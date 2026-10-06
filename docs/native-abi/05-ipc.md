@@ -6,7 +6,7 @@
 
 ## 1. 设计概览
 
-Native ABI 提供两个互补的 IPC 原语。Channel 是同步/异步消息传递，支持 handle 传递，用于 RPC、请求-响应和数据流。Event Queue 的目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合；当前已接入 channel、timer、task 退出和用户态驱动 IRQ，但 file/socket/pipe readiness 与 signal 事件生产者尚未接入，因此现在不能称为 epoll/signalfd 的完整替代。
+Native ABI 提供两个互补的 IPC 原语。Channel 是同步/异步消息传递，支持 handle 传递，用于 RPC、请求-响应和数据流。Event Queue 的目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合；当前已接入 channel、timer、task 退出、用户态驱动 IRQ、socket/pipe readiness、signal delivery 和文件系统路径事件。`event_watch` 默认边沿触发，可选 `A20_WATCH_LEVEL` 对非 vfile 类型在 park 前直接查对象就绪位（file/pipe/socket 一类 vfile-backed 对象走 park 失败后的 readiness/poll 子系统）；普通 file fd 仍无 readiness 生产者，`event_watch_fs` 只支持目录级 watch，因此还不是 epoll/signalfd 的完整替代。
 
 两者都基于 handle：创建后返回 handle，操作通过 handle 进行，权限通过 rights 控制。
 
@@ -264,19 +264,19 @@ typedef struct a20_eventq {
 
 | 索引 | 常量 | 对象类型 | 说明 | 当前事件源 |
 |------|------|---------|------|-----------|
-| 0 | `A20_EVENT_READABLE` | file/socket/pipe | 数据可读 | 未接入 |
-| 1 | `A20_EVENT_WRITABLE` | file/socket/pipe | 缓冲区可写 | 未接入 |
-| 2 | `A20_EVENT_ERROR` | file/socket | I/O 错误 | 未接入 |
-| 3 | `A20_EVENT_CLOSED` | object/channel | 对象关闭 | channel endpoint 已接入 |
-| 4 | `A20_EVENT_CONNECTION` | socket | 新连接到达 | 未接入 |
-| 5 | `A20_EVENT_ACCEPT_READY` | socket | 可接受连接 | 未接入 |
+| 0 | `A20_EVENT_READABLE` | file/socket/pipe | 数据可读 | socket、pipe 已接入；普通 file fd 未接入 |
+| 1 | `A20_EVENT_WRITABLE` | file/socket/pipe | 缓冲区可写 | socket、pipe 已接入；普通 file fd 未接入 |
+| 2 | `A20_EVENT_ERROR` | file/socket | I/O 错误 | socket 已接入 |
+| 3 | `A20_EVENT_CLOSED` | object/channel | 对象关闭 | channel endpoint、socket 已接入 |
+| 4 | `A20_EVENT_CONNECTION` | socket | 新连接到达 | socket 已接入 |
+| 5 | `A20_EVENT_ACCEPT_READY` | socket | 可接受连接 | socket 已接入 |
 | 6 | `A20_EVENT_EXPIRED` | timer | 定时器到期 | 已接入 |
 | 7 | `A20_EVENT_EXITED` | task/thread | 任务退出 | task 已接入 |
 | 8 | `A20_EVENT_MESSAGE_READY` | channel | 有消息可接收 | 已接入 |
 | 9 | `A20_EVENT_PEER_CLOSED` | channel | 对端关闭 | 已接入 |
-| 10 | `A20_EVENT_SIGNALED` | device | 用户态驱动 IRQ 已屏蔽并待确认 | 已接入 |
+| 10 | `A20_EVENT_SIGNALED` | device/task/thread | 用户态驱动 IRQ 已屏蔽并待确认；signal delivery 复用同一事件，signo 走 `data0`，TASK/THREAD 两类 watch 都通知 | 已接入 |
 
-事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。当前可实际观测的是 channel、timer、task 退出与用户态驱动 IRQ；file/socket/pipe readiness、signal delivery 和文件系统路径事件仍是后续接入项。
+事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。索引 16..19 的 `A20_EVENT_FS_*`（CREATE/DELETE/MODIFY/RENAME）不走本表：它们由 `event_watch_fs` 按 vnode 键投递，变更名放在事件的 `fs_name` 字段（`char[32]`，超长截断；`FS_MODIFY` 的生产点不传名字，该字段为空），见 [09-native-abi-deepening.md](09-native-abi-deepening.md) 与 [08-runtime-status.md](08-runtime-status.md)。普通 file fd 的 READABLE/WRITABLE 目前没有生产者，vfs 只发 FS 类事件。
 
 ### 3.4 操作
 
@@ -417,8 +417,8 @@ void a20_eventq_on_object_destroy(void *object, uint16_t object_type) {
 |-----------|-------------------|----------------|
 | `pipe()` | `channel_create()` | channel 已支持消息与 handle 传递，但不是 POSIX 字节流的无差别替代 |
 | `SCM_RIGHTS` (sendmsg) | `channel_send(handles)` | 已实现显式权限降级，不需要辅助数据 |
-| `epoll_create/ctl/wait` | `event_queue_create/watch/wait` | 替代目标；file/socket/pipe readiness 生产者未接入，当前不能承担通用 fd 多路复用 |
-| `signalfd` | EventQ signal event | 替代目标；当前没有 signal 生产者，`task EXITED` 只表示任务生命周期事件，不等同 signalfd |
+| `epoll_create/ctl/wait` | `event_queue_create/watch/wait` | 替代目标；socket/pipe readiness 生产者已接入，普通 file fd 仍无生产者，因此不能承担通用 fd 多路复用 |
+| `signalfd` | EventQ signal event | 替代目标；signal 生产者已接入（`A20_EVENT_SIGNALED`，signo 走 `data0`），`task EXITED` 另表示任务生命周期事件，二者不是同一语义 |
 | `timerfd` | `event_watch(timer, EXPIRED)` | timer handle 与到期事件已接入 |
 | `eventfd` | channel 信号消息 | channel 可发送零字节消息，但语义不等同 Linux eventfd 计数器 |
 | SysV msgget/msgsnd/msgrcv | channel | 无全局 key，权限通过 handle 控制 |

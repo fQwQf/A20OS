@@ -50,6 +50,11 @@ int g_sched_base_slice_ms = 10;
 /* From kernel/core/timekeeping.c: architecture-independent timer tick. */
 void a20_timer_tick(void) { }
 
+/* From kernel/proc/timer_posix.c: the MCU trim carries neither syscall/ nor
+ * abi/linux/, so no POSIX timer or ITIMER can ever be armed there. */
+void posix_timer_tick(void) { }
+void posix_itimer_cpu_tick(task_t *cur) { (void)cur; }
+
 /* Diagnostics omitted from the size-constrained MCU image. */
 uint64_t g_perf_sw_context_switches;
 void psi_tick(void) { }

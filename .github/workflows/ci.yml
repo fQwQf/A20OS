@@ -87,9 +87,8 @@ jobs:
             exit 1
           fi
 
-      # check-doc-test-gates 里那 17 个子门禁中，不依赖 QEMU 的那 6 个。
-      # 剩下的 11 个（边界/MM/VFS/驱动/并发）各自拉起 QEMU guest，属于
-      # smoke job 的范围，不能混进这个快速 job。
+      # check-doc-test-gates 里不依赖 QEMU 的子门禁在这里跑。带 QEMU guest 的那些
+      # （边界/MM/VFS/驱动/并发）属于 smoke job 的范围，不能混进这个快速 job。
       - name: 'Source contracts: subsystem boundaries'
         run: |
           make check-task-lifetime-boundary
@@ -101,6 +100,11 @@ jobs:
         run: |
           make check-abi-boundary
           make check-envelope-coverage
+          # Native 侧的同一件事：Linux 侧有覆盖表生成器与信封分类，Native 侧
+          # 此前两样都没有，check-abi-boundary 的 19 条断言全是单文件关键词
+          # 存在性检查。两条都是宿主侧，与 check-abi-boundary 共用这一步。
+          make check-native-abi-coverage
+          make check-abi-config-guard
 
       - name: 'Source contracts: task-state boundary, ABI smoke contract, doc drift'
         run: |
@@ -295,6 +299,20 @@ jobs:
           make smoke-vfs-stress
           make smoke-vfs-stress-smp2
           make smoke-smp-bringup
+          # 第一条 Native 运行时门禁。tools/smoke_cases.py 里 21 条 native
+          # smoke 全部写死 ARCH=riscv64 + ABI=both，所以选它不会新增一次构建：
+          # 复用上面 dev-build 已经产出的 riscv64-qemu-virt-riscv64-both-dev
+          # 目录，代价是一次 20s 的 QEMU 启动（该用例的 timeout 就是 20s，
+          # pre 无附加镜像）。覆盖面按 syscall 分区挑的 rights algebra /
+          # BPF / EventQ / VMOL / DMA 五项，不与上面 Linux 侧用例重叠。
+          #
+          # 这一行在 main 上就是红的：user/tests/test_native_contract.c:466 的
+          # vmol-leak-vmo 断言失败（a20_vm_unmap 之后 objstat 的 vmos 计数没回到
+          # 基线）。已在 git archive HEAD 的干净副本上冷构建复现，失败点相同，
+          # 与待合入的改动无关。接线本身是对的（它第一次让这个缺陷可见），但要
+          # 转绿得先修 mm/ 的 VMO 释放路径。详见 docs/testing-gates.md 的
+          # “Native 门禁的架构覆盖现状”。
+          make smoke-native-contract
         timeout-minutes: 60
 
       # Networking had no CI coverage at all until this block, which is why a

@@ -128,6 +128,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_handle_xattr_get  0x0109
 #define A20_SYS_handle_xattr_list 0x010A
 #define A20_SYS_handle_xattr_remove 0x010B
+#define A20_SYS_handle_poll         0x010C
 
 /* ===== Task / Thread (0x0200) ===== */
 #define A20_SYS_task_exit         0x0200
@@ -190,6 +191,8 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_path_link_at      0x0413
 #define A20_SYS_path_symlink_at   0x0414
 #define A20_SYS_path_readlink_at  0x0415
+#define A20_SYS_fs_serve          0x0416
+#define A20_SYS_fs_block_io       0x0417
 
 /* ===== Event / IPC (0x0500) ===== */
 #define A20_SYS_event_queue_create 0x0500

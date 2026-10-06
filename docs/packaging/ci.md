@@ -71,6 +71,7 @@ toolchain-gates（裸 runner，不进容器，~20 s + 装 linux-headers）：
     → make check-task-lifetime-boundary / check-smp-platform-boundary
       check-io-progress-model / check-external-dependency-boundary
     → make check-abi-boundary / check-envelope-coverage
+    → make check-native-abi-coverage / check-abi-config-guard   # Native 侧同一件事
 
 ci-kernel-arches（几秒）：make -s print-ci-kernel-arches，把 CI 的内核构建
   矩阵从 Makefile 的 CI_KERNEL_ARCHES 解析成 JSON 输出。矩阵列表不写在 YAML
@@ -99,6 +100,8 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
         smoke-sched-stress / smoke-proc-stress / smoke-futex-stress
         smoke-mm-stress / smoke-vfs-stress   # FAT/ext4/ISO9660 压力
         smoke-smp-bringup       # 2 核 SMP bring-up
+        smoke-native-contract   # 唯一的 Native 运行时门禁（riscv64；见 docs/testing-gates.md
+                                # 「Native 门禁的架构覆盖现状」：21 条 native smoke 全是 riscv64）
     → make smoke-devtools       # 上游 Alpine gcc 在 guest 内编译+运行
     → 失败也上传 .kernel-build/smoke/ 日志 artifact（smoke-riscv64-logs）
 ```
