@@ -26,7 +26,12 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 /* MMIO base addresses (kernel virtual) */
 #define LAPIC_PHYS_BASE    0xFEE00000UL
 #define LAPIC_BASE         (LAPIC_PHYS_BASE + PAGE_OFFSET)
-#define IOAPIC_BASE        (0xFEC00000UL + PAGE_OFFSET)
+/* I/O APIC window.  The address is a firmware fact, not an architectural
+ * constant: the MADT publishes one entry per controller and real chipsets put
+ * them wherever the address map allows.  0xFEC00000 was QEMU's choice and is
+ * kept only as the answer for a machine that published no MADT entry. */
+#define IOAPIC_FALLBACK_BASE 0xFEC00000UL
+#define IOAPIC_MAX          4U
 #define PCI_ECAM_BASE      (0xB0000000UL + PAGE_OFFSET)
 #define PCI_MMIO_BASE      (0xC0000000UL + PAGE_OFFSET)
 
@@ -51,14 +56,39 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
  * writing it from that CPU; this IPI is how the request gets there. */
 #define IRQ_VECTOR_MSIX_VECTOR 0xF2
 
-/* Publish the chipset PCI INTx -> IOAPIC GSI base (0 selects the q35
- * swizzle).  A board calls this once it knows the routing; see the setter in
- * trap/irqchip.c for why this is runtime state and not a board #ifdef. */
-void arch_pci_set_intx_gsi_base(uint32_t gsi_base);
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
+/* The I/O APIC windows, as learned from the MADT.  Count is 0 when firmware
+ * published none, in which case every accessor falls back to a single
+ * controller at IOAPIC_FALLBACK_BASE -- the arrangement QEMU's legacy path uses.
+ * Reading the redirection-entry count means touching the controller, so it is
+ * done once during trap_init and cached here rather than per access. */
+unsigned  arch_ioapic_count(void);
+uintptr_t arch_ioapic_base(unsigned idx);
+uint32_t  arch_ioapic_entries(unsigned idx);
+/* APIC ID the controller forwards to.  Hardcoding 0 delivers an INTx line to a
+ * processor that may not exist: firmware routinely renumbers I/O APICs, and a
+ * redirection entry aimed at a wrong ID raises nothing at all. */
+uint32_t  arch_ioapic_dest_id(unsigned idx);
+/* Which controller owns @gsi and which of its entries that is.  -ENODEV when the
+ * GSI falls in no published range, which is how a stale routing guess is caught
+ * before it is programmed. */
+int       arch_ioapic_gsi_lookup(uint32_t gsi, unsigned *idx, uint32_t *entry);
+/* Count of fully-handled interrupts seen on an IOAPIC-routed vector.  A routed
+ * line that firmware had already claimed to someone else shows up as a vector
+ * that was programmed and never fired, which is otherwise indistinguishable from
+ * a device that is simply idle. */
+uint64_t  x86_64_pci_gsi_firq_count(uint32_t gsi);
+/* Sentinel returned by arch_pci_prt_gsi() when no firmware routing table
+ * answers for a line: no DSDT, no _PRT for that bus, or an entry in it this
+ * kernel refuses to trust.  Distinct from a routing table saying GSI 0. */
+#define PCI_PRT_GSI_NONE 0xFFFFFFFFU
+/* Where firmware says an INTx line goes, read out of the ACPI DSDT's _PRT.
+ * @pin is 1..4 (A..D).  Returns PCI_PRT_GSI_NONE when firmware says nothing
+ * usable. */
+uint32_t  arch_pci_prt_gsi(int bus, int dev, int pin);
 /* Mask/unmask the interrupt source behind a driver IRQ line id: the IOAPIC
  * entry for a routed PCI vector (0x40+gsi) or the local APIC LVT for a
- * message-signalled one (0xd0-0xef).  Anything else is ignored. */
+ * message-signalled one.  Anything else is ignored. */
 void x86_64_pci_irq_set_masked(int vector, int masked);
 void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval);
 uint64_t x86_64_get_trap_cause(void);
