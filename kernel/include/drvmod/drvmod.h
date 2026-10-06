@@ -67,7 +67,14 @@ void  drv_write32(void *dev, uintptr_t off, uint32_t val);
 uint8_t drv_in8(uint16_t port);
 void  drv_out8(uint16_t port, uint8_t value);
 
-/* DMA: coherent, zeroed allocation with a stable device address. */
+/* DMA: coherent, zeroed allocation with a stable device address.
+ *
+ * Unconstrained by design: the drv_env contract is byte-identical across the
+ * kernel, user and module placements and none of them carries a device_t, so
+ * this entry point always allocates from the full 64-bit window.  A driver that
+ * owns a device_t must instead call the exported dma_set_mask() to declare the
+ * window and dma_alloc_coherent(dev, ...) / dma_alloc_coherent_aligned(dev,
+ * ...) to allocate inside it; all three are in the framework export table. */
 void *drv_dma_alloc_coherent(size_t size, uint64_t *dma_handle);
 void  drv_dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle);
 
@@ -88,6 +95,10 @@ int   drv_driver_register(void *drv);
 int   drv_driver_unregister(void *drv);
 void *drv_device_get_resource(void *dev, int type, int index);
 void  drv_driver_probe_all(void);
+/* Pick the devfs node name for a class device this module publishes (e.g.
+ * /dev/vport0 instead of the generated /dev/charN).  Callable from probe()
+ * only: publication copies the name when probe returns 0. */
+int   drv_device_set_devfs_name(void *dev, const char *name);
 
 /* Arch hook (kernel/arch/<arch>/platform/arch_hooks.c): validates that the
  * physical range lies inside the platform's direct-map window.  Returns 0

@@ -138,8 +138,29 @@ int class_device_publish(struct device *dev)
         return ret;
     }
     cdev->devt = class_devt(cdev->class_type, cdev->index);
-    snprintf(cdev->name, sizeof(cdev->name), "%s%u",
-             class_prefix(cdev->class_type), cdev->index);
+    /* A driver may pick the node name from probe() (device_set_devfs_name);
+     * everything else gets the generated "<prefix><index>". */
+    if (dev->devfs_name[0])
+        snprintf(cdev->name, sizeof(cdev->name), "%s", dev->devfs_name);
+    else
+        snprintf(cdev->name, sizeof(cdev->name), "%s%u",
+                 class_prefix(cdev->class_type), cdev->index);
+    /* Name resolution is first-match by name (devfs, sysfs, netlink), so a name
+     * that is already published would give this device a node nothing can reach
+     * and can shadow an unrelated one -- a driver-chosen name colliding with
+     * another driver's, or claiming a generated "char3" for itself.  The index
+     * and devt were unique; the name has to be too, or the registry holds two
+     * devices answering to one name.  Refusing here makes the second probe
+     * decline: driver_probe_bound_device() unwinds it like any other publish
+     * failure.  This also covers a driver-chosen name against a generated one
+     * in either order, since it walks every published device. */
+    for (unsigned i = 0; i < g_class_count; i++) {
+        if (strcmp(g_class_devices[i]->name, cdev->name) == 0) {
+            spin_unlock_irqrestore(&g_class_lock, flags);
+            kfree(cdev);
+            return -EEXIST;
+        }
+    }
     __atomic_store_n(&cdev->online, 1, __ATOMIC_RELEASE);
     g_class_devices[g_class_count++] = cdev;
     dev->class_dev = cdev;
