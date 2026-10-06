@@ -6,6 +6,7 @@
 #include "core/klog.h"
 #include "core/cpu.h"
 #include "core/timer.h"
+#include "core/preempt.h"
 
 #if CONFIG_DEBUG_LOCKS
 #include "proc/proc.h"
@@ -304,6 +305,11 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
 #endif
+    /* Every critical section is a non-preemptible one.  The bump comes after
+     * the spin loop so that waiting for the lock does not also disable
+     * preemption -- otherwise a task blocked on a lock would never be a legal
+     * switch-out target at the IRQ return point. */
+    preempt_disable();
 }
 
 static inline void spin_lock(spinlock_t *lock) {
@@ -314,6 +320,12 @@ static inline void spin_unlock(spinlock_t *lock) {
     lock->owner = NULL;
     lock->owner_ra = 0;
     __atomic_store_n(&lock->locked, 0, __ATOMIC_RELEASE);
+    /* Last, not first: while the lock is still held the section must still be
+     * non-preemptible.  Releasing the counter before the store would let an
+     * interrupt that lands in that window reach the IRQ return decision point
+     * with preempt == 0 and switch the lock owner out; the next task on this
+     * CPU would then spin on a lock whose owner is not running. */
+    preempt_enable();
 }
 
 static inline uint64_t spin_lock_irqsave(spinlock_t *lock) {
@@ -341,6 +353,7 @@ static inline int spin_trylock_irqsave(spinlock_t *lock, uint64_t *flags) {
     lock->owner_ra = (uintptr_t)__builtin_return_address(0);
 #endif
     *flags = f;
+    preempt_disable();
     return 1;
 }
 

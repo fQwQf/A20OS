@@ -1,0 +1,26 @@
+# Kernel-preemption RT wakeup-latency probe on riscv64, two CPUs.
+#
+# Run 1 pins the hog and the RT child to CPU0: with a second CPU online the
+# unpinned RT child would simply be placed on the idle CPU and the number
+# would say nothing about preemption, so same-CPU contention is forced.  This
+# is the single-CPU scenario rebuilt on an SMP kernel, plus the wake path the
+# timer takes through a kernel that has two runqueues to balance.
+#
+# Run 2 leaves both children to the scheduler: the RT child is expected to be
+# placed on the idle CPU1, which exercises the cross-CPU wake (resched IPI to
+# a remote CPU) instead of a local preempt.
+name = "preempt-lat-smp-riscv64"
+description = "riscv64 kernel-preemption RT wakeup latency, smp=2 (preempt_lat)"
+arch = "riscv64"
+abi = "linux"
+
+[machine]
+memory = "3G"
+smp = 2
+allow_unverified_smp = true
+
+[test]
+commands = ["preempt_lat 256 0 0", "preempt_lat 256", "poweroff"]
+expect = ["PREEMPT_LAT: rt ", "PREEMPT_LAT: DONE"]
+input_delay = 60
+timeout = "2400s"

@@ -105,6 +105,15 @@ extern void trap_handler_la64(trap_context_t *ctx);
 #define TRAP_CTX_STATUS(ctx)         ((ctx)->prmd)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->regs[0])
 
+/* LoongArch clears CRMD.IE before the entry vector runs and parks the
+ * interrupted value in PRMD.PIE, so PRMD is read exactly like RISC-V reads
+ * sstatus for SPIE: the frame's prmd field is that pre-disable snapshot.
+ * SSTATUS_SPIE is bit 2 for PRMD, matching arch_local_irq_disable()'s CRMD.IE
+ * bit.  A kernel trap frame is built on the interrupted task's own kernel
+ * stack (__trap_from_kernel only subtracts CTX_SIZE from the live sp), which
+ * is what lets the preemption decision point in core/trap.c switch out here. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->prmd & SSTATUS_SPIE) != 0)
+
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->pgdl)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->prmd)
 
