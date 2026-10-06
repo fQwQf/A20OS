@@ -52,6 +52,17 @@
 /* PBA bitmap, ceil(table_size / 64) 64-bit words (PCI 3.7.5.4). */
 #define PCI_MSIX_PBA_WORDS(size)  (((size) + 63U) / 64U)
 
+/* Logical CPU ids used as the MSI-X destination.  CPU 0 is the boot processor,
+ * and it is where every vector stays until a driver moves it, so an untouched
+ * device behaves exactly as it did before affinity existed. */
+#define PCI_MSIX_CPU_BOOT        0
+
+/* How many entries of a function the kernel can remember a destination for.
+ * Every caller in the tree (virtio one vector per queue, e1000e two, NVMe one
+ * per queue) stays far below this; the bound exists so the per-function state
+ * is a fixed array instead of an allocation on the interrupt path. */
+#define PCI_MSIX_AFFINITY_VECTORS 64U
+
 typedef struct pci_msix_info {
     uint8_t  cap_offset;      /* config-space offset, dword aligned */
     uint8_t  table_size;      /* number of table entries the device implements */
@@ -85,19 +96,87 @@ int pci_msix_commit(device_t *dev);
 /* Quiesce the function: mask every programmed entry, then drop Enable. */
 void pci_msix_disable(device_t *dev);
 
+/* Affinity: which logical CPU a programmed entry's message is aimed at.
+ *
+ * The entry has to be masked, its message address rewritten and the local
+ * controller entry armed on the new CPU before it is unmasked again, so a
+ * message never lands on a CPU that has no handler behind that vector.
+ * pci_msix_set_affinity() does that sequence and leaves the entry unmasked
+ * only if it was unmasked before.  Asking for the CPU the entry already
+ * points at is a successful no-op.
+ *
+ * Returns -EINVAL for an entry that was never programmed or a negative CPU,
+ * -ERANGE for an index past PCI_MSIX_AFFINITY_VECTORS, and whatever errno the
+ * arch hooks return otherwise: on a platform whose message path is boot-CPU-
+ * only they refuse first, so nothing is half-programmed on the way out.
+ *
+ * The two failure modes after the mask-before-write step are not equivalent.  A
+ * readback mismatch (-EIO) means the write did not take, so the entry still
+ * carries the old CPU's address -- and because both the device entry and the
+ * old CPU's local entry were masked for the rewrite, the rollback re-arms the
+ * old CPU and clears the device mask again, restoring the pre-call state
+ * exactly.  A controller entry that could not be armed on the new CPU leaves
+ * the entry MASKED on the new CPU's address: the device is stopped rather than
+ * allowed to post into a vector with no armed handler, which would drop the
+ * message silently.  Either way the entry is left in a state the caller can
+ * name, not half-live. */
+int pci_msix_set_affinity(device_t *dev, unsigned index, int cpu);
+
+/* Current destination of a programmed entry; -ENOENT if it is not one. */
+int pci_msix_get_affinity(device_t *dev, unsigned index, int *cpu);
+
+/* Retarget every programmed entry of every enumerated function.  Returns 0
+ * only if all of them moved; a negative errno from the first entry that
+ * refused is returned, so a caller cannot mistake a partial move for
+ * success.  This is the kernel-wide form behind /proc/a20/irq_affinity. */
+int pci_msix_set_all_affinity(int cpu);
+
+/* One line of /proc/a20/irq_affinity: what the kernel programmed and where it
+ * points now.  @name borrows the enumeration record's device name and stays
+ * valid for as long as the function stays enumerated. */
+typedef struct pci_msix_affinity_entry {
+    const char *name;
+    unsigned index;
+    uint32_t vector;
+    int cpu;
+} pci_msix_affinity_entry_t;
+
+/* Copy up to @max programmed entries into @out and return how many exist in
+ * total (which can exceed @max, so a caller can size a buffer). */
+unsigned pci_msix_affinity_snapshot(pci_msix_affinity_entry_t *out,
+                                    unsigned max);
+
 /*
- * Platform hooks.  Every one is weak and returns a negative errno on the
- * platforms that have no message-signalled interrupt path at all, which is
- * what keeps a driver on its INTx or completion-polling fallback instead of
- * programming a capability that will never be delivered.
+ * Platform hooks.  A platform that has a message-signalled interrupt path
+ * defines these strongly (x86_64 does, in arch/x86_64/trap/irqchip.c); the
+ * only definition that is weak is the -EOPNOTSUPP stub in drivers/bus/
+ * pci_msix.c, which is what keeps a driver on its INTx or completion-polling
+ * fallback on the platforms that have no such path instead of programming a
+ * capability that will never be delivered.
+ *
+ * The prototypes below therefore carry NO weak attribute on purpose: GCC
+ * applies an attribute seen on a declaration to the definition that follows
+ * it in the same translation unit, so marking these weak here would make the
+ * platform's real implementation weak too -- and with two weak definitions
+ * of one symbol the link outcome is whichever the linker happens to pick
+ * first, which is how the stub ended up winning over the x86_64 hooks.
  */
 
-/* Physical address the device must post its message to for @vector. */
-int __attribute__((weak)) arch_msix_message_address(uint32_t vector,
-                                                   uint32_t *addr_lo,
-                                                   uint32_t *addr_hi);
-/* Program (or mask) the local interrupt controller entry for @vector.  Called
- * before the entry is unmasked and again whenever the mask changes. */
-int __attribute__((weak)) arch_msix_vector_setup(uint32_t vector, int masked);
+/* Physical address the device must post its message to for @vector aimed at
+ * logical CPU @cpu.  Both the vector and the destination travel in the message
+ * itself, so the two hooks below are asked about the same pair every time. */
+int arch_msix_message_address(uint32_t vector, int cpu,
+                              uint32_t *addr_lo,
+                              uint32_t *addr_hi);
+/* Program (or mask) the local interrupt controller entry for @vector on
+ * logical CPU @cpu.  Called on the current CPU before the entry is unmasked
+ * and again whenever the mask changes or the entry moves; the platform is
+ * responsible for reaching a remote CPU. */
+int arch_msix_vector_setup(uint32_t vector, int cpu,
+                           int masked);
+/* Number of logical CPUs a message-signalled vector may be aimed at.  One on
+ * every platform that has no per-CPU destination, which is what makes an
+ * out-of-range request a clean refusal rather than a wrong write. */
+int arch_irq_msix_cpu_count(void);
 
 #endif /* _DRIVERS_BUS_PCI_MSIX_H */
