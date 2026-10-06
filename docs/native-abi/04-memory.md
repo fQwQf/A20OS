@@ -175,10 +175,10 @@ int64_t vm_map(a20_vm_map_args_t *args);
 2. 否则验证 source handle 有效、检查 `MAP` 权限，类型必须为 `MEMORY`、`FILE` 或 `DEVICE`
 3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界；`offset` 需页对齐
 4. source 是 `FILE`/`DEVICE`：走核心 `mm_mmap_file`，经 page cache **按需分页**填充（不再 eager-load 到匿名 VMO）；`offset` 需页对齐
-5. 计算 READ/WRITE 的 `prot_eff` 与 handle rights 交集；当前 EXEC 位直接透传，没有检查 source handle 的 `A20_RIGHT_EXEC`
+5. 计算 READ/WRITE/EXEC 的 `prot_eff` 与 handle rights 交集（`a20_vm_prot_eff`；无 `A20_RIGHT_EXEC` 则不给 EXEC 位）
 6. MEMORY source 创建 `VM_VMO` 映射记录并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有映射记录并持 fd 引用
 
-与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE rights 会收紧对应保护位；EXEC rights 当前未在该路径强制，属于实现与目标 rights 模型之间的已知缺口。
+与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE/EXEC rights 都会收紧对应保护位；此外经 VMAR 路由的映射还要满足节点天花板与 `MAP_FIXED` 的 `VMAR_CAN_MAP_SPECIFIC` 要求（`vmar_cap_allows`）。
 
 实现分层（2026-08 更新）：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
 
@@ -201,10 +201,10 @@ int64_t vm_protect(uint64_t addr, uint64_t length, uint32_t prot);
 
 语义：
 1. 查找目标 VMAR
-2. 直接调用核心 `mm_mprotect`
-3. 由核心路径更新页表项并执行所需 TLB invalidation
+2. 先做能力检查：逐个覆盖 `[addr, addr+length)` 的 VMA，任何 `vmar_cap != 0` 的 VMA 都要求 `new_prot` 不超出该 cap，否则返回 `ACCESS`（`a20_vmar_protect`）。`vmar_cap` 是映射建立时盖的章：`mm_mmap`/`mm_mmap_file`/`mm_mmap_vmo` 三条入口都无条件写入（Linux ABI 的 mmap 经 `proc_mmap` 也走前两条，因此同样带 cap），fork 按结构体整拷继承；只有不经这三条入口拼装的记录（如 vDSO/vvar）该字段为 0，不受此检查限制
+3. 调用核心 `mm_mprotect`，由核心路径更新页表项并执行所需 TLB invalidation
 
-当前没有保存/检查 `CAN_MAP_*` 或原 source handle rights，因此 Native 层本身不保证“只能收紧不能放宽”。
+回归测试在 `user/tests/test_native_mm.c` 第 6 分区：先经 VMAR 以 `R|W` 映射失败（cap 不含 WRITE）、以 `R` 成功，随后对该区间 `vm_protect(R|W)` 必须被拒。
 
 ### 4.5 vm_share — 内存共享
 
@@ -229,7 +229,7 @@ int64_t vm_flush(uint64_t addr, uint64_t length, uint32_t flags);
 | `A20_FLUSH_INVALIDATE` | 使缓存无效 |
 | `A20_FLUSH_SYNC` | 等待写回完成 |
 
-当前实现先验证地址范围均有映射记录；`SYNC` 调用全局 `vfs_sync()`，`INVALIDATE` 只执行本地 `arch_tlb_flush()`，`CLEAN` 单独使用时是 no-op。它没有按给定映射记录的范围执行脏页写回或 page-cache invalidation，多个 flag 组合也因顺序返回而不是完整组合语义。
+当前实现先验证地址范围均有映射记录；`SYNC` 与 `CLEAN` 都调用全局 `vfs_sync()`，`INVALIDATE` 只执行本地 `arch_tlb_flush()`。`CLEAN` 不是 no-op——文件映射区间靠一次全量 cache sync 覆盖（VMO 帧由 VMO 自持，没有按范围写回的路径）。它仍未按给定映射记录的范围执行脏页写回或 page-cache invalidation，多个 flag 组合也因顺序返回而不是完整组合语义。
 
 ---
 
@@ -244,7 +244,7 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 [读写 addr_A]       ← canonical VMO frames → [读写 addr_B]
 ```
 
-权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。但当前 `vm_protect` 不重新检查原 handle rights，仍可能把该映射记录放宽为可写，这是尚未收口的权限缺口。
+权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。此后 `vm_protect` 受该 VMA 建立时盖下的 `vmar_cap` 约束，不能把映射放宽到 cap 之外（§4.4）。
 
 ---
 

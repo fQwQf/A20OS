@@ -59,6 +59,7 @@ extern void a20_object_release(void *object, uint16_t type);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
+extern int64_t a20_native_vfs_result(int r);
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
@@ -219,24 +220,115 @@ int64_t sys_a20_handle_set_meta(const a20_syscall_args_t *args)
         return -A20_ERR_INVALID_ARGUMENT;
     }
 
-
     vfile_t *vf = (vfile_t *)entry.object;
-
-    if (flags & A20_SET_META_MODE) {
-        if (vf && vf->vnode)
-            vf->vnode->mode = (vf->vnode->mode & ~07777u) | ((uint32_t)val0 & 07777u);
+    if (!vf || !vf->vnode) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_BAD_HANDLE;
     }
-    if (flags & A20_SET_META_OWNER) {
-        if (vf && vf->vnode) {
-            vf->vnode->uid = (uint32_t)val0;
-            vf->vnode->gid = (uint32_t)val1;
+    vnode_t *vn = vf->vnode;
+
+    /* Reserved and unhonoured bits are rejected before anything is modified:
+     * a request naming both a supported and an unsupported field must not
+     * half-apply, and reporting A20_OK for a field the kernel dropped would
+     * be a lie (docs/native-abi/02-errors.md §4).  Naming no field at all is
+     * rejected for the same reason. */
+    if ((flags & ~(A20_SET_META_MODE | A20_SET_META_OWNER | A20_SET_META_ATIME |
+                   A20_SET_META_MTIME | A20_SET_META_CTIME |
+                   A20_SET_META_TRUNCATE | A20_SET_META_ALLOCATE)) || flags == 0) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_INVALID_ARGUMENT;
+    }
+    /* No preallocation core exists to route this to (Linux fallocate(2)). */
+    if (flags & A20_SET_META_ALLOCATE) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_NOT_SUPPORTED;
+    }
+    /* vfs_set_times() refreshes ctime from the clock on every write; no entry
+     * point accepts a caller-supplied ctime. */
+    if (flags & A20_SET_META_CTIME) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_NOT_SUPPORTED;
+    }
+    if ((flags & A20_SET_META_TRUNCATE) && vn->type == VFS_FT_DIR) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_IS_DIR;
+    }
+    /* Same rejection sys_ftruncate() makes for a negative length: on a 32-bit
+     * target the requested size is not representable as a file size. */
+    if ((flags & A20_SET_META_TRUNCATE) && val0 > SIZE_MAX) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_INVALID_ARGUMENT;
+    }
+    /* A read-only mount rejects all three writes below (Linux: -EROFS), but
+     * vfs_ftruncate() never consults vn->mnt and vfs_futimens() lets the owner
+     * branch swallow the EROFS that vfs_vnode_permission() raises, so the
+     * check has to happen here. */
+    if ((flags & (A20_SET_META_ATIME | A20_SET_META_MTIME | A20_SET_META_TRUNCATE)) &&
+        vn->mnt && (vn->mnt->flags & 1)) {
+        a20_object_release(entry.object, entry.type);
+        return a20_native_vfs_result(-EROFS);
+    }
+
+    /* Every honoured field goes through the VFS by fd, so borrow a slot for
+     * the call.  A successful install takes over the lookup reference, so the
+     * matching close below replaces the release.  An exhausted fd table
+     * reports the same code as the other borrowing sites (sys_core.c). */
+    int gfd = fdtable_install_current_vfile(vf, 0);
+    if (gfd < 0) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
+
+    /* Order: truncate and the timestamps first, since they are the steps that
+     * can fail on seals, quota and the mode bits in force; mode and owner
+     * last, because their ownership check has to see the pre-request owner.
+     * Nothing here is atomic across steps — a rejected chmod leaves the
+     * truncate and timestamps of the same call in place. */
+    if (flags & A20_SET_META_TRUNCATE) {
+        int vr = vfs_ftruncate(gfd, (size_t)val0);
+        if (vr < 0) {
+            fdtable_close_current(gfd);
+            return a20_native_vfs_result(vr);
         }
     }
-    if (flags & (A20_SET_META_ATIME | A20_SET_META_MTIME | A20_SET_META_CTIME |
-                 A20_SET_META_TRUNCATE | A20_SET_META_ALLOCATE)) {
-        (void)val0; (void)val1;
+    if (flags & (A20_SET_META_ATIME | A20_SET_META_MTIME)) {
+        /* val0 carries atime_ns and val1 mtime_ns, mirroring A20_SET_META_OWNER's
+         * use of the two words; the field left unflagged keeps its old value. */
+        uint64_t times[4] = { LINUX_UTIME_OMIT, LINUX_UTIME_OMIT,
+                              LINUX_UTIME_OMIT, LINUX_UTIME_OMIT };
+        if (flags & A20_SET_META_ATIME) {
+            times[0] = val0 / 1000000000ull;
+            times[1] = val0 % 1000000000ull;
+        }
+        if (flags & A20_SET_META_MTIME) {
+            times[2] = val1 / 1000000000ull;
+            times[3] = val1 % 1000000000ull;
+        }
+        int vr = vfs_futimens(gfd, times);
+        if (vr < 0) {
+            fdtable_close_current(gfd);
+            return a20_native_vfs_result(vr);
+        }
     }
-    a20_object_release(entry.object, entry.type);
+    /* vfs_fchmod()/vfs_fchown(), not a bare vn->mode write: the vnode cache
+     * is not the backing store, and only the VFS checks that the caller owns
+     * the file before letting it change the mode. */
+    if (flags & A20_SET_META_MODE) {
+        int vr = vfs_fchmod(gfd, (int)(val0 & 07777u));
+        if (vr < 0) {
+            fdtable_close_current(gfd);
+            return a20_native_vfs_result(vr);
+        }
+    }
+    if (flags & A20_SET_META_OWNER) {
+        int vr = vfs_fchown(gfd, (int)(uint32_t)val0, (int)(uint32_t)val1);
+        if (vr < 0) {
+            fdtable_close_current(gfd);
+            return a20_native_vfs_result(vr);
+        }
+    }
+
+    fdtable_close_current(gfd);
     return A20_OK;
 }
 
@@ -277,9 +369,13 @@ static int64_t xattr_common(a20_handle_t h, const char *name, void *buf,
         return -A20_ERR_BAD_HANDLE;
     }
 
+    /* set (0) and remove (3) change the object's metadata and so require WRITE;
+     * get (1) and list (2) only observe it.  A20_OBJ_DIRECTORY has no WRITE in
+     * its rights ceiling, so set/remove on a directory handle always fails. */
+    a20_rights_t required = (op == 0 || op == 3) ? A20_RIGHT_WRITE : A20_RIGHT_STAT;
     a20_handle_entry_t entry;
     int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID,
-                                               A20_RIGHT_STAT, &entry);
+                                               required, &entry);
     if (r < 0) goto out_free;
     if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DIRECTORY &&
         entry.type != A20_OBJ_DEVICE) {

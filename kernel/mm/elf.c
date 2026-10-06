@@ -25,7 +25,7 @@
 #include "mm/frame.h"
 #include "mm/pt.h"
 #include "drivers/driver_descriptor.h"
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/start_info.h"
 #endif
 
@@ -1591,7 +1591,7 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
     return sp_va;
 }
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             char *const envp[], const elf_load_info_t *info,
                             uint32_t stdin_h, uint32_t stdout_h,
