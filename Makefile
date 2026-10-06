@@ -185,12 +185,14 @@ UART_CMDLINE ?= n
 # capability "xlator" in components/trim.toml.
 XLATOR_SUPPORTED_ARCHES := $(TRIM_CAP_XLATOR_ARCHES)
 
-# Synthetic driver lifecycle test and the HDA/NVMe in-probe smoke builds.
-# All three default to off and are enabled with the on-value their existing
+# Synthetic driver lifecycle test, the platform-bus IRQ resource self-check,
+# and the HDA/NVMe in-probe smoke builds.
+# All four default to off and are enabled with the on-value their existing
 # callers already pass (tools/smoke_cases.py and docs/drivers/meta/
 # testing-and-submission.md use `=y`), so the BUILD_VARIANT components below
 # and the gate invocations keep working unchanged.
 CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
+CONFIG_PLATFORM_IRQ_TEST ?= 0
 CONFIG_HDA_SMOKE_TEST ?= 0
 CONFIG_NVME_SMOKE_TEST ?= 0
 
@@ -414,7 +416,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -544,6 +546,30 @@ SMOKE_TIMEOUT_SMP ?= 180s
 # interactive-shell default.
 SMOKE_TIMEOUT_EXT4 ?= 180
 SMOKE_INPUT_DELAY_EXT4 ?= 22
+# The AHCI gate boots x86_64 with an extra controller behind the root bus and
+# runs the fsync test against it, so it needs both a later shell injection
+# point (two HBAs are probed before the shell prompt) and a longer budget than
+# a single-device boot.
+SMOKE_TIMEOUT_AHCI ?= 120s
+SMOKE_INPUT_DELAY_AHCI ?= 20
+# The e1000 gate boots x86_64, injects a listener, and then needs the host-side
+# probe's own retry window on top (the guest must have booted and opened the port
+# before a connection can land).  It also probes a second PCI function behind the
+# root bus before the shell prompt appears, so its injection point is later than
+# the single-device default for the same reason AHCI's is.
+SMOKE_TIMEOUT_E1000 ?= 120s
+SMOKE_INPUT_DELAY_E1000 ?= 20
+# Same shape as the e1000 gate and the same reason for each value: the rtl8139
+# probe's own retry window sits on top of the guest's boot time, and the guest
+# needs to enumerate a PCI function, ring programming and a listener open
+# before the forwarded connection can land.
+SMOKE_TIMEOUT_RTL8139 ?= 120s
+SMOKE_INPUT_DELAY_RTL8139 ?= 20
+# virtio-console: the host probe first waits for the guest to publish
+# "VPORT_TEST: READY" (boot, DriverStore activation of virtio-console.a20drv,
+# /dev/vport0 open), then holds its own 90 s window for the echo.
+SMOKE_TIMEOUT_VPORT ?= 150s
+SMOKE_INPUT_DELAY_VPORT ?= 20
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_LOG_DIR ?= .kernel-build/smoke/step35
@@ -1112,6 +1138,13 @@ endif
 # Synthetic driver lifecycle test (disabled by default).
 ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
 CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
+endif
+
+# Platform-bus IRQ resource self-check (smoke-platform-irq-fallback).  Empty at
+# 0.  It registers synthetic platform devices on the real bus and claims a real
+# IRQ line, so it is a gate build and not a shipping default.
+ifeq ($(CONFIG_PLATFORM_IRQ_TEST),y)
+CFLAGS += -DCONFIG_PLATFORM_IRQ_TEST
 endif
 
 # CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST deliberately add nothing to

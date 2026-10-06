@@ -370,15 +370,28 @@ void firmware_shutdown(void) {
     arch_halt();
 }
 
-/* QEMU fw_cfg (port 0x510 selector / 0x511 data).  With `-kernel`+`-append`
- * QEMU exposes the command line through FW_CFG_CMDLINE_SIZE/DATA; without
- * it, bootargs would be empty on x86_64 and every a20.* knob (static
- * network config, trace=<comm> diagnosis) stays unreachable. */
+/* QEMU fw_cfg (port 0x510 selector / 0x511 data).
+ *
+ * The command line is *not* reachable through the old fixed keys
+ * FW_CFG_CMDLINE_SIZE/DATA (0x14/0x15): those belong to the Linux boot
+ * protocol and QEMU only fills them in when it boots a bzImage through a
+ * setup header.  Under `-kernel` multiboot they read back as zero, which is
+ * why bootargs used to come out empty here and every a20.* knob -- static
+ * network config, trace=<comm> -- was unreachable on x86_64.
+ *
+ * What QEMU actually publishes is the file directory: every `-fw_cfg
+ * name=...,file/string=...` item gets a selector and a 64-byte record in a
+ * flat table at FW_CFG_FILE_DIR, so `-fw_cfg name=opt/x86/cmdline,string=...`
+ * is a supported way to hand the kernel a command line.  Read the directory,
+ * find the name, then read the file through the selector its record names. */
 #define FW_CFG_SELECTOR_PORT 0x510
 #define FW_CFG_DATA_PORT     0x511
 #define FW_CFG_SIGNATURE     0x0000
-#define FW_CFG_CMDLINE_SIZE  0x0014
-#define FW_CFG_CMDLINE_DATA  0x0015
+#define FW_CFG_FILE_DIR      0x0019
+#define FW_CFG_FILE_NAME_LEN 56
+#define FW_CFG_FILE_REC_LEN  64
+#define FW_CFG_FILE_MAX      256
+#define FW_CFG_CMDLINE_FILE  "opt/x86/cmdline"
 
 static uint8_t fw_cfg_read8(void) {
     return inb(FW_CFG_DATA_PORT);
@@ -389,6 +402,49 @@ static uint32_t fw_cfg_read32(void) {
     for (int i = 0; i < 4; i++)
         value = (value << 8) | fw_cfg_read8();
     return value;
+}
+
+/* Everything in fw_cfg is big-endian and the data port is one sequential
+ * stream per selected item: writing the selector rewinds to that item, and
+ * each following read just keeps walking forward. */
+static uint16_t fw_cfg_read16(void) {
+    return (uint16_t)((fw_cfg_read8() << 8) | fw_cfg_read8());
+}
+
+/* Copy the fw_cfg file called `name` into `out`.  The directory is a
+ * big-endian entry count followed by that many fixed 64-byte records of
+ * {u32 size, u16 select, u16 reserved, char name[56]}; a file's bytes are
+ * then read straight from the selector its record carries, with no length
+ * prefix.  Returns 0 on success. */
+static int fw_cfg_read_file(const char *name, char *out, size_t outsz) {
+    outw(FW_CFG_SELECTOR_PORT, FW_CFG_FILE_DIR);
+    uint32_t count = fw_cfg_read32();
+    /* No directory at all, or a count no real machine would publish: both mean
+     * there is nothing named `name`, and guessing past that would feed
+     * whatever the port happens to return to every bootargs consumer. */
+    if (count == 0 || count > FW_CFG_FILE_MAX)
+        return -1;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t size = fw_cfg_read32();
+        uint16_t select = fw_cfg_read16();
+        (void)fw_cfg_read16();        /* reserved */
+        char entry[FW_CFG_FILE_NAME_LEN];
+        for (int n = 0; n < FW_CFG_FILE_NAME_LEN; n++)
+            entry[n] = (char)fw_cfg_read8();
+        entry[FW_CFG_FILE_NAME_LEN - 1] = '\0';
+
+        if (strcmp(entry, name) != 0)
+            continue;
+        if (size >= outsz)
+            size = outsz - 1;
+        outw(FW_CFG_SELECTOR_PORT, select);
+        for (uint32_t k = 0; k < size; k++)
+            out[k] = (char)fw_cfg_read8();
+        out[size] = '\0';
+        return 0;
+    }
+    return -1;
 }
 
 static char g_bootargs[256];
@@ -457,20 +513,11 @@ const char *firmware_bootargs(void) {
         outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
         uint32_t sig = fw_cfg_read32();
         printf("[FW_CFG] signature=0x%08x\n", sig);
-        if (sig == 0x51454d55U) {   /* "QEMU", big-endian */
-            outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_SIZE);
-            uint32_t len = fw_cfg_read32();
-            printf("[FW_CFG] cmdline_size=%u\n", len);
-            if (len > sizeof(g_bootargs) - 1)
-                len = sizeof(g_bootargs) - 1;
-            outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_DATA);
-            for (uint32_t i = 0; i < len; i++)
-                g_bootargs[i] = (char)fw_cfg_read8();
-            g_bootargs[len] = '\0';
-            printf("[FW_CFG] cmdline='%s'\n", g_bootargs);
-        } else {
-            printf("[FW_CFG] no QEMU fw_cfg, using fallback bootargs\n");
-        }
+        if (sig == 0x51454d55U &&   /* "QEMU", big-endian */
+            fw_cfg_read_file(FW_CFG_CMDLINE_FILE, g_bootargs, sizeof(g_bootargs)) == 0)
+            printf("[FW_CFG] %s='%s'\n", FW_CFG_CMDLINE_FILE, g_bootargs);
+        else
+            printf("[FW_CFG] no %s, using fallback bootargs\n", FW_CFG_CMDLINE_FILE);
     }
     return g_bootargs;
 }

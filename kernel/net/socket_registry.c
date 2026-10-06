@@ -97,12 +97,30 @@ void net_socket_registry_init(void) {
             g_net_buckets[b].free_bits[NET_SOCK_BUCKET_WORDS - 1] |=
                 ~0u << (32 - slack);
     }
+    #if CONFIG_NET_LOCK_ASSERT
+    /* Count the registry size either side of the loop below rather than
+     * trusting that every register() landed.  impl-notes-net.md §8.2/§8.7 left
+     * LOCK_COUNTERS_MAX=192 as an open budget question with the server profile's
+     * 128 bucket locks eating two thirds of it, and a register() past the
+     * ceiling used to be dropped without a word -- the locks work, they just
+     * stop being audited, and /proc/a20/lock_contention then reports a clean run
+     * for a lock nobody ever looked at.  The delta is exact here because these
+     * are fresh locks: the dedup-by-pointer branch inside register() cannot
+     * fire for a lock that has never been registered. */
+    unsigned before = lock_counters_count();
+#endif
     for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
         snprintf(g_net_bucket_names[b], NET_BUCKET_NAME_MAX,
                  "net_bucket_%d", b);
         spin_set_debug(&g_net_buckets[b].lock, g_net_bucket_names[b], NULL);
         lock_counters_register(&g_net_buckets[b].lock, g_net_bucket_names[b]);
     }
+#if CONFIG_NET_LOCK_ASSERT
+    unsigned after = lock_counters_count();
+    if (after - before != NET_SOCK_BUCKETS)
+        net_lockcounters_short(after - before, NET_SOCK_BUCKETS,
+                               lock_counters_dropped());
+#endif
 }
 
 /*
@@ -172,9 +190,39 @@ int net_register_socket_locked(net_socket_t *s) {
     return -ENFILE;
 }
 
-void net_socket_unregister(net_socket_t *s) {
+/*
+ * Release the registry slot, and REPORT whether there was one.
+ *
+ * The return value is the whole point of this function's shape.  A socket that
+ * owns a slot carries two references -- the creator's and the registry's --
+ * and a socket that owns none carries exactly one.  Both kinds reach the same
+ * two teardown paths (net_socket_close_file() and the accept() install-failure
+ * rollback), because an AF_UNIX accepted child is never registered: see
+ * net_unix_socket_connect(), which is why `grep -rn net_register_socket_locked
+ * kernel/net/socket_unix.c` has no hits.  A teardown that unconditionally drops
+ * "the registry's reference" therefore drops one reference too many for every
+ * AF_UNIX connection, which frees the socket in the middle of its own teardown
+ * and then keeps dereferencing it.
+ *
+ * That is not a new bug.  The pre-ledger net_socket_free() was a
+ * __atomic_fetch_sub() compared against 1, so a free arriving at an already-zero
+ * count read as -1, matched nothing, and returned -- the object was freed
+ * exactly once, by accident rather than by design, and the use-after-free
+ * survived because nothing read the freed memory in a way that faulted.  What
+ * changed is that it is now visible: net_socket_free()'s CAS loop refuses a
+ * non-positive count and the ref_magic canary rejects a socket that is not live,
+ * so CONFIG_NET_REF_ASSERT=1 turns this into a panic on the first AF_UNIX close.
+ * The ledger is what found it; see docs/measured/impl-notes-net.md §8.3/§8.6,
+ * which recorded the reference count as walked by hand over 54 sites and never
+ * once run.
+ *
+ * Returning "was there a slot" makes the coupling impossible to get wrong
+ * again: the function that knows whether the reference exists is the one that
+ * released the thing it was counted against.
+ */
+bool net_socket_unregister(net_socket_t *s) {
     if (!s)
-        return;
+        return false;
     /*
      * Registration recorded the slot, so closing reads it back instead of
      * searching for the pointer: the search cost one comparison per slot, and
@@ -193,7 +241,7 @@ void net_socket_unregister(net_socket_t *s) {
     int i = s->reg_idx;
     int b = net_socket_bucket(s);
     if (b < 0 || i < 0 || i >= NET_MAX_SOCKETS)
-        return;
+        return false;
     uint64_t flags = net_bucket_lock(b);
     uint64_t sflags = net_sock_lock(s);
     /* Released while the slot is still this socket's, because that is the key
@@ -211,9 +259,11 @@ void net_socket_unregister(net_socket_t *s) {
     net_sock_unlock(s, sflags);
     net_bucket_unlock(b, flags);
     /* The registry's own reference is released by the caller with one more
-     * net_socket_free(), *after* this function returns and every lock is
-     * dropped: it can free the socket, and obj_cache_free() is not something to
-     * run with a shard lock held and interrupts disabled. */
+     * net_socket_free() -- only because this function returned true -- *after*
+     * this function returns and every lock is dropped: it can free the socket,
+     * and obj_cache_free() is not something to run with a shard lock held and
+     * interrupts disabled. */
+    return true;
 }
 
 /*

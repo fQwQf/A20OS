@@ -41,3 +41,35 @@ void platform_device_unregister(platform_device_t *pdev)
     if (pdev)
         device_unregister(&pdev->dev);
 }
+
+/*
+ * See the PLATFORM_IRQ_RESOURCE_CHANNEL contract in
+ * kernel/include/drivers/bus/platform_bus.h for the return-value contract.
+ *
+ * This reads the same resource_t the board or the device tree enumerator
+ * wrote; it does not add a second IRQ description channel, so a device that
+ * already publishes RES_IRQ (the StarFive and LS2K GMACs do, and the RISC-V
+ * device tree walker fills it from `interrupts`) is picked up here with no
+ * board change at all.
+ */
+int platform_device_irq(device_t *dev)
+{
+    if (!dev || dev->bus != &platform_bus)
+        return -EINVAL;
+
+    /* Index 0: the platform bus publishes one line per device.  A second
+     * RES_IRQ is not a thing this bus has ever described, and silently using
+     * the first one of several would attach a driver to the wrong line. */
+    resource_t *res = device_get_resource(dev, RES_IRQ, 0);
+    if (!res)
+        return -ENODEV;              /* no line published: caller polls */
+
+    /* Validate before subtracting, the same order core-model.md prescribes for
+     * resource lengths: a malformed resource is a board bug, not a line. */
+    if (res->end < res->start || res->end != res->start)
+        return -EINVAL;
+    if (res->start >= PLATFORM_IRQ_MAX_LINES)
+        return -ERANGE;
+
+    return (int)res->start;
+}

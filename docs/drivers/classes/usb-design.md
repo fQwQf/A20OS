@@ -59,7 +59,7 @@ A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（11
 - **HCD 只负责传输**，不解析 USB 协议；协议解析（HID/MSC）在类驱动。
 - **USB 核心不依赖任何具体 HCD**，只依赖 `usb_hcd_t` 接口。
 - 类驱动通过 `device_id_t`（vendor=USB class<<16|subclass<<8|protocol）在 usb 总线上匹配，沿用现有 `driver_t` 生命周期。
-- 当前没有已实现的“设备锁 > URB 锁 > 环锁”层级。USB core 由 process-context progress poll 驱动；HID/storage 有各自 class lock，而 `xhci->lock` 目前只初始化、未实际获取。若未来并行提交 URB 或并行 hotplug，必须先实现 controller 级同步并在[锁顺序契约](../guide/lock-order.md)记录单向顺序。
+- 当前没有已实现的“设备锁 > URB 锁 > 环锁”三级层级。xHCI 现在有真实生效的 `xhci->lock`（保护 command/event ring、endpoint 链、事件环游标与同步传输所有权），完成由 controller 自己的 INTx 驱动，USB core 的 process-context poll 保留为热插拔扫描与无 INTx 平台上的回退路径。同步传输靠 `xfer_busy` 所有权标志串行化而不是排队，HID/storage 各自的 class lock 与 `xhci->lock` 之间的单向顺序记录在[锁顺序契约](../guide/lock-order.md)。仍未建立的是：同一 controller 上多个同步传输的排队、MSI/MSI-X 模式，以及 SMP 下的压力验证（门禁只跑单核）。
 
 ## 4. USB 核心设计
 
@@ -79,8 +79,8 @@ typedef struct usb_urb {
 } usb_urb_t;
 ```
 
-- xHCI endpoint 保存当前 pending URB，HCD 轮询 event ring 并完成它；当前不是通用多项端点待办队列。
-- 中断传输（HID 报告）由 class 驱动重新提交，沿用轮询 event ring 的进展路径。
+- xHCI endpoint 保存当前 pending URB，HCD 完成它；当前不是通用多项端点待办队列。
+- 中断传输（HID 报告）由 class 驱动重新提交，沿用同一条 event ring 进展路径——由 IRQ handler 驱动，core poll 负责热插拔扫描与回退。
 - 控制传输走核心封装：`usb_control_msg()`（标准请求 set/get，包 setup + data + status 三个阶段）。
 
 ### 4.2 设备树模型
@@ -125,7 +125,7 @@ typedef struct usb_hcd {
 - `xhci_ring/enqueue/dispatch/wait_event/command/control` → HCD 内部；
 - `hid_keyboard_report/mouse_report/tablet_report` → 移入 usb-hid 类驱动；
 - `xhci_parse_hid/configure_hid` → 由 usb 核心的 interface 枚举替代，端点/接口信息从描述符读取而非 HID 专属解析；
-- 轮询入口保留（`xhci_poll_locked`）；当前没有 IRQ completion 路径。
+- 轮询入口保留（`xhci_op_poll`，仍是热插拔扫描入口，也是无 INTx 平台和 `a20.xhci.poll=1` 时的回退）；IRQ completion 路径已实现：probe 申领 INTx，`xhci_irq_handler()` 驱动 event ring 完成。
 
 ## 6. 类驱动
 
@@ -207,5 +207,6 @@ Phase 3（未来计划，未实现）：hub 与其它 HCD。
 ## 13. 与"设计原则"的一致性
 
 - 分层薄接口、无 ABI 互相包装依赖（USB core 不碰 Linux/native ABI）。
-- 不引入 POSIX 异步信号/回调式中断风暴；HID 沿用读时轮询（与现有 xhci_hid 一致），不新增中断驱动复杂度。
+- 不引入 POSIX 异步信号；HID 完成由 controller 的 INTx 驱动，class 回调仍走
+  同步的 `read`/`poll` 路径，不新增异步完成回调接口。
 - 能力/权限、时间约束等 native 概念不进入 USB core。

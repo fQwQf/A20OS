@@ -21,6 +21,11 @@
 
 typedef struct trace_slot {
     task_t *task;
+    /* A slot holds no reference on task, and a SIGKILLed task can be freed
+     * while its slot is still occupied.  The pid is a plain integer, so the
+     * scanner can revalidate through it without first dereferencing the
+     * possibly freed task. */
+    int pid;
     const linux_syscall_entry_t *entry;
     uint64_t args[3];
     uint64_t start_tick;
@@ -115,6 +120,7 @@ void syscall_trace_enter(task_t *t, const linux_syscall_entry_t *entry,
     if (!s)
         return;
     s->task = t;
+    s->pid = t->pid;
     s->entry = entry;
     s->args[0] = args->arg[0];
     s->args[1] = args->arg[1];
@@ -169,8 +175,10 @@ void syscall_trace_slow_scanner(void)
             if (!s->task || !s->entry || s->start_tick == 0)
                 continue;
             /* A SIGKILLed task exits without an exit-trace; its slot would
-             * otherwise report garbage from freed task memory forever. */
-            task_t *live = proc_find_get(s->task->pid);
+             * otherwise report garbage from freed task memory forever.  Look
+             * the task up by the slot's pid: dereferencing s->task first is
+             * exactly the read that faults when that task is already gone. */
+            task_t *live = proc_find_get(s->pid);
             if (live != s->task) {
                 if (live)
                     proc_put(live);

@@ -1631,6 +1631,19 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
              "\nlwip_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)\n");
     a20_lwip_append(buf, bufsz, &off, cell);
 #endif
+    /*
+     * The net-lock side of the same switch.  Rendered here rather than in
+     * net_format_status() because this is the function that already owns the
+     * lwIP row and the two are read together; it runs with no lock held (the
+     * lane census above dropped both of its own), and net_lock_probe_format()
+     * only reads per-CPU counters.
+     */
+    {
+        char lockrow[512];
+        int lockn = net_lock_probe_format(lockrow, sizeof(lockrow));
+        if (lockn > 0)
+            a20_lwip_append(buf, bufsz, &off, lockrow);
+    }
     return (int)off;
 }
 
@@ -1909,6 +1922,52 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off, row);
     }
 
+    /*
+     * The socket table's half of the same account, which no pool row can show
+     * either.  These objects come from the socket obj_cache rather than from
+     * .bss, so they cost nothing until a socket exists -- but the ceiling is a
+     * compile-time number and the cache will fill it, which is exactly why
+     * "the netmem page looked small" was never evidence that the tier fitted.
+     *
+     * `total` is NET_MAX_SOCKETS x sizeof(net_socket_t) -- the worst case the
+     * table can reach, not a live count, so it is directly comparable with the
+     * static .bss line above and with NET_PROFILE_SOCKET_BUDGET, the ceiling
+     * socket_internal.h asserts it against.  The ring and payload columns are
+     * the two profile numbers that decide it, printed because a reader looking
+     * at a tier that no longer fits has to be able to see which knob moved.
+     */
+    {
+        /* Its own buffer: seven fields on a 128 B row would truncate, and a
+         * truncated accounting line is worse than no line. */
+        char sock_row[192];
+        /*
+         * budget= is "n/a" on the tiers that declare no ceiling, not 0.  Only
+         * the embedded tier defines NET_PROFILE_SOCKET_BUDGET, and printing a
+         * literal 0 there would read as "31 MB of sockets against a zero
+         * budget" -- an overrun claim that is not true and that nothing
+         * asserts.  A tier without a declared ceiling says so.
+         */
+#ifdef NET_PROFILE_SOCKET_BUDGET
+        const char *budget = NULL;
+        char budget_buf[32];
+        snprintf(budget_buf, sizeof(budget_buf), "%lu",
+                 (unsigned long)NET_PROFILE_SOCKET_BUDGET);
+        budget = budget_buf;
+#else
+        const char *budget = "n/a";
+#endif
+        snprintf(sock_row, sizeof(sock_row),
+                 "socket table: per_socket=%lu slots=%lu bh_ring=%lu "
+                 "inline_payload=%lu total=%lu budget=%s\n",
+                 (unsigned long)sizeof(net_socket_t),
+                 (unsigned long)NET_MAX_SOCKETS,
+                 (unsigned long)NET_BH_RING_SIZE,
+                 (unsigned long)NET_BH_INLINE_PAYLOAD,
+                 (unsigned long)(NET_MAX_SOCKETS * sizeof(net_socket_t)),
+                 budget);
+        a20_lwip_append(buf, bufsz, &off, sock_row);
+    }
+
     a20_lwip_unlock(flags);
     return (int)off;
 }
@@ -2041,6 +2100,80 @@ int a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
     a20_lwip_copy_ip4(mask, netif_ip4_netmask(n));
     a20_lwip_copy_ip4(gw, netif_ip4_gw(n));
     a20_lwip_unlock(flags);
+    return 0;
+}
+
+/*
+ * Add one IPv6 address to a netif.  This is the kernel write path behind
+ * RTM_NEWADDR with ifa_family == AF_INET6, and it exists so RTNLGRP_IPV6_IFADDR
+ * has an event source: without it the group could be defined and bound but
+ * never fed, which is exactly the "negotiated and unused" state worth avoiding.
+ *
+ * Add-only, and deliberately so.  lwIP with LWIP_NETIF_API == 0 exposes no
+ * netif_remove_ip6_address(); removal goes through nd6.c's internal pool
+ * teardown, and reaching into it from here would be a real divergence for a
+ * capability nothing in this tree uses yet.  So RTM_DELADDR for AF_INET6 is
+ * refused with -EOPNOTSUPP by the caller rather than half-performed.
+ *
+ * No DAD either.  netif_add_ip6_address() parks the address TENTATIVE and
+ * lwIP's ND6 timer would promote it after the probes; this promotes it straight
+ * to IP6_ADDR_VALID instead, because the address came from an explicit
+ * administrative request rather than from a router advertisement, and the
+ * loopback netif already takes the same shortcut (a20_lwip_loopif_init_cb).
+ * The boundary is recorded in docs/net/network-config-design.md: a listener
+ * must not read this event as "duplicate address detection passed".
+ *
+ * prefixlen is accepted and validated but not applied: lwIP's IPv6 subnet
+ * membership comes from the prefix-length field carried inside the address
+ * itself (ip6_addr_t's zone/subnet encoding), not from a separate netmask, and
+ * there is no per-address prefixlen in struct netif.  It is validated so a
+ * malformed request is still refused, and it is what the notification reports.
+ */
+int a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
+                          uint8_t prefixlen)
+{
+    if (!addr)
+        return -EINVAL;
+    if (prefixlen > 128)
+        return -EINVAL;
+    ip6_addr_t want;
+    /* IP6_ADDR_PART() is lwIP's own byte-part-to-u32 setter and applies the
+     * byte-order conversion, so this cannot drift from how the rest of the stack
+     * reads an ip6_addr_t. */
+    ip6_addr_set_zero(&want);
+    IP6_ADDR_PART(&want, 0, addr[0], addr[1], addr[2], addr[3]);
+    IP6_ADDR_PART(&want, 1, addr[4], addr[5], addr[6], addr[7]);
+    IP6_ADDR_PART(&want, 2, addr[8], addr[9], addr[10], addr[11]);
+    IP6_ADDR_PART(&want, 3, addr[12], addr[13], addr[14], addr[15]);
+    /* An all-zero address is not a state an interface can be put into, and
+     * lwIP treats it as invalid, so it would be stored and then never used.
+     * Refuse it here rather than accept a write that reports success. */
+    int any = 1;
+    for (int i = 0; i < 16; i++)
+        if (addr[i]) { any = 0; break; }
+    if (any)
+        return -EINVAL;
+
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    s8_t idx = -1;
+    /* netif_add_ip6_address() returns ERR_OK with chosen_idx set for an address
+     * that is already present, so this is idempotent the same way the IPv4 path
+     * is: re-adding an address already configured is a no-op, not a duplicate
+     * slot. */
+    err_t e = netif_add_ip6_address(n, &want, &idx);
+    if (e != ERR_OK || idx < 0) {
+        a20_lwip_unlock(flags);
+        return -ENOSPC;               /* every slot taken, or no slot for this scope */
+    }
+    netif_ip6_addr_set_state(n, idx, IP6_ADDR_VALID);
+    a20_lwip_unlock(flags);
+    /* Outside g_lwip_lock: the notify path takes net locks. */
+    net_netlink_addr6_notify(ifindex, addr, prefixlen);
     return 0;
 }
 

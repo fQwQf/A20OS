@@ -3,6 +3,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/audio/pc_speaker.h"
+#include "drivers/char/cmos_rtc.h"
 #include "core/arch.h"
 #include "core/bootargs.h"
 #include "core/smp.h"
@@ -94,7 +95,7 @@ static int x86_64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
 static void x86_64_smp_send(const smp_cpu_desc_t *cpu,
                             smp_ipi_reason_t reason) {
     if (reason == SMP_IPI_RESCHEDULE)
-        x86_64_smp_send_ipi((unsigned)cpu->hw_id, IRQ_VECTOR_RESCHEDULE);
+        (void)x86_64_smp_send_ipi((unsigned)cpu->hw_id, IRQ_VECTOR_RESCHEDULE);
 }
 
 static void x86_64_smp_secondary(const smp_cpu_desc_t *cpu) {
@@ -150,6 +151,26 @@ static void x86_64_enumerate_devices(void) {
             .device = A20_DEVICE_PC_SPEAKER,
         },
     };
+    /* MC146818 CMOS RTC: two fixed I/O ports, index then data.  q35 always
+     * has the RTC on the ISA bus at these addresses; the cmos-rtc.a20drv
+     * module binds to this device and seeds the wall clock from it. */
+    static resource_t cmos_rtc_resources[] = {
+        { .type = RES_IOPORT, .start = 0x70, .end = 0x70,
+          .name = "cmos-index" },
+        { .type = RES_IOPORT, .start = 0x71, .end = 0x71,
+          .name = "cmos-data" },
+    };
+    static platform_device_t cmos_rtc = {
+        .dev = {
+            .name = "cmos-rtc",
+            .res = cmos_rtc_resources,
+            .res_count = 2,
+        },
+        .id = {
+            .vendor = A20_PLATFORM_VENDOR,
+            .device = A20_DEVICE_CMOS_RTC,
+        },
+    };
     /*
      * Ask the firmware where the ECAM window is, rather than assuming it.
      *
@@ -203,6 +224,7 @@ static void x86_64_enumerate_devices(void) {
 
     pci_enumerate(ecam, bus_start, bus_end);
     (void)platform_device_register(&speaker);
+    (void)platform_device_register(&cmos_rtc);
 }
 
 static const board_config_t qemu_virt_x86_64 = {

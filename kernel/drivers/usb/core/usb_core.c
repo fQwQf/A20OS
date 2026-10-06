@@ -100,6 +100,22 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
     if (!udev)
         return;
 
+    /* Tear the controller side down FIRST.  The transfer rings this slot owns
+     * outlive the class devices underneath it, and the controller's interrupt
+     * handler may still drain them: xhci_collect_interrupt() reads
+     * ep->pending and then urb->complete on the way to deciding whether there is
+     * anything to run.  Unlinking the endpoints here makes ep->pending
+     * unreachable, so a drain racing this teardown finds no endpoint rather
+     * than one pointing at a class driver's freed URB.
+     *
+     * Running it after the class removes left exactly that window open: a
+     * class remove that freed its URB between the two calls handed the drain a
+     * dangling pointer to read through.  No class remove touches an endpoint or
+     * issues a transfer -- they only drop their own drv_priv -- so the order
+     * swap costs them nothing. */
+    if (hcd->ops && hcd->ops->abort_slot)
+        hcd->ops->abort_slot(hcd, udev->slot);
+
     /* Remove class devices before their interface and endpoint storage. */
     for (uint8_t i = 0; i < udev->iface_count; i++) {
         usb_interface_t *iface = &udev->ifaces[i];
@@ -111,8 +127,6 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
         }
         kfree(iface->eps);
     }
-    if (hcd->ops && hcd->ops->abort_slot)
-        hcd->ops->abort_slot(hcd, udev->slot);
     kfree(udev->ifaces);
     kfree(udev);
     hcd->port_devices[port - 1] = NULL;

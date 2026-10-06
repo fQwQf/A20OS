@@ -11,6 +11,7 @@
 #include "core/types.h"
 #include "core/refcount.h"
 #include "core/lock.h"
+#include "uapi/a20/block.h"
 
 struct device;
 struct audio_dev_ops;
@@ -65,10 +66,16 @@ typedef struct block_dev_ops {
     uint32_t (*sector_size)(struct device *dev);
 } block_dev_ops_t;
 
-/* block ioctl requests */
-#define BLK_IOCTL_GET_CAPACITY   0x1001
-#define BLK_IOCTL_GET_SECTOR_SZ  0x1002
-#define BLK_IOCTL_SYNC           0x1003
+/* block ioctl requests.  The numbers live in uapi/a20/block.h because they are
+ * reachable from userspace on /dev/diskN; these are the kernel-side names for
+ * the same values. */
+#define BLK_IOCTL_GET_CAPACITY   A20_BLK_IOCTL_GET_CAPACITY
+#define BLK_IOCTL_GET_SECTOR_SZ  A20_BLK_IOCTL_GET_SECTOR_SZ
+#define BLK_IOCTL_SYNC           A20_BLK_IOCTL_SYNC
+/* Fills an a20_blk_stats_t (uapi/a20/block.h).  Optional per driver: an
+ * unimplemented ioctl falls through to -ENOTTY, which is what a driver with
+ * no completion statistics must return rather than reporting zeros. */
+#define BLK_IOCTL_GET_STATS      A20_BLK_IOCTL_GET_STATS
 
 /* ============================================================
  * Network device operations
@@ -129,17 +136,32 @@ typedef struct net_iovec {
  *
  * Why the two checksum bits exist but stay clear:
  *
- * lwIP 2.2.2 as vendored offers no way for a stack to tell a driver "the L4
- * checksum in this frame is a partial sum you must finish".  opt.h:2449-2450
- * defaults LWIP_CHECKSUM_ON_COPY to 0, so pbuf_take() computes and verifies
- * checksums itself, and netif.h:84-107 defines exactly seven NETIF_FLAG_*
- * bits (UP, BROADCAST, LINK_UP, ETHARP, ETHERNET, IGMP, MLD6) -- none of which
- * a checksum-offload handshake would ride on.  Setting either bit under those
- * semantics would leave lwIP verifying a checksum the device never computed, so
- * the bits are defined now and are set only by a driver that has a stack able
- * to express the handshake.  MRG_RXBUF is different: it is a pure device-side
- * receive property lwIP never sees, so a driver that negotiated it can and
- * should report it.
+ * The stack does have a carrier for this handshake -- lwIP 2.2.2 carries the
+ * NETIF_CHECKSUM_GEN_* and NETIF_CHECKSUM_CHECK_* bits plus a
+ * netif->chksum_flags field
+ * (lwip netif.h:140-153, :340-342, :408-417) behind the
+ * LWIP_CHECKSUM_CTRL_PER_NETIF switch, which defaults to 0
+ * (opt.h:2371-2373).  What is missing is the wiring on the A20OS side of it,
+ * and one gap that no switch closes:
+ *
+ *  - the TCP send path finalises the segment checksum with no
+ *    IF__NETIF_CHECKSUM_ENABLED() around it at all (lwip tcp_out.c:1587-1596),
+ *    so enabling the switch would offload UDP and not TCP;
+ *  - lwIP's per-netif bit is not a per-frame bit, and this HAL's recv() returns
+ *    a length and nothing else, so "this frame's checksum was verified" has no
+ *    channel to travel in.  QEMU's virtio-net does not supply it either: it
+ *    never sets VIRTIO_NET_HDR_F_DATA_VALID;
+ *  - the outbound path rewrites L4 checksums incrementally in place for NAT
+ *    (kernel/net/netfilter_nat.c), which is arithmetic on a value that would no
+ *    longer be a complete checksum.
+ *
+ * Setting either bit under those conditions would leave lwIP verifying a
+ * checksum the device never computed -- a silent drop of every packet, not a
+ * missing feature.  The bits are defined now and are set only by a driver whose
+ * stack can express the handshake end to end.  MRG_RXBUF is different: it is a
+ * pure device-side receive property lwIP never sees, so a driver that negotiated
+ * it can and should report it.  The full investigation, including what each
+ * required change would be, is docs/net/checksum-offload.md.
  */
 #define NET_DEV_CAP_TX_SG           (1u << 0) /* send_sg() consumes a segment list */
 #define NET_DEV_CAP_TX_CSUM_OFFLOAD (1u << 1) /* needs_csum/csum_start in the vnet hdr */

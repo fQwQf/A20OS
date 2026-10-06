@@ -55,6 +55,7 @@
 /* Multicast groups from linux/rtnetlink.h, which musl does not publish. */
 #define RTNLGRP_LINK        0x1
 #define RTNLGRP_IPV4_IFADDR 0x5
+#define RTNLGRP_IPV6_IFADDR 0xA
 
 #define IFA_ADDRESS     1
 #define IFA_LOCAL       2
@@ -174,6 +175,37 @@ static int send_addr(int fd, uint16_t type, uint16_t flags, int ifindex,
     return send_nl(fd, buf, off);
 }
 
+/* The AF_INET6 twin of send_addr().  Same envelope, but IFA_ADDRESS /
+ * IFA_LOCAL carry 16 bytes instead of 4.  A separate helper rather than a width
+ * parameter on send_addr() because the width changes what the kernel validates:
+ * an IPv6 request carrying a 4-byte attribute must be refused on its LENGTH,
+ * and reusing the 4-byte helper is the only way to write that negative case. */
+static int send_addr6(int fd, uint16_t type, uint16_t flags, int ifindex,
+                      int prefixlen, const uint8_t *a1, uint16_t t1,
+                      const uint8_t *a2, uint16_t t2)
+{
+    unsigned char buf[256];
+    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+    struct ifaddrmsg *ifa = (struct ifaddrmsg *)(buf + sizeof(*nlh));
+    size_t off;
+
+    memset(buf, 0, sizeof(buf));
+    nlh->nlmsg_len = NLMSG_LENGTH(sizeof(*ifa));
+    nlh->nlmsg_type = type;
+    nlh->nlmsg_flags = flags;
+    ifa->ifa_family = AF_INET6;
+    ifa->ifa_prefixlen = (uint8_t)prefixlen;
+    ifa->ifa_index = (uint32_t)ifindex;
+
+    off = sizeof(*nlh) + sizeof(*ifa);
+    if (a1)
+        off = add_attr(buf, off, t1, a1, 16);
+    if (a2)
+        off = add_attr(buf, off, t2, a2, 16);
+    nlh->nlmsg_len = (uint32_t)off;
+    return send_nl(fd, buf, off);
+}
+
 static int send_link(int fd, int ifindex, uint32_t change, uint32_t flags,
                      const void *mtu, size_t mtu_len)
 {
@@ -285,10 +317,14 @@ static void test_addr_refusals(int fd, int ifindex, const uint8_t addr[4])
            errno == EOPNOTSUPP,
        "the secondary-address form (IFA_LOCAL != IFA_ADDRESS) is refused");
 
+    /* An address family with no write path at all is still refused.  This used
+     * to be AF_INET6, which asserted the absence of a feature; it is now a
+     * family nothing claims, so the assertion covers what it always meant --
+     * an unrecognised family must not be treated as IPv4 by falling through. */
     errno = 0;
-    ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, AF_INET6, 64,
+    ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, AF_UNSPEC, 24,
                  addr, IFA_LOCAL, NULL, 0) < 0 && errno == EAFNOSUPPORT,
-       "RTM_NEWADDR with an IPv6 family is refused with EAFNOSUPPORT");
+       "RTM_NEWADDR with an unsupported family is refused with EAFNOSUPPORT");
 
     errno = 0;
     ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, 0, AF_INET, 24,
@@ -335,6 +371,106 @@ static void test_addr_refusals(int fd, int ifindex, const uint8_t addr[4])
        "RTM_DELADDR of an address the interface does not hold is refused");
 }
 
+/*
+ * The AF_INET6 write path.  This exists because RTNLGRP_IPV6_IFADDR was added:
+ * a group number a listener can bind to is only honest if the kernel can
+ * produce an event for it, and the only thing that can produce one is a write
+ * path.  Until a20_lwip_if_set_addr6() existed, the honest move would have been
+ * to leave the group undefined -- so these assertions are what make the group
+ * definition load-bearing rather than decorative.
+ *
+ * The address used is 2001:db8::1, RFC 3849's documentation prefix.  It is
+ * reserved precisely so that configuring it cannot reach anything real.
+ */
+static void test_addr6(int fd, int ifindex)
+{
+    static const uint8_t doc[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x01,
+    };
+    static const uint8_t doc2[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x02,
+    };
+
+    /* Refusals first: the IPv6 arm must not be a hole where malformed requests
+     * get through. */
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 129,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 prefix length over 128 is refused with EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, 0, 64,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 RTM_NEWADDR with ifa_index 0 is refused with EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  NULL, 0, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 RTM_NEWADDR carrying no address attribute is refused with "
+       "EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, doc2, IFA_ADDRESS) < 0 &&
+           errno == EOPNOTSUPP,
+       "the IPv6 secondary-address form (IFA_LOCAL != IFA_ADDRESS) is "
+       "refused");
+
+    /* IFA_ADDRESS alone is a legitimate spelling (Linux treats the two as
+     * equivalent when they carry the same address), so it must not be
+     * confused with the "no address attribute at all" case above. */
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  NULL, 0, doc, IFA_ADDRESS) >= 0,
+       "an IPv6 RTM_NEWADDR naming only IFA_ADDRESS is accepted, not "
+       "confused with carrying no address at all");
+
+    /* All-zero is not an address an interface can hold; accepting it would
+     * store a slot lwIP treats as invalid and then report success. */
+    static const uint8_t zero[16] = { 0 };
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  zero, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an all-zero IPv6 address is refused with EINVAL");
+
+    /* Delete is not implemented, and saying so is better than accepting it:
+     * lwIP with LWIP_NETIF_API=0 has no netif_remove_ip6_address(). */
+    errno = 0;
+    ok(send_addr6(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EOPNOTSUPP,
+       "RTM_DELADDR for AF_INET6 is refused with EOPNOTSUPP, not faked");
+
+    /* An IPv6 request whose attribute is 4 bytes wide must be refused on its
+     * length -- this is why send_addr6() exists separately from send_addr(). */
+    {
+        unsigned char buf[256];
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        struct ifaddrmsg *ifa = (struct ifaddrmsg *)(buf + sizeof(*nlh));
+
+        memset(buf, 0, sizeof(buf));
+        nlh->nlmsg_type = RTM_NEWADDR;
+        nlh->nlmsg_flags = NLM_F_REQUEST;
+        ifa->ifa_family = AF_INET6;
+        ifa->ifa_prefixlen = 64;
+        ifa->ifa_index = (uint32_t)ifindex;
+        nlh->nlmsg_len = (uint32_t)add_attr(buf, sizeof(*nlh) + sizeof(*ifa),
+                                            IFA_LOCAL, doc, 4);
+        errno = 0;
+        ok(send_nl(fd, buf, nlh->nlmsg_len) < 0 && errno == EINVAL,
+           "a 4-byte IFA_LOCAL on an AF_INET6 request is refused with EINVAL");
+    }
+
+    /* The positive case, twice: the second add must be idempotent, matching
+     * how the IPv4 path treats a re-asserted address. */
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) >= 0,
+       "an IPv6 RTM_NEWADDR is accepted");
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) >= 0,
+       "re-adding the same IPv6 address is accepted (idempotent)");
+}
+
 static void test_envelope_refusals(int fd, int ifindex)
 {
     unsigned char buf[256];
@@ -376,10 +512,19 @@ static void test_envelope_refusals(int fd, int ifindex)
        "a multipart RTM_NEWADDR is refused with EINVAL");
 }
 
-static void test_link(int fd, int ifindex)
+static void test_link(int fd, int sfd, int ifindex, const char *name)
 {
     uint32_t mtu;
     uint16_t small = 0;
+    struct ifreq ifr;
+    uint32_t current_mtu = 0;
+
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    if (ioctl(sfd, SIOCGIFMTU, &ifr) == 0)
+        current_mtu = (uint32_t)ifr.ifr_mtu;
+    else
+        ok(0, "read the interface's MTU before the link write tests");
 
     errno = 0;
     ok(send_link(fd, ifindex, 0x10000, 0, NULL, 0) < 0 && errno == EOPNOTSUPP,
@@ -407,9 +552,148 @@ static void test_link(int fd, int ifindex)
     ok(send_link(fd, ifindex, 0x1, 0x1 /* IFF_UP in both */, NULL, 0) >= 0,
        "RTM_NEWLINK setting IFF_UP on an already-up link is accepted");
 
-    mtu = 1500;
+    /* The interface's own MTU, read rather than written as 1500.  This check
+     * is "re-applying the current MTU is accepted", and 1500 was only ever the
+     * current MTU on the default and server tiers: the embedded tier's frame
+     * buffer is 512 B so its link runs at 498, and asking for 1500 there is not
+     * a no-op but a request the profile's ceiling refuses.  The hardcoded
+     * value therefore made this an implicit profile-1 failure -- it only did
+     * not show on tier 1 because the suite never got that far there. */
+    mtu = current_mtu;
     ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) >= 0,
        "RTM_NEWLINK re-applying the current MTU is accepted");
+}
+
+/* ------------------------------------------------------------------ */
+/* The MTU ceiling                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * a20_lwip_if_set_mtu() refuses an MTU whose frame (MTU + ETH_HLEN) does not
+ * fit the profile's device scratch buffer, and that refusal had no gate at
+ * all: the tree shipped no user of SIOCSIFMTU, and netlink_test only ever
+ * re-applied the MTU the interface already had, which is accepted on the tiers
+ * where it is below the ceiling.  So the ceiling was a line of kernel code
+ * nothing had ever run.
+ *
+ * The ceiling is per profile -- the embedded tier's frame buffer is 512 B so
+ * the cap is 498, the default and server tiers use 1536 B so theirs is 1522 --
+ * and userspace has no way to read which tier is built.  It is therefore
+ * discovered instead of hardcoded: acceptance is monotonic in the requested
+ * MTU (below 68 is the RFC 791 floor, above the cap is the frame buffer), so a
+ * bisection converges on the exact boundary, and both sides of that boundary
+ * are then asserted rather than one arbitrary oversized value being refused.
+ *
+ * Both entry points are covered, because they are two doors to one check:
+ * RTM_NEWLINK/IFLA_MTU and SIOCSIFMTU both end in a20_lwip_if_set_mtu().
+ */
+static void test_mtu_ceiling(int fd, int sfd, int ifindex, const char *name)
+{
+    struct ifreq ifr;
+    uint32_t mtu, original = 0, cap;
+    int have_original;
+
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    have_original = ioctl(sfd, SIOCGIFMTU, &ifr) == 0;
+    if (have_original)
+        original = (uint32_t)ifr.ifr_mtu;
+    else
+        ok(0, "read the interface's current MTU");
+
+    /* Above every profile's ceiling: 65535 + ETH_HLEN exceeds both the 512 B
+     * and the 1536 B scratch buffers.  Without this the rest of the function
+     * could pass on a kernel that had no ceiling at all, as long as bisection
+     * then reported 65535 -- so the bisection result is checked against this
+     * rather than trusted on its own. */
+    mtu = 0xffff;
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "an MTU of 65535 is refused with EINVAL on every profile");
+
+    /* Bisect: lo is known-acceptable (the RFC 791 minimum), hi is known
+     * refused (65535, asserted just above). */
+    {
+        uint32_t lo = 68, hi = 0xffff;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo + 1) / 2;
+            if (send_link(fd, ifindex, 0, 0, &mid, sizeof(mid)) >= 0)
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+        cap = lo;
+    }
+
+    ok(cap > 68 && cap < 0xffff,
+       "the MTU ceiling is a profile bound, not the bottom or the top of the "
+       "u16 range");
+    /* Printed because the value is the whole point of the test and it differs
+     * per profile: 498 on the embedded tier, 1522 on the default and server
+     * ones.  A gate log that records it turns "the ceiling still holds" into a
+     * number that can be compared across builds. */
+    printf("%s: info MTU ceiling discovered at %u (profile frame buffer %u B, "
+           "running with %u)\n", TEST_NAME, (unsigned)cap,
+           (unsigned)(cap + 14), (unsigned)original);
+
+    if (have_original)
+        ok(cap >= original,
+           "the MTU ceiling is at least the MTU the interface is running with");
+
+    /* One byte over.  This is the assertion the path never had: the value is
+     * derived from the kernel's own behaviour, so it fails if the cap moves
+     * without this test following, and it fails if the cap stops existing. */
+    mtu = cap + 1;
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "one byte above the profile's MTU ceiling is refused with EINVAL");
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "the refusal is repeatable, not a one-shot");
+
+    mtu = cap;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) >= 0,
+       "the MTU ceiling itself is accepted");
+
+    /* And the ceiling took effect, rather than being validated and discarded. */
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    if (ioctl(sfd, SIOCGIFMTU, &ifr) == 0)
+        ok((uint32_t)ifr.ifr_mtu == cap,
+           "an accepted MTU is the MTU the interface then reports");
+    else
+        ok(0, "read the MTU back after setting it");
+
+    /* The ioctl door to the same check.  SIOCSIFMTU returned ENOTTY for every
+     * caller until it was wired to a20_lwip_if_set_mtu(), so this is also the
+     * only assertion that the ioctl reaches the check at all. */
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    ifr.ifr_mtu = (int)cap + 1;
+    errno = 0;
+    ok(ioctl(sfd, SIOCSIFMTU, &ifr) < 0 && errno == EINVAL,
+       "SIOCSIFMTU above the profile's MTU ceiling is refused with EINVAL");
+    ifr.ifr_mtu = (int)cap;
+    ok(ioctl(sfd, SIOCSIFMTU, &ifr) == 0,
+       "SIOCSIFMTU at the profile's MTU ceiling is accepted");
+
+    /* Put the link back the way it was found: the rest of this test walks the
+     * address, netmask and flag state afterwards, and an MTU left at the
+     * ceiling is not the state the suite was written against. */
+    if (have_original) {
+        memset(&ifr, 0, sizeof(ifr));
+        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+        ifr.ifr_mtu = (int)original;
+        if (ioctl(sfd, SIOCSIFMTU, &ifr) == 0) {
+            memset(&ifr, 0, sizeof(ifr));
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+            ok(ioctl(sfd, SIOCGIFMTU, &ifr) == 0 &&
+                   (uint32_t)ifr.ifr_mtu == original,
+               "the MTU is back where the test found it");
+        } else {
+            ok(0, "restore the interface's original MTU");
+        }
+    }
 }
 
 static void test_addr_idempotent(int fd, int ifindex, const uint8_t addr[4],
@@ -620,8 +904,9 @@ static void test_multicast(int ifindex, const char *ifname_want,
             close(mute);
         return;
     }
-    ok(bind_groups(sub, RTNLGRP_LINK | RTNLGRP_IPV4_IFADDR) == 0,
-       "bind a route socket to the link and address groups");
+    ok(bind_groups(sub, RTNLGRP_LINK | RTNLGRP_IPV4_IFADDR |
+                        RTNLGRP_IPV6_IFADDR) == 0,
+       "bind a route socket to the link and both address groups");
     ok(bind_groups(mute, 0) == 0,
        "bind a second route socket to no group at all");
 
@@ -659,6 +944,47 @@ static void test_multicast(int ifindex, const char *ifname_want,
                        IFA_LOCAL, 4, got) == 0 &&
            memcmp(got, addr, 4) == 0,
            "IFA_LOCAL in the event is the same address");
+    }
+
+    /* --- IPv6 address --- */
+    /* Same add the write-path test made, re-asserted so the event fires again.
+     * This is the assertion that gives RTNLGRP_IPV6_IFADDR its reason to
+     * exist: a group a listener binds to must actually receive something. */
+    static const uint8_t doc6[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x01,
+    };
+    ok(send_addr6(sub, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc6, IFA_LOCAL, NULL, 0) >= 0,
+       "re-assert the IPv6 address to trigger an IPv6 multicast");
+
+    n = recv_nl(sub, buf, sizeof(buf), 2000);
+    ok(n > 0, "the subscribed socket receives the IPv6 address event");
+    if (n > 0) {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        ok(nlh->nlmsg_type == RTM_NEWADDR,
+           "the IPv6 address event arrives as RTM_NEWADDR");
+        ok(nlh->nlmsg_pid == 0,
+           "the IPv6 notification names the kernel (nlmsg_pid 0) as its "
+           "source");
+        const struct ifaddrmsg *ifa =
+            (const struct ifaddrmsg *)(buf + sizeof(*nlh));
+        ok(n >= (int)(sizeof(*nlh) + sizeof(*ifa)) &&
+           ifa->ifa_family == AF_INET6,
+           "the IPv6 payload is an AF_INET6 ifaddrmsg, not the IPv4 shape");
+        ok(ifa->ifa_index == (uint32_t)ifindex,
+           "the IPv6 event names the interface that changed");
+        ok(ifa->ifa_prefixlen == 64,
+           "the IPv6 event carries the prefix length that was requested");
+        uint8_t got6[16] = { 0 };
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_ADDRESS, 16, got6) == 0 &&
+           memcmp(got6, doc6, 16) == 0,
+           "IFA_ADDRESS in the IPv6 event is the address now configured");
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_LOCAL, 16, got6) == 0 &&
+           memcmp(got6, doc6, 16) == 0,
+           "IFA_LOCAL in the IPv6 event is the same address");
     }
 
     /* --- link --- */
@@ -733,8 +1059,10 @@ int main(void)
            mask_to_prefixlen(mask));
 
     test_addr_refusals(nl, ifindex, addr);
+    test_addr6(nl, ifindex);
     test_envelope_refusals(nl, ifindex);
-    test_link(nl, ifindex);
+    test_link(nl, sfd, ifindex, name);
+    test_mtu_ceiling(nl, sfd, ifindex, name);
     test_addr_idempotent(nl, ifindex, addr, mask);
     test_state_intact(sfd, name, addr, mask);
     test_multicast(ifindex, name, addr, mask);
