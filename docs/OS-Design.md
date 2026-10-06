@@ -141,7 +141,7 @@ on_rq -> dispatching -> on_cpu -> unowned
 
 本地 picker 只持有本 CPU 的 runqueue 锁，原子完成 `on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取 EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免 8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU编号升序。
 
-远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不会在任意中断上下文直接切换；请求在 trap/syscall/timer 返回或显式调度安全点消费。
+远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不在中断处理中途切换；请求在 trap/syscall/timer 返回、显式调度安全点，以及（`CONFIG_KERNEL_PREEMPT`，hosted 默认开）内核态硬件中断处理完毕的返回点消费——内核里跑长 syscall 的任务会在 tick/IPI 到来时被切走，恢复经由既有栈切换路径，无需新汇编（机制与不变量见 `docs/process-scheduler.md` §4.1）。
 
 所有对象等待使用 tokenized Park/Wake。waiter 先生成 `(task, wait_seq)`token，在对象锁内重查条件并 link，释放对象锁后才 commit；waker 在对象锁内只把 task 引用和 token 转移到 wake queue，释放对象锁后再进入 scheduler。因此提前到达的事件、旧 timeout 和重复 wake 都不能唤醒后续等待。
 

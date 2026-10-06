@@ -108,13 +108,48 @@ proc_lock -> a20_handle_table.lock
 2. 以 release 语义设置目标 CPU 的 `need_resched`；
 3. 仅在请求从未决变为未决时发送 reschedule IPI。
 
-IPI 是通知，不是调度决定。handler 只确认通知和建立 acquire 顺序，不在任意中断上下文直接切换。请求由以下安全点消费：
+IPI 是通知，不是调度决定。handler 只确认通知和建立 acquire 顺序，不在中断处理中途切换。请求由以下消费点处理：
 
 - syscall/trap 返回；
 - timer 返回；
-- idle loop 或显式 `sched()`。
+- idle loop 或显式 `sched()`；
+- **内核态硬件中断返回前**（`CONFIG_KERNEL_PREEMPT`，见 §4.1）。
 
 这样即使 IPI 合并、延迟或先于安全点到达，抢占请求也不会丢失。
+
+### 4.1 内核态抢占点（CONFIG_KERNEL_PREEMPT）
+
+hosted 架构默认开启；MCU profile（armv7m 的 PendSV 协作模型）不编入。内核态任务在长
+syscall 里不再独占 CPU 到 syscall 返回：`kernel_trap_handler()` 的 IRQ 分支处理完
+`arch_handle_irq()` 后，`kernel_preempt_at_irq_return()` 在全部条件满足时直接
+`proc_yield()` 切换——need_resched 未决、当前任务非 idle 且为 RUNNING、
+`preempt_allowed()`（per-CPU 抢占计数为 0 且不在 hardirq 中）、被中断上下文中断是开的
+（各架构钩子 `ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx)` 读保存的状态寄存器：x86_64
+`rflags.IF`、riscv `sstatus.SPIE`、aarch64 `SPSR.I`、loongarch `PRMD.PIE`、arm32
+`CPSR.I`、ppc64le `SRR1.MSR.EE`；缺钩子的 hosted 构建是编译错误而非静默禁用）。
+
+恢复路径不需要任何新汇编：内核态 trap 落在被中断任务自己的内核栈上，被抢占任务的
+kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler 帧][sched() 帧]`，
+`__switch` 切回后从 `sched()` 返回、沿中断尾声 iret/eret/sret 回到断点——与 syscall 中
+阻塞的既有路径同构。
+
+支撑不变量有二，均被机制强制而非仅靠约定：
+
+1. **per-CPU 抢占计数在每次 `__switch` 时必为 0**。自愿切换在持锁下被锁契约禁止，
+   `context_switch_locked()` 入口的无条件 panic 把它变成 checked fact；抢占式切换被
+   `preempt_count()==0` 挡住。计数因此无需随任务保存/恢复，`spin_lock/spin_unlock/
+   spin_trylock_irqsave` 的挂钩（获取成功后 disable、释放后 enable，**等待锁期间不禁
+   抢占**）就是全部成本。
+2. **切换窗口对中断不可见**。`sched()` 的 pick→publish→`__switch` 段全程关中断；
+   `__switch` 按任务保存/恢复 rflags/sstatus，各任务在自己的 `out:` 处恢复自己保存的
+   标志，因此任何任务都不会观察到中断落在别人的切换窗口里。
+
+效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
+A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
+见 `docs/measured/impl-notes-preempt.md`——x86_64 最大唤醒 557ms→21ms（smp=1）、
+→1ms（smp=2），riscv64 427ms→31ms（smp=1）、→10ms（smp=2）。SCHED_RR 死循环任务
+跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的
+"只在 pick 时轮转"限制随之消失。
 
 ## 5. Tokenized Park/Wake
 
