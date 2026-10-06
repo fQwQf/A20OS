@@ -26,12 +26,12 @@ GICv3 架构 trap 层负责 distributor/CPU interface 初始化；board irqchip 
 
 | VirtualBox 设备 | PCI ID | 驱动 | 类 | 当前模式 |
 |---|---|---|---|---|
-| VirtIO-SCSI | `1af4:1048` | `kernel/drivers/block/virtio_scsi.c` / `virtio-scsi.a20drv` | BLOCK | 三个 split queue，requestq 轮询 |
+| VirtIO-SCSI | `1af4:1048` | `kernel/drivers/block/virtio_scsi.c` / `virtio-scsi.a20drv` | BLOCK | 三个 split queue，requestq 走 MSI-X → INTx → 轮询的完成阶梯；VirtualBox ARM 上 MSI-X 不可用，实际以轮询为主 |
 | Intel E1000 82540EM | `8086:100e` | `kernel/drivers/net/e1000.c` / `e1000.a20drv` | NET | RX/TX descriptor ring 轮询 |
 | SVGAv3/VMSVGA | `15ad:0406` | `kernel/drivers/gpu/vmsvga.c` / `vmsvga.a20drv` | DISPLAY | BAR0 regs、BAR2 VRAM、update command |
-| Intel Panther Point xHCI | `8086:1e31` | `kernel/drivers/usb/host/xhci.c` + `usb-hid.a20drv` | INPUT | USB boot keyboard/mouse/tablet，轮询 event ring |
+| Intel Panther Point xHCI | `8086:1e31` | `kernel/drivers/usb/host/xhci.c` + `usb-hid.a20drv` | INPUT | USB boot keyboard/mouse/tablet，INTx event ring；该平台的 PCI INTx 路由尚不完整，取不到线时自动退回轮询 |
 
-VirtIO-SCSI 使用 LUN 0、READ/WRITE(10) 和 512 字节扇区；启动盘首先解析 GPT 第一个 partition，再尝试 FAT32 `/bin`。E1000 由 lwIP 按 `DEV_CLASS_NET` 自动挂接，当前 ARM board 源码合成 VBox NAT 静态 bootargs。VMSVGA probe 调用 display registry，`/dev/fb0` 是保留的 display 聚合节点；xHCI HID 事件由 `/dev/event0` 聚合。其他 char/block/audio class 设备由 devfs 动态发布，并在 `/sys/class` 中出现。
+VirtIO-SCSI 使用 LUN 0、READ/WRITE(10)、SYNCHRONIZE CACHE(10) 和 512 字节扇区；启动盘首先解析 GPT 第一个 partition，再尝试 FAT32 `/bin`。E1000 由 lwIP 按 `DEV_CLASS_NET` 自动挂接，当前 ARM board 源码合成 VBox NAT 静态 bootargs。VMSVGA probe 调用 display registry，`/dev/fb0` 是保留的 display 聚合节点；xHCI HID 事件由 `/dev/event0` 聚合。其他 char/block/audio class 设备由 devfs 动态发布，并在 `/sys/class` 中出现。
 
 ## x86_64 发现链
 
