@@ -235,6 +235,16 @@ static void vf2_enumerate_devices(void) {
     static platform_device_t sdio_dev;
     static resource_t sdio_res[1];
 
+    /* No RES_IRQ here, and that is deliberate rather than an omission.  The
+     * VF2 DTB carries the mshc0 line, and riscv64_fdt_enumerate_platform_devices()
+     * publishes it as a RES_IRQ on the primary path above -- so on a board that
+     * boots the way this one normally does, dw-sdio.c drives its completion path
+     * from the interrupt the firmware described.  This fallback table is only
+     * reached when no tree was handed over, and there the line is genuinely
+     * unknown: naming a constant here would be a guess, and a guessed line that
+     * is never routed costs the card every transfer's timeout before the driver
+     * downgrades itself.  With no RES_IRQ, platform_device_irq() returns
+     * -ENODEV and the driver polls, which is the path that works. */
     sdio_res[0].type  = RES_MMIO;
     sdio_res[0].start = VF2_SDIO_BASE;
     sdio_res[0].end   = VF2_SDIO_BASE + VF2_SDIO_SIZE - 1;
