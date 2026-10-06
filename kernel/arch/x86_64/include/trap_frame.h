@@ -161,6 +161,9 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->rip)
 #define TRAP_CTX_STATUS(ctx)       ((ctx)->rflags)
+/* The CPU pushes the interrupted RFLAGS on trap entry, so ctx->rflags carries
+ * the IF state the trap interrupted rather than the cleared one. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->rflags & SSTATUS_SIE) != 0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->kscratch0)
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->cr3)
