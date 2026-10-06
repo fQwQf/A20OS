@@ -1025,7 +1025,7 @@ int drvmod_load(int fd, const char *name)
     if (!descriptor || !a20_driver_descriptor_sane(descriptor) ||
         descriptor->placement != A20_DRIVER_PLACEMENT_KERNEL_MODULE ||
         descriptor->type < A20_DRIVER_TYPE_RTC ||
-        descriptor->type > A20_DRIVER_TYPE_USB) {
+        descriptor->type > A20_DRIVER_TYPE_CHAR) {
         kerr("[DRVMOD] %s: missing or invalid kernel driver descriptor\n", name);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
