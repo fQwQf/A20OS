@@ -9,6 +9,10 @@ void *kmalloc_atomic(size_t size);
 void *kcalloc_atomic(size_t nmemb, size_t size);
 
 void  kfree(void *ptr);
+/* 1 when @ptr is a block kmalloc() handed out (slab object or big-alloc page
+ * block), 0 when it is a raw frame-allocator block such as pfa_alloc().  Use it
+ * to pick the right release path; kfree() panics on a frame-allocator block. */
+int   kmalloc_owns(const void *ptr);
 void *krealloc(void *ptr, size_t new_size);
 void *kcalloc(size_t nmemb, size_t size);
 

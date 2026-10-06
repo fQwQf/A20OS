@@ -38,6 +38,7 @@
 #include "net/net_config.h"
 #include "net/lwip_stack.h"
 #include "drivers/core/riscv_iommu.h"
+#include "drivers/bus/pci_msix.h"
 
 #ifdef CONFIG_BOARD_LS2K1000
 #include "platform.h"
@@ -796,6 +797,32 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_A20_SCHED_BASE_SLICE:
         snprintf(buf, bufsz, "%d\n", g_sched_base_slice_ms);
         return (int)strlen(buf);
+    case PF_A20_IRQ_AFFINITY: {
+        /* One line per programmed entry, plus the window a write has to stay
+         * inside.  Reporting the ceiling matters: a platform whose message
+         * path is boot-CPU-only reads back "cpus: 1", which is the honest
+         * reason an echo of anything else is refused rather than a limit the
+         * reader has to know to guess. */
+        pci_msix_affinity_entry_t entries[PCI_MSIX_AFFINITY_VECTORS];
+        unsigned shown = sizeof(entries) / sizeof(entries[0]);
+        unsigned total = pci_msix_affinity_snapshot(entries, shown);
+        size_t off = 0;
+        int n = snprintf(buf, bufsz, "cpus: %d\nentries: %u\n",
+                         arch_irq_msix_cpu_count(), total);
+        if (n < 0)
+            return 0;
+        off = (size_t)n < bufsz ? (size_t)n : bufsz;
+        for (unsigned i = 0; i < total && i < shown && off < bufsz; i++) {
+            n = snprintf(buf + off, bufsz - off, "%s\t%u\t%u\t%d\n",
+                         entries[i].name, entries[i].index, entries[i].vector,
+                         entries[i].cpu);
+            if (n < 0)
+                break;
+            off += (size_t)n < bufsz - off ? (size_t)n : bufsz - off;
+        }
+        buf[bufsz - 1] = '\0';
+        return (int)strlen(buf);
+    }
 #ifdef CONFIG_XLATOR
     case PF_A20_XLATOR:
         /* xlator_render() formats the switch state, the forwarding counter
