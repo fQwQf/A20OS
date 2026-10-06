@@ -44,6 +44,8 @@ make check-doc-test-gates
 make check-mm-lock-model          # 内存管理
 make check-vfs-abstraction        # 文件系统
 make check-abi-boundary           # ABI 边界
+make check-native-abi-coverage    # 新增 A20_NATIVE_SYSCALL 时（登记表/编号表/文档要对齐）
+make check-abi-config-guard       # 改动 CONFIG_ABI_* 守卫写法时
 make check-driver-core-model      # 驱动
 make check-io-progress-model      # I/O 进展
 make check-concurrency-foundation # 并发

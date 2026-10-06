@@ -453,6 +453,12 @@ struct vmo *mm_lookup_vmo_region(mm_struct_t *mm, vaddr_t addr, size_t len,
                                  uint32_t *prot_out);
 /* MADV_DONTNEED/MADV_FREE page discard over [addr, addr+len). */
 int  mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len);
+/* Advice dispatch: page discard for DONTNEED/FREE, VMA fork flags for
+ * DONTFORK/DOFORK/WIPEONFORK/KEEPONFORK, -ENOSYS for REMOVE, the coverage
+ * answer for the advices this path accepts without acting on, -EINVAL for an
+ * unknown advice.  The Linux sys_madvise has its own dispatch and does not
+ * come through here. */
+int  mm_madvise(mm_struct_t *mm, vaddr_t addr, size_t len, int advice);
 /* Toggle the mlock-style VMA flag over [start, end) under mm->lock. */
 int  mm_vma_set_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end, int on);
 

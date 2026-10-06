@@ -7,6 +7,10 @@
  *   3. vm_protect: change protection
  *   4. vm_advise(MADV_DONTNEED): drop PTEs without faulting
  *   5. vm_unmap: release the VMO
+ *   6. VMAR reservations (hierarchy, ceilings, capability stamping)
+ *   7. file-backed mapping through the page cache
+ *   8. vm_advise(MADV_NORMAL): a pure hint must not drop pages
+ *   9. vm_advise fork-policy advices and the range/error contract
  */
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
@@ -188,6 +192,95 @@ int main(int argc, char **argv, char **envp)
         if (st != A20_OK)
             return fail(out, 19, "vm_unmap FILE", 14);
         a20_hdl_close(po.out_handle);
+    }
+
+    /* 8. vm_advise(MADV_NORMAL): a pure hint.  It must return success and
+     *    leave the pages in place -- MADV_NORMAL means "expect normal
+     *    access", and a kernel that treated it as a discard would hand the
+     *    caller a range whose contents are gone. */
+    {
+        uint64_t naddr = 0;
+        st = a20_vm_alloc_pages(2, 3 /* PROT_R|PROT_W */, &naddr);
+        if (st != A20_OK || !naddr)
+            return fail(out, 20, "vm_alloc NORMAL", 15);
+
+        volatile uint8_t *nb = (volatile uint8_t *)(uintptr_t)naddr;
+        for (uint64_t i = 0; i < 2 * PAGE; i++)
+            nb[i] = (uint8_t)(0xa5 ^ (i & 0xff));
+
+        st = a20_syscall6(A20_SYS_vm_advise, naddr, 2 * PAGE,
+                          0 /* MADV_NORMAL */, 0, 0, 0);
+        if (st != A20_OK)
+            return failh(out, 21, "vm_advise NORMAL st=", 20, st);
+        for (uint64_t i = 0; i < 2 * PAGE; i++) {
+            if (nb[i] != (uint8_t)(0xa5 ^ (i & 0xff)))
+                return fail(out, 22, "MADV_NORMAL dropped", 19);
+        }
+
+        st = a20_vm_unmap(naddr, 2 * PAGE);
+        if (st != A20_OK)
+            return fail(out, 23, "vm_unmap NORMAL", 15);
+    }
+
+    /* 9. The fork-policy advices are the only ones that change kernel state,
+     *    so each of the four gets a round trip over a mapped range.  What the
+     *    child ends up with is not checkable from here -- this is a single
+     *    process and there is no fork in the Native ABI test -- but the
+     *    dispatch reaching the VMA flag path at all is, as is the range
+     *    contract around it. */
+    {
+        uint64_t kaddr = 0;
+        st = a20_vm_alloc_pages(3, 3 /* PROT_R|PROT_W */, &kaddr);
+        if (st != A20_OK || !kaddr)
+            return fail(out, 24, "vm_alloc fork", 13);
+
+        static const int fork_adv[] = {
+            10, /* MADV_DONTFORK */
+            11, /* MADV_DOFORK */
+            18, /* MADV_WIPEONFORK */
+            19, /* MADV_KEEPONFORK */
+        };
+        for (unsigned i = 0; i < sizeof(fork_adv) / sizeof(fork_adv[0]); i++) {
+            st = a20_syscall6(A20_SYS_vm_advise, kaddr, 3 * PAGE,
+                              (uint64_t)fork_adv[i], 0, 0, 0);
+            if (st != A20_OK)
+                return failh(out, 25, "fork advise st=", 15, st);
+        }
+
+        /* A range running past the mapping is refused, for a fork bit and for
+         * a hint alike: the hint path validates coverage too, so the same
+         * address answers the same way whichever advice it was given. */
+        st = a20_syscall6(A20_SYS_vm_advise, kaddr, 8 * PAGE,
+                          10 /* MADV_DONTFORK */, 0, 0, 0);
+        if (st != -A20_ERR_NO_MEMORY)
+            return failh(out, 26, "fork hole st=", 13, st);
+        st = a20_syscall6(A20_SYS_vm_advise, kaddr, 8 * PAGE,
+                          0 /* MADV_NORMAL */, 0, 0, 0);
+        if (st != -A20_ERR_NO_MEMORY)
+            return failh(out, 27, "hint hole st=", 13, st);
+
+        /* addr+len that wraps is a rejected range, not an empty success. */
+        st = a20_syscall6(A20_SYS_vm_advise, 0xfffffffffffff000ULL, 0x2000,
+                          4 /* MADV_DONTNEED */, 0, 0, 0);
+        if (st != -A20_ERR_INVALID_ARGUMENT)
+            return failh(out, 28, "wrap range st=", 14, st);
+
+        /* An advice value the kernel does not know is refused rather than
+         * taken for a hint. */
+        st = a20_syscall6(A20_SYS_vm_advise, kaddr, PAGE, 999, 0, 0, 0);
+        if (st != -A20_ERR_INVALID_ARGUMENT)
+            return failh(out, 29, "unknown advice st=", 18, st);
+
+        /* MADV_REMOVE has no swapout to promise with, so it says so instead
+         * of discarding the range the caller expects to read back. */
+        st = a20_syscall6(A20_SYS_vm_advise, kaddr, PAGE, 9 /* MADV_REMOVE */,
+                          0, 0, 0);
+        if (st != -A20_ERR_NOT_SUPPORTED)
+            return failh(out, 30, "MADV_REMOVE st=", 15, st);
+
+        st = a20_vm_unmap(kaddr, 3 * PAGE);
+        if (st != A20_OK)
+            return fail(out, 31, "vm_unmap fork", 13);
     }
 
     a20_hdl_write_buf(out, "NATIVE_MM: PASS\n", 16, (void *)0);

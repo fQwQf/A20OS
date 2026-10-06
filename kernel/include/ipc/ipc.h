@@ -259,7 +259,9 @@ typedef struct a20_namespace {
     uint32_t    ns_type;
     uint32_t    flags;
     void       *isolated_data;
-    char        root_path[256];
+    /* Sized like task->fs.root_path: ns_create snapshots the caller's root
+     * verbatim, so a shorter field would truncate a legal MAX_PATH_LEN path. */
+    char        root_path[MAX_PATH_LEN];
     uint32_t    net_ifindex;
     uint64_t    pid_offset;
     uint32_t    dev_access_mask;

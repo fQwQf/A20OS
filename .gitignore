@@ -23,7 +23,7 @@ compile_commands.json
 kernel-rv
 kernel-la
 /standard-reference.pdf
-.kernel-build/
+.kernel-build
 /build/
 .tmp/
 user/build/

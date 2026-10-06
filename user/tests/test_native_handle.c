@@ -591,6 +591,130 @@ static int temporal_auto_close(void)
     return 0;
 }
 
+/* ---- handle_set_meta / handle_xattr (03-handle.md §6, 0x0107-0x010B) ---- */
+
+static int set_meta_fields(void)
+{
+    const char *path = "/tmp/native_meta.txt";
+    a20_handle_t f = open_file(path,
+                               A20_PATH_OPEN_CREATE | A20_PATH_OPEN_RDWR | A20_PATH_OPEN_TRUNC,
+                               A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT);
+    if (f == A20_HANDLE_NULL)
+        return fail("meta-open");
+
+    a20_iovec_t w = { (uint64_t)"metadata", 8 };
+    if (a20_status_is_err(a20_hdl_write(f, &w, 1, NULL)))
+        return fail("meta-write");
+
+    if (a20_hdl_set_meta(f, 0, 0, 0) != -A20_ERR_INVALID_ARGUMENT)
+        return fail("meta-empty-flags");
+    if (a20_hdl_set_meta(f, 1u << 20, 0, 0) != -A20_ERR_INVALID_ARGUMENT)
+        return fail("meta-reserved-bit");
+    if (a20_hdl_set_meta(f, A20_SET_META_CTIME, 0, 0) != -A20_ERR_NOT_SUPPORTED)
+        return fail("meta-ctime");
+
+    if (a20_status_is_err(a20_hdl_set_meta(f, A20_SET_META_MODE, 0640, 0)))
+        return fail("meta-chmod");
+    a20_stat_t st;
+    a20_memset(&st, 0, sizeof(st));
+    if (a20_status_is_err(a20_hdl_stat(f, &st)))
+        return fail("meta-stat-mode");
+    if ((st.mode & 07777) != 0640)
+        return fail("meta-mode-value");
+
+    /* TRUNCATE and MTIME are the one legal pair: val0 carries the length,
+     * val1 the mtime.  Both must land, and the explicit mtime has to survive
+     * the truncate that refreshes it from the clock. */
+    const uint64_t mt = 1500000000ull;
+    if (a20_status_is_err(a20_hdl_set_meta(f, A20_SET_META_TRUNCATE | A20_SET_META_MTIME,
+                                           3, mt)))
+        return fail("meta-trunc-mtime");
+    a20_memset(&st, 0, sizeof(st));
+    if (a20_status_is_err(a20_hdl_stat(f, &st)))
+        return fail("meta-stat-trunc");
+    if (st.size_bytes != 3 || st.mtime_ns != mt)
+        return fail("meta-trunc-value");
+
+    const uint64_t at = 1400000000ull;
+    if (a20_status_is_err(a20_hdl_set_meta(f, A20_SET_META_ATIME, at, 0)))
+        return fail("meta-atime");
+    a20_memset(&st, 0, sizeof(st));
+    if (a20_status_is_err(a20_hdl_stat(f, &st)))
+        return fail("meta-stat-atime");
+    if (st.atime_ns != at)
+        return fail("meta-atime-value");
+
+    a20_hdl_close(f);
+    a20_path_unlink(A20_HANDLE_NULL, path, (uint32_t)a20_strlen(path));
+    return 0;
+}
+
+static int xattr_rights_split(void)
+{
+    const char *key = "user.native";
+    const char *val = "v";
+    const char *path = "/tmp/native_xattr.txt";
+    a20_handle_t f = open_file(path,
+                               A20_PATH_OPEN_CREATE | A20_PATH_OPEN_RDWR,
+                               A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
+                               A20_RIGHT_DUP);
+    if (f == A20_HANDLE_NULL)
+        return fail("xattr-open");
+
+    if (a20_status_is_err(a20_hdl_xattr_set(f, key, val, 1)))
+        return fail("xattr-set");
+    char got[8];
+    a20_memset(got, 0, sizeof(got));
+    uint64_t out_len = 0;
+    if (a20_status_is_err(a20_hdl_xattr_get(f, key, got, sizeof(got), &out_len)))
+        return fail("xattr-get");
+    if (out_len != 1 || got[0] != 'v')
+        return fail("xattr-get-value");
+    if (a20_status_is_err(a20_hdl_xattr_remove(f, key)))
+        return fail("xattr-remove");
+    if (a20_status_is_ok(a20_hdl_xattr_get(f, key, NULL, 0, NULL)))
+        return fail("xattr-after-remove");
+
+    /* A directory capability has no WRITE in its rights ceiling, so setting
+     * an attribute through one is refused however it was opened. */
+    a20_path_open_args_t dargs;
+    a20_memset(&dargs, 0, sizeof(dargs));
+    dargs.size = sizeof(dargs);
+    dargs.version = 1;
+    dargs.dir = A20_HANDLE_NULL;
+    dargs.path = (uint64_t)"/tmp";
+    dargs.path_len = 4;
+    dargs.rights = A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP;
+    if (a20_status_is_err(a20_path_open(&dargs)))
+        return fail("xattr-dopen");
+    if (a20_hdl_xattr_set(dargs.out_handle, key, val, 1) != -A20_ERR_ACCESS)
+        return fail("xattr-dir-set");
+    /* get is not rights-blocked on a directory handle; the attribute simply is
+     * not there, since nothing could have set it. */
+    if (a20_hdl_xattr_get(dargs.out_handle, key, NULL, 0, NULL) == -A20_ERR_ACCESS)
+        return fail("xattr-dir-get");
+    a20_hdl_close(dargs.out_handle);
+
+    /* set needs WRITE; a STAT-only dup must be refused. */
+    a20_handle_dup_args_t dup_args;
+    a20_memset(&dup_args, 0, sizeof(dup_args));
+    dup_args.size = sizeof(dup_args);
+    dup_args.version = 1;
+    dup_args.source = f;
+    dup_args.rights_mask = A20_RIGHT_STAT;
+    dup_args.out_handle = A20_HANDLE_NULL;
+    if (a20_status_is_err(a20_hdl_dup(&dup_args)))
+        return fail("xattr-dup");
+    if (a20_hdl_xattr_set(dup_args.out_handle, key, val, 1) != -A20_ERR_ACCESS)
+        return fail("xattr-stat-only-set");
+    a20_hdl_close(dup_args.out_handle);
+
+    a20_hdl_close(f);
+    a20_path_unlink(A20_HANDLE_NULL, path, (uint32_t)a20_strlen(path));
+    return 0;
+}
+
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc;
@@ -663,6 +787,16 @@ int main(int argc, char **argv, char **envp)
         return 1;
     if (g_stdout != A20_HANDLE_NULL)
         a20_hdl_write_buf(g_stdout, "ac ok\n", 6, NULL);
+
+    if (set_meta_fields() != 0)
+        return 1;
+    if (g_stdout != A20_HANDLE_NULL)
+        a20_hdl_write_buf(g_stdout, "meta ok\n", 9, NULL);
+
+    if (xattr_rights_split() != 0)
+        return 1;
+    if (g_stdout != A20_HANDLE_NULL)
+        a20_hdl_write_buf(g_stdout, "xattr ok\n", 10, NULL);
 
     return 0;
 }

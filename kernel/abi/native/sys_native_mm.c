@@ -451,10 +451,25 @@ int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
+/* A20_ERR <-> Linux errno mapping for core mm calls (mm/madvise.c,
+ * mm/mremap.c et al). */
+static int64_t a20_mm_errno_map(int r)
+{
+    switch (r) {
+    case -EINVAL:  return -A20_ERR_INVALID_ARGUMENT;
+    case -ENOMEM:  return -A20_ERR_NO_MEMORY;
+    case -EFAULT:  return -A20_ERR_FAULT;
+    case -EPERM:   return -A20_ERR_PERM;
+    case -ENOSYS:  return -A20_ERR_NOT_SUPPORTED;
+    default:       return -A20_ERR_INVALID_ARGUMENT;
+    }
+}
+
 int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
 {
     uint64_t addr = A20_ARG(0);
     uint64_t len = A20_ARG(1);
+    int advice = (int)(uint32_t)A20_ARG(2);
 
     if (len == 0) return A20_OK;
     if (addr & 4095) return -A20_ERR_INVALID_ARGUMENT;
@@ -462,22 +477,10 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
-    int r = mm_madvise_dontneed(cur->mm, (vaddr_t)addr, (size_t)len);
-    if (r == -ENOMEM) return -A20_ERR_NO_MEMORY;
-    if (r < 0) return -A20_ERR_INVALID_ARGUMENT;
+    int r = mm_madvise(cur->mm, (vaddr_t)addr, (size_t)len, advice);
+    if (r < 0)
+        return a20_mm_errno_map(r);
     return A20_OK;
-}
-
-/* A20_ERR <-> Linux errno mapping for core mm calls (mm/mremap.c et al). */
-static int64_t a20_mm_errno_map(int r)
-{
-    switch (r) {
-    case -EINVAL: return -A20_ERR_INVALID_ARGUMENT;
-    case -ENOMEM: return -A20_ERR_NO_MEMORY;
-    case -EFAULT: return -A20_ERR_FAULT;
-    case -EPERM:  return -A20_ERR_PERM;
-    default:      return -A20_ERR_INVALID_ARGUMENT;
-    }
 }
 
 /*
