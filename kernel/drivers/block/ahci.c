@@ -14,6 +14,8 @@
 #include "core/sync.h"
 #include "core/timer.h"
 #include "core/cpu.h"
+#include "core/bootargs.h"
+#include "core/perf.h"
 #include "proc/proc.h"
 
 #define AHCI_MAX_PORTS          32U
@@ -110,11 +112,15 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
      * - The IRQ top-half write-clears PxIS and records the bits it
      *   consumed in last_is, because the waiter must still observe TFES
      *   after the hardware status register has been acknowledged.
+     * - last_is crosses the IRQ boundary, so it is read and written with
+     *   __atomic acquire/release.  `volatile` alone would order nothing on a
+     *   weakly ordered ISA, and the window is real: the handler can publish
+     *   last_is and wake the submitter while the submitter is still in
+     *   wait_queue_link().
      * - Parked submitters sleep on waiters; the handler collects them
      *   after recording last_is.  Only slot 0 is ever in flight (the
      *   port mutex serializes commands), so one status word suffices. */
-    volatile uint32_t last_is;
-    volatile int irq_seen;
+    uint32_t last_is;
     int irq;
     int irq_registered;
     wait_queue_t waiters;
@@ -126,6 +132,45 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
 
 static ahci_port_t g_ahci_port;
 static int g_ahci_ready;
+
+/*
+ * a20.ahci.poll=1 forces the completion path to stay in bounded polling even
+ * when the controller has a usable interrupt line.  Absent or =0 is the
+ * interrupt path, which is the default because it is the one that does not
+ * charge every command a hardware round trip.
+ *
+ * This is a kernel parameter rather than a build flag on purpose: whether a
+ * machine's PHY/route raises a usable interrupt is a property of that
+ * machine, and one image is expected to run on all of them.  The knob is also
+ * the only way to keep the polling fallback covered by a test -- a fallback
+ * nothing ever selects is a fallback nobody knows still works.
+ */
+static int ahci_poll_requested(void)
+{
+    const char *cmdline = bootargs_get();
+    static const char key[] = "a20.ahci.poll=";
+    /* memcmp(), not strncmp(): this file is also #included verbatim by
+     * kernel/drvmod/examples/ahci.c, and a loadable module may only call
+     * symbols in the kernel's drv_export_table[] -- strncpy/memcmp/strcmp/
+     * strlen are exported (kernel/drvmod/framework.c:313-318) but strncmp is
+     * not, and the loader rejects the package outright on an unresolved
+     * symbol (kernel/drvmod/loader.c:236-243) rather than failing later at
+     * run time.  strncmp() also stops at the token's NUL, so it never read
+     * past tok_end on a short token; memcmp() would, hence the explicit
+     * length check that stands in for that early stop. */
+    const char *p = cmdline;
+    while (p && *p) {
+        const char *tok = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if ((size_t)(p - tok) >= sizeof(key) - 1 &&
+            memcmp(tok, key, sizeof(key) - 1) == 0)
+            return tok[sizeof(key) - 1] >= '1' && tok[sizeof(key) - 1] <= '9';
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
+    return 0;
+}
 
 static volatile void *ahci_reg(uintptr_t base, uint32_t off) {
     return (volatile void *)(base + off);
@@ -173,6 +218,25 @@ static int ahci_start_port(ahci_port_t *port) {
 
 static int ahci_wait_complete(ahci_port_t *port, size_t bytes);
 
+/*
+ * Ring the doorbell for the one command slot this driver uses.
+ *
+ * PxCI is the only thing that makes the HBA act: until slot 0's bit is set,
+ * the command header and table the submitter just filled are inert memory,
+ * the HBA never fetches them, and the drive never sees the FIS.  Both
+ * submit paths below have to end here, and the callers must have pushed the
+ * header/table/PRDT to the device first -- the doorbell is a plain volatile
+ * MMIO store, so it must come last for the fetch to see written memory.
+ *
+ * Omitting it was invisible while ahci.c was compile-verified only: with
+ * PxCI still 0, ahci_wait_complete()'s "nothing outstanding" test was true on
+ * its very first read and every command reported success for work the
+ * controller had never started.
+ */
+static void ahci_issue_slot0(ahci_port_t *port) {
+    ahci_write(port, AHCI_PXCI, 1U);
+}
+
 static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
                        uint16_t sectors, int write, uint64_t dma, size_t bytes) {
     if (port->read_only && (write || command == ATA_CMD_WRITE_DMA_EXT))
@@ -212,6 +276,8 @@ static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
     dma_sync_for_device(port->cmd_list, 1024U);
     dma_sync_for_device(table, sizeof(*table));
     dma_sync_for_device(port->transfer, bytes);
+    ahci_issue_slot0(port);
+    a20_perf_count(A20_PERF_AHCI_COMMANDS);
     return ahci_wait_complete(port, bytes);
 }
 
@@ -258,6 +324,8 @@ static int ahci_submit_nodata(ahci_port_t *port, uint8_t command) {
 
     dma_sync_for_device(port->cmd_list, 1024U);
     dma_sync_for_device(table, sizeof(*table));
+    ahci_issue_slot0(port);
+    a20_perf_count(A20_PERF_AHCI_COMMANDS);
     return ahci_wait_complete(port, 0);
 }
 
@@ -292,16 +360,20 @@ static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
     uint64_t pre_poll_until = start + US_TO_TICKS(AHCI_HYBRID_PRE_POLL_US);
 
     for (;;) {
-        uint32_t is = ahci_read(port, AHCI_PXIS) | port->last_is;
+        uint32_t is = ahci_read(port, AHCI_PXIS) |
+            __atomic_load_n(&port->last_is, __ATOMIC_ACQUIRE);
         if (is & AHCI_PXIS_TFES) {
             ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
-            port->last_is = 0;
+            __atomic_store_n(&port->last_is, 0, __ATOMIC_RELEASE);
+            a20_perf_count(A20_PERF_AHCI_ERRORS);
             return -1;
         }
         if ((ahci_read(port, AHCI_PXCI) & 1U) == 0) {
-            port->last_is = 0;
+            __atomic_store_n(&port->last_is, 0, __ATOMIC_RELEASE);
             if (bytes)
                 dma_sync_for_cpu(port->transfer, bytes);
+            if (!port->irq_registered)
+                a20_perf_count(A20_PERF_AHCI_POLL_COMPLETIONS);
             return 0;
         }
         if (!port->irq_registered) {
@@ -319,6 +391,7 @@ static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
         }
         /* Park until the completion IRQ; the bounded chunk turns a
          * hypothetical missed wake into a re-check instead of a stall. */
+        a20_perf_count(A20_PERF_AHCI_PARK_ROUNDS);
         uint64_t chunk = now + MS_TO_TICKS(AHCI_PARK_CHUNK_MS);
         if (chunk > deadline)
             chunk = deadline;
@@ -330,7 +403,8 @@ static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
          * not sleep. */
         if ((ahci_read(port, AHCI_PXCI) & 1U) == 0 ||
             (ahci_read(port, AHCI_PXIS) & AHCI_PXIS_TFES) ||
-            (port->last_is & AHCI_PXIS_TFES)) {
+            (__atomic_load_n(&port->last_is, __ATOMIC_ACQUIRE) &
+             AHCI_PXIS_TFES)) {
             wait_queue_unlink(&port->waiters, &entry);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
@@ -402,16 +476,27 @@ static int ahci_irq_handler(int irq, void *priv) {
         return 0;
     /* Top-half only: acknowledge and record the status bits, then wake the
      * parked submitter, which re-checks PxCI/last_is itself.  Recording
-     * last_is before the write-clear keeps TFES observable to the waiter. */
+     * last_is before the write-clear keeps TFES observable to the waiter.
+     *
+     * The release store is what makes the recorded bits visible to a waiter
+     * that is woken immediately below: on a weakly ordered ISA the write to
+     * last_is and the subsequent proc_wake_q_flush() are otherwise free to
+     * reach the woken CPU in the other order, and the waiter would re-park
+     * for a completion that already happened.  It is also free to deadlock in
+     * the other direction, which is why the waiter re-checks after linking.
+     */
     uint32_t is = ahci_read(port, AHCI_PXIS);
     if (is) {
-        port->last_is |= is;
+        uint32_t merged = __atomic_load_n(&port->last_is, __ATOMIC_RELAXED) | is;
+        __atomic_store_n(&port->last_is, merged, __ATOMIC_RELEASE);
         ahci_write(port, AHCI_PXIS, is);
-        port->irq_seen = 1;
+        a20_perf_count(A20_PERF_AHCI_IRQ_COMPLETIONS);
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        (void)wait_queue_collect_all(&port->waiters, 0, PROC_WAKE_EVENT,
-                                     &wake_q, NULL);
+        unsigned woken = wait_queue_collect_all(&port->waiters, 0,
+                                                PROC_WAKE_EVENT, &wake_q,
+                                                NULL);
+        a20_perf_add(A20_PERF_AHCI_IRQ_WAKEUPS, woken);
         (void)proc_wake_q_flush(&wake_q);
     }
     return 0;
@@ -462,6 +547,7 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     port->read_only = !!(flags & AHCI_PLATFORM_F_READ_ONLY);
     int preserve_firmware_link =
         !!(flags & AHCI_PLATFORM_F_PRESERVE_FIRMWARE_LINK);
+    int force_poll = ahci_poll_requested();
     mutex_init(&port->lock);
     wait_queue_init(&port->waiters);
 
@@ -527,13 +613,16 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
         return -ENODEV;
     }
 
-    port->cmd_list = dma_alloc_coherent_aligned(1024U, 1024U,
+    port->cmd_list = dma_alloc_coherent_aligned(dev, 1024U, 1024U,
                                                 &port->cmd_list_dma);
-    port->rfis = dma_alloc_coherent_aligned(256U, 256U, &port->rfis_dma);
-    port->tables = dma_alloc_coherent_aligned(
+    port->rfis = dma_alloc_coherent_aligned(dev, 256U, 256U, &port->rfis_dma);
+    port->tables = dma_alloc_coherent_aligned(dev,
         AHCI_CMD_SLOTS * sizeof(*port->tables), 128U, &port->tables_dma);
-    port->transfer = dma_alloc_coherent_aligned(
+    port->transfer = dma_alloc_coherent_aligned(dev,
         AHCI_TRANSFER_BYTES, AHCI_SECTOR_SIZE, &port->transfer_dma);
+    /* A narrowed mask the board cannot satisfy shows up as NULL here, and the
+     * same -ENOMEM the allocation failure reports: the port must not come up
+     * holding lists the HBA cannot address. */
     if (!port->cmd_list || !port->rfis || !port->tables || !port->transfer) {
         ret = -ENOMEM;
         goto fail;
@@ -557,12 +646,24 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
         goto fail;
     }
 
-    if (irq >= 0) {
+    /* Clear whatever IDENTIFY left behind before the handler exists, so the
+     * first unmask cannot deliver a status bit whose only reader is gone. */
+    ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
+    __atomic_store_n(&port->last_is, 0, __ATOMIC_RELEASE);
+
+    if (force_poll) {
+        printf("[AHCI] a20.ahci.poll=1; completion path stays in polling\n");
+    } else if (irq >= 0) {
         if (request_irq((uint32_t)irq, ahci_irq_handler, IRQF_SHARED,
                         port) == 0) {
             port->irq = irq;
             port->irq_registered = 1;
-            /* Unmask device interrupts only with the handler in place. */
+            /* Unmask the port and the host only with the handler in place.
+             * PxIE stays 0 until here: an HBA asserting a shared level line
+             * with nobody clearing its source storms the CPU.  Enabling every
+             * port bit (DPS/DSE/PRDIE/TF...) rather than a narrow set is what
+             * makes the wait independent of which bit a given HBA raises for
+             * which command. */
             ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
             writel(AHCI_GHC_AE | AHCI_GHC_IE,
                    ahci_reg(port->host_regs, AHCI_GHC));
@@ -580,9 +681,10 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     port->block.priv = port;
     dev->drv_priv = port;
     g_ahci_ready = 1;
-    printf("[AHCI] device on port %u, capacity=%lu sectors%s\n",
+    printf("[AHCI] device on port %u, capacity=%lu sectors%s completion=%s\n",
            port->port_no, (unsigned long)port->capacity,
-           port->read_only ? ", writes blocked" : "");
+           port->read_only ? ", writes blocked" : "",
+           port->irq_registered ? "irq" : "poll");
     return 0;
 
 fail:
@@ -620,10 +722,16 @@ static int ahci_remove(device_t *dev) {
         return 0;
     g_ahci_ready = 0;
     /* Mask device interrupts before releasing the handler so a completion
-     * racing the remove cannot wake a torn-down port. */
+     * racing the remove cannot wake a torn-down port.  Dropping GHC.IE
+     * afterwards takes the HBA off the host interrupt line entirely: on a
+     * shared INTx route a controller left asserting with its source masked
+     * keeps the line asserted for whoever shares that vector. */
     ahci_write(port, AHCI_PXIE, 0);
-    if (port->irq_registered)
+    if (port->irq_registered) {
         free_irq((uint32_t)port->irq, port);
+        writel(AHCI_GHC_AE,
+               ahci_reg(port->host_regs, AHCI_GHC));
+    }
     (void)ahci_stop_port(port);
     if (port->transfer) dma_free_coherent_aligned(port->transfer, AHCI_TRANSFER_BYTES, port->transfer_dma);
     if (port->tables) dma_free_coherent_aligned(port->tables, AHCI_CMD_SLOTS * sizeof(*port->tables), port->tables_dma);
