@@ -46,22 +46,21 @@ typedef struct pci_bus_data {
 
 static pci_bus_data_t g_pci_data;
 
+/* Config-space access goes through the arch HAL, which decides between an ECAM
+ * memory window and the legacy 0xCF8/0xCFC port pair once per access by probing
+ * for a host bridge at 00:00.0.
+ *
+ * This used to compute the ECAM address here and read it directly, which made
+ * the legacy path in pci_host.c unreachable: on a machine with no ECAM window at
+ * all (i440fx) every read returned zero, enumeration published one phantom
+ * device per slot, and nothing was ever found.  The arch layer exists precisely
+ * so that question is answered in one place. */
 static uint32_t pci_ecam_read(int bus, int dev, int func, uint32_t reg) {
-    uintptr_t addr = g_pci_data.ecam_base
-        + ((uintptr_t)bus << 20)
-        + ((uintptr_t)dev << 15)
-        + ((uintptr_t)func << 12)
-        + reg;
-    return readl((const volatile void *)addr);
+    return arch_pci_config_read32(bus, dev, func, reg);
 }
 
 static void pci_ecam_write(int bus, int dev, int func, uint32_t reg, uint32_t val) {
-    uintptr_t addr = g_pci_data.ecam_base
-        + ((uintptr_t)bus << 20)
-        + ((uintptr_t)dev << 15)
-        + ((uintptr_t)func << 12)
-        + reg;
-    writel(val, (volatile void *)addr);
+    arch_pci_config_write32(bus, dev, func, reg, val);
 }
 
 typedef struct pci_dev_info {
@@ -766,7 +765,16 @@ static int pci_publish_bdf(int bus, int dev, int func,
 {
         uint32_t id = pci_ecam_read(bus, dev, func, 0);
         uint16_t vendor = (uint16_t)(id & 0xFFFF);
-        if (vendor == 0xFFFF)
+        /* Both all-ones and all-zeros mean "nothing is plugged in here", but
+         * they mean it for different machines.  0xffff is the answer from a
+         * window that decodes the address and finds no device behind it; 0x0000
+         * is the answer from a window that is not there at all, which is what
+         * reading ECAM off a machine with no ECAM (i440fx, say) gives.  Filtering
+         * only 0xffff published one phantom device per slot on such a machine --
+         * 128 of them, all id=0000:0000, none matching a driver -- and the
+         * failure surfaced much later as "no init program found" with nothing
+         * pointing at PCI. */
+        if (vendor == 0xFFFF || vendor == 0x0000)
             return 0;
 
         /* Header type is 0x0E[23:16]; 1 is a PCI-to-PCI bridge.  Decide it
