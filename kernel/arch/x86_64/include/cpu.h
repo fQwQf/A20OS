@@ -275,14 +275,27 @@ static inline void lapic_write(uint32_t reg, uint32_t val) {
     *(volatile uint32_t *)(LAPIC_BASE + reg) = val;
 }
 
-/* IOAPIC helpers */
+/* I/O APIC register window.  Two registers only: writing the index selects what
+ * the read at +0x10 returns.  @base is a kernel-virtual address, so a controller
+ * outside the direct map would need a mapping this inline does not add -- every
+ * MADT entry this kernel accepts is below 4 GiB. */
+static inline uint32_t ioapic_read_at(uintptr_t base, uint32_t reg) {
+    *(volatile uint32_t *)(base + 0x00) = reg;
+    return *(volatile uint32_t *)(base + 0x10);
+}
+static inline void ioapic_write_at(uintptr_t base, uint32_t reg, uint32_t val) {
+    *(volatile uint32_t *)(base + 0x00) = reg;
+    *(volatile uint32_t *)(base + 0x10) = val;
+}
+
+/* Controller 0.  A caller holding a specific GSI must use the lookup instead:
+ * a machine with more than one I/O APIC does not route GSI N through
+ * controller 0. */
 static inline uint32_t ioapic_read(uint32_t reg) {
-    *(volatile uint32_t *)(IOAPIC_BASE + 0x00) = reg;
-    return *(volatile uint32_t *)(IOAPIC_BASE + 0x10);
+    return ioapic_read_at(arch_ioapic_base(0), reg);
 }
 static inline void ioapic_write(uint32_t reg, uint32_t val) {
-    *(volatile uint32_t *)(IOAPIC_BASE + 0x00) = reg;
-    *(volatile uint32_t *)(IOAPIC_BASE + 0x10) = val;
+    ioapic_write_at(arch_ioapic_base(0), reg, val);
 }
 
 
