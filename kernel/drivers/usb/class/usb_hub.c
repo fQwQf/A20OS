@@ -78,8 +78,14 @@ typedef struct usb_hub {
     usb_endpoint_t *sc_ep;        /* status-change endpoint on the hub */
     usb_urb_t       sc_urb;
     uint8_t         sc_buf[HUB_CTRL_BUF_SZ];
+    /* The parent HCD completes this URB from its own interrupt handler as
+     * well as from its process-context poll, while hub_op_poll() reads and
+     * writes the same two flags, so they carry their own lock.  It is the
+     * outermost lock here: hub_sc_arm() reaches the parent HCD under it, and
+     * the parent never takes it back. */
     uint8_t         sc_armed;
     uint8_t         sc_changed;
+    spinlock_t      sc_lock;
 } usb_hub_t;
 
 /* ------------------------------------------------------------------ */
@@ -412,22 +418,46 @@ static int hub_op_abort_slot(usb_hcd_t *hcd, uint8_t token)
 static void hub_sc_complete(usb_urb_t *urb)
 {
     usb_hub_t *hub = (usb_hub_t *)urb->ctx;
-    /* Completion runs from inside the parent controller's event handling, so
-     * it only records that something moved; our own poll does the work. */
+    if (!hub)
+        return;
+    /* Completion runs from inside the parent controller's event handling --
+     * its interrupt handler, its poll, or a synchronous wait on another
+     * endpoint -- so it only records that something moved; our own poll does
+     * the work. */
+    uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
     if (urb->status == 0)
         hub->sc_changed = 1;
     hub->sc_armed = 0;
+    spin_unlock_irqrestore(&hub->sc_lock, flags);
 }
 
 static int hub_sc_arm(usb_hub_t *hub)
 {
-    if (hub->sc_armed || !hub->sc_ep)
+    uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
+    if (hub->sc_armed || !hub->sc_ep) {
+        spin_unlock_irqrestore(&hub->sc_lock, flags);
         return 0;
+    }
+    /* Claim the slot before the submit, not after it.  The completion arrives
+     * from the parent controller -- its IRQ handler or its poll, i.e. another
+     * CPU -- and it clears sc_armed; storing 1 after the submit would overwrite
+     * that clear, leaving hub_op_poll() returning early forever and this hub
+     * permanently deaf to attach/detach.  Going up first makes an early
+     * completion the last writer, which is the order that re-arms. */
+    hub->sc_armed = 1;
+    spin_unlock_irqrestore(&hub->sc_lock, flags);
     hub->sc_urb.buf = hub->sc_buf;
     hub->sc_urb.len = hub->status_bytes;
+    /* Submitted without sc_lock: usb_submit_urb() reaches the parent
+     * controller's lock, and the parent never takes sc_lock back, so the
+     * order is one-way. */
     int r = usb_submit_urb(&hub->sc_urb);
-    if (!r)
-        hub->sc_armed = 1;
+    if (r) {
+        /* Nothing was armed, so give the slot back. */
+        flags = spin_lock_irqsave(&hub->sc_lock);
+        hub->sc_armed = 0;
+        spin_unlock_irqrestore(&hub->sc_lock, flags);
+    }
     return r;
 }
 
@@ -437,10 +467,16 @@ static int hub_op_poll(usb_hcd_t *hcd)
 
     /* The endpoint completes only when the hub has something to report, so
      * re-arming is what turns a status change into a bit we can look at. */
-    if (hub->sc_armed)
+    uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
+    if (hub->sc_armed) {
+        spin_unlock_irqrestore(&hub->sc_lock, flags);
         return 0;
-    if (hub->sc_changed) {
-        hub->sc_changed = 0;
+    }
+    int changed = hub->sc_changed;
+    hub->sc_changed = 0;
+    spin_unlock_irqrestore(&hub->sc_lock, flags);
+
+    if (changed) {
         if (hub_get_status(hub) == 0)
             hub_ack_changes(hub);
     } else if (hub_get_status(hub) != 0) {
@@ -472,6 +508,16 @@ static void hub_free(usb_hub_t *hub)
 {
     if (!hub)
         return;
+    /* The parent controller may still have this URB queued when we are torn
+     * down.  Clearing the callback narrows that window to a completion that
+     * has already read the pointer; it does not close it, because aborting a
+     * queued URB is the parent's job and the parent runs it from the same
+     * event path this completion runs in.  Written under sc_lock so it is a
+     * single store the completion either sees or does not. */
+    uint64_t flags = spin_lock_irqsave(&hub->sc_lock);
+    hub->sc_urb.complete = NULL;
+    hub->sc_urb.ctx = NULL;
+    spin_unlock_irqrestore(&hub->sc_lock, flags);
     if (hub->registered)
         usb_core_unregister_hcd(&hub->hcd);
     kfree(hub->status);
@@ -494,6 +540,7 @@ static int usb_hub_probe(device_t *dev)
     hub->parent_hcd = hub_dev->hcd;
     hub->dev = dev;
     hub->iface = iface;
+    spin_init(&hub->sc_lock);
 
     /* A hub descriptor is a class request, not a standard one: the hub is
      * asked for it with bmRequestType 0xA0 and wValue 0.  Answering it as a
