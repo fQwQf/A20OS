@@ -403,12 +403,17 @@ guest 侧对 FDT 的全部依赖有四处，逐个对着代码看：
 | 需要的东西 | 谁在读 | 缺了会怎样 |
 | --- | --- | --- |
 | 合法 FDT 头 | `fdt.c:194`、`fdt.c:205` | 打印一行告警后回退到板级窗口 |
-| `/memory` 的 `reg` | `riscv64_memory_init()`，`fdt.c:262` | 回退到板级窗口 `0x80000000 .. +16 GiB`（`platform.h:16,19`）——**正好就是我们要的窗口**，所以这条可以不给 |
+| `/memory` 的 `reg` | `riscv64_memory_init()`，`fdt.c:262` | 回退到板级窗口 `0x80000000 .. +16 GiB`（`platform.h:16,19`）——**这条绝不能缺、更不能解析失败**：`hypvm -m` 默认只给 128 MiB，回退值比窗口大 128 倍，guest 按回退值分配就立刻越窗（曾经的 `kfree(magic=0x0)` 就是这条链） |
 | `/cpus` 的 `riscv,isa` 含 `sstc` | `timer.c:30` | guest 改走 SBI `set_timer`（见 §4，这是个必须补的洞） |
 | `/chosen/bootargs` | `arch_bootargs_get()`，`fdt.c:301` | 返回 NULL，命令行参数全丢 |
 
-所以最小 FDT 的必需项其实只有：**合法头部 + 一个 `chosen/bootargs` 节点**，
-内存节点给不给都能跑（回退值正好合适）。`sstc` 给不给决定要不要实现 SBI
+所以最小 FDT 的必需项是：**合法头部 + 内存节点 + 一个 `chosen/bootargs` 节点**。
+内存节点**必须给、而且必须真的解析成功**——回退值 `+16 GiB` 远大于 `hypvm -m`
+给的窗口，guest 拿回退值去分配就会越窗。**当前树的合成 FDT 是解析成功的**（实测
+`[FDT] RAM range 0x80000000..0x88000000 (128 MiB)`、`bootargs='a20.hypguest=1'`，
+`grep -cE 'memory node parse failed|using board window'` = 0）；曾有一版因为合成
+blob 的 4 字节 padding 写错，整个结构块失步、四条属性同时读不到，见
+[03-usage.md §2.3](03-usage.md)。`sstc` 给不给决定要不要实现 SBI
 `set_timer`——建议给，两条都通最省心。FDT 放在哪由装载器决定，但 §7.4 有
 一个硬约束必须满足。
 
@@ -469,10 +474,13 @@ C 代码并能写串口"，打在内存子系统就绪之后的串才顺带证�
 最早的 banner 行。
 
 **PASS 的定义是"guest 到达了自己的 banner"，不是"guest 引导完成"。**
-这轮门禁构建的是 `RAMFS_USER=0` 镜像（`tools/smoke_cases.py:614`），guest 没有块
+这轮门禁构建的是 `RAMFS_USER=0` 镜像（`tools/smoke_cases.py:630`），guest 没有块
 设备、挂不上 rootfs，会死在 `init_kthread` 里——那是真实到达，不是失败。
-**但这条不再是本轮的实际终点**：实测那次 guest 停在自己的 slab 层（§8.3），
-早于 `init_kthread`。这条边界必须写进 gate，否则两件坏事之一必然发生：
+**当前实测的终点正是那里**：`smoke-hyp-a20os` 当前日志（632 行）里 guest 走完
+banner、`[INIT] entering scheduler...`、driver manager，停在
+`[INIT] Cannot open /bin/init: -2` → `init: no init program found` → `KERNEL PANIC`
+→ `HYP_A20OS: PASS`。**更早两轮的终点更靠前**（slab 层的 `kfree`、进调度器时的
+栈页 use-after-free），两个根因都已修（§8.3 第五次）。这条边界必须写进 gate，否则两件坏事之一必然发生：
 
 - 把 `PANIC` 放进 forbid：guest 的 panic 文本与宿主的**逐字节相同**，一条正确
   的运行会被判红；
@@ -486,7 +494,9 @@ verdict 行在宿主活着的时候才写得出来。这条 gate 的 timeout 是
 guest 引导比宿主自举慢好几个数量级。
 
 **guest 在 banner 之后走到哪儿，与判据无关。** 判据只看 marker，不看退出原因。
-三次实测（`.kernel-build/smoke/hyp-a20os-riscv64.log`），三次门禁都 PASS：
+五次实测（前三次是 `.kernel-build/smoke/hyp-a20os-riscv64.log`，第四、五次是
+`hyp-shell-riscv64.log`），五次门禁都 PASS——**但第五次是 guest 真的通了，
+前四次是 marker 与 guest 崩溃同时出现**：
 
 **第一次（日志可读，全文 573 行）**，guest 走到根 ramfs 就绪，然后：
 
@@ -501,8 +511,10 @@ guest 引导比宿主自举慢好几个数量级。
 **`exit=1(shutdown)` 与 `PASS` 同时出现，中间隔着一次 guest 自己的
 `KERNEL PANIC`。** `shutdown` 只说明 guest 发了一次 SBI SRST ecall
 （`hyp_vcpu.c:413-418`），那次是 panic 路径在打完堆栈之后发的。`[SLAB BUG]`
-是 **guest 自己 slab 层报的**（guest 用的是同一棵树的 slab 代码），本片没有定位
-根因，也没有证据说它与 hypervisor 有关。同一个日志里还有一条对照：
+是 **guest 自己 slab 层报的**（guest 用的是同一棵树的 slab 代码）。**当时本片写的是
+"没有定位根因"，现在已定位**：合成 FDT 的 4 字节 padding 失步 → guest 回退板级
+16 GiB 窗口 → 越窗分配 → RAZ 喂零 → `kfree(magic=0x0)`，已修，见 §8.3 第五次。
+同一个日志里还有一条对照：
 `292: [BUS] virtio-mmio: found 0 devices`——guest 在自己的 stage-1 里数到了两个
 virtio-mmio（宿主那次是 `:103` 的 2 个），但设备模型给的是 RAZ/WI 计数，不是真设备。
 
@@ -513,7 +525,8 @@ virtio-mmio（宿主那次是 `:103` 的 2 个），但设备模型给的是 RAZ
 `kernel/hyp/hyp_vcpu.c` 两处在途 `DBG` 打印把日志撑到了 432,618 行。
 **"这次没看见"不等于"这次没有"。**
 
-**第三次（去掉调试打印后，当前树，PASS，日志可读）**：**和第一次停在同一个地方。**
+**第三次（去掉调试打印后，那一轮的树，PASS，日志 573 行可读）**：**和第一次停在
+同一个地方。**
 `[RAMFS] Initialized, root inode 0` 之后紧跟
 
 ```
@@ -522,8 +535,8 @@ virtio-mmio（宿主那次是 `:103` 的 2 个），但设备模型给的是 RAZ
 [FRAME-TRACE] releases of pfn=4193312:
 ```
 
-**所以第二次的自旋是那两条 `DBG` 造成的假象，guest 的真实终点一直是
-`kfree` 一个 RAMFS 指针。** `flags=0x1 refcount=1` 说明那一页在 buddy 层仍是"已分配"
+**所以第二次的自旋是那两条 `DBG` 造成的假象；到第三次为止，guest 的真实终点是
+`kfree` 一个 RAMFS 指针**（第四次已经不是了，见下面那条引注）。 `flags=0x1 refcount=1` 说明那一页在 buddy 层仍是"已分配"
 的——被 `kfree` 的地址落在 `0xffffffc47f...`，正是 guest 的 RAMFS 区间，ramfs 把
 自己持有的页当普通页还了回去。**这不是 stage-2 的问题**：解码零缺口
 （`grep -c "undecodable guest access"` = 0）、guest 一路走到 `[INIT] USB devices
@@ -538,17 +551,41 @@ scanned`（17840 个 guest console 字节）、该走的二级页错配都走完
 读到最后一行之上最近的 `[PANIC]` / `[SLAB BUG]` / `trap loop`，而不是读 `PASS`。
 逐行解读见 [03-usage.md §3.1-3.3](03-usage.md)。
 
-> **上面这一段的"真实终点"已经被本轮推翻了，别照抄。** 那是**上一棵树**的终点
-> （`kfree` 一个 RAMFS 指针）。本轮 `make smoke-hyp-shell` 的实测里
+> **上面这一段的"真实终点"已经被推翻了两轮，别照抄。** 第一次的终点（`kfree`
+> 一个 RAMFS 指针）被第四次推翻；第四次的终点（内核栈页 use-after-free）被第五次
+> 推翻。第四次的记录保留如下，**它是历史，不是现状**：那一轮
 > `.kernel-build/smoke/hyp-shell-riscv64.log` **一次 `[SLAB BUG]` 都没有**
 > （`grep -c 'SLAB BUG'` = 0），guest 走得更远——打完 banner、走到
 > `[INIT] entering scheduler...`——然后死在**内核栈页的 use-after-free**
 > （`[TRAP] pfn 32638 sits on buddy free list — use-after-free of stack page`，
-> `[PANIC] task: pid=1 name=kthread`）。**上面那句"这不是 stage-2 的问题"仍然成立**
-> （解码零缺口），但"guest 的真实终点是那个 kfree"已经不成立。
+> `[PANIC] task: pid=1 name=kthread`）。**"这不是 stage-2 的问题"仍然成立**
+> （解码零缺口），但"guest 的真实终点是那个 kfree"当时就不成立了。
+>
+> **第四次（622 行日志，`smoke-hyp-a20os` 与 `smoke-hyp-shell` 同形）**：
+> `554: [RAMFS] Initialized` → VFS / 四个 `DRVMOD` / LWIP → `578: [INIT] System ready`
+> → `605: Welcome to A20OS!` → `607: [INIT] entering scheduler...` → `608` 起
+> `[TRAP] corrupted kernel sp` → `KERNEL PANIC` → `[PANIC] attempting firmware poweroff`
+> → `HYP_A20OS: exit=1(shutdown) … console_bytes=20926` → `HYP_A20OS: PASS`。
+> `grep -c 'SLAB BUG'` = 0、`grep -c 'trap loop'` = 0、
+> `grep -c "undecodable guest access"` = 0。逐行解读见
+> [03-usage.md §3.3 第四次](03-usage.md)。
+>
+> **第五次（当前，`make smoke-hyp-shell` 绿，同路径日志现为 641 行）**：guest
+> 走完上面全部步骤**再往下**——`[INIT] user init created: pid=3` →
+> `[init] fork=0, calling execve mksh` → 提示符 → 门禁敲入的
+> `echo AAAABBBBCCCC` / `echo DDEEEEEEFFFF` 两个 token 原样回显（日志 630-633 行）
+> → `exit` → `[init] shutting down`（635 行）→
+> `HYPVM: exit=1(shutdown) … console_bytes=21705 rx_bytes=41` → `HYPVM: PASS`
+> （640-641 行）→ 宿主 `poweroff`。`grep -cE 'SLAB BUG|KERNEL PANIC'` = 0、
+> `grep -cE 'memory node parse failed|using board window'` = 0、
+> `[FDT] RAM range 0x80000000..0x88000000 (128 MiB)`（263 行）、
+> `[FDT] bootargs='a20.hypguest=1'`（280 行）。两个根因（合成 FDT 的 4 字节
+> padding 失步、guest 入口帧 `mstatus.FS=Off` 打穿栈）与修法见
+> [00-design.md 的门禁表](00-design.md)；逐行对账见
+> [03-usage.md §3.3 第五次](03-usage.md)。
 
 
-**另有一条门禁 `smoke-hyp-console-p0`（`tools/smoke_cases.py:563-611`）**，它验的
+**另有一条门禁 `smoke-hyp-console-p0`（`tools/smoke_cases.py:572-611`）**，它验的
 不是这个 marker，而是本轮新增的 guest 控制台输入（契约 v3）：往 QEMU 的 stdin 里
 按 `sendline_seq` 的顺序送三步（提示符 → `hyp_test echo` → guest up → 三个字节 →
 提示符 → `poweroff`），期望日志里出现独立一行 `HYP`（guest 的回显）与
@@ -567,24 +604,27 @@ scanned`（17840 个 guest console 字节）、该走的二级页错配都走完
 **第三条门禁 `smoke-hyp-console`（`tools/smoke_cases.py:742-808`）** 是端到端那条：
 用 `-k /bin/boot/guest-kernel-ramfs.elf` 引导 `RAMFS_USER=1` 的 guest 内核
 （userland 直接链进镜像，因此背后没有块设备也有 `/bin/init` 可 exec），并要求
-`HYPVM:` 行上的 `rx_bytes` 非零。**实跑 PASS，`rx_bytes=15`**——正好是
-`echo roundtrip` 那 15 个字节。`rx_bytes` 是设备模型自己的入口计数器，只在
+`HYPVM:` 行上的 `rx_bytes` 非零。**实跑 PASS，`rx_bytes=20`**——`echo roundtrip` 的
+15 个字节加 `exit\n` 的 5 个。`rx_bytes` 是设备模型自己的入口计数器，只在
 `hyp_dev_pump_rx()` 里、只在真的从 `uart_try_getc()` 拿到字节时递增，而 pump 只在
-guest trap 上跑，所以宿主伪造不了它。**这一条不声称 guest 把它们读回来了**：那需要
-guest 侧 `uart_rx_is_polled` 的降级，不在本片；真正的往返在
-`smoke-hyp-console-p0` 上验，在设备边界上。
+guest trap 上跑，所以宿主伪造不了它。**这条门禁的判据本身不声称 guest 把它们读回来
+了**——虽然当前实跑里 guest 确实走到了 mksh 并把 `roundtrip` 打了出来（日志
+630-631 行），判据没变；要断言"guest 读了"看第四条。
 
 **第四条门禁 `smoke-hyp-shell`（`tools/smoke_cases.py:810-962`，
 `tools/targets-smoke.mk:202-213`）** 是"guest 能进 shell 并且能交互"那条目标的
-验收点，第三条覆盖不到的那一半就是它。**实跑 FAIL，如实记红。** 它在第三条的
+验收点，第三条覆盖不到的那一半就是它。**实跑 PASS（当前）。** 它在第三条的
 `rx_bytes` 之外**另外**要求：guest 走到 mksh 提示符、执行门禁敲进去的
 `echo AAAABBBBCCCC` 与 `echo DDEEEEEEFFFF`、把两个 token 打印回来、回到提示符，
 最后由 `exit` 触发 `user/init.c:264-283` 的 `do_shutdown()` 收尾。
 **"字节进了环"和"guest 读了"是两条分开的断言**——第三条只断言了第一条。
-本轮实测：`rx_bytes=18`（泵是通的），但两个 token 一次都没出现，guest 死在
-`[INIT] entering scheduler...` 的内核栈页 use-after-free 上、连 `/bin/init` 都没
-exec。逐行对账见 [03-usage.md §3.4.2](03-usage.md)，路线图上的状态见
-[02-roadmap.md](02-roadmap.md)。
+当前实测：`rx_bytes=41`（两条 `echo` 加 `exit` 共 18+19+4 字节），两个 token
+都在 guest 区原样回显，`grep -cE 'SLAB BUG|KERNEL PANIC'` = 0（日志 630-641 行，
+见上文"第五次"）。**它此前是红的**，红点与根因也见"第五次"；门禁本身一度还会
+因为死锁而假红（健康 guest 敲 `exit` 前不自退，原 steps 等 `HYPVM: PASS` 才发
+`poweroff`，实测 300 s 超时），已把 guest `exit` 加为独立一步
+（`tools/smoke_cases.py`）。逐行对账见 [03-usage.md §3.4.2](03-usage.md)，
+路线图上的状态见 [02-roadmap.md](02-roadmap.md)。
 
 > **命令行入口的行前缀是 `HYPVM:`，不是 `HYP_A20OS:`。** 本节与
 > `tools/smoke_cases.py` 记的是硬编码装载器 `user/cmds/core/hyp_boot.c` 的
@@ -680,9 +720,12 @@ VMO 级。
    （`Makefile:1238` 的 `RAMFS_USER_PROGRAMS`、`kernel/fs/rootfs_user.c:31-41`，
    由 `kernel/fs/diskfs/ramfs.c:1285-1301` 铺开并软链 `/bin/sh -> /bin/mksh`），
    **那种 guest 不需要块设备也能起 init**。门禁 `smoke-hyp-a20os` 的构建变量是
-   `RAMFS_USER=0`（`tools/smoke_cases.py:614`），所以对门禁而言原话成立。
-   **未验证**：本片没有构建也没有运行过 `RAMFS_USER=1` 的 guest。
-   真 rootfs（读镜像上的文件、持久写）仍然要 virtio-blk，属于
+   `RAMFS_USER=0`（`tools/smoke_cases.py:630`），所以对门禁而言原话成立。
+   **`RAMFS_USER=1` 的 guest 本轮已经构建并跑过**：`make smoke-hyp-console` 与
+   `make smoke-hyp-shell` boot 的就是它（日志第 227 行
+   `HYPVM: guest=/bin/boot/guest-kernel-ramfs.elf`），它确实不需要块设备就走到了
+   banner，**并且 `smoke-hyp-shell` 绿了——它走到了 mksh、执行命令、`exit` 收尾**
+   （§8.3 第五次）。真 rootfs（读镜像上的文件、持久写）仍然要 virtio-blk，属于
    [02-roadmap.md](02-roadmap.md)。**guest 的 virtio-blk 是内核内驱动**——
    `kernel/drvmod/examples/virtio_blk.c` 只是 `#include` 了
    `kernel/drivers/block/virtio_blk.c` 的 16 行注册壳
@@ -750,13 +793,16 @@ FDT（`hypvm.c:300`），并在它与镜像重叠时报错而不是硬塞。默�
 **guest** 控制台字节上匹配，所以宿主自己那行同名 banner 顶不上，见 §8.2），以及
 `console_bytes` 大于 marker 长度（排除"只打到开头"的退化命中）。**`exit=` 与 PASS
 同时出现不构成矛盾，这一点本轮又验证了一遍**：实测那次是
-`exit=1(shutdown)`，而它来自 guest 自己的 `kfree` panic 之后的 SBI SRST ecall
-（§8.3）。所以"`exit=2(fault)` 与 PASS 同时出现是预期的"这句话**已被实测结果取代**——
+`exit=1(shutdown)`，而它来自 guest panic 之后的 SBI SRST ecall
+（本轮第一次是 `kfree`/`[SLAB BUG]`，第四次是内核栈页 use-after-free，§8.3）。所以"`exit=2(fault)` 与 PASS 同时出现是预期的"这句话**已被实测结果取代**——
 换成更强的说法：**任何 `exit=` 值与 PASS 同时出现都是预期的**，判据只看 marker。
-"guest 没有块设备、挂不上 rootfs"这条边界也仍然成立，但**它不再是本轮 guest 的
-终点**：门禁构建的是 `RAMFS_USER=0` 镜像（`tools/smoke_cases.py:614` 只传
-`ARCH=riscv64 ABI=linux BRINGUP=0`），而本轮 guest 停在自己的 slab 层，早于
-`init_kthread`。块设备与 `RAMFS_USER=1` 那条替代路的完整拆解见
+"guest 没有块设备、挂不上 rootfs"这条边界也仍然成立，**而且它就是当前
+`smoke-hyp-a20os` 的实测终点**：门禁构建的是 `RAMFS_USER=0` 镜像
+（`tools/smoke_cases.py:630` 只传 `ARCH=riscv64 ABI=linux BRINGUP=0`），
+guest 走到 `init_kthread` 后 `panic("init: no init program found")`（当前日志
+622-625 行）。**更早几轮 guest 还没走到那里就停了**（slab 层 `kfree`、进调度器
+时的栈页 use-after-free），两个根因都已修（§8.3 第五次）。块设备与
+`RAMFS_USER=1` 那条替代路的完整拆解见
 [03-usage.md §4.3](03-usage.md) 与 [02-roadmap.md §4](02-roadmap.md)。
 `hyp_boot` 的三行字面输出被 `smoke-hyp-a20os` 按字面匹配，所以它一个字都没改；
 `hypvm` 的 PASS 行带上窗口大小，正是为了让门禁能分辨两次不同参数的运行。

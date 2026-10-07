@@ -16,6 +16,14 @@
 #include "envelope_abi.h"
 #define SYS_a20_channel_pair    900
 #define SYS_io_uring_setup      425
+#define SYS_hyp_vm_create       907
+#define SYS_hyp_vm_load         908
+#define SYS_hyp_vcpu_create     909
+#define SYS_hyp_vcpu_run        910
+#define SYS_hyp_vm_destroy      911
+#define SYS_hyp_vcpu_set_boot   912
+#define SYS_hyp_vm_set_marker   913
+#define SYS_hyp_vm_status       914
 
 
 
@@ -269,6 +277,41 @@ static int t9_net_data_plane(long env_id)
     return 0;
 }
 
+/* The hypervisor interface controls host-level guest execution and currently
+ * has no envelope delegation model.  Every entry point must reject an
+ * enveloped caller before argument or handle validation (which also makes
+ * this test independent of the host CPU's H-extension support). */
+static int t10_hyp_control_deny(long env_id)
+{
+    if (env_enter(env_id) < 0)
+        die(101);
+    if (expect_errno(syscall(SYS_hyp_vm_create, 0), EPERM,
+                     "hyp vm create"))
+        die(102);
+    if (expect_errno(syscall(SYS_hyp_vm_load, 0, 0, 0, 0), EPERM,
+                     "hyp vm load"))
+        die(103);
+    if (expect_errno(syscall(SYS_hyp_vcpu_create, 0, 0), EPERM,
+                     "hyp vcpu create"))
+        die(104);
+    if (expect_errno(syscall(SYS_hyp_vcpu_run, 0), EPERM,
+                     "hyp vcpu run"))
+        die(105);
+    if (expect_errno(syscall(SYS_hyp_vm_destroy, 0), EPERM,
+                     "hyp vm destroy"))
+        die(106);
+    if (expect_errno(syscall(SYS_hyp_vcpu_set_boot, 0, 0, 0), EPERM,
+                     "hyp vcpu set boot"))
+        die(107);
+    if (expect_errno(syscall(SYS_hyp_vm_set_marker, 0, 0), EPERM,
+                     "hyp vm set marker"))
+        die(108);
+    if (expect_errno(syscall(SYS_hyp_vm_status, 0, 0), EPERM,
+                     "hyp vm status"))
+        die(109);
+    return 0;
+}
+
 int main(void)
 {
     printf("ENVELOPE_SMOKE: start\n");
@@ -308,25 +351,25 @@ int main(void)
             return 1;
         }
 
-    int (*scenarios[8])(long) = {
+    int (*scenarios[9])(long) = {
         t1_functional, t2_type_deny, t3_rights_deny,
         t4_op_budget, t5_data_budget, t6_expiry, t8_reopen,
-        t9_net_data_plane,
+        t9_net_data_plane, t10_hyp_control_deny,
     };
-    const char *names[8] = {
+    const char *names[9] = {
         "functional", "type-deny", "rights-deny",
         "op-budget", "data-budget", "expiry", "reopen-upgrade",
-        "net-data-plane",
+        "net-data-plane", "hyp-control-deny",
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 9; i++) {
         pid_t c = fork();
         if (c < 0) {
             printf("ENVELOPE_SMOKE: fork failed\n");
             return 1;
         }
         if (c == 0)
-            exit(scenarios[i](ids[i]));
+            exit(scenarios[i](ids[i < 8 ? i : 0]));
         int st = 0;
         waitpid(c, &st, 0);
         if (WIFEXITED(st) && WEXITSTATUS(st) == 0)

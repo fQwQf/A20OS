@@ -84,6 +84,16 @@ typedef struct hyp_vm {
     uint32_t  rx_head;      /* producer: next slot to write */
     uint32_t  rx_tail;      /* consumer: next slot to read  */
     uint64_t  rx_bytes;     /* host bytes handed to this guest, lifetime */
+
+    /* ---- v4: out-of-window accounting ----
+     * Appended on the same terms as every block above: nothing pinned by
+     * hyp_vcpu_asm.S moves.  1 once this VM has printed its "above RAM
+     * window" line: the first GPA past ram_base+ram_size is already the whole
+     * story -- a guest allocating memory it was never given -- so it gets one
+     * dedicated line immediately instead of the RAZ path's every-4096th hit.
+     * Touched only from the guest trap path that is running this VM, with
+     * __atomic ops so a later reader does not have to know that. */
+    int       above_window_logged;
 } hyp_vm_t;
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
