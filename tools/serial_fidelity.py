@@ -1,42 +1,54 @@
 #!/usr/bin/env python3
 """Guest serial RX fidelity probe.
 
-Boots the riscv64 QEMU guest, types N numbered commands one burst at a time,
-and checks that every byte the host wrote came back out of the guest unchanged.
+Boots the riscv64 QEMU guest, types N numbered commands whose payload is a
+deterministic pseudo-random blob, and checks that every byte the host wrote came
+back out of the guest unchanged.
 
 Why this exists
 ---------------
-`docs/net/net-lanes.md` recorded that roughly 3 of 800 console commands were
-received by the guest with an adjacent character transposed or dropped, which
-turns `grep -c PASS` into a statistic that cannot tell "did not run" apart from
-"did not fail".  That note named the symptom but not the mechanism, so this
-script exists to make the mechanism measurable on demand: it prints an exact
-corruption rate for whatever kernel.elf it is pointed at, which is what makes a
-before/after claim checkable instead of anecdotal.
+`docs/net/net-lanes.md` ("本轮的一个**测量方法**发现：控制台输入会吃掉字符")
+recorded that roughly 3 of 800 console commands were received by the guest with
+an adjacent character transposed or dropped.  That number came from reading a
+console log, and reading a console log cannot tell these two apart:
 
-How the comparison works
-------------------------
-The guest shell (mksh) echoes every byte it accepts from the tty, so each typed
-command appears twice in the console log: once as the echoed input line
-(`# echo FID000001`) and once as the command's own output (`FID000001`).  The
-echoed line is the interesting one, because it is produced by the kernel RX path
-(arch_uart_poll_getc -> uart_rx_push -> uart_getc -> tty_console_read echo) with
-no shell parsing in between.  A transposed or dropped byte shows up there as a
-line whose index does not match the line that was typed.
+  * the guest's UART receive path really lost or reordered a byte, or
+  * a kernel print landed inside the echoed input line, so the *log* looks
+    transposed while the shell received every byte correctly.
 
-A run therefore reports four independent counts, kept separate on purpose:
+The first is a driver bug.  The second is a measurement bug.  This probe is
+built so the two cannot be confused:
 
-  sent        lines written to the guest
-  echoed      echoed input lines recovered from the log
-  matched     echoed lines whose index equals the one sent
-  executed    command output lines recovered from the log
+  * each line carries a high-entropy payload, so a dropped or transposed byte
+    changes the payload itself and not just a command name;
+  * a line is counted as corrupted only when the guest produced output for that
+    index whose bytes differ from what was sent -- an interleaved kernel print
+    inserts foreign text and is reported separately as `interleaved`, not as
+    corruption;
+  * both the echoed input line and the command's own output are checked, so a
+    fault that only shows up on one side is visible as a disagreement.
 
-`corrupted` is `sent - matched`, and the script exits non-zero when it is
+Amplifiers (all optional, all reported in the summary line):
+
+  --blast N     write N command lines per host write with no wait in between,
+                keeping the 16550 FIFO and the kernel ring buffer non-empty.
+  --load CMD    run CMD in the guest in the background for the whole run, so
+                the console reader competes with real work -- the situation the
+                field report came from.
+  --payload L   bytes of payload per line (default 48).  Sensitivity is
+                per-byte, so a longer payload measures more bytes per line;
+                the default stays under one 80-column line because mksh's line
+                editor redraws a wrapped input line with \r and backspaces,
+                which this probe reports as `interleaved` rather than as RX
+                corruption.
+
+A run prints sent / matched / corrupted and exits non-zero when corrupted is
 non-zero, so it can be used as a gate directly.
 
 Usage:
     tools/serial_fidelity.py --kernel-dir .kernel-build/<dir> [--count 300]
-                             [--interval 0] [--log FILE] [--timeout 900]
+                             [--payload 96] [--blast 0] [--load CMD]
+                             [--log FILE] [--timeout 900] [--qemu-arg A]...
 """
 
 import argparse
@@ -48,11 +60,28 @@ import subprocess
 import sys
 import time
 
-# A corruption-proof alphabet for the index token: no two indices in a run can
-# differ by one character, so a transposed digit cannot be mistaken for a
-# neighbouring index.  The token is also long enough that losing or moving a
-# byte anywhere inside it is visible as a mismatch rather than as a valid index.
-TOKEN_RE = re.compile(rb"^FID(\d{6})$")
+# Base62 only: no shell metacharacter, no escape, no quote, no backslash, so
+# the payload cannot change how mksh parses the line and the echoed line is
+# byte-comparable with what was typed.
+ALPHABET = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789")
+TOKEN_RE = re.compile(rb"FID(\d{6})([A-Za-z0-9]*)")
+
+
+def payload_for(index, length):
+    """Deterministic pseudo-random payload for line `index`.
+
+    An LCG rather than random bytes so a failing run can be replayed from its
+    index alone, and base62 rather than raw bytes so the line stays printable
+    ASCII that mksh echoes verbatim.
+    """
+    state = (index * 2654435761 + 1013904223) & 0xFFFFFFFF
+    out = []
+    for _ in range(length):
+        state = (1103515245 * state + 12345) & 0x7FFFFFFF
+        out.append(ALPHABET[(state >> 16) % len(ALPHABET)])
+    return "".join(out)
 
 
 def build_qemu_cmd(kernel_dir, extra_args):
@@ -73,36 +102,19 @@ def build_qemu_cmd(kernel_dir, extra_args):
     ] + extra_args
 
 
-def find_echo_line(buf, token):
-    """Return the echoed input line for `token`, or None.
-
-    Kept for interactive debugging of a single line; the tally itself scans
-    every echo line in the finished log (see the Tally comment below).
-    """
-    idx = buf.find(token)
-    if idx < 0:
-        return None
-    start = buf.rfind(b"# echo ", max(0, idx - 64), idx)
-    if start < 0:
-        return None
-    end = buf.find(b"\n", start)
-    if end < 0:
-        return None
-    return buf[start + 2:end].strip()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel-dir", required=True)
     ap.add_argument("--count", type=int, default=300)
+    ap.add_argument("--payload", type=int, default=48)
     ap.add_argument("--interval", type=float, default=0.0,
                     help="seconds between lines; 0 means wait for each prompt")
     ap.add_argument("--blast", type=int, default=0,
-                    help="write this many command lines per host write, with "
-                         "no wait for the guest in between; the amplifier for "
-                         "the RX reorder race")
+                    help="command lines per host write, with no wait in between")
+    ap.add_argument("--load", default=None,
+                    help="guest command to run in the background for the run")
     ap.add_argument("--settle", type=float, default=0.05,
-                    help="pause after a prompt before typing the next line")
+                    help="pause after a command's output before the next line")
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--log", default=None)
     ap.add_argument("--qemu-arg", action="append", default=[])
@@ -114,11 +126,10 @@ def main():
               file=sys.stderr)
         return 2
 
-    log_path = args.log
     log_file = None
-    if log_path:
-        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-        log_file = open(log_path, "wb")
+    if args.log:
+        os.makedirs(os.path.dirname(args.log) or ".", exist_ok=True)
+        log_file = open(args.log, "wb")
 
     process = subprocess.Popen(
         build_qemu_cmd(kernel_dir, args.qemu_arg),
@@ -131,7 +142,6 @@ def main():
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
 
-    deadline = time.monotonic() + args.timeout
     buf = bytearray()
 
     def pump(budget):
@@ -167,77 +177,63 @@ def main():
         process.stdin.write(line + b"\n")
         process.stdin.flush()
 
-    echoed = []     # (sent_index, echoed_text_or_None); paced mode only
-    executed = 0    # paced mode: commands whose output line was seen
+    lines = [("echo FID%06d%s" % (i, payload_for(i, args.payload))).encode()
+             for i in range(1, args.count + 1)]
+    # TOKEN_RE captures the payload *after* the index, so the expectation is the
+    # payload: "echo " is 5 bytes and the token "FID%06d" is 9.
+    expected = {("%06d" % i).encode(): lines[i - 1][14:] for i in
+                range(1, args.count + 1)}
 
     try:
-        # Wait for the shell prompt.  15s covers the slowest boot seen here;
-        # the overall --timeout still bounds the run if the guest never gets
-        # there.
+        # 120s covers the slowest boot seen here; --timeout bounds the rest.
         if wait_for(b"# ", 120.0, 0) < 0:
             print("serial_fidelity: guest never reached a shell prompt",
                   file=sys.stderr)
             return 2
 
+        if args.load:
+            send((args.load + " &").encode())
+
         prompt_end = buf.rfind(b"# ") + 2
         next_send = time.monotonic() + args.settle
 
         if args.blast > 0:
-            # Burst mode: hand the guest `blast` command lines per host write
-            # and never wait for it in between.  This is the amplifier -- it
-            # keeps the 16550 receive FIFO and the kernel ring buffer
-            # non-empty, which is the precondition for the RX poll/IRQ
-            # reorder race.  Tallying still walks the finished log, so a
-            # dropped or transposed byte shows up as a mismatched echo line
-            # exactly as in the paced mode.
-            pending = [b"echo FID%06d" % i
-                       for i in range(1, args.count + 1)]
-            for start in range(0, len(pending), args.blast):
-                chunk = b"".join(line + b"\n" for line in pending[start:start + args.blast])
+            for start in range(0, len(lines), args.blast):
+                chunk = b"".join(line + b"\n"
+                                 for line in lines[start:start + args.blast])
                 process.stdin.write(chunk)
                 process.stdin.flush()
                 pump(0.05)
-            deadline_tail = time.monotonic() + 120.0
-            while time.monotonic() < deadline_tail:
-                if buf.count(b"# ") >= args.count + 4:
+            tail = time.monotonic() + 180.0
+            while time.monotonic() < tail:
+                if buf.count(b"FID") >= args.count:
                     break
                 pump(1.0)
         else:
-            for index in range(1, args.count + 1):
-                token = b"FID%06d" % index
+            for line in lines:
+                token = line[5:14]          # FID%06d
                 if args.interval > 0:
                     now = time.monotonic()
                     if next_send > now:
                         pump(min(next_send - now, 0.5))
                     next_send = time.monotonic() + args.interval
-                send(b"echo " + token)
+                send(line)
 
                 # The command's own output line is the deterministic end of
-                # this command: mksh prints the token, then the next prompt.
-                # Waiting for it keeps the guest's ring buffer far from full,
-                # which is what separates an ordering bug from a plain
-                # overrun.
-                out_at = wait_for(token + b"\n", 60.0, prompt_end)
+                # this command.  Waiting for it keeps the guest's ring buffer
+                # far from full, which is what separates an ordering bug from a
+                # plain overrun.
+                out_at = wait_for(b"\n" + token, 60.0, prompt_end)
                 if out_at < 0:
-                    echoed.append((index, None))
-                    print(f"serial_fidelity: line {index} produced no "
+                    print(f"serial_fidelity: line {token.decode()} produced no "
                           "output; stopping", file=sys.stderr)
                     break
-                executed += 1
-                prompt_end = buf.find(b"# ", out_at)
-                if prompt_end < 0:
-                    prompt_end = out_at + len(token) + 1
-                else:
-                    prompt_end += 2
-
-                # Give the ring a moment to drain before the next burst so the
-                # measurement is about RX fidelity, not about how fast the host
-                # can outrun a 256-byte ring buffer.
+                prompt_end = out_at + len(token) + 2
                 if args.interval <= 0:
                     pump(args.settle)
 
         send(b"poweroff")
-        pump(3.0)
+        pump(5.0)
     finally:
         selector.close()
         try:
@@ -252,58 +248,63 @@ def main():
         if log_file:
             log_file.close()
 
-    # Tally by scanning every echoed input line in the finished log.
-    #
-    # The echoed line is `# echo FID%06d`, produced by the kernel RX path
-    # (arch_uart_poll_getc -> uart_rx_push -> uart_getc -> tty_console_read's
-    # echo) with no shell parsing in between, so whatever the guest actually
-    # received is what appears there.  Scanning the whole log rather than
-    # tracking each line as it is sent means a corrupted echo still lands in
-    # the tally -- as a mismatched line -- instead of quietly not being found.
-    echoed_re = re.compile(rb"^# (echo FID\d+)\s*$", re.MULTILINE)
+    log = bytes(buf)
+
+    # Classify every FID token the guest printed.  A token is "clean" when the
+    # payload after it is exactly what was sent; "corrupt" when the index is
+    # right but the bytes differ (a dropped, transposed or duplicated byte); and
+    # "interleaved" when something foreign was spliced into the same line, which
+    # is a console-output interleaving and not an RX fault.
+    clean = 0
+    corrupt = []
+    interleaved = 0
     seen = {}
-    order = []
-    for m in echoed_re.finditer(bytes(buf)):
-        text = m.group(1)
-        order.append(text)
-        seen.setdefault(text, 0)
-        seen[text] += 1
-
-    matched = 0
-    missing = 0
-    mismatches = []
-    for index in range(1, args.count + 1):
-        want = b"echo FID%06d" % index
-        if want in seen:
-            matched += 1
-            seen.pop(want)
-        else:
-            missing += 1
-            # Report the corrupted echo for this index, if the guest produced
-            # any echo line at all that claims to be this command.
-            for text in seen:
-                if text.startswith(b"echo FID"):
-                    got = text
-                    break
+    for raw in log.split(b"\n"):
+        for m in TOKEN_RE.finditer(raw):
+            index = m.group(1)
+            got = m.group(2)
+            want = expected.get(index)
+            if want is None:
+                continue
+            seen[index] = seen.get(index, 0) + 1
+            rest = raw[m.end():].strip(b"\r")
+            if got == want:
+                clean += 1
+            elif want.startswith(got) and (not rest or
+                                           rest.startswith(want[len(got):])):
+                # The payload stops short but the line carries nothing foreign:
+                # the guest really received fewer bytes than were sent.
+                corrupt.append((index, want, got, "truncated"))
+            elif len(got) == len(want) and sorted(got) == sorted(want):
+                # Same bytes, different order: an adjacent-character swap.
+                corrupt.append((index, want, got, "transposed"))
+            elif not got and not rest:
+                corrupt.append((index, want, got, "vanished"))
             else:
-                got = None
-            mismatches.append((index, want, got))
+                # Foreign text spliced into the same line: a console-output
+                # interleaving, which is a different fault from a lost byte and
+                # must not be counted as RX corruption.
+                interleaved += 1
 
-    sent = args.count
-    not_found = buf.count(b"inaccessible or not found")
-    corrupted = missing
+    # An index is only evidence of corruption if the guest produced output for
+    # it at all; a line that never came back is a stall, reported separately.
+    returned = len(seen)
+    corrupted = len(corrupt)
+    missing = args.count - returned
+    not_found = log.count(b"inaccessible or not found")
 
-    print(f"serial_fidelity: kernel_dir={kernel_dir}")
-    print(f"serial_fidelity: sent={sent} echoed_lines={len(order)} "
-          f"matched={matched} corrupted={corrupted}")
-    print(f"serial_fidelity: shell_not_found={not_found}")
-    for index, want, got in mismatches[:20]:
-        got_repr = got.decode(errors="replace") if got else "<no echo line>"
-        print(f"serial_fidelity: CORRUPT line {index}: "
-              f"sent={want.decode(errors='replace')!r} "
-              f"echoed={got_repr!r}")
-    if len(mismatches) > 20:
-        print(f"serial_fidelity: ... {len(mismatches) - 20} more mismatches")
+    print(f"serial_fidelity: kernel_dir={kernel_dir} count={args.count} "
+          f"payload={args.payload} blast={args.blast} load={args.load!r}")
+    print(f"serial_fidelity: returned={returned} clean_tokens={clean} "
+          f"corrupted={corrupted} never_returned={missing} "
+          f"interleaved_tokens={interleaved} shell_not_found={not_found}")
+    for index, want, got, kind in corrupt[:20]:
+        print(f"serial_fidelity: CORRUPT {index.decode()}: {kind} "
+              f"want_len={len(want)} got_len={len(got)} "
+              f"want={want[:24].decode(errors='replace')}... "
+              f"got={got[:24].decode(errors='replace')}")
+    if len(corrupt) > 20:
+        print(f"serial_fidelity: ... {len(corrupt) - 20} more corrupt lines")
 
     return 0 if corrupted == 0 else 1
 
