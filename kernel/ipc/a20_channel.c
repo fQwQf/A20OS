@@ -750,6 +750,31 @@ void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
     spin_unlock(&g_ch_lock);
 }
 
+/*
+ * a20_channel_ep_peer_ref — referenced peer lookup for the cluster proxy
+ * plumbing (kernel/cluster/remote_ep.c, docs/cluster/03-kernel-impl.md §1).
+ *
+ * Minimal registered patch: connect() must own the proxy half of a fresh
+ * pair and export() the service half's peer, and the peer pointer may only
+ * be read under g_ch_lock (see CH_PEER_TEARDOWN_PROTOCOL above).  This is
+ * that read plus refcount_inc_not_zero, exactly the pattern the internal
+ * send/recv paths use.  Fast paths are untouched.  Returns NULL when the
+ * peer is gone.
+ */
+a20_channel_ep_t *a20_channel_ep_peer_ref(a20_channel_ep_t *ep)
+{
+    a20_channel_ep_t *peer;
+
+    if (!ep)
+        return NULL;
+    spin_lock(&g_ch_lock);
+    peer = ep->peer;
+    if (peer && !refcount_inc_not_zero(&peer->refcount))
+        peer = NULL;
+    spin_unlock(&g_ch_lock);
+    return peer;
+}
+
 void a20_channel_ep_release(a20_channel_ep_t *ep)
 {
     if (!ep) return;

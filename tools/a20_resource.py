@@ -64,11 +64,11 @@ class MemorySpecError(ValueError):
 # The `hostfwd=` key and the boolean are optional here because an instance
 # manifest may write either the readable short form or the fully spelled one.
 _HOSTFWD_RE = re.compile(
-    r"^(?:hostfwd=)?(?:tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)"
+    r"^(?:hostfwd=)?(?P<proto>tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)"
     r"-(?P<gaddr>[^:]*):(?P<gport>\d+)(?:=(?:on|off))?$")
 
 
-def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int], ...]:
+def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int, str], ...]:
     """Host ports an instance's [net].hostfwd will claim.
 
     Port 0 means "let the OS pick", which is exactly the case the preflight must
@@ -77,7 +77,7 @@ def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int],
     rejected here -- `a20 check` is the layer that reports malformed hostfwd,
     and a preflight that refuses to start would be the wrong place to learn it.
     """
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, int, str]] = []
     for entry in entries or ():
         m = _HOSTFWD_RE.match(entry.strip())
         if m is None:
@@ -85,8 +85,41 @@ def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int],
         port = int(m.group("hport"))
         if port == 0:
             continue
-        out.append((m.group("haddr") or "0.0.0.0", port))
+        out.append((m.group("haddr") or "0.0.0.0", port, m.group("proto")))
     return tuple(out)
+
+
+# A [net].backend spec claims host ports too: `listen=addr:port` binds a TCP
+# socket, `localaddr=addr:port` binds a UDP one.  `connect=` is a client and
+# claims nothing.  Only the key/value pairs the instance wrote are probed here;
+# anything malformed is `a20 check`'s business, not the preflight's.
+_NETDEV_PORT_RE = re.compile(r"(?:^|,)(?P<key>listen|localaddr)=(?P<value>[^,]*)")
+
+
+def parse_netdev_ports(backend: str | None) -> tuple[tuple[str, int, str], ...]:
+    """Host ports an instance's [net].backend will bind, with their protocol."""
+    out: list[tuple[str, int, str]] = []
+    for m in _NETDEV_PORT_RE.finditer(backend or ""):
+        addr, sep, port = m.group("value").rpartition(":")
+        if not sep or not port.isdigit():
+            continue
+        if int(port) == 0:
+            continue
+        proto = "udp" if m.group("key") == "localaddr" else "tcp"
+        out.append((addr or "0.0.0.0", int(port), proto))
+    return tuple(out)
+
+
+def instance_net_ports(inst: Instance) -> tuple[tuple[str, int, str], ...]:
+    """Every host port an instance's [net] section will bind.
+
+    Covers both the default user backend ([net].hostfwd) and a backend
+    override ([net].backend, e.g. the cluster demo's UDP tunnel), so the
+    preflight and `a20 ports` see one merged view instead of silently missing
+    whatever was declared through the newer field.
+    """
+    return tuple(dict.fromkeys(
+        parse_hostfwd_ports(inst.net.hostfwd) + parse_netdev_ports(inst.net.backend)))
 
 
 def parse_memory_mb(text: str) -> int:
@@ -153,11 +186,11 @@ class HostResources:
     load1: float
     disk_free_mb: int
     running_guests: int
-    busy_ports: tuple[tuple[str, int], ...] = ()
+    busy_ports: tuple[tuple[str, int, str], ...] = ()
 
     @classmethod
     def snapshot(cls, disk_path: Path,
-                 want_ports: Sequence[tuple[str, int]] = ()) -> HostResources:
+                 want_ports: Sequence[tuple[str, int, str]] = ()) -> HostResources:
         return cls(
             mem_available_mb=_mem_available_mb(),
             cpu_count=os.cpu_count() or 1,
@@ -212,24 +245,28 @@ def count_running_guests() -> int:
     return count
 
 
-def busy_ports(want: Sequence[tuple[str, int]]) -> tuple[tuple[str, int], ...]:
+def busy_ports(want: Sequence[tuple[str, int, str]]) -> tuple[tuple[str, int, str], ...]:
     """Which of the requested host ports cannot be bound right now.
 
     Probed by actually binding, rather than by reading /proc or ss: a port held
     by another QEMU, by a leftover process, or by a socket in TIME_WAIT all show
     up the same way here, which is the only answer that actually predicts
-    whether QEMU's bind will succeed.
+    whether QEMU's bind will succeed.  The protocol is probed as declared --
+    a UDP tunnel port is free even when a TCP listener holds the number, and
+    probing TCP for it would deadlock the gate on a conflict that does not
+    exist for the guest.
     """
-    taken: list[tuple[str, int]] = []
-    for addr, port in want:
+    taken: list[tuple[str, int, str]] = []
+    for addr, port, proto in want:
         family = socket.AF_INET6 if ":" in addr else socket.AF_INET
-        with socket.socket(family, socket.SOCK_STREAM) as s:
+        kind = socket.SOCK_DGRAM if proto == "udp" else socket.SOCK_STREAM
+        with socket.socket(family, kind) as s:
             # Deliberately no SO_REUSEADDR: QEMU does not set it either, so
             # this reproduces QEMU's own bind semantics rather than a laxer one.
             try:
                 s.bind((addr, port))
             except OSError:
-                taken.append((addr, port))
+                taken.append((addr, port, proto))
     return tuple(taken)
 
 
@@ -239,13 +276,19 @@ class Requirement:
     cpus: int
     disk_mb: int
     guests: int = 1
-    ports: tuple[tuple[str, int], ...] = ()
+    ports: tuple[tuple[str, int, str], ...] = ()
 
     def describe(self) -> str:
         parts = [f"mem {self.mem_mb} MiB", f"{self.cpus} vCPU", f"disk {self.disk_mb} MiB"]
         if self.ports:
-            parts.append("ports " + ",".join(f"{a}:{p}" for a, p in self.ports))
+            parts.append("ports " + ",".join(format_net_port(p) for p in self.ports))
         return ", ".join(parts)
+
+
+def format_net_port(p: tuple[str, int, str]) -> str:
+    """One claimed host port as `addr:port`, with a /udp suffix when UDP."""
+    addr, port, proto = p
+    return f"{addr}:{port}" if proto == "tcp" else f"{addr}:{port}/udp"
 
 
 def requirement_for(inst: Instance, policy: Policy) -> Requirement:
@@ -259,7 +302,7 @@ def requirement_for(inst: Instance, policy: Policy) -> Requirement:
         mem_mb=mem_mb + policy.reserve_mem_mb,
         cpus=max(1, cpus),
         disk_mb=max(disk_mb, policy.min_disk_mb),
-        ports=parse_hostfwd_ports(inst.net.hostfwd),
+        ports=instance_net_ports(inst),
     )
 
 
@@ -301,8 +344,8 @@ def evaluate(need: Requirement, have: HostResources, policy: Policy,
         d.append(f"guest slots: {have.running_guests} running, cap {cap}")
         r.append("wait for a running guest to exit, or raise A20_MAX_CONCURRENT "
                  "(the default cap is one guest per 4 CPUs)")
-    for addr, port in (have.busy_ports if guest else ()):
-        d.append(f"host port: {addr}:{port} is already in use by another process")
+    for addr, port, proto in (have.busy_ports if guest else ()):
+        d.append(f"host port: {addr}:{port}/{proto} is already in use by another process")
         r.append(f"stop whatever holds {addr}:{port}, or give this instance a "
                  f"different hostfwd")
     return Verdict(ok=not d, deficits=tuple(d), remedies=tuple(r))

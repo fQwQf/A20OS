@@ -165,6 +165,11 @@ typedef struct a20_channel_type {
 
 #define A20_CHAN_TYPE_ORDERED (1u << 0)
 #define A20_CHAN_TYPE_STRICT  (1u << 1)
+/* Cluster proxy endpoint (docs/cluster/03-kernel-impl.md §1): the peer is
+ * off-node, so the cluster ABI maps the typed-channel handle refusal
+ * (send_handle_types == 0) to A20_ERR_CLUSTER_UNSUPPORTED instead of
+ * A20_ERR_TYPE_MISMATCH.  Set only by kernel/cluster/remote_ep.c. */
+#define A20_CHAN_TYPE_REMOTE  (1u << 2)
 
 #define A20_CHAN_TYPE_FILE     (1u << A20_OBJ_FILE)
 #define A20_CHAN_TYPE_SOCKET   (1u << A20_OBJ_SOCKET)
@@ -359,6 +364,12 @@ void a20_channel_ep_release(a20_channel_ep_t *ep);
 /* One-sided teardown: set the peer's peer_closed and wake its waiters.  Used
  * by umount to tell a service that it is going away. */
 void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep);
+/* Cluster proxy plumbing (kernel/cluster/remote_ep.c): take a reference on
+ * the paired endpoint, or NULL when the peer is gone.  The peer pointer may
+ * only be read under the channel lock discipline; this is that read plus a
+ * reference, in one place.  Registered as the minimal a20_channel.c patch
+ * in docs/cluster/03-kernel-impl.md §1 (2026-10). */
+a20_channel_ep_t *a20_channel_ep_peer_ref(a20_channel_ep_t *ep);
 
 /* ---- Event queue API ---- */
 

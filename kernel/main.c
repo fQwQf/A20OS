@@ -212,6 +212,15 @@ void kernel_main(void) {
         panic("Failed to create init_kthread");
     if (proc_alloc(oom_kswapd_thread) < 0)
         kerr("[KSWAPD] failed to spawn background reclaimer\n");
+    /* Cluster subsystem self-check (docs/cluster/03-kernel-impl.md §5.6):
+     * inert unless the command line carries clxselftest=1; costs one
+     * strstr on normal boots.  Also calls a20_clx_core_init() when the
+     * bootarg is present, so the check does not depend on a userspace
+     * cluster syscall happening first. */
+    {
+        extern void a20_clx_selftest_boot(void);
+        a20_clx_selftest_boot();
+    }
 #endif
 
     printf("[INIT] System ready\n\n");

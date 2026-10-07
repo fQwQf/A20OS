@@ -56,6 +56,9 @@ extern int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
 extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
+/* Cluster proxy errno mapping (kernel/abi/native/sys_native_cluster.c,
+ * docs/cluster/03-kernel-impl.md §1). */
+extern int64_t a20_clx_map_send_err(int64_t r, const a20_channel_ep_t *ep);
 
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
@@ -366,6 +369,10 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 
     r = a20_channel_send(ep, kdata, kargs.data_len,
                          hinfos, actual_hcount, ht, kargs.flags);
+    /* Cluster proxy endpoints (docs/cluster/03-kernel-impl.md §1): the
+     * typed-channel refusal of a cross-node handle maps to
+     * A20_ERR_CLUSTER_UNSUPPORTED instead of TYPE_MISMATCH. */
+    r = a20_clx_map_send_err(r, ep);
 
 out_handles:
     for (uint32_t i = 0; i < actual_hcount; i++)
@@ -638,6 +645,8 @@ int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
 
     r = a20_channel_send_dwc(ep, kdata, kargs.data_len,
                              hinfos, actual_hcount, ht, kargs.flags, 1);
+    /* Cluster proxy mapping, see sys_a20_channel_send. */
+    r = a20_clx_map_send_err(r, ep);
 
 out_handles:
     for (uint32_t i = 0; i < actual_hcount; i++)

@@ -68,6 +68,16 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"QEMU_GUI_AUDIO_DEVICE={g.audio_device}")
     if n.hostfwd is not None:
         v.append(f"NET_HOSTFWD={n.qemu_hostfwd()}")
+    if n.mac is not None:
+        v.append(f"NET_MAC={n.mac}")
+    if n.backend is not None:
+        v.append(f"NET_BACKEND={n.backend}")
+    if n.guest_ip is not None:
+        v.append(f"NET_GUEST_IP={n.guest_ip}")
+    if n.guest_netmask is not None:
+        v.append(f"NET_GUEST_NETMASK={n.guest_netmask}")
+    if n.guest_gateway is not None:
+        v.append(f"NET_GUEST_GATEWAY={n.guest_gateway}")
     if r.size_mb is not None:
         v.append(f"FAT32_IMAGE_MB={r.size_mb}")
     if r.ext4_size_mb is not None:

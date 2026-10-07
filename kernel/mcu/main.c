@@ -7,6 +7,7 @@
 #include "mm/slab.h"
 #include "peripherals.h"
 #include "heap.h"
+#include "leaf.h"
 #include "proc/proc.h"
 #include "drivers/stm32f1/stm32_uart.h"
 
@@ -18,6 +19,11 @@ static void stm32_peripheral_thread(void) {
     for (;;) {
         uint64_t now = timer_get_ticks();
         stm32_peripherals_service(now);
+        /* Cluster UART leaf pump: drains the RX ring through the SLIP
+         * decoder and runs the 50 ms / 50 s timers (kernel/mcu/leaf.h).
+         * 5 ms keeps the 128 B console-UART ring from overflowing at
+         * 115200 baud; no-op in the QEMU probe build. */
+        a20_mcu_leaf_poll();
         proc_sleep_until(now + 5U);
     }
 }
@@ -53,6 +59,10 @@ void kernel_main(void) {
     uart_init();
     mcu_heap_init();
     timer_init();
+    /* Cluster UART leaf protocol face (docs/cluster/04-transports.md §4):
+     * passive only -- it answers HELLO/PING/CALL and costs nothing until a
+     * head node dials this UART. */
+    a20_mcu_leaf_init();
 
     printf("\n======================================\n");
     printf(" A20OS ARMv7-M STM32F103 bringup\n");
