@@ -837,7 +837,10 @@ int  frame_is_lent_to_guest(pfn_t pfn);
 /* Audit one stage-2 root against its metadata.  check_vma is meaningless
  * here (there is no host mapping list) and is forced off internally; the
  * report fields used are the generic present/absent/prot/cow set plus
- * guest_flag_mismatch. */
+ * seg_extent_mismatch, which is what the stage-2 flag cross-check tallies
+ * into (pt.c:2974, s2_audit_flags) -- there is no guest_flag_mismatch
+ * field in mm_pt_audit_report_t, and naming one here sent the first reader
+ * looking for a member that does not exist. */
 int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out);
 
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */

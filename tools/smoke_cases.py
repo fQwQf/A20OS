@@ -782,6 +782,24 @@ CASES: dict[str, dict] = {
                   'expect': '# ',
                   'steps': [('\n# ', 'hypvm -k /bin/boot/guest-kernel-ramfs.elf'),
                             ('HYPVM: running\n', 'echo roundtrip'),
+                            # A guest that WORKS no longer dies on its own: it
+                            # sits at the mksh prompt and hypvm never returns,
+                            # so keying this send on HYPVM: PASS waits for a
+                            # line that only follows the very input this step
+                            # must provide -- measured: 300s timeout, the log
+                            # ends at the '# ' after roundtrip, and
+                            # find(b'HYPVM: PASS') = -1.  Type `exit` into the
+                            # GUEST shell first (mksh exits, init shuts the
+                            # guest down, hypvm prints PASS from that); then
+                            # the PASS-keyed step below types poweroff into the
+                            # HOST shell, which is what the comment above the
+                            # case is about.  The marker is the output line
+                            # plus the prompt that follows it, not bare
+                            # 'roundtrip': the shell's own echo of the typed
+                            # command ('# echo roundtrip\r\n') contains that
+                            # word too, and tail.find() is a literal substring
+                            # match, not a regex.
+                            ('roundtrip\n# ', 'exit'),
                             ('HYPVM: PASS', 'poweroff')]},
         'timeout': '300s',
         'qemu': 'qemu-system-riscv64',
@@ -795,7 +813,7 @@ CASES: dict[str, dict] = {
             r"mem=128 MiB base=0x80000000 marker='A20OS Kernel'",
             r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ '
             r'rx_bytes=[1-9][0-9]* exit=[0-9]+\(\w+\) mem=128 MiB',
-            # Clean shutdown rather than a 300s timeout kill; see the third
+            # Clean shutdown rather than a 300s timeout kill; see the last
             # stdin step above and smoke.py's report(), which scores the log
             # text and never looks at QEMU's exit status.
             'System is going down for power-off NOW',
