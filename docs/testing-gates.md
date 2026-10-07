@@ -1183,3 +1183,9 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 `make check-doc-drift` 重新生成 Linux syscall 覆盖表，扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。
 
 若 `for simplicity` 出现在禁用区域，删除或替换为明确 TODO；若 `stub`/`partial`/`Future`/`not yet` 缺失于许可文件，确保它们已绑定到覆盖表或 TODO。
+
+### RV64 prepared-park yield 回归
+
+`make smoke-rv64-sched-park-yield` 用单核 QEMU 启动带 `a20.sched_park_yield_selftest=1` 的内核。自检创建一个可运行 helper，在当前任务的 wait token 处于 `PREPARING` 时强制真实切换；helper 确认原任务以 `READY` 留在运行队列、token 序号仍有效。原任务恢复后正常提交 park，由 helper 对该 token 发送 `EVENT` 唤醒，并检查 `finish` 将状态清回 `IDLE`。这覆盖 IRQ 抢占在 wait queue 检查之后、`proc_park_commit()` 之前到来的同一状态交错。
+
+测试失败会 panic，未出现 `RV64_SCHED_PARK_YIELD: PASS` 或 QEMU 超时都视为门禁失败。此测试只用于 RV64 单核调度回归；SMP 行为由对应 SMP 门禁覆盖。

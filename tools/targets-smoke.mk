@@ -301,6 +301,9 @@ smoke-mm-stress:
 smoke-rv64-trap-t0:
 	$(PYTHON) tools/smoke.py smoke-rv64-trap-t0
 
+smoke-rv64-sched-park-yield:
+	$(PYTHON) tools/smoke.py smoke-rv64-sched-park-yield
+
 # Drives an address space past MM_SEG_INDEX_CAPACITY so mm_seg_find()'s
 # list-walk fallback executes.  See the case in tools/smoke_cases.py for why
 # this needed its own gate rather than a phase of smoke-mm-stress.

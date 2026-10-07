@@ -301,6 +301,12 @@ void init_kthread(void) {
         else
             panic("RV64_TRAP_T0: FAIL (timer IRQ missing or t0 changed)");
     }
+    if (bootargs && strstr(bootargs, "a20.sched_park_yield_selftest=1")) {
+        extern int riscv64_sched_park_yield_selftest(void);
+        if (riscv64_sched_park_yield_selftest())
+            panic("RV64_SCHED_PARK_YIELD: FAIL");
+        printf("RV64_SCHED_PARK_YIELD: PASS (PREPARING survived yield and wake)\n");
+    }
 #endif
 
     /* Generic systems discover optional packages after the root filesystem is

@@ -67,9 +67,11 @@ typedef struct proc_wake_q {
 /*
  * A20_PARK_WAKE_PROTOCOL:
  *
- * PREPARING keeps the current task RUNNING and off every runqueue.  An early
- * wake changes only park_state to WOKEN.  Commit either consumes that early
- * wake without scheduling, or atomically publishes PARKED + PROC_BLOCKED.
+ * PREPARING starts on the current RUNNING task, normally off every runqueue.
+ * A local yield may publish it READY while preserving the token; the ordinary
+ * switch-completion path then queues it. An early event wake changes only
+ * park_state to WOKEN. Commit either consumes that early wake without
+ * scheduling, or atomically publishes PARKED + PROC_BLOCKED.
  * Every wake carries wait_seq, so a delayed event or timeout cannot wake a
  * later wait by the same task.
  *
