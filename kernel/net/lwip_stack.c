@@ -1839,7 +1839,7 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
 
 #if CONFIG_NET_LANES > 1
     /*
-     * Per-lane pbuf pool accounting, printed after everything above so no gate
+     * Per-lane pool accounting, printed after everything above so no gate
      * keying on "^POOLNAME <digits>" can see a row it did not expect.
      *
      * These are two monotonic counters per lane, not a used/free pair, and the
@@ -1851,18 +1851,28 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
      * is the question /proc/net/status's lanes line is built to answer: is
      * traffic actually being spread over the lanes, or is everything landing on
      * one of them?
+     *
+     * Summed over every pool rather than broken out per pool: stage C2 made the
+     * counters per (lane, pool), and MEMP_MAX pools times CONFIG_NET_LANES rows
+     * would bury the one line a reader wants here.  The header changed from
+     * "pbuf lane" to "memp lane" because the scope did -- these are no longer
+     * just the two pbuf pools.
      */
     {
         char lane_row[64];
         a20_lwip_append(buf, bufsz, &off,
-            "pbuf lane         alloc   freed\n");
+            "memp lane         alloc   freed\n");
         for (unsigned l = 0; l < CONFIG_NET_LANES; l++) {
-            const struct memp_lane_count *c = memp_lane_count_get(l);
-            if (!c)
-                continue;
+            unsigned long lalloc = 0, lfreed = 0;
+            for (memp_t p = 0; p < MEMP_MAX; p++) {
+                const struct memp_lane_count *c = memp_lane_count_get(l, p);
+                if (!c)
+                    continue;
+                lalloc += c->alloc;
+                lfreed += c->freed;
+            }
             snprintf(lane_row, sizeof(lane_row), "%-15lu%7lu%8lu\n",
-                     (unsigned long)l, (unsigned long)c->alloc,
-                     (unsigned long)c->freed);
+                     (unsigned long)l, lalloc, lfreed);
             a20_lwip_append(buf, bufsz, &off, lane_row);
         }
     }

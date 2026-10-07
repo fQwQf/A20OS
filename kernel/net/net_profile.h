@@ -615,6 +615,60 @@ _Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
 #endif
 
 /*
+ * What the per-lane memp tables cost, so the tiers can be reconciled against it.
+ *
+ * Stage C2 gave every pool a per-lane descriptor row plus a per-(lane, pool)
+ * pair of counters (kernel/external/lwip/src/core/memp.c).  Three static tables
+ * follow, and only lane 0's descriptor row is free: it aliases memp_pools[]
+ * rather than copying it, so the descriptor table is (N-1) rows, not N.
+ *
+ *   descriptors  (N-1) * MEMP_MAX * sizeof(struct memp_desc)
+ *   counters        N  * MEMP_MAX * sizeof(struct memp_lane_count)
+ *   pool index      N  * MEMP_MAX * sizeof(struct memp_desc *)
+ *
+ * The four sizes below are the LWIP side's layout, restated here because this
+ * is the header the tier budgets are written in and lwip/memp.h cannot see it
+ * in time to size anything.  They are not allowed to drift: memp.c asserts this
+ * expression against the real sizeof of the tables it declares, so changing one
+ * side without the other is a build failure, not a silently wrong budget.
+ * Measured on riscv64 LP64: 14 pools compile in at all three tiers,
+ * sizeof(struct memp_desc) is 24 (desc + stats + u16 size, padded to the
+ * pointer alignment), and sizeof(struct memp_lane_count) is 8 (two u32).
+ *
+ * Why this is the whole memory cost of per-lane-izing memp, and it is worth
+ * being explicit because the opposite is the natural guess: it is not.  All
+ * three tiers set MEMP_MEM_MALLOC=1, under which a descriptor holds a size and
+ * nothing else and do_memp_malloc_pool() is a mem_malloc() of that size against
+ * the one shared heap.  A per-lane descriptor therefore draws from the same heap
+ * as its siblings, so NET_PROFILE_MEMP_CLAIM_BYTES and MEM_SIZE are unchanged
+ * by lane count -- there is no xN on pool memory here.  What a future
+ * !MEMP_MEM_MALLOC build would cost instead is N copies of every pool's base
+ * array, which is the xN this file would then have to budget, and which is why
+ * that switch is a profile decision rather than a detail.
+ *
+ * Cost on riscv64 LP64: 0 B at one lane, 1904 B at four, identical on all
+ * three tiers because it does not scale with any tier's heap.
+ */
+#define NET_PROFILE_MEMP_POOLS        14
+#define NET_PROFILE_MEMP_DESC_BYTES   24
+#define NET_PROFILE_MEMP_COUNT_BYTES  8
+#define NET_PROFILE_MEMP_PTR_BYTES    8
+/* The N > 1 guard is not decoration.  At one lane lwipopts.h does not define
+ * LWIP_MEMP_LANE at all, so none of the three tables is compiled and the honest
+ * cost is 0 -- which is also the number that keeps a one-lane build byte-for-
+ * byte where it was.  Summing the formula unconditionally would bill an
+ * embedded build 224 bytes for tables that are not in its image. */
+#define NET_PROFILE_MEMP_LANE_TABLE_BYTES                                    \
+    ((CONFIG_NET_LANES > 1)                                                 \
+         ? (((CONFIG_NET_LANES - 1) * NET_PROFILE_MEMP_POOLS *               \
+             NET_PROFILE_MEMP_DESC_BYTES) +                                  \
+            (CONFIG_NET_LANES * NET_PROFILE_MEMP_POOLS *                      \
+             NET_PROFILE_MEMP_COUNT_BYTES) +                                 \
+            (CONFIG_NET_LANES * NET_PROFILE_MEMP_POOLS *                      \
+             NET_PROFILE_MEMP_PTR_BYTES))                                    \
+         : 0)
+
+/*
  * Diagnostic amplifier for the multi-lane boot fault.  When non-zero, spins for
  * this many microseconds inside the accept drain, between dequeuing a staged pcb
  * and taking g_lwip_lock.  That gap is the only point on the accept path that
