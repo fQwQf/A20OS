@@ -146,7 +146,7 @@ struct uart_dump_snap {
     int pid, ppid, pgid, sid;
     int state;
     unsigned long wake_time;
-    int on_rq;
+    int task_on_rq;
     char name[16];
 };
 static struct uart_dump_snap g_uart_dump_snap[UART_DUMP_SNAP_MAX];
@@ -180,8 +180,8 @@ static void uart_dump_tasks(void)
             g_uart_dump_snap[n].sid = t->sid;
             g_uart_dump_snap[n].state = state;
             g_uart_dump_snap[n].wake_time = (unsigned long)t->wake_time;
-            g_uart_dump_snap[n].on_rq = __atomic_load_n(&t->on_rq,
-                                                        __ATOMIC_RELAXED);
+            g_uart_dump_snap[n].task_on_rq = __atomic_load_n(
+                &t->on_rq, __ATOMIC_RELAXED);
             strncpy(g_uart_dump_snap[n].name, t->name,
                     sizeof(g_uart_dump_snap[n].name) - 1);
             g_uart_dump_snap[n].name[sizeof(g_uart_dump_snap[n].name) - 1] =
@@ -206,7 +206,7 @@ static void uart_dump_tasks(void)
         }
         kdebug("[TTYDBG] pid=%d ppid=%d pgid=%d sid=%d state=%s wake=%lu onrq=%d name=%s\n",
                e->pid, e->ppid, e->pgid, e->sid, state,
-               e->wake_time, e->on_rq, e->name);
+               e->wake_time, e->task_on_rq, e->name);
     }
     if (n == UART_DUMP_SNAP_MAX)
         kdebug("[TTYDBG] task dump truncated at %d entries\n",

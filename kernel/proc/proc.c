@@ -66,7 +66,7 @@ static struct {
     int pid;
     int state;
     int on_cpu;
-    int on_rq;
+    int task_on_rq;
     unsigned owner_cpu;
     int park;
     char name[16];
@@ -277,10 +277,10 @@ void proc_task_sched_state_snapshot(task_t *t, proc_task_sched_state_t *out)
     snap.on_cpu = t->on_cpu;
     spin_unlock_irqrestore(&t->park_lock, flags);
 
-    snap.on_rq = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
+    snap.task_on_rq = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
     snap.dispatching = __atomic_load_n(&t->dispatching, __ATOMIC_RELAXED);
     snap.owner_cpu = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
-    snap.cpu_id = __atomic_load_n(&t->cpu_id, __ATOMIC_RELAXED);
+    snap.task_cpu_id = __atomic_load_n(&t->cpu_id, __ATOMIC_RELAXED);
     *out = snap;
 }
 
@@ -477,7 +477,7 @@ void idle_loop(void) {
                     g_hang_snap[snap_count].pid = t->pid;
                     g_hang_snap[snap_count].state = (int)st.state;
                     g_hang_snap[snap_count].on_cpu = st.on_cpu;
-                    g_hang_snap[snap_count].on_rq = st.on_rq;
+                    g_hang_snap[snap_count].task_on_rq = st.task_on_rq;
                     g_hang_snap[snap_count].owner_cpu = st.owner_cpu;
                     g_hang_snap[snap_count].park =
                         (int)__atomic_load_n(&t->park_state, __ATOMIC_RELAXED);
@@ -502,7 +502,7 @@ void idle_loop(void) {
                 printf("  pid=%d name=%s state=%d on_cpu=%d on_rq=%d cpu=%u park=%d\n",
                        g_hang_snap[i].pid, g_hang_snap[i].name,
                        g_hang_snap[i].state, g_hang_snap[i].on_cpu,
-                       g_hang_snap[i].on_rq, g_hang_snap[i].owner_cpu,
+                       g_hang_snap[i].task_on_rq, g_hang_snap[i].owner_cpu,
                        g_hang_snap[i].park);
             }
             extern void a20_channel_trace_dump(void);
