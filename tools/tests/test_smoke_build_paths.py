@@ -85,6 +85,21 @@ class SmokeBuildPathTests(unittest.TestCase):
         self.assertEqual(kernel, f"{expected}/kernel.elf")
         self.assertIn(f"file={expected}/fat32.img", disk)
 
+    def test_ramfs_guest_kernel_path_inherits_preempt_variant(self):
+        variables = ("ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=linux")
+        build_dir = self.resolve_dir(*variables)
+        make_db = subprocess.run(
+            ["make", "--no-print-directory", *variables, "-pn", "print-build-dir"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        ramfs_dir = next(
+            line.split(":=", 1)[1].strip()
+            for line in make_db.splitlines()
+            if line.startswith("GUEST_KERNEL_RAMFS_DIR :=")
+        )
+        expected = build_dir.replace("-dev", "-dev-ramfs-user", 1)
+        self.assertEqual(ramfs_dir, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

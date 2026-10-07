@@ -19,16 +19,14 @@ endif
 # (Makefile:396), not a flag that can be turned on for one file inside another
 # variant's build -- the RAMFS blobs are KERNEL_OBJ entries, so they are part
 # of the link.  Hence the recursive make below, the same shape
-# tools/targets-build.mk uses for its second-variant board gates.  The path is
-# spelled out rather than derived because BUILD_DIR (Makefile:402) hardcodes
-# .kernel-build and BUILD_VARIANT is a chain of conditionals no caller can
-# reuse from here; this mirrors the "linux-dev-ramfs-user" tail exactly, and the
-# guard below is what keeps a mismatch from costing anything but one file.
+# tools/targets-build.mk uses for its second-variant board gates. Derive the
+# sibling path from this invocation's BUILD_DIR so preempt, SMP, and explicit
+# feature suffixes remain in sync.
 #
 # Only wired in when this make is already building the plain default variant.
-# BUILD_DIR ends in BUILD_VARIANT (Makefile:396) and the "-dev-ramfs-user" tail
-# above is literally spelled out, so any of these switched to something else
-# names a directory the recursive make below never writes:
+# BUILD_DIR ends in BUILD_VARIANT and this target only adds the ramfs-user
+# component after "-dev". The guard below keeps this to the ordinary dev image;
+# other build modes do not need a second guest kernel:
 #   BRINGUP=1           -> BUILD_VARIANT "...-bringup-ramfs-user", not "-dev-"
 #   RAMFS_USER=1        -> this make IS the ramfs-user build, no second one
 #   CONFIG_SLAB_DEBUG=1 -> BUILD_VARIANT gains "-slabdbg"
@@ -43,7 +41,7 @@ endif
 # only copy inside fat32.img was whatever leftover somebody had last produced by
 # hand.  A guard that cannot fail loudly is worse than no guard -- write it so a
 # typo shows up as a missing prerequisite on the next `make -p`.
-GUEST_KERNEL_RAMFS_DIR := .kernel-build/$(ARCH)-$(BOARD)-$(ABI)-dev-ramfs-user
+GUEST_KERNEL_RAMFS_DIR := $(subst -dev,-dev-ramfs-user,$(BUILD_DIR))
 GUEST_KERNEL_RAMFS_ELF := $(GUEST_KERNEL_RAMFS_DIR)/kernel-nosyms.elf
 GUEST_KERNEL_RAMFS_STAMP := $(GUEST_KERNEL_RAMFS_DIR)/.ramfs-user-elf.stamp
 GUEST_KERNEL_RAMFS_DEP :=
