@@ -134,12 +134,12 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     if (dr < 0) return dr;
                     continue;
                 }
-                uint64_t old_flags = arch_pte_flags(*pte);
-                uint64_t flags = mm_pte_flags_apply_prot(*pte, ptef);
+                pte_t observed = *pte;
+                uint64_t flags = mm_pte_flags_apply_prot(observed, ptef);
                 if ((ptef & PTE_W) &&
                     (v->vm_flags & VM_FILE) &&
                     !(v->vm_flags & VM_SHARED)) {
-                    pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
+                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
                     page_cache_page_t *page =
                         mm_file_cache_mapping_get(v, va, pfn);
                     if (page) {
@@ -150,32 +150,47 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                         page_cache_put(page);
                     }
                 }
-                if ((flags & PTE_X) && !(old_flags & PTE_X)) {
-                    paddr_t pa = arch_pte_addr(*pte);
-                    pfn_t pfn = phys_to_pfn(pa);
-                    if (pfn_valid(pfn))
-                        arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
-                }
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-                /* The rewrite and its status refresh run under the owning
-                 * table's node lock, with the PTE re-checked under it: the
-                 * lockless COW fault (mm_cow_from_status) replaces a present
-                 * COW leaf while holding exactly this lock and never takes
-                 * mm->lock.  Writing `replacement` from a stale *pte would
-                 * resurrect a frame the page no longer maps. */
-                paddr_t pa_now = arch_pte_addr(*pte);
                 pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
                 if (ltab)
                     mm_pt_node_lock(ltab);
-                int still = !ltab || ((*pte & PTE_V) &&
-                                      arch_pte_addr(*pte) == pa_now);
-                if (still) {
-                    pte_t replacement = arch_pte_leaf(arch_pte_addr(*pte),
-                                                      flags);
-                    if (replacement != *pte) {
-                        *pte = replacement;
-                        mm_tlb_note_change(mm, base, size);
+                /* MM_MPROTECT_RETRY: recompute for the same VA if a COW
+                 * fault changed the snapshot used for cache classification.
+                 * Skipping this VA would update policy but miss its new PTE. */
+                if (*pte != observed) {
+                    if (ltab)
+                        mm_pt_node_unlock(ltab);
+                    continue;
+                }
+#endif
+                /* Raising W on a private anonymous page still shared after
+                 * fork must preserve COW, including after a read-only interval
+                 * cleared its old COW bit.  Temporary pins may cause a spare
+                 * copy, which is safe; granting W to a shared frame is not. */
+                if ((ptef & PTE_W) &&
+                    !(v->vm_flags & (VM_SHARED | VM_VMO))) {
+                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
+                    if (pfn_valid(pfn)) {
+                        uint64_t pf = spin_lock_irqsave(&pfa.lock);
+                        if (pfa.meta[pfn].refcount > 1) {
+                            flags &= ~(uint64_t)(PTE_W | PTE_D);
+                            flags |= PTE_COW;
+                        }
+                        spin_unlock_irqrestore(&pfa.lock, pf);
                     }
+                }
+                if ((flags & PTE_X) && !(observed & PTE_X)) {
+                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
+                    if (pfn_valid(pfn))
+                        arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+                }
+                pte_t replacement = arch_pte_leaf(arch_pte_addr(observed),
+                                                  flags);
+                if (replacement != observed) {
+                    *pte = replacement;
+                    mm_tlb_note_change(mm, base, size);
+                }
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
                     /* The status byte is what a later status-driven fault
                      * installs and what mm_pt_audit_all() compares, so it
                      * has to follow the PTE here as well -- not only on the
@@ -189,18 +204,8 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     if (ltab)
                         (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
                                                       flags);
-                }
                 if (ltab)
                     mm_pt_node_unlock(ltab);
-#else
-                /* arm32 has no status sidecar and no lockless status-driven
-                 * fault to race, so the plain PTE rewrite is the whole
-                 * operation -- what the pre-sidecar path did. */
-                pte_t replacement = arch_pte_leaf(arch_pte_addr(*pte), flags);
-                if (replacement != *pte) {
-                    *pte = replacement;
-                    mm_tlb_note_change(mm, base, size);
-                }
 #endif /* ARCH_HAS_PGTABLE_OPS */
                 va = base + size;
             } else {
