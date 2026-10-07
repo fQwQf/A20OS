@@ -1921,8 +1921,21 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off,
             "rx lane            rx   drop\n");
         for (unsigned l = 0; l < CONFIG_NET_LANES; l++) {
-            snprintf(lane_row, sizeof(lane_row), "%-15lu%6llu%7llu\n",
-                     (unsigned long)l,
+            /* The kernel formatter has no '-' flag; see the memp lane row
+             * above.  Keep the lane field padded here too, or the formatter
+             * prints the token literally and consumes neither counter. */
+            char lane_col[16];
+            int lane_len = snprintf(lane_col, sizeof(lane_col), "%lu",
+                                    (unsigned long)l);
+            if (lane_len < 0)
+                lane_len = 0;
+            if (lane_len >= (int)sizeof(lane_col))
+                lane_len = (int)sizeof(lane_col) - 1;
+            while (lane_len < 15 && lane_len < (int)sizeof(lane_col) - 1)
+                lane_col[lane_len++] = ' ';
+            lane_col[lane_len] = '\0';
+            snprintf(lane_row, sizeof(lane_row), "%s%6llu%7llu\n",
+                     lane_col,
                      net_lane_rx_stat(l, NET_LANE_RX_PROCESSED),
                      net_lane_rx_stat(l, NET_LANE_RX_DROPPED));
             a20_lwip_append(buf, bufsz, &off, lane_row);
@@ -2296,4 +2309,3 @@ int a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len)
     a20_lwip_unlock(flags);
     return r == (int)len ? (int)len : -EIO;
 }
-

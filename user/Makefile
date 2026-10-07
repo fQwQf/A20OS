@@ -535,13 +535,21 @@ FF_LIB := $(OBJ_DIR)/fastfetch/libfastfetch.a
 # cross toolchains, but under /usr/include/<triple> for native multiarch.  Pick
 # whichever exists on this host so the build also works when the host arch
 # differs from the target (e.g. building riscv64 on an aarch64 machine).
+FF_LINUX_UAPI_ROOT ?=
 FF_LINUX_INC_DIR = $(or $(firstword $(wildcard \
+                    $(if $(FF_LINUX_UAPI_ROOT),$(FF_LINUX_UAPI_ROOT)/$(1)/include) \
                     /usr/include/$(1) /usr/$(1)/include /usr/$(1)/sysroot/usr/include)),\
                     /usr/include/$(1))
 FF_LINUX_INC_riscv64 := -isystem $(call FF_LINUX_INC_DIR,riscv64-linux-gnu)
+# Linux UAPI headers are architecture-generic for the fastfetch uses here, so
+# riscv32 shares the installed riscv64 header set; the target compiler still
+# supplies the correct 32-bit ABI types and predefined macros.
+FF_LINUX_INC_riscv32 := -isystem $(call FF_LINUX_INC_DIR,riscv64-linux-gnu)
 FF_LINUX_INC_loongarch64 := -isystem $(call FF_LINUX_INC_DIR,loongarch64-linux-gnu)
 FF_LINUX_INC_aarch64 := -isystem $(call FF_LINUX_INC_DIR,aarch64-linux-gnu)
+FF_LINUX_INC_arm32 := -isystem $(call FF_LINUX_INC_DIR,arm-linux-gnueabihf)
 FF_LINUX_INC_x86_64 := -isystem $(call FF_LINUX_INC_DIR,x86_64-linux-gnu)
+FF_LINUX_INC_ppc64le := -isystem $(call FF_LINUX_INC_DIR,powerpc64le-linux-gnu)
 FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH)) \
                 -isystem $(shell $(CC) -print-file-name=include)
 
