@@ -93,7 +93,10 @@
    查询只读内核静态状态。纯字符串 parser host 测试不覆盖地址映射/生命周期，之前漏掉
    了这个错误；运行时 H=false gate 曾在 parser 处触发 page fault，之后的高半试验读到
    的 magic 也不符合 FDT 头。快照修正后 H=false 输出上表的 SKIP，H=true 则由正向
-   gates 验证实际执行路径。
+   gates 验证实际执行路径。此处只解决 late hyp/timer 对 H/SSTC 两个位的查询；完整
+   DTB 尚未复制或从 PFA 保留，`fdt_dev.c` 的晚期硬件树遍历仍直接使用固件 PA。支持该
+   路径的板级 DTB 生命周期仍需后续 copy/reserve 工作，本轮 QEMU virt 的 FDT 设备读取
+   已在 early board-init 阶段完成。
 
 **那还要不要写 `-cpu rv64,h=true`？要写。** 它把意图写进命令行，换一台默认 CPU
 不带 H 的 QEMU 时不会静默退化成"什么都没测"。只是别把"去掉它门禁会红"当成
