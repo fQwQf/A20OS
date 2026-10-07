@@ -645,10 +645,10 @@ task_t *proc_next_task_locked(task_t *t);
 typedef struct proc_task_sched_state {
     proc_state_t state;
     int          on_cpu;
-    int          on_rq;
+    int          task_on_rq;
     int          dispatching;
     unsigned     owner_cpu;
-    unsigned     cpu_id;
+    unsigned     task_cpu_id;
 } proc_task_sched_state_t;
 
 void proc_task_sched_state_snapshot(task_t *t, proc_task_sched_state_t *out);
