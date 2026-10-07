@@ -150,4 +150,12 @@ A20_NATIVE_SYSCALL(device_claim,      sys_a20_device_claim(args))
 A20_NATIVE_SYSCALL(device_release,    sys_a20_device_release(args))
 A20_NATIVE_SYSCALL(device_alloc_dma,  sys_a20_device_alloc_dma(args))
 A20_NATIVE_SYSCALL(device_free_dma,   sys_a20_device_free_dma(args))
-A20_NATIVE_SYSCALL(device_get_info,   sys_a20_device_get_info(args))
+A20_NATIVE_SYSCALL(device_get_info,    sys_a20_device_get_info(args))
+
+/* Cluster (0x0520, docs/cluster/01-abi.md) */
+A20_NATIVE_SYSCALL(cluster_set_self,        sys_a20_cluster_set_self(args))
+A20_NATIVE_SYSCALL(cluster_export,          sys_a20_cluster_export(args))
+A20_NATIVE_SYSCALL(cluster_connect,         sys_a20_cluster_connect(args))
+A20_NATIVE_SYSCALL(cluster_route,           sys_a20_cluster_route(args))
+A20_NATIVE_SYSCALL(cluster_event_subscribe, sys_a20_cluster_event_subscribe(args))
+A20_NATIVE_SYSCALL(cluster_link_status,     sys_a20_cluster_link_status(args))

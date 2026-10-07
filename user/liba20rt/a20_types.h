@@ -55,6 +55,10 @@ typedef int64_t a20_status_t;
 #define A20_ERR_TYPE_MISMATCH        ((a20_status_t)23)
 #define A20_ERR_NOT_FOUND            ((a20_status_t)24)
 #define A20_ERR_EXPIRED              ((a20_status_t)25)
+#define A20_ERR_NODE_UNREACHABLE     ((a20_status_t)26)
+#define A20_ERR_CLUSTER_TIMEOUT      ((a20_status_t)27)
+#define A20_ERR_REMOTE_CLOSED        ((a20_status_t)28)
+#define A20_ERR_CLUSTER_UNSUPPORTED  ((a20_status_t)29)
 
 #define A20_IS_ERROR(status)   ((a20_status_t)(status) < 0)
 #define A20_ABS_ERROR(status)  (-(a20_status_t)(status))
@@ -94,12 +98,14 @@ typedef uint64_t a20_vaddr_t;      /* Virtual address */
 #define A20_RIGHT_CONTROL    (1ull << 11)
 #define A20_RIGHT_ADMIN      (1ull << 12)
 #define A20_RIGHT_SIGNAL     (1ull << 13)
+#define A20_RIGHT_CLUSTER_ADMIN (1ull << 14)
 
 #define A20_RIGHTS_ALL  (A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_EXEC | \
                          A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP | \
                          A20_RIGHT_TRANSFER | A20_RIGHT_MAP | A20_RIGHT_WAIT | \
                          A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT | A20_RIGHT_CONTROL | \
-                         A20_RIGHT_ADMIN | A20_RIGHT_SIGNAL)
+                         A20_RIGHT_ADMIN | A20_RIGHT_SIGNAL | \
+                         A20_RIGHT_CLUSTER_ADMIN)
 
 #define A20_RIGHTS_NONE  ((a20_rights_t)0)
 
@@ -1255,6 +1261,115 @@ typedef struct a20_system_info {
     uint32_t       page_size;
     uint64_t       uptime_ns;
 } a20_system_info_t;
+
+/* ========================================================================
+ * Cluster (kernel/include/abi/native/types.h, docs/cluster/01-abi.md)
+ * ======================================================================== */
+
+typedef struct a20_node_id {
+    uint8_t bytes[16];
+} a20_node_id_t;
+
+#define A20_CLUSTER_CAP_RELAY     (1u << 0)
+#define A20_CLUSTER_CAP_RELIABLE  (1u << 1)
+#define A20_CLUSTER_CAP_LEAF      (1u << 2)
+#define A20_CLUSTER_CAPS_ALL      (A20_CLUSTER_CAP_RELAY | \
+                                   A20_CLUSTER_CAP_RELIABLE | \
+                                   A20_CLUSTER_CAP_LEAF)
+
+#define A20_EXPORT_REPLACE      (1u << 0)
+#define A20_EXPORT_LOCAL_ONLY   (1u << 1)
+#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY)
+
+#define A20_CONNECT_RELIABLE    (1u << 0)
+#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE)
+
+#define A20_ROUTE_ADD       0u
+#define A20_ROUTE_DEL       1u
+#define A20_ROUTE_REPLACE   2u
+
+#define A20_CLX_EVENT_LINK_UP        (1u << 0)
+#define A20_CLX_EVENT_LINK_DOWN      (1u << 1)
+#define A20_CLX_EVENT_ROUTE_LOST     (1u << 2)
+#define A20_CLX_EVENT_EXPORT_DROPPED (1u << 3)
+#define A20_CLX_EVENT_MASK_ALL       0xFu
+
+#define A20_CLX_LINK_DOWN     0u
+#define A20_CLX_LINK_SUSPECT  1u
+#define A20_CLX_LINK_UP       2u
+
+#define A20_CLX_TRANSPORT_LOOPBACK 0u
+#define A20_CLX_TRANSPORT_UDP      1u
+#define A20_CLX_TRANSPORT_UART     2u
+
+#define A20_CLUSTER_SERVICE_NAME_MAX 64
+
+typedef struct a20_cluster_set_self_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       caps;
+    uint32_t       _pad;
+    a20_node_id_t  node_id;
+    uint64_t       reserved[2];
+} a20_cluster_set_self_args_t;
+
+typedef struct a20_cluster_export_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;
+    uint32_t       _pad;
+    a20_handle_t   channel;
+    const char    *service_name;
+    uint32_t       name_len;
+    uint32_t       reserved;
+} a20_cluster_export_args_t;
+
+typedef struct a20_cluster_connect_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;
+    uint32_t       slot;
+    a20_node_id_t  node_id;
+    const char    *service_name;
+    uint32_t       name_len;
+    uint32_t       timeout_ms;
+    uint32_t       reserved;
+} a20_cluster_connect_args_t;
+
+typedef struct a20_cluster_route_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       op;
+    uint32_t       transport_id;
+    a20_node_id_t  node_id;
+    uint8_t        next_hop[16];
+    uint32_t       next_hop_len;
+    uint32_t       metric;
+    uint32_t       reserved;
+} a20_cluster_route_args_t;
+
+typedef struct a20_cluster_event_subscribe_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       mask;
+    uint32_t       reserved;
+} a20_cluster_event_subscribe_args_t;
+
+typedef struct a20_cluster_link_status_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       reserved;
+    uint32_t       _pad;
+    a20_node_id_t  node_id;
+    uint32_t       state;
+    uint32_t       rtt_us;
+    uint64_t       tx_frames;
+    uint64_t       rx_frames;
+    uint64_t       tx_drops;
+    uint64_t       rx_drops;
+    uint64_t       retransmits;
+    uint64_t       last_hello_age_ms;
+} a20_cluster_link_status_args_t;
 
 /* ========================================================================
  * Resource limits (kernel/include/abi/native/resource.h)

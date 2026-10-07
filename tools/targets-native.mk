@@ -12,7 +12,8 @@ A20_IDL_PYTHON      ?= $(PYTHON)
 	native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-ppc64le native-debug-test-all \
 	native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-ppc64le native-ext-test-all \
 	native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-ppc64le native-ipc-all \
-	native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all
+	native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all \
+	native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-ppc64le native-cluster-all
 
 $(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
 	@mkdir -p $(dir $@)
@@ -456,6 +457,48 @@ native-contract-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-contract-arch
 
 native-contract-all: native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le
+
+# Cluster ABI contract (docs/cluster/01-abi.md, stage W0). Same shape as the
+# contract recipe above: freestanding, no libc, boots as a native program.
+define NATIVE_CLUSTER_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+	    $(3) \
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_COMPILER_RT_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    user/tests/test_native_cluster.c \
+	    $(NATIVE_LIBS) \
+	    -o $(4)
+endef
+
+$(NATIVE_CLUSTER_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_cluster.c \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
+	$(call NATIVE_CLUSTER_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-cluster-arch: $(NATIVE_CLUSTER_BIN)
+
+native-cluster-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-cluster-arch
+
+native-cluster-la:
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-cluster-arch
+
+native-cluster-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-cluster-arch
+native-cluster-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-cluster-arch
+native-cluster-arm32:
+	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-cluster-arch
+native-cluster-rv32:
+	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-cluster-arch
+native-cluster-ppc64le:
+	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-cluster-arch
+
+native-cluster-all: native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-ppc64le
 
 define NATIVE_SVC_RECIPE
 @mkdir -p $(dir $(5))

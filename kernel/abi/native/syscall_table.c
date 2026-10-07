@@ -157,6 +157,14 @@ int64_t sys_a20_monitor_query(const a20_syscall_args_t *args);
 int64_t sys_a20_task_mem_read(const a20_syscall_args_t *args);
 int64_t sys_a20_task_mem_write(const a20_syscall_args_t *args);
 
+/* Forward declarations for Cluster syscalls (sys_native_cluster.c) */
+int64_t sys_a20_cluster_set_self(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_export(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_route(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_event_subscribe(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_link_status(const a20_syscall_args_t *args);
+
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \
     static int64_t a20_handle_##name(const a20_syscall_args_t *args) \

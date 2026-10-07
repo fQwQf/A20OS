@@ -204,6 +204,9 @@ smoke-native-svc:
 smoke-native-contract:
 	$(PYTHON) tools/smoke.py smoke-native-contract
 
+smoke-native-cluster:
+	$(PYTHON) tools/smoke.py smoke-native-cluster
+
 smoke-native-personality:
 	$(PYTHON) tools/smoke.py smoke-native-personality
 

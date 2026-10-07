@@ -514,6 +514,20 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0507 | `event_watch_fs` | `int64_t event_watch_fs(a20_handle_t dir, a20_handle_t queue, uint32_t mask, uint64_t user_data)` | 当前为目录普通 watch 占位；路径过滤/VFS 事件源未实现 |
 | 0x0508 | `channel_call` | `int64_t channel_call(a20_channel_call_args_t *args)` | 融合 RPC：一次陷入完成发送请求 + 等待回复 |
 
+### Cluster (0x0520)
+
+集群 ABI（docs/cluster/01-abi.md）。核心是 `cluster_connect` 返回一个普通
+`A20_OBJ_CHANNEL_ENDPOINT` 句柄，之后调用方用普通 channel 调用即可，不必知道对端在本机还是另一台机器。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0520 | `cluster_set_self` | `int64_t cluster_set_self(a20_cluster_set_self_args_t *args)` | 注入本节点 ID 与能力位，仅一次，需 `A20_RIGHT_CLUSTER_ADMIN` |
+| 0x0521 | `cluster_export` | `int64_t cluster_export(a20_cluster_export_args_t *args)` | 把本机 channel 端点导出为集群可寻址，返回 32 位 slot |
+| 0x0522 | `cluster_connect` | `int64_t cluster_connect(a20_cluster_connect_args_t *args)` | 建立指向远端（`(LOCAL, slot)` 即本机）的代理端点，返回 channel 句柄 |
+| 0x0523 | `cluster_route` | `int64_t cluster_route(a20_cluster_route_args_t *args)` | 注入/更新/删除路由表项，需 `A20_RIGHT_CLUSTER_ADMIN` |
+| 0x0524 | `cluster_event_subscribe` | `int64_t cluster_event_subscribe(a20_cluster_event_subscribe_args_t *args)` | 订阅链路/路由/导出事件，返回 EventQ 句柄 |
+| 0x0525 | `cluster_link_status` | `int64_t cluster_link_status(a20_cluster_link_status_args_t *args)` | 查询链路状态、RTT 与收发计数器 |
+
 ### Network (0x0600)
 
 | 编号 | 名称 | 签名 | 说明 |

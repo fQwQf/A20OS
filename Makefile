@@ -491,6 +491,7 @@ NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
+NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
@@ -505,7 +506,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
-                          $(NATIVE_CHESS_BIN)
+                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.

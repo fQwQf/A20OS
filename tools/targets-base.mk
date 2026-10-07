@@ -19,6 +19,7 @@
 		native-futex-arch smoke-native-futex native-debug-test-arch smoke-native-debug native-ext-test-arch smoke-native-ext mlibc-sysroot mlibc-hello-rv mlibc-sbase mlibc-mksh smoke-mlibc smoke-mlibc-sbase smoke-mlibc-fork smoke-mlibc-mksh \
 		native-ipc-arch native-ipc-la smoke-native-ipc \
 		native-contract-arch native-contract-la smoke-native-contract \
+		native-cluster-arch native-cluster-la smoke-native-cluster \
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
 		native-uedud-arch native-uedud-rv smoke-iommu-udriver-isolation \
 		native-personality-arch native-personality-rv smoke-native-personality \
@@ -41,7 +42,8 @@
 		native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-ppc64le native-mm-all \
 		native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-ppc64le native-signal-all \
 		native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-ppc64le native-ipc-all \
-		native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all
+		native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all \
+		native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-ppc64le native-cluster-all
 
 FORCE:
 
