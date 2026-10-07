@@ -429,6 +429,23 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-rv64-trap-t0: PASS (real timer IRQ preserved kernel t0); log saved to $log',
     },
+    # Regression for a timer/preemption yield between park prepare and commit.
+    # The bootarg test creates a runnable helper, yields with PREPARING active,
+    # then commits and is woken by that helper.
+    'smoke-rv64-sched-park-yield': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/rv64-sched-park-yield.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '@BUILD_DIR@/kernel.elf', '-append', 'a20.sched_park_yield_selftest=1'],
+        'expect': ['RV64_SCHED_PARK_YIELD: PASS', 'System is going down for power-off NOW'],
+        'forbid': ['RV64_SCHED_PARK_YIELD: FAIL', 'KERNEL PANIC|Kernel panic|PANIC'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-rv64-sched-park-yield: PASS (prepare/yield/commit/wake); log saved to $log',
+    },
     # Page-table cursor race gate.
     #
     # anonprov=4096 is load-bearing, not decoration: mm_pt_provision_anon() is

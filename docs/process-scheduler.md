@@ -56,6 +56,8 @@ IDLE -> PREPARING -> PARKED -> WOKEN -> IDLE
 
 事件可以在 `PREPARING` 阶段到达，因此“先唤醒、后提交”是合法竞态。`wait_seq` 每次 prepare 都递增；任何延迟事件必须同时匹配 task 和`wait_seq`，否则视为旧 token，不能影响下一次等待。
 
+prepare 与 commit 之间的本地 yield 不属于等待事件：它只在 `park_lock` 下把当前任务从 `RUNNING` 转为 `READY`，保留 `PREPARING` token，并由正常的 switch-completion 路径重新入队。异步事件仍由 wake 路径处理；若事件先到，只把 token 置为 `WOKEN`。因此调度切换不会伪造一次等待事件，也不会让未入队的任务保持 `RUNNING`。
+
 ## 2. 锁域与锁顺序
 
 不存在一把覆盖所有调度操作的“全局调度锁”。当前锁域是：
