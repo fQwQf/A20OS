@@ -17,6 +17,7 @@ nothing about how the trees are compiled changes.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import os
 import filecmp
@@ -24,6 +25,7 @@ import shutil
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -92,63 +94,92 @@ def submake(args: list[str]) -> int:
     return r.returncode
 
 
+@contextmanager
+def user_output_lock(user_build_dir: str):
+    """Serialize stamp decisions and writers that share a user output tree.
+
+    The lock is a sibling of ``build/<variant>``, not inside it: a rebuild may
+    remove that directory, but must not unlink the inode another process is
+    using to coordinate.  Build IDs/options are deliberately absent from the
+    lock name because all configurations for one USER_VARIANT write the same
+    output root.
+    """
+    output_dir = REPO / user_build_dir
+    lock_dir = output_dir.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{output_dir.name}.a20-build.lock"
+    with lock_path.open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def cmd_user(a) -> int:
     if not a.build_id:
         raise SystemExit("error: user stamp needs --build-id")
-    stamp = REPO / a.stamp
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    need_build = need_clean = False
-    init = a.user_build_dir + "/init"
-    mksh = a.user_build_dir + "/mksh"
+    with user_output_lock(a.user_build_dir):
+        stamp = REPO / a.stamp
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        need_build = need_clean = False
+        init = a.user_build_dir + "/init"
+        mksh = a.user_build_dir + "/mksh"
 
-    # The shell tested these as an elif chain, so a changed build id short
-    # circuits the two later checks rather than also running them.
-    if stamp_id(stamp) != a.build_id:
-        need_build = need_clean = True
-    elif not os.access(init, os.X_OK) or not os.access(mksh, os.X_OK):
-        need_build = True
-    elif any_newer(stamp, a.roots.split(), a.skip.split()):
-        need_build = True
+        # Re-evaluate only after taking the output-root lock. Another make
+        # process may have completed this exact build while we were waiting.
+        if stamp_id(stamp) != a.build_id:
+            need_build = need_clean = True
+        elif not os.access(init, os.X_OK) or not os.access(mksh, os.X_OK):
+            need_build = True
+        elif any_newer(stamp, a.roots.split(), a.skip.split()):
+            need_build = True
 
-    if not need_build:
-        print(f"[USER] {a.build_id} up to date")
-        return 0
-    common = [f"ARCH={a.arch}", f"NOMMU={a.nommu}",
-              f"OPT={a.user_opt}", f"PROFILE={a.profile}",
-              f"BUILD_DIR=build/{a.user_variant}"]
-    if need_clean:
-        rc = submake(["-C", "user", *common, "clean"])
+        if not need_build:
+            print(f"[USER] {a.build_id} up to date")
+            return 0
+        # A clean user rebuild removes the whole shared output directory, and
+        # even an incremental rebuild can rewrite native targets.  Invalidate
+        # the sibling stamp while holding the same output-root lock so another
+        # make process cannot treat deleted native artifacts as current.
+        (stamp.parent / ".native-build-id").unlink(missing_ok=True)
+        common = [f"ARCH={a.arch}", f"NOMMU={a.nommu}",
+                  f"OPT={a.user_opt}", f"PROFILE={a.profile}",
+                  f"BUILD_DIR=build/{a.user_variant}"]
+        if need_clean:
+            rc = submake(["-C", "user", *common, "clean"])
+            if rc != 0:
+                return rc
+        rc = submake(["-C", "user", *common])
         if rc != 0:
             return rc
-    rc = submake(["-C", "user", *common])
-    if rc != 0:
-        return rc
-    stamp.write_text(a.build_id + "\n")
-    return 0
+        stamp.write_text(a.build_id + "\n")
+        return 0
 
 
 def cmd_native(a) -> int:
     if not a.build_id:
         raise SystemExit("error: native stamp needs --build-id")
-    stamp = REPO / a.stamp
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    need_build = False
-    if stamp_id(stamp) != a.build_id:
-        need_build = True
-    elif any(not os.access(b, os.X_OK) for b in a.binaries.split()):
-        need_build = True
-    elif any_newer(stamp, a.roots.split(), []):
-        need_build = True
+    with user_output_lock(a.stamp.rsplit("/", 1)[0]):
+        stamp = REPO / a.stamp
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        need_build = False
+        if stamp_id(stamp) != a.build_id:
+            need_build = True
+        elif any(not os.access(b, os.X_OK) for b in a.binaries.split()):
+            need_build = True
+        elif any_newer(stamp, a.roots.split(), []):
+            need_build = True
 
-    if not need_build:
-        print(f"[NATIVE] {a.build_id} up to date")
+        if not need_build:
+            print(f"[NATIVE] {a.build_id} up to date")
+            return 0
+        rc = submake([f"ARCH={a.arch}", f"NOMMU={a.nommu}", f"OPT={a.opt}",
+                      "native-programs"])
+        if rc != 0:
+            return rc
+        stamp.write_text(a.build_id + "\n")
         return 0
-    rc = submake([f"ARCH={a.arch}", f"NOMMU={a.nommu}", f"OPT={a.opt}",
-                  "native-programs"])
-    if rc != 0:
-        return rc
-    stamp.write_text(a.build_id + "\n")
-    return 0
 
 
 def cmd_build_flags(a) -> int:
