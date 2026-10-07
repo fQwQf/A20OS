@@ -1220,8 +1220,10 @@ void proc_sched_assert_task_locked(task_t *t)
     if (!t)
         return;
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    /* A local yield may publish READY while preserving a PREPARING token.
+     * The task remains runnable and will consume that token after dispatch. */
     if (t->park_state == PROC_PARK_PREPARING &&
-        t->state != PROC_RUNNING)
+        t->state != PROC_RUNNING && t->state != PROC_READY)
         panic("sched invariant: pid=%d preparing state=%d", t->pid, t->state);
     if (t->park_state == PROC_PARK_PARKED &&
         t->state != PROC_BLOCKED)
@@ -2233,7 +2235,23 @@ void proc_yield(void) {
         eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
         if (cur->pid >= 4)
             ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
-        proc_make_ready(cur);
+        /* A local reschedule is not an event wake. In particular, when a
+         * wait token is PREPARING, proc_make_ready() records an early wake
+         * without changing RUNNING; sched() could then switch this task out
+         * permanently because switch completion only queues READY tasks.
+         * Publish the local RUNNING -> READY transition under park_lock while
+         * leaving the park token untouched for commit() to consume. */
+        uint64_t flags = spin_lock_irqsave(&cur->park_lock);
+        if (cur->state == PROC_RUNNING) {
+            if (!cur->on_cpu ||
+                __atomic_load_n(&cur->owner_cpu, __ATOMIC_RELAXED) !=
+                    cpu_current_id())
+                panic("sched yield: pid=%d not owned by current cpu", cur->pid);
+            cur->state = PROC_READY;
+            cur->cpu_id = cpu_current_id();
+        }
+        proc_sched_assert_task_locked(cur);
+        spin_unlock_irqrestore(&cur->park_lock, flags);
     }
     sched();
 }
