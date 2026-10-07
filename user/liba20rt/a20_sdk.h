@@ -21,6 +21,7 @@
 #include "a20_registry.h"
 #include "a20_system.h"
 #include "a20_pager.h"
+#include "a20_cluster.h"
 
 /* Pure utility functions (no syscall dependency) */
 #include "a20_string.h"

@@ -44,7 +44,8 @@ typedef enum a20_object_type {
     A20_OBJ_VMAR             = 17,  /* address-region reservation node */
 } a20_object_type_t;
 
-/* 14 capability rights bits (docs/native-abi/06-security.md §1) */
+/* 15 capability rights bits (docs/native-abi/06-security.md §1, plus
+ * A20_RIGHT_CLUSTER_ADMIN from docs/cluster/01-abi.md §3) */
 #define A20_RIGHT_READ       (1ull << 0)
 #define A20_RIGHT_WRITE      (1ull << 1)
 #define A20_RIGHT_EXEC       (1ull << 2)
@@ -59,12 +60,16 @@ typedef enum a20_object_type {
 #define A20_RIGHT_CONTROL    (1ull << 11)
 #define A20_RIGHT_ADMIN      (1ull << 12)
 #define A20_RIGHT_SIGNAL     (1ull << 13)
+/* Cluster administration: cluster_set_self / cluster_route / cluster_export
+ * (docs/cluster/01-abi.md §3). A plain cluster_connect does not need it. */
+#define A20_RIGHT_CLUSTER_ADMIN (1ull << 14)
 
 #define A20_RIGHTS_ALL  (A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_EXEC | \
                          A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP | \
                          A20_RIGHT_TRANSFER | A20_RIGHT_MAP | A20_RIGHT_WAIT | \
                          A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT | A20_RIGHT_CONTROL | \
-                         A20_RIGHT_ADMIN | A20_RIGHT_SIGNAL)
+                         A20_RIGHT_ADMIN | A20_RIGHT_SIGNAL | \
+                         A20_RIGHT_CLUSTER_ADMIN)
 
 #define A20_RIGHTS_NONE ((a20_rights_t)0)
 
@@ -96,6 +101,14 @@ typedef enum a20_object_type {
 #define A20_ERR_RANGE                22
 #define A20_ERR_TYPE_MISMATCH        23
 #define A20_ERR_EXPIRED              25
+
+/* ---- Cluster status codes (docs/cluster/01-abi.md) ----
+ * Appended after the 25 codes above; each one has exactly one trigger so a
+ * remote failure can be mapped back to a cause without ambiguity. */
+#define A20_ERR_NODE_UNREACHABLE     26   /* no route, link DOWN, TTL exhausted, no set_self */
+#define A20_ERR_CLUSTER_TIMEOUT      27   /* remote CALL past deadline; link-up timeout */
+#define A20_ERR_REMOTE_CLOSED        28   /* peer endpoint closed (remote CLOSE) */
+#define A20_ERR_CLUSTER_UNSUPPORTED  29   /* cross-node handle/donate, MCU frag/broadcast, HELLO hash clash */
 
 /* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
 
