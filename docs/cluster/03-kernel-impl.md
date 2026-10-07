@@ -143,7 +143,7 @@ python3 tools/cluster-ref/check_c_side.py    # refdec.c 过全部金样，1889 c
 
 ### 7.4 传输层联调环境
 
-双 QEMU 实例 L2 互联（WA2 的验收环境，现已可用于链路层验证）：`tools/cluster-net-up.sh` 一键起 `instances/qemu-riscv64-cluster-{a,b}.toml` 两实例并互 ping，拓扑与实测记录见 [02-udp-demo.md](02-udp-demo.md)。跨机 cluster 流量本身要等 WA2 的 `kernel/cluster/udp.c`（未实现）。
+双 QEMU 实例 L2 互联（WA2 的验收环境，现已可用于链路层验证）：`tools/cluster-net-up.sh` 一键起 `instances/qemu-riscv64-cluster-{a,b}.toml` 两实例并互 ping，拓扑与实测记录见 [02-udp-demo.md](02-udp-demo.md)。跨机 cluster 流量本身要等 WA2 规划中的 `kernel/cluster/udp.c` 实现；该文件目前尚未创建。
 
 ## 8. 使用要点与已规避的坑
 

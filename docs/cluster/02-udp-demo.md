@@ -151,7 +151,7 @@ guest_netmask = "255.255.255.0" # → a20.netmask
 
 ## 给 WA2 的接手说明
 
-- 本环境对集群传输零假设：`kernel/cluster/udp.c` 落地后，帧走 guest 内 `socket(AF_INET, SOCK_DGRAM)` 到对端 `10.0.3.x:44020`，链路 MTU 1472 以内不分片（04-§3）。
+- 本环境对集群传输零假设：WA2 规划中的 UDP 传输文件 `kernel/cluster/udp.c` 尚未创建；实现后帧将走 guest 内 `socket(AF_INET, SOCK_DGRAM)` 到对端 `10.0.3.x:44020`，链路 MTU 1472 以内不分片（04-§3）。
 - 演示结果（demo-echo 四路径，05-§5）按 00-design 的约定回填到本文档末尾的"验收记录"一节。
 - 故障注入（丢包/分区）在 loopback 钩子上做（04-§2），不在本隧道上做；本隧道只证明"链路通"。
 - `--keep` 留下的两个 guest 可直接用于 clusterd 联调；宿主端口 44121/44122 只承载 L2 隧道帧，与 guest 集群端口无冲突。

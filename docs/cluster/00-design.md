@@ -56,7 +56,7 @@ tools/cluster-net-up.sh --skip-build    # 产物已就绪时跳过构建
 tools/cluster-net-up.sh --keep          # 验证后保留两个 guest
 ```
 
-注意：这一环境**不含任何 `kernel/cluster/` 数据面行为**——内核 UDP 传输 `kernel/cluster/udp.c` 未实现（WA2），跨机 `cluster_connect` + `channel_call` 今天跑不通。拓扑、端口、选型理由与手动检查方法见 [02-udp-demo.md](02-udp-demo.md)。
+注意：这一环境**不含任何 `kernel/cluster/` 数据面行为**——内核 UDP 传输 `kernel/cluster/udp.c` 尚未实现，文件仍是 WA2 规划项，跨机 `cluster_connect` + `channel_call` 今天跑不通。拓扑、端口、选型理由与手动检查方法见 [02-udp-demo.md](02-udp-demo.md)。
 
 ### 1.5 UART 传输与 MCU 叶子
 
@@ -250,7 +250,7 @@ W0 ABI 冻结 ✔（串行门禁，已收官）
  └─ WE 生产硬化（功能全部完成后）：WE1 故障注入/模糊/soak/性能 → WE2 安全审查 + 运维文档 + 终验
 ```
 
-文件所有权（避免并行轨道互相踩）：WA 拥有 `kernel/cluster/`（除 uart.c）、`kernel/abi/native/sys_native_cluster.c`；WB 拥有 `tools/cluster-ref/`、`instances/*cluster*`、演示脚本；WC 拥有 `kernel/cluster/uart.c`、`kernel/mcu/` 改动；WD 拥有 `user/svc/clusterd.c`、`user/svc/jobd.c`。跨所有权的修改必须先在规范文档中登记。
+文件所有权（避免并行轨道互相踩）：WA 拥有 `kernel/cluster/`（除 uart.c）、`kernel/abi/native/sys_native_cluster.c`；WB 拥有 `tools/cluster-ref/`、`instances/*cluster*`、演示脚本；WC 拥有 `kernel/cluster/uart.c`、`kernel/mcu/` 改动；WD 规划拥有尚未创建的 `user/svc/clusterd.c`、`user/svc/jobd.c`。跨所有权的修改必须先在规范文档中登记。
 
 每个轨道的独立可执行 prompt 见 [impl-prompts.md](impl-prompts.md)——它是**后续轨道的实施计划**（WA2/WA3/WD/WE），不是已完成功能的描述。
 
@@ -283,8 +283,8 @@ W0 ABI 冻结 ✔（串行门禁，已收官）
 
 本文原无此节；2026-10-07 改写时按源码核对补建。各子系统文档（01-abi、02、03、04）的落地状态清单仍然是偏差的**主登记处**，此处只登记顶层叙述与代码现实之间的偏差，不重复子系统条目。
 
-1. **管理权限的承载**（核对 2026-10-07）：本文旧版写「`cluster_export`/`cluster_route` 要求 `A20_RIGHT_CLUSTER_ADMIN`（新 right 位，加入 `kernel/abi/native/rights.h` 体系）」。代码未新增 right 位：本树 rights 附着于 handle、无任务级位图，管理权限由 effective uid 0 承载（`sys_native_cluster.c:64`-`:69`，文件头 `:10`-`:14` 说明）。01-abi 落地状态已登记；本文 §6 按代码改写。
-2. **cluster errno 的物理位置**：旧版写「负值为 errno，见 `kernel/abi/native/errno.h`」。实际四个 cluster errno 定义在 `kernel/include/ipc/ipc.h:105`-`:111`；`kernel/include/abi/native/errno.h` 只是 re-export 头（其文件头注明「status code space is internal」）。已按代码改写 §6。
+1. **管理权限的承载**（核对 2026-10-07）：本文旧版曾写「`cluster_export`/`cluster_route` 要求 `A20_RIGHT_CLUSTER_ADMIN`（新 right 位，加入已不存在的 `kernel/abi/native/rights.h` 体系）」。代码未新增 right 位：本树 rights 附着于 handle、无任务级位图，管理权限由 effective uid 0 承载（`sys_native_cluster.c:64`-`:69`，文件头 `:10`-`:14` 说明）。01-abi 落地状态已登记；本文 §6 按代码改写。
+2. **cluster errno 的物理位置**：旧版曾引用已不存在的 `kernel/abi/native/errno.h`。实际四个 cluster errno 定义在 `kernel/include/ipc/ipc.h:105`-`:111`；`kernel/include/abi/native/errno.h` 只是 re-export 头（其文件头注明「status code space is internal」）。已按代码改写 §6。
 3. **行号漂移修正**：`a20_channel_ep_t` 现位于 `kernel/include/ipc/ipc.h:217`（`peer` 字段 `:221`）；`A20_CH_MAX_DATA` 定义于 `ipc.h:147`（旧版经 `kernel/include/fs/ufs_proto.h:10` 间接引用，现改为直指定义处）。
 4. **远程消息一律 CALL/CALL_REPLY**：v0 数据面不使用 `SEND` 帧承载远程单向消息（02-§2 实现期决定，`clx_internal.h:14`-`:15`）；`SEND` 类型保留在线格式与金样中。
 5. **`connect` 的 `timeout_ms` v0 未消费**：loopback 无 HELLO 建链握手，connect 即时返回；该字段按头部校验规则校验但不被读取，WA2 接入（01-abi 落地状态 #13）。
