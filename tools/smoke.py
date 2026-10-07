@@ -613,7 +613,18 @@ def main(argv: list[str] | None = None) -> int:
     if a.case not in CASES:
         print(f"unknown case {a.case!r}; try --list", file=sys.stderr)
         return 2
-    case = CASES[a.case]
+    case = dict(CASES[a.case])
+    if a.case == "smoke-driver-lifecycle":
+        case["argv"] = list(case["argv"])
+        build_vars = case["build"]["vars"]
+        build_dir = sh(["make", "--no-print-directory", *build_vars,
+                        "print-build-dir"],
+                       capture_output=True, text=True)
+        if build_dir.returncode != 0:
+            raise SystemExit("could not resolve driver lifecycle build dir")
+        kernel_arg = case["argv"].index("-kernel") + 1
+        case["argv"][kernel_arg] = \
+            f"{build_dir.stdout.strip()}/kernel.elf"
     case.setdefault("name", a.case)
     if a.print_argv:
         print(" ".join(qemu_argv(case)))
