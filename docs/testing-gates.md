@@ -4,7 +4,7 @@
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
 
-门禁存在不等于门禁已通过：任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果（最后核实：2026-09）。
+门禁存在不等于门禁已通过：任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。门禁目录（目标名、契约说明及实现路径）最后复核：2026-10-08；本轮具体运行结果见[开发中断恢复与集成验收](development-recovery-2026-10-08.md)。
 
 | 领域 | 门禁 |
 | --- | --- |
@@ -382,7 +382,16 @@ device 半边的桥接由一个聚合 pending 位把门，活性下限由两件�
 
 失败时门禁会列出全部 `file:line`；把该行改成 `defined(...) || defined(...)` 的完整形式即可（当前两种 ABI 语义下等价），不要改成 `#ifdef CONFIG_ABI_BOTH` 单条件——那会让 `ABI=native` 构建丢掉该代码块。
 
-守卫改宽之后，缺的定义必须在每个源集里都存在。MCU 是一处源集与 ABI 宏解耦的地方：`Makefile:1177` 把 `KERNEL_SRC` 整体换成 `components/trim.mk` 的 `TRIM_PROFILE_MCU_SOURCES`，那份表含 `kernel/proc/timer_heap.c` 与 `kernel/proc/sched.c` 但不含 `kernel/proc/timer_posix.c`，而 `TRIM_PROFILE_MCU_CPPFLAGS` 照样发 `-DCONFIG_MCU`，`ABI=both` 照样发 `-DCONFIG_ABI_BOTH -DCONFIG_ABI_NATIVE`。所以 `posix_timer_tick()` / `posix_itimer_cpu_tick()` 在 armv7m 上唯一的定义在 MCU 源集之外，由 `kernel/mcu/mcu_stubs.c` stub（与同文件里 `a20_timer_tick()` / `a20_monitor_tick()` / `psi_tick()` 的处理同形——MCU 源集既无 `syscall/` 也无 `abi/linux/`，POSIX 定时器在那里根本无法被 arm）。armv7m 不进 CI（`Makefile` 的 `check-stm32f103` 只在 `HOST_OS=Darwin` 分支里进 `DEFAULT_KERNEL_CHECK_TARGETS`），所以“新增 ABI 守卫后 MCU 链接失败”这一类只能靠 `make -s print-trim-mcu-sources` 之类的静态比对挡住，CI 不会告诉你。
+守卫改宽之后，缺的定义必须在每个源集里都存在。MCU 是一处源集与 ABI 宏解耦的地方：`Makefile:1275` 把 `KERNEL_SRC` 整体换成 `components/trim.mk` 的 `TRIM_PROFILE_MCU_SOURCES`，那份表含 `kernel/proc/timer_heap.c` 与 `kernel/proc/sched.c` 但不含 `kernel/proc/timer_posix.c`，而 `TRIM_PROFILE_MCU_CPPFLAGS` 照样发 `-DCONFIG_MCU`，`ABI=both` 照样发 `-DCONFIG_ABI_BOTH -DCONFIG_ABI_NATIVE`。所以 `posix_timer_tick()` / `posix_itimer_cpu_tick()` 在 armv7m 上唯一的定义在 MCU 源集之外，由 `kernel/mcu/mcu_stubs.c` stub（与同文件里 `a20_timer_tick()` / `a20_monitor_tick()` / `psi_tick()` 的处理同形——MCU 源集既无 `syscall/` 也无 `abi/linux/`，POSIX 定时器在那里根本无法被 arm）。armv7m 不进 CI（`Makefile` 的 `check-stm32f103` 只在 `HOST_OS=Darwin` 分支里进 `DEFAULT_KERNEL_CHECK_TARGETS`），所以“新增 ABI 守卫后 MCU 链接失败”这一类需要静态检查现有源集和 stub，不能依靠普通 ABI 守卫发现；CI 也不会做目标链接。
+
+静态复核时直接检查源集与 stub，不启动构建：
+
+```sh
+rg -n '^TRIM_PROFILE_MCU_SOURCES :=|kernel/proc/timer_posix\.c' components/trim.mk
+rg -n 'posix_timer_tick|posix_itimer_cpu_tick' kernel/mcu/mcu_stubs.c kernel/proc/timer_posix.c
+```
+
+第一条显示 MCU 源集含 `sched.c` 与 `timer_heap.c`、不含 `timer_posix.c`；第二条核对 MCU stub 与完整实现的符号定义。`make check-trim-registry` 另行验证 trim 清单和生成文件一致，但不验证跨源集的链接符号覆盖。
 
 #### 已知项：守卫改宽后新暴露的面
 
