@@ -1216,7 +1216,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
  */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 static int mm_cow_from_status(task_t *t, mm_struct_t *mm,
-                              uint64_t page_va, uint64_t stval,
+                              uint64_t page_va,
                               pfn_t *retired_pfn)
 {
     *retired_pfn = PFN_NONE;
@@ -1309,7 +1309,8 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     /* Prefer the status-led private-anon copy; it uses a cursor and compare-
      * replace.  The per-mm lock also excludes the legacy fallback below. */
     pfn_t status_old_pfn = PFN_NONE;
-    if (mm_cow_from_status(t, mm, stval & ~(uint64_t)(PAGE_SIZE - 1), stval,
+    if (mm_cow_from_status(t, mm,
+                           stval & ~(uint64_t)(PAGE_SIZE - 1),
                            &status_old_pfn)) {
         spin_unlock(&mm->lock);
         if (status_old_pfn != PFN_NONE) {
