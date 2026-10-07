@@ -138,7 +138,7 @@ SKIP，gate 就变成"过了但什么都没测"。
 
 1. **`trap.S:461-466` 的注释与实现不符**：它说 guest 跑在一棵"带着宿主子树的
    自己的 stage-1 根"上、进出各有一次 satp 切换。实际是 vsatp 停在 MODE=Bare、
-   satp 全程不动（`hyp_arch.c:184-193`、`hyp_vcpu_asm.S:200-205`），trap 返回时
+   satp 全程不动（`hyp_arch.c:317-322`、`hyp_vcpu_asm.S:305-308` 与 `:340`），trap 返回时
    硬件自己完成 satp 与 vsatp 的暂存/恢复。注释是早期形状的残留。
 2. **只在 TCG 上验证过**：`hedeleg`/`hideleg` 全写 0（`hyp_arch.c:168-169`），
    这一片只在 QEMU 10.0.13（Debian 1:10.0.13+ds-0+deb13u1）的
@@ -149,7 +149,7 @@ SKIP，gate 就变成"过了但什么都没测"。
    `rwx==7`（R|W|X）落到 `PAGE_READ|PAGE_WRITE|PAGE_EXEC`，正常翻译。
    工作树现在按 `HYP_RAM_PAGE_PROT (PTE_R|PTE_W|PTE_X)` 装 guest RAM
    （`kernel/hyp/hyp.c:50`），`hyp_vm_load()` 装进去的镜像用同一个值
-   （`kernel/hyp/hyp_vcpu.c:91` 的 `HYP_GUEST_PAGE_PROT`）。所以"guest 代码与
+   （`kernel/hyp/hyp_vcpu.c:100` 的 `HYP_GUEST_PAGE_PROT`）。所以"guest 代码与
    数据不能同页、镜像不能带栈"这个后果不存在——A20OS 的 `.bss` 与其中的
    `_stack_end` 正需要 R|W。
 4. **句柄类型没进对象枚举**：Native ABI 的 VM/vcpu 用私有 type 18/19
@@ -179,3 +179,6 @@ SKIP，gate 就变成"过了但什么都没测"。
 | 大页叶建模 | `make smoke-mm-stress`（huge_install>=1 + 审计全零） |
 | 无锁 COW | 同上（cow_from_status>=1）+ `make check-mm-pt-lock-order`（32 条） |
 | 锁模型回归 | `make check-mm-lock-model`（14 条） |
+| **guest 控制台输入（设备边界那一段）** | `make smoke-hyp-console-p0`——**绿**，但它的 guest 是 13 条指令的合成程序，只证明设备模型，不证明 A20OS-as-guest 能交互 |
+| **guest 走到用户态 shell 并能交互** | `make smoke-hyp-shell`——**红**（本轮实跑）。真 guest 死在 `[INIT] entering scheduler...` 的内核栈页 use-after-free 上；泵是通的（`rx_bytes=18`），但 guest 从没 exec `/bin/init`、从没读过一个字节。逐行对账见 [03-usage.md §3.4.2](03-usage.md) |
+

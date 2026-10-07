@@ -353,8 +353,15 @@ static int blob_name(struct blob *b, const char *name)
     size_t n = strlen(name) + 1;
     if (blob_put(b, name, n) < 0)
         return -1;
-    while (b->len & 3)
-        return blob_u32(b, 0);
+    /* One zero BYTE at a time.  blob_u32() writes 4 bytes, and 4 does not
+ * change len & 3, so padding with it spins until blob_put() overflows the
+ * cap -- which is exactly what it used to do here, misaligning the whole
+ * struct block past the root node and leaving the guest's fdt.c reader
+ * desynchronised at offset 0x44. */
+    while (b->len & 3) {
+        if (blob_put(b, "\0", 1) < 0)
+            return -1;
+    }
     return 0;
 }
 
@@ -363,8 +370,10 @@ static int blob_value(struct blob *b, const void *v, size_t n)
 {
     if (blob_put(b, v, n) < 0)
         return -1;
-    while (b->len & 3)
-        return blob_u32(b, 0);
+    while (b->len & 3) {
+        if (blob_put(b, "\0", 1) < 0)
+            return -1;
+    }
     return 0;
 }
 
@@ -404,7 +413,7 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
         return 0;
     }
     sr.len = 1;
-    st.p[0] = '\0';
+    sr.p[0] = '\0';      /* strings block offset 0 IS the empty string */
 
     if (!bootargs)
         bootargs = "";

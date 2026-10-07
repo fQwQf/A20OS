@@ -38,6 +38,12 @@
  * in the VM so the match state travels with the object the host sets up. */
 #define HYP_VM_MARKER_MAX 32
 
+/* Guest console ingress ring, in bytes.  One guest UART page's worth of input
+ * is 256 bytes, which is also the HOST rx ring's size (RX_BUF_SIZE in
+ * kernel/drivers/char/uart.c) -- the two cannot grow independently anyway,
+ * since this ring is filled by draining the host one. */
+#define HYP_VM_RX_RING 256
+
 typedef struct hyp_vm {
     uint32_t magic;
 #define HYP_VM_MAGIC 0x48594d56 /* 'HYMV' */
@@ -59,6 +65,25 @@ typedef struct hyp_vm {
     uint32_t  marker_pos;     /* sliding-match cursor into marker[] */
     int       marker_seen;    /* 1 once the marker matched in full */
     char      marker[HYP_VM_MARKER_MAX];
+
+    /* ---- v3: guest console INPUT (host keystrokes -> guest UART RBR) ----
+     * Appended on the same terms as the block above: nothing here is pinned by
+     * hyp_vcpu_asm.S, and a stage-2 entry address derived from any of the
+     * first five fields must not move.
+     *
+     * This is a plain single-producer/single-consumer ring with a one-slot
+     * slack convention: head == tail is empty, so HYP_VM_RX_RING bytes of
+     * storage carry HYP_VM_RX_RING-1.  The producer is hyp_dev_pump_rx() and
+     * the consumer is the guest's own LSR/RBR read, both running on the CPU
+     * that is running the guest (see hyp_dev.c for why that is a fact rather
+     * than a hope), so the two indices need no lock; they are still written
+     * with __atomic ops so the code does not depend on that for its memory
+     * ordering.  rx_bytes is the lifetime ingress count, the ingress
+     * counterpart of console_bytes. */
+    uint8_t   rx_buf[HYP_VM_RX_RING];
+    uint32_t  rx_head;      /* producer: next slot to write */
+    uint32_t  rx_tail;      /* consumer: next slot to read  */
+    uint64_t  rx_bytes;     /* host bytes handed to this guest, lifetime */
 } hyp_vm_t;
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
