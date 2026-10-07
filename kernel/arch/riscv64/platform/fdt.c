@@ -7,6 +7,7 @@
 #include "core/bootargs.h"
 #include "firmware.h"
 #include "platform.h"
+#include "fdt_isa.h"
 #include "drivers/core/driver_core.h"
 
 #define FDT_MAGIC       0xd00dfeedU
@@ -53,25 +54,6 @@ static void riscv64_window_from_board(void)
     }
 }
 
-static int fdt_isa_has_token(const uint8_t *value, uint32_t len,
-                             const char *extension)
-{
-    size_t ext_len = strlen(extension);
-    if (!value || ext_len == 0 || ext_len > len)
-        return 0;
-
-    for (uint32_t off = 0; off + ext_len <= len; off++) {
-        int left_ok = off == 0 || value[off - 1] == '_';
-        int right_ok = off + ext_len == len ||
-                       value[off + ext_len] == '_' ||
-                       value[off + ext_len] == '\0';
-        if (left_ok && right_ok &&
-            memcmp(value + off, extension, ext_len) == 0)
-            return 1;
-    }
-    return 0;
-}
-
 int riscv64_fdt_has_isa_extension(const char *extension)
 {
     const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
@@ -113,8 +95,10 @@ int riscv64_fdt_has_isa_extension(const char *extension)
         if (p + padded > endp || off_strings + nameoff >= totalsize)
             return 0;
         const char *propname = (const char *)(stringsp + nameoff);
-        if (strcmp(propname, "riscv,isa") == 0 &&
-            fdt_isa_has_token(p, len, extension))
+        int legacy_isa = strcmp(propname, "riscv,isa") == 0;
+        if ((legacy_isa || strcmp(propname, "riscv,isa-extensions") == 0) &&
+            fdt_isa_string_has_extension((const char *)p, len, extension,
+                                         legacy_isa))
             return 1;
         p += padded;
     }
