@@ -2385,7 +2385,7 @@ int mm_cursor_cow_snapshot_pin(mm_cursor_t *cur, vaddr_t addr,
      * the snapshot frame while the caller copies it. */
     uint64_t irq = spin_lock_irqsave(&pfa.lock);
     uint16_t refs = pfa.meta[pfn].refcount;
-    if (refs <= 1 || refs == UINT16_MAX) {
+    if (refs <= 1 || refs == (uint16_t)0xffffu) {
         spin_unlock_irqrestore(&pfa.lock, irq);
         cursor_leaf_unlock(cur);
         return 0;
