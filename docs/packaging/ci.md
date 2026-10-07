@@ -123,6 +123,39 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
 `fault.c` 的架构 hook 调用，`Makefile` 也没有放宽 `pt.h` 的守卫——所以 arm32 现在
 在 CI 列表内。若 arm32 在 CI 里变红，那是新的真实回归，不是被豁免的状态。
 
+2026-10-07 核对的 CI 实况与本地验证边界：
+
+- **推送树上的 arm32 是红的**。run 37347553976（sha `9b7944da6`）的
+  `kernel-build-arm32` 以 6 个错误死在 `cow.o`：`kernel/mm/cow.c` 在推送树上没有
+  `ARCH_HAS_PGTABLE_OPS` 守卫，`mm_pt_leaf_table` / `mm_pt_peek` /
+  `mm_pt_sync_status` 隐式声明加 int-conversion。make 在第一个错误即中止（该 job
+  只编译了 24 个目标文件），所以 `mprotect.c` / `munmap.c` / `fault.c` / `mm.c`
+  在 arm32 上的红灯 CI 从未观测到——本地用下述沙箱逐文件定位后全部修复，连同
+  `pt_map_huge()` 的五参签名与 `mm_fork_page_class()` 的无 sidecar 桩。
+- **CI 整体自 2026-09-29 起每次运行都失败**，最后一次绿灯是 2026-09-21 的
+  `bfa60707`（run 35572403113）。最新一次 run 37368039326（`1d03b2808`）死在
+  `toolchain-gates`，`resolve-kernel-arch-matrix` 与 `resolve-buildenv-image` 被
+  取消，`kernel-build-*` 与 `smoke-riscv64` 直接 skipped——构建矩阵没有跑到。
+  上一段"arm32 变红即真实回归"的判据当前没有生效的观测面；恢复顺序是先修
+  `toolchain-gates`，矩阵才有机会暴露架构回归。
+- **本机对 arm32 的验证边界**：这台机器没有 `gcc-arm-linux-gnueabihf` /
+  `gcc-arm-none-eabi` 也没有 sudo，arm32 的本地检查是宿主 gcc 语法沙箱——取
+  `make ARCH=arm32 ABI=both BRINGUP=1 kernel-only -n` 打出的真实编译行，全部
+  `-I` / `-D` / `-Werror` 逐字保留，只把交叉编译器换成宿主 gcc、剥掉 ARM 专属
+  代码生成旗标（`-march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard
+  -mno-unaligned-access` 等）、`-c` 换成 `-fsyntax-only`，并压掉两个宿主位宽
+  伪报（`-Wno-type-limits`、`-Wno-pointer-to-int-cast`）。它能断言守卫拓扑、
+  声明可见性与 `-Werror` 组诊断（本轮 8 个 mm 文件全绿），但**不能**验证 ARM
+  内联汇编与代码生成；arm32 的最终判据仍是 CI 的 `kernel-build-arm32`，而这要
+  等上述本地提交推送、且 `toolchain-gates` 恢复绿灯。
+
+2026-10-08 本地完整矩阵复验：
+
+- 使用临时解包的 ARM32 交叉工具链与 `linux-libc-dev-armhf-cross` UAPI 头文件，执行
+  `PATH=/tmp/a20-arm-toolchain/root/usr/bin:$PATH LD_LIBRARY_PATH=/tmp/a20-arm-toolchain/root/usr/lib/x86_64-linux-gnu make -j8 FF_LINUX_UAPI_ROOT=/tmp/a20-arm-toolchain/root/usr check-build-matrix`，七个 hosted 架构的 bring-up 内核及用户态均通过。运行前 `make clean` 清空了专用 `.kernel-build` 外部缓存，并清除了七个架构的用户构建输出；clean 保留 `.kernel-build` 符号链接及 `.a20-build-root` 标记。
+- 矩阵发现并修复了 arm32 `timer_edge` 对 timer syscall 编号的假设：本仓库 musl 的 arm32 `time_t` 为 64 位，测试现在明确使用 `timer_settime64` / `timer_gettime64` 原始编号，并断言时间结构宽度与 syscall ABI 相符。
+- 这是 2026-10-08 本地源码树的构建结果，不代表 GitHub Actions 已运行或变绿。2026-10-07 所记远端红灯与 CI toolchain-gates 阻断仍需推送后在远端复核；本地完整矩阵通过不能代替该 CI 观察。
+
 `kernel-build` 与 `build` 分开不是重复：`build` 要产出发布打包产物
 （apk 仓库 + world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前
 构建不过（`user/cmds/stress/poll_edge.c` 在 riscv32 上引用了 musl 未声明的
