@@ -131,10 +131,32 @@ void hyp_arch_vstimecmp_set(uint64_t deadline)
 
 void hyp_arch_host_tlb_fence(void)
 {
-    /* SFENCE.VMA with every operand zero: this hart, every address.  A superset
-     * of whatever the guest asked its own SFENCE.VMA for, which is what the
-     * caller's comment already claimed and what is harmless here. */
+    /* Two different TLBs live on this hart and the guest's is not the one
+     * `sfence.vma` reaches.
+     *
+     * The guest does not run on the host's page tables: the run loop parks
+     * the host satp and puts vsatp in its place (hyp_vcpu.c), so the guest's
+     * translations live in the VS-stage TLB.  In the H extension SFENCE.VMA
+     * executed in HS-mode does NOT invalidate VS-stage entries -- HFENCE.GVMA
+     * is the instruction that does.  Issuing only sfence.vma therefore left
+     * the guest's old page-table translations cached, which is not a
+     * performance defect but a correctness one: after the guest switched
+     * address spaces and then edited its own page tables, the hardware kept
+     * resolving through the stale ones.  Measured effect in the smoke log:
+     * the guest reached "[INIT] entering scheduler...", then trapped with
+     * "corrupted kernel sp detected / pfn N sits on buddy free list" -- a
+     * stack pointer that had been cached through a table the guest had
+     * already replaced.
+     *
+     * So: sfence.vma for the host-execution-context entries this function's
+     * contract already covers, and hfence.gvma x0,x0 for the VS-stage ones
+     * the guest asked about.  The .insn encoding is the same one
+     * hyp_arch_s2_fence() uses (R-type, opcode SYSTEM 0x73, funct3 0,
+     * funct7 0110001, rd x0) with rs1 = rs2 = x0, which per the H extension
+     * invalidates every VS-stage entry on this hart for every VMID.
+     */
     __asm__ volatile("sfence.vma" ::: "memory");
+    __asm__ volatile(".insn r 0x73, 0, 0x31, x0, x0, x0" ::: "memory");
 }
 
 /* ---- vcpu half: guest entry state and the trap dispatcher's query ---- */

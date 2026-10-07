@@ -37,7 +37,9 @@
 /* "shutdown" / "fault" / "error" / "none", for the exit=N(name) reports. */
 const char *hyp_guest_exit_name(long exit_reason);
 
-/* Mirror of struct hyp_vm_status in kernel/abi/linux/sys_a20_bridge.c. */
+/* Mirror of struct hyp_vm_status in kernel/abi/linux/sys_a20_bridge.c.  The
+ * kernel struct is one copy_to_user of the whole thing, so the two have to
+ * agree field for field and in order; a field is only ever APPENDED. */
 struct hyp_guest_status {
     uint64_t exit;
     uint64_t scause;
@@ -45,6 +47,7 @@ struct hyp_guest_status {
     uint64_t htval;
     uint64_t marker_seen;
     uint64_t console_bytes;
+    uint64_t rx_bytes;     /* v3: host bytes handed to the guest's UART */
 };
 
 /* ---- files ---- */

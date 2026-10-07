@@ -11,6 +11,16 @@
  * piece of shared state below is reached through __atomic ops, and the guest's
  * own UART never waits for anything.
  *
+ * THE ONE LOCK THIS FILE TAKES.  hyp_dev_pump_rx(), called on the same guest
+ * trap path just before the dispatcher routes the trap, drains the host
+ * console with uart_try_getc() -- which takes the host UART's rx_lock and
+ * releases it again before returning.  It is a leaf lock (the LOCK_ORDER note
+ * in kernel/drivers/char/uart.c says nothing is taken under it), it is not
+ * held across the sret, and no sleep happens under it, so the constraint
+ * above holds.  It is spelled out here rather than left implicit because the
+ * header otherwise reads as an absolute, and the next reader needs to know
+ * which line to distrust.
+ *
  * WHAT IS MODELLED, AND WHY SO LITTLE.  The guest is a real kernel, not a
  * device-test program: its boot walks a DTB, sizes the CLINT, initializes a
  * PLIC, and enables interrupts it expects to be delivered.  A second-stage
@@ -28,6 +38,7 @@
 #include "core/timer.h"
 #include "core/errno.h"
 #include "mm/pt.h"
+#include "drivers/char/uart.h"
 
 /* qemu-virt's map, from the platform spec (docs/hypervisor/00-design.md S5):
  * a 16550 at 0x10000000 and the CLINT at 0x02000000.  Only these two ranges
@@ -39,7 +50,7 @@
 #define HYP_CLINT_SIZE 0x00010000ULL
 
 /* 16550 register file, at byte offsets inside the UART page. */
-#define HYP_UART_THR    0x0   /* write: transmit; read: RBR, no input here */
+#define HYP_UART_THR    0x0   /* write: transmit; read: RBR (guest input) */
 #define HYP_UART_IER    0x1
 #define HYP_UART_FCR_IIR 0x2  /* write: FCR; read: IIR */
 #define HYP_UART_LCR    0x3
@@ -49,10 +60,14 @@
 #define HYP_UART_SCR    0x7
 
 /* LSR as a 16550 with an always-empty holding register reports: THRE (bit 5,
- * holding register empty) and TEMT (bit 6, shift register empty).  The
- * contract fixes this value, and it is the one LSR bit a guest's polled
- * console driver loops on, so a guest printing a character never waits. */
+ * holding register empty) and TEMT (bit 6, shift register empty).  Those two
+ * are constant and the contract fixes them: they are what a guest's polled
+ * console driver loops on, so a guest printing a character never waits.
+ * Bit 0 (DR) is NOT part of that constant any more -- it tracks the VM's
+ * ingress ring, so it is computed per read (hyp_uart_read_reg below).  See the
+ * v3 note in kernel/include/hyp/hyp_vcpu.h. */
 #define HYP_UART_LSR_TX_EMPTY 0x60
+#define HYP_UART_LSR_DR       0x01
 /* IIR: bit 0 low means "an interrupt is pending".  Nothing here ever raises
  * one -- the guest's UART interrupts are delegated, not injected by this
  * model -- so the honest read is "no interrupt pending" (0x01).  RAZ here
@@ -175,15 +190,119 @@ uint64_t hyp_vm_console_bytes(hyp_vm_t *vm)
     return __atomic_load_n(&vm->console_bytes, __ATOMIC_RELAXED);
 }
 
+/* ---- guest console input: the host keystrokes a guest can steal ----
+ *
+ * hyp_dev_pump_rx() moves whatever the host typed into the VM's ingress ring;
+ * the guest's RBR read below pops it back out.  That is the whole v1 channel,
+ * and it is deliberately POLL-ONLY: nothing here raises an interrupt, so the
+ * guest finds out that input exists by polling LSR, exactly as it already
+ * does for the host's own console.  Injecting a UART interrupt instead is a
+ * two-part change -- hvip injection AND a PLIC the guest can SCLAIM from -- and
+ * doing only the first half replaces a working polled path with one that never
+ * gets an interrupt delivered.
+ */
+void hyp_dev_pump_rx(hyp_vm_t *vm)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return;
+
+    /* ONE BYTE AT A TIME, AND ONLY WHAT FITS.  uart_try_getc() is the
+     * non-blocking reader (kernel/drivers/char/uart.c): it takes rx_lock --
+     * a leaf lock that the LOCK_ORDER comment there says nothing else is taken
+     * under -- and returns without parking.  uart_getc() is the one that must
+     * never appear on this path: it proc_park_prepare()s when the ring is
+     * empty, and a sleep inside a guest trap has nobody to wake it.
+     *
+     * SINGLE READER, AND THAT IS THE POINT.  The host rx ring is one 256-byte
+     * buffer with exactly one consumer, and this steals from it: while a
+     * guest runs, the host shell is parked in a syscall and does not read, so
+     * in this slice the steal is the only reader there is.  It stops being
+     * true the moment a second CPU can run a host shell against the same ring
+     * (CONFIG_NR_CPUS>1), which is why the limitation is written here instead
+     * of left for the next person to discover as a stolen keystroke.
+     *
+     * STOLEN, NOT COPIED.  uart_try_getc() removes the byte from the host
+     * ring, so a byte a guest never reads is GONE when the VM is freed -- it
+     * does not reappear in the host ring to be executed as a command after
+     * hypvm returns.  A tee (copy, leave the original) would avoid stealing a
+     * keystroke from a second CPU at the cost of that one: pick this half now,
+     * because dropping unconsumed input is recoverable and a command the user
+     * did not type is not.
+     *
+     * Ctrl-C NEVER ARRIVES.  uart_rx_push() intercepts 0x03 for SIGINT before
+     * it reaches the ring (kernel/drivers/char/uart.c), so a guest cannot be
+     * interrupted this way and, for the same reason, cannot be knocked out of a
+     * runaway guest with ^C.  Carrying it would mean changing uart_rx_push(),
+     * which is outside this file. */
+    for (;;) {
+        uint32_t head = __atomic_load_n(&vm->rx_head, __ATOMIC_RELAXED);
+        uint32_t next = (head + 1) % HYP_VM_RX_RING;
+        if (next == __atomic_load_n(&vm->rx_tail, __ATOMIC_ACQUIRE))
+            break;                  /* guest ring full: the rest waits */
+
+        int c = uart_try_getc();
+        if (c < 0)
+            break;                  /* host ring empty: done for now */
+        vm->rx_buf[head] = (uint8_t)c;
+        __atomic_store_n(&vm->rx_head, next, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&vm->rx_bytes, 1, __ATOMIC_RELAXED);
+    }
+}
+
+uint64_t hyp_vm_rx_bytes(hyp_vm_t *vm)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return 0;
+    return __atomic_load_n(&vm->rx_bytes, __ATOMIC_RELAXED);
+}
+
+/* Is there a byte waiting for the guest?  LSR.DR is a PEEK, not a pop: a
+ * driver is entitled to ask "is input ready" any number of times before it
+ * decides to read, and a real 16550's DR bit does not consume anything. */
+static int hyp_uart_rx_ready(hyp_vm_t *vm)
+{
+    return __atomic_load_n(&vm->rx_tail, __ATOMIC_RELAXED) !=
+           __atomic_load_n(&vm->rx_head, __ATOMIC_ACQUIRE);
+}
+
+/* Pop the oldest byte, or -1 when the guest ring is empty. */
+static int hyp_uart_pop_rx(hyp_vm_t *vm)
+{
+    uint32_t tail = __atomic_load_n(&vm->rx_tail, __ATOMIC_RELAXED);
+    uint32_t head = __atomic_load_n(&vm->rx_head, __ATOMIC_ACQUIRE);
+    if (tail == head)
+        return -1;
+    int c = (int)vm->rx_buf[tail];
+    __atomic_store_n(&vm->rx_tail, (tail + 1) % HYP_VM_RX_RING,
+                     __ATOMIC_RELEASE);
+    return c;
+}
+
 /* ---- UART ---- */
 
-static uint8_t hyp_uart_read_reg(uint64_t off)
+static uint8_t hyp_uart_read_reg(hyp_vm_t *vm, uint64_t off, int byte_index)
 {
     switch (off) {
     case HYP_UART_FCR_IIR: return HYP_UART_IIR_NONE;
-    case HYP_UART_LSR:     return HYP_UART_LSR_TX_EMPTY;
+    case HYP_UART_LSR:     return (uint8_t)(HYP_UART_LSR_TX_EMPTY |
+                                (hyp_uart_rx_ready(vm) ? HYP_UART_LSR_DR : 0));
     case HYP_UART_MSR:     return HYP_UART_MSR_CARRIER;
-    case HYP_UART_THR:     return 0;   /* RBR: this model has no input */
+    case HYP_UART_THR: {   /* RBR: pop one byte, or 0 on an empty ring -- the
+                             * same answer a real 16550 gives a read that races
+                             * the last byte, and the only one a driver that
+                             * checked LSR first can observe.
+                             *
+                             * FIRST BYTE ONLY.  hyp_dev_access() decomposes an
+                             * access byte by byte, so a multi-byte read of
+                             * RBR would otherwise pop that many keystrokes and
+                             * report all but the first as data.  Nothing in
+                             * this slice issues one (the guest's
+                             * arch_uart_poll_getc() reads a single byte), but
+                             * the loss would present as vanished input rather
+                             * than as a decoder bug. */
+        int c = (byte_index == 0) ? hyp_uart_pop_rx(vm) : -1;
+        return (c >= 0) ? (uint8_t)c : 0;
+    }
     default:               return 0;   /* IER/LCR/MCR/SCR: RAZ */
     }
 }
@@ -285,9 +404,9 @@ static void hyp_dev_access(hyp_vm_t *vm, uint64_t off,
 
 static uint8_t hyp_uart_rd(void *vm, uint64_t off, int i)
 {
-    (void)vm;
-    (void)i;
-    return hyp_uart_read_reg(off);
+    /* byte_index is passed through deliberately: hyp_uart_read_reg uses it to
+     * pop at most one byte per access (see the RBR case). */
+    return hyp_uart_read_reg((hyp_vm_t *)vm, off, i);
 }
 
 static void hyp_uart_wr(void *vm, uint64_t off, uint8_t v)

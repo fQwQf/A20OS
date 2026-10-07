@@ -370,12 +370,13 @@ int main(int argc, char **argv)
         return fail_call("vm_status", r);
 
     printf("HYPVM: exit=%ld(%s) scause=0x%llx stval=0x%llx htval=0x%llx "
-           "marker_seen=%llu console_bytes=%llu\n",
+           "marker_seen=%llu console_bytes=%llu rx_bytes=%llu\n",
            exit_reason, hyp_guest_exit_name(exit_reason),
            (unsigned long long)st.scause, (unsigned long long)st.stval,
            (unsigned long long)st.htval,
            (unsigned long long)st.marker_seen,
-           (unsigned long long)st.console_bytes);
+           (unsigned long long)st.console_bytes,
+           (unsigned long long)st.rx_bytes);
 
     /* Same two judgements hyp_boot makes: the marker was matched over guest
      * console bytes (so the host's own identical banner cannot satisfy it),
@@ -388,10 +389,11 @@ int main(int argc, char **argv)
                      (unsigned long long)st.console_bytes,
                      (unsigned long)marker_len);
 
-    printf("HYPVM: PASS marker_seen=%llu console_bytes=%llu exit=%ld(%s) "
-           "mem=%llu MiB\n",
+    printf("HYPVM: PASS marker_seen=%llu console_bytes=%llu rx_bytes=%llu "
+           "exit=%ld(%s) mem=%llu MiB\n",
            (unsigned long long)st.marker_seen,
-           (unsigned long long)st.console_bytes, exit_reason,
+           (unsigned long long)st.console_bytes,
+           (unsigned long long)st.rx_bytes, exit_reason,
            hyp_guest_exit_name(exit_reason), (unsigned long long)mem_mib);
     return HYPVM_EXIT_OK;
 }

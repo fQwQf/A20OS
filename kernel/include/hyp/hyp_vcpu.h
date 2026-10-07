@@ -188,7 +188,9 @@ int  hyp_vm_set_ram(hyp_vm_t *vm, uint64_t base, uint64_t size);
  * members, so the smoke can gate on real behaviour:
  *   - qemu-virt 16550 UART [0x10000000, 0x10001000): THR writes go to the
  *     host console and count into the guest console byte counter; LSR
- *     reads return 0x60 (THR+TSR empty); IER/FCR etc. store silently.
+ *     reads return 0x60 (THR+TSR empty) PLUS bit 0 when the VM's ingress
+ *     ring holds a byte -- see the v3 note at the end of this header, which
+ *     corrects the v2 "always 0x60" wording; IER/FCR etc. store silently.
  *   - CLINT mtime [0x2000000, 0x2010000): reads return the host timebase
  *     (a guest with a frozen clock spins forever in its delay loops);
  *     other CLINT registers RAZ/WI.
@@ -240,5 +242,44 @@ int  hyp_vm_marker_seen(hyp_vm_t *vm);
 
 /* Guest console byte count since run start (for the smoke's report). */
 uint64_t hyp_vm_console_bytes(hyp_vm_t *vm);
+
+/* ================================================================
+ * v3 -- guest console INPUT: host keystrokes reach the guest's UART.
+ * Append-only; no field above moved.  Design record:
+ * docs/hypervisor/01-a20os-guest.md.
+ * ================================================================
+ *
+ * v3 changed two things the v2 text above states as constants, so they are
+ * corrected HERE rather than left for someone to discover from a guest that
+ * never sees a keystroke:
+ *
+ *   v2 said "LSR reads return 0x60 (THR+TSR empty)".  That is still the
+ *   TRANSMIT half and it is still fixed -- bits 5 and 6 never change, which is
+ *   what keeps a guest printing a character from waiting.  Bit 0 (DR, data
+ *   ready) is no longer part of the constant: it reports whether the VM's
+ *   ingress ring holds a byte, so LSR reads 0x60, or 0x61 when input waits.
+ *
+ *   v2 said "RBR: this model has no input".  RBR now pops the oldest byte off
+ *   that ring and returns it, or 0 when the ring is empty.  One byte per
+ *   access, never one per byte of a wide access.
+ *
+ * THERE IS NO INTERRUPT BEHIND THIS.  Nothing here raises hvip or vsip, and
+ * IIR still reads "no interrupt pending": the channel is poll-only and a guest
+ * finds input by polling LSR.  Injecting a UART interrupt is a two-part
+ * change -- hvip injection PLUS a PLIC the guest can SCLAIM a source from --
+ * and doing only the first half would replace a working polled path with one
+ * whose interrupt is never delivered. */
+
+/* Drain the host console into vm's ingress ring.  Non-blocking: takes the
+ * host UART's rx_lock briefly and returns with it released, and the guest trap
+ * dispatcher calls it BEFORE routing the trap, so a byte that arrived with a
+ * host IRQ is already in the ring by the time the guest next reads LSR.
+ * Never uart_getc(): that parks when the ring is empty, and nothing on this
+ * path can wake it. */
+void     hyp_dev_pump_rx(hyp_vm_t *vm);
+
+/* Host bytes handed to this guest's UART since the VM was created -- the
+ * ingress counterpart of hyp_vm_console_bytes(). */
+uint64_t hyp_vm_rx_bytes(hyp_vm_t *vm);
 
 #endif /* _HYP_VCPU_H */

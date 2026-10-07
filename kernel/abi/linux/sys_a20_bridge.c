@@ -493,8 +493,10 @@ int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args)
  * widths would need packing rules that a user program cannot see, and every
  * field here is a small integer or a raw CSR value.
  *
- * user/cmds/core/hyp_boot.c mirrors this layout; it is the user-side ABI copy,
- * the same way hyp_test.c mirrors the syscall numbers.
+ * user/cmds/core/hyp/hyp_guest.h mirrors this layout; it is the user-side ABI
+ * copy, the same way hyp_test.c mirrors the syscall numbers.  Fields are
+ * APPENDED and never reordered: the whole struct is one copy_to_user, and the
+ * user copy is a separate translation unit that has to agree by hand.
  */
 struct hyp_vm_status {
     uint64_t exit;            /* hyp_exit_reason_t of the vcpu that ran */
@@ -503,6 +505,7 @@ struct hyp_vm_status {
     uint64_t htval;
     uint64_t marker_seen;
     uint64_t console_bytes;
+    uint64_t rx_bytes;        /* v3: host bytes handed to the guest's UART */
 };
 
 /* SYS_hyp_vm_status(vm, out) -> 0 */
@@ -541,6 +544,7 @@ int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
     }
     st.marker_seen    = (uint64_t)hyp_vm_marker_seen(vm);
     st.console_bytes  = hyp_vm_console_bytes(vm);
+    st.rx_bytes       = hyp_vm_rx_bytes(vm);
 
     if (copy_to_user(uout, &st, sizeof(st)) < 0)
         return -EFAULT;
