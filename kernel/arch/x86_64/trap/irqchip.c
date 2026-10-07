@@ -278,8 +278,10 @@ static void ioapic_discover(void) {
 
     for (size_t i = 0; i < found; i++) {
         /* An entry with no address is a MADT this kernel cannot map; taking it
-         * would redirect the fallback controller onto a bogus window. */
-        if (!listed[i].base || listed[i].base > X86_HIGH_RAM_MAP_END)
+         * would redirect the fallback controller onto a bogus window.  No upper
+         * bound is needed: the field is 32 bits wide and the direct map covers
+         * all 4 GiB, so every value that fits is reachable. */
+        if (!listed[i].base)
             continue;
         uintptr_t base = listed[i].base + PAGE_OFFSET;
         /* Version register: bits 23:16 hold max_entries minus one.  Reading it

@@ -424,6 +424,20 @@ BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
+
+# Gates that launch QEMU themselves need the image paths the default variant
+# writes, but BUILD_VARIANT carries a suffix for every option that changes
+# compiled code (see line 419) -- so a gate that spells the directory out goes
+# stale the moment one of those defaults flips, and fails with a missing
+# fat32.img rather than anything to do with what it was testing.  This prints
+# the directory the current configuration actually uses, so a gate asks the
+# Makefile instead of predicting it.  Call it with the same overrides the gate
+# builds with:
+#
+#   $(MAKE) ARCH=x86_64 print-build-dir
+.PHONY: print-build-dir
+print-build-dir:
+	@echo '$(BUILD_DIR)'
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 EXT4_JOURNAL_IMG = $(BUILD_DIR)/ext4-journal.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
