@@ -156,6 +156,12 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
 - 矩阵发现并修复了 arm32 `timer_edge` 对 timer syscall 编号的假设：本仓库 musl 的 arm32 `time_t` 为 64 位，测试现在明确使用 `timer_settime64` / `timer_gettime64` 原始编号，并断言时间结构宽度与 syscall ABI 相符。
 - 这是 2026-10-08 本地源码树的构建结果，不代表 GitHub Actions 已运行或变绿。2026-10-07 所记远端红灯与 CI toolchain-gates 阻断仍需推送后在远端复核；本地完整矩阵通过不能代替该 CI 观察。
 
+2026-10-08 本地网络运行门禁也已顺序复验：`make -j8 smoke-lwip-memp`、
+`smoke-net-lanes`、`smoke-net-lanes-n1` 与 `smoke-network-suite` 均通过。N4
+报告 4-lane occupancy 为 `0 0 1 0`，RX lane 有计数且无 drop；N1/N4 的四路
+stress verdict 完全一致。Suite 为 11 passed、1 declared-absent（`alg_test`）。
+日志位于 `.kernel-build/smoke/`；这是本地运行记录，不表示远端 CI 已运行或变绿。
+
 `kernel-build` 与 `build` 分开不是重复：`build` 要产出发布打包产物
 （apk 仓库 + world 镜像），因此需要可用的用户态；`kernel-build` 是纯内核
 bring-up 门禁，与 `check-kernel-build-all` 迭代的是同一个 `check-<arch>-bringup`
