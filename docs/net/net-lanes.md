@@ -1576,9 +1576,17 @@ bottom-half 需要 ring 已排空，而只在读者唤醒后才跑的 poll 在�
 这条连接自己的本地四元组，已建立连接、UDP 与被动开出的子连接因此落在同一条 lane 上。
 
 **处理侧**：`a20_lwip_lane_drain_locked()`（`lwip_stack.c:1043`）取 lane 的消费权
-（`net_lane_rx_claim()`，`net_lane.h:318`），拿 `g_lwip_lock`，
+（`net_lane_rx_claim()`，`net_lane.h:318`），并在必要时拿 `g_lwip_lock`，
 `net_lane_ctx_push(lane)`，然后逐帧 `pbuf_alloc` + `pbuf_take` + `n->input()`。
 驱动遍历的入口是 `a20_lwip_lane_drain_all()`（`lwip_stack.c:1083`）。
+
+有两个调用上下文，不能混为一谈：`a20_lwip_poll_rx_locked()` 已持有
+`g_lwip_lock`，其内联 drain 以 `lwip_locked=1` 调用，只做非阻塞 lane claim，
+不再取或释放全局锁；`a20_lwip_lane_rx_poll()` 从 scheduler bottom-half 在锁外调用，
+以 `lwip_locked=0` 调用，先 claim，再获取并释放 `g_lwip_lock`。lane claim 是
+try-claim：若锁外 poller 已持有 lane 并等待全局锁，锁内 poller 必须跳过该 lane，
+让出全局锁后由前者处理。这样既避免全局锁自重入，也避免“持全局锁等待 lane、
+持 lane 等全局锁”的锁序环。
 
 #### 三处必须记住的坑
 

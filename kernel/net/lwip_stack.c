@@ -1026,12 +1026,12 @@ static void a20_lwip_lane_input_one(unsigned lane, struct netif *n,
  *
  * THE ORDERING RULES, because both of them are easy to get wrong:
  *
- *   - the lane is claimed before g_lwip_lock, never the other way round.  The
- *     claim is only ever taken from process context and g_lwip_lock is taken
- *     from interrupt context, so the reverse order is an inversion with a real
- *     deadlock behind it: an interrupt on this CPU would wait for g_lwip_lock
- *     while this CPU holds it and spins for the claim.  Nothing takes a lane
- *     claim under g_lwip_lock, so the pair is a strict order, not a cycle.
+ *   - an unlocked caller claims the lane before acquiring g_lwip_lock.  A
+ *     caller already holding g_lwip_lock may also try the claim, but it must
+ *     never wait for it (the claim is non-blocking), and must not reacquire
+ *     g_lwip_lock.  This handles both orderings without a cycle: if an
+ *     unlocked caller owns the claim while waiting for the core lock, the
+ *     locked caller simply skips that lane and releases the core lock.
  *   - the emptiness test happens before the lock, while the claim is held.  A
  *     producer only ever adds, so a lane found non-empty cannot become empty
  *     under us, and the test saves taking the core lock for nothing on the
@@ -1040,13 +1040,16 @@ static void a20_lwip_lane_input_one(unsigned lane, struct netif *n,
  * The claim is given back before returning, including on the early return, so
  * a lane is never left unclaimable.
  */
-static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget)
+static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget,
+                                    int lwip_locked)
 {
     if (!net_lane_rx_claim(lane))
         return 0;
     unsigned done = 0;
     if (net_lane_rx_ready(lane)) {
-        uint64_t flags = a20_lwip_lock();
+        uint64_t flags = 0;
+        if (!lwip_locked)
+            flags = a20_lwip_lock();
         /* Declare this lane for the whole batch: every pbuf the stack allocates
          * here belongs to the connections whose packets these are, which is
          * what makes stage C's per-lane pool table mean something.  Popped and
@@ -1067,7 +1070,8 @@ static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget)
             a20_lwip_lane_input_one(lane, n, frame, len);
         }
         net_lane_ctx_pop(prev_lane);
-        a20_lwip_unlock(flags);
+        if (!lwip_locked)
+            a20_lwip_unlock(flags);
     }
     net_lane_rx_release(lane);
     return done;
@@ -1076,11 +1080,11 @@ static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget)
 /* Drain every lane that will hand itself over.  `budget` caps each lane, not
  * the total, because the point of the stage is that four CPUs can each be
  * inside a different lane at the same time. */
-static unsigned a20_lwip_lane_drain_all(unsigned budget)
+static unsigned a20_lwip_lane_drain_all(unsigned budget, int lwip_locked)
 {
     unsigned done = 0;
     for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++)
-        done += a20_lwip_lane_drain_locked(lane, budget);
+        done += a20_lwip_lane_drain_locked(lane, budget, lwip_locked);
     return done;
 }
 #endif /* CONFIG_NET_LANES > 1 */
@@ -1364,7 +1368,7 @@ void a20_lwip_poll_rx_locked(unsigned budget)
         }
     }
 #if CONFIG_NET_LANES > 1
-    a20_lwip_lane_drain_all(budget);
+    a20_lwip_lane_drain_all(budget, 1);
     /* "Complete" has to mean the queues are empty too.  Clearing the RX pending
      * flag with frames still staged would let the reader path skip a drain it
      * should have made, and the frames would sit until the next interrupt --
@@ -1411,7 +1415,7 @@ void a20_lwip_lane_rx_poll(unsigned budget)
 {
     if (net_lane_rx_queued_total() == 0)
         return;
-    a20_lwip_lane_drain_all(budget);
+    a20_lwip_lane_drain_all(budget, 0);
 }
 #endif /* CONFIG_NET_LANES > 1 */
 
