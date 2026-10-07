@@ -185,7 +185,10 @@ CASES: dict[str, dict] = {
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/envelope-riscv64.log',
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['envelope_smoke', 'poweroff']},
-        'timeout': '60s',
+        # Includes a 40-worker active revocation test under QEMU TCG; the
+        # initial ABI scenarios completed in 60s, but the full lifecycle needs
+        # a wider runtime budget to reach the SCM_RIGHTS checks and final PASS.
+        'timeout': '180s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
         'expect': ['ENVELOPE_SMOKE: PASS'],
@@ -764,8 +767,13 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/hyp-a20os-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ',
-                  'lines': ['hyp_boot', 'poweroff']},
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ('# ', 'hyp_boot'),
+            # The guest can print shell-like text itself.  Anchor after the
+            # host-side verdict before looking for the returned host prompt.
+            ('HYP_A20OS: PASS', ''),
+            ('# ', 'poweroff'),
+        ]},
         # 300s, not 60s: every guest console byte, page-table walk and second
         # stage fault traps through the host, so a guest boot is orders of
         # magnitude slower than a host boot of the same kernel.
@@ -804,7 +812,11 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/hyp-vm-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['hypvm', 'poweroff']},
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ('# ', 'hypvm'),
+            ('HYPVM: PASS marker_seen=1', ''),
+            ('# ', 'poweroff'),
+        ]},
         # 300s, same as smoke-hyp-a20os: every guest console byte, page-table
         # walk and second-stage fault traps through the host, so a guest boot is
         # orders of magnitude slower than a host boot of the same kernel.
@@ -855,9 +867,11 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/hyp-vm-96-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ',
-                  'lines': ['hypvm -m 96 -b a20.hypguest=1,a20.hypvm=smoke',
-                            'poweroff']},
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ('# ', 'hypvm -m 96 -b a20.hypguest=1,a20.hypvm=smoke'),
+            ('HYPVM: PASS marker_seen=1', ''),
+            ('# ', 'poweroff'),
+        ]},
         'timeout': '300s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
