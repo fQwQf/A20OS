@@ -1,0 +1,60 @@
+{
+  "id": "mal-hello-len-05",
+  "category": "malformed",
+  "title": "HELLO with a 24 B payload although 02-6 fixes 32 B",
+  "doc_sections": [
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 6",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-6 fixes the HELLO payload at 32 bytes. A second copy of this check lives in the HELLO validator (02-6 layer) and is unreachable from a single frame, which is intentional defence in depth.",
+  "frame": null,
+  "raw_header": "434c0001000000000000000035818eae7520dc5e000000000000000018000801",
+  "diagnostics": {
+    "wire_len": 58,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "fixed_size_mismatch",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "fixed_payload_len_mismatch",
+    "crc_value": "0x9E8B",
+    "crc_computed": "0x9E8B"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "fixed_payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "fixed_payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-hello-len-05.hex"
+}

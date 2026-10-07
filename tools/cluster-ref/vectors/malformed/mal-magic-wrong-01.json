@@ -1,0 +1,70 @@
+{
+  "id": "mal-magic-wrong-01",
+  "category": "malformed",
+  "title": "magic 0x4C44 instead of 0x4C43",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "wrong magic",
+      "offset": 0,
+      "value": 68,
+      "was": "0x43"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "frame": null,
+  "raw_header": "444c0003000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "bad_magic",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "unchecked",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "bad_magic"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "bad_magic"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "bad_magic",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-magic-wrong-01.hex"
+}

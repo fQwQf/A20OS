@@ -507,6 +507,7 @@ NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
+NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
@@ -521,7 +522,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
-                          $(NATIVE_CHESS_BIN)
+                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.
@@ -542,7 +543,31 @@ comma := ,
 # tools/a20 checks the declared ports are free before starting (waiting, like
 # the memory/CPU preflight, when they are not).
 NET_HOSTFWD ?=
-NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
+# Per-instance network backend.  Empty = the SLIRP user backend below, which
+# every existing instance keeps using.  An instance overrides it through
+# [net].backend (emitted as this variable by tools/a20) to attach its NIC to
+# something else -- the cluster demo uses QEMU's socket UDP tunnel so two
+# instances share one L2 segment (docs/cluster/02-udp-demo.md).  hostfwd only
+# exists on the user backend, which is why NET_HOSTFWD folds into the default
+# and not into an override.
+NET_BACKEND ?=
+ifeq ($(strip $(NET_BACKEND)),)
+NET_BACKEND = user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
+endif
+NETDEV_USER = -netdev $(NET_BACKEND)
+# Per-instance NIC MAC ([net].mac -> this variable).  Empty = QEMU's built-in
+# default, which is fine for one guest but collides as soon as two instances
+# share an L2 segment.
+NET_MAC ?=
+# Guest-side static IPv4 ([net].guest_ip / guest_netmask / guest_gateway ->
+# these variables), assembled into the kernel's a20.* boot arguments below.
+# Empty = unchanged behaviour: DHCP against the SLIRP backend, or an
+# unconfigured link.  The key names are the kernel contract in
+# kernel/net/net_config.c; the net smokes in tools/targets-smoke.mk pass the
+# same keys by hand.
+NET_GUEST_IP ?=
+NET_GUEST_NETMASK ?=
+NET_GUEST_GATEWAY ?=
 SMOKE_TIMEOUT ?= 20s
 # The DNAT gate boots a guest, waits for it to install a NAT rule, and then
 # needs the host-side probe's own retry window on top, so it needs more than
@@ -916,7 +941,21 @@ endif
 # In bringup mode, boot kernel only (no fs image dependency).
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
-QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
+QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net$(if $(strip $(NET_MAC)),$(comma)mac=$(NET_MAC))
+# Guest static IPv4, when the instance declares one.  a20.dhcp=0 keeps lwIP
+# from racing a DHCP client against the static address on a link that has no
+# DHCP server (the cluster's UDP tunnel is one).  The a20.* key names are the
+# kernel contract in kernel/net/net_config.c.
+ifneq ($(strip $(NET_GUEST_IP)),)
+NET_GUEST_APPEND := a20.dhcp=0 a20.ip=$(NET_GUEST_IP)
+ifneq ($(strip $(NET_GUEST_NETMASK)),)
+NET_GUEST_APPEND += a20.netmask=$(NET_GUEST_NETMASK)
+endif
+ifneq ($(strip $(NET_GUEST_GATEWAY)),)
+NET_GUEST_APPEND += a20.gateway=$(NET_GUEST_GATEWAY)
+endif
+QEMU_FLAGS += -append '$(NET_GUEST_APPEND)'
+endif
 # Snapshot the flags before an optional second disk is appended, so the
 # world-image targets can add theirs without inheriting an strays' disk.
 QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
@@ -1250,6 +1289,7 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/fs/*/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
              $(wildcard $(KERNEL_DIR)/net/*.c) \
+             $(wildcard $(KERNEL_DIR)/cluster/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/ext/*.c) \
              $(wildcard $(KERNEL_DIR)/drvmod/*.c) \

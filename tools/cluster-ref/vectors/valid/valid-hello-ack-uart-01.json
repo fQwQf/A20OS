@@ -1,0 +1,114 @@
+{
+  "id": "valid-hello-ack-uart-01",
+  "category": "valid",
+  "title": "A -> leaf HELLO_ACK with short_addr 0x0007 assigned by the head",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 6",
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "leaf_uart",
+    "profile_tier": 1,
+    "profile_name": "MCU",
+    "state": "UP",
+    "peer_caps": 4,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-6: UART tier also completes short address allocation; the head assigns the leaf's 16-bit link address here.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 2,
+    "type_name": "HELLO_ACK",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x94DDCBB0",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 32,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 66,
+    "crc_present": true,
+    "crc_value": "0xB9A2",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 32,
+    "hex": "0102030405060708090a0b0c0d0e0f1000000303070002000102030405060708",
+    "app_offset": 0,
+    "app_len": 32,
+    "app_hex": "0102030405060708090a0b0c0d0e0f1000000303070002000102030405060708",
+    "ack_prefix": null,
+    "hello": {
+      "node_id": "0102030405060708090a0b0c0d0e0f10",
+      "node_id_hash": "0xAE8E8135",
+      "proto_min": 0,
+      "proto_max": 0,
+      "profile_tier": 3,
+      "profile_name": "SERVER",
+      "caps": 3,
+      "cap_names": [
+        "RELAY",
+        "RELIABLE"
+      ],
+      "short_addr": 7,
+      "short_addr_state": "unexpected_off_uart:0x0007",
+      "link_addr_len": 2,
+      "reserved": 0,
+      "nonce": "0102030405060708"
+    }
+  },
+  "diagnostics": {
+    "wire_len": 66,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xB9A2",
+    "crc_computed": "0xB9A2"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "valid/valid-hello-ack-uart-01.hex"
+}

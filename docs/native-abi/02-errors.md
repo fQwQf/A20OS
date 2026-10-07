@@ -48,7 +48,13 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 #define A20_ERR_TYPE_MISMATCH        23   /* typed channel 的 handle 类型/大小越界 */
 #define A20_ERR_NOT_FOUND            24   /* 对象未找到（如 event_cancel 的 target） */
 #define A20_ERR_EXPIRED              25   /* 时态能力已过期（访问 EXPIRED 状态的 handle） */
+#define A20_ERR_NODE_UNREACHABLE     26   /* 集群：无路由、链路 DOWN、TTL 耗尽、未 set_self */
+#define A20_ERR_CLUSTER_TIMEOUT      27   /* 集群：远程 CALL 超 deadline / 建链超时 */
+#define A20_ERR_REMOTE_CLOSED        28   /* 集群：对端端点已关闭 */
+#define A20_ERR_CLUSTER_UNSUPPORTED  29   /* 集群：跨机 handle/捐赠、MCU 分片/广播、HELLO 哈希冲突 */
 ```
+
+26–29 是集群子系统追加的四个码（docs/cluster/01-abi.md）。每个码只对应一个触发场景，禁止混用，这样远端失败才能无歧义地映射回原因。
 
 ---
 
@@ -103,6 +109,15 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 |--------|---------|
 | `A20_ERR_PROTOCOL` | 网络协议错误、channel 协议违反 |
 | `A20_ERR_NOT_SUPPORTED` | 操作不被当前对象类型支持 |
+| `A20_ERR_CLUSTER_UNSUPPORTED` | 集群：请求的跨机语义在 v0 不支持（handle 传递、时间片捐赠、MCU 档分片/广播、RELIABLE 协商失败） |
+
+### 3.7 集群类
+
+| 错误码 | 触发场景 |
+|--------|---------|
+| `A20_ERR_NODE_UNREACHABLE` | 目标节点无路由、链路判定 DOWN、TTL 耗尽，或本节点尚未 `cluster_set_self` |
+| `A20_ERR_CLUSTER_TIMEOUT` | 远程 `channel_call` 超过 deadline，或建链超时 |
+| `A20_ERR_REMOTE_CLOSED` | 收到对端 `CLOSE`，或已知对端句柄已释放 |
 
 ---
 
@@ -143,6 +158,8 @@ A20_ERR_CANCELED      →  ECANCELED
 A20_ERR_PROTOCOL      →  EPROTO
 A20_ERR_RANGE         →  ERANGE
 ```
+
+四个集群码（26–29）在 POSIX 兼容层没有对应项，v0 不映射：`A20_ERR_NODE_UNREACHABLE` 与 `ENETUNREACH` 语义相近但触发条件更宽，`A20_ERR_REMOTE_CLOSED` 无 POSIX 对应。兼容层应原样透传而非折叠成通用码，否则调用方无法区分本机语义与远程语义。
 
 ### 4.3 扩展规则
 

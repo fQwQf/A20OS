@@ -1,0 +1,115 @@
+{
+  "id": "valid-call-01",
+  "category": "valid",
+  "title": "A -> B CALL txid=1000 seq=1 slot=3, reliable, TLV request",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 3",
+    "02-wire-protocol.md 4",
+    "05-userspace.md 3"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-05"
+  ],
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 6,
+    "type_name": "CALL",
+    "flags": "0x0001",
+    "flags_set": {
+      "RELIABLE": true,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 1000,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 3,
+    "seq": 1,
+    "payload_len": 20,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 54,
+    "crc_present": true,
+    "crc_value": "0xC86F",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 20,
+    "hex": "0700000001800300646f74000280040008000000",
+    "app_offset": 4,
+    "app_len": 16,
+    "app_hex": "01800300646f74000280040008000000",
+    "ack_prefix": 7,
+    "view": {
+      "kind": "tlv",
+      "doc": "05-userspace.md 3",
+      "items": [
+        {
+          "tag": "0x8001",
+          "len": 3,
+          "hex": "646f74"
+        },
+        {
+          "tag": "0x8002",
+          "len": 4,
+          "hex": "08000000"
+        }
+      ]
+    }
+  },
+  "diagnostics": {
+    "wire_len": 54,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xC86F",
+    "crc_computed": "0xC86F"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "valid/valid-call-01.hex"
+}

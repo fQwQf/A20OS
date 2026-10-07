@@ -1,0 +1,45 @@
+{
+  "id": "state-inflight-limit-01",
+  "category": "state",
+  "title": "a 65th unanswered CALL on a DEFAULT link (limit 64)",
+  "doc_sections": [
+    "02-wire-protocol.md 4",
+    "02-wire-protocol.md 10",
+    "01-abi.md limits"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-4: exceeding the outstanding-CALL limit returns RESOURCE_LIMIT and must not block waiting for a free slot.",
+  "precondition": "64 CALL transactions are already unanswered on this endpoint (A20_LIMIT_CLX_INFLIGHT_DEFAULT)",
+  "followup": "tx_drops += 1 and the new call returns A20_ERR_NO_SPACE(13) (01-abi maps A20_ERR_RESOURCE_LIMIT to A20_ERR_NO_SPACE); no frame is ever built",
+  "wire_frame": null,
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "not built"
+    },
+    "dispatch": {
+      "layer": "local",
+      "action": "drop",
+      "reason": "inflight_call_limit",
+      "counters": [
+        "tx_drops"
+      ],
+      "errno": "A20_ERR_NO_SPACE",
+      "reply": null
+    }
+  }
+}

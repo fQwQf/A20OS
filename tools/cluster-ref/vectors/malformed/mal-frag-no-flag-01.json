@@ -1,0 +1,74 @@
+{
+  "id": "mal-frag-no-flag-01",
+  "category": "malformed",
+  "title": "frag=0x0005 with FRAGMENTED clear",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 3",
+    "02-wire-protocol.md 5",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set16",
+      "doc": "02-3",
+      "why": "fragment index without the flag",
+      "offset": 6,
+      "value": 5,
+      "was": "0x0000"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "frame": null,
+  "raw_header": "434c0003000005000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "frag_without_flag",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "frag_flag_mismatch",
+    "crc_value": "0x4928",
+    "crc_computed": "0x4928"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "frag_flag_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "frag_flag_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-frag-no-flag-01.hex"
+}

@@ -5,7 +5,7 @@
 TRIM_PROFILE_MCU_ARCHES := armv7m
 TRIM_PROFILE_MCU_OPT := -Os
 TRIM_PROFILE_MCU_CPPFLAGS := -DCONFIG_MCU -DCONFIG_KLOG_BUF_SIZE=256
-TRIM_PROFILE_MCU_SOURCES := kernel/mcu/main.c kernel/mcu/uart.c kernel/mcu/heap.c kernel/mcu/mcu_stubs.c kernel/core/printf.c kernel/core/string.c kernel/core/panic.c kernel/core/sync.c kernel/core/klog.c kernel/core/timekeeping.c kernel/core/stack_protector.c kernel/proc/sched.c kernel/proc/park.c kernel/proc/timer_heap.c kernel/proc/current.c kernel/proc/pid.c kernel/proc/pidns.c kernel/proc/proc.c kernel/proc/userns.c kernel/proc/task.c kernel/proc/exit.c kernel/proc/signal.c kernel/proc/cg_cpu.c kernel/mm/nommu.c kernel/fs/diskfs/fat32lite.c
+TRIM_PROFILE_MCU_SOURCES := kernel/mcu/main.c kernel/mcu/uart.c kernel/mcu/heap.c kernel/mcu/mcu_stubs.c kernel/mcu/leaf.c kernel/core/printf.c kernel/core/string.c kernel/core/panic.c kernel/core/sync.c kernel/core/klog.c kernel/core/timekeeping.c kernel/core/stack_protector.c kernel/proc/sched.c kernel/proc/park.c kernel/proc/timer_heap.c kernel/proc/current.c kernel/proc/pid.c kernel/proc/pidns.c kernel/proc/proc.c kernel/proc/userns.c kernel/proc/task.c kernel/proc/exit.c kernel/proc/signal.c kernel/proc/cg_cpu.c kernel/mm/nommu.c kernel/fs/diskfs/fat32lite.c
 TRIM_PROFILE_MCU_FORCE_NOMMU := 1
 TRIM_PROFILE_MCU_FORCE_BRINGUP := 1
 

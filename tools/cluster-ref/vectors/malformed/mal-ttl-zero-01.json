@@ -1,0 +1,99 @@
+{
+  "id": "mal-ttl-zero-01",
+  "category": "malformed",
+  "title": "ttl=0: the hop budget is exhausted",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10",
+    "01-abi.md errnos"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-13"
+  ],
+  "notes": "02-1: decrement per hop, drop at 0; 01-abi maps TTL exhaustion to A20_ERR_NODE_UNREACHABLE.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 3,
+    "type_name": "PING",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 8,
+    "ttl": 0,
+    "csum_kind": 1,
+    "wire_len": 42,
+    "crc_present": true,
+    "crc_value": "0xCF90",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 8,
+    "hex": "87d6120000000000",
+    "app_offset": 0,
+    "app_len": 8,
+    "app_hex": "87d6120000000000",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xCF90",
+    "crc_computed": "0xCF90"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "dispatch",
+      "action": "drop",
+      "reason": "ttl_expired",
+      "counters": [
+        "rx_drops"
+      ],
+      "errno": "A20_ERR_NODE_UNREACHABLE",
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-ttl-zero-01.hex"
+}

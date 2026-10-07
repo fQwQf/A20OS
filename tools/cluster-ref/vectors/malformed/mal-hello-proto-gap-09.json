@@ -1,0 +1,111 @@
+{
+  "id": "mal-hello-proto-gap-09",
+  "category": "malformed",
+  "title": "HELLO proto_min=2 proto_max=3 while local is v0",
+  "doc_sections": [
+    "02-wire-protocol.md 6",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp_hello",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "HELLO_SENT",
+    "peer_caps": 0,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 1,
+    "type_name": "HELLO",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 32,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 66,
+    "crc_present": true,
+    "crc_value": "0xFDEC",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 32,
+    "hex": "0102030405060708090a0b0c0d0e0f1002030202000006000102030405060708",
+    "app_offset": 0,
+    "app_len": 32,
+    "app_hex": "0102030405060708090a0b0c0d0e0f1002030202000006000102030405060708",
+    "ack_prefix": null,
+    "hello": {
+      "node_id": "0102030405060708090a0b0c0d0e0f10",
+      "node_id_hash": "0xAE8E8135",
+      "proto_min": 2,
+      "proto_max": 3,
+      "profile_tier": 2,
+      "profile_name": "DEFAULT",
+      "caps": 2,
+      "cap_names": [
+        "RELIABLE"
+      ],
+      "short_addr": 0,
+      "short_addr_state": "not_used_off_uart",
+      "link_addr_len": 6,
+      "reserved": 0,
+      "nonce": "0102030405060708"
+    }
+  },
+  "diagnostics": {
+    "wire_len": 66,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xFDEC",
+    "crc_computed": "0xFDEC"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "hello",
+      "action": "drop",
+      "reason": "hello_proto_not_negotiable",
+      "counters": [
+        "hello_rejects"
+      ],
+      "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+      "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+    }
+  },
+  "hex_file": "malformed/mal-hello-proto-gap-09.hex"
+}

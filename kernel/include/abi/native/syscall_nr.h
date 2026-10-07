@@ -99,6 +99,14 @@
 #define A20_SYS_event_watch_fs    0x0507
 #define A20_SYS_channel_call      0x0508
 
+/* Cluster (0x0520; docs/cluster/01-abi.md) */
+#define A20_SYS_cluster_set_self        0x0520
+#define A20_SYS_cluster_export         0x0521
+#define A20_SYS_cluster_connect        0x0522
+#define A20_SYS_cluster_route          0x0523
+#define A20_SYS_cluster_event_subscribe 0x0524
+#define A20_SYS_cluster_link_status    0x0525
+
 /* Network (0x0600) */
 #define A20_SYS_net_socket        0x0600
 #define A20_SYS_net_bind          0x0601

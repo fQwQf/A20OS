@@ -1,0 +1,53 @@
+{
+  "id": "slip-mal-oversize-05",
+  "category": "slip",
+  "title": "unterminated stream of 602 decoded bytes exceeds the 512 B RX buffer",
+  "doc_sections": [
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "04-4: the leaf owns a single static 512 B receive buffer. When it fills before an END the half frame must be dropped and the receiver resyncs on the next END; the note records 'oversize'. Nothing is written past the buffer -- that is the property 06-1 P-fuzz checks.",
+  "slip": {
+    "slip_frames": [],
+    "slip_notes": [
+      "oversize"
+    ],
+    "slip_stream_len": 634
+  },
+  "frame_hex": "",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 0,
+      "slip_notes": [
+        "oversize"
+      ]
+    }
+  },
+  "hex_file": "slip/slip-mal-oversize-05.slip.hex"
+}
