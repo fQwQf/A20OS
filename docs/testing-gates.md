@@ -710,6 +710,15 @@ listener；`lwip` 档把已绑定的 PCB 转成真正的 lwIP LISTEN pcb，由�
 是"本次运行的环境没有覆盖该能力"，属于**运行**的事实；`known_absent` 是"项目已决定
 不做该能力"，属于**树**的事实，门禁本该把它钉住）。
 
+2026-10-08 本地 RV64 复验：`make -j8 smoke-lwip-memp`、`make -j8
+smoke-net-lanes`、`make -j8 smoke-net-lanes-n1` 与 `make -j8
+smoke-network-suite` 顺序通过。4-lane stress 完成 4 轮、每轮 1 MiB 的四路传输，
+报告 `lanes: count=4 sockets=1 occupancy: 0 0 1 0`；`/proc/a20/netmem` 的 lane
+分配/释放与 RX/drop 行均有实测计数，staged RX 为 0。N1 对照中 1-lane 与
+4-lane 的 `NET_STRESS_TEST: PASS` 行逐字相同。完整 suite 报告 11 passed、1
+declared-absent（`alg_test`）；对应 `.kernel-build/smoke/*-riscv64.log` 无
+panic。该记录只描述 2026-10-08 本地运行，不代表远端 CI 状态。
+
 AF_ALG 是后者的典型：它刻意不提供任何算法（见 `kernel/net/socket_alg.c`），`bind()` 必然
 失败，`alg_test` 如实返回 78（ABSENT）。此前套件把 ABSENT 一律当失败，于是
 `smoke-network-suite` 在 `main` 上就已经是红的——网络栈无论怎么改都不可能让它变绿，
