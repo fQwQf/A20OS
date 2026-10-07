@@ -1,0 +1,55 @@
+{
+  "id": "slip-mal-unescaped-02",
+  "category": "slip",
+  "title": "stream ends on a lone ESC (inter-byte timeout before the escape code)",
+  "doc_sections": [
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "04-4: silence > 50 ms drops the half frame.",
+  "slip": {
+    "slip_frames": [
+      "434c00030000000000000000b0cbdd9435818eae000000000000000008000801dbdbdbdbdbdbc0c0ce0c"
+    ],
+    "slip_notes": [
+      "unterminated_escape"
+    ],
+    "slip_stream_len": 53
+  },
+  "frame_hex": "434c00030000000000000000b0cbdd9435818eae000000000000000008000801dbdbdbdbdbdbc0c0ce0c",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 1,
+      "slip_notes": [
+        "unterminated_escape"
+      ]
+    }
+  },
+  "hex_file": "slip/slip-mal-unescaped-02.slip.hex"
+}

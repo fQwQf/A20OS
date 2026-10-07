@@ -1,0 +1,113 @@
+{
+  "id": "valid-hello-default-02",
+  "category": "valid",
+  "title": "B -> A HELLO, SERVER tier with CAP_RELAY|CAP_RELIABLE",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 6",
+    "01-abi.md node hash"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "head_udp_hello",
+    "profile_tier": 3,
+    "profile_name": "SERVER",
+    "state": "HELLO_SENT",
+    "peer_caps": 0,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 1,
+    "type_name": "HELLO",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0x5EDC2075",
+    "dst_hash": "0xAE8E8135",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 32,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 66,
+    "crc_present": true,
+    "crc_value": "0xF004",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 32,
+    "hex": "a1a2a3a4a5a6a7a8a9aaabacadaeafb000000303000006001112131415161718",
+    "app_offset": 0,
+    "app_len": 32,
+    "app_hex": "a1a2a3a4a5a6a7a8a9aaabacadaeafb000000303000006001112131415161718",
+    "ack_prefix": null,
+    "hello": {
+      "node_id": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "node_id_hash": "0x5EDC2075",
+      "proto_min": 0,
+      "proto_max": 0,
+      "profile_tier": 3,
+      "profile_name": "SERVER",
+      "caps": 3,
+      "cap_names": [
+        "RELAY",
+        "RELIABLE"
+      ],
+      "short_addr": 0,
+      "short_addr_state": "not_used_off_uart",
+      "link_addr_len": 6,
+      "reserved": 0,
+      "nonce": "1112131415161718"
+    }
+  },
+  "diagnostics": {
+    "wire_len": 66,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xF004",
+    "crc_computed": "0xF004"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "valid/valid-hello-default-02.hex"
+}

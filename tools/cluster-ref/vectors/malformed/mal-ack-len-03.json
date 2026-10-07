@@ -1,0 +1,59 @@
+{
+  "id": "mal-ack-len-03",
+  "category": "malformed",
+  "title": "ACK with a 3 B payload (02-2 fixes 4 B)",
+  "doc_sections": [
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 7",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "frame": null,
+  "raw_header": "434c0009000000000000000035818eae7520dc5e000000000000000003000801",
+  "diagnostics": {
+    "wire_len": 37,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "fixed_size_mismatch",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "fixed_payload_len_mismatch",
+    "crc_value": "0xE9E2",
+    "crc_computed": "0xE9E2"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "fixed_payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "fixed_payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-ack-len-03.hex"
+}

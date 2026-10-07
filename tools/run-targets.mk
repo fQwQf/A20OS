@@ -111,11 +111,19 @@ _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
 # them.  tools/qemu.py reads the result and does the running, so the launch
 # sequence (build, verify, exec) is no longer shell inside a recipe.  They must
 # stay free of prerequisites, or asking for the argv would rebuild the world.
+#
+# The expansion is double-quoted, not single-quoted: a [net].guest_ip instance
+# adds `-append 'a20.dhcp=0 a20.ip=...'` to QEMU_FLAGS, and a single-quoted
+# printf argument would let the value's own spaces escape the quoting -- the
+# printed "command line" would be several broken lines, and every consumer
+# that shlex-splits it (tools/qemu.py, tools/a20 test) would silently boot
+# without the guest arguments.  The dual invariant is that flag values contain
+# single quotes or double quotes, never both.
 _qemu_argv:
-	@printf '%s\n' '$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)'
+	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)"
 
 _qemu_argv_debug:
-	@printf '%s\n' '$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s'
+	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s"
 
 _run_impl:
 	$(PYTHON) tools/qemu.py run --arch $(ARCH) --bringup $(BRINGUP)

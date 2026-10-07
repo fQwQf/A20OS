@@ -44,6 +44,14 @@ _MEMORY_RE: Final = re.compile(r"[0-9]+[KMGT]")
 # has to be happy with what the author wrote, not with what QEMU ends up given.
 _HOSTFWD_RE: Final = re.compile(
     r"(?:hostfwd=)?(?:tcp|udp):[^:,\s]*:\d*-[^:,\s]*:\d+(?:=(?:on|off))?")
+# net.backend is passed to QEMU verbatim as the -netdev spec.  No whitespace
+# can appear in a netdev spec (values are comma-separated), and the spec must
+# carry id=net because the Makefile attaches the default NIC as
+# -device ...,netdev=net -- any other id leaves that device pointing at
+# nothing and QEMU fails long after the build.
+_BACKEND_RE: Final = re.compile(r"[a-z][a-z0-9_-]*(,\S+)*")
+_MAC_RE: Final = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+_IPV4_RE: Final = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
 _TIMEOUT_RE: Final = re.compile(r"[0-9]+s")
 
 _UEFI_VARIANTS: Final = ("default", "text")
@@ -119,6 +127,44 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         for fwd in n.hostfwd:
             if not _HOSTFWD_RE.fullmatch(fwd):
                 e.append(f"net.hostfwd: '{fwd}' must look like tcp::5555-:5555")
+    # The [net] backend fields configure the generic QEMU NIC; there is no
+    # such device on a bringup build (no -netdev is emitted) or on a
+    # non-QEMU-runnable arch (armv7m launches through tools/stm32.mk).
+    if n.backend is not None or n.mac is not None or n.guest_ip is not None:
+        if k.bringup:
+            e.append("net.backend/mac/guest_ip: no NIC exists in bringup mode "
+                     "(kernel.bringup builds emit no -netdev)")
+        elif inst.arch not in QEMU_RUNNABLE_ARCHES:
+            e.append(f"net.backend/mac/guest_ip: unsupported for {inst.arch}; "
+                     f"supported: {', '.join(QEMU_RUNNABLE_ARCHES)}")
+    if n.mac is not None:
+        if not _MAC_RE.fullmatch(n.mac):
+            e.append(f"net.mac: '{n.mac}' must look like 52:54:00:12:34:01")
+        elif int(n.mac[:2], 16) & 1:
+            e.append(f"net.mac: '{n.mac}' is a multicast address (low bit of "
+                     "the first octet must be 0)")
+    if n.backend is not None:
+        if not _BACKEND_RE.fullmatch(n.backend):
+            e.append(f"net.backend: '{n.backend}' must be a comma-separated "
+                     "QEMU -netdev spec without whitespace")
+        elif not re.search(r"(?:^|,)id=net(?:,|$)", n.backend):
+            e.append(f"net.backend: '{n.backend}' must carry id=net (the "
+                     "default NIC attaches as -device ...,netdev=net)")
+        if n.hostfwd:
+            e.append("net.backend: cannot combine with net.hostfwd (hostfwd "
+                     "only exists on the default user backend this replaces)")
+    for field, value in (("guest_ip", n.guest_ip),
+                         ("guest_netmask", n.guest_netmask),
+                         ("guest_gateway", n.guest_gateway)):
+        if value is None:
+            continue
+        octets = value.split(".")
+        if not _IPV4_RE.fullmatch(value) or any(int(o) > 255 for o in octets):
+            e.append(f"net.{field}: '{value}' must be a dotted-quad IPv4 address")
+    if n.guest_netmask is not None and n.guest_ip is None:
+        e.append("net.guest_netmask: only meaningful together with net.guest_ip")
+    if n.guest_gateway is not None and n.guest_ip is None:
+        e.append("net.guest_gateway: only meaningful together with net.guest_ip")
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
     has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))

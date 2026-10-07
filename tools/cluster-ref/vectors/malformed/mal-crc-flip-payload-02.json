@@ -1,0 +1,70 @@
+{
+  "id": "mal-crc-flip-payload-02",
+  "category": "malformed",
+  "title": "one payload bit flipped, header untouched (loopback corrupt hook)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10",
+    "04-transports.md 2"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "flip_bit",
+      "doc": "02-1",
+      "why": "payload bit flip",
+      "bit": 309,
+      "offset": 38,
+      "was": "0x6E",
+      "to": "0x4E"
+    }
+  ],
+  "notes": "04-2: the loopback corrupt hook flips a random payload bit together with csum_kind=1 to exercise the CRC path.",
+  "frame": null,
+  "raw_header": "434c0005000000000000000035818eae7520dc5e000000000000000010000801",
+  "diagnostics": {
+    "wire_len": 50,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "mismatch",
+    "reason": "crc_mismatch",
+    "crc_value": "0x5EC8",
+    "crc_computed": "0x67C5"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "crc_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "crc_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-crc-flip-payload-02.hex"
+}

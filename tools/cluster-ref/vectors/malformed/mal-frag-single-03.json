@@ -1,0 +1,86 @@
+{
+  "id": "mal-frag-single-03",
+  "category": "malformed",
+  "title": "FRAGMENTED with frag index 0 and the last bit: a one-fragment message",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 3",
+    "02-wire-protocol.md 5",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-5",
+      "why": "index 0 marked last",
+      "offset": 6,
+      "value": 0,
+      "was": "0x02"
+    },
+    {
+      "op": "set",
+      "doc": "02-5",
+      "why": "index 0 marked last",
+      "offset": 7,
+      "value": 128,
+      "was": "0x80"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "assumptions": [
+    "A-04"
+  ],
+  "notes": "A-04: 02-5 makes the index start at 0 and increment, so a message that fits in one frame is sent with FRAGMENTED clear and frag=0; a FRAGMENTED frame with index 0 + last bit is contradictory.",
+  "frame": null,
+  "raw_header": "434c000603000080e903000035818eae7520dc5e03000000030000009e050801",
+  "diagnostics": {
+    "wire_len": 1472,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "single_fragmented",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "frag_flag_mismatch",
+    "crc_value": "0xF930",
+    "crc_computed": "0xF930"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "frag_flag_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "frag_flag_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-frag-single-03.hex"
+}

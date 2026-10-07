@@ -1,0 +1,78 @@
+{
+  "id": "mal-seq-unreliable-01",
+  "category": "malformed",
+  "title": "RELIABLE clear but seq=7",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 3",
+    "02-wire-protocol.md 7",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "seq on an unreliable frame",
+      "offset": 24,
+      "value": 7,
+      "was": "0x00"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "assumptions": [
+    "A-11"
+  ],
+  "notes": "02-1: seq is the reliable-tier number and an unreliable frame puts 0; A-11 makes this per-frame rather than per-link.",
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000700000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "seq_without_reliable",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "seq_on_unreliable_frame",
+    "crc_value": "0xED44",
+    "crc_computed": "0xED44"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "seq_on_unreliable_frame"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "seq_on_unreliable_frame",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-seq-unreliable-01.hex"
+}

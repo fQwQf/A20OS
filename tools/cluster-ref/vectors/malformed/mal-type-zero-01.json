@@ -1,0 +1,70 @@
+{
+  "id": "mal-type-zero-01",
+  "category": "malformed",
+  "title": "type=0 (no message type 0)",
+  "doc_sections": [
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-2",
+      "why": "type 0",
+      "offset": 3,
+      "value": 0,
+      "was": "0x03"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "frame": null,
+  "raw_header": "434c0000000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "unknown_type",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "unchecked",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "unknown_type"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "unknown_type"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "unknown_type",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-type-zero-01.hex"
+}

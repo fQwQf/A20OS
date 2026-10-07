@@ -1,0 +1,28 @@
+# Cluster UDP demo, node A (docs/cluster/02-udp-demo.md).
+#
+# One half of the WB2 two-instance environment: A and B share one L2 segment
+# through QEMU's socket netdev in UDP-tunnel mode.  Each side binds its own
+# host UDP port and sends to the peer's, so the topology is symmetric, has no
+# start-order dependency, and can be restarted without teardown races.
+#
+#   A: localaddr 127.0.0.1:44121  -> udp 127.0.0.1:44122 (B)
+#   B: localaddr 127.0.0.1:44122  -> udp 127.0.0.1:44121 (A)
+#
+# Guest identities: A is 10.0.3.2/24 with MAC 52:54:00:12:34:01; B is
+# 10.0.3.3/24 with 52:54:00:12:34:02.  The subnet deliberately is not SLIRP's
+# 10.0.2.0/24, so cluster traffic can never be confused with user-mode
+# networking.  WA2's kernel cluster transport will later bind the guest UDP
+# port 44020 on this link (docs/cluster/04-transports.md §3: default
+# 44020 + instance index); this instance's kernel argument surface is
+# [net].guest_ip, extended in this schema change, not the cluster port.
+#
+# Driven by tools/cluster-net-up.sh, which builds once and boots both nodes.
+name = "qemu-riscv64-cluster-a"
+description = "Cluster UDP demo node A: socket-UDP tunnel to node B, 10.0.3.2/24"
+arch = "riscv64"
+
+[net]
+mac = "52:54:00:12:34:01"
+backend = "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"
+guest_ip = "10.0.3.2"
+guest_netmask = "255.255.255.0"

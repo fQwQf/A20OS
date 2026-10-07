@@ -1,0 +1,64 @@
+{
+  "id": "mal-len-crc-missing-01",
+  "category": "malformed",
+  "title": "csum_kind=1 but the 2 CRC bytes are absent",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "drop_tail",
+      "doc": "02-1",
+      "why": "CRC trailer missing",
+      "keep": 40,
+      "was_len": 42
+    }
+  ],
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 40,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "mismatch",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "payload_len_mismatch"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-len-crc-missing-01.hex"
+}

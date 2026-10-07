@@ -42,6 +42,7 @@ sources = [
     "kernel/mcu/uart.c",
     "kernel/mcu/heap.c",
     "kernel/mcu/mcu_stubs.c",
+    "kernel/mcu/leaf.c",
     "kernel/core/printf.c",
     "kernel/core/string.c",
     "kernel/core/panic.c",

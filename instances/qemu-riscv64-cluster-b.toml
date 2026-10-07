@@ -1,0 +1,14 @@
+# Cluster UDP demo, node B (docs/cluster/02-udp-demo.md).
+#
+# The mirror of qemu-riscv64-cluster-a.toml: same L2 tunnel, ports swapped,
+# independent MAC and guest IP.  See that file for the topology rationale and
+# docs/cluster/02-udp-demo.md for the wiring commands and expected output.
+name = "qemu-riscv64-cluster-b"
+description = "Cluster UDP demo node B: socket-UDP tunnel to node A, 10.0.3.3/24"
+arch = "riscv64"
+
+[net]
+mac = "52:54:00:12:34:02"
+backend = "socket,id=net,udp=127.0.0.1:44121,localaddr=127.0.0.1:44122"
+guest_ip = "10.0.3.3"
+guest_netmask = "255.255.255.0"

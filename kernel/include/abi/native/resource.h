@@ -51,6 +51,32 @@ struct a20_resource_limits {
 /* Cascading depth limit (docs/native-abi/03-handle.md §3.3) */
 #define A20_CASCADE_DEPTH_MAX            2
 
+/* Cluster subsystem caps (docs/cluster/01-abi.md "限额"). Three tiers:
+ * MCU (CLUSTER_PROFILE=1), DEFAULT (=2), ABSOLUTE hard ceiling. Exceeding any
+ * of them returns A20_ERR_NO_SPACE; the remote path never blocks a sender
+ * waiting for room. */
+#define A20_LIMIT_CLX_ROUTES_MCU           4
+#define A20_LIMIT_CLX_ROUTES_DEFAULT     256
+#define A20_LIMIT_CLX_ROUTES_ABSOLUTE   4096
+
+#define A20_LIMIT_CLX_SLOTS_MCU            4
+#define A20_LIMIT_CLX_SLOTS_DEFAULT       64
+#define A20_LIMIT_CLX_SLOTS_ABSOLUTE     256
+
+#define A20_LIMIT_CLX_REMOTE_EPS_MCU       2
+#define A20_LIMIT_CLX_REMOTE_EPS_DEFAULT 128
+#define A20_LIMIT_CLX_REMOTE_EPS_ABSOLUTE 1024
+
+/* Reassembly cache bytes; zero on MCU, where fragmentation is forbidden. */
+#define A20_LIMIT_CLX_REASM_BYTES_MCU           0
+#define A20_LIMIT_CLX_REASM_BYTES_DEFAULT  (256 * 1024)
+#define A20_LIMIT_CLX_REASM_BYTES_ABSOLUTE (4 * 1024 * 1024)
+
+/* Unanswered CALL transactions per remote endpoint. */
+#define A20_LIMIT_CLX_INFLIGHT_MCU            1
+#define A20_LIMIT_CLX_INFLIGHT_DEFAULT       64
+#define A20_LIMIT_CLX_INFLIGHT_ABSOLUTE      512
+
 static inline void a20_resource_limits_init_default(struct a20_resource_limits *l)
 {
     l->max_handles        = A20_LIMIT_HANDLES_DEFAULT;

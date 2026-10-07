@@ -1,0 +1,73 @@
+{
+  "id": "mal-ver-high-hello-02",
+  "category": "malformed",
+  "title": "ver=1 on a HELLO: ERROR frame + hello_rejects",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 6",
+    "02-wire-protocol.md 10",
+    "01-abi.md ABI stability"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "ver above local",
+      "offset": 2,
+      "value": 1,
+      "was": "0x00"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "notes": "02-1 hands a higher ver to the HELLO phase; 02-6 turns the failure into an ERROR frame and state DOWN; 01-abi stability rules allow exactly a one-version compatibility window.",
+  "frame": null,
+  "raw_header": "434c0101000000000000000035818eae7520dc5e000000000000000020000801",
+  "diagnostics": {
+    "wire_len": 66,
+    "magic": "ok",
+    "ver": "unsupported_ver",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "unchecked",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "unsupported_ver"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "unsupported_ver"
+    },
+    "dispatch": {
+      "layer": "hello",
+      "action": "drop",
+      "reason": "hello_proto_not_negotiable",
+      "counters": [
+        "hello_rejects"
+      ],
+      "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+      "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+    }
+  },
+  "hex_file": "malformed/mal-ver-high-hello-02.hex"
+}
