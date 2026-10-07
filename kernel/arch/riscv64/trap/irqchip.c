@@ -57,12 +57,32 @@ static void arch_plic_complete(uint32_t irq) {
     *(volatile uint32_t *)PLIC_SCLAIM(hart) = irq;
 }
 
+/* Bootarg-driven regression for the kernel trap frame's caller-saved t0 slot.
+ * The assembly probe holds a sentinel across a real timer interrupt. */
+volatile unsigned int riscv64_trap_t0_test_active;
+volatile unsigned int riscv64_trap_t0_test_seen;
+static unsigned int riscv64_trap_t0_test_cpu;
+extern uint64_t riscv64_timer_freq(void);
+extern int riscv64_trap_t0_test_asm(uint64_t timeout_ticks);
+
 static void handle_timer_irq(int from_user) {
+    if (__atomic_load_n(&riscv64_trap_t0_test_active, __ATOMIC_RELAXED) &&
+        arch_current_cpu_id() == riscv64_trap_t0_test_cpu)
+        __atomic_store_n(&riscv64_trap_t0_test_seen, 1, __ATOMIC_RELEASE);
     timer_irq_tick();
     kernel_progress_timer_tick();
     uint64_t now = timer_get_ticks();
     timer_set_interval(proc_next_timer_interval(now));
     proc_sched_tick(from_user);
+}
+
+int riscv64_trap_t0_selftest(void)
+{
+    riscv64_trap_t0_test_cpu = arch_current_cpu_id();
+    __atomic_store_n(&riscv64_trap_t0_test_seen, 0, __ATOMIC_RELAXED);
+    int result = riscv64_trap_t0_test_asm(riscv64_timer_freq() / 10);
+    int seen = __atomic_load_n(&riscv64_trap_t0_test_seen, __ATOMIC_ACQUIRE);
+    return result == 0 && seen;
 }
 
 void trap_init(void) {

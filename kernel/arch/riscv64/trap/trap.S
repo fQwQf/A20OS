@@ -367,30 +367,31 @@ __trap_from_kernel:
 
     /* No stack swap - already on kernel stack.  x[2] is the sp the trap-return
      * resumes on, and on this path it has to be the sp the trap was TAKEN on,
-     * not the post-allocation frame base: every offset the interrupted code
-     * computes afterwards is relative to the sp it expects, so handing it a
-     * value 560 bytes lower silently retargets all of them (its own
-     * `ld ra, -8(sp)` then reads trap-frame slot 69 instead of its saved ra).
-     * Recorded here, before anything clobbers t0; slot 2 is otherwise
-     * untouched until the frame is full.  __trap_from_user stores the user sp
-     * in the same slot for the same reason.
+     * not the post-allocation frame base. Save t0 before using it to calculate
+     * that original sp; otherwise the generic x3..x31 save below would record
+     * the temporary stack value as the interrupted t0.  __trap_from_user stores
+     * the user sp in the same slot for the same reason.
      *
-     * The value stored is sp ITSELF, sampled before the allocation below: the
-     * return path reloads this slot straight into x2, so recording sp+70*8 here
-     * hands the resumed code a stack pointer 560 bytes ABOVE the frame it came
-     * from -- its `ld ra, -8(sp)` then reads this trap frame instead of its own
-     * saved ra, and every push it makes lands on top of its caller's live data. */
-    addi    t0, sp, 0
+     * The slot must contain the pre-allocation sp. Reconstruct it as the frame
+     * base plus 560 bytes; storing the frame base would resume inside this
+     * frame, so subsequent stack accesses would overwrite saved trap state. */
     addi    sp, sp, -70*8
+    sd      t0, 5*8(sp)
+    addi    t0, sp, 70*8
     sd      t0, 2*8(sp)
 
     /* Save general-purpose registers */
     sd      x1, 1*8(sp)
     /* Skip x2 (sp), recorded above */
 
-    /* Save x3~x31 */
+    /* Save x3, x4, and x6~x31; x5 was preserved before t0 was reused. */
     .set n, 3
-    .rept 29
+    .rept 2
+        SAVE_GP %n
+        .set n, n+1
+    .endr
+    .set n, 6
+    .rept 26
         SAVE_GP %n
         .set n, n+1
     .endr
@@ -470,6 +471,57 @@ csrw    sstatus, t0
 
 user_trap_return:
     j __return_to_user
+
+/* Hold a t0 sentinel until a real supervisor timer IRQ is observed.  The
+ * caller runs this only for the RISC-V64 trap regression bootarg. */
+    .globl riscv64_trap_t0_test_asm
+riscv64_trap_t0_test_asm:
+    addi    sp, sp, -16
+    sd      ra, 8(sp)
+    sd      s0, 0(sp)
+    csrr    s0, sstatus
+    csrc    sstatus, 2
+
+    la      t1, riscv64_trap_t0_test_seen
+    sw      zero, 0(t1)
+    la      t1, riscv64_trap_t0_test_active
+    li      t2, 1
+    sw      t2, 0(t1)
+
+    li      t0, 0x5a17c0de
+    csrr    t4, time
+    add     t3, t4, a0
+    li      t1, 2
+    csrs    sstatus, t1
+.Ltrap_t0_test_wait:
+    la      t1, riscv64_trap_t0_test_seen
+    lw      t2, 0(t1)
+    bnez    t2, .Ltrap_t0_test_seen
+    li      t1, 0x5a17c0de
+    bne     t0, t1, .Ltrap_t0_test_fail
+    csrr    t4, time
+    bltu    t4, t3, .Ltrap_t0_test_wait
+    j       .Ltrap_t0_test_fail
+.Ltrap_t0_test_seen:
+    li      t1, 0x5a17c0de
+    bne     t0, t1, .Ltrap_t0_test_fail
+    li      a0, 0
+    j       .Ltrap_t0_test_finish
+.Ltrap_t0_test_fail:
+    li      a0, -1
+.Ltrap_t0_test_finish:
+    csrc    sstatus, 2
+    la      t1, riscv64_trap_t0_test_active
+    sw      zero, 0(t1)
+    andi    t1, s0, 2
+    beqz    t1, .Ltrap_t0_test_irq_restored
+    li      t1, 2
+    csrs    sstatus, t1
+.Ltrap_t0_test_irq_restored:
+    ld      s0, 0(sp)
+    ld      ra, 8(sp)
+    addi    sp, sp, 16
+    ret
 
     .globl arch_return_to_user
 arch_return_to_user:

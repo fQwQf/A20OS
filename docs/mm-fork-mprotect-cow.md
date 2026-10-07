@@ -9,3 +9,9 @@ fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子�
 `smoke-mm-fork-exec-race` 除并发 fork 与 VMA 操作外，还运行确定性隔离检查：子进程对 fork 共享页依次执行只读和读写 `mprotect`，再写入该页；父进程在每轮后确认原值未改变。该检查覆盖恢复写权限不能清除仍有效的 COW 义务。
 
 `pfn_valid()` 只表示 PFN 落在已登记的物理内存范围内，不检查帧当前是否分配或其引用数。帧的存活由 `pfa.meta[].refcount` 及持有的映射/临时引用保证；因此，PFN 范围检查本身不构成并发帧回收保护。
+
+## RV64 内核 trap 的寄存器保存
+
+RV64 内核态 trap 入口在分配 trap frame 后，需要先保存原始 `t0`，再借用它重建陷入前的 `sp`。通用寄存器保存循环跳过已单独保存的 `x5/t0`。此前循环把临时计算出的旧 `sp` 写进了 `t0` 槽，导致 timer IRQ 返回后被打断的内核代码拿到错误的 `t0`；context switch 路径中 `t0` 可暂存地址空间状态，错误恢复会扰乱后续控制流或页表切换。
+
+`make smoke-rv64-trap-t0` 通过 `a20.trap_t0_selftest=1` 在 RV64 单核 guest 中运行哨兵测试。测试在 `t0` 持有固定值时等待本 CPU 的 supervisor timer IRQ，并要求中断处理程序确认 IRQ 确已发生且汇编探针返回时哨兵未变；超时、未收到本 CPU 的 IRQ 或寄存器值变化都会失败。MM 修复后的回归还应运行 `make -j8 smoke-mm-pt-race`、`make -j8 smoke-mm-fork-exec-race` 和 `make -j8 smoke-mm-stress`。
