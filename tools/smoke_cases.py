@@ -583,6 +583,27 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-hyp-selftest: PASS; log saved to $log',
     },
+    # QEMU still exposes hstatus on an H-less CPU, so CSR probing alone lets
+    # this selftest pass into a later illegal-instruction panic.  The FDT ISA
+    # gate must reject H before touching H CSRs and make the selftest skip.
+    'smoke-hyp-no-h': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-no-h-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['cat /proc/a20/hyp_selftest', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=false', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt/kernel.elf'],
+        'expect': [
+            'HYP_SELFTEST: SKIP (no virtualization extension)',
+            'hyp_selftest=PASS',
+        ],
+        'forbid': ['PANIC', 'Kernel Illegal Instruction', 'HYP_SELFTEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-no-h: PASS; log saved to $log',
+    },
     # End-to-end vcpu slice: a user program creates a VM, loads 56 bytes of
     # RISC-V machine code into it, runs the guest and asserts the guest left
     # through the SBI shutdown call.  Runs in the same ABI=linux image as the

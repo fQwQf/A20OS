@@ -18,15 +18,18 @@
 #include "core/stdio.h"
 #include "hyp_asm_offsets.h"
 
-/* hstatus exists only when the H extension is implemented, so reading it IS
- * the probe.  (csrr misa was tried first and turned out to raise an
- * illegal-instruction trap under QEMU's rv64 CPU -- the spec calls misa
- * any-privilege, so the reason is unresolved; the CSR the extension itself
- * adds is the honest probe.)  Read once at first use. */
+/* The DTB is the only safe pre-CSR signal available here: QEMU permits reading
+ * hstatus even with H disabled, while later H instructions trap fatally.  A
+ * truthful firmware declaration therefore gates the CSR probe.  A firmware
+ * that falsely advertises H remains outside what this probe can safely detect. */
 static int hyp_probe(void)
 {
     static int probed = -1;
     if (probed < 0) {
+        if (!riscv64_fdt_has_isa_extension("h")) {
+            probed = 0;
+            return probed;
+        }
         uint64_t hstatus;
         __asm__ volatile("csrr %0, hstatus" : "=r"(hstatus));
         (void)hstatus;
