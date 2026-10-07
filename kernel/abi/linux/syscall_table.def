@@ -439,3 +439,17 @@ LINUX_SYSCALL(a20_envelope_enter, 0, sys_a20_envelope_enter(args))
 LINUX_SYSCALL(a20_envelope_revoke, 0, sys_a20_envelope_revoke(args))
 LINUX_SYSCALL(a20_envelope_stats, 0, sys_a20_envelope_stats(args))
 LINUX_SYSCALL(a20_envelope_audit, 0, sys_a20_envelope_audit(args))
+
+/* A20OS extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c,
+ * docs/hypervisor/00-design.md S5). */
+LINUX_SYSCALL(hyp_vm_create, 0, sys_hyp_vm_create(args))
+LINUX_SYSCALL(hyp_vm_load, 0, sys_hyp_vm_load(args))
+LINUX_SYSCALL(hyp_vcpu_create, 0, sys_hyp_vcpu_create(args))
+LINUX_SYSCALL(hyp_vcpu_run, 0, sys_hyp_vcpu_run(args))
+LINUX_SYSCALL(hyp_vm_destroy, 0, sys_hyp_vm_destroy(args))
+/* A20OS-as-guest (hyp_vcpu.h v2): hand the vcpu its boot registers, name the
+ * console substring that proves the guest reached its own banner, and read the
+ * post-run status back. */
+LINUX_SYSCALL(hyp_vcpu_set_boot, 0, sys_hyp_vcpu_set_boot(args))
+LINUX_SYSCALL(hyp_vm_set_marker, 0, sys_hyp_vm_set_marker(args))
+LINUX_SYSCALL(hyp_vm_status, 0, sys_hyp_vm_status(args))

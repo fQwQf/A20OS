@@ -320,6 +320,20 @@ int64_t sys_a20_envelope_revoke(const linux_syscall_args_t *args);
 int64_t sys_a20_envelope_stats(const linux_syscall_args_t *args);
 int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args);
 
+/* A20OS extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c). */
+int64_t sys_hyp_vm_create(const linux_syscall_args_t *args);
+int64_t sys_hyp_vm_load(const linux_syscall_args_t *args);
+int64_t sys_hyp_vcpu_create(const linux_syscall_args_t *args);
+int64_t sys_hyp_vcpu_run(const linux_syscall_args_t *args);
+int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args);
+
+/* A20OS-as-guest additions (hyp_vcpu.h v2): the boot arguments a guest kernel
+ * is entered with, the console marker its output is scanned for, and the
+ * post-run status a caller needs to judge the run. */
+int64_t sys_hyp_vcpu_set_boot(const linux_syscall_args_t *args);
+int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args);
+int64_t sys_hyp_vm_status(const linux_syscall_args_t *args);
+
 /* Keyring (sys_keyring.c). */
 int64_t sys_add_key(const char *type, const char *description,
                     const void *payload, size_t plen, int32_t ringid);

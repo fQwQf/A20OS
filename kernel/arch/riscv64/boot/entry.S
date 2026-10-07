@@ -108,8 +108,16 @@ _start:
       * and never allocates pages beyond actual memory.
       *
       * PTE = (PPN << 10) | flags
-      * flags = V|R|W|X|A|D = 0xAF
-      */
+      * flags = V|R|W|X|A|D = 0xCF, the same PTE_KERN the mm layer builds
+     * (kernel/arch/riscv64/include/page_table.h:56).  A and D are set here
+     * rather than left for the hardware: an implementation without implicit
+     * update of them raises a page fault on the first access through a PTE
+     * whose A is clear, and this table is walked before any C in the kernel
+     * runs to fix it.  QEMU only leaves them implicit while the walk is the
+     * hart's own -- a VS-stage walk under a hypervisor has ADUE ANDed with
+     * henvcfg.ADUE, and that in turn with menvcfg.ADUE, which an S-mode
+     * hypervisor cannot set, so the guest is the side that has to pre-set them.
+     */
 #ifndef CONFIG_NOMMU
     la      t0, boot_pgdir
 
@@ -120,13 +128,13 @@ _start:
     la      t6, boot_map_phys_value
     ld      t6, 0(t6)
     srli    t1, t6, 2           /* PTE base: (PA >> 2) encodes PPN << 10 */
-    ori     t1, t1, 0xAF
+    ori     t1, t1, 0xCF
     srli    t2, t6, 30          /* first pgdir index for the RAM window */
     addi    t4, t2, 16
 
     /* Identity-map the low MMIO window so the emergency trap path can still
      * reach the UART after paging is enabled. */
-    li      t6, 0x000000af
+    li      t6, 0x000000cf
     sd      t6, 0(t0)
 
 .Lmap_boot_ram:
@@ -148,7 +156,7 @@ _start:
 
     /* Higher-half MMIO maps PA 0..1GB.  On JH7110 this covers every on-SoC
      * device (UART/PLIC/CLINT/CRG/SDIO/GMAC all sit below DRAM). */
-    li      t1, 0x000000AF
+    li      t1, 0x000000CF
     li      t2, 256*8
     add     t3, t0, t2
     sd      t1, 0(t3)
@@ -159,7 +167,7 @@ _start:
     ld      t1, 0(t1)
     beqz    t1, .enable_mmu
     srli    t1, t1, 2
-    ori     t1, t1, 0xAF
+    ori     t1, t1, 0xCF
     li      t2, 257*8
     add     t3, t0, t2
     sd      t1, 0(t3)

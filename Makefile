@@ -1243,6 +1243,7 @@ else
 # mean the file is not built at all.
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
+             $(wildcard $(KERNEL_DIR)/hyp/*.c) \
              $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
              $(if $(filter-out y,$(CONFIG_XLATOR)),$(filter-out $(KERNEL_DIR)/proc/xlator.c,$(wildcard $(KERNEL_DIR)/proc/*.c)),$(wildcard $(KERNEL_DIR)/proc/*.c)) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \

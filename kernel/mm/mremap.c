@@ -1,6 +1,7 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
+#include "mm/pt.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
@@ -116,8 +117,23 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
         if (!pcp && !vmo_owned)
             frame_get(pfn);
-        int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
-                            : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
+        /* Keep the source's class across the move so the copy's status still
+         * names the same backing; a huge leaf's slot is level-aware.  The
+         * status sidecar is a pgtable-ops feature -- arm32's short-descriptor
+         * backend has none and NOMMU has no table at all -- so where it is
+         * absent the move starts from MM_ST_INVALID and takes the default
+         * below, the same answer the query gives when the slot is unreadable. */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+#else
+        uint8_t move_cls = MM_ST_INVALID;
+#endif
+        if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
+            move_cls = MM_ST_ANON_MAPPED;
+        int r = (level > 0) ? pt_map_huge(mm, dst + off, pa,
+                                          arch_pte_flags(*src), move_cls)
+                            : pt_map(mm->pgdir, dst + off, pa,
+                                     arch_pte_flags(*src));
         if (r < 0) {
             if (pcp) {
                 page_cache_put(pcp);
@@ -169,7 +185,18 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
         if (!pcp && !vmo_owned)
             frame_get(pfn);
-        int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+#else
+        /* Same reason as the move path above: no readable status slot, so
+         * the class starts out the one the default below turns into
+         * MM_ST_ANON_MAPPED. */
+        uint8_t move_cls = MM_ST_INVALID;
+#endif
+        if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
+            move_cls = MM_ST_ANON_MAPPED;
+        int r = (level > 0) ? pt_map_huge(mm, dst + off, pa, pte_flags,
+                                          move_cls)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
             if (pcp) {

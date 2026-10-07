@@ -34,8 +34,10 @@
  * pages that were about to fault from the status.  mm_pt_leaf_table() walks
  * from the root without allocating, so the teardown path cannot conjure the
  * intermediate levels it is in the middle of destroying. */
+#ifndef CONFIG_NOMMU
 static void mm_munmap_retire_reservation(mm_struct_t *mm, vaddr_t va)
 {
+#if defined(ARCH_HAS_PGTABLE_OPS)
     pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
     if (!table || table == mm->pgdir)
         return;
@@ -44,7 +46,14 @@ static void mm_munmap_retire_reservation(mm_struct_t *mm, vaddr_t va)
     if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
         mm_pt_note_absent(table, 0, idx);
     mm_pt_node_unlock(table);
+#else
+    /* arm32's short-descriptor backend keeps no status marks, so a
+     * never-faulted reservation cannot exist to be retired. */
+    (void)mm;
+    (void)va;
+#endif /* ARCH_HAS_PGTABLE_OPS */
 }
+#endif /* CONFIG_NOMMU */
 
 int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (!mm || !mm->pgdir) return -EINVAL;

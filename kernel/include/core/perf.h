@@ -54,6 +54,16 @@ typedef enum a20_perf_counter {
     A20_PERF_MM_ANON_BATCH_WINDOWS,
     A20_PERF_MM_ANON_BATCH_PAGES,
     A20_PERF_MM_COW_FAULTS,
+    /* Huge-leaf installs through pt_map_huge (THP fault, fork clone, mremap
+     * move).  Exists so a huge-page gate can prove the path RAN -- without
+     * it, a THP fault that silently fell back to 4K pages makes every
+     * huge-page assertion pass against a workload that never had one. */
+    A20_PERF_MM_HUGE_FAULTS,
+    /* COW breaks served by the lockless slice (mm_cow_from_status): the
+     * shared-to-private copy installed without mm->lock.  The authoritative
+     * non-vacuity read is the plain mm_cow_from_status_count global in
+     * [MM-ASM]; this perf counter exists for armed measurement windows. */
+    A20_PERF_MM_COW_FROM_STATUS,
     /* Single-level model: page-table lock behaviour.  A cursor that finds the
      * covering node busy is contending with a transaction on an overlapping
      * range; the ratio of contended to total acquisitions is the direct

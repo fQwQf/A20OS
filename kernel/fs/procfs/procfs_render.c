@@ -3,6 +3,7 @@
 #include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
+#include "hyp/hyp.h"
 #include "fs/vfs/mntns.h"
 #include "proc/pidns.h"
 #include "core/bootargs.h"
@@ -794,6 +795,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_A20_ANONPROV:
         snprintf(buf, bufsz, "%u\n", mm_pt_anon_prov_max());
         return (int)strlen(buf);
+    case PF_A20_HYP_SELFTEST:
+        /* A read RUNS the kernel-side stage-2 selftest; the per-step
+         * HYP_SELFTEST lines go to the console (they include audit
+         * counters) and the read returns the one-line verdict so a shell
+         * can gate on it directly. */
+        return snprintf(buf, bufsz, "hyp_selftest=%s\n",
+                        hyp_selftest() == 0 ? "PASS" : "FAIL");
     case PF_A20_SCHED_BASE_SLICE:
         snprintf(buf, bufsz, "%d\n", g_sched_base_slice_ms);
         return (int)strlen(buf);
