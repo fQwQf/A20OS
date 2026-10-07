@@ -178,3 +178,17 @@ dropped=0`（clean_tokens 558 / 556 / 555，interleaved 2 / 1 / 1——内核打
 - **未做**：`smoke-net-lanes-n1` 字节等价门禁未在本任务内跑——它属于 lanes/锁分片
   流的回归，由编排层统一做；本任务改动只涉及 UART 驱动与冒烟工具，不含 lane 代码。
   §2C 的停摆性质未归因（可能落在范围外的 tty.c）；真实硬件未测（仅 QEMU）。
+
+## 7. main 集成复验（2026-10-08）
+
+在 main 源码基线 `3d1e5b24f` 上运行 `make -j8 smoke-serial-fidelity`，门禁 PASS。
+宿主日志为 `/tmp/a20-recovery-logs/smoke-serial-fidelity-final.log`；guest 日志及
+汇总分别为 `.kernel-build/smoke/serial-fidelity-riscv64.log` 和
+`.kernel-build/smoke/serial-fidelity-riscv64.summary`。本次结果：
+`returned=300 clean_tokens=558 corrupted=0 never_returned=0 interleaved_tokens=2
+shell_not_found=0`，RX 计数 `dropped=0 poll_bytes=1 irq_bytes=16572`。
+
+`interleaved_tokens=2` 是串口日志中内核输出与会话文本交错的分类，不代表 RX 字节
+损坏；300 条命令均返回，payload 逐字节匹配，`corrupted=0`。`poll_bytes=1` 也确认
+任务态轮询 RX 路径确实执行，不是仅由 IRQ 接收覆盖门禁。该记录是 QEMU 集成复验，
+不替代真实硬件测量。
