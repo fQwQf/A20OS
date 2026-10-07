@@ -197,12 +197,19 @@ def cmd_clean(a) -> int:
             # `make clean` from silently retaining stale objects while making
             # an unexpected symlink target a loud, non-destructive error.
             target = path.resolve(strict=True)
-            if not target.is_dir() or target == REPO or REPO in target.parents:
+            if (not target.is_dir() or target == REPO or REPO in target.parents
+                    or target in REPO.parents):
                 raise SystemExit(f"error: refusing unsafe .kernel-build target: {target}")
+            marker = target / ".a20-build-root"
+            if marker.is_symlink() or not marker.is_file() or marker.read_text(encoding="utf-8").strip() != "a20-build-root-v1":
+                raise SystemExit(
+                    f"error: refusing unmarked .kernel-build target: {target} "
+                    "(initialize a dedicated build cache with .a20-build-root containing a20-build-root-v1)"
+                )
             allowed = re.compile(
-                r"^(?:aarch64|arm32|armv7m|loongarch64|ppc64le|riscv32|riscv64|x86_64)-.*|smoke$"
+                r"^(?:aarch64|arm32|armv7m|loongarch32|loongarch64|ppc64le|riscv32|riscv64|x86_64)-.*|smoke$"
             )
-            children = list(target.iterdir())
+            children = [p for p in target.iterdir() if p != marker]
             unexpected = [p.name for p in children if not allowed.fullmatch(p.name)]
             if unexpected or any(p.is_symlink() or not p.is_dir() for p in children):
                 raise SystemExit(
