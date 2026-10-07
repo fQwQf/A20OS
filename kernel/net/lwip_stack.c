@@ -1871,8 +1871,34 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
                 lalloc += c->alloc;
                 lfreed += c->freed;
             }
-            snprintf(lane_row, sizeof(lane_row), "%-15lu%7lu%8lu\n",
-                     (unsigned long)l, lalloc, lfreed);
+            /*
+             * The lane field is padded by hand, and the reason is not style.
+             * do_format() has no '-' flag: its width loop accepts only '0' and
+             * digits (kernel/core/printf.c:43), so "%-15lu" falls through to
+             * the default case (kernel/core/printf.c:150), which echoes "%-"
+             * verbatim and consumes no va_arg.  The rest of the format is then
+             * read as ordinary text and every later argument shifts one slot,
+             * which is why the row used to print a literal "%-15lu" and drop
+             * the freed column entirely.  Reproduced on the pre-change tree,
+             * where stage C's "pbuf lane" rows printed the same garbage -- so
+             * this is a workaround for the printf, not a stage C2 regression.
+             * "%" with digits and "lu" are both supported.
+             */
+            char lane_col[16];
+            int lane_len = snprintf(lane_col, sizeof(lane_col), "%lu",
+                                    (unsigned long)l);
+            if (lane_len < 0) {
+                lane_len = 0;
+            }
+            if (lane_len >= (int)sizeof(lane_col)) {
+                lane_len = (int)sizeof(lane_col) - 1;
+            }
+            while (lane_len < 15 && lane_len < (int)sizeof(lane_col) - 1) {
+                lane_col[lane_len++] = ' ';
+            }
+            lane_col[lane_len] = '\0';
+            snprintf(lane_row, sizeof(lane_row), "%s%7lu%8lu\n",
+                     lane_col, lalloc, lfreed);
             a20_lwip_append(buf, bufsz, &off, lane_row);
         }
     }

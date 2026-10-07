@@ -889,9 +889,220 @@ per-lane 副本里的 `stats` 指针**刻意保持指向同一个 `stats_mem`**�
 
 `/proc/a20/netmem` 的渲染随之从两个 pbuf 池扩到全部池，表头由 `pbuf lane` 改成
 `memp lane`，并按 lane 汇总所有池（`MEMP_MAX × CONFIG_NET_LANES` 行会淹没读者要的那
-一行）。**注意 `smoke-lwip-memp` 门禁按 `NET_LANES` 默认值 1 构建**（`Makefile:127`
-`NET_LANES ?= 1`，该目标不覆盖它），因此整段 lane 行在 N=1 下根本不渲染，该门禁的
-期望值**无需改动**——形状变了，但只在 N>1 时可见。
+一行）。**新格式**（`lwip_stack.c` 的 `#if CONFIG_NET_LANES > 1` 块，实测输出）：
+
+```
+memp lane         alloc   freed
+0                  313     299
+1                    0       0
+2                    0       1
+3                    1       1
+```
+
+三列依次是 lane 号（左对齐 15 宽）、该 lane 发出去的元素数、收回来的元素数，
+每条 lane 汇总它在所有池上的计数。注意第二行 `lane 2 alloc=0 freed=1` 并非笔误：
+`freed` 记的是"这次 `memp_free()` 发生在哪条 lane 的表上"，而 `alloc` 记的是
+"这次 `memp_malloc()` 发生在哪条 lane 的表上"，两者不是同一个问题的答案，
+所以这两个数**不能相减**。
+
+**注意 `smoke-lwip-memp` 门禁按 `NET_LANES` 默认值 1 构建**（`Makefile:127`
+`NET_LANES ?= 1`，该目标不覆盖它），整段 lane 行被 `#if CONFIG_NET_LANES > 1`
+（`lwip_stack.c:1840`）整个挡掉，**不渲染**——所以该门禁的期望值无需改动：
+形状变了，但只在 N>1 可见。这一点已实测：N=1 的 `smoke` 日志里 grep
+`memp lane|pbuf lane|rx lane` 为 NONE。
+
+#### 顺带查到的一个既有缺陷：本树的 `snprintf` 不支持 `-` 左对齐标志
+
+上面那张表之所以要手写补齐 lane 字段，是因为 `%-15lu` 在这棵树上**根本不成立**。
+根因（每条都核过）：
+
+| 事实 | 出处 |
+|---|---|
+| `do_format()` 的宽度解析只认 `'0'` 和数字，**没有 `-` 分支** | `kernel/core/printf.c:43-46` |
+| 认不出的指令落到 `default:`，`putc('%'); putc(*fmt);` 并且**不消费任何 `va_arg`** | `kernel/core/printf.c:150` |
+| 于是 `%-15lu` 被原样打印成 `%-`+`15lu`，后面参数整体错位一格，`freed` 列被整个丢掉 | 实测输出 |
+
+**这是既有缺陷，不是阶段 C2 引入的**：改动前的树（`HEAD^`）上，阶段 C 的 `pbuf lane`
+行和阶段 D 的 `rx lane` 行打印的是同样的 `%-15lu` 字面量。已在本阶段只修 `memp lane`
+行（`lwip_stack.c:1900`），改成手工补齐；**`rx lane` 行（`lwip_stack.c:1924`，阶段 D 的）
+原样保留未动**，仍打印 `%-15lu`，留给编排层决定是否一并处理。改 `printf.c` 本身
+会影响全内核 printf，不在本阶段范围内，因此没动。
+
+因为整个块在 `#if CONFIG_NET_LANES > 1` 内，这次修正理论上不触及 N=1 的字节等价性——
+**但"理论上"不算数，单独实测过**（20:48，比这次修正的提交 38347ef63@20:18:38 还晚）。
+取 `b6d68730f`（修正前）与 `HEAD`（修正后）两版 `lwip_stack.c`（全文件 diff 只有上面那一块），
+**同一条命令行**（`make -n ARCH=riscv64 ABI=linux BRINGUP=0 dev-build` 抓出来的原命令，
+`-DCONFIG_NET_LANES=1`，`-c` 与 `-o` 之外一字不改）各编一次：
+
+| 条件 | 结果 |
+|---|---|
+| 去掉 `-fsanitize=undefined` | **整个 `.o` 逐字节相同**，198648 字节，`cmp` 干净 |
+| 按树上的原样开 UBSan | `.text`(29426) / `.rodata`(120) / `.rodata.str1.8`(2056) / `.sdata`(1000) **全 IDENTICAL**；只有 `.data` 不同（两边都 10208 字节） |
+
+`.data` 那点差异就是 UBSan 的 `SourceLocation` 行号表，被新增的 27 行注释整体推移——
+与**下面**整树证明里那 19 个对象是同一类现象。
+
+**这次微证明本身踩了两个假差异，记下来免得下次重犯**：先用 `lwip_stack.prefix.c` 和
+`lwip_stack.head.c` 两个文件名编，结果 `.o` 差 8 字节——差的是 `.symtab`/`.strtab` 里那个
+`*ABS*` 的源文件名；换成同名文件后 `.rodata.str1.8` 又不同——UBSan 把 `__FILE__` 的字符串
+放在这一节，路径不同它就不同。**最后是把同一个路径覆盖写成两个版本**才得到上面的干净结果。
+
+**但"修好了"不能靠读代码下结论：四个门禁一个都没覆盖这一行。**
+`smoke-lwip-memp` 按 `NET_LANES=1` 跑（lane 行整段被挡掉），`smoke-net-lanes` 与
+`smoke-net-lanes-n1` 读的是 `/proc/net/status` 而不是 `/proc/a20/netmem`。
+于是单独在 N=4 镜像上敲 `cat /proc/a20/netmem`（`.kernel-build/...-smp4-lanes4/kernel.elf`，
+20:34:33 构建，晚于最后一次代码提交 20:18:38）：
+
+```
+memp lane         alloc   freed
+0                  311     296
+1                    2       2
+2                    0       1
+3                    1       1
+rx lane            rx   drop
+%-15lu     0      0
+%-15lu     1      2
+%-15lu     2      0
+%-15lu     3      1
+```
+
+两段并排就是本阶段的边界：上面四行数字列对齐、三列齐全；下面四行仍是 `%-15lu`
+字面量。**并且之前只说了"打印字面量"是不够的——实测确认 `rx lane` 还丢了一整列**：
+格式串里两个可用的转换符只吃到 lane 和 rx 两个参数，`drop` 从头到尾没被打印。
+
+#### 阶段 C2 的 N=1 等价证明与门禁（实测）
+
+**字节级证明（objdump，铁律指定的方法）。** 基线用 `git archive HEAD^` 拉出改动前的
+`b21565373` 到独立目录、独立构建目录，**两边同一条命令行**（`make dev-build`）各做一次
+完全干净的构建，再逐 section 比对：
+
+| 目标文件 | `.text` | `.rodata` | `.sdata` |
+|---|---|---|---|
+| `memp.o` | IDENTICAL (`0x0fbe`) | IDENTICAL (`0x1c0`) | IDENTICAL (`0x85`) |
+| `lwip_stack.o` | IDENTICAL (`0x72f2`) | IDENTICAL (`0x78`) | IDENTICAL (`0x3e8`) |
+| `socket_inet.o` | IDENTICAL (`0x97e0`) | 两树均无该节 | IDENTICAL (`0x388`) |
+
+`riscv64-unknown-elf-objdump -h` 取尺寸 + `objcopy -O binary --only-section=…` 取内容
+后 `cmp`，三个文件三节全部逐字节相同。
+
+**整目标文件层面**：两边 338 个 `.o` **尺寸全部相同**；其中 19 个字节不同，全部是
+`-fsanitize=undefined` 内嵌的 `SourceLocation` 行号表（`.data` 里）——把这 19 个源文件
+用同一条命令行**去掉 `-fsanitize=undefined`** 各重编一次，**19/19 逐字节相同**。
+唯一仍不同的一个数是 `procfs_render.o` 里 `__DATE__ __TIME__` 生成的横幅时间戳
+（`A20OS 0.13 build Oct  7 2026 18:37:05` vs `…18:37:06`），与本改动无关。
+
+**这两次构建的时间戳本身就限定了这份证明的覆盖面，不能略过**：`18:37:05` 早于
+memp lane 行那次修正的提交 `38347ef63`（`20:18:38`）一小时四十分，所以这份整树证明盖的是
+`b6d68730f` 的代码树（`8d8719549` 只改了两份 `.md`，代码与它相同），**不含**那次修正。
+修正本身由上面「因为整个块在 `#if CONFIG_NET_LANES > 1` 内」那一小节的 TU 级证明单独覆盖
+（20:48 跑的）。两份合起来才是"HEAD 的 N=1 与改动前等价"这个结论的全部依据——
+只引其中一份都会漏掉另一半。
+
+**一个必须记下来的坑：基线不能取 `main`。** 本分支的 merge-base 是 `b21565373`，
+而 `main` 已经跑到 `278603614`。第一版证明取了 `main` 做基线，`.text` 差了 5552 字节，
+查下来全部来自 `pci_bus.c`（`1301f1d9c` 那条会话的改动）——与 memp 毫无关系，
+但足以让"字节级等价"看起来被打破。**基线必须是 `HEAD^`，不是 `main`。**
+
+**门禁（全部在提交 `5236068c3` 的树上跑，镜像时间戳 21:15:42 / 21:16:54 / 21:17:08 晚于
+最后一次改动代码的提交 `38347ef63` 20:18:38）：**
+`5236068c3` 之后若还有提交，也只会是本文档这类 `.md`，不进任何产物——
+`git diff 38347ef63..HEAD --name-only` 只有 `docs/net/net-lanes.md`。
+（上表两种跑法都在 `5236068c3` 上各跑了一遍：裸跑 4/4 PASS，`CONFIG_KERNEL_PREEMPT=0`
+4/4 PASS，后者会把这三个镜像重建到上面那三个时刻。）
+
+| 门禁 | 结果 |
+|---|---|
+| `make dev-build` | EXIT=0 |
+| `make CONFIG_KERNEL_PREEMPT=0 smoke-network-suite` | PASS |
+| `make CONFIG_KERNEL_PREEMPT=0 smoke-lwip-memp` | PASS |
+| `make CONFIG_KERNEL_PREEMPT=0 smoke-net-lanes` | PASS |
+| `make CONFIG_KERNEL_PREEMPT=0 smoke-net-lanes-n1` | PASS |
+| 裸 `make <gate>`（四条各跑一遍，编排层的跑法） | 四条全 PASS |
+
+**`CONFIG_KERNEL_PREEMPT=0` 必须写在这里，因为它才是能自证的那条跑法**：门禁自己
+`dev-build` 出它自己要 QEMU 的目录。裸 `make smoke-net-lanes-n1` 在非 `-preempt` 目录
+**不存在**时会直接 FAIL，下一个人因此误以为是 memp 的问题——`Makefile:998` 现在
+`CONFIG_KERNEL_PREEMPT ?= 1`，于是 `BUILD_VARIANT`（`Makefile:419`）给构建目录加了
+`-preempt` 后缀，实际产出 `riscv64-qemu-virt-riscv64-linux-dev-smp4-preempt/`；而
+`tools/targets-smoke.mk:957/958/909/912/817/820` 硬编码的仍是**不带** `-preempt` 的目录名。
+`smoke-network-suite` 这类改走 `$(PYTHON) tools/smoke.py`（`targets-smoke.mk:276`）的门禁
+没有例外：`tools/smoke_cases.py` 里同样硬编码了 35 处
+`.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/`（例如 `smoke_cases.py:924` 的
+`-drive`/`-kernel`），而 `smoke.py:127` 起的 `build` 步骤一样跑默认的 `dev-build`。
+QEMU 因此直接报
+`Could not open '.../riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img': No such file or directory`，
+两个 QEMU 状态都是 1、日志里 0 行 `NET_STRESS_TEST`，门禁 FAIL。
+**该失配不是本阶段引入的，三个门禁文件在分支基线上逐字节未变**：
+`git rev-parse` 对 `b21565373` 与 `HEAD` 取 blob，`Makefile`=`1a2b56b1…`、
+`tools/targets-smoke.mk`=`fbd9892f…`、`tools/smoke_cases.py`=`498358fd…`，两边**全部相同**
+（`git diff b21565373 HEAD --name-only -- Makefile tools/targets-smoke.mk tools/smoke_cases.py`
+为空）。失配机制就写在这三个文件里：`Makefile:998` 的 `CONFIG_KERNEL_PREEMPT ?= 1` 配
+`Makefile:419` 的 `BUILD_VARIANT` 加 `-preempt` 后缀，对上 `targets-smoke.mk:817` 这类
+不带后缀的路径——**基线与 HEAD 上一字不差，所以失配在基线上同样成立**。
+这是 kernel-preemption 工作引入的既有问题，**不在本阶段范围内，因此没有改门禁文件**——
+改目录名等于动别人的门禁。同理 `Makefile:531` 的 `NETDEV_USER` 与门禁一致，与此无关。
+
+**比 FAIL 更危险的变种：门禁照样 PASS，但跑的是比 HEAD 还旧的镜像。**
+失配只在非 `-preempt` 目录**不存在**时才表现为 FAIL；一旦那个目录里躺着一份旧产物，
+QEMU 就照常起来、断言照常过，而 `dev-build` 刚刚重建的是另一个 `-preempt` 目录。
+本轮（修复轮 2）一开始也栽在这里：四条门禁先用裸 `make` 跑了一遍、四条全 PASS，
+但三个被 QEMU 的 `kernel.elf` 时间戳是 20:16:20 / 20:17:31 / 20:17:46，**全部早于最后一次
+代码提交 20:18:38**——那次 PASS 对 HEAD 没有证明力。改用
+`make CONFIG_KERNEL_PREEMPT=0 <gate>` 重跑（门禁自己 `dev-build` 出它自己要 QEMU 的
+那个目录）后，三个 `kernel.elf` 变成 20:33:06 / 20:34:19 / 20:34:33，四条门禁才是在
+HEAD 的产物上过的。**判断依据是时间戳比对，不是"跑绿了"**：
+`git log -1 --format=%ct <code commit>` 对 `stat -c %Y <dir>/kernel.elf`。
+目录刷新之后裸 `make` 再跑一遍四条也全 PASS（编排层就是这么跑的），且这三个镜像的
+`kernel.elf` 时间戳在整轮里**没有再变**——证明裸跑确实只是拿现成目录去 QEMU，不重建。
+
+**编排层两次报 `make smoke-network-suite` 未过，两轮根因都不在本阶段，而且根因在迁移。**
+两份日志尾部都是 `make[1]: 离开目录"/home/fqwqf/OS/A20OS"`——**跑在主工作区，不是本
+worktree**。机制很确定：`smoke-network-suite` 走 `targets-smoke.mk:276` 的 `tools/smoke.py`，
+而 `smoke.py:39` 是 `REPO = Path(__file__).resolve().parent.parent`、`smoke.py:106` 的
+`sh()` 一律 `cwd=REPO`——**构建永远发生在"那份 `smoke.py` 自己所在的仓库"里**，
+跟调用方在哪敲的 `make` 无关。所以谁在主工作区敲这条命令，`dev-build` 就在主工作区跑。
+
+| 轮次 | 报错落在 | 我这边的复核（带时刻，主工作区在动，不带时刻的说法会立刻过期） |
+|---|---|---|
+| 修复轮 1 | `kernel/core/trap.c:19` 冲突标记、`kernel/include/mm/pt.h` `pt_meta_t` | 21:09:47 查：工作树 0 标记，index 仍 `UU` |
+| 修复轮 2 | `kernel/mm/cow.c:234/244/260/265/270` 冲突标记 | 21:01:45 查：**4 处标记俱在**，与日志完全对得上；对方 21:02:03 写盘清掉，21:09:47 查已是 0 标记，但 index 仍 `UU` |
+
+主工作区 `HEAD` 是 `4504c1223`（merge wt3/lockshard），但 `git ls-files -u` 在 21:09:47
+**仍列着四路未合**：`kernel/core/trap.c`、`kernel/include/mm/pt.h`、`kernel/mm/cow.c`、
+`kernel/mm/pt.c`——**标记清了不等于合并完成，index 里 1/2/3 三个 stage 还在**。
+**冲突与本分支无关**，一条条核过：
+
+| 事实 | 值 |
+|---|---|
+| `kernel/mm/cow.c` 在我分支基线 `b21565373` 的 blob | `f454bab60a6e0c12407367f6decf5032a1f11c7c` |
+| 同一 blob 在主工作区 merge 的 stage 2（ours） | `f454bab60a6e0c12407367f6decf5032a1f11c7c`（**相同**） |
+| stage 3（theirs = `feat/virt-foundation`）的 blob | `984ebeedf5309fd9f875ac88ff4fe9540edbe157`（不同） |
+| `git diff b21565373 4504c1223^1 --name-only -- kernel/mm/cow.c` | 空，**本分支对 cow.c 贡献 0 字节** |
+| 主工作区 `kernel/mm/cow.c` 的 mtime | 21:02:03（我在 21:01:45 查时是 21:00:34，**两次相隔 69 秒，对方在持续写**） |
+
+标记从 `trap.c`/`pt.h` 迁到 `cow.c`、又在查证期间被清掉，是**另一个会话正在逐个解
+`feat/virt-foundation` 的 merge**，不是本阶段的改动。按约定（"构建报错若落在那些文件上，
+如实报告"）**没有改主工作区任何文件、没有 `git add`、没有为了让构建变绿回退它们，
+也没有在主工作区内执行任何构建**——主工作区只读，所以**我没有也不能声称主工作区现在
+能构建**；能声称的只有下面这条我实际跑过的。同一条命令在我这边重跑：
+
+```
+$ cd /home/fqwqf/OS/A20OS-wt3-lockshard && make smoke-network-suite
+EXIT=0
+smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv64.log
+# 日志里 make[1]: 离开目录"/home/fqwqf/OS/A20OS-wt3-lockshard"
+# grep -c "conflict marker" = 0
+```
+
+**没有通过的一项（如实交代）：`network_suite` 在 `NET_LANES=4` 下挂死。**
+在 `NR_CPUS=1 NET_LANES=4` 的镜像上敲 `network_suite`，guest 卡在
+`[LOCK-STALL] … name=lwip waiter=7 owner=-1` 直到超时。**这不是本阶段引入的**：
+同一条命令行在基线 `b21565373` 的 N=4 镜像上**同样挂死**，同样的锁、同样的
+`waiter_ra=0xffffffc08038ea2e`、同样停在第 231 行 `# network_suite`。既然基线同样红，
+本阶段没有去动它，也**没有**把它算成通过的门禁。现有门禁里 `smoke-network-suite`
+只在默认 N=1 下跑 `network_suite`（N=1 通过），没有任何一条门禁在 N=4 下跑它，
+所以这个缺口在本阶段之前就存在。
+
 
 #### 阶段 C2 查到的一件比本阶段更要紧的事：切 memp 并不足以让 `g_lwip_lock` 可切
 
