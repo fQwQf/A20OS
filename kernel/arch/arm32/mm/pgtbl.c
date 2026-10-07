@@ -295,6 +295,20 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     return 0;
 }
 
+/* ARM32's short-descriptor backend predates the per-PTE status sidecar.
+ * Callers still use the common mapping API, but this architecture records the
+ * effective mapping only in its hardware PTE. */
+int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+               uint8_t cls) {
+    (void)cls;
+    if (flags & PTE_X) {
+        pfn_t pfn = phys_to_pfn(pa);
+        if (pfn_valid(pfn))
+            arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+    }
+    return pt_map(pgdir, va, pa, flags);
+}
+
 int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
                 uint8_t cls) {
     int idx;

@@ -29,6 +29,7 @@ static int fail(const char *what)
 #define VMA_RACE_ROUNDS 256
 #define VMA_FORK_EXEC_WORKERS 4
 #define VMA_FORK_EXEC_ROUNDS 64
+#define FORK_MPROTECT_COW_ROUNDS 32
 
 static volatile int vma_race_ready;
 static volatile int vma_race_start;
@@ -436,6 +437,44 @@ static int concurrent_vma_fork_exec(void)
         }
     }
     return result;
+}
+
+/* A private page stays shared after fork until a writer faults.  Cycling the
+ * child through read-only and writable protections must not erase that COW
+ * obligation and let its store modify the parent's frame. */
+static int fork_mprotect_cow(void)
+{
+    volatile unsigned char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED)
+        return fail("fork-mprotect-cow-mmap");
+    page[0] = 0x35;
+
+    for (int round = 0; round < FORK_MPROTECT_COW_ROUNDS; round++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            munmap((void *)page, 4096);
+            return fail("fork-mprotect-cow-fork");
+        }
+        if (pid == 0) {
+            unsigned char value = (unsigned char)(round + 1);
+            if (mprotect((void *)page, 4096, PROT_READ) < 0 ||
+                mprotect((void *)page, 4096, PROT_READ | PROT_WRITE) < 0)
+                _exit(2);
+            page[0] = value;
+            _exit(page[0] == value ? 0 : 3);
+        }
+
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0 || page[0] != 0x35) {
+            munmap((void *)page, 4096);
+            return fail("fork-mprotect-cow-isolation");
+        }
+    }
+    if (munmap((void *)page, 4096) < 0)
+        return fail("fork-mprotect-cow-munmap");
+    return 0;
 }
 
 static unsigned long read_page_cache_pinned(void)
@@ -1912,7 +1951,7 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--vma-fork-exec-only") == 0) {
         printf("MM_VMA_FORK_EXEC: start workers=%d rounds=%d\n",
                VMA_FORK_EXEC_WORKERS, VMA_FORK_EXEC_ROUNDS);
-        if (concurrent_vma_fork_exec() != 0)
+        if (fork_mprotect_cow() != 0 || concurrent_vma_fork_exec() != 0)
             return 1;
         printf("MM_VMA_FORK_EXEC: PASS\n");
         return 0;
