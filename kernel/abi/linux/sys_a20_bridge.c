@@ -276,9 +276,19 @@ static hyp_vcpu_t *hyp_bridge_vcpu(int64_t id)
     return vcpu;
 }
 
+/* Guest creation and execution are host-level authority with no envelope
+ * delegation or resource accounting contract.  Deny the entire hyp_* syscall
+ * family before validating arguments, probing hardware, or looking up slots. */
+static int hyp_envelope_denied(void)
+{
+    return env_active(proc_current());
+}
+
 /* SYS_hyp_vm_create(mem_size) -> vm id >= 0, or a negative errno. */
 int64_t sys_hyp_vm_create(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     uint64_t mem_size = args->arg[0];
     if (mem_size == 0)
         return -EINVAL;
@@ -324,6 +334,8 @@ static void hyp_scrub_page(void *page)
  */
 int64_t sys_hyp_vm_load(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     uint64_t gpa = args->arg[1];
     const char *ubuf = (const char *)(uintptr_t)args->arg[2];
     uint64_t len = args->arg[3];
@@ -372,6 +384,8 @@ int64_t sys_hyp_vm_load(const linux_syscall_args_t *args)
 /* SYS_hyp_vcpu_create(vm, entry_gpa) -> vcpu id >= 0, or a negative errno. */
 int64_t sys_hyp_vcpu_create(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     if (!hyp_supported())
         return -EOPNOTSUPP;
 
@@ -401,6 +415,8 @@ int64_t sys_hyp_vcpu_create(const linux_syscall_args_t *args)
  */
 int64_t sys_hyp_vcpu_run(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     if (!hyp_supported())
         return -EOPNOTSUPP;
 
@@ -418,6 +434,8 @@ int64_t sys_hyp_vcpu_run(const linux_syscall_args_t *args)
  * reference hyp_vcpu_create() took, so only the caller's own reference goes. */
 int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     hyp_vm_t *vm = (hyp_vm_t *)hyp_slot_take(proc_current()->pid,
                                              HYP_SLOT_VM,
                                              (int64_t)args->arg[0]);
@@ -454,6 +472,8 @@ int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
 /* SYS_hyp_vcpu_set_boot(vcpu, hartid, dtb_gpa) -> 0 */
 int64_t sys_hyp_vcpu_set_boot(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     hyp_vcpu_t *vcpu = hyp_bridge_vcpu((int64_t)args->arg[0]);
     if (!vcpu)
         return -EBADF;
@@ -468,6 +488,8 @@ int64_t sys_hyp_vcpu_set_boot(const linux_syscall_args_t *args)
  * into across the run, and the copy is 32 bytes on a syscall stack. */
 int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
     if (!vm)
         return -EBADF;
@@ -511,6 +533,8 @@ struct hyp_vm_status {
 /* SYS_hyp_vm_status(vm, out) -> 0 */
 int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
 {
+    if (hyp_envelope_denied())
+        return -EPERM;
     hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
     if (!vm)
         return -EBADF;

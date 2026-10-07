@@ -52,6 +52,17 @@ TRANSFER = {
 }
 FAILCLOSED = {
     "io_uring_register": "A9 REGISTER_FILES 分支对信封任务 -EPERM；EVENTFD 完成通知在执行点调解",
+    # Host-side guest creation and execution have no delegated envelope
+    # authority model.  Keep all Linux entry points closed for enveloped tasks
+    # until the hypervisor API has an explicit capability and accounting design.
+    "hyp_vm_create": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vm_load": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vcpu_create": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vcpu_run": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vm_destroy": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vcpu_set_boot": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vm_set_marker": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
+    "hyp_vm_status": "hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝",
 }
 USE = {
     "read":      "方向位 R", "readv": "方向位 R", "pread64": "方向位 R",

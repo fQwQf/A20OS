@@ -636,4 +636,16 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
 | 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
 
-总计：142 个 syscall（`syscall_table.def` 当前登记数）。
+### Hypervisor / vCPU (0x0F00)
+
+宿主 hypervisor 控制接口。VM 与 vCPU 通过有类型的 handle 管理；guest RAM 加载按页从用户缓冲区复制，执行 vCPU 直到 guest 退出。RISC-V H 扩展不可用时创建/运行接口返回 `A20_ERR_NOT_SUPPORTED`。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0F00 | `hyp_vm_create` | `int64_t hyp_vm_create(uint64_t mem_size)` | 创建 guest 地址空间，返回 VM handle |
+| 0x0F01 | `hyp_vm_load` | `int64_t hyp_vm_load(a20_handle_t vm, uint64_t gpa, const void *buf, uint64_t len)` | 将用户缓冲区复制到 guest GPA；GPA 页对齐，单次最多 16 MiB |
+| 0x0F02 | `hyp_vcpu_create` | `int64_t hyp_vcpu_create(a20_handle_t vm, uint64_t entry_gpa)` | 创建从指定 GPA 启动的 vCPU，返回 vCPU handle |
+| 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
+| 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
+
+总计：147 个 syscall（`syscall_table.def` 当前登记数）。

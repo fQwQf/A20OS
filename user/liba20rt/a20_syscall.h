@@ -281,4 +281,11 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_ext_point_info     0x0E04
 #define A20_SYS_registry_claim    0x0A03
 
+/* ===== Hypervisor / vcpu (0x0F00) ===== */
+#define A20_SYS_hyp_vm_create      0x0F00
+#define A20_SYS_hyp_vm_load        0x0F01
+#define A20_SYS_hyp_vcpu_create    0x0F02
+#define A20_SYS_hyp_vcpu_run       0x0F03
+#define A20_SYS_hyp_vm_destroy     0x0F04
+
 #endif

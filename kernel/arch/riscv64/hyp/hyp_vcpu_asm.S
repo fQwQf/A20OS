@@ -55,6 +55,7 @@
     .equ SSTATUS_SIE,  (1 << 1)
     .equ SSTATUS_SPIE, (1 << 5)
     .equ SSTATUS_SPP,  (1 << 8)
+    .equ SSTATUS_FS_INITIAL, (1 << 13)
 
 .altmacro
 .macro LOAD_GP n
@@ -248,13 +249,32 @@ hyp_arch_vcpu_enter:
     sd      t0, 33*8(sp)
 
     /* Guest sstatus: SPP=1 because VS-mode's privilege is S (sret reads SPP
-     * for the privilege and hstatus.SPV for the virtual side), FS=Off because
-     * the vcpu carries no guest FP image so a guest FP instruction must fault
-     * instead of quietly sharing the host's FPRs, and SPIE|SIE so the host
+     * for the privilege and hstatus.SPV for the virtual side), FS=Initial so
+     * guest FP instructions are executable at all, and SPIE|SIE so the host
      * timer interrupt reaches the guest as a trap to HS rather than sitting
      * pending behind it (sret copies SPIE into SIE, so SPIE is the load-bearing
-     * half). */
-    li      t0, SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE
+     * half).
+     *
+     * FS used to be programmed Off here, on the theory that a guest FP
+     * instruction should fault instead of sharing the host's FPRs.  It cannot
+     * work: sret loads this value into mstatus, and mstatus.FS is a HOST-level
+     * gate -- from VS-mode the guest's own `csrs sstatus, FS=Dirty` writes
+     * vsstatus only, so the guest's trap handler raised FS where the gate was
+     * not, and its very first `fsd` (saving the FP frame of the handler
+     * itself, right after that csrs) took the same illegal-instruction trap
+     * again, re-entered at the same sepc, and recursed until the trap frame
+     * walked off the stack (measured: 359 identical cause-2 traps ending in
+     * "trap: corrupted kernel stack pointer").  A non-Off FS is this kernel's
+     * normal steady state anyway -- arch_user_initial_status() hands user
+     * tasks FS=Clean (trap_frame.h:106), the trap entry tests for non-Off FS
+     * (trap.S:72), and nothing else in the tree ever clears the FS field, so
+     * this entry point was the single site that dropped it to Off.  FS=Initial
+     * gives the guest what it has outside a VM: hardware executes its FP
+     * instructions, and its own lazy-FPU dance through vsstatus decides
+     * whether the FPRs are context-switched.  The host's trap entry turns
+     * FS on and restores the register file around every HS trap it takes, so
+     * the guest's FP image also survives each trip out to the hypervisor. */
+    li      t0, SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_FS_INITIAL
     sd      t0, 32*8(sp)
 
     /* kernel_tp: the host task pointer, which is what the trap entry expects

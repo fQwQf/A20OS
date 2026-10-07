@@ -111,6 +111,24 @@ static void hyp_dev_note_unknown(uint64_t gpa, int len)
               (unsigned long)gpa, (unsigned long)((n + 1) / HYP_RAZ_LOG_EVERY));
 }
 
+/* The complement of note_unknown's cadence, for the one address range that is
+ * not a probe: a GPA at or above ram_base+ram_size is beyond everything this
+ * VM was given, and the first hit already says what happened -- the guest
+ * allocated or touched memory it was never handed (the bad-FDT shape, where an
+ * oversized memory node makes it believe the window runs to the top of a
+ * 16 GiB machine).  So ONE line per VM, on the first hit, naming the window
+ * that was stepped over; hyp_guest_mem_fault() prints its "no device" line
+ * immediately after this returns and records the fault. */
+static void hyp_dev_note_above_window(hyp_vm_t *vm, uint64_t gpa, int len)
+{
+    if (__atomic_exchange_n(&vm->above_window_logged, 1, __ATOMIC_RELAXED))
+        return;
+    kwarn("hyp: guest access above RAM window: gpa=%lx len=%d "
+          "window=%lx..%lx\n",
+          (unsigned long)gpa, len, (unsigned long)vm->ram_base,
+          (unsigned long)(vm->ram_base + vm->ram_size));
+}
+
 /* ---- guest console: byte count and marker match ---- */
 
 /*
@@ -468,6 +486,20 @@ int hyp_dev_mmio(hyp_vm_t *vm, uint64_t gpa, int store, uint64_t *value, int len
         }
         hyp_dev_access(vm, off, store, value, len, hyp_clint_rd, hyp_clint_wr);
         return 1;
+    }
+
+    /* Above the window's upper edge there is nothing to probe and nothing to
+     * RAZ: hyp_vm_t carries exactly ram_base/ram_size, both device windows
+     * live below the window, and a GPA out here is a guest that believes it
+     * has memory it was never given -- an oversized FDT memory node makes it
+     * allocate frames past the edge, and the stores land here.  RAZ/WI would
+     * keep feeding that illusion zeros (and did: a run before this line read
+     * magic=0x0 in kfree from a frame the guest never really wrote).
+     * Answer 0 instead: hyp_guest_mem_fault() prints "hyp: no device for
+     * guest ..." and records the fault, so the run stops loudly. */
+    if (vm->ram_size != 0 && gpa >= vm->ram_base + vm->ram_size) {
+        hyp_dev_note_above_window(vm, gpa, len);
+        return 0;
     }
 
     /* No model for this page: RAZ/WI, tallied, and the guest resumes.  A guest
