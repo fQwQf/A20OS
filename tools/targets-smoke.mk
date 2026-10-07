@@ -297,6 +297,10 @@ smoke-procfs-stress:
 smoke-mm-stress:
 	$(PYTHON) tools/smoke.py smoke-mm-stress
 
+# Preserve RV64 caller-saved t0 across a real supervisor timer trap.
+smoke-rv64-trap-t0:
+	$(PYTHON) tools/smoke.py smoke-rv64-trap-t0
+
 # Drives an address space past MM_SEG_INDEX_CAPACITY so mm_seg_find()'s
 # list-walk fallback executes.  See the case in tools/smoke_cases.py for why
 # this needed its own gate rather than a phase of smoke-mm-stress.

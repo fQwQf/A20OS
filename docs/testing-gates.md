@@ -105,6 +105,8 @@ CPU 的 tick 交错扫描，x86_64 实测 ≤1ms）；无抢占对照（CONFIG_K
 
 `make check-mm-lock-model` 覆盖 MM/VMA/页表这一组静态契约：`MM_LOCK_MODEL`、`MM_VMA_PTE_AUDIT`、`COW/DEMAND_FAULT_TLB_CONTRACT`、`MM_FORK_COW_REGRESSION_GUARD`、`FILE_MMAP_PAGE_CACHE_CONTRACT`、`OOM_RECLAIM_LIFETIME_CONTRACT`、`mm_seg_index_overflow` 等；并确认 `smoke-mm-stress` 与 `MM_STRESS: PASS` 存在。它现在还跑 `smoke-mm-seg-index-overflow`——那条链路的容量溢出分支是整棵树里唯一能被触达的地方，只挂在单跑用例上等于没人验证（见下文「`seg index overflow`」一节）。
 
+RV64 内核 trap 帧的 `t0` 保存回归单独由 `make smoke-rv64-trap-t0` 覆盖。它在单 hart guest 中用启动参数触发汇编哨兵，并等待本 CPU 的 supervisor timer IRQ；没有真实 IRQ 或 `t0` 在返回后变化都会失败。根因、负控结果和寄存器契约见 [mm-fork-mprotect-cow.md](mm-fork-mprotect-cow.md#rv64-内核-trap-的寄存器保存)。
+
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
 
 关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**每页元数据与硬件页表、映射记录与元数据是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：

@@ -292,6 +292,17 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
+#ifdef CONFIG_RISCV64
+    const char *bootargs = bootargs_get();
+    if (bootargs && strstr(bootargs, "a20.trap_t0_selftest=1")) {
+        extern int riscv64_trap_t0_selftest(void);
+        if (riscv64_trap_t0_selftest())
+            printf("RV64_TRAP_T0: PASS (timer IRQ preserved t0)\n");
+        else
+            panic("RV64_TRAP_T0: FAIL (timer IRQ missing or t0 changed)");
+    }
+#endif
+
     /* Generic systems discover optional packages after the root filesystem is
      * available. Embedded deployments link all drivers into the kernel. */
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
