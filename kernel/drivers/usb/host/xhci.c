@@ -537,16 +537,6 @@ static int xhci_command_locked(xhci_controller_t *xhci, uint64_t parameter,
     return xhci_wait_event(xhci, XHCI_TRB_COMMAND_EVENT, pointer, event);
 }
 
-static int xhci_command(xhci_controller_t *xhci, uint64_t parameter,
-                        uint32_t status, uint32_t control, xhci_trb_t *event) {
-    int r = xhci_xfer_acquire(xhci);
-    if (r)
-        return r;
-    r = xhci_command_locked(xhci, parameter, status, control, event);
-    xhci_xfer_release(xhci);
-    return r;
-}
-
 /* Stage the setup/data/status chain on the slot's EP0 ring and ring its
  * doorbell.  Returns the status TRB address the caller matches the completion
  * against, or 0 with *r set when the transfer could not be started.
