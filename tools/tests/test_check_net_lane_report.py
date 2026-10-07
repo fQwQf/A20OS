@@ -43,6 +43,22 @@ rx staged (not yet processed): 0
         with self.assertRaisesRegex(ValueError, "expected lane rows"):
             self.read(report, 4)
 
+    def test_four_lane_report_requires_nonzero_receive_activity(self):
+        report = """memp lane         alloc   freed
+0                  311     296
+1                    2       2
+2                    0       1
+3                    1       1
+rx lane            rx   drop
+0                    0      0
+1                    0      0
+2                    0      0
+3                    0      0
+rx staged (not yet processed): 0
+"""
+        with self.assertRaisesRegex(ValueError, "rx lane counters"):
+            self.read(report, 4)
+
     def test_one_lane_report_has_no_per_lane_blocks(self):
         self.read("PBUF_POOL 10 0 0 0\nTCP_SEG 8 0 0 0\n", 1)
 
