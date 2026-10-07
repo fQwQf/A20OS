@@ -86,6 +86,15 @@
    `riscv,isa-extensions` 字符串列表判断 H；H=false 时应安全跳过。该判断仍以
    固件的 FDT 内容为准。
 
+   2026-10 本轮在 QEMU 实跑 `smoke-hyp-no-h` 时还补出了指针地址约束：OpenSBI
+   传入的 DTB 是物理地址，启动页表撤掉临时 identity map 后不能继续直接解引用该
+   PA；高半加 `PAGE_OFFSET` 也不是此 DTB 的持久映射。`riscv64_memory_init()` 因而在
+   board early-init 阶段、identity 映射仍有效时快照 H 与 SSTC 两个位，后续 timer/hyp
+   查询只读内核静态状态。纯字符串 parser host 测试不覆盖地址映射/生命周期，之前漏掉
+   了这个错误；运行时 H=false gate 曾在 parser 处触发 page fault，之后的高半试验读到
+   的 magic 也不符合 FDT 头。快照修正后 H=false 输出上表的 SKIP，H=true 则由正向
+   gates 验证实际执行路径。
+
 **那还要不要写 `-cpu rv64,h=true`？要写。** 它把意图写进命令行，换一台默认 CPU
 不带 H 的 QEMU 时不会静默退化成"什么都没测"。只是别把"去掉它门禁会红"当成
 事实——在 QEMU 10.0.13 上它去掉也过。**已验证**：`tools/smoke_cases.py:627` 起的
