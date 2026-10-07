@@ -48,7 +48,7 @@ ABI=both riscv64 构建与 `check-abi-boundary` / `check-native-abi-coverage` /
 | 门禁 | 状态 | 归因 |
 |---|---|---|
 | `smoke-native-contract` | 停在 `vmol-leak-vmo` | **主干既有**。在 `git archive HEAD` 的干净副本上失败点逐行相同。该轮把这条门禁接进了 CI，所以它第一次跑就暴露了这个缺陷——门禁在正常工作，但它意味着合入后 CI 会红 |
-| `check-doc-drift` | 3 条 `virtio_net.h:132` 引用越界 | **主干既有**。在合并前的提交 `b21565373~1` 上重测，报错逐条相同（`docs/net/checksum-offload.md:99`、`:160`、`kernel/external/lwip/DIVERGENCE.md:441`，而 `kernel/include/drivers/net/virtio_net.h` 现仅 15 行） |
+| `check-doc-drift` | 3 条 `include/standard-headers/linux/virtio_net.h:132` 外部引用被误解析为本树同名头文件 | **主干既有**。在合并前的提交 `b21565373~1` 上重测，报错逐条相同（`docs/net/checksum-offload.md:99`、`:160`、`kernel/external/lwip/DIVERGENCE.md:441`，而 `kernel/include/drivers/net/virtio_net.h` 现仅 15 行） |
 | `smoke-native-handle` | 跑完第一个用例即在 power-off 前中止 | **主干既有**，但形态比此前记录的更靠前：升级到带 `CONFIG_KERNEL_PREEMPT` 的构建后，`missing` 列表是 `['part ok', 'tchan ok', …]`，此前记的是停在第一个 transfer 用例 |
 
 三条的完成条件写在 [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)。
