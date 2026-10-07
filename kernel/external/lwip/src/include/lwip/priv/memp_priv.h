@@ -147,15 +147,15 @@ struct memp_desc {
 void memp_init_pool(const struct memp_desc *desc);
 
 #ifdef LWIP_MEMP_LANE
-/* Per-lane pbuf pool accounting, defined in core/memp.c.  Two monotonic
- * counters per lane rather than a "used" gauge: memp_free() is handed a pool
+/* Per-lane pool accounting, defined in core/memp.c.  Two monotonic counters
+ * per (lane, pool) rather than a "used" gauge: memp_free() is handed a pool
  * id and a pointer and nothing that says which lane allocated the element, so
  * only counts that cannot drift are offered.  See the note in memp.c. */
 struct memp_lane_count {
   u32_t alloc;
   u32_t freed;
 };
-const struct memp_lane_count *memp_lane_count_get(unsigned lane);
+const struct memp_lane_count *memp_lane_count_get(unsigned lane, memp_t pool);
 #endif /* LWIP_MEMP_LANE */
 
 #if MEMP_OVERFLOW_CHECK
