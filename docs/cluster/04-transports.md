@@ -199,7 +199,7 @@ WC1 落地 `kernel/cluster/uart.{c,h}` 与 `kernel/mcu/leaf.{c,h}` 后对本节�
 | | loopback | UDP | UART |
 |---|---|---|---|
 | 实现状态 | **已实现** | **未实现（WA2 计划）** | **已实现** |
-| 代码 | `kernel/cluster/loopback.c` | （`kernel/cluster/udp.c` 待建） | `kernel/cluster/uart.c` + `kernel/mcu/leaf.c` |
+| 代码 | `kernel/cluster/loopback.c` | WA2 规划文件 `kernel/cluster/udp.c` 尚未创建 | `kernel/cluster/uart.c` + `kernel/mcu/leaf.c` |
 | MTU | 65536（免分片） | 1472（规范值） | 256 |
 | 保序 | 是 | 否（IP 层乱序可能） | 是（单线） |
 | 丢包 | 钩子控制 | 自然 | CRC 丢弃 |
