@@ -746,6 +746,10 @@ void mm_cursor_unlock(mm_cursor_t *cur);
  * leaf is present. */
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
                     paddr_t *pa_out);
+/* Atomically snapshot a private-anon COW leaf and pin its old frame while the
+ * leaf node lock is still held. Returns 1 with a pin, 0 when not eligible. */
+int mm_cursor_cow_snapshot_pin(mm_cursor_t *cur, vaddr_t addr,
+                               uint8_t *cls_out, paddr_t *pa_out);
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
                   uint8_t cls);
 
@@ -758,7 +762,7 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
-/* Compare-and-replace for the lockless COW fault: install `pa` only while
+/* Compare-and-replace for the status-led COW fault: install `pa` only while
  * the entry still maps `expect_pa` as a COW leaf, all under the leaf lock;
  * the new PTE's flags are re-derived from the old one under that lock.
  * 0 = replaced, 1 = state moved underneath (nothing written), <0 = error. */

@@ -11,7 +11,7 @@ struct vfile;
 int handle_cow_fault(struct task_t *t, uint64_t stval);
 int handle_demand_fault(struct task_t *t, uint64_t stval);
 
-/* COW breaks served by the lockless slice (mm_cow_from_status).  Plain
+/* COW breaks served by the status-led path (mm_cow_from_status).  Plain
  * global, printed in [MM-ASM]: the shutdown audit reads it even though the
  * faulting process has exited and a20_perf collection was never armed. */
 extern uint64_t mm_cow_from_status_count;

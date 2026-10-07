@@ -1959,15 +1959,13 @@ int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 }
 
 /*
- * Compare-and-replace one leaf PTE under the leaf lock, for the lockless COW
- * fault: the decision (shared frame -> private copy) is made WITHOUT
- * mm->lock, so the install must refuse to fire when a competing writer got
- * there first.  The entry is replaced only while it still maps `expect_pa`
+ * Compare-and-replace one leaf PTE under the leaf lock, for the status-led
+ * COW fault. The caller also holds mm->lock to serialize against its fallback
+ * path and fork/mprotect operations. The entry is replaced only while it maps `expect_pa`
  * as a COW leaf under the same lock the competing writers now take (fork's
  * parent-side rewrite, mprotect's prot rewrite, mm_pt_node_lock in the unmap
  * bypasses); anything else -- demoted, unmapped, already broken, moved --
- * returns 1 having written nothing, and the caller falls back to the
- * mm->lock path.
+ * returns 1 having written nothing, and the caller releases its spare copy.
  *
  * The new PTE's flags are derived from the OLD PTE under the same lock
  * (exactly the formula handle_cow_fault_locked() applies), so a concurrent
@@ -2351,6 +2349,53 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         *cls_out = byte;
     if (pa_out)
         *pa_out = arch_pte_addr(pte) + (addr & (PAGE_SIZE - 1));
+    cursor_leaf_unlock(cur);
+    return 1;
+}
+
+int mm_cursor_cow_snapshot_pin(mm_cursor_t *cur, vaddr_t addr,
+                               uint8_t *cls_out, paddr_t *pa_out)
+{
+    if (cls_out)
+        *cls_out = MM_ST_CLS_BYTE(MM_ST_INVALID);
+    if (pa_out)
+        *pa_out = 0;
+    if (!cursor_span_ok(cur, addr))
+        return -EINVAL;
+
+    pte_t *slot = cursor_leaf_slot(cur, addr, 0);
+    if (!slot)
+        return 0;
+    pte_t pte = *slot;
+    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte) ||
+        !(pte & PTE_COW) || !(pte & PTE_U)) {
+        cursor_leaf_unlock(cur);
+        return 0;
+    }
+    int idx = arch_pt_vpn(addr, 0);
+    uint8_t cls = mm_pt_peek(cursor_leaf_table(cur), 0, idx);
+    pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+    if (MM_ST_GET_CLASS(cls) != MM_ST_ANON_MAPPED || !pfn_valid(pfn)) {
+        cursor_leaf_unlock(cur);
+        return 0;
+    }
+
+    /* Pin under node->pfa lock order, before releasing the PTE lock.  A peer
+     * COW replacement can then retire the mapping without freeing/recycling
+     * the snapshot frame while the caller copies it. */
+    uint64_t irq = spin_lock_irqsave(&pfa.lock);
+    uint16_t refs = pfa.meta[pfn].refcount;
+    if (refs <= 1 || refs == UINT16_MAX) {
+        spin_unlock_irqrestore(&pfa.lock, irq);
+        cursor_leaf_unlock(cur);
+        return 0;
+    }
+    pfa.meta[pfn].refcount++;
+    spin_unlock_irqrestore(&pfa.lock, irq);
+    if (cls_out)
+        *cls_out = cls;
+    if (pa_out)
+        *pa_out = arch_pte_addr(pte);
     cursor_leaf_unlock(cur);
     return 1;
 }
@@ -3002,3 +3047,25 @@ int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out)
 }
 
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
+#if !defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+/* ARM32's short-descriptor page tables do not carry the metadata used by the
+ * generic page-table ops implementation.  These APIs remain callable from
+ * architecture-independent teardown and safety paths, so provide the same
+ * inert behavior as NOMMU where there is no sidecar state to update. */
+int mm_pt_set_safe_range(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                         unsigned flags, int set)
+{
+    (void)mm;
+    (void)start;
+    (void)end;
+    (void)flags;
+    (void)set;
+    return 0;
+}
+
+void mm_pt_retire_drain(mm_struct_t *mm)
+{
+    (void)mm;
+}
+#endif /* !ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */

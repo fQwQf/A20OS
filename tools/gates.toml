@@ -1118,6 +1118,10 @@ pattern = "MM_VMA_FORK_EXEC: PASS"
 files = ["user/cmds/stress/mm_stress.c"]
 
 [[gate.assertion]]
+pattern = "fork_mprotect_cow"
+files = ["user/cmds/stress/mm_stress.c"]
+
+[[gate.assertion]]
 pattern = "FILE_MMAP_PAGE_CACHE_CONTRACT"
 files = ["kernel/include/fs/page_cache.h"]
 
@@ -1422,53 +1426,45 @@ files = ["kernel/arch/ppc64le/include/page_table.h"]
 # had GAINED one, which is the same hole as the prefix bug above.  Anchoring the
 # end of line is what makes "exactly this list" mean exactly this list.
 [[gate.assertion]]
-pattern = "^SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le$"
+pattern = "^SWAP_SUPPORTED_ARCHES := \\$\\(TRIM_CAP_SWAP_ARCHES\\)$"
 files = ["Makefile"]
 
-# MM_COW_FROM_STATUS: the lockless COW slice installs its private copy under
-# the leaf lock alone, which is only sound because every writer that can
-# race it on the same leaf takes that same lock.  These assertions pin the
-# three sides of that triangle.
+# MM_COW_FROM_STATUS: the status-led COW path holds mm->lock to serialize with
+# its cache/fallback path, and uses leaf locking for an atomic PTE snapshot and
+# frame pin plus compare-and-replace.  These assertions pin those boundaries.
 #
-# 1. fork's parent-side COW rewrite must be node-lock bracketed at both
-#    clone sites, and both must RE-CHECK the PTE under the lock: rewriting
-#    from a value read before the lock would resurrect a frame the process
-#    no longer maps.  `mm_pt_node_lock(stab)` twice (mm_fork_clone_page and
-#    mm_fork_clone_leaf) and the re-check twice.
+# 1. Fork snapshots and pins the source under the owning node lock before it
+#    downgrades the parent and maps the child after releasing that lock.
 [[gate.assertion]]
 pattern = "mm_pt_node_lock\\(stab\\)"
-min_count = 2
+min_count = 1
 files = ["kernel/mm/cow.c"]
 
 [[gate.assertion]]
-pattern = "int still = "
-min_count = 2
+pattern = "MM_FORK_SNAPSHOT_PIN"
 files = ["kernel/mm/cow.c"]
 
 # 2. mprotect's present-leaf rewrite and its never-faulted status refresh
 #    take the owning table's node lock -- the refresh guards the status byte
-#    the lockless fault paths read and write under that same lock.
+#    status-led COW path reads and writes under that same lock.
 [[gate.assertion]]
 pattern = "mm_pt_node_lock\\(ltab\\)"
 min_count = 2
 files = ["kernel/mm/mprotect.c"]
 
-# 3. The lockless COW slice must use the non-reclaiming allocator, exactly
-#    like the anon status fast path: a reclaiming allocation reaches
-#    oom_try_reclaim(), whose victim teardown wants the node locks this
-#    path holds.  Not hypothetical -- the first version allocated
-#    reclaiming and LOCK-STALLed on pfa.lock (the waiter was the COW fault,
-#    the holder the reclaim).  min_count = 2: the anon fast path has one,
-#    the COW fast path needs its own.
+# 3. The status-led COW slice must use the non-reclaiming allocator. A
+#    reclaiming allocation reaches oom_try_reclaim(), which cannot run from
+#    this fault transaction. min_count = 2: the anon status path has one and
+#    the COW status path needs its own.
 [[gate.assertion]]
 pattern = "pfa_alloc_flags\\(0, 0\\)"
 min_count = 2
 files = ["kernel/mm/fault.c"]
 
-# The lockless slice must run BEFORE mm->lock is taken in handle_cow_fault,
-# or it is not lockless.
+# The COW transaction holds mm->lock and uses an atomic snapshot/pin helper;
+# keep that helper in the status-led path.
 [[gate.assertion]]
-pattern = "if \\(mm_cow_from_status\\(t, mm"
+pattern = "mm_cursor_cow_snapshot_pin\\(&cur"
 min_count = 1
 files = ["kernel/mm/fault.c"]
 

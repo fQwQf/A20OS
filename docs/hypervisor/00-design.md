@@ -14,14 +14,20 @@ hypervisor 最吃内存模型。在动 stage-2 之前，`feat/virt-foundation` �
    **空** level-0 表都以 -EEXIST 永久挡住大叶（实测 live-children=0）。现在
    空表在父→子节点锁下退役后装入大叶；`smoke-mm-stress` 断言
    `huge_install>=1` 与审计全零。
-2. **锁模型推广**（`a455e3d3d`）：无锁 COW 切片 `mm_cow_from_status`——
-   rc>1 的共享匿名 COW 缺页只凭叶锁装私有副本；fork 的父侧重写、mprotect
-   的 PTE 重写与 status 刷新都纳入同一把节点锁并带锁下重查。首个版本踩了
+2. **锁模型推广**（`a455e3d3d`）：状态驱动 COW 路径 `mm_cow_from_status`——
+   它最初尝试让 rc>1 的共享匿名 COW 缺页只凭叶锁装私有副本；fork 的父侧
+   重写、mprotect 的 PTE 重写与 status 刷新都纳入同一把节点锁并带锁下重查。首个版本踩了
    两个运行期坑：pfa.lock 临界区内调 `frame_get()`（自死锁）和用可回收分配
    器（reclaim 拿节点锁，LOCK-STALL）。`check-mm-pt-lock-order` 新增 5 条
    断言钉住这个锁三角。
 3. **guest 状态格式**（本文 S2/S3）：`FRAME_F_GUEST` 帧标志与
    `MM_ST_GUEST_MEM` stage-2 叶类。
+
+当前实现状态（2026-10-08）：并发审查发现状态路径读取 PTE 与取得帧引用之间
+仍有可回收窗口，且它可能与传统 COW 回退同时改写同一叶项。因此 COW fault
+的状态路径和回退路径现在都由 `mm->lock` 串行；状态路径另用叶节点锁原子
+快照并 pin 旧帧，再比较并替换。此处保留历史提交号描述原始实现，不再把该
+路径作为无锁或并行 COW 的依据。
 
 ## 1. 定位
 
@@ -181,4 +187,3 @@ SKIP，gate 就变成"过了但什么都没测"。
 | 锁模型回归 | `make check-mm-lock-model`（14 条） |
 | **guest 控制台输入（设备边界那一段）** | `make smoke-hyp-console-p0`——**绿**，但它的 guest 是 13 条指令的合成程序，只证明设备模型，不证明 A20OS-as-guest 能交互 |
 | **guest 走到用户态 shell 并能交互** | `make smoke-hyp-shell`——**绿**（本轮实跑，`.kernel-build/smoke/hyp-shell-riscv64.log`）。真 guest 走到 mksh 提示符，执行门禁敲入的 `echo AAAABBBBCCCC` / `echo DDEEEEEEFFFF` 并把两个 token 打回来（日志 630-633 行），`exit` 收尾、`[init] shutting down`、`HYPVM: … rx_bytes=41 exit=1(shutdown)`、`System is going down for power-off NOW`，`grep -cE 'SLAB BUG\|KERNEL PANIC'` = 0。此前两次红是两个不同的根因，都已修：①**kfree(magic=0x0)**——合成 FDT 的 4 字节对齐 padding 用 `blob_u32()` 写 4 字节，`len & 3` 永不归零，结构块失步、guest 解析失败回退板级 16 GiB 窗口后越窗分配（修 `user/cmds/core/hyp/hyp_guest.c` 的 `blob_name`/`blob_value`，逐字节补零）；②**内核栈页 use-after-free / `corrupted kernel sp`**——guest 入口帧把 `mstatus.FS` 置 Off（`kernel/arch/riscv64/hyp/hyp_vcpu_asm.S`），而 VS 模式下 guest 自己的 `csrs sstatus` 只写 `vsstatus`，它的非法指令处理程序连保存 FP 帧的 `fsd` 都开不出来，同一点 359 次重入把栈打穿（修：入口帧 FS=Initial + `hyp_vcpu.c` 解 FP 访存形 fill-and-retry）。逐行对账见 [03-usage.md](03-usage.md) |
-
