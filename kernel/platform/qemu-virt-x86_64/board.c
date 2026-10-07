@@ -214,12 +214,21 @@ static void x86_64_enumerate_devices(void) {
          * existed to hand the kernel its RSDP.  kernel/boot/uefi/x86_64_loader.c
          * does now, so reaching here under UEFI means the RSDP was found and the
          * MCFG inside it is absent or too old -- a firmware property, not a
-         * missing loader, so do not blame the stub. */
-        printf("[PCI] no MCFG (%s), using the q35 default 0x%lx%s\n", fw,
+         * missing loader, so do not blame the stub.
+         *
+         * This fallback is a guess, and a guess about where the ECAM lives only
+         * holds on the machine it was written for.  pci_host.c checks the window
+         * before trusting it and drops to the 0xCF8/0xCFC ports when it holds no
+         * host bridge, so a machine like i440fx still enumerates -- but through
+         * the legacy ports, and with no ACPI _PRT to answer where its INTx lines
+         * land, so those devices keep their polling path.  Say that, rather than
+         * printing an address as though finding it were the same as it working. */
+        printf("[PCI] no MCFG (%s), assuming q35 ECAM 0x%lx%s\n", fw,
                (unsigned long)ecam,
                fw[0] == 'U' ? " -- UEFI firmware without an MCFG table; PCI "
                               "devices here will not be found"
-                            : "");
+                            : " -- verified against the window before use; "
+                              "absent it, PCI goes through the legacy ports");
     }
 
     pci_enumerate(ecam, bus_start, bus_end);

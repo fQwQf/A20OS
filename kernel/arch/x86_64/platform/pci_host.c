@@ -14,13 +14,26 @@ void arch_pci_host_init(uintptr_t ecam_base) {
     pci_ecam_base = ecam_base;
 }
 
-/* Machines predating PCIe have no ECAM window at all; CONFIG_ADDRESS reads
- * 0xffffffff and the 0xCF8/0xCFC indirection pair is the only way in.  Once a
- * vendor id reads back as all-ones there is no ECAM, so stop trying. */
+/* Machines predating PCIe have no ECAM window at all, and the 0xCF8/0xCFC
+ * indirection pair is the only way in.  Deciding which one this is means asking
+ * the window for something only a real ECAM can answer.
+ *
+ * The test is the host bridge at 00:00.0, not the base address itself.  A
+ * machine with no ECAM does not read back as one fixed wrong value: QEMU's
+ * i440fx leaves the address unmapped, so the first dword reads 0x00000000,
+ * while a machine that decodes the range but has no host bridge there reads
+ * 0xffffffff.  Either way it is not a vendor id, and both have to be rejected
+ * -- checking only for all-ones is what let an i440fx boot enumerate 129
+ * phantom devices at bus fe with id=0000:0000 and then fail much later with
+ * "no init program found", pointing at nothing.
+ *
+ * A real host bridge always has a vendor id, and no machine has one at 00:00.0,
+ * so a nonzero, non-all-ones vendor id means the window is live. */
 static int ecam_absent(void) {
     if (pci_legacy_only)
         return 1;
-    if (*(volatile uint32_t *)pci_ecam_base == 0xffffffffU) {
+    uint32_t id = *(volatile uint32_t *)pci_ecam_base;
+    if (id == 0x00000000U || id == 0xffffffffU) {
         pci_legacy_only = 1;
         return 1;
     }
