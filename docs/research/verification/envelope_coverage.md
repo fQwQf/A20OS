@@ -2,14 +2,14 @@
 
 由 `tools/gen_envelope_coverage.py` 从 `kernel/abi/linux/syscall_table.def` 机械生成——每登记一个新 syscall，`make check-envelope-coverage` 即失败直至其被显式分类。
 
-- 登记入口总数：**366**
+- 登记入口总数：**374**
 - ACQUIRE：14
 - TRANSFER：3
 - USE：15
-- FAILCLOSED：1
+- FAILCLOSED：9
 - PLANNED：35
 - NA：298
-- **资源权威相关且已调解：33**；已知未调解面（PLANNED）：35（全部挂 W2 行项）；无权威参与（NA）：298
+- **资源权威相关且已调解：41**；已知未调解面（PLANNED）：35（全部挂 W2 行项）；无权威参与（NA）：298
 
 分类语义见 docs/research/05 §2.5；类目定义见生成脚本头部。PLANNED 行项清零是论文投稿前条件（审稿人第一攻击点）。
 
@@ -369,6 +369,14 @@
 | 904 | `a20_envelope_revoke` | NA |  |
 | 905 | `a20_envelope_stats` | NA |  |
 | 906 | `a20_envelope_audit` | NA |  |
+| 907 | `hyp_vm_create` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 908 | `hyp_vm_load` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 909 | `hyp_vcpu_create` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 910 | `hyp_vcpu_run` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 911 | `hyp_vm_destroy` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 912 | `hyp_vcpu_set_boot` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 913 | `hyp_vm_set_marker` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 914 | `hyp_vm_status` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
 | 1000 | `arch_prctl` | NA |  |
 | 1001 | `set_thread_area` | NA |  |
 | 1002 | `poll` | NA |  |
