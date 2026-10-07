@@ -117,9 +117,9 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
 - [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
 
-验证入口包括 `make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`。它们分别覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell。相关入口都显式传入 `-cpu rv64,h=true`，这是为表达目标 CPU 前提并避免换用默认不带 H 的模拟器时静默跳过；它本身不是当前 QEMU 上 H 可用的判据。
+验证入口包括 8 个正向门禁：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`；以及负向门禁 `make smoke-hyp-no-h`。正向门禁覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell，并显式以 `-cpu rv64,h=true` 表达 CPU 前提；负向门禁以 `h=false` 检查内核安全拒绝缺少 H 扩展的 CPU。
 
-CPU 必须实际支持 RISC-V H 扩展。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，门禁可运行；设置 `h=false` 时当前 `hyp_probe()` 仍误判为可用，随后宿主在 vcpu exit 路径 panic，而不是干净返回 `NOT_SUPPORTED`。因此显式参数用于表达意图，不应把它解读为运行时特性探测正确，也不要在不带 H 的硬件上运行 guest。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
+CPU 必须实际支持 RISC-V H 扩展。当前 `hyp_probe()` 在执行 H CSR 探测前先查询启动阶段缓存的 FDT ISA 声明；FDT 如实声明 `h=false` 时，内核会拒绝虚拟化并安全跳过，`smoke-hyp-no-h` 覆盖此路径。固件若错误地声明 H 存在，内核仍无法仅凭 CSR 可读性安全识别不支持 H 的 CPU，后续 H 指令可能触发宿主异常。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，正向门禁可运行；显式 `-cpu rv64,h=true` 用于表达测试前提，不是运行时能力判据。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
 
 ## 当前契约与恢复记录
 
