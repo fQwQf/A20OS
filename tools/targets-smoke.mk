@@ -1023,12 +1023,12 @@ smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 # line instead of eating the 'n' off net_stress_test.  Observed exactly once,
 # as 'ent_stress_test: inaccessible or not found', which made this gate fail
 # with the network perfectly healthy.
-NET_LANES4_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1" print-build-dir)
+NET_LANES4_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" print-build-dir)
 NET_LANES1_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 print-build-dir)
 
 smoke-net-lanes: NET_HOSTFWD=
 smoke-net-lanes:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1" dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-lanes-riscv64.log"; \
@@ -1237,7 +1237,7 @@ smoke-net-accept:
 # downstream -- or, for the lookup bug, as a plain missed connection.
 smoke-net-tcp-lanes: NET_HOSTFWD=
 smoke-net-tcp-lanes:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1" dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-tcp-lanes-riscv64.log"; \
@@ -1249,10 +1249,10 @@ smoke-net-tcp-lanes:
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(NET_LANES4_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/kernel.elf \
+		-kernel $(NET_LANES4_BUILD_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 || status=$$?; \
 	passes=$$(grep -c 'TCP_ACCEPT_TEST: PASS' "$$log" || true); \
