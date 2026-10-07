@@ -88,14 +88,29 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
   - 完成条件：修好 `mm/` 的 VMO 释放路径，该门禁在 `ABI=both` 下通过并进入发布
     流水线（与 `release.yml` 现有的 smoke 前置一致）。
 - [ ] 修好 `smoke-native-handle` 与 `smoke-native-mm`
-  - 两条在主干上本就是红的（HEAD 干净副本上失败点相同）：
-    `smoke-native-handle` 停在第一个 transfer 用例（`dup ok` 之后），
-    `smoke-native-mm` 停在 `vm_map FILE`。后果是本轮新写的用户态断言
+  - 两条在主干上本就是红的（HEAD 干净副本上失败点相同）。2026-10-06 在已并入
+    `wt/practical-readiness` 且带 `CONFIG_KERNEL_PREEMPT` 的 main 上重测，
+    `smoke-native-handle` 的实际失败形态是**跑完第一个用例就在 power-off 前中止**：
+    `missing ['part ok', 'tchan ok', 'bch ok', 'evq ok', 'opc ok', 'ac ok',
+    'System is going down for power-off NOW']`——即 `part ok` 之后的下一个断言
+    就没有再输出，且没有走到正常关机。此前记的"停在第一个 transfer 用例
+    （`dup ok` 之后）"是更早提交上的形态，升级到抢占配置后提前得更靠前。
+    `smoke-native-mm` 仍停在 `vm_map FILE`。后果是本轮新写的用户态断言
     （`handle_set_meta` 的 truncate/时间戳、`xattr` 的读写权限分离、`vm_advise` 的
     `MADV_NORMAL` 与四个 fork-policy advice）**一次都没有被成功执行验证过**——
     它们现在只是写下的断言，不是已验证的行为。
   - 完成条件：两条门禁在当前提交 PASS，且新增断言确实被执行到（不是在到达它们
     之前就失败）。
+- [ ] 修好 `check-doc-drift` 的 4 条失效引用
+  - 这是合并双 ABI 整改时**在主干上就红、且与该轮改动无关**的一条
+    （在合并前的提交 `b21565373~1` 上重测，报错逐条相同）：
+    `docs/net/checksum-offload.md:99`、`docs/net/checksum-offload.md:160`、
+    `kernel/external/lwip/DIVERGENCE.md:441` 都把
+    `include/standard-headers/linux/virtio_net.h:132` 指到了
+    `kernel/include/drivers/net/virtio_net.h`（现仅 15 行）之外。
+    `check-doc-citations` 扫 1240 条行内引用，这 3 条让门禁退出码为 2。
+  - 完成条件：三条引用各自重指向到符号当前所在行，或在「引用文件而非定位」时
+    去掉行号，让 `make check-doc-drift` 转绿。
 - [ ] 把剩余 20 条 native 运行时门禁接进 CI，并扩到第二个架构
   - 需要先让 `tools/smoke_cases.py` 的 `argv` / `build.vars` 可按架构参数化
     （`qemu-system-$(ARCH)` 与 `AX=ARCH=…`），再在 `smoke` job 里开架构矩阵；只把

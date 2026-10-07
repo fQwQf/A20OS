@@ -37,10 +37,29 @@ P1 提为表首 P0（重新定级，不是新增阻塞项）；另外「`proc_lo
 「更远」，而是对现状知道得更多了。具体到服务器选型：**内核抢占与 RT 限流仍然
 缺席**，且它是当前距可投产最远的一项，后果见 §四 开头与 §八 首行。
 
+### 整合到 main 时留下的三个红灯（2026-10-06，`b21565373`）
+
+`wt/practical-readiness` 并入 main 时人工合并了两处冲突（`kernel/mm/madvise.c`
+的文件头注释、`docs/server-readiness.md` 的排序与边界注记），合并本身通过了
+ABI=both riscv64 构建与 `check-abi-boundary` / `check-native-abi-coverage` /
+`check-abi-config-guard` / `check-smoke-cases`。但**有三条门禁是红的**，其中
+两条在这一轮之前就红，且都不是该轮引入的：
+
+| 门禁 | 状态 | 归因 |
+|---|---|---|
+| `smoke-native-contract` | 停在 `vmol-leak-vmo` | **主干既有**。在 `git archive HEAD` 的干净副本上失败点逐行相同。该轮把这条门禁接进了 CI，所以它第一次跑就暴露了这个缺陷——门禁在正常工作，但它意味着合入后 CI 会红 |
+| `check-doc-drift` | 3 条 `virtio_net.h:132` 引用越界 | **主干既有**。在合并前的提交 `b21565373~1` 上重测，报错逐条相同（`docs/net/checksum-offload.md:99`、`:160`、`kernel/external/lwip/DIVERGENCE.md:441`，而 `kernel/include/drivers/net/virtio_net.h` 现仅 15 行） |
+| `smoke-native-handle` | 跑完第一个用例即在 power-off 前中止 | **主干既有**，但形态比此前记录的更靠前：升级到带 `CONFIG_KERNEL_PREEMPT` 的构建后，`missing` 列表是 `['part ok', 'tchan ok', …]`，此前记的是停在第一个 transfer 用例 |
+
+三条的完成条件写在 [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)。
+其中 `smoke-native-handle` 与 `smoke-native-mm` 不修的后果值得单独强调：**该轮新写的
+全部用户态断言（`handle_set_meta` 的 truncate/时间戳、`xattr` 读写权限分离、
+`vm_advise` 的 `MADV_NORMAL` 与四个 fork-policy advice）一次都没有被成功执行过**——
+它们目前是写下的断言，不是已验证的行为。静态门禁与构建只能证明它们编得过。
+
 上列四项里的第一条（入站 TCP）是 `feat/net-lanes` 那一轮的最大发现，且**已修**：
 `net_listen()` 此前丢弃已绑定的 PCB，
-`tcp_listen()` 全树从未被调用，所以 listener 从来不存在于 lwIP 里，入站 SYN
-一律被回 RST——协议栈没有任何对外服务能力。现在 `net_listen()` 按 `a20.tcpmode`
+`tcp_listen()` 全树从未被调用，所以 listener 从来不存在于 lwIP 里，入站 SYN一律被回 RST——协议栈没有任何对外服务能力。现在 `net_listen()` 按 `a20.tcpmode`
 分两档，`lwip` 档会把绑定 PCB 转成真正的 LISTEN pcb；端到端实测（SLIRP
 hostfwd 指向 guest telnetd）从"连接被对方重置"变为拿到可用 shell。**默认仍是
 `fast` 档、行为不变**，服务器需显式选 `a20.tcpmode=lwip`。详见第二节。
