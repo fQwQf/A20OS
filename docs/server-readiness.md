@@ -122,7 +122,8 @@ AHCI（`FLUSH CACHE EXT`）。
   INTx swizzle 由 `arch_pci_intx_irq()` 覆盖（dev 2 pin A → GSI 22 →
   vector 0x56）。**这仍只是 QEMU 证据**，下面的边界没有因此改变。
 - AHCI 仍是单 controller / 单 port / 单 command slot，只走 INTx，没有 MSI-X
-  路径；真实 SATA PHY 上的行为没有任何证据。
+  路径；**classic MSI（能力 0x05）也未实现**（见 §八 P1「MSI（PCI 能力
+  0x05）支持」），真实 SATA PHY 上的行为没有任何证据。
 - 无 RAID、无数据校验和、无快照/CoW、无 fs-verity。
   文件数据块本身仍无校验和；`crc32c` 覆盖 JBD2 日志与 ext4 元数据
   （`metadata_csum`），不覆盖常规文件数据内容。
@@ -1056,12 +1057,30 @@ OOM 评分。
   但没有 per-function/per-queue 的细粒度接口与 cmdline 亲和性策略；
   e1000e 只验证到表被正确解析并 arm，
   网卡无流量故未实测投递（virtio-blk 一路是端到端的）。
-- INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:297-311` 只认
-  host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
-  ACPI `_PRT` 与 PIRQ link 编程。
-- ECAM 基址是编译期常量（仅 virtualbox-aarch64 从 MCFG 读）。
-- ACPI 基本没有：只有 RSDP + MADT + HPET + TPM2。**无 DSDT/AML 解释器**
-  → 电源管理在架构上就不可能。
+- **INTx 路由不再硬编码，但仍未在真机上执行过**（2026-10-07 改）：原先
+  `arch_pci_intx_irq()` 只认 host bridge `0x29c08086`，否则 `return -1`。
+  现在 `kernel/arch/x86_64/platform/acpi_dsdt.c` 实现 DSDT 子集解释器读
+  `_PRT`（**失败即关闭**：不认识的 opcode、走不通的包、表里没有的设备一律
+  返回"无 GSI"让驱动留在轮询，绝不猜），q35 swizzle 只作为唯一已知、无固件
+  依赖的回退；boot log 打印 `(ACPI _PRT)` 或 `(q35 swizzle)` 标明是谁答的。
+  **残留（全部写死在文档里）**：① `_PRT` 只答 bus 0，次级总线需 bridge 树
+  下钻，**未实现**；② i440fx 的 PIRQ link 寄存器只读不写；③ QEMU 的 DSDT
+  极简，`_PRT` 求值器**从未真正执行过**（q35 门禁实测走的是 swizzle 分支），
+  真机固件上一次都没跑过。详见 [platforms/x86_64-pc.md](platforms/x86_64-pc.md)。
+- **ECAM 基址不再只靠编译期常量**（2026-10-07 改）：x86_64 各板从 ACPI MCFG
+  读（`firmware_acpi_mcfg_base()`）；无 ECAM 的机器（i440fx）经
+  `arch_pci_config_read32` 的 `0xCF8`/`0xCFC` legacy 回退枚举——`pci_bus.c`
+  曾自己算 ECAM 地址直接读，使这条回退成了死代码，i440fx 上枚举出 128 个
+  `id=0000:0000` 幽灵设备；已修并由 `make smoke-pci-i440fx` 按设备 ID（非
+  槽位）断言。残留：virtualbox-aarch64 仍是旧板级固件范围路径。
+- **ACPI 已有 DSDT 子集解释器与 S5 关机**（2026-10-07 改，原条目"无 DSDT/AML
+  解释器 → 电源管理在架构上就不可能"已失效）：RSDP + MADT（含 IOAPIC 条目，
+  `IOAPIC_BASE` 硬编码已删）+ FADT（PM1a 块地址/宽度/睡眠状态）+ DSDT 子集
+  （`acpi_dsdt.c`）。`pc_poweroff()` 改走 `firmware_acpi_poweroff()`：先写
+  规范的 `SLP_TYP=5|SLP_EN`，短暂停顿后再写 QEMU 可识别的 `0x2000`——QEMU
+  `acpi_pm_cnt_write()` 只对 sleep type 0 关机、5 落空，而 0 在真机上是保留
+  值，双写是模拟器怪癖，代码内已注明。**残留**：S5 与 `_PRT` 都只在 QEMU 上
+  验证，解释器从未在真实固件上执行。
 - RTC 只有 x86_64：`cmos-rtc.a20drv`（MC146818，Early DriverStore）读 CMOS
   并经 `timekeeping_wallclock_set_hw()` 替换墙钟；因为它是模块，替换只能
   发生在 `driver_manager_early_init()` 之后，`timekeeping_init()` 仍从编译期
@@ -1390,7 +1409,8 @@ CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过�
 | P1 | 接收缓冲自动调优 | `SO_RCVBUF` / `SO_SNDBUF` 已不再是 no-op（`aacce4dcc`），且**抬高 `SO_SNDBUF` 现在对既有连接立即生效**（`272c80a2f`，直接双向写 `pcb->snd_buf`，DIVERGENCE §2.10）、UDP/RAW 也接受这两个选项并真正执行（`92b399e5d`）。但**仍然没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈、不从实测吞吐调整，依赖 Linux 那种增长的调用方拿不到。窗口缩放已解除协议上限，池与档位仍是硬边界 |
 | P1 | 嵌入式档仍装不进 20 KiB | **账已全部纳入 profile 并被四项求和断言钉住，20 KiB 仍然不够，且这不是调参问题**：两块静态数组先降 91.5%（`g_pkt_ring` 24640→2064，`g_netif_state` 12672→1120），随后每 socket staging 按档位压小（ring 4→2、内联载荷 320→256，`8 × sizeof(net_socket_t)` 32768→**19520 B**，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB），池上限从 22,880 B 降到 13,332 B 对上 `MEM_SIZE` 16,384 B，conntrack 64→32。总账四项 **42.3 KiB**（filter 项在 `810e9e431` 给条目加字段后由 3,072 涨到 3,328 B），由 `socket_internal.h:510` 的四项求和断言封在 44 KiB。**本档现在诚实地声明自己要 44 KiB，而不是声明 20 KiB 然后被自己的代码违反**——八个 socket 就占满 20 KiB 部件的 95%。减少的能力（burst 吸收、缓冲深度、并发流数、MTU 498）逐条写在「嵌入式档的账全部进了 profile」一节。**残留**：三条预算断言都只有 tier 1 有，tier 2/3 的池上限仍远大于各自的 `MEM_SIZE`（由 `obj_cache` 动态分配，不是同一件事），本轮未对账 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
-| P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
+| P1 | ACPI `_PRT`（解释器已落，但只答 bus 0、且从未真正执行） | `acpi_dsdt.c` 已在 main（`7f38f2227`），失败即关闭、绝不猜 GSI；**残留三项**：次级总线的 bridge 树下钻未实现（桥后设备留轮询）、i440fx PIRQ link 只读不写、求值器在 QEMU 极简 DSDT 上走不到、真机固件上一次未跑。真机服务器的准入条件 |
+| P1 | MSI（PCI 能力 0x05）支持 | `PCI_CAP_ID_MSI` 在 `pci_msix.h` 已定义但**全树无一处使用**：MSI-X（能力 0x11）已实现并实测，但只带 MSI-X 的中断窗口；AHCI、NVMe、xHCI、rtl8139 这类常见设备多数只提供 classic MSI，当前它们的路径是 INTx（有 `_PRT`/swizzle 时）或轮询。需要复用 MSI-X 的向量分配与 LVT 编程，驱动侧按 MSI → MSI-X → INTx → 轮询降级 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |
