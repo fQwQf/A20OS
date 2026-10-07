@@ -157,15 +157,16 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
 - 这是 2026-10-08 本地源码树的构建结果，不代表 GitHub Actions 已运行或变绿。2026-10-07 所记远端红灯与 CI toolchain-gates 阻断仍需推送后在远端复核；本地完整矩阵通过不能代替该 CI 观察。
 
 `kernel-build` 与 `build` 分开不是重复：`build` 要产出发布打包产物
-（apk 仓库 + world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前
-构建不过（`user/cmds/stress/poll_edge.c` 在 riscv32 上引用了 musl 未声明的
-`SYS_pselect6` / `SYS_ppoll`）；`kernel-build` 是纯内核 bring-up 门禁，与
-`check-kernel-build-all` 迭代的是同一个 `check-<arch>-bringup` 目标。
+（apk 仓库 + world 镜像），因此需要可用的用户态；`kernel-build` 是纯内核
+bring-up 门禁，与 `check-kernel-build-all` 迭代的是同一个 `check-<arch>-bringup`
+目标。2026-10-07 时 riscv32 用户态因 `user/cmds/stress/poll_edge.c` 引用了 musl
+未声明的 `SYS_pselect6` / `SYS_ppoll` 而构建失败；2026-10-08 本地七架构矩阵已通过，
+这条历史失败不再描述当前树。
 
-`make check-doc-test-gates` 目前**不在** CI 里，原因有两条，都不是"忘了"：
-它不是快速的纯文档检查——17 个子门禁里有 11 个各自拉起 QEMU guest，按
+截至 2026-10-07，`make check-doc-test-gates` **不在** CI 里，原因有两条，都不是"忘了"：
+它不是快速的纯文档检查——当时的 17 个子门禁里有 11 个各自拉起 QEMU guest，按
 [testing-gates.md](../testing-gates.md) 的说明属于长时间聚合；而且它当前
-在树上是红的（`check-task-state-boundary`、`check-abi-smoke-gate`、
+在当时的树上是红的（`check-task-state-boundary`、`check-abi-smoke-gate`、
 `check-doc-drift` 三项失败）。`check-final-definition` 的 11 条断言已被
 `check-doc-test-gates` 完全覆盖，所以 CI 只跑后者，不重复跑同一批 QEMU
 smoke。
