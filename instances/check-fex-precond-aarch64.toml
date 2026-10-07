@@ -15,7 +15,7 @@ expect = [
 	"AUXV_STACK: 19 pairs, 1 AT_NULL, required=present, AT_EXECFN=absent",
 	# Require native-word bytes to match the exec vector even when consumed
 	# through short reads across arbitrary pair boundaries.
-	"AUXV_PROC: binary 19 pairs, native-word, stack-match=YES, PHDR/PAGESZ/AT_NULL=valid",
+	"AUXV_PROC: binary 19 pairs, native-word, stack-match=YES, PHDR/PAGESZ/AT_NULL=valid, offset/EOF=valid",
 	"AUXV: PROC_LINUX_COMPAT=YES; FEX_SUPPORT=NOT_ESTABLISHED",
 	"AUXV: AUDIT DONE",
 	# mmap never validated prot, so a hint there was already ignored.

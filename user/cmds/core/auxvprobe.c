@@ -45,6 +45,10 @@ static ssize_t read_proc_auxv(char *buf, size_t cap)
 	if (fd < 0)
 		return -1;
 	size_t used = 0;
+	if (lseek(fd, 0, SEEK_SET) != 0) {
+		close(fd);
+		return -1;
+	}
 	while (used < cap) {
 		/* Deliberately use short reads; the proc file must preserve the
 		 * byte stream and file offset across arbitrary read boundaries. */
@@ -59,8 +63,23 @@ static ssize_t read_proc_auxv(char *buf, size_t cap)
 		if (n == 0)
 			break;
 		used += (size_t)n;
+		if (lseek(fd, 0, SEEK_CUR) != (off_t)used) {
+			close(fd);
+			return -1;
+		}
 	}
+	/* The EOF position, EOF read, and rewind must all agree with the byte
+	 * stream assembled above. */
+	if (used == cap || lseek(fd, 0, SEEK_END) != (off_t)used ||
+	    read(fd, buf, 1) != 0 || lseek(fd, 0, SEEK_SET) != 0) {
+		close(fd);
+		return -1;
+	}
+	char first[7];
+	ssize_t first_n = read(fd, first, sizeof(first));
 	close(fd);
+	if (first_n != (ssize_t)sizeof(first) || memcmp(first, buf, sizeof(first)))
+		return -1;
 	return (ssize_t)used;
 }
 
@@ -99,7 +118,7 @@ static int audit_proc_auxv(const struct aux_pair *stack, size_t stack_n)
 		    count_tag(proc, stack_n, AT_ENTRY, NULL) == 1 &&
 		    count_tag(proc, stack_n, AT_PAGESZ, &pagesz) == 1 &&
 		    pagesz == 4096;
-	printf("AUXV_PROC: binary %zu pairs, native-word, stack-match=%s, PHDR/PAGESZ/AT_NULL=%s\n",
+	printf("AUXV_PROC: binary %zu pairs, native-word, stack-match=%s, PHDR/PAGESZ/AT_NULL=%s, offset/EOF=valid\n",
 	       stack_n, valid ? "YES" : "NO", valid ? "valid" : "INVALID");
 	if (!valid)
 		return 1;

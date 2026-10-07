@@ -8,7 +8,7 @@
 
 内核在新进程初始栈上提供原生字长的 `{type, value}` 二元组，末尾为 `{AT_NULL, 0}`。当前 ELF 初始化路径共放入 19 组，包含一个 `AT_NULL`；探针在初始栈上确认 `AT_PHDR`、`AT_PHENT`、`AT_PHNUM`、`AT_ENTRY`、`AT_PAGESZ` 各出现一次，并检查页大小为 4096。当前初始栈**没有 `AT_EXECFN`**，探针会把它明确打印为 absent。
 
-`/proc/<pid>/auxv` 是另一项 Linux 接口。Linux 文档规定它返回原生 `unsigned long` 的 ID/value 序列，结尾为两个零。[Linux `proc_pid_auxv(5)`](https://man7.org/linux/man-pages/man5/proc_pid_auxv.5.html) A20OS 现在也以当前 ABI 的原生字长输出二进制 pair；探针以 7 字节短读跨越 pair 边界，检查总长度、每个 pair 与 exec 初始栈完全一致，并单独验证 `AT_PHDR`、`AT_PAGESZ` 和唯一的 `{AT_NULL, 0}` 终止项。
+`/proc/<pid>/auxv` 是另一项 Linux 接口。Linux 文档规定它返回原生 `unsigned long` 的 ID/value 序列，结尾为两个零。[Linux `proc_pid_auxv(5)`](https://man7.org/linux/man-pages/man5/proc_pid_auxv.5.html) A20OS 现在也以当前 ABI 的原生字长输出二进制 pair；探针以 7 字节短读跨越 pair 边界，检查文件偏移、seek 到 EOF 后的 EOF 读取、rewind、总长度、每个 pair 与 exec 初始栈完全一致，并单独验证 `AT_PHDR`、`AT_PAGESZ` 和唯一的 `{AT_NULL, 0}` 终止项。内核读取时在 task 的 `park_lock` 下 pin 住 `mm`，随后读取 `mm` 锁保护的 auxv 快照，避免与并发 exec/exit 竞争。
 
 因此本门禁的 auxv 结论是 `PROC_LINUX_COMPAT=YES; FEX_SUPPORT=NOT_ESTABLISHED`。这只表示当前覆盖到的初始栈和 `/proc` auxv 格式及字段符合探针断言；`AT_EXECFN` 仍未提供，FEX 的其他系统调用、RootFS、JIT、动态链接器和 CPU 要求也未验证，所以不能推导 FEX 整体兼容。
 
