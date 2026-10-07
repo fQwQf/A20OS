@@ -1743,12 +1743,31 @@ static int shared_file_eviction_with_mmap(void)
 
 #define HPSIZE (2 * 1024 * 1024)
 
+/* mmap() hands out page-aligned addresses, and the kernel's THP fault only
+ * fires when the 2 MiB window [hbase, hbase + 2 MiB) lies entirely inside
+ * the VMA -- an unaligned 2 MiB mapping satisfies that for NO hbase, so
+ * every huge phase this file used to have passed on 4K pages while the
+ * huge-leaf path never executed (mm_huge_faults read 0 in every gate log).
+ * Map TWICE the size and derive an aligned window from whatever base the
+ * allocator returned, so the huge-leaf paths run regardless of its luck. */
+static char *huge_aligned_map(size_t *len_out)
+{
+    size_t len = 2 * HPSIZE;
+    char *mem = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (mem == MAP_FAILED)
+        return MAP_FAILED;
+    uintptr_t win = ((uintptr_t)mem + HPSIZE - 1) & ~(uintptr_t)(HPSIZE - 1);
+    *len_out = len;
+    return (char *)win;
+}
+
 static int huge_page_basic(void)
 {
     /* Allocate a huge page, write a pattern, and verify readback. */
     unsigned long base_pins = read_page_cache_pinned();
-    char *mem = mmap(NULL, HPSIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    size_t len = 0;
+    char *mem = huge_aligned_map(&len);
     if (mem == MAP_FAILED)
         return fail("huge-basic-mmap");
 
@@ -1756,12 +1775,12 @@ static int huge_page_basic(void)
         mem[i] = (char)((i * 13) % 251);
     for (size_t i = 0; i < HPSIZE; i++) {
         if (mem[i] != (char)((i * 13) % 251)) {
-            munmap(mem, HPSIZE);
+            munmap(mem, len);
             return fail("huge-basic-verify");
         }
     }
 
-    if (munmap(mem, HPSIZE) < 0)
+    if (munmap(mem, len) < 0)
         return fail("huge-basic-munmap");
     if (read_page_cache_pinned() != base_pins)
         return fail("huge-basic-pinned-leak");
@@ -1772,8 +1791,8 @@ static int huge_page_fork_cow(void)
 {
     /* Fork with a huge page mapping; child writes must not affect parent. */
     unsigned long base_pins = read_page_cache_pinned();
-    char *mem = mmap(NULL, HPSIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    size_t len = 0;
+    char *mem = huge_aligned_map(&len);
     if (mem == MAP_FAILED)
         return fail("huge-fork-mmap");
 
@@ -1782,7 +1801,7 @@ static int huge_page_fork_cow(void)
 
     pid_t pid = fork();
     if (pid < 0) {
-        munmap(mem, HPSIZE);
+        munmap(mem, len);
         return fail("huge-fork");
     }
     if (pid == 0) {
@@ -1792,22 +1811,22 @@ static int huge_page_fork_cow(void)
     }
     int status;
     if (waitpid(pid, &status, 0) < 0) {
-        munmap(mem, HPSIZE);
+        munmap(mem, len);
         return fail("huge-fork-wait");
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        munmap(mem, HPSIZE);
+        munmap(mem, len);
         return fail("huge-fork-child");
     }
 
     for (size_t i = 0; i < HPSIZE; i++) {
         if (mem[i] != (char)((i * 17) % 251)) {
-            munmap(mem, HPSIZE);
+            munmap(mem, len);
             return fail("huge-fork-verify");
         }
     }
 
-    if (munmap(mem, HPSIZE) < 0)
+    if (munmap(mem, len) < 0)
         return fail("huge-fork-munmap");
     if (read_page_cache_pinned() != base_pins)
         return fail("huge-fork-pinned-leak");
@@ -1818,8 +1837,8 @@ static int huge_page_partial_munmap(void)
 {
     /* Partial munmap of a huge page forces demotion; remaining halves stay mapped. */
     unsigned long base_pins = read_page_cache_pinned();
-    char *mem = mmap(NULL, HPSIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    size_t len = 0;
+    char *mem = huge_aligned_map(&len);
     if (mem == MAP_FAILED)
         return fail("huge-partial-mmap");
 
@@ -1827,25 +1846,25 @@ static int huge_page_partial_munmap(void)
         mem[i] = (char)((i * 19) % 251);
 
     if (munmap(mem + HPSIZE / 2, 4096) < 0) {
-        munmap(mem, HPSIZE);
+        munmap(mem, len);
         return fail("huge-partial-munmap-middle");
     }
 
     for (size_t i = 0; i < HPSIZE / 2; i++) {
         if (mem[i] != (char)((i * 19) % 251)) {
-            munmap(mem, HPSIZE);
+            munmap(mem, len);
             return fail("huge-partial-verify-lo");
         }
     }
     for (size_t i = HPSIZE / 2 + 4096; i < HPSIZE; i++) {
         if (mem[i] != (char)((i * 19) % 251)) {
-            munmap(mem, HPSIZE);
+            munmap(mem, len);
             return fail("huge-partial-verify-hi");
         }
     }
 
     if (munmap(mem, HPSIZE / 2) < 0 ||
-        munmap(mem + HPSIZE / 2 + 4096, HPSIZE / 2 - 4096) < 0) {
+        munmap(mem + HPSIZE / 2 + 4096, len - HPSIZE / 2 - 4096) < 0) {
         return fail("huge-partial-munmap-rest");
     }
     if (read_page_cache_pinned() != base_pins)
@@ -1857,8 +1876,8 @@ static int huge_page_mprotect(void)
 {
     /* mprotect across a huge page forces demotion and preserves content. */
     unsigned long base_pins = read_page_cache_pinned();
-    char *mem = mmap(NULL, HPSIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    size_t len = 0;
+    char *mem = huge_aligned_map(&len);
     if (mem == MAP_FAILED)
         return fail("huge-prot-mmap");
 
@@ -1866,18 +1885,18 @@ static int huge_page_mprotect(void)
         mem[i] = (char)((i * 23) % 251);
 
     if (mprotect(mem, HPSIZE, PROT_READ) < 0) {
-        munmap(mem, HPSIZE);
+        munmap(mem, len);
         return fail("huge-prot-mprotect");
     }
 
     for (size_t i = 0; i < HPSIZE; i++) {
         if (mem[i] != (char)((i * 23) % 251)) {
-            munmap(mem, HPSIZE);
+            munmap(mem, len);
             return fail("huge-prot-verify");
         }
     }
 
-    if (munmap(mem, HPSIZE) < 0)
+    if (munmap(mem, len) < 0)
         return fail("huge-prot-munmap");
     if (read_page_cache_pinned() != base_pins)
         return fail("huge-prot-pinned-leak");

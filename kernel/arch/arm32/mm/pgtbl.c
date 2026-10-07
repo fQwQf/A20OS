@@ -295,12 +295,19 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     return 0;
 }
 
-int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
+int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
+                uint8_t cls) {
     int idx;
     pte_t *pte;
 
-    if (!pgdir)
+    /* No status sidecar on the short-descriptor backend, so the class the
+     * generic callers pass (fork's and mremap's) has nothing to write into;
+     * the signature still has to match mm/mm.h, or arm32 fails with
+     * conflicting types rather than silently keeping the old one. */
+    (void)cls;
+    if (!mm || !mm->pgdir)
         return -EINVAL;
+    pt_root_t *pgdir = mm->pgdir;
     if ((va & (PMD_SIZE - 1)) || (pa & (PMD_SIZE - 1)))
         return -EINVAL;
 

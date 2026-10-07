@@ -49,6 +49,12 @@
  *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES
  *       pt_unmap_leaf   mm.c   no cursor; every mutation under mm_pt_node_lock
  *       pt_unmap        mm.c   no cursor; every mutation under mm_pt_node_lock
+ *       fork rewrite    cow.c  no cursor; the parent-side COW rewrite and its
+ *                              status sync run under mm_pt_node_lock, with the
+ *                              PTE re-checked under that lock
+ *       mprotect prot   mprotect.c  no cursor; the present-leaf rewrite and
+ *                              the never-faulted status refresh both run under
+ *                              mm_pt_node_lock
  *
  *     These two do not satisfy rule 1 as written -- they are not cursors and
  *     hold no range-wide atomicity, which is why they stay listed instead of
@@ -136,7 +142,14 @@
 #define MM_ST_VMO            6u  /* backed by a native-ABI VMO */
 #define MM_ST_SWAPPED        7u  /* contents live on a swap device */
 #define MM_ST_PT_NODE        8u  /* this entry is an intermediate PT page */
-#define MM_ST_CLASS_MAX      9u
+/* Stage-2 (second-stage / guest physical) leaf only.  A stage-2 table reuses
+ * the pt_meta_t machinery -- same shape, same lock, same per-entry byte --
+ * but its leaves map GUEST PHYSICAL pages to host frames, so the host-side
+ * classes (anon/file/vmo) would be lies there.  This class never appears in
+ * host address-space metadata: the host auditor treats it as a mismatch, so
+ * a stage-2 byte leaking into a host table is caught, not silent. */
+#define MM_ST_GUEST_MEM      9u
+#define MM_ST_CLASS_MAX      10u
 
 #define MM_ST_CLS_BYTE(c)    ((uint8_t)(((c) & 0xFu) << 4))
 #define MM_ST_GET_CLASS(b)   ((uint8_t)(((b) >> 4) & 0xFu))
@@ -501,6 +514,13 @@ typedef struct mm_pt_audit_report {
      * relies on, so it is counted to make it observable rather than inferred
      * from the absence of mismatches. */
     uint64_t anon_virt;
+    /* Observation, not verdict: present leaves at level > 0 (huge pages).
+     * This is the non-vacuity instrument for every huge-page claim: an
+     * audit line with huge=0 means the workload never had a huge leaf, so
+     * any huge-path assertion against it proved nothing.  Lives here rather
+     * than in the perf counters because the audit runs unconditionally at
+     * shutdown, with no reader-arms-collection dance. */
+    uint64_t huge_leaves;
     /* Segment annotations (P6).  seg_slots counts PT-node entries that name a
      * segment; seg_pages counts distinct segments those entries resolve to.
      * Both are observations, not verdicts -- a purely anonymous address space
@@ -657,9 +677,11 @@ extern uint64_t mm_seg_shadow_agree;
 extern uint64_t mm_seg_shadow_disagree;
 extern uint64_t mm_seg_shadow_miss;
 
-/* Which side of the P6 dispatch actually decided.  Both zero means the change
- * is inert; both equal means the segment is inert.  Declared above, outside the
- * arch-ops guard, because fault.c counts them on every build. */
+/* mm_seg_dispatch_seg / mm_seg_dispatch_fallback are declared above the
+ * page-table guard with their definitions in pt.c: they are counters, not
+ * capability, and fault.c counts them on every build.  Which side of the P6
+ * dispatch actually decided -- both zero means the change is inert, both equal
+ * means the segment is inert. */
 
 /* Why a lookup found nothing, and why an annotation could not be recorded.
  *
@@ -700,6 +722,11 @@ void mm_pt_note_absent(pte_t *table, int level, int idx);
  * its store, or the status silently keeps describing the old page. */
 int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls);
 uint8_t mm_pt_peek(pte_t *table, int level, int idx);
+/* The status byte of the leaf covering va, at whatever level the leaf sits
+ * (a huge leaf's slot lives in its own table's metadata, one level up).
+ * Returns 0 (MM_ST_INVALID) when nothing maps the address.  This is the
+ * level-aware read; mm_pt_peek() on a level-0 slot is wrong for huge pages. */
+uint8_t mm_pt_status_at(pt_root_t *pgdir, vaddr_t va);
 
 /* Copy a page-table page's metadata to a freshly cloned page. */
 int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level);
@@ -731,6 +758,13 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
+/* Compare-and-replace for the lockless COW fault: install `pa` only while
+ * the entry still maps `expect_pa` as a COW leaf, all under the leaf lock;
+ * the new PTE's flags are re-derived from the old one under that lock.
+ * 0 = replaced, 1 = state moved underneath (nothing written), <0 = error. */
+int mm_cursor_replace_if_cow(mm_cursor_t *cur, vaddr_t addr,
+                             paddr_t expect_pa, paddr_t pa, uint8_t cls,
+                             paddr_t *old_pa_out);
 int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
                         pte_t flags);
 int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef);
@@ -780,6 +814,32 @@ int mm_pt_audit_addrspace(struct mm_struct *mm, int check_vma,
  * internally and pins each address space with mm_get() under the owning task's
  * park_lock; callers must not hold tasklist_lock themselves. */
 int mm_pt_audit_all(mm_pt_audit_report_t *out);
+
+/* ---- stage-2 (second-stage / guest physical) tables ----
+ *
+ * A stage-2 address space is a radix page table of the same shape as a host
+ * one, so it reuses pt_meta_t wholesale: same node locks, same per-entry
+ * status byte, same retire chain.  Two things differ, and both are expressed
+ * here rather than by overloading host meanings:
+ *
+ *  - a mapped stage-2 leaf carries class MM_ST_GUEST_MEM (never an anon/file
+ *    class, which would describe the wrong plane), and the frame it names
+ *    carries FRAME_F_GUEST;
+ *  - the audit compares PTE vs status AND frame flag vs stage-2 mapping, so
+ *    a frame whose guest died without returning it cannot hide.
+ *
+ * The frame-lend/return pair is the only sanctioned way to set or clear
+ * FRAME_F_GUEST; both assert the frame is not a page-table page, because a
+ * frame backs exactly one kind of page table. */
+void mm_pt_frame_lend(pfn_t pfn);
+void mm_pt_frame_return(pfn_t pfn);
+int  frame_is_lent_to_guest(pfn_t pfn);
+
+/* Audit one stage-2 root against its metadata.  check_vma is meaningless
+ * here (there is no host mapping list) and is forced off internally; the
+ * report fields used are the generic present/absent/prot/cow set plus
+ * guest_flag_mismatch. */
+int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out);
 
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
