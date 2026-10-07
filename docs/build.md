@@ -111,6 +111,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 ## 注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
+- 顶层构建可能同时从磁盘镜像与 RAMFS guest kernel 进入用户构建。`tools/stamps.py` 会按共享的 `user/build/<arch>[-nommu]` 输出根使用跨进程锁，并在拿锁后重新检查 stamp；因此不同 `OPT`/profile 或 user/native stamp 的独立 make 进程不会并发清理或写入同一目录。锁文件位于该目录的父目录，不会随变体 clean 一起删除。
 - `make clean` 会清除当前仓库配置的 `.kernel-build` 内容。若该路径是指向专用外部构建缓存的符号链接，命令会保留链接并清空其目标中的架构构建目录。首次使用外部缓存时，先确认目标目录专用于 A20OS，再创建标记文件：`printf 'a20-build-root-v1\n' > /path/to/cache/.a20-build-root`。清理会验证该标记、拒绝指向仓库本身/父目录的链接，并拒绝不符合架构构建目录命名约定的内容，以免误删无关文件。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
 - 发布构建 `make all` 构建 RISC-V64 与 LoongArch64，使用 `PROFILE=benchmark NR_CPUS=8 DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1`，输出根目录的 `kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。默认优化仍来自 `OPT=-O3`；若需要改变优化必须使用 `OPT`。
