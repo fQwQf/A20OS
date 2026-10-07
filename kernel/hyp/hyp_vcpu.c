@@ -536,12 +536,17 @@ static int hyp_guest_read_va(hyp_vcpu_t *vcpu, uint64_t va, uint64_t *out)
 }
 
 /* What the faulting instruction was asking for.  Only the shapes a device
- * model can serve are decoded: the 32-bit LOAD and STORE encodings, with the
- * width and signedness straight out of the RISC-V load/store funct3 table
- * (lb/lh/lw sign-extend, lbu/lhu/lwu zero-extend, ld is 8 bytes).  An AMO or
- * an SC is NOT decoded: answering one would also have to write the old value
- * back into rd, which no device in this slice asks for, so it stays a
- * recorded fault instead of a half-implemented access. */
+ * model can serve are decoded: the LOAD and STORE encodings, 32-bit and RVC,
+ * with the width and signedness straight out of the RISC-V load/store funct3
+ * table (lb/lh/lw and c.lw sign-extend, lbu/lhu/lwu zero-extend, ld/c.ld are
+ * 8 bytes).  An AMO or an SC is NOT decoded: answering one would also have to
+ * write the old value back into rd, which no device in this slice asks for,
+ * so it stays a recorded fault instead of a half-implemented access.
+ *
+ * ilen is the ENCODED length, not the access width: an access served here is
+ * stepped over rather than retried (see hyp_guest_mem_fault), and a 16-bit
+ * encoding advances sepc by two.  Getting that wrong does not fault -- it just
+ * resumes the guest in the middle of some other instruction. */
 struct hyp_guest_access {
     uint64_t va;      /* effective address the instruction computed */
     uint64_t value;   /* store data (already the guest register) */
@@ -549,6 +554,7 @@ struct hyp_guest_access {
     int      len;     /* access width in bytes */
     int      store;
     int      sign;    /* sign-extend the loaded value (rv64 rule) */
+    int      ilen;    /* 2 for RVC, 4 for the 32-bit encodings */
 };
 
 static int hyp_guest_read_insn(hyp_vcpu_t *vcpu, uint32_t *insn)
@@ -556,9 +562,12 @@ static int hyp_guest_read_insn(hyp_vcpu_t *vcpu, uint32_t *insn)
     uint64_t word;
     if (!hyp_guest_read_va(vcpu, vcpu->pc, &word))
         return 0;
+    /* The low halfword is enough for both encodings: a 32-bit instruction and
+     * a 16-bit one are told apart by insn & 3, and every bit an RVC load/store
+     * uses lives below 16.  Reading a full word at a pc whose page ends here is
+     * fine too -- the G-stage fault is page granular and the tail byte is
+     * never consulted. */
     *insn = (uint32_t)word;
-    /* RVC: the 16-bit encodings carry no load/store, and every CSR/sfence
-     * instruction this loop emulates is 32-bit. */
     return 1;
 }
 
@@ -569,11 +578,155 @@ static uint64_t hyp_sext(uint64_t v, unsigned bits)
     return (uint64_t)((int64_t)(v << (64 - bits)) >> (64 - bits));
 }
 
+/* The 3-bit compressed register fields name x8..x15 as 0..7. */
+static inline unsigned hyp_rvc_reg3(unsigned f)
+{
+    return 8u + (f & 7u);
+}
+
+/*
+ * One 16-bit (RVC) load or store, decoded into the same shape the 32-bit
+ * encodings fill in.  RVC does not give these a funct3 table to index -- every
+ * encoding here carries its own immediate layout -- so the immediates are
+ * assembled bit by bit from the halfword, and the 32-bit I/S-type helper
+ * (hyp_sext over insn >> 20) must NOT be used on them: those fields overlap
+ * differently in every one of the eight encodings.
+ *
+ * WHICH OF THEM EXIST IN A GUEST IS A MEASURED QUESTION.  Objdumping the
+ * A20OS guest image and counting (riscv64-unknown-elf-objdump -d -M no-aliases
+ * kernel-nosyms.elf | grep -oE "\bc\.[a-z0-9._]+" | sort | uniq -c) shows the
+ * memory forms in use: c.ldsp 74501, c.sdsp 62465, c.ld 5848, c.lw 3699,
+ * c.sd 1361, c.swsp 1301, c.sw 1065, c.lwsp 1052 -- exactly the eight decoded
+ * here.  Decoding only the one instruction that first wedged the guest (a
+ * c.sw) just moves the same undecodable failure to the next c.sdsp, so all
+ * eight land together.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: c.fldsp and c.fsdsp (84 and 56 occurrences).
+ * The guest frame comes up with sstatus = SPP|SPIE|SIE and FS Off
+ * (kernel/arch/riscv64/hyp/hyp_vcpu_asm.S programs exactly that), so a guest
+ * floating-point instruction raises the GUEST's own illegal-instruction trap
+ * before it can ever take a second-stage access fault -- decoding the FP forms
+ * here would be unreachable code, not a missing feature.
+ */
+static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
+                                 struct hyp_guest_access *a)
+{
+    uint16_t c = (uint16_t)insn;
+    unsigned funct3 = (unsigned)((c >> 13) & 7);
+    unsigned rdp    = hyp_rvc_reg3((unsigned)((c >> 2) & 7));  /* inst[4:2] */
+    unsigned rs1p   = hyp_rvc_reg3((unsigned)((c >> 7) & 7));  /* inst[9:7] */
+
+    a->ilen = 2;
+    a->rd   = 0;
+    a->sign = 0;
+    a->value = 0;
+
+    switch (c & 3) {
+    case 0:     /* quadrant 0: the *4SPN and * forms, x8..x15 only */
+        switch (funct3) {
+        case 0x0: return 0;    /* c.addi4spn: register-immediate, no access */
+        case 0x2: {            /* c.lw  off[5:3]=inst[12:10] [2]=inst[6] [6]=inst[5] */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 6) & 1) << 2) |
+                           ((uint64_t)((c >> 5) & 1) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 4; a->store = 0; a->sign = 1; a->rd = rdp;
+            return 1;
+        }
+        case 0x3: {            /* c.ld  off[5:3]=inst[12:10] [7:6]=inst[6:5] */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 5) & 3) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 8; a->store = 0; a->sign = 0; a->rd = rdp;
+            return 1;
+        }
+        /* Quadrant 0's floating-point slot is funct3=0x1 (c.fld); 0x5 is
+         * c.fsd.  Only one of the two is spelled out here and both answer
+         * the same thing -- not decoded -- so name the one this line is, and
+         * let 0x1 fall to the default below rather than leaving a reader to
+         * assume the FP forms were enumerated. */
+        case 0x5: return 0;    /* c.fsd: floating point, see above */
+        case 0x6: {            /* c.sw  same offsets as c.lw, rs2' = inst[4:2] */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 6) & 1) << 2) |
+                           ((uint64_t)((c >> 5) & 1) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 4; a->store = 1; a->value = vcpu->regs[rdp];
+            return 1;
+        }
+        case 0x7: {            /* c.sd  same offsets as c.ld */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 5) & 3) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 8; a->store = 1; a->value = vcpu->regs[rdp];
+            return 1;
+        }
+        default: return 0;
+        }
+
+    case 2:     /* quadrant 2: the *SP forms, full 5-bit registers off x2 */
+        switch (funct3) {
+        case 0x0: return 0;    /* c.slli */
+        case 0x1: return 0;    /* c.fldsp: floating point, see above */
+        case 0x2: {            /* c.lwsp rd=inst[11:7]
+                                *   off[5]=inst[12] [4:2]=inst[6:4] [7:6]=inst[3:2] */
+            uint64_t off = ((uint64_t)((c >> 2) & 3) << 6) |
+                           ((uint64_t)((c >> 12) & 1) << 5) |
+                           ((uint64_t)((c >> 4) & 7) << 2);
+            a->va = vcpu->regs[2] + off;
+            a->len = 4; a->store = 0; a->sign = 1;
+            a->rd = (unsigned)((c >> 7) & 0x1f);
+            return 1;
+        }
+        case 0x3: {            /* c.ldsp rd=inst[11:7]
+                                *   off[5]=inst[12] [4:3]=inst[6:5] [8:6]=inst[4:2] */
+            uint64_t off = ((uint64_t)((c >> 2) & 7) << 6) |
+                           ((uint64_t)((c >> 12) & 1) << 5) |
+                           ((uint64_t)((c >> 5) & 3) << 3);
+            a->va = vcpu->regs[2] + off;
+            a->len = 8; a->store = 0; a->sign = 0;
+            a->rd = (unsigned)((c >> 7) & 0x1f);
+            return 1;
+        }
+        case 0x5: return 0;    /* c.fsdsp: floating point, see above */
+        case 0x6: {            /* c.swsp rs2=inst[6:2]
+                                *   off[5:2]=inst[12:9] [7:6]=inst[8:7] */
+            uint64_t off = ((uint64_t)((c >> 7) & 3) << 6) |
+                           ((uint64_t)((c >> 9) & 0xf) << 2);
+            a->va = vcpu->regs[2] + off;
+            a->len = 4; a->store = 1;
+            a->value = vcpu->regs[(unsigned)((c >> 2) & 0x1f)];
+            return 1;
+        }
+        case 0x7: {            /* c.sdsp rs2=inst[6:2]
+                                *   off[5:3]=inst[12:10] [8:6]=inst[9:7] */
+            uint64_t off = ((uint64_t)((c >> 7) & 7) << 6) |
+                           ((uint64_t)((c >> 10) & 7) << 3);
+            a->va = vcpu->regs[2] + off;
+            a->len = 8; a->store = 1;
+            a->value = vcpu->regs[(unsigned)((c >> 2) & 0x1f)];
+            return 1;
+        }
+        default: return 0;
+        }
+
+    default:
+        /* Quadrant 1 (c.addi, c.li, c.j, c.bnez, the MISC-ALU group, ...) has
+         * no load or store in it at all, and c.addi4spn above is the only
+         * quadrant-0 form that looks load-shaped and is not. */
+        return 0;
+    }
+}
+
 static int hyp_decode_guest_access(hyp_vcpu_t *vcpu, struct hyp_guest_access *a)
 {
     uint32_t insn;
-    if (!hyp_guest_read_insn(vcpu, &insn) || (insn & 3) != 3)
+    if (!hyp_guest_read_insn(vcpu, &insn))
         return 0;
+    if ((insn & 3) != 3)
+        return hyp_decode_rvc_access(vcpu, insn, a);
+
+    a->ilen = 4;
 
     unsigned opcode = insn & 0x7f;
     unsigned funct3 = (insn >> 12) & 7;
@@ -675,8 +828,16 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
 
     struct hyp_guest_access a;
     if (!hyp_decode_guest_access(vcpu, &a)) {
-        kerr("hyp: undecodable guest access at pc=%lx (second-stage fault)\n",
-             (unsigned long)vcpu->pc);
+        /* The raw word rides along because this line is the only thing between
+         * "the guest stopped here" and knowing WHICH encoding it stopped on:
+         * a 16-bit halfword disassembled by eye names the missing form in one
+         * step, and the guess is not worth making -- an access this model
+         * cannot decode is a recorded fault, never an improvised one. */
+        uint32_t raw = 0;
+        hyp_guest_read_insn(vcpu, &raw);
+        kerr("hyp: undecodable guest access at pc=%lx (insn=%x%s)\n",
+             (unsigned long)vcpu->pc, raw,
+             (raw & 3) == 3 ? "" : " rvc");
         hyp_vcpu_record_fault(vcpu, scause, gpage, htval);
         return 0;
     }
@@ -708,7 +869,12 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
      * silently corrupt a banked x0 the day it stopped holding. */
     if (!a.store && a.rd)
         vcpu->regs[a.rd] = hyp_extend_loaded(value, a.len, a.sign);
-    vcpu->pc += 4;                /* the access happened; do not redo it */
+    /* The access happened; do not redo it -- and step over the ENCODED length,
+     * which is 2 for the RVC encodings.  A fixed +4 here resumes the guest
+     * half-way into whatever follows, which shows up much later as a stray
+     * illegal instruction or a walk into somebody else's function rather than
+     * as anything to do with this line. */
+    vcpu->pc += (uint64_t)a.ilen;
     return 1;
 }
 
@@ -745,6 +911,15 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
 static void hyp_write_vsatp(uint64_t v)
 {
     hyp_arch_vsatp_set(v);
+    /* Changing the VS-stage root does NOT implicitly drop the entries cached
+     * under the old one.  The guest's satp write arrives here rather than
+     * reaching the CSR directly (hstatus.VTVM traps it), so this is the only
+     * place the switch happens and the only place the matching fence can be
+     * issued: without it this hart keeps resolving guest addresses through the
+     * page tables the guest just abandoned.  The guest's own SFENCE.VMA (also
+     * trapped, see hyp_emulate_virt_inst) covers the edits it makes after the
+     * switch; this covers the switch itself. */
+    hyp_arch_host_tlb_fence();
 }
 
 /* The trapped instruction, from the trap report when it carries one.
@@ -889,6 +1064,26 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
 
     if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC || !vcpu->running)
         return 0;
+
+    /* Move host keystrokes into the guest's ingress ring, here, on every guest
+     * trap -- before the cause is looked at at all.  Two things pin the spot,
+     * and both are easy to get wrong:
+     *
+     *   BEFORE the host-IRQ early return below.  A host UART IRQ reaches HS
+     *   with the interrupt bit set in scause, so that early return is exactly
+     *   the path a new byte takes, and it is also the path the counters below
+     *   never see (they start after it).  Pumping after it would mean a byte
+     *   is invisible to the guest until some LATER trap came along, which is
+     *   not a latency anyone can reason about.
+     *
+     *   AFTER the magic/running check above, because it dereferences
+     *   vcpu->vm.  That is why this is not "pump once per run" somewhere
+     *   convenient: by this point the VM is known good, and the call cannot
+     *   fail.
+     *
+     * It is a drain of a non-blocking reader (hyp_dev.c spells out which one
+     * and why), so an empty host ring costs one atomic load and a return. */
+    hyp_dev_pump_rx(vcpu->vm);
 
     /* Host IRQ.  The host IRQ machinery has already run against this frame
      * by the time the dispatcher gets here; the guest just resumes. */

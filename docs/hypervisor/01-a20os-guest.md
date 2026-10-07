@@ -10,7 +10,7 @@
 §2.3 的两条修正里，**（一）`HYP_HIDELEG_DEFAULT` 已修**：掩码改为 VS 级位
 2/6/10（`kernel/include/hyp/hyp_vcpu.h:216-222`）。**（二）`hstatus.VTVM` 未按本文
 原建议去掉**，代码选择保留 VTVM=1 并在 scause 22 上模拟 guest 的 `csrw satp` /
-`sfence.vma` / `csrw vstimecmp`（`kernel/hyp/hyp_vcpu.c:650-717`）；本文 §2.3(二)
+`sfence.vma` / `csrw vstimecmp`（`kernel/hyp/hyp_vcpu.c:927-1015`）；本文 §2.3(二)
 与 §3 的相关段落已按**已实现的策略**改写，理由见那里。v1 的已落地范围见
 [00-design.md](00-design.md)，后续切片见 [02-roadmap.md](02-roadmap.md)。
 
@@ -80,6 +80,19 @@ cause 编号见同文件的编号 cause 表：8 = from U/VU、9 = from HS、10 =
 11 = from M、12/13/15 = insn/load/store page fault、14 与 17 是 Reserved、
 22 = virtual instruction。本文 §2.2 提到的逐位表对不齐问题也出自这份文件。）
 
+> **别把 scause 当十进制读。** 本轮实测到 `hyp: trap #1 scause=14 pc=0`（
+> `.kernel-build/smoke/hyp-console-p0-riscv64.log`），紧跟着的是
+> `hyp: guest instruction fetch fault gpa=0 pc=0 rc=-14`。**`scause` 是 `%lx` 打的，
+> 所以 `14` 是 0x14 = 20 = guest 取指缺页**，正是 QEMU 10.0.13 的
+> `RISCV_EXCP_INST_GUEST_PAGE_FAULT = 0x14`（`target/riscv/cpu_bits.h:720`），也正是
+> 树里 `HYP_SCAUSE_GPF_INST`（`kernel/hyp/hyp_vcpu.c:71`）处理的那一条
+> （`hyp_vcpu.c:810-822`）。同一份日志里还有 `scause=15`（0x15 = 21 =
+> `RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT`）与 `scause=17`（0x17 = 23 =
+> `RISCV_EXCP_STORE_GUEST_AMO_ACCESS_FAULT`，`cpu_bits.h:721,723`）。
+> **读成十进制会把 guest 取指缺页误判成规格里的 Reserved 14。** 这条 guest 为什么
+> 跳到 `pc=0`，本片**没有定位**；它出现在 [03-usage.md §3.4.1](03-usage.md) 记录的
+> 那次门禁失败里。
+
 **（一）`HYP_HIDELEG_DEFAULT` 的三个位是只读零，写了等于没写。** —— **已修。**
 
 原始定义（`kernel/include/hyp/hyp_vcpu.h`）是
@@ -139,9 +152,9 @@ handler 上（除非 HS 把它留在 HS 侧处理，那正是本文不建议的�
 各一份）。这同时让 §3 的"无需保存"结论成立。
 
 **当前状态：没有去掉，改走另一条路。** 工作树保留 `VTVM=1`
-（`hyp_arch.c:116-117` 与 `hyp_vcpu_asm.S:52-53` 的 `HYP_HSTATUS_GUEST_ON` /
+（`hyp_arch.c:166-167` 与 `hyp_vcpu_asm.S:47-53` 的 `HYP_HSTATUS_GUEST_ON` /
 `HSTATUS_GUEST_ON` 都含该位），并在运行循环里模拟被 VTVM 拦下的那三条
-（`kernel/hyp/hyp_vcpu.c:650-717`，`hyp_emulate_virt_inst()`）：
+（`kernel/hyp/hyp_vcpu.c:927-1015`，`hyp_emulate_virt_inst()`）：
 
 - `csrr`/`csrw satp` → 转成 HS-mode 下的 `csrr`/`csrw vsatp`（CSR `0x180` ↔ `0x280`）；
 - `sfence.vma` → 在 HS-mode 直接执行；
@@ -210,7 +223,7 @@ guest 是 A20OS 自己，它的 SBI 调用面由
 
 | 发出方 | a7 = EID | a6 = FID | a0 | v1 现状 | v2 必须 |
 | --- | --- | --- | --- | --- | --- |
-| `firmware_console_putchar` | `0x01` | 0 | 字符 | 已实现（`hyp_vcpu.c:225`） | 改为走 16550 设备模型 |
+| `firmware_console_putchar` | `0x01` | 0 | 字符 | 已实现（`hyp_vcpu.c:390-393`） | 改为走 16550 设备模型 |
 | `firmware_console_getchar` | `0x02` | 0 | — | **未实现** | 允许，恒返回 -1（无输入） |
 | `firmware_set_timer` | `0x00` | 0 | deadline | **未实现** | 必须，或让 guest 走 sstc（见下） |
 | `firmware_shutdown` | `0x53525354` (SRST) | 0 | 0 | **未实现** | 必须 |
@@ -251,20 +264,22 @@ guest 是 A20OS 自己，它的 SBI 调用面由
 | 2 | GPA ∈ `[ram_base, ram_base + ram_size)` | `hyp_ram_fill()`：分配**一帧清零内存**，`hyp_s2_map()` 以 RWX 装入，guest 重试同一条指令即命中 |
 | 3 | 其它 | 交给 `hyp_dev_mmio()`；返回 0（地址不认识）则以 `HYP_EXIT_FAULT` 退出并留下 `exit_htval` |
 
-- **窗口默认 `[0x80000000, mem_size)`**（`hyp_vcpu.h:154`）。这与 guest 板的
+- **窗口默认 `[0x80000000, mem_size)`**（`HYP_RAM_BASE_DEFAULT`，`kernel/hyp/hyp.c:24`，
+  赋值在 `hyp.c:115-116`）。这与 guest 板的
   内存布局一致：`kernel/arch/riscv64/include/platform.h:14-16` 把 QEMU virt 的
   `PHYS_MEMORY_BASE` 定为 `0x80000000`，启动代码链接在
   `KERNEL_ENTRY = 0x80200000`（`:20`）。
 - **窗口页必须是 RWX**，且 `PTE_U` 必须置位（`PTE_U` 的理由见
-  [00-design.md §5.3 支撑改动](00-design.md)）。v1 的 `HYP_GUEST_PAGE_PROT`
-  只给 R|X（`hyp_vcpu.c:64`），因为 v1 的 guest 是纯代码；v2 的窗口页要放页表、
-  bss 和栈，**必须可写**。而"可写"与"可执行"同页要求 R|W|X，而 R|W|X 在叶 PTE
-  里是规格上的保留编码——在途实现给出的依据是：QEMU 10.0.13 的 G-stage 走查
-  只拒绝 R-less 的组合，值 7（R|W|X）落到 `PAGE_READ|PAGE_WRITE|PAGE_EXEC`
-  （`kernel/hyp/hyp.c` 里 `HYP_RAM_PAGE_PROT` 上方的注释，指向 QEMU
-  `target/riscv/cpu_helper.c` 的 `get_physical_address()`）。**未验证**：树里
-  vendored 的 QEMU（`qemu-10.0.13+ds/`）没有 `target/` 目录，本片无法核对这段
-  代码；这正是 `smoke-hyp-a20os` 要在真机上先撞一次的地方（§8）。
+  [00-design.md §5.3 支撑改动](00-design.md)）。**已落地**：工作树里
+  `HYP_RAM_PAGE_PROT` 是 `PTE_R|PTE_W|PTE_X`（`kernel/hyp/hyp.c:50`），
+  `hyp_vm_load()` 装镜像用的 `HYP_GUEST_PAGE_PROT` 是同一个值
+  （`kernel/hyp/hyp_vcpu.c:100`），`hyp_s2_map()` 在 prot 之上再补 `PTE_R|A|D|U`
+  （`kernel/hyp/hyp.c:229`）。理由与被推翻的旧结论见
+  [00-design.md §5.3 第 3 条](00-design.md)：R|W|X 在 QEMU 10.0.13 的
+  `get_physical_address()` 里落到 `PAGE_READ|PAGE_WRITE|PAGE_EXEC`，正常翻译，
+  不是保留编码。**已验证**：本轮 `smoke-hyp-a20os` 里 guest 一路走到
+  `[RAMFS] Initialized`，其中包含大量对只读装入页的写（`.data`、`.bss`、页表、
+  栈）——R|X 的镜像在这条路上早就 fault 了。
 - **窗口页与预装页的关系**：`hyp_vm_load()` 装过的页是显式映射，不会触发缺页；
   窗口只覆盖 guest 自己分配的内存。两者重叠时以先建立的映射为准
   （`hyp_s2_map()` 对已映射 GPA 返回 `-EEXIST`）。
@@ -272,9 +287,13 @@ guest 是 A20OS 自己，它的 SBI 调用面由
   `cg_mem_charge()` / `cg_mem_uncharge()`（`kernel/mm/vmo.c:276,284`），
   与 VMO 记的是同一本账——这正是 capability 叙事里"guest 内存就是宿主内存、
   只是被出借"的落点（见 §9）。
-- **退出不是兜底，是契约**：v1 明确禁止"静默按需补页"
-  （`hyp_vcpu.c:266-278`）。v2 把"窗口内 = 补页、窗口外 = 设备模型或退出"写成
-  三段裁决后，这条禁令才被一条可判定的规则替代——而不是被放宽。
+- **"静默按需补页"这条禁令已被一条可判定的规则替代**：窗口内的 GPA 补页并让
+  guest **重试同一条指令**，窗口外交给设备模型并由宿主**代执行这条指令**，
+  补页失败就是一次记下来的 fault——三条都在 `hyp_guest_mem_fault()` 的注释与
+  实现里（`kernel/hyp/hyp_vcpu.c:780-789` 的两出口说明、`815`、`843-848`、
+  `851-857`、`866-872`）。契约头还留着"no silent on-demand fill"那句
+  （`kernel/include/hyp/hyp_vcpu.h:154-155`），指的是"补页不能藏在 trap 里悄无声息地
+  进行"，与这里写的是同一件事。
 
 ---
 
@@ -301,16 +320,17 @@ guest 的 UART 代码在 `kernel/arch/riscv64/include/console.h`（内联头，�
 | `FCR` | 2 | 写 0x07（`console.h:23`） | 静默丢弃 |
 | `MCR` | 4 | 写 0x0B | 静默丢弃 |
 | `THR` | 0 | `arch_uart_putc()` 自旋等 LSR，再写字节（`console.h:27-32`） | 写到宿主 console，计入 guest console 字节数，逐字节比对 marker |
-| `RBR` | 0 | `arch_uart_poll_getc()` 先读 LSR（`console.h:34-39`） | 恒返回 0（无输入） |
-| `LSR` | 5 | `arch_uart_putc()` 等 bit `0x20`；`arch_uart_flush()` 等 bit `0x40`；`arch_uart_poll_getc()` 读 bit `0x01` | **恒返回 `0x60`** |
-| `IIR` | 2 | 通用串口驱动会轮询中断标识 | 读 `0x01`（"无中断待处理"）。**在途实现补了这一条**：RAZ 会宣称有一个永远不会被投递的中断，那是唯一能把轮询 IIR 的驱动挂死的值 |
-| `MSR` | 6 | 等 CTS/DSR 再写的驱动 | 读 `0x30`（DSR+CTS 置位，RLSD 不置）。**在途实现补了这一条** |
+| `RBR` | 0 | `arch_uart_poll_getc()` 先读 LSR（`console.h:34-39`） | **已实现**：读弹出 ingress ring 里最老的一个字节，空环回 0（`kernel/hyp/hyp_dev.c:290-304` 的 `HYP_UART_THR` 分支，`hyp_uart_pop_rx()` 在 `:269-279`）。多字节读只认第一字节（`byte_index != 0` 不弹） |
+| `LSR` | 5 | `arch_uart_putc()` 等 bit `0x20`；`arch_uart_flush()` 等 bit `0x40`；`arch_uart_poll_getc()` 读 bit `0x01` | **返回 `0x60` 或 `0x61`**：`0x60` 恒在（`HYP_UART_LSR_TX_EMPTY`，`hyp_dev.c:69`），bit `0x01`（DR）由"ring 非空"决定（`hyp_dev.c:287-288`；`hyp_uart_rx_ready()` 是**窥视不消费**，`:262-267`） |
+| `IIR` | 2 | 通用串口驱动会轮询中断标识 | 读 `0x01`（"无中断待处理"，`HYP_UART_IIR_NONE`，`hyp_dev.c:76,286`）。**在途实现补了这一条**：RAZ 会宣称有一个永远不会被投递的中断，那是唯一能把轮询 IIR 的驱动挂死的值 |
+| `MSR` | 6 | 等 CTS/DSR 再写的驱动 | 读 `0x30`（DSR+CTS 置位，RLSD 不置，`HYP_UART_MSR_CARRIER`，`hyp_dev.c:79,289`）。**在途实现补了这一条** |
 
-`LSR = 0x60` 是**承重值**，不是随手填的：契约（`hyp_vcpu.h:163-165`）给的就是
-`0x60`。bit `0x20`（THRE）必须常置，否则 `arch_uart_putc()` 里的
+`LSR = 0x60` 是**承重值**，不是随手填的：契约（`hyp_vcpu.h` 的 v3 一节，
+`kernel/include/hyp/hyp_vcpu.h:250-262`）给的就是 `0x60`，并明确说**只有 DR 位是
+后加的**。bit `0x20`（THRE）必须常置，否则 `arch_uart_putc()` 里的
 `while ((uart[5] & 0x20) == 0);` 会把 guest 焊死在一个自旋里——这是启动冒烟
 最可能卡住的地方。bit `0x40`（TEMT）同理，`arch_uart_flush()` 会等它。bit
-`0x01` 恒 0 表示没有输入，guest 的前台 shell 读不到 stdin；启动冒烟不需要它。
+`0x01` 从"恒 0"变成"有输入才 1"，这正是契约 v3 带来的唯一寄存器语义变化。
 
 **中断**：`arch_uart_init()` 打开了 IER bit 0，`uart_init()` 又无条件
 `request_irq(UART0_IRQ=10, …)`（`kernel/drivers/char/uart.c:184`）。v2 不路由
@@ -433,7 +453,7 @@ v2 的 guest 会打出整个内核启动日志，而宿主自己的日志与之�
 | --- | --- | --- | --- |
 | 1 | `hyp_vm_marker_seen(vm) == 1` | guest 走完了从入口到打印 banner 的整条路——包括委托的异常处理、按需 RAM 窗口和 16550 的 THR 路径 | **已实现**（`hyp_boot.c:218-219`） |
 | 2 | `hyp_vm_console_bytes(vm) > <marker 长度>` | marker 不是"只匹配到开头就停"的退化命中 | **已实现**（`hyp_boot.c:221-223`） |
-| 3 | `hyp_vcpu_run()` 返回 0 且 `vcpu->exit == HYP_EXIT_SHUTDOWN` | guest 是自己关机，不是撞死 | **未实现**，且**这条判据本身与 PASS 的定义冲突**：本门禁的 PASS 是"guest 打到了自己的 banner"，不是"guest 正常关机"。guest 无块设备，在 `init_kthread` 里找不到 init 就 panic 退出（见 §8.3），那是**预期到达**而不是缺陷。当前代码只检查 `exit_reason >= 0`（`hyp_boot.c:201`），退出原因只打出来给人看（`:205-212`），不参与判定 |
+| 3 | `hyp_vcpu_run()` 返回 0 且 `vcpu->exit == HYP_EXIT_SHUTDOWN` | guest 是自己关机，不是撞死 | **未实现**，且**这条判据本身与 PASS 的定义冲突**：本门禁的 PASS 是"guest 打到了自己的 banner"，不是"guest 正常关机"。当前代码只检查 `exit_reason >= 0`（`hyp_boot.c:201`），退出原因只打出来给人看（`:205-212`），不参与判定。**本轮这条尤其不能加**：实测那次 `exit=1(shutdown)` 恰恰是 guest panic 之后发的（§8.3），把它当成功判据会把一次 panic 判成正常关机 |
 | 4 | `mm_s2_audit(vm)` 返回 0 | 出借的帧与 stage-2 表在 guest 死后仍然对得上 | **未实现**：内核侧有 `hyp_s2_audit()`/`mm_s2_audit()`（`kernel/hyp/hyp.c:275`），但没有任何 syscall 能从用户态取到它的结果 |
 
 第 1 条已经包含了"这份输出来自 guest 通道"这层意思——marker 只在 guest UART
@@ -448,9 +468,11 @@ C 代码并能写串口"，打在内存子系统就绪之后的串才顺带证�
 **进行中**：`user/cmds/core/hyp_boot.c` 选了 `"A20OS Kernel"`，也就是 guest
 最早的 banner 行。
 
-**PASS 的定义是"guest 到达了自己的 banner"，不是"guest 引导完成"。** guest
-没有块设备、挂不上 rootfs，会死在 `init_kthread` 里——那是真实到达，不是失败。
-这条边界必须写进 gate，否则两件坏事之一必然发生：
+**PASS 的定义是"guest 到达了自己的 banner"，不是"guest 引导完成"。**
+这轮门禁构建的是 `RAMFS_USER=0` 镜像（`tools/smoke_cases.py:614`），guest 没有块
+设备、挂不上 rootfs，会死在 `init_kthread` 里——那是真实到达，不是失败。
+**但这条不再是本轮的实际终点**：实测那次 guest 停在自己的 slab 层（§8.3），
+早于 `init_kthread`。这条边界必须写进 gate，否则两件坏事之一必然发生：
 
 - 把 `PANIC` 放进 forbid：guest 的 panic 文本与宿主的**逐字节相同**，一条正确
   的运行会被判红；
@@ -463,12 +485,106 @@ verdict 行在宿主活着的时候才写得出来。这条 gate 的 timeout 是
 60 s：每个 guest console 字节、每次页表走查、每次二级缺页都要陷回宿主，
 guest 引导比宿主自举慢好几个数量级。
 
-**guest 在 banner 之后 fault 退出同样是预期到达**，不是失败。实测（`.kernel-build/
-smoke/hyp-a20os-riscv64.log` 第 261-263 行）是一次 `exit=2(fault)` 与
-`HYP_A20OS: PASS` **同时出现**的运行：guest 在 `trap_init()` 写 PLIC
-（gpa `0xC000028`）时撞上"访存指令解不出来"——那条是 16 位压缩 store，而当前
-解码器只认 32 位编码。`exit=2` 说的是 guest 停在哪儿，PASS 说的是它有没有到达，
-两件事。**判据只看 marker，不看退出原因。**
+**guest 在 banner 之后走到哪儿，与判据无关。** 判据只看 marker，不看退出原因。
+三次实测（`.kernel-build/smoke/hyp-a20os-riscv64.log`），三次门禁都 PASS：
+
+**第一次（日志可读，全文 573 行）**，guest 走到根 ramfs 就绪，然后：
+
+```
+556: [RAMFS] Initialized, root inode 0
+557: [SLAB BUG] kfree(0xffffffc47fae0010): invalid non-slab pointer …
+571: [PANIC] attempting firmware poweroff
+572: HYP_A20OS: exit=1(shutdown) scause=0xa stval=0x0 htval=0x0 marker_seen=1 console_bytes=17840
+573: HYP_A20OS: PASS
+```
+
+**`exit=1(shutdown)` 与 `PASS` 同时出现，中间隔着一次 guest 自己的
+`KERNEL PANIC`。** `shutdown` 只说明 guest 发了一次 SBI SRST ecall
+（`hyp_vcpu.c:413-418`），那次是 panic 路径在打完堆栈之后发的。`[SLAB BUG]`
+是 **guest 自己 slab 层报的**（guest 用的是同一棵树的 slab 代码），本片没有定位
+根因，也没有证据说它与 hypervisor 有关。同一个日志里还有一条对照：
+`292: [BUS] virtio-mmio: found 0 devices`——guest 在自己的 stage-1 里数到了两个
+virtio-mmio（宿主那次是 `:103` 的 2 个），但设备模型给的是 RAZ/WI 计数，不是真设备。
+
+**第二次（日志被在途调试打印刷成 43 万行，guest 段读不出）**：结果行逐字段相同
+（`console_bytes` 也是 17840），可 guest 侧换成停在 UART 页上的自旋
+（`hyp: trap loop at pc=ffffffc080209664 scause=17`），而且 `[SLAB BUG]` 与
+`KERNEL PANIC` 这两行**不再出现在日志里**——原因不是被修好了，是
+`kernel/hyp/hyp_vcpu.c` 两处在途 `DBG` 打印把日志撑到了 432,618 行。
+**"这次没看见"不等于"这次没有"。**
+
+**第三次（去掉调试打印后，当前树，PASS，日志可读）**：**和第一次停在同一个地方。**
+`[RAMFS] Initialized, root inode 0` 之后紧跟
+
+```
+[SLAB BUG] kfree(0xffffffc47fc20010): invalid non-slab pointer hdr=0xffffffc47fc20000 magic=0x0 order=0
+[SLAB BUG]   pfn=4193312 flags=0x1 refcount=1 order_meta=5 cpu=0
+[FRAME-TRACE] releases of pfn=4193312:
+```
+
+**所以第二次的自旋是那两条 `DBG` 造成的假象，guest 的真实终点一直是
+`kfree` 一个 RAMFS 指针。** `flags=0x1 refcount=1` 说明那一页在 buddy 层仍是"已分配"
+的——被 `kfree` 的地址落在 `0xffffffc47f...`，正是 guest 的 RAMFS 区间，ramfs 把
+自己持有的页当普通页还了回去。**这不是 stage-2 的问题**：解码零缺口
+（`grep -c "undecodable guest access"` = 0）、guest 一路走到 `[INIT] USB devices
+scanned`（17840 个 guest console 字节）、该走的二级页错配都走完了。同一现象在
+`RAMFS_USER=1` 的内核上**一模一样地复现**（同一个 `[RAMFS] Initialized` 后面、
+同一个 `[SLAB BUG]`，只有 `pfn` 差了一点），所以也不是"guest 缺 `/bin/init`"那条路
+导致的。
+
+所以这条边界要写成两句话而不是一句：**PASS = guest 到达了自己的 banner；
+`exit=` = guest 最后停在哪。** 第二次实测里 `exit=` 与 `console_bytes` 与第一次
+完全一样而 guest 的实际终点不同（当时读不出来），就是这条边界最硬的证据。读日志要
+读到最后一行之上最近的 `[PANIC]` / `[SLAB BUG]` / `trap loop`，而不是读 `PASS`。
+逐行解读见 [03-usage.md §3.1-3.3](03-usage.md)。
+
+> **上面这一段的"真实终点"已经被本轮推翻了，别照抄。** 那是**上一棵树**的终点
+> （`kfree` 一个 RAMFS 指针）。本轮 `make smoke-hyp-shell` 的实测里
+> `.kernel-build/smoke/hyp-shell-riscv64.log` **一次 `[SLAB BUG]` 都没有**
+> （`grep -c 'SLAB BUG'` = 0），guest 走得更远——打完 banner、走到
+> `[INIT] entering scheduler...`——然后死在**内核栈页的 use-after-free**
+> （`[TRAP] pfn 32638 sits on buddy free list — use-after-free of stack page`，
+> `[PANIC] task: pid=1 name=kthread`）。**上面那句"这不是 stage-2 的问题"仍然成立**
+> （解码零缺口），但"guest 的真实终点是那个 kfree"已经不成立。
+
+
+**另有一条门禁 `smoke-hyp-console-p0`（`tools/smoke_cases.py:563-611`）**，它验的
+不是这个 marker，而是本轮新增的 guest 控制台输入（契约 v3）：往 QEMU 的 stdin 里
+按 `sendline_seq` 的顺序送三步（提示符 → `hyp_test echo` → guest up → 三个字节 →
+提示符 → `poweroff`），期望日志里出现独立一行 `HYP`（guest 的回显）与
+`rx_bytes=N`。**本片实跑结果：门禁 PASS。** guest 轮询 LSR、弹出三个宿主字节、
+经 SBI 打回，控制台上是干净的 `HYP`，随后 SBI shutdown：
+`HYP_VCPU_TEST: exit=1 rx_bytes=4` → `HYP_VCPU_TEST: PASS`。
+
+> **它一度是红的，而红的不是通道。** 第一版 `hyp_test.c` 里
+> `memcpy(code + n, guest_echo, sizeof(guest_echo) / sizeof(guest_echo[0]))`
+> 把**元素个数当成了字节数**——拷了 13 字节（三个整字加第四个字的头一个字节）。
+> guest 于是把 `andi a1,a1,1` 取成 `0x00000093`，解成 `addi ra,x0,0`，带着过期的
+> LSR 字节跳进镜像后面的零填充，在 `pc=0` 取指失败。**这条编译不报、运行不报、
+> 头一个字还对**，四步之外的 `trap #1 scause=14 pc=0` 是它唯一的表现，而那四步
+> 全都"看起来对"——解码出的 `va`、`gpa`、`rd` 一项不差。
+
+**第三条门禁 `smoke-hyp-console`（`tools/smoke_cases.py:742-808`）** 是端到端那条：
+用 `-k /bin/boot/guest-kernel-ramfs.elf` 引导 `RAMFS_USER=1` 的 guest 内核
+（userland 直接链进镜像，因此背后没有块设备也有 `/bin/init` 可 exec），并要求
+`HYPVM:` 行上的 `rx_bytes` 非零。**实跑 PASS，`rx_bytes=15`**——正好是
+`echo roundtrip` 那 15 个字节。`rx_bytes` 是设备模型自己的入口计数器，只在
+`hyp_dev_pump_rx()` 里、只在真的从 `uart_try_getc()` 拿到字节时递增，而 pump 只在
+guest trap 上跑，所以宿主伪造不了它。**这一条不声称 guest 把它们读回来了**：那需要
+guest 侧 `uart_rx_is_polled` 的降级，不在本片；真正的往返在
+`smoke-hyp-console-p0` 上验，在设备边界上。
+
+**第四条门禁 `smoke-hyp-shell`（`tools/smoke_cases.py:810-962`，
+`tools/targets-smoke.mk:202-213`）** 是"guest 能进 shell 并且能交互"那条目标的
+验收点，第三条覆盖不到的那一半就是它。**实跑 FAIL，如实记红。** 它在第三条的
+`rx_bytes` 之外**另外**要求：guest 走到 mksh 提示符、执行门禁敲进去的
+`echo AAAABBBBCCCC` 与 `echo DDEEEEEEFFFF`、把两个 token 打印回来、回到提示符，
+最后由 `exit` 触发 `user/init.c:264-283` 的 `do_shutdown()` 收尾。
+**"字节进了环"和"guest 读了"是两条分开的断言**——第三条只断言了第一条。
+本轮实测：`rx_bytes=18`（泵是通的），但两个 token 一次都没出现，guest 死在
+`[INIT] entering scheduler...` 的内核栈页 use-after-free 上、连 `/bin/init` 都没
+exec。逐行对账见 [03-usage.md §3.4.2](03-usage.md)，路线图上的状态见
+[02-roadmap.md](02-roadmap.md)。
 
 > **命令行入口的行前缀是 `HYPVM:`，不是 `HYP_A20OS:`。** 本节与
 > `tools/smoke_cases.py` 记的是硬编码装载器 `user/cmds/core/hyp_boot.c` 的
@@ -522,14 +638,33 @@ VMO 级。
 
 ## 10. 已知限制
 
-1. **单 vcpu。** 全局槽 + trylock（`hyp_vcpu.c:74-88,311-322`）。guest 的 secondary
+1. **单 vcpu。** 全局槽 + trylock（`hyp_vcpu.c:1157-1190`）。guest 的 secondary
    路径要 `sbi_hart_start()`，不在 v2 SBI 面里。
-2. **不路由中断。** `hideleg` 委托了 VS 级中断位，但 HS 侧没有任何东西去断言
-   `hvip.VSTIP` / `hgeip`（规格 `norm:hip_vseip_vstip_acc_op` 那两条 OR 来源）。
-   结果是 guest 的时钟中断与外部中断**不会到来**。单 vcpu、无 PLIC、无 IPI 的
-   启动冒烟能在没有 tick 的情况下跑完（前提是启动路径不依赖定时器推进），
-   但任何依赖调度的 guest 行为都做不了。这条是"中断虚拟化"整件事，属于
-   [02-roadmap.md](02-roadmap.md)。**未验证**：本片没有跑过 guest。
+2. **不注入外部中断。** —— **本条此前写的是"guest 的时钟中断与外部中断不会到来"，
+   前半句是错的，已更正。** `hideleg` 委托了 VS 级中断位
+   （`HYP_HIDELEG_DEFAULT` = bit 2/6/10，`kernel/include/hyp/hyp_vcpu.h:226-227`，
+   写的地方 `kernel/arch/riscv64/hyp/hyp_arch.c:284`），`hstatus.VIE` 在
+   `HYP_HSTATUS_GUEST_ON` 里（`hyp_arch.c:151,166-167,315`），而 vstimecmp 到期
+   置 `mip.VSTIP` 是 QEMU 的硬件行为（`target/riscv/time_helper.c:25-30`
+   的 `riscv_vstimer_cb()`；写 CSR 0x24d 挂上它的是 `target/riscv/csr.c:1680-1692`）。
+   V=1 时 `hsie` 恒 1（`target/riscv/cpu_helper.c:585`），被委托的 VS 位被重编号
+   后交给 VS-mode（`:617-634`）。**所以 guest 用 Sstc 时定时器中断是通的**，两条入口
+   本树都接上了：guest 自己写 CSR 0x24d 由虚拟指令路径仿真
+   （`kernel/hyp/hyp_vcpu.c:988-1003`），或 guest 发 legacy `set_timer` 由分派器代写
+   （`hyp_vcpu.c:386-388`）。
+
+   **真正缺的是外部中断注入**：`hvip`（CSR 0x646）与 `hgeip`/`hgeie` 在全树零引用
+   （`grep -rn 'hvip\|hgeip\|hgeie' kernel/ user/cmds --include=*.c --include=*.h
+   --include=*.S` 无输出），PLIC 没有模型（`kernel/hyp/hyp_dev.c:472-477` 把非
+   UART/CLINT 页 RAZ/WI 并按页计数，`hyp_dev_note_unknown()` 在 `:100-112`），
+   UART 的 IIR 恒回"无中断待处理"（`hyp_dev.c:71-76,286`）。规格 `norm:hip_vseip_vstip_acc_op` 那两条 OR 来源里，
+   `vstimecmp` 那一半在位，`hgeip`/`hvip` 那一半没有。
+
+   后果：单 vcpu、无 PLIC、无 IPI 的启动冒烟能在有 tick 的情况下跑完（前提是启动
+   路径不依赖 tick），而任何依赖**外部**中断推进的 guest 行为（PLIC 配置完成后的
+   外设中断、guest 之间的 IPI）现在做不了。这条是"中断虚拟化"整件事，属于
+   [02-roadmap.md](02-roadmap.md) §2。**未验证**：本片没有跑过"guest 收到自己的
+   定时器中断"这条路径——`timer_preempt` 之类的 guest 侧证据要等 guest 活到那一步。
 3. **无 guest 页保护。** 窗口页一律 RWX。guest 之间的隔离要等 vmid 侧的真隔离
    语义才有意义，而本设计一次只跑一个 guest。
 4. **GPA 上限 512 GiB。** hgatp 是 Sv39x4 但只编程根表 [0,512)（
@@ -537,24 +672,44 @@ VMO 级。
    根表项。
 5. **VMID 只增不重用**（`hyp.h:26-30` 与 `hyp_arch.c:50-54`）：宽度是 WARL，
    环绕是文档化限制。
-6. **设备模型是寄存器级的，不是 virtio 的。** guest 挂不上 rootfs，
-   `smoke-hyp-a20os` 的 PASS 因此定义为"到达 banner"而不是"引导完成"
-   （§8.3）。真 rootfs 需要 virtio-blk，属于 [02-roadmap.md](02-roadmap.md)。
-7. **R|W|X 叶页依赖 QEMU 的具体行为**（§5）。规格说这是保留编码，在途实现给出
-   的是"QEMU 10.0.13 只拒绝 R-less 组合"这条依据；本片无法核对（vendored 的
-   QEMU 树里没有 `target/` 目录），也没有跑过 `smoke-hyp-a20os`。**这是最可能
-   让首次启动卡死的一处**，而卡死点是 guest 的第一条访存，排查成本很高。
-8. **`smoke-hyp-a20os` 在本文写作时尚未运行。** 本片只读了它的定义，没有执行。
-   本文关于 v2 行为的一切描述都是"契约 + 代码 + 规格"三者的推演，不是运行
-   结论。QEMU 的 TCG 对 `hgatp`、VS CSR 影子、`htimedelta`、`hideleg` 翻译的
-   贴合度需要实跑确认。真机更没有——见 [02-roadmap.md](02-roadmap.md)。
+6. **设备模型是寄存器级的，不是 virtio 的。** 这直接决定了 PASS 的定义只能是"到达
+   banner"而不是"引导完成"（§8.3）。**但"guest 挂不上 rootfs"这句话要分情况**：
+   `RAMFS_USER=0`（默认，`Makefile:111`）镜像的根 ramfs 里没有 `/bin/init`，
+   `init_kthread()` 会 `panic("init: no init program found")`（`kernel/main.c:352,361`）；
+   `RAMFS_USER=1` 镜像则把 `init`、`mksh`、`ls`、`cat`、`ps` 等直接嵌进内核 ramfs
+   （`Makefile:1238` 的 `RAMFS_USER_PROGRAMS`、`kernel/fs/rootfs_user.c:31-41`，
+   由 `kernel/fs/diskfs/ramfs.c:1285-1301` 铺开并软链 `/bin/sh -> /bin/mksh`），
+   **那种 guest 不需要块设备也能起 init**。门禁 `smoke-hyp-a20os` 的构建变量是
+   `RAMFS_USER=0`（`tools/smoke_cases.py:614`），所以对门禁而言原话成立。
+   **未验证**：本片没有构建也没有运行过 `RAMFS_USER=1` 的 guest。
+   真 rootfs（读镜像上的文件、持久写）仍然要 virtio-blk，属于
+   [02-roadmap.md](02-roadmap.md)。**guest 的 virtio-blk 是内核内驱动**——
+   `kernel/drvmod/examples/virtio_blk.c` 只是 `#include` 了
+   `kernel/drivers/block/virtio_blk.c` 的 16 行注册壳
+   （`components/drivers.toml:20-24` 把它登记成 early `.a20drv`，
+   `kernel/arch/riscv64/platform/early_drivers.c:33` 从 `/boot/drivers` 加载），
+   不存在"guest 的 virtio 驱动是用户态程序"这回事。
+7. ~~**R|W|X 叶页依赖 QEMU 的具体行为**~~ —— **已推翻并修正，见
+   [00-design.md §5.3 第 3 条](00-design.md)。** 原结论说 W 与 X 同时置位在叶 PTE
+   里是保留组合、G-stage 走查直接拒；QEMU 10.0.13 的 `get_physical_address()` 只特判
+   `rwx==6`（W|X）与 `rwx==2`（W），`rwx==7`（R|W|X）落到
+   `PAGE_READ|PAGE_WRITE|PAGE_EXEC`，正常翻译。工作树按
+   `HYP_RAM_PAGE_PROT (PTE_R|PTE_W|PTE_X)` 装 guest RAM。
+   本条此前还写着"vendored 的 QEMU 树里没有 `target/` 目录，无法核对"——
+   **该目录存在**（`/tmp/qs/qemu-10.0.13/target/`），核对方式是读
+   `target/riscv/cpu_helper.c`。
+8. **`smoke-hyp-a20os` 已经跑过，PASS。** 本条此前写的是"本文写作时尚未运行，本文
+   关于 v2 行为的一切描述都是推演"。运行结论与逐行日志见
+   [03-usage.md §3.3](03-usage.md)（`smoke-hyp-a20os` 与手工 `hypvm` 两次真跑，
+   guest 侧结果逐字段相同）。仍然只验到 banner 一层，banner 之后的事见 §10 第 9 条。
 9. **一次宿主会话里只能引导一台 guest。** 实测：同一 shell 里连续两次运行
    `/hypvm`，第一次正常 PASS，第二次——**参数与第一次完全相同**——打完
    `HYPVM: running` 之后一个 guest 控制台字节都没有，`hyp_vcpu_run()` 一直不
    返回，QEMU 100% CPU，宿主连一条 `[ERR] hyp:` 都没打（说明 guest 在跑、且没有
    陷入）。单独跑 `hypvm -m 96`、单独跑自定义 `-b` 都正常，所以与参数无关，是第
    一次 guest 以 `HYP_EXIT_FAULT` 退出之后留下的状态。根因未查（怀疑与第 2 条
-   "不路由中断"下 guest 等待一个永远不会到来的中断有关），修它属于
+   "不注入外部中断"下 guest 等待一个永远不会被投递的外部中断有关——注意不是
+   时钟中断，时钟中断那条路是通的），修它属于
    [02-roadmap.md](02-roadmap.md) §2 的范围。**后果**：`smoke-hyp-vm` 与
    `smoke-hyp-vm-96` 因此是两个门禁、两次 QEMU 启动，而不是一个门禁里的两行
    命令。
@@ -593,8 +748,16 @@ FDT（`hypvm.c:300`），并在它与镜像重叠时报错而不是硬塞。默�
 
 `hypvm` 的 PASS 判据与 `hyp_boot` 同款且只有两条：marker 命中（设备模型只在
 **guest** 控制台字节上匹配，所以宿主自己那行同名 banner 顶不上，见 §8.2），以及
-`console_bytes` 大于 marker 长度（排除"只打到开头"的退化命中）。`exit=2(fault)`
-与 PASS 同时出现是预期的：guest 没有块设备、挂不上 rootfs，和 §8.3 是同一条边界。
+`console_bytes` 大于 marker 长度（排除"只打到开头"的退化命中）。**`exit=` 与 PASS
+同时出现不构成矛盾，这一点本轮又验证了一遍**：实测那次是
+`exit=1(shutdown)`，而它来自 guest 自己的 `kfree` panic 之后的 SBI SRST ecall
+（§8.3）。所以"`exit=2(fault)` 与 PASS 同时出现是预期的"这句话**已被实测结果取代**——
+换成更强的说法：**任何 `exit=` 值与 PASS 同时出现都是预期的**，判据只看 marker。
+"guest 没有块设备、挂不上 rootfs"这条边界也仍然成立，但**它不再是本轮 guest 的
+终点**：门禁构建的是 `RAMFS_USER=0` 镜像（`tools/smoke_cases.py:614` 只传
+`ARCH=riscv64 ABI=linux BRINGUP=0`），而本轮 guest 停在自己的 slab 层，早于
+`init_kthread`。块设备与 `RAMFS_USER=1` 那条替代路的完整拆解见
+[03-usage.md §4.3](03-usage.md) 与 [02-roadmap.md §4](02-roadmap.md)。
 `hyp_boot` 的三行字面输出被 `smoke-hyp-a20os` 按字面匹配，所以它一个字都没改；
 `hypvm` 的 PASS 行带上窗口大小，正是为了让门禁能分辨两次不同参数的运行。
 
