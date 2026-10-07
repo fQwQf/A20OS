@@ -44,6 +44,14 @@ SKIP_DIRS = {".git", ".kernel-build", "qemu-10.0.13+ds", "node_modules",
 SRC_EXT = {".c", ".h", ".S", ".ld", ".mk", ".py", ".rs", ".toml", ".sh",
            ".inc", ".ld.S", ".md"}
 
+# Some upstream trees use distinctive internal roots that may collide with a
+# first-party basename.  In particular QEMU's include/standard-headers tree is
+# not mirrored at the repository root; `virtio_net.h` there must not fall
+# through to the unrelated A20OS driver header with the same basename.  Exact
+# in-tree paths and the conventional kernel-relative paths above are resolved
+# before this check, so a real tracked target still gets line-count checking.
+EXTERNAL_PATH_MARKERS = (("standard-headers", "linux"),)
+
 CITE = re.compile(
     r'(?P<path>(?:[\w./-]+/)?[\w.-]+\.(?:c|h|S|ld|mk|py|rs|toml|sh|inc))'
     r':(?P<a>\d+)(?:-(?P<b>\d+))?'
@@ -100,6 +108,12 @@ def resolve(path):
     for cand in candidates:
         if os.path.isfile(os.path.join(ROOT, cand)):
             return cand, False
+
+    parts = path.split("/")
+    if any(tuple(parts[i:i + len(marker)]) == marker
+           for marker in EXTERNAL_PATH_MARKERS
+           for i in range(len(parts) - len(marker) + 1)):
+        return None, False
 
     hits = find_all(os.path.basename(path))
     if not hits:
