@@ -89,6 +89,22 @@ class GuiCfg:
 @dataclass(frozen=True, slots=True)
 class NetCfg:
     hostfwd: tuple[str, ...] | None = None
+    # NIC MAC for the default virtio-net device.  QEMU's built-in default is
+    # the same 52:54:00:12:34:56 for every guest, which collides the moment two
+    # instances share one L2 segment (the cluster UDP demo does exactly that),
+    # so any instance meant to coexist must declare its own.
+    mac: str | None = None
+    # Full QEMU netdev spec (without the `-netdev` prefix) replacing the
+    # default SLIRP user backend.  Must carry `id=net`, because the Makefile
+    # attaches the default NIC as -device ...,netdev=net.  Mutually exclusive
+    # with hostfwd, which only exists on the user backend.
+    backend: str | None = None
+    # Guest-side static IPv4, handed to the kernel as a20.* boot arguments
+    # (kernel/net/net_config.c).  Only meaningful together with guest_ip, and
+    # only on architectures with a QEMU -append path.
+    guest_ip: str | None = None
+    guest_netmask: str | None = None
+    guest_gateway: str | None = None
 
     def qemu_hostfwd(self) -> str:
         """[net].hostfwd as QEMU wants it on the -netdev command line.
@@ -303,7 +319,9 @@ _SECTION_SPECS: Final = {
                 for f in MachineCfg.__dataclass_fields__},
     "gui": {f: ("bool" if f == "enabled" else "str")
             for f in GuiCfg.__dataclass_fields__},
-    "net": {f: "str_list" for f in NetCfg.__dataclass_fields__},
+    "net": {f: ("str" if f in ("mac", "backend", "guest_ip", "guest_netmask",
+                               "guest_gateway") else "str_list")
+            for f in NetCfg.__dataclass_fields__},
     "rootfs": {f: ("str_list" if f == "drivers"
                    else "str" if f == "world"
                    else "bool" if f == "alpine" else "int")
