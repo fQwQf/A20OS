@@ -4,7 +4,7 @@
 
 ---
 
-这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务与文件系统宿主机制（uxfs/ufsd）。Linux ABI（`syscall_table.def` 登记 366 个 syscall）兼容现有 musl 生态，Native ABI（登记 142 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务与文件系统宿主机制（uxfs/ufsd）。Linux ABI（`syscall_table.def` 登记 366 个 syscall）兼容现有 musl 生态，Native ABI（`kernel/abi/native/syscall_table.def` 登记 153 个 syscall）提供面向能力、句柄与事件的新接口；登记数量表示表中入口数，不等同于每项语义均完整实现。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 ## 文档范围与权威性
 
@@ -110,16 +110,22 @@
 
 ### 虚拟化（hypervisor）
 
-riscv64 H 扩展下的 stage-2 地基与 vcpu 切片。宿主侧两片（stage-2 与 vcpu 运行循环）已落地；v2（把 A20OS 自己当 guest）的契约已冻结，完整实现也已提交（`1aa0603ea`）——设备模型（`kernel/hyp/hyp_dev.c`）、RAM 窗口与 marker（`kernel/hyp/hyp.c`）、装载器与门禁（`user/cmds/core/hyp_boot.c`、`smoke-hyp-a20os`）、Linux ABI 桥新增的三个调用。各篇内部仍逐条标注哪些是"已落地"（HEAD 有代码）、哪些只是"在工作树里"：
+riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户可从 shell 运行 `/hypvm` 指定 guest 内核与参数，也可使用固定参数的 `/hyp_boot`；宿主与 guest 之间的控制台字节通道已接入。`smoke-hyp-shell` 已验证 RAMFS guest 启动到 shell、执行两次交互命令并由 guest 请求关机；这项证据覆盖当前测试镜像的 guest shell，不代表完整发行版或通用 guest 设备模型。Native ABI 表中登记 5 个 hyp 入口：`hyp_vm_create`、`hyp_vm_load`、`hyp_vcpu_create`、`hyp_vcpu_run`、`hyp_vm_destroy`。源码与测试入口是当前状态依据，设计页仍保留实现过程与限制：
 
 - [hypervisor/00-design.md](hypervisor/00-design.md)：设计记录——单级内存模型如何复用为 stage-2、riscv64 架构半、vcpu 运行循环的已落地形状、评审发现与遗留
 - [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
-- [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——前置条件（riscv64 + `-cpu rv64,h=true`）、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
+- [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
 
-验证入口：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-a20os`（后者是 v2：把同一个内核当 guest 启起来，PASS 判据是设备模型数到的 guest 自己的 banner）。三条 gate 都必须带 `-cpu rv64,h=true`，否则默认 rv64 CPU 不暴露 H 扩展，测的是 SKIP 而不是功能。
+验证入口包括 `make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`。它们分别覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell。相关入口都显式传入 `-cpu rv64,h=true`，这是为表达目标 CPU 前提并避免换用默认不带 H 的模拟器时静默跳过；它本身不是当前 QEMU 上 H 可用的判据。
 
-> 上一句末尾那个因果在 QEMU 10.0.13 上复现不出来：实跑四组 `-cpu`（`h=true` / `rv64` / 完全不写 / `h=false`）显示默认 `rv64` 本来就带 H，去掉该参数 gate 照样过；而 `h=false` 得到的是宿主 KERNEL PANIC，不是 `NOT_SUPPORTED`。参数仍建议保留。数据与命令见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
+CPU 必须实际支持 RISC-V H 扩展。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，门禁可运行；设置 `h=false` 时当前 `hyp_probe()` 仍误判为可用，随后宿主在 vcpu exit 路径 panic，而不是干净返回 `NOT_SUPPORTED`。因此显式参数用于表达意图，不应把它解读为运行时特性探测正确，也不要在不带 H 的硬件上运行 guest。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
+
+## 当前契约与恢复记录
+
+- [mm-fork-mprotect-cow.md](mm-fork-mprotect-cow.md)：fork、COW 与 `mprotect` 的当前锁和帧引用契约，以及隔离回归范围。
+- [aarch64-fex-preconditions.md](aarch64-fex-preconditions.md)：AArch64 auxv 与保护提示的接口审计范围；明确哪些证据尚不能推出 FEX 支持。
+- [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮中断开发恢复的工作树、提交、门禁与验证记录。
 
 ## 研究与项目背景
 
