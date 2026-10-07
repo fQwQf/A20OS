@@ -4,10 +4,16 @@
 # ----------------------------------------------------------------
 .PHONY: check-smp-platform-boundary check-io-progress-model
 
-# Several gates launch recursive builds that share the default RISC-V image.
-# Serialize the aggregate so `make -j check-doc-test-gates` cannot rebuild the
-# same FAT image concurrently from independent prerequisite branches.
-.NOTPARALLEL: check-doc-test-gates check-final-definition
+# Several gate groups launch recursive builds that share the default RISC-V
+# image.  GNU make's .NOTPARALLEL is not transitive: marking the top-level
+# check-doc-test-gates serializes its direct child groups, but does not
+# serialize sibling smoke prerequisites *inside* each group.  Mark every
+# runtime aggregate whose sibling smokes can concurrently rebuild the same
+# FAT image.  Keep check-final-definition covered because it delegates to the
+# full aggregate.
+.NOTPARALLEL: check-doc-test-gates check-final-definition \
+	check-blocking-point-boundary check-timeout-ownership-boundary \
+	check-mm-lock-model check-upgrade-userland-smokes
 
 all:
 	$(MAKE) release-rv
