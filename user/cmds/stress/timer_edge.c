@@ -21,6 +21,24 @@
 #include <time.h>
 #include <unistd.h>
 
+/* ARM EABI exposes time64 timer syscalls under explicit names.  musl uses a
+ * 64-bit time_t on this 32-bit target, so call the matching raw ABI directly. */
+#if defined(__arm__) && !defined(__aarch64__)
+#ifndef SYS_timer_settime64
+#error "ARM EABI headers must expose timer_settime64"
+#endif
+#ifndef SYS_timer_gettime64
+#error "ARM EABI headers must expose timer_gettime64"
+#endif
+_Static_assert(sizeof(time_t) == sizeof(int64_t),
+               "ARM timer64 syscall requires 64-bit time_t layout");
+#define A20_SYS_timer_settime SYS_timer_settime64
+#define A20_SYS_timer_gettime SYS_timer_gettime64
+#else
+#define A20_SYS_timer_settime SYS_timer_settime
+#define A20_SYS_timer_gettime SYS_timer_gettime
+#endif
+
 /* Linux clockids */
 #define CLK_REALTIME  0
 #define CLK_MONOTONIC 1
@@ -64,12 +82,12 @@ static long xtimer_settime(int timerid, int flags,
                            const struct itimerspec *newv,
                            struct itimerspec *oldv)
 {
-    return syscall(SYS_timer_settime, timerid, flags, newv, oldv);
+    return syscall(A20_SYS_timer_settime, timerid, flags, newv, oldv);
 }
 
 static long xtimer_gettime(int timerid, struct itimerspec *cur)
 {
-    return syscall(SYS_timer_gettime, timerid, cur);
+    return syscall(A20_SYS_timer_gettime, timerid, cur);
 }
 
 static long xtimer_getoverrun(int timerid)
