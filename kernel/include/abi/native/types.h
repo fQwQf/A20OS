@@ -1092,4 +1092,129 @@ typedef struct a20_system_info {
     uint64_t       uptime_ns;
 } a20_system_info_t;
 
+/* ---- Cluster structures (docs/cluster/01-abi.md) ----
+ *
+ * Frozen. Append-only: new fields may be added at the tail, gated by the
+ * size/version header every args struct carries, never inserted into the
+ * middle. */
+
+/* 128-bit cluster-wide unique node identity. All-zero is A20_NODE_ID_LOCAL
+ * (this machine; addressing (LOCAL, slot) must take the local fast path and is
+ * never serialized), all-0xff is A20_NODE_ID_BROADCAST (SERVER tier, SEND
+ * frames only). */
+typedef struct a20_node_id {
+    uint8_t bytes[16];
+} a20_node_id_t;
+
+/* cluster_set_self capability bits. */
+#define A20_CLUSTER_CAP_RELAY     (1u << 0)  /* forwards frames for other nodes */
+#define A20_CLUSTER_CAP_RELIABLE  (1u << 1)  /* ACK / retransmit / reassembly */
+#define A20_CLUSTER_CAP_LEAF      (1u << 2)  /* answers only, never dials out */
+#define A20_CLUSTER_CAPS_ALL      (A20_CLUSTER_CAP_RELAY | \
+                                   A20_CLUSTER_CAP_RELIABLE | \
+                                   A20_CLUSTER_CAP_LEAF)
+
+/* cluster_export flags. */
+#define A20_EXPORT_REPLACE      (1u << 0)
+#define A20_EXPORT_LOCAL_ONLY   (1u << 1)
+#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY)
+
+/* cluster_connect flags. */
+#define A20_CONNECT_RELIABLE    (1u << 0)
+#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE)
+
+/* cluster_route op. */
+#define A20_ROUTE_ADD       0u
+#define A20_ROUTE_DEL       1u
+#define A20_ROUTE_REPLACE   2u
+
+/* cluster_event_subscribe mask. */
+#define A20_CLX_EVENT_LINK_UP        (1u << 0)
+#define A20_CLX_EVENT_LINK_DOWN      (1u << 1)
+#define A20_CLX_EVENT_ROUTE_LOST     (1u << 2)
+#define A20_CLX_EVENT_EXPORT_DROPPED (1u << 3)
+#define A20_CLX_EVENT_MASK_ALL       0xFu
+
+/* Link state reported by cluster_link_status. */
+#define A20_CLX_LINK_DOWN     0u
+#define A20_CLX_LINK_SUSPECT  1u
+#define A20_CLX_LINK_UP       2u
+
+/* transport_id values owned by the cluster subsystem. */
+#define A20_CLX_TRANSPORT_LOOPBACK 0u
+#define A20_CLX_TRANSPORT_UDP      1u
+#define A20_CLX_TRANSPORT_UART     2u
+
+#define A20_CLUSTER_SERVICE_NAME_MAX 64
+
+/* Wire identifiers for the six syscalls live in syscall_nr.h at 0x0520+. */
+
+typedef struct a20_cluster_set_self_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       caps;          /* A20_CLUSTER_CAP_* */
+    uint32_t       _pad;
+    a20_node_id_t  node_id;
+    uint64_t       reserved[2];   /* must be zero */
+} a20_cluster_set_self_args_t;
+
+typedef struct a20_cluster_export_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;         /* A20_EXPORT_* */
+    uint32_t       _pad;
+    a20_handle_t   channel;       /* A20_OBJ_CHANNEL_ENDPOINT, needs R */
+    const char    *service_name;  /* UTF-8, need not be NUL-terminated */
+    uint32_t       name_len;      /* <= A20_CLUSTER_SERVICE_NAME_MAX */
+    uint32_t       reserved;      /* must be zero */
+} a20_cluster_export_args_t;
+
+typedef struct a20_cluster_connect_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       flags;         /* A20_CONNECT_* */
+    uint32_t       slot;
+    a20_node_id_t  node_id;       /* LOCAL means this machine */
+    const char    *service_name;  /* optional; takes priority over slot */
+    uint32_t       name_len;
+    uint32_t       timeout_ms;    /* 0 = 5000 default */
+    uint32_t       reserved;      /* must be zero */
+} a20_cluster_connect_args_t;
+
+typedef struct a20_cluster_route_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       op;            /* A20_ROUTE_* */
+    uint32_t       transport_id;  /* 0=loopback 1=udp 2=uart */
+    a20_node_id_t  node_id;
+    uint8_t        next_hop[16];  /* interpretation is per-transport */
+    uint32_t       next_hop_len;
+    uint32_t       metric;        /* lowest wins for one destination */
+    uint32_t       reserved;      /* must be zero */
+} a20_cluster_route_args_t;
+
+typedef struct a20_cluster_event_subscribe_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       mask;          /* A20_CLX_EVENT_* */
+    uint32_t       reserved;      /* must be zero */
+} a20_cluster_event_subscribe_args_t;
+
+typedef struct a20_cluster_link_status_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint32_t       reserved;
+    uint32_t       _pad;
+    a20_node_id_t  node_id;       /* LOCAL aggregates every link */
+    /* out */
+    uint32_t       state;         /* A20_CLX_LINK_* */
+    uint32_t       rtt_us;        /* sliding average; always 0 on MCU tier */
+    uint64_t       tx_frames;
+    uint64_t       rx_frames;
+    uint64_t       tx_drops;
+    uint64_t       rx_drops;
+    uint64_t       retransmits;
+    uint64_t       last_hello_age_ms;
+} a20_cluster_link_status_args_t;
+
 #endif /* _ABI_NATIVE_TYPES_H */
