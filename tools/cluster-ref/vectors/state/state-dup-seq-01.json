@@ -1,0 +1,97 @@
+{
+  "id": "state-dup-seq-01",
+  "category": "state",
+  "title": "CALL_REPLY with a seq already seen: duplicate, drop but re-ACK",
+  "doc_sections": [
+    "02-wire-protocol.md 7",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "head_udp",
+    "profile_tier": 3,
+    "profile_name": "SERVER",
+    "state": "UP",
+    "peer_caps": 3,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-7: the receiver keeps a 256-entry seq bitmap per link, drops duplicate frames and re-sends the ACK.",
+  "precondition": "seq 1 on this link has already been received (the frame is byte-identical to the first delivery)",
+  "followup": "dedup_drops += 1; the ACK is sent again; the caller does not see a second reply",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 7,
+    "type_name": "CALL_REPLY",
+    "flags": "0x0001",
+    "flags_set": {
+      "RELIABLE": true,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 1000,
+    "src_hash": "0x5EDC2075",
+    "dst_hash": "0xAE8E8135",
+    "dst_slot": 0,
+    "seq": 1,
+    "payload_len": 12,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 46,
+    "crc_present": true,
+    "crc_value": "0x5A90",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 12,
+    "hex": "010000000380040000080000",
+    "app_offset": 4,
+    "app_len": 8,
+    "app_hex": "0380040000080000",
+    "ack_prefix": 1
+  },
+  "diagnostics": {
+    "wire_len": 46,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x5A90",
+    "crc_computed": "0x5A90"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "reliable",
+      "action": "drop",
+      "reason": "duplicate_seq",
+      "counters": [
+        "dedup_drops"
+      ],
+      "errno": null,
+      "reply": "ACK re-sent for the already received cumulative seq"
+    }
+  },
+  "hex_file": "state/state-dup-seq-01.hex"
+}

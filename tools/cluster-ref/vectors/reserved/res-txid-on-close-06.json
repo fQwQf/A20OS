@@ -1,0 +1,100 @@
+{
+  "id": "res-txid-on-close-06",
+  "category": "reserved",
+  "title": "CLOSE with txid=99 (02-1 constrains txid only for SEND)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 8"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-15"
+  ],
+  "notes": "A-15: 02-1 constrains txid explicitly only for SEND, so a CLOSE carrying one is ignored rather than rejected.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 8,
+    "type_name": "CLOSE",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 99,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 3,
+    "seq": 0,
+    "payload_len": 0,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 34,
+    "crc_present": true,
+    "crc_value": "0x3873",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 0,
+    "hex": "",
+    "app_offset": 0,
+    "app_len": 0,
+    "app_hex": "",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 34,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x3873",
+    "crc_computed": "0x3873"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "dispatch",
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "note": "txid on a CLOSE is ignored, not rejected"
+    }
+  },
+  "hex_file": "reserved/res-txid-on-close-06.hex"
+}

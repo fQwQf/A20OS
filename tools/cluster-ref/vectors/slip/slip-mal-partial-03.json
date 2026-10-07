@@ -1,0 +1,53 @@
+{
+  "id": "slip-mal-partial-03",
+  "category": "slip",
+  "title": "frame cut in half with no trailing END: partial frame timeout",
+  "doc_sections": [
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "04-4: partial frame timeout drops the half frame; notes record 'partial_frame'.",
+  "slip": {
+    "slip_frames": [],
+    "slip_notes": [
+      "partial_frame"
+    ],
+    "slip_stream_len": 26
+  },
+  "frame_hex": "434c00030000000000000000b0cbdd9435818eae000000000000000008000801dbdbdbdbdbdbc0c0ce0c",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 0,
+      "slip_notes": [
+        "partial_frame"
+      ]
+    }
+  },
+  "hex_file": "slip/slip-mal-partial-03.slip.hex"
+}

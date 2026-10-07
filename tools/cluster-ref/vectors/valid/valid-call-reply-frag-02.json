@@ -1,0 +1,99 @@
+{
+  "id": "valid-call-reply-frag-02",
+  "category": "valid",
+  "title": "B -> A CALL_REPLY txid=2001 seq=5 fragment 1 (66 B, last)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 5",
+    "02-wire-protocol.md 7"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-04",
+    "A-05"
+  ],
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 7,
+    "type_name": "CALL_REPLY",
+    "flags": "0x0003",
+    "flags_set": {
+      "RELIABLE": true,
+      "FRAGMENTED": true,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x8001",
+    "frag_seq": 1,
+    "frag_last": true,
+    "frag_reserved_nonzero": false,
+    "txid": 2001,
+    "src_hash": "0x5EDC2075",
+    "dst_hash": "0xAE8E8135",
+    "dst_slot": 0,
+    "seq": 5,
+    "payload_len": 66,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 100,
+    "crc_present": true,
+    "crc_value": "0x6CE3",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 66,
+    "hex": "a3aeb9c4cfdae5f0fb06111c27323d48535e69747f8a95a0abb6c1ccd7e2edf8030e19242f3a45505b66717c87929da8b3bec9d4dfeaf5000b16212c37424d58636e",
+    "app_offset": 0,
+    "app_len": 66,
+    "app_hex": "a3aeb9c4cfdae5f0fb06111c27323d48535e69747f8a95a0abb6c1ccd7e2edf8030e19242f3a45505b66717c87929da8b3bec9d4dfeaf5000b16212c37424d58636e",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 100,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x6CE3",
+    "crc_computed": "0x6CE3"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "valid/valid-call-reply-frag-02.hex"
+}

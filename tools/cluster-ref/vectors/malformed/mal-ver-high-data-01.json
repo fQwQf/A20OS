@@ -1,0 +1,72 @@
+{
+  "id": "mal-ver-high-data-01",
+  "category": "malformed",
+  "title": "ver=1 on a PING: a data frame is dropped silently",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 6",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "ver above local",
+      "offset": 2,
+      "value": 1,
+      "was": "0x00"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "notes": "02-1: magic/ver mismatch -> drop + count; a ver higher than local is handled in the HELLO phase, data frames are dropped silently.",
+  "frame": null,
+  "raw_header": "434c0103000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "unsupported_ver",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "unchecked",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "unsupported_ver"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "unsupported_ver"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "unsupported_ver",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-ver-high-data-01.hex"
+}

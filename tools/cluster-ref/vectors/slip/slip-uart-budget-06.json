@@ -1,0 +1,55 @@
+{
+  "id": "slip-uart-budget-06",
+  "category": "slip",
+  "title": "MCU operator frame at the 128 B payload budget with every payload byte escaped (312 B on the wire, buffer is 320 B)",
+  "doc_sections": [
+    "04-transports.md 4",
+    "02-wire-protocol.md 5"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-17"
+  ],
+  "notes": "04-4 gives the leaf a 320 B transmit buffer and recommends an operator payload of at most 128 bytes. The two agree: 24 escapable header bytes plus a payload plus the CRC give a worst-case escaped frame of 2*(32+p)+4 bytes, so p=129 is exactly 320 B and p=130 does not fit. This vector is p=128 with a payload made entirely of 0xDB, the value that escapes hardest. ASSUMPTION A-17.",
+  "slip": {
+    "slip_frames": [
+      "434c000601000000dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb80000801dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb4b22"
+    ],
+    "slip_notes": [],
+    "slip_stream_len": 312
+  },
+  "frame_hex": "434c000601000000dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb80000801dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb4b22",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 1,
+      "slip_notes": []
+    }
+  },
+  "hex_file": "slip/slip-uart-budget-06.slip.hex"
+}

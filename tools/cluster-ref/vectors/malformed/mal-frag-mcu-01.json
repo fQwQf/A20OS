@@ -1,0 +1,95 @@
+{
+  "id": "mal-frag-mcu-01",
+  "category": "malformed",
+  "title": "FRAGMENTED frame received on an MCU tier link",
+  "doc_sections": [
+    "02-wire-protocol.md 5",
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "leaf_uart",
+    "profile_tier": 1,
+    "profile_name": "MCU",
+    "state": "UP",
+    "peer_caps": 4,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-5: the MCU tier forbids fragmentation, FRAGMENTED frames are dropped and counted. The frame is 234 B so it fits the 256 B UART MTU and the profile rule is what rejects it, not the length bound.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 6,
+    "type_name": "CALL",
+    "flags": "0x0002",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": true,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0001",
+    "frag_seq": 1,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 1001,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x94DDCBB0",
+    "dst_slot": 1,
+    "seq": 0,
+    "payload_len": 200,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 234,
+    "crc_present": true,
+    "crc_value": "0x5A31",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 200,
+    "hex": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "app_offset": 0,
+    "app_len": 200,
+    "app_hex": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 234,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x5A31",
+    "crc_computed": "0x5A31"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "dispatch",
+      "action": "drop",
+      "reason": "fragment_forbidden_on_profile",
+      "counters": [
+        "rx_drops"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-frag-mcu-01.hex"
+}

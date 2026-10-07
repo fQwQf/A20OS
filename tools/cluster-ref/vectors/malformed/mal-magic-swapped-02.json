@@ -1,0 +1,79 @@
+{
+  "id": "mal-magic-swapped-02",
+  "category": "malformed",
+  "title": "magic bytes written as 0x4C 0x43, i.e. u16 0x434C (big-endian spelling)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "byte-swapped magic",
+      "offset": 0,
+      "value": 76,
+      "was": "0x43"
+    },
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "byte-swapped magic",
+      "offset": 1,
+      "value": 67,
+      "was": "0x4C"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "notes": "02-1 says multi-byte fields are little-endian and magic is 0x4C43, so a legal frame starts with the bytes 0x43 0x4C ('C','L'). This vector fails if either side spells the magic big-endian. It is the vector that settles the 'CL' vs 0x4C43 wording of 02-1.",
+  "frame": null,
+  "raw_header": "4c430003000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "bad_magic",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "unchecked",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "bad_magic"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "bad_magic"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "bad_magic",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-magic-swapped-02.hex"
+}

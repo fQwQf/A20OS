@@ -1,0 +1,99 @@
+{
+  "id": "state-mcu-oversize-01",
+  "category": "state",
+  "title": "MCU tier: a 300 B message exceeds the 256 B frame limit",
+  "doc_sections": [
+    "02-wire-protocol.md 5",
+    "04-transports.md 4",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 1,
+    "profile_name": "MCU",
+    "state": "UP",
+    "peer_caps": 4,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-5: the MCU tier forbids fragmentation, a message larger than the MTU returns A20_ERR_INVALID_ARGS immediately. 02-5 also says a fragmenter must not build this frame at all.",
+  "precondition": "an MCU tier link that negotiated short_addr 0x0007",
+  "followup": "tx_drops += 1 and the caller gets A20_ERR_INVALID_ARGUMENT(12) (01-abi: A20_ERR_INVALID_ARGS); the frame below is never transmitted -- it exists so the C side can see what the refused frame would have looked like",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 6,
+    "type_name": "CALL",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 5001,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x94DDCBB0",
+    "dst_slot": 1,
+    "seq": 0,
+    "payload_len": 300,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 334,
+    "crc_present": true,
+    "crc_value": "0x991F",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 300,
+    "hex": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "app_offset": 0,
+    "app_len": 300,
+    "app_hex": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 334,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x991F",
+    "crc_computed": "0x991F"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "local",
+      "action": "drop",
+      "reason": "payload_over_mtu",
+      "counters": [
+        "tx_drops"
+      ],
+      "errno": "A20_ERR_INVALID_ARGUMENT",
+      "reply": null,
+      "note": "the frame layer accepts it (it is well formed and the loopback/UDP MTU is larger); the MCU tier refuses to send it"
+    }
+  },
+  "hex_file": "state/state-mcu-oversize-01.hex"
+}

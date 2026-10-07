@@ -1,0 +1,69 @@
+{
+  "id": "mal-crc-flip-header-03",
+  "category": "malformed",
+  "title": "one header bit flipped (ttl): proves the CRC covers the header",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "flip_bit",
+      "doc": "02-1",
+      "why": "header bit flip",
+      "bit": 241,
+      "offset": 30,
+      "was": "0x08",
+      "to": "0x0A"
+    }
+  ],
+  "notes": "02-1 puts the CRC after the payload and says nothing about its extent; this vector pins it as covering the 32-byte header too, otherwise a corrupted ttl/flags would pass silently.",
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000000000008000a01",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "mismatch",
+    "reason": "crc_mismatch",
+    "crc_value": "0x85DB",
+    "crc_computed": "0x5B51"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "crc_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "crc_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-crc-flip-header-03.hex"
+}

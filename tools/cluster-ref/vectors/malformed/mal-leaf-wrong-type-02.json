@@ -1,0 +1,94 @@
+{
+  "id": "mal-leaf-wrong-type-02",
+  "category": "malformed",
+  "title": "SEND received by an MCU leaf",
+  "doc_sections": [
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "leaf_uart",
+    "profile_tier": 1,
+    "profile_name": "MCU",
+    "state": "UP",
+    "peer_caps": 4,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "04-4: on receiving SEND/ACK/NACK/fragment frames -- drop and count, not treated as an error.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 5,
+    "type_name": "SEND",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x94DDCBB0",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 16,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 50,
+    "crc_present": true,
+    "crc_value": "0x9C8F",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 16,
+    "hex": "0180040070696e670280040007000000",
+    "app_offset": 0,
+    "app_len": 16,
+    "app_hex": "0180040070696e670280040007000000",
+    "ack_prefix": null
+  },
+  "diagnostics": {
+    "wire_len": 50,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x9C8F",
+    "crc_computed": "0x9C8F"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "dispatch",
+      "action": "drop",
+      "reason": "unexpected_type_for_state",
+      "counters": [
+        "rx_drops"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-leaf-wrong-type-02.hex"
+}

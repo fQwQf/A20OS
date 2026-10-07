@@ -1,0 +1,51 @@
+{
+  "id": "slip-call-01",
+  "category": "slip",
+  "title": "CALL with 0xC0 and 0xDB inside a TLV value",
+  "doc_sections": [
+    "02-wire-protocol.md 2",
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "slip": {
+    "slip_frames": [
+      "434c000600000000e8030000b0cbdd94b0cbdd9401000000000000001000080101800300646f740002800400c0db00018ec7"
+    ],
+    "slip_notes": [],
+    "slip_stream_len": 54
+  },
+  "frame_hex": "434c000600000000e8030000b0cbdd94b0cbdd9401000000000000001000080101800300646f740002800400c0db00018ec7",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 1,
+      "slip_notes": []
+    }
+  },
+  "hex_file": "slip/slip-call-01.slip.hex"
+}
