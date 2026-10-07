@@ -45,6 +45,8 @@ def read_report(path: Path, lanes: int) -> list[str]:
         if label == "memp" and (sum(row[1] for row in rows) == 0 or
                                  sum(row[2] for row in rows) == 0):
             raise ValueError("memp lane counters did not record allocations and frees")
+        if label == "rx" and sum(row[1] + row[2] for row in rows) == 0:
+            raise ValueError("rx lane counters did not record any processed or dropped packets")
 
     staged = [line for line in lines if line.startswith("rx staged")]
     if len(staged) != 1 or not re.search(r":\s*\d+$", staged[0]):

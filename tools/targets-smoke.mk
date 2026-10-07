@@ -1040,6 +1040,7 @@ smoke-net-lanes:
 	occ_sum=$$(printf '%s\n' "$$lanes_line" | awk '{s=0; for(i=5;i<=NF;i++) s+=$$i; print s+0}'); \
 	sock_n=$$(printf '%s\n' "$$lanes_line" | awk '{for(i=1;i<=NF;i++) if($$i ~ /^sockets=/){sub(/^sockets=/,"",$$i); print $$i+0}}'); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
+	   [ "$$status" -eq 0 ] && \
 	   $(PYTHON) tools/check_net_lane_report.py "$$log" --lanes 4 && \
 	   [ -n "$$lanes_line" ] && \
 	   [ "$$occ_n" -eq 4 ] && \
