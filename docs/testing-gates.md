@@ -1198,3 +1198,7 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 `make smoke-rv64-sched-park-yield` 用单核 QEMU 启动带 `a20.sched_park_yield_selftest=1` 的内核。自检创建一个可运行 helper，在当前任务的 wait token 处于 `PREPARING` 时强制真实切换；helper 确认原任务以 `READY` 留在运行队列、token 序号仍有效。原任务恢复后正常提交 park，由 helper 对该 token 发送 `EVENT` 唤醒，并检查 `finish` 将状态清回 `IDLE`。这覆盖 IRQ 抢占在 wait queue 检查之后、`proc_park_commit()` 之前到来的同一状态交错。
 
 测试失败会 panic，未出现 `RV64_SCHED_PARK_YIELD: PASS` 或 QEMU 超时都视为门禁失败。此测试只用于 RV64 单核调度回归；SMP 行为由对应 SMP 门禁覆盖。
+
+### Native cluster ABI smoke
+
+`make smoke-native-cluster` 通过真实 Native syscall ABI 检查集群入口号、节点 ID 哈希、`set_self` 一次成功和重复调用 `A20_ERR_EXISTS`，以及 LOCAL 导出/按 slot 连接、loopback route 与 link-status。参数与结构版本测试继续验证非法输入在真实处理器中返回对应错误；它不再把 WA1 已落地的 syscall 当作统一 stub。
