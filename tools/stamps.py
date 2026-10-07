@@ -21,6 +21,7 @@ import fnmatch
 import os
 import filecmp
 import shutil
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -188,7 +189,34 @@ def cmd_clean(a) -> int:
             f.unlink()
             n += 1
     for d in a.rm_rf:
-        shutil.rmtree(REPO / d, ignore_errors=True)
+        path = REPO / d
+        if path.is_symlink() and d == ".kernel-build":
+            # Developers may point the build root at a dedicated external
+            # cache. Preserve that link, but only empty it when its immediate
+            # children look like our generated build directories. This keeps
+            # `make clean` from silently retaining stale objects while making
+            # an unexpected symlink target a loud, non-destructive error.
+            target = path.resolve(strict=True)
+            if not target.is_dir() or target == REPO or REPO in target.parents:
+                raise SystemExit(f"error: refusing unsafe .kernel-build target: {target}")
+            allowed = re.compile(
+                r"^(?:aarch64|arm32|armv7m|loongarch64|ppc64le|riscv32|riscv64|x86_64)-.*|smoke$"
+            )
+            children = list(target.iterdir())
+            unexpected = [p.name for p in children if not allowed.fullmatch(p.name)]
+            if unexpected or any(p.is_symlink() or not p.is_dir() for p in children):
+                raise SystemExit(
+                    "error: refusing to clear unexpected .kernel-build contents: "
+                    + ", ".join(unexpected or [p.name for p in children if p.is_symlink() or not p.is_dir()])
+                )
+            for child in children:
+                shutil.rmtree(child)
+        elif path.is_symlink():
+            # rmtree does not remove directory symlinks; unlink explicitly so
+            # other rm-rf callers do not leave stale links behind.
+            path.unlink()
+        else:
+            shutil.rmtree(path, ignore_errors=True)
     for f in a.rm_f:
         (REPO / f).unlink(missing_ok=True)
     print(f"[CLEAN] {n} object file(s) removed")
