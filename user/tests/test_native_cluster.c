@@ -1,14 +1,15 @@
 /*
  * Cluster ABI contract tests (docs/cluster/01-abi.md, stage W0).
  *
- * The kernel cluster data plane does not exist yet, so what is pinned here is
- * the frozen surface rather than the behaviour:
+ * The kernel cluster data plane has landed in WA1, so this test pins the
+ * implemented identity behavior alongside the frozen syscall surface:
  *
  *   abi-nr    every cluster syscall number is the documented value and is
  *             reachable through the dispatch table (a wrong number returns
  *             ENOSYS/NOT_SUPPORTED from the generic unknown-syscall path, not
  *             the cluster refusal)
- *   abi-stub  each of the six currently returns A20_ERR_CLUSTER_UNSUPPORTED
+ *   abi-live  set_self succeeds once and rejects a second identity with
+ *             A20_ERR_EXISTS
  *   abi-args  each rejects the argument shapes the ABI says are illegal, and
  *             does so *before* the refusal, so a malformed caller never sees
  *             the stub's answer
@@ -44,9 +45,6 @@ static void note(const char *msg, uint64_t len)
     if (g_stdout != A20_HANDLE_NULL)
         a20_hdl_write_buf(g_stdout, msg, len, NULL);
 }
-
-/* The stub refusal every unimplemented cluster call must give. */
-#define CLX_UNSUPPORTED (-(a20_status_t)A20_ERR_CLUSTER_UNSUPPORTED)
 
 static int abi_numbers(void)
 {
@@ -88,34 +86,51 @@ static void peer_id(a20_node_id_t *out)
     a20_node_id_set_raw(out, raw);
 }
 
-static int abi_stub_refusals(void)
+static int abi_live_identity(void)
 {
-    a20_node_id_t local;
     a20_node_id_t peer;
-    a20_node_id_local(&local);
+    a20_node_id_t routed;
     peer_id(&peer);
 
-    /* export takes a real endpoint: the null handle is a bad handle, not a
-     * stub refusal, so create a channel first. */
+    a20_status_t r = a20_cluster_set_self(&peer, A20_CLUSTER_CAP_RELIABLE);
+    if (r != 0) return fail("set-self-first");
+    if (a20_cluster_set_self(&peer, A20_CLUSTER_CAP_RELIABLE) !=
+        -(a20_status_t)A20_ERR_EXISTS)
+        return fail("set-self-second");
+
+    /* Exercise the committed local export/name lookup path.  The server
+     * endpoint is owned by this task and is closed on exit; the temporary
+     * caller endpoint is closed here. */
     a20_channel_pair_t pair;
-    a20_status_t r;
-
     if (a20_status_is_err(a20_channel_create(&pair)))
-        return fail("stub-channel-create");
+        return fail("live-channel-create");
+    uint32_t slot = 0;
+    r = a20_cluster_export(pair.endpoints[0], "native-cluster", 0, &slot);
+    if (r < 0 || slot == 0)
+        return fail("live-export");
+    a20_handle_t caller = A20_HANDLE_NULL;
+    r = a20_cluster_connect(NULL, slot, NULL, 0, 0, &caller);
+    if (r < 0 || caller == A20_HANDLE_NULL)
+        return fail("live-connect-local");
+    if (a20_hdl_close(caller) < 0)
+        return fail("live-close-caller");
 
-    r = a20_cluster_set_self(&peer, A20_CLUSTER_CAP_RELIABLE);
-    if (r != CLX_UNSUPPORTED) return fail("stub-set_self");
-    r = a20_cluster_export(pair.endpoints[0], "svc", 0, 0);
-    if (r != CLX_UNSUPPORTED) return fail("stub-export");
-    r = a20_cluster_connect(&peer, 1, "svc", 0, 0, 0);
-    if (r != CLX_UNSUPPORTED) return fail("stub-connect");
-    if (a20_cluster_route(A20_ROUTE_REPLACE, &peer, A20_CLX_TRANSPORT_LOOPBACK,
-                          0, 0, 0) != CLX_UNSUPPORTED)
-        return fail("stub-route");
-    r = a20_cluster_event_subscribe(A20_CLX_EVENT_MASK_ALL, 0);
-    if (r != CLX_UNSUPPORTED) return fail("stub-events");
-    if (a20_cluster_link_status(&local, 0) != CLX_UNSUPPORTED)
-        return fail("stub-link");
+    /* Route-table lookup and loopback link status are observable through the
+     * public ABI; the synthetic next-hop is a 32-bit loopback node number. */
+    peer_id(&routed);
+    routed.bytes[0]++;
+    uint32_t vnode = 7;
+    if (a20_cluster_route(A20_ROUTE_REPLACE, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, &vnode, sizeof(vnode),
+                          0) != 0)
+        return fail("live-route-replace");
+    a20_cluster_link_status_args_t link;
+    if (a20_cluster_link_status(&routed, &link) != 0 ||
+        link.state != A20_CLX_LINK_UP)
+        return fail("live-loopback-status");
+    if (a20_cluster_route(A20_ROUTE_DEL, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, NULL, 0, 0) != 0)
+        return fail("live-route-delete");
 
     return 0;
 }
@@ -127,9 +142,13 @@ static int abi_arg_rejection(void)
 {
     a20_node_id_t id;
     a20_node_id_local(&id);
+    a20_channel_pair_t pair;
+    if (a20_status_is_err(a20_channel_create(&pair)))
+        return fail("args-channel-create");
 
     /* set_self with a reserved node id (all-zero LOCAL, all-0xff BROADCAST). */
-    if (a20_cluster_set_self(&id, A20_CLUSTER_CAP_RELIABLE) != CLX_UNSUPPORTED)
+    if (a20_cluster_set_self(&id, A20_CLUSTER_CAP_RELIABLE) !=
+        -A20_ERR_INVALID_ARGUMENT)
         return fail("args-set_self-local");
     a20_node_id_broadcast(&id);
     if (a20_cluster_set_self(&id, 0) != -A20_ERR_INVALID_ARGUMENT)
@@ -141,12 +160,12 @@ static int abi_arg_rejection(void)
     char longname[A20_CLUSTER_SERVICE_NAME_MAX + 2];
     for (unsigned i = 0; i < sizeof(longname); i++)
         longname[i] = 'x';
-    if (a20_cluster_export(A20_HANDLE_NULL, longname, 0, 0) !=
+    if (a20_cluster_export(pair.endpoints[0], longname, 0, 0) !=
         -A20_ERR_INVALID_ARGUMENT)
         return fail("args-export-name");
 
     /* export with an unknown flag bit. */
-    if (a20_cluster_export(A20_HANDLE_NULL, "svc", 0x80u, 0) !=
+    if (a20_cluster_export(pair.endpoints[0], "svc", 0x80u, 0) !=
         -A20_ERR_INVALID_ARGUMENT)
         return fail("args-export-flags");
 
@@ -227,8 +246,8 @@ int main(int argc, char **argv, char **envp)
     if (abi_node_hash() != 0) return 1;
     note("abi-node ok\n", 11);
 
-    if (abi_stub_refusals() != 0) return 1;
-    note("abi-stub ok\n", 11);
+    if (abi_live_identity() != 0) return 1;
+    note("abi-live ok\n", 11);
 
     if (abi_arg_rejection() != 0) return 1;
     note("abi-args ok\n", 11);
