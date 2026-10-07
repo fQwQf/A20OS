@@ -1766,3 +1766,14 @@ lanes: count=4 sockets=8 occupancy: 3 2 2 1
 
 吞吐数字仍然要等真机（VisionFive 2 / LS2K1000 的 GMAC 已在树里）或给测试链路注入
 RTT —— 这条没有变。
+
+### PCB sanity 门禁的优化级别
+
+`OPT` 是完整替换值，不是追加到默认 `-O3` 的额外宏列表。因此启用 PCB 列表检查时，
+必须显式保留 `-O3`：`OPT="-O3 -DCONFIG_NET_PCB_SANE=1"`。此前仅传
+`OPT="-DCONFIG_NET_PCB_SANE=1"` 的 10 月 8 日尝试实际以 GCC 默认 `-O0` 构建；
+`tcp_pcbs_sane()` 又在每个 TCP 输入包路径扫描全部 PCB 列表，慢结果无法区分列表
+故障与未优化诊断构建的运行成本。`smoke-net-lanes` 和 `smoke-net-tcp-lanes` 现都
+显式保留 `-O3`，后续复验才可用于判断优化构建的运行行为。当前目录名不编码 `OPT`，
+但 `.build-flags` stamp 会追踪完整编译 flags 并触发对象更新；运行门禁时仍须从同一
+配置派生 kernel 与镜像目录。
