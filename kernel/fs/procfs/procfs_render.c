@@ -1135,7 +1135,10 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         task_t *t = proc_find_get(pid);
         if (!t)
             break;
-        mm_struct_t *mm = t->mm;
+        /* exec swaps task->mm and exit drops its task-owned reference.  Pin
+         * the address space under park_lock before taking mm->lock so this
+         * proc read cannot follow a stale task pointer across either race. */
+        mm_struct_t *mm = proc_task_get_mm(t);
         if (mm) {
             uint64_t flags = spin_lock_irqsave(&mm->lock);
             uint32_t n = mm->auxv_n;
@@ -1154,8 +1157,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                     memcpy(buf + (size_t)i * pair_size, pair, pair_size);
                 }
             spin_unlock_irqrestore(&mm->lock, flags);
+            mm_destroy(mm);
             proc_put(t);
-            buf[len] = '\0';
             return (int)len;
         }
         proc_put(t);
