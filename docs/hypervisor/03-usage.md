@@ -53,7 +53,7 @@
 | `-cpu rv64,h=true` | 1 | `HYPVM: PASS marker_seen=1 console_bytes=163 exit=2(fault) mem=128 MiB` |
 | `-cpu rv64`（即默认） | 1 | **同样 PASS**，输出逐字节相同 |
 | 完全不写 `-cpu` | 1 | 同样 PASS |
-| `-cpu rv64,h=false` | **仍然是 1** | **宿主 KERNEL PANIC**（不是 `-EOPNOTSUPP`） |
+| `-cpu rv64,h=false` | 0（由 FDT ISA 声明拒绝） | `HYP_SELFTEST: SKIP (no virtualization extension)`；`smoke-hyp-no-h` 门禁覆盖 |
 
 > 这张表是**一次旧测量**，`console_bytes=163` / `exit=2(fault)` 是补 RVC 解码**之前**
 > 的那次，所以它没有 `rx_bytes=` 字段（契约 v3 之后才加的），四行"输出逐字节相同"
@@ -65,11 +65,13 @@
 1. **这台 QEMU 的默认 riscv64 CPU 已经带 H**，所以门禁里那个
    `-cpu rv64,h=true` 在 QEMU 10.0.13 上**不是承重件**——去掉它门禁照样过。
    本片是拿三次真跑得出的，不是读源码推的。
-2. **`-cpu rv64,h=false` 不会得到 `-EOPNOTSUPP`。** `hyp_probe()`
-   （`kernel/arch/riscv64/hyp/hyp_arch.c:24-35`）只做一件事：读一次 `hstatus`
-   看会不会陷。QEMU 在 `h=false` 下这个 CSR 仍然可读，于是 `hyp_supported()`
-   返回 1，`vm_create` 成功，工具一路走到 `HYPVM: running`，然后宿主死在
-   `hyp_arch_vcpu_exit` 里：
+2. **CSR 可读性不能证明 H 扩展存在。** 旧版 `hyp_probe()` 只读一次
+   `hstatus`；QEMU 在 `h=false` 下这个 CSR 仍然可读，旧实现因此误报支持，随后
+   `hyp_arch_vcpu_exit` 执行 H 指令时宿主 panic。现在探测先检查固件提供的 FDT
+   ISA 字符串：缺少 H 时关闭虚拟化，并由 `smoke-hyp-no-h` 回归门禁验证；带 H
+   的启动仍由 `smoke-hyp-selftest` 和 vCPU 门禁覆盖。该检查依赖固件如实描述 CPU：
+   若 FDT 错误地声明 H 存在，之后执行 H CSR/指令仍可能触发宿主异常，因为当前
+   架构没有可恢复的 illegal-instruction 探测机制。
 
    ```
    [ERR] Kernel Illegal Instruction at sepc=0xffffffc0804409f4
@@ -80,9 +82,9 @@
      [1] hyp_arch_vcpu_exit+0x4e0
    ```
 
-   也就是说：**"CPU 没有 H" 这条故障在 QEMU 上表现为宿主 panic，不是干净的
-   `EOPNOTSUPP`。** 探测手段（读一个在关掉 H 时依然存在的 CSR）分辨不了这两种
-   情况——这是探测方法本身的局限，见 §5.1 对应行。
+   这段 panic 是修复前的证据。当前实现通过 `riscv64,isa` 的紧凑基础扩展串或
+   `riscv,isa-extensions` 字符串列表判断 H；H=false 时应安全跳过。该判断仍以
+   固件的 FDT 内容为准。
 
 **那还要不要写 `-cpu rv64,h=true`？要写。** 它把意图写进命令行，换一台默认 CPU
 不带 H 的 QEMU 时不会静默退化成"什么都没测"。只是别把"去掉它门禁会红"当成
@@ -1129,7 +1131,7 @@ tick。反过来说也成立：一条"guest 的定时器中断不来"的判断�
 | 症状 | 原因 | 怎么办 |
 | --- | --- | --- |
 | `HYPVM: FAIL vm_create (rc=-95 errno=95)`，**退出码 4** | 内核的 `hyp_supported()` 返回 0，桥在 `sys_a20_bridge.c:285,375,404` 三处各挡一次，返回 `-EOPNOTSUPP`（95，`kernel/include/core/errno.h:43`）。`fail_call()` 会在后面追加一句说明（`hypvm.c:108-115`） | **本片没有复现出这一类**（见 §1.1：QEMU 10.0.13 的默认 `rv64` 本来就带 H）。真遇到时按"这台 QEMU 的 CPU 不带 H"处理，加 `-cpu rv64,h=true` |
-| `[PANIC] task: … name=hypvm` + `KERNEL Illegal Instruction`，backtrace 里有 `hyp_arch_vcpu_exit` | **这才是"CPU 不带 H"在 QEMU 上的样子**，不是 `EOPNOTSUPP`。`hyp_probe()`（`hyp_arch.c:24-35`）只读一次 `hstatus` 看会不会陷，而 QEMU 在 `h=false` 下这个 CSR 照样可读，于是探测放行、运行走到进 guest 那一步才炸。**已验证**：`-cpu rv64,h=false` 跑 `hypvm` 得到这个 panic（输出见 §1.1） | 加 `-cpu rv64,h=true`。这是探测方法的局限，不是新 bug |
+| `[PANIC] task: … name=hypvm` + `KERNEL Illegal Instruction`，backtrace 里有 `hyp_arch_vcpu_exit` | 修复前，`hyp_probe()` 只读 `hstatus`，而 QEMU 在 `h=false` 时仍允许读取该 CSR，因此错误放行。现在先检查 FDT ISA 声明；若仍出现，先核对固件是否错误声明 H。固件误报仍可能令后续 H 指令陷入不可恢复异常 | 使用如实描述 CPU 的固件；QEMU H=false 回归由 `smoke-hyp-no-h` 验证，H=true 路径由 `smoke-hyp-selftest` 验证 |
 | `hypvm` 卡在 `HYPVM: running` 之后再无输出，连 `[ERR] hyp: trap #N` 都没有 | 多半是 `-g` 挪走了 RAM 窗口而镜像仍在它的链接地址上，见 §2.2 的提示框。**已验证**（`-g 0x90000000 -m 64`，200 s 超时前零输出） | 去掉 `-g`，用默认值 |
 | `HYPVM: FAIL cannot read /bin/boot/guest-kernel.elf (errno=2)`，退出码 3 | 镜像里没有这个文件 | 只有 riscv64 会拷（`tools/targets-images.mk:8-10`）；非 riscv64 镜像本来就没有。用 `-k` 指别的路径 |
 | `HYPVM: FAIL guest ELF rejected (entry=0x…)`，退出码 5 | 文件不是 ELF64/LSB/`ET_EXEC`/`EM_RISCV`，或 `e_phnum` 为 0 或 > 16，或某段的 `p_offset + p_filesz` 越界，或某段 LMA 未按页对齐却要与前一段共享首页（检查项见 `hyp_guest.c:163-215`，`hyp_guest_load_elf()` 是同一份逻辑） | 确认 `-k` 指的是 riscv64 的 `kernel.elf` / `kernel-nosyms.elf`，不是别的架构的产物 |

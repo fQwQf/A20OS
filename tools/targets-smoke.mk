@@ -308,6 +308,10 @@ smoke-mm-seg-index-overflow:
 smoke-hyp-selftest:
 	$(PYTHON) tools/smoke.py smoke-hyp-selftest
 
+# The FDT must reject a QEMU CPU with H disabled before any H CSR/opcode runs.
+smoke-hyp-no-h:
+	$(PYTHON) tools/smoke.py smoke-hyp-no-h
+
 # End-to-end vcpu slice gate: a user program creates a VM, loads a
 # hand-encoded guest into it, runs it, and the guest must exit through the SBI
 # shutdown call with its console output visible.  Needs -cpu rv64,h=true, which
