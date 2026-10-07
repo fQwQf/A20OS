@@ -91,7 +91,7 @@ host-tests: $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
 /tmp/a20-host-%: tools/tests/%.c
-	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include $< -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c

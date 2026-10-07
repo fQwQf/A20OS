@@ -102,6 +102,20 @@ audio_device = "hda"         # hda | virtio
 [net]
 # 宿主端口转发。不写这一段 = 完全不转发（默认值，见下）
 hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]
+# 网卡 MAC。不写 = QEMU 内置默认 52:54:00:12:34:56——单实例没问题，但两个
+# 实例共处一条 L2 段（如集群双实例演示）会 ARP 撞车，必须各自显式声明。
+mac = "52:54:00:12:34:01"
+# 整段 QEMU -netdev 规格，替换默认的 SLIRP user 后端。必须带 id=net（默认
+# 网卡固定以 -device ...,netdev=net 挂接）。与 hostfwd 互斥——hostfwd 只
+# 存在于被替换掉的 user 后端上，组合会被 a20 check 拒绝。
+# 不写 = -netdev user,id=net[,hostfwd...]，全部既有实例走这条路。
+backend = "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"
+# guest 侧静态 IPv4，经 -append 以 a20.dhcp=0 / a20.ip / a20.netmask /
+# a20.gateway 注入内核（kernel/net/net_config.c 解析）。设置 guest_ip 后
+# Makefile 自动关 DHCP，netmask/gateway 可选；只在有 QEMU -append 通路的
+# 架构上有意义。用法见 docs/cluster/02-udp-demo.md。
+guest_ip = "10.0.3.2"
+guest_netmask = "255.255.255.0"
 
 [rootfs]
 size_mb = 128                # FAT32 根盘大小
@@ -169,6 +183,8 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `machine.smp` / `memory` / `allow_unverified_smp` | `NR_CPUS` / `QEMU_MEMORY` / `ALLOW_UNVERIFIED_SMP` |
 | `gui.display` / `audio_driver` / `audio_device` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
+| `net.mac` / `net.backend` | `NET_MAC`（设备 `mac=`）/ `NET_BACKEND`（整段 `-netdev` 规格） |
+| `net.guest_ip` / `guest_netmask` / `guest_gateway` | `NET_GUEST_IP` / `NET_GUEST_NETMASK` / `NET_GUEST_GATEWAY`（→ `-append` 的 `a20.*` bootargs） |
 | `rootfs.size_mb` / `ext4_size_mb` | `FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` |
 | `rootfs.world` / `world_size_mb` / `alpine` | `PKG_WORLD` / `PKG_SIZE_MB` / `PKG_ALPINE` |
 | `rootfs.drivers` | `DRIVER_SELECTION`（自动补 `.a20drv` 后缀） |
@@ -449,6 +465,8 @@ tools/a20 run qemu-riscv64         # 启动前打印本实例的端口
 ```
 
 `a20 ports` 会把跨实例的端口冲突作为提示列出（不判失败：如果你从不让它们同时跑，共用一个端口是完全合理的选择），并给出改用端口 0 的建议。
+
+`[net].backend` 声明的端口同样纳入预检：`listen=addr:port` 按 TCP、`localaddr=addr:port` 按 UDP 各自实测 bind 探测（协议探错会把"UDP 端口与某个 TCP 监听者同号"误判为冲突，永远等下去）；`connect=` 是客户端，不占宿主端口。
 
 ## 宿主资源预检
 

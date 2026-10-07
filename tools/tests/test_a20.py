@@ -229,6 +229,35 @@ class TestDeriveMakeVars(unittest.TestCase):
         self.assertEqual(_qemu_hostfwd("tcp::2222-192.168.7.9:22"),
                          "hostfwd=tcp::2222-192.168.7.9:22=on")
 
+    def test_cluster_backend_fields_derive_to_net_variables(self) -> None:
+        """[net].mac/backend/guest_* -> the variables the Makefile net block reads.
+
+        The cluster demo (docs/cluster/02-udp-demo.md) hangs both nodes' NICs
+        off QEMU's socket UDP tunnel; these are the variables that wire it.
+        """
+        got = derived(self.tmp, """
+            arch = "riscv64"
+            [net]
+            mac = "52:54:00:12:34:01"
+            backend = "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"
+            guest_ip = "10.0.3.2"
+            guest_netmask = "255.255.255.0"
+            guest_gateway = "10.0.3.1"
+        """)
+        self.assertEqual(got["NET_MAC"], "52:54:00:12:34:01")
+        self.assertEqual(got["NET_BACKEND"],
+                         "socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121")
+        self.assertEqual(got["NET_GUEST_IP"], "10.0.3.2")
+        self.assertEqual(got["NET_GUEST_NETMASK"], "255.255.255.0")
+        self.assertEqual(got["NET_GUEST_GATEWAY"], "10.0.3.1")
+
+    def test_unset_net_backend_fields_emit_nothing(self) -> None:
+        """Absent [net] backend fields must fall through to the Makefile default."""
+        got = derived(self.tmp, 'arch = "riscv64"\n')
+        for absent in ("NET_MAC", "NET_BACKEND", "NET_GUEST_IP",
+                       "NET_GUEST_NETMASK", "NET_GUEST_GATEWAY"):
+            self.assertNotIn(absent, got)
+
     def test_hostfwd_explicit_key_passes_through(self) -> None:
         from a20_instance import _qemu_hostfwd
         rule = "hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081"
@@ -380,6 +409,49 @@ class TestValidateInstance(unittest.TestCase):
         self.assertEqual(self.check('arch = "riscv64"\nboard = "visionfive2"\n'
                                     'abi = "both"\n[package]\nkind = "fit-sdcard"\n'
                                     'variant = "sdcard"\n'), [])
+
+    # ---- [net] backend fields (cluster UDP demo, docs/cluster/02-udp-demo.md)
+
+    def test_cluster_instance_net_fields_are_valid(self) -> None:
+        self.assertEqual(self.check('arch = "riscv64"\n[net]\n'
+                                    'mac = "52:54:00:12:34:01"\n'
+                                    'backend = "socket,id=net,udp=127.0.0.1:44122,'
+                                    'localaddr=127.0.0.1:44121"\n'
+                                    'guest_ip = "10.0.3.2"\n'
+                                    'guest_netmask = "255.255.255.0"\n'), [])
+
+    def test_backend_must_carry_id_net(self) -> None:
+        """The default NIC attaches as -device ...,netdev=net; another id
+        would leave it pointing at nothing and fail long after the build."""
+        errors = self.check('arch = "riscv64"\n[net]\n'
+                            'backend = "socket,id=clx,listen=127.0.0.1:44121"\n')
+        self.assertTrue(any("id=net" in e for e in errors), errors)
+
+    def test_backend_rejects_whitespace_and_hostfwd(self) -> None:
+        errors = self.check('arch = "riscv64"\n[net]\n'
+                            'backend = "socket, id=net"\n')
+        self.assertTrue(any("net.backend" in e for e in errors), errors)
+        errors = self.check('arch = "riscv64"\n[net]\n'
+                            'backend = "socket,id=net,listen=127.0.0.1:44121"\n'
+                            'hostfwd = ["tcp::5555-:5555"]\n')
+        self.assertTrue(any("cannot combine" in e for e in errors), errors)
+
+    def test_mac_must_be_unicast_and_wellformed(self) -> None:
+        errors = self.check('arch = "riscv64"\n[net]\nmac = "52:54:00:12:34"\n')
+        self.assertTrue(any("net.mac" in e for e in errors), errors)
+        errors = self.check('arch = "riscv64"\n[net]\nmac = "53:54:00:12:34:01"\n')
+        self.assertTrue(any("multicast" in e for e in errors), errors)
+
+    def test_guest_fields_need_each_other_and_bringup(self) -> None:
+        errors = self.check('arch = "riscv64"\n[net]\n'
+                            'guest_netmask = "255.255.255.0"\n')
+        self.assertTrue(any("guest_netmask" in e for e in errors), errors)
+        errors = self.check('arch = "riscv64"\n[net]\n'
+                            'guest_ip = "10.0.3.999"\n')
+        self.assertTrue(any("guest_ip" in e for e in errors), errors)
+        errors = self.check('arch = "riscv64"\n[kernel]\nbringup = true\n'
+                            '[net]\nguest_ip = "10.0.3.2"\n')
+        self.assertTrue(any("bringup" in e for e in errors), errors)
 
 
 class TestFlashBackendSafety(unittest.TestCase):
@@ -1472,9 +1544,10 @@ class TestSmokeProgressAndLifecycle(unittest.TestCase):
         from a20_resource import HostResources, Policy, Requirement, evaluate
         have = HostResources(
             mem_available_mb=256, cpu_count=1, load1=1.0,
-            disk_free_mb=10, running_guests=4, busy_ports=(("127.0.0.1", 2222),))
+            disk_free_mb=10, running_guests=4,
+            busy_ports=(("127.0.0.1", 2222, "tcp"),))
         v = evaluate(Requirement(mem_mb=4096, cpus=8, disk_mb=8192, guests=1,
-                                 ports=(("127.0.0.1", 2222),)),
+                                 ports=(("127.0.0.1", 2222, "tcp"),)),
                      have, Policy())
         self.assertFalse(v.ok)
         self.assertEqual(len(v.remedies), len(v.deficits),
@@ -2178,7 +2251,7 @@ class TestHostPortGate(unittest.TestCase):
     def test_parses_fixed_ports(self) -> None:
         from a20_resource import parse_hostfwd_ports
         self.assertEqual(parse_hostfwd_ports(["tcp::5555-:5555"]),
-                         (("0.0.0.0", 5555),))
+                         (("0.0.0.0", 5555, "tcp"),))
 
     def test_ephemeral_port_is_not_gated(self) -> None:
         """Port 0 is allocated by the OS at bind time, so nothing is contended
@@ -2189,7 +2262,7 @@ class TestHostPortGate(unittest.TestCase):
     def test_bound_address_is_kept(self) -> None:
         from a20_resource import parse_hostfwd_ports
         self.assertEqual(parse_hostfwd_ports(["tcp:127.0.0.1:8080-:80"]),
-                         (("127.0.0.1", 8080),))
+                         (("127.0.0.1", 8080, "tcp"),))
 
     def test_malformed_entries_are_ignored_not_fatal(self) -> None:
         from a20_resource import parse_hostfwd_ports
@@ -2198,7 +2271,37 @@ class TestHostPortGate(unittest.TestCase):
     def test_tcp_and_udp_of_one_instance_yield_one_port(self) -> None:
         from a20_resource import parse_hostfwd_ports
         self.assertEqual(parse_hostfwd_ports(["tcp::5555-:5555", "udp::5555-:5555"]),
-                         (("0.0.0.0", 5555), ("0.0.0.0", 5555)))
+                         (("0.0.0.0", 5555, "tcp"), ("0.0.0.0", 5555, "udp")))
+
+    def test_backend_listen_claims_a_tcp_port(self) -> None:
+        from a20_resource import parse_netdev_ports
+        self.assertEqual(
+            parse_netdev_ports("socket,id=net,listen=127.0.0.1:44121"),
+            (("127.0.0.1", 44121, "tcp"),))
+
+    def test_backend_localaddr_claims_a_udp_port(self) -> None:
+        """The cluster demo's UDP tunnel: each side binds its own port."""
+        from a20_resource import parse_netdev_ports
+        self.assertEqual(
+            parse_netdev_ports("socket,id=net,udp=127.0.0.1:44122,localaddr=127.0.0.1:44121"),
+            (("127.0.0.1", 44121, "udp"),))
+
+    def test_backend_connect_claims_nothing(self) -> None:
+        """A client dials out; it binds no fixed port for the gate to wait on."""
+        from a20_resource import parse_netdev_ports
+        self.assertEqual(
+            parse_netdev_ports("socket,id=net,connect=127.0.0.1:44121"), ())
+
+    def test_instance_net_ports_merges_hostfwd_and_backend(self) -> None:
+        from a20_resource import instance_net_ports
+        inst = load(self.tmp, """
+            arch = "riscv64"
+            [net]
+            hostfwd = ["tcp::5555-:5555"]
+            backend = "socket,id=net,localaddr=127.0.0.1:44121"
+        """)
+        self.assertEqual(instance_net_ports(inst),
+                         (("0.0.0.0", 5555, "tcp"), ("127.0.0.1", 44121, "udp")))
 
     def test_busy_ports_detects_a_held_port(self) -> None:
         import socket as sk
@@ -2208,7 +2311,23 @@ class TestHostPortGate(unittest.TestCase):
         held.listen(1)
         port = held.getsockname()[1]
         try:
-            self.assertIn(("0.0.0.0", port), busy_ports([("0.0.0.0", port)]))
+            self.assertIn(("0.0.0.0", port, "tcp"),
+                          busy_ports([("0.0.0.0", port, "tcp")]))
+        finally:
+            held.close()
+
+    def test_busy_ports_probes_the_declared_protocol(self) -> None:
+        """A UDP claim must be probed over UDP: a TCP listener on the same
+        number does not block a UDP tunnel, and probing TCP for it would gate
+        on a conflict that does not exist for the guest."""
+        import socket as sk
+        from a20_resource import busy_ports
+        held = sk.socket()
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        try:
+            self.assertEqual(busy_ports([("0.0.0.0", port, "udp")]), ())
         finally:
             held.close()
 
@@ -2219,12 +2338,12 @@ class TestHostPortGate(unittest.TestCase):
         probe.bind(("0.0.0.0", 0))
         port = probe.getsockname()[1]
         probe.close()
-        self.assertEqual(busy_ports([("0.0.0.0", port)]), ())
+        self.assertEqual(busy_ports([("0.0.0.0", port, "tcp")]), ())
 
     def test_requirement_carries_the_declared_ports(self) -> None:
         from a20_resource import Policy, requirement_for
         got = requirement_for(self.inst('["tcp::5555-:5555"]'), Policy())
-        self.assertEqual(got.ports, (("0.0.0.0", 5555),))
+        self.assertEqual(got.ports, (("0.0.0.0", 5555, "tcp"),))
 
     def test_instance_without_hostfwd_claims_no_port(self) -> None:
         from a20_resource import Policy, requirement_for
@@ -2232,10 +2351,10 @@ class TestHostPortGate(unittest.TestCase):
 
     def test_busy_port_is_a_deficit(self) -> None:
         from a20_resource import evaluate
-        need = Requirement(mem_mb=1, cpus=1, disk_mb=1, ports=(("0.0.0.0", 5555),))
+        need = Requirement(mem_mb=1, cpus=1, disk_mb=1, ports=(("0.0.0.0", 5555, "tcp"),))
         have = HostResources(mem_available_mb=99999, cpu_count=64, load1=0.0,
                              disk_free_mb=99999, running_guests=0,
-                             busy_ports=(("0.0.0.0", 5555),))
+                             busy_ports=(("0.0.0.0", 5555, "tcp"),))
         v = evaluate(need, have, Policy())
         self.assertFalse(v.ok)
         self.assertIn("5555", v.reason())

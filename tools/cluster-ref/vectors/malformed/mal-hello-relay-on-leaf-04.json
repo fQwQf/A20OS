@@ -1,0 +1,114 @@
+{
+  "id": "mal-hello-relay-on-leaf-04",
+  "category": "malformed",
+  "title": "HELLO from profile_tier=1 (MCU) that sets CAP_RELAY",
+  "doc_sections": [
+    "02-wire-protocol.md 6",
+    "01-abi.md capability bits",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp_hello",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "HELLO_SENT",
+    "peer_caps": 0,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "02-6 explicitly: caps must agree with the tier, a leaf must not set RELAY.",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 1,
+    "type_name": "HELLO",
+    "flags": "0x0000",
+    "flags_set": {
+      "RELIABLE": false,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 0,
+    "src_hash": "0x94DDCBB0",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 0,
+    "seq": 0,
+    "payload_len": 32,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 66,
+    "crc_present": true,
+    "crc_value": "0x4F63",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 32,
+    "hex": "deadbeef00000000000000000000000100000105ffff0200feedfacec0dbdcdd",
+    "app_offset": 0,
+    "app_len": 32,
+    "app_hex": "deadbeef00000000000000000000000100000105ffff0200feedfacec0dbdcdd",
+    "ack_prefix": null,
+    "hello": {
+      "node_id": "deadbeef000000000000000000000001",
+      "node_id_hash": "0x94DDCBB0",
+      "proto_min": 0,
+      "proto_max": 0,
+      "profile_tier": 1,
+      "profile_name": "MCU",
+      "caps": 5,
+      "cap_names": [
+        "RELAY",
+        "LEAF"
+      ],
+      "short_addr": 65535,
+      "short_addr_state": "unassigned",
+      "link_addr_len": 2,
+      "reserved": 0,
+      "nonce": "feedfacec0dbdcdd"
+    }
+  },
+  "diagnostics": {
+    "wire_len": 66,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0x4F63",
+    "crc_computed": "0x4F63"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "hello",
+      "action": "drop",
+      "reason": "hello_relay_on_leaf",
+      "counters": [
+        "hello_rejects"
+      ],
+      "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+      "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+    }
+  },
+  "hex_file": "malformed/mal-hello-relay-on-leaf-04.hex"
+}
