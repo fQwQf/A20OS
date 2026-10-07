@@ -120,6 +120,10 @@ RAMFS_USER ?= 0
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
+# BUILD_VARIANT is expanded while QEMU_FLAGS is assembled below.  Its
+# preemption default must exist before the QEMU image paths are captured, or
+# `-kernel` and `-drive` can point at different build directories.
+CONFIG_KERNEL_PREEMPT ?= 1
 # Network lanes. 1 keeps every lane index folded to 0, which is the
 # embedded shape and byte-for-byte the pre-lane behaviour. Raise it
 # only together with stage D of docs/net/net-lanes.md; stages A-C
@@ -1048,7 +1052,6 @@ endif
 # 内核抢占（CONFIG_KERNEL_PREEMPT）：hosted 架构默认开，MCU profile 保持协作式。
 # armv7m 用 PendSV 建模切换点，preempt 计数/tick 驱动的内核抢占模型与之不兼容；
 # 该 profile 的切换点必须由 PendSV 触发，不能由 IRQ 尾声触发。
-CONFIG_KERNEL_PREEMPT ?= 1
 ifeq ($(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)),)
 ifeq ($(filter 1,$(CONFIG_KERNEL_PREEMPT)),1)
 CFLAGS += -DCONFIG_KERNEL_PREEMPT

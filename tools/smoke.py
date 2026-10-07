@@ -129,6 +129,56 @@ def run_build(case: dict) -> None:
         raise SystemExit(f"build failed: make {' '.join(b['vars'])} {b['target']}")
 
 
+def resolve_build_dir(case: dict) -> str:
+    """Ask the Makefile for this case's output directory without building it."""
+    build = case.get("build")
+    if not build:
+        raise SystemExit(f"{case.get('name', 'case')}: build paths need a build section")
+    r = sh(["make", "--no-print-directory", *build["vars"], "print-build-dir"],
+           capture_output=True, text=True)
+    if r.returncode != 0:
+        detail = r.stderr.strip() or r.stdout.strip()
+        raise SystemExit(f"{case.get('name', 'case')}: could not resolve build directory"
+                         + (f"\n{detail}" if detail else ""))
+    path = r.stdout.strip()
+    if not path or "\n" in path:
+        raise SystemExit(f"{case.get('name', 'case')}: invalid print-build-dir output")
+    return path
+
+
+def resolve_build_paths(case: dict, build_dir: str) -> dict:
+    """Rebase the QEMU kernel and its sibling images onto Make's build dir.
+
+    Some cases intentionally attach an auxiliary image from another build.
+    Replacing only the directory that contains this case's `-kernel` preserves
+    those cross-build image paths while keeping the kernel and sibling images
+    in lockstep with options such as preemption, SMP, and embedded deployment.
+    """
+    resolved = dict(case)
+    argv = list(case.get("argv", []))
+    old_dir = None
+    try:
+        kernel = argv[argv.index("-kernel") + 1]
+    except (ValueError, IndexError):
+        kernel = None
+    if kernel and kernel.startswith(".kernel-build/"):
+        old_dir = str(Path(kernel).parent)
+
+    out = []
+    for arg in argv:
+        arg = arg.replace("@BUILD_DIR@", build_dir)
+        if old_dir:
+            arg = arg.replace(old_dir + "/", build_dir.rstrip("/") + "/")
+        out.append(arg)
+    resolved["argv"] = out
+    return resolved
+
+
+def resolve_case_build_paths(case: dict) -> dict:
+    """Resolve a case's build-relative paths using its own make variables."""
+    return resolve_build_paths(case, resolve_build_dir(case))
+
+
 def qemu_argv(case: dict) -> list[str]:
     """The full QEMU command line, as the make recipe invoked it."""
     argv = [sys.executable, TIMEOUT_HELPER]
@@ -613,18 +663,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.case not in CASES:
         print(f"unknown case {a.case!r}; try --list", file=sys.stderr)
         return 2
-    case = dict(CASES[a.case])
-    if a.case == "smoke-driver-lifecycle":
-        case["argv"] = list(case["argv"])
-        build_vars = case["build"]["vars"]
-        build_dir = sh(["make", "--no-print-directory", *build_vars,
-                        "print-build-dir"],
-                       capture_output=True, text=True)
-        if build_dir.returncode != 0:
-            raise SystemExit("could not resolve driver lifecycle build dir")
-        kernel_arg = case["argv"].index("-kernel") + 1
-        case["argv"][kernel_arg] = \
-            f"{build_dir.stdout.strip()}/kernel.elf"
+    case = resolve_case_build_paths(dict(CASES[a.case]))
     case.setdefault("name", a.case)
     if a.print_argv:
         print(" ".join(qemu_argv(case)))
