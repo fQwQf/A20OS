@@ -116,6 +116,9 @@ def main():
     ap.add_argument("--settle", type=float, default=0.05,
                     help="pause after a command's output before the next line")
     ap.add_argument("--timeout", type=float, default=900.0)
+    ap.add_argument("--allow-missing", action="store_true",
+                    help="report lines that never returned without failing "
+                         "the run (for --blast amplifier runs only)")
     ap.add_argument("--log", default=None)
     ap.add_argument("--qemu-arg", action="append", default=[])
     args = ap.parse_args()
@@ -125,6 +128,13 @@ def main():
         print(f"serial_fidelity: no kernel.elf under {kernel_dir}",
               file=sys.stderr)
         return 2
+
+    # One wall-clock budget for the whole run (boot wait included).  wait_for
+    # clamps its per-line wait to it, so a guest that hangs at line 3 stops the
+    # run there instead of burning the full per-line timeout on every one of
+    # the remaining lines.  On expiry the loop reports the lines that never
+    # returned and fails -- a hung run must never look like a passing one.
+    deadline = time.monotonic() + args.timeout
 
     log_file = None
     if args.log:
@@ -162,8 +172,11 @@ def main():
                     log_file.flush()
 
     def wait_for(needle, budget, start_offset):
-        """Wait until `needle` appears at/after start_offset; return its index."""
-        stop = time.monotonic() + budget
+        """Wait until `needle` appears at/after start_offset; return its index.
+
+        The wait never extends past the run-wide deadline, so one hung line
+        cannot be followed by N-1 more full waits."""
+        stop = min(time.monotonic() + budget, deadline)
         while True:
             idx = buf.find(needle, start_offset)
             if idx >= 0:
@@ -204,7 +217,7 @@ def main():
                 process.stdin.write(chunk)
                 process.stdin.flush()
                 pump(0.05)
-            tail = time.monotonic() + 180.0
+            tail = min(time.monotonic() + 180.0, deadline)
             while time.monotonic() < tail:
                 if buf.count(b"FID") >= args.count:
                     break
@@ -306,7 +319,18 @@ def main():
     if len(corrupt) > 20:
         print(f"serial_fidelity: ... {len(corrupt) - 20} more corrupt lines")
 
-    return 0 if corrupted == 0 else 1
+    # A line that never came back is the same measurement hazard as a
+    # corrupted one -- it is a command that did not run -- so it fails the run
+    # too.  --allow-missing exists only for the --blast amplifier runs, where
+    # the host deliberately outruns the UART and the question being answered
+    # is "how much survives", not "did everything survive".
+    if missing > 0:
+        print(f"serial_fidelity: {missing} lines never returned"
+              + (" (--allow-missing: reported, not failed)"
+                 if args.allow_missing else ""))
+    if corrupted > 0 or (missing > 0 and not args.allow_missing):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

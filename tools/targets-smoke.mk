@@ -1632,3 +1632,68 @@ smoke-net-rtl8139:
 		tail -n 60 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# Serial RX fidelity gate: 300 commands must round-trip byte-exact
+# ================================================================
+# docs/net/net-lanes.md recorded ~3 of 800 console commands arriving at the
+# guest with an adjacent character transposed or dropped.  That number was
+# read off a console log, which cannot separate a real UART receive fault from
+# a kernel print landing inside the echoed line -- and `grep -c PASS` then
+# counts "never executed" as "did not fail".  This gate makes the round trip
+# itself the assertion.
+#
+# tools/serial_fidelity.py types 300 numbered commands, each with a 48-byte
+# base62 payload, and compares what came back byte for byte.  It fails on:
+#   * a payload that came back different (truncated / transposed / vanished);
+#   * a line that never returned at all -- a command that did not run is the
+#     same measurement hazard as one that ran wrong;
+#   * the guest shell reporting a command it could not find (the observed
+#     symptom: 'ceho: inaccessible or not found' after a transposition);
+#   * [UART] rx_fidelity reporting a non-zero dropped count, i.e. the ring
+#     overflowed and silently discarded bytes the harness cannot attribute.
+# A run with no rx_fidelity line at all also fails: the probe must be in the
+# kernel being tested or the gate would be asserting nothing.
+#
+# The guest runs a background flood loop (--load) and -smp 4, the amplifier
+# that reproduced the fault on the unfixed tree: two of three baseline runs
+# corrupted command 43/44 (docs/measured/serial-fidelity.md).  Deliberately
+# NOT asserted: interleaved_tokens.  A kernel print spliced into an echo line
+# corrupts the *log*, not the receive path, and counting it here would make
+# this gate fail on console traffic that the driver delivered correctly.
+SERIAL_FIDELITY_ARGS = ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
+smoke-serial-fidelity: NET_HOSTFWD=
+smoke-serial-fidelity:
+	$(MAKE) $(SERIAL_FIDELITY_ARGS) dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 4
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/serial-fidelity-riscv64.log"; \
+	summary="$(SMOKE_LOG_DIR)/serial-fidelity-riscv64.summary"; \
+	status=0; \
+	kernel_dir=$$($(MAKE) --no-print-directory $(SERIAL_FIDELITY_ARGS) print-build-dir); \
+	$(PYTHON) tools/serial_fidelity.py --kernel-dir "$$kernel_dir" \
+		--count 300 --timeout 600 \
+		--load 'i=0; while [ $$i -lt 200000 ]; do echo flood $$i; i=$$((i+1)); done' \
+		--qemu-arg=-smp --qemu-arg=4 \
+		--log "$$log" > "$$summary" 2>&1 || status=$$?; \
+	result_line=$$(grep 'returned=' "$$summary" || true); \
+	fid_line=$$(grep 'rx_fidelity' "$$log" | tail -1 || true); \
+	dropped=$$(printf '%s\n' "$$fid_line" | sed -n 's/.*dropped=\([0-9]*\).*/\1/p'); \
+	poll_bytes=$$(printf '%s\n' "$$fid_line" | sed -n 's/.*poll_bytes=\([0-9]*\).*/\1/p'); \
+	not_found=$$(grep -c 'inaccessible or not found' "$$log" || true); \
+	if [ "$$status" -eq 0 ] && [ -n "$$result_line" ] && \
+	   [ -n "$$fid_line" ] && [ "$$dropped" = 0 ] && \
+	   [ -n "$$poll_bytes" ] && [ "$$poll_bytes" -gt 0 ] && \
+	   [ "$$not_found" -eq 0 ] && \
+	   ! grep -qiE 'panic|page fault' "$$log"; then \
+		echo "smoke-serial-fidelity: PASS (300/300 commands round-tripped byte-exact under -smp 4 + guest flood; $$result_line)"; \
+		echo "    $$fid_line"; \
+	else \
+		echo "smoke-serial-fidelity: FAIL (status=$$status dropped='$$dropped' poll_bytes='$$poll_bytes' shell_not_found=$$not_found)"; \
+		echo "  $$result_line"; \
+		echo "  last fidelity line: $${fid_line:-<absent: the probe never printed>}"; \
+		echo "  log saved to $$log; summary:"; \
+		cat "$$summary"; \
+		exit 1; \
+	fi
