@@ -79,7 +79,8 @@ commit**。现已显式抓取并记录基线：
                                             （+9）  补齐缺失的 LWIP_ASSERT_CORE_LOCKED()
 +209/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
 +178/-82  src/core/udp.c                            PCB 链表按 lane 分桶
-+175/-4   src/core/memp.c                           MEMP_PBUF/MEMP_PBUF_POOL 按当前 lane 索引的池表（见 §2.9）
++175/-4   src/core/memp.c                           全部 14 个池按当前 lane 索引的描述符表 + per-(lane,pool) 计数
+                                                          （见 §2.9；阶段 C2 推广自阶段 C 的两个 pbuf 池）
 +146/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
 +100/-37  src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
                                       （+2）        tcp_trigger_input_pcb_close() 补断言
@@ -105,6 +106,7 @@ commit**。现已显式抓取并记录基线：
 | `b1bb28b5` | 按 lane 分片 TCP 快/慢定时器 |
 | `16304db8` | 修 lane 桶中 TCP pcb 双重索引移除 |
 | `5ea06a78` | lane stage C：pbuf 池按当前 lane 索引的骨架（见 §2.9） |
+| 见 §2.9 | lane stage C2：分片推广到全部池，并记下 `MEMP_MEM_MALLOC=1` 下真正无锁共享的是 mem.c 全局堆 |
 | 见 §2.5 | 把锁契约变成可执行：`LWIP_ASSERT_CORE_LOCKED()` 从空宏接到 `g_lwip_lock` 的持有者 CPU |
 
 ### 2.2 引入的独有概念
@@ -318,7 +320,7 @@ lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_
 - 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
   "还回去" 的机制。
 
-### 2.9 `LWIP_MEMP_LANE()`：pbuf 池按当前 lane 索引（本树独有）
+### 2.9 `LWIP_MEMP_LANE()`：memp 按当前 lane 索引（本树独有）
 
 **这条与 §2.5 是同一种接线**：上游不提供这个维度，移植层提供，lwIP 侧只加一个
 受 `#ifdef` 保护的分派。它不是"给 memp 打补丁"，因为改的是**分配器回答什么问题**。
@@ -328,20 +330,29 @@ lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_
 本树在 `CONFIG_NET_LANES > 1` 下让移植层通过 `LWIP_MEMP_LANE()`（声明在
 `kernel/net/lwip_port/lwipopts.h`，实现在 `kernel/net/lwip_stack.c` 的
 `a20_lwip_memp_lane()`）回答"当前这段工作属于哪条 lane"，memp 用它索引一张
-per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被分片**，其余池
-保持全局——它们的内容既不按包也不按连接。
+per-lane 描述符表。**每一个池都按 lane 索引**，不是只有 pbuf 两个——阶段 C 只切了
+`MEMP_PBUF` / `MEMP_PBUF_POOL`，阶段 C2 把它推广到全部 14 个池。理由是直接的：
+`g_lwip_lock` 切开之后，若 `tcp_pcb_alloc()` 之类仍走全局表，两条 lane 就是并发踩
+同一张表，"部分分片"既不是原来的全局锁、也不是新的分片锁，是第三种更坏的状态。
 
 | 改动 | 位置 |
 |---|---|
-| `memp_desc_for(type)`：`MEMP_PBUF` / `MEMP_PBUF_POOL` 走 lane 表，其余走 `memp_pools[]` | `src/core/memp.c` |
-| `memp_init()` 在自身池循环之后，为 lane 1..N-1 复制一份描述符 | `src/core/memp.c` |
-| `struct memp_lane_count { u32_t alloc; u32_t freed; }` 与 `memp_lane_count_get()` | `src/include/lwip/priv/memp_priv.h` |
-| `memp_malloc()` / `memp_free()` 各自记一次单调计数 | `src/core/memp.c` |
+| `memp_desc_for(type)`：`memp_lane_pool[当前 lane][type]`，未初始化时回落 `memp_pools[type]` | `src/core/memp.c` |
+| `memp_init()` 在自身池循环之后，为 lane 1..N-1 复制**每一个**池的描述符 | `src/core/memp.c` |
+| `struct memp_lane_count { u32_t alloc; u32_t freed; }` 与 `memp_lane_count_get(lane, pool)` | `src/include/lwip/priv/memp_priv.h` |
+| `memp_malloc()` / `memp_free()` 各自按 `(当前 lane, pool)` 记一次单调计数 | `src/core/memp.c` |
+| 三张表的真实字节数与 `NET_PROFILE_MEMP_LANE_TABLE_BYTES` 对账的 `_Static_assert` | `src/core/memp.c` |
 
 **lane 0 指向上游那个描述符对象本身**，不是副本，所以 `memp_pools[]` 与
 `lwip_stats.memp[]` 对 lane 0 的指向和上游一模一样。lane 1..N-1 的副本在
 `memp_init()` 里取——那是描述符唯一完整的那一刻（`LWIP_MEMPOOL_DECLARE` 用池自己的
 `LWIP_MEMPOOL()` 行算出元素大小，在这里重写一遍就是第二份要同步的副本）。
+
+**per-lane 副本里的 `stats` 指针刻意保持指向同一个 `stats_mem`**。`lwip_stats.memp[]`
+与 `/proc` 渲染器把这些计数器当全局量读——`kernel/net/lwip_stack.c` 报
+`lwip_stats.memp[MEMP_TCP_PCB]->used` 为 `tcp_active`——给每条 lane 一份私有 stats
+块，会在多 lane 构建上把这个数悄悄重新定义成"lane 0 的 TCP PCB 数"。能拆的拆了；
+被当总量读的仍然是总量。
 
 **必须说清楚它没有做到什么**，因为名字很容易被读大：
 
@@ -353,7 +364,36 @@ per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被�
   `lwipopts.h` 里的 profile 静态断言也只按**一份**拷贝预留 `.bss`。
 - **释放路径没有因此改变。** 同一模式下 `do_memp_free_pool()` 忽略描述符，元素
   无论经哪条 lane 的表索引进来，都回到同一块 lwIP 堆。
-- 因此今天可观测的只有那条 per-lane 计数。
+- 因此今天被按 lane 切开的只有**账目**，以及将来挂 per-lane base 数组的那个索引。
+
+**内存账（阶段 C2 实测，riscv64 LP64）**。三张表的 `.bss` 占用是
+`(N-1)*MEMP_MAX*sizeof(struct memp_desc) + N*MEMP_MAX*sizeof(struct memp_lane_count) +
+N*MEMP_MAX*sizeof(struct memp_desc *)`；`MEMP_MAX=14`、`sizeof(struct memp_desc)=24`、
+`sizeof(struct memp_lane_count)=8`。得 0 / 784 / 1904 / 4144 B（N=1/2/4/8），
+**三档 profile 完全相同**，因为它不随任何一档的堆缩放。也就是说 per-lane 化在池内存上
+**没有 ×N**——那正是 `MEMP_MEM_MALLOC=1` 的直接后果：池仍从同一块堆上取。将来切到
+`!MEMP_MEM_MALLOC` 时要付的 ×N 是每条 lane 一份 base 数组，那时才是 profile 级的决定。
+`kernel/net/net_profile.h` 的 `NET_PROFILE_MEMP_LANE_TABLE_BYTES` 与
+`memp.c` 的 `_Static_assert` 是这条账的两端，改一边不改另一边会直接编译失败。
+
+**阶段 C2 查到的、比上面更要紧的一件事：切 memp 并不足以让 `g_lwip_lock` 可切。**
+`MEMP_MEM_MALLOC=1` 下真正被并发共享的可变结构不是 memp 的池，是 `src/core/mem.c`
+里那一块全局堆：`ram_heap[MEM_SIZE]` 静态数组加唯一的全局 `lfree` 空闲链表，而**它在
+本配置下没有任何内部锁**——实测证据：
+
+| 事实 | 出处 |
+|---|---|
+| `mem_mutex` 只在 `#if !NO_SYS` 下声明，而本移植层 `NO_SYS 1` | `src/core/mem.c:376`、`kernel/net/lwip_port/lwipopts.h:6` |
+| `LWIP_MEM_FREE_PROTECT()` 定义成 `sys_mutex_lock(&mem_mutex)`，`NO_SYS=1` 时 `sys_mutex_lock(mu)` 展开成空 | `src/core/mem.c:396`、`src/include/lwip/sys.h:64` |
+| `LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT` 未定义（=0），所以走上面这条空互斥而不是 `SYS_ARCH_PROTECT` | `src/core/mem.c:393` |
+| 预处理后的 `mem_free()` 里，`LWIP_MEM_FREE_PROTECT()` / `UNPROTECT()` 两处都是裸 `;`，切链表与 `plug_holes()` 全程无保护 | `gcc -E kernel/external/lwip/src/core/mem.c` |
+| `SYS_ARCH_PROTECT` 也不能救：`arch_local_irq_disable()` 是 `csrc sstatus`，只关本 CPU 的 IRQ | `kernel/arch/riscv64/include/cpu.h:29` |
+| 堆是**一块**全局数组，不随 lane 分 | `src/core/mem.c:371`（`ram_heap`） |
+
+所以在把 `g_lwip_lock` 按 lane 切开之前，堆这条路径必须先有归属：要么每条 lane 一块
+堆（回到 `!MEMP_MEM_MALLOC` 的静态预留布局，并把 ×N 记进三档 profile 的账），要么给
+这块堆一把专用的全局分配器锁。哪一个都超出本阶段，本树两条都还没选。`memp` 的 per-lane
+索引是这两条路的前置件，不是替代品。
 
 **为什么是计数器而不是"已用"水位。** `memp_free()` 拿到的是 pool id 和指针，
 没有任何东西说明这个元素是哪条 lane 发出去的；把它记到释放方会漂移，记到分配方
@@ -362,10 +402,10 @@ per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被�
 不会下溢的：每条 lane 的池发出去多少、回来多少。
 
 **`CONFIG_NET_LANES=1` 折叠成什么**：`memp_desc_for(type)` 是宏
-`memp_pools[type]`，即上游原句；`LWIP_MEMP_LANE()` 不被定义。实测 `memp.o` 在
-一 lane 下 `.text`/`.rodata`/`.sdata` 与改动前逐字节相同，加 `-fno-sanitize=undefined`
-重编后整个目标文件也逐字节相同（仅存的差异是 UBSan 内嵌的源码行号表，因为文件
-多了行——加一行注释也会让它动，这不是本改动特有的）。
+`memp_pools[type]`，即上游原句；`LWIP_MEMP_LANE()` 不被定义，三张表一张都不编译。
+实测 `memp.o` 在一 lane 下 `.text`/`.rodata`/`.sdata` 与改动前逐字节相同，加
+`-fno-sanitize=undefined` 重编后整个目标文件也逐字节相同（仅存的差异是 UBSan 内嵌的
+源码行号表，因为文件多了行——加一行注释也会让它动，这不是本改动特有的）。
 
 ### 2.10 从 socket 层直接写 `pcb->snd_buf`（SO_SNDBUF 抬高对既有连接生效）
 

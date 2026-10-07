@@ -105,6 +105,17 @@
  * exhausted, so an undersized pool shows up as accept() failing rather than as
  * an allocation failure, which is why the ordering is asserted instead of left
  * to be discovered under load.
+ *
+ * Stage C2 re-checked this against per-lane memp and it does not move, for a
+ * reason worth recording.  A lane has its own PCBs, so a partitioned design
+ * would want lanes * TCP_PCB timer entries -- but the sys_timeout pool is a
+ * property of the *socket*, not of the lane: tcp_pcb_alloc() takes the entry
+ * from a global pool on whichever lane the address hash put the socket's
+ * context, and nothing records the lane on the pcb.  So the ceiling that has
+ * to hold is still the global one, and per-lane memp introduces no factor of N
+ * here.  If a future change ever does make timeouts lane-local, this is the
+ * assert that has to be revisited with it -- the second one below says what the
+ * ordering would become.
  */
 #define MEMP_NUM_PBUF                   (NET_PROFILE_PBUF_POOL_SIZE / 2)
 #define MEMP_NUM_RAW_PCB                NET_PROFILE_RAW_PCB
