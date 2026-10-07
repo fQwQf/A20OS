@@ -52,13 +52,12 @@ static uint64_t mm_cow_flags(uint64_t pte) {
 #if defined(ARCH_HAS_PGTABLE_OPS)
 static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
 {
-    pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
-    if (tab) {
-        uint8_t cur = mm_pt_peek(tab, 0, arch_pt_vpn(va, 0));
-        uint8_t cls = MM_ST_GET_CLASS(cur);
-        if (cls != MM_ST_INVALID && cls != MM_ST_PT_NODE)
-            return cls;
-    }
+    /* Level-aware read: a huge leaf's status slot lives at its own level,
+     * so a level-0 peek would read whatever neighbouring entry owns that
+     * level-0 index and hand back the wrong backing. */
+    uint8_t cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, va));
+    if (cls != MM_ST_INVALID && cls != MM_ST_PT_NODE)
+        return cls;
     /* No status to preserve.  Recover the backing from the VMA so a page that
      * predates the cursor still gets a coherent class rather than a guess. */
     mm_seg_t *v = mm_seg_find(mm, va);
@@ -69,6 +68,17 @@ static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
     if (v->vm_flags & VM_FILE)
         return (v->vm_flags & VM_SHARED) ? MM_ST_FILE_SHARED
                                          : MM_ST_FILE_PRIVATE;
+    return MM_ST_ANON_MAPPED;
+}
+#else
+/* arm32 (MMU, but no pgtable ops) still calls this to hand a class to
+ * pt_map_huge(); its short-descriptor backend ignores the argument because
+ * there is no status sidecar to write.  The real class recovery above needs
+ * mm_pt_status_at(), which pt.h only declares under the pgtable-ops guard. */
+static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
+{
+    (void)mm;
+    (void)va;
     return MM_ST_ANON_MAPPED;
 }
 #endif /* ARCH_HAS_PGTABLE_OPS */
@@ -111,25 +121,48 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
     pte_t flags = shared ? arch_pte_flags(*src) : mm_cow_flags(*src);
     frame_get(pfn);
 
-    int r = (level > 0) ? pt_map_huge(child->pgdir, base, pa, flags)
-                        : pt_map(child->pgdir, base, pa, flags);
+    int r = (level > 0)
+                ? pt_map_huge(child, base, pa, flags,
+                              mm_fork_page_class(parent, base))
+                : pt_map(child->pgdir, base, pa, flags);
     if (r < 0) {
         frame_put(pfn);
         return r;
     }
 
     if (!shared && (*src & (PTE_W | PTE_COW))) {
-        *src = arch_pte_leaf(pa, flags);
-        mm_tlb_note_change(parent, base, size);
-        /* The parent's PTE just lost W and gained COW; the status has to
-         * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
-         * status-driven fault would keep installing the parent's old
-         * write permission over a page the child now shares. */
 #if defined(ARCH_HAS_PGTABLE_OPS)
+        /* The rewrite and its status sync run under the owning table's node
+         * lock, and the PTE is RE-CHECKED under it: the lockless COW fault
+         * (mm_cow_from_status) replaces a present COW leaf while holding
+         * exactly this lock and nothing else -- it never takes mm->lock, so
+         * mm->lock excludes nothing there.  Rewriting from the stale *src
+         * would resurrect a frame the process no longer maps while the
+         * frame reference taken above belongs to the child. */
         pte_t *stab = mm_pt_leaf_table(parent->pgdir, base);
         if (stab)
-            (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(base, 0),
-                                    mm_fork_page_class(parent, base));
+            mm_pt_node_lock(stab);
+        int still = (*src & PTE_V) && (*src & (PTE_W | PTE_COW)) &&
+                    arch_pte_addr(*src) == pa;
+        if (still) {
+            *src = arch_pte_leaf(pa, flags);
+            mm_tlb_note_change(parent, base, size);
+            /* The parent's PTE just lost W and gained COW; the status has to
+             * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
+             * status-driven fault would keep installing the parent's old
+             * write permission over a page the child now shares. */
+            if (stab)
+                (void)mm_pt_sync_status(stab, level, arch_pt_vpn(base, level),
+                                        mm_fork_page_class(parent, base));
+        }
+        if (stab)
+            mm_pt_node_unlock(stab);
+#else
+        /* arm32's short-descriptor backend has no status sidecar, so there
+         * is no lockless status-driven COW fault to race this write; the
+         * plain rewrite is enough. */
+        *src = arch_pte_leaf(pa, flags);
+        mm_tlb_note_change(parent, base, size);
 #endif /* ARCH_HAS_PGTABLE_OPS */
     }
     mm_rss_add(child, size / PAGE_SIZE);
@@ -170,8 +203,9 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
             return -ENOMEM;
         memcpy(pfn_to_virt(copy), pfn_to_virt(pfn), leaf_size);
         int r = (level > 0) ?
-            pt_map_huge(child->pgdir, va, pfn_to_phys(copy),
-                        arch_pte_flags(*src_pte)) :
+            pt_map_huge(child, va, pfn_to_phys(copy),
+                        arch_pte_flags(*src_pte),
+                        mm_fork_page_class(parent, va)) :
             pt_map(child->pgdir, va, pfn_to_phys(copy),
                    arch_pte_flags(*src_pte));
         if (r < 0) {
@@ -195,7 +229,8 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
         frame_get(pfn);
 
     pte_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
-    int r = (level > 0) ? pt_map_huge(child->pgdir, va, pa, flags)
+    int r = (level > 0) ? pt_map_huge(child, va, pa, flags,
+                                      mm_fork_page_class(parent, va))
                         : pt_map(child->pgdir, va, pa, flags);
     if (r < 0) {
         if (pcp) {
@@ -207,19 +242,34 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     }
 
     if (!shared && (*src_pte & (PTE_W | PTE_COW))) {
-        *src_pte = arch_pte_leaf(pa, flags);
-        mm_tlb_note_change(parent, va, leaf_size);
-        /* See mm_fork_clone_page(): the parent's status must follow the PTE
-         * it just rewrote.  Only level-0 leaves have a per-PTE status slot;
-         * a large leaf is one entry covering many virtual pages and the
-         * auditor checks it as a whole. */
 #if defined(ARCH_HAS_PGTABLE_OPS)
-        if (level == 0) {
-            pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+        /* Same node-lock discipline as mm_fork_clone_page(): re-check under
+         * the owning table's lock, because the lockless COW fault replaces
+         * present COW leaves while holding exactly this lock. */
+        pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+        if (stab)
+            mm_pt_node_lock(stab);
+        int still = (*src_pte & PTE_V) && (*src_pte & (PTE_W | PTE_COW)) &&
+                    arch_pte_addr(*src_pte) == pa;
+        if (still) {
+            *src_pte = arch_pte_leaf(pa, flags);
+            mm_tlb_note_change(parent, va, leaf_size);
+            /* The parent's status must follow the PTE it just rewrote.  A
+             * huge leaf's slot lives in its own table at its own level --
+             * mm_pt_leaf_table() returns that owner for both cases, and the
+             * index must be taken at the leaf's level. */
             if (stab)
-                (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(va, 0),
+                (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
                                         mm_fork_page_class(parent, va));
         }
+        if (stab)
+            mm_pt_node_unlock(stab);
+#else
+        /* arm32's short-descriptor backend has no status sidecar, so there
+         * is no lockless status-driven COW fault to race this write; the
+         * plain rewrite is enough. */
+        *src_pte = arch_pte_leaf(pa, flags);
+        mm_tlb_note_change(parent, va, leaf_size);
 #endif /* ARCH_HAS_PGTABLE_OPS */
     }
     mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);

@@ -520,14 +520,525 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mm-stress-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['mm_stress', 'poweroff']},
-        'timeout': '45s',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress', 'poweroff']},
+        # 45s was enough before the huge-leaf path ran: huge_install>0 and
+        # cow_from_status>0 mean the phases now do the 2 MiB copies and the
+        # lockless COW work they always claimed to, which costs time.
+        'timeout': '90s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
-        'expect': ['MM_STRESS: PASS'],
+        'expect': [
+            'MM_STRESS: PASS',
+            # mm_stress runs the huge-page phases (basic / fork-COW / prot),
+            # the only workload in the gate set that exercises pt_map_huge
+            # and the huge-leaf demote path.  That is exactly why the audit
+            # line must be asserted *here*: before the huge leaf carried
+            # status, every THP fault left a present_mismatch that only
+            # smoke-mm-pt-race and smoke-mm-software would have caught --
+            # and neither of those maps huge pages, so the gap was invisible
+            # to every gate that could have seen it.
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            # Non-vacuity for the huge-leaf path, same discipline as the
+            # mm_fault_from_status assertion in smoke-mm-pt-race: huge_install=0
+            # means the workload never had a huge leaf and every huge-path
+            # assertion above proved nothing.  Plain globals printed in
+            # [MM-ASM]; matched WITHOUT the line prefix because a concurrent
+            # klog line can split the audit record mid-print, and both names
+            # exist nowhere else in the kernel's output.
+            r'huge_install=[1-9]',
+            # Non-vacuity for the lockless COW slice: mm_stress's fork phases
+            # make shared anonymous COW leaves, and mm_cow_from_status must
+            # be the one serving them (rc>1 copies).  cow_from_status=0 with
+            # the fork phases green means the fast path declined every fault
+            # and the mm->lock path did all the work again.
+            r'cow_from_status=[1-9]',
+        ],
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-stress: PASS; log saved to $log',
+    },
+    'smoke-hyp-selftest': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-selftest-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['cat /proc/a20/hyp_selftest', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # The per-step lines go to the console; the read's one-line
+            # verdict is what a shell can gate on.  Reading the file RUNS
+            # the selftest (create -> map 4 pages -> translate/readback ->
+            # lend-flag -> s2 audit -> unmap/remap/-EEXIST -> destroy).
+            # -cpu rv64,h=true: the default rv64 CPU does not expose the H
+            # extension, and hyp_supported() then makes the file SKIP --
+            # which would make this gate pass while testing nothing.
+            'HYP_SELFTEST: PASS',
+            'hyp_selftest=PASS',
+        ],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-selftest: PASS; log saved to $log',
+    },
+    # End-to-end vcpu slice: a user program creates a VM, loads 56 bytes of
+    # RISC-V machine code into it, runs the guest and asserts the guest left
+    # through the SBI shutdown call.  Runs in the same ABI=linux image as the
+    # selftest case, through the Linux bridge syscalls, because a Linux-ABI
+    # task has no Native handle table to name a VM with.
+    'smoke-hyp-vcpu': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vcpu-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hyp_test', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-selftest, -cpu rv64,h=true included: the
+        # default rv64 CPU does not expose the H extension, hyp_supported()
+        # then refuses every call, and the gate would go red on a kernel that
+        # is merely correct -- or, worse, "pass" against nothing.  The flag is
+        # load-bearing, exactly as it is for the selftest.
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            'HYP_VCPU_TEST: PASS',
+            # The guest's own console output, as its own line.  The PASS line
+            # above only proves the syscall returned; this proves the legacy
+            # SBI console_putchar path really executed inside the guest.
+            # Anchored, because a bare 'HYP' substring is already contained in
+            # 'HYP_VCPU_TEST' and would match vacuously.
+            r'^HYP$',
+        ],
+        'forbid': ['PANIC', 'LOCK-STALL', 'MCS DEADLOCK', 'HYP_VCPU_TEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vcpu: PASS; log saved to $log',
+    },
+    # Host keystrokes -> guest UART -> host console, the P0 round trip.  This
+    # is the independent acceptance point for the guest console input channel
+    # (kernel/hyp/hyp_dev.c, hyp_dev_pump_rx): the guest polls the modelled
+    # 16550's LSR for DR, pops RBR, and writes the byte back out through SBI
+    # console_putchar.  Three bytes in, three bytes out, with only the device
+    # model in between.
+    #
+    # WHY IT NEEDS sendline_seq AND NOT sendline.  The gate's whole subject is
+    # the ORDER: the bytes have to be lying in the host rx ring BEFORE the
+    # guest gets a chance to poll for them, or the guest just keeps polling.
+    # sendline waits for one marker and then dumps every line at once, which
+    # happens to work here only because the first marker is the shell prompt
+    # and the shell buffers the rest -- but the second step depends on
+    # hyp_test having reached its guest, which sendline cannot express at all.
+    # Each marker therefore gates its own line: prompt -> start hyp_test,
+    # "guest up" -> send the three bytes, hyp_test's own PASS line -> power off.
+    #
+    # The LAST STEP IS KEYED ON 'HYP_VCPU_TEST: PASS', NOT ON THE SHELL PROMPT,
+    # and that is load-bearing rather than cosmetic.  hyp_test destroys the VM
+    # before it prints PASS, and hyp_dev_pump_rx() only runs while
+    # hyp_vcpu_run() is inside the guest -- so a poweroff typed after that line
+    # cannot be stolen into a ring that no longer exists.  Keyed on the prompt
+    # instead, the run ended with `# oweroff` / `E: mksh: oweroff: inaccessible
+    # or not found` (measured, hyp-console-p0-riscv64.log before this change)
+    # and QEMU was left to be killed by the timeout.
+    #
+    # The prompt marker for the FIRST step is anchored with a preceding newline
+    # because the boot banner contains `# ` inside its ASCII art.
+    #
+    # `rx_bytes=` is the count the device model took on the way IN, which is a
+    # separate claim from the echoed bytes: the echo proves they came back out,
+    # the counter proves they went through the ring rather than some other
+    # path.  Comment the pump out and this case goes red on both.
+    'smoke-hyp-console-p0': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-console-p0-riscv64.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ('\n# ', 'hyp_test echo'),
+            ('HYP_VCPU_TEST: guest up', 'HYP'),
+            ('HYP_VCPU_TEST: PASS', 'poweroff'),
+        ]},
+        # 120s, not 60s: this is smoke-hyp-vcpu plus a guest that spins in
+        # second-stage faults while it waits for the bytes, and a host that is
+        # slow to reach the prompt should not be able to fail the gate.
+        'timeout': '120s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-vcpu, -cpu rv64,h=true included: without the H
+        # extension hyp_supported() refuses every call and this gate would go
+        # green against nothing.
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # The three stolen bytes, echoed by the guest through the host's
+            # SBI handler, as their own line.  Anchored: a bare 'HYP' is
+            # already inside 'HYP_VCPU_TEST' and would match vacuously.  The
+            # shell's own echo of the typed command cannot produce this line --
+            # it is blocked inside hyp_test while the bytes are consumed.
+            r'^HYP$',
+            'HYP_VCPU_TEST: PASS',
+            r'rx_bytes=[1-9][0-9]*',
+            # Clean shutdown, not a timeout kill.  smoke.py's report() judges
+            # the log text and deliberately does not look at QEMU's exit
+            # status, so without this the gate stays green on a run whose only
+            # ending was the harness SIGTERM'ing a machine that never powered
+            # off.  The same string is what 50-odd other gates assert, so it
+            # is not a hypervisor-specific invention.
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['PANIC', 'LOCK-STALL', 'MCS DEADLOCK',
+                   'HYP_VCPU_TEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-console-p0: PASS; log saved to $log',
+    },
+    # A20OS as a guest: /hyp_boot reads the kernel ELF off the image
+    # (/boot/guest-kernel.elf), lays its PT_LOAD segments into guest RAM at
+    # their link-time physical addresses, hands the vcpu a minimal FDT and runs
+    # it.  PASS is the guest's own banner counted by the device model
+    # (marker_seen), not a parse of the interleaved console: host and guest
+    # share one UART, and only the marker counter separates them.
+    #
+    # forbid deliberately does NOT list PANIC.  A guest with no block device
+    # cannot mount a rootfs and panics in init_kthread ("init: no init program
+    # found", kernel/main.c) -- an expected arrival, not a defect -- and its
+    # panic text is byte-identical to the host's, so a PANIC forbid would go red
+    # on a correct run.  A host that actually dies is caught by the missing
+    # 'HYP_A20OS: PASS' expectation instead, which the verdict line cannot
+    # produce.
+    'smoke-hyp-a20os': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-a20os-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hyp_boot', 'poweroff']},
+        # 300s, not 60s: every guest console byte, page-table walk and second
+        # stage fault traps through the host, so a guest boot is orders of
+        # magnitude slower than a host boot of the same kernel.
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-vcpu; -cpu rv64,h=true is load-bearing (the
+        # default rv64 CPU has no H extension and hyp_supported() would refuse
+        # every call, making this gate pass or fail against nothing).
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # marker_seen was non-zero: the guest reached its own banner.  The
+            # marker counter covers guest console bytes only, so this cannot be
+            # satisfied by the host's identical "A20OS Kernel" line.
+            'HYP_A20OS: PASS',
+        ],
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYP_A20OS: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-a20os: PASS; log saved to $log',
+    },
+    # /hypvm is the same guest boot with its parameters on the command line
+    # (user/cmds/core/hypvm.c), so this gate is smoke-hyp-a20os run with argv
+    # instead of with it compiled in: bare `hypvm`, i.e. exactly the defaults
+    # hyp_boot carries.  Its partner is smoke-hyp-vm-96 below, which runs the
+    # same program on a 96 MiB window with a bootargs string of its own.
+    #
+    # ONE guest boot per host boot, deliberately.  Two hypvm runs in one shell
+    # session were tried first and do not work: the first run PASSes and the
+    # second one (default arguments, so nothing about the arguments explains it)
+    # never produces a single guest console byte and never returns --
+    # hyp_vcpu_run() spins at 100% CPU with no host trap message at all.  The
+    # two parameter combinations therefore live in two gates, one QEMU boot
+    # each, rather than one gate with two shell lines; the limitation itself is
+    # written up in docs/hypervisor/01-a20os-guest.md §10 item 9.
+    'smoke-hyp-vm': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vm-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['hypvm', 'poweroff']},
+        # 300s, same as smoke-hyp-a20os: every guest console byte, page-table
+        # walk and second-stage fault traps through the host, so a guest boot is
+        # orders of magnitude slower than a host boot of the same kernel.
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-a20os; -cpu rv64,h=true is load-bearing (the
+        # default rv64 CPU has no H extension, hyp_supported() refuses every
+        # call, and hypvm reports that as its own exit code 4 rather than a
+        # silent pass).
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # marker_seen=1 is the whole verdict (device-model counter over
+            # guest console bytes only); console_bytes=[0-9]+ is the second half
+            # of the same judgement hyp_boot makes, a marker length's worth of
+            # output would be a degenerate hit.  exit= keeps the reason on the
+            # record: the guest has no rootfs, so it is expected to end in a
+            # second-stage fault rather than a shutdown.  mem= is what says this
+            # really ran on the default window.
+            #
+            # rx_bytes= is the v3 ingress counter and is NOT asserted here: this
+            # gate types nothing while the guest runs, so it has no business
+            # pinning a value.  It is pinned in smoke-hyp-console, and it is
+            # matched with rx_bytes=[0-9]+ rather than left out because the field
+            # sits BETWEEN console_bytes= and exit=, so an older regex that
+            # spelled the neighbours adjacently stops matching the moment the
+            # counter exists -- which is exactly what happened when v3 landed.
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ '
+            r'rx_bytes=[0-9]+ exit=[0-9]+\(\w+\) mem=128 MiB',
+        ],
+        # Same discipline as smoke-hyp-a20os: no PANIC, because a guest panic's
+        # bytes are the host kernel's own panic bytes and the guest's arrival
+        # path is allowed to end there.  A host that actually dies cannot print
+        # the verdict lines the expectations require.
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYPVM: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vm: PASS; log saved to $log',
+    },
+    # The second hypvm gate: same program, a window that is not the default, and
+    # a /chosen/bootargs of its own.  This is the run hyp_boot cannot express at
+    # all -- the FDT address is derived from the window top, so a window other
+    # than 128 MiB is exactly the case where a fixed DTB GPA lands inside the
+    # guest image (docs/hypervisor/01-a20os-guest.md §11.3).
+    #
+    # No spaces inside -b: the guest shell would split them into a second argv
+    # entry, and hypvm would (rightly) reject it as an unknown argument.
+    'smoke-hyp-vm-96': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vm-96-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hypvm -m 96 -b a20.hypguest=1,a20.hypvm=smoke',
+                            'poweroff']},
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ '
+            r'rx_bytes=[0-9]+ exit=[0-9]+\(\w+\) mem=96 MiB',
+            # The bootargs string went into the synthesized FDT's /chosen, which
+            # is the only way to tell -b apart from a run where the flag was
+            # silently dropped.
+            r'HYPVM: guest=\S+ elf_bytes=\d+ mem=96 MiB base=0x80000000 '
+            r"marker='A20OS Kernel' bootargs='a20.hypguest=1,a20.hypvm=smoke'",
+        ],
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYPVM: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vm-96: PASS; log saved to $log',
+    },
+    # The console round trip end to end, on the real guest: boot the
+    # RAMFS_USER=1 kernel (which has /bin/init linked in, so it needs no block
+    # device behind the stage-2), and require rx_bytes to be non-zero on the
+    # trailing HYPVM line.
+    #
+    # rx_bytes is the device model's own ingress counter, so it is the one
+    # number here that the HOST cannot fake: it increments only inside
+    # hyp_dev_pump_rx(), which only runs on a guest trap, and only when
+    # uart_try_getc() actually handed over a byte.  A guest that booted and
+    # printed its banner without ever trapping would leave it at 0, so this
+    # asserts that host keystrokes reached the ring while the guest was live.
+    #
+    # It deliberately does NOT claim the guest read them back.  That needs the
+    # guest-side uart_rx_is_polled downgrade, which is not in this slice; the
+    # round trip itself is asserted at the device boundary by
+    # smoke-hyp-console-p0, where the guest program IS the RBR reader.  The
+    # measured counterpart on this gate is that the real guest issues ZERO RBR
+    # reads -- grep the log for 'scause=15.*stval=ffffffc010000000' and get 0
+    # hits, against 11 LSR reads (…0005, scause=15) and 10 THR writes (the
+    # same offset …0000 but scause=17) -- because it panics in kfree before any
+    # shell exists.
+    #
+    # The last step is keyed on hypvm's own PASS line, not on the shell prompt,
+    # for the reason spelled out at smoke-hyp-console-p0: hypvm destroys the VM
+    # before printing PASS, and the pump only runs inside hyp_vcpu_run().  On
+    # the prompt-keyed version the run ended `# oweroff` / `E: mksh: oweroff:
+    # inaccessible or not found` and QEMU was killed by the 300s timeout.
+    'smoke-hyp-console': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-console-riscv64.log',
+        # The bytes have to reach the host's rx ring WHILE the guest is running,
+        # not before the command: hypvm blocks inside the vcpu run loop and the
+        # shell is not reading, so anything typed earlier was already consumed
+        # by the shell.  Step 2 keys off "HYPVM: running", which hypvm prints
+        # immediately before handing the CPU to the guest, and types one line
+        # into the gap.  From there the host UART IRQ fills the host ring and
+        # the very next guest trap's hyp_dev_pump_rx() moves it across.
+        'stdin': {'kind': 'sendline_seq',
+                  'expect': '# ',
+                  'steps': [('\n# ', 'hypvm -k /bin/boot/guest-kernel-ramfs.elf'),
+                            ('HYPVM: running\n', 'echo roundtrip'),
+                            ('HYPVM: PASS', 'poweroff')]},
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # The RAMFS kernel is a different ELF from the one the other two
+            # gates boot, and a typo in -k would silently fall back to the
+            # default kernel and still satisfy everything below.  The size line
+            # is what tells the two apart.
+            r'HYPVM: guest=/bin/boot/guest-kernel-ramfs\.elf elf_bytes=[0-9]+ '
+            r"mem=128 MiB base=0x80000000 marker='A20OS Kernel'",
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ '
+            r'rx_bytes=[1-9][0-9]* exit=[0-9]+\(\w+\) mem=128 MiB',
+            # Clean shutdown rather than a 300s timeout kill; see the third
+            # stdin step above and smoke.py's report(), which scores the log
+            # text and never looks at QEMU's exit status.
+            'System is going down for power-off NOW',
+        ],
+        # No PANIC forbid, for the same reason smoke-hyp-a20os has none: the
+        # guest's panic bytes are the host kernel's own panic bytes, and this
+        # gate's subject is the ingress counter, not how far the guest got.
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYPVM: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-console: PASS; log saved to $log',
+    },
+    # THE ACCEPTANCE GATE FOR "the guest reaches a shell you can type into".
+    # smoke-hyp-console-p0 proved the device boundary (host byte -> ring -> a
+    # guest PROGRAM that is itself the RBR reader -> back out), and
+    # smoke-hyp-console proved the ingress counter moves on the real kernel.
+    # Neither proves the thing the user asked for: a real A20OS guest, booted
+    # with RAMFS_USER=1, sitting at an mksh prompt, executing a command this
+    # harness typed and printing its output back.  That is what this gate is
+    # for, and it is deliberately the strictest of the three.
+    #
+    # TWO WITNESSES, ASSERTED SEPARATELY, BECAUSE THEY ARE DIFFERENT CLAIMS.
+    #
+    #   rx_bytes=NN  -- "the keystrokes got into the guest's ingress ring".
+    #     The counter only advances inside hyp_dev_pump_rx() (kernel/hyp/
+    #     hyp_dev.c, the rx_bytes increment), which only runs from
+    #     hyp_vcpu_handle_trap() and only when uart_try_getc() really handed a
+    #     byte over.  It is a claim about the HOST's side of the boundary and
+    #     nothing else -- last round's gate asserted it and nothing more, which
+    #     is exactly the "bytes entered the ring, nobody read them" gap this
+    #     gate exists to close.
+    #
+    #   the echoed command output -- "the guest READ the bytes and acted on
+    #     them".  The host cannot produce these lines: for the whole run the
+    #     host shell is parked inside hyp_vm_run() and is not reading stdin, and
+    #     the host console's own echo is absent for the same reason (measured:
+    #     no run of the round-trip line ever appears in the log, though
+    #     rx_bytes=15 accounts for every byte of it).  A byte that gets this
+    #     far has been through uart_try_getc() -> hyp_dev_pump_rx() -> the
+    #     guest's LSR/RBR reads -> the guest's shell -> the guest's write path,
+    #     and the only producer of the line is the guest.  The device-model RBR
+    #     read cannot be pinned from the log instead: the bounded trap trace
+    #     (HYP_TRAP_TRACE_HEAD, kernel/hyp/hyp_vcpu.c:1043) prints only the
+    #     first 24 traps and the guest spends all of them printing its banner
+    #     (measured in hyp-console-riscv64.log: traps #3..#23 are all LSR reads
+    #     at stval=ffffffc010000005 / THR writes at ...0000000), long before a
+    #     shell exists -- so a shell-time RBR read never reaches a log line at
+    #     all, and pretending otherwise would make this gate unsatisfiable.
+    #
+    # WHY THE TOKENS LOOK LIKE THEY DO.  The output witness is matched as
+    # "(?:^|# )TOKEN\r?$" rather than "^TOKEN$" because the two possible guest
+    # tty echo behaviours put the token in different places: with echo the
+    # token is on its own output line (the command itself is on the previous
+    # line, after the prompt); with no echo it is glued to the prompt as
+    # "# TOKEN".  The alternation accepts both and still refuses the host's
+    # echo, which would read "# echo TOKEN\r" -- there the token is preceded by
+    # "echo ", not by a line start or by "# ", so it cannot match.  The
+    # trailing \r? is there because host console lines are CRLF (measured:
+    # "# hypvm -k ...^M" in the same log) and smoke.py's grep_matches() is a
+    # MULTILINE re.search (tools/smoke.py:203-212), where `$` sits before the
+    # "\n" but not before a "\r".
+    #
+    # TWO COMMANDS, NOT ONE.  The second one is what turns "the shell ran a
+    # command" into "the shell is interactive and loops": the guest has to
+    # print its prompt again and read a second line before the second output
+    # can appear, and the prompt is asserted directly by the
+    # "...TOKEN\n# " expectation below.
+    #
+    # HOW THE RUN ENDS, AND WHY IT IS `exit` AND NOT `poweroff`.  A guest
+    # session has to be closed from the guest side or hyp_vm_run() never
+    # returns and the rx_bytes counter is never printed.  `exit` does it with
+    # nothing added to the tree: mksh exits, user/init.c:264-283 reaps the
+    # shell child, falls out of its wait loop and calls do_shutdown(), which
+    # prints "[init] shutting down" and reboot(RB_POWER_OFF)s (user/init.c:
+    # 137-143); the guest kernel turns that into the SBI SRST shutdown the host
+    # serves as HYP_EXIT_SHUTDOWN (=1, kernel/include/hyp/hyp_vcpu.h:55), so
+    # hypvm prints its PASS line with the counter.  `poweroff` cannot be typed
+    # INTO the guest: the RAMFS_USER rootfs is exactly RAMFS_USER_PROGRAMS
+    # (Makefile:1238-1241) and there is no poweroff binary in it, and the guest
+    # has no block device behind the stage-2 to find one on.  The LAST step is
+    # therefore the HOST's poweroff, keyed on hypvm's PASS line -- the pump only
+    # runs inside hyp_vcpu_run(), so once the guest is gone the keystroke goes
+    # back to the host shell instead of being stolen into a ring that no longer
+    # exists (same reasoning as smoke-hyp-console-p0).
+    'smoke-hyp-shell': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-shell-riscv64.log',
+        # Every marker gates its own line, in order, on a tail that is trimmed
+        # after each match (tools/run_with_timeout.py:127-133), so a marker
+        # further down can only be satisfied by output produced after the ones
+        # before it.  Step 3's marker is the bare first token, which the guest's
+        # own echo can also produce -- harmless: the bytes queue in the ring in
+        # order and the guest executes them in order, so `exit` cannot overtake
+        # the output it is waiting for.
+        'stdin': {'kind': 'sendline_seq', 'expect': '# ',
+                  'steps': [('\n# ', 'hypvm -k /bin/boot/guest-kernel-ramfs.elf'),
+                            ('HYPVM: running\n', 'echo AAAABBBBCCCC'),
+                            ('AAAABBBBCCCC', 'echo DDEEEEEEFFFF'),
+                            ('DDEEEEEEFFFF', 'exit'),
+                            ('HYPVM: PASS', 'poweroff')]},
+        # 300s, same as the other hypvm gates: every guest console byte, every
+        # page-table walk and every second-stage fault traps through the host,
+        # so a guest boot is orders of magnitude slower than a host boot of the
+        # same kernel.
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-console; -cpu rv64,h=true is carried so a host
+        # whose default rv64 has no H extension cannot make this gate pass
+        # against nothing.
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # Right guest image: a typo in -k would silently fall back to the
+            # default kernel and still satisfy a banner-only reading of this
+            # gate.  The size line is what tells the two apart.
+            r'HYPVM: guest=/bin/boot/guest-kernel-ramfs\.elf elf_bytes=[0-9]+ '
+            r"mem=128 MiB base=0x80000000 marker='A20OS Kernel'",
+            # WITNESS 1 -- the guest read the keystrokes and ran the command.
+            r'(?:^|# )AAAABBBBCCCC\r?$',
+            # The guest is back at its mksh prompt after that output, which is
+            # the only way the second command below can be typed at all.  This
+            # is the "reached a shell prompt" requirement, pinned on guest-side
+            # text: the host prompt is on an earlier line and the tail has been
+            # trimmed past the host's own steps by the time this can match.
+            r'AAAABBBBCCCC\r?\n# ',
+            # WITNESS 1 again, for the second command: proof the loop is
+            # interactive, not one-shot.
+            r'(?:^|# )DDEEEEEEFFFF\r?$',
+            # The guest's init took its power-off path, i.e. the guest was a
+            # live init+shell system that shut down on request rather than a
+            # kernel that died.  The host's init never prints this (measured:
+            # the host boot reaches "[telnetd] listening on port 2323" and sits
+            # at the prompt).
+            r'\[init\] shutting down',
+            # WITNESS 2 -- the device model's own ingress counter, pinned
+            # non-zero on the line hypvm prints after the guest is gone.  Kept
+            # as a separate expectation from the two above on purpose: they
+            # assert the READ, this one asserts the PUMP, and collapsing them
+            # is what made the previous round's claim hollow.
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ '
+            r'rx_bytes=[1-9][0-9]* exit=1\(shutdown\) mem=128 MiB',
+            # Clean host shutdown rather than a 300s timeout kill; smoke.py's
+            # report() scores the log text and never looks at QEMU's exit
+            # status, so without this a hang stays indistinguishable from a
+            # pass.
+            'System is going down for power-off NOW',
+        ],
+        # PANIC is forbidden HERE and deliberately not in smoke-hyp-console's
+        # list.  There, a guest with no rootfs is an expected arrival and its
+        # panic bytes are byte-identical to the host's, so a PANIC forbid would
+        # go red on a correct run.  Here the guest must reach a shell, so a
+        # panic of either side is the failure this gate exists to catch, and
+        # both sides print the same strings -- which is exactly why both
+        # patterns are here.
+        'forbid': ['KERNEL PANIC', r'\[PANIC\]', 'SLAB BUG', 'LOCK-STALL',
+                   'MCS DEADLOCK', 'HYPVM: FAIL',
+                   # "the guest came up and the keystrokes never reached it".
+                   # The expect above already requires rx_bytes non-zero; this
+                   # is here so the failure message names the cause instead of
+                   # printing a missing-pattern list.
+                   r'rx_bytes=0\b'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-hyp-shell: PASS; log saved to $log',
     },
     'smoke-mmprobe': {
         'gate': {'mem': '1G', 'cpus': '1'},

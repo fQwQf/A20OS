@@ -126,6 +126,27 @@ def build_fat32(a) -> int:
         if r.returncode != 0:
             raise SystemExit(r.returncode)
 
+    # The kernel the hypervisor boots as a guest (smoke-hyp-a20os).  It is a
+    # file on the image rather than a build product of the image because the
+    # user program that loads it is itself on the image: /hyp_boot has no other
+    # way to reach the ELF.  riscv64 only; empty elsewhere.
+    #
+    # Two of them, and the difference between them is the entire reason the
+    # second exists.  guest-kernel.elf is the ordinary build, whose userland
+    # lives on a FAT32 block device; a guest behind the stage-2 has no
+    # virtio-blk to mount that on, so it panics in init_kthread before it can
+    # exec anything.  guest-kernel-ramfs.elf is the same kernel built with
+    # RAMFS_USER=1, which links /bin/init and the rest of the userland into
+    # the image, so that guest has an init with no block device at all.
+    # Shipping only the first is what made "the guest boots" and "the guest is
+    # usable" look like the same milestone; they are not.
+    if a.guest_kernel and (REPO / a.guest_kernel).is_file():
+        mdir(str(img), "::/boot")
+        mcopy(str(img), a.guest_kernel, "::/boot/guest-kernel.elf")
+    if a.guest_kernel_ramfs and (REPO / a.guest_kernel_ramfs).is_file():
+        mdir(str(img), "::/boot")
+        mcopy(str(img), a.guest_kernel_ramfs, "::/boot/guest-kernel-ramfs.elf")
+
     print(f"img: FAT32 image written: {img}")
     return 0
 
@@ -550,7 +571,7 @@ def main() -> int:
                              "sbase-rootfs", "mlibc-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
     for f in (
-              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag" ):
+              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "guest-kernel", "guest-kernel-ramfs", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag" ):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4,

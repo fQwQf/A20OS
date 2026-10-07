@@ -305,6 +305,65 @@ smoke-mm-seg-index-overflow:
 
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
+smoke-hyp-selftest:
+	$(PYTHON) tools/smoke.py smoke-hyp-selftest
+
+# End-to-end vcpu slice gate: a user program creates a VM, loads a
+# hand-encoded guest into it, runs it, and the guest must exit through the SBI
+# shutdown call with its console output visible.  Needs -cpu rv64,h=true, which
+# the case argv carries.
+smoke-hyp-vcpu:
+	$(PYTHON) tools/smoke.py smoke-hyp-vcpu
+
+# Host keystrokes -> guest UART -> host console: `hyp_test echo` runs a guest
+# that polls the modelled 16550's LSR, pops RBR and writes the byte back out
+# through SBI.  Needs -cpu rv64,h=true (carried by the case argv), and
+# sendline_seq rather than sendline, because each step's input depends on the
+# previous step having reached a particular point.
+smoke-hyp-console-p0:
+	$(PYTHON) tools/smoke.py smoke-hyp-console-p0
+
+# A20OS as a guest: /hyp_boot boots the kernel carried on the image as
+# /boot/guest-kernel.elf and the gate passes when the guest's own banner was
+# seen on the guest console.  Needs -cpu rv64,h=true, which the case argv
+# carries, and 300s, because every guest access traps through the host.
+smoke-hyp-a20os:
+	$(PYTHON) tools/smoke.py smoke-hyp-a20os
+
+# /hypvm is that boot with its parameters on the command line.  Two gates,
+# one QEMU boot each: smoke-hyp-vm runs it on hyp_boot's defaults,
+# smoke-hyp-vm-96 on a 96 MiB window with its own bootargs -- the run that
+# matters, because the FDT address is derived from the window top, so a window
+# other than 128 MiB is where a fixed DTB GPA lands inside the guest image.
+# They are two boots rather than two shell lines in one because a second guest
+# boot in the same host session does not come back (see the case comment in
+# tools/smoke_cases.py).  Both need -cpu rv64,h=true (carried by the case argv)
+# and 300s each, for smoke-hyp-a20os's reason.
+smoke-hyp-vm:
+	$(PYTHON) tools/smoke.py smoke-hyp-vm
+
+smoke-hyp-vm-96:
+	$(PYTHON) tools/smoke.py smoke-hyp-vm-96
+
+# The console round trip end to end: the RAMFS_USER=1 guest kernel, booted with
+# no block device behind the stage-2, plus a non-zero rx_bytes on the trailing
+# HYPVM line.  300s like the other two hypvm gates.
+smoke-hyp-console:
+	$(PYTHON) tools/smoke.py smoke-hyp-console
+
+# The acceptance gate for "the guest reaches a shell you can type into": the
+# RAMFS_USER=1 guest must reach its mksh prompt, execute `echo AAAABBBBCCCC`
+# and `echo DDEEEEEEFFFF` typed into it by this harness, print both tokens
+# back, sit at its prompt again, and shut down on `exit` (which is how a guest
+# session is closed without adding anything to the tree -- the RAMFS_USER
+# rootfs has no poweroff binary, Makefile:1238).  The trailing HYPVM line must
+# then carry a non-zero rx_bytes, so the two claims -- "the keystrokes reached
+# the ring" and "the guest read them" -- are asserted separately.
+# sendline_seq, not sendline: each line's input depends on the previous step
+# having reached a particular point.  300s like the other hypvm gates.
+smoke-hyp-shell:
+	$(PYTHON) tools/smoke.py smoke-hyp-shell
+
 smoke-mmprobe:
 	$(PYTHON) tools/smoke.py smoke-mmprobe
 
