@@ -629,7 +629,9 @@ CASES: dict[str, dict] = {
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=false', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt/kernel.elf'],
         'expect': [
-            'HYP_SELFTEST: SKIP (no virtualization extension)',
+            # Smoke expectations are regular expressions, so quote the
+            # parentheses in the literal runtime marker.
+            r'HYP_SELFTEST: SKIP \(no virtualization extension\)',
             'hyp_selftest=PASS',
         ],
         'forbid': ['PANIC', 'Kernel Illegal Instruction', 'HYP_SELFTEST: FAIL'],

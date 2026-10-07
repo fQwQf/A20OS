@@ -40,6 +40,11 @@ extern uint64_t __boot_dtb_ptr;
 
 static paddr_t riscv64_ram_base = PHYS_MEMORY_BASE;
 static paddr_t riscv64_ram_end = PHYS_MEMORY_END;
+/* OpenSBI's DTB pointer is a temporary physical address.  Snapshot the ISA
+ * facts needed after MMU setup while the boot identity mapping is alive. */
+static int riscv64_fdt_isa_cache_ready;
+static int riscv64_fdt_has_h;
+static int riscv64_fdt_has_sstc;
 
 /* The selected board declares the physical window the kernel may use.  The
  * FDT memory node then narrows that window to the RAM actually populated, so
@@ -56,6 +61,20 @@ static void riscv64_window_from_board(void)
 
 int riscv64_fdt_has_isa_extension(const char *extension)
 {
+    if (!extension)
+        return 0;
+    if (riscv64_fdt_isa_cache_ready) {
+        if (strcmp(extension, "h") == 0)
+            return riscv64_fdt_has_h;
+        if (strcmp(extension, "sstc") == 0)
+            return riscv64_fdt_has_sstc;
+        /* Do not dereference the firmware's temporary buffer after the
+         * boot mapping is gone.  These are the only late-query consumers. */
+        return 0;
+    }
+
+    /* Before MMU initialization, OpenSBI's physical pointer is reachable
+     * through the temporary identity map. */
     const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
     if (!base || !extension || read_be32(base) != FDT_MAGIC)
         return 0;
@@ -173,6 +192,15 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
 void riscv64_memory_init(void)
 {
     riscv64_window_from_board();
+
+    /* Snapshot the only ISA properties consumed after MMU initialization.
+     * OpenSBI's DTB is passed as a physical pointer and may not be mapped (or
+     * retained) after the temporary boot identity map is removed. */
+    if (!riscv64_fdt_isa_cache_ready) {
+        riscv64_fdt_has_h = riscv64_fdt_has_isa_extension("h");
+        riscv64_fdt_has_sstc = riscv64_fdt_has_isa_extension("sstc");
+        riscv64_fdt_isa_cache_ready = 1;
+    }
 
     const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
     if (!base || read_be32(base) != FDT_MAGIC) {

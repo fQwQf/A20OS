@@ -30,6 +30,10 @@
 size_t arch_ram_range_count(void);
 int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 void riscv64_memory_init(void);
+/* Early-boot queries may inspect the OpenSBI DTB directly. After
+ * riscv64_memory_init() snapshots the ISA facts, only "h" and "sstc" are
+ * supported; other extensions fail closed instead of rereading the temporary
+ * firmware pointer. */
 int riscv64_fdt_has_isa_extension(const char *extension);
 uint64_t riscv64_fdt_timebase_freq(void);
 /* Returns how many platform devices the tree yielded, so a board can tell an
