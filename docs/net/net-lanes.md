@@ -851,6 +851,71 @@ ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是�
    但"编译器会折叠"是对某个编译器版本的断言，"一 lane 下预处理结果就是上游那句"
    是可以 `grep` 出来的事实。铁律该按后者守。
 
+### 阶段 C2 落地记录：memp 按 lane 索引推广到全部池，以及它**不是**内存分片
+
+阶段 C 只给 `MEMP_PBUF` / `MEMP_PBUF_POOL` 两个池做了 lane 索引，其余 22 个保持全局。
+阶段 C2 把索引推广到**每一个池**，理由是直接的：`g_lwip_lock` 切开之后，若
+`tcp_pcb_alloc()` 之类仍走全局表，"部分分片"既不是原来的全局锁、也不是新的分片锁，
+是第三种更坏的状态。**能统一就统一**，所以选了统一。
+
+**必须先说清楚 `MEMP_MEM_MALLOC=1` 下"池"是什么**，因为这一节的名字很容易被读大。
+三档 profile 全是 `MEMP_MEM_MALLOC=1`（`net_profile.h:92`/`:357`/`:418`），该模式下：
+
+| 问题 | 答案 | 出处 |
+|---|---|---|
+| 有 free-list 吗 | **没有**。`memp_init_pool()` 是空桩 | `src/core/memp.c:343-345` |
+| 有静态数组吗 | **没有**。描述符只贡献一个 `size` | `src/include/lwip/priv/memp_priv.h:130-146` |
+| 那分配走哪 | `mem_malloc(MEMP_SIZE + MEMP_ALIGN_SIZE(desc->size))` | `src/core/memp.c:449` |
+| 释放走哪 | `LWIP_UNUSED_ARG(desc)` 后直接 `mem_free()`，元素回到**同一块**堆 | `src/core/memp.c:585-587` |
+
+所以在 MEMP_MEM_MALLOC=1 下，**池既不是计数器也不是堆分区，它什么都不是**——它只是
+一个把 pool id 翻译成元素大小的查表，真正干活的分配器是 `mem.c` 的全局堆。因此：
+
+- **per-lane 化没有 ×N 的内存放大。** 本阶段编排给的预期是"per-lane 化会放大内存
+  占用（×N）"，**在这棵树上前提不成立**：池元素仍从同一块 `MEM_SIZE` 堆上取，没有
+  按 lane 预留的东西可以放大。三张 per-lane 表是 0 / 784 / 1904 / 4144 B
+  （N=1/2/4/8），**三档完全相同**，因为它不随任何一档的堆缩放。
+- **本阶段编排给的另一条判断也不成立**："`tcp_pcb_alloc()` 仍会踩同一个 free-list"。
+  没有 free-list 可踩。两条 lane 并发 `tcp_pcb_alloc()` 走的是两次 `mem_malloc()`，
+  不共享任何 memp 内部状态。
+- **被按 lane 切开的只有两样东西**：一是描述符表（将来挂 per-lane base 数组的那个索引），
+  二是 per-(lane, pool) 的 alloc/freed 单调计数。
+
+per-lane 副本里的 `stats` 指针**刻意保持指向同一个 `stats_mem`**：`lwip_stats.memp[]`
+与 `/proc` 渲染器把这些计数器当全局量读（`lwip_stack.c` 报
+`lwip_stats.memp[MEMP_TCP_PCB]->used` 为 `tcp_active`），给每条 lane 一份私有 stats 块
+会在多 lane 构建上把这个数悄悄重新定义成"lane 0 的 TCP PCB 数"。能拆的拆了，被当总量读
+的仍然是总量。
+
+`/proc/a20/netmem` 的渲染随之从两个 pbuf 池扩到全部池，表头由 `pbuf lane` 改成
+`memp lane`，并按 lane 汇总所有池（`MEMP_MAX × CONFIG_NET_LANES` 行会淹没读者要的那
+一行）。**注意 `smoke-lwip-memp` 门禁按 `NET_LANES` 默认值 1 构建**（`Makefile:127`
+`NET_LANES ?= 1`，该目标不覆盖它），因此整段 lane 行在 N=1 下根本不渲染，该门禁的
+期望值**无需改动**——形状变了，但只在 N>1 时可见。
+
+#### 阶段 C2 查到的一件比本阶段更要紧的事：切 memp 并不足以让 `g_lwip_lock` 可切
+
+本阶段被赋予的定位是"锁分片的硬前置"。查完之后必须如实记下：**在这个配置下它不是。**
+`g_lwip_lock` 切开之后真正会被并发共享、且**没有任何内部保护**的可变结构，是 `mem.c`
+里那一块全局堆——`ram_heap[MEM_SIZE_ALIGNED]` 静态数组加唯一的全局 `lfree` 空闲链表。
+实测证据（每一条都独立核过）：
+
+| 事实 | 出处 |
+|---|---|
+| `NO_SYS 1` | `kernel/net/lwip_port/lwipopts.h:6` |
+| `mem_mutex` 只在 `#if !NO_SYS` 下声明，本配置下根本不编译 | `src/core/mem.c:375-377` |
+| `LWIP_MEM_FREE_PROTECT()` 定义成 `sys_mutex_lock(&mem_mutex)` | `src/core/mem.c:397` |
+| `NO_SYS=1` 时 `sys_mutex_lock(mu)` 展开成空 | `src/include/lwip/sys.h:63` |
+| `LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT` 全树未覆盖 = 0，故走上面这条空互斥而非 `SYS_ARCH_PROTECT` | `src/include/lwip/opt.h:400` |
+| 预处理后 `mem_free()` 里两处 `LWIP_MEM_FREE_PROTECT/UNPROTECT()` 都是裸 `;`，`lfree` 改写与 `plug_holes()` 全程无保护 | `gcc -E -P kernel/external/lwip/src/core/mem.c` |
+| `SYS_ARCH_PROTECT` 也救不了：`arch_local_irq_disable()` 只关本 CPU 的 IRQ | `kernel/net/lwip_compat.c:53-56` |
+
+于是分片锁之前必须先给堆定归属，两条路都有实质代价：**要么**每条 lane 一块堆（回到
+`!MEMP_MEM_MALLOC` 的静态预留布局，并把 ×N 记进三档 profile 的账——`net_profile.h`
+注释早已把它标为"profile 级的决定"），**要么**给这块堆一把专用的全局分配器锁（但
+`NO_SYS=1` 意味着没有现成的 OS 互斥可用，得接到 A20OS 自己的原语上）。**本树两条都
+还没选，本阶段也不选。** 阶段 C2 的 per-lane 索引是这两条路的前置件，不是替代品。
+
 ### 门禁现状：`smoke-net-accept` 本身是 flaky 的（与本次修复无关）
 
 在最终干净树上复跑 `smoke-net-accept` 三次：

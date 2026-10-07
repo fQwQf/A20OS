@@ -477,7 +477,7 @@ _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
  * The embedded tier's whole accounting, asserted here because this is the first
  * point in the include chain where net_socket_t is a complete type.
  *
- * The other three terms are checked against real sizeof() in the files that own
+ * The other terms are checked against real sizeof() in the files that own
  * them -- socket_packet.c for the AF_PACKET ring, lwip_stack.c for the netif
  * state, netfilter_nat.c for the filter tables -- and the heap is a static
  * array of exactly NET_PROFILE_MEM_SIZE bytes in memp/mem.c.  What only this
@@ -486,16 +486,38 @@ _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
  * against a 20 KiB device, which is the number docs/server-readiness.md kept
  * quoting as the reason the tier could not fit.
  *
- * With the per-tier ring depth and inline payload it is 8 x 2440 = 19520 B, so
- * the socket table is inside NET_PROFILE_SOCKET_BUDGET with 960 B to spare, and
- * the four terms together are 42644 B against NET_PROFILE_TOTAL_BUDGET (44 KiB).
+ * With the per-tier ring depth and inline payload the socket table is
+ * 8 x 2448 = 19584 B, inside NET_PROFILE_SOCKET_BUDGET (20 KiB) with 896 B to
+ * spare.
  *
- * The frame term below is the macro bound, not the measured 3732 B: the AF_PACKET
- * ring carries one more slot than the profile's macro counts (the drain scratch
- * buffer in socket_packet.c), so the macro undercounts by 516 B and the real
- * total is 42644 rather than the 42128 the assert is checking.  That is the
- * right direction for a bound this tight and is why the ceiling carries 2.4 KiB
- * of slack.
+ * Stage C2 re-measured all five terms on riscv64 LP64 at this tier by sizing a
+ * char[] probe of the assert's own expression, rather than adding to the
+ * numbers written here.  Three of them were stale:
+ *
+ *   socket table    19584   (the comment said 8 x 2440 = 19520; net_socket_t
+ *                            grew by 8 B and the 960 B of slack was 896 B)
+ *   frame arrays     2064   4 slots x (4 + 1536), exact
+ *   netif state      1152   1 dev x (2 x 512 + 128)
+ *   filter tables    3328   32 x 64 + 1280
+ *   lwIP heap       16384   NET_PROFILE_MEM_SIZE, a static array in mem.c
+ *                    -----
+ *                    42512   at one lane, against a 45056 ceiling
+ *
+ * So the four terms are 42512, not the 42644 this comment claimed, and the
+ * "the macro undercounts by 516 B" note was itself stale: socket_packet.c has
+ * exactly NET_PROFILE_PACKET_RING_SLOTS slots in g_pkt_ring and the only other
+ * frame-sized buffer is a stack local in the AF_PACKET send path
+ * (socket_packet.c:314), so the frame term is exact and there is no undercount
+ * to allow for.  Both corrections run the same way -- the real number is below
+ * what the comment promised -- so nothing here got tighter than it looked.
+ *
+ * The fifth term, the per-lane memp tables, is stage C2's.  It is 0 at
+ * CONFIG_NET_LANES == 1, which is how the embedded tier ships, so no shipping
+ * configuration moved: the assert evaluates to exactly the same 42512 it did
+ * before this change.  At four lanes it is 44416, inside 45056 by 640 B.  That
+ * is the whole reason the ceiling carries 2.5 KiB of headroom rather than being
+ * rounded down to the last byte: an embedded build that also wants four lanes is
+ * a legitimate thing to compile, and it still fits.
  */
 _Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) <= NET_PROFILE_SOCKET_BUDGET,
                "the embedded profile's whole socket table does not fit the "
@@ -506,12 +528,13 @@ _Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) +
                    NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
                    NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES +
                    NET_PROFILE_FILTER_BUDGET +
-                   NET_PROFILE_MEM_SIZE
+                   NET_PROFILE_MEM_SIZE +
+                   NET_PROFILE_MEMP_LANE_TABLE_BYTES
                <= NET_PROFILE_TOTAL_BUDGET,
                "the embedded profile's total RAM -- socket table, frame arrays, "
-               "filter tables and the lwIP heap -- exceeds the ceiling the "
-               "profile declares for itself; one of the four terms grew and the "
-               "tier no longer fits the part it names");
+               "filter tables, the lwIP heap and the per-lane memp tables -- "
+               "exceeds the ceiling the profile declares for itself; one of the "
+               "five terms grew and the tier no longer fits the part it names");
 
 #endif /* CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED */
 
