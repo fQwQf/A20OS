@@ -1129,9 +1129,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         buf[0] = '\0';
         return 0;
     case PF_PID_AUXV: {
-        /* Linux format: one {type,value} pair per line, both as %08lx.  A
-         * reader parses the file by shape, so the width is part of the
-         * interface rather than cosmetics. */
+        /* Linux exposes auxv as native-word {type,value} pairs, terminated
+         * by {AT_NULL,0}.  Keep this binary: callers read it as an ABI
+         * structure, not as a human-readable proc status file. */
         task_t *t = proc_find_get(pid);
         if (!t)
             break;
@@ -1141,23 +1141,18 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             uint32_t n = mm->auxv_n;
             if (n > A20_AUXV_MAX_PAIRS)
                 n = A20_AUXV_MAX_PAIRS;
-            size_t len = 0;
-            for (uint32_t i = 0; i < n; i++) {
-                /* Leave room for the last line's NUL: the buffer is the
-                 * contract, and a line written without it would hand back an
-                 * unterminated record. */
-                int w = snprintf(buf + len, (len < bufsz) ? bufsz - len : 0,
-                                 "%08lx %08lx\n",
-                                 (unsigned long)mm->auxv[i][0],
-                                 (unsigned long)mm->auxv[i][1]);
-                if (w < 0)
-                    break;
-                len += (size_t)w;
-                if (len >= bufsz) {      /* truncated: stop cleanly */
-                    len = bufsz - 1;
-                    break;
+            size_t pair_size = 2 * sizeof(unsigned long);
+            size_t len = (size_t)n * pair_size;
+            if (len > bufsz)
+                len = 0; /* never publish a silently truncated vector */
+            else
+                for (uint32_t i = 0; i < n; i++) {
+                    unsigned long pair[2] = {
+                        (unsigned long)mm->auxv[i][0],
+                        (unsigned long)mm->auxv[i][1],
+                    };
+                    memcpy(buf + (size_t)i * pair_size, pair, pair_size);
                 }
-            }
             spin_unlock_irqrestore(&mm->lock, flags);
             proc_put(t);
             buf[len] = '\0';

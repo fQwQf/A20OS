@@ -1,0 +1,35 @@
+# Runtime audit of selected AArch64 FEX-related kernel interfaces. This does
+# not claim FEX support: the probe reports both initial-stack auxv and the
+# current /proc auxv format, and tests the mprotect hint/error contract.
+name = "check-fex-precond-aarch64"
+description = "audit AArch64 auxv surfaces and PROT_BTI/PROT_MTE mprotect behavior"
+arch = "aarch64"
+abi = "linux"
+
+[test]
+commands = ["auxvprobe", "btiprobe", "poweroff"]
+expect = [
+	# The initial stack is the binary vector a newly exec'd image receives.
+	# AT_EXECFN is explicitly reported because this kernel does not currently
+	# publish that tag; no FEX compatibility claim follows from this audit.
+	"AUXV_STACK: 19 pairs, 1 AT_NULL, required=present, AT_EXECFN=absent",
+	# Require native-word bytes to match the exec vector even when consumed
+	# through short reads across arbitrary pair boundaries.
+	"AUXV_PROC: binary 19 pairs, native-word, stack-match=YES, PHDR/PAGESZ/AT_NULL=valid",
+	"AUXV: PROC_LINUX_COMPAT=YES; FEX_SUPPORT=NOT_ESTABLISHED",
+	"AUXV: AUDIT DONE",
+	# mmap never validated prot, so a hint there was already ignored.
+	# The assertion is only that the hint changes nothing.
+	"PROT_HINT: mmap[RW]: plain=ok, hinted=ok, unchanged",
+	"PROT_HINT: mmap[RWX]: plain=ok, hinted=ok, unchanged",
+	# mprotect is the strict path.  The hint is accepted rather than refused.
+	"PROT_HINT: mprotect[RW (no hint)] = ok, want success",
+	"PROT_HINT: mprotect[RW | PROT_BTI] = ok, want success",
+	"PROT_HINT: mprotect[RW | PROT_MTE] = ok, want success",
+	"PROT_HINT: mprotect[RWX | PROT_BTI] = ok, want success",
+	"PROT_HINT: mprotect[RW | BTI and MTE] = ok, want success",
+	# An unknown bit must fail specifically with EINVAL, not any arbitrary error.
+	"PROT_HINT: mprotect[RW | unknown 0x40000000] = ok, want EINVAL (errno=22)",
+	"PROT_HINT: DONE",
+]
+timeout = "1200s"
