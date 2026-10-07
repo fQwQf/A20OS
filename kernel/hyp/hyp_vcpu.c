@@ -555,6 +555,9 @@ struct hyp_guest_access {
     int      store;
     int      sign;    /* sign-extend the loaded value (rv64 rule) */
     int      ilen;    /* 2 for RVC, 4 for the 32-bit encodings */
+    int      fp;      /* FP transfer: address and width are real, but the
+                       * register side is an FPR this model does not hold --
+                       * fill-and-retry only, never emulated against MMIO */
 };
 
 static int hyp_guest_read_insn(hyp_vcpu_t *vcpu, uint32_t *insn)
@@ -601,12 +604,22 @@ static inline unsigned hyp_rvc_reg3(unsigned f)
  * c.sw) just moves the same undecodable failure to the next c.sdsp, so all
  * eight land together.
  *
- * WHAT IS DELIBERATELY NOT HERE: c.fldsp and c.fsdsp (84 and 56 occurrences).
- * The guest frame comes up with sstatus = SPP|SPIE|SIE and FS Off
- * (kernel/arch/riscv64/hyp/hyp_vcpu_asm.S programs exactly that), so a guest
- * floating-point instruction raises the GUEST's own illegal-instruction trap
- * before it can ever take a second-stage access fault -- decoding the FP forms
- * here would be unreachable code, not a missing feature.
+ * WHAT THE FP FORMS DO HERE (c.fldsp and c.fsdsp, 84 and 56 occurrences in
+ * the guest image, plus c.fld/c.fsd and the 32-bit fld/fsd): address and width
+ * only.  Guest entry programs sstatus with FS=Initial
+ * (kernel/arch/riscv64/hyp/hyp_vcpu_asm.S), because mstatus.FS is a HOST-level
+ * gate -- a guest raising FS from VS-mode only reaches vsstatus, so with
+ * FS=Off at entry the guest's own trap handler kept faulting on the fsd that
+ * saves its FP frame and recursed off the stack.  With FS live, an FP access
+ * over a not-yet-filled page is a real second-stage access fault this decoder
+ * must answer: it answers with va/len, hyp_ram_fill() populates the page, and
+ * the GUEST RETRIES THE INSTRUCTION -- hardware does the FPR transfer itself,
+ * because this model has no guest FPR file to put the data in or take it
+ * from.  rd and value stay zero (an FPR index must never land in the GPR
+ * file), and hyp_guest_mem_fault records a fault instead of emulating FP
+ * against MMIO, where the value would have to come from or go to an FPR the
+ * model cannot see.  RV64 has no flw/fsw (those are RV32-only), so nothing
+ * memory-shaped is left unenumerated.
  */
 static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
                                  struct hyp_guest_access *a)
@@ -620,6 +633,7 @@ static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
     a->rd   = 0;
     a->sign = 0;
     a->value = 0;
+    a->fp   = 0;
 
     switch (c & 3) {
     case 0:     /* quadrant 0: the *4SPN and * forms, x8..x15 only */
@@ -640,12 +654,26 @@ static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
             a->len = 8; a->store = 0; a->sign = 0; a->rd = rdp;
             return 1;
         }
-        /* Quadrant 0's floating-point slot is funct3=0x1 (c.fld); 0x5 is
-         * c.fsd.  Only one of the two is spelled out here and both answer
-         * the same thing -- not decoded -- so name the one this line is, and
-         * let 0x1 fall to the default below rather than leaving a reader to
-         * assume the FP forms were enumerated. */
-        case 0x5: return 0;    /* c.fsd: floating point, see above */
+        /* The FP slots: funct3=0x1 is c.fld, 0x5 is c.fsd.  Both carry the
+         * immediate layout of the integer twin sitting right beside them
+         * (c.ld / c.sd above), which is the only part that matters here: the
+         * destination or source register is an FPR, so rd and value stay at
+         * their zero defaults and the fill-and-retry path never consults
+         * either (see the block comment above this function). */
+        case 0x1: {            /* c.fld  same offsets as c.ld */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 5) & 3) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 8; a->store = 0; a->sign = 0; a->fp = 1;
+            return 1;
+        }
+        case 0x5: {            /* c.fsd  same offsets as c.sd */
+            uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
+                           ((uint64_t)((c >> 5) & 3) << 6);
+            a->va = vcpu->regs[rs1p] + off;
+            a->len = 8; a->store = 1; a->fp = 1;
+            return 1;
+        }
         case 0x6: {            /* c.sw  same offsets as c.lw, rs2' = inst[4:2] */
             uint64_t off = ((uint64_t)((c >> 10) & 7) << 3) |
                            ((uint64_t)((c >> 6) & 1) << 2) |
@@ -667,7 +695,17 @@ static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
     case 2:     /* quadrant 2: the *SP forms, full 5-bit registers off x2 */
         switch (funct3) {
         case 0x0: return 0;    /* c.slli */
-        case 0x1: return 0;    /* c.fldsp: floating point, see above */
+        case 0x1: {            /* c.fldsp rd=inst[11:7], an FPR
+                                *   off[5]=inst[12] [4:3]=inst[6:5] [8:6]=inst[4:2]
+                                *   -- same immediate as the c.ldsp below */
+            uint64_t off = ((uint64_t)((c >> 2) & 7) << 6) |
+                           ((uint64_t)((c >> 12) & 1) << 5) |
+                           ((uint64_t)((c >> 5) & 3) << 3);
+            a->va = vcpu->regs[2] + off;
+            a->len = 8; a->store = 0; a->sign = 0; a->fp = 1;
+            a->rd = 0;   /* inst[11:7] is an FPR index, not an x register */
+            return 1;
+        }
         case 0x2: {            /* c.lwsp rd=inst[11:7]
                                 *   off[5]=inst[12] [4:2]=inst[6:4] [7:6]=inst[3:2] */
             uint64_t off = ((uint64_t)((c >> 2) & 3) << 6) |
@@ -688,7 +726,16 @@ static int hyp_decode_rvc_access(hyp_vcpu_t *vcpu, uint32_t insn,
             a->rd = (unsigned)((c >> 7) & 0x1f);
             return 1;
         }
-        case 0x5: return 0;    /* c.fsdsp: floating point, see above */
+        case 0x5: {            /* c.fsdsp rs2=inst[6:2], an FPR
+                                *   off[5:3]=inst[12:10] [8:6]=inst[9:7]
+                                *   -- same immediate as the c.sdsp below */
+            uint64_t off = ((uint64_t)((c >> 7) & 7) << 6) |
+                           ((uint64_t)((c >> 10) & 7) << 3);
+            a->va = vcpu->regs[2] + off;
+            a->len = 8; a->store = 1; a->fp = 1;
+            a->value = 0;   /* the store data is an FPR, not vcpu->regs[] */
+            return 1;
+        }
         case 0x6: {            /* c.swsp rs2=inst[6:2]
                                 *   off[5:2]=inst[12:9] [7:6]=inst[8:7] */
             uint64_t off = ((uint64_t)((c >> 7) & 3) << 6) |
@@ -727,6 +774,7 @@ static int hyp_decode_guest_access(hyp_vcpu_t *vcpu, struct hyp_guest_access *a)
         return hyp_decode_rvc_access(vcpu, insn, a);
 
     a->ilen = 4;
+    a->fp   = 0;
 
     unsigned opcode = insn & 0x7f;
     unsigned funct3 = (insn >> 12) & 7;
@@ -766,6 +814,27 @@ static int hyp_decode_guest_access(hyp_vcpu_t *vcpu, struct hyp_guest_access *a)
         a->rd    = 0;
         a->sign  = 0;
         a->value = vcpu->regs[(insn >> 20) & 0x1f];   /* rs2 */
+        return 1;
+    }
+
+    /* The FP memory ops of RV64: fld/fsd (opcode 0x07/0x27, funct3=3).  Same
+     * I/S-type immediates as ld/sd; rd/rs2 are FPR indices, so the GPR-facing
+     * rd and value stay zero and only the address and width are handed up for
+     * fill-and-retry.  RV32's flw/fsw (funct3=2) are deliberately absent --
+     * there is no RV32 guest on this path -- and fall through to the undecodable
+     * answer below. */
+    if (opcode == 0x07 && funct3 == 3) {           /* fld */
+        a->va    = base + hyp_sext((uint64_t)(insn >> 20), 12);
+        a->len   = 8; a->store = 0; a->sign = 0;
+        a->rd    = 0; a->value = 0; a->fp = 1;
+        return 1;
+    }
+
+    if (opcode == 0x27 && funct3 == 3) {           /* fsd */
+        uint32_t imm = (uint32_t)(((insn >> 25) << 5) | ((insn >> 7) & 0x1f));
+        a->va    = base + hyp_sext(imm, 12);
+        a->len   = 8; a->store = 1; a->sign = 0;
+        a->rd    = 0; a->value = 0; a->fp = 1;
         return 1;
     }
 
@@ -849,6 +918,21 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
     if (rc != -EFAULT) {
         kerr("hyp: guest RAM fill gpa=%lx pc=%lx rc=%d\n",
              (unsigned long)gpage, (unsigned long)vcpu->pc, rc);
+        hyp_vcpu_record_fault(vcpu, scause, gpa, htval);
+        return 0;
+    }
+
+    /* An FP access against a device would have to move data between an FPR
+     * and the device model, and this vcpu carries no FPR file: emulating it
+     * would hand the device a GPR's value or hand the FPR a zero.  The RAM
+     * path above answers FP faults the only honest way there is -- fill the
+     * page and let the guest retry the instruction in hardware -- so reaching
+     * this line with fp set means the access was never going to be emulated.
+     * Record it as the fault it is rather than faking a transfer. */
+    if (a.fp) {
+        kerr("hyp: guest FP %s to MMIO gpa=%lx pc=%lx\n",
+             a.store ? "store" : "load", (unsigned long)gpa,
+             (unsigned long)vcpu->pc);
         hyp_vcpu_record_fault(vcpu, scause, gpa, htval);
         return 0;
     }
