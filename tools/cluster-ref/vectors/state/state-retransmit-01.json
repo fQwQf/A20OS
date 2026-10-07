@@ -1,0 +1,101 @@
+{
+  "id": "state-retransmit-01",
+  "category": "state",
+  "title": "the RTO retransmission of a CALL must be byte-identical",
+  "doc_sections": [
+    "02-wire-protocol.md 7",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "assumptions": [
+    "A-11"
+  ],
+  "notes": "02-7: retransmission reuses the same seq so that the receiver's bitmap can recognise it; only the bytes are resent, no field is rewritten.",
+  "precondition": "the first copy was lost; RTO = max(200 ms, 2 x RTT mean) has expired",
+  "followup": "retransmits += 1 on the sender; the receiver drops the duplicate (dedup_drops) and re-ACKs; the service side must not execute twice (02-4 dedup window over (src_hash, txid))",
+  "frame": {
+    "magic": "0x4C43",
+    "ver": 0,
+    "type": 6,
+    "type_name": "CALL",
+    "flags": "0x0001",
+    "flags_set": {
+      "RELIABLE": true,
+      "FRAGMENTED": false,
+      "BROADCAST": false,
+      "COMPRESSED": false
+    },
+    "unknown_flag_bits": "0x0000",
+    "frag": "0x0000",
+    "frag_seq": 0,
+    "frag_last": false,
+    "frag_reserved_nonzero": false,
+    "txid": 1000,
+    "src_hash": "0xAE8E8135",
+    "dst_hash": "0x5EDC2075",
+    "dst_slot": 3,
+    "seq": 1,
+    "payload_len": 20,
+    "ttl": 8,
+    "csum_kind": 1,
+    "wire_len": 54,
+    "crc_present": true,
+    "crc_value": "0xEE2E",
+    "crc_ok": true
+  },
+  "payload": {
+    "len": 20,
+    "hex": "070000000180040070696e670280040007000000",
+    "app_offset": 4,
+    "app_len": 16,
+    "app_hex": "0180040070696e670280040007000000",
+    "ack_prefix": 7
+  },
+  "diagnostics": {
+    "wire_len": 54,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "OK",
+    "crc_value": "0xEE2E",
+    "crc_computed": "0xEE2E"
+  },
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "reliable",
+      "action": "accept",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "note": "byte-identical to the first copy; the receiver counts dedup_drops, the sender counts retransmits"
+    }
+  },
+  "hex_file": "state/state-retransmit-01.hex"
+}

@@ -1,0 +1,64 @@
+{
+  "id": "mal-len-trailing-01",
+  "category": "malformed",
+  "title": "4 garbage bytes appended after the CRC trailer",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "append",
+      "doc": "02-1",
+      "why": "trailing garbage",
+      "bytes": "deadbeef",
+      "was_len": 42
+    }
+  ],
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 46,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "mismatch",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "payload_len_mismatch"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-len-trailing-01.hex"
+}

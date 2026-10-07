@@ -1,5 +1,7 @@
 # 用户态集群服务规范（clusterd / 命名 / jobd / 演示）
 
+> **实现状态（2026-10-07）**：本文件描述的用户态服务与演示——clusterd（§1）、service:// 命名解析（§2）、jobd（§4）、demo-echo/demo-wordcount（§5）——**均尚未实现**，属于 WD 轨道（WD1/WD2）计划；本文是规范/验收依据，不是使用说明。已完成的是内核侧数据面 loopback 骨架（WA1，见 `kernel/cluster/` 与 [03-kernel-impl.md](03-kernel-impl.md)）、线协议参考编解码与金样向量（WB1，见 `tools/cluster-ref/`）、双 QEMU UDP 互联（WB2，见 [02-udp-demo.md](02-udp-demo.md)）、UART 传输与 MCU 叶子（WC1，见 `kernel/cluster/uart.c`）。轨道进度总览见 [impl-prompts.md](impl-prompts.md) 头部横幅。
+
 内容已按 2026-10 源码核对。服务编写范式参照 `user/svc/echod.c`（最小 channel 服务）、`user/svc/svcmgr.c`（监管）、`user/svc/a20_services.idl`（服务接口声明惯例）。所有服务是 Native ABI 普通进程，崩溃由 svcmgr 重启——**状态必须能重建**（从内核查询 + 种子配置），禁止把不可恢复状态只存内存。
 
 ## 1. clusterd（成员与路由服务）

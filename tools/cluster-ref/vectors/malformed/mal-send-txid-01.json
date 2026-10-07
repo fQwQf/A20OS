@@ -1,0 +1,77 @@
+{
+  "id": "mal-send-txid-01",
+  "category": "malformed",
+  "title": "SEND with txid=5 although 02-1 says SEND puts 0",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "txid on SEND",
+      "offset": 8,
+      "value": 5,
+      "was": "0x00"
+    },
+    {
+      "op": "recrc",
+      "doc": "02-1",
+      "why": "CRC recomputed so the frame reaches the rule under test"
+    }
+  ],
+  "assumptions": [
+    "A-15"
+  ],
+  "notes": "A-15: 02-1 states this as a send-side rule; this vector pins the receiver-side reading (reject + rx_malformed). The alternative is to ignore it for forward compatibility.",
+  "frame": null,
+  "raw_header": "434c0005000000000500000035818eae7520dc5e000000000000000010000801",
+  "diagnostics": {
+    "wire_len": 50,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "txid_on_send",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "txid_on_send",
+    "crc_value": "0x3A9F",
+    "crc_computed": "0x3A9F"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "txid_on_send"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "txid_on_send",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-send-txid-01.hex"
+}

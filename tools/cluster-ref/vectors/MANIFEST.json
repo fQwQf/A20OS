@@ -1,0 +1,3425 @@
+{
+  "schema": "a20-cluster-goldvectors/1",
+  "doc": "docs/cluster/02-wire-protocol.md 9",
+  "generated_by": "tools/cluster-ref/gen_vectors.py",
+  "reference_codec": "tools/cluster-ref/clframe.py",
+  "counter_names": [
+    "tx_frames",
+    "rx_frames",
+    "tx_drops",
+    "rx_drops",
+    "rx_malformed",
+    "retransmits",
+    "reasm_timeouts",
+    "reasm_evicted",
+    "dedup_drops",
+    "hello_rejects"
+  ],
+  "mtu": {
+    "loopback": 65536,
+    "udp": 1472,
+    "uart": 256
+  },
+  "max_payload_len": {
+    "loopback": 65502,
+    "udp": 1438,
+    "uart": 222
+  },
+  "node_hashes": {
+    "NODE_A": {
+      "node_id": "0102030405060708090a0b0c0d0e0f10",
+      "hash": "0xAE8E8135"
+    },
+    "NODE_B": {
+      "node_id": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "hash": "0x5EDC2075"
+    },
+    "LEAF": {
+      "node_id": "deadbeef000000000000000000000001",
+      "hash": "0x94DDCBB0"
+    },
+    "A20_NODE_ID_LOCAL": {
+      "node_id": "00000000000000000000000000000000",
+      "hash": "0x69691905"
+    },
+    "A20_NODE_ID_BROADCAST": {
+      "node_id": "ffffffffffffffffffffffffffffffff",
+      "hash": "0x360779F5"
+    }
+  },
+  "errno": {
+    "A20_ERR_NO_ENTRY": 2,
+    "A20_ERR_EXISTS": 10,
+    "A20_ERR_INVALID_ARGUMENT": 12,
+    "A20_ERR_NO_SPACE": 13,
+    "A20_ERR_NOT_FOUND": 24,
+    "A20_ERR_NODE_UNREACHABLE": 26,
+    "A20_ERR_CLUSTER_TIMEOUT": 27,
+    "A20_ERR_REMOTE_CLOSED": 28,
+    "A20_ERR_CLUSTER_UNSUPPORTED": 29
+  },
+  "counts": {
+    "total": 108,
+    "by_category": {
+      "valid": 30,
+      "malformed": 49,
+      "reserved": 7,
+      "state": 6,
+      "slip": 16
+    },
+    "valid_by_type": {
+      "HELLO": 4,
+      "HELLO_ACK": 2,
+      "PING": 2,
+      "PONG": 2,
+      "SEND": 3,
+      "CALL": 5,
+      "CALL_REPLY": 4,
+      "CLOSE": 2,
+      "ACK": 2,
+      "NACK": 2,
+      "ERROR": 2
+    },
+    "counters_exercised": [
+      "dedup_drops",
+      "hello_rejects",
+      "reasm_evicted",
+      "rx_drops",
+      "rx_frames",
+      "rx_malformed",
+      "tx_drops"
+    ],
+    "counters_never_exercised": [
+      "tx_frames",
+      "retransmits",
+      "reasm_timeouts"
+    ]
+  },
+  "vectors": [
+    {
+      "id": "valid-hello-default-01",
+      "category": "valid",
+      "file": "valid/valid-hello-default-01.json",
+      "hex_file": "valid/valid-hello-default-01.hex",
+      "title": "A -> B HELLO over UDP, DEFAULT tier, CAP_RELIABLE",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 7",
+        "01-abi.md node hash",
+        "04-transports.md 3"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-hello-default-02",
+      "category": "valid",
+      "file": "valid/valid-hello-default-02.json",
+      "hex_file": "valid/valid-hello-default-02.hex",
+      "title": "B -> A HELLO, SERVER tier with CAP_RELAY|CAP_RELIABLE",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "01-abi.md node hash"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-hello-default-03",
+      "category": "valid",
+      "file": "valid/valid-hello-default-03.json",
+      "hex_file": "valid/valid-hello-default-03.hex",
+      "title": "A -> B HELLO with csum_kind=0 (CRC optional off UDP)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "04-transports.md 3"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-hello-uart-01",
+      "category": "valid",
+      "file": "valid/valid-hello-uart-01.json",
+      "hex_file": "valid/valid-hello-uart-01.hex",
+      "title": "leaf -> A HELLO over UART, short_addr 0xFFFF (unassigned power-on value)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "01-abi.md node hash",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-hello-ack-default-01",
+      "category": "valid",
+      "file": "valid/valid-hello-ack-default-01.json",
+      "hex_file": "valid/valid-hello-ack-default-01.hex",
+      "title": "B -> A HELLO_ACK confirming the v0 intersection",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-hello-ack-uart-01",
+      "category": "valid",
+      "file": "valid/valid-hello-ack-uart-01.json",
+      "hex_file": "valid/valid-hello-ack-uart-01.hex",
+      "title": "A -> leaf HELLO_ACK with short_addr 0x0007 assigned by the head",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-ping-01",
+      "category": "valid",
+      "file": "valid/valid-ping-01.json",
+      "hex_file": "valid/valid-ping-01.hex",
+      "title": "A -> B PING, 8 B monotonic timestamp (us), ttl 8",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [
+        "A-05b"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-ping-02",
+      "category": "valid",
+      "file": "valid/valid-ping-02.json",
+      "hex_file": "valid/valid-ping-02.hex",
+      "title": "B -> A PING at t = 1 s, ttl 8",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [
+        "A-05b"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-pong-01",
+      "category": "valid",
+      "file": "valid/valid-pong-01.json",
+      "hex_file": "valid/valid-pong-01.hex",
+      "title": "B -> A PONG echoing valid-ping-01 verbatim",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [
+        "A-05b"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-pong-02",
+      "category": "valid",
+      "file": "valid/valid-pong-02.json",
+      "hex_file": "valid/valid-pong-02.hex",
+      "title": "B -> A PONG with ttl=1 (last hop budget)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [
+        "A-13"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-send-01",
+      "category": "valid",
+      "file": "valid/valid-send-01.json",
+      "hex_file": "valid/valid-send-01.hex",
+      "title": "A -> B SEND, txid 0, application TLV payload (unreliable)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "05-userspace.md 3"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-send-02",
+      "category": "valid",
+      "file": "valid/valid-send-02.json",
+      "hex_file": "valid/valid-send-02.hex",
+      "title": "A -> B SEND RELIABLE seq=1, payload starts with the 4 B cumulative ACK",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 7",
+        "05-userspace.md 3"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-send-broadcast-01",
+      "category": "valid",
+      "file": "valid/valid-send-broadcast-01.json",
+      "hex_file": "valid/valid-send-broadcast-01.hex",
+      "title": "A -> broadcast SEND, SERVER tier only, csum_kind=0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "01-abi.md node hash"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-01",
+      "category": "valid",
+      "file": "valid/valid-call-01.json",
+      "hex_file": "valid/valid-call-01.hex",
+      "title": "A -> B CALL txid=1000 seq=1 slot=3, reliable, TLV request",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 4",
+        "05-userspace.md 3"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-02",
+      "category": "valid",
+      "file": "valid/valid-call-02.json",
+      "hex_file": "valid/valid-call-02.hex",
+      "title": "A -> B CALL txid=0xFFFFFFFF (txid upper boundary), seq=2",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 4"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-frag-01",
+      "category": "valid",
+      "file": "valid/valid-call-frag-01.json",
+      "hex_file": "valid/valid-call-frag-01.hex",
+      "title": "A -> B CALL txid=1001 seq=3 fragment 0 (1438 B, not last)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-04",
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-frag-02",
+      "category": "valid",
+      "file": "valid/valid-call-frag-02.json",
+      "hex_file": "valid/valid-call-frag-02.hex",
+      "title": "A -> B CALL txid=1001 seq=3 fragment 1 (1438 B, not last)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-04",
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-frag-03",
+      "category": "valid",
+      "file": "valid/valid-call-frag-03.json",
+      "hex_file": "valid/valid-call-frag-03.hex",
+      "title": "A -> B CALL txid=1001 seq=3 fragment 2 (1424 B, last)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-04",
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-reply-frag-01",
+      "category": "valid",
+      "file": "valid/valid-call-reply-frag-01.json",
+      "hex_file": "valid/valid-call-reply-frag-01.hex",
+      "title": "B -> A CALL_REPLY txid=2001 seq=5 fragment 0 (1438 B, not last)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-04",
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-reply-frag-02",
+      "category": "valid",
+      "file": "valid/valid-call-reply-frag-02.json",
+      "hex_file": "valid/valid-call-reply-frag-02.hex",
+      "title": "B -> A CALL_REPLY txid=2001 seq=5 fragment 1 (66 B, last)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-04",
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-reply-01",
+      "category": "valid",
+      "file": "valid/valid-call-reply-01.json",
+      "hex_file": "valid/valid-call-reply-01.hex",
+      "title": "B -> A CALL_REPLY txid=1000 seq=1, TLV result",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7",
+        "05-userspace.md 3"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-call-reply-02",
+      "category": "valid",
+      "file": "valid/valid-call-reply-02.json",
+      "hex_file": "valid/valid-call-reply-02.hex",
+      "title": "B -> A CALL_REPLY txid=0xFFFFFFFF seq=2, csum_kind=0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-close-01",
+      "category": "valid",
+      "file": "valid/valid-close-01.json",
+      "hex_file": "valid/valid-close-01.hex",
+      "title": "B -> A CLOSE slot=3, empty payload",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-close-02",
+      "category": "valid",
+      "file": "valid/valid-close-02.json",
+      "hex_file": "valid/valid-close-02.hex",
+      "title": "A -> B CLOSE slot=3, ttl=1, csum_kind=0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8"
+      ],
+      "assumptions": [
+        "A-13"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-ack-01",
+      "category": "valid",
+      "file": "valid/valid-ack-01.json",
+      "hex_file": "valid/valid-ack-01.hex",
+      "title": "A -> B bare ACK cumulative_seq=3",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-11"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-ack-02",
+      "category": "valid",
+      "file": "valid/valid-ack-02.json",
+      "hex_file": "valid/valid-ack-02.hex",
+      "title": "B -> A bare ACK cumulative_seq=0 (nothing acknowledged yet)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-11",
+        "A-14"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-nack-01",
+      "category": "valid",
+      "file": "valid/valid-nack-01.json",
+      "hex_file": "valid/valid-nack-01.hex",
+      "title": "A -> B NACK missing_seq=7 (optional gap acceleration)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-11"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-nack-02",
+      "category": "valid",
+      "file": "valid/valid-nack-02.json",
+      "hex_file": "valid/valid-nack-02.hex",
+      "title": "B -> A NACK missing_seq=0xFFFFFFFF",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [
+        "A-11"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-error-01",
+      "category": "valid",
+      "file": "valid/valid-error-01.json",
+      "hex_file": "valid/valid-error-01.hex",
+      "title": "B -> A ERROR NOT_FOUND(24) orig_txid=1002 (slot lookup miss)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 4",
+        "02-wire-protocol.md 8",
+        "01-abi.md errnos"
+      ],
+      "assumptions": [
+        "A-08"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "valid-error-02",
+      "category": "valid",
+      "file": "valid/valid-error-02.json",
+      "hex_file": "valid/valid-error-02.hex",
+      "title": "B -> A ERROR CLUSTER_UNSUPPORTED(29) orig_txid=0xFFFFFFFF, csum_kind=0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8"
+      ],
+      "assumptions": [
+        "A-08"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-magic-wrong-01",
+      "category": "malformed",
+      "file": "malformed/mal-magic-wrong-01.json",
+      "hex_file": "malformed/mal-magic-wrong-01.hex",
+      "title": "magic 0x4C44 instead of 0x4C43",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "bad_magic"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "bad_magic",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-magic-swapped-02",
+      "category": "malformed",
+      "file": "malformed/mal-magic-swapped-02.json",
+      "hex_file": "malformed/mal-magic-swapped-02.hex",
+      "title": "magic bytes written as 0x4C 0x43, i.e. u16 0x434C (big-endian spelling)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "bad_magic"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "bad_magic",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-magic-zero-03",
+      "category": "malformed",
+      "file": "malformed/mal-magic-zero-03.json",
+      "hex_file": "malformed/mal-magic-zero-03.hex",
+      "title": "magic all zero (noise on the wire)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "bad_magic"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "bad_magic",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-short-01",
+      "category": "malformed",
+      "file": "malformed/mal-short-01.json",
+      "hex_file": "malformed/mal-short-01.hex",
+      "title": "only 20 bytes: shorter than the 32-byte header",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "short_frame"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "short_frame",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-short-02",
+      "category": "malformed",
+      "file": "malformed/mal-short-02.json",
+      "hex_file": "malformed/mal-short-02.hex",
+      "title": "31 bytes: one byte short of a complete header",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "short_frame"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "short_frame",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-len-under-01",
+      "category": "malformed",
+      "file": "malformed/mal-len-under-01.json",
+      "hex_file": "malformed/mal-len-under-01.hex",
+      "title": "payload_len=8 but 20 payload bytes present (trailer lost)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-hello-len-05",
+      "category": "malformed",
+      "file": "malformed/mal-hello-len-05.json",
+      "hex_file": "malformed/mal-hello-len-05.hex",
+      "title": "HELLO with a 24 B payload although 02-6 fixes 32 B",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "fixed_payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "fixed_payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-len-trailing-01",
+      "category": "malformed",
+      "file": "malformed/mal-len-trailing-01.json",
+      "hex_file": "malformed/mal-len-trailing-01.hex",
+      "title": "4 garbage bytes appended after the CRC trailer",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-len-crc-missing-01",
+      "category": "malformed",
+      "file": "malformed/mal-len-crc-missing-01.json",
+      "hex_file": "malformed/mal-len-crc-missing-01.hex",
+      "title": "csum_kind=1 but the 2 CRC bytes are absent",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-len-overflow-udp-01",
+      "category": "malformed",
+      "file": "malformed/mal-len-overflow-udp-01.json",
+      "hex_file": "malformed/mal-len-overflow-udp-01.hex",
+      "title": "payload_len=1440 > UDP MTU - 32 - 2 = 1438 (full 1474 B datagram)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10",
+        "04-transports.md 3"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "payload_len_over_mtu"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "payload_len_over_mtu",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-ver-high-data-01",
+      "category": "malformed",
+      "file": "malformed/mal-ver-high-data-01.json",
+      "hex_file": "malformed/mal-ver-high-data-01.hex",
+      "title": "ver=1 on a PING: a data frame is dropped silently",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unsupported_ver"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "unsupported_ver",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-ver-high-hello-02",
+      "category": "malformed",
+      "file": "malformed/mal-ver-high-hello-02.json",
+      "hex_file": "malformed/mal-ver-high-hello-02.hex",
+      "title": "ver=1 on a HELLO: ERROR frame + hello_rejects",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10",
+        "01-abi.md ABI stability"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unsupported_ver"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_proto_not_negotiable",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-crc-flip-01",
+      "category": "malformed",
+      "file": "malformed/mal-crc-flip-01.json",
+      "hex_file": "malformed/mal-crc-flip-01.hex",
+      "title": "one bit flipped in the CRC trailer",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10",
+        "04-transports.md 2"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "crc_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "crc_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-crc-flip-payload-02",
+      "category": "malformed",
+      "file": "malformed/mal-crc-flip-payload-02.json",
+      "hex_file": "malformed/mal-crc-flip-payload-02.hex",
+      "title": "one payload bit flipped, header untouched (loopback corrupt hook)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10",
+        "04-transports.md 2"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "crc_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "crc_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-crc-flip-header-03",
+      "category": "malformed",
+      "file": "malformed/mal-crc-flip-header-03.json",
+      "hex_file": "malformed/mal-crc-flip-header-03.hex",
+      "title": "one header bit flipped (ttl): proves the CRC covers the header",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "crc_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "crc_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-crc-swapped-04",
+      "category": "malformed",
+      "file": "malformed/mal-crc-swapped-04.json",
+      "hex_file": "malformed/mal-crc-swapped-04.hex",
+      "title": "CRC trailer byte-swapped (big-endian CRC)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "crc_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "crc_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-csum-kind-01",
+      "category": "malformed",
+      "file": "malformed/mal-csum-kind-01.json",
+      "hex_file": "malformed/mal-csum-kind-01.hex",
+      "title": "csum_kind=2, which 02-1 does not define",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unsupported_csum_kind"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "unsupported_csum_kind",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-type-zero-01",
+      "category": "malformed",
+      "file": "malformed/mal-type-zero-01.json",
+      "hex_file": "malformed/mal-type-zero-01.hex",
+      "title": "type=0 (no message type 0)",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unknown_type"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "unknown_type",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-type-undefined-02",
+      "category": "malformed",
+      "file": "malformed/mal-type-undefined-02.json",
+      "hex_file": "malformed/mal-type-undefined-02.hex",
+      "title": "type=12, one past the last defined type",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unknown_type"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "unknown_type",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-type-high-03",
+      "category": "malformed",
+      "file": "malformed/mal-type-high-03.json",
+      "hex_file": "malformed/mal-type-high-03.hex",
+      "title": "type=255",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "unknown_type"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "unknown_type",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-frag-no-flag-01",
+      "category": "malformed",
+      "file": "malformed/mal-frag-no-flag-01.json",
+      "hex_file": "malformed/mal-frag-no-flag-01.hex",
+      "title": "frag=0x0005 with FRAGMENTED clear",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "frag_flag_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "frag_flag_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-frag-last-no-flag-02",
+      "category": "malformed",
+      "file": "malformed/mal-frag-last-no-flag-02.json",
+      "hex_file": "malformed/mal-frag-last-no-flag-02.hex",
+      "title": "frag bit15 (last) set with FRAGMENTED clear",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "frag_flag_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "frag_flag_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-frag-single-03",
+      "category": "malformed",
+      "file": "malformed/mal-frag-single-03.json",
+      "hex_file": "malformed/mal-frag-single-03.hex",
+      "title": "FRAGMENTED with frag index 0 and the last bit: a one-fragment message",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-04"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "frag_flag_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "frag_flag_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-seq-unreliable-01",
+      "category": "malformed",
+      "file": "malformed/mal-seq-unreliable-01.json",
+      "hex_file": "malformed/mal-seq-unreliable-01.hex",
+      "title": "RELIABLE clear but seq=7",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 7",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-11"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "seq_on_unreliable_frame"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "seq_on_unreliable_frame",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-send-txid-01",
+      "category": "malformed",
+      "file": "malformed/mal-send-txid-01.json",
+      "hex_file": "malformed/mal-send-txid-01.hex",
+      "title": "SEND with txid=5 although 02-1 says SEND puts 0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-15"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "txid_on_send"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "txid_on_send",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-close-payload-01",
+      "category": "malformed",
+      "file": "malformed/mal-close-payload-01.json",
+      "hex_file": "malformed/mal-close-payload-01.hex",
+      "title": "CLOSE with a 4 B payload although 02-2 says the payload is empty",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-15"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "fixed_payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "fixed_payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-ping-len-02",
+      "category": "malformed",
+      "file": "malformed/mal-ping-len-02.json",
+      "hex_file": "malformed/mal-ping-len-02.hex",
+      "title": "PING with a 7 B payload although 02-2 fixes 8 B",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "fixed_payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "fixed_payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-ack-len-03",
+      "category": "malformed",
+      "file": "malformed/mal-ack-len-03.json",
+      "hex_file": "malformed/mal-ack-len-03.hex",
+      "title": "ACK with a 3 B payload (02-2 fixes 4 B)",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 7",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "fixed_payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "fixed_payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-error-len-04",
+      "category": "malformed",
+      "file": "malformed/mal-error-len-04.json",
+      "hex_file": "malformed/mal-error-len-04.hex",
+      "title": "ERROR with a 7 B payload (02-2 fixes 4 B errno + 4 B orig_txid)",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "fixed_payload_len_mismatch"
+        },
+        "dispatch": {
+          "layer": "frame",
+          "action": "drop",
+          "reason": "fixed_payload_len_mismatch",
+          "counters": [
+            "rx_malformed"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-dst-local-01",
+      "category": "malformed",
+      "file": "malformed/mal-dst-local-01.json",
+      "hex_file": "malformed/mal-dst-local-01.hex",
+      "title": "dst_hash = 0x69691905 = fnv1a32(all-zero) = A20_NODE_ID_LOCAL",
+      "doc_sections": [
+        "01-abi.md node identity",
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "dst_is_local",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-ttl-zero-01",
+      "category": "malformed",
+      "file": "malformed/mal-ttl-zero-01.json",
+      "hex_file": "malformed/mal-ttl-zero-01.hex",
+      "title": "ttl=0: the hop budget is exhausted",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 10",
+        "01-abi.md errnos"
+      ],
+      "assumptions": [
+        "A-13"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "ttl_expired",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": "A20_ERR_NODE_UNREACHABLE",
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-broadcast-mcu-01",
+      "category": "malformed",
+      "file": "malformed/mal-broadcast-mcu-01.json",
+      "hex_file": "malformed/mal-broadcast-mcu-01.hex",
+      "title": "BROADCAST SEND received on an MCU tier link",
+      "doc_sections": [
+        "01-abi.md node identity",
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "broadcast_forbidden_on_profile",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-broadcast-non-send-02",
+      "category": "malformed",
+      "file": "malformed/mal-broadcast-non-send-02.json",
+      "hex_file": "malformed/mal-broadcast-non-send-02.hex",
+      "title": "BROADCAST flag on a CALL (02-3 allows it on SEND only)",
+      "doc_sections": [
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-05"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "broadcast_flag_on_non_send",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-reliable-no-cap-01",
+      "category": "malformed",
+      "file": "malformed/mal-reliable-no-cap-01.json",
+      "hex_file": "malformed/mal-reliable-no-cap-01.hex",
+      "title": "RELIABLE frame from a peer that never advertised CAP_RELIABLE",
+      "doc_sections": [
+        "02-wire-protocol.md 3",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "reliable_without_negotiated_cap",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-frag-mcu-01",
+      "category": "malformed",
+      "file": "malformed/mal-frag-mcu-01.json",
+      "hex_file": "malformed/mal-frag-mcu-01.hex",
+      "title": "FRAGMENTED frame received on an MCU tier link",
+      "doc_sections": [
+        "02-wire-protocol.md 5",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "fragment_forbidden_on_profile",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-leaf-wrong-type-02",
+      "category": "malformed",
+      "file": "malformed/mal-leaf-wrong-type-02.json",
+      "hex_file": "malformed/mal-leaf-wrong-type-02.hex",
+      "title": "SEND received by an MCU leaf",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "unexpected_type_for_state",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-leaf-ack-03",
+      "category": "malformed",
+      "file": "malformed/mal-leaf-ack-03.json",
+      "hex_file": "malformed/mal-leaf-ack-03.hex",
+      "title": "bare ACK received by an MCU leaf",
+      "doc_sections": [
+        "04-transports.md 4",
+        "02-wire-protocol.md 7"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "unexpected_type_for_state",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-leaf-ping-down-04",
+      "category": "malformed",
+      "file": "malformed/mal-leaf-ping-down-04.json",
+      "hex_file": "malformed/mal-leaf-ping-down-04.hex",
+      "title": "PING while the leaf state machine is DISCONNECTED",
+      "doc_sections": [
+        "04-transports.md 4",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "drop",
+          "reason": "unexpected_type_for_state",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-error-unknown-errno-01",
+      "category": "malformed",
+      "file": "malformed/mal-error-unknown-errno-01.json",
+      "hex_file": "malformed/mal-error-unknown-errno-01.hex",
+      "title": "ERROR carrying errno 999, which 02-8 maps to CLUSTER_UNSUPPORTED",
+      "doc_sections": [
+        "02-wire-protocol.md 8"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "error",
+          "action": "accept",
+          "reason": "error_errno_unknown",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-error-stale-txid-02",
+      "category": "malformed",
+      "file": "malformed/mal-error-stale-txid-02.json",
+      "hex_file": "malformed/mal-error-stale-txid-02.hex",
+      "title": "ERROR whose orig_txid is no longer in flight (late reply)",
+      "doc_sections": [
+        "02-wire-protocol.md 4",
+        "02-wire-protocol.md 8",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "error",
+          "action": "drop",
+          "reason": "error_orig_txid_not_inflight",
+          "counters": [
+            "rx_drops"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-hello-hash-mismatch-01",
+      "category": "malformed",
+      "file": "malformed/mal-hello-hash-mismatch-01.json",
+      "hex_file": "malformed/mal-hello-hash-mismatch-01.hex",
+      "title": "HELLO whose header src_hash is not fnv1a32(node_id) in the payload",
+      "doc_sections": [
+        "01-abi.md node hash",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_hash_mismatch",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-hash-clash-02",
+      "category": "malformed",
+      "file": "malformed/mal-hello-hash-clash-02.json",
+      "hex_file": "malformed/mal-hello-hash-clash-02.hex",
+      "title": "HELLO whose node id hashes onto an already-linked hash with a different full id",
+      "doc_sections": [
+        "01-abi.md node hash",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_hash_clash",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-caps-unknown-03",
+      "category": "malformed",
+      "file": "malformed/mal-hello-caps-unknown-03.json",
+      "hex_file": "malformed/mal-hello-caps-unknown-03.hex",
+      "title": "HELLO caps=0x80 (an unknown capability bit)",
+      "doc_sections": [
+        "01-abi.md capability bits",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_caps_not_legal",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-relay-on-leaf-04",
+      "category": "malformed",
+      "file": "malformed/mal-hello-relay-on-leaf-04.json",
+      "hex_file": "malformed/mal-hello-relay-on-leaf-04.hex",
+      "title": "HELLO from profile_tier=1 (MCU) that sets CAP_RELAY",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "01-abi.md capability bits",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_relay_on_leaf",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-self-loop-05",
+      "category": "malformed",
+      "file": "malformed/mal-hello-self-loop-05.json",
+      "hex_file": "malformed/mal-hello-self-loop-05.hex",
+      "title": "HELLO carrying our own nonce",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-14"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_nonce_self_loop",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": null,
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "mal-hello-node-local-06",
+      "category": "malformed",
+      "file": "malformed/mal-hello-node-local-06.json",
+      "hex_file": "malformed/mal-hello-node-local-06.hex",
+      "title": "HELLO whose node_id is all zero (A20_NODE_ID_LOCAL)",
+      "doc_sections": [
+        "01-abi.md node identity",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_reserved_node_id",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-node-broadcast-07",
+      "category": "malformed",
+      "file": "malformed/mal-hello-node-broadcast-07.json",
+      "hex_file": "malformed/mal-hello-node-broadcast-07.hex",
+      "title": "HELLO whose node_id is all 0xff (A20_NODE_ID_BROADCAST)",
+      "doc_sections": [
+        "01-abi.md node identity",
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_reserved_node_id",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-proto-future-08",
+      "category": "malformed",
+      "file": "malformed/mal-hello-proto-future-08.json",
+      "hex_file": "malformed/mal-hello-proto-future-08.hex",
+      "title": "HELLO proto_min=1 proto_max=1 while local is v0",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "01-abi.md ABI stability",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_proto_not_negotiable",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "mal-hello-proto-gap-09",
+      "category": "malformed",
+      "file": "malformed/mal-hello-proto-gap-09.json",
+      "hex_file": "malformed/mal-hello-proto-gap-09.hex",
+      "title": "HELLO proto_min=2 proto_max=3 while local is v0",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "hello",
+          "action": "drop",
+          "reason": "hello_proto_not_negotiable",
+          "counters": [
+            "hello_rejects"
+          ],
+          "errno": "A20_ERR_CLUSTER_UNSUPPORTED",
+          "reply": "ERROR(A20_ERR_CLUSTER_UNSUPPORTED, orig_txid=0)"
+        }
+      }
+    },
+    {
+      "id": "res-flags-unknown-bit-01",
+      "category": "reserved",
+      "file": "reserved/res-flags-unknown-bit-01.json",
+      "hex_file": "reserved/res-flags-unknown-bit-01.hex",
+      "title": "flags bit 8 set -- a flag bit 02-3 does not define",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "an undefined flag bit is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-flags-compressed-02",
+      "category": "reserved",
+      "file": "reserved/res-flags-compressed-02.json",
+      "hex_file": "reserved/res-flags-compressed-02.hex",
+      "title": "flags bit3 COMPRESSED set although 02-3 says it must be 0",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 3"
+      ],
+      "assumptions": [
+        "A-16"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "the COMPRESSED flag is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-frag-reserved-bits-03",
+      "category": "reserved",
+      "file": "reserved/res-frag-reserved-bits-03.json",
+      "hex_file": "reserved/res-frag-reserved-bits-03.hex",
+      "title": "frag bit12 set (reserved area 12-14) on a real fragment",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-04"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "frag reserved bits 12-14 is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-frag-reserved-all-04",
+      "category": "reserved",
+      "file": "reserved/res-frag-reserved-all-04.json",
+      "hex_file": "reserved/res-frag-reserved-all-04.hex",
+      "title": "frag bits 12, 13 and 14 all set",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-04"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "frag reserved bits 12-14 is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-dst-slot-on-ping-05",
+      "category": "reserved",
+      "file": "reserved/res-dst-slot-on-ping-05.json",
+      "hex_file": "reserved/res-dst-slot-on-ping-05.hex",
+      "title": "PING with dst_slot=7 although 02-1 says only CALL/SEND/CLOSE use it",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2"
+      ],
+      "assumptions": [
+        "A-15"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "dst_slot on a PING is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-txid-on-close-06",
+      "category": "reserved",
+      "file": "reserved/res-txid-on-close-06.json",
+      "hex_file": "reserved/res-txid-on-close-06.hex",
+      "title": "CLOSE with txid=99 (02-1 constrains txid only for SEND)",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 2",
+        "02-wire-protocol.md 8"
+      ],
+      "assumptions": [
+        "A-15"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "txid on a CLOSE is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "res-hello-reserved-07",
+      "category": "reserved",
+      "file": "reserved/res-hello-reserved-07.json",
+      "hex_file": "reserved/res-hello-reserved-07.hex",
+      "title": "HELLO payload reserved byte = 1",
+      "doc_sections": [
+        "02-wire-protocol.md 1",
+        "02-wire-protocol.md 6"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "dispatch",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "the HELLO payload reserved byte at offset 23 is ignored, not rejected"
+        }
+      }
+    },
+    {
+      "id": "state-dup-seq-01",
+      "category": "state",
+      "file": "state/state-dup-seq-01.json",
+      "hex_file": "state/state-dup-seq-01.hex",
+      "title": "CALL_REPLY with a seq already seen: duplicate, drop but re-ACK",
+      "doc_sections": [
+        "02-wire-protocol.md 7",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "reliable",
+          "action": "drop",
+          "reason": "duplicate_seq",
+          "counters": [
+            "dedup_drops"
+          ],
+          "errno": null,
+          "reply": "ACK re-sent for the already received cumulative seq"
+        }
+      }
+    },
+    {
+      "id": "state-retransmit-01",
+      "category": "state",
+      "file": "state/state-retransmit-01.json",
+      "hex_file": "state/state-retransmit-01.hex",
+      "title": "the RTO retransmission of a CALL must be byte-identical",
+      "doc_sections": [
+        "02-wire-protocol.md 7",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [
+        "A-11"
+      ],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "reliable",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "byte-identical to the first copy; the receiver counts dedup_drops, the sender counts retransmits"
+        }
+      }
+    },
+    {
+      "id": "state-reasm-gap-01",
+      "category": "state",
+      "file": "state/state-reasm-gap-01.json",
+      "hex_file": "state/state-reasm-gap-01.hex",
+      "title": "fragment index 2 of 3 arrives, index 1 is lost: no immediate drop",
+      "doc_sections": [
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "reasm",
+          "action": "accept",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "no counter at receive time; reasm_timeouts after 5 s"
+        }
+      }
+    },
+    {
+      "id": "state-reasm-evict-01",
+      "category": "state",
+      "file": "state/state-reasm-evict-01.json",
+      "hex_file": "state/state-reasm-evict-01.hex",
+      "title": "a well-formed fragment arriving when the reassembly cache is full",
+      "doc_sections": [
+        "02-wire-protocol.md 5",
+        "02-wire-protocol.md 10",
+        "01-abi.md limits"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "reasm",
+          "action": "accept",
+          "reason": "reasm_cache_evicted",
+          "counters": [
+            "reasm_evicted",
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "note": "the frame is admitted; reasm_evicted is charged to the oldest partial message, not to this frame"
+        }
+      }
+    },
+    {
+      "id": "state-inflight-limit-01",
+      "category": "state",
+      "file": "state/state-inflight-limit-01.json",
+      "hex_file": null,
+      "title": "a 65th unanswered CALL on a DEFAULT link (limit 64)",
+      "doc_sections": [
+        "02-wire-protocol.md 4",
+        "02-wire-protocol.md 10",
+        "01-abi.md limits"
+      ],
+      "assumptions": [],
+      "transport": "udp",
+      "expect": {
+        "frame": {
+          "accept": false,
+          "reason": "not built"
+        },
+        "dispatch": {
+          "layer": "local",
+          "action": "drop",
+          "reason": "inflight_call_limit",
+          "counters": [
+            "tx_drops"
+          ],
+          "errno": "A20_ERR_NO_SPACE",
+          "reply": null
+        }
+      }
+    },
+    {
+      "id": "state-mcu-oversize-01",
+      "category": "state",
+      "file": "state/state-mcu-oversize-01.json",
+      "hex_file": "state/state-mcu-oversize-01.hex",
+      "title": "MCU tier: a 300 B message exceeds the 256 B frame limit",
+      "doc_sections": [
+        "02-wire-protocol.md 5",
+        "04-transports.md 4",
+        "02-wire-protocol.md 10"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "local",
+          "action": "drop",
+          "reason": "payload_over_mtu",
+          "counters": [
+            "tx_drops"
+          ],
+          "errno": "A20_ERR_INVALID_ARGUMENT",
+          "reply": null,
+          "note": "the frame layer accepts it (it is well formed and the loopback/UDP MTU is larger); the MCU tier refuses to send it"
+        }
+      }
+    },
+    {
+      "id": "slip-hello-leaf-01",
+      "category": "slip",
+      "file": "slip/slip-hello-leaf-01.json",
+      "hex_file": "slip/slip-hello-leaf-01.slip.hex",
+      "title": "leaf HELLO with 0xC0/0xDB/0xDC/0xDD in the nonce: every escape rule",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-hello-ack-01",
+      "category": "slip",
+      "file": "slip/slip-hello-ack-01.json",
+      "hex_file": "slip/slip-hello-ack-01.slip.hex",
+      "title": "head HELLO_ACK assigning short_addr 0x0007",
+      "doc_sections": [
+        "02-wire-protocol.md 6",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-ping-01",
+      "category": "slip",
+      "file": "slip/slip-ping-01.json",
+      "hex_file": "slip/slip-ping-01.slip.hex",
+      "title": "PING whose timestamp is 0xC0C0DBDBDBDBDBDB (8 escaped bytes)",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "04-transports.md 4"
+      ],
+      "assumptions": [
+        "A-05b"
+      ],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-pong-01",
+      "category": "slip",
+      "file": "slip/slip-pong-01.json",
+      "hex_file": "slip/slip-pong-01.slip.hex",
+      "title": "PONG echoing slip-ping-01",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "04-transports.md 4"
+      ],
+      "assumptions": [
+        "A-05b"
+      ],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-call-01",
+      "category": "slip",
+      "file": "slip/slip-call-01.json",
+      "hex_file": "slip/slip-call-01.slip.hex",
+      "title": "CALL with 0xC0 and 0xDB inside a TLV value",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-call-reply-01",
+      "category": "slip",
+      "file": "slip/slip-call-reply-01.json",
+      "hex_file": "slip/slip-call-reply-01.slip.hex",
+      "title": "CALL_REPLY from the leaf operator",
+      "doc_sections": [
+        "02-wire-protocol.md 2",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-error-01",
+      "category": "slip",
+      "file": "slip/slip-error-01.json",
+      "hex_file": "slip/slip-error-01.slip.hex",
+      "title": "ERROR NOT_FOUND from the leaf",
+      "doc_sections": [
+        "02-wire-protocol.md 8",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-close-01",
+      "category": "slip",
+      "file": "slip/slip-close-01.json",
+      "hex_file": "slip/slip-close-01.slip.hex",
+      "title": "CLOSE from the leaf (empty payload, 34 B on the wire)",
+      "doc_sections": [
+        "02-wire-protocol.md 8",
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    },
+    {
+      "id": "slip-two-frames-01",
+      "category": "slip",
+      "file": "slip/slip-two-frames-01.json",
+      "hex_file": "slip/slip-two-frames-01.slip.hex",
+      "title": "two frames back to back in one stream (one UART, no idle gap required)",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 2,
+          "slip_notes": [
+            "empty"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-resync-01",
+      "category": "slip",
+      "file": "slip/slip-mal-resync-01.json",
+      "hex_file": "slip/slip-mal-resync-01.slip.hex",
+      "title": "leading empty frames between ENDs: resync artifact, not a frame",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [
+        "A-10"
+      ],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": [
+            "empty",
+            "empty",
+            "empty"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-badescape-01",
+      "category": "slip",
+      "file": "slip/slip-mal-badescape-01.json",
+      "hex_file": "slip/slip-mal-badescape-01.slip.hex",
+      "title": "ESC followed by an undefined code byte: half frame discarded",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": [
+            "bad_escape",
+            "empty"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-unescaped-02",
+      "category": "slip",
+      "file": "slip/slip-mal-unescaped-02.json",
+      "hex_file": "slip/slip-mal-unescaped-02.slip.hex",
+      "title": "stream ends on a lone ESC (inter-byte timeout before the escape code)",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": [
+            "unterminated_escape"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-partial-03",
+      "category": "slip",
+      "file": "slip/slip-mal-partial-03.json",
+      "hex_file": "slip/slip-mal-partial-03.slip.hex",
+      "title": "frame cut in half with no trailing END: partial frame timeout",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 0,
+          "slip_notes": [
+            "partial_frame"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-truncated-04",
+      "category": "slip",
+      "file": "slip/slip-mal-truncated-04.json",
+      "hex_file": "slip/slip-mal-truncated-04.slip.hex",
+      "title": "END-terminated stream shorter than a 32 B header",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 0,
+          "slip_notes": [
+            "truncated"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-mal-oversize-05",
+      "category": "slip",
+      "file": "slip/slip-mal-oversize-05.json",
+      "hex_file": "slip/slip-mal-oversize-05.slip.hex",
+      "title": "unterminated stream of 602 decoded bytes exceeds the 512 B RX buffer",
+      "doc_sections": [
+        "04-transports.md 4"
+      ],
+      "assumptions": [],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 0,
+          "slip_notes": [
+            "oversize"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slip-uart-budget-06",
+      "category": "slip",
+      "file": "slip/slip-uart-budget-06.json",
+      "hex_file": "slip/slip-uart-budget-06.slip.hex",
+      "title": "MCU operator frame at the 128 B payload budget with every payload byte escaped (312 B on the wire, buffer is 320 B)",
+      "doc_sections": [
+        "04-transports.md 4",
+        "02-wire-protocol.md 5"
+      ],
+      "assumptions": [
+        "A-17"
+      ],
+      "transport": "uart",
+      "expect": {
+        "frame": {
+          "accept": true,
+          "reason": "OK"
+        },
+        "dispatch": {
+          "layer": "slip",
+          "action": "decode",
+          "reason": "OK",
+          "counters": [
+            "rx_frames"
+          ],
+          "errno": null,
+          "reply": null,
+          "slip_frames": 1,
+          "slip_notes": []
+        }
+      }
+    }
+  ]
+}

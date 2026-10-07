@@ -1,0 +1,75 @@
+{
+  "id": "mal-crc-swapped-04",
+  "category": "malformed",
+  "title": "CRC trailer byte-swapped (big-endian CRC)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "CRC high byte first",
+      "offset": 40,
+      "value": 133,
+      "was": "0xDB"
+    },
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "CRC high byte first",
+      "offset": 41,
+      "value": 219,
+      "was": "0x85"
+    }
+  ],
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 42,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "ok",
+    "csum_kind": "ok",
+    "crc": "mismatch",
+    "reason": "crc_mismatch",
+    "crc_value": "0xDB85",
+    "crc_computed": "0x85DB"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "crc_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "crc_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-crc-swapped-04.hex"
+}

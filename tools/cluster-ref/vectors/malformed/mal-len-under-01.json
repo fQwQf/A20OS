@@ -1,0 +1,66 @@
+{
+  "id": "mal-len-under-01",
+  "category": "malformed",
+  "title": "payload_len=8 but 20 payload bytes present (trailer lost)",
+  "doc_sections": [
+    "02-wire-protocol.md 1",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [
+    {
+      "op": "set",
+      "doc": "02-1",
+      "why": "payload_len too small",
+      "offset": 28,
+      "value": 8,
+      "was": "0x10"
+    }
+  ],
+  "notes": "02-1: payload_len not matching the length the transport actually received -> drop + rx_malformed.",
+  "frame": null,
+  "raw_header": "434c0005000000000000000035818eae7520dc5e000000000000000008000801",
+  "diagnostics": {
+    "wire_len": 50,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "mismatch",
+    "csum_kind": "ok",
+    "crc": "absent",
+    "reason": "payload_len_mismatch"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-len-under-01.hex"
+}

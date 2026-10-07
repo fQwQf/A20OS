@@ -1,0 +1,57 @@
+{
+  "id": "slip-mal-badescape-01",
+  "category": "slip",
+  "title": "ESC followed by an undefined code byte: half frame discarded",
+  "doc_sections": [
+    "04-transports.md 4"
+  ],
+  "transport": {
+    "id": 2,
+    "name": "uart",
+    "mtu": 256,
+    "max_payload_len": 222
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "only the intact first frame is recovered; the damaged one is dropped (rx_drops) and the receiver resyncs on the next END.",
+  "slip": {
+    "slip_frames": [
+      "434c00030000000000000000b0cbdd9435818eae000000000000000008000801dbdbdbdbdbdbc0c0ce0c"
+    ],
+    "slip_notes": [
+      "bad_escape",
+      "empty"
+    ],
+    "slip_stream_len": 55
+  },
+  "frame_hex": "",
+  "expect": {
+    "frame": {
+      "accept": true,
+      "reason": "OK"
+    },
+    "dispatch": {
+      "layer": "slip",
+      "action": "decode",
+      "reason": "OK",
+      "counters": [
+        "rx_frames"
+      ],
+      "errno": null,
+      "reply": null,
+      "slip_frames": 1,
+      "slip_notes": [
+        "bad_escape",
+        "empty"
+      ]
+    }
+  },
+  "hex_file": "slip/slip-mal-badescape-01.slip.hex"
+}

@@ -1,0 +1,59 @@
+{
+  "id": "mal-ping-len-02",
+  "category": "malformed",
+  "title": "PING with a 7 B payload although 02-2 fixes 8 B",
+  "doc_sections": [
+    "02-wire-protocol.md 2",
+    "02-wire-protocol.md 10"
+  ],
+  "transport": {
+    "id": 1,
+    "name": "udp",
+    "mtu": 1472,
+    "max_payload_len": 1438
+  },
+  "receiver": {
+    "role": "peer_udp",
+    "profile_tier": 2,
+    "profile_name": "DEFAULT",
+    "state": "UP",
+    "peer_caps": 2,
+    "local_ver": 0
+  },
+  "mutations": [],
+  "notes": "the frame length is self-consistent (32 + 7 + 2), so this exercises the fixed payload size column of 02-2 rather than the payload_len check.",
+  "frame": null,
+  "raw_header": "434c0003000000000000000035818eae7520dc5e000000000000000007000801",
+  "diagnostics": {
+    "wire_len": 41,
+    "magic": "ok",
+    "ver": "ok",
+    "type": "ok",
+    "flags": "ok",
+    "frag": "ok",
+    "reserved": "ok",
+    "payload_len": "fixed_size_mismatch",
+    "csum_kind": "ok",
+    "crc": "ok",
+    "reason": "fixed_payload_len_mismatch",
+    "crc_value": "0xE020",
+    "crc_computed": "0xE020"
+  },
+  "expect": {
+    "frame": {
+      "accept": false,
+      "reason": "fixed_payload_len_mismatch"
+    },
+    "dispatch": {
+      "layer": "frame",
+      "action": "drop",
+      "reason": "fixed_payload_len_mismatch",
+      "counters": [
+        "rx_malformed"
+      ],
+      "errno": null,
+      "reply": null
+    }
+  },
+  "hex_file": "malformed/mal-ping-len-02.hex"
+}
