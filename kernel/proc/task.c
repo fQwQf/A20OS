@@ -8,11 +8,77 @@
 #include "fs/vfs.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#include "mm/frame.h"
 #include "core/cpu.h"
 #include "core/panic.h"
+#ifdef CONFIG_KSTACK_DIAG
+#include "core/stdio.h"
+#endif
 #include "core/string.h"
 #include "core/timekeeping.h"
 #include "cg/cgroup.h"
+
+#ifdef CONFIG_KSTACK_DIAG
+static uint32_t kstack_diag_next_seq;
+
+void proc_kstack_diag_register(task_t *t)
+{
+    if (!t || !t->kstack_base)
+        return;
+    t->kstack_diag_base = t->kstack_base;
+    t->kstack_diag_seq = __atomic_add_fetch(&kstack_diag_next_seq, 1,
+                                             __ATOMIC_RELAXED);
+    t->kstack_diag_reported = 0;
+    printf("[KSTACKDIAG] alloc seq=%u pid=%d task=%p base=%p sp=0x%lx\n",
+           t->kstack_diag_seq, t->pid, t, t->kstack_base,
+           (unsigned long)t->kstack);
+}
+
+void proc_kstack_diag_check(task_t *t, const char *where)
+{
+    if (!t || !t->kstack_diag_seq || t->kstack_diag_reported)
+        return;
+
+    void *expected = t->kstack_diag_base;
+    void *actual = t->kstack_base;
+    uint32_t magic = 0;
+    uint16_t order = 0;
+    uint64_t canary = 0;
+    int header_ok = 0, canary_ok = 0;
+    if (expected) {
+        const uint8_t *hdr = (const uint8_t *)expected - 16;
+        magic = *(const uint32_t *)hdr;
+        order = *(const uint16_t *)(hdr + 4);
+        header_ok = magic == 0x42494741U && order <= MAX_ORDER;
+        if (header_ok) {
+            const uint64_t *tail = (const uint64_t *)
+                (hdr + (((size_t)1 << order) * PAGE_SIZE) - sizeof(uint64_t));
+            canary = *tail;
+            canary_ok = canary == 0xCAFEBABEUL;
+        }
+    }
+
+    if (actual == expected && header_ok && canary_ok)
+        return;
+
+    t->kstack_diag_reported = 1;
+    task_t *current = proc_current();
+    uintptr_t sp;
+#if defined(__riscv)
+    __asm__ volatile("mv %0, sp" : "=r"(sp));
+#elif defined(__x86_64__)
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+#else
+    sp = 0;
+#endif
+    printf("[KSTACKDIAG] CORRUPT seq=%u where=%s pid=%d name=%s task=%p current=%d actual=%p expected=%p sp=0x%lx kstack=0x%lx header=0x%x order=%u canary=0x%lx header_ok=%d canary_ok=%d\n",
+           t->kstack_diag_seq, where, t->pid, t->name, t,
+           current ? current->pid : -1, actual, expected, (unsigned long)sp,
+           (unsigned long)t->kstack, magic, order, (unsigned long)canary,
+           header_ok, canary_ok);
+    panic("kstack allocation identity corrupted");
+}
+#endif
 #include "ipc/keyring.h"
 #include "ipc/landlock.h"
 #include "ipc/envelope.h"
@@ -66,6 +132,7 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
 {
     if (!t)
         return;
+
     refcount_set(&t->refs, 1);
     proc_lifetime_note_task_init(0);
     t->destroy_started = 0;
@@ -368,6 +435,9 @@ static void proc_task_release_resources(task_t *t)
 #endif
 
     if (t->kstack) {
+#ifdef CONFIG_KSTACK_DIAG
+        proc_kstack_diag_check(t, "release-resources");
+#endif
         kfree(t->kstack_base);
         t->kstack = 0;
         t->kstack_base = NULL;
@@ -418,6 +488,9 @@ void proc_put(task_t *t)
         panic("proc_put: live task pid=%d reached zero references", t->pid);
     }
 
+#ifdef CONFIG_KSTACK_DIAG
+    proc_kstack_diag_check(t, "final-proc-put");
+#endif
     proc_task_release_resources(t);
     proc_lifetime_note_task_free();
     memset(t, 0, sizeof(*t));

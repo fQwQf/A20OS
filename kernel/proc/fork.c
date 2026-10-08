@@ -329,6 +329,9 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
+#ifdef CONFIG_KSTACK_DIAG
+    proc_kstack_diag_register(t);
+#endif
 
     uint64_t ks_top = (uint64_t)(uintptr_t)kstack + KERNEL_STACK_SIZE;
 

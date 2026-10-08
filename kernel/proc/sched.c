@@ -1950,6 +1950,10 @@ static void context_switch_locked(task_t *next) {
     uint64_t now = timer_get_ticks();
 
     task_t *prev = proc_current();
+#ifdef CONFIG_KSTACK_DIAG
+    proc_kstack_diag_check(prev, "switch-out");
+    proc_kstack_diag_check(next, "switch-in");
+#endif
     unsigned cpu = cpu_current_id();
     eevdf_charge(&sched_runq[cpu], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {

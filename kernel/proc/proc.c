@@ -696,6 +696,9 @@ int proc_alloc(void (*entry)(void)) {
     TASK_CTX_STATUS(ctx) = arch_task_kernel_status();
     arch_task_context_set_initial_sp(ctx, NULL, stack_top);
     t->kstack_base = stack;
+#ifdef CONFIG_KSTACK_DIAG
+    proc_kstack_diag_register(t);
+#endif
     t->kstack = (uintptr_t)ctx;
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
@@ -734,6 +737,9 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
+#ifdef CONFIG_KSTACK_DIAG
+    proc_kstack_diag_register(t);
+#endif
 
     uintptr_t ks_top = (uintptr_t)kstack + KERNEL_STACK_SIZE;
     ks_top &= ~0xF;

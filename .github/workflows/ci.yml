@@ -1,17 +1,8 @@
-# PR/主干门禁：多架构矩阵构建 + 打包 + 组镜像 + QEMU 冒烟。
-# 所有 job 运行在 ghcr 的构建容器里，本地可用同一镜像复现（docs/packaging/ci.md）。
+# Temporary diagnostic branch only; do not merge this workflow into main.
 name: CI
-
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-
 jobs:
-  # ghcr 镜像名必须全小写，而 github.repository_owner 可能含大写（如 fQwQf）。
-  # container.image 在 job 启动前解析，用不了步骤内的 shell，因此先在此
-  # 算出小写镜像名，供下方所有 job 的 container 引用。
   buildenv-image:
     name: resolve-buildenv-image
     runs-on: ubuntu-latest
@@ -27,226 +18,6 @@ jobs:
           fi
           echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
-  # 工具链层门禁：a20 工具本身与其数据、源码契约门禁。
-  # 全部是宿主侧纯 Python / rg / 宿主 gcc，与架构无关、无需交叉工具链、
-  # 无需 QEMU，所以不进容器、不做矩阵，排在所有重量级 job 之前。
-  # 刻意不拉 submodule：这些门禁只读 instances/、components/、tools/、
-  # Makefile、docs/ 与 kernel/ 下的一方源文件路径（vendored 的
-  # kernel/external/lwip 是普通 tracked tree，user/external 下的第三方树
-  # 不参与），完全不碰 submodule 里的东西。
-  #
-  # 这里跑的门禁全部是 fail-closed 的：断言的是"某个反模式没有被重新引入"，
-  # 而不是"某个字符串存在"。本地跑绿而在 CI 里没人跑，等于这些断言不存在。
-  toolchain-gates:
-    name: toolchain-gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      # The fail-closed source gates use `rg`; ubuntu-latest does not guarantee
-      # ripgrep is preinstalled, so declare the host-side dependency explicitly.
-      - name: Install source-gate tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ripgrep
-
-      - name: Validate instances, arch matrix and component registries
-        run: make check-manifests
-
-      - name: Unit tests for the a20 toolchain
-        run: make check-a20-tests
-
-      # ~25 条反回归断言，秒级。它是本 job 最高杠杆的一步：未实现的设施
-      # 必须报告缺席而不是伪造输出，这条策略此前只有本地跑。
-      - name: Honesty policy (fail-closed anti-regression)
-        run: make check-honesty-policy
-
-      - name: Smoke case table agrees with the makefiles
-        run: make check-smoke-cases
-
-      # kernel/proc/xlator_guests.def（内核策略）与 tools/targets-xlator.mk
-      # （构建宿主上装了哪些交叉编译器）互推不出来，只能断言一致。两者已经
-      # 漂移过一次：CC 表里有一个内核从未注册过的架构。
-      - name: Guest architecture registry agrees across kernel and build
-        run: make check-xlator-guests
-
-      - name: Host-side unit tests for kernel format/helper logic
-        run: make host-tests
-
-      # 把 kernel/include/drivers/gpu/drm.h 的每个 DRM_IOCTL_* 编号与
-      # 宿主 linux-headers 的 include/uapi/drm 逐条比对，并实测线结构体
-      # 尺寸与字段偏移。tools/ci/Dockerfile 刻意不带 linux-headers，所以
-      # 在这里（裸 runner）装：镜像保持不变，不必为让一个门禁生效而重建
-      # buildenv。门禁本身在缺头文件时会"干净跳过"，因此本步骤在它真的
-      # 跳过时判失败——一个静默不再断言的门禁比没有门禁更糟。
-      - name: DRM UAPI ioctl numbers and struct layouts vs the Linux UAPI
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            "linux-headers-$(uname -r)" \
-            || sudo apt-get install -y -qq --no-install-recommends linux-headers-generic
-          out="$(make check-drm-abi 2>&1)" || { echo "$out"; exit 1; }
-          echo "$out"
-          if printf '%s\n' "$out" | grep -q '^skip:'; then
-            echo '::error::check-drm-abi skipped -- no Linux UAPI DRM headers on this runner, so the gate asserted nothing'
-            exit 1
-          fi
-
-      # check-doc-test-gates 里不依赖 QEMU 的子门禁在这里跑。带 QEMU guest 的那些
-      # （边界/MM/VFS/驱动/并发）属于 smoke job 的范围，不能混进这个快速 job。
-      - name: 'Source contracts: subsystem boundaries'
-        run: |
-          make check-task-lifetime-boundary
-          make check-smp-platform-boundary
-          make check-io-progress-model
-          make check-external-dependency-boundary
-
-      - name: 'Source contracts: ABI table and envelope choke-point coverage'
-        run: |
-          make check-abi-boundary
-          make check-envelope-coverage
-          # Native 侧的同一件事：Linux 侧有覆盖表生成器与信封分类，Native 侧
-          # 此前两样都没有，check-abi-boundary 的 19 条断言全是单文件关键词
-          # 存在性检查。两条都是宿主侧，与 check-abi-boundary 共用这一步。
-          make check-native-abi-coverage
-          make check-abi-config-guard
-
-      - name: 'Source contracts: task-state boundary, ABI smoke contract, doc drift'
-        run: |
-          make check-task-state-boundary
-          make check-abi-smoke-gate
-          make check-doc-drift
-
-      - name: 'Source contracts: arch boundary (static gate)'
-        run: python3 tools/gates.py check-arch-boundary
-
-  # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
-  # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
-  # 之后悄悄落后——arm32、riscv32、ppc64le 长期没进 CI 就是这么来的。
-  # strategy.matrix 必须在矩阵 job 的任何 step 之前拿到列表，所以用与
-  # buildenv-image 同样的独立 resolver job 形状。
-  ci-kernel-arches:
-    name: resolve-kernel-arch-matrix
-    runs-on: ubuntu-latest
-    outputs:
-      arches: ${{ steps.arches.outputs.arches }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: arches
-        run: make -s print-ci-kernel-arches >> "$GITHUB_OUTPUT"
-
-  build:
-    name: build-${{ matrix.arch }}
-    needs: buildenv-image
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [riscv64, x86_64, aarch64, loongarch64]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Trust workspace ownership (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: ccache
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-${{ matrix.arch }}-
-
-      - name: Build kernel + userland
-        run: make ARCH=${{ matrix.arch }} dev-build
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      - name: Package build outputs as .apk and index the repo
-        run: make ARCH=${{ matrix.arch }} pkg-repo
-
-      - name: Compose base image from the package repository
-        run: make ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a20os-${{ matrix.arch }}
-          path: |
-            .kernel-build/*/kernel.elf
-            build/images/*.img
-            build/repo/${{ matrix.arch }}/
-          # Kernel ELFs live under .kernel-build. Keep the glob narrow so the
-          # artifact includes only the explicitly matched build output there.
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14
-
-  # BUILD_MATRIX_GATE_CONTRACT 的 CI 一半：每个"CI 装得了工具链"的
-  # hosted 架构都跑一次内核 bring-up 构建门禁。此前 CI 只构建
-  # riscv64/x86_64/aarch64/loongarch64 四个，riscv32 与 ppc64le 从未构建，
-  # arm32 的构建断裂因此长期无人看见。
-  #
-  # 与 build 分开是有原因的，不是重复：build 要产出发布打包产物（apk 仓库 +
-  # world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前构建不过
-  # （user/cmds/stress/poll_edge.c 在 riscv32 上引用了 musl 未声明的
-  # SYS_pselect6/SYS_ppoll）。下面这条是纯内核门禁，与
-  # check-kernel-build-all / check-build-matrix 迭代的是同一个
-  # check-<arch>-bringup 目标。
-  #
-  # 不拉 submodule：bring-up 构建只编译 vendored 源（kernel/external/lwip
-  # 是 tracked tree），本矩阵里的每个架构都已在无 submodule 的 checkout 上
-  # 实测通过；唯一的 gitlink 是 fastfetch，拉它只会把时间花在
-  # 与这个门禁无关的下载上。
-  kernel-build:
-    name: kernel-build-${{ matrix.arch }}
-    needs: [buildenv-image, ci-kernel-arches]
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ needs.buildenv-image.outputs.image }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: ${{ fromJSON(needs.ci-kernel-arches.outputs.arches) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Trust workspace ownership (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: ccache
-        uses: actions/cache@v4
-        with:
-          path: build/cache/ccache
-          key: ccache-kernel-${{ matrix.arch }}-${{ github.sha }}
-          restore-keys: ccache-kernel-${{ matrix.arch }}-
-
-      - name: Kernel bring-up build gate (check-<arch>-bringup)
-        run: make check-${{ matrix.arch }}-bringup
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-
-      # 架构专属的构建断裂没有日志基本无法定位，所以逐架构留下 kernel.elf。
-      - uses: actions/upload-artifact@v4
-        with:
-          name: a20os-kernel-${{ matrix.arch }}
-          path: .kernel-build/*/kernel.elf
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-  # QEMU 冒烟门禁（riscv64，TCG）：PR 与主干同一标准，套件对应
-  # docs/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
-  # 调度/进程/futex/MM/VFS 压力、SMP），最后跑需要网络与包仓库的
-  # smoke-devtools（Alpine gcc 在 guest 内编译运行）。
-  # 各 make 目标自带的 dev-build 增量复用同一构建目录与 ccache。
   smoke:
     name: smoke-riscv64
     needs: buildenv-image
@@ -255,6 +26,8 @@ jobs:
       image: ${{ needs.buildenv-image.outputs.image }}
       options: --privileged
     timeout-minutes: 90
+    env:
+      EXTRA_CFLAGS: -DCONFIG_KSTACK_DIAG
     steps:
       - uses: actions/checkout@v4
         with:
@@ -297,6 +70,10 @@ jobs:
 
       - name: Package build outputs as .apk and index the repo
         run: make ARCH=riscv64 pkg-repo
+
+      - name: Diagnostic gcc regression before preceding smoke gates
+        run: make smoke-devtools
+        timeout-minutes: 20
 
       - name: QEMU smoke gates
         run: |
@@ -355,3 +132,12 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Upload diagnostic kernel ELF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kstack-diagnostic-kernel
+          path: .kernel-build/**/kernel.elf
+          include-hidden-files: true
+          retention-days: 7

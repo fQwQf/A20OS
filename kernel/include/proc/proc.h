@@ -211,6 +211,12 @@ typedef struct task_t {
      * kernel mode always holds the current task_t (see switch.S).  The guard
      * reaches them at fixed offsets. */
     uintptr_t trap_guard_scratch[7];
+#ifdef CONFIG_KSTACK_DIAG
+    /* Temporary allocation identity for the CI-only stack corruption probe. */
+    void     *kstack_diag_base;
+    uint32_t  kstack_diag_seq;
+    uint8_t   kstack_diag_reported;
+#endif
     refcount_t refs;
     int      destroy_started;
     int      pid;
@@ -494,6 +500,11 @@ _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
                "task_t.kstack_base must remain at assembly ABI offset 8/4");
 _Static_assert(offsetof(task_t, trap_guard_scratch) == 2 * sizeof(uintptr_t),
                "task_t.trap_guard_scratch must remain at assembly ABI offset 16/8");
+
+#ifdef CONFIG_KSTACK_DIAG
+void proc_kstack_diag_register(task_t *t);
+void proc_kstack_diag_check(task_t *t, const char *where);
+#endif
 
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)
