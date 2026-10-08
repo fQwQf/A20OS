@@ -1,5 +1,10 @@
 # impl-notes-proc：切换发布路径去全局 proc_lock
 
+> 2026-10-08 更正：本页关于 `g_proc_waiting_child_waiter_count` 的配对维护属于历史
+> 实现。该计数及通知器的锁前零值快速路径现已删除：不同 task 的 park_lock 无法
+> 保护共享计数，且通知器在等待注册前读零仍会漏唤醒。当前等待协议见
+> [进程与调度](../process-scheduler.md#5-tokenized-parkwake)。
+
 实施者：proc agent。设计：`docs/roadmap/lock-serialization-split.md` §1。
 工作树：`/home/fqwqf/OS/A20OS-locks`（`feat/lock-serialization-split`，与 baseline
 产物 `docs/measured/lock-baseline.md` 同一 worktree；`kernel/proc/sched.c`、
