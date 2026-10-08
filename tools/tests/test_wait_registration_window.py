@@ -70,9 +70,10 @@ typedef struct { unsigned seq; } proc_wait_token_t;
 typedef int proc_wake_reason_t;
 
 static spinlock_t tasklist_lock = {1};
-static task_t waiter, child;
+static task_t waiter, child, live_member;
 static unsigned g_proc_waiting_child_waiter_count;
 static int injected, wake_queued, parked_without_wake;
+static int live_group_test;
 static jmp_buf parked;
 
 static uint64_t spin_lock_irqsave(spinlock_t *lock) { (void)lock; return 0; }
@@ -91,7 +92,16 @@ static void inject_child_exit(void) {
 }
 static task_t *proc_current(void) { return &waiter; }
 static int proc_task_state_get(task_t *t) { return t->state; }
-static int proc_tg_group_dead_locked(task_t *t) { (void)t; return 1; }
+static int proc_tg_group_dead_locked(task_t *t) {
+    if (!live_group_test)
+        return 1;
+    for (task_t *m = t->tg_next; m; m = m->tg_next) {
+        if (m->tgid == t->tgid && m->state != PROC_UNUSED &&
+            m->state != PROC_ZOMBIE)
+            return 0;
+    }
+    return 1;
+}
 static int proc_task_is_current_any_cpu(task_t *t) { (void)t; return 0; }
 static task_t *proc_get(task_t *t) { return t; }
 static void proc_reap_detach_list_locked(task_t *t) { (void)t; }
@@ -142,15 +152,42 @@ int main(void) {
             return 3;
         }
         puts("wait-registration-window: PASS");
-        return 0;
     }
 
     if (parked_without_wake) {
         fprintf(stderr, "wait-registration-window: FAIL parked after child exit was lost\n");
         return 1;
     }
-    fprintf(stderr, "unexpected longjmp\n");
-    return 4;
+
+    /* A zombie thread-group leader remains a waitable child even while its
+     * last member thread is still alive.  WNOHANG reports no status (0), not
+     * ECHILD, then the same proc_wait4 body reaps it after group death. */
+    waiter = (task_t){.pid=20, .tgid=20, .pgid=20};
+    child = (task_t){.pid=21, .ppid=20, .tgid=21, .pgid=20,
+                     .state=PROC_ZOMBIE, .parent=&waiter};
+    live_member = (task_t){.pid=22, .ppid=20, .tgid=21, .pgid=20,
+                           .state=PROC_RUNNABLE, .parent=&waiter};
+    waiter.tg_leader = &waiter;
+    waiter.children = &child;
+    child.tg_leader = &child;
+    child.tg_next = &live_member;
+    live_group_test = 1;
+    int status = 0;
+    int result = proc_wait4(child.pid, &status, WNOHANG);
+    if (result != 0) {
+        fprintf(stderr, "live zombie leader wait4 returned %d, expected 0\n",
+                result);
+        return 5;
+    }
+    live_member.state = PROC_ZOMBIE;
+    result = proc_wait4(child.pid, &status, WNOHANG);
+    if (result != child.pid) {
+        fprintf(stderr, "dead-group wait4 returned %d, expected %d\n",
+                result, child.pid);
+        return 6;
+    }
+    puts("wait-zombie-leader: PASS");
+    return 0;
 }
 """
 
