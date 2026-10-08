@@ -1,8 +1,6 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
-#include "core/consts.h"
-#include "core/klog.h"
 #include "mm/mm.h"
 
 #define WNOHANG     1
@@ -101,6 +99,7 @@ int proc_wait4(int pid, int *status, int options)
                 int cstate = proc_task_state_get(child);
                 if (cstate != PROC_UNUSED &&
                     wait_child_matches_locked(child, t, pid, options)) {
+                    found = 1;
                     if (cstate == PROC_ZOMBIE &&
                         !proc_tg_group_dead_locked(child)) {
                         /* zombie leader with live member threads: not
@@ -108,7 +107,6 @@ int proc_wait4(int pid, int *status, int options)
                         child = next;
                         continue;
                     }
-                    found = 1;
                     if (cstate == PROC_ZOMBIE) {
                         if (proc_task_is_current_any_cpu(child)) {
                             reap_pending = 1;
@@ -197,20 +195,10 @@ int proc_wait4(int pid, int *status, int options)
             return 0;
         }
 
-        /* Drop the list lock before parking.  This branch is the only one in
-         * proc_wait4() that reaches the bottom of the loop, and
-         * proc_park_commit() switches to another task: holding tasklist_lock
-         * across it parks the waiter as the lock's owner, so the next task
-         * that needs the list (the first clone of a booting init, say) spins
-         * on a lock nobody will ever release.  Every other exit above already
-         * released it at the same place.  The scan result stays valid: the
-         * waiter registration below is guarded by t->park_lock alone, and the
-         * loop re-scans the whole group after every wake. */
-        spin_unlock_irqrestore(&tasklist_lock, lock_flags);
-
-        /* The waiter registration and the park preparation are one park_lock
-         * critical section: ->waiting_for_child and the aggregate counter stay
-         * paired with the park state machine (INV-P1). */
+        /* Register before releasing tasklist_lock.  Child exit/reparent and
+         * proc_wake_child_waiters() use tasklist_lock, so keeping it held
+         * through this publication closes the scan-to-park lost-wakeup gap.
+         * The established lock order is tasklist_lock -> park_lock. */
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
         t->waiting_for_child = 1;
         g_proc_waiting_child_waiter_count++;
@@ -220,6 +208,7 @@ int proc_wait4(int pid, int *status, int options)
         if (sig)
             (void)proc_try_wake_locked(t, token.seq, PROC_WAKE_SIGNAL);
         spin_unlock_irqrestore(&t->park_lock, plf);
+        spin_unlock_irqrestore(&tasklist_lock, lock_flags);
 
         proc_wake_reason_t reason = proc_park_commit(token);
         proc_park_finish(token);

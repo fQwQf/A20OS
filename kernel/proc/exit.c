@@ -516,12 +516,36 @@ void proc_exit(int exit_code)
     if (vfork_completed)
         complete(&t->vfork_done);
 
+    /* Keep a thread group's leader alive across the zombie publication below.
+     * Once this member becomes zombie, a concurrent waiter may observe the
+     * whole group as dead and reap the leader before we can inspect it again. */
+    task_t *thread_leader = NULL;
+    lf = spin_lock_irqsave(&tasklist_lock);
+    if (t->tg_leader && t->tg_leader != t)
+        thread_leader = proc_get(t->tg_leader);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+
     uint64_t flags = spin_lock_irqsave(&t->park_lock);
     proc_runq_remove_locked(t);
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
     t->state = PROC_ZOMBIE;
     spin_unlock_irqrestore(&t->park_lock, flags);
+
+    /* A thread-group leader may already be a zombie while sibling threads
+     * keep the process unreportable to wait4.  The last member's exit makes
+     * that leader reportable, so wake the leader's parent after checking the
+     * group under tasklist_lock and taking references for the unlocked wake. */
+    task_t *completed_parent = NULL;
+    if (thread_leader) {
+        lf = spin_lock_irqsave(&tasklist_lock);
+        if (proc_task_state_get(thread_leader) == PROC_ZOMBIE &&
+            proc_tg_group_dead_locked(thread_leader) &&
+            thread_leader->parent &&
+            thread_leader->parent != proc_idle_task())
+            completed_parent = proc_get(thread_leader->parent);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+    }
 
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
@@ -536,6 +560,10 @@ void proc_exit(int exit_code)
     } else {
         proc_wake_child_waiters(parent);
     }
+    if (completed_parent)
+        proc_wake_child_waiters(completed_parent);
+    proc_put(completed_parent);
+    proc_put(thread_leader);
     int notify_parent_pid =
         !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
 
