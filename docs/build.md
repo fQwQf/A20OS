@@ -32,7 +32,7 @@ sudo apt-get install -y \
 - LoongArch32（LA32R）：**发行版完全没有**这个包，需要按 [platforms/loongarch32.md](platforms/loongarch32.md) 从源码构建 cloudspurs 的 binutils/gcc la32 分支。没有它就跑不了 `make check-loongarch32-bringup`，该门禁也因此只在装了自建工具链的本机跑，不进 CI。
 - arm32：需要 `gcc-arm-linux-gnueabihf` 与 `linux-libc-dev-armhf-cross`（Debian/Ubuntu 有）；`tools/ci/Dockerfile` 会装交叉编译器。后者为 fastfetch 提供 ARM Linux UAPI 头文件。若只把交叉工具链解包到临时目录，可将 `FF_LINUX_UAPI_ROOT` 指向包含 `<triple>/include` 的根目录，例如 `make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`。ARMv7-M 另走 STM32 目标，工具链不同。
 - ARM32 musl 的 `time_t` 是 64 位，直接 syscall 回归 `timer_edge` 因此使用 `timer_settime64` / `timer_gettime64` 编号和同宽的 `itimerspec` 布局；不要把 32 位 `timer_*32` 编号与 64 位结构体混用。
-- Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）。
+- Python：Makefile 默认调用 `python3`（Python 3.11 或更新版本，仅需标准库）。不需要 Conda，也不会因机器安装了 Conda 而自动切换解释器。可通过 `make PYTHON=/path/to/python3 ...` 显式指定其他解释器。
 - `grub-pc-bin` / `grub-efi-amd64-bin` / `xorriso`：只有 x86_64 瘦客户机部署用得到。`tools/a20 package x86_64-pc` 生成 GRUB rescue ISO 时，`grub-mkrescue` 会调用 `xorriso`；缺了它会在打包这一步报 `grub-mkrescue: 未找到 xorriso`。riscv64/aarch64 板和 QEMU 虚拟机都不需要这三个包。
 
 ## 最常用的构建与运行命令

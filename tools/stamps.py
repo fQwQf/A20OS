@@ -123,8 +123,8 @@ def cmd_user(a) -> int:
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
         need_build = need_clean = False
-        init = a.user_build_dir + "/init"
-        mksh = a.user_build_dir + "/mksh"
+        init = REPO / a.user_build_dir / "init"
+        mksh = REPO / a.user_build_dir / "mksh"
 
         # Re-evaluate only after taking the output-root lock. Another make
         # process may have completed this exact build while we were waiting.
@@ -166,7 +166,7 @@ def cmd_native(a) -> int:
         need_build = False
         if stamp_id(stamp) != a.build_id:
             need_build = True
-        elif any(not os.access(b, os.X_OK) for b in a.binaries.split()):
+        elif any(not os.access(REPO / b, os.X_OK) for b in a.binaries.split()):
             need_build = True
         elif any_newer(stamp, a.roots.split(), []):
             need_build = True

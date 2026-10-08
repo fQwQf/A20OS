@@ -3,7 +3,7 @@ OPT ?= -O3
 PROFILE ?= full
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
-PYTHON ?= $(if $(shell command -v conda 2>/dev/null),conda run -n a20os --no-capture-output python,python3)
+PYTHON ?= python3
 
 .DEFAULT_GOAL := all
 

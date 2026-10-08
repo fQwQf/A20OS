@@ -356,7 +356,7 @@ device 半边的桥接由一个聚合 pending 位把门，活性下限由两件�
 
 `make check-abi-boundary` 重新生成 Linux syscall 覆盖表，检查 `LINUX_ABI_BOUNDARY_CONTRACT`、`LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT`、`NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX`、`NATIVE_DEBUG_LIMITED_CONTRACT` 等静态契约；确认 `docs/native-abi/00-overview.md` 仍包含 `Debug 分区受限`。
 
-失败时先运行 `conda run -n a20os python tools/gen_linux_syscall_coverage.py` 看是否生成失败，再检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/include/ipc/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串，并确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
+失败时先运行 `python3 tools/gen_linux_syscall_coverage.py` 看是否生成失败，再检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/include/ipc/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串，并确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
 
 `check-abi-boundary` 的 19 条断言全部是单文件关键词存在性检查，没有一条跨表比对：Linux 侧靠 `tools/gen_linux_syscall_coverage.py` 与 `tools/gen_envelope_coverage.py` 两个生成器逼着每个新 `LINUX_SYSCALL` 写覆盖行与信封分类，Native 侧两样都没有，加一个 `A20_NATIVE_SYSCALL` 不需要任何文档行。下面两条补的就是这个方向。
 
@@ -624,7 +624,7 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 `make check-signal-exit-boundary` 检查 Park mode 与普通/致命/退出唤醒原因的映射、`signal_state.lock` 所有权、`STOPPED` 的显式恢复路径和远程退出安全边界；禁止信号或退出路径通过 `proc_make_ready()` 绕过 token；确认 `proc_stress` 覆盖停止态隔离、`SIGCONT`、停止态 `SIGKILL`、`sigsuspend` 交接和 eventfd 信号中断。完整步骤五本地矩阵运行 `make check-proc-step5-local`。
 
-失败时先运行 `make PYTHON='conda run --no-capture-output -n a20os python' NETDEV_USER='-netdev user,id=net' smoke-proc-stress` 并查看 `.kernel-build/smoke/proc-stress-riscv64.log`，再检查 `kernel/proc/{signal,park,sched,exit}.c` 的锁顺序与唤醒原因。
+失败时先运行 `make PYTHON=python3 NETDEV_USER='-netdev user,id=net' smoke-proc-stress` 并查看 `.kernel-build/smoke/proc-stress-riscv64.log`，再检查 `kernel/proc/{signal,park,sched,exit}.c` 的锁顺序与唤醒原因。
 
 ### Timeout heap 所有权
 
