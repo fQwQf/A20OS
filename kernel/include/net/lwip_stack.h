@@ -12,8 +12,8 @@ void a20_lwip_attach_netifs(void);
 void a20_lwip_poll(void);
 void a20_lwip_poll_waiter(void);
 void a20_lwip_poll_locked(void);
-/* Split so a caller that only advances timers does not drag the receive drain
- * into its critical section.  Both require g_lwip_lock held. */
+/* Generic timeout/configuration work requires the cold barrier. Multi-lane
+ * RX polling requires ingress and stages frames without protocol execution. */
 void a20_lwip_poll_timers_locked(void);
 void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
@@ -33,32 +33,22 @@ void a20_lwip_lane_rx_poll(unsigned budget);
 #else
 #define A20_LWIP_LANE_RX_POLL(budget) ((void)(budget))
 #endif
+/* Ingress protects device staging and netif topology, never protocol state.
+ * It must not be acquired while holding a core lane. */
+uint64_t a20_lwip_ingress_lock(void);
+void a20_lwip_ingress_unlock(uint64_t flags);
+void a20_lwip_signal_timer_pending(void);
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
-/* Stage C: say which lane owns the lwIP work that is about to run, so lwIP's
- * allocator can index that lane's pbuf pool.  Call only with g_lwip_lock held
- * and only right after taking it; a20_lwip_unlock() clears it again, so there
- * is no matching exit call.
- *
- * At CONFIG_NET_LANES == 1 this has to disappear from the *preprocessed
- * source*, not merely from the assembly, and that is why it is a macro rather
- * than an out-of-line function or even a static inline:
- *
- *   - out of line, it exists at one lane too, so all ~19 call sites in
- *     socket_inet.c would gain a relocation and a call, to hold an empty body;
- *   - static inline with an empty body is still not enough.  Measured: with
- *     `(void)net_lane_ctx_push(lane)` at CONFIG_NET_LANES == 1, GCC's IR for
- *     socket_inet.c differs from HEAD's even though the instruction stream
- *     barely moves -- one function's stack-slot assignment shuffles and .text
- *     ends up four bytes shorter.  An empty inline still passes `s->lane` as an
- *     argument, and the argument's deadness is decided early enough to perturb
- *     register allocation.
- *
- * So at one lane the macro expands to nothing and `s->lane` is never read.  The
- * N=1 objects then differ from the pre-lane build only in UBSan's embedded
- * source-line table, which shifts because this file gained lines at all; the
- * generated code is byte-identical, verified by rebuilding these files with
- * -fno-sanitize=undefined on both trees. */
+/* Control-plane writers acquire every core lane in ascending order.  Hot
+ * callers hold one owner lane and may never upgrade to the control barrier. */
+uint64_t a20_lwip_lane_lock(unsigned lane);
+void a20_lwip_lane_unlock(uint64_t flags);
+int a20_lwip_control_is_held(void);
+int a20_lwip_lane_is_held(unsigned lane);
+/* Select logical work ownership only while the requested lane is held.  Cold
+ * callers own every lane; hot callers must retain their one owner context.
+ * One-lane builds erase the context call at preprocessing time. */
 #if CONFIG_NET_LANES > 1
 void a20_lwip_lane_enter(unsigned lane);
 #else

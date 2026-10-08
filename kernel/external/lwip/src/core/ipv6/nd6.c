@@ -61,6 +61,8 @@
 #include "lwip/dhcp6.h"
 #include "lwip/ip.h"
 #include "lwip/stats.h"
+#include "net/lwip_concurrency.h"
+#include "net/lwip_stack.h"
 #include "lwip/dns.h"
 
 #include <string.h>
@@ -102,9 +104,6 @@ static u8_t nd6_queue_size = 0;
 /* Index for cache entries. */
 static netif_addr_idx_t nd6_cached_destination_index;
 
-/* Multicast address holder. */
-static ip6_addr_t multicast_address;
-
 static u8_t nd6_tmr_rs_reduction;
 
 /* Static buffer to parse RA packet options */
@@ -116,7 +115,6 @@ union ra_options {
   struct rdnss_option   rdnss;
 #endif
 };
-static union ra_options nd6_ra_buffer;
 
 /* Forward declarations. */
 static s8_t nd6_find_neighbor_cache_entry(const ip6_addr_t *ip6addr);
@@ -304,6 +302,9 @@ nd6_input(struct pbuf *p, struct netif *inp)
   u8_t msg_type;
   s8_t i;
   s16_t dest_idx;
+  union ra_options ra_buffer;
+
+  LWIP_ASSERT("ND6 input requires the control barrier", a20_lwip_control_is_held());
 
   ND6_STATS_INC(nd6.recv);
 
@@ -670,17 +671,17 @@ nd6_input(struct pbuf *p, struct netif *inp)
         buffer = &((u8_t*)p->payload)[offset];
       } else {
         /* check if this option fits into our buffer */
-        if (option_len > sizeof(nd6_ra_buffer)) {
+        if (option_len > sizeof(ra_buffer)) {
           option_type = pbuf_get_at(p, offset);
           /* invalid option length */
           if (option_type != ND6_OPTION_TYPE_RDNSS) {
             goto lenerr_drop_free_return;
           }
           /* we allow RDNSS option to be longer - we'll just drop some servers */
-          option_len = sizeof(nd6_ra_buffer);
+          option_len = sizeof(ra_buffer);
         }
-        buffer = (u8_t*)&nd6_ra_buffer;
-        option_len = pbuf_copy_partial(p, &nd6_ra_buffer, option_len, offset);
+        buffer = (u8_t*)&ra_buffer;
+        option_len = pbuf_copy_partial(p, &ra_buffer, option_len, offset);
       }
       option_type = buffer[0];
       switch (option_type) {
@@ -976,6 +977,8 @@ nd6_tmr(void)
   s8_t i;
   struct netif *netif;
 
+  LWIP_ASSERT("ND6 timer requires the control barrier", a20_lwip_control_is_held());
+
   /* Process neighbor entries. */
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     switch (neighbor_cache[i].state) {
@@ -1198,6 +1201,7 @@ nd6_send_ns(struct netif *netif, const ip6_addr_t *target_addr, u8_t flags)
   struct ns_header *ns_hdr;
   struct pbuf *p;
   const ip6_addr_t *src_addr = NULL;
+  ip6_addr_t multicast_addr;
   u16_t lladdr_opt_len;
 
   LWIP_ASSERT("target address is required", target_addr != NULL);
@@ -1251,9 +1255,9 @@ nd6_send_ns(struct netif *netif, const ip6_addr_t *target_addr, u8_t flags)
 
   /* Generate the solicited node address for the target address. */
   if (flags & ND6_SEND_FLAG_MULTICAST_DEST) {
-    ip6_addr_set_solicitednode(&multicast_address, target_addr->addr[3]);
-    ip6_addr_assign_zone(&multicast_address, IP6_MULTICAST, netif);
-    target_addr = &multicast_address;
+    ip6_addr_set_solicitednode(&multicast_addr, target_addr->addr[3]);
+    ip6_addr_assign_zone(&multicast_addr, IP6_MULTICAST, netif);
+    target_addr = &multicast_addr;
   }
 
 #if CHECKSUM_GEN_ICMP6
@@ -1285,6 +1289,7 @@ nd6_send_na(struct netif *netif, const ip6_addr_t *target_addr, u8_t flags)
   struct pbuf *p;
   const ip6_addr_t *src_addr;
   const ip6_addr_t *dest_addr;
+  ip6_addr_t multicast_addr;
   u16_t lladdr_opt_len;
 
   LWIP_ASSERT("target address is required", target_addr != NULL);
@@ -1321,13 +1326,13 @@ nd6_send_na(struct netif *netif, const ip6_addr_t *target_addr, u8_t flags)
 
   /* Generate the solicited node address for the target address. */
   if (flags & ND6_SEND_FLAG_MULTICAST_DEST) {
-    ip6_addr_set_solicitednode(&multicast_address, target_addr->addr[3]);
-    ip6_addr_assign_zone(&multicast_address, IP6_MULTICAST, netif);
-    dest_addr = &multicast_address;
+    ip6_addr_set_solicitednode(&multicast_addr, target_addr->addr[3]);
+    ip6_addr_assign_zone(&multicast_addr, IP6_MULTICAST, netif);
+    dest_addr = &multicast_addr;
   } else if (flags & ND6_SEND_FLAG_ALLNODES_DEST) {
-    ip6_addr_set_allnodes_linklocal(&multicast_address);
-    ip6_addr_assign_zone(&multicast_address, IP6_MULTICAST, netif);
-    dest_addr = &multicast_address;
+    ip6_addr_set_allnodes_linklocal(&multicast_addr);
+    ip6_addr_assign_zone(&multicast_addr, IP6_MULTICAST, netif);
+    dest_addr = &multicast_addr;
   } else {
     dest_addr = ip6_current_src_addr();
   }
@@ -1360,6 +1365,7 @@ nd6_send_rs(struct netif *netif)
   struct pbuf *p;
   const ip6_addr_t *src_addr;
   err_t err;
+  ip6_addr_t multicast_addr;
   u16_t lladdr_opt_len = 0;
 
   /* Link-local source address, or unspecified address? */
@@ -1370,8 +1376,8 @@ nd6_send_rs(struct netif *netif)
   }
 
   /* Generate the all routers target address. */
-  ip6_addr_set_allrouters_linklocal(&multicast_address);
-  ip6_addr_assign_zone(&multicast_address, IP6_MULTICAST, netif);
+  ip6_addr_set_allrouters_linklocal(&multicast_addr);
+  ip6_addr_assign_zone(&multicast_addr, IP6_MULTICAST, netif);
 
   /* Allocate a packet. */
   if (src_addr != IP6_ADDR_ANY6) {
@@ -1402,14 +1408,14 @@ nd6_send_rs(struct netif *netif)
 #if CHECKSUM_GEN_ICMP6
   IF__NETIF_CHECKSUM_ENABLED(netif, NETIF_CHECKSUM_GEN_ICMP6) {
     rs_hdr->chksum = ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->len, src_addr,
-      &multicast_address);
+      &multicast_addr);
   }
 #endif /* CHECKSUM_GEN_ICMP6 */
 
   /* Send the packet out. */
   ND6_STATS_INC(nd6.xmit);
 
-  err = ip6_output_if(p, (src_addr == IP6_ADDR_ANY6) ? NULL : src_addr, &multicast_address,
+  err = ip6_output_if(p, (src_addr == IP6_ADDR_ANY6) ? NULL : src_addr, &multicast_addr,
       ND6_HOPLIM, 0, IP6_NEXTH_ICMP6, netif);
   pbuf_free(p);
 
@@ -1640,6 +1646,7 @@ void
 nd6_clear_destination_cache(void)
 {
   int i;
+  LWIP_ASSERT("ND6 destination cache clear requires the control barrier", a20_lwip_control_is_held());
 
   for (i = 0; i < LWIP_ND6_NUM_DESTINATIONS; i++) {
     ip6_addr_set_any(&destination_cache[i].destination_addr);
@@ -1770,6 +1777,9 @@ nd6_find_route(const ip6_addr_t *ip6addr)
 {
   struct netif *netif;
   s8_t i;
+  uint64_t flags;
+  LWIP_ASSERT_CORE_LOCKED();
+  flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ND6, NULL);
 
   /* @todo decide if it makes sense to check the destination cache first */
 
@@ -1779,7 +1789,10 @@ nd6_find_route(const ip6_addr_t *ip6addr)
     netif = prefix_list[i].netif;
     if ((netif != NULL) && ip6_addr_net_eq(&prefix_list[i].prefix, ip6addr) &&
         netif_is_up(netif) && netif_is_link_up(netif)) {
-      return netif;
+      {
+        a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
+        return netif;
+      }
     }
   }
 
@@ -1788,9 +1801,12 @@ nd6_find_route(const ip6_addr_t *ip6addr)
   if (i >= 0) {
     LWIP_ASSERT("selected router must have a neighbor entry",
       default_router_list[i].neighbor_entry != NULL);
-    return default_router_list[i].neighbor_entry->netif;
+    netif = default_router_list[i].neighbor_entry->netif;
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
+    return netif;
   }
 
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
   return NULL;
 }
 
@@ -2060,8 +2076,7 @@ nd6_get_next_hop_entry(const ip6_addr_t *ip6addr, struct netif *netif)
       neighbor_cache[i].isrouter = 0;
       neighbor_cache[i].netif = netif;
       neighbor_cache[i].state = ND6_INCOMPLETE;
-      neighbor_cache[i].counter.probes_sent = 1;
-      nd6_send_neighbor_cache_probe(&neighbor_cache[i], ND6_SEND_FLAG_MULTICAST_DEST);
+      neighbor_cache[i].counter.probes_sent = 0;
     }
   }
 
@@ -2268,29 +2283,45 @@ nd6_send_q(s8_t i)
  *
  * As such, this function returns one of three different possible results:
  *
- * - ERR_OK with a non-NULL 'hwaddrp': the caller should send the packet now.
- * - ERR_OK with a NULL 'hwaddrp': the packet has been enqueued for later.
+ * - ERR_OK with send_now set: the caller should send using the copied address.
+ * - ERR_OK with send_now clear: the packet has been enqueued for later.
  * - not ERR_OK: something went wrong; forward the error upward in the stack.
  *
  * @param netif The lwIP network interface on which the IP packet will be sent.
  * @param q The pbuf(s) containing the IP packet to be sent.
  * @param ip6addr The destination IPv6 address of the packet.
- * @param hwaddrp On success, filled with a pointer to a HW address or NULL (meaning
- *        the packet has been queued).
+ * @param hwaddr On success, receives a copy of the HW address if send_now is set.
+ * @param send_now Set when the caller should transmit immediately.
  * @return
  * - ERR_OK on success, ERR_RTE if no route was found for the packet,
  * or ERR_MEM if low memory conditions prohibit sending the packet at all.
  */
 err_t
-nd6_get_next_hop_addr_or_queue(struct netif *netif, struct pbuf *q, const ip6_addr_t *ip6addr, const u8_t **hwaddrp)
+nd6_get_next_hop_addr_or_queue(struct netif *netif, struct pbuf *q, const ip6_addr_t *ip6addr,
+                               u8_t hwaddr[6], u8_t *send_now)
 {
   s8_t i;
+  struct netif *probe_netif = NULL;
+  ip6_addr_t probe_addr;
+  u8_t send_probe = 0;
+  uint64_t flags;
+  LWIP_ASSERT_CORE_LOCKED();
+  flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ND6, NULL);
+  *send_now = 0;
 
   /* Get next hop record. */
   i = nd6_get_next_hop_entry(ip6addr, netif);
   if (i < 0) {
     /* failed to get a next hop neighbor record. */
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
     return i;
+  }
+  if ((neighbor_cache[i].state == ND6_INCOMPLETE) &&
+      (neighbor_cache[i].counter.probes_sent == 0)) {
+    neighbor_cache[i].counter.probes_sent = 1;
+    probe_netif = neighbor_cache[i].netif;
+    ip6_addr_copy(probe_addr, neighbor_cache[i].next_hop_address);
+    send_probe = 1;
   }
 
   /* Now that we have a destination record, send or queue the packet. */
@@ -2305,13 +2336,24 @@ nd6_get_next_hop_addr_or_queue(struct netif *netif, struct pbuf *q, const ip6_ad
       (neighbor_cache[i].state == ND6_PROBE)) {
 
     /* Tell the caller to send out the packet now. */
-    *hwaddrp = neighbor_cache[i].lladdr;
+    SMEMCPY(hwaddr, neighbor_cache[i].lladdr, 6);
+    *send_now = 1;
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
+    if (send_probe) {
+      nd6_send_ns(probe_netif, &probe_addr, ND6_SEND_FLAG_MULTICAST_DEST);
+    }
     return ERR_OK;
   }
 
   /* We should queue packet on this interface. */
-  *hwaddrp = NULL;
-  return nd6_queue_packet(i, q);
+  {
+    err_t err = nd6_queue_packet(i, q);
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
+    if (send_probe) {
+      nd6_send_ns(probe_netif, &probe_addr, ND6_SEND_FLAG_MULTICAST_DEST);
+    }
+    return err;
+  }
 }
 
 
@@ -2326,19 +2368,26 @@ u16_t
 nd6_get_destination_mtu(const ip6_addr_t *ip6addr, struct netif *netif)
 {
   s16_t i;
+  u16_t mtu = IP6_MIN_MTU_LENGTH;
+  uint64_t flags;
+  LWIP_ASSERT_CORE_LOCKED();
+  flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ND6, NULL);
 
   i = nd6_find_destination_cache_entry(ip6addr);
   if (i >= 0) {
     if (destination_cache[i].pmtu > 0) {
-      return destination_cache[i].pmtu;
+      mtu = destination_cache[i].pmtu;
+      goto done;
     }
   }
 
   if (netif != NULL) {
-    return netif_mtu6(netif);
+    mtu = netif_mtu6(netif);
   }
 
-  return IP6_MIN_MTU_LENGTH; /* Minimum MTU */
+done:
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
+  return mtu; /* Minimum MTU if no destination-specific value is known. */
 }
 
 
@@ -2358,6 +2407,9 @@ nd6_reachability_hint(const ip6_addr_t *ip6addr)
   s8_t i;
   s16_t dst_idx;
   struct nd6_destination_cache_entry *dest;
+  uint64_t flags;
+  LWIP_ASSERT_CORE_LOCKED();
+  flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ND6, NULL);
 
   /* Find destination in cache. */
   if (ip6_addr_eq(ip6addr, &(destination_cache[nd6_cached_destination_index].destination_addr))) {
@@ -2367,6 +2419,7 @@ nd6_reachability_hint(const ip6_addr_t *ip6addr)
     dst_idx = nd6_find_destination_cache_entry(ip6addr);
   }
   if (dst_idx < 0) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
     return;
   }
 
@@ -2379,17 +2432,20 @@ nd6_reachability_hint(const ip6_addr_t *ip6addr)
     i = nd6_find_neighbor_cache_entry(&dest->next_hop_addr);
   }
   if (i < 0) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
     return;
   }
 
   /* For safety: don't set as reachable if we don't have a LL address yet. Misuse protection. */
   if (neighbor_cache[i].state == ND6_INCOMPLETE || neighbor_cache[i].state == ND6_NO_ENTRY) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
     return;
   }
 
   /* Set reachability state. */
   neighbor_cache[i].state = ND6_REACHABLE;
   neighbor_cache[i].counter.reachable_time = reachable_time;
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ND6, NULL, flags);
 }
 #endif /* LWIP_ND6_TCP_REACHABILITY_HINTS */
 
@@ -2403,6 +2459,7 @@ nd6_cleanup_netif(struct netif *netif)
 {
   u8_t i;
   s8_t router_index;
+  LWIP_ASSERT("ND6 netif cleanup requires the control barrier", a20_lwip_control_is_held());
   for (i = 0; i < LWIP_ND6_NUM_PREFIXES; i++) {
     if (prefix_list[i].netif == netif) {
       prefix_list[i].netif = NULL;
@@ -2439,6 +2496,10 @@ void
 nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
 {
   u8_t old_state, old_member, new_member;
+  ip6_addr_t multicast_addr;
+
+  LWIP_ASSERT("ND6 multicast membership update requires the control barrier",
+              a20_lwip_control_is_held());
 
   old_state = netif_ip6_addr_state(netif, addr_idx);
 
@@ -2449,13 +2510,13 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
   new_member = (new_state != IP6_ADDR_INVALID && new_state != IP6_ADDR_DUPLICATED && new_state != IP6_ADDR_TENTATIVE);
 
   if (old_member != new_member) {
-    ip6_addr_set_solicitednode(&multicast_address, netif_ip6_addr(netif, addr_idx)->addr[3]);
-    ip6_addr_assign_zone(&multicast_address, IP6_MULTICAST, netif);
+    ip6_addr_set_solicitednode(&multicast_addr, netif_ip6_addr(netif, addr_idx)->addr[3]);
+    ip6_addr_assign_zone(&multicast_addr, IP6_MULTICAST, netif);
 
     if (new_member) {
-      mld6_joingroup_netif(netif, &multicast_address);
+      mld6_joingroup_netif(netif, &multicast_addr);
     } else {
-      mld6_leavegroup_netif(netif, &multicast_address);
+      mld6_leavegroup_netif(netif, &multicast_addr);
     }
   }
 }
@@ -2465,6 +2526,7 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
 void
 nd6_restart_netif(struct netif *netif)
 {
+  LWIP_ASSERT("ND6 netif restart requires the control barrier", a20_lwip_control_is_held());
 #if LWIP_IPV6_SEND_ROUTER_SOLICIT
   /* Send Router Solicitation messages (see RFC 4861, ch. 6.3.7). */
   netif->rs_count = LWIP_ND6_MAX_MULTICAST_SOLICIT;

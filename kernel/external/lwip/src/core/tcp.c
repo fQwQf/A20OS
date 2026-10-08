@@ -109,6 +109,7 @@
 #if LWIP_TCP_CUBIC
 #include "lwip/priv/tcp_cubic_priv.h" /* A20OS: per-connection congestion control */
 #endif
+#include "net/lwip_concurrency.h"
 #include "lwip/debug.h"
 #include "lwip/stats.h"
 #include "lwip/ip6.h"
@@ -162,7 +163,14 @@ static const char *const tcp_state_str[] = {
 static u16_t tcp_port = TCP_LOCAL_PORT_RANGE_START;
 
 /* Incremented every coarse grained timer shot (typically every 500 ms). */
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+u32_t tcp_ticks_value;
+#define TCP_TICKS_INCREMENT() \
+  ((void)__atomic_add_fetch(&tcp_ticks_value, 1U, __ATOMIC_RELAXED))
+#else
 u32_t tcp_ticks;
+#define TCP_TICKS_INCREMENT() (++tcp_ticks)
+#endif
 static const u8_t tcp_backoff[13] =
 { 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7};
 /* Times per slowtmr hits */
@@ -187,17 +195,23 @@ struct tcp_pcb **const tcp_pcb_lists[] = {(struct tcp_pcb **)tcp_listen_pcbs, tc
          tcp_active_pcbs, tcp_tw_pcbs
 };
 
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+u8_t tcp_active_pcbs_changed_lanes[LWIP_CORE_LANE_COUNT];
+#else
 u8_t tcp_active_pcbs_changed;
+#endif
 
 /** Timer counters, one pair per lane.
  *
  * These two are per-lane because nothing outside the timer reads them, and
  * because each lane walks only its own bucket: a pcb is compared against, and
  * stamped with, the counter of the lane that owns it, so the dedup stays exact
- * even though every lane advances independently.  tcp_ticks below is NOT in
- * this set -- it is the stack's wall clock and is written from the packet
- * paths; see docs/net/net-lanes.md. */
+ * even though every lane advances independently. tcp_ticks is the shared wall
+ * clock: the timer bottom-half advances it once per slow-timer interval, and
+ * multi-lane readers use atomic loads. */
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
 static u8_t tcp_timer[NET_PCB_LANE_BUCKETS];
+#endif
 static u8_t tcp_timer_ctr[NET_PCB_LANE_BUCKETS];
 static u16_t tcp_new_port(void);
 
@@ -248,6 +262,9 @@ void
 tcp_tmr(void)
 {
   LWIP_ASSERT_CORE_LOCKED();
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  LWIP_ASSERT("tcp_tmr: use per-lane timer entry points", 0);
+#else
   /* Call tcp_fasttmr() every 250 ms */
   tcp_fasttmr();
 
@@ -256,7 +273,16 @@ tcp_tmr(void)
        tcp_tmr() is called. */
     tcp_slowtmr();
   }
+#endif
 }
+
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+void
+tcp_ticks_advance(void)
+{
+  TCP_TICKS_INCREMENT();
+}
+#endif
 
 #if LWIP_CALLBACK_API || TCP_LISTEN_BACKLOG
 /** Called when a listen pcb is closed. Iterates one pcb list and removes the
@@ -316,8 +342,14 @@ tcp_backlog_delayed(struct tcp_pcb *pcb)
   LWIP_ASSERT_CORE_LOCKED();
   if ((pcb->flags & TF_BACKLOGPEND) == 0) {
     if (pcb->listener != NULL) {
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+      uint64_t listener_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, pcb->listener);
+#endif
       pcb->listener->accepts_pending++;
       LWIP_ASSERT("accepts_pending != 0", pcb->listener->accepts_pending != 0);
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+      a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, pcb->listener, listener_flags);
+#endif
       tcp_set_flags(pcb, TF_BACKLOGPEND);
     }
   }
@@ -339,8 +371,14 @@ tcp_backlog_accepted(struct tcp_pcb *pcb)
   LWIP_ASSERT_CORE_LOCKED();
   if ((pcb->flags & TF_BACKLOGPEND) != 0) {
     if (pcb->listener != NULL) {
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+      uint64_t listener_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, pcb->listener);
+#endif
       LWIP_ASSERT("accepts_pending != 0", pcb->listener->accepts_pending != 0);
       pcb->listener->accepts_pending--;
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+      a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, pcb->listener, listener_flags);
+#endif
       tcp_clear_flags(pcb, TF_BACKLOGPEND);
     }
   }
@@ -1063,6 +1101,9 @@ tcp_new_port(void)
   int lane;
   u16_t n = 0;
   struct tcp_pcb *pcb;
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  uint64_t lock_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, NULL);
+#endif
 
 again:
   tcp_port++;
@@ -1076,14 +1117,23 @@ again:
         if (pcb->local_port == tcp_port) {
           n++;
           if (n > (TCP_LOCAL_PORT_RANGE_END - TCP_LOCAL_PORT_RANGE_START)) {
-            return 0;
+            goto exhausted;
           }
           goto again;
         }
       }
     }
   }
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, NULL, lock_flags);
+#endif
   return tcp_port;
+
+exhausted:
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, NULL, lock_flags);
+#endif
+  return 0;
 }
 
 /**
@@ -1525,27 +1575,25 @@ tcp_slowtmr_active_bucket(int lane)
 }
 
 void
-tcp_slowtmr(void)
+tcp_slowtmr_lane(unsigned lane)
 {
   struct tcp_pcb *pcb, *prev;
   u8_t pcb_remove;      /* flag if a PCB should be removed */
-  int lane;
 
   LWIP_ASSERT_CORE_LOCKED();
-
-  ++tcp_ticks;
+  LWIP_ASSERT("tcp_slowtmr_lane: invalid lane", lane < CONFIG_NET_LANES);
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  LWIP_ASSERT("tcp_slowtmr_lane: lane context mismatch", lane == LWIP_CORE_LANE());
+#endif
 
 tcp_slowtmr_start:
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
-    ++tcp_timer_ctr[lane];
-    if (tcp_slowtmr_active_bucket(lane)) {
-      goto tcp_slowtmr_start;
-    }
+  ++tcp_timer_ctr[lane];
+  if (tcp_slowtmr_active_bucket((int)lane)) {
+    goto tcp_slowtmr_start;
   }
 
 
-  /* Steps through all of the TIME-WAIT PCBs, one lane bucket at a time. */
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+  /* Steps through this lane's TIME-WAIT PCBs. */
   prev = NULL;
   pcb = tcp_tw_pcbs[lane];
   while (pcb != NULL) {
@@ -1578,7 +1626,21 @@ tcp_slowtmr_start:
       pcb = pcb->next;
     }
   }
+}
+
+void
+tcp_slowtmr(void)
+{
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  LWIP_ASSERT("tcp_slowtmr: use tcp_slowtmr_lane in multi-lane builds", 0);
+#else
+  unsigned lane;
+  LWIP_ASSERT_CORE_LOCKED();
+  TCP_TICKS_INCREMENT();
+  for (lane = 0; lane < CONFIG_NET_LANES; lane++) {
+    tcp_slowtmr_lane(lane);
   }
+#endif
 }
 
 /**
@@ -1638,20 +1700,34 @@ tcp_fasttmr_bucket(int lane)
 }
 
 void
-tcp_fasttmr(void)
+tcp_fasttmr_lane(unsigned lane)
 {
-  int lane;
-
   LWIP_ASSERT_CORE_LOCKED();
+  LWIP_ASSERT("tcp_fasttmr_lane: invalid lane", lane < CONFIG_NET_LANES);
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  LWIP_ASSERT("tcp_fasttmr_lane: lane context mismatch", lane == LWIP_CORE_LANE());
+#endif
 
 tcp_fasttmr_start:
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
-    ++tcp_timer_ctr[lane];
-    if (tcp_fasttmr_bucket(lane)) {
-      /* application callback has changed the pcb list: restart the loop */
-      goto tcp_fasttmr_start;
-    }
+  ++tcp_timer_ctr[lane];
+  if (tcp_fasttmr_bucket((int)lane)) {
+    /* application callback changed this lane's list: restart its bucket */
+    goto tcp_fasttmr_start;
   }
+}
+
+void
+tcp_fasttmr(void)
+{
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  LWIP_ASSERT("tcp_fasttmr: use tcp_fasttmr_lane in multi-lane builds", 0);
+#else
+  unsigned lane;
+  LWIP_ASSERT_CORE_LOCKED();
+  for (lane = 0; lane < CONFIG_NET_LANES; lane++) {
+    tcp_fasttmr_lane(lane);
+  }
+#endif
 }
 
 /** Call tcp_output for all active pcbs that have TF_NAGLEMEMERR set */
@@ -1662,7 +1738,12 @@ tcp_txnow(void)
   struct tcp_pcb *pcb;
   int lane;
 
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  /* A hot caller owns one lane; do not walk or output another lane's PCBs. */
+  for (lane = (int)LWIP_CORE_LANE(); lane < (int)LWIP_CORE_LANE() + 1; lane++) {
+#else
   for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+#endif
     for (pcb = tcp_active_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       if (pcb->flags & TF_NAGLEMEMERR) {
         tcp_output(pcb);
@@ -1835,6 +1916,20 @@ tcp_recv_null(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 }
 #endif /* LWIP_CALLBACK_API */
 
+/* Bound OOM reclamation by the locks the caller actually holds. */
+static void
+tcp_oom_lane_bounds(int *first, int *end)
+{
+  *first = 0;
+  *end = NET_PCB_LANE_BUCKETS;
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  if (!LWIP_CORE_ALL_LANES_HELD()) {
+    *first = (int)LWIP_CORE_LANE();
+    *end = *first + 1;
+  }
+#endif
+}
+
 /**
  * Kills the oldest active connection that has a lower priority than 'prio'.
  *
@@ -1847,7 +1942,7 @@ tcp_kill_prio(u8_t prio)
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
   u8_t mprio;
-  int lane;
+  int lane, first_lane, end_lane;
 
   mprio = LWIP_MIN(TCP_PRIO_MAX, prio);
 
@@ -1867,7 +1962,8 @@ tcp_kill_prio(u8_t prio)
 
   inactivity = 0;
   inactive = NULL;
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+  tcp_oom_lane_bounds(&first_lane, &end_lane);
+  for (lane = first_lane; lane < end_lane; lane++) {
     for (pcb = tcp_active_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
           /* lower prio is always a kill candidate */
           if ((pcb->prio < mprio) ||
@@ -1896,7 +1992,7 @@ tcp_kill_state(enum tcp_state state)
   LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
-  int lane;
+  int lane, first_lane, end_lane;
 
   LWIP_ASSERT("invalid state", (state == CLOSING) || (state == LAST_ACK));
 
@@ -1904,7 +2000,8 @@ tcp_kill_state(enum tcp_state state)
   inactive = NULL;
   /* Go through the list of active pcbs and get the oldest pcb that is in state
      CLOSING/LAST_ACK. */
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+  tcp_oom_lane_bounds(&first_lane, &end_lane);
+  for (lane = first_lane; lane < end_lane; lane++) {
     for (pcb = tcp_active_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       if (pcb->state == state) {
         if ((u32_t)(tcp_ticks - pcb->tmr) >= inactivity) {
@@ -1932,12 +2029,13 @@ tcp_kill_timewait(void)
   LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
-  int lane;
+  int lane, first_lane, end_lane;
 
   inactivity = 0;
   inactive = NULL;
   /* Go through the list of TIME_WAIT pcbs and get the oldest pcb. */
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+  tcp_oom_lane_bounds(&first_lane, &end_lane);
+  for (lane = first_lane; lane < end_lane; lane++) {
     for (pcb = tcp_tw_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       if ((u32_t)(tcp_ticks - pcb->tmr) >= inactivity) {
         inactivity = tcp_ticks - pcb->tmr;
@@ -1962,9 +2060,12 @@ tcp_handle_closepend(void)
 {
   LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb;
-  int lane;
+  int lane, first_lane, end_lane;
 
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+  /* Hot allocation may reclaim only its own bucket. Cold inputs and control
+   * paths already hold every lane, so preserve whole-pool reclaim there. */
+  tcp_oom_lane_bounds(&first_lane, &end_lane);
+  for (lane = first_lane; lane < end_lane; lane++) {
     pcb = tcp_active_pcbs[lane];
 
     while (pcb != NULL) {
@@ -2396,12 +2497,23 @@ tcp_next_iss(struct tcp_pcb *pcb)
   return LWIP_HOOK_TCP_ISN(&pcb->local_ip, pcb->local_port, &pcb->remote_ip, pcb->remote_port);
 #else /* LWIP_HOOK_TCP_ISN */
   static u32_t iss = 6510;
+  u32_t next;
 
   LWIP_ASSERT("tcp_next_iss: invalid pcb", pcb != NULL);
   LWIP_UNUSED_ARG(pcb);
 
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  {
+    uint64_t lock_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_TX, NULL);
+    iss += tcp_ticks;       /* XXX */
+    next = iss;
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, NULL, lock_flags);
+  }
+#else
   iss += tcp_ticks;       /* XXX */
-  return iss;
+  next = iss;
+#endif
+  return next;
 #endif /* LWIP_HOOK_TCP_ISN */
 }
 
@@ -2705,7 +2817,11 @@ tcp_debug_print_pcbs(void)
   int lane;
 
   LWIP_DEBUGF(TCP_DEBUG, ("Active PCB states:\n"));
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  for (lane = (int)LWIP_CORE_LANE(); lane < (int)LWIP_CORE_LANE() + 1; lane++) {
+#else
   for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+#endif
     for (pcb = tcp_active_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       LWIP_DEBUGF(TCP_DEBUG, ("Local port %"U16_F", foreign port %"U16_F" lane %u snd_nxt %"U32_F" rcv_nxt %"U32_F" ",
                               pcb->local_port, pcb->remote_port, (unsigned)pcb->lane,
@@ -2715,7 +2831,11 @@ tcp_debug_print_pcbs(void)
   }
 
   LWIP_DEBUGF(TCP_DEBUG, ("Listen PCB states:\n"));
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  for (lane = (int)LWIP_CORE_LANE(); lane < (int)LWIP_CORE_LANE() + 1; lane++) {
+#else
   for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+#endif
     for (pcbl = tcp_listen_pcbs[lane].listen_pcbs; pcbl != NULL; pcbl = pcbl->next) {
       LWIP_DEBUGF(TCP_DEBUG, ("Local port %"U16_F" lane %u ", pcbl->local_port, (unsigned)pcbl->lane));
       tcp_debug_print_state(pcbl->state);
@@ -2723,7 +2843,11 @@ tcp_debug_print_pcbs(void)
   }
 
   LWIP_DEBUGF(TCP_DEBUG, ("TIME-WAIT PCB states:\n"));
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  for (lane = (int)LWIP_CORE_LANE(); lane < (int)LWIP_CORE_LANE() + 1; lane++) {
+#else
   for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+#endif
     for (pcb = tcp_tw_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       LWIP_DEBUGF(TCP_DEBUG, ("Local port %"U16_F", foreign port %"U16_F" lane %u snd_nxt %"U32_F" rcv_nxt %"U32_F" ",
                               pcb->local_port, pcb->remote_port, (unsigned)pcb->lane,
@@ -2740,10 +2864,18 @@ s16_t
 tcp_pcbs_sane(void)
 {
   struct tcp_pcb *pcb;
-  int i, lane;
+  int i, lane, first_lane = 0, end_lane = NET_PCB_LANE_BUCKETS;
 
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  if (!LWIP_CORE_ALL_LANES_HELD()) {
+    first_lane = (int)LWIP_CORE_LANE();
+    end_lane = first_lane + 1;
+  }
+#endif
   for (i = 0; i < NUM_TCP_PCB_LISTS; i++) {
-    for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+    /* Hot assertions inspect only their lane. A cold caller holding the
+     * control barrier can retain the original whole-list audit. */
+    for (lane = first_lane; lane < end_lane; lane++) {
       for (pcb = tcp_pcb_lists[i][lane]; pcb != NULL; pcb = pcb->next) {
         /* A pcb linked at index `lane` while naming a different one is in the
            wrong list: either it was linked twice, or its lane was rewritten

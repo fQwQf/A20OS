@@ -1151,20 +1151,6 @@ netif_loop_output(struct netif *netif, struct pbuf *p)
     MIB2_STATS_NETIF_INC(stats_if, ifoutdiscards);
     return ERR_MEM;
   }
-#if LWIP_LOOPBACK_MAX_PBUFS
-  clen = pbuf_clen(r);
-  /* check for overflow or too many pbuf on queue */
-  if (((netif->loop_cnt_current + clen) < netif->loop_cnt_current) ||
-      ((netif->loop_cnt_current + clen) > LWIP_MIN(LWIP_LOOPBACK_MAX_PBUFS, 0xFFFF))) {
-    pbuf_free(r);
-    LINK_STATS_INC(link.memerr);
-    LINK_STATS_INC(link.drop);
-    MIB2_STATS_NETIF_INC(stats_if, ifoutdiscards);
-    return ERR_MEM;
-  }
-  netif->loop_cnt_current = (u16_t)(netif->loop_cnt_current + clen);
-#endif /* LWIP_LOOPBACK_MAX_PBUFS */
-
   /* Copy the whole pbuf queue p into the single pbuf r */
   if ((err = pbuf_copy(r, p)) != ERR_OK) {
     pbuf_free(r);
@@ -1183,6 +1169,20 @@ netif_loop_output(struct netif *netif, struct pbuf *p)
   }
 
   SYS_ARCH_PROTECT(lev);
+#if LWIP_LOOPBACK_MAX_PBUFS
+  clen = pbuf_clen(r);
+  /* Reserve queue capacity atomically with publishing the packet. */
+  if (((netif->loop_cnt_current + clen) < netif->loop_cnt_current) ||
+      ((netif->loop_cnt_current + clen) > LWIP_MIN(LWIP_LOOPBACK_MAX_PBUFS, 0xFFFF))) {
+    SYS_ARCH_UNPROTECT(lev);
+    pbuf_free(r);
+    LINK_STATS_INC(link.memerr);
+    LINK_STATS_INC(link.drop);
+    MIB2_STATS_NETIF_INC(stats_if, ifoutdiscards);
+    return ERR_MEM;
+  }
+  netif->loop_cnt_current = (u16_t)(netif->loop_cnt_current + clen);
+#endif /* LWIP_LOOPBACK_MAX_PBUFS */
   if (netif->loop_first != NULL) {
     LWIP_ASSERT("if first != NULL, last must also be != NULL", netif->loop_last != NULL);
     netif->loop_last->next = r;

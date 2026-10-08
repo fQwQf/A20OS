@@ -321,9 +321,32 @@ struct tcp_seg {
 #endif /* LWIP_WND_SCALE */
 
 /* Global variables: */
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+extern struct tcp_pcb *tcp_input_pcbs[LWIP_CORE_LANE_COUNT];
+#define tcp_input_pcb (tcp_input_pcbs[LWIP_CORE_LANE()])
+#else
 extern struct tcp_pcb *tcp_input_pcb;
+#endif
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+extern u32_t tcp_ticks_value;
+/* Packet paths may read the wall clock while the timer bottom-half advances
+ * it.  Keep the externally visible lwIP spelling but make every read atomic. */
+#define tcp_ticks (__atomic_load_n(&tcp_ticks_value, __ATOMIC_RELAXED))
+/* Multi-lane bottom-half entry points: the caller owns the named lane lock
+ * and scopes LWIP_CORE_LANE() to that logical lane. Advance wall time exactly
+ * once per global slow-timer tick, before dispatching lane callbacks. */
+void tcp_ticks_advance(void);
+void tcp_fasttmr_lane(unsigned lane);
+void tcp_slowtmr_lane(unsigned lane);
+#else
 extern u32_t tcp_ticks;
+#endif
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+extern u8_t tcp_active_pcbs_changed_lanes[LWIP_CORE_LANE_COUNT];
+#define tcp_active_pcbs_changed (tcp_active_pcbs_changed_lanes[LWIP_CORE_LANE()])
+#else
 extern u8_t tcp_active_pcbs_changed;
+#endif
 
 /* The TCP PCB lists.  Each is CONFIG_NET_LANES heads rather than one, indexed
    by the pcb's own `lane` field; see lwip/priv/pcb_lane.h. */

@@ -343,6 +343,11 @@ void a20_lwip_assert_core_locked(void *site);
 unsigned a20_lwip_memp_lane(void);
 #define LWIP_MEMP_LANE() a20_lwip_memp_lane()
 #define LWIP_MEMP_LANES CONFIG_NET_LANES
+unsigned a20_lwip_core_lane(void);
+#define LWIP_CORE_LANE_COUNT CONFIG_NET_LANES
+#define LWIP_CORE_LANE() a20_lwip_core_lane()
+int a20_lwip_control_is_held(void);
+#define LWIP_CORE_ALL_LANES_HELD() a20_lwip_control_is_held()
 #endif
 
 #define LWIP_RAND()                     ((u32_t)random_u64())

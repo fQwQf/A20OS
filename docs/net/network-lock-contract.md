@@ -1,5 +1,92 @@
 # 网络锁契约
 
+> **多 lane 核心并发契约（2026-10-08）**：本节优先于下文历史阶段记录中把
+> `g_lwip_lock` 描述为“保护全部 lwIP 核心状态”的旧表述。`CONFIG_NET_LANES=1`
+> 仍走单 lane/IRQ-save 的原有串行语义；多 lane 时热数据路径按 lane 锁保护，跨 lane
+> 数据由少数 shared-domain guard 保护，控制/冷路径以全 lane barrier 串行。此阶段保证
+> 协议语义和互斥安全，不声称 1-lane 与多 lane 二进制或输出字节完全相同。
+
+### 多 lane 锁层次与流量分类
+
+多 lane 构建的锁顺序为：
+
+```text
+ingress staging lock (g_lwip_lock; 只保护设备轮询/入队)
+    -> CT guard for input filter/NAT -> release CT -> publish staged frame
+    -> release ingress
+one owner-lane lock (普通热流量)
+OR  control barrier (g_lwip_lock -> every lane lock, ascending)
+
+lane/control-held core -> ARP/ND cache guard -> release before output/probe
+lane/control-held core -> UDP/RAW PCB guard -> callback (staging-only callback contract)
+TCP listen path -> short listener backlog guard; accept callback -> keyed stage guard
+control barrier -> IPv4/IPv6 reassembly (no FRAG shared guard in current use)
+lane/control-held core -> heap lock -> allocator protect (heap -> protect)
+TX(netif tx-frame guard) -> CT guard (released) -> driver send callback
+```
+
+`g_lwip_lock` 在多 lane 下有两个用途：设备 ingress/staging 的串行门，以及 control
+barrier 的外层门；它不再是每个 TCP/UDP/IP 热包都要取得的全局核心锁。Ingress 路径
+完成设备收包、在短 CT guard 下完成 input filter/NAT 与队列发布后释放该锁，之后才处理
+owner lane 或冷路径，禁止持 lane/control/shared-domain guard 升级回 ingress 锁。Control
+barrier 先取 `g_lwip_lock`，再按 lane 编号递增取得所有
+lane lock，释放时反序；它等待已有热包结束，并阻止新热包进入。
+
+只有普通单播 IPv4/IPv6 TCP/UDP 可以走单 lane 热路径：IPv4 必须无 options/fragment，
+IPv6 必须没有扩展头；TCP/UDP 头需完整且格式有效；DNS、DHCP 控制端口不走热路径。
+ARP、ICMP/ICMPv6（含 ND/RA）、所有 IP fragment/reassembly、broadcast/multicast、
+扩展头和控制 UDP 都走全 lane control barrier。netif 地址/链路配置、协议控制输入和
+全局 timer/maintenance 也只能在该 barrier 下运行。分类器是保守门控；无法明确识别的
+帧必须降级到冷路径。
+
+lane 是按网络元组/对象确定的逻辑归属，不是 CPU 亲和性：任意可运行该路径的 CPU 都可
+取得对应 owner-lane 锁处理工作，队列 claim 保证同一 lane 同时只有一个核心消费者。
+`ip_data` 这类逐包临时全局状态在多 lane 配置下按当前 lane 保存。跨 lane 的全局服务
+状态使用各自 guard；ARP/ND6 cache guard 只覆盖 cache 访问，并在发包或发送探测前释放。
+UDP/RAW per-PCB guard 在必要时覆盖 callback，以保护 PCB/回调字段；这些回调只能执行有界
+的预分配事件暂存，不得获取 lane、control、ingress 或 socket 锁，也不得阻塞或分配。
+TCP listener guard 更窄：SYN 路径只短暂保护 backlog reservation/update；成功 accept
+callback 用 keyed `s->tcp` guard 序列化 accept-stage head/tail、槽位初始化和发布，随后
+先释放 guard 再调度 bottom-half。它不覆盖整个 `tcp_listen_input()` 或 `TCP_EVENT_ACCEPT`
+调用链。Stage 满或参数无效时 callback 返回 `ERR_MEM`；回调不在 guard 内 abort PCB，
+lwIP 在 callback 返回后按错误结果终止 child。IPv4/IPv6 reassembly 目前只由 cold/control
+barrier 串行保护；虽然 domain 枚举中有 FRAG 项，当前没有使用 fragment shared guard。
+
+`LWIP_MEMP_LANE()` 选择的是 memp 描述符及其分配/释放计数上下文，不代表每 lane 有独立
+pbuf arena 或内存预留。本配置 `MEMP_MEM_MALLOC=1` 时，各 lane 的池元素都经 `mem_malloc()`
+从同一 `mem.c` lwIP heap 分配；heap 用一把短锁保护。因此 per-lane 统计和描述符索引只
+提供归属/观测，不构成物理内存隔离或独立池容量保证。
+
+ARP/ND6 队列操作目前可能在 cache guard 内引用/分配/释放 pbuf 及 queue node；审查过的
+分配序为 cache-domain -> heap -> allocator protect，当前未见 allocator/protect 路径
+反向获取 cache-domain guard。继续修改时必须维持这个无反向边的约束，并尽量把 cache
+guard 内可移出的释放放到锁外。
+
+TX guard 按 netif state 序列化共享 staging buffer；在仍持 TX guard 时短暂取得并释放 CT
+guard 来运行 output filter/NAT，然后调用驱动 `send`/`send_sg`。驱动回调不得同步重入
+lwIP linkoutput，也不得阻塞。输入过滤仅持 CT guard，不在持 CT guard时进入 TX/output，
+因此已审查路径没有 CT -> TX 反向边。任何新回调若改变此性质，必须先改锁契约再实现。
+
+多 lane 的 TCP fast/slow timers 分别在 lane 锁下按 lane 执行；ARP/ND6/reassembly、
+全局 timeout wheel、netif/config 与 conntrack expiry 等跨 lane maintenance 随后在
+control barrier 下执行。单 lane 构建保留既有单锁/中断关闭路径。Loopback queue 在
+maintenance/control 路径排空，当前按该路径的 lane 上下文处理，并非每 lane 独立队列。
+TCP OOM reclamation 与 `tcp_pcbs_sane()` 在热 lane 上只扫描该 lane；当且仅当冷调用持有
+`LWIP_CORE_ALL_LANES_HELD()` 所代表的完整 control barrier 时，才扫描所有 lane 与
+wildcard sentinel bucket。
+
+Socket 选项元数据由 socket 锁保护。TCP/IP 选项快照在该锁下取得，释放后再获取 core
+ownership，并检查对应版本号；版本已变化时释放 core ownership、重新取快照，避免旧
+快照晚于新设置覆盖 PCB。TCP 选项只应用本次请求涉及的字段，防止设置 NODELAY 等选项
+意外重置发送 buffer credit。LISTEN PCB 只有公共前缀，完整 TCP PCB 才有的选项留在
+listener 元数据中由 accepted child 继承。任何路径都不得同时持 socket 与 core 锁。
+Bind 在全 lane 屏障内完成 PCB rebucket 后才发布 socket owner lane；数据路径获取候选
+lane 锁后先复查已发布 lane，再解引用 PCB，防止旧 lane 快照绕过新 owner 的生命周期锁。
+
+以上是代码结构契约，不代表本文件中的旧阶段验证记录已在当前代码上重跑。当前切片
+唯一新增的外部收包并发门禁结果列在 [net-lanes.md](./net-lanes.md)；不能据此推断其他
+网络门禁或整体验收通过。
+
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
 > **更正（2026-10-05，三次）：**
@@ -60,7 +147,11 @@
 
 ## 范围与目标
 
-A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串行化所有 lwIP 核心状态。socket 表本身由一组分片桶锁 `g_net_buckets[]` 保护（阶段 E 之后它只管 slot 表的分配与查找），而每个 socket 的消息队列、accept 队列、连接状态与 waiter 由该 socket 自己的 `net_socket_t.lock` 保护。
+A20OS 以 `NO_SYS=1` 模式运行 lwIP。单 lane 配置使用原有的单锁串行路径；多 lane 配置
+由 owner-lane locks、全 lane control barrier 与跨 lane shared-domain guards 共同保护核心
+状态，具体边界见本文件开头的当前契约。socket registry 由分片桶锁 `g_net_buckets[]`
+保护（阶段 E 之后它只管 slot 表的分配与查找），而每个 socket 的消息队列、accept 队列、
+连接状态与 waiter 由该 socket 自己的 `net_socket_t.lock` 保护。
 
 本契约目标：
 
@@ -75,10 +166,14 @@ A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串
 ### `g_lwip_lock`
 
 - 在 `kernel/net/lwip_stack.c` 中定义为 `spinlock_t`。
-- 保护全部 lwIP 核心状态：PCB 列表、pbuf、timeout 列表、netif 状态、ARP/DNS/DHCP 状态和 lwIP 统计。
-- 通过 `a20_lwip_lock()` 获取，通过 `a20_lwip_unlock()` 释放。
-- `a20_lwip_lock()` 禁用本地中断并获取 spinlock；`a20_lwip_unlock()` 恢复之前的中断状态。
-- 每个 raw lwIP API 调用都必须在持有该锁时运行。
+- 在单 lane 下由 `a20_lwip_lock()` / `a20_lwip_unlock()` 作为核心串行锁使用。
+- 在多 lane 下，它是 ingress staging 锁，也是 control barrier 的外层锁；control 路径
+  持有它并按序取得全部 owner-lane locks。普通热包不取得此锁，而取得一个 owner-lane
+  lock；跨 lane 状态由本文件开头列出的 shared-domain guard 保护。
+- 所有获取都禁用本地中断，并按获取时记录的状态恢复。不得在持有 lane/control 锁时
+  再获取 ingress 锁，也不得在 shared-domain guard 中获取这些核心锁或 socket 锁。
+- raw lwIP API 仍要求处在其状态对应的 lane、control barrier 或独立 guard 保护下，
+  不能再概括为“每个调用都持有 `g_lwip_lock`”。
 
 ### `net_socket_t.lock`：per-socket 锁（阶段 E，`7c7a4d7c8`）
 
@@ -178,7 +273,8 @@ socket 跳过。这一拆分顺带修掉两个**既有**的跨桶写：
 
 ### 全局顺序与当前更严格规则
 
-`kernel/include/core/lock.h` 给出的全局允许顺序上界里，网络那一行现在是：
+`kernel/include/core/lock.h` 中 socket 锁的全局顺序仍然有效；核心并发新增的顺序见本文件
+开头。两套顺序共同适用。历史网络锁上界曾写成：
 
 ```text
 g_lwip_lock -> （net 侧什么也不嵌套）

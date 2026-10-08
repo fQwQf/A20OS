@@ -487,6 +487,51 @@ ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建�
 代码；但若上游将来把 `LWIP_CHECKSUM_CTRL_PER_NETIF` 的默认值或 TCP 发送路径改掉，
 上面三条"必须动上游"的清单要重新评估。
 
+### 2.10 多 lane 核心并发与 shared-state guards（2026-10-08）
+
+本树的并发模型现不再是“所有核心入口统一由 `g_lwip_lock` 串行”。多 lane 配置下，
+`kernel/net/lwip_stack.c` 保守分类普通单播 TCP/UDP 帧并在 owner-lane lock 下调用
+lwIP；多 lane `ip_data` 临时状态按 `LWIP_CORE_LANE()` 选择。ARP、ND6、conntrack/NAT、
+listener/UDP/RAW 等跨 lane 状态由
+`kernel/net/lwip_concurrency.c` 的独立 shared-domain guards 保护。
+`LWIP_MEMP_LANE()` 只选择 memp descriptor 与 per-lane 计数上下文；当前
+`MEMP_MEM_MALLOC=1`，所有 pool element 从同一全局 lwIP heap 分配，不存在 per-lane pbuf
+arena 或物理内存预留。
+
+不能并行的工作仍明确走 control barrier：ARP/ND 输入与维护、ND/RA/ICMP 控制流、所有
+IP 分片/重组、广播/多播、无法安全分类的包、全局 timeout 和 netif/configuration
+变更。设备 RX staging 使用单独 ingress 锁，先收包/复制入 lane 队列、释放 ingress，
+再由 lane consumer 执行协议处理。入队前会在 ingress 锁下短暂取 CT guard 完成 input
+filter/NAT，之后释放 CT 再发布队列；不得持 lane/control/shared guard 再取得 ingress 锁。
+ARP/ND6 cache guard 在发包/探测前释放，查询向调用者复制 MAC/地址数据，避免解锁后
+解引用 cache 内部指针。TCP listener guard 只短暂保护 SYN backlog reservation/update；
+成功 accept callback 用 `s->tcp` 作为稳定 key，保护 accept-stage slot 初始化与 head 发布，
+释放 guard 后才调度 bottom-half。它不包围整个 `tcp_listen_input()` 或 `TCP_EVENT_ACCEPT`
+调用链。Stage 满/无效 callback 返回 `ERR_MEM`，不在 callback 内 abort；lwIP 在 callback
+返回后处理错误并 abort child。UDP/RAW per-PCB guard 则按需覆盖接收 callback；callback
+契约只允许有界、预分配事件暂存，不能获取核心/ingress/socket 锁、分配或阻塞。Reassembly
+只由冷 control barrier 保护；FRAG shared-domain 枚举项当前未使用。
+
+TCP OOM reclamation 与 `tcp_pcbs_sane()` 在普通 owner-lane 路径只访问当前 lane；冷路径
+检测到 `LWIP_CORE_ALL_LANES_HELD()` 时才可遍历全部 buckets（包含 wildcard sentinel）。
+PCB lane hash 的端口单位是 host order：socket sockaddr 和 raw wire 端口在参与 hash 前
+转换为 host order，PCB 内的 port 字段已经是 host order。首轮 N=4 外部 host-forward
+测试曾因把 network-order 端口直接 hash 而将流放入错误 lane；该回归已由修复后的
+`smoke-net-lanes-hostfwd` 覆盖，具体日志与结果记录在 `docs/net/net-lanes.md`。
+
+锁顺序边界：lane/control -> 独立 shared-domain guard；shared-domain 内不得取得
+lane/control/socket/ingress 锁（UDP/RAW callback 仅执行上述受限事件暂存）。分配可在 ARP/ND6 cache guard 内发生，其已检查顺序是
+cache guard -> lwIP heap lock -> allocator `SYS_ARCH_PROTECT`；allocator 的 heap/protect
+路径不反向进入 cache guard。TX staging guard 保持期间先取得再释放 CT guard，之后才
+调用 non-blocking driver send callback；driver send 不得同步重入 lwIP。修改任一 callback
+或 allocator 路径时必须重审
+这些反向边。单 lane 配置保持既有单锁与 IRQ-save 语义；本节不声称 1-lane 和多 lane
+逐字节/机器码等价。
+
+这些描述记录当前源码结构，不是整体运行验证报告。`smoke-net-lanes-hostfwd` 这一项
+N=1/N=4 外部收包门禁已通过，日志与探针边界记录在 `docs/net/net-lanes.md`；其他构建、
+SMP/runtime 门禁仍需以各自实际执行日志确认，不从这一项推断 PASS。
+
 ## 3. 重新同步上游的流程
 
 ```sh

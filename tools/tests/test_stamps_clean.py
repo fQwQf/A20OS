@@ -104,6 +104,15 @@ def _parallel_stamp_native(repo: str, log: str, barrier):
     raise SystemExit(stamps.cmd_native(args))
 
 
+def _hold_user_root_lock(repo: str, variant: str, acquired, release=None):
+    stamps.REPO = Path(repo)
+    with stamps.user_output_lock(f"user/build/{variant}"):
+        acquired.put(variant)
+        if release is not None:
+            if not release.wait(5):
+                raise RuntimeError("timed out waiting to release user-root lock")
+
+
 def _parallel_stamp_user_with_barrier(repo: str, log: str, barrier):
     stamps.REPO = Path(repo)
 
@@ -202,6 +211,42 @@ class CleanSymlinkTests(unittest.TestCase):
 
 
 class UserBuildLockTests(unittest.TestCase):
+    def test_different_arch_output_roots_are_not_serialized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = multiprocessing.get_context("fork")
+            acquired = ctx.Queue()
+            release = ctx.Event()
+            riscv = ctx.Process(target=_hold_user_root_lock,
+                                args=(tmp, "riscv64", acquired, release))
+            riscv.start()
+            self.assertEqual(acquired.get(timeout=5), "riscv64")
+            loongarch = ctx.Process(target=_hold_user_root_lock,
+                                    args=(tmp, "loongarch64", acquired))
+            loongarch.start()
+            try:
+                # The first process still owns its lock: a second architecture
+                # must nevertheless enter its independent output root.
+                self.assertEqual(acquired.get(timeout=2), "loongarch64")
+            finally:
+                release.set()
+                riscv.join(5)
+                loongarch.join(5)
+            self.assertEqual(riscv.exitcode, 0)
+            self.assertEqual(loongarch.exitcode, 0)
+
+    def test_arch_user_matrix_targets_use_stamp_locked_build_path(self):
+        targets = (Path(__file__).resolve().parents[1] / "targets-build.mk").read_text(
+            encoding="utf-8")
+        self.assertIn("check-user-build-stamp: $(USER_BUILD_STAMP)", targets)
+        for arch in ("riscv64", "loongarch64", "aarch64", "x86_64",
+                     "arm32", "riscv32", "ppc64le"):
+            marker = f"check-{arch}-user:\n"
+            self.assertIn(marker, targets)
+            recipe = targets.split(marker, 1)[1].split("\n\n", 1)[0]
+            self.assertIn(f"ARCH={arch}", recipe)
+            self.assertIn("check-user-build-stamp", recipe)
+            self.assertNotIn("-C user", recipe)
+
     def test_parallel_stamp_checks_recheck_after_shared_root_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

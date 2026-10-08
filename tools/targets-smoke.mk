@@ -181,6 +181,7 @@ smoke-netfilter:
 # kernel/net/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
 # and no port forward can ever complete -- NAT would be exonerated of a failure
 # that is really the listener model.  Same knob smoke-net-accept uses.
+NET_NAT_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
 smoke-netfilter-nat: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081
 smoke-netfilter-nat:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NET_HOSTFWD='hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081' dev-build
@@ -191,12 +192,12 @@ smoke-netfilter-nat:
 	rm -f "$$log"; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'netnat_test\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_NAT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(NET_NAT_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-kernel $(NET_NAT_BUILD_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 & \
 	qemu_pid=$$!; \
@@ -275,6 +276,11 @@ smoke-ct-capacity:
 
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
+
+# Exercises TCP options on a real lwIP LISTEN pcb (fast mode uses a different
+# socket implementation and cannot validate the listener's compact layout).
+smoke-netopt-lwip:
+	$(PYTHON) tools/smoke.py smoke-netopt-lwip
 
 # netctl only inspects local kernel state; it never accepts an inbound
 # connection, so it must not depend on a free host port 5555.  That is now
@@ -1217,6 +1223,79 @@ smoke-net-accept:
 		echo "smoke-net-accept: failed with status $$status (passes=$$passes tcp_listen=$$tcp_listen accept_drop=$$accept_drop bh_overflow=$$bh_overflow alloc_fail=$$alloc_fail); tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
+	fi
+
+# Real external input concurrency through QEMU hostfwd.
+#
+# These four destination ports hash to four distinct lwIP owner lanes for
+# 10.0.2.15. The host helper starts simultaneous connections and transfers a
+# 64 KiB checked stream in both directions on each. In the four-lane run the
+# opt-in core probe rendezvous establishes actual overlapping tcp_input calls;
+# the report must show at least two active lanes, input on every lane, and TCP
+# timer progress on every lane. The N1 control runs the identical traffic and
+# requires the guest's semantic verdict to match byte-for-byte.
+NET_LANE_HOST_PORTS = 18100,18101,18105,18110
+NET_LANE_HOST_GUEST_ARGS = 18100 18101 18105 18110
+smoke-net-lanes-hostfwd: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18100-10.0.2.15:18100,hostfwd=tcp:127.0.0.1:18101-10.0.2.15:18101,hostfwd=tcp:127.0.0.1:18105-10.0.2.15:18105,hostfwd=tcp:127.0.0.1:18110-10.0.2.15:18110
+smoke-net-lanes-hostfwd:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-O3 -DCONFIG_NET_PCB_SANE=1" dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	lanes1_dir="$(NET_LANES1_BUILD_DIR)"; \
+	lanes4_dir="$(NET_LANES4_BUILD_DIR)"; \
+	log1="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n1-riscv64.log"; \
+	log4="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n4-riscv64.log"; \
+	probe1="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n1-probe.log"; \
+	probe4="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n4-probe.log"; \
+	children1_file="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n1-children.log"; \
+	children4_file="$(SMOKE_LOG_DIR)/net-lanes-hostfwd-n4-children.log"; \
+	run_case() { \
+		dir="$$1"; log="$$2"; probe="$$3"; lanes="$$4"; \
+		append='a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip'; \
+		if [ "$$lanes" -eq 4 ]; then append="$$append net_lane_probe=1"; fi; \
+		{ sleep $(SMOKE_INPUT_DELAY); \
+		  printf '\necho tcpmode lwip > /proc/net/config\nnet_lane_hostfwd_test $(NET_LANE_HOST_GUEST_ARGS)\n'; \
+		  sleep 1; printf 'cat /proc/net/status\npoweroff\n'; } | \
+		$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+			-machine virt -m 1G -nographic -smp 4 -bios default \
+			-global virtio-mmio.force-legacy=false \
+			-drive file="$$dir/fat32.img",if=none,format=raw,id=x0 \
+			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+			-kernel "$$dir/kernel.elf" -append "$$append" \
+			> "$$log" 2>&1 & \
+		qemu_pid=$$!; probe_status=0; qemu_status=0; \
+		$(PYTHON) tools/lwip_lane_host_probe.py --log "$$log" --ports "$(NET_LANE_HOST_PORTS)" --lanes "$$lanes" \
+			> "$$probe" 2>&1 || probe_status=$$?; \
+		wait "$$qemu_pid" || qemu_status=$$?; \
+		cat "$$probe" >> "$$log"; \
+		[ "$$probe_status" -eq 0 ] && [ "$$qemu_status" -eq 0 ]; \
+	}; \
+	s1=0; run_case "$$lanes1_dir" "$$log1" "$$probe1" 1 || s1=$$?; \
+	s4=0; run_case "$$lanes4_dir" "$$log4" "$$probe4" 4 || s4=$$?; \
+	verdict1=$$(awk '/^NET_LANE_HOSTFWD_TEST: PASS /{v=$$0} END{print v}' "$$log1"); \
+	verdict4=$$(awk '/^NET_LANE_HOSTFWD_TEST: PASS /{v=$$0} END{print v}' "$$log4"); \
+	children1=$$(grep -c '^NET_LANE_HOSTFWD_CHILD: PASS ' "$$log1" || true); \
+	children4=$$(grep -c '^NET_LANE_HOSTFWD_CHILD: PASS ' "$$log4" || true); \
+	grep '^NET_LANE_HOSTFWD_CHILD: PASS ' "$$log1" | sort > "$$children1_file" || true; \
+	grep '^NET_LANE_HOSTFWD_CHILD: PASS ' "$$log4" | sort > "$$children4_file" || true; \
+	if [ "$$s1" -eq 0 ] && [ "$$s4" -eq 0 ] && \
+	   [ "$$children1" -eq 4 ] && [ "$$children4" -eq 4 ] && \
+	   [ -n "$$verdict1" ] && [ "$$verdict1" = "$$verdict4" ] && \
+	   cmp -s "$$children1_file" "$$children4_file" && \
+	   grep -q '^NET_LANE_HOST_PROBE: PASS connections=4 lanes=0,0,0,0 ' "$$log1" && \
+	   grep -q '^NET_LANE_HOST_PROBE: PASS connections=4 lanes=2,3,0,1 ' "$$log4" && \
+	   $(PYTHON) tools/check_net_lane_parallel_report.py "$$log4" && \
+	   ! grep -qiE 'panic|assertion failed|page fault|NET_LANE_HOSTFWD_CHILD: FAIL' "$$log1" "$$log4"; then \
+		echo "smoke-net-lanes-hostfwd: PASS (four external TCP streams validated; owner-lane overlap observed; N1/N4 guest byte verdicts match)"; \
+		echo "  N1: $$verdict1"; echo "  N4: $$verdict4"; \
+		echo "  logs: $$log1 $$log4"; \
+	else \
+		echo "smoke-net-lanes-hostfwd: FAIL (QEMU/probe statuses N1=$$s1 N4=$$s4, child accepts N1=$$children1 N4=$$children4)"; \
+		if ! cmp -s "$$children1_file" "$$children4_file"; then diff -u "$$children1_file" "$$children4_file" || true; fi; \
+		echo "  N1 verdict: $${verdict1:-<absent>}"; echo "  N4 verdict: $${verdict4:-<absent>}"; \
+		tail -n 50 "$$log1"; tail -n 80 "$$log4"; exit 1; \
 	fi
 
 # Real LISTEN pcb create/close at NET_LANES>1.

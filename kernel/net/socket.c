@@ -194,7 +194,7 @@ net_socket_t *net_socket_alloc(void) {
         __atomic_fetch_add(&g_net_sock_ref_allocs, 1, __ATOMIC_RELAXED);
         /* Provisional only: the authoritative lane comes from the bound address
          * and port, which net_inet_bind_pcb() recomputes. */
-        s->lane = net_lane_of_cpu(cpu_current_id());
+        net_socket_lane_store(s, net_lane_of_cpu(cpu_current_id()));
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
         wait_queue_init(&s->write_waitq);
@@ -264,6 +264,23 @@ int net_task_has_unblocked_signal(task_t *t) {
 int net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write) {
     if (!s)
         return 0;
+    uint64_t timeout = net_socket_timeout_snapshot(s, for_write);
+    return timeout && (int64_t)(timer_get_ticks() - (start + timeout)) >= 0;
+}
+
+uint64_t net_socket_timeout_snapshot(net_socket_t *s, int for_write) {
+    if (!s)
+        return 0;
+    uint64_t flags = net_sock_lock(s);
+    uint64_t timeout = for_write ? s->send_timeout_ticks : s->recv_timeout_ticks;
+    net_sock_unlock(s, flags);
+    return timeout;
+}
+
+int net_socket_wait_expired_locked(net_socket_t *s, uint64_t start,
+                                   int for_write) {
+    if (!s)
+        return 0;
     uint64_t timeout = for_write ? s->send_timeout_ticks : s->recv_timeout_ticks;
     return timeout && (int64_t)(timer_get_ticks() - (start + timeout)) >= 0;
 }
@@ -283,6 +300,9 @@ typedef struct {
     size_t         addrlen;
     uint16_t       port;
     net_socket_t  *want;        /* bind-conflict only: the socket being bound */
+    int            want_reuseaddr;
+    int            want_reuseport;
+    int            want_v6only;
     net_socket_t  *found;
 } net_find_arg_t;
 
@@ -335,29 +355,33 @@ net_socket_t *net_find_bound_socket(int domain, int type,
     return a.found;
 }
 
-static int net_bind_sockets_overlap(net_socket_t *a, net_socket_t *b)
+static int net_bind_sockets_overlap(const net_find_arg_t *a,
+                                    const net_socket_t *b)
 {
-    if (a->domain == b->domain)
+    int domain = a->want->domain;
+    if (domain == b->domain)
         return 1;
     /* IPv4 vs IPv6 only conflicts when the IPv6 side is dual-stack.
      * A v6-only (IPV6_V6ONLY) listener shares the port with IPv4. */
-    if (a->domain == AF_INET && b->domain == AF_INET6)
+    if (domain == AF_INET && b->domain == AF_INET6)
         return !b->ipv6_v6only;
-    if (a->domain == AF_INET6 && b->domain == AF_INET)
-        return !a->ipv6_v6only;
+    if (domain == AF_INET6 && b->domain == AF_INET)
+        return !a->want_v6only;
     return 0;
 }
 
-static int net_bind_reuse_allowed(net_socket_t *new_s, net_socket_t *old_s)
+static int net_bind_reuse_allowed(const net_find_arg_t *a,
+                                 const net_socket_t *old_s)
 {
+    net_socket_t *new_s = a->want;
     if (!new_s || !old_s || new_s->type != old_s->type)
         return 0;
     if (new_s->type == SOCK_RAW)
         return new_s->protocol == old_s->protocol;
     if (new_s->type == SOCK_STREAM)
-        return new_s->reuseport && old_s->reuseport;
-    return (new_s->reuseaddr && old_s->reuseaddr) ||
-           (new_s->reuseport && old_s->reuseport);
+        return a->want_reuseport && old_s->reuseport;
+    return (a->want_reuseaddr && old_s->reuseaddr) ||
+           (a->want_reuseport && old_s->reuseport);
 }
 
 static bool net_find_conflict_slot(net_socket_t *s, int idx, void *arg)
@@ -366,11 +390,11 @@ static bool net_find_conflict_slot(net_socket_t *s, int idx, void *arg)
     (void)idx;
     if (s == a->want || !s->bound || s->type != a->want->type)
         return false;
-    if (!net_bind_sockets_overlap(a->want, s))
+    if (!net_bind_sockets_overlap(a, s))
         return false;
     if (!net_find_port_bound(s, s->domain, a->type, a->port))
         return false;
-    if (net_bind_reuse_allowed(a->want, s))
+    if (net_bind_reuse_allowed(a, s))
         return false;
     a->found = net_socket_ref(s);
     return true;
@@ -393,6 +417,11 @@ static net_socket_t *net_find_bind_conflict(net_socket_t *new_s,
         .domain = new_s->domain, .type = new_s->type, .addr = addr,
         .addrlen = addrlen, .port = port, .want = new_s, .found = NULL,
     };
+    uint64_t flags = net_sock_lock(new_s);
+    a.want_reuseaddr = new_s->reuseaddr;
+    a.want_reuseport = new_s->reuseport;
+    a.want_v6only = new_s->ipv6_v6only;
+    net_sock_unlock(new_s, flags);
     net_table_scan_all(net_find_conflict_slot, &a);
     return a.found;
 }
@@ -703,11 +732,6 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
     memcpy(s->local, bind_addr, bind_len);
     s->local_len = bind_len;
     s->bound = 1;
-    /* Authoritative lane: derived from the address and port the socket is now
-     * bound to, which is the pair an inbound packet reproduces.  Set inside the
-     * same critical section that publishes s->local so no reader can see one
-     * without the other. */
-    s->lane = net_socket_lane_of_addr(bind_addr, bind_len, s->lane);
     net_sock_unlock(s, flags);
     return net_inet_bind_pcb(s, bind_addr, addrlen);
 }
@@ -1145,7 +1169,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                 net_sock_unlock(s, irq);
                 return -ERESTARTSYS;
             }
-            if (net_socket_wait_expired(s, start, 0)) {
+            if (net_socket_wait_expired_locked(s, start, 0)) {
                 net_sock_unlock(s, irq);
                 return -EAGAIN;
             }
@@ -1270,7 +1294,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
             net_sock_unlock(s, irq);
             return -ERESTARTSYS;
         }
-        if (net_socket_wait_expired(s, start, 0)) {
+        if (net_socket_wait_expired_locked(s, start, 0)) {
             net_sock_unlock(s, irq);
             return -EAGAIN;
         }
