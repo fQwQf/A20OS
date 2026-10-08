@@ -38,6 +38,9 @@ smoke-aarch64:
 smoke-x86_64:
 	tools/a20 test smoke-x86_64
 
+smoke-x86-fp-preserve:
+	$(PYTHON) tools/smoke.py smoke-x86-fp-preserve
+
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
 smoke-smp-bringup:
