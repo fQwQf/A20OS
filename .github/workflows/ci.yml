@@ -195,7 +195,7 @@ jobs:
           retention-days: 14
 
       - uses: actions/upload-artifact@v4
-        if: matrix.arch == 'x86_64'
+        if: always() && matrix.arch == 'x86_64'
         with:
           name: x86-fp-preserve-smoke-log
           path: .kernel-build/smoke/x86-fp-preserve.log
