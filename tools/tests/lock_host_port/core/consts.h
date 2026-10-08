@@ -1,0 +1,6 @@
+#ifndef A20_HOST_LOCK_CORE_CONSTS_H
+#define A20_HOST_LOCK_CORE_CONSTS_H
+#ifndef CONFIG_NR_CPUS
+#define CONFIG_NR_CPUS 2
+#endif
+#endif

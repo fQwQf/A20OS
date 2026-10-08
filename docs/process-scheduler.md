@@ -140,11 +140,19 @@ kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler �
 1. **per-CPU 抢占计数在每次 `__switch` 时必为 0**。自愿切换在持锁下被锁契约禁止，
    `context_switch_locked()` 入口的无条件 panic 把它变成 checked fact；抢占式切换被
    `preempt_count()==0` 挡住。计数因此无需随任务保存/恢复，`spin_lock/spin_unlock/
-   spin_trylock_irqsave` 的挂钩（获取成功后 disable、释放后 enable，**等待锁期间不禁
-   抢占**）就是全部成本。
+   spin_trylock_irqsave` 按同一规则维护：普通自旋锁在每次尝试原子取锁**之前**增加
+   计数，失败立即回退该计数再等待，成功则一直保持到释放锁。这样不存在已经持锁但
+   仍可抢占的窗口；等待保留调用方原有的嵌套深度，不额外禁止抢占。irqsave 变体在
+   中断关闭时取锁，同样在释放锁之后减少计数。
 2. **切换窗口对中断不可见**。`sched()` 的 pick→publish→`__switch` 段全程关中断；
    `__switch` 按任务保存/恢复 rflags/sstatus，各任务在自己的 `out:` 处恢复自己保存的
    标志，因此任何任务都不会观察到中断落在别人的切换窗口里。
+
+`preempt_disable()` 还须保证 CPU 槽选择与计数递增之间不会迁移：它短暂保存并关闭
+本地中断，更新当前 CPU 的计数后恢复原中断状态。否则，首次递增前的 IRQ 可以把
+任务移到另一 CPU，使旧 CPU 的计数增加而新 CPU 仍允许抢占。这段保护只覆盖计数
+发布，不覆盖争用等待。宿主回归 `test_spinlock_preempt_window.c` 直接执行内核的
+锁和计数实现，在 CPU 槽读取及取锁成功边界注入中断时序；分别换回旧实现均会失败。
 
 效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
 A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
