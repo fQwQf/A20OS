@@ -12,7 +12,7 @@ HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
         check-smoke-cases \
         check-native-abi-coverage check-abi-config-guard \
         check-flash-backend-registry check-manifests \
-        check-a20-tests
+        check-a20-tests check-pt-mcs-preempt-window
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
@@ -88,7 +88,7 @@ check-a20-tests:
 check-drm-abi:
 	@tools/check-drm-abi.sh
 
-host-tests: $(HOST_TESTS_BIN)
+host-tests: check-pt-mcs-preempt-window $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
 /tmp/a20-host-%: tools/tests/%.c
