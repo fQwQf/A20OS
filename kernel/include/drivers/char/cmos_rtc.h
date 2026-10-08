@@ -15,12 +15,13 @@
 
 /*
  * Index (port 0x70) / data (port 0x71) register numbers.  This is the numbering
- * the firmware and the emulator agree on -- SeaBIOS's own table
- * (qemu-10.0.13+ds/roms/seabios-hppa/src/hw/rtc.h:11-25,36) puts the time
- * registers at 0x00/0x02/0x04/0x06/0x07/0x08/0x09, registers A..D at
+ * the firmware and emulator agree on. SeaBIOS's table in the external
+ * Debian QEMU 10.0.13+ds tree (roms/seabios-hppa/src/hw/rtc.h:11-25,36)
+ * places time registers at 0x00/0x02/0x04/0x06/0x07/0x08/0x09 and A..D at
  * 0x0a..0x0d and the century byte at 0x32; Linux (include/linux/mc146818rtc.h)
  * and QEMU's mc146818 model use the same indices.  So register A does *not*
  * alias the month, and the date can be read without decoding away mode bits.
+ * Source provenance: docs/history/2026-10-08/migration.md.
  */
 #define CMOS_RTC_SEC          0x00
 #define CMOS_RTC_MIN          0x02

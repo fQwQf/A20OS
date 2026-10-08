@@ -478,7 +478,7 @@ ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建�
 过滤。
 
 **设备侧现状（决定了 RX 一半本机不可验证）：** `VIRTIO_NET_HDR_F_DATA_VALID`
-在 `qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 有定义，
+在外部 Debian QEMU 10.0.13+ds 源树 `qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 有定义（解包定位见 `docs/history/2026-10-08/migration.md`），
 但 `hw/net/virtio-net.c` 全文不使用它（只有 e1000e / igb / vmxnet3 用），即 QEMU
 10.0 的 virtio-net 不逐帧上报校验和有效性。TX 一半设备侧是通的：
 `hw/net/net_tx_pkt.c:833-838` 会为带 `VIRTIO_NET_HDR_F_NEEDS_CSUM` 的帧补算校验和。
