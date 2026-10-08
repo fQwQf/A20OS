@@ -94,11 +94,12 @@ int64_t sys_pidfd_open(int pid, unsigned flags)
         proc_put(target);
         return -ESRCH;
     }
-    proc_put(target);
 
     task_t *self = proc_current();
-    if (self && !proc_has_cap(self, CAP_SYS_PTRACE) &&
-        !proc_task_may_access(self, target))
+    int allowed = !self || proc_has_cap(self, CAP_SYS_PTRACE) ||
+                  proc_task_may_access(self, target);
+    proc_put(target);
+    if (!allowed)
         return -EPERM;
 
     return linux_pidfd_create(pid, (int)flags);
