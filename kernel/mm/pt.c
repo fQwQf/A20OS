@@ -1869,11 +1869,17 @@ void mm_cursor_unlock(mm_cursor_t *cur)
     pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
     if (pool->depth < (uint32_t)cur->lock_base_depth)
         panic("mcs: cursor unlock depth below its base");
-    while (pool->depth > (uint32_t)cur->lock_base_depth) {
+    /* Keep the number of cursor-owned locks in task-local state.  The final
+     * mcs_unlock() drops preemption to zero and may migrate this task; after
+     * that point even reading pool->depth would inspect the old CPU's stack,
+     * which may already belong to another task. */
+    uint32_t unwind_count = pool->depth - (uint32_t)cur->lock_base_depth;
+    while (unwind_count) {
         pt_meta_t *m = pool->held[pool->depth - 1];
         if (!m)
             panic("mcs: cursor unlock found empty held slot");
         mcs_unlock(m);              /* pops the depth slot itself */
+        unwind_count--;
     }
     if (cur->in_read_side) {
         mm_pt_read_exit(cur->mm);
