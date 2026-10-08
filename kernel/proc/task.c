@@ -29,9 +29,8 @@ void proc_kstack_diag_register(task_t *t)
     t->kstack_diag_seq = __atomic_add_fetch(&kstack_diag_next_seq, 1,
                                              __ATOMIC_RELAXED);
     t->kstack_diag_reported = 0;
-    printf("[KSTACKDIAG] alloc seq=%u pid=%d task=%p base=%p sp=0x%lx\n",
-           t->kstack_diag_seq, t->pid, t, t->kstack_base,
-           (unsigned long)t->kstack);
+    printf("[KSTACKDIAG] alloc seq=%u pid=%d name=%s task=%p base=%p\n",
+           t->kstack_diag_seq, t->pid, t->name, t, t->kstack_base);
 }
 
 void proc_kstack_diag_check(task_t *t, const char *where)
