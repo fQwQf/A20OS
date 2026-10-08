@@ -42,11 +42,10 @@ isr_common:
     movq  %r15, 120(%rsp)
 
     /*
-     * Normal IDT entries do not use IST.  Traps from user mode switch to
-     * TSS.rsp0 and push SS/RSP/RFLAGS/CS/RIP; traps from kernel mode remain
-     * on the current task's stack and push only RFLAGS/CS/RIP.  Error-code
-     * vectors plus the ISR stubs leave vec/error/RIP/CS/RFLAGS at the same
-     * offsets in both cases.
+     * In 64-bit mode, IDT entries push SS/RSP/RFLAGS/CS/RIP even when the
+     * interrupt stays at the same CPL.  Error-code vectors plus the ISR
+     * stubs leave vec/error/RIP/CS/RFLAGS/RSP/SS at the same offsets for
+     * user and kernel entries.
      */
 
     /* Copy CPU-pushed values into trap_context_t */
@@ -59,21 +58,10 @@ isr_common:
     movq  240(%rsp), %rax
     movq  %rax, 144(%rsp)       /* ctx->cs */
 
-    movq  240(%rsp), %rax       /* CPU-pushed CS */
-    testq $3, %rax
-    jz    1f
-
     movq  264(%rsp), %rax
-    movq  %rax, 152(%rsp)       /* ctx->ss */
+    movq  %rax, 152(%rsp)       /* ctx->ss: always pushed in long mode */
     movq  256(%rsp), %rax
     movq  %rax, 56(%rsp)        /* ctx->rsp */
-    jmp   2f
-
-1:
-    movq  $0x10, 152(%rsp)      /* current kernel SS */
-    leaq  256(%rsp), %rax       /* interrupted kernel RSP */
-    movq  %rax, 56(%rsp)
-2:
 
     /* Save kernel_tp (GS base) */
     movl  $0xC0000101, %ecx
@@ -206,18 +194,12 @@ kernel_trap:
     movq  144(%rsp), %rax
     movq  %rax, 240(%rsp)       /* CS */
 
-    /*
-     * Only privilege-changing traps have CPU-pushed RSP/SS slots.  Writing
-     * them for a kernel-mode trap would corrupt the interrupted kernel stack.
-     */
-    movq  144(%rsp), %rax
-    testq $3, %rax
-    jz    4f
+    /* Long mode pushes RSP and SS for every IDT entry.  Restore both saved
+     * slots for user and kernel traps after the C handler returns. */
     movq  152(%rsp), %rax
     movq  %rax, 264(%rsp)       /* SS */
     movq  56(%rsp), %rax
     movq  %rax, 256(%rsp)       /* old RSP */
-4:
 
     /* Restore general-purpose registers */
     movq  0(%rsp), %rax
