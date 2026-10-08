@@ -10,6 +10,7 @@
 | --- | --- |
 | 并发基础 | `make check-concurrency-foundation` |
 | task 引用与异步所有权 | `make check-task-lifetime-boundary` |
+| 线程组回收及子进程等待 | `make host-tests`（含生产 link/unlink/release 的 ASan 回归及生产 wait4 的注册交错回归） |
 | Park/Wake 与阻塞点 | `make check-blocking-point-boundary` |
 | 信号、停止与远程退出 | `make check-signal-exit-boundary` |
 | timeout heap 所有权 | `make check-timeout-ownership-boundary` |
@@ -23,6 +24,7 @@
 | Native ABI 三表交叉 | `make check-native-abi-coverage`（登记表 / 编号表 / `docs/native-abi/` 互相对齐；宿主侧） |
 | 双 ABI 编译守卫 | `make check-abi-config-guard`（禁裸 `#ifdef CONFIG_ABI_LINUX`/`#ifdef CONFIG_ABI_NATIVE`；宿主侧） |
 | 驱动核心 | `make check-driver-core-model` |
+| x86 驱动保持用户 FP 状态 | `make smoke-x86-fp-preserve`（4 CPU、ext4 块设备上的 raw syscall；构建还检查 ET_REL 驱动 ISA） |
 | 外部依赖 | `make check-external-dependency-boundary` |
 | 剪裁注册表 | `make check-trim-registry`（`components/trim.toml` 自洽、生成的 `components/trim.mk` 不过期、每个发射变量都有 makefile 消费者；并入 `check-manifests`） |
 | 架构边界 | `make check-arch-boundary` |
