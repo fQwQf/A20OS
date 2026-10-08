@@ -187,19 +187,10 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
  * E2: tasklist_lock walks the global list, and each candidate's ->waiting_for_child
  * and ->tgid are park_lock-owned, so the walk nests tasklist_lock -> park_lock.
  * The parent's own tgid is sampled in its own critical section *before* the
- * walk, so no two task park_locks are ever held at once (INV-P3).  It is read
- * under tasklist_lock only as a fast-path guard; the value that decides matches
- * is the sampled one. */
+ * walk, so no two task park_locks are ever held at once (INV-P3). */
 void proc_wake_child_waiters(task_t *parent)
 {
     if (!parent)
-        return;
-
-    /* Fast path: no task is parked in wait4(), so no waiter can match.  The
-     * counter is maintained in lockstep with each waiter's ->waiting_for_child
-     * under that waiter's park_lock, so it is only an advisory hint here and is
-     * read relaxed. */
-    if (!__atomic_load_n(&g_proc_waiting_child_waiter_count, __ATOMIC_RELAXED))
         return;
 
     int parent_tgid;
@@ -618,15 +609,8 @@ void proc_force_exit(task_t *t, int exit_code)
     if (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE) {
         t->pending_exit_code = exit_code;
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
-        /* Keep the wait4 aggregate exactly paired with the guarded flag.
-         * The former unconditional decrement for every BLOCKED task let an
-         * unrelated forced exit hide real child waiters, so later child exits
-         * skipped their wake scan and left zombie children behind forever. */
-        if (t->waiting_for_child) {
+        if (t->waiting_for_child)
             t->waiting_for_child = 0;
-            if (g_proc_waiting_child_waiter_count)
-                g_proc_waiting_child_waiter_count--;
-        }
         if (t->state == PROC_BLOCKED) {
             /*
              * REMOTE_EXIT_SAFE_BOUNDARY: a cancelable Park consumes the task
