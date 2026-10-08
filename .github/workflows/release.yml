@@ -21,9 +21,26 @@ permissions:
   contents: write
 
 jobs:
+  release-version:
+    name: check-release-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check kernel version and release tag
+        env:
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            python3 tools/check-release-version.py "$GITHUB_REF_NAME"
+          else
+            python3 tools/check-release-version.py
+          fi
+
   # 同 ci.yml：ghcr 镜像名必须全小写，owner 含大写时先算好小写镜像名。
   buildenv-image:
     name: resolve-buildenv-image
+    needs: release-version
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.resolve.outputs.image }}
@@ -162,6 +179,7 @@ jobs:
   # 于是 tag 触发的 Release 永远建不出来。
   release:
     name: release
+    if: github.ref_type == 'tag'
     needs: [build, smoke]
     runs-on: ubuntu-latest
     steps:

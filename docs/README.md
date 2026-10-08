@@ -34,6 +34,7 @@
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
 - [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮开发中断恢复、分支集成、验证结果与剩余边界
+- [releases/v0.17.md](releases/v0.17.md)：v0.17 候选版本范围、构建修正与发布检查
 - [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及代码与注释规范（语言、格式、何时该写注释、锁序与 ABI 注释约定）
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
