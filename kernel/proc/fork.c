@@ -224,10 +224,16 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     } else {
         t->tg_leader = t;
     }
-    proc_children_link_locked(t->parent, t);
+    int tg_link_error = 0;
     if (t->tg_leader != t)
-        proc_tg_link_locked(t);
+        tg_link_error = proc_tg_link_locked(t);
+    if (!tg_link_error)
+        proc_children_link_locked(t->parent, t);
     spin_unlock_irqrestore(&tasklist_lock, list_flags);
+    if (tg_link_error) {
+        proc_destroy_task(t);
+        return tg_link_error;
+    }
 
     t->clone_flags = (int)flags;
     if (flags & CLONE_CHILD_CLEARTID)

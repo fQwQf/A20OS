@@ -12,7 +12,8 @@ HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
         check-smoke-cases \
         check-native-abi-coverage check-abi-config-guard \
         check-flash-backend-registry check-manifests \
-        check-a20-tests check-pt-mcs-preempt-window check-proc-wait-window
+        check-a20-tests check-pt-mcs-preempt-window check-proc-wait-window \
+        check-tg-leader-lifetime
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
@@ -88,7 +89,8 @@ check-a20-tests:
 check-drm-abi:
 	@tools/check-drm-abi.sh
 
-host-tests: check-pt-mcs-preempt-window check-proc-wait-window $(HOST_TESTS_BIN)
+host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
+            check-tg-leader-lifetime $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
 /tmp/a20-host-%: tools/tests/%.c
@@ -144,6 +146,11 @@ check-pt-mcs-preempt-window:
 # semantics without booting a guest.
 check-proc-wait-window:
 	$(PYTHON) tools/tests/test_wait_registration_window.py
+
+# Prove the task-group leader remains alive while linked members can still
+# update its embedded tg_next chain, using the production link/unlink bodies.
+check-tg-leader-lifetime:
+	$(PYTHON) tools/tests/test_tg_leader_lifetime.py
 
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
