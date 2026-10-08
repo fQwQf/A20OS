@@ -5,12 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sched.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <pthread.h>
+#include <poll.h>
 
 static int fail(const char *what)
 {
@@ -26,6 +28,177 @@ static int thread_wait_pipe[2];
 static int thread_wait_pid;
 static int thread_wait_pidfd;
 static int thread_wait_error;
+static int zombie_group_release_fd;
+
+static void *zombie_group_member(void *unused)
+{
+    (void)unused;
+    char byte;
+    while (read(zombie_group_release_fd, &byte, 1) < 0 && errno == EINTR)
+        ;
+    syscall(SYS_exit, 0);
+    return NULL;
+}
+
+static void zombie_group_child(int ready_fd, int release_fd, int exit_fd)
+{
+    zombie_group_release_fd = release_fd;
+    pthread_t member;
+    if (pthread_create(&member, NULL, zombie_group_member, NULL) != 0)
+        _exit(70);
+    if (write(ready_fd, "r", 1) != 1)
+        _exit(71);
+    char exit_byte;
+    if (read(exit_fd, &exit_byte, 1) != 1)
+        _exit(72);
+    /* Exit just this thread, leaving a live member behind.  libc _exit uses
+     * exit_group and would terminate the scenario instead. */
+    syscall(SYS_exit, 23);
+    _exit(73);
+}
+
+static int proc_pid_state(pid_t pid)
+{
+    char path[64];
+    char line[512];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *file = fopen(path, "r");
+    if (!file)
+        return -1;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    char *comm_end = strrchr(line, ')');
+    return comm_end && comm_end[1] == ' ' ? comm_end[2] : -1;
+}
+
+static int test_wait_zombie_leader_with_live_member(void)
+{
+    int ready_pipe[2], release_pipe[2], exit_pipe[2];
+    if (pipe(ready_pipe) < 0 || pipe(release_pipe) < 0 || pipe(exit_pipe) < 0)
+        return fail("wait-live-group-pipe");
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("wait-live-group-fork");
+    if (pid == 0) {
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        close(exit_pipe[1]);
+        zombie_group_child(ready_pipe[1], release_pipe[0], exit_pipe[0]);
+    }
+
+    close(ready_pipe[1]);
+    close(release_pipe[0]);
+    close(exit_pipe[0]);
+    char byte;
+    if (read(ready_pipe[0], &byte, 1) != 1) {
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        close(exit_pipe[1]);
+        return fail("wait-live-group-ready");
+    }
+    close(ready_pipe[0]);
+    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd < 0) {
+        close(exit_pipe[1]);
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        waitpid(pid, NULL, 0);
+        return fail("wait-live-group-pidfd");
+    }
+
+    if (write(exit_pipe[1], "x", 1) != 1) {
+        close(exit_pipe[1]);
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        close(pidfd);
+        waitpid(pid, NULL, 0);
+        return fail("wait-live-group-exit-leader");
+    }
+    close(exit_pipe[1]);
+    sched_yield();
+
+    /* Wait until procfs confirms the leader is zombie.  The group member
+     * remains blocked on release_pipe, so pidfd must still be unreadable. */
+    int leader_zombie = 0;
+    for (int attempt = 0; attempt < 10000; attempt++) {
+        if (proc_pid_state(pid) == 'Z') {
+            leader_zombie = 1;
+            break;
+        }
+        sched_yield();
+    }
+    if (!leader_zombie) {
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        close(pidfd);
+        waitpid(pid, NULL, 0);
+        return fail("wait-live-group-leader-zombie-timeout");
+    }
+
+    int zombie_pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (zombie_pidfd < 0) {
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        close(pidfd);
+        waitpid(pid, NULL, 0);
+        return fail("wait-live-group-open-zombie-pidfd");
+    }
+    struct pollfd pfd = {.fd = pidfd, .events = POLLIN, .revents = 0};
+    int polled = poll(&pfd, 1, 0);
+    close(zombie_pidfd);
+    if (polled != 0 || pfd.revents != 0) {
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        close(pidfd);
+        waitpid(pid, NULL, 0);
+        return fail("wait-live-group-pidfd-early-readable");
+    }
+
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)pidfd, &info, WEXITED | WNOHANG) < 0 ||
+        info.si_pid != 0) {
+        int saved_errno = errno;
+        write(release_pipe[1], "x", 1);
+        close(release_pipe[1]);
+        close(pidfd);
+        waitpid(pid, NULL, 0);
+        errno = saved_errno;
+        return fail("wait-live-group-nohang");
+    }
+
+    if (write(release_pipe[1], "x", 1) != 1) {
+        close(release_pipe[1]);
+        close(pidfd);
+        return fail("wait-live-group-release");
+    }
+    close(release_pipe[1]);
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)pidfd, &info, WEXITED | WNOWAIT) < 0) {
+        close(pidfd);
+        return fail("wait-live-group-wnowait");
+    }
+    if (info.si_pid != pid || info.si_status != 23) {
+        close(pidfd);
+        return fail("wait-live-group-final-info");
+    }
+    pfd.revents = 0;
+    polled = poll(&pfd, 1, 0);
+    if (polled != 1 || !(pfd.revents & POLLIN)) {
+        close(pidfd);
+        return fail("wait-live-group-pidfd-readable");
+    }
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)pidfd, &info, WEXITED) < 0) {
+        close(pidfd);
+        return fail("wait-live-group-reap");
+    }
+    close(pidfd);
+    return 0;
+}
 
 /* Create a process from a non-leader thread, then let that thread exit.  The
  * main thread must still be able to wait for its thread-group child's pidfd. */
@@ -243,14 +416,32 @@ int main(int argc, char **argv)
     /* waitid siginfo_t follows the Linux ABI: on 64-bit targets the
      * siginfo union begins at offset 16 (offset 12 on 32-bit targets).
      * pidfd + WNOWAIT checks both that layout and non-consuming semantics. */
+    int waitid_gate[2];
+    if (pipe(waitid_gate) < 0)
+        return fail("waitid-gate-pipe");
     pid = fork();
     if (pid < 0)
         return fail("waitid-fork");
-    if (pid == 0)
+    if (pid == 0) {
+        close(waitid_gate[1]);
+        char gate_byte;
+        if (read(waitid_gate[0], &gate_byte, 1) != 1)
+            _exit(38);
         _exit(37);
+    }
+    close(waitid_gate[0]);
     int child_pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
-    if (child_pidfd < 0)
+    if (child_pidfd < 0) {
+        write(waitid_gate[1], "x", 1);
+        close(waitid_gate[1]);
         return fail("pidfd-open");
+    }
+    if (write(waitid_gate[1], "x", 1) != 1) {
+        close(waitid_gate[1]);
+        close(child_pidfd);
+        return fail("waitid-gate-release");
+    }
+    close(waitid_gate[1]);
     siginfo_t child_info;
     memset(&child_info, 0xa5, sizeof(child_info));
     if (waitid(P_PIDFD, (id_t)child_pidfd, &child_info,
@@ -272,6 +463,9 @@ int main(int argc, char **argv)
         return fail("waitid-echild");
 
     if (test_thread_group_pidfd_wait())
+        return 1;
+
+    if (test_wait_zombie_leader_with_live_member())
         return 1;
 
     pid = fork();
