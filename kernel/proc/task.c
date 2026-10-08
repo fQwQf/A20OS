@@ -372,6 +372,11 @@ static void proc_task_release_resources(task_t *t)
         t->kstack = 0;
         t->kstack_base = NULL;
     }
+
+    /* A thread's tg_prev_ptr may target leader-owned storage until unlink, and
+     * other outstanding task references may still inspect tg_leader afterward.
+     * Drop this anchor only during final release, outside tasklist_lock. */
+    proc_tg_leader_ref_release(t);
 }
 
 task_t *proc_get(task_t *t)

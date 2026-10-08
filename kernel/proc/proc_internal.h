@@ -91,8 +91,9 @@ void proc_children_link_locked(task_t *parent, task_t *child);
 void proc_link_newborn(task_t *t);
 void proc_children_unlink_locked(task_t *t);
 void proc_reparent_task_locked(task_t *new_parent, task_t *t);
-void proc_tg_link_locked(task_t *t);
+int proc_tg_link_locked(task_t *t);
 void proc_tg_unlink_locked(task_t *t);
+void proc_tg_leader_ref_release(task_t *t);
 task_t *proc_set_current(task_t *next);
 pt_root_t *proc_kernel_pgdir_shared(void);
 
