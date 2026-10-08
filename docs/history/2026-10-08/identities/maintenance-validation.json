@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "history_tool_tests": 18,
+  "history_tool_tests_passed": true,
+  "check_doc_drift": "PASS",
+  "diff_check": "PASS",
+  "runtime_source_changed": false,
+  "note": "These checks cover the maintenance tools and documentation; historical objects are checked separately in validation.json and independent-validation.json."
+}

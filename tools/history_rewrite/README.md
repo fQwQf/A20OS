@@ -48,3 +48,17 @@ python3 tools/history_rewrite/messages.py \
 完整消息计划作为工具输入保存在 `plans/messages-20261008.json`，其中保留历史负向测试样例的原始引用，供消息逐字核对，不属于当前文档主张。
 
 完整回归命令保持为本文件开头的 unittest discovery；新增用例覆盖不同作者/提交者与不同时间及时区、merge 父序、分叉、空提交、stash、嵌套标签、tree/blob 引用、真实共同作者保留、计划覆盖、签名拒绝和节点碰撞。
+
+## 精确身份更正
+
+用户进一步确认 Sisyphus 提交实际属于 fQwQf，见[身份迁移说明](../../docs/history/2026-10-08/identities/migration.md)。`identities.py` 读取精确 `Name <email>` 映射，仅更正 author/committer 身份；两种时间戳和时区各自保留，不改消息或 tree，不合并节点，不改其他作者。它拒绝签名对象、节点碰撞、无匹配计划及已存在的输出目录；嵌套标签目标和全部源 refs 同步映射，验证源 refs 未变。
+
+```sh
+python3 tools/history_rewrite/identities.py \
+  --repo /tmp/a20-before-identities.git \
+  --output /tmp/a20-identities-preview.git \
+  --plan docs/history/2026-10-08/identities/plan.json \
+  --artifacts /tmp/a20-identities-evidence
+```
+
+须从该阶段对应的 `before.bundle` 恢复源仓库，不能对已更正完成的历史再次使用同一身份计划。测试覆盖混合身份、独立时间及时区、正文字符串保留、分叉/merge/标签及树引用、碰撞与隔离目录失败路径。

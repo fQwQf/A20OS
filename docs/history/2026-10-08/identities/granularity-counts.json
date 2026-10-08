@@ -1,0 +1,12 @@
+{
+  "first_parent": {
+    "commits": 176,
+    "merges": 42,
+    "doc_only": 37
+  },
+  "all_reachable": {
+    "commits": 470,
+    "merges": 50,
+    "doc_only": 63
+  }
+}

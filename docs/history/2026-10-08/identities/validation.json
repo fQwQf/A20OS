@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "commits": 2196,
+  "commits_rehashed": 599,
+  "merges": 92,
+  "author_corrected": 13,
+  "committer_corrected": 13,
+  "forks": 69,
+  "annotated_tags": 16,
+  "refs": 31,
+  "author_and_committer_dates_and_timezones_identical": true,
+  "messages_and_trees_identical": true,
+  "other_identities_unchanged": true,
+  "parent_order_and_topology_preserved": true,
+  "tag_metadata_preserved": true,
+  "source_refs_unchanged": true
+}

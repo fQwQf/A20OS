@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "independent_raw_object_and_sha1_verification": true,
+  "objects": 2215,
+  "commits": 2196,
+  "corrected_headers": {
+    "author": 13,
+    "committer": 13
+  },
+  "source_refs_unchanged": true,
+  "messages_trees_dates_timezones_and_other_metadata_preserved": true
+}

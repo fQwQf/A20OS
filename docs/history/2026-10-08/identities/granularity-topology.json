@@ -1,0 +1,68 @@
+[
+  {
+    "old": [
+      "dd61e0107f8236022c40624c05b2b040eb485464",
+      "886229d83575d7569ebc0ddf434c40b3f7b8f32c"
+    ],
+    "mapped": [
+      "81118962ecc8b816cd01be28c4b86f9118e69083",
+      "c9451beffa2c1a888e7005c812baed683deed60c"
+    ],
+    "adjacent_single_parent": true,
+    "first_children": [
+      "886229d83575d7569ebc0ddf434c40b3f7b8f32c",
+      "cd554a9b8f6ae9bafc0a6e65c5218d6b2e655536"
+    ],
+    "first_is_ref_or_tag_endpoint": false,
+    "first_can_be_removed_without_dropping_protected_node": false
+  },
+  {
+    "old": [
+      "7100f7b1a740bb45daf8295a619422d8795e0deb",
+      "6aac4141e2dd4d1fb4c57555e2eac5222aca6601"
+    ],
+    "mapped": [
+      "0eda885b32ec78ade8ab4b8c8a318a301839c1fa",
+      "9c75c02ba53a6bfcf7f33c089b61f3633077e96a"
+    ],
+    "adjacent_single_parent": true,
+    "first_children": [
+      "6aac4141e2dd4d1fb4c57555e2eac5222aca6601"
+    ],
+    "first_is_ref_or_tag_endpoint": false,
+    "first_can_be_removed_without_dropping_protected_node": true
+  },
+  {
+    "old": [
+      "c0e2d3b78b4cf58742de8e6f25e5302415f10697",
+      "a6177705cce124fd238bb20ed99105f8da122a39"
+    ],
+    "mapped": [
+      "26a732ae52dfacbe796456267a32a763c3a28001",
+      "600f6ac86fdf10218d10c2eabc120f29eab222da"
+    ],
+    "adjacent_single_parent": true,
+    "first_children": [
+      "a6177705cce124fd238bb20ed99105f8da122a39"
+    ],
+    "first_is_ref_or_tag_endpoint": false,
+    "first_can_be_removed_without_dropping_protected_node": true
+  },
+  {
+    "old": [
+      "6d5eef7aaca38d6ad10eb0aea660cd8492002a7f",
+      "8ea76a8217903724fb2b29858bff135d72641e70"
+    ],
+    "mapped": [
+      "73cb74c035374a30efdc94b708a9fd8a52b937f5",
+      "a2dc01ff131c0c5b58221cd5ec3d9fd4ac620311"
+    ],
+    "adjacent_single_parent": true,
+    "first_children": [
+      "8ea76a8217903724fb2b29858bff135d72641e70",
+      "7e3051ba922d057cebd22344f619bbf52a110eb8"
+    ],
+    "first_is_ref_or_tag_endpoint": false,
+    "first_can_be_removed_without_dropping_protected_node": false
+  }
+]
