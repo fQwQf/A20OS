@@ -1,0 +1,161 @@
+{
+  "groups": [
+    {
+      "commits": [
+        "103bd0ce011b885db329d668fc29f81fa39eed7f",
+        "93774479643ea6f7462cec43d85b8e36363f6a4b"
+      ],
+      "message": "fix(unix): wake stream readers after each delivered chunk\n\nNotify blocked stream peers as data enters the receive buffer so a writer\nwaiting for space cannot leave already-buffered data unread. Fold in the\npreceding XWayland trace and observed Minecraft stall result, keeping\nnetwork crashes and later DNS failures as separate unresolved issues.\n",
+      "reason": "第一笔记录 XWayland/Minecraft stall 的观察，下一笔紧接着实现 AF_UNIX stream 每个分块到达即通知/唤醒接收端，并在同一文档记下结果；属于诊断与直接修复。保留限定语，不夸大因果。"
+    },
+    {
+      "commits": [
+        "3e5e9672fc5a8db2f6461d8437217862f9d96f47",
+        "a8b69c7b031c73e56be85474f685b69dd69befff"
+      ],
+      "message": "fix(futex): break COW before PI futex stores\n\nThe reproducer shows PI futex stores writing through a shared raw frame.\nResolve the private writable mapping before the atomic store, keeping this\nissue distinct from the separate clear-child-tid crash. Record the clean\npost-fix reproduction and the remaining prepare-to-store fork window.\n",
+      "reason": "连续的证据记录与对应 futex PI 写入修复，diff 触及相同 COW 绕过问题；消息注明与另一种 clear_child_tid 故障区分，不把旁支问题混入。"
+    },
+    {
+      "commits": [
+        "7d9bea22f3842fce1be5f0415b0197407001efda",
+        "d7536324c753c0be747bde995cef5a4b205e639a"
+      ],
+      "message": "feat(audio): expose PCM ioctls and attach HDA to XFCE\n\nImplement the ALSA PCM ioctl layouts and operations, select a PCM-capable\ndevice, and attach HDA to the XFCE instance. Record successful driver\nbinding without claiming PCM playback was verified; Minecraft still used\nthe configured null output at this checkpoint.\n",
+      "reason": "连续两笔分别实现 ALSA PCM ioctl/device 与 XFCE 实例绑定，直接完成同一 guest PCM 可用性目标。描述保留当时尚未确认实际打开播放的限制。"
+    },
+    {
+      "commits": [
+        "6fc7f01e5cea96bb680d3c3d097c7a51e08cd0b7",
+        "70c80c202d68e4923f8598fd0e246598ed428dda"
+      ],
+      "message": "fix(drm): assign framebuffer IDs independently of GEM handles\n\nFold the CRTC failure trace into the framebuffer-lifetime fix. Allocate\nframebuffer IDs and retain a GEM reference for each framebuffer object,\nso destroying a dumb handle does not invalidate a live framebuffer.\n",
+      "reason": "紧邻的根因记录明确指出 fb_id 与 GEM handle 混用，下一提交正是分配 framebuffer ID 并持有 GEM 引用；这是诊断与直接修复。"
+    },
+    {
+      "commits": [
+        "fc86c94f53dc38ee768435708fcbe6e98565a294",
+        "4a0f2fc7240df88453e5159d466aa8193c374821"
+      ],
+      "message": "test(gates): migrate source assertions into declarative gates\n\nMove 97 source assertions from targets-gates.mk and 84 assertions from\nthe 12 pure gates in targets-build.mk into the TOML schema and runner.\nPreserve negation, dynamic globs, fixed strings, multiline and PCRE flags,\nwith round-trip and negative-case checks. Keep mixed build/assertion\nrecipes in Make and document the pre-existing gate failures separately.\n",
+      "reason": "两个连续提交共同将两个 Makefile 中的源代码断言迁移到同一 TOML gate schema/runner；同一机械迁移目标，适合用合并后的消息覆盖两步范围。"
+    },
+    {
+      "commits": [
+        "94fb71e138633f4ac4ffdbba89d5ec956dcbf301",
+        "42de401c15322ba8f64b07af33f9ec6e3e2c44aa"
+      ],
+      "message": "feat(mm): provision anonymous status and preserve mprotect permissions\n\nPre-mark bounded anonymous mmap ranges with class and permission metadata,\nclear unused reservations on unmap, and refresh reserved-leaf permissions\nwhen mprotect changes them. Keep large mappings on the existing VMA path\nand expose provisioning counters; the status-only fault consumer follows\nin a separate change.\n",
+      "reason": "第二笔是 mmap 匿名区预标记后紧邻发现并修正 mprotect 对 reserved leaf 的状态刷新；同一状态模型的必要收尾，不扩大到其他 MM 改造。"
+    },
+    {
+      "commits": [
+        "70b54650ecbe6414e1ca9b5f6b67ad10cf60728d",
+        "1223551ac5d4cca56072f22a0dd3de94efabc32b"
+      ],
+      "message": "fix(mm): refresh per-PTE protection through the leaf-table lookup\n\nFold the status/PTE divergence evidence into the protection refresh fix.\nUse the leaf-table lookup when an absent mapping has no present PTE, so\nmprotect can update its recorded permissions. Remove temporary fault\nand install tracing and retain the measured verification in the MM record.\n",
+      "reason": "前一提交给出 status 错误的证据与根因，后一提交对同一 status 路径实现 leaf-table 查询和刷新；连续、同一缺陷。"
+    },
+    {
+      "commits": [
+        "11e4c70936640b3c132a7664b7f46f5beb7c0d4f",
+        "e92bbc051cc1858d07330fea31ece74b2156437f"
+      ],
+      "message": "build(tools): retire source-built userland in favour of apk worlds\n\nReplace source-built extra userland with apk worlds, remove the retired\nbuild machinery and stale extra.img references, and reject the removed\nfit-sdcard variant with regression coverage. Keep archive pruning separate.\n",
+      "reason": "The first commit migrates user software from vendored source builds and extra.img to Alpine apk worlds, while keeping only the board's writable /extra slot where needed. The follow-up removes remaining README and QEMU-comment claims about extra.img, removes the now-invalid fit-sdcard extra variant, and adds validation coverage so the removed variant fails early. That is completion and validation of the same retirement migration. Do not include preceding e6ff80f793bad0cabd0a676d94bcdfc60929b950 archive pruning: it is a separately scoped producer-less code/resource cleanup."
+    },
+    {
+      "commits": [
+        "7b00ddc1386cd4188187a9aad062fe375fb0c462",
+        "58f3f43c731a8636a235cfca5e14f17a0aa421f4",
+        "b57506128449f06acb58ecba0e54a5d72f190570",
+        "3c92a690eb3da59f3eac5e5445aa3a1aabfcbbe1"
+      ],
+      "message": "docs(drm): record the timestamp capability rollback\n\nRecord the timestamp-capability experiment, the wlroots startup regression\nand the rollback. Preserve the working capability value with its rationale,\nand retain the separate eglinfo investigation without claiming it is fixed.\n",
+      "reason": "This is one short experiment sequence around DRM_CAP_TIMESTAMP_MONOTONIC. The first commit clears the cap because MODE_GETTIME is absent; the next records that this does not explain eglinfo's fault; the revert restores the cap after desktop testing shows wlroots treats it as mandatory; the final commit records that measured result in the documentation and DRM comment. The final tree preserves the useful conclusion and rationale without making the transient desktop-breaking state a standalone landed change. The final diff is primarily the investigation record plus a clarifying code comment, so docs(drm) is an accurate scope."
+    },
+    {
+      "commits": [
+        "8d5fc6f5e119e24b64a7c345e0876e66adfe22df",
+        "5cf0a883cdd5da90dcc4a95e79db75e7290303d6"
+      ],
+      "message": "test(smoke): add x86_64 and aarch64 virgl readback gates\n\nAdd matching virgl pixel-readback smoke instances for x86_64 and AArch64.\nKeep the generic QEMU command parser correction as a separate change.\n",
+      "reason": "The two commits are eight seconds apart and each adds one architecture-specific smoke instance with the same virgl pixel-readback assertions. Together they add the stated cross-architecture coverage for the same 3D rendering contract; they remain separate instances inside the combined commit, preserving architecture-specific failure evidence."
+    },
+    {
+      "commits": [
+        "1c84f256da809886cca9e6a59ca999d9bfaaf3b8",
+        "1702e7646c89a30bb1efefe018fad935da603bd9"
+      ],
+      "message": "docs(graphics): record 3D coverage and the Mesa attach status\n\nRecord the failed sysfs-only Mesa attach experiment and its llvmpipe\nfallback dependency alongside the three-architecture 3D readback evidence.\nDistinguish the hand-written command-stream gate from stock Mesa attach,\nwhich remains an open observation at this historical point.\n",
+      "reason": "These commits are two minutes apart in the same 3D/Mesa investigation. The first adds the sysfs/llvmpipe diagnosis to docs/graphics/3d-graphics.md; the next revises the same status section with three-architecture pixel-readback evidence and records the still-open Mesa attach gate in both that document and docs/testing-gates.md. Together they form one coherent status-and-evidence update."
+    },
+    {
+      "commits": [
+        "a396a2a3f0cde664074991d6dab8f1d72078cef7",
+        "6e34909185ff84676f6a2904eb0ed015a3de5915",
+        "02cc8cf9a48f6766cf1ef7606c4153e9b29c175a"
+      ],
+      "message": "fix(gfx): enable and verify Mesa virgl attachment\n\nUse the GETPARAM userspace pointer ABI and correct Mesa-facing version and\ncapset handling. Configure the Mesa gate with a virgl GPU and require\nrenderer attachment, then record the measured result and corrected cause.\n",
+      "reason": "All three commits are twelve seconds apart and complete one end-to-end Mesa attach outcome. a396 fixes the actual DRM UAPI/loader blockers (GETPARAM writes through the user pointer, version major, GET_CAPS capset semantics and driver name); 6e corrects the Mesa gate so it actually boots a virgl GPU, recognizes eglinfo's renderer line, and fails when Mesa does not attach; 02 replaces the disproved Alpine-packaging explanation with measured GETPARAM cause and updates the gate/status docs. Although the patches address distinct layers, they are complementary parts of making Mesa attach and making the gate prove that result, rather than independent features. A single commit keeps the implementation, reliable evidence, and final explanation together."
+    },
+    {
+      "commits": [
+        "226b4383b97705d384b3c6f8aad5666291421d5b",
+        "73cb74c035374a30efdc94b708a9fd8a52b937f5"
+      ],
+      "message": "docs(net): consolidate the loopback pbuf lifetime investigation\n\nRecord the loopback pbuf backtrace and the follow-up exclusions for inline\nstaging overflow and synchronous draining. Preserve these as investigation\nevidence and next steps rather than claiming a verified runtime fix.\n",
+      "reason": "Four minutes apart, both commits edit only docs/net/net-lanes.md and document the same TCP accept-race investigation. The first records a pbuf-lifetime hypothesis from a backtrace; the next immediately narrows and corrects that diagnosis by ruling out staging overflow and the drain window, and redirects investigation to the send path. This is a useful investigation record, but its two-step hypothesis and correction can be presented as one coherent diagnostic update."
+    },
+    {
+      "commits": [
+        "a4d2531805070d187c24c6726fb0853b9fff45a1",
+        "3ae34ba13b85a1f4c741f03accd8730d8f9b6471"
+      ],
+      "message": "docs(server-readiness): record server boot evidence and corrected TCP findings\n\nDocument server-world image assembly, guest shell boot and SSH prerequisites.\nCorrect the inbound handshake diagnosis after fixing the test port: accept\nsucceeds before the observed double-free panic. Retain the reproduction\nsteps and the separate fast-mode gate failure without claiming SSH works.\n",
+      "reason": "Adjacent single-parent commits by the same author and committer, both editing docs/server-readiness.md. The first records inbound TCP as not completing its handshake; the second explicitly corrects that finding because the test targeted the wrong port, documents the actual accept-then-double-free behavior, and removes the now-duplicated tentative report. The first has only the second as child; the second has only 2145f5cb0112..., and neither is a direct ref or peeled-tag endpoint. The unified record would preserve the corrected finding without retaining an obsolete interim diagnosis."
+    },
+    {
+      "commits": [
+        "94ca523174f22d87a0bee4b361c7cffa0b82e64f",
+        "fbbcbbd9797c370e46323c7b3290597d4d9f36ad"
+      ],
+      "message": "fix(mm): synchronize PTE status and validate page-table metadata\n\nRefresh protection and COW status after direct PTE writes. Correct the\nauditor to recognize huge leaves and untouched demand-paged VMAs, improve\nmismatch diagnostics and W/X handling, and add the mmtest smoke gate.\n\nKeep the existing address-space locking model.\n",
+      "reason": "The first commit adds status updates for direct PTE writes in kernel/mm/pt.c, cow.c, fault.c and mprotect.c. Its immediate child corrects page-table status accounting in the same kernel/mm/pt.c and pt.h path, then adds the mmtest gate and documentation. Both author and committer identities exactly match (fQwQf <supertjz123@foxmail.com>). The initial commit has exactly one child, this follow-up; the follow-up has exactly one child, fef64359c396..., and neither candidate is a direct ref or peeled-tag endpoint. This is implementation plus immediate correctness fix and regression coverage for one status-tracking feature."
+    },
+    {
+      "commits": [
+        "a971eaa58e8bdcae9d45fadc1875e6cae99885b2",
+        "1c66d9bef2b1e09fc9d09d5d6c3b32aa3c0880e2"
+      ],
+      "message": "feat(mm): provision segment indexes and preserve mapping policy\n\nProvision segment storage along mapping and split paths, carry policy\nmetadata on the segments, and repair lifetime leaks exposed by the\nanonymous-segment prototype. Record its remaining capacity cost and\nlimitations without claiming the single-level model is complete.\n",
+      "reason": "The initial commit provisions segment-index capacity through mapping paths; its immediate child carries mapping policy into segments and repairs the associated lifetime defects. Both patches touch kernel/include/mm/pt.h, kernel/mm/pt.c, mmap/mprotect paths and the same single-level memory-model record. Both author and committer identities exactly match (fQwQf <supertjz123@foxmail.com>). The older commit has only the proposed child; the child has only 3d0bd6fc5817..., and neither commit is a direct ref or peeled-tag endpoint. Keep the later ordered-index refactor 3d0bd6fc5817... separate; it is a subsequent implementation step."
+    },
+    {
+      "commits": [
+        "2ac869003f66cf4517c19dbdbb8f2afd855444fe",
+        "8830ff54894a31ebe6a96b1eb7bcd4e668432479"
+      ],
+      "message": "docs(net): align network guidance and correct embedded budgets\n\nUpdate network guidance to match implemented behavior and fold in the\nimmediate conntrack entry-size and embedded filter-budget corrections.\n",
+      "reason": "The second commit follows eleven minutes later and edits three of the same documentation files changed by the first. It corrects facts in the freshly updated network guidance: embedded conntrack entries are 32 rather than 64, actual entry size is 64 rather than 56 bytes, and the filter budget is fully consumed. Its body explicitly frames these as corrections to the earlier text. Consolidating this immediate correction with the documentation update would leave one reviewed description of the implemented network budget."
+    },
+    {
+      "commits": [
+        "0eda885b32ec78ade8ab4b8c8a318a301839c1fa",
+        "9c75c02ba53a6bfcf7f33c089b61f3633077e96a"
+      ],
+      "message": "docs(recovery): record integration acceptance and merged-worktree cleanup\n\nDocument the recovered integration, final acceptance evidence and CI status.\nInclude the verified removal of fully merged worktrees and local branches,\nwhile retaining independent recovery archives and unmerged research refs.\n",
+      "reason": "首次恢复验收报告与紧接的6行状态措辞更正是同一份完成记录，合并为一次文档更新。"
+    },
+    {
+      "commits": [
+        "26a732ae52dfacbe796456267a32a763c3a28001",
+        "600f6ac86fdf10218d10c2eabc120f29eab222da"
+      ],
+      "message": "docs(recovery): record lane-lock and guest-shell acceptance and synchronization\n\nRecord the supplementary lwIP concurrency and guest-shell acceptance,\nincluding the final-source runtime and cross-architecture evidence.\nInclude subsequent remote synchronization and expired backup cleanup,\nkeeping the earlier acceptance baselines and limitations explicit.\n",
+      "reason": "同日恢复文档连续补记原始目标验收、远端同步与备份清理，按同一恢复收尾目标整合，保留不同验收基线与限制。"
+    }
+  ],
+  "messages": {},
+  "purge": {}
+}

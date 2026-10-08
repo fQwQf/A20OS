@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "history_tool_tests": 18,
+  "history_tool_tests_passed": true,
+  "check_doc_drift": "PASS",
+  "diff_check": "PASS",
+  "runtime_source_changed": false,
+  "note": "Object preservation is checked separately in the three history-validation artifacts."
+}

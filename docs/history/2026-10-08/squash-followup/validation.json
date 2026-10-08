@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "source_refs_unchanged_checked": true,
+  "commit_count": 2197,
+  "removed_count": 22,
+  "retained_count": 2175,
+  "ref_count": 31,
+  "tag_object_count": 16,
+  "protected_v0.13_commit_count": 683,
+  "purge_hit_commit_count": 0,
+  "purge_hit_path_occurrences": 0,
+  "tree_ref_hit_count": 0,
+  "tree_ref_hit_path_occurrences": 0,
+  "checks": [
+    "ref inventory mapped atomically",
+    "ref endpoint object types and filtered trees",
+    "all retained trees independently filtered and non-target entries byte-identical",
+    "retained commit raw author/committer headers",
+    "parent mapping/order and merge cardinality",
+    "fork nodes retained",
+    "v0.13 message/topology preserved; only purge trees and propagated parent OIDs may change",
+    "removed commits declared"
+  ]
+}

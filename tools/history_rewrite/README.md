@@ -62,3 +62,7 @@ python3 tools/history_rewrite/identities.py \
 ```
 
 须从该阶段对应的 `before.bundle` 恢复源仓库，不能对已更正完成的历史再次使用同一身份计划。测试覆盖混合身份、独立时间及时区、正文字符串保留、分叉/merge/标签及树引用、碰撞与隔离目录失败路径。
+
+## 进一步碎片整理
+
+用户后续授权对可合并的碎片继续 squash，见[本轮迁移说明](../../docs/history/2026-10-08/squash-followup/migration.md)。复用 `engine.py` 与独立 `actual-verify.py`，使用该轮的 bundle、计划、引用快照和拓扑清单；复现命令在迁移说明中给出了本轮预期计数。19 组均保留最后节点的原始 author/committer 和两种时间，未执行路径清理。不要将旧阶段计划的 SHA 用于当前历史。

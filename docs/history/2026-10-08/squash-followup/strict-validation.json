@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "source_commits": 2197,
+  "groups": 19,
+  "removed": 22,
+  "retained": 2175,
+  "merges": 92,
+  "forks": 69,
+  "refs": 31,
+  "annotated_tags": 16,
+  "independent_raw_object_and_sha1_verification": true,
+  "retained_dates_times_trees_and_unplanned_messages_byte_identical": true,
+  "every_ref_endpoint_tree_identical": true,
+  "retained_nodes_are_distinct": true,
+  "v0.13_and_ancestors_have_identical_ids": true,
+  "source_refs_unchanged": true
+}
