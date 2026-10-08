@@ -268,3 +268,9 @@ trap 仍先于 host frame 记账处理，保留区仍排除在通用页帧分配
 跳过。但 MM 压测在 `vma-deferred-race` 阶段 90 秒超时；同一提交在上述 CI run
 约 5 秒通过该阶段，说明这是间歇性进度故障，不能通过放宽时间或删除断言处理。
 后续修复和候选提交的最终验收应同时记录在这里。
+
+Run [37752140621](https://github.com/fQwQf/A20OS/actions/runs/37752140621)
+的 `toolchain-gates` 又发现裸 `ubuntu-latest` runner 不保证预装 ripgrep：
+`check-honesty-policy` 的 `rg` 命令因此不存在，并误报 pagemap 所有权检查失败。
+workflow 现显式安装 `ripgrep`，原有 fail-closed 源码断言保持不变；该依赖修复
+仍需由后续远端 CI run 验证。

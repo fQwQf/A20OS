@@ -44,6 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The fail-closed source gates use `rg`; ubuntu-latest does not guarantee
+      # ripgrep is preinstalled, so declare the host-side dependency explicitly.
+      - name: Install source-gate tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ripgrep
+
       - name: Validate instances, arch matrix and component registries
         run: make check-manifests
 
