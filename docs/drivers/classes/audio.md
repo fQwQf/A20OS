@@ -74,7 +74,7 @@ RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 E
 ```bash
 make smoke-hda
 make smoke-audio-userspace
-make PYTHON='conda run -n a20os python' smoke-virtio-sound
+make PYTHON=python3 smoke-virtio-sound
 make run-world-gui PKG_WORLD=xfce QEMU_GUI_AUDIO_DEVICE=virtio
 ```
 

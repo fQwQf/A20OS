@@ -22,7 +22,7 @@ make smoke-driver-lifecycle
 make smoke-platform-irq-fallback
 make smoke-hda
 make smoke-audio-userspace
-make PYTHON='conda run -n a20os python' smoke-virtio-sound
+make PYTHON=python3 smoke-virtio-sound
 make smoke-pci-portability
 ```
 

@@ -75,7 +75,7 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 2. 服务端（rtcd/svcmgr/ubd 等）与客户端按新生成头收发，字段布局由 `typedef struct a20_idl_*_t` 保证一致；
 3. 服务端信封校验保持 version/size 检查，防止旧客户端错配。
 
-生成头 `user/svc/a20_services_idl.h` 是构建期自动生成的（`tools/targets-native.mk` 的 `$(A20_SERVICES_IDL_HDR)` 规则，`A20_IDL_PYTHON` 可覆盖，默认 `conda run -n a20os python`），并被 `.gitignore` 排除、不进入 Git 跟踪；native 服务二进制直接依赖该头并自动触发生成：绑定槽位（svc/ping/shmring/chand/rtcd/ubd）、shmring 几何与消息布局均出自 IDL。`make check-a20-idl` 重新生成并与当前工作树头比对，防止手工改动生成头。
+生成头 `user/svc/a20_services_idl.h` 是构建期自动生成的（`tools/targets-native.mk` 的 `$(A20_SERVICES_IDL_HDR)` 规则，`A20_IDL_PYTHON` 可覆盖，默认 `python3`），并被 `.gitignore` 排除、不进入 Git 跟踪；native 服务二进制直接依赖该头并自动触发生成：绑定槽位（svc/ping/shmring/chand/rtcd/ubd）、shmring 几何与消息布局均出自 IDL。`make check-a20-idl` 重新生成并与当前工作树头比对，防止手工改动生成头。
 
 ### 1.7 当前 IDL 覆盖与边界
 

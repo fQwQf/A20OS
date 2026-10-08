@@ -429,7 +429,7 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
   1 核/8 核运行矩阵是 `make check-proc-step8-local`。
 - 需要完整双架构运行矩阵时运行 `make check-proc-step8`，它聚合 RISC-V64 与
   LoongArch64 的 debug/release、单核/八核压力矩阵。
-- 项目 Python 命令统一通过 conda 环境 `a20os`；长跑基准入口负责记录 QEMU 命令、
+- 项目 Python 命令统一使用 Python 3 标准库；长跑基准入口负责记录 QEMU 命令、
   镜像哈希、退出状态、timeout 与 guest CPU 状态。
 - NOMMU 支持集合由构建入口和 `smoke-arch-mmu-matrix` 验证，不以本文中的历史成功
   列表代替当前运行结果。
