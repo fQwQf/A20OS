@@ -1188,6 +1188,7 @@ smoke-net-lanes-n1:
 # printed for human review instead, since how many accepts a run makes depends
 # on client retry timing.
 smoke-net-accept: NET_HOSTFWD=
+NET_ACCEPT_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 print-build-dir)
 smoke-net-accept:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -1198,10 +1199,10 @@ smoke-net-accept:
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(NET_ACCEPT_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-kernel $(NET_ACCEPT_BUILD_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 || status=$$?; \
 	passes=$$(grep -c 'TCP_ACCEPT_TEST: PASS' "$$log" || true); \
