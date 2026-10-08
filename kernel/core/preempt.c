@@ -63,7 +63,15 @@ void preempt_state_init(unsigned cpu)
  * ordered after the counter bump that made it non-preemptible. */
 void preempt_disable(void)
 {
+    /* Pin the task to this CPU while selecting and updating its per-CPU slot.
+     * Otherwise an IRQ could arrive after cpu_current_id() but before the
+     * increment, switch the still-preemptible task to another CPU, and leave
+     * this CPU's counter raised while the task holds a lock elsewhere. */
+    uint64_t irq_flags = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
     __atomic_fetch_add(&preempt_slot()->preempt, 1, __ATOMIC_ACQUIRE);
+    if (irq_flags)
+        arch_local_irq_enable();
 }
 
 /* RELEASE on the way out, paired with the acquire above: a task that resumes

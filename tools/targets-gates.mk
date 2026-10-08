@@ -115,6 +115,24 @@ host-tests: $(HOST_TESTS_BIN)
 	  -Itools/tests/net_lane_host_port -Ikernel/include -Ikernel \
 	  tools/tests/test_net_lane_concurrency.c kernel/net/net_lane.c -o $@
 
+# Exercise the real spin_lock_at() inline body.  The host exchange seam injects
+# a simulated IRQ at lock acquisition and verifies that preemption was already
+# disabled, while the contention seam verifies failed waiters remain switchable.
+/tmp/a20-host-test_spinlock_preempt_window: \
+        tools/tests/test_spinlock_preempt_window.c \
+        kernel/core/preempt.c \
+        kernel/include/core/lock.h \
+        tools/tests/lock_host_port/core/types.h \
+        tools/tests/lock_host_port/core/consts.h \
+        tools/tests/lock_host_port/core/defs.h \
+        tools/tests/lock_host_port/core/klog.h \
+        tools/tests/lock_host_port/core/cpu.h \
+        tools/tests/lock_host_port/core/timer.h \
+        tools/tests/lock_host_port/core/preempt.h
+	$(HOST_CC) $(HOST_CFLAGS) -DCONFIG_KERNEL_PREEMPT=1 \
+	  -Itools/tests/lock_host_port -Ikernel/include \
+	  tools/tests/test_spinlock_preempt_window.c -o $@
+
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
 	@mkdir -p $(BUILD_DIR)
