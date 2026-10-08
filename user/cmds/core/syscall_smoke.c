@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,6 +30,73 @@ static int thread_wait_pid;
 static int thread_wait_pidfd;
 static int thread_wait_error;
 static int zombie_group_release_fd;
+
+#if defined(__x86_64__)
+#ifndef SYS_arch_prctl
+#define SYS_arch_prctl 158
+#endif
+#define X86_ARCH_GET_FS 0x1003
+
+typedef struct {
+    uint64_t fs_base;
+    int failed;
+} x86_tls_probe_t;
+
+static uint64_t x86_get_fs_base(void)
+{
+    uint64_t fs_base = 0;
+    if (syscall(SYS_arch_prctl, X86_ARCH_GET_FS, &fs_base) < 0)
+        return 0;
+    return fs_base;
+}
+
+static void *x86_tls_probe_thread(void *arg)
+{
+    x86_tls_probe_t *probe = arg;
+    probe->fs_base = x86_get_fs_base();
+    if (!probe->fs_base) {
+        probe->failed = 1;
+        return NULL;
+    }
+    for (int i = 0; i < 64; i++) {
+        if (sched_yield() < 0 || getpid() <= 0 ||
+            x86_get_fs_base() != probe->fs_base) {
+            probe->failed = 2;
+            break;
+        }
+    }
+    return NULL;
+}
+
+static int test_x86_thread_fs_base(void)
+{
+    enum { THREADS = 4 };
+    pthread_t threads[THREADS];
+    x86_tls_probe_t probes[THREADS] = {{0}};
+    uint64_t main_fs = x86_get_fs_base();
+    if (!main_fs)
+        return fail("x86-fs-main-get");
+
+    for (int i = 0; i < THREADS; i++) {
+        if (pthread_create(&threads[i], NULL, x86_tls_probe_thread,
+                           &probes[i]) != 0)
+            return fail("x86-fs-thread-create");
+    }
+    for (int i = 0; i < THREADS; i++) {
+        if (pthread_join(threads[i], NULL) != 0)
+            return fail("x86-fs-thread-join");
+        if (probes[i].failed || !probes[i].fs_base ||
+            probes[i].fs_base == main_fs)
+            return fail("x86-fs-thread-stability");
+        for (int j = 0; j < i; j++) {
+            if (probes[i].fs_base == probes[j].fs_base)
+                return fail("x86-fs-thread-unique");
+        }
+    }
+    puts("X86_TLS_SMOKE: PASS threads=4 yields=64");
+    return 0;
+}
+#endif
 
 static void *zombie_group_member(void *unused)
 {
@@ -320,6 +388,11 @@ int main(int argc, char **argv)
 
     if (getpid() <= 0)
         return fail("getpid");
+
+#if defined(__x86_64__)
+    if (test_x86_thread_fs_base())
+        return 1;
+#endif
 
     int pfd[2];
     if (pipe(pfd) < 0)
