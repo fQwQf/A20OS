@@ -100,6 +100,25 @@ class SmokeBuildPathTests(unittest.TestCase):
         expected = build_dir.replace("-dev", "-dev-ramfs-user", 1)
         self.assertEqual(ramfs_dir, expected)
 
+    def test_netopt_lwip_uses_resolved_smp4_lane4_image_and_real_lwip_mode(self):
+        case = smoke.CASES["smoke-netopt-lwip"]
+        self.assertEqual(case["build"]["vars"], [
+            "ARCH=riscv64", "ABI=linux", "BRINGUP=0", "NR_CPUS=4", "NET_LANES=4",
+            "OPT=-O3 -DCONFIG_NET_PCB_SANE=1",
+        ])
+        self.assertEqual(case["stdin"]["lines"],
+                         ["netopt_test --lwip-listener", "poweroff"])
+        self.assertEqual(case["expect"], ["NETOPT: PASS"])
+        self.assertIn("a20.tcpmode=lwip", case["argv"][-1])
+        resolved = smoke.resolve_case_build_paths(case)
+        build_dir = smoke.resolve_build_dir(case)
+        kernel = resolved["argv"][resolved["argv"].index("-kernel") + 1]
+        disk = next(arg for arg in resolved["argv"] if arg.startswith("file=")
+                    and "fat32.img" in arg)
+        self.assertEqual(kernel, f"{build_dir}/kernel.elf")
+        self.assertEqual(disk, f"file={build_dir}/fat32.img,if=none,format=raw,id=x0")
+        self.assertEqual(resolved["argv"][resolved["argv"].index("-smp") + 1], "4")
+
 
 if __name__ == "__main__":
     unittest.main()

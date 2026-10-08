@@ -277,6 +277,11 @@ smoke-ct-capacity:
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
 
+# Exercises TCP options on a real lwIP LISTEN pcb (fast mode uses a different
+# socket implementation and cannot validate the listener's compact layout).
+smoke-netopt-lwip:
+	$(PYTHON) tools/smoke.py smoke-netopt-lwip
+
 # netctl only inspects local kernel state; it never accepts an inbound
 # connection, so it must not depend on a free host port 5555.  That is now
 # baked into the case argv in tools/smoke_cases.py (no hostfwd token), so the

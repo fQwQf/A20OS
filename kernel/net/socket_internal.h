@@ -340,6 +340,9 @@ typedef struct net_socket {
     int keep_idle;
     int keep_intvl;
     int keep_cnt;
+    /* Incremented under lock whenever the PCB-applied TCP option group changes.
+     * Lane holders validate snapshots against it after acquiring core ownership. */
+    uint32_t tcp_opts_generation;
     /* Per-socket IPPROTO_IP options.  The *_set flags separate "caller asked
      * for 0" from "never asked": TTL 0 and TOS 0 are both legal. */
     uint8_t ip_ttl;
@@ -348,6 +351,7 @@ typedef struct net_socket {
     uint8_t ip_tos_set;
     uint8_t mc_ttl;   /* hop count, not a TTL byte; 0 means 1, as Linux does */
     uint8_t mc_loop;
+    uint32_t ip_opts_generation;
     uint64_t recv_timeout_ticks;
     uint64_t send_timeout_ticks;
     int ipv6_checksum_offset;
@@ -1190,6 +1194,9 @@ void          net_socket_free(net_socket_t *s);
 
 int      net_task_has_unblocked_signal(task_t *t);
 int      net_socket_wait_expired(net_socket_t *s, uint64_t start, int for_write);
+int      net_socket_wait_expired_locked(net_socket_t *s, uint64_t start,
+                                        int for_write);
+uint64_t net_socket_timeout_snapshot(net_socket_t *s, int for_write);
 
 void     net_alg_copy_string(char *dst, size_t dstsz,
                              const uint8_t *src, size_t srcsz);
@@ -1283,6 +1290,18 @@ uint64_t net_inet_socket_lane_lock(net_socket_t *s);
 void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                                uint8_t *mc_ttl);
 
+typedef struct net_inet_ip_options_snapshot {
+    uint8_t ttl;
+    uint8_t tos;
+    uint8_t mc_ttl;
+    uint8_t mc_loop;
+    uint32_t generation;
+} net_inet_ip_options_snapshot_t;
+void net_inet_ip_options_snapshot(net_socket_t *s,
+                                  net_inet_ip_options_snapshot_t *out);
+void net_inet_ip_opts_apply_snapshot_locked(
+    net_socket_t *s, const net_inet_ip_options_snapshot_t *opts);
+
 /* Select the congestion control algorithm (TCP_CONGESTION) on an lwIP pcb.
  * Defined in socket_inet.c, called from socket_control.c's setsockopt handler,
  * so an established connection can switch algorithms without the socket's
@@ -1296,7 +1315,8 @@ void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
  * socket_control.c's setsockopt handler, from net_inet_tcp_apply_options() on
  * connect and on the accept path, so one code path owns the clamping for all
  * three entry points. */
-void     net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb);
+void     net_inet_tcp_buf_apply(uint32_t snd_buf, uint32_t rcv_buf,
+                               struct tcp_pcb *pcb);
 
 /* The largest SO_SNDBUF / SO_RCVBUF this socket could honour, ignoring what it
  * currently has.  `is_snd` selects which of the two.

@@ -75,6 +75,14 @@ TCP OOM reclamation 与 `tcp_pcbs_sane()` 在热 lane 上只扫描该 lane；当
 `LWIP_CORE_ALL_LANES_HELD()` 所代表的完整 control barrier 时，才扫描所有 lane 与
 wildcard sentinel bucket。
 
+Socket 选项元数据由 socket 锁保护。TCP/IP 选项快照在该锁下取得，释放后再获取 core
+ownership，并检查对应版本号；版本已变化时释放 core ownership、重新取快照，避免旧
+快照晚于新设置覆盖 PCB。TCP 选项只应用本次请求涉及的字段，防止设置 NODELAY 等选项
+意外重置发送 buffer credit。LISTEN PCB 只有公共前缀，完整 TCP PCB 才有的选项留在
+listener 元数据中由 accepted child 继承。任何路径都不得同时持 socket 与 core 锁。
+Bind 在全 lane 屏障内完成 PCB rebucket 后才发布 socket owner lane；数据路径获取候选
+lane 锁后先复查已发布 lane，再解引用 PCB，防止旧 lane 快照绕过新 owner 的生命周期锁。
+
 以上是代码结构契约，不代表本文件中的旧阶段验证记录已在当前代码上重跑。当前切片
 唯一新增的外部收包并发门禁结果列在 [net-lanes.md](./net-lanes.md)；不能据此推断其他
 网络门禁或整体验收通过。

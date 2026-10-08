@@ -36,8 +36,8 @@ host order 后再计算 lane；PCB 中的端口本来就是 host order。该失�
 `.kernel-build/smoke/net-lanes-hostfwd-n4-riscv64.log`，最终门禁汇总见
 `/tmp/a20-recovery-logs/lwip-hostfwd-final.log`。两档各跑四条外部 TCP 流，
 逐流 digest 均为 `0b824eec9801a325`，host 汇总为 `2e093bb260068c94`。N=4 报告
-`core_parallel peak_active_lanes=3 probe_hits=400 inputs=100,105,98,97 timers=89,89,89,89`，
-说明该探针观测到最多三个 lane 同时活跃；四条流分别分配到 lane `2,3,0,1`，但这个样本
+`core_parallel peak_active_lanes=2 probe_hits=406 inputs=107,102,92,105 timers=89,89,89,89`，
+说明该探针观测到两个 lane 同时活跃；四条流分别分配到 lane `2,3,0,1`，但这个样本
 没有要求四个 lane 同时活跃。它不是吞吐或加速比指标。probe 为 opt-in，抽样前 64 个热
 TCP 调用并以 20 ms 为并行等待上限，默认关闭。此验证只覆盖该 host-forward 测试与该
 并发探针，不代表其他网络门禁均通过。
