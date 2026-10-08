@@ -14,9 +14,9 @@
  * at all.  That is exactly the gap docs/platforms/x86_64-pc.md recorded as
  * "not implemented".
  *
- * The register map below was taken from the QEMU device model this tree ships
- * (qemu-10.0.13+ds/hw/net/rtl8139.c), not from memory of the datasheet, because
- * that is the model the gate boots:
+ * The register map below was checked against the external Debian QEMU
+ * 10.0.13+ds source tree (hw/net/rtl8139.c). Source provenance and the
+ * external-unpack locator are in docs/history/2026-10-08/migration.md:
  *   - register file            hw/net/rtl8139.c:96-140
  *   - ISR/IMR bit names        hw/net/rtl8139.c:161-172
  *   - TX status bit names      hw/net/rtl8139.c:174-181
