@@ -242,8 +242,7 @@ int net_listen_sock(net_socket_t *s, int backlog)
         s->listening = 1;
         if (s->domain == AF_INET || s->domain == AF_INET6) {
             s->local_tcp = 1;
-            if (s->tcp)
-                net_tcp_drop_pcb(s);
+            net_tcp_drop_pcb(s);
         }
     }
     if (s->domain == AF_INET || s->domain == AF_INET6) {
@@ -642,8 +641,11 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
              * says what a connection entering congestion avoidance without a
              * congestion event behind it must do, and that is exactly this
              * case. */
-            if (s->tcp) {
-                a20_net_cong_apply(s->tcp, (uint8_t)alg);
+            {
+                uint64_t flags = a20_lwip_lock();
+                if (s->tcp)
+                    a20_net_cong_apply(s->tcp, (uint8_t)alg);
+                a20_lwip_unlock(flags);
             }
             return 0;
         }
@@ -654,12 +656,14 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         switch (optname) {
         case TCP_NODELAY:
             s->tcp_nodelay = val != 0;
-            if (s->tcp) {
+            {
                 uint64_t flags = a20_lwip_lock();
-                if (s->tcp_nodelay)
-                    tcp_nagle_disable(s->tcp);
-                else
-                    tcp_nagle_enable(s->tcp);
+                if (s->tcp) {
+                    if (s->tcp_nodelay)
+                        tcp_nagle_disable(s->tcp);
+                    else
+                        tcp_nagle_enable(s->tcp);
+                }
                 a20_lwip_unlock(flags);
             }
             return 0;
@@ -676,9 +680,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             if (val <= 0)
                 return -EINVAL;
             s->keep_idle = val;
-            if (s->tcp) {
+            {
                 uint64_t flags = a20_lwip_lock();
-                s->tcp->keep_idle = (u32_t)val * 1000U;
+                if (s->tcp)
+                    s->tcp->keep_idle = (u32_t)val * 1000U;
                 a20_lwip_unlock(flags);
             }
             return 0;
@@ -686,9 +691,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             if (val <= 0)
                 return -EINVAL;
             s->keep_intvl = val;
-            if (s->tcp) {
+            {
                 uint64_t flags = a20_lwip_lock();
-                s->tcp->keep_intvl = (u32_t)val * 1000U;
+                if (s->tcp)
+                    s->tcp->keep_intvl = (u32_t)val * 1000U;
                 a20_lwip_unlock(flags);
             }
             return 0;
@@ -696,9 +702,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             if (val <= 0)
                 return -EINVAL;
             s->keep_cnt = val;
-            if (s->tcp) {
+            {
                 uint64_t flags = a20_lwip_lock();
-                s->tcp->keep_cnt = (u32_t)val;
+                if (s->tcp)
+                    s->tcp->keep_cnt = (u32_t)val;
                 a20_lwip_unlock(flags);
             }
             return 0;
@@ -733,12 +740,14 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
          * has already made the pcb, so net_inet_tcp_apply_options() saw the old
          * value.  Push it across here or bind() would consult a stale
          * SOF_REUSEADDR. */
-        if (s->tcp) {
+        {
             uint64_t flags = a20_lwip_lock();
-            if (s->reuseaddr)
-                ip_set_option(s->tcp, SOF_REUSEADDR);
-            else
-                ip_reset_option(s->tcp, SOF_REUSEADDR);
+            if (s->tcp) {
+                if (s->reuseaddr)
+                    ip_set_option(s->tcp, SOF_REUSEADDR);
+                else
+                    ip_reset_option(s->tcp, SOF_REUSEADDR);
+            }
             a20_lwip_unlock(flags);
         }
         return 0;
@@ -757,11 +766,15 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         int val;
         memcpy(&val, optval, sizeof(val));
         s->keepalive = val != 0;
-        if (s->tcp) {
-            if (s->keepalive)
-                s->tcp->so_options |= SOF_KEEPALIVE;
-            else
-                s->tcp->so_options &= ~SOF_KEEPALIVE;
+        {
+            uint64_t flags = a20_lwip_lock();
+            if (s->tcp) {
+                if (s->keepalive)
+                    s->tcp->so_options |= SOF_KEEPALIVE;
+                else
+                    s->tcp->so_options &= ~SOF_KEEPALIVE;
+            }
+            a20_lwip_unlock(flags);
         }
         return 0;
     }
@@ -802,9 +815,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
          * net_inet_tcp_buf_apply() writes the value back onto the pcb in both
          * directions and is also where the boundary between "queued" and "in
          * flight" is documented, so do not invent that here. */
-        if (s->tcp) {
+        {
             uint64_t flags = a20_lwip_lock();
-            net_inet_tcp_buf_apply(s, s->tcp);
+            if (s->tcp)
+                net_inet_tcp_buf_apply(s, s->tcp);
             a20_lwip_unlock(flags);
         }
         return 0;
@@ -930,9 +944,10 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
              * field is not always the answer. */
             uint8_t alg = s->tcp_congestion;
 #if LWIP_TCP_CUBIC
-            if (s->tcp) {
+            uint64_t flags = a20_lwip_lock();
+            if (s->tcp)
                 alg = s->tcp->cong_alg;
-            }
+            a20_lwip_unlock(flags);
 #else
             /* Without CUBIC there is only ever one algorithm, whatever the
              * socket recorded.  Saying otherwise here would put this
@@ -970,16 +985,31 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
             val = 0;
             break;
         case TCP_KEEPIDLE:
-            val = s->keep_idle > 0 ? s->keep_idle :
-                  (s->tcp ? (int)(s->tcp->keep_idle / 1000U) : 7200);
+            if (s->keep_idle > 0) {
+                val = s->keep_idle;
+            } else {
+                uint64_t flags = a20_lwip_lock();
+                val = s->tcp ? (int)(s->tcp->keep_idle / 1000U) : 7200;
+                a20_lwip_unlock(flags);
+            }
             break;
         case TCP_KEEPINTVL:
-            val = s->keep_intvl > 0 ? s->keep_intvl :
-                  (s->tcp ? (int)(s->tcp->keep_intvl / 1000U) : 75);
+            if (s->keep_intvl > 0) {
+                val = s->keep_intvl;
+            } else {
+                uint64_t flags = a20_lwip_lock();
+                val = s->tcp ? (int)(s->tcp->keep_intvl / 1000U) : 75;
+                a20_lwip_unlock(flags);
+            }
             break;
         case TCP_KEEPCNT:
-            val = s->keep_cnt > 0 ? s->keep_cnt :
-                  (s->tcp ? (int)s->tcp->keep_cnt : 9);
+            if (s->keep_cnt > 0) {
+                val = s->keep_cnt;
+            } else {
+                uint64_t flags = a20_lwip_lock();
+                val = s->tcp ? (int)s->tcp->keep_cnt : 9;
+                a20_lwip_unlock(flags);
+            }
             break;
         default:
             return -ENOPROTOOPT;

@@ -523,6 +523,8 @@ const struct drv_export drv_export_table[] = {
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
     /* in-kernel lwIP bridge (virtio-net) */
+    { "a20_lwip_ingress_lock", (void *)a20_lwip_ingress_lock },
+    { "a20_lwip_ingress_unlock", (void *)a20_lwip_ingress_unlock },
     { "a20_lwip_lock",                 (void *)a20_lwip_lock },
     { "a20_lwip_unlock",               (void *)a20_lwip_unlock },
     { "a20_lwip_poll_locked",          (void *)a20_lwip_poll_locked },

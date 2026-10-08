@@ -136,7 +136,12 @@ struct ip_globals
   /** Destination IP address of current_header */
   ip_addr_t current_iphdr_dest;
 };
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+extern struct ip_globals ip_data_lanes[LWIP_CORE_LANE_COUNT];
+#define ip_data (ip_data_lanes[LWIP_CORE_LANE()])
+#else
 extern struct ip_globals ip_data;
+#endif
 
 
 /** Get the interface that accepted the current packet.

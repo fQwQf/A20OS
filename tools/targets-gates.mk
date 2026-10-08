@@ -108,6 +108,13 @@ host-tests: $(HOST_TESTS_BIN)
 	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
 	  $^ -Wl,--gc-sections -o $@
 
+# Compile the real lane queue implementation, with only CPU identity shimmed.
+/tmp/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
+        kernel/net/net_lane.c kernel/include/net/net_lane.h kernel/net/net_profile.h
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -DCONFIG_NET_LANES=4 -DCONFIG_NR_CPUS=4 \
+	  -Itools/tests/net_lane_host_port -Ikernel/include -Ikernel \
+	  tools/tests/test_net_lane_concurrency.c kernel/net/net_lane.c -o $@
+
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
 	@mkdir -p $(BUILD_DIR)

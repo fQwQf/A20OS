@@ -64,6 +64,7 @@
 #include "lwip/dhcp.h"
 
 #include "lwip/priv/pcb_lane.h"
+#include "net/lwip_concurrency.h"
 
 #include <string.h>
 
@@ -153,6 +154,9 @@ udp_new_port(void)
   u16_t n = 0;
   struct udp_pcb *pcb;
   int lane;
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  uint64_t lock_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_UDP, NULL);
+#endif
 
 again:
   if (udp_port++ == UDP_LOCAL_PORT_RANGE_END) {
@@ -163,13 +167,22 @@ again:
     for (pcb = udp_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
       if (pcb->local_port == udp_port) {
         if (++n > (UDP_LOCAL_PORT_RANGE_END - UDP_LOCAL_PORT_RANGE_START)) {
-          return 0;
+          goto exhausted;
         }
         goto again;
       }
     }
   }
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, NULL, lock_flags);
+#endif
   return udp_port;
+
+exhausted:
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, NULL, lock_flags);
+#endif
+  return 0;
 }
 
 /** Common code to see if the current input packet matches the pcb
@@ -248,8 +261,14 @@ void
 udp_input(struct pbuf *p, struct netif *inp)
 {
   struct udp_hdr *udphdr;
-  struct udp_pcb *pcb, *prev;
+  struct udp_pcb *pcb;
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
+  struct udp_pcb *prev;
+#endif
   struct udp_pcb *uncon_pcb;
+#if LWIP_IPV4
+  u8_t uncon_pcb_netif_match = 0;
+#endif
   u16_t src, dest;
   u8_t broadcast;
   u8_t for_us = 0;
@@ -301,7 +320,9 @@ udp_input(struct pbuf *p, struct netif *inp)
   LWIP_DEBUGF(UDP_DEBUG, (", %"U16_F")\n", lwip_ntohs(udphdr->src)));
 
   pcb = NULL;
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
   prev = NULL;
+#endif
   uncon_pcb = NULL;
   /* Buckets to search, most specific first.  A datagram for a concrete
      destination can only be delivered by a pcb bound to that same address,
@@ -319,6 +340,10 @@ udp_input(struct pbuf *p, struct netif *inp)
   } else {
     search_buckets = NET_PCB_LANE_SEARCH_BUCKETS;
     search_lane[0] = NET_PCB_LANE_OF(ip_current_dest_addr(), dest);
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+    LWIP_ASSERT("udp_input: frame lane matches UDP local endpoint",
+                LWIP_CORE_ALL_LANES_HELD() || search_lane[0] == LWIP_CORE_LANE());
+#endif
 #if NET_PCB_LANE_ANY_PROBE
     search_lane[1] = (u8_t)NET_PCB_LANE_ANY;
 #endif /* NET_PCB_LANE_ANY_PROBE */
@@ -329,8 +354,10 @@ udp_input(struct pbuf *p, struct netif *inp)
    * matches the local port and ip address gets the datagram. */
   for (lane = 0; lane < search_buckets; lane++) {
     const u8_t bucket = search_lane[lane];
-    prev = NULL;
     for (pcb = udp_pcbs[bucket]; pcb != NULL; pcb = pcb->next) {
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+    uint64_t pcb_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_UDP, pcb);
+#endif
     /* print the PCB local and remote address */
     LWIP_DEBUGF(UDP_DEBUG, ("pcb ("));
     ip_addr_debug_print_val(UDP_DEBUG, pcb->local_ip);
@@ -346,13 +373,18 @@ udp_input(struct pbuf *p, struct netif *inp)
           /* the first unconnected matching PCB */
           uncon_pcb = pcb;
 #if LWIP_IPV4
+          uncon_pcb_netif_match = IP_IS_V4_VAL(pcb->local_ip) &&
+              ip4_addr_eq(ip_2_ip4(&pcb->local_ip), netif_ip4_addr(inp));
+#endif
+#if LWIP_IPV4
         } else if (broadcast && ip4_current_dest_addr()->addr == IPADDR_BROADCAST) {
           /* global broadcast address (only valid for IPv4; match was checked before) */
-          if (!IP_IS_V4_VAL(uncon_pcb->local_ip) || !ip4_addr_eq(ip_2_ip4(&uncon_pcb->local_ip), netif_ip4_addr(inp))) {
+          if (!uncon_pcb_netif_match) {
             /* uncon_pcb does not match the input netif, check this pcb */
             if (IP_IS_V4_VAL(pcb->local_ip) && ip4_addr_eq(ip_2_ip4(&pcb->local_ip), netif_ip4_addr(inp))) {
               /* better match */
               uncon_pcb = pcb;
+              uncon_pcb_netif_match = 1;
             }
           }
 #endif /* LWIP_IPV4 */
@@ -361,6 +393,10 @@ udp_input(struct pbuf *p, struct netif *inp)
         else if (!ip_addr_isany(&pcb->local_ip)) {
           /* prefer specific IPs over catch-all */
           uncon_pcb = pcb;
+#if LWIP_IPV4
+          uncon_pcb_netif_match = IP_IS_V4_VAL(pcb->local_ip) &&
+              ip4_addr_eq(ip_2_ip4(&pcb->local_ip), netif_ip4_addr(inp));
+#endif
         }
 #endif /* SO_REUSE */
       }
@@ -370,20 +406,32 @@ udp_input(struct pbuf *p, struct netif *inp)
           (ip_addr_isany_val(pcb->remote_ip) ||
            ip_addr_eq(&pcb->remote_ip, ip_current_src_addr()))) {
         /* the first fully matching PCB */
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+        /* Do not reorder this list here: a wildcard bucket or broadcast
+         * search can be observed by packets owned by another lane. */
+#else
         if (prev != NULL) {
-          /* move the pcb to the front of its bucket so that is
-             found faster next time */
+          /* move the pcb to the front of its bucket for the single-lane cache */
           prev->next = pcb->next;
           pcb->next = udp_pcbs[bucket];
           udp_pcbs[bucket] = pcb;
         } else {
           UDP_STATS_INC(udp.cachehit);
         }
+#endif
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+        a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, pcb, pcb_flags);
+#endif
         break;
       }
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
+    prev = pcb;
+#endif
     }
 
-    prev = pcb;
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, pcb, pcb_flags);
+#endif
     }
   /* A fully matching pcb ends the search.  Otherwise try the next bucket, and
      a catch-all pcb found in the sentinel bucket only wins if the hashed
@@ -470,6 +518,9 @@ udp_input(struct pbuf *p, struct netif *inp)
         for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
           for (mpcb = udp_pcbs[lane]; mpcb != NULL; mpcb = mpcb->next) {
             if (mpcb != pcb) {
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+              uint64_t mpcb_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_UDP, mpcb);
+#endif
               /* compare PCB local addr+port to UDP destination addr+port */
               if ((mpcb->local_port == dest) &&
                   (udp_input_local_match(mpcb, inp, broadcast) != 0)) {
@@ -482,6 +533,9 @@ udp_input(struct pbuf *p, struct netif *inp)
                   }
                 }
               }
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+              a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, mpcb, mpcb_flags);
+#endif
             }
           }
         }
@@ -490,7 +544,15 @@ udp_input(struct pbuf *p, struct netif *inp)
       /* callback */
       if (pcb->recv != NULL) {
         /* now the recv function is responsible for freeing p */
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+        {
+          uint64_t pcb_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_UDP, pcb);
+          pcb->recv(pcb->recv_arg, pcb, p, ip_current_src_addr(), src);
+          a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, pcb, pcb_flags);
+        }
+#else
         pcb->recv(pcb->recv_arg, pcb, p, ip_current_src_addr(), src);
+#endif
       } else {
         /* no recv function registered? then we have to free the pbuf! */
         pbuf_free(p);

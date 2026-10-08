@@ -1521,8 +1521,39 @@ pattern = "LWIP_NO_THREAD_PROGRESS_CONTRACT"
 files = ["kernel/net/lwip_stack.c"]
 
 [[gate.assertion]]
-pattern = "g_lwip_lock -> virtio-net nonblocking"
-files = ["kernel/include/core/lock.h"]
+pattern = "a20_lwip_ingress_lock\\(\\)"
+min_count = 1
+files = ["kernel/drivers/net/virtio_net.c"]
+
+[[gate.assertion]]
+pattern = "a20_lwip_process_netif_irq_locked\\(net->slot\\)"
+min_count = 1
+files = ["kernel/drivers/net/virtio_net.c"]
+
+[[gate.assertion]]
+pattern = "void a20_lwip_process_netif_irq_locked\\(int net_idx\\);"
+min_count = 1
+files = ["kernel/include/net/lwip_stack.h"]
+
+[[gate.assertion]]
+pattern = "a20_lwip_rx_enqueue_locked\\(n, 0\\)"
+min_count = 1
+files = ["kernel/net/lwip_stack.c"]
+
+[[gate.assertion]]
+pattern = "a20_lwip_lane_lock\\(lane\\)"
+min_count = 1
+files = ["kernel/net/lwip_stack.c"]
+
+[[gate.assertion]]
+pattern = "net_lane_ctx_push\\(lane\\)"
+min_count = 1
+files = ["kernel/net/lwip_stack.c"]
+
+[[gate.assertion]]
+pattern = "net_lane_rx_consume\\(lane\\)"
+min_count = 1
+files = ["kernel/net/lwip_stack.c"]
 
 [[gate.assertion]]
 negate = true

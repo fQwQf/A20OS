@@ -49,6 +49,8 @@
 
 #include "lwip/etharp.h"
 #include "lwip/stats.h"
+#include "net/lwip_concurrency.h"
+#include "net/lwip_stack.h"
 #include "lwip/snmp.h"
 #include "lwip/dhcp.h"
 #include "lwip/autoip.h"
@@ -198,6 +200,13 @@ void
 etharp_tmr(void)
 {
   int i;
+  struct {
+    struct netif *netif;
+    ip4_addr_t ipaddr;
+  } requests[ARP_TABLE_SIZE];
+  size_t request_count = 0;
+
+  LWIP_ASSERT("ARP timer requires the control barrier", a20_lwip_control_is_held());
 
   LWIP_DEBUGF(ETHARP_DEBUG, ("etharp_timer\n"));
   /* remove expired entries from the ARP table */
@@ -225,10 +234,15 @@ etharp_tmr(void)
            re-send an ARP request. */
         arp_table[i].state = ETHARP_STATE_STABLE;
       } else if (arp_table[i].state == ETHARP_STATE_PENDING) {
-        /* still pending, resend an ARP query */
-        etharp_request(arp_table[i].netif, &arp_table[i].ipaddr);
+        /* Copy request data while protected; transmit after releasing cache. */
+        requests[request_count].netif = arp_table[i].netif;
+        ip4_addr_copy(requests[request_count].ipaddr, arp_table[i].ipaddr);
+        request_count++;
       }
     }
+  }
+  for (i = 0; i < (int)request_count; ++i) {
+    etharp_request(requests[i].netif, &requests[i].ipaddr);
   }
 }
 
@@ -423,6 +437,14 @@ static err_t
 etharp_update_arp_entry(struct netif *netif, const ip4_addr_t *ipaddr, struct eth_addr *ethaddr, u8_t flags)
 {
   s16_t i;
+  struct eth_addr resolved_ethaddr;
+#if ARP_QUEUEING
+  struct etharp_q_entry *pending = NULL;
+#else
+  struct pbuf *pending = NULL;
+#endif
+  uint64_t cache_flags;
+  LWIP_ASSERT_CORE_LOCKED();
   LWIP_ASSERT("netif->hwaddr_len == ETH_HWADDR_LEN", netif->hwaddr_len == ETH_HWADDR_LEN);
   LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_update_arp_entry: %"U16_F".%"U16_F".%"U16_F".%"U16_F" - %02"X16_F":%02"X16_F":%02"X16_F":%02"X16_F":%02"X16_F":%02"X16_F"\n",
               ip4_addr1_16(ipaddr), ip4_addr2_16(ipaddr), ip4_addr3_16(ipaddr), ip4_addr4_16(ipaddr),
@@ -435,10 +457,12 @@ etharp_update_arp_entry(struct netif *netif, const ip4_addr_t *ipaddr, struct et
     LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_update_arp_entry: will not add non-unicast IP address to ARP cache\n"));
     return ERR_ARG;
   }
+  cache_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
   /* find or create ARP entry */
   i = etharp_find_entry(ipaddr, flags, netif);
   /* bail out if no entry could be found */
   if (i < 0) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
     return (err_t)i;
   }
 
@@ -448,6 +472,7 @@ etharp_update_arp_entry(struct netif *netif, const ip4_addr_t *ipaddr, struct et
     arp_table[i].state = ETHARP_STATE_STATIC;
   } else if (arp_table[i].state == ETHARP_STATE_STATIC) {
     /* found entry is a static type, don't overwrite it */
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
     return ERR_VAL;
   } else
 #endif /* ETHARP_SUPPORT_STATIC_ENTRIES */
@@ -464,30 +489,33 @@ etharp_update_arp_entry(struct netif *netif, const ip4_addr_t *ipaddr, struct et
   LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_update_arp_entry: updating stable entry %"S16_F"\n", i));
   /* update address */
   SMEMCPY(&arp_table[i].ethaddr, ethaddr, ETH_HWADDR_LEN);
+  SMEMCPY(&resolved_ethaddr, &arp_table[i].ethaddr, ETH_HWADDR_LEN);
   /* reset time stamp */
   arp_table[i].ctime = 0;
   /* this is where we will send out queued packets! */
 #if ARP_QUEUEING
-  while (arp_table[i].q != NULL) {
-    struct pbuf *p;
-    /* remember remainder of queue */
-    struct etharp_q_entry *q = arp_table[i].q;
-    /* pop first item off the queue */
-    arp_table[i].q = q->next;
-    /* get the packet pointer */
-    p = q->p;
-    /* now queue entry can be freed */
-    memp_free(MEMP_ARP_QUEUE, q);
+  pending = arp_table[i].q;
+  arp_table[i].q = NULL;
 #else /* ARP_QUEUEING */
-  if (arp_table[i].q != NULL) {
-    struct pbuf *p = arp_table[i].q;
-    arp_table[i].q = NULL;
+  pending = arp_table[i].q;
+  arp_table[i].q = NULL;
 #endif /* ARP_QUEUEING */
-    /* send the queued IP packet */
-    ethernet_output(netif, p, (struct eth_addr *)(netif->hwaddr), ethaddr, ETHTYPE_IP);
-    /* free the queued IP packet */
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
+#if ARP_QUEUEING
+  while (pending != NULL) {
+    struct etharp_q_entry *q = pending;
+    struct pbuf *p = q->p;
+    pending = q->next;
+    memp_free(MEMP_ARP_QUEUE, q);
+    ethernet_output(netif, p, (struct eth_addr *)(netif->hwaddr), &resolved_ethaddr, ETHTYPE_IP);
     pbuf_free(p);
   }
+#else
+  if (pending != NULL) {
+    ethernet_output(netif, pending, (struct eth_addr *)(netif->hwaddr), &resolved_ethaddr, ETHTYPE_IP);
+    pbuf_free(pending);
+  }
+#endif
   return ERR_OK;
 }
 
@@ -530,7 +558,9 @@ err_t
 etharp_remove_static_entry(const ip4_addr_t *ipaddr)
 {
   s16_t i;
+  uint64_t flags;
   LWIP_ASSERT_CORE_LOCKED();
+  flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
   LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_remove_static_entry: %"U16_F".%"U16_F".%"U16_F".%"U16_F"\n",
               ip4_addr1_16(ipaddr), ip4_addr2_16(ipaddr), ip4_addr3_16(ipaddr), ip4_addr4_16(ipaddr)));
 
@@ -538,15 +568,18 @@ etharp_remove_static_entry(const ip4_addr_t *ipaddr)
   i = etharp_find_entry(ipaddr, ETHARP_FLAG_FIND_ONLY, NULL);
   /* bail out if no entry could be found */
   if (i < 0) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
     return (err_t)i;
   }
 
   if (arp_table[i].state != ETHARP_STATE_STATIC) {
     /* entry wasn't a static entry, cannot remove it */
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
     return ERR_ARG;
   }
   /* entry found, free it */
   etharp_free_entry(i);
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
   return ERR_OK;
 }
 #endif /* ETHARP_SUPPORT_STATIC_ENTRIES */
@@ -560,6 +593,8 @@ void
 etharp_cleanup_netif(struct netif *netif)
 {
   int i;
+
+  LWIP_ASSERT("ARP netif cleanup requires the control barrier", a20_lwip_control_is_held());
 
   for (i = 0; i < ARP_TABLE_SIZE; ++i) {
     u8_t state = arp_table[i].state;
@@ -588,6 +623,7 @@ etharp_find_addr(struct netif *netif, const ip4_addr_t *ipaddr,
 
   LWIP_ASSERT("eth_ret != NULL && ip_ret != NULL",
               eth_ret != NULL && ip_ret != NULL);
+  LWIP_ASSERT("ARP pointer lookup requires the control barrier", a20_lwip_control_is_held());
 
   LWIP_UNUSED_ARG(netif);
 
@@ -615,6 +651,7 @@ etharp_get_entry(size_t i, ip4_addr_t **ipaddr, struct netif **netif, struct eth
   LWIP_ASSERT("ipaddr != NULL", ipaddr != NULL);
   LWIP_ASSERT("netif != NULL", netif != NULL);
   LWIP_ASSERT("eth_ret != NULL", eth_ret != NULL);
+  LWIP_ASSERT("ARP table iteration requires the control barrier", a20_lwip_control_is_held());
 
   if ((i < ARP_TABLE_SIZE) && (arp_table[i].state >= ETHARP_STATE_STABLE)) {
     *ipaddr  = &arp_table[i].ipaddr;
@@ -645,6 +682,8 @@ etharp_input(struct pbuf *p, struct netif *netif)
   /* these are aligned properly, whereas the ARP header fields might not be */
   ip4_addr_t sipaddr, dipaddr;
   u8_t for_us, from_us;
+
+  LWIP_ASSERT("ARP input requires the control barrier", a20_lwip_control_is_held());
 
   LWIP_ASSERT_CORE_LOCKED();
 
@@ -746,28 +785,60 @@ etharp_input(struct pbuf *p, struct netif *netif)
  * in the arp_table specified by the index 'arp_idx'.
  */
 static err_t
-etharp_output_to_arp_index(struct netif *netif, struct pbuf *q, netif_addr_idx_t arp_idx)
+etharp_output_to_arp_index(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr,
+                           netif_addr_idx_t arp_idx)
 {
+  struct eth_addr ethaddr;
+  ip4_addr_t cached_ipaddr;
+  u8_t request_mode = 0;
+  u8_t transition_reserved = 0;
+  uint64_t flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
+
+  if (arp_table[arp_idx].state < ETHARP_STATE_STABLE ||
+      !ip4_addr_eq(ipaddr, &arp_table[arp_idx].ipaddr)) {
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
+    return etharp_query(netif, ipaddr, q);
+  }
   LWIP_ASSERT("arp_table[arp_idx].state >= ETHARP_STATE_STABLE",
               arp_table[arp_idx].state >= ETHARP_STATE_STABLE);
+  ip4_addr_copy(cached_ipaddr, arp_table[arp_idx].ipaddr);
+  SMEMCPY(&ethaddr, &arp_table[arp_idx].ethaddr, ETH_HWADDR_LEN);
   /* if arp table entry is about to expire: re-request it,
      but only if its state is ETHARP_STATE_STABLE to prevent flooding the
      network with ARP requests if this address is used frequently. */
   if (arp_table[arp_idx].state == ETHARP_STATE_STABLE) {
     if (arp_table[arp_idx].ctime >= ARP_AGE_REREQUEST_USED_BROADCAST) {
-      /* issue a standard request using broadcast */
-      if (etharp_request(netif, &arp_table[arp_idx].ipaddr) == ERR_OK) {
-        arp_table[arp_idx].state = ETHARP_STATE_STABLE_REREQUESTING_1;
-      }
+      request_mode = 1;
     } else if (arp_table[arp_idx].ctime >= ARP_AGE_REREQUEST_USED_UNICAST) {
-      /* issue a unicast request (for 15 seconds) to prevent unnecessary broadcast */
-      if (etharp_request_dst(netif, &arp_table[arp_idx].ipaddr, &arp_table[arp_idx].ethaddr) == ERR_OK) {
-        arp_table[arp_idx].state = ETHARP_STATE_STABLE_REREQUESTING_1;
-      }
+      request_mode = 2;
+    }
+    if (request_mode != 0) {
+      /* Reserve the transition to avoid parallel sends flooding ARP. */
+      arp_table[arp_idx].state = ETHARP_STATE_STABLE_REREQUESTING_1;
+      transition_reserved = 1;
     }
   }
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
 
-  return ethernet_output(netif, q, (struct eth_addr *)(netif->hwaddr), &arp_table[arp_idx].ethaddr, ETHTYPE_IP);
+  if (request_mode == 1) {
+    if (etharp_request(netif, &cached_ipaddr) != ERR_OK) {
+      request_mode = 0;
+    }
+  } else if (request_mode == 2) {
+    if (etharp_request_dst(netif, &cached_ipaddr, &ethaddr) != ERR_OK) {
+      request_mode = 0;
+    }
+  }
+  if (transition_reserved && request_mode == 0) {
+    flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
+    if (arp_table[arp_idx].state == ETHARP_STATE_STABLE_REREQUESTING_1 &&
+        ip4_addr_eq(ipaddr, &arp_table[arp_idx].ipaddr)) {
+      arp_table[arp_idx].state = ETHARP_STATE_STABLE;
+    }
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
+  }
+
+  return ethernet_output(netif, q, (struct eth_addr *)(netif->hwaddr), &ethaddr, ETHTYPE_IP);
 }
 
 /**
@@ -821,6 +892,8 @@ etharp_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr)
     /* unicast destination IP address? */
   } else {
     netif_addr_idx_t i;
+    int matched = -1;
+    uint64_t flags;
     /* outside local network? if so, this can neither be a global broadcast nor
        a subnet broadcast. */
     if (!ip4_addr_net_eq(ipaddr, netif_ip4_addr(netif), netif_ip4_netmask(netif)) &&
@@ -853,12 +926,12 @@ etharp_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr)
         }
       }
     }
+    flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
 #if LWIP_NETIF_HWADDRHINT
     if (netif->hints != NULL) {
       /* per-pcb cached entry was given */
       netif_addr_idx_t etharp_cached_entry = netif->hints->addr_hint;
       if (etharp_cached_entry < ARP_TABLE_SIZE) {
-#endif /* LWIP_NETIF_HWADDRHINT */
         if ((arp_table[etharp_cached_entry].state >= ETHARP_STATE_STABLE) &&
 #if ETHARP_TABLE_MATCH_NETIF
             (arp_table[etharp_cached_entry].netif == netif) &&
@@ -866,9 +939,8 @@ etharp_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr)
             (ip4_addr_eq(dst_addr, &arp_table[etharp_cached_entry].ipaddr))) {
           /* the per-pcb-cached entry is stable and the right one! */
           ETHARP_STATS_INC(etharp.cachehit);
-          return etharp_output_to_arp_index(netif, q, etharp_cached_entry);
+          matched = etharp_cached_entry;
         }
-#if LWIP_NETIF_HWADDRHINT
       }
     }
 #endif /* LWIP_NETIF_HWADDRHINT */
@@ -883,8 +955,13 @@ etharp_output(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr)
           (ip4_addr_eq(dst_addr, &arp_table[i].ipaddr))) {
         /* found an existing, stable entry */
         ETHARP_SET_ADDRHINT(netif, i);
-        return etharp_output_to_arp_index(netif, q, i);
+        matched = i;
+        break;
       }
+    }
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, flags);
+    if (matched >= 0) {
+      return etharp_output_to_arp_index(netif, q, dst_addr, (netif_addr_idx_t)matched);
     }
     /* no stable entry found, use the (slower) query function:
        queue on destination Ethernet address belonging to ipaddr */
@@ -936,8 +1013,19 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
   struct eth_addr *srcaddr = (struct eth_addr *)netif->hwaddr;
   err_t result = ERR_MEM;
   int is_new_entry = 0;
+  int send_request = 0;
+  ip4_addr_t request_ipaddr;
+  struct eth_addr resolved_ethaddr;
+  struct pbuf *discarded_pbuf = NULL;
+  struct pbuf *unqueued_pbuf = NULL;
+#if ARP_QUEUEING
+  struct etharp_q_entry *discarded_entry = NULL;
+#endif
+  uint64_t cache_flags;
   s16_t i_err;
   netif_addr_idx_t i;
+
+  LWIP_ASSERT_CORE_LOCKED();
 
   /* non-unicast address? */
   if (ip4_addr_isany(ipaddr) ||
@@ -948,6 +1036,7 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
   }
 
   /* find entry in ARP cache, ask to create entry if queueing packet */
+  cache_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
   i_err = etharp_find_entry(ipaddr, ETHARP_FLAG_TRY_HARD, netif);
 
   /* could not find or create entry? */
@@ -957,6 +1046,7 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
       LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: packet dropped\n"));
       ETHARP_STATS_INC(etharp.memerr);
     }
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
     return (err_t)i_err;
   }
   LWIP_ASSERT("type overflow", (size_t)i_err < NETIF_ADDR_IDX_MAX);
@@ -975,10 +1065,14 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
               ((arp_table[i].state == ETHARP_STATE_PENDING) ||
                (arp_table[i].state >= ETHARP_STATE_STABLE)));
 
-  /* do we have a new entry? or an implicit query request? */
-  if (is_new_entry || (q == NULL)) {
+  /* Publish queued packets before transmitting a request, so an immediate
+   * reply cannot race ahead of queue insertion. */
+  send_request = is_new_entry || (q == NULL);
+  ip4_addr_copy(request_ipaddr, arp_table[i].ipaddr);
+  if (q == NULL) {
     /* try to resolve it; send out ARP request */
-    result = etharp_request(netif, ipaddr);
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
+    result = etharp_request(netif, &request_ipaddr);
     if (result != ERR_OK) {
       /* ARP request couldn't be sent */
       /* We don't re-send arp request in etharp_tmr, but we still queue packets,
@@ -986,11 +1080,16 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
          etharp_query again could lead to sending the queued packets. */
     } else {
       /* ARP request successfully sent */
-      if ((arp_table[i].state == ETHARP_STATE_PENDING) && !is_new_entry) {
+      if (!is_new_entry) {
         /* A new ARP request has been sent for a pending entry. Reset the ctime to
            not let it expire too fast. */
-        LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: reset ctime for entry %"S16_F"\n", (s16_t)i));
-        arp_table[i].ctime = 0;
+        cache_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_ARP, NULL);
+        if ((arp_table[i].state == ETHARP_STATE_PENDING) &&
+            ip4_addr_eq(&request_ipaddr, &arp_table[i].ipaddr)) {
+          LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: reset ctime for entry %"S16_F"\n", (s16_t)i));
+          arp_table[i].ctime = 0;
+        }
+        a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
       }
     }
     if (q == NULL) {
@@ -1005,7 +1104,9 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
     /* we have a valid IP->Ethernet address mapping */
     ETHARP_SET_ADDRHINT(netif, i);
     /* send the packet */
-    result = ethernet_output(netif, q, srcaddr, &(arp_table[i].ethaddr), ETHTYPE_IP);
+    SMEMCPY(&resolved_ethaddr, &arp_table[i].ethaddr, ETH_HWADDR_LEN);
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
+    return ethernet_output(netif, q, srcaddr, &resolved_ethaddr, ETHTYPE_IP);
     /* pending entry? (either just created or already pending */
   } else if (arp_table[i].state == ETHARP_STATE_PENDING) {
     /* entry is still pending, queue the given packet 'q' */
@@ -1060,15 +1161,15 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
           struct etharp_q_entry *old;
           old = arp_table[i].q;
           arp_table[i].q = arp_table[i].q->next;
-          pbuf_free(old->p);
-          memp_free(MEMP_ARP_QUEUE, old);
+          discarded_pbuf = old->p;
+          discarded_entry = old;
         }
 #endif
         LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: queued packet %p on ARP entry %"U16_F"\n", (void *)q, i));
         result = ERR_OK;
       } else {
         /* the pool MEMP_ARP_QUEUE is empty */
-        pbuf_free(p);
+        unqueued_pbuf = p;
         LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: could not queue a copy of PBUF_REF packet %p (out of memory)\n", (void *)q));
         result = ERR_MEM;
       }
@@ -1076,7 +1177,7 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
       /* always queue one packet per ARP request only, freeing a previously queued packet */
       if (arp_table[i].q != NULL) {
         LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: dropped previously queued packet %p for ARP entry %"U16_F"\n", (void *)q, (u16_t)i));
-        pbuf_free(arp_table[i].q);
+        discarded_pbuf = arp_table[i].q;
       }
       arp_table[i].q = p;
       result = ERR_OK;
@@ -1087,6 +1188,21 @@ etharp_query(struct netif *netif, const ip4_addr_t *ipaddr, struct pbuf *q)
       LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_query: could not queue a copy of PBUF_REF packet %p (out of memory)\n", (void *)q));
       result = ERR_MEM;
     }
+  }
+  a20_lwip_shared_unlock(A20_LWIP_SHARED_ARP, NULL, cache_flags);
+  if (discarded_pbuf != NULL) {
+    pbuf_free(discarded_pbuf);
+  }
+  if (unqueued_pbuf != NULL) {
+    pbuf_free(unqueued_pbuf);
+  }
+#if ARP_QUEUEING
+  if (discarded_entry != NULL) {
+    memp_free(MEMP_ARP_QUEUE, discarded_entry);
+  }
+#endif
+  if (send_request) {
+    (void)etharp_request(netif, &request_ipaddr);
   }
   return result;
 }

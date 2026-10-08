@@ -394,11 +394,8 @@ check-honesty-policy:
 	  echo "  FAIL virtio-blk no longer issues a flush request"; exit 1; fi
 	@if ! rg -q 'ATA_CMD_FLUSH_CACHE_EXT' kernel/drivers/block/ahci.c; then \
 	  echo "  FAIL AHCI no longer issues FLUSH CACHE"; exit 1; fi
-	@# New subsystems must stay wired, not merely present.
-	@if ! rg -q 'netfilter_input\(st->rx_frame' kernel/net/lwip_stack.c; then \
-	  echo "  FAIL netfilter input hook is not wired"; exit 1; fi
-	@if ! rg -q 'netfilter_output\(st->tx_frame' kernel/net/lwip_stack.c; then \
-	  echo "  FAIL netfilter output hook is not wired"; exit 1; fi
+	@# Check the live wrappers and ordering, not the former one-lock call shape.
+	@$(PYTHON) tools/check_lwip_concurrency_wiring.py
 	@if ! rg -q 'proc_loadavg_tick' kernel/proc/sched.c; then \
 	  echo "  FAIL load average is no longer sampled from the scheduler tick"; exit 1; fi
 	@if ! rg -q 'proc_io_account' kernel/fs/vfs/file.c; then \

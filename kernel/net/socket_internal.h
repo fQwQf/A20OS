@@ -455,6 +455,18 @@ typedef struct net_socket {
     volatile int bh_pending;
 } net_socket_t;
 
+/* s->lane is published while bind/PCB rebucket operations may race with
+ * packet-side snapshots, so all post-publication accesses use atomics. */
+static inline unsigned net_socket_lane_load(const net_socket_t *s)
+{
+    return __atomic_load_n(&s->lane, __ATOMIC_ACQUIRE);
+}
+
+static inline void net_socket_lane_store(net_socket_t *s, unsigned lane)
+{
+    __atomic_store_n(&s->lane, lane, __ATOMIC_RELEASE);
+}
+
 /*
  * One net_socket_t exists per open socket and up to a hundred of them are kept
  * alive by the socket obj_cache, so its size is a per-socket memory cost that
@@ -1267,6 +1279,7 @@ int      net_inet_tcp_listen(net_socket_t *s, int backlog);
  * forward-declared locally: defined in socket_inet.c, called from
  * socket_control.c. */
 void     net_inet_ip_opts_apply(net_socket_t *s);
+uint64_t net_inet_socket_lane_lock(net_socket_t *s);
 void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                                uint8_t *mc_ttl);
 
