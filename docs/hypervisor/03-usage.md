@@ -29,6 +29,11 @@
 
 ## 1. 前置条件
 
+仓库中的 `tools/run-nested-a20` 是固定路径的打包 sandbox 辅助脚本：只适用于
+QEMU、固件、guest 内核和磁盘均已放到 `/bin` 的环境。它不是 checkout 的启动入口，
+也不是这里使用的 H 扩展 hypervisor 验收入口。开发机启动应使用 `tools/a20 run
+qemu-riscv64` 或 `make ARCH=riscv64 run`；内核虚拟化交互验收使用 `make smoke-hyp-shell`。
+
 ### 1.1 目标必须是 riscv64，且 CPU 必须带 H 扩展
 
 只有 riscv64 走这条 hypervisor 路径。其它架构的 `hyp_supported()` 恒为 0，
