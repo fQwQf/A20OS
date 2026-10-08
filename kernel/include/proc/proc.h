@@ -238,6 +238,9 @@ typedef struct task_t {
     /* Thread-group chain rooted at the leader (leader excluded from its own
      * tg_next chain); tg_leader is self for non-thread tasks. */
     struct task_t *tg_leader;
+    /* Non-leader tasks pin tg_leader while their chain links or task lifetime
+     * may still refer to leader-owned tg_next storage. */
+    int      tg_leader_ref_held;
     struct task_t *tg_next;
     struct task_t **tg_prev_ptr;
     uint64_t wake_time;
