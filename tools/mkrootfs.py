@@ -53,11 +53,37 @@ EXT4_MKFS_ARGS = [
     "mkfs.ext4", "-q", "-F",
     "-O", "^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
 ]
+MKFS_EXT4_FALLBACK_DIRS = (Path("/usr/sbin"), Path("/sbin"))
 
 
 def die(msg: str) -> "SystemExit":
     print(f"mkrootfs: error: {msg}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def resolve_mkfs_ext4() -> str:
+    """Resolve mkfs.ext4 before staging, including standard sbin directories.
+
+    PATH wins when it contains an executable; minimal host environments often
+    omit /usr/sbin and /sbin even though e2fsprogs is installed there. Return an
+    absolute path so fakeroot's shell does not need to rediscover the command.
+    """
+    candidate = shutil.which(EXT4_MKFS_ARGS[0])
+    if candidate:
+        path_candidate = Path(candidate)
+        if path_candidate.is_file() and os.access(path_candidate, os.X_OK):
+            return str(path_candidate.resolve())
+
+    for directory in MKFS_EXT4_FALLBACK_DIRS:
+        path_candidate = directory / EXT4_MKFS_ARGS[0]
+        if path_candidate.is_file() and os.access(path_candidate, os.X_OK):
+            return str(path_candidate.resolve())
+
+    searched = ":".join([os.environ.get("PATH", ""),
+                          *(str(p) for p in MKFS_EXT4_FALLBACK_DIRS)])
+    die(f"required host tool {EXT4_MKFS_ARGS[0]} not found or not executable "
+        f"(searched PATH and {', '.join(str(p) for p in MKFS_EXT4_FALLBACK_DIRS)}); "
+        f"install e2fsprogs or add it to PATH (PATH={searched})")
 
 
 def run(cmd: list[str], sudo: list[str], **kw) -> None:
@@ -395,6 +421,10 @@ def main() -> None:
     if args.size_mb < 16:
         die("--size-mb must be at least 16")
 
+    # Resolve this before fetching keys or creating the expensive apk staging
+    # tree, and use the absolute path through any fakeroot wrapper below.
+    mkfs_ext4 = resolve_mkfs_ext4() if args.format == "ext4" else None
+
     # --- locate apk.static ---
     apk = os.environ.get("APK_STATIC")
     if not apk:
@@ -525,7 +555,7 @@ def main() -> None:
         tmp_img.unlink(missing_ok=True)
         check_fits_size_mb(staging, args.size_mb)
         run(["truncate", "-s", f"{args.size_mb}M", str(tmp_img)], [])
-        mkfs = EXT4_MKFS_ARGS + ["-L", args.label]
+        mkfs = [mkfs_ext4, *EXT4_MKFS_ARGS[1:], "-L", args.label]
         mkfs_sudo = sudo
         if args.usermode:
             # Staging files are owned by the caller; record them as root in
