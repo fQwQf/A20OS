@@ -77,7 +77,7 @@ ci-kernel-arches（几秒）：make -s print-ci-kernel-arches，把 CI 的内核
   矩阵从 Makefile 的 CI_KERNEL_ARCHES 解析成 JSON 输出。矩阵列表不写在 YAML
   里——手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES 之后悄悄落后。
 
-kernel-build-<arch> ×6 并行（容器，无 submodule）：
+kernel-build-<arch> ×7 并行（容器，无 submodule）：
     → make check-<arch>-bringup       # = make ARCH=<arch> BRINGUP=1 kernel-only
     → upload-artifact（kernel.elf）    # 架构专属构建断裂没有日志很难定位
 
@@ -174,8 +174,15 @@ bring-up 门禁，与 `check-kernel-build-all` 迭代的是同一个 `check-<arc
 [testing-gates.md](../testing-gates.md) 的说明属于长时间聚合；而且它当前
 在当时的树上是红的（`check-task-state-boundary`、`check-abi-smoke-gate`、
 `check-doc-drift` 三项失败）。`check-final-definition` 的 11 条断言已被
-`check-doc-test-gates` 完全覆盖，所以 CI 只跑后者，不重复跑同一批 QEMU
-smoke。
+`check-doc-test-gates` 完全覆盖，因此本地不需要重复跑两者。当前 CI 分别执行
+宿主侧子门禁与 smoke job 中列出的运行门禁，没有直接调用这两个聚合目标。
+
+2026-10-08，本地在 `3d1e5b24f` 完整运行 `make -j8 check-doc-test-gates`
+通过，包括十项实际 QEMU runtime smoke。修复了嵌套聚合未被顶层
+`.NOTPARALLEL` 约束的共享 FAT 镜像竞争，以及诊断快照字段被所有权门禁误识别的问题。
+此前记录的 10 月 7 日失败不能用于描述当前本地树；远端 CI 状态仍需推送后观察。
+最终构建、ABI、串口等验收和限制统一见
+[开发恢复报告](../development-recovery-2026-10-08.md)。
 
 `smoke-devtools` 是唯一需要外网的 CI 步骤（从 Alpine 镜像站拉包；本地有
 `build/cache/apk` 缓存）。它是 trap.S 内核栈守卫修复的回归门禁。
