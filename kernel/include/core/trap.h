@@ -17,6 +17,9 @@
 /* C handlers called from assembly */
 void trap_handler(trap_context_t *ctx);
 void kernel_trap_handler(trap_context_t *ctx);
+/* Return nonzero if guest handling consumed the trap. Called before host
+ * frame bookkeeping; the default returns zero and continues host handling. */
+int arch_hyp_guest_trap(trap_context_t *ctx);
 
 /* Initialization */
 void trap_init(void);

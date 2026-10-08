@@ -49,6 +49,10 @@ void riscv_iommu_early_probe(void);
 /* Forward declarations */
 void init_kthread(void);
 
+/* Architecture-owned bootarg diagnostics are a no-op unless an architecture
+ * provides a real implementation. */
+__attribute__((weak)) void arch_run_bootarg_selftests(void) { }
+
 /* ============================================================
  * Block-device mount — unified strategy
  *
@@ -292,22 +296,7 @@ void init_kthread(void) {
     task_t *cur = proc_current();
     printf("[INIT] init_kthread started (pid=%d)\n", cur ? cur->pid : 0);
 
-#ifdef CONFIG_RISCV64
-    const char *bootargs = bootargs_get();
-    if (bootargs && strstr(bootargs, "a20.trap_t0_selftest=1")) {
-        extern int riscv64_trap_t0_selftest(void);
-        if (riscv64_trap_t0_selftest())
-            printf("RV64_TRAP_T0: PASS (timer IRQ preserved t0)\n");
-        else
-            panic("RV64_TRAP_T0: FAIL (timer IRQ missing or t0 changed)");
-    }
-    if (bootargs && strstr(bootargs, "a20.sched_park_yield_selftest=1")) {
-        extern int riscv64_sched_park_yield_selftest(void);
-        if (riscv64_sched_park_yield_selftest())
-            panic("RV64_SCHED_PARK_YIELD: FAIL");
-        printf("RV64_SCHED_PARK_YIELD: PASS (PREPARING survived yield and wake)\n");
-    }
-#endif
+    arch_run_bootarg_selftests();
 
     /* Generic systems discover optional packages after the root filesystem is
      * available. Embedded deployments link all drivers into the kernel. */
