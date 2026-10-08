@@ -127,6 +127,13 @@ static inline uint64_t arch_mm_address_space_token(void *pgdir,
     do { (void)(ctx); (void)(user_tp); } while (0)
 #endif
 
+/* A fork-like operation may need to copy architectural user FP state into
+ * the child's initial context.  Fresh tasks retain the architecture's normal
+ * initial state; architectures that support live FP inheritance opt in. */
+#ifndef ARCH_TASK_CONTEXT_COPY_USER_FP
+# define ARCH_TASK_CONTEXT_COPY_USER_FP(ctx) do { (void)(ctx); } while (0)
+#endif
+
 #ifndef ARCH_PT_LEVEL_ENTRIES
 # define ARCH_PT_LEVEL_ENTRIES(level) ARCH_PT_ENTRIES
 #endif
@@ -281,6 +288,11 @@ static inline void arch_task_context_set_user_tp(task_context_t *ctx,
                                                   uintptr_t user_tp)
 {
     ARCH_TASK_CONTEXT_SET_USER_TP(ctx, user_tp);
+}
+
+static inline void arch_task_context_copy_user_fp(task_context_t *ctx)
+{
+    ARCH_TASK_CONTEXT_COPY_USER_FP(ctx);
 }
 
 #ifndef ARCH_TASK_USER_RESUME_STATUS
