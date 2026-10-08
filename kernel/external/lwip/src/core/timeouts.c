@@ -75,11 +75,11 @@
 /** This array contains all stack-internal cyclic timers. To get the number of
  * timers, use LWIP_ARRAYSIZE() */
 const struct lwip_cyclic_timer lwip_cyclic_timers[] = {
-#if LWIP_TCP
+#if LWIP_TCP && (!defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1))
   /* The TCP timer is a special case: it does not have to run always and
      is triggered to start from TCP using tcp_timer_needed() */
   {TCP_TMR_INTERVAL, HANDLER(tcp_tmr)},
-#endif /* LWIP_TCP */
+#endif /* LWIP_TCP && single core lane */
 #if LWIP_IPV4
 #if IP_REASSEMBLY
   {IP_TMR_INTERVAL, HANDLER(ip_reass_tmr)},
@@ -132,6 +132,7 @@ sys_timeouts_get_next_timeout(void)
 #endif
 
 #if LWIP_TCP
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
 /** global variable that shows if the tcp timer is currently scheduled or not */
 static int tcpip_tcp_timer_active;
 
@@ -174,6 +175,16 @@ tcp_timer_needed(void)
     sys_timeout(TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);
   }
 }
+#else /* multi-lane core: TCP timers are dispatched by the lane bottom-half */
+void
+tcp_timer_needed(void)
+{
+  /* The lane bottom-half advances TCP timers independently of sys_timeout.
+   * This hook intentionally does not acquire another lane or arm the generic
+   * timeout list while a PCB lane lock is held. */
+  LWIP_ASSERT_CORE_LOCKED();
+}
+#endif
 #endif /* LWIP_TCP */
 
 static void

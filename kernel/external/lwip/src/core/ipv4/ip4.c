@@ -961,12 +961,12 @@ ip4_output_if_opt_src(struct pbuf *p, const ip4_addr_t *src, const ip4_addr_t *d
     chk_sum += iphdr->_len;
 #endif /* CHECKSUM_GEN_IP_INLINE */
     IPH_OFFSET_SET(iphdr, 0);
-    IPH_ID_SET(iphdr, lwip_htons(ip_id));
+    u16_t identification =
+        __atomic_fetch_add(&ip_id, 1, __ATOMIC_RELAXED);
+    IPH_ID_SET(iphdr, lwip_htons(identification));
 #if CHECKSUM_GEN_IP_INLINE
     chk_sum += iphdr->_id;
 #endif /* CHECKSUM_GEN_IP_INLINE */
-    ++ip_id;
-
     if (src == NULL) {
       ip4_addr_copy(iphdr->src, *IP4_ADDR_ANY4);
     } else {
