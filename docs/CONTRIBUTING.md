@@ -137,25 +137,42 @@ python3 tools/check_doc_citations.py --verbose   # 单独跑，并列出被跳�
 
 ## 5. 提交信息风格
 
-提交信息用于生成历史记录，请保持清晰：
+标题统一使用 `type(scope): description`，以英文祈使句说明这个提交改变了什么。描述首词小写，保留 `QEMU`、`VMA`、`RISC-V`、函数名和路径的原有拼写；不加句号。标题以 72 字符内为宜，最长 100 字符。`scope` 使用小写子系统名，例如 `mm`、`net`、`hyp`、`build` 或 `history`。
 
-- 标题使用祈使句，例如 `mm: fix COW TLB invalidation on riscv64`。
-- 标题不超过 50 个字符。
-- 正文说明修改原因和验证方式，可引用 issue。
-- 一个提交只做一件事。
+| type | 用途 |
+| --- | --- |
+| `feat` | 增加可用行为或接口 |
+| `fix` | 修正已有行为、错误或回归 |
+| `refactor` | 调整实现结构，保持外部行为 |
+| `perf` | 改善性能或资源开销 |
+| `docs` | 修改文档 |
+| `test` | 增补或修正测试、门禁及基准工具 |
+| `build` | 修改编译、依赖或打包流程 |
+| `ci` | 修改持续集成流程 |
+| `chore` | 其他仓库维护 |
+| `revert` | 撤销已有改动 |
+| `merge` | 描述多父提交集成的功能或修复 |
+
+类型取决于主要改动，不因补了测试就把修复写成 `test`，也不因同时改了 Makefile 就把功能写成 `build`。scope 使用子系统名称，不把 `fix`、`feat` 等类型再混入 scope。
+
+正文与标题空一行。需要正文时，解释修改原因、行为变化和重要限制；验证部分只写实际执行的命令及结果。测试未执行时如实说明原因。完整日志、诊断过程和长期设计记录放在文档中，提交信息概括结论并给出路径。一个提交围绕一个可独立审阅的目的；避免 `update`、`fix bugs`、`WIP` 或阶段编号充当全部说明。
+
+`Co-authored-by` 只用于实际参与该补丁的共同作者，不自动添加模型或工具名称。已有真实作者的署名应保留，不把工具使用记录冒充共同作者。
 
 示例：
 
 ```text
-fs: add refcnt helper for vnode lifecycle
+fix(mm): flush stale COW translations on RISC-V
 
-Replace direct ref_count manipulation in ramfs/ext4 with
-vfile_ref_init / vfile_get / vfile_put_ref_only.
+Invalidate the previous writable translation before exposing the
+read-only COW mapping to another hart.
 
-Verified with:
-- make check-vfs-abstraction
-- make smoke-vfs-stress
+Validation:
+- make check-mm-lock-model
+- make smoke-mm-pt-race
 ```
+
+示例中的验证命令仅说明写法，应替换为该提交实际执行的检查。历史提交信息规范化与验证工具见 [历史迁移工具](../tools/history_rewrite/README.md)。
 
 ## 6. Pull Request
 

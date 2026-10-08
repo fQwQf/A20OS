@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "commits": 2195,
+  "merges": 92,
+  "forks": 69,
+  "annotated_tags": 16,
+  "refs": 31,
+  "subjects_reworded": 2166,
+  "bodies_changed": 356,
+  "false_coauthor_lines_removed": 35,
+  "trees_identical": true,
+  "raw_author_committer_headers_identical": true,
+  "parent_order_identical_under_mapping": true,
+  "tag_metadata_and_messages_identical": true,
+  "other_coauthors_preserved": true,
+  "source_refs_unchanged": true
+}

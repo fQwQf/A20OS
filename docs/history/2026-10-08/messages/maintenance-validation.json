@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "unit_tests_passed": 14,
+  "doc_drift": "passed",
+  "in_tree_line_citations_checked": 1957,
+  "git_diff_check": "passed",
+  "message_plan_sha256": "54dbe57a6862f69c3c8b1d638817683579adb5d99ad734cce2235c714fb0f067",
+  "historical_tree_and_metadata_checks": "validation.json and independent-validation.json",
+  "runtime_changes": false
+}
