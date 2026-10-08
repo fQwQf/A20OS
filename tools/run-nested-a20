@@ -1,5 +1,6 @@
 #!/bin/mksh
 # Boot A20OS under QEMU from a sandbox whose root is mounted at /bin.
+# This helper belongs to the packaged sandbox, not the checkout root.
 #
 # Every path below is absolute under /bin, and LD_LIBRARY_PATH is set to match,
 # so this script only works where the build outputs have been placed (or
