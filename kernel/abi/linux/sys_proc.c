@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "abi/linux/siginfo.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
 #include "mm/fault.h"
@@ -1076,8 +1077,8 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     if (ret < 0) return ret;
 
     if (info) {
-        uint8_t si[128];
-        memset(si, 0, sizeof(si));
+        linux_siginfo_t si;
+        memset(&si, 0, sizeof(si));
         if (ret > 0) {
             int si_code = CLD_EXITED;
             int si_status = 0;
@@ -1094,14 +1095,15 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
                 si_status = (status >> 8) & 0xff;
             }
 
-            ((int *)si)[0] = SIGCHLD;    /* si_signo */
-            ((int *)si)[1] = 0;          /* si_errno */
-            ((int *)si)[2] = si_code;    /* si_code */
-            ((int *)si)[3] = ret;        /* si_pid */
-            ((int *)si)[4] = proc_current() ? proc_current()->cred.uid : 0; /* si_uid */
-            ((int *)si)[5] = si_status;  /* si_status */
+            si.signo = SIGCHLD;
+            si.error = 0;
+            si.code = si_code;
+            si.fields.common.first.piduid.pid = ret;
+            si.fields.common.first.piduid.uid =
+                proc_current() ? proc_current()->cred.uid : 0;
+            si.fields.common.second.sigchld.status = si_status;
         }
-        if (copy_to_user(info, si, sizeof(si)) < 0) return -EFAULT;
+        if (copy_to_user(info, &si, sizeof(si)) < 0) return -EFAULT;
     }
     return 0;
 }
