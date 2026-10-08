@@ -531,6 +531,8 @@ static inline size_t mm_rss_get(mm_struct_t *mm)
  * and by internal call chains (mremap etc.) that already hold the lock. */
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                        int prot, int flags);
+/* File must have one reference: success transfers it to the VMA; failure
+ * leaves it with the caller to release after dropping mm->lock. */
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                             int prot, int flags, struct vfile *file,
                             uint64_t file_offset);
@@ -565,6 +567,10 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset);
+/* Consumes one referenced vfile on both success and failure. */
+vaddr_t mm_mmap_vfile(mm_struct_t *mm, vaddr_t addr, size_t len,
+                      int prot, int flags, struct vfile *file,
+                      uint64_t file_offset);
 vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
                     int prot, int flags, struct vmo *vmo, uint64_t vmo_offset);
 int     mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len);

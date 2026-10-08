@@ -186,19 +186,22 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
                 return -A20_ERR_ACCESS;
             }
             uint32_t prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
-            int gfd = (int)(uintptr_t)src.object;
-            /* Demand-paged file mapping through the core page cache.  The VMA
-             * holds its own fd reference; no eager anonymous VMO is created. */
+            /* Demand-paged file mapping through the core page cache. The
+             * handle lookup reference transfers directly to the VMA wrapper;
+             * the VMA owns it on success, and the wrapper drops it after
+             * releasing mm->lock on failure. */
             if (kargs.offset & (PAGE_SIZE - 1)) {
                 a20_object_release(src.object, src.type);
                 return -A20_ERR_INVALID_ARGUMENT;
             }
-            addr = mm_mmap_file(cur->mm, kargs.addr_hint, kargs.length,
-                                a20_prot_to_mmap(prot_eff), MAP_PRIVATE,
-                                gfd, kargs.offset);
-            a20_object_release(src.object, src.type);
-            if (mm_addr_is_error((vaddr_t)addr))
+            addr = mm_mmap_vfile(cur->mm, kargs.addr_hint, kargs.length,
+                                 a20_prot_to_mmap(prot_eff), MAP_PRIVATE,
+                                 (struct vfile *)src.object, kargs.offset);
+            if (mm_addr_is_error((vaddr_t)addr)) {
+                if (route)
+                    a20_object_release(route, A20_OBJ_VMAR);
                 return -A20_ERR_NO_MEMORY;
+            }
         } else {
             a20_object_release(src.object, src.type);
             return -A20_ERR_INVALID_ARGUMENT;
