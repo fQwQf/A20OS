@@ -50,13 +50,61 @@ long strtol(const char *nptr, char **endptr, int base) {
 #include "core/lock.h"
 #include "arch/cc.h"
 
+#if CONFIG_NET_LANES > 1
+/* SYS_ARCH_PROTECT may nest inside lwIP helpers, so only the outermost
+ * protection section takes the SMP lock. Local IRQ masking prevents a same-CPU
+ * interrupt from observing an in-progress depth transition. */
+static spinlock_t lwip_protect_lock = SPINLOCK_INIT;
+static unsigned lwip_protect_depth[CONFIG_NR_CPUS];
+
+/* The heap lock is deliberately separate from SYS_ARCH_PROTECT. Heap code
+ * updates statistics while holding this lock, establishing heap -> protect
+ * ordering; no path may enter the heap while SYS_ARCH_PROTECT is held. */
+static spinlock_t lwip_heap_lock = SPINLOCK_INIT;
+static uint8_t lwip_heap_irq_was_enabled[CONFIG_NR_CPUS];
+
+void a20_lwip_heap_lock(void)
+{
+    uint8_t restore_irqs = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    if (lwip_protect_depth[cpu] != 0)
+        panic("lwIP heap lock acquired inside SYS_ARCH_PROTECT");
+    lwip_heap_irq_was_enabled[cpu] = restore_irqs;
+    spin_lock(&lwip_heap_lock);
+}
+
+void a20_lwip_heap_unlock(void)
+{
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    uint8_t restore_irqs = lwip_heap_irq_was_enabled[cpu];
+
+    spin_unlock(&lwip_heap_lock);
+    if (restore_irqs)
+        arch_local_irq_enable();
+}
+#endif
+
 sys_prot_t sys_arch_protect(void) {
     uint64_t flags = arch_irqs_enabled() ? 1 : 0;
     arch_local_irq_disable();
+#if CONFIG_NET_LANES > 1
+    unsigned cpu = cpu_current_id();
+    if (lwip_protect_depth[cpu]++ == 0)
+        spin_lock(&lwip_protect_lock);
+#endif
     return flags;
 }
 
 void sys_arch_unprotect(sys_prot_t pval) {
+#if CONFIG_NET_LANES > 1
+    unsigned cpu = cpu_current_id();
+    if (lwip_protect_depth[cpu] == 0)
+        panic("lwIP SYS_ARCH_UNPROTECT without matching protect");
+    if (--lwip_protect_depth[cpu] == 0)
+        spin_unlock(&lwip_protect_lock);
+#endif
     if (pval)
         arch_local_irq_enable();
 }

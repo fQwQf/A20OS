@@ -38,6 +38,7 @@
 #define LWIP_HDR_STATS_H
 
 #include "lwip/opt.h"
+#include "lwip/sys.h"
 
 #include "lwip/mem.h"
 #include "lwip/memp.h"
@@ -309,14 +310,14 @@ extern struct stats_ lwip_stats;
 /** Init statistics */
 void stats_init(void);
 
-#define STATS_INC(x) ++lwip_stats.x
-#define STATS_DEC(x) --lwip_stats.x
-#define STATS_INC_USED(x, y, type) do { lwip_stats.x.used = (type)(lwip_stats.x.used + y); \
+#define STATS_INC(x) SYS_ARCH_LOCKED(++lwip_stats.x)
+#define STATS_DEC(x) SYS_ARCH_LOCKED(--lwip_stats.x)
+#define STATS_INC_USED(x, y, type) SYS_ARCH_LOCKED( \
+                                lwip_stats.x.used = (type)(lwip_stats.x.used + (y)); \
                                 if (lwip_stats.x.max < lwip_stats.x.used) { \
                                     lwip_stats.x.max = lwip_stats.x.used; \
-                                } \
-                             } while(0)
-#define STATS_GET(x) lwip_stats.x
+                                })
+#define STATS_GET(x) __atomic_load_n(&lwip_stats.x, __ATOMIC_RELAXED)
 #else /* LWIP_STATS */
 #define stats_init()
 #define STATS_INC(x)
@@ -389,10 +390,11 @@ void stats_init(void);
 #endif
 
 #if MEM_STATS
-#define MEM_STATS_AVAIL(x, y) lwip_stats.mem.x = y
+#define MEM_STATS_AVAIL(x, y) SYS_ARCH_LOCKED(lwip_stats.mem.x = (y))
 #define MEM_STATS_INC(x) STATS_INC(mem.x)
 #define MEM_STATS_INC_USED(x, y) STATS_INC_USED(mem, y, mem_size_t)
-#define MEM_STATS_DEC_USED(x, y) lwip_stats.mem.x = (mem_size_t)((lwip_stats.mem.x) - (y))
+#define MEM_STATS_DEC_USED(x, y) SYS_ARCH_LOCKED( \
+                                lwip_stats.mem.x = (mem_size_t)(lwip_stats.mem.x - (y)))
 #define MEM_STATS_DISPLAY() stats_display_mem(&lwip_stats.mem, "HEAP")
 #else
 #define MEM_STATS_AVAIL(x, y)
@@ -403,9 +405,9 @@ void stats_init(void);
 #endif
 
  #if MEMP_STATS
-#define MEMP_STATS_DEC(x, i) STATS_DEC(memp[i]->x)
+#define MEMP_STATS_DEC(x, i) SYS_ARCH_LOCKED(--lwip_stats.memp[i]->x)
 #define MEMP_STATS_DISPLAY(i) stats_display_memp(lwip_stats.memp[i], i)
-#define MEMP_STATS_GET(x, i) STATS_GET(memp[i]->x)
+#define MEMP_STATS_GET(x, i) __atomic_load_n(&lwip_stats.memp[i]->x, __ATOMIC_RELAXED)
  #else
 #define MEMP_STATS_DEC(x, i)
 #define MEMP_STATS_DISPLAY(i)
