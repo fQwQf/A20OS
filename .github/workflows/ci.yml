@@ -169,6 +169,12 @@ jobs:
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
 
+      - name: x86 kernel driver FP-state regression
+        if: matrix.arch == 'x86_64'
+        run: make smoke-x86-fp-preserve
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
       - name: Package build outputs as .apk and index the repo
         run: make ARCH=${{ matrix.arch }} pkg-repo
 
@@ -184,6 +190,15 @@ jobs:
             build/repo/${{ matrix.arch }}/
           # Kernel ELFs live under .kernel-build. Keep the glob narrow so the
           # artifact includes only the explicitly matched build output there.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x86_64'
+        with:
+          name: x86-fp-preserve-smoke-log
+          path: .kernel-build/smoke/x86-fp-preserve.log
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

@@ -19,8 +19,8 @@ DRVMOD_CFLAGS := -ffreestanding -nostdlib -mcmodel=medany -fPIC -mno-relax \
                  -march=rv64g -mabi=lp64d -DCONFIG_RISCV64 -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel
 else ifeq ($(ARCH),x86_64)
 DRVMOD_GCC := $(CCACHE_PREFIX)x86_64-linux-gnu-gcc
-DRVMOD_CFLAGS := -ffreestanding -nostdlib -mno-red-zone -fno-pic -fno-pie \
-                 -mcmodel=large -DCONFIG_X86_64 -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel
+DRVMOD_CFLAGS := -ffreestanding -nostdlib -mno-red-zone \
+                 -mgeneral-regs-only -fno-pic -fno-pie -mcmodel=large -DCONFIG_X86_64 -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel
 else ifeq ($(ARCH),aarch64)
 DRVMOD_GCC := $(CCACHE_PREFIX)aarch64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=large \
@@ -210,9 +210,16 @@ $(USER_BUILD_DIR)/usb-storage.a20drv: $(DRVMOD_DIR)/usb_storage.c kernel/drivers
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-.PHONY: virtio-blk-module drvmod-examples
+.PHONY: virtio-blk-module drvmod-examples check-x86-drvmod-isa
 
 virtio-blk-module: $(USER_BUILD_DIR)/virtio-blk.a20drv
+
+ifeq ($(ARCH),x86_64)
+X86_DRVMOD_ELFS := $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES))
+check-x86-drvmod-isa: $(X86_DRVMOD_ELFS) tools/check_x86_drvmod_isa.py
+	$(PYTHON) tools/check_x86_drvmod_isa.py $(X86_DRVMOD_ELFS)
+drvmod-examples: check-x86-drvmod-isa
+endif
 
 drvmod-examples: $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES))
 
