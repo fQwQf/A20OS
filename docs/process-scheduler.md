@@ -154,6 +154,12 @@ kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler �
 发布，不覆盖争用等待。宿主回归 `test_spinlock_preempt_window.c` 直接执行内核的
 锁和计数实现，在 CPU 槽读取及取锁成功边界注入中断时序；分别换回旧实现均会失败。
 
+页表 MCS 锁直接使用每 CPU 的节点池，不经过普通自旋锁包装。它必须在选取节点池
+之前禁止抢占，并保持到对应解锁完成队列交接、弹出节点后再恢复；排队等待期间也
+必须保留这份保护。否则任务迁移会让解锁访问另一 CPU 的池，即使只有一个 CPU，
+任务切换也会让不同任务交错使用同一池的嵌套深度。页表 cursor 的初始深度由同一次
+受保护的取锁操作返回，避免在保护建立前读取 CPU 本地状态。
+
 效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
 A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
 见 `docs/measured/impl-notes-preempt.md`——x86_64 最大唤醒 557ms→21ms（smp=1）、

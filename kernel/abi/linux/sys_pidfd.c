@@ -7,16 +7,17 @@
 #include "fs/memfd.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
+#include "proc/proc_internal.h"
 
 typedef struct pidfd_file {
     int pid;
 } pidfd_file_t;
 
 /*
- * Linux pidfd semantics: poll() blocks while the target task is alive and
- * reports EPOLLIN|EPOLLHUP once it has exited.  A pidfd with no poll op fell
- * through vfs_poll_file() to POLLNVAL, which made an event loop that watches
- * its children spin at 100% CPU instead of blocking.
+ * Linux pidfd semantics: poll() reports readable only after the referenced
+ * thread group has exited.  A pidfd with no poll op fell through
+ * vfs_poll_file() to POLLNVAL, which made an event loop that watches its
+ * children spin at 100% CPU instead of blocking.
  */
 static int pidfd_poll(vfile_t *vf, short events)
 {
@@ -25,9 +26,15 @@ static int pidfd_poll(vfile_t *vf, short events)
         return POLLNVAL;
 
     task_t *t = proc_find_get(pf->pid);
-    int exited = !t || t->state == PROC_ZOMBIE;
-    if (t)
+    int exited = 1;
+    if (t) {
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+        int state = proc_task_state_get(t);
+        exited = state == PROC_UNUSED ||
+                 (state == PROC_ZOMBIE && proc_tg_group_dead_locked(t));
+        spin_unlock_irqrestore(&tasklist_lock, flags);
         proc_put(t);
+    }
     if (!exited)
         return 0;
 
@@ -90,18 +97,17 @@ int64_t sys_pidfd_open(int pid, unsigned flags)
     task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
-    if (target->state == PROC_ZOMBIE) {
-        proc_put(target);
-        return -ESRCH;
-    }
-    proc_put(target);
-
     task_t *self = proc_current();
-    if (self && !proc_has_cap(self, CAP_SYS_PTRACE) &&
-        !proc_task_may_access(self, target))
+    int allowed = !self || proc_has_cap(self, CAP_SYS_PTRACE) ||
+                  proc_task_may_access(self, target);
+    if (!allowed) {
+        proc_put(target);
         return -EPERM;
+    }
 
-    return linux_pidfd_create(pid, (int)flags);
+    int fd = linux_pidfd_create(pid, (int)flags);
+    proc_put(target);
+    return fd;
 }
 
 int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
