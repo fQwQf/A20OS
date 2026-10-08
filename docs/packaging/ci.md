@@ -267,10 +267,21 @@ trap 仍先于 host frame 记账处理，保留区仍排除在通用页帧分配
 的版本检查、四架构签名包仓库及 base/devel 镜像均通过，最终发布 job 按分支策略
 跳过。但 MM 压测在 `vma-deferred-race` 阶段 90 秒超时；同一提交在上述 CI run
 约 5 秒通过该阶段，说明这是间歇性进度故障，不能通过放宽时间或删除断言处理。
-后续修复和候选提交的最终验收应同时记录在这里。
+定位过程中修复了两处确定的抢占窗口：普通自旋锁原先先取得所有权再禁止抢占；
+首次提高 per-CPU 计数时，CPU 槽读取与递增之间也允许 IRQ 迁移任务。确定性宿主
+回归分别换回任一旧实现都会失败；最终实现的 MM 压测首轮及后续八轮均通过。
+修复前未在本机稳定复现远端超时，因此还须以候选提交的 CI 和 Release smoke
+共同验收，不能仅凭本机结果断言已覆盖全部间歇故障。
 
 Run [37752140621](https://github.com/fQwQf/A20OS/actions/runs/37752140621)
 的 `toolchain-gates` 又发现裸 `ubuntu-latest` runner 不保证预装 ripgrep：
 `check-honesty-policy` 的 `rg` 命令因此不存在，并误报 pagemap 所有权检查失败。
-workflow 现显式安装 `ripgrep`，原有 fail-closed 源码断言保持不变；该依赖修复
-仍需由后续远端 CI run 验证。
+workflow 现显式安装 `ripgrep`，原有 fail-closed 源码断言保持不变。
+
+下一次 run [37752703380](https://github.com/fQwQf/A20OS/actions/runs/37752703380)
+中，ripgrep、宿主测试、DRM UAPI 和前序源码门禁均通过，文档检查随后指出 fresh
+checkout 尚未生成 `user/svc/a20_services_idl.h`。`check-doc-drift` 现先依赖
+`check-a20-idl`，生成并校验该构建输入后再核对文档路径；不把现用头文件标成历史
+文件，也不跳过路径检查。
+从 `git archive` 提取的临时干净源码目录中，该头初始不存在，修复后的
+`make check-doc-drift` 完成 IDL 生成、同步校验和全部文档检查。

@@ -256,7 +256,9 @@ check-abi-smoke-gate:
 .PHONY: check-upgrade-userland-smokes
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
 
-check-doc-drift:
+# Documentation cites the generated Native IDL header. Materialize and verify
+# that build input before resolving paths, including on a fresh checkout.
+check-doc-drift: check-a20-idl
 	@$(PYTHON) tools/gates.py check-doc-drift
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
 	@$(PYTHON) tools/gates.py check-doc-drift --segment 1
