@@ -336,13 +336,13 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 }
 
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
-                              int prot, int flags, struct vfile *file,
-                              uint64_t file_offset)
+                            int prot, int flags, struct vfile *file,
+                            uint64_t file_offset)
 {
-    /* @file arrives referenced; on success the VMA owns that reference, on
-     * failure this function releases it. */
+    /* @file arrives referenced. On success the VMA takes ownership; on
+     * failure ownership stays with the caller so it can release the reference
+     * after dropping mm->lock. */
     if (!file || (file_offset & (PAGE_SIZE - 1))) {
-        vfs_put_file(file);
         return (vaddr_t)-EINVAL;
     }
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
@@ -354,17 +354,14 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (len > USER_VA_LIMIT)
         return (vaddr_t)-ENOMEM;
 
-    /* W^X: filter before taking the fd reference, to avoid pointless
-     * refcount churn */
+    /* Apply W^X policy before allocating the VMA or retaining its vnode. */
     prot = mm_wx_filter_prot(prot, "mmap_file");
     if (prot < 0)
         return (vaddr_t)prot;
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        if (mm_range_overlaps(mm, addr, len, NULL)) {
-            vfs_put_file(file);
+        if (mm_range_overlaps(mm, addr, len, NULL))
             return (vaddr_t)-EEXIST;
-        }
         flags |= MAP_FIXED;
     }
 
@@ -384,16 +381,13 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 #ifdef CONFIG_NOMMU
     void *nommu_raw = nommu_pick_region(flags, len, addr, &addr);
-    if (!nommu_raw) {
-        vfs_put_file(file);
+    if (!nommu_raw)
         return (vaddr_t)-ENOMEM;
-    }
 #else
     if (addr == 0)
         addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
-        vfs_put_file(file);
         return (vaddr_t)-ENOMEM;
     }
 #endif
@@ -410,7 +404,6 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
 #endif
-        vfs_put_file(file);
         return (vaddr_t)-ENOMEM;
     }
     vma->start       = addr;
@@ -440,7 +433,6 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                 vma->file_vnode = NULL;
             }
             kfree(vma);
-            vfs_put_file(file);
             return (vaddr_t)-ENOMEM;
         }
         vma->vm_flags |= VM_LOCKED;
@@ -545,17 +537,34 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset)
 {
     if (!mm) return (vaddr_t)-EINVAL;
-    /* Resolve the caller's fd to a referenced vfile; mm_mmap_file_locked
-     * takes over that reference (success) or drops it (failure). */
+    /* Resolve the caller's fd to a referenced vfile, then transfer ownership
+     * through the same wrapper used by handle-based callers. */
     vfile_t *file = fdtable_get_current_file_ref(file_fd);
     if (!file)
         return (vaddr_t)-EBADF;
+    return mm_mmap_vfile(mm, addr, len, prot, flags, file, file_offset);
+}
+
+/* Consumes one referenced vfile on success or failure. */
+vaddr_t mm_mmap_vfile(mm_struct_t *mm, vaddr_t addr, size_t len,
+                      int prot, int flags, struct vfile *file,
+                      uint64_t file_offset)
+{
+    /* This API consumes one referenced vfile on every path. The locked helper
+     * only transfers it to the VMA on success; failure cleanup stays outside
+     * mm->lock because dropping a vfile can run filesystem finalizers. */
+    if (!mm) {
+        vfs_put_file(file);
+        return (vaddr_t)-EINVAL;
+    }
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file,
                                     file_offset);
     spin_unlock_irqrestore(&mm->lock, flags_l);
     mm_tlb_invalidate_finish(mm);
+    if (mm_addr_is_error(r))
+        vfs_put_file(file);
     return r;
 }
 

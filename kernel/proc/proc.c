@@ -955,6 +955,8 @@ vaddr_t proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(t->mm);
     if ((long)ret < 0 && (long)ret >= -4095)
+        vfs_put_file(file);
+    if ((long)ret < 0 && (long)ret >= -4095)
         ktrace_mm("[MM] mmap-vfile fail pid=%d addr=%lx len=%lu ret=%ld\n",
                   t->pid, (unsigned long)addr, (unsigned long)len, (long)ret);
     return ret;
@@ -983,6 +985,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     vaddr_t ret;
+    vfile_t *mfile = NULL;
     if ((flags & MAP_ANONYMOUS) || fd < 0)
         ret = mm_mmap_locked(t->mm, addr, len, prot, flags);
     else {
@@ -992,9 +995,9 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
             return (vaddr_t)-EINVAL;
         }
 
-        /* Resolve the caller's fd; mm_mmap_file_locked takes over the
-         * reference (success) or drops it (failure). */
-        vfile_t *mfile = fdtable_get_current_file_ref(fd);
+        /* Resolve the caller's fd; a successful VMA takes over this
+         * reference, while a failure leaves it for cleanup after unlocking. */
+        mfile = fdtable_get_current_file_ref(fd);
         if (!mfile) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
             mm_tlb_invalidate_finish(t->mm);
@@ -1005,6 +1008,8 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(t->mm);
+    if (mfile && (long)ret < 0 && (long)ret >= -4095)
+        vfs_put_file(mfile);
     /* Test the errno range through a signed type of pointer width: an int64_t
      * cast zero-extends on 32-bit and silently makes this dead code. */
     if ((long)ret < 0 && (long)ret >= -4095)

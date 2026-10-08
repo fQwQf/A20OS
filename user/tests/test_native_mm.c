@@ -184,6 +184,11 @@ int main(int argc, char **argv, char **envp)
         if (st != A20_OK || !faddr)
             return fail(out, 17, "vm_map FILE failed", 18);
 
+        /* The VMA must retain its own file reference after the source handle
+         * closes; a subsequent fault still needs the backing vfile. */
+        a20_hdl_close(po.out_handle);
+        po.out_handle = A20_HANDLE_NULL;
+
         volatile const uint8_t *fb = (volatile const uint8_t *)(uintptr_t)faddr;
         if (!(fb[0] == 0x7f && fb[1] == 'E' && fb[2] == 'L' && fb[3] == 'F'))
             return fail(out, 18, "file map content", 18);
@@ -191,7 +196,6 @@ int main(int argc, char **argv, char **envp)
         st = a20_vm_unmap(faddr, PAGE);
         if (st != A20_OK)
             return fail(out, 19, "vm_unmap FILE", 14);
-        a20_hdl_close(po.out_handle);
     }
 
     /* 8. vm_advise(MADV_NORMAL): a pure hint.  It must return success and
