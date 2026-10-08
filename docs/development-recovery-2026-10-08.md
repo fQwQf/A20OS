@@ -1,5 +1,92 @@
 # 2026-10-08 开发中断恢复与集成验收
 
+## 远端同步与旧备份清理
+
+2026-10-08 按用户要求执行 `git fetch --prune origin`，核对远端 main
+`41cb8217c` 已是本地 main 的祖先；`git merge origin/main` 返回 `Already up to date`，
+无需额外合并提交。本次推送目标为 `origin/main`，包含已验收源码及本次清理记录。
+
+以 2026-09-08 为一个月前的界线，删除两个本地旧备份引用：
+
+| 分支 | 删除前 HEAD | 备份日期 |
+| --- | --- | --- |
+| `backup/main-snapshot-20260820` | `07c31bb36` | 2026-08-20 |
+| `backup/riir-original-20260816` | `728fc137e` | 2026-08-16 |
+
+这两条引用没有可用的创建 reflog，按分支名称中的明确备份日期判断，并核对其 HEAD
+提交日期也早于界线。保留其余六个较新的备份分支、research/riir 分支及独立恢复归档。
+下文未推送与保留八个备份的说明属于此前阶段记录。
+
+## 两个原始开发目标的补充验收
+
+此前的恢复报告把网络范围收窄为既有 lane 切片的集成，没有完成用户原本要求的 lwIP
+全局核心锁拆分。这一判断不完整；下面旧阶段的门禁通过不能代表该目标已经实现。
+后续工作在 `codex/lwip-lane-locks` 中接续，按独立 lane 锁执行普通 TCP/UDP 核心路径，
+保留共享协议控制屏障，并加入真实外部连接的并行验收。当前结构和验收边界见
+[网络 lane 文档](net/net-lanes.md)及[网络锁契约](net/network-lock-contract.md)。
+
+Hypervisor 的基础目标是让 A20OS guest 从 RAMFS 启动到 shell，能输入命令并正常退出。
+在 main `fa2e505f3` 上重新运行 `make -j8 smoke-hyp-shell` 已确认：`hypvm -k
+/bin/boot/guest-kernel-ramfs.elf` 启动 guest init/mksh，两条不同 echo 命令正确返回，guest
+`exit` 后 host prompt 恢复并正常关机。日志为本机
+`/tmp/a20-recovery-logs/hyp-shell-user-path-fa2e505.log` 及 guest
+`.kernel-build/smoke/hyp-shell-riscv64.log`。这不扩大为多 vCPU、任意 Linux/rootfs 或
+完整 guest 中断/设备模型的完成声明。
+
+补充实现把 ingress/staging 与协议执行分离：普通单播 TCP/UDP 在 owner-lane 锁下运行，
+逐包临时状态按 lane 保存，TCP 定时器逐 lane 推进。ARP/ND、分片、配置和全局维护仍由
+全 lane 屏障保护；共享 heap、PCB 回调、缓存与 TX staging 各有短锁。Lane 根据协议元组
+确定，不绑定 CPU。物理 pbuf arena 分片、多队列硬件/RSS 和 loopback 并行不在本次完成
+声明内，见网络文档中的现状与后续范围。
+
+补充验收使用实际外部 TCP 连接，而非仅凭 loopback 成功或没有 panic 判断并发成立。
+首轮暴露 raw wire/sockaddr 端口与 PCB 端口字节序不一致，修复统一 owner hash 后复测。
+最终四路各传输并校验双向 64 KiB；N1/N4 的子进程数据摘要与最终 verdict 一致。
+N4 的 opt-in TCP 输入探针报告 `peak_active_lanes=2`、`probe_hits=406`，四 lane 输入计数
+为 `107,102,92,105`，TCP timer 计数均为 `89`。它证明观察到了跨 lane 重叠执行，
+不代表吞吐提升，也不要求四个 lane 在同一时刻活跃。
+
+跨架构补充构建首轮还发现了既有入口绕锁问题：kernel bring-up 的 driver blob 会通过
+`USER_BUILD_STAMP` 构建用户输出，而矩阵的 `check-<arch>-user` 直接运行 user Makefile，
+二者可同时写同一目录。LoongArch 的 `.build-id` 重复初始化及同一目标重复编译后出现
+ccache 目标文件缺失。修复把七个矩阵用户入口统一接到已有 stamp/输出根锁协议，保持
+不同架构输出根独立并行；宿主回归覆盖入口接线、同根互斥与异根不互相阻塞。首轮失败
+日志保留为 `lwip-build-matrix-first-failed.log`。
+
+补充审查也修正了 socket/lane 交界的生命周期与配置问题：bind 在全 lane 屏障内
+rebucket 后发布 owner，热路径先复查发布值才解引用 PCB；TCP/IP 选项在 socket 锁内
+快照，释放后取得 core ownership 并用版本号校验重试，TCP 按请求字段应用。LISTEN
+PCB 的完整 TCP 字段访问改为 listener 元数据继承，并补真实 lwIP 模式的监听后选项
+回归。该门禁首轮还揭示长度为 4 的 `reno` 被末字节终止覆盖成 `ren`，已修正为有界
+复制后追加终止符，未放宽验收预期；失败日志另存为 `lwip-netopt-first-failed.log`。
+
+补充源码验收基线为 `a801e798b`：共享 allocator 保护为 `7168f6a08`，核心 owner-lane
+并发为 `4b8288c09`，矩阵构建入口修复为 `446c67eda`，最后的 socket 生命周期与选项
+同步为 `a801e798b`。后续只更新文档与合并记录。补充测试记录（完整命令输出位于
+`/tmp/a20-recovery-logs/`）：
+
+| 验证 | 结果与日志 |
+| --- | --- |
+| `make -j8 check` | 19 项宿主门禁通过，包含 285 项 Python 工具回归；`lwip-check-final.log` |
+| `make host-tests` | 实际 lwIP allocator/pbuf 并发及实际 lane queue/context 宿主回归通过；宿主 CPU/IRQ shim 不替代内核实测 |
+| `tools/test-tcp-cubic-host.sh` | 22366 项检查通过 |
+| `make -j8 smoke-netopt-lwip` | 显式 lwIP 模式下 99 项检查通过，包含监听后选项与真实 accept 继承；`lwip-netopt-final.log` |
+| `make -j8 smoke-net-lanes-hostfwd` | N1/N4 外部四路 TCP 数据校验及 N4 并行探针通过；`lwip-hostfwd-final.log` |
+| `make -j8 NR_CPUS=4 NET_LANES=4 OPT='-O3 -DCONFIG_NET_PCB_SANE=1' smoke-netfilter-nat` | 四核四 lane 下 DNAT 后 owner 分派及连接通过；`lwip-nat-n4-final.log` |
+| `make -j8 smoke-hyp-shell` | 补充网络实现上 guest shell 两条 echo、exit、host 恢复及关机通过；`lwip-hyp-shell-final.log` |
+| `smoke-net-tcp-lanes`、`smoke-net-lanes-n1`、`smoke-lwip-memp`、`smoke-network-suite` | 专项回归通过；network suite 的 1 项既有声明缺失仍不算已实现 |
+| `make -j8 ARCH=aarch64 NR_CPUS=4 NET_LANES=4 ABI=linux BRINGUP=0 kernel-only` | AArch64 四核四 lane 内核构建通过；`lwip-aarch64-lanes4-build.log` |
+| `make -j8 check-build-matrix`（使用下文的临时 ARM 工具链环境） | 七个 hosted 架构的 bring-up 内核和用户态构建通过；`lwip-build-matrix-final.log` |
+
+补充实现已以 `85401f000` 合入本地 main。核对 `a801e798b` 是 main 祖先且工作树干净后，
+以非强制方式删除 `/home/fqwqf/OS/A20OS-lwip-core` 与 `codex/lwip-lane-locks`；现在仅保留
+main 工作树，未合并的 backup/research/riir 引用继续保留。补充 guest 日志已复制到 main
+的 `.kernel-build/smoke/`，并独立归档至 `/tmp/a20-recovery-logs/lwip-final-artifacts/smoke/`，
+同目录保存源码基线和恢复报告草稿。该验收阶段尚未推送，后续同步见文首。
+
+下面的范围、提交及验收记录描述此前恢复阶段，基线与本次补充实现分别标明；不能把
+旧基线上的整套运行门禁说成已在补充实现上全部重跑。
+
 ## 范围与现场保留
 
 本轮恢复的是已存在的开发切片：RISC-V H 扩展虚拟化、UART 接收保真、网络 lane 统计与门禁、MM 合并及跨架构构建，以及未提交的 AArch64 接口探针。没有把长期路线图中的全部功能列为本轮完成条件。
@@ -25,7 +112,7 @@
 
 COW 本轮选择先保证旧路径与状态路径之间的互斥，因此状态驱动匿名 COW 当前按地址空间串行化；不能沿用此前“无需 mm->lock”的性能描述。匿名 demand-fault 的其他状态路径与该选择分开讨论。
 
-网络 C2 的 lane 索引与计数不表示物理池已完成分片，也不表示可以删除全局 lwIP 锁。多 vCPU、完整中断注入、virtio DMA、真实 H 扩展硬件，以及 FEX 完整运行，仍按各子系统文档明确的后续范围处理。
+此前网络 C2 的 lane 索引与计数不表示物理池已完成分片；本报告旧阶段也没有拆分全局 lwIP 核心锁，后续补充工作见文首。多 vCPU、完整中断注入、virtio DMA、真实 H 扩展硬件，以及 FEX 完整运行，仍按各子系统文档明确的后续范围处理。
 
 恢复验收额外修正了两个失败路径：H 扩展探测先检查启动 FDT 的早期能力快照，避免 QEMU `h=false` 时仅凭可读 `hstatus` 误判能力；lwIP lane drain 区分已持全局锁的 socket poll 与锁外 scheduler 调用，避免同一非递归锁重入。`a66a030c6` 在 MMU/PFA 初始化前保存 H/SSTC 能力，晚期查询不再依赖固件临时物理缓冲区；FDT 仍依赖固件如实声明平台能力。
 
@@ -60,7 +147,7 @@ COW 本轮选择先保证旧路径与状态路径之间的互斥，因此状态�
 
 ## 尚存的独立限制
 
-本地检查不能证明 GitHub Actions 已通过；本轮没有推送或发布，远端 CI 需在推送后重新观察。[CI 说明](packaging/ci.md) 中 2026-10-07 的红灯属于历史记录，2026-10-08 本地矩阵结果单独登记。
+本地检查不能证明 GitHub Actions 已通过；初始验收阶段没有推送或发布，后续同步见文首，远端 CI 需在推送后重新观察。[CI 说明](packaging/ci.md) 中 2026-10-07 的红灯属于历史记录，2026-10-08 本地矩阵结果单独登记。
 
 H/SSTC 缓存没有为所有消费者保留完整 DTB。当前 QEMU 板级设备按固定配置枚举；硬件平台的晚期 raw FDT 枚举路径仍需在 PFA 前复制 DTB 或排除其物理页，见 [虚拟化使用说明](hypervisor/03-usage.md)。这属于现有硬件平台层限制，不能将能力缓存描述为完整 DTB 生命周期修复。
 
