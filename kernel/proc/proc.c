@@ -136,16 +136,20 @@ void proc_reparent_task_locked(task_t *new_parent, task_t *t)
     proc_children_link_locked(new_parent, t);
 }
 
-void proc_tg_link_locked(task_t *t)
+int proc_tg_link_locked(task_t *t)
 {
     task_t *leader = t->tg_leader ? t->tg_leader : t;
     if (t == leader || leader == t->tg_next || t->tg_prev_ptr)
-        return;
+        return 0;
+    if (t->tg_leader_ref_held || !proc_get(leader))
+        return -ESRCH;
+    t->tg_leader_ref_held = 1;
     t->tg_next = leader->tg_next;
     t->tg_prev_ptr = &leader->tg_next;
     if (t->tg_next)
         t->tg_next->tg_prev_ptr = &t->tg_next;
     leader->tg_next = t;
+    return 0;
 }
 
 void proc_tg_unlink_locked(task_t *t)
@@ -157,6 +161,18 @@ void proc_tg_unlink_locked(task_t *t)
         t->tg_next->tg_prev_ptr = t->tg_prev_ptr;
     t->tg_next = NULL;
     t->tg_prev_ptr = NULL;
+    /* The leader pin is intentionally kept until final task release.  Other
+     * task references may still inspect tg_leader after list detachment. */
+}
+
+void proc_tg_leader_ref_release(task_t *t)
+{
+    if (!t || !t->tg_leader_ref_held)
+        return;
+    task_t *leader = t->tg_leader;
+    t->tg_leader_ref_held = 0;
+    t->tg_leader = NULL;
+    proc_put(leader);
 }
 
 void proc_unlink_task_locked(task_t *t)
