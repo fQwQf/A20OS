@@ -246,3 +246,13 @@ Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages
 - 同一 CI run 的 `smoke-riscv64` 在 `smoke-native-contract` 的 `vmol-leak-vmo` 断言失败（VMO unmap 后对象计数未恢复）。这是运行时缺陷，不能通过跳过或放宽 smoke 门禁修复。
 - Release runs [37746751131](https://github.com/fQwQf/A20OS/actions/runs/37746751131)、[37746751023](https://github.com/fQwQf/A20OS/actions/runs/37746751023) 和 [37746750856](https://github.com/fQwQf/A20OS/actions/runs/37746750856) 的四架构 job 都在 `mka20repo: no .apk files in build/repo/<arch>` 失败。日志中 `PKG_SIGN_KEY` 与 `PKG_KEY_NAME` 已设置，签名安装不是失败点；这些 run 所使用的 `pkg-repo` Make target 未依赖 `pkgs`，因此没有先生成 `.apk`。该缺陷已在当前 HEAD 的 `pkg-repo: pkgs` 和 `image-world: pkg-repo` 依赖链修复，本轮增加回归检查固定现有依赖，没有重复修改已修复的 Make 规则。
 - Release workflow 现在先执行 `check-release-version`，核验内核版本与 Linux release 配对；tag ref 还要求 `v<version>` 与 header 完全一致。该检查不会按 tag 改写二进制版本。手动从 branch dispatch 会运行构建与 smoke 验收，但最终发布 job 仅对 tag ref 开启，避免把 `main` 等 branch 名误当 release tag。
+
+后续 run [37750054878](https://github.com/fQwQf/A20OS/actions/runs/37750054878)
+确认七架构内核与上传、四架构包与 base 镜像均通过，但也暴露了此前未到达的检查：
+
+- 缺少 MCU 工具链的测试曾只接受 `arm-none-eabi` 诊断；裸 runner 有 clang、
+  无 `llvm-objcopy` 时，Makefile 会正确报告后者缺失。测试现用受控 PATH 分别
+  覆盖没有编译器及只有 clang 的情形，仍要求明确失败，不依赖开发机预装工具。
+- `smoke-net-accept` 曾硬编码无 `-preempt` 后缀的构建目录，导致 QEMU 未能打开
+  镜像。门禁现从相同构建变量的 `print-build-dir` 查询路径，原握手、accept 和
+  丢弃计数断言保持不变；本机复跑通过。

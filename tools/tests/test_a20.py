@@ -1684,17 +1684,32 @@ class TestArtifactLedger(unittest.TestCase):
                 self.assertFalse(a.path.startswith("/"), a.path)
                 self.assertNotIn("/home/", a.path)
 
-    @unittest.skipIf(shutil.which("arm-none-eabi-gcc"),
-                     "toolchain present, so the ledger resolves MCU paths normally")
     def test_missing_cross_toolchain_is_reported_not_faked(self) -> None:
         """A ledger that silently omitted the artifacts it could not resolve
-        would be worse than useless on a board. make refuses to evaluate the
-        Makefile without the cross toolchain, and that refusal must surface."""
+        would be worse than useless on a board. Make refuses to evaluate the
+        Makefile without a complete cross toolchain, and that refusal must
+        surface whether the runner discovers no compiler or clang alone."""
         from a20_make import MakeQueryError
         from a20_manifest import collect
-        with self.assertRaises(MakeQueryError) as cm:
-            collect(load_instance("stm32f103-xuanwu"))
-        self.assertIn("arm-none-eabi", str(cm.exception))
+        make = shutil.which("make")
+        self.assertIsNotNone(make)
+
+        # Keep discovery hermetic: provide make itself, plus clang in the
+        # second scenario, while hiding any host cross-toolchain binaries.
+        # This exercises both Makefile fail-closed diagnostics on contributors'
+        # machines and hosted runners with different preinstalled tools.
+        for expose_clang, expected in ((False, "arm-none-eabi"),
+                                       (True, "llvm-objcopy")):
+            with self.subTest(expose_clang=expose_clang), \
+                 tempfile.TemporaryDirectory() as temp:
+                bin_dir = Path(temp)
+                (bin_dir / "make").symlink_to(make)
+                if expose_clang:
+                    (bin_dir / "clang").symlink_to("/bin/true")
+                with patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                    with self.assertRaises(MakeQueryError) as cm:
+                        collect(load_instance("stm32f103-xuanwu"))
+                self.assertIn(expected, str(cm.exception))
 
     def test_git_state_reports_head_and_dirtiness(self) -> None:
         from a20_manifest import git_state
