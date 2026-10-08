@@ -3,6 +3,7 @@
 #include "core/klog.h"
 #include "core/cpu.h"
 #include "core/perf.h"
+#include "core/preempt.h"
 #include "core/string.h"
 #include "core/bootargs.h"
 #include "mm/frame.h"
@@ -197,8 +198,13 @@ static inline unsigned pt_cpu(void)
 
 /* The MCS node is stashed in the descriptor while the lock is held so that
  * unlock can find it; only the holder ever touches that field. */
-static void mcs_lock(pt_meta_t *m)
+static uint32_t mcs_lock(pt_meta_t *m)
 {
+    /* Nodes and nesting depth are CPU-local.  Pin the task before selecting
+     * the pool and keep it pinned until the matching unlock has popped this
+     * slot; otherwise a timer-driven migration makes unlock read a different
+     * CPU's depth/top node. */
+    preempt_disable();
     unsigned cpu = pt_cpu();
     pt_mcs_pool_t *pool = &g_pt_mcs_pool[cpu];
     uint32_t d = pool->depth;
@@ -211,10 +217,9 @@ static void mcs_lock(pt_meta_t *m)
 
     pt_mcs_node_t *me = &pool->nodes[d];
     pool->held[d] = m;
-    /* One push per acquisition.  The matching pop belongs to the cursor's
-     * unwind loop in mm_cursor_unlock, not to mcs_unlock, so that the two
-     * steps -- hand the node to the next waiter, and forget the slot -- stay
-     * distinct and the depth cannot be decremented twice. */
+    /* One push per acquisition; mcs_unlock performs the matching pop after it
+     * has handed the node to the next waiter.  Cursor unwind calls that same
+     * unlock once for each slot it owns. */
     pool->depth = d + 1;
 
     me->next = 0;
@@ -259,6 +264,7 @@ static void mcs_lock(pt_meta_t *m)
             }
         }
     }
+    return d;
 }
 
 static void mcs_unlock(pt_meta_t *m)
@@ -269,6 +275,9 @@ static void mcs_unlock(pt_meta_t *m)
      * instead of itself -- it then cleared the lock and handed off to nobody,
      * and that waiter span forever.  mcs_lock pushed exactly one slot and
      * depth is decremented only below, so our node is the top of our stack. */
+    if (pool->depth == 0 || pool->depth > PT_MCS_POOL_SLOTS ||
+        pool->held[pool->depth - 1] != m)
+        panic("mcs: unlock with invalid per-cpu depth");
     pt_mcs_node_t *me = &pool->nodes[pool->depth - 1];
 
     pt_mcs_node_t *next =
@@ -297,6 +306,7 @@ static void mcs_unlock(pt_meta_t *m)
      * cursor's unwind loop both rely on it, and pre-decrementing in a caller
      * as well is a double decrement that corrupts the stack discipline. */
     pool->depth--;
+    preempt_enable();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1818,8 +1828,7 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -ENOMEM;
     }
 
-    cur->lock_base_depth = (int)g_pt_mcs_pool[pt_cpu()].depth;
-    mcs_lock(m);
+    cur->lock_base_depth = (int)mcs_lock(m);
     if (m->stale) {
         mcs_unlock(m);
         cur->lock_base_depth = 0;
@@ -1858,13 +1867,13 @@ void mm_cursor_unlock(mm_cursor_t *cur)
      * per-CPU held[] stack is the record; the cursor only remembers the
      * depth it started at, so a DFS of any width unwinds correctly. */
     pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
+    if (pool->depth < (uint32_t)cur->lock_base_depth)
+        panic("mcs: cursor unlock depth below its base");
     while (pool->depth > (uint32_t)cur->lock_base_depth) {
         pt_meta_t *m = pool->held[pool->depth - 1];
-        if (m) {
-            mcs_unlock(m);          /* pops the depth slot itself */
-        } else {
-            pool->depth--;          /* no node recorded: pop the slot */
-        }
+        if (!m)
+            panic("mcs: cursor unlock found empty held slot");
+        mcs_unlock(m);              /* pops the depth slot itself */
     }
     if (cur->in_read_side) {
         mm_pt_read_exit(cur->mm);
