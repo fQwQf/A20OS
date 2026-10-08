@@ -50,6 +50,105 @@ static int net_copyout_int(void *optval, size_t *optlen, int val)
     return 0;
 }
 
+typedef struct net_tcp_options_snapshot {
+    uint8_t congestion;
+    uint8_t nodelay;
+    uint8_t keepalive;
+    uint8_t reuseaddr;
+    int keep_idle;
+    int keep_intvl;
+    int keep_cnt;
+    uint32_t snd_buf;
+    uint32_t rcv_buf;
+    uint32_t generation;
+} net_tcp_options_snapshot_t;
+
+static void net_tcp_options_changed_locked(net_socket_t *s)
+{
+    __atomic_add_fetch(&s->tcp_opts_generation, 1, __ATOMIC_RELEASE);
+}
+
+/* Never hold the socket lock with the lwIP control barrier.  If another
+ * setter publishes while this snapshot waits for the barrier, discard it and
+ * retry the complete option group so independent fields cannot be lost. */
+enum {
+    NET_TCP_APPLY_CONGESTION = 1u << 0,
+    NET_TCP_APPLY_NODELAY    = 1u << 1,
+    NET_TCP_APPLY_KEEPALIVE  = 1u << 2,
+    NET_TCP_APPLY_REUSEADDR  = 1u << 3,
+    NET_TCP_APPLY_KEEP_IDLE  = 1u << 4,
+    NET_TCP_APPLY_KEEP_INTVL = 1u << 5,
+    NET_TCP_APPLY_KEEP_CNT   = 1u << 6,
+    NET_TCP_APPLY_SNDBUF     = 1u << 7,
+    NET_TCP_APPLY_RCVBUF     = 1u << 8,
+};
+
+static void net_tcp_options_apply_current(net_socket_t *s, unsigned mask)
+{
+    for (;;) {
+        net_tcp_options_snapshot_t opts;
+        uint64_t sf = net_sock_lock(s);
+        opts.congestion = s->tcp_congestion;
+        opts.nodelay = s->tcp_nodelay;
+        opts.keepalive = s->keepalive;
+        opts.reuseaddr = s->reuseaddr;
+        opts.keep_idle = s->keep_idle;
+        opts.keep_intvl = s->keep_intvl;
+        opts.keep_cnt = s->keep_cnt;
+        opts.snd_buf = s->snd_buf;
+        opts.rcv_buf = s->rcv_buf;
+        opts.generation = __atomic_load_n(&s->tcp_opts_generation,
+                                          __ATOMIC_RELAXED);
+        net_sock_unlock(s, sf);
+
+        uint64_t flags = a20_lwip_lock();
+        if (__atomic_load_n(&s->tcp_opts_generation, __ATOMIC_ACQUIRE) !=
+            opts.generation) {
+            a20_lwip_unlock(flags);
+            continue;
+        }
+        if (s->tcp) {
+            if (mask & NET_TCP_APPLY_KEEPALIVE) {
+                if (opts.keepalive)
+                    s->tcp->so_options |= SOF_KEEPALIVE;
+                else
+                    s->tcp->so_options &= ~SOF_KEEPALIVE;
+            }
+            if (mask & NET_TCP_APPLY_REUSEADDR) {
+                if (opts.reuseaddr)
+                    ip_set_option(s->tcp, SOF_REUSEADDR);
+                else
+                    ip_reset_option(s->tcp, SOF_REUSEADDR);
+            }
+            /* LISTEN uses tcp_pcb_listen, which only has the common PCB
+             * prefix.  Its child options live in net_socket_t until accept
+             * creates a full tcp_pcb. */
+            if (s->tcp->state != LISTEN) {
+                if (mask & NET_TCP_APPLY_CONGESTION)
+                    a20_net_cong_apply(s->tcp, opts.congestion);
+                if (mask & NET_TCP_APPLY_NODELAY) {
+                    if (opts.nodelay)
+                        tcp_nagle_disable(s->tcp);
+                    else
+                        tcp_nagle_enable(s->tcp);
+                }
+                if ((mask & NET_TCP_APPLY_KEEP_IDLE) && opts.keep_idle > 0)
+                    s->tcp->keep_idle = (u32_t)opts.keep_idle * 1000U;
+                if ((mask & NET_TCP_APPLY_KEEP_INTVL) && opts.keep_intvl > 0)
+                    s->tcp->keep_intvl = (u32_t)opts.keep_intvl * 1000U;
+                if ((mask & NET_TCP_APPLY_KEEP_CNT) && opts.keep_cnt > 0)
+                    s->tcp->keep_cnt = (u32_t)opts.keep_cnt;
+                net_inet_tcp_buf_apply(
+                    (mask & NET_TCP_APPLY_SNDBUF) ? opts.snd_buf : 0,
+                    (mask & NET_TCP_APPLY_RCVBUF) ? opts.rcv_buf : 0,
+                    s->tcp);
+            }
+        }
+        a20_lwip_unlock(flags);
+        return;
+    }
+}
+
 /* Linux UABI, the value MCAST_JOIN_GROUP / MCAST_LEAVE_GROUP carry across the
  * syscall boundary:
  *
@@ -300,7 +399,7 @@ int net_accept_sock(net_socket_t *s, void *addr, size_t *addrlen, int flags)
             net_sock_unlock(s, irq);
             return -ERESTARTSYS;
         }
-        if (net_socket_wait_expired(s, start, 0)) {
+        if (net_socket_wait_expired_locked(s, start, 0)) {
             net_sock_unlock(s, irq);
             return -EAGAIN;
         }
@@ -494,7 +593,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             int val = net_ipopt_byte(optval, optlen, 0, 0xff);
             if (val < 0)
                 return val;
+            uint64_t sf = net_sock_lock(s);
             s->mc_ttl = (uint8_t)val;
+            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
+            net_sock_unlock(s, sf);
             net_inet_ip_opts_apply(s);
             return 0;
         }
@@ -502,7 +604,10 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             int val = net_ipopt_byte(optval, optlen, 0, 1);
             if (val < 0)
                 return val;
+            uint64_t sf = net_sock_lock(s);
             s->mc_loop = (uint8_t)val;
+            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
+            net_sock_unlock(s, sf);
             net_inet_ip_opts_apply(s);
             return 0;
         }
@@ -510,8 +615,11 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             int val = net_ipopt_byte(optval, optlen, 1, 0xff);
             if (val < 0)
                 return val;
+            uint64_t sf = net_sock_lock(s);
             s->ip_ttl = (uint8_t)val;
             s->ip_ttl_set = 1;
+            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
+            net_sock_unlock(s, sf);
             net_inet_ip_opts_apply(s);
             return 0;
         }
@@ -519,8 +627,11 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             int val = net_ipopt_byte(optval, optlen, 0, 0xff);
             if (val < 0)
                 return val;
+            uint64_t sf = net_sock_lock(s);
             s->ip_tos = (uint8_t)val;
             s->ip_tos_set = 1;
+            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
+            net_sock_unlock(s, sf);
             net_inet_ip_opts_apply(s);
             return 0;
         }
@@ -623,17 +734,19 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             int alg;
             if (!optval || !optlen)
                 return -EINVAL;
-            /* The name is a NUL-terminated string, not a fixed-size blob: Linux
-             * treats optlen as the buffer size and reads up to it.  Truncating
-             * at 15 chars means an over-long name is rejected as unknown
-             * rather than silently matching a prefix. */
-            n = optlen < sizeof(name) ? optlen : sizeof(name);
+            /* optlen is the caller's bound; input need not contain a NUL.
+             * Reserve one byte for our terminator so a full-length name is
+             * parsed intact, while longer names cannot match a valid prefix. */
+            n = optlen < sizeof(name) - 1 ? optlen : sizeof(name) - 1;
             memcpy(name, optval, n);
-            name[n - 1] = '\0';
+            name[n] = '\0';
             alg = tcp_cong_alg_parse(name);
             if (alg < 0)
                 return -ENOPROTOOPT;
+            uint64_t sf = net_sock_lock(s);
             s->tcp_congestion = (uint8_t)alg;
+            net_tcp_options_changed_locked(s);
+            net_sock_unlock(s, sf);
             /* Apply immediately to a live pcb as well as to future ones, so
              * the option means what the caller just asked for.  Linux allows
              * this on an established connection.  Switching does not reset the
@@ -641,12 +754,7 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
              * says what a connection entering congestion avoidance without a
              * congestion event behind it must do, and that is exactly this
              * case. */
-            {
-                uint64_t flags = a20_lwip_lock();
-                if (s->tcp)
-                    a20_net_cong_apply(s->tcp, (uint8_t)alg);
-                a20_lwip_unlock(flags);
-            }
+            net_tcp_options_apply_current(s, NET_TCP_APPLY_CONGESTION);
             return 0;
         }
         if (!optval || optlen < sizeof(int))
@@ -654,19 +762,14 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         int val;
         memcpy(&val, optval, sizeof(val));
         switch (optname) {
-        case TCP_NODELAY:
+        case TCP_NODELAY: {
+            uint64_t sf = net_sock_lock(s);
             s->tcp_nodelay = val != 0;
-            {
-                uint64_t flags = a20_lwip_lock();
-                if (s->tcp) {
-                    if (s->tcp_nodelay)
-                        tcp_nagle_disable(s->tcp);
-                    else
-                        tcp_nagle_enable(s->tcp);
-                }
-                a20_lwip_unlock(flags);
-            }
+            net_tcp_options_changed_locked(s);
+            net_sock_unlock(s, sf);
+            net_tcp_options_apply_current(s, NET_TCP_APPLY_NODELAY);
             return 0;
+        }
         case TCP_CORK:
         case TCP_MAXSEG:
         case TCP_SYNCNT:
@@ -676,39 +779,36 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         case TCP_QUICKACK:
         case TCP_USER_TIMEOUT:
             return 0;
-        case TCP_KEEPIDLE:
+        case TCP_KEEPIDLE: {
             if (val <= 0)
                 return -EINVAL;
+            uint64_t sf = net_sock_lock(s);
             s->keep_idle = val;
-            {
-                uint64_t flags = a20_lwip_lock();
-                if (s->tcp)
-                    s->tcp->keep_idle = (u32_t)val * 1000U;
-                a20_lwip_unlock(flags);
-            }
+            net_tcp_options_changed_locked(s);
+            net_sock_unlock(s, sf);
+            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_IDLE);
             return 0;
-        case TCP_KEEPINTVL:
+        }
+        case TCP_KEEPINTVL: {
             if (val <= 0)
                 return -EINVAL;
+            uint64_t sf = net_sock_lock(s);
             s->keep_intvl = val;
-            {
-                uint64_t flags = a20_lwip_lock();
-                if (s->tcp)
-                    s->tcp->keep_intvl = (u32_t)val * 1000U;
-                a20_lwip_unlock(flags);
-            }
+            net_tcp_options_changed_locked(s);
+            net_sock_unlock(s, sf);
+            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_INTVL);
             return 0;
-        case TCP_KEEPCNT:
+        }
+        case TCP_KEEPCNT: {
             if (val <= 0)
                 return -EINVAL;
+            uint64_t sf = net_sock_lock(s);
             s->keep_cnt = val;
-            {
-                uint64_t flags = a20_lwip_lock();
-                if (s->tcp)
-                    s->tcp->keep_cnt = (u32_t)val;
-                a20_lwip_unlock(flags);
-            }
+            net_tcp_options_changed_locked(s);
+            net_sock_unlock(s, sf);
+            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_CNT);
             return 0;
+        }
         default:
             return -ENOPROTOOPT;
         }
@@ -721,13 +821,17 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
     if (level == SOL_SOCKET && optname == SO_RCVTIMEO) {
         if (!optval || optlen < sizeof(long) * 2)
             return -EINVAL;
+        uint64_t sf = net_sock_lock(s);
         s->recv_timeout_ticks = timeval_to_ticks(optval, optlen);
+        net_sock_unlock(s, sf);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_SNDTIMEO) {
         if (!optval || optlen < sizeof(long) * 2)
             return -EINVAL;
+        uint64_t sf = net_sock_lock(s);
         s->send_timeout_ticks = timeval_to_ticks(optval, optlen);
+        net_sock_unlock(s, sf);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_REUSEADDR) {
@@ -735,21 +839,15 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             return -EINVAL;
         int val;
         memcpy(&val, optval, sizeof(val));
+        uint64_t sf = net_sock_lock(s);
         s->reuseaddr = val != 0;
+        net_tcp_options_changed_locked(s);
+        net_sock_unlock(s, sf);
         /* setsockopt() normally runs between socket() and bind(), and socket()
          * has already made the pcb, so net_inet_tcp_apply_options() saw the old
          * value.  Push it across here or bind() would consult a stale
          * SOF_REUSEADDR. */
-        {
-            uint64_t flags = a20_lwip_lock();
-            if (s->tcp) {
-                if (s->reuseaddr)
-                    ip_set_option(s->tcp, SOF_REUSEADDR);
-                else
-                    ip_reset_option(s->tcp, SOF_REUSEADDR);
-            }
-            a20_lwip_unlock(flags);
-        }
+        net_tcp_options_apply_current(s, NET_TCP_APPLY_REUSEADDR);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_REUSEPORT) {
@@ -757,7 +855,9 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             return -EINVAL;
         int val;
         memcpy(&val, optval, sizeof(val));
+        uint64_t sf = net_sock_lock(s);
         s->reuseport = val != 0;
+        net_sock_unlock(s, sf);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_KEEPALIVE) {
@@ -765,17 +865,11 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
             return -EINVAL;
         int val;
         memcpy(&val, optval, sizeof(val));
+        uint64_t sf = net_sock_lock(s);
         s->keepalive = val != 0;
-        {
-            uint64_t flags = a20_lwip_lock();
-            if (s->tcp) {
-                if (s->keepalive)
-                    s->tcp->so_options |= SOF_KEEPALIVE;
-                else
-                    s->tcp->so_options &= ~SOF_KEEPALIVE;
-            }
-            a20_lwip_unlock(flags);
-        }
+        net_tcp_options_changed_locked(s);
+        net_sock_unlock(s, sf);
+        net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEPALIVE);
         return 0;
     }
     if (level == SOL_SOCKET &&
@@ -805,22 +899,17 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         uint32_t want = net_socket_buf_ceiling(s, is_snd);
         if ((uint32_t)val > want)
             val = (int)want;
+        uint64_t sf = net_sock_lock(s);
         if (is_snd)
             s->snd_buf = (uint32_t)val;
         else
             s->rcv_buf = (uint32_t)val;
-        /* Apply now if a pcb exists, so an established connection does not have
-         * to wait for the next connect(), and so a raised ceiling lands on it
-         * immediately rather than on the next connection.
-         * net_inet_tcp_buf_apply() writes the value back onto the pcb in both
-         * directions and is also where the boundary between "queued" and "in
-         * flight" is documented, so do not invent that here. */
-        {
-            uint64_t flags = a20_lwip_lock();
-            if (s->tcp)
-                net_inet_tcp_buf_apply(s, s->tcp);
-            a20_lwip_unlock(flags);
-        }
+        net_tcp_options_changed_locked(s);
+        net_sock_unlock(s, sf);
+        /* Apply only this buffer field: snd_buf is available credit, so an
+         * unrelated option must never reset it. */
+        net_tcp_options_apply_current(
+            s, is_snd ? NET_TCP_APPLY_SNDBUF : NET_TCP_APPLY_RCVBUF);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_PASSCRED) {
@@ -853,6 +942,18 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
     if (!optval || !optlen)
         return -EINVAL;
     int val = 0;
+    uint8_t tcp_congestion, tcp_nodelay, keepalive, reuseaddr, reuseport;
+    int keep_idle, keep_intvl, keep_cnt;
+    uint64_t sf = net_sock_lock(s);
+    tcp_congestion = s->tcp_congestion;
+    tcp_nodelay = s->tcp_nodelay;
+    keepalive = s->keepalive;
+    reuseaddr = s->reuseaddr;
+    reuseport = s->reuseport;
+    keep_idle = s->keep_idle;
+    keep_intvl = s->keep_intvl;
+    keep_cnt = s->keep_cnt;
+    net_sock_unlock(s, sf);
     if (level == SOL_SOCKET && optname == SO_TYPE)
         val = s->type;
     else if (level == SOL_SOCKET && optname == SO_ERROR)
@@ -873,11 +974,11 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
          * it is the only place the clamp exists at all. */
         val = (int)net_socket_buf_in_force(s, optname == SO_SNDBUF);
     else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
-        val = s->reuseaddr;
+        val = reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
-        val = s->reuseport;
+        val = reuseport;
     else if (level == SOL_SOCKET && optname == SO_KEEPALIVE)
-        val = s->keepalive;
+        val = keepalive;
     else if (level == SOL_SOCKET && optname == SO_PASSCRED)
         val = s->passcred;
     else if (level == SOL_SOCKET) {
@@ -920,7 +1021,12 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         case IP_TTL:                  val = ttl; break;
         case IP_TOS:                  val = tos; break;
         case A20_IP_MULTICAST_TTL_WIRE:  val = mc_ttl; break;
-        case A20_IP_MULTICAST_LOOP_WIRE: val = s->mc_loop; break;
+        case A20_IP_MULTICAST_LOOP_WIRE: {
+            uint64_t irq = net_sock_lock(s);
+            val = s->mc_loop;
+            net_sock_unlock(s, irq);
+            break;
+        }
         /* -EOPNOTSUPP rather than -ENOPROTOOPT: the option exists in the Linux
          * ABI, this kernel just cannot honour it (IP_OPTIONS needs a
          * per-packet option buffer lwIP's output path has no room for). */
@@ -942,10 +1048,10 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
              * setsockopt applies to the pcb as well -- a connection that was
              * accepted inherits its listener's algorithm, so the socket's own
              * field is not always the answer. */
-            uint8_t alg = s->tcp_congestion;
+            uint8_t alg = tcp_congestion;
 #if LWIP_TCP_CUBIC
             uint64_t flags = a20_lwip_lock();
-            if (s->tcp)
+            if (s->tcp && s->tcp->state != LISTEN)
                 alg = s->tcp->cong_alg;
             a20_lwip_unlock(flags);
 #else
@@ -970,7 +1076,7 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         }
         switch (optname) {
         case TCP_NODELAY:
-            val = s->tcp_nodelay;
+            val = tcp_nodelay;
             break;
         case TCP_MAXSEG:
             val = 1460;
@@ -985,29 +1091,32 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
             val = 0;
             break;
         case TCP_KEEPIDLE:
-            if (s->keep_idle > 0) {
-                val = s->keep_idle;
+            if (keep_idle > 0) {
+                val = keep_idle;
             } else {
                 uint64_t flags = a20_lwip_lock();
-                val = s->tcp ? (int)(s->tcp->keep_idle / 1000U) : 7200;
+                val = s->tcp && s->tcp->state != LISTEN
+                    ? (int)(s->tcp->keep_idle / 1000U) : 7200;
                 a20_lwip_unlock(flags);
             }
             break;
         case TCP_KEEPINTVL:
-            if (s->keep_intvl > 0) {
-                val = s->keep_intvl;
+            if (keep_intvl > 0) {
+                val = keep_intvl;
             } else {
                 uint64_t flags = a20_lwip_lock();
-                val = s->tcp ? (int)(s->tcp->keep_intvl / 1000U) : 75;
+                val = s->tcp && s->tcp->state != LISTEN
+                    ? (int)(s->tcp->keep_intvl / 1000U) : 75;
                 a20_lwip_unlock(flags);
             }
             break;
         case TCP_KEEPCNT:
-            if (s->keep_cnt > 0) {
-                val = s->keep_cnt;
+            if (keep_cnt > 0) {
+                val = keep_cnt;
             } else {
                 uint64_t flags = a20_lwip_lock();
-                val = s->tcp ? (int)s->tcp->keep_cnt : 9;
+                val = s->tcp && s->tcp->state != LISTEN
+                    ? (int)s->tcp->keep_cnt : 9;
                 a20_lwip_unlock(flags);
             }
             break;

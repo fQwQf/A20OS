@@ -23,6 +23,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <time.h>
 #include <netinet/in.h>
@@ -657,8 +658,129 @@ static void test_congestion(void)
     close(fd);
 }
 
-int main(void)
+/* Exercise TCP option metadata while the socket's pcb has the smaller
+ * tcp_pcb_listen layout, then prove the saved values reach a real accepted
+ * child.  The options are deliberately set after listen(), when s->tcp is no
+ * longer a full tcp_pcb.  The receive timeout bounds a failed handshake so
+ * this gate cannot hang indefinitely. */
+static void test_listen_tcp_option_inheritance(void)
 {
+    int listener = -1, accepted = -1, client;
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
+    struct timeval timeout = { 5, 0 };
+    int one = 1, idle = 37, intvl = 9, cnt = 4, got = 0;
+    char cong[16] = { 0 };
+    socklen_t optlen;
+    pid_t child;
+    int status = 0;
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0) {
+        ok(0, "open a TCP listener for post-listen option metadata");
+        return;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(0x7F000001);
+    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        getsockname(listener, (struct sockaddr *)&addr, &addrlen) < 0 ||
+        listen(listener, 4) < 0) {
+        ok(0, "bind and listen before setting TCP options");
+        close(listener);
+        return;
+    }
+    ok(1, "bind and listen before setting TCP options");
+
+    ok(setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                  sizeof(timeout)) == 0,
+       "listener accept has a bounded timeout");
+    ok(setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) == 0,
+       "TCP_NODELAY can be set after listen");
+    optlen = sizeof(got);
+    ok(getsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &got, &optlen) == 0 &&
+       got == one,
+       "TCP_NODELAY reads back from a listening socket");
+
+    ok(setsockopt(listener, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) == 0,
+       "TCP_KEEPIDLE can be set after listen");
+    ok(setsockopt(listener, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) == 0,
+       "TCP_KEEPINTVL can be set after listen");
+    ok(setsockopt(listener, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) == 0,
+       "TCP_KEEPCNT can be set after listen");
+    ok(setsockopt(listener, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) == 0,
+       "SO_KEEPALIVE can be set after listen");
+    ok(setsockopt(listener, IPPROTO_TCP, TCP_CONGESTION, "reno", 4) == 0,
+       "TCP_CONGESTION can be set after listen");
+    optlen = sizeof(cong);
+    ok(getsockopt(listener, IPPROTO_TCP, TCP_CONGESTION, cong, &optlen) == 0 &&
+       strcmp(cong, "reno") == 0,
+       "TCP_CONGESTION reads back from a listening socket");
+
+    child = fork();
+    if (child < 0) {
+        ok(0, "fork a TCP client for listener option inheritance");
+        close(listener);
+        return;
+    }
+    if (child == 0) {
+        int ttl = 64;
+        close(listener);
+        alarm(5);
+        client = socket(AF_INET, SOCK_STREAM, 0);
+        if (client < 0 ||
+            setsockopt(client, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0 ||
+            connect(client, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+            _exit(1);
+        close(client);
+        _exit(0);
+    }
+    accepted = accept(listener, NULL, NULL);
+    ok(accepted >= 0, "a real client completes connect/accept");
+    if (accepted >= 0) {
+        optlen = sizeof(got);
+        ok(getsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &got, &optlen) == 0 &&
+           got == one,
+           "accepted child inherits TCP_NODELAY");
+        optlen = sizeof(got);
+        ok(getsockopt(accepted, IPPROTO_TCP, TCP_KEEPIDLE, &got, &optlen) == 0 &&
+           got == idle,
+           "accepted child inherits TCP_KEEPIDLE");
+        optlen = sizeof(got);
+        ok(getsockopt(accepted, IPPROTO_TCP, TCP_KEEPINTVL, &got, &optlen) == 0 &&
+           got == intvl,
+           "accepted child inherits TCP_KEEPINTVL");
+        optlen = sizeof(got);
+        ok(getsockopt(accepted, IPPROTO_TCP, TCP_KEEPCNT, &got, &optlen) == 0 &&
+           got == cnt,
+           "accepted child inherits TCP_KEEPCNT");
+        optlen = sizeof(got);
+        ok(getsockopt(accepted, SOL_SOCKET, SO_KEEPALIVE, &got, &optlen) == 0 &&
+           got == one,
+           "accepted child inherits SO_KEEPALIVE");
+        memset(cong, 0, sizeof(cong));
+        optlen = sizeof(cong);
+        ok(getsockopt(accepted, IPPROTO_TCP, TCP_CONGESTION, cong, &optlen) == 0 &&
+           strcmp(cong, "reno") == 0,
+           "accepted child inherits TCP_CONGESTION");
+        close(accepted);
+    }
+    close(listener);
+    if (waitpid(child, &status, 0) != child)
+        status = -1;
+    ok(status == 0 || (status != -1 && WIFEXITED(status) &&
+                       WEXITSTATUS(status) == 0),
+       "forked client connected successfully");
+}
+
+int main(int argc, char **argv)
+{
+    int lwip_listener = argc == 2 && strcmp(argv[1], "--lwip-listener") == 0;
+    if (argc != 1 && !lwip_listener) {
+        fprintf(stderr, "usage: netopt_test [--lwip-listener]\n");
+        return 2;
+    }
+
     test_ip_options();
     test_multicast();
     test_fionbio();
@@ -668,6 +790,8 @@ int main(void)
     test_proc_net_rows();
     test_sock_buffers();
     test_congestion();
+    if (lwip_listener)
+        test_listen_tcp_option_inheritance();
 
     if (failures == 0) {
         printf("%s: PASS (%d checks)\n", TEST_NAME, checks);
