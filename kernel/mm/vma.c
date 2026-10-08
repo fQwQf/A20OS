@@ -211,7 +211,7 @@ static void mm_seg_index_rebuild(mm_struct_t *mm)
      * count, so it correctly contributes nothing here. */
     uint16_t old_count = mm->seg_index_count;
     for (uint16_t i = 0; i < old_count; i++) {
-        mm_seg_put(mm->seg_index[i]);
+        vma_put(mm, mm->seg_index[i]);
         mm->seg_index[i] = NULL;
     }
 
@@ -231,7 +231,7 @@ static void mm_seg_index_rebuild(mm_struct_t *mm)
              * difference is whether a reader has to take the word for it. */
             mm_seg_index_overflow++;
             for (uint16_t i = 0; i < count; i++) {
-                mm_seg_put(mm->seg_index[i]);
+                vma_put(mm, mm->seg_index[i]);
                 mm->seg_index[i] = NULL;
             }
             mm->seg_index_count = 0;
@@ -261,7 +261,7 @@ void mm_seg_index_clear(mm_struct_t *mm)
     /* Keyed on the count, not on state == 1: a dirty index (state 0) still
      * owns every reference the last valid pass took. */
     for (uint16_t i = 0; i < mm->seg_index_count; i++)
-        mm_seg_put(mm->seg_index[i]);
+        vma_put(mm, mm->seg_index[i]);
     memset(mm->seg_index, 0, sizeof(mm->seg_index));
     mm->seg_index_count = 0;
     mm->seg_index_state = 0;

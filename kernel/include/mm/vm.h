@@ -418,8 +418,8 @@ struct mm_seg *mm_seg_find(mm_struct_t *mm, vaddr_t addr);
  * mutation, and the reason it is separate from mm_seg_index_clear(). */
 void mm_seg_index_invalidate(mm_struct_t *mm);
 
-/* Drop the index's owned references.  Called when the address space is torn
- * down; the invalidation path does not, because it cannot allocate. */
+/* Drop the index's owned references and leave it dirty for a later rebuild.
+ * Caller holds mm->lock, or is tearing down an unshared mm. */
 void mm_seg_index_clear(mm_struct_t *mm);
 
 /* Times an address space was found over MM_SEG_INDEX_CAPACITY mappings, so
