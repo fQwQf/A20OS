@@ -367,6 +367,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         TASK_CTX_PAGE_TABLE(ctx) = child_as;
         TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
         arch_task_context_set_initial_sp(ctx, trap, ks_top);
+        arch_task_context_copy_user_fp(ctx);
         t->kstack = (uint64_t)(uintptr_t)ctx;
     } else {
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, NULL);
