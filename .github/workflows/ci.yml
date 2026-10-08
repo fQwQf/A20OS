@@ -175,6 +175,9 @@ jobs:
             .kernel-build/*/kernel.elf
             build/images/*.img
             build/repo/${{ matrix.arch }}/
+          # Kernel ELFs live under .kernel-build. Keep the glob narrow so the
+          # artifact includes only the explicitly matched build output there.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
@@ -228,6 +231,7 @@ jobs:
         with:
           name: a20os-kernel-${{ matrix.arch }}
           path: .kernel-build/*/kernel.elf
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -306,11 +310,8 @@ jobs:
           # pre 无附加镜像）。覆盖面按 syscall 分区挑的 rights algebra /
           # BPF / EventQ / VMOL / DMA 五项，不与上面 Linux 侧用例重叠。
           #
-          # 这一行在 main 上就是红的：user/tests/test_native_contract.c:466 的
-          # vmol-leak-vmo 断言失败（a20_vm_unmap 之后 objstat 的 vmos 计数没回到
-          # 基线）。已在 git archive HEAD 的干净副本上冷构建复现，失败点相同，
-          # 与待合入的改动无关。接线本身是对的（它第一次让这个缺陷可见），但要
-          # 转绿得先修 mm/ 的 VMO 释放路径。详见 docs/testing-gates.md 的
+          # VMOL 同时检查 unmap 后 VMO 对象和页面计数回到基线，防止映射索引
+          # 的陈旧引用跨过 munmap 完成边界。详见 docs/testing-gates.md 的
           # “Native 门禁的架构覆盖现状”。
           make smoke-native-contract
         timeout-minutes: 60
@@ -344,5 +345,6 @@ jobs:
         with:
           name: smoke-riscv64-logs
           path: .kernel-build/smoke/
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14

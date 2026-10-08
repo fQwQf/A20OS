@@ -1,6 +1,6 @@
 # CI/CD 详解
 
-最后核实：2026-09-14。
+最后核实：2026-10-08。
 
 ## 三个 workflow
 
@@ -28,8 +28,8 @@ workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner�
 依赖清单刻意与 [../build.md](../build.md) 的"环境准备"一节一一对应；
 **改动一边时必须同步另一边**。
 
-CI 的所有 job 通过 `container:` 运行在这个镜像里，因此"CI 挂了本地
-复现"就是一条命令：
+CI 的构建和 QEMU job 通过 `container:` 运行在这个镜像里；源码契约门禁和
+矩阵/镜像名解析 job 使用裸 runner。构建或运行失败时可在同一镜像复现：
 
 ```bash
 docker run --rm -it -v "$PWD:/src" -w /src \
@@ -79,7 +79,8 @@ ci-kernel-arches（几秒）：make -s print-ci-kernel-arches，把 CI 的内核
 
 kernel-build-<arch> ×7 并行（容器，无 submodule）：
     → make check-<arch>-bringup       # = make ARCH=<arch> BRINGUP=1 kernel-only
-    → upload-artifact（kernel.elf）    # 架构专属构建断裂没有日志很难定位
+    → upload-artifact（kernel.elf；include-hidden-files 显式开启）
+                                      # 架构专属构建断裂没有日志很难定位
 
 build-<arch> ×4 并行：
   checkout（核心构建的第三方源码全部 vendored；actions/checkout 仍带 submodules: recursive 作为防御）
@@ -193,8 +194,11 @@ x86 宿主上本来就只有 TCG，各 smoke 目标的超时按 TCG 校准，适
 ## release.yml 的工作分解
 
 ```
+check-release-version（轻量 runner）：checkout → 校验 A20OS_VERSION 与
+  A20OS_RELEASE 的 20.<version> 配对；tag ref 还要求 tag 严格等于 v<version>
+
 每个架构并行：
-  装发布密钥（secret A20_REPO_SIGNING_KEY；缺失则不签名 + 醒目警告）
+  装发布密钥（默认要求 secret A20_REPO_SIGNING_KEY；缺失则失败）
   → dev-build → pkg-repo → image-world base + devel
   → 上传 artifact（镜像 + 各架构仓库目录 + 公钥）
 
@@ -209,16 +213,18 @@ release（等全部架构完成）：
 
 ### 发布准备（一次性）
 
-1. **发布密钥**（可选但推荐）：
+1. **发布密钥**（默认必需）：
    ```bash
    openssl genrsa -out a20os-release.rsa 4096
    openssl rsa -in a20os-release.rsa -pubout -out a20os-release.rsa.pub
    ```
    私钥内容粘进 Settings → Secrets → Actions 的
    `A20_REPO_SIGNING_KEY`；公钥由 workflow 从私钥导出并随 artifact 上传，
-   无需入库；
+   无需入库。缺少该 secret 时发布默认失败。只有管理员明确将 repository
+   variable `ALLOW_UNSIGNED_RELEASE` 设为 `1`，才允许无签名发布；这会使产物
+   无法通过仓库签名验证，不应作为 CI 修复手段；
 2. 打注解 tag（tag 正文会成为 Release 的发布说明）：
-   `git tag -a v0.13 -m "..." && git push origin v0.13`。
+   内核版本与候选提交通过验证后，例如 `git tag -a v0.17 -m "..." && git push origin v0.17`。
 
 Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages.yml`
 的官网站点，与 release 无关。
@@ -232,3 +238,11 @@ Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages
 | `unexpected end of file`（读包时） | 包不是 mka20pkg 产物：apk v2 的分段 tar 格式约束见 [apk-format.md](apk-format.md) |
 | 容器里 `git` 报 dubious ownership | 加 `git config --global --add safe.directory "$GITHUB_WORKSPACE"`（workflow 已含） |
 | loongarch64 工具链缺失 | 容器默认装 `gcc-loongarch64-linux-gnu`（Debian cross-ports）；个别快照期缺失时按 docs/build.md 用 Loongson 官方工具链 |
+
+## 2026-10-08 远端 CI / Release 失败核对
+
+- CI run [37746777046](https://github.com/fQwQf/A20OS/actions/runs/37746777046)：七个架构的纯内核 bring-up 均完成编译，但 `kernel-build-*` 的 artifact 上传全部因 glob `.kernel-build/*/kernel.elf` 指向隐藏目录、而 `upload-artifact@v4` 默认排除隐藏文件而失败。`ci.yml` 对两个包含该 glob 的上传步骤显式启用 `include-hidden-files`，并将匹配范围限制在 kernel ELF。
+- 同一 CI run 的 `toolchain-gates` 因 Makefile 发现 runner 安装了 Conda，就强制调用不存在的 `/usr/share/miniconda/envs/a20os` 而失败。构建与测试并不依赖 Conda；顶层与用户态 Makefile 现统一默认使用 `python3`，不再探测或自动选择 Conda。
+- 同一 CI run 的 `smoke-riscv64` 在 `smoke-native-contract` 的 `vmol-leak-vmo` 断言失败（VMO unmap 后对象计数未恢复）。这是运行时缺陷，不能通过跳过或放宽 smoke 门禁修复。
+- Release runs [37746751131](https://github.com/fQwQf/A20OS/actions/runs/37746751131)、[37746751023](https://github.com/fQwQf/A20OS/actions/runs/37746751023) 和 [37746750856](https://github.com/fQwQf/A20OS/actions/runs/37746750856) 的四架构 job 都在 `mka20repo: no .apk files in build/repo/<arch>` 失败。日志中 `PKG_SIGN_KEY` 与 `PKG_KEY_NAME` 已设置，签名安装不是失败点；这些 run 所使用的 `pkg-repo` Make target 未依赖 `pkgs`，因此没有先生成 `.apk`。该缺陷已在当前 HEAD 的 `pkg-repo: pkgs` 和 `image-world: pkg-repo` 依赖链修复，本轮增加回归检查固定现有依赖，没有重复修改已修复的 Make 规则。
+- Release workflow 现在先执行 `check-release-version`，核验内核版本与 Linux release 配对；tag ref 还要求 `v<version>` 与 header 完全一致。该检查不会按 tag 改写二进制版本。手动从 branch dispatch 会运行构建与 smoke 验收，但最终发布 job 仅对 tag ref 开启，避免把 `main` 等 branch 名误当 release tag。
