@@ -13,6 +13,13 @@
 #include "trap_frame.h"
 #include "firmware.h"
 
+/* x86_64 does not save user FP state on syscall entry.  Fork must therefore
+ * snapshot the live state while still in the syscall before the child is
+ * first scheduled; copying the parent's saved task context could be stale. */
+#define ARCH_TASK_CONTEXT_COPY_USER_FP(ctx) \
+    __asm__ __volatile__("fxsave64 (%0)" \
+                         : : "r"((ctx)->fpu) : "memory")
+
 
 /* direct exec leaves lose their text PTE under parallel
  * loader lifetimes, which shows up as dynamic-loader SIGSEGVs. */

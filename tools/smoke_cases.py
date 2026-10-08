@@ -173,6 +173,7 @@ CASES: dict[str, dict] = {
                            'CONFIG_KERNEL_PREEMPT=1'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/x86-fp-preserve.log',
         'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': [
+            'fork_fpu_probe',
             'mkdir -p /mnt',
             'a20mount /dev/vdb /mnt ext4 && x86guard /mnt/x86guard-probe.tmp',
             'sync', 'poweroff']},
@@ -185,11 +186,12 @@ CASES: dict[str, dict] = {
                  '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp4-preempt/ext4.img,if=none,format=raw,id=x1',
                  '-device', 'virtio-blk-pci,drive=x1',
                  '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp4-preempt/kernel.elf'],
-        'expect': [r'X86GUARD: PASS bytes=8388608 ops=write\+fsync\+read',
+        'expect': [r'FORK_FPU: PASS raw-fork xmm0\+xmm15\+x87cw\+mxcsr',
+                   r'X86GUARD: PASS bytes=8388608 ops=write\+fsync\+read',
                    'System is going down for power-off'],
-        'forbid': ['X86GUARD: FAIL', 'KERNEL PANIC', 'kernel panic'],
+        'forbid': ['FORK_FPU: FAIL', 'X86GUARD: FAIL', 'KERNEL PANIC', 'kernel panic'],
         'timeout_msg': False,
-        'pass_msg': 'smoke-x86-fp-preserve: PASS (4CPU block-backed syscall FP-state regression); log saved to $log',
+        'pass_msg': 'smoke-x86-fp-preserve: PASS (4CPU fork inheritance + block-backed syscall FP-state regressions); log saved to $log',
     },
     'smoke-dual-input': {
         'gate': {'mem': '1G', 'cpus': '1'},
