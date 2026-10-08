@@ -159,6 +159,10 @@ kstack 自底向上叠着 `[被中断内核帧][IRQ 帧][trap_context][handler �
 必须保留这份保护。否则任务迁移会让解锁访问另一 CPU 的池，即使只有一个 CPU，
 任务切换也会让不同任务交错使用同一池的嵌套深度。页表 cursor 的初始深度由同一次
 受保护的取锁操作返回，避免在保护建立前读取 CPU 本地状态。
+cursor 批量解锁先在保护下计算需要弹出的节点数；最后一次解锁允许任务迁移，
+因此后续循环只能读取本地剩余计数，不能重新检查旧 CPU 的节点池。宿主回归
+`test_pt_mcs_preempt_window.py` 在最后一次恢复抢占时模拟迁移及旧 CPU 被另一任务
+复用节点池，换回旧循环会失败。
 
 效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
 A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
@@ -167,7 +171,21 @@ A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为
 跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的
 "只在 pick 时轮转"限制随之消失。
 
+x86 首次任务入口可能恢复开启中断的初始 flags。返回用户态的汇编入口先关闭
+maskable IRQ，再发布 TSS、GS、用户 FS 和返回帧，最终由 `iretq` 恢复用户 flags。
+内核 IRQ 尾声也恢复入口保存的 FS base，避免打断过渡窗口后遗留内核 canary stub。
+x86 的 fork/clone 会将 syscall 时的 live FP 状态保存到子任务的初始 context；
+不能复制可能过期的父任务已保存 context，也不能用新进程的默认 FP 状态替代继承。
+
 ## 5. Tokenized Park/Wake
+
+子进程等待的扫描与注册也必须连续：`proc_wait4()` 在 `tasklist_lock` 下扫描，
+仍持有该锁时取得 `park_lock`，发布 `waiting_for_child` 并准备 park token，
+最后释放两把锁再提交休眠。子进程退出通知同样经过 `tasklist_lock`，不能落在
+“扫描结束但尚未注册”之间。原先在锁前检查的全局 waiter 计数快速路径已经删除：
+即使计数改成原子操作，注册前读到零仍会漏掉这次通知。僵尸 leader 仍有活动线程时，等待应继续而不是返回
+`ECHILD`；最后一个线程退出后需要唤醒 leader 的父进程。普通 pidfd 的可读条件
+同样是整个线程组退出，而不是 leader 单独成为僵尸。
 
 所有可能丢失唤醒的阻塞路径都遵循同一顺序：
 
