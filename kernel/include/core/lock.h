@@ -252,7 +252,17 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
         if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra)
             site = NULL;
     }
-    while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
+    for (;;) {
+        /* Publish non-preemptibility before ownership becomes visible.  If an
+         * enabled timer IRQ lands after the exchange but before this counter
+         * was raised, its IRQ-return scheduler could switch the lock owner
+         * away and leave the next task spinning forever on this CPU.  A failed
+         * attempt immediately drops the count below, before any wait/spin. */
+        preempt_disable();
+        if (!__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE))
+            break;
+        preempt_enable();
+
         __atomic_fetch_add(&lock->contended_acquires, 1, __ATOMIC_RELAXED);
         if (site)
             __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
@@ -325,11 +335,8 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
 #endif
-    /* Every critical section is a non-preemptible one.  The bump comes after
-     * the spin loop so that waiting for the lock does not also disable
-     * preemption -- otherwise a task blocked on a lock would never be a legal
-     * switch-out target at the IRQ return point. */
-    preempt_disable();
+    /* A successful attempt kept its preempt count raised from before the
+     * ownership exchange; failed attempts dropped it before waiting. */
 }
 
 static inline void spin_lock(spinlock_t *lock) {
