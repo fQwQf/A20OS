@@ -10,11 +10,127 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 static int fail(const char *what)
 {
     printf("SYSCALL_SMOKE: FAIL %s errno=%d\n", what, errno);
     return 1;
+}
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+
+static int thread_wait_pipe[2];
+static int thread_wait_pid;
+static int thread_wait_pidfd;
+static int thread_wait_error;
+
+/* Create a process from a non-leader thread, then let that thread exit.  The
+ * main thread must still be able to wait for its thread-group child's pidfd. */
+static void *thread_spawn_child(void *unused)
+{
+    (void)unused;
+    pid_t pid = fork();
+    if (pid < 0) {
+        thread_wait_error = errno ? errno : ECHILD;
+        return NULL;
+    }
+    if (pid == 0) {
+        close(thread_wait_pipe[1]);
+        char byte;
+        if (read(thread_wait_pipe[0], &byte, 1) != 1)
+            _exit(62);
+        _exit(61);
+    }
+
+    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd < 0) {
+        thread_wait_error = errno ? errno : ECHILD;
+        return NULL;
+    }
+    thread_wait_pid = (int)pid;
+    thread_wait_pidfd = pidfd;
+    return NULL;
+}
+
+static int test_thread_group_pidfd_wait(void)
+{
+    if (pipe(thread_wait_pipe) < 0)
+        return fail("thread-wait-pipe");
+    thread_wait_pid = -1;
+    thread_wait_pidfd = -1;
+    thread_wait_error = 0;
+
+    pthread_t helper;
+    int err = pthread_create(&helper, NULL, thread_spawn_child, NULL);
+    if (err != 0) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        errno = err;
+        return fail("thread-wait-create");
+    }
+    err = pthread_join(helper, NULL);
+    if (err != 0) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        errno = err;
+        return fail("thread-wait-join");
+    }
+    if (thread_wait_error || thread_wait_pid <= 0 || thread_wait_pidfd < 0) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        close(thread_wait_pidfd);
+        errno = thread_wait_error ? thread_wait_error : ECHILD;
+        return fail("thread-wait-spawn");
+    }
+
+    siginfo_t info;
+    memset(&info, 0xa5, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)thread_wait_pidfd, &info,
+               WEXITED | WNOHANG) < 0) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        close(thread_wait_pidfd);
+        return fail("thread-wait-live-child");
+    }
+    if (info.si_pid != 0) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        close(thread_wait_pidfd);
+        return fail("thread-wait-nohang-result");
+    }
+
+    if (write(thread_wait_pipe[1], "x", 1) != 1) {
+        close(thread_wait_pipe[0]);
+        close(thread_wait_pipe[1]);
+        close(thread_wait_pidfd);
+        return fail("thread-wait-release-child");
+    }
+    close(thread_wait_pipe[0]);
+    close(thread_wait_pipe[1]);
+
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)thread_wait_pidfd, &info,
+               WEXITED | WNOWAIT) < 0)
+        return fail("thread-wait-wnowait");
+    if (info.si_signo != SIGCHLD || info.si_code != CLD_EXITED ||
+        info.si_pid != thread_wait_pid || info.si_status != 61)
+        return fail("thread-wait-wnowait-info");
+
+    memset(&info, 0, sizeof(info));
+    if (waitid(P_PIDFD, (id_t)thread_wait_pidfd, &info, WEXITED) < 0)
+        return fail("thread-wait-reap");
+    if (info.si_signo != SIGCHLD || info.si_pid != thread_wait_pid ||
+        info.si_status != 61)
+        return fail("thread-wait-reap-info");
+    close(thread_wait_pidfd);
+
+    errno = 0;
+    if (waitpid(thread_wait_pid, NULL, WNOHANG) != -1 || errno != ECHILD)
+        return fail("thread-wait-reaped-echild");
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -127,9 +243,6 @@ int main(int argc, char **argv)
     /* waitid siginfo_t follows the Linux ABI: on 64-bit targets the
      * siginfo union begins at offset 16 (offset 12 on 32-bit targets).
      * pidfd + WNOWAIT checks both that layout and non-consuming semantics. */
-#ifndef SYS_pidfd_open
-#define SYS_pidfd_open 434
-#endif
     pid = fork();
     if (pid < 0)
         return fail("waitid-fork");
@@ -157,6 +270,9 @@ int main(int argc, char **argv)
     errno = 0;
     if (waitpid(pid, &status, WNOHANG) != -1 || errno != ECHILD)
         return fail("waitid-echild");
+
+    if (test_thread_group_pidfd_wait())
+        return 1;
 
     pid = fork();
     if (pid < 0)
