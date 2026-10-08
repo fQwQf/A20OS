@@ -250,6 +250,11 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
         }
         vma = next;
     }
+    /* Drop the cache's references to the old VMA pass now.  Keeping the index
+     * dirty lets the next lookup rebuild it lazily, while vma_put() defers any
+     * last backing-object release until mm_tlb_invalidate_finish() has crossed
+     * the shootdown boundary. */
+    mm_seg_index_clear(mm);
     return 0;
 }
 
