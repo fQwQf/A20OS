@@ -1,0 +1,47 @@
+{
+  "all_ref_merge_count": 92,
+  "annotated_tag_count": 16,
+  "checks": [
+    "all-source-reachable commit map coverage",
+    "declared removed map and anchor mapping",
+    "ref snapshot and complete ref inventory",
+    "all raw author/committer headers and expected messages",
+    "parent order/count including every merge",
+    "all main/all-ref merge and fork preservation",
+    "annotated tag message/tagger/target mapping",
+    "all unique old/new tree pairs recursively checked for exact non-target entries",
+    "all source ref endpoints resolve to mapped output objects"
+  ],
+  "main_merge_count": 57,
+  "ok": true,
+  "protected_v0.13_ancestry_count": 683,
+  "ref_count": 33,
+  "removed_commit_count": 162,
+  "retained_commit_count": 2194,
+  "retained_metadata_checked": 2194,
+  "source_commit_count": 2356,
+  "source_multi_child_commit_count": 69,
+  "source_ref_snapshot_match": true,
+  "topology_protected_fork_count": 35,
+  "tree_verification": {
+    "deleted_entry_occurrences": 1573,
+    "deleted_paths": [
+      ".zcode",
+      ".zcodeignore",
+      "docs/paper/main.pdf",
+      "driver_manager.d",
+      "elf.d",
+      "exec.d",
+      "fork.d",
+      "packages/overlay/devtools/usr/lib/a20/poweroff-helper",
+      "packages/overlay/pynode/usr/local/bin/a20mount",
+      "qemu-10.0.13+ds",
+      "qemu_10.0.13+ds-0+deb13u1.debian.tar.xz",
+      "qemu_10.0.13+ds-0+deb13u1.dsc",
+      "qemu_10.0.13+ds.orig.tar.xz",
+      "sched.d",
+      "timer_heap.d"
+    ],
+    "unique_tree_pairs_checked": 13932
+  }
+}

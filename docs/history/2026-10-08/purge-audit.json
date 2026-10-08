@@ -1,0 +1,320 @@
+{
+  "audit_scope": {
+    "repository": "/home/fqwqf/OS/A20OS",
+    "refs_scanned": "all refs, via git rev-list --objects --all and all reachable commit histories",
+    "reachable_commit_count": 2356,
+    "rev_list_object_records": 71787,
+    "current_main_head": "fe440e3917b84ba9032fe9816ab7843fd4f79a1a",
+    "v0_13_peeled_commit": "c2dc8d578c369b345904a44a420a98ca54ac996a",
+    "method": "Read-only object/tree inventory; batch-scanned reachable blob signatures and sizes; checked path existence at HEAD and peeled v0.13; inspected add/delete/change commits, relevant text references, and first-parent commit deltas. No refs or working-tree files were modified.",
+    "binary_scan_summary": {
+      "reachable_blob_bytes_streamed": 603159659,
+      "recognized_common_binary_signatures_over_all_blob_versions": 59,
+      "other_blobs_with_NUL_in_first_8192_bytes": 257,
+      "non_qemu_unrecognized_NUL_blob_paths": [
+        "user/external/mksh-cvs2git/mksh.ico"
+      ],
+      "interpretation": "Most opaque binary-signature matches are inside the QEMU upstream source package (test disk/ACPI/firmware/logo/font assets). Outside that package the actionable ELF payloads are poweroff-helper and a20mount; fake-lib is an intentional test stub. The paper PDFs and real images/fonts are classified separately."
+    }
+  },
+  "suggested_rules": {
+    "prefixes": [
+      ".zcode/",
+      "qemu-10.0.13+ds/"
+    ],
+    "exact_paths": [
+      ".zcodeignore",
+      "qemu_10.0.13+ds.orig.tar.xz",
+      "qemu_10.0.13+ds-0+deb13u1.debian.tar.xz",
+      "qemu_10.0.13+ds-0+deb13u1.dsc",
+      "docs/paper/main.pdf",
+      "packages/overlay/devtools/usr/lib/a20/poweroff-helper",
+      "packages/overlay/pynode/usr/local/bin/a20mount"
+    ],
+    "root_globs": [
+      "/*.d"
+    ],
+    "root_glob_matches": [
+      "driver_manager.d",
+      "elf.d",
+      "exec.d",
+      "fork.d",
+      "sched.d",
+      "timer_heap.d"
+    ],
+    "notes": [
+      "The .zcode/ prefix has exactly one tracked file across all refs, the plan markdown listed above.",
+      "No literal root .d directory/path was found; the six matches are dotless root files ending .d.",
+      "A purge of docs/paper/main.pdf, poweroff-helper, or a20mount reaches the peeled v0.13 tree and ancestors; the QEMU source/archive, .zcode paths, and six root .d do not."
+    ]
+  },
+  "findings": [
+    {
+      "path": ".zcode/",
+      "kind": "editor plan metadata",
+      "size_bytes": 9169,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge prefix .zcode/",
+      "purpose_assessment": "Across all reachable refs this directory contains exactly one file: .zcode/plans/plan-sess_8159ef94-1a8a-4f0a-a60a-203e6ce260bd.md (9,169 bytes). Personal work/planning artifact, no build/runtime consumer. Removing .zcode/ avoids leaving an empty directory."
+    },
+    {
+      "path": ".zcodeignore",
+      "kind": "editor metadata",
+      "size_bytes": 2391,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact path",
+      "purpose_assessment": "Personal editor ignore configuration; no project tooling reference found."
+    },
+    {
+      "path": "driver_manager.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 3189,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "elf.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 1939,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "exec.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 3345,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "fork.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 3127,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "sched.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 3174,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "timer_heap.d",
+      "kind": "generated compiler dependency manifest",
+      "size_bytes": 2527,
+      "first_added_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "last_direct_change_commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact root path; candidate root glob /*.d",
+      "purpose_assessment": "Text make dependency output (e.g. `exec.o: kernel/proc/exec.c ...`), not source. Six files total 17,301 bytes; introduced alongside substantive ABI code/tests, so the adding commit will remain nonempty."
+    },
+    {
+      "path": "qemu-10.0.13+ds/",
+      "kind": "downloaded/extracted QEMU 10.0.13 Debian source package",
+      "size_bytes": 278612085,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "d119d4925d97fe2da745a21ffd8df34fa3a6f11f",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge prefix qemu-10.0.13+ds/ after citation/tool updates",
+      "purpose_assessment": "Current main tree contains 35,508 blob entries totaling 278,612,085 bytes (~265.7 MiB). This is a full upstream source tree, not an A20OS build input located by search; however 7 project docs/source files cite files beneath it as evidence. The tree also carries upstream firmware, fonts, logos, ACPI/ROM files and test disk fixtures. Do not remove selected assets individually without checking their role; a prefix purge removes the whole vendored snapshot and requires replacing or editing those citations."
+    },
+    {
+      "path": "qemu_10.0.13+ds.orig.tar.xz",
+      "kind": "downloaded QEMU Debian source package archive/metadata",
+      "size_bytes": 40010016,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact path",
+      "purpose_assessment": "Downloaded source archive/packaging metadata duplicate the extracted QEMU tree; total 40,178,574 bytes. No project build consumer found."
+    },
+    {
+      "path": "qemu_10.0.13+ds-0+deb13u1.debian.tar.xz",
+      "kind": "downloaded QEMU Debian source package archive/metadata",
+      "size_bytes": 156096,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact path",
+      "purpose_assessment": "Downloaded source archive/packaging metadata duplicate the extracted QEMU tree; total 40,178,574 bytes. No project build consumer found."
+    },
+    {
+      "path": "qemu_10.0.13+ds-0+deb13u1.dsc",
+      "kind": "downloaded QEMU Debian source package archive/metadata",
+      "size_bytes": 12462,
+      "first_added_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "last_direct_change_commit": "837b411fba126fc3e4258dc299f7d24aaeb60631",
+      "present_in_v0_13_peeled_tree": false,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact path",
+      "purpose_assessment": "Downloaded source archive/packaging metadata duplicate the extracted QEMU tree; total 40,178,574 bytes. No project build consumer found."
+    },
+    {
+      "path": "docs/paper/main.pdf",
+      "kind": "generated paper PDF",
+      "size_bytes": 157051,
+      "first_added_commit": "324e919ca2cbf2658b0d556729ef8984e9321d6f",
+      "last_direct_change_commit": "ca6a26581f010c35ecf6273559b968bffe8274b0",
+      "present_in_v0_13_peeled_tree": true,
+      "present_in_current_main_tree": true,
+      "suggested_action": "purge exact path per user decision",
+      "purpose_assessment": "Paper render output; same tree contains docs/paper/main.tex (46,795 bytes), so the PDF can be regenerated. It is present in v0.13 and ancestors; this path cleanup changes those historical trees/tag content if applied across all history."
+    },
+    {
+      "path": "packages/overlay/devtools/usr/lib/a20/poweroff-helper",
+      "kind": "prebuilt ELF packaged helper",
+      "size_bytes": 543168,
+      "first_added_commit": "dd3f559c403eaf0ad6373879b1311ad66bf2e6af",
+      "last_direct_change_commit": "2137ef421071699b24e8dbf42b4f62d0b82f7e5e",
+      "present_in_v0_13_peeled_tree": true,
+      "present_in_current_main_tree": false,
+      "suggested_action": "purge exact path per user decision",
+      "purpose_assessment": "ELF payload added with apk packaging and removed by the later XFCE/distro overlay migration. Historically an intentional installed poweroff helper, not an untracked compiler object; v0.13 and ancestors contain it. Check the source/provenance recorded in docs/distro/known-issues.md before interpreting the purge as removal of a required supported feature."
+    },
+    {
+      "path": "packages/overlay/pynode/usr/local/bin/a20mount",
+      "kind": "prebuilt ELF in distro overlay",
+      "size_bytes": 105720,
+      "first_added_commit": "d2b2781a886abee0af8dc4558477b4b35b52c80c",
+      "last_direct_change_commit": "855fa9d4b21595663c882347509a5a2b09f206d7",
+      "present_in_v0_13_peeled_tree": true,
+      "present_in_current_main_tree": false,
+      "suggested_action": "purge exact path per user decision",
+      "purpose_assessment": "Architecture-specific compiled copy placed in the pynode overlay; current source is user/cmds/core/a20mount.c and packages/recipes/a20-corpus-tools.toml builds/installs it for target architecture. Later source-built-userland retirement removes the duplicate overlay ELF. Present at v0.13 and ancestors."
+    },
+    {
+      "path": "user/external/mlibc/tests/rtld/fail-load/fake/fake-lib",
+      "kind": "intentional ELF test fixture",
+      "size_bytes": 137,
+      "first_added_commit": "7da1f021b55b28edbf597784d2d1900fc4831f65",
+      "last_direct_change_commit": "7da1f021b55b28edbf597784d2d1900fc4831f65",
+      "present_in_v0_13_peeled_tree": true,
+      "present_in_current_main_tree": true,
+      "suggested_action": "preserve",
+      "purpose_assessment": "Purpose-built fake shared library copied as libfoo.so/libnative-foo.so by the fail-load test Meson file; deleting would remove test input."
+    },
+    {
+      "path": "user/external/tlse/tlslayer_ssltest.png",
+      "kind": "image in vendored TLSe subtree",
+      "size_bytes": 59550,
+      "first_added_commit": "42f9cc97a87cbbec3763fc0ab7975b6b86871cf1",
+      "last_direct_change_commit": "aa6d85fa24dce8a83cd163226062400cc86b1df3",
+      "present_in_v0_13_peeled_tree": true,
+      "present_in_current_main_tree": true,
+      "suggested_action": "preserve pending asset ownership check",
+      "purpose_assessment": "Real PNG image in the third-party TLSe subtree. No in-repository textual reference was found, but it is a genuine image asset and is outside the purge candidates; do not classify as compiler debris from extension alone."
+    }
+  ],
+  "qemu_references_outside_vendor_tree": [
+    {
+      "file": "kernel/drivers/net/rtl8139.c",
+      "cited_vendor_path": "qemu-10.0.13+ds/hw/net/rtl8139.c"
+    },
+    {
+      "file": "docs/drivers/meta/implementation-status.md",
+      "cited_vendor_path": "qemu-10.0.13+ds/hw/net/rtl8139.c"
+    },
+    {
+      "file": "docs/testing-gates.md",
+      "cited_vendor_path": "qemu-10.0.13+ds/hw/net/rtl8139.c"
+    },
+    {
+      "file": "docs/net/checksum-offload.md",
+      "cited_vendor_paths": [
+        "qemu-10.0.13+ds/hw/net/net_tx_pkt.c",
+        "qemu-10.0.13+ds/hw/net/virtio-net.c",
+        "qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h"
+      ]
+    },
+    {
+      "file": "kernel/external/lwip/DIVERGENCE.md",
+      "cited_vendor_path": "qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h"
+    },
+    {
+      "file": "kernel/include/drivers/char/cmos_rtc.h",
+      "cited_vendor_path": "qemu-10.0.13+ds/roms/seabios-hppa/src/hw/rtc.h"
+    },
+    {
+      "file": "docs/measured/impl-notes-slab.md",
+      "cited_vendor_path": "qemu-10.0.13+ds/tests/unit/test-visitor-serialization.c"
+    }
+  ],
+  "preserve_resources": [
+    {
+      "path": "user/external/mlibc/tests/rtld/fail-load/fake/fake-lib",
+      "reason": "test fixture; explicitly used by Meson fail-load case."
+    },
+    {
+      "path": "user/external/tlse/tlslayer_ssltest.png",
+      "reason": "real image asset; leave out of binary purge absent confirmation."
+    },
+    {
+      "path": "qemu-10.0.13+ds/**",
+      "reason": "package snapshot contains many fonts, firmware, logos, ACPI images and upstream disk/test fixtures. Do not hand-delete individual such resources; the proposed package-prefix removal is a separate whole-vendor-tree decision and would require retaining/replacing only any project-required cited material."
+    },
+    {
+      "path": "user/external/mksh-cvs2git/mksh.ico",
+      "reason": "Icon asset in the vendored mksh source subtree; opaque binary signature is an image resource, not a build executable. Keep out of broad binary purge."
+    }
+  ],
+  "empty_commits_after_proposed_purge": [
+    {
+      "commit": "60b4e93fa06023be370284a3b5a892fac2976da1",
+      "parent": "4763b4c4d437cdffd8ca8416f388aaf1f6d6a64b",
+      "subject": "fix(paper): resolve remaining LaTeX issues -- zero-error compilation confirmed",
+      "changed_paths": [
+        "docs/paper/main.pdf"
+      ],
+      "becomes_tree_equal_to_parent_after_purge": true,
+      "is_merge": false,
+      "is_all_refs_fork": false,
+      "is_protected_anchor": false,
+      "is_tag_target": false,
+      "is_ref_tip": false,
+      "present_in_v0_13_peeled_tree": true,
+      "note": "The only first-parent diff is the generated PDF (256,184 -> 256,184 bytes but different content). It is an ordinary single-parent commit and not a protected fork/merge/tag/ref anchor. If the PDF purge is applied across pre-v0.13 history, this commit becomes empty and may be absorbed into its linear segment."
+    }
+  ],
+  "empty_commit_scan_summary": {
+    "nonmerge_commits_scanned": 2264,
+    "nonmerge_commits_touching_proposed_paths": 17,
+    "purge_only_nonmerge_commits": 1,
+    "merge_commits_scanned": 92,
+    "merge_commits_purge_only_vs_first_parent": 0,
+    "merge_commits_with_some_candidate_path_changes": 2,
+    "anchor_check_source": "history-rewrite-20261008-_32ryr29/topology.json",
+    "note": "Commits importing or updating QEMU, adding the root .d manifests, and adding/removing the two ELF payloads also change substantive files and therefore remain nonempty. Merges were checked against first parent; no merge is a purge-only delta."
+  }
+}

@@ -81,7 +81,7 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 ### 2.1 发送侧（`VIRTIO_NET_F_CSUM`）
 
 设备侧是通的：QEMU 收到 `VIRTIO_NET_HDR_F_NEEDS_CSUM` 的 TX 头会在主机上补算校验和
-（`qemu-10.0.13+ds/hw/net/net_tx_pkt.c:833-838`）。缺的是**栈 → 驱动**的那一段：
+（外部 Debian QEMU 10.0.13+ds 源树 `qemu-10.0.13+ds/hw/net/net_tx_pkt.c:833-838`；来源与解包定位见[迁移说明](../history/2026-10-08/migration.md)）。缺的是**栈 → 驱动**的那一段：
 
 | 需要的改动 | 位置 | 性质 |
 |---|---|---|
@@ -95,11 +95,12 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 
 设备侧**在本机可用的 QEMU 上不可用**，这是比栈侧更硬的一道墙：
 
-- `VIRTIO_NET_HDR_F_DATA_VALID`（"校验和有效"）这个位在树里**只有定义、virtio-net
-  从不使用**：`include/standard-headers/linux/virtio_net.h:132` 定义了它，
-  `hw/net/virtio-net.c` 全文**没有出现过**（`hw/net/e1000e_core.c:1187`、
+- `VIRTIO_NET_HDR_F_DATA_VALID`（"校验和有效"）这个位在外部源树**只有定义、virtio-net
+  从不使用**：`qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 定义了它，
+  `qemu-10.0.13+ds/hw/net/virtio-net.c` 全文**没有出现过**（`hw/net/e1000e_core.c:1187`、
   `hw/net/igb_core.c:1379`、`hw/net/vmxnet3.c:884` 才在用）。也就是说 QEMU 10.0 的
-  virtio-net 即使协商了 CSUM，也不会逐帧告诉驱动"这帧验过了"。
+  virtio-net 即使协商了 CSUM，也不会逐帧告诉驱动"这帧验过了"。来源与解包定位见
+  [迁移说明](../history/2026-10-08/migration.md)。
 - lwIP 侧的表达是**每 netif 一个位**（`netif->chksum_flags`），不是每 pbuf 一个位。
   打开 `NETIF_CHECKSUM_CHECK_TCP` 就等于"这个 netif 的每一帧都别验了"。在 virtio 上
   这个假设只有在驱动能逐帧判断时才成立，而驱动判断不了——RX 头里唯一的逐帧信息
@@ -157,6 +158,6 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 | 发送侧 TCP 校验和不受开关控制 | `src/core/tcp_out.c:1587-1596` |
 | 驱动清零 vnet 头，从不声明 NEEDS_CSUM | `kernel/drivers/net/virtio_net.c:803-810` |
 | 驱动 RX 只读 num_buffers，不读 flags | `kernel/drivers/net/virtio_net.c:929-947` |
-| QEMU virtio-net 不用 `DATA_VALID` | `qemu-10.0.13+ds/hw/net/virtio-net.c` 全文无该宏；定义在 `include/standard-headers/linux/virtio_net.h:132` |
-| QEMU 会补算 TX 校验和 | `qemu-10.0.13+ds/hw/net/net_tx_pkt.c:833-838` |
+| QEMU virtio-net 不用 `DATA_VALID` | 外部 Debian QEMU 10.0.13+ds：`hw/net/virtio-net.c` 全文无该宏；定义在 `include/standard-headers/linux/virtio_net.h:132`，来源见[迁移说明](../history/2026-10-08/migration.md) |
+| QEMU 会补算 TX 校验和 | 外部 Debian QEMU 10.0.13+ds：`hw/net/net_tx_pkt.c:833-838`，来源见[迁移说明](../history/2026-10-08/migration.md) |
 | NAT 增量修正 L4 校验和 | `kernel/net/netfilter_nat.c:754-892` |

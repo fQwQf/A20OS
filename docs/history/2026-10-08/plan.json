@@ -1,0 +1,1539 @@
+{
+  "groups": [
+    {
+      "commits": [
+        "de34f701f1c75183cf7d1f6a16657a54073615d1",
+        "ead7ac7c8f606fd9073f08c6f1bc59ca346b81be",
+        "6ccbae9b44cf318d8788623933b397ea7b33bf04",
+        "ab83c121492e33d2479c9f148dd26753cfcfc12d",
+        "0dc0d347d2dbbd65cc1b16d07331559f6c1c0bb2",
+        "41ba8524f857e4cae45e2a9203ff1663ffeb1377"
+      ],
+      "message": "sysfs: publish the DRM device in the PCI hierarchy and correct the GBM diagnosis\n\nExpose the DRM device PCI identity and its /sys/bus/pci/devices entry, with subsystem links pointing to /sys/bus/pci. The follow-up investigation corrected the attribution: the GBM stall was elsewhere, so these sysfs changes do not claim to resolve it.\n",
+      "reason": "18、20、22 是连续的 DRM PCI sysfs 实现步骤，19、21、23 是紧邻的状态记录和诊断更正；同一问题链，合并后保留明确的实现范围和“GBM stall 不在 sysfs”的结论。"
+    },
+    {
+      "commits": [
+        "750f2d85d308c9775bf38eea83bc281468453a70",
+        "8a8a8a8f7c40628e0bd96a70f01988a111b22aab"
+      ],
+      "message": "unix: wake blocked stream peers per chunk and record the Minecraft stall fix\n",
+      "reason": "直接的实现与结果记录：前项修复 AF_UNIX 大写入时读写两端互相等待，后项记录该 per-chunk wakeup 解除 glfwCreateWindow 卡住；同一已定位问题，代码与文档连续。"
+    },
+    {
+      "commits": [
+        "4eb8127e952cdb56f3dd3e6f27436fb3d048e621",
+        "114e6e5f20c242b8420da3478addf0200197fbf2"
+      ],
+      "message": "minecraft: revert the OpenAL library redirect after it moved the failure earlier\n",
+      "reason": "后一项紧接着撤销前一项的运行时库名重定向，并把实测结果记入图形诊断；合并后只保留最终有效状态和失败原因，避免将尝试补丁留作独立提交。"
+    },
+    {
+      "commits": [
+        "1a8c5a786fc2bf9b97fe24ea673dca716bfbff9f",
+        "addecdf32d3188610bf5a4fbd07f3d30c1b9557e",
+        "e63f30c63de12e8a43e2c80b1686e8ddd8ee5fd5"
+      ],
+      "message": "distro: configure Minecraft OpenAL and verify the sound engine startup\n",
+      "reason": "连续三项都改进 Minecraft 的 OpenAL 选择/配置和同一组件诊断，末项记录配置后的启动结果；不是跨功能拼接。"
+    },
+    {
+      "commits": [
+        "a0822869bc5973cc4382f97fd8b113dc66fe3fe9",
+        "cab832605c96bccb2abc94a516a6af704718c6aa",
+        "be1443fa9680da4b72159cabb5d8f405503db13e",
+        "e598177c252163539163f5eda32c97385e7afe82"
+      ],
+      "message": "audio: provide ALSA PCM ioctls and bind a PCM-capable device\n\nUse the Linux PCM ioctl layouts and implement the ioctls libasound opens. The follow-up check showed that the ABI change alone did not make the device open; bind ALSA to a PCM-capable device instead of the first enumerated device.\n",
+      "reason": "同一 ALSA open 失败链上的诊断、更正、ABI 实现、负结果和实际设备选择修复；最终消息避免声称单靠 ioctl 修复已解决问题。"
+    },
+    {
+      "commits": [
+        "7052f3803dc07b16105078624e9bef41facadd09",
+        "9f9d00c87e857bae6c101030a56417c6b3762e41",
+        "7485baad139b191c40e738590a560c4b49374eae",
+        "a1ace71f04e392b74f0378c2a0d87f5ffeac91b2"
+      ],
+      "message": "page_cache: serialize vfile fill offsets and record the launcher progress\n",
+      "reason": "诊断文档沿着 Minecraft/LuaJIT 故障定位到 vfile fill 的共享 offset 操作，随后修复并记录启动进展；同一运行故障链，避免把无关的桌面功能合并。"
+    },
+    {
+      "commits": [
+        "4e9fa537096d033aed55e83bad01da6771b75f58",
+        "9dd6f779b18acec8c9776e56a1b0a13bd509b91f"
+      ],
+      "message": "net: fix pbuf ownership after UDP and raw sends\n",
+      "reason": "实现提交后紧邻文档记录双重释放修复及仍存在的 DNS 阻塞；摘要只覆盖本次 pbuf 所有权缺陷。"
+    },
+    {
+      "commits": [
+        "bee87a64668a8064ce9622859a42e8b7fd4914f6",
+        "1fc7c15d16f9284e71758e50c42e4aaf03be9ffc"
+      ],
+      "message": "shmring: bound gate waits and report actionable failure state\n",
+      "reason": "连续两次修正同一个 shmring gate：先从无理由的长时间挂起改为失败时说明原因，再将等待限制为 20 秒并报告真实状态；末项是前项紧邻补完。"
+    },
+    {
+      "commits": [
+        "0a137ba13414926475490ce944089133de4d980c",
+        "81c3d16a046cd07a3fc513e2bdfee275bd45e308"
+      ],
+      "message": "shmring: correct the root-cause record and identify the lost futex wake\n",
+      "reason": "连续更正文档中被自身证据推翻的判断，并将根因更新为跨进程 futex wake 丢失；同时补充服务端诊断改动。"
+    },
+    {
+      "commits": [
+        "5319ce2dc1f2a622c896302c9b80a9c02049e125",
+        "8ca8631371c71db805af64678c90c6a6903effff",
+        "a964adece33243ae75e8ba34a1e81e3b37aae4bc"
+      ],
+      "message": "gates: migrate the remaining build assertions into gates.toml\n",
+      "reason": "三项相邻的迁移小步都将 Makefile 中的门禁描述纳入 gates.toml，并补充 mixed 检查、post_filter 和 exists 断言能力；同一配置迁移范围，保留门禁的最终定义。"
+    },
+    {
+      "commits": [
+        "87e135f56fc96f308a4c92d6fcb3206d7e329ee0",
+        "b2a1b26a4fd5f058d91d101e279ad9ca4392340d",
+        "139d80189c63f2b6d561084e5c906d45f7f41708"
+      ],
+      "message": "build: make documentation drift checks detect and explain stale generated output\n",
+      "reason": "连续修复同一文档漂移检查链：先停止检查前自动修复，再让 gate 真正发现 drift，最后解释两个缺少生成入口的目标；作者一致，功能和诊断闭环。"
+    },
+    {
+      "commits": [
+        "e1539ad125b9ec6b19d67ad3e6b89485c8c7855a",
+        "a6039ce571b48bdd11930cbc1dddd69a316d31bc"
+      ],
+      "message": "docs: correct the lwIP contention attribution and distinguish acquire from hold cost\n",
+      "reason": "同一份 SMP 锁争用分析文档连续修正错误的 read-path 归因，并澄清 acquire-side 与 hold-side 指标；合并成一条证据更正。"
+    },
+    {
+      "commits": [
+        "40f2aca48bf10eec7a76916cbff0c865bfef71cd",
+        "a8ec3eb391607bca3e61e6c74d665e0f28cae4c1"
+      ],
+      "message": "net: measure read waiters and reject the proc_lock TLB-wait hypothesis\n",
+      "reason": "代码加入读者等待门禁及 proc_lock TLB wait 计数后，紧邻文档根据计数撤回 TLB-wait 根因；合并消息只保留实验设置和否定结论。"
+    },
+    {
+      "commits": [
+        "1b300f8642958963b9875804281029e3042f0e4b",
+        "0f85bd069a2d20ef782365b8a9c1746dface0723"
+      ],
+      "message": "docs: split the virgl blockers and correct the capset-size interpretation\n",
+      "reason": "两项连续文档更正同步 roadmap 与图形状态页：分清 QEMU 3D device negotiation 和 host capset 两层问题，并撤回 308-byte capset 表示旧 renderer 的错误判断。"
+    },
+    {
+      "commits": [
+        "51153e5a6f09bfc28ccea1f725bd03e73d1bf7f9",
+        "4b2e0e0db5de104867edda6252ad2350ee236179"
+      ],
+      "message": "docs: record and falsify the IPv6 fragment-reassembly pbuf hypothesis\n",
+      "reason": "连续两条同文件诊断先提出 ip6_frag 候选，再用关闭分片重组后仍复现的结果推翻它；合并后保留假设和反证，不将候选写成根因。"
+    },
+    {
+      "commits": [
+        "87b94a12a0866100d60dbf936cbd2170969eb3e7",
+        "602c85822a07044bdd21fc7fba1dff154ac20963",
+        "38ced7aa8aa69ac6a547b06e28c9b6e8bd1f5050",
+        "07385047f97e1ba54bddf340704ce0cca927b9f0"
+      ],
+      "message": "docs: record the IPv6 pbuf bisection and reject the ip6_input lead\n",
+      "reason": "这四项连续更新同一 pbuf 损坏调查：记录 IPv6 子系统隔离结果、形成 ip6_input 线索、说明还需覆盖 raw 路径，并最终用复测否定该线索、修正文中误判。摘要保留可复用的结论，不保留逐次假设作为单独提交。"
+    },
+    {
+      "commits": [
+        "21368c54824737f01ae78011ade45878293865e0",
+        "54b6b96c7685bbb5e38e09f5753ad22825cbdab5"
+      ],
+      "message": "docs: correct the missing-display-server diagnosis\n",
+      "reason": "后一项直接推翻前一项结论并定位为截断 init 脚本造成的实验假象；合并同一文档链后以修正后的显示服务结论为准。"
+    },
+    {
+      "commits": [
+        "3db558a18ab90c5e3ab37931cfb0f90e61096fe9",
+        "5b9916a0cfdf5710f38b1c481f7716b461e47628"
+      ],
+      "message": "mm: revert the incomplete PT-page reclamation path and correct its regression attribution\n",
+      "reason": "先撤回 RCU producer 的不完整接线，随后用同树 A/B 撤回将 mmap 回归归因于该路径的结论；相邻的回退和证据更正属于同一性能调查。"
+    },
+    {
+      "commits": [
+        "1936c6b085eede8c0d19edcf0942e88585ea5db1",
+        "efff06f30ee815955d17f8d8ede1121bb18dd2a5"
+      ],
+      "message": "x86_64: fix W^X splitting across all 1 GiB slots\n",
+      "reason": "紧邻的诊断记录定位启动失败后，代码修复 W^X 仅拆分前四个 1 GiB slot 的缺陷；保留具体根因和修复，不吸收其他 MM 实验。"
+    },
+    {
+      "commits": [
+        "ead968a1de9d344dd16da629809639a99fa38c98",
+        "f97bcffe54fc7f5fe79defdc88a0432248e533a5"
+      ],
+      "message": "docs: correct the mmap performance claim and require interleaved A/B runs\n",
+      "reason": "两项相邻文档修正同一性能结论：撤回共享 KVM 主机上噪声范围内的 1.5x claim，并说明顺序 A/B 无效、应交错执行。"
+    },
+    {
+      "commits": [
+        "0ac0af56a7735791bb86cc6b2328ed6b390ed706",
+        "d9ec77d265edf3ecdd092bf94034e1cb1475ceb9",
+        "d45a12f7167e0c2ab2fec8fe59777f5d0d00fde1"
+      ],
+      "message": "mm: measure anonymous pre-marking and leave it disabled by default\n",
+      "reason": "运行时开关使同次启动能作交错 A/B，紧邻记录的测量显示 14% mmap 成本，随后将默认值关闭；完整保留测量和据此作出的默认策略。"
+    },
+    {
+      "commits": [
+        "120ee0076b262af4071f5fbaae1cbe2943cf3607",
+        "c85a5ffbd9a0412e35fbe955de3865b6b1cd5ea9"
+      ],
+      "message": "mm: reclaim PT pages after an independent read-side grace period\n",
+      "reason": "文档完成 teardown-site UAF 审计后，下一提交实现独立的读侧宽限期回收；是同一 PT page 生命周期审计的结论和修复。"
+    },
+    {
+      "commits": [
+        "c1005f239e52f532eff56fce2a4ea0a45d5fc5c0",
+        "3828a2bea23a3d14b3bcafdcf2adaf86373bb818",
+        "1f43dba5abc49a1704ef0259c367bd8acb7856d0",
+        "6f01b1917c49816d315d7b6ee65cb853286ab6aa"
+      ],
+      "message": "mm: add and enforce per-PTE safety metadata\n",
+      "reason": "连续提交新增 per-PTE safety bits、接入 mseal/userfaultfd、加入双向不变量审计，并补齐缺失叶子的分类及 UFFD gate；均属该安全元数据功能的实现与校验步骤。"
+    },
+    {
+      "commits": [
+        "b3b285b8e803796c315a2ae8bfa2b6c34ef25878",
+        "2d82655b736d508e50340950d2f0a36ca133aea8",
+        "ba9d9e67bf2c54171348502eed5eab8b63466378"
+      ],
+      "message": "mm: count status-path soft faults and assert readback consistency\n",
+      "reason": "文档诊断定位 status fault 路径漏掉的四类软故障计数，随后补齐计数并加入 readback 不变量断言；同一诊断到实现/验证链，作者一致。"
+    },
+    {
+      "commits": [
+        "545cd9712538424c63699ca3333bb4ca5d803436",
+        "e987e952c5b0f2197aa476674d361cfb8d0276cb"
+      ],
+      "message": "docs: identify the x86_64 fw_cfg command-line failure\n",
+      "reason": "相邻两条同文件诊断先定位 fw_cfg selector，再确认 x86_64 fw_cfg 不含 file directory；合并后保留明确的根因结论。"
+    },
+    {
+      "commits": [
+        "60944be9f47233fbc56fc43b090c4e490d109701",
+        "1571552a9637afbb78381c0ff1640690f19a6246"
+      ],
+      "message": "mm: restore PTE_U in the status path and correct its measured cost\n",
+      "reason": "代码修复 status path 丢失 PTE_U 的错误后，紧邻文档重测并撤回之前的 14% 性能结论；修复与针对它的结果更正同属一个问题闭环。"
+    },
+    {
+      "commits": [
+        "cc37e658387625fce2a6ece5127d4170a6daf5e5",
+        "c50c8dec698cab8a0dd4f407bd32546a2a1c6c65",
+        "bd708683a42b77f1c51fb1eaebece7992c511338",
+        "b7b82b29169c8ec6f75c10f541b98026112baed5",
+        "494ff71b8a0af367be900ec78453dffacf061789",
+        "0e0b8d2ba3973d7dc4d032c16b3196c7c067b8aa",
+        "3b53c87bcbb8b1d817fb44dba92a18a7069a7f11",
+        "00667d1e2fc56b8311506df69cb64024f129e944"
+      ],
+      "message": "docs: record the status-path investigation and reject the provisioning hypothesis\n",
+      "reason": "这些连续更新只改同一调查文档，逐项排除了 VMA 写点、split/merge 和 teardown 解释，验证了观测后又撤回 mm_pt_provision_anon 跳过既有 PTE 的初始根因判断。合并消息明确这是诊断记录而非已证实根因，保留最终“需按运行时安装路径继续追踪”的结论。"
+    },
+    {
+      "commits": [
+        "10bc37d2ade606247d620200e4d42ff0c00476d9",
+        "054fce529c4d40d50d76469e650dbe6639ad2218",
+        "bac72d8cf2298f8c7eefd27ade5196da0ad8226b",
+        "d85e5fefbcd9e38608d782cb13718cc88c6ec61d",
+        "f862739f30d445cf0781e66da556fa1d32b0b81c"
+      ],
+      "message": "mm: refresh per-PTE status through the leaf-table lookup\n",
+      "reason": "连续调查确认 mprotect 对缺失页跳过 refresh 的路径，并厘清 pt_lookup_leaf 的 NULL 语义与 table reuse；随后修正 leaf-table 查询和状态刷新，末项记录 riscv64 验证结果。仅合并这一 status-refresh 故障闭环。"
+    },
+    {
+      "commits": [
+        "fd4a0ebfa2cf7e5933303f6fb2f822bf62e1e1dd",
+        "ff3a9a872b081edfb5bbd431f7718b6b28994e0d",
+        "3985a7946055f13dd20cb4fd678dc76722ad0dd8"
+      ],
+      "message": "mm: clear UFFD marks page by page with a presence recheck\n",
+      "reason": "连续诊断排除锁顺序障碍，随后按页重查存在性并清理 UFFD mark；前两项是同一修复的设计确认，第三项落地实现。"
+    },
+    {
+      "commits": [
+        "54c0c71e7d9d29ab11088c2bbc674191e72281df",
+        "0ebe0c395195e699f2d953620614bef14453617e"
+      ],
+      "message": "bcache: count evictable pages correctly after a single-pass scan\n",
+      "reason": "文档记录 no-evictable-page 计数自相矛盾后，紧邻实现修复单遍扫描产生的 phantom 计数；根因和改动直接对应。"
+    },
+    {
+      "commits": [
+        "24005f0201d6ff526738adafc58b9d6922eeaeee",
+        "184e13575001fc9f014e524c2e72fe311c958caf"
+      ],
+      "message": "gfx: publish 3D resources and verify their pixel readback\n",
+      "reason": "资源发布到 virgl context 的实现后紧邻修正 gpu3d_test，使它通过 transfer 读回像素并校正红蓝通道；实现及对应验收逻辑是同一功能闭环，作者一致。"
+    },
+    {
+      "commits": [
+        "8758a1d0ce7740b47dc171ef2c663584432f16ae",
+        "00a9eeb33821dc3c6292bb31ae07b8d8ea130e07",
+        "e0a16353e60b2f95aeac27492a9421b7b8ba400c",
+        "aea342080c34933245b3ff9cb329892a2d8d023f",
+        "4ec1d6e29a41a941412bcf571b453e660620d800"
+      ],
+      "message": "docs(net): consolidate the fault-site analysis for the multi-lane TCP failure\n\nCorrect the register and instruction interpretation, then record the faulting LISTEN-PCB traversal and the evidence that identifies the invalid node.\n",
+      "reason": "这些提交连续修正同一份网络故障记录中的寄存器/指令推断；保留修订后的结论与最强证据，压缩来回更正。"
+    },
+    {
+      "commits": [
+        "a1663d3be715796ee6a35184cf2fab2b1dce204e",
+        "16304db8611e4deb9de699b5aed9806664fd4b16",
+        "696eb3d3120f55a6522da67eda8acc7eaed20afa",
+        "19579c8980e486a4d3c3441881d6ee96ac14fef2",
+        "dbde0aef46acdbb70201efca335f529e0a9a5f42",
+        "076618eb950fa8397a3f0753cd57b172f413cd44"
+      ],
+      "message": "net: fix double-indexed TCP PCB removal and add a PCB-list gate\n\nPass the base lane-bucket array to TCP removal, add an opt-in list checker and smoke integration, and correct the record to keep the separate accept-path defect open.\n",
+      "reason": "从定位 LISTEN PCB 链损坏，到修复双重移除、加入不变量检查和门禁，再收敛验证口径，是同一缺陷闭环。"
+    },
+    {
+      "commits": [
+        "2857028b5034e8c665c7447e489e221baa402ec6",
+        "5b6286f88730132c7ce540483503ee39a534997d",
+        "e6d679dea38e56c9788e4e3854e53f0b5e817cc1"
+      ],
+      "message": "docs(net): trace intermittent multi-lane accept misses to listener lookup\n\nRecord the controlled lane-count comparison, discard the source-port hypothesis, and identify the mismatch between listener buckets and inbound lookup.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "f7f3d670bb0128167612673cef0274ce9092be1d",
+        "88ba28a9c1833fcfe8bcb9db9c339f2830d0048b"
+      ],
+      "message": "net: select TCP PCB buckets by the destination endpoint\n\nHash the inbound segment by its local destination port and add a multi-lane LISTEN create/connect/close smoke path.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "2bd890e0b9055de5782d8d93e6261912136f8165",
+        "97d5c7501a2103b591ffaead23497e35606e8767",
+        "36ebd0269ed955c0ac87bd798d652c561881c403",
+        "8bf992f1def57bcd21e2a02030c4f0750b206577",
+        "8153d5adfe8f7e2ba5c37df41d0f45aaa84447d8",
+        "bba864aa874802fb79ada9d502ccfc93507f0e91",
+        "729e65355fadae45dd7deadf8e5f1fbd78c22384",
+        "dd69d564ab3d4fcde2829caf0c4b866e18d37a60"
+      ],
+      "message": "docs(net): correct the remaining Stage C and accept-flake investigation\n\nUpdate the lane plan and remove unsupported explanations for the residual accept flake, leaving the unresolved cause and per-lane pbuf-pool work explicit.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "f6ad2ef48d5d415d6db75685777f85379e62b492",
+        "b33ae7aa633a0c5063097da4d2ac551bb5c4cbbc",
+        "b825f82f181aa4c9983deea58daf037370393bc4"
+      ],
+      "message": "instances: correct console checks for the newly added boards\n\nAlign ARM board checks with their actual console output and remove the FDT marker from the x86_64 PC check.\n",
+      "reason": "同一轮新板 console_check 配置的两次匹配修正，均是配置纠错。"
+    },
+    {
+      "commits": [
+        "75d4656b3f3c07ab11dff8bc39791dbcbedb1cf0",
+        "476bec875dd9e486de18564e65b460d136f1bece",
+        "a67137f6fd8a9fa021c68dd60c82a26e0d632bf8",
+        "77a6769671f823b97acb57bf07ba32a3eadaaeba"
+      ],
+      "message": "x86_64: add a directly bootable UEFI disk path through userspace\n\nImplement the loader and firmware handoff, correct Multiboot and MCFG handling, package the disk image, and report the entry firmware.\n",
+      "reason": "连续修正 x86_64 UEFI/Multiboot 启动路径并完成进入用户态及固件来源报告，属于同一可启动磁盘交付链。"
+    },
+    {
+      "commits": [
+        "1b839bc77c4e8ad1aa14e26e91b6e662193fd1d4",
+        "31baf9327661ecbac99e69f8ed498db1dcdcebd8"
+      ],
+      "message": "fs: move descriptor ownership to per-task tables of vfile references\n\nReplace the global descriptor table with per-task fd tables and initialize the producer-owned reference when allocating a vfile.\n",
+      "reason": "同一 vfile 引用所有权迁移的实现与 producer 初始引用修正。"
+    },
+    {
+      "commits": [
+        "96c208295adca9a753021b081af85cc230f71a93",
+        "089c198195bf8f9203b3bc0654cb0c962362ab45",
+        "76c65af3f01cd97e51788b615a20b78611d45cea",
+        "60e34399b1b9b854fb034eb728b181ecf135cad5",
+        "b034a5378bc54294a19cc7efb3bc0ca6cf3a6bc7",
+        "64e67fdc64fab249b164f0ab9b969472e8946903"
+      ],
+      "message": "proc: implement nested PID namespaces across fork, procfs, and syscall interfaces\n\nAdd per-level PID objects and translation, namespace-scoped procfs and ptrace lookup, clone integration, and a live nesting reproducer.\n",
+      "reason": "PID namespace 从对象/进程生命周期接入 procfs、ABI 翻译与 live-nesting gate，再补 ptrace PID 解析；连续功能链。"
+    },
+    {
+      "commits": [
+        "cdff4687622834d8118ade980c72d9e440e6b72a",
+        "6ffb54ca7fed09085e79ab711b07d055282f52d0",
+        "bcb7750208e86eb66250f25ca5001ea0545f2e48",
+        "3d15148e249525338baa663f70380a21470b8418"
+      ],
+      "message": "ext4: add JBD2 journaling, metadata checksums, and a matching gate image\n\nAdd block-cache journal hooks and the ext4 journal/checksum paths, then prepare an image matching the reference tools.\n",
+      "reason": "ext4 journal 持久化路径、校验一致性与参考工具/gate image 配套；连续完成一个可验证的 JBD2 基线。"
+    },
+    {
+      "commits": [
+        "79a6e9ac601c1a7108a9903235a26373a579f7bd",
+        "ef195e6bf2c26ad7b2d961e6c699b8727ab52e51",
+        "c4b0ead2fd11be586b803bc6a6dea0d6977200fd"
+      ],
+      "message": "ext4: add a procfs-armed journal crash-injection gate\n\nExpose journal fault injection through procfs, make the gate exercise an observable failure path, and document its setup and filesystem limits.\n",
+      "reason": "同一 ext4 journal crash-injection gate 的控制入口、可失败判据与文档说明。"
+    },
+    {
+      "commits": [
+        "80c208840191b3a92d80bcb37afbf36b9ae05fea",
+        "5acb81629d16a1d2d2eb7eb5c20718d31a74c445",
+        "2d69901ff0604b8bce508b684eabb60943615c5f"
+      ],
+      "message": "net: preserve accepted PCB ownership through the TCP handshake\n\nKeep lwIP from freeing a PCB still owned by accept staging, align the client retry budget with its stated contract, and document the ownership rule.\n",
+      "reason": "accept-stage PCB 所有权修复、测试重试预算和对应规则/阻塞项记录构成同一收尾链。"
+    },
+    {
+      "commits": [
+        "768db2a19539aa9f10ad054cb980281ce329b962",
+        "f766b2d5d9cfe5f35960ab317ee0509eeaf63b47",
+        "94e459c942a8e57ab80be6b24319c5508968bafc"
+      ],
+      "message": "docs: check code-line citations and prevent citation drift\n\nCorrect stale source locations and add a citation checker to the build gates.\n",
+      "reason": "锁诊断文档的引用位置核准并加门禁防止行号引用再次漂移。"
+    },
+    {
+      "commits": [
+        "6d20e00f0d50f10494b91a97629c2584e7a1acb1",
+        "245b64033f9f5b55d628a80d79361c81b01f528e"
+      ],
+      "message": "mm: correct page-table status accounting and add an mmtest gate\n\nUpdate direct PTE writes and write/execute handling, then promote the MM software test runner into the smoke-gate workflow.\n",
+      "reason": "nodejs 运行后校正 MM auditor 误报，并将试验 runner 纳入正式 gate 与文档。"
+    },
+    {
+      "commits": [
+        "4b5ed63638fa0bff13a48295cb9549c7d19e81fd",
+        "5852188fc9dddd31853a940b9a41662a22a17d27",
+        "7b0dcb525b788cf5098a0c2dc9a6362663aae78c"
+      ],
+      "message": "mm: measure P6 segment-table requirements and correct the design record\n\nReplace the assumed blocker and baseline with measured prerequisites, and update the segment-table design accordingly.\n",
+      "reason": "P6 段表设计从 blocker 收窄、测量前置条件到纠正设计与 baseline 说法，是连续诊断链。"
+    },
+    {
+      "commits": [
+        "16208d43f97a70579f79f47b3675895e8ccabf68",
+        "4a88e42f729fc2abb24e2ef70e6f7f8b7d5aff00",
+        "7e6cc1a7e3a5cca3b205b1671ccba4ed0a599025",
+        "5cfaffe8ba13227f78499c5d4b8328f6ea76c2ca",
+        "b956b9508f9b804d1ab0c1e080e47f2bb6185073",
+        "4400c680d390b7c78098c680455ec019ae1f22af",
+        "8fbe0465d34b4bc81da9f69bbe95375d2857ad6d",
+        "b8b1b06e90006bdfe0430f47e4e77c329775b7bb",
+        "69853084074d010e0cce4edb493dd87a1831fee0"
+      ],
+      "message": "mm: add page-table segment indexing for mapping-backed faults\n\nRecord mapping backing on the page-table path, route file faults through the segment index, handle full-table traversal and packed-index width, and align the gate and design notes.\n",
+      "reason": "段表映射记录从实现到审计门禁、容量诊断和索引宽度修正，连续的首阶段设计/实证链。"
+    },
+    {
+      "commits": [
+        "d58d3a8a782cfe0cb92af6431d960fe17aa28fab",
+        "3ab5e57cab34628e9e137998bb5c52001f816628",
+        "138349f3dee44691d02543a3720033b8c1d92995",
+        "86f1322c2fdb0cdb8db5f2a6cf36a73b747d0300",
+        "0d31908f844118a319822484d393f64e9e7eb71f",
+        "2bbcb5993b2beb875c7bc8708da880ea15cf506f",
+        "02dc42d8b0be5d93b4b80c7821ee0f70fde12a82"
+      ],
+      "message": "mm: provision segment-index capacity along mapping paths\n\nReshape segment storage and split handling so mapping publication has a provisioned path, and correct the frame-capacity arithmetic in the design record.\n",
+      "reason": "同一 segment 节点容量与映射路径 provision 的连续重构、算术纠错和需求测量。"
+    },
+    {
+      "commits": [
+        "f5d0cc25c6debd599d11e84b615ecee21bcd235a",
+        "3bc414e98ccd94d1d6db8285c4532d0f94f607f2",
+        "ab8e9e99375cc149602a675347a26a1d2bf0b6f6",
+        "a3de05fe321e04cbd126db353c84334b56fca534"
+      ],
+      "message": "mm: carry mapping policy on segments and repair lifetime defects\n\nStore policy metadata on each segment, fix lifetime leaks exposed by the anonymous-segment prototype, and record the remaining capacity cost without presenting the prototype as complete.\n",
+      "reason": "segment 策略元数据落地、匿名段实验暴露生命周期缺陷、修复并记录实测成本，连续闭环。"
+    },
+    {
+      "commits": [
+        "17e5dc608754eadd2117d1ea8c41cc66688a4ffb",
+        "3a4f63d4a61551789d0c4218d85040cb36bbc3e0",
+        "516c0d17c6eb9a97d606f9ae385a96f487463a77",
+        "9c2dbb486d82dd2920b47623c58ee783f251783d",
+        "c1c959ef76a9dcb9109ac7b5c6f2462aff596a7a",
+        "b4e1068566b32142c245c6e8d880a4190fdb2065",
+        "039414d37bcaf7d8385ccbf279a7318ff5f19d4f",
+        "d75475f4edae65b69276ac18c962eb1dfa207821",
+        "86acfec3f5e15d8593bfe30cfd60b1c7dea7a28b",
+        "e48b4f2125a845782331e8c981aaee06d39eef88"
+      ],
+      "message": "mm: replace duplicate mapping metadata with an ordered segment index\n\nMove mapping lookup and page-table state to the segment record, migrate call sites, remove the duplicate representation, and update the invariant gate and design docs.\n",
+      "reason": "连续完成单记录内存映射模型、索引迁移、旧表示删除、门禁与文档校正；merge 735 保留。"
+    },
+    {
+      "commits": [
+        "c04061c1415d9c66b881a4442d99152de1b31c2f",
+        "c7c65560a4888896d161cf9c3dcbdd7a80b61020"
+      ],
+      "message": "mm: add NOMMU static-PIE relocations and resolve only required symbols\n\nApply relocations for static PIE images and require symbol resolution only for relocations that reference symbols.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "a19846781f1aa652267d6c6ec71ba6031c6fdf09",
+        "f34b451f43656da52785605c93e37d973e5d95e6"
+      ],
+      "message": "net: gate socket-buffer and congestion options and fix socket-init ACKs\n\nAdd runtime coverage for the new options and prevent the receive-buffer ceiling from sending an unsolicited ACK during socket creation.\n",
+      "reason": "新 buffer/congestion 选项的 runtime gate 及 socket 初始化时多发 ACK 的紧邻修复。"
+    },
+    {
+      "commits": [
+        "f48a8f5f22865f8c088217b0cb851961bc256f6f",
+        "dd4e5678a45ce74d2c6d80a1759552c426efb88c"
+      ],
+      "message": "net: add IPv4 conntrack and NAT with initialized bucket chains\n\nImplement fixed-budget conntrack and SNAT, MASQUERADE, and DNAT rules. Initialize bucket heads to the empty sentinel before packet processing.\n",
+      "reason": "按原始作者归属拆分；只合并同一问题的实现与紧邻补完。"
+    },
+    {
+      "commits": [
+        "1475cd9dde74b6597fdbaac667cf4c5f46a6101a",
+        "0d9d0885fca8c60870b6318bdb2ab0400d380939",
+        "4b4472d172c70988b36a58f4655d1e34bf7b0181",
+        "4fde1c0892d7fc9a08b34b825d9ee08a42f0eca3",
+        "e53d10845dda226a96507d919a8594c47c64af33"
+      ],
+      "message": "net: correct NAT parsing and wire checksums and gate DNAT forwarding\n\nAccept valid masquerade rules, correct translated IPv4/TCP checksum updates and return traffic, and add an end-to-end DNAT gate. Document the forwarding and lock boundaries.\n",
+      "reason": "按原始作者归属拆分；只合并同一问题的实现与紧邻补完。"
+    },
+    {
+      "commits": [
+        "5ea06a78670ee0a6c901faccbfb239ad0dcc8004",
+        "fe03aac27a33e7a98966f023b7586b8600b6ff4d"
+      ],
+      "message": "net: add the stage C per-lane pbuf-pool scaffold\n\nIntroduce the lane-keyed pool structure and document which parts of stage C are present and still outstanding.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "7c7a4d7c88f1c4812e7ec4380dbfab00b5fabf3f",
+        "411a0700757efba1a8426209d2beb240ca14b807"
+      ],
+      "message": "net: move socket state from bucket locks to per-socket locks\n\nApply the stage E socket-lock scheme and document its lock order and remaining limitations.\n",
+      "reason": "per-socket lock 取代 bucket lock 的阶段 E 实现与锁顺序记录。"
+    },
+    {
+      "commits": [
+        "59bf85c0fb3899e913d64461eb806e6fbe854eed",
+        "80873fdd5cdbe05093f5ce4dd436b31b9237389e"
+      ],
+      "message": "docs(drivers): reconcile implementation status and gate coverage\n\nUpdate the driver guides and status ledger to describe the landed work, missing gates, and unverified areas.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "d88a9f12b5484a6530dac4378a5d51219551d7f9",
+        "7f38f2227db714dcf97d0d9be25a45d65cad125d"
+      ],
+      "message": "x86_64: initialize firmware and interrupt routing through ACPI\n\nRefactor firmware and interrupt-controller initialization, then parse DSDT _PRT packages to route PCI INTx pins.\n",
+      "reason": "x86_64 平台/固件提交后紧接 DSDT _PRT PCI INTx 路由实现，主题一致；需先将含糊中文标题改写。"
+    },
+    {
+      "commits": [
+        "1301f1d9c6ff4af544caee7d173aa14af80ed220",
+        "278603614cc7cab4c23e2573a3d5cf3f3bc72282"
+      ],
+      "message": "pci: route x86_64 config access through the architecture HAL\n\nUse the architecture PCI path for i440fx and document the actual scope and evidence of the ACPI/PCI work.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "b6d68730f6418e6b7198fd4e0836e7a5f6b21508",
+        "8d8719549ff1a00a0f6d63aebe04420f44be51d4"
+      ],
+      "message": "net: extend per-lane memp descriptors and accounting to every pool\n\nIndex all memp pool descriptors and allocation/free counters by lane, expose the counters, and enforce table-memory budgets. Heap-backed storage and aggregate lwIP statistics remain shared at this stage.\n",
+      "reason": "保留中断中的 memp 分片骨架并紧接补充阶段 C2/DIVERGENCE 记录，保持 WIP 边界和实际状态。"
+    },
+    {
+      "commits": [
+        "0e1ef2f60382fbaa355b7386e4782b48702acf41",
+        "9858550b84b1c8c81ea01a4e6e6ac8368d2d6460"
+      ],
+      "message": "hyp: define the vCPU contract and add the guest run loop\n\nAdd the vCPU slice contract and route guest traps through the standard trap path.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "6364d11386cd1a32614ebb1ef8fc2d860329ecdb",
+        "1aa0603eadae45389c3eb2b219ef25003dc88c6c",
+        "1214ea6d5c0e4f64ef9106411a2d853601c8439c"
+      ],
+      "message": "hyp: define A20OS guest execution and fix RISC-V SBI dispatch\n\nSpecify the guest contract, add delegated traps and demand-filled guest RAM, and handle legacy and v0.2 SBI calls needed to continue guest boot.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "c2ca4ae1f7812c337b513510c277a2081321466a",
+        "5a2636a671382b4a525eb24d09ebd6d21a150dca"
+      ],
+      "message": "hyp: add the hypvm runner and document the current DTB limitation\n\nProvide the user-facing VM runner and clarify that the current -b option places a DTB in guest memory that the guest does not yet consume.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "8beebfb1f2de02809d071dcddd17c164c7ba9614",
+        "fb8acd99900ef1b69584ba61a5a250fc78849fc7"
+      ],
+      "message": "hyp: forward guest UART input and gate interactive shell boot\n\nForward host keystrokes to guest UART, add the guest-shell acceptance gate, and correct VS-stage TLB invalidation.\n",
+      "reason": "guest UART 输入实现及 shell 验收/TLB fence 修复紧邻，作为独立交互闭环；891 继续被 894 引用，可作 anchor。"
+    },
+    {
+      "commits": [
+        "38347ef63646f43a65cae79d66d2aabaa4039ad2",
+        "7c75d1651f6b8af7c1c73f59155a1e9ae8aedf3e",
+        "a01d4f58d3eea8b363173545e9a699ae72cfce1b",
+        "c98300a8f4d0b352796394d164a67f43a7571649",
+        "d62a61cfc2c9196707daadbd8bd75568cfb15630",
+        "5236068c367464174a72c232c2ccab0c342164b8",
+        "7545c271e6df7cca18eedce33741e3ecf0be81d2"
+      ],
+      "message": "net: fix memp lane accounting output and consolidate its coverage notes\n\nCorrect the lane report formatting and record the equivalence scope, stale-image and coverage limitations, and the state of the follow-up integration.\n",
+      "reason": "memp lane 输出修复后连续记录等价证明、旧镜像/覆盖范围缺口、实测边界与 merge 时间，完整验证链；merge 903 保留。"
+    },
+    {
+      "commits": [
+        "25bc083944fea9d2141d60f2ee06f49b887f0c5f",
+        "f00b055f7062634cddaf4b95d8afde2244a1afda"
+      ],
+      "message": "cluster: implement native transports and repair endpoint lifecycle\n\nAdd kernel frame routing, export workers, loopback and remote endpoints, UART/leaf transport, reference vectors, and dual-QEMU support. Correct CLOSE encoding, deadline updates, CALL dispatch, local resolution, and worker replacement ownership.\n",
+      "reason": "按原始作者归属拆分；只合并同一问题的实现与紧邻补完。"
+    },
+    {
+      "commits": [
+        "86d5fd3559d55c7c498c1ce96d3ed664b99247d2",
+        "d119d4925d97fe2da745a21ffd8df34fa3a6f11f",
+        "41cb8217c3048bca3f257e34368f5b8a89b02b10"
+      ],
+      "message": "cluster: complete protocol assets and usage documentation\n\nNormalize document and vector permissions, restore the vector manifest and design notes, and document implemented usage and remaining transport limitations.\n",
+      "reason": "按原始作者归属拆分；只合并同一问题的实现与紧邻补完。"
+    },
+    {
+      "commits": [
+        "6cf4bc7e1b3f316fb7a2538d061dc74b19146938",
+        "c21b12ed1355cb019fcfb8453aa689f6c030aa61"
+      ],
+      "message": "net: avoid recursive lwIP locking during lane drain\n\nAdjust lane-drain lock handling and align the affected parameter formatting.\n",
+      "reason": "lane drain 递归 lwIP lock 修复及其紧邻参数排版清理。"
+    },
+    {
+      "commits": [
+        "dec3ade0204b9c1f1b6483c3e23ea8bc53bff617",
+        "3cb5b0d0f10a739203628a488641571f1e9aa181",
+        "a6fc355887a8bbf3f14d5391968ee2d94f3932b1"
+      ],
+      "message": "riscv: reject missing H extension and bound legacy ISA parsing\n\nFail closed when the FDT does not advertise the hypervisor extension and constrain legacy ISA scans to the property string.\n",
+      "reason": "RISC-V FDT H-extension fail-closed 检查与 legacy ISA 字符串边界修复连续解决同一解析安全问题。"
+    },
+    {
+      "commits": [
+        "017c650576278fa0e54bb095701392929629f281",
+        "8580f27ddc58e7f301d75c0fd9e545965acc7521"
+      ],
+      "message": "riscv64: preserve t0 across trap entry and add a regression gate\n\nSave the interrupted register across the trap path and add the corresponding smoke-gate entry.\n",
+      "reason": "RV64 trap t0 保存修复及专属回归 gate 索引文档。"
+    },
+    {
+      "commits": [
+        "b6a0b47e97dd87aba59e796dbd76bdda5f6a2d4d",
+        "d79edb9c0e9f3e70ce6e5d42ca720da1132abfa5",
+        "e5a4cae6e14d33afe134b5ddc8045691db4bdb87"
+      ],
+      "message": "sched: allow yield during prepared park waits and add a regression gate\n\nFix the prepared-park yield path, add its self-test gate, and mark the wrapper targets as phony.\n",
+      "reason": "prepared park yield 修复、回归门禁及新 smoke wrapper 的 phony 声明，构成一个完整测试闭环。"
+    },
+    {
+      "commits": [
+        "207181a1e375bd4ce492eb2b2ed7a0f9b6ebfc0b",
+        "a66a030c61bee045e58a72b7d71fc7f8b086ea24"
+      ],
+      "message": "riscv: preserve DTB and ISA data across MMU setup\n\nMap the boot DTB through the high-half alias and snapshot ISA properties before enabling the MMU.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "29eaf66b7ddc4d9a47dac0cabc664d00141b21a6",
+        "5736d7ba5a8624405b470c2d694417e69586dadb"
+      ],
+      "message": "hyp: make guest-boot smoke input sequencing deterministic\n\nSequence the guest input after boot reaches the expected point and remove ordering dependence from the smoke script.\n",
+      "reason": "按功能边界拆分后的连续父子链；合并消息概括聚合 diff，保留未完成状态且不重复历史测试声明。"
+    },
+    {
+      "commits": [
+        "79d0290109709a25c4067ff17092e0d289a2cae2",
+        "3d1e5b24fec4e561e2a5fb00c34194d5e24f525d"
+      ],
+      "message": "sched: clarify snapshot fields while preserving runqueue API names\n\nRename scheduler snapshot fields explicitly and keep the runqueue snapshot API stable for its caller.\n",
+      "reason": "runqueue snapshot 字段命名澄清及保持 API 名称稳定的紧邻修订。"
+    }
+  ],
+  "messages": [
+    {
+      "commit": "43c501007092beba28d1f43727fa37a50dd9b645",
+      "message": "chess: add SAN disambiguation before applying moves\n",
+      "reason": "原主题“Enhance chess”过于宽泛；diff 的实质是将 SAN 的同类棋子消歧提前到走子应用前，并整理记谱/将军后缀生成，改写主题与实际改动对应。"
+    },
+    {
+      "commit": "8de2d3c61013f4cd2cdc5d77d47a63e10b417db0",
+      "message": "merge: integrate origin/main chess notation changes\n",
+      "reason": "原 merge subject 只说合并 origin/main，没有交代范围；该 merge 的第二父提交是 origin/main 上唯一带入的 chess SAN 消歧改动，且 merge diff 仅改变 user/cmds/core/chess.c，改写消息点明实际内容。"
+    },
+    {
+      "commit": "cd329d6aac784dc99a3371607663ce3166243d90",
+      "message": "merge: integrate capability-correct ABI, userland utilities, smoke checks, and hosted-architecture CI\n",
+      "reason": "原主题只有 branch 名称。第二父侧相对 merge-base 带入四项具体提交：停止报告未实现的 capabilities、完善 ps/ls、让缺失 capability 使 gate 失败、在 CI 运行项目 gates 并构建受支持 host arch；新主题概括这组实际范围。"
+    },
+    {
+      "commit": "6f9c4a3f19a053063bd8a3fbbd017d905d6bc040",
+      "message": "merge: integrate TCP lane sharding and its lock-contract fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "9ce1f6886b1ee72b589638b5892b921255672ddd",
+      "message": "build: ignore local crash-reproduction logs\n\n\n.diag/ holds the preserved QEMU log from diagnosing the multi-lane fault. It is\na machine-local artifact -- one run's console output, several megabytes -- and\ndoes not belong in the tree, but the investigation needs it kept on disk between\nruns, which is why it gets an ignore rule rather than being deleted.\n",
+      "reason": "原题明确是本地 crash repro 日志，英文更具体；保留为独立构建卫生提交。"
+    },
+    {
+      "commit": "5584e61820eebbb59a2f41a9b814e9aa1930d2fd",
+      "message": "aarch64: fix two NOMMU build failures exposed by the RK3328 port\n\n\narch_is_kernel_address() tested the low bound as `ptr >= PHYS_MEMORY_BASE`,\nwhich is `ptr >= 0` on the RK3328 -- its DRAM starts at physical 0 -- and\n-Werror=type-limits rejected the always-true comparison.  Expressed as an\noffset from the window base instead, which is vacuously correct when the base\nis 0 and still a containment test when it is not, rather than special-casing\nthe board.\n\nvbox_aarch64_platform.h redefined PAGE_OFFSET and USER_VA_LIMIT with the\nsame MMU values arch/aarch64/include/platform.h had already set.  Under\nNOMMU the arch header sets PAGE_OFFSET to 0 first, the board header then\nredefines it, and the NOMMU build of that board has been failing against\n-Werror ever since.  Pre-existing, not caused by this port, but it is the\nsame double-definition the board-override mechanism invites, so it is worth\nremoving rather than documenting.  The arch values are already correct for\nboth modes.\n\nVerified: every board in the tree builds MMU, and every NOMMU_ARCHES board\nalso builds NOMMU -- riscv64, riscv32, aarch64.  smoke-x86_64 and\nsmoke-riscv64 pass.  All thirteen boundary, driver-model, doc and registry\ngates pass.\n",
+      "reason": "原标题信息足够但表述含糊；以 diff 对应 RK3328 暴露的两处 NOMMU 编译失败，明确范围。"
+    },
+    {
+      "commit": "be81ed3044a9c9651b59b40a10a1f464acb70573",
+      "message": "cleanup: remove LS2K bring-up markers from filesystem and ABI paths\n\n\nOne board's first-boot instrumentation had been left switched on inside the\narchitecture-neutral paths: six uart_putc calls in the readiness scan that\npoll(2) blocks on, eleven in linux_poll itself, and one per syscall in the\ndispatch path.  All eighteen were gated on CONFIG_BOARD_LS2K1000 &&\nCONFIG_COOPERATIVE_BOOT, so they cost nothing on any other board -- but they\nput a board name in code that has no business knowing one, and 0xC0000000-style\ndebug tracing inside poll(2) is the kind of thing that gets left switched on\nby accident and then blamed for a latency problem.\n\nThe gating meant the markers were also load-bearing documentation of intent:\nthey showed where the LS2K1000 bring-up was stuck.  What replaces them is not\nnothing -- CONFIG_LS2K_TRAP_TRACE still works for anyone who wants to\nre-enable tracing, and kernel/arch/loongarch64/{boot/switch.S,trap/trap.S} keep\ntheir single-character switch/trap checkpoints.  Those are assembly, guarded\nby the same CONFIG_BOARD_LS2K1000 test, and they poke the LS2K UART directly\nrather than calling into C, so they are legitimately arch-internal and left\nalone.  Note the build never actually defined CONFIG_LS2K_TRAP_TRACE, so that\nassembly path was already dormant.\n\nThe C-side tracing helper uart_trace_ls2k_syscall() in uart.h existed only to\nserve the dispatch site and went with it; uart.h no longer mentions any board.\n\nVerified: kernel-only builds clean under -Werror for all nine board targets,\nincluding ls2k1000 itself -- the board the markers were for -- with\nDRIVER_DEPLOYMENT=embedded.  check-smp-platform-boundary,\ncheck-concurrency-foundation, check-honesty-policy and check-doc-test-gates\npass.\n",
+      "reason": "原标题覆盖三个源码热路径但缺少动作对象；该英文标题概括删去仅调试用 bring-up 标记。"
+    },
+    {
+      "commit": "e3afdb6e13402f7103eebd37ff7b5a33373d8eea",
+      "message": "panic: route LoongArch register dumps through architecture hooks\n\n\npanic() and the return-to-user path in proc_task_first_entry() read\nLoongArch CSRs inline: nine in the panic capture and eight at every first\nswitch back to user, all behind CONFIG_BOARD_LS2K1000.  That put a board\nname and a LoongArch CSR number list inside two architecture-neutral files,\nand the CSR reads in panic() ran before va_start purely so the values\nsurvived long enough to print.\n\nTwo optional hooks now carry it.  arch_panic_dump() is called from panic()\nwhere the LoongArch block used to print, and arch_debug_dump_user_state()\nfrom the switch path; the generic callers say nothing about which registers\nexist.  An architecture opts in by defining ARCH_HAS_BOOT_TRACE_DUMPS in its\nown arch/<arch>/include/arch.h, following the ARCH_HAS_* convention the tree\nalready uses for capability negotiation.  Only loongarch64 does, and only when\nCONFIG_DEBUG_BOOT_TRACE is set -- the same flag that compiles the new file --\nso every other build gets a no-op inline rather than a declared function with\nno definition.  The default has to be an inline and not a weak symbol: a\nno-op definition would still be a real call in the panic path.\n\nThe switch is now opt-in rather than implicit.  It used to be gated on\nCONFIG_BOARD_LS2K1000, which meant a new board could not ask for these dumps\nwithout editing kernel/core/panic.c.  The Makefile sets the flag for the\nLS2K1000 cooperative profile, which is the only configuration that had it.\n\nkernel/proc/task.c also had ls2k_dump_user_pt_path(), a page-table walker\nwritten entirely in arch-neutral page-table terms -- arch_pt_vpn,\narch_pte_is_leaf, arch_pte_to_ptr -- behind that board guard.  It is now\ndump_user_pt_path() behind CONFIG_DEBUG_BOOT_TRACE, since that is what it\nactually is.\n\nCSR numbers are immediates, not a function argument.  Passing the number in a\nregister let GCC allocate the same register for destination and source,\nemitting `csrrd $r8, $r8`, which this assembler rejects; the inline reads this\nreplaced all used immediates and are kept that way.\n\nVerified: all thirteen board targets build clean under -Werror, and ls2k1000\nbuilds both with DEBUG_BOOT_TRACE (the eleven diagnostics present) and without\n(it compiled out).  check-smp-platform-boundary, check-concurrency-foundation,\ncheck-driver-core-model, check-honesty-policy and check-doc-test-gates pass.\n",
+      "reason": "原标题含 panic/sched 两个前缀；diff 是将寄存器输出移到 arch hooks，标题明确单一行为。"
+    },
+    {
+      "commit": "2ef45f88c9e14668b732e54df76eba21b7af9e6f",
+      "message": "sched: query the board for its timer device\n\n\nidle_loop() tested CONFIG_BOARD_LS2K1000 four times.  Two of those were not\nlogging: the idle path skipped arch_local_irq_enable() entirely and called\ncpu_relax() in place of the arch_idle_wait() sequence.  A board that needs a\ndifferent idle strategy therefore had to edit kernel/proc/proc.c, and the only\nexample of that need in the tree was expressed as a board name in the\nscheduler.\n\nboard_config_t gains idle_cannot_sleep, and idle_loop() reads it once.  The\npolarity is deliberate: every other field in that struct is a pointer, so a\nstatic initializer leaves this one at 0, which means 0 has to be \"the timer\nworks\" or every board that does not mention it would silently stop sleeping\nand burn a core spinning.  The LS2K1000 sets it only under\nCONFIG_COOPERATIVE_BOOT, which is what the old guard tested too -- the same\nboard in its normal profile still sleeps.\n\nkernel/proc/fork.c's non-preemptive clone launch was left alone.  It looks like\nthe same problem but is guarded by CONFIG_COOPERATIVE_BOOT, a build profile\nrather than a board name, so no board is named in neutral code there and\nnothing needs to change.\n\nVerified: ls2k1000 builds both with and without COOPERATIVE_BOOT, and all\neleven other board targets are unregressed -- with idle_cannot_sleep zeroed by\nstatic initialization, which is the case that would have broken them if the\npolarity were the other way round.  check-smp-platform-boundary,\ncheck-concurrency-foundation, check-driver-core-model, check-honesty-policy and\ncheck-doc-test-gates pass.\n",
+      "reason": "原题口语且未说明依赖关系；改为可读的接口行为。"
+    },
+    {
+      "commit": "8dc386080195c4c4dfd08d81b13aa015a0ec9713",
+      "message": "mm, abi: describe physical address width as a hardware property\n\n\nNine sites in architecture-neutral files branched on CONFIG_<architecture> or\nCONFIG_BOARD_<name>.  In every case the thing being branched on was a\nhardware or firmware property, and writing the architecture's name instead\nmeant that adding an architecture to the tree silently changed behaviour\nnobody had decided on.\n\nSeven are architecture properties and now say so.  Each is a capability macro\nin core/arch.h, defaulting to the safe or common case, following the ARCH_HAS_*\nconvention already in the tree:\n\n  ARCH_EXE_LEAF_RETAIN_UNSAFE   x86_64, loongarch64\n  ARCH_FAULT_AROUND_UNSAFE      loongarch64\n  ARCH_INSN_FAULT_UNRECOVERABLE ppc64le\n  ARCH_TIMER_FREQ_RUNTIME       riscv64\n  ARCH_FAST_CURRENT             riscv64\n  ARCH_HW_SINGLE_STEP           x86_64\n  ARCH_LINUX_EPOLL_EVENT_PACKED x86_64\n\nThe first one is a latent bug fix.  mm/fault.c's comment said \"LoongArch64 and\nx86_64 additionally keep ALL executable private leaves on the anonymous-copy\npath\" while the code tested only CONFIG_X86_64, so LoongArch64 was taking the\nopposite branch from the one its own comment described.  It now sets the\nmacro.  The change is unobservable on LoongArch64 because\nARCH_FAULT_AROUND_UNSAFE already forces fault_around to 0 there and\ndirect_private requires fault_around, so what actually changes is that the\ncomment and the code agree.\n\nThe other two are board facts, not architecture facts, and went into\nboard_config_t next to idle_cannot_sleep rather than into arch.h:\n\n  vdso_user_timer_unreliable  VisionFive 2\n  uart_rx_is_polled            VisionFive 2, LS2K1000 cooperative\n\nBoth are about how a board's firmware hands over -- whether U-mode can read\nthe time CSR, whether the console UART has an interrupt -- and neither is a\nproperty of the instruction set.  They replace three CONFIG_BOARD tests: one in\nmm/vdso.c and two in drivers/char/uart.c that were keyed on VisionFive 2, and a\nthird in uart.c that was keyed on the LS2K1000 cooperative profile and is the\nsame fact as the other two.  As with idle_cannot_sleep the polarity is chosen so\nthat a static initializer's 0 is the working behaviour.\n\nVerified: all thirteen board targets build clean under -Werror, and ls2k1000\nbuilds under COOPERATIVE_BOOT as well, which is the configuration that exercises\ntwo of the three new flags.  check-smp-platform-boundary,\ncheck-concurrency-foundation, check-driver-core-model, check-abi-boundary,\ncheck-honesty-policy and check-doc-test-gates pass.\n",
+      "reason": "原题“architecture”对比不清；改写为本提交所修复的物理地址位宽抽象。"
+    },
+    {
+      "commit": "16c2a9d5293c37ed7b6ed433b9f2544b97e09a6b",
+      "message": "merge: integrate portable board bring-up, FDT enumeration, and x86_64 firmware support\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "554097a10c860a7cbf4b1ed1ec807f974692cfce",
+      "message": "smoke: gate the four new board targets and correct their readiness docs\n\n\nlicheerv-nano, milk-v-duo, rk3328 and sun50i-h616 each carried\n\"Build-verified only\" in their docs and \"Verified: builds clean under -Werror\"\nin board.c, with nothing in the tree that reproduced it.  check-kernel-build-all\ncovered VisionFive 2 and LS2K1000 precisely so those two could not rot; these\nfour had no such target, so the claim described one afternoon rather than a\nproperty of the repository.\n\ncheck-lao64-board-builds and check-arm-board-builds are build-only on purpose.\nNo one has powered up any of these boards, so a gate asserting a boot would be\nasserting something unverified -- the honest gate is the one that can actually\nbe run.  Each page now names the target that holds its claim.\n\nrk3328.md called itself \"the zero-blob-boot ARM option in the tree\" and then\nadmitted in the same sentence that the SPL's DDR training blob comes from rkbin,\nand its own boot-chain diagram shows that blob.  It is the only-vendor-blob\nboard, not the zero-blob one, and saying so plainly costs the page nothing;\nH616 is the actual zero-blob chain and is now linked.\n\nx86_64-pc.md and instances/x86_64-pc.toml both claimed there is no x86_64 UEFI\nloader in the tree.  There is one -- kernel/boot/uefi/x86_64_loader.c, built to\nBOOTX64.EFI -- and it was added by this same branch, four commits before the text\nthat denies it.  Both now say where it applies (qemu-virt-x86_64's memory map,\ndeployed by vbox-x86_64) and why this board's layout-agnostic artifact stays\nGRUB.\n\nvirtualbox-x86_64.md said the disk came from tools/mk_grub_disk_image.sh while\ntwo other lines on the page said the ESP holds BOOTX64.EFI.  It comes from\nmk_uefi_fat_image.sh; the GRUB disk is the other instance's artifact and the two\nare not interchangeable.\n\nVerified: all four gates pass (licheerv-nano, milk-v-duo with NOMMU, rk3328,\nsun50i-h616); check-instances and check-honesty-policy pass.\n",
+      "reason": "原标题动词不明；明确加入门禁并同步纠正四板文档。"
+    },
+    {
+      "commit": "5c7c6d48975e5fd8388b1de10ea0ee136cd3f9c3",
+      "message": "merge: integrate portable hardware bring-up and deployment paths\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "f08fc2a893af39a0eebcdd240d412dc6948998d3",
+      "message": "merge: integrate lock and scheduler primitive fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "c318781789d395d24e27b77474340cdf99f4c95a",
+      "message": "merge: integrate architecture TLB and barrier fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "7da6cf2fac236a10e26a6cc182741e708268680c",
+      "message": "merge: integrate MM hot-path fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "c0e87f4be7032e13329c75c086f5babff2260ac3",
+      "message": "merge: integrate page-cache statistics and readahead fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "36e2d256784c7f8bc0cd8d7c58c438db8ba69c0d",
+      "message": "merge: integrate filesystem I/O correctness fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "1b812813c33ca511b902fa87147e98d4b34d052e",
+      "message": "merge: integrate disk filesystem algorithm improvements\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "73e6ec45df7b6cdc4fb3db6a29850f47a8fc5f75",
+      "message": "merge: integrate network stack fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "79f35ebd8b6978adc73fb6601a6ce9facf31e81a",
+      "message": "merge: integrate IPC and ABI dispatch improvements\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "3df1297c07169c4a003ecd68defe3b06ebc66a28",
+      "message": "merge: integrate driver I/O improvements\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "ab700592c431f543bdb283db1c837cea9eaae4c4",
+      "message": "mm: reject exec faults outside the VMA permissions\n\n\nA page fault on a present leaf was answered from the PTE alone: if the leaf\ncarried PTE_X the exec fault was reported as handled, whatever the VMA said.\nThat makes a leaf whose execute bit disagrees with its VMA silently\nself-fulfilling. On aarch64 the disagreement is not merely bookkeeping --\narch_pte_leaf() derives the hardware UXN/PXN pair from PTE_X, so a stack page\nwhose leaf picked up a stray X bit really is executable at EL0, mksh jumps\ninto it, the retry succeeds, the PC does not move to anything meaningful, and\nthe same stack address faults again immediately.\n\nThat is what the post-fork hang was: ~23k prefetch aborts at a stack address\nwith no kernel output at all, because every round trip returned \"handled\"\nand so no fault was ever reported. It looked like a lost wakeup and behaved\nlike a livelock; the machine only stopped when the harness timed out.\n\nThe VMA is the authority on what an address may be used for, not the PTE, so\ncross-check it under mm->lock and refuse an exec fault on a VMA without\nVM_EXEC (or write on one without VM_WRITE). The leaf may then be as wrong as\nit likes and the worst outcome is the correct one: a clean SIGSEGV naming a\nmapping the process was never allowed to execute.\n\nThe two demand-fault refusals in the same commit close the matching holes on\nthe not-present side: an instruction fault inside the stack-growth or brk\nwindow was satisfied with a fresh read/write anon leaf, which has the same\nnon-advancing-PC property. A stack or heap page is never executable, so those\nnow fail instead.\n\naarch64 now reports the crash it was hiding:\n  SIGSEGV: pid=5 code=32 sepc=0x3ff0c6e0 ra=0x3ff0c6e0 (a stack address)\n  FATAL: pid=5 signal=11 comm=mksh pc=0x3ff0c6e0\ninstead of spinning until the harness kills it.\n",
+      "reason": "原标题“VMA never granted”生硬；明确执行 fault 必须在 VMA 授权范围。"
+    },
+    {
+      "commit": "fb936ffb0b6e6c089eb3bce99b95badb9d57791c",
+      "message": "merge: bring main up to date in the kernel-core scalability branch\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "91a1648bd39ec69072ea3d08e7a588dce434d1de",
+      "message": "merge: integrate kernel-core scalability improvements\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "84b7bc2c5fd416fb5b9f6356f95ed1963f2d82a3",
+      "message": "merge: integrate the single-record memory mapping model\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "29ba6e4980b767a0310452c8f3284817176406c3",
+      "message": "mm: move the segment-table index out of page frames\n\n\nroadmap §13.19.1 把 MM_SEGTAB_NAMES 写成 (PAGE_SIZE - sizeof(arr)) /\nMM_PT_META_ENTRIES，也就是\"一个策略参数\"其实是页帧剩下的余数。7 是对的，\n因为 Sv39 的节点页有 512 项；riscv32 有 1024 项，7 × 1024 = 7176 越过一帧，\n静态断言直接拒绝编译——一个按单一架构调好的常数，在别的架构上是编译错误。\n为了让宽度涨到 8 而删掉 segtab 自己的引用计数（4104 = 4096 + 8），\n已经是为迁就布局而删生命周期字段了。\n\n现在 arr 走 slab，idx 是一次 kcalloc(1, sizeof(st) + ENTRIES * NAMES) 的\n尾部：没有第二次分配，也就没有第二条失败路径。segtab_detach_locked() 从\npfa_free(virt_to_pfn(st)) 变成 kfree(st)，被标注的 PT 页不再白占一整个 4 KiB\n去装 3584 字节索引。sizeof(mm_segtab_t) <= 4096 那条断言随之删除——结构体\n不再是页帧大小，它不对应任何真实约束，留着会让人以为还有。\n\n先补测量再调容量：mm_seg_annot_lost[1]（条目名字用尽）此前不记层级，\n而 mm_seg_full_lvl[] 只在共享数组用尽那一支递增，于是门禁在 nibbles_full=3918\n的同一次运行里打印 full_by_level=[0,0,0]。补上之后是 level 1: 749、\nlevel 2: 3169、根层一次都没有——损失不在根表那四个槽位，在 2 MiB 条目塞了\n超过 7 个映射。这是\"常量选错了\"的证据，不是\"几何挡住了\"的证据。\n直方图也改成按层逐行打印，8 个层级里此前被静默丢掉的 3..7 现在可见。\n\n宽度实测两档：16 → fallback 796 / nibbles_full 1992；32 → 767 / 159。\n159 是要点：到这个量级索引不再是约束，残余 767 次回退里 625 次是\nMM_MW_EXTENT（条目命名了不覆盖该地址的段），那是 2 MiB 分辨率，\n加宽索引买不到。选 32 是因为再翻一倍买到的还是同一堵墙，只是每张被标注的\nPT 页多背 16 KiB。\n\n顺带修掉一处改动引入的真实缺陷：mm_pt_meta_clone() 里\nmemcpy(st->idx, src->segtab->idx, sizeof(st->idx))，idx 从数组变成指针后\nsizeof 成了指针大小（8 或 16 字节）——拷贝 8 字节无关内容、索引不初始化，\nfork 出来的子进程照这份索引解析段。已改为显式元素数。这类错误能编译、\n不报警、只在 fork 后表现为随机的段解析错误。\n\n文档：roadmap 新增 §13.20；§13.19.4 与 testing-gates 里\"不是再调大常数能\n消掉的\"那句被就地标记为已推翻，而不是删掉——它错在一个能说清楚的地方\n（把页帧余量当策略上限），两次同类错误各推翻过一次诊断，值得留痕。\n\n验证：六架构 kernel-only -Werror 通过（riscv32 在本改动前连编译都过不了）；\ncheck-mm-lock-model 14 / check-mm-pt-lock-order 27 / check-doc-test-gates /\ncheck-doc-drift / check-doc-citations 全 PASS；smoke-mm-software PASS，\ngit/vim/gcc/python/nodejs 全跑，审计全部计数器 0，disagreed=0，\nseg_fallback 1102 → 767。\n",
+      "reason": "原标题过度解释常数选择；提交动作是把 segtab index 移出页帧。"
+    },
+    {
+      "commit": "e59ee08c01657180d8c97c61640a46d58abb9fe3",
+      "message": "mm: measure the remaining segment-annotation benefit and correct the root-level analysis\n\n\n§13.20.1 写了\"749 at level 1 and 3169 at level 2, none at the root\"。\nARCH_PT_ROOT_LEVEL 在 riscv64 上就是 2（kernel/arch/riscv64/include/\npage_table.h:11），所以这两句不能同时成立：那 3169 次全都在根层，\n是 1 GiB 分辨率，不是 2 MiB。少核对一行\"根层是第几层\"，\n把一个 1 GiB 的问题读成了 2 MiB 的问题，而这个差别决定了该往哪修。\n\n更正之后做收益计算，每一条都是实跑门禁的数字：\n\n  宽度 7（索引在页帧里）      fallback 1036\n  宽度 16（索引移出页帧）      fallback  796   8 KiB/PT 页\n  宽度 32（当前）             fallback  767  16 KiB/PT 页\n  宽度 64                     外推仅剩 ~10    32 KiB/PT 页   否决\n  下钻进所有已存在的子节点      fallback  775   多走 299848 节点  否决（实测）\n  给叶表标注（4 KiB 分辨率）   上界  792→260   2 KiB/叶表      否决\n\n\"下钻进所有已存在的子节点\"是唯一实现并实测的候选：纸面上最像正解，\n因为过去只在映射区间落进一个条目时才下钻，而门禁显示 353908 个已存在的\n子节点因此从未被下钻过。实测零覆盖收益（767→775，噪声内），\n却让 walk 多走 299848 个节点。原因是这些子节点存在就说明某次缺页建过它们，\n而那次缺页紧接着就会调 mm_mmap_seg_label() 重新标注——\"漏掉的那部分\"\n第一次缺页之后本来就补上了。看起来像泄漏、实际是已有机制在兜底。\n\n决定性的一次数值：回退路径补完标注后立刻重查同一地址，\nrelabel_ok=782 relabel_fail=0。补标注每次都成功，792 次回退是 792 个\"第一次\"，\n之后同一映射上每次缺页都走页表名。也就是说这批回退不随工作负载增长，\n它等于\"被创建过的映射数\"这个常量。再往上优化就是在压一个不增长的常量。\n\n据此否决叶表标注：它能把 792 压到 260（降幅 67%，纸面最大），\n但代价是每张叶表 2 KiB、1 GiB 工作集 1 MiB、4 GiB 4 MiB——\n用不增长的量换随内存增长的量，方向是反的。更要紧的是它换不来简化：\n叶表标注要回答\"这一页属于哪个映射\"，而 cls[] 已经在回答，\n等于把刚删掉的 vma_index[] 换个位置请回来，只是这次住在页表里。\nCortenMM 的论点正是每 PTE 元数据是唯一权威、不需要第二个命名结构。\n\n结论：宽度 32 是终点。下一步不在分辨率上，而在删掉回退路径本身——\n只要回退还在，mm->mmap 就还不能删，迁移就没有真正完成。\n这是唯一同时降低复杂度并且降低回退率的方向。\n\n顺带把 alone/shared 拆分记进文档（252/530）：alone 是\"标注压根没发生\"，\n提高分辨率帮不上忙；shared 是\"条目挤不下名字\"，只有这一类分辨率能收。\n能问对这个问题本身就是更正根层那处错误带来的。\n\n三处同步更正：roadmap §13.20.1、testing-gates 的读法说明、\npt.h 里同一句话的注释（它原本把一个错读写成了头文件级的不变量）。\n\n验证：kernel-only -Werror 通过；check-doc-drift /\ncheck-doc-test-gates / check-doc-citations 全 PASS；\n门禁复跑仍为 PASS（git/vim/gcc/python/nodejs，审计全部计数器 0）。\n",
+      "reason": "原标题含混的“残余收益计算”；明确测量剩余收益并纠正根层结论。"
+    },
+    {
+      "commit": "1fe8d26ce08a754bf501bcc3bb70838b2728f50f",
+      "message": "exec-xlator: add configurable cross-architecture exec translation (in progress)\n\nAdd a fail-closed translator registry, ELF architecture handoff, boot-time configuration, user probes and shims, build targets, and usage documentation. This checkpoint is not presented as complete or verified.\n",
+      "reason": "原题“保留未提交”会误解为未提交变更；这是把在制工作作为提交保存。"
+    },
+    {
+      "commit": "fc206c3f17c978a5ac95e91a6ae481709f12a981",
+      "message": "merge: integrate the cross-architecture exec translation path\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "689f1dc7406e11173461472540669130b31f8708",
+      "message": "build: remove the extra comma from BUILD_VARIANT after the merge\n\n\n调解 Makefile 冲突时把两侧各自新增的 BUILD_VARIANT 后缀并成了一行，\n但把 -noxlator 追加在了行尾已有的逗号**之后**，于是\n`$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if ...,-noxlator,),`\n展开成 `both-dev,`——BUILD_DIR 带上一个尾逗号。\n\n它不会让构建失败，只会让所有产物落进一个名字里带逗号的目录，\n而 stamps.py 记的 build-flags 路径也跟着变，于是**每次增量构建都判为过期**，\n等于静默地把一次编译变成两次。这个 bug 在默认配置下看不出来，\n因为 CONFIG_XLATOR=y 时那个 `$(if)` 本就展开为空——只有把后缀挪到逗号之前\n才暴露。默认路径的 BUILD_DIR 现在回到 riscv64-qemu-virt-riscv64-both-dev。\n",
+      "reason": "明确具体格式错误及触发时机。"
+    },
+    {
+      "commit": "ce06ab18d7e8a57b9cd762aaf668a11f380e8a29",
+      "message": "loongarch64: remove the duplicate arch_bootargs_get definition\n\n\nfeat/exec-xlator 为 LoongArch 补了 arch_bootargs_get()，而 main 早就独立补过\n一份；两处新增落在文件的不同位置，git 没有把它们识别为冲突，于是自动合并\n留下两个同名定义，loongarch64 直接编译失败（redefinition）。\n\n保留 main 那一份，删掉 xlator 带来的那份，理由是能力不同而不是位置不同：\nmain 那份多了 CONFIG_UART_CMDLINE 的串口回退（QEMU 的 loongarch virt\n根本不发布命令行，没有这条回退 a20.* 全部失效），而 xlator 的\n`a20.xlator.<guest>` 正是要走这条路。删掉的那份只多了一个\n`&& bootargs_buf[0]` 判断，少了回退分支。\n",
+      "reason": "原标题“merge carried in second copy”不清；改为可检索的代码问题。"
+    },
+    {
+      "commit": "b90c030598c1b003b5108a54049abfc3e293e641",
+      "message": "merge: integrate extensible cross-architecture exec translation\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "0a816b0a8536163fc2aebe36db8486a2238378f8",
+      "message": "build: define kernel trimming policies in components/trim.toml\n\n\n剪裁的\"数据\"（profile 策展源码清单、能力架构矩阵、每架构特性宏）原先\n同时活在 Makefile 和 a20_instance.py 里，靠手工保持一致；现在只有一份\nTOML，两个消费方读同一处：\n\n- [profile.mcu]：25 文件策展源码白名单、-Os/-DCONFIG_MCU 编译参数、\n  nommu/bringup 隐含开关；arches 驱动 Makefile 的 profile 强制推导，\n  加第二个 MCU 级架构从此是一行 TOML。\n- [capability.*]：nommu/swap/xlator/ramfs-user/smp-verified-qemu/\n  pcie-mmio-alloc/pcie-mmio-ecam（含 board_exclusions），替代\n  Makefile 与 Python 里两份手工同步的架构白名单。\n- [arch-cppflags]：x86_64/aarch64 的无条件特性宏。\n\nMakefile 经 make regen-trim-fragment 生成的 components/trim.mk 消费\n（NOMMU_SUPPORTED_ARCHES 等矩阵变量改从 fragment 赋值），force-off\n与 $(error) 门禁逻辑仍留在 Makefile；tools/a20 校验实例时直接读\nTOML，两边不可能各说各话。\n\n新门禁 check-trim-registry 并入 check-manifests（CI 自动覆盖），做\n三件事：注册表自洽（必备条目、源文件与 board 排除项真实存在）、生成\nfragment 无 staleness、每个发射变量都有 makefile 消费者（死配置即\nFAIL）。ramfs-user 的构建侧把关仍是 RAMFS_USER_OBJCOPY 配方表，不\n重复第二份清单。\n\ntools/a20：新增 trim <实例>（展示剪裁计划：profile、各能力开关及理\n由、内存预算）与 check-trim/regen-trim；show 附剪裁摘要。实例校验\n同步强化——swap 请求在不支持的架构上从构建期静默 force-off 改为\na20 check 直接拒绝；kernel.profile 与架构一致性（mcu 用到非 MCU 架\n构、MCU 架构上写会被强制覆盖的 profile）在编译前报错。\n\nxlator_guests_audit 改读 trim.toml 的 xlator capability（原先用正则\n抠 Makefile）。板级事实（引脚/时钟）与链接兼容桩（kernel/mcu/\nmcu_stubs.c）刻意不进注册表。\n\n验证：armv7m dry-run 改造前后各 57 个编译单元逐文件等价；riscv64\nbringup 全量重编 326 个编译单元链接通过；make check 16 个宿主侧门\n禁全绿（含 240 个 a20 单测与新增 test_a20_trim.py）。\n",
+      "reason": "明确将剪裁策略移入声明式注册表。"
+    },
+    {
+      "commit": "65bd609eba93cc198453c3512c3cb2fe9bd2c944",
+      "message": "proc: remove the global proc_lock from the task-switch path\n",
+      "reason": "独立的 proc 锁域拆分，按要求保留。"
+    },
+    {
+      "commit": "2f17a5ba89cfff4fc6589605d4038c43b43edebf",
+      "message": "net: replace g_net_lock with per-bucket socket locks\n",
+      "reason": "独立的网络锁域拆分，按要求保留。"
+    },
+    {
+      "commit": "3873d889f69b9ea901199d692ce5e56733b00f6f",
+      "message": "mm: register slab-cache locks and read CPU arrays with interrupts disabled\n",
+      "reason": "独立的 slab/MM 锁域拆分，按要求保留。"
+    },
+    {
+      "commit": "f5bab711691af2503f5553ade5095d9f2db0f5b2",
+      "message": "merge: integrate lock serialization split across proc, network, and slab paths\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "4ab48b5c445f4e1646cd3e0587274201227ff9b5",
+      "message": "fix: repair x86_64 boot, server image sizing, and MM mapping references\n\n\n四个互相独立的回归，都是近期改动带进来的。\n\n1) x86_64 一启动就 KERNEL OOPS（pc=kernel_main+0x1f1，BADV=0x0）\n\n   boot/ldscript.ld 里的 `_stack_end = .` 遮蔽了 entry.S 中真正的标签，把\n   BSP 启动栈放到了 _bss_end 之上的 ALIGN(16) 处。_bss_end 往上的内存归物理\n   页帧分配器所有（mm_init 把 va_to_pa(_bss_end) 交给 pfa_init，后者从\n   ROUND_UP(kernel_end, 64) 开始 memset 自己那几 MB 的帧元数据位图），于是\n   栈刚用上就被清掉。lwIP 启用 512 KiB ram_heap（MEMP_MEM_MALLOC=1）后\n   ram_heap 落在 .bss 末尾，压在栈上，net_init() 里 mem_init() 的哨兵正好落在\n   它的活动栈上，下一次 printf 就返回到 kernel_main 的 call *%rax 中间。\n\n   栈改为放进专有的 .bss.stack 段，由 ldscript 在 .bss 里最先收集，因此位于\n   .bss 底部且在 _bss_end 之下；另加三条 ASSERT 锁住这个约束。同一处修正\n   riscv64/riscv32/loongarch64/loongarch32/ppc64le/vf2：它们的\n   `*(.bss.stack)` 排在 `*(.bss .bss.*)` 通配之后，而 ld 只认第一条匹配指令，\n   那行一直是死代码。另外 ppc64le 距 pfa memset 边界只有 0 字节余量，现为 12 MB。\n\n2) server-riscv64 镜像装不下（mkfs.ext4: Could not allocate block）\n\n   GUI_MEDIA 把 535 MiB 的 Minecraft 数据注入了每一个 world，包括没有 JVM、\n   没有启动器、world_size_mb=512 的 server 镜像。改为只对桌面 world 注入，\n   并在 mkrootfs.py 里加装盘前的体积预检，让这类错误直接指名道姓，而不是伪装\n   成磁盘满。\n\n3) 凡是声明了端口转发的实例都起不来\n\n   QEMU 9 弃用、QEMU 10 直接拒绝裸的 `tcp::2222-:22` 短写法。清单里仍保留\n   可读的短写法，改写集中到 NetCfg.qemu_hostfwd() 一处完成。\n\n4) xfce-x86_64 桌面启动到 dbus-uuidgen 时 use-after-free\n\n   mm_pt_lookup_seg_rcu() 在“同一页表项下两个映射都认领该地址”的歧义分支上对\n   一个借来的指针调用了 mm_seg_put()——segtab_seg() 是纯借用，引用归节点共享\n   数组所有（segtab_slot() 取得）。成功分支上的 mm_seg_get() 是对的，歧义分支\n   漏了对应的一次 put，于是偷走持有者的最后一个引用：第一次故障释放掉页面表\n   仍在引用的记录，第二次故障读已释放内存，magic=0 而 panic。删掉这次 put 即可，\n   引用计数本就按 slot 配平（annotate 时 get，segtab_entry_forget() 与 segarr\n   拆除时 put）。\n\n   同时补上 mm_insert_vma() 两个合并分支里缺失的 mm_mmap_seg_retire()：这是\n   唯一会把映射移出链表却不注销标注的改动路径（unmap/split/mprotect 都有）。\n   2 MiB 的页表项远粗于映射，ld.so 映射同一共享对象的相邻段时，survivor 长回去\n   覆盖被吸收的那半，于是那一项同时指向两个记录，落在被吸收半边的故障就必然歧义。\n\n   引入于 7e6cc1a7e，与 SMP 无关：smp=1/2/4 均稳定复现，同一进程同一 pid。\n\n顺带修掉 arm32 的编译中断：mm_pt_core_init() 与两个 dispatch 计数器原先都在\npt.h/pt.c 的 ARCH_HAS_PGTABLE_OPS 守卫内，而 arm32 按设计不带这个宏\n（它有自己的短描述符页表后端），于是 mm.c:50 与 fault.c 的两处引用符号不存在。\n计数器是统计量而非能力，移到守卫外让它们在每个构建里都存在；它们的上报点\nsys_proc.c 本就自带守卫，arm32 只是不打印。\n\n验证：x86_64/riscv64/aarch64/loongarch64/riscv32/ppc64le 六个 check-*-bringup\n全部通过；smoke-x86_64、smoke-riscv64、smoke-abi-linux、smoke-net-iface 通过；\nserver-riscv64 出镜像并进到 / # 提示符；xfce-x86_64 走完 distro rootfs →\nchroot → 载入 /bin/sh → user init pid=3 → dbus-daemon 起服务 → xfdesktop 拉起\n缩略图服务，全程零 panic。arm32 无 arm-linux-gnueabihf-gcc 交叉工具链，\n其修复只经静态核对，未能编译验证。\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n",
+      "reason": "原标题列出三个发现但中文复合句难读；准确概括三个修复面。"
+    },
+    {
+      "commit": "dab31684be007665f62854225abcb1368e1cb91b",
+      "message": "fix: restore NOMMU builds and missing RISC-V 32-bit syscall numbers\n\n\n上一修提交把 mm 层的引用计数溢出修掉之后，跑实例矩阵又挖出两处编译中断，\n都与\"NOMMU/32 位下某个头文件守卫把不该藏的东西藏了\"这一类有关。\n\n1) 三个 qemu-*-nommu 实例根本编译不过\n\n   pt.h 用 `#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)` 圈住了\n   一批声明，可引用它们的代码却没跟着藏：\n\n   - mm/cow.c 整份实现（含 mm_fork_clone_range / mm_fork_clone_present_range）\n     无条件调用 mm_pt_leaf_table / mm_pt_peek / mm_pt_sync_status；\n   - mm/fault.c 的 cow_sync_status() 与 shadow_seg_check() 同样如此。两者的调用点\n     本来就在 NOMMU 分支里，只有定义漏了守卫；\n   - mm/fault.c:429 那句 handle_demand_fault_attempt() 的前向声明是全局的，而定义\n     与唯一的调用点都在 #ifndef CONFIG_NOMMU 里，于是 NOMMU 下 -Werror 报\n     \"declared static but never defined\"；\n   - 最根本的一处：mm_seg_get() / mm_seg_put() 连声明带定义都关在守卫里。这两个是\n     slab 对象上的引用计数，与页表毫无关系，而 vma.c 在未受守卫的路径上增减引用，\n     于是 NOMMU 下调用的是不存在的函数。\n\n   cow.c 的处理是补一组返回 0 的实现而不是删函数：mm_fork() 在 mm/vm.c 里只在\n   返回值为负时判失败，而那两处调用点没有守卫，删掉照样编不过；NOMMU 地址空间是\n   平的，本来就没有页表可克隆、没有写保护可降，返回 0 是诚实的答案。\n\n   mm_seg_get/put 移到守卫外，与 dispatch 计数器同样处理：它们是统计/计数，不是\n   能力，声明跟着定义走，vma.c 才有的调用才有着落。\n\n   三个 NOMMU 内核（aarch64 / riscv64 / riscv32）现已全部编译通过。\n\n   注意：编译通过之后它们在早期启动里暴露出另一个问题——page_cache_init() 经\n   page_cache_grow_internal() 调 kcalloc() 时触发缺页 panic。这是被上面这层编译\n   错误挡在后面的既有缺陷，不是本次改动引入的（本次没有碰 slab.c 或 page_cache.c，\n   而 NOMMU 此前根本无法编译、也就无从运行）。NOMMU 的 slab/页缓存尚不能工作，\n   本次未修。\n\n2) riscv32 用户态编译不过\n\n   musl 的 riscv32 头文件沿用上游 riscv32 Linux 的编号，而本内核的 riscv32 没有\n   专属 syscall_nr 头（只有 arm32 和 x86_64 有），走的是 include/core/syscall_nr.h\n   这张通用表。两者对不上的地方，用户态直接调 syscall() 的代码就编不过：\n\n   - 先撞上的是 pselect6 / ppoll（上游 riscv32 只有 _time64 变体，musl 的内部\n     shim 会把缺省的 SYS_pselect6 顶到 _time64，但 cmds/stress/poll_edge.c 包含的\n     是公开的 <sys/syscall.h>，shim 根本不生效）；\n   - 修掉后又依次撞上 timer_gettime / timer_settime。\n\n   查全树之后，把 user/cmds 真正用到、而 riscv32 头文件没有、又确实存在于内核表里\n   的名字一次性补齐：pselect6、ppol、renameat、timer_gettime、timer_settime、\n   clock_gettime、close_range、io_getevents、time、utimes。编号一律照抄\n   kernel/include/core/syscall_nr.h —— 内核派发认的是这张表，照抄上游的号能编过，\n   但调到的会是别的系统调用。\n\n   SYS_mkswap 与 a20_* 没有放进 musl：那些是 A20OS 自有的，用户态是通过直接包含\n   内核头拿到的（如 cmds/core/mkswap.c 包含 kernel/include/mm/swap.h）。\n\n   riscv32 用户态现在能编过 musl 与全部 cmds，最后停在\n   `native-handle-rv32` 需要 riscv32-linux-gnu-gcc，而本机没装这个交叉工具链——\n   与 arm32、loongarch32 缺工具链同属环境问题。\n\n验证：六个 MMU 架构 check-*-bringup 全通过；aarch64 / riscv64 / riscv32 三个\nNOMMU 内核编译通过；11 个 smoke 门全通过；check-manifests 与 a20 check（55 个\n实例）通过。\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n",
+      "reason": "原标题表述略口语；明确修复的两项。"
+    },
+    {
+      "commit": "39921a13cb075c6fe8b4ee10a5e95f4d7e77902a",
+      "message": "merge: integrate instance boot regression fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "a641ada10b1023ebab2ab21b1e15a4b79e4cdfc8",
+      "message": "fix: bound two startup accesses in NOMMU mode\n",
+      "reason": "与后续架构权限和 static-PIE 工作分开保留。"
+    },
+    {
+      "commit": "6d38be0d3290f208f0e866f6874556fd2c4eef52",
+      "message": "aarch64: make kernel text executable in the NOMMU identity map\n",
+      "reason": "明确此修复处理内核镜像权限，不与 relocation 工作合并。"
+    },
+    {
+      "commit": "b89da421336aad0f96f6899bdd7b9372ed84ac53",
+      "message": "aarch64: limit the NOMMU AP=00 prefix to the kernel image and drvmod arena\n",
+      "reason": "独立映射边界调整，保留。"
+    },
+    {
+      "commit": "d230d3c0dc48e30bfaa13db4b3eecd9e54094a61",
+      "message": "fix: correct driver arena sizing, sigaction ABI layout, VMA references, and startup fd cleanup\n\nFix NOMMU driver-module arena unit calculation, restore architecture-specific sigaction layout, release segment-index references during rebuild and clear, and close descriptors through the correct startup file table. Make the NOMMU executable-page permission path explicit.\n",
+      "reason": "凝练四类聚合修复及关联NOMMU权限处理，删除堆叠的原始提交说明和运行结果声明。"
+    },
+    {
+      "commit": "31bc04bf94fb28ad13cc1309e92ab2b36e253f6d",
+      "message": "merge: integrate the remaining instance boot regression fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "257aba3818114084634d39795998b73a4c1612c6",
+      "message": "mm: expose /proc/<pid>/auxv and accept PROT_BTI and PROT_MTE in mprotect\n\n\n两处都为接入 FEX（aarch64 宿主上的 x86 翻译器）铺路，内核侧到此不再\n是阻塞项；通道本身（exec_try_translator 改写 bprm 后原生 re-exec）零改动。\n\n/proc/<pid>/auxv：此前完全没有该节点，auxv 只在内核构造初始栈时存在。\n不在读取时从栈回读——那段内存归程序所有、随时可能被覆写，回读回答的是\n「读者内存里现在有什么」而非「这个镜像当初如何被 exec」。故在 exec 时\n把向量拷进 mm_struct_t，由 /proc 重放；跨 fork 继承无需额外代码，因为\nmm_fork 的 *child = *parent 已带过去，这也是用值数组而非指针的原因。\nA20 native ABI 用 a20_start_info_t 启动、本就不发布 auxv，故其 auxv_n\n保持 0、节点读出为空——对一个从未被交给 auxv 的程序这是正确的。\n\nPROT_BTI/PROT_MTE：旧的 prot & ~(R|W|X) 把这两个位当未知位退回 EINVAL。\n要害在于它们与访问权同处一个参数，调用方无法「去掉它们重试」，只能拿到\n一个无法解释的 EINVAL。改为在 mprotect 入口即剥掉（prot &= ~PROT_HINT_MASK），\n位置在 W^X 策略与页表之前，使两处重读 prot 时只看到 R/W/X、hint 不会被\n误当权限。真正未知的位仍照常 EINVAL，校验未整体放松。mmap 本就不校验\nprot 位，未改。接受即丢弃该 hint，保证只弱不强。\n\n验证：aarch64 实跑——auxv 输出 AT_PHENT=0x38（56，真正的 Elf64_Phdr 大小）、\nAT_PHNUM=4、AT_PAGESZ=0x1000、AT_BASE=0（静态）、结尾有 AT_NULL；\nPROT_BTI 四项（RW+BTI、RW+BTI+MTE 被接受且仍可写、BTI 单独不给写权限、\n未知位 0x400 仍 EINVAL）全过。回归 smoke-aarch64 / smoke-abi-linux /\nsmoke-exec-xlator 全绿，aarch64 与 loongarch64 均在 -Werror 下编译通过。\n",
+      "reason": "原标题尚可，英文明确两个动作。"
+    },
+    {
+      "commit": "7d217d3fdb976a90b443a5faafb13792ad31539a",
+      "message": "net: connect LWIP_ASSERT_CORE_LOCKED to the g_lwip_lock owner CPU\n\n\ndocs/net/network-lock-contract.md 一直只是一份文档：上游\nsrc/include/lwip/opt.h:227 把 LWIP_ASSERT_CORE_LOCKED() 定义成空宏，除非移植层\n自己 #define。本树没有定义，于是 tcp.c / tcp_in.c / raw.c / udp.c / dns.c /\nethernet.c 里那几十处断言全部是空操作。net-lanes.md 记的那个多 lane + 真实\nLISTEN pcb 的链表损坏之所以能一路走到汇编和 UBSan 描述符才被抓住，这就是原因。\n\n做法：\n\n- a20_lwip_lock()/a20_lwip_unlock() 记录持有者 **CPU id**（kernel/net/lwip_stack.c:83）。\n  不用布尔量：布尔量回答的是\"这个标志置位了吗\"，而别的 CPU 持有锁时它在每个 CPU\n  上都是真，恰好放行断言要抓的那种情况。\n- lwipopts.h 把宏映射到 a20_lwip_assert_core_locked(site)，site 是宏展开点上的\n  __builtin_return_address(0)，即\"未持锁运行的那个 lwIP 函数\"；panic 之前先记录。\n- a20_lwip_init() 结束时才 arm（lwip_stack.c:398）。arm 之前断言是 no-op：lwIP 自己\n  的 lwip_init()/netif_add()/netif_init()/dhcp_start() 链在 a20_lwip_init() 内部跑，\n  那里没有 A20OS 的锁。net-lanes.md 的探针在引导期测到 23 次命中、8 个不同返回\n  地址（netif_init、netif_add、lwip_init、netif_add_ip6_address、a20_lwip_init、\n  a20_lwip_loopif_init_cb），对它们 panic 会让每个配置启动即死。arm 之后一次违规\n  即 panic，不是只计数——计数型信号会被当成噪声，而这条契约的价值在于\"违反必须\n  停下来\"。\n- 引导期命中不再计入 violations：把 23 次已知 init 命中和真实违规混在一个计数器\n  里，读起来就是噪声，正是训练所有人忽略这行的方式。\n\n补上此前没有断言的入口，把探针盲区变成覆盖区（上游此处也没有断言，纯新增）：\ntcp_new()、tcp_new_ip_type()、tcp_slowtmr()、tcp_fasttmr()、\ntcp_netif_ip_addr_changed()、tcp_process_refused_data()、\ntcp_trigger_input_pcb_close()。\n\ntcp_abort() 在本树已经带断言（tcp.c:656），net-lanes.md 说它没有，那条记录已过时，\n在提交说明里更正，不重复改。\n\n默认 CONFIG_NET_LOCK_ASSERT=0，宏仍为空，热路径零代价。\n\n证据：\n- make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 OPT=\"-DCONFIG_NET_LOCK_ASSERT=1\"\n  dev-build 通过（-Werror）。\n- 同构建 + OPT 追加 -DCONFIG_NET_RACE_DELAY_US=200，QEMU 4 CPU、a20.tcpmode=lwip、\n  8 个 tcp_accept_test + 2 个 tcp_loopback_test：\n  \"lwip_lock: armed=1 owner=4294967295 violations=0 sites=0\"，无 panic、无 page fault。\n  即 arm 之后的收包 / accept / 计时器 / PCB 增删路径全部持锁。\n- tcp_loopback_test 仍 FAIL，那是独立的下一步（close 走 tcp_abort 发 RST），\n  不在本提交范围内。\n",
+      "reason": "原标题“接到持有者CPU”不自然，明确断言与锁 owner 的连接。"
+    },
+    {
+      "commit": "edc29d31ad57ca9f39742c4ac72e1a8b01522b27",
+      "message": "net: fix loopback TCP stalls caused by close-time RST and dropped staged data\n\n\ntcp_loopback_test 在 tcpmode=lwip 下稳定失败：握手完成、服务端 send(2)\n返回 2，客户端 read() 却拿到 0（EOF）。用临时探针跑 a20.tcpmode=lwip\n（4 CPU）取到证据链：\n\n  SRV: recv=18 ok=1 send=2 closed\n  [DIAG] recv_cb s=<client> len=2      <- lwIP 已把 2 字节交给 socket 层\n  [DIAG] bh ring s=<client> len=2 closed=1\n  CLI: recv=0                            <- 数据在 bottom half 里被扔了\n\n两处缺陷叠加：\n\n1) net_inet_socket_destroy() 对已建立的 pcb 无条件 tcp_abort()。那是\n   tcp_abandon(pcb, 1)，会把 RST 放上线，等于告诉对端\"丢掉我发的东西\"。\n   服务端做的是最普通的 write(); close()，最后一段数据被这一行 routine\n   地毁掉，对端能不能看见取决于 RST 和数据谁先到接收队列。改成先解绑\n   回调再 tcp_close()，ERR_MEM 时才退回 tcp_abort()——与 net_tcp_close_pcb()\n   同一形状。\n\n2) net_inet_bottom_half_process_socket_locked() 先处理 bh_error/bh_closed\n   再 drain bh_ring，而 ring 的 `if (!s->closed)` 守卫于是把 lwIP 已经交付\n   的字节一起扔了。TCP 在同一趟 bottom half 里交付数据和紧随其后的 FIN，\n   于是 read() 对一个还欠着数据的连接回答 EOF。改成先把两个标志 capture\n   到局部变量、drain 完再按序施加；守卫重新只对\"本地已 close\"的 socket\n   生效——那才是它本来要防的东西。RST 跟在数据后面到达时同理，且更糟。\n\n修 (1) 暴露出一个此前被 (1) 掩盖的缺陷：优雅关闭会留 TIME_WAIT pcb，而\nSO_REUSE 在本树是 opt.h 的默认 0，socket 层的 reuseaddr 又从未搬上 pcb，\n于是 tcp_bind() 照旧扫 TIME_WAIT 表，同端口重启一律 EADDRINUSE(98)——\n第一次运行 PASS、之后每次 bind 失败。lwipopts.h 打开 SO_REUSE=1，\nnet_inet_tcp_apply_options() 把 reuseaddr 搬成 SOF_REUSEADDR（accept 子\npcb 经 SOF_INHERITED 继承），setsockopt 在 socket 层把新值推回已存在的\npcb（它发生在 socket() 与 bind() 之间）。登记见 DIVERGENCE.md §2.6。\n\n证据（ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build，QEMU，\na20.tcpmode=lwip）：\n- 基线（仅 item1）：端口 12345 连跑 3 次 3 PASS、连跑 10 次 0 PASS，\n  每次 CLI: recv=0；改用 6 个不同端口仍是 0/6 PASS\n- 本提交：同端口连跑 8 次 8 PASS，CLI: recv=2 data=ok\n- make smoke-network-suite: PASS（TCP_ACCEPT/TCP_LOOPBACK/UDP_LOOPBACK/\n  ICMP_LOOPBACK 全 PASS）\n",
+      "reason": "原标题概括不完整；明确两条导致 loopback 停滞的路径。"
+    },
+    {
+      "commit": "ec47d621e8b0348cf779ddb5c4a9f44a63274264",
+      "message": "net: return EPIPE after peer reset instead of ENOTSOCK\n\n\ntcp_edge_test 的 epipe 场景要求 send() 在对端 reset 后返回 EPIPE。\n在上一提交（回环传输修复）之后它稳定失败，报 errno=88 (ENOTSOCK)。\n\n用临时 printf 探针取到确切状态（a20.tcpmode=lwip，4 CPU）：\n\n  [DIAG] net_sendto_sock fallthrough: dom=2 type=1 conn=1 closed=1\n         ever=1 tcp=0x0\n  TCP_EDGE_TEST: epipe send errno=88 (Not a socket)\n\ntype=1 是 SOCK_STREAM、ever_connected=1，而 tcp=0x0——说明这不是\"不是套接字\"，\n而是一条被 lwIP 拆掉的连接。原因在派发条件本身：\n\n  if ((s->domain == AF_INET || s->domain == AF_INET6) &&\n      (s->udp || s->raw || s->tcp))\n      return net_inet_sendto(...);\n\n它按\"当前是否持有 pcb\"来路由。lwip_tcp_err_cb() 在 RST 和每一个致命错误上\n都会把 s->tcp 置 NULL，所以 s->tcp == NULL 恰恰是一条死掉的 TCP 连接的常态。\n这些 write 因此绕过 net_inet_sendto() 掉进下面的通用\"两个套接字\"路径，\n由 net_socket_is_live() 判定 s->closed 而返回 ENOTSOCK——对一个货真价实的\nfd 谎称它不是套接字。\n\n改成按套接字类型判定，并显式豁免 fast 路径：fast 模式的套接字按设计就不持有\npcb、由下面的快捷路径服务，所以这个豁免必须写出来而不是靠默认。语义沿用\nnet_inet_send_tcp() 已有的 Linux ABI 规则：ever_connected 则 EPIPE，否则\nENOTCONN。sys_sendto 与 write(2) 两条派发路径（net_sendto_sock、\nnet_vfile_write）都有同一个缺陷，一并修。\n\n这不是上一提交引入的缺陷：基线上 epipe 能过，是因为它失败在 partial-io 上\n（3 次连跑只有 2 次过），且基线的顺序恰好让 s->tcp 在 send() 到达派发时还没被\n置空。上一提交把 close() 从 abort 改成优雅关闭，改变了 RST 与 send 的先后，\n把这个一直存在的窗口变成了稳定命中。证据：同一探针在基线上不打印任何 DIAG，\n而基线的 epipe 自身也不稳定。\n\n证据（ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build，QEMU，\na20.tcpmode=lwip）：\n- tcp_edge_test 连跑 3 次：修前 2/3（失败形态是 partial-io），修后 3/3\n- 跨模式切换 lwip → fast → lwip 各跑一次 tcp_edge_test：两次实际执行均 PASS\n- make smoke-network-suite: PASS，11 passed / 1 declared-absent，\n  含 TCP_ACCEPT / TCP_LOOPBACK / TCP_EDGE / UDP_LOOPBACK / ICMP_LOOPBACK\n",
+      "reason": "将错误语义放在标题首位。"
+    },
+    {
+      "commit": "5ab14c95b21e67e5ff02d0dca3c77c8917e20281",
+      "message": "docs: record two unsuccessful attempts to reproduce the 2% multi-lane flake\n\n\n按本文件既有的\"下一步（不要只读代码，要放大窗口）\"配方执行了两轮\nCONFIG_NET_RACE_DELAY_US 实验，结论是**没炸，因此没有修，也没有定位**。\n\n数据（NET_LANES=4 NR_CPUS=4 a20.tcpmode=lwip，每轮换端口）：\n\n  DELAY=200   5 轮 x 8 端口 = 40 次   40/40 PASS\n  DELAY=2000  4 轮 x 8 端口 = 32 次   32/32 PASS\n  DELAY=0     6 x smoke-net-tcp-lanes  6/6 PASS\n\n三组共 78 次连接 0 失败，全程 lwip_lock violations=0 sites=0\n（即第 1 项接好的锁断言一次都没触发），net_accept_drop /\nnet_bh_overflow / net_alloc_fail 均为 0，CONFIG_NET_PCB_SANE=1 零命中。\n\n能说与不能说的边界写进文档了：72 次放大样本在 2% 失败率下期望 1.6 次失败，\n观测 0 次的概率约 23%，**不足以宣称\"flake 已消失\"**；能说的是\n\"accept stage 出队后、取 lwip 锁前\"这段被指认为最可疑的窗口，放大到\n200us（相对一次 a20_lwip_lock() 获取是数千倍）没有让间歇故障变必然，\n故该窗口不是触发点。\n\n下一轮配方改为按成本递增：先补到 200 次以上无失败以判定 2% 是否本就来自\n更早的脏树（72 次阴性样本最省事的解释），再把放大器挪到生产者\nlwip_tcp_accept_cb() 一侧（用新开关，避免两组数据混在一起），再看回环队列\n无界导致的入队/排空 CPU 时刻漂移。\n\n顺带记录一个新观测：长跑中 tcp_active 由 48 爬到 64。这是本轮把 server 侧\nclose() 从 tcp_abort()（RST 立即回收）改为 tcp_close()（FIN）后必然出现的\nTIME_WAIT 累积，非新 bug；已确认有界（dev profile MEMP_NUM_TCP_PCB=8192，\ntcp_alloc() 在池压力下回收最老的 TIME_WAIT pcb）。\n",
+      "reason": "原标题“2%...两轮放大实验”不清；不把未复现写成定位结论。"
+    },
+    {
+      "commit": "1a34f0ce00192513ec8c6d2e7b3763fe58dc77f7",
+      "message": "docs: update the network lock contract for net_bucket locks and core-lock assertions\n\n\n本文件此前把 g_net_lock 当作一把现存的全局锁来写适用范围、顺序要求和\n\"已知未完成\"。提交 2f17a5ba8 已删除它并把 socket 表分片为 net_bucket\n桶锁，所以\"锁\"一节之后的所有表述都建立在错误前提上。\n\n改动：\n\n- 头部加显式更正，并说明净效果是**变严格不是放松**：原来只禁 g_net_lock\n  一把，现在禁全部 NET_SOCK_BUCKET_COUNT 把（该不变量在分片时被原样保留，\n  见 lock.h:82-84 与 socket_internal.h:434-436）。\n- \"g_net_lock\" 一节重写为 g_net_buckets[]：分片粒度按 profile 缩放\n  （SERVER 512 slot/桶 128 桶，DEFAULT 32 slot/桶 32 桶）、桶下标是\n  reg_idx 高位而非哈希、孤儿桶 NET_SOCK_ORPHAN_BUCKET 收 reg_idx<0 的\n  在建/竞争 close 的 socket、取锁一律走 net_bucket_lock/lock2 包装。\n- 补全分片带来的新规则：跨 socket 必须 net_bucket_lock2() 按升序取两把；\n  全表扫描一次一把取了就放（取全组会活锁，fs/vfs/dcache.c 有同处记录）；\n  net_register_socket_locked() 自取桶锁故不得嵌在已持桶锁之下。\n- 正文逐处订正：accept 落底现只取 listener 一把桶且必须先放 g_lwip_lock；\n  accept drain 的 single-consumer 保证改由 drain_active 显式串行化\n  （socket_inet.c:917-919），不再隐含在全局锁里。\n- \"已知未完成\"删掉已落地项，改为记 2f17a5ba8 自陈的三项运行期验证缺口\n  （引用计数不漏不重、LOCK_COUNTERS_MAX 预算、-ENOTCONN 窗口），\n  并新增一条真实落差：桶锁一侧**没有**对应断言，ascending/至多两把目前\n  只有评审把关。检查清单相应加 4 条已满足项与 1 条未满足项。\n\n新增「核心锁断言：本文从\"文档\"变成\"可执行\"」一节，记录 7d217d3fd 的接线：\n持锁者记 CPU id 而非布尔量（布尔量在别的 CPU 持锁时每个 CPU 上都为真，\n恰好放行要抓的情况）、宏映射到带 site 的 a20_lwip_assert_core_locked()、\na20_lwip_init() 结束时才 arm（引导期实测 23 次命中 8 个返回地址，对它们\npanic 会让每个配置启动即死，且这些合法命中不计入 violations）、/proc/net/stats\n的可见性与\"关闭时显式打印 not checked\"。\n\n同时更正两处此前写错的事实：上游断言分布是 tcp.c 42 / netif.c 26 /\nudp.c 10 / raw.c 9 / timeouts.c 5 / tcp_in.c 2 / tcp_out.c 2（无 dns.c、\nethernet.c），共 96 处；tcp_abort() 本树**已带**断言（tcp.c:656），\nnet-lanes.md 那条\"它没有\"的记录已过时。7d217d3fd 补的是另外 7 个此前\n无断言的入口：tcp_new、tcp_new_ip_type、tcp_slowtmr、tcp_fasttmr、\ntcp_netif_ip_addr_changed、tcp_process_refused_data、tcp_trigger_input_pcb_close。\n",
+      "reason": "英文准确呈现两个文档更新内容。"
+    },
+    {
+      "commit": "036cd10ffa1f0a21a4e45fca15afe4fad698f120",
+      "message": "merge: integrate network correctness fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "23231f4827303c379bd11d9a6c7f98778a41601b",
+      "message": "docs: state that the MCU profile does not build the network stack\n\n\nREADME「支持的硬件平台」的 MCU 条目此前只说\"当前提供启动、USART1、SysTick 与\n基础堆\"，没有否定任何东西，读者会把它连同 20 KiB SRAM 一起理解成\"网络也支持\"。\n而按 docs/server-readiness.md §二的核对，STM32F103 在网络上不是\"内存不够\"，是\n**从未构建**：PROFILE=mcu 走 components/trim.toml [profile.mcu].sources 的独立\n源清单（Makefile:1166），其中既无 kernel/net 源文件也无 $(LWIP_SRC)，\nNET_PROFILE 对该目标完全无效。\n\n现在 MCU 条目明写\"不含网络\"并给出机制与出处，把\"给 mcu profile 纳入网络栈\"\n记为尚未做的产品决定而非调参；make stm32f103-bringup 的注释同步标注。\n\nserver-readiness.md §二相应更新：\n- \"真正的瓶颈不是 lwIP 池\" 记录 profile 化的宏、断言位置与前后实测数字\n  （37312 → 3184 B，−91.5%），并明确**结论只被部分推翻**：20 KiB 仍装不下\n  tier 1（8 个 net_socket_t 就是 32768 B、lwIP 堆 16407 B），剩下的账全在\n  profile 之内、可按档位调；\n- \"tier 1 连 net_stress_test 都跑不了\" 记录 SKIP 机制、SKIP 行文本与它不会让\n  任何门禁变绿的理由，并附两档实测输出；\n- \"STM32F103 根本不编译网络栈\" 标记为已按\"修 README\"方向关闭，并订正两处\n  漂移过的行号（Makefile:931 现在是 CFLAGS 段，MCU 源清单在 :1166；PROFILE=mcu\n  的自动启用在 :247-248）；\n- \"rx_frame/tx_frame 硬编码 1536\" 标记已修，说明 MTU 必须跟着帧缓冲区走，\n  否则满 MTU 帧仍然链 3 个池元素。\n",
+      "reason": "原标题“README 如实说明”改成用户可读事实。"
+    },
+    {
+      "commit": "04c791cb475aacff8ccaf3d8aa2c1bc54b42914c",
+      "message": "merge: integrate embedded network profile changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "dfac308514773e4ad69ca954889bc13bf3e890b7",
+      "message": "merge: integrate network protocol and socket features\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "d12733f48b04cbe6d834f8afa84219454a6ca918",
+      "message": "drivers: add optional scatter-gather transmit and capability reporting to net_dev_ops\n\n\nnet_dev_ops_t 末尾追加两个字段：send_sg() 吃 net_iovec_t 段列表，\ncaps() 返回协商到的能力位（TX_SG / TX_CSUM_OFFLOAD / RX_CSUM_OFFLOAD /\nMRG_RXBUF）。全部追加在 rx_irq_driven 之后，因此每个既有驱动的\n指定初始化器（virtio_net.c:735、e1000.c:508、starfive_gmac.c:692、\nls2k_gmac.c:626）不改一行继续编译，字段为 NULL 即\"只支持线性发送\"。\n\n按 driver_class.h:83-89 那条注释的规矩，vtable 加字段必须同步抬\nA20_DRIVER_ABI：1 -> 2。老模块的 net_dev_ops_t 更短，kernel 会越界读\n并调用，所以 drvmod_load() 必须在 a20_driver_descriptor_sane() 处拒绝。\nsmoke-drvmod-* 的门禁判据是 abi_probe.a20drv 被拒（它自称\nA20_DRIVER_ABI+1 = 3），抬版本后仍然被拒，判据不变。\n\n能力位只描述\"真的协商到了\"，不描述\"硬件理论上能做\"：位必须与对应回调\n同时具备，消费者才允许据此改路径。\n\n证据：make dev-build 通过（riscv64 qemu-virt 单核）。\n",
+      "reason": "把中英混杂的标题统一为准确英文。"
+    },
+    {
+      "commit": "089a2055c1549850d1d931ef182f204a8a76fe6b",
+      "message": "net: add scatter-gather fallback and driver capability reporting\n\n\na20_lwip_register_netifs() 采样一次 ops->caps(dev) 存进\na20_lwip_netif_state_t::caps；a20_lwip_linkoutput() 只在\n(caps & NET_DEV_CAP_TX_SG) && ops->send_sg && p->next == NULL 三个条件\n同时成立时走 send_sg()，其余情况逐字节回到原来的 pbuf_copy_partial()\n-> netfilter_output() -> send() 线性路径。\n\n为什么只取单段：netfilter_output() 的形参是平坦帧指针\n(netfilter.c:512)，它要从 Ethernet/VLAN/IPv4/L4 里就地解端口和地址，\n所以多段链在过钩子之前必须先拉平。PBUF_POOL 的头元素本身连续，所以\n单段帧可以直接在 p->payload 上跑钩子，零拷贝；多段仍走暂存缓冲。把\n过滤器改成走 pbuf 链属于 netfilter.c 的改动，本轮不做。\n\n卸载位不打开，理由写进 driver_class.h 的 NET_DEV_CAP_* 注释：lwIP\n2.2.2 的 LWIP_CHECKSUM_ON_COPY 默认 0（opt.h:2449-2450），且 netif.h\n只定义 7 个 NETIF_FLAG_* 位，没有任何一位能承载校验和卸载握手。开了\n就是让 lwIP 去校验设备根本没算出来的和。\n\n/proc/net/status 新增 devcaps 行，把默认 netif 的能力位和走 SG 的帧数/\n字节数打出来，便于在没有调试器的情况下确认\"能力位到底协商到了什么\"。\n\n证据：make dev-build 通过。当前四个网驱动的 net_dev_ops_t 都没有\nsend_sg/caps，caps 恒为 0，SG 分支在本次提交里不会被走到。\n",
+      "reason": "明确 lwIP stack 侧提交动作。"
+    },
+    {
+      "commit": "cfda15ab82c4dc6cecab734efb64630958669058",
+      "message": "virtio-net: negotiate MRG_RXBUF and expand the RX/TX rings to 256 entries\n\n\nRX/TX 环深从 32 提到 256（virtio_net.c:29），并协商\nVIRTIO_NET_F_MRG_RXBUF：接收侧按 3 描述符链（hdr 12B / data 1536B /\nctx 4B）投放，virtio_net_recv() 从首元素头偏移 10 读 num_buffers，按\n可用环顺序跨缓冲线性重组成一帧，再把每个用过的缓冲全部投回环上。\n\nMRG_RXBUF 只在 modern（version 1）传输上确认：带 VERSION_1 时规范把\nguest 头固定为 12 字节，与是否确认该特性无关；不带时头是 10 字节除非\n确认 MRG_RXBUF，而本驱动每实例只有一套缓冲布局和一个 hdr_len，确认后\nlegacy 环区还得为每缓冲留 3 个描述符，三页 legacy 环区放不下。\nVIRTIO_NET_F_CSUM / GUEST_CSUM 明确不确认：vendored lwIP 2.2.2 没有把\n\"L4 校验和是待补的partial sum\"告诉驱动的途径（opt.h:2449-2450 的\nLWIP_CHECKSUM_ON_COPY 默认 0，netif.h:84-107 只有 7 个 NETIF_FLAG_* 位），\n确认等于让 lwIP 校验设备根本没算出来的和——静默损坏每个包，而不是少个\n特性。VIRTIO_NET_F_MQ 只探测不确认：多队列路径未实现。这些取舍都记在\n就绪行上，不留在注释里。\n\n环与缓冲改为探测时一次性 kmalloc，不再是静态数组。理由是硬约束：默认\nDRIVER_DEPLOYMENT=generic 下本驱动打成 virtio-net.a20drv，drvmod_load()\n拒绝 .text+.data+.bss 超过 DRV_MOD_MAX_SIZE 的包（kernel/include/drvmod/\ndrvmod.h:31 的 512 KiB，loader.c 里 \"bad total_size\"）。静态版本 .bss\n0x1a60e8（1729256 字节），模块在 -ENOEXEC 上被拒，探测代码根本没跑到；\n改成 kmalloc 后 .bss 0x408（1032 字节）。地址可以交给设备是因为\nva_to_pa() 是减 PAGE_OFFSET 的平坦映射（kernel/include/mm/mm.h:26），\n且大于 SLAB_MAX_OBJ 的块（kernel/mm/slab.c:12）直接走 buddy、按整页返回，\n正好满足 legacy 环区按 PFN 寻址的页对齐要求。\n\n同时去掉 __builtin_clz：.a20drv 不链 libgcc，其 64 位降级变成\n__clzdi2 调用，loader 报 \"unresolved symbol '__clzdi2'\" 拒收模块。\nfloor(log2) 改写成循环。\n\nVIRTIO_NET_F_MRG_RXBUF 通过 net_dev_ops_t::caps() 上报为\nNET_DEV_CAP_MRG_RXBUF（1<<3），是纯设备侧接收属性，lwIP 看不到，因此可以\n如实上报；两个校验和位保持关闭。\n\n证据：\n  make dev-build: PASS\n  make smoke-network-suite: PASS\n    [VIRTIO-NET0] ready legacy=0 mac=52:54:00:12:34:56 qsize=256 hdr=12\n                  mrg_rxbuf=1 offered(mq=0 csum=0 guest_csum=0)\n  make smoke-net-accept: PASS\n    devcaps: en2 caps=0x8 [tx_sg:off][tx_csum_offload:off]\n             [rx_csum_offload:off][mrg_rxbuf:on] sg_tx=0 sg_tx_bytes=0\n",
+      "reason": "明确队列变化，不采用模糊“32->256”。"
+    },
+    {
+      "commit": "31dd3a73f4e8ea602da42e4d09bb100be52f27f7",
+      "message": "e1000: expand rings, reassemble multi-buffer frames, and add 82574L interrupt throttling\n\n\n环深 64 -> 256，描述符和缓冲改为探测时一次性 kmalloc，和 virtio_net 同\n一个硬约束：generic profile 下本驱动打成 e1000.a20drv，\ndrvmod_load() 拒绝 .text+.data+.bss 超过 DRV_MOD_MAX_SIZE 的包\n（kernel/include/drvmod/drvmod.h:31 的 512 KiB）。256 项 x 2048 字节 x 两\n个方向超过 1 MiB，静态数组根本装不进包。改后 .bss 0xa0（160 字节），\n整个包 19496 字节。RDLEN/TDLEN 本来就写的是 sizeof(rx)（描述符个数），\n环变成 kmalloc 之后 sizeof 不再等于项数，两处都改成显式的\nE1000_RING_SIZE。\n\n多缓冲帧不再直接丢。旧代码在 !EOP 时把 length 清零，等于丢掉每个超过\n2048 字节的帧的第一片；更糟的是它照样把这一项交还给设备，RDT 就停在帧\n中间，下一次读从半个包开始。现在从 rx_next 走到 EOP，把各片线性拼进调用\n者的缓冲：每一片都在清 status 之前先把 DD/EOP/errors/length 读出来（EOP\n就在即将被清零的那个字节里），交付与否都退役该描述符，RDT 写的是本次\n退役的最后一个而不是 last+1——那正是每次环回绕丢一个包的经典差一错误。\n出错时整帧退役并返回 0，而不是把设备标记为坏的前缀交给上层。遍历上界是\n环大小：设备永不置 EOP 的情形代价是一整个环然后在描述符边界上重新同步。\n\n82574L 简单接收中断节流。ITR (0x000C) 只在 e1000 这一代部件的寄存器组里\n存在，82540EM/82545EM/82546EB/82541PI 在这里是保留空洞，所以\ne1000_itr_init() 按 device id == 0x10D3 门控写入，而不是无条件写。节流\n在这里安全而不是吞吐下降：中断触发的接收排空是无界的——\ne1000_irq_handler() 把 netif 下标交给 a20_lwip_process_netif_irq_locked()，\n后者以 0 预算调 a20_lwip_process_netif_rx_tx_locked(n, 0)，一次中断排空整\n个环。间隔只改变多久排空一次，不改变每次排空多少，256 项又给了一次突发量\n设了上界。取 3904 x 1024 ns ≈ 3.9 ms：节流的代价是收包要等下一次中断，\n所以间隔本质是延迟预算，3.9 ms 对本栈服务的任何应用都不可见。就绪行打印\nitr=<us>，两次启动的 diff 一眼能看出节流有没有生效。\n\n证据：\n  x86_64-linux-gnu-gcc -Wall -Wextra -c kernel/drvmod/examples/e1000.c\n      （DRVMOD_CFLAGS 原样）: rc=0，无警告\n  make ARCH=x86_64 BOARD=x86_64-pc ABI=linux BRINGUP=1 dev-build: RC=0\n      Dev build complete；e1000.a20drv .bss = 0xa0\n  make ARCH=x86_64 BOARD=x86_64-pc ABI=linux BRINGUP=1 \\\n       DRIVER_DEPLOYMENT=embedded dev-build: RC=0\n  QEMU q35 + e1000 启动 embedded 镜像:\n      [E1000] ready: mac=52:54:00:12:34:57 link=up irq=-1 ring=256 itr=0us\n      [UEVENT] add net/net1 devt=0:1 delivered=0\n      [DRIVER] device 'pci-8086:100e-3' bound to driver 'e1000'\n\n未验证：82574L 的 ITR 分支只到 device id 门控为止，QEMU 没有 82574L\n模型，没有任何硬件可跑，itr=0us 是门控在 82540EM 上正确关闭的证据，不是\n节流生效的证据。多缓冲重组的重组路径也未被运行时覆盖——QEMU 的 e1000\n不产生超过 2048 字节的帧。\n",
+      "reason": "把三个实现点写清楚。"
+    },
+    {
+      "commit": "c620892b424b9322d3118ae98a3510aa5212e5ef",
+      "message": "virtio-net: restore single-descriptor RX buffers and fix MRG_RXBUF frame loss\n\n\n三描述符的 MRG_RXBUF 收包链在 QEMU 10.0 上丢帧：设备回报的 used 长度、\nnum_buffers 都正确，但第一帧之后每一帧送到协议栈都是全零\n（ethertype=0x0000），ethernet_input() 全部丢弃，ping 0/4。\n\n实测三种投递形状（均已确认 MRG_RXBUF）：\n  [hdr 12B][data 1536B][ctx 4B]  ping 0/4\n  [data 1548B][ctx 4B]           ping 0/4\n  [data 1548B]                   ping 4/4\n即载荷必须与 vnet 头同处一个描述符，带上 ctx 描述符反而丢帧。改回单描述符，\n删除随之无用的 rx_ctx[]。\n\n代价与取舍如实记录在 VIRTIO_NET_RX_DESC_MAX 上方注释：MRG_RXBUF 仍被确认，\nhdr_len 为 12、num_buffers 仍被 virtio_net_recv() 读取，但一描述符缓冲没有\nNEXT，无法跨多个投递缓冲拼 jumbo 帧；重组路径保留 num_buffers > 1 的分支，\n只是当前投递形状下不会触发。未协商即不会用的 MQ/CSUM 保持原样。\n\n证据：\n  make dev-build                                RC=0\n  make smoke-network-suite                      PASS\n  make smoke-netfilter                          NETFILTER_TEST: PASS dropped=3 out_packets=3\n",
+      "reason": "明确回退与缺陷。"
+    },
+    {
+      "commit": "b4755d79e4f9cdfc1a0fa0d13519cb6bd493c9af",
+      "message": "merge: integrate network driver data-path changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "79633039675277fbc23015937f026a2856e2d30f",
+      "message": "merge: integrate conntrack and NAT support\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "5881dee8912f4a2ac8599ea0821c94c1c0fabfe5",
+      "message": "net: assign accepted TCP children to the PCB owner lane\n",
+      "reason": "独立修正 accepted child 的 lane 所有权，按要求不并入 stage C/D。"
+    },
+    {
+      "commit": "f6f327b966eab246642ee242e52c6d1d11327f29",
+      "message": "net: process staged receive frames per lane in process context\n",
+      "reason": "独立 Stage D 实现，按要求不并入 stage C。"
+    },
+    {
+      "commit": "9b7944da61ff2837eb8e6ccb5d8b4ffedda6fff6",
+      "message": "merge: integrate network lane, socket-lock, and protocol changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "0d05c072629e57cf1d3c01870371624ff7c70dd4",
+      "message": "feat: add kernel preemption behind CONFIG_KERNEL_PREEMPT\n\n\nCooperative kernel code can now lose the CPU at a hardware-interrupt\nreturn: after arch_handle_irq() completes, kernel_preempt_at_irq_return()\nswitches out the interrupted task when need_resched is pending, the task\nis RUNNING and not idle, and the interrupted context ran with interrupts\nenabled (per-arch ARCH_IRQ_WAS_ENABLED_IN_TRAP against the saved status\nregister).  The resume path needs no new assembly: the preempted task's\nkstack still holds its trap frame under the handler frames, so __switch\nback into it unwinds through the ordinary IRQ epilogue.\n\nTwo invariants make the per-CPU preempt counter sound without per-task\nsave/restore: sched() masks interrupts across pick->publish->__switch\n(each task restores its own flag state at out:, because __switch already\nsaves/restores flags per task), and context_switch_locked() panics if\never entered with the counter raised -- a voluntary switch under a\nspinlock was already banned by the lock contract, this makes it a checked\nfact.  spin_lock/spin_unlock/spin_trylock_irqsave now bracket every\ncritical section with preempt_disable/enable; waiting for a lock stays\npreemptible.\n\nHosted arches get the hook by default; the MCU profile (armv7m PendSV)\nkeeps its cooperative scheduler, and a hosted build missing the hook is\na compile error rather than a silent never-preempts.\n\nAlso: ppc64le trap dispatch learned to route kernel-mode traps to\nkernel_trap_handler() by SRR1[PR] (previously every trap took the user\npath, so kernel ticks were charged as user time and the preemption point\nwas unreachable), and BUILD_VARIANT gains -preempt so pre-merge build\ndirectories cannot be reused with stale no-preemption objects.\n\ncow.c guards its per-PTE status sidecar calls with ARCH_HAS_PGTABLE_OPS\n(arm32's short-descriptor backend has none) so the arm32 build gets past\nmm/fork again.\n\nVerification: check-*-bringup for x86_64, riscv64, aarch64, riscv32,\nloongarch64, ppc64le; smoke-* for the same six; smoke-smp-bringup;\nsmoke-abi-linux; RT-wakeup A/B probe (user/cmds/core/preempt_lat.c)\nunder TCG on x86_64 and riscv64, smp=1 and smp=2 pinned and unpinned:\nmax wakeup 557ms -> 21ms (x86_64 smp1), 1ms (x86_64 smp2), 427ms -> 31ms\n(riscv64 smp1), 10ms (riscv64 smp2) against preempt-off controls.\n",
+      "reason": "原标题只有功能名；补上配置控制关系。"
+    },
+    {
+      "commit": "2dd28758c1da7e976ccd35f9c61ebaacd5b7fb5a",
+      "message": "net: add a runtime probe for the lock contract and record its refcount findings\n\n\ndocs/net/network-lock-contract.md listed, as the largest gap between the lock\ncontract and the implementation, that only the g_lwip_lock half was executable.\nLWIP_ASSERT_CORE_LOCKED() had been wired to a panicking probe in 7d217d3fd;\nthe net locks had nothing.  Two rules were prose only:\n\n  - net_sock_lock2() takes two sockets in ascending address order, and a\n    critical section holds at most two socket locks;\n  - a bucket lock is never taken while a socket lock is held (the bucket is the\n    outer lock; net_bucket_scan() and the register/unregister pair nest the\n    other way, which is the sanctioned direction).\n\nThis lands both probes plus the runtime verification impl-notes-net.md §8.2,\n§8.3, §8.5, §8.6 and §8.7 recorded as never run.\n\nnet-lock probe (kernel/net/net_lock_probe.c, new)\n--------------------------------------------------\nA per-CPU set of the net locks this CPU holds, checked on every acquire:\nduplicate (a self-deadlock the spinlock reports with no explanation), socket\nlock out of address order, a third socket lock, a bucket lock under a socket\nlock, and a second bucket lock (net_bucket_lock2() was deleted in 7c7a4d7c8, so\none is the ceiling).\n\nPer-CPU rather than per-task is the right granularity and the reason is load\nbearing: every net lock is spin_lock_irqsave()/spin_unlock_irqrestore(), and\nnet_sock_lock2() takes its second lock with plain spin_lock() only after the\nfirst has disabled interrupts.  Interrupts are therefore off for the whole held\nwindow, so the holder can be neither preempted nor interrupted into a nested\nacquire, and cannot migrate while holding one.  If a net lock ever stops being\nirqsave, this table stops being authoritative; that is written down at the\ndefinition rather than left for the next reader to infer.\n\nArming is at the end of net_init() (socket.c), for the reason\ng_lwip_lock_armed already documents: before that the registry locks do not\nexist.  Rendering is on /proc/net/status next to the lwip row, and a switch-off\nbuild prints \"net_lock: not checked\" so an absent probe is never read as a\nclean one.\n\nCONFIG_NET_LOCK_ASSERT gains a third value: 0 absent, 1 panic on violation, 2\ncount only.  The counting mode exists because a counting signal trains people to\nignore the line; on a long soak the final count is worth more than a dead\nmachine on the first hit.\n\nnet_socket_registry_init() now compares lock_counters_count() either side of\nits registration loop against NET_SOCK_BUCKETS and reports a shortfall, so\n\"the contention audit covers the net data plane\" is a checked statement.\n\nReference-count ledger\n----------------------\nimpl-notes-net.md §8.3/§8.6 recorded net_socket_ref/free as a primitive walked\nby hand over 54 sites and never once executed.  Now:\n\n  - net_socket_free() uses a CAS loop instead of __atomic_fetch_sub().  The\n    old form could not tell \"dropped the last reference\" from \"dropped one too\n    many\": both land on the same atomic.  A non-positive count is now refused\n    and counted rather than driving the count negative.\n  - A ref_magic canary, set on alloc and cleared by the free that releases the\n    object, rejects a free aimed at something that is not a live socket.  Stated\n    plainly at the field: obj_cache hands the same address back to the next\n    socket, so a double free landing on a *reused* slot stays invisible.  It\n    catches the other case, which is the one that happens.\n  - allocs / frees / live / faults render on /proc/net/status.  `live` is the\n    leak reading: a create/destroy cycle that leaks moves it and not\n    syscall-sockets' `open`, which counts only table-visible sockets.\n\nENOTCONN attribution\n--------------------\n§8.5's open question was whether the peer-revalidation window is reachable, and\nit could not be asked: the window and \"this socket was never connected\" surface\nas the same errno.  All 13 -ENOTCONN return sites now go through net_notconn()\nwith a reason, four of which are the window, and /proc/net/status prints\n`total=` and `window=` separately.\n\nThe AF_UNIX over-drop the ledger found\n--------------------------------------\nWith CONFIG_NET_REF_ASSERT=1 the first run panicked on the first AF_UNIX close:\n\n  net_socket_free: canary-mismatch: object was not a live socket\n  refs=0 allocs=127 frees=126 faults=1\n  net_socket_free <- net_socket_close_file <- vfs_finalize_closed_vfile <- sys_close\n\nCause: net_socket_unregister() early-returns for a socket with no slot and does\nnot release a reference, but both generic teardown paths dropped \"the registry\nreference\" unconditionally.  An AF_UNIX accepted child is never registered --\n`grep -rn net_register_socket_locked kernel/net/socket_unix.c` has no hits, the\nbehaviour impl-notes-net.md §3bis(b) records as inherited -- so it carries one\nreference, not two.  Every AF_UNIX close therefore freed the socket mid-teardown\nand kept dereferencing it: wait_queue_wake_all() on freed wait queues, then a\nsecond free.\n\nThis was not introduced here and was not a live memory-safety failure: the old\nfetch_sub compared against 1, so the extra free read as -1, matched nothing and\nreturned.  The object was freed exactly once by accident rather than by design,\nand the use-after-free survived because nothing read the freed memory in a way\nthat faulted.  What changed is that it is now visible.\n\nFix: net_socket_unregister() returns whether it released a slot, and each caller\ndrops the registry reference only when it did.  All five call sites updated --\nsocket_file.c:304 (the fd's own socket, which for an AF_UNIX accepted child is\nitself unregistered), socket_file.c:370 (queued children), socket_control.c:393\n(accept install failure), socket_inet.c:1235 and :2072 (accept-stage and local\nconnect rollbacks, where a slot is guaranteed but the shape is made uniform).\nReturning \"was there a slot\" puts the knowledge in the function that released\nthe thing the reference was counted against, so the pairing cannot drift again.\n\nEvidence on the tree carrying this commit, riscv64 both-dev,\nCONFIG_NET_LOCK_ASSERT=1 CONFIG_NET_REF_ASSERT=1, single CPU:\n  SOCKET_STRESS: PASS / NET_STRESS_TEST: PASS / UNIX_TEST: PASS\n  net_lock: armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0\n  net_sock_ref: live=1 allocs=129 frees=128 faults=0\n  net_notconn: total=0 window=0 reasons=13\nlive=1 agrees with \"syscall-sockets: open=1\" and \"lanes: sockets=1\" (the DHCP\nsocket), which is the cross-check the two readings exist for.\n\nNegative controls, so the probe is not vacuous.  A temporary injection that made\nthe first post-arm bucket acquire look as though a socket lock were already held\nproduced, under mode 1:\n  net lock contract: bucket lock under socket lock ... cpu=0 held=1 violations=1\nfollowed by [PANIC].  A second temporary injection that poisoned the held set\nwith one synthetic socket lock at a higher address, under mode 2, produced\n\"net_lock: armed=1 violations=11449 sites=8\" with SOCKET_STRESS: PASS -- i.e.\nthe address-order check fires and mode 2 counts without aborting.  Both\ninjections were reverted and are not in this commit.  The third-socket-lock\nbranch shares the reporting path with the address-order branch but was not\nseparately injected; say so rather than implying three controls for two runs.\n",
+      "reason": "明确 probe 的目的及发现。"
+    },
+    {
+      "commit": "e1a69dde7c36aaaab4902b3644a829682284db19",
+      "message": "docs: record 797 failure-free samples and correct the counting gap\n\n\nDocs only.  Second amplification round for the residual connect flake in\nnet-lanes.md, which 2026-10-05 left unresolved at 78 negative samples.\n\nTwo rounds, 4 CPU + 4 lane + a20.tcpmode=lwip, CONFIG_NET_PCB_SANE=1 and\nCONFIG_NET_LOCK_ASSERT=1 throughout, ten independent boots each, five repeats\nof the eight-port set per boot:\n\n  round A   CONFIG_NET_RACE_DELAY_US=500   400 issued / 398 executed / 0 failed\n  round B   CONFIG_NET_RACE_DELAY_US=0     400 issued / 399 executed / 0 failed\n\n797 executed, zero failures; 0.98^797 is about 1.1e-7.  That is NOT a claim\nthat the flake was fixed -- nothing in the implementation was changed for it\nthis round, and the two historical failures (ports 12404/12405) predate the\ncurrent tree.  It is the reading the doc's own next-step rule predicted: the\n2% came from an older tree, so the next move is to check the build id of\nthose two samples rather than keep hunting a race here.  Round A's 500 us is\nalso *not* beyond the 2000 us already tried last round; what it adds is\nsample count, not amplification, and the doc says so rather than letting the\ntable imply otherwise.\n\nWhat is new and worth more than the sample count: the console garbles input.\nThree of the 800 commands arrived in the guest with adjacent characters\ntransposed or dropped -- \"tcp_accept_test\" became \"tcp_aceptc_test\",\n\"tpc_accept_test\" and \"ctp_accept_test\" -- and mksh reported\n\"inaccessible or not found\".  The input rate is one line per second and the\nhost side emitted the bytes correctly, so this is the guest UART receive\npath, and it happens before the command runs at all.\n\nThat matters for how anyone measures this flake.  grep -c 'TCP_ACCEPT_TEST:\nPASS' counts a command that never executed as a command that did not fail,\nwhich silently eats 0.4% of the sample.  smoke-net-tcp-lanes is wrong in the\nopposite direction: a swallowed command drops passes to 7 and the gate\nreports a failure.  The new table keeps \"issued\" and \"executed\" in separate\ncolumns for that reason, and the next-steps list now puts fixing the sample\naccounting ahead of moving the amplifier, because without it the remaining\nexperiments are equally untrustworthy.\n\nAlso folded in, all measured on this branch:\n  - the two negative controls from impl-notes-net.md 11.3 re-run independently,\n    confirming mode 1 panics and mode 2 counts without aborting;\n  - the multi-core refcount evidence 11.4 said it lacked: live=1 faults=0\n    across all twenty 4-CPU boots, which is what makes \"the ledger does not\n    leak under real multi-core handshakes\" more than a single-CPU reading;\n  - the LOCK_COUNTERS_MAX budget question 8.2/8.7 left open, answered on the\n    server profile: registered=141 capacity=192 dropped=0, i.e. 128 bucket\n    locks plus 13 others, 51 to spare.\n",
+      "reason": "原标题结构不明；保留样本数与计数缺陷。"
+    },
+    {
+      "commit": "578fbfbe154129a1ab5c940848f0097fcc756625",
+      "message": "merge: integrate network correctness fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "5ed36bf16aa77993543a1f440ad6144b2ef887c5",
+      "message": "net: fit the embedded tier within its memory budget\n\n\ndocs/server-readiness.md kept reporting that tier 1 does not fit, for a\nreason that was entirely inside the profile: eight net_socket_t were\n29120 B (1.39x a 20 KiB part) because each one embeds its own bottom-half\nring of 4 events x 320 B of inline payload, and the tier's pool ceilings\nadded up to 22880 B against a 16384 B lwIP heap.\n\nTwo knobs, both per tier, both measured on riscv64 LP64:\n\n  ring 4 / payload 320 -> event 528 B, net_socket_t 3640 B, 8 sockets 29120 B\n  ring 2 / payload 256 -> event 464 B, net_socket_t 2440 B, 8 sockets 19520 B\n\nPayload 256 is the floor and not a round number: socket_inet.c asserts\nNET_BH_INLINE_PAYLOAD >= TCP_MSS and this tier's MSS is 256.  Ring depth 2\nis safe rather than merely small -- net_inet_tcp_stage_payload() reserves\ncapacity for the whole segment and answers ERR_MEM when the ring is full,\nso lwIP parks the pbuf in refused_data.  A full ring backpressures.\n\nThe pool ceilings are reconciled against MEM_SIZE for the same reason: with\nMEMP_MEM_MALLOC=1 memp has no per-pool cap, so a ceiling that exceeds the\nheap is capacity the tier declares and cannot allocate, and the shortfall\nsurfaces as err > 0 on /proc/a20/netmem rather than as a clean failure.\nPBUF_POOL_SIZE 24 -> 10, TCP_SEG_MULT 16 -> 8, reassembly/fragment pools and\nthe two IPv6 pools (which were lwIP's opt.h defaults of 32/16/20/4, chosen\nfor a different part) are profile-scoped now: 13332 B of claims against\n16384 B, 3052 B left for everything memp does not serve.  Conntrack halves\nto 32 entries, which is unconditional .bss paid on every boot.\n\nThe total is asserted, not described: socket_internal.h is the first point\nwhere net_socket_t is a complete type, so the four-term sum (socket table,\nframe arrays, filter tables, heap) is checked there against\nNET_PROFILE_TOTAL_BUDGET, and the socket term alone against\nNET_PROFILE_SOCKET_BUDGET.  The filter term is checked against a real\nsizeof() in netfilter_nat.c.  42644 B measured against a 44 KiB ceiling.\n\nNote the ceiling moved: this tier used to name 20 KiB and overran it.  Eight\nsockets are 19520 B before lwIP exists, so 20 KiB was never reachable and\n44 KiB is what the code now guarantees.  docs/server-readiness.md carries\nthe capability statement that goes with it.\n\nDEFAULT and SERVER change no byte: their ring depth, inline payload, socket\nbudget, pool ceilings and conntrack table are untouched, and the new\nmacros default to the values opt.h and lwipopts.h already had.\n\nMeasured on this branch (riscv64 QEMU, NET_PROFILE=1):\n  socket table: per_socket=2440 slots=8 bh_ring=2 inline_payload=256\n                total=19520 budget=20480\n  static .bss: netif_state=1152 netif=368 pkt_ring=2580 total=4100\n  TCP_LOOPBACK_TEST: PASS / ICMP_LOOPBACK_TEST: PASS\n",
+      "reason": "原标题“gets a budget it fits”有歧义；说明结果。"
+    },
+    {
+      "commit": "669ea99bef8aaac2c23172fb79e4cbbbbb929ab2",
+      "message": "net: gate the SIOCSIFMTU ceiling and make the ioctl reach it\n\n\na20_lwip_if_set_mtu() has refused an MTU whose frame does not fit the\nprofile's scratch buffer since the last round, and nothing in the tree had\never run that line: SIOCSIFMTU was dispatched by net_vfile_ioctl() into\nnet_vfile_ifreq_ioctl(), which had no A20_SIOCSIFMTU arm and answered\nENOTTY to every caller, so the only live door to the check was\nRTM_NEWLINK -- and netlink_test only ever re-applied the MTU the interface\nalready had, which sits below the ceiling.\n\nTwo changes:\n\n  socket_file.c wires SIOCSIFMTU to a20_lwip_if_set_mtu() rather than to a\n  bare nif->mtu write.  The RFC 791 floor and the profile's frame ceiling\n  are enforced in that one place, and a direct write would be the only way\n  to configure an MTU the receive path then truncates at its clamp and the\n  transmit path refuses with ERR_BUF.  The int->uint16_t range check is\n  here because 0x10000 would otherwise truncate to 0 and be refused as a\n  below-minimum MTU instead of as the out-of-range value it is.\n\n  netlink_test discovers the ceiling instead of hardcoding one.  It is per\n  profile (498 on the embedded tier's 512 B frame buffer, 1522 on the\n  1536 B ones) and userspace cannot read which tier is built, so a\n  bisection over the monotonic accept/refuse predicate finds the exact\n  boundary, and then both sides are asserted: 65535 refused, ceiling\n  accepted, ceiling+1 refused with EINVAL twice, the value read back\n  through SIOCGIFMTU, SIOCSIFMTU refusing above and accepting at the\n  ceiling, and the original MTU restored.  Discovery is cross-checked\n  against the unconditional 65535 refusal, so a kernel with no ceiling at\n  all fails rather than passing with a ceiling of 65535.\n\nOne existing assertion was profile-1-broken and is fixed here rather than\nleft: \"RTM_NEWLINK re-applying the current MTU is accepted\" sent a literal\n1500, which on the embedded tier is a request the 498 ceiling refuses.\nIt read the current MTU now.  It never surfaced as a tier 1 failure only\nbecause the tier 1 suite hangs earlier, in tcp_accept_test.\n\nMeasured (riscv64 QEMU):\n  default tier: NETLINK: info MTU ceiling discovered at 1522 (frame buffer\n    1536 B, running with 1500); NETLINK: PASS (60 checks)\n  embedded tier: NETLINK: info MTU ceiling discovered at 498 (frame buffer\n    512 B, running with 498); NETLINK: PASS (60 checks)\n",
+      "reason": "原标题说法较口语，保持技术事实。"
+    },
+    {
+      "commit": "d77ff622e87a84f411d488985a1201dcc2e86af8",
+      "message": "net: report n/a when no socket memory budget is defined\n\n\nThe /proc/a20/netmem socket row printed budget=0 on every tier that does not\ndefine NET_PROFILE_SOCKET_BUDGET, which is every tier but the embedded one.\nA zero there reads as \"31 MB of socket table against a zero budget\" -- an\noverrun claim the kernel does not make and nothing asserts.  Measured on the\ndefault tier:\n\n  socket table: per_socket=30552 slots=1024 bh_ring=16 inline_payload=1600\n                total=31285248 budget=0\n\nThe embedded tier is unaffected (it defines the macro):\n\n  socket table: per_socket=2440 slots=8 bh_ring=2 inline_payload=256\n                total=19520 budget=20480\n\nSo this is a printing change only: no size, no assert and no profile value\nmoves.  It is fixed rather than left because the whole point of the row is to\nbe read as an accounting statement, and an accounting statement that reports a\nbudget the build does not have is worse than no column at all.\n\nGates re-run after the change (riscv64 QEMU):\n  make dev-build NET_PROFILE=1 / =2 / =3            all exit 0\n  make smoke-network-suite   PASS (netlink 60 checks, MTU ceiling 1522)\n  make smoke-lwip-memp       PASS (6 pools exposed, err=0)\n  embedded tier: TCP_LOOPBACK_TEST: PASS, ICMP_LOOPBACK_TEST: PASS,\n                NETLINK: PASS (60 checks), ceiling discovered at 498\n",
+      "reason": "明确表格列行为。"
+    },
+    {
+      "commit": "db4a818983e405bf7f89a816f0f73e5a9e98812f",
+      "message": "merge: integrate embedded network budget and MTU-gate changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "9b1a270b73ac289cfb4745a64e8c392a8e34ac2f",
+      "message": "merge: integrate network protocol and feature changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "5bd73c041d5d359a0e2e440208b7a70e9d605930",
+      "message": "virtio-net: reassemble MRG_RXBUF frames across real buffers\n\n\nThe feature was acknowledged and num_buffers was read, but a frame could\nnever span two posted buffers, so the merge loop was unreachable code.\n\nWhy it was unreachable is in QEMU, not in the posting shape.  The device\npops one receive element per iteration (hw/net/virtio-net.c:1971), copies at\nmost what is left of the frame into it (:2023-2025) and loops while\noffset < size (:1958); it writes the iteration count -- the number of\nelements it popped -- into the header's num_buffers (:2043).  A 1536 B\npayload swallowed a 1514 B frame whole, so num_buffers was pinned at 1.\nPosting 512 B payloads inverts that: a full-MTU frame spans three, a\nminimum frame still spans one, and the merge path runs on ordinary traffic.\nThe descriptor shape is unchanged from the one measurement already settled\n-- header and payload in one descriptor, no NEXT, no context descriptor --\nonly the payload size moved.\n\n  [VIRTIO-NET0] ready legacy=0 mac=52:54:00:12:34:56 qsize=256 hdr=12 mrg_rxbuf=1 rxbuf=524 offered(mq=0 csum=0 guest_csum=0)\n  [VIRTIO-NET0] first frame reassembled from 2 buffers (rxbuf=524)\n  /tmp/big64.bin: saved 65536 bytes\n  65536 /tmp/big64.bin\n  --- 10.0.2.2 ping statistics --- 4 packets transmitted, 4 received\n\nmeasured under qemu-system-riscv64 10.0.13, guest wget against a host\npython3 -m http.server serving a 65536-byte file, then guest\n\"ping 10.0.2.2 4\".  The log line prints the first spanning frame only, and\nthe first one slirp happened to send was a two-buffer frame; a full-MTU\nframe is three by the arithmetic above, which no single log line shows\nbecause the counter behind the line is not exposed over any ioctl.  lwIP verifies the TCP checksum of every merged frame,\nso a mis-joined frame cannot reach the socket; 65536 of 65536 bytes and a\n4/4 ping with the merge path firing say the join is right.\n\nWhat does not cover this: make smoke-network-suite passes on the same build\nbut does not exercise the merge path at all.  It drives loopback plus a\ntelnetd/DNS handshake, and every frame it exchanges fits inside one 524-byte\nbuffer, so num_buffers stays 1 and the log carries no reassembly line -- a\ngreen suite is not evidence for this feature and the section in\ndocs/server-readiness.md now says so.  Conversely the host-to-guest\ndirection does not work in this slirp setup: ping 10.0.2.15 from the host is\n0/4 whatever the boot timing, so the ping evidence above is the guest\npinging the gateway, not the other way round.\n\nThat fix exposed a latent bug in the merge loop itself: it subtracted a\nvirtio_net_hdr from every buffer of the chain, including continuations.\nOnly the first buffer carries a header -- QEMU resets `total` per element\nand adds guest_hdr_len only when i == 0 (hw/net/virtio-net.c:1996-2025:\n`if (i == 0)` at :1996, `total += n->guest_hdr_len` at :2016, the payload\ncopy at :2023) --\nso the old code would have dropped the first 12 payload bytes of every\nmerged frame.  It never showed because no device ever produced a\ncontinuation buffer.\n\nBuffers without MRG_RXBUF keep a whole frame each: the device drops a\nframe that does not fit one buffer (hw/net/virtio-net.c:2030-2036), so\nsmall buffers there would be a silent receive black hole.\n\nRing memory per instance drops from 790 KiB to 534 KiB on a modern device,\nor 862 KiB to 606 KiB legacy, counting every region virtio_net_ring_bytes()\nadds: the receive stride is 524 rather than 1548, the transmit stride is\nunchanged at 1548 (TX never merges), and the descriptor tables, avail/used\nrings and bookkeeping arrays are untouched.\n",
+      "reason": "统一驱动名称写法。"
+    },
+    {
+      "commit": "e3acc6b43e8ab99838db4121239ada54805c4049",
+      "message": "e1000: measure receive reassembly across descriptors\n\n\ne1000_recv() walks the descriptor chain to EOP, but no frame could ever\nspan two descriptors, so the walk was unexercised.  One thing kept that\ntrue: the device discards every frame past 1514 bytes unless RCTL[5] LPE\nis set -- e1000x_is_oversized() compares against header_size + ETH_MTU\nwhen LPE is clear (hw/net/e1000x_common.c:141-152, the drop condition at\n:151-153) -- and LPE was clear.\n\nThe per-descriptor size is not what made the walk unreachable, and an\nearlier draft of this message said so wrongly.  There is no RCTL.BSIZE\nfield in this model at all: \"BSIZE\" occurs zero times in QEMU 10.0.13's\nhw/net/e1000.c and hw/net/e1000x_common.c, and the only BSIZE masks that\nmodel carries are the PSRCTL parse-and-classify ones (hw/net/e1000_regs.h\n:179-187), a different register.  This driver posts legacy descriptors, so\na buffer is exactly the length the guest writes into the descriptor and a\nlong frame simply walks on to the next one.  E1000_BUF_SIZE = 2048 sets\nhow many descriptors one frame costs, not whether it can cross one.\n\nSo RCTL.LPE is now programmed, with JUMBO set to a ceiling of two buffers\n(1514 + 2560 = 4074 bytes of frame, inside 2 * 2048 with the FCS) rather\nthan the 16 KiB the part can address: two descriptors per frame is the\nbound the walk is claimed to meet.  QEMU ignores JUMBO and tests only LPE\nagainst its own 16 * KiB - ETH_FCS_LEN ceiling\n(hw/net/e1000x_common.c:147-149), so the register is written for the part's\nsake and not because QEMU reads it.\n\nFeeding it a long frame needs a host that can produce one, and the obvious\nroute is closed.  slirp has no mtu option --\n\n  $ qemu-system-x86_64 -netdev user,id=n0,mtu=9000\n  qemu-system-x86_64: -netdev user,id=n0,mtu=9000: Invalid parameter 'mtu'\n\n-- and raw sockets are denied here (uid=1000, SOCK_RAW ->\n\"[Errno 1] Operation not permitted\"), so no frame larger than a 1500-byte\nMTU payload can be made to cross slirp at all.\nWhat does work is -netdev socket,id=n0,fd=N with a datagram socketpair\n(net/socket.c:706-741 treats one datagram as one frame), driven from an\nunprivileged parent process.  Injecting a 2842-byte frame at the guest MAC:\n\n  [E1000] first frame reassembled from 2 descriptors (buf=2048)\n  en2      -          5            0            6            0\n\nBefore LPE the same injection produced RX-OK 1 (the single-descriptor\ncontrol frame) and no reassembly line at all.\n\nWhat this does NOT establish: an over-long frame is reassembled correctly\nand then dropped by lwIP, because the link MTU is\nNET_PROFILE_NETIF_MTU = 1500 (kernel/net/net_profile.h:190) and no IPv4\npacket above it is deliverable.  End-to-end jumbo needs the profile table\nand the pbuf sizing to move together, which is the net stack's, not the\ndriver's, to change.  Receive-side capability only until then.\n",
+      "reason": "原标题“measured, not just written”口语；明确实测行为。"
+    },
+    {
+      "commit": "88c13a56240d40f0f395067b15241032fb204d7c",
+      "message": "docs: explain why checksum-offload capability bits remain disabled\n\n\nLast round recorded \"vendored lwIP 2.2.2 has no flag to carry the checksum\noffload handshake\", with opt.h:2449-2450 (LWIP_CHECKSUM_ON_COPY default 0)\nand the seven netif.h:84-107 NETIF_FLAG_* bits as the evidence.  Half of\nthat is wrong and the other half is beside the point.\n\nThe flag exists.  lwIP 2.2.2 carries ten NETIF_CHECKSUM_GEN_* /\nNETIF_CHECKSUM_CHECK_* bits (netif.h:140-153), a netif->chksum_flags field\n(netif.h:340-342) and NETIF_SET_CHECKSUM_CTRL() / IF__NETIF_CHECKSUM_ENABLED()\n(netif.h:408-417) -- all of it behind LWIP_CHECKSUM_CTRL_PER_NETIF, which\nopt.h:2371-2373 defaults to 0, which expands those two macros to nothing and a\nnetif == NULL check that is always true.  None of that is a NETIF_FLAG_* bit,\nwhich is why counting the seven flags missed it.\n\nLWIP_CHECKSUM_ON_COPY was also cited for the wrong thing.  It governs\naccumulating a checksum while copying an application buffer into a pbuf;\npbuf_take() itself is a MEMCPY and never looks at a checksum\n(src/core/pbuf.c:1254-1295).  Whether the stack verifies a received frame is\ndecided by CHECKSUM_CHECK_* in ip4.c:532-533, udp.c:419 and tcp_in.c:166-169.\n\nSo the decision not to enable TX/RX checksum offload stands, but the\nreason is now three concrete things rather than one wrong one:\n\n  - the TCP send path finalises the segment checksum with no\n    IF__NETIF_CHECKSUM_ENABLED() around it at all (tcp_out.c:1587-1596), so\n    flipping the switch offloads UDP and leaves TCP computing a full\n    checksum anyway -- a half state that is worse than none;\n  - lwIP's carrier is one bit per netif, while \"this frame was verified\" is\n    per frame, and this HAL's recv() returns a length and nothing else.  QEMU\n    cannot supply the missing half either: VIRTIO_NET_HDR_F_DATA_VALID is\n    defined (standard-headers/linux/virtio_net.h:132) but occurs zero times\n    in QEMU 10.0.13's hw/net/virtio-net.c, so a virtio-net RX frame never\n    carries a verdict to pass on;\n  - the NAT path folds new addresses and ports into the L4 checksum\n    incrementally (netfilter_nat.c:754-892: netfilter_csum_delta at :754-763,\n    netfilter_fix_l4 at :815-834, netfilter_set_port at :875-892), which is\n    arithmetic on a value that would no longer be a complete checksum.\n\nNothing is enabled here and nothing is negotiated.  virtio_net_init_instance()\nstill only records offered(csum=..) and refuses to acknowledge\nVIRTIO_NET_F_CSUM / VIRTIO_NET_F_GUEST_CSUM, and NET_DEV_CAP_TX_CSUM_OFFLOAD /\nNET_DEV_CAP_RX_CSUM_OFFLOAD stay defined and unset.\n\ndocs/net/checksum-offload.md is the investigation: what each required change\nwould touch (upstream opt.h or lwipopts.h, upstream tcp_out.c, an upstream\npbuf.h per-frame bit, an A20_DRIVER_ABI bump from 2 for the send path),\nwhat breaks if it is half-done, and the order to do it in.  The intent is\nregistered as DIVERGENCE.md section 2.10, explicitly marked as an intent\nrather than an implemented divergence -- there is no code to carry across an\nupstream re-sync, only a checklist to re-evaluate.\n\nEvery lwIP, QEMU and A20OS line number in the new document was checked\nagainst the tree this commit is built from.\n",
+      "reason": "明确文档说明。"
+    },
+    {
+      "commit": "b8795b4690c48dbd828fa543b8b2f3aaf042b05a",
+      "message": "merge: integrate network driver receive and capability changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "1fa82bee2bc0960531276b447cd375b6c8f2d02b",
+      "message": "format: format netnat_test.c after adding the test binary\n\n\nclang-format was absent on this machine, so `make check-format` had been\nreporting SKIP and every new file since landed unformatted.  Installed via\n`pipx install clang-format` (23.1.2, the version the ratchet baseline header\nnames as verified-equivalent to the 19.1.7 it was recorded with) and applied\nit to this file.\n\nPure formatting: `clang-format -i user/cmds/net/netnat_test.c`, 39 lines\nchanged, no token touched.  Checked with\n`clang-format user/cmds/net/netnat_test.c | diff -u user/cmds/net/netnat_test.c -`\nwhich now reports nothing.\n\nThe gate as a whole still fails on 57 files this stream does not own; see the\nfollow-up commit and the notes in docs/server-readiness.md.\n",
+      "reason": "明确格式化对象及时间关系。"
+    },
+    {
+      "commit": "32764f6594c6e1732e1abb366ec5641efdaf4d7a",
+      "message": "a20: derive the guest address used by the hostfwd rule\n\n\ntools/targets-smoke.mk carried a note for whoever owned this file: it emits\n\"tcp::5555-:5555\", which QEMU 10 refuses.  Measured on QEMU 10.0.13 here before\nchanging anything, because the note and the binary may disagree:\n\n  tcp::5555-:5555                              -> Invalid parameter (rejected)\n  hostfwd=tcp::5555-:5555=on                   -> starts, binds 5555\n  hostfwd=tcp::5555-10.0.2.15:5555=on         -> starts, binds 5555\n\nSo the bare form *is* the failure, and the existing `hostfwd=`-prefix rewrite\nalready fixes it.  The \"Missing guest address\" message the note quotes does not\nappear on this QEMU for any of these spellings -- the string exists in the\nbinary, but the -netdev user path does not reach it.  I could not reproduce that\nhalf of the note, and am not claiming it.\n\nWhat changes anyway: the derived rule now spells the guest address the way\nsmoke-netfilter-nat measures as working end to end, instead of relying on QEMU's\ndefault for the guest half.  The default is the address the tree's own boards\nboot with under slirp -- a20.ip=10.0.2.15 in\nkernel/platform/qemu-virt-x86_64/board.c, and the -append line every target in\ntools/targets-smoke.mk uses -- named once as GUEST_ADDR_DEFAULT.\n\n  tcp::2222-:22  ->  hostfwd=tcp::2222-10.0.2.15:22=on\n\nA manifest that already spells a guest address keeps it; an entry that already\ncarries `hostfwd=` is passed through untouched; and a shape this function does\nnot recognise is passed through with the key spelled out rather than rewritten\ninto a different broken shape, so `a20 check` still gets to report it.  That\nlast one replaces the old `^(?:tcp|udp):[^-]*-[^:]*:\\d+$` test, which matched by\nprefix shape and could not tell an empty guest address from a present one.\n\nparse_hostfwd_ports() in tools/a20_resource.py is untouched: it reads the\nmanifest form, where the guest address is legitimately optional, so the preflight\nkeeps reporting the host ports an instance claims.\n\nEvidence: `make check-a20-tests` -> 243 tests OK (the four hostfwd tests now\nassert the new spelling, the explicit-address pass-through and the unparseable\npass-through); `make check-manifests` -> PASS across 55 instances.\n",
+      "reason": "原标题“name the guest address”具体目标是规则派生，明确动作。"
+    },
+    {
+      "commit": "dcb85f44f61edb56269f25dbc1a3bfeea552fda8",
+      "message": "merge: integrate network validation gates\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "175bcd42a94f56974310a80eb8f6900d429e0573",
+      "message": "gates: add driver gates and fix two harness defects\n",
+      "reason": "driver gate/harness 变更保留独立。"
+    },
+    {
+      "commit": "7e0da2f013afb1ec724edfbd9784ec8c68c173e2",
+      "message": "tools: reclaim ext4 journal gate temporary directories after termination\n",
+      "reason": "与 driver docs 无关，独立保留。"
+    },
+    {
+      "commit": "16a7f42f043ea0ced85d602e17b901a28ffbe176",
+      "message": "merge: integrate driver framework strengthening\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "6d87660a94fc016695a70c7bab37d3cad40ff14b",
+      "message": "merge: integrate Minecraft startup kernel fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "3d30f355ab4dac9c97d818fecdf60f17e1ab5618",
+      "message": "merge: bring main up to date in the kernel preemption branch\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "d1aa68c3cdd66b5d45886fbf8b6758c6040cb4b1",
+      "message": "merge: integrate kernel preemption\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "b2156537347cc1d8aa1ca2530f77d6c171ab3707",
+      "message": "merge: integrate practical-readiness and ABI changes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "603ae0ecf02dd78987b8119b852dcf535e521e07",
+      "message": "gates: derive the x86_64 build directory from the Makefile\n",
+      "reason": "独立构建目录修正，不并入 PCI HAL。"
+    },
+    {
+      "commit": "60a785402b02a0ae34f6c2bffafe79dda0692109",
+      "message": "uart: save partial serial-fidelity work (not yet validated)\n\nRetain the current UART and measurement-script edits. The baseline loss rate, root cause, and smoke gate remain unresolved.\n",
+      "reason": "原标题重复“保留...在制品”；用清晰英语说明是保存中断工作。"
+    },
+    {
+      "commit": "d89bccf088b2098932b3e2f45d3a720ac2639a1c",
+      "message": "merge: integrate x86_64 ACPI/PCI and build-directory updates\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "8058a7095df49849f14f22f19686220c2eae51dd",
+      "message": "uart: remove unsupported RX counters and revise serial-fidelity criteria\n\nDistinguish UART byte loss from kernel output interleaving in the echo log; keep the measurement method provisional.\n",
+      "reason": "原标题中文混杂；明确恢复计数拆分和测量判据重写。"
+    },
+    {
+      "commit": "38d74ed2f7e4dda42e6c99a096969077a32b50f3",
+      "message": "merge: integrate UART receive-fidelity work in progress\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "4504c122393518e2991cf77a4fd5e23407708679",
+      "message": "merge: preserve the memp-sharding work in progress and its network notes\n\n\nb6d68730f 是被打断会话的在制品，按其提交信息原样并入；\n8d8719549 是文档补记与笔误更正。\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n",
+      "reason": "原合并消息可保留但英文化并明确留下的是 WIP 与记录。"
+    },
+    {
+      "commit": "d7a1e02680979f88635f7c110c12415141951c77",
+      "message": "hyp: add the stage-2 foundation for the single-level memory model\n",
+      "reason": "Stage 2 基础节点独立保留。"
+    },
+    {
+      "commit": "9e2f465bf4614c5cd6e0ad03f39e47f2a4fe5708",
+      "message": "hyp: compile the generic virtualization layer on advertised architectures\n",
+      "reason": "跨架构编译覆盖单独保留。"
+    },
+    {
+      "commit": "0ad3ea143b671a14c9b65524903677cde78a2c34",
+      "message": "merge: integrate the hypervisor guest foundation\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "b34367255a5fc0a4bd162aa6d0edecf10421584a",
+      "message": "merge: integrate verified guest-shell support\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "39ff150f89c376c3583682f8ee596bcb7dbd2c22",
+      "message": "merge: integrate memp lane accounting and validation notes\n",
+      "reason": "英文规范化 merge subject。"
+    },
+    {
+      "commit": "ea16644cc4ea5a17f7718b2322f7d52935c11f6f",
+      "message": "merge: integrate verified UART receive-fidelity fixes\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "af0809a04c2b58630cebd20c060855fa95c15031",
+      "message": "cluster(native): freeze the cluster ABI (W0)\n",
+      "reason": "ABI 冻结是独立前置节点，不并入传输实现。"
+    },
+    {
+      "commit": "12e13c575fe3993d1c03aff2e5889eba0cd54275",
+      "message": "merge: integrate cluster transport development\n\n\nPreserve both the hypervisor and cluster Native ABI registrations, and reconcile the complete syscall count at 153. Retain upstream transport, vectors, instance tooling and documentation for integrated validation.\n",
+      "reason": "规范化 merge 标题。"
+    },
+    {
+      "commit": "bae6de724f94bb3d02f75baca813687feb679f00",
+      "message": "abi: expose Linux auxv in the native binary proc format\n",
+      "reason": "原标题过于省略“通过 proc format”，明确接口。"
+    },
+    {
+      "commit": "c0dc2a138dc7bfb4a50746089a8670107ca61a4b",
+      "message": "mm: serialize status COW updates and preserve fork protections\n",
+      "reason": "原标题表达已清楚，英文精炼。"
+    },
+    {
+      "commit": "a55e85743e8f60d2a8783e7747f9262571bca1a3",
+      "message": "auxvprobe: include the errno declarations\n",
+      "reason": "原标题信息准确，补出组件。"
+    },
+    {
+      "commit": "51241af4ba83a9f969aaac64e94410cc5bccee10",
+      "message": "mm: remove the unused COW fault-address parameter\n",
+      "reason": "统一代码清理标题。"
+    },
+    {
+      "commit": "e66cfe85635a6a0050160ca5b52e4041a3a6b476",
+      "message": "auxv: pin the address space and test procfs offsets\n",
+      "reason": "原标题涵盖两个动作，英文化。"
+    },
+    {
+      "commit": "950a74ebd0c1b99ddce2a82f88ac76492397d1ba",
+      "message": "docs(cluster): mark unimplemented transports and services as planned\n",
+      "reason": "清楚说明文档状态。"
+    },
+    {
+      "commit": "b547e17d295c40c1b78f1233dd9ba6419dfa9cb9",
+      "message": "smoke: resolve QEMU paths from the selected build variant\n",
+      "reason": "精简但保留语义。"
+    },
+    {
+      "commit": "5ecc3421e5756fe707d7db01dbf957c7312dd048",
+      "message": "build: identify dedicated linked build caches before cleaning\n",
+      "reason": "原标题信息正确，英文化。"
+    },
+    {
+      "commit": "263c27b1adf460a630168ceb18617af40c950882",
+      "message": "net: require successful runtime evidence in the lane-report gate\n",
+      "reason": "明确 gate 的成功条件。"
+    },
+    {
+      "commit": "8070f0e3ab6095342f3ad0c131792eceb5066672",
+      "message": "test: use the ARM time64 timer syscall numbers\n",
+      "reason": "明确是测试程序。"
+    },
+    {
+      "commit": "458e0a7ff2f6f06cf463ad17a3c3436d957ddef2",
+      "message": "test: format the AArch64 precondition probes\n",
+      "reason": "原标题可理解但泛；明确 probes。"
+    },
+    {
+      "commit": "74746121a27678ffcb3848e70806493591a6ae86",
+      "message": "smoke: derive the guest RAMFS image path from the build variant\n",
+      "reason": "明确工具上下文。"
+    },
+    {
+      "commit": "06ea462ad50d7062c0fd472766ff84125bfcb742",
+      "message": "docs: record the local October 8 build-matrix results\n",
+      "reason": "原标题“evidence”可读，改为自然英文，不新增验证主张。"
+    },
+    {
+      "commit": "4c700f99598b9fb66b806693c4697f59d7d50b75",
+      "message": "docs: refresh the Native ABI and hypervisor overview\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "28d85dd1965da0b35028714e3447028ec5f57438",
+      "message": "docs: clarify historical build-gate failures\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "14435993dee033aca9306a9f1d5f3d9bb7907b55",
+      "message": "build: serialize concurrent user-artifact stamp generation\n",
+      "reason": "原标题准确，英文措辞自然。"
+    },
+    {
+      "commit": "efdd5f68c3411323e0d1e6160aa244ac5fea0015",
+      "message": "smoke: retain optimization in PCB-sanity builds\n",
+      "reason": "原标题可读但“keep”指代不清，明确构建设置。"
+    },
+    {
+      "commit": "a2e7a1ef60224f31464bd3f61300bb79cada9404",
+      "message": "docs: record the October network-gate results\n",
+      "reason": "英文化。"
+    },
+    {
+      "commit": "78eefc2482b4175fe392bdc41f4c2f1cc48a5de7",
+      "message": "cluster: align the native-cluster smoke test with the WA1 ABI\n",
+      "reason": "原标题含义明确，统一术语。"
+    },
+    {
+      "commit": "fe9ec8a105fcd60a2093b5943162966b57b0858f",
+      "message": "docs: refresh the hypervisor status in the documentation index\n",
+      "reason": "英文化。"
+    },
+    {
+      "commit": "a842758b9424c18d9206d2b476e775a346aa8f02",
+      "message": "docs: refresh verification status in the gate catalog\n",
+      "reason": "英文化。"
+    },
+    {
+      "commit": "cc4b5cce5e623b2e1880c7f368cbfd1e71b82489",
+      "message": "build: serialize shared-image runtime gate groups\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "68a4a486ee2dda7a8e9bad77bdb154d695b374b8",
+      "message": "docs: record the serial-fidelity integration rerun\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "42a807c28f8d4942bc0b6a68b4b6b40f41bab126",
+      "message": "docs: record development recovery and final acceptance\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "fa2e505f328610d3b22176177f7fcdc37cacc462",
+      "message": "docs: record cleanup of the merged worktrees\n",
+      "reason": "原标题准确，英文化；该提交有 fork，保持独立。"
+    },
+    {
+      "commit": "85401f00014f9fe293a0118673deb14f669e66d8",
+      "message": "merge: integrate lwIP owner-lane locking and guest-shell acceptance\n",
+      "reason": "该节点是必须保留的 merge；原消息只有分支名或泛化标签，改为具体合入范围。"
+    },
+    {
+      "commit": "396c58631d4bd80113b413a55745d1d5ef5e2ebf",
+      "message": "docs: record completion of lane locking and guest-shell acceptance\n\n\nCorrect the original recovery scope, record final-source runtime and architecture evidence, preserve failure logs and document completed local integration and cleanup.\n",
+      "reason": "原标题准确，英文化。"
+    },
+    {
+      "commit": "fe440e3917b84ba9032fe9816ab7843fd4f79a1a",
+      "message": "docs: record remote synchronization and expired backup-branch cleanup\n",
+      "reason": "原标题是当前 main ref tip，单独保留；仅建议标题英文化。"
+    },
+    {
+      "commit": "8decd2b0e10a0b478ebf9b9a098cad5a9ff4e02d",
+      "message": "docs: record the initial IN_FORMATS property-list failure\n\nThe first blob and follow-up variants all failed before GETPROPBLOB, suggesting wlroots failed while reading the plane property list. This is an initial diagnostic, later superseded by the clean two-property control in a subsequent note.\n",
+      "reason": "先记录早期实测：多个变体在读取plane property list阶段失败；明确这是暂时结论，后续提交已推翻，避免将其当成最终根因。"
+    },
+    {
+      "commit": "86f8bbb0ec6212b7d2b35cdc960fb9b8d5aa3959",
+      "message": "docs: correct the JVM and process-exit diagnosis; retain video guidance\n\nThe probes show that Java completes startup and prints its banner; the alternating 255 is an exit-status anomaly, not a JVM startup failure. File read/mmap, shared-memory writes, exit_group shapes and per-thread TLS probes passed; one apparent non-leader exit_group fault was a probe stack bug. Keep the remaining uncertainty explicit, and retain ffplay guidance: the GL path, rather than Java startup, remained Minecraft's blocker. The note also records that x86_64 still manages only 1 GiB despite larger QEMU `-m` values, as a separate memory-sizing follow-up.\n",
+      "reason": "该提交汇总多轮相互撤回的诊断。消息只保留最终有效结论：JVM能正常运行、255是退出状态异常；mmap/线程/TLS及exit_group探针通过；所谓非leader崩溃来自错误的probe栈。视频建议保留，Minecraft当时主要阻塞仍在GL链。"
+    },
+    {
+      "commit": "bd607b502d3a92d2a62823878650d26db23f3b2a",
+      "message": "docs: correct the IN_FORMATS finding and localize the GBM failure\n\nA clean plane with two type properties reaches a working desktop, disproving the earlier property-count diagnosis; the previous IN_FORMATS attempts had wiring or encoding errors. Separately, `eglinfo -p gbm` fails during GBM device initialization despite the backend and software DRI drivers being present. A Wayland-EGL/`wl_shm` route for Minecraft is only a hypothesis to test.\n",
+      "reason": "此提交修正早期IN_FORMATS结论，并把GBM故障定位到device init；Wayland EGL替代路径仍是待验证假设。"
+    },
+    {
+      "commit": "8b787c792ee38462fb63be76a6e4d074ff199abf",
+      "message": "docs: update RAM, video and GBM status with the sysfs diagnosis\n\nRecord the x86_64 multiboot-memory sizing fix and ffplay as the default video handler. For GBM, the guest's missing PCI identity in sysfs prevents libdrm from identifying the DRM device; document the required device links and attributes, while preserving `/sys/class/drm` paths relied on by wlroots and libinput.\n",
+      "reason": "概括该提交实际覆盖的三块状态：RAM修复、ffplay默认项、基于libdrm证据记录GBM/sysfs需求及兼容约束。"
+    },
+    {
+      "commit": "ccc53b1886b8bafb1dd45786e98531bd0b2311e7",
+      "message": "docs/distro: record Minecraft networking progress and window-creation blockers\n\nWith the system allocator workaround, Minecraft starts LWJGL and reaches profile/auth networking, then advances to GLFW window creation. The recorded blockers are unresolved DNS/network setup and an X11/XWayland `XIO` error (`EMSGSIZE`) during window creation.\n",
+      "reason": "保留两个相继阶段及尚存问题，不把启动进展误写成游戏可用。"
+    },
+    {
+      "commit": "e476a7e7849c8b63c9cb19b275175e002f98e448",
+      "message": "docs/distro: separate network setup from Minecraft's working GL path\n\nAdding `hosts` and `resolv.conf` does not configure the interface: standard tools fail because the lwIP-backed stack lacks `SIOCGIF*` ioctls. A later QMP run reaches Minecraft's OpenGL renderer through GLX/XWayland with llvmpipe and reports its extension set; this does not resolve network configuration or establish full playability.\n",
+      "reason": "明确网络问题是接口配置ioctl缺失而非单纯DNS文件；另记实际渲染器到达证据及其边界。"
+    },
+    {
+      "commit": "710e7bda3bf0226e9d7f4c0ba6b9646a097e4581",
+      "message": "docs/distro: trace the missing Wayland wallpaper to xfdesktop\n\nThe backdrop tree, SVG loader and BMP support are present, but neither SVG nor a plain BMP appears in captured frames. xfdesktop emits no backdrop/draw activity, while tumblerd separately faults with a general-protection error. The evidence points to xfdesktop's Wayland backdrop path, not image decoding; a compositor background client or xfdesktop fix remains to be tried.\n",
+      "reason": "实际测试排除素材/解码器，区分xfdesktop不绘制与tumblerd独立崩溃；未声称已有修复。"
+    },
+    {
+      "commit": "6b177c06c2ade38ca36be4bfbf580d946e91e257",
+      "message": "docs/minecraft: narrow the XWayland stall without claiming a root cause\n\nThe partial AF_UNIX receive leaves the client polling after 40,640 bytes, but inspection rules out the channel park/wake pairing; the missing remainder may have been unwritten upstream or dropped. One kernel panic in `ethernet_output` followed Minecraft's network attempt but was not reproduced. Record the concurrent-recv staging-buffer risk and the need for a paired Xwayland/client trace before attributing either symptom.\n",
+      "reason": "合并多轮观察后不把部分recv、网络panic或竞争假设写成已证实根因；准确说明已排除的wake pairing和待补证据。"
+    },
+    {
+      "commit": "5bc48f5913154053a7c1837876c2a0caebdbb085",
+      "message": "docs: prove the futex PI COW bypass and separate it from other crashes\n\nThe ordinary fork/COW probe remains clean (20/20), and the `clear_child_tid` defect is real but does not explain the mpv/tumblerd crashes. A separate PI-futex probe reproducibly changes the parent's COW-shared word (20/20) while its control stays clean, confirming that the PI path's raw physical-frame write bypasses COW. Record a fix plan to break COW before mapping the word, preserving the atomic store; the bug is not yet fixed here.\n",
+      "reason": "重点突出最终证据：PI futex写穿COW已复现；普通COW通过；clear_child_tid与mpv/tumblerd崩溃无因果关系。文中仍有后续修复计划，不误称已修好。"
+    },
+    {
+      "commit": "419d62e4c820396107bce81025c7d87e65e0712b",
+      "message": "docs/graphics: distinguish Minecraft window creation from XWayland presentation\n\nA validated X11 interposer shows that Minecraft creates/maps no X window even when its GL path reaches the menu or sound startup; a working `glxgears` control does create and map a window, but X11 windows still are not presented. Thus there are two separate issues: Minecraft/GLFW window creation and XWayland/wlroots presentation. DISPLAY-unset runs load Wayland libraries but stall before window creation, so the Wayland path is not yet a workaround.\n",
+      "reason": "完整保留经control验证的两个独立问题；修正此前误判GLFW仅支持X11的说法，并不把DISPLAY unset当成功方案。"
+    },
+    {
+      "commit": "0c121442c7e56a8ba060e152808a8453da487c29",
+      "message": "docs/distro: verify ALSA PCM setup and refine the threaded-crash diagnosis\n\nA raw ioctl probe opens the PCM and completes format negotiation and preparation, establishing that the kernel-side ALSA stream setup works for this client. Separate mpv/LuaJIT and tumblerd crashes share NULL list-link faults, but the precise lost-write mechanism remains unproven; the note records instrumentation and a minimal threaded reproducer as next steps.\n",
+      "reason": "归纳可证实的ALSA操作和两类崩溃的相同fault形态，明确lost-write只是推断，待工具与最小复现验证。"
+    },
+    {
+      "commit": "5cf087a5bedf34d37f362984c1139d959bccd2bc",
+      "message": "docs: retract the bottom-half DNS fix and retain the intermittent pbuf failure\n\nThe bottom-half change still fails DNS and regresses raw-IP networking; the reverted baseline restores the known `Connection refused` result without panic. The pbuf double-free fix removes a deterministic failure but does not eliminate the intermittent assertion (one of four boots still hits it). The added probes did not run before the ARP failure, so the remaining IRQ/poller and lwIP pbuf interaction is a lead, not a confirmed cause.\n",
+      "reason": "说明为什么重试/修复结论被撤回：底半部改动有回归；pbuf问题只是降低未消除；未运行的探针不能当证据。"
+    },
+    {
+      "commit": "bf7b62582755365a8e2ec8999ca195b2e7ccbb67",
+      "message": "docs: correct the MM lock-model assumptions and Phase 3 prerequisites\n\nRevise the single-level MM notes: a wide cursor is already routine in fault-around, and the fast/slow fault split must keep cursor ownership valid across unmap. The notes identify `pt_unmap_leaf()` and `pt_unmap()` as cursor-invariant breakers, reject per-node locking as a standalone detach solution, and record the failed Phase 3 attempt without claiming it landed. Update the gate contract to match the evidence.\n",
+      "reason": "避免沿用正文中的早期误判，集中描述最终修订的cursor/unmap前置条件和未落地尝试；没有把失败尝试写作实现。"
+    },
+    {
+      "commit": "0c51d81bde1e96eb94822635f98b3e57875de0d5",
+      "message": "mm: serialize page-table unmap with per-node locks\n\nAdd node-lock coverage to leaf removal and upward table detachment so faults and unmaps exclude one another. Update the design note to confirm per-node locking is the needed primitive, while retaining the detach-ordering constraints; the lock-model and lock-order gates pass, including negative checks.\n",
+      "reason": "这是实际代码实现提交；明确锁覆盖的操作及文档修正，测试只按消息记录的门禁，不扩写其他验证。"
+    },
+    {
+      "commit": "56747aed2cf745b0ee4439a5dc73189ed9365942",
+      "message": "mm: keep page-table allocation outside the node MCS lock\n\nMove page-table node allocation out of the MCS critical section, avoiding a reclaim path that may wait while holding the node lock; on allocation failure, decline the fast path and let the VMA path handle the fault. Update the phase notes with the observed `mm->lock`/node-lock ordering issue and remaining cursor/semantic checks.\n",
+      "reason": "概括真实代码改动：锁外分配、失败回退；准确记录与锁顺序相关的观测而不把待验证项混入完成项。"
+    },
+    {
+      "commit": "e4fae164add251a6a0b94608178060791d5a9d76",
+      "message": "docs: record Phase 3 lockup evidence and retract unsupported causes\n\nThe repeated Phase 3 attempts ruled out a TLB timeout and the initial bare-`nop` starvation inference. Instrumentation found CPUs waiting on a level-0 node; holder/PC readings narrowed the stuck path but did not initially prove the cause, and candidate caller unlock leaks were ruled out. The remaining handoff hypothesis was explicitly left unverified; all temporary instrumentation and the fast-path attempt were reverted at this checkpoint.\n",
+      "reason": "把多轮诊断统一成有边界的结论，删除“holder从未unlock”等已被纠正的说法；说明该节点只是文档诊断且未落地。"
+    },
+    {
+      "commit": "b4961526164af965121b9101840cc0dd9c8c4722",
+      "message": "mm: fix MCS handoff and run the anonymous status fast path without mm->lock\n\nServe pre-provisioned anonymous faults through `mm_fault_from_status()` before taking the global `mm->lock`, falling back when provisioning is unavailable. The contention work exposed two MCS handoff defects: unlock used shared node state and did not reliably wake the next waiter. Record the corrected handoff and P5 status; the commit reports non-vacuous SMP=8 smokes and three-architecture builds.\n",
+      "reason": "最终实现提交：概括P5 fast path及真实MCS交接修复，保留消息给出的SMP、多架构和非空洞计数证据。"
+    },
+    {
+      "commit": "aaca0d472658476e1534826f85cf81e9db07ab39",
+      "message": "mm: implement the reverse MM_AS audit and clarify the transitional lock contract\n\nKeep `MM_LOCK_MODEL` as the transitional contract and carve out only the status fast path, which relies on per-address node locking; ordinary COW/file/VMA installs remain under `mm->lock`. Add the reverse metadata-to-VMA audit (`vmai`) alongside the existing PTE-to-metadata walk, assert `vmai=0` in `smoke-mm-pt-race`, and document why `smoke-mm-stress` does not cover it.\n",
+      "reason": "覆盖该提交中文档纠错、实现及测试：保留两个模型名，窄化无mm锁例外，增加反向一致性审计及真正断言它的门禁。"
+    },
+    {
+      "commit": "c6c22365e78f9ee863294aeb3dd179ddb97bd94f",
+      "message": "docs: close P6/P7 as blocked on the status metadata format\n\nThe status byte can classify faults but cannot carry the vnode/fd/offset data needed for file and COW servicing; brk pages are not provisioned with status either, leaving no implementable P6 subset. P7 also cannot remove `PTE_SWAP` until swap payload storage is redesigned: the payload is 44 bits on 64-bit targets and 24 bits on 32-bit targets. Correct the UFFD attribution: the fast-path safety bit is status-driven, while the VMA range table remains authoritative for unregister races. Documentation only.\n",
+      "reason": "提炼最终技术结论，纳入44/24位更正、brk无status及UFFD两层语义；避免保留已经撤回的dispatch与位宽错误解释。"
+    },
+    {
+      "commit": "4a18eac3e520df4f1caba784c0e872389ee922f6",
+      "message": "docs: align build and platform guidance with merged MM support\n",
+      "reason": "Update architecture build guidance and known-issue records to match the merged MM fixes, and add the missing x86_64-pc build gate. The changes also refresh the single-level MM design notes and citation checks."
+    },
+    {
+      "commit": "b6041d1584e09b10b290e8fd9feffce0ea705254",
+      "message": "mm: cache ordered-index overflow state between lookups\n",
+      "reason": "Treat only an invalidated segment index as dirty. Keep the over-capacity state cached until a mapping change invalidates it, avoiding a full rebuild on every lookup."
+    },
+    {
+      "commit": "da9098952f27173a0b525122c7d4aca1b5ad2e9d",
+      "message": "pkg: filter GUI media ELF files by target architecture\n",
+      "reason": "Exclude incompatible native ELF files when assembling GUI media for an image target, and remove empty native directories so launchers cannot mistake them for usable libraries."
+    },
+    {
+      "commit": "f9044086e58c509a5b9d44f39fb502664a421614",
+      "message": "tools: add shell completion for a20 subcommands and instance names\n",
+      "reason": "Expose Bash completion for subcommands, options, instance arguments, architectures, actions, and formats; derive candidates from the shared argument parser."
+    },
+    {
+      "commit": "b3be79f006825a51fe52c361e69cb0de139f24bc",
+      "message": "tools: add lock benchmarks and record an unchanged-kernel baseline\n",
+      "reason": "Add the lock-benchmark command and preserve its collected baseline data with the lock-serialization design notes."
+    },
+    {
+      "commit": "79b571a835e7eb6ccaff7a7d13ab4c6e7f6116ea",
+      "message": "fs: release the descriptor slot in vfs_close\n",
+      "reason": "Clear the descriptor-table slot and its allocation state when closing a VFS file, so repeated internal open/close operations do not exhaust the caller table."
+    },
+    {
+      "commit": "9ba4e441ffa34523d9fa7bfd22a28c391f8af7f0",
+      "message": "signal: map NOMMU return trampolines to executable storage\n",
+      "reason": "Make the AArch64 and x86_64 signal trampolines reside at the address used for instruction fetch in NOMMU mode, and update the related driver-module mapping path."
+    },
+    {
+      "commit": "7ca110ed39175c1c737cb904f060ebc9fb93d84c",
+      "message": "net: size packet frame buffers from the active network profile\n",
+      "reason": "Move packet-ring and interface-state frame sizing into network profile settings, and use the configured pool-buffer size for RX/TX frames."
+    },
+    {
+      "commit": "85f24cf858287ba465abeeb5dad73039da6c05e3",
+      "message": "net: skip stress workloads that exceed profile socket capacity\n",
+      "reason": "Report the network stress case as skipped when the selected profile cannot provide enough concurrent sockets for its configured workers."
+    },
+    {
+      "commit": "812062b9fa3554b33bfe0f9326d4d78a0298fb7c",
+      "message": "docs(net): align network guidance with implemented behavior\n",
+      "reason": "Reconcile network design, readiness, locking, and lane documentation with the code state, including implemented congestion-control and memory behavior and remaining limitations."
+    },
+    {
+      "commit": "1d03b2808d57e6596fbefb3fa5e0612c1df30a47",
+      "message": "docs(net): correct conntrack entry size and embedded filter budget\n",
+      "reason": "Update the documented conntrack entry size to 64 bytes and reflect that the embedded filter allocation consumes the full configured budget."
+    },
+    {
+      "commit": "33d80a43bff5038f6e4fc9e30ab82e324d34fc4d",
+      "message": "abi: fix Linux and native ABI gaps and gate both syscall surfaces\n",
+      "reason": "Correct five ABI entry-point behaviors and extend CI and static gates to cover the Linux and native ABI paths."
+    },
+    {
+      "commit": "530e0ee5204bab19e9cd7f38267202edc10abf6d",
+      "message": "docs: record three existing gates exposed after the ABI merge\n",
+      "reason": "Document the three failing gates observed after the ABI work was merged, including which failures predated that change."
+    },
+    {
+      "commit": "7f02514c0c5899e439b94ed0aaf9c791247b8310",
+      "message": "hyp: complete the RISC-V guest-shell support slice\n",
+      "reason": "Extend the RISC-V hypervisor guest path, bridge, vCPU handling, and smoke support, and update usage and design documentation for the guest-shell slice."
+    },
+    {
+      "commit": "5d66a298c81aaf40e2f3e66f528f022059feb3c8",
+      "message": "xhci: remove the unused unlocked command wrapper\n",
+      "reason": "Delete the unused xHCI command wrapper that bypassed the command lock."
+    },
+    {
+      "commit": "73a01a039d93178c0e2a737df53d0774fbd69250",
+      "message": "build: clean linked kernel build roots\n",
+      "reason": "Update clean handling for linked kernel build roots and cover the cleanup behavior in the stamp tests."
+    },
+    {
+      "commit": "90b00d644b474e7a4ad038db582588400227c324",
+      "message": "net: verify lane reports in smoke gates\n",
+      "reason": "Add report validation to the network smoke-gate flow and provide a checker for the lane report format."
+    }
+  ],
+  "purge": {
+    "paths": [
+      ".zcodeignore",
+      "docs/paper/main.pdf",
+      "packages/overlay/devtools/usr/lib/a20/poweroff-helper",
+      "packages/overlay/pynode/usr/local/bin/a20mount",
+      "qemu_10.0.13+ds-0+deb13u1.debian.tar.xz",
+      "qemu_10.0.13+ds-0+deb13u1.dsc",
+      "qemu_10.0.13+ds.orig.tar.xz"
+    ],
+    "prefixes": [
+      ".zcode/",
+      "qemu-10.0.13+ds/"
+    ],
+    "root_globs": [
+      "*.d"
+    ]
+  }
+}

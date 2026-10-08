@@ -10,6 +10,9 @@ per-CPU 对象数组在当前树里已经实现，且已是 HEAD 的祖先提交
 
 ## 1. 输入材料的可得性（诚实性声明）
 
+> 历史扫描输出保留原样；其中 `qemu-10.0.13+ds/...` 是当时记录的源树路径。该解包目录已从仓库清理，当前应将路径理解为外部 Debian QEMU 10.0.13+ds 源包根目录下的相对路径。来源与解包定位见[迁移说明](../history/2026-10-08/migration.md)。
+
+
 - 设计文档 `lock-serialization-split.md` **在本仓库中不存在**。核实方式：
   - `find . -path ./kernel/external -prune -o -name "*serialization*" -print` → 只命中
     `.git/refs/heads/feat/lock-serialization-split` 与 `qemu-10.0.13+ds/tests/unit/test-visitor-serialization.c`；

@@ -968,8 +968,9 @@ Realtek ID，所以 `-nic user,model=rtl8139` 起来的那个 PCI function 没�
 在 QEMU 上不会（见下）。
 
 **门禁覆盖不到的部分**：一台 RTL8139、QEMU user-mode 网络后端、TCG、单核、
-INTx（这个型号没有 MSI-X）。寄存器图和 RX ring 几何是照着仓库内置的
-`qemu-10.0.13+ds/hw/net/rtl8139.c` 写的，**没有在真实硅片上跑过**；同一个
+INTx（这个型号没有 MSI-X）。寄存器图和 RX ring 几何是照着外部 Debian QEMU 10.0.13+ds 源树
+`qemu-10.0.13+ds/hw/net/rtl8139.c` 写的，**没有在真实硅片上跑过**；来源与解包定位见
+[迁移说明](history/2026-10-08/migration.md)。同一个
 `RCR[12:11]` 字段在 RTL8139C datasheet 上写的是「8K + 16K」，驱动按 QEMU 的语义
 编程成 64 KiB，硅片上是否一致**未验证**。`TxPoll` 也有同样的分歧：datasheet 是
 bit 5，QEMU 是 bit 6，驱动写 `0x60` 两边都满足，并在代码里写明了这个妥协。不覆盖：
