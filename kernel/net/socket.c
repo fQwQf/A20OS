@@ -194,7 +194,7 @@ net_socket_t *net_socket_alloc(void) {
         __atomic_fetch_add(&g_net_sock_ref_allocs, 1, __ATOMIC_RELAXED);
         /* Provisional only: the authoritative lane comes from the bound address
          * and port, which net_inet_bind_pcb() recomputes. */
-        s->lane = net_lane_of_cpu(cpu_current_id());
+        net_socket_lane_store(s, net_lane_of_cpu(cpu_current_id()));
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
         wait_queue_init(&s->write_waitq);
@@ -707,7 +707,8 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
      * bound to, which is the pair an inbound packet reproduces.  Set inside the
      * same critical section that publishes s->local so no reader can see one
      * without the other. */
-    s->lane = net_socket_lane_of_addr(bind_addr, bind_len, s->lane);
+    net_socket_lane_store(s, net_socket_lane_of_addr(
+        bind_addr, bind_len, net_socket_lane_load(s)));
     net_sock_unlock(s, flags);
     return net_inet_bind_pcb(s, bind_addr, addrlen);
 }

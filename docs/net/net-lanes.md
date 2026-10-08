@@ -1,5 +1,47 @@
 # 网络 lane
 
+> **当前核心锁状态（2026-10-08）**：下文阶段 A–E 的记录保留了当时的实施过程，
+> 其中“`g_lwip_lock` 尚未分片”“热路径仍全局串行”及“单 lane 必须逐字节等价”等
+> 结论已被后续核心锁收窄工作取代。当前多 lane 路径以 lane lock 并行处理保守分类的
+> 单播 TCP/UDP 热包；ARP/ND/ICMP、分片、广播/多播、扩展头和控制/配置/timer维护仍走
+> 全 lane control barrier。Ingress 锁只序列化设备轮询、入队前过滤和帧发布；过滤时可
+> 短暂取得 CT guard，发布队列后释放 ingress，再由消费者处理帧。跨 lane ARP、ND6、
+> UDP/RAW PCB、conntrack 状态由 shared guard 保护；TCP listener guard 只短暂保护 backlog
+> 计数，成功 accept callback 用稳定 listener PCB key 保护 stage slot 与发布，并在
+> bottom-half 调度前释放；满队列返回 `ERR_MEM`，由 lwIP 在 callback 返回后 abort child。
+> Guard 不包围整个 listen input/event 调用链。Fragment/reassembly 则只走冷屏障，
+> 当前没有启用 FRAG shared guard。Lane 是逻辑归属而非 CPU 亲和性，任意 CPU 可处理
+> 已 claim 的 lane。热路径上的 TCP close-pending 回收和 `tcp_pcbs_sane()` 检查只扫描
+> 当前 owner lane；冷路径持有 `LWIP_CORE_ALL_LANES_HELD()` control barrier 时才扫描全部
+> lane，包括 wildcard sentinel bucket。`LWIP_MEMP_LANE()` 只选择 memp descriptor/计数
+> 上下文；`MEMP_MEM_MALLOC=1` 下所有 pool element 仍从同一 lwIP heap 分配，没有每 lane
+> pbuf arena 或物理内存预留。完整分类、锁序、驱动约束见
+> [network-lock-contract.md](./network-lock-contract.md)。
+>
+> 单 lane 保持既有单锁、IRQ-save 的运行语义；本阶段不承诺多 lane 与单 lane 的
+> 输出逐字节相同。本文较早章节里的等价实验和阶段状态是历史记录，不能当作当前
+> 全部实现的回归结果。下方只记录本轮明确执行的 host-forward 并发门禁；它不代表
+> 其他网络 smoke 或整体验收通过。
+
+### 当前并发切片的外部收包验证（2026-10-08）
+
+首轮 N=4 外部 host-forward 收包曾暴露端口字节序不一致：sockaddr 与 raw wire 端口是
+network byte order，lane hash 需要 host-order 端口；旧路径把 network-order 值直接用于
+hash，可能将 socket/PCB 与入站流分派到不同 lane。修复将 sockaddr 和 raw wire 端口转为
+host order 后再计算 lane；PCB 中的端口本来就是 host order。该失败样本作为 N=4 路由回归
+证据保留，不应只看最终摘要。
+
+`smoke-net-lanes-hostfwd` 最终运行通过：日志分别为
+`.kernel-build/smoke/net-lanes-hostfwd-n1-riscv64.log` 与
+`.kernel-build/smoke/net-lanes-hostfwd-n4-riscv64.log`，最终门禁汇总见
+`/tmp/a20-recovery-logs/lwip-hostfwd-final.log`。两档各跑四条外部 TCP 流，
+逐流 digest 均为 `0b824eec9801a325`，host 汇总为 `2e093bb260068c94`。N=4 报告
+`core_parallel peak_active_lanes=3 probe_hits=400 inputs=100,105,98,97 timers=89,89,89,89`，
+说明该探针观测到最多三个 lane 同时活跃；四条流分别分配到 lane `2,3,0,1`，但这个样本
+没有要求四个 lane 同时活跃。它不是吞吐或加速比指标。probe 为 opt-in，抽样前 64 个热
+TCP 调用并以 20 ms 为并行等待上限，默认关闭。此验证只覆盖该 host-forward 测试与该
+并发探针，不代表其他网络门禁均通过。
+
 最后核实：阶段 A–E **均已落地**（按落地顺序）：
 阶段 A（`kernel/include/net/net_lane.h`、`kernel/net/net_lane.c`、`net_socket_t.lane`、
 `net_socket_lane_of_addr()`、`/proc/net/status` 的 lanes 行）、
@@ -8,9 +50,10 @@
 索引**骨架**）、阶段 D（`f6f327b96`：IRQ 只按 lane 入队、协议处理移到进程上下文）、
 阶段 E（`7c7a4d7c8`：per-socket 锁取代桶锁保护全部 socket 状态）。
 
-**仍未落地**的是 F（多队列 + 每队列中断）与 G（RSS / 流引导），以及阶段 C 的
-**内存真分片**与阶段 D/E 都未触及的 `g_lwip_lock` 分片。本文件记录顺序、前置条件，
-以及每阶段"做到哪、剩什么"的边界。
+F（多队列 + 每队列中断）与 G（RSS / 流引导）仍是未来路线；阶段 C 的内存真分片也
+仍未实现。核心锁现已有按 lane 热路径与全 lane 冷路径的分治，历史文中“锁仍完全
+未分片”的表述不再代表当前状态。本文件其余按阶段叙述用于保留历史与设计缘由，
+其验证结论只适用于对应记录的代码快照。
 
 > **一处必须先更正的旧记录。** 本文「阻塞」一节里"为什么当初没有任何断言拦住它"
 > 那一段，是**提交 `7d217d3fd` 之前**的状态。该宏现在已接到 `g_lwip_lock` 的持有者
@@ -31,9 +74,9 @@
 - 资源轴 = `kernel/net/net_profile.h` 的三档（EMBEDDED / DEFAULT / SERVER），纯编译期常量
 - 规模轴 = 本文件的 lane 数，同一个 `CONFIG_NET_LANES` 常量
 
-关键性质：**`CONFIG_NET_LANES == 1` 的行为必须与 lane 存在之前完全相同。** 嵌入式
-构建把每个 lane 索引折叠为常量 0，编译结果就是改动前的代码。这条性质不是口号：
-`net_lane_of()` 是取模 `CONFIG_NET_LANES` 的表达式，在 1 时被编译器折叠。
+关键性质：**`CONFIG_NET_LANES == 1` 保持原有单 lane 锁和 IRQ-save 语义。** 它不
+意味着当前整套多 lane 改造与某个旧提交的机器码或每个竞态下的输出字节完全相同。
+`net_lane_of()` 在单 lane 时仍归到 lane 0；具体兼容范围以当前代码和对应回归证据为准。
 已实测两档 `net_stress_test` 输出**逐字节一致**（`NET_STRESS_TEST: PASS (4 parallel transfers, 4 rounds x 1048576 B)`）。
 
 **这条性质有一个必须守住的实现约束**：通配 listener 的哨兵桶只能在
@@ -831,7 +874,10 @@ ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是�
 - **pbuf 的归属 lane 还无从得知**，阶段 D 才能解；在此之前 per-lane 池表分的是
   "谁在分配"，不是"这个包属于谁"。
 
-#### `CONFIG_NET_LANES=1` 等价：实测结论，以及两个比想象中难缠的坑
+#### 历史记录：`CONFIG_NET_LANES=1` 等价检查，以及两个并发问题
+
+以下结果对应当时的阶段代码快照，不覆盖 2026-10-08 后加入的 lane/control/shared-domain
+锁划分；不可外推为本轮改动的验证结论。
 
 `memp.o`、`lwip_stack.o`、`socket_inet.o` 在一 lane 下 `.text` / `.rodata` /
 `.sdata` 与改动前**逐字节相同**；再加 `-fno-sanitize=undefined` 重编，三个目标文件
@@ -1596,8 +1642,9 @@ try-claim：若锁外 poller 已持有 lane 并等待全局锁，锁内 poller �
    `sched()` 每次调度决策、每次会引发重新调度的时钟 tick、每次 idle pass 都走到它。
    放在"读者醒来之后"就晚了：阻塞读由 socket bottom-half 唤醒，bottom-half 需要暂存的
    帧已经被处理掉，而只在唤醒后才跑的 poll 在等一个不会到来的事件。门控用的量是
-   生产者自己抬起来的"已暂存帧数"计数器（`net_lane_rx_queued_total()`，
-   `net_lane.h:339`；poll 点在 `lwip_stack.c:1412` 判空），它只可能假阳，假阳的代价是
+   生产者自己抬起来的"已暂存帧数"计数器（`net_lane_rx_queued_total()`，声明于
+   `kernel/include/net/net_lane.h`，由 `kernel/net/net_lane.c` 实现；lane poll 以该计数
+   判空），它只可能假阳，假阳的代价是
    一次 relaxed load。位置在 `kernel_progress_net_rx()` **之前**而不是之后：后者是
    CPU 0 排设备 ring 的地方，多 lane 下它排出来的帧只是暂存，放在它之后要等下一趟。
 2. **claim 用原子标志，不是 `spinlock_t`。** `core/lock.h` 只有
@@ -1614,7 +1661,10 @@ try-claim：若锁外 poller 已持有 lane 并等待全局锁，锁内 poller �
 另外两处不是可选的：netfilter 必须跑在**算 lane 之前**（DNAT 原地改写目的地址，
 lane 得跟着改写后的元组走）；回环**不入队**（它本来就已经被摘链并在原地处理了）。
 
-#### `CONFIG_NET_LANES=1` 等价：实测，以及第三个坑
+#### 历史记录：`CONFIG_NET_LANES=1` 等价检查，以及第三个坑
+
+以下结果对应当时阶段 C/D 的源代码快照，不覆盖 2026-10-08 后加入的锁划分；不可将其
+外推为本轮改动的验证结论。
 
 方法与阶段 C 相同：`git worktree add` 拉出改动前的 `fe03aac27`，两边**同一条命令行**
 编 `lwip_stack.c`、`net_lane.c`、`socket_inet.c`、`progress.c`、`udp.c`、`tcp.c`、
@@ -1635,7 +1685,7 @@ lane 得跟着改写后的元组走）；回环**不入队**（它本来就已�
 出来的事实才算。改成一 lane 下展开为 `((void)(budget))` 的宏
 `A20_LWIP_LANE_RX_POLL()` 之后，调用点从预处理结果里消失。头文件里三处都按这个写法。
 
-#### 阶段 D 还剩下的（不要当成已完成）
+#### 阶段 D 当时还剩下的（历史快照，不代表当前状态）
 
 - **`g_lwip_lock` 仍然是一把全局锁。** lane 决定的是"谁处理"，不是"谁能并行处理"。
   真正分片要改的是锁的粒度与所有权（谁持有、由谁释放、跨 lane 的 PCB 冷路径怎么不
@@ -1703,7 +1753,7 @@ peer_addr）则在锁内拷到栈上，因为真正入队发生在解锁之后�
 `g_net_bh_pending[]` 位图 + `net_bucket_slot_ref(i)` 逐个取引用，再在那个 socket 自己的
 锁下处理事件。
 
-### 这一步没有解决的
+### 阶段 E 当时没有解决的（历史快照，不代表当前状态）
 
 `g_lwip_lock` 仍然是一把全局锁，阶段 D 的"各 CPU 各自处理自己的 socket"依然只成立在
 "谁处理"这一层。阶段 E 去掉的是 socket 侧的伪共享，没动协议栈侧的全局串行——那要等

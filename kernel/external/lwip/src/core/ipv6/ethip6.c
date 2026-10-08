@@ -79,7 +79,8 @@ err_t
 ethip6_output(struct netif *netif, struct pbuf *q, const ip6_addr_t *ip6addr)
 {
   struct eth_addr dest;
-  const u8_t *hwaddr;
+  u8_t hwaddr[6];
+  u8_t send_now;
   err_t result;
 
   LWIP_ASSERT_CORE_LOCKED();
@@ -105,13 +106,13 @@ ethip6_output(struct netif *netif, struct pbuf *q, const ip6_addr_t *ip6addr)
   /* @todo anycast? */
 
   /* Ask ND6 what to do with the packet. */
-  result = nd6_get_next_hop_addr_or_queue(netif, q, ip6addr, &hwaddr);
+  result = nd6_get_next_hop_addr_or_queue(netif, q, ip6addr, hwaddr, &send_now);
   if (result != ERR_OK) {
     return result;
   }
 
   /* If no hardware address is returned, nd6 has queued the packet for later. */
-  if (hwaddr == NULL) {
+  if (!send_now) {
     return ERR_OK;
   }
 

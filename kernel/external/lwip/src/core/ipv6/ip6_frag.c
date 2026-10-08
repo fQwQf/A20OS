@@ -49,6 +49,7 @@
 #include "lwip/pbuf.h"
 #include "lwip/memp.h"
 #include "lwip/stats.h"
+#include "net/lwip_stack.h"
 
 #include <string.h>
 
@@ -113,6 +114,7 @@ void
 ip6_reass_tmr(void)
 {
   struct ip6_reassdata *r, *tmp;
+  LWIP_ASSERT("IPv6 reassembly timer requires the control barrier", a20_lwip_control_is_held());
 
 #if !IPV6_FRAG_COPYHEADER
   LWIP_ASSERT("sizeof(struct ip6_reass_helper) <= IP6_FRAG_HLEN, set IPV6_FRAG_COPYHEADER to 1",
@@ -281,6 +283,7 @@ ip6_reass(struct pbuf *p)
   u16_t clen;
   u8_t valid = 1;
   struct pbuf *q, *next_pbuf;
+  LWIP_ASSERT("IPv6 reassembly requires the control barrier", a20_lwip_control_is_held());
 
   IP6_FRAG_STATS_INC(ip6_frag.recv);
 
@@ -745,6 +748,7 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
   u16_t left_to_copy;
 #endif
   static u32_t identification;
+  u32_t fragment_id;
   u16_t left, cop;
   const u16_t mtu = nd6_get_destination_mtu(dest, netif);
   const u16_t nfb = (u16_t)((mtu - (IP6_HLEN + IP6_FRAG_HLEN)) & IP6_FRAG_OFFSET_MASK);
@@ -752,7 +756,7 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
   u16_t last;
   u16_t poff = IP6_HLEN;
 
-  identification++;
+  fragment_id = __atomic_fetch_add(&identification, 1, __ATOMIC_RELAXED) + 1;
 
   original_ip6hdr = (struct ip6_hdr *)p->payload;
 
@@ -850,7 +854,7 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
     frag_hdr->_nexth = original_ip6hdr->_nexth;
     frag_hdr->reserved = 0;
     frag_hdr->_fragment_offset = lwip_htons((u16_t)((fragment_offset & IP6_FRAG_OFFSET_MASK) | (last ? 0 : IP6_FRAG_MORE_FLAG)));
-    frag_hdr->_identification = lwip_htonl(identification);
+    frag_hdr->_identification = lwip_htonl(fragment_id);
 
     IP6H_NEXTH_SET(ip6hdr, IP6_NEXTH_FRAGMENT);
     IP6H_PLEN_SET(ip6hdr, (u16_t)(cop + IP6_FRAG_HLEN));
