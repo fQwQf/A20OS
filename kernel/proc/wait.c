@@ -9,10 +9,6 @@
 #define WNOWAIT     0x1000000
 #define __WNOTHREAD 0x20000000
 
-/* ->waiting_for_child and g_proc_waiting_child_waiter_count are always changed
- * together under the waiter's own park_lock; the counter is an advisory
- * fast-path hint for proc_wake_child_waiters() on other tasks. */
-
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
 {
     if (!parent || !child)
@@ -201,7 +197,6 @@ int proc_wait4(int pid, int *status, int options)
          * The established lock order is tasklist_lock -> park_lock. */
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
         t->waiting_for_child = 1;
-        g_proc_waiting_child_waiter_count++;
         proc_wait_token_t token =
             proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
         int sig = signal_task_has_unblocked(t);
@@ -215,13 +210,9 @@ int proc_wait4(int pid, int *status, int options)
 
         uint64_t pf2 = spin_lock_irqsave(&t->park_lock);
         /* A remote forced exit may already have removed this waiter while it
-         * was parked.  Update the flag and the aggregate as one guarded
-         * transition so the fast path can never under-count live waiters. */
-        if (t->waiting_for_child) {
+         * was parked. */
+        if (t->waiting_for_child)
             t->waiting_for_child = 0;
-            if (g_proc_waiting_child_waiter_count)
-                g_proc_waiting_child_waiter_count--;
-        }
         spin_unlock_irqrestore(&t->park_lock, pf2);
         if (proc_wake_reason_is_task_interrupt(reason) || sig)
             return -ERESTARTSYS;
