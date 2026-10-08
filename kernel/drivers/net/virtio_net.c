@@ -1057,9 +1057,9 @@ void virtio_net_poll_rx_all_bounded(unsigned budget) {
     if (!poll_only && !a20_lwip_rx_pending_any())
         return;
 
-    uint64_t flags = a20_lwip_lock();
+    uint64_t flags = a20_lwip_ingress_lock();
     a20_lwip_poll_rx_locked(budget);
-    a20_lwip_unlock(flags);
+    a20_lwip_ingress_unlock(flags);
 }
 
 void virtio_net_poll_rx_all(void) {
@@ -1087,9 +1087,9 @@ static int virtio_net_irq_handler(int irq, void *priv) {
      * interrupt line asserted otherwise.  Matches virtio_blk_irq_handler. */
     net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
-    uint64_t flags = a20_lwip_lock();
+    uint64_t flags = a20_lwip_ingress_lock();
     a20_lwip_process_netif_irq_locked(net->slot);
-    a20_lwip_unlock(flags);
+    a20_lwip_ingress_unlock(flags);
     return 0;
 }
 

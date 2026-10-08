@@ -17,13 +17,9 @@
 struct net_lane g_net_lanes[CONFIG_NET_LANES];
 
 #if CONFIG_NET_LANES > 1
-/*
- * Stage C's "which lane owns the work in progress" context.  Declared in
- * net_lane.h with the full rationale; the two facts that matter here are that
- * it is only meaningful under g_lwip_lock, and that lane 0 is the value a
- * section gets when it never establishes one of its own.
- */
-unsigned a20_net_lane_cur;
+/* Logical owner context is CPU-local for the duration of an IRQ-off core
+ * critical section. The value is address-derived and restored on exit. */
+unsigned a20_net_lane_cur[CONFIG_NR_CPUS];
 
 /*
  * Stage D's receive queue.
@@ -37,8 +33,8 @@ unsigned a20_net_lane_cur;
  * IRQ, because the producer needs no mutual exclusion at all (head and tail are
  * the whole of the synchronisation).  Leaving interrupts enabled while the claim
  * is held is therefore both safe and required: the protocol processing it
- * guards is exactly the work that must not run with interrupts off, which is
- * the reason it left the interrupt handler in the first place.
+ * guards runs in bounded, IRQ-off owner-lane sections in process context.
+ * The claim itself does not disable IRQs or hold a core lock while waiting.
  *
  * It is non-blocking for the other reason the poll point needs it to be.  Every
  * CPU runs that poll point, so two of them reaching the same lane at the same
@@ -125,7 +121,7 @@ int net_lane_rx_ready(unsigned lane)
     return head != tail;
 }
 
-struct netif *net_lane_rx_pop(unsigned lane, const uint8_t **frame,
+struct netif *net_lane_rx_peek(unsigned lane, const uint8_t **frame,
                               unsigned *len)
 {
     struct net_lane *l = net_lane(lane);
@@ -142,15 +138,7 @@ struct netif *net_lane_rx_pop(unsigned lane, const uint8_t **frame,
     *frame = slot->frame;
     *len = slot->len;
 
-    /*
-     * The slot is released as it is popped rather than after the caller has
-     * finished with the bytes, so a producer that wraps around immediately can
-     * reuse it.  That is safe only because the caller copies the frame into a
-     * pbuf before asking for the next one, and it is the reason this is one
-     * "pop and use" call rather than a peek followed by a release.
-     */
-    __atomic_store_n(&l->rx_tail, tail + 1, __ATOMIC_RELEASE);
-    __atomic_fetch_sub(&g_lane_rx_queued_total, 1, __ATOMIC_RELAXED);
+
     return nif;
 }
 
@@ -178,6 +166,14 @@ unsigned long long net_lane_rx_stat(unsigned lane, int which)
     default:
         return 0;
     }
+}
+
+void net_lane_rx_consume(unsigned lane)
+{
+    struct net_lane *l = net_lane(lane);
+    uint32_t tail = __atomic_load_n(&l->rx_tail, __ATOMIC_RELAXED);
+    __atomic_store_n(&l->rx_tail, tail + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_sub(&g_lane_rx_queued_total, 1, __ATOMIC_RELAXED);
 }
 
 void net_lane_rx_count_processed(unsigned lane)

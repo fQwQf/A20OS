@@ -86,6 +86,11 @@
 
 #include <string.h>
 
+#if CONFIG_NET_LANES > 1
+#include "net/lwip_concurrency.h"
+#include "net/lwip_stack.h"
+#endif
+
 #define SIZEOF_STRUCT_PBUF        LWIP_MEM_ALIGN_SIZE(sizeof(struct pbuf))
 /* Since the pool is created in memp, PBUF_POOL_BUFSIZE will be automatically
    aligned there. Therefore, PBUF_POOL_BUFSIZE_ALIGNED can be used here. */
@@ -129,9 +134,23 @@ pbuf_free_ooseq(void)
 {
   struct tcp_pcb *pcb;
   int lane;
+  int lane_end;
   SYS_ARCH_SET(pbuf_free_ooseq_pending, 0);
 
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+#if CONFIG_NET_LANES > 1
+  /* Reclaim only the active-PCB bucket protected by the caller's core lane.
+   * The old whole-array scan races with independent lane input/ACK processing. */
+  lane = (int)a20_lwip_core_lane();
+  if (lane < 0 || lane >= CONFIG_NET_LANES ||
+      !a20_lwip_lane_is_held((unsigned)lane)) {
+    return;
+  }
+  lane_end = lane + 1;
+#else
+  lane = 0;
+  lane_end = NET_PCB_LANE_BUCKETS;
+#endif
+  for (; lane < lane_end; lane++) {
     for (pcb = tcp_active_pcbs[lane]; NULL != pcb; pcb = pcb->next) {
       if (pcb->ooseq != NULL) {
         /** Free the ooseq pbufs of one PCB only */
