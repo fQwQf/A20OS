@@ -133,6 +133,12 @@ host-tests: $(HOST_TESTS_BIN)
 	  -Itools/tests/lock_host_port -Ikernel/include \
 	  tools/tests/test_spinlock_preempt_window.c -o $@
 
+# Extract and execute the production PT MCS lock bodies with a deterministic
+# CPU-migration seam.  The negative control removes mcs_lock's pin and must
+# trip the production non-LIFO guard on unlock.
+check-pt-mcs-preempt-window:
+	$(PYTHON) tools/tests/test_pt_mcs_preempt_window.py
+
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
 	@mkdir -p $(BUILD_DIR)
