@@ -184,6 +184,19 @@ kernel_trap:
     movq  200(%rsp), %rdx
     call  x86_64_restore_trap_state
 
+    /* A kernel IRQ may have interrupted __return_to_user after it installed
+     * the user FS base but before iretq.  isr_common switches FS to the kernel
+     * canary stub for C, so restore the interrupted FS value here along with
+     * the general registers.  On every other kernel trap this slot contains
+     * the kernel stub and the write is idempotent. */
+    movq  184(%rsp), %rax
+    movl  %eax, %edi
+    shrq  $32, %rax
+    movl  %eax, %edx
+    movl  %edi, %eax
+    movl  $0xC0000100, %ecx
+    wrmsr
+
     /* Restore the common CPU-pushed frame in case C modified it. */
     movq  128(%rsp), %rax
     movq  %rax, 232(%rsp)       /* RIP */
@@ -418,6 +431,15 @@ syscall_entry_saved:
 
     .globl __return_to_user
 __return_to_user:
+    /* Do not accept a maskable IRQ while publishing user state below.  Most
+     * syscall exits arrive here with IF already clear, but a fresh task first
+     * enters through proc_task_first_entry with IF restored from its initial
+     * task_context_t, and that context has IF set.  In particular, an IRQ
+     * after writing the user's FS base would otherwise switch FS back to the
+     * kernel canary stub and return past the write.  iretq restores the
+     * user's saved IF from ctx->rflags. */
+    cli
+
     /*
      * task->kstack is maintained by __switch and syscall_entry, so we do not
      * need to read or write %gs:0 here.  Avoiding %gs: prevents faults when
