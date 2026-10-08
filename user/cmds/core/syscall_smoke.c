@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -122,6 +123,40 @@ int main(int argc, char **argv)
         return fail("waitpid");
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 42)
         return fail("wait-status");
+
+    /* waitid siginfo_t follows the Linux ABI: on 64-bit targets the
+     * siginfo union begins at offset 16 (offset 12 on 32-bit targets).
+     * pidfd + WNOWAIT checks both that layout and non-consuming semantics. */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+    pid = fork();
+    if (pid < 0)
+        return fail("waitid-fork");
+    if (pid == 0)
+        _exit(37);
+    int child_pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (child_pidfd < 0)
+        return fail("pidfd-open");
+    siginfo_t child_info;
+    memset(&child_info, 0xa5, sizeof(child_info));
+    if (waitid(P_PIDFD, (id_t)child_pidfd, &child_info,
+               WEXITED | WNOWAIT) < 0)
+        return fail("waitid-wnowait");
+    if (child_info.si_signo != SIGCHLD || child_info.si_code != CLD_EXITED ||
+        child_info.si_pid != pid || child_info.si_uid != getuid() ||
+        child_info.si_status != 37)
+        return fail("waitid-siginfo-layout");
+    memset(&child_info, 0, sizeof(child_info));
+    if (waitid(P_PIDFD, (id_t)child_pidfd, &child_info, WEXITED) < 0)
+        return fail("waitid-reap");
+    if (child_info.si_signo != SIGCHLD || child_info.si_pid != pid ||
+        child_info.si_uid != getuid() || child_info.si_status != 37)
+        return fail("waitid-reap-siginfo");
+    close(child_pidfd);
+    errno = 0;
+    if (waitpid(pid, &status, WNOHANG) != -1 || errno != ECHILD)
+        return fail("waitid-echild");
 
     pid = fork();
     if (pid < 0)
