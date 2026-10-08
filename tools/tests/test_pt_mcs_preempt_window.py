@@ -51,12 +51,21 @@ typedef struct pt_mcs_pool {
     pt_meta_t **held;
     uint32_t depth;
 } pt_mcs_pool_t;
+typedef struct mm_struct { int unused; } mm_struct;
+typedef struct mm_cursor {
+    mm_struct *mm;
+    int locked;
+    int lock_base_depth;
+    int in_read_side;
+} mm_cursor_t;
 static pt_mcs_node_t nodes[CONFIG_NR_CPUS][PT_MCS_POOL_SLOTS];
 static pt_meta_t *held[CONFIG_NR_CPUS][PT_MCS_POOL_SLOTS];
 static pt_mcs_pool_t g_pt_mcs_pool[CONFIG_NR_CPUS];
 static unsigned cpu_id;
 static unsigned preempt_depth[CONFIG_NR_CPUS];
 static int migrate_pending;
+static int inject_foreign_on_unpin;
+static pt_meta_t foreign_meta;
 
 static unsigned cpu_current_id(void) {
     if (migrate_pending && preempt_depth[cpu_id] == 0) {
@@ -73,6 +82,17 @@ static void preempt_disable(void) { preempt_depth[cpu_id]++; }
 static void preempt_enable(void) {
     assert(preempt_depth[cpu_id] != 0);
     preempt_depth[cpu_id]--;
+    if (inject_foreign_on_unpin && preempt_depth[cpu_id] == 0) {
+        /* Model a scheduler handoff at the exact 1->0 boundary: another task
+         * acquires one MCS lock on the old CPU before this continuation resumes
+         * on CPU 1. The old task must never inspect that CPU-local stack again. */
+        unsigned old_cpu = cpu_id;
+        inject_foreign_on_unpin = 0;
+        preempt_depth[old_cpu] = 1;
+        g_pt_mcs_pool[old_cpu].held[0] = &foreign_meta;
+        g_pt_mcs_pool[old_cpu].depth = 1;
+        cpu_id ^= 1;
+    }
 }
 static void a20_perf_count(unsigned event) { (void)event; }
 static void arch_cpu_relax(void) { abort(); }
@@ -90,6 +110,15 @@ static void init(void) {
     }
     cpu_id = 0;
     migrate_pending = 0;
+    inject_foreign_on_unpin = 0;
+    foreign_meta = (pt_meta_t){0};
+}
+
+static void __attribute__((unused)) cursor_leaf_unlock(mm_cursor_t *cur) {
+    (void)cur;
+}
+static void __attribute__((unused)) mm_pt_read_exit(mm_struct *mm) {
+    (void)mm;
 }
 """
 
@@ -105,6 +134,18 @@ int main(void) {
     (void)mcs_lock(&outer);
     migrate_pending = 1;
     mcs_unlock(&outer);
+    return 0;
+#elif defined(TEST_CURSOR_UNWIND)
+    (void)inner;
+    mm_struct mm = {0};
+    mm_cursor_t cur = {.mm=&mm, .locked=1, .lock_base_depth=0};
+    (void)mcs_lock(&outer);
+    assert(g_pt_mcs_pool[0].depth == 1);
+    inject_foreign_on_unpin = 1;
+    mm_cursor_unlock(&cur);
+    assert(cpu_id == 1);
+    assert(g_pt_mcs_pool[0].depth == 1);
+    assert(g_pt_mcs_pool[0].held[0] == &foreign_meta);
     return 0;
 #else
     migrate_pending = 1;
@@ -138,6 +179,7 @@ def main() -> None:
     source = PT_SOURCE.read_text()
     lock = extract_function(source, "static uint32_t mcs_lock(pt_meta_t *m)")
     unlock = extract_function(source, "static void mcs_unlock(pt_meta_t *m)")
+    cursor_unlock = extract_function(source, "void mm_cursor_unlock(mm_cursor_t *cur)")
     with tempfile.TemporaryDirectory(prefix="a20-pt-mcs-test-") as tmp:
         tmp = Path(tmp)
         cc = ["cc", "-std=gnu11", "-O0", "-Wall", "-Wextra", "-Werror"]
@@ -146,6 +188,40 @@ def main() -> None:
         positive_src.write_text(PRELUDE + lock + "\n" + unlock + "\n" + HARNESS)
         subprocess.run(cc + [str(positive_src), "-o", str(positive_bin)], check=True)
         subprocess.run([str(positive_bin)], check=True)
+
+        cursor_src = tmp / "cursor.c"
+        cursor_bin = tmp / "cursor"
+        cursor_src.write_text(PRELUDE + lock + "\n" + unlock + "\n" +
+                              cursor_unlock + "\n" + HARNESS)
+        subprocess.run(cc + ["-DTEST_CURSOR_UNWIND", str(cursor_src), "-o",
+                             str(cursor_bin)], check=True)
+        cursor_result = subprocess.run([str(cursor_bin)], check=False)
+        if cursor_result.returncode != 0:
+            raise SystemExit(
+                "cursor unwind accessed the old CPU MCS pool after unpin "
+                f"(exit {cursor_result.returncode})")
+
+        # Negative control: restore the original pool->depth loop. It reads
+        # CPU 0's pool after the last unlock has moved the continuation to CPU 1.
+        legacy_cursor = cursor_unlock.replace(
+            "    uint32_t unwind_count = pool->depth - (uint32_t)cur->lock_base_depth;\n"
+            "    while (unwind_count) {",
+            "    while (pool->depth > (uint32_t)cur->lock_base_depth) {",
+            1,
+        ).replace("        unwind_count--;\n", "", 1)
+        if legacy_cursor == cursor_unlock:
+            raise SystemExit("could not construct cursor-unwind negative control")
+        legacy_src = tmp / "cursor-legacy.c"
+        legacy_bin = tmp / "cursor-legacy"
+        legacy_src.write_text(PRELUDE + lock + "\n" + unlock + "\n" +
+                              legacy_cursor + "\n" + HARNESS)
+        subprocess.run(cc + ["-DTEST_CURSOR_UNWIND", str(legacy_src), "-o",
+                             str(legacy_bin)], check=True)
+        legacy_result = subprocess.run([str(legacy_bin)], check=False)
+        if legacy_result.returncode != 99:
+            raise SystemExit(
+                "cursor-unwind legacy negative control unexpectedly returned "
+                f"{legacy_result.returncode}")
 
         # Negative control: the old code selected its per-CPU pool before the
         # simulated migration window had been closed; unlock must reject the
