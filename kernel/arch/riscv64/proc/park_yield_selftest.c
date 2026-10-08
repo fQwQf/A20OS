@@ -4,7 +4,6 @@
 #include "core/cpu.h"
 #include "core/lock.h"
 
-#ifdef CONFIG_RISCV64
 
 /* This bootarg-only probe runs on one CPU. The helper is deliberately runnable
  * while the test task owns a PREPARING park token, so proc_yield() must really
@@ -116,5 +115,3 @@ int riscv64_sched_park_yield_selftest(void) {
         return -1;
     return 0;
 }
-
-#endif /* CONFIG_RISCV64 */

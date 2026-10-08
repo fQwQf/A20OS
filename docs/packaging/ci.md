@@ -256,3 +256,15 @@ Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages
 - `smoke-net-accept` 曾硬编码无 `-preempt` 后缀的构建目录，导致 QEMU 未能打开
   镜像。门禁现从相同构建变量的 `print-build-dir` 查询路径，原握手、accept 和
   丢弃计数断言保持不变；本机复跑通过。
+
+工具单测早停还曾遮住 `check-arch-boundary` 的失败。RISC-V 启动自测和 guest
+trap 入口、AArch64 NOMMU 驱动代码保留区现由各架构实现，通用代码通过有默认
+实现的架构接口调用；Linux open 标志的架构差异移入 `arch/fcntl.h`。这项整理
+不扩大门禁白名单，也不改变各架构标志值。启动自测仍在原初始化位置执行，guest
+trap 仍先于 host frame 记账处理，保留区仍排除在通用页帧分配器之外。
+
+分支发布验收 run [37750056148](https://github.com/fQwQf/A20OS/actions/runs/37750056148)
+的版本检查、四架构签名包仓库及 base/devel 镜像均通过，最终发布 job 按分支策略
+跳过。但 MM 压测在 `vma-deferred-race` 阶段 90 秒超时；同一提交在上述 CI run
+约 5 秒通过该阶段，说明这是间歇性进度故障，不能通过放宽时间或删除断言处理。
+后续修复和候选提交的最终验收应同时记录在这里。

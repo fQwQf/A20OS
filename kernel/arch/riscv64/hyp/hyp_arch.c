@@ -493,3 +493,13 @@ int hyp_arch_guest_trap(void *trap_frame)
     vcpu->running = 0;
     hyp_arch_vcpu_exit(vcpu);
 }
+
+/* A guest trap reaches kernel_trap_handler through the guest prelude, after
+ * that prelude banks the guest sp/tp and joins __trap_from_kernel. This hook
+ * must classify the frame before generic host bookkeeping overwrites x[0]
+ * with the host address-space token. A handled frame either resumes the guest
+ * through the normal trap return or tears it down before returning here. */
+int arch_hyp_guest_trap(trap_context_t *ctx)
+{
+    return hyp_arch_guest_trap(ctx);
+}

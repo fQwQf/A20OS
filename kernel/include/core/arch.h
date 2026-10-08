@@ -49,6 +49,18 @@
 # error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=loongarch32, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
 #endif
 
+/* Architecture-owned initialization hooks. The generic definitions provide
+ * conservative fallbacks when an architecture does not override them.
+ * init_kthread() calls the bootarg diagnostics once after scheduler startup. */
+void arch_run_bootarg_selftests(void);
+/* Physical byte address just past memory reserved before frame allocation. */
+paddr_t arch_pfa_init_limit(void);
+/* Reserved module allocator: 1=allocated, with *addr_out set to the load VA;
+ * 0=use the frame pool; negative errno=allocation failure (out is undefined). */
+int arch_drvmod_alloc_reserved(uint32_t order, uintptr_t *addr_out);
+/* Release only a load VA returned by a prior successful reserved allocation. */
+void arch_drvmod_free_reserved(uintptr_t addr, uint32_t order);
+
 /* Keep the conservative global behavior on architectures without a
  * local-only full TLB flush primitive. */
 #ifndef ARCH_HAS_LOCAL_TLB_FLUSH

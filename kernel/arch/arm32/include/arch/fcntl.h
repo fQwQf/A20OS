@@ -1,0 +1,9 @@
+#ifndef _ARCH_FCNTL_H
+#define _ARCH_FCNTL_H
+
+#define ARCH_O_DIRECTORY  0x4000
+#define ARCH_O_NOFOLLOW   0x8000
+#define ARCH_O_DIRECT     0x10000
+#define ARCH_O_LARGEFILE  0x20000
+
+#endif /* _ARCH_FCNTL_H */
