@@ -45,8 +45,15 @@ extern int proc_task_pid(const void *task);
  *   park_lock -> mm_struct.lock
  *   park_lock -> a20_handle_table.lock
  *   driver registry/IRQ locks -> device-private locks
- *   g_lwip_lock -> nothing net-side at all
- *   g_lwip_lock -> virtio-net nonblocking send/recv paths only
+ *   lwIP ingress lock -> CT guard (released) -> stage frame -> release ingress
+ *                      -> lane/control core processing
+ *   lwIP control barrier: ingress/global gate -> all owner lanes ascending
+ *   lwIP lane or control core -> keyed shared-state guard -> release before
+ *                          taking lane/control/socket/ingress locks
+ *   lwIP core -> heap lock -> allocator SYS_ARCH_PROTECT
+ *   lwIP TX staging guard -> conntrack/NAT guard (released) -> nonblocking
+ *                          driver send callback (leaf; no lwIP reentry)
+ *   lwIP core locks are never nested with net_socket_t.lock or net_bucket locks
  *
  * cg_node.lock is never held together with tasklist_lock: the memory
  * controller releases it before scanning tasks for an OOM victim.
@@ -54,15 +61,21 @@ extern int proc_task_pid(const void *task);
  * Rules:
  *
  * Lock-safe network entry points (see docs/net/network-lock-contract.md):
- * - a20_lwip_lock()/a20_lwip_unlock(): outer lock around all lwIP core calls.
- * - a20_lwip_poll_locked(): progress entry that runs with g_lwip_lock held;
- *   must not allocate, block, or acquire any net lock (neither a socket lock nor
- *   a socket-table bucket lock).
- * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
- *   runs the socket bottom-half under socket locks only.
- * - lwIP callbacks run under g_lwip_lock and must only stage events into the
- *   preallocated per-PCB ring; allocation, enqueue, and wakeup happen in the
- *   bottom-half, in process context, with a socket lock held.
+ * - CONFIG_NET_LANES=1 retains the single core lock. With multiple lanes,
+ *   a20_lwip_lane_lock() protects ordinary owner-lane traffic and
+ *   a20_lwip_lock() is the ingress gate or the outer part of a control barrier
+ *   that then takes all lane locks in ascending order.
+ * - Ingress only stages frames and releases its gate before lane consumers
+ *   process them. Never upgrade a held lane/control lock to ingress or to the
+ *   all-lane barrier.
+ * - Cross-lane protocol state uses a keyed shared-domain guard. The order is
+ *   lane/control -> shared guard; shared guards must not acquire lane/control,
+ *   ingress, or socket locks. Allocation under ARP/ND6 guards follows
+ *   shared-domain -> heap -> allocator protect, with no reverse edge.
+ * - Output serializes a netif's staging frame, takes/releases the conntrack/NAT
+ *   guard, then invokes a nonblocking driver send callback. Drivers must not
+ *   synchronously re-enter lwIP. lwIP core locks never nest with socket or
+ *   socket-table locks; callbacks defer socket work to bottom-halves.
  *
  * Socket locks and socket-table bucket locks (stage E of
  * docs/net/net-lanes.md; full text in docs/net/network-lock-contract.md):
@@ -93,11 +106,10 @@ extern int proc_task_pid(const void *task);
  *   (see the same failure recorded for VFS dcache in kernel/fs/vfs/dcache.c).
  *   net_socket_table_walk() and every other table scan walk bucket by bucket,
  *   taking and releasing one bucket at a time.
- * - g_lwip_lock is never held together with any net lock -- neither a socket
- *   lock nor a bucket lock.  This is the unchanged meaning of the old
- *   "g_lwip_lock and g_net_lock are never held together" rule
- *   (docs/net/network-lock-contract.md), and it is now true everywhere rather
- *   than "true except on the accept path".
+ * - No lwIP ingress, lane, control, shared-domain, heap, or allocator-protect
+ *   lock is held together with any net lock -- neither a socket lock nor a
+ *   bucket lock.  This keeps core callbacks from entering socket state while
+ *   holding protocol locks; deferred bottom-halves run after core locks drop.
  * - A socket that owns no registry slot (being created, the accepted end of an
  *   AF_UNIX stream, or one whose close() is in flight) needs no special shard.
  *   Its per-socket state is covered by its own lock; only the slot does not

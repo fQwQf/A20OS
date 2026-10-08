@@ -94,6 +94,27 @@ host-tests: $(HOST_TESTS_BIN)
 /tmp/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
+# Exercise the actual vendored lwIP heap and pbuf code under host threads. The
+# host port supplies only the architecture types and lock shims; allocator and
+# reference-count algorithms come from the kernel's lwIP sources.
+/tmp/a20-host-test_lwip_allocator_concurrency: \
+        tools/tests/test_lwip_allocator_concurrency.c \
+        kernel/external/lwip/src/core/mem.c \
+        kernel/external/lwip/src/core/memp.c \
+        kernel/external/lwip/src/core/pbuf.c
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -ffunction-sections -fdata-sections \
+	  -DCONFIG_X86_64 \
+	  -Itools/tests/lwip_host_port \
+	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
+	  $^ -Wl,--gc-sections -o $@
+
+# Compile the real lane queue implementation, with only CPU identity shimmed.
+/tmp/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
+        kernel/net/net_lane.c kernel/include/net/net_lane.h kernel/net/net_profile.h
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -DCONFIG_NET_LANES=4 -DCONFIG_NR_CPUS=4 \
+	  -Itools/tests/net_lane_host_port -Ikernel/include -Ikernel \
+	  tools/tests/test_net_lane_concurrency.c kernel/net/net_lane.c -o $@
+
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
 	@mkdir -p $(BUILD_DIR)

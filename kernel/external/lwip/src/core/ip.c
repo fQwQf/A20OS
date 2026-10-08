@@ -61,7 +61,11 @@
 #include "lwip/ip.h"
 
 /** Global data for both IPv4 and IPv6 */
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+struct ip_globals ip_data_lanes[LWIP_CORE_LANE_COUNT];
+#else
 struct ip_globals ip_data;
+#endif
 
 #if LWIP_IPV4 && LWIP_IPV6
 

@@ -58,6 +58,7 @@
 #include "lwip/stats.h"
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
+#include "net/lwip_concurrency.h"
 #include "lwip/inet_chksum.h"
 
 #include <string.h>
@@ -134,7 +135,10 @@ raw_input_local_match(struct raw_pcb *pcb, u8_t broadcast)
 raw_input_state_t
 raw_input(struct pbuf *p, struct netif *inp)
 {
-  struct raw_pcb *pcb, *prev;
+  struct raw_pcb *pcb;
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
+  struct raw_pcb *prev;
+#endif
   s16_t proto;
   raw_input_state_t ret = RAW_INPUT_NONE;
   u8_t broadcast = ip_addr_isbroadcast(ip_current_dest_addr(), ip_current_netif());
@@ -159,11 +163,16 @@ raw_input(struct pbuf *p, struct netif *inp)
   }
 #endif /* LWIP_IPV4 */
 
-  prev = NULL;
   pcb = raw_pcbs;
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
+  prev = NULL;
+#endif
   /* loop through all raw pcbs until the packet is eaten by one */
   /* this allows multiple pcbs to match against the packet by design */
   while (pcb != NULL) {
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+    uint64_t pcb_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_RAW, pcb);
+#endif
     if ((pcb->protocol == proto) && raw_input_local_match(pcb, broadcast) &&
         (((pcb->flags & RAW_FLAGS_CONNECTED) == 0) ||
          ip_addr_eq(&pcb->remote_ip, ip_current_src_addr()))) {
@@ -179,13 +188,17 @@ raw_input(struct pbuf *p, struct netif *inp)
         if (eaten != 0) {
           /* receive function ate the packet */
           p = NULL;
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
           if (prev != NULL) {
-            /* move the pcb to the front of raw_pcbs so that is
-               found faster next time */
+            /* preserve the upstream single-lane locality optimization */
             prev->next = pcb->next;
             pcb->next = raw_pcbs;
             raw_pcbs = pcb;
           }
+#endif
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+          a20_lwip_shared_unlock(A20_LWIP_SHARED_RAW, pcb, pcb_flags);
+#endif
           return RAW_INPUT_EATEN;
         } else {
           /* sanity-check that the receive callback did not alter the pbuf */
@@ -195,8 +208,13 @@ raw_input(struct pbuf *p, struct netif *inp)
       }
       /* no receive callback function was set for this raw PCB */
     }
+#if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_RAW, pcb, pcb_flags);
+#endif
     /* drop the packet */
+#if !defined(LWIP_CORE_LANE) || (LWIP_CORE_LANE_COUNT <= 1)
     prev = pcb;
+#endif
     pcb = pcb->next;
   }
   return ret;

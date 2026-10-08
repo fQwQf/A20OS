@@ -72,12 +72,9 @@ static void kernel_progress_devices(void)
     usb_core_poll();
 }
 
-/*
- * NO_SYS lwIP has one global core lock.  Letting every idle CPU poll it turns
- * an otherwise idle SMP guest into a permanent lock convoy.  CPU 0 owns
- * compatibility RX polling; device IRQs still make progress on the CPU that
- * receives them.
- */
+/* One CPU stages the single device RX ring. Protocol consumers run on every
+ * CPU under independent owner lane locks; the ingress lock is not a core lock
+ * in multi-lane builds. */
 static void kernel_progress_net_rx(void)
 {
     if (cpu_current_id() == 0 && virtio_net_poll_rx_all_bounded)
@@ -93,12 +90,16 @@ void kernel_progress_poll(kernel_progress_reason_t reason)
 
 void kernel_progress_timer_tick(void)
 {
-    /* One timer owner is sufficient for the global NO_SYS timeout wheel. */
+    /* CPU 0 publishes the timer hint; multi-lane work runs in process context. */
     if (cpu_current_id() != 0)
         return;
+#if CONFIG_NET_LANES > 1
+    a20_lwip_signal_timer_pending();
+#else
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_timers_locked();
     a20_lwip_unlock(flags);
+#endif
     /* The device bit is the liveness floor for completion-polled drivers:
      * re-arm it here so the scheduler hot path can skip the device walk. */
     if (++g_progress_fallback_ticks >= KERNEL_PROGRESS_FALLBACK_TICKS) {

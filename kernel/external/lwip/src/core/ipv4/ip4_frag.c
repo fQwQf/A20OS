@@ -48,6 +48,7 @@
 #include "lwip/netif.h"
 #include "lwip/stats.h"
 #include "lwip/icmp.h"
+#include "net/lwip_stack.h"
 
 #include <string.h>
 
@@ -128,6 +129,7 @@ void
 ip_reass_tmr(void)
 {
   struct ip_reassdata *r, *prev = NULL;
+  LWIP_ASSERT("IPv4 reassembly timer requires the control barrier", a20_lwip_control_is_held());
 
   r = reassdatagrams;
   while (r != NULL) {
@@ -512,6 +514,7 @@ ip4_reass(struct pbuf *p)
   u8_t hlen;
   int valid;
   int is_last;
+  LWIP_ASSERT("IPv4 reassembly requires the control barrier", a20_lwip_control_is_held());
 
   IPFRAG_STATS_INC(ip_frag.recv);
   MIB2_STATS_INC(mib2.ipreasmreqds);

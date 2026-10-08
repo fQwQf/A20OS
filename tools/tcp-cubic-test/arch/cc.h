@@ -28,6 +28,7 @@ typedef int32_t   s32_t;
 typedef uint64_t  u64_t;
 typedef int64_t   s64_t;
 typedef uintptr_t mem_ptr_t;
+typedef uint64_t sys_prot_t;
 
 #define LWIP_NO_STDDEF_H    1
 #define LWIP_NO_STDINT_H    1

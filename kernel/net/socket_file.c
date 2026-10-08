@@ -68,7 +68,7 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
             net_sock_unlock(s, irq);
             return -ERESTARTSYS;
         }
-        if (net_socket_wait_expired(s, start, 0)) {
+        if (net_socket_wait_expired_locked(s, start, 0)) {
             net_sock_unlock(s, irq);
             return -EAGAIN;
         }

@@ -1,4 +1,6 @@
 #include "net/lwip_stack.h"
+#include "net/lwip_concurrency.h"
+#include "core/bootargs.h"
 #include "net/socket_internal.h"
 #include "net/net_config.h"
 #include "net/netfilter.h"
@@ -44,43 +46,66 @@ extern void virtio_net_dev_stats(struct device *dev,
 static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
                             const char *row);
 
-/*
- * LWIP_NO_THREAD_PROGRESS_CONTRACT:
- * - NO_SYS lwIP progress consists of sys_check_timeouts(), virtio-net TX
- *   completion cleanup, RX frame delivery into netif input, and netif_poll().
- * - a20_lwip_poll()/a20_lwip_poll_locked() are the only generic progress
- *   entries. Scheduler/idle access them only via kernel_progress_poll().
- * - g_lwip_lock serializes lwIP core state. While holding it, callers may use
- *   only nonblocking virtio-net send/recv/progress paths; blocking driver calls
- *   or reverse driver->lwIP lock acquisition are forbidden.
- * - Network smoke must cover timeout advancement, RX/TX delivery, DNS, UDP, TCP,
- *   and ICMP-facing paths before removing the compatibility poll bridge.
- *
- * Lock-safe entry points:
- * - a20_lwip_lock()/a20_lwip_unlock(): outer lock for all lwIP API calls.
- * - a20_lwip_poll_locked(): run with g_lwip_lock held; does not allocate or
- *   acquire a net lock.
- * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
- *   runs the socket deferred bottom-half (net_inet_bottom_half_process_all)
- *   under socket locks only.
- *
- * "The two locks are never held together" used to be false here.  Under the
- * single g_net_lock, net_inet_accept_stage_drain() held it and then took
- * a20_lwip_lock() for the pcb handoff, so both were genuinely held together on
- * the accept path.  Two changes removed the reason for it, in that order: the
- * registry sharding made the drain drop the listener's lock across the handoff
- * (it has to, because it also registers each child and
- * net_register_socket_locked() takes a bucket lock of its own), and stage E
- * replaced that lock with a socket lock that covers strictly less.
- *
- * The order is one-way and no path nests them at all: nothing takes
- * g_lwip_lock and then a net lock, so there is no ABBA cycle to form.  A future
- * path that did -- draining a receive ring per lane while touching socket state
- * is the obvious candidate -- has to drop g_lwip_lock first.  See
- * docs/net/network-lock-contract.md and docs/measured/impl-notes-net.md.
- */
+/* LWIP_NO_THREAD_PROGRESS_CONTRACT: NO_SYS core ownership:
+ * - ordinary unicast TCP/UDP input and socket data operations hold one logical
+ *   owner lane; IRQ-off CPU-local context selects packet/TCP scratch state.
+ * - control writers take ingress/control, then every lane in ascending order.
+ *   A lane holder must never upgrade to ingress or this barrier.
+ * - IRQ ingress only stages wire frames. Scheduler/idle consumers process
+ *   queues on every CPU, including when all network tasks are parked.
+ * - TCP timers run one lane at a time in process context. Shared protocol
+ *   timers/configuration and loopback delivery use the cold control barrier.
+ * - callbacks only stage preallocated socket rings; socket locks are acquired
+ *   after all core and shared protocol locks have been released.
+ * See docs/net/network-lock-contract.md for shared-cache lock ordering. */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
+static unsigned g_lwip_control_held[CONFIG_NR_CPUS];
+#if CONFIG_NET_LANES > 1
+static spinlock_t g_lwip_lane_locks[CONFIG_NET_LANES];
+static unsigned g_lwip_lane_owner[CONFIG_NET_LANES];
+static unsigned g_lwip_lane_held[CONFIG_NR_CPUS];
+static unsigned g_lwip_lane_prev[CONFIG_NR_CPUS];
+#endif
+#if CONFIG_NET_LANES > 1
+static unsigned g_lwip_timer_pending;
+static unsigned g_lwip_maintenance_owner;
+static unsigned g_lwip_probe_enabled;
+static unsigned g_lwip_probe_calls;
+static unsigned g_lwip_probe_active;
+static unsigned g_lwip_probe_peak;
+static uint64_t g_lwip_hot_inputs[CONFIG_NET_LANES];
+static uint64_t g_lwip_tcp_timers[CONFIG_NET_LANES];
+#endif
+
+void a20_lwip_signal_timer_pending(void)
+{
+#if CONFIG_NET_LANES > 1
+    __atomic_store_n(&g_lwip_timer_pending, 1, __ATOMIC_RELEASE);
+#endif
+}
+
+/* Test-only rendezvous inside tcp_input, under distinct core owner locks.
+ * The raw hardware clock bounds the wait even with local IRQs disabled.
+ * Ordinary boots do not delay packet handling. */
+void a20_lwip_parallel_probe_point(void)
+{
+#if CONFIG_NET_LANES > 1
+    if (!g_lwip_probe_enabled || a20_lwip_control_is_held()) return;
+    unsigned call = __atomic_fetch_add(&g_lwip_probe_calls, 1, __ATOMIC_RELAXED);
+    if (call >= 64) return;
+    unsigned active = __atomic_add_fetch(&g_lwip_probe_active, 1, __ATOMIC_ACQ_REL);
+    unsigned peak = __atomic_load_n(&g_lwip_probe_peak, __ATOMIC_RELAXED);
+    while (peak < active && !__atomic_compare_exchange_n(&g_lwip_probe_peak,
+           &peak, active, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
+    uint64_t deadline = timer_get_ticks() + MS_TO_TICKS(20);
+    while (__atomic_load_n(&g_lwip_probe_active, __ATOMIC_ACQUIRE) < 2 &&
+           __atomic_load_n(&g_lwip_probe_peak, __ATOMIC_RELAXED) < 2 &&
+           timer_get_ticks() < deadline) { __asm__ volatile("" ::: "memory"); }
+    __atomic_fetch_sub(&g_lwip_probe_active, 1, __ATOMIC_RELEASE);
+#endif
+}
+
 #define A20_LWIP_LOCK_UNOWNED 0xffffffffu
 #define A20_LWIP_LOCK_SITES 8
 #if CONFIG_NET_LOCK_ASSERT
@@ -96,7 +121,8 @@ static unsigned g_lwip_lock_violations;
  * on those would kill every configuration at boot.  What matters is the claim
  * made about *steady state*, so the assertion starts biting exactly when the
  * stack becomes reachable: after arming, every LWIP_ASSERT_CORE_LOCKED() site
- * must be holding g_lwip_lock, and one that is not is a defect, not noise.
+ * must hold a core owner-lane lock or the full control barrier. A missing
+ * core owner is a defect, not noise.
  *
  * Pre-arm hits are therefore *not* counted either: a counter that mixes 23
  * known-init hits with real ones reads as noise and trains everyone to ignore
@@ -337,6 +363,16 @@ u32_t sys_now(void) {
     return (u32_t)(timer_get_ticks() * 1000UL / TICKS_PER_SEC);
 }
 
+static netfilter_action_t a20_lwip_filter(uint8_t *frame, size_t len,
+                                         int idx, int input)
+{
+    uint64_t flags = a20_lwip_shared_lock(A20_LWIP_SHARED_CT, NULL);
+    netfilter_action_t result = input ? netfilter_input(frame, len, idx) :
+        netfilter_output(frame, len, idx);
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_CT, NULL, flags);
+    return result;
+}
+
 static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
     if (!netif || !netif->state || !p)
         return ERR_ARG;
@@ -346,6 +382,7 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
 int r;
+    uint64_t tx_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_TX, st);
 
     /*
      * Scatter-gather transmit, taken only when the driver advertised
@@ -388,36 +425,39 @@ int r;
     if ((st->caps & NET_DEV_CAP_TX_SG) && st->ops->send_sg && p->next == NULL) {
         net_iovec_t iov;
         pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-        if (netfilter_output(st->tx_frame, p->tot_len, st->idx) ==
+        if (a20_lwip_filter(st->tx_frame, p->tot_len, st->idx, 0) ==
             NETFILTER_DROP) {
-            st->tx_filtered++;
+            __atomic_fetch_add(&st->tx_filtered, 1, __ATOMIC_RELAXED);
+            a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
             return ERR_OK;
         }
         iov.base = st->tx_frame;
         iov.len = p->tot_len;
         r = st->ops->send_sg(st->dev, &iov, 1);
         if (r == (int)p->tot_len) {
-            st->tx_sg_frames++;
-            st->tx_sg_bytes += p->tot_len;
+            __atomic_fetch_add(&st->tx_sg_frames, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&st->tx_sg_bytes, p->tot_len, __ATOMIC_RELAXED);
         }
     } else {
         pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-        if (netfilter_output(st->tx_frame, p->tot_len, st->idx) ==
+        if (a20_lwip_filter(st->tx_frame, p->tot_len, st->idx, 0) ==
             NETFILTER_DROP) {
-            st->tx_filtered++;
+            __atomic_fetch_add(&st->tx_filtered, 1, __ATOMIC_RELAXED);
+            a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
             return ERR_OK;
         }
         r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
     }
 
+    a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
     if (r == (int)p->tot_len) {
-        st->tx_packets++;
-        st->tx_bytes += p->tot_len;
+        __atomic_fetch_add(&st->tx_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->tx_bytes, p->tot_len, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_TX_PACKETS);
         a20_perf_add(A20_PERF_NET_TX_BYTES, p->tot_len);
         return ERR_OK;
     }
-    st->tx_errors++;
+    __atomic_fetch_add(&st->tx_errors, 1, __ATOMIC_RELAXED);
     return ERR_IF;
 }
 
@@ -588,17 +628,16 @@ void a20_lwip_init(void) {
     /* Before lwip_init(), so no packet can meet a half-built conntrack table. */
     netfilter_conntrack_init();
     spin_init(&g_lwip_lock);
+#if CONFIG_NET_LANES > 1
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++)
+        spin_init(&g_lwip_lane_locks[lane]);
+#endif
     spin_set_debug(&g_lwip_lock, "lwip", NULL);
-    /* g_lwip_lock serialises the entire TCP/IP data plane, so its contention
-     * is the single most important number for deciding whether the network
-     * stack can ever scale across CPUs.  Register it (and enable per-callsite
-     * sampling) so /proc/a20/lock_contention attributes it to exact call
-     * sites.  Measuring before rewriting is deliberate: sharding a lock this
-     * central is a high-risk protocol change, and the same callsite-first
-     * method used for proc_lock is what made that rewrite's scope decidable
-     * (see docs/roadmap/perf-overhaul.md). */
+    /* Keep control-barrier contention visible alongside the owner lane locks.
+     * Ordinary multi-lane TCP/UDP work no longer holds this lock. */
     lock_counters_register(&g_lwip_lock, "lwip");
     lock_counters_enable_callsite(&g_lwip_lock);
+    uint64_t init_flags = a20_lwip_lock();
     lwip_init();
     a20_lwip_register_netifs();
     /* Add loopback after physical links.  lwIP prepends to netif_list, so
@@ -608,7 +647,13 @@ void a20_lwip_init(void) {
      * matches on st->idx, so this is about keeping the hardware netifs
      * adjacent in diagnostics output, not about polling precedence. */
     a20_lwip_register_loopif();
+#if CONFIG_NET_LANES > 1
+    const char *boot = bootargs_get();
+    g_lwip_probe_enabled = boot && strstr(boot, "net_lane_probe=1");
+    a20_lwip_signal_timer_pending();
+#endif
     g_lwip_ready = 1;
+    a20_lwip_unlock(init_flags);
 #if CONFIG_NET_LOCK_ASSERT
     /* Past this point every lwIP entry point that carries an assertion must be
      * reached with g_lwip_lock held.  See g_lwip_lock_armed. */
@@ -627,30 +672,127 @@ void a20_lwip_attach_netifs(void)
     a20_lwip_unlock(flags);
 }
 
+uint64_t a20_lwip_ingress_lock(void)
+{
+#if CONFIG_NET_LANES > 1
+    uint64_t flags = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    if (g_lwip_lane_held[cpu] || g_lwip_control_held[cpu])
+        panic("lwip: ingress acquisition inside core");
+    spin_lock(&g_lwip_lock);
+    return flags;
+#else
+    return a20_lwip_lock();
+#endif
+}
+
+void a20_lwip_ingress_unlock(uint64_t flags)
+{
+#if CONFIG_NET_LANES > 1
+    spin_unlock_irqrestore(&g_lwip_lock, flags);
+#else
+    a20_lwip_unlock(flags);
+#endif
+}
+
 uint64_t a20_lwip_lock(void)
 {
-    uint64_t flags = spin_lock_irqsave(&g_lwip_lock);
+    uint64_t flags = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+#if CONFIG_NET_LANES > 1
+    if (g_lwip_lane_held[cpu] || g_lwip_control_held[cpu])
+        panic("lwip: core lane cannot upgrade to control barrier");
+#endif
+    spin_lock(&g_lwip_lock);
+#if CONFIG_NET_LANES > 1
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++) {
+        spin_lock(&g_lwip_lane_locks[lane]);
+        __atomic_store_n(&g_lwip_lane_owner[lane], cpu + 1, __ATOMIC_RELEASE);
+    }
+#endif
+    g_lwip_control_held[cpu] = 1;
     a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
 #if CONFIG_NET_LOCK_ASSERT
-    g_lwip_lock_owner = cpu_current_id();
+    g_lwip_lock_owner = cpu;
 #endif
     return flags;
 }
 
 void a20_lwip_unlock(uint64_t flags)
 {
+    unsigned cpu = cpu_current_id();
+    if (!g_lwip_control_held[cpu])
+        panic("lwip: control barrier released by non-owner");
+    net_lane_ctx_pop(0);
+    g_lwip_control_held[cpu] = 0;
 #if CONFIG_NET_LOCK_ASSERT
     g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
 #endif
-    /*
-     * The lane context ends with the critical section.  Resetting it here is
-     * what makes "lane 0" the value a section gets when it never establishes
-     * one of its own, instead of inheriting whatever lane the previous holder
-     * of this lock happened to be working on.  Folding to nothing at one lane
-     * is what net_lane_ctx_pop(0) is for.
-     */
-    net_lane_ctx_pop(0);
+#if CONFIG_NET_LANES > 1
+    for (unsigned lane = CONFIG_NET_LANES; lane-- > 0;) {
+        __atomic_store_n(&g_lwip_lane_owner[lane], 0, __ATOMIC_RELEASE);
+        spin_unlock(&g_lwip_lane_locks[lane]);
+    }
+#endif
     spin_unlock_irqrestore(&g_lwip_lock, flags);
+}
+
+int a20_lwip_control_is_held(void)
+{
+    return g_lwip_control_held[cpu_current_id()] != 0;
+}
+
+int a20_lwip_lane_is_held(unsigned lane)
+{
+#if CONFIG_NET_LANES > 1
+    return lane < CONFIG_NET_LANES &&
+        __atomic_load_n(&g_lwip_lane_owner[lane], __ATOMIC_ACQUIRE) ==
+            cpu_current_id() + 1;
+#else
+    return lane == 0 && a20_lwip_control_is_held();
+#endif
+}
+
+uint64_t a20_lwip_lane_lock(unsigned lane)
+{
+#if CONFIG_NET_LANES > 1
+    if (lane >= CONFIG_NET_LANES)
+        panic("lwip: invalid owner lane %u", lane);
+    uint64_t flags = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    if (g_lwip_lane_held[cpu] || g_lwip_control_held[cpu])
+        panic("lwip: recursive core lane acquisition");
+    spin_lock(&g_lwip_lane_locks[lane]);
+    __atomic_store_n(&g_lwip_lane_owner[lane], cpu + 1, __ATOMIC_RELEASE);
+    g_lwip_lane_held[cpu] = lane + 1;
+    g_lwip_lane_prev[cpu] = net_lane_ctx_push(lane);
+    a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
+    return flags;
+#else
+    (void)lane;
+    return a20_lwip_lock();
+#endif
+}
+
+void a20_lwip_lane_unlock(uint64_t flags)
+{
+#if CONFIG_NET_LANES > 1
+    unsigned cpu = cpu_current_id();
+    if (!g_lwip_lane_held[cpu])
+        panic("lwip: core lane released by non-owner");
+    unsigned lane = g_lwip_lane_held[cpu] - 1;
+    net_lane_ctx_pop(g_lwip_lane_prev[cpu]);
+    g_lwip_lane_held[cpu] = 0;
+    __atomic_store_n(&g_lwip_lane_owner[lane], 0, __ATOMIC_RELEASE);
+    spin_unlock(&g_lwip_lane_locks[lane]);
+    if (flags)
+        arch_local_irq_enable();
+#else
+    a20_lwip_unlock(flags);
+#endif
 }
 
 /*
@@ -677,6 +819,8 @@ void a20_lwip_unlock(uint64_t flags)
  */
 void a20_lwip_lane_enter(unsigned lane)
 {
+    if (!a20_lwip_lane_is_held(lane))
+        panic("lwip: logical lane changed without ownership");
     (void)net_lane_ctx_push(lane);
 }
 
@@ -718,12 +862,13 @@ static unsigned a20_lwip_netif_lane(const struct netif *n)
 }
 #endif /* CONFIG_NET_LANES > 1 */
 
-#if CONFIG_NET_LOCK_ASSERT
 int a20_lwip_lock_is_held(void)
 {
-    return g_lwip_lock_owner == cpu_current_id();
+    return a20_lwip_control_is_held() ||
+        a20_lwip_lane_is_held(net_lane_ctx_get());
 }
 
+#if CONFIG_NET_LOCK_ASSERT
 void a20_lwip_note_lock_violation(void *site)
 {
     __atomic_fetch_add(&g_lwip_lock_violations, 1, __ATOMIC_RELAXED);
@@ -759,7 +904,7 @@ unsigned a20_lwip_lock_violations(void)
  */
 void a20_lwip_assert_core_locked(void *site)
 {
-    if (g_lwip_lock_owner == cpu_current_id())
+    if (a20_lwip_lock_is_held())
         return;
     /* Pre-arm: boot-time lwIP construction, which by construction holds no
      * A20OS lock.  Counted (that count is the evidence for the exemption),
@@ -873,7 +1018,7 @@ static unsigned a20_lwip_frame_lane(const struct netif *n, const uint8_t *f,
         if (f[l3 + 9] == A20_IPPROTO_TCP || f[l3 + 9] == A20_IPPROTO_UDP) {
             uint16_t dport;
             memcpy(&dport, f + l3 + ihl + 2, sizeof(dport));
-            return net_lane_of(dst, dport);
+            return net_lane_of(dst, lwip_ntohs(dport));
         }
         return net_lane_of_ip(dst);
     }
@@ -897,7 +1042,7 @@ static unsigned a20_lwip_frame_lane(const struct netif *n, const uint8_t *f,
             if (len < l3 + 40 + 4)
                 return net_lane_of_ip(dst);
             memcpy(&dport, f + l3 + 40 + 2, sizeof(dport));
-            return net_lane_of(dst, dport);
+            return net_lane_of(dst, lwip_ntohs(dport));
         }
         return net_lane_of_ip(dst);
     }
@@ -911,9 +1056,9 @@ static unsigned a20_lwip_frame_lane(const struct netif *n, const uint8_t *f,
          * tha(6) tpa(4), all of it IPv4-over-Ethernet on this link by
          * definition of the ethertype we matched. */
         uint32_t tpa;
-        if (len < l3 + 38)
+        if (len < l3 + 28)
             return a20_lwip_netif_lane(n);
-        memcpy(&tpa, f + l3 + 24 + 14, sizeof(tpa));
+        memcpy(&tpa, f + l3 + 24, sizeof(tpa));
         return net_lane_of_ip(tpa);
     }
 
@@ -933,10 +1078,8 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
         return 1;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-    a20_lwip_sync_link_state(n);
 
     if (!netif_is_link_up(n)) {
-        netif_poll(n);
         return 1;
     }
 
@@ -953,8 +1096,8 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
         done++;
         if ((size_t)len > sizeof(st->rx_frame))
             len = (int)sizeof(st->rx_frame);
-        st->rx_packets++;
-        st->rx_bytes += (uint64_t)len;
+        __atomic_fetch_add(&st->rx_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->rx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_RX_PACKETS);
         a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
@@ -966,10 +1109,10 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
          * the packet used to have.  Running it after the enqueue would make the
          * dispatch disagree with the lookup in udp_input(), which reads the
          * post-NAT destination. */
-        if (netfilter_input(st->rx_frame, (size_t)len, st->idx) ==
+        if (a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1) ==
             NETFILTER_DROP) {
             LINK_STATS_INC(link.drop);
-            st->rx_filtered++;
+            __atomic_fetch_add(&st->rx_filtered, 1, __ATOMIC_RELAXED);
             continue;
         }
         unsigned lane = a20_lwip_frame_lane(n, st->rx_frame, (unsigned)len);
@@ -981,14 +1124,9 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
              * is not the bottom-half overflow the existing counter describes,
              * and reusing that one would make an unrelated counter move. */
             LINK_STATS_INC(link.drop);
-            st->rx_dropped++;
+            __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
         }
     }
-    /* Loopback is not staged.  netif_poll() already unlinks the pbuf from
-     * loop_first under SYS_ARCH_PROTECT and processes it in place, so there is
-     * no window to close by deferring it, and turning it into a staged frame
-     * would mean freeing a pbuf and re-allocating one to say the same thing. */
-    netif_poll(n);
     return drained;
 }
 
@@ -1005,7 +1143,7 @@ static void a20_lwip_lane_input_one(unsigned lane, struct netif *n,
     if (!p) {
         LINK_STATS_INC(link.memerr);
         LINK_STATS_INC(link.drop);
-        st->rx_dropped++;
+        __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
         return;
     }
@@ -1014,77 +1152,87 @@ static void a20_lwip_lane_input_one(unsigned lane, struct netif *n,
      * not redundant -- ownership moves at the call.  After ethernet_input() has
      * taken ownership it frees the pbuf itself on its error paths while still
      * returning ERR_OK, so the caller must not free again. */
+    if (!a20_lwip_control_is_held())
+        __atomic_fetch_add(&g_lwip_hot_inputs[lane], 1, __ATOMIC_RELAXED);
     if (n->input(p, n) != ERR_OK) {
         LINK_STATS_INC(link.drop);
-        st->rx_dropped++;
+        __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
     }
     net_lane_rx_count_processed(lane);
 }
 
-/*
- * Drain one lane's staged frames.  `budget` of 0 means no cap.
- *
- * THE ORDERING RULES, because both of them are easy to get wrong:
- *
- *   - an unlocked caller claims the lane before acquiring g_lwip_lock.  A
- *     caller already holding g_lwip_lock may also try the claim, but it must
- *     never wait for it (the claim is non-blocking), and must not reacquire
- *     g_lwip_lock.  This handles both orderings without a cycle: if an
- *     unlocked caller owns the claim while waiting for the core lock, the
- *     locked caller simply skips that lane and releases the core lock.
- *   - the emptiness test happens before the lock, while the claim is held.  A
- *     producer only ever adds, so a lane found non-empty cannot become empty
- *     under us, and the test saves taking the core lock for nothing on the
- *     overwhelmingly common "no traffic" pass.
- *
- * The claim is given back before returning, including on the early return, so
- * a lane is never left unclaimable.
- */
-static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget,
-                                    int lwip_locked)
+/* Only plain unicast TCP/UDP may execute under one owner lock.  All protocol
+ * control, reassembly and extension-header work uses the cold barrier. */
+static int a20_lwip_frame_hot(const uint8_t *f, unsigned len)
 {
-    if (!net_lane_rx_claim(lane))
+    unsigned l3 = ETH_HLEN;
+    if (len < l3 || (f[0] & 1))
         return 0;
+    unsigned type = ((unsigned)f[12] << 8) | f[13];
+    if (type == ETHTYPE_VLAN) {
+        l3 += 4;
+        if (len < l3) return 0;
+        type = ((unsigned)f[16] << 8) | f[17];
+    }
+    unsigned transport, proto;
+    if (type == ETHTYPE_IP) {
+        if (len < l3 + 20 || f[l3] != 0x45 ||
+            (f[l3 + 6] & 0x3f) || f[l3 + 7]) return 0;
+        if (f[l3 + 16] >= 224 ||
+            (f[l3 + 16] == 255 && f[l3 + 17] == 255 &&
+             f[l3 + 18] == 255 && f[l3 + 19] == 255)) return 0;
+        proto = f[l3 + 9];
+        transport = l3 + 20;
+    } else if (type == ETHTYPE_IPV6) {
+        if (len < l3 + 40 || f[l3 + 24] == 0xff) return 0;
+        proto = f[l3 + 6];
+        transport = l3 + 40;
+    } else return 0;
+    if (len < transport + 8) return 0;
+    if (proto != A20_IPPROTO_TCP && proto != A20_IPPROTO_UDP) return 0;
+    unsigned src = ((unsigned)f[transport] << 8) | f[transport + 1];
+    unsigned dst = ((unsigned)f[transport + 2] << 8) | f[transport + 3];
+    if (proto == A20_IPPROTO_TCP) {
+        if (len < transport + 20) return 0;
+        unsigned header = (unsigned)(f[transport + 12] >> 4) * 4;
+        return header >= 20 && len >= transport + header && src != 53 && dst != 53;
+    }
+    /* DNS, DHCPv4/v6 callbacks own shared service state. */
+    return src != 53 && dst != 53 && src != 67 && src != 68 &&
+        dst != 67 && dst != 68 && src != 546 && src != 547 &&
+        dst != 546 && dst != 547;
+}
+
+static unsigned a20_lwip_lane_drain(unsigned lane, unsigned budget)
+{
+    if (!net_lane_rx_claim(lane)) return 0;
     unsigned done = 0;
-    if (net_lane_rx_ready(lane)) {
-        uint64_t flags = 0;
-        if (!lwip_locked)
-            flags = a20_lwip_lock();
-        /* Declare this lane for the whole batch: every pbuf the stack allocates
-         * here belongs to the connections whose packets these are, which is
-         * what makes stage C's per-lane pool table mean something.  Popped and
-         * restored rather than assigned, because the caller may have arrived
-         * with a lane of its own -- a socket's send path reaches the receive
-         * drain through a20_lwip_poll_locked() -- and giving it up for the
-         * duration would charge this traffic to the wrong pool. */
-        unsigned prev_lane = net_lane_ctx_push(lane);
-        for (;;) {
-            if (budget && done >= budget)
-                break;
-            const uint8_t *frame;
-            unsigned len;
-            struct netif *n = net_lane_rx_pop(lane, &frame, &len);
-            if (!n)
-                break;
-            done++;
-            a20_lwip_lane_input_one(lane, n, frame, len);
-        }
-        net_lane_ctx_pop(prev_lane);
-        if (!lwip_locked)
-            a20_lwip_unlock(flags);
+    while (!budget || done < budget) {
+        const uint8_t *frame;
+        unsigned len;
+        struct netif *n = net_lane_rx_peek(lane, &frame, &len);
+        if (!n) break;
+        int hot = a20_lwip_frame_hot(frame, len);
+        uint64_t flags = hot ? a20_lwip_lane_lock(lane) : a20_lwip_lock();
+        unsigned prev = net_lane_ctx_push(lane);
+        a20_lwip_lane_input_one(lane, n, frame, len);
+        net_lane_ctx_pop(prev);
+        if (hot) a20_lwip_lane_unlock(flags);
+        else a20_lwip_unlock(flags);
+        net_lane_rx_consume(lane);
+        done++;
     }
     net_lane_rx_release(lane);
     return done;
 }
 
-/* Drain every lane that will hand itself over.  `budget` caps each lane, not
- * the total, because the point of the stage is that four CPUs can each be
- * inside a different lane at the same time. */
-static unsigned a20_lwip_lane_drain_all(unsigned budget, int lwip_locked)
+static unsigned a20_lwip_lane_drain_all(unsigned budget)
 {
     unsigned done = 0;
-    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++)
-        done += a20_lwip_lane_drain_locked(lane, budget, lwip_locked);
+    /* Different CPUs start at different queues, without changing ownership. */
+    unsigned first = cpu_current_id() % CONFIG_NET_LANES;
+    for (unsigned i = 0; i < CONFIG_NET_LANES; i++)
+        done += a20_lwip_lane_drain((first + i) % CONFIG_NET_LANES, budget);
     return done;
 }
 #endif /* CONFIG_NET_LANES > 1 */
@@ -1174,8 +1322,8 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
          * over-reports; without it an over-report reads past rx_frame below. */
         if ((size_t)len > sizeof(st->rx_frame))
             len = (int)sizeof(st->rx_frame);
-        st->rx_packets++;
-        st->rx_bytes += (uint64_t)len;
+        __atomic_fetch_add(&st->rx_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->rx_bytes, (uint64_t)len, __ATOMIC_RELAXED);
         a20_perf_count(A20_PERF_NET_RX_PACKETS);
         a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
@@ -1189,17 +1337,17 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
          * match and the connection would never be made.  Running first also
          * means the drop path has no pbuf to release.
          */
-        if (netfilter_input(st->rx_frame, (size_t)len, st->idx) ==
+        if (a20_lwip_filter(st->rx_frame, (size_t)len, st->idx, 1) ==
             NETFILTER_DROP) {
             LINK_STATS_INC(link.drop);
-            st->rx_filtered++;
+            __atomic_fetch_add(&st->rx_filtered, 1, __ATOMIC_RELAXED);
             continue;
         }
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
         if (!p) {
             LINK_STATS_INC(link.memerr);
             LINK_STATS_INC(link.drop);
-            st->rx_dropped++;
+            __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
             a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
             continue;
         }
@@ -1215,7 +1363,7 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
          */
         if (n->input(p, n) != ERR_OK) {
             LINK_STATS_INC(link.drop);
-            st->rx_dropped++;
+            __atomic_fetch_add(&st->rx_dropped, 1, __ATOMIC_RELAXED);
         }
     }
     netif_poll(n);
@@ -1331,6 +1479,47 @@ void a20_lwip_poll_timers_locked(void)
     }
 }
 
+#if CONFIG_NET_LANES > 1
+static void a20_lwip_maintenance(void)
+{
+    if (!g_lwip_ready ||
+        !__atomic_load_n(&g_lwip_timer_pending, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&g_lwip_maintenance_owner, 1, __ATOMIC_ACQUIRE)) return;
+    __atomic_exchange_n(&g_lwip_timer_pending, 0, __ATOMIC_ACQ_REL);
+    static u32_t fast_at, slow_at;
+    static int started;
+    u32_t now = sys_now();
+    if (!started) {
+        fast_at = now + TCP_FAST_INTERVAL;
+        slow_at = now + TCP_SLOW_INTERVAL;
+        started = 1;
+    }
+    int fast = (s32_t)(now - fast_at) >= 0;
+    int slow = (s32_t)(now - slow_at) >= 0;
+    /* Coalesce missed maintenance rather than replaying an unbounded IRQ gap. */
+    if (fast) fast_at = now + TCP_FAST_INTERVAL;
+    if (slow) {
+        slow_at = now + TCP_SLOW_INTERVAL;
+        tcp_ticks_advance();
+    }
+    if (fast || slow) {
+        for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++) {
+            uint64_t flags = a20_lwip_lane_lock(lane);
+            if (fast) tcp_fasttmr_lane(lane);
+            if (slow) tcp_slowtmr_lane(lane);
+            __atomic_fetch_add(&g_lwip_tcp_timers[lane], 1, __ATOMIC_RELAXED);
+            a20_lwip_lane_unlock(flags);
+        }
+    }
+    uint64_t flags = a20_lwip_lock();
+    for (struct netif *n = netif_list; n; n = n->next)
+        if (n->state) a20_lwip_sync_link_state(n);
+    a20_lwip_poll_timers_locked();
+    a20_lwip_unlock(flags);
+    __atomic_store_n(&g_lwip_maintenance_owner, 0, __ATOMIC_RELEASE);
+}
+#endif
+
 /* Device completions plus the receive drain.  `budget` of 0 means no cap.
  *
  * More than one lane: the device ring is staged onto the owning lanes and then
@@ -1364,18 +1553,11 @@ void a20_lwip_poll_rx_locked(unsigned budget)
             /* No state means a netif the port does not drive, so there is no
              * address to hash and no per-netif lane to adopt.  It still has to
              * be drained, so it runs in whatever lane the caller set. */
+#if CONFIG_NET_LANES == 1
             netif_poll(n);
+#endif
         }
     }
-#if CONFIG_NET_LANES > 1
-    a20_lwip_lane_drain_all(budget, 1);
-    /* "Complete" has to mean the queues are empty too.  Clearing the RX pending
-     * flag with frames still staged would let the reader path skip a drain it
-     * should have made, and the frames would sit until the next interrupt --
-     * which, since this interrupt is what staged them, may not come. */
-    if (net_lane_rx_queued_total() != 0)
-        complete = 0;
-#endif
     if (complete)
         a20_lwip_clear_rx_pending();
 }
@@ -1413,22 +1595,34 @@ void a20_lwip_poll_rx_locked(unsigned budget)
 #if CONFIG_NET_LANES > 1
 void a20_lwip_lane_rx_poll(unsigned budget)
 {
+    a20_lwip_maintenance();
     if (net_lane_rx_queued_total() == 0)
         return;
-    a20_lwip_lane_drain_all(budget, 0);
+    a20_lwip_lane_drain_all(budget);
 }
 #endif /* CONFIG_NET_LANES > 1 */
 
 void a20_lwip_poll_locked(void) {
+#if CONFIG_NET_LANES == 1
     a20_lwip_poll_timers_locked();
     a20_lwip_poll_rx_locked(0);
+#else
+    /* Never upgrade a socket's owner lane to ingress or the cold barrier.
+     * Scheduler/idle progress is unconditional, including for parked waiters. */
+    (void)0;
+#endif
 }
 
 void a20_lwip_poll(void) {
     a20_perf_count(A20_PERF_NET_POLL_CALLS);
-    uint64_t flags = a20_lwip_lock();
+    uint64_t flags = a20_lwip_ingress_lock();
+#if CONFIG_NET_LANES > 1
+    a20_lwip_poll_rx_locked(0);
+#else
     a20_lwip_poll_locked();
-    a20_lwip_unlock(flags);
+#endif
+    a20_lwip_ingress_unlock(flags);
+    A20_LWIP_LANE_RX_POLL(CONFIG_NET_RX_IRQ_BUDGET);
     /* With g_lwip_lock dropped, so this is allowed to touch socket buckets. */
     a20_lwip_netlink_flush();
     net_inet_bottom_half_process_all();
@@ -1463,12 +1657,17 @@ void a20_lwip_poll_waiter(void) {
             need_lock = 1;
     }
     if (need_lock) {
-        uint64_t flags = a20_lwip_lock();
+        uint64_t flags = a20_lwip_ingress_lock();
+#if CONFIG_NET_LANES > 1
+        a20_lwip_poll_rx_locked(CONFIG_NET_RX_IRQ_BUDGET);
+#else
         a20_lwip_poll_locked();
-        a20_lwip_unlock(flags);
+#endif
+        a20_lwip_ingress_unlock(flags);
     } else {
         a20_perf_count(A20_PERF_NET_POLL_SKIPPED);
     }
+    A20_LWIP_LANE_RX_POLL(CONFIG_NET_RX_IRQ_BUDGET);
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();
 }
@@ -1526,15 +1725,15 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         "pcbs: udp=%u tcp_active=%u tcp_listen=%u raw=%u\n"
         "link: xmit=%u recv=%u drop=%u chkerr=%u memerr=%u\n",
         g_lwip_ready, ifname, state, ipbuf, maskbuf, gwbuf, dnsbuf,
-        (unsigned)lwip_stats.memp[MEMP_UDP_PCB]->used,
-        (unsigned)lwip_stats.memp[MEMP_TCP_PCB]->used,
-        (unsigned)lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used,
-        (unsigned)lwip_stats.memp[MEMP_RAW_PCB]->used,
-        (unsigned)lwip_stats.link.xmit,
-        (unsigned)lwip_stats.link.recv,
-        (unsigned)lwip_stats.link.drop,
-        (unsigned)lwip_stats.link.chkerr,
-        (unsigned)lwip_stats.link.memerr);
+        (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_UDP_PCB]->used, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_TCP_PCB]->used, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_TCP_PCB_LISTEN]->used, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.memp[MEMP_RAW_PCB]->used, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.link.xmit, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.link.recv, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.link.drop, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.link.chkerr, __ATOMIC_RELAXED),
+        (unsigned)__atomic_load_n(&lwip_stats.link.memerr, __ATOMIC_RELAXED));
     /* TCP timer firings.  tcp_ticks advances exactly once per tcp_tmr() call, so
      * at TCP_TMR_INTERVAL it directly witnesses how often the TCP timer ran.
      * Reported because the cadence is an invariant a caller can break with no
@@ -1574,7 +1773,7 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
                 continue;
             uint64_t sflags = net_sock_lock(s);
             if (net_socket_is_live(s)) {
-                unsigned l = s->lane;
+                unsigned l = net_socket_lane_load(s);
                 if (l < CONFIG_NET_LANES)
                     lanes[l]++;
                 total++;
@@ -1595,6 +1794,23 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         a20_lwip_append(buf, bufsz, &off, num);
     }
     a20_lwip_append(buf, bufsz, &off, "\n");
+#if CONFIG_NET_LANES > 1
+    snprintf(cell, sizeof(cell), "\ncore_parallel: peak_active_lanes=%u probe_hits=%u inputs:",
+             __atomic_load_n(&g_lwip_probe_peak, __ATOMIC_RELAXED),
+             __atomic_load_n(&g_lwip_probe_calls, __ATOMIC_RELAXED));
+    a20_lwip_append(buf, bufsz, &off, cell);
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++) {
+        snprintf(cell, sizeof(cell), " %llu",
+            (unsigned long long)__atomic_load_n(&g_lwip_hot_inputs[lane], __ATOMIC_RELAXED));
+        a20_lwip_append(buf, bufsz, &off, cell);
+    }
+    a20_lwip_append(buf, bufsz, &off, " timers:");
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++) {
+        snprintf(cell, sizeof(cell), " %llu",
+            (unsigned long long)__atomic_load_n(&g_lwip_tcp_timers[lane], __ATOMIC_RELAXED));
+        a20_lwip_append(buf, bufsz, &off, cell);
+    }
+#endif
     snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
     a20_lwip_append(buf, bufsz, &off, cell);
     /*
@@ -1835,9 +2051,9 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
 
         snprintf(row, sizeof(row), "%s%6lu%7lu%8lu%6lu\n", name,
                  (unsigned long)desc->size,
-                 (unsigned long)desc->stats->used,
-                 (unsigned long)desc->stats->max,
-                 (unsigned long)desc->stats->err);
+                 (unsigned long)__atomic_load_n(&desc->stats->used, __ATOMIC_RELAXED),
+                 (unsigned long)__atomic_load_n(&desc->stats->max, __ATOMIC_RELAXED),
+                 (unsigned long)__atomic_load_n(&desc->stats->err, __ATOMIC_RELAXED));
         a20_lwip_append(buf, bufsz, &off, row);
     }
 

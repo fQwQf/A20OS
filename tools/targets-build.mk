@@ -323,26 +323,32 @@ check-final-definition: check-doc-test-gates
 	@$(PYTHON) tools/gates.py check-final-definition
 	@echo "check-final-definition: PASS (SMP covered via check-concurrency-foundation; every assertion here is already asserted by a gate check-doc-test-gates runs)"
 
+# The kernel bring-up targets may also build per-arch user driver blobs.  Route
+# matrix user builds through USER_BUILD_STAMP so both paths take stamps.py's
+# lock for the shared user/build/<arch> root before touching it.
+.PHONY: check-user-build-stamp
+check-user-build-stamp: $(USER_BUILD_STAMP)
+
 check-riscv64-user:
-	$(MAKE) -C user ARCH=riscv64 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=riscv64 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-loongarch64-user:
-	$(MAKE) -C user ARCH=loongarch64 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=loongarch64 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-aarch64-user:
-	$(MAKE) -C user ARCH=aarch64 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=aarch64 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-x86_64-user:
-	$(MAKE) -C user ARCH=x86_64 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=x86_64 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-arm32-user:
-	$(MAKE) -C user ARCH=arm32 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=arm32 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-riscv32-user:
-	$(MAKE) -C user ARCH=riscv32 OPT="$(USER_OPT)"
+	$(MAKE) ARCH=riscv32 USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-ppc64le-user:
-	$(MAKE) -C user ARCH=ppc64le OPT="$(USER_OPT)"
+	$(MAKE) ARCH=ppc64le USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build
@@ -394,11 +400,8 @@ check-honesty-policy:
 	  echo "  FAIL virtio-blk no longer issues a flush request"; exit 1; fi
 	@if ! rg -q 'ATA_CMD_FLUSH_CACHE_EXT' kernel/drivers/block/ahci.c; then \
 	  echo "  FAIL AHCI no longer issues FLUSH CACHE"; exit 1; fi
-	@# New subsystems must stay wired, not merely present.
-	@if ! rg -q 'netfilter_input\(st->rx_frame' kernel/net/lwip_stack.c; then \
-	  echo "  FAIL netfilter input hook is not wired"; exit 1; fi
-	@if ! rg -q 'netfilter_output\(st->tx_frame' kernel/net/lwip_stack.c; then \
-	  echo "  FAIL netfilter output hook is not wired"; exit 1; fi
+	@# Check the live wrappers and ordering, not the former one-lock call shape.
+	@$(PYTHON) tools/check_lwip_concurrency_wiring.py
 	@if ! rg -q 'proc_loadavg_tick' kernel/proc/sched.c; then \
 	  echo "  FAIL load average is no longer sampled from the scheduler tick"; exit 1; fi
 	@if ! rg -q 'proc_io_account' kernel/fs/vfs/file.c; then \
