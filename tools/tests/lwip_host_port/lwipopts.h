@@ -1,0 +1,28 @@
+#ifndef A20_LWIP_HOST_TEST_OPTS_H
+#define A20_LWIP_HOST_TEST_OPTS_H
+
+#define NO_SYS 1
+#define SYS_LIGHTWEIGHT_PROT 1
+#define LWIP_TIMERS 0
+#define LWIP_IPV4 1
+#define LWIP_IPV6 0
+#define LWIP_TCP 1
+#define TCP_QUEUE_OOSEQ 0
+#define LWIP_UDP 1
+#define LWIP_NETCONN 0
+#define LWIP_SOCKET 0
+#define LWIP_TIMEVAL_PRIVATE 0
+#define LWIP_STATS 1
+#define MEM_STATS 1
+#define MEMP_STATS 1
+#define MEM_ALIGNMENT 8
+#define MEM_SIZE (1024 * 1024)
+#define MEM_USE_POOLS 0
+#define MEM_LIBC_MALLOC 0
+#define MEM_OVERFLOW_CHECK 0
+#define MEMP_OVERFLOW_CHECK 0
+#define MEMP_MEM_MALLOC 1
+#define PBUF_POOL_SIZE 32
+#define PBUF_POOL_BUFSIZE 512
+
+#endif

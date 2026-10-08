@@ -72,9 +72,9 @@
 #define LWIP_MEM_ILLEGAL_FREE(msg)         LWIP_ASSERT(msg, 0)
 #endif
 
-#define MEM_STATS_INC_LOCKED(x)         SYS_ARCH_LOCKED(MEM_STATS_INC(x))
-#define MEM_STATS_INC_USED_LOCKED(x, y) SYS_ARCH_LOCKED(MEM_STATS_INC_USED(x, y))
-#define MEM_STATS_DEC_USED_LOCKED(x, y) SYS_ARCH_LOCKED(MEM_STATS_DEC_USED(x, y))
+#define MEM_STATS_INC_LOCKED(x)         MEM_STATS_INC(x)
+#define MEM_STATS_INC_USED_LOCKED(x, y) MEM_STATS_INC_USED(x, y)
+#define MEM_STATS_DEC_USED_LOCKED(x, y) MEM_STATS_DEC_USED(x, y)
 
 #if MEM_OVERFLOW_CHECK
 #define MEM_SANITY_OFFSET   MEM_SANITY_REGION_BEFORE_ALIGNED
@@ -629,15 +629,17 @@ mem_free(void *rmem)
     MEM_STATS_INC_LOCKED(illegal);
     return;
   }
+  /* protect the heap from concurrent access */
+  LWIP_HEAP_LOCK();
+  LWIP_MEM_FREE_PROTECT();
 #if MEM_OVERFLOW_CHECK
   mem_overflow_check_element(mem);
 #endif
-  /* protect the heap from concurrent access */
-  LWIP_MEM_FREE_PROTECT();
   /* mem has to be in a used state */
   if (!mem->used) {
     LWIP_MEM_ILLEGAL_FREE("mem_free: illegal memory: double free");
     LWIP_MEM_FREE_UNPROTECT();
+    LWIP_HEAP_UNLOCK();
     LWIP_DEBUGF(MEM_DEBUG | LWIP_DBG_LEVEL_SEVERE, ("mem_free: illegal memory: double free?\n"));
     /* protect mem stats from concurrent access */
     MEM_STATS_INC_LOCKED(illegal);
@@ -647,6 +649,7 @@ mem_free(void *rmem)
   if (!mem_link_valid(mem)) {
     LWIP_MEM_ILLEGAL_FREE("mem_free: illegal memory: non-linked: double free");
     LWIP_MEM_FREE_UNPROTECT();
+    LWIP_HEAP_UNLOCK();
     LWIP_DEBUGF(MEM_DEBUG | LWIP_DBG_LEVEL_SEVERE, ("mem_free: illegal memory: non-linked: double free?\n"));
     /* protect mem stats from concurrent access */
     MEM_STATS_INC_LOCKED(illegal);
@@ -670,6 +673,7 @@ mem_free(void *rmem)
   mem_free_count = 1;
 #endif /* LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT */
   LWIP_MEM_FREE_UNPROTECT();
+  LWIP_HEAP_UNLOCK();
 }
 
 /**
@@ -717,6 +721,9 @@ mem_trim(void *rmem, mem_size_t new_size)
   /* Get the corresponding struct mem ... */
   /* cast through void* to get rid of alignment warnings */
   mem = (struct mem *)(void *)((u8_t *)rmem - (SIZEOF_STRUCT_MEM + MEM_SANITY_OFFSET));
+  /* Read the block links only after taking the shared heap lock. */
+  LWIP_HEAP_LOCK();
+  LWIP_MEM_FREE_PROTECT();
 #if MEM_OVERFLOW_CHECK
   mem_overflow_check_element(mem);
 #endif
@@ -727,15 +734,16 @@ mem_trim(void *rmem, mem_size_t new_size)
   LWIP_ASSERT("mem_trim can only shrink memory", newsize <= size);
   if (newsize > size) {
     /* not supported */
+    LWIP_MEM_FREE_UNPROTECT();
+    LWIP_HEAP_UNLOCK();
     return NULL;
   }
   if (newsize == size) {
     /* No change in size, simply return */
+    LWIP_MEM_FREE_UNPROTECT();
+    LWIP_HEAP_UNLOCK();
     return rmem;
   }
-
-  /* protect the heap from concurrent access */
-  LWIP_MEM_FREE_PROTECT();
 
   mem2 = ptr_to_mem(mem->next);
   if (mem2->used == 0) {
@@ -803,6 +811,7 @@ mem_trim(void *rmem, mem_size_t new_size)
   mem_free_count = 1;
 #endif /* LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT */
   LWIP_MEM_FREE_UNPROTECT();
+  LWIP_HEAP_UNLOCK();
   return rmem;
 }
 
@@ -843,6 +852,7 @@ mem_malloc(mem_size_t size_in)
   }
 
   /* protect the heap from concurrent access */
+  LWIP_HEAP_LOCK();
   sys_mutex_lock(&mem_mutex);
   LWIP_MEM_ALLOC_PROTECT();
 #if LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT
@@ -936,7 +946,6 @@ mem_malloc_adjust_lfree:
           LWIP_ASSERT("mem_malloc: !lfree->used", ((lfree == ram_end) || (!lfree->used)));
         }
         LWIP_MEM_ALLOC_UNPROTECT();
-        sys_mutex_unlock(&mem_mutex);
         LWIP_ASSERT("mem_malloc: allocated memory not above ram_end.",
                     (mem_ptr_t)mem + SIZEOF_STRUCT_MEM + size <= (mem_ptr_t)ram_end);
         LWIP_ASSERT("mem_malloc: allocated memory properly aligned.",
@@ -948,6 +957,8 @@ mem_malloc_adjust_lfree:
         mem_overflow_init_element(mem, size_in);
 #endif
         MEM_SANITY();
+        sys_mutex_unlock(&mem_mutex);
+        LWIP_HEAP_UNLOCK();
         return (u8_t *)mem + SIZEOF_STRUCT_MEM + MEM_SANITY_OFFSET;
       }
     }
@@ -958,6 +969,7 @@ mem_malloc_adjust_lfree:
   MEM_STATS_INC(err);
   LWIP_MEM_ALLOC_UNPROTECT();
   sys_mutex_unlock(&mem_mutex);
+  LWIP_HEAP_UNLOCK();
   LWIP_DEBUGF(MEM_DEBUG | LWIP_DBG_LEVEL_SERIOUS, ("mem_malloc: could not allocate %"S16_F" bytes\n", (s16_t)size));
   return NULL;
 }

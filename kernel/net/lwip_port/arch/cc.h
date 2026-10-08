@@ -5,6 +5,7 @@
 #include "core/stdio.h"
 #include "core/panic.h"
 #include "core/random.h"
+#include "net/net_profile.h"
 
 #define LWIP_NO_STDDEF_H    1
 #define LWIP_NO_STDINT_H    1
@@ -51,6 +52,19 @@ typedef intptr_t  ptrdiff_t;
 } while (0)
 
 #define LWIP_PROVIDE_ERRNO 1
+
+/* The NO_SYS heap has one global free list.  When packet lanes are enabled,
+ * protect that list with a kernel SMP lock; the one-lane build keeps the
+ * upstream single-context allocator path. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_heap_lock(void);
+void a20_lwip_heap_unlock(void);
+#define LWIP_HEAP_LOCK()   a20_lwip_heap_lock()
+#define LWIP_HEAP_UNLOCK() a20_lwip_heap_unlock()
+#else
+#define LWIP_HEAP_LOCK()   ((void)0)
+#define LWIP_HEAP_UNLOCK() ((void)0)
+#endif
 
 #endif /* A20_LWIP_ARCH_CC_H */
 

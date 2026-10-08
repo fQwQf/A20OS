@@ -552,7 +552,7 @@ memp_malloc_fn(memp_t type, const char *file, const int line)
    * share and a reader can tell a lane that was refused from one that never
    * asked.  u32_t wraps only after 4G elements, and it only ever increments. */
   if (memp != NULL) {
-    memp_lane_counts[memp_pool_lane(type)][type].alloc++;
+    SYS_ARCH_LOCKED(memp_lane_counts[memp_pool_lane(type)][type].alloc++);
   }
 #endif /* LWIP_MEMP_LANE */
 
@@ -652,7 +652,7 @@ memp_free(memp_t type, void *mem)
    * need a per-element tag lwIP has nowhere to put.  Two monotonic counters
    * are exact and cannot underflow; see the note on memp_lane_count above.
    */
-  memp_lane_counts[memp_pool_lane(type)][type].freed++;
+  SYS_ARCH_LOCKED(memp_lane_counts[memp_pool_lane(type)][type].freed++);
 #endif /* LWIP_MEMP_LANE */
 
 #ifdef LWIP_HOOK_MEMP_AVAILABLE
