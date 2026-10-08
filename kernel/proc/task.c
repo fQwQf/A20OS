@@ -105,8 +105,6 @@ void *proc_scratch_buffer(size_t size)
     return buf;
 }
 
-unsigned long g_proc_waiting_child_waiter_count;
-
 void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
 {
     (void)clone_flags;

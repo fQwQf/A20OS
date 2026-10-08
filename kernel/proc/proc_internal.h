@@ -164,12 +164,6 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
  * park_lock first). */
 int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq);
 void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq);
-/* Count of tasks blocked in wait4() with ->waiting_for_child set.  It is
- * maintained in lockstep with the owning task's ->waiting_for_child, under that
- * task's park_lock, so the two can never disagree; readers on other tasks only
- * use it as an advisory fast-path hint and read it relaxed.
- * proc_wake_child_waiters() skips its global task-list scan when it is zero. */
-extern unsigned long g_proc_waiting_child_waiter_count;
 /* Park-state wake transition; requires task->park_lock held (tasklist_lock ->
  * park_lock is the documented order). */
 int proc_try_wake_locked_common(task_t *task, uint64_t seq,
