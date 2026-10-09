@@ -53,6 +53,13 @@ if ((${#MACROS[@]} == 0)); then
     exit 1
 fi
 
+# mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
+# recipes, this covers a manual run) so the scratch lands under build/, where
+# `make clean` can remove it.
+TMPDIR="${TMPDIR:-$REPO_ROOT/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

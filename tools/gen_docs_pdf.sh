@@ -179,6 +179,13 @@ mapfile -t DOCS < <(
 # Override the template with A20OS_LATEX_TEMPLATE if needed.
 TEMPLATE="${A20OS_LATEX_TEMPLATE:-tools/a20os.latex}"
 BUILD_DATE="$(date +%Y-%m-%d)"
+# mktemp honours TMPDIR; pin it into the checkout (the repo root was cd'd to
+# above; make exports build/tmp for recipes, this covers a manual run) so the
+# scratch tree lands under build/, where `make clean` can remove it.
+TMPDIR="${TMPDIR:-$PWD/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 LOGO_PDF="$WORK/a20os-logo.pdf"

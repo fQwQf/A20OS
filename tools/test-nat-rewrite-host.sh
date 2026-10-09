@@ -14,6 +14,13 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# Manual runs bypass make, which is what pins TMPDIR for every recipe; pin it
+# here too so the scratch directory lands under build/ and `make clean` can
+# reach it even if this script is killed before its trap fires.
+mkdir -p build/tmp
+TMPDIR="$PWD/build/tmp"
+export TMPDIR
+
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 

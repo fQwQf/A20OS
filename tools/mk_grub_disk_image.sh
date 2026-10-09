@@ -66,6 +66,14 @@ parted -s "$output" set 1 esp on
 esp_offset=$((1024 * 1024))
 mformat -i "$output@@$esp_offset" -F -v A20OS ::
 
+# mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
+# recipes, this covers a manual run) so the scratch files land under build/,
+# where `make clean` can remove them.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMPDIR="${TMPDIR:-$REPO_ROOT/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 mtoolsrc=$(mktemp)
 tmp_cfg=$(mktemp)
 tmp_efi=$(mktemp)
