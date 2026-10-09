@@ -13,6 +13,12 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# Pin TMPDIR into the checkout for manual runs (make exports it for recipes):
+# the scratch dir then lives under build/, where `make clean` can remove it.
+mkdir -p build/tmp
+TMPDIR="$PWD/build/tmp"
+export TMPDIR
+
 LWIP=kernel/external/lwip/src
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT

@@ -31,7 +31,6 @@ import re
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -205,9 +204,15 @@ def qemu_argv(case: dict) -> list[str]:
 def qmp_socket_path(case: dict) -> str:
     """Per-case QMP socket path.  Derived from the case name, not the pid, so a
     second run of the same case reuses the name and finds the stale socket it
-    has to remove."""
+    has to remove.
+
+    build/tmp rather than tempfile.gettempdir(): a socket in the host /tmp is
+    invisible to `make clean`, and unix socket paths are limited to 104 bytes
+    here anyway -- both problems go away by keeping it in the checkout."""
     name = case.get("name", "case").replace("/", "_")
-    return str(Path(tempfile.gettempdir()) / f"a20-qmp-{name}.sock")
+    tmp = REPO / "build" / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    return str(tmp / f"a20-qmp-{name}.sock")
 
 
 def split_command(cmd: str) -> list[str]:

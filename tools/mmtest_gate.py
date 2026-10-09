@@ -50,6 +50,20 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+def tmp_dir() -> str:
+    """Scratch directory: <repo>/build/tmp, reachable by `make clean`.
+
+    tempfile's default is TMPDIR or the host /tmp, which is outside the
+    checkout: this gate leaves a full-size world-image snapshot behind, and a
+    snapshot stranded in /tmp (often a small tmpfs) can neither be cleaned by
+    `make clean` nor make room for the next run.
+    """
+    d = os.path.join(REPO, "build", "tmp")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 # The world carries the five tools plus the kernel's own corpus tools.
 DEFAULT_WORLD = "mmtest"
 DEFAULT_SIZE_MB = "2048"
@@ -131,7 +145,7 @@ def boot(img: str, kernel: str, log_path: str, timeout: int,
     fail with "Failed to get write lock", which reads like a disk bug and is
     not one.
     """
-    snap = tempfile.mkdtemp(prefix="mmtest-img-")
+    snap = tempfile.mkdtemp(prefix="mmtest-img-", dir=tmp_dir())
     snap_img = os.path.join(snap, "world.img")
     try:
         shutil.copyfile(img, snap_img)
@@ -264,7 +278,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--image")
     ap.add_argument("--kernel")
-    ap.add_argument("--log", default="/tmp/mmtest-gate.log")
+    ap.add_argument("--log", default=os.path.join(tmp_dir(), "mmtest-gate.log"))
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--cmdline", default="")
     ap.add_argument("--world", default=DEFAULT_WORLD)

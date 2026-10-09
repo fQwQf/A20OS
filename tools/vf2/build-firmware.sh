@@ -10,13 +10,14 @@
 #   u-boot.itb                  OpenSBI+U-Boot FIT (rescue/development chain)
 #   mkimage                     host tool used by make-boot-image.sh
 #
-# Source trees live under $WORK_DIR (default /tmp/vf2-firmware) so repeated
+# Source trees live under $WORK_DIR (default build/vf2-work) so repeated
 # runs are incremental.  Versions are pinned by commit; override with
-# OPENSBI_REF / UBOOT_REF.
+# OPENSBI_REF / UBOOT_REF.  The work trees stay inside the checkout (next to
+# build/cache, outside build/tmp) so make clean does not discard the clones.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-WORK_DIR="${WORK_DIR:-/tmp/vf2-firmware}"
+WORK_DIR="${WORK_DIR:-$REPO_ROOT/build/vf2-work}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/vf2-firmware}"
 CROSS_COMPILE="${CROSS_COMPILE:-riscv64-linux-gnu-}"
 JOBS="${JOBS:-$(nproc)}"

@@ -4,7 +4,7 @@
 HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
-HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
+HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment \
@@ -93,13 +93,13 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
             check-tg-leader-lifetime $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
-/tmp/a20-host-%: tools/tests/%.c
+$(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
 # host port supplies only the architecture types and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
-/tmp/a20-host-test_lwip_allocator_concurrency: \
+$(TMPDIR)/a20-host-test_lwip_allocator_concurrency: \
         tools/tests/test_lwip_allocator_concurrency.c \
         kernel/external/lwip/src/core/mem.c \
         kernel/external/lwip/src/core/memp.c \
@@ -111,7 +111,7 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 	  $^ -Wl,--gc-sections -o $@
 
 # Compile the real lane queue implementation, with only CPU identity shimmed.
-/tmp/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
+$(TMPDIR)/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
         kernel/net/net_lane.c kernel/include/net/net_lane.h kernel/net/net_profile.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -DCONFIG_NET_LANES=4 -DCONFIG_NR_CPUS=4 \
 	  -Itools/tests/net_lane_host_port -Ikernel/include -Ikernel \
@@ -120,7 +120,7 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 # Exercise the real spin_lock_at() inline body.  The host exchange seam injects
 # a simulated IRQ at lock acquisition and verifies that preemption was already
 # disabled, while the contention seam verifies failed waiters remain switchable.
-/tmp/a20-host-test_spinlock_preempt_window: \
+$(TMPDIR)/a20-host-test_spinlock_preempt_window: \
         tools/tests/test_spinlock_preempt_window.c \
         kernel/core/preempt.c \
         kernel/include/core/lock.h \
@@ -154,9 +154,9 @@ check-tg-leader-lifetime:
 
 # Minimal ISO9660 test image for the isofs driver (no mkisofs/xorriso needed).
 $(ISOFS_IMG): tools/mkisofs_test.c
-	@mkdir -p $(BUILD_DIR)
-	$(HOST_CC) $(HOST_CFLAGS) $< -o /tmp/a20-mkisofs
-	/tmp/a20-mkisofs $@
+	@mkdir -p $(BUILD_DIR) $(TMPDIR)
+	$(HOST_CC) $(HOST_CFLAGS) $< -o $(TMPDIR)/a20-mkisofs
+	$(TMPDIR)/a20-mkisofs $@
 
 check-vfs-abstraction: smoke-vfs-stress
 	@$(PYTHON) tools/gates.py vfs-abstraction

@@ -9,6 +9,17 @@ PYTHON ?= python3
 TIMEOUT ?= $(PYTHON) tools/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
+# Every temporary file a make-driven step produces stays inside the checkout
+# so `make clean` can remove it. The host /tmp is often a small tmpfs: staging
+# there once broke image-world mid-apk (No space left on device) while the
+# repository disk had tens of GiB free, and nothing in `make clean` could
+# reach those leftovers. Absolute path so recursive makes with a different
+# cwd resolve it to the same directory. Overridable on the make command line
+# (make TMPDIR=...) but not by the ambient environment.
+TMPDIR := $(CURDIR)/build/tmp
+export TMPDIR
+$(shell mkdir -p $(TMPDIR))
+
 ifeq ($(HOST_OS),Darwin)
 DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-stm32f103
 DEFAULT_USER_CHECK_TARGETS := check-riscv64-user
