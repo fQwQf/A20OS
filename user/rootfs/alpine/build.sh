@@ -46,12 +46,16 @@ fi
 
 if [ "$(id -u)" -eq 0 ]; then sudo=; else sudo=${SUDO:-sudo}; fi
 
-rootfs_dir="${TMPDIR:-/tmp}/a20os-alpine-rootfs.$$"
+# Stage inside the checkout (make exports TMPDIR=build/tmp; the fallback covers
+# a manual run with TMPDIR unset) so `make clean` reaches the residue instead of
+# leaking an 8 GiB tree into /tmp.
+tmp_base="${TMPDIR:-$project_root/build/tmp}"
+rootfs_dir="$tmp_base/a20os-alpine-rootfs.$$"
 image_tmp="$OUTPUT.tmp.$$"
 cleanup() { rm -rf "$rootfs_dir" "$image_tmp"; }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$cache_dir" "$package_cache_dir" "$output_dir"
+mkdir -p "$cache_dir" "$package_cache_dir" "$output_dir" "$tmp_base"
 
 # --- Download apk-tools-static (from the same mirror tree) ---
 apk_static_path="$cache_dir/$APK_TOOLS_STATIC"

@@ -54,6 +54,14 @@ mformat -i "$output@@$esp_offset" -F -v A20OS ::
 # mtools maps one image per drive.  Use a temporary drive map so the complete
 # FAT root (including /init, /mksh, /etc and runtime libraries) can share the
 # UEFI system partition with EFI/BOOT/BOOTAA64.EFI.
+# mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
+# recipes, this covers a manual run) so the scratch files land under build/,
+# where `make clean` can remove them.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMPDIR="${TMPDIR:-$REPO_ROOT/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 tmp_mtoolsrc=$(mktemp)
 trap 'rm -f "$tmp_mtoolsrc"' EXIT HUP INT TERM
 cat > "$tmp_mtoolsrc" <<EOF

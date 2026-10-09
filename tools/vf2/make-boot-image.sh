@@ -69,6 +69,13 @@ if [ -n "$EXTRA_IMG" ]; then
     fi
 fi
 
+# mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
+# recipes, this covers a manual run) so the staging tree lands under build/,
+# where `make clean` can remove it.
+TMPDIR="${TMPDIR:-$REPO_ROOT/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 

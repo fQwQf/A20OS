@@ -29,7 +29,10 @@ if [[ ! -f "$GEN/virgl-version.h" ]]; then
     exit 1
 fi
 
-OUT="${TMPDIR:-/tmp}/a20-virglprobe"
+# Build the probe binary inside the checkout (make exports TMPDIR=build/tmp;
+# the fallback covers a manual run) so it lands where `make clean` can remove it.
+OUT="${TMPDIR:-$ROOT/build/tmp}/a20-virglprobe"
+mkdir -p "$(dirname "$OUT")"
 gcc -std=gnu11 -O1 -g -o "$OUT" "$ROOT/tools/virgl-probe/probe-clear-stream.c" \
     -I"$SRC" -I"$SRC/vrend" -I"$GEN" -L"$LIBDIR" -lvirglrenderer -lEGL
 LD_LIBRARY_PATH="$LIBDIR:${LD_LIBRARY_PATH:-}" exec "$OUT"

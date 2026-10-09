@@ -13,7 +13,7 @@ Examples:
     tools/mkrootfs.py --arch riscv64 --world packages/world/devel.world \
         --output build/images/devel-riscv64.img --size-mb 1024
     tools/mkrootfs.py --arch riscv64 --world my.world --format dir \
-        --usermode --allow-untrusted --output /tmp/rootfs
+        --usermode --allow-untrusted --output build/images/rootfs
 
 Privileges: like user/rootfs/alpine/build.sh, composing with correct file
 ownership needs root; the script re-execs the apk/mkfs steps through sudo
@@ -308,6 +308,44 @@ def check_fits_size_mb(staging: Path, size_mb: int) -> None:
         f"stop injecting an overlay the world does not need")
 
 
+def staging_root(repo_root: Path) -> Path:
+    """Where mkrootfs unpacks the world: build/tmp, never the host /tmp.
+
+    tempfile's default is TMPDIR or /tmp, and /tmp is a tmpfs on many hosts:
+    the xfce worlds stage well over a GiB there, apk dies partway through
+    with dozens of `No space left on device` errors, and the repository disk
+    sits mostly empty next to it. Staging under build/ keeps the world on the
+    same filesystem as the output image (so --format dir is a rename, not a
+    cross-device copy) and inside the tree `make clean` removes. TMPDIR is
+    deliberately ignored: build artifacts belong to the build tree.
+    """
+    root = repo_root / "build" / "tmp"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        die(f"cannot create staging root {root}: {exc}")
+    return root
+
+
+def check_staging_space(root: Path, need_mb: int) -> None:
+    """Refuse to start a stage whose filesystem cannot hold it.
+
+    apk reports a full staging filesystem as a wall of `No space left on
+    device` errors and `failed to write database` halfway through the
+    install, naming packages instead of the real cause. Check the budget
+    before creating anything, and say where the space should come from --
+    same idea as check_fits_size_mb below.
+    """
+    try:
+        free_mb = shutil.disk_usage(root).free // (1024 * 1024)
+    except OSError as exc:
+        die(f"cannot measure free space at {root}: {exc}")
+    if free_mb < need_mb:
+        die(f"{root} has only {free_mb} MiB free but this build needs about "
+            f"{need_mb} MiB; free space on that filesystem (staging is fixed "
+            f"under build/ on purpose, so `make clean` can reach it)")
+
+
 def read_world(paths: list[Path]) -> list[str]:
     pkgs: list[str] = []
     for path in paths:
@@ -487,7 +525,25 @@ def main() -> None:
         suffix = "" if args.format == "dir" else ".img"
         output = repo_root / "build" / "images" / f"{stem}-{args.arch}{suffix}"
 
-    staging = Path(tempfile.mkdtemp(prefix="a20os-rootfs-"))
+    root = staging_root(repo_root)
+    # The unpacked world stays within size_mb (check_fits_size_mb enforces
+    # that on content, but only after apk has already filled the disk), and
+    # the ext4 image spends about the same again when it lands on the same
+    # filesystem -- which is the default layout, build/tmp and build/images.
+    need_mb = args.size_mb
+    if args.format != "dir":
+        probe = output.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            same_fs = os.stat(probe).st_dev == os.stat(root).st_dev
+        except OSError:
+            same_fs = True
+        if same_fs:
+            need_mb += args.size_mb + 128
+    check_staging_space(root, need_mb)
+
+    staging = Path(tempfile.mkdtemp(prefix="a20os-rootfs-", dir=root))
     print(f"mkrootfs: staging at {staging}")
     try:
         cache_dir = args.cache_dir or repo_root / "build" / "cache" / "apk" / args.arch

@@ -75,6 +75,9 @@ tools/mkrootfs.py --arch riscv64 \
    `build/cache/apk-tools/`）；
 2. 用真正的 apk 解析器把 world 清单 + 依赖解析到 staging 目录
    （`apk --root <staging> --arch <arch> --initdb add ...`）；
+   staging 固定落在仓库内 `build/tmp/`（与输出镜像同一文件系统，避开塞满的
+   `/tmp` tmpfs；该目录随 `make clean` 一并删除，不会像 `/tmp` 那样留下
+   清不掉的残留），且开始前先核对该文件系统的可用空间，不足则直接报错退出；
 3. 应用 `--overlay` 目录（可选，层层覆盖）；
 4. 写入 `/etc/apk/repositories`（仅远程仓库），让镜像内的系统
    将来也能 `apk add`；

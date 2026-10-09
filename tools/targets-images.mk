@@ -286,12 +286,13 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
+	$(MAKE) -C user clean
 	@$(PYTHON) tools/stamps.py clean \
 		--find-root "$(KERNEL_DIR)" \
 		--rm-rf .kernel-build \
+		--rm-rf build/tmp \
 		$(foreach f,kernel.elf kernel.bin fat32.img ext4.img \
 			kernel-rv kernel-la disk.img disk-la.img,--rm-f $(f))
-	$(MAKE) -C user clean
 
 -include $(DEP_FILES)
 
