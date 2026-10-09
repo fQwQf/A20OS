@@ -2405,5 +2405,11 @@ class TestHostPortGate(unittest.TestCase):
 
         threading.Thread(target=release, daemon=True).start()
         with patch("a20_resource._POLL_SECONDS", 0.05):
-            verdict = preflight(inst, Policy(), self.tmp, wait=True, echo=lambda _m: None)
+            # min_disk_mb=0: this test pins the port gate, but Policy()'s
+            # 2 GiB disk floor is measured on disk_path -- here self.tmp,
+            # which lives under /tmp -- and /tmp is a tmpfs that may sit
+            # near full. wait_timeout is 0 (forever), so a full /tmp would
+            # hang the test on a host condition unrelated to ports.
+            verdict = preflight(inst, Policy(min_disk_mb=0), self.tmp,
+                                wait=True, echo=lambda _m: None)
         self.assertTrue(verdict.ok)
