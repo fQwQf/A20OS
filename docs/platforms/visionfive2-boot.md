@@ -66,7 +66,7 @@ make vf2-image VF2_WORLD=devel
 
 ```sh
 # 1. 固件:克隆并构建 OpenSBI + U-Boot(版本按 commit 锁定,
-#    可用 OPENSBI_REF/UBOOT_REF 覆盖;工作树在 /tmp/vf2-firmware,增量构建)
+#    可用 OPENSBI_REF/UBOOT_REF 覆盖;工作树在 build/vf2-work,增量构建)
 make vf2-firmware
 
 # 2. 内核 + 额外用户态 + 打包:生成 FIT、FAT32 根文件系统和 extra ext4 分区

@@ -30,6 +30,14 @@ if [ -z "$GRUB_MKRESCUE" ]; then
     exit 1
 fi
 
+# mktemp honours TMPDIR; pin it into the checkout (make exports build/tmp for
+# recipes, this covers a manual run) so the staging tree lands under build/,
+# where `make clean` can remove it.  The reassignment then points TMPDIR at this
+# script's own workdir for everything downstream, and the trap removes it.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMPDIR="${TMPDIR:-$REPO_ROOT/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 

@@ -103,6 +103,14 @@ if [[ -z "$VIRGL_LIBDIR" ]]; then
     done
 fi
 
+# The namespace's shadow dir comes from mktemp and has no trap to remove it
+# (the inner shell execs): pin TMPDIR into the checkout -- make exports
+# build/tmp for recipes, this covers a manual run -- so the leftover lands
+# under build/, where `make clean` can remove it.
+TMPDIR="${TMPDIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/build/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 exec unshare -Urm --propagation private bash -c '
   set -euo pipefail
   render_node=$1; card_node=$2; mesa_json=$3; virgl_lib=$4; shift 4
