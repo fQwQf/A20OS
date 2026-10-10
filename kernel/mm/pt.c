@@ -127,14 +127,18 @@ void mm_seg_put(mm_seg_t *s)
          * because a record that reaches zero without one would leak the
          * backing object.
          *
-         * It runs here only when nothing else owes it.  A record whose list
-         * reference has already been dropped is on the deferred queue, and
-         * that queue -- which holds a reference of its own, so this put
-         * cannot be the one that frees it -- is what runs the release, in a
-         * context that is allowed to block. */
+         * It never runs here.  The callers are page faults and index rebuilds
+         * that hold mm->lock -- a spinlock, so preempt is disabled -- plus
+         * mcs_lock sections and interrupts, and the release blocks on I/O
+         * (vfs_close reaches the page cache), which parks the task from inside
+         * a spinlock and trips context_switch_locked's preempt_count check.
+         * The put therefore hands the record to the deferred queue instead,
+         * and mm_vma_flush_deferred() runs the release in a context that may
+         * block.  The queue takes over the reference this put just dropped, so
+         * the record is never left at zero for a later get to resurrect. */
         if (!s->released && s->release) {
-            s->released = 1;
-            s->release(s);
+            mm_seg_release_defer(s);
+            return;
         }
         seg_free(s);
     }
@@ -1918,8 +1922,9 @@ static inline uint8_t status_byte(uint8_t cls, pte_t flags)
  * the remote TLB shootdown, and the rc==1 branch runs with pfa.lock already
  * held, so a frame_put() inside here would deadlock against itself.
  */
-int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
-                      uint8_t cls, paddr_t *old_pa_out)
+static int cursor_install(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
+                           pte_t flags, uint8_t cls, paddr_t *old_pa_out,
+                           int only_absent)
 {
     if (old_pa_out)
         *old_pa_out = 0;
@@ -1933,6 +1938,13 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
         return -ENOMEM;
 
     pte_t old = *pte;
+    /* Demand faults must never replace a page a racing fault installed.
+     * Check and install under the same leaf-node lock, including swaps. */
+    if (only_absent && old) {
+        cursor_leaf_unlock(cur);
+        return -EEXIST;
+    }
+
     pte_t old_pa = 0;
     int had_old = 0;
 #ifdef CONFIG_SWAP
@@ -1959,6 +1971,18 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
         *old_pa_out = old_pa;
     cursor_leaf_unlock(cur);
     return 0;
+}
+
+int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
+                      uint8_t cls, paddr_t *old_pa_out)
+{
+    return cursor_install(cur, addr, pa, flags, cls, old_pa_out, 0);
+}
+
+int mm_cursor_map_if_absent(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
+                            pte_t flags, uint8_t cls)
+{
+    return cursor_install(cur, addr, pa, flags, cls, NULL, 1);
 }
 
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,

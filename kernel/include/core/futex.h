@@ -67,7 +67,7 @@ struct task_t;
 
 /* Core user-futex engine (kernel/ipc/futex.c). */
 int futex_wait(int *uaddr, int expected, void *timeout, uint32_t bitset,
-               int absolute_timeout, int realtime_timeout);
+               int absolute_timeout, int realtime_timeout, int private);
 int futex_wake(int *uaddr, int nr, uint32_t bitset, int private);
 int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
                   int check_cmp, int cmpval, int private);
@@ -79,6 +79,9 @@ int futex_timeout_ticks(void *timeout, int absolute, int realtime,
                         uint64_t *ticks_out);
 int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks,
                      uint32_t bitset);
+
+int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
+                          uint32_t bitset, int private);
 
 void exit_robust_list(struct task_t *t);
 

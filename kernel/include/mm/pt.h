@@ -752,6 +752,11 @@ int mm_cursor_cow_snapshot_pin(mm_cursor_t *cur, vaddr_t addr,
                                uint8_t *cls_out, paddr_t *pa_out);
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
                   uint8_t cls);
+/* Installs only into an empty PTE, under the leaf lock; -EEXIST preserves
+ * the existing mapping and leaves ownership of pa with the caller. */
+int mm_cursor_map_if_absent(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
+                            pte_t flags, uint8_t cls);
+
 
 /* Install a mapping and report the displaced frame in *old_pa_out WITHOUT
  * releasing it.  The COW path must hold the old reference until after the

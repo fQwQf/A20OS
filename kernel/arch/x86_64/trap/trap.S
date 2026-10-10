@@ -422,9 +422,10 @@ syscall_entry_saved:
     xorl  %edx, %edx
     call  x86_64_set_trap_state
 
-    /* The scratch slot is no longer live: the complete user state now resides
-     * on the task's kernel stack.  Permit timer and reschedule IRQs in C. */
-    sti
+    /* Keep IRQs masked until the common handler snapshots the CPU-local
+     * cause.  It enables preemption at arch_syscall_dispatch_enter().  An
+     * earlier STI permits migration between CPU-id lookup and cause load,
+     * making an ordinary syscall appear to be another CPU's page fault. */
     movq  %rsp, %rdi
     call  trap_handler
     jmp   __return_to_user

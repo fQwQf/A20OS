@@ -6,8 +6,7 @@
 /*
  * Current task storage.
  *
- * The kernel still boots one CPU, but current task state is already indexed by
- * CPU id. This keeps the scheduler-facing API stable for SMP bringup.
+ * Each CPU publishes the task currently executing on its kernel stack.
  *
  * PER_CPU_CURRENT_VALIDATION:
  * - CPU 0 sets current during proc_init(); every secondary CPU must set its own
@@ -147,7 +146,16 @@ task_t *proc_current(void)
      */
     return __atomic_load_n(&g_cpu_current[0], __ATOMIC_ACQUIRE);
 #else
-    return g_cpu_current[cpu_current_id()];
+    /* An IRQ may migrate this continuation after the CPU id is read but
+     * before its slot is loaded.  Pin that pair of operations, otherwise
+     * the old CPU's replacement task is returned as our current task. */
+    uint64_t flags = arch_irqs_enabled();
+    arch_local_irq_disable();
+    task_t *result =
+        __atomic_load_n(&g_cpu_current[cpu_current_id()], __ATOMIC_ACQUIRE);
+    if (flags)
+        arch_local_irq_enable();
+    return result;
 #endif
 }
 

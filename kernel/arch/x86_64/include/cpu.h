@@ -133,10 +133,9 @@ static inline void arch_set_task_pointer(void *task) {
 static inline void *arch_get_task_pointer(void) {
     uint32_t low, high;
     __asm__ __volatile__(
-        "movl %[msr], %%ecx\n\t"
         "rdmsr"
         : "=a"(low), "=d"(high)
-        : [msr] "i" (0xC0000101)
+        : "c" (0xC0000101)
     );
     return (void *)((uint64_t)high << 32 | low);
 }

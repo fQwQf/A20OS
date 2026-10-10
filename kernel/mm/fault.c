@@ -69,25 +69,33 @@ uint64_t mm_cow_from_status_count;
  * leaf already covers the address, which a leaf map must not silently ignore.
  */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
-                     uint8_t cls)
+static int fault_install(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                         uint8_t cls, int replace)
 {
     mm_cursor_t cur;
     int r = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur);
     if (r != 0)
         return r < 0 ? r : -EFAULT;
-    r = mm_cursor_map(&cur, page_va, pfn_to_phys(pfn), flags, cls);
+    r = replace ? mm_cursor_map(&cur, page_va, pfn_to_phys(pfn), flags, cls)
+                : mm_cursor_map_if_absent(&cur, page_va, pfn_to_phys(pfn), flags, cls);
     mm_cursor_unlock(&cur);
     return r;
 }
 #else
-static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
-                     uint8_t cls)
+static int fault_install(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                         uint8_t cls, int replace)
 {
     (void)cls;
+    (void)replace;
     return pt_map(mm->pgdir, page_va, pfn_to_phys(pfn), flags);
 }
 #endif
+
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    return fault_install(mm, page_va, pfn, flags, cls, 0);
+}
 
 /*
  * Install a whole fault-around window [start, start + n*PAGE_SIZE), capped at
@@ -103,20 +111,14 @@ static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
  *
  * Returns the number of pages installed, or a negative errno if the range
  * could not be locked at all.  A short count is reported rather than assumed,
- * because the caller releases the frames of the pages this did not install and
- * must not release one it did.
+ * and consumed PFN slots are cleared individually; a racing present page
+ * leaves its candidate owned by the caller.
  *
- * This is the arm32 case in particular: kernel/arch/arm32/mm/pgtbl.c supplies a
- * short-descriptor backend with no cursor and no per-PTE status sidecar, and
- * Makefile:866-869 withholds ARCH_HAS_PGTABLE_OPS from it, so
- * kernel/include/mm/pt.h never declares mm_addrspace_lock() there.  Calling it
- * from the fault path is what broke check-arm32-bringup; this hook is the
- * supported way in instead.
  */
 #if !defined(CONFIG_NOMMU)
 #if defined(ARCH_HAS_PGTABLE_OPS)
 static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
-                            const pfn_t *pfns, size_t n, pte_t flags)
+                            pfn_t *pfns, size_t n, pte_t flags)
 {
     mm_cursor_t cur;
     int r = mm_addrspace_lock(mm, start, end, &cur);
@@ -127,9 +129,15 @@ static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         vaddr_t va = start + (vaddr_t)i * PAGE_SIZE;
         if (va >= end)
             break;
-        if (mm_cursor_map(&cur, va, pfn_to_phys(pfns[i]), flags,
-                          MM_ST_ANON_MAPPED) < 0)
+        if (pfns[i] == PFN_NONE)
+            continue;
+        int r = mm_cursor_map_if_absent(&cur, va, pfn_to_phys(pfns[i]),
+                                        flags, MM_ST_ANON_MAPPED);
+        if (r == -EEXIST)
+            continue;
+        if (r < 0)
             break;
+        pfns[i] = PFN_NONE; /* Transfer only this slot's frame. */
         mapped++;
     }
     mm_cursor_unlock(&cur);
@@ -137,15 +145,21 @@ static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
 }
 #else
 static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
-                            const pfn_t *pfns, size_t n, pte_t flags)
+                            pfn_t *pfns, size_t n, pte_t flags)
 {
     int mapped = 0;
     for (size_t i = 0; i < n; i++) {
         vaddr_t va = start + (vaddr_t)i * PAGE_SIZE;
         if (va >= end)
             break;
+        if (pfns[i] == PFN_NONE)
+            continue;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+        if (pte && *pte)
+            continue;
         if (pt_map(mm->pgdir, va, pfn_to_phys(pfns[i]), flags) < 0)
             break;
+        pfns[i] = PFN_NONE;
         mapped++;
     }
     return mapped;
@@ -552,8 +566,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             return -1;
         }
 
-        int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
-                          MM_ST_ANON_MAPPED);
+        /* Swap-in replaces the non-present swap entry; demand maps must
+         * instead refuse to overwrite a racing installed leaf. */
+        int r = fault_install(t->mm, page_va, pfn, vma->pte_flags,
+                              MM_ST_ANON_MAPPED, 1);
         if (r < 0) {
             cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
@@ -616,7 +632,11 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
             int r = fault_map(t->mm, page_va, pfn, mm_user_stack_pte_flags(),
                               MM_ST_ANON_MAPPED);
-            if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
+            if (r < 0) {
+                cg_mem_uncharge(t->cgroup, 1);
+                frame_put(pfn);
+                return r == -EEXIST ? MM_FAULT_RETRY : r;
+            }
 
             if (page_va < t->mm->stack_bottom)
                 t->mm->stack_bottom = page_va;
@@ -644,7 +664,11 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         int r = fault_map(t->mm, page_va, pfn, mm_user_brk_pte_flags(),
                           MM_ST_ANON_MAPPED);
-        if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
+        if (r < 0) {
+            cg_mem_uncharge(t->cgroup, 1);
+            frame_put(pfn);
+            return r == -EEXIST ? MM_FAULT_RETRY : r;
+        }
 
         mm_rss_add(t->mm, 1);
         a20_perf_count(A20_PERF_MM_ANON_FAULTS);
@@ -655,7 +679,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
     mm_seg_t *vma = mm_seg_find(t->mm, page_va);
     if (vma) {
 
-        if (pte && (*pte & PTE_V)) return -1;
+        if (pte && (*pte & PTE_V)) return MM_FAULT_RETRY;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
         /* Shadow check: would the segment table have answered this fault the
@@ -839,7 +863,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 spin_lock(&t->mm->lock);
                 pte_t *cp = pt_lookup_leaf(t->mm->pgdir, page_va,
                                            NULL, NULL, NULL);
-                if (prepared > 0 && cp && (*cp & PTE_V)) {
+                if (cp && (*cp & PTE_V)) {
                     for (size_t i = 0; i < prepared; i++) {
                         cg_mem_uncharge(t->cgroup, 1);
                         frame_put(pfns[i]);
@@ -847,9 +871,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                     vma_put(t->mm, vma);
                     return 0;
                 }
-                if (prepared == 0) {
-                    vma_put(t->mm, vma);
-                } else if (mm_seg_find(t->mm, page_va) != vma) {
+                if (mm_seg_find(t->mm, page_va) != vma) {
                     for (size_t i = 0; i < prepared; i++) {
                         cg_mem_uncharge(t->cgroup, 1);
                         frame_put(pfns[i]);
@@ -872,23 +894,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                      * it is the failure mode this window was suspected of
                      * causing, so the span is re-clamped here, under the lock,
                      * to the VMA's current end; the frames prepared beyond it
-                     * are released by the short count fault_map_window()
+                     * are released using the slots fault_map_window()
                      * reports back. */
                     if (end > vma->end)
                         end = vma->end;
-                    size_t keep = 0;
-                    for (size_t i = 0; i < prepared; i++) {
-                        uint64_t va = page_va + (uint64_t)i * PAGE_SIZE;
-                        pte_t *p = pt_lookup_leaf(t->mm->pgdir, va,
-                                                  NULL, NULL, NULL);
-                        if (p && (*p & PTE_V)) {
-                            cg_mem_uncharge(t->cgroup, 1);
-                            frame_put(pfns[i]);
-                            continue;
-                        }
-                        pfns[keep++] = pfns[i];
-                    }
-                    prepared = keep;
                 }
             }
 
@@ -903,7 +912,9 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                         map_flags);
             if (wmap > 0)
                 mapped = (size_t)wmap;
-            for (size_t i = mapped; i < prepared; i++) {
+            for (size_t i = 0; i < prepared; i++) {
+                if (pfns[i] == PFN_NONE)
+                    continue;
                 cg_mem_uncharge(t->cgroup, 1);
                 frame_put(pfns[i]);
             }
@@ -929,7 +940,11 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
                           MM_ST_ANON_MAPPED);
-        if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
+        if (r < 0) {
+            cg_mem_uncharge(t->cgroup, 1);
+            frame_put(pfn);
+            return r == -EEXIST ? MM_FAULT_RETRY : r;
+        }
 
         mm_rss_add(t->mm, 1);
         arch_tlb_flush_page_local(stval);
@@ -1039,26 +1054,12 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
     for (size_t i = 0; i < PAGE_CACHE_FAULT_AROUND_PAGES; i++)
         candidates[i] = PFN_NONE;
 
-    /* Read-only MAP_PRIVATE leaves can use the same canonical cache frame as
-     * MAP_SHARED.  A future mprotect(PROT_WRITE) marks such a leaf COW before
-     * exposing write permission, so no eager anonymous copy is required. */
-    /* Direct executable mappings are enabled for filesystems that can fill a
-     * complete fault-around window.  That is the hot ext4 parallel-build path.
-     * Single-page backends such as the embedded FAT32 development image keep
-     * executable mappings on anonymous copies, so an unrelated late text
-     * fault cannot perturb page-cache pin accounting inside a running test.
-     * LoongArch64 and x86_64 additionally keep ALL executable private leaves
-     * on the anonymous-copy path: direct exec leaves can lose text PTEs under
-     * parallel loader/fault lifetimes there (dynamic-loader SIGSEGVs). */
-    int direct_private = !shared && fault_around && !executable;
-    /* Backends with an explicit readpages hook are the only ones allowed to hand
-     * a private executable leaf a shared page-cache frame, and only where the
-     * architecture tolerates retaining one.  This used to be a CONFIG_X86_64 test
-     * while the comment above claimed LoongArch64 behaved the same way; it now
-     * does, and on LoongArch64 the distinction is unobservable anyway because
-     * ARCH_FAULT_AROUND_UNSAFE already forces fault_around to 0. */
-    if (!ARCH_EXE_LEAF_RETAIN_UNSAFE && vf->vnode->ops->readpages)
-        direct_private = 1;
+    /* Private file leaves may retain a canonical cache frame when the
+     * backend supports batched fills.  The mapping owns its cache pin and
+     * stays COW, so a later store cannot modify the cache or another mm.
+     * Single-page backends keep the existing anonymous-copy policy. */
+    int direct_private = !shared &&
+        ((fault_around && !executable) || vf->vnode->ops->readpages);
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
@@ -1411,7 +1412,7 @@ static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
         goto decline;
     }
     memset(pfn_to_virt(np), 0, PAGE_SIZE);
-    if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np), allow,
+    if (mm_cursor_map_if_absent(&qcur, page_va, pfn_to_phys(np), allow,
                       MM_ST_ANON_MAPPED) != 0) {
         cg_mem_uncharge(t->cgroup, 1);
         frame_put(np);
@@ -1489,7 +1490,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
 #endif
     if (pte && (*pte & PTE_V)) {
         spin_unlock(&mm->lock);
-        return -1;
+        return handle_present_page_fault(t, stval, access);
     }
 
 
@@ -1577,16 +1578,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (seg_ptef & PTE_X) != 0;
-#ifdef CONFIG_LOONGARCH64
-        /* LoongArch64 cannot yet retain private page-cache leaves safely
-         * across the parallel loader/fault lifetime.  Keep private file pages
-         * on the proven single-page copy path; direct executable leaves lose
-         * text PTEs, while direct read-only leaves corrupt dynamic symbols in
-         * librustc_driver under parallel compile load. */
-        int fault_around = 0;
-#else
         int fault_around = !shared && !(seg_ptef & PTE_W);
-#endif
         spin_unlock(&mm->lock);
         vfile_t *vf = seg_vf;
         if (!vf || !vf->vnode) {
@@ -1624,16 +1616,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (vma->pte_flags & PTE_X) != 0;
-#if ARCH_FAULT_AROUND_UNSAFE
-        /* This architecture cannot yet retain private page-cache leaves safely
-         * across the parallel loader/fault lifetime.  Keep private file pages
-         * on the proven single-page copy path; direct executable leaves lose
-         * text PTEs, while direct read-only leaves corrupt dynamic symbols in
-         * librustc_driver under parallel compile load. */
-        int fault_around = 0;
-#else
         int fault_around = !shared && !(vma->pte_flags & PTE_W);
-#endif
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
         vfile_t *vf = vma->file;
