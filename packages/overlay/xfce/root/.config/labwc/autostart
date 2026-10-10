@@ -1,1 +1,4 @@
+# xfdesktop currently leaves its Wayland backdrop black.  Create the
+# background surface after its desktop surface has settled.
+sh -c 'i=0; while [ "$i" -lt 120 ] && ! pgrep -x xfdesktop >/dev/null 2>&1; do sleep 0.5; i=$((i + 1)); done; sleep 20; exec swaybg -i /usr/share/backgrounds/xfce/xfce-flower.svg -m fill' &
 /usr/lib/a20/start-desktop-components.sh

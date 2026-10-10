@@ -73,7 +73,8 @@
 无本地显示器时可以使用 QEMU 的 VNC 显示与 QMP `screendump`、输入事件，显示
 后端变化需要写入验收记录。不要通过删网卡、减少 CPU 数或替换桌面组件来宣称原实例
 通过。已知故障、修复依据与实际验收记录见
-[发行版排查笔记](distro/known-issues.md)。
+[发行版排查笔记](distro/known-issues.md)。x86_64 的缺页/futex/PTY 回归与
+浏览器测试步骤见 [XFCE x86_64 验证记录](distro/xfce-x86_64-validation.md)。
 
 ### 宿主资源预检
 
