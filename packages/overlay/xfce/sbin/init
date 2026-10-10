@@ -72,15 +72,16 @@ done
 
 # Device enumeration: eudev persists ID_INPUT_* for the input nodes so
 # libinput's udev backend enumerates /dev/input/event*.
+
 if [ -x /sbin/udevd ] || [ -x /usr/sbin/udevd ]; then
-    udevd 2>/dev/null &
+    udevd &
     i=0
     while [ ! -e /run/udev/control ] && [ "$i" -lt 50 ]; do
         sleep 0.1
         i=$((i + 1))
     done
-    udevadm trigger --action=add 2>/dev/null || true
-    timeout 5 udevadm settle 2>/dev/null || true
+    udevadm trigger --action=add
+    timeout 5 udevadm settle || true
 fi
 
 if [ -x /usr/lib/polkit-1/polkitd ]; then

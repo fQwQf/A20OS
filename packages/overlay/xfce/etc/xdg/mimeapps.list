@@ -1,4 +1,7 @@
 [Default Applications]
+text/html=netsurf.desktop
+x-scheme-handler/http=netsurf.desktop
+x-scheme-handler/https=netsurf.desktop
 video/mp4=ffplay.desktop
 video/x-matroska=ffplay.desktop
 video/webm=ffplay.desktop
