@@ -1,6 +1,8 @@
 #ifndef _ARCH_AARCH64_H
 #define _ARCH_AARCH64_H
 
+#define ARCH_NAME "aarch64"
+
 #define ARCH_HAS_VDSO 1
 
 #include "platform.h"

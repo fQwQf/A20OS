@@ -1,4 +1,3 @@
-#ifdef CONFIG_AARCH64
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
@@ -167,7 +166,10 @@ static void aa64_enumerate_devices(void) {
     virtio_mmio_enumerate(VIRTIO_BASE, 8, 16);
 }
 
+void board_register_module_devices(void);
+
 static const board_config_t qemu_virt_aa64 = {
+    .register_module_devices = board_register_module_devices,
     .name              = "qemu-virt-aa64",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = PHYS_MEMORY_END,
@@ -181,5 +183,3 @@ static const board_config_t qemu_virt_aa64 = {
 };
 
 const board_config_t *const current_board = &qemu_virt_aa64;
-
-#endif /* CONFIG_AARCH64 */

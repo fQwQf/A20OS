@@ -14,8 +14,7 @@
  *                     device; the core lets only read-only kernel probes
  *                     bind user-owned devices).
  *
- * Board-owned devices that modules or user services bind to are registered
- * here as unified platform devices.
+ * Boards register module-owned platform devices through their board callback.
  */
 
 #include "core/types.h"
@@ -110,114 +109,6 @@ int driver_descriptor_read(int fd, a20_driver_descriptor_t *out)
 /* ------------------------------------------------------------------ */
 /*  Module-owned device registration                                  */
 /* ------------------------------------------------------------------ */
-
-/* Platform devices that optional kernel modules or user services bind
- * to.  The driver core uses user_owned to enforce one owner per device:
- * only read-only kernel probes bind a user-owned device. */
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || \
-    defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) || \
-    defined(CONFIG_BOARD_QEMU_VIRT_LOONGARCH64)
-static platform_device_t g_rtc_pdev;
-#endif
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
-static platform_device_t g_blk_pdev;
-#endif
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || \
-    defined(CONFIG_BOARD_QEMU_VIRT_AARCH64)
-static platform_device_t g_vinput_pdev;
-#endif
-#if defined(CONFIG_X86_64)
-static platform_device_t g_ps2_pdev;
-static platform_device_t g_tpm_pdev;
-#endif
-
-static void manager_register_board_devices(void)
-{
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || \
-    defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) || \
-    defined(CONFIG_BOARD_QEMU_VIRT_LOONGARCH64)
-    /* goldfish RTC (dual-placement: kernel probe module + user rtcd). */
-    static resource_t rtc_res[] = {
-        { RES_MMIO, 0x101000, 0x1010FF, IORESOURCE_MMIO_32BIT, "rtc" },
-    };
-    memset(&g_rtc_pdev, 0, sizeof(g_rtc_pdev));
-    g_rtc_pdev.dev.name = "goldfish-rtc";
-    g_rtc_pdev.dev.res = rtc_res;
-    g_rtc_pdev.dev.res_count = 1;
-    g_rtc_pdev.dev.user_owned = 1;
-    g_rtc_pdev.id.vendor = 0x101000;
-    g_rtc_pdev.id.device = 0;
-    g_rtc_pdev.id.subvendor = VENDOR_ANY;
-    g_rtc_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_rtc_pdev);
-#endif
-
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
-    /* User-reserved virtio-blk slot 3 (user service ubd). */
-    static resource_t blk_res[] = {
-        { RES_MMIO, 0x10004000, 0x10004FFF, IORESOURCE_MMIO_32BIT, "ubd" },
-    };
-    memset(&g_blk_pdev, 0, sizeof(g_blk_pdev));
-    g_blk_pdev.dev.name = "virtio-blk-user";
-    g_blk_pdev.dev.res = blk_res;
-    g_blk_pdev.dev.res_count = 1;
-    g_blk_pdev.dev.user_owned = 1;
-    g_blk_pdev.id.vendor = 0x10004000;
-    g_blk_pdev.id.device = 0;
-    g_blk_pdev.id.subvendor = VENDOR_ANY;
-    g_blk_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_blk_pdev);
-#endif
-
-#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
-    /* Dual-placement virtio-input slot 5 (kernel probe + user uinputd). */
-    static resource_t vinput_res[] = {
-        { RES_MMIO, 0x10006000, 0x10006FFF, IORESOURCE_MMIO_32BIT, "vinput" },
-    };
-    memset(&g_vinput_pdev, 0, sizeof(g_vinput_pdev));
-    g_vinput_pdev.dev.name = "virtio-input-slot5";
-    g_vinput_pdev.dev.res = vinput_res;
-    g_vinput_pdev.dev.res_count = 1;
-    g_vinput_pdev.dev.user_owned = 1;
-    g_vinput_pdev.id.vendor = 0x10006000;
-    g_vinput_pdev.id.device = 0;
-    g_vinput_pdev.id.subvendor = VENDOR_ANY;
-    g_vinput_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_vinput_pdev);
-#elif defined(CONFIG_BOARD_QEMU_VIRT_AARCH64)
-    static resource_t vinput_res[] = {
-        { RES_MMIO, 0x0A000A00, 0x0A000BFF, IORESOURCE_MMIO_32BIT, "vinput" },
-    };
-    memset(&g_vinput_pdev, 0, sizeof(g_vinput_pdev));
-    g_vinput_pdev.dev.name = "virtio-input-slot5";
-    g_vinput_pdev.dev.res = vinput_res;
-    g_vinput_pdev.dev.res_count = 1;
-    g_vinput_pdev.dev.user_owned = 1;
-    g_vinput_pdev.id.vendor = 0x0A000A00;
-    g_vinput_pdev.id.device = 0;
-    g_vinput_pdev.id.subvendor = VENDOR_ANY;
-    g_vinput_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_vinput_pdev);
-#endif
-
-#if defined(CONFIG_X86_64)
-    memset(&g_ps2_pdev, 0, sizeof(g_ps2_pdev));
-    g_ps2_pdev.dev.name = "ps2";
-    g_ps2_pdev.id.vendor = 0x50533200;
-    g_ps2_pdev.id.device = 0;
-    g_ps2_pdev.id.subvendor = VENDOR_ANY;
-    g_ps2_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_ps2_pdev);
-
-    memset(&g_tpm_pdev, 0, sizeof(g_tpm_pdev));
-    g_tpm_pdev.dev.name = "tpm";
-    g_tpm_pdev.id.vendor = 0x54504D00;
-    g_tpm_pdev.id.device = 0;
-    g_tpm_pdev.id.subvendor = VENDOR_ANY;
-    g_tpm_pdev.id.subdevice = DEVICE_ANY;
-    platform_device_register(&g_tpm_pdev);
-#endif
-}
 
 /* ------------------------------------------------------------------ */
 /*  User-service activation                                           */
@@ -516,7 +407,8 @@ void driver_manager_early_init(void)
 void driver_manager_init(void)
 {
     kinfo("[DRIVERMGR] runtime driver manager init\n");
-    manager_register_board_devices();
+    if (current_board && current_board->register_module_devices)
+        current_board->register_module_devices();
     manager_scan_store(DRIVER_STORE_RUNTIME, 0, 1);
     drvmod_init_all();
     kinfo("[DRIVERMGR] runtime driver manager init done\n");

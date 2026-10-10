@@ -236,7 +236,10 @@ static void x86_64_enumerate_devices(void) {
     (void)platform_device_register(&cmos_rtc);
 }
 
+void board_register_module_devices(void);
+
 static const board_config_t qemu_virt_x86_64 = {
+    .register_module_devices = board_register_module_devices,
     .name              = "qemu-virt-x86_64",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = PHYS_MEMORY_END,

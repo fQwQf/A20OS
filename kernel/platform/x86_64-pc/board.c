@@ -240,7 +240,10 @@ static void pc_enumerate_devices(void) {
     (void)platform_device_register(&cmos_rtc);
 }
 
+void board_register_module_devices(void);
+
 static const board_config_t x86_64_pc = {
+    .register_module_devices = board_register_module_devices,
     .name              = "x86_64-pc",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = PHYS_MEMORY_END,

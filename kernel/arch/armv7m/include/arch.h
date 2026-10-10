@@ -1,6 +1,8 @@
 #ifndef _ARCH_ARMV7M_H
 #define _ARCH_ARMV7M_H
 
+#define ARCH_NAME "armv7m"
+
 #include "platform.h"
 #include "console.h"
 #include "cpu.h"

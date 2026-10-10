@@ -20,6 +20,7 @@
  * hwapi line limit.
  */
 
+#include "drvmod/export.h"
 #include "drvmod/drvmod.h"
 
 #include "core/bootargs.h"
@@ -299,16 +300,11 @@ void drv_driver_probe_all(void)
 
 /* ---- export table (the loader's symbol whitelist) ---- */
 
-struct drv_export {
-    const char *name;
-    void *addr;
-};
+/* Ports without module-specific symbols need no additional exports. */
+__attribute__((weak)) const struct drv_export arch_drv_export_table[] = {};
+__attribute__((weak)) const unsigned arch_drv_export_count = 0;
 
-/* platform_bus: shared platform device bus the modules bind against. */
 extern bus_type_t platform_bus;
-#if defined(CONFIG_X86_64)
-extern unsigned x86_64_apic_to_cpu(unsigned apic_id);
-#endif
 
 const struct drv_export drv_export_table[] = {
     { "strncpy",             strncpy },
@@ -418,11 +414,6 @@ const struct drv_export drv_export_table[] = {
     { "mutex_lock",          (void *)mutex_lock },
     { "mutex_unlock",        (void *)mutex_unlock },
     { "timer_get_ticks",     (void *)timer_get_ticks },
-#ifdef CONFIG_RISCV64
-    /* riscv64 resolves TICKS_PER_SEC at runtime (DTB timebase), so modules
-     * that expand MS_TO_TICKS/US_TO_TICKS reference this symbol. */
-    { "riscv64_timer_freq",  (void *)riscv64_timer_freq },
-#endif
     { "clock_ticks_per_sec", (void *)clock_ticks_per_sec },
     /* The block progress bridge is gated on an aggregated pending bit; a
      * deployed virtio-blk module ORs it when it publishes a request. */
@@ -458,15 +449,8 @@ const struct drv_export drv_export_table[] = {
     { "input_mux_wake",      (void *)input_mux_wake },
     /* virtio PCI transport setup (vinput module PCI path) */
     { "pci_virtio_transport_init", (void *)pci_virtio_transport_init },
-#if defined(CONFIG_X86_64)
-    { "firmware_acpi_tpm2",  (void *)firmware_acpi_tpm2 },
-    /* x86_64 wall clock: the CMOS RTC module hands the epoch it read to the
-     * kernel here, which is what replaces the build-time seed taken by
-     * timekeeping_init().  Only x86_64 declares these symbols, so the entry
-     * is arch-gated with them. */
     { "timekeeping_wallclock_set_hw", (void *)timekeeping_wallclock_set_hw },
     { "timekeeping_wallclock_from_hw", (void *)timekeeping_wallclock_from_hw },
-#endif
     /* lock / scheduler primitives used by inline spinlock helpers
      * (arch_irqs_enabled & friends are static inline and compile into
      * the module itself; only the extern calls below are exported) */
@@ -488,15 +472,8 @@ const struct drv_export drv_export_table[] = {
      * exported or the loader rejects the module with an unresolved symbol. */
     { "kallsyms_lookup",     (void *)kallsyms_lookup },
     { "kallsyms_print",      (void *)kallsyms_print },
-#if defined(CONFIG_LOONGARCH64)
-    { "arch_ram_range_count", (void *)arch_ram_range_count },
-    { "arch_ram_range",       (void *)arch_ram_range },
-#endif
     { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
     { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
-#if defined(CONFIG_X86_64)
-    { "x86_64_apic_to_cpu",  (void *)x86_64_apic_to_cpu },
-#endif
     /* hwapi passthroughs used by module class drivers */
     { "dma_alloc_coherent",  (void *)dma_alloc_coherent },
     { "dma_free_coherent",   (void *)dma_free_coherent },

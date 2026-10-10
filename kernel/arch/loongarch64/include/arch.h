@@ -1,6 +1,8 @@
 #ifndef _ARCH_LOONGARCH64_H
 #define _ARCH_LOONGARCH64_H
 
+#define ARCH_NAME "loongarch64"
+
 #include "platform.h"
 #include "console.h"
 #include "cpu.h"
@@ -38,12 +40,6 @@ static inline uintptr_t loongarch64_elf_hwcap(void)
 #endif
 
 
-/* private executable leaves lose text PTEs, and read-only
- * leaves corrupt librustc_driver symbols under parallel compile load. */
-#define ARCH_EXE_LEAF_RETAIN_UNSAFE 1
 
-/* a mapped-but-not-yet-uptodate fault-around window corrupts
- * dynamic symbols in a shared object. */
-#define ARCH_FAULT_AROUND_UNSAFE 1
 
 #endif

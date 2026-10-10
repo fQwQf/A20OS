@@ -24,6 +24,11 @@ __attribute__((weak)) int arch_hyp_guest_trap(trap_context_t *ctx)
     return 0;
 }
 
+__attribute__((weak)) void arch_user_breakpoint(trap_context_t *ctx)
+{
+    (void)ctx;
+}
+
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
 __attribute__((weak)) void arch_dump_trap_extra_context(const trap_context_t *ctx)
 {
@@ -69,75 +74,6 @@ static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frame
         kerr("\n");
     }
 }
-
-#if defined(__x86_64__)
-/*
- * Prints refs so the caller can tell a shared (refs > 1, i.e. writes go through
- * COW) page from a private one; the surrounding zeros-vs-one-zero pattern then
- * separates a never-initialised object from a single lost write.
- */
-static void dump_user_object(task_t *task, vaddr_t va, const char *tag) {
-    if (!task || !task->mm || !task->mm->pgdir || !va)
-        return;
-
-    uintptr_t pte_slot = 0;
-    pte_t pte_value = 0;
-    mm_debug_pte_value(task->mm->pgdir, va, &pte_slot, &pte_value);
-    mm_leaf_info_t leaf;
-    if (!mm_query_leaf(task->mm->pgdir, va, &leaf)) {
-        kerr("  [%s] va=0x%lx pte=0x%lx UNMAPPED\n", tag,
-             (unsigned long)va, (unsigned long)pte_value);
-        return;
-    }
-    paddr_t page_pa = leaf.pa & ~(paddr_t)(PAGE_SIZE - 1);
-    pfn_t pfn = phys_to_pfn(page_pa);
-    if (!pfn_valid(pfn))
-        return;
-
-    uint16_t refs = 0;
-    uint8_t frame_flags = 0;
-    uint64_t flags = spin_lock_irqsave(&pfa.lock);
-    refs = pfa.meta[pfn].refcount;
-    frame_flags = pfa.meta[pfn].flags;
-    spin_unlock_irqrestore(&pfa.lock, flags);
-
-    vaddr_t window_base = va & ~(vaddr_t)0x3f;
-    size_t spare = PAGE_SIZE - (size_t)(window_base & (PAGE_SIZE - 1));
-    size_t words = spare / sizeof(uint64_t);
-    if (words > 48)
-        words = 48;
-
-    const uint64_t *w = (const uint64_t *)((const char *)pfn_to_virt(pfn) +
-                                           (window_base & (PAGE_SIZE - 1)));
-    kerr("  [%s] va=0x%lx base=0x%lx pfn=%lu refs=%u fflags=0x%x\n",
-         tag, (unsigned long)va, (unsigned long)window_base,
-         (unsigned long)pfn, refs, frame_flags);
-    for (size_t i = 0; i < words; i++) {
-        vaddr_t a = window_base + (vaddr_t)(8 * i);
-        kerr("    +0x%03lx %016lx%s\n", (unsigned long)(a & (PAGE_SIZE - 1)),
-             (unsigned long)w[i],
-             (a <= va && va < a + 8) ? "  <==" : "");
-    }
-
-    uint64_t zero_blocks = 0;
-    int nonzero_bytes = 0;
-    const char *page = (const char *)pfn_to_virt(pfn);
-    for (size_t b = 0; b < PAGE_SIZE / 64; b++) {
-        const uint64_t *q = (const uint64_t *)(page + b * 64);
-        int all_zero = 1;
-        for (int j = 0; j < 8; j++) {
-            if (q[j]) {
-                all_zero = 0;
-                nonzero_bytes += 8;
-            }
-        }
-        if (all_zero)
-            zero_blocks |= (uint64_t)1 << b;
-    }
-    kerr("  [%s] PAGE-ZEROMAP 64B-blocks all-zero=0x%016lx nonzero_bytes=%d/%d\n",
-         tag, (unsigned long)zero_blocks, nonzero_bytes, (int)PAGE_SIZE);
-}
-#endif
 
 static void dump_fault_pte(task_t *task, vaddr_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
@@ -444,27 +380,8 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             }
             if (user_sync_signal_is_handled(cur, SIGSEGV)) {
-                /* A process that installed its own SIGSEGV handler -- the JVM
-                 * does, to write hs_err -- used to return here with nothing
-                 * printed, so every MC crash reached the log undecoded while
-                 * the unhandled-fault path below dumped page_words/va_words/
-                 * frame refs.  Deliver exactly as before, but diagnose first.
-                 * dump_fault_pte() is generic; the register-name and
-                 * user-object dumps below read x86_64-only context (rdi is
-                 * the load's base register on this ABI, and both helpers are
-                 * x86_64-only), so other arches take just the PTE dumps. */
                 dump_fault_pte(cur, stval);
                 dump_fault_pte(cur, sepc);
-#if defined(__x86_64__)
-                /* A load fault names its base register, not its source.  The
-                 * failing walk is musl's `mov -0x10(%rdi),%rax` followed by
-                 * `cmp %rcx,0x10(%rax)`, so rax is the null and rdi is the chunk
-                 * whose metadata is broken -- and no FAULT-* dump below reaches
-                 * here, because that block sits past this early return. */
-                vaddr_t rdi = (vaddr_t)arch_trap_ctx_reg(ctx, 5);
-                if (rdi && rdi != stval)
-                    dump_user_object(cur, rdi, "FAULT-DI");
-#endif
                 if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                     return;
             }
@@ -498,13 +415,6 @@ static void user_trap_handler(trap_context_t *ctx) {
                      (unsigned long)TRAP_CTX_FP(ctx));
                 dump_fault_pte(cur, TRAP_CTX_FP(ctx));
             }
-#if defined(__x86_64__)
-            {
-                vaddr_t rbx = (vaddr_t)arch_trap_ctx_reg(ctx, 1);
-                if (rbx && rbx != stval)
-                    dump_user_object(cur, rbx, "FAULT-BX");
-            }
-#endif
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV);
@@ -546,10 +456,11 @@ static void user_trap_handler(trap_context_t *ctx) {
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval, (unsigned long)code);
             if (have_user_insn)
                 kerr("  insn@sepc=0x%08x\n", user_insn);
+            dump_fault_pte(cur, sepc);
             dump_trap_context(ctx);
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
-            proc_exit_group(-SIGSEGV); 
+            proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_ILLEGAL_INSN) {
             printf("SIGILL: pid=%d sepc=0x%lx stval=0x%lx",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
@@ -584,12 +495,7 @@ static void user_trap_handler(trap_context_t *ctx) {
         } else if (code == CAUSE_BREAKPOINT) {
             printf("SIGTRAP: pid=%d sepc=0x%lx stval=0x%lx\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
-#if defined(CONFIG_X86_64)
-            /* Single-step #DB (vec 1 maps here): clear TF in the saved
-             * context so the step is one-shot; the traced stop reports the
-             * SIGTRAP and the resume continues without re-trapping. */
-            ctx->rflags &= ~(1UL << 8);
-#endif
+            arch_user_breakpoint(ctx);
             if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP))
                 return;
             proc_exit_group(-SIGTRAP);

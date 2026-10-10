@@ -2,6 +2,8 @@
 #define _ARCH_RISCV32_H
 
 #define ARCH_NAME "riscv32"
+
+#define ARCH_NAME "riscv32"
 #ifndef PAGE_SHIFT
 #define PAGE_SHIFT 12
 #endif

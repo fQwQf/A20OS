@@ -1,4 +1,3 @@
-#ifdef CONFIG_AARCH64
 
 #include "core/defs.h"
 #include "core/stdio.h"
@@ -146,5 +145,3 @@ void vbox_serial_console(void)
         }
     }
 }
-
-#endif /* CONFIG_AARCH64 */

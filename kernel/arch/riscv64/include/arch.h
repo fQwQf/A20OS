@@ -1,6 +1,8 @@
 #ifndef _ARCH_RISCV64_H
 #define _ARCH_RISCV64_H
 
+#define ARCH_NAME "riscv64"
+
 #define ARCH_HAS_VDSO 1
 
 #include "platform.h"

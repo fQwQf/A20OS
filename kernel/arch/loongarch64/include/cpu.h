@@ -27,6 +27,13 @@ static inline void arch_wfi(void) { __asm__ __volatile__("idle 0"); }
 #define ARCH_HAS_SAFE_IDLE_WAIT 1
 void arch_idle_wait(void);
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
+
+static inline uint32_t arch_read_cpu_config(unsigned index)
+{
+    uint32_t value;
+    __asm__ __volatile__("cpucfg %0, %1" : "=r"(value) : "r"(index));
+    return value;
+}
 static inline void arch_fence_i(void) { 
     __asm__ __volatile__(
         "dbar 0\n\t"

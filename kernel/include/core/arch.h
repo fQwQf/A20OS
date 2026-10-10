@@ -27,27 +27,7 @@
  *   firmware.h   — shutdown/reboot/console/timer firmware calls (SBI or equiv)
  */
 
-#if defined(CONFIG_RISCV64)
-# include "arch/riscv64/include/arch.h"
-#elif defined(CONFIG_RISCV32)
-# include "arch/riscv32/include/arch.h"
-#elif defined(CONFIG_LOONGARCH64)
-# include "arch/loongarch64/include/arch.h"
-#elif defined(CONFIG_LOONGARCH32)
-# include "arch/loongarch32/include/arch.h"
-#elif defined(CONFIG_AARCH64)
-# include "arch/aarch64/include/arch.h"
-#elif defined(CONFIG_ARM32)
-# include "arch/arm32/include/arch.h"
-#elif defined(CONFIG_ARMV7M)
-# include "arch/armv7m/include/arch.h"
-#elif defined(CONFIG_PPC64LE)
-# include "arch/ppc64le/include/arch.h"
-#elif defined(CONFIG_X86_64)
-# include "arch/x86_64/include/arch.h"
-#else
-# error "No architecture defined. Set ARCH=riscv64, ARCH=riscv32, ARCH=loongarch64, ARCH=loongarch32, ARCH=aarch64, ARCH=arm32, ARCH=armv7m, ARCH=ppc64le or ARCH=x86_64."
-#endif
+#include <arch.h>
 
 /* Architecture-owned initialization hooks. The generic definitions provide
  * conservative fallbacks when an architecture does not override them.
@@ -203,25 +183,6 @@ static inline int arch_pt_level_entries(int level)
  */
 
 /*
- * The arch cannot reliably retain a private executable leaf pointing at a
- * page-cache frame: direct exec leaves lose their text PTE, which shows up as
- * loader SIGSEGVs.  x86_64 and loongarch64 both have this, and the fault.c
- * comment said so while only testing x86_64.
- */
-#ifndef ARCH_EXE_LEAF_RETAIN_UNSAFE
-# define ARCH_EXE_LEAF_RETAIN_UNSAFE 0
-#endif
-
-/*
- * Page-cache fault-around (mapping a whole window on one miss) is unsafe here
- * because a mapped-but-not-yet-uptodate window corrupts the dynamic symbols of
- * a shared object under parallel load.  loongarch64.
- */
-#ifndef ARCH_FAULT_AROUND_UNSAFE
-# define ARCH_FAULT_AROUND_UNSAFE 0
-#endif
-
-/*
  * An instruction storage fault loses the faulting EA, so demand paging can never
  * map the page and executable file pages must be mapped eagerly.  ppc64le, whose
  * external-vector entry clobbers SRR0.
@@ -348,27 +309,6 @@ static inline int arch_syscall_resched_allowed(void)
  * error rather than a quiet zero.  Expands to an int expression, not a
  * statement.
  */
-
-/* Arch name string (for uname, procfs, etc.) */
-#if defined(CONFIG_RISCV64)
-# define ARCH_NAME "riscv64"
-#elif defined(CONFIG_RISCV32)
-# define ARCH_NAME "riscv32"
-#elif defined(CONFIG_LOONGARCH64)
-# define ARCH_NAME "loongarch64"
-#elif defined(CONFIG_LOONGARCH32)
-# define ARCH_NAME "loongarch32"
-#elif defined(CONFIG_AARCH64)
-# define ARCH_NAME "aarch64"
-#elif defined(CONFIG_ARM32)
-# define ARCH_NAME "arm32"
-#elif defined(CONFIG_ARMV7M)
-# define ARCH_NAME "armv7m"
-#elif defined(CONFIG_PPC64LE)
-# define ARCH_NAME "ppc64le"
-#elif defined(CONFIG_X86_64)
-# define ARCH_NAME "x86_64"
-#endif
 
 /* Optional arch hook used by the ELF loader for dynamic-linker fallbacks. */
 int arch_resolve_interp_fallback(const char *exec_path, const char *interp_path,

@@ -10,6 +10,7 @@
 #include "fs/devfs.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
+#include "fs/tty.h"
 #include "core/errno.h"
 #include "mm/mm.h"
 #include "proc/proc.h"
@@ -30,7 +31,6 @@
 #define TIOCSCTTY      0x540E
 #define TIOCNOTTY      0x5422
 #define FIONBIO        0x5421
-#define PTY_NCCS       32
 
 /* termios flag bits used by the line discipline (Linux values). */
 #define PTY_OPOST      0x1
@@ -44,16 +44,8 @@
 #define PTY_CC_VKILL   3
 #define PTY_CC_VEOF    4
 
-typedef struct {
-    uint32_t c_iflag;
-    uint32_t c_oflag;
-    uint32_t c_cflag;
-    uint32_t c_lflag;
-    uint8_t  c_line;
-    uint8_t  c_cc[PTY_NCCS];
-    uint32_t c_ispeed;
-    uint32_t c_ospeed;
-} pty_termios_t;
+/* Console and PTYs share the kernel termios representation and arch codec. */
+typedef ktty_termios_t pty_termios_t;
 
 typedef struct {
     /* LOCK_ORDER: per-pair lock protects ring buffers, master/slave refs,
@@ -571,12 +563,12 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         termios = g_ptys[idx].termios;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
-        if (copy_to_user(arg, &termios, sizeof(termios)) < 0) return -EFAULT;
+        if (arch_tty_termios_to_user(arg, &termios) < 0) return -EFAULT;
         return 0;
     }
     if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
         pty_termios_t termios;
-        if (copy_from_user(&termios, arg, sizeof(termios)) < 0) return -EFAULT;
+        if (arch_tty_termios_from_user(&termios, arg) < 0) return -EFAULT;
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].termios = termios;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -666,12 +658,12 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         termios = g_ptys[idx].termios;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
-        if (copy_to_user(arg, &termios, sizeof(termios)) < 0) return -EFAULT;
+        if (arch_tty_termios_to_user(arg, &termios) < 0) return -EFAULT;
         return 0;
     }
     if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
         pty_termios_t termios;
-        if (copy_from_user(&termios, arg, sizeof(termios)) < 0) return -EFAULT;
+        if (arch_tty_termios_from_user(&termios, arg) < 0) return -EFAULT;
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].termios = termios;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);

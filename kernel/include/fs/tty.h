@@ -3,6 +3,20 @@
 
 #include "core/types.h"
 
+#define KTTY_NCCS 19
+
+typedef struct {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[KTTY_NCCS];
+} ktty_termios_t;
+
+long arch_tty_termios_to_user(void *dst, const ktty_termios_t *src);
+long arch_tty_termios_from_user(ktty_termios_t *dst, const void *src);
+
 struct vfile;
 
 /*

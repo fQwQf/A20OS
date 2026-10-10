@@ -1,7 +1,6 @@
 #include "core/stdio.h"
 #include "core/bootargs.h"
 #include "drivers/char/uart.h"
-void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
 #include "mm/oom.h"
 #include "mm/elf.h"
@@ -151,18 +150,8 @@ void kernel_main(void) {
         printf("[INIT] Board devices enumerated (%s)\n",
                current_board->name ? current_board->name : "unknown");
     }
-#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
-    riscv_iommu_early_probe();
-#endif
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
-#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
-    /* Dual-placement driver skeleton (docs/hybrid-kernel/04-dual-placement.md):
-     * the kernel placements of the shared goldfish RTC and virtio-input
-     * drivers are drvmod modules (/lib/drivers/rtc.a20drv, vinput-probe.a20drv)
-     * loaded and bound in init_kthread below; the built-in probes were
-     * removed by the drvmod migration. */
-#endif
     usb_core_scan();
     printf("[INIT] USB devices scanned\n");
     /* PS/2 controller (x86_64) is owned by the ps2.a20drv drvmod module;
@@ -183,14 +172,12 @@ void kernel_main(void) {
      * mounting /bin; user-service packages still wait for proc_init(). */
     driver_manager_early_init();
 #endif
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-    /* The LS2K1000 GMAC/PIC path is not usable yet.  Keep the shell bring-up
-     * independent of lwIP until a net device can be registered successfully. */
-    printf("[INIT] Network deferred during LS2K1000 shell bring-up\n");
-#else
-    net_init();
-    printf("[INIT] Network initialized\n");
-#endif
+    if (current_board && current_board->defer_network_init) {
+        printf("[INIT] Network deferred by board recovery profile\n");
+    } else {
+        net_init();
+        printf("[INIT] Network initialized\n");
+    }
 
 #if defined(CONFIG_STORAGE_READ_ONLY)
     mount_read_only_storage();
@@ -267,21 +254,8 @@ void kernel_main(void) {
     printf("Welcome to A20OS!\n\n");
     printf("[INIT] entering scheduler...\n");
 
-#ifdef CONFIG_BOARD_LS2K1000
-    /* Keep the bootstrap stack non-preemptible until the first runnable task
-     * exists and all one-time boot work is complete. */
-    uint32_t cpucfg1, cpucfg2;
-    __asm__ __volatile__("cpucfg %0, %1" : "=r"(cpucfg1) : "r"(1U));
-    __asm__ __volatile__("cpucfg %0, %1" : "=r"(cpucfg2) : "r"(2U));
-    printf("[INIT] LS2K1000 CPUCFG.1=0x%x CPUCFG.2=0x%x\n",
-           cpucfg1, cpucfg2);
-#ifdef CONFIG_COOPERATIVE_BOOT
-    printf("[INIT] LS2K1000 polling mode; timer interrupts remain disabled\n");
-#else
-    timer_enable();
-    printf("[INIT] LS2K1000 timer interrupts enabled\n");
-#endif
-#endif
+    if (current_board && current_board->prepare_scheduler)
+        current_board->prepare_scheduler();
 
 #ifdef CONFIG_COOPERATIVE_BOOT
     init_kthread();

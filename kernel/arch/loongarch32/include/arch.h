@@ -1,6 +1,8 @@
 #ifndef _ARCH_LOONGARCH32_H
 #define _ARCH_LOONGARCH32_H
 
+#define ARCH_NAME "loongarch32"
+
 #include "platform.h"
 #include "console.h"
 #include "cpu.h"

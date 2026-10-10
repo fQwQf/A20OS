@@ -1,4 +1,3 @@
-#ifdef CONFIG_AARCH64
 
 #include "drivers/core/driver_core.h"
 #include "drivers/bus/pci_bus.h"
@@ -235,5 +234,3 @@ static const board_config_t virtualbox_aarch64 = {
 };
 
 const board_config_t *const current_board = &virtualbox_aarch64;
-
-#endif /* CONFIG_AARCH64 */
