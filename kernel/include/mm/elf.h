@@ -320,4 +320,8 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
                                     vaddr_t *start_info_out);
 #endif
 
+/* Native ELF relocation encodings supplied by arch. */
+uint32_t arch_elf_relative_reltype(uint16_t machine);
+uint32_t arch_elf_absolute_reltype(uint16_t machine, bool elf64);
+
 #endif /* _ELF_H */

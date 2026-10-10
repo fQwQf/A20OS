@@ -1799,3 +1799,7 @@ smoke-serial-fidelity:
 		cat "$$summary"; \
 		exit 1; \
 	fi
+
+# Copyout after COW, adjacent first faults, and signal-stack ABI.
+smoke-vm-fault-x86_64:
+	$(PYTHON) tools/smoke.py smoke-vm-fault-x86_64

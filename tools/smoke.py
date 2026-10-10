@@ -279,22 +279,25 @@ def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
             if "event" not in reply:
                 return reply
 
-    cmd({"execute": "qmp_capabilities"})
-    while time.time() < deadline:
-        for k in keys:
-            cmd({"execute": "input-send-event", "arguments": {"events": [
-                {"type": "key", "data": {"down": True,
-                                         "key": {"type": "qcode", "data": k}}}]}})
-        time.sleep(hold)
-        for k in keys:
-            cmd({"execute": "input-send-event", "arguments": {"events": [
-                {"type": "key", "data": {"down": False,
-                                         "key": {"type": "qcode", "data": k}}}]}})
-        time.sleep(gap)
     try:
-        sock.close()
-    except OSError:
+        cmd({"execute": "qmp_capabilities"})
+        while time.time() < deadline:
+            for k in keys:
+                cmd({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "key", "data": {"down": True,
+                                             "key": {"type": "qcode", "data": k}}}]}})
+            time.sleep(hold)
+            for k in keys:
+                cmd({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "key", "data": {"down": False,
+                                             "key": {"type": "qcode", "data": k}}}]}})
+            time.sleep(gap)
+    except (BrokenPipeError, ConnectionResetError):
+        # A guest may power off before the injection duration expires.
         pass
+    finally:
+        rx.close()
+        sock.close()
 
 
 def run_qemu(case: dict) -> int:

@@ -40,30 +40,22 @@ static mutex_t g_tty_write_lock = MUTEX_INIT;
 static int g_tty_line_owner = -1;
 static tty_line_buffer_t g_tty_line_buffers[TTY_LINE_SLOTS];
 
-#define KTTY_NCCS 19
+__attribute__((weak)) unsigned long arch_linux_ioctl_request(unsigned long req)
+{
+    return req;
+}
 
-typedef struct {
-    uint32_t c_iflag;
-    uint32_t c_oflag;
-    uint32_t c_cflag;
-    uint32_t c_lflag;
-    uint8_t  c_line;
-    uint8_t  c_cc[KTTY_NCCS];
-} ktty_termios_t;
+__attribute__((weak)) long arch_tty_termios_to_user(void *dst,
+                                                   const ktty_termios_t *src)
+{
+    return copy_to_user(dst, src, sizeof(*src));
+}
 
-typedef struct {
-    uint32_t c_iflag;
-    uint32_t c_oflag;
-    uint32_t c_cflag;
-    uint32_t c_lflag;
-    uint8_t  c_cc[KTTY_NCCS];
-    uint8_t  c_line;
-    uint32_t c_ispeed;
-    uint32_t c_ospeed;
-} ppc64_tty_termios_t;
-
-_Static_assert(sizeof(ppc64_tty_termios_t) == 44,
-               "PPC64 termios must be 44 bytes");
+__attribute__((weak)) long arch_tty_termios_from_user(ktty_termios_t *dst,
+                                                     const void *src)
+{
+    return copy_from_user(dst, src, sizeof(*dst));
+}
 
 typedef struct {
     uint16_t ws_row;
@@ -494,49 +486,24 @@ int tty_console_ioctl(unsigned long req, void *arg) {
     }
     if (!arg)
         return -EFAULT;
-    if (req == TCGETS || req == PPC64_TCGETS) {
-        if (req == PPC64_TCGETS) {
-            ppc64_tty_termios_t ppc = {
-                .c_iflag = g_dev_tty.termios.c_iflag,
-                .c_oflag = g_dev_tty.termios.c_oflag,
-                .c_cflag = g_dev_tty.termios.c_cflag,
-                .c_lflag = g_dev_tty.termios.c_lflag,
-                .c_line = g_dev_tty.termios.c_line,
-                .c_ispeed = 0,
-                .c_ospeed = 0,
-            };
-            memcpy(ppc.c_cc, g_dev_tty.termios.c_cc, KTTY_NCCS);
-            if (copy_to_user(arg, &ppc, sizeof(ppc)) < 0) return -EFAULT;
-            return 0;
-        }
-        if (copy_to_user(arg, &g_dev_tty.termios, sizeof(g_dev_tty.termios)) < 0) return -EFAULT;
-        return 0;
-    }
-    if (req == TCSETS || req == TCSETSW || req == TCSETSF ||
-        req == PPC64_TCSETS || req == PPC64_TCSETSW || req == PPC64_TCSETSF) {
-        if (req == PPC64_TCSETS || req == PPC64_TCSETSW || req == PPC64_TCSETSF) {
-            ppc64_tty_termios_t ppc;
-            if (copy_from_user(&ppc, arg, sizeof(ppc)) < 0) return -EFAULT;
-            g_dev_tty.termios.c_iflag = ppc.c_iflag;
-            g_dev_tty.termios.c_oflag = ppc.c_oflag;
-            g_dev_tty.termios.c_cflag = ppc.c_cflag;
-            g_dev_tty.termios.c_lflag = ppc.c_lflag;
-            g_dev_tty.termios.c_line = ppc.c_line;
-            memcpy(g_dev_tty.termios.c_cc, ppc.c_cc, KTTY_NCCS);
-            return 0;
-        }
+    if (req == TCGETS)
+        return arch_tty_termios_to_user(arg, &g_dev_tty.termios) < 0 ? -EFAULT : 0;
+    if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
         ktty_termios_t tio;
-        if (copy_from_user(&tio, arg, sizeof(tio)) < 0) return -EFAULT;
+        if (arch_tty_termios_from_user(&tio, arg) < 0)
+            return -EFAULT;
         g_dev_tty.termios = tio;
         return 0;
     }
-    if (req == TIOCGWINSZ || req == PPC64_TIOCGWINSZ) {
-        if (copy_to_user(arg, &g_dev_tty.winsize, sizeof(g_dev_tty.winsize)) < 0) return -EFAULT;
+    if (req == TIOCGWINSZ) {
+        if (copy_to_user(arg, &g_dev_tty.winsize, sizeof(g_dev_tty.winsize)) < 0)
+            return -EFAULT;
         return 0;
     }
-    if (req == DEVFS_TIOCSWINSZ || req == PPC64_TIOCSWINSZ) {
+    if (req == DEVFS_TIOCSWINSZ) {
         kwinsize_t ws;
-        if (copy_from_user(&ws, arg, sizeof(ws)) < 0) return -EFAULT;
+        if (copy_from_user(&ws, arg, sizeof(ws)) < 0)
+            return -EFAULT;
         g_dev_tty.winsize = ws;
         return 0;
     }

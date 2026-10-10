@@ -1268,6 +1268,10 @@ endif
 # explicit and generic built-in exceptions remain reviewable.
 include tools/driver-sources.mk
 
+# Shared ISA code is selected here, never by architecture tests in core C.
+ARCH_SHARED_SRC_riscv64 := $(KERNEL_DIR)/arch/common/riscv/linux_syscalls.c
+ARCH_SHARED_SRC_riscv32 := $(ARCH_SHARED_SRC_riscv64)
+
 # ABI-specific source directories
 ifeq ($(ABI),both)
 ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/linux/*.c) \
@@ -1286,7 +1290,7 @@ CFLAGS += $(TRIM_PROFILE_MCU_OPT) $(TRIM_PROFILE_MCU_CPPFLAGS)
 KERNEL_SRC = $(TRIM_PROFILE_MCU_SOURCES) \
              $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
-             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
+             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) $(ARCH_SHARED_SRC_$(ARCH))
 else
 # The CONFIG_XLATOR=n case drops kernel/proc/xlator.c from the source list
 # outright rather than compiling it to an empty translation unit -- the same
@@ -1307,13 +1311,14 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/bpf/*.c) \
              $(wildcard $(KERNEL_DIR)/ext/*.c) \
              $(wildcard $(KERNEL_DIR)/drvmod/*.c) \
+             $(KERNEL_DIR)/arch/common/module_reloc.c $(KERNEL_DIR)/arch/common/elf_reloc.c \
              $(DRIVER_KERNEL_SRCS) \
              $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
-             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
+             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) $(ARCH_SHARED_SRC_$(ARCH)) \
              $(LWIP_SRC) \
              $(LFS_SRC)
 

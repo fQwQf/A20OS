@@ -707,4 +707,9 @@ void arch_dump_trap_extra_context(const trap_context_t *ctx)
            (unsigned long)ctx->r10, (unsigned long)ctx->r11);
 }
 
+void arch_user_breakpoint(trap_context_t *ctx)
+{
+    ctx->rflags &= ~(1UL << 8); /* Single-step is one-shot. */
+}
+
 #endif

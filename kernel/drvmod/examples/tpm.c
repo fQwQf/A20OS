@@ -4,7 +4,7 @@
  * Migrated from kernel/drivers/security/tpm.c (removed).  The TIS FIFO
  * state machine and TPM2 command framing are unchanged; the module binds
  * the kernel-registered "tpm" fixed device and discovers the TPM through
- * the ACPI TPM2 table (firmware_acpi_tpm2).  With no TPM attached the
+ * the MMIO resource supplied by the platform device.  With no TPM attached the
  * probe returns -ENODEV and the module stays idle.
  */
 
@@ -26,11 +26,6 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/core/driver_core.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_hwapi.h"
-
-#if defined(CONFIG_X86_64)
-extern uint64_t firmware_acpi_tpm2(void);
-#endif
-
 
 /* ------------------------------------------------------------------ */
 /* TIS register map (locality 0)                                       */
@@ -334,15 +329,11 @@ static int tpm_tis_init(uintptr_t base, uint64_t phys) {
 
 static int tpm_probe(device_t *dev)
 {
-    (void)dev;
-#if defined(CONFIG_X86_64)
-    uint64_t tpm_phys = firmware_acpi_tpm2();
-    if (!tpm_phys)
+    resource_t *res = device_get_resource(dev, RES_MMIO, 0);
+    if (!res)
         return -ENODEV;
-    return tpm_tis_init(PAGE_OFFSET + (uintptr_t)tpm_phys, tpm_phys);
-#else
-    return -EOPNOTSUPP;
-#endif
+    uint64_t phys = res->start;
+    return tpm_tis_init(PAGE_OFFSET + (uintptr_t)phys, phys);
 }
 
 static const device_id_t tpm_ids[] = {

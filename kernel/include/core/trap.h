@@ -25,4 +25,7 @@ int arch_hyp_guest_trap(trap_context_t *ctx);
 void trap_init(void);
 void arch_handle_irq(reg_t irq, int from_user);
 
+/* Architecture-specific cleanup before delivering a user breakpoint. */
+void arch_user_breakpoint(trap_context_t *ctx);
+
 #endif /* _TRAP_H */

@@ -1,4 +1,4 @@
-#ifdef CONFIG_RISCV64
+extern void riscv_iommu_early_probe(void);
 
 #include "drivers/core/driver_core.h"
 #include "drivers/irqchip/plic.h"
@@ -186,9 +186,21 @@ extern void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 static void rv64_enumerate_devices(void) {
     virtio_mmio_enumerate(VIRTIO_BASE, 8, 1);
     pci_enumerate(PCIE_ECAM_BASE, 0, 1);
+    riscv_iommu_early_probe();
 }
 
+void board_register_module_devices(void);
+int board_user_mmio_allowed(uint64_t phys, uint64_t size);
+int board_user_mmio_owned(uint64_t phys);
+int board_user_mmio_present(uint64_t phys);
+int board_user_mmio_index(uint64_t phys);
+
 static const board_config_t qemu_virt_rv64 = {
+    .register_module_devices = board_register_module_devices,
+    .user_mmio_allowed = board_user_mmio_allowed,
+    .user_mmio_owned = board_user_mmio_owned,
+    .user_mmio_present = board_user_mmio_present,
+    .user_mmio_index = board_user_mmio_index,
     .name              = "qemu-virt-rv64",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = PHYS_MEMORY_MAX_END,
@@ -202,5 +214,3 @@ static const board_config_t qemu_virt_rv64 = {
 };
 
 const board_config_t *const current_board = &qemu_virt_rv64;
-
-#endif /* CONFIG_RISCV64 */

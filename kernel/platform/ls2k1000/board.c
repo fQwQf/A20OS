@@ -25,6 +25,7 @@
 #include "drivers/net/ls2k_gmac.h"
 #include "core/arch.h"
 #include "core/klog.h"
+#include "core/stdio.h"
 #include "core/timer.h"
 #include "platform.h"
 
@@ -256,6 +257,36 @@ static void ls2k_enumerate_devices(void) {
      * real PCI host shim must be added before pci_enumerate() is usable. */
 }
 
+static int ls2k_format_interrupts(char *buf, size_t bufsz)
+{
+    return snprintf(buf, bufsz,
+            "           CPU0\n"
+            "  0: %12lu   LS2K-LIOINTC   edge   ttyS0\n"
+            "CAS: %12lu   LS2K HWI1 cascades\n"
+            "SPU: %12lu   LS2K spurious cascades\n"
+            "STM: %12lu   LS2K masked UART storms\n",
+            (unsigned long)ls2k1000_irq_source_count(UART0_IRQ),
+            (unsigned long)ls2k1000_irq_cascade_count(),
+            (unsigned long)ls2k1000_irq_spurious_count(),
+            (unsigned long)ls2k1000_irq_storm_count());
+}
+
+static void ls2k_prepare_scheduler(void)
+{
+    /* Keep the bootstrap stack non-preemptible until the first runnable task
+     * exists and all one-time boot work is complete. */
+    uint32_t cpucfg1 = arch_read_cpu_config(1);
+    uint32_t cpucfg2 = arch_read_cpu_config(2);
+    printf("[INIT] LS2K1000 CPUCFG.1=0x%x CPUCFG.2=0x%x\n",
+           cpucfg1, cpucfg2);
+#ifdef CONFIG_COOPERATIVE_BOOT
+    printf("[INIT] LS2K1000 polling mode; timer interrupts remain disabled\n");
+#else
+    timer_enable();
+    printf("[INIT] LS2K1000 timer interrupts enabled\n");
+#endif
+}
+
 static const board_config_t ls2k1000 = {
     .name              = "ls2k1000",
     .ram_base          = LS2K_MEMORY_BASE,
@@ -266,6 +297,8 @@ static const board_config_t ls2k1000 = {
     .poweroff          = ls2k_poweroff,
     .reboot            = ls2k_reboot,
     .enumerate_devices = ls2k_enumerate_devices,
+    .prepare_scheduler = ls2k_prepare_scheduler,
+    .format_interrupts = ls2k_format_interrupts,
 #ifdef CONFIG_COOPERATIVE_BOOT
     /* The cooperative recovery profile exists because this board's firmware
      * hands over with the timer unable to preempt, so a sleeping idle task would
@@ -275,6 +308,7 @@ static const board_config_t ls2k1000 = {
      * The same profile has no working UART IRQ route, so the console driver
      * polls the 16550 directly.  Both flags are read by name from the code that
      * needs them rather than tested for this board. */
+    .defer_network_init = 1,
     .idle_cannot_sleep = 1,
     .uart_rx_is_polled = 1,
 #endif

@@ -1,4 +1,3 @@
-#ifdef CONFIG_LOONGARCH32
 
 /*
  * NaiLoong Core (LA32R) board support.
@@ -92,5 +91,3 @@ static const board_config_t nailoong = {
 };
 
 const board_config_t *const current_board = &nailoong;
-
-#endif /* CONFIG_LOONGARCH32 */

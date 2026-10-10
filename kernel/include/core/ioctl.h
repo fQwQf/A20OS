@@ -56,7 +56,7 @@
 
 /* FS_IOC_GETFLAGS/SETFLAGS are _IOR/_IOW('f', 1|2, long), so the encoded
  * value embeds the target's sizeof(long) -- hence an LP64 and an ILP32 form,
- * matched the way TIOCGPGRP/PPC64_TIOCGPGRP already are.  GET reports the real
+ * accepted by the common ABI boundary.  GET reports the real
  * on-disk ext4 i_flags; SET is refused because no FS_* mutation is enforced
  * in the write path, and accepting a flag the kernel would not honour is a
  * false promise. */
@@ -65,15 +65,7 @@
 #define FS_IOC_GETFLAGS_ILP32 0x80046601UL
 #define FS_IOC_SETFLAGS_ILP32 0x40046602UL
 
-#define PPC64_TCGETS       0x402C7413UL
-#define PPC64_TCSETS       0x802C7414UL
-#define PPC64_TCSETSW      0x802C7415UL
-#define PPC64_TCSETSF      0x802C7416UL
-#define PPC64_TIOCSPGRP    0x80047476UL
-#define PPC64_TIOCGPGRP    0x40047477UL
-#define PPC64_TIOCSWINSZ   0x80087467UL
-#define PPC64_TIOCGWINSZ   0x40087468UL
-#define PPC64_FIONBIO      0x8004667EUL
-#define PPC64_FIONREAD     0x4004667FUL
+/* Translate the native Linux wire request to the common kernel request. */
+unsigned long arch_linux_ioctl_request(unsigned long req);
 
 #endif

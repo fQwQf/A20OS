@@ -124,7 +124,11 @@ trap_entry_la64:
     /* Read PRMD.PPLV to decide user vs kernel trap path */
     csrrd   $t0, 0x1              /* PRMD */
     andi    $t0, $t0, 0x3         /* PPLV bits [1:0] */
-    bnez    $t0, __trap_from_user /* PPLV != 0 → came from user */
+    /* The aligned exception vector may be far from the main text section.
+     * Use a local conditional and a full-range branch to either handler. */
+    beqz    $t0, .Ltrap_kernel
+    b       __trap_from_user     /* PPLV != 0 → came from user */
+.Ltrap_kernel:
     b       __trap_from_kernel
 #ifdef CONFIG_BOARD_LS2K1000
     .section .text

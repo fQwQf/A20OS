@@ -1,4 +1,3 @@
-#ifdef CONFIG_RISCV32
 
 #include "drivers/core/driver_core.h"
 #include "drivers/irqchip/plic.h"
@@ -56,5 +55,3 @@ static const board_config_t qemu_virt_rv32 = {
 };
 
 const board_config_t *const current_board = &qemu_virt_rv32;
-
-#endif /* CONFIG_RISCV32 */

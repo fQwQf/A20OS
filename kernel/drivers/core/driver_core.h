@@ -310,6 +310,17 @@ typedef struct board_config {
 
     /* bus enumeration: board calls device_register() for each device */
     void                 (*enumerate_devices)(void);
+    /* Devices reserved for runtime module/user-service discovery. */
+    void                 (*register_module_devices)(void);
+
+    /* Board-specific handoff and user-service resource policy. */
+    void                 (*prepare_scheduler)(void);
+    int                    defer_network_init;
+    int                  (*user_mmio_allowed)(uint64_t phys, uint64_t size);
+    int                  (*user_mmio_owned)(uint64_t phys);
+    int                  (*user_mmio_present)(uint64_t phys);
+    int                  (*user_mmio_index)(uint64_t phys);
+    int                  (*format_interrupts)(char *buf, size_t size);
 
     /*
      * Set when the board's timer interrupt cannot preempt, so idle_loop() must

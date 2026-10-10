@@ -665,9 +665,9 @@ int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
  * handle to a gfd first). */
 int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
 {
-    req &= 0xffffffffUL;
+    req = arch_linux_ioctl_request(req & 0xffffffffUL);
 
-    if (req == TIOCGPGRP || req == PPC64_TIOCGPGRP) {
+    if (req == TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
         /* Nobody claims the foreground group placeholder: if the group has no
          * live user process left, the caller is the foreground process by
@@ -683,14 +683,14 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
         }
         return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;
     }
-    if (req == TIOCSPGRP || req == PPC64_TIOCSPGRP) {
+    if (req == TIOCSPGRP) {
         int pgid = 0;
         if (copy_from_user(&pgid, arg, sizeof(pgid)) < 0) return -EFAULT;
         if (pgid <= 0) return -EINVAL;
         uart_set_foreground_pgid(pgid);
         return 0;
     }
-    if (req == TIOCGWINSZ || req == PPC64_TIOCGWINSZ) {
+    if (req == TIOCGWINSZ) {
         /* Linux semantics: ENOTTY on non-terminals.  musl's isatty() is
          * TIOCGWINSZ-based, so faking success here makes pipes/files look
          * like ttys and trips Node.js's PlatformInit tcgetattr check. */
@@ -703,7 +703,7 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
     }
     if (req == TIOCSPTLCK || req == TIOCSCTTY)
         return 0;
-    if (req == FIONBIO || req == PPC64_FIONBIO) {
+    if (req == FIONBIO) {
         /* A socket blocks in the net data path, so "non-blocking" has to be
          * real here.  Go through the same two steps as fcntl(F_SETFL): the
          * vfile flag for the generic layers, then net_socket_t.nonblock for
@@ -723,7 +723,7 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
             return r;
         return net_set_nonblock((int)gfd, nonblock);
     }
-    if (req == FIONREAD || req == PPC64_FIONREAD) {
+    if (req == FIONREAD) {
         vfile_t *vf = vfs_get_file_ref((int)gfd);
         if (!vf)
             return -EBADF;

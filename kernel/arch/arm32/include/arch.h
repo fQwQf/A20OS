@@ -1,6 +1,8 @@
 #ifndef _ARCH_ARM32_H
 #define _ARCH_ARM32_H
 
+#define ARCH_NAME "arm32"
+
 #include "platform.h"
 #include "console.h"
 #include "cpu.h"

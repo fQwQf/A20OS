@@ -1,4 +1,3 @@
-#ifdef CONFIG_LOONGARCH64
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
@@ -216,7 +215,10 @@ static void la64_enumerate_devices(void) {
  * is no reason to cap it; the ceiling stays the architectural limit. */
 #define QEMU_VIRT_LA64_RAM_END 0x100000000UL
 
+void board_register_module_devices(void);
+
 static const board_config_t qemu_virt_la64 = {
+    .register_module_devices = board_register_module_devices,
     .name              = "qemu-virt-la64",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = QEMU_VIRT_LA64_RAM_END,
@@ -237,5 +239,3 @@ static const board_config_t qemu_virt_la64 = {
 };
 
 const board_config_t *const current_board = &qemu_virt_la64;
-
-#endif /* CONFIG_LOONGARCH64 */
