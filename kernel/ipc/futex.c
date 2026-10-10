@@ -71,27 +71,11 @@ static wait_queue_t g_futex_buckets[FUTEX_BUCKETS] = {
     [0 ... (FUTEX_BUCKETS - 1)] = WAIT_QUEUE_INIT
 };
 
-/*
- * Bucket on the PHYSICAL page holding the futex word, not on its virtual
- * address.  The virtual address is not a usable bucket key: task_spawn() gives
- * the child a fresh, independently ASLR-randomised mm, so a MAP_SHARED futex
- * word is one physical page under two different virtual addresses and the two
- * peers hash apart.  Keying on the physical page puts every process sharing
- * the word in one bucket, so a wake is a single locked pass instead of a
- * sweep over the rest of the table.
- *
- * The wait side cannot consult the caller: FUTEX_PRIVATE_FLAG is chosen by the
- * waker, and a PRIVATE futex is matched on (mm, vaddr) alone.  So the wait
- * side always derives the bucket from the physical key, and so must every
- * other side -- including the PRIVATE waker, which pays the page-table walk
- * that passing pkey = 0 to the match predicate was avoiding.  Skipping it
- * would put a private waker in a different bucket from the waiters it must
- * find, which is a missed wake rather than a slowdown.
- *
- * NOMMU has no physical addresses, so futex_user_word_map() and
- * futex_phys_key() both fall back to the virtual address and the two agree by
- * construction.
- */
+/* Private futexes use a stable virtual key, matched with their mm.  A fork
+ * can COW the containing page while another thread is asleep, so a physical
+ * key would strand that waiter in the old bucket.  Shared futexes retain a
+ * physical key to match peers mapping the same page at different addresses.
+ * The ABI must preserve the private flag on both wait and wake operations. */
 static uintptr_t futex_bucket_key(uintptr_t vkey, uintptr_t pkey)
 {
     return pkey ? pkey : vkey;
@@ -267,7 +251,8 @@ static void futex_requeue_rekey(wait_queue_entry_t *entry, void *arg)
  * matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
  */
 /* ticks == 0 waits indefinitely. */
-int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
+int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
+                           uint32_t bitset, int private)
 {
     if (!uaddr) return -EFAULT;
     if ((uintptr_t)uaddr & (sizeof(int) - 1)) return -EINVAL;
@@ -313,6 +298,8 @@ int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
         return -ERESTARTSYS;
     }
 
+    if (private)
+        pkey = 0;
     unsigned bucket = futex_bucket_index(futex_bucket_key(vkey, pkey));
     wait_queue_t *q = &g_futex_buckets[bucket];
     uint64_t flags = spin_lock_irqsave(&q->lock);
@@ -370,13 +357,18 @@ int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
     return 0;
 }
 
+int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
+{
+    return futex_wait_ticks_mode(uaddr, expected, ticks, bitset, 0);
+}
+
 int futex_wait(int *uaddr, int expected, void *timeout, uint32_t bitset,
-                         int absolute_timeout, int realtime_timeout)
+                         int absolute_timeout, int realtime_timeout, int private)
 {
     uint64_t ticks = 0;
     int tr = futex_timeout_ticks(timeout, absolute_timeout, realtime_timeout, &ticks);
     if (tr < 0) return tr;
-    return futex_wait_ticks(uaddr, expected, ticks, bitset);
+    return futex_wait_ticks_mode(uaddr, expected, ticks, bitset, private);
 }
 
 /* Native ABI entry point: relative timeout in nanoseconds,
@@ -407,12 +399,8 @@ int futex_wake(int *uaddr, int nr, uint32_t bitset, int private)
     if (nr < 0) return -EINVAL;
 
     uintptr_t vkey = (uintptr_t)uaddr;
-    /* The bucket is derived from the physical key even for a PRIVATE futex,
-     * because the waiter had no way to know the wake would be private.  The
-     * physical address is still withheld from the match predicate so a PRIVATE
-     * wake can never match a foreign mm by physical-page alias. */
-    uintptr_t phys = futex_phys_key(uaddr);
-    uintptr_t pkey = private ? 0 : phys;
+    uintptr_t phys = private ? 0 : futex_phys_key(uaddr);
+    uintptr_t pkey = phys;
     mm_struct_t *mm = cur ? cur->mm : NULL;
     unsigned home = futex_bucket_index(futex_bucket_key(vkey, phys));
     bool may_be_elsewhere = !private && phys == 0;
@@ -458,10 +446,10 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t phys1 = futex_phys_key(uaddr);
+    uintptr_t phys1 = private ? 0 : futex_phys_key(uaddr);
     uintptr_t pkey1 = private ? 0 : phys1;
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t phys2 = futex_phys_key(uaddr2);
+    uintptr_t phys2 = private ? 0 : futex_phys_key(uaddr2);
     uintptr_t pkey2 = private ? 0 : phys2;
     unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
     unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));
@@ -571,10 +559,10 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t phys1 = futex_phys_key(uaddr);
+    uintptr_t phys1 = private ? 0 : futex_phys_key(uaddr);
     uintptr_t pkey1 = private ? 0 : phys1;
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t phys2 = futex_phys_key(uaddr2);
+    uintptr_t phys2 = private ? 0 : futex_phys_key(uaddr2);
     uintptr_t pkey2 = private ? 0 : phys2;
     unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
     unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));

@@ -104,6 +104,12 @@ __attribute__((weak)) uint64_t arch_signal_handler_sp(uint64_t frame_sp) {
     return frame_sp;
 }
 
+/* The interrupted stack may reserve ABI-owned bytes below its pointer. */
+__attribute__((weak)) uint64_t arch_signal_stack_top(uint64_t sp)
+{
+    return sp;
+}
+
 /*
  * CORE_DUMP_HOOK: the fatal default-action path below calls this before
  * proc_exit_group() for signals whose default action dumps core.  The strong
@@ -888,7 +894,7 @@ void signal_deliver_user(trap_context_t *ctx) {
         t->sig_handling = sig;
         spin_unlock_irqrestore(&ss->lock, flags);
 
-        uint64_t sp = TRAP_CTX_SP(ctx);
+        uint64_t sp = arch_signal_stack_top(TRAP_CTX_SP(ctx));
 
         if ((action.sa_flags & SA_ONSTACK) &&
             t->sigaltstack.ss_flags == 0 &&

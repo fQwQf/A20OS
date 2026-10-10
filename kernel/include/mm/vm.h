@@ -438,11 +438,19 @@ extern uint64_t mm_seg_index_overflow;
  * which can block on I/O, via vfs_close -- and only then drops the queue's
  * reference.  So no page-fault, index-rebuild or cursor path ever runs release
  * code, and no record on the queue can be freed by a later put underneath it.
+ *
+ * mm_seg_put() has no mm to queue onto, and it is the put those paths reach:
+ * when it is the last holder it parks the record on a global queue instead
+ * (mm_seg_release_defer), which mm_vma_flush_deferred() drains alongside the
+ * per-mm one.
  */
 void vma_get(mm_seg_t *vma);
 void vma_put(mm_struct_t *mm, mm_seg_t *vma);
 void mm_vma_defer(mm_struct_t *mm, mm_seg_t *vma);
 void mm_vma_flush_deferred(mm_struct_t *mm);
+/* Hand a record whose last reference just dropped to the deferred-release
+ * queue; takes over that reference.  Called only from mm_seg_put(). */
+void mm_seg_release_defer(mm_seg_t *s);
 mm_seg_t *vma_try_merge(mm_struct_t *mm, mm_seg_t *vma);
 
 struct vmo;

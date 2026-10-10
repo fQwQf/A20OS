@@ -349,10 +349,13 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
 }
 
 /*
- * mm_tlb_shootdown_page — remote shootdown for a single PTE change made
+ * mm_tlb_shootdown_page — local and remote shootdown for a single PTE change made
  * outside the mm_tlb_* transaction machinery (COW faults).
  *
- * The faulting CPU already flushed the page locally inside the fault path.
+ * Flush the calling CPU as well: COW may be triggered by copy_to_user(),
+ * which writes through the direct map and does not take a hardware fault on
+ * the stale user translation.  Keep the CPU pinned until all target and
+ * generation bookkeeping is complete.
  * Publish the PTE change with a tlb_generation bump so a CPU that left this
  * address space and re-enters it (ASID hardware) flushes on the way in via
  * mm_context_enter, then invalidate only the CPUs currently running this
@@ -365,8 +368,11 @@ void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr)
     if (!mm)
         return;
 
-    __atomic_add_fetch(&mm->tlb_generation, 1, __ATOMIC_RELEASE);
+    preempt_disable();
+    uint64_t generation =
+        __atomic_add_fetch(&mm->tlb_generation, 1, __ATOMIC_RELEASE);
     arch_mb();
+    arch_tlb_flush_page_local(addr);
 
     uint32_t targets =
         __atomic_load_n(&mm->active_cpus, __ATOMIC_ACQUIRE) &
@@ -374,7 +380,7 @@ void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr)
     unsigned current = cpu_current_id();
     uint32_t flushed = 0;
     if (current < 32) {
-        /* The faulting CPU already flushed this page locally. */
+        /* This pinned CPU was flushed above. */
         targets &= ~(1U << current);
         flushed |= 1U << current;
     }
@@ -392,12 +398,11 @@ void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr)
         }
     }
 
-    uint64_t generation = __atomic_load_n(&mm->tlb_generation,
-                                          __ATOMIC_RELAXED);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++)
         if (flushed & (1U << cpu))
             __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
                              __ATOMIC_RELEASE);
+    preempt_enable();
 }
 
 /*

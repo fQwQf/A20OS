@@ -173,6 +173,9 @@ void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, vaddr_t tramp_addr,
  * at the returned sp.
  */
 uint64_t arch_signal_handler_sp(uint64_t frame_sp);
+/* Usable top of the interrupted stack, excluding any ABI red zone. */
+uint64_t arch_signal_stack_top(uint64_t sp);
+
 
 /*
  * Architecture-specific hook called once when a new user address space is

@@ -22,10 +22,10 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
     int private = (op & FUTEX_PRIVATE_FLAG) != 0;
     switch (opc) {
     case FUTEX_WAIT:
-        return futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, 0, 0);
+        return futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, 0, 0, private);
     case FUTEX_WAIT_BITSET:
         return futex_wait(uaddr, val, timeout, (uint32_t)val3, 1,
-                          (op & FUTEX_CLOCK_REALTIME) != 0);
+                          (op & FUTEX_CLOCK_REALTIME) != 0, private);
     case FUTEX_WAKE:
         return futex_wake(uaddr, val, FUTEX_BITSET_MATCH_ANY, private);
     case FUTEX_WAKE_BITSET:
@@ -57,7 +57,7 @@ int64_t sys_futex(int *uaddr, int op, int val, void *timeout, int *uaddr2, int v
         uint64_t ticks = 0;
         int tr = futex_timeout_ticks(timeout, 0, 0, &ticks);
         if (tr < 0) return tr;
-        int r = futex_wait_ticks(uaddr, val, ticks, FUTEX_BITSET_MATCH_ANY);
+        int r = futex_wait_ticks_mode(uaddr, val, ticks, FUTEX_BITSET_MATCH_ANY, private);
         if (r < 0)
             return r;
         return futex_pi_acquire(uaddr2, 0);
@@ -163,7 +163,8 @@ int64_t sys_futex_wait(void *uaddr, uint32_t val, const void *timeout,
 {
     int realtime = (flags & 1) != 0; /* FUTEX_CLOCK_REALTIME */
     return futex_wait((int *)uaddr, (int)val, (void *)timeout,
-                      FUTEX_BITSET_MATCH_ANY, 1, realtime);
+                      FUTEX_BITSET_MATCH_ANY, 1, realtime,
+                      (flags & FUTEX_PRIVATE_FLAG) != 0);
 }
 
 int64_t sys_futex_wake(void *uaddr, uint32_t nr, uint32_t flags)

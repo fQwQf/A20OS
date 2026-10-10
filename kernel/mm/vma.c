@@ -445,6 +445,53 @@ void mm_vma_defer(mm_struct_t *mm, mm_seg_t *vma)
     vma_put(mm, vma);
 }
 
+/*
+ * The queue for records whose last reference drops somewhere mm->deferred_vma
+ * cannot be reached: mm_seg_put() from a page fault or an index rebuild that
+ * still holds mm->lock, from inside an mcs_lock section, or from an interrupt.
+ * Those paths may not run release code -- it closes the backing file, which
+ * blocks on I/O, and parking the task from inside a spinlock is exactly what
+ * the context_switch_locked preempt_count check rejects -- so the put parks
+ * the record here instead and hands over the reference it just dropped.
+ *
+ * Global rather than per-mm because by construction no caller can still name
+ * the mm the record belonged to; vma_release() reads only the record itself,
+ * so any flush point will do.  mm_vma_flush_deferred() runs on every munmap,
+ * mmap teardown and exit, which is what keeps the queue bounded.
+ */
+static mm_seg_t *g_seg_release_pending;
+static spinlock_t g_seg_release_lock = SPINLOCK_INIT;
+
+void mm_seg_release_defer(mm_seg_t *s)
+{
+    if (!s) return;
+    /* Take over the reference mm_seg_put() just dropped, so the record is
+     * never observed at zero: the flusher drops this one after the release. */
+    mm_seg_get(s);
+
+    uint64_t flags = spin_lock_irqsave(&g_seg_release_lock);
+    s->deferred_next = g_seg_release_pending;
+    g_seg_release_pending = s;
+    spin_unlock_irqrestore(&g_seg_release_lock, flags);
+}
+
+static void mm_seg_release_drain(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_seg_release_lock);
+    mm_seg_t *v = g_seg_release_pending;
+    g_seg_release_pending = NULL;
+    spin_unlock_irqrestore(&g_seg_release_lock, flags);
+
+    while (v) {
+        mm_seg_t *next = v->deferred_next;
+        v->deferred_next = NULL;
+        v->released = 1;
+        vma_release(v);
+        mm_seg_put(v);
+        v = next;
+    }
+}
+
 void mm_vma_flush_deferred(mm_struct_t *mm)
 {
     if (!mm) return;
@@ -472,6 +519,9 @@ void mm_vma_flush_deferred(mm_struct_t *mm)
         mm_seg_put(v);
         v = next;
     }
+
+    /* Same contract, for the records no per-mm queue could claim. */
+    mm_seg_release_drain();
 }
 
 void mm_insert_vma(mm_struct_t *mm, mm_seg_t *newv) {

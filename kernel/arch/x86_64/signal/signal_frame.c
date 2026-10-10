@@ -43,6 +43,15 @@ uint64_t arch_signal_handler_sp(uint64_t frame_sp)
     return frame_sp - 8;
 }
 
+/* SysV AMD64 reserves the 128 bytes below RSP for interrupted leaf
+ * functions.  A signal frame must leave those bytes untouched.  When the
+ * generic delivery path switches to a fresh altstack it uses that stack's
+ * top instead, so no red zone is subtracted there. */
+uint64_t arch_signal_stack_top(uint64_t sp)
+{
+    return sp >= 128 ? sp - 128 : 0;
+}
+
 /*
  * Map a dedicated RX page for the signal return trampoline into the new
  * process address space.  It is freed automatically with the mm because we
