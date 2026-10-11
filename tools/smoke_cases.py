@@ -211,7 +211,7 @@ CASES: dict[str, dict] = {
                  '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp4-preempt/ext4.img,if=none,format=raw,id=x1',
                  '-device', 'virtio-blk-pci,drive=x1',
                  '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp4-preempt/kernel.elf'],
-        'expect': ['VM_FAULT: reclaim-hints PASS', 'VM_FAULT: fork-writes PASS', 'SCM_STRESS: native-wire-lengths PASS', 'SCM_STRESS: PASS', 'NETOPT: PASS', 'SIGNAL_FAULT: PASS', 'SOCKET_STRESS: registry-shard-recycle PASS', 'SOCKET_STRESS: PASS', 'IO_EVENT_TEST: eventfd overflow', 'IO_EVENT_TEST: PASS', 'SIGNALFD_STRESS: PASS', 'SECCOMP_CONTEXT: PASS', 'GS_BASE: PASS', 'VM_FAULT: sparse-unmap PASS', r'SANDBOX: PASS no-new-privs fork\+exec\+setid seccomp-pointer\+errno\+inherit', 'VM_FAULT: redzone PASS', 'VM_FAULT: cow-copy PASS', 'VM_FAULT: futex-cow PASS',
+        'expect': ['VM_FAULT: copy-protection PASS', 'VM_FAULT: reclaim-hints PASS', 'VM_FAULT: fork-writes PASS', 'SCM_STRESS: native-wire-lengths PASS', 'SCM_STRESS: PASS', 'NETOPT: PASS', 'SIGNAL_FAULT: PASS', 'SOCKET_STRESS: registry-shard-recycle PASS', 'SOCKET_STRESS: PASS', 'IO_EVENT_TEST: eventfd overflow', 'IO_EVENT_TEST: PASS', 'SIGNALFD_STRESS: PASS', 'SECCOMP_CONTEXT: PASS', 'GS_BASE: PASS', 'VM_FAULT: sparse-unmap PASS', r'SANDBOX: PASS no-new-privs fork\+exec\+setid seccomp-pointer\+errno\+inherit', 'VM_FAULT: redzone PASS', 'VM_FAULT: cow-copy PASS', 'VM_FAULT: futex-cow PASS',
                    'VM_FAULT: anon-race PASS errors=0', 'VM_FAULT: PASS',
                    'PTY_TERMIOS: PASS',
                    'System is going down for power-off'],
