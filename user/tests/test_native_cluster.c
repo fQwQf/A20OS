@@ -841,15 +841,97 @@ static int task_stat(const char *key, uint64_t *out) {
     return -1;
 }
 
+/* Fixture application query runs through the production CW DOT dispatch. */
+static int gateway_send_count(const a20_node_id_t *peer, uint64_t epoch,
+                              uint64_t *count) {
+    uint8_t input[12] = {1}, wire[44], reply[40];
+    a20_work_request_t query = {.job = 0x53454e44u,
+                                .kind = A20_WORK_OPERATOR,
+                                .operator_id = A20_WORK_DOT,
+                                .attempt = 1,
+                                .budget_ms = 1000,
+                                .input = input,
+                                .input_len = sizeof(input)};
+    int n = a20_work_encode(wire, sizeof(wire), &query);
+    a20_handle_t endpoint = A20_HANDLE_NULL;
+    if (n < 0 || a20_cluster_connect_bound(peer, 2, epoch, &endpoint) < 0)
+        return -1;
+    uint32_t len = sizeof(reply);
+    int status = a20_cluster_exchange(endpoint, wire, n, reply, &len, 3000);
+    a20_hdl_close(endpoint);
+    a20_work_result_t result;
+    if (status < 0 || a20_work_result_decode(reply, len, &query, &result) < 0 ||
+        result.status || result.output_len != 8)
+        return -1;
+    *count = a20_work_u64(result.output);
+    return 0;
+}
+
+static int gateway_send_probe(const a20_node_id_t *peer, uint64_t epoch) {
+    uint32_t slot;
+    uint64_t discovered;
+    a20_handle_t endpoint = A20_HANDLE_NULL;
+    if (a20_cluster_resolve(peer, "events", 6, 3000, &slot, &discovered) < 0 ||
+        discovered != epoch || slot != 3 ||
+        a20_cluster_connect_bound_flags(
+            peer, slot, epoch, A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY,
+            &endpoint) < 0)
+        return fail("gateway-send-connect");
+    const unsigned lengths[] = {8, 64, 128, 206};
+    uint64_t started = a20_agent_clock_ms(0);
+    for (unsigned index = 0; index < 128; index++) {
+        uint8_t message[206];
+        unsigned len = lengths[index % 4];
+        a20_work_put32(message, index);
+        a20_work_put32(message + 4, len);
+        for (unsigned j = 8; j < len; j++)
+            message[j] = (uint8_t)(index ^ j);
+        a20_status_t status;
+        do {
+            status = a20_channel_send_flags(endpoint, message, len, NULL, 0,
+                                            A20_MSG_NONBLOCK);
+            if (status != -A20_ERR_WOULD_BLOCK)
+                break;
+            a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+        } while (a20_agent_clock_ms(0) - started < 20000);
+        if (status < 0)
+            return fail("gateway-send-submit");
+    }
+    uint64_t count = 0;
+    do {
+        if (gateway_send_count(peer, epoch, &count) < 0 || count > 128)
+            return fail("gateway-send-query");
+        if (count == 128)
+            break;
+        a20_thread_sleep((a20_time_t){.nsecs = 10000000});
+    } while (a20_agent_clock_ms(0) - started < 25000);
+    if (count != 128)
+        return fail("gateway-send-delivery");
+    a20_cluster_resource_args_t resources = {0};
+    do {
+        if (a20_cluster_resources(&resources) < 0)
+            return fail("gateway-send-resources");
+        if (!resources.values[A20_CLX_STAT_INFLIGHT])
+            break;
+        a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+    } while (a20_agent_clock_ms(0) - started < 25000);
+    if (resources.values[A20_CLX_STAT_INFLIGHT] ||
+        resources.values[A20_CLX_STAT_INFLIGHT_BYTES])
+        return fail("gateway-send-drain");
+    a20_hdl_close(endpoint);
+    note("GATEWAY: send-pass\n", 19);
+    return 0;
+}
+
 /* Invoked explicitly by the full-kernel COM2/MCU byte-stream checker. */
 static int uart_runtime(const char *control_path, const char *agent_path,
-                        unsigned rounds, int routed) {
+                        unsigned rounds, int routed, int oneway) {
     a20_node_id_t self = {{0}}, peer = {{0}};
     self.bytes[15] = 1;
     peer.bytes[15] = 2;
     a20_handle_t early_control = A20_HANDLE_NULL;
     uint8_t hop[2] = {1, 0};
-    if (a20_cluster_set_self(&self, 0) < 0)
+    if (a20_cluster_set_self(&self, oneway ? A20_CLUSTER_CAP_ONEWAY : 0) < 0)
         return fail("uart-identity");
     if (routed) {
         a20_node_id_t gateway = {{0}};
@@ -902,6 +984,8 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         early_control = A20_HANDLE_NULL;
     }
     note("UART: directory-pass\n", 21);
+    if (oneway && gateway_send_probe(&peer, epoch))
+        return 1;
     if (routed) {
         uint8_t too_large[207] = {0}, reply[32];
         a20_handle_t endpoint = A20_HANDLE_NULL;
@@ -1028,6 +1112,13 @@ static int uart_runtime(const char *control_path, const char *agent_path,
                                 -A20_ERR_NODE_UNREACHABLE)
             return fail("gateway-reboot-epoch");
         note("GATEWAY: reboot-pass\n", 21);
+        if (oneway) {
+            a20_thread_sleep((a20_time_t){.nsecs = 500000000});
+            uint64_t count;
+            if (gateway_send_count(&peer, epoch, &count) < 0 || count)
+                return fail("gateway-send-old-session");
+            note("GATEWAY: send-old-session-pass\n", 31);
+        }
     }
     a20_handle_t agent = A20_HANDLE_NULL, control = early_control;
     if (spawn_service(agent_path, &agent) < 0 ||
@@ -1157,13 +1248,18 @@ int main(int argc, char **argv, char **envp) {
     if (si)
         g_stdout = si->stdout_handle;
 
-    if ((argc == 2 || argc == 3) && !a20_strcmp(argv[1], "gateway-head")) {
+    if ((argc == 2 || argc == 3) &&
+        (!a20_strcmp(argv[1], "gateway-head") ||
+         !a20_strcmp(argv[1], "gateway-send-head"))) {
         a20_node_id_t self = {{0}}, client = {{0}}, leaf = {{0}};
         self.bytes[15] = 3;
         client.bytes[15] = 1;
         leaf.bytes[15] = 2;
         uint8_t uart[2] = {1, 0}, udp[6] = {10, 0, 3, 2, 0xab, 0xf4};
-        if (a20_cluster_set_self(&self, A20_CLUSTER_CAP_RELAY) < 0 ||
+        uint32_t caps = A20_CLUSTER_CAP_RELAY;
+        if (!a20_strcmp(argv[1], "gateway-send-head"))
+            caps |= A20_CLUSTER_CAP_ONEWAY;
+        if (a20_cluster_set_self(&self, caps) < 0 ||
             a20_cluster_route(A20_ROUTE_ADD, &leaf, A20_CLX_TRANSPORT_UART,
                               uart, sizeof(uart), 0) < 0 ||
             a20_cluster_route(A20_ROUTE_ADD, &client, A20_CLX_TRANSPORT_UDP,
@@ -1178,6 +1274,7 @@ int main(int argc, char **argv, char **envp) {
     }
     if ((argc == 4 || argc == 5) && (!a20_strcmp(argv[1], "uart") ||
                                      !a20_strcmp(argv[1], "gateway-client") ||
+                                     !a20_strcmp(argv[1], "gateway-send") ||
                                      !a20_strcmp(argv[1], "gateway-gossip"))) {
         unsigned rounds = 96;
         if (argc == 5) {
@@ -1193,7 +1290,9 @@ int main(int argc, char **argv, char **envp) {
         return uart_runtime(argv[2], argv[3], rounds,
                             !a20_strcmp(argv[1], "gateway-gossip")
                                 ? 2
-                                : !a20_strcmp(argv[1], "gateway-client"));
+                                : (!a20_strcmp(argv[1], "gateway-client") ||
+                                   !a20_strcmp(argv[1], "gateway-send")),
+                            !a20_strcmp(argv[1], "gateway-send"));
     }
 
     note("start\n", 6);

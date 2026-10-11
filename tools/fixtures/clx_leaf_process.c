@@ -40,8 +40,39 @@ static int raw_receive(void *ctx) {
     return read(STDIN_FILENO, &byte, 1) == 1 ? byte : -1;
 }
 static unsigned executions;
+static unsigned sink_count, sink_duplicates, sink_bad;
+static uint8_t sink_seen[128];
+static uint32_t counted_sink(void *ctx, const uint8_t *input, uint32_t len) {
+    (void)ctx;
+    unsigned index = len >= 8 ? a20_work_u32(input) : 128;
+    if (index >= 128 || a20_work_u32(input + 4) != len) {
+        sink_bad++;
+        return 12; /* Native INVALID_ARGUMENT, carried by the SEND receipt. */
+    }
+    for (unsigned i = 8; i < len; i++)
+        if (input[i] != (uint8_t)(index ^ i)) {
+            sink_bad++;
+            return 12;
+        }
+    if (sink_seen[index])
+        sink_duplicates++;
+    sink_seen[index] = 1;
+    fprintf(stderr, "SEND-EXEC:%u index=%u bytes=%u duplicates=%u bad=%u\n",
+            ++sink_count, index, len, sink_duplicates, sink_bad);
+    return 0;
+}
 static uint32_t counted_dot(void *ctx, const a20_work_request_t *request,
                             uint8_t *output, uint32_t *output_len) {
+    /* Fixture application query, executed through the shipped work dispatch.
+     * It does not create a synthetic wire reply or change production DOT. */
+    if (request->job == 0x53454e44u) {
+        if (*output_len < 8)
+            return A20_WORK_NO_SPACE;
+        a20_work_put64(output, sink_count | ((uint64_t)sink_duplicates << 32) |
+                                   ((uint64_t)sink_bad << 48));
+        *output_len = 8;
+        return 0;
+    }
     fprintf(stderr, "DOT-EXEC:%u job=%llu shard=%u attempt=%u\n", ++executions,
             (unsigned long long)request->job, request->shard, request->attempt);
     return a20_work_dot(ctx, request, output, output_len);
@@ -53,6 +84,9 @@ static uint32_t counted_map(void *ctx, const a20_work_request_t *request,
     return a20_work_word_map(ctx, request, output, output_len);
 }
 int main(int argc, char **argv) {
+    int oneway = argc > 1 && !strcmp(argv[argc - 1], "--send");
+    if (oneway)
+        argc--;
     assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0);
     a20_mcu_leaf_init();
     a20_work_operator_t ops[sizeof(leaf_operators) / sizeof(leaf_operators[0])];
@@ -70,6 +104,8 @@ int main(int argc, char **argv) {
     }
     assert(a20_mcu_leaf_set_io(raw_send, raw_receive, NULL) == 0);
     assert(a20_mcu_leaf_set_agent(&agent) == 0);
+    if (oneway)
+        assert(a20_mcu_leaf_set_sink("events", 6, counted_sink, NULL) == 0);
     assert(argc == 1 || argc == 3 || (argc == 2 && !strcmp(argv[1], "300")));
     assert(a20_mcu_leaf_configure(id, argc == 2 ? 300 : 200) == 0);
     fprintf(stderr, "LEAF-READY\n");

@@ -330,6 +330,7 @@ check-cluster-reliable:
 check-cluster-send:
 	$(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-server
 	$(PYTHON) tools/check-cluster-udp.py --send --routed --faults --profile 3 --peer-profile 2 --timeout 180 --log-dir .kernel-build/cluster/send-routed-mixed
+	$(PYTHON) tools/check-cluster-gateway.py --send --timeout 180
 
 .PHONY: check-cluster-mesh
 check-cluster-mesh:

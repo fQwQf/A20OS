@@ -297,3 +297,24 @@ ring 下标进行第二次映射，TX 回收错误槽位，RX 也做了相同转
 STM32 USART2/3 均链接，text=47936 B、data=0、bss=9440 B，仍不代表物理运行。
 
 本轮 `make check-doc-test-gates` 全部通过；1498 个文档行号引用检查通过。
+
+
+## 19. 单向 SEND 的完整混合传输链路
+
+`tools/check-cluster-gateway.py --send` 已通过：真实 RISC-V Native 程序经 UDP、
+x86 COM2 和生产 leaf 接收 128 条 8–206 B 消息。MCU 业务回调按编号核对全部
+字节，重复接收为零。故意丢退休收据后观察单缓存 NO_SPACE 背压与同事务收据
+重发，后续接纳继续；丢请求/ACK/完成回执、重复帧、leaf 重启后旧 SEND 重放
+均通过。原 96 次可靠 DOT、any、混合算子与词频树、任务资源回收也继续通过。
+
+初次完整链路运行耗时 32.441 秒，DOT 实际执行/独立事务为 97/97，MAP 为
+1/1。这是该次仿真记录，不是吞吐或硬件性能承诺。归档位于
+`.kernel-build/cluster/evidence/gateway-send-initial/`；`check-cluster-send` 已增加
+完整网关入口。四节点吞吐、8 小时 soak 和物理板仍待验收。
+
+
+加强证据检查后再次以 `--send --abandon` 通过，33.267 秒；丢失的 SEND 退休
+事务号为 7，实际观察到同事务 2 个退休帧，128 条消息全部精确接纳。该次
+MAP 为 2/2，首次 attempt 的全部回复被丢弃后，作业以新 attempt 重派成功。
+原 `--gossip --abandon` 场景随后独立通过，默认未启用 SEND 的行为保持可用。
+Native 集群测试程序再次完成七架构链接，文档引用检查通过。

@@ -83,11 +83,17 @@ SEND 的 seq，业务回复长度为零，仅携带反向 epoch 与状态码。�
 | `make smoke-native-cluster` | LOCAL 单向接收、模式拒绝、只写句柄、融合 CALL 权限拒绝与 epoch 绑定 helper 通过 | 真实 Native ABI 与内核 |
 | 同一入口的 `test_clx_oneway.c` | 256 次静态 sink 接纳、768 个重复帧，0/1/64/206 B、错误回调缓存、旧 epoch、路由 CS 均通过 | 真实 UART 与 leaf 代码，替换时钟及板级 I/O |
 | `make check-cluster-send` | 两端各 264 次 SEND、96 次并发 CALL；服务器档持续 10% 丢帧，以及三内核中继的服务器/默认混合档均通过 | 独立 QEMU 内核，64 KiB 服务器业务，混合档按较小限额 |
+| `tools/check-cluster-gateway.py --send` | 128 个 8/64/128/206 B SEND、丢请求/回执/ACK/退休收据、重复帧、MCU 单缓存恢复和旧 SEND 重放隔离通过 | RISC-V Native→UDP→x86 COM2→生产 leaf 主机进程；没有物理板 |
 | `tools/check-cluster-udp.py --send --faults --restart` | 丢 SEND/完成回执/ACK/收据、重复/乱序/丢片、对端重启和旧 CALL/SEND 重放通过 | 两套独立内核；接收业务重复计数为零 |
 
 每次软件运行的源码摘要、QEMU 命令和日志保存在检查器的 `--log-dir` 下。
 本轮 `send-server/`、`send-routed-mixed/`、`send-restart-final/` 保留成功记录；
 之前的缓存满、2 秒重组超时和大 SEND 编码失败日志也保留，没有当作通过。
 
-尚未完成：完整 Native UDP→UART→MCU SEND 故障链路、物理板、四节点 60 秒
-吞吐和 8 小时混合 soak。静态 UART 配对验证不能替代这些端到端或规模证据。
+网关的 fixture 以静态回调记录业务编号，另用真实 CW/DOT 接口提供应用查询；
+Native 观察 128 次接纳后再等待在途/重试字节归零。检查器只转发、丢弃、
+重复或重放真实帧，不生成业务回复。丢退休收据后必须观察同事务收据再次
+出现及 MCU NO_SPACE 背压，再验证后续 SEND 和 CALL 恢复。
+
+尚未完成：物理板、四节点 60 秒吞吐和 8 小时混合 soak。静态 UART 配对及
+短时网关验证不能替代这些硬件或规模证据。

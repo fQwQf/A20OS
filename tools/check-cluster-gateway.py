@@ -44,13 +44,20 @@ def cl_payload(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--send", action="store_true", help="probe reliable SEND through both kernels and the static leaf")
     parser.add_argument("--abandon", action="store_true", help="lose every reply of the first leaf MAP attempt")
     parser.add_argument("--gossip", action="store_true", help="discover the leaf route from a relay, then expire it on link loss")
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--log-dir", type=Path)
     args = parser.parse_args()
+    if args.send and args.gossip:
+        parser.error("--send currently uses explicit routes; gossip is a separate scenario")
     root = Path(__file__).resolve().parent.parent
-    directory = root / (".kernel-build/cluster/gateway-abandon" if args.abandon else
+    directory = root / (".kernel-build/cluster/gateway-send" if args.send else
+                        ".kernel-build/cluster/gateway-abandon" if args.abandon else
                         ".kernel-build/cluster/gateway-gossip" if args.gossip else ".kernel-build/cluster/gateway")
+    if args.log_dir:
+        directory = (root / args.log_dir).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     commands = []
     for arch in ("riscv64", "x86_64"):
@@ -81,6 +88,8 @@ def main():
     events, saved, keys = {}, {}, set()
     map_keys = set()
     map_acks = set()
+    send_keys = set()
+    send_retirements = {}
     trace = deque(maxlen=1024)
     success = False
     started = time.monotonic()
@@ -96,7 +105,8 @@ def main():
         endpoints.extend([wire, stdio])
         log = (directory / ("leaf-reboot.log" if reboot else "leaf.log")).open("w")
         logs.append(log)
-        process = subprocess.Popen([str(binary)] + (["300"] if reboot else []), cwd=root,
+        process = subprocess.Popen([str(binary)] + (["300"] if reboot else []) +
+                                   (["--send"] if args.send else []), cwd=root,
                                    stdin=stdio, stdout=stdio, stderr=log)
         processes.append(process)
         stdio.close()
@@ -185,6 +195,28 @@ def main():
                             trace.append({"lane": "uart", "side": side, "hex": cl.hex()})
                             if len(cl) > 256:
                                 raise RuntimeError("gateway exceeded UART path MTU")
+                            txid = int.from_bytes(cl[8:12], "little")
+                            seq = int.from_bytes(cl[24:28], "little")
+                            if args.send and side == 0 and cl[3] == 5 and int.from_bytes(cl[20:24], "little") == 3:
+                                if txid or not seq or not cl[4] & 1 or len(cl) > 256:
+                                    raise RuntimeError("invalid business SEND on UART")
+                                send_keys.add(seq)
+                                if once("uart-drop-send"):
+                                    continue
+                                saved.setdefault("uart-old-send", packet)
+                                if once("uart-duplicate-send"):
+                                    pending[1] += b"\xc0" + packet + b"\xc0"
+                            if args.send and side == 1 and txid in send_keys:
+                                if cl[3] == 7 and once("uart-drop-send-completion"):
+                                    continue
+                                if cl[3] == 9 and once("uart-drop-send-ack"):
+                                    continue
+                            if (args.send and side == 0 and cl[3] == 6 and
+                                    int.from_bytes(cl[20:24], "little") == 0 and txid in send_keys):
+                                send_retirements[txid] = send_retirements.get(txid, 0) + 1
+                                if once("uart-drop-send-retirement"):
+                                    saved["lost-send-retirement"] = txid
+                                    continue
                             if cl[32:35] == b"CS\x01":
                                 if int.from_bytes(cl[36:40], "little") != 256:
                                     raise RuntimeError("CS did not clamp the UART path MTU")
@@ -199,8 +231,10 @@ def main():
                             if side == 0 and work and cl[3] == 6 and cl[51] == 2:
                                 if once("uart-drop-work"):
                                     continue
-                                saved.setdefault("uart-old-call", packet)
-                                if int.from_bytes(cl[64:68], "little") == 1:
+                                job = int.from_bytes(cl[52:60], "little")
+                                if job != 0x53454e44:
+                                    saved.setdefault("uart-old-call", packet)
+                                if int.from_bytes(cl[64:68], "little") == 1 and job != 0x53454e44:
                                     keys.add(bytes(cl[8:12] + cl[32:48]))
                                 if int.from_bytes(cl[64:68], "little") == 3:
                                     map_keys.add(bytes(cl[8:12] + cl[32:48]))
@@ -223,11 +257,13 @@ def main():
                 if "F:" in output or "F:" in gateway or "PANIC" in output+gateway:
                     raise RuntimeError("Native gateway test failed; inspect logs")
                 if not launched and time.monotonic()-started >= 8:
-                    processes[1].stdin.write(b"/bin/native-cluster-x86_64 gateway-head" +
+                    processes[1].stdin.write(b"/bin/native-cluster-x86_64 " +
+                                             (b"gateway-send-head" if args.send else b"gateway-head") +
                                              (b" /bin/clusterd-x86_64" if args.gossip else b"") + b"\n")
                     processes[1].stdin.flush()
                     processes[0].stdin.write(b"/bin/native-cluster-rv " +
-                                             (b"gateway-gossip" if args.gossip else b"gateway-client") +
+                                             (b"gateway-send" if args.send else
+                                              b"gateway-gossip" if args.gossip else b"gateway-client") +
                                              b" /bin/clusterd-rv /bin/cluster-agent-rv\n")
                     processes[0].stdin.flush()
                     launched = True
@@ -247,6 +283,11 @@ def main():
                     side, data = saved["udp-old-reply"]
                     udp[1-side].sendto(data, ("127.0.0.1", ports[1-side]))
                     pending[1] += b"\xc0" + saved["uart-old-call"] + b"\xc0"
+                    if args.send:
+                        if "uart-old-send" not in saved:
+                            raise RuntimeError("no old SEND for reboot replay")
+                        pending[1] += b"\xc0" + saved["uart-old-send"] + b"\xc0"
+                        events["old-send-replayed"] = 1
                     events["old-cs-reply-replayed"] = events["old-call-replayed"] = 1
                     replayed = True
                 if args.gossip and "GATEWAY: gossip-expire-ready" in output and not unplugged:
@@ -255,6 +296,29 @@ def main():
                     pending[1].clear()
                     events["serial-unplugged"] = 1
                 if "UART: PASS" in output:
+                    if args.send:
+                        before = (directory / "leaf.log").read_text()
+                        after = (directory / "leaf-reboot.log").read_text()
+                        required = ("uart-drop-send", "uart-duplicate-send", "uart-drop-send-completion",
+                                    "uart-drop-send-ack", "uart-drop-send-retirement", "old-send-replayed")
+                        admitted = [line for line in before.splitlines() if line.startswith("SEND-EXEC:")]
+                        records = [dict(field.split("=", 1) for field in line.split()[1:]) for line in admitted]
+                        if (len(send_keys) != 128 or before.count("SEND-EXEC:") != 128 or
+                                "SEND-EXEC:" in after or
+                                {int(r["index"]) for r in records} != set(range(128)) or
+                                any(r["duplicates"] != "0" or r["bad"] != "0" or
+                                    int(r["bytes"]) != (8, 64, 128, 206)[int(r["index"]) % 4]
+                                    for r in records) or
+                                "GATEWAY: send-pass" not in output or
+                                "GATEWAY: send-old-session-pass" not in output or
+                                not all(events.get(k) for k in required) or
+                                send_retirements.get(saved.get("lost-send-retirement"), 0) < 2 or
+                                not events.get("mcu-admission-busy")):
+                            raise RuntimeError("SEND delivery/dedup/retirement recovery/reboot evidence incomplete")
+                        events["send_admitted"] = 128
+                        events["send_retirement_recovery"] = True
+                        events["lost_send_retirement_txid"] = saved["lost-send-retirement"]
+                        events["recovered_send_retirement_frames"] = send_retirements[saved["lost-send-retirement"]]
                     if args.gossip and "GATEWAY: gossip-expire-pass" not in output:
                         raise RuntimeError("automatic route lease did not expire")
                     executed = sum((directory / name).read_text().count("DOT-EXEC:")
@@ -266,7 +330,6 @@ def main():
                             or not all(events.get(k) for k in ("udp-0-drop-cs-1", "udp-0-drop-cs-2",
                                       "udp-1-drop-cs-1", "udp-1-drop-cs-2", "uart-path-mtu-256"))):
                         raise RuntimeError(f"fault/dedup/reboot evidence incomplete: {executed=}, {len(keys)=}")
-                    success = True
                     maps = sum((directory / name).read_text().count("MAP-EXEC:")
                                for name in ("leaf.log", "leaf-reboot.log"))
                     admitted_maps = sum(int.from_bytes(key[:4], "little") in map_acks for key in map_keys)
@@ -278,7 +341,9 @@ def main():
                         raise RuntimeError("attempt abandonment/cache retirement evidence missing")
                     events.update({"dot_executions": executed, "unique_dot_transactions": len(keys),
                                    "map_executions": maps, "admitted_map_transactions": admitted_maps, "requested_map_transactions": len(map_keys)})
+                    success = True
                     print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree" +
+                          (", 128 SENDs and lost-retirement recovery" if args.send else "") +
                           (", automatic route/daemon recovery/lease expiry" if args.gossip else "") + ")")
                     return
             raise TimeoutError("gateway test timed out; inspect logs")
