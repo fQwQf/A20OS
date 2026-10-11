@@ -6,12 +6,12 @@
 /* Native transport driver for the same graph state machine used by firmware
  * harnesses. Fresh endpoints isolate each attempt and are closed on every
  * termination path. The caller owns task storage; this bounded driver accepts
- * at most the convenience DOT graph's 15 nodes. */
+ * at most the shared graph limit of 64 nodes. */
 static inline int a20_cluster_job_run(a20_job_t *job, const char *service) {
-    if (!job || job->task_count > A20_JOB_DOT_TASKS || !service)
+    if (!job || job->task_count > A20_JOB_MAX_TASKS || !service)
         return -1;
-    a20_handle_t endpoints[A20_JOB_DOT_TASKS];
-    for (uint32_t i = 0; i < A20_JOB_DOT_TASKS; i++)
+    a20_handle_t endpoints[A20_JOB_MAX_TASKS];
+    for (uint32_t i = 0; i < A20_JOB_MAX_TASKS; i++)
         endpoints[i] = A20_HANDLE_NULL;
     a20_cluster_snapshot_args_t self = {0};
     if (a20_cluster_snapshot(&self) < 0)

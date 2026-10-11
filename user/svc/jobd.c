@@ -4,9 +4,10 @@
 #include "liba20rt/crt0_a20.h"
 #include "../../kernel/include/uapi/a20/cluster_word_job.h"
 
-static a20_job_task_t tasks[A20_JOB_DOT_TASKS];
+static a20_job_task_t tasks[A20_JOB_WORD_TASKS];
 static uint8_t inputs[A20_JOB_DOT_LEAVES][132];
-static uint8_t outputs[A20_JOB_DOT_TASKS][A20_WORD_RESULT];
+static uint8_t outputs[A20_JOB_WORD_TASKS][A20_WORD_RESULT];
+static uint8_t word_inputs[A20_JOB_WORD_LEAVES][A20_JOB_WORD_CHUNK];
 static uint64_t sequence;
 static int dispatch(void *ctx, const uint8_t *request, uint32_t len,
                     uint8_t *reply, uint32_t capacity) {
@@ -38,11 +39,11 @@ static int dispatch(void *ctx, const uint8_t *request, uint32_t len,
         len != A20_JOB_WIRE_HEADER + count * (words ? 1 : 8) || !budget ||
         budget > 30000)
         return error_len;
-    int n = words
-                ? a20_job_word_graph(tasks, A20_JOB_DOT_TASKS, inputs, outputs,
-                                     request + A20_JOB_WIRE_HEADER, count)
-                : a20_job_dot_graph(tasks, A20_JOB_DOT_TASKS, inputs,
-                                    request + A20_JOB_WIRE_HEADER, count);
+    int n = words ? a20_job_word_graph(tasks, A20_JOB_WORD_TASKS, word_inputs,
+                                       outputs, request + A20_JOB_WIRE_HEADER,
+                                       count)
+                  : a20_job_dot_graph(tasks, A20_JOB_DOT_TASKS, inputs,
+                                      request + A20_JOB_WIRE_HEADER, count);
     a20_job_t job;
     /* Use owner-generated IDs for CW execution. A repeated client CJ request
      * is a new job, never an alias of an in-progress caller-chosen shard. */

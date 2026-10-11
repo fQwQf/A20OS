@@ -69,7 +69,9 @@ static uint64_t leaf_nonce;
 static uint64_t leaf_peer_nonce;
 static uint8_t leaf_peer_version;
 static uint32_t leaf_peer_caps;
-#define LEAF_ORIGINS 4u
+/* Six hosted control planes can discover a leaf in the eight-node mixed
+ * deployment. Keep their session/windows without evicting execution history. */
+#define LEAF_ORIGINS 8u
 typedef struct leaf_origin {
     int used;
     uint8_t id[16];

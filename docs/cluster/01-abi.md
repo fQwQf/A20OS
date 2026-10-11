@@ -1,6 +1,6 @@
 # Native 集群 ABI 使用手册
 
-七个 syscall 已接入真实内核数据面，号段 `0x0520`–`0x0525`。
+七个 syscall 已接入真实内核数据面，号段 `0x0520`–`0x0526`。
 结构体的权威定义为 `kernel/include/abi/native/types.h`，用户包装在
 `user/liba20rt/a20_cluster.h`。协议版本与 Native 参数结构体 version 是两套
 不同版本：参数头当前填 `size=sizeof(args), version=1`。
