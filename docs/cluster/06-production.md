@@ -89,8 +89,8 @@
   未完成项见 [20-hardening.md](20-hardening.md)。`check-cluster-fuzz` 是百万变异
   快速档；`check-cluster-fuzz-smoke` 持续至少 300 秒并更换种子。Native 性能入口
   为 `check-cluster-performance`，测量范围和局限见 [21-performance.md](21-performance.md)。
-- 业务单向发送入口为 `make check-cluster-send`，含服务器档持续 10% 丢帧与
-  服务器/默认混合档多跳测试；协议、完成含义和 MCU 静态接收器见
+- 业务单向发送入口为 `make check-cluster-send`，含服务器档持续 10% 丢帧、
+  服务器/默认混合档多跳及 Native UDP→UART→leaf 故障测试；协议、完成含义和 MCU 静态接收器见
   [22-oneway.md](22-oneway.md)。
 - 进 `.github/workflows/ci.yml` 的从 `print-ci-kernel-arches` 派生的矩阵惯例，不允许手工硬编码架构清单（Makefile 顶部注释的既有教训）。
 - 全量既有门禁零回归是合入前提：`make help` 列出的默认 check 目标。
