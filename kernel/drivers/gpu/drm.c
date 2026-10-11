@@ -36,7 +36,7 @@
  * gpu_dev_ops_t.  Dumb buffers are VMO-backed so userland can mmap them.
  */
 
-#define DRM_MAX_GEMS 64
+#define DRM_GEM_BUCKETS 256
 #define DRM_MAX_FBS 64
 #define DRM_MAX_GEM_NAMES 64
 #define DRM_EVENT_FLIP_COMPLETE 0x02
@@ -50,7 +50,7 @@
  * virgl path all operate on the same object, as in Linux.
  */
 typedef struct drm_gem {
-    int used;
+    struct drm_gem *next;
     uint32_t handle;
     uint32_t width;
     uint32_t height;
@@ -149,8 +149,7 @@ static void drm_vblank_init_once(void)
  * (the wlroots backend), matching Linux DRM semantics.  wlroots exports a
  * buffer via PRIME on one fd and imports it on another, then creates an FB
  * and pages it in. */
-static drm_gem_t g_gems[DRM_MAX_GEMS];
-static int g_gem_count;
+static drm_gem_t *g_gems[DRM_GEM_BUCKETS];
 
 /* Handles are unique device-wide, not per-fd, to match the global store. */
 static uint32_t g_gem_next_handle = 1;
@@ -788,15 +787,15 @@ struct drm_mode_atomic {
 /* ---- helpers ----
  *
  * Everything below the "locked" suffix requires g_drm.lock; the pinned variants
- * take it themselves.  No function here returns a pointer into g_gems[]/
+ * take it themselves.  No function here returns a pointer into the GEM store or
  * g_fbs[] unless the caller is documented to be holding the lock or a pin.
  */
 
 static drm_gem_t *drm_find_gem_locked(uint32_t handle)
 {
-    for (int i = 0; i < g_gem_count; i++)
-        if (g_gems[i].used && g_gems[i].handle == handle)
-            return &g_gems[i];
+    for (drm_gem_t *g = g_gems[handle % DRM_GEM_BUCKETS]; g; g = g->next)
+        if (g->handle == handle)
+            return g;
     return NULL;
 }
 
@@ -821,12 +820,11 @@ static drm_gem_t *drm_gem_pin(uint32_t handle)
 typedef struct {
     struct vmo *vmo;
     uint32_t virgl_res_id;
+    drm_gem_t *object;
 } drm_gem_storage_t;
 
 static void drm_gem_drop_storage(drm_gem_storage_t *s)
 {
-    if (!s->vmo && !s->virgl_res_id)
-        return;
     /* A 3D resource is still mapped by the host after userspace drops its
      * handle: the host writes rendered results straight into these frames.
      * Releasing the VMO first would hand those frames back to the allocator
@@ -842,6 +840,8 @@ static void drm_gem_drop_storage(drm_gem_storage_t *s)
         vmo_release(s->vmo);
         s->vmo = NULL;
     }
+    kfree(s->object);
+    s->object = NULL;
 }
 
 /* Take the GEM out of the tables and hand its storage back to the caller.
@@ -856,8 +856,12 @@ static void drm_gem_detach_locked(drm_gem_t *b, drm_gem_storage_t *out)
             break;
         }
     }
-    memset(b, 0, sizeof(*b));
-    b->used = 0;
+    drm_gem_t **link = &g_gems[b->handle % DRM_GEM_BUCKETS];
+    while (*link && *link != b)
+        link = &(*link)->next;
+    if (*link)
+        *link = b->next;
+    out->object = b;
 }
 
 /* Drop a pin and, if the object has no owner left either, reclaim it.  Safe to
@@ -967,34 +971,31 @@ static drm_gem_t *drm_gem_alloc_locked(uint32_t width, uint32_t height,
      * single ioctl. */
     if (size == 0 || size > DRM_MAX_BUFFER_BYTES)
         return NULL;
-    for (int i = 0; i < DRM_MAX_GEMS; i++) {
-        if (g_gems[i].used)
-            continue;
-        struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, 0);
-        if (!vmo)
-            return NULL;
-        drm_gem_t *g = &g_gems[i];
-        memset(g, 0, sizeof(*g));
-        g->used = 1;
-        uint32_t h;
-        do {
-            h = g_gem_next_handle++;
-        } while (h == 0 || drm_find_gem_locked(h));
-        g->handle = h;
-        g->width = width;
-        g->height = height;
-        g->pitch = pitch;
-        g->bpp = bpp;
-        g->format = format;
-        g->usage = usage;
-        g->vmo = vmo;
-        g->size = size;
-        g->dumb_live = 1;
-        if (i + 1 > g_gem_count)
-            g_gem_count = i + 1;
-        return g;
+    drm_gem_t *g = kmalloc(sizeof(*g));
+    if (!g)
+        return NULL;
+    memset(g, 0, sizeof(*g));
+    g->vmo = vmo_create(VMO_ANONYMOUS, size, 0);
+    if (!g->vmo) {
+        kfree(g);
+        return NULL;
     }
-    return NULL;
+    uint32_t h;
+    do {
+        h = g_gem_next_handle++;
+    } while (h == 0 || drm_find_gem_locked(h));
+    g->handle = h;
+    g->width = width;
+    g->height = height;
+    g->pitch = pitch;
+    g->bpp = bpp;
+    g->format = format;
+    g->usage = usage;
+    g->size = size;
+    g->dumb_live = 1;
+    g->next = g_gems[h % DRM_GEM_BUCKETS];
+    g_gems[h % DRM_GEM_BUCKETS] = g;
+    return g;
 }
 
 static int drm_gem_name_bind_locked(uint32_t name, uint32_t handle)
@@ -2638,24 +2639,28 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
     struct drm_virtgpu_resource_create r;
     if (copy_from_user(&r, arg, sizeof(r)) < 0)
         return -EFAULT;
-    if (r.width == 0 || r.height == 0)
+    uint64_t size = r.size ? r.size : PAGE_SIZE;
+    size = (size + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (size > DRM_MAX_BUFFER_BYTES)
         return -EINVAL;
 
     int cid = drm_virtgpu_ensure_ctx(ctx);
     if (cid < 0)
         return cid;
-
-    drm_gem_t *g = drm_gem_pin(r.bo_handle);
-    if (!g)
-        return -ENOENT;
-
     gpu_dev_ops_t *ops = drm_gpu_ops();
-    if (!ops || !ops->resource_create_3d) {
-        drm_gem_unpin(g);
+    if (!ops || !ops->resource_create_3d)
         return -ENODEV;
-    }
 
+    /* Linux RESOURCE_CREATE allocates a new GEM. Both handles are outputs;
+     * Mesa does not preallocate one through an A20-specific ioctl. */
     drm_lock();
+    drm_gem_t *g = drm_gem_alloc_locked(r.width, r.height, r.stride, 0, 0, 0, size);
+    if (!g) {
+        drm_unlock();
+        return -ENOMEM;
+    }
+    g->pins++;
+    uint32_t handle = g->handle;
     uint32_t res_id = g_virtgpu_next_res++;
     if (res_id == 0)
         res_id = g_virtgpu_next_res++;
@@ -2665,66 +2670,30 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
                                      r.target, r.format, r.bind, r.width,
                                      r.height, r.depth, r.array_size,
                                      r.last_level, r.nr_samples, r.flags);
-    if (rc < 0) {
-        drm_gem_unpin(g);
-        return rc;
-    }
-
-    /* Promoting a buffer that is already a resource replaces the old one, so
-     * the previous host resource has to be released here -- overwriting
-     * virgl_res_id alone leaks it on the host for the life of the guest. */
+    if (rc < 0)
+        goto fail;
     drm_lock();
-    uint32_t old_res = g->is_virgl ? g->virgl_res_id : 0;
     g->virgl_res_id = res_id;
     g->is_virgl = 1;
-    g->backing_attached = 0;
-    /* The new resource is a different host object, so the old one's context
-     * attachment does not carry over to it. */
-    g->ctx_attached_for = 0;
     drm_unlock();
-    if (old_res && old_res != res_id && ops->resource_unref)
-        ops->resource_unref(drm_gpu_device(), old_res);
-
     rc = drm_gem_attach_backing(g);
-    if (rc < 0) {
-        if (ops->resource_unref)
-            ops->resource_unref(drm_gpu_device(), res_id);
-        drm_lock();
-        /* Id-guarded like the copy_to_user rollback below: a concurrent
-         * RESOURCE_CREATE may have installed a newer resource, and clearing
-         * that one would both hide it from EXECBUFFER and leak it on the host. */
-        if (g->virgl_res_id == res_id) {
-            g->is_virgl = 0;
-            g->virgl_res_id = 0;
-            g->backing_attached = 0;
-        }
-        drm_unlock();
-        drm_gem_unpin(g);
-        return rc;
-    }
-
+    if (rc < 0)
+        goto fail;
+    r.bo_handle = handle;
     r.res_handle = res_id;
     if (copy_to_user(arg, &r, sizeof(r)) < 0) {
-        /* The resource exists on the host and the caller never learns its id, so
-         * nothing will ever unref it -- release it here instead. The id is
-         * cleared under the lock *before* the unref, and while this call still
-         * holds its pin, so a concurrent reclaim cannot reach the same id
-         * through drm_gem_drop_storage() and unref it a second time. */
-        drm_lock();
-        if (g->virgl_res_id == res_id) {
-            g->is_virgl = 0;
-            g->virgl_res_id = 0;
-            g->backing_attached = 0;
-            g->ctx_attached_for = 0;
-        }
-        drm_unlock();
-        if (ops->resource_unref)
-            ops->resource_unref(drm_gpu_device(), res_id);
-        drm_gem_unpin(g);
-        return -EFAULT;
+        rc = -EFAULT;
+        goto fail;
     }
     drm_gem_unpin(g);
     return 0;
+
+fail:
+    /* The pin holds the object until both GEM and host-resource ownership
+     * have been dropped, including an output-copy fault. */
+    drm_free_gem(handle);
+    drm_gem_unpin(g);
+    return rc;
 }
 
 static int drm_virtgpu_resource_info(drm_context_t *ctx, void *arg)
