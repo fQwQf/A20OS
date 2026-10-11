@@ -21,7 +21,7 @@ node_id 为 16 字节持久身份；全零代表 LOCAL，全 ff 为保留广播�
 | `cluster_set_self` | node_id、caps | 0；只允许成功一次 |
 | `cluster_export` | channel、service_name、name_len、flags | 新 slot |
 | `cluster_connect` | node_id、slot 或本地服务名、flags、timeout_ms | 普通 channel 句柄 |
-| `cluster_route` | ADD/DEL/REPLACE、node_id、transport_id、next_hop、metric | 0 |
+| `cluster_route` | ADD/DEL/REPLACE/DEL_MATCH/LEARN、node_id、transport_id、next_hop、metric | 0 |
 | `cluster_event_subscribe` | 事件 mask | EventQ 句柄 |
 | `cluster_link_status` | node_id；LOCAL 代表汇总 | 状态/计数写回参数 |
 | `cluster_snapshot` (0x0526) | kind/index/generation | 当前身份、资源档、运行资源计数或单条路由/服务快照 |
@@ -130,3 +130,13 @@ LOCAL 连接核对本机 boot epoch；远端在创建代理前核对协商到的
 不一致返回 NODE_UNREACHABLE，不能把目录解析到的旧服务派发给重启后的节点。
 已创建代理仍绑定这个会话，后续重启按既有链路取消规则处理。
 SDK 入口 `a20_cluster_connect_bound`；service URI 和作业驱动使用它。
+
+
+### 动态路由操作扩展
+
+`cluster_route` 原结构和 syscall 号不变，新增 op=3 `DEL_MATCH` 与 op=4
+`LEARN`。DEL_MATCH 仅在当前 node、transport、next_hop、长度和 metric 全部
+相等时原子删除；不匹配返回 BUSY，没有目标返回 NOT_FOUND。LEARN 只新增或
+替换带 `A20_ROUTE_DYNAMIC=0x80000000` 标记的路由，拒绝覆盖显式路由（EXISTS），
+且传入 metric 必须含标记。低 31 位为传播距离。管理员权限要求不变。
+显式 REPLACE 可覆盖动态路由；旧守护进程随后清理时不能误删用户的新配置。

@@ -1128,6 +1128,9 @@ typedef struct a20_node_id {
 #define A20_ROUTE_ADD       0u
 #define A20_ROUTE_DEL       1u
 #define A20_ROUTE_REPLACE   2u
+#define A20_ROUTE_DEL_MATCH 3u /* Delete only an exact route tuple. */
+#define A20_ROUTE_LEARN     4u /* Upsert only absent or dynamic routes. */
+#define A20_ROUTE_DYNAMIC  0x80000000u
 
 /* cluster_event_subscribe mask. */
 #define A20_CLX_EVENT_LINK_UP        (1u << 0)
