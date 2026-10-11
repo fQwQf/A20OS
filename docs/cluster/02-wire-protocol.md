@@ -161,7 +161,8 @@ v0 格式金样保持不变；v1 主机 UDP 已接入协商分片、有界重组
 网关的重分片仍未实现，出口容纳不下原片时明确丢弃。
 RELAY 转发已实现 TTL 递减和 CRC 更新；CS/1 双向挑战确认间接目的身份、
 boot epoch 和路径 MTU，格式见 [15-routed-sessions.md](15-routed-sessions.md)。
-间接业务当前使用探测到的单帧预算，未开启多跳分片。
+完整 UDP 路径可协商多跳分片；经过 UART 或未协商分片的路径使用单帧预算，
+见 [19-routed-fragmentation.md](19-routed-fragmentation.md)。
 
 v0 ERROR 保留固定 errno/orig_txid 布局。v1 接纳后的错误通过带会话的
 CALL_REPLY.status 返回。旧/错误会话数据丢弃，不能唤醒或完成新会话事务。

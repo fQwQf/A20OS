@@ -15,6 +15,18 @@
 #define A20_CS_REFRESH_MS 5000u
 #define A20_CS_LEASE_MS 10000u
 #define A20_CS_RETRIES 8u
+#define A20_CS_FRAGMENT_MTU 1472u
+
+/* Fixed UDP fragment geometry is retained end to end. A narrower or legacy
+ * hop removes this capability; no subsequent relay may add it back. */
+static inline void a20_cs_path_clamp(uint8_t p[A20_CS_BYTES], uint32_t mtu,
+                                     int fragment_path) {
+    if (a20_clx_get_le32(p + 4) > mtu)
+        a20_clx_put_le32(p + 4, mtu);
+    if (!fragment_path || a20_clx_get_le32(p + 4) < A20_CS_FRAGMENT_MTU)
+        a20_clx_put_le32(p + 40,
+                         a20_clx_get_le32(p + 40) & ~A20_CLX_CAP_FRAGMENT);
+}
 
 typedef struct a20_cs_record {
     uint32_t kind, mtu, caps, profile;

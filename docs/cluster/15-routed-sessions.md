@@ -54,8 +54,9 @@ CRC16 必须存在。载荷严格为 72 B，完整帧 106 B，MCU 单帧即可�
 ## 3. 路径预算和 MCU 去重
 
 探测起点填写出口 MTU。每个 RELAY 把该值缩小到出口预算并重算 CRC；应答
-同时受已探测值和反向出口限制。当前多跳业务以这个双向最小 MTU 为单帧上限，
-**没有为间接目的协商分片**。UDP→UART 路径为 256 B：可靠业务请求最多
+同时受已探测值和反向出口限制。完整 UDP 路径可协商端到端分片，具体资格与
+降级规则见 [19-routed-fragmentation.md](19-routed-fragmentation.md)。其他路径
+以双向最小 MTU 为单帧上限。UDP→UART 路径为 256 B：可靠业务请求最多
 206 B、回复业务最多 202 B。超出预算在本地结束调用，不把大帧送到串口后丢弃。
 直连 UDP 的 4 KiB / 64 KiB 逻辑负载能力仍见 [14-fragmentation.md](14-fragmentation.md)。
 

@@ -37,6 +37,11 @@ def main():
                         "-Ikernel/include", "-Ikernel", "tools/tests/test_clx_fragment.c",
                         "-o", str(server)], root)
         run([str(server)], root)
+        run(compiler + ["-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-DCONFIG_CLUSTER_PROFILE=3", "-Ikernel/arch/riscv64/include",
+                        "-Ikernel/include", "-Ikernel", "tools/tests/test_clx_session.c",
+                        "-o", str(server)], root)
+        run([str(server)], root)
         run([sys.executable, "tools/cluster-ref/selftest.py"], root)
         run([sys.executable, "tools/cluster-ref/check_c_side.py", "--decoder",
              str(Path(directory) / "test_clx_frame")], root)

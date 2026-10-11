@@ -55,6 +55,12 @@ def main():
         (directory / "session.log").write_text(checked_session.stdout)
         print(checked_session.stdout, end="")
         checked_session.check_returncode()
+        subprocess.run(compiler + flags + ["-DCONFIG_CLUSTER_PROFILE=3", "tools/tests/test_clx_session.c", "-o", session], cwd=root, check=True)
+        checked_session_server = subprocess.run([session], cwd=root, text=True, stdout=subprocess.PIPE,
+                                                stderr=subprocess.STDOUT, timeout=60)
+        (directory / "session-server.log").write_text(checked_session_server.stdout)
+        print(checked_session_server.stdout, end="")
+        checked_session_server.check_returncode()
         config = str(Path(temporary) / "config")
         subprocess.run(compiler + flags + ["tools/tests/test_clx_config.c", "-o", config], cwd=root, check=True)
         checked_config = subprocess.run([config], cwd=root, text=True, stdout=subprocess.PIPE,

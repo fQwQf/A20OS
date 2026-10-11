@@ -20,10 +20,10 @@ class FaultWire:
         self.sockets = []
         self.events = {}
         self.delayed = []
-        self.calls = [0, 0]
+        self.calls = [0] * len(ports)
         self.saved = {}
         self.trace = deque(maxlen=4096)
-        for _ in range(2):
+        for _ in ports:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.bind(("127.0.0.1", 0))
             self.sockets.append(sock)
@@ -43,8 +43,17 @@ class FaultWire:
         for sock in ready:
             data, _ = sock.recvfrom(65536)
             side = self.sockets.index(sock)
-            destination = ("127.0.0.1", self.ports[1-side])
-            output = self.sockets[1-side]
+            macs = [bytes.fromhex(f"52540012340{i+1}") for i in range(len(self.ports))]
+            if data[:6] in macs:
+                target = macs.index(data[:6])
+            else:
+                # Broadcast ARP/IPv6 packets do not carry CL fault injection.
+                for target in range(len(self.ports)):
+                    if target != side:
+                        self.sockets[target].sendto(data, ("127.0.0.1", self.ports[target]))
+                continue
+            destination = ("127.0.0.1", self.ports[target])
+            output = self.sockets[target]
             cl = b""
             if len(data) >= 42 and data[12:14] == b"\x08\x00":
                 ip = 14
@@ -59,7 +68,16 @@ class FaultWire:
                     "type": kind, "flags": int.from_bytes(cl[4:6], "little"),
                     "frag": int.from_bytes(cl[6:8], "little"),
                     "txid": int.from_bytes(cl[8:12], "little"),
-                    "length": len(cl), "prefix": cl[32:56].hex()})
+                    "length": len(cl), "ttl": cl[30], "target": target,
+                    "prefix": cl[32:56].hex()})
+                if side >= 2:
+                    if int.from_bytes(cl[4:6], "little") & 2:
+                        if cl[30] != 7 or len(cl) > 1472:
+                            raise RuntimeError("relay violated fragment TTL/MTU")
+                        event = f"relay-fragment-{kind}"
+                        self.events[event] = self.events.get(event, 0) + 1
+                    output.sendto(data, destination)
+                    continue
                 if kind == 2:
                     self.saved.setdefault((side, "hello-ack"), data)
                 reliable = bool(int.from_bytes(cl[4:6], "little") & 1)
@@ -121,6 +139,7 @@ class FaultWire:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--routed", action="store_true", help="three kernels through a UDP relay, with wire fault injection")
     parser.add_argument("--faults", action="store_true", help="drop, duplicate and delay real wire frames")
     parser.add_argument("--restart", action="store_true", help="restart node b and replay old session frames")
     parser.add_argument("--timeout", type=float, default=90)
@@ -128,6 +147,8 @@ def main():
     parser.add_argument("--profile", type=int, choices=(2, 3), default=2)
     parser.add_argument("--peer-profile", type=int, choices=(2, 3))
     args = parser.parse_args()
+    if args.routed and args.restart:
+        parser.error("use the dedicated gateway reboot test for routed reboot coverage")
     root = Path(__file__).resolve().parent.parent
     log_dir = (root / args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -136,9 +157,10 @@ def main():
     sources = ["kernel/cluster/fragment.c", "kernel/cluster/fragment.h",
                "kernel/cluster/frame.c", "kernel/cluster/frame.h", "kernel/cluster/transport.c",
                "kernel/cluster/reliable.c", "kernel/cluster/remote_ep.c", "kernel/cluster/udp.c",
+               "kernel/cluster/session.c", "kernel/cluster/session_control.h",
                "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c", "tools/check-cluster-udp.py"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}
-    profiles = [args.profile, args.peer_profile or args.profile]
+    profiles = [args.profile, args.peer_profile or args.profile] + ([2] if args.routed else [])
     commands = {}
     for profile in set(profiles):
         make = ["make", "--no-print-directory", "ARCH=riscv64", "BRINGUP=1",
@@ -151,22 +173,24 @@ def main():
                                                                cwd=root, text=True))
     ports = []
     reservations = []
-    for _ in range(2):
+    for _ in profiles:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("127.0.0.1", 0))
         ports.append(sock.getsockname()[1])
         reservations.append(sock)
     processes, logs = [], []
-    wire = FaultWire(ports) if args.faults or args.restart else None
+    wire = FaultWire(ports) if args.faults or args.restart or args.routed else None
     restarted, replayed = False, False
     guest_commands = []
     try:
         for sock in reservations:
             sock.close()
-        for i, side in enumerate("ab"):
+        for i, side in enumerate("abr" if args.routed else "ab"):
             cmd = list(commands[profiles[i]])
             bootargs = (f"clxudptest={side} a20.dhcp=0 a20.ip=10.0.3.{i+2} "
                         "a20.netmask=255.255.255.0")
+            if args.routed:
+                bootargs += " clxudprouted=1"
             if wire:
                 bootargs += " clxudpfaults=1"
             if args.restart:
@@ -196,6 +220,8 @@ def main():
                      "reliable-unknown-slot", "empty-call", "oversize-completes")
             if wire:
                 cases += ("bounded-blackhole",)
+            if args.routed:
+                cases += ("routed-fragment-session",)
             if all(all(f"node={side} {case}: PASS" in out for case in cases)
                    for side, out in zip("ab", outputs)):
                 if args.restart and not restarted:
@@ -231,8 +257,12 @@ def main():
                     if not expected.issubset(wire.events):
                         raise RuntimeError(f"fault scenarios missing: {expected - wire.events.keys()}")
                     (log_dir / "udp-faults.json").write_text(json.dumps(wire.events, indent=2) + "\n")
+                if args.routed and (wire.events.get("relay-fragment-6", 0) < 16 or
+                                    wire.events.get("relay-fragment-7", 0) < 16 or
+                                    "relay-ready: PASS" not in (log_dir / "udp-r.log").read_text(errors="replace")):
+                    raise RuntimeError("relay fragment forwarding evidence missing")
                 success = True
-                print("check-cluster-udp: PASS (two kernels, 96 reliable calls each, "
+                print("check-cluster-udp: PASS (" + ("three kernels via UDP relay" if args.routed else "two kernels") + ", 96 reliable calls each, "
                       "at-most-once service execution, fragmented echo, shared dot, bounded failures" +
                       (", real wire faults" if wire else "") +
                       (", reboot and old-session rejection)" if args.restart else ")"))
@@ -254,11 +284,11 @@ def main():
                     errors="replace").splitlines()[-35:]))
         return 1
     finally:
-        evidence = {"success": success, "profiles": profiles, "faults": args.faults,
-                    "restart": args.restart, "source_sha256": hashes,
+        evidence = {"success": success, "profiles": profiles, "faults": wire is not None,
+                    "restart": args.restart, "routed": args.routed, "source_sha256": hashes,
                     "platform": platform.platform(), "elapsed_seconds": round(time.monotonic()-started, 6),
                     "qemu_version": subprocess.check_output(["qemu-system-riscv64", "--version"], text=True).splitlines()[0],
-                    "scope": "two independent RISC-V kernels, TCG, not physical throughput"}
+                    "scope": f"{len(profiles)} independent RISC-V kernels, TCG, not physical throughput"}
         (log_dir / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
         if wire:
             (log_dir / "wire-trace.json").write_text(json.dumps(list(wire.trace), indent=2) + "\n")

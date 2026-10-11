@@ -6,10 +6,14 @@
 #include <string.h>
 #include "../../kernel/cluster/session_control.h"
 #define _CLX_INTERNAL_H
+#ifndef CONFIG_CLUSTER_PROFILE
 #define CONFIG_CLUSTER_PROFILE 2
+#endif
+#define CLX_LOGICAL_MTU (CONFIG_CLUSTER_PROFILE == 3 ? 65590u : 4096u)
 #define CLX_LIMIT_ROUTES 8u
 #define A20_CLX_LINK_ADDR_MAX 16u
 #define A20_CLX_TRANSPORT_LOOPBACK 0u
+#define A20_CLX_TRANSPORT_UDP 1u
 #define A20_ERR_NODE_UNREACHABLE 1
 #define TICKS_PER_SEC 1000u
 #define MS_TO_TICKS(ms) (ms)
@@ -20,8 +24,10 @@ typedef int spinlock_t;
 static spinlock_t g_clx_lock;
 static uint64_t now, gateway_epoch = 3000;
 static unsigned canceled, sent;
-static int reachable = 1, relay = 1;
+static int reachable = 1, relay = 1, fragment = 1;
 static a20_cs_record_t output;
+static uint32_t remote_mtu = 256, remote_profile = 1;
+static uint32_t remote_caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_LEAF;
 static uint64_t timer_get_ticks(void) {
     return now;
 }
@@ -55,7 +61,8 @@ static int physical_session(void *ctx, const uint8_t *nh, uint32_t len,
         return -1;
     *local = 1000;
     *remote = gateway_epoch;
-    *caps = A20_CLX_CAP_RELIABLE | (relay ? A20_CLX_CAP_RELAY : 0);
+    *caps = A20_CLX_CAP_RELIABLE | (relay ? A20_CLX_CAP_RELAY : 0) |
+            (fragment ? A20_CLX_CAP_FRAGMENT : 0);
     return 0;
 }
 typedef struct {
@@ -105,12 +112,12 @@ static int a20_clx_core_send_frame(const a20_node_id_t *id, const uint8_t *p,
 static void receive(const a20_node_id_t *id, uint32_t kind, uint64_t cookie,
                     uint64_t epoch, uint64_t target_epoch) {
     a20_cs_record_t r = {.kind = kind,
-                         .mtu = 256,
+                         .mtu = remote_mtu,
                          .cookie = cookie,
                          .epoch = epoch,
                          .target_epoch = target_epoch,
-                         .caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_LEAF,
-                         .profile = 1};
+                         .caps = remote_caps,
+                         .profile = remote_profile};
     memcpy(r.source, id->bytes, 16);
     r.target[15] = 1;
     a20_frame_hdr_t h = {.ver = 1,
@@ -198,6 +205,52 @@ int main(void) {
     peer.bytes[15] = 100;
     assert(a20_clx_routed_session(&peer, &local, &remote, &caps) < 0);
     assert(sent == before + 1);
+    /* End-to-end fragmentation needs an eligible local lane and path reply.
+     * A server endpoint on the far side cannot elevate the default profile. */
+    memset(sessions, 0, sizeof(sessions));
+    remote_mtu = A20_CS_FRAGMENT_MTU;
+    remote_profile = 3;
+    remote_caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT;
+    assert(a20_clx_routed_session(&peer, &local, &remote, &caps) < 0);
+    assert(output.caps & A20_CLX_CAP_FRAGMENT);
+    receive(&peer, A20_CS_REPLY, output.cookie, 800, 1000);
+    assert(a20_clx_session_mtu(&peer) == 1472 &&
+           a20_clx_session_logical_mtu(&peer) == CLX_LOGICAL_MTU);
+    a20_clx_session_invalidate(&peer);
+    remote_profile = 2;
+    assert(a20_clx_routed_session(&peer, &local, &remote, &caps) < 0);
+    receive(&peer, A20_CS_REPLY, output.cookie, 800, 1000);
+    assert(a20_clx_session_logical_mtu(&peer) == 4096);
+    remote_caps &= ~A20_CLX_CAP_FRAGMENT;
+    receive(&peer, A20_CS_PROBE, 90, 800, 0);
+    assert(output.kind == A20_CS_REPLY &&
+           !(output.caps & A20_CLX_CAP_FRAGMENT));
+    fragment = 0;
+    assert(a20_clx_routed_session(&peer, &local, &remote, &caps) < 0);
+    assert(!(output.caps & A20_CLX_CAP_FRAGMENT));
+    remote_caps |= A20_CLX_CAP_FRAGMENT;
+    receive(&peer, A20_CS_REPLY, output.cookie, 800, 1000);
+    assert(a20_clx_session_logical_mtu(&peer) == 1472);
+    fragment = 1;
+    assert(a20_clx_routed_session(&peer, &local, &remote, &caps) < 0);
+    remote_mtu = 256;
+    receive(&peer, A20_CS_REPLY, output.cookie, 800, 1000);
+    assert(a20_clx_session_logical_mtu(&peer) == 256);
+    uint8_t path[A20_CS_BYTES] = {0};
+    a20_clx_put_le32(path + 4, 1472);
+    a20_clx_put_le32(path + 40, A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT);
+    a20_cs_path_clamp(path, 1472, 1);
+    assert(a20_clx_get_le32(path + 40) & A20_CLX_CAP_FRAGMENT);
+    a20_cs_path_clamp(path, 256, 1);
+    assert(a20_clx_get_le32(path + 4) == 256 &&
+           !(a20_clx_get_le32(path + 40) & A20_CLX_CAP_FRAGMENT));
+    a20_cs_path_clamp(path, 1472, 1);
+    assert(a20_clx_get_le32(path + 4) == 256 &&
+           !(a20_clx_get_le32(path + 40) & A20_CLX_CAP_FRAGMENT));
+    a20_clx_put_le32(path + 4, 1472);
+    a20_clx_put_le32(path + 40, A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT);
+    a20_cs_path_clamp(path, 1472, 0);
+    assert(!(a20_clx_get_le32(path + 40) & A20_CLX_CAP_FRAGMENT));
     /* Profile/identity/flag validation with exact-sized untrusted buffers. */
     a20_cs_record_t r = output, decoded;
     uint8_t data[A20_CS_BYTES];
