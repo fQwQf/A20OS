@@ -81,9 +81,9 @@ static int signalfd_dequeue(task_t *t, uint64_t mask,
                 out->ssi_errno = v;
                 memcpy(&v, pi + 8, 4);
                 out->ssi_code = v;
-                memcpy(&v, pi + 16, 4);
+                memcpy(&v, pi + __builtin_offsetof(arch_siginfo_t, _sifields), 4);
                 out->ssi_pid = (uint32_t)v;
-                memcpy(&v, pi + 20, 4);
+                memcpy(&v, pi + __builtin_offsetof(arch_siginfo_t, _sifields) + 4, 4);
                 out->ssi_uid = (uint32_t)v;
             }
             ss->pending_has_info[sig] = 0;
