@@ -40,11 +40,19 @@ a20_cluster_resolve(const a20_node_id_t *node, const char *name,
         budget_ms > 30000)
         return -A20_ERR_INVALID_ARGUMENT;
     a20_handle_t ep = A20_HANDLE_NULL;
-    a20_status_t r = a20_cluster_connect(node, A20_DIRECTORY_SLOT, 0,
-                                         A20_CONNECT_RELIABLE, 0, &ep);
+    uint64_t started = a20_agent_clock_ms(0), generation = 0;
+    a20_status_t r;
+    do {
+        r = a20_cluster_connect(node, A20_DIRECTORY_SLOT, 0,
+                                A20_CONNECT_RELIABLE, 0, &ep);
+        if (r != -A20_ERR_NODE_UNREACHABLE)
+            break;
+        if (a20_agent_clock_ms(0) - started >= budget_ms)
+            return -A20_ERR_TIMED_OUT;
+        a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+    } while (1);
     if (r < 0)
         return r;
-    uint64_t started = a20_agent_clock_ms(0), generation = 0;
     uint32_t index = 0;
     for (unsigned step = 0; step < 8192; step++) {
         uint64_t elapsed = a20_agent_clock_ms(0) - started;

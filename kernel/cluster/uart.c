@@ -572,6 +572,10 @@ static void uart_tick(a20_clx_uart_link_t *l, uint64_t now) {
                 return;
             if (l->awaiting_pong) {
                 l->pings_missed++;
+                /* A rebooted passive leaf cannot answer PING until HELLO.
+                 * Reconfirm on the first miss without waiting for DOWN. */
+                if (l->pings_missed == 1 && !l->hello_cookie)
+                    (void)uart_send_hello(l, now);
                 if (l->pings_missed >= 2 * A20_CLX_UART_HELLO_RETRIES) {
                     /* 02 §6: UP loses 3 -> SUSPECT, 3 more -> DOWN. */
                     uart_link_down(l, now);
@@ -847,7 +851,7 @@ int a20_clx_uart_session(const uint8_t *nh, uint32_t nh_len,
         a20_clx_uart_link_t *l = &g_uart_links[i];
         if (l->used && l->published.state == A20_CLX_STATE_UP &&
             l->published.peer_addr == a20_clx_get_le16(nh) &&
-            memcmp(l->published_node, node, 16) == 0) {
+            (!node || memcmp(l->published_node, node, 16) == 0)) {
             *local = l->published_local;
             *remote = l->published_remote;
             *caps = l->published_caps;

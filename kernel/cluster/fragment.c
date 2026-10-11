@@ -22,6 +22,9 @@ uint32_t a20_clx_logical_mtu(const a20_node_id_t *peer) {
     if (a20_clx_route_lookup(peer, &id, nh, &nh_len) < 0)
         return 0;
     uint32_t mtu = a20_clx_transport_mtu(id);
+    uint32_t path_mtu = a20_clx_session_mtu(peer);
+    if (path_mtu)
+        return path_mtu < mtu ? path_mtu : mtu;
 #if ASSEMBLY_SLOTS > 0 && !defined(CONFIG_MCU)
     uint64_t local, remote;
     uint32_t caps;

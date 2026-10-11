@@ -2,7 +2,8 @@
 
 三个适配器共用 `a20_clx_transport_t`：`send` 拷贝/发送一个完整帧，`poll`
 推进有界 I/O，`session` 返回直连对端协商结果。驱动不能把下一跳网关的会话
-当作最终目的节点的会话。转发可靠调用所需的端到端会话发现仍待控制面接入。
+当作最终目的节点的会话。`node_id=NULL` 只查询邻接会话，供核心验证下一跳
+RELAY；可靠间接目的由 [15-routed-sessions.md](15-routed-sessions.md) 的 CS 双向挑战确认。
 
 ## 1. 传输合同
 
@@ -50,7 +51,7 @@ next_hop 为 `{10, 0, 3, 3, 0xab, 0xf4}`，不使用宿主机本地字节序整�
 
 板级代码通过 `a20_clx_uart_link_register` 提供 `getc`、`putc`、本机身份、短地址
 及角色能力。可提供明确 boot session；没有提供时使用启动时混合值，量产部署
-仍需板级持久 epoch 或可靠熵来源。生产板级注册者仍在接入中。
+仍需板级持久 epoch 或可靠熵来源。x86 COM2 板级绑定已接入，见 [13-uart-head.md](13-uart-head.md)。
 
 SLIP 使用头/尾 END，转义 END 和 ESC；CRC 强制开启，帧 MTU 256。
 50 ms 字节间超时丢弃半帧。每链路发送队列为 4 帧，只有 poll 写字节，控制帧
@@ -58,12 +59,13 @@ SLIP 使用头/尾 END，转义 END 和 ESC；CRC 强制开启，帧 MTU 256。
 
 HELLO 由主节点引导；v1 双方通过当前 challenge 的 ACK 确认对端会话，
 叶子完成确认后采用短地址。注销 UP 链路也发 DOWN 以取消代理。5 s PING，连续 3 次未应答
-进入 SUSPECT，再 3 次进入 DOWN。重新协商后原代理需重建。
+进入 SUSPECT，再 3 次进入 DOWN。首次漏掉 PONG 时先尝试新的 HELLO 挑战，
+让重启的被动 leaf 提前恢复。确认不同启动 epoch 后原代理需重建。
 
 ## 5. MCU 叶子
 
 `kernel/mcu/leaf.c` 使用静态 RX/TX 缓冲和一个有界回复缓存，单轮最多收 64
-字节。实际板的外围服务线程每 5 ms 泵一次；受限 QEMU MCU 探针默认不携带
+字节。专用集群固件有独立的 1 ms 泵；受限 QEMU MCU 探针默认不携带
 完整 leaf，可显式开启测试配置。
 
 叶子支持 v0 单帧调用，双方协商 v1 后支持相同的会话前缀、序号窗口、回复
@@ -71,7 +73,8 @@ HELLO 由主节点引导；v1 双方通过当前 challenge 的 ACK 确认对端�
 仍可能需要重放的结果。叶子当前无分片、广播和任意进程执行能力。
 
 默认演示身份不能用于多板部署。必须在握手前通过 identity 配置安装不同的
-持久 node_id；持久 boot epoch 和板级身份配置仍是生产接入待完成项。
+持久 node_id；STM32 集群固件使用 UID 与持久 boot epoch journal。
+经 RELAY 到达的调用者有 4 个固定来源槽位及独立窗口，共用单回复缓存。
 50 s 无 PING 使叶子断开并作废短地址。
 
 ## 6. 证据边界

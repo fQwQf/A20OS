@@ -33,8 +33,8 @@ typedef struct a20_clx_transport {
                 const void *frame, uint32_t len);
     /* POLLING 档收包泵；非 POLLING 档置 NULL。 */
     void (*poll)(void *ctx);
-    /* Direct peer session, after HELLO. Indirect peers need control-plane
-     * session discovery; adapters must not substitute the gateway epoch. */
+    /* Direct peer session after HELLO. node_id==NULL queries adjacency for
+     * routed discovery; a non-NULL identity must match the direct peer. */
     int (*session)(void *ctx, const uint8_t *nh, uint32_t nh_len,
                    const uint8_t node_id[16], uint64_t *local, uint64_t *remote,
                    uint32_t *caps);

@@ -247,8 +247,10 @@ static int clx_route_update(const a20_node_id_t *node, uint32_t transport,
             a20_clx_loopback_vnode_del(node);
         if (old.in_use &&
             (old.transport_id != transport || old.nh_len != nh_len ||
-             memcmp(old.next_hop, nh, nh_len) != 0))
+             memcmp(old.next_hop, nh, nh_len) != 0)) {
+            a20_clx_session_invalidate(node);
             a20_clx_node_down(node);
+        }
         if (old.in_use && old.transport_id == A20_CLX_TRANSPORT_UDP)
             clx_release_unused_udp(old.next_hop, old.nh_len);
     }
@@ -290,6 +292,7 @@ int a20_clx_route_del(const a20_node_id_t *node) {
     a20_clx_loopback_vnode_del(node);
     if (old.transport_id == A20_CLX_TRANSPORT_UDP)
         clx_release_unused_udp(old.next_hop, old.nh_len);
+    a20_clx_session_invalidate(node);
     a20_clx_node_down(node);
     a20_clx_event_push(A20_CLX_EV_ROUTE_LOST, a20_clx_node_hash(node), 0, 0);
     __atomic_store_n(&g_clx_route_mutating, 0, __ATOMIC_RELEASE);
@@ -307,8 +310,10 @@ void a20_clx_route_link_down(uint32_t transport_id, const uint8_t *nh,
         if (hit)
             node = r->node;
         spin_unlock_irqrestore(&g_clx_lock, flags);
-        if (hit)
+        if (hit) {
+            a20_clx_session_invalidate(&node);
             a20_clx_node_down(&node);
+        }
     }
 }
 
