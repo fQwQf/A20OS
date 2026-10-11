@@ -1,4 +1,4 @@
-# XFCE x86_64 修复与网页验证（2026-10-11）
+# XFCE x86_64 修复与网页验证（2026-10-12）
 
 ## 修复依据
 
@@ -138,4 +138,25 @@ Firefox ESR 140 的 musl 堆断言在内存修复后仍可复现；它不作为�
 HTTP/3 的 neqo 套接字选项仍报告 EOPNOTSUPP，浏览器使用 TCP/TLS 回退；
 这不构成 QUIC 支持验收。仍可见 xfdesktop 文件图标断言、elogind 和 udev
 ethtool 的兼容性缺口。本记录只覆盖 QEMU x86_64 桌面，不代表真实硬件、
-其他架构桌面、音频或 3D 的验收。
+其他架构桌面、音频或 Firefox WebGL 的验收。Minecraft 的 virgl 验证见 [Minecraft](minecraft.md)。
+
+
+### 图形修复后的 Firefox 回归
+
+GPU 资源、PRIME 共享和 fence 修复后，再用生产镜像副本各完成一次冷启动：
+
+- `build/browser-followup/firefox-updated-2d.log`：普通 virtio GPU，自动选择 pixman。
+- `build/browser-followup/firefox-updated-3d.log`：virgl GPU，自动选择 GLES。
+
+两轮均完整通过配置往返、curl HTTP/HTTPS、Firefox 网页 DOM、Bing 搜索与刷新、
+标签页操作和五分钟稳定性检查，最终包含 `XFCE_WEB: desktop and browser PASS`。
+对应画面为同目录 `firefox-updated-{2d,3d}-bing.png`。
+此处内核 SHA-256 为
+`965962d4520347257f4ab19da083fabbb9e36613c1d0a2c5ecbe6149a81a67a4`。
+随后另修复 [SIOCGIFCONF](../linux-interface-enumeration.md) 的输出语义，
+该修复通过 x86_64/RISC-V 原生回归；它不改变浏览器套接字的数据传输路径。
+
+会话通过 `VIRTGPU_GETPARAM(3D_FEATURES)` 选择渲染器，不判断架构或应用名；
+`A20_RENDERER` 可显式覆盖。用户默认的普通 XFCE 实例仍能使用 2D GPU，
+Minecraft 专用实例开启 virgl。详见
+[GPU 共享与同步](../graphics/virtgpu-sharing-and-sync.md)。
