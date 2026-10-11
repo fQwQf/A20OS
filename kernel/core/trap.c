@@ -204,7 +204,7 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
     }
 }
 
-static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code) {
+static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code, uintptr_t addr) {
     task_t *cur = proc_current();
     if (!cur || !cur->signals || !cur->pgdir) {
         printf("FATAL: pid=%d signal=%d (no signal state) pc=0x%lx\n",
@@ -229,7 +229,17 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
         proc_exit_group(fatal_code);
     }
 
-    signal_send(cur->pid, sig);
+    /* A CPU exception belongs to the faulting thread. Publishing it to the
+     * process queue lets a sibling consume it with an unrelated context. */
+    int code = 1;
+    if (sig == SIGSEGV && cur->mm) {
+        uint64_t flags = spin_lock_irqsave(&cur->mm->lock);
+        if (mm_seg_find(cur->mm, addr))
+            code = 2; /* SEGV_ACCERR: a mapping exists but denies this access. */
+        spin_unlock_irqrestore(&cur->mm->lock, flags);
+    }
+    if (signal_send_thread_fault(cur->pid, sig, addr, code) < 0)
+        proc_exit_group(fatal_code);
     signal_deliver_user(ctx);
     return 1;
 }
@@ -380,9 +390,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 return;
             }
             if (user_sync_signal_is_handled(cur, SIGSEGV)) {
-                dump_fault_pte(cur, stval);
-                dump_fault_pte(cur, sepc);
-                if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV, stval))
                     return;
             }
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
@@ -415,7 +423,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                      (unsigned long)TRAP_CTX_FP(ctx));
                 dump_fault_pte(cur, TRAP_CTX_FP(ctx));
             }
-            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV, stval))
                 return;
             proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_PAGE_MODIFICATION) {
@@ -440,7 +448,7 @@ static void user_trap_handler(trap_context_t *ctx) {
              * signals are still reported by deliver_user_sync_signal().
              */
             (void)have_user_insn;
-            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV, stval))
                 return;
             proc_exit_group(-SIGSEGV);
         } else if (arch_is_user_page_permission_fault(code)) {
@@ -448,7 +456,7 @@ static void user_trap_handler(trap_context_t *ctx) {
              * invalid-page faults.  They are user protection violations and
              * must be delivered as SIGSEGV rather than treated as an unknown
              * kernel exception. */
-            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV, stval))
                 return;
             proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_INSN_FAULT || code == CAUSE_LOAD_FAULT || code == CAUSE_STORE_FAULT) {
@@ -458,7 +466,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 kerr("  insn@sepc=0x%08x\n", user_insn);
             dump_fault_pte(cur, sepc);
             dump_trap_context(ctx);
-            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+            if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV, stval))
                 return;
             proc_exit_group(-SIGSEGV);
         } else if (code == CAUSE_ILLEGAL_INSN) {
@@ -472,7 +480,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 printf(" insn=0x%08x", user_insn);
             printf("\n");
             dump_fault_pte(cur, sepc);
-            if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL))
+            if (deliver_user_sync_signal(ctx, SIGILL, -SIGILL, sepc))
                 return;
             kerr("User Illegal Instruction: pid=%d sepc=0x%lx stval=0x%lx\n",
                  cur ? cur->pid : -1, sepc, stval);
@@ -496,7 +504,7 @@ static void user_trap_handler(trap_context_t *ctx) {
             printf("SIGTRAP: pid=%d sepc=0x%lx stval=0x%lx\n",
                   cur ? cur->pid : -1, (unsigned long)sepc, (unsigned long)stval);
             arch_user_breakpoint(ctx);
-            if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP))
+            if (deliver_user_sync_signal(ctx, SIGTRAP, -SIGTRAP, sepc))
                 return;
             proc_exit_group(-SIGTRAP);
         } else {

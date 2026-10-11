@@ -685,24 +685,24 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
     for (int i = 0; i < entries; i++) {
         pte_t pte = src[i];
         if (!(pte & PTE_V)) continue;
+        if (level == ARCH_PT_ROOT_LEVEL && i >= ARCH_PT_USER_END) {
+            dst[i] = pte;
+            continue;
+        }
 
         int is_leaf = arch_pte_is_leaf(pte);
 
         if (is_leaf) {
-            if (pte & PTE_U) {
-                size_t leaf_size = pt_level_size(level);
-                int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
-                if (leaf_size != PAGE_SIZE && leaf_size != PMD_SIZE) {
-                    pt_destroy(dst);
-                    return NULL;
-                }
-                pfn_t nf = pfa_alloc(order);
-                if (nf == PFN_NONE) { pt_destroy(dst); return NULL; }
-                memcpy(pfn_to_virt(nf), arch_pte_to_ptr(pte), leaf_size);
-                dst[i] = arch_pte_leaf(pfn_to_phys(nf), arch_pte_flags(pte));
-            } else {
-                dst[i] = pte;
+            size_t leaf_size = pt_level_size(level);
+            int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
+            if (leaf_size != PAGE_SIZE && leaf_size != PMD_SIZE) {
+                pt_destroy(dst);
+                return NULL;
             }
+            pfn_t nf = pfa_alloc(order);
+            if (nf == PFN_NONE) { pt_destroy(dst); return NULL; }
+            memcpy(pfn_to_virt(nf), arch_pte_to_ptr(pte), leaf_size);
+            dst[i] = arch_pte_leaf(pfn_to_phys(nf), arch_pte_flags(pte));
         } else {
             pte_t *next_src = arch_pte_to_ptr(pte);
             pte_t *next_dst = pt_clone_level(next_src, level - 1);
@@ -742,8 +742,9 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
         int is_leaf = arch_pte_is_leaf(pte);
 
         if (is_leaf) {
-            if (pte & PTE_U)
-                frame_put(phys_to_pfn(arch_pte_addr(pte)));
+            /* Ownership follows the user address range, including protected
+             * leaves whose user-access permission is temporarily cleared. */
+            frame_put(phys_to_pfn(arch_pte_addr(pte)));
             table[i] = 0;
         } else {
             paddr_t next_pa = arch_pte_addr(pte);

@@ -100,6 +100,7 @@ int  signal_send_task(void *task, int signum);
 int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
+int  signal_send_thread_fault(int tid, int signum, uintptr_t addr, int code);
 int  signal_send_thread_info(int tid, int signum, const void *info, size_t size);
 /* Caller holds signals->lock; consumes only one scope, thread before process. */
 int signal_take_pending_info_locked(void *task, int sig, void *out, size_t size);

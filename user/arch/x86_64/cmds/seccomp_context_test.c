@@ -31,6 +31,10 @@ static void handler(int sig, siginfo_t *info, void *context) {
         errors++;
     received++;
     uc->uc_mcontext.gregs[REG_RAX] = 777 + expected;
+    /* Handler code may freely clobber SIMD registers; sigreturn must restore
+     * the interrupted state rather than the handler's scratch values. */
+    __asm__ volatile("pxor %%xmm0,%%xmm0; pxor %%xmm15,%%xmm15" ::
+                         : "xmm0", "xmm15");
 }
 
 static void *worker(void *arg) {
@@ -50,9 +54,18 @@ static void *worker(void *arg) {
         usleep(1000);
     if (failed)
         return (void *)1;
-    for (int i = 0; i < 200; i++)
-        if (syscall(SYS_getppid) != 777 + expected)
+    for (int i = 0; i < 200; i++) {
+        uint64_t token = 0xabc00000ULL + tid, observed;
+        unsigned mask;
+        long result = SYS_getppid;
+        __asm__ volatile("movq %3,%%xmm0; pcmpeqb %%xmm15,%%xmm15; syscall; "
+                         "movq %%xmm0,%1; pmovmskb %%xmm15,%2"
+                         : "+a"(result), "=r"(observed), "=r"(mask)
+                         : "r"(token)
+                         : "rcx", "r11", "xmm0", "xmm15", "memory");
+        if (result != 777 + expected || observed != token || mask != 65535)
             errors++;
+    }
     return (void *)(uintptr_t)(errors || received != 200);
 }
 

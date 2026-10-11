@@ -89,7 +89,7 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
     vaddr_t base = 0;
     size_t size = 0;
     pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
-    if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src) || !(*src & PTE_U))
+    if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         return 0;
     if (va != base)
         return 0;
@@ -117,7 +117,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
                        pte_t *src_pte, vaddr_t va, int level,
                        int shared) {
     if (!src_pte || !(*src_pte & PTE_V) ||
-        !arch_pte_is_leaf(*src_pte) || !(*src_pte & PTE_U))
+        !arch_pte_is_leaf(*src_pte))
         return 0;
 
     paddr_t pa = arch_pte_addr(*src_pte);
@@ -158,7 +158,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
      * rewrite lets a status-driven COW replace and free the observed frame
      * before frame_get(), or leaves the child sharing a writable parent. */
     pte_t source = *src_pte;
-    if (!(source & PTE_V) || !arch_pte_is_leaf(source) || !(source & PTE_U)) {
+    if (!(source & PTE_V) || !arch_pte_is_leaf(source)) {
 #if defined(ARCH_HAS_PGTABLE_OPS)
         if (stab)
             mm_pt_node_unlock(stab);

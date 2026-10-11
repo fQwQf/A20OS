@@ -501,24 +501,19 @@ static pte_t *pt_clone_l2(pte_t *src) {
             frame_free(dst);
             return NULL;
         }
-        if (pte & PTE_U) {
-            pa = arch_pte_addr(pte);
-            pfn = phys_to_pfn(pa);
-            if (!pfn_valid(pfn)) {
-                frame_free(dst);
-                return NULL;
-            }
-            np = pfa_alloc_page();
-            if (np == PFN_NONE) {
-                frame_free(dst);
-                return NULL;
-            }
-            memcpy(pfn_to_virt(np), pfn_to_virt(pfn), PAGE_SIZE);
-            frame_get(pfn);
-            dst[i] = arch_pte_leaf(pfn_to_phys(np), arch_pte_flags(pte));
-        } else {
-            dst[i] = pte;
+        pa = arch_pte_addr(pte);
+        pfn = phys_to_pfn(pa);
+        if (!pfn_valid(pfn)) {
+            frame_free(dst);
+            return NULL;
         }
+        np = pfa_alloc_page();
+        if (np == PFN_NONE) {
+            frame_free(dst);
+            return NULL;
+        }
+        memcpy(pfn_to_virt(np), pfn_to_virt(pfn), PAGE_SIZE);
+        dst[i] = arch_pte_leaf(pfn_to_phys(np), arch_pte_flags(pte));
     }
     return dst;
 }
@@ -538,30 +533,29 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
         if (!(pte & PTE_V))
             continue;
 
+        if (level == ARCH_PT_ROOT_LEVEL && i >= ARCH_PT_USER_END) {
+            dst[i] = pte;
+            continue;
+        }
         if (IS_LEAF(pte)) {
-            if (pte & PTE_U) {
-                size_t leaf_size = pt_level_size(level);
-                int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
-                pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-                pfn_t np;
-                if (!pfn_valid(pfn)) {
-                    pt_destroy(dst);
-                    return NULL;
-                }
-                np = pfa_alloc(order);
-                if (np == PFN_NONE) {
-                    pt_destroy(dst);
-                    return NULL;
-                }
-                memcpy(pfn_to_virt(np), pfn_to_virt(pfn), leaf_size);
-                frame_get(pfn);
-                if (level == ARCH_PT_ROOT_LEVEL)
-                    dst[i] = arm32_section_pte(pfn_to_phys(np), arch_pte_flags(pte));
-                else
-                    dst[i] = arch_pte_leaf(pfn_to_phys(np), arch_pte_flags(pte));
-            } else {
-                dst[i] = pte;
+            size_t leaf_size = pt_level_size(level);
+            int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
+            pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+            pfn_t np;
+            if (!pfn_valid(pfn)) {
+                pt_destroy(dst);
+                return NULL;
             }
+            np = pfa_alloc(order);
+            if (np == PFN_NONE) {
+                pt_destroy(dst);
+                return NULL;
+            }
+            memcpy(pfn_to_virt(np), pfn_to_virt(pfn), leaf_size);
+            if (level == ARCH_PT_ROOT_LEVEL)
+                dst[i] = arm32_section_pte(pfn_to_phys(np), arch_pte_flags(pte));
+            else
+                dst[i] = arch_pte_leaf(pfn_to_phys(np), arch_pte_flags(pte));
         } else if (IS_TABLE(pte)) {
             pte_t *next_src = arch_pte_to_ptr(pte);
             pte_t *next_dst = pt_clone_l2(next_src);
@@ -598,8 +592,7 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
             continue;
 
         if (IS_LEAF(pte)) {
-            if (pte & PTE_U)
-                frame_put(phys_to_pfn(arch_pte_addr(pte)));
+            frame_put(phys_to_pfn(arch_pte_addr(pte)));
             table[i] = 0;
         } else if (IS_TABLE(pte)) {
             next_pa = arch_pte_addr(pte);

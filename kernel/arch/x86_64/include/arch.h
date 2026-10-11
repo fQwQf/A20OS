@@ -27,7 +27,7 @@
 /* the debug registers are available and cheap enough to trap on. */
 #define ARCH_HW_SINGLE_STEP 1
 
-/* the kernel's epoll_event really is packed; musl's is not. */
+/* Linux and musl use the packed 12-byte epoll_event wire layout. */
 #define ARCH_LINUX_EPOLL_EVENT_PACKED 1
 
 #endif
