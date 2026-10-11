@@ -436,6 +436,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "domainname") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_DOMAINNAME, 0);
         type = PF_SYS_KERNEL_DOMAINNAME;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "overflowuid") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_OVERFLOW_UID, 0);
+        type = PF_SYS_KERNEL_OVERFLOW_UID;
+    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "overflowgid") == 0) {
+        child = new_entry(name, PF_SYS_KERNEL_OVERFLOW_GID, 0);
+        type = PF_SYS_KERNEL_OVERFLOW_GID;
     } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "io_uring_disabled") == 0) {
         child = new_entry(name, PF_SYS_KERNEL_IO_URING_DISABLED, 0);
         type = PF_SYS_KERNEL_IO_URING_DISABLED;
@@ -723,6 +729,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
          * access is which paths the administrator named at boot. */
         type == PF_A20_XLATOR ||
 #endif
+        type == PF_SYS_KERNEL_OVERFLOW_UID ||
+        type == PF_SYS_KERNEL_OVERFLOW_GID ||
         type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
         type == PF_SYS_KERNEL_CORE_PATTERN ||
         type == PF_SYS_VM_DROP_CACHES ||
@@ -1260,6 +1268,24 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         int r = proc_set_pid_max(value);
         return r < 0 ? r : (int)count;
     }
+    if (p->type == PF_SYS_KERNEL_OVERFLOW_UID ||
+        p->type == PF_SYS_KERNEL_OVERFLOW_GID) {
+        if (!count || count > 32) return -EINVAL;
+        size_t n = 0;
+        while (n < count && (buf[n] == ' ' || buf[n] == '\t')) n++;
+        if (n == count || buf[n] < '0' || buf[n] > '9') return -EINVAL;
+        unsigned value = 0;
+        while (n < count && buf[n] >= '0' && buf[n] <= '9') {
+            value = value * 10 + (unsigned)(buf[n++] - '0');
+            if (value > 65535) return -EINVAL;
+        }
+        while (n < count && (buf[n] == ' ' || buf[n] == '\t' ||
+                             buf[n] == '\n' || buf[n] == '\r')) n++;
+        if (n != count) return -EINVAL;
+        int r = userns_set_overflow_id(p->type == PF_SYS_KERNEL_OVERFLOW_GID,
+                                       (int)value);
+        return r < 0 ? r : (int)count;
+    }
     if (p->type == PF_SYS_KERNEL_HOSTNAME ||
         p->type == PF_SYS_KERNEL_DOMAINNAME) {
         extern int linux_kernel_set_hostname(const char *name, size_t len);
@@ -1620,7 +1646,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *sys_kernel_entries[] = {
         ".", "..", "osrelease", "pid_max", "pidmap", "tainted", "sched_autogroup_enabled",
-        "core_pattern", "io_uring_disabled", "hostname", "domainname", NULL
+        "core_pattern", "io_uring_disabled", "hostname", "domainname",
+        "overflowuid", "overflowgid", NULL
     };
     static const char *sys_net_entries[] = {
         ".", "..", NULL
