@@ -28,6 +28,7 @@
 #include "drivers/bus/pci_bus.h"
 #include "net/socket_internal.h"
 #include "drivers/gpu/gpu_core.h"
+#include "drivers/input/evdev.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 
@@ -55,6 +56,9 @@ typedef enum {
     SF_NET_LOOPBACK_ATTR,
     SF_CLASS_TYPE,
     SF_CLASS_DEVICE,
+    SF_INPUT_CAPS,
+    SF_INPUT_BITMAP,
+    SF_INPUT_NAME,
     SF_CLASS_DEVICE_DEV,
     SF_CLASS_DEVICE_UEVENT, /* /sys/class/<sub>/<name>/uevent */
     SF_CLASS_DEVICE_SUBSYS, /* /sys/class/<sub>/<name>/subsystem (symlink) */
@@ -115,7 +119,7 @@ typedef struct {
     uint32_t  width;
     uint32_t  height;
     uint64_t  devt;
-    char      content[128];
+    char      content[512];
     size_t    content_len;
 } sysfs_priv_t;
 
@@ -585,6 +589,11 @@ static uint32_t sysfs_class_type_by_subsystem(const char *name)
     return DEV_CLASS_NONE;
 }
 
+static const char *const input_caps_names[] = {
+    "ev", "key", "rel", "abs", "msc", "led", "snd", "sw", "ff"
+};
+static const unsigned input_caps_types[] = {0, 1, 2, 3, 4, 17, 18, 5, 21};
+
 static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
 {
     if (!name || !*name) return -ENOENT;
@@ -787,6 +796,26 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         }
         child_type = SF_CLASS_DEVICE;
         dynamic_class = dm->class_type;
+    } else if ((dm->type == SF_CLASS_DEVICE || dm->type == SF_DEVICES_VDEV) &&
+               dm->class_type == DEV_CLASS_INPUT &&
+               (!strcmp(name, "capabilities") || !strcmp(name, "properties") ||
+                !strcmp(name, "name"))) {
+        child_type = !strcmp(name, "capabilities") ? SF_INPUT_CAPS :
+                     !strcmp(name, "name") ? SF_INPUT_NAME : SF_INPUT_BITMAP;
+        child_idx = INPUT_EVENT_TYPES; /* properties rather than event bits */
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
+    } else if (dm->type == SF_INPUT_CAPS) {
+        unsigned i;
+        for (i = 0; i < ARRAY_SIZE(input_caps_names); i++)
+            if (!strcmp(name, input_caps_names[i])) break;
+        if (i == ARRAY_SIZE(input_caps_names)) return -ENOENT;
+        child_type = SF_INPUT_BITMAP;
+        child_idx = input_caps_types[i];
+        dynamic_class = dm->class_type;
+        dynamic_cdev = dm->class_dev;
+        class_device_get(dynamic_cdev);
     } else if (dm->type == SF_CLASS_DEVICE && strcmp(name, "dev") == 0) {
         child_type = SF_CLASS_DEVICE_DEV;
         dynamic_class = dm->class_type;
@@ -797,7 +826,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         dynamic_class = dm->class_type;
         dynamic_cdev = dm->class_dev;
         class_device_get(dynamic_cdev);
-    } else if (dm->type == SF_CLASS_DEVICE && strcmp(name, "subsystem") == 0) {
+    } else if ((dm->type == SF_CLASS_DEVICE || dm->type == SF_DEVICES_VDEV) &&
+               strcmp(name, "subsystem") == 0) {
         child_type = SF_CLASS_DEVICE_SUBSYS;
         dynamic_class = dm->class_type;
         dynamic_cdev = dm->class_dev;
@@ -854,7 +884,7 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     }
     memset(vn, 0, sizeof(*vn));
 
-    int is_dir = (child_type == SF_ROOT || child_type == SF_FS ||
+    int is_dir = (child_type == SF_INPUT_CAPS || child_type == SF_ROOT || child_type == SF_FS ||
                   child_type == SF_FS_CGROUP || child_type == SF_BLOCK ||
                   child_type == SF_BLOCK_LOOP || child_type == SF_CLASS ||
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
@@ -876,11 +906,11 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
     if (child_type == SF_DRM_CARD || child_type == SF_DRM_CARD_DEVICE ||
         child_type == SF_GPU_NODE_SUBSYS || child_type == SF_BUS_PCI_DEV ||
-        (child_type == SF_DEV_CHAR_ENTRY &&
-         ((unsigned)child_idx >> 8) == DRM_MAJOR)) {
+        child_type == SF_DEV_CHAR_ENTRY) {
         vn->type = VFS_FT_SYMLINK;
         vn->mode = S_IFLNK | 0777;
-    } else if (child_type == SF_CLASS_DEVICE_SUBSYS) {
+    } else if (child_type == SF_CLASS_DEVICE_SUBSYS ||
+               (child_type == SF_CLASS_DEVICE && dynamic_class == DEV_CLASS_INPUT)) {
         vn->type = VFS_FT_SYMLINK;
         vn->mode = S_IFLNK | 0777;
     } else if (child_type == SF_CLASS_DEVICE_UEVENT) {
@@ -1038,6 +1068,12 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
         return (int)n;
     }
 
+    if (dm->type == SF_CLASS_DEVICE && dm->class_type == DEV_CLASS_INPUT &&
+        dm->class_dev) {
+        int n = snprintf(buf, sz, "../../devices/virtual/input/%s", dm->class_dev->name);
+        return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
+    }
+
     if (dm->type == SF_CLASS_DEVICE_SUBSYS) {
         const char *sub = class_device_subsystem(dm->class_type);
         if (!sub)
@@ -1066,7 +1102,9 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
                                   "/drm/card0" : "/drm/renderD128");
         const char *base = strrchr(devname, '/');
         base = base ? base + 1 : devname;
-        int n = snprintf(buf, sz, "../../class/%s/%s", subsystem, base);
+        int n = snprintf(buf, sz, !strcmp(subsystem, "input") ?
+                         "../../devices/virtual/%s/%s" : "../../class/%s/%s",
+                         subsystem, base);
         return (n > 0 && (size_t)n < sz) ? n : -ENAMETOOLONG;
     }
 
@@ -1144,7 +1182,7 @@ static int sysfs_class_readdir(vfile_t *vf, sysfs_meta_t *dm,
         de->d_ino = pos + 1;
         de->d_off = (int64_t)(pos + 1);
         de->d_reclen = (uint16_t)reclen;
-        de->d_type = 4;
+        de->d_type = dm->type == SF_CLASS_TYPE && dm->class_type == DEV_CLASS_INPUT && pos >= 2 ? 10 : 4;
         memcpy(de->d_name, name, nlen + 1);
         class_device_put(cdev);
         written += reclen;
@@ -1215,7 +1253,7 @@ static int sysfs_devchar_dir_readdir(vfile_t *vf, void *dirp, size_t count)
         de->d_ino = pos + 1;
         de->d_off = (int64_t)(pos + 1);
         de->d_reclen = (uint16_t)reclen;
-        de->d_type = 4;
+        de->d_type = pos >= 2 ? 10 : 4;
         memcpy(de->d_name, name, nlen + 1);
         written += reclen;
         pos++;
@@ -1312,6 +1350,12 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     } else if (dm->type == SF_DEVICES_VDEV) {
         entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
+        if (dm->class_type == DEV_CLASS_INPUT) {
+            entries[nent].name = "capabilities"; entries[nent].dtype = 4; nent++;
+            entries[nent].name = "properties"; entries[nent].dtype = 8; nent++;
+            entries[nent].name = "name"; entries[nent].dtype = 8; nent++;
+        }
     } else if (dm->type == SF_DEV) {
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_CLASS) {
@@ -1336,6 +1380,15 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
+        if (dm->class_type == DEV_CLASS_INPUT) {
+            entries[nent].name = "capabilities"; entries[nent].dtype = 4; nent++;
+            entries[nent].name = "properties"; entries[nent].dtype = 8; nent++;
+            entries[nent].name = "name"; entries[nent].dtype = 8; nent++;
+        }
+    } else if (dm->type == SF_INPUT_CAPS) {
+        for (unsigned i = 0; i < ARRAY_SIZE(input_caps_names); i++) {
+            entries[nent].name = input_caps_names[i]; entries[nent].dtype = 8; nent++;
+        }
     } else if (dm->type == SF_DRM) {
         entries[nent].name = "card0"; entries[nent].dtype = 10; nent++;
         entries[nent].name = "renderD128"; entries[nent].dtype = 10; nent++;
@@ -1449,6 +1502,37 @@ vnode_t *sysfs_mount(void)
     return root;
 }
 
+/* Linux sysfs bitmaps are native unsigned-long groups, most significant
+ * group first. Build groups from wire bits so this also works on big endian. */
+static int sysfs_input_content(sysfs_priv_t *p, class_device_t *device)
+{
+    struct input_device_info *info = kcalloc(1, sizeof(*info));
+    if (!info) return -ENOMEM;
+    int ret = input_device_get_info(device, info);
+    if (!ret && p->type == SF_INPUT_NAME) {
+        p->content_len = snprintf(p->content, sizeof(p->content), "%s\n", info->name);
+    } else if (!ret) {
+        const uint8_t *bits = p->loop_idx == INPUT_EVENT_TYPES ? info->properties :
+                              info->bits[p->loop_idx];
+        unsigned long words[INPUT_BITMAP_BYTES / sizeof(unsigned long)] = {0};
+        for (unsigned b = 0; b < INPUT_BITMAP_BYTES * 8; b++)
+            if (bits[b >> 3] & (1U << (b & 7)))
+                words[b / (sizeof(unsigned long) * 8)] |=
+                    1UL << (b % (sizeof(unsigned long) * 8));
+        unsigned n = ARRAY_SIZE(words);
+        while (n > 1 && !words[n - 1]) n--;
+        size_t len = 0;
+        while (n) {
+            n--;
+            len += snprintf(p->content + len, sizeof(p->content) - len,
+                            "%lx%s", words[n], n ? " " : "\n");
+        }
+        p->content_len = len;
+    }
+    kfree(info);
+    return ret;
+}
+
 static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
 {
     vfile_t *vf = vfile_alloc();
@@ -1467,7 +1551,13 @@ static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
         meta ? meta->width : 0,
         meta ? meta->height : 0,
         meta ? meta->devt : 0);
-    if (!priv) { vfile_free(vf); return NULL; }
+    if (!priv || (meta && (meta->type == SF_INPUT_BITMAP || meta->type == SF_INPUT_NAME) &&
+                  sysfs_input_content(priv, meta->class_dev) < 0)) {
+        kfree(priv);
+        vnode_put(vn);
+        vfile_free(vf);
+        return NULL;
+    }
     vf->priv = priv;
     return vf;
 }

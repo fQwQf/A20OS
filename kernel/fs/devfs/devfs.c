@@ -15,6 +15,7 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/char/uart.h"
 #include "drivers/audio/audio_core.h"
+#include "drivers/input/evdev.h"
 #include "drivers/gpu/gpu_core.h"
 #include "mm/slab.h"
 
@@ -436,7 +437,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         const char *name;
         uint8_t type;
     } input_entries[] = {
-        { ".", DT_DIR }, { "..", DT_DIR }, { "event0", DT_CHR },
+        { ".", DT_DIR }, { "..", DT_DIR },
     };
     static const struct {
         const char *name;
@@ -529,32 +530,21 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
             class_device_put(cdev);
         }
     } else if (kind == DEVFS_INPUT_DIR && idx >= nentries) {
-        /* Append every published input class device as /dev/input/eventN,
-         * starting at index 1 (event0 is the static alias above).  Keep the
-         * listing consistent with devfs_lookup so /dev/input/eventN can be
-         * opened for every node the udev database knows about. */
+        /* Every eventN is the corresponding published physical device.
+         * The aggregate compatibility node is only /dev/event0. */
         unsigned visible = (unsigned)(idx - nentries);
-        unsigned ordinal = 1;
-        for (;;) {
+        unsigned ordinal = 0;
+        for (; ordinal < 256; ordinal++) {
             class_device_t *cdev = class_device_get_by_type(DEV_CLASS_INPUT,
                                                              ordinal);
-            if (!cdev) {
-                /* also try sparse indices beyond the dense run */
-                class_device_t *next = class_device_get_nth(ordinal + 1);
-                if (!next)
-                    break;
-                class_device_put(next);
-                ordinal++;
+            if (!cdev)
                 continue;
-            }
             if (visible > 0) {
                 visible--;
                 class_device_put(cdev);
-                ordinal++;
                 continue;
             }
-            char name[32];
-            snprintf(name, sizeof(name), "event%u", ordinal);
+            const char *name = cdev->name;
             size_t namelen = strlen(name);
             size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
             if (total + reclen > count) {
@@ -563,7 +553,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
             }
             vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
             d->d_ino = 0x20000U + ((uint64_t)DEV_CLASS_INPUT << 8) +
-                       (ordinal & 0xffU);
+                       (cdev->index & 0xffU);
             d->d_off = (int64_t)(idx + 1);
             d->d_reclen = (uint16_t)reclen;
             d->d_type = DT_CHR;
@@ -571,7 +561,6 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
             total += reclen;
             idx++;
             class_device_put(cdev);
-            ordinal++;
         }
     } else if ((kind == DEVFS_BLOCK_DIR || kind == DEVFS_CHAR_DIR) && idx >= nentries) {
         /* List all class devices as major:minor, matching Linux /dev/block
@@ -1101,16 +1090,6 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             }
         }
     } else if (node->kind == DEVFS_INPUT_DIR) {
-        /* Static alias first (event0 from g_nodes), then dynamic evdev
-         * nodes reflecting every published input class device, so the
-         * Linux-style /dev/input/eventN namespace stays in sync with
-         * /sys/class/input/eventN and the udev database. */
-        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
-            if (g_nodes[i].kind == DEVFS_INPUT && strcmp(name, g_nodes[i].name) == 0) {
-                *out = node_to_vnode(i);
-                return 0;
-            }
-        }
         if (strncmp(name, "event", 5) == 0 && name[5] != '\0') {
             char numbuf[16];
             size_t ni = 0;
@@ -1135,7 +1114,7 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                         return -ENOMEM;
                     }
                     dynamic->kind = DEVFS_INPUT;
-                    dynamic->name = cname;
+                    dynamic->name = cdev->name;
                     dynamic->rdev = 0x1d01U + (index & 0xffU);
                     dynamic->class_dev = cdev;
                     dynamic->dynamic = 1;
@@ -1302,7 +1281,13 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_FB:
         vf->ops = &g_devfs_fb_ops;
         break;
-    case DEVFS_INPUT: vf->ops = &g_devfs_input_ops; break;
+    case DEVFS_INPUT:
+        if (input_file_open(vf, node->class_dev) < 0) {
+            vnode_put(vf->vnode);
+            vfile_free(vf);
+            return NULL;
+        }
+        break;
     case DEVFS_CLASS:
         if (!node->class_dev || !__atomic_load_n(&node->class_dev->online,
                                                  __ATOMIC_ACQUIRE)) {

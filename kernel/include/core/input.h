@@ -28,6 +28,7 @@ struct input_absinfo {
 #define EV_REL   0x02
 #define EV_ABS   0x03
 #define EV_MSC   0x04
+#define EV_REP   0x14
 
 #define SYN_REPORT  0
 #define SYN_CONFIG  1
@@ -71,6 +72,7 @@ struct input_absinfo {
 
 #define EVIOCGVERSION A20_IOR('E', 0x01, 4)  /* int: EV_VERSION */
 #define EVIOCGID      A20_IOR('E', 0x02, 8)  /* struct input_id */
+#define EVIOCGREP     A20_IOR('E', 0x03, 8)  /* delay/period in milliseconds */
 #define EVIOCGRAB     A20_IOW('E', 0x90, 4)
 #define EVIOCREVOKE   A20_IOW('E', 0x91, 4)
 #define EVIOCSCLOCKID A20_IOW('E', 0xa0, 4)

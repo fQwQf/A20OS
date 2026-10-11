@@ -37,6 +37,7 @@ extern void input_mux_wake(void);
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "core/errno.h"
+#include "drivers/input/evdev.h"
 #include "core/lock.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -442,11 +443,51 @@ static int vinput_class_read(device_t *dev, void *buf, size_t count) {
     return copied ? (int)copied : -EAGAIN;
 }
 
-static int vinput_class_ioctl(device_t *dev, unsigned long req, void *arg) {
-    (void)dev;
-    (void)req;
-    (void)arg;
-    return -ENOSYS;
+/* virtio_input_config selectors are transport-independent device config. */
+static unsigned vinput_config(virtio_input_inst_t *inst, unsigned select,
+                              unsigned subselect, void *out, unsigned capacity)
+{
+    virtio_transport_t *vt = &inst->vt;
+    vt->write32(vt, VMMIO_CONFIG, select | (subselect << 8));
+    unsigned size = (vt->read32(vt, VMMIO_CONFIG) >> 16) & 0xff;
+    if (size > capacity)
+        size = capacity;
+    for (unsigned i = 0; i < size; i += 4) {
+        uint32_t word = vt->read32(vt, VMMIO_CONFIG + 8 + i);
+        unsigned n = size - i < 4 ? size - i : 4;
+        memcpy((uint8_t *)out + i, &word, n);
+    }
+    return size;
+}
+
+static int vinput_class_ioctl(device_t *dev, unsigned long req, void *arg)
+{
+    virtio_input_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (req != INPUT_IOCTL_GET_INFO)
+        return -ENOTTY;
+    if (!inst || !inst->valid || !arg)
+        return -ENODEV;
+    struct input_device_info *info = arg;
+    memset(info, 0, sizeof(*info));
+    uint64_t flags = spin_lock_irqsave(&inst->lock);
+    vinput_config(inst, 1, 0, info->name, sizeof(info->name) - 1);
+    vinput_config(inst, 3, 0, &info->id, sizeof(info->id));
+    vinput_config(inst, 0x10, 0, info->properties, sizeof(info->properties));
+    input_info_bit(info, EV_SYN, SYN_REPORT);
+    for (unsigned type = 1; type < INPUT_EVENT_TYPES; type++) {
+        unsigned n = vinput_config(inst, 0x11, type, info->bits[type],
+                                    INPUT_BITMAP_BYTES);
+        if (n)
+            info->bits[0][type >> 3] |= 1U << (type & 7);
+    }
+    for (unsigned axis = 0; axis < 64; axis++) {
+        if (!(info->bits[EV_ABS][axis >> 3] & (1U << (axis & 7))))
+            continue;
+        /* virtio absinfo omits Linux input_absinfo.value. */
+        vinput_config(inst, 0x12, axis, &info->abs[axis].minimum, 20);
+    }
+    spin_unlock_irqrestore(&inst->lock, flags);
+    return 0;
 }
 
 static int vinput_class_poll(device_t *dev, short events) {
