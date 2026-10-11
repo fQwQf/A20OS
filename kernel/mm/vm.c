@@ -221,6 +221,9 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     if (!mm)
         return;
 
+    /* CPU identity, local flush and per-CPU generation publication form one
+     * pinned operation, just as in the single-page shootdown path. */
+    preempt_disable();
     int transaction_flushed = 0;
 
     uint64_t generation = __atomic_load_n(&mm->tlb_generation,
@@ -272,6 +275,8 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
             __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
                              __ATOMIC_RELEASE);
     }
+
+    preempt_enable();
 
     /* Count one transaction if it requested any local, global, or remote
      * shootdown. This is not a count of every architecture-local flush. */
