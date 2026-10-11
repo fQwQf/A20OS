@@ -1,4 +1,5 @@
 #include "mm/elf.h"
+#include <stdint.h>
 
 /*
  * The relocation types this loader applies, per machine.
