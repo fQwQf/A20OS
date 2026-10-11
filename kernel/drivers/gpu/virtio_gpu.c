@@ -333,13 +333,14 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
         if (deadline && clock_get_ticks() >= deadline)
             break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
@@ -871,6 +872,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
@@ -882,7 +884,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
          * while holding command_lock, starving the host backend thread that
          * has to consume this very descriptor.  Bounded chunks keep a lost
          * completion interrupt from parking forever. */
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
@@ -1038,6 +1040,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
@@ -1048,7 +1051,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
         if (deadline && clock_get_ticks() >= deadline)
             break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
