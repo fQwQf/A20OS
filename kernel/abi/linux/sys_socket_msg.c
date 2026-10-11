@@ -9,20 +9,16 @@
 typedef struct {
     void *msg_name;
     uint32_t msg_namelen;
-    uint32_t __pad1;
     void *msg_iov;
-    int msg_iovlen;
-    int __pad_iovlen;
+    size_t msg_iovlen;
     void *msg_control;
-    uint32_t msg_controllen;
-    uint32_t __pad_controllen;
+    size_t msg_controllen;
     int msg_flags;
 } socket_msghdr_t;
 
 typedef struct {
     socket_msghdr_t msg_hdr;
     unsigned msg_len;
-    unsigned __pad;
 } socket_mmsghdr_t;
 
 typedef struct {
@@ -31,8 +27,7 @@ typedef struct {
 } socket_iovec_t;
 
 typedef struct {
-    uint32_t cmsg_len;
-    int __pad_cmsg_len;
+    size_t cmsg_len;
     int cmsg_level;
     int cmsg_type;
 } socket_cmsghdr_t;
@@ -99,15 +94,24 @@ static socket_cmsghdr_t *cmsg_firsthdr(const socket_msghdr_t *mh)
            (socket_cmsghdr_t *)mh->msg_control : NULL;
 }
 
-static socket_cmsghdr_t *cmsg_nxthdr(const socket_msghdr_t *mh,
-                                     const socket_cmsghdr_t *cmsg)
+static size_t cmsg_remaining(const socket_msghdr_t *mh,
+                             const socket_cmsghdr_t *cmsg)
 {
-    size_t next = (size_t)((const uint8_t *)cmsg - (const uint8_t *)mh->msg_control) +
-                  cmsg_align(cmsg->cmsg_len);
-    if (cmsg->cmsg_len < sizeof(socket_cmsghdr_t) ||
-        next + sizeof(socket_cmsghdr_t) > mh->msg_controllen)
+    size_t offset = (const uint8_t *)cmsg - (const uint8_t *)mh->msg_control;
+    return offset <= mh->msg_controllen ? mh->msg_controllen - offset : 0;
+}
+
+static socket_cmsghdr_t *cmsg_nxthdr(const socket_msghdr_t *mh,
+                                   const socket_cmsghdr_t *cmsg)
+{
+    size_t remaining = cmsg_remaining(mh, cmsg);
+    if (cmsg->cmsg_len < sizeof(*cmsg) || cmsg->cmsg_len > remaining ||
+        cmsg->cmsg_len > SIZE_MAX - (sizeof(size_t) - 1))
         return NULL;
-    return (socket_cmsghdr_t *)((uint8_t *)mh->msg_control + next);
+    size_t step = cmsg_align(cmsg->cmsg_len);
+    if (step > remaining || remaining - step < sizeof(*cmsg))
+        return NULL;
+    return (socket_cmsghdr_t *)((uint8_t *)cmsg + step);
 }
 
 static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
@@ -117,7 +121,7 @@ static int parse_send_control(const socket_msghdr_t *mh, int *ttl, int *tclass)
     socket_cmsghdr_t *cmsg = cmsg_firsthdr(mh);
     while (cmsg) {
         size_t need = cmsg_len(0);
-        if (cmsg->cmsg_len < need || cmsg->cmsg_len > mh->msg_controllen)
+        if (cmsg->cmsg_len < need || cmsg->cmsg_len > cmsg_remaining(mh, cmsg))
             return -EINVAL;
         if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_HOPLIMIT) {
             if (cmsg->cmsg_len < cmsg_len(sizeof(int)))
@@ -158,7 +162,7 @@ static int parse_send_rights(const socket_msghdr_t *mh, scm_rights_t *out)
     socket_cmsghdr_t *cmsg = cmsg_firsthdr(mh);
     while (cmsg) {
         size_t need = cmsg_len(0);
-        if (cmsg->cmsg_len < need || cmsg->cmsg_len > mh->msg_controllen) {
+        if (cmsg->cmsg_len < need || cmsg->cmsg_len > cmsg_remaining(mh, cmsg)) {
             scm_rights_clear(out);
             return -EINVAL;
         }
@@ -216,7 +220,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_PKTINFO;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(socket_in6_pktinfo_t));
+        cmsg->cmsg_len = cmsg_len(sizeof(socket_in6_pktinfo_t));
         socket_in6_pktinfo_t pktinfo = {0};
         if (meta->has_pktinfo) {
             memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
@@ -234,7 +238,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_HOPLIMIT;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        cmsg->cmsg_len = cmsg_len(sizeof(int));
         int hoplimit = meta->has_hoplimit ? meta->hoplimit : 0;
         memcpy(cmsg_data(cmsg), &hoplimit, sizeof(hoplimit));
         used += need;
@@ -248,7 +252,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_TCLASS;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        cmsg->cmsg_len = cmsg_len(sizeof(int));
         int tclass = meta->has_tclass ? meta->tclass : 0;
         memcpy(cmsg_data(cmsg), &tclass, sizeof(tclass));
         used += need;
@@ -262,7 +266,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_2292PKTINFO;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(socket_in6_pktinfo_t));
+        cmsg->cmsg_len = cmsg_len(sizeof(socket_in6_pktinfo_t));
         socket_in6_pktinfo_t pktinfo = {0};
         if (meta->has_pktinfo) {
             memcpy(pktinfo.ipi6_addr, meta->pktinfo_addr, sizeof(pktinfo.ipi6_addr));
@@ -280,7 +284,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_2292HOPLIMIT;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(sizeof(int));
+        cmsg->cmsg_len = cmsg_len(sizeof(int));
         int hoplimit = meta->has_hoplimit ? meta->hoplimit : 0;
         memcpy(cmsg_data(cmsg), &hoplimit, sizeof(hoplimit));
         used += need;
@@ -295,7 +299,7 @@ static size_t build_recv_control(const socket_msghdr_t *mh,
         cmsg = (socket_cmsghdr_t *)(dst + used);
         cmsg->cmsg_level = SOL_SOCKET;
         cmsg->cmsg_type = SCM_CREDENTIALS;
-        cmsg->cmsg_len = (uint32_t)cmsg_len(3 * sizeof(int32_t));
+        cmsg->cmsg_len = cmsg_len(3 * sizeof(int32_t));
         int32_t cred[3];
         cred[0] = meta->has_cred ? out->cred_pid : 0;
         cred[1] = meta->has_cred ? out->cred_uid : 0;
@@ -325,9 +329,8 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
                                        int flags)
 {
     if (!mh) return -EFAULT;
-    if (mh->msg_iovlen < 0) return -EINVAL;
     if (mh->msg_iovlen == 0) return 0;
-    if (mh->msg_iovlen > 1024) return -EINVAL;
+    if (mh->msg_iovlen > 1024) return -EMSGSIZE;
 
     size_t iov_bytes = (size_t)mh->msg_iovlen * sizeof(socket_iovec_t);
     socket_iovec_t *iov = (socket_iovec_t *)kmalloc(iov_bytes);
@@ -338,7 +341,7 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
     }
 
     size_t total = 0;
-    for (int i = 0; i < mh->msg_iovlen; i++) {
+    for (size_t i = 0; i < mh->msg_iovlen; i++) {
         if (iov[i].len > SIZE_MAX - total) {
             kfree(iov);
             return -EINVAL;
@@ -373,7 +376,7 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
         return -ENOMEM;
     }
     size_t off = 0;
-    for (int i = 0; i < mh->msg_iovlen; i++) {
+    for (size_t i = 0; i < mh->msg_iovlen; i++) {
         if (iov[i].len == 0)
             continue;
         if (!iov[i].base) {
@@ -495,9 +498,8 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
     if (!msg) return -EFAULT;
     socket_msghdr_t mh;
     if (copy_from_user(&mh, msg, sizeof(mh)) < 0) return -EFAULT;
-    if (mh.msg_iovlen < 0) return -EINVAL;
     if (mh.msg_iovlen == 0) return 0;
-    if (mh.msg_iovlen > 1024) return -EINVAL;
+    if (mh.msg_iovlen > 1024) return -EMSGSIZE;
 
     size_t iov_bytes = (size_t)mh.msg_iovlen * sizeof(socket_iovec_t);
     socket_iovec_t *iov = (socket_iovec_t *)kmalloc(iov_bytes);
@@ -508,7 +510,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
     }
 
     size_t total = 0;
-    for (int i = 0; i < mh.msg_iovlen; i++) {
+    for (size_t i = 0; i < mh.msg_iovlen; i++) {
         if (iov[i].len > SIZE_MAX - total) {
             kfree(iov);
             return -EINVAL;
@@ -560,7 +562,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
     int64_t r = net_recvfrom_meta((int)gfd, buf, total, flags, addr, addrlen, &meta);
     if (r >= 0) {
         size_t copied = 0;
-        for (int i = 0; i < mh.msg_iovlen && copied < (size_t)r; i++) {
+        for (size_t i = 0; i < mh.msg_iovlen && copied < (size_t)r; i++) {
             size_t n = (size_t)r - copied;
             if (n > iov[i].len)
                 n = iov[i].len;
@@ -639,6 +641,9 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                     kfree(iov);
                     return -ENOMEM;
                 }
+                /* Ancillary headers use native size_t on the Linux wire.
+                 * Clear alignment padding as well as initializing every field. */
+                memset(cbuf, 0, mh.msg_controllen);
                 if (recv_meta.has_pktinfo || recv_meta.has_hoplimit ||
                     recv_meta.has_tclass || recv_meta.has_2292_pktinfo ||
                     recv_meta.has_2292_hoplimit || recv_meta.has_cred) {
@@ -692,7 +697,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                         cmsg->cmsg_level = SOL_SOCKET;
                         cmsg->cmsg_type = SCM_RIGHTS;
                         cmsg->cmsg_len =
-                            (uint32_t)cmsg_len((size_t)delivered * sizeof(int));
+                            cmsg_len((size_t)delivered * sizeof(int));
                         used += cmsg_space((size_t)delivered * sizeof(int));
                     } else {
                         ctrunc = 1;
@@ -708,7 +713,7 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                 }
                 kfree(cbuf);
             }
-            mh.msg_controllen = (uint32_t)used;
+            mh.msg_controllen = used;
             if (copy_to_user(&((socket_msghdr_t *)msg)->msg_controllen,
                              &mh.msg_controllen, sizeof(mh.msg_controllen)) < 0) {
                 kfree(iov);
