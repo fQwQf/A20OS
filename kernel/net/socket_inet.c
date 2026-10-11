@@ -2862,12 +2862,48 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                    ? (uint32_t)TCP_SND_BUF : (uint32_t)avail;
             if (room32 > 0xffff)
                 room32 = 0xffff;
+            if (s->tcp->snd_queuelen >= TCP_SND_QUEUELEN)
+                room32 = 0;
         }
         if (!tcp_alive) {
             a20_lwip_lane_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
         }
         net_inet_ip_opts_apply_snapshot_locked(s, &ip_opts);
+        bool allocation_blocked = false;
+        if (room32) {
+            size_t n = len - sent;
+            if (n > room32)
+                n = room32;
+            err_t e;
+            /* snd_buf counts bytes, while tcp_write also needs queue entries
+             * and pbufs. A smaller prefix may fit when the full write does not. */
+            for (;;) {
+                e = tcp_write(s->tcp, (const uint8_t *)buf + sent,
+                              (u16_t)n, TCP_WRITE_FLAG_COPY);
+                if (e != ERR_MEM || n == 1)
+                    break;
+                n /= 2;
+            }
+            if (e == ERR_OK) {
+                /* tcp_write already owns these bytes. An output failure leaves
+                 * them queued for retransmission; reporting failure here would
+                 * make the caller resend data that we have accepted. */
+                sent += n;
+                e = tcp_output(s->tcp);
+                if (e != ERR_OK)
+                    ktrace_net("[NET] queued TCP output deferred: %d\n", (int)e);
+                a20_lwip_lane_unlock(lwip_flags);
+                continue;
+            }
+            if (e != ERR_MEM) {
+                a20_lwip_lane_unlock(lwip_flags);
+                return sent ? (int)sent :
+                       (e == ERR_CONN || e == ERR_CLSD ? -EPIPE : -EIO);
+            }
+            allocation_blocked = true;
+            room32 = 0;
+        }
         if (room32 == 0) {
             a20_lwip_lane_unlock(lwip_flags);
             if (sent || s->nonblock)
@@ -2881,6 +2917,13 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -EAGAIN;
             uint64_t timeout = net_socket_timeout_snapshot(s, 1);
             uint64_t deadline = timeout ? start + timeout : 0;
+            /* Allocation can fail even with an empty queue. Retry after a tick
+             * instead of waiting forever for an ACK that cannot arrive. */
+            if (allocation_blocked) {
+                uint64_t retry = timer_get_ticks() + 1;
+                if (!deadline || retry < deadline)
+                    deadline = retry;
+            }
             proc_wait_token_t token =
                 proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
             if (!token.task)
@@ -2897,7 +2940,8 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 /* Same question as the loop asked, one re-check later: has an
                  * ACK landed since we parked, and does that mean room?  Answered
                  * from snd_buf for the reason spelled out above. */
-                room_now = s->tcp->snd_buf > 0;
+                room_now = !allocation_blocked && s->tcp->snd_buf > 0 &&
+                           s->tcp->snd_queuelen < TCP_SND_QUEUELEN;
             }
             a20_lwip_lane_unlock(room_flags);
             if (room_now)
@@ -2913,36 +2957,12 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             proc_park_finish(token);
             if (proc_wake_reason_is_task_interrupt(reason))
                 return -ERESTARTSYS;
-            if (reason == PROC_WAKE_TIMEOUT)
+            if (reason == PROC_WAKE_TIMEOUT &&
+                (!allocation_blocked || net_socket_wait_expired(s, start, 1)))
                 return -EAGAIN;
             continue;
         }
-        /* room32 > 0: merge the sndbuf check with write/output under one lock
-         * acquisition.  The lock above measured room and confirmed liveness;
-         * re-verify liveness under the same lock before writing, because
-         * tcp_write() would otherwise have to fail on a dead pcb. */
-        size_t n = len - sent;
-        if (n > room32)
-            n = room32;
-        if (n > 0xffff)
-            n = 0xffff;
-        if (!s->tcp || s->closed || !s->connected) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EPIPE;
-        }
-        err_t e = tcp_write(s->tcp, (const uint8_t *)buf + sent,
-                            (u16_t)n, TCP_WRITE_FLAG_COPY);
-        if (e != ERR_OK) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EIO;
-        }
-        e = tcp_output(s->tcp);
-        if (e != ERR_OK) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EIO;
-        }
-        a20_lwip_lane_unlock(lwip_flags);
-        sent += n;
+
     }
     /* Outside the lwIP lane lock, for the same reason the loop does not run them.
      * The error returns above skip this, which is safe because sched() runs
