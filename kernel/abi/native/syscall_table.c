@@ -170,11 +170,14 @@ int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_route(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_event_subscribe(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_link_status(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
-#define A20_NATIVE_SYSCALL(name, ...) \
-    static int64_t a20_handle_##name(const a20_syscall_args_t *args) \
-    { (void)args; return __VA_ARGS__; }
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    static int64_t a20_handle_##name(const a20_syscall_args_t *args) {         \
+        (void)args;                                                            \
+        return __VA_ARGS__;                                                    \
+    }
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
@@ -184,28 +187,28 @@ int64_t sys_a20_cluster_link_status(const a20_syscall_args_t *args);
  * a bounds check. */
 
 /* One const entry per syscall, so the index below can point into it. */
-#define A20_NATIVE_SYSCALL(name, ...) \
-    static const a20_syscall_entry_t a20_entry_##name = \
-        { A20_SYS_##name, #name, a20_handle_##name };
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    static const a20_syscall_entry_t a20_entry_##name = {                      \
+        A20_SYS_##name, #name, a20_handle_##name};
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
-#define A20_NATIVE_SYSCALL(name, ...) \
-    _Static_assert(A20_SYS_##name < A20_SYSCALL_TABLE_SIZE, \
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    _Static_assert(A20_SYS_##name < A20_SYSCALL_TABLE_SIZE,                    \
                    "Native syscall number exceeds the dispatch index");
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
 /* Every lookup returns a pointer into this array, so it must stay const: a
  * shared mutable copy would be one data race between two CPUs in syscalls. */
-static const a20_syscall_entry_t *const a20_syscall_index[A20_SYSCALL_TABLE_SIZE] = {
+static const a20_syscall_entry_t *const
+    a20_syscall_index[A20_SYSCALL_TABLE_SIZE] = {
 #define A20_NATIVE_SYSCALL(name, ...) [A20_SYS_##name] = &a20_entry_##name,
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 };
 
-const a20_syscall_entry_t *a20_syscall_lookup(uint64_t nr)
-{
+const a20_syscall_entry_t *a20_syscall_lookup(uint64_t nr) {
     if (nr >= A20_SYSCALL_TABLE_SIZE)
         return NULL;
     return a20_syscall_index[nr];

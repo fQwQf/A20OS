@@ -16,6 +16,7 @@
 #include "core/random.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
 #include "mm/frame.h"
@@ -42,12 +43,15 @@
 extern struct a20_ht_internal *task_get_a20_ht(task_t *t);
 extern int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                                   uint16_t type, a20_rights_t rights);
-extern int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
-                                           uint16_t type, a20_rights_t rights,
-                                           uint64_t expiry_tick, uint32_t remaining_ops,
-                                           uint32_t temporal_flags, uint8_t security_label);
-extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,
-                                          uint16_t expected_type, a20_rights_t required_rights,
+extern int64_t
+a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
+                            uint16_t type, a20_rights_t rights,
+                            uint64_t expiry_tick, uint32_t remaining_ops,
+                            uint32_t temporal_flags, uint8_t security_label);
+extern int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht,
+                                          a20_handle_t h,
+                                          uint16_t expected_type,
+                                          a20_rights_t required_rights,
                                           a20_handle_entry_t *out);
 extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
@@ -59,26 +63,37 @@ extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
 /* ===== Task (0x0200) continued ===== */
 
-int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     int32_t sig = (int32_t)A20_ARG(1);
+    if (sig < 0 || sig >= NSIG)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_SIGNAL, &entry);
-    if (r < 0) return r;
+    int64_t r =
+        a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_SIGNAL, &entry);
+    if (r < 0)
+        return r;
 
     task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (!target) return -A20_ERR_BAD_HANDLE;
+    if (!target)
+        return -A20_ERR_BAD_HANDLE;
 
-    if (sig == 9) {
+    if (!sig) {
         proc_put(target);
-        proc_exit(128 + 9);
+        return A20_OK;
+    }
+    if (sig == 9) {
+        /* Force the referenced target to exit at its safe boundary. Calling
+         * proc_exit here would terminate the requesting agent instead. */
+        proc_force_exit(target, 128 + 9);
+        proc_put(target);
+        return A20_OK;
     }
 
     /* Checkpoint-based delivery: record the signal and wake the target if it
@@ -100,8 +115,7 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_signal_check(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_signal_check(const a20_syscall_args_t *args) {
     (void)args;
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -110,8 +124,7 @@ int64_t sys_a20_signal_check(const a20_syscall_args_t *args)
     return (int64_t)a20_ht_sig_take(ht);
 }
 
-int64_t sys_a20_signal_mask(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_signal_mask(const a20_syscall_args_t *args) {
     uint64_t new_mask = A20_ARG(0);
     uint64_t *old_out = (uint64_t *)(uintptr_t)A20_ARG(1);
 
@@ -125,23 +138,25 @@ int64_t sys_a20_signal_mask(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_task_info(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_task_info(const a20_syscall_args_t *args) {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_task_info_t *out = (a20_task_info_t *)(uintptr_t)A20_ARG(1);
-    if (!out) return -A20_ERR_FAULT;
+    if (!out)
+        return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_STAT, &entry);
-    if (r < 0) return r;
+    int64_t r = a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_STAT, &entry);
+    if (r < 0)
+        return r;
 
     task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (!target) return -A20_ERR_BAD_HANDLE;
+    if (!target)
+        return -A20_ERR_BAD_HANDLE;
 
     a20_task_info_t info;
     memset(&info, 0, sizeof(info));
@@ -165,8 +180,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args) {
     uint64_t duration_ns = A20_ARG(0);
     if (duration_ns == 0) {
         proc_yield();
@@ -177,18 +191,18 @@ int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args)
      * PROC_WAKE_SIGNAL, so the sleep returns -A20_ERR_INTERRUPTED and the
      * caller can dispatch signals at this checkpoint.  The wait-timer heap
      * fires the deadline on timeout. */
-    uint64_t sec  = duration_ns / 1000000000ULL;
+    uint64_t sec = duration_ns / 1000000000ULL;
     uint64_t nsec = duration_ns % 1000000000ULL;
-    uint64_t ticks = sec * TICKS_PER_SEC +
-                     nsec * TICKS_PER_SEC / 1000000000ULL;
+    uint64_t ticks = sec * TICKS_PER_SEC + nsec * TICKS_PER_SEC / 1000000000ULL;
     if (ticks == 0)
         ticks = 1;
     uint64_t now = timer_get_ticks();
     uint64_t deadline = now + ticks;
     if (deadline < now)
-        deadline = UINT64_MAX / 2;   /* overflow: cap far future */
+        deadline = UINT64_MAX / 2; /* overflow: cap far future */
 
-    proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
     if (!token.task) {
         proc_yield();
         return A20_OK;
@@ -200,15 +214,13 @@ int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_thread_yield(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_thread_yield(const a20_syscall_args_t *args) {
     (void)args;
     proc_yield();
     return A20_OK;
 }
 
-int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args) {
     uint32_t *out = (uint32_t *)(uintptr_t)A20_ARG(0);
     uint32_t cpu = cpu_current_id();
     if (!out || copy_to_user(out, &cpu, sizeof(cpu)) < 0)
@@ -216,27 +228,27 @@ int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_thread_exit(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_thread_exit(const a20_syscall_args_t *args) {
     int32_t code = (int32_t)A20_ARG(0);
     proc_exit(code);
     return 0;
 }
 
-int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args) {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_sched_args_t *out = (a20_sched_args_t *)(uintptr_t)A20_ARG(1);
-    if (!out) return -A20_ERR_FAULT;
+    if (!out)
+        return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_STAT, &entry);
-    if (r < 0) return r;
+    int64_t r = a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_STAT, &entry);
+    if (r < 0)
+        return r;
 
     task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     a20_sched_args_t kinfo;
@@ -258,20 +270,21 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
-int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
-{
+int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args) {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_rusage_t *out = (a20_rusage_t *)(uintptr_t)A20_ARG(1);
-    if (!out) return -A20_ERR_FAULT;
+    if (!out)
+        return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
+    if (!ht)
+        return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_STAT, &entry);
-    if (r < 0) return r;
+    int64_t r = a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_STAT, &entry);
+    if (r < 0)
+        return r;
 
     task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     a20_rusage_t usage;
@@ -279,7 +292,8 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
     if (target) {
         usage.user_time_ns = target->total_time * 10000000ULL;
         usage.max_rss = mm_rss_get(target->mm) * 4096ULL;
-        usage.sys_time_ns = (target->child_utime + target->child_stime) * 10000000ULL;
+        usage.sys_time_ns =
+            (target->child_utime + target->child_stime) * 10000000ULL;
     }
     proc_put(target);
     if (copy_to_user(out, &usage, sizeof(usage)) < 0)

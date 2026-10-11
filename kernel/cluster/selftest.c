@@ -55,8 +55,7 @@
 
 static int g_st_pass, g_st_total;
 
-static void st_report(const char *name, int ok)
-{
+static void st_report(const char *name, int ok) {
     g_st_total++;
     if (ok)
         g_st_pass++;
@@ -64,19 +63,17 @@ static void st_report(const char *name, int ok)
 }
 
 /* Virtual identities; hashes are pinned in tools/cluster-ref/MANIFEST.json. */
-static const a20_node_id_t st_node_a = {
-    { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-      0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10 }
-};
-static const a20_node_id_t st_node_b = {
-    { 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
-      0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0 }
-};
-static const uint8_t st_nh_b[4] = { 0x02, 0, 0, 0 };
+static const a20_node_id_t st_node_a = {{0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                                         0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                                         0x0d, 0x0e, 0x0f, 0x10}};
+static const a20_node_id_t st_node_b = {{0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+                                         0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac,
+                                         0xad, 0xae, 0xaf, 0xb0}};
+static const uint8_t st_nh_b[4] = {0x02, 0, 0, 0};
 
 /* ---- server side: the exported echo endpoint ------------------------------- */
 
-static a20_channel_ep_t *st_server_ep;      /* ep_S, owned by the server */
+static a20_channel_ep_t *st_server_ep; /* ep_S, owned by the server */
 static volatile int st_server_done;
 static volatile int st_server_should_close;
 
@@ -89,8 +86,7 @@ static volatile int st_server_should_close;
 static a20_channel_ep_t *st_conn_spawn[ST_CONN_SLOTS];
 static spinlock_t st_conn_spawn_lock = SPINLOCK_INIT;
 
-static void st_conn_thread(void)
-{
+static void st_conn_thread(void) {
     a20_channel_ep_t *ep = NULL;
     uint8_t buf[256];
 
@@ -111,7 +107,7 @@ static void st_conn_thread(void)
         uint32_t len = 0, handles = 0;
         int64_t r = a20_channel_recv_begin(ep, 0, &len, &handles);
         if (r < 0)
-            break;                          /* caller went away */
+            break; /* caller went away */
         if (len > sizeof(buf) || handles) {
             a20_channel_recv_abort(ep);
             break;
@@ -126,8 +122,7 @@ static void st_conn_thread(void)
     a20_channel_ep_release(ep);
 }
 
-static int st_conn_queue(a20_channel_ep_t *ep)
-{
+static int st_conn_queue(a20_channel_ep_t *ep) {
     uint64_t flags = spin_lock_irqsave(&st_conn_spawn_lock);
     for (int i = 0; i < ST_CONN_SLOTS; i++) {
         if (!st_conn_spawn[i]) {
@@ -145,8 +140,7 @@ static int st_conn_queue(a20_channel_ep_t *ep)
     return -1;
 }
 
-static void st_server_thread(void)
-{
+static void st_server_thread(void) {
     proc_set_name(proc_current(), "clx-st-srv");
     uint8_t *buf = kmalloc(2048);
 
@@ -157,7 +151,7 @@ static void st_server_thread(void)
          * endpoint; requests were injected through its peer). */
         int64_t r = a20_channel_recv_begin(st_server_ep, 0, &len, &handles);
         if (r < 0)
-            break;                          /* closed: stop serving */
+            break; /* closed: stop serving */
         if (!buf || len > 2048 || handles > 1) {
             a20_channel_recv_abort(st_server_ep);
             break;
@@ -195,13 +189,11 @@ static void st_server_thread(void)
 
 /* ---- check thread ----------------------------------------------------------- */
 
-static void st_sleep_ms(uint32_t ms)
-{
+static void st_sleep_ms(uint32_t ms) {
     proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(ms));
 }
 
-static void st_check_thread(void)
-{
+static void st_check_thread(void) {
     proc_set_name(proc_current(), "clx-selftest");
 
     /* The check drives the internal API directly; bring the core up the
@@ -210,44 +202,73 @@ static void st_check_thread(void)
         printf("[CLX-TEST] core init failed\n");
         return;
     }
-    st_sleep_ms(200);                       /* let the boot finish printing */
+    st_sleep_ms(200); /* let the boot finish printing */
 
     /* setup: self, route to virtual node B */
     st_report("set_self", a20_clx_self_set(&st_node_a, 0) == 0);
     st_report("set_self twice -> EXISTS",
               a20_clx_self_set(&st_node_a, 0) == -A20_ERR_EXISTS);
-    st_report("route_add B", a20_clx_route_add(&st_node_b,
-                                               A20_CLX_TRANSPORT_LOOPBACK,
-                                               st_nh_b, 4, 0) == 0);
+    st_report("route_add B",
+              a20_clx_route_add(&st_node_b, A20_CLX_TRANSPORT_LOOPBACK, st_nh_b,
+                                4, 0) == 0);
     st_report("route_add B twice -> EXISTS",
-              a20_clx_route_add(&st_node_b, A20_CLX_TRANSPORT_LOOPBACK,
-                                st_nh_b, 4, 0) == -A20_ERR_EXISTS);
+              a20_clx_route_add(&st_node_b, A20_CLX_TRANSPORT_LOOPBACK, st_nh_b,
+                                4, 0) == -A20_ERR_EXISTS);
     {
         uint32_t tid = 0xdead, nh_len = 0;
         uint8_t nh[16];
         st_report("route lookup B",
                   a20_clx_route_lookup(&st_node_b, &tid, nh, &nh_len) == 0 &&
-                  tid == A20_CLX_TRANSPORT_LOOPBACK);
+                      tid == A20_CLX_TRANSPORT_LOOPBACK);
         {
-            a20_node_id_t unknown = {{
-                0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
-                0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee }};
+            a20_node_id_t unknown = {{0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
+                                      0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
+                                      0xee, 0xee}};
             st_report("route lookup unknown -> UNREACHABLE",
-                      a20_clx_route_lookup(&unknown, &tid, nh,
-                                           &nh_len) ==
+                      a20_clx_route_lookup(&unknown, &tid, nh, &nh_len) ==
                           -A20_ERR_NODE_UNREACHABLE);
         }
         st_report("route lookup self -> loopback",
                   a20_clx_route_lookup(&st_node_a, &tid, nh, &nh_len) == 0 &&
-                  tid == A20_CLX_TRANSPORT_LOOPBACK);
+                      tid == A20_CLX_TRANSPORT_LOOPBACK);
+    }
+
+    {
+        /* Two distinct persistent identities with the same FNV-1a32. */
+        a20_node_id_t c1 = {{0xc6, 0xb0, 0x25, 0xcd, 0xda, 0x92, 0x17, 0x04,
+                             0xaf, 0xa4, 0x5e, 0xb1, 0x82, 0x2b, 0xc1, 0x06}};
+        a20_node_id_t c2 = {{0x8b, 0xce, 0x6c, 0xa6, 0xe8, 0x3c, 0x7e, 0x93,
+                             0x0e, 0xd4, 0xec, 0x9b, 0xd7, 0x15, 0x20, 0xf6}};
+        uint8_t nh1[4] = {10, 0, 0, 0}, nh2[4] = {11, 0, 0, 0};
+        int first =
+            a20_clx_route_add(&c1, A20_CLX_TRANSPORT_LOOPBACK, nh1, 4, 0);
+        int second =
+            a20_clx_route_add(&c2, A20_CLX_TRANSPORT_LOOPBACK, nh2, 4, 0);
+        st_report("node hash collision rejected",
+                  a20_clx_node_hash(&c1) == a20_clx_node_hash(&c2) &&
+                      first == 0 && second == -A20_ERR_EXISTS);
+        if (!first)
+            a20_clx_route_del(&c1);
+        st_report("null route identity rejected",
+                  a20_clx_route_add(NULL, A20_CLX_TRANSPORT_LOOPBACK, nh1, 4,
+                                    0) == -A20_ERR_INVALID_ARGUMENT);
+        uint8_t old_nh[16];
+        uint32_t tid, length;
+        int bad = a20_clx_route_replace(&st_node_b, A20_CLX_TRANSPORT_LOOPBACK,
+                                        nh1, 3, 0);
+        st_report("failed route replacement preserves old route",
+                  bad == -A20_ERR_INVALID_ARGUMENT &&
+                      a20_clx_route_lookup(&st_node_b, &tid, old_nh, &length) ==
+                          0 &&
+                      length == 4 && memcmp(old_nh, st_nh_b, 4) == 0);
     }
 
     /* export: fresh channel; the server owns ep_s, export_register keeps
      * the peer (injection path + reply drain). */
     a20_channel_ep_t *ep_s = a20_channel_create(8, NULL);
     uint32_t slot = 0;
-    int64_t er = ep_s ? a20_clx_export_register(ep_s, "echo", 4, 0, &slot)
-                      : -1;
+    int64_t er =
+        ep_s ? a20_clx_export_register_owned(ep_s, "echo", 4, 0, &slot) : -1;
     st_report("export register", er > 0);
     st_server_ep = ep_s;
     int server_pid = proc_alloc(st_server_thread);
@@ -266,9 +287,8 @@ static void st_check_thread(void)
         uint8_t rbuf[64];
         rlen = (uint32_t)sizeof(rbuf);
         int64_t rr = a20_channel_recv(ep_a, rbuf, &rlen, NULL, NULL, NULL, 0);
-        st_report("A/B echo round trip",
-                  sr == 0 && rr == 0 && rlen == 10 &&
-                  memcmp(rbuf, req, 10) == 0);
+        st_report("A/B echo round trip", sr == 0 && rr == 0 && rlen == 10 &&
+                                             memcmp(rbuf, req, 10) == 0);
 
         /* 1a. completed CALL clears the proxy deadline: after the round
          * trip above nothing is in flight, so deadline_tick must be 0 and
@@ -276,16 +296,15 @@ static void st_check_thread(void)
          * 30 s deadline tore every proxy down after its first call). */
         {
             uint64_t flags = spin_lock_irqsave(&g_clx_lock);
-            a20_clx_proxy_t *p = a20_clx_proxy_by_node_slot(
-                a20_clx_node_hash(&st_node_b), slot);
-            int cleared = p && p->inflight_count == 0 &&
-                          p->deadline_tick == 0;
+            a20_clx_proxy_t *p =
+                a20_clx_proxy_by_node_slot(a20_clx_node_hash(&st_node_b), slot);
+            int cleared = p && p->inflight_count == 0 && p->deadline_tick == 0;
             spin_unlock_irqrestore(&g_clx_lock, flags);
             a20_clx_deadline_scan();
             st_sleep_ms(20);
             uint64_t f2 = spin_lock_irqsave(&g_clx_lock);
-            a20_clx_proxy_t *p2 = a20_clx_proxy_by_node_slot(
-                a20_clx_node_hash(&st_node_b), slot);
+            a20_clx_proxy_t *p2 =
+                a20_clx_proxy_by_node_slot(a20_clx_node_hash(&st_node_b), slot);
             int alive = p2 && p2->in_use;
             spin_unlock_irqrestore(&g_clx_lock, f2);
             st_report("CALL done -> deadline cleared, scan keeps proxy",
@@ -298,17 +317,17 @@ static void st_check_thread(void)
          * tore the endpoint down on its first call). */
         {
             int err3 = 0;
-            a20_channel_ep_t *ep_self = a20_clx_proxy_create(&st_node_a, slot,
-                                                             0, &err3);
+            a20_channel_ep_t *ep_self =
+                a20_clx_proxy_create(&st_node_a, slot, 0, &err3);
             const char *sreq = "self-call";
             int self_ok = 0, self_alive = 0;
             if (ep_self) {
-                int64_t ss = a20_channel_send(ep_self, sreq, 9, NULL, 0,
-                                              NULL, 0);
+                int64_t ss =
+                    a20_channel_send(ep_self, sreq, 9, NULL, 0, NULL, 0);
                 st_sleep_ms(50);
                 rlen = (uint32_t)sizeof(rbuf);
-                int64_t srr = a20_channel_recv(ep_self, rbuf, &rlen, NULL,
-                                               NULL, NULL, 0);
+                int64_t srr =
+                    a20_channel_recv(ep_self, rbuf, &rlen, NULL, NULL, NULL, 0);
                 self_ok = ss == 0 && srr == 0 && rlen == 9 &&
                           memcmp(rbuf, sreq, 9) == 0;
                 uint64_t flags = spin_lock_irqsave(&g_clx_lock);
@@ -331,30 +350,27 @@ static void st_check_thread(void)
          * (01-abi §6), a routed node reports its own link, an unknown
          * node is NODE_UNREACHABLE. */
         {
-            a20_node_id_t local = {{ 0 }};
-            a20_node_id_t unknown = {{
-                0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
-                0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77 }};
+            a20_node_id_t local = {{0}};
+            a20_node_id_t unknown = {{0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
+                                      0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
+                                      0x77, 0x77}};
             uint32_t lst = 0, lrtt = 0;
             uint32_t bst = 0, brtt = 0;
             uint32_t ust = 0, urtt = 0;
             uint64_t ltx = 0, lrx = 0, ltd = 0, lrd = 0, lrt = 0, llh = 0;
             uint64_t btx = 0, brx = 0, btd = 0, brd = 0, brt = 0, blh = 0;
             uint64_t utx = 0, urx = 0, utd = 0, urd = 0, urt = 0, ulh = 0;
-            int64_t r_loc = a20_clx_link_status_fill(&local, &lst, &lrtt,
-                                                     &ltx, &lrx, &ltd, &lrd,
-                                                     &lrt, &llh);
-            int64_t r_b = a20_clx_link_status_fill(&st_node_b, &bst, &brtt,
-                                                   &btx, &brx, &btd, &brd,
-                                                   &brt, &blh);
-            int64_t r_unk = a20_clx_link_status_fill(&unknown, &ust, &urtt,
-                                                     &utx, &urx, &utd, &urd,
-                                                     &urt, &ulh);
+            int64_t r_loc = a20_clx_link_status_fill(
+                &local, &lst, &lrtt, &ltx, &lrx, &ltd, &lrd, &lrt, &llh);
+            int64_t r_b = a20_clx_link_status_fill(
+                &st_node_b, &bst, &brtt, &btx, &brx, &btd, &brd, &brt, &blh);
+            int64_t r_unk = a20_clx_link_status_fill(
+                &unknown, &ust, &urtt, &utx, &urx, &utd, &urd, &urt, &ulh);
             st_report("link_status LOCAL aggregates / B UP / unknown UNREACH",
                       r_loc == 0 && ltx > 0 && lrx > 0 &&
-                      lst == A20_CLX_LINK_UP &&
-                      r_b == 0 && bst == A20_CLX_LINK_UP && btx > 0 &&
-                      r_unk == -A20_ERR_NODE_UNREACHABLE);
+                          lst == A20_CLX_LINK_UP && r_b == 0 &&
+                          bst == A20_CLX_LINK_UP && btx > 0 &&
+                          r_unk == -A20_ERR_NODE_UNREACHABLE);
         }
 
         /* 1d. A20_EXPORT_REPLACE: same-name export without REPLACE is
@@ -367,16 +383,16 @@ static void st_check_thread(void)
             a20_channel_ep_t *ep_r1 = a20_channel_create(8, NULL);
             a20_channel_ep_t *ep_r2 = a20_channel_create(8, NULL);
             a20_channel_ep_t *ep_r3 = a20_channel_create(8, NULL);
-            int64_t er1 = ep_r1 ? a20_clx_export_register(ep_r1, "repl-svc",
-                                                          8, 0, &slot_r1)
+            int64_t er1 = ep_r1 ? a20_clx_export_register_owned(
+                                      ep_r1, "repl-svc", 8, 0, &slot_r1)
                                 : -1;
-            int64_t er2 = ep_r2 ? a20_clx_export_register(ep_r2, "repl-svc",
-                                                          8, 0, &slot_r2)
+            int64_t er2 = ep_r2 ? a20_clx_export_register_owned(
+                                      ep_r2, "repl-svc", 8, 0, &slot_r2)
                                 : -1;
-            int64_t er3 = ep_r3 ? a20_clx_export_register(
-                                      ep_r3, "repl-svc", 8,
-                                      A20_EXPORT_REPLACE, &slot_r3)
-                                : -1;
+            int64_t er3 =
+                ep_r3 ? a20_clx_export_register_owned(
+                            ep_r3, "repl-svc", 8, A20_EXPORT_REPLACE, &slot_r3)
+                      : -1;
             uint64_t flags = spin_lock_irqsave(&g_clx_lock);
             a20_clx_export_t *old_ex = a20_clx_export_by_slot(slot_r1);
             a20_clx_export_t *new_ex = a20_clx_export_by_name("repl-svc", 8);
@@ -384,7 +400,7 @@ static void st_check_thread(void)
             spin_unlock_irqrestore(&g_clx_lock, flags);
             st_report("export REPLACE retires same-name export",
                       er1 > 0 && er2 == -A20_ERR_EXISTS && er3 > 0 &&
-                      slot_r3 != slot_r1 && swapped);
+                          slot_r3 != slot_r1 && swapped);
             if (ep_r1)
                 a20_channel_ep_release(ep_r1);
             if (ep_r2)
@@ -407,16 +423,15 @@ static void st_check_thread(void)
         {
             uint32_t slot_w1 = 0, slot_w2 = 0;
             a20_channel_ep_t *ep_w1 = a20_channel_create(8, NULL);
-            int64_t ew1 = ep_w1 ? a20_clx_export_register(ep_w1,
-                                                          "repl-race", 9,
-                                                          0, &slot_w1)
+            int64_t ew1 = ep_w1 ? a20_clx_export_register_owned(
+                                      ep_w1, "repl-race", 9, 0, &slot_w1)
                                 : -1;
-            st_sleep_ms(50);        /* old worker parks on the old peer */
+            st_sleep_ms(50); /* old worker parks on the old peer */
             a20_channel_ep_t *ep_w2 = a20_channel_create(8, NULL);
-            int64_t ew2 = ep_w2 ? a20_clx_export_register(
-                                      ep_w2, "repl-race", 9,
-                                      A20_EXPORT_REPLACE, &slot_w2)
-                                : -1;
+            int64_t ew2 =
+                ep_w2 ? a20_clx_export_register_owned(
+                            ep_w2, "repl-race", 9, A20_EXPORT_REPLACE, &slot_w2)
+                      : -1;
             /* The trigger 1d never waited for: the OLD server handle
              * dies only after the entry already carries the NEW
              * registration, running the old worker's exit path. */
@@ -437,20 +452,20 @@ static void st_check_thread(void)
                 ep_c = a20_clx_proxy_create(&st_node_b, slot_w2, 0, &err7);
                 if (ep_c) {
                     const char *wreq = "race-probe";
-                    if (a20_channel_send(ep_c, wreq, 10, NULL, 0, NULL,
-                                         0) == 0) {
+                    if (a20_channel_send(ep_c, wreq, 10, NULL, 0, NULL, 0) ==
+                        0) {
                         st_sleep_ms(100);
                         rlen = (uint32_t)sizeof(rbuf);
-                        int64_t wr = a20_channel_recv(ep_c, rbuf, &rlen,
-                                                      NULL, NULL, NULL, 0);
+                        int64_t wr = a20_channel_recv(ep_c, rbuf, &rlen, NULL,
+                                                      NULL, NULL, 0);
                         call_ok = wr == 0 && rlen == 10 &&
                                   memcmp(rbuf, wreq, 10) == 0;
                     }
                 }
             }
             st_report("REPLACE survives old server-handle release",
-                      ew1 > 0 && ew2 > 0 && slot_w2 != slot_w1 &&
-                      peer_ok && served && call_ok);
+                      ew1 > 0 && ew2 > 0 && slot_w2 != slot_w1 && peer_ok &&
+                          served && call_ok);
             /* Cleanup: drop the caller (CLOSE), revoke the export, then
              * mark the server half closed via its peer so the conn
              * thread exits; its last release of ep_w2 closes the export
@@ -471,7 +486,7 @@ static void st_check_thread(void)
             } else if (ep_w2) {
                 a20_channel_ep_release(ep_w2);
             }
-            st_sleep_ms(50);        /* let the workers/conn threads exit */
+            st_sleep_ms(50); /* let the workers/conn threads exit */
         }
 
         /* 1e. connect(LOCAL): a fresh pair whose connection half the
@@ -485,22 +500,20 @@ static void st_check_thread(void)
             const char *rreq = "remote-after-local";
             int local_ok = 0, remote_ok = 0;
             if (lr == 0 && ep_l) {
-                st_sleep_ms(50);        /* server accepts the connection */
-                int64_t ls = a20_channel_send(ep_l, lreq, 10, NULL, 0,
-                                              NULL, 0);
+                st_sleep_ms(50); /* server accepts the connection */
+                int64_t ls = a20_channel_send(ep_l, lreq, 10, NULL, 0, NULL, 0);
                 st_sleep_ms(50);
                 rlen = (uint32_t)sizeof(rbuf);
-                int64_t lrr = a20_channel_recv(ep_l, rbuf, &rlen, NULL,
-                                               NULL, NULL, 0);
+                int64_t lrr =
+                    a20_channel_recv(ep_l, rbuf, &rlen, NULL, NULL, NULL, 0);
                 local_ok = ls == 0 && lrr == 0 && rlen == 10 &&
                            memcmp(rbuf, lreq, 10) == 0;
                 /* the remote path still works on the same export */
-                int64_t rs = a20_channel_send(ep_a, rreq, 18, NULL, 0,
-                                              NULL, 0);
+                int64_t rs = a20_channel_send(ep_a, rreq, 18, NULL, 0, NULL, 0);
                 st_sleep_ms(50);
                 rlen = (uint32_t)sizeof(rbuf);
-                int64_t rrr = a20_channel_recv(ep_a, rbuf, &rlen, NULL,
-                                               NULL, NULL, 0);
+                int64_t rrr =
+                    a20_channel_recv(ep_a, rbuf, &rlen, NULL, NULL, NULL, 0);
                 remote_ok = rs == 0 && rrr == 0 && rlen == 18 &&
                             memcmp(rbuf, rreq, 18) == 0;
             }
@@ -520,14 +533,14 @@ static void st_check_thread(void)
         /* 3. in-flight over-limit refuses without blocking (01-abi 限额). */
         {
             uint64_t flags = spin_lock_irqsave(&g_clx_lock);
-            a20_clx_proxy_t *p = a20_clx_proxy_by_node_slot(
-                a20_clx_node_hash(&st_node_b), slot);
+            a20_clx_proxy_t *p =
+                a20_clx_proxy_by_node_slot(a20_clx_node_hash(&st_node_b), slot);
             int full_ok = 0;
             if (p) {
                 int filled = 0;
-                while (a20_clx_proxy_inflight_add(
-                           p, 0x1000u + (uint32_t)filled,
-                           timer_get_ticks() + 1000) == 0)
+                while (a20_clx_proxy_inflight_add(p, 0x1000u + (uint32_t)filled,
+                                                  timer_get_ticks() + 1000) ==
+                       0)
                     filled++;
                 full_ok = (filled == (int)p->inflight_cap);
                 for (uint32_t j = 0; j < p->inflight_cap; j++)
@@ -537,6 +550,38 @@ static void st_check_thread(void)
             }
             spin_unlock_irqrestore(&g_clx_lock, flags);
             st_report("inflight over-limit -> NO_SPACE", full_ok);
+        }
+
+        {
+            int full_err = 0;
+            a20_channel_ep_t *full_ep =
+                a20_clx_proxy_create(&st_node_b, 0x7ffffffeu, 0, &full_err);
+            uint64_t flags = spin_lock_irqsave(&g_clx_lock);
+            a20_clx_proxy_t *p = a20_clx_proxy_by_node_slot(
+                a20_clx_node_hash(&st_node_b), 0x7ffffffeu);
+            if (p) {
+                for (uint32_t i = 0; i < p->inflight_cap; i++)
+                    a20_clx_proxy_inflight_add(
+                        p, 0x6000u + i,
+                        timer_get_ticks() + MS_TO_TICKS(CLX_CALL_DEADLINE_MS));
+            }
+            spin_unlock_irqrestore(&g_clx_lock, flags);
+            int full_ok = full_ep && a20_channel_send(full_ep, "full", 4, NULL,
+                                                      0, NULL, 0) == 0;
+            int64_t result = 0;
+            for (uint32_t i = 0; full_ok && i < 100; i++) {
+                uint8_t data;
+                uint32_t length = 1;
+                result = a20_channel_recv(full_ep, &data, &length, NULL, NULL,
+                                          NULL, A20_MSG_NONBLOCK);
+                if (result == -A20_ERR_CANCELED)
+                    break;
+                st_sleep_ms(10);
+            }
+            st_report("inflight exhaustion completes caller",
+                      full_ok && result == -A20_ERR_CANCELED);
+            if (full_ep)
+                a20_channel_ep_release(full_ep);
         }
 
         /* 3a. empty-payload frames encode (02-§8 CLOSE was undeliverable
@@ -556,14 +601,13 @@ static void st_check_thread(void)
             int fn = a20_frame_encode(fbuf, sizeof(fbuf), 65536, &fh, NULL);
             st_report("CLOSE frame encodes with NULL payload",
                       fn == (int)(A20_CLX_HDR_LEN + A20_CLX_CRC_LEN) &&
-                      a20_frame_decode(fbuf, (uint32_t)fn, 65536, &fd,
-                                       &fpl) == A20_FRAME_OK &&
-                      fd.type == A20_CLX_TYPE_CLOSE && fd.payload_len == 0);
+                          a20_frame_decode(fbuf, (uint32_t)fn, 65536, &fd,
+                                           &fpl) == A20_FRAME_OK &&
+                          fd.type == A20_CLX_TYPE_CLOSE && fd.payload_len == 0);
         }
 
-        /* 3b. CLOSE export branch: a live proxy whose caller half is
-         * released puts CLOSE(dst_slot) on the wire (02-§8); on RX the
-         * export side drops the slot's unanswered request pairings. */
+        /* A caller release preserves another caller's pending FIFO entry.
+         * Clearing it would shift the reply pairing for a shared service. */
         {
             uint64_t flags = spin_lock_irqsave(&g_clx_lock);
             a20_clx_export_t *ex = a20_clx_export_by_slot(slot);
@@ -575,19 +619,24 @@ static void st_check_thread(void)
             spin_unlock_irqrestore(&g_clx_lock, flags);
 
             int err4 = 0;
-            a20_channel_ep_t *ep_x = a20_clx_proxy_create(&st_node_b, slot,
-                                                          0, &err4);
+            a20_channel_ep_t *ep_x =
+                a20_clx_proxy_create(&st_node_b, slot, 0, &err4);
             if (ep_x) {
-                st_sleep_ms(20);            /* worker parks on recv */
-                a20_channel_ep_release(ep_x);   /* 02-§8: -> CLOSE wire */
+                st_sleep_ms(20);              /* worker parks on recv */
+                a20_channel_ep_release(ep_x); /* 02-§8: -> CLOSE wire */
             }
-            st_sleep_ms(100);               /* CLOSE round trip */
+            st_sleep_ms(100); /* CLOSE round trip */
             uint64_t f2 = spin_lock_irqsave(&g_clx_lock);
             a20_clx_export_t *ex2 = a20_clx_export_by_slot(slot);
-            int cleared = armed && ex2 && ex2->pending_count == 0;
+            int preserved = armed && ex2 && ex2->pending_count == 1;
+            /* Remove the synthetic entry injected by this test only. */
+            if (ex2) {
+                ex2->pending_head = 0;
+                ex2->pending_count = 0;
+            }
             spin_unlock_irqrestore(&g_clx_lock, f2);
-            st_report("CLOSE rx clears export pending (export branch)",
-                      ep_x != NULL && cleared);
+            st_report("caller CLOSE preserves unrelated pending",
+                      ep_x != NULL && preserved);
         }
 
         /* 3c. CLOSE proxy branch: a CLOSE from the remote node naming one
@@ -596,8 +645,8 @@ static void st_check_thread(void)
          * export, so the export branch is a no-op here. */
         {
             int err5 = 0;
-            a20_channel_ep_t *ep_z = a20_clx_proxy_create(&st_node_b, 77, 0,
-                                                          &err5);
+            a20_channel_ep_t *ep_z =
+                a20_clx_proxy_create(&st_node_b, 77, 0, &err5);
             if (ep_z) {
                 uint8_t fbuf[A20_CLX_HDR_LEN + A20_CLX_CRC_LEN];
                 a20_frame_hdr_t fh;
@@ -609,8 +658,7 @@ static void st_check_thread(void)
                 fh.dst_slot = 77;
                 fh.ttl = A20_CLX_TTL_DEFAULT;
                 fh.csum_kind = A20_CLX_CSUM_CCITT;
-                int fn = a20_frame_encode(fbuf, sizeof(fbuf), 65536, &fh,
-                                          NULL);
+                int fn = a20_frame_encode(fbuf, sizeof(fbuf), 65536, &fh, NULL);
                 if (fn > 0)
                     a20_clx_rx_frame(A20_CLX_TRANSPORT_LOOPBACK, st_nh_b, 4,
                                      fbuf, (uint32_t)fn);
@@ -621,8 +669,8 @@ static void st_check_thread(void)
                 int gone = !pz || !pz->in_use;
                 spin_unlock_irqrestore(&g_clx_lock, flags);
                 rlen = (uint32_t)sizeof(rbuf);
-                int64_t zr = a20_channel_recv(ep_z, rbuf, &rlen, NULL, NULL,
-                                              NULL, 0);
+                int64_t zr =
+                    a20_channel_recv(ep_z, rbuf, &rlen, NULL, NULL, NULL, 0);
                 st_report("CLOSE rx tears proxy down (proxy branch)",
                           fn > 0 && gone && zr == -A20_ERR_CANCELED);
                 a20_channel_ep_release(ep_z);
@@ -640,8 +688,8 @@ static void st_check_thread(void)
         rlen = (uint32_t)sizeof(rbuf);
         (void)a20_channel_recv(ep_a, rbuf, &rlen, NULL, NULL, NULL, 0);
         st_sleep_ms(100);
-        int64_t cr = a20_channel_send(ep_a, "after-close", 11, NULL, 0,
-                                      NULL, 0);
+        int64_t cr =
+            a20_channel_send(ep_a, "after-close", 11, NULL, 0, NULL, 0);
         st_sleep_ms(100);
         rlen = (uint32_t)sizeof(rbuf);
         int64_t cr2 = a20_channel_recv(ep_a, rbuf, &rlen, NULL, NULL, NULL, 0);
@@ -651,28 +699,43 @@ static void st_check_thread(void)
         /* 5. deadline scan: synthesize an expired in-flight txid on a
          * fresh proxy, run one scan, expect the proxy torn down. */
         int err2 = 0;
-        a20_channel_ep_t *ep_a2 = a20_clx_proxy_create(&st_node_b, 0, 0,
-                                                       &err2);
+        a20_channel_ep_t *ep_a2 = a20_clx_proxy_create(&st_node_b, 0, 0, &err2);
         if (ep_a2) {
             uint64_t flags = spin_lock_irqsave(&g_clx_lock);
-            a20_clx_proxy_t *p = a20_clx_proxy_by_node_slot(
-                a20_clx_node_hash(&st_node_b), 0);
+            a20_clx_proxy_t *p =
+                a20_clx_proxy_by_node_slot(a20_clx_node_hash(&st_node_b), 0);
             int armed = 0;
             if (p)
-                armed = a20_clx_proxy_inflight_add(
-                            p, 0xBEEFu, timer_get_ticks() - 1) == 0;
+                armed = a20_clx_proxy_inflight_add(p, 0xBEEFu,
+                                                   timer_get_ticks() - 1) == 0;
             spin_unlock_irqrestore(&g_clx_lock, flags);
             a20_clx_deadline_scan();
             st_sleep_ms(20);
             uint64_t f2 = spin_lock_irqsave(&g_clx_lock);
-            a20_clx_proxy_t *p2 = a20_clx_proxy_by_node_slot(
-                a20_clx_node_hash(&st_node_b), 0);
+            a20_clx_proxy_t *p2 =
+                a20_clx_proxy_by_node_slot(a20_clx_node_hash(&st_node_b), 0);
             int gone = armed && (!p2 || !p2->in_use);
             spin_unlock_irqrestore(&g_clx_lock, f2);
             st_report("deadline scan teardown", gone);
             a20_channel_ep_release(ep_a2);
         } else {
             st_report("deadline scan teardown", 0);
+        }
+        {
+            int del_err;
+            a20_channel_ep_t *routed_ep =
+                a20_clx_proxy_create(&st_node_b, slot, 0, &del_err);
+            int deleted = a20_clx_route_del(&st_node_b);
+            uint8_t data;
+            uint32_t length = 1;
+            int64_t result =
+                routed_ep ? a20_channel_recv(routed_ep, &data, &length, NULL,
+                                             NULL, NULL, A20_MSG_NONBLOCK)
+                          : 0;
+            st_report("route removal cancels old proxies",
+                      deleted == 0 && result == -A20_ERR_CANCELED);
+            if (routed_ep)
+                a20_channel_ep_release(routed_ep);
         }
         a20_channel_ep_release(ep_a);
     }
@@ -685,8 +748,9 @@ static void st_check_thread(void)
 
 /* ---- boot hook ------------------------------------------------------------------ */
 
-void a20_clx_selftest_boot(void)
-{
+void a20_clx_selftest_boot(void) {
+    extern void a20_clx_udp_selftest_boot(void);
+    a20_clx_udp_selftest_boot();
     const char *args = bootargs_get();
 
     if (!args || !strstr(args, "clxselftest=1"))

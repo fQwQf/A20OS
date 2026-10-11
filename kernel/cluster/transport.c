@@ -1,39 +1,24 @@
-/*
- * Cluster transport registry + RX data path (docs/cluster/04-transports.md
- * §1, 03-kernel-impl.md §2 transport.c row).
- *
- * Structure:
- *   - a fixed registry of a20_clx_transport_t (loopback always; UART when
- *     the DEFAULT-tier head node is compiled in; UDP is WA2);
- *   - one RX ring: transport callbacks (04-§1 上行) only enqueue a
- *     kmalloc'd frame copy under the ring lock and wake the RX thread --
- *     no g_clx_lock, no routing (03-§3 中断上下文纪律);
- *   - the RX thread dequeues, screens the frame through the layer-1 codec
- *     (rx_malformed / rx_drops accounting per A-12), resolves identities
- *     (only frames addressed to a hosted identity are accepted -- self or
- *     a loopback virtual node, 04-§2), and dispatches to the proxy/export
- *     handlers, which take g_clx_lock themselves and never sleep under it;
- *   - a housekeeping thread scans CALL deadlines (remote_ep.c).
- *
- * Everything starts lazily from the first cluster syscall via
- * a20_clx_core_init(): a kernel that never touches cluster syscalls pays
- * nothing at boot, and the local channel fast path is untouched
- * (03-§6 本机路径性能回归).
- */
+/* Cluster adapter registry and bounded receive dispatch.
+ * RX, polling and housekeeping run independently. Driver I/O and channel
+ * injection never run under the registry lock. Valid nonlocal frames may
+ * be forwarded only by a RELAY, with TTL/CRC updated in the shared codec.
+ * See docs/cluster/03-kernel-impl.md and 04-transports.md. */
 #include "cluster/clx_internal.h"
 #include "cluster/loopback.h"
+#include "cluster/udp.h"
 
 #include "core/klog.h"
+#include "core/random.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 
-#define CLX_RX_RING 64          /* queued frame pointers, not bytes */
+#define CLX_RX_RING 64 /* queued frame pointers, not bytes */
 
 typedef struct clx_rx_item {
     uint8_t *frame;
     uint32_t len;
     uint32_t transport_id;
-    uint8_t  nh_src[A20_CLX_LINK_ADDR_MAX];
+    uint8_t nh_src[A20_CLX_LINK_ADDR_MAX];
     uint32_t nh_len;
 } clx_rx_item_t;
 
@@ -44,14 +29,19 @@ static spinlock_t g_clx_rx_lock = SPINLOCK_INIT;
 static clx_rx_item_t g_clx_rx_ring[CLX_RX_RING];
 static uint32_t g_clx_rx_head, g_clx_rx_tail;
 static int g_clx_core_ready;
+static uint64_t g_clx_loop_session;
+
+uint64_t a20_clx_boot_session(void) {
+    return g_clx_loop_session;
+}
 
 /* Per-link counters (02-§10), keyed (transport_id, next_hop). */
 typedef struct clx_link_stats {
-    int      in_use;
+    int in_use;
     uint32_t transport_id;
-    uint8_t  next_hop[A20_CLX_LINK_ADDR_MAX];
+    uint8_t next_hop[A20_CLX_LINK_ADDR_MAX];
     uint32_t nh_len;
-    uint32_t state;                    /* A20_CLX_LINK_* */
+    uint32_t state; /* A20_CLX_LINK_* */
     uint64_t tx_frames, rx_frames, tx_drops, rx_drops, rx_malformed;
     uint64_t retransmits;
     uint64_t last_hello_tick;
@@ -61,13 +51,12 @@ static spinlock_t g_clx_links_lock = SPINLOCK_INIT;
 
 /* ---- link counters ------------------------------------------------------ */
 
-static clx_link_stats_t *clx_link_find(uint32_t transport_id,
-                                       const uint8_t *nh, uint32_t nh_len,
-                                       int create)
-{
+static clx_link_stats_t *clx_link_find(uint32_t transport_id, const uint8_t *nh,
+                                       uint32_t nh_len, int create) {
     clx_link_stats_t *free_slot = NULL;
 
-    for (uint32_t i = 0; i < sizeof(g_clx_links) / sizeof(g_clx_links[0]); i++) {
+    for (uint32_t i = 0; i < sizeof(g_clx_links) / sizeof(g_clx_links[0]);
+         i++) {
         clx_link_stats_t *l = &g_clx_links[i];
         if (!l->in_use) {
             if (!free_slot)
@@ -92,8 +81,7 @@ static clx_link_stats_t *clx_link_find(uint32_t transport_id,
 }
 
 void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
-                          uint32_t nh_len)
-{
+                          uint32_t nh_len) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
     clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
     if (l)
@@ -102,8 +90,7 @@ void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
 }
 
 void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,
-                               uint32_t nh_len)
-{
+                               uint32_t nh_len) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
     clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
     if (l)
@@ -112,8 +99,7 @@ void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,
 }
 
 void a20_clx_link_tx_drop(uint32_t transport_id, const uint8_t *nh,
-                          uint32_t nh_len)
-{
+                          uint32_t nh_len) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
     clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
     if (l)
@@ -123,9 +109,9 @@ void a20_clx_link_tx_drop(uint32_t transport_id, const uint8_t *nh,
 
 /* ---- registry ------------------------------------------------------------ */
 
-int a20_clx_transport_register(const a20_clx_transport_t *t)
-{
-    if (!t || !t->send)
+int a20_clx_transport_register(const a20_clx_transport_t *t) {
+    if (!t || !t->send || t->mtu < A20_CLX_HDR_LEN + A20_CLX_CRC_LEN ||
+        t->mtu > 65536u)
         return -1;
     uint64_t flags = spin_lock_irqsave(&g_clx_lock);
     for (uint32_t i = 0; i < g_clx_transport_count; i++) {
@@ -143,16 +129,14 @@ int a20_clx_transport_register(const a20_clx_transport_t *t)
     return 0;
 }
 
-const a20_clx_transport_t *a20_clx_transport_get(uint32_t transport_id)
-{
+const a20_clx_transport_t *a20_clx_transport_get(uint32_t transport_id) {
     for (uint32_t i = 0; i < g_clx_transport_count; i++)
         if (g_clx_transports[i].transport_id == transport_id)
             return &g_clx_transports[i];
     return NULL;
 }
 
-uint32_t a20_clx_transport_mtu(uint32_t transport_id)
-{
+uint32_t a20_clx_transport_mtu(uint32_t transport_id) {
     const a20_clx_transport_t *t = a20_clx_transport_get(transport_id);
     return t ? t->mtu : 0;
 }
@@ -160,8 +144,7 @@ uint32_t a20_clx_transport_mtu(uint32_t transport_id)
 /* ---- TX: node -> route -> transport -> wire ------------------------------ */
 
 int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
-                            uint32_t len)
-{
+                            uint32_t len) {
     uint32_t transport_id, nh_len;
     uint8_t nh[A20_CLX_LINK_ADDR_MAX];
     const a20_clx_transport_t *t;
@@ -182,8 +165,9 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
         clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
         if (l) {
             l->tx_frames++;
-            if (l->state == A20_CLX_LINK_DOWN)
-                l->state = A20_CLX_LINK_UP;   /* 04-§5 loopback: 常 UP */
+            if (transport_id == A20_CLX_TRANSPORT_LOOPBACK &&
+                l->state == A20_CLX_LINK_DOWN)
+                l->state = A20_CLX_LINK_UP; /* 04-§5 loopback: 常 UP */
         }
         spin_unlock_irqrestore(&g_clx_links_lock, flags);
     } else {
@@ -192,14 +176,44 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
     return r;
 }
 
+int a20_clx_peer_session(const a20_node_id_t *node, uint64_t *local,
+                         uint64_t *remote, uint32_t *caps) {
+    uint32_t id, nh_len;
+    uint8_t nh[A20_CLX_LINK_ADDR_MAX];
+    if (a20_clx_route_lookup(node, &id, nh, &nh_len) < 0)
+        return -A20_ERR_NODE_UNREACHABLE;
+    if (id == A20_CLX_TRANSPORT_LOOPBACK) {
+        *local = *remote = g_clx_loop_session;
+        *caps = A20_CLX_CAP_RELIABLE;
+        return 0;
+    }
+    const a20_clx_transport_t *t = a20_clx_transport_get(id);
+    return t && t->session ? t->session(t->ctx, nh, nh_len, node->bytes, local,
+                                        remote, caps)
+                           : -A20_ERR_CLUSTER_UNSUPPORTED;
+}
+
+void a20_clx_link_retransmit(const a20_node_id_t *node) {
+    uint32_t transport, nh_len;
+    uint8_t nh[16];
+    if (a20_clx_route_lookup(node, &transport, nh, &nh_len) < 0)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
+    clx_link_stats_t *l = clx_link_find(transport, nh, nh_len, 1);
+    if (l)
+        l->retransmits++;
+    spin_unlock_irqrestore(&g_clx_links_lock, flags);
+}
+
 /* ---- RX ring -------------------------------------------------------------- */
 
 void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
-                      uint32_t nh_len, const uint8_t *frame, uint32_t len)
-{
+                      uint32_t nh_len, const uint8_t *frame, uint32_t len) {
     uint8_t *copy;
 
-    if (nh_len > A20_CLX_LINK_ADDR_MAX)
+    uint32_t mtu = a20_clx_transport_mtu(transport_id);
+    if (!frame || (!next_hop_src && nh_len) || nh_len > A20_CLX_LINK_ADDR_MAX ||
+        len < A20_CLX_HDR_LEN || len > mtu)
         return;
     /* Copy here: the caller's buffer (loopback bounce buffer, UDP pbuf,
      * UART decode window) is only valid during the callback (04-§1 send =
@@ -229,8 +243,7 @@ void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
 }
 
-static int clx_rx_pop(clx_rx_item_t *out)
-{
+static int clx_rx_pop(clx_rx_item_t *out) {
     uint64_t flags = spin_lock_irqsave(&g_clx_rx_lock);
 
     if (g_clx_rx_head == g_clx_rx_tail) {
@@ -246,8 +259,7 @@ static int clx_rx_pop(clx_rx_item_t *out)
 /* ---- RX thread: screen -> resolve -> dispatch ----------------------------- */
 
 static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
-                         uint32_t nh_len, const uint8_t *frame, uint32_t len)
-{
+                         uint32_t nh_len, uint8_t *frame, uint32_t len) {
     a20_frame_hdr_t h;
     const uint8_t *payload = NULL;
     a20_node_id_t src, dst, self;
@@ -255,7 +267,8 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
 
     /* Layer 1 (02-§1 hard rules).  A-12: wire-format violations count as
      * rx_malformed.  ttl==0 arrives exhausted (A-13) -> rx_drops. */
-    a20_frame_verdict_t v = a20_frame_decode(frame, len, mtu, &h, &payload);
+    a20_frame_verdict_t v =
+        a20_frame_decode_session(frame, len, mtu, &h, &payload);
     if (v != A20_FRAME_OK) {
         a20_clx_link_rx_malformed(transport_id, nh_src, nh_len);
         return;
@@ -288,6 +301,23 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
         l->rx_frames++;
     spin_unlock_irqrestore(&g_clx_links_lock, flags);
 
+    uint32_t dst_transport, dst_nh_len, caps;
+    uint8_t dst_nh[A20_CLX_LINK_ADDR_MAX];
+    int routed =
+        a20_clx_route_lookup(&dst, &dst_transport, dst_nh, &dst_nh_len);
+    int hosted = memcmp(dst.bytes, self.bytes, 16) == 0 ||
+                 (routed == 0 && dst_transport == A20_CLX_TRANSPORT_LOOPBACK);
+    if (!hosted) {
+        a20_clx_self_get(NULL, &caps);
+        uint32_t outgoing_mtu =
+            routed == 0 ? a20_clx_transport_mtu(dst_transport) : 0;
+        if (!(caps & A20_CLUSTER_CAP_RELAY) || !outgoing_mtu ||
+            a20_frame_forward(frame, len, outgoing_mtu) < 0 ||
+            a20_clx_core_send_frame(&dst, frame, len) < 0)
+            a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
+        return;
+    }
+
     /* Handlers take g_clx_lock internally and sleep only after releasing
      * it (03-§3 lock order: core lock -> channel locks).  An inbound CALL
      * is a request for one of our exports and goes to the export table
@@ -298,12 +328,16 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
      * learns its remote service closed, an export learns a caller left
      * (02-§8; the slot names the export endpoint from the sender's side in
      * both directions). */
-    if (h.type == A20_CLX_TYPE_CALL_REPLY || h.type == A20_CLX_TYPE_ERROR) {
+    if (a20_clx_reliable_rx(&src, &h, &payload))
+        return;
+    if (h.type == A20_CLX_TYPE_CALL_REPLY || h.type == A20_CLX_TYPE_ERROR ||
+        h.type == A20_CLX_TYPE_ACK) {
         a20_clx_proxy_rx(transport_id, &src, &h, payload);
     } else if (h.type == A20_CLX_TYPE_CALL) {
         a20_clx_export_rx(transport_id, &src, &h, payload);
     } else if (h.type == A20_CLX_TYPE_CLOSE) {
-        a20_clx_proxy_rx(transport_id, &src, &h, payload);
+        if (h.txid != A20_CLX_CLOSE_CALLER)
+            a20_clx_proxy_rx(transport_id, &src, &h, payload);
         a20_clx_export_rx(transport_id, &src, &h, payload);
     } else {
         /* HELLO/PING/PONG/ACK/NACK/SEND: loopback keeps no link state and
@@ -312,14 +346,15 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
     }
 }
 
-static void clx_rx_thread(void)
-{
+static void clx_rx_thread(void) {
     proc_set_name(proc_current(), "clx-rx");
     for (;;) {
+        if (__atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) == 3)
+            return;
         clx_rx_item_t it;
         if (clx_rx_pop(&it)) {
-            clx_dispatch(it.transport_id, it.nh_src, it.nh_len,
-                         it.frame, it.len);
+            clx_dispatch(it.transport_id, it.nh_src, it.nh_len, it.frame,
+                         it.len);
             kfree(it.frame);
             continue;
         }
@@ -327,10 +362,31 @@ static void clx_rx_thread(void)
     }
 }
 
-static void clx_hk_thread(void)
-{
+/* Drivers must progress even while RX dispatch waits for a service queue. */
+static void clx_poll_thread(void) {
+    proc_set_name(proc_current(), "clx-poll");
+    for (;;) {
+        if (__atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) == 3)
+            return;
+        for (uint32_t i = 0; i < A20_CLX_MAX_TRANSPORTS; i++) {
+            a20_clx_transport_t t = {0};
+            uint64_t flags = spin_lock_irqsave(&g_clx_lock);
+            int present = i < g_clx_transport_count;
+            if (present)
+                t = g_clx_transports[i];
+            spin_unlock_irqrestore(&g_clx_lock, flags);
+            if (present && (t.flags & A20_CLX_TFL_POLLING) && t.poll)
+                t.poll(t.ctx);
+        }
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+    }
+}
+
+static void clx_hk_thread(void) {
     proc_set_name(proc_current(), "clx-hk");
     for (;;) {
+        if (__atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) == 3)
+            return;
         proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(250));
         a20_clx_deadline_scan();
     }
@@ -338,30 +394,33 @@ static void clx_hk_thread(void)
 
 /* ---- UART adapter (04-§4 note 4: WA wraps WC1's head node) ---------------- */
 
-#ifndef CONFIG_MCU
+#if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_DEFAULT
 static void clx_uart_rx_adapter(void *ud, const uint8_t *nh, uint32_t nh_len,
-                                const uint8_t *frame, uint32_t len)
-{
+                                const uint8_t *frame, uint32_t len) {
     (void)ud;
     a20_clx_rx_frame(A20_CLX_TRANSPORT_UART, nh, nh_len, frame, len);
 }
 
 static void clx_uart_link_adapter(void *ud, const uint8_t *nh, uint32_t nh_len,
-                                  int up)
-{
+                                  int up) {
     (void)ud;
     a20_clx_link_event(A20_CLX_TRANSPORT_UART, nh, nh_len, up);
 }
 
 static int clx_uart_send_wrap(void *ctx, const uint8_t *nh, uint32_t nh_len,
-                              const void *frame, uint32_t len)
-{
+                              const void *frame, uint32_t len) {
     (void)ctx;
     return a20_clx_uart_send_frame(nh, nh_len, frame, len);
 }
 
-static void clx_uart_poll_wrap(void *ctx)
-{
+static int clx_uart_session_wrap(void *ctx, const uint8_t *nh, uint32_t len,
+                                 const uint8_t node[16], uint64_t *local,
+                                 uint64_t *remote, uint32_t *caps) {
+    (void)ctx;
+    return a20_clx_uart_session(nh, len, node, local, remote, caps);
+}
+
+static void clx_uart_poll_wrap(void *ctx) {
     (void)ctx;
     a20_clx_uart_poll_all();
 }
@@ -369,45 +428,57 @@ static void clx_uart_poll_wrap(void *ctx)
 
 /* ---- init ------------------------------------------------------------------ */
 
-int a20_clx_core_init(void)
-{
-    uint64_t flags = spin_lock_irqsave(&g_clx_lock);
-
-    if (g_clx_core_ready) {
-        spin_unlock_irqrestore(&g_clx_lock, flags);
-        return 0;
+int a20_clx_core_init(void) {
+    for (;;) {
+        int state = __atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE);
+        if (state == 2)
+            return 0;
+        if (state == 3)
+            return -A20_ERR_NO_MEMORY;
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&g_clx_core_ready, &expected, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
     }
-    g_clx_core_ready = 1;   /* set first: reentrancy from spawned threads */
-    spin_unlock_irqrestore(&g_clx_lock, flags);
 
+    g_clx_loop_session = random_u64() | 1ULL;
     a20_clx_loopback_init();
     /* loopback (04-§2): every tier, zero-loss, link addrs = 4B vnode no. */
     static a20_clx_transport_t clx_loopback_transport;
     memset(&clx_loopback_transport, 0, sizeof(clx_loopback_transport));
     clx_loopback_transport.transport_id = A20_CLX_TRANSPORT_LOOPBACK;
-    clx_loopback_transport.mtu = 65536;                /* 04-§5 */
+    clx_loopback_transport.mtu = 65536; /* 04-§5 */
     clx_loopback_transport.send = a20_clx_loopback_send;
     a20_clx_transport_register(&clx_loopback_transport);
 
 #ifndef CONFIG_MCU
+    a20_clx_udp_init();
+#endif
+#if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_DEFAULT
     /* 04-§4 note 4: WA wraps WC1's head-node UART transport into the
      * 04-§1 contract.  Without registered links it stays inert. */
     static a20_clx_transport_t clx_uart_transport;
     memset(&clx_uart_transport, 0, sizeof(clx_uart_transport));
     clx_uart_transport.transport_id = A20_CLX_TRANSPORT_UART;
     clx_uart_transport.mtu = A20_CLX_UART_MTU;
-    clx_uart_transport.flags = A20_CLX_TFL_POLLING;
+    clx_uart_transport.flags =
+        A20_CLX_TFL_POLLING | A20_CLX_TFL_RELIABLE_CAPABLE;
     clx_uart_transport.send = clx_uart_send_wrap;
     clx_uart_transport.poll = clx_uart_poll_wrap;
+    clx_uart_transport.session = clx_uart_session_wrap;
     a20_clx_transport_register(&clx_uart_transport);
     a20_clx_uart_set_rx_handler(clx_uart_rx_adapter, NULL);
     a20_clx_uart_set_link_event_handler(clx_uart_link_adapter, NULL);
 #endif
 
-    if (proc_alloc(clx_rx_thread) < 0)
-        printf("[CLX] rx thread spawn failed\n");
-    if (proc_alloc(clx_hk_thread) < 0)
-        printf("[CLX] housekeeping thread spawn failed\n");
+    if (proc_alloc(clx_rx_thread) < 0 || proc_alloc(clx_hk_thread) < 0 ||
+        proc_alloc(clx_poll_thread) < 0) {
+        __atomic_store_n(&g_clx_core_ready, 3, __ATOMIC_RELEASE);
+        printf("[CLX] core thread spawn failed\n");
+        return -A20_ERR_NO_MEMORY;
+    }
+    __atomic_store_n(&g_clx_core_ready, 2, __ATOMIC_RELEASE);
     printf("[CLX] core ready transports=%u\n", g_clx_transport_count);
     return 0;
 }
@@ -418,14 +489,13 @@ int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
                              uint32_t *rtt_us, uint64_t *tx_frames,
                              uint64_t *rx_frames, uint64_t *tx_drops,
                              uint64_t *rx_drops, uint64_t *retransmits,
-                             uint64_t *last_hello_age_ms)
-{
+                             uint64_t *last_hello_age_ms) {
     a20_node_id_t self;
     uint32_t transport_id, nh_len;
     uint8_t nh[A20_CLX_LINK_ADDR_MAX];
     uint64_t flags;
 
-    *rtt_us = 0;                      /* MCU 档恒 0; loopback 无 RTT 采样 */
+    *rtt_us = 0; /* MCU 档恒 0; loopback 无 RTT 采样 */
     *last_hello_age_ms = 0;
     *retransmits = 0;
 
@@ -475,15 +545,15 @@ int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
         *tx_drops = l->tx_drops;
         *rx_drops = l->rx_drops;
         *retransmits = l->retransmits;
-        *last_hello_age_ms =
-            l->last_hello_tick
-                ? (timer_get_ticks() - l->last_hello_tick) /
-                      (TICKS_PER_SEC / 1000)
-                : 0;
+        *last_hello_age_ms = l->last_hello_tick
+                                 ? (timer_get_ticks() - l->last_hello_tick) /
+                                       (TICKS_PER_SEC / 1000)
+                                 : 0;
     } else {
         /* Route exists but the link has no traffic yet: loopback links are
          * UP by construction (04-§5). */
-        *state = A20_CLX_LINK_UP;
+        *state = transport_id == A20_CLX_TRANSPORT_LOOPBACK ? A20_CLX_LINK_UP
+                                                            : A20_CLX_LINK_DOWN;
         *tx_frames = *rx_frames = *tx_drops = *rx_drops = 0;
     }
     spin_unlock_irqrestore(&g_clx_links_lock, flags);
@@ -493,8 +563,7 @@ int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
 /* ---- link events (04-§1 上行) ---------------------------------------------- */
 
 void a20_clx_link_event(uint32_t transport_id, const uint8_t *next_hop,
-                        uint32_t nh_len, int up)
-{
+                        uint32_t nh_len, int up) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
     clx_link_stats_t *l = clx_link_find(transport_id, next_hop, nh_len, 1);
 
@@ -502,23 +571,24 @@ void a20_clx_link_event(uint32_t transport_id, const uint8_t *next_hop,
         l->state = up ? A20_CLX_LINK_UP : A20_CLX_LINK_DOWN;
     spin_unlock_irqrestore(&g_clx_links_lock, flags);
 
-    a20_clx_event_push(up ? A20_CLX_EV_LINK_UP : A20_CLX_EV_LINK_DOWN,
-                        0, transport_id, 0);
+    a20_clx_event_push(up ? A20_CLX_EV_LINK_UP : A20_CLX_EV_LINK_DOWN, 0,
+                       transport_id, 0);
+    if (!up)
+        a20_clx_route_link_down(transport_id, next_hop, nh_len);
 }
 
 /* ---- events (01-abi §5) ----------------------------------------------------- */
 
 typedef struct clx_sub {
-    int          in_use;
-    uint64_t     mask;                  /* bit (A20_CLX_EV_BASE + kind) */
+    int in_use;
+    uint64_t mask; /* bit (A20_CLX_EV_BASE + kind) */
     a20_eventq_t *eq;
 } clx_sub_t;
 static clx_sub_t g_clx_subs[8];
 static uint64_t g_clx_event_overflows;
-static const uint32_t g_clx_event_src;   /* token object, never dereferenced */
+static const uint32_t g_clx_event_src; /* token object, never dereferenced */
 
-a20_eventq_t *a20_clx_event_subscribe(uint32_t mask)
-{
+a20_eventq_t *a20_clx_event_subscribe(uint32_t mask) {
     uint64_t want = 0;
 
     for (uint32_t k = 0; k < 4; k++)
@@ -530,8 +600,8 @@ a20_eventq_t *a20_clx_event_subscribe(uint32_t mask)
         return NULL;
     /* Watch the cluster token object: a20_event_notify() matches watches
      * by (object, type) and appends to the owner queue. */
-    if (a20_eventq_watch(eq, 0, (void *)&g_clx_event_src, A20_OBJ_DEBUG,
-                         want, 0, 0) < 0) {
+    if (a20_eventq_watch(eq, 0, (void *)&g_clx_event_src, A20_OBJ_DEBUG, want,
+                         0, 0) < 0) {
         a20_eventq_release(eq);
         return NULL;
     }
@@ -556,8 +626,7 @@ a20_eventq_t *a20_clx_event_subscribe(uint32_t mask)
 }
 
 void a20_clx_event_push(uint32_t kind, uint32_t node_hash,
-                        uint32_t transport_id, uint32_t reason)
-{
+                        uint32_t transport_id, uint32_t reason) {
     uint32_t ev = A20_CLX_EV_BASE + kind;
     uint64_t data0 = node_hash;
     uint64_t data1 = transport_id | ((uint64_t)reason << 8);
@@ -573,15 +642,14 @@ void a20_clx_event_push(uint32_t kind, uint32_t node_hash,
         uint64_t eqflags = spin_lock_irqsave(&s->eq->lock);
         int full = (s->eq->ring_count >= s->eq->ring_cap);
         spin_unlock_irqrestore(&s->eq->lock, eqflags);
-        a20_event_notify((void *)&g_clx_event_src, A20_OBJ_DEBUG, ev,
-                         data0, data1);
+        a20_event_notify((void *)&g_clx_event_src, A20_OBJ_DEBUG, ev, data0,
+                         data1);
         if (full)
             g_clx_event_overflows++;
     }
     spin_unlock_irqrestore(&g_clx_lock, flags);
 }
 
-uint64_t a20_clx_event_overflows(void)
-{
+uint64_t a20_clx_event_overflows(void) {
     return g_clx_event_overflows;
 }
