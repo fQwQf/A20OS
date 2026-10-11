@@ -27,13 +27,25 @@ static inline void arch_idle_wait(void) {
 }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
 
+/* An unused data descriptor records the logical CPU in its byte-granularity
+ * limit. LSL reads the current CPU's GDT without touching task GS or causing a
+ * CPUID VM exit. Boot/trampoline GDTs omit this slot, so early calls fall back. */
+#define X86_CPU_ID_SELECTOR 0x38U
+#define X86_CPU_ID_LIMIT_TAG 0xa2000U
+
 static inline unsigned arch_current_cpu_id(void) {
 #if CONFIG_NR_CPUS == 1
-    /* Single-CPU build: every caller would pay a CPUID (a KVM VM-exit on
-     * x86_64) to learn what is already known.  Per-CPU state reduces to
-     * index 0, matching cpu_current_id()'s clamp. */
+    /* Single-CPU builds need no descriptor lookup or boot fallback.
+     * Per-CPU state reduces to index 0, matching cpu_current_id()'s clamp. */
     return 0;
 #else
+    unsigned limit;
+    unsigned char valid;
+    __asm__ __volatile__("lsl %w2, %0; setz %1"
+                         : "=r"(limit), "=qm"(valid)
+                         : "r"(X86_CPU_ID_SELECTOR) : "cc");
+    if (valid && (limit & ~7U) == X86_CPU_ID_LIMIT_TAG)
+        return limit ^ X86_CPU_ID_LIMIT_TAG;
     /* Use CPUID leaf 1 initial APIC ID.  Reading x2APIC MSR 0x802 only works
      * when the CPU is in x2APIC mode, which the kernel does not enable. */
     uint32_t eax, ebx, ecx, edx;

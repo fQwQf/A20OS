@@ -134,6 +134,9 @@ static void gdt_init(void) {
     cpu_gdt[3] = make_gdt_entry(0, 0xFFFFF, 0xFA, 0xA);
     cpu_gdt[4] = make_gdt_entry(0, 0xFFFFF, 0xF2, 0xC);
 
+    cpu_gdt[X86_CPU_ID_SELECTOR >> 3] =
+        make_gdt_entry(0, X86_CPU_ID_LIMIT_TAG | cpu, 0x92, 0);
+
     gdtr[cpu].limit = sizeof(gdt[cpu]) - 1;
     gdtr[cpu].base = (uint64_t)cpu_gdt;
     __asm__ __volatile__("lgdt %0" :: "m"(gdtr[cpu]));
