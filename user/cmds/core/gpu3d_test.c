@@ -64,10 +64,6 @@
 #include <unistd.h>
 
 
-/* A20-private: the Linux UAPI has no GEM_CREATE, so there is no upstream
- * number to match.  tools/check-drm-abi.sh checks the real DRM_* numbers here
- * against the installed UAPI headers. */
-#define A20_GPU_IOCTL_GEM_CREATE 0x00004710UL
 #define DRM_IOCTL_GEM_CLOSE   0x40086409UL
 #define DRM_IOCTL_VIRTGPU_GETPARAM        0xc0106443UL
 #define DRM_IOCTL_VIRTGPU_GET_CAPS        0xc0186449UL
@@ -119,9 +115,6 @@
 #define PIPE_CLEAR_COLOR0 0x4
 
 
-struct drm_gem_create {
-    uint32_t width, height, format, bpp, size, handle;
-};
 
 struct drm_gem_close {
     uint32_t handle, pad;
@@ -292,24 +285,7 @@ int main(void)
         printf("GPU3D_TEST: GET_CAPS returned a %u byte capset\n", caps.size);
     }
 
-    /* A real GEM buffer, then a 3D resource on top of it.  RESOURCE_CREATE is
-     * where the guest must publish its own pages to the host; if backing
-     * attach were missing this is the call that would silently do nothing. */
-    struct drm_gem_create g;
-    g.width = TEST_W;
-    g.height = TEST_H;
-    g.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
-    g.bpp = TEST_BPP * 8;
-    g.size = TEST_SIZE;
-    g.handle = 0;
-    if (ioctl(fd, A20_GPU_IOCTL_GEM_CREATE, &g) < 0)
-        return fail("GEM_CREATE");
-    if (g.handle == 0) {
-        printf("GPU3D_TEST: FAIL GEM_CREATE returned handle 0\n");
-        return EXIT_FAIL;
-    }
-    printf("GPU3D_TEST: GEM handle %u allocated (%u bytes)\n", g.handle, g.size);
-
+    /* RESOURCE_CREATE itself allocates the GEM, as stock Mesa requests. */
     struct drm_virtgpu_resource_create rc;
     memset(&rc, 0, sizeof(rc));
     rc.target = 2; /* GL_TEXTURE_2D */
@@ -319,18 +295,17 @@ int main(void)
     rc.height = TEST_H;
     rc.depth = 1;
     rc.array_size = 1;
-    rc.bo_handle = g.handle;
-    rc.size = g.size;
+    rc.size = TEST_SIZE;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, &rc) < 0)
         return fail("VIRTGPU_RESOURCE_CREATE");
-    if (rc.res_handle == 0) {
+    if (rc.res_handle == 0 || rc.bo_handle == 0) {
         printf("GPU3D_TEST: FAIL RESOURCE_CREATE returned res_handle 0\n");
         return EXIT_FAIL;
     }
     printf("GPU3D_TEST: 3D resource %u created with host backing\n", rc.res_handle);
 
     struct drm_virtgpu_resource_info ri;
-    ri.bo_handle = g.handle;
+    ri.bo_handle = rc.bo_handle;
     ri.res_handle = 0;
     ri.size = 0;
     ri.blob_mem = 0;
@@ -348,7 +323,7 @@ int main(void)
      * same physical frames the host renders into, so this reads what the host
      * produced rather than a copy of what this program last wrote. */
     struct drm_virtgpu_map m;
-    m.handle = g.handle;
+    m.handle = rc.bo_handle;
     m.pad = 0;
     m.offset = 0;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &m) < 0)
@@ -387,7 +362,7 @@ int main(void)
         eb.flags = 0;
         eb.size = len;
         eb.command = (uint64_t)(uintptr_t)test_stream;
-        eb.bo_handles = (uint64_t)(uintptr_t)&g.handle;
+        eb.bo_handles = (uint64_t)(uintptr_t)&rc.bo_handle;
         eb.num_bo_handles = 1;
         eb.fence_fd = -1;
         if (ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &eb) < 0) {
@@ -407,7 +382,7 @@ int main(void)
          * read it directly and reported that as a rendering failure. */
         struct drm_virtgpu_3d_transfer tr;
         memset(&tr, 0, sizeof(tr));
-        tr.bo_handle = g.handle;
+        tr.bo_handle = rc.bo_handle;
         tr.box.x = 0;
         tr.box.y = 0;
         tr.box.z = 0;
@@ -448,10 +423,43 @@ int main(void)
     munmap(pix, TEST_SIZE);
 
     struct drm_gem_close cl;
-    cl.handle = g.handle;
+    cl.handle = rc.bo_handle;
     cl.pad = 0;
     if (ioctl(fd, DRM_IOCTL_GEM_CLOSE, &cl) < 0)
         return fail("GEM_CLOSE");
+
+    /* Exercise allocation beyond the old 64-entry device-wide table. The
+     * zero size requests one page and input handle fields must be ignored. */
+    uint32_t handles[96];
+    for (unsigned i = 0; i < 96; i++) {
+        struct drm_virtgpu_resource_create many = rc;
+        many.width = many.height = 4;
+        many.size = 0;
+        many.bo_handle = many.res_handle = UINT32_MAX;
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, &many) < 0)
+            return fail("RESOURCE_CREATE simultaneous objects");
+        handles[i] = many.bo_handle;
+        if (!handles[i] || handles[i] == UINT32_MAX || !many.res_handle)
+            return fail("RESOURCE_CREATE output handles");
+        struct drm_virtgpu_resource_info info = {0};
+        info.bo_handle = handles[i];
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &info) < 0 || info.size != 4096)
+            return fail("RESOURCE_CREATE zero-size page");
+        for (unsigned j = 0; j < i; j++)
+            if (handles[j] == handles[i])
+                return fail("RESOURCE_CREATE duplicate live handle");
+    }
+    for (unsigned i = 0; i < 96; i++) {
+        struct drm_gem_close close_bo = {handles[i], 0};
+        if (ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_bo) < 0)
+            return fail("GEM_CLOSE simultaneous objects");
+        struct drm_virtgpu_resource_info gone = {0};
+        gone.bo_handle = handles[i];
+        errno = 0;
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &gone) != -1 || errno != ENOENT)
+            return fail("GEM_CLOSE retained object");
+    }
+    printf("GPU3D_TEST: native allocation 96 simultaneous objects PASS\n");
 
     close(fd);
     printf("GPU3D_TEST: PASS (UAPI works and the host rendered the colours "
