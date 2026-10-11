@@ -108,13 +108,11 @@ int main(void)
           "read /proc/self/ns/mnt format");
     CHECK(init_ino != 0, "init namespace ino is nonzero");
 
-    /* Other namespace types report singleton identifiers.  The pid namespace
-     * id is checked for real (it must change across a container) in
-     * pidns_test; here only the file format matters. */
+    /* Other implemented namespace types expose real identifiers. */
     CHECK(read_ns_file("/proc/self/ns/pid", "pid", NULL) == 0,
           "read /proc/self/ns/pid format");
-    CHECK(read_ns_file("/proc/self/ns/net", "net", NULL) == 0,
-          "read /proc/self/ns/net format");
+    CHECK(read_ns_file("/proc/self/ns/user", "user", NULL) == 0,
+          "read /proc/self/ns/user format");
 
     /* 2. fork() shares the mount namespace. */
     {
