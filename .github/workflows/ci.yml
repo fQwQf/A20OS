@@ -83,6 +83,9 @@ jobs:
       - name: Virtio network descriptor completion and wraparound
         run: make check-virtio-net-completion
 
+      - name: Cluster receive wake and park race boundaries
+        run: make check-cluster-wakeup
+
       # 把 kernel/include/drivers/gpu/drm.h 的每个 DRM_IOCTL_* 编号与
       # 宿主 linux-headers 的 include/uapi/drm 逐条比对，并实测线结构体
       # 尺寸与字段偏移。tools/ci/Dockerfile 刻意不带 linux-headers，所以
@@ -183,7 +186,7 @@ jobs:
 
       - name: Extended mixed architecture and MCU simulation acceptance
         if: github.event_name == 'workflow_dispatch'
-        run: make check-cluster-hardening check-cluster-send demo-wordcount check-cluster-fuzz-smoke check-cluster-performance
+        run: make check-cluster-hardening check-cluster-send check-cluster-smp demo-wordcount check-cluster-fuzz-smoke check-cluster-performance
 
       - name: Upload runtime evidence
         if: always()

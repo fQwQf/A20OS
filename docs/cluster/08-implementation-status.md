@@ -318,3 +318,40 @@ x86 COM2 和生产 leaf 接收 128 条 8–206 B 消息。MCU 业务回调按编
 MAP 为 2/2，首次 attempt 的全部回复被丢弃后，作业以新 attempt 重派成功。
 原 `--gossip --abandon` 场景随后独立通过，默认未启用 SEND 的行为保持可用。
 Native 集群测试程序再次完成七架构链接，文档引用检查通过。
+
+
+## 20. RX 与 UDP 就绪唤醒
+
+RX 入队直接唤醒有界队列的消费者；UDP adapter poll owner 等待 socket 就绪，
+最迟 1 ms 继续串口与链路控制。使用已有 park token 防止登记与 commit 之间
+丢失唤醒，等待期间持有 socket 引用。RX 空闲期限 10 ms，重组仍由单一 owner
+清理，没有向普通 Native channel syscall 增加分支。
+
+新 `check-cluster-wakeup` 提取实际生产函数，在 ASan/UBSan 下通过 RX 与 UDP
+各 25 万次交错边界及失败/引用平衡检查，并接入本地与 CI 宿主门禁。23 项
+宿主门禁通过；服务器档持续丢帧、混合档多跳 SEND、完整 UART SEND 网关、
+原默认可靠调用/重启及 gossip/放弃作业回归均通过。
+
+完整性能测量通过：本机/loopback 各 10 万次，UDP 64 B 一万次、64 KiB 一千
+次。loopback 均值 0.860 ms，UDP 64 B p50 6.484 ms；分别仍超过三倍本机与
+5 ms 目标。64 KiB 顺序 CALL 双向有效负载 1.747 MB/s。数值和原始日志位置
+见 [21-performance.md](21-performance.md)，四节点与长时验收仍未完成。
+
+## 21. 单网络通道的 SMP 内存保护
+
+新增双 CPU 集群故障测试时，曾在 `ip4_output_if_src` 触发 `p->ref == 1`
+断言。根因是 lwIP 堆锁和 `SYS_ARCH_PROTECT` 的跨 CPU 锁错误地只在
+`CONFIG_NET_LANES > 1` 时启用；单通道并不意味着只有一个 CPU 分配数据包，
+socket 发送路径会在取得 lwIP core 锁前分配 pbuf。主机测试改为执行实际
+`lwip_compat.c` 和生产堆锁宏，旧单通道代码也复现了双重释放。
+
+现已在所有通道配置下启用堆锁与可嵌套的引用计数保护，保持 heap→protect
+锁序和本 CPU IRQ 状态恢复。单通道、四通道分别以 8 线程×20000 次真实
+堆分配/缩小/合并、memp 与 pbuf 引用操作通过，ASan/UBSan 通过。宿主门禁
+同时运行两种配置，不再用独立的 pthread 算法代替生产保护逻辑。
+
+真实双 CPU 与四 CPU 内核分别在持续 10% 丢帧下通过双向 96 次可靠调用、
+最大 64 KiB 分片及每端 264 条 SEND/96 条并发 CALL；重复业务执行为零。
+日志分别保留在 `rx-event-smp2-fixed/`、`rx-event-smp4-fixed/`；修复前失败在
+`rx-event-smp2/` 和 `smp-allocator-before/`。`make check-cluster-smp` 将双 CPU
+场景纳入可重跑门禁，并进入 CI 扩展检查。这些短时回归不替代长时 soak。
