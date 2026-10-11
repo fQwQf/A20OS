@@ -28,6 +28,7 @@ static a20_clx_transport_t g_clx_transports[A20_CLX_MAX_TRANSPORTS];
 static uint32_t g_clx_transport_count;
 
 static spinlock_t g_clx_rx_lock = SPINLOCK_INIT;
+static wait_queue_t g_clx_rx_waiters = WAIT_QUEUE_INIT;
 static clx_rx_item_t g_clx_rx_ring[CLX_RX_RING];
 static uint32_t g_clx_rx_head, g_clx_rx_tail;
 static uint32_t g_clx_rx_bytes, g_clx_rx_peak_bytes;
@@ -318,6 +319,7 @@ void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
     if (g_clx_rx_bytes > g_clx_rx_peak_bytes)
         g_clx_rx_peak_bytes = g_clx_rx_bytes;
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    wait_queue_wake_one(&g_clx_rx_waiters, 1, PROC_WAKE_EVENT);
 }
 
 static int clx_rx_pop(clx_rx_item_t *out) {
@@ -332,6 +334,31 @@ static int clx_rx_pop(clx_rx_item_t *out) {
     g_clx_rx_tail = (g_clx_rx_tail + 1) % CLX_RX_RING;
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
     return 1;
+}
+
+static void clx_rx_wait(void) {
+    /* Register under the ring condition lock, then commit outside it. An
+     * enqueue between empty-pop and prepare is observed by the recheck; an
+     * enqueue between link and commit is an early token-bound event wake.
+     * The bounded idle timeout lets this sole RX owner expire reassembly. */
+    proc_wait_token_t token = proc_park_prepare(
+        PROC_WAIT_UNINTERRUPTIBLE, timer_get_ticks() + MS_TO_TICKS(10));
+    if (!token.task) {
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+        return;
+    }
+    wait_queue_entry_t entry = {0};
+    uint64_t flags = spin_lock_irqsave(&g_clx_rx_lock);
+    int linked = g_clx_rx_head == g_clx_rx_tail &&
+                 __atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) != 3 &&
+                 wait_queue_link(&g_clx_rx_waiters, &entry, token, 1);
+    spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    if (linked)
+        (void)proc_park_commit(token);
+    else
+        (void)proc_park_cancel(token);
+    wait_queue_unlink(&g_clx_rx_waiters, &entry);
+    proc_park_finish(token);
 }
 
 /* ---- RX thread: screen -> resolve -> dispatch ----------------------------- */
@@ -479,7 +506,7 @@ static void clx_rx_thread(void) {
             kfree(it.frame);
             continue;
         }
-        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+        clx_rx_wait();
     }
 }
 
@@ -499,7 +526,11 @@ static void clx_poll_thread(void) {
             if (present && (t.flags & A20_CLX_TFL_POLLING) && t.poll)
                 t.poll(t.ctx);
         }
+#ifndef CONFIG_MCU
+        a20_clx_udp_wait(timer_get_ticks() + MS_TO_TICKS(1));
+#else
         proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+#endif
     }
 }
 

@@ -1,0 +1,202 @@
+/* Scheduler and wait-queue seams exercise the actual spliced RX functions.
+ * Lock/prepare/link/commit boundaries inject events deterministically. */
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define CLX_RX_RING 64u
+#define A20_CLX_LINK_ADDR_MAX 16u
+#define A20_CLX_HDR_LEN 32u
+#define MS_TO_TICKS(ms) (ms)
+#define PROC_WAIT_UNINTERRUPTIBLE 0
+#define PROC_WAKE_EVENT 1
+typedef int spinlock_t;
+typedef struct {
+    void *task;
+    uint64_t seq;
+} proc_wait_token_t;
+typedef struct {
+    int unused;
+} wait_queue_t;
+typedef struct {
+    int linked;
+    proc_wait_token_t token;
+} wait_queue_entry_t;
+typedef struct {
+    uint8_t *frame;
+    uint32_t len, transport_id;
+    uint8_t nh_src[A20_CLX_LINK_ADDR_MAX];
+    uint32_t nh_len;
+} clx_rx_item_t;
+static spinlock_t g_clx_rx_lock;
+static wait_queue_t g_clx_rx_waiters;
+static clx_rx_item_t g_clx_rx_ring[CLX_RX_RING];
+static uint32_t g_clx_rx_head, g_clx_rx_tail;
+static uint32_t g_clx_rx_bytes, g_clx_rx_peak_bytes;
+static int g_clx_core_ready = 2;
+enum { IDLE, BEFORE_PREPARE, EARLY, LATE, PREPARE_FAIL, LINK_FAIL };
+static unsigned mode, held, injected, woken, commits, cancels, finishes;
+static unsigned sleeps, wakes, drops, allocations, sequence;
+static int oom;
+static wait_queue_entry_t *linked_entry;
+static void enqueue(void);
+
+static uint64_t timer_get_ticks(void) {
+    return 100;
+}
+static uint64_t spin_lock_irqsave(spinlock_t *lock) {
+    assert(lock == &g_clx_rx_lock && !held);
+    held = 1;
+    return 0;
+}
+static void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags) {
+    assert(lock == &g_clx_rx_lock && held && !flags);
+    held = 0;
+    if (mode == EARLY && linked_entry && !injected) {
+        injected = 1;
+        enqueue();
+    }
+}
+static uint32_t a20_clx_transport_mtu(uint32_t id) {
+    assert(id == 2);
+    return 1472;
+}
+static void *kmalloc(unsigned len) {
+    allocations++;
+    return oom ? NULL : malloc(len);
+}
+static void kfree(void *pointer) {
+    free(pointer);
+}
+static void a20_clx_link_rx_drop(uint32_t id, const uint8_t *nh, uint32_t len) {
+    assert(id == 2 && nh && len == 6 && !held);
+    drops++;
+}
+static unsigned wait_queue_wake_one(wait_queue_t *queue, uintptr_t key,
+                                    int reason) {
+    assert(queue == &g_clx_rx_waiters && key == 1 &&
+           reason == PROC_WAKE_EVENT && !held);
+    wakes++;
+    if (linked_entry) {
+        assert(linked_entry->linked && linked_entry->token.seq == sequence);
+        linked_entry->linked = 0;
+        linked_entry = NULL;
+        woken++;
+        return 1;
+    }
+    return 0;
+}
+static proc_wait_token_t proc_park_prepare(int wait_mode, uint64_t deadline) {
+    assert(!held && wait_mode == PROC_WAIT_UNINTERRUPTIBLE && deadline == 110);
+    if (mode == BEFORE_PREPARE)
+        enqueue();
+    return (proc_wait_token_t){mode == PREPARE_FAIL ? NULL : (void *)1,
+                               ++sequence};
+}
+static int wait_queue_link(wait_queue_t *queue, wait_queue_entry_t *entry,
+                           proc_wait_token_t token, uintptr_t key) {
+    assert(held && queue == &g_clx_rx_waiters && !linked_entry &&
+           token.seq == sequence && key == 1);
+    if (mode == LINK_FAIL)
+        return 0;
+    entry->linked = 1;
+    entry->token = token;
+    linked_entry = entry;
+    return 1;
+}
+static int proc_park_commit(proc_wait_token_t token) {
+    assert(!held && token.task && token.seq == sequence);
+    commits++;
+    if (mode == LATE)
+        enqueue();
+    if (mode == EARLY || mode == LATE)
+        assert(woken == 1 && !linked_entry && g_clx_rx_head != g_clx_rx_tail);
+    else
+        assert(mode == IDLE && !woken && g_clx_rx_head == g_clx_rx_tail);
+    return woken ? PROC_WAKE_EVENT : 2;
+}
+static int proc_park_cancel(proc_wait_token_t token) {
+    assert(!held && token.task && token.seq == sequence && !commits);
+    cancels++;
+    return 0;
+}
+static void wait_queue_unlink(wait_queue_t *queue, wait_queue_entry_t *entry) {
+    assert(!held && queue == &g_clx_rx_waiters);
+    if (linked_entry == entry)
+        linked_entry = NULL;
+    entry->linked = 0;
+}
+static void proc_park_finish(proc_wait_token_t token) {
+    assert(!held && token.task && token.seq == sequence && !linked_entry);
+    finishes++;
+}
+static void proc_sleep_until(uint64_t deadline) {
+    assert(!held && mode == PREPARE_FAIL && deadline == 101);
+    sleeps++;
+}
+
+/* PRODUCTION_a20_clx_rx_frame */
+/* PRODUCTION_clx_rx_wait */
+
+static void enqueue(void) {
+    uint8_t frame[64] = {0}, nh[6] = {1};
+    a20_clx_rx_frame(2, nh, sizeof(nh), frame, sizeof(frame));
+}
+static void reset(unsigned next_mode) {
+    assert(!held && !linked_entry);
+    for (unsigned i = 0; i < CLX_RX_RING; i++) {
+        free(g_clx_rx_ring[i].frame);
+        g_clx_rx_ring[i].frame = NULL;
+    }
+    g_clx_rx_head = g_clx_rx_tail = g_clx_rx_bytes = g_clx_rx_peak_bytes = 0;
+    g_clx_core_ready = 2;
+    mode = next_mode;
+    injected = woken = commits = cancels = finishes = sleeps = wakes = drops =
+        allocations = 0;
+    oom = 0;
+}
+int main(void) {
+    for (unsigned iteration = 0; iteration < 250000; iteration++) {
+        unsigned scenario = iteration % 8;
+        reset(scenario < 6 ? scenario : IDLE);
+        if (scenario == 6)
+            enqueue();
+        if (scenario == 7)
+            g_clx_core_ready = 3;
+        clx_rx_wait();
+        assert(!held && !linked_entry);
+        if (mode == PREPARE_FAIL) {
+            assert(sleeps == 1 && !commits && !cancels && !finishes);
+        } else {
+            assert(finishes == 1 && commits + cancels == 1 && !sleeps);
+            assert(commits ==
+                   (scenario == IDLE || scenario == EARLY || scenario == LATE));
+        }
+        assert(woken == (scenario == EARLY || scenario == LATE));
+        assert(g_clx_rx_bytes == 64u * (scenario == BEFORE_PREPARE ||
+                                        scenario == EARLY || scenario == LATE ||
+                                        scenario == 6));
+    }
+    reset(IDLE);
+    uint8_t frame[1473] = {0}, nh[17] = {1};
+    a20_clx_rx_frame(2, nh, 6, NULL, 64);
+    a20_clx_rx_frame(2, nh, 6, frame, 31);
+    a20_clx_rx_frame(2, nh, 6, frame, sizeof(frame));
+    a20_clx_rx_frame(2, NULL, 6, frame, 64);
+    a20_clx_rx_frame(2, nh, sizeof(nh), frame, 64);
+    assert(!allocations && !wakes);
+    oom = 1;
+    enqueue();
+    assert(drops == 1 && !wakes && !g_clx_rx_bytes);
+    reset(IDLE);
+    for (unsigned i = 0; i < 64; i++)
+        enqueue();
+    assert(wakes == 63 && drops == 1 && allocations == 64);
+    assert(g_clx_rx_bytes == 63 * 64 && g_clx_rx_peak_bytes == g_clx_rx_bytes);
+    reset(IDLE);
+    puts("clx_wakeup: 250K prepare/link/commit boundaries, timeout, failure, "
+         "OOM and full-ring PASS");
+    return 0;
+}

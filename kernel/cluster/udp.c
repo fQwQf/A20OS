@@ -335,6 +335,39 @@ static void udp_receive(const uint8_t nh[6], const uint8_t *frame,
         a20_clx_rx_frame(A20_CLX_TRANSPORT_UDP, nh, 6, frame, len);
 }
 
+void a20_clx_udp_wait(uint64_t deadline) {
+    uint64_t irq = spin_lock_irqsave(&g_udp_lock);
+    net_socket_t *s = net_socket_ref(g_udp_socket);
+    spin_unlock_irqrestore(&g_udp_lock, irq);
+    if (!s) {
+        proc_sleep_until(deadline);
+        return;
+    }
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, deadline);
+    if (!token.task) {
+        net_socket_free(s);
+        proc_sleep_until(deadline);
+        return;
+    }
+    wait_queue_entry_t entry = {0};
+    irq = net_sock_lock(s);
+    int unavailable = s->closed || s->shut_rd;
+    int linked = !unavailable && !s->rx_head &&
+                 !__atomic_load_n(&s->bh_pending, __ATOMIC_ACQUIRE) &&
+                 wait_queue_link(&s->read_waitq, &entry, token, 0);
+    net_sock_unlock(s, irq);
+    if (linked)
+        (void)proc_park_commit(token);
+    else
+        (void)proc_park_cancel(token);
+    wait_queue_unlink(&s->read_waitq, &entry);
+    proc_park_finish(token);
+    net_socket_free(s);
+    if (unavailable)
+        proc_sleep_until(deadline);
+}
+
 static void udp_poll(void *ctx) {
     (void)ctx;
     uint64_t irq = spin_lock_irqsave(&g_udp_lock);

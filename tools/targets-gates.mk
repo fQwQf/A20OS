@@ -5,6 +5,7 @@ HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
+HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment \
@@ -117,16 +118,21 @@ check-cluster-loopback:
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
 # host ports supply architecture types, CPU identity and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
-$(TMPDIR)/a20-host-test_lwip_allocator_concurrency: \
+$(TMPDIR)/a20-host-test_lwip_allocator_concurrency \
+$(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
         tools/tests/test_lwip_allocator_concurrency.c \
         kernel/external/lwip/src/core/mem.c \
         kernel/external/lwip/src/core/memp.c \
         kernel/external/lwip/src/core/pbuf.c \
+        kernel/net/lwip_compat.c \
+        kernel/net/lwip_port/arch/heap.h \
+        tools/tests/lwip_host_port/core/lock.h \
         tools/tests/lwip_host_port/arch/cc.h \
         tools/tests/lwip_host_port/lwipopts.h \
         tools/tests/net_lane_host_port/core/cpu.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -ffunction-sections -fdata-sections \
-	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=4 \
+	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=9 \
+	  -DCONFIG_NET_LANES=$(if $(findstring single_lane,$@),1,4) \
 	  -Itools/tests/lwip_host_port \
 	  -Itools/tests/net_lane_host_port \
 	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
@@ -237,6 +243,7 @@ CHECK_FAST_GATES := \
     host-tests \
     check-cluster-unit \
     check-cluster-fuzz \
+    check-cluster-wakeup \
     check-virtio-net-completion \
     check-drm-abi \
     check-task-lifetime-boundary \
@@ -326,7 +333,10 @@ endif
 check-cluster-reliable:
 	$(PYTHON) tools/check-cluster-udp.py --faults --restart --log-dir .kernel-build/cluster/reliable
 
-.PHONY: check-cluster-send
+.PHONY: check-cluster-send check-cluster-smp
+check-cluster-smp:
+	NR_CPUS=2 $(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-smp2
+
 check-cluster-send:
 	$(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-server
 	$(PYTHON) tools/check-cluster-udp.py --send --routed --faults --profile 3 --peer-profile 2 --timeout 180 --log-dir .kernel-build/cluster/send-routed-mixed
@@ -350,6 +360,10 @@ check-cluster-performance:
 .PHONY: check-virtio-net-completion
 check-virtio-net-completion:
 	$(PYTHON) tools/check-virtio-net-completion.py
+
+.PHONY: check-cluster-wakeup
+check-cluster-wakeup:
+	$(PYTHON) tools/check-cluster-wakeup.py
 
 .PHONY: check-cluster-uart
 check-cluster-uart:

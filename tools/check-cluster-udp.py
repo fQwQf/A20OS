@@ -293,7 +293,9 @@ def main():
                "kernel/cluster/reliable.c", "kernel/cluster/remote_ep.c", "kernel/cluster/udp.c",
                "kernel/cluster/session.c", "kernel/cluster/session_control.h",
                "kernel/include/uapi/a20/cluster_snapshot.h",
-               "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c", "tools/check-cluster-udp.py"]
+               "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c",
+               "kernel/net/lwip_compat.c", "kernel/net/lwip_port/arch/cc.h",
+               "kernel/net/lwip_port/arch/heap.h", "tools/check-cluster-udp.py"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}
     profiles = [args.profile, args.peer_profile or args.profile] + ([2] if args.routed else [])
     commands = {}
@@ -306,6 +308,10 @@ def main():
                                stdout=log, stderr=subprocess.STDOUT, check=True)
         commands[profile] = shlex.split(subprocess.check_output(make + ["_qemu_argv"],
                                                                cwd=root, text=True))
+    kernel_hashes = {
+        str(profile): hashlib.sha256((root / cmd[cmd.index("-kernel") + 1]).read_bytes()).hexdigest()
+        for profile, cmd in commands.items()
+    }
     ports = []
     reservations = []
     for _ in profiles:
@@ -478,6 +484,7 @@ def main():
                     "concurrent_calls_each": 96 if args.send else 0,
                     "random_loss": args.random_loss, "random_delay_ms": [50, 200] if args.random_delay else None,
                     "corrupt": args.corrupt, "seed": args.seed, "source_sha256": hashes,
+                    "guest_commands": guest_commands, "kernel_sha256": kernel_hashes,
                     "hello_flood_each": 1000 if args.hello_flood else 0,
                     "partition_seconds": 30 if args.partition else 0,
                     "slow_consumer_ms": 10000 if args.slow_consumer else 0,

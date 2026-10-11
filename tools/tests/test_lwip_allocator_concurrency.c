@@ -14,45 +14,23 @@
 
 struct stats_ lwip_stats;
 
-static pthread_mutex_t heap_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t protect_mutex = PTHREAD_MUTEX_INITIALIZER;
-static __thread unsigned protect_depth;
-
-/* These host-only shims let the real vendored allocators run concurrently. */
-void a20_lwip_heap_lock(void) {
-    pthread_mutex_lock(&heap_mutex);
-}
-void a20_lwip_heap_unlock(void) {
-    pthread_mutex_unlock(&heap_mutex);
-}
-
-sys_prot_t sys_arch_protect(void) {
-    sys_prot_t outer = protect_depth == 0;
-    if (outer)
-        pthread_mutex_lock(&protect_mutex);
-    ++protect_depth;
-    return outer;
-}
-
-void sys_arch_unprotect(sys_prot_t token) {
-    (void)token;
-    if (protect_depth == 0) {
-        fprintf(stderr, "unbalanced SYS_ARCH_UNPROTECT\n");
-        abort();
-    }
-    if (--protect_depth == 0)
-        pthread_mutex_unlock(&protect_mutex);
-}
+/* Production lwip_compat.c supplies heap/protect algorithms. Host seams only
+ * replace spinlocks, IRQ state and CPU identity (one thread per CPU). */
+__thread unsigned a20_host_cpu;
+__thread int a20_host_irq_enabled = 1;
 
 static struct pbuf *shared_pbuf;
 static volatile int failed;
 
 static void *worker(void *arg) {
     uintptr_t id = (uintptr_t)arg;
+    a20_host_cpu = (unsigned)id + 1;
     uint32_t state = (uint32_t)(0x9e3779b9u ^ (uint32_t)id);
     unsigned i;
 
     for (i = 0; i < ITERATIONS; ++i) {
+        int irq_before = (i & 7u) != 0;
+        a20_host_irq_enabled = irq_before;
         size_t len;
         unsigned char value;
         unsigned char *p;
@@ -87,6 +65,14 @@ static void *worker(void *arg) {
         }
         mem_free(p);
 
+        struct pbuf *private = pbuf_alloc(PBUF_TRANSPORT, 128, PBUF_RAM);
+        if (!private || private->ref != 1) {
+            __atomic_store_n(&failed, 1, __ATOMIC_RELAXED);
+            return NULL;
+        }
+        memset(private->payload, value, private->len);
+        pbuf_free(private);
+
         pool_element = memp_malloc(MEMP_TCP_SEG);
         if (pool_element == NULL) {
             __atomic_store_n(&failed, 1, __ATOMIC_RELAXED);
@@ -98,6 +84,19 @@ static void *worker(void *arg) {
          * exercise the actual pbuf refcount without allowing final release. */
         pbuf_ref(shared_pbuf);
         pbuf_free(shared_pbuf);
+        if (a20_host_irq_enabled != irq_before)
+            abort();
+
+        sys_prot_t outer = sys_arch_protect(), inner = sys_arch_protect();
+        if (a20_host_irq_enabled)
+            abort();
+        sys_arch_unprotect(inner);
+        if (a20_host_irq_enabled)
+            abort();
+        sys_arch_unprotect(outer);
+        if (a20_host_irq_enabled != irq_before)
+            abort();
+        a20_host_irq_enabled = 1;
     }
     return NULL;
 }
@@ -138,7 +137,8 @@ int main(void) {
             (unsigned long)lwip_stats.mem.used, (unsigned)lwip_stats.mem.err);
         return 1;
     }
-    printf("lwIP allocator concurrency: PASS (%u workers x %u iterations)\n",
-           WORKERS, ITERATIONS);
+    printf("lwIP allocator concurrency: PASS (%u lanes, %u workers x %u "
+           "iterations)\n",
+           CONFIG_NET_LANES, WORKERS, ITERATIONS);
     return 0;
 }

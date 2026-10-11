@@ -61,7 +61,8 @@ def main():
     sources = ["user/tests/test_native_cluster_bench.c", "kernel/abi/native/sys_native_ipc.c",
                "kernel/ipc/a20_channel.c", "kernel/cluster/remote_ep.c", "kernel/cluster/export.c",
                "kernel/cluster/transport.c", "kernel/cluster/udp.c", "kernel/cluster/fragment.c",
-               "kernel/drivers/net/virtio_net.c",
+               "kernel/drivers/net/virtio_net.c", "kernel/net/lwip_compat.c",
+               "kernel/net/lwip_port/arch/cc.h", "kernel/net/lwip_port/arch/heap.h",
                "tools/check-cluster-performance.py"]
     hashes = {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in sources}
     if not args.skip_build:
