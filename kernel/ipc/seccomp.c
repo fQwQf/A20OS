@@ -366,8 +366,11 @@ int64_t seccomp_gate(trap_context_t *ctx, uint64_t nr, int64_t *ret_out)
             .arch = SECCOMP_ARCH_TOKEN,
         };
         memcpy(si._sifields, &f, sizeof(f));
-        signal_send_info(t->pid, SIGSYS, &si, sizeof(si));
-        *ret_out = -ENOSYS;
+        if (signal_send_thread_info(t->pid, SIGSYS, &si, sizeof(si)) < 0)
+            proc_exit_group(-SIGSYS);
+        /* SIGSYS describes the trapped instruction, including the original
+         * syscall/result register. The handler supplies the eventual result. */
+        *ret_out = (int64_t)TRAP_CTX_RET(ctx);
         return 1;
     }
     case SECCOMP_RET_TRACE:

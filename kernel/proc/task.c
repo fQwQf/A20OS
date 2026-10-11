@@ -209,6 +209,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     }
     t->sig_old_blocked = 0;
     t->thread_pending = 0;
+    t->thread_signal_info = NULL;
     ARCH_TASK_INIT(t);
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
@@ -331,6 +332,8 @@ static void proc_task_release_resources(task_t *t)
     landlock_release_task(t);
     env_release_task(t);
 
+    kfree(t->thread_signal_info);
+    t->thread_signal_info = NULL;
     if (t->signals) {
         signal_state_t *ss = (signal_state_t *)t->signals;
         t->signals = NULL;

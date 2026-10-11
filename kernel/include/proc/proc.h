@@ -360,6 +360,7 @@ typedef struct task_t {
     int            sigwait_active;
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
+    void          *thread_signal_info; /* lazily allocated, signals->lock */
 
     /* Debug/tracing state (kernel/proc/debug.c).  Protected by the task's own
      * park_lock for transitions; the tracer reads the snapshot fields only

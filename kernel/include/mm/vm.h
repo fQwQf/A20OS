@@ -584,6 +584,7 @@ vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
 int     mm_munmap(mm_struct_t *mm, vaddr_t addr, size_t len);
 vaddr_t mm_brk(mm_struct_t *mm, vaddr_t newbrk);
 int     mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
+int     mm_make_page_exec(mm_struct_t *mm, vaddr_t addr);
 int     mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                   size_t new_size, int flags, vaddr_t new_addr,
                   vaddr_t *out_addr);
