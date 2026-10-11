@@ -245,10 +245,15 @@ int aio_context_destroy(struct mm_struct *mm, uint64_t ctx)
 
 /* ---- synchronous iocb execution ---- */
 
-/* pread/pwrite to a user buffer through the VFS, chunked over page segments. */
-static int64_t aio_do_pread(int fd, uint64_t buf, uint64_t nbytes,
-                            int64_t offset)
+/* Positional I/O uses a kernel bounce page. A direct-map user pointer must
+ * never escape into VFS I/O: COW/unmap can replace it while the device sleeps.
+ * Copying outside offset_lock also allows a user-buffer fault to read a mapping
+ * of this same file without recursively taking that lock. */
+static int64_t aio_do_io(int fd, uint64_t buf, uint64_t nbytes,
+                         int64_t offset, int write)
 {
+    if (offset < 0 || nbytes > (uint64_t)INT64_MAX - (uint64_t)offset)
+        return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0)
         return gfd;
@@ -259,103 +264,61 @@ static int64_t aio_do_pread(int fd, uint64_t buf, uint64_t nbytes,
         vfs_put_file_ref((int)gfd, vf);
         return -ESPIPE;
     }
-
-    mutex_lock(&vf->offset_lock);
-    long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
-    if (saved < 0) {
-        mutex_unlock(&vf->offset_lock);
+    char *bounce = nbytes ? kmalloc(PAGE_SIZE) : NULL;
+    if (nbytes && !bounce) {
         vfs_put_file_ref((int)gfd, vf);
-        return saved;
+        return -ENOMEM;
     }
-    if (vf->ops->lseek(vf, (long)offset, SEEK_SET) < 0) {
-        mutex_unlock(&vf->offset_lock);
-        vfs_put_file_ref((int)gfd, vf);
-        return -ESPIPE;
-    }
-
     int64_t total = 0;
-    while ((size_t)total < nbytes) {
-        void *kaddr;
-        size_t chunk;
-        if (user_buffer_segment((const void *)(uintptr_t)(buf + total),
-                                (size_t)(nbytes - (size_t)total), 1,
-                                &kaddr, &chunk) < 0) {
-            if (total == 0) total = -EFAULT;
+    while ((uint64_t)total < nbytes) {
+        size_t chunk = nbytes - (uint64_t)total > PAGE_SIZE
+                           ? PAGE_SIZE : (size_t)(nbytes - (uint64_t)total);
+        if (write && copy_from_user(bounce, (void *)(uintptr_t)(buf + total),
+                                     chunk) < 0) {
+            if (!total) total = -EFAULT;
             break;
         }
-        if (chunk > nbytes - (size_t)total)
-            chunk = nbytes - (size_t)total;
-        int64_t n = vfs_read_file(vf, kaddr, chunk);
+        mutex_lock(&vf->offset_lock);
+        long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
+        int64_t n = saved;
+        if (saved >= 0) {
+            n = vf->ops->lseek(vf, (long)(offset + total), SEEK_SET);
+            if (n >= 0)
+                n = write ? vfs_write_file(vf, bounce, chunk)
+                          : vfs_read_file(vf, bounce, chunk);
+            long restore = vf->ops->lseek(vf, saved, SEEK_SET);
+            if (restore < 0 && n >= 0)
+                n = restore;
+        }
+        mutex_unlock(&vf->offset_lock);
         if (n <= 0) {
-            if (total == 0)
-                total = n;
+            if (!total) total = n;
+            break;
+        }
+        if (!write && copy_to_user((void *)(uintptr_t)(buf + total), bounce,
+                                   (size_t)n) < 0) {
+            if (!total) total = -EFAULT;
             break;
         }
         total += n;
         if ((size_t)n < chunk)
             break;
     }
-    long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
-    mutex_unlock(&vf->offset_lock);
+    kfree(bounce);
     vfs_put_file_ref((int)gfd, vf);
-    if (restore_r < 0 && total >= 0)
-        return restore_r;
     return total;
+}
+
+static int64_t aio_do_pread(int fd, uint64_t buf, uint64_t nbytes,
+                            int64_t offset)
+{
+    return aio_do_io(fd, buf, nbytes, offset, 0);
 }
 
 static int64_t aio_do_pwrite(int fd, uint64_t buf, uint64_t nbytes,
                              int64_t offset)
 {
-    int64_t gfd = fdtable_get_current(fd);
-    if (gfd < 0)
-        return gfd;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
-    if (!vf)
-        return -EBADF;
-    if (!vf->ops || !vf->ops->lseek) {
-        vfs_put_file_ref((int)gfd, vf);
-        return -ESPIPE;
-    }
-
-    mutex_lock(&vf->offset_lock);
-    long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
-    if (saved < 0) {
-        mutex_unlock(&vf->offset_lock);
-        vfs_put_file_ref((int)gfd, vf);
-        return saved;
-    }
-    if (vf->ops->lseek(vf, (long)offset, SEEK_SET) < 0) {
-        mutex_unlock(&vf->offset_lock);
-        vfs_put_file_ref((int)gfd, vf);
-        return -ESPIPE;
-    }
-
-    int64_t total = 0;
-    while ((size_t)total < nbytes) {
-        void *kaddr;
-        size_t chunk;
-        if (user_buffer_segment((const void *)(uintptr_t)(buf + total),
-                                (size_t)(nbytes - (size_t)total), 0,
-                                &kaddr, &chunk) < 0) {
-            if (total == 0) total = -EFAULT;
-            break;
-        }
-        if (chunk > nbytes - (size_t)total)
-            chunk = nbytes - (size_t)total;
-        int64_t n = vfs_write_file(vf, kaddr, chunk);
-        if (n <= 0) {
-            if (total == 0)
-                total = n;
-            break;
-        }
-        total += n;
-    }
-    long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
-    mutex_unlock(&vf->offset_lock);
-    vfs_put_file_ref((int)gfd, vf);
-    if (restore_r < 0 && total >= 0)
-        return restore_r;
-    return total;
+    return aio_do_io(fd, buf, nbytes, offset, 1);
 }
 
 static int64_t aio_do_fsync(int fd, int datasync)

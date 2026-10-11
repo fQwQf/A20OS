@@ -818,70 +818,57 @@ int user_prepare_write(struct task_t *t, uint64_t va)
 #endif
 }
 
-static int user_resolve_leaf(task_t *t, uint64_t va, int write,
-                             void **kaddr_out, size_t *avail_out) {
-    va = (uint64_t)(vaddr_t)va;
+/* A direct-map address is borrowed from the PTE, not a pinned translation.
+ * Keep the mapping stable through the copy: fork/COW, munmap and mremap may
+ * otherwise replace it after lookup and before memcpy. Fault resolution can
+ * sleep, so it runs outside the lock and the next iteration re-reads the PTE.
+ * Limit each locked access to one base page, including huge mappings. */
+static int user_access_begin(task_t *t, uint64_t va, int write,
+                             void **kaddr, size_t *chunk, uint64_t *flags)
+{
 #ifdef CONFIG_NOMMU
-    (void)t; (void)write;
-    *kaddr_out = (void *)(uintptr_t)va;
-    *avail_out = USER_VA_LIMIT > va ? USER_VA_LIMIT - va : 0;
+    (void)t;
+    (void)write;
+    *flags = 0;
+    *kaddr = (void *)(uintptr_t)va;
+    *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
     return 0;
 #else
-    vaddr_t leaf_base = 0;
-    size_t leaf_size = 0;
-    pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-    if (!pte || !(*pte & PTE_V)) {
-        int r = handle_demand_fault(t, va);
-        if (r < 0)
+    for (;;) {
+        *flags = spin_lock_irqsave(&t->mm->lock);
+        pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
+        int allowed = pte && (write ? pte_user_writable(*pte)
+                                    : pte_user_readable(*pte));
+        mm_seg_t *vma = mm_seg_find(t->mm, va);
+        if (vma && !(vma->vm_flags & (write ? VM_WRITE : VM_READ))) {
+            spin_unlock_irqrestore(&t->mm->lock, *flags);
             return -EFAULT;
-        pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-        if (!pte || !(*pte & PTE_V))
-            return -EFAULT;
-    }
-
-    if (write) {
-        if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
-            return -EFAULT;
-        if (!(*pte & PTE_W)) {
-            int r = handle_cow_fault(t, va);
-            if (r < 0)
-                return -EFAULT;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &leaf_base, &leaf_size);
-            if (!pte || !(*pte & PTE_V))
-                return -EFAULT;
         }
-        if (!pte_user_writable(*pte))
+        if (allowed) {
+            vaddr_t base;
+            size_t size;
+            pte = pt_lookup_leaf(t->pgdir, va, NULL, &base, &size);
+            *kaddr = (void *)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
+            *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+            *pte |= PTE_A | (write ? PTE_D : 0);
+            return 0;
+        }
+        spin_unlock_irqrestore(&t->mm->lock, *flags);
+        if (handle_demand_fault_access(t, va, write ? MM_FAULT_ACCESS_WRITE
+                                                   : MM_FAULT_ACCESS_READ) < 0)
             return -EFAULT;
-    } else if (!pte_user_readable(*pte)) {
-        return -EFAULT;
     }
-
-    size_t page_off = va - leaf_base;
-    paddr_t pa = arch_pte_addr(*pte);
-    *kaddr_out = (void *)(pa + PAGE_OFFSET + page_off);
-    *avail_out = leaf_size - page_off;
-    return 0;
 #endif
 }
 
-int user_buffer_segment(const void *user, size_t len, int write,
-                        void **kaddr, size_t *chunk) {
-    task_t *t = proc_current();
-    if (!t || !t->mm || !kaddr || !chunk)
-        return -EFAULT;
-    if (len == 0) {
-        *kaddr = NULL;
-        *chunk = 0;
-        return 0;
-    }
-    uint64_t va = (uint64_t)(vaddr_t)user;
-    if (!user_range_ok(va, len))
-        return -EFAULT;
-    if (user_resolve_leaf(t, va, write, kaddr, chunk) < 0)
-        return -EFAULT;
-    if (*chunk > len)
-        *chunk = len;
-    return 0;
+static void user_access_end(task_t *t, uint64_t flags)
+{
+#ifndef CONFIG_NOMMU
+    spin_unlock_irqrestore(&t->mm->lock, flags);
+#else
+    (void)t;
+    (void)flags;
+#endif
 }
 
 long copy_from_user(void *dst, const void *src, size_t n) {
@@ -892,11 +879,14 @@ long copy_from_user(void *dst, const void *src, size_t n) {
     while (copied < n) {
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, (uint64_t)(uintptr_t)src + copied, 0, &kaddr, &chunk) < 0)
+        uint64_t flags;
+        if (user_access_begin(t, (uint64_t)(uintptr_t)src + copied, 0,
+                               &kaddr, &chunk, &flags) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
         memcpy((char *)dst + copied, kaddr, chunk);
+        user_access_end(t, flags);
         copied += chunk;
     }
     return (long)copied;
@@ -910,11 +900,14 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     while (copied < n) {
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, (uint64_t)(uintptr_t)dst + copied, 1, &kaddr, &chunk) < 0)
+        uint64_t flags;
+        if (user_access_begin(t, (uint64_t)(uintptr_t)dst + copied, 1,
+                               &kaddr, &chunk, &flags) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
         memcpy(kaddr, (const char *)src + copied, chunk);
+        user_access_end(t, flags);
         copied += chunk;
     }
     return (long)copied;
@@ -930,14 +923,19 @@ long user_strncpy(char *dst, const char *src, size_t max) {
         if (!user_range_ok(va, 1)) return -EFAULT;
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, va, 0, &kaddr, &chunk) < 0)
+        uint64_t flags;
+        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags) < 0)
             return -EFAULT;
         if (chunk > max - 1 - i) chunk = max - 1 - i;
         const char *src_page = (const char *)kaddr;
         for (size_t j = 0; j < chunk; j++) {
             dst[i + j] = src_page[j];
-            if (src_page[j] == '\0') return (long)(i + j);
+            if (src_page[j] == '\0') {
+                user_access_end(t, flags);
+                return (long)(i + j);
+            }
         }
+        user_access_end(t, flags);
         i += chunk;
     }
     dst[i] = '\0';
@@ -954,13 +952,18 @@ long user_strnlen(const char *src, size_t max) {
         if (!user_range_ok(va, 1)) return -EFAULT;
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, va, 0, &kaddr, &chunk) < 0)
+        uint64_t flags;
+        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags) < 0)
             return -EFAULT;
         if (chunk > max - i) chunk = max - i;
         const char *page = (const char *)kaddr;
         for (size_t j = 0; j < chunk; j++) {
-            if (page[j] == '\0') return (long)(i + j);
+            if (page[j] == '\0') {
+                user_access_end(t, flags);
+                return (long)(i + j);
+            }
         }
+        user_access_end(t, flags);
         i += chunk;
     }
     return (long)max;

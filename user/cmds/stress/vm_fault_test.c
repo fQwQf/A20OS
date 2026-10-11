@@ -250,9 +250,40 @@ static int reclaim_hint_probe(void) {
     printf("VM_FAULT: reclaim-hints %s\n", failed ? "FAIL" : "PASS");
     return failed;
 }
+static int copy_protection_probe(void) {
+    uint64_t *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int hold[2], input[2];
+    if (p == MAP_FAILED || pipe(hold) || pipe(input))
+        return 1;
+    *p = 0xabc123;
+    pid_t child = fork();
+    if (child < 0)
+        return 1;
+    if (!child) {
+        char c;
+        read(hold[0], &c, 1);
+        _exit(*p != 0xabc123);
+    }
+    uint64_t value = 0xdef456;
+    int failed = mprotect(p, 4096, PROT_READ) != 0;
+    failed |= write(input[1], &value, sizeof(value)) != sizeof(value);
+    errno = 0;
+    ssize_t n = read(input[0], p, sizeof(value));
+    failed |= n != -1 || errno != EFAULT || *p != 0xabc123;
+    write(hold[1], "x", 1);
+    int status;
+    failed |= waitpid(child, &status, 0) != child || status != 0;
+    close(hold[0]); close(hold[1]);
+    close(input[0]); close(input[1]);
+    munmap(p, 4096);
+    printf("VM_FAULT: copy-protection %s\n", failed ? "FAIL" : "PASS");
+    return failed;
+}
 int main(void) {
     int failed = sparse_unmap_probe();
     failed |= reclaim_hint_probe();
+    failed |= copy_protection_probe();
     failed |= fork_write_probe();
     failed |= signal_probe();
     failed |= cow_copy_probe();

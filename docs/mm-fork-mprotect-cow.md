@@ -59,3 +59,33 @@ and RISC-V 4-CPU preemptible kernels and a Linux host pass; the full x86 smoke a
 its signal, COW, eventfd, Unix descriptor passing, socket registry and network
 option probes (`reclaim-full-guest.log`, `reclaim-host.log`, `reclaim-rv-guest.log`). This establishes
 the data-loss regression, not a diagnosis of Firefox's remaining heap crash.
+
+## User copies and sleeping positional I/O
+
+User-copy helpers now hold the address-space lock from translation lookup through
+one base-page copy (also for huge mappings). This prevents COW, unmap or remap
+from retiring the translated frame before the copy finishes. Fault resolution
+runs outside the lock, followed by a fresh permission and translation lookup.
+The same lifetime rule covers user string helpers and records accessed/dirty
+bits when the direct map is used.
+
+The internal `user_buffer_segment` borrowed-pointer interface has been removed.
+Its sole caller, positional AIO, now uses a kernel bounce page: device I/O may
+sleep while another thread changes the submitting process's mappings. User
+copies run outside the file-position lock, allowing faults on mappings of that
+same file, and each chunk saves/restores the shared file position under its lock.
+
+Deterministic host probes exercise a pending mapping replacement at the copy
+boundary and a replacement during VFS I/O:
+
+```sh
+python3 tools/tests/test_usercopy_mapping_races.py
+python3 tools/tests/test_aio_user_mapping_races.py
+```
+
+The 4-CPU preemptible x86_64 full VM smoke and RISC-V VM/AIO probes pass
+(`build/browser-followup/usercopy-aio-guest.log`, `usercopy-rv-guest.log`). The
+added guest `copy-protection` case also passed on the preceding kernel; it is
+permission regression coverage, not evidence of reproducing the copy race.
+Firefox ESR still crashes after this change, so this fix does not establish the
+cause of its heap corruption.
