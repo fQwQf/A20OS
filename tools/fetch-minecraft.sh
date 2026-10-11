@@ -25,13 +25,22 @@ WITH_ASSETS=${WITH_ASSETS:-1}
 MANIFEST=${MANIFEST:-https://piston-meta.mojang.com/mc/game/version_manifest_v2.json}
 
 python3 - "$VERSION" "$OUT" "$WITH_ASSETS" "$MANIFEST" <<'PY'
-import concurrent.futures, hashlib, json, os, sys, threading, urllib.request
+import concurrent.futures, hashlib, json, os, sys, threading, time, urllib.request
+import urllib.error
 
 version, out, with_assets, manifest = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
 
 def get(url):
-    with urllib.request.urlopen(url, timeout=180) as r:
-        return r.read()
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return r.read()
+        except (OSError, urllib.error.URLError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            if attempt == 4:
+                raise RuntimeError("download failed: " + url) from error
+            time.sleep(2 ** attempt)
 
 def fetch(path, url, sha1):
     dest = os.path.join(out, path)
