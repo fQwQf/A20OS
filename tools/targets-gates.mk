@@ -357,6 +357,10 @@ check-cluster-fuzz-smoke:
 check-cluster-performance:
 	$(PYTHON) tools/check-cluster-performance.py
 
+.PHONY: check-cluster-load
+check-cluster-load:
+	$(PYTHON) tools/check-cluster-load.py
+
 .PHONY: check-virtio-net-completion
 check-virtio-net-completion:
 	$(PYTHON) tools/check-virtio-net-completion.py

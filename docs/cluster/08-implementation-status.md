@@ -355,3 +355,16 @@ socket 发送路径会在取得 lwIP core 锁前分配 pbuf。主机测试改为
 日志分别保留在 `rx-event-smp2-fixed/`、`rx-event-smp4-fixed/`；修复前失败在
 `rx-event-smp2/` 和 `smp-allocator-before/`。`make check-cluster-smp` 将双 CPU
 场景纳入可重跑门禁，并进入 CI 扩展检查。这些短时回归不替代长时 soak。
+
+## 22. 四节点 SEND 的真实负载
+
+新增 Native `native-cluster-load` 与 `make check-cluster-load`，四个独立内核
+互相收发 64 B SEND。接收者拥有固定单调时间窗口，应用编号历史独立检查
+重复；最终通过真实 CALL 查询所有消息接纳及资源归零。宿主仅转发真实
+Ethernet 帧，性能达标布尔值与业务正确性通过分别报告。
+
+60 秒正式运行通过数量与资源核对，每方向 165.767–193.283 条/秒，所有
+成功提交消息最终送达，重复为零；明显未达 >10000 条/秒目标。初次忙循环
+让出 CPU 的客户端曾发生链路超时，已保留失败现场；使用正常阻塞背压后
+通过，但该进展故障尚未完成定位。程序完成七架构链接，CI 手动扩展任务
+已接入。方法、原始日志与剩余验收见 [23-four-node-load.md](23-four-node-load.md)。
