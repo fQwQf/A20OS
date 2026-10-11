@@ -1814,3 +1814,6 @@ smoke-resource-ns:
 # Four-CPU dispatch ownership and scheduling-key update races.
 smoke-sched-stress-x86_64:
 	$(PYTHON) tools/smoke.py smoke-sched-stress-x86_64
+
+smoke-sandbox:
+	$(PYTHON) tools/smoke.py smoke-sandbox

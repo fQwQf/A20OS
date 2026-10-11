@@ -318,7 +318,7 @@ static uint32_t bpf_run(const sock_filter_t *insns, uint16_t len,
 #endif
 
 typedef struct {
-    uint64_t call_addr;
+    uintptr_t call_addr;
     int32_t syscall;
     uint32_t arch;
 } sigsys_fields_t;
@@ -361,7 +361,7 @@ int64_t seccomp_gate(trap_context_t *ctx, uint64_t nr, int64_t *ret_out)
         si.si_code = SYS_SECCOMP;
         si.si_errno = (int)data;
         sigsys_fields_t f = {
-            .call_addr = (uint64_t)TRAP_CTX_EPC(ctx),
+            .call_addr = (uintptr_t)TRAP_CTX_EPC(ctx),
             .syscall = (int32_t)nr,
             .arch = SECCOMP_ARCH_TOKEN,
         };

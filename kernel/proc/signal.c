@@ -215,9 +215,8 @@ static void build_siginfo_code(arch_siginfo_t *si, int sig, task_t *sender, int 
     si->si_signo = sig;
     si->si_code = code;
     if (sender) {
-        si->_sifields[0] = 0;
-        si->_sifields[1] = sender->pid;
-        si->_sifields[2] = (int)sender->cred.uid;
+        si->_sifields[0] = sender->pid;
+        si->_sifields[1] = (int)sender->cred.uid;
     }
 }
 
@@ -237,8 +236,8 @@ static void build_siginfo(arch_siginfo_t *si, int sig, task_t *sender)
 static void build_siginfo_fault(arch_siginfo_t *si, int sig, const trap_context_t *ctx)
 {
     build_siginfo_code(si, sig, NULL, SIGINFO_SEGV_MAPERR);
-    uint64_t addr = (uint64_t)TRAP_CTX_KScratch0(ctx);
-    memcpy(&si->_sifields[1], &addr, sizeof(addr));
+    uintptr_t addr = (uintptr_t)TRAP_CTX_KScratch0(ctx);
+    memcpy(si->_sifields, &addr, sizeof(addr));
 }
 
 void signal_init(signal_state_t *ss) {

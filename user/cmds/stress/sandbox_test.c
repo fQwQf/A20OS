@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -24,6 +25,36 @@ struct sock_fprog {
 #define SECCOMP_MODE_FILTER 2
 #define SECCOMP_RET_ERRNO 0x00050000U
 #define SECCOMP_RET_ALLOW 0x7fff0000U
+
+static volatile sig_atomic_t trap_received;
+
+static void trap_handler(int sig, siginfo_t *info, void *context) {
+    (void)context;
+    trap_received = sig == SIGSYS && info->si_signo == SIGSYS &&
+                            info->si_code == 1 && info->si_errno == 42 &&
+                            info->si_syscall == SYS_getppid &&
+                            info->si_call_addr != NULL && info->si_arch != 0
+                        ? 1 : -1;
+}
+
+static int filter_trap_probe(void) {
+    struct sigaction act = {.sa_sigaction = trap_handler,
+                            .sa_flags = SA_SIGINFO};
+    sigemptyset(&act.sa_mask);
+    struct sock_filter insns[] = {
+        {0x20, 0, 0, 0},
+        {0x15, 0, 1, SYS_getppid},
+        {0x06, 0, 0, 0x00030000U | 42},
+        {0x06, 0, 0, SECCOMP_RET_ALLOW},
+    };
+    struct sock_fprog prog = {.len = 4, .filter = insns};
+    if (sigaction(SIGSYS, &act, NULL) ||
+        prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) ||
+        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0L, 0L))
+        return 1;
+    syscall(SYS_getppid);
+    return trap_received == 1 ? 0 : 2;
+}
 
 static int wait_ok(pid_t pid) {
     int status;
@@ -123,6 +154,11 @@ int main(int argc, char **argv) {
         goto fail;
     child = fork();
     if (!child)
+        _exit(filter_trap_probe());
+    if (!wait_ok(child))
+        goto fail;
+    child = fork();
+    if (!child)
         _exit(filter_stack_probe());
     if (!wait_ok(child))
         goto fail;
@@ -157,7 +193,7 @@ int main(int argc, char **argv) {
     }
     unlink("/tmp/sandbox-setid");
     puts("SANDBOX: PASS no-new-privs fork+exec+setid "
-         "seccomp-pointer+errno+inherit+stack+scratch+mode");
+         "seccomp-pointer+errno+inherit+stack+scratch+mode+sigsys");
     return 0;
 fail:
     unlink("/tmp/sandbox-setid");
