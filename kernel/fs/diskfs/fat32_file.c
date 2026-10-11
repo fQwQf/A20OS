@@ -230,6 +230,7 @@ int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
 
     char *out    = (char *)dirp;
     size_t total = 0;
+    size_t resume_off = fc->dir_byte_off;
     lfn_buf_t lfn;
     memset(&lfn, 0, sizeof(lfn));
 
@@ -240,13 +241,21 @@ int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
         if (r <= 0) break;
         if (de.name[0] == 0x00) break;
         fc->dir_byte_off += 32;
-        if ((uint8_t)de.name[0] == 0xE5) { memset(&lfn, 0, sizeof(lfn)); continue; }
+        if ((uint8_t)de.name[0] == 0xE5) {
+            memset(&lfn, 0, sizeof(lfn));
+            resume_off = fc->dir_byte_off;
+            continue;
+        }
 
         if (de.attr == FAT_ATTR_LFN) {
             lfn_append_seg(&lfn, (fat32_lfn_t *)&de);
             continue;
         }
-        if (de.attr & FAT_ATTR_VOL_LABEL) { memset(&lfn, 0, sizeof(lfn)); continue; }
+        if (de.attr & FAT_ATTR_VOL_LABEL) {
+            memset(&lfn, 0, sizeof(lfn));
+            resume_off = fc->dir_byte_off;
+            continue;
+        }
 
         char fname[256];
         if (lfn.valid) {
@@ -265,7 +274,13 @@ int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
         size_t reclen  = sizeof(vfs_dirent64_t) + namelen + 1;
         reclen = (reclen + 7) & ~7UL; /* 8-byte align */
 
-        if (total + reclen > count) break;
+        if (total + reclen > count) {
+            /* Retry this entire record, including its LFN entries, on the
+             * next call. Advancing here silently loses one file per buffer. */
+            fc->dir_byte_off = resume_off;
+            fat32_unlock(fc->sb);
+            return total ? (int)total : -EINVAL;
+        }
 
         vfs_dirent64_t *dent = (vfs_dirent64_t *)(out + total);
         uint32_t cluster = ((uint32_t)de.fst_clus_hi << 16) | de.fst_clus_lo;
@@ -276,6 +291,7 @@ int fat32_freaddir(vfile_t *vf, void *dirp, size_t count) {
         memcpy(dent->d_name, fname, namelen + 1);
 
         total += reclen;
+        resume_off = fc->dir_byte_off;
     }
 
     fat32_unlock(fc->sb);
@@ -381,4 +397,3 @@ vfile_ops_t g_fat32_fops = {
     .ioctl   = NULL,
     .close   = fat32_fclose,
 };
-
