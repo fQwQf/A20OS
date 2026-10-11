@@ -29,38 +29,46 @@
 
 /* ---- check_c_side.py runner support ---------------------------------- */
 
-static uint32_t rd16(const uint8_t *p)
-{
+static uint32_t rd16(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
 }
 
-static uint32_t rd32(const uint8_t *p)
-{
+static uint32_t rd32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
 }
 
-static const char *type_name_of(uint8_t t)
-{
+static const char *type_name_of(uint8_t t) {
     switch (t) {
-    case A20_CLX_TYPE_HELLO:      return "HELLO";
-    case A20_CLX_TYPE_HELLO_ACK:  return "HELLO_ACK";
-    case A20_CLX_TYPE_PING:       return "PING";
-    case A20_CLX_TYPE_PONG:       return "PONG";
-    case A20_CLX_TYPE_SEND:       return "SEND";
-    case A20_CLX_TYPE_CALL:       return "CALL";
-    case A20_CLX_TYPE_CALL_REPLY: return "CALL_REPLY";
-    case A20_CLX_TYPE_CLOSE:      return "CLOSE";
-    case A20_CLX_TYPE_ACK:        return "ACK";
-    case A20_CLX_TYPE_NACK:       return "NACK";
-    case A20_CLX_TYPE_ERROR:      return "ERROR";
-    default:                      return "UNKNOWN";
+        case A20_CLX_TYPE_HELLO:
+            return "HELLO";
+        case A20_CLX_TYPE_HELLO_ACK:
+            return "HELLO_ACK";
+        case A20_CLX_TYPE_PING:
+            return "PING";
+        case A20_CLX_TYPE_PONG:
+            return "PONG";
+        case A20_CLX_TYPE_SEND:
+            return "SEND";
+        case A20_CLX_TYPE_CALL:
+            return "CALL";
+        case A20_CLX_TYPE_CALL_REPLY:
+            return "CALL_REPLY";
+        case A20_CLX_TYPE_CLOSE:
+            return "CLOSE";
+        case A20_CLX_TYPE_ACK:
+            return "ACK";
+        case A20_CLX_TYPE_NACK:
+            return "NACK";
+        case A20_CLX_TYPE_ERROR:
+            return "ERROR";
+        default:
+            return "UNKNOWN";
     }
 }
 
 /* refdec-compatible: one line, hex bytes, whitespace stripped. */
-static uint32_t read_hex_file(const char *path, uint8_t *out, uint32_t cap)
-{
+static uint32_t read_hex_file(const char *path, uint8_t *out, uint32_t cap) {
     FILE *f = fopen(path, "r");
     static char line[65536];
     uint32_t n = 0;
@@ -87,8 +95,7 @@ static uint32_t read_hex_file(const char *path, uint8_t *out, uint32_t cap)
     return n;
 }
 
-static void print_hex(const uint8_t *p, uint32_t n)
-{
+static void print_hex(const uint8_t *p, uint32_t n) {
     uint32_t i;
 
     for (i = 0; i < n; i++)
@@ -103,8 +110,7 @@ static void print_hex(const uint8_t *p, uint32_t n)
  * gold suite can be diffed against one binary. */
 #define CLX_HOST_SLIP_RX_CAP 512u
 
-static int run_slip_file(const char *path)
-{
+static int run_slip_file(const char *path) {
     static uint8_t in[8192];
     static uint8_t out[8192];
     static uint8_t cur[512];
@@ -192,8 +198,7 @@ static int run_slip_file(const char *path)
     return 0;
 }
 
-static int run_frame_file(const char *path, uint32_t mtu)
-{
+static int run_frame_file(const char *path, uint32_t mtu) {
     static uint8_t buf[8192];
     a20_frame_hdr_t h;
     const uint8_t *payload = NULL;
@@ -212,22 +217,24 @@ static int run_frame_file(const char *path, uint32_t mtu)
     printf("ver=%u\n", buf[A20_CLX_OFF_VER]);
     printf("type=%u\n", buf[A20_CLX_OFF_TYPE]);
     printf("type_name=%s\n", type_name_of(buf[A20_CLX_OFF_TYPE]));
-    printf("flags=0x%04X\n",
-           len >= A20_CLX_HDR_LEN ? (unsigned)rd16(buf + A20_CLX_OFF_FLAGS) : 0u);
-    printf("frag=0x%04X\n",
-           len >= A20_CLX_HDR_LEN ? (unsigned)rd16(buf + A20_CLX_OFF_FRAG) : 0u);
-    printf("frag_seq=%u\n",
-           len >= A20_CLX_HDR_LEN
-               ? (unsigned)(rd16(buf + A20_CLX_OFF_FRAG) & A20_CLX_FRAG_SEQ_MASK)
-               : 0u);
+    printf("flags=0x%04X\n", len >= A20_CLX_HDR_LEN
+                                 ? (unsigned)rd16(buf + A20_CLX_OFF_FLAGS)
+                                 : 0u);
+    printf("frag=0x%04X\n", len >= A20_CLX_HDR_LEN
+                                ? (unsigned)rd16(buf + A20_CLX_OFF_FRAG)
+                                : 0u);
+    printf("frag_seq=%u\n", len >= A20_CLX_HDR_LEN
+                                ? (unsigned)(rd16(buf + A20_CLX_OFF_FRAG) &
+                                             A20_CLX_FRAG_SEQ_MASK)
+                                : 0u);
     printf("frag_last=%u\n",
            len >= A20_CLX_HDR_LEN
                ? (unsigned)!!(rd16(buf + A20_CLX_OFF_FRAG) & A20_CLX_FRAG_LAST)
                : 0u);
     printf("frag_reserved_nonzero=%u\n",
-           len >= A20_CLX_HDR_LEN
-               ? (unsigned)!!(rd16(buf + A20_CLX_OFF_FRAG) & A20_CLX_FRAG_RESERVED)
-               : 0u);
+           len >= A20_CLX_HDR_LEN ? (unsigned)!!(rd16(buf + A20_CLX_OFF_FRAG) &
+                                                 A20_CLX_FRAG_RESERVED)
+                                  : 0u);
     printf("txid=%u\n",
            len >= A20_CLX_HDR_LEN ? rd32(buf + A20_CLX_OFF_TXID) : 0u);
     printf("src_hash=0x%08X\n",
@@ -280,8 +287,7 @@ static int run_frame_file(const char *path, uint32_t mtu)
         printf("hello_proto_max=%u\n", payload[17]);
         printf("hello_profile_tier=%u\n", payload[18]);
         printf("hello_caps=0x%02X\n", payload[19]);
-        printf("hello_short_addr=0x%04X\n",
-               (unsigned)rd16(payload + 20));
+        printf("hello_short_addr=0x%04X\n", (unsigned)rd16(payload + 20));
         printf("hello_link_addr_len=%u\n", payload[22]);
         printf("hello_reserved=%u\n", payload[23]);
         for (i = 0; i < 8u; i++)
@@ -300,8 +306,7 @@ static int run_frame_file(const char *path, uint32_t mtu)
 static int fails;
 static int checks;
 
-static void ck(int cond, const char *what)
-{
+static void ck(int cond, const char *what) {
     checks++;
     if (!cond) {
         fails++;
@@ -309,8 +314,7 @@ static void ck(int cond, const char *what)
     }
 }
 
-static uint32_t fnv_ref(const uint8_t *id)
-{
+static uint32_t fnv_ref(const uint8_t *id) {
     uint32_t h = 2166136261u;
     int i;
 
@@ -322,20 +326,18 @@ static uint32_t fnv_ref(const uint8_t *id)
 }
 
 static int build(uint8_t *buf, uint32_t cap, uint32_t mtu, a20_frame_hdr_t *h,
-                 const uint8_t *payload)
-{
+                 const uint8_t *payload) {
     return a20_frame_encode(buf, cap, mtu, h, payload);
 }
 
-static void unit_tests(void)
-{
-    static const uint8_t zeros[16] = { 0 };
-    static const uint8_t ones[16] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                      0xff, 0xff, 0xff, 0xff };
-    static const uint8_t node_a[16] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                                        0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-                                        0x0d, 0x0e, 0x0f, 0x10 };
+static void unit_tests(void) {
+    static const uint8_t zeros[16] = {0};
+    static const uint8_t ones[16] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                     0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                     0xff, 0xff, 0xff, 0xff};
+    static const uint8_t node_a[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                                       0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                                       0x0d, 0x0e, 0x0f, 0x10};
     uint8_t buf[2048];
     uint8_t pay[64];
     a20_frame_hdr_t h, d;
@@ -346,7 +348,8 @@ static void unit_tests(void)
     /* anchors: 01-abi node hash + CRC-16/CCITT-FALSE check value */
     ck(fnv_ref(zeros) == 0x69691905u, "fnv1a32(zeros) == 0x69691905");
     ck(fnv_ref(ones) == 0x360779f5u, "fnv1a32(ones) == 0x360779f5");
-    ck(fnv_ref(node_a) == 0xAE8E8135u, "fnv1a32(NODE_A) == 0xAE8E8135 (MANIFEST)");
+    ck(fnv_ref(node_a) == 0xAE8E8135u,
+       "fnv1a32(NODE_A) == 0xAE8E8135 (MANIFEST)");
     ck(a20_clx_crc16_ccitt((const uint8_t *)"123456789", 9) == 0x29B1u,
        "crc16_ccitt check value 0x29B1");
 
@@ -391,6 +394,21 @@ static void unit_tests(void)
     ck(d.crc_present == 1 && pl != NULL && memcmp(pl, pay, sizeof(pay)) == 0,
        "round trip payload bytes");
 
+    ck(a20_frame_forward(buf, (uint32_t)n, 1472) == 0, "relay decrements TTL");
+    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) == A20_FRAME_OK &&
+           d.ttl == 7 && d.txid == h.txid && d.src_hash == h.src_hash &&
+           d.dst_hash == h.dst_hash && memcmp(pl, pay, sizeof(pay)) == 0,
+       "relay preserves transaction and payload, updates CRC");
+    ck(a20_frame_forward(buf, (uint32_t)n, (uint32_t)n - 1) < 0,
+       "relay refuses smaller outgoing MTU");
+    h.ttl = 1;
+    n = build(buf, sizeof(buf), 1472, &h, pay);
+    ck(a20_frame_forward(buf, (uint32_t)n, 1472) < 0 &&
+           buf[A20_CLX_OFF_TTL] == 1,
+       "exhausted relay leaves frame unchanged");
+    h.ttl = A20_CLX_TTL_DEFAULT;
+    n = build(buf, sizeof(buf), 1472, &h, pay);
+
     /* verdict order pins, mirroring the malformed vector families */
     ck(a20_frame_decode(buf, 20, 1472, &d, &pl) == A20_FRAME_SHORT_FRAME,
        "short_frame");
@@ -419,11 +437,14 @@ static void unit_tests(void)
            A20_FRAME_PAYLOAD_LEN_MISMATCH,
        "payload_len_mismatch (mal-len-trailing-01 family)");
     buf[n - 1] ^= 0xFF; /* flip a CRC bit */
-    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) == A20_FRAME_CRC_MISMATCH,
+    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) ==
+           A20_FRAME_CRC_MISMATCH,
        "crc_mismatch");
     buf[n - 1] ^= 0xFF;
-    buf[A20_CLX_OFF_TTL] ^= 0x01; /* flip a header bit: CRC must catch it (A-02) */
-    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) == A20_FRAME_CRC_MISMATCH,
+    buf[A20_CLX_OFF_TTL] ^=
+        0x01; /* flip a header bit: CRC must catch it (A-02) */
+    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) ==
+           A20_FRAME_CRC_MISMATCH,
        "crc covers header (mal-crc-flip-header-03)");
     buf[A20_CLX_OFF_TTL] ^= 0x01;
 
@@ -509,7 +530,8 @@ static void unit_tests(void)
         buf[A20_CLX_HDR_LEN + 8] = (uint8_t)(crc & 0xFF);
         buf[A20_CLX_HDR_LEN + 9] = (uint8_t)(crc >> 8);
     }
-    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) == A20_FRAME_TXID_ON_SEND,
+    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) ==
+           A20_FRAME_TXID_ON_SEND,
        "txid on SEND (mal-send-txid-01)");
     buf[A20_CLX_OFF_TXID + 3] = 0x00;
 
@@ -520,8 +542,7 @@ static void unit_tests(void)
         buf[A20_CLX_HDR_LEN + 8] = (uint8_t)(crc & 0xFF);
         buf[A20_CLX_HDR_LEN + 9] = (uint8_t)(crc >> 8);
     }
-    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) ==
-           A20_FRAME_OK,
+    ck(a20_frame_decode(buf, (uint32_t)n, 1472, &d, &pl) == A20_FRAME_OK,
        "PING with 8-byte payload decodes (fixed len satisfied)");
     /* PING whose header payload_len (7) is self-consistent with the wire
      * (32+7+2 = 41 bytes received) but violates the §2 fixed column.  The
@@ -563,11 +584,13 @@ static void unit_tests(void)
        "csum_kind=0 frame decodes");
     ck(a20_frame_decode(buf, (uint32_t)n + 1, 1472, &d, &pl) ==
            A20_FRAME_PAYLOAD_LEN_MISMATCH,
-       "trailing byte with csum_kind=0 is length mismatch (mal-len-crc-missing-01)");
+       "trailing byte with csum_kind=0 is length mismatch "
+       "(mal-len-crc-missing-01)");
     h.csum_kind = A20_CLX_CSUM_CCITT;
 
     /* verdict strings are the exact clframe.py constants */
-    ck(strcmp(a20_frame_verdict_str(A20_FRAME_OK), "OK") == 0, "verdict str OK");
+    ck(strcmp(a20_frame_verdict_str(A20_FRAME_OK), "OK") == 0,
+       "verdict str OK");
     ck(strcmp(a20_frame_verdict_str(A20_FRAME_SHORT_FRAME), "short_frame") == 0,
        "verdict str short_frame");
     ck(strcmp(a20_frame_verdict_str(A20_FRAME_FIXED_PAYLOAD_LEN_MISMATCH),
@@ -580,8 +603,8 @@ static void unit_tests(void)
         uint8_t frame[128];
 
         a20_clx_build_hello_payload(node_a, 0, 0, A20_CLX_TIER_DEFAULT,
-                                    A20_CLX_CAP_RELIABLE, 0, 0x0102030405060708ull,
-                                    hello);
+                                    A20_CLX_CAP_RELIABLE, 0,
+                                    0x0102030405060708ull, hello);
         memset(&h, 0, sizeof(h));
         h.type = A20_CLX_TYPE_HELLO;
         h.src_hash = fnv_ref(node_a);
@@ -596,11 +619,32 @@ static void unit_tests(void)
         ck(pl && memcmp(pl, hello, 32) == 0, "HELLO payload intact");
     }
 
+    {
+        uint8_t frame[128];
+        memset(&h, 0, sizeof(h));
+        h.ver = A20_CLX_SESSION_VER;
+        h.type = A20_CLX_TYPE_CALL;
+        h.flags = A20_CLX_FLAG_RELIABLE;
+        h.seq = h.txid = 1;
+        h.ttl = 8;
+        h.csum_kind = A20_CLX_CSUM_CCITT;
+        n = build(frame, sizeof(frame), 1472, &h, NULL);
+        ck(n > 0 && a20_frame_decode(frame, n, 1472, &d, &pl) ==
+                        A20_FRAME_UNSUPPORTED_VER,
+           "v0 gold decoder remains strict about session version");
+        ck(a20_frame_decode_session(frame, n, 1472, &d, &pl) == A20_FRAME_OK,
+           "runtime decoder accepts negotiated session version");
+        ck(a20_frame_forward(frame, n, 1472) == 0 &&
+               a20_frame_decode_session(frame, n, 1472, &d, &pl) ==
+                   A20_FRAME_OK &&
+               d.ttl == 7,
+           "session frame forwarding preserves version and CRC");
+    }
+
     printf("%s: %d checks, %d failures\n", "test_clx_frame", checks, fails);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--selftest") == 0) {
         /* check_c_side.py calls this first: anchors only, no "FAIL" on
          * success, exit 0. */
@@ -616,8 +660,8 @@ int main(int argc, char **argv)
         return run_frame_file(argv[1], mtu);
     }
     if (argc == 2) {
-        fprintf(stderr, "usage: %s <file.hex> <mtu> | %s --selftest\n",
-                argv[0], argv[0]);
+        fprintf(stderr, "usage: %s <file.hex> <mtu> | %s --selftest\n", argv[0],
+                argv[0]);
         return 2;
     }
     unit_tests();

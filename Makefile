@@ -274,6 +274,18 @@ endif
 # Driver deployment depends on the selected architecture and board.
 include tools/driver-deployment.mk
 
+# One protocol, profile-selected resource budgets. MCU firmware keeps the
+# single-transaction budget; hosted kernels may select any bounded tier.
+CLUSTER_PROFILE ?= $(if $(filter mcu,$(PROFILE)),1,2)
+ifeq ($(filter 1 2 3,$(CLUSTER_PROFILE)),)
+$(error CLUSTER_PROFILE=$(CLUSTER_PROFILE) is invalid; use 1, 2 or 3)
+endif
+ifeq ($(PROFILE),mcu)
+ifneq ($(CLUSTER_PROFILE),1)
+$(error MCU firmware requires CLUSTER_PROFILE=1)
+endif
+endif
+
 NOMMU ?= 0
 NOMMU_SUPPORTED_ARCHES := $(TRIM_CAP_NOMMU_ARCHES)
 
@@ -431,7 +443,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -523,6 +535,12 @@ NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
 NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
+NATIVE_CLUSTER_AGENT_BIN := $(NATIVE_BUILD_DIR)/cluster-agent-$(NATIVE_TAG)
+NATIVE_CLUSTER_PROBE_BIN := $(NATIVE_BUILD_DIR)/cluster-task-probe-$(NATIVE_TAG)
+NATIVE_CLUSTER_HANG_BIN := $(NATIVE_BUILD_DIR)/cluster-hang-probe-$(NATIVE_TAG)
+NATIVE_CLUSTER_MESH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-mesh-$(NATIVE_TAG)
+NATIVE_JOBD_BIN := $(NATIVE_BUILD_DIR)/jobd-$(NATIVE_TAG)
+NATIVE_CLUSTERD_BIN := $(NATIVE_BUILD_DIR)/clusterd-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
@@ -537,7 +555,9 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
-                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN)
+                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
+                          $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
+                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.
@@ -1014,6 +1034,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
          -DCONFIG_NET_LANES=$(NET_LANES) \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
+         -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror

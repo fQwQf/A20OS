@@ -19,57 +19,84 @@
  */
 #include "cluster/frame.h"
 
+int a20_frame_forward(uint8_t *buf, uint32_t len, uint32_t outgoing_mtu) {
+    a20_frame_hdr_t h;
+    const uint8_t *payload;
+    if (!buf || len > outgoing_mtu ||
+        a20_frame_decode_session(buf, len, outgoing_mtu, &h, &payload) !=
+            A20_FRAME_OK ||
+        h.ttl <= 1)
+        return -1;
+    buf[A20_CLX_OFF_TTL]--;
+    if (h.crc_present)
+        a20_clx_put_le16(
+            buf + A20_CLX_HDR_LEN + h.payload_len,
+            a20_clx_crc16_ccitt(buf, A20_CLX_HDR_LEN + h.payload_len));
+    return 0;
+}
+
 /* 02 §2 payload column; -1 variable, -2 unknown.  Values from the table:
  * HELLO/HELLO_ACK 32 (§6), PING/PONG 8 (§2), CLOSE 0, ACK/NACK 4,
  * ERROR 8 (4B errno + 4B orig_txid), SEND/CALL/CALL_REPLY variable. */
-int a20_frame_fixed_payload_len(uint8_t type)
-{
+int a20_frame_fixed_payload_len(uint8_t type) {
     switch (type) {
-    case A20_CLX_TYPE_HELLO:
-    case A20_CLX_TYPE_HELLO_ACK:
-        return 32;
-    case A20_CLX_TYPE_PING:
-    case A20_CLX_TYPE_PONG:
-        return 8;
-    case A20_CLX_TYPE_SEND:
-    case A20_CLX_TYPE_CALL:
-    case A20_CLX_TYPE_CALL_REPLY:
-        return -1;
-    case A20_CLX_TYPE_CLOSE:
-        return 0;
-    case A20_CLX_TYPE_ACK:
-    case A20_CLX_TYPE_NACK:
-        return 4;
-    case A20_CLX_TYPE_ERROR:
-        return 8;
-    default:
-        return -2;
+        case A20_CLX_TYPE_HELLO:
+        case A20_CLX_TYPE_HELLO_ACK:
+            return 32;
+        case A20_CLX_TYPE_PING:
+        case A20_CLX_TYPE_PONG:
+            return 8;
+        case A20_CLX_TYPE_SEND:
+        case A20_CLX_TYPE_CALL:
+        case A20_CLX_TYPE_CALL_REPLY:
+            return -1;
+        case A20_CLX_TYPE_CLOSE:
+            return 0;
+        case A20_CLX_TYPE_ACK:
+        case A20_CLX_TYPE_NACK:
+            return 4;
+        case A20_CLX_TYPE_ERROR:
+            return 8;
+        default:
+            return -2;
     }
 }
 
-const char *a20_frame_verdict_str(int verdict)
-{
+const char *a20_frame_verdict_str(int verdict) {
     switch (verdict) {
-    case A20_FRAME_OK:                          return "OK";
-    case A20_FRAME_SHORT_FRAME:                 return "short_frame";
-    case A20_FRAME_BAD_MAGIC:                   return "bad_magic";
-    case A20_FRAME_UNSUPPORTED_VER:             return "unsupported_ver";
-    case A20_FRAME_UNKNOWN_TYPE:                return "unknown_type";
-    case A20_FRAME_UNSUPPORTED_CSUM_KIND:       return "unsupported_csum_kind";
-    case A20_FRAME_PAYLOAD_OVER_MTU:            return "payload_len_over_mtu";
-    case A20_FRAME_PAYLOAD_LEN_MISMATCH:        return "payload_len_mismatch";
-    case A20_FRAME_CRC_MISMATCH:                return "crc_mismatch";
-    case A20_FRAME_FRAG_FLAG_MISMATCH:          return "frag_flag_mismatch";
-    case A20_FRAME_SEQ_ON_UNRELIABLE:           return "seq_on_unreliable_frame";
-    case A20_FRAME_TXID_ON_SEND:                return "txid_on_send";
-    case A20_FRAME_FIXED_PAYLOAD_LEN_MISMATCH:  return "fixed_payload_len_mismatch";
-    default:                                    return "unknown_verdict";
+        case A20_FRAME_OK:
+            return "OK";
+        case A20_FRAME_SHORT_FRAME:
+            return "short_frame";
+        case A20_FRAME_BAD_MAGIC:
+            return "bad_magic";
+        case A20_FRAME_UNSUPPORTED_VER:
+            return "unsupported_ver";
+        case A20_FRAME_UNKNOWN_TYPE:
+            return "unknown_type";
+        case A20_FRAME_UNSUPPORTED_CSUM_KIND:
+            return "unsupported_csum_kind";
+        case A20_FRAME_PAYLOAD_OVER_MTU:
+            return "payload_len_over_mtu";
+        case A20_FRAME_PAYLOAD_LEN_MISMATCH:
+            return "payload_len_mismatch";
+        case A20_FRAME_CRC_MISMATCH:
+            return "crc_mismatch";
+        case A20_FRAME_FRAG_FLAG_MISMATCH:
+            return "frag_flag_mismatch";
+        case A20_FRAME_SEQ_ON_UNRELIABLE:
+            return "seq_on_unreliable_frame";
+        case A20_FRAME_TXID_ON_SEND:
+            return "txid_on_send";
+        case A20_FRAME_FIXED_PAYLOAD_LEN_MISMATCH:
+            return "fixed_payload_len_mismatch";
+        default:
+            return "unknown_verdict";
     }
 }
 
 int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
-                     const a20_frame_hdr_t *h, const uint8_t *payload)
-{
+                     const a20_frame_hdr_t *h, const uint8_t *payload) {
     uint32_t crc_len, len, i;
     uint16_t crc;
 
@@ -113,16 +140,18 @@ int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
         buf[A20_CLX_HDR_LEN + i] = payload[i];
 
     if (crc_len) {
-        crc = a20_clx_crc16_ccitt(buf, A20_CLX_HDR_LEN + (uint32_t)h->payload_len);
+        crc = a20_clx_crc16_ccitt(buf,
+                                  A20_CLX_HDR_LEN + (uint32_t)h->payload_len);
         a20_clx_put_le16(buf + A20_CLX_HDR_LEN + (uint32_t)h->payload_len, crc);
     }
     return (int)len;
 }
 
-a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
-                                     uint32_t mtu, a20_frame_hdr_t *out,
-                                     const uint8_t **payload)
-{
+static a20_frame_verdict_t frame_decode_version(const uint8_t *buf,
+                                                uint32_t len, uint32_t mtu,
+                                                a20_frame_hdr_t *out,
+                                                const uint8_t **payload,
+                                                uint8_t maximum) {
     uint32_t crc_len, want_len;
     uint16_t crc_rx, crc_calc;
     int fixed;
@@ -139,24 +168,24 @@ a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
 
     /* Fields are readable from here on for every later verdict (the
      * runner prints the header even for rejects past the length check). */
-    out->ver         = buf[A20_CLX_OFF_VER];
-    out->type        = buf[A20_CLX_OFF_TYPE];
-    out->flags       = a20_clx_get_le16(buf + A20_CLX_OFF_FLAGS);
-    out->frag        = a20_clx_get_le16(buf + A20_CLX_OFF_FRAG);
-    out->txid        = a20_clx_get_le32(buf + A20_CLX_OFF_TXID);
-    out->src_hash    = a20_clx_get_le32(buf + A20_CLX_OFF_SRC_HASH);
-    out->dst_hash    = a20_clx_get_le32(buf + A20_CLX_OFF_DST_HASH);
-    out->dst_slot    = a20_clx_get_le32(buf + A20_CLX_OFF_DST_SLOT);
-    out->seq         = a20_clx_get_le32(buf + A20_CLX_OFF_SEQ);
+    out->ver = buf[A20_CLX_OFF_VER];
+    out->type = buf[A20_CLX_OFF_TYPE];
+    out->flags = a20_clx_get_le16(buf + A20_CLX_OFF_FLAGS);
+    out->frag = a20_clx_get_le16(buf + A20_CLX_OFF_FRAG);
+    out->txid = a20_clx_get_le32(buf + A20_CLX_OFF_TXID);
+    out->src_hash = a20_clx_get_le32(buf + A20_CLX_OFF_SRC_HASH);
+    out->dst_hash = a20_clx_get_le32(buf + A20_CLX_OFF_DST_HASH);
+    out->dst_slot = a20_clx_get_le32(buf + A20_CLX_OFF_DST_SLOT);
+    out->seq = a20_clx_get_le32(buf + A20_CLX_OFF_SEQ);
     out->payload_len = a20_clx_get_le16(buf + A20_CLX_OFF_PAYLOAD_LEN);
-    out->ttl         = buf[A20_CLX_OFF_TTL];
-    out->csum_kind   = buf[A20_CLX_OFF_CSUM_KIND];
+    out->ttl = buf[A20_CLX_OFF_TTL];
+    out->csum_kind = buf[A20_CLX_OFF_CSUM_KIND];
 
     if (a20_clx_get_le16(buf + A20_CLX_OFF_MAGIC) != A20_CLX_MAGIC)
         return A20_FRAME_BAD_MAGIC;
     /* 02 §1: version mismatch drops the frame; a higher ver is negotiated
      * in the HELLO phase, data frames are dropped silently. */
-    if (out->ver != (uint8_t)A20_CLX_WIRE_VER)
+    if (out->ver > maximum)
         return A20_FRAME_UNSUPPORTED_VER;
     if (out->type < A20_CLX_TYPE_HELLO || out->type > A20_CLX_TYPE_ERROR)
         return A20_FRAME_UNKNOWN_TYPE;
@@ -184,7 +213,7 @@ a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
         crc_rx = a20_clx_get_le16(buf + A20_CLX_HDR_LEN +
                                   (uint32_t)out->payload_len);
         crc_calc = a20_clx_crc16_ccitt(buf, A20_CLX_HDR_LEN +
-                                               (uint32_t)out->payload_len);
+                                                (uint32_t)out->payload_len);
         out->crc_value = crc_rx;
         if (crc_rx != crc_calc)
             return A20_FRAME_CRC_MISMATCH;
@@ -213,4 +242,17 @@ a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
         return A20_FRAME_FIXED_PAYLOAD_LEN_MISMATCH;
 
     return A20_FRAME_OK;
+}
+
+a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
+                                     uint32_t mtu, a20_frame_hdr_t *out,
+                                     const uint8_t **payload) {
+    return frame_decode_version(buf, len, mtu, out, payload, A20_CLX_WIRE_VER);
+}
+
+a20_frame_verdict_t a20_frame_decode_session(const uint8_t *buf, uint32_t len,
+                                             uint32_t mtu, a20_frame_hdr_t *out,
+                                             const uint8_t **payload) {
+    return frame_decode_version(buf, len, mtu, out, payload,
+                                A20_CLX_SESSION_VER);
 }

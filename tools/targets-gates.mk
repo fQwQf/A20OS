@@ -96,6 +96,22 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
+# The MCU protocol harness uses architecture type definitions but executes
+# no target assembly. The generic host rule lacks this include directory.
+$(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include \
+		-Ikernel/include -Ikernel $< -o $@
+
+.PHONY: check-cluster-unit check-cluster-udp check-cluster-loopback check-cluster-reliable
+check-cluster-unit:
+	@$(PYTHON) tools/check-cluster-unit.py
+
+check-cluster-udp:
+	@$(PYTHON) tools/check-cluster-udp.py
+
+check-cluster-loopback:
+	@$(PYTHON) tools/check-cluster-loopback.py
+
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
 # host port supplies only the architecture types and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
@@ -297,3 +313,14 @@ ifeq ($(CLANG_FORMAT),)
 else
 	@$(PYTHON) tools/clang_format_gate.py --clang-format "$(CLANG_FORMAT)" --write
 endif
+
+check-cluster-reliable:
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --log-dir .kernel-build/cluster/reliable
+
+.PHONY: check-cluster-mesh
+check-cluster-mesh:
+	$(PYTHON) tools/check-cluster-mesh.py
+
+.PHONY: check-cluster-fuzz
+check-cluster-fuzz:
+	$(PYTHON) tools/check-cluster-fuzz.py

@@ -89,7 +89,7 @@ NATIVE_LIBC_SRC  := \
 # instead: over-declaring is the safe direction for a correctness net, and
 # $(wildcard) yields an empty list for an absent directory rather than a
 # literal unexpanded path.
-NATIVE_SDK_HDRS := $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+NATIVE_SDK_HDRS := $(wildcard kernel/include/uapi/a20/cluster*.h) $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
 
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
@@ -480,6 +480,35 @@ $(NATIVE_CLUSTER_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC
 	$(call NATIVE_CLUSTER_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-cluster-arch: $(NATIVE_CLUSTER_BIN)
+
+define NATIVE_CLUSTER_APP_RECIPE
+@mkdir -p $(dir $(2))
+$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) \
+    -Iuser -Iuser/liba20rt -T$(NATIVE_LD) $(NATIVE_CRT0) \
+    $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    $(1) $(NATIVE_LIBS) -o $(2)
+endef
+
+$(NATIVE_CLUSTER_AGENT_BIN): user/svc/cluster_agent.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_agent.c,$@)
+
+$(NATIVE_CLUSTER_PROBE_BIN): user/svc/cluster_task_probe.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_task_probe.c,$@)
+
+.PHONY: native-cluster-agent
+native-cluster-agent: $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN)
+
+$(NATIVE_CLUSTER_MESH_BIN): user/tests/test_native_cluster_mesh.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_mesh.c,$@)
+
+$(NATIVE_JOBD_BIN): user/svc/jobd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/jobd.c,$@)
+
+$(NATIVE_CLUSTERD_BIN): user/svc/clusterd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/clusterd.c,$@)
+
+$(NATIVE_CLUSTER_HANG_BIN): user/svc/cluster_hang_probe.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_hang_probe.c,$@)
 
 native-cluster-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-cluster-arch

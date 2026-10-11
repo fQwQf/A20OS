@@ -1117,7 +1117,8 @@ typedef struct a20_node_id {
 /* cluster_export flags. */
 #define A20_EXPORT_REPLACE      (1u << 0)
 #define A20_EXPORT_LOCAL_ONLY   (1u << 1)
-#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY)
+#define A20_EXPORT_WORK         (1u << 2) /* service speaks CW/1 */
+#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY | A20_EXPORT_WORK)
 
 /* cluster_connect flags. */
 #define A20_CONNECT_RELIABLE    (1u << 0)
@@ -1180,6 +1181,12 @@ typedef struct a20_cluster_connect_args {
     uint32_t       timeout_ms;    /* 0 = 5000 default */
     uint32_t       reserved;      /* must be zero */
 } a20_cluster_connect_args_t;
+
+/* Version 2 appends a mandatory expected boot epoch. Version 1 is unchanged. */
+typedef struct a20_cluster_connect_args_v2 {
+    a20_cluster_connect_args_t base;
+    uint64_t expected_boot_epoch;
+} a20_cluster_connect_args_v2_t;
 
 typedef struct a20_cluster_route_args {
     uint32_t       size;

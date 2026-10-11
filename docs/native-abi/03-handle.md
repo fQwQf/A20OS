@@ -536,6 +536,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0523 | `cluster_route` | `int64_t cluster_route(a20_cluster_route_args_t *args)` | 注入/更新/删除路由表项，需 `A20_RIGHT_CLUSTER_ADMIN` |
 | 0x0524 | `cluster_event_subscribe` | `int64_t cluster_event_subscribe(a20_cluster_event_subscribe_args_t *args)` | 订阅链路/路由/导出事件，返回 EventQ 句柄 |
 | 0x0525 | `cluster_link_status` | `int64_t cluster_link_status(a20_cluster_link_status_args_t *args)` | 查询链路状态、RTT 与收发计数器 |
+| 0x0526 | `cluster_snapshot` | `int64_t cluster_snapshot(a20_cluster_snapshot_args_t *args)` | 只读枚举当前身份、资源档、路由和导出服务；代数变化时重新枚举，支持控制面重启恢复 |
 
 ### Network (0x0600)
 
@@ -662,4 +663,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
 
-总计：153 个 syscall（`syscall_table.def` 当前登记数）。
+总计：154 个 syscall（`syscall_table.def` 当前登记数）。

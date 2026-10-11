@@ -32,6 +32,8 @@
  */
 
 #include "cluster/uart.h"
+#include "cluster/operator.h"
+#include "uapi/a20/cluster_work.h"
 
 /* ------------------------------------------------------------------ */
 /* Built-in demo operator: u32 vector dot product.                     */
@@ -53,11 +55,21 @@
 /* (4 + 8n <= 222 = MTU - 32 - 2).                                     */
 /* ------------------------------------------------------------------ */
 
-#define A20_MCU_LEAF_OP_DOT_SLOT 1u /* slot 0 is reserved (01-abi) */
+#define A20_MCU_LEAF_OP_DOT_SLOT A20_CLX_OPERATOR_DOT
+#define A20_MCU_LEAF_WORK_SLOT 2u
+
+/* Install a static-lifetime operator registry before the first handshake.
+ * The leaf permits one admission, <=140 input bytes, <=168 output bytes,
+ * and <=30 s cooperative execution. Process tasks require a hosted agent. */
+int a20_mcu_leaf_set_agent(const a20_work_agent_t *agent);
+
+/* Production board provisioning: stable unique identity and a nonzero boot
+ * epoch that never repeats for this identity. Refuse changes while linked. */
+int a20_mcu_leaf_configure(const uint8_t node_id[16], uint64_t boot_epoch);
 
 /* Leaf link state, 04 §4: exactly two states. */
 #define A20_MCU_LEAF_DISCONNECTED 0u
-#define A20_MCU_LEAF_UP           1u
+#define A20_MCU_LEAF_UP 1u
 
 /*
  * Wire the leaf into the board bring-up: resets the protocol state, installs
