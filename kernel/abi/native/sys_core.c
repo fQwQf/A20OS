@@ -460,6 +460,9 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     if (copy_from_user(&kargs, uargs, copy_size) < 0)
         return -A20_ERR_FAULT;
     kargs.version = hdr[1];
+    if ((kargs.flags & ~A20_SPAWN_PARENT_BOUND) ||
+        (kargs.version == 2 && kargs.reserved))
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -493,7 +496,8 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     memset(&info, 0, sizeof(info));
     r = elf_load(img_fd, path_buf, &info);
     fdtable_close_current(img_fd);
-    a20_object_release(img_entry.object, img_entry.type);
+    /* fdtable_close_current already released the consumed lookup reference.
+     * The original image handle must remain usable for another spawn. */
 
     if (r < 0) return -A20_ERR_IO;
     if (!info.is_native_abi) {
@@ -556,6 +560,11 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     if (!new_task) return -A20_ERR_NO_MEMORY;
 
     new_task->abi_mode = 1;
+    if (kargs.flags & A20_SPAWN_PARENT_BOUND) {
+        uint64_t flags = spin_lock_irqsave(&new_task->park_lock);
+        new_task->pdeathsig = 9;
+        spin_unlock_irqrestore(&new_task->park_lock, flags);
+    }
 
     struct a20_ht_internal *new_ht = a20_ht_create();
     if (!new_ht) {

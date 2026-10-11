@@ -554,6 +554,8 @@ NATIVE_CLUSTER_PROBE_BIN := $(NATIVE_BUILD_DIR)/cluster-task-probe-$(NATIVE_TAG)
 NATIVE_CLUSTER_HANG_BIN := $(NATIVE_BUILD_DIR)/cluster-hang-probe-$(NATIVE_TAG)
 NATIVE_CLUSTER_MESH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-mesh-$(NATIVE_TAG)
 NATIVE_JOBD_BIN := $(NATIVE_BUILD_DIR)/jobd-$(NATIVE_TAG)
+NATIVE_CLUSTER_SUPERVISOR_BIN := $(NATIVE_BUILD_DIR)/cluster-supervisor-$(NATIVE_TAG)
+NATIVE_CLUSTER_SUPERVISOR_TEST_BIN := $(NATIVE_BUILD_DIR)/native-cluster-supervisor-$(NATIVE_TAG)
 NATIVE_CLUSTERD_BIN := $(NATIVE_BUILD_DIR)/clusterd-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
@@ -571,7 +573,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
                           $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
-                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN)
+                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.

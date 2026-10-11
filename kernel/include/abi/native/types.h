@@ -269,6 +269,9 @@ typedef struct a20_spawn_handle {
 
 /* ---- Task structures ---- */
 
+/* Kill this child when its spawning parent exits. */
+#define A20_SPAWN_PARENT_BOUND (1u << 0)
+
 typedef struct a20_task_spawn_args {
     uint32_t       size;
     uint32_t       version;        /* 1 = base layout; 2 = adds the stdio fields */

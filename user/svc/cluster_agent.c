@@ -14,6 +14,7 @@ static uint32_t run_process(void *ctx, const a20_work_request_t *request,
     uint64_t started = a20_agent_clock_ms(0);
     a20_task_spawn_args_t spawn = {0};
     spawn.image = process_image;
+    spawn.flags = A20_SPAWN_PARENT_BOUND;
     spawn.root_dir = spawn.cwd_dir = spawn.event_queue = A20_HANDLE_NULL;
     if (a20_task_spawn(&spawn) < 0)
         return A20_WORK_FAILED;

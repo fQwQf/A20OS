@@ -686,3 +686,9 @@ native-chess-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-chess-arch
 
 native-chess-all: native-chess-rv native-chess-la native-chess-aarch64 native-chess-x86_64 native-chess-arm32 native-chess-rv32 native-chess-ppc64le
+
+$(NATIVE_CLUSTER_SUPERVISOR_BIN): user/svc/cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_supervisor.c,$@)
+
+$(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN): user/tests/test_native_cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_supervisor.c,$@)

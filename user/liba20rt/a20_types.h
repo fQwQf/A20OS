@@ -456,6 +456,9 @@ typedef struct a20_spawn_handle {
  * Task / Thread structures (kernel/include/abi/native/types.h)
  * ======================================================================== */
 
+/* Kill this child when its spawning parent exits. */
+#define A20_SPAWN_PARENT_BOUND (1u << 0)
+
 typedef struct a20_task_spawn_args {
     uint32_t       size;
     uint32_t       version;

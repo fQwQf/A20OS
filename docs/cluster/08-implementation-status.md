@@ -61,7 +61,7 @@ ARM 固件构建使用隔离提取的 Debian `gcc-arm-none-eabi` 与 `binutils-a
 | G1 基础数据面 | 协议和独立内核路径已验证 | STM32 持久配置已接入；x86 COM2 头节点绑定已接入；UDP→UART 独立双内核网关已通过；仍缺物理持久写入与硬件网关联调 |
 | G2 可靠事务 | 单帧直连与主要故障已验证 | UART 双向会话确认已通过；协商分片和 64 KiB 业务负载已通过；间接目的双向会话与路径 MTU 已通过；仍需多跳分片和更多网关故障场景 |
 | G3 统一服务 | 工作协议、能力查询、注册表与实际 Native agent 已验证 | 物理 MCU/服务器混合联调；专用串口固件已接入 |
-| G4 动态集群 | 成员/间接探测、租约、any 与 Native clusterd 已实现；本机恢复测试通过 | 三独立内核故障验证通过；gossip/自动租约路由已通过 UDP→UART 独立内核验证；配置监管仍未完成 |
+| G4 动态集群 | 成员/间接探测、租约、any 与 Native clusterd 已实现；本机恢复测试通过 | 三独立内核故障验证通过；gossip/自动租约路由已通过 UDP→UART 独立内核验证；持久配置与 Native 服务监管已通过；仍需物理部署与更复杂拓扑验证 |
 | G5 分布式作业 | 共享图调度、重派、去重、二叉树和 jobd 已实现；UART/主机仿真混合树及 Native jobd 通过 | 物理混合部署、通用结果/词频演示及完整故障矩阵 |
 | G6 硬化 | 正在补充可复现门禁 | 有界 fuzz 和资源档构建已通过；Native 运行资源快照与 UART 延迟记录已接入；10000 次 COM2 连续调用及任务资源回收已通过 |
 
@@ -132,3 +132,13 @@ upsert、用户替换后旧清理不能误删。共享传播策略测试覆盖�
 split horizon 和租约。Native 外层增量构建原来漏跟踪 UAPI 头文件，现已补齐，
 头文件单独更新触发重编译的回归通过。详见
 [16-gossip-routes.md](16-gossip-routes.md)。
+
+
+## 11. 持久配置与服务监管
+
+配置解析、三服务独立退避、singleton、子进程回收和 owner 强杀清理已接入；
+Native 磁盘配置 smoke 实际启动 agent/clusterd/jobd 并完成 DOT 调用，覆盖崩溃
+重启、配置恢复、正常停止和强杀恢复。共享解析器 10 万次变异通过 ASan/UBSan。
+Native spawn 可执行文件重复释放引用的缺陷一并修复。协议和部署契约见
+[17-deployment-supervision.md](17-deployment-supervision.md)。外层启动/监管者重启
+由系统 init 或操作者负责；不声称已自动修改各平台启动策略。
