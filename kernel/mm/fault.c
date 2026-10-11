@@ -1319,6 +1319,10 @@ int handle_cow_fault(task_t *t, uint64_t stval)
      * address space's leaf.  Keep them in the same per-mm transaction so the
      * fallback's in-place rc==1 upgrade cannot race a status-led replacement.
      * Its allocation is non-reclaiming, so this lock does not enter reclaim. */
+    /* Fork publishes read-only PTEs before its shootdown completes. A COW
+     * copy must wait for that transaction: a sibling still using a writable
+     * TLB entry could otherwise update the old frame after we copied it. */
+    mutex_lock(&mm->tlb_lock);
     spin_lock(&mm->lock);
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
     /* Prefer the status-led private-anon copy; it uses a cursor and compare-
@@ -1333,6 +1337,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
             frame_put(status_old_pfn);
             frame_put(status_old_pfn);
         }
+        mutex_unlock(&mm->tlb_lock);
         return 0;
     }
 #endif
@@ -1356,6 +1361,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
         __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     }
+    mutex_unlock(&mm->tlb_lock);
     return r;
 #endif
 }
@@ -1723,6 +1729,8 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
     pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
     int allowed = pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
                   (*pte & PTE_U);
+    int retry_cow = allowed && access == MM_FAULT_ACCESS_WRITE &&
+                    (*pte & PTE_COW);
     if (allowed) {
         if (access == MM_FAULT_ACCESS_WRITE)
             allowed = (*pte & PTE_W) != 0;
@@ -1751,10 +1759,12 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
      * the correct one: a clean SIGSEGV naming a mapping the process was never
      * allowed to execute.
      */
-    if (allowed) {
+    if (allowed || retry_cow) {
         mm_seg_t *vma = mm_seg_find(mm, stval);
-        if (vma && !fault_access_allowed(vma->vm_flags, access))
+        if (vma && !fault_access_allowed(vma->vm_flags, access)) {
             allowed = 0;
+            retry_cow = 0;
+        }
     }
 
     /*
@@ -1766,6 +1776,11 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
         *pte |= PTE_A;
     spin_unlock(&mm->lock);
 
+    /* A concurrent fork can write-protect a leaf between the initial COW
+     * attempt and demand-fault recheck. Resolve that new COW state rather
+     * than rejecting a write the VMA permits. */
+    if (retry_cow)
+        return handle_cow_fault(t, stval);
     if (!allowed)
         return -1;
 

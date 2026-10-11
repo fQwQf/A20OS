@@ -15,3 +15,27 @@ fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子�
 RV64 内核态 trap 入口在分配 trap frame 后，需要先保存原始 `t0`，再借用它重建陷入前的 `sp`。通用寄存器保存循环跳过已单独保存的 `x5/t0`。此前循环把临时计算出的旧 `sp` 写进了 `t0` 槽，导致 timer IRQ 返回后被打断的内核代码拿到错误的 `t0`；context switch 路径中 `t0` 可暂存地址空间状态，错误恢复会扰乱后续控制流或页表切换。
 
 `make smoke-rv64-trap-t0` 通过 `a20.trap_t0_selftest=1` 在 RV64 单核 guest 中运行哨兵测试。测试在 `t0` 持有固定值时等待本 CPU 的 supervisor timer IRQ，并要求中断处理程序确认 IRQ 确已发生且汇编探针返回时哨兵未变；超时、未收到本 CPU 的 IRQ 或寄存器值变化都会失败。MM 修复后的回归还应运行 `make -j8 smoke-mm-pt-race`、`make -j8 smoke-mm-fork-exec-race` 和 `make -j8 smoke-mm-stress`。
+
+## fork 写保护与 TLB 完成边界
+
+页表叶锁只保护 PTE，不能阻止另一 CPU 继续使用旧的可写 TLB。fork 释放
+地址空间锁后、远端 shootdown 完成前，COW 若提前复制旧帧，父进程其他线程
+随后写入旧帧的内容就会丢失。COW 现在先取得该地址空间的 `tlb_lock`，等待
+先前事务完成，再取得 `mm->lock`；复制、shootdown 和旧帧释放都在这一边界内。
+
+缺页处理的第一次 COW 检查与最后的 present 检查之间也可能发生 fork。最后
+检查若见到 VMA 允许写入的 COW 叶，会重新执行 COW，避免把有效写入报告为
+SIGSEGV。批量 TLB 完成路径则固定当前 CPU，直到本地刷新与各 CPU generation
+记账完成；释放延迟帧前恢复抢占。
+
+`vm_fault_test` 新增三个线程持续原子递增、主线程执行 64 次 fork 的检查。
+旧内核记录 `actual=26810828 expected=26812229`；修复后的完整 x86_64 smoke
+记录 `actual=13837809 expected=13837809`，其余 MM、信号、GS、eventfd、SCM
+和 socket 检查通过，关机审计为 0。宿主确定性交错检查运行命令为：
+
+```sh
+python3 tools/tests/test_tlb_transaction_races.py
+```
+
+本机原始日志保存在 `build/browser-followup/cow-race-negative-guest.log` 与
+`cow2-full-guest.log`，不纳入源码提交。

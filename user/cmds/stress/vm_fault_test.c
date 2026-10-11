@@ -171,8 +171,64 @@ static int sparse_unmap_probe(void) {
     printf("VM_FAULT: sparse-unmap %s ms=%ld\n", failed ? "FAIL" : "PASS", ms);
     return failed;
 }
+/* Parent writes may race fork, but fork must never erase those writes. */
+#define COW_COUNTERS 4096
+static uint32_t *cow_counters;
+static struct {
+    unsigned stop;
+    uint64_t iterations[3];
+} *cow_control;
+static void *cow_counter_worker(void *arg) {
+    unsigned id = (uintptr_t)arg;
+    uint64_t n = 0;
+    while (!__atomic_load_n(&cow_control->stop, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&cow_counters[n % COW_COUNTERS], 1, __ATOMIC_RELAXED);
+        n++;
+    }
+    cow_control->iterations[id] = n;
+    return NULL;
+}
+static int fork_write_probe(void) {
+    cow_counters = mmap(NULL, COW_COUNTERS * sizeof(*cow_counters),
+                        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    cow_control = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (cow_counters == MAP_FAILED || cow_control == MAP_FAILED)
+        return 1;
+    pthread_t threads[3];
+    for (uintptr_t i = 0; i < 3; i++)
+        if (pthread_create(&threads[i], NULL, cow_counter_worker, (void *)i))
+            return 1;
+    int failed = 0;
+    for (unsigned i = 0; i < 64; i++) {
+        pid_t child = fork();
+        if (!child)
+            _exit(0);
+        int status;
+        if (child < 0 || waitpid(child, &status, 0) != child || status != 0) {
+            failed = 1;
+            break;
+        }
+    }
+    __atomic_store_n(&cow_control->stop, 1, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < 3; i++)
+        pthread_join(threads[i], NULL);
+    uint64_t actual = 0, expected = 0;
+    for (unsigned i = 0; i < COW_COUNTERS; i++)
+        actual += cow_counters[i];
+    for (unsigned i = 0; i < 3; i++)
+        expected += cow_control->iterations[i];
+    failed |= actual != expected;
+    printf("VM_FAULT: fork-writes %s actual=%llu expected=%llu\n",
+           failed ? "FAIL" : "PASS", (unsigned long long)actual,
+           (unsigned long long)expected);
+    munmap(cow_counters, COW_COUNTERS * sizeof(*cow_counters));
+    munmap(cow_control, 4096);
+    return failed;
+}
 int main(void) {
     int failed = sparse_unmap_probe();
+    failed |= fork_write_probe();
     failed |= signal_probe();
     failed |= cow_copy_probe();
     failed |= futex_cow_probe();
