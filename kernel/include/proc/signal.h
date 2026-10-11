@@ -42,6 +42,11 @@ typedef struct sigaction {
 #define CLD_KILLED     2
 
 /* Per-process signal state */
+typedef struct signal_pending_info {
+    uint8_t has_info[NSIG];
+    uint8_t info[NSIG][SIGNAL_INFO_SIZE];
+} signal_pending_info_t;
+
 typedef struct signal_state {
     refcount_t refcount;
     /*
@@ -95,6 +100,9 @@ int  signal_send_task(void *task, int signum);
 int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
+int  signal_send_thread_info(int tid, int signum, const void *info, size_t size);
+/* Caller holds signals->lock; consumes only one scope, thread before process. */
+int signal_take_pending_info_locked(void *task, int sig, void *out, size_t size);
 int  signal_send_thread_user(int tid, int signum);
 
 /* Copy the siginfo queued for `signum` into `out` (ptrace GETSIGINFO

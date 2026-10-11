@@ -11,58 +11,13 @@
 #include "proc/coredump.h"
 #include "proc/debug.h"
 #include "mm/mm.h"
+#include "mm/slab.h"
 #include "mm/vm.h"
 #include "ipc/ipc.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "sys/usercopy.h"
-
-/*
- * Make the page containing @addr executable so the signal trampoline
- * can run.  This is needed because user-allocated stacks (e.g. via
- * malloc in clone02) lack VM_EXEC, and the sigreturn trampoline is
- * placed on the stack.  We upgrade PTE flags by unmapping and
- * remapping with execute permissions added.
- */
-static void signal_make_page_exec(uint64_t addr) {
-    task_t *t = proc_current();
-#ifdef CONFIG_NOMMU
-    /* There is nothing to upgrade: with no page tables, the boot-time flat
-     * identity map is the only source of permissions, and its descriptors leave
-     * XN clear, so every page the frame allocator hands a process is already
-     * executable.  The PTE rewrite below could not be performed even in
-     * principle -- there is no second mapping to rewrite -- so this early return
-     * is the correct result, not a silent failure to reach it. */
-    (void)t;
-    (void)addr;
-#else
-    if (!t || !t->mm || !t->mm->pgdir) return;
-    vaddr_t page = addr & ~(vaddr_t)(PAGE_SIZE - 1);
-    if (user_prepare_write(t, (uint64_t)page) < 0) return;
-    paddr_t pa = pt_translate(t->pgdir, page);
-    if (!pa) return;
-
-    /*
-     * Keep the permissions the VMA already grants and add execute, rather than
-     * substituting the trampoline's own flags.  This page is part of a live
-     * stack: taking the flags from arch_signal_tramp_pte_flags() alone would
-     * drop the write bit on architectures where that constant is R+X (riscv64),
-     * and the process would take a store page fault the first time it stored
-     * through the stack again -- a crash caused by making a page executable.
-     */
-    pte_t flags = arch_signal_tramp_pte_flags();
-    spin_lock(&t->mm->lock);
-    mm_seg_t *vma = mm_seg_find(t->mm, page);
-    if (vma)
-        flags = vma->pte_flags | (flags & PTE_X);
-    spin_unlock(&t->mm->lock);
-
-    pt_unmap(t->mm, page);
-    pt_map(t->pgdir, page, pa, flags);
-    arch_tlb_flush_page(page);
-#endif
-}
 
 __attribute__((weak)) void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame,
                                                      vaddr_t tramp_addr,
@@ -286,14 +241,51 @@ static int signal_action_fatal_locked(task_t *t, signal_state_t *ss,
            signal_default_terminate(signum);
 }
 
+static int signal_peek_pending_info_locked(task_t *t, signal_state_t *ss,
+                                           int sig, void *out, size_t size)
+{
+    const uint8_t *info;
+    if (t->thread_pending & signal_mask_bit(sig)) {
+        signal_pending_info_t *pending = t->thread_signal_info;
+        if (!pending || !pending->has_info[sig]) return -ENOENT;
+        info = pending->info[sig];
+    } else {
+        if (!ss->pending_has_info[sig]) return -ENOENT;
+        info = ss->pending_info[sig];
+    }
+    size_t n = size < SIGNAL_INFO_SIZE ? size : SIGNAL_INFO_SIZE;
+    memcpy(out, info, n);
+    return 0;
+}
+
 static void signal_clear_pending_locked(task_t *t, signal_state_t *ss,
                                         int signum)
 {
     uint64_t bit = signal_mask_bit(signum);
-    ss->pending &= ~bit;
-    t->thread_pending &= ~bit;
-    ss->pending_has_info[signum] = 0;
-    memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
+    if (t->thread_pending & bit) {
+        t->thread_pending &= ~bit;
+        signal_pending_info_t *pending = t->thread_signal_info;
+        if (pending) pending->has_info[signum] = 0;
+    } else {
+        ss->pending &= ~bit;
+        ss->pending_has_info[signum] = 0;
+    }
+}
+
+int signal_take_pending_info_locked(void *task, int sig, void *out, size_t size)
+{
+    task_t *t = task;
+    signal_state_t *ss = t->signals;
+    int ret = signal_peek_pending_info_locked(t, ss, sig, out, size);
+    signal_clear_pending_locked(t, ss, sig);
+    return ret;
+}
+
+/* Generation of a stop/continue cancels both scopes for this task. */
+static void signal_cancel_pending_locked(task_t *t, signal_state_t *ss, int sig)
+{
+    signal_clear_pending_locked(t, ss, sig);
+    signal_clear_pending_locked(t, ss, sig);
 }
 
 static void signal_apply_generation_rules_locked(task_t *t,
@@ -301,12 +293,12 @@ static void signal_apply_generation_rules_locked(task_t *t,
                                                  int signum)
 {
     if (signum == SIGCONT) {
-        signal_clear_pending_locked(t, ss, SIGSTOP);
-        signal_clear_pending_locked(t, ss, SIGTSTP);
-        signal_clear_pending_locked(t, ss, SIGTTIN);
-        signal_clear_pending_locked(t, ss, SIGTTOU);
+        signal_cancel_pending_locked(t, ss, SIGSTOP);
+        signal_cancel_pending_locked(t, ss, SIGTSTP);
+        signal_cancel_pending_locked(t, ss, SIGTTIN);
+        signal_cancel_pending_locked(t, ss, SIGTTOU);
     } else if (signal_default_stop(signum)) {
-        signal_clear_pending_locked(t, ss, SIGCONT);
+        signal_cancel_pending_locked(t, ss, SIGCONT);
     }
 }
 
@@ -344,6 +336,13 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     int sigwait_match = 0;
     int immediate_kernel_exit = 0;
 
+    signal_pending_info_t *candidate = NULL;
+    if (thread_directed && info && info_size &&
+        !__atomic_load_n(&t->thread_signal_info, __ATOMIC_RELAXED)) {
+        candidate = kmalloc(sizeof(*candidate));
+        if (!candidate) return -ENOMEM;
+        memset(candidate, 0, sizeof(*candidate));
+    }
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     signal_apply_generation_rules_locked(t, ss, signum);
     sigaction_t action = ss->actions[signum];
@@ -358,33 +357,47 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
         (action.sa_handler == SIG_IGN ||
          (action.sa_handler == SIG_DFL && signal_default_ignore(signum)))) {
         spin_unlock_irqrestore(&ss->lock, flags);
+        kfree(candidate);
         return 0;
     }
 
     fatal = signal_action_fatal_locked(t, ss, signum);
     immediate_kernel_exit = !is_user && fatal;
 
-    if (info && info_size) {
-        size_t n = info_size > SIGNAL_INFO_SIZE ? SIGNAL_INFO_SIZE : info_size;
-        memcpy(ss->pending_info[signum], info, n);
-        if (n < SIGNAL_INFO_SIZE)
-            memset(ss->pending_info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
-        ss->pending_has_info[signum] = 1;
-    } else {
-        ss->pending_has_info[signum] = 0;
-        memset(ss->pending_info[signum], 0, SIGNAL_INFO_SIZE);
-        *(int *)ss->pending_info[signum] = signum;
-    }
-    if (thread_directed)
+    if (thread_directed) {
+        if (!t->thread_signal_info && candidate) {
+            __atomic_store_n(&t->thread_signal_info, candidate, __ATOMIC_RELEASE);
+            candidate = NULL;
+        }
+        signal_pending_info_t *pending = t->thread_signal_info;
+        /* Standard signals coalesce within a scope; retain the first info. */
+        if (!(t->thread_pending & signal_mask_bit(signum)) && pending) {
+            pending->has_info[signum] = info && info_size;
+            if (info && info_size) {
+                size_t n = info_size < SIGNAL_INFO_SIZE ? info_size : SIGNAL_INFO_SIZE;
+                memcpy(pending->info[signum], info, n);
+                memset(pending->info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
+            }
+        }
         t->thread_pending |= signal_mask_bit(signum);
-    else
+    } else {
+        if (info && info_size) {
+            size_t n = info_size < SIGNAL_INFO_SIZE ? info_size : SIGNAL_INFO_SIZE;
+            memcpy(ss->pending_info[signum], info, n);
+            memset(ss->pending_info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
+            ss->pending_has_info[signum] = 1;
+        } else {
+            ss->pending_has_info[signum] = 0;
+        }
         ss->pending |= signal_mask_bit(signum);
+    }
 
     deliverable = signal_action_deliverable_locked(t, ss, signum);
     sigwait_match = t->sigwait_active &&
                     (t->sigwait_mask & signal_mask_bit(signum));
     spin_unlock_irqrestore(&ss->lock, flags);
 
+    kfree(candidate);
     wait_queue_wake_all(&ss->readiness_waiters, 0, PROC_WAKE_EVENT);
 
     if (immediate_kernel_exit) {
@@ -423,6 +436,15 @@ int signal_send_user(int pid, int signum) {
     return signal_send_info(pid, signum, &si, sizeof(si));
 }
 
+int signal_send_thread_info(int tid, int signum, const void *info, size_t size) {
+    if (signum <= 0 || signum >= NSIG) return -EINVAL;
+    task_t *t = proc_find_get(tid);
+    if (!t) return -ESRCH;
+    int ret = signal_queue_task(t, signum, info, size, 1);
+    proc_put(t);
+    return ret;
+}
+
 int signal_send_thread(int tid, int signum) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find_get(tid);
@@ -451,12 +473,7 @@ int signal_task_get_pending_info(void *task, int signum, void *out,
         return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    int ret = -ENOENT;
-    if (ss->pending_has_info[signum]) {
-        size_t n = size < SIGNAL_INFO_SIZE ? size : SIGNAL_INFO_SIZE;
-        memcpy(out, ss->pending_info[signum], n);
-        ret = 0;
-    }
+    int ret = signal_peek_pending_info_locked(t, ss, signum, out, size);
     spin_unlock_irqrestore(&ss->lock, flags);
     return ret;
 }
@@ -678,6 +695,8 @@ void signal_exec_reset(void *task)
     memset(ss->pending_info, 0, sizeof(ss->pending_info));
     t->sig_handling = 0;
     t->thread_pending = 0;
+    if (t->thread_signal_info)
+        memset(t->thread_signal_info, 0, sizeof(signal_pending_info_t));
     t->sigsuspend_active = 0;
     t->sigwait_active = 0;
     t->sigwait_mask = 0;
@@ -865,9 +884,8 @@ void signal_deliver_user(trap_context_t *ctx) {
         }
 
         arch_siginfo_t queued_info;
-        int has_queued_info = ss->pending_has_info[sig];
-        if (has_queued_info)
-            memcpy(&queued_info, ss->pending_info[sig], sizeof(queued_info));
+        int has_queued_info = signal_peek_pending_info_locked(
+            t, ss, sig, &queued_info, sizeof(queued_info)) == 0;
 
         signal_clear_pending_locked(t, ss, sig);
 
@@ -938,8 +956,9 @@ void signal_deliver_user(trap_context_t *ctx) {
          * trampoline page was already mapped executable at address-space
          * setup and must stay read-only, or SCTLR_EL1.WXN would make it
          * execute-never again. */
-        if (return_addr == tramp_addr)
-            signal_make_page_exec(tramp_addr);
+        if (return_addr == tramp_addr &&
+            mm_make_page_exec(t->mm, tramp_addr) < 0)
+            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
 
         /* x86_64 enters the handler below the 16-aligned frame (see
          * arch_signal_handler_sp); its return address goes at that entry sp

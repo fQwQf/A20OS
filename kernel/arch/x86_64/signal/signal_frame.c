@@ -9,6 +9,13 @@
 /* Fixed per-process user address for the signal return trampoline page. */
 #define X86_64_SIGRET_TRAMP_ADDR  0x700000000000ULL
 
+uint64_t arch_signal_tramp_addr(struct mm_struct *mm, uint64_t stack_tramp_addr)
+{
+    (void)mm;
+    (void)stack_tramp_addr;
+    return X86_64_SIGRET_TRAMP_ADDR;
+}
+
 /*
  * x86_64 uses the normal C calling convention: a signal handler returns with
  * RET, which pops the return address from the top-of-stack word.  We place the
