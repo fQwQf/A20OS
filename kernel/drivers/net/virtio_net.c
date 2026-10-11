@@ -140,11 +140,6 @@ typedef struct {
     uint32_t legacy_desc_off;
     uint32_t legacy_avail_off;
     uint32_t legacy_used_off;
-    /* used->ring[].id is an index into the available ring (virtio 1.0 §2.7.8),
-     * not a descriptor head.  This maps it back to the buffer slot, which is
-     * what the driver owns.  The old code read id as the slot directly, which
-     * only worked because every queue kept avail->ring[i] == i. */
-    uint16_t *slot_of_avail;
     uint16_t last_used;
 } virtio_net_queue_t;
 
@@ -180,7 +175,7 @@ typedef struct {
     /* LOCK_ORDER: net->lock is innermost under g_lwip_lock.
      * Local order: g_lwip_lock -> net->lock.
      * Protects TX/RX descriptor rings, tx_busy[], rx_buf[], tx_buf[],
-     * slot_of_avail[], last_used, avail->idx, rx_packets,
+     * last_used, avail->idx, rx_packets,
      * tx_packets, rx_drops, tx_drops, rx_mrg_frames, rx_mrg_reported. */
     spinlock_t lock;
     int valid;
@@ -260,12 +255,11 @@ static size_t virtio_net_ring_bytes(const virtio_net_inst_t *net)
     n += (size_t)VIRTIO_NET_TX_DESC_MAX * sizeof(virtq_desc_t);
     n += 2 * sizeof(virtio_net_avail_t);
     n += 2 * sizeof(virtio_net_used_t);
-    n += 2 * (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);  /* slot_of_avail */
     n += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);      /* rx_recycle */
     n += (size_t)VIRTIO_NET_QUEUE_SIZE;                         /* tx_busy */
     /* Alignment slack: every region below is 64-byte aligned so the payload
      * buffers keep the cache-line granularity arch_dma_sync_for_device()
-     * expects, and so the descriptor tables satisfy their 16-byte rule.  Twelve
+     * expects, and so the descriptor tables satisfy their 16-byte rule.  Ten
      * regions, less than one page of headroom. */
     n += 64 * 12;
     if (net->legacy)
@@ -336,12 +330,6 @@ static int virtio_net_alloc_ring(virtio_net_inst_t *net)
     p += sizeof(virtio_net_used_t);
     net->txq.used = p;
     p += sizeof(virtio_net_used_t);
-
-    VIRTIO_NET_ALIGN(p, 2);
-    net->rxq.slot_of_avail = p;
-    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
-    net->txq.slot_of_avail = p;
-    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
 
     VIRTIO_NET_ALIGN(p, 2);
     net->rx_recycle = p;
@@ -503,7 +491,6 @@ static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, unsigned slot) {
      * store gives the device the same view as virtio_blk's clean-before.
      * virtio_net.c and virtio_blk.c differ in placement on purpose. */
     uint16_t avail_slot = avail->idx % net->qsize;
-    q->slot_of_avail[avail_slot] = (uint16_t)slot;
     avail->ring[avail_slot] = (uint16_t)slot;
     wmb();
     avail->idx++;
@@ -528,9 +515,10 @@ static void virtio_net_complete_tx_locked(virtio_net_inst_t *net) {
     while (q->last_used != used_idx) {
         uint16_t ring_idx = q->last_used % net->qsize;
         arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
-        uint16_t avail_idx = (uint16_t)used->ring[ring_idx].id;
-        uint16_t slot = q->slot_of_avail[avail_idx % net->qsize];
-        if (slot < VIRTIO_NET_QUEUE_SIZE)
+        /* VIRTIO 1.2 2.7.8: id is the descriptor-chain head, not an
+         * available-ring position. Keep all 32 bits for bounds checking. */
+        uint32_t slot = used->ring[ring_idx].id;
+        if (slot < net->qsize)
             net->tx_busy[slot] = 0;
         q->last_used++;
     }
@@ -824,7 +812,6 @@ static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *seg
     desc[slot].next = 0;
 
     uint16_t avail_slot = avail->idx % net->qsize;
-    q->slot_of_avail[avail_slot] = (uint16_t)slot;
     avail->ring[avail_slot] = (uint16_t)slot;
     wmb();
     avail->idx++;
@@ -907,9 +894,8 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
     unsigned pending = (unsigned)(uint16_t)(used_idx - q->last_used);
     uint16_t ring_idx = q->last_used % net->qsize;
     arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
-    uint16_t avail_idx = (uint16_t)used->ring[ring_idx].id;
+    uint32_t slot = used->ring[ring_idx].id;
     uint32_t used_len = used->ring[ring_idx].len;
-    unsigned slot = q->slot_of_avail[avail_idx % net->qsize];
     q->last_used++;
 
     if (slot >= net->qsize) {
@@ -968,10 +954,9 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
         } else {
             ring_idx = q->last_used % net->qsize;
             arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
-            avail_idx = (uint16_t)used->ring[ring_idx].id;
+            buf_slot = used->ring[ring_idx].id;
             buf_len = used->ring[ring_idx].len;
             q->last_used++;
-            buf_slot = q->slot_of_avail[avail_idx % net->qsize];
             if (buf_slot >= net->qsize) {
                 /* Nothing sane left to do with this entry: keep the buffers
                  * accounted for so far and drop the frame. */
