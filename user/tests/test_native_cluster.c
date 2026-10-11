@@ -680,15 +680,26 @@ static int task_stat(const char *key, uint64_t *out) {
 
 /* Invoked explicitly by the full-kernel COM2/MCU byte-stream checker. */
 static int uart_runtime(const char *control_path, const char *agent_path,
-                        unsigned rounds) {
+                        unsigned rounds, int routed) {
     a20_node_id_t self = {{0}}, peer = {{0}};
     self.bytes[15] = 1;
     peer.bytes[15] = 2;
     uint8_t hop[2] = {1, 0};
-    if (a20_cluster_set_self(&self, 0) < 0 ||
-        a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UART, hop, 2,
-                          0) < 0)
+    if (a20_cluster_set_self(&self, 0) < 0)
+        return fail("uart-identity");
+    if (routed) {
+        a20_node_id_t gateway = {{0}};
+        gateway.bytes[15] = 3;
+        uint8_t udp[6] = {10, 0, 3, 3, 0xab, 0xf4};
+        if (a20_cluster_route(A20_ROUTE_ADD, &gateway, A20_CLX_TRANSPORT_UDP,
+                              udp, sizeof(udp), 0) < 0 ||
+            a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UDP, udp,
+                              sizeof(udp), 1) < 0)
+            return fail("gateway-route");
+    } else if (a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UART,
+                                 hop, 2, 0) < 0) {
         return fail("uart-route");
+    }
     uint32_t slot = 0;
     uint64_t epoch = 0;
     uint64_t started = a20_agent_clock_ms(0);
@@ -703,6 +714,19 @@ static int uart_runtime(const char *control_path, const char *agent_path,
     if (!discovered || epoch != 200 || slot != 2)
         return fail("uart-directory");
     note("UART: directory-pass\n", 21);
+    if (routed) {
+        uint8_t too_large[207] = {0}, reply[32];
+        a20_handle_t endpoint = A20_HANDLE_NULL;
+        uint32_t length = sizeof(reply);
+        if (a20_cluster_connect_bound(&peer, 1, 200, &endpoint) < 0)
+            return fail("gateway-mtu-connect");
+        int result = a20_cluster_exchange(
+            endpoint, too_large, sizeof(too_large), reply, &length, 1000);
+        a20_hdl_close(endpoint);
+        if (result >= 0)
+            return fail("gateway-mtu-limit");
+        note("GATEWAY: mtu-pass\n", 18);
+    }
     /* Let the directory worker finish before taking a stable baseline. */
     a20_thread_sleep((a20_time_t){.nsecs = 100000000});
     uint64_t task_baseline = 0, zombie_baseline = 0, errors_baseline = 0;
@@ -770,7 +794,7 @@ static int uart_runtime(const char *control_path, const char *agent_path,
             break;
         a20_thread_sleep((a20_time_t){.nsecs = 1000000});
     } while (a20_agent_clock_ms(0) - started < 2000);
-    if (resources.values[A20_CLX_STAT_ROUTES] != 1 ||
+    if (resources.values[A20_CLX_STAT_ROUTES] != (routed ? 2u : 1u) ||
         resources.values[A20_CLX_STAT_PROXIES] ||
         resources.values[A20_CLX_STAT_INFLIGHT] ||
         resources.values[A20_CLX_STAT_INFLIGHT_BYTES] ||
@@ -801,6 +825,22 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         errors_after != errors_baseline)
         return fail("uart-lifetime-release");
     note("UART: resources-pass\n", 21);
+    if (routed) {
+        note("GATEWAY: reboot-ready\n", 22);
+        started = a20_agent_clock_ms(0);
+        do {
+            epoch = 0;
+            a20_cluster_resolve(&peer, "work", 4, 500, &slot, &epoch);
+            if (epoch == 300)
+                break;
+            a20_thread_sleep((a20_time_t){.nsecs = 10000000});
+        } while (a20_agent_clock_ms(0) - started < 20000);
+        a20_handle_t old = A20_HANDLE_NULL;
+        if (epoch != 300 || a20_cluster_connect_bound(&peer, 2, 200, &old) !=
+                                -A20_ERR_NODE_UNREACHABLE)
+            return fail("gateway-reboot-epoch");
+        note("GATEWAY: reboot-pass\n", 21);
+    }
     a20_handle_t agent = A20_HANDLE_NULL, control = A20_HANDLE_NULL;
     if (spawn_service(agent_path, &agent) < 0 ||
         spawn_service(control_path, &control) < 0)
@@ -857,7 +897,24 @@ int main(int argc, char **argv, char **envp) {
     if (si)
         g_stdout = si->stdout_handle;
 
-    if ((argc == 4 || argc == 5) && !a20_strcmp(argv[1], "uart")) {
+    if (argc == 2 && !a20_strcmp(argv[1], "gateway-head")) {
+        a20_node_id_t self = {{0}}, client = {{0}}, leaf = {{0}};
+        self.bytes[15] = 3;
+        client.bytes[15] = 1;
+        leaf.bytes[15] = 2;
+        uint8_t uart[2] = {1, 0}, udp[6] = {10, 0, 3, 2, 0xab, 0xf4};
+        if (a20_cluster_set_self(&self, A20_CLUSTER_CAP_RELAY) < 0 ||
+            a20_cluster_route(A20_ROUTE_ADD, &leaf, A20_CLX_TRANSPORT_UART,
+                              uart, sizeof(uart), 0) < 0 ||
+            a20_cluster_route(A20_ROUTE_ADD, &client, A20_CLX_TRANSPORT_UDP,
+                              udp, sizeof(udp), 0) < 0)
+            return fail("gateway-head");
+        note("GATEWAY: head-ready\n", 20);
+        for (;;)
+            a20_thread_sleep((a20_time_t){.nsecs = 1000000000});
+    }
+    if ((argc == 4 || argc == 5) && (!a20_strcmp(argv[1], "uart") ||
+                                     !a20_strcmp(argv[1], "gateway-client"))) {
         unsigned rounds = 96;
         if (argc == 5) {
             rounds = 0;
@@ -869,7 +926,8 @@ int main(int argc, char **argv, char **envp) {
             if (rounds < 96 || rounds > 10000)
                 return fail("uart-rounds");
         }
-        return uart_runtime(argv[2], argv[3], rounds);
+        return uart_runtime(argv[2], argv[3], rounds,
+                            !a20_strcmp(argv[1], "gateway-client"));
     }
 
     note("start\n", 6);

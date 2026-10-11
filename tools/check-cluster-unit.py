@@ -24,7 +24,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="a20-cluster-unit-") as directory:
         compiler = shlex.split(os.environ.get("HOST_CC", "cc"))
         for name in ("test_clx_frame", "test_clx_fragment", "test_clx_uart", "test_clx_operator",
-                     "test_mcu_leaf", "test_clx_uart_pair", "test_clx_transaction",
+                     "test_mcu_leaf", "test_clx_uart_pair", "test_clx_transaction", "test_clx_session",
                      "test_clx_work", "test_clx_membership", "test_clx_job", "test_clx_epoch", "test_clx_board_uart"):
             binary = Path(directory) / name
             run(compiler + ["-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",

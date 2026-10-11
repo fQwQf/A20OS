@@ -139,6 +139,44 @@ static void pump(unsigned milliseconds) {
     }
 }
 
+static void routed_confirmation(uint8_t id[16], uint64_t epoch,
+                                uint8_t saved[256], int *saved_len) {
+    a20_cs_record_t r = {.kind = A20_CS_PROBE,
+                         .cookie = 99,
+                         .epoch = epoch,
+                         .mtu = 256,
+                         .caps = A20_CLX_CAP_RELIABLE,
+                         .profile = 2};
+    memcpy(r.source, id, 16);
+    memcpy(r.target, leaf_self_id, 16);
+    uint8_t data[A20_CS_BYTES], frame[256];
+    a20_cs_encode(data, &r);
+    int n = a20_clx_build_frame(
+        frame, sizeof(frame), A20_CLX_TYPE_SEND, 0, 0, 0, a20_clx_fnv1a32(id),
+        a20_clx_fnv1a32(leaf_self_id), A20_CS_SLOT, data, sizeof(data));
+    leaf_set_reliable_seq(frame, n, 0);
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    leaf_origin_t *o = leaf_origin_find(a20_clx_fnv1a32(id), id, 0);
+    assert(o && o->session.cookie);
+    r.kind = A20_CS_REPLY;
+    r.cookie = o->session.cookie;
+    r.target_epoch = leaf_nonce;
+    a20_cs_encode(data, &r);
+    n = a20_clx_build_frame(frame, sizeof(frame), A20_CLX_TYPE_SEND, 0, 0, 0,
+                            a20_clx_fnv1a32(id), a20_clx_fnv1a32(leaf_self_id),
+                            A20_CS_SLOT, data, sizeof(data));
+    leaf_set_reliable_seq(frame, n, 0);
+    if (saved) {
+        memcpy(saved, frame, n);
+        *saved_len = n;
+    }
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(a20_cs_live(&o->session, leaf_clock_ms(NULL)) &&
+           o->session.epoch == epoch);
+}
+
 int main(void) {
     a20_mcu_leaf_init();
     assert(a20_mcu_leaf_set_io(NULL, leaf_raw_getc, &to_leaf) < 0);
@@ -150,6 +188,7 @@ int main(void) {
     cfg.self_node_id[15] = 1;
     cfg.assigned_addr = 7;
     cfg.session = 100;
+    cfg.caps = A20_CLX_CAP_RELAY;
     cfg.drv.getc = head_getc;
     cfg.drv.putc = head_putc;
     int id = a20_clx_uart_link_register(&cfg);
@@ -487,7 +526,87 @@ int main(void) {
     a20_mcu_leaf_poll();
     assert(!advance_leaf_rx_clock && leaf_state == A20_MCU_LEAF_UP &&
            leaf_last_ping_ticks == ticks);
+    /* Routed callers use their own epochs/windows, never the head's epoch. */
+    uint8_t caller[16] = {0}, other[16] = {0}, saved_cs[256];
+    caller[15] = 99;
+    other[15] = 98;
+    int saved_cs_len = 0;
+    routed_confirmation(caller, 500, saved_cs, &saved_cs_len);
+    routed_confirmation(other, 600, NULL, NULL);
+    uint8_t routed_payload[28];
+    a20_clx_session_encode(routed_payload, 500, 300);
+    memcpy(routed_payload + 16, request, 12);
+    n = a20_clx_build_frame(frame, sizeof(frame), A20_CLX_TYPE_CALL,
+                            A20_CLX_FLAG_RELIABLE, 0, 1,
+                            a20_clx_fnv1a32(caller), a20_clx_fnv1a32(leaf_id),
+                            1, routed_payload, sizeof(routed_payload));
+    leaf_set_reliable_seq(frame, n, 1);
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(leaf_inflight_src_hash == a20_clx_fnv1a32(caller) &&
+           leaf_reply_origin_epoch == 500 && !leaf_reply_acknowledged);
+    uint64_t dedup_before = leaf_c.dedup_drops;
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(leaf_c.dedup_drops == dedup_before + 1);
+    /* A receipt from another confirmed caller cannot release this reply. */
+    uint8_t receipt_payload[16];
+    a20_clx_session_encode(receipt_payload, 600, 300);
+    int rn =
+        a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_CALL,
+                            A20_CLX_FLAG_RELIABLE, 0, 1, a20_clx_fnv1a32(other),
+                            a20_clx_fnv1a32(leaf_id), 0, receipt_payload, 16);
+    leaf_set_reliable_seq(stale, rn, 1);
+    inject_frame(&to_leaf, stale, rn);
+    pump(100);
+    assert(!leaf_reply_acknowledged);
+    a20_clx_put_le64(receipt_payload, 500);
+    rn = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_CALL,
+                             A20_CLX_FLAG_RELIABLE, 0, 1,
+                             a20_clx_fnv1a32(caller), a20_clx_fnv1a32(leaf_id),
+                             0, receipt_payload, 16);
+    leaf_set_reliable_seq(stale, rn, 1);
+    inject_frame(&to_leaf, stale, rn);
+    pump(100);
+    assert(leaf_reply_acknowledged);
+    a20_clx_put_le64(routed_payload, 600);
+    a20_clx_put_le32(frame + A20_CLX_OFF_SRC_HASH, a20_clx_fnv1a32(other));
+    memcpy(frame + 32, routed_payload, sizeof(routed_payload));
+    leaf_set_reliable_seq(frame, n, 1);
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(leaf_inflight_src_hash == a20_clx_fnv1a32(other) &&
+           leaf_reply_origin_epoch == 600 && !leaf_reply_acknowledged);
+    /* Head reboot invalidates discovery but retains the execution record. */
     assert(a20_clx_uart_link_unregister(id) == 0 && !link_up);
+    cfg.session = 401;
+    id = a20_clx_uart_link_register(&cfg);
+    pump(3000);
+    assert(id >= 0 && link_up && leaf_peer_nonce == 401 &&
+           leaf_inflight_src_hash == a20_clx_fnv1a32(other));
+    routed_confirmation(other, 600, NULL, NULL);
+    dedup_before = leaf_c.dedup_drops;
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(leaf_c.dedup_drops == dedup_before + 1);
+    /* Old correlated replies cannot roll back a confirmed caller reboot. */
+    routed_confirmation(caller, 501, NULL, NULL);
+    inject_frame(&to_leaf, saved_cs, saved_cs_len);
+    pump(100);
+    assert(
+        leaf_origin_find(a20_clx_fnv1a32(caller), caller, 0)->session.epoch ==
+        501);
+    for (unsigned i = 0; i < 2; i++) {
+        uint8_t extra[16] = {0};
+        extra[15] = 90 + i;
+        routed_confirmation(extra, 700 + i, NULL, NULL);
+    }
+    uint8_t extra[16] = {0};
+    extra[15] = 80;
+    assert(!leaf_origin_find(a20_clx_fnv1a32(extra), extra, 1));
+    assert(a20_clx_uart_link_unregister(id) == 0 && !link_up);
+    puts("test_clx_uart_pair: routed origins, receipt isolation, fixed slots, "
+         "head reboot dedup and old-epoch reply rejection PASS");
     puts("test_clx_uart_pair: bidirectional challenge, both reboots, stale "
          "HELLO/ACK, cache preservation and DOWN events passed");
 

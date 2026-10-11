@@ -405,7 +405,7 @@ static int udp_session(void *ctx, const uint8_t *nh, uint32_t nh_len,
     for (uint32_t i = 0; i < CLX_LIMIT_ROUTES; i++) {
         clx_udp_peer_t *p = &g_udp_peers[i];
         if (p->used && nh_len == 6 && memcmp(nh, p->nh, 6) == 0 &&
-            memcmp(node, p->node.bytes, 16) == 0 &&
+            (!node || memcmp(node, p->node.bytes, 16) == 0) &&
             (p->state == A20_CLX_LINK_UP || p->state == A20_CLX_LINK_SUSPECT)) {
             *local = g_udp_nonce;
             *remote = p->remote_nonce;

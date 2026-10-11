@@ -82,6 +82,10 @@ static int a20_clx_peer_session(const a20_node_id_t *p, uint64_t *local,
     *caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT;
     return 0;
 }
+static uint32_t a20_clx_session_mtu(const a20_node_id_t *p) {
+    (void)p;
+    return 0;
+}
 uint32_t a20_clx_udp_logical_mtu(const uint8_t node[16]) {
     (void)node;
     return 4096;

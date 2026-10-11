@@ -7,6 +7,7 @@
 #include "cluster/loopback.h"
 #include "cluster/udp.h"
 #include "cluster/fragment.h"
+#include "cluster/session_control.h"
 
 #include "core/klog.h"
 #include "core/random.h"
@@ -181,6 +182,9 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
         a20_clx_link_tx_drop(transport_id, nh, nh_len);
         return -A20_ERR_NODE_UNREACHABLE;
     }
+    uint32_t path_mtu = a20_clx_session_mtu(dst);
+    if (path_mtu && len > path_mtu)
+        return -A20_ERR_NO_SPACE;
     if (len <= t->mtu)
         return clx_wire_send(t, transport_id, nh, nh_len, frame, len);
     uint32_t logical_mtu = a20_clx_logical_mtu(dst);
@@ -245,9 +249,11 @@ int a20_clx_peer_session(const a20_node_id_t *node, uint64_t *local,
         return 0;
     }
     const a20_clx_transport_t *t = a20_clx_transport_get(id);
-    return t && t->session ? t->session(t->ctx, nh, nh_len, node->bytes, local,
-                                        remote, caps)
-                           : -A20_ERR_CLUSTER_UNSUPPORTED;
+    if (!t || !t->session)
+        return -A20_ERR_CLUSTER_UNSUPPORTED;
+    int result =
+        t->session(t->ctx, nh, nh_len, node->bytes, local, remote, caps);
+    return result == 0 ? 0 : a20_clx_routed_session(node, local, remote, caps);
 }
 
 void a20_clx_link_retransmit(const a20_node_id_t *node) {
@@ -344,8 +350,8 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
      * virtual node; one export namespace per kernel.  Link-address pinning
      * (anti-spoof) is a real-transport concern (UDP/UART); virtual-node
      * replies are emitted on the local node's link address, so the addr
-     * cannot pin the sender here.  RELAY is v0-unimplemented: frames for
-     * anyone else are dropped (rx_drops), never forwarded. */
+     * cannot pin the sender here. Nonlocal frames require RELAY and a
+     * resolvable destination route. */
     if (a20_clx_node_by_hash(h.src_hash, &src) < 0 ||
         a20_clx_self_get(&self, NULL) < 0) {
         a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
@@ -372,9 +378,25 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
         a20_clx_self_get(NULL, &caps);
         uint32_t outgoing_mtu =
             routed == 0 ? a20_clx_transport_mtu(dst_transport) : 0;
+        if (h.type == A20_CLX_TYPE_SEND && h.dst_slot == A20_CS_SLOT) {
+            a20_cs_record_t control;
+            if (a20_cs_decode(&h, payload, &control) < 0) {
+                a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
+                return;
+            }
+        }
         if (!(caps & A20_CLUSTER_CAP_RELAY) || !outgoing_mtu ||
-            a20_frame_forward(frame, len, outgoing_mtu) < 0 ||
-            a20_clx_core_send_frame(&dst, frame, len) < 0)
+            a20_frame_forward(frame, len, outgoing_mtu) < 0) {
+            a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
+            return;
+        }
+        if (h.type == A20_CLX_TYPE_SEND && h.dst_slot == A20_CS_SLOT &&
+            a20_clx_get_le32(payload + 4) > outgoing_mtu) {
+            a20_clx_put_le32(frame + A20_CLX_HDR_LEN + 4, outgoing_mtu);
+            a20_clx_put_le16(frame + len - 2,
+                             a20_clx_crc16_ccitt(frame, len - 2));
+        }
+        if (a20_clx_core_send_frame(&dst, frame, len) < 0)
             a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
         return;
     }
@@ -389,6 +411,10 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
      * learns its remote service closed, an export learns a caller left
      * (02-§8; the slot names the export endpoint from the sender's side in
      * both directions). */
+    if (h.type == A20_CLX_TYPE_SEND && h.dst_slot == A20_CS_SLOT) {
+        a20_clx_session_rx(&src, &h, payload);
+        return;
+    }
     uint8_t *assembled = NULL;
     if (h.flags & A20_CLX_FLAG_FRAGMENTED) {
         assembled = a20_clx_fragment_rx(&src, transport_id, &h, payload);
@@ -461,6 +487,7 @@ static void clx_hk_thread(void) {
             return;
         proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(250));
         a20_clx_deadline_scan();
+        a20_clx_session_tick();
     }
 }
 

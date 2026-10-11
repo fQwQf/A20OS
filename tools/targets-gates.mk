@@ -328,3 +328,7 @@ check-cluster-fuzz:
 .PHONY: check-cluster-uart
 check-cluster-uart:
 	$(PYTHON) tools/check-cluster-uart.py
+
+.PHONY: check-cluster-gateway
+check-cluster-gateway:
+	$(PYTHON) tools/check-cluster-gateway.py

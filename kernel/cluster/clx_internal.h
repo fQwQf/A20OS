@@ -290,6 +290,15 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
 int a20_clx_peer_session(const a20_node_id_t *node, uint64_t *local,
                          uint64_t *remote, uint32_t *caps);
 
+/* Routed sessions retain direct HELLO binding and confirm the final endpoint. */
+int a20_clx_routed_session(const a20_node_id_t *node, uint64_t *local,
+                           uint64_t *remote, uint32_t *caps);
+void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
+                        const uint8_t *payload);
+void a20_clx_session_tick(void);
+void a20_clx_session_invalidate(const a20_node_id_t *node);
+uint32_t a20_clx_session_mtu(const a20_node_id_t *node);
+
 /* Reliable layer owns the bounded request/reply cache. RX returns one
  * when consumed; otherwise it strips the CALL prefix in the supplied view. */
 int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,

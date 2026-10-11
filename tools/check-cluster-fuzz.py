@@ -22,7 +22,8 @@ def main():
     inputs = ["tools/tests/test_clx_fuzz.c", "kernel/cluster/frame.c",
               "kernel/cluster/frame.h", "kernel/cluster/uart.h",
               "kernel/cluster/fragment.h", "kernel/cluster/fragment.c",
-              "tools/tests/test_clx_fragment.c", "kernel/mcu/leaf.c",
+              "tools/tests/test_clx_fragment.c", "tools/tests/test_clx_session.c",
+              "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
               "kernel/mcu/leaf.h", "kernel/include/uapi/a20/cluster_work.h",
               "kernel/include/uapi/a20/cluster_directory.h", "kernel/cluster/transaction.h"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in inputs}
@@ -47,13 +48,20 @@ def main():
         (directory / "fragment-server.log").write_text(server.stdout)
         print(server.stdout, end="")
         server.check_returncode()
+        session = str(Path(temporary) / "session")
+        subprocess.run(compiler + flags + ["tools/tests/test_clx_session.c", "-o", session], cwd=root, check=True)
+        checked_session = subprocess.run([session], cwd=root, text=True, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, timeout=60)
+        (directory / "session.log").write_text(checked_session.stdout)
+        print(checked_session.stdout, end="")
+        checked_session.check_returncode()
         elapsed = time.monotonic() - started
         (directory / "run.log").write_text(result.stdout)
         print(result.stdout, end="")
         result.check_returncode()
     metadata = {"compiler": subprocess.check_output(compiler + ["--version"], text=True).splitlines()[0],
                 "flags": flags, "platform": platform.platform(), "seed": "0x20c1a55",
-                "mutations": 1000000, "fragment_mutations": 100000, "fragment_sizes": 64118, "elapsed_seconds": round(elapsed, 6),
+                "mutations": 1000000, "fragment_mutations": 100000, "fragment_sizes": 64118, "session_mutations": 100000, "elapsed_seconds": round(elapsed, 6),
                 "source_sha256": hashes, "scope": "host sanitizer harness; not target throughput"}
     (directory / "evidence.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print("check-cluster-fuzz: PASS (ASan/UBSan, 1M deterministic mutations)")

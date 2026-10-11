@@ -46,7 +46,7 @@ static uint32_t counted_dot(void *ctx, const a20_work_request_t *request,
             (unsigned long long)request->job, request->shard, request->attempt);
     return a20_work_dot(ctx, request, output, output_len);
 }
-int main(void) {
+int main(int argc, char **argv) {
     assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0);
     a20_mcu_leaf_init();
     a20_work_operator_t ops[] = {
@@ -60,7 +60,8 @@ int main(void) {
     id[15] = 2;
     assert(a20_mcu_leaf_set_io(raw_send, raw_receive, NULL) == 0);
     assert(a20_mcu_leaf_set_agent(&agent) == 0);
-    assert(a20_mcu_leaf_configure(id, 200) == 0);
+    assert(argc == 1 || (argc == 2 && !strcmp(argv[1], "300")));
+    assert(a20_mcu_leaf_configure(id, argc == 2 ? 300 : 200) == 0);
     fprintf(stderr, "LEAF-READY\n");
     uint64_t last_status = 0;
     for (;;) {
