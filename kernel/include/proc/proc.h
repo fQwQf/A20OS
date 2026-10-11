@@ -290,8 +290,6 @@ typedef struct task_t {
     uint64_t io_syscw;
     uint64_t io_read_bytes;
     uint64_t io_write_bytes;
-    uint64_t user_gs_base;         /* x86_64 ARCH_SET_GS value (kernel GS is
-                                    * reserved for per-CPU data) */
     uint32_t cfs_weight;
     uint32_t pi_boost_weight;    /* PI-futex waiter weight donation, atomic */
     uint64_t eevdf_vruntime;     /* weighted virtual run time (ticks) */

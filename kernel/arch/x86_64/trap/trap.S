@@ -63,12 +63,29 @@ isr_common:
     movq  256(%rsp), %rax
     movq  %rax, 56(%rsp)        /* ctx->rsp */
 
-    /* Save kernel_tp (GS base) */
+    /* Detect actual GS state rather than interrupted CPL: an NMI can land
+     * in the entry/exit SWAPGS window while CS still says kernel. Kernel
+     * task pointers are upper canonical; arch_prctl only accepts lower user
+     * bases. The alignment slot records whether this entry swapped GS. */
+    movq  $0, 208(%rsp)
     movl  $0xC0000101, %ecx
     rdmsr
+    testl %edx, %edx
+    js    .Lisr_kernel_gs
+    swapgs
+    lfence
+    movq  $1, 208(%rsp)
+    rdmsr
+.Lisr_kernel_gs:
     shlq  $32, %rdx
     orq   %rdx, %rax
     movq  %rax, 160(%rsp)       /* ctx->kernel_tp */
+
+    movl  $0xC0000102, %ecx
+    rdmsr
+    shlq  $32, %rdx
+    orq   %rdx, %rax
+    movq  %rax, 200(%rsp)       /* user GS, before kernel trap-state reuse */
 
     /* Save user FS base for x86_64 TLS. */
     movl  $0xC0000100, %ecx
@@ -214,6 +231,11 @@ kernel_trap:
     movq  56(%rsp), %rax
     movq  %rax, 256(%rsp)       /* old RSP */
 
+    /* Undo a window NMI's SWAPGS; no C code runs after this point. */
+    cmpq  $0, 208(%rsp)
+    je    .Lkernel_gs_restored
+    swapgs
+.Lkernel_gs_restored:
     /* Restore general-purpose registers */
     movq  0(%rsp), %rax
     movq  8(%rsp), %rbx
@@ -308,22 +330,10 @@ syscall_entry_\cpu:
 #endif
 
 syscall_entry_saved:
-    /*
-     * SYSCALL preserves the GS base MSR (current task pointer) but may leave
-     * the GS segment selector in a state where %gs: memory operands fault.
-     * Avoid %gs: entirely: read the GS base MSR directly to obtain the task
-     * pointer, then use normal kernel addresses.
-     *
-     * On entry:
-     *   rax = syscall number
-     *   rdi/rsi/rdx/r10/r8/r9 = arguments 0-5
-     *   rcx = user RIP, r11 = user RFLAGS, rsp = user RSP
-     *
-     * We must not write below the user RSP because the user code owns that
-     * memory (red zone / stack frames).  Instead, stash the register state in
-     * a small kernel scratch array while we compute the kernel stack top and
-     * switch stacks.
-     */
+    /* SYSCALL always enters from user mode. The scratch save above never
+     * accesses GS or the user stack; now activate the kernel task pointer. */
+    swapgs
+    lfence
     /* Read GS base (task pointer) into r9. */
     movl  $0xC0000101, %ecx
     rdmsr
@@ -413,6 +423,12 @@ syscall_entry_saved:
     movl  $0xC0000100, %ecx
     wrmsr
 
+    movl  $0xC0000102, %ecx
+    rdmsr
+    shlq  $32, %rdx
+    orq   %rdx, %rax
+    movq  %rax, 200(%rsp)       /* user GS base */
+
     /* Original task->kstack so __return_to_user / __switch can restore it. */
     movq  %r14, 192(%rsp)
 
@@ -463,6 +479,14 @@ __return_to_user:
     movl  $0xC0000101, %ecx
     wrmsr
 
+    /* Publish the user's GS in the inactive MSR; it becomes active only
+     * after the final SWAPGS immediately before IRET. */
+    movq  200(%rsp), %rax
+    movq  %rax, %rdx
+    shrq  $32, %rdx
+    movl  $0xC0000102, %ecx
+    wrmsr
+
     /* Restore user FS base for TLS before iretq. */
     movq  184(%rsp), %rax
     movl  %eax, %edi
@@ -511,6 +535,7 @@ __return_to_user:
     movq  0(%rsp), %rax
     movq  8(%rsp), %r11
     leaq  16(%rsp), %rsp
+    swapgs
     iretq
 
     .globl user_trap_return
