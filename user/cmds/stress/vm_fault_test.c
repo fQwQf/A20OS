@@ -226,8 +226,33 @@ static int fork_write_probe(void) {
     munmap(cow_control, 4096);
     return failed;
 }
+static int reclaim_hint_probe(void) {
+    int failed = 0;
+    const size_t bytes = 4 * 4096;
+    for (unsigned shared = 0; shared < 2; shared++) {
+        uint64_t *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                           MAP_ANONYMOUS | (shared ? MAP_SHARED : MAP_PRIVATE),
+                           -1, 0);
+        if (p == MAP_FAILED)
+            return 1;
+        for (unsigned i = 0; i < bytes / sizeof(*p); i++)
+            p[i] = 0x123456789abc0000ULL + i;
+        const int advice[] = {MADV_COLD, MADV_PAGEOUT};
+        for (unsigned n = 0; n < 2; n++) {
+            failed |= madvise(p, bytes, advice[n]) != 0;
+            for (unsigned i = 0; i < bytes / sizeof(*p); i++) {
+                failed |= p[i] != 0x123456789abc0000ULL + i + n;
+                p[i] = 0x123456789abc0000ULL + i + n + 1;
+            }
+        }
+        munmap(p, bytes);
+    }
+    printf("VM_FAULT: reclaim-hints %s\n", failed ? "FAIL" : "PASS");
+    return failed;
+}
 int main(void) {
     int failed = sparse_unmap_probe();
+    failed |= reclaim_hint_probe();
     failed |= fork_write_probe();
     failed |= signal_probe();
     failed |= cow_copy_probe();
