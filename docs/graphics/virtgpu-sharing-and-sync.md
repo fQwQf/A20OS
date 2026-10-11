@@ -55,3 +55,11 @@ rejects a valid zero-stride transfer with EINVAL. Separate matching old modules
 were used for those negative checks.
 ARM32 and AArch64 kernel builds and the seven architecture boundary assertions
 also pass. These are interface tests; Minecraft gameplay is validated separately.
+
+Large requests, backing attachment and fenced submissions now use the same
+interrupt-first wait policy as short commands. They recheck the used index after
+subscribing, retaining bounded poll/yield for boot or failed IRQ registration.
+This removes the fixed 65,536 cache-synchronized polling iterations before a
+runtime task can sleep. Native rendering, sharing and synchronization tests pass
+on four-CPU preemptive x86_64 and riscv64:
+`build/browser-followup/virtgpu-irq-wait-{x86,rv}-guest.log`.
