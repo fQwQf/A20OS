@@ -1,4 +1,8 @@
 #include <errno.h>
+#include <pthread.h>
+#include <poll.h>
+#include <stddef.h>
+#include <sys/un.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -222,7 +226,110 @@ static int empty_rights_test(int fd) {
     return 0;
 }
 
+
+/* Connections and queued credentials belong to a process even when its
+ * worker thread creates/sends through the socket and then exits. */
+struct threaded_credentials {
+    int type;
+    int sv[2];
+    int listener;
+    struct sockaddr_un address;
+    socklen_t length;
+    int error;
+};
+
+static void *credential_worker(void *arg) {
+    struct threaded_credentials *test = arg;
+    if (test->listener >= 0) {
+        test->sv[0] = socket(AF_UNIX, test->type, 0);
+        if (test->sv[0] < 0 || connect(test->sv[0],
+                (struct sockaddr *)&test->address, test->length) < 0)
+            goto bad;
+    } else if (socketpair(AF_UNIX, test->type, 0, test->sv) < 0) {
+        goto bad;
+    }
+    int receiver = test->listener >= 0 ?
+        accept(test->listener, NULL, NULL) : test->sv[1];
+    if (receiver < 0)
+        goto bad;
+    test->sv[1] = receiver;
+    int on = 1;
+    if (setsockopt(receiver, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0 ||
+        send(test->sv[0], "T", 1, 0) != 1)
+        goto bad;
+    return NULL;
+bad:
+    test->error = errno ? errno : EIO;
+    return NULL;
+}
+
+static int threaded_credentials_test(void) {
+    const int types[] = {SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET};
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        /* Also cover a worker connecting to a bound listening socket. */
+        for (int connected = 0; connected <= (types[i] != SOCK_DGRAM); connected++) {
+            struct threaded_credentials test = {
+                .type = types[i], .sv = {-1, -1}, .listener = -1,
+            };
+            if (connected) {
+                test.listener = socket(AF_UNIX, types[i], 0);
+                test.address.sun_family = AF_UNIX;
+                snprintf(test.address.sun_path + 1,
+                         sizeof(test.address.sun_path) - 1,
+                         "scm-process-%d-%u", getpid(), i);
+                test.length = offsetof(struct sockaddr_un, sun_path) + 1 +
+                              strlen(test.address.sun_path + 1);
+                if (test.listener < 0 || bind(test.listener,
+                        (struct sockaddr *)&test.address, test.length) < 0 ||
+                    listen(test.listener, 1) < 0)
+                    return fail("thread credential listener");
+            }
+            pthread_t thread;
+            if (pthread_create(&thread, NULL, credential_worker, &test) ||
+                pthread_join(thread, NULL) || test.error)
+                return fail("thread credential worker");
+            struct ucred peer = {0};
+            socklen_t length = sizeof(peer);
+            if (getsockopt(test.sv[1], SOL_SOCKET, SO_PEERCRED,
+                           &peer, &length) < 0 || peer.pid != getpid())
+                return fail("worker SO_PEERCRED must name process");
+            char control[CMSG_SPACE(sizeof(peer))], data;
+            struct iovec iov = {.iov_base = &data, .iov_len = 1};
+            struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1,
+                .msg_control = control, .msg_controllen = sizeof(control)};
+            if (recvmsg(test.sv[1], &message, 0) != 1)
+                return fail("worker credential receive");
+            struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+            if (!header || header->cmsg_type != SCM_CREDENTIALS)
+                return fail("worker missing SCM_CREDENTIALS");
+            memcpy(&peer, CMSG_DATA(header), sizeof(peer));
+            if (peer.pid != getpid())
+                return fail("worker SCM_CREDENTIALS must name process");
+            /* SO_PEERPIDFD (Linux 6.5+) must survive the worker's exit. */
+            int pidfd = -1;
+            length = sizeof(pidfd);
+            if (getsockopt(test.sv[1], SOL_SOCKET, 77, &pidfd, &length) == 0) {
+                struct pollfd pollfd = {.fd = pidfd, .events = POLLIN};
+                if (pidfd <= 2 || !(fcntl(pidfd, F_GETFD) & FD_CLOEXEC) ||
+                    poll(&pollfd, 1, 0) != 0)
+                    return fail("worker peer pidfd must remain alive");
+                close(pidfd);
+            } else if (errno != ENOPROTOOPT) {
+                return fail("worker peer pidfd");
+            }
+            close(test.sv[0]);
+            close(test.sv[1]);
+            if (test.listener >= 0)
+                close(test.listener);
+        }
+    }
+    puts("SCM_STRESS: process-credentials PASS");
+    return 0;
+}
+
 int main(void) {
+    if (threaded_credentials_test())
+        return 1;
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
         return fail("socketpair");

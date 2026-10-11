@@ -652,7 +652,7 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     {
         task_t *cur = proc_current();
         if (cur) {
-            int32_t pid = cur->pid;
+            int32_t pid = cur->tgid;
             int32_t uid = cur->cred.uid;
             int32_t gid = cur->cred.gid;
             sa->peer_pid = pid; sa->peer_uid = uid; sa->peer_gid = gid;
