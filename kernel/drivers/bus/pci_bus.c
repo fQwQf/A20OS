@@ -570,7 +570,10 @@ static void pci_virtio_write32(virtio_transport_t *transport, uint32_t off,
                (uintptr_t)notify_off * vt->notify_multiplier));
         break;
     }
-    default: break;
+    default:
+        if (off >= VIRTIO_MMIO_CONFIG && vt->config)
+            writel(value, (volatile void *)(vt->config + off - VIRTIO_MMIO_CONFIG));
+        break;
     }
 }
 

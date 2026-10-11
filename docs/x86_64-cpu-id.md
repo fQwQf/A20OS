@@ -27,8 +27,9 @@ SMP 内核原先在每次 `arch_current_cpu_id()` 调用时执行 CPUID，再将
 同一主机、4 CPU/4 GiB、virgl、相同 Minecraft 1.21.11 demo 世界的单次冷启动
 对比中，从存档检查结束、执行启动器到最后一张启动纹理图集加载完成，从
 103.5 秒降到 76.8 秒，约缩短 26%。这是游戏初始化阶段的测量，不表示帧率
-提高相同比例，也不包含测试脚本启动前固定的 35 秒等待。原始串口时间戳见
-`build/browser-followup/input-desktop-{slow,fast}-timing.log`。
+提高相同比例，也不包含测试脚本启动前固定的 35 秒等待。优化后的串口时间戳见
+`build/browser-followup/input-desktop-fast-timing.log`；基线临时日志被后续复测
+覆盖，因此这项仅保留早期单次观察记录，正式性能比较需重新成对测量。
 
 复测构建与客体命令：
 
