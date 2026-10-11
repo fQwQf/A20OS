@@ -702,7 +702,7 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 ### SIOCGIFCONF 与 per-interface getter（Linux ABI sockets 区域）
 
-`make smoke-net-iface` 覆盖 `user/cmds/net/net_iface_test.c` 二十项，同时被 `smoke-network-suite` 覆盖，因为 `net_iface_test` 已列入 `network_suite` 的用例表。检查项包括 SIOCGIFCONF 的空 `ifc_buf` 尺寸查询（必须是整条目数，估算值会让调用方反复扩容）、按 `struct ifreq` 步长填充、行数与查询值一致、接口名 NUL 终止、每行是 `AF_INET` sockaddr、不足一个条目的缓冲返回 0 且不写入、单条目缓冲不溢出且只返回整条目、非 IPv4 族请求返回空列表、负 `ifc_len` 返回 EINVAL；再用枚举出的名字回灌 SIOCGIFADDR / SIOCGIFFLAGS，并确认未知接口名被拒。
+`make smoke-net-iface` 覆盖 `user/cmds/net/net_iface_test.c` 二十四项，同时被 `smoke-network-suite` 覆盖，因为 `net_iface_test` 已列入 `network_suite` 的用例表。检查项包括 SIOCGIFCONF 的空 `ifc_buf` 尺寸查询（必须是整条目数，估算值会让调用方反复扩容）、按 `struct ifreq` 步长填充、行数与查询值一致、接口名 NUL 终止、每行是 `AF_INET` sockaddr、不足一个条目的缓冲返回 0 且不写入、单条目缓冲不溢出且只返回整条目、脏输出缓冲区不作族过滤、空 `ifc_buf` 忽略输入长度、非空缓冲区的负 `ifc_len` 返回零条目且保留缓冲区内容；再用枚举出的名字回灌 SIOCGIFADDR / SIOCGIFFLAGS，并确认未知接口名被拒。
 
 它必须存在，是因为 getifaddrs()、ifconfig 与 busybox `ip` 全部建立在 SIOCGIFCONF 上，而 per-interface getter 在没有枚举手段之前不可达。SIOCGIFCONF 此前是"派发但未实现"（-ENOTTY），该区域没有任何运行门禁，因此下面两个真实缺陷是写这个门禁时才暴露的。
 
