@@ -86,8 +86,9 @@
 
 - 新 make 目标（风格对齐现有 `check-*`）：`check-cluster-unit`（金样+单元）、`check-cluster-loopback`（P-集成-1）、`check-cluster-udp`（P-集成-2/3，脚本化双 QEMU）、`check-cluster-fuzz-smoke`（模糊 5 分钟档）。
 - 已落地的硬化入口为 `make check-cluster-hardening`，实际注入范围、计数口径和
-  未完成项见 [20-hardening.md](20-hardening.md)；现有 `check-cluster-fuzz` 是
-  ASan/UBSan 的有界确定性档，不能声称是尚未实现的 5 分钟 fuzz 目标。
+  未完成项见 [20-hardening.md](20-hardening.md)。`check-cluster-fuzz` 是百万变异
+  快速档；`check-cluster-fuzz-smoke` 持续至少 300 秒并更换种子。Native 性能入口
+  为 `check-cluster-performance`，测量范围和局限见 [21-performance.md](21-performance.md)。
 - 进 `.github/workflows/ci.yml` 的从 `print-ci-kernel-arches` 派生的矩阵惯例，不允许手工硬编码架构清单（Makefile 顶部注释的既有教训）。
 - 全量既有门禁零回归是合入前提：`make help` 列出的默认 check 目标。
 
@@ -99,3 +100,22 @@
 | `docs/cluster/11-api-tutorial.md` | 用集群 ABI 写一个可远程调用的服务（从 export 到 any 解析） | WE2 |
 | 本文附录 | 性能实测数值表 | WE1 |
 | 01/02/04/05 更新 | 全部实现期偏差回写，头部核对日期刷新 | 各阶段即时 |
+
+## 附录：2026-10-11 实测
+
+Native 融合调用、RISC-V64 单核 QEMU TCG，服务器集群档；完整方法、源码/ELF
+摘要与原始日志位置见 [21-performance.md](21-performance.md)。
+
+| 指标 | 本轮结果 | 验收判断 |
+|---|---|---|
+| 本机改造前后，各五次启动、每次 10 万调用 | 75.400→71.724 µs，−4.875%；p=0.00794；95% 区间 [−7.114%, −2.914%] | 没有 >20% 退化；未证明 ±3% 严格等价 |
+| loopback v0 RTT，10 万次 | 均值 2.142 ms，同次本机均值 70.712 µs，比值 30.286 | 超过 3 倍目标 |
+| 双 QEMU UDP v1 64B，1 万次 | p50 7.628 ms，p99 12.119 ms | 超过 p50 5 ms 目标 |
+| UDP v1 64 KiB，1000 次顺序 CALL | 双向有效负载 1.545 MB/s，p50 82.827 ms | 已测顺序连接；未验收四节点批量聚合目标 |
+| SERVER 四节点 SEND | 尚未实现业务单向 SEND 的测量 | 未验收 |
+| MCU 实机 | 没有已连接物理板 | 未验收 |
+
+连续大消息发现并修复了 virtio-net 的错误描述符回收；修复后两端 drops 与
+malformed 为零，客户端 1 次重传且执行次数正确，结束时重组资源归零。
+当前延迟瓶颈包括周期轮询、代理/导出线程调度和分片主动节流；后续应以同一
+基准验证事件唤醒与有界流水线，不能把尚未满足的性能指标写成通过。

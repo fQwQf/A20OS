@@ -46,8 +46,9 @@ A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid
 Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子，网关可跨 UDP/UART
 转发。独立内核及生产叶子代码的混合仿真已验证可靠调用、成员恢复和 16 片/8 节点词频
 作业；物理板联调仍待验证。参见[统一设计](docs/cluster/07-unified-runtime.md)、
-[实现证据](docs/cluster/08-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)
-与[服务开发教程](docs/cluster/11-api-tutorial.md)。
+[实现证据](docs/cluster/08-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)、
+[服务开发教程](docs/cluster/11-api-tutorial.md)
+与[性能测量口径](docs/cluster/21-performance.md)。
 
 ## Linux ABI 兼容性
 
