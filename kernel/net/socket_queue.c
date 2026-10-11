@@ -86,7 +86,8 @@ size_t net_rxq_bytes_locked(net_socket_t *s)
 }
 
 /*
- * Capture the current task credentials for SCM_CREDENTIALS.  Called under the
+ * Capture process identity for SCM_CREDENTIALS. Linux reports the thread
+ * group ID, including messages sent by a worker which may exit independently.  Called under the
  * destination socket's lock while that socket is being serviced;
  * proc_current() is safe there (it is a CPU-local read).
  */
@@ -96,7 +97,7 @@ static void net_capture_sender_cred(net_msg_t *m)
     if (!cur)
         return;
     m->has_cred = 1;
-    m->cred_pid = cur->pid;
+    m->cred_pid = cur->tgid;
     m->cred_uid = cur->cred.uid;
     m->cred_gid = cur->cred.gid;
 }

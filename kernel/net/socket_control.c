@@ -1002,7 +1002,7 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
                 return net_notconn(NET_NOTCONN_PEERPIDFD);
             if (*optlen < sizeof(int32_t))
                 return -EINVAL;
-            int pfd = linux_pidfd_create(s->peer_pid, 0);
+            int pfd = linux_pidfd_create(s->peer_pid, O_CLOEXEC);
             if (pfd < 0)
                 return pfd;
             int32_t out = pfd;
