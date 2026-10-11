@@ -88,3 +88,8 @@ channel 继续工作；新进程重建成员和能力目录。服务退出由导
 验证：`make smoke-native-cluster` 覆盖真实 Native 服务解析、能力拒绝、守护进程
 替换、服务退出与数据面连续性。`tools/check-cluster-mesh.py` 是三独立内核验证器，
 包含间接探测、成员死亡/重启和跨节点作业；当前运行结果以实现状态表为准。
+
+种子地址也接受 `uart:1`，将对应 node_id 安装为 UART 下一跳 1。当前生产头
+绑定为 `ARCH=x86_64 CLUSTER_UART_COM2=1` 的独立 COM2；UART node_id 必须与
+实际 leaf 身份一致，不能用短地址代替持久身份。配置示例见
+[13-uart-head.md](13-uart-head.md)。

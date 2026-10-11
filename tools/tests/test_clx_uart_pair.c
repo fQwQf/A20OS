@@ -46,6 +46,7 @@ typedef struct {
 } wire_queue;
 static wire_queue to_head, to_leaf;
 static int unplugged;
+static int advance_head_rx_clock = 1, advance_leaf_rx_clock;
 static uint8_t received[256];
 static unsigned received_len, replies;
 static int link_up;
@@ -70,7 +71,12 @@ int uart_try_getc(void) {
 }
 static int leaf_raw_getc(void *ctx) {
     assert(ctx == &to_leaf);
-    return wire_get(ctx);
+    int byte = wire_get(ctx);
+    if (byte >= 0 && advance_leaf_rx_clock) {
+        ticks++;
+        advance_leaf_rx_clock = 0;
+    }
+    return byte;
 }
 static int leaf_raw_putc(void *ctx, uint8_t byte) {
     assert(ctx == &to_leaf);
@@ -79,7 +85,12 @@ static int leaf_raw_putc(void *ctx, uint8_t byte) {
 }
 static int head_getc(void *ctx) {
     (void)ctx;
-    return wire_get(&to_head);
+    int byte = wire_get(&to_head);
+    if (byte >= 0 && advance_head_rx_clock) {
+        ticks++;
+        advance_head_rx_clock = 0;
+    }
+    return byte;
 }
 static int head_putc(void *ctx, uint8_t b) {
     (void)ctx;
@@ -121,6 +132,10 @@ static void pump(unsigned milliseconds) {
         a20_clx_uart_poll_all();
         a20_mcu_leaf_poll();
         a20_clx_uart_poll_all();
+        a20_clx_uart_link_status_t status;
+        if (a20_clx_uart_get_status(0, &status) == 0 &&
+            status.state == A20_CLX_UART_L_UP)
+            assert(status.last_hello_age_ms <= ticks);
     }
 }
 
@@ -461,6 +476,17 @@ int main(void) {
     assert(leaf_peer_nonce == 400 && link_up &&
            a20_clx_uart_session(nh, 2, leaf_id, &local, &remote, &caps) == 0 &&
            local == 400 && remote == 300);
+    /* Reproduce a real clock tick between poll entry and PING handling.
+     * A stale subtraction used to underflow and disconnect immediately. */
+    uint8_t heartbeat[8] = {0};
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_PING, 0, 0, 0,
+                            a20_clx_fnv1a32(cfg.self_node_id),
+                            a20_clx_fnv1a32(leaf_id), 0, heartbeat, 8);
+    inject_frame(&to_leaf, stale, n);
+    advance_leaf_rx_clock = 1;
+    a20_mcu_leaf_poll();
+    assert(!advance_leaf_rx_clock && leaf_state == A20_MCU_LEAF_UP &&
+           leaf_last_ping_ticks == ticks);
     assert(a20_clx_uart_link_unregister(id) == 0 && !link_up);
     puts("test_clx_uart_pair: bidirectional challenge, both reboots, stale "
          "HELLO/ACK, cache preservation and DOWN events passed");

@@ -369,11 +369,19 @@ int main(int argc, char **argv, char **envp) {
             a20_memcmp(id.bytes, self.node_id, 16) || (argc - 2) % 2)
             return 2;
         for (int i = 2; i + 1 < argc; i += 2) {
-            uint8_t hop[6];
-            if (a20_node_id_parse_hex(argv[i], &id) < 0 ||
-                a20_cluster_parse_udp(argv[i + 1], hop) < 0 ||
-                a20_cluster_route(A20_ROUTE_REPLACE, &id, A20_CLX_TRANSPORT_UDP,
-                                  hop, 6, 0) < 0)
+            uint8_t hop[6] = {0};
+            uint32_t transport = A20_CLX_TRANSPORT_UDP, hop_len = 6;
+            if (a20_node_id_parse_hex(argv[i], &id) < 0)
+                return 3;
+            if (!a20_strcmp(argv[i + 1], "uart:1")) {
+                transport = A20_CLX_TRANSPORT_UART;
+                hop_len = 2;
+                hop[0] = 1;
+            } else if (a20_cluster_parse_udp(argv[i + 1], hop) < 0) {
+                return 3;
+            }
+            if (a20_cluster_route(A20_ROUTE_REPLACE, &id, transport, hop,
+                                  hop_len, 0) < 0)
                 return 3;
         }
     }

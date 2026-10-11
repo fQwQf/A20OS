@@ -13,7 +13,7 @@
 static a20_clx_proxy_t g_clx_proxies[CLX_LIMIT_REMOTE_EPS];
 static uint32_t g_clx_proxy_count;
 static uint32_t g_clx_proxy_generation;
-static uint32_t g_clx_inflight_bytes;
+static uint32_t g_clx_inflight_bytes, g_clx_inflight_peak_bytes;
 static uint32_t g_clx_txid_next = 1; /* 0 = SEND only (02-§1) */
 
 /* ---- worker spawn table (proc_alloc entries take no argument) -------------- */
@@ -80,7 +80,7 @@ static int clx_spawn_queue(int kind, void *payload, void *payload2) {
             g_clx_spawn[i].payload = payload;
             g_clx_spawn[i].payload2 = payload2;
             spin_unlock_irqrestore(&g_clx_spawn_lock, flags);
-            if (proc_alloc(clx_worker_entry) < 0) {
+            if (proc_alloc_detached(clx_worker_entry) < 0) {
                 /* No thread will run: take the job back, so -1 means "not
                  * queued" and the caller can unwind the payloads without
                  * stranding them in the table (an export payload2 carries
@@ -761,6 +761,8 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
                     entry->frame_len = n;
                     entry->retry_tick = now + MS_TO_TICKS(A20_CLX_RETRY_MS);
                     g_clx_inflight_bytes += n;
+                    if (g_clx_inflight_bytes > g_clx_inflight_peak_bytes)
+                        g_clx_inflight_peak_bytes = g_clx_inflight_bytes;
                     retry = NULL;
                     break;
                 }
@@ -889,4 +891,13 @@ static void clx_export_tx_main(a20_clx_export_t *ex,
     if (owned_slot)
         a20_clx_export_revoke_slot(ex, owned_slot, 1);
     a20_channel_ep_release(my_peer);
+}
+
+void a20_clx_proxy_resources(uint64_t *v) {
+    v[A20_CLX_STAT_PROXIES] = g_clx_proxy_count;
+    for (uint32_t i = 0; i < CLX_LIMIT_REMOTE_EPS; i++)
+        if (g_clx_proxies[i].in_use)
+            v[A20_CLX_STAT_INFLIGHT] += g_clx_proxies[i].inflight_count;
+    v[A20_CLX_STAT_INFLIGHT_BYTES] = g_clx_inflight_bytes;
+    v[A20_CLX_STAT_INFLIGHT_PEAK_BYTES] = g_clx_inflight_peak_bytes;
 }

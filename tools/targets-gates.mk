@@ -324,3 +324,7 @@ check-cluster-mesh:
 .PHONY: check-cluster-fuzz
 check-cluster-fuzz:
 	$(PYTHON) tools/check-cluster-fuzz.py
+
+.PHONY: check-cluster-uart
+check-cluster-uart:
+	$(PYTHON) tools/check-cluster-uart.py

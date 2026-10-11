@@ -23,7 +23,7 @@
 #include "liba20rt/crt0_a20.h"
 #include "liba20rt/a20_cluster_agent.h"
 #include "liba20rt/a20_cluster_client.h"
-#include "../../kernel/include/uapi/a20/cluster_job.h"
+#include "liba20rt/a20_cluster_job.h"
 
 static a20_handle_t g_stdout = A20_HANDLE_NULL;
 
@@ -210,6 +210,16 @@ static int abi_snapshot_and_agent(void) {
     if (a20_cluster_snapshot(&self) < 0 || !self.boot_epoch ||
         self.profile != 2 || self.max_inflight == 0)
         return fail("snapshot-self");
+    a20_cluster_resource_args_t resources;
+    a20_memset(&resources, 0xff, sizeof(resources));
+    if (a20_cluster_resources(&resources) < 0 ||
+        resources.values[A20_CLX_STAT_BOOT_EPOCH] != self.boot_epoch ||
+        resources.values[A20_CLX_STAT_MAX_ROUTES] != self.max_routes ||
+        resources.values[A20_CLX_STAT_MAX_EXPORTS] != self.max_exports ||
+        resources.values[A20_CLX_STAT_MAX_PROXIES] != self.max_remote_eps ||
+        resources.values[A20_CLX_STAT_REPLAY_BYTES] >
+            resources.values[A20_CLX_STAT_MAX_REPLAY_BYTES])
+        return fail("snapshot-resources");
     a20_node_id_t id;
     peer_id(&id);
     if (a20_memcmp(self.node_id, id.bytes, 16))
@@ -625,6 +635,213 @@ static int abi_struct_versioning(void) {
     return 0;
 }
 
+/* Read the existing ownership diagnostics through the Native file ABI. */
+static int task_stat(const char *key, uint64_t *out) {
+    static const char path[] = "/proc/a20/task_lifetime";
+    a20_path_open_args_t open = {.dir = A20_HANDLE_NULL,
+                                 .rights = A20_RIGHT_READ,
+                                 .path = (uint64_t)(uintptr_t)path,
+                                 .path_len = sizeof(path) - 1};
+    if (a20_path_open(&open) < 0)
+        return -1;
+    char buf[2048];
+    uint64_t got = 0;
+    int status = a20_hdl_read_buf(open.out_handle, buf, sizeof(buf) - 1, &got);
+    a20_hdl_close(open.out_handle);
+    if (status < 0 || !got)
+        return -1;
+    buf[got] = 0;
+    unsigned klen = a20_strlen(key);
+    for (char *p = buf; *p;) {
+        char *end = p;
+        while (*end && *end != '\n')
+            end++;
+        if ((unsigned)(end - p) > klen + 2 && a20_memcmp(p, key, klen) == 0 &&
+            p[klen] == ':' && p[klen + 1] == ' ') {
+            uint64_t value = 0;
+            for (char *d = p + klen + 2; d < end; d++) {
+                if (*d < '0' || *d > '9')
+                    return -1;
+                value = value * 10 + (unsigned)(*d - '0');
+            }
+            *out = value;
+            return 0;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return -1;
+}
+
+/* Invoked explicitly by the full-kernel COM2/MCU byte-stream checker. */
+static int uart_runtime(const char *control_path, const char *agent_path,
+                        unsigned rounds) {
+    a20_node_id_t self = {{0}}, peer = {{0}};
+    self.bytes[15] = 1;
+    peer.bytes[15] = 2;
+    uint8_t hop[2] = {1, 0};
+    if (a20_cluster_set_self(&self, 0) < 0 ||
+        a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UART, hop, 2,
+                          0) < 0)
+        return fail("uart-route");
+    uint32_t slot = 0;
+    uint64_t epoch = 0;
+    uint64_t started = a20_agent_clock_ms(0);
+    int discovered = 0;
+    while (a20_agent_clock_ms(0) - started < 12000) {
+        if (a20_cluster_resolve(&peer, "work", 4, 500, &slot, &epoch) == 0) {
+            discovered = 1;
+            break;
+        }
+        a20_thread_sleep((a20_time_t){.nsecs = 10000000});
+    }
+    if (!discovered || epoch != 200 || slot != 2)
+        return fail("uart-directory");
+    note("UART: directory-pass\n", 21);
+    /* Let the directory worker finish before taking a stable baseline. */
+    a20_thread_sleep((a20_time_t){.nsecs = 100000000});
+    uint64_t task_baseline = 0, zombie_baseline = 0, errors_baseline = 0;
+    if (task_stat("task_objects", &task_baseline) < 0 ||
+        task_stat("zombies", &zombie_baseline) < 0 ||
+        task_stat("lifetime_errors", &errors_baseline) < 0)
+        return fail("uart-lifetime-baseline");
+    note_value("UART: tasks-before=", task_baseline);
+    static uint32_t latencies[10000];
+    uint64_t dot_start = a20_agent_clock_ms(0);
+    for (unsigned i = 0; i < rounds; i++) {
+        uint8_t data[12], request[44], reply[40];
+        a20_work_put32(data, 1);
+        a20_work_put32(data + 4, i);
+        a20_work_put32(data + 8, (uint32_t)-7);
+        a20_work_request_t q = {.job = 42,
+                                .shard = i,
+                                .kind = A20_WORK_OPERATOR,
+                                .operator_id = A20_WORK_DOT,
+                                .budget_ms = 1000,
+                                .input = data,
+                                .input_len = 12,
+                                .attempt = 1};
+        int n = a20_work_encode(request, sizeof(request), &q);
+        a20_handle_t endpoint = A20_HANDLE_NULL;
+        if (a20_cluster_connect_bound(&peer, 2, 200, &endpoint) < 0)
+            return fail("uart-connect");
+        uint32_t len = sizeof(reply);
+        uint64_t call_start = a20_agent_clock_ms(0);
+        int result =
+            a20_cluster_exchange(endpoint, request, n, reply, &len, 3000);
+        latencies[i] = (uint32_t)(a20_agent_clock_ms(0) - call_start);
+        a20_hdl_close(endpoint);
+        a20_work_result_t r = {0};
+        int decoded = a20_work_result_decode(reply, len, &q, &r);
+        if (result < 0 || decoded < 0 || r.status || r.output_len != 8 ||
+            a20_work_u64(r.output) != (uint64_t)((int64_t)i * -7)) {
+            note_value("UART: failed-index=", i);
+            note_value("UART: failed-result=", (uint64_t)(int64_t)result);
+            note_value("UART: failed-decoded=", (uint64_t)(int64_t)decoded);
+            note_value("UART: failed-status=", r.status);
+            return fail("uart-dot");
+        }
+    }
+    note_value("UART: dot-elapsed-ms=", a20_agent_clock_ms(0) - dot_start);
+    for (unsigned i = 1; i < rounds; i++) {
+        uint32_t value = latencies[i], at = i;
+        while (at && latencies[at - 1] > value) {
+            latencies[at] = latencies[at - 1];
+            at--;
+        }
+        latencies[at] = value;
+    }
+    note_value("UART: dot-p50-ms=", latencies[(rounds - 1) / 2]);
+    note_value("UART: dot-p95-ms=", latencies[(rounds * 95 - 1) / 100]);
+    note_value("UART: dot-calls=", rounds);
+    note("UART: reliable-pass\n", 20);
+    a20_cluster_resource_args_t resources;
+    a20_memset(&resources, 0xff, sizeof(resources));
+    started = a20_agent_clock_ms(0);
+    do {
+        if (a20_cluster_resources(&resources) < 0)
+            return fail("uart-resources");
+        if (!resources.values[A20_CLX_STAT_PROXIES])
+            break;
+        a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+    } while (a20_agent_clock_ms(0) - started < 2000);
+    if (resources.values[A20_CLX_STAT_ROUTES] != 1 ||
+        resources.values[A20_CLX_STAT_PROXIES] ||
+        resources.values[A20_CLX_STAT_INFLIGHT] ||
+        resources.values[A20_CLX_STAT_INFLIGHT_BYTES] ||
+        resources.values[A20_CLX_STAT_INFLIGHT_PEAK_BYTES] < 94 ||
+        !resources.values[A20_CLX_STAT_RX_PEAK_BYTES] ||
+        resources.values[A20_CLX_STAT_REPLAY_BYTES] >
+            resources.values[A20_CLX_STAT_MAX_REPLAY_BYTES])
+        return fail("uart-resource-release");
+    note_value("UART: inflight-peak-bytes=",
+               resources.values[A20_CLX_STAT_INFLIGHT_PEAK_BYTES]);
+    note_value("UART: rx-peak-bytes=",
+               resources.values[A20_CLX_STAT_RX_PEAK_BYTES]);
+    uint64_t tasks_after = 0, zombies_after = 0, errors_after = 0;
+    started = a20_agent_clock_ms(0);
+    do {
+        a20_thread_sleep((a20_time_t){.nsecs = 10000000});
+        if (task_stat("task_objects", &tasks_after) < 0 ||
+            task_stat("zombies", &zombies_after) < 0 ||
+            task_stat("lifetime_errors", &errors_after) < 0)
+            return fail("uart-lifetime-read");
+        if (tasks_after <= task_baseline && zombies_after <= zombie_baseline)
+            break;
+    } while (a20_agent_clock_ms(0) - started < 2000);
+    note_value("UART: tasks-after=", tasks_after);
+    note_value("UART: zombies-after=", zombies_after);
+    note_value("UART: lifetime-errors=", errors_after);
+    if (tasks_after > task_baseline || zombies_after > zombie_baseline ||
+        errors_after != errors_baseline)
+        return fail("uart-lifetime-release");
+    note("UART: resources-pass\n", 21);
+    a20_handle_t agent = A20_HANDLE_NULL, control = A20_HANDLE_NULL;
+    if (spawn_service(agent_path, &agent) < 0 ||
+        spawn_service(control_path, &control) < 0)
+        return fail("uart-services");
+    unsigned seen = 0;
+    started = a20_agent_clock_ms(0);
+    while (seen != 3 && a20_agent_clock_ms(0) - started < 15000) {
+        a20_cluster_selection_t selected;
+        if (a20_cluster_resolve_any("work", A20_WORK_OPERATOR, A20_WORK_DOT, 12,
+                                    300, &selected) == 0)
+            seen |= selected.node.bytes[15] == 1   ? 1
+                    : selected.node.bytes[15] == 2 ? 2
+                                                   : 0;
+    }
+    if (seen != 3)
+        return fail("uart-any");
+    uint8_t vectors[512], inputs[8][132];
+    uint64_t expected = 0;
+    for (unsigned i = 0; i < 64; i++) {
+        int32_t av = (int32_t)i - 20, bv = 7 - (int32_t)i;
+        a20_work_put32(vectors + 4 * i, (uint32_t)av);
+        a20_work_put32(vectors + 4 * (64 + i), (uint32_t)bv);
+        expected += (uint64_t)((int64_t)av * bv);
+    }
+    a20_job_task_t tasks[A20_JOB_DOT_TASKS];
+    int count =
+        a20_job_dot_graph(tasks, A20_JOB_DOT_TASKS, inputs, vectors, 64);
+    a20_job_t job;
+    if (count != 7 ||
+        a20_job_init(&job, 1000, tasks, count, a20_agent_clock_ms(0), 20000,
+                     1500, 4) < 0 ||
+        a20_cluster_job_run(&job, "work") < 0 || job.state != A20_JOB_DONE ||
+        tasks[count - 1].result != expected)
+        return fail("uart-tree");
+    seen = 0;
+    for (int i = 0; i < count; i++)
+        seen |= tasks[i].target.node_id[15] == 1   ? 1
+                : tasks[i].target.node_id[15] == 2 ? 2
+                                                   : 0;
+    stop_service(control);
+    stop_service(agent);
+    if (seen != 3)
+        return fail("uart-tree-mixed");
+    note("UART: mixed-tree-pass\nUART: PASS\n", 33);
+    return 0;
+}
+
 int main(int argc, char **argv, char **envp) {
     (void)argc;
     (void)argv;
@@ -633,6 +850,21 @@ int main(int argc, char **argv, char **envp) {
     a20_start_info_t *si = a20_get_start_info();
     if (si)
         g_stdout = si->stdout_handle;
+
+    if ((argc == 4 || argc == 5) && !a20_strcmp(argv[1], "uart")) {
+        unsigned rounds = 96;
+        if (argc == 5) {
+            rounds = 0;
+            for (const char *p = argv[4]; *p; p++) {
+                if (*p < '0' || *p > '9' || rounds > 10000)
+                    return fail("uart-rounds");
+                rounds = rounds * 10 + (unsigned)(*p - '0');
+            }
+            if (rounds < 96 || rounds > 10000)
+                return fail("uart-rounds");
+        }
+        return uart_runtime(argv[2], argv[3], rounds);
+    }
 
     note("start\n", 6);
 

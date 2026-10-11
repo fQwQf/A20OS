@@ -4,6 +4,38 @@
 #define A20_CLUSTER_SNAPSHOT_SELF 0u
 #define A20_CLUSTER_SNAPSHOT_ROUTE 1u
 #define A20_CLUSTER_SNAPSHOT_EXPORT 2u
+#define A20_CLUSTER_SNAPSHOT_RESOURCES 3u
+
+/* Same 192-byte syscall envelope; resource samples have no enumeration
+ * cursor. Counts are coherent within each subsystem, not a global stop. */
+enum a20_cluster_resource_metric {
+    A20_CLX_STAT_SAMPLE_MS,
+    A20_CLX_STAT_BOOT_EPOCH,
+    A20_CLX_STAT_ROUTES,
+    A20_CLX_STAT_EXPORTS,
+    A20_CLX_STAT_PROXIES,
+    A20_CLX_STAT_INFLIGHT,
+    A20_CLX_STAT_RX_QUEUED,
+    A20_CLX_STAT_REPLAY_ENTRIES,
+    A20_CLX_STAT_ORIGINS,
+    A20_CLX_STAT_INFLIGHT_BYTES,
+    A20_CLX_STAT_REPLAY_BYTES,
+    A20_CLX_STAT_RX_BYTES,
+    A20_CLX_STAT_INFLIGHT_PEAK_BYTES,
+    A20_CLX_STAT_REPLAY_PEAK_BYTES,
+    A20_CLX_STAT_RX_PEAK_BYTES,
+    A20_CLX_STAT_MAX_ROUTES,
+    A20_CLX_STAT_MAX_EXPORTS,
+    A20_CLX_STAT_MAX_PROXIES,
+    A20_CLX_STAT_MAX_INFLIGHT,
+    A20_CLX_STAT_MAX_REPLAY_BYTES,
+    A20_CLX_STAT_COUNT
+};
+typedef struct a20_cluster_resource_args {
+    uint32_t size, version, kind, index;
+    uint64_t generation, reserved;
+    uint64_t values[A20_CLX_STAT_COUNT];
+} a20_cluster_resource_args_t;
 /* Read-only native ABI. Begin with index=0, generation=0; continue using
  * next_index and the returned generation. BUSY means restart enumeration;
  * NOT_FOUND marks the end. Output fields are never input validation. */

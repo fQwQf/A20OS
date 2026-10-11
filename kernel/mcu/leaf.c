@@ -702,6 +702,9 @@ void a20_mcu_leaf_poll(void) {
         else if (r < 0)
             leaf_c.rx_drops++; /* half frame dropped, decoder re-synced */
     }
+    /* RX handlers can refresh heartbeat/handshake timestamps after the
+     * poll's first clock read. Re-sample before subtracting those values. */
+    now = timer_get_ticks();
     /* 04 §4: inter-byte silence > 50 ms kills the half frame. */
     if (a20_clx_slip_rx_timeout(&leaf_rx, now))
         leaf_c.rx_drops++;

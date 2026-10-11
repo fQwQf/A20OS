@@ -24,7 +24,7 @@ node_id 为 16 字节持久身份；全零代表 LOCAL，全 ff 为保留广播�
 | `cluster_route` | ADD/DEL/REPLACE、node_id、transport_id、next_hop、metric | 0 |
 | `cluster_event_subscribe` | 事件 mask | EventQ 句柄 |
 | `cluster_link_status` | node_id；LOCAL 代表汇总 | 状态/计数写回参数 |
-| `cluster_snapshot` (0x0526) | kind/index/generation | 当前身份、资源档或单条路由/服务快照 |
+| `cluster_snapshot` (0x0526) | kind/index/generation | 当前身份、资源档、运行资源计数或单条路由/服务快照 |
 
 `set_self` caps 使用 RELAY、RELIABLE、LEAF 位；LEAF 与 RELAY 互斥。
 RELIABLE 为数据面实际能力，内核发布时附带它，是否能建立可靠连接还取决于

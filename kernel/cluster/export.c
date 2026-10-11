@@ -473,3 +473,7 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
     }
     a20_channel_ep_release(peer);
 }
+
+void a20_clx_export_resources(uint64_t *v) {
+    v[A20_CLX_STAT_EXPORTS] = g_clx_export_count;
+}

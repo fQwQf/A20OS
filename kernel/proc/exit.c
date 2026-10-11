@@ -175,6 +175,8 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
 {
     if (!child)
         return 0;
+    if (!parent || parent == proc_idle_task())
+        return 1;
     if (child->clone_flags & CLONE_THREAD)
         return 1;
     if (child->exit_signal != SIGCHLD)

@@ -18,6 +18,16 @@ a20_cluster_snapshot(a20_cluster_snapshot_args_t *out) {
     return a20_syscall6(A20_SYS_cluster_snapshot, (uint64_t)out, 0, 0, 0, 0, 0);
 }
 
+static inline a20_status_t
+a20_cluster_resources(a20_cluster_resource_args_t *out) {
+    out->size = sizeof(*out);
+    out->version = 1;
+    out->kind = A20_CLUSTER_SNAPSHOT_RESOURCES;
+    out->index = 0;
+    out->generation = out->reserved = 0;
+    return a20_syscall6(A20_SYS_cluster_snapshot, (uint64_t)out, 0, 0, 0, 0, 0);
+}
+
 /* All-zero means this machine; addressing (LOCAL, slot) stays on the local
  * fast path and is never serialized. */
 static inline void a20_node_id_local(a20_node_id_t *out) {

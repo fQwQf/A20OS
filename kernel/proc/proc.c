@@ -672,7 +672,7 @@ task_t *proc_alloc_task_slot(void) {
 }
 
 // Allocate a kernel thread
-int proc_alloc(void (*entry)(void)) {
+static int proc_alloc_kernel(void (*entry)(void), int detached) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_pid_alloc();
@@ -680,12 +680,17 @@ int proc_alloc(void (*entry)(void)) {
         proc_destroy_task(t);
         return -EAGAIN;
     }
-    proc_task_init_common(t, proc_current(), 0);
+    if (detached)
+        proc_task_init_detached(t);
+    else
+        proc_task_init_common(t, proc_current(), 0);
     proc_link_newborn(t);
     proc_pid_register(t);
 #ifndef CONFIG_MCU
-    fdtable_close_all(t);
-    fdtable_init_stdio(t);
+    if (!detached) {
+        fdtable_close_all(t);
+        fdtable_init_stdio(t);
+    }
 #endif
     t->fs.cwd[0] = '/';
     t->fs.cwd[1] = '\0';
@@ -717,6 +722,17 @@ int proc_alloc(void (*entry)(void)) {
     kdebug("[PROC] kthread pid=%d\n", t->pid);
     proc_make_ready(t);
     return t->pid;
+}
+
+int proc_alloc(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 0);
+}
+
+/* Internal workers have no user parent and are reaped by the scheduler. */
+int proc_alloc_detached(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 1);
 }
 
 /* Allocate a user-mode task with given entry point and stack */
