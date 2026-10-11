@@ -75,6 +75,14 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
     if (!t || !st)
         return;
 
+    /* no_new_privs is sticky across exec: neither set-id mode bits nor
+     * root's capability reconstruction may grant new authority. */
+    if (t->policy.no_new_privs) {
+        t->cred.suid = t->cred.euid;
+        t->cred.sgid = t->cred.egid;
+        return;
+    }
+
     int old_uid  = t->cred.uid;
     int old_euid = t->cred.euid;
     int old_suid = t->cred.suid;

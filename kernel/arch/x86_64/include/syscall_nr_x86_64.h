@@ -555,7 +555,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 238 */ SYS_set_mempolicy,
         /* 239 */ SYS_get_mempolicy,
         /* 240 */ SYS_mq_open,
-        /* 241 */ SYS_perf_event_open,
+        /* 241 */ SYS_mq_unlink,
         /* 242 */ SYS_mq_timedsend,
         /* 243 */ SYS_mq_timedreceive,
         /* 244 */ SYS_mq_notify,
@@ -631,7 +631,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 314 */ SYS_sched_setattr,
         /* 315 */ SYS_sched_getattr,
         /* 316 */ SYS_renameat2,
-        /* 317 */ SYS_membarrier,
+        /* 317 */ SYS_seccomp,
         /* 318 */ SYS_getrandom,
         /* 319 */ SYS_memfd_create,
         /* 320 */ SYS_kexec_file_load,  /* kexec_file_load */

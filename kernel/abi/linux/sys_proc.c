@@ -1306,6 +1306,17 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
         t->cred.cap_bounding &= ~(1ULL << a1);
         return 0;
     }
+    if (op == PR_SET_NO_NEW_PRIVS) {
+        if (!t) return -ESRCH;
+        if (a1 != 1 || a2 || a3 || a4) return -EINVAL;
+        t->policy.no_new_privs = 1;
+        return 0;
+    }
+    if (op == PR_GET_NO_NEW_PRIVS) {
+        if (!t) return -ESRCH;
+        if (a1 || a2 || a3 || a4) return -EINVAL;
+        return t->policy.no_new_privs;
+    }
     if (op == PR_SET_THP_DISABLE) {
         if (!t) return -ESRCH;
         if (a1 > 1 || a2 || a3 || a4) return -EINVAL;
