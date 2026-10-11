@@ -10,6 +10,8 @@
 #include "proc/proc_internal.h"
 #include "proc/coredump.h"
 #include "proc/debug.h"
+#include "proc/pidns.h"
+#include "proc/userns.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
@@ -413,6 +415,25 @@ int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     int ret = signal_queue_task(t, signum, info, info_size, 0);
     proc_put(t);
     return ret;
+}
+
+/* A completed child group is identified by its leader, including when the
+ * last task to exit is a sibling. Keep Linux siginfo independent of the
+ * exiting worker's credentials and PID. Both tasks are referenced by caller. */
+void signal_notify_child_exit(void *parent, void *child)
+{
+    task_t *p = parent, *c = child;
+    if (!p || !c || c->exit_signal <= 0)
+        return;
+    arch_siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    info.si_signo = c->exit_signal;
+    int code = c->exit_code;
+    info.si_code = code < 0 ? ((-code & 0x80) ? CLD_DUMPED : CLD_KILLED) : CLD_EXITED;
+    info._sifields[0] = task_pid_nr_ns(c, pidns_task_own(p));
+    info._sifields[1] = userns_from_kuid(userns_task_own(p), c->cred.uid);
+    info._sifields[2] = code < 0 ? (-code & 0x7f) : (code & 0xff);
+    (void)signal_send_info(p->pid, c->exit_signal, &info, sizeof(info));
 }
 
 int signal_send_user(int pid, int signum) {
