@@ -332,7 +332,7 @@ int main(void) {
         assert(a20_work_result_decode(received + 32, received_len - 34, &work,
                                       &result) == 0);
         if (kind == A20_WORK_QUERY) {
-            assert(result.status == 0 && result.output_len == 56);
+            assert(result.status == 0 && result.output_len == 104);
             assert(a20_work_u32(result.output) == A20_WORK_CAP_OPERATOR);
             assert(a20_work_u32(result.output + 4) == 140);
         } else {

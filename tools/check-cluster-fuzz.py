@@ -25,7 +25,7 @@ def main():
               "tools/tests/test_clx_fragment.c", "tools/tests/test_clx_session.c",
               "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
               "kernel/mcu/leaf.h", "kernel/include/uapi/a20/cluster_work.h",
-              "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/cluster/transaction.h"]
+              "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/include/uapi/a20/cluster_job.h", "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "tools/tests/test_clx_word_job.c", "kernel/cluster/transaction.h"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in inputs}
     with tempfile.TemporaryDirectory(prefix="a20-cluster-fuzz-") as temporary:
         binary = str(Path(temporary) / "fuzz")
@@ -62,13 +62,20 @@ def main():
         (directory / "config.log").write_text(checked_config.stdout)
         print(checked_config.stdout, end="")
         checked_config.check_returncode()
+        words = str(Path(temporary) / "words")
+        subprocess.run(compiler + flags + ["tools/tests/test_clx_word_job.c", "-o", words], cwd=root, check=True)
+        checked_words = subprocess.run([words], cwd=root, text=True, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, timeout=60)
+        (directory / "words.log").write_text(checked_words.stdout)
+        print(checked_words.stdout, end="")
+        checked_words.check_returncode()
         elapsed = time.monotonic() - started
         (directory / "run.log").write_text(result.stdout)
         print(result.stdout, end="")
         result.check_returncode()
     metadata = {"compiler": subprocess.check_output(compiler + ["--version"], text=True).splitlines()[0],
                 "flags": flags, "platform": platform.platform(), "seed": "0x20c1a55",
-                "mutations": 1000000, "fragment_mutations": 100000, "fragment_sizes": 64118, "session_mutations": 100000, "elapsed_seconds": round(elapsed, 6),
+                "mutations": 1000000, "fragment_mutations": 100000, "fragment_sizes": 64118, "session_mutations": 100000, "config_mutations": 100000, "word_mutations": 100000, "elapsed_seconds": round(elapsed, 6),
                 "source_sha256": hashes, "scope": "host sanitizer harness; not target throughput"}
     (directory / "evidence.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print("check-cluster-fuzz: PASS (ASan/UBSan, 1M deterministic mutations)")

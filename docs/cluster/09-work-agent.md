@@ -38,6 +38,14 @@ REPLAY_SAFE 表示作业层可重派；ASSOCIATIVE 表示可做树形归约。
 
 - DOT=1：输入 `u32 n; i32 a[n]; i32 b[n]`，精确长度 `4+8n`；输出 `u64 sum`。
 - SUM64=2：输入连续小端 u64，长度必须为 8 的倍数；输出 `u64 sum`。
+- WORD_MAP=3：原始 ASCII 文本转规范有界词典。
+- WORD_MERGE=4：合并一或两个长度前缀词典，精确累加计数。
+- CONCAT=5：拼接一或两个长度前缀字节串，保留顺序并拒绝容量溢出。
+
+五个默认算子都声明 REPLAY_SAFE；SUM64、WORD_MERGE、CONCAT 声明 ASSOCIATIVE。
+默认 QUERY 正文为 24+5×16=104 B，含 CW 头共 136 B。不能固定按旧双算子
+56 B 正文分配接收缓冲。词频格式及各节点能力上限见
+[18-wordcount.md](18-wordcount.md)。
 
 累加都按模 2^64 定义，DOT 的单个有符号乘积在 i64 内计算。
 这使 32 位 MCU 与 64 位服务器在溢出时仍有一致语义。

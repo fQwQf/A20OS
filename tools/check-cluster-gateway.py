@@ -77,6 +77,7 @@ def main():
     ports = [s.getsockname()[1] for s in reservations]
     processes, logs, endpoints = [], [], list(udp)
     events, saved, keys = {}, {}, set()
+    map_keys = set()
     trace = deque(maxlen=1024)
     success = False
     started = time.monotonic()
@@ -196,7 +197,12 @@ def main():
                                 saved.setdefault("uart-old-call", packet)
                                 if int.from_bytes(cl[64:68], "little") == 1:
                                     keys.add(bytes(cl[8:12] + cl[32:48]))
+                                if int.from_bytes(cl[64:68], "little") == 3:
+                                    map_keys.add(bytes(cl[8:12] + cl[32:48]))
                             if side == 1 and cl[3] == 7 and cl[52:54] == b"CW" and once("uart-drop-reply"):
+                                continue
+                            if (side == 1 and cl[3] == 7 and cl[52:54] == b"CW"
+                                    and int.from_bytes(cl[68:72], "little") == 3 and once("uart-drop-map-reply")):
                                 continue
                             if not unplugged:
                                 pending[1-side] += b"\xc0" + packet + b"\xc0"
@@ -242,12 +248,19 @@ def main():
                     executed = sum((directory / name).read_text().count("DOT-EXEC:")
                                    for name in ("leaf.log", "leaf-reboot.log"))
                     if (not rebooted or not replayed or executed != len(keys) or executed < 96
+                            or "UART: mixed-word-tree-pass" not in output
+                            or "MAP-EXEC:" not in (directory / "leaf-reboot.log").read_text()
                             or "GATEWAY: mtu-pass" not in output
                             or not all(events.get(k) for k in ("udp-0-drop-cs-1", "udp-0-drop-cs-2",
                                       "udp-1-drop-cs-1", "udp-1-drop-cs-2", "uart-path-mtu-256"))):
                         raise RuntimeError(f"fault/dedup/reboot evidence incomplete: {executed=}, {len(keys)=}")
                     success = True
-                    events.update({"dot_executions": executed, "unique_dot_transactions": len(keys)})
+                    maps = sum((directory / name).read_text().count("MAP-EXEC:")
+                               for name in ("leaf.log", "leaf-reboot.log"))
+                    if not maps or maps != len(map_keys) or "uart-drop-map-reply" not in events:
+                        raise RuntimeError("word map loss/dedup evidence missing")
+                    events.update({"dot_executions": executed, "unique_dot_transactions": len(keys),
+                                   "map_executions": maps, "unique_map_transactions": len(map_keys)})
                     print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree" +
                           (", automatic route/daemon recovery/lease expiry" if args.gossip else "") + ")")
                     return
@@ -269,7 +282,8 @@ def main():
         sources = ["kernel/cluster/session.c", "kernel/cluster/session_control.h",
                    "kernel/cluster/transport.c", "kernel/cluster/udp.c", "kernel/cluster/uart.c",
                    "kernel/mcu/leaf.c", "kernel/cluster/remote_ep.c", "kernel/cluster/route.c",
-                   "kernel/include/uapi/a20/cluster_gossip.h", "kernel/include/uapi/a20/cluster_control.h",
+                   "kernel/include/uapi/a20/cluster_gossip.h", "kernel/include/uapi/a20/cluster_control.h", "kernel/include/uapi/a20/cluster_job.h",
+                   "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "user/liba20rt/a20_cluster_job.h",
                    "user/svc/clusterd.c", "user/tests/test_native_cluster.c", "tools/targets-dev.mk",
                    "tools/check-cluster-gateway.py", "tools/fixtures/clx_leaf_process.c"]
         events.update({"success": success, "elapsed_seconds": time.monotonic()-started,

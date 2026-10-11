@@ -9,12 +9,18 @@
 #define A20_JOB_FAILED 4u
 #define A20_JOB_CANCELED 5u
 #define A20_JOB_DEADLINE 6u
-#define A20_JOB_MAX_INPUT 132u
+#define A20_JOB_MAX_INPUT 344u
+#define A20_JOB_MAX_OUTPUT 168u
+#define A20_JOB_MAX_TASKS 64u
 #define A20_JOB_NO_CHILD UINT32_MAX
 
 /* One owner drives this allocation-free state machine on every architecture.
  * Definitions are caller-owned and stay immutable until the job terminates.
- * Each reduction has at most two predecessors and an eight-byte result. */
+ * Each reduction has at most two predecessors. Optional output storage and
+ * input framing extend the original eight-byte SUM64 graph without a heap. */
+typedef int (*a20_job_combine_fn)(void *ctx, const uint8_t *const parts[2],
+                                  const uint32_t lengths[2], uint32_t count,
+                                  uint8_t *out, uint32_t capacity);
 typedef struct a20_job_target {
     uint8_t node_id[16];
     uint64_t boot_epoch;
@@ -27,6 +33,10 @@ typedef struct a20_job_task {
     uint32_t state, attempt, retryable, committed_attempt;
     uint64_t lease_until, result;
     a20_job_target_t target;
+    uint8_t *output;
+    uint32_t output_capacity, output_len;
+    a20_job_combine_fn combine;
+    void *combine_ctx;
 } a20_job_task_t;
 typedef struct a20_job {
     uint64_t id, deadline;
@@ -43,9 +53,10 @@ static inline int a20_job_node_equal(const uint8_t a[16], const uint8_t b[16]) {
 static inline int a20_job_init(a20_job_t *j, uint64_t id, a20_job_task_t *tasks,
                                uint32_t count, uint64_t now, uint32_t budget_ms,
                                uint32_t attempt_ms, uint32_t max_attempts) {
-    if (!j || !id || !tasks || !count || !budget_ms || budget_ms > 30000 ||
-        !attempt_ms || attempt_ms > budget_ms || !max_attempts ||
-        max_attempts > 8 || now > UINT64_MAX - budget_ms)
+    if (!j || !id || !tasks || !count || count > A20_JOB_MAX_TASKS ||
+        !budget_ms || budget_ms > 30000 || !attempt_ms ||
+        attempt_ms > budget_ms || !max_attempts || max_attempts > 8 ||
+        now > UINT64_MAX - budget_ms)
         return -1;
     /* Validate the entire graph before touching any runtime state. */
     for (uint32_t i = 0; i < count; i++) {
@@ -53,10 +64,14 @@ static inline int a20_job_init(a20_job_t *j, uint64_t id, a20_job_task_t *tasks,
         if ((t->kind != A20_WORK_OPERATOR && t->kind != A20_WORK_PROCESS) ||
             !t->operator_id || t->input_len > A20_JOB_MAX_INPUT ||
             (t->input_len && !t->input) || t->child_count > 2 ||
+            t->output_capacity > A20_JOB_MAX_OUTPUT ||
+            (!t->output && t->output_capacity) ||
+            (t->combine && !t->child_count) ||
             (t->flags & ~(A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE)))
             return -1;
         if (t->child_count &&
-            (t->kind != A20_WORK_OPERATOR || t->operator_id != A20_WORK_SUM64 ||
+            (t->kind != A20_WORK_OPERATOR ||
+             (!t->combine && t->operator_id != A20_WORK_SUM64) ||
              t->input_len || !(t->flags & A20_WORK_ASSOCIATIVE)))
             return -1;
         for (uint32_t k = 0; k < t->child_count; k++)
@@ -75,6 +90,7 @@ static inline int a20_job_init(a20_job_t *j, uint64_t id, a20_job_task_t *tasks,
         t->state = t->child_count ? A20_JOB_WAITING : A20_JOB_READY;
         t->attempt = t->retryable = t->committed_attempt = 0;
         t->lease_until = t->result = 0;
+        t->output_len = 0;
         t->target = (a20_job_target_t){0};
     }
     return 0;
@@ -140,7 +156,66 @@ static inline void a20_job_node_failed(a20_job_t *j, const uint8_t node[16],
     }
 }
 static inline uint32_t a20_job_input_len(const a20_job_task_t *t) {
-    return t->child_count ? t->child_count * 8 : t->input_len;
+    return t->combine       ? UINT32_MAX
+           : t->child_count ? t->child_count * 8
+                            : t->input_len;
+}
+/* Pure framing of already committed child outputs. Business reduction runs
+ * at the selected agent; a custom framer must be deterministic and bounded. */
+static inline int a20_job_prepare_input(const a20_job_t *j, uint32_t index,
+                                        uint8_t *out, uint32_t capacity) {
+    if (!j || index >= j->task_count || !out)
+        return -1;
+    const a20_job_task_t *t = &j->tasks[index];
+    if (!t->child_count) {
+        if (t->input_len > capacity)
+            return -1;
+        for (uint32_t i = 0; i < t->input_len; i++)
+            out[i] = t->input[i];
+        return (int)t->input_len;
+    }
+    const uint8_t *parts[2];
+    uint32_t lengths[2];
+    uint8_t scalar[2][8];
+    for (uint32_t i = 0; i < t->child_count; i++) {
+        const a20_job_task_t *child = &j->tasks[t->children[i]];
+        if (child->state != A20_JOB_DONE)
+            return -1;
+        lengths[i] = child->output_len;
+        a20_work_put64(scalar[i], child->result);
+        parts[i] = child->output ? child->output : scalar[i];
+    }
+    if (t->combine) {
+        int n = t->combine(t->combine_ctx, parts, lengths, t->child_count, out,
+                           capacity);
+        return n >= 0 && (uint32_t)n <= capacity ? n : -1;
+    }
+    if (capacity < t->child_count * 8)
+        return -1;
+    for (uint32_t i = 0; i < t->child_count; i++) {
+        if (lengths[i] != 8)
+            return -1;
+        for (unsigned k = 0; k < 8; k++)
+            out[i * 8 + k] = parts[i][k];
+    }
+    return (int)(t->child_count * 8);
+}
+static inline int a20_job_concat_parts(void *ctx, const uint8_t *const parts[2],
+                                       const uint32_t lengths[2],
+                                       uint32_t count, uint8_t *out,
+                                       uint32_t capacity) {
+    (void)ctx;
+    unsigned used = 0;
+    for (unsigned i = 0; i < count; i++) {
+        if (capacity - used < 4 || lengths[i] > capacity - used - 4)
+            return -1;
+        a20_work_put32(out + used, lengths[i]);
+        used += 4;
+        for (unsigned k = 0; k < lengths[i]; k++)
+            out[used + k] = parts[i][k];
+        used += lengths[i];
+    }
+    return (int)used;
 }
 /* Admission accounts for all tasks currently assigned to a service. The
  * transport owner closes old attempt endpoints before reusing their slots. */
@@ -151,7 +226,12 @@ static inline int a20_job_begin(a20_job_t *j, uint32_t index,
         j->state != A20_JOB_RUNNING || now >= j->deadline)
         return -1;
     a20_job_task_t *t = &j->tasks[index];
-    uint32_t input_len = a20_job_input_len(t), inflight = 0;
+    uint8_t prepared[A20_JOB_MAX_INPUT];
+    int prepared_len =
+        a20_job_prepare_input(j, index, prepared, sizeof(prepared));
+    if (prepared_len < 0)
+        return -1;
+    uint32_t input_len = (uint32_t)prepared_len, inflight = 0;
     unsigned any = 0, all = 255;
     for (unsigned i = 0; i < 16; i++) {
         any |= target->node_id[i];
@@ -159,7 +239,8 @@ static inline int a20_job_begin(a20_job_t *j, uint32_t index,
     }
     if (t->state != A20_JOB_READY || !any || all == 255 ||
         !target->boot_epoch || !target->slot || !target->max_inflight ||
-        input_len > target->max_input || target->max_output < 8 ||
+        input_len > target->max_input ||
+        target->max_output < (t->output ? t->output_capacity : 8) ||
         capacity < A20_WORK_HEADER + input_len ||
         t->attempt >= j->max_attempts ||
         (t->child_count && !(target->flags & A20_WORK_ASSOCIATIVE)))
@@ -174,12 +255,6 @@ static inline int a20_job_begin(a20_job_t *j, uint32_t index,
     }
     if (inflight >= target->max_inflight)
         return -1;
-    uint8_t reduction[16];
-    for (uint32_t i = 0; i < t->child_count; i++) {
-        if (j->tasks[t->children[i]].state != A20_JOB_DONE)
-            return -1;
-        a20_work_put64(reduction + i * 8, j->tasks[t->children[i]].result);
-    }
     uint64_t remaining = j->deadline - now;
     uint32_t budget =
         remaining < j->attempt_ms ? (uint32_t)remaining : j->attempt_ms;
@@ -190,8 +265,7 @@ static inline int a20_job_begin(a20_job_t *j, uint32_t index,
                                   .budget_ms = budget,
                                   .attempt = t->attempt + 1,
                                   .input_len = input_len,
-                                  .input =
-                                      t->child_count ? reduction : t->input};
+                                  .input = prepared};
     int n = a20_work_encode(wire, capacity, &request);
     if (n < 0)
         return -1;
@@ -229,12 +303,18 @@ static inline int a20_job_complete(a20_job_t *j, uint32_t index,
                                   .attempt = t->attempt};
     a20_work_result_t result;
     if (a20_work_result_decode(wire, len, &request, &result) < 0 ||
-        result.status || result.output_len != 8) {
+        result.status ||
+        (t->output ? result.output_len > t->output_capacity
+                   : result.output_len != 8)) {
         t->state = A20_JOB_FAILED;
         j->state = A20_JOB_FAILED;
         return -1;
     }
-    t->result = a20_work_u64(result.output);
+    t->output_len = result.output_len;
+    if (t->output)
+        for (uint32_t i = 0; i < result.output_len; i++)
+            t->output[i] = result.output[i];
+    t->result = result.output_len == 8 ? a20_work_u64(result.output) : 0;
     t->committed_attempt = t->attempt;
     t->state = A20_JOB_DONE;
     if (++j->completed == j->task_count)

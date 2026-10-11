@@ -46,14 +46,19 @@ static uint32_t counted_dot(void *ctx, const a20_work_request_t *request,
             (unsigned long long)request->job, request->shard, request->attempt);
     return a20_work_dot(ctx, request, output, output_len);
 }
+static uint32_t counted_map(void *ctx, const a20_work_request_t *request,
+                            uint8_t *output, uint32_t *output_len) {
+    fprintf(stderr, "MAP-EXEC: job=%llu shard=%u attempt=%u\n",
+            (unsigned long long)request->job, request->shard, request->attempt);
+    return a20_work_word_map(ctx, request, output, output_len);
+}
 int main(int argc, char **argv) {
     assert(fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK) == 0);
     a20_mcu_leaf_init();
-    a20_work_operator_t ops[] = {
-        {A20_WORK_DOT, A20_WORK_REPLAY_SAFE, 140, 8, counted_dot, NULL},
-        {A20_WORK_SUM64, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 136, 8,
-         a20_work_sum64, NULL},
-    };
+    a20_work_operator_t ops[sizeof(leaf_operators) / sizeof(leaf_operators[0])];
+    memcpy(ops, leaf_operators, sizeof(ops));
+    ops[0].run = counted_dot;
+    ops[2].run = counted_map;
     a20_work_agent_t agent = leaf_default_agent;
     agent.operators = ops;
     uint8_t id[16] = {0};
