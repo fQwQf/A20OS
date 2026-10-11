@@ -387,7 +387,7 @@ vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 vnode_t *vfs_resolve_no_follow(const char *path);
 vnode_t *vfs_resolve_no_follow_final(const char *path);
-vnode_t *vnode_lookup_path(vnode_t *root, const char *path);
+vnode_t *vnode_lookup_path(mount_t *mnt, const char *path);
 vnode_t *vnode_lookup_path_openat2(const char *path,
                                    const char *start,
                                    const char *root_path,
