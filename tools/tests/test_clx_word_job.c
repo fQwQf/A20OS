@@ -25,8 +25,9 @@ static const a20_work_agent_t agent = {.operators = operators,
                                        .max_output = 168,
                                        .max_inflight = 1,
                                        .max_budget_ms = 30000};
-static a20_job_task_t tasks[15];
-static uint8_t inputs[8][132], outputs[15][A20_WORD_RESULT];
+static a20_job_task_t tasks[A20_JOB_WORD_TASKS];
+static uint8_t inputs[A20_JOB_WORD_LEAVES][A20_JOB_WORD_CHUNK],
+    outputs[A20_JOB_WORD_TASKS][A20_WORD_RESULT];
 static uint8_t wire[A20_WORK_HEADER + A20_JOB_MAX_INPUT],
     reply[A20_WORK_HEADER + A20_JOB_MAX_OUTPUT];
 static a20_job_target_t target(unsigned id, unsigned max_input) {
@@ -69,12 +70,13 @@ static void execute(a20_job_t *job) {
 }
 int main(void) {
     const char *sentence = "Alpha beta gamma DELTA alpha beta gamma delta ";
-    uint8_t text[768], reference[132];
+    uint8_t text[A20_JOB_MAX_TEXT], reference[132];
     for (unsigned i = 0; i < sizeof(text); i++)
         text[i] = sentence[i % strlen(sentence)];
     for (unsigned len = 0; len <= sizeof(text); len++) {
-        int count = a20_job_word_graph(tasks, 15, inputs, outputs, text, len);
-        assert(count > 0 && count <= 15);
+        int count = a20_job_word_graph(tasks, A20_JOB_WORD_TASKS, inputs,
+                                       outputs, text, len);
+        assert(count > 0 && count <= (int)A20_JOB_WORD_TASKS);
         a20_job_t job;
         assert(!a20_job_init(&job, len + 1, tasks, count, 0, 1000, 100, 3));
         execute(&job);
@@ -85,6 +87,19 @@ int main(void) {
                !memcmp(tasks[count - 1].output, reference, n));
         assert(a20_word_dictionary_valid(reference, n));
     }
+    /* Twelve-byte words force five-word shards: exactly 16 leaves and a
+     * 31-node tree, including all four reduction levels. */
+    const char *word = "alpha1234567 ";
+    for (unsigned i = 0; i < 1014; i++)
+        text[i] = word[i % 13];
+    int wide_count = a20_job_word_graph(tasks, A20_JOB_WORD_TASKS, inputs,
+                                        outputs, text, 1014);
+    assert(wide_count == (int)A20_JOB_WORD_TASKS);
+    a20_job_t wide;
+    assert(!a20_job_init(&wide, 9000, tasks, wide_count, 0, 1000, 100, 3));
+    execute(&wide);
+    assert(tasks[wide_count - 1].output_len == 20 &&
+           a20_work_u32(tasks[wide_count - 1].output + 16) == 78);
     /* Generic byte results include zero bytes, ordered CONCAT and stale-attempt
      * isolation; the old result buffer is never committed into a new attempt. */
     uint8_t raw[3][168];
@@ -171,6 +186,6 @@ int main(void) {
         (void)a20_work_word_merge(0, &q, reference, &out);
         (void)a20_word_dictionary_valid(text, len);
     }
-    puts("test_clx_word_job: 769 split/merge trees, generic/zero/CONCAT "
+    puts("test_clx_word_job: 1025 split/merge trees, generic/zero/CONCAT "
          "results, stale attempts, exact limits and 100K mutations PASS");
 }

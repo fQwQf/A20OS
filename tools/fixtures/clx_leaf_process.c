@@ -63,9 +63,14 @@ int main(int argc, char **argv) {
     agent.operators = ops;
     uint8_t id[16] = {0};
     id[15] = 2;
+    if (argc == 3) {
+        assert(!strcmp(argv[1], "--node") &&
+               (!strcmp(argv[2], "7") || !strcmp(argv[2], "8")));
+        id[15] = argv[2][0] - '0';
+    }
     assert(a20_mcu_leaf_set_io(raw_send, raw_receive, NULL) == 0);
     assert(a20_mcu_leaf_set_agent(&agent) == 0);
-    assert(argc == 1 || (argc == 2 && !strcmp(argv[1], "300")));
+    assert(argc == 1 || argc == 3 || (argc == 2 && !strcmp(argv[1], "300")));
     assert(a20_mcu_leaf_configure(id, argc == 2 ? 300 : 200) == 0);
     fprintf(stderr, "LEAF-READY\n");
     uint64_t last_status = 0;

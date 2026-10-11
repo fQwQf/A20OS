@@ -991,7 +991,7 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         a20_work_put32(vectors + 4 * (64 + i), (uint32_t)bv);
         expected += (uint64_t)((int64_t)av * bv);
     }
-    a20_job_task_t tasks[A20_JOB_DOT_TASKS];
+    a20_job_task_t tasks[A20_JOB_WORD_TASKS];
     int count =
         a20_job_dot_graph(tasks, A20_JOB_DOT_TASKS, inputs, vectors, 64);
     a20_job_t job;
@@ -1006,15 +1006,16 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         seen |= tasks[i].target.node_id[15] == 1   ? 1
                 : tasks[i].target.node_id[15] == 2 ? 2
                                                    : 0;
-    uint8_t text[736], word_outputs[15][A20_WORD_RESULT],
+    uint8_t text[736], word_outputs[A20_JOB_WORD_TASKS][A20_WORD_RESULT],
+        word_inputs[A20_JOB_WORD_LEAVES][A20_JOB_WORD_CHUNK],
         expected_words[A20_WORD_RESULT];
     const char *phrase = "alpha beta gamma delta ";
     for (unsigned i = 0; i < sizeof(text); i++)
         text[i] = phrase[i % 23];
     a20_work_request_t map = {.input = text, .input_len = sizeof(text)};
     uint32_t expected_len = sizeof(expected_words);
-    int words =
-        a20_job_word_graph(tasks, 15, inputs, word_outputs, text, sizeof(text));
+    int words = a20_job_word_graph(tasks, A20_JOB_WORD_TASKS, word_inputs,
+                                   word_outputs, text, sizeof(text));
     if (a20_work_word_map(0, &map, expected_words, &expected_len) ||
         words < 3 ||
         a20_job_init(&job, 1001, tasks, words, a20_agent_clock_ms(0), 20000,

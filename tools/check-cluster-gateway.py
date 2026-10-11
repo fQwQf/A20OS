@@ -80,6 +80,7 @@ def main():
     processes, logs, endpoints = [], [], list(udp)
     events, saved, keys = {}, {}, set()
     map_keys = set()
+    map_acks = set()
     trace = deque(maxlen=1024)
     success = False
     started = time.monotonic()
@@ -192,6 +193,8 @@ def main():
                                 events["uart-path-mtu-256"] = events.get("uart-path-mtu-256", 0) + 1
                             if side == 1 and cl[3] == 7 and len(cl) >= 54 and cl[4] & 1 and int.from_bytes(cl[48:52], "little") == 13:
                                 events["mcu-admission-busy"] = events.get("mcu-admission-busy", 0) + 1
+                            if side == 1 and cl[3] == 9 and int.from_bytes(cl[16:20], "little") == 0x68691772:
+                                map_acks.add(int.from_bytes(cl[8:12], "little"))
                             work = len(cl) >= 82 and cl[48:50] == b"CW"
                             if side == 0 and work and cl[3] == 6 and cl[51] == 2:
                                 if once("uart-drop-work"):
@@ -266,14 +269,15 @@ def main():
                     success = True
                     maps = sum((directory / name).read_text().count("MAP-EXEC:")
                                for name in ("leaf.log", "leaf-reboot.log"))
-                    if not maps or maps != len(map_keys) or "uart-drop-map-reply" not in events:
+                    admitted_maps = sum(int.from_bytes(key[:4], "little") in map_acks for key in map_keys)
+                    if not maps or maps != admitted_maps or "uart-drop-map-reply" not in events:
                         raise RuntimeError("word map loss/dedup evidence missing")
                     if ("UART: post-job-cache-pass" not in output or
                             (args.abandon and ("UART: word-retries=0000000000000000" in output
                                                or events["uart-drop-map-reply"] < 2))):
                         raise RuntimeError("attempt abandonment/cache retirement evidence missing")
                     events.update({"dot_executions": executed, "unique_dot_transactions": len(keys),
-                                   "map_executions": maps, "unique_map_transactions": len(map_keys)})
+                                   "map_executions": maps, "admitted_map_transactions": admitted_maps, "requested_map_transactions": len(map_keys)})
                     print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree" +
                           (", automatic route/daemon recovery/lease expiry" if args.gossip else "") + ")")
                     return

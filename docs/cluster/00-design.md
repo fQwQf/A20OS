@@ -5,9 +5,11 @@
 [07-unified-runtime.md](07-unified-runtime.md)，实际证据见
 [08-implementation-status.md](08-implementation-status.md)。
 
-当前已实现跨独立内核的 UDP 调用、UART 主节点/叶子协议、有界可靠事务和
-共享 dot 算子。动态成员目录、完整统一 agent、混合作业与生产硬化仍在推进，
-不能把数据面测试通过解释为整个集群设计已经完成。
+当前已实现独立内核 UDP、UART 主/叶、端到端会话、可靠调用与多跳 UDP 分片，
+共用算子/能力协议，动态成员、服务目录、租约路由，持久部署配置与 Native
+服务监管，以及分片重派和字节结果树归约。16 片词频已通过 8 主机和 6 主机+
+2 leaf 两种配比的故障验证。物理板联调、完整生产故障矩阵、长期 soak 和性能
+规模目标仍需独立验收，不能把仿真与构建等同于量产可用。
 
 ## 1. 分层
 
@@ -68,12 +70,17 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 ## 5. 使用与验证入口
 
-- [01-abi.md](01-abi.md)：六个 Native syscall、句柄所有权与错误语义。
+- [01-abi.md](01-abi.md)：七个 Native syscall、句柄所有权与错误语义。
 - [02-wire-protocol.md](02-wire-protocol.md)：v0 与协商 v1 事务扩展。
 - [03-kernel-impl.md](03-kernel-impl.md)：线程、锁、缓存与生命周期。
 - [04-transports.md](04-transports.md)：UDP/UART/loopback 接入与预算。
 - [02-udp-demo.md](02-udp-demo.md)：真实双内核验收及故障注入。
 - [05-userspace.md](05-userspace.md)：控制面与作业面目标，未落地项保留标注。
 - [06-production.md](06-production.md)：生产验收要求。
+- [17-deployment-supervision.md](17-deployment-supervision.md)：持久配置、服务监管与恢复。
+- [18-wordcount.md](18-wordcount.md)：文件 CLI、通用结果与 16 片/8 节点演示。
+- [10-operator-guide.md](10-operator-guide.md)：部署、拓扑、恢复、排障和信任边界。
+- [11-api-tutorial.md](11-api-tutorial.md)：从导出到 any 算子调用与自定义图。
+- [19-routed-fragmentation.md](19-routed-fragmentation.md)：多跳分片协商与资源降级。
 
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。

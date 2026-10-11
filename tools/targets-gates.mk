@@ -332,3 +332,8 @@ check-cluster-uart:
 .PHONY: check-cluster-gateway
 check-cluster-gateway:
 	$(PYTHON) tools/check-cluster-gateway.py
+
+.PHONY: demo-wordcount
+demo-wordcount:
+	$(PYTHON) tools/check-cluster-wordcount.py
+	$(PYTHON) tools/check-cluster-wordcount.py --mixed

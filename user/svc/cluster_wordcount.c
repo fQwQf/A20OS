@@ -15,7 +15,7 @@ int main(int argc, char **argv, char **envp) {
         output = start->stdout_handle;
     if (argc != 2)
         return error(
-            "usage: cluster-wordcount <text-file; at most 768 bytes>\n");
+            "usage: cluster-wordcount <text-file; at most 1024 bytes>\n");
     a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
                                  .path = (uint64_t)(uintptr_t)argv[1],
                                  .path_len = (uint32_t)a20_strlen(argv[1]),

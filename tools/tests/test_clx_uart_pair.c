@@ -612,7 +612,7 @@ int main(void) {
     assert(
         leaf_origin_find(a20_clx_fnv1a32(caller), caller, 0)->session.epoch ==
         501);
-    for (unsigned i = 0; i < 2; i++) {
+    for (unsigned i = 0; i < LEAF_ORIGINS - 2; i++) {
         uint8_t extra[16] = {0};
         extra[15] = 90 + i;
         routed_confirmation(extra, 700 + i, NULL, NULL);
