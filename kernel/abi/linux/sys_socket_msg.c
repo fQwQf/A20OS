@@ -168,7 +168,10 @@ static int parse_send_rights(const socket_msghdr_t *mh, scm_rights_t *out)
         }
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
             size_t payload = cmsg->cmsg_len - need;
-            if (payload == 0 || (payload % sizeof(int)) != 0 ||
+            /* A header with no descriptors is valid (e.g. request/reply
+             * messages whose optional handle list is empty). Keep parsing
+             * later headers and send the ordinary payload as usual. */
+            if ((payload % sizeof(int)) != 0 ||
                 payload / sizeof(int) > NET_SCM_MAX_FDS) {
                 scm_rights_clear(out);
                 return -EINVAL;
