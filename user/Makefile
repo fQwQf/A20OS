@@ -204,6 +204,7 @@ WGET_CMD_SRC := cmds/net/wget.c
 WGET_OBJ := $(OBJ_DIR)/cmds/net/wget.o
 WGET_CMD := $(BUILD_DIR)/wget
 LOCAL_CMD_SRCS := $(filter-out $(WGET_CMD_SRC),$(wildcard cmds/*/*.c))
+ARCH_CMD_SRCS := $(wildcard arch/$(ARCH)/cmds/*.c)
 LOCAL_CMD_NAMES := $(basename $(notdir $(LOCAL_CMD_SRCS)))
 
 SBASE_ALL_BINS := basename cat chgrp chmod chown chroot cksum cmp comm cp cut date dd \
@@ -256,7 +257,8 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
                 -DA20OS_NO_FAST_SQR
 
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
-LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES))
+LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES) $(basename $(notdir $(ARCH_CMD_SRCS))))
+ARCH_CMD_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(ARCH_CMD_SRCS))
 
 # The hypervisor guest loader, shared by the two programs that boot a guest:
 # /hyp_boot (the fixed-parameter smoke gate) and /hypvm (the same boot with its
@@ -593,7 +595,7 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
                -DMKSH_DONT_EMIT_IDSTRING -DMKSH_BUILDSH -DMKSH_BUILD_R=599
 
 USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
-                             $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
+                             $(LOCAL_CMD_OBJS) $(ARCH_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
                              $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
                              $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
                              $(HYP_GUEST_OBJ)
@@ -678,6 +680,17 @@ $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o
 	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$^ $(CRT_END) $(LIBC)
 endef
 $(foreach src,$(LOCAL_CMD_SRCS),$(eval $(call LOCAL_CMD_RULE,$(src))))
+
+define ARCH_CMD_RULE
+$(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst %.c,$(OBJ_DIR)/%.o,$(1)) | build_dir musl_prepare
+	@mkdir -p $$(dir $$@)
+	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$^ $(CRT_END) $(LIBC)
+endef
+$(foreach src,$(ARCH_CMD_SRCS),$(eval $(call ARCH_CMD_RULE,$(src))))
+$(OBJ_DIR)/arch/%.o: arch/%.c Makefile | build_dir musl_prepare
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 
 # The two guest-boot commands additionally link the shared loader.  Prerequisite
 # only, no recipe: the rule above already gave both targets one.
