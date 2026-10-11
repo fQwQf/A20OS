@@ -84,6 +84,7 @@ typedef struct proc_cred {
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_RESOURCE     24
 #define CAP_SYS_BOOT         22
+#define CAP_NET_ADMIN        12
 #define CAP_NET_RAW          13
 
 typedef struct proc_limits {
@@ -398,6 +399,7 @@ typedef struct task_t {
      * ownership rule as mnt_ns: one reference, released by
      * userns_release_task() from fdtable_close_all(). */
     struct user_namespace *user_ns;
+    struct resource_namespace *resource_ns[8];
     proc_ns_context_t ns_ctx;
 
     /* PID namespace membership (kernel/proc/pidns.c).  pid_ns is the

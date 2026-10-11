@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "proc/userns.h"
 #include "ipc/ipc.h"
 #include "net/lwip_stack.h"
 #include "core/consts.h"
@@ -178,7 +179,7 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
         net_sock_unlock(s, sf);
     }
     if (!dst && connected)
-        dst = net_find_bound_socket(s->domain, s->type, peer_addr, peer_len);
+        dst = net_find_bound_socket(s->net_ns, s->domain, s->type, peer_addr, peer_len);
     if (!dst)
         return connected ? -ECONNREFUSED : -EDESTADDRREQ;
 
@@ -732,9 +733,65 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
     return -ENOTTY;
 }
 
+/* A newly created network namespace owns an initially-down loopback and no
+ * physical NIC. The fd's namespace is used even after its owner calls setns. */
+static int net_namespace_ioctl(resource_namespace_t *ns, unsigned long req, void *uarg)
+{
+    if (req == A20_SIOCGIFCONF) {
+        struct a20_ifconf ifc;
+        if (copy_from_user(&ifc, uarg, sizeof(ifc)) < 0) return -EFAULT;
+        if (ifc.ifc_len < 0) return -EINVAL;
+        if (!ifc.ifc_buf) ifc.ifc_len = sizeof(struct a20_ifreq);
+        else if (ifc.ifc_len >= (int)sizeof(struct a20_ifreq)) {
+            struct a20_ifreq ifr = {0};
+            strcpy(ifr.ifr_name, "lo");
+            ifr.ifr_ifru.addr.sa_family = A20_AF_INET;
+            ifr.ifr_ifru.addr.sa_addr = 0x0100007f;
+            if (copy_to_user(ifc.ifc_buf, &ifr, sizeof(ifr)) < 0) return -EFAULT;
+            ifc.ifc_len = sizeof(ifr);
+        } else ifc.ifc_len = 0;
+        return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
+    }
+    struct a20_ifreq ifr;
+    if (copy_from_user(&ifr, uarg, sizeof(ifr)) < 0) return -EFAULT;
+    ifr.ifr_name[A20_IFNAMSIZ - 1] = 0;
+    if (req == A20_SIOCGIFNAME) {
+        int index; memcpy(&index, ifr.ifr_ifru.raw, sizeof(index));
+        if (index != 1) return -ENODEV;
+        strcpy(ifr.ifr_name, "lo");
+        return copy_to_user(uarg, &ifr, sizeof(ifr)) < 0 ? -EFAULT : 0;
+    }
+    if (strcmp(ifr.ifr_name, "lo")) return -ENODEV;
+    uint32_t value = 0;
+    switch (req) {
+    case A20_SIOCGIFINDEX: value = 1; break;
+    case A20_SIOCGIFMTU: value = __atomic_load_n(&ns->loopback_mtu, __ATOMIC_ACQUIRE); break;
+    case A20_SIOCGIFFLAGS:
+        value = 8 | (__atomic_load_n(&ns->loopback_up, __ATOMIC_ACQUIRE) ? A20_IFF_UP | A20_IFF_RUNNING : 0);
+        return copy_to_user((char *)uarg + A20_IFNAMSIZ, &value, sizeof(short)) < 0 ? -EFAULT : 0;
+    case A20_SIOCGIFADDR: value = 0x0100007f; return net_ifreq_put_addr(uarg, A20_AF_INET, &value, 4);
+    case A20_SIOCGIFNETMASK: value = 0x000000ff; return net_ifreq_put_addr(uarg, A20_AF_INET, &value, 4);
+    case A20_SIOCGIFHWADDR: { uint8_t zero[6] = {0}; return net_ifreq_put_addr(uarg, 772, zero, 6); }
+    case A20_SIOCSIFFLAGS:
+    case A20_SIOCSIFMTU:
+        if (!userns_capable(proc_current(), ns->owner, CAP_NET_ADMIN)) return -EPERM;
+        memcpy(&value, ifr.ifr_ifru.raw, req == A20_SIOCSIFFLAGS ? sizeof(short) : sizeof(int));
+        if (req == A20_SIOCSIFFLAGS) __atomic_store_n(&ns->loopback_up, !!(value & A20_IFF_UP), __ATOMIC_RELEASE);
+        else {
+            if (value < 68 || value > 65536) return -EINVAL;
+            __atomic_store_n(&ns->loopback_mtu, value, __ATOMIC_RELEASE);
+        }
+        return 0;
+    default: return -EOPNOTSUPP;
+    }
+    return copy_to_user((char *)uarg + A20_IFNAMSIZ, &value, sizeof(value)) < 0 ? -EFAULT : 0;
+}
+
 static int net_vfile_ioctl(vfile_t *vf, unsigned long req, void *arg)
 {
-    (void)vf;
+    net_socket_t *s = vf ? vf->priv : NULL;
+    if (s && !resource_ns_is_initial(s->net_ns))
+        return net_namespace_ioctl(s->net_ns, req, arg);
     if (req == A20_SIOCGIFCONF)
         return net_ifreq_getconf(arg);
     switch (req) {

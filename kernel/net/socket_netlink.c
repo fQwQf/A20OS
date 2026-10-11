@@ -1,3 +1,4 @@
+#include "proc/userns.h"
 #include "net/socket_internal.h"
 
 #include "core/klog.h"
@@ -199,7 +200,7 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
         int i = base + k;
         net_socket_t *s = g_sockets[i];
-        if (!s || s == requester)
+        if (!s || s == requester || s->net_ns != requester->net_ns)
             continue;
         inet_diag_reply_t reply;
         /* Bucket outer, socket inner: the same nesting net_bucket_scan() does. */
@@ -336,7 +337,7 @@ static int netlink_uevent_broadcast(const char *action,
             uint64_t sf = net_sock_lock(s);
             bool matched = false;
             int r = 0;
-            if (s->domain == AF_NETLINK && s->bound &&
+            if (resource_ns_is_initial(s->net_ns) && s->domain == AF_NETLINK && s->bound &&
                 s->protocol == NETLINK_KOBJECT_UEVENT) {
                 net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
                 if (nl && (nl->nl_groups & UEVENT_GROUP)) {
@@ -554,8 +555,20 @@ static uint8_t nlrt_mask_prefixlen(const uint8_t mask[4])
  * taken and the lwIP
  * lock dropped before any reply is enqueued.
  */
-static int nlrt_snapshot(nlrt_link_t *out, int max)
+static int nlrt_snapshot(resource_namespace_t *ns, nlrt_link_t *out, int max)
 {
+    if (!resource_ns_is_initial(ns)) {
+        if (max < 1) return 0;
+        nlrt_link_t *e = &out[0];
+        memset(e, 0, sizeof(*e));
+        strcpy(e->name, "lo"); e->index = 1; e->loopback = 1;
+        e->mtu = __atomic_load_n(&ns->loopback_mtu, __ATOMIC_ACQUIRE);
+        e->flags = NLRT_IF_FLAGS_LOOPBACK;
+        if (__atomic_load_n(&ns->loopback_up, __ATOMIC_ACQUIRE))
+            e->flags |= NLRT_IF_FLAGS_UP | NLRT_IF_FLAGS_RUNNING;
+        e->has_ip = 1; e->ip[0] = 127; e->ip[3] = 1; e->mask[0] = 255;
+        return 1;
+    }
     uint64_t lf = a20_lwip_lock();
     int n = 0;
     for (struct netif *ni = netif_list; ni && n < max; ni = ni->next) {
@@ -777,7 +790,7 @@ static int nlrt_attr_get(const rtattr_t *a, size_t want, void *out)
  * helpers are ordered so the only failure after the first is an unknown
  * ifindex -- which the first helper called already reports.
  */
-static int nlrt_apply_newlink(const ifinfomsg_t *ifi, const uint8_t *attrs,
+static int nlrt_apply_newlink(resource_namespace_t *ns, const ifinfomsg_t *ifi, const uint8_t *attrs,
                               size_t alen)
 {
     if (ifi->ifi_index <= 0)
@@ -816,6 +829,13 @@ static int nlrt_apply_newlink(const ifinfomsg_t *ifi, const uint8_t *attrs,
     if (ifi->ifi_change & (uint32_t)NLRT_IF_FLAGS_UP)
         want_up = (ifi->ifi_flags & (uint32_t)NLRT_IF_FLAGS_UP) ? 1 : 0;
 
+    if (!resource_ns_is_initial(ns)) {
+        if (ifindex != 1) return -ENODEV;
+        if (have_mtu) __atomic_store_n(&ns->loopback_mtu, mtu, __ATOMIC_RELEASE);
+        if (ifi->ifi_change & NLRT_IF_FLAGS_UP)
+            __atomic_store_n(&ns->loopback_up, want_up, __ATOMIC_RELEASE);
+        return 0;
+    }
     int rc = 0;
     if (have_mtu) {
         rc = a20_lwip_if_set_mtu(ifindex, (uint16_t)mtu);
@@ -1010,6 +1030,7 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
      * holding it together with a net lock (taken only further
      * down). */
     if (type == RTM_NEWLINK || type == RTM_NEWADDR || type == RTM_DELADDR) {
+        if (!userns_capable(proc_current(), requester->net_ns->owner, CAP_NET_ADMIN)) return -EPERM;
         /* Only a single-message write is honoured; a multipart request would
          * carry further nlmsghdrs this path does not walk. */
         if (req->nlmsg_flags & NLM_F_MULTI)
@@ -1017,14 +1038,15 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
         const uint8_t *body = (const uint8_t *)buf + sizeof(*req);
         size_t blen = (size_t)req->nlmsg_len - sizeof(*req) - want;
         if (type == RTM_NEWLINK)
-            return nlrt_apply_newlink((const ifinfomsg_t *)body, body + want,
+            return nlrt_apply_newlink(requester->net_ns, (const ifinfomsg_t *)body, body + want,
                                       blen);
+        if (!resource_ns_is_initial(requester->net_ns)) return -EOPNOTSUPP;
         return nlrt_apply_addr(type, req->nlmsg_flags,
                                (const ifaddrmsg_t *)body, body + want, blen);
     }
 
     nlrt_link_t links[NLRT_MAX_LINKS];
-    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    int nlinks = nlrt_snapshot(requester->net_ns, links, NLRT_MAX_LINKS);
 
     net_sockaddr_nl_t from = { .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = 0 };
     /* Every reply below is enqueued into the requester, and nothing else is
@@ -1155,7 +1177,7 @@ static int nlrt_broadcast(const uint8_t *msg, size_t len, uint32_t group)
             uint64_t sf = net_sock_lock(s);
             bool matched = false;
             int r = -1;
-            if (s->domain == AF_NETLINK && s->bound &&
+            if (resource_ns_is_initial(s->net_ns) && s->domain == AF_NETLINK && s->bound &&
                 s->protocol == NETLINK_ROUTE) {
                 net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
                 if (nl && (nl->nl_groups & group)) {
@@ -1197,7 +1219,7 @@ void net_netlink_link_notify(const nlrt_link_event_t *events, int n)
     if (!events || n <= 0)
         return;
     nlrt_link_t links[NLRT_MAX_LINKS];
-    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    int nlinks = nlrt_snapshot(resource_ns_task_get(NULL, PROCNS_NET), links, NLRT_MAX_LINKS);
     if (nlinks <= 0)
         return;
 
@@ -1235,7 +1257,7 @@ void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
     if (!addr)
         return;
     nlrt_link_t links[NLRT_MAX_LINKS];
-    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    int nlinks = nlrt_snapshot(resource_ns_task_get(NULL, PROCNS_NET), links, NLRT_MAX_LINKS);
     const nlrt_link_t *e = NULL;
     for (int k = 0; k < nlinks; k++)
         if (links[k].index == ifindex) {
@@ -1268,7 +1290,7 @@ void net_netlink_addr6_notify(unsigned ifindex, const uint8_t addr[16],
     if (!addr)
         return;
     nlrt_link_t links[NLRT_MAX_LINKS];
-    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    int nlinks = nlrt_snapshot(resource_ns_task_get(NULL, PROCNS_NET), links, NLRT_MAX_LINKS);
     const nlrt_link_t *e = NULL;
     for (int k = 0; k < nlinks; k++)
         if (links[k].index == ifindex) {

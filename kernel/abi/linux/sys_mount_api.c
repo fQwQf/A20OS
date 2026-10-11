@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "syscall_impl.h"
 
 #include "core/string.h"
@@ -278,12 +279,7 @@ int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id,
     return (int64_t)n;
 }
 
-/* listns(2): report the namespace id of the calling task.  Mount, PID and
- * user namespaces are real objects with per-task membership, so the id
- * reported is the caller's own.  The remaining ns types are system-wide
- * singletons rendered with their Linux init-namespace inos, exactly as
- * /proc/<pid>/ns does.  An nstype A20OS has no namespace for is refused
- * rather than answered with a fabricated id. */
+/* listns(2): report the calling task's namespace object identity. */
 int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr)
 {
     if (!nsids || nr == 0)
@@ -299,13 +295,13 @@ int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr)
     } else if (nstype == LINUX_CLONE_NEWUSER) {
         ino = userns_task_ino(t);
     } else if (nstype == LINUX_CLONE_NEWUTS) {
-        ino = MNTNS_INIT_INO_UTS;
+        ino = resource_ns_task_ino(t, PROCNS_UTS);
     } else if (nstype == LINUX_CLONE_NEWIPC) {
-        ino = MNTNS_INIT_INO_IPC;
+        ino = resource_ns_task_ino(t, PROCNS_IPC);
     } else if (nstype == LINUX_CLONE_NEWNET) {
-        ino = MNTNS_INIT_INO_NET;
+        ino = resource_ns_task_ino(t, PROCNS_NET);
     } else if (nstype == LINUX_CLONE_NEWCGROUP) {
-        ino = MNTNS_INIT_INO_CGROUP;
+        ino = resource_ns_task_ino(t, PROCNS_CGROUP);
     } else {
         return -EINVAL;
     }

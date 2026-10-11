@@ -71,7 +71,8 @@ void lock_counters_enable_callsite(spinlock_t *lock) { (void)lock; }
 pfa_t pfa;
 
 /* From kernel/proc/exit.c / cgroup integration. */
-void cg_detach_task(struct cg_node *cg, int pid) { (void)cg; (void)pid; }
+void cg_detach_task(struct task_t *t) { (void)t; }
+void cg_inherit_task(struct task_t *child, struct task_t *parent) { (void)child; (void)parent; }
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages) {
     (void)cg;
     (void)nr_pages;

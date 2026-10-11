@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 /*
  * A20OS — procfs: Virtual /proc filesystem
  *
@@ -295,6 +296,16 @@ static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
     return m;
 }
 
+static int resource_kind(pf_type_t type) {
+    switch (type) {
+    case PF_PID_NS_UTS: return PROCNS_UTS;
+    case PF_PID_NS_IPC: return PROCNS_IPC;
+    case PF_PID_NS_NET: return PROCNS_NET;
+    case PF_PID_NS_CGROUP: return PROCNS_CGROUP;
+    default: return 0;
+    }
+}
+
 static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
     procfs_priv_t *p = (procfs_priv_t *)kmalloc(sizeof(*p));
     if (!p) return NULL;
@@ -335,7 +346,7 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         p->content_len = (size_t)len;
     }
     if (type == PF_PID_NS_MNT || type == PF_PID_NS_PID ||
-        type == PF_PID_NS_PID_FOR_CHILDREN || type == PF_PID_NS_USER) {
+        type == PF_PID_NS_PID_FOR_CHILDREN || type == PF_PID_NS_USER || resource_kind(type)) {
         /* Pin the target's namespace for setns(2); released from
          * procfs_fclose().  Done last so the failure paths above have no
          * reference to drop.  ns_ref is void* so one field serves all three
@@ -343,7 +354,9 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
          * apart, and it checks the pf_type stored alongside. */
         task_t *target = proc_find_get(real_pid);
         if (target) {
-            if (type == PF_PID_NS_MNT)
+            if (resource_kind(type))
+                p->ns_ref = resource_ns_task_get(target, resource_kind(type));
+            else if (type == PF_PID_NS_MNT)
                 p->ns_ref = mntns_task_get(target);
             else if (type == PF_PID_NS_PID)
                 p->ns_ref = pidns_task_get(target);
@@ -595,9 +608,6 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         proc_put(owner);
         proc_put(thread);
     } else if (dp && dp->type == PF_PID_NS) {
-        /* Namespace files are capability probes.  Expose only namespaces
-         * backed by clone/unshare/setns, never singleton placeholders for
-         * unsupported isolation domains. */
         if (strcmp(name, "pid") == 0)
             type = PF_PID_NS_PID;
         else if (strcmp(name, "pid_for_children") == 0)
@@ -606,6 +616,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type = PF_PID_NS_USER;
         else if (strcmp(name, "mnt") == 0)
             type = PF_PID_NS_MNT;
+        else if (strcmp(name, "uts") == 0) type = PF_PID_NS_UTS;
+        else if (strcmp(name, "ipc") == 0) type = PF_PID_NS_IPC;
+        else if (strcmp(name, "net") == 0) type = PF_PID_NS_NET;
+        else if (strcmp(name, "cgroup") == 0) type = PF_PID_NS_CGROUP;
         else
             return -ENOENT;
         child = new_entry(name, type, dp->pid);
@@ -1627,7 +1641,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         "netmem", "journal", "hyp_selftest", NULL
     };
     static const char *ns_entries[] = {
-        ".", "..", "pid", "pid_for_children", "user", "mnt", NULL
+        ".", "..", "pid", "pid_for_children", "user", "mnt", "uts", "ipc", "net", "cgroup", NULL
     };
     static const char *pressure_entries[] = {
         ".", "..", "cpu", "memory", "io", NULL
@@ -1752,7 +1766,9 @@ static int procfs_fclose(vfile_t *vf) {
          * Handing a mount namespace to pidns_put() would fail that test and
          * free a static object. */
         if (p->ns_ref) {
-            if (p->type == PF_PID_NS_MNT)
+            if (resource_kind(p->type))
+                resource_ns_put(p->ns_ref);
+            else if (p->type == PF_PID_NS_MNT)
                 mntns_put((mnt_namespace_t *)p->ns_ref);
             else if (p->type == PF_PID_NS_USER)
                 userns_put((user_namespace_t *)p->ns_ref);
@@ -1896,4 +1912,11 @@ static vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     vnode_get(vn);
     vf->priv = priv;
     return vf;
+}
+
+struct resource_namespace *procfs_ns_file_resource_get(const vfile_t *vf)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv) return NULL;
+    procfs_priv_t *p = vf->priv;
+    return resource_kind(p->type) ? resource_ns_get(p->ns_ref) : NULL;
 }

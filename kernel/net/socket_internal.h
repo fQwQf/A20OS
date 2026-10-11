@@ -1,6 +1,8 @@
 #ifndef _NET_SOCKET_INTERNAL_H
 #define _NET_SOCKET_INTERNAL_H
 
+#include "proc/resource_ns.h"
+
 #include "net/socket.h"
 #include "ipc/ipc.h"
 #include "fs/vfs.h"
@@ -267,6 +269,7 @@ typedef struct net_recv_meta {
 } net_recv_meta_t;
 
 typedef struct net_socket {
+    resource_namespace_t *net_ns;
     /*
      * Lane this socket's PCB belongs to, and which never changes for the life of
      * the connection.  Recomputed at bind from the bound (ip, port) because that
@@ -1078,7 +1081,7 @@ unsigned net_socket_lane_of_addr(const void *addr, size_t len,
 int      net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                                  uint8_t out[NET_SOCKADDR_MAX],
                                  size_t *outlen);
-net_socket_t *net_find_bound_socket(int domain, int type,
+net_socket_t *net_find_bound_socket(resource_namespace_t *ns, int domain, int type,
                                     const void *addr, size_t addrlen);
 /*
  * Registry slot allocation.  Takes bucket locks itself, one at a time, and the

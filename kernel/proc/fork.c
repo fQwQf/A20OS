@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
@@ -288,6 +289,15 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         proc_destroy_task(t);
         return userns_r;
     }
+    int resource_r = resource_ns_fork(t, parent, flags);
+    if (resource_r < 0) {
+        userns_release_task(t);
+        pidns_release_task(t);
+        mntns_release_task(t);
+        proc_destroy_task(t);
+        return resource_r;
+    }
+
 
     /* Capability envelopes are inherited (shared root budget, refcounted);
      * see kernel/abi/linux/envelope.c and docs/research/05. */

@@ -91,7 +91,8 @@ void     cg_cpuset_update_effective(struct cg_node *cg, unsigned nr_cpus);
 
 /* ---- Task association API ---- */
 void cg_attach_task(struct cg_node *cg, int pid);
-void cg_detach_task(struct cg_node *cg, int pid);
+void cg_inherit_task(struct task_t *child, struct task_t *parent);
+void cg_detach_task(struct task_t *task);
 struct cg_node *cg_root_node(void);
 
 #endif /* _CG_CGROUP_H */

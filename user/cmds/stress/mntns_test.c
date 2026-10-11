@@ -134,17 +134,8 @@ int main(void)
         CHECK(child_ino == init_ino, "fork shares mount namespace");
     }
 
-    /* 3. Honest errors for the namespace types that are still not
-     *    implemented.  PID namespaces ARE implemented and covered by
-     *    pidns_test, so they are not in this list.  User namespaces are
-     *    implemented too (userns_test), so unshare(CLONE_NEWUSER) succeeds
-     *    and is exercised there rather than refused here. */
-    errno = 0;
-    CHECK(xunshare(CLONE_NEWNET) == -1 && errno == EINVAL,
-          "unshare(CLONE_NEWNET) must fail with EINVAL");
-    errno = 0;
-    CHECK(xunshare(CLONE_NEWIPC) == -1 && errno == EINVAL,
-          "unshare(CLONE_NEWIPC) must fail with EINVAL");
+    /* 3. Network and IPC namespaces now have dedicated isolation coverage
+     * in resource_ns_test; the mount-only scenario keeps its original domains. */
 
     /* 4. Witness child stays in the initial namespace; it checks (on
      *    request) whether the namespace-private mount is visible there. */

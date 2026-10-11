@@ -45,7 +45,7 @@ static int net_table_claims(net_table_kind_t kind, const net_socket_t *s)
          * either a udp or a raw pcb and fails the socket() otherwise, so the
          * pcb test is also how a live socket is told from a torn-down one. */
         return (s->domain == AF_INET || s->domain == AF_INET6) &&
-               (s->udp || s->raw);
+               (s->type == SOCK_DGRAM || s->type == SOCK_RAW);
     case NET_TABLE_UNIX:
         return s->domain == AF_UNIX;
     }
@@ -64,6 +64,7 @@ static bool net_walk_slot(net_socket_t *s, int idx, void *arg)
 {
     net_walk_arg_t *w = arg;
     (void)idx;
+    if (s->net_ns != resource_ns_current(PROCNS_NET)) return false;
     if (s->closed || !net_table_claims(w->kind, s))
         return false;
     if (w->family != AF_UNSPEC && s->domain != w->family)

@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 /*
  * A20OS — Enhanced Process Management
  *
@@ -536,6 +537,7 @@ void proc_init(void) {
     proc_pid_init();
     pidns_early_init();
     userns_early_init();
+    resource_ns_init();
     proc_sched_runq_init();
     proc_current_slots_init();
     spin_init(&tasklist_lock);

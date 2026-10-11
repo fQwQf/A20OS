@@ -99,17 +99,13 @@ static int check_lookup_semantics(void)
     if (fd < 0)
         return fail("open self ns mnt");
     close(fd);
-    const char *unsupported[] = {"uts", "ipc", "net", "cgroup"};
-    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+    const char *implemented[] = {"uts", "ipc", "net", "cgroup"};
+    for (size_t i = 0; i < sizeof(implemented) / sizeof(implemented[0]); i++) {
         char path[64];
-        snprintf(path, sizeof(path), "/proc/self/ns/%s", unsupported[i]);
-        errno = 0;
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", implemented[i]);
         fd = open(path, O_RDONLY);
-        if (fd >= 0 || errno != ENOENT) {
-            if (fd >= 0)
-                close(fd);
-            return fail("unsupported namespace must not be advertised");
-        }
+        if (fd < 0) return fail("open implemented namespace");
+        close(fd);
     }
     return 0;
 }
