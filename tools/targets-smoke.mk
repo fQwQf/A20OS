@@ -624,12 +624,15 @@ smoke-futex-stress:
 smoke-futex-stress-aarch64:
 	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64
 
-.PHONY: smoke-symlink-mount smoke-drm-sysfs
+.PHONY: smoke-symlink-mount smoke-drm-sysfs smoke-drm-prime
 smoke-symlink-mount:
 	$(PYTHON) tools/smoke.py smoke-symlink-mount
 
 smoke-drm-sysfs:
 	$(PYTHON) tools/smoke.py smoke-drm-sysfs
+
+smoke-drm-prime:
+	$(PYTHON) tools/smoke.py smoke-drm-prime
 
 .PHONY: smoke-cpuinfo
 smoke-cpuinfo:
