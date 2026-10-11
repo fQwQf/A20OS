@@ -234,7 +234,11 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     }
     int r = net_recvfrom((int)gfd, kbuf, len, flags,
                          addr ? kaddr : NULL, addr ? &klen : NULL);
-    if (r >= 0 && copy_to_user(buf, kbuf, (size_t)r) < 0) {
+    /* MSG_TRUNC reports the complete datagram length, which can exceed the
+     * caller's buffer. Only the bytes actually received belong in user memory. */
+    size_t copied = r > 0 ? (size_t)r : 0;
+    if (copied > len) copied = len;
+    if (r >= 0 && copied && copy_to_user(buf, kbuf, copied) < 0) {
         return -EFAULT;
     }
     if (r >= 0 && addr && addrlen) {

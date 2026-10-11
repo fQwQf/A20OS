@@ -255,7 +255,9 @@ static void test_msg_trunc(void)
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in sa;
     socklen_t sl = sizeof(sa);
-    char big[16], small[4];
+    char big[16];
+    struct { char bytes[4]; unsigned char guard[16]; } small;
+    memset(&small, 0xa5, sizeof(small));
     ssize_t r;
 
     if (fd < 0) {
@@ -279,9 +281,23 @@ static void test_msg_trunc(void)
 
     /* A 4-byte buffer cannot hold it, so the return value is what tells the
      * caller how much was lost -- that is the whole point of MSG_TRUNC. */
-    r = recv(fd, small, sizeof(small), MSG_TRUNC);
+    r = recv(fd, NULL, 0, MSG_PEEK | MSG_TRUNC);
+    ok(r == (ssize_t)sizeof(big), "zero-length peek reports datagram size");
+    r = recv(fd, small.bytes, sizeof(small.bytes), MSG_PEEK | MSG_TRUNC);
+    ok(r == (ssize_t)sizeof(big), "short peek reports datagram size");
+    int intact = 1;
+    for (size_t i = 0; i < sizeof(small.guard); i++)
+        if (small.guard[i] != 0xa5)
+            intact = 0;
+    ok(intact, "MSG_PEEK|MSG_TRUNC preserves bytes beyond the buffer");
+    r = recv(fd, small.bytes, sizeof(small.bytes), MSG_TRUNC);
     ok(r == (ssize_t)sizeof(big),
        "MSG_TRUNC reports the full datagram length from a short buffer");
+    intact = 1;
+    for (size_t i = 0; i < sizeof(small.guard); i++)
+        if (small.guard[i] != 0xa5)
+            intact = 0;
+    ok(intact, "MSG_TRUNC preserves bytes beyond the buffer");
 
     close(fd);
 }
