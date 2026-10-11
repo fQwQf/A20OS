@@ -61,6 +61,7 @@ typedef enum {
     PF_PID_IO,
     PF_PID_LOGINUID,
     PF_PID_SESSIONID,
+    PF_PID_TASK,
     PF_PID_NS,
     PF_PID_NS_PID,
     PF_PID_NS_PID_FOR_CHILDREN,

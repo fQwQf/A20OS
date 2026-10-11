@@ -156,6 +156,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "io") == 0) return PF_PID_IO;
     if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
+    if (strcmp(name, "task") == 0) return PF_PID_TASK;
     if (strcmp(name, "ns") == 0) return PF_PID_NS;
     if (strcmp(name, "pid") == 0) return PF_PID_NS_PID;
     if (strcmp(name, "pid_for_children") == 0) return PF_PID_NS_PID_FOR_CHILDREN;
@@ -578,6 +579,21 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         vfs_put_file(target);
         child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
         type = PF_PID_FDINFO_ENTRY;
+    } else if (dp && dp->type == PF_PID_TASK) {
+        if (!is_pid_str(name))
+            return -ENOENT;
+        int owner_pid = dp->pid == -1 ? proc_current()->pid : dp->pid;
+        task_t *owner = proc_find_get(owner_pid);
+        task_t *thread = proc_find_get_user(pid);
+        if (!owner || !thread || owner->tgid != thread->tgid) {
+            proc_put(owner);
+            proc_put(thread);
+            return -ENOENT;
+        }
+        type = PF_ROOT;
+        child = new_entry(name, type, thread->pid);
+        proc_put(owner);
+        proc_put(thread);
     } else if (dp && dp->type == PF_PID_NS) {
         /* Namespace files are capability probes.  Expose only namespaces
          * backed by clone/unshare/setns, never singleton placeholders for
@@ -631,7 +647,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type == PF_PID_ENVIRON || type == PF_PID_AUXV ||
             type == PF_PID_IO ||
             type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
-            type == PF_PID_NS || type == PF_PID_FDINFO ||
+            type == PF_PID_TASK || type == PF_PID_NS || type == PF_PID_FDINFO ||
             type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
             type == PF_PID_LIMITS || type == PF_PID_WCHAN ||
             type == PF_PID_STACK ||
@@ -670,7 +686,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 type == PF_SYS_NET || type == PF_SYS_VM ||
                 type == PF_SYS_FS_INOTIFY || type == PF_NET ||
                 type == PF_A20 || type == PF_PID_FD ||
-                type == PF_PID_NS || type == PF_PID_FDINFO ||
+                type == PF_PID_TASK || type == PF_PID_NS || type == PF_PID_FDINFO ||
                 type == PF_PRESSURE) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     if (magic_symlink)
@@ -1502,6 +1518,65 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
     return (int)total;
 }
 
+/* Thread ids are rendered in the reader's pid namespace, just like the
+ * process directories.  Keep the task-list lock only while selecting an id;
+ * no allocation or file operations run under it. */
+static int procfs_task_readdir(vfile_t *vf, procfs_priv_t *p,
+                               void *dirp, size_t count)
+{
+    task_t *owner = proc_find_get(p->pid);
+    if (!owner)
+        return -ENOENT;
+    int tgid = owner->tgid;
+    proc_put(owner);
+    size_t cursor = vf->offset;
+    size_t total = 0;
+    while (total < count) {
+        const char *name;
+        char tid_name[16];
+        size_t next_cursor = cursor + 1;
+        int tid = 0;
+        if (cursor < 2) {
+            name = cursor == 0 ? "." : "..";
+        } else {
+            int best = 0;
+            uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+            pid_namespace_t *ns = pidns_current();
+            for (task_t *t = proc_first_task_locked(); t;
+                 t = proc_next_task_locked(t)) {
+                if (proc_task_state_get(t) == PROC_UNUSED || t->tgid != tgid ||
+                    !pidns_visible(ns, t) || t->pid <= 0 ||
+                    (size_t)t->pid + 2 < cursor)
+                    continue;
+                if (!best || t->pid < best) {
+                    best = t->pid;
+                    tid = task_pid_nr_ns(t, ns);
+                }
+            }
+            spin_unlock_irqrestore(&tasklist_lock, flags);
+            if (!best)
+                break;
+            next_cursor = (size_t)best + 3;
+            snprintf(tid_name, sizeof(tid_name), "%d", tid);
+            name = tid_name;
+        }
+        size_t namelen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+        if (total + reclen > count)
+            break;
+        vfs_dirent64_t *d = (vfs_dirent64_t *)((char *)dirp + total);
+        d->d_ino = tid ? (uint64_t)tid : cursor + 1;
+        d->d_off = next_cursor;
+        d->d_reclen = (uint16_t)reclen;
+        d->d_type = 4; /* DT_DIR */
+        memcpy(d->d_name, name, namelen + 1);
+        total += reclen;
+        cursor = next_cursor;
+    }
+    vf->offset = cursor;
+    return (int)total;
+}
+
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "stat", "version", "uptime", "cmdline",
@@ -1515,7 +1590,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
-        "fd", "environ", "auxv", "io", "loginuid", "sessionid", "ns", "fdinfo",
+        "fd", "environ", "auxv", "io", "loginuid", "sessionid", "task", "ns", "fdinfo",
         "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack",
         /* The same three names as under /proc/, but bound to THIS task's
          * user namespace.  Writing them is how a parent installs the maps of
@@ -1558,6 +1633,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "cpu", "memory", "io", NULL
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p && p->type == PF_PID_TASK)
+        return procfs_task_readdir(vf, p, dirp, count);
     if (p && (p->type == PF_PID_FD || p->type == PF_PID_FDINFO))
         return procfs_fd_readdir(vf, p, dirp, count);
 
@@ -1644,7 +1721,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         if (is_root && is_pid_str(name))
             is_dir = 1;
         if (!is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
-                         strcmp(name, "fdinfo") == 0))
+                         strcmp(name, "fdinfo") == 0 || strcmp(name, "task") == 0))
             is_dir = 1;
         if (p && p->type == PF_SYS && strcmp(name, "fs") == 0)
             is_dir = 1;
