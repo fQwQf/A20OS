@@ -46,7 +46,7 @@ static inline int a20_gossip_id_order(const uint8_t *a, const uint8_t *b) {
 static inline int a20_gossip_hint_valid(const a20_gossip_hint_t *h) {
     return h && a20_gossip_id_valid(h->node) && h->epoch &&
            h->state >= A20_MEMBER_ALIVE && h->state <= A20_MEMBER_DEAD &&
-           h->profile >= 1 && h->profile <= 3 && !(h->caps & ~7u) &&
+           h->profile >= 1 && h->profile <= 3 && !(h->caps & ~23u) &&
            h->distance < A20_GOSSIP_MAX_HOPS;
 }
 static inline a20_gossip_route_t *a20_gossip_find(a20_gossip_table_t *t,

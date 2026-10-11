@@ -32,7 +32,8 @@ def main():
               "tools/tests/test_clx_fragment.c", "tools/tests/test_clx_session.c",
               "kernel/cluster/reliable.c", "tools/tests/test_clx_reliable.c", "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
               "kernel/mcu/leaf.h", "kernel/include/uapi/a20/cluster_work.h",
-              "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/include/uapi/a20/cluster_job.h", "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "tools/tests/test_clx_word_job.c", "kernel/cluster/transaction.h"]
+              "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/include/uapi/a20/cluster_job.h", "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "tools/tests/test_clx_word_job.c", "kernel/cluster/transaction.h", "tools/tests/test_clx_oneway.c",
+              "tools/tests/test_clx_uart_pair.c"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in inputs}
     with tempfile.TemporaryDirectory(prefix="a20-cluster-fuzz-") as temporary:
         binary = str(Path(temporary) / "fuzz")
@@ -100,6 +101,13 @@ def main():
         (directory / "reliable.log").write_text(checked_reliable.stdout)
         print(checked_reliable.stdout, end="")
         checked_reliable.check_returncode()
+        oneway = str(Path(temporary) / "oneway")
+        subprocess.run(compiler + flags + ["tools/tests/test_clx_oneway.c", "-o", oneway], cwd=root, check=True)
+        checked_oneway = subprocess.run([oneway], cwd=root, text=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=60)
+        (directory / "oneway.log").write_text(checked_oneway.stdout)
+        print(checked_oneway.stdout, end="")
+        checked_oneway.check_returncode()
         elapsed = time.monotonic() - started
     metadata = {"compiler": subprocess.check_output(compiler + ["--version"], text=True).splitlines()[0],
                 "flags": flags, "platform": platform.platform(), "seed": "0x20c1a55", "batch_seeds": seeds,

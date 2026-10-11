@@ -12,6 +12,7 @@
 #define A20_CLX_PROFILE_SERVER 3
 #define A20_CLX_PROFILE_MCU 1
 #define CLX_LIMIT_ROUTES 4
+#define CLX_DEDUP_WINDOW 64
 #define TICKS_PER_SEC 1000
 #define MS_TO_TICKS(ms) (ms)
 #define A20_ERR_NO_SPACE 13
@@ -29,6 +30,7 @@ static unsigned executions, sends, allocations;
 static int fail_alloc;
 static uint8_t sent_frame[256];
 static uint32_t sent_len;
+static uint32_t peer_caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_ONEWAY;
 static uint64_t timer_get_ticks(void) {
     return ticks;
 }
@@ -76,7 +78,7 @@ static int a20_clx_peer_session(const a20_node_id_t *n, uint64_t *local,
     assert(!g_clx_lock);
     *local = 11;
     *remote = 22;
-    *caps = A20_CLX_CAP_RELIABLE;
+    *caps = peer_caps;
     return 0;
 }
 static int a20_clx_core_send_frame(const a20_node_id_t *n, const uint8_t *p,
@@ -88,16 +90,23 @@ static int a20_clx_core_send_frame(const a20_node_id_t *n, const uint8_t *p,
     sends++;
     return 0;
 }
+static void a20_clx_fragment_retire(uint32_t hash, uint32_t seq,
+                                    uint64_t source, uint64_t destination) {
+    (void)hash;
+    (void)seq;
+    assert(!g_clx_lock && source == 22 && destination == 11);
+}
 #include "../../kernel/cluster/frame.c"
 #include "../../kernel/cluster/reliable.c"
 static a20_node_id_t caller = {{0}};
-static uint32_t receive(uint32_t txid, uint32_t slot, uint64_t caller_epoch) {
+static uint32_t receive_kind(uint32_t txid, uint32_t slot,
+                             uint64_t caller_epoch, int oneway) {
     uint8_t p[17] = {0};
     a20_clx_session_encode(p, caller_epoch, 11);
     a20_frame_hdr_t h = {.ver = 1,
-                         .type = A20_CLX_TYPE_CALL,
+                         .type = oneway ? A20_CLX_TYPE_SEND : A20_CLX_TYPE_CALL,
                          .flags = A20_CLX_FLAG_RELIABLE,
-                         .txid = txid,
+                         .txid = oneway ? 0 : txid,
                          .seq = txid,
                          .src_hash = a20_clx_node_hash(&caller),
                          .dst_hash = a20_clx_self_hash(),
@@ -107,9 +116,13 @@ static uint32_t receive(uint32_t txid, uint32_t slot, uint64_t caller_epoch) {
     int consumed = a20_clx_reliable_rx(&caller, &h, &body);
     if (!consumed) {
         assert(slot && h.payload_len == 1 && body == p + 16);
+        assert(h.txid == txid);
         executions++;
     }
     return consumed;
+}
+static uint32_t receive(uint32_t txid, uint32_t slot, uint64_t caller_epoch) {
+    return receive_kind(txid, slot, caller_epoch, 0);
 }
 static void complete(unsigned txid) {
     uint8_t data = 42;
@@ -157,6 +170,63 @@ int main(void) {
     assert(receive(5, 0, 22)); /* Retirement overtakes the original request. */
     assert(receive(5, 2, 22) && last_error() == A20_ERR_CANCELED &&
            executions == 4);
+    complete(4);
+    assert(receive(4, 0, 22));
+    /* SEND has a zero wire txid, a shared replay key and a small receipt
+     * reservation. Lost completion cannot execute the sink twice. */
+    peer_caps = A20_CLX_CAP_RELIABLE;
+    before = sends;
+    assert(receive_kind(6, 3, 22, 1) && executions == 4 && sends == before);
+    peer_caps |= A20_CLX_CAP_ONEWAY;
+    assert(receive_kind(6, 3, 21, 1) && executions == 4);
+    assert(!receive_kind(6, 3, 22, 1) && executions == 5);
+    assert(g_replay[0].oneway && g_replay[0].capacity == 54);
+    before = sends;
+    assert(receive(6, 3, 22) && sends == before); /* Mode collision. */
+    a20_clx_reliable_reply(&caller, 6, a20_clx_self_hash(), 22, 11, NULL, 0, 0);
+    assert(sent_len == 54 && !last_error());
+    assert(receive_kind(6, 3, 22, 1) && executions == 5 && sent_len == 54);
+    assert(receive(6, 0, 22) && g_replay[0].acknowledged);
+    assert(!receive_kind(7, 3, 22, 1) && executions == 6);
+    assert(receive_kind(6, 3, 22, 1) && executions == 6 &&
+           last_error() == A20_ERR_CANCELED);
+    a20_clx_reliable_reply(&caller, 7, a20_clx_self_hash(), 22, 11, NULL, 0, 0);
+    peer_caps = A20_CLX_CAP_RELIABLE;
+    assert(receive(71, 2, 22) && last_error() == A20_ERR_NO_SPACE);
+    peer_caps |= A20_CLX_CAP_ONEWAY;
+    assert(!receive(71, 2, 22) && executions == 7);
+    assert(receive_kind(7, 3, 22, 1) && last_error() == A20_ERR_CANCELED);
+    a20_frame_hdr_t fragment = {.type = A20_CLX_TYPE_CALL,
+                                .src_hash = a20_clx_node_hash(&caller),
+                                .dst_hash = a20_clx_self_hash(),
+                                .dst_slot = 2,
+                                .seq = 71};
+    before = sends;
+    assert(a20_clx_reliable_fragment_seen(&caller, &fragment, 22, 11));
+    assert(sends == before + 1); /* Running: one admission ACK only. */
+    complete(71);
+    ticks += A20_CLX_RETRY_MS;
+    before = sends;
+    assert(a20_clx_reliable_fragment_seen(&caller, &fragment, 22, 11));
+    assert(sends == before + 2); /* Complete: one ACK + cached reply. */
+    for (unsigned i = 0; i < 64; i++)
+        assert(a20_clx_reliable_fragment_seen(&caller, &fragment, 22, 11));
+    assert(sends == before + 2); /* No reply amplification per fragment. */
+    fragment.seq = 72;
+    assert(!a20_clx_reliable_fragment_seen(&caller, &fragment, 22, 11));
+    fragment.seq = 7;
+    assert(a20_clx_reliable_fragment_seen(&caller, &fragment, 22, 11));
+    a20_clx_reliable_receipt(&caller, 99, 11, 22);
+    before = sends;
+    a20_clx_reliable_retry_receipt(&caller, 11, 23);
+    assert(sends == before);
+    a20_clx_reliable_receipt(&caller, 88, 11, 22);
+    a20_clx_reliable_retry_receipt(&caller, 11, 22);
+    assert(sent_len == 50 && a20_clx_get_le32(sent_frame + 8) == 99);
+    ticks += A20_CLX_RETAIN_MS;
+    before = sends;
+    a20_clx_reliable_retry_receipt(&caller, 11, 22);
+    assert(sends == before);
     kfree(g_replay[0].frame);
     assert(!allocations);
     puts("test_clx_reliable: early/late retirement, running reservation, "

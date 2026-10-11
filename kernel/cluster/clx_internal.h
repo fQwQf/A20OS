@@ -60,6 +60,8 @@
 #endif
 uint32_t a20_clx_logical_mtu(const a20_node_id_t *peer);
 void a20_clx_fragment_expire(void);
+void a20_clx_fragment_retire(uint32_t source_hash, uint32_t seq,
+                             uint64_t source_epoch, uint64_t destination_epoch);
 uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
                              a20_frame_hdr_t *header, const uint8_t *payload);
 
@@ -214,7 +216,8 @@ int a20_clx_export_spawn_worker(a20_clx_export_t *ex);
  * send error (e.g. -A20_ERR_TYPE_MISMATCH on typed exports that refuse
  * endpoint handles, -A20_ERR_WOULD_BLOCK on a full server queue). */
 int a20_clx_export_connect_local(uint32_t slot, const char *name,
-                                 uint32_t name_len, a20_channel_ep_t **out);
+                                 uint32_t name_len, uint32_t connect_flags,
+                                 a20_channel_ep_t **out);
 
 /* ---- proxies / remote endpoints (03-§2 remote_ep.c row) ---------------- */
 
@@ -230,6 +233,8 @@ typedef struct a20_clx_proxy {
     a20_node_id_t peer_node; /* remote node identity */
     uint32_t dst_slot;       /* remote slot; 0 = by name / slot 0 */
     uint32_t reliable;       /* A20_CONNECT_RELIABLE requested */
+    uint32_t oneway;         /* SEND, with transport-only delivery receipts */
+    uint32_t peer_single;    /* LEAF has one shared reply reservation */
     uint64_t local_session, remote_session;
     struct a20_clx_inflight {
         uint32_t txid;
@@ -314,6 +319,16 @@ void a20_clx_reliable_reply(const a20_node_id_t *dst, uint32_t txid,
                             uint32_t len, uint32_t error);
 void a20_clx_reliable_receipt(const a20_node_id_t *dst, uint32_t txid,
                               uint64_t local, uint64_t remote);
+void a20_clx_reliable_retry_receipt(const a20_node_id_t *dst, uint64_t local,
+                                    uint64_t remote);
+/* Called only after full fragment geometry and current session validation. */
+int a20_clx_reliable_fragment_seen(const a20_node_id_t *src,
+                                   const a20_frame_hdr_t *h,
+                                   uint64_t source_epoch,
+                                   uint64_t destination_epoch);
+int a20_clx_proxy_fragment_pending_locked(uint32_t source_hash, uint32_t txid,
+                                          uint64_t source_epoch,
+                                          uint64_t destination_epoch);
 void a20_clx_link_retransmit(const a20_node_id_t *node);
 
 /* ---- events (01-abi §5) ------------------------------------------------ */

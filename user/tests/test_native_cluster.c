@@ -190,6 +190,55 @@ static int abi_live_identity(void) {
         return fail("live-close-server-export");
     a20_thread_yield();
 
+    /* A local receive-only export retains ordinary channel send semantics,
+     * but its client cannot accidentally issue an RPC or read a response. */
+    if (a20_channel_create(&pair) < 0)
+        return fail("oneway-create");
+    r = a20_cluster_export(pair.endpoints[0], "oneway", A20_EXPORT_ONEWAY,
+                           &slot);
+    if (r < 0)
+        return fail("oneway-export");
+    slot = (uint32_t)r;
+    if (a20_cluster_connect(NULL, slot, NULL, A20_CONNECT_ONEWAY, 0, &caller) !=
+            -A20_ERR_INVALID_ARGUMENT ||
+        a20_cluster_connect(NULL, slot, NULL, 0, 0, &caller) !=
+            -A20_ERR_CLUSTER_UNSUPPORTED)
+        return fail("oneway-mode-validation");
+    a20_cluster_snapshot_args_t identity = {0};
+    a20_node_id_t local;
+    a20_node_id_local(&local);
+    if (a20_cluster_snapshot(&identity) < 0 ||
+        a20_cluster_connect_bound_flags(
+            &local, slot, identity.boot_epoch,
+            A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY, &caller) < 0)
+        return fail("oneway-local-connect");
+    uint8_t data = 42;
+    uint32_t data_len = 1, handle_count = 1;
+    a20_handle_t connection;
+    if (a20_channel_recv(pair.endpoints[0], &data, &data_len, &connection,
+                         &handle_count) < 0 ||
+        handle_count != 1 || data_len)
+        return fail("oneway-local-handshake");
+    if (a20_channel_send(caller, &data, 1, NULL, 0) < 0)
+        return fail("oneway-local-send");
+    data = 0;
+    data_len = 1;
+    handle_count = 0;
+    if (a20_channel_recv(connection, &data, &data_len, NULL, &handle_count) <
+            0 ||
+        data_len != 1 || data != 42)
+        return fail("oneway-local-delivery");
+    if (a20_channel_recv(caller, &data, &data_len, NULL, &handle_count) !=
+        -A20_ERR_ACCESS)
+        return fail("oneway-write-only");
+    if (a20_channel_call(caller, &data, 1, NULL, 0, &data, &data_len, NULL,
+                         &handle_count) != -A20_ERR_ACCESS)
+        return fail("oneway-call-refused");
+    a20_hdl_close(connection);
+    a20_hdl_close(caller);
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+
     /* Route-table lookup and loopback link status are observable through the
      * public ABI; the synthetic next-hop is a 32-bit loopback node number. */
     peer_id(&routed);
@@ -203,6 +252,10 @@ static int abi_live_identity(void) {
     if (a20_cluster_link_status(&routed, &link) != 0 ||
         link.state != A20_CLX_LINK_UP)
         return fail("live-loopback-status");
+    if (a20_cluster_connect(&routed, 1, NULL,
+                            A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY, 0,
+                            &caller) != -A20_ERR_CLUSTER_UNSUPPORTED)
+        return fail("oneway-unadvertised-capability");
     if (a20_cluster_route(A20_ROUTE_LEARN, &routed, A20_CLX_TRANSPORT_LOOPBACK,
                           &vnode, sizeof(vnode),
                           A20_ROUTE_DYNAMIC | 1) != -A20_ERR_EXISTS ||

@@ -29,6 +29,7 @@ init，也不把示例身份作为默认部署配置。系统重启后从同一�
 | `version 1` | 配置版本 |
 | `node <32hex>` | 持久完整节点 ID；拒绝全 0/全 ff |
 | `role worker/relay/leaf` | 分别对应可靠工作节点、可靠转发节点、可靠叶子能力 |
+| `feature oneway` | 可选，至多一次；启用可靠业务 SEND，默认关闭；与 role 行顺序无关 |
 | `seed <32hex> udp:<IPv4>:<port>` | 可选显式直连种子；拒绝自身、重复节点和非法地址 |
 | `seed <32hex> uart:1` | 可选 UART 邻居 |
 | `service agent/control/jobs <绝对路径>` | 可选的三个固定职责，各至多一个本地可执行文件 |

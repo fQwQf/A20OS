@@ -31,6 +31,16 @@
 
 #define A20_MCU_LEAF_OP_DOT_SLOT A20_CLX_OPERATOR_DOT
 #define A20_MCU_LEAF_WORK_SLOT 2u
+#define A20_MCU_LEAF_SINK_SLOT 3u
+
+/* One optional static receive-only service, without heap storage. Install
+ * before discovery. The bounded callback returns an A20_ERR_* status, accepts
+ * <=206 bytes, and must not retain the input pointer or re-enter the leaf.
+ * A successful receipt means callback admission, not durable completion. */
+int a20_mcu_leaf_set_sink(const char *name, uint32_t name_len,
+                          uint32_t (*receive)(void *, const uint8_t *,
+                                              uint32_t),
+                          void *ctx);
 
 /* Raw binary I/O; transmit returns 0 or -1, receive returns byte or -1.
  * Callbacks and context must outlive the leaf. Bind only while disconnected.

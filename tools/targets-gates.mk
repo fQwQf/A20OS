@@ -98,9 +98,11 @@ $(TMPDIR)/a20-host-%: tools/tests/%.c
 
 # The MCU protocol harness uses architecture type definitions but executes
 # no target assembly. The generic host rule lacks this include directory.
-$(TMPDIR)/a20-host-test_clx_fragment $(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
+$(TMPDIR)/a20-host-test_clx_fragment $(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_oneway $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include \
 		-Ikernel/include -Ikernel $< -o $@
+
+$(TMPDIR)/a20-host-test_clx_oneway: tools/tests/test_clx_uart_pair.c kernel/mcu/leaf.c kernel/cluster/uart.c
 
 .PHONY: check-cluster-unit check-cluster-udp check-cluster-loopback check-cluster-reliable
 check-cluster-unit:
@@ -323,6 +325,11 @@ endif
 
 check-cluster-reliable:
 	$(PYTHON) tools/check-cluster-udp.py --faults --restart --log-dir .kernel-build/cluster/reliable
+
+.PHONY: check-cluster-send
+check-cluster-send:
+	$(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-server
+	$(PYTHON) tools/check-cluster-udp.py --send --routed --faults --profile 3 --peer-profile 2 --timeout 180 --log-dir .kernel-build/cluster/send-routed-mixed
 
 .PHONY: check-cluster-mesh
 check-cluster-mesh:

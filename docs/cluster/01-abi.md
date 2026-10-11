@@ -26,7 +26,9 @@ node_id 为 16 字节持久身份；全零代表 LOCAL，全 ff 为保留广播�
 | `cluster_link_status` | node_id；LOCAL 代表汇总 | 状态/计数写回参数 |
 | `cluster_snapshot` (0x0526) | kind/index/generation | 当前身份、资源档、运行资源计数或单条路由/服务快照 |
 
-`set_self` caps 使用 RELAY、RELIABLE、LEAF 位；LEAF 与 RELAY 互斥。
+`set_self` caps 使用 RELAY、RELIABLE、LEAF，以及显式开启的 ONEWAY 位；
+LEAF 与 RELAY 互斥。单向接收接口、能力升级要求与接纳语义见
+[22-oneway.md](22-oneway.md)。
 RELIABLE 为数据面实际能力，内核发布时附带它，是否能建立可靠连接还取决于
 对端版本与能力。角色不由处理器型号或资源档固定。
 
@@ -50,6 +52,8 @@ a20_hdl_close(pair.endpoints[1]);
 分配新 slot。slot 单调且不复用，编号耗尽拒绝，旧 slot 不会意外指向新服务。
 LOCAL_ONLY 禁止远程访问。WORK（bit 2）声明该服务支持 CW/1，供能力目录识别；
 未设置时 clusterd 不向服务发送 CW 查询。服务须按接收顺序回复；当前无乱序业务完成接口。
+ONEWAY（bit 3）导出仅接收业务 SEND，不与 WORK 组合。连接须设置 RELIABLE
+与 ONEWAY，返回只写 channel handle；普通 CALL 连接与单向导出不能混用。
 
 本地 connect 使用独立 channel pair，把连接端点作为 handle 交给服务。
 支持本地连接的服务须接收此握手并服务新端点，不能只把零长度消息当业务请求。

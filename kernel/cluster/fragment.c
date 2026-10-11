@@ -55,12 +55,43 @@ void a20_clx_fragment_expire(void) {
         uint8_t *release = NULL;
         uint64_t f = spin_lock_irqsave(&g_clx_lock);
         assembly_slot_t *slot = &assemblies[i];
-        if (slot->used && slot->expires <= now) {
+        int inactive =
+            slot->used &&
+            slot->assembly.header.type == A20_CLX_TYPE_CALL_REPLY &&
+            !a20_clx_proxy_fragment_pending_locked(
+                slot->assembly.header.src_hash, slot->assembly.header.txid,
+                slot->assembly.source_epoch, slot->assembly.destination_epoch);
+        if (slot->used && (slot->expires <= now || inactive)) {
             release = slot->storage;
             if (release)
                 assembly_bytes -= slot->assembly.total;
             memset(slot, 0, sizeof(*slot));
-            expired++;
+            if (!inactive)
+                expired++;
+        }
+        spin_unlock_irqrestore(&g_clx_lock, f);
+        kfree(release);
+    }
+}
+
+/* RX-owner only, after a valid retirement; no other thread mutates slots. */
+void a20_clx_fragment_retire(uint32_t source_hash, uint32_t seq,
+                             uint64_t source_epoch,
+                             uint64_t destination_epoch) {
+    for (uint32_t i = 0; i < ASSEMBLY_SLOTS; i++) {
+        uint8_t *release = NULL;
+        uint64_t f = spin_lock_irqsave(&g_clx_lock);
+        assembly_slot_t *slot = &assemblies[i];
+        if (slot->used && slot->assembly.header.src_hash == source_hash &&
+            slot->assembly.header.seq == seq &&
+            (slot->assembly.header.type == A20_CLX_TYPE_CALL ||
+             slot->assembly.header.type == A20_CLX_TYPE_SEND) &&
+            slot->assembly.source_epoch == source_epoch &&
+            slot->assembly.destination_epoch == destination_epoch) {
+            release = slot->storage;
+            if (release)
+                assembly_bytes -= slot->assembly.total;
+            memset(slot, 0, sizeof(*slot));
         }
         spin_unlock_irqrestore(&g_clx_lock, f);
         kfree(release);
@@ -77,6 +108,7 @@ uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
         a20_clx_peer_session(src, &local, &remote, &caps) < 0 ||
         (caps & (A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT)) !=
             (A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT) ||
+        (h->type == A20_CLX_TYPE_SEND && !(caps & A20_CLX_CAP_ONEWAY)) ||
         !a20_clx_session_matches(payload, h->payload_len, remote, local) ||
         a20_clx_fragment_parse(h, payload, a20_clx_transport_mtu(transport),
                                a20_clx_logical_mtu(src), &part) < 0) {
@@ -86,7 +118,16 @@ uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
         return NULL;
     }
     assembly_slot_t *slot = NULL, *empty = NULL;
+    if (a20_clx_reliable_fragment_seen(src, h, remote, local))
+        return NULL;
     uint64_t f = spin_lock_irqsave(&g_clx_lock);
+    if (h->type == A20_CLX_TYPE_CALL_REPLY &&
+        !a20_clx_proxy_fragment_pending_locked(h->src_hash, h->txid, remote,
+                                               local)) {
+        rejected++;
+        spin_unlock_irqrestore(&g_clx_lock, f);
+        return NULL;
+    }
     for (uint32_t i = 0; i < ASSEMBLY_SLOTS; i++) {
         assembly_slot_t *s = &assemblies[i];
         if (!s->used) {
@@ -96,6 +137,7 @@ uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
                    s->assembly.header.dst_hash == h->dst_hash &&
                    s->assembly.header.type == h->type &&
                    s->assembly.header.txid == h->txid &&
+                   s->assembly.header.seq == h->seq &&
                    s->assembly.source_epoch == remote &&
                    s->assembly.destination_epoch == local) {
             slot = s;
@@ -154,6 +196,14 @@ uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
 }
 #else
 void a20_clx_fragment_expire(void) {
+}
+void a20_clx_fragment_retire(uint32_t source_hash, uint32_t seq,
+                             uint64_t source_epoch,
+                             uint64_t destination_epoch) {
+    (void)source_hash;
+    (void)seq;
+    (void)source_epoch;
+    (void)destination_epoch;
 }
 uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
                              a20_frame_hdr_t *h, const uint8_t *payload) {

@@ -17,6 +17,11 @@ int main(void) {
     assert(c.seeds[0].transport == 2 && c.seeds[1].hop[4] == 0xab &&
            c.seeds[1].hop[5] == 0xf4);
     before = c;
+    const char *enabled = "version 1\nfeature oneway\nnode "
+                          "00000000000000000000000000000001\nrole relay\n";
+    assert(!a20_cluster_config_parse(enabled, strlen(enabled), &c, &line));
+    assert(c.caps == 19);
+    c = before;
     const char *bad[] = {
         "",
         "version 2\n",
@@ -28,7 +33,11 @@ int main(void) {
         "version 1\nnode 00000000000000000000000000000001\nrole "
         "worker\nservice agent relative\n",
         "version 1\nnode 00000000000000000000000000000001\nrole "
-        "worker\nprocess /bin/probe\n"};
+        "worker\nprocess /bin/probe\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole worker\n"
+        "feature unknown\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole worker\n"
+        "feature oneway\nfeature oneway\n"};
     for (unsigned i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
         assert(a20_cluster_config_parse(bad[i], strlen(bad[i]), &c, &line) < 0);
         assert(!memcmp(&c, &before, sizeof(c)));

@@ -16,6 +16,32 @@ static uint32_t g_clx_proxy_generation;
 static uint32_t g_clx_inflight_bytes, g_clx_inflight_peak_bytes;
 static uint32_t g_clx_txid_next = 1; /* 0 = SEND only (02-§1) */
 
+/* The receiver keeps a 64-number serial window per origin session, shared
+ * across its CALL and SEND services. Bound the whole peer's outstanding
+ * span, including holes lost before admission, rather than just each proxy's
+ * count. Otherwise later completions can make an unseen retry permanently
+ * stale. g_clx_lock serializes reservation and all proxy completions. */
+static uint32_t clx_txid_reserve_locked(a20_clx_proxy_t *owner) {
+    uint32_t hash = a20_clx_node_hash(&owner->peer_node);
+    uint32_t candidate = g_clx_txid_next;
+    while (!candidate || candidate == A20_CLX_CLOSE_CALLER ||
+           a20_clx_proxy_by_txid(hash, candidate))
+        candidate++;
+    for (uint32_t i = 0; owner->reliable && i < CLX_LIMIT_REMOTE_EPS; i++) {
+        a20_clx_proxy_t *p = &g_clx_proxies[i];
+        if (!p->in_use || !p->reliable ||
+            a20_clx_node_hash(&p->peer_node) != hash)
+            continue;
+        for (uint32_t j = 0; j < p->inflight_cap; j++)
+            if (p->inflight[j].deadline_tick &&
+                (owner->peer_single ||
+                 candidate - p->inflight[j].txid >= CLX_DEDUP_WINDOW))
+                return 0;
+    }
+    g_clx_txid_next = candidate + 1;
+    return candidate;
+}
+
 /* ---- worker spawn table (proc_alloc entries take no argument) -------------- */
 
 enum clx_worker_kind { CLX_WK_PROXY_TX = 1, CLX_WK_EXPORT_TX };
@@ -242,6 +268,14 @@ a20_clx_proxy_t *a20_clx_proxy_by_txid(uint32_t src_hash, uint32_t txid) {
     return NULL;
 }
 
+int a20_clx_proxy_fragment_pending_locked(uint32_t source_hash, uint32_t txid,
+                                          uint64_t source_epoch,
+                                          uint64_t destination_epoch) {
+    a20_clx_proxy_t *p = a20_clx_proxy_by_txid(source_hash, txid);
+    return p && p->reliable && p->remote_session == source_epoch &&
+           p->local_session == destination_epoch;
+}
+
 a20_clx_proxy_t *a20_clx_proxy_by_node_slot(uint32_t src_hash, uint32_t slot) {
     for (uint32_t i = 0; i < CLX_LIMIT_REMOTE_EPS; i++) {
         a20_clx_proxy_t *p = &g_clx_proxies[i];
@@ -405,6 +439,8 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
                  * to apply backpressure to concurrent discovery/business calls.
                  * An admitted cached error still completes normally. */
                 spin_unlock_irqrestore(&g_clx_lock, flags);
+                a20_clx_reliable_retry_receipt(src, local_session,
+                                               remote_session);
                 return;
             }
         }
@@ -424,6 +460,11 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
         return;
     }
     if (h->type == A20_CLX_TYPE_CALL_REPLY) {
+        if (p->oneway && payload_len) {
+            spin_unlock_irqrestore(&g_clx_lock, flags);
+            a20_clx_link_rx_drop(transport_id, NULL, 0);
+            return;
+        }
         /* Complete the transaction (02-§4), then deliver the payload into
          * the caller's queue through the proxy half (03-§1): it lands in
          * the caller half's queue and wakes the parked caller. */
@@ -436,15 +477,16 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
             }
         }
         clx_proxy_deadline_recalc(p);
-        a20_channel_ep_t *ep = p->ep;
+        int oneway = p->oneway;
+        a20_channel_ep_t *ep = oneway ? NULL : p->ep;
         if (ep)
             refcount_inc(&ep->refcount);
         spin_unlock_irqrestore(&g_clx_lock, flags);
-        if (!ep)
-            return; /* teardown raced us; drop */
         if (local_session)
             a20_clx_reliable_receipt(src, h->txid, local_session,
                                      remote_session);
+        if (!ep)
+            return; /* SEND receipt consumed internally, or teardown raced us. */
         int64_t r = a20_channel_send(ep, payload, payload_len, NULL, 0, NULL,
                                      A20_MSG_NONBLOCK);
         a20_channel_ep_release(ep);
@@ -566,11 +608,23 @@ a20_channel_ep_t *a20_clx_proxy_create_bound(const a20_node_id_t *node,
 
     uint64_t local_session = 0, remote_session = 0;
     uint32_t caps = 0;
+    if ((reliable & A20_CONNECT_ONEWAY) && !(reliable & A20_CONNECT_RELIABLE)) {
+        *err = -A20_ERR_INVALID_ARGUMENT;
+        return NULL;
+    }
     if (reliable & A20_CONNECT_RELIABLE) {
         int r =
             a20_clx_peer_session(node, &local_session, &remote_session, &caps);
         if (r < 0 || !(caps & A20_CLX_CAP_RELIABLE)) {
             *err = r < 0 ? r : -A20_ERR_CLUSTER_UNSUPPORTED;
+            return NULL;
+        }
+        uint32_t self_caps = 0;
+        a20_clx_self_get(NULL, &self_caps);
+        if ((reliable & A20_CONNECT_ONEWAY) &&
+            (!(caps & A20_CLX_CAP_ONEWAY) ||
+             !(self_caps & A20_CLX_CAP_ONEWAY))) {
+            *err = -A20_ERR_CLUSTER_UNSUPPORTED;
             return NULL;
         }
     }
@@ -618,9 +672,15 @@ a20_channel_ep_t *a20_clx_proxy_create_bound(const a20_node_id_t *node,
     p->peer_node = *node;
     p->dst_slot = slot;
     p->reliable = reliable & A20_CONNECT_RELIABLE;
+    p->oneway = !!(reliable & A20_CONNECT_ONEWAY);
+    p->peer_single = !!(caps & A20_CLX_CAP_LEAF);
     p->local_session = local_session;
     p->remote_session = remote_session;
     p->inflight_cap = CLX_LIMIT_INFLIGHT;
+    if (p->oneway && p->inflight_cap > CLX_DEDUP_WINDOW)
+        p->inflight_cap = CLX_DEDUP_WINDOW;
+    if (p->oneway && (caps & A20_CLX_CAP_LEAF))
+        p->inflight_cap = 1;
     p->inflight = kmalloc(sizeof(*p->inflight) * p->inflight_cap);
     if (!p->inflight) {
         p->in_use = 0;
@@ -721,6 +781,18 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
                 a20_channel_ep_release(ep);
             break;
         }
+        if (p->oneway) {
+            uint64_t f = spin_lock_irqsave(&g_clx_lock);
+            int full = p->inflight_count >= p->inflight_cap;
+            spin_unlock_irqrestore(&g_clx_lock, f);
+            if (full) {
+                a20_channel_ep_release(ep);
+                /* Leave queued messages in the bounded local channel so its
+                 * existing blocking/NONBLOCK behavior supplies backpressure. */
+                proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+                continue;
+            }
+        }
 
         uint8_t *msg = NULL;
         uint32_t msg_len = 0;
@@ -770,27 +842,6 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
                                    p->remote_session);
         if (msg_len)
             memcpy(payload + prefix, msg, msg_len);
-        uint64_t f2 = spin_lock_irqsave(&g_clx_lock);
-        uint32_t txid;
-        do {
-            txid = g_clx_txid_next++;
-        } while (!txid || txid == A20_CLX_CLOSE_CALLER ||
-                 a20_clx_proxy_by_txid(a20_clx_node_hash(&p->peer_node), txid));
-        a20_frame_hdr_t h = {0};
-        h.ver = p->reliable ? A20_CLX_SESSION_VER : A20_CLX_WIRE_VER;
-        h.type = A20_CLX_TYPE_CALL;
-        h.flags = p->reliable ? A20_CLX_FLAG_RELIABLE : 0;
-        h.seq = p->reliable ? txid : 0;
-        h.txid = txid;
-        h.src_hash = a20_clx_self_hash();
-        h.dst_hash = a20_clx_node_hash(&p->peer_node);
-        h.dst_slot = p->dst_slot;
-        h.payload_len = prefix + msg_len;
-        h.ttl = A20_CLX_TTL_DEFAULT;
-        h.csum_kind = A20_CLX_CSUM_CCITT;
-        int n = a20_frame_encode_logical(frame, capacity, mtu, &h, payload);
-        int ir = -1;
-        uint64_t now = timer_get_ticks();
 #if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_SERVER
         uint32_t retry_budget = A20_LIMIT_CLX_REASM_BYTES_ABSOLUTE;
 #elif CONFIG_CLUSTER_PROFILE == A20_CLX_PROFILE_MCU
@@ -798,27 +849,59 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
 #else
         uint32_t retry_budget = A20_LIMIT_CLX_REASM_BYTES_DEFAULT;
 #endif
-        if (n > 0 && p->in_use && p->id == generation &&
-            (!retry || g_clx_inflight_bytes + capacity <= retry_budget))
-            ir = a20_clx_proxy_inflight_add(
-                p, txid, now + MS_TO_TICKS(CLX_CALL_DEADLINE_MS));
-        if (!ir && retry) {
-            memcpy(retry, frame, n);
-            for (uint32_t j = 0; j < p->inflight_cap; j++) {
-                struct a20_clx_inflight *entry = &p->inflight[j];
-                if (entry->deadline_tick && entry->txid == txid) {
-                    entry->frame = retry;
-                    entry->frame_len = n;
-                    entry->retry_tick = now + MS_TO_TICKS(A20_CLX_RETRY_MS);
-                    g_clx_inflight_bytes += n;
-                    if (g_clx_inflight_bytes > g_clx_inflight_peak_bytes)
-                        g_clx_inflight_peak_bytes = g_clx_inflight_bytes;
-                    retry = NULL;
-                    break;
+        int n = -1, ir = -1;
+        uint64_t deadline =
+            timer_get_ticks() + MS_TO_TICKS(CLX_CALL_DEADLINE_MS);
+        for (;;) {
+            uint64_t f2 = spin_lock_irqsave(&g_clx_lock);
+            uint64_t now = timer_get_ticks();
+            if (!p->in_use || p->id != generation || now >= deadline) {
+                spin_unlock_irqrestore(&g_clx_lock, f2);
+                break;
+            }
+            uint32_t txid = 0;
+            if (p->inflight_count < p->inflight_cap &&
+                (!retry || g_clx_inflight_bytes + capacity <= retry_budget))
+                txid = clx_txid_reserve_locked(p);
+            if (!txid) {
+                spin_unlock_irqrestore(&g_clx_lock, f2);
+                proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+                continue;
+            }
+            a20_frame_hdr_t h = {0};
+            h.ver = p->reliable ? A20_CLX_SESSION_VER : A20_CLX_WIRE_VER;
+            h.type = p->oneway ? A20_CLX_TYPE_SEND : A20_CLX_TYPE_CALL;
+            h.flags = p->reliable ? A20_CLX_FLAG_RELIABLE : 0;
+            h.seq = p->reliable ? txid : 0;
+            h.txid = p->oneway ? 0 : txid;
+            h.src_hash = a20_clx_self_hash();
+            h.dst_hash = a20_clx_node_hash(&p->peer_node);
+            h.dst_slot = p->dst_slot;
+            h.payload_len = prefix + msg_len;
+            h.ttl = A20_CLX_TTL_DEFAULT;
+            h.csum_kind = A20_CLX_CSUM_CCITT;
+            n = a20_frame_encode_logical(frame, capacity, mtu, &h, payload);
+            if (n > 0)
+                ir = a20_clx_proxy_inflight_add(p, txid, deadline);
+            if (!ir && retry) {
+                memcpy(retry, frame, n);
+                for (uint32_t j = 0; j < p->inflight_cap; j++) {
+                    struct a20_clx_inflight *entry = &p->inflight[j];
+                    if (entry->deadline_tick && entry->txid == txid) {
+                        entry->frame = retry;
+                        entry->frame_len = n;
+                        entry->retry_tick = now + MS_TO_TICKS(A20_CLX_RETRY_MS);
+                        g_clx_inflight_bytes += n;
+                        if (g_clx_inflight_bytes > g_clx_inflight_peak_bytes)
+                            g_clx_inflight_peak_bytes = g_clx_inflight_bytes;
+                        retry = NULL;
+                        break;
+                    }
                 }
             }
+            spin_unlock_irqrestore(&g_clx_lock, f2);
+            break;
         }
-        spin_unlock_irqrestore(&g_clx_lock, f2);
         if (n > 0 && ir == 0) {
             if (a20_clx_core_send_frame(&p->peer_node, frame, n) < 0 &&
                 !p->reliable)

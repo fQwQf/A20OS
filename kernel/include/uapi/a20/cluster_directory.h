@@ -5,6 +5,7 @@
 /* Stable read-only discovery endpoint, independent of user-daemon lifetime.
  * Export slots below it are never reused during a boot. */
 #define A20_DIRECTORY_WORK (1u << 2) /* Same bit as Native A20_EXPORT_WORK. */
+#define A20_DIRECTORY_ONEWAY (1u << 3)
 #define A20_DIRECTORY_SLOT 0xfffffffeu
 #define A20_DIRECTORY_REQUEST 16u
 #define A20_DIRECTORY_REPLY 128u

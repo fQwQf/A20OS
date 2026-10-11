@@ -205,7 +205,8 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
         a20_frame_decode_logical(frame, len, logical_mtu, &h, &payload) !=
             A20_FRAME_OK ||
         h.flags != A20_CLX_FLAG_RELIABLE ||
-        (h.type != A20_CLX_TYPE_CALL && h.type != A20_CLX_TYPE_CALL_REPLY) ||
+        (h.type != A20_CLX_TYPE_CALL && h.type != A20_CLX_TYPE_CALL_REPLY &&
+         h.type != A20_CLX_TYPE_SEND) ||
         a20_clx_peer_session(dst, &local, &remote, &caps) < 0 ||
         !a20_clx_session_matches(payload, h.payload_len, local, remote)) {
         a20_clx_link_tx_drop(transport_id, nh, nh_len);
@@ -254,7 +255,8 @@ int a20_clx_peer_session(const a20_node_id_t *node, uint64_t *local,
         return -A20_ERR_NODE_UNREACHABLE;
     if (id == A20_CLX_TRANSPORT_LOOPBACK) {
         *local = *remote = g_clx_loop_session;
-        *caps = A20_CLX_CAP_RELIABLE;
+        a20_clx_self_get(NULL, caps);
+        *caps |= A20_CLX_CAP_RELIABLE;
         return 0;
     }
     const a20_clx_transport_t *t = a20_clx_transport_get(id);
@@ -450,7 +452,7 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
     if (h.type == A20_CLX_TYPE_CALL_REPLY || h.type == A20_CLX_TYPE_ERROR ||
         h.type == A20_CLX_TYPE_ACK) {
         a20_clx_proxy_rx(transport_id, &src, &h, payload);
-    } else if (h.type == A20_CLX_TYPE_CALL) {
+    } else if (h.type == A20_CLX_TYPE_CALL || h.type == A20_CLX_TYPE_SEND) {
         a20_clx_export_rx(transport_id, &src, &h, payload);
     } else if (h.type == A20_CLX_TYPE_CLOSE) {
         if (h.txid != A20_CLX_CLOSE_CALLER)

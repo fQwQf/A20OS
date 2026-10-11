@@ -207,16 +207,17 @@ static inline a20_status_t a20_cluster_connect(const a20_node_id_t *node_id,
 }
 
 /* Version-2 connect atomically binds admission to the discovered boot. */
-static inline a20_status_t a20_cluster_connect_bound(const a20_node_id_t *node,
-                                                     uint32_t slot,
-                                                     uint64_t expected_epoch,
-                                                     a20_handle_t *endpoint) {
-    if (!node || !endpoint || !expected_epoch)
+static inline a20_status_t
+a20_cluster_connect_bound_flags(const a20_node_id_t *node, uint32_t slot,
+                                uint64_t expected_epoch, uint32_t flags,
+                                a20_handle_t *endpoint) {
+    if (!node || !endpoint || !expected_epoch ||
+        (flags & ~A20_CONNECT_FLAGS_ALL) || !(flags & A20_CONNECT_RELIABLE))
         return -A20_ERR_INVALID_ARGUMENT;
     a20_cluster_connect_args_v2_t args = {0};
     args.base.size = sizeof(args);
     args.base.version = 2;
-    args.base.flags = A20_CONNECT_RELIABLE;
+    args.base.flags = flags;
     args.base.slot = slot;
     args.base.node_id = *node;
     args.expected_boot_epoch = expected_epoch;
@@ -225,6 +226,14 @@ static inline a20_status_t a20_cluster_connect_bound(const a20_node_id_t *node,
     if (r >= 0)
         *endpoint = (a20_handle_t)r;
     return r;
+}
+
+static inline a20_status_t a20_cluster_connect_bound(const a20_node_id_t *node,
+                                                     uint32_t slot,
+                                                     uint64_t expected_epoch,
+                                                     a20_handle_t *endpoint) {
+    return a20_cluster_connect_bound_flags(node, slot, expected_epoch,
+                                           A20_CONNECT_RELIABLE, endpoint);
 }
 
 /* next_hop format is per-transport: loopback = 4B virtual node number,

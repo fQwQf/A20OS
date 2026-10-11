@@ -30,6 +30,7 @@ static spinlock_t g_clx_lock;
 static uint64_t ticks;
 static unsigned allocations, live_bytes;
 static int allocation_failure;
+static int request_seen, reply_pending = 1;
 static uint64_t timer_get_ticks(void) {
     return ticks;
 }
@@ -79,7 +80,7 @@ static int a20_clx_peer_session(const a20_node_id_t *p, uint64_t *local,
     (void)p;
     *local = 11;
     *remote = 22;
-    *caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT;
+    *caps = A20_CLX_CAP_RELIABLE | A20_CLX_CAP_FRAGMENT | A20_CLX_CAP_ONEWAY;
     return 0;
 }
 static uint32_t a20_clx_session_logical_mtu(const a20_node_id_t *p) {
@@ -89,6 +90,23 @@ static uint32_t a20_clx_session_logical_mtu(const a20_node_id_t *p) {
 uint32_t a20_clx_udp_logical_mtu(const uint8_t node[16]) {
     (void)node;
     return CLX_LOGICAL_MTU;
+}
+static int a20_clx_reliable_fragment_seen(const a20_node_id_t *node,
+                                          const a20_frame_hdr_t *h,
+                                          uint64_t source,
+                                          uint64_t destination) {
+    (void)node;
+    (void)h;
+    assert(!g_clx_lock && source == 22 && destination == 11);
+    return request_seen;
+}
+static int a20_clx_proxy_fragment_pending_locked(uint32_t hash, uint32_t txid,
+                                                 uint64_t source,
+                                                 uint64_t destination) {
+    (void)hash;
+    (void)txid;
+    assert(g_clx_lock && source == 22 && destination == 11);
+    return reply_pending;
 }
 #include "../../kernel/cluster/fragment.c"
 #include "../../kernel/cluster/frame.c"
@@ -185,6 +203,15 @@ int main(void) {
     assert(a20_frame_decode_logical(logical, 65590, 65590, &full, &decoded) ==
            A20_FRAME_OK);
     assert(!memcmp(decoded, body, 65556));
+    full.type = A20_CLX_TYPE_SEND;
+    full.txid = 0;
+    full.payload_len = 65552;
+    assert(a20_frame_encode_logical(logical, 65590, 65590, &full, body) ==
+           65586);
+    assert(a20_frame_decode_logical(logical, 65586, 65590, &full, &decoded) ==
+           A20_FRAME_OK);
+    assert(full.type == A20_CLX_TYPE_SEND && full.txid == 0 &&
+           full.payload_len == 65552 && !memcmp(decoded, body, 65552));
     free(logical);
     a20_clx_assembly_t a = {0};
     assert(feed(&a, 4000, 0) == 0);
@@ -247,13 +274,13 @@ int main(void) {
     part(4000, 0, ASSEMBLY_SLOTS + 1);
     assert(!a20_clx_fragment_rx(&node, 1, &header, payload));
     assert(allocations == ASSEMBLY_SLOTS);
-    ticks = 1999;
+    ticks = A20_CLX_FRAGMENT_TTL_MS - 1;
     part(4000, 0, 1);
     assert(!a20_clx_fragment_rx(&node, 1, &header, payload));
     payload[100] ^= 1;
     assert(!a20_clx_fragment_rx(&node, 1, &header, payload));
     assert(allocations == ASSEMBLY_SLOTS - 1 && assemblies[0].poisoned);
-    ticks = 2000;
+    ticks = A20_CLX_FRAGMENT_TTL_MS;
     a20_clx_fragment_expire();
     assert(!allocations && !live_bytes);
     allocation_failure = 1;
@@ -276,6 +303,22 @@ int main(void) {
         }
     }
     unsigned expected_expired = ASSEMBLY_SLOTS;
+    /* Two SENDs both have wire txid zero. seq must separate their contexts. */
+    for (unsigned index = 0; index < 3; index++) {
+        for (unsigned seq = 20; seq <= 21; seq++) {
+            part(4000, index, seq);
+            header.type = A20_CLX_TYPE_SEND;
+            header.txid = 0;
+            uint8_t *ready = a20_clx_fragment_rx(&node, 1, &header, payload);
+            if (index < 2)
+                assert(!ready && allocations == (index == 0 ? seq - 19 : 2));
+            else {
+                assert(ready && header.txid == 0 && header.seq == seq &&
+                       !memcmp(ready, body, 4000));
+                kfree(ready);
+            }
+        }
+    }
 #if CONFIG_CLUSTER_PROFILE >= 3
     /* 64 full logical payloads exceed 4 MiB: the byte quota binds first. */
     unsigned fit = ASSEMBLY_BUDGET / sizeof(body);
@@ -288,7 +331,7 @@ int main(void) {
     part(sizeof(body), 0, 1000 + fit);
     assert(!a20_clx_fragment_rx(&node, 1, &header, payload));
     assert(allocations == fit);
-    ticks += 2000;
+    ticks += A20_CLX_FRAGMENT_TTL_MS;
     a20_clx_fragment_expire();
     expected_expired += fit;
 #endif
@@ -296,8 +339,29 @@ int main(void) {
     a20_clx_fragment_resources(&stats);
     assert(!allocations && !live_bytes && !stats.values[A20_CLX_REASM_BYTES] &&
            !stats.values[A20_CLX_REASM_CONTEXTS] &&
-           stats.values[A20_CLX_REASM_COMPLETED] == 1 &&
+           stats.values[A20_CLX_REASM_COMPLETED] == 3 &&
            stats.values[A20_CLX_REASM_EXPIRED] == expected_expired);
+    part(4000, 0, 100);
+    request_seen = 1;
+    assert(!a20_clx_fragment_rx(&node, 1, &header, payload) && !allocations);
+    request_seen = 0;
+    assert(!a20_clx_fragment_rx(&node, 1, &header, payload) &&
+           allocations == 1);
+    a20_clx_fragment_retire(12, 100, 21, 11);
+    assert(allocations == 1); /* Wrong epoch cannot clear partial input. */
+    a20_clx_fragment_retire(12, 100, 22, 11);
+    assert(!allocations && !live_bytes);
+    part(4000, 0, 101);
+    header.type = A20_CLX_TYPE_CALL_REPLY;
+    reply_pending = 0;
+    assert(!a20_clx_fragment_rx(&node, 1, &header, payload) && !allocations);
+    reply_pending = 1;
+    assert(!a20_clx_fragment_rx(&node, 1, &header, payload) &&
+           allocations == 1);
+    reply_pending = 0;
+    a20_clx_fragment_expire();
+    assert(!allocations &&
+           !live_bytes); /* Cancelled proxy releases promptly. */
     puts("test_clx_fragment: 64118 sizes, reorder/duplicates/conflicts, slot "
          "and byte quotas, 100K mutations, expiry, session, OOM and release "
          "PASS");

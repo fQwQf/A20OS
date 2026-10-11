@@ -86,7 +86,7 @@ static inline int a20_cs_decode(const a20_frame_hdr_t *h, const uint8_t *p,
         !r->epoch ||
         r->mtu < A20_CLX_HDR_LEN + A20_CLX_CRC_LEN + A20_CS_BYTES ||
         r->mtu > 65536 || r->profile < 1 || r->profile > 3 ||
-        !(r->caps & A20_CLX_CAP_RELIABLE) || r->caps & ~15u ||
+        !(r->caps & A20_CLX_CAP_RELIABLE) || r->caps & ~31u ||
         ((r->caps & A20_CLX_CAP_FRAGMENT) && r->profile == 1) ||
         (r->kind == A20_CS_PROBE && r->target_epoch) ||
         (r->kind == A20_CS_REPLY && !r->target_epoch) ||

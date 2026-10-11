@@ -17,7 +17,7 @@ import time
 
 class FaultWire:
     """Operate on real Ethernet datagrams; never synthesize guest replies."""
-    def __init__(self, ports, loss=0, delay=False, corrupt=False, seed=20261011, flood=False):
+    def __init__(self, ports, loss=0, delay=False, corrupt=False, seed=20261011, flood=False, oneway=False):
         self.ports = ports
         self.sockets = []
         self.events = {}
@@ -31,6 +31,8 @@ class FaultWire:
         self.flood_queue = deque()
         self.next_flood = 0
         self.partition_until = 0
+        self.oneway = oneway
+        self.send_sequences = set()
 
         for _ in ports:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -110,6 +112,7 @@ class FaultWire:
                     "type": kind, "flags": int.from_bytes(cl[4:6], "little"),
                     "frag": int.from_bytes(cl[6:8], "little"),
                     "txid": int.from_bytes(cl[8:12], "little"),
+                    "seq": int.from_bytes(cl[24:28], "little"),
                     "length": len(cl), "ttl": cl[30], "target": target,
                     "prefix": cl[32:56].hex()})
                 if side >= 2:
@@ -139,6 +142,33 @@ class FaultWire:
                 slot = int.from_bytes(cl[20:24], "little")
                 fragmented = bool(int.from_bytes(cl[4:6], "little") & 2)
                 index = int.from_bytes(cl[6:8], "little") & 0xfff
+                src = int.from_bytes(cl[12:16], "little")
+                dst = int.from_bytes(cl[16:20], "little")
+                txid = int.from_bytes(cl[8:12], "little")
+                seq = int.from_bytes(cl[24:28], "little")
+                if self.oneway and reliable and kind == 5:
+                    if txid or not seq:
+                        raise RuntimeError("business SEND violated zero txid/nonzero seq")
+                    self.send_sequences.add((src, dst, seq))
+                    self.saved.setdefault((side, "send"), data)
+                    if not fragmented and self.once(side, "drop-send"):
+                        continue
+                    if not fragmented and self.once(side, "duplicate-send"):
+                        self.delayed.append((time.monotonic() + 0.2, output, data, destination))
+                    if fragmented and index == 0 and self.once(side, "drop-send-fragment"):
+                        continue
+                    if fragmented and index == 1 and self.once(side, "reorder-send-fragment"):
+                        self.delayed.append((time.monotonic() + 0.06, output, data, destination))
+                        continue
+                if self.oneway and (dst, src, txid) in self.send_sequences:
+                    if kind == 7 and self.once(side, "drop-send-completion"):
+                        continue
+                    if kind == 9 and self.once(side, "drop-send-ack"):
+                        continue
+                if (self.oneway and reliable and kind == 6 and not slot and
+                        (src, dst, txid) in self.send_sequences and
+                        self.once(side, "drop-send-retirement")):
+                    continue
                 if fragmented:
                     if kind == 6 and index == 0 and self.once(side, "drop-fragment"):
                         continue
@@ -150,7 +180,10 @@ class FaultWire:
                     if kind == 7 and index == 0 and self.once(side, "duplicate-fragment"):
                         self.delayed.append((time.monotonic() + 0.01, output, data, destination))
                 if reliable and kind == 6 and slot:
-                    self.saved.setdefault((side, "call"), data)
+                    # Replay a counted business request after reboot; a ready
+                    # probe would not exercise the service execution counter.
+                    if not fragmented and len(cl) >= 54 and cl[48:52] == b"yler":
+                        self.saved.setdefault((side, "call"), data)
                     if len(cl) >= 54 and cl[48:52] == b"kalb":
                         key = f"{side}:blackhole-call"
                         self.events[key] = self.events.get(key, 0) + 1
@@ -203,7 +236,10 @@ class FaultWire:
         self.delayed = pending
 
     def replay_old_session(self):
-        for side, kind in ((0, "call"), (1, "hello-ack")):
+        frames = [(0, "call"), (1, "hello-ack")]
+        if self.oneway:
+            frames.append((0, "send"))
+        for side, kind in frames:
             data = self.saved.get((side, kind))
             if data is None:
                 raise RuntimeError(f"no saved {kind} for old-session replay")
@@ -222,6 +258,7 @@ def main():
     parser.add_argument("--faults", action="store_true", help="drop, duplicate and delay real wire frames")
     parser.add_argument("--restart", action="store_true", help="restart node b and replay old session frames")
     parser.add_argument("--stress", action="store_true", help="1000 verified reliable calls per endpoint")
+    parser.add_argument("--send", action="store_true", help="264 reliable business SENDs and 96 concurrent CALLs per endpoint")
     parser.add_argument("--random-loss", type=float, default=0, help="seeded loss probability for reliable frames")
     parser.add_argument("--random-delay", action="store_true", help="delay reliable frames by 50-200 ms")
     parser.add_argument("--corrupt", action="store_true", help="flip one CL payload bit per endpoint, preserving UDP checksum")
@@ -277,7 +314,7 @@ def main():
         ports.append(sock.getsockname()[1])
         reservations.append(sock)
     processes, logs = [], []
-    wire = (FaultWire(ports, args.random_loss, args.random_delay, args.corrupt, args.seed, args.hello_flood)
+    wire = (FaultWire(ports, args.random_loss, args.random_delay, args.corrupt, args.seed, args.hello_flood, args.send)
             if args.faults or args.restart or args.routed or args.random_loss or
             args.random_delay or args.corrupt or args.hello_flood or args.partition else None)
     rounds = 1000 if args.stress else 96
@@ -298,6 +335,8 @@ def main():
                 bootargs += " clxudprestart=1"
             if args.stress:
                 bootargs += " clxudpstress=1"
+            if args.send:
+                bootargs += " clxudpsend=1"
             if args.corrupt:
                 bootargs += " clxudpcorrupt=1"
             if args.hello_flood:
@@ -335,6 +374,8 @@ def main():
                 cases += ("bounded-blackhole",)
             if args.routed:
                 cases += ("routed-fragment-session",)
+            if args.send:
+                cases += ("oneway-264-concurrent-call",)
             if args.corrupt:
                 cases += ("crc-counter",)
             if args.hello_flood:
@@ -386,6 +427,14 @@ def main():
                         raise RuntimeError("blackhole did not exercise exactly 8 retries per caller")
                     if not expected.issubset(wire.events):
                         raise RuntimeError(f"fault scenarios missing: {expected - wire.events.keys()}")
+                    if args.send:
+                        expected_send = {f"{side}:{event}" for side in range(2)
+                                         for event in ("drop-send", "duplicate-send",
+                                                       "drop-send-fragment", "reorder-send-fragment",
+                                                       "drop-send-completion", "drop-send-ack",
+                                                       "drop-send-retirement")}
+                        if not expected_send.issubset(wire.events):
+                            raise RuntimeError(f"SEND faults missing: {expected_send - wire.events.keys()}")
                     for side in range(2):
                         for enabled, event in ((args.corrupt, "corrupt-crc"),
                                                (args.random_loss, "random-drop"),
@@ -402,6 +451,7 @@ def main():
                 success = True
                 print("check-cluster-udp: PASS (" + ("three kernels via UDP relay" if args.routed else "two kernels") + f", {rounds} reliable calls each, "
                       "at-most-once service execution, fragmented echo, shared dot, bounded failures" +
+                      (", 264 SENDs and 96 concurrent CALLs each" if args.send else "") +
                       (", real wire faults" if wire else "") +
                       (", reboot and old-session rejection)" if args.restart else ")"))
                 print(f"logs: {log_dir}")
@@ -424,6 +474,8 @@ def main():
     finally:
         evidence = {"success": success, "profiles": profiles, "faults": wire is not None,
                     "restart": args.restart, "routed": args.routed, "calls_each": rounds,
+                    "send_each": 264 if args.send else 0,
+                    "concurrent_calls_each": 96 if args.send else 0,
                     "random_loss": args.random_loss, "random_delay_ms": [50, 200] if args.random_delay else None,
                     "corrupt": args.corrupt, "seed": args.seed, "source_sha256": hashes,
                     "hello_flood_each": 1000 if args.hello_flood else 0,

@@ -145,7 +145,8 @@ static void routed_confirmation(uint8_t id[16], uint64_t epoch,
                          .cookie = 99,
                          .epoch = epoch,
                          .mtu = 256,
-                         .caps = A20_CLX_CAP_RELIABLE,
+                         .caps = A20_CLX_CAP_RELIABLE |
+                                 (leaf_sink ? A20_CLX_CAP_ONEWAY : 0),
                          .profile = 2};
     memcpy(r.source, id, 16);
     memcpy(r.target, leaf_self_id, 16);
