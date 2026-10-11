@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 /*
  * A20OS SysV SHM — shmget(2) / shmat(2) / shmdt(2) / shmctl(2).
  *
@@ -54,6 +55,7 @@
 
 typedef struct {
     int used;
+    uint64_t namespace_ino;
     int marked_delete;
     int key;
     size_t size;
@@ -176,9 +178,9 @@ int sysv_shm_get(int key, size_t size, int shmflg)
 {
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
 
-    if (!(shmflg & IPC_CREAT)) {
+    if (key != 0 && !(shmflg & IPC_CREAT)) {
         for (int i = 0; i < SYSV_SHM_MAX; i++) {
-            if (g_shm[i].used && !g_shm[i].marked_delete && g_shm[i].key == key) {
+            if (g_shm[i].used && g_shm[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && !g_shm[i].marked_delete && g_shm[i].key == key) {
                 if (size > g_shm[i].size) {
                     spin_unlock_irqrestore(&g_shm_lock, flags);
                     return -EINVAL;
@@ -193,7 +195,7 @@ int sysv_shm_get(int key, size_t size, int shmflg)
 
     if (key != 0) {
         for (int i = 0; i < SYSV_SHM_MAX; i++) {
-            if (g_shm[i].used && !g_shm[i].marked_delete && g_shm[i].key == key) {
+            if (g_shm[i].used && g_shm[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && !g_shm[i].marked_delete && g_shm[i].key == key) {
                 if (size > g_shm[i].size) {
                     spin_unlock_irqrestore(&g_shm_lock, flags);
                     return -EINVAL;
@@ -240,7 +242,7 @@ int sysv_shm_get(int key, size_t size, int shmflg)
     flags = spin_lock_irqsave(&g_shm_lock);
     if (key != 0) {
         for (int i = 0; i < SYSV_SHM_MAX; i++) {
-            if (g_shm[i].used && !g_shm[i].marked_delete && g_shm[i].key == key) {
+            if (g_shm[i].used && g_shm[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && !g_shm[i].marked_delete && g_shm[i].key == key) {
                 size_t existing_size = g_shm[i].size;
                 int existing_id = i;
                 spin_unlock_irqrestore(&g_shm_lock, flags);
@@ -262,6 +264,7 @@ int sysv_shm_get(int key, size_t size, int shmflg)
         }
     }
     g_shm[slot].used = 1;
+    g_shm[slot].namespace_ino = resource_ns_ino(PROCNS_IPC);
     g_shm[slot].marked_delete = 0;
     g_shm[slot].key = key;
     g_shm[slot].size = npages * PAGE_SIZE;
@@ -276,7 +279,7 @@ int sysv_shm_size(int shmid, size_t *size)
 {
     if (!size) return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
-    if (shmid < 0 || shmid >= SYSV_SHM_MAX || !g_shm[shmid].used) {
+    if (shmid < 0 || shmid >= SYSV_SHM_MAX || (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC))) {
         spin_unlock_irqrestore(&g_shm_lock, flags);
         return -EINVAL;
     }
@@ -294,7 +297,7 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
 
     uint64_t lk = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX ||
-        !g_shm[shmid].used || g_shm[shmid].marked_delete) {
+        (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC)) || g_shm[shmid].marked_delete) {
         spin_unlock_irqrestore(&g_shm_lock, lk);
         return (uint64_t)-EINVAL;
     }
@@ -378,7 +381,7 @@ int sysv_shm_detach(const void *shmaddr)
 int sysv_shm_control(int shmid, int cmd, void *buf)
 {
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
-    if (shmid < 0 || shmid >= SYSV_SHM_MAX || !g_shm[shmid].used) {
+    if (shmid < 0 || shmid >= SYSV_SHM_MAX || (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC))) {
         spin_unlock_irqrestore(&g_shm_lock, flags);
         return -EINVAL;
     }
@@ -477,8 +480,23 @@ int sysv_shm_count(void)
     int n = 0;
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
     for (int i = 0; i < SYSV_SHM_MAX; i++)
-        if (g_shm[i].used)
+        if (g_shm[i].used && g_shm[i].namespace_ino == resource_ns_ino(PROCNS_IPC))
             n++;
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return n;
+}
+
+void sysv_shm_namespace_destroy(uint64_t ino)
+{
+    for (int i = 0; i < SYSV_SHM_MAX; i++) {
+        pfn_t *pages = NULL;
+        size_t npages = 0;
+        uint64_t irq = spin_lock_irqsave(&g_shm_lock);
+        if (g_shm[i].used && g_shm[i].namespace_ino == ino) {
+            g_shm[i].marked_delete = 1;
+            if (!g_shm[i].nattach) sysv_shm_free_locked(i, &pages, &npages);
+        }
+        spin_unlock_irqrestore(&g_shm_lock, irq);
+        sysv_shm_free_pages(pages, npages);
+    }
 }

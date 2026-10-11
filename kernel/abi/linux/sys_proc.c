@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "abi/linux/siginfo.h"
@@ -86,16 +87,9 @@ __attribute__((weak)) int64_t sys_pause(void) {
      LINUX_CLONE_SIGHAND | LINUX_CLONE_PIDFD | LINUX_CLONE_PTRACE | \
      LINUX_CLONE_VFORK | LINUX_CLONE_PARENT | LINUX_CLONE_THREAD | \
      LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID | LINUX_CLONE_NEWUSER | \
-     LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
+     RESOURCE_NS_FLAGS | LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
      LINUX_CLONE_PARENT_SETTID | LINUX_CLONE_CHILD_CLEARTID | \
      LINUX_CLONE_CHILD_SETTID | LINUX_CLONE_IO | 0xFFULL)
-
-/* Namespace types other than mount, pid and user namespaces are not
- * implemented; both clone and clone3 refuse them instead of silently ignoring
- * the flag. */
-#define LINUX_CLONE_UNSUPPORTED_NS_FLAGS \
-    (LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS | LINUX_CLONE_NEWIPC | \
-     LINUX_CLONE_NEWNET)
 
 /* CLONE_NEWNS requires privilege in the caller (Linux: CAP_SYS_ADMIN in the
  * current user namespace; simplified here to CAP_SYS_ADMIN or root). */
@@ -454,53 +448,45 @@ int64_t sys_getsid(int pid) {
     return sid;
 }
 
-static char g_hostname[65] = "A20OS";
-static char g_domainname[65] = "";
-
-/* Exposed for /proc/sys/kernel/hostname and domainname (procfs render). */
-const char *linux_kernel_hostname(void) { return g_hostname; }
-const char *linux_kernel_domainname(void) { return g_domainname; }
-
-/* Kernel-side setters used by /proc/sys/kernel writes.  @buf is a kernel
- * buffer; returns 0 or a negative errno. */
-int linux_kernel_set_hostname(const char *buf, size_t len)
-{
-    if (!buf || len >= sizeof(g_hostname))
-        return -EINVAL;
-    memcpy(g_hostname, buf, len);
-    g_hostname[len] = '\0';
+/* Procfs and uname read the calling task's UTS namespace. */
+const char *linux_kernel_hostname(void) {
+    return resource_ns_current(PROCNS_UTS)->hostname;
+}
+const char *linux_kernel_domainname(void) {
+    return resource_ns_current(PROCNS_UTS)->domainname;
+}
+static int uts_set_name(const char *buf, size_t len, int domain) {
+    if (!buf || len > 64) return -EINVAL;
+    resource_namespace_t *ns = resource_ns_current(PROCNS_UTS);
+    if (!userns_capable(proc_current(), ns->owner, CAP_SYS_ADMIN)) return -EPERM;
+    uint64_t irq = spin_lock_irqsave(&ns->lock);
+    char *name = domain ? ns->domainname : ns->hostname;
+    memcpy(name, buf, len);
+    name[len] = '\0';
+    spin_unlock_irqrestore(&ns->lock, irq);
     return 0;
 }
-
-int linux_kernel_set_domainname(const char *buf, size_t len)
-{
-    if (!buf || len >= sizeof(g_domainname))
-        return -EINVAL;
-    memcpy(g_domainname, buf, len);
-    g_domainname[len] = '\0';
-    return 0;
+int linux_kernel_set_hostname(const char *buf, size_t len) {
+    return uts_set_name(buf, len, 0);
+}
+int linux_kernel_set_domainname(const char *buf, size_t len) {
+    return uts_set_name(buf, len, 1);
 }
 
 int64_t sys_sethostname(const char *name, size_t len) {
     if (!name) return -EFAULT;
-    if (len >= sizeof(g_hostname)) return -EINVAL;
-    task_t *t = proc_current();
-    if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
-        return -EPERM;
+    if (len > 64) return -EINVAL;
     char buf[65];
-    if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
+    if (copy_from_user(buf, name, len) < 0) return -EFAULT;
     buf[len] = '\0';
     return linux_kernel_set_hostname(buf, len);
 }
 
 int64_t sys_setdomainname(const char *name, size_t len) {
     if (!name) return -EFAULT;
-    if (len >= sizeof(g_domainname)) return -EINVAL;
-    task_t *t = proc_current();
-    if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
-        return -EPERM;
+    if (len > 64) return -EINVAL;
     char buf[65];
-    if (user_strncpy(buf, name, sizeof(buf)) < 0) return -EFAULT;
+    if (copy_from_user(buf, name, len) < 0) return -EFAULT;
     buf[len] = '\0';
     return linux_kernel_set_domainname(buf, len);
 }
@@ -525,11 +511,6 @@ int64_t sys_vhangup(void) {
 }
 
 int64_t sys_unshare(int flags) {
-    /* Real namespace semantics: CLONE_NEWNS, CLONE_NEWPID and CLONE_NEWUSER
-     * create real namespaces; every other namespace type is refused with
-     * -EINVAL (Linux's error for unsupported types) instead of faking
-     * success.  The non-namespace unshare flags (CLONE_FS/FILES/SIGHAND/VM/
-     * THREAD/SYSVSEM) are likewise not implemented and refuse honestly. */
     const int known = (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
                       LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
                       LINUX_CLONE_NEWNS | LINUX_CLONE_SYSVSEM |
@@ -538,9 +519,7 @@ int64_t sys_unshare(int flags) {
                       LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET);
     if (flags & ~known)
         return -EINVAL;
-    if (flags & (int)(LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS |
-                      LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWNET))
-        return -EINVAL;
+
     if (flags & (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
                       LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
                       LINUX_CLONE_SYSVSEM))
@@ -552,7 +531,8 @@ int64_t sys_unshare(int flags) {
         (int)(LINUX_CLONE_NEWPID | LINUX_CLONE_THREAD))
         return -EINVAL;
 
-    if (flags & (int)(LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID)) {
+    if ((flags & (int)(LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID | RESOURCE_NS_FLAGS)) &&
+        !(flags & (int)LINUX_CLONE_NEWUSER)) {
         task_t *t = proc_current();
         if (!t)
             return -ESRCH;
@@ -560,39 +540,30 @@ int64_t sys_unshare(int flags) {
             return -EPERM;
     }
     task_t *t = proc_current();
-    /* unshare(CLONE_NEWUSER) deliberately needs NO capability: it is how an
-     * unprivileged process obtains a namespace it is root in.  The privilege
-     * that comes with it is scoped to the new namespace, so it grants nothing
-     * outside it.  It runs LAST, because it changes what the other two
-     * namespaces are created relative to: a task that unshares NEWNS and
-     * NEWUSER in one call wants the mount namespace nested under the user
-     * namespace it just joined, not the other way round. */
-    mnt_namespace_t *old_mnt = NULL;
-    if (flags & (int)LINUX_CLONE_NEWNS) {
-        old_mnt = mntns_task_get(t);
-        int r = mntns_unshare(t);
-        if (r < 0) {
-            mntns_put(old_mnt);
-            return r;
-        }
+    if (!t) return -ESRCH;
+    /* Save references before any membership changes. NEWUSER runs first so
+     * the other namespaces belong to the new credential domain; every
+     * allocation failure restores all previous memberships and credentials. */
+    user_namespace_t *old_user = userns_task_get(t);
+    mnt_namespace_t *old_mnt = mntns_task_get(t);
+    pid_namespace_t *old_pid = pidns_get(t->pid_ns_for_children);
+    proc_cred_t old_cred = t->cred;
+    int r = 0;
+    if (flags & (int)LINUX_CLONE_NEWUSER) r = userns_unshare(t);
+    if (!r && (flags & (int)LINUX_CLONE_NEWNS)) r = mntns_unshare(t);
+    if (!r && (flags & (int)LINUX_CLONE_NEWPID)) r = pidns_unshare(t);
+    if (!r) r = resource_ns_unshare(t, (unsigned)flags);
+    if (r < 0) {
+        userns_join(t, old_user);
+        t->cred = old_cred;
+        mntns_join(t, old_mnt); /* consumes this reference */
+        old_mnt = NULL;
+        pidns_join(t, old_pid);
     }
-    if (flags & (int)LINUX_CLONE_NEWPID) {
-        int r = pidns_unshare(t);
-        if (r < 0) {
-            /* Roll the mount namespace back so a multi-flag unshare is not
-             * left half applied. */
-            if (flags & (int)LINUX_CLONE_NEWNS) {
-                mntns_join(t, old_mnt);  /* consumes old_mnt */
-            }
-            return r;
-        }
-    }
-    if (flags & (int)LINUX_CLONE_NEWUSER) {
-        int r = userns_unshare(t);
-        if (r < 0)
-            return r;
-    }
-    return 0;
+    userns_put(old_user);
+    mntns_put(old_mnt);
+    pidns_put(old_pid);
+    return r;
 }
 
 int64_t sys_setns(int fd, int nstype) {
@@ -619,15 +590,20 @@ int64_t sys_setns(int fd, int nstype) {
         vfs_put_file(vf);
         return -EINVAL;
     }
-    /* Mount, pid and user namespaces can be joined; the other namespace types
-     * are system-wide singletons and setns is honestly refused. */
-    if (kind != PROCNS_MNT && kind != PROCNS_PID && kind != PROCNS_USER) {
-        vfs_put_file(vf);
-        return -EINVAL;
-    }
     task_t *cur = proc_current();
     int owner_uid = -1;
     int r;
+    if (kind == PROCNS_UTS || kind == PROCNS_IPC || kind == PROCNS_NET || kind == PROCNS_CGROUP) {
+        resource_namespace_t *ns = procfs_ns_file_resource_get(vf);
+        if (!ns) { vfs_put_file(vf); return -EINVAL; }
+        if (!cur || !userns_capable(cur, ns->owner, CAP_SYS_ADMIN) ||
+            !proc_has_cap(cur, CAP_SYS_ADMIN)) r = -EPERM;
+        else r = resource_ns_join(cur, ns);
+        resource_ns_put(ns);
+        vfs_put_file(vf);
+        return r;
+    }
+
     if (kind == PROCNS_MNT) {
         user_namespace_t *owner = NULL;
         mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid, &owner);
@@ -897,9 +873,14 @@ int64_t sys_clone3(void *cl_args, size_t size) {
         return -EINVAL;
     if ((args.flags & LINUX_CLONE_THREAD) && !(args.flags & LINUX_CLONE_SIGHAND))
         return -EINVAL;
+    if ((args.flags & RESOURCE_NS_FLAGS) && !(args.flags & LINUX_CLONE_NEWUSER)) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0) return perm;
+    }
+    if ((args.flags & LINUX_CLONE_NEWIPC) && (args.flags & LINUX_CLONE_SYSVSEM)) return -EINVAL;
     if ((args.flags & LINUX_CLONE_FS) && (args.flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
-    if (args.flags & LINUX_CLONE_NEWNS) {
+    if ((args.flags & LINUX_CLONE_NEWNS) && !(args.flags & LINUX_CLONE_NEWUSER)) {
         int perm = linux_clone_newns_perm_check();
         if (perm < 0)
             return perm;
@@ -909,9 +890,10 @@ int64_t sys_clone3(void *cl_args, size_t size) {
          * not lead its group cannot host a namespace's pid 1. */
         if (args.flags & LINUX_CLONE_THREAD)
             return -EINVAL;
-        int perm = linux_clone_newns_perm_check();
-        if (perm < 0)
-            return perm;
+        if (!(args.flags & LINUX_CLONE_NEWUSER)) {
+            int perm = linux_clone_newns_perm_check();
+            if (perm < 0) return perm;
+        }
     }
     if (!!args.stack != !!args.stack_size)
         return -EINVAL;
@@ -989,11 +971,14 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
         return -EINVAL; /* NOMMU does not support fork without CLONE_VM */
     }
 #endif
-    if (flags & LINUX_CLONE_UNSUPPORTED_NS_FLAGS)
-        return -EINVAL;
+    if ((flags & RESOURCE_NS_FLAGS) && !(flags & LINUX_CLONE_NEWUSER)) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0) return perm;
+    }
+    if ((flags & LINUX_CLONE_NEWIPC) && (flags & LINUX_CLONE_SYSVSEM)) return -EINVAL;
     if ((flags & LINUX_CLONE_FS) && (flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
-    if (flags & LINUX_CLONE_NEWNS) {
+    if ((flags & LINUX_CLONE_NEWNS) && !(flags & LINUX_CLONE_NEWUSER)) {
         int perm = linux_clone_newns_perm_check();
         if (perm < 0)
             return perm;
@@ -1004,9 +989,10 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
          * well as in clone3 so both entry points agree. */
         if (flags & LINUX_CLONE_THREAD)
             return -EINVAL;
-        int perm = linux_clone_newns_perm_check();
-        if (perm < 0)
-            return perm;
+        if (!(flags & LINUX_CLONE_NEWUSER)) {
+            int perm = linux_clone_newns_perm_check();
+            if (perm < 0) return perm;
+        }
     }
     return proc_clone(flags, (uint64_t)(uintptr_t)stack, ptid, tls, ctid,
                       (int)(flags & 0xFF));

@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "syscall_impl.h"
 #include "core/version.h"
 #include "mm/frame.h"
@@ -14,7 +15,11 @@ int64_t sys_uname(void *buf) {
     struct uname u;
     memset(&u, 0, sizeof(u));
     snprintf(u.s, sizeof(u.s), "%s", A20OS_SYSNAME);
-    snprintf(u.n, sizeof(u.n), "%s", A20OS_NODENAME);
+    resource_namespace_t *uts = resource_ns_current(PROCNS_UTS);
+    uint64_t irq = spin_lock_irqsave(&uts->lock);
+    memcpy(u.n, uts->hostname, sizeof(u.n));
+    memcpy(u.d, uts->domainname, sizeof(u.d));
+    spin_unlock_irqrestore(&uts->lock, irq);
     snprintf(u.r, sizeof(u.r), "%s", A20OS_RELEASE);
     snprintf(u.v, sizeof(u.v), "%s", A20OS_VERSION_FULL);
     snprintf(u.m, sizeof(u.m), "%s", ARCH_NAME);

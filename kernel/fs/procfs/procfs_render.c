@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mount.h"
 #include "net/netfilter.h"
@@ -1086,10 +1087,14 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_CGROUP:
-        snprintf(buf, bufsz,
-            "0::/init.scope\n");
+    case PF_PID_CGROUP: {
+        task_t *t = proc_find_get(pid);
+        char path[1024];
+        resource_ns_cgroup_path(t, path, sizeof(path));
+        snprintf(buf, bufsz, "0::%s\n", path);
+        proc_put(t);
         break;
+    }
     case PF_PID_CMDLINE: {
         task_t *t = proc_find_get(pid);
         if (!t || !t->exec_path[0]) {
@@ -1219,10 +1224,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_UTS:
+    case PF_PID_NS_UTS: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "uts:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_UTS);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_UTS));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_USER: {
         /* Real user namespaces: report the target task's namespace ino, so a
          * container and the host are distinguishable by reading
@@ -1233,10 +1241,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_IPC:
+    case PF_PID_NS_IPC: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "ipc:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_IPC);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_IPC));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_MNT: {
         /* Real mount namespaces: report the target task's namespace ino. */
         task_t *t = proc_find_get(pid);
@@ -1245,14 +1256,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_NET:
+    case PF_PID_NS_NET: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "net:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_NET);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_NET));
+        proc_put(t);
         break;
-    case PF_PID_NS_CGROUP:
+    }
+    case PF_PID_NS_CGROUP: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "cgroup:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_CGROUP);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_CGROUP));
+        proc_put(t);
         break;
+    }
     case PF_PID_MOUNTINFO: {
         buf[0] = '\0';
         int pos = 0;

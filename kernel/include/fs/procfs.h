@@ -21,6 +21,7 @@ struct user_namespace;
 #define PROCNS_CGROUP 7
 
 int  procfs_ns_file_kind(const vfile_t *vf);
+struct resource_namespace *procfs_ns_file_resource_get(const vfile_t *vf);
 
 /*
  * The three *_get() accessors below hand setns(2) the object behind an open

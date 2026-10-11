@@ -237,6 +237,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
          * chdir and pivot_root independently from here on, and each exit
          * path releases its own pins. */
         vfs_task_fs_pins_copy(t, parent);
+        cg_inherit_task(t, parent);
     } else {
         t->fs.cwd[0] = '/';
         t->fs.cwd[1] = '\0';
@@ -310,7 +311,7 @@ static void proc_task_release_resources(task_t *t)
         return;
 
     if (t->cgroup) {
-        cg_detach_task(t->cgroup, t->pid);
+        cg_detach_task(t);
         t->cgroup = NULL;
     }
 

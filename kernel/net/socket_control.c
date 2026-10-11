@@ -329,7 +329,7 @@ int net_listen_sock(net_socket_t *s, int backlog)
      * and left the port unreachable, and the lwip path refused outright.
      */
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        g_a20_tcp_path == A20_TCP_PATH_LWIP) {
+        resource_ns_is_initial(s->net_ns) && g_a20_tcp_path == A20_TCP_PATH_LWIP) {
         int r = net_inet_tcp_listen(s, backlog);
         if (r < 0) {
             s->listening = 0;

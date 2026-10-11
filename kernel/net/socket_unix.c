@@ -115,7 +115,7 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
      * time and comes back with a reference instead of running inside s's own
      * critical section.  It never mutates, so publishing s->local afterwards
      * needs s's bucket alone. */
-    net_socket_t *clash = net_find_bound_socket(AF_UNIX, s->type, bind_addr,
+    net_socket_t *clash = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, bind_addr,
                                                 bind_len);
     if (clash) {
         net_socket_free(clash);
@@ -173,7 +173,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
      * bucket first and scanning inside it would nest an arbitrary bucket under
      * a held one, which is the ABBA the ascending order exists to forbid.
      */
-    net_socket_t *listener = net_find_bound_socket(AF_UNIX, s->type,
+    net_socket_t *listener = net_find_bound_socket(s->net_ns, AF_UNIX, s->type,
                                                   peer_addr, peer_len);
     if (!listener)
         return -ECONNREFUSED;
@@ -329,7 +329,7 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         net_sock_unlock(s, sf);
     }
     if (!dst && dst_addr)
-        dst = net_find_bound_socket(AF_UNIX, s->type, dst_addr, dst_len);
+        dst = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, dst_addr, dst_len);
     if (!dst)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 

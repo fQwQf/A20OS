@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 /*
  * A20OS — sysfs: Minimal /sys filesystem
  *
@@ -49,6 +50,8 @@ typedef enum {
     SF_DRM_ENABLED,
     SF_DRM_STATUS,
     SF_DRM_MODES,
+    SF_NET_LOOPBACK,
+    SF_NET_LOOPBACK_ATTR,
     SF_CLASS_TYPE,
     SF_CLASS_DEVICE,
     SF_CLASS_DEVICE_DEV,
@@ -101,6 +104,7 @@ typedef struct {
     uint32_t  class_type;
     uint64_t  devt;
     class_device_t *class_dev;
+    resource_namespace_t *net_ns;
 } sysfs_meta_t;
 
 /* Full state for open file handles */
@@ -116,6 +120,10 @@ typedef struct {
 
 #define MAX_LOOP_DEVS 8
 #define LOOP_MAJOR    7
+
+static const char *const loopback_attrs[] = {
+    "ifindex", "mtu", "flags", "address", "operstate", "type", NULL
+};
 
 /* ---- helpers ---- */
 
@@ -325,7 +333,7 @@ static int sysfs_pci_attr_index(const char *name)
     return -1;
 }
 
-static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
+static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t type, int loop_idx,
                                        uint32_t width, uint32_t height,
                                        uint64_t devt)
 {
@@ -339,7 +347,19 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
     p->devt = devt;
 
     /* Generate content on open */
-    if (type == SF_BLOCK_LOOP_DEV) {
+    if (type == SF_NET_LOOPBACK_ATTR) {
+        unsigned up = __atomic_load_n(&net_ns->loopback_up, __ATOMIC_ACQUIRE);
+        int n = 0;
+        switch (loop_idx) {
+        case 0: n = snprintf(p->content, sizeof(p->content), "1\n"); break;
+        case 1: n = snprintf(p->content, sizeof(p->content), "%u\n", __atomic_load_n(&net_ns->loopback_mtu, __ATOMIC_ACQUIRE)); break;
+        case 2: n = snprintf(p->content, sizeof(p->content), "0x%x\n", 8 | (up ? 1 | 64 : 0)); break;
+        case 3: n = snprintf(p->content, sizeof(p->content), "00:00:00:00:00:00\n"); break;
+        case 4: n = snprintf(p->content, sizeof(p->content), "%s\n", up ? "unknown" : "down"); break;
+        case 5: n = snprintf(p->content, sizeof(p->content), "772\n"); break;
+        }
+        p->content_len = n > 0 ? (size_t)n : 0;
+    } else if (type == SF_BLOCK_LOOP_DEV) {
         int n = snprintf(p->content, sizeof(p->content),
                          "%d:%d\n", LOOP_MAJOR, loop_idx);
         p->content_len = (size_t)(n > 0 ? n : 0);
@@ -563,6 +583,15 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             return -ENOENT;
         child_type = SF_DEVICES_VSUB;
         dynamic_class = ct;
+    } else if (dm->type == SF_NET_LOOPBACK) {
+        child_type = SF_NET_LOOPBACK_ATTR;
+        for (int i = 0; loopback_attrs[i]; i++)
+            if (!strcmp(name, loopback_attrs[i])) child_idx = i;
+        if (child_idx < 0) return -ENOENT;
+    } else if ((dm->type == SF_CLASS_TYPE || dm->type == SF_DEVICES_VSUB) &&
+               dm->class_type == DEV_CLASS_NET && !resource_ns_is_initial(dm->net_ns)) {
+        if (strcmp(name, "lo")) return -ENOENT;
+        child_type = SF_NET_LOOPBACK;
     } else if (dm->type == SF_DEVICES_VSUB) {
         class_device_t *cdev = class_device_get_by_name(name);
         if (!cdev || cdev->class_type != dm->class_type) {
@@ -765,7 +794,7 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_BLOCK_LOOP || child_type == SF_CLASS ||
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
                   child_type == SF_DRM_CONNECTOR || child_type == SF_DRM_CARD_DEVICE ||
-                  child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE ||
+                  child_type == SF_NET_LOOPBACK || child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE ||
                   child_type == SF_DEVICES || child_type == SF_DEVICES_VIRTUAL ||
                   child_type == SF_DEVICES_VSUB || child_type == SF_DEVICES_VDEV ||
                   child_type == SF_DEV || child_type == SF_DEV_CHAR ||
@@ -800,6 +829,7 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
 
     sysfs_meta_t *meta = sysfs_meta_create(child_type, child_idx);
     if (meta) {
+        meta->net_ns = resource_ns_get(dm->net_ns);
         meta->class_type = dynamic_class;
         meta->class_dev = dynamic_cdev;
         meta->devt = dynamic_cdev ? dynamic_cdev->devt : 0;
@@ -886,6 +916,7 @@ static void sysfs_release(vnode_t *vn)
 {
     if (vn->fs_data) {
         sysfs_meta_t *meta = vn->fs_data;
+        resource_ns_put(meta->net_ns);
         class_device_put(meta->class_dev);
         kfree(meta);
     }
@@ -997,7 +1028,10 @@ static int sysfs_class_readdir(vfile_t *vf, sysfs_meta_t *dm,
         class_device_t *cdev = NULL;
         if (pos == 0) name = ".";
         else if (pos == 1) name = "..";
-        else {
+        else if (dm->class_type == DEV_CLASS_NET && !resource_ns_is_initial(dm->net_ns)) {
+            if (pos != 2) break;
+            name = "lo";
+        } else {
             cdev = class_device_get_by_type(dm->class_type,
                                              (unsigned)(pos - 2));
             if (!cdev)
@@ -1119,7 +1153,11 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     entries[nent].name = ".";  entries[nent].dtype = 4; nent++;
     entries[nent].name = ".."; entries[nent].dtype = 4; nent++;
 
-    if (dm->type == SF_ROOT) {
+    if (dm->type == SF_NET_LOOPBACK) {
+        for (int i = 0; loopback_attrs[i]; i++) {
+            entries[nent].name = loopback_attrs[i]; entries[nent++].dtype = 8;
+        }
+    } else if (dm->type == SF_ROOT) {
         entries[nent].name = "block"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "class"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "dev"; entries[nent].dtype = 4; nent++;
@@ -1275,6 +1313,7 @@ vnode_t *sysfs_mount(void)
     root->ops = &g_sysfs_vnode_ops;
 
     sysfs_meta_t *meta = sysfs_meta_create(SF_ROOT, -1);
+    if (meta) meta->net_ns = resource_ns_task_get(proc_current(), PROCNS_NET);
     root->fs_data = meta;
     return root;
 }
@@ -1291,6 +1330,7 @@ static vfile_t *sysfs_open_vnode(vnode_t *vn, int flags)
 
     sysfs_meta_t *meta = (sysfs_meta_t *)vn->fs_data;
     sysfs_priv_t *priv = sysfs_priv_create(
+        meta ? meta->net_ns : resource_ns_current(PROCNS_NET),
         meta ? meta->type : SF_ROOT,
         meta ? meta->loop_idx : -1,
         meta ? meta->width : 0,

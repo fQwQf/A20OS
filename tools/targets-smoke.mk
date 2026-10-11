@@ -1803,3 +1803,10 @@ smoke-serial-fidelity:
 # Copyout after COW, adjacent first faults, and signal-stack ABI.
 smoke-vm-fault-x86_64:
 	$(PYTHON) tools/smoke.py smoke-vm-fault-x86_64
+
+# UTS/IPC/network/cgroup membership, isolation and namespace lifetime.
+smoke-resource-ns-x86_64:
+	$(PYTHON) tools/smoke.py smoke-resource-ns-x86_64
+
+smoke-resource-ns:
+	$(PYTHON) tools/smoke.py smoke-resource-ns
