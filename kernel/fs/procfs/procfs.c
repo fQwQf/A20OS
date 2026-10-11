@@ -579,22 +579,17 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
         type = PF_PID_FDINFO_ENTRY;
     } else if (dp && dp->type == PF_PID_NS) {
+        /* Namespace files are capability probes.  Expose only namespaces
+         * backed by clone/unshare/setns, never singleton placeholders for
+         * unsupported isolation domains. */
         if (strcmp(name, "pid") == 0)
             type = PF_PID_NS_PID;
         else if (strcmp(name, "pid_for_children") == 0)
             type = PF_PID_NS_PID_FOR_CHILDREN;
-        else if (strcmp(name, "uts") == 0)
-            type = PF_PID_NS_UTS;
         else if (strcmp(name, "user") == 0)
             type = PF_PID_NS_USER;
-        else if (strcmp(name, "ipc") == 0)
-            type = PF_PID_NS_IPC;
         else if (strcmp(name, "mnt") == 0)
             type = PF_PID_NS_MNT;
-        else if (strcmp(name, "net") == 0)
-            type = PF_PID_NS_NET;
-        else if (strcmp(name, "cgroup") == 0)
-            type = PF_PID_NS_CGROUP;
         else
             return -ENOENT;
         child = new_entry(name, type, dp->pid);
@@ -1557,7 +1552,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         "netmem", "journal", "hyp_selftest", NULL
     };
     static const char *ns_entries[] = {
-        ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
+        ".", "..", "pid", "pid_for_children", "user", "mnt", NULL
     };
     static const char *pressure_entries[] = {
         ".", "..", "cpu", "memory", "io", NULL

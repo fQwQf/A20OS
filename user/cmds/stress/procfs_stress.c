@@ -91,10 +91,22 @@ static int check_lookup_semantics(void)
         return fail("root must not expose pid maps");
     }
 
-    fd = open("/proc/self/ns/net", O_RDONLY);
+    fd = open("/proc/self/ns/mnt", O_RDONLY);
     if (fd < 0)
-        return fail("open self ns net");
+        return fail("open self ns mnt");
     close(fd);
+    const char *unsupported[] = {"uts", "ipc", "net", "cgroup"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", unsupported[i]);
+        errno = 0;
+        fd = open(path, O_RDONLY);
+        if (fd >= 0 || errno != ENOENT) {
+            if (fd >= 0)
+                close(fd);
+            return fail("unsupported namespace must not be advertised");
+        }
+    }
     return 0;
 }
 
