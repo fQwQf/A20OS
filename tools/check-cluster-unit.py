@@ -23,7 +23,7 @@ def main():
     root = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory(prefix="a20-cluster-unit-") as directory:
         compiler = shlex.split(os.environ.get("HOST_CC", "cc"))
-        for name in ("test_clx_frame", "test_clx_uart", "test_clx_operator",
+        for name in ("test_clx_frame", "test_clx_fragment", "test_clx_uart", "test_clx_operator",
                      "test_mcu_leaf", "test_clx_uart_pair", "test_clx_transaction",
                      "test_clx_work", "test_clx_membership", "test_clx_job", "test_clx_epoch", "test_clx_board_uart"):
             binary = Path(directory) / name
@@ -31,6 +31,12 @@ def main():
                             "-Ikernel/arch/riscv64/include", "-Ikernel/include", "-Ikernel",
                             f"tools/tests/{name}.c", "-o", str(binary)], root)
             run([str(binary)], root)
+        server = Path(directory) / "fragment-server"
+        run(compiler + ["-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-DCONFIG_CLUSTER_PROFILE=3", "-Ikernel/arch/riscv64/include",
+                        "-Ikernel/include", "-Ikernel", "tools/tests/test_clx_fragment.c",
+                        "-o", str(server)], root)
+        run([str(server)], root)
         run([sys.executable, "tools/cluster-ref/selftest.py"], root)
         run([sys.executable, "tools/cluster-ref/check_c_side.py", "--decoder",
              str(Path(directory) / "test_clx_frame")], root)

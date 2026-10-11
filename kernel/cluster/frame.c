@@ -115,7 +115,7 @@ int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
         return -1;
     if (h->frag & A20_CLX_FRAG_RESERVED)
         return -1;
-    if ((uint32_t)h->payload_len > a20_frame_max_payload(mtu))
+    if (h->payload_len > 65535u || h->payload_len > a20_frame_max_payload(mtu))
         return -2;
 
     crc_len = (h->csum_kind == A20_CLX_CSUM_CCITT) ? A20_CLX_CRC_LEN : 0u;
@@ -147,11 +147,36 @@ int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
     return (int)len;
 }
 
+int a20_frame_encode_logical(uint8_t *buf, uint32_t cap, uint32_t mtu,
+                             const a20_frame_hdr_t *h, const uint8_t *payload) {
+    if (!h || h->payload_len <= 65535u)
+        return a20_frame_encode(buf, cap, mtu, h, payload);
+    uint32_t n = A20_CLX_HDR_LEN + h->payload_len + A20_CLX_CRC_LEN;
+    if (!buf || !payload || h->payload_len > 65556u || n > mtu || n > cap ||
+        h->ver != A20_CLX_SESSION_VER || h->flags != A20_CLX_FLAG_RELIABLE ||
+        (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_CALL_REPLY) ||
+        h->frag || h->csum_kind != A20_CLX_CSUM_CCITT)
+        return -1;
+    uint8_t header[A20_CLX_HDR_LEN + A20_CLX_CRC_LEN];
+    a20_frame_hdr_t small = *h;
+    small.payload_len = 0;
+    if (a20_frame_encode(header, sizeof(header), sizeof(header), &small, NULL) <
+        0)
+        return -1;
+    for (uint32_t i = 0; i < A20_CLX_HDR_LEN; i++)
+        buf[i] = header[i];
+    a20_clx_put_le16(buf + A20_CLX_OFF_PAYLOAD_LEN, 65535u);
+    for (uint32_t i = 0; i < h->payload_len; i++)
+        buf[A20_CLX_HDR_LEN + i] = payload[i];
+    a20_clx_put_le16(buf + n - 2, a20_clx_crc16_ccitt(buf, n - 2));
+    return n;
+}
+
 static a20_frame_verdict_t frame_decode_version(const uint8_t *buf,
                                                 uint32_t len, uint32_t mtu,
                                                 a20_frame_hdr_t *out,
                                                 const uint8_t **payload,
-                                                uint8_t maximum) {
+                                                uint8_t maximum, int logical) {
     uint32_t crc_len, want_len;
     uint16_t crc_rx, crc_calc;
     int fixed;
@@ -192,6 +217,16 @@ static a20_frame_verdict_t frame_decode_version(const uint8_t *buf,
     if (out->csum_kind != A20_CLX_CSUM_NONE &&
         out->csum_kind != A20_CLX_CSUM_CCITT)
         return A20_FRAME_UNSUPPORTED_CSUM_KIND;
+
+    if (logical && out->payload_len == 65535u && len > 65569u) {
+        if (len > 65590u || out->ver != A20_CLX_SESSION_VER ||
+            out->flags != A20_CLX_FLAG_RELIABLE || out->frag ||
+            (out->type != A20_CLX_TYPE_CALL &&
+             out->type != A20_CLX_TYPE_CALL_REPLY) ||
+            out->csum_kind != A20_CLX_CSUM_CCITT)
+            return A20_FRAME_PAYLOAD_LEN_MISMATCH;
+        out->payload_len = len - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN;
+    }
 
     /* 02 §1 + A-09: the two CRC bytes are subtracted unconditionally. */
     if (mtu < A20_CLX_HDR_LEN + A20_CLX_CRC_LEN ||
@@ -247,12 +282,20 @@ static a20_frame_verdict_t frame_decode_version(const uint8_t *buf,
 a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
                                      uint32_t mtu, a20_frame_hdr_t *out,
                                      const uint8_t **payload) {
-    return frame_decode_version(buf, len, mtu, out, payload, A20_CLX_WIRE_VER);
+    return frame_decode_version(buf, len, mtu, out, payload, A20_CLX_WIRE_VER,
+                                0);
 }
 
 a20_frame_verdict_t a20_frame_decode_session(const uint8_t *buf, uint32_t len,
                                              uint32_t mtu, a20_frame_hdr_t *out,
                                              const uint8_t **payload) {
     return frame_decode_version(buf, len, mtu, out, payload,
-                                A20_CLX_SESSION_VER);
+                                A20_CLX_SESSION_VER, 0);
+}
+
+a20_frame_verdict_t a20_frame_decode_logical(const uint8_t *buf, uint32_t len,
+                                             uint32_t mtu, a20_frame_hdr_t *out,
+                                             const uint8_t **payload) {
+    return frame_decode_version(buf, len, mtu, out, payload,
+                                A20_CLX_SESSION_VER, 1);
 }

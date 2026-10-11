@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Run real production channel proxies between two independent QEMU kernels."""
 import argparse
+from collections import deque
 import json
+import hashlib
+import platform
 import select
 from pathlib import Path
 import shlex
@@ -19,6 +22,7 @@ class FaultWire:
         self.delayed = []
         self.calls = [0, 0]
         self.saved = {}
+        self.trace = deque(maxlen=4096)
         for _ in range(2):
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.bind(("127.0.0.1", 0))
@@ -51,10 +55,27 @@ class FaultWire:
                         cl = data[udp + 8:]
             if len(cl) >= 34 and cl[:2] == b"CL":
                 kind = cl[3]
+                self.trace.append({"time": time.monotonic(), "side": side,
+                    "type": kind, "flags": int.from_bytes(cl[4:6], "little"),
+                    "frag": int.from_bytes(cl[6:8], "little"),
+                    "txid": int.from_bytes(cl[8:12], "little"),
+                    "length": len(cl), "prefix": cl[32:56].hex()})
                 if kind == 2:
                     self.saved.setdefault((side, "hello-ack"), data)
                 reliable = bool(int.from_bytes(cl[4:6], "little") & 1)
                 slot = int.from_bytes(cl[20:24], "little")
+                fragmented = bool(int.from_bytes(cl[4:6], "little") & 2)
+                index = int.from_bytes(cl[6:8], "little") & 0xfff
+                if fragmented:
+                    if kind == 6 and index == 0 and self.once(side, "drop-fragment"):
+                        continue
+                    if kind == 6 and index == 1 and self.once(side, "reorder-fragment"):
+                        self.delayed.append((time.monotonic() + 0.06, output, data, destination))
+                        continue
+                    if kind == 7 and index == 1 and self.once(side, "drop-reply-fragment"):
+                        continue
+                    if kind == 7 and index == 0 and self.once(side, "duplicate-fragment"):
+                        self.delayed.append((time.monotonic() + 0.01, output, data, destination))
                 if reliable and kind == 6 and slot:
                     self.saved.setdefault((side, "call"), data)
                     if len(cl) >= 54 and cl[48:52] == b"kalb":
@@ -104,18 +125,30 @@ def main():
     parser.add_argument("--restart", action="store_true", help="restart node b and replay old session frames")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--log-dir", type=Path, default=Path(".kernel-build/cluster/udp"))
+    parser.add_argument("--profile", type=int, choices=(2, 3), default=2)
+    parser.add_argument("--peer-profile", type=int, choices=(2, 3))
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     log_dir = (root / args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    make = ["make", "--no-print-directory", "ARCH=riscv64", "BRINGUP=1",
-            "RAMFS_USER=1", "DRIVER_DEPLOYMENT=embedded"]
-    if not args.skip_build:
-        with (log_dir / "udp-build.log").open("w") as log:
-            subprocess.run(make + ["-j8", "kernel-only"], cwd=root,
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
-    command = shlex.split(subprocess.check_output(make + ["_qemu_argv"],
-                                                  cwd=root, text=True))
+    started = time.monotonic()
+    success = False
+    sources = ["kernel/cluster/fragment.c", "kernel/cluster/fragment.h",
+               "kernel/cluster/frame.c", "kernel/cluster/frame.h", "kernel/cluster/transport.c",
+               "kernel/cluster/reliable.c", "kernel/cluster/remote_ep.c", "kernel/cluster/udp.c",
+               "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c", "tools/check-cluster-udp.py"]
+    hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}
+    profiles = [args.profile, args.peer_profile or args.profile]
+    commands = {}
+    for profile in set(profiles):
+        make = ["make", "--no-print-directory", "ARCH=riscv64", "BRINGUP=1",
+                "RAMFS_USER=1", "DRIVER_DEPLOYMENT=embedded", f"CLUSTER_PROFILE={profile}"]
+        if not args.skip_build:
+            with (log_dir / f"udp-build-{profile}.log").open("w") as log:
+                subprocess.run(make + ["-j8", "kernel-only"], cwd=root,
+                               stdout=log, stderr=subprocess.STDOUT, check=True)
+        commands[profile] = shlex.split(subprocess.check_output(make + ["_qemu_argv"],
+                                                               cwd=root, text=True))
     ports = []
     reservations = []
     for _ in range(2):
@@ -131,7 +164,7 @@ def main():
         for sock in reservations:
             sock.close()
         for i, side in enumerate("ab"):
-            cmd = list(command)
+            cmd = list(commands[profiles[i]])
             bootargs = (f"clxudptest={side} a20.dhcp=0 a20.ip=10.0.3.{i+2} "
                         "a20.netmask=255.255.255.0")
             if wire:
@@ -159,7 +192,7 @@ def main():
                        for side in "ab"]
             if any("[CLX-UDP-TEST]" in out and ": FAIL" in out for out in outputs):
                 raise RuntimeError("guest reported FAIL")
-            cases = ("echo-8", "reliable-96-at-most-once", "shared-dot", "unified-work", "directory-discovery", "unknown-slot",
+            cases = ("session-ready", "echo-8", "reliable-96-at-most-once", "fragmented-8-at-most-once", "shared-dot", "unified-work", "directory-discovery", "unknown-slot",
                      "reliable-unknown-slot", "empty-call", "oversize-completes")
             if wire:
                 cases += ("bounded-blackhole",)
@@ -190,14 +223,17 @@ def main():
                 if wire:
                     expected = {f"{side}:{event}" for side in range(2)
                                 for event in ("drop-request", "drop-reply", "drop-ack",
-                                              "drop-receipt", "duplicate-call", "delay-call")}
+                                              "drop-receipt", "duplicate-call", "delay-call",
+                                              "drop-fragment", "reorder-fragment",
+                                              "drop-reply-fragment", "duplicate-fragment")}
                     if any(wire.events.get(f"{side}:blackhole-call", 0) != 9 for side in range(2)):
                         raise RuntimeError("blackhole did not exercise exactly 8 retries per caller")
                     if not expected.issubset(wire.events):
                         raise RuntimeError(f"fault scenarios missing: {expected - wire.events.keys()}")
                     (log_dir / "udp-faults.json").write_text(json.dumps(wire.events, indent=2) + "\n")
+                success = True
                 print("check-cluster-udp: PASS (two kernels, 96 reliable calls each, "
-                      "at-most-once service execution, shared dot, bounded failures" +
+                      "at-most-once service execution, fragmented echo, shared dot, bounded failures" +
                       (", real wire faults" if wire else "") +
                       (", reboot and old-session rejection)" if args.restart else ")"))
                 print(f"logs: {log_dir}")
@@ -218,6 +254,15 @@ def main():
                     errors="replace").splitlines()[-35:]))
         return 1
     finally:
+        evidence = {"success": success, "profiles": profiles, "faults": args.faults,
+                    "restart": args.restart, "source_sha256": hashes,
+                    "platform": platform.platform(), "elapsed_seconds": round(time.monotonic()-started, 6),
+                    "qemu_version": subprocess.check_output(["qemu-system-riscv64", "--version"], text=True).splitlines()[0],
+                    "scope": "two independent RISC-V kernels, TCG, not physical throughput"}
+        (log_dir / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        if wire:
+            (log_dir / "wire-trace.json").write_text(json.dumps(list(wire.trace), indent=2) + "\n")
+            (log_dir / "udp-faults.json").write_text(json.dumps(wire.events, indent=2) + "\n")
         for proc in processes:
             if proc.poll() is None:
                 proc.terminate()

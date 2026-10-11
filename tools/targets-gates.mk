@@ -98,7 +98,7 @@ $(TMPDIR)/a20-host-%: tools/tests/%.c
 
 # The MCU protocol harness uses architecture type definitions but executes
 # no target assembly. The generic host rule lacks this include directory.
-$(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
+$(TMPDIR)/a20-host-test_clx_fragment $(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include \
 		-Ikernel/include -Ikernel $< -o $@
 

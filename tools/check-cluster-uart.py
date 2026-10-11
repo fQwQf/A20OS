@@ -53,7 +53,7 @@ def main():
     binary = directory / "leaf-process"
     subprocess.run(["cc", "-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-Ikernel/arch/riscv64/include", "-Ikernel/include", "-Ikernel",
-                    "tools/tests/clx_leaf_process.c", "-o", str(binary)],
+                    "tools/fixtures/clx_leaf_process.c", "-o", str(binary)],
                    cwd=root, check=True)
     command = shlex.split(subprocess.check_output(make + ["-s", "_qemu_argv"],
                                                   cwd=root, text=True))
@@ -157,7 +157,7 @@ def main():
                     inputs = ["kernel/arch/x86_64/platform/cluster_uart.c",
                               "kernel/cluster/uart.c", "kernel/cluster/transport.c",
                               "kernel/proc/proc.c", "kernel/proc/task.c", "kernel/proc/exit.c",
-                              "kernel/mcu/leaf.c", "tools/tests/clx_leaf_process.c",
+                              "kernel/mcu/leaf.c", "tools/fixtures/clx_leaf_process.c",
                               "user/tests/test_native_cluster.c", "user/svc/clusterd.c",
                               "user/liba20rt/a20_cluster_job.h"]
                     events["source_sha256"] = {p: hashlib.sha256((root/p).read_bytes()).hexdigest()

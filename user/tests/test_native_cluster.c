@@ -220,6 +220,12 @@ static int abi_snapshot_and_agent(void) {
         resources.values[A20_CLX_STAT_REPLAY_BYTES] >
             resources.values[A20_CLX_STAT_MAX_REPLAY_BYTES])
         return fail("snapshot-resources");
+    if (a20_cluster_reassembly_resources(&resources) < 0 ||
+        resources.kind != A20_CLUSTER_SNAPSHOT_REASSEMBLY ||
+        resources.values[A20_CLX_REASM_BYTES] >
+            resources.values[A20_CLX_REASM_MAX_BYTES] ||
+        resources.values[A20_CLX_STAT_COUNT - 1])
+        return fail("snapshot-reassembly");
     a20_node_id_t id;
     peer_id(&id);
     if (a20_memcmp(self.node_id, id.bytes, 16))
