@@ -344,7 +344,8 @@ int64_t sys_a20_cluster_route(const a20_syscall_args_t *args) {
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     if (kargs.op != A20_ROUTE_ADD && kargs.op != A20_ROUTE_DEL &&
-        kargs.op != A20_ROUTE_REPLACE)
+        kargs.op != A20_ROUTE_REPLACE && kargs.op != A20_ROUTE_DEL_MATCH &&
+        kargs.op != A20_ROUTE_LEARN)
         return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.reserved)
         return -A20_ERR_INVALID_ARGUMENT;
@@ -367,6 +368,14 @@ int64_t sys_a20_cluster_route(const a20_syscall_args_t *args) {
 
     if (kargs.op == A20_ROUTE_DEL)
         return a20_clx_route_del(&kargs.node_id);
+    if (kargs.op == A20_ROUTE_DEL_MATCH)
+        return a20_clx_route_del_match(&kargs.node_id, kargs.transport_id,
+                                       kargs.next_hop, kargs.next_hop_len,
+                                       kargs.metric);
+    if (kargs.op == A20_ROUTE_LEARN)
+        return a20_clx_route_learn(&kargs.node_id, kargs.transport_id,
+                                   kargs.next_hop, kargs.next_hop_len,
+                                   kargs.metric);
     if (kargs.op == A20_ROUTE_ADD)
         return a20_clx_route_add(&kargs.node_id, kargs.transport_id,
                                  kargs.next_hop, kargs.next_hop_len,

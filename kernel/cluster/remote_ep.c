@@ -326,7 +326,19 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
         p = a20_clx_proxy_by_node_slot(src_hash, h->dst_slot);
     if (!p) {
         spin_unlock_irqrestore(&g_clx_lock, flags);
-        /* Late REPLY after deadline, 02-§4: 查无事务 -> 丢弃计数. */
+        /* A valid late completion still releases the peer's replay storage.
+         * The application deadline only ends delivery; it must not pin a
+         * single-cache MCU until retention expires. Never trust epochs from
+         * the reply itself: require the currently confirmed endpoint session. */
+        uint64_t local = 0, remote = 0;
+        uint32_t caps = 0;
+        if (h->ver == A20_CLX_SESSION_VER &&
+            h->type == A20_CLX_TYPE_CALL_REPLY &&
+            (h->flags & A20_CLX_FLAG_RELIABLE) && h->seq == h->txid &&
+            h->payload_len >= A20_CLX_REPLY_PREFIX &&
+            !a20_clx_peer_session(src, &local, &remote, &caps) &&
+            a20_clx_session_matches(payload, h->payload_len, remote, local))
+            a20_clx_reliable_receipt(src, h->txid, local, remote);
         a20_clx_link_rx_drop(transport_id, NULL, 0);
         return;
     }
@@ -364,6 +376,21 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
             return;
         }
         uint32_t error = a20_clx_get_le32(payload + A20_CLX_SESSION_BYTES);
+        if (error == A20_ERR_NO_SPACE) {
+            int accepted = 0;
+            for (uint32_t j = 0; j < p->inflight_cap; j++)
+                if (p->inflight[j].deadline_tick &&
+                    p->inflight[j].txid == h->txid)
+                    accepted = p->inflight[j].accepted;
+            if (!accepted) {
+                /* An unadmitted peer has executed nothing. Keep the original
+                 * txid, retry schedule and deadline, allowing a single-slot MCU
+                 * to apply backpressure to concurrent discovery/business calls.
+                 * An admitted cached error still completes normally. */
+                spin_unlock_irqrestore(&g_clx_lock, flags);
+                return;
+            }
+        }
         if (error) {
             spin_unlock_irqrestore(&g_clx_lock, flags);
             a20_clx_reliable_receipt(src, h->txid, local_session,

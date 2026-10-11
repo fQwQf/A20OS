@@ -6,6 +6,7 @@
 #define A20_CONTROL_RESOLVE 1u
 #define A20_CONTROL_MEMBER 2u
 #define A20_CONTROL_INDIRECT 3u
+#define A20_CONTROL_GOSSIP 4u
 /* CM/1 requests: type at 3, work kind/member index at 4, operator at 8,
  * input bytes at 12, name bytes at 16, reserved at 20, cookie at 24,
  * name/target id at 32. Replies: status at 4, node at 8, epoch at 24,
@@ -32,7 +33,7 @@ static inline void a20_control_request(uint8_t out[96], uint8_t type,
 }
 static inline int a20_control_valid(const uint8_t *p, uint32_t len) {
     return p && len == 96 && p[0] == 'C' && p[1] == 'M' && p[2] == 1 &&
-           p[3] >= 1 && p[3] <= 3 && !a20_work_u32(p + 20) &&
+           p[3] >= 1 && p[3] <= 4 && !a20_work_u32(p + 20) &&
            a20_work_u32(p + 16) <= 64;
 }
 #endif

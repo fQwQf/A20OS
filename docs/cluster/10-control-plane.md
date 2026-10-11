@@ -20,7 +20,7 @@
 clusterd 读 SELF 快照、安装种子路由，再枚举已有内核路由并加入成员。自己也进入
 成员表，因此 `any` 可选择本机 agent。默认成员表 32 项、服务表 64 项、每次目录
 快照最多 8 个工作服务；可编译修改 `A20_CLUSTERD_MEMBERS`。不声称支持超出这个
-控制面预算的成员规模。路由数量超过预算会显式退出，不能报告完整集群视图。
+控制面预算的成员规模。路由数量超过预算时计入 overflow 并跳过新增项，继续维护已跟踪成员；不能报告完整集群视图。
 
 ## 2. 存活与会话
 
@@ -46,8 +46,10 @@ helper 必须实际查询目标固定目录，不能把自己的缓存当成存�
 
 直接发现新 epoch 时立即清除该成员旧服务。成员槽位复用同时清理旧探测 endpoint
 和 helper 槽位。删除路由不会立即删除成员，后续探测使其进入 SUSPECT/DEAD。
-目前没有感染式 gossip、未知节点自动准入、成员增量传播或自动最短路计算；
-`refute` 等共享状态机操作有测试，尚未连接完整 gossip 网络。
+CM/1 GOSSIP 已连接种子邻居间的有界增量传播，可发现未知目的并安装租约路由；
+传闻只提供可达性提示，必须直接确认目的会话、目录和能力后才能调度。
+跳数优先、同距 provider ID 决胜、split horizon 和过期回收见
+[16-gossip-routes.md](16-gossip-routes.md)。这不是全局一致的最短路协议。
 
 ## 3. 目录发布
 
@@ -66,7 +68,8 @@ helper 槽位只在完整枚举成功后发布，重启后旧槽位立即失效�
 控制服务导出名 `cluster.control`，请求固定 96 B，回复 80 B，小端且无 C 结构体
 直接序列化。定义和字段偏移见 `kernel/include/uapi/a20/cluster_control.h`。
 RESOLVE 按服务名、工作种类、算子 ID 与输入长度筛选；MEMBER 按物理表索引查询；
-INDIRECT 用请求 cookie 关联 helper 的目标查询。
+INDIRECT 用请求 cookie 关联 helper 的目标查询；GOSSIP 按游标分页传播节点提示，
+同样回显 cookie，保留现有请求/回复尺寸。
 
 `service://any/work` 采用轮询，排除 SUSPECT/DEAD、过期服务和能力不匹配的节点。
 进程任务只匹配支持 PROCESS 的 agent，当前显式清单 ID 为 1、输入为空。

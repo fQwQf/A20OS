@@ -129,6 +129,10 @@ int a20_clx_route_add(const a20_node_id_t *node, uint32_t transport_id,
                       const uint8_t *next_hop, uint32_t nh_len,
                       uint32_t metric);
 int a20_clx_route_del(const a20_node_id_t *node);
+int a20_clx_route_del_match(const a20_node_id_t *node, uint32_t transport,
+                            const uint8_t *hop, uint32_t len, uint32_t metric);
+int a20_clx_route_learn(const a20_node_id_t *node, uint32_t transport,
+                        const uint8_t *hop, uint32_t len, uint32_t metric);
 int a20_clx_route_replace(const a20_node_id_t *node, uint32_t transport_id,
                           const uint8_t *next_hop, uint32_t nh_len,
                           uint32_t metric);

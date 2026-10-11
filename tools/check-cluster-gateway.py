@@ -44,10 +44,11 @@ def cl_payload(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--gossip", action="store_true", help="discover the leaf route from a relay, then expire it on link loss")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    directory = root / ".kernel-build/cluster/gateway"
+    directory = root / (".kernel-build/cluster/gateway-gossip" if args.gossip else ".kernel-build/cluster/gateway")
     directory.mkdir(parents=True, exist_ok=True)
     commands = []
     for arch in ("riscv64", "x86_64"):
@@ -133,7 +134,7 @@ def main():
             leaf, wire = leaf_start(False)
             serial = [head, wire]
             pending, packets = [bytearray(), bytearray()], [bytearray(), bytearray()]
-            launched = rebooted = replayed = False
+            launched = rebooted = replayed = unplugged = False
             while time.monotonic()-started < args.timeout:
                 if any(p.poll() is not None for p in processes[:2]) or leaf.poll() is not None:
                     raise RuntimeError("kernel/leaf exited; inspect logs")
@@ -186,6 +187,8 @@ def main():
                                 if side == 0 and cl[30] != 7:
                                     raise RuntimeError("relay did not decrement TTL")
                                 events["uart-path-mtu-256"] = events.get("uart-path-mtu-256", 0) + 1
+                            if side == 1 and cl[3] == 7 and len(cl) >= 54 and cl[4] & 1 and int.from_bytes(cl[48:52], "little") == 13:
+                                events["mcu-admission-busy"] = events.get("mcu-admission-busy", 0) + 1
                             work = len(cl) >= 82 and cl[48:50] == b"CW"
                             if side == 0 and work and cl[3] == 6 and cl[51] == 2:
                                 if once("uart-drop-work"):
@@ -195,15 +198,19 @@ def main():
                                     keys.add(bytes(cl[8:12] + cl[32:48]))
                             if side == 1 and cl[3] == 7 and cl[52:54] == b"CW" and once("uart-drop-reply"):
                                 continue
-                            pending[1-side] += b"\xc0" + packet + b"\xc0"
+                            if not unplugged:
+                                pending[1-side] += b"\xc0" + packet + b"\xc0"
                 output = (directory / "client.log").read_text(errors="replace")
                 gateway = (directory / "gateway.log").read_text(errors="replace")
                 if "F:" in output or "F:" in gateway or "PANIC" in output+gateway:
                     raise RuntimeError("Native gateway test failed; inspect logs")
                 if not launched and time.monotonic()-started >= 8:
-                    processes[1].stdin.write(b"/bin/native-cluster-x86_64 gateway-head\n")
+                    processes[1].stdin.write(b"/bin/native-cluster-x86_64 gateway-head" +
+                                             (b" /bin/clusterd-x86_64" if args.gossip else b"") + b"\n")
                     processes[1].stdin.flush()
-                    processes[0].stdin.write(b"/bin/native-cluster-rv gateway-client /bin/clusterd-rv /bin/cluster-agent-rv\n")
+                    processes[0].stdin.write(b"/bin/native-cluster-rv " +
+                                             (b"gateway-gossip" if args.gossip else b"gateway-client") +
+                                             b" /bin/clusterd-rv /bin/cluster-agent-rv\n")
                     processes[0].stdin.flush()
                     launched = True
                 if "GATEWAY: reboot-ready" in output and not rebooted:
@@ -224,7 +231,14 @@ def main():
                     pending[1] += b"\xc0" + saved["uart-old-call"] + b"\xc0"
                     events["old-cs-reply-replayed"] = events["old-call-replayed"] = 1
                     replayed = True
+                if args.gossip and "GATEWAY: gossip-expire-ready" in output and not unplugged:
+                    unplugged = True
+                    pending[0].clear()
+                    pending[1].clear()
+                    events["serial-unplugged"] = 1
                 if "UART: PASS" in output:
+                    if args.gossip and "GATEWAY: gossip-expire-pass" not in output:
+                        raise RuntimeError("automatic route lease did not expire")
                     executed = sum((directory / name).read_text().count("DOT-EXEC:")
                                    for name in ("leaf.log", "leaf-reboot.log"))
                     if (not rebooted or not replayed or executed != len(keys) or executed < 96
@@ -234,7 +248,8 @@ def main():
                         raise RuntimeError(f"fault/dedup/reboot evidence incomplete: {executed=}, {len(keys)=}")
                     success = True
                     events.update({"dot_executions": executed, "unique_dot_transactions": len(keys)})
-                    print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree)")
+                    print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree" +
+                          (", automatic route/daemon recovery/lease expiry" if args.gossip else "") + ")")
                     return
             raise TimeoutError("gateway test timed out; inspect logs")
     finally:
@@ -253,7 +268,9 @@ def main():
             log.close()
         sources = ["kernel/cluster/session.c", "kernel/cluster/session_control.h",
                    "kernel/cluster/transport.c", "kernel/cluster/udp.c", "kernel/cluster/uart.c",
-                   "kernel/mcu/leaf.c", "user/tests/test_native_cluster.c",
+                   "kernel/mcu/leaf.c", "kernel/cluster/remote_ep.c", "kernel/cluster/route.c",
+                   "kernel/include/uapi/a20/cluster_gossip.h", "kernel/include/uapi/a20/cluster_control.h",
+                   "user/svc/clusterd.c", "user/tests/test_native_cluster.c", "tools/targets-dev.mk",
                    "tools/check-cluster-gateway.py", "tools/fixtures/clx_leaf_process.c"]
         events.update({"success": success, "elapsed_seconds": time.monotonic()-started,
                        "platform": platform.platform(), "scope": "two TCG kernels and host leaf, not physical hardware",

@@ -152,6 +152,12 @@ static int clx_route_put(const a20_node_id_t *node, uint32_t transport_id,
         }
     }
 
+    if (replace == 2 &&
+        (!(metric & A20_ROUTE_DYNAMIC) ||
+         (idx >= 0 && !(g_clx_routes[idx].metric & A20_ROUTE_DYNAMIC)))) {
+        r = -A20_ERR_EXISTS;
+        goto out;
+    }
     if ((idx >= 0 && !replace) ||
         (idx < 0 && g_clx_route_count >= CLX_LIMIT_ROUTES)) {
         r = idx >= 0 ? -A20_ERR_EXISTS : -A20_ERR_NO_SPACE;
@@ -272,7 +278,14 @@ int a20_clx_route_replace(const a20_node_id_t *node, uint32_t transport,
     return clx_route_update(node, transport, nh, nh_len, metric, 1);
 }
 
-int a20_clx_route_del(const a20_node_id_t *node) {
+int a20_clx_route_learn(const a20_node_id_t *node, uint32_t transport,
+                        const uint8_t *hop, uint32_t len, uint32_t metric) {
+    return clx_route_update(node, transport, hop, len, metric, 2);
+}
+
+static int clx_route_remove(const a20_node_id_t *node, int match,
+                            uint32_t transport, const uint8_t *hop,
+                            uint32_t len, uint32_t metric) {
     if (!node)
         return -A20_ERR_INVALID_ARGUMENT;
     if (__atomic_exchange_n(&g_clx_route_mutating, 1, __ATOMIC_ACQUIRE))
@@ -285,6 +298,12 @@ int a20_clx_route_del(const a20_node_id_t *node) {
         return -A20_ERR_NOT_FOUND;
     }
     clx_route_t old = g_clx_routes[idx];
+    if (match && (old.transport_id != transport || old.nh_len != len ||
+                  old.metric != metric || memcmp(old.next_hop, hop, len))) {
+        spin_unlock_irqrestore(&g_clx_lock, flags);
+        __atomic_store_n(&g_clx_route_mutating, 0, __ATOMIC_RELEASE);
+        return -A20_ERR_BUSY;
+    }
     memset(&g_clx_routes[idx], 0, sizeof(g_clx_routes[idx]));
     g_clx_route_count--;
     g_clx_route_generation++;
@@ -297,6 +316,16 @@ int a20_clx_route_del(const a20_node_id_t *node) {
     a20_clx_event_push(A20_CLX_EV_ROUTE_LOST, a20_clx_node_hash(node), 0, 0);
     __atomic_store_n(&g_clx_route_mutating, 0, __ATOMIC_RELEASE);
     return 0;
+}
+
+int a20_clx_route_del(const a20_node_id_t *node) {
+    return clx_route_remove(node, 0, 0, NULL, 0, 0);
+}
+int a20_clx_route_del_match(const a20_node_id_t *node, uint32_t transport,
+                            const uint8_t *hop, uint32_t len, uint32_t metric) {
+    if (!hop || !len || len > A20_CLX_LINK_ADDR_MAX)
+        return -A20_ERR_INVALID_ARGUMENT;
+    return clx_route_remove(node, 1, transport, hop, len, metric);
 }
 
 void a20_clx_route_link_down(uint32_t transport_id, const uint8_t *nh,

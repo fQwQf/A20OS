@@ -4,6 +4,7 @@
 #include "liba20rt/a20_cluster_client.h"
 #include "liba20rt/crt0_a20.h"
 #include "../../kernel/include/uapi/a20/cluster_control.h"
+#include "../../kernel/include/uapi/a20/cluster_gossip.h"
 
 #ifndef A20_CLUSTERD_MEMBERS
 #define A20_CLUSTERD_MEMBERS 32u
@@ -12,9 +13,12 @@
 #define CONTROL_CONNECTIONS 8u
 #define PHASE_DIRECTORY 1u
 #define PHASE_CAPABILITY 2u
+#define PHASE_GOSSIP 3u
+#define GOSSIP_PAGES 8u
 typedef struct peer_probe {
     a20_handle_t directory, capability;
     uint32_t phase, index, count, control_slot, pending_control, steps;
+    uint32_t gossip_cursor, gossip_pages;
     uint8_t node_id[16];
     uint64_t cookie, generation, epoch, deadline, next_probe;
     a20_member_service_t scratch[DIRECTORY_SERVICES];
@@ -25,6 +29,12 @@ static a20_member_service_t services[A20_CLUSTERD_MEMBERS * 2];
 static peer_probe_t probes[A20_CLUSTERD_MEMBERS];
 static a20_membership_t cluster;
 static a20_cluster_snapshot_args_t self;
+static a20_cluster_snapshot_args_t route_view[A20_CLUSTERD_MEMBERS];
+static uint8_t route_seen[A20_CLUSTERD_MEMBERS];
+static a20_gossip_route_t learned[A20_CLUSTERD_MEMBERS];
+static a20_gossip_table_t gossip = {.routes = learned,
+                                    .capacity = A20_CLUSTERD_MEMBERS};
+static uint64_t route_overflow;
 
 static void probe_close(peer_probe_t *p) {
     if (p->directory != A20_HANDLE_NULL)
@@ -87,6 +97,31 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
     uint32_t index = a20_work_u32(request + 4);
     int service = -1, found = -1;
     uint64_t now = a20_agent_clock_ms(0);
+    if (request[3] == A20_CONTROL_GOSSIP && a20_work_u32(request + 16) == 16 &&
+        a20_work_u64(request + 24) && !a20_work_u32(request + 8) &&
+        !a20_work_u32(request + 12)) {
+        for (unsigned i = index; i < A20_CLUSTERD_MEMBERS; i++) {
+            a20_member_t *m = &members[i];
+            if (!m->state || !m->boot_epoch || !route_seen[i] ||
+                !a20_gossip_advertise(&gossip, m->node_id, request + 32, now))
+                continue;
+            uint32_t distance = route_view[i].metric & ~A20_GOSSIP_ROUTE_MARK;
+            if (distance >= A20_GOSSIP_MAX_HOPS)
+                continue;
+            a20_memcpy(reply + 8, m->node_id, 16);
+            a20_work_put64(reply + 24, m->boot_epoch);
+            a20_work_put32(reply + 32, distance);
+            a20_work_put32(reply + 36, m->state);
+            a20_work_put32(reply + 40, m->caps);
+            a20_work_put32(reply + 44, m->profile);
+            a20_work_put32(reply + 48, i + 1);
+            a20_work_put64(reply + 72, m->incarnation);
+            a20_work_put32(reply + 4, 0);
+            return A20_CONTROL_REPLY;
+        }
+        a20_work_put32(reply + 4, A20_ERR_NOT_FOUND);
+        return A20_CONTROL_REPLY;
+    }
     if (request[3] == A20_CONTROL_RESOLVE) {
         service = a20_member_select(
             &cluster, (const char *)request + 32, a20_work_u32(request + 16),
@@ -154,6 +189,111 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
                 a20_work_put32(reply + 56, s->operators[i].flags);
     }
     return A20_CONTROL_REPLY;
+}
+
+static int gossip_send(peer_probe_t *p) {
+    uint8_t request[A20_CONTROL_REQUEST];
+    a20_control_request(request, A20_CONTROL_GOSSIP, p->gossip_cursor, 0, 0,
+                        (const char *)self.node_id, 16, p->cookie);
+    return a20_channel_send_flags(p->directory, request, sizeof(request), 0, 0,
+                                  A20_MSG_NONBLOCK) < 0
+               ? -1
+               : 0;
+}
+static void gossip_start(unsigned i, uint64_t now) {
+    peer_probe_t *p = &probes[i];
+    if (!(members[i].caps & A20_CLUSTER_CAP_RELAY) || !p->control_slot ||
+        !route_seen[i] || route_view[i].metric != 0 ||
+        route_view[i].transport_id == A20_CLX_TRANSPORT_LOOPBACK)
+        return;
+    a20_node_id_t node = member_node(i);
+    if (a20_cluster_connect_bound(&node, p->control_slot, members[i].boot_epoch,
+                                  &p->directory) < 0)
+        return;
+    p->phase = PHASE_GOSSIP;
+    p->deadline = now + 700;
+    p->gossip_pages = 0;
+    if (gossip_send(p) < 0)
+        directory_full(p, now);
+}
+static void gossip_receive(unsigned provider, const uint8_t *wire, uint32_t len,
+                           uint64_t now) {
+    peer_probe_t *p = &probes[provider];
+    if (len != A20_CONTROL_REPLY || wire[0] != 'C' || wire[1] != 'M' ||
+        wire[2] != 1 || wire[3] != A20_CONTROL_GOSSIP ||
+        a20_work_u64(wire + 64) != p->cookie) {
+        directory_full(p, now);
+        return;
+    }
+    if (a20_work_u32(wire + 4)) {
+        p->gossip_cursor = 0;
+        directory_full(p, now);
+        return;
+    }
+    uint32_t next = a20_work_u32(wire + 48);
+    a20_gossip_hint_t hint = {.epoch = a20_work_u64(wire + 24),
+                              .incarnation = a20_work_u64(wire + 72),
+                              .distance = a20_work_u32(wire + 32),
+                              .state = a20_work_u32(wire + 36),
+                              .caps = a20_work_u32(wire + 40),
+                              .profile = a20_work_u32(wire + 44)};
+    a20_memcpy(hint.node, wire + 8, 16);
+    if (next <= p->gossip_cursor || next > 8192u ||
+        !a20_gossip_hint_valid(&hint)) {
+        gossip.rejected++;
+        directory_full(p, now);
+        return;
+    }
+    int explicit_route = 0;
+    for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++) {
+        if (members[i].state &&
+            a20_member_id_equal(members[i].node_id, hint.node)) {
+            explicit_route = route_seen[i] &&
+                             !(route_view[i].metric & A20_GOSSIP_ROUTE_MARK);
+            if (hint.state != A20_MEMBER_ALIVE) {
+                if (a20_member_id_equal(hint.node, self.node_id) &&
+                    hint.epoch == self.boot_epoch)
+                    a20_member_refute(hint.incarnation,
+                                      &members[i].incarnation);
+                else
+                    a20_member_suspect(&cluster, i, hint.epoch,
+                                       hint.incarnation, now);
+            }
+            break;
+        }
+    }
+    a20_gossip_route_t proposal;
+    a20_cluster_snapshot_args_t *via = &route_view[provider];
+    if (!a20_gossip_propose(&gossip, self.node_id, members[provider].node_id,
+                            members[provider].boot_epoch,
+                            members[provider].caps, via->transport_id,
+                            via->next_hop, via->next_hop_len, &hint,
+                            explicit_route, now, &proposal)) {
+        int index = track_node(hint.node);
+        if (index >= 0) {
+            a20_node_id_t node = member_node(index);
+            if (a20_cluster_route(A20_ROUTE_LEARN, &node, proposal.transport,
+                                  proposal.hop, proposal.hop_len,
+                                  A20_ROUTE_DYNAMIC | proposal.distance) >= 0) {
+                a20_gossip_commit(&gossip, &proposal);
+                route_seen[index] = 1;
+                route_view[index] = (a20_cluster_snapshot_args_t){
+                    .transport_id = proposal.transport,
+                    .next_hop_len = proposal.hop_len,
+                    .metric = A20_ROUTE_DYNAMIC | proposal.distance};
+                a20_memcpy(route_view[index].node_id, hint.node, 16);
+                a20_memcpy(route_view[index].next_hop, proposal.hop,
+                           proposal.hop_len);
+            } else {
+                gossip.rejected++;
+            }
+        } else {
+            gossip.rejected++;
+        }
+    }
+    p->gossip_cursor = next;
+    if (++p->gossip_pages >= GOSSIP_PAGES || gossip_send(p) < 0)
+        directory_full(p, now);
 }
 
 static int indirect(unsigned target, uint64_t cookie) {
@@ -230,19 +370,29 @@ static void probe_pump(unsigned i, uint64_t now) {
         return;
     }
     if (now >= p->deadline || ++p->steps > 65536) {
-        probe_failed(i, now);
+        if (p->phase == PHASE_GOSSIP)
+            directory_full(p, now);
+        else
+            probe_failed(i, now);
         return;
     }
     uint8_t wire[A20_AGENT_BUFFER];
     uint32_t len = sizeof(wire), handles = 0;
     a20_handle_t ep =
-        p->phase == PHASE_DIRECTORY ? p->directory : p->capability;
+        p->phase == PHASE_CAPABILITY ? p->capability : p->directory;
     a20_status_t r =
         a20_channel_recv_flags(ep, wire, &len, 0, &handles, A20_MSG_NONBLOCK);
     if (r == -A20_ERR_WOULD_BLOCK)
         return;
     if (r < 0) {
-        probe_failed(i, now);
+        if (p->phase == PHASE_GOSSIP)
+            directory_full(p, now);
+        else
+            probe_failed(i, now);
+        return;
+    }
+    if (p->phase == PHASE_GOSSIP) {
+        gossip_receive(i, wire, len, now);
         return;
     }
     if (p->phase == PHASE_CAPABILITY) {
@@ -271,7 +421,10 @@ static void probe_pump(unsigned i, uint64_t now) {
     if (!p->epoch) {
         if (members[i].boot_epoch != record.boot_epoch)
             p->control_slot = 0;
-        if (a20_member_observe(&cluster, i, p->cookie, record.boot_epoch, 0,
+        if (a20_member_observe(&cluster, i, p->cookie, record.boot_epoch,
+                               members[i].boot_epoch == record.boot_epoch
+                                   ? members[i].incarnation
+                                   : 0,
                                record.caps, record.profile, now, 1) < 0) {
             probe_failed(i, now);
             return;
@@ -294,6 +447,7 @@ static void probe_pump(unsigned i, uint64_t now) {
         p->control_slot = p->pending_control;
         probe_close(p);
         p->next_probe = now + 1000;
+        gossip_start(i, now);
         return;
     }
     if (record.status != A20_DIRECTORY_FOUND || record.next_index <= p->index ||
@@ -339,6 +493,7 @@ static void probe_pump(unsigned i, uint64_t now) {
 
 static int refresh_routes(void) {
     a20_cluster_snapshot_args_t route = {.kind = A20_CLUSTER_SNAPSHOT_ROUTE};
+    a20_memset(route_seen, 0, sizeof(route_seen));
     for (unsigned step = 0; step < 8192; step++) {
         a20_status_t r = a20_cluster_snapshot(&route);
         if (r == -A20_ERR_NOT_FOUND)
@@ -346,13 +501,61 @@ static int refresh_routes(void) {
         if (r == -A20_ERR_BUSY) {
             route.index = 0;
             route.generation = 0;
+            a20_memset(route_seen, 0, sizeof(route_seen));
             continue;
         }
-        if (r < 0 || track_node(route.node_id) < 0)
+        if (r < 0)
             return -1;
+        int index = track_node(route.node_id);
+        if (index < 0) {
+            route_overflow++;
+        } else {
+            route_view[index] = route;
+            route_seen[index] = 1;
+            a20_gossip_route_t *owned = a20_gossip_find(&gossip, route.node_id);
+            if (!(route.metric & A20_ROUTE_DYNAMIC)) {
+                if (owned)
+                    owned->used = 0;
+            } else if (!owned) {
+                /* A restarted owner gives inherited dynamic routes one
+                 * bounded lease to be refreshed, never permanent ownership. */
+                a20_gossip_route_t recovered = {
+                    .used = 1,
+                    .distance = route.metric & ~A20_ROUTE_DYNAMIC,
+                    .transport = route.transport_id,
+                    .hop_len = route.next_hop_len,
+                    .expires = a20_agent_clock_ms(0) + A20_GOSSIP_LEASE_MS};
+                a20_memcpy(recovered.node, route.node_id, 16);
+                a20_memcpy(recovered.hop, route.next_hop, 16);
+                a20_gossip_commit(&gossip, &recovered);
+            }
+        }
         route.index = route.next_index;
     }
     return -1;
+}
+static void gossip_expire(uint64_t now) {
+    for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++) {
+        a20_gossip_route_t *r = &learned[i];
+        if (!r->used || now < r->expires)
+            continue;
+        a20_node_id_t node;
+        a20_memcpy(node.bytes, r->node, 16);
+        a20_status_t status =
+            a20_cluster_route(A20_ROUTE_DEL_MATCH, &node, r->transport, r->hop,
+                              r->hop_len, A20_ROUTE_DYNAMIC | r->distance);
+        if (status >= 0 || status == -A20_ERR_NOT_FOUND) {
+            r->used = 0;
+            gossip.expired++;
+            for (unsigned j = 0; j < A20_CLUSTERD_MEMBERS; j++)
+                if (a20_member_id_equal(members[j].node_id, node.bytes)) {
+                    route_seen[j] = 0;
+                    a20_member_forget_services(&cluster, j);
+                }
+        }
+        /* BUSY also means another owner changed the route. refresh_routes
+         * drops ownership of an explicit replacement; otherwise retry. */
+    }
 }
 
 int main(int argc, char **argv, char **envp) {
@@ -411,6 +614,7 @@ int main(int argc, char **argv, char **envp) {
                 return 6;
             refresh_at = now + 1000;
         }
+        gossip_expire(now);
         a20_membership_tick(&cluster, now);
         for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++)
             if (members[i].state)

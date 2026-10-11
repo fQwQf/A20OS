@@ -198,6 +198,32 @@ static int abi_live_identity(void) {
     if (a20_cluster_link_status(&routed, &link) != 0 ||
         link.state != A20_CLX_LINK_UP)
         return fail("live-loopback-status");
+    if (a20_cluster_route(A20_ROUTE_LEARN, &routed, A20_CLX_TRANSPORT_LOOPBACK,
+                          &vnode, sizeof(vnode),
+                          A20_ROUTE_DYNAMIC | 1) != -A20_ERR_EXISTS ||
+        a20_cluster_route(A20_ROUTE_DEL_MATCH, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, &vnode, sizeof(vnode),
+                          1) != -A20_ERR_BUSY ||
+        a20_cluster_link_status(&routed, &link) < 0)
+        return fail("route-preserve-explicit");
+    if (a20_cluster_route(A20_ROUTE_DEL_MATCH, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, &vnode, sizeof(vnode),
+                          0) < 0 ||
+        a20_cluster_route(A20_ROUTE_LEARN, &routed, A20_CLX_TRANSPORT_LOOPBACK,
+                          &vnode, sizeof(vnode), A20_ROUTE_DYNAMIC | 1) < 0 ||
+        a20_cluster_route(A20_ROUTE_LEARN, &routed, A20_CLX_TRANSPORT_LOOPBACK,
+                          &vnode, sizeof(vnode), A20_ROUTE_DYNAMIC | 2) < 0)
+        return fail("route-learn-upsert");
+    if (a20_cluster_route(A20_ROUTE_REPLACE, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, &vnode, sizeof(vnode),
+                          3) < 0 ||
+        a20_cluster_route(A20_ROUTE_DEL_MATCH, &routed,
+                          A20_CLX_TRANSPORT_LOOPBACK, &vnode, sizeof(vnode),
+                          A20_ROUTE_DYNAMIC | 2) != -A20_ERR_BUSY ||
+        a20_cluster_route(A20_ROUTE_LEARN, &routed, A20_CLX_TRANSPORT_LOOPBACK,
+                          &vnode, sizeof(vnode),
+                          A20_ROUTE_DYNAMIC | 1) != -A20_ERR_EXISTS)
+        return fail("route-user-replacement-wins");
     if (a20_cluster_route(A20_ROUTE_DEL, &routed, A20_CLX_TRANSPORT_LOOPBACK,
                           NULL, 0, 0) != 0)
         return fail("live-route-delete");
@@ -684,6 +710,7 @@ static int uart_runtime(const char *control_path, const char *agent_path,
     a20_node_id_t self = {{0}}, peer = {{0}};
     self.bytes[15] = 1;
     peer.bytes[15] = 2;
+    a20_handle_t early_control = A20_HANDLE_NULL;
     uint8_t hop[2] = {1, 0};
     if (a20_cluster_set_self(&self, 0) < 0)
         return fail("uart-identity");
@@ -693,13 +720,16 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         uint8_t udp[6] = {10, 0, 3, 3, 0xab, 0xf4};
         if (a20_cluster_route(A20_ROUTE_ADD, &gateway, A20_CLX_TRANSPORT_UDP,
                               udp, sizeof(udp), 0) < 0 ||
-            a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UDP, udp,
-                              sizeof(udp), 1) < 0)
+            (routed == 1 &&
+             a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UDP, udp,
+                               sizeof(udp), 1) < 0))
             return fail("gateway-route");
     } else if (a20_cluster_route(A20_ROUTE_ADD, &peer, A20_CLX_TRANSPORT_UART,
                                  hop, 2, 0) < 0) {
         return fail("uart-route");
     }
+    if (routed == 2 && spawn_service(control_path, &early_control) < 0)
+        return fail("gossip-control");
     uint32_t slot = 0;
     uint64_t epoch = 0;
     uint64_t started = a20_agent_clock_ms(0);
@@ -713,6 +743,27 @@ static int uart_runtime(const char *control_path, const char *agent_path,
     }
     if (!discovered || epoch != 200 || slot != 2)
         return fail("uart-directory");
+    if (routed == 2) {
+        a20_cluster_snapshot_args_t route = {.kind =
+                                                 A20_CLUSTER_SNAPSHOT_ROUTE};
+        int learned = 0;
+        for (unsigned i = 0; i < 32; i++) {
+            if (a20_cluster_snapshot(&route) < 0)
+                break;
+            if (route.node_id[15] == 2 && (route.metric & A20_ROUTE_DYNAMIC))
+                learned = 1;
+            route.index = route.next_index;
+        }
+        if (!learned)
+            return fail("gossip-dynamic-route");
+        note("GATEWAY: gossip-learn-pass\n", 27);
+    }
+    if (early_control != A20_HANDLE_NULL) {
+        /* Exercise inherited dynamic-route recovery while keeping the per-call
+         * lifetime sample independent of the daemon's periodic probe workers. */
+        stop_service(early_control);
+        early_control = A20_HANDLE_NULL;
+    }
     note("UART: directory-pass\n", 21);
     if (routed) {
         uint8_t too_large[207] = {0}, reply[32];
@@ -841,9 +892,10 @@ static int uart_runtime(const char *control_path, const char *agent_path,
             return fail("gateway-reboot-epoch");
         note("GATEWAY: reboot-pass\n", 21);
     }
-    a20_handle_t agent = A20_HANDLE_NULL, control = A20_HANDLE_NULL;
+    a20_handle_t agent = A20_HANDLE_NULL, control = early_control;
     if (spawn_service(agent_path, &agent) < 0 ||
-        spawn_service(control_path, &control) < 0)
+        (control == A20_HANDLE_NULL &&
+         spawn_service(control_path, &control) < 0))
         return fail("uart-services");
     unsigned seen = 0;
     started = a20_agent_clock_ms(0);
@@ -880,6 +932,32 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         seen |= tasks[i].target.node_id[15] == 1   ? 1
                 : tasks[i].target.node_id[15] == 2 ? 2
                                                    : 0;
+    if (routed == 2) {
+        note("GATEWAY: gossip-expire-ready\n", 29);
+        started = a20_agent_clock_ms(0);
+        int found = 1;
+        do {
+            a20_cluster_snapshot_args_t route = {
+                .kind = A20_CLUSTER_SNAPSHOT_ROUTE};
+            found = 0;
+            for (unsigned step = 0; step < 32; step++) {
+                int result = a20_cluster_snapshot(&route);
+                if (result == -A20_ERR_NOT_FOUND)
+                    break;
+                if (result < 0) {
+                    found = 1;
+                    break;
+                }
+                if (route.node_id[15] == 2)
+                    found = 1;
+                route.index = route.next_index;
+            }
+            a20_thread_sleep((a20_time_t){.nsecs = 10000000});
+        } while (found && a20_agent_clock_ms(0) - started < 12000);
+        if (found)
+            return fail("gossip-route-expiry");
+        note("GATEWAY: gossip-expire-pass\n", 28);
+    }
     stop_service(control);
     stop_service(agent);
     if (seen != 3)
@@ -897,7 +975,7 @@ int main(int argc, char **argv, char **envp) {
     if (si)
         g_stdout = si->stdout_handle;
 
-    if (argc == 2 && !a20_strcmp(argv[1], "gateway-head")) {
+    if ((argc == 2 || argc == 3) && !a20_strcmp(argv[1], "gateway-head")) {
         a20_node_id_t self = {{0}}, client = {{0}}, leaf = {{0}};
         self.bytes[15] = 3;
         client.bytes[15] = 1;
@@ -909,12 +987,16 @@ int main(int argc, char **argv, char **envp) {
             a20_cluster_route(A20_ROUTE_ADD, &client, A20_CLX_TRANSPORT_UDP,
                               udp, sizeof(udp), 0) < 0)
             return fail("gateway-head");
+        a20_handle_t control;
+        if (argc == 3 && spawn_service(argv[2], &control) < 0)
+            return fail("gossip-head-control");
         note("GATEWAY: head-ready\n", 20);
         for (;;)
             a20_thread_sleep((a20_time_t){.nsecs = 1000000000});
     }
     if ((argc == 4 || argc == 5) && (!a20_strcmp(argv[1], "uart") ||
-                                     !a20_strcmp(argv[1], "gateway-client"))) {
+                                     !a20_strcmp(argv[1], "gateway-client") ||
+                                     !a20_strcmp(argv[1], "gateway-gossip"))) {
         unsigned rounds = 96;
         if (argc == 5) {
             rounds = 0;
@@ -927,7 +1009,9 @@ int main(int argc, char **argv, char **envp) {
                 return fail("uart-rounds");
         }
         return uart_runtime(argv[2], argv[3], rounds,
-                            !a20_strcmp(argv[1], "gateway-client"));
+                            !a20_strcmp(argv[1], "gateway-gossip")
+                                ? 2
+                                : !a20_strcmp(argv[1], "gateway-client"));
     }
 
     note("start\n", 6);
