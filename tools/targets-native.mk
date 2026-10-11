@@ -704,3 +704,9 @@ $(NATIVE_CLUSTER_BENCH_BIN): user/tests/test_native_cluster_bench.c $(NATIVE_CRT
 
 .PHONY: native-cluster-bench
 native-cluster-bench: $(NATIVE_CLUSTER_BENCH_BIN)
+
+$(NATIVE_CLUSTER_LOAD_BIN): user/tests/test_native_cluster_load.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_load.c,$@)
+
+.PHONY: native-cluster-load
+native-cluster-load: $(NATIVE_CLUSTER_LOAD_BIN)
