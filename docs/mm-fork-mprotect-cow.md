@@ -89,3 +89,9 @@ added guest `copy-protection` case also passed on the preceding kernel; it is
 permission regression coverage, not evidence of reproducing the copy race.
 Firefox ESR still crashes after this change, so this fix does not establish the
 cause of its heap corruption.
+
+ARM32 cross-compilation additionally caught a direct conversion from the 64-bit
+user-address arithmetic to a native pointer. Converting through `uintptr_t`
+keeps that generic helper valid for 32-bit kernels. The ARM32 Linux kernel build
+passes with this conversion; the AArch64 dual-ABI kernel also builds. These are
+compile checks, not desktop or boot validation for either architecture.

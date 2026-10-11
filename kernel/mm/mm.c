@@ -848,7 +848,7 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
             vaddr_t base;
             size_t size;
             pte = pt_lookup_leaf(t->pgdir, va, NULL, &base, &size);
-            *kaddr = (void *)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
+            *kaddr = (void *)(uintptr_t)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
             *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
             *pte |= PTE_A | (write ? PTE_D : 0);
             return 0;
