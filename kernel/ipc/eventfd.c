@@ -63,13 +63,11 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
     }
     uint64_t val = efd->semaphore ? 1 : efd->counter;
     efd->counter -= val;
-    int wake_writers = (efd->counter + val == ~0ULL);
     spin_unlock(&efd->lock);
 
-    /* The read freed exactly the space this writer needs; the rest of the
-     * blocked writers still do not fit and would only re-check and re-park. */
-    if (wake_writers)
-        wait_queue_wake_one(&efd->writers, 0, PROC_WAKE_EVENT);
+    /* Writers may request different increments, and poll observers share
+     * this queue. Every waiter must recheck after space becomes available. */
+    wait_queue_wake_all(&efd->writers, 0, PROC_WAKE_EVENT);
     memcpy(buf, &val, sizeof(val));
     return sizeof(val);
 }
@@ -78,13 +76,13 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
 {
     eventfd_t *efd = vf ? vf->priv : NULL;
     if (!efd) return -EBADF;
-    if (count < sizeof(uint64_t)) return -EINVAL;
+    if (count != sizeof(uint64_t)) return -EINVAL;
     uint64_t val;
     memcpy(&val, buf, sizeof(val));
     if (val == ~0ULL) return -EINVAL;
 
     spin_lock(&efd->lock);
-    while (efd->counter + val > ~0ULL - 1) {
+    while (val > (~0ULL - 1) - efd->counter) {
         if (vf->flags & O_NONBLOCK) {
             spin_unlock(&efd->lock);
             return -EAGAIN;
@@ -97,7 +95,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
 
         wait_queue_entry_t entry = {0};
         spin_lock(&efd->lock);
-        if (efd->counter + val <= ~0ULL - 1) {
+        if (val <= (~0ULL - 1) - efd->counter) {
             spin_unlock(&efd->lock);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
@@ -119,14 +117,12 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
             return -ERESTARTSYS;
         spin_lock(&efd->lock);
     }
-    int wake_readers = (efd->counter == 0);
     efd->counter += val;
     spin_unlock(&efd->lock);
 
-    /* A non-semaphore read drains the whole counter in one call, so one
-     * reader can take everything this write published. */
-    if (wake_readers)
-        wait_queue_wake_one(&efd->readers, 0, PROC_WAKE_EVENT);
+    /* Readiness notifications do not consume the counter. Waking only one
+     * observer strands other poll/epoll users and semaphore readers. */
+    wait_queue_wake_all(&efd->readers, 0, PROC_WAKE_EVENT);
     return sizeof(val);
 }
 
