@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -60,6 +61,65 @@ static int wait_ok(pid_t pid) {
     int status;
     return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
            WEXITSTATUS(status) == 0;
+}
+
+static int dumpable_access_probe(void) {
+    if (setgid(65534) || setuid(65534) ||
+        prctl(PR_GET_DUMPABLE) != 0 || prctl(PR_SET_DUMPABLE, 1L))
+        return 1;
+    /* Rejected filesystem-ID changes must change neither credentials nor
+     * dumpability. setfsuid/setfsgid return the previous ID even on failure. */
+    syscall(SYS_setfsuid, 12345);
+    syscall(SYS_setfsgid, 12345);
+    if (syscall(SYS_setfsuid, -1) != 65534 ||
+        syscall(SYS_setfsgid, -1) != 65534 || prctl(PR_GET_DUMPABLE) != 1)
+        return 2;
+    for (int enabled = 0; enabled < 2; enabled++) {
+        int ready[2];
+        if (pipe(ready)) return 3;
+        pid_t child = fork();
+        if (!child) {
+            close(ready[0]);
+            if (prctl(PR_SET_DUMPABLE, (long)enabled) ||
+                write(ready[1], "x", 1) != 1) _exit(4);
+            for (;;) pause();
+        }
+        close(ready[1]);
+        char c;
+        if (child < 0 || read(ready[0], &c, 1) != 1) return 5;
+        close(ready[0]);
+        errno = 0;
+        long r = ptrace(PTRACE_ATTACH, child, NULL, NULL);
+        int ok = enabled ? r == 0 : r == -1 && errno == EPERM;
+        if (enabled && r == 0) {
+            int status;
+            ok = waitpid(child, &status, 0) == child && WIFSTOPPED(status) &&
+                 ptrace(PTRACE_DETACH, child, NULL, NULL) == 0;
+        }
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        if (!ok) return 6 + enabled;
+    }
+    return 0;
+}
+
+static int dumpable_probe(void) {
+    if (prctl(PR_GET_DUMPABLE) != 1 || prctl(PR_SET_DUMPABLE, 0L) ||
+        prctl(PR_GET_DUMPABLE) != 0) return 1;
+    errno = 0;
+    if (prctl(PR_SET_DUMPABLE, 2L) != -1 || errno != EINVAL ||
+        prctl(PR_GET_DUMPABLE) != 0) return 2;
+    pid_t child = fork();
+    if (!child) {
+        if (prctl(PR_GET_DUMPABLE) != 0) _exit(3);
+        execl("/proc/self/exe", "sandbox_test", "--dumpable-exec", NULL);
+        _exit(4);
+    }
+    if (!wait_ok(child) || prctl(PR_GET_DUMPABLE) != 0 ||
+        prctl(PR_SET_DUMPABLE, 1L)) return 5;
+    child = fork();
+    if (!child) _exit(dumpable_access_probe());
+    return wait_ok(child) ? 0 : 6;
 }
 
 static int filter_probe(void) {
@@ -134,12 +194,19 @@ static int exec_probe(int enabled) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--dumpable-exec") == 0)
+        return prctl(PR_GET_DUMPABLE) == 1 ? 0 : 1;
     if (argc == 2) {
         int enabled = strcmp(argv[1], "--nnp") == 0;
         return geteuid() == (enabled ? 65534 : 0) &&
                        prctl(PR_GET_NO_NEW_PRIVS, 0L, 0L, 0L, 0L) == enabled
                    ? 0
                    : 1;
+    }
+    int dump_result = dumpable_probe();
+    if (dump_result) {
+        printf("SANDBOX: FAIL dumpable=%d errno=%d\n", dump_result, errno);
+        return 1;
     }
     errno = 0;
     if (prctl(PR_SET_NO_NEW_PRIVS, 0L, 0L, 0L, 0L) != -1 || errno != EINVAL)
@@ -193,7 +260,7 @@ int main(int argc, char **argv) {
     }
     unlink("/tmp/sandbox-setid");
     puts("SANDBOX: PASS no-new-privs fork+exec+setid "
-         "seccomp-pointer+errno+inherit+stack+scratch+mode+sigsys");
+         "seccomp-pointer+errno+inherit+stack+scratch+mode+sigsys+dumpable+ptrace");
     return 0;
 fail:
     unlink("/tmp/sandbox-setid");

@@ -86,6 +86,7 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
     int old_uid  = t->cred.uid;
     int old_euid = t->cred.euid;
     int old_suid = t->cred.suid;
+    int old_egid = t->cred.egid;
 
     if (st->st_mode & S_ISUID) {
         t->cred.euid  = (int)st->st_uid;
@@ -97,6 +98,9 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
         t->cred.sgid  = t->cred.egid;
         t->cred.fsgid = t->cred.egid;
     }
+
+    if (old_euid != t->cred.euid || old_egid != t->cred.egid)
+        mm_set_dumpable(t->mm, 0);
 
     int old_had_root = old_uid == 0 || old_euid == 0 || old_suid == 0;
     int new_has_root = t->cred.uid == 0 || t->cred.euid == 0 || t->cred.suid == 0;
@@ -921,6 +925,7 @@ static int exec_install_process(task_t *t,
         return -ENOMEM;
 
     new_mm->pgdir      = info->pgdir;
+    new_mm->dumpable   = 1;
     new_mm->brk        = info->brk;
     new_mm->start_brk  = info->brk;
     /* ASLR: every exec re-randomizes the mmap fallback base (fork inherits it
