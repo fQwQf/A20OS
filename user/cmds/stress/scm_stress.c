@@ -176,6 +176,52 @@ static int raw_control_test(int fd) {
     return 0;
 }
 
+/* Firefox's request/reply transport emits SCM_RIGHTS even when no handles
+ * are attached. Linux accepts that header and sends the payload normally. */
+static int empty_rights_test(int fd) {
+    const int types[] = {SOCK_STREAM, SOCK_DGRAM, SOCK_SEQPACKET};
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        int pair[2];
+        if (socketpair(AF_UNIX, types[i], 0, pair))
+            return -1;
+        if (send_fds(pair[0], &fd, 0, "empty", 5, 0) != 5)
+            return -1;
+        char data[16] = {0};
+        int received = -1, flags = 0;
+        if (recv_fds(pair[1], &received, 1, data, sizeof(data), 0, &flags) != 0 ||
+            memcmp(data, "empty", 5) || flags || received != -1)
+            return -1;
+        /* An empty header must not terminate parsing of later headers. */
+        union {
+            size_t align;
+            char bytes[CMSG_SPACE(0) + CMSG_SPACE(sizeof(int))];
+        } control = {0};
+        struct iovec iov = {.iov_base = "mixed", .iov_len = 5};
+        struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1,
+                            .msg_control = control.bytes,
+                            .msg_controllen = sizeof(control.bytes)};
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(0);
+        cmsg = CMSG_NXTHDR(&msg, cmsg);
+        if (!cmsg)
+            return -1;
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+        if (sendmsg(pair[0], &msg, 0) != 5 ||
+            recv_fds(pair[1], &received, 1, data, sizeof(data), 0, &flags) != 1 ||
+            received < 0 || memcmp(data, "mixed", 5) || flags || close(received))
+            return -1;
+        close(pair[0]);
+        close(pair[1]);
+    }
+    puts("SCM_STRESS: empty-rights PASS");
+    return 0;
+}
+
 int main(void) {
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
@@ -186,6 +232,9 @@ int main(void) {
         return fail("open tmp");
     if (write(f, "hello", 5) != 5)
         return fail("write tmp");
+
+    if (empty_rights_test(f))
+        return fail("empty rights");
 
     /* Single fd, single message. */
     if (send_fds(sv[0], &f, 1, "A", 1, 0) != 1)
