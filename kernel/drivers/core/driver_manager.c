@@ -131,6 +131,26 @@ static int64_t manager_handle_install(struct a20_ht_internal *ht, void *obj,
     return a20_handle_install(ht, obj, type, rights);
 }
 
+/* Native file handles own vfile references, never Linux descriptor numbers.
+ * Drop the temporary descriptor after taking the reference for the handle. */
+static uint32_t manager_console_handle(struct a20_ht_internal *ht, int flags,
+                                       a20_rights_t rights)
+{
+    int fd = vfs_open("/dev/console", flags, 0);
+    if (fd < 0)
+        return 0xFFFFFFFF;
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
+    fdtable_close_current(fd);
+    if (!vf)
+        return 0xFFFFFFFF;
+    int64_t h = manager_handle_install(ht, vf, A20_OBJ_FILE, rights);
+    if (h < 0) {
+        vfs_put_file(vf);
+        return 0xFFFFFFFF;
+    }
+    return (uint32_t)h;
+}
+
 int driver_manager_spawn_user(const char *path)
 {
     if (!path)
@@ -183,32 +203,12 @@ int driver_manager_spawn_user(const char *path)
     }
     __atomic_store_n(&task->a20_ht, ht, __ATOMIC_RELEASE);
 
-    uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF,
-             stderr_h = 0xFFFFFFFF;
-    int console_rd = vfs_open("/dev/console", O_RDONLY, 0);
-    if (console_rd >= 0) {
-        int64_t h = manager_handle_install(
-            ht, (void *)(uintptr_t)console_rd, A20_OBJ_FILE,
-            A20_RIGHT_READ | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-        if (h >= 0)
-            stdin_h = (uint32_t)h;
-    }
-    int console_wr = vfs_open("/dev/console", O_WRONLY, 0);
-    if (console_wr >= 0) {
-        int64_t h = manager_handle_install(
-            ht, (void *)(uintptr_t)console_wr, A20_OBJ_FILE,
-            A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-        if (h >= 0)
-            stdout_h = (uint32_t)h;
-    }
-    int console_wr2 = vfs_open("/dev/console", O_WRONLY, 0);
-    if (console_wr2 >= 0) {
-        int64_t h = manager_handle_install(
-            ht, (void *)(uintptr_t)console_wr2, A20_OBJ_FILE,
-            A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-        if (h >= 0)
-            stderr_h = (uint32_t)h;
-    }
+    uint32_t stdin_h = manager_console_handle(ht, O_RDONLY,
+        A20_RIGHT_READ | A20_RIGHT_SEEK | A20_RIGHT_DUP);
+    uint32_t stdout_h = manager_console_handle(ht, O_WRONLY,
+        A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
+    uint32_t stderr_h = manager_console_handle(ht, O_WRONLY,
+        A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
 
     a20_handle_t self_h = 0;
     {
