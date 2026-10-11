@@ -263,6 +263,10 @@ static void clx_proxy_shutdown(a20_clx_proxy_t *p, uint32_t generation,
     a20_channel_ep_t *ep;
     a20_node_id_t peer;
     uint32_t slot;
+    struct a20_clx_inflight *retired;
+    uint32_t retired_count;
+    uint64_t local, remote;
+    int reliable;
 
     uint64_t flags = spin_lock_irqsave(&g_clx_lock);
     if (!p->in_use || p->id != generation) {
@@ -271,12 +275,18 @@ static void clx_proxy_shutdown(a20_clx_proxy_t *p, uint32_t generation,
     }
     peer = p->peer_node;
     slot = p->dst_slot;
+    local = p->local_session;
+    remote = p->remote_session;
+    reliable = p->reliable;
     p->in_use = 0; /* deadline scan stops here */
-    if (p->inflight) {
-        for (uint32_t i = 0; i < p->inflight_cap; i++)
-            clx_inflight_clear(&p->inflight[i]);
-        kfree(p->inflight);
-        p->inflight = NULL;
+    retired = p->inflight;
+    retired_count = p->inflight_cap;
+    p->inflight = NULL;
+    p->inflight_count = 0;
+    for (uint32_t i = 0; retired && i < retired_count; i++) {
+        uint32_t txid = retired[i].deadline_tick ? retired[i].txid : 0;
+        clx_inflight_clear(&retired[i]);
+        retired[i].txid = txid;
     }
     g_clx_proxy_count--;
     ep = p->ep;
@@ -284,6 +294,13 @@ static void clx_proxy_shutdown(a20_clx_proxy_t *p, uint32_t generation,
         refcount_inc(&ep->refcount); /* temp ref for the shutdowns */
     spin_unlock_irqrestore(&g_clx_lock, flags);
 
+    /* The caller no longer needs these replies. Retire their storage even
+     * when every reply was lost; the receiver's sequence window still keeps
+     * an old request from executing again. This does not cancel execution. */
+    for (uint32_t i = 0; reliable && retired && i < retired_count; i++)
+        if (retired[i].txid)
+            a20_clx_reliable_receipt(&peer, retired[i].txid, local, remote);
+    kfree(retired);
     if (send_close)
         clx_send_close(&peer, slot);
     if (!ep)

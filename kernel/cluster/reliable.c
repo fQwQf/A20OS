@@ -1,6 +1,6 @@
 /* Bounded end-to-end transaction replay. ACK confirms admission only;
  * replies complete calls. A session-bound slot-zero CALL acknowledges a
- * completed reply, permitting cache reuse without re-executing old calls. */
+ * no-longer-needed reply, permitting reuse without re-executing old calls. */
 #include "cluster/clx_internal.h"
 #include "mm/slab.h"
 
@@ -26,7 +26,7 @@ typedef struct clx_origin {
 } clx_origin_t;
 
 typedef struct clx_replay {
-    int used, done, acknowledged;
+    int used, done, acknowledged, abandoned;
     uint32_t hash, txid, slot, serve_hash;
     uint64_t caller_session, server_session, expires;
     uint8_t *frame;
@@ -141,8 +141,16 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
     uint64_t flags = spin_lock_irqsave(&g_clx_lock);
     clx_replay_t *r = replay_find(h->src_hash, h->txid, remote, local);
     if (!h->dst_slot) {
-        if (h->payload_len == A20_CLX_SESSION_BYTES && r && r->done)
-            r->acknowledged = 1;
+        if (h->payload_len == A20_CLX_SESSION_BYTES && r) {
+            r->abandoned = 1;
+            /* Keep the execution's reservation until its worker finishes. */
+            r->acknowledged = r->done;
+        } else if (h->payload_len == A20_CLX_SESSION_BYTES) {
+            /* Retirement may overtake a delayed request or its fragments. */
+            clx_origin_t *o = origin_find(h->src_hash, remote, local);
+            if (o && a20_clx_window_test(&o->window, h->txid) == A20_CLX_TX_NEW)
+                a20_clx_window_commit(&o->window, h->txid);
+        }
         spin_unlock_irqrestore(&g_clx_lock, flags);
         return 1;
     }
@@ -241,6 +249,7 @@ void a20_clx_reliable_reply(const a20_node_id_t *dst, uint32_t txid,
         if (n > 0) {
             r->len = frame_len = n;
             r->done = 1;
+            r->acknowledged = r->abandoned;
             copy = kmalloc(frame_len);
             if (copy)
                 memcpy(copy, r->frame, frame_len);

@@ -275,6 +275,16 @@ int main(void) {
     pump(50);
     assert(a20_clx_get_le32(received + 48) ==
            20); /* Retired transaction, no replay. */
+    /* A retirement may arrive before a delayed request. */
+    a20_clx_put_le32(receipt + A20_CLX_OFF_TXID, 126);
+    leaf_set_reliable_seq(receipt, receipt_len, 126);
+    assert(a20_clx_uart_send_frame(nh, 2, receipt, receipt_len) == 0);
+    pump(50);
+    a20_clx_put_le32(frame + A20_CLX_OFF_TXID, 126);
+    leaf_set_reliable_seq(frame, n, 126);
+    assert(a20_clx_uart_send_frame(nh, 2, frame, n) == 0);
+    pump(50);
+    assert(a20_clx_get_le32(received + 48) == 20);
     a20_clx_put_le64(frame + 40, remote ^ 1);
     leaf_set_reliable_seq(frame, n, 124);
     unsigned before = replies;
@@ -573,6 +583,12 @@ int main(void) {
     a20_clx_put_le32(frame + A20_CLX_OFF_SRC_HASH, a20_clx_fnv1a32(other));
     memcpy(frame + 32, routed_payload, sizeof(routed_payload));
     leaf_set_reliable_seq(frame, n, 1);
+    inject_frame(&to_leaf, frame, n);
+    pump(100);
+    assert(leaf_inflight_src_hash == a20_clx_fnv1a32(caller));
+    /* The other caller retired its own txid=1, but can execute txid=2. */
+    a20_clx_put_le32(frame + A20_CLX_OFF_TXID, 2);
+    leaf_set_reliable_seq(frame, n, 2);
     inject_frame(&to_leaf, frame, n);
     pump(100);
     assert(leaf_inflight_src_hash == a20_clx_fnv1a32(other) &&

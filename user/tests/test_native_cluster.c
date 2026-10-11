@@ -1028,9 +1028,28 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         word_seen |= tasks[i].target.node_id[15] == 1   ? 1
                      : tasks[i].target.node_id[15] == 2 ? 2
                                                         : 0;
-    if (word_seen != 3)
+    if (word_seen != 3 && !job.retries)
         return fail("uart-word-mixed");
+    note_value("UART: word-retries=", job.retries);
     note("UART: mixed-word-tree-pass\n", 27);
+    a20_work_request_t query = {
+        .job = 1002, .kind = A20_WORK_QUERY, .budget_ms = 1000, .attempt = 1};
+    uint8_t query_wire[32], query_reply[200];
+    int query_len = a20_work_encode(query_wire, sizeof(query_wire), &query);
+    uint32_t query_got = sizeof(query_reply);
+    a20_handle_t query_ep = A20_HANDLE_NULL;
+    a20_work_result_t query_result;
+    if (a20_cluster_connect_bound(&peer, 2, epoch, &query_ep) < 0)
+        return fail("uart-post-job-connect");
+    int query_status = a20_cluster_exchange(query_ep, query_wire, query_len,
+                                            query_reply, &query_got, 2500);
+    a20_hdl_close(query_ep);
+    if (query_status < 0 ||
+        a20_work_result_decode(query_reply, query_got, &query, &query_result) <
+            0 ||
+        query_result.status || query_result.output_len != 104)
+        return fail("uart-post-job-cache");
+    note("UART: post-job-cache-pass\n", 26);
     if (routed == 2) {
         note("GATEWAY: gossip-expire-ready\n", 29);
         started = a20_agent_clock_ms(0);

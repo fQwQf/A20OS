@@ -590,6 +590,9 @@ static void leaf_on_call(const uint8_t *frame) {
             return;
         }
         if (!slot) {
+            if (payload_len == A20_CLX_SESSION_BYTES &&
+                a20_clx_window_test(window, txid) == A20_CLX_TX_NEW)
+                a20_clx_window_commit(window, txid);
             if (payload_len == A20_CLX_SESSION_BYTES && leaf_reply_reliable &&
                 txid == leaf_inflight_txid &&
                 src_hash == leaf_inflight_src_hash &&

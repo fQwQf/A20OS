@@ -78,6 +78,7 @@ make check-cluster-unit
 make check-cluster-fuzz
 make smoke-native-cluster
 python3 tools/check-cluster-gateway.py --gossip
+python3 tools/check-cluster-gateway.py --gossip --abandon
 PATH=/path/to/arm-toolchain/bin:$PATH make ARCH=armv7m BOARD=stm32f103 \
   STM32_FLASH_KB=64 STM32_RAM_KB=20 STM32_CLUSTER_PORT=2 kernel-only
 ```
@@ -96,3 +97,9 @@ RISC-V→UDP→x86 COM2→UART→leaf；736 B 文本树必须同时使用主机�
 该演示是精确、有界 ASCII 词频，不支持 Unicode 分词或任意大词表。
 历史实施轨道的 16 片/8 节点配比、外部数据集流式分片、持久多作业调度与物理
 板联调仍需单独验证，不用此有界演示代替其证据。
+
+`--abandon` 丢弃首个 MCU MAP 事务的所有回复，直到协调器放弃该 attempt。
+测试要求至少一次作业重派、至少两次实际丢回复，并在树完成后直接查询 MCU，
+2.5 s 内必须成功。放弃收据释放已完成事务的缓存，旧请求仍受去重窗口约束。
+主机共享回放测试还覆盖执行中先收放弃通知、不能提前复用预留记录、旧 worker
+不能完成新记录、通知先于请求、OOM 后重试和过期旧序号。

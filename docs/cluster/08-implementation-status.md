@@ -156,3 +156,16 @@ CJ WORDCOUNT，文件 CLI 已纳入构建和真实 Native smoke。
 独立事务 1 个，最终结果与整体参考逐字节一致。STM32 64 KiB Flash/20 KiB RAM
 USART2 固件链接成功，text=47496 B、data=0、bss=8992 B；这不是全部 RAM 用量，
 线程栈/堆与持久 Flash 区另有链接预算。详见 [18-wordcount.md](18-wordcount.md)。
+
+
+## 13. 放弃调用的缓存回收
+
+调用者关闭在途 endpoint 时发送原会话/事务绑定的放弃收据，避免全部回复丢失
+后 MCU 单缓存持续占用 35 s。执行中记录只标记放弃，worker 完成后才可复用；
+通知先于原请求时先提交序号窗口，阻止迟到执行。通知是尽力交付，不承诺取消
+远端业务；丢失时仍有缓存保留期限。
+
+`python3 tools/check-cluster-gateway.py --gossip --abandon` 已实际丢弃首个 MAP
+事务的全部回复；作业重派一次，词频正确，后续 MCU 查询在 2.5 s 内成功。
+生产主机回放测试及 UART 配对测试覆盖通知先于请求、执行中预留、旧 worker、
+旧序号和 OOM；ASan/UBSan 通过。对应协议见 02、11、18 文档。

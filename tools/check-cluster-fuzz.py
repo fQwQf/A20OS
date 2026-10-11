@@ -23,7 +23,7 @@ def main():
               "kernel/cluster/frame.h", "kernel/cluster/uart.h",
               "kernel/cluster/fragment.h", "kernel/cluster/fragment.c",
               "tools/tests/test_clx_fragment.c", "tools/tests/test_clx_session.c",
-              "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
+              "kernel/cluster/reliable.c", "tools/tests/test_clx_reliable.c", "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
               "kernel/mcu/leaf.h", "kernel/include/uapi/a20/cluster_work.h",
               "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/include/uapi/a20/cluster_job.h", "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "tools/tests/test_clx_word_job.c", "kernel/cluster/transaction.h"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in inputs}
@@ -69,6 +69,13 @@ def main():
         (directory / "words.log").write_text(checked_words.stdout)
         print(checked_words.stdout, end="")
         checked_words.check_returncode()
+        reliable = str(Path(temporary) / "reliable")
+        subprocess.run(compiler + flags + ["tools/tests/test_clx_reliable.c", "-o", reliable], cwd=root, check=True)
+        checked_reliable = subprocess.run([reliable], cwd=root, text=True, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, timeout=60)
+        (directory / "reliable.log").write_text(checked_reliable.stdout)
+        print(checked_reliable.stdout, end="")
+        checked_reliable.check_returncode()
         elapsed = time.monotonic() - started
         (directory / "run.log").write_text(result.stdout)
         print(result.stdout, end="")

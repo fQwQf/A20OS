@@ -44,11 +44,13 @@ def cl_payload(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--abandon", action="store_true", help="lose every reply of the first leaf MAP attempt")
     parser.add_argument("--gossip", action="store_true", help="discover the leaf route from a relay, then expire it on link loss")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    directory = root / (".kernel-build/cluster/gateway-gossip" if args.gossip else ".kernel-build/cluster/gateway")
+    directory = root / (".kernel-build/cluster/gateway-abandon" if args.abandon else
+                        ".kernel-build/cluster/gateway-gossip" if args.gossip else ".kernel-build/cluster/gateway")
     directory.mkdir(parents=True, exist_ok=True)
     commands = []
     for arch in ("riscv64", "x86_64"):
@@ -202,8 +204,15 @@ def main():
                             if side == 1 and cl[3] == 7 and cl[52:54] == b"CW" and once("uart-drop-reply"):
                                 continue
                             if (side == 1 and cl[3] == 7 and cl[52:54] == b"CW"
-                                    and int.from_bytes(cl[68:72], "little") == 3 and once("uart-drop-map-reply")):
-                                continue
+                                    and int.from_bytes(cl[68:72], "little") == 3):
+                                if args.abandon:
+                                    transaction = bytes(cl[8:12] + cl[32:48])
+                                    saved.setdefault("abandoned-map", transaction)
+                                    if transaction == saved["abandoned-map"]:
+                                        events["uart-drop-map-reply"] = events.get("uart-drop-map-reply", 0) + 1
+                                        continue
+                                elif once("uart-drop-map-reply"):
+                                    continue
                             if not unplugged:
                                 pending[1-side] += b"\xc0" + packet + b"\xc0"
                 output = (directory / "client.log").read_text(errors="replace")
@@ -259,6 +268,10 @@ def main():
                                for name in ("leaf.log", "leaf-reboot.log"))
                     if not maps or maps != len(map_keys) or "uart-drop-map-reply" not in events:
                         raise RuntimeError("word map loss/dedup evidence missing")
+                    if ("UART: post-job-cache-pass" not in output or
+                            (args.abandon and ("UART: word-retries=0000000000000000" in output
+                                               or events["uart-drop-map-reply"] < 2))):
+                        raise RuntimeError("attempt abandonment/cache retirement evidence missing")
                     events.update({"dot_executions": executed, "unique_dot_transactions": len(keys),
                                    "map_executions": maps, "unique_map_transactions": len(map_keys)})
                     print("check-cluster-gateway: PASS (RISC-V -> UDP -> x86 COM2 -> static leaf, CS loss, reliable dedup, reboot/old replay, any/mixed tree" +
@@ -281,7 +294,7 @@ def main():
             log.close()
         sources = ["kernel/cluster/session.c", "kernel/cluster/session_control.h",
                    "kernel/cluster/transport.c", "kernel/cluster/udp.c", "kernel/cluster/uart.c",
-                   "kernel/mcu/leaf.c", "kernel/cluster/remote_ep.c", "kernel/cluster/route.c",
+                   "kernel/mcu/leaf.c", "kernel/cluster/reliable.c", "kernel/cluster/remote_ep.c", "kernel/cluster/route.c",
                    "kernel/include/uapi/a20/cluster_gossip.h", "kernel/include/uapi/a20/cluster_control.h", "kernel/include/uapi/a20/cluster_job.h",
                    "kernel/include/uapi/a20/cluster_words.h", "kernel/include/uapi/a20/cluster_word_job.h", "user/liba20rt/a20_cluster_job.h",
                    "user/svc/clusterd.c", "user/tests/test_native_cluster.c", "tools/targets-dev.mk",
