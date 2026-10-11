@@ -155,8 +155,25 @@ static int futex_cow_probe(void) {
     printf("VM_FAULT: futex-cow %s\n", failed ? "FAIL" : "PASS");
     return failed;
 }
+static int sparse_unmap_probe(void) {
+    const size_t span = (size_t)(8ULL * 1024 * 1024 * 1024);
+    if (!span)
+        return 0;
+    char *p = mmap(0, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED)
+        return 1;
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int failed = munmap(p, span) != 0;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    long ms = (end.tv_sec - start.tv_sec) * 1000 +
+              (end.tv_nsec - start.tv_nsec) / 1000000;
+    printf("VM_FAULT: sparse-unmap %s ms=%ld\n", failed ? "FAIL" : "PASS", ms);
+    return failed;
+}
 int main(void) {
-    int failed = signal_probe();
+    int failed = sparse_unmap_probe();
+    failed |= signal_probe();
     failed |= cow_copy_probe();
     failed |= futex_cow_probe();
     fflush(stdout);

@@ -39,7 +39,7 @@ static void mm_munmap_retire_reservation(mm_struct_t *mm, vaddr_t va)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
     pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
-    if (!table || table == mm->pgdir)
+    if (!table || mm_pt_meta_level(mm_pt_meta(table)) != 0)
         return;
     int idx = arch_pt_vpn(va, 0);
     mm_pt_node_lock(table);
@@ -111,8 +111,13 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                  && !pte_is_swap(*pte)
 #endif
                 )) {
-                mm_munmap_retire_reservation(mm, va);
-                va += PAGE_SIZE;
+                if (level == 0)
+                    mm_munmap_retire_reservation(mm, va);
+                /* No leaf table means there can be no per-page reservation
+                 * marks in this subtree.  Faults that build such a path need
+                 * mm->lock; existing level-0 marks are still retired above. */
+                vaddr_t next_va = size ? base + size : va + PAGE_SIZE;
+                va = next_va > va ? next_va : va + PAGE_SIZE;
                 continue;
             }
             if (shared_file_vma && vma->file_vnode && (*pte & PTE_D)) {

@@ -51,6 +51,8 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out);
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va);
 pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc);
+/* A missing entry also reports the absent subtree span in base/size/level.
+ * Range walkers may skip it; it contains no leaf mappings or reservations. */
 pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out,
                       vaddr_t *base_out, size_t *size_out);
 
