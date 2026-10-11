@@ -40,6 +40,7 @@ typedef struct sigaction {
 #define SI_TKILL    (-6)
 #define CLD_EXITED     1
 #define CLD_KILLED     2
+#define CLD_DUMPED     3
 
 /* Per-process signal state */
 typedef struct signal_pending_info {
@@ -97,6 +98,7 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 int  signal_send(int pid, int signum);
 /* Caller must hold a task reference for the duration of this call. */
 int  signal_send_task(void *task, int signum);
+void signal_notify_child_exit(void *parent, void *child);
 int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);

@@ -116,6 +116,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->state     = PROC_READY;
     t->parent    = parent;
     t->exit_code = 0;
+    t->exit_notified = 0;
     t->priority  = parent ? parent->priority : 0;
     t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
