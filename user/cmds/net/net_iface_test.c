@@ -9,7 +9,7 @@
  *
  * Wire format, per the kernel side (kernel/net/socket_file.c):
  *   struct ifconf { int ifc_len; void *ifc_buf; }
- *   struct ifreq  { char ifr_name[16]; union { ... } }   -- 32 bytes total
+ *   struct ifreq  { char ifr_name[16]; union { ... } }   -- 40 bytes on LP64
  * User space walks the buffer in whole-entry strides, so the layout has to match
  * Linux exactly; the kernel pins that with a _Static_assert of its own.
  */
@@ -113,6 +113,7 @@ static void test_fill(int fd, char *first_name)
 static void test_truncation(int fd)
 {
     struct ifreq row;
+    memset(&row, 0xAA, sizeof(row));
     char small[sizeof(struct ifreq)];
     struct ifconf ifc;
 
@@ -135,7 +136,7 @@ static void test_truncation(int fd)
     ok(ifc.ifc_len % (int)sizeof(row) == 0, "truncated result is still whole entries");
 }
 
-static void test_family_filter(int fd)
+static void test_output_buffer(int fd)
 {
     size_t need = query_size(fd);
     char *buf = malloc(need);
@@ -146,9 +147,7 @@ static void test_family_filter(int fd)
         ok(0, "allocate buffer for family filter");
         return;
     }
-    /* Linux reads the wanted family from the first entry of a non-empty
-     * buffer. Only IPv4 is implemented, so asking for anything else must come
-     * back empty rather than IPv4 rows wearing the wrong family tag. */
+    /* malloc'd output need not have initialized address-family fields. */
     rows = (struct ifreq *)buf;
     memset(rows, 0, sizeof(*rows));
     {
@@ -160,8 +159,9 @@ static void test_family_filter(int fd)
     memset(&ifc, 0, sizeof(ifc));
     ifc.ifc_len = (int)need;
     ifc.ifc_buf = buf;
-    ok(ioctl(fd, SIOCGIFCONF, &ifc) == 0, "non-IPv4 family request is accepted");
-    ok(ifc.ifc_len == 0, "non-IPv4 family request yields an empty list");
+    ok(ioctl(fd, SIOCGIFCONF, &ifc) == 0, "dirty output buffer is accepted");
+    ok(ifc.ifc_len == (int)need, "output contents do not filter interface rows");
+    ok(rows->ifr_addr.sa_family == AF_INET, "output family is replaced with IPv4");
     free(buf);
 }
 
@@ -171,9 +171,15 @@ static void test_negative_length(int fd)
     memset(&ifc, 0, sizeof(ifc));
     ifc.ifc_len = -1;
     ifc.ifc_buf = NULL;
-    errno = 0;
-    ok(ioctl(fd, SIOCGIFCONF, &ifc) < 0, "negative ifc_len is rejected");
-    ok(errno == EINVAL, "negative ifc_len fails with EINVAL");
+    ok(ioctl(fd, SIOCGIFCONF, &ifc) == 0, "NULL size query ignores input length");
+    ok(ifc.ifc_len == (int)query_size(fd), "NULL query returns the required size");
+    struct ifreq row;
+    memset(&row, 0xAA, sizeof(row));
+    ifc.ifc_len = -1;
+    ifc.ifc_buf = (char *)&row;
+    ok(ioctl(fd, SIOCGIFCONF, &ifc) == 0, "negative output length is accepted");
+    ok(ifc.ifc_len == 0, "negative output length yields no complete rows");
+    ok((unsigned char)row.ifr_name[0] == 0xAA, "negative output length leaves rows untouched");
 }
 
 static void test_round_trip(int fd, const char *name)
@@ -218,7 +224,7 @@ int main(void)
     test_size_query(fd);
     test_fill(fd, first_name);
     test_truncation(fd);
-    test_family_filter(fd);
+    test_output_buffer(fd);
     test_negative_length(fd);
     if (first_name[0])
         test_round_trip(fd, first_name);

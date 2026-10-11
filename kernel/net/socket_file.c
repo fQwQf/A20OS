@@ -547,9 +547,6 @@ static int net_ifreq_getconf(void *uarg)
     struct a20_ifconf ifc;
     if (copy_from_user(&ifc, uarg, sizeof(ifc)) < 0)
         return -EFAULT;
-    if (ifc.ifc_len < 0)
-        return -EINVAL;
-
     int needed = 0;
     for (struct netif *n = netif_list; n; n = n->next)
         needed += (int)sizeof(struct a20_ifreq);
@@ -559,22 +556,7 @@ static int net_ifreq_getconf(void *uarg)
         return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
     }
 
-    /* Linux reads the wanted address family from the first entry of a
-     * non-empty buffer.  Only IPv4 is reported, so a caller asking for
-     * another family gets an empty list rather than IPv4 rows wearing the
-     * wrong family tag. */
-    if (ifc.ifc_len >= (int)sizeof(struct a20_ifreq)) {
-        struct a20_ifreq probe;
-        if (copy_from_user(&probe, ifc.ifc_buf, sizeof(probe)) < 0)
-            return -EFAULT;
-        uint16_t want = (uint16_t)probe.ifr_ifru.raw[0] |
-                        ((uint16_t)probe.ifr_ifru.raw[1] << 8);
-        if (want != A20_AF_UNSPEC && want != A20_AF_INET) {
-            ifc.ifc_len = 0;
-            return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
-        }
-    }
-
+    /* The row buffer is output only, including its address-family fields. */
     int limit = ifc.ifc_len;
     int used = 0;
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -740,7 +722,6 @@ static int net_namespace_ioctl(resource_namespace_t *ns, unsigned long req, void
     if (req == A20_SIOCGIFCONF) {
         struct a20_ifconf ifc;
         if (copy_from_user(&ifc, uarg, sizeof(ifc)) < 0) return -EFAULT;
-        if (ifc.ifc_len < 0) return -EINVAL;
         if (!ifc.ifc_buf) ifc.ifc_len = sizeof(struct a20_ifreq);
         else if (ifc.ifc_len >= (int)sizeof(struct a20_ifreq)) {
             struct a20_ifreq ifr = {0};
