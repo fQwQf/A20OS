@@ -154,7 +154,8 @@ int a20_frame_encode_logical(uint8_t *buf, uint32_t cap, uint32_t mtu,
     uint32_t n = A20_CLX_HDR_LEN + h->payload_len + A20_CLX_CRC_LEN;
     if (!buf || !payload || h->payload_len > 65556u || n > mtu || n > cap ||
         h->ver != A20_CLX_SESSION_VER || h->flags != A20_CLX_FLAG_RELIABLE ||
-        (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_CALL_REPLY) ||
+        (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_CALL_REPLY &&
+         h->type != A20_CLX_TYPE_SEND) ||
         h->frag || h->csum_kind != A20_CLX_CSUM_CCITT)
         return -1;
     uint8_t header[A20_CLX_HDR_LEN + A20_CLX_CRC_LEN];
@@ -222,7 +223,8 @@ static a20_frame_verdict_t frame_decode_version(const uint8_t *buf,
         if (len > 65590u || out->ver != A20_CLX_SESSION_VER ||
             out->flags != A20_CLX_FLAG_RELIABLE || out->frag ||
             (out->type != A20_CLX_TYPE_CALL &&
-             out->type != A20_CLX_TYPE_CALL_REPLY) ||
+             out->type != A20_CLX_TYPE_CALL_REPLY &&
+             out->type != A20_CLX_TYPE_SEND) ||
             out->csum_kind != A20_CLX_CSUM_CCITT)
             return A20_FRAME_PAYLOAD_LEN_MISMATCH;
         out->payload_len = len - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN;

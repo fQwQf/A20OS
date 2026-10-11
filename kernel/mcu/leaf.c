@@ -124,6 +124,16 @@ static const a20_work_agent_t leaf_default_agent = {
     .clock_ms = leaf_clock_ms,
 };
 static const a20_work_agent_t *leaf_agent = &leaf_default_agent;
+static uint32_t (*leaf_sink)(void *, const uint8_t *, uint32_t);
+static void *leaf_sink_ctx;
+static char leaf_sink_name[64];
+static uint32_t leaf_sink_name_len;
+static int leaf_reply_oneway;
+
+static uint32_t leaf_caps(void) {
+    return A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE |
+           (leaf_sink ? A20_CLX_CAP_ONEWAY : 0);
+}
 
 static a20_clx_link_counters_t leaf_c;
 
@@ -281,8 +291,8 @@ static void leaf_adopt_hello(const uint8_t *payload) {
 static void leaf_send_confirmation(void) {
     uint8_t payload[32];
     a20_clx_build_hello_payload(leaf_self_id, 0, 1, A20_CLX_TIER_MCU,
-                                A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE,
-                                leaf_pending_addr, leaf_nonce, payload);
+                                leaf_caps(), leaf_pending_addr, leaf_nonce,
+                                payload);
     (void)leaf_send(A20_CLX_TYPE_HELLO, leaf_hello_cookie,
                     a20_clx_fnv1a32(leaf_self_id),
                     a20_clx_fnv1a32(leaf_pending_id), 0, payload, 32);
@@ -333,8 +343,7 @@ static void leaf_on_hello(const uint8_t *frame) {
         leaf_adopt_hello(payload);
     uint8_t ack[32];
     a20_clx_build_hello_payload(leaf_self_id, 0, 1, A20_CLX_TIER_MCU,
-                                A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE,
-                                address, leaf_nonce, ack);
+                                leaf_caps(), address, leaf_nonce, ack);
     (void)leaf_send(
         A20_CLX_TYPE_HELLO_ACK, a20_clx_get_le32(frame + A20_CLX_OFF_TXID),
         a20_clx_fnv1a32(leaf_self_id), a20_clx_fnv1a32(payload), 0, ack, 32);
@@ -414,7 +423,7 @@ static void leaf_admission_ack(uint32_t txid, uint32_t destination) {
 
 static int leaf_directory(const uint8_t *input, uint32_t len, uint8_t *output) {
     a20_directory_record_t r = {.profile = A20_CLX_PROFILE_MCU,
-                                .caps = A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE,
+                                .caps = leaf_caps(),
                                 .boot_epoch = leaf_nonce,
                                 .generation = 1,
                                 .status = A20_DIRECTORY_INVALID};
@@ -424,15 +433,23 @@ static int leaf_directory(const uint8_t *input, uint32_t len, uint8_t *output) {
     if (!a20_directory_decode_request(input, len, &index, &generation)) {
         if (generation && generation != 1) {
             r.status = A20_DIRECTORY_CHANGED;
-        } else if (index >= 2) {
+        } else if (index >= (leaf_sink ? 3u : 2u)) {
             r.status = A20_DIRECTORY_END;
         } else {
             r.status = A20_DIRECTORY_FOUND;
             r.next_index = index + 1;
-            r.slot = index ? A20_MCU_LEAF_WORK_SLOT : A20_MCU_LEAF_OP_DOT_SLOT;
-            r.flags = index ? A20_DIRECTORY_WORK : 0;
-            r.name_len = index ? 4 : 3;
-            memcpy(r.name, index ? "work" : "dot", r.name_len);
+            if (index == 2) {
+                r.slot = A20_MCU_LEAF_SINK_SLOT;
+                r.flags = A20_DIRECTORY_ONEWAY;
+                r.name_len = leaf_sink_name_len;
+                memcpy(r.name, leaf_sink_name, r.name_len);
+            } else {
+                r.slot =
+                    index ? A20_MCU_LEAF_WORK_SLOT : A20_MCU_LEAF_OP_DOT_SLOT;
+                r.flags = index ? A20_DIRECTORY_WORK : 0;
+                r.name_len = index ? 4 : 3;
+                memcpy(r.name, index ? "work" : "dot", r.name_len);
+            }
         }
     }
     a20_directory_encode(output, &r);
@@ -471,7 +488,7 @@ static void leaf_session_send(const leaf_origin_t *o, uint32_t kind,
                          .cookie = cookie,
                          .epoch = leaf_nonce,
                          .target_epoch = target_epoch,
-                         .caps = A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE,
+                         .caps = leaf_caps(),
                          .profile = 1};
     memcpy(r.source, leaf_self_id, 16);
     memcpy(r.target, o->id, 16);
@@ -558,6 +575,15 @@ static void leaf_session_tick(void) {
 
 static void leaf_on_call(const uint8_t *frame) {
     uint32_t txid = a20_clx_get_le32(frame + A20_CLX_OFF_TXID);
+    int oneway = frame[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_SEND;
+    uint32_t seq = a20_clx_get_le32(frame + A20_CLX_OFF_SEQ);
+    if (oneway) {
+        if (txid || !seq || seq == A20_CLX_CLOSE_CALLER) {
+            leaf_c.rx_drops++;
+            return;
+        }
+        txid = seq;
+    }
     uint32_t src_hash = a20_clx_get_le32(frame + A20_CLX_OFF_SRC_HASH);
     uint32_t dst_hash = a20_clx_get_le32(frame + A20_CLX_OFF_DST_HASH);
     uint32_t slot = a20_clx_get_le32(frame + A20_CLX_OFF_DST_SLOT);
@@ -575,6 +601,14 @@ static void leaf_on_call(const uint8_t *frame) {
         origin_epoch = origin->session.epoch;
         window = &origin->window;
     }
+    if (oneway && (!reliable || !leaf_sink || !slot ||
+                   !((direct   ? leaf_peer_caps
+                      : origin ? origin->session.caps
+                               : 0) &
+                     A20_CLX_CAP_ONEWAY))) {
+        leaf_c.rx_drops++;
+        return;
+    }
     if (leaf_state != A20_MCU_LEAF_UP || dst_hash != self_hash ||
         (!direct &&
          (!reliable || !(leaf_peer_caps & A20_CLX_CAP_RELAY) || !origin ||
@@ -587,7 +621,7 @@ static void leaf_on_call(const uint8_t *frame) {
             leaf_peer_version < A20_CLX_SESSION_VER ||
             !a20_clx_session_matches(payload, payload_len, origin_epoch,
                                      leaf_nonce) ||
-            a20_clx_get_le32(frame + A20_CLX_OFF_SEQ) != txid) {
+            seq != txid) {
             leaf_c.rx_drops++;
             return;
         }
@@ -608,6 +642,7 @@ static void leaf_on_call(const uint8_t *frame) {
     if (leaf_inflight_len &&
         (!reliable || timer_get_ticks() < leaf_reply_expires) &&
         leaf_inflight_src_hash == src_hash && leaf_inflight_txid == txid &&
+        leaf_reply_oneway == oneway && leaf_inflight_slot == slot &&
         leaf_reply_reliable == reliable &&
         (!reliable || leaf_reply_origin_epoch == origin_epoch)) {
         if (reliable)
@@ -630,11 +665,16 @@ static void leaf_on_call(const uint8_t *frame) {
     uint8_t reply[A20_CLX_UART_MTU - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN];
     uint32_t prefix = reliable ? A20_CLX_REPLY_PREFIX : 0;
     uint32_t reply_len = 0;
-    if (!error && slot != A20_MCU_LEAF_OP_DOT_SLOT &&
-        slot != A20_MCU_LEAF_WORK_SLOT && slot != A20_DIRECTORY_SLOT)
+    int sink_admitted = !error && oneway && slot == A20_MCU_LEAF_SINK_SLOT;
+    if (!error && (oneway ? slot != A20_MCU_LEAF_SINK_SLOT
+                          : slot != A20_MCU_LEAF_OP_DOT_SLOT &&
+                                slot != A20_MCU_LEAF_WORK_SLOT &&
+                                slot != A20_DIRECTORY_SLOT))
         error = A20_CLX_WERR_NOT_FOUND;
     if (!error) {
-        if (slot == A20_DIRECTORY_SLOT) {
+        if (sink_admitted) {
+            error = leaf_sink(leaf_sink_ctx, payload, payload_len);
+        } else if (slot == A20_DIRECTORY_SLOT) {
             reply_len = leaf_directory(payload, payload_len, reply + prefix);
         } else if (slot == A20_MCU_LEAF_WORK_SLOT) {
             int result =
@@ -676,20 +716,24 @@ static void leaf_on_call(const uint8_t *frame) {
         return;
     }
     if ((!reliable && !protected_reply) ||
-        (reliable && (!error || error == A20_CLX_WERR_NOT_FOUND))) {
+        (reliable &&
+         (sink_admitted || !error || error == A20_CLX_WERR_NOT_FOUND))) {
         leaf_inflight_store(src_hash, txid, slot, leaf_tx_buf, n);
         leaf_reply_reliable = reliable;
+        leaf_reply_oneway = oneway;
         leaf_reply_origin_epoch = origin_epoch;
         leaf_reply_acknowledged = 0;
         leaf_reply_expires = timer_get_ticks() + MS_TO_TICKS(A20_CLX_RETAIN_MS);
         if (reliable)
             a20_clx_window_commit(window, txid);
     }
-    if (reliable && (!error || error == A20_CLX_WERR_NOT_FOUND))
+    if (reliable &&
+        (sink_admitted || !error || error == A20_CLX_WERR_NOT_FOUND))
         leaf_admission_ack(txid, src_hash);
     /* leaf_admission_ack uses leaf_tx_buf; the cache pins the admitted
      * reply. Rejected requests were not ACKed and still occupy tx_buf. */
-    if (reliable && (!error || error == A20_CLX_WERR_NOT_FOUND))
+    if (reliable &&
+        (sink_admitted || !error || error == A20_CLX_WERR_NOT_FOUND))
         leaf_output_frame(leaf_inflight_frame, leaf_inflight_len);
     else
         leaf_output_frame(leaf_tx_buf, n);
@@ -764,7 +808,10 @@ static void leaf_on_frame(const uint8_t *frame, uint32_t len) {
             leaf_c.rx_drops++;
             return;
         case A20_CLX_TYPE_SEND:
-            leaf_on_session(frame);
+            if (a20_clx_get_le32(frame + A20_CLX_OFF_DST_SLOT) == A20_CS_SLOT)
+                leaf_on_session(frame);
+            else
+                leaf_on_call(frame);
             return;
         case A20_CLX_TYPE_ACK:
         case A20_CLX_TYPE_NACK:
@@ -813,6 +860,26 @@ void a20_mcu_leaf_init(void) {
      * a peer is not misread as our own echo (02 §6). */
     leaf_nonce = leaf_next_nonce(timer_get_ticks() ^ 0xA20C1A55ULL);
     leaf_agent = &leaf_default_agent;
+    leaf_sink = NULL;
+    leaf_sink_ctx = NULL;
+    leaf_sink_name_len = 0;
+    leaf_reply_oneway = 0;
+}
+
+int a20_mcu_leaf_set_sink(const char *name, uint32_t name_len,
+                          uint32_t (*receive)(void *, const uint8_t *,
+                                              uint32_t),
+                          void *ctx) {
+    if (leaf_state != A20_MCU_LEAF_DISCONNECTED || leaf_hello_cookie || !name ||
+        !name_len || name_len > sizeof(leaf_sink_name) || !receive ||
+        (name_len == 3 && !memcmp(name, "dot", 3)) ||
+        (name_len == 4 && !memcmp(name, "work", 4)))
+        return -1;
+    memcpy(leaf_sink_name, name, name_len);
+    leaf_sink_name_len = name_len;
+    leaf_sink_ctx = ctx;
+    leaf_sink = receive;
+    return 0;
 }
 
 int a20_mcu_leaf_set_io(int (*send)(void *, uint8_t), int (*receive)(void *),

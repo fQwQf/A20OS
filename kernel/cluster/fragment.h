@@ -9,7 +9,7 @@
  * Peers must negotiate FRAGMENT before emitting this format. */
 #define A20_CLX_FRAGMENT_PREFIX 24u
 #define A20_CLX_FRAGMENT_COUNT 64u
-#define A20_CLX_FRAGMENT_TTL_MS 2000u
+#define A20_CLX_FRAGMENT_TTL_MS 30000u
 
 typedef struct a20_clx_fragment_part {
     const a20_frame_hdr_t *header;
@@ -30,8 +30,11 @@ static inline int a20_clx_fragment_parse(const a20_frame_hdr_t *h,
                                          a20_clx_fragment_part_t *out) {
     if (!h || !p || !out || h->ver != A20_CLX_SESSION_VER ||
         h->flags != (A20_CLX_FLAG_RELIABLE | A20_CLX_FLAG_FRAGMENTED) ||
-        (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_CALL_REPLY) ||
-        !h->txid || h->txid == A20_CLX_CLOSE_CALLER || h->seq != h->txid ||
+        (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_CALL_REPLY &&
+         h->type != A20_CLX_TYPE_SEND) ||
+        !h->seq || h->seq == A20_CLX_CLOSE_CALLER ||
+        (h->type == A20_CLX_TYPE_SEND ? h->txid || !h->dst_slot
+                                      : h->seq != h->txid) ||
         (h->type == A20_CLX_TYPE_CALL && !h->dst_slot) ||
         h->csum_kind != A20_CLX_CSUM_CCITT || h->frag & A20_CLX_FRAG_RESERVED ||
         h->payload_len <= A20_CLX_FRAGMENT_PREFIX ||

@@ -114,7 +114,7 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
                                            a20_cluster_config_t *out,
                                            uint32_t *error_line) {
     a20_cluster_config_t c = {0};
-    unsigned seen = 0, line_no = 0, pos = 0;
+    unsigned seen = 0, line_no = 0, pos = 0, features = 0;
     if (error_line)
         *error_line = 0;
     if (!text || !out || !len || len > A20_CONFIG_BYTES)
@@ -171,6 +171,10 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
             else
                 goto bad;
             seen |= 4;
+        } else if (a20_config_equal(tokens[0], "feature") && count == 2) {
+            if (features || !a20_config_equal(tokens[1], "oneway"))
+                goto bad;
+            features = 16;
         } else if (a20_config_equal(tokens[0], "seed") && count == 3) {
             if (c.seed_count == A20_CONFIG_SEEDS)
                 goto bad;
@@ -201,6 +205,7 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
     }
     if (seen != 7 || (c.process[0] && !c.service[A20_CONFIG_AGENT][0]))
         goto bad;
+    c.caps |= features;
     for (unsigned i = 0; i < c.seed_count; i++)
         if (a20_config_same_id(c.node, c.seeds[i].node))
             goto bad;

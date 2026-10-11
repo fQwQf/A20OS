@@ -26,9 +26,9 @@ typedef struct clx_origin {
 } clx_origin_t;
 
 typedef struct clx_replay {
-    int used, done, acknowledged, abandoned;
+    int used, done, acknowledged, abandoned, oneway;
     uint32_t hash, txid, slot, serve_hash;
-    uint64_t caller_session, server_session, expires;
+    uint64_t caller_session, server_session, expires, replay_tick;
     uint8_t *frame;
     uint32_t capacity, len;
 } clx_replay_t;
@@ -36,6 +36,16 @@ typedef struct clx_replay {
 static clx_origin_t g_origins[CLX_LIMIT_ROUTES + 4];
 static clx_replay_t g_replay[REPLAY_SLOTS];
 static uint32_t g_replay_bytes, g_replay_peak_bytes;
+
+/* Recovery hints, not execution/dedup state: LRU eviction is safe. A lost
+ * retirement must not pin a one-slot MCU until the 35 s cache expiry while
+ * its next request exhausts retries. Re-send the last bound retirement on
+ * unadmitted NO_SPACE. No new wire type or unbound ACK is required. */
+typedef struct clx_retire_hint {
+    uint32_t hash, txid;
+    uint64_t local, remote, saved;
+} clx_retire_hint_t;
+static clx_retire_hint_t g_retire_hints[CLX_LIMIT_ROUTES + 4];
 
 static clx_replay_t *replay_find(uint32_t hash, uint32_t txid, uint64_t caller,
                                  uint64_t server) {
@@ -125,17 +135,72 @@ static void admission_ack(const a20_node_id_t *dst,
         a20_clx_core_send_frame(dst, frame, n);
 }
 
+int a20_clx_reliable_fragment_seen(const a20_node_id_t *src,
+                                   const a20_frame_hdr_t *h,
+                                   uint64_t source_epoch,
+                                   uint64_t destination_epoch) {
+    if (h->type != A20_CLX_TYPE_CALL && h->type != A20_CLX_TYPE_SEND)
+        return 0;
+    uint64_t f = spin_lock_irqsave(&g_clx_lock);
+    clx_replay_t *r =
+        replay_find(h->src_hash, h->seq, source_epoch, destination_epoch);
+    if (r) {
+        uint64_t now = timer_get_ticks();
+        if (r->slot != h->dst_slot ||
+            r->oneway != (h->type == A20_CLX_TYPE_SEND) ||
+            r->replay_tick > now) {
+            spin_unlock_irqrestore(&g_clx_lock, f);
+            return 1;
+        }
+        r->replay_tick = now + MS_TO_TICKS(A20_CLX_RETRY_MS);
+        uint32_t len = r->done ? r->len : 0;
+        uint8_t *copy = len ? kmalloc(len) : NULL;
+        if (copy)
+            memcpy(copy, r->frame, len);
+        spin_unlock_irqrestore(&g_clx_lock, f);
+        a20_frame_hdr_t admitted = *h;
+        admitted.txid = h->seq;
+        admission_ack(src, &admitted);
+        if (copy) {
+            a20_clx_core_send_frame(src, copy, len);
+            kfree(copy);
+        }
+        return 1;
+    }
+    int old = 0;
+    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES + 4; i++) {
+        clx_origin_t *o = &g_origins[i];
+        if (o->used && o->hash == h->src_hash &&
+            o->caller_session == source_epoch &&
+            o->server_session == destination_epoch) {
+            old = a20_clx_window_test(&o->window, h->seq) != A20_CLX_TX_NEW;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_clx_lock, f);
+    return old;
+}
+
 int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
                         const uint8_t **payload) {
-    if (!(h->flags & A20_CLX_FLAG_RELIABLE) || h->type != A20_CLX_TYPE_CALL)
+    int oneway = h->type == A20_CLX_TYPE_SEND;
+    if (!(h->flags & A20_CLX_FLAG_RELIABLE) ||
+        (h->type != A20_CLX_TYPE_CALL && !oneway))
         return 0;
     uint64_t local, remote;
     uint32_t caps;
-    if (h->ver != A20_CLX_SESSION_VER || h->seq != h->txid ||
+    if (h->ver != A20_CLX_SESSION_VER || !h->seq ||
+        h->seq == A20_CLX_CLOSE_CALLER ||
+        (oneway ? h->txid != 0 || !h->dst_slot : h->seq != h->txid) ||
         a20_clx_peer_session(src, &local, &remote, &caps) < 0 ||
         !(caps & A20_CLX_CAP_RELIABLE) ||
+        (oneway && !(caps & A20_CLX_CAP_ONEWAY)) ||
         !a20_clx_session_matches(*payload, h->payload_len, remote, local))
         return 1;
+    /* SEND keeps txid zero on the wire. Shared replay code uses its nonzero
+     * reliable sequence as an internal key only, after validating the frame. */
+    if (oneway)
+        h->txid = h->seq;
     h->src_session = remote;
     h->dst_session = local;
     uint64_t flags = spin_lock_irqsave(&g_clx_lock);
@@ -152,9 +217,15 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
                 a20_clx_window_commit(&o->window, h->txid);
         }
         spin_unlock_irqrestore(&g_clx_lock, flags);
+        if (h->payload_len == A20_CLX_SESSION_BYTES)
+            a20_clx_fragment_retire(h->src_hash, h->txid, remote, local);
         return 1;
     }
     if (r) {
+        if (r->oneway != oneway || r->slot != h->dst_slot) {
+            spin_unlock_irqrestore(&g_clx_lock, flags);
+            return 1;
+        }
         uint32_t len = r->done ? r->len : 0;
         uint8_t *copy = len ? kmalloc(len) : NULL;
         if (copy)
@@ -176,8 +247,19 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
     uint64_t now = timer_get_ticks();
     if (!error) {
         for (uint32_t i = 0; i < REPLAY_SLOTS; i++) {
+            clx_replay_t *old = &g_replay[i];
+            /* An ONEWAY-capable sender bounds the outstanding serial span
+             * across all reliable proxies. Advancing >=64 therefore also
+             * retires completed records for this origin, even if an explicit
+             * retirement datagram was lost. Never reclaim a running worker or
+             * another origin's record, and retain the legacy policy otherwise. */
+            int advanced =
+                (caps & A20_CLX_CAP_ONEWAY) && old->done &&
+                old->hash == h->src_hash && old->caller_session == remote &&
+                old->server_session == local &&
+                (int32_t)(h->txid - old->txid) >= (int32_t)CLX_DEDUP_WINDOW;
             if (!g_replay[i].used || g_replay[i].acknowledged ||
-                g_replay[i].expires <= now) {
+                g_replay[i].expires <= now || advanced) {
                 r = &g_replay[i];
                 break;
             }
@@ -188,7 +270,11 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
     spin_unlock_irqrestore(&g_clx_lock, flags);
 
     /* Reserve negotiated maximum reply storage BEFORE running a service. */
-    uint32_t capacity = !error ? a20_clx_logical_mtu(src) : 0;
+    uint32_t capacity =
+        !error
+            ? (oneway ? A20_CLX_HDR_LEN + A20_CLX_REPLY_PREFIX + A20_CLX_CRC_LEN
+                      : a20_clx_logical_mtu(src))
+            : 0;
     if (capacity > REPLAY_FRAME_MAX)
         capacity = REPLAY_FRAME_MAX;
     uint8_t *storage = !error && capacity ? kmalloc(capacity) : NULL;
@@ -205,6 +291,7 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
             kfree(r->frame);
         memset(r, 0, sizeof(*r));
         r->used = 1;
+        r->oneway = oneway;
         r->hash = h->src_hash;
         r->txid = h->txid;
         r->slot = h->dst_slot;
@@ -264,6 +351,23 @@ void a20_clx_reliable_reply(const a20_node_id_t *dst, uint32_t txid,
 
 void a20_clx_reliable_receipt(const a20_node_id_t *dst, uint32_t txid,
                               uint64_t local, uint64_t remote) {
+    uint64_t f = spin_lock_irqsave(&g_clx_lock);
+    clx_retire_hint_t *hint = &g_retire_hints[0];
+    uint32_t hash = a20_clx_node_hash(dst);
+    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES + 4; i++) {
+        clx_retire_hint_t *h = &g_retire_hints[i];
+        if (!h->txid || h->hash == hash) {
+            hint = h;
+            break;
+        }
+        if (h->saved < hint->saved)
+            hint = h;
+    }
+    if (hint->hash != hash || hint->local != local || hint->remote != remote ||
+        !hint->txid || (int32_t)(txid - hint->txid) >= 0)
+        *hint =
+            (clx_retire_hint_t){hash, txid, local, remote, timer_get_ticks()};
+    spin_unlock_irqrestore(&g_clx_lock, f);
     uint8_t payload[16], frame[50];
     a20_frame_hdr_t h = {0};
     h.ver = A20_CLX_SESSION_VER;
@@ -279,6 +383,23 @@ void a20_clx_reliable_receipt(const a20_node_id_t *dst, uint32_t txid,
     int n = a20_frame_encode(frame, sizeof(frame), sizeof(frame), &h, payload);
     if (n > 0)
         a20_clx_core_send_frame(dst, frame, n);
+}
+
+void a20_clx_reliable_retry_receipt(const a20_node_id_t *dst, uint64_t local,
+                                    uint64_t remote) {
+    uint32_t txid = 0, hash = a20_clx_node_hash(dst);
+    uint64_t f = spin_lock_irqsave(&g_clx_lock);
+    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES + 4; i++) {
+        clx_retire_hint_t *h = &g_retire_hints[i];
+        if (h->hash == hash && h->local == local && h->remote == remote &&
+            timer_get_ticks() - h->saved < MS_TO_TICKS(A20_CLX_RETAIN_MS)) {
+            txid = h->txid;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_clx_lock, f);
+    if (txid)
+        a20_clx_reliable_receipt(dst, txid, local, remote);
 }
 
 void a20_clx_replay_resources(uint64_t *v) {

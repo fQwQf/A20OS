@@ -67,8 +67,8 @@ int a20_clx_self_get(a20_node_id_t *out_id, uint32_t *out_caps) {
 
 int a20_clx_self_set(const a20_node_id_t *id, uint32_t caps) {
     if (!id ||
-        (caps &
-         ~(A20_CLX_CAP_RELAY | A20_CLX_CAP_RELIABLE | A20_CLX_CAP_LEAF)) ||
+        (caps & ~(A20_CLX_CAP_RELAY | A20_CLX_CAP_RELIABLE | A20_CLX_CAP_LEAF |
+                  A20_CLX_CAP_ONEWAY)) ||
         ((caps & A20_CLX_CAP_RELAY) && (caps & A20_CLX_CAP_LEAF)))
         return -A20_ERR_INVALID_ARGUMENT;
     uint8_t any = 0, all = 0xff;

@@ -419,6 +419,7 @@ help:
 	  '  Gates -- need a cross toolchain and/or QEMU' \
 	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
 	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
+	  '    make check-cluster-send        reliable one-way SEND, loss and mixed routed profiles' \
 	  '    make check-cluster-hardening   random loss/delay/CRC/flood/partition acceptance' \
 	  '    make check-cluster-fuzz-smoke  five minutes of varied sanitizer mutations' \
 	  '    make check-cluster-performance Native local/loopback/UDP RPC measurements' \

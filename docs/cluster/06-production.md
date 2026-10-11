@@ -89,6 +89,9 @@
   未完成项见 [20-hardening.md](20-hardening.md)。`check-cluster-fuzz` 是百万变异
   快速档；`check-cluster-fuzz-smoke` 持续至少 300 秒并更换种子。Native 性能入口
   为 `check-cluster-performance`，测量范围和局限见 [21-performance.md](21-performance.md)。
+- 业务单向发送入口为 `make check-cluster-send`，含服务器档持续 10% 丢帧与
+  服务器/默认混合档多跳测试；协议、完成含义和 MCU 静态接收器见
+  [22-oneway.md](22-oneway.md)。
 - 进 `.github/workflows/ci.yml` 的从 `print-ci-kernel-arches` 派生的矩阵惯例，不允许手工硬编码架构清单（Makefile 顶部注释的既有教训）。
 - 全量既有门禁零回归是合入前提：`make help` 列出的默认 check 目标。
 
@@ -112,7 +115,7 @@ Native 融合调用、RISC-V64 单核 QEMU TCG，服务器集群档；完整方�
 | loopback v0 RTT，10 万次 | 均值 2.142 ms，同次本机均值 70.712 µs，比值 30.286 | 超过 3 倍目标 |
 | 双 QEMU UDP v1 64B，1 万次 | p50 7.628 ms，p99 12.119 ms | 超过 p50 5 ms 目标 |
 | UDP v1 64 KiB，1000 次顺序 CALL | 双向有效负载 1.545 MB/s，p50 82.827 ms | 已测顺序连接；未验收四节点批量聚合目标 |
-| SERVER 四节点 SEND | 尚未实现业务单向 SEND 的测量 | 未验收 |
+| SERVER 四节点 SEND | 单向 SEND 已实现，四节点测量尚未完成 | 未验收 |
 | MCU 实机 | 没有已连接物理板 | 未验收 |
 
 连续大消息发现并修复了 virtio-net 的错误描述符回收；修复后两端 drops 与

@@ -495,7 +495,7 @@ static void st_check_thread(void) {
          * behind the reply worker (01-abi 落地状态 #10). */
         {
             a20_channel_ep_t *ep_l = NULL;
-            int lr = a20_clx_export_connect_local(0, "echo", 4, &ep_l);
+            int lr = a20_clx_export_connect_local(0, "echo", 4, 0, &ep_l);
             const char *lreq = "local-echo";
             const char *rreq = "remote-after-local";
             int local_ok = 0, remote_ok = 0;

@@ -183,7 +183,7 @@ jobs:
 
       - name: Extended mixed architecture and MCU simulation acceptance
         if: github.event_name == 'workflow_dispatch'
-        run: make check-cluster-hardening demo-wordcount check-cluster-fuzz-smoke check-cluster-performance
+        run: make check-cluster-hardening check-cluster-send demo-wordcount check-cluster-fuzz-smoke check-cluster-performance
 
       - name: Upload runtime evidence
         if: always()

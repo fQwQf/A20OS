@@ -179,6 +179,9 @@ int64_t sys_a20_cluster_export(const a20_syscall_args_t *args) {
 
     if (kargs.flags & ~A20_EXPORT_FLAGS_ALL)
         return -A20_ERR_INVALID_ARGUMENT;
+    if ((kargs.flags & (A20_EXPORT_WORK | A20_EXPORT_ONEWAY)) ==
+        (A20_EXPORT_WORK | A20_EXPORT_ONEWAY))
+        return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.reserved)
         return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.channel == A20_HANDLE_NULL)
@@ -250,6 +253,9 @@ int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args) {
 
     if (kargs.flags & ~A20_CONNECT_FLAGS_ALL)
         return -A20_ERR_INVALID_ARGUMENT;
+    if ((kargs.flags & A20_CONNECT_ONEWAY) &&
+        !(kargs.flags & A20_CONNECT_RELIABLE))
+        return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.reserved)
         return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.name_len > A20_CLUSTER_SERVICE_NAME_MAX)
@@ -278,9 +284,10 @@ int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args) {
 
     /* Rights: cluster_connect needs no A20_RIGHT_CLUSTER_ADMIN (01-abi
      * §3 权限位与标签). */
-    static const a20_rights_t ep_rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
-                                          A20_RIGHT_STAT | A20_RIGHT_DUP |
-                                          A20_RIGHT_TRANSFER;
+    a20_rights_t ep_rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
+                             A20_RIGHT_DUP | A20_RIGHT_TRANSFER;
+    if (kargs.flags & A20_CONNECT_ONEWAY)
+        ep_rights &= ~A20_RIGHT_READ;
 
     a20_channel_ep_t *ep = NULL;
     if (clx_node_is_local(&kargs.node_id)) {
@@ -292,11 +299,13 @@ int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args) {
          * connect request, decoupled from the remote reply path
          * (01-abi 落地状态 #10). */
         if (have_name) {
-            r = a20_clx_export_connect_local(0, name, kargs.name_len, &ep);
+            r = a20_clx_export_connect_local(0, name, kargs.name_len,
+                                             kargs.flags, &ep);
             if (r < 0)
                 return r;
         } else if (kargs.slot) {
-            r = a20_clx_export_connect_local(kargs.slot, NULL, 0, &ep);
+            r = a20_clx_export_connect_local(kargs.slot, NULL, 0, kargs.flags,
+                                             &ep);
             if (r < 0)
                 return r;
         } else {

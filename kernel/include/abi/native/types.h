@@ -1113,19 +1113,23 @@ typedef struct a20_node_id {
 #define A20_CLUSTER_CAP_RELAY     (1u << 0)  /* forwards frames for other nodes */
 #define A20_CLUSTER_CAP_RELIABLE  (1u << 1)  /* ACK / retransmit / reassembly */
 #define A20_CLUSTER_CAP_LEAF      (1u << 2)  /* answers only, never dials out */
+#define A20_CLUSTER_CAP_ONEWAY    (1u << 4) /* opt-in reliable business SEND */
 #define A20_CLUSTER_CAPS_ALL      (A20_CLUSTER_CAP_RELAY | \
                                    A20_CLUSTER_CAP_RELIABLE | \
-                                   A20_CLUSTER_CAP_LEAF)
+                                   A20_CLUSTER_CAP_LEAF | A20_CLUSTER_CAP_ONEWAY)
 
 /* cluster_export flags. */
 #define A20_EXPORT_REPLACE      (1u << 0)
 #define A20_EXPORT_LOCAL_ONLY   (1u << 1)
 #define A20_EXPORT_WORK         (1u << 2) /* service speaks CW/1 */
-#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY | A20_EXPORT_WORK)
+#define A20_EXPORT_ONEWAY       (1u << 3) /* receive only; no business replies */
+#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY | \
+                                  A20_EXPORT_WORK | A20_EXPORT_ONEWAY)
 
 /* cluster_connect flags. */
 #define A20_CONNECT_RELIABLE    (1u << 0)
-#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE)
+#define A20_CONNECT_ONEWAY      (1u << 1) /* requires RELIABLE; write-only handle */
+#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY)
 
 /* cluster_route op. */
 #define A20_ROUTE_ADD       0u

@@ -44,7 +44,7 @@ frag/flag 一致性、seq/flag 一致性、SEND 的 txid、固定载荷长度。
 | 2 | HELLO_ACK | 固定 32 B |
 | 3 | PING | 固定 8 B |
 | 4 | PONG | 原样回显 PING 的 8 B |
-| 5 | SEND | 可变；当前代理未使用 |
+| 5 | SEND | v1 会话前缀 + 单向业务；需 ONEWAY 能力 |
 | 6 | CALL | v0 业务载荷，或 v1 会话前缀 + 业务载荷 |
 | 7 | CALL_REPLY | v0 业务载荷，或 v1 回复前缀 + 业务载荷 |
 | 8 | CLOSE | 空 |
@@ -61,7 +61,7 @@ v0 caller 释放代理发 CLOSE，`txid=0xffffffff` 标识调用方关闭；接�
 | 位 | 名称 | 当前行为 |
 |---:|---|---|
 | 0 | RELIABLE | v1 有界会话事务；双方版本/能力必须支持 |
-| 1 | FRAGMENTED | v1 协商的可靠 CALL/REPLY 分片，见 14 文档 |
+| 1 | FRAGMENTED | v1 协商的可靠 CALL/REPLY/SEND 分片，见 14 文档 |
 | 2 | BROADCAST | 当前适配器拒绝 |
 | 3 | COMPRESSED | 保留；发送拒绝，v0 层 1 接收兼容 |
 
@@ -79,7 +79,7 @@ HELLO 本身用 v0 基础帧，32 B 载荷：
 | 16 | proto_min u8 |
 | 17 | proto_max u8 |
 | 18 | resource_profile u8：1/2/3 |
-| 19 | caps u8：RELAY=1、RELIABLE=2、LEAF=4、FRAGMENT=8（v1 主机传输特性） |
+| 19 | caps u8：RELAY=1、RELIABLE=2、LEAF=4、FRAGMENT=8（v1 主机传输特性）、ONEWAY=16（可选单向业务） |
 | 20 | short_addr u16 |
 | 22 | link_addr_len u8：UART=2、UDP=6 |
 | 23 | reserved u8 |
@@ -140,6 +140,11 @@ CALL，`dst_slot=0, seq=txid`，载荷仅 16 B 原会话对。语义是调用者
 
 主机有 64 项有界回复表；MCU 单回复缓存。MCU 没收到完成收据且缓存仍在
 保留期内时，拒绝新请求为 NO_SPACE。应用必须按协商容量分配并发。
+发送代理对 LEAF 的所有可靠连接合计只允许一个在途；未接纳 NO_SPACE 会
+重发最近一个绑定会话的退休收据，以恢复收据丢失造成的单槽占用。
+对声明 ONEWAY 的新实现，发送方还约束同一对端所有代理的未完成编号跨度
+小于 64。新编号前进至少 64 时，接收方可复用该来源已经完成的旧缓存，
+即使显式退休收据丢失；运行中的记录和其他来源记录不按此规则回收。
 
 ## 7. 重试、期限与保证范围
 
@@ -150,6 +155,10 @@ CALL，`dst_slot=0, seq=txid`，载荷仅 16 B 原会话对。语义是调用者
 服务缓存保留期为 35 s，大于调用期限。采用 64 位序号位图及 32 位 serial
 比较，允许窗口内乱序，拒绝过旧未见请求。调用编号回绕跳过保留值与在途号。
 序号比较要求保留期内不能跨越半个 32 位序号空间。
+
+普通业务单向 SEND 扩展保持 wire `txid=0`，以非零 seq 共享可靠窗口。成功
+完成回执没有业务回复体，只确认接纳；格式、能力协商和队列背压见
+[22-oneway.md](22-oneway.md)。默认未启用的部署不增加 HELLO 能力位。
 
 保证仅覆盖当前会话与有界保留/序号窗口，不是跨断电 exactly-once。
 作业层仍须对 `(job_id, shard_id)` 去重，并显式声明是否允许重派。

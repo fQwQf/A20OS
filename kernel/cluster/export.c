@@ -93,7 +93,9 @@ int64_t a20_clx_export_register(a20_channel_ep_t *ep, const char *name,
     a20_clx_pending_req_t old_pending[CLX_EXPORT_PENDING];
     uint64_t tflags;
 
-    if (!ep || !name || name_len == 0 ||
+    if (!ep || !name || name_len == 0 || (flags & ~A20_EXPORT_FLAGS_ALL) ||
+        (flags & (A20_EXPORT_WORK | A20_EXPORT_ONEWAY)) ==
+            (A20_EXPORT_WORK | A20_EXPORT_ONEWAY) ||
         name_len > A20_CLUSTER_SERVICE_NAME_MAX)
         return -A20_ERR_INVALID_ARGUMENT;
 
@@ -332,7 +334,8 @@ int a20_clx_export_pop_pending(a20_clx_export_t *ex, a20_node_id_t *src,
  * -A20_ERR_TYPE_MISMATCH.
  */
 int a20_clx_export_connect_local(uint32_t slot, const char *name,
-                                 uint32_t name_len, a20_channel_ep_t **out) {
+                                 uint32_t name_len, uint32_t connect_flags,
+                                 a20_channel_ep_t **out) {
     a20_channel_ep_t *peer, *ep_c, *ep_conn;
     a20_clx_export_t *ex;
     uint64_t flags;
@@ -344,6 +347,11 @@ int a20_clx_export_connect_local(uint32_t slot, const char *name,
     if (!ex) {
         spin_unlock_irqrestore(&g_clx_lock, flags);
         return -A20_ERR_NOT_FOUND;
+    }
+    if (!!(connect_flags & A20_CONNECT_ONEWAY) !=
+        !!(ex->flags & A20_EXPORT_ONEWAY)) {
+        spin_unlock_irqrestore(&g_clx_lock, flags);
+        return -A20_ERR_CLUSTER_UNSUPPORTED;
     }
     peer = ex->peer;
     if (peer)
@@ -402,10 +410,24 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
      * consume every queued response to preserve other callers' pairing. */
     if (h->type == A20_CLX_TYPE_CLOSE)
         return;
-    if (h->type != A20_CLX_TYPE_CALL)
-        return; /* v0: SEND unused, 02-§2 note */
+    int oneway = h->type == A20_CLX_TYPE_SEND;
+    if (h->type != A20_CLX_TYPE_CALL && !oneway)
+        return;
+    /* The reliable layer validates the wire SEND and normalizes its seq to
+     * the internal transaction key. No unreliable business SEND is admitted. */
+    if (oneway && !h->src_session)
+        return;
+    uint32_t self_caps = 0;
+    if (oneway && (a20_clx_self_get(NULL, &self_caps) < 0 ||
+                   !(self_caps & A20_CLX_CAP_ONEWAY))) {
+        a20_clx_send_error(src, h, A20_ERR_CLUSTER_UNSUPPORTED);
+        return;
+    }
     if (h->dst_slot == A20_DIRECTORY_SLOT) {
-        a20_clx_directory_rx(src, h, payload);
+        if (oneway)
+            a20_clx_send_error(src, h, A20_ERR_CLUSTER_UNSUPPORTED);
+        else
+            a20_clx_directory_rx(src, h, payload);
         return;
     }
 
@@ -419,6 +441,11 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
         a20_clx_link_rx_drop(transport_id, NULL, 0);
         return;
     }
+    if (oneway != !!(ex->flags & A20_EXPORT_ONEWAY)) {
+        spin_unlock_irqrestore(&g_clx_lock, flags);
+        a20_clx_send_error(src, h, A20_ERR_CLUSTER_UNSUPPORTED);
+        return;
+    }
     if (!(h->flags & A20_CLX_FLAG_RELIABLE) &&
         a20_clx_export_dedup_seen(h->src_hash, h->txid)) {
         g_clx_dedup_drops++; /* 02-§10 dedup_drops */
@@ -426,17 +453,20 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
         a20_clx_link_rx_drop(transport_id, NULL, 0);
         return;
     }
-    if (a20_clx_export_push_pending(ex, src, h->txid, h->dst_hash) < 0) {
+    if (!oneway &&
+        a20_clx_export_push_pending(ex, src, h->txid, h->dst_hash) < 0) {
         /* Reject before executing. RX must not wait for the server. */
         spin_unlock_irqrestore(&g_clx_lock, flags);
         a20_clx_send_error(src, h, A20_ERR_NO_SPACE);
         a20_clx_link_rx_drop(transport_id, NULL, 0);
         return;
     }
-    uint32_t tail =
-        (ex->pending_head + ex->pending_count - 1) % CLX_EXPORT_PENDING;
-    ex->pending[tail].src_session = h->src_session;
-    ex->pending[tail].dst_session = h->dst_session;
+    if (!oneway) {
+        uint32_t tail =
+            (ex->pending_head + ex->pending_count - 1) % CLX_EXPORT_PENDING;
+        ex->pending[tail].src_session = h->src_session;
+        ex->pending[tail].dst_session = h->dst_session;
+    }
     peer = ex->peer;
     /* Pin the peer for the injection: a concurrent revoke releases the
      * export's reference, ours keeps the endpoint alive meanwhile. */
@@ -459,7 +489,7 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
         /* This RX thread is the only producer of the pairing FIFO. An
          * unsuccessful injection cannot have produced a matching reply. */
         flags = spin_lock_irqsave(&g_clx_lock);
-        if (ex->in_use && ex->peer == peer && ex->pending_count) {
+        if (!oneway && ex->in_use && ex->peer == peer && ex->pending_count) {
             uint32_t tail =
                 (ex->pending_head + ex->pending_count - 1) % CLX_EXPORT_PENDING;
             if (ex->pending[tail].txid == h->txid &&
@@ -470,6 +500,11 @@ void a20_clx_export_rx(uint32_t transport_id, const a20_node_id_t *src,
         a20_clx_send_error(src, h,
                            r == -A20_ERR_WOULD_BLOCK ? A20_ERR_NO_SPACE
                                                      : A20_ERR_REMOTE_CLOSED);
+    } else if (oneway) {
+        /* A delivery receipt attests queue admission, never service completion.
+         * SEND does not occupy the CALL reply-pairing FIFO. */
+        a20_clx_reliable_reply(src, h->txid, h->dst_hash, h->src_session,
+                               h->dst_session, NULL, 0, 0);
     }
     a20_channel_ep_release(peer);
 }

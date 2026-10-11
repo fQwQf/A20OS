@@ -114,3 +114,29 @@ ASSOCIATIVE 表示可结合归约，不表示交换律。输出过大应返回 N
 现成作业入口是本地 CJ/1 `cluster.jobs`：DOT 操作 1、WORDCOUNT 操作 2。
 文件客户端与 16 片/8 节点完整演示见 18 文档；图状态机与失败契约见 11-jobs。
 持久队列、外部数据流、jobd 根故障恢复均是后续扩展，不由本教程暗示已经存在。
+
+
+## 5. 单向业务接收
+
+主机以独立 channel 导出 `events`，标志使用 `A20_EXPORT_ONEWAY`。服务端只接收，
+不发送业务回复；LOCAL 连接仍须处理携带独立连接句柄的握手。身份配置须启用
+`A20_CLUSTER_CAP_ONEWAY`，持久配置可写 `feature oneway`。MCU 则在首次握手前
+用 `a20_mcu_leaf_set_sink()` 注册静态回调，不需要创建 Native channel。
+
+下面接收已发现且绑定 epoch 的目标，避免目录查询后对端重启而误连新实例：
+
+```c
+#include "liba20rt/a20_cluster.h"
+static a20_status_t connect_events(const a20_node_id_t *node, uint32_t slot,
+                                   uint64_t epoch, a20_handle_t *ep) {
+    return a20_cluster_connect_bound_flags(node, slot, epoch,
+        A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY, ep);
+}
+```
+
+调用者通过普通 `a20_channel_send()` 写入；该句柄没有 READ 权限，不能用
+`channel_call`。只写句柄不会收到内部空回执。传输失败会关闭代理；本地发送
+成功不能代替业务确认，也不能发送后立即关闭并认为已经送达。需要确认时，
+应用可另设 CALL 查询已接纳的业务编号，再关闭写入端点。共享传输最多保持
+64 个在途序号跨度，LEAF 对端总共一个在途；满时由现有 channel 阻塞或
+NONBLOCK 提供背压。完整线协议、升级和测试边界见 22 文档。

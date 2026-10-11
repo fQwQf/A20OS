@@ -131,6 +131,7 @@
 #define A20_CLX_CAP_LEAF (1u << 2)
 /* Transport feature, not a Native set_self capability. */
 #define A20_CLX_CAP_FRAGMENT (1u << 3)
+#define A20_CLX_CAP_ONEWAY (1u << 4)
 
 /* Transport-neutral states, numerically identical to the Native ABI. */
 #define A20_CLX_STATE_DOWN 0u
@@ -382,7 +383,10 @@ static inline int a20_clx_validate_hello(const uint8_t *payload, uint32_t len,
     if (zero || broadcast || same)
         return -1;
     uint8_t caps = payload[A20_CLX_HELLO_OFF_CAPS];
-    if ((caps & ~15u) ||
+    if ((caps & ~31u) ||
+        ((caps & A20_CLX_CAP_ONEWAY) &&
+         (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER ||
+          !(caps & A20_CLX_CAP_RELIABLE))) ||
         ((caps & A20_CLX_CAP_FRAGMENT) &&
          (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER ||
           payload[A20_CLX_HELLO_OFF_TIER] == 1 ||
