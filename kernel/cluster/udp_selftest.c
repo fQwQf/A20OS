@@ -7,12 +7,17 @@
 #include "uapi/a20/cluster_directory.h"
 #include "core/bootargs.h"
 #include "proc/proc.h"
+#include "mm/slab.h"
+#include "lwip/stats.h"
 
 static a20_channel_ep_t *udp_test_server;
 static a20_channel_ep_t *udp_test_operator;
 static a20_channel_ep_t *udp_test_agent;
 static uint8_t udp_test_seen[96];
 static uint32_t udp_test_executed, udp_test_duplicate;
+static uint8_t udp_large_seen[8];
+static uint32_t udp_large_executed, udp_large_duplicate;
+static int udp_large_peer_done;
 
 static void udp_test_work(void) {
     const a20_work_operator_t ops[] = {
@@ -56,9 +61,11 @@ static void udp_test_dot(void) {
 }
 
 static void udp_test_echo(void) {
-    uint8_t buf[128];
+    uint8_t *buf = kmalloc(CLX_LOGICAL_MTU);
+    if (!buf)
+        return;
     for (;;) {
-        uint32_t len = sizeof(buf);
+        uint32_t len = CLX_LOGICAL_MTU;
         if (a20_channel_recv(udp_test_server, buf, &len, NULL, NULL, NULL, 0) <
             0)
             break;
@@ -76,9 +83,26 @@ static void udp_test_echo(void) {
             a20_clx_put_le32(buf, udp_test_executed);
             a20_clx_put_le32(buf + 4, udp_test_duplicate);
         }
+        if (len > 1400 && a20_clx_get_le32(buf) == 0x67617266u) {
+            unsigned index = a20_clx_get_le32(buf + 4);
+            if (index < sizeof(udp_large_seen)) {
+                if (udp_large_seen[index])
+                    udp_large_duplicate++;
+                else {
+                    udp_large_seen[index] = 1;
+                    udp_large_executed++;
+                }
+            }
+        } else if (len == 8 && a20_clx_get_le32(buf) == 0x74736766u) {
+            a20_clx_put_le32(buf, udp_large_executed);
+            a20_clx_put_le32(buf + 4, udp_large_duplicate);
+        }
+        if (len == 8 && a20_clx_get_le32(buf) == 0x656e6466u)
+            __atomic_store_n(&udp_large_peer_done, 1, __ATOMIC_RELEASE);
         if (a20_channel_send(udp_test_server, buf, len, NULL, 0, NULL, 0) < 0)
             break;
     }
+    kfree(buf);
     a20_channel_ep_release(udp_test_server);
 }
 
@@ -90,6 +114,78 @@ static int udp_test_roundtrip(a20_channel_ep_t *ep, const uint8_t *request,
            a20_channel_send(ep, request, len, NULL, 0, NULL, 0) == 0 &&
            a20_channel_recv(ep, reply, &got, NULL, NULL, NULL, 0) == 0 &&
            got == len && memcmp(reply, request, len) == 0;
+}
+
+static int udp_test_large(const a20_node_id_t *peer) {
+    uint32_t heap_before =
+        __atomic_load_n(&lwip_stats.mem.used, __ATOMIC_RELAXED);
+    uint32_t maximum = a20_clx_logical_mtu(peer) - 54;
+    if (maximum < 3002)
+        return 0;
+    const uint32_t sizes[] = {1423, 1430,        2000,        2048,
+                              3000, maximum - 2, maximum - 1, maximum};
+    uint8_t *input = kmalloc(maximum), *reply = kmalloc(maximum);
+    int err, ok = input && reply;
+    a20_channel_ep_t *ep =
+        ok ? a20_clx_proxy_create(peer, 1, A20_CONNECT_RELIABLE, &err) : NULL;
+    ok = ok && ep;
+    for (unsigned i = 0; ok && i < 8; i++) {
+        for (unsigned j = 0; j < sizes[i]; j++)
+            input[j] = (uint8_t)(j * 73 + i);
+        a20_clx_put_le32(input, 0x67617266u);
+        a20_clx_put_le32(input + 4, i);
+        uint32_t got = maximum;
+        int sent = a20_channel_send(ep, input, sizes[i], NULL, 0, NULL, 0);
+        int received =
+            sent == 0 ? a20_channel_recv(ep, reply, &got, NULL, NULL, NULL, 0)
+                      : -1;
+        ok = sent == 0 && received == 0 && got == sizes[i] &&
+             memcmp(input, reply, got) == 0;
+        printf("[CLX-UDP-TEST] large peer=%u index=%u len=%u send=%d recv=%d "
+               "got=%u\n",
+               peer->bytes[15], i, sizes[i], sent, received, got);
+    }
+    uint8_t stats[8] = {0};
+    a20_clx_put_le32(stats, 0x74736766u);
+    uint32_t got = sizeof(stats);
+    ok = ok &&
+         a20_channel_send(ep, stats, sizeof(stats), NULL, 0, NULL, 0) == 0 &&
+         a20_channel_recv(ep, stats, &got, NULL, NULL, NULL, 0) == 0 &&
+         got == sizeof(stats) && a20_clx_get_le32(stats) == 8 &&
+         a20_clx_get_le32(stats + 4) == 0;
+    a20_clx_put_le32(stats, 0x656e6466u);
+    got = sizeof(stats);
+    ok = ok &&
+         a20_channel_send(ep, stats, sizeof(stats), NULL, 0, NULL, 0) == 0 &&
+         a20_channel_recv(ep, stats, &got, NULL, NULL, NULL, 0) == 0;
+    uint64_t wait_start = timer_get_ticks();
+    while (ok && !__atomic_load_n(&udp_large_peer_done, __ATOMIC_ACQUIRE) &&
+           timer_get_ticks() - wait_start < MS_TO_TICKS(15000))
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(10));
+    ok = ok && __atomic_load_n(&udp_large_peer_done, __ATOMIC_ACQUIRE);
+    if (ep)
+        a20_channel_ep_release(ep);
+    kfree(input);
+    kfree(reply);
+    /* Late duplicated pieces are incomplete assemblies with a finite age. */
+    proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(2300));
+    a20_cluster_resource_args_t resources;
+    a20_clx_fragment_resources(&resources);
+    ok = ok && !resources.values[A20_CLX_REASM_CONTEXTS] &&
+         !resources.values[A20_CLX_REASM_BYTES] &&
+         resources.values[A20_CLX_REASM_COMPLETED] >= 14 &&
+         resources.values[A20_CLX_REASM_PEAK_BYTES] > 1400;
+    uint32_t heap_after =
+        __atomic_load_n(&lwip_stats.mem.used, __ATOMIC_RELAXED);
+    printf("[CLX-UDP-TEST] heap peer=%u before=%u after=%u reassembly=%lu/%lu "
+           "complete=%lu\n",
+           peer->bytes[15], heap_before, heap_after,
+           (unsigned long)resources.values[A20_CLX_REASM_CONTEXTS],
+           (unsigned long)resources.values[A20_CLX_REASM_BYTES],
+           (unsigned long)resources.values[A20_CLX_REASM_COMPLETED]);
+    /* Allow a few asynchronous ARP/heartbeat buffers, not a growing TX heap. */
+    ok = ok && heap_after <= heap_before + 8192;
+    return ok;
 }
 
 static void udp_test_main(void) {
@@ -148,8 +244,20 @@ static void udp_test_main(void) {
         return;
     }
     int err;
-    a20_channel_ep_t *ep = a20_clx_proxy_create(&peer, 1, 0, &err);
-    int ok = ep != NULL;
+    /* HELLO completion can be asymmetric. A reliable probe establishes that
+     * both ends accept data before deliberately exercising lossy v0 calls. */
+    a20_channel_ep_t *ep =
+        a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
+    const uint8_t ready[] = "ready";
+    int ok = udp_test_roundtrip(ep, ready, sizeof(ready));
+    if (ep)
+        a20_channel_ep_release(ep);
+    printf("[CLX-UDP-TEST] node=%c session-ready: %s\n", side_b ? 'b' : 'a',
+           ok ? "PASS" : "FAIL");
+    if (!ok)
+        return;
+    ep = a20_clx_proxy_create(&peer, 1, 0, &err);
+    ok = ep != NULL;
     for (uint32_t i = 0; ok && i < 8; i++) {
         uint8_t request[64], reply[64];
         for (uint32_t j = 0; j < sizeof(request); j++)
@@ -187,6 +295,15 @@ static void udp_test_main(void) {
     if (ep)
         a20_channel_ep_release(ep);
     printf("[CLX-UDP-TEST] node=%c reliable-96-at-most-once: %s\n",
+           side_b ? 'b' : 'a', ok ? "PASS" : "FAIL");
+    ok = udp_test_large(&peer);
+    a20_clx_link_status_fill(&peer, &state, &rtt, &tx, &rx, &tx_drop, &rx_drop,
+                             &retransmit, &hello_age);
+    printf("[CLX-UDP-TEST] after-large peer=%u state=%u age=%lu tx=%lu rx=%lu "
+           "drops=%lu/%lu\n",
+           peer.bytes[15], state, (unsigned long)hello_age, (unsigned long)tx,
+           (unsigned long)rx, (unsigned long)tx_drop, (unsigned long)rx_drop);
+    printf("[CLX-UDP-TEST] node=%c fragmented-8-at-most-once: %s\n",
            side_b ? 'b' : 'a', ok ? "PASS" : "FAIL");
     ep = a20_clx_proxy_create(&peer, 2, 0, &err);
     uint8_t request[28] = {0}, reply[A20_CLX_DOT_REPLY_BYTES];

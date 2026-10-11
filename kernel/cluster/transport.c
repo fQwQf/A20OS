@@ -6,6 +6,7 @@
 #include "cluster/clx_internal.h"
 #include "cluster/loopback.h"
 #include "cluster/udp.h"
+#include "cluster/fragment.h"
 
 #include "core/klog.h"
 #include "core/random.h"
@@ -144,6 +145,26 @@ uint32_t a20_clx_transport_mtu(uint32_t transport_id) {
 
 /* ---- TX: node -> route -> transport -> wire ------------------------------ */
 
+static int clx_wire_send(const a20_clx_transport_t *t, uint32_t transport_id,
+                         const uint8_t *nh, uint32_t nh_len,
+                         const uint8_t *frame, uint32_t len) {
+    int r = t->send(t->ctx, nh, nh_len, frame, len);
+    if (r == 0) {
+        uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
+        clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
+        if (l) {
+            l->tx_frames++;
+            if (transport_id == A20_CLX_TRANSPORT_LOOPBACK &&
+                l->state == A20_CLX_LINK_DOWN)
+                l->state = A20_CLX_LINK_UP; /* 04-§5 loopback: 常 UP */
+        }
+        spin_unlock_irqrestore(&g_clx_links_lock, flags);
+    } else {
+        a20_clx_link_tx_drop(transport_id, nh, nh_len);
+    }
+    return r;
+}
+
 int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
                             uint32_t len) {
     uint32_t transport_id, nh_len;
@@ -160,20 +181,55 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
         a20_clx_link_tx_drop(transport_id, nh, nh_len);
         return -A20_ERR_NODE_UNREACHABLE;
     }
-    r = t->send(t->ctx, nh, nh_len, frame, len);
-    if (r == 0) {
-        uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
-        clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
-        if (l) {
-            l->tx_frames++;
-            if (transport_id == A20_CLX_TRANSPORT_LOOPBACK &&
-                l->state == A20_CLX_LINK_DOWN)
-                l->state = A20_CLX_LINK_UP; /* 04-§5 loopback: 常 UP */
-        }
-        spin_unlock_irqrestore(&g_clx_links_lock, flags);
-    } else {
+    if (len <= t->mtu)
+        return clx_wire_send(t, transport_id, nh, nh_len, frame, len);
+    uint32_t logical_mtu = a20_clx_logical_mtu(dst);
+    a20_frame_hdr_t h;
+    const uint8_t *payload;
+    uint64_t local, remote;
+    uint32_t caps;
+    if (logical_mtu <= t->mtu || len > logical_mtu ||
+        a20_frame_decode_logical(frame, len, logical_mtu, &h, &payload) !=
+            A20_FRAME_OK ||
+        h.flags != A20_CLX_FLAG_RELIABLE ||
+        (h.type != A20_CLX_TYPE_CALL && h.type != A20_CLX_TYPE_CALL_REPLY) ||
+        a20_clx_peer_session(dst, &local, &remote, &caps) < 0 ||
+        !a20_clx_session_matches(payload, h.payload_len, local, remote)) {
         a20_clx_link_tx_drop(transport_id, nh, nh_len);
+        return -A20_ERR_NO_SPACE;
     }
+    uint8_t *fragment = kmalloc(t->mtu);
+    if (!fragment)
+        return -A20_ERR_NO_MEMORY;
+    uint32_t chunk = a20_frame_max_payload(t->mtu) - A20_CLX_FRAGMENT_PREFIX;
+    uint32_t body = h.payload_len - A20_CLX_SESSION_BYTES;
+    uint32_t total = h.payload_len;
+    uint8_t *part = fragment + A20_CLX_HDR_LEN;
+    h.flags |= A20_CLX_FLAG_FRAGMENTED;
+    r = 0;
+    for (uint32_t offset = 0, index = 0; offset < body;
+         offset += chunk, index++) {
+        uint32_t length = body - offset < chunk ? body - offset : chunk;
+        h.frag = index | (offset + length == body ? A20_CLX_FRAG_LAST : 0);
+        h.payload_len = A20_CLX_FRAGMENT_PREFIX + length;
+        memcpy(part, payload, A20_CLX_SESSION_BYTES);
+        a20_clx_put_le32(part + 16, total);
+        a20_clx_put_le32(part + 20, offset);
+        memcpy(part + A20_CLX_FRAGMENT_PREFIX,
+               payload + A20_CLX_SESSION_BYTES + offset, length);
+        int n = a20_frame_encode(fragment, t->mtu, t->mtu, &h, part);
+        if (n < 0 ||
+            (r = clx_wire_send(t, transport_id, nh, nh_len, fragment, n)) < 0) {
+            if (n < 0)
+                r = -A20_ERR_INVALID_ARGUMENT;
+            break;
+        }
+        /* A 64 KiB burst must not monopolize the network lane or fill a
+         * peer's bounded datagram queues before its polling owner can run. */
+        if ((index + 1) % 4 == 0 && offset + length < body)
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+    }
+    kfree(fragment);
     return r;
 }
 
@@ -333,8 +389,17 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
      * learns its remote service closed, an export learns a caller left
      * (02-§8; the slot names the export endpoint from the sender's side in
      * both directions). */
-    if (a20_clx_reliable_rx(&src, &h, &payload))
+    uint8_t *assembled = NULL;
+    if (h.flags & A20_CLX_FLAG_FRAGMENTED) {
+        assembled = a20_clx_fragment_rx(&src, transport_id, &h, payload);
+        if (!assembled)
+            return;
+        payload = assembled;
+    }
+    if (a20_clx_reliable_rx(&src, &h, &payload)) {
+        kfree(assembled);
         return;
+    }
     if (h.type == A20_CLX_TYPE_CALL_REPLY || h.type == A20_CLX_TYPE_ERROR ||
         h.type == A20_CLX_TYPE_ACK) {
         a20_clx_proxy_rx(transport_id, &src, &h, payload);
@@ -349,6 +414,7 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
          * v0 emits none of these (04-§5: loopback heartbeat 无). */
         a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
     }
+    kfree(assembled);
 }
 
 static void clx_rx_thread(void) {
@@ -356,6 +422,7 @@ static void clx_rx_thread(void) {
     for (;;) {
         if (__atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) == 3)
             return;
+        a20_clx_fragment_expire();
         clx_rx_item_t it;
         if (clx_rx_pop(&it)) {
             clx_dispatch(it.transport_id, it.nh_src, it.nh_len, it.frame,

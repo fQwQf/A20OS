@@ -20,7 +20,7 @@ typedef struct clx_udp_peer {
     a20_node_id_t node;
     uint32_t state;
     uint32_t caps;
-    uint8_t version;
+    uint8_t version, tier;
     uint64_t remote_nonce;
     uint32_t challenge;
     uint64_t last_rx;
@@ -210,9 +210,14 @@ static void udp_control(const clx_udp_peer_t *p, uint8_t type,
     h.ttl = A20_CLX_TTL_DEFAULT;
     h.csum_kind = A20_CLX_CSUM_CCITT;
     if (type == A20_CLX_TYPE_HELLO || type == A20_CLX_TYPE_HELLO_ACK) {
-        a20_clx_build_hello_payload(
-            self.bytes, 0, A20_CLX_SESSION_VER, CONFIG_CLUSTER_PROFILE,
-            (uint8_t)(caps | A20_CLX_CAP_RELIABLE), 0, g_udp_nonce, payload);
+        a20_clx_build_hello_payload(self.bytes, 0, A20_CLX_SESSION_VER,
+                                    CONFIG_CLUSTER_PROFILE,
+                                    (uint8_t)(caps | A20_CLX_CAP_RELIABLE
+#if CONFIG_CLUSTER_PROFILE != A20_CLX_PROFILE_MCU
+                                              | A20_CLX_CAP_FRAGMENT
+#endif
+                                              ),
+                                    0, g_udp_nonce, payload);
         payload[A20_CLX_HELLO_OFF_LINK_ADDR_LEN] = 6;
         h.payload_len = 32;
     } else {
@@ -270,7 +275,10 @@ static void udp_receive(const uint8_t nh[6], const uint8_t *frame,
         return;
     }
     if ((!hello && h.ver > peer.version) ||
-        (h.flags & (A20_CLX_FLAG_FRAGMENTED | A20_CLX_FLAG_BROADCAST))) {
+        (h.flags & A20_CLX_FLAG_BROADCAST) ||
+        ((h.flags & A20_CLX_FLAG_FRAGMENTED) &&
+         (peer.version < A20_CLX_SESSION_VER ||
+          !(peer.caps & A20_CLX_CAP_FRAGMENT)))) {
         a20_clx_link_rx_drop(A20_CLX_TRANSPORT_UDP, nh, 6);
         return;
     }
@@ -309,6 +317,7 @@ static void udp_receive(const uint8_t nh[6], const uint8_t *frame,
     g_udp_peers[idx].state = A20_CLX_LINK_UP;
     if (hello) {
         g_udp_peers[idx].caps = payload[A20_CLX_HELLO_OFF_CAPS];
+        g_udp_peers[idx].tier = payload[A20_CLX_HELLO_OFF_TIER];
         g_udp_peers[idx].version =
             payload[A20_CLX_HELLO_OFF_PROTO_MAX] >= A20_CLX_SESSION_VER
                 ? A20_CLX_SESSION_VER
@@ -372,8 +381,14 @@ static void udp_poll(void *ctx) {
         spin_unlock_irqrestore(&g_udp_lock, irq);
         if (!due)
             continue;
-        if (state == A20_CLX_LINK_DOWN && peer.state != A20_CLX_LINK_DOWN)
+        if (state == A20_CLX_LINK_DOWN && peer.state != A20_CLX_LINK_DOWN) {
+            kinfo(
+                "[CLX-UDP] peer=%u timeout now=%lu last_rx=%lu silent_ms=%lu\n",
+                peer.node.bytes[15], (unsigned long)now,
+                (unsigned long)peer.last_rx,
+                (unsigned long)((now - peer.last_rx) * 1000 / TICKS_PER_SEC));
             a20_clx_link_event(A20_CLX_TRANSPORT_UDP, peer.nh, 6, 0);
+        }
         udp_control(&peer,
                     state == A20_CLX_LINK_DOWN ? A20_CLX_TYPE_HELLO
                                                : A20_CLX_TYPE_PING,
@@ -403,6 +418,23 @@ static int udp_session(void *ctx, const uint8_t *nh, uint32_t nh_len,
     }
     spin_unlock_irqrestore(&g_udp_lock, irq);
     return result;
+}
+
+uint32_t a20_clx_udp_logical_mtu(const uint8_t node_id[16]) {
+    uint32_t result = A20_CLX_UDP_MTU;
+    uint64_t irq = spin_lock_irqsave(&g_udp_lock);
+    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES; i++) {
+        clx_udp_peer_t *p = &g_udp_peers[i];
+        if (p->used && memcmp(p->node.bytes, node_id, 16) == 0 &&
+            p->version >= A20_CLX_SESSION_VER &&
+            (p->caps & A20_CLX_CAP_FRAGMENT) &&
+            (p->state == A20_CLX_LINK_UP || p->state == A20_CLX_LINK_SUSPECT)) {
+            result = p->tier >= A20_CLX_PROFILE_SERVER ? 65590u : 4096u;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_udp_lock, irq);
+    return result < CLX_LOGICAL_MTU ? result : CLX_LOGICAL_MTU;
 }
 
 void a20_clx_udp_init(void) {

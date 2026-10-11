@@ -85,7 +85,7 @@ typedef struct a20_frame_hdr {
     uint32_t dst_hash;
     uint32_t dst_slot;
     uint32_t seq;
-    uint16_t payload_len;
+    uint32_t payload_len; /* Internal logical view; wire field remains u16. */
     uint8_t ttl;
     uint8_t csum_kind;
     uint8_t crc_present; /* 1 when csum_kind == A20_CLX_CSUM_CCITT      */
@@ -122,6 +122,15 @@ int a20_frame_fixed_payload_len(uint8_t type);
  */
 int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
                      const a20_frame_hdr_t *h, const uint8_t *payload);
+
+/* Owned retry/replay buffers may represent a 64 KiB business message plus
+ * session metadata. A saturated u16 length is private to these buffers and
+ * is NEVER accepted by wire decoders; TX fragments it before driver I/O. */
+int a20_frame_encode_logical(uint8_t *buf, uint32_t cap, uint32_t mtu,
+                             const a20_frame_hdr_t *h, const uint8_t *payload);
+a20_frame_verdict_t a20_frame_decode_logical(const uint8_t *buf, uint32_t len,
+                                             uint32_t mtu, a20_frame_hdr_t *out,
+                                             const uint8_t **payload);
 
 /* Forward an already valid frame in place, preserving all fields except
  * TTL and CRC. Reject exhaustion or a smaller outgoing MTU. */

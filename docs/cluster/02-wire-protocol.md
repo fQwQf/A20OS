@@ -61,7 +61,7 @@ v0 caller 释放代理发 CLOSE，`txid=0xffffffff` 标识调用方关闭；接�
 | 位 | 名称 | 当前行为 |
 |---:|---|---|
 | 0 | RELIABLE | v1 有界会话事务；双方版本/能力必须支持 |
-| 1 | FRAGMENTED | 编解码可验证格式，运行时尚未接入重组 |
+| 1 | FRAGMENTED | v1 协商的可靠 CALL/REPLY 分片，见 14 文档 |
 | 2 | BROADCAST | 当前适配器拒绝 |
 | 3 | COMPRESSED | 保留；发送拒绝，v0 层 1 接收兼容 |
 
@@ -79,7 +79,7 @@ HELLO 本身用 v0 基础帧，32 B 载荷：
 | 16 | proto_min u8 |
 | 17 | proto_max u8 |
 | 18 | resource_profile u8：1/2/3 |
-| 19 | caps u8：RELAY=1、RELIABLE=2、LEAF=4 |
+| 19 | caps u8：RELAY=1、RELIABLE=2、LEAF=4、FRAGMENT=8（v1 主机传输特性） |
 | 20 | short_addr u16 |
 | 22 | link_addr_len u8：UART=2、UDP=6 |
 | 23 | reserved u8 |
@@ -153,8 +153,9 @@ byte application_reply[]   // status 非零时为空
 
 ## 8. 分片、转发与错误
 
-分片字段和 v0 格式金样仍在，但当前运行时拒绝 FRAGMENTED。服务器分片与
-总字节预算、重组超时、跨不同 MTU 网关的适配属于待实现内容。
+v0 格式金样保持不变；v1 主机 UDP 已接入协商分片、有界重组和首片期限。
+格式与资源口径见 [14-fragmentation.md](14-fragmentation.md)。跨不同 MTU
+网关的重分片仍未实现，出口容纳不下原片时明确丢弃。
 RELAY 转发已实现 TTL 递减和 CRC 更新；可靠间接目的节点还缺端到端会话发现。
 
 v0 ERROR 保留固定 errno/orig_txid 布局。v1 接纳后的错误通过带会话的

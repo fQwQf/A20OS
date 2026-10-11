@@ -692,11 +692,11 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
         if (r > 0)
             continue;
 
-        uint32_t mtu = clx_route_mtu(&p->peer_node);
+        uint32_t mtu = p->reliable ? a20_clx_logical_mtu(&p->peer_node)
+                                   : clx_route_mtu(&p->peer_node);
         uint32_t budget = a20_frame_max_payload(mtu);
         uint32_t prefix = p->reliable ? A20_CLX_SESSION_BYTES : 0;
-        if (budget < prefix || msg_len > budget - prefix ||
-            msg_len + prefix > 65535u) {
+        if (budget < prefix || msg_len > budget - prefix || msg_len > 65536u) {
             printf("[CLX] proxy %u: %u B message over MTU budget %u\n", p->id,
                    msg_len, budget);
             kfree(msg);
@@ -738,7 +738,7 @@ static void clx_proxy_tx_main(a20_clx_proxy_t *p) {
         h.payload_len = prefix + msg_len;
         h.ttl = A20_CLX_TTL_DEFAULT;
         h.csum_kind = A20_CLX_CSUM_CCITT;
-        int n = a20_frame_encode(frame, capacity, mtu, &h, payload);
+        int n = a20_frame_encode_logical(frame, capacity, mtu, &h, payload);
         int ir = -1;
         uint64_t now = timer_get_ticks();
 #if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_SERVER

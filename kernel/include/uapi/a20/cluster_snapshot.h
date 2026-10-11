@@ -5,6 +5,7 @@
 #define A20_CLUSTER_SNAPSHOT_ROUTE 1u
 #define A20_CLUSTER_SNAPSHOT_EXPORT 2u
 #define A20_CLUSTER_SNAPSHOT_RESOURCES 3u
+#define A20_CLUSTER_SNAPSHOT_REASSEMBLY 4u
 
 /* Same 192-byte syscall envelope; resource samples have no enumeration
  * cursor. Counts are coherent within each subsystem, not a global stop. */
@@ -30,6 +31,18 @@ enum a20_cluster_resource_metric {
     A20_CLX_STAT_MAX_INFLIGHT,
     A20_CLX_STAT_MAX_REPLAY_BYTES,
     A20_CLX_STAT_COUNT
+};
+/* kind=REASSEMBLY uses the same fixed 20-value envelope. Unused values zero. */
+enum a20_cluster_reassembly_metric {
+    A20_CLX_REASM_SAMPLE_MS,
+    A20_CLX_REASM_CONTEXTS,
+    A20_CLX_REASM_BYTES,
+    A20_CLX_REASM_PEAK_BYTES,
+    A20_CLX_REASM_MAX_CONTEXTS,
+    A20_CLX_REASM_MAX_BYTES,
+    A20_CLX_REASM_COMPLETED,
+    A20_CLX_REASM_REJECTED,
+    A20_CLX_REASM_EXPIRED
 };
 typedef struct a20_cluster_resource_args {
     uint32_t size, version, kind, index;

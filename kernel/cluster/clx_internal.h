@@ -49,6 +49,20 @@
 #define CLX_LIMIT_INFLIGHT A20_LIMIT_CLX_INFLIGHT_DEFAULT
 #endif
 
+/* Logical frame limit includes header and CRC, independent of wire MTU. */
+#if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_SERVER
+#define CLX_LOGICAL_MTU                                                        \
+    65590u /* 65536 business + 20 session/status + 34 wire */
+#elif CONFIG_CLUSTER_PROFILE == A20_CLX_PROFILE_MCU
+#define CLX_LOGICAL_MTU 256u
+#else
+#define CLX_LOGICAL_MTU 4096u
+#endif
+uint32_t a20_clx_logical_mtu(const a20_node_id_t *peer);
+void a20_clx_fragment_expire(void);
+uint8_t *a20_clx_fragment_rx(const a20_node_id_t *src, uint32_t transport,
+                             a20_frame_hdr_t *header, const uint8_t *payload);
+
 /* Per-node dedup window for inbound CALLs (02-§4: >= 64 entries). */
 #define CLX_DEDUP_WINDOW 64u
 
@@ -67,6 +81,7 @@ int a20_clx_route_snapshot(a20_cluster_snapshot_args_t *out);
 int a20_clx_export_snapshot(a20_cluster_snapshot_args_t *out);
 uint64_t a20_clx_boot_session(void);
 void a20_clx_resources(a20_cluster_resource_args_t *out);
+void a20_clx_fragment_resources(a20_cluster_resource_args_t *out);
 /* These collectors require g_clx_lock, and never allocate or sleep. */
 void a20_clx_route_resources(uint64_t *values);
 void a20_clx_export_resources(uint64_t *values);

@@ -44,7 +44,7 @@ int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args) {
         return -A20_ERR_FAULT;
     a20_cluster_snapshot_args_t out;
     A20_VALIDATE_AND_COPY(user, out);
-    if (out.reserved || out.kind > A20_CLUSTER_SNAPSHOT_RESOURCES)
+    if (out.reserved || out.kind > A20_CLUSTER_SNAPSHOT_REASSEMBLY)
         return -A20_ERR_INVALID_ARGUMENT;
     uint32_t output_offset =
         __builtin_offsetof(a20_cluster_snapshot_args_t, next_index);
@@ -74,8 +74,11 @@ int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args) {
         a20_cluster_resource_args_t resources = {0};
         resources.size = sizeof(resources);
         resources.version = 1;
-        resources.kind = A20_CLUSTER_SNAPSHOT_RESOURCES;
-        a20_clx_resources(&resources);
+        resources.kind = out.kind;
+        if (out.kind == A20_CLUSTER_SNAPSHOT_REASSEMBLY)
+            a20_clx_fragment_resources(&resources);
+        else
+            a20_clx_resources(&resources);
         memcpy(&out, &resources, sizeof(out));
         r = 0;
     }

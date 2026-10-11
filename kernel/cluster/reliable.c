@@ -6,7 +6,7 @@
 
 #if CONFIG_CLUSTER_PROFILE >= A20_CLX_PROFILE_SERVER
 #define REPLAY_BUDGET A20_LIMIT_CLX_REASM_BYTES_ABSOLUTE
-#define REPLAY_FRAME_MAX 65536u
+#define REPLAY_FRAME_MAX CLX_LOGICAL_MTU
 #define REPLAY_SLOTS CLX_DEDUP_WINDOW
 #elif CONFIG_CLUSTER_PROFILE == A20_CLX_PROFILE_MCU
 #define REPLAY_BUDGET 256u
@@ -82,7 +82,7 @@ static int reply_encode(uint8_t *frame, uint32_t capacity, uint32_t src,
         A20_CLX_HDR_LEN + A20_CLX_REPLY_PREFIX + A20_CLX_CRC_LEN;
     if (capacity < overhead)
         return -1;
-    if (len > capacity - overhead || len > 65535u - A20_CLX_REPLY_PREFIX) {
+    if (len > capacity - overhead || len > 65536u) {
         error = A20_ERR_NO_SPACE;
         len = 0;
     }
@@ -104,7 +104,7 @@ static int reply_encode(uint8_t *frame, uint32_t capacity, uint32_t src,
     a20_clx_put_le32(p + A20_CLX_SESSION_BYTES, error);
     if (len)
         memcpy(p + A20_CLX_REPLY_PREFIX, data, len);
-    return a20_frame_encode(frame, capacity, capacity, &h, p);
+    return a20_frame_encode_logical(frame, capacity, capacity, &h, p);
 }
 
 static void admission_ack(const a20_node_id_t *dst,
@@ -179,12 +179,8 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
     }
     spin_unlock_irqrestore(&g_clx_lock, flags);
 
-    /* Reserve maximum single-frame reply storage BEFORE running a service. */
-    uint32_t transport, nh_len;
-    uint8_t nh[16];
-    uint32_t capacity = 0;
-    if (!error && a20_clx_route_lookup(src, &transport, nh, &nh_len) == 0)
-        capacity = a20_clx_transport_mtu(transport);
+    /* Reserve negotiated maximum reply storage BEFORE running a service. */
+    uint32_t capacity = !error ? a20_clx_logical_mtu(src) : 0;
     if (capacity > REPLAY_FRAME_MAX)
         capacity = REPLAY_FRAME_MAX;
     uint8_t *storage = !error && capacity ? kmalloc(capacity) : NULL;
