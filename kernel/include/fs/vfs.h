@@ -189,6 +189,8 @@ typedef struct vfile_ops {
      * NULL falls back to the vnode/mount flush in vfs_fsync_vfile. */
     int     (*sync)(struct vfile *vf);
     int     (*close)(struct vfile *vf);
+    int64_t (*mmap)(struct vfile *vf, uint64_t addr, size_t len, int prot,
+                    int flags, uint64_t offset);
 } vfile_ops_t;
 
 /*

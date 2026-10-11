@@ -9,7 +9,6 @@
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
 #include "drivers/gpu/framebuffer.h"
-#include "drivers/gpu/drm.h"
 
 static uint64_t linux_mm_lock(task_t *t)
 {
@@ -70,12 +69,12 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                 if (off < 0) return -EINVAL;
                 return fbdev_linux_mmap(addr, len, prot, flags, (uint64_t)off);
             }
-            if (drm_is_drm_vfile(vf)) {
+            if (vf->ops && vf->ops->mmap) {
                 if (off < 0) { vfs_put_file_ref(gfd, vf); return -EINVAL; }
-                int64_t drm_ret = drm_linux_mmap(vf, addr, len, prot, flags,
-                                                 (uint64_t)off);
+                int64_t ret = vf->ops->mmap(vf, addr, len, prot, flags,
+                                             (uint64_t)off);
                 vfs_put_file_ref(gfd, vf);
-                return drm_ret;
+                return ret;
             }
             /* Anonymous descriptor types without an mmap implementation
              * (eventfd, epoll, the current partial io_uring backend, ...)
