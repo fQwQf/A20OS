@@ -73,10 +73,16 @@ STM32 专用集群 main 已使用 UID、两页 epoch journal 和独立 USART2/3�
 
 ## 4. 仓库基线门禁
 
-全库格式门禁存在本轮以外的不合规文件；本轮修改的 C/头文件独立格式化，
+全库格式门禁存在本轮以外的不合规文件；本轮修改的集群 C/头文件独立格式化，
 不扩大格式豁免名单。文档引用检查曾发现已有的
 `docs/roadmap/single-level-mm-model.md` 对 drvmod loader 的越界行号引用。
-这些不能报告为本轮验证通过，最终门禁结果继续在此记录。
+初次 `make check` 的 `host-tests` 因 lwIP 并发 harness 缺少 CPU 适配头与
+CPU 数配置失败，`check-doc-drift` 因上述越界引用失败。已复用宿主 CPU shim、
+保留四 lane 配置及真实分配器测试，并将引用更新到实际函数。最终 21 项
+宿主门禁全部通过，含 8 线程各 20000 次 lwIP 分配器并发操作。
+全库格式检查仍报告 114 个既有非豁免文件不合规，未扩大豁免名单。
+`make check-doc-test-gates` 最终通过，包含实际 SMP、阻塞/退出、进程生命周期、
+MM、VFS 与驱动运行检查；日志为 `.kernel-build/cluster/final-doc-test-gates.log`。
 
 统一服务格式、资源限制、进程取消和目录枚举详见 [09-work-agent.md](09-work-agent.md)。
 
@@ -207,3 +213,32 @@ RISC-V、2 套 x86 COM2 网关和 2 个生产 MCU leaf 主机进程。固定文�
 1025 种文本长度及精确 16 片树通过单测和 ASan/UBSan；原 DOT 接口保留。
 数据集、命令和资源边界见 [18-wordcount.md](18-wordcount.md)。该验收仍是
 QEMU 与主机 leaf 的证据，不含物理 STM32 板运行。
+
+## 16. 故障硬化、诊断与最终构建
+
+`make check-cluster-hardening` 的三个场景已通过：两端各 1000 次调用加 10%
+随机丢可靠帧，重复执行为零；50–200 ms 单帧延迟、CL bit 损坏且 UDP 校验
+仍合法；每端 1000 个伪造身份 HELLO；30 秒双向网络分区；服务端 10 秒不
+应答而调用方按 2 秒预算关闭代理。分区调用 15 秒内结束，恢复后新请求成功；
+慢服务执行一次且调用方在途/重试字节归零。重启及旧会话重放仍在矩阵中。
+
+新增 Native snapshot kind=5，以原 192 B 信封读取聚合链路桶、收发、策略
+丢弃、malformed、重传及桶数上限。损坏帧测试要求接收内核 malformed 增长，
+不只依据宿主的“已注入”事件。完整语义与证据边界见
+[20-hardening.md](20-hardening.md)。
+公共链路状态也同步 UDP/UART 的 SUSPECT；分区测试实际观察到 SUSPECT 后
+调用结束，恢复后 UP。UDP→x86 COM2→leaf 的 gossip/丢尽回复/重启回归仍通过。
+
+最终七架构 `check-build-matrix` 通过；七架构 Native 集群测试程序、agent、
+clusterd、jobd、supervisor 和文件 CLI 也全部链接成功。ARM32 使用独立
+`arm-none-eabi-gcc`，RISC-V32 显式以 `NATIVE_CC_riscv32=riscv64-unknown-elf-gcc`
+选择其真实 RV32 multilib。32 位 SDK 仍有既有指针宽度转换警告；这次编译
+不能当作七架构实际运行证据。运行证据主要是 RISC-V 与 x86 独立内核。
+
+`smoke-riscv64`、Native cluster/supervisor、三节点 mesh 最终回归通过。
+STM32 64 KiB Flash/20 KiB RAM 的 USART2/3 固件均链接，当前每份 text
+47504 B、data 0 B、bss 9376 B。Flash journal、固定栈与运行堆预算另计，
+不能只以 text+bss 推断可用堆。所有物理板验证与 8 小时生产 soak 仍保持未完成。
+
+CI 已配置宿主 unit/fuzz 与独立内核运行门禁，手动工作流增加完整硬化和词频
+配比测试；未在本地把“配置存在”写成 GitHub 已执行成功。

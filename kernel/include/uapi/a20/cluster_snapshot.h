@@ -6,6 +6,7 @@
 #define A20_CLUSTER_SNAPSHOT_EXPORT 2u
 #define A20_CLUSTER_SNAPSHOT_RESOURCES 3u
 #define A20_CLUSTER_SNAPSHOT_REASSEMBLY 4u
+#define A20_CLUSTER_SNAPSHOT_LINKS 5u
 
 /* Same 192-byte syscall envelope; resource samples have no enumeration
  * cursor. Counts are coherent within each subsystem, not a global stop. */
@@ -43,6 +44,21 @@ enum a20_cluster_reassembly_metric {
     A20_CLX_REASM_COMPLETED,
     A20_CLX_REASM_REJECTED,
     A20_CLX_REASM_EXPIRED
+};
+/* Aggregate adapter counters; unused values in the envelope are zero. */
+enum a20_cluster_link_metric {
+    A20_CLX_LINK_SAMPLE_MS,
+    A20_CLX_LINK_COUNT,
+    A20_CLX_LINK_UP_COUNT,
+    A20_CLX_LINK_SUSPECT_COUNT,
+    A20_CLX_LINK_DOWN_COUNT,
+    A20_CLX_LINK_TX_FRAMES,
+    A20_CLX_LINK_RX_FRAMES,
+    A20_CLX_LINK_TX_DROPS,
+    A20_CLX_LINK_RX_DROPS,
+    A20_CLX_LINK_RX_MALFORMED,
+    A20_CLX_LINK_RETRANSMITS,
+    A20_CLX_LINK_MAX_LINKS
 };
 typedef struct a20_cluster_resource_args {
     uint32_t size, version, kind, index;

@@ -146,3 +146,11 @@ SDK 自动初始化头，内核覆盖全部输出，不依赖调用方缓冲区�
 重组运行统计使用同一 syscall 的 kind=4 和独立指标索引，详见
 [14-fragmentation.md](14-fragmentation.md)。它与 kind=3 的重试/回复/RX 缓冲
 统计分开，避免把不同所有者的 RAM 计入同一个不明确的总量。
+
+链路运行统计使用 kind=5，SDK 为 `a20_cluster_link_resources`，同样要求
+index/generation/reserved 为零。`values[0..11]` 依次为采样 ms、统计桶数、
+UP/SUSPECT/DOWN 桶数、TX/RX 帧数、TX/RX drops、RX malformed、重传数、
+统计桶上限；其余值清零。采样在链路锁内完成，累计量在本次启动内保留。
+一个桶代表 `(transport_id, next_hop)`；无法解析下一跳的发送失败也可建立
+adapter 0 的汇总桶，所以桶数不是集群成员数。CRC/长度/编码失败计入
+malformed，TTL/未知身份等策略拒绝计入 drops，两者不能混为丢包率。

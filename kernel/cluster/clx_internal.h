@@ -329,6 +329,10 @@ uint64_t a20_clx_event_overflows(void);
 
 /* ---- counters for cluster_link_status (02-§10) ------------------------- */
 
+void a20_clx_link_resources(a20_cluster_resource_args_t *out);
+void a20_clx_link_state_note(uint32_t transport_id, const uint8_t *nh,
+                             uint32_t nh_len, uint32_t state);
+
 int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
                              uint32_t *rtt_us, uint64_t *tx_frames,
                              uint64_t *rx_frames, uint64_t *tx_drops,

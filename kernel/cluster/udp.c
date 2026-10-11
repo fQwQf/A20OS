@@ -381,6 +381,8 @@ static void udp_poll(void *ctx) {
         spin_unlock_irqrestore(&g_udp_lock, irq);
         if (!due)
             continue;
+        if (state == A20_CLX_LINK_SUSPECT && peer.state != state)
+            a20_clx_link_state_note(A20_CLX_TRANSPORT_UDP, peer.nh, 6, state);
         if (state == A20_CLX_LINK_DOWN && peer.state != A20_CLX_LINK_DOWN) {
             kinfo(
                 "[CLX-UDP] peer=%u timeout now=%lu last_rx=%lu silent_ms=%lu\n",
