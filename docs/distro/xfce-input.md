@@ -67,3 +67,26 @@ QEMU GTK、4 CPU/4 GiB、virtio-gpu/virgl，使用生产 XFCE 镜像快照：
 删除中间文件并复用 inode，关机后检查文件与宿主机 `e2fsck -fn`。
 旧内核负对照失败，新内核通过；磁盘为私有副本且禁用 QEMU snapshot，
 因此检查的是落盘后的元数据。重建的生产 XFCE 镜像也通过只读 fsck。
+
+## 浏览器与游戏追加验收
+
+Firefox 151.0.3 的 HTTP/HTTPS DOM、Bing 首页/搜索（10 条结果）、刷新和
+5 分钟页面存活检查通过，见 `input-desktop-release-web.log`。
+
+最终使用重建镜像、四核 KVM/virgl 的单 VM 验证 Minecraft 1.21.11 demo：
+
+- 鼠标点击 Play Demo World、Continue Playing，进入世界。
+- GLFW 建立相对指针与 pointer lock，非零 relative_motion 转动视角。
+- 客户端收到 BTN_LEFT/BTN_RIGHT 的按下与释放；Esc 销毁 pointer lock。
+- 鼠标保存回标题、正常退出（status=0），存档 gzip 检查与 sync 通过。
+
+完整客户端 Wayland 跟踪和 QA 结果位于 `input-desktop-complete.log`。
+截图为 `input-complete-mouse-play.png`、`input-complete-captured-before.png`、
+`input-complete-look-around.png`、`input-complete-pause.png`、
+`input-complete-saved-title-verified.png`、`input-complete-exited-desktop.png`。
+本次使用快照，未重复“重启同一可写镜像后重载存档”的前期验收；音频仍为
+OpenAL No Output，未验证实体声卡输出。
+
+早期同时运行两个 virgl VM 时遇到过一次 GPU `cmd=202` 超时；该轮不计入
+游戏输入验收。最终单 VM、重建镜像的完整游玩/保存/退出未复现，这不等于
+已修复多 VM 并行下的图形超时。QA 脚本和 Wayland 调试均未进入生产镜像。
