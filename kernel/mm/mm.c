@@ -249,8 +249,15 @@ pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out,
             return pte;
         }
 #endif
-        if (!(*pte & PTE_V))
+        if (!(*pte & PTE_V)) {
+            /* Report the entire absent subtree so teardown can skip sparse
+             * reservations without walking every base page under mm->lock. */
+            size_t sz = pt_level_size(level);
+            if (level_out) *level_out = level;
+            if (base_out) *base_out = va & ~(vaddr_t)(sz - 1);
+            if (size_out) *size_out = sz;
             return NULL;
+        }
         if (arch_pte_is_leaf(*pte)) {
             size_t sz = pt_level_size(level);
             if (level_out) *level_out = level;
