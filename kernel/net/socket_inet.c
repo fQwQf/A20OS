@@ -2530,7 +2530,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
 {
     /* SO_SNDBUF on a datagram socket bounds the one datagram this socket will
      * hand on, which is the only send-side buffer a datagram socket has: the
-     * pbuf is handed to udp_sendto() and freed by it, so nothing accumulates.
+     * temporary pbuf is released by this adapter after udp_sendto() returns.
      * Compared against net_socket_buf_in_force() rather than s->snd_buf directly,
      * so the number that rejects the send is the number getsockopt reports. */
     if (len > net_socket_buf_in_force(s, 1))
@@ -2666,8 +2666,9 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         pbuf_free(p);
         return -EDESTADDRREQ;
     }
-    /* udp_sendto()/udp_send() take ownership of the pbuf and free it on every
-     * path, including error, so it must not be freed again here. */
+    /* The lwIP raw UDP API retains the caller's pbuf on success and error.
+     * ARP/output may hold their own reference; release only our ownership. */
+    pbuf_free(p);
     a20_lwip_poll_locked();
     a20_lwip_shared_unlock(A20_LWIP_SHARED_UDP, s->udp, shared);
     a20_lwip_lane_unlock(lwip_flags);
@@ -2715,8 +2716,8 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
         pbuf_free(p);
         return -EDESTADDRREQ;
     }
-    /* raw_sendto()/raw_send() take ownership of the pbuf and free it on every
-     * path, including error, so it must not be freed again here. */
+    /* RAW output also retains the caller's reference, including on error. */
+    pbuf_free(p);
     a20_lwip_poll_locked();
     a20_lwip_shared_unlock(A20_LWIP_SHARED_RAW, s->raw, shared);
     a20_lwip_lane_unlock(lwip_flags);
