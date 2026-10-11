@@ -105,9 +105,11 @@ void *proc_scratch_buffer(size_t size)
     return buf;
 }
 
-void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
+static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
+                      int detached)
 {
     (void)clone_flags;
+    (void)detached;
     int parent_pgid = parent ? parent->pgid : 0;
     int parent_sid = parent ? parent->sid : 0;
 
@@ -253,6 +255,12 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     }
 
 #ifndef CONFIG_MCU
+    /* Internal workers have no user descriptors or signal disposition. */
+    if (detached) {
+        t->files = NULL;
+        t->signals = NULL;
+        return;
+    }
     if (parent && (clone_flags & (CLONE_FILES | CLONE_THREAD)))
         fdtable_share(t, parent);
     else if (parent)
@@ -272,6 +280,16 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->files = NULL;
     t->signals = NULL;
 #endif
+}
+
+void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
+{
+    task_init(t, parent, clone_flags, 0);
+}
+
+void proc_task_init_detached(task_t *t)
+{
+    task_init(t, NULL, 0, 1);
 }
 
 void proc_task_first_entry(void)

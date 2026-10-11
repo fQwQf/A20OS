@@ -35,7 +35,7 @@ typedef struct clx_replay {
 
 static clx_origin_t g_origins[CLX_LIMIT_ROUTES + 4];
 static clx_replay_t g_replay[REPLAY_SLOTS];
-static uint32_t g_replay_bytes;
+static uint32_t g_replay_bytes, g_replay_peak_bytes;
 
 static clx_replay_t *replay_find(uint32_t hash, uint32_t txid, uint64_t caller,
                                  uint64_t server) {
@@ -211,6 +211,8 @@ int a20_clx_reliable_rx(const a20_node_id_t *src, a20_frame_hdr_t *h,
         r->capacity = capacity;
         r->frame = storage;
         g_replay_bytes = g_replay_bytes - old_capacity + capacity;
+        if (g_replay_bytes > g_replay_peak_bytes)
+            g_replay_peak_bytes = g_replay_bytes;
         a20_clx_window_commit(&o->window, h->txid);
     }
     spin_unlock_irqrestore(&g_clx_lock, flags);
@@ -272,4 +274,14 @@ void a20_clx_reliable_receipt(const a20_node_id_t *dst, uint32_t txid,
     int n = a20_frame_encode(frame, sizeof(frame), sizeof(frame), &h, payload);
     if (n > 0)
         a20_clx_core_send_frame(dst, frame, n);
+}
+
+void a20_clx_replay_resources(uint64_t *v) {
+    for (uint32_t i = 0; i < REPLAY_SLOTS; i++)
+        v[A20_CLX_STAT_REPLAY_ENTRIES] += !!g_replay[i].used;
+    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES + 4; i++)
+        v[A20_CLX_STAT_ORIGINS] += !!g_origins[i].used;
+    v[A20_CLX_STAT_REPLAY_BYTES] = g_replay_bytes;
+    v[A20_CLX_STAT_REPLAY_PEAK_BYTES] = g_replay_peak_bytes;
+    v[A20_CLX_STAT_MAX_REPLAY_BYTES] = REPLAY_BUDGET;
 }

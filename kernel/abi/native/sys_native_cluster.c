@@ -34,13 +34,17 @@
 
 #define A20_ARG(n) (args->arg[(n)])
 
+STATIC_ASSERT(sizeof(a20_cluster_resource_args_t) ==
+                  sizeof(a20_cluster_snapshot_args_t),
+              clx_resources_envelope);
+
 int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args) {
     a20_cluster_snapshot_args_t *user = (void *)(uintptr_t)A20_ARG(0);
     if (!user)
         return -A20_ERR_FAULT;
     a20_cluster_snapshot_args_t out;
     A20_VALIDATE_AND_COPY(user, out);
-    if (out.reserved || out.kind > A20_CLUSTER_SNAPSHOT_EXPORT)
+    if (out.reserved || out.kind > A20_CLUSTER_SNAPSHOT_RESOURCES)
         return -A20_ERR_INVALID_ARGUMENT;
     uint32_t output_offset =
         __builtin_offsetof(a20_cluster_snapshot_args_t, next_index);
@@ -62,8 +66,18 @@ int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args) {
         out.generation = 1;
     } else if (out.kind == A20_CLUSTER_SNAPSHOT_ROUTE) {
         r = a20_clx_route_snapshot(&out);
-    } else {
+    } else if (out.kind == A20_CLUSTER_SNAPSHOT_EXPORT) {
         r = a20_clx_export_snapshot(&out);
+    } else {
+        if (out.index || out.generation)
+            return -A20_ERR_INVALID_ARGUMENT;
+        a20_cluster_resource_args_t resources = {0};
+        resources.size = sizeof(resources);
+        resources.version = 1;
+        resources.kind = A20_CLUSTER_SNAPSHOT_RESOURCES;
+        a20_clx_resources(&resources);
+        memcpy(&out, &resources, sizeof(out));
+        r = 0;
     }
     if (r < 0)
         return r;

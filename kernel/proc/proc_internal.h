@@ -104,6 +104,7 @@ void proc_pid_unregister(task_t *t);
 int proc_pid_next_value(void);
 
 void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags);
+void proc_task_init_detached(task_t *t);
 task_t *proc_task_alloc_storage(void);
 void proc_task_init_idle_state(task_t *t, unsigned cpu);
 void proc_task_first_entry(void) NORETURN;

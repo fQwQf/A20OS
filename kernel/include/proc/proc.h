@@ -573,6 +573,8 @@ int      proc_set_pid_max(int value);
 void     proc_get_vm_stats(proc_vm_stats_t *stats);
 size_t   proc_format_pidmap(char *buf, size_t bufsz);
 int      proc_alloc(void (*entry)(void));
+/* Detached kernel workers do not inherit user process resources. */
+int      proc_alloc_detached(void (*entry)(void));
 int      proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir);
 int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                                struct mm_seg *mmap, vaddr_t brk,

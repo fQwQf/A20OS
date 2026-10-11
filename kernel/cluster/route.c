@@ -231,6 +231,11 @@ static int clx_route_update(const a20_node_id_t *node, uint32_t transport,
             goto out;
     }
 #endif
+    if (transport == A20_CLX_TRANSPORT_UART) {
+        r = a20_clx_uart_prepare_route(nh, nh_len);
+        if (r < 0)
+            goto out;
+    }
     if (transport == A20_CLX_TRANSPORT_LOOPBACK) {
         r = a20_clx_loopback_vnode_add(node, nh, nh_len);
         if (r < 0)
@@ -357,4 +362,8 @@ int a20_clx_node_by_hash(uint32_t hash, a20_node_id_t *out) {
     spin_unlock_irqrestore(&g_clx_lock, flags);
     (void)self;
     return -1;
+}
+
+void a20_clx_route_resources(uint64_t *v) {
+    v[A20_CLX_STAT_ROUTES] = g_clx_route_count;
 }

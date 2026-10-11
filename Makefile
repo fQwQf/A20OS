@@ -279,6 +279,15 @@ include tools/driver-deployment.mk
 # One protocol, profile-selected resource budgets. MCU firmware keeps the
 # single-transaction budget; hosted kernels may select any bounded tier.
 CLUSTER_PROFILE ?= $(if $(filter mcu,$(PROFILE)),1,2)
+CLUSTER_UART_COM2 ?= 0
+ifeq ($(CLUSTER_UART_COM2),1)
+ifneq ($(ARCH),x86_64)
+$(error CLUSTER_UART_COM2 requires ARCH=x86_64)
+endif
+ifeq ($(CLUSTER_PROFILE),1)
+$(error CLUSTER_UART_COM2 requires DEFAULT or SERVER cluster profile)
+endif
+endif
 ifeq ($(filter 1 2 3,$(CLUSTER_PROFILE)),)
 $(error CLUSTER_PROFILE=$(CLUSTER_PROFILE) is invalid; use 1, 2 or 3)
 endif
@@ -450,6 +459,9 @@ BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)$(if $(filter-out 0,$(STM32_CLUSTER_PORT)),-cluart$(STM32_CLUSTER_PORT),)
+endif
+ifeq ($(CLUSTER_UART_COM2),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-clcom2
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -1048,6 +1060,9 @@ endif
 # unreachable there.  Building two images with
 # EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=<n> and interleaving the runs gives
 # the same time-adjacent A/B that a runtime switch gives elsewhere.
+ifeq ($(CLUSTER_UART_COM2),1)
+CFLAGS += -DCONFIG_CLUSTER_UART_COM2
+endif
 EXTRA_CFLAGS ?=
 CFLAGS += $(EXTRA_CFLAGS)
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c

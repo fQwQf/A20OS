@@ -28,6 +28,7 @@ static uint32_t g_clx_transport_count;
 static spinlock_t g_clx_rx_lock = SPINLOCK_INIT;
 static clx_rx_item_t g_clx_rx_ring[CLX_RX_RING];
 static uint32_t g_clx_rx_head, g_clx_rx_tail;
+static uint32_t g_clx_rx_bytes, g_clx_rx_peak_bytes;
 static int g_clx_core_ready;
 static uint64_t g_clx_loop_session;
 
@@ -240,6 +241,9 @@ void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
     it->nh_len = nh_len;
     memcpy(it->nh_src, next_hop_src, nh_len);
     g_clx_rx_head = next;
+    g_clx_rx_bytes += len;
+    if (g_clx_rx_bytes > g_clx_rx_peak_bytes)
+        g_clx_rx_peak_bytes = g_clx_rx_bytes;
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
 }
 
@@ -251,6 +255,7 @@ static int clx_rx_pop(clx_rx_item_t *out) {
         return 0;
     }
     *out = g_clx_rx_ring[g_clx_rx_tail];
+    g_clx_rx_bytes -= out->len;
     g_clx_rx_tail = (g_clx_rx_tail + 1) % CLX_RX_RING;
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
     return 1;
@@ -472,8 +477,9 @@ int a20_clx_core_init(void) {
     a20_clx_uart_set_link_event_handler(clx_uart_link_adapter, NULL);
 #endif
 
-    if (proc_alloc(clx_rx_thread) < 0 || proc_alloc(clx_hk_thread) < 0 ||
-        proc_alloc(clx_poll_thread) < 0) {
+    if (proc_alloc_detached(clx_rx_thread) < 0 ||
+        proc_alloc_detached(clx_hk_thread) < 0 ||
+        proc_alloc_detached(clx_poll_thread) < 0) {
         __atomic_store_n(&g_clx_core_ready, 3, __ATOMIC_RELEASE);
         printf("[CLX] core thread spawn failed\n");
         return -A20_ERR_NO_MEMORY;
@@ -652,4 +658,61 @@ void a20_clx_event_push(uint32_t kind, uint32_t node_hash,
 
 uint64_t a20_clx_event_overflows(void) {
     return g_clx_event_overflows;
+}
+
+/* Prepare the selected board stream before a route becomes visible. */
+int a20_clx_uart_prepare_route(const uint8_t *nh, uint32_t len) {
+#ifdef CONFIG_CLUSTER_UART_COM2
+    static int prepared;
+    if (len != 2 || a20_clx_get_le16(nh) != 1)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (__atomic_load_n(&prepared, __ATOMIC_ACQUIRE) == 2)
+        return 0;
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&prepared, &expected, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return -A20_ERR_BUSY;
+    a20_clx_uart_link_cfg_t cfg = {0};
+    a20_node_id_t self;
+    int result = -A20_ERR_NODE_UNREACHABLE;
+    extern int arch_cluster_uart_com2_init(a20_clx_uart_drv_t *);
+    if (a20_clx_self_get(&self, &cfg.caps) == 0 &&
+        arch_cluster_uart_com2_init(&cfg.drv) == 0) {
+        memcpy(cfg.self_node_id, self.bytes, 16);
+        cfg.session = a20_clx_boot_session();
+        cfg.assigned_addr = 1;
+        result = a20_clx_uart_link_register(&cfg) >= 0 ? 0 : -A20_ERR_NO_SPACE;
+    }
+    __atomic_store_n(&prepared, result ? 0 : 2, __ATOMIC_RELEASE);
+    return result;
+#else
+    (void)nh;
+    (void)len;
+    /* Other boards can register links through the byte-driver seam. */
+    return 0;
+#endif
+}
+
+void a20_clx_resources(a20_cluster_resource_args_t *out) {
+    uint64_t *v = out->values;
+    memset(v, 0, sizeof(out->values));
+    v[A20_CLX_STAT_SAMPLE_MS] = timer_get_ticks() * 1000 / TICKS_PER_SEC;
+    v[A20_CLX_STAT_BOOT_EPOCH] = a20_clx_boot_session();
+    v[A20_CLX_STAT_MAX_ROUTES] = CLX_LIMIT_ROUTES;
+    v[A20_CLX_STAT_MAX_EXPORTS] = CLX_LIMIT_SLOTS;
+    v[A20_CLX_STAT_MAX_PROXIES] = CLX_LIMIT_REMOTE_EPS;
+    v[A20_CLX_STAT_MAX_INFLIGHT] = CLX_LIMIT_INFLIGHT;
+    uint64_t flags = spin_lock_irqsave(&g_clx_lock);
+    a20_clx_route_resources(v);
+    a20_clx_export_resources(v);
+    a20_clx_proxy_resources(v);
+    a20_clx_replay_resources(v);
+    spin_unlock_irqrestore(&g_clx_lock, flags);
+    flags = spin_lock_irqsave(&g_clx_rx_lock);
+    v[A20_CLX_STAT_RX_QUEUED] =
+        (g_clx_rx_head + CLX_RX_RING - g_clx_rx_tail) % CLX_RX_RING;
+    v[A20_CLX_STAT_RX_BYTES] = g_clx_rx_bytes;
+    v[A20_CLX_STAT_RX_PEAK_BYTES] = g_clx_rx_peak_bytes;
+    spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    out->generation = 1;
 }

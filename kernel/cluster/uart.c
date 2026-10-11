@@ -751,6 +751,8 @@ void a20_clx_uart_poll_link(int link_id) {
         else if (r < 0)
             l->c.rx_drops++; /* half frame discarded, decoder re-synced */
     }
+    /* HELLO/PONG handlers can read a newer clock during driver I/O. */
+    now = timer_get_ticks();
     /* 04 §4: >50 ms of inter-byte silence kills the half frame. */
     if (a20_clx_slip_rx_timeout(&l->rx, now))
         l->c.rx_drops++;

@@ -66,6 +66,12 @@
 int a20_clx_route_snapshot(a20_cluster_snapshot_args_t *out);
 int a20_clx_export_snapshot(a20_cluster_snapshot_args_t *out);
 uint64_t a20_clx_boot_session(void);
+void a20_clx_resources(a20_cluster_resource_args_t *out);
+/* These collectors require g_clx_lock, and never allocate or sleep. */
+void a20_clx_route_resources(uint64_t *values);
+void a20_clx_export_resources(uint64_t *values);
+void a20_clx_proxy_resources(uint64_t *values);
+void a20_clx_replay_resources(uint64_t *values);
 void a20_clx_directory_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
                           const uint8_t *input);
 
@@ -86,6 +92,7 @@ extern spinlock_t g_clx_lock;
 /* Idempotent.  Registers the loopback (and, DEFAULT tier, UART) transport
  * and spawns the RX + housekeeping threads.  Syscall context only. */
 int a20_clx_core_init(void);
+int a20_clx_uart_prepare_route(const uint8_t *nh, uint32_t len);
 /* Spawns the boot-gated self-check when the command line carries
  * clxselftest=1 (03-§5 step 6).  Called at the end of core_init. */
 void a20_clx_selftest_boot(void);
