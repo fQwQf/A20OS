@@ -49,6 +49,7 @@ static int unplugged;
 static uint8_t received[256];
 static unsigned received_len, replies;
 static int link_up;
+static unsigned link_down_events;
 
 static void wire_put(wire_queue *q, uint8_t byte) {
     assert(!g_uart_lock.held);
@@ -66,6 +67,15 @@ void uart_putc(char c) {
 }
 int uart_try_getc(void) {
     return wire_get(&to_leaf);
+}
+static int leaf_raw_getc(void *ctx) {
+    assert(ctx == &to_leaf);
+    return wire_get(ctx);
+}
+static int leaf_raw_putc(void *ctx, uint8_t byte) {
+    assert(ctx == &to_leaf);
+    wire_put(&to_head, byte);
+    return 0;
 }
 static int head_getc(void *ctx) {
     (void)ctx;
@@ -90,7 +100,21 @@ static void on_link(void *ctx, const uint8_t *nh, uint32_t len, int up) {
     (void)nh;
     assert(len == 2 && !g_uart_lock.held);
     link_up = up;
+    if (!up)
+        link_down_events++;
 }
+static int inject_byte(void *ctx, uint8_t byte) {
+    wire_put((wire_queue *)ctx, byte);
+    return 0;
+}
+static void inject_frame(wire_queue *queue, const uint8_t *frame,
+                         unsigned len) {
+    wire_put(queue, A20_CLX_SLIP_END);
+    for (unsigned i = 0; i < len; i++)
+        assert(a20_clx_slip_emit(frame[i], inject_byte, queue) == 0);
+    wire_put(queue, A20_CLX_SLIP_END);
+}
+
 static void pump(unsigned milliseconds) {
     for (unsigned i = 0; i < milliseconds; i += 5) {
         ticks += 5;
@@ -102,12 +126,15 @@ static void pump(unsigned milliseconds) {
 
 int main(void) {
     a20_mcu_leaf_init();
+    assert(a20_mcu_leaf_set_io(NULL, leaf_raw_getc, &to_leaf) < 0);
+    assert(a20_mcu_leaf_set_io(leaf_raw_putc, leaf_raw_getc, &to_leaf) == 0);
     uint8_t leaf_id[16] = {0};
     leaf_id[15] = 2;
-    a20_mcu_leaf_set_identity(leaf_id);
+    assert(a20_mcu_leaf_configure(leaf_id, 200) == 0);
     a20_clx_uart_link_cfg_t cfg = {0};
     cfg.self_node_id[15] = 1;
     cfg.assigned_addr = 7;
+    cfg.session = 100;
     cfg.drv.getc = head_getc;
     cfg.drv.putc = head_putc;
     int id = a20_clx_uart_link_register(&cfg);
@@ -116,6 +143,9 @@ int main(void) {
     a20_clx_uart_set_link_event_handler(on_link, NULL);
     pump(3000);
     assert(link_up);
+    assert(a20_mcu_leaf_set_io(leaf_raw_putc, leaf_raw_getc, &to_leaf) < 0);
+    uint32_t old_head_cookie = g_uart_hello_counter;
+    uint32_t old_leaf_cookie = leaf_hello_counter;
     a20_mcu_leaf_status_t leaf;
     a20_mcu_leaf_get_status(&leaf);
     assert(leaf.state == A20_MCU_LEAF_UP && leaf.short_addr == 7);
@@ -371,7 +401,70 @@ int main(void) {
                             ticks) == 1);
     puts("test_clx_uart_pair: mixed UART/host job, reliable shards, root "
          "reassign and duplicate reduction passed");
+    /* An old HELLO can request a fresh challenge, but cannot erase the
+     * protected result cache or roll back a peer boot epoch. */
+    uint8_t hello[32], stale[80];
+    uint16_t protected_len = leaf_inflight_len;
+    uint32_t protected_txid = leaf_inflight_txid;
+    unsigned downs = link_down_events;
+    a20_clx_build_hello_payload(cfg.self_node_id, 0, 1, 2, A20_CLX_CAP_RELIABLE,
+                                7, 99, hello);
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_HELLO, 0, 0, 900,
+                            a20_clx_fnv1a32(cfg.self_node_id),
+                            a20_clx_fnv1a32(leaf_id), 0, hello, 32);
+    inject_frame(&to_leaf, stale, n);
+    pump(100);
+    assert(leaf_peer_nonce == 100 && leaf_inflight_len == protected_len &&
+           leaf_inflight_txid == protected_txid && link_down_events == downs);
+    a20_mcu_leaf_init();
+    assert(a20_mcu_leaf_set_io(NULL, leaf_raw_getc, &to_leaf) < 0);
+    assert(a20_mcu_leaf_set_io(leaf_raw_putc, leaf_raw_getc, &to_leaf) == 0);
+    assert(a20_mcu_leaf_configure(leaf_id, 300) == 0);
+    a20_clx_build_hello_payload(leaf_id, 0, 1, 1, A20_CLX_CAP_RELIABLE, 7, 300,
+                                hello);
+    assert(leaf_send(A20_CLX_TYPE_HELLO, 901, a20_clx_fnv1a32(leaf_id),
+                     a20_clx_fnv1a32(cfg.self_node_id), 0, hello, 32) == 0);
+    pump(200);
+    assert(link_up && leaf_state == A20_MCU_LEAF_UP &&
+           a20_clx_uart_session(nh, 2, leaf_id, &local, &remote, &caps) == 0 &&
+           local == 100 && remote == 300 && link_down_events == downs + 1);
+    /* Replay an ACK from before the leaf reboot, then an old leaf HELLO. */
+    a20_clx_put_le64(hello + A20_CLX_HELLO_OFF_NONCE, 200);
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_HELLO_ACK, 0, 0,
+                            old_head_cookie, a20_clx_fnv1a32(leaf_id),
+                            a20_clx_fnv1a32(cfg.self_node_id), 0, hello, 32);
+    inject_frame(&to_head, stale, n);
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_HELLO, 0, 0, 902,
+                            a20_clx_fnv1a32(leaf_id),
+                            a20_clx_fnv1a32(cfg.self_node_id), 0, hello, 32);
+    inject_frame(&to_head, stale, n);
+    pump(100);
+    assert(a20_clx_uart_session(nh, 2, leaf_id, &local, &remote, &caps) == 0 &&
+           remote == 300 && link_down_events == downs + 1);
     assert(a20_clx_uart_link_unregister(id) == 0 && !link_up);
+    cfg.session = 400;
+    id = a20_clx_uart_link_register(&cfg);
+    assert(id >= 0);
+    pump(3000);
+    assert(link_up && leaf_peer_nonce == 400);
+    a20_clx_build_hello_payload(cfg.self_node_id, 0, 1, 2, A20_CLX_CAP_RELIABLE,
+                                7, 100, hello);
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_HELLO_ACK, 0, 0,
+                            old_leaf_cookie, a20_clx_fnv1a32(cfg.self_node_id),
+                            a20_clx_fnv1a32(leaf_id), 0, hello, 32);
+    inject_frame(&to_leaf, stale, n);
+    n = a20_clx_build_frame(stale, sizeof(stale), A20_CLX_TYPE_HELLO, 0, 0, 903,
+                            a20_clx_fnv1a32(cfg.self_node_id),
+                            a20_clx_fnv1a32(leaf_id), 0, hello, 32);
+    inject_frame(&to_leaf, stale, n);
+    pump(100);
+    assert(leaf_peer_nonce == 400 && link_up &&
+           a20_clx_uart_session(nh, 2, leaf_id, &local, &remote, &caps) == 0 &&
+           local == 400 && remote == 300);
+    assert(a20_clx_uart_link_unregister(id) == 0 && !link_up);
+    puts("test_clx_uart_pair: bidirectional challenge, both reboots, stale "
+         "HELLO/ACK, cache preservation and DOWN events passed");
+
     puts("test_clx_uart_pair: handshake, shared dot, reliable replay, cache "
          "pressure, stale session, reconnect, mixed-job reassign and "
          "unregister passed");

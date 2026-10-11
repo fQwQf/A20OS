@@ -240,6 +240,8 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
+# Dedicated raw USART2/3 cluster firmware; 0 preserves the peripheral image.
+STM32_CLUSTER_PORT ?= 0
 # Derive the artifact dirs from BUILD_VARIANT (f<flash>k-r<ram>k[-qemu]) so a
 # change to STM32_FLASH_KB/RAM_KB/STM32_QEMU never desyncs the hardcoded paths.
 STM32_XUANWU_BUILD_DIR = $(BUILD_DIR)
@@ -447,7 +449,7 @@ BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
-BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)$(if $(filter-out 0,$(STM32_CLUSTER_PORT)),-cluart$(STM32_CLUSTER_PORT),)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -1193,8 +1195,19 @@ endif
 ifeq ($(STM32_XUANWU),1)
 CFLAGS += -DCONFIG_STM32_XUANWU
 endif
+ifeq ($(filter $(STM32_CLUSTER_PORT),0 2 3),)
+$(error STM32_CLUSTER_PORT must be 0, 2 or 3; USART1 is the console)
+endif
+ifneq ($(STM32_CLUSTER_PORT),0)
 ifeq ($(STM32_QEMU),1)
-CFLAGS += -DCONFIG_STM32_QEMU
+$(error STM32_CLUSTER_PORT requires a physical STM32 configuration)
+endif
+CFLAGS += -DCONFIG_STM32_CLUSTER_PORT=$(STM32_CLUSTER_PORT)
+endif
+ifeq ($(STM32_QEMU),1)
+# The 8 KiB QEMU probe carries only idle; use the existing bounded timer
+# heap override instead of spending 2.5 KiB on the 64-entry MCU default.
+CFLAGS += -DCONFIG_STM32_QEMU -DCONFIG_WAIT_TIMER_HEAP_MAX=4
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32 loongarch32),)
@@ -1277,7 +1290,8 @@ endif
 
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(LDSCRIPT) $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
 ifeq ($(ARCH),armv7m)
-LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
+LDFLAGS += -Wl,--defsym=CLUSTER_NVRAM_LENGTH=$(if $(filter 1,$(STM32_QEMU)),0,$(if $(filter 16 32 64 128,$(STM32_FLASH_KB)),2,4))K \
+           -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
            -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
 endif
 

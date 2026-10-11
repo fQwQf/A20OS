@@ -1,35 +1,9 @@
 #ifndef _MCU_LEAF_H
 #define _MCU_LEAF_H
 
-/*
- * MCU leaf protocol face -- the leaf half of the cluster UART transport.
- *
- * WC1 track owns kernel/mcu/ (docs/cluster/impl-prompts.md 文件所有权表).
- * This file is the side a STM32-class leaf runs: it only ever ANSWERS.
- * The head-node counterpart lives in kernel/cluster/uart.c; both share the
- * wire codec in kernel/cluster/uart.h so the two ends cannot drift.
- *
- * Spec basis:
- *   docs/cluster/04-transports.md §4  leaf-side constraints: which frame
- *       types are answered, the DISCONNECTED/UP two-state machine, "50s 无
- *       PING 回 DISCONNECTED，短地址作废", the static 512 B RX / 320 B TX
- *       buffers, and the 0xFFFF unassigned-address rule.
- *   docs/cluster/02-wire-protocol.md §6  HELLO payload and short-address
- *       assignment; §2 frame types; §10 counters.
- *   docs/cluster/01-abi.md §能力位  CAP_LEAF: "只应答，不主动建链".
- *
- * Handshake direction (recorded here because 02 §6 can be read two ways):
- * the HEAD dials -- it sends HELLO carrying the assigned short address, the
- * leaf PASSIVELY answers HELLO_ACK.  This is the reading 01-abi's CAP_LEAF
- * ("不主动建链"), 04-§4's "HELLO/HELLO_ACK（被动应答）" and the WC1 brief's
- * "HELLO 被动应答" all agree on.  The 0xFFFF rule then lands as a TX gate:
- * while the leaf holds no assigned address its only lawful output is
- * HELLO-family frames, and since it never originates frames at all, the
- * gate in practice admits only the HELLO_ACK reply.
- *
- * Memory discipline (03-kernel-impl.md §3, MCU tier): every buffer here is
- * static; nothing in this file allocates.
- */
+/* MCU leaf protocol face. The head initiates discovery; a v1 leaf also
+ * challenges the head before adopting its boot epoch. All storage is static.
+ * Board byte I/O can be bound before the first handshake. */
 
 #include "cluster/uart.h"
 #include "cluster/operator.h"
@@ -58,6 +32,13 @@
 #define A20_MCU_LEAF_OP_DOT_SLOT A20_CLX_OPERATOR_DOT
 #define A20_MCU_LEAF_WORK_SLOT 2u
 
+/* Raw binary I/O; transmit returns 0 or -1, receive returns byte or -1.
+ * Callbacks and context must outlive the leaf. Bind only while disconnected.
+ * The default console seam exists for host fixtures; production must bind a
+ * dedicated byte stream without terminal newline conversion. */
+int a20_mcu_leaf_set_io(int (*send)(void *, uint8_t), int (*receive)(void *),
+                        void *ctx);
+
 /* Install a static-lifetime operator registry before the first handshake.
  * The leaf permits one admission, <=140 input bytes, <=168 output bytes,
  * and <=30 s cooperative execution. Process tasks require a hosted agent. */
@@ -78,23 +59,15 @@ int a20_mcu_leaf_configure(const uint8_t node_id[16], uint64_t boot_epoch);
  * override with a20_mcu_leaf_set_identity() before the first HELLO lands.
  */
 void a20_mcu_leaf_init(void);
+void a20_mcu_leaf_disable(void);
 
 /* Replace the leaf's 16-byte node identity (01-abi §节点标识: neither
  * all-zero (LOCAL) nor all-0xff (BROADCAST) may be used on the wire). */
 void a20_mcu_leaf_set_identity(const uint8_t node_id[A20_CLX_NODE_ID_LEN]);
 
-/*
- * The polling pump: drain the UART RX ring through the SLIP decoder, run
- * the 50 ms inter-byte resync and the 50 s idle watchdog.  Call from a
- * periodic thread context; it never blocks for long (one frame's worth of
- * uart_putc busy-wait is the worst case, ~30 ms at 115200 8N1 for a
- * full-MTU frame, 04 §4).
- *
- * Cadence note: the MCU console UART ring (kernel/mcu/uart.c) is 128 B; at
- * 115200 baud it fills in ~11 ms, so the pump period must stay well below
- * that or the ring overflows (the head sees a dropped frame, its timer
- * recovers).  The 5 ms stm32 peripheral-thread loop satisfies this.
- */
+/* Drain at most 64 raw bytes and run handshake/resync/watchdog timers.
+ * Call from one dedicated periodic thread; operator callbacks must be bounded
+ * and cooperative. Production STM32 firmware pumps every 1 ms. */
 void a20_mcu_leaf_poll(void);
 
 /* Observability: state, short address and the 02 §10 counter set. */

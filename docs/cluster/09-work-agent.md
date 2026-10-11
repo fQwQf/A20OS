@@ -50,7 +50,7 @@ MCU 默认发布 dot 槽位 1、work 槽位 2。工作执行无堆分配，最�
 板级代码可在握手前通过 `a20_mcu_leaf_set_agent()` 安装静态生命期的回调表。
 重复 ID、超出静态缓冲、进程回调和不符合单在途预算的注册会拒绝。
 `a20_mcu_leaf_configure()` 接受唯一持久身份与非重复 boot epoch；默认演示值
-仍只用于测试，板级生产配置接入尚未完成。
+仍只用于测试；STM32 main 已接入 UID 与持久 epoch，物理验证尚未完成，见 12 文档。
 
 Native 程序 `cluster-agent-<arch>` 导出 `work` 服务，默认输入/输出预算各 1024 B。
 它有界轮询一个远程 FIFO 与最多 8 个本地连接；本地 connect 的独立 channel

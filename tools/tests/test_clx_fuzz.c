@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #define CONFIG_MCU 1
 #define CONFIG_CLUSTER_PROFILE 1
@@ -85,16 +86,29 @@ int main(void) {
                 a20_clx_put_le16(frame + n - 2,
                                  a20_clx_crc16_ccitt(frame, n - 2));
         }
+        if (mode == 6) {
+            n = 34 + next_random() % 32;
+            frame[A20_CLX_OFF_TYPE] =
+                i & 1 ? A20_CLX_TYPE_HELLO : A20_CLX_TYPE_HELLO_ACK;
+            a20_clx_put_le16(frame + A20_CLX_OFF_PAYLOAD_LEN, n - 34);
+            a20_clx_put_le16(frame + n - 2, a20_clx_crc16_ccitt(frame, n - 2));
+        }
+        /* Exact-size allocations turn reads past actual input into ASan
+         * errors instead of silently reading stale bytes in the 512B arena. */
+        uint8_t *exact = malloc(n ? (unsigned)n : 1u);
+        assert(exact);
+        memcpy(exact, frame, n);
         a20_frame_hdr_t decoded;
         const uint8_t *body;
         a20_frame_verdict_t verdict =
-            a20_frame_decode_session(frame, n, 256, &decoded, &body);
+            a20_frame_decode_session(exact, n, 256, &decoded, &body);
         if (verdict == A20_FRAME_OK) {
             accepted++;
-            assert(body >= frame && body <= frame + n &&
-                   decoded.payload_len <= (uint32_t)(frame + n - body));
+            assert(body >= exact && body <= exact + n &&
+                   decoded.payload_len <= (uint32_t)(exact + n - body));
         }
-        a20_mcu_leaf_on_frame(frame, n);
+        a20_mcu_leaf_on_frame(exact, n);
+        free(exact);
     }
     assert(accepted > 100000 && transmitted > 0 && leaf_c.rx_frames > 1000);
     printf("test_clx_fuzz: 1000000 mutations, %u decoded, firmware dispatch "
