@@ -1464,6 +1464,11 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                  sysv_msg_count(), sysv_sem_count(), sysv_shm_count());
         break;
     }
+    case PF_SYS_KERNEL_OVERFLOW_UID:
+    case PF_SYS_KERNEL_OVERFLOW_GID:
+        snprintf(buf, bufsz, "%d\n",
+                 userns_overflow_id(type == PF_SYS_KERNEL_OVERFLOW_GID));
+        break;
     case PF_SYS_KERNEL_HOSTNAME: {
         extern const char *linux_kernel_hostname(void);
         snprintf(buf, bufsz, "%s\n", linux_kernel_hostname());
