@@ -30,6 +30,7 @@
 #include "mm/swap.h"
 #include "core/timer.h"
 #include "core/timekeeping.h"
+#include "core/smp.h"
 #include "core/perf.h"
 #include "core/lock_counters.h"
 #include "core/string.h"
@@ -50,6 +51,11 @@
 extern size_t  frame_free_count(void);
 extern int     vfs_mount_count(void);
 extern struct mount *vfs_mount_at(int index);
+
+__attribute__((weak)) int arch_cpuinfo_fields(char *buf, size_t size)
+{
+    return snprintf(buf, size, "model name\t: %s\n", ARCH_NAME);
+}
 
 /*
  * On-demand content generation for the synthetic /proc files.  Split out of
@@ -699,13 +705,19 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
          * the same content here. */
         snprintf(buf, bufsz, "%s\n", bootargs_get() ? bootargs_get() : "");
         break;
-    case PF_CPUINFO:
-        snprintf(buf, bufsz,
-            "processor\t: 0\n"
-            "hart\t\t: 0\n"
-            "isa\t\t: rv64gc\n"
-            "mmu\t\t: sv39\n\n");
+    case PF_CPUINFO: {
+        size_t off = 0;
+        uint32_t online = smp_online_cpu_mask();
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+            if (!(online & (1U << cpu)))
+                continue;
+            appendf(buf, bufsz, &off, "processor\t: %u\n", cpu);
+            char fields[256];
+            arch_cpuinfo_fields(fields, sizeof(fields));
+            appendf(buf, bufsz, &off, "%s\n", fields);
+        }
         break;
+    }
     case PF_MOUNTS: {
         buf[0] = '\0';
         int pos = 0;

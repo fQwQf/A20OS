@@ -284,7 +284,7 @@ static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
         task_t *cur = proc_current();
         real_pid = cur ? cur->pid : 0;
     }
-    if (type == PF_PID_PAGEMAP || type == PF_PID_MAPS ||
+    if (type == PF_CPUINFO || type == PF_PID_PAGEMAP || type == PF_PID_MAPS ||
         type == PF_PID_SMAPS || type == PF_PID_FDINFO_ENTRY) {
         m->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
         if (type != PF_PID_PAGEMAP)
@@ -330,14 +330,17 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
             return NULL;
         }
     } else {
-        p->content = kmalloc(4096);
+        /* CPU records scale with the configured SMP capacity. */
+        size_t capacity = type == PF_CPUINFO ?
+                          512 * CONFIG_NR_CPUS + 1 : 4096;
+        p->content = kmalloc(capacity);
         if (!p->content) {
             kfree(p);
             return NULL;
         }
         int len = type == PF_PID_FDINFO_ENTRY ?
-            generate_pid_fdinfo(real_pid, fd, p->content, 4096) :
-            generate_content(type, real_pid, p->content, 4096);
+            generate_pid_fdinfo(real_pid, fd, p->content, capacity) :
+            generate_content(type, real_pid, p->content, capacity);
         if (len < 0) {
             kfree(p->content);
             kfree(p);

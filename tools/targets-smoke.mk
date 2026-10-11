@@ -624,6 +624,10 @@ smoke-futex-stress:
 smoke-futex-stress-aarch64:
 	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64
 
+.PHONY: smoke-cpuinfo
+smoke-cpuinfo:
+	$(PYTHON) tools/smoke.py smoke-cpuinfo
+
 .PHONY: smoke-sigchld-group
 smoke-sigchld-group:
 	$(PYTHON) tools/smoke.py smoke-sigchld-group
