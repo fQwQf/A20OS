@@ -97,6 +97,7 @@ typedef struct proc_limits {
 typedef struct proc_policy {
     int oom_score_adj;
     int thp_disabled;
+    int no_new_privs;
     int mempolicy_mode;
     uint64_t mempolicy_nmask;
 } proc_policy_t;

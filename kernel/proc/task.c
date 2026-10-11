@@ -187,6 +187,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->cred.cap_bounding = parent ? parent->cred.cap_bounding : ~(uint64_t)0;
     t->policy.oom_score_adj = parent ? parent->policy.oom_score_adj : 0;
     t->policy.thp_disabled = parent ? parent->policy.thp_disabled : 0;
+    t->policy.no_new_privs = parent ? parent->policy.no_new_privs : 0;
     t->clone_flags = 0;
     t->exit_signal = SIGCHLD;
     t->clear_child_tid = NULL;
