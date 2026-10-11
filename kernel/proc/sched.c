@@ -664,60 +664,31 @@ static int sched_task_linked_locked(task_t *target)
 
 /*
  * SMP_RUNQUEUE_MIGRATION_PROTOCOL:
- * A queued task moves from source to destination while the task's park_lock
- * and both runqueue locks are held. Runqueue locks are always acquired by
- * ascending CPU
- * number and released in reverse order. cpu_id changes only during the
- * on_rq=0 interval protected by those locks; the runqueue-owned task reference
- * is transferred without a put/get gap.
+ * Detach a queued task before changing its scheduling keys. park_lock keeps
+ * wakers away; the source runqueue lock excludes picks/steals. The caller
+ * retains the queue reference until it re-enqueues or cancels the task.
  */
-static void sched_runq_requeue_locked(task_t *t, unsigned dst_cpu,
-                                      int old_level)
+static int sched_runq_detach_locked(task_t *t)
 {
-    if (!t || !t->on_rq || t->state != PROC_READY ||
-        t->cpu_id >= CONFIG_NR_CPUS || dst_cpu >= CONFIG_NR_CPUS) {
-        __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
-        return;
+    if (!t || !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) return 0;
+    unsigned cpu = __atomic_load_n(&t->cpu_id, __ATOMIC_RELAXED);
+    if (cpu >= CONFIG_NR_CPUS) return 0;
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    proc_runq_t *rq = &sched_runq[cpu];
+    if (!t->on_rq || t->cpu_id != cpu) {
+        RUNQ_UNLOCK_IRQ(cpu, rf);
+        return 0;
     }
-
-    unsigned src_cpu = t->cpu_id;
-    unsigned first = src_cpu < dst_cpu ? src_cpu : dst_cpu;
-    unsigned second = src_cpu < dst_cpu ? dst_cpu : src_cpu;
-    uint64_t first_flags = RUNQ_LOCK_IRQ(first);
-    uint64_t second_flags = 0;
-    if (second != first)
-        second_flags = RUNQ_LOCK_IRQ(second);
-
-    proc_runq_t *src = &sched_runq[src_cpu];
-    proc_runq_t *dst = &sched_runq[dst_cpu];
-    if (sched_level_clamp(old_level) == 0)
-        rt_unlink_locked(src, t);
+    if (sched_task_rt(t)) rt_unlink_locked(rq, t);
     else {
-        eevdf_remove_locked(src, t);
-        sched_runq_eevdf_del_weight(src, t);
+        eevdf_remove_locked(rq, t);
+        sched_runq_eevdf_del_weight(rq, t);
     }
     t->on_rq = 0;
-    if (src_cpu != dst_cpu) {
-        if (__atomic_load_n(&src->nr_running, __ATOMIC_RELAXED) > 0)
-            __atomic_fetch_sub(&src->nr_running, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&dst->nr_running, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&sched_runqueue_migrations, 1,
-                           __ATOMIC_RELAXED);
-    }
-
-    int new_level = sched_task_rt(t) ? 0 : EEVDF_LEVEL;
-    t->cpu_id = dst_cpu;
-    t->sched_level = new_level;
-    t->ready_since = timer_get_ticks();
-    if (new_level == 0)
-        rt_enqueue_locked(dst, t);
-    else
-        eevdf_insert_locked(dst, t);
-    t->on_rq = 1;
-
-    if (second != first)
-        RUNQ_UNLOCK_IRQ(second, second_flags);
-    RUNQ_UNLOCK_IRQ(first, first_flags);
+    t->ready_since = 0;
+    __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
+    RUNQ_UNLOCK_IRQ(cpu, rf);
+    return 1;
 }
 
 uint32_t proc_sched_effective_affinity(task_t *t)
@@ -763,9 +734,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if (!t || !config || (config->fields & ~all_fields))
         return -1;
 
-    /* D': policy/priority/nice/affinity are written together with the queue
-     * position they imply, and sched_runq_requeue_locked() nests the two
-     * runqueue locks (CPU order ascending) inside this park_lock. */
+    /* Remove the old queue entry before changing keys: pickers use only
+     * runqueue locks, so park_lock alone does not protect queued keys. */
     uint64_t lock_flags = spin_lock_irqsave(&t->park_lock);
     if (!sched_task_linked_locked(t))
         goto invalid;
@@ -784,6 +754,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if ((config->fields & PROC_SCHED_NICE) &&
         (config->nice < -20 || config->nice > 19))
         goto invalid;
+    uint32_t affinity_eligible = 0;
     if (config->fields & PROC_SCHED_AFFINITY) {
         uint32_t eligible = config->affinity & smp_online_cpu_mask();
         if (t->cgroup) {
@@ -792,6 +763,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         }
         if (!eligible)
             goto invalid;
+        affinity_eligible = eligible;
         /* INV-P4b: dispatching/owner_cpu are runq publications, so they are
          * read atomically rather than under this task's park_lock. */
         if ((t->on_cpu || __atomic_load_n(&t->dispatching, __ATOMIC_RELAXED)) &&
@@ -801,10 +773,14 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
             goto invalid;
     }
 
-    int ready = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED) &&
-                t->state == PROC_READY;
+    int ready = sched_runq_detach_locked(t);
+    /* A picker may have won since the earlier affinity validation. Its
+     * owner is stable while we hold park_lock; reject exclusion before
+     * changing any attributes. */
+    if ((config->fields & PROC_SCHED_AFFINITY) && t->dispatching &&
+        (t->owner_cpu >= 32 || !(affinity_eligible & (1U << t->owner_cpu))))
+        goto invalid;
     unsigned old_cpu = t->cpu_id;
-    int old_level = t->sched_level;
     int old_nice = sched_nice_value(t);
     int old_rt = sched_policy_rt_value(t->sched_policy);
     if (config->fields & PROC_SCHED_POLICY) {
@@ -843,15 +819,15 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
             target_cpu = proc_sched_select_cpu_locked(t);
     }
 
-    int queue_fields_changed =
-        (config->fields &
-         (PROC_SCHED_POLICY | PROC_SCHED_PRIORITY | PROC_SCHED_NICE)) != 0;
-    if (ready && (queue_fields_changed || target_cpu != old_cpu))
-        sched_runq_requeue_locked(t, target_cpu, old_level);
-    else if (!ready && !t->on_cpu &&
-             !__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
-             !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED))
+    if (ready) {
         t->cpu_id = target_cpu;
+        proc_runq_enqueue_locked(t);
+        if (old_cpu != target_cpu)
+            __atomic_fetch_add(&sched_runqueue_migrations, 1, __ATOMIC_RELAXED);
+        proc_put(t); /* replaced the detached queue reference */
+    } else if (!t->on_cpu && !t->dispatching && !t->on_rq) {
+        t->cpu_id = target_cpu;
+    }
 
     int queued = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
     int priority_preempt =
@@ -1624,26 +1600,7 @@ int proc_runq_enqueue_locked(task_t *t) {
 
 /* Remove a queued task.  Caller must hold the task's park_lock. */
 void proc_runq_remove_locked(task_t *t) {
-    if (!t || !t->on_rq)
-        return;
-
-    unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
-    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
-    proc_runq_t *rq = &sched_runq[cpu];
-
-    int q = sched_level_clamp(t->sched_level);
-    if (q == 0)
-        rt_unlink_locked(rq, t);
-    else {
-        eevdf_remove_locked(rq, t);
-        sched_runq_eevdf_del_weight(rq, t);
-    }
-    t->on_rq = 0;
-    t->ready_since = 0;
-    if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
-    RUNQ_UNLOCK_IRQ(cpu, rf);
-    proc_put(t);
+    if (sched_runq_detach_locked(t)) proc_put(t);
 }
 
 /*
@@ -1693,12 +1650,14 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         t->rq_prev = NULL;
         if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) > 0)
             __atomic_fetch_sub(&rrq->nr_running, 1, __ATOMIC_RELAXED);
-        spin_unlock_irqrestore(&rrq->lock, rrf);
-
-        /* Publish dispatch ownership under the (held) local runqueue lock. */
+        /* Transfer ownership before releasing the source queue. A waker
+         * must never observe an unqueued task without a dispatch owner:
+         * it could enqueue a second copy during that gap. Both source and
+         * destination queues are locked until this publication is complete. */
         t->cpu_id = local;
         t->dispatching = 1;
         t->owner_cpu = local;
+        spin_unlock_irqrestore(&rrq->lock, rrf);
         t->rq_next = NULL;
         t->rq_prev = NULL;
         __atomic_fetch_add(&sched_runqueue_migrations, 1, __ATOMIC_RELAXED);
@@ -1802,7 +1761,7 @@ task_t *proc_runq_pick_local(void)
 static void sched_runq_unpick_locked(task_t *t)
 {
     if (!t || !t->dispatching || t->on_rq || t->on_cpu ||
-        t->owner_cpu >= CONFIG_NR_CPUS || t->state != PROC_READY) {
+        t->owner_cpu >= CONFIG_NR_CPUS) {
         __atomic_fetch_add(&sched_violations, 1, __ATOMIC_RELAXED);
         return;
     }
@@ -1813,6 +1772,13 @@ static void sched_runq_unpick_locked(task_t *t)
     int q = sched_task_rt(t) ? 0 : sched_level_clamp(t->sched_level);
     t->dispatching = 0;
     t->owner_cpu = PROC_CPU_NONE;
+    if (t->state != PROC_READY || !t->kstack) {
+        /* Exit/stop can win after the pick. Cancel the dispatch reference
+         * instead of leaving the task permanently marked as selected. */
+        RUNQ_UNLOCK_IRQ(cpu, rf);
+        proc_put(t);
+        return;
+    }
     t->cpu_id = cpu;
     t->sched_level = q;
     t->ready_since = timer_get_ticks();
