@@ -1238,6 +1238,14 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     task_t *t = proc_current();
+    if (op == PR_GET_DUMPABLE)
+        return t && t->mm ? mm_dumpable(t->mm) : -ESRCH;
+    if (op == PR_SET_DUMPABLE) {
+        if (!t || !t->mm) return -ESRCH;
+        if (a1 > 1) return -EINVAL;
+        mm_set_dumpable(t->mm, (int)a1);
+        return 0;
+    }
     if (op == PR_SET_PDEATHSIG) {
         /* One-shot signal delivered to the child when its parent dies.  A
          * signal number >= _NSIG is rejected; a parent that is already gone

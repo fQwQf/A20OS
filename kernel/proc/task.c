@@ -459,8 +459,12 @@ int proc_task_may_access(const task_t *caller, const task_t *target)
     uint64_t cf = 0, tf = 0;
     proc_lock_two_tasks(a, b, &cf, &tf);
     int allowed = caller->tgid == target->tgid ||
-        proc_has_cap(caller, CAP_SYS_PTRACE) ||
-        (caller->cred.fsuid == target->cred.uid &&
+        userns_capable(caller, userns_task_own((task_t *)target), CAP_SYS_PTRACE) ||
+        (mm_dumpable(target->mm) == 1 &&
+         caller->cred.fsgid == target->cred.gid &&
+         caller->cred.fsgid == target->cred.egid &&
+         caller->cred.fsgid == target->cred.sgid &&
+         caller->cred.fsuid == target->cred.uid &&
          caller->cred.fsuid == target->cred.euid &&
          caller->cred.fsuid == target->cred.suid);
     proc_unlock_two_tasks(a, b, cf, tf);

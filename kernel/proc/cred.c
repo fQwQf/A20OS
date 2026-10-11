@@ -1,5 +1,6 @@
 #include "proc/cred.h"
 #include "core/errno.h"
+#include "mm/vm.h"
 
 /*
  * POSIX credential transition rules — ABI-agnostic process subsystem.
@@ -48,12 +49,14 @@ static void cred_update_uid_caps(task_t *t, int old_uid, int old_euid,
 int cred_setuid(task_t *t, int uid) {
     if (cred_is_root(t)) {
         int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
+        if (uid != t->cred.euid || uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
         t->cred.uid = t->cred.euid = t->cred.suid = t->cred.fsuid = uid;
         cred_update_uid_caps(t, old_uid, old_euid, old_suid);
         return 0;
     }
     if (!uid_is_current(t, uid)) return -EPERM;
     int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
+    if (uid != t->cred.euid || uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
     t->cred.euid = t->cred.fsuid = uid;
     cred_update_uid_caps(t, old_uid, old_euid, old_suid);
     return 0;
@@ -61,10 +64,12 @@ int cred_setuid(task_t *t, int uid) {
 
 int cred_setgid(task_t *t, int gid) {
     if (cred_can_setgid(t)) {
+        if (gid != t->cred.egid || gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
         t->cred.gid = t->cred.egid = t->cred.sgid = t->cred.fsgid = gid;
         return 0;
     }
     if (!gid_is_current(t, gid)) return -EPERM;
+    if (gid != t->cred.egid || gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
     t->cred.egid = t->cred.fsgid = gid;
     return 0;
 }
@@ -76,7 +81,10 @@ int cred_setreuid(task_t *t, int ruid, int euid) {
     }
     int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
     if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) t->cred.euid = t->cred.fsuid = euid;
+    if (euid != -1) {
+        if (euid != t->cred.euid || euid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
+        t->cred.euid = t->cred.fsuid = euid;
+    }
     if (ruid != -1 || euid != -1) t->cred.suid = t->cred.euid;
     cred_update_uid_caps(t, old_uid, old_euid, old_suid);
     return 0;
@@ -88,7 +96,10 @@ int cred_setregid(task_t *t, int rgid, int egid) {
         if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
     }
     if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) t->cred.egid = t->cred.fsgid = egid;
+    if (egid != -1) {
+        if (egid != t->cred.egid || egid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
+        t->cred.egid = t->cred.fsgid = egid;
+    }
     if (rgid != -1 || egid != -1) t->cred.sgid = t->cred.egid;
     return 0;
 }
@@ -101,7 +112,10 @@ int cred_setresuid(task_t *t, int ruid, int euid, int suid) {
     }
     int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
     if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) t->cred.euid = t->cred.fsuid = euid;
+    if (euid != -1) {
+        if (euid != t->cred.euid || euid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
+        t->cred.euid = t->cred.fsuid = euid;
+    }
     if (suid != -1) t->cred.suid = suid;
     cred_update_uid_caps(t, old_uid, old_euid, old_suid);
     return 0;
@@ -114,22 +128,29 @@ int cred_setresgid(task_t *t, int rgid, int egid, int sgid) {
         if (sgid != -1 && !gid_is_current(t, sgid)) return -EPERM;
     }
     if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) t->cred.egid = t->cred.fsgid = egid;
+    if (egid != -1) {
+        if (egid != t->cred.egid || egid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
+        t->cred.egid = t->cred.fsgid = egid;
+    }
     if (sgid != -1) t->cred.sgid = sgid;
     return 0;
 }
 
 int cred_setfsuid(task_t *t, int uid) {
     int old = t->cred.fsuid;
-    if (uid >= 0 && (cred_is_root(t) || uid_is_current(t, uid)))
+    if (uid >= 0 && (cred_is_root(t) || uid_is_current(t, uid))) {
+        if (uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
         t->cred.fsuid = uid;
+    }
     return old;
 }
 
 int cred_setfsgid(task_t *t, int gid) {
     int old = t->cred.fsgid;
-    if (gid >= 0 && (cred_can_setgid(t) || gid_is_current(t, gid)))
+    if (gid >= 0 && (cred_can_setgid(t) || gid_is_current(t, gid))) {
+        if (gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
         t->cred.fsgid = gid;
+    }
     return old;
 }
 
