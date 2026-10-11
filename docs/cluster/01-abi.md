@@ -118,6 +118,9 @@ python3 tools/check-cluster-udp.py --faults --restart
 验收状态、物理硬件边界和剩余功能见 [08-implementation-status.md](08-implementation-status.md)。
 
 `cluster_snapshot` 的只读枚举与恢复契约见 [09-work-agent.md](09-work-agent.md)。
+kind=3/4/5 分别提供运行资源、重组资源与聚合链路计数，仍使用同一 192 B
+信封；链路统计包含此前只保存在内核中的 malformed 计数。指标与诊断边界见
+[20-hardening.md](20-hardening.md)。
 
 ## cluster_connect v2：绑定解析得到的启动会话
 

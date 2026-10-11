@@ -1496,7 +1496,7 @@ KERNEL PANIC: init: no init program found
 `/bin/init` ENOENT。`mdir` 显示镜像里 `init` 在根目录，根本没有 `/bin` 目录。
 riscv64 能跑起来是因为它走的是另一条路径，两个镜像的目录结构其实一样。
 
-失败点在 `kernel/drvmod/loader.c:1485`：
+失败点在 `kernel/drvmod/loader.c:789`：
 
 ```c
 if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,

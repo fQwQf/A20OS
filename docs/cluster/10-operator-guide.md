@@ -72,9 +72,12 @@ clusterd 先确认邻居，再传播有界成员页和租约路由；目录与�
 | 服务名找到但调用失败 | CW QUERY 和 Native 资源快照 | 比较输入/输出、算子 ID、budget、max_inflight 与路径 MTU |
 | 大消息不进展 | `cluster_snapshot(kind=4)` | 检查分片资格、重组拒绝/超时、槽位和字节峰值 |
 | 偶发缓存忙 | kind=3、重试/收据统计 | 查看未接纳重试与放弃收据；MCU 单缓存不得被强制逐出后重复执行 |
+| 链路存在但丢帧增长 | `cluster_snapshot(kind=5)` | 分开查看 malformed、策略 drops 与重传；核对 CRC、身份/地址绑定和 TTL |
 | 停止后资源仍增长 | kind=3 与 `/proc/a20/task_lifetime` | 分别检查代理/重试字节归零、任务和僵尸恢复；回复保留内存不等同泄漏 |
 
-Native SDK 包装为 `a20_cluster_resources` 和 `a20_cluster_reassembly_resources`。
+Native SDK 包装为 `a20_cluster_resources`、`a20_cluster_reassembly_resources`
+和 `a20_cluster_link_resources`，计数口径与故障复现见
+[20-hardening.md](20-hardening.md)。
 监管状态服务 LOCAL_ONLY；它返回统计，不能用于远程执行管理命令。当前没有
 完整交互式 clusterctl，以上检查应通过 SDK 或已提供的验收程序执行。
 
@@ -97,6 +100,7 @@ leaf/网关小拓扑，再逐批升级完整主机。不能用升级操作重置
 make check-cluster-unit check-cluster-fuzz
 make smoke-native-cluster smoke-native-cluster-supervisor
 make check-cluster-reliable check-cluster-mesh
+make check-cluster-hardening
 python3 tools/check-cluster-gateway.py --gossip --abandon
 make demo-wordcount
 ```

@@ -419,6 +419,8 @@ help:
 	  '  Gates -- need a cross toolchain and/or QEMU' \
 	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
 	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
+	  '    make check-cluster-hardening   random loss/delay/CRC/flood/partition acceptance' \
+	  '    make demo-wordcount            sixteen shards over eight servers or a mixed MCU cluster' \
 	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
 	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
 	  '    make check-concurrency-foundation  SMP lock-model contract, builds a 2-CPU config' \

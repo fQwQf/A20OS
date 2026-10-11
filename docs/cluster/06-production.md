@@ -85,6 +85,9 @@
 ## 5. CI 与回归门禁
 
 - 新 make 目标（风格对齐现有 `check-*`）：`check-cluster-unit`（金样+单元）、`check-cluster-loopback`（P-集成-1）、`check-cluster-udp`（P-集成-2/3，脚本化双 QEMU）、`check-cluster-fuzz-smoke`（模糊 5 分钟档）。
+- 已落地的硬化入口为 `make check-cluster-hardening`，实际注入范围、计数口径和
+  未完成项见 [20-hardening.md](20-hardening.md)；现有 `check-cluster-fuzz` 是
+  ASan/UBSan 的有界确定性档，不能声称是尚未实现的 5 分钟 fuzz 目标。
 - 进 `.github/workflows/ci.yml` 的从 `print-ci-kernel-arches` 派生的矩阵惯例，不允许手工硬编码架构清单（Makefile 顶部注释的既有教训）。
 - 全量既有门禁零回归是合入前提：`make help` 列出的默认 check 目标。
 

@@ -13,8 +13,9 @@
 static a20_channel_ep_t *udp_test_server;
 static a20_channel_ep_t *udp_test_operator;
 static a20_channel_ep_t *udp_test_agent;
-static uint8_t udp_test_seen[96];
+static uint8_t udp_test_seen[1000];
 static uint32_t udp_test_executed, udp_test_duplicate;
+static uint32_t udp_slow_executed;
 static uint8_t udp_large_seen[8];
 static uint32_t udp_large_executed, udp_large_duplicate;
 static int udp_large_peer_done;
@@ -82,6 +83,11 @@ static void udp_test_echo(void) {
         } else if (len == 8 && a20_clx_get_le32(buf) == 0x73746174u) {
             a20_clx_put_le32(buf, udp_test_executed);
             a20_clx_put_le32(buf + 4, udp_test_duplicate);
+        } else if (len == 8 && a20_clx_get_le32(buf) == 0x776f6c73u) {
+            udp_slow_executed++;
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(10000));
+        } else if (len == 8 && a20_clx_get_le32(buf) == 0x74736c73u) {
+            a20_clx_put_le32(buf, udp_slow_executed);
         }
         if (len > 1400 && a20_clx_get_le32(buf) == 0x67617266u) {
             unsigned index = a20_clx_get_le32(buf + 4);
@@ -190,6 +196,7 @@ static int udp_test_large(const a20_node_id_t *peer) {
 
 static void udp_test_main(void) {
     const char *args = bootargs_get();
+    unsigned rounds = args && strstr(args, "clxudpstress=1") ? 1000 : 96;
     int side_b = args && strstr(args, "clxudptest=b");
     int relay = args && strstr(args, "clxudptest=r");
     int routed = args && strstr(args, "clxudprouted=1");
@@ -314,7 +321,7 @@ static void udp_test_main(void) {
            ok ? "PASS" : "FAIL");
     ep = a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
     ok = ep != NULL;
-    for (uint32_t i = 0; ok && i < sizeof(udp_test_seen); i++) {
+    for (uint32_t i = 0; ok && i < rounds; i++) {
         uint8_t request[64] = {0}, reply[64];
         a20_clx_put_le32(request, 0x72656c79u);
         a20_clx_put_le32(request + 4, i);
@@ -330,12 +337,43 @@ static void udp_test_main(void) {
     ok = ok &&
          a20_channel_send(ep, stats, sizeof(stats), NULL, 0, NULL, 0) == 0 &&
          a20_channel_recv(ep, stats, &stats_len, NULL, NULL, NULL, 0) == 0 &&
-         stats_len == sizeof(stats) && a20_clx_get_le32(stats) == 96 &&
+         stats_len == sizeof(stats) && a20_clx_get_le32(stats) == rounds &&
          a20_clx_get_le32(stats + 4) == 0;
     if (ep)
         a20_channel_ep_release(ep);
-    printf("[CLX-UDP-TEST] node=%c reliable-96-at-most-once: %s\n",
-           side_b ? 'b' : 'a', ok ? "PASS" : "FAIL");
+    printf("[CLX-UDP-TEST] node=%c reliable-%u-at-most-once: %s\n",
+           side_b ? 'b' : 'a', rounds, ok ? "PASS" : "FAIL");
+    a20_cluster_resource_args_t observed = {0};
+    if (args && strstr(args, "clxudpcorrupt=1")) {
+        a20_clx_link_resources(&observed);
+        printf("[CLX-UDP-TEST] node=%c crc-counter: %s malformed=%lu\n",
+               side_b ? 'b' : 'a',
+               observed.values[A20_CLX_LINK_RX_MALFORMED] ? "PASS" : "FAIL",
+               (unsigned long)observed.values[A20_CLX_LINK_RX_MALFORMED]);
+    }
+    if (args && strstr(args, "clxudpflood=1")) {
+        uint64_t wait = timer_get_ticks();
+        do {
+            a20_clx_link_resources(&observed);
+            if (observed.values[A20_CLX_LINK_RX_DROPS] >= 1000)
+                break;
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(10));
+        } while (timer_get_ticks() - wait < MS_TO_TICKS(5000));
+        uint64_t links = observed.values[A20_CLX_LINK_COUNT];
+        uint64_t drops = observed.values[A20_CLX_LINK_RX_DROPS];
+        a20_clx_resources(&observed);
+        /* A failed pre-session send can also create the adapter-0 bucket. */
+        ok = drops >= 1000 && links <= 2 &&
+             observed.values[A20_CLX_STAT_ROUTES] == 1 &&
+             observed.values[A20_CLX_STAT_EXPORTS] == 3 &&
+             observed.values[A20_CLX_STAT_ORIGINS] == 1;
+        printf("[CLX-UDP-TEST] node=%c hello-flood-bounded: %s drops=%lu "
+               "links=%lu routes=%lu origins=%lu\n",
+               side_b ? 'b' : 'a', ok ? "PASS" : "FAIL", (unsigned long)drops,
+               (unsigned long)links,
+               (unsigned long)observed.values[A20_CLX_STAT_ROUTES],
+               (unsigned long)observed.values[A20_CLX_STAT_ORIGINS]);
+    }
     ok = udp_test_large(&peer);
     a20_clx_link_status_fill(&peer, &state, &rtt, &tx, &rx, &tx_drop, &rx_drop,
                              &retransmit, &hello_age);
@@ -495,6 +533,88 @@ static void udp_test_main(void) {
             a20_channel_ep_release(ep);
         printf("[CLX-UDP-TEST] node=%c bounded-blackhole: %s\n",
                side_b ? 'b' : 'a', ok ? "PASS" : "FAIL");
+    }
+    if (!side_b && args && strstr(args, "clxudpslow=1")) {
+        uint8_t slow[8] = {0};
+        a20_clx_put_le32(slow, 0x776f6c73u);
+        ep = a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
+        uint64_t started = timer_get_ticks();
+        ok = ep &&
+             a20_channel_send(ep, slow, sizeof(slow), NULL, 0, NULL, 0) == 0;
+        int64_t received = -A20_ERR_WOULD_BLOCK;
+        while (ok && timer_get_ticks() - started < MS_TO_TICKS(2000)) {
+            len = sizeof(slow);
+            received = a20_channel_recv(ep, slow, &len, NULL, NULL, NULL,
+                                        A20_MSG_NONBLOCK);
+            if (received != -A20_ERR_WOULD_BLOCK)
+                break;
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(5));
+        }
+        /* The Native job driver enforces an attempt budget by closing its
+         * endpoint; this exercises the same retirement during execution. */
+        ok = ok && received == -A20_ERR_WOULD_BLOCK &&
+             timer_get_ticks() - started <= MS_TO_TICKS(2500);
+        if (ep)
+            a20_channel_ep_release(ep);
+        proc_sleep_until(started + MS_TO_TICKS(12000));
+        ep = a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
+        a20_clx_put_le32(slow, 0x74736c73u);
+        len = sizeof(slow);
+        ok = ok && ep &&
+             a20_channel_send(ep, slow, sizeof(slow), NULL, 0, NULL, 0) == 0 &&
+             a20_channel_recv(ep, slow, &len, NULL, NULL, NULL, 0) == 0 &&
+             len == sizeof(slow) && a20_clx_get_le32(slow) == 1;
+        if (ep)
+            a20_channel_ep_release(ep);
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(200));
+        a20_clx_resources(&observed);
+        ok = ok && !observed.values[A20_CLX_STAT_INFLIGHT] &&
+             !observed.values[A20_CLX_STAT_INFLIGHT_BYTES];
+        printf("[CLX-UDP-TEST] node=a slow-consumer-recovered: %s\n",
+               ok ? "PASS" : "FAIL");
+    }
+    if (!side_b && args && strstr(args, "clxudppartition=1")) {
+        printf("[CLX-UDP-TEST] node=a partition-ready: PASS\n");
+        uint64_t started = timer_get_ticks();
+        proc_sleep_until(started + MS_TO_TICKS(250));
+        ep = a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
+        uint8_t isolated[8] = {0};
+        ok = ep && a20_channel_send(ep, isolated, sizeof(isolated), NULL, 0,
+                                    NULL, 0) == 0;
+        int saw_suspect = 0;
+        int64_t received = -A20_ERR_WOULD_BLOCK;
+        while (ok && timer_get_ticks() - started <= MS_TO_TICKS(15000)) {
+            a20_clx_link_resources(&observed);
+            saw_suspect |= observed.values[A20_CLX_LINK_SUSPECT_COUNT] != 0;
+            len = sizeof(isolated);
+            received = a20_channel_recv(ep, isolated, &len, NULL, NULL, NULL,
+                                        A20_MSG_NONBLOCK);
+            if (received != -A20_ERR_WOULD_BLOCK)
+                break;
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(10));
+        }
+        ok = ok && saw_suspect && received == -A20_ERR_CANCELED &&
+             timer_get_ticks() - started <= MS_TO_TICKS(15000);
+        if (ep)
+            a20_channel_ep_release(ep);
+        printf("[CLX-UDP-TEST] node=a partition-canceled: %s\n",
+               ok ? "PASS" : "FAIL");
+        proc_sleep_until(started + MS_TO_TICKS(32000));
+        for (unsigned i = 0; ok && i < 1000; i++) {
+            a20_clx_link_status_fill(&peer, &state, &rtt, &tx, &rx, &tx_drop,
+                                     &rx_drop, &retransmit, &hello_age);
+            if (state == A20_CLX_LINK_UP)
+                break;
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(10));
+        }
+        ep = a20_clx_proxy_create(&peer, 1, A20_CONNECT_RELIABLE, &err);
+        const uint8_t recovered[] = "partition-recovered";
+        ok = ok && state == A20_CLX_LINK_UP &&
+             udp_test_roundtrip(ep, recovered, sizeof(recovered));
+        if (ep)
+            a20_channel_ep_release(ep);
+        printf("[CLX-UDP-TEST] node=a partition-recovered: %s\n",
+               ok ? "PASS" : "FAIL");
     }
     if (!side_b && args && strstr(args, "clxudprestart=1")) {
         uint64_t local_session, previous_session, new_session = 0;

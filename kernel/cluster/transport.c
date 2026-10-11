@@ -101,6 +101,15 @@ void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,
     spin_unlock_irqrestore(&g_clx_links_lock, flags);
 }
 
+void a20_clx_link_state_note(uint32_t transport_id, const uint8_t *nh,
+                             uint32_t nh_len, uint32_t state) {
+    uint64_t irq = spin_lock_irqsave(&g_clx_links_lock);
+    clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
+    if (l)
+        l->state = state;
+    spin_unlock_irqrestore(&g_clx_links_lock, irq);
+}
+
 void a20_clx_link_tx_drop(uint32_t transport_id, const uint8_t *nh,
                           uint32_t nh_len) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
@@ -534,6 +543,15 @@ static int clx_uart_session_wrap(void *ctx, const uint8_t *nh, uint32_t len,
 static void clx_uart_poll_wrap(void *ctx) {
     (void)ctx;
     a20_clx_uart_poll_all();
+    for (unsigned i = 0; i < A20_CLX_UART_MAX_LINKS; i++) {
+        a20_clx_uart_link_status_t status;
+        if (a20_clx_uart_get_status(i, &status) == 0 && status.peer_addr) {
+            uint8_t nh[2];
+            a20_clx_put_le16(nh, status.peer_addr);
+            a20_clx_link_state_note(A20_CLX_TRANSPORT_UART, nh, 2,
+                                    status.state);
+        }
+    }
 }
 #endif
 
@@ -597,6 +615,34 @@ int a20_clx_core_init(void) {
 
 /* ---- link_status fill (01-abi §6, 02-§10) ---------------------------------- */
 
+void a20_clx_link_resources(a20_cluster_resource_args_t *out) {
+    uint64_t *v = out->values;
+    memset(v, 0, sizeof(out->values));
+    v[A20_CLX_LINK_SAMPLE_MS] = timer_get_ticks() / (TICKS_PER_SEC / 1000);
+    v[A20_CLX_LINK_MAX_LINKS] = sizeof(g_clx_links) / sizeof(g_clx_links[0]);
+    uint64_t irq = spin_lock_irqsave(&g_clx_links_lock);
+    for (unsigned i = 0; i < sizeof(g_clx_links) / sizeof(g_clx_links[0]);
+         i++) {
+        const clx_link_stats_t *l = &g_clx_links[i];
+        if (!l->in_use)
+            continue;
+        v[A20_CLX_LINK_COUNT]++;
+        if (l->state == A20_CLX_LINK_UP)
+            v[A20_CLX_LINK_UP_COUNT]++;
+        else if (l->state == A20_CLX_LINK_SUSPECT)
+            v[A20_CLX_LINK_SUSPECT_COUNT]++;
+        else
+            v[A20_CLX_LINK_DOWN_COUNT]++;
+        v[A20_CLX_LINK_TX_FRAMES] += l->tx_frames;
+        v[A20_CLX_LINK_RX_FRAMES] += l->rx_frames;
+        v[A20_CLX_LINK_TX_DROPS] += l->tx_drops;
+        v[A20_CLX_LINK_RX_DROPS] += l->rx_drops;
+        v[A20_CLX_LINK_RX_MALFORMED] += l->rx_malformed;
+        v[A20_CLX_LINK_RETRANSMITS] += l->retransmits;
+    }
+    spin_unlock_irqrestore(&g_clx_links_lock, irq);
+}
+
 int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
                              uint32_t *rtt_us, uint64_t *tx_frames,
                              uint64_t *rx_frames, uint64_t *tx_drops,
@@ -641,6 +687,9 @@ int a20_clx_link_status_fill(const a20_node_id_t *node, uint32_t *state,
             *rx_drops += l->rx_drops;
             if (l->state == A20_CLX_LINK_UP)
                 *state = A20_CLX_LINK_UP;
+            else if (l->state == A20_CLX_LINK_SUSPECT &&
+                     *state != A20_CLX_LINK_UP)
+                *state = A20_CLX_LINK_SUSPECT;
         }
         spin_unlock_irqrestore(&g_clx_links_lock, flags);
         return 0;

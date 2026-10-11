@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Run real production channel proxies between two independent QEMU kernels."""
 import argparse
+import binascii
 from collections import deque
 import json
 import hashlib
 import platform
+import random
 import select
 from pathlib import Path
 import shlex
@@ -15,7 +17,7 @@ import time
 
 class FaultWire:
     """Operate on real Ethernet datagrams; never synthesize guest replies."""
-    def __init__(self, ports):
+    def __init__(self, ports, loss=0, delay=False, corrupt=False, seed=20261011, flood=False):
         self.ports = ports
         self.sockets = []
         self.events = {}
@@ -23,10 +25,21 @@ class FaultWire:
         self.calls = [0] * len(ports)
         self.saved = {}
         self.trace = deque(maxlen=4096)
+        self.loss, self.delay, self.corrupt = loss, delay, corrupt
+        self.random = random.Random(seed)
+        self.flood = flood
+        self.flood_queue = deque()
+        self.next_flood = 0
+        self.partition_until = 0
+
         for _ in ports:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.bind(("127.0.0.1", 0))
             self.sockets.append(sock)
+
+    def partition(self, seconds):
+        self.partition_until = time.monotonic() + seconds
+        self.events["partition-seconds"] = seconds
 
     def address(self, side):
         return self.sockets[side].getsockname()[1]
@@ -38,8 +51,34 @@ class FaultWire:
         self.events[key] = 1
         return True
 
+    def count(self, side, event):
+        key = f"{side}:{event}"
+        self.events[key] = self.events.get(key, 0) + 1
+
+    @staticmethod
+    def corrupt_cluster(data, udp):
+        # Preserve a valid UDP checksum so the production CL CRC rejects it.
+        packet = bytearray(data)
+        packet[udp + 8 + 55] ^= 1
+        return FaultWire.udp_checksum(packet, udp)
+
+    @staticmethod
+    def udp_checksum(packet, udp):
+        packet = bytearray(packet)
+        length = int.from_bytes(packet[udp+4:udp+6], "big")
+        packet[udp+6:udp+8] = bytes(2)
+        pseudo = packet[26:34] + bytes((0, 17)) + length.to_bytes(2, "big")
+        payload = pseudo + packet[udp:udp+length]
+        if len(payload) & 1:
+            payload += bytes(1)
+        total = sum(int.from_bytes(payload[i:i+2], "big") for i in range(0, len(payload), 2))
+        while total >> 16:
+            total = (total & 0xffff) + (total >> 16)
+        packet[udp+6:udp+8] = ((~total & 0xffff) or 0xffff).to_bytes(2, "big")
+        return bytes(packet)
+
     def pump(self):
-        ready, _, _ = select.select(self.sockets, [], [], 0.05)
+        ready, _, _ = select.select(self.sockets, [], [], 0.002 if self.flood_queue else 0.05)
         for sock in ready:
             data, _ = sock.recvfrom(65536)
             side = self.sockets.index(sock)
@@ -63,6 +102,9 @@ class FaultWire:
                     if data[udp + 2:udp + 4] == b"\xab\xf4":
                         cl = data[udp + 8:]
             if len(cl) >= 34 and cl[:2] == b"CL":
+                if time.monotonic() < self.partition_until:
+                    self.count(side, "partition-drop")
+                    continue
                 kind = cl[3]
                 self.trace.append({"time": time.monotonic(), "side": side,
                     "type": kind, "flags": int.from_bytes(cl[4:6], "little"),
@@ -80,6 +122,19 @@ class FaultWire:
                     continue
                 if kind == 2:
                     self.saved.setdefault((side, "hello-ack"), data)
+                if self.flood and kind == 1 and self.once(side, "hello-flood-queued"):
+                    for index in range(1000):
+                        node = (0x10000 + index).to_bytes(16, "little")
+                        node_hash = 2166136261
+                        for byte in node:
+                            node_hash = ((node_hash ^ byte) * 16777619) & 0xffffffff
+                        frame = bytearray(cl)
+                        frame[12:16] = node_hash.to_bytes(4, "little")
+                        frame[32:48] = node
+                        frame[-2:] = binascii.crc_hqx(frame[:-2], 0xffff).to_bytes(2, "little")
+                        packet = data[:udp+8] + frame
+                        self.flood_queue.append((side, output,
+                            self.udp_checksum(packet, udp), destination))
                 reliable = bool(int.from_bytes(cl[4:6], "little") & 1)
                 slot = int.from_bytes(cl[20:24], "little")
                 fragmented = bool(int.from_bytes(cl[4:6], "little") & 2)
@@ -113,8 +168,32 @@ class FaultWire:
                     continue
                 elif reliable and kind == 6 and not slot and self.once(side, "drop-receipt"):
                     continue
+                if reliable:
+                    if (self.corrupt and kind == 6 and slot and not fragmented and
+                            len(cl) > 57 and self.once(side, "corrupt-crc")):
+                        data = self.corrupt_cluster(data, udp)
+                        # Deliver this separate fault so random loss cannot
+                        # bypass the guest's CRC-counter assertion.
+                        output.sendto(data, destination)
+                        continue
+                    self.count(side, "random-eligible")
+                    if self.random.random() < self.loss:
+                        self.count(side, "random-drop")
+                        continue
+                    if self.delay:
+                        milliseconds = self.random.randint(50, 200)
+                        self.count(side, "random-delay")
+                        self.delayed.append((time.monotonic() + milliseconds / 1000,
+                                             output, data, destination))
+                        continue
             output.sendto(data, destination)
         now = time.monotonic()
+        if self.flood_queue and now >= self.next_flood:
+            for _ in range(min(4, len(self.flood_queue))):
+                side, output, data, destination = self.flood_queue.popleft()
+                output.sendto(data, destination)
+                self.count(side, "hello-flood-sent")
+            self.next_flood = now + 0.002
         pending = []
         for due, output, data, destination in self.delayed:
             if due <= now:
@@ -142,13 +221,31 @@ def main():
     parser.add_argument("--routed", action="store_true", help="three kernels through a UDP relay, with wire fault injection")
     parser.add_argument("--faults", action="store_true", help="drop, duplicate and delay real wire frames")
     parser.add_argument("--restart", action="store_true", help="restart node b and replay old session frames")
+    parser.add_argument("--stress", action="store_true", help="1000 verified reliable calls per endpoint")
+    parser.add_argument("--random-loss", type=float, default=0, help="seeded loss probability for reliable frames")
+    parser.add_argument("--random-delay", action="store_true", help="delay reliable frames by 50-200 ms")
+    parser.add_argument("--corrupt", action="store_true", help="flip one CL payload bit per endpoint, preserving UDP checksum")
+    parser.add_argument("--seed", type=int, default=20261011)
+    parser.add_argument("--hello-flood", action="store_true", help="send 1000 valid-CRC HELLOs with forged node IDs per endpoint")
+    parser.add_argument("--partition", action="store_true", help="isolate both endpoints for 30 seconds, then verify a fresh call")
+    parser.add_argument("--slow-consumer", action="store_true", help="hold a real service reply for 10 seconds and verify bounded cancellation")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--log-dir", type=Path, default=Path(".kernel-build/cluster/udp"))
     parser.add_argument("--profile", type=int, choices=(2, 3), default=2)
     parser.add_argument("--peer-profile", type=int, choices=(2, 3))
     args = parser.parse_args()
+    if not 0 <= args.random_loss <= 0.5:
+        parser.error("--random-loss must be between 0 and 0.5")
     if args.routed and args.restart:
         parser.error("use the dedicated gateway reboot test for routed reboot coverage")
+    if args.routed and args.hello_flood:
+        parser.error("--hello-flood currently requires the direct-link topology")
+    if args.routed and args.corrupt:
+        parser.error("--corrupt checks endpoint counters and requires direct links")
+    if args.partition and (args.restart or args.routed):
+        parser.error("--partition requires direct endpoints without --restart")
+    if args.slow_consumer and args.restart:
+        parser.error("--slow-consumer must run before a separate reboot test")
     root = Path(__file__).resolve().parent.parent
     log_dir = (root / args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +255,7 @@ def main():
                "kernel/cluster/frame.c", "kernel/cluster/frame.h", "kernel/cluster/transport.c",
                "kernel/cluster/reliable.c", "kernel/cluster/remote_ep.c", "kernel/cluster/udp.c",
                "kernel/cluster/session.c", "kernel/cluster/session_control.h",
+               "kernel/include/uapi/a20/cluster_snapshot.h",
                "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c", "tools/check-cluster-udp.py"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}
     profiles = [args.profile, args.peer_profile or args.profile] + ([2] if args.routed else [])
@@ -179,7 +277,10 @@ def main():
         ports.append(sock.getsockname()[1])
         reservations.append(sock)
     processes, logs = [], []
-    wire = FaultWire(ports) if args.faults or args.restart or args.routed else None
+    wire = (FaultWire(ports, args.random_loss, args.random_delay, args.corrupt, args.seed, args.hello_flood)
+            if args.faults or args.restart or args.routed or args.random_loss or
+            args.random_delay or args.corrupt or args.hello_flood or args.partition else None)
+    rounds = 1000 if args.stress else 96
     restarted, replayed = False, False
     guest_commands = []
     try:
@@ -195,6 +296,16 @@ def main():
                 bootargs += " clxudpfaults=1"
             if args.restart:
                 bootargs += " clxudprestart=1"
+            if args.stress:
+                bootargs += " clxudpstress=1"
+            if args.corrupt:
+                bootargs += " clxudpcorrupt=1"
+            if args.hello_flood:
+                bootargs += " clxudpflood=1"
+            if args.partition:
+                bootargs += " clxudppartition=1"
+            if args.slow_consumer:
+                bootargs += " clxudpslow=1"
             if "-append" in cmd:
                 cmd[cmd.index("-append") + 1] += " " + bootargs
             else:
@@ -216,14 +327,33 @@ def main():
                        for side in "ab"]
             if any("[CLX-UDP-TEST]" in out and ": FAIL" in out for out in outputs):
                 raise RuntimeError("guest reported FAIL")
-            cases = ("session-ready", "echo-8", "reliable-96-at-most-once", "fragmented-8-at-most-once", "shared-dot", "unified-work", "directory-discovery", "unknown-slot",
+            if args.partition and not wire.partition_until and "partition-ready: PASS" in outputs[0]:
+                wire.partition(30)
+            cases = ("session-ready", "echo-8", f"reliable-{rounds}-at-most-once", "fragmented-8-at-most-once", "shared-dot", "unified-work", "directory-discovery", "unknown-slot",
                      "reliable-unknown-slot", "empty-call", "oversize-completes")
             if wire:
                 cases += ("bounded-blackhole",)
             if args.routed:
                 cases += ("routed-fragment-session",)
+            if args.corrupt:
+                cases += ("crc-counter",)
+            if args.hello_flood:
+                cases += ("hello-flood-bounded",)
             if all(all(f"node={side} {case}: PASS" in out for case in cases)
                    for side, out in zip("ab", outputs)):
+                if args.slow_consumer and "slow-consumer-recovered: PASS" not in outputs[0]:
+                    if wire:
+                        wire.pump()
+                    else:
+                        time.sleep(0.05)
+                    continue
+                if args.partition:
+                    if "partition-recovered: PASS" not in outputs[0]:
+                        wire.pump()
+                        continue
+                    if (time.monotonic() < wire.partition_until or
+                            not all(wire.events.get(f"{side}:partition-drop") for side in range(2))):
+                        raise RuntimeError("partition did not isolate both endpoints for 30 seconds")
                 if args.restart and not restarted:
                     if "reboot-armed: PASS" not in outputs[0]:
                         wire.pump()
@@ -256,13 +386,21 @@ def main():
                         raise RuntimeError("blackhole did not exercise exactly 8 retries per caller")
                     if not expected.issubset(wire.events):
                         raise RuntimeError(f"fault scenarios missing: {expected - wire.events.keys()}")
+                    for side in range(2):
+                        for enabled, event in ((args.corrupt, "corrupt-crc"),
+                                               (args.random_loss, "random-drop"),
+                                               (args.random_delay, "random-delay")):
+                            if enabled and not wire.events.get(f"{side}:{event}"):
+                                raise RuntimeError(f"missing injected {event} on node {side}")
+                        if args.hello_flood and wire.events.get(f"{side}:hello-flood-sent") != 1000:
+                            raise RuntimeError("HELLO flood did not send all 1000 forged identities")
                     (log_dir / "udp-faults.json").write_text(json.dumps(wire.events, indent=2) + "\n")
                 if args.routed and (wire.events.get("relay-fragment-6", 0) < 16 or
                                     wire.events.get("relay-fragment-7", 0) < 16 or
                                     "relay-ready: PASS" not in (log_dir / "udp-r.log").read_text(errors="replace")):
                     raise RuntimeError("relay fragment forwarding evidence missing")
                 success = True
-                print("check-cluster-udp: PASS (" + ("three kernels via UDP relay" if args.routed else "two kernels") + ", 96 reliable calls each, "
+                print("check-cluster-udp: PASS (" + ("three kernels via UDP relay" if args.routed else "two kernels") + f", {rounds} reliable calls each, "
                       "at-most-once service execution, fragmented echo, shared dot, bounded failures" +
                       (", real wire faults" if wire else "") +
                       (", reboot and old-session rejection)" if args.restart else ")"))
@@ -285,7 +423,12 @@ def main():
         return 1
     finally:
         evidence = {"success": success, "profiles": profiles, "faults": wire is not None,
-                    "restart": args.restart, "routed": args.routed, "source_sha256": hashes,
+                    "restart": args.restart, "routed": args.routed, "calls_each": rounds,
+                    "random_loss": args.random_loss, "random_delay_ms": [50, 200] if args.random_delay else None,
+                    "corrupt": args.corrupt, "seed": args.seed, "source_sha256": hashes,
+                    "hello_flood_each": 1000 if args.hello_flood else 0,
+                    "partition_seconds": 30 if args.partition else 0,
+                    "slow_consumer_ms": 10000 if args.slow_consumer else 0,
                     "platform": platform.platform(), "elapsed_seconds": round(time.monotonic()-started, 6),
                     "qemu_version": subprocess.check_output(["qemu-system-riscv64", "--version"], text=True).splitlines()[0],
                     "scope": f"{len(profiles)} independent RISC-V kernels, TCG, not physical throughput"}

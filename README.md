@@ -42,6 +42,13 @@ A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid
 
 在架构选型上，A20OS 兼具宏内核与微内核的双重优势：调度、MM、VFS 核心、页缓存与 TCP/IP 数据面等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——面向能力的 Handle、VMO/VMAR 内存容器与 Channel 通信之上，设备驱动（RTC/input/virtio-blk scratch）与文件系统实现（FAT/ext4/ISO9660/NTFS 只读）均可作为可崩溃、可重启的用户态服务运行。
 
+集群机制通过同一套身份、会话事务、服务发现和算子协议连接 MCU 与服务器：主机使用
+Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子，网关可跨 UDP/UART
+转发。独立内核及生产叶子代码的混合仿真已验证可靠调用、成员恢复和 16 片/8 节点词频
+作业；物理板联调仍待验证。参见[统一设计](docs/cluster/07-unified-runtime.md)、
+[实现证据](docs/cluster/08-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)
+与[服务开发教程](docs/cluster/11-api-tutorial.md)。
+
 ## Linux ABI 兼容性
 
 A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以及 Linux 生态工具链）直接运行在内核机制之上：

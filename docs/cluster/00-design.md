@@ -80,6 +80,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 - [17-deployment-supervision.md](17-deployment-supervision.md)：持久配置、服务监管与恢复。
 - [18-wordcount.md](18-wordcount.md)：文件 CLI、通用结果与 16 片/8 节点演示。
 - [10-operator-guide.md](10-operator-guide.md)：部署、拓扑、恢复、排障和信任边界。
+- [20-hardening.md](20-hardening.md)：随机丢包、延迟、CRC、身份洪泛、分区、慢服务与 CI。
 - [11-api-tutorial.md](11-api-tutorial.md)：从导出到 any 算子调用与自定义图。
 - [19-routed-fragmentation.md](19-routed-fragmentation.md)：多跳分片协商与资源降级。
 

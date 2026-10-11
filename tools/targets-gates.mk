@@ -113,18 +113,22 @@ check-cluster-loopback:
 	@$(PYTHON) tools/check-cluster-loopback.py
 
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
-# host port supplies only the architecture types and lock shims; allocator and
+# host ports supply architecture types, CPU identity and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
 $(TMPDIR)/a20-host-test_lwip_allocator_concurrency: \
         tools/tests/test_lwip_allocator_concurrency.c \
         kernel/external/lwip/src/core/mem.c \
         kernel/external/lwip/src/core/memp.c \
-        kernel/external/lwip/src/core/pbuf.c
+        kernel/external/lwip/src/core/pbuf.c \
+        tools/tests/lwip_host_port/arch/cc.h \
+        tools/tests/lwip_host_port/lwipopts.h \
+        tools/tests/net_lane_host_port/core/cpu.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -ffunction-sections -fdata-sections \
-	  -DCONFIG_X86_64 \
+	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=4 \
 	  -Itools/tests/lwip_host_port \
+	  -Itools/tests/net_lane_host_port \
 	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
-	  $^ -Wl,--gc-sections -o $@
+	  $(filter %.c,$^) -Wl,--gc-sections -o $@
 
 # Compile the real lane queue implementation, with only CPU identity shimmed.
 $(TMPDIR)/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
@@ -229,6 +233,8 @@ CHECK_FAST_GATES := \
     check-smoke-cases \
     check-xlator-guests \
     host-tests \
+    check-cluster-unit \
+    check-cluster-fuzz \
     check-drm-abi \
     check-task-lifetime-boundary \
     check-smp-platform-boundary \
@@ -337,3 +343,9 @@ check-cluster-gateway:
 demo-wordcount:
 	$(PYTHON) tools/check-cluster-wordcount.py
 	$(PYTHON) tools/check-cluster-wordcount.py --mixed
+
+.PHONY: check-cluster-hardening
+check-cluster-hardening:
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --stress --random-loss 0.1 --corrupt --timeout 420 --log-dir .kernel-build/cluster/random-loss1000
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --random-delay --corrupt --hello-flood --timeout 240 --log-dir .kernel-build/cluster/delay-crc-flood
+	$(PYTHON) tools/check-cluster-udp.py --faults --partition --slow-consumer --timeout 150 --log-dir .kernel-build/cluster/partition-slow
