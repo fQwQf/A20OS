@@ -78,6 +78,9 @@ clusterd 先确认邻居，再传播有界成员页和租约路由；目录与�
 Native SDK 包装为 `a20_cluster_resources`、`a20_cluster_reassembly_resources`
 和 `a20_cluster_link_resources`，计数口径与故障复现见
 [20-hardening.md](20-hardening.md)。
+
+性能测量与五分钟模糊档见 [21-performance.md](21-performance.md)；性能入口会
+占用正在测量的镜像，运行期间不要重打包同一构建变体。
 监管状态服务 LOCAL_ONLY；它返回统计，不能用于远程执行管理命令。当前没有
 完整交互式 clusterctl，以上检查应通过 SDK 或已提供的验收程序执行。
 

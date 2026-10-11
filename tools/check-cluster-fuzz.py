@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bounded deterministic sanitizer run against real CL and MCU leaf code."""
+import argparse
 import hashlib
 import json
 import os
@@ -12,8 +13,14 @@ import time
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seconds", type=float, default=0,
+                        help="minimum mutation duration, in complete million-case batches")
+    args = parser.parse_args()
+    if not 0 <= args.seconds <= 7200:
+        parser.error("duration must be 0..7200 seconds")
     root = Path(__file__).resolve().parent.parent
-    directory = root / ".kernel-build/cluster/fuzz"
+    directory = root / (".kernel-build/cluster/fuzz-smoke" if args.seconds else ".kernel-build/cluster/fuzz")
     directory.mkdir(parents=True, exist_ok=True)
     compiler = shlex.split(os.environ.get("HOST_CC", "cc"))
     flags = ["-std=gnu99", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
@@ -31,8 +38,19 @@ def main():
         binary = str(Path(temporary) / "fuzz")
         subprocess.run(compiler + flags + [inputs[0], "-o", binary], cwd=root, check=True)
         started = time.monotonic()
-        result = subprocess.run([binary], cwd=root, text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, timeout=60)
+        seeds = []
+        with (directory / "run.log").open("w") as log:
+            while not seeds or time.monotonic() - started < args.seconds:
+                seed = (0x20c1a55 + len(seeds) * 0x9e3779b9) & 0xffffffff
+                seed = seed or 1
+                result = subprocess.run([binary, str(seed)], cwd=root, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+                log.write(result.stdout)
+                log.flush()
+                print(result.stdout, end="", flush=True)
+                result.check_returncode()
+                seeds.append(seed)
+        mutation_elapsed = time.monotonic() - started
         fragment = str(Path(temporary) / "fragment")
         subprocess.run(compiler + flags + ["tools/tests/test_clx_fragment.c", "-o", fragment],
                        cwd=root, check=True)
@@ -83,15 +101,13 @@ def main():
         print(checked_reliable.stdout, end="")
         checked_reliable.check_returncode()
         elapsed = time.monotonic() - started
-        (directory / "run.log").write_text(result.stdout)
-        print(result.stdout, end="")
-        result.check_returncode()
     metadata = {"compiler": subprocess.check_output(compiler + ["--version"], text=True).splitlines()[0],
-                "flags": flags, "platform": platform.platform(), "seed": "0x20c1a55",
-                "mutations": 1000000, "fragment_mutations": 100000, "fragment_sizes": 64118, "session_mutations": 100000, "config_mutations": 100000, "word_mutations": 100000, "elapsed_seconds": round(elapsed, 6),
+                "flags": flags, "platform": platform.platform(), "seed": "0x20c1a55", "batch_seeds": seeds,
+                "requested_mutation_seconds": args.seconds, "mutation_elapsed_seconds": mutation_elapsed,
+                "mutations": 1000000 * len(seeds), "fragment_mutations": 100000, "fragment_sizes": 64118, "session_mutations": 100000, "config_mutations": 100000, "word_mutations": 100000, "elapsed_seconds": round(elapsed, 6),
                 "source_sha256": hashes, "scope": "host sanitizer harness; not target throughput"}
     (directory / "evidence.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    print("check-cluster-fuzz: PASS (ASan/UBSan, 1M deterministic mutations)")
+    print(f"check-cluster-fuzz: PASS (ASan/UBSan, {len(seeds)}M deterministic mutations, {mutation_elapsed:.3f}s)")
 
 
 if __name__ == "__main__":

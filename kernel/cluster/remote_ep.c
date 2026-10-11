@@ -410,6 +410,8 @@ void a20_clx_proxy_rx(uint32_t transport_id, const a20_node_id_t *src,
         }
         if (error) {
             spin_unlock_irqrestore(&g_clx_lock, flags);
+            printf("[CLX] reliable error=%u txid=%u proxy=%u\n", error, h->txid,
+                   generation);
             a20_clx_reliable_receipt(src, h->txid, local_session,
                                      remote_session);
             clx_proxy_shutdown(p, generation, 0);
@@ -511,7 +513,11 @@ void a20_clx_deadline_scan(void) {
             int expired = entry->deadline_tick && entry->deadline_tick <= now;
             int due = entry->frame && entry->retry_tick <= now;
             if (expired || (due && entry->retries >= A20_CLX_RETRY_MAX)) {
+                uint32_t txid = entry->txid, retries = entry->retries;
                 spin_unlock_irqrestore(&g_clx_lock, flags);
+                printf("[CLX] reliable timeout txid=%u proxy=%u retries=%u "
+                       "deadline=%u\n",
+                       txid, generation, retries, expired);
                 clx_proxy_shutdown(p, generation, 0);
                 break;
             }

@@ -420,6 +420,8 @@ help:
 	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
 	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
 	  '    make check-cluster-hardening   random loss/delay/CRC/flood/partition acceptance' \
+	  '    make check-cluster-fuzz-smoke  five minutes of varied sanitizer mutations' \
+	  '    make check-cluster-performance Native local/loopback/UDP RPC measurements' \
 	  '    make demo-wordcount            sixteen shards over eight servers or a mixed MCU cluster' \
 	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
 	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
@@ -555,6 +557,7 @@ NATIVE_CLUSTER_AGENT_BIN := $(NATIVE_BUILD_DIR)/cluster-agent-$(NATIVE_TAG)
 NATIVE_CLUSTER_PROBE_BIN := $(NATIVE_BUILD_DIR)/cluster-task-probe-$(NATIVE_TAG)
 NATIVE_CLUSTER_HANG_BIN := $(NATIVE_BUILD_DIR)/cluster-hang-probe-$(NATIVE_TAG)
 NATIVE_CLUSTER_WORD8_BIN := $(NATIVE_BUILD_DIR)/native-cluster-word8-$(NATIVE_TAG)
+NATIVE_CLUSTER_BENCH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-bench-$(NATIVE_TAG)
 NATIVE_CLUSTER_MESH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-mesh-$(NATIVE_TAG)
 NATIVE_CLUSTER_WORDCOUNT_BIN := $(NATIVE_BUILD_DIR)/cluster-wordcount-$(NATIVE_TAG)
 NATIVE_JOBD_BIN := $(NATIVE_BUILD_DIR)/jobd-$(NATIVE_TAG)
@@ -577,7 +580,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
                           $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
-                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN) $(NATIVE_CLUSTER_WORDCOUNT_BIN) $(NATIVE_CLUSTER_WORD8_BIN)
+                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN) $(NATIVE_CLUSTER_WORDCOUNT_BIN) $(NATIVE_CLUSTER_WORD8_BIN) $(NATIVE_CLUSTER_BENCH_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.

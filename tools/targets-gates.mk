@@ -235,6 +235,7 @@ CHECK_FAST_GATES := \
     host-tests \
     check-cluster-unit \
     check-cluster-fuzz \
+    check-virtio-net-completion \
     check-drm-abi \
     check-task-lifetime-boundary \
     check-smp-platform-boundary \
@@ -330,6 +331,17 @@ check-cluster-mesh:
 .PHONY: check-cluster-fuzz
 check-cluster-fuzz:
 	$(PYTHON) tools/check-cluster-fuzz.py
+
+.PHONY: check-cluster-fuzz-smoke check-cluster-performance
+check-cluster-fuzz-smoke:
+	$(PYTHON) tools/check-cluster-fuzz.py --seconds 300
+
+check-cluster-performance:
+	$(PYTHON) tools/check-cluster-performance.py
+
+.PHONY: check-virtio-net-completion
+check-virtio-net-completion:
+	$(PYTHON) tools/check-virtio-net-completion.py
 
 .PHONY: check-cluster-uart
 check-cluster-uart:

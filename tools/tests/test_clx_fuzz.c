@@ -37,7 +37,17 @@ static uint32_t next_random(void) {
     x ^= x << 5;
     return random_state = x;
 }
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 2)
+        return 2;
+    if (argc == 2) {
+        char *end;
+        unsigned long seed = strtoul(argv[1], &end, 0);
+        if (!*argv[1] || *end || !seed || seed > UINT32_MAX)
+            return 2;
+        random_state = (uint32_t)seed;
+    }
+    const uint32_t seed = random_state;
     uint8_t head[16] = {1}, node[16] = {2}, payload[224], frame[512];
     a20_mcu_leaf_init();
     assert(a20_mcu_leaf_configure(node, 200) == 0);
@@ -111,7 +121,8 @@ int main(void) {
         free(exact);
     }
     assert(accepted > 100000 && transmitted > 0 && leaf_c.rx_frames > 1000);
-    printf("test_clx_fuzz: 1000000 mutations, %u decoded, firmware dispatch "
+    printf("test_clx_fuzz: seed=0x%x 1000000 mutations, %u decoded, firmware "
+           "dispatch "
            "bounded; passed\n",
-           accepted);
+           seed, accepted);
 }
