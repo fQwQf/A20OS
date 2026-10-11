@@ -4,6 +4,7 @@
  * Driver I/O and upcalls run outside locks. Register/unregister refuse an
  * active per-link pump. See docs/cluster/04-transports.md. */
 #include "cluster/uart.h"
+#include <stdint.h>
 
 #include "core/errno.h"
 #include "core/klog.h"
@@ -30,6 +31,7 @@ typedef struct a20_clx_uart_link {
 
     uint8_t state; /* A20_CLX_UART_L_* */
     uint8_t hello_retries;
+    uint32_t hello_cookie;
     uint8_t pings_missed;
     uint8_t awaiting_pong;
     uint64_t hello_sent_ticks;
@@ -63,6 +65,7 @@ static void *g_uart_rx_ud;
 static a20_clx_uart_link_event_fn g_uart_event_fn;
 static void *g_uart_event_ud;
 static uint64_t g_uart_route_misses;
+static uint32_t g_uart_hello_counter;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -131,16 +134,29 @@ static int uart_send_hello(a20_clx_uart_link_t *l, uint64_t now_ticks) {
     uint8_t frame[A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN];
     int len;
 
+    if (!l->hello_cookie) {
+        uint64_t irq = spin_lock_irqsave(&g_uart_lock);
+        if (!g_uart_hello_counter)
+            g_uart_hello_counter = (uint32_t)(l->nonce ^ (l->nonce >> 32)) | 1u;
+        if (g_uart_hello_counter == UINT32_MAX) {
+            spin_unlock_irqrestore(&g_uart_lock, irq);
+            return -ENOSPC;
+        }
+        l->hello_cookie = ++g_uart_hello_counter;
+        spin_unlock_irqrestore(&g_uart_lock, irq);
+        l->hello_retries = 0;
+    }
     uart_fill_hello_payload(l, payload, l->assigned_addr, l->nonce);
     /* Dial HELLO: the leaf's identity is not known yet, so dst_hash stays 0
      * ("no destination resolved"); the leaf does not filter HELLO by
      * dst_hash on a point-to-point wire. */
-    len = a20_clx_build_frame(frame, sizeof(frame), A20_CLX_TYPE_HELLO, 0, 0, 0,
-                              a20_clx_fnv1a32(l->self_node_id), 0, 0, payload,
-                              (uint16_t)A20_CLX_HELLO_LEN);
+    len = a20_clx_build_frame(frame, sizeof(frame), A20_CLX_TYPE_HELLO, 0, 0,
+                              l->hello_cookie, a20_clx_fnv1a32(l->self_node_id),
+                              0, 0, payload, (uint16_t)A20_CLX_HELLO_LEN);
     if (len < 0)
         return -EINVAL;
-    l->state = A20_CLX_UART_L_HELLO_SENT;
+    if (l->state != A20_CLX_UART_L_UP && l->state != A20_CLX_UART_L_SUSPECT)
+        l->state = A20_CLX_UART_L_HELLO_SENT;
     l->hello_sent_ticks = now_ticks;
     return uart_link_output(l, frame, (uint32_t)len);
 }
@@ -164,6 +180,8 @@ static int uart_validate_hello(a20_clx_uart_link_t *l, const uint8_t *frame,
     if (r < 0)
         return r == -2 ? -ENOENT : -EINVAL;
     *peer_caps_out = payload[A20_CLX_HELLO_OFF_CAPS];
+    if (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER)
+        *peer_caps_out &= ~A20_CLX_CAP_RELIABLE;
     return 0;
 }
 
@@ -188,6 +206,7 @@ static void uart_link_down(a20_clx_uart_link_t *l, uint64_t now_ticks) {
         l->awaiting_pong = 0;
         l->pings_missed = 0;
         l->hello_retries = 0;
+        l->hello_cookie = 0;
         uint64_t irq = spin_lock_irqsave(&g_uart_lock);
         l->tx_count = 0;
         l->tx_head = 0;
@@ -256,6 +275,16 @@ static void uart_on_ack_frame(a20_clx_uart_link_t *l, const uint8_t *frame) {
     uint16_t short_addr;
     int rc;
 
+    int legacy = payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER;
+    if (!l->hello_cookie ||
+        (txid != l->hello_cookie &&
+         !(legacy && !txid && l->state == A20_CLX_UART_L_HELLO_SENT)) ||
+        (legacy && l->peer_version == A20_CLX_SESSION_VER &&
+         (l->state == A20_CLX_UART_L_UP ||
+          l->state == A20_CLX_UART_L_SUSPECT))) {
+        l->c.rx_drops++;
+        return;
+    }
     rc = uart_validate_hello(l, frame, &peer_caps);
     if (rc == -ENOENT) {
         /* Self-loop: reject without an ERROR (02 §6 via the nonce rule). */
@@ -277,6 +306,12 @@ static void uart_on_ack_frame(a20_clx_uart_link_t *l, const uint8_t *frame) {
         uart_link_down(l, timer_get_ticks());
         return;
     }
+    uint64_t new_nonce = a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE);
+    if ((l->state == A20_CLX_UART_L_UP || l->state == A20_CLX_UART_L_SUSPECT) &&
+        (l->peer_nonce != new_nonce ||
+         memcmp(l->peer_node_id, payload + A20_CLX_HELLO_OFF_NODE_ID, 16)))
+        uart_link_down(l, timer_get_ticks());
+    l->hello_cookie = 0;
     l->peer_nonce = a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE);
     l->peer_caps = peer_caps;
     l->peer_version =
@@ -300,6 +335,12 @@ static void uart_on_hello_frame(a20_clx_uart_link_t *l, const uint8_t *frame) {
     uint8_t ack_frame[A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN];
     int rc, len;
 
+    if (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER &&
+        l->peer_version == A20_CLX_SESSION_VER &&
+        (l->state == A20_CLX_UART_L_UP || l->state == A20_CLX_UART_L_SUSPECT)) {
+        l->c.rx_drops++;
+        return;
+    }
     rc = uart_validate_hello(l, frame, &peer_caps);
     if (rc == -ENOENT) {
         l->c.hello_rejects++;
@@ -321,7 +362,7 @@ static void uart_on_hello_frame(a20_clx_uart_link_t *l, const uint8_t *frame) {
      * assigns the leaf's short address in the HELLO exchange). */
     uart_fill_hello_payload(l, ack_payload, l->assigned_addr, l->nonce);
     len = a20_clx_build_frame(
-        ack_frame, sizeof(ack_frame), A20_CLX_TYPE_HELLO_ACK, 0, 0, 0,
+        ack_frame, sizeof(ack_frame), A20_CLX_TYPE_HELLO_ACK, 0, 0, txid,
         a20_clx_fnv1a32(l->self_node_id),
         a20_clx_fnv1a32(payload + A20_CLX_HELLO_OFF_NODE_ID), 0, ack_payload,
         (uint16_t)A20_CLX_HELLO_LEN);
@@ -329,15 +370,22 @@ static void uart_on_hello_frame(a20_clx_uart_link_t *l, const uint8_t *frame) {
         l->c.tx_drops++;
         return;
     }
-    l->peer_nonce = a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE);
-    l->peer_caps = peer_caps;
-    l->peer_version =
-        payload[A20_CLX_HELLO_OFF_PROTO_MAX] >= A20_CLX_SESSION_VER
-            ? A20_CLX_SESSION_VER
-            : A20_CLX_WIRE_VER;
-    if (uart_link_output(l, ack_frame, (uint32_t)len) == 0)
-        uart_link_up(l, short_addr, payload + A20_CLX_HELLO_OFF_NODE_ID,
-                     timer_get_ticks());
+    if (uart_link_output(l, ack_frame, (uint32_t)len) < 0)
+        return;
+    if (payload[A20_CLX_HELLO_OFF_PROTO_MAX] >= A20_CLX_SESSION_VER) {
+        int same = (l->state == A20_CLX_UART_L_UP ||
+                    l->state == A20_CLX_UART_L_SUSPECT) &&
+                   l->peer_nonce ==
+                       a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE) &&
+                   !memcmp(l->peer_node_id, payload, 16);
+        if (!same && !l->hello_cookie)
+            (void)uart_send_hello(l, timer_get_ticks());
+    } else {
+        l->peer_nonce = a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE);
+        l->peer_caps = peer_caps;
+        l->peer_version = A20_CLX_WIRE_VER;
+        uart_link_up(l, short_addr, payload, timer_get_ticks());
+    }
     l->c.rx_frames++;
 }
 
@@ -485,6 +533,15 @@ static void uart_tick(a20_clx_uart_link_t *l, uint64_t now) {
     uint64_t now_us;
     int len;
 
+    if (l->hello_cookie &&
+        (l->state == A20_CLX_UART_L_UP || l->state == A20_CLX_UART_L_SUSPECT) &&
+        now - l->hello_sent_ticks >=
+            MS_TO_TICKS(A20_CLX_UART_HELLO_TIMEOUT_MS)) {
+        if (++l->hello_retries >= A20_CLX_UART_HELLO_RETRIES)
+            l->hello_cookie = 0;
+        else
+            (void)uart_send_hello(l, now);
+    }
     switch (l->state) {
         case A20_CLX_UART_L_DOWN:
             /* Redial after a quiet cooldown so a rebooted leaf is picked up

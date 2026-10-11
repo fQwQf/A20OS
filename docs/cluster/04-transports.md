@@ -56,7 +56,8 @@ SLIP 使用头/尾 END，转义 END 和 ESC；CRC 强制开启，帧 MTU 256。
 50 ms 字节间超时丢弃半帧。每链路发送队列为 4 帧，只有 poll 写字节，控制帧
 和 CALL 不会互相穿插。主节点每轮最多读取 128 字节。
 
-HELLO 由主节点发起，叶子采用分配短地址并应答。5 s PING，连续 3 次未应答
+HELLO 由主节点引导；v1 双方通过当前 challenge 的 ACK 确认对端会话，
+叶子完成确认后采用短地址。注销 UP 链路也发 DOWN 以取消代理。5 s PING，连续 3 次未应答
 进入 SUSPECT，再 3 次进入 DOWN。重新协商后原代理需重建。
 
 ## 5. MCU 叶子
@@ -79,3 +80,11 @@ HELLO 由主节点发起，叶子采用分配短地址并应答。5 s PING，连
 时钟和锁，验证握手、共享算子、重放、缓存满、旧会话与重连。
 它是生产协议的主机仿真，不是物理串口或真实 MCU 性能测试。
 STM32 固件成功链接也不等价于硬件运行成功。
+
+STM32 的 UID 与持久 boot epoch 已从生产 main 接入，配置失败禁用 leaf；
+journal、Flash 保留区和物理证据边界见 [12-mcu-identity.md](12-mcu-identity.md)。
+
+STM32 部署使用 `STM32_CLUSTER_PORT=2/3` 独立集群固件：专用 USART2/3 原始
+字节流、512 B IRQ 环、独立 1 ms 协议泵。原外设固件默认不启用 leaf，控制台
+USART1 不参与二进制帧收发。配置、持久身份和实际资源见
+[12-mcu-identity.md](12-mcu-identity.md)。

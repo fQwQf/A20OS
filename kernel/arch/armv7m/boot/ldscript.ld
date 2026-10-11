@@ -3,7 +3,7 @@ ENTRY(Reset_Handler)
 
 MEMORY
 {
-    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = FLASH_LENGTH
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = FLASH_LENGTH - CLUSTER_NVRAM_LENGTH
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = RAM_LENGTH
 }
 
@@ -26,6 +26,7 @@ SECTIONS
         . = ALIGN(4);
         _data_start = .;
         *(.data .data.*)
+        *(.ramfunc .ramfunc.*)
         _data_end = .;
     } > RAM
     _data_load = LOADADDR(.data);
@@ -43,6 +44,8 @@ SECTIONS
     _heap_start = _bss_end;
     _ram_origin = ORIGIN(RAM);
     _ram_linked_end = ORIGIN(RAM) + LENGTH(RAM);
+    _cluster_nv_start = ORIGIN(FLASH) + LENGTH(FLASH);
+    _cluster_nv_end = ORIGIN(FLASH) + FLASH_LENGTH;
     _flash_origin = ORIGIN(FLASH);
     _flash_linked_end = ORIGIN(FLASH) + LENGTH(FLASH);
     _stack_top = ORIGIN(RAM) + LENGTH(RAM);

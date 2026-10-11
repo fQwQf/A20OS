@@ -595,6 +595,10 @@ static inline int a20_clx_screen_frame(const uint8_t *frame, uint32_t len) {
     if ((uint32_t)payload_len != len - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN ||
         payload_len > A20_CLX_UART_MAX_PAYLOAD)
         return A20_CLX_SCREEN_MALFORMED;
+    if ((frame[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_HELLO ||
+         frame[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_HELLO_ACK) &&
+        payload_len != A20_CLX_HELLO_LEN)
+        return A20_CLX_SCREEN_MALFORMED;
     if (frame[A20_CLX_OFF_TTL] == 0)
         return A20_CLX_SCREEN_DROP;
     crc_rx = a20_clx_get_le16(frame + A20_CLX_HDR_LEN + (uint32_t)payload_len);

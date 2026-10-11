@@ -91,11 +91,13 @@ HELLO 本身用 v0 基础帧，32 B 载荷：
 
 nonce 在一个会话内保持稳定，重试 HELLO 不更换 nonce。启动 epoch 必须来自
 可靠熵或平台持久计数，不能把固定启动 tick 当作跨断电唯一性的证明。
-UDP 主机使用内核 RNG；物理 MCU 的持久 epoch 接入仍待完成。
+UDP 主机使用内核 RNG；STM32 已接入两页持久 epoch journal，物理写入验证仍待完成。
 
 UDP 使用 HELLO.txid 作为本方 challenge，HELLO_ACK.txid 回显它。只有当前
-challenge 的应答才能更新对端 epoch，旧 ACK 不得使会话回退。UART 当前为
-专用点对点主节点发起模型，完整重启/抗旧握手硬化仍待板级接入验证。
+challenge 的应答才能更新对端 epoch，旧 ACK 不得使会话回退。UART 使用双向
+challenge，收到 HELLO 先应答，再用本方 HELLO 确认当前对端；只有匹配当前
+challenge 的 ACK 能更新会话。v0 兼容连接不能替换已经建立的 v1 会话。
+实现和掉电/重放测试见 [12-mcu-identity.md](12-mcu-identity.md)。
 
 ## 5. v1 可靠 CALL
 
