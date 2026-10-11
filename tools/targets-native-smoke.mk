@@ -236,3 +236,7 @@ smoke-native-ext:
 
 smoke-native-debug:
 	$(PYTHON) tools/smoke.py smoke-native-debug
+
+.PHONY: smoke-native-cluster-supervisor
+smoke-native-cluster-supervisor:
+	$(PYTHON) tools/smoke.py smoke-native-cluster-supervisor

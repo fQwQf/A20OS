@@ -25,7 +25,7 @@ def main():
               "tools/tests/test_clx_fragment.c", "tools/tests/test_clx_session.c",
               "kernel/cluster/session.c", "kernel/cluster/session_control.h", "kernel/mcu/leaf.c",
               "kernel/mcu/leaf.h", "kernel/include/uapi/a20/cluster_work.h",
-              "kernel/include/uapi/a20/cluster_directory.h", "kernel/cluster/transaction.h"]
+              "kernel/include/uapi/a20/cluster_directory.h", "kernel/include/uapi/a20/cluster_config.h", "tools/tests/test_clx_config.c", "kernel/cluster/transaction.h"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in inputs}
     with tempfile.TemporaryDirectory(prefix="a20-cluster-fuzz-") as temporary:
         binary = str(Path(temporary) / "fuzz")
@@ -55,6 +55,13 @@ def main():
         (directory / "session.log").write_text(checked_session.stdout)
         print(checked_session.stdout, end="")
         checked_session.check_returncode()
+        config = str(Path(temporary) / "config")
+        subprocess.run(compiler + flags + ["tools/tests/test_clx_config.c", "-o", config], cwd=root, check=True)
+        checked_config = subprocess.run([config], cwd=root, text=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=60)
+        (directory / "config.log").write_text(checked_config.stdout)
+        print(checked_config.stdout, end="")
+        checked_config.check_returncode()
         elapsed = time.monotonic() - started
         (directory / "run.log").write_text(result.stdout)
         print(result.stdout, end="")
