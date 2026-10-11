@@ -39,3 +39,23 @@ python3 tools/tests/test_tlb_transaction_races.py
 
 本机原始日志保存在 `build/browser-followup/cow-race-negative-guest.log` 与
 `cow2-full-guest.log`，不纳入源码提交。
+
+## Reclaim hints retain live contents
+
+Linux `MADV_COLD` and `MADV_PAGEOUT` previously entered the same PTE-discard
+loop as `MADV_DONTNEED`. Private anonymous data became zero on the next fault,
+and shared anonymous mappings could lose their backing as well. These hints
+now validate the range and reject locked/PFN mappings, while keeping resident
+contents intact. This is a conservative hint implementation, consistent with
+the Native ABI; it does not force per-range swapout or implement page aging.
+The existing global pressure reclaimer remains responsible for eviction.
+See [madvise(2)](https://man7.org/linux/man-pages/man2/madvise.2.html).
+
+`vm_fault_test` fills both private and shared anonymous ranges, issues both
+hints, checks every word, and writes a new pattern between hints. With the
+previous kernel the added test reports `reclaim-hints FAIL`
+(`build/browser-followup/reclaim-negative-guest.log`). The corrected x86_64
+and RISC-V 4-CPU preemptible kernels and a Linux host pass; the full x86 smoke also passes
+its signal, COW, eventfd, Unix descriptor passing, socket registry and network
+option probes (`reclaim-full-guest.log`, `reclaim-host.log`, `reclaim-rv-guest.log`). This establishes
+the data-loss regression, not a diagnosis of Firefox's remaining heap crash.

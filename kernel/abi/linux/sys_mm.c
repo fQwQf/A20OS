@@ -220,12 +220,24 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_SEQUENTIAL:
     case MADV_WILLNEED:
         break;
+    case MADV_COLD:
+    case MADV_PAGEOUT:
+        /* These are reclaim hints, not permission to discard live data.
+         * Keep the pages resident until reclaim can preserve their contents;
+         * Linux also permits ignoring these hints.  In particular an anonymous
+         * page must not turn into a fresh zero page on its next fault. */
+        for (mm_seg_t *vma = mm_seg_find(t->mm, start);
+             vma && vma->start < end; vma = vma->next) {
+            if (vma->vm_flags & (VM_LOCKED | VM_PFNMAP)) {
+                ret = -EINVAL;
+                break;
+            }
+        }
+        break;
 #ifndef CONFIG_NOMMU
     case MADV_DONTNEED:
     case MADV_FREE:
     case MADV_REMOVE:
-    case MADV_COLD:
-    case MADV_PAGEOUT:
         /* mseal(2): the page-releasing advices are refused on sealed ranges.
          * MADV_COLD and MADV_PAGEOUT are hints and are allowed by Linux even
          * on sealed ranges; the releasing advices are not. */
