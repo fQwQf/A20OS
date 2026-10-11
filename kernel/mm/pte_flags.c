@@ -10,7 +10,11 @@
  */
 
 pte_t mm_prot_to_pte_flags(int prot) {
-    pte_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
+    pte_t f = PTE_V | PTE_A | PTE_MAT1 | PTE_LEAF;
+    /* Keep a valid leaf and its frame ownership for PROT_NONE, but deny
+     * all user access. Readability may alias validity in a hardware PTE. */
+    if (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) f |= PTE_U;
+    else f |= PTE_R;
     if (prot & 1) f |= PTE_R;
     if (prot & 2) f |= (PTE_W | PTE_D);
     if (prot & 4) f |= PTE_X;
@@ -19,6 +23,7 @@ pte_t mm_prot_to_pte_flags(int prot) {
 }
 
 int mm_pte_flags_to_prot(pte_t pte_flags) {
+    if (!(pte_flags & PTE_U)) return 0;
     int prot = 0;
     if (pte_flags & PTE_R) prot |= PROT_READ;
     if (pte_flags & PTE_W) prot |= PROT_WRITE;
@@ -35,6 +40,7 @@ pte_t mm_vm_flags_to_pte_flags(uint64_t vm_flags) {
 }
 
 uint64_t mm_pte_flags_to_vm_flags(pte_t pte_flags) {
+    if (!(pte_flags & PTE_U)) return 0;
     uint64_t vm = 0;
     if (pte_flags & PTE_R) vm |= VM_READ;
     if (pte_flags & PTE_W) vm |= VM_WRITE;
@@ -51,15 +57,16 @@ pte_t mm_user_brk_pte_flags(void) {
 }
 
 int mm_pte_flags_allow_access(pte_t pte_flags) {
-    return (pte_flags & (PTE_R | PTE_W | PTE_X)) != 0;
+    return (pte_flags & PTE_U) &&
+           (pte_flags & (PTE_R | PTE_W | PTE_X));
 }
 
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags) {
     pte_t flags = old_flags & (PTE_R | PTE_W | PTE_X | PTE_U |
                                   PTE_G | PTE_A | PTE_D | PTE_COW |
                                   PTE_LEAF | PTE_MAT1);
-    flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_D);
-    flags |= prot_flags & (PTE_R | PTE_W | PTE_X | PTE_D);
+    flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_U | PTE_D);
+    flags |= prot_flags & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_D);
     if (!(prot_flags & PTE_W))
         flags &= ~(uint64_t)PTE_COW;
     return flags;

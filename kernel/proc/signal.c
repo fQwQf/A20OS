@@ -180,21 +180,6 @@ static void build_siginfo(arch_siginfo_t *si, int sig, task_t *sender)
     build_siginfo_code(si, sig, sender, SI_USER);
 }
 
-/* SI_KERNEL is A20OS's generic code for a synchronous fault; Linux instead
- * distinguishes SEGV_MAPERR (1) from SEGV_ACCERR (2).  The code and the
- * faulting address both matter: HotSpot decides whether a SIGSEGV is an
- * implicit null check (its array/field access relies on the fault, not an
- * explicit compare) from them, and misclassifying turns a throwable NPE into
- * a hard VM crash. */
-#define SIGINFO_SEGV_MAPERR 1
-
-static void build_siginfo_fault(arch_siginfo_t *si, int sig, const trap_context_t *ctx)
-{
-    build_siginfo_code(si, sig, NULL, SIGINFO_SEGV_MAPERR);
-    uintptr_t addr = (uintptr_t)TRAP_CTX_KScratch0(ctx);
-    memcpy(si->_sifields, &addr, sizeof(addr));
-}
-
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
     refcount_set(&ss->refcount, 1);
@@ -443,6 +428,13 @@ int signal_send_thread_info(int tid, int signum, const void *info, size_t size) 
     int ret = signal_queue_task(t, signum, info, size, 1);
     proc_put(t);
     return ret;
+}
+
+int signal_send_thread_fault(int tid, int signum, uintptr_t addr, int code) {
+    arch_siginfo_t info;
+    build_siginfo_code(&info, signum, NULL, code);
+    memcpy(info._sifields, &addr, sizeof(addr));
+    return signal_send_thread_info(tid, signum, &info, sizeof(info));
 }
 
 int signal_send_thread(int tid, int signum) {
@@ -925,8 +917,6 @@ void signal_deliver_user(trap_context_t *ctx) {
         arch_sigframe_flag_set(&frame, 0x77777777ULL);
         if (has_queued_info)
             *arch_sigframe_info_ptr(&frame) = queued_info;
-        else if (sig == SIGSEGV || sig == SIGBUS)
-            build_siginfo_fault(arch_sigframe_info_ptr(&frame), sig, ctx);
         else
             build_siginfo_code(arch_sigframe_info_ptr(&frame), sig, NULL, SI_KERNEL);
         build_ucontext(arch_sigframe_ucontext_ptr(&frame), ctx, old_blocked, &t->sigaltstack);
