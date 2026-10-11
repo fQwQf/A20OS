@@ -25,6 +25,7 @@
 #include "mm/mm.h"
 #include "core/errno.h"
 #include "drivers/core/driver_class.h"
+#include "drivers/bus/pci_bus.h"
 #include "net/socket_internal.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/core/driver_core.h"
@@ -58,6 +59,10 @@ typedef enum {
     SF_CLASS_DEVICE_UEVENT, /* /sys/class/<sub>/<name>/uevent */
     SF_CLASS_DEVICE_SUBSYS, /* /sys/class/<sub>/<name>/subsystem (symlink) */
     SF_DEVICES,          /* /sys/devices */
+    SF_GPU_ROOT,         /* selected GPU's PCI host bridge or platform bus */
+    SF_GPU_NODE_DEV,
+    SF_GPU_NODE_SUBSYS,
+    SF_BUS_PLATFORM,
     SF_DEVICES_VIRTUAL,  /* /sys/devices/virtual */
     SF_DEVICES_VSUB,     /* /sys/devices/virtual/<subsystem> */
     SF_DEVICES_VDEV,     /* /sys/devices/virtual/<subsystem>/<name> */
@@ -81,10 +86,6 @@ typedef enum {
     SF_BUS_PCI,          /* /sys/bus/pci */
     SF_BUS_PCI_DEVICES,  /* /sys/bus/pci/devices */
     SF_BUS_PCI_DEV,      /* /sys/bus/pci/devices/<bdf> */
-    SF_BUS_PCI_DEV_CONFIG, /* .../<bdf>/config */
-    SF_BUS_PCI_DEV_UEVENT, /* .../<bdf>/uevent */
-    SF_BUS_PCI_DEV_ATTR,   /* .../<bdf>/{vendor,device,revision,...} */
-    SF_BUS_PCI_DEV_DRM,    /* .../<bdf>/drm */
     SF_FB,                 /* /sys/class/fb */
     SF_FB_DEVICE,          /* /sys/class/fb/fbN */
     SF_FB_NAME,            /* /sys/class/fb/fbN/name */
@@ -128,6 +129,34 @@ static const char *const loopback_attrs[] = {
 /* ---- helpers ---- */
 
 #define DRM_MAJOR 226
+
+/* DRM exposes the selected GPU, whose identity belongs to the bus enumerator.
+ * An MMIO GPU is a platform device; never invent a PCI function for it. */
+static int sysfs_gpu_names(char *root, size_t root_sz,
+                           char *name, size_t name_sz)
+{
+    device_t *dev = gpu_device_get_default();
+    unsigned bus, slot, function;
+    if (!dev)
+        return -ENODEV;
+    if (pci_device_location(dev, &bus, &slot, &function) == 0) {
+        snprintf(root, root_sz, "pci0000:%02x", bus);
+        snprintf(name, name_sz, "0000:%02x:%02x.%u", bus, slot, function);
+        return 1;
+    }
+    snprintf(root, root_sz, "platform");
+    snprintf(name, name_sz, "%s", dev->name);
+    return 0;
+}
+
+static int sysfs_gpu_path(char *buf, size_t size, const char *suffix)
+{
+    char root[32], name[64];
+    if (sysfs_gpu_names(root, sizeof(root), name, sizeof(name)) < 0)
+        return -ENODEV;
+    int n = snprintf(buf, size, "/sys/devices/%s/%s%s", root, name, suffix);
+    return n >= 0 && (size_t)n < size ? n : -ENAMETOOLONG;
+}
 
 /*
  * The class registry has no devt lookup and class_device_get_by_type() walks
@@ -262,11 +291,11 @@ static int sysfs_devchar_name(uint64_t devt, char *devname, size_t devname_sz,
  * then every published class device in (type, index) order. */
 static int sysfs_devchar_entry_at(unsigned idx, char *name, size_t name_sz)
 {
-    if (idx == 0) {
-        snprintf(name, name_sz, "226:0");
+    if (idx < 2) {
+        snprintf(name, name_sz, "226:%u", idx ? 128 : 0);
         return 0;
     }
-    unsigned remaining = idx - 1;
+    unsigned remaining = idx - 2;
     for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
         const char *sub = class_device_subsystem(type);
         if (!sub)
@@ -377,9 +406,22 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         int n = snprintf(p->content, sizeof(p->content), "%ux%u\n", width, height);
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_DRM_MODALIAS) {
-        const char modalias[] = "of:NgpuTdisplayCvirtio,gpuC\n";
-        memcpy(p->content, modalias, sizeof(modalias) - 1);
-        p->content_len = sizeof(modalias) - 1;
+        device_t *dev = gpu_device_get_default();
+        char root[32], name[64];
+        int pci = sysfs_gpu_names(root, sizeof(root), name, sizeof(name));
+        int n;
+        if (pci > 0) {
+            unsigned cls = pci_class_code(dev);
+            n = snprintf(p->content, sizeof(p->content),
+                         "pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X\n",
+                         pci_cfg_read16(dev, 0), pci_cfg_read16(dev, 2),
+                         pci_cfg_read16(dev, 0x2c), pci_cfg_read16(dev, 0x2e),
+                         cls >> 16, (cls >> 8) & 0xff, cls & 0xff);
+        } else {
+            n = snprintf(p->content, sizeof(p->content), "platform:%s\n",
+                         pci == 0 ? name : "unknown");
+        }
+        p->content_len = n > 0 ? (size_t)n : 0;
     } else if (type == SF_CLASS_DEVICE_DEV) {
         int n = snprintf(p->content, sizeof(p->content), "%lu:%lu\n",
                          (unsigned long)(devt >> 8),
@@ -435,34 +477,44 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         } else {
             p->content_len = 0;
         }
-    } else if (type == SF_DEV_CHAR_DEVICE_ATTR || type == SF_BUS_PCI_DEV_ATTR) {
-        static const char *const pci_vals[5] = {
-            "01", "1af4", "1050", "1af4", "1100"
-        };
-        int n = snprintf(p->content, sizeof(p->content), "%s\n",
-                         (loop_idx >= 0 && loop_idx < 5) ? pci_vals[loop_idx]
-                                                         : "00");
+    } else if (type == SF_DEV_CHAR_DEVICE_ATTR) {
+        device_t *dev = gpu_device_get_default();
+        if (pci_device_location(dev, NULL, NULL, NULL) < 0) return p;
+        unsigned value = 0;
+        switch (loop_idx) {
+        case 0: value = pci_cfg_read8(dev, 0x08); break;
+        case 1: value = pci_cfg_read16(dev, 0x00); break;
+        case 2: value = pci_cfg_read16(dev, 0x02); break;
+        case 3: value = pci_cfg_read16(dev, 0x2c); break;
+        case 4: value = pci_cfg_read16(dev, 0x2e); break;
+        }
+        int n = snprintf(p->content, sizeof(p->content), "0x%04x\n", value);
         p->content_len = (size_t)(n > 0 ? n : 0);
-    } else if (type == SF_DEV_CHAR_DEVICE_CONFIG || type == SF_BUS_PCI_DEV_CONFIG) {
-        memset(p->content, 0, sizeof(p->content));
-        p->content[0x00] = 0xf4; p->content[0x01] = 0x1a;
-        p->content[0x02] = 0x50; p->content[0x03] = 0x10;
-        p->content[0x06] = 0x10;
-        p->content[0x08] = 0x01;
-        p->content[0x0a] = 0x03; p->content[0x0b] = 0x02;
-        p->content[0x2c] = 0xf4; p->content[0x2d] = 0x1a;
-        p->content[0x2e] = 0x00; p->content[0x2f] = 0x11;
+    } else if (type == SF_DEV_CHAR_DEVICE_CONFIG) {
+        device_t *dev = gpu_device_get_default();
+        if (pci_device_location(dev, NULL, NULL, NULL) < 0) return p;
+        for (unsigned offset = 0; offset < 64; offset += 4) {
+            uint32_t value = pci_cfg_read32(dev, offset);
+            for (unsigned byte = 0; byte < 4; byte++)
+                p->content[offset + byte] = (char)(value >> (byte * 8));
+        }
         p->content_len = 64;
-    } else if (type == SF_DEV_CHAR_DEVICE_UEVENT || type == SF_BUS_PCI_DEV_UEVENT) {
-        const char *ue = "PCI_SLOT_NAME=0000:00:01.0\n"
-                         "PCI_ID=1AF4:1050\n"
-                         "PCI_SUBSYS_ID=1AF4:1100\n"
-                         "DRIVER=virtio-pci\n";
-        size_t n = strlen(ue);
-        if (n > sizeof(p->content)) n = sizeof(p->content);
-        memcpy(p->content, ue, n);
-        p->content_len = n;
-    } else if (type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
+    } else if (type == SF_DEV_CHAR_DEVICE_UEVENT) {
+        char root[32], name[64];
+        device_t *dev = gpu_device_get_default();
+        int pci = sysfs_gpu_names(root, sizeof(root), name, sizeof(name));
+        int n;
+        if (pci > 0)
+            n = snprintf(p->content, sizeof(p->content),
+                         "PCI_SLOT_NAME=%s\nPCI_ID=%04X:%04X\n"
+                         "PCI_SUBSYS_ID=%04X:%04X\n",
+                         name, pci_cfg_read16(dev, 0), pci_cfg_read16(dev, 2),
+                         pci_cfg_read16(dev, 0x2c), pci_cfg_read16(dev, 0x2e));
+        else
+            n = snprintf(p->content, sizeof(p->content),
+                         "MODALIAS=platform:%s\n", pci == 0 ? name : "unknown");
+        p->content_len = n > 0 ? (size_t)n : 0;
+    } else if (type == SF_GPU_NODE_DEV) {
         unsigned dmaj = (unsigned)(((unsigned)loop_idx >> 8) & 0xffU);
         unsigned dmin = (unsigned)((unsigned)loop_idx & 0xffU);
         int n = snprintf(p->content, sizeof(p->content), "%u:%u\n", dmaj, dmin);
@@ -514,6 +566,8 @@ static sysfs_priv_t *sysfs_priv_create(resource_namespace_t *net_ns, sf_type_t t
         p->content_len = 0;
     }
 
+    if (p->content_len >= sizeof(p->content))
+        p->content_len = sizeof(p->content) - 1;
     return p;
 }
 
@@ -543,6 +597,9 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
 
     class_device_t *dynamic_cdev = NULL;
     uint32_t dynamic_class = DEV_CLASS_NONE;
+    char gpu_root[32], gpu_name[64];
+    int gpu_pci = sysfs_gpu_names(gpu_root, sizeof(gpu_root),
+                                  gpu_name, sizeof(gpu_name));
     if (dm->type == SF_ROOT && strcmp(name, "block") == 0) {
         child_type = SF_BLOCK;
     } else if (dm->type == SF_ROOT && strcmp(name, "class") == 0) {
@@ -557,26 +614,26 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_type = SF_BUS;
     } else if (dm->type == SF_BUS && strcmp(name, "pci") == 0) {
         child_type = SF_BUS_PCI;
-    } else if (dm->type == SF_BUS_PCI && strcmp(name, "devices") == 0) {
+    } else if (dm->type == SF_BUS && strcmp(name, "platform") == 0) {
+        child_type = SF_BUS_PLATFORM;
+    } else if ((dm->type == SF_BUS_PCI || dm->type == SF_BUS_PLATFORM) &&
+               strcmp(name, "devices") == 0) {
         child_type = SF_BUS_PCI_DEVICES;
+        child_idx = dm->type == SF_BUS_PCI ? 1 : 0;
     } else if (dm->type == SF_BUS_PCI_DEVICES &&
-               strcmp(name, "0000:00:01.0") == 0) {
+               gpu_pci >= 0 && dm->loop_idx == gpu_pci &&
+               strcmp(name, gpu_name) == 0) {
         child_type = SF_BUS_PCI_DEV;
-    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "config") == 0) {
-        child_type = SF_BUS_PCI_DEV_CONFIG;
-    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "uevent") == 0) {
-        child_type = SF_BUS_PCI_DEV_UEVENT;
-    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "drm") == 0) {
-        child_type = SF_BUS_PCI_DEV_DRM;
-    } else if (dm->type == SF_BUS_PCI_DEV) {
-        child_type = SF_BUS_PCI_DEV_ATTR;
-        child_idx = sysfs_pci_attr_index(name);
-        if (child_idx < 0)
-            return -ENOENT;
     } else if (dm->type == SF_FS && strcmp(name, "cgroup") == 0) {
         child_type = SF_FS_CGROUP;
     } else if (dm->type == SF_DEVICES && strcmp(name, "virtual") == 0) {
         child_type = SF_DEVICES_VIRTUAL;
+    } else if (dm->type == SF_DEVICES && gpu_pci >= 0 &&
+               strcmp(name, gpu_root) == 0) {
+        child_type = SF_GPU_ROOT;
+    } else if (dm->type == SF_GPU_ROOT && gpu_pci >= 0 &&
+               strcmp(name, gpu_name) == 0) {
+        child_type = SF_DEV_CHAR_DEVICE;
     } else if (dm->type == SF_DEVICES_VIRTUAL) {
         uint32_t ct = sysfs_class_type_by_subsystem(name);
         if (ct == DEV_CLASS_NONE)
@@ -653,13 +710,17 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "subsystem") == 0) {
         child_type = SF_DEV_CHAR_DEVICE_SUBSYS;
         child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "modalias") == 0) {
+        child_type = SF_DRM_MODALIAS;
     } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "config") == 0) {
+        if (gpu_pci != 1) return -ENOENT;
         child_type = SF_DEV_CHAR_DEVICE_CONFIG;
         child_idx = dm->loop_idx;
     } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "uevent") == 0) {
         child_type = SF_DEV_CHAR_DEVICE_UEVENT;
         child_idx = dm->loop_idx;
     } else if (dm->type == SF_DEV_CHAR_DEVICE) {
+        if (gpu_pci != 1) return -ENOENT;
         child_type = SF_DEV_CHAR_DEVICE_ATTR;
         child_idx = sysfs_pci_attr_index(name);
         if (child_idx < 0)
@@ -667,7 +728,14 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     } else if (dm->type == SF_DEV_CHAR_DEVICE_DRM &&
                (strcmp(name, "card0") == 0 || strcmp(name, "renderD128") == 0)) {
         child_type = SF_DEV_CHAR_DEVICE_DRM_ENTRY;
+        child_idx = (DRM_MAJOR << 8) | (!strcmp(name, "card0") ? 0 : 128);
+    } else if (dm->type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
         child_idx = dm->loop_idx;
+        if (!strcmp(name, "device")) child_type = SF_DRM_CARD_DEVICE;
+        else if (!strcmp(name, "dev")) child_type = SF_GPU_NODE_DEV;
+        else if (!strcmp(name, "uevent")) child_type = SF_DEV_CHAR_UEVENT;
+        else if (!strcmp(name, "subsystem")) child_type = SF_GPU_NODE_SUBSYS;
+        else return -ENOENT;
     } else if (dm->type == SF_CLASS && strcmp(name, "drm") == 0) {
         child_type = SF_DRM;
     } else if (dm->type == SF_CLASS && strcmp(name, "fb") == 0) {
@@ -734,15 +802,12 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         dynamic_class = dm->class_type;
         dynamic_cdev = dm->class_dev;
         class_device_get(dynamic_cdev);
-    } else if (dm->type == SF_DRM && strcmp(name, "card0") == 0) {
+    } else if (dm->type == SF_DRM &&
+               (!strcmp(name, "card0") || !strcmp(name, "renderD128"))) {
         child_type = SF_DRM_CARD;
+        child_idx = (DRM_MAJOR << 8) | (!strcmp(name, "card0") ? 0 : 128);
     } else if (dm->type == SF_DRM && strcmp(name, "card0-Virtual-1") == 0) {
         child_type = SF_DRM_CONNECTOR;
-    } else if (dm->type == SF_DRM_CARD) {
-        if (strcmp(name, "device") == 0) child_type = SF_DRM_CARD_DEVICE;
-        else return -ENOENT;
-    } else if (dm->type == SF_DRM_CARD_DEVICE && strcmp(name, "modalias") == 0) {
-        child_type = SF_DRM_MODALIAS;
     } else if (dm->type == SF_DRM_CONNECTOR) {
         if (strcmp(name, "enabled") == 0) child_type = SF_DRM_ENABLED;
         else if (strcmp(name, "status") == 0) child_type = SF_DRM_STATUS;
@@ -795,19 +860,27 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
                   child_type == SF_DRM_CONNECTOR || child_type == SF_DRM_CARD_DEVICE ||
                   child_type == SF_NET_LOOPBACK || child_type == SF_CLASS_TYPE || child_type == SF_CLASS_DEVICE ||
-                  child_type == SF_DEVICES || child_type == SF_DEVICES_VIRTUAL ||
+                  child_type == SF_DEVICES || child_type == SF_GPU_ROOT ||
+                  child_type == SF_DEVICES_VIRTUAL ||
                   child_type == SF_DEVICES_VSUB || child_type == SF_DEVICES_VDEV ||
                   child_type == SF_DEV || child_type == SF_DEV_CHAR ||
                   child_type == SF_DEV_CHAR_ENTRY ||
                   child_type == SF_DEV_CHAR_DEVICE ||
                   child_type == SF_DEV_CHAR_DEVICE_DRM ||
+                  child_type == SF_DEV_CHAR_DEVICE_DRM_ENTRY ||
                   child_type == SF_BUS || child_type == SF_BUS_PCI ||
+                  child_type == SF_BUS_PLATFORM ||
                   child_type == SF_BUS_PCI_DEVICES || child_type == SF_BUS_PCI_DEV ||
-                  child_type == SF_BUS_PCI_DEV_DRM ||
                   child_type == SF_FB || child_type == SF_FB_DEVICE);
 
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
-    if (child_type == SF_CLASS_DEVICE_SUBSYS) {
+    if (child_type == SF_DRM_CARD || child_type == SF_DRM_CARD_DEVICE ||
+        child_type == SF_GPU_NODE_SUBSYS || child_type == SF_BUS_PCI_DEV ||
+        (child_type == SF_DEV_CHAR_ENTRY &&
+         ((unsigned)child_idx >> 8) == DRM_MAJOR)) {
+        vn->type = VFS_FT_SYMLINK;
+        vn->mode = S_IFLNK | 0777;
+    } else if (child_type == SF_CLASS_DEVICE_SUBSYS) {
         vn->type = VFS_FT_SYMLINK;
         vn->mode = S_IFLNK | 0777;
     } else if (child_type == SF_CLASS_DEVICE_UEVENT) {
@@ -826,6 +899,9 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     vn->parent = dir;
     vnode_get(dir);
     vn->ops = dir->ops;
+    /* Synthetic attributes must bypass the disk page cache. This also keeps
+     * generated records independent of their nominal stat size. */
+    vn->mnt = dir->mnt;
 
     sysfs_meta_t *meta = sysfs_meta_create(child_type, child_idx);
     if (meta) {
@@ -835,7 +911,9 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         meta->devt = dynamic_cdev ? dynamic_cdev->devt : 0;
         if (child_type == SF_DEV_CHAR_ENTRY || child_type == SF_DEV_CHAR_UEVENT ||
             child_type == SF_DEV_CHAR_DEVICE ||
-            child_type == SF_DEV_CHAR_DEVICE_DRM)
+            child_type == SF_DEV_CHAR_DEVICE_DRM ||
+            child_type == SF_DEV_CHAR_DEVICE_DRM_ENTRY ||
+            child_type == SF_GPU_NODE_DEV)
             meta->devt = (uint64_t)((uint32_t)child_idx & 0xffffU);
         if (dm->type == SF_DRM_CONNECTOR) {
             meta->width = dm->width;
@@ -867,11 +945,11 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_UEVENT) {
             vn->size = 64;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_ATTR || child_type == SF_BUS_PCI_DEV_ATTR) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_ATTR) {
             vn->size = 16;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_CONFIG || child_type == SF_BUS_PCI_DEV_CONFIG) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_CONFIG) {
             vn->size = 64;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_UEVENT || child_type == SF_BUS_PCI_DEV_UEVENT) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_UEVENT) {
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
             vn->size = 16;
@@ -934,11 +1012,25 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
     if (!dm)
         return -EINVAL;
 
+    if (dm->type == SF_DRM_CARD_DEVICE || dm->type == SF_BUS_PCI_DEV)
+        return sysfs_gpu_path(buf, sz, "");
+    if (dm->type == SF_DRM_CARD) {
+        return sysfs_gpu_path(buf, sz, (dm->loop_idx & 0xff) == 0 ?
+                              "/drm/card0" : "/drm/renderD128");
+    }
+    if (dm->type == SF_GPU_NODE_SUBSYS) {
+        const char *target = "/sys/class/drm";
+        size_t n = strlen(target);
+        if (n >= sz) return -ENAMETOOLONG;
+        memcpy(buf, target, n + 1);
+        return (int)n;
+    }
+
     if (dm->type == SF_DEV_CHAR_SUBSYS || dm->type == SF_DEV_CHAR_DEVICE_SUBSYS) {
-        /* Mesa's loader_get_pci_id_for_fd() rejects anything whose libdrm
-         * bus type is not DRM_BUS_PCI, and libdrm derives the type from this
-         * link's target string, so it must read /sys/bus/pci. */
-        const char *target = "/sys/bus/pci";
+        char root[32], name[64];
+        int pci = sysfs_gpu_names(root, sizeof(root), name, sizeof(name));
+        const char *target = dm->type == SF_DEV_CHAR_SUBSYS ? "/sys/class/drm" :
+                             (pci > 0 ? "/sys/bus/pci" : "/sys/bus/platform");
         size_t n = strlen(target);
         if (n + 1 > sz)
             return -ENAMETOOLONG;
@@ -969,6 +1061,9 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
             devt = (uint64_t)((uint32_t)dm->loop_idx & 0xffffU);
         if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) < 0)
             return -ENOENT;
+        if (((devt >> 8) & 0xffU) == DRM_MAJOR)
+            return sysfs_gpu_path(buf, sz, (devt & 0xffU) == 0 ?
+                                  "/drm/card0" : "/drm/renderD128");
         const char *base = strrchr(devname, '/');
         base = base ? base + 1 : devname;
         int n = snprintf(buf, sz, "../../class/%s/%s", subsystem, base);
@@ -1149,6 +1244,9 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         uint8_t dtype;
     } entries[16];
     int nent = 0;
+    char gpu_root[32], gpu_name[64];
+    int gpu_pci = sysfs_gpu_names(gpu_root, sizeof(gpu_root),
+                                  gpu_name, sizeof(gpu_name));
 
     entries[nent].name = ".";  entries[nent].dtype = 4; nent++;
     entries[nent].name = ".."; entries[nent].dtype = 4; nent++;
@@ -1163,10 +1261,46 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "dev"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "devices"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "fs"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "bus"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_BUS) {
+        entries[nent].name = "pci"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "platform"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_BUS_PCI || dm->type == SF_BUS_PLATFORM) {
+        entries[nent].name = "devices"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_BUS_PCI_DEVICES) {
+        if (gpu_pci >= 0 && gpu_pci == dm->loop_idx) {
+            entries[nent].name = gpu_name; entries[nent].dtype = 10; nent++;
+        }
     } else if (dm->type == SF_FS) {
         entries[nent].name = "cgroup"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_DEVICES) {
         entries[nent].name = "virtual"; entries[nent].dtype = 4; nent++;
+        if (gpu_pci >= 0) {
+            entries[nent].name = gpu_root; entries[nent].dtype = 4; nent++;
+        }
+    } else if (dm->type == SF_GPU_ROOT) {
+        if (gpu_pci >= 0) {
+            entries[nent].name = gpu_name; entries[nent].dtype = 4; nent++;
+        }
+    } else if (dm->type == SF_DEV_CHAR_DEVICE) {
+        entries[nent].name = "drm"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
+        entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "modalias"; entries[nent].dtype = 8; nent++;
+        if (gpu_pci > 0) {
+            entries[nent].name = "config"; entries[nent].dtype = 8; nent++;
+            for (int i = 0; i < 5; i++) {
+                entries[nent].name = g_pci_attrs[i]; entries[nent].dtype = 8; nent++;
+            }
+        }
+    } else if (dm->type == SF_DEV_CHAR_DEVICE_DRM) {
+        entries[nent].name = "card0"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "renderD128"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
+        entries[nent].name = "device"; entries[nent].dtype = 10; nent++;
+        entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
+        entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
     } else if (dm->type == SF_DEVICES_VIRTUAL) {
         entries[nent].name = "drm"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
@@ -1203,12 +1337,9 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "subsystem"; entries[nent].dtype = 10; nent++;
     } else if (dm->type == SF_DRM) {
-        entries[nent].name = "card0"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "card0"; entries[nent].dtype = 10; nent++;
+        entries[nent].name = "renderD128"; entries[nent].dtype = 10; nent++;
         entries[nent].name = "card0-Virtual-1"; entries[nent].dtype = 4; nent++;
-    } else if (dm->type == SF_DRM_CARD) {
-        entries[nent].name = "device"; entries[nent].dtype = 4; nent++;
-    } else if (dm->type == SF_DRM_CARD_DEVICE) {
-        entries[nent].name = "modalias"; entries[nent].dtype = 8; nent++;
     } else if (dm->type == SF_DRM_CONNECTOR) {
         entries[nent].name = "enabled"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "status"; entries[nent].dtype = 8; nent++;
