@@ -24,6 +24,7 @@
 #include "liba20rt/a20_cluster_agent.h"
 #include "liba20rt/a20_cluster_client.h"
 #include "liba20rt/a20_cluster_job.h"
+#include "../../kernel/include/uapi/a20/cluster_word_job.h"
 
 static a20_handle_t g_stdout = A20_HANDLE_NULL;
 
@@ -56,14 +57,14 @@ static void note_value(const char *label, uint64_t value) {
     note(text, sizeof(text));
 }
 
-static int spawn_service(const char *path, a20_handle_t *task) {
+static int spawn_argv(const char *path, const char **argv, unsigned argc,
+                      a20_handle_t *task) {
     a20_path_open_args_t image = {.dir = A20_HANDLE_NULL,
                                   .rights = A20_RIGHT_READ | A20_RIGHT_EXEC,
                                   .path = (uint64_t)(uintptr_t)path,
                                   .path_len = (uint32_t)a20_strlen(path)};
     if (a20_path_open(&image) < 0)
         return -1;
-    const char *argv[] = {path, 0};
     a20_task_spawn_args_t spawn = {.size = sizeof(spawn),
                                    .version = 2,
                                    .image = image.out_handle,
@@ -74,7 +75,7 @@ static int spawn_service(const char *path, a20_handle_t *task) {
                                    .stdout_handle = g_stdout,
                                    .stderr_handle = g_stdout,
                                    .argv = (uint64_t)(uintptr_t)argv,
-                                   .argc = 1};
+                                   .argc = argc};
     a20_status_t r =
         a20_syscall6(A20_SYS_task_spawn, (uint64_t)&spawn, 0, 0, 0, 0, 0);
     a20_hdl_close(image.out_handle);
@@ -82,6 +83,10 @@ static int spawn_service(const char *path, a20_handle_t *task) {
         return -1;
     *task = spawn.out_task;
     return 0;
+}
+static int spawn_service(const char *path, a20_handle_t *task) {
+    const char *argv[] = {path, 0};
+    return spawn_argv(path, argv, 1, task);
 }
 
 static void stop_service(a20_handle_t task) {
@@ -305,7 +310,7 @@ static int abi_snapshot_and_agent(void) {
     int ok = client != A20_HANDLE_NULL;
     if (!ok)
         note("agent-connect timed out\n", 24);
-    uint8_t input[128], reply[128], data[12];
+    uint8_t input[128], reply[200], data[12];
     a20_work_put32(data, 1);
     a20_work_put32(data + 4, (uint32_t)-7);
     a20_work_put32(data + 8, 6);
@@ -338,7 +343,7 @@ static int abi_snapshot_and_agent(void) {
              a20_work_result_decode(reply, got, &request, &result) == 0 &&
              result.status == 0;
         if (ok && kind == A20_WORK_QUERY)
-            ok = result.output_len == 56 &&
+            ok = result.output_len == 104 &&
                  a20_work_u32(result.output) ==
                      (A20_WORK_CAP_OPERATOR | A20_WORK_CAP_PROCESS);
         if (ok && kind == A20_WORK_OPERATOR)
@@ -532,6 +537,75 @@ static int abi_clusterd(void) {
              a20_work_u64(response + 32) == expected;
         if (ok)
             note("jobd-binary-tree ok\n", 20);
+        uint8_t text[736], expected_words[A20_WORD_RESULT], word_reply[164];
+        const char *phrase = "alpha beta gamma delta ";
+        for (unsigned i = 0; i < sizeof(text); i++)
+            text[i] = phrase[i % 23];
+        a20_work_request_t map = {.input = text, .input_len = sizeof(text)};
+        uint32_t expected_len = sizeof(expected_words);
+        ok = ok && !a20_work_word_map(0, &map, expected_words, &expected_len);
+        a20_memset(wire, 0, 32);
+        wire[0] = 'C';
+        wire[1] = 'J';
+        wire[2] = 1;
+        wire[3] = A20_JOB_WORDCOUNT;
+        a20_work_put64(wire + 4, 801);
+        a20_work_put32(wire + 12, 5000);
+        a20_work_put32(wire + 16, sizeof(text));
+        a20_memcpy(wire + 32, text, sizeof(text));
+        len = sizeof(word_reply);
+        ok = ok &&
+             a20_cluster_exchange(jobs, wire, 32 + sizeof(text), word_reply,
+                                  &len, 6000) >= 0 &&
+             len == 32 + expected_len && word_reply[3] == A20_JOB_WORDCOUNT &&
+             a20_work_u64(word_reply + 4) == 801 &&
+             !a20_work_u32(word_reply + 12) &&
+             a20_work_u32(word_reply + 16) == a20_work_u32(word_reply + 24) &&
+             a20_work_u32(word_reply + 24) > 3 &&
+             a20_work_u32(word_reply + 28) == expected_len &&
+             !a20_memcmp(word_reply + 32, expected_words, expected_len);
+        if (ok)
+            note("jobd-word-tree ok\n", 18);
+        const char *word_path = "/tmp/cluster-wordcount.txt";
+        const char *sample = "Alpha beta alpha\n";
+        a20_path_open_args_t file = {
+            .dir = A20_HANDLE_NULL,
+            .path = (uint64_t)(uintptr_t)word_path,
+            .path_len = (uint32_t)a20_strlen(word_path),
+            .rights = A20_RIGHT_WRITE,
+            .flags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_WRONLY |
+                     A20_PATH_OPEN_TRUNC,
+            .mode = 0600};
+        if (ok && a20_path_open(&file) >= 0) {
+            uint64_t wrote = 0;
+            ok = a20_hdl_write_buf(file.out_handle, sample, a20_strlen(sample),
+                                   &wrote) >= 0 &&
+                 wrote == a20_strlen(sample);
+            a20_hdl_close(file.out_handle);
+        } else
+            ok = 0;
+        const char *word_argv[] = {"/bin/cluster-wordcount-rv", word_path, 0};
+        a20_handle_t submitter = A20_HANDLE_NULL;
+        ok = ok && !spawn_argv(word_argv[0], word_argv, 2, &submitter);
+        if (submitter != A20_HANDLE_NULL) {
+            a20_task_status_t status = {.size = sizeof(status), .version = 1};
+            started = a20_agent_clock_ms(0);
+            int waited;
+            do {
+                waited =
+                    a20_task_wait(submitter, A20_TASK_WAIT_NONBLOCK, &status);
+                if (waited != -A20_ERR_WOULD_BLOCK)
+                    break;
+                a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+            } while (a20_agent_clock_ms(0) - started < 6000);
+            ok = ok && !waited && !status.exit_code;
+            if (waited < 0)
+                stop_service(submitter);
+            else
+                a20_hdl_close(submitter);
+        }
+        if (ok)
+            note("jobd-word-cli ok\n", 17);
         a20_hdl_close(jobs);
     } else {
         ok = 0;
@@ -932,6 +1006,31 @@ static int uart_runtime(const char *control_path, const char *agent_path,
         seen |= tasks[i].target.node_id[15] == 1   ? 1
                 : tasks[i].target.node_id[15] == 2 ? 2
                                                    : 0;
+    uint8_t text[736], word_outputs[15][A20_WORD_RESULT],
+        expected_words[A20_WORD_RESULT];
+    const char *phrase = "alpha beta gamma delta ";
+    for (unsigned i = 0; i < sizeof(text); i++)
+        text[i] = phrase[i % 23];
+    a20_work_request_t map = {.input = text, .input_len = sizeof(text)};
+    uint32_t expected_len = sizeof(expected_words);
+    int words =
+        a20_job_word_graph(tasks, 15, inputs, word_outputs, text, sizeof(text));
+    if (a20_work_word_map(0, &map, expected_words, &expected_len) ||
+        words < 3 ||
+        a20_job_init(&job, 1001, tasks, words, a20_agent_clock_ms(0), 20000,
+                     1500, 4) < 0 ||
+        a20_cluster_job_run(&job, "work") < 0 ||
+        tasks[words - 1].output_len != expected_len ||
+        a20_memcmp(tasks[words - 1].output, expected_words, expected_len))
+        return fail("uart-word-tree");
+    unsigned word_seen = 0;
+    for (int i = 0; i < words; i++)
+        word_seen |= tasks[i].target.node_id[15] == 1   ? 1
+                     : tasks[i].target.node_id[15] == 2 ? 2
+                                                        : 0;
+    if (word_seen != 3)
+        return fail("uart-word-mixed");
+    note("UART: mixed-word-tree-pass\n", 27);
     if (routed == 2) {
         note("GATEWAY: gossip-expire-ready\n", 29);
         started = a20_agent_clock_ms(0);

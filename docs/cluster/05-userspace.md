@@ -10,7 +10,9 @@ agent；两者都执行 CW/1。构建：`make ARCH=riscv64 native-cluster-agent`
 |---|---|---|
 | clusterd | 从种子与内核快照重建成员；直接/间接探测；能力目录、租约、any 选择 | [10-control-plane.md](10-control-plane.md) |
 | cluster-agent | CW 查询、可注册算子、显式清单进程、期限处理 | [09-work-agent.md](09-work-agent.md) |
-| jobd | 本地有界 DOT 作业提交、远端分片派发、失败重派、二叉树归约 | [11-jobs.md](11-jobs.md) |
+| jobd | 本地有界 DOT/词频作业提交、远端分片派发、失败重派、二叉树归约 | [11-jobs.md](11-jobs.md) |
+| cluster-supervisor | 持久配置、三服务独立重启、退避与退出回收 | [17-deployment-supervision.md](17-deployment-supervision.md) |
+| cluster-wordcount | 从文件提交词频作业并打印排序结果 | [18-wordcount.md](18-wordcount.md) |
 | Native SDK | 固定目录解析、CM/1 any 选择、绑定启动会话的连接和作业驱动 | `user/liba20rt/a20_cluster*.h` |
 | MCU leaf | 相同 CW 协议、静态算子表与能力查询、单帧可靠应答缓存 | [04-transports.md](04-transports.md) |
 
@@ -28,7 +30,8 @@ agent 重启产生新服务槽位，旧连接失败，启动 epoch 在同内核�
 jobd 根进程退出会终止作业；没有作业日志或自动恢复。可重试算子只保证至少一次
 执行与结果去重；进程任务禁止不确定失败后的自动重派。
 
-以下仍是设计目标，未作为已完成能力：感染式 gossip/成员增量同步、自动路由
-计算、持久配置与监管集成、通用 TLV 作业提交、多作业持久队列、词频/CONCAT/
-自定义归约以及大规模和物理混合部署。当前实现已将这些目标与运行证据分开，
+有界成员传播与租约路由见 [16-gossip-routes.md](16-gossip-routes.md)，持久配置与
+Native 监管已接入。通用字节结果、自定义封装归约、CONCAT 和词频已经使用相同
+调度器执行。以下仍是设计目标：通用 TLV 作业提交、多作业持久队列、外部数据
+流式处理、更大规模与物理混合部署。当前实现已将目标与运行证据分开，
 继续按 [07-unified-runtime.md](07-unified-runtime.md) 的门槛推进。

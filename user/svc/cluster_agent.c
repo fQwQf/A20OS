@@ -2,6 +2,7 @@
  * tasks; no remote payload is interpreted as a filesystem path. */
 #include "liba20rt/a20_cluster_agent.h"
 #include "liba20rt/crt0_a20.h"
+#include "../../kernel/include/uapi/a20/cluster_words.h"
 
 static a20_handle_t process_image = A20_HANDLE_NULL;
 static uint32_t run_process(void *ctx, const a20_work_request_t *request,
@@ -110,11 +111,17 @@ int main(int argc, char **argv, char **envp) {
         {A20_WORK_DOT, A20_WORK_REPLAY_SAFE, 1024, 8, a20_work_dot, 0},
         {A20_WORK_SUM64, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 1024, 8,
          a20_work_sum64, 0},
+        {A20_WORK_WORD_MAP, A20_WORK_REPLAY_SAFE, 1024, A20_WORD_RESULT,
+         a20_work_word_map, 0},
+        {A20_WORK_WORD_MERGE, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE,
+         A20_WORD_MERGE_INPUT, A20_WORD_RESULT, a20_work_word_merge, 0},
+        {A20_WORK_CONCAT, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 344, 168,
+         a20_work_concat, 0},
     };
     a20_cluster_agent_server_t server = {0};
     server.agent = (a20_work_agent_t){
         .operators = ops,
-        .operator_count = 2,
+        .operator_count = sizeof(ops) / sizeof(ops[0]),
         .max_input = 1024,
         .max_output = 1024,
         .max_inflight = 1,

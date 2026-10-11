@@ -5,6 +5,7 @@
  * Board byte I/O is the only transport dependency. No heap allocation.
  * See docs/cluster/02-wire-protocol.md and 04-transports.md. */
 #include "leaf.h"
+#include "uapi/a20/cluster_words.h"
 #include "cluster/operator.h"
 #include "cluster/transaction.h"
 #include "cluster/session_control.h"
@@ -104,10 +105,16 @@ static const a20_work_operator_t leaf_operators[] = {
     {A20_WORK_DOT, A20_WORK_REPLAY_SAFE, 140, 8, a20_work_dot, NULL},
     {A20_WORK_SUM64, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 136, 8,
      a20_work_sum64, NULL},
+    {A20_WORK_WORD_MAP, A20_WORK_REPLAY_SAFE, 140, A20_WORD_RESULT,
+     a20_work_word_map, NULL},
+    {A20_WORK_WORD_MERGE, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 140,
+     A20_WORD_RESULT, a20_work_word_merge, NULL},
+    {A20_WORK_CONCAT, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 140, 168,
+     a20_work_concat, NULL},
 };
 static const a20_work_agent_t leaf_default_agent = {
     .operators = leaf_operators,
-    .operator_count = 2,
+    .operator_count = sizeof(leaf_operators) / sizeof(leaf_operators[0]),
     .max_input = 140,
     .max_output = 168,
     .max_inflight = 1,

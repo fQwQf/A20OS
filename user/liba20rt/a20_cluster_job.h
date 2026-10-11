@@ -30,7 +30,7 @@ static inline int a20_cluster_job_run(a20_job_t *job, const char *service) {
                 endpoints[i] = A20_HANDLE_NULL;
                 continue;
             }
-            uint8_t reply[40];
+            uint8_t reply[A20_WORK_HEADER + A20_JOB_MAX_OUTPUT];
             uint32_t len = sizeof(reply), handles = 0;
             a20_status_t r = a20_channel_recv_flags(
                 endpoints[i], reply, &len, 0, &handles, A20_MSG_NONBLOCK);
@@ -61,9 +61,16 @@ static inline int a20_cluster_job_run(a20_job_t *job, const char *service) {
                 break;
             uint64_t remaining = job->deadline - now;
             uint32_t lookup_ms = remaining < 100 ? (uint32_t)remaining : 100;
+            uint8_t prepared[A20_JOB_MAX_INPUT];
+            int input_len =
+                a20_job_prepare_input(job, i, prepared, sizeof(prepared));
+            if (input_len < 0) {
+                job->state = A20_JOB_FAILED;
+                break;
+            }
             a20_cluster_selection_t selected;
             if (a20_cluster_resolve_any(service, t->kind, t->operator_id,
-                                        a20_job_input_len(t), lookup_ms,
+                                        (uint32_t)input_len, lookup_ms,
                                         &selected) < 0)
                 continue;
             a20_job_target_t target = {.boot_epoch = selected.boot_epoch,
