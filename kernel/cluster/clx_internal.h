@@ -302,6 +302,7 @@ void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
 void a20_clx_session_tick(void);
 void a20_clx_session_invalidate(const a20_node_id_t *node);
 uint32_t a20_clx_session_mtu(const a20_node_id_t *node);
+uint32_t a20_clx_session_logical_mtu(const a20_node_id_t *node);
 
 /* Reliable layer owns the bounded request/reply cache. RX returns one
  * when consumed; otherwise it strips the CALL prefix in the supplied view. */

@@ -1,9 +1,10 @@
 /* Bounded routed identity sessions. Registry operations never perform I/O. */
 #include "cluster/clx_internal.h"
 #include "cluster/session_control.h"
+#include "cluster/udp.h"
 
 typedef struct session_path {
-    uint32_t transport, nh_len, mtu;
+    uint32_t transport, nh_len, mtu, fragment;
     uint8_t nh[A20_CLX_LINK_ADDR_MAX];
     uint64_t local, gateway;
 } session_path_t;
@@ -33,12 +34,15 @@ static int path_get(const a20_node_id_t *node, session_path_t *path) {
         !(caps & A20_CLX_CAP_RELAY) || !(caps & A20_CLX_CAP_RELIABLE))
         return -1;
     path->mtu = t->mtu;
+    path->fragment = path->transport == A20_CLX_TRANSPORT_UDP &&
+                     t->mtu == A20_CS_FRAGMENT_MTU &&
+                     (caps & A20_CLX_CAP_FRAGMENT);
     return 0;
 }
 static int same_path(const session_path_t *a, const session_path_t *b) {
     return a->transport == b->transport && a->nh_len == b->nh_len &&
            a->local == b->local && a->gateway == b->gateway &&
-           !memcmp(a->nh, b->nh, a->nh_len);
+           a->fragment == b->fragment && !memcmp(a->nh, b->nh, a->nh_len);
 }
 static routed_session_t *find_locked(const a20_node_id_t *node, int create) {
     routed_session_t *free = NULL;
@@ -59,7 +63,7 @@ static routed_session_t *find_locked(const a20_node_id_t *node, int create) {
 }
 static void session_send(const a20_node_id_t *node, const session_path_t *path,
                          uint32_t kind, uint64_t cookie, uint64_t target_epoch,
-                         uint32_t mtu) {
+                         uint32_t mtu, uint32_t requested_caps) {
     a20_node_id_t self;
     uint32_t caps;
     if (a20_clx_self_get(&self, &caps) < 0)
@@ -71,6 +75,9 @@ static void session_send(const a20_node_id_t *node, const session_path_t *path,
                          .caps = caps & ~A20_CLX_CAP_FRAGMENT,
                          .profile = CONFIG_CLUSTER_PROFILE,
                          .mtu = mtu < path->mtu ? mtu : path->mtu};
+    if (CONFIG_CLUSTER_PROFILE > 1 && path->fragment &&
+        r.mtu == A20_CS_FRAGMENT_MTU && (requested_caps & A20_CLX_CAP_FRAGMENT))
+        r.caps |= A20_CLX_CAP_FRAGMENT;
     memcpy(r.source, self.bytes, 16);
     memcpy(r.target, node->bytes, 16);
     uint8_t frame[A20_CLX_HDR_LEN + A20_CS_BYTES + A20_CLX_CRC_LEN];
@@ -119,7 +126,8 @@ int a20_clx_routed_session(const a20_node_id_t *node, uint64_t *local,
     if (cancel)
         a20_clx_node_down(node);
     if (cookie)
-        session_send(node, &path, A20_CS_PROBE, cookie, 0, path.mtu);
+        session_send(node, &path, A20_CS_PROBE, cookie, 0, path.mtu,
+                     A20_CLX_CAP_FRAGMENT);
     return result;
 }
 
@@ -140,6 +148,9 @@ void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
                    &path.gateway, &caps) < 0)
         return;
     path.mtu = t->mtu;
+    path.fragment = path.transport == A20_CLX_TRANSPORT_UDP &&
+                    t->mtu == A20_CS_FRAGMENT_MTU &&
+                    (caps & A20_CLX_CAP_FRAGMENT);
     /* A directly adjacent peer already has bidirectional HELLO. It can answer
      * a probe, but cannot create a second, independent epoch authority. */
     uint64_t direct_local, direct_remote;
@@ -148,7 +159,8 @@ void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
     if (!direct && path_get(src, &path) < 0)
         return;
     if (r.kind == A20_CS_PROBE)
-        session_send(src, &path, A20_CS_REPLY, r.cookie, r.epoch, r.mtu);
+        session_send(src, &path, A20_CS_REPLY, r.cookie, r.epoch, r.mtu,
+                     r.caps);
     if (direct)
         return;
     uint64_t now = session_now(), cookie = 0;
@@ -164,6 +176,9 @@ void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
         if (r.kind == A20_CS_REPLY) {
             if (r.mtu > path.mtu)
                 r.mtu = path.mtu;
+            if (CONFIG_CLUSTER_PROFILE == 1 || !path.fragment ||
+                r.mtu != A20_CS_FRAGMENT_MTU)
+                r.caps &= ~A20_CLX_CAP_FRAGMENT;
             int accepted = a20_cs_accept(&s->state, &r, path.local, now);
             changed |= accepted > 0;
         } else if ((!a20_cs_live(&s->state, now) ||
@@ -176,7 +191,8 @@ void a20_clx_session_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
     if (changed)
         a20_clx_node_down(src);
     if (cookie)
-        session_send(src, &path, A20_CS_PROBE, cookie, 0, path.mtu);
+        session_send(src, &path, A20_CS_PROBE, cookie, 0, path.mtu,
+                     A20_CLX_CAP_FRAGMENT);
 }
 
 void a20_clx_session_invalidate(const a20_node_id_t *node) {
@@ -194,6 +210,23 @@ uint32_t a20_clx_session_mtu(const a20_node_id_t *node) {
     routed_session_t *s = find_locked(node, 0);
     if (s && a20_cs_live(&s->state, now))
         mtu = s->state.mtu;
+    spin_unlock_irqrestore(&g_clx_lock, f);
+    return mtu;
+}
+
+uint32_t a20_clx_session_logical_mtu(const a20_node_id_t *node) {
+    uint32_t mtu = 0;
+    uint64_t now = session_now();
+    uint64_t f = spin_lock_irqsave(&g_clx_lock);
+    routed_session_t *s = find_locked(node, 0);
+    if (s && a20_cs_live(&s->state, now)) {
+        mtu = s->state.mtu;
+        if (CONFIG_CLUSTER_PROFILE > 1 && mtu == A20_CS_FRAGMENT_MTU &&
+            (s->state.caps & A20_CLX_CAP_FRAGMENT)) {
+            uint32_t remote = s->state.profile >= 3 ? 65590u : 4096u;
+            mtu = remote < CLX_LOGICAL_MTU ? remote : CLX_LOGICAL_MTU;
+        }
+    }
     spin_unlock_irqrestore(&g_clx_lock, f);
     return mtu;
 }
@@ -236,7 +269,8 @@ void a20_clx_session_tick(void) {
             a20_clx_node_down(&copy.node);
         } else if (send) {
             session_send(&copy.node, &copy.path, A20_CS_PROBE,
-                         copy.state.cookie, 0, copy.path.mtu);
+                         copy.state.cookie, 0, copy.path.mtu,
+                         A20_CLX_CAP_FRAGMENT);
         }
     }
 }

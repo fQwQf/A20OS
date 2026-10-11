@@ -98,8 +98,9 @@ make smoke-native-cluster
 这些都是主机/QEMU 证据，不能当作物理板或生产吞吐结论。
 
 跨不同 MTU 的网关当前不会重分片，只能转发能容纳的原片。
-[15-routed-sessions.md](15-routed-sessions.md) 已实现间接会话与路径 MTU 探测，
-当前对间接目的限制为最小路径单帧预算；不能把直连 UDP 分片称为多跳分片。
+[15-routed-sessions.md](15-routed-sessions.md) 实现间接会话与路径 MTU 探测；
+[19-routed-fragmentation.md](19-routed-fragmentation.md) 实现完整 UDP 路径的端到端
+分片协商。经过 UART 或不能分片的邻接仍使用最小路径单帧预算。
 
 ## 5. 本轮实际证据与底层修复
 

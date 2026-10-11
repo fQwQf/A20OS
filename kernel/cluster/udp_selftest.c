@@ -1,4 +1,4 @@
-/* Real two-kernel acceptance fixture, gated by clxudptest=a/b.
+/* Real independent-kernel acceptance fixture, gated by clxudptest=a/b/r.
  * This uses ordinary channel queues and the production route/UDP/proxy path;
  * tools/check-cluster-udp.py owns the independent QEMU instances. */
 #include "cluster/clx_internal.h"
@@ -191,12 +191,36 @@ static int udp_test_large(const a20_node_id_t *peer) {
 static void udp_test_main(void) {
     const char *args = bootargs_get();
     int side_b = args && strstr(args, "clxudptest=b");
+    int relay = args && strstr(args, "clxudptest=r");
+    int routed = args && strstr(args, "clxudprouted=1");
     a20_node_id_t self = {{0}}, peer = {{0}};
-    self.bytes[15] = side_b ? 2 : 1;
+    self.bytes[15] = relay ? 3 : side_b ? 2 : 1;
     peer.bytes[15] = side_b ? 1 : 2;
-    uint8_t nh[6] = {10, 0, 3, side_b ? 2 : 3, 0xab, 0xf4};
-    if (a20_clx_core_init() < 0 || a20_clx_self_set(&self, 0) < 0 ||
-        a20_clx_route_add(&peer, A20_CLX_TRANSPORT_UDP, nh, 6, 0) < 0) {
+    uint8_t nh[6] = {10, 0, 3, routed ? 4 : side_b ? 2 : 3, 0xab, 0xf4};
+    if (a20_clx_core_init() < 0 ||
+        a20_clx_self_set(&self, A20_CLUSTER_CAP_RELIABLE |
+                                    (relay ? A20_CLUSTER_CAP_RELAY : 0)) < 0) {
+        printf("[CLX-UDP-TEST] setup: FAIL\n");
+        return;
+    }
+    if (relay) {
+        for (unsigned i = 1; i <= 2; i++) {
+            peer.bytes[15] = i;
+            nh[3] = i + 1;
+            if (a20_clx_route_add(&peer, A20_CLX_TRANSPORT_UDP, nh, 6, 0) < 0) {
+                printf("[CLX-UDP-TEST] relay-setup: FAIL\n");
+                return;
+            }
+        }
+        printf("[CLX-UDP-TEST] relay-ready: PASS\n");
+        return;
+    }
+    a20_node_id_t gateway = {{0}};
+    gateway.bytes[15] = 3;
+    if ((routed &&
+         a20_clx_route_add(&gateway, A20_CLX_TRANSPORT_UDP, nh, 6, 0) < 0) ||
+        a20_clx_route_add(&peer, A20_CLX_TRANSPORT_UDP, nh, 6, routed ? 1 : 0) <
+            0) {
         printf("[CLX-UDP-TEST] setup: FAIL\n");
         return;
     }
@@ -242,6 +266,22 @@ static void udp_test_main(void) {
     if (state != A20_CLX_LINK_UP) {
         printf("[CLX-UDP-TEST] handshake: FAIL\n");
         return;
+    }
+    if (routed) {
+        uint64_t local, remote;
+        uint32_t caps;
+        int confirmed = 0;
+        for (unsigned i = 0; i < 1000; i++) {
+            if (!a20_clx_peer_session(&peer, &local, &remote, &caps)) {
+                confirmed = (caps & A20_CLX_CAP_FRAGMENT) != 0;
+                break;
+            }
+            proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(20));
+        }
+        printf("[CLX-UDP-TEST] node=%c routed-fragment-session: %s\n",
+               side_b ? 'b' : 'a', confirmed ? "PASS" : "FAIL");
+        if (!confirmed)
+            return;
     }
     int err;
     /* HELLO completion can be asymmetric. A reliable probe establishes that
@@ -507,8 +547,8 @@ static void udp_test_main(void) {
 
 void a20_clx_udp_selftest_boot(void) {
     const char *args = bootargs_get();
-    if (args &&
-        (strstr(args, "clxudptest=a") || strstr(args, "clxudptest=b"))) {
+    if (args && (strstr(args, "clxudptest=a") || strstr(args, "clxudptest=b") ||
+                 strstr(args, "clxudptest=r"))) {
         if (proc_alloc(udp_test_main) < 0)
             printf("[CLX-UDP-TEST] spawn: FAIL\n");
     }

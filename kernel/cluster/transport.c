@@ -183,7 +183,7 @@ int a20_clx_core_send_frame(const a20_node_id_t *dst, const uint8_t *frame,
         return -A20_ERR_NODE_UNREACHABLE;
     }
     uint32_t path_mtu = a20_clx_session_mtu(dst);
-    if (path_mtu && len > path_mtu)
+    if (path_mtu && path_mtu < t->mtu && len > path_mtu)
         return -A20_ERR_NO_SPACE;
     if (len <= t->mtu)
         return clx_wire_send(t, transport_id, nh, nh_len, frame, len);
@@ -325,6 +325,16 @@ static int clx_rx_pop(clx_rx_item_t *out) {
 
 /* ---- RX thread: screen -> resolve -> dispatch ----------------------------- */
 
+static int clx_fragment_hop(uint32_t id, const uint8_t *nh, uint32_t len) {
+    const a20_clx_transport_t *t = a20_clx_transport_get(id);
+    uint64_t local, remote;
+    uint32_t caps;
+    return CONFIG_CLUSTER_PROFILE > 1 && id == A20_CLX_TRANSPORT_UDP && t &&
+           t->mtu == A20_CS_FRAGMENT_MTU && t->session &&
+           !t->session(t->ctx, nh, len, NULL, &local, &remote, &caps) &&
+           (caps & A20_CLX_CAP_FRAGMENT);
+}
+
 static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
                          uint32_t nh_len, uint8_t *frame, uint32_t len) {
     a20_frame_hdr_t h;
@@ -390,9 +400,11 @@ static void clx_dispatch(uint32_t transport_id, const uint8_t *nh_src,
             a20_clx_link_rx_drop(transport_id, nh_src, nh_len);
             return;
         }
-        if (h.type == A20_CLX_TYPE_SEND && h.dst_slot == A20_CS_SLOT &&
-            a20_clx_get_le32(payload + 4) > outgoing_mtu) {
-            a20_clx_put_le32(frame + A20_CLX_HDR_LEN + 4, outgoing_mtu);
+        if (h.type == A20_CLX_TYPE_SEND && h.dst_slot == A20_CS_SLOT) {
+            a20_cs_path_clamp(
+                frame + A20_CLX_HDR_LEN, outgoing_mtu,
+                clx_fragment_hop(transport_id, nh_src, nh_len) &&
+                    clx_fragment_hop(dst_transport, dst_nh, dst_nh_len));
             a20_clx_put_le16(frame + len - 2,
                              a20_clx_crc16_ccitt(frame, len - 2));
         }
