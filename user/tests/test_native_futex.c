@@ -95,7 +95,7 @@ int main(int argc, char **argv, char **envp)
         sizeof("NATIVE_COMPUTE_CANCEL: PASS workers=2 exit=137 pure-user=1\n") -
             1,
         0);
-    int file_result = native_file_contract();
+    int file_result = native_file_contract(1);
     if (file_result) {
         char error[] = "NATIVE_FILE_ERROR: 00\n";
         error[sizeof(error) - 4] = '0' + file_result / 10;

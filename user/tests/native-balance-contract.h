@@ -10,7 +10,7 @@
  * work thread is assigned a CPU: both admit the complete online domain. */
 static struct {
     volatile uint32_t input[128];
-    uint32_t online, mask[2], jobs[2], sum[2], taken[2], ready[2];
+    uint32_t online, mask[2], jobs[2], sum[2], taken[2], ready[2], error[2];
     a20_work_range_t work;
 } native_balance_shared;
 static int native_balance_prepare(a20_handle_t worker) {
@@ -40,36 +40,42 @@ static int native_balance_prepare(a20_handle_t worker) {
         native_balance_shared.sum[i] = 0;
         native_balance_shared.taken[i] = 0;
         native_balance_shared.ready[i] = 0;
+        native_balance_shared.error[i] = 0;
     }
     a20_sched_args_t sched = {.flags = A20_SCHED_AFFINITY,
                               .affinity = domain.online_mask,
                               .affinity_size = sizeof(uint64_t)};
     return a20_sched_set(worker, &sched) != A20_OK;
 }
-static int native_balance_work(unsigned part) {
-    if (part >= 2)
-        return 1;
+/* Publish failures too: an exited peer cannot satisfy a success barrier. */
+static int native_balance_wait(unsigned part, uint32_t threshold) {
+    for (;;) {
+        uint32_t ready, error;
+        if (a20_atomic32_load(&native_balance_shared.error[1 - part], &error) ||
+            error ||
+            a20_atomic32_load(&native_balance_shared.ready[1 - part], &ready))
+            return 1;
+        if (ready >= threshold)
+            return 0;
+        if (a20_thread_yield())
+            return 1;
+    }
+}
+static int native_balance_work_inner(unsigned part) {
     if (a20_atomic32_store(&native_balance_shared.ready[part], 1))
         return 5;
-    uint32_t ready = 0;
-    while (!ready) {
-        if (a20_atomic32_load(&native_balance_shared.ready[1 - part], &ready) ||
-            a20_thread_yield())
-            return 6;
-    }
+    if (native_balance_wait(part, 1))
+        return 6;
 #ifdef A20_NATIVE_FILE_TEST
-    /* Both real workers use the same filesystem concurrently before claiming
-     * shared computation. Wait again so storage latency cannot consume all
-     * work on one worker before the other has reached the computation phase. */
-    if (native_file_contract() ||
-        a20_atomic32_store(&native_balance_shared.ready[part], 2))
+    /* Both workers retain ownership throughout every file operation. A closed
+     * handle number can be reused by the other worker immediately. */
+    int file_result = native_file_contract(0);
+    if (file_result)
+        return 100 + file_result;
+    if (a20_atomic32_store(&native_balance_shared.ready[part], 2))
         return 8;
-    ready = 0;
-    while (ready < 2) {
-        if (a20_atomic32_load(&native_balance_shared.ready[1 - part], &ready) ||
-            a20_thread_yield())
-            return 9;
-    }
+    if (native_balance_wait(part, 2))
+        return 9;
 #endif
     for (;;) {
         uint32_t job;
@@ -98,6 +104,15 @@ static int native_balance_work(unsigned part) {
             return 4;
     }
     return 0;
+}
+static int native_balance_work(unsigned part) {
+    if (part >= 2)
+        return 1;
+    int result = native_balance_work_inner(part);
+    if (result && a20_atomic32_store(&native_balance_shared.error[part],
+                                     (uint32_t)result))
+        return 10;
+    return result;
 }
 static uint32_t native_balance_mask(void) {
     return native_balance_shared.mask[0] | native_balance_shared.mask[1];

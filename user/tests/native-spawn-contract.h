@@ -70,9 +70,18 @@ static int native_spawn_contract(void) {
                 7);
         previous = identity.id;
         a20_task_status_t status;
-        S_CHECK(a20_task_wait(args.out_task, 0, &status) == A20_OK &&
-                    status.size == sizeof(status) && status.version == 1 &&
-                    status.exit_code == 37,
+        a20_status_t waited;
+        do {
+            waited = a20_task_wait(args.out_task, 0, &status);
+            if (waited == -A20_ERR_INTERRUPTED) {
+                /* This parent expects only child-exit notifications here.
+                 * Consume the notification before retrying the same child. */
+                int64_t pending = a20_signal_check();
+                S_CHECK(pending >= 0 && !(pending & ~(1ULL << 17)), 18);
+            }
+        } while (waited == -A20_ERR_INTERRUPTED);
+        S_CHECK(waited == A20_OK && status.size == sizeof(status) &&
+                    status.version == 1 && status.exit_code == 37,
                 8);
         S_CHECK(a20_hdl_identity(args.out_task, &identity) == A20_OK &&
                     identity.state == A20_OBJECT_RETIRED &&

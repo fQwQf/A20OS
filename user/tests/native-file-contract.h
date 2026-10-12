@@ -4,7 +4,9 @@
 #include "liba20rt/a20_handle.h"
 #include "liba20rt/a20_mem.h"
 /* Same actual file operations on MMU servers and flat shared MCU kernels. */
-static int native_file_contract(void) {
+/* A closed slot may immediately belong to another thread. Only a caller
+ * with no concurrent handle allocation may check the just-closed number. */
+static int native_file_contract(int serialized) {
 #define F_CHECK(test, code)                                                    \
     do {                                                                       \
         if (!(test))                                                           \
@@ -41,7 +43,8 @@ static int native_file_contract(void) {
     for (unsigned i = 0; i < 40; i++)
         F_CHECK(buffer[i] == (uint8_t)((487 + i) * 37 + 11), 10);
     F_CHECK(a20_hdl_close(file) == A20_OK, 11);
-    F_CHECK(a20_hdl_read_buf(file, buffer, 1, &count) == -A20_ERR_BAD_HANDLE,
+    F_CHECK(a20_hdl_read_buf(serialized ? file : A20_HANDLE_NULL, buffer, 1,
+                             &count) == -A20_ERR_BAD_HANDLE,
             12);
     open.rights = A20_RIGHT_STAT;
     F_CHECK(a20_path_open(&open) == A20_OK, 13);

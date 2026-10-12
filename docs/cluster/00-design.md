@@ -135,3 +135,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 持续纯计算 Native 线程的用户态时间片、停止与实际执行检查见
 [44-native-user-preemption.md](44-native-user-preemption.md)。
+
+真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
+[45-native-execution-reliability.md](45-native-execution-reliability.md)。

@@ -761,3 +761,6 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 
 持续纯计算 Native 线程的用户态时间片、停止与实际执行检查见
 [44-native-user-preemption.md](44-native-user-preemption.md)。
+
+真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
+[45-native-execution-reliability.md](45-native-execution-reliability.md)。

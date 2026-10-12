@@ -104,6 +104,10 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
     int wret = proc_wait4(target->pid, &status,
                           (flags & A20_TASK_WAIT_NONBLOCK) ? 1 : 0);
     proc_put(target);
+    /* Interrupts leave the child and its handle available for a later join.
+     * Native callers consume their pending signals and choose whether to retry. */
+    if (wret == -ERESTARTSYS || wret == -EINTR)
+        return -A20_ERR_INTERRUPTED;
     if (wret < 0)
         return -A20_ERR_INVALID_ARGUMENT;
     if (wret == 0)

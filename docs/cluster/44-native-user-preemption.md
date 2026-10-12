@@ -99,3 +99,6 @@ ABI、IDL、裁剪注册、共享 fabric 可移植性与文档检查通过，149
 证据入口为 `.kernel-build/cluster/evidence/native-compute-<commit>/manifest.json`。
 归档保留最终和中间映像、同父程序负例、实际 FAT、串口日志、最终源码和
 SHA256；负例的 90 个链接目标文件还能重新链接出逐字节相同的失败映像。
+
+真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
+[45-native-execution-reliability.md](45-native-execution-reliability.md)。
