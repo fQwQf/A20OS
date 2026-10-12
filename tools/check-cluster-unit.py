@@ -45,6 +45,7 @@ def main():
         run([sys.executable, "tools/cluster-ref/selftest.py"], root)
         run([sys.executable, "tools/cluster-ref/check_c_side.py", "--decoder",
              str(Path(directory) / "test_clx_frame")], root)
+        run([sys.executable, "tools/check-cluster-udp-peers.py"], root)
     print("check-cluster-unit: PASS")
 
 
