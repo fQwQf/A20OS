@@ -46,6 +46,18 @@ class ProgramDomain(rtl.RtlDomain):
         self.syscall_numbers = set()
         self.svc_count = [0] * self.n
         self.returns = [0] * self.n
+        self.private_stack_checks = [0] * self.n
+        # Read the production ELF allocation size; the test does not allocate
+        # or switch firmware stacks on the kernel's behalf.
+        with open(elf, "rb") as stream:
+            obj = kernel.ELFFile(stream)
+            stack_size = next(int(sym["st_size"]) for sym in
+                              obj.get_section_by_name(".symtab").iter_symbols()
+                              if sym.name == "armv7m_exception_stack")
+        self.exception_stack_base = self.symbols["armv7m_exception_stack"]
+        self.exception_stack_top = self.exception_stack_base + stack_size
+        assert stack_size >= 32 and kernel.LOCAL <= self.exception_stack_base
+        assert self.exception_stack_top <= self.symbols["_stack_limit"]
         self.return_addresses = set()
         for first, end in [("SVC_Handler", "PendSV_Handler"),
                            ("SysTick_Handler", "External_IRQHandler")]:
@@ -97,6 +109,13 @@ class ProgramDomain(rtl.RtlDomain):
         # Enter Handler mode first so banked-register API access is privileged.
         psr = values[7] & ~((0x3f << 10) | (3 << 25) | 0x1ff)
         engine.reg_write(UC_ARM_REG_XPSR, psr | number | 0x01000000)
+        # Unprivileged Thread mode cannot read banked MSP through the CPU
+        # API; inspect it only after entering privileged Handler mode.
+        if use_psp:
+            msp = engine.reg_read(UC_ARM_REG_MSP)
+            assert self.exception_stack_base + 32 <= msp <= self.exception_stack_top, (
+                "PSP task left another migratable task stack as handler MSP", cpu, hex(msp))
+            self.private_stack_checks[cpu] += 1
         engine.reg_write(UC_ARM_REG_PSP if use_psp else UC_ARM_REG_MSP, frame)
         engine.reg_write(UC_ARM_REG_LR, 0xfffffffd if use_psp else 0xfffffff9)
         engine.reg_write(UC_ARM_REG_PC, self.symbols["SVC_Handler" if number == 11 else "SysTick_Handler"])
@@ -183,9 +202,12 @@ def main():
         domain = ProgramDomain(args.elf, bus, args.cpus, args.seed)
         result = domain.run(args.rounds, reset_cpus=[1] if bus else None)
         assert all(n > 0 for n in domain.user_instructions[:2])
+        assert all(n > 0 for n in domain.private_stack_checks[:2])
         assert {0x0002, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers
         assert domain.scalar("program_test_rejections") == 8
         assert any("[PROGRAM-THREAD] PASS final heap restored handles stacks image=freed" in log for log in domain.logs)
+        assert {4, 5, 0x010d} <= domain.syscall_numbers
+        assert any("[PROGRAM-RUNTIME] PASS immutable binding serial IDs survive join cross-cpu=1" in log for log in domain.logs)
         assert any("[PROGRAM-THREAD] PASS public affinity parent=1 child=0" in log for log in domain.logs)
         assert {3, 0x0100, 0x0202, 0x0205, 0x0209, 0x020a} <= domain.syscall_numbers
         assert any("[PROGRAM-THREAD] PASS nested-create join close shared-space stack-pin=1" in log for log in domain.logs)
@@ -194,7 +216,7 @@ def main():
         assert any("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free" in log for log in domain.logs)
         assert any("[PROGRAM-HEAP] PASS checks=20 wait-pinned=1 cross-cpu=1" in log for log in domain.logs)
         result.update(user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
-                      exception_returns=domain.returns, native_syscalls=sorted(domain.syscall_numbers),
+                      exception_returns=domain.returns, psp_exception_private_stack_checks=domain.private_stack_checks, native_syscalls=sorted(domain.syscall_numbers),
                       seed=args.seed, quantum=1, elf_rejections=8,
                       tick_injection="at most one SysTick per 1000 interleaving rounds; not cycle timing",
                       elf_sha256=hashlib.sha256(args.elf.read_bytes()).hexdigest(),

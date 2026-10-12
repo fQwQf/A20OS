@@ -10,6 +10,8 @@
 #define A20_SYS_feature_test 0x0001
 #define A20_SYS_execution_info 0x0002
 #define A20_SYS_execution_domain_info 0x0003
+#define A20_SYS_runtime_info 0x0004
+#define A20_SYS_runtime_bind 0x0005
 
 /* Handle (0x0100) */
 #define A20_SYS_handle_close 0x0100
@@ -25,6 +27,7 @@
 #define A20_SYS_handle_xattr_list 0x010A
 #define A20_SYS_handle_xattr_remove 0x010B
 #define A20_SYS_handle_poll 0x010C
+#define A20_SYS_handle_identity 0x010D
 
 /* Task / Thread (0x0200) */
 #define A20_SYS_task_exit 0x0200

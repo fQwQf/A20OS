@@ -234,8 +234,13 @@ int main(int argc, char **argv, char **envp) {
     a20_cluster_snapshot_args_t self = {0};
     if (a20_cluster_snapshot(&self) >= 0)
         return fail("invalid config changed identity");
+    a20_runtime_info_t initial;
+    if (a20_runtime_info(&initial) || !a20_runtime_info_valid(&initial) ||
+        initial.state)
+        return fail("unexpected runtime binding");
     const char normal[] =
-        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "version 1\nnode 00000000000000000000000000000001\ninstance "
+        "a2200000000000000000000000000001\nepoch 72623859790382856\nrole "
         "worker\nseed 00000000000000000000000000000003 "
         "udp:10.0.3.3:44020\nservice agent /bin/cluster-agent-rv\nservice "
         "control "
@@ -243,6 +248,24 @@ int main(int argc, char **argv, char **envp) {
         "/bin/cluster-task-probe-rv\n";
     if (write_config(normal) || spawn(&task) || running(0) || call_work())
         return fail("configured services");
+    a20_runtime_info_t bound;
+    if (a20_runtime_info(&bound) || !a20_runtime_info_valid(&bound) ||
+        bound.state != A20_RUNTIME_BOUND || bound.instance_id[0] != 0xa2 ||
+        bound.instance_id[1] != 0x20 || bound.instance_id[15] != 1 ||
+        bound.domain_id[15] != 1 || bound.boot_epoch != 0x0102030405060708ULL)
+        return fail("runtime bind");
+    char conflict[sizeof(normal)];
+    a20_memcpy(conflict, normal, sizeof(normal));
+    for (unsigned i = 0; i + 5 < sizeof(conflict); i++)
+        if (!a20_memcmp(conflict + i, "epoch", 5)) {
+            conflict[i + 6] = '8';
+            break;
+        }
+    a20_handle_t rejected;
+    if (write_config(conflict) || spawn(&rejected) ||
+        wait_exit(rejected, 6, 1000) || running(0) || call_work() ||
+        write_config(normal))
+        return fail("runtime conflicting deployment");
     a20_handle_t duplicate;
     if (spawn(&duplicate) || wait_exit(duplicate, 4, 1000) || running(0) ||
         call_work())
@@ -256,7 +279,8 @@ int main(int argc, char **argv, char **envp) {
         task_stat("lifetime_errors", &baseline_errors))
         return fail("lifetime baseline");
     const char crash[] =
-        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "version 1\nnode 00000000000000000000000000000001\ninstance "
+        "a2200000000000000000000000000001\nepoch 72623859790382856\nrole "
         "worker\nservice agent /bin/cluster-task-probe-rv\nservice control "
         "/bin/clusterd-rv\nservice jobs /bin/jobd-rv\n";
     if (write_config(crash) || spawn(&task) || running(3))
@@ -271,6 +295,11 @@ int main(int argc, char **argv, char **envp) {
         return fail("owner death recovery");
     if (a20_task_kill(task, 15) < 0 || wait_exit(task, 0, 3000) || quiescent())
         return fail("final cleanup");
+    a20_runtime_info_t recovered;
+    if (a20_runtime_info(&recovered) ||
+        a20_memcmp(&bound, &recovered, sizeof(bound)))
+        return fail("runtime identity changed on supervisor recovery");
+    note("SUPERVISOR: runtime immutable/conflict/restart PASS\n");
     uint64_t tasks = UINT64_MAX, zombies = UINT64_MAX, errors = UINT64_MAX;
     uint64_t waited = a20_agent_clock_ms(0);
     do {

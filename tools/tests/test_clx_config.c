@@ -21,9 +21,24 @@ int main(void) {
                           "00000000000000000000000000000001\nrole relay\n";
     assert(!a20_cluster_config_parse(enabled, strlen(enabled), &c, &line));
     assert(c.caps == 19);
+    const char *runtime =
+        "version 1\nnode 00000000000000000000000000000001\nrole worker\n"
+        "instance a2200000000000000000000000000001\nepoch "
+        "18446744073709551615\n";
+    assert(!a20_cluster_config_parse(runtime, strlen(runtime), &c, &line));
+    assert(c.instance[0] == 0xa2 && c.runtime_epoch == UINT64_MAX);
     c = before;
     const char *bad[] = {
         "",
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ninstance a2200000000000000000000000000001\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole worker\nepoch "
+        "1\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ninstance a2200000000000000000000000000001\nepoch 0\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ninstance a2200000000000000000000000000001\nepoch "
+        "18446744073709551616\n",
         "version 2\n",
         "version 1\nnode ffffffffffffffffffffffffffffffff\nrole worker\n",
         "version 1\nnode 00000000000000000000000000000001\nrole worker\nseed "

@@ -103,3 +103,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 同一内核中的稳定任务引用、PID 复用与关闭语义见
 [33-task-object-lifetime.md](33-task-object-lifetime.md)。
+
+运行实例的公共身份、不可变启动绑定与指针无关对象名见
+[34-runtime-namespace.md](34-runtime-namespace.md)。同一接口用于共享 MCU 内核与服务器域。

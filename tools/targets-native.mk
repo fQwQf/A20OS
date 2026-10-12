@@ -89,7 +89,7 @@ NATIVE_LIBC_SRC  := \
 # instead: over-declaring is the safe direction for a correctness net, and
 # $(wildcard) yields an empty list for an absent directory rather than a
 # literal unexpanded path.
-NATIVE_SDK_HDRS := $(wildcard kernel/include/uapi/a20/cluster*.h) $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+NATIVE_SDK_HDRS := $(wildcard kernel/include/uapi/a20/cluster*.h) kernel/include/uapi/a20/runtime.h $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
 
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
@@ -190,7 +190,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c user/tests/native-memory-contract.h \
-        user/tests/native-domain-contract.h user/tests/native-thread-contract.h kernel/include/uapi/a20/execution_domain.h \
+        user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h kernel/include/uapi/a20/execution_domain.h \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 

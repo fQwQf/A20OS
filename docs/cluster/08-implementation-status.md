@@ -666,3 +666,20 @@ TASK/THREAD/DEBUG 从 PID 值改为独立引用对象。任务回收先解除弱
 等待、调度、资源、调试、内存、namespace 与事件键复用同一公共身份路径。
 这补齐执行域内部生命周期，不等于全局对象目录或跨重启身份。
 设计、复现命令和证据边界见 [33-task-object-lifetime.md](33-task-object-lifetime.md)。
+
+## 公共实例命名空间（2026-10-12）
+
+新增 runtime_info/runtime_bind/handle_identity 公共 Native 接口。管理员显式绑定
+instance/domain/boot_epoch，绑定在本内核启动内不可变，控制服务重启只重读该
+状态。任务对象增加独立序号；dup、join 后句柄和 PID 复用不混淆对象名。
+固定结构与显式小端编解码适用于 32/64 位平台。配置可选 instance+epoch，旧
+配置保持可用。细节与验证入口见 [34](34-runtime-namespace.md)。
+
+BOUND 仅是命名空间配置状态；持久代次分配、多域实例准入、全局对象目录与
+Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经实现。
+
+实际验证：三种服务器 ISA 双核、共享 MCU 原生 ELF/SVC/RTL、第二种 MCU
+交错、supervisor 身份冲突和重启均通过。新测试修复 ARMv7-M 迁移任务与 idle
+栈被异常处理覆盖的问题；异常处理改用独立 CPU 私有栈。默认精简 MCU 固件
+及 RV64 Linux-only 原始内核二进制与上一提交完全一致。详细证据及性能边界见
+[34](34-runtime-namespace.md)。

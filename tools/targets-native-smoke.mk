@@ -253,3 +253,7 @@ check-native-thread-admission:
 .PHONY: check-native-task-object
 check-native-task-object:
 	$(PYTHON) tools/check-native-task-object.py
+
+.PHONY: check-native-runtime
+check-native-runtime:
+	$(PYTHON) tools/check-native-runtime.py

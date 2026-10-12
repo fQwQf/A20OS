@@ -1282,7 +1282,7 @@ CASES: dict[str, dict] = {
         'timeout': '30s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
-        'expect': ['SUPERVISOR: persisted config/singleton/crash restart/recovery/cleanup PASS', 'System is going down for power-off NOW'],
+        'expect': ['SUPERVISOR: runtime immutable/conflict/restart PASS', 'SUPERVISOR: persisted config/singleton/crash restart/recovery/cleanup PASS', 'System is going down for power-off NOW'],
         'forbid': ['SIGSEGV', 'SUPERVISOR: FAIL', 'cleanup failed', 'VFS BUG', 'PANIC'],
         'timeout_msg': False,
         'pass_msg': 'smoke-native-cluster-supervisor: PASS; log saved to $log',

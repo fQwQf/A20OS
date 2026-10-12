@@ -8,6 +8,9 @@
 
 #define A20_ARG(n) (args->arg[(n)])
 
+int64_t sys_a20_runtime_info(const a20_syscall_args_t *args);
+int64_t sys_a20_runtime_bind(const a20_syscall_args_t *args);
+int64_t sys_a20_handle_identity(const a20_syscall_args_t *args);
 /* Forward declarations for implemented syscalls */
 int64_t sys_a20_abi_info(const a20_syscall_args_t *args);
 int64_t sys_a20_feature_test(const a20_syscall_args_t *args);

@@ -180,6 +180,13 @@ int main(void) {
     proc_put(pin);
     task_t *replacement = new_task();
     assert(replacement->pid == 1);
+    int64_t replacement_handle = a20_handle_install_task(
+        &table, replacement, A20_OBJ_TASK, A20_RIGHT_WAIT);
+    assert(replacement_handle >= 0 &&
+           a20_task_object_serial(flight.object) > 0);
+    assert(a20_task_object_serial(replacement->a20_object) >
+           a20_task_object_serial(flight.object));
+    close_handle(replacement_handle);
     assert(a20_handle_task_get(&table, h, A20_OBJ_INVALID, A20_RIGHT_WAIT,
                                &pin) == -A20_ERR_BAD_HANDLE &&
            !pin);

@@ -425,6 +425,9 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/31-runtime-instance.md) |
 | 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/28-execution-capabilities.md) |
 
+| 0x0004 | `runtime_info` | `int64_t runtime_info(a20_runtime_info_t *out, uint32_t capacity)` | 不可变运行实例命名空间，见 [契约](../cluster/34-runtime-namespace.md) |
+| 0x0005 | `runtime_bind` | `int64_t runtime_bind(const a20_runtime_binding_t *in, uint32_t capacity)` | 管理员显式绑定；完全相同的重试幂等 |
+
 ### Handle (0x0100)
 
 | 编号 | 名称 | 签名 | 说明 |
@@ -442,6 +445,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名（要求 `STAT`） |
 | 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性（要求 `WRITE`；同 0x0108，目录句柄不可用） |
 | 0x010C | `handle_poll` | `int64_t handle_poll(a20_handle_t h, uint32_t events, uint64_t timeout_ns)` | 非阻塞就绪查询（复用 `vfs_poll_events`，见 08-runtime-status.md §5a） |
+
+| 0x010D | `handle_identity` | `int64_t handle_identity(a20_handle_t h, a20_handle_identity_t *out, uint32_t capacity)` | TASK/THREAD/DEBUG 统一对象名；要求 STAT，未绑定返回 WOULD_BLOCK |
 
 ### Task / Thread (0x0200)
 
@@ -671,4 +676,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
 
-总计：157 个 syscall（`syscall_table.def` 当前登记数）。
+总计：160 个 syscall（`syscall_table.def` 当前登记数）。
