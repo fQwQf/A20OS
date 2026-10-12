@@ -32,10 +32,12 @@ struct armv7m_program;
 void armv7m_program_release(struct armv7m_program *program);
 #define ARCH_PROGRAM_FIELD struct armv7m_program *arch_program;
 #define ARCH_PROGRAM_INIT(task) ((task)->arch_program = NULL)
-#define ARCH_TASK_RELEASE(task) do { \
-    armv7m_program_release((task)->arch_program); \
-    (task)->arch_program = NULL; \
-} while (0)
+#define ARCH_TASK_RELEASE(task)                                                \
+    do {                                                                       \
+        armv7m_program_release((task)->arch_program);                          \
+        (task)->arch_program = NULL;                                           \
+        (task)->flat_user = NULL;                                              \
+    } while (0)
 #else
 #define ARCH_PROGRAM_FIELD
 #define ARCH_PROGRAM_INIT(task) ((void)(task))

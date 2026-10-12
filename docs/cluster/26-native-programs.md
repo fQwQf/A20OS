@@ -88,3 +88,10 @@ JVM、显示/input/runtime 依赖，以及实际多板验证仍未闭合。
 
 ELF/异常规则参考 [Arm ELF32 ABI](https://github.com/ARM-software/abi-aa/blob/main/aaelf32/aaelf32.rst)
 和 [ST Cortex-M3 编程手册](https://www.st.com/resource/en/programming_manual/cd00228163.pdf)。
+
+## 动态内存扩展
+
+Native 程序现可通过同一 SDK 的 vm_alloc/vm_unmap 分配和释放共享堆内存，
+并将动态同步字用于公共 futex/atomic32。公共所有权、等待期间的引用固定、
+退出回收与验证方法见 [30](30-flat-user-memory.md)。这仍未提供完整 JVM、
+文件/图形/输入运行时，也不构成 Minecraft 已启动的证据。

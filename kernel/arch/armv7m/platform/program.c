@@ -19,6 +19,8 @@ extern void armv7m_svc_handler(uint32_t *frame);
 extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
+extern int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args);
+extern int64_t sys_a20_vm_unmap(const a20_syscall_args_t *args);
 extern int64_t sys_a20_atomic32(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_yield(const a20_syscall_args_t *args);
@@ -34,14 +36,17 @@ int mcu_program_user_range(const void *pointer, size_t length) {
     armv7m_program_t *p = task ? task->arch_program : NULL;
     if (!p)
         return 0;
-    return within(p->image, p->image_size, (uintptr_t)pointer, length) ||
-           within((uintptr_t)p->stack, p->stack_size, (uintptr_t)pointer,
-                  length);
+    uint64_t flags = spin_lock_irqsave(&p->memory.lock);
+    int valid = a20_flat_range_locked(&p->memory, (uintptr_t)pointer, length);
+    spin_unlock_irqrestore(&p->memory.lock, flags);
+    return valid;
 }
 
 void armv7m_program_release(armv7m_program_t *p) {
     if (!p)
         return;
+    if (a20_flat_destroy(&p->memory))
+        panic("program released with pinned memory");
     kfree(p->stack);
     kfree(p->allocation);
     if (p->counted)
@@ -204,6 +209,7 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     armv7m_program_t *p = kcalloc(1, sizeof(*p));
     if (!p)
         return -ENOMEM;
+    a20_flat_init(&p->memory);
     int result = load_image(elf, length, p);
     if (result) {
         armv7m_program_release(p);
@@ -215,6 +221,11 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
         return -ENOMEM;
     }
     p->stack_size = stack_size;
+    if (a20_flat_add_fixed(&p->memory, &p->image_region, p->image,
+                           p->image_size) ||
+        a20_flat_add_fixed(&p->memory, &p->stack_region, (uintptr_t)p->stack,
+                           stack_size))
+        panic("program memory ranges rejected");
     p->startup = (void *)(((uintptr_t)p->stack + stack_size - startup_size) &
                           ~(uintptr_t)15);
     if (startup_size)
@@ -231,6 +242,7 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     if (!task)
         panic("deferred program task disappeared");
     task->arch_program = p;
+    task->flat_user = &p->memory;
     p->counted = 1;
     __atomic_fetch_add(&mcu_program_live, 1, __ATOMIC_RELEASE);
     proc_set_name(task, "native-mcu");
@@ -253,6 +265,12 @@ static void program_syscall_thread(void) {
         args.arg[i] = p->registers.r[i];
     int64_t result;
     switch (args.nr) {
+        case A20_SYS_vm_alloc:
+            result = sys_a20_vm_alloc(&args);
+            break;
+        case A20_SYS_vm_unmap:
+            result = sys_a20_vm_unmap(&args);
+            break;
         case A20_SYS_atomic32:
             result = sys_a20_atomic32(&args);
             break;

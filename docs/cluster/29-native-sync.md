@@ -10,7 +10,7 @@ A20 的执行域使用同一任务表、调度器和 Park/Wake 协议。应用�
 |---|---|---|
 | 应用 | `user/liba20rt/a20_sync.h` | 使用同一等待循环，无板型分支 |
 | Native ABI | `sys_native_sync.c`：0x0B00 wait、0x0B01 wake、0x0B02 atomic32 | syscall/trap 入口传入参数结构指针 |
-| 等待机制 | `ipc/futex.c`、公共 wait_queue、Park/Wake | MMU 映射加锁；不可重映射的 flat 程序以任务引用固定分配 |
+| 等待机制 | `ipc/futex.c`、公共 wait_queue、Park/Wake | MMU 映射加锁；flat 动态内存在等待全过程持有分配引用 |
 | 原子操作 | GCC 原子调用 | 一致性服务器使用 CPU 原子；非一致性共享 RAM 使用公共 fabric gate |
 
 MCU Native 程序接入上述实现，不再使用 MCU 的空 futex wake stub。
@@ -36,7 +36,8 @@ LOAD 返回当前值；STORE/EXCHANGE 返回替换前值；CAS 返回比较时�
 NULL/用户范围外地址返回 FAULT，未对齐/非法操作/flags/短结构返回
 INVALID_ARGUMENT。32 位入口拒绝 u64 地址的高位，不能悄悄截断到本地地址。
 MMU 写操作先解析 writable/COW 映射，再在映射锁内复查用户/读写权限；flat
-程序只能访问其任务持有的镜像/栈分配。用户操作数是普通共享 RAM，不能用作
+程序只能访问其任务持有的镜像、栈及已登记的动态堆分配。映射锁内进行
+范围检查与操作，动态 futex 字的生命周期见 [30](30-flat-user-memory.md)。用户操作数是普通共享 RAM，不能用作
 设备 MMIO 操作接口。若原子操作完成后输出结构拷贝失败，会返回 FAULT，但
 操作可能已经生效；调用者不能把错误当作无副作用而盲目重试。
 
@@ -80,7 +81,7 @@ make check-execution
 
 `check-native-sync` 在 RV64、AArch64、x86-64 双核 QEMU 内核中执行同一个
 原生应用，并记录镜像/内核哈希与模拟器退出方式。服务器原生用户态覆盖
-公共 SDK 的四种原子操作、成功/失败 CAS、
+公共 SDK 分配器的对齐/溢出/扩缩容契约，以及四种原子操作、成功/失败 CAS、
 无效地址、只读映射、解除映射、短结构/非法 flags、超时与真实线程唤醒。
 MCU 原生 ARM ELF 经实际 SVC 指令覆盖十二种 futex 参数/超时路径、八种原子
 路径、64 位大超时、跨 CPU wake、wait 入队竞态、同 PID/栈迁移与退出回收。

@@ -184,12 +184,12 @@ $(1) -ffreestanding -nostdlib -static \
     $(NATIVE_SDK_SRC) \
     $(NATIVE_COMPILER_RT_SRC) \
     $(NATIVE_ARCH_SRC) \
-    user/tests/test_native_futex.c \
+    user/tests/test_native_futex.c user/tests/native-memory-contract.h \
     $(NATIVE_LIBS) \
     -o $(4)
 endef
 
-$(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c \
+$(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c user/tests/native-memory-contract.h \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 

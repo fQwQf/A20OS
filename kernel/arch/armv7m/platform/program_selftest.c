@@ -44,19 +44,27 @@ static void controller(void) {
         }
         proc_yield();
     }
+    CHECK(record->allocator_passed == 1);
+    printf("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free\n");
+    CHECK(record->heap_checks == 20);
+    CHECK(a20_flat_unmap(&program->memory, record->heap_base, 8192) == -EBUSY);
+    CHECK(a20_flat_destroy(&program->memory) == -EBUSY);
+    uint32_t *word = (void *)(uintptr_t)record->heap_base;
+    printf("[PROGRAM-HEAP] PASS checks=%u wait-pinned=1 cross-cpu=1\n",
+           record->heap_checks);
     proc_sched_config_t config = {.fields = PROC_SCHED_AFFINITY, .affinity = 1};
     CHECK(proc_sched_set(program_task, &config) == 0);
-    __atomic_store_n(&record->futex_word, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(word, 1, __ATOMIC_RELEASE);
     record->phase = 2;
-    CHECK(futex_wake_user((int *)&record->futex_word, 1) == 1);
+    CHECK(futex_wake_user((int *)word, 1) == 1);
     while (record->phase != 4) {
         CHECK(!record->error);
         proc_yield();
     }
     /* Race a wake against wait admission: before linkage gives WOULD_BLOCK,
      * after linkage wakes the waiter. Either ordering must make progress. */
-    __atomic_store_n(&record->futex_word, 2, __ATOMIC_RELEASE);
-    int woke = futex_wake_user((int *)&record->futex_word, 1);
+    __atomic_store_n(word, 2, __ATOMIC_RELEASE);
+    int woke = futex_wake_user((int *)word, 1);
     CHECK(woke == 0 || woke == 1);
     while (record->phase != 3) {
         CHECK(!record->error);
@@ -67,7 +75,7 @@ static void controller(void) {
           record->stack_before >= 0x60000000U);
     uintptr_t stack = record->stack_after;
     CHECK(record->futex_checks == 12 && record->futex_waits >= 1);
-    CHECK(futex_wake_user((int *)&record->futex_word, 1) == 0);
+    CHECK(futex_wake_user((int *)word, 1) == 0);
     printf(
         "[PROGRAM-FUTEX] PASS checks=%u waits=%u remote-wake=1 race-wake=%d\n",
         record->futex_checks, record->futex_waits, woke);

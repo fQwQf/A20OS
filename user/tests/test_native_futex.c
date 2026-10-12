@@ -10,6 +10,7 @@
  */
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
+#include "native-memory-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -61,9 +62,15 @@ int main(int argc, char **argv, char **envp)
     if (out == A20_HANDLE_NULL)
         return 90;
 
+    if (native_memory_contract())
+        return fail(out, 93, "allocator contract",
+                    sizeof("allocator contract") - 1);
+    a20_hdl_write_buf(out, "NATIVE_ALLOCATOR: PASS\n",
+                      sizeof("NATIVE_ALLOCATOR: PASS\n") - 1, (void *)0);
     _Static_assert(sizeof(a20_atomic32_args_t) == 40, "atomic32 ABI layout");
     a20_execution_info_t execution;
     if (a20_execution_info(&execution) != A20_OK ||
+        !(execution.features & A20_EXEC_USER_HEAP) ||
         !(execution.features & A20_EXEC_ATOMIC32) ||
         !(execution.features & A20_EXEC_FUTEX))
         return fail(out, 10, "sync capabilities missing",
@@ -105,6 +112,8 @@ int main(int argc, char **argv, char **envp)
     CHECK_ATOMIC(a20_syscall6(A20_SYS_atomic32, (uintptr_t)&bad, 0, 0, 0, 0,
                               0) == -A20_ERR_INVALID_ARGUMENT);
     uint64_t page;
+    CHECK_ATOMIC(a20_vm_alloc_pages(UINT64_MAX / 4096 + 1, 3, &page) ==
+                 -A20_ERR_INVALID_ARGUMENT);
     CHECK_ATOMIC(a20_vm_alloc_pages(1, 3, &page) == A20_OK);
     CHECK_ATOMIC(a20_atomic32_store((void *)(uintptr_t)page, 37) == A20_OK);
     CHECK_ATOMIC(a20_vm_protect(page, 4096, 1) == A20_OK);

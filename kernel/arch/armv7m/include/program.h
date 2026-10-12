@@ -3,9 +3,12 @@
 #ifdef CONFIG_MCU_NATIVE_PROGRAM
 #include "core/types.h"
 #include "trap_frame.h"
+#include "mm/flat_user.h"
 
 typedef struct armv7m_program {
     trap_context_t registers;
+    a20_flat_space_t memory;
+    a20_flat_region_t image_region, stack_region;
     void *allocation, *stack;
     uintptr_t image;
     size_t image_size, stack_size;

@@ -19,7 +19,7 @@ typedef uint64_t a20_size_t;       /* 大小 */
 typedef uint64_t a20_vaddr_t;      /* 虚拟地址 */
 ```
 
-指针大小由 `a20_abi_info.pointer_bits` 指示，处理函数读取实际指针宽度。64 位架构使用 64 位用户指针；32 位用户态和 MCU Native 实验端口使用独立 ABI profile。更详细的 ISA/调用约定、内存模型与接口可用性由 [execution_info](../cluster/28-execution-capabilities.md) 查询；MCU 尚未提供完整 abi_info/句柄/futex 接口。
+指针大小由 `a20_abi_info.pointer_bits` 指示，处理函数读取实际指针宽度。64 位架构使用 64 位用户指针；32 位用户态和 MCU Native 实验端口使用独立 ABI profile。更详细的 ISA/调用约定、内存模型与接口可用性由 [execution_info](../cluster/28-execution-capabilities.md) 查询；MCU 已接入公共 futex/atomic32/匿名堆，尚未提供完整 abi_info 与句柄接口。
 
 ---
 

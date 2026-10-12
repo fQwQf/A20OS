@@ -166,21 +166,20 @@ void vfs_task_fs_pins_copy(task_t *dst, const task_t *src) {
     (void)dst;
     (void)src;
 }
-/* The optional shared-program profile copies only into its owned image/stack.
+/* The optional shared-program profile copies through the common owned-range model.
  * Other MCU profiles have no user mappings. */
 #ifdef CONFIG_MCU_NATIVE_PROGRAM
 #include "program.h"
 #include "core/string.h"
 long copy_from_user(void *dst, const void *src, size_t n) {
-    if (!mcu_program_user_range(src, n))
-        return -EFAULT;
-    memcpy(dst, src, n);
-    return 0;
+    task_t *task = proc_current();
+    return task ? a20_flat_copy(task->flat_user, dst, (void *)src, n, 0)
+                : -EFAULT;
 }
 long copy_to_user(void *dst, const void *src, size_t n) {
-    if (!mcu_program_user_range(dst, n)) return -EFAULT;
-    memcpy(dst, src, n);
-    return 0;
+    task_t *task = proc_current();
+    return task ? a20_flat_copy(task->flat_user, (void *)src, dst, n, 1)
+                : -EFAULT;
 }
 #else
 long copy_to_user(void *dst, const void *src, size_t n) {
