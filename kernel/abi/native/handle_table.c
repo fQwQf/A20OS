@@ -231,7 +231,11 @@ static const a20_rights_t a20_type_rights[A20_OBJ_VMAR + 1] = {
 a20_rights_t a20_type_valid_rights(uint16_t type)
 {
 #ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
-    if (type != A20_OBJ_TASK && type != A20_OBJ_THREAD)
+    if (type != A20_OBJ_TASK && type != A20_OBJ_THREAD
+#ifdef CONFIG_NATIVE_FLAT_FILES
+        && type != A20_OBJ_FILE
+#endif
+    )
         return 0;
 #endif
     if (type > A20_OBJ_VMAR) return 0;

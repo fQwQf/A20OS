@@ -8,11 +8,13 @@
  *      wakes; worker observes the wakeup and exits
  * Also covers proc_create_thread (native thread_create) end to end.
  */
+#define A20_NATIVE_FILE_TEST 1
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "native-memory-contract.h"
 #include "native-domain-contract.h"
 #include "native-thread-contract.h"
+#include "native-file-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -77,6 +79,21 @@ int main(int argc, char **argv, char **envp)
     if (native_runtime_contract())
         return fail(out, 96, "runtime identity",
                     sizeof("runtime identity") - 1);
+    int file_result = native_file_contract();
+    if (file_result) {
+        char error[] = "NATIVE_FILE_ERROR: 00\n";
+        error[sizeof(error) - 4] = '0' + file_result / 10;
+        error[sizeof(error) - 3] = '0' + file_result % 10;
+        a20_hdl_write_buf(out, error, sizeof(error) - 1, 0);
+        return fail(out, 97, "file contract", sizeof("file contract") - 1);
+    }
+    a20_hdl_write_buf(
+        out, "NATIVE_FILES: PASS bytes=2048 fnv=60f4edc5\n",
+        sizeof("NATIVE_FILES: PASS bytes=2048 fnv=60f4edc5\n") - 1, 0);
+    if (native_file_reopen(4100))
+        return fail(out, 98, "file reopen", sizeof("file reopen") - 1);
+    a20_hdl_write_buf(out, "NATIVE_FILES_REOPEN: PASS count=4100\n",
+                      sizeof("NATIVE_FILES_REOPEN: PASS count=4100\n") - 1, 0);
     int thread_result = native_thread_contract();
     if (thread_result) {
         char code[] = "NATIVE_THREAD_ERROR: 00 mask=00000000\n";

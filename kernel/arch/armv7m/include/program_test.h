@@ -11,5 +11,6 @@ typedef struct mcu_program_test_record {
     volatile uint32_t parent_exited, orphan_done;
     uint32_t objects_passed;
     uint32_t balance_mask, balance_jobs, balance_sum;
+    uint32_t files_passed;
 } mcu_program_test_record_t;
 #endif

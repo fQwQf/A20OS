@@ -245,6 +245,7 @@ void fs_locks_release_process_file(vfile_t *vf, int pid) {
     (void)pid;
 }
 
+#ifndef CONFIG_NATIVE_FLAT_FILES
 /* From kernel/fs/file.c: file reference lookup / release. */
 vfile_t *vfs_get_file_ref(int fd) {
     (void)fd;
@@ -258,14 +259,17 @@ void vfs_put_file(vfile_t *vf) {
     (void)vf;
 }
 
+#endif
 /* From kernel/fs/vfs/vnode.c: vnode reference drop. */
 void vnode_put(vnode_t *vp) {
     (void)vp;
 }
 
+#ifndef CONFIG_NATIVE_FLAT_FILES
 void vfile_free(vfile_t *vf) {
     (void)vf;
 }
+#endif
 
 #ifndef CONFIG_MCU_SHARED_KERNEL
 /* 64-bit atomic helpers required by Cortex-M3 (no native 8-byte atomics). */

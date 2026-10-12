@@ -18,6 +18,13 @@
 unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
+#ifdef CONFIG_NATIVE_FLAT_FILES
+extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_read(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_write(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_seek(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_stat(const a20_syscall_args_t *args);
+#endif
 extern int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args);
 extern int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
@@ -353,6 +360,23 @@ static void program_syscall_thread(void) {
         args.arg[i] = p->registers.r[i];
     int64_t result;
     switch (args.nr) {
+#ifdef CONFIG_NATIVE_FLAT_FILES
+        case A20_SYS_path_open:
+            result = sys_a20_path_open(&args);
+            break;
+        case A20_SYS_handle_read:
+            result = sys_a20_handle_read(&args);
+            break;
+        case A20_SYS_handle_write:
+            result = sys_a20_handle_write(&args);
+            break;
+        case A20_SYS_handle_seek:
+            result = sys_a20_handle_seek(&args);
+            break;
+        case A20_SYS_handle_stat:
+            result = sys_a20_handle_stat(&args);
+            break;
+#endif
         case A20_SYS_task_set_sched:
             result = sys_a20_task_set_sched(&args);
             break;

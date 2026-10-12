@@ -81,3 +81,12 @@ SRAM、Xuanwu 的 1 MiB 外部 SRAM或原型的 1 MiB 共享 RAM足以启动客�
 
 这个目标尚未完成。当前已把路线落实为可编译、可验证线程迁移的原生
 共享内核端口，后续必须以物理硬件和完整客户端启动证据继续推进。
+
+## 2026-10-13 运行时基础进展
+
+公共 Native 线程和共享工作领取已实际执行，见 [32](32-native-threads.md) 与
+[40](40-native-application-balance.md)。可选 flat 文件后端现在能让同一用户
+程序在共享 MCU 内核和三种服务器 ISA 上读取实际文件，并由两个线程继续
+共同处理计算任务，见 [41](41-native-files.md)。该后端当前只读、短文件名，
+MCU 使用 FAT 扇区 fixture；这一步没有执行 Java 字节码或加载 Minecraft，
+下一步仍需在真实 Native 程序中逐项接入 Java 运行时及所选客户端依赖。
