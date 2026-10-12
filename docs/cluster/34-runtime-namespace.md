@@ -145,3 +145,6 @@ MCU 其他 ISA 的实际用户上下文与物理多板验证也未完成。Minec
 
 成员实例准入和 CD/2、CM/2 协议已继续接入，当前边界与复现命令见
 [35-instance-membership.md](35-instance-membership.md)。
+
+对象目录已继续接入：按所属域解析全局对象名、租约发布和实际能力生命周期，
+当前接口与验证边界见 [36-object-directory.md](36-object-directory.md)。

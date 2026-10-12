@@ -190,7 +190,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c user/tests/native-memory-contract.h \
-        user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h kernel/include/uapi/a20/execution_domain.h \
+        user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-object-contract.h kernel/include/uapi/a20/cluster_objects.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h kernel/include/uapi/a20/execution_domain.h \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
@@ -714,3 +714,9 @@ $(NATIVE_CLUSTER_LOAD_BIN): user/tests/test_native_cluster_load.c $(NATIVE_CRT0)
 
 .PHONY: native-cluster-load
 native-cluster-load: $(NATIVE_CLUSTER_LOAD_BIN)
+
+$(NATIVE_OBJECTD_BIN): user/svc/objectd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/objectd.c,$@)
+
+$(NATIVE_OBJECT_TEST_BIN): user/tests/test_native_objects.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_objects.c,$@)

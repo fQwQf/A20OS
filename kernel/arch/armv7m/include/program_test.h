@@ -9,5 +9,6 @@ typedef struct mcu_program_test_record {
     uint32_t domain_mask_before, domain_mask_after;
     uint32_t threads_passed, thread_parent_cpu, thread_worker_cpu;
     volatile uint32_t parent_exited, orphan_done;
+    uint32_t objects_passed;
 } mcu_program_test_record_t;
 #endif

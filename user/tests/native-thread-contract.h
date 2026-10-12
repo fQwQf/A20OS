@@ -6,6 +6,7 @@
 #include "liba20rt/a20_mem.h"
 #include "liba20rt/a20_execution.h"
 #include "native-runtime-contract.h"
+#include "native-object-contract.h"
 /* Identical Native application code on MCU and server ISAs. No host task
  * manipulation, no reliance on user CPU atomics or libc allocator locking. */
 static struct {
@@ -112,6 +113,7 @@ static int native_thread_contract(void) {
     T_CHECK(native_runtime_identity(args.out_thread, &original_identity,
                                     A20_OBJECT_LIVE),
             29);
+    T_CHECK(native_object_begin(args.out_thread) == 0, 34);
     uint32_t ready = 0;
     for (unsigned i = 0; i < 100000 && !ready; i++) {
         T_CHECK(a20_atomic32_load(&native_thread_shared.ready, &ready) ==
@@ -198,7 +200,7 @@ static int native_thread_contract(void) {
                     a20_hdl_close(duplicate) == A20_OK,
                 28);
     }
-    T_CHECK(a20_hdl_close(args.out_thread) == A20_OK, 19);
+    T_CHECK(native_object_finish(args.out_thread) == 0, 35);
     T_CHECK(a20_hdl_close(args.out_thread) == -A20_ERR_BAD_HANDLE, 20);
     T_CHECK(a20_task_wait(args.out_thread, 0, 0) == -A20_ERR_BAD_HANDLE, 21);
     T_CHECK(a20_vm_unmap(stack, 16384) == A20_OK, 22);

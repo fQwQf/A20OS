@@ -109,3 +109,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 运行实例的公共成员准入、跨 ISA 发现证明与兼容策略见
 [35-instance-membership.md](35-instance-membership.md)。
+
+对象目录已继续接入：按所属域解析全局对象名、租约发布和实际能力生命周期，
+当前接口与验证边界见 [36-object-directory.md](36-object-directory.md)。

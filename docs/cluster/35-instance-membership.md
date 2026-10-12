@@ -157,3 +157,6 @@ ASan/UBSan 检查通过；ABI 配置、Native 覆盖、trim、模块边界、任
 本阶段提交的日志、命令、帧追踪、内核/应用 ELF 与 SHA256 清单保存在
 `.kernel-build/cluster/evidence/instance-membership-<commit>/`；构建镜像记录
 SHA256，避免把后续构建的镜像错认成本次运行证据。
+
+对象目录已继续接入：按所属域解析全局对象名、租约发布和实际能力生命周期，
+当前接口与验证边界见 [36-object-directory.md](36-object-directory.md)。
