@@ -9,6 +9,7 @@ module a20_fabric #(
 )(
     input logic clk,
     input logic reset_n,
+    input logic [15:0] external_fault,
     input logic [CPUS-1:0] req_valid,
     input logic [CPUS-1:0] req_control,
     input logic [CPUS-1:0] req_write,
@@ -78,6 +79,7 @@ module a20_fabric #(
             fault <= 0;
         end else begin
             ready <= '0;
+            if (fault == 0 && external_fault != 0) fault <= external_fault;
             for (int i = 0; i < CPUS; i++)
                 if (!req_valid[i]) consumed[i] <= 0;
             if (memory_busy) begin
@@ -89,7 +91,7 @@ module a20_fabric #(
                     memory_busy <= 0;
                     mem_valid <= 0;
                 end
-            end else if (found) begin
+            end else if (found && (external_fault == 0 || fault != 0)) begin
                 if (!req_control[selected] && fault == 0 &&
                     req_addr[selected][0] == 0 && req_bytes[selected] != 0 &&
                     (req_addr[selected] >> RAM_ADDR_BITS) == 0) begin

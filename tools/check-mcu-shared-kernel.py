@@ -239,7 +239,7 @@ class Domain:
         for text in self.logs:
             assert "[PANIC] arch=" not in text and "fault exception=" not in text, text
 
-    def run(self, rounds):
+    def run(self, rounds, reset_cpus=None):
         # Start CPU1 first: it must wait without touching poisoned shared BSS.
         before = bytes(self.shared)
         for cpu in range(1, self.n):
@@ -273,7 +273,7 @@ class Domain:
         # Reset each MCU separately. Sticky attachment must reject re-entry
         # without clearing shared task/heap bytes. Faulting port never writes
         # through the shared-data initialization path again.
-        for cpu in reversed(range(self.n)):
+        for cpu in (reversed(range(self.n)) if reset_cpus is None else reset_cpus):
             snapshot = bytes(self.shared)
             engine = self.engines[cpu]
             engine.reg_write(UC_ARM_REG_SP, self.symbols["_stack_top"])

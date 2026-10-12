@@ -59,11 +59,21 @@ CPU 上有效，持有它时不得跨 CPU 迁移。普通任务栈来自共享�
 ## 3. 硬件必须提供什么
 
 原型面向带 FSMC 的 STM32F103 大封装芯片，新增的 `shared_bus.c` 配置
-NE1 共享 RAM 和 NE2 控制窗口、16 位异步总线，使用复位时 8 MHz HSI 和保守
-固定总线时序。它不是 Xuanwu 板现有 NE3 SRAM 接线；不能直接刷入并期待形成集群。
-具体引脚以该文件的 GPIO 表及 STM32 数据手册核对，已提供并仿真验证仲裁控制器事务核心
-`hardware/shared-mcu/a20_fabric.sv`；FSMC 异步桥、实际 RAM 控制器、PCB、时序
-闭合和物理连线尚未交付或验证。
+NE1 共享 RAM 和 NE2 控制窗口、16 位异步总线，使用复位时 8 MHz HSI、保守
+setup/turnaround 时序及 **PD6/NWAIT**。两个 bank 的 BCR 均为 `0x9011`，
+ASYNCWAIT=1、WAITPOL=0；PD6 配置为输入。它不是 Xuanwu 板现有 NE3 SRAM
+接线；不能直接刷入并期待形成集群。NWAIT 在本模式中为必接线，旧版固定
+周期 `0x1011` 固件不能与这个可变等待桥组合。
+
+已提供仲裁核心 `a20_fabric.sv`、独立每端口 FSMC 异步桥
+`a20_fsmc_bridge.sv`、可推导 FPGA RAM 后端 `a20_shared_ram.sv` 及顶层连接
+`a20_shared_top.sv`，路径均在 `hardware/shared-mcu/`。完整固件的共享访问
+已经与这些 RTL 联合仿真；尚无目标 FPGA 的综合/布局布线、容量与时序报告，
+也没有 PCB 或物理连线验证。RAM 后端是片上推导数组，不是已交付的外部
+SRAM/SDRAM 控制器，1 MiB 参数不证明某块 FPGA 实际容纳得下它。
+
+ASYNCWAIT 及异步等待时序参考 [ST RM0008 Rev21 §21.5.4/§21.5.6](https://www.st.com/resource/en/reference_manual/rm0008-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)，
+PD6 映射参考 [ST STM32F103 高密度数据手册](https://www.st.com/resource/en/datasheet/stm32f103vd.pdf)。
 
 硬件控制器必须：
 
@@ -72,9 +82,9 @@ NE1 共享 RAM 和 NE2 控制窗口、16 位异步总线，使用复位时 8 MHz
    不使用软件缓存；写完成后，其他端口的后续读必须看到它。
 3. 提供真正跨端口互斥的原子信号量操作；普通 SRAM 的读写互斥不等于
    “读-改-写”原子性。两个芯片的本地 LDREX/STREX 和 IRQ 屏蔽不能代替它。
-4. 每个固定周期内完成访问并保证公平性，包括同地址冲突。当前 FSMC
-   适配没有配置 NWAIT；若控制器不能满足固定周期，必须先修改时序/等待线
-   适配，不能丢写、返回未就绪数据或仅延长软件超时来掩盖总线错误。
+4. 访问期间先拉低 NWAIT，直到读数据稳定或写事务完成才释放，并保证公平
+   仲裁。不能丢写、提前返回或只延长软件超时。固件保留 DATAST=15，实际板
+   必须核对 NWAIT 断言延迟和手册的采样裕量；等待不是免除电气时序验证。
 5. 整域复位同时清空启动权、attached、release、fault、IPI 和信号量所有权。
    仅复位一块 MCU 不清这些状态。上电必须先稳定 RAM 和仲裁器，再释放 MCU。
 
@@ -109,6 +119,18 @@ Infineon 的[双口 SRAM 数据手册](https://www.infineon.com/dgdl/Infineon-CY
 端口此前的共享写。错误所有者释放、非法端口或非法宽度访问应锁存 FAULT。RTL 核心在 FAULT
 后不再发起 RAM 事务或授予新门，冻结该接口的写入；物理桥必须也遵守此行为。
 争用读返回 0，不排队拥有锁，也不允许同端口重复读被当成可重入获取。
+
+桥使用三拍 strobe 同步和额外四拍 payload settling。主机须保持地址、选择、
+byte lanes 及写数据直到响应；不是对每个 payload 位独立同步。NWAIT 在
+原始 strobe 上组合断言，响应后保持数据，NOE/选择撤销时立即关闭 DQ 输出。
+相邻事务的 active strobe 至少需六个 fabric clock 的空隙；当前固件保守的
+setup/turnaround 覆盖该协议间隔，仍需目标时钟与布线约束证明。
+FSMC A0 对应 CPU 字节地址 bit1，桥补低位零；未接的高地址输入必须固定为零。
+
+非法双 CS/双读写 strobe、等待中 payload 改变或访问提前撤销会锁存桥错误
+`0x82`，经 `external_fault` 冻结全域。已受理的 RAM 事务排空一次，可能已
+产生写入；没有回滚。健康端口仍可读取 FAULT，坏端口保持等待，恢复需整域
+复位。核心错误 `0x80/0x81` 分别表示错误所有者释放/非法寄存器或 RAM 访问。
 
 固件 FAULT 码：2 拓扑错误、3 不支持的 IPI、4 CPU ID/容量不匹配、5 重复
 attach、6 冷启动权已使用。MAGIC 错误时不向未知设备写 FAULT，直接停机。共享初始化完成前的
@@ -195,8 +217,24 @@ Unicorn 不实现的 Thumb YIELD 只作为执行让步提示处理，未替换�
 硬件事务核心可通过 `make check-mcu-shared-fabric` 复现，使用 Verilator 和
 三端口测试台。覆盖启动权、attached/release、IPI、并发信号量唯一所有者、
 RAM 写完成之前禁止控制操作越过、字节通道、错误释放、故障后写屏蔽和整域
-复位。它与 Python 外设模型分别测试，尚未将完整 MCU 固件连接 RTL 联合仿真。
-接口和剩余桥接工作见 [hardware/shared-mcu/README.md](../../hardware/shared-mcu/README.md)。
+复位。`make check-mcu-shared-bus` 进一步把三个异步物理端口模型接到真实
+桥/核心/RAM；包括长时间保持 strobe 不重复寄存器副作用、DQ 方向与保持、
+并发 RAM/门、字节通道、跨全域复位的 RAM 保留及撤销访问后的故障围栏。
+该测试将 RAM 响应故意延迟至 3 µs，超过原固定 DATAST，验证等待扩展。
+
+`make PYTHON=/tmp/a20-shared-test/bin/python check-mcu-shared-rtl` 构建 C++
+引脚适配器，再执行双 Cortex-M3 的实际固件。**每一次**共享 RAM 读写与
+fabric 访问均经过实际 RTL 桥、仲裁核心和推导 RAM；Python 的 RAM mirror
+只向指令引擎交付 RTL 返回值，寄存器模型仅作为独立期望值断言。无宿主
+任务状态注入。门争用、同 PID/栈/堆迁移、正常退出及 CPU1 隔离复位拒绝
+均覆盖；联合测试因全域 FAULT 不可软件清零，只做一次隔离复位，原指令
+模型另覆盖逐 CPU 复位及早期启动拒绝。报告为 `report-rtl.json`。
+
+Unicorn 2.1.4 安装 RAM hook 后在部分多指令步长边界跳过 Thumb 指令，空 hook
+也复现；联合门禁限定逐条指令执行，默认五百万轮功能预算。总线事务由
+适配器依次完成，不证明多事务在途的时序；并发桥覆盖来自上面的独立总线
+测试。它也不证明真实 MCU 内部 FSMC/NVIC 或 FPGA CDC 的物理可靠性。
+接口和部署约束见 [hardware/shared-mcu/README.md](../../hardware/shared-mcu/README.md)。
 
 ## 8. 后续功能验收
 
