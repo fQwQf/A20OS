@@ -401,3 +401,11 @@ check-cluster-hardening:
 .PHONY: check-cluster-instance
 check-cluster-instance:
 	$(PYTHON) tools/check-cluster-instance.py
+
+.PHONY: check-cluster-objects
+check-cluster-objects:
+	$(PYTHON) tools/check-cluster-objects.py
+
+.PHONY: check-object-directory-portability
+check-object-directory-portability:
+	$(PYTHON) tools/check-object-directory-portability.py

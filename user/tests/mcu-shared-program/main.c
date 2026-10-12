@@ -79,6 +79,9 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     CHECK(native_runtime_contract() == 0, 85);
     CHECK(native_thread_contract() == 0, 84);
     record->threads_passed = 1;
+    record->objects_passed = native_object_releases == 1 &&
+                             !native_object_close_error &&
+                             !native_object_record[0].publication;
     record->thread_parent_cpu = native_thread_shared.parent_cpu;
     record->thread_worker_cpu = native_thread_shared.worker_cpu;
     CHECK(native_memory_contract() == 0, 81);

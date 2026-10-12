@@ -51,7 +51,7 @@ def run_case(arch, args, output):
                     phase = "application"
                     deadline = time.monotonic() + args.timeout
                 elif phase == "application" and "NATIVE_FUTEX: PASS" in content:
-                    assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS", "NATIVE_RUNTIME: PASS"]), str(log)
+                    assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS", "NATIVE_RUNTIME: PASS", "NATIVE_OBJECT_DIRECTORY: PASS"]), str(log)
                     match = re.search(r"NATIVE_THREAD_CPUS: (\d+)->(\d+)", content)
                     assert match, str(log)
                     thread_cpus = [int(match[1]), int(match[2])]
