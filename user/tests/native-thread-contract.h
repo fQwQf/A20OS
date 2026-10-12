@@ -5,10 +5,12 @@
 #include "liba20rt/a20_sync.h"
 #include "liba20rt/a20_mem.h"
 #include "liba20rt/a20_execution.h"
+#include "native-runtime-contract.h"
 /* Identical Native application code on MCU and server ISAs. No host task
  * manipulation, no reliance on user CPU atomics or libc allocator locking. */
 static struct {
     uint32_t ready, go, nested, expected_cpu, worker_cpu, parent_cpu;
+    uint64_t nested_serial;
 } native_thread_shared;
 static __attribute__((noreturn)) void native_thread_nested(uintptr_t arg) {
     if (arg != 0xa20 || a20_atomic32_store(&native_thread_shared.nested, 19))
@@ -18,6 +20,8 @@ static __attribute__((noreturn)) void native_thread_nested(uintptr_t arg) {
 }
 static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
     volatile uintptr_t local = arg;
+    if (!native_runtime_matches())
+        a20_thread_exit(89);
     if (a20_atomic32_store(&native_thread_shared.ready, 1))
         a20_thread_exit(92);
     uint32_t value;
@@ -48,6 +52,11 @@ static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
     a20_status_t handle = a20_thread_create(&args);
     if (handle < 0 || (uint32_t)handle != args.out_thread)
         a20_thread_exit(97);
+    a20_handle_identity_t nested_identity;
+    if (!native_runtime_identity(args.out_thread, &nested_identity,
+                                 A20_OBJECT_LIVE))
+        a20_thread_exit(88);
+    native_thread_shared.nested_serial = nested_identity.id.serial;
     a20_task_status_t status;
     if (a20_task_wait(args.out_thread, 0, &status) || status.exit_code != 19 ||
         a20_hdl_close(args.out_thread) || a20_vm_unmap(stack, 16384))
@@ -99,6 +108,10 @@ static int native_thread_contract(void) {
     }
     a20_status_t handle = a20_thread_create(&args);
     T_CHECK(handle >= 0 && (uint32_t)handle == args.out_thread, 10);
+    a20_handle_identity_t original_identity;
+    T_CHECK(native_runtime_identity(args.out_thread, &original_identity,
+                                    A20_OBJECT_LIVE),
+            29);
     uint32_t ready = 0;
     for (unsigned i = 0; i < 100000 && !ready; i++) {
         T_CHECK(a20_atomic32_load(&native_thread_shared.ready, &ready) ==
@@ -115,6 +128,10 @@ static int native_thread_contract(void) {
                                          A20_RIGHT_WAIT | A20_RIGHT_STAT};
         T_CHECK(a20_hdl_dup(&dup) == A20_OK, 26);
         duplicate = dup.out_handle;
+        a20_handle_identity_t alias;
+        T_CHECK(native_runtime_identity(duplicate, &alias, A20_OBJECT_LIVE) &&
+                    a20_object_id_equal(&original_identity.id, &alias.id),
+                30);
     }
     T_CHECK(a20_task_wait(args.out_thread, A20_TASK_WAIT_NONBLOCK, 0) ==
                 -A20_ERR_WOULD_BLOCK,
@@ -152,12 +169,30 @@ static int native_thread_contract(void) {
     T_CHECK(a20_atomic32_load(&native_thread_shared.nested, &ready) == A20_OK &&
                 ready == 19,
             18);
+    a20_handle_identity_t retired;
+    T_CHECK(native_runtime_identity(args.out_thread, &retired,
+                                    A20_OBJECT_RETIRED) &&
+                a20_object_id_equal(&original_identity.id, &retired.id) &&
+                native_thread_shared.nested_serial >
+                    original_identity.id.serial,
+            31);
+    uint8_t wire[64];
+    a20_object_id_t decoded;
+    T_CHECK(!a20_object_id_encode(wire, sizeof(wire), &retired.id) &&
+                !a20_object_id_decode(wire, sizeof(wire), &decoded) &&
+                a20_object_id_equal(&decoded, &original_identity.id),
+            32);
     /* Reaped identity remains safely closeable but cannot resolve a task. */
     T_CHECK(a20_task_wait(args.out_thread, A20_TASK_WAIT_NONBLOCK, 0) ==
                     -A20_ERR_BAD_HANDLE &&
                 a20_sched_get(args.out_thread, &sched) == -A20_ERR_BAD_HANDLE,
             27);
     if (duplicate != A20_HANDLE_NULL) {
+        a20_handle_identity_t alias;
+        T_CHECK(
+            native_runtime_identity(duplicate, &alias, A20_OBJECT_RETIRED) &&
+                a20_object_id_equal(&original_identity.id, &alias.id),
+            33);
         T_CHECK(a20_task_wait(duplicate, A20_TASK_WAIT_NONBLOCK, 0) ==
                         -A20_ERR_BAD_HANDLE &&
                     a20_hdl_close(duplicate) == A20_OK,

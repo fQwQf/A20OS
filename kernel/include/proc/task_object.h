@@ -2,6 +2,7 @@
 #define _PROC_TASK_OBJECT_H
 #include "proc/proc.h"
 #ifdef A20_TASK_OBJECTS_ENABLED
+uint64_t a20_task_object_serial(void *object);
 void a20_task_object_ref(void *object);
 void a20_task_object_put(void *object);
 /* Caller holds an object reference. Returned task needs proc_put(). */

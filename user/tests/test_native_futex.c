@@ -74,10 +74,15 @@ int main(int argc, char **argv, char **envp)
     a20_hdl_write_buf(out, domain_line, sizeof(domain_line) - 1, (void *)0);
     a20_hdl_write_buf(out, "NATIVE_DOMAIN: PASS\n",
                       sizeof("NATIVE_DOMAIN: PASS\n") - 1, (void *)0);
+    if (native_runtime_contract())
+        return fail(out, 96, "runtime identity",
+                    sizeof("runtime identity") - 1);
     if (native_thread_contract())
         return fail(out, 95, "thread contract", sizeof("thread contract") - 1);
     a20_hdl_write_buf(out, "NATIVE_THREAD: PASS\n",
                       sizeof("NATIVE_THREAD: PASS\n") - 1, (void *)0);
+    a20_hdl_write_buf(out, "NATIVE_RUNTIME: PASS\n",
+                      sizeof("NATIVE_RUNTIME: PASS\n") - 1, (void *)0);
     char thread_line[] = "NATIVE_THREAD_CPUS: 00->00\n";
     unsigned offset = sizeof("NATIVE_THREAD_CPUS: ") - 1;
     thread_line[offset] = '0' + native_thread_shared.parent_cpu / 10;

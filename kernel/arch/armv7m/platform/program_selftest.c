@@ -47,6 +47,8 @@ static void controller(void) {
     }
     CHECK(record->threads_passed == 1 && record->thread_parent_cpu == 1 &&
           record->thread_worker_cpu == 0);
+    printf("[PROGRAM-RUNTIME] PASS immutable binding serial IDs survive join "
+           "cross-cpu=1\n");
     printf("[PROGRAM-THREAD] PASS public affinity parent=1 child=0\n");
     printf("[PROGRAM-THREAD] PASS nested-create join close shared-space "
            "stack-pin=1\n");

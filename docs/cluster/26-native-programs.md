@@ -40,6 +40,8 @@ NOMMU 功能原型，非完整的进程内存保护实现。
 |---|---|
 | `0x0002` execution_info | 公共执行能力描述，见 [28](28-execution-capabilities.md) |
 | `0x0003` execution_domain_info | 当前原生执行域状态，见 [31](31-runtime-instance.md) |
+| `0x0004/0x0005` runtime_info/runtime_bind | 公共实例/域/启动代次，见 [34](34-runtime-namespace.md) |
+| `0x010D` handle_identity | 稳定任务对象名与回收状态，见 [34](34-runtime-namespace.md) |
 | `0x0100` handle_close | 关闭线程句柄 |
 | `0x0202` task_wait | 加入线程并取得退出码 |
 | `0x0205` thread_create | 创建共享空间的用户线程，见 [32](32-native-threads.md) |

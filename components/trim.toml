@@ -57,6 +57,8 @@ sources = [
     "kernel/ipc/a20_object.c",
     "kernel/proc/native_thread.c",
     "kernel/proc/task_object.c",
+    "kernel/core/runtime.c",
+    "kernel/abi/native/sys_runtime.c",
     "kernel/proc/wait.c",
     "kernel/abi/native/sys_mem_basic.c",
     "kernel/mm/flat_user.c",

@@ -250,6 +250,16 @@ int main(int argc, char **argv, char **envp) {
     } else if (a20_memcmp(self.node_id, config.node, 16) ||
                self.caps != config.caps)
         return 3;
+    if (config.runtime_epoch) {
+        a20_runtime_binding_t binding = {
+            .size = 64, .version = 1, .boot_epoch = config.runtime_epoch};
+        a20_memcpy(binding.instance_id, config.instance, 16);
+        a20_memcpy(binding.domain_id, config.node, 16);
+        if (a20_runtime_bind(&binding) < 0) {
+            note("CLUSTER_SUPERVISOR: runtime binding conflict\n");
+            return 6;
+        }
+    }
     a20_channel_pair_t pair;
     if (a20_channel_create(&pair) < 0 ||
         a20_cluster_export(pair.endpoints[0], "cluster.supervisor",

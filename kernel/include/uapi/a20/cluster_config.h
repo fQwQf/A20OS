@@ -18,7 +18,8 @@ typedef struct a20_config_seed {
     uint32_t transport, hop_len;
 } a20_config_seed_t;
 typedef struct a20_cluster_config {
-    uint8_t node[16];
+    uint8_t node[16], instance[16];
+    uint64_t runtime_epoch;
     uint32_t caps, seed_count;
     a20_config_seed_t seeds[A20_CONFIG_SEEDS];
     char service[A20_CONFIG_SERVICES][A20_CONFIG_PATH];
@@ -110,6 +111,21 @@ static inline int a20_config_address(const char *s, a20_config_seed_t *seed) {
     seed->hop_len = 6;
     return 0;
 }
+static inline int a20_config_epoch(const char *s, uint64_t *out) {
+    uint64_t n = 0;
+    if (!s || !*s)
+        return -1;
+    while (*s) {
+        if (*s < '0' || *s > '9' ||
+            n > (UINT64_MAX - (unsigned)(*s - '0')) / 10)
+            return -1;
+        n = n * 10 + (unsigned)(*s++ - '0');
+    }
+    if (!n)
+        return -1;
+    *out = n;
+    return 0;
+}
 static inline int a20_cluster_config_parse(const char *text, uint32_t len,
                                            a20_cluster_config_t *out,
                                            uint32_t *error_line) {
@@ -159,6 +175,14 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
             if ((seen & 2) || a20_config_id(tokens[1], c.node))
                 goto bad;
             seen |= 2;
+        } else if (a20_config_equal(tokens[0], "instance") && count == 2) {
+            if ((seen & 8) || a20_config_id(tokens[1], c.instance))
+                goto bad;
+            seen |= 8;
+        } else if (a20_config_equal(tokens[0], "epoch") && count == 2) {
+            if ((seen & 16) || a20_config_epoch(tokens[1], &c.runtime_epoch))
+                goto bad;
+            seen |= 16;
         } else if (a20_config_equal(tokens[0], "role") && count == 2) {
             if (seen & 4)
                 goto bad;
@@ -203,7 +227,8 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
         } else
             goto bad;
     }
-    if (seen != 7 || (c.process[0] && !c.service[A20_CONFIG_AGENT][0]))
+    if ((seen != 7 && seen != 31) ||
+        (c.process[0] && !c.service[A20_CONFIG_AGENT][0]))
         goto bad;
     c.caps |= features;
     for (unsigned i = 0; i < c.seed_count; i++)

@@ -23,8 +23,8 @@ static __attribute__((noreturn)) void orphan_entry(uintptr_t arg) {
     a20_execution_domain_info_t domain;
     uint64_t page = 0;
     if (relocated[0] != 0xa20beef || zero_bss[3] != 99 ||
-        native_domain_contract(&domain) || a20_vm_alloc_pages(1, 3, &page) ||
-        a20_vm_unmap(page, 4096)) {
+        native_domain_contract(&domain) || !native_runtime_matches() ||
+        a20_vm_alloc_pages(1, 3, &page) || a20_vm_unmap(page, 4096)) {
         record->error = 87;
         a20_thread_exit(87);
     }
@@ -76,6 +76,7 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
               domain.online_mask == 3,
           82);
     record->domain_mask_before = domain.online_mask;
+    CHECK(native_runtime_contract() == 0, 85);
     CHECK(native_thread_contract() == 0, 84);
     record->threads_passed = 1;
     record->thread_parent_cpu = native_thread_shared.parent_cpu;

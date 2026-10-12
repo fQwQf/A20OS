@@ -24,6 +24,9 @@ extern int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
 extern int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 extern int64_t sys_a20_handle_close(const a20_syscall_args_t *args);
 extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
+extern int64_t sys_a20_runtime_info(const a20_syscall_args_t *args);
+extern int64_t sys_a20_runtime_bind(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_identity(const a20_syscall_args_t *args);
 extern int64_t sys_a20_execution_domain_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
@@ -379,6 +382,15 @@ static void program_syscall_thread(void) {
             break;
         case A20_SYS_futex_wake:
             result = sys_a20_futex_wake(&args);
+            break;
+        case A20_SYS_runtime_info:
+            result = sys_a20_runtime_info(&args);
+            break;
+        case A20_SYS_runtime_bind:
+            result = sys_a20_runtime_bind(&args);
+            break;
+        case A20_SYS_handle_identity:
+            result = sys_a20_handle_identity(&args);
             break;
         case A20_SYS_execution_domain_info:
             result = sys_a20_execution_domain_info(&args);

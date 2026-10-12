@@ -1,3 +1,6 @@
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+#include "program_stack.h"
+#endif
     .syntax unified
     .cpu cortex-m3
     .thumb
@@ -143,6 +146,12 @@ SVC_Handler:
     /* Resume a complete user frame, including flags/Thumb IT state. */
     ldmia r0!, {r4-r11}
     msr psp, r0
+    /* PSP tasks can migrate. Handler mode must never keep an outgoing
+     * task's shared kernel stack as this CPU's MSP: that task may already
+     * execute on another CPU when the next SysTick/SVC arrives. The old
+     * MSP exception frame is discarded by the PSP EXC_RETURN below. */
+    ldr r0, =(armv7m_exception_stack + ARMV7M_EXCEPTION_STACK_BYTES)
+    msr msp, r0
     movs r0, #3
     msr control, r0
     isb
@@ -293,6 +302,15 @@ __switch:
 
     /* Switch to the next task's stack and resume. */
     mov sp, r1
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    /* A PSP context owns only PSP; handler MSP is CPU-private. A kernel
+     * thread using MSP owns its active stack until switch completion. */
+    tst lr, #2
+    beq 7f
+    ldr r3, =(armv7m_exception_stack + ARMV7M_EXCEPTION_STACK_BYTES)
+    msr msp, r3
+7:
+#endif
 #ifdef CONFIG_MCU_SHARED_KERNEL
     ldr r0, [r0, #20]          /* next ctx->status */
     msr primask, r0

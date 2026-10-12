@@ -12,10 +12,16 @@
 struct a20_task_object {
     refcount_t refs;
     task_t *task;
+    uint64_t serial;
 };
 /* Serializes lazy publication, weak-to-strong acquisition and detach.
  * No allocator, table lock, park lock or task release under this lock. */
 static spinlock_t task_object_lock = SPINLOCK_INIT;
+static uint64_t next_serial;
+
+uint64_t a20_task_object_serial(void *object) {
+    return object ? ((struct a20_task_object *)object)->serial : 0;
+}
 
 void a20_task_object_ref(void *object) {
     if (object)
@@ -71,6 +77,12 @@ int64_t a20_handle_install_task(struct a20_ht_internal *ht, task_t *task,
             return -A20_ERR_BAD_HANDLE;
         }
         if (!object && candidate) {
+            if (next_serial == UINT64_MAX) {
+                spin_unlock_irqrestore(&task_object_lock, flags);
+                a20_task_object_put(candidate);
+                return -A20_ERR_NO_SPACE;
+            }
+            candidate->serial = ++next_serial;
             object = candidate;
             candidate = NULL;
             object->task = task;

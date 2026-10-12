@@ -18,17 +18,20 @@ agent、clusterd、jobd。共享解析器及退避规则在
 配置路径是显式参数，不依赖当前目录或环境变量。FAT 镜像根通常挂载在 `/bin`，
 外部 rootfs 可以使用 `/etc/a20/cluster.conf`。替换为对应架构的 Native 后缀。
 启动本监管进程仍由启动脚本、系统服务管理器或操作者负责；它不自动修改系统
-init，也不把示例身份作为默认部署配置。系统重启后从同一个持久文件恢复配置。
+init，也不把示例身份作为默认部署配置。系统重启后恢复持久部署配置；若启用
+公共实例绑定，启动 epoch 必须由部署层更新，不能照搬上次启动的 epoch，见
+[34](34-runtime-namespace.md)。
 
 格式为逐行 ASCII，支持空白、CRLF 和以独立 `#` token 开始的行尾注释，拒绝
 未知字段、重复字段、额外 token、NUL、非法 ID 和超长行。没有 shell 展开或
-远端路径执行。必填各一次：
+远端路径执行。前三项必填各一次，其余可选：
 
 | 字段 | 含义 |
 |---|---|
 | `version 1` | 配置版本 |
 | `node <32hex>` | 持久完整节点 ID；拒绝全 0/全 ff |
 | `role worker/relay/leaf` | 分别对应可靠工作节点、可靠转发节点、可靠叶子能力 |
+| `instance <32hex>`、`epoch <非零十进制uint64>` | 可选且必须成对；绑定公共运行实例，域 ID 使用 node，见 [34](34-runtime-namespace.md) |
 | `feature oneway` | 可选，至多一次；启用可靠业务 SEND，默认关闭；与 role 行顺序无关 |
 | `seed <32hex> udp:<IPv4>:<port>` | 可选显式直连种子；拒绝自身、重复节点和非法地址 |
 | `seed <32hex> uart:1` | 可选 UART 邻居 |
