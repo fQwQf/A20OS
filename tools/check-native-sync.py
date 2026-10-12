@@ -54,6 +54,11 @@ def run_case(arch, args, output):
                     assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS", "NATIVE_RUNTIME: PASS", "NATIVE_OBJECT_DIRECTORY: PASS"]), str(log)
                     match = re.search(r"NATIVE_THREAD_CPUS: (\d+)->(\d+)", content)
                     assert match, str(log)
+                    balance = re.search(r"NATIVE_BALANCE: PASS jobs=32 sum=4359168 mask=([0-9a-f]{8}) range=dynamic", content)
+                    assert balance, str(log)
+                    balance_mask = int(balance[1], 16)
+                    assert balance_mask and not balance_mask & ~((1 << args.cpus) - 1), str(log)
+                    assert args.cpus == 1 or balance_mask.bit_count() >= 2, str(log)
                     thread_cpus = [int(match[1]), int(match[2])]
                     assert all(cpu < args.cpus for cpu in thread_cpus), str(log)
                     assert args.cpus == 1 or thread_cpus[0] != thread_cpus[1], str(log)
@@ -82,7 +87,7 @@ def run_case(arch, args, output):
                 process.wait()
             process.stdin.close()
     assert phase == "complete", f"{arch} stopped at {phase}; see {log}"
-    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, thread_cpus_verified=thread_cpus, passed=True, build=build, command=command,
+    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, thread_cpus_verified=thread_cpus, balance_cpu_mask=balance_mask, balance_jobs=32, balance_sum=4359168, dynamic_work_range_checked=True, passed=True, build=build, command=command,
                 log=str(log.relative_to(ROOT)), kernel=str(kernel.relative_to(ROOT)),
                 kernel_sha256=sha(kernel), image=str(image.relative_to(ROOT)),
                 image_sha256=sha(image), returncode=process.returncode,

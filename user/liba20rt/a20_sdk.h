@@ -16,6 +16,7 @@
 #include "a20_channel.h"
 #include "a20_clock.h"
 #include "a20_sync.h"
+#include "a20_work.h"
 #include "a20_net.h"
 #include "a20_device.h"
 #include "a20_registry.h"

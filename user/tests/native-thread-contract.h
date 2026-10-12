@@ -7,14 +7,17 @@
 #include "liba20rt/a20_execution.h"
 #include "native-runtime-contract.h"
 #include "native-object-contract.h"
+#include "native-balance-contract.h"
 /* Identical Native application code on MCU and server ISAs. No host task
  * manipulation, no reliance on user CPU atomics or libc allocator locking. */
 static struct {
     uint32_t ready, go, nested, expected_cpu, worker_cpu, parent_cpu;
     uint64_t nested_serial;
+    a20_handle_t worker_handle;
 } native_thread_shared;
 static __attribute__((noreturn)) void native_thread_nested(uintptr_t arg) {
-    if (arg != 0xa20 || a20_atomic32_store(&native_thread_shared.nested, 19))
+    if (arg != 0xa20 || native_balance_work(1) ||
+        a20_atomic32_store(&native_thread_shared.nested, 19))
         a20_thread_exit(91);
     a20_thread_exit(19);
     __builtin_unreachable();
@@ -43,6 +46,8 @@ static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
     native_thread_shared.worker_cpu = cpu;
     if (local != 0xc0ffee)
         a20_thread_exit(95);
+    if (native_balance_prepare(native_thread_shared.worker_handle))
+        a20_thread_exit(101);
     uint64_t stack;
     if (a20_vm_alloc_pages(4, 3, &stack))
         a20_thread_exit(96);
@@ -58,6 +63,8 @@ static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
                                  A20_OBJECT_LIVE))
         a20_thread_exit(88);
     native_thread_shared.nested_serial = nested_identity.id.serial;
+    if (native_balance_work(0))
+        a20_thread_exit(102);
     a20_task_status_t status;
     if (a20_task_wait(args.out_thread, 0, &status) || status.exit_code != 19 ||
         a20_hdl_close(args.out_thread) || a20_vm_unmap(stack, 16384))
@@ -109,6 +116,7 @@ static int native_thread_contract(void) {
     }
     a20_status_t handle = a20_thread_create(&args);
     T_CHECK(handle >= 0 && (uint32_t)handle == args.out_thread, 10);
+    native_thread_shared.worker_handle = args.out_thread;
     a20_handle_identity_t original_identity;
     T_CHECK(native_runtime_identity(args.out_thread, &original_identity,
                                     A20_OBJECT_LIVE),
@@ -168,6 +176,7 @@ static int native_thread_contract(void) {
                 status.size == sizeof(status) && status.version == 1 &&
                 status.exit_code == 37,
             17);
+    T_CHECK(native_balance_result(), 36);
     T_CHECK(a20_atomic32_load(&native_thread_shared.nested, &ready) == A20_OK &&
                 ready == 19,
             18);

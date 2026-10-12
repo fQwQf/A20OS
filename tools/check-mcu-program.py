@@ -208,6 +208,7 @@ def main():
         assert any("[PROGRAM-THREAD] PASS final heap restored handles stacks image=freed" in log for log in domain.logs)
         assert {4, 5, 0x010d} <= domain.syscall_numbers
         assert any("[PROGRAM-RUNTIME] PASS immutable binding serial IDs survive join cross-cpu=1" in log for log in domain.logs)
+        assert any("[PROGRAM-BALANCE] PASS jobs=32 sum=4359168 cpu-mask=3 unpinned=1 range=dynamic" in log for log in domain.logs)
         assert any("[PROGRAM-THREAD] PASS public affinity parent=1 child=0" in log for log in domain.logs)
         assert {3, 0x0100, 0x0202, 0x0205, 0x0209, 0x020a} <= domain.syscall_numbers
         assert any("[PROGRAM-THREAD] PASS nested-create join close shared-space stack-pin=1" in log for log in domain.logs)
@@ -219,7 +220,7 @@ def main():
         assert any("[PROGRAM-APPS] PASS common owner real ELF launch dedup root=stable" in log for log in domain.logs)
         assert any("[PROGRAM-APPS] PASS exit tombstone stale owner release=1" in log for log in domain.logs)
         assert any("[PROGRAM-APPS] PASS recycle old START stale slot=available release=1" in log for log in domain.logs)
-        result.update(native_app_recycle_checked=True, native_app_owner_checked=True, native_object_directory_checked=True,user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
+        result.update(native_unpinned_balance_checked=True, native_dynamic_work_range_checked=True, balance_jobs=32, balance_sum=4359168, balance_cpu_mask=3, native_app_recycle_checked=True, native_app_owner_checked=True, native_object_directory_checked=True,user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
                       exception_returns=domain.returns, psp_exception_private_stack_checks=domain.private_stack_checks, native_syscalls=sorted(domain.syscall_numbers),
                       seed=args.seed, quantum=1, elf_rejections=8,
                       tick_injection="at most one SysTick per 1000 interleaving rounds; not cycle timing",
@@ -233,6 +234,12 @@ def main():
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(result, indent=2)+"\n")
         print(json.dumps(result, indent=2))
+    except Exception as error:
+        if args.report:
+            args.report.write_text(json.dumps({"result": "FAIL", "passed": False,
+                "error": repr(error), "seed": args.seed,
+                "elf_sha256": hashlib.sha256(args.elf.read_bytes()).hexdigest()}, indent=2) + "\n")
+        raise
     finally:
         if bus: bus.close()
 

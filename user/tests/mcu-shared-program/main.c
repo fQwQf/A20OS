@@ -77,7 +77,13 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
           82);
     record->domain_mask_before = domain.online_mask;
     CHECK(native_runtime_contract() == 0, 85);
-    CHECK(native_thread_contract() == 0, 84);
+    int thread_result = native_thread_contract();
+    record->balance_mask = native_balance_mask();
+    record->balance_jobs =
+        native_balance_shared.jobs[0] + native_balance_shared.jobs[1];
+    record->balance_sum =
+        native_balance_shared.sum[0] + native_balance_shared.sum[1];
+    CHECK(thread_result == 0, 84);
     record->threads_passed = 1;
     record->objects_passed = native_object_releases == 1 &&
                              !native_object_close_error &&

@@ -120,3 +120,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 固定容量下的持续应用执行与旧请求拒绝机制见
 [39-application-recycling.md](39-application-recycling.md)。
+
+同一应用内的公共动态工作领取与真实多 CPU 计算验收见
+[40-native-application-balance.md](40-native-application-balance.md)。
