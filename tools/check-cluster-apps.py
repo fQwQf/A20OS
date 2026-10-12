@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--arches", default="riscv64,aarch64,x86_64")
-    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--timeout", type=float, default=360)
     parser.add_argument("--log-dir", type=Path, default=Path(".kernel-build/cluster/apps"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
@@ -48,7 +48,7 @@ def main():
         reserve.append(a); lanes.append(b); ports.append(a.getsockname()[1])
     processes, logs, commands, outputs, pending = [None]*3, [], [], [None]*3, {}
     trace = []
-    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "reboots": []}
+    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "ca2": 0, "dropped_release_replies": 0, "dropped_reusable_start_replies": 0, "recycle_domains": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "reboots": []}
     macs = [bytes.fromhex(f"52540012340{i+1}") for i in range(3)]
 
     def stop(i):
@@ -99,14 +99,18 @@ def main():
                     if cl[:2] == b"CL":
                         if len(trace)<20000:
                             trace.append([round(time.monotonic()-begin,3),source,packet[30:34].hex(),cl.hex()])
-                        for proto in (b"CD\x01", b"CD\x02", b"CM\x01", b"CM\x02", b"CA\x01"):
+                        for proto in (b"CD\x01", b"CD\x02", b"CM\x01", b"CM\x02", b"CA\x01", b"CA\x02"):
                             if proto in cl[32:60]:
                                 events[proto[:2].decode().lower()+str(proto[2])] += 1
                 ca = cl.find(b"CA\x01\x02",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
                 if source==1 and drop and ca>=0 and int.from_bytes(cl[ca+16:ca+24],"little")==99 and len(cl)>=ca+192:
                     events["dropped_start_replies"] += 1
                     continue
-                stop_ca = cl.find(b"CA\x01\x04",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
+                reusable_ca = cl.find(b"CA\x02\x02",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
+                if source==1 and reusable_ca>=0 and len(cl)>=reusable_ca+192 and int.from_bytes(cl[reusable_ca+16:reusable_ca+24],"little")==1300 and "APPS: reusable-start-timeout-pass" not in outputs[0].read_text(errors="replace"):
+                    events["dropped_reusable_start_replies"]+=1
+                    continue
+                stop_ca = cl.find(b"CA\x02\x04",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
                 if stop_ca>=0 and len(cl)>=stop_ca+176 and int.from_bytes(cl[stop_ca+16:stop_ca+24],"little")==701:
                     if source==0 and "APPCTL: stop retry original owner" not in outputs[0].read_text(errors="replace"):
                         events["dropped_stop_requests"]+=1
@@ -114,6 +118,10 @@ def main():
                     if source==1 and len(cl)>=stop_ca+192:
                         events["dropped_stop_replies"]+=1
                         continue
+                release_ca = cl.find(b"CA\x02\x05",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
+                if source==1 and release_ca>=0 and len(cl)>=release_ca+192 and int.from_bytes(cl[release_ca+16:release_ca+24],"little")==1200:
+                    events["dropped_release_replies"]+=1
+                    continue
                 targets = [macs.index(packet[:6])] if packet[:6] in macs else range(3)
                 for target in targets:
                     if target != source:
@@ -126,8 +134,10 @@ def main():
                     raise TimeoutError(f"guest {i} did not reach shell")
             out = outputs[0].read_text(errors="replace")
             for i, path in enumerate(outputs):
-                if path and "APPS: FAIL" in path.read_text(errors="replace"):
-                    raise RuntimeError(f"guest {i} failed; see {path}")
+                if path:
+                    guest = path.read_text(errors="replace")
+                    if "KERNEL PANIC" in guest or "APPS: FAIL" in guest:
+                        raise RuntimeError(f"guest {i} failed; see {path}")
             if "APPS: reboot-ready" in out and not bound:
                 start(1, 1); bound = True
             if "APPS: PASS" in out:
@@ -140,11 +150,14 @@ def main():
                 all_logs[1]+=(directory / "node-1-mode-1.log").read_text(errors="replace")
                 events["real_argument_workloads"]=[s.count("APP-ARGS: PASS argc=4 envc=2") for s in all_logs]
                 events["cli_exits"]=out.count("APPCTL: exit=00000025")
-                if "APPS: cli-pass real-args-env exit=37 nodes=3" not in out or any(n!=1 for n in events["real_argument_workloads"]) or events["cli_exits"]!=3:
+                if "APPS: cli-pass real-args-env exit=37 nodes=3" not in out or events["real_argument_workloads"]!=[10,1,1] or events["cli_exits"]!=12:
                     raise RuntimeError(f"missing actual configured CLI workloads: {events}")
                 events["cli_cancel_exits"]=out.count("APPCTL: exit=00000089")
                 if "APPS: cli-cancel-pass remote-exit=137 active=0" not in out or events["cli_cancel_exits"]!=1 or not events["dropped_stop_requests"] or not events["dropped_stop_replies"]:
                     raise RuntimeError(f"missing actual remote CLI cancellation: {events}")
+                events["recycle_domains"]=out.count("APPS: recycle-pass real-exits=16 live-preserved old-start=expired slots=8")
+                if events["recycle_domains"]!=3 or not events["dropped_reusable_start_replies"] or "APPS: reusable-start-timeout-pass original-root=live" not in out or not events["ca2"] or not events["dropped_release_replies"] or "APPS: release-timeout-pass old-start=expired" not in out or "APPS: cli-reuse-pass runs=9 no-daemon-restart" not in out:
+                    raise RuntimeError(f"missing real reusable application lifecycle: {events}")
                 events["passed"] = True
                 print(f"check-cluster-apps: PASS ({','.join(arches)}, variant launch, dedup/lost reply, exit/stop, daemon restart and kernel reboot)")
                 return
@@ -152,6 +165,9 @@ def main():
                 if p.poll() is not None :
                     raise RuntimeError(f"QEMU {i} exited unexpectedly")
         raise TimeoutError(f"application test timeout; logs: {directory}")
+    except Exception as error:
+        events["error"] = str(error)
+        raise
     finally:
         (directory / "events.json").write_text(json.dumps(events, indent=2)+"\n")
         (directory / "wire.json").write_text(json.dumps(trace)+"\n")

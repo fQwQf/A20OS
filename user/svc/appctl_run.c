@@ -27,6 +27,23 @@ static int decimal(const char *s, uint64_t *out) {
     *out = v;
     return 0;
 }
+static void retire(a20_app_session_t *session, const a20_app_ticket_t *ticket) {
+    uint64_t deadline = a20_agent_clock_ms(0) + 8000;
+    while (a20_agent_clock_ms(0) < deadline) {
+        if (session->endpoint == A20_HANDLE_NULL) {
+            a20_status_t status = a20_app_resume(ticket, 2000, session);
+            if (status == -A20_ERR_EXPIRED)
+                return;
+            if (status < 0)
+                continue;
+        }
+        a20_app_result_t result;
+        a20_status_t status = a20_app_release(session, ticket, 2000, &result);
+        if (status >= 0 || status == -A20_ERR_EXPIRED)
+            return;
+    }
+    text("APPCTL: terminal result observed; slot retirement unconfirmed\n");
+}
 int main(int argc, char **argv, char **envp) {
     (void)envp;
     a20_start_info_t *si = a20_get_start_info();
@@ -50,8 +67,8 @@ int main(int argc, char **argv, char **envp) {
     a20_app_ticket_t ticket = {0};
     a20_app_result_t result;
     a20_status_t status =
-        a20_app_start_any(domains, (unsigned)argc - 4, manifest.bytes, nonce,
-                          (uint32_t)budget, &ticket, &result);
+        a20_app_start_any_reusable(domains, (unsigned)argc - 4, manifest.bytes,
+                                   nonce, (uint32_t)budget, &ticket, &result);
     if (!ticket.nonce) {
         text("APPCTL: no launch accepted\n");
         return 125;
@@ -63,6 +80,8 @@ int main(int argc, char **argv, char **envp) {
     hex(ticket.controller.serial, 16);
     text(" client=");
     hex(ticket.client.serial, 16);
+    text(" token=");
+    hex(ticket.token, 16);
     text(" nonce=");
     hex(ticket.nonce, 16);
     text("\n");
@@ -99,13 +118,16 @@ int main(int argc, char **argv, char **envp) {
         }
         recovery = a20_agent_clock_ms(0);
         if (result.state == A20_APP_EXITED) {
+            int32_t code = result.exit_code;
+            retire(&session, &ticket);
             a20_app_close(&session);
             text("APPCTL: exit=");
-            hex((uint32_t)result.exit_code, 8);
+            hex((uint32_t)code, 8);
             text("\n");
-            return result.exit_code;
+            return code;
         }
         if (result.state == A20_APP_FAILED) {
+            retire(&session, &ticket);
             a20_app_close(&session);
             text("APPCTL: image launch failed\n");
             return 125;

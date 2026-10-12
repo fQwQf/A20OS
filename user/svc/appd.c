@@ -145,16 +145,19 @@ int main(int argc, char **argv, char **envp) {
                            records, APPLICATIONS, 0, start, poll, stop,
                            release))
         return 3;
-    a20_channel_pair_t pair;
-    if (a20_channel_create(&pair) < 0 ||
-        a20_cluster_export(pair.endpoints[0], A20_APP_SERVICE, 0, 0) < 0)
-        return 4;
-    a20_hdl_close(pair.endpoints[1]);
-    a20_cluster_agent_server_t server;
+    a20_cluster_agent_server_t servers[2];
     a20_work_agent_t unused = {0};
-    a20_cluster_agent_init(&server, pair.endpoints[0], &unused);
-    server.dispatch = dispatch;
-    server.dispatch_ctx = &owner;
+    const char *services[2] = {A20_APP_SERVICE, A20_APP_REUSABLE_SERVICE};
+    for (unsigned i = 0; i < 2; i++) {
+        a20_channel_pair_t pair;
+        if (a20_channel_create(&pair) < 0 ||
+            a20_cluster_export(pair.endpoints[0], services[i], 0, 0) < 0)
+            return 4;
+        a20_hdl_close(pair.endpoints[1]);
+        a20_cluster_agent_init(&servers[i], pair.endpoints[0], &unused);
+        servers[i].dispatch = dispatch;
+        servers[i].dispatch_ctx = &owner;
+    }
     if (startup->stdout_handle != A20_HANDLE_NULL)
         a20_hdl_write_buf(startup->stdout_handle, "APPD: ready\n", 12, 0);
     int result = 0;
@@ -162,10 +165,11 @@ int main(int argc, char **argv, char **envp) {
         if (a20_signal_check() & (1ULL << 15))
             break;
         a20_app_owner_poll(&owner);
-        if (a20_cluster_agent_pump(&server) < 0) {
-            result = 5;
+        for (unsigned i = 0; i < 2; i++)
+            if (a20_cluster_agent_pump(&servers[i]) < 0)
+                result = 5;
+        if (result)
             break;
-        }
         a20_thread_sleep((a20_time_t){.nsecs = 1000000});
     }
     for (unsigned i = 0; i < APPLICATIONS; i++)
@@ -173,9 +177,11 @@ int main(int argc, char **argv, char **envp) {
             stop(0, records[i].object, 9);
             release(0, records[i].object);
         }
-    for (unsigned i = 0; i < A20_AGENT_LOCAL_CONNECTIONS; i++)
-        if (server.local[i] != A20_HANDLE_NULL)
-            a20_hdl_close(server.local[i]);
-    a20_hdl_close(server.exported);
+    for (unsigned i = 0; i < 2; i++) {
+        for (unsigned j = 0; j < A20_AGENT_LOCAL_CONNECTIONS; j++)
+            if (servers[i].local[j] != A20_HANDLE_NULL)
+                a20_hdl_close(servers[i].local[j]);
+        a20_hdl_close(servers[i].exported);
+    }
     return result;
 }

@@ -117,3 +117,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 普通应用参数、环境与实际集群命令行执行见
 [38-application-launch-inputs.md](38-application-launch-inputs.md)。
+
+固定容量下的持续应用执行与旧请求拒绝机制见
+[39-application-recycling.md](39-application-recycling.md)。

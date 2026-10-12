@@ -6,12 +6,14 @@
 /* One explicitly selected application owner. Fixed storage, no ISA-specific
  * launch policy, no transparent failover or tombstone eviction. */
 #define A20_APP_SERVICE "instance.apps"
+#define A20_APP_REUSABLE_SERVICE "instance.apps2"
 #define A20_APP_REQUEST 176u
 #define A20_APP_REPLY 192u
 #define A20_APP_HELLO 1u
 #define A20_APP_START 2u
 #define A20_APP_QUERY 3u
 #define A20_APP_STOP 4u
+#define A20_APP_RELEASE 5u
 #define A20_APP_OK 0u
 #define A20_APP_INVALID 1u
 #define A20_APP_STALE 2u
@@ -32,22 +34,23 @@ typedef struct a20_app_variant {
     uintptr_t image;
 } a20_app_variant_t;
 typedef struct a20_app_request {
-    uint32_t op, reason;
-    uint64_t cookie, nonce;
+    uint32_t op, reason, version; /* zero encodes legacy CA/1 */
+    uint64_t cookie, nonce, token;
     a20_object_id_t controller, client;
     uint8_t manifest[16];
 } a20_app_request_t;
 typedef struct a20_app_result {
     uint32_t status, state, capacity, occupied, active;
     int32_t exit_code;
+    uint64_t token; /* CA/2 HELLO offer; other operations use request token */
     a20_object_id_t controller, root;
     a20_execution_info_t execution;
 } a20_app_result_t;
 typedef struct a20_app_record {
     a20_object_id_t client, root;
     uint8_t manifest[16];
-    uint64_t nonce;
-    uint32_t state, stop_requested, has_object;
+    uint64_t nonce, token;
+    uint32_t state, stop_requested, has_object, version;
     int32_t exit_code;
     uintptr_t object;
 } a20_app_record_t;
@@ -56,6 +59,8 @@ typedef struct a20_app_owner {
     a20_execution_info_t execution;
     const a20_app_variant_t *variants;
     uint32_t variant_count, capacity;
+    uint64_t
+        next_token; /* monotonic within real controller lifetime; no wrap */
     a20_app_record_t *records;
     void *ctx;
     /* start: <0 guarantees no application started; 0 returns a valid root;
@@ -76,22 +81,26 @@ static inline int a20_app_zero(const uint8_t *p, unsigned n) {
 static inline int a20_app_request_decode(const uint8_t *p, uint32_t n,
                                          a20_app_request_t *out) {
     if (!p || !out || n != A20_APP_REQUEST || p[0] != 'C' || p[1] != 'A' ||
-        p[2] != 1 || p[3] < 1 || p[3] > 4 || !a20_work_u64(p + 8) ||
-        a20_work_u64(p + 24))
+        (p[2] != 1 && p[2] != 2) || p[3] < 1 ||
+        p[3] > (p[2] == 1 ? A20_APP_STOP : A20_APP_RELEASE) ||
+        !a20_work_u64(p + 8) || (p[2] == 1 && a20_work_u64(p + 24)))
         return -1;
     a20_app_request_t q = {.op = p[3],
+                           .version = p[2],
+                           .token = a20_work_u64(p + 24),
                            .reason = a20_work_u32(p + 4),
                            .cookie = a20_work_u64(p + 8),
                            .nonce = a20_work_u64(p + 16)};
     if (q.op == A20_APP_HELLO) {
-        if (q.reason || q.nonce || !a20_app_zero(p + 32, 128))
+        if (q.reason || q.nonce || q.token || !a20_app_zero(p + 32, 128))
             return -1;
         for (unsigned i = 0; i < 16; i++)
             q.manifest[i] = p[160 + i];
         if (!a20_app_zero(q.manifest, 16) && !a20_runtime_id_valid(q.manifest))
             return -1;
     } else {
-        if (!q.nonce || a20_object_id_decode(p + 32, 64, &q.controller) ||
+        if (!q.nonce || (q.version == 2 && !q.token) ||
+            a20_object_id_decode(p + 32, 64, &q.controller) ||
             a20_object_id_decode(p + 96, 64, &q.client))
             return -1;
         for (unsigned i = 0; i < 16; i++)
@@ -99,7 +108,7 @@ static inline int a20_app_request_decode(const uint8_t *p, uint32_t n,
         if (!a20_runtime_id_valid(q.manifest) ||
             !a20_runtime_id_equal(q.client.instance_id,
                                   q.controller.instance_id) ||
-            (q.op == A20_APP_QUERY && q.reason) ||
+            ((q.op == A20_APP_QUERY || q.op == A20_APP_RELEASE) && q.reason) ||
             (q.op == A20_APP_STOP && (!q.reason || q.reason > 63)))
             return -1;
     }
@@ -108,17 +117,21 @@ static inline int a20_app_request_decode(const uint8_t *p, uint32_t n,
 }
 static inline int a20_app_request_encode(uint8_t *p, uint32_t cap,
                                          const a20_app_request_t *q) {
-    if (!p || cap < A20_APP_REQUEST || !q)
+    if (!p || cap < A20_APP_REQUEST || !q ||
+        (q->version && q->version != 1 && q->version != 2) ||
+        q->op < A20_APP_HELLO ||
+        q->op > (q->version == 2 ? A20_APP_RELEASE : A20_APP_STOP))
         return -1;
     for (unsigned i = 0; i < A20_APP_REQUEST; i++)
         p[i] = 0;
     p[0] = 'C';
     p[1] = 'A';
-    p[2] = 1;
+    p[2] = q->version ? (uint8_t)q->version : 1;
     p[3] = (uint8_t)q->op;
     a20_work_put32(p + 4, q->reason);
     a20_work_put64(p + 8, q->cookie);
     a20_work_put64(p + 16, q->nonce);
+    a20_work_put64(p + 24, q->token);
     if (q->op != A20_APP_HELLO) {
         if (a20_object_id_encode(p + 32, 64, &q->controller) ||
             a20_object_id_encode(p + 96, 64, &q->client))
@@ -132,13 +145,18 @@ static inline int a20_app_request_encode(uint8_t *p, uint32_t cap,
 static inline int a20_app_result_decode(const uint8_t *p, uint32_t n,
                                         const a20_app_request_t *q,
                                         a20_app_result_t *out) {
+    uint32_t version = q && q->version ? q->version : 1;
     if (!p || !q || !out || n != A20_APP_REPLY || p[0] != 'C' || p[1] != 'A' ||
-        p[2] != 1 || p[3] != q->op || a20_work_u64(p + 8) != q->cookie ||
-        a20_work_u64(p + 16) != q->nonce || a20_work_u32(p + 188))
+        p[2] != version || p[3] != q->op || a20_work_u64(p + 8) != q->cookie ||
+        (!(version == 2 && q->op == A20_APP_HELLO) &&
+         a20_work_u64(p + 16) != q->nonce) ||
+        a20_work_u32(p + 188))
         return -1;
     a20_app_result_t v = {.status = a20_work_u32(p + 4),
                           .state = a20_work_u32(p + 24),
                           .exit_code = (int32_t)a20_work_u32(p + 28)};
+    v.token = version == 2 && q->op == A20_APP_HELLO ? a20_work_u64(p + 16)
+                                                     : q->token;
     v.capacity = a20_work_u32(p + 176);
     v.occupied = a20_work_u32(p + 180);
     v.active = a20_work_u32(p + 184);
@@ -151,7 +169,9 @@ static inline int a20_app_result_decode(const uint8_t *p, uint32_t n,
         if (p[160 + i] != q->manifest[i])
             return -1;
     if (q->op == A20_APP_HELLO) {
-        if (v.state || v.exit_code ||
+        if ((version == 2 && v.token &&
+             (v.status || v.occupied == v.capacity)) ||
+            v.state || v.exit_code ||
             (v.status ? !a20_app_zero(p + 96, 64)
                       : a20_execution_decode(p + 96, 64, &v.execution)))
             return -1;
@@ -160,6 +180,11 @@ static inline int a20_app_result_decode(const uint8_t *p, uint32_t n,
             !a20_object_id_equal(&v.controller, &q->controller))
             return -1;
         if (v.state || v.exit_code || !a20_app_zero(p + 96, 64))
+            return -1;
+    } else if (q->op == A20_APP_RELEASE) {
+        if (version != 2 ||
+            !a20_object_id_equal(&v.controller, &q->controller) || v.state ||
+            v.exit_code || !a20_app_zero(p + 96, 64))
             return -1;
     } else {
         if (!a20_object_id_equal(&v.controller, &q->controller) ||
@@ -208,13 +233,14 @@ static inline int a20_app_owner_init(
                            .variant_count = count,
                            .records = records,
                            .capacity = capacity,
+                           .next_token = (uint64_t)capacity + 1,
                            .ctx = ctx,
                            .start = start,
                            .poll = poll,
                            .stop = stop,
                            .release = release};
     for (uint32_t i = 0; i < capacity; i++)
-        records[i] = (a20_app_record_t){0};
+        records[i] = (a20_app_record_t){.token = (uint64_t)i + 1};
     return 0;
 }
 static inline void a20_app_owner_poll(a20_app_owner_t *o) {
@@ -261,8 +287,23 @@ static inline void a20_app_owner_load(const a20_app_owner_t *o,
             (*active)++;
     }
 }
-/* Tombstones are retained until this controller incarnation ends. Full means
- * NO_SPACE, never silent eviction followed by duplicate side effects. */
+/* CA/1 records retain their original lifetime semantics. CA/2 explicitly
+ * retires terminal (or unaccepted) slots and assigns a never-reused token.
+ * Exact old START frames cannot execute after retirement, without keeping
+ * unbounded per-client history or changing real task/controller identities. */
+static inline void a20_app_owner_retire(a20_app_owner_t *o,
+                                        a20_app_record_t *r) {
+    uint64_t token = o->next_token;
+    if (token)
+        o->next_token = token == UINT64_MAX ? 0 : token + 1;
+    *r = (a20_app_record_t){.token = token};
+}
+static inline uint64_t a20_app_owner_offer(const a20_app_owner_t *o) {
+    for (uint32_t i = 0; i < o->capacity; i++)
+        if (!o->records[i].nonce && o->records[i].token)
+            return o->records[i].token;
+    return 0;
+}
 static inline int a20_app_owner_dispatch(a20_app_owner_t *o,
                                          const uint8_t *input, uint32_t n,
                                          uint8_t *reply, uint32_t cap) {
@@ -286,16 +327,31 @@ static inline int a20_app_owner_dispatch(a20_app_owner_t *o,
         else {
             for (uint32_t i = 0; i < o->capacity; i++) {
                 a20_app_record_t *r = &o->records[i];
-                if (!r->nonce) {
+                if (q.version == 2) {
+                    if (r->token == q.token) {
+                        found = r;
+                        free_index = (int)i;
+                    }
+                } else if (!r->nonce) {
                     if (free_index < 0)
                         free_index = (int)i;
-                } else if (r->nonce == q.nonce &&
+                } else if (r->version == 1 && r->nonce == q.nonce &&
                            a20_object_id_equal(&r->client, &q.client))
                     found = r;
             }
-            if (found && !a20_runtime_id_equal(found->manifest, q.manifest))
+            if (q.version == 2 && !found)
+                status = A20_APP_STALE;
+            else if (found && found->nonce &&
+                     (found->version != q.version || found->nonce != q.nonce ||
+                      !a20_object_id_equal(&found->client, &q.client) ||
+                      !a20_runtime_id_equal(found->manifest, q.manifest)))
                 status = A20_APP_CONFLICT;
-            else if (q.op == A20_APP_START && !found) {
+            else if (q.op == A20_APP_RELEASE) {
+                if (found->has_object)
+                    status = A20_APP_BUSY;
+                else
+                    a20_app_owner_retire(o, found);
+            } else if (q.op == A20_APP_START && (!found || !found->nonce)) {
                 const a20_app_variant_t *selected = 0;
                 status = a20_app_owner_variant(o, q.manifest, &selected);
                 if (!status && q.reason && active != q.reason - 1)
@@ -305,7 +361,9 @@ static inline int a20_app_owner_dispatch(a20_app_owner_t *o,
                 if (!status) {
                     found = &o->records[free_index];
                     *found = (a20_app_record_t){.client = q.client,
-                                                .nonce = q.nonce};
+                                                .nonce = q.nonce,
+                                                .version = q.version,
+                                                .token = found->token};
                     for (unsigned i = 0; i < 16; i++)
                         found->manifest[i] = q.manifest[i];
                     int result = o->start(o->ctx, selected->image,
@@ -329,7 +387,7 @@ static inline int a20_app_owner_dispatch(a20_app_owner_t *o,
                             found->root = (a20_object_id_t){0};
                     }
                 }
-            } else if (!found)
+            } else if (!found || !found->nonce)
                 status = A20_APP_NOT_FOUND;
             else if (q.op == A20_APP_STOP && found->has_object &&
                      !found->stop_requested) {
@@ -346,18 +404,20 @@ static inline int a20_app_owner_dispatch(a20_app_owner_t *o,
         reply[i] = 0;
     reply[0] = 'C';
     reply[1] = 'A';
-    reply[2] = 1;
+    reply[2] = (uint8_t)q.version;
     reply[3] = (uint8_t)q.op;
     a20_work_put32(reply + 4, status);
     a20_work_put64(reply + 8, q.cookie);
-    a20_work_put64(reply + 16, q.nonce);
+    a20_work_put64(reply + 16, q.version == 2 && q.op == A20_APP_HELLO
+                                   ? (!status ? a20_app_owner_offer(o) : 0)
+                                   : q.nonce);
     a20_object_id_encode(reply + 32, 64, &o->controller);
     for (unsigned i = 0; i < 16; i++)
         reply[160 + i] = q.manifest[i];
     if (!status) {
         if (q.op == A20_APP_HELLO)
             a20_execution_encode(reply + 96, 64, &o->execution);
-        else {
+        else if (q.op != A20_APP_RELEASE) {
             a20_work_put32(reply + 24, found->state);
             a20_work_put32(reply + 28, (uint32_t)found->exit_code);
             if (a20_object_id_valid(&found->root))

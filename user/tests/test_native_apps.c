@@ -187,6 +187,17 @@ static int start_configured_daemon(void) {
         exec.calling_abi == 3   ? "3"
         : exec.calling_abi == 2 ? "2"
                                 : "1",
+        " 2\nend\n",
+        "app c7000000000000000000000000000007 /bin/native-app-exit-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
         " 2\nend\n"};
     a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
                                  .path = (uint64_t)(uintptr_t)path,
@@ -367,6 +378,110 @@ static int exited(a20_app_session_t *s, a20_app_ticket_t *ticket, int expected,
         sleep_ms(10);
     }
     return -1;
+}
+static int reusable(const uint8_t domain[16], int lose_reply) {
+    uint8_t loop[16] = {0xc6}, short_app[16] = {0xc7};
+    loop[15] = 6;
+    short_app[15] = 7;
+    a20_app_session_t session;
+    a20_app_result_t offer, result;
+    a20_app_ticket_t held, ticket, retired;
+    if (a20_app_connect_reusable(domain, 8000, &session) < 0 ||
+        a20_app_offer(&session, loop, 4000, &offer) < 0 || !offer.token ||
+        a20_app_start_offered(&session, loop, 900, offer.token, 4000, &held,
+                              &result) < 0 ||
+        result.state != A20_APP_RUNNING)
+        return -1;
+    a20_object_id_t root = result.root, controller = session.controller;
+    if (a20_app_release(&session, &held, 4000, &result) !=
+            -A20_ERR_WOULD_BLOCK ||
+        a20_app_resume(&held, 8000, &session) < 0)
+        return -1;
+    for (unsigned i = 0; i < 16; i++) {
+        if (a20_app_offer(&session, short_app, 4000, &offer) < 0 ||
+            !offer.token || offer.active != 1 || offer.occupied != 1 ||
+            a20_app_start_offered(&session, short_app, 1000 + i, offer.token,
+                                  4000, &ticket, &result) < 0 ||
+            exited(&session, &ticket, 37, &result) ||
+            a20_app_release(&session, &ticket, 4000, &result) < 0 ||
+            result.occupied != 1 || result.active != 1)
+            return -1;
+        if (!i)
+            retired = ticket;
+        if (a20_app_query(&session, &held, 4000, &result) < 0 ||
+            result.state != A20_APP_RUNNING ||
+            !a20_object_id_equal(&root, &result.root) ||
+            !a20_object_id_equal(&controller, &session.controller))
+            return -1;
+    }
+    if (a20_app_call(&session, &retired, A20_APP_START, 0, 4000, &result) !=
+            -A20_ERR_EXPIRED ||
+        a20_app_resume(&held, 8000, &session) < 0)
+        return -1;
+    /* Retiring an offered but unaccepted key fences its delayed first START. */
+    if (a20_app_offer(&session, short_app, 4000, &offer) < 0 || !offer.token)
+        return -1;
+    ticket = (a20_app_ticket_t){.controller = session.controller,
+                                .client = session.client,
+                                .version = 2,
+                                .token = offer.token,
+                                .nonce = 1100};
+    a20_memcpy(ticket.manifest, short_app, 16);
+    if (a20_app_release(&session, &ticket, 4000, &result) < 0 ||
+        a20_app_call(&session, &ticket, A20_APP_START, 0, 4000, &result) !=
+            -A20_ERR_EXPIRED ||
+        a20_app_resume(&held, 8000, &session) < 0)
+        return -1;
+    if (lose_reply) {
+        if (a20_app_offer(&session, loop, 4000, &offer) < 0 || !offer.token ||
+            a20_app_start_offered(&session, loop, 1300, offer.token, 1500,
+                                  &ticket, &result) != -A20_ERR_TIMED_OUT ||
+            a20_app_resume(&ticket, 8000, &session) < 0 ||
+            a20_app_query(&session, &ticket, 4000, &result) < 0 ||
+            result.state != A20_APP_RUNNING)
+            return -1;
+        a20_object_id_t pending_root = result.root;
+        note("APPS: reusable-start-timeout-pass original-root=live\n");
+        if (a20_app_call(&session, &ticket, A20_APP_START, 0, 4000, &result) <
+                0 ||
+            !a20_object_id_equal(&pending_root, &result.root) ||
+            a20_app_stop(&session, &ticket, 9, 4000, &result) < 0 ||
+            exited(&session, &ticket, 137, &result) ||
+            a20_app_release(&session, &ticket, 4000, &result) < 0)
+            return -1;
+    }
+    if (lose_reply) {
+        if (a20_app_offer(&session, short_app, 4000, &offer) < 0 ||
+            !offer.token ||
+            a20_app_start_offered(&session, short_app, 1200, offer.token, 4000,
+                                  &ticket, &result) < 0 ||
+            exited(&session, &ticket, 37, &result))
+            return -1;
+        note("APPS: release-drop-ready\n");
+        if (a20_app_release(&session, &ticket, 1500, &result) !=
+                -A20_ERR_TIMED_OUT ||
+            a20_app_resume(&ticket, 8000, &session) < 0 ||
+            a20_app_query(&session, &ticket, 4000, &result) !=
+                -A20_ERR_EXPIRED ||
+            a20_app_resume(&ticket, 8000, &session) < 0 ||
+            a20_app_call(&session, &ticket, A20_APP_START, 0, 4000, &result) !=
+                -A20_ERR_EXPIRED ||
+            a20_app_resume(&held, 8000, &session) < 0)
+            return -1;
+        note("APPS: release-timeout-pass old-start=expired\n");
+    }
+    if (a20_app_query(&session, &held, 4000, &result) < 0 ||
+        result.state != A20_APP_RUNNING ||
+        !a20_object_id_equal(&root, &result.root) ||
+        a20_app_stop(&session, &held, 9, 4000, &result) < 0 ||
+        exited(&session, &held, 137, &result) ||
+        a20_app_release(&session, &held, 4000, &result) < 0 || result.active ||
+        result.occupied)
+        return -1;
+    a20_app_close(&session);
+    note("APPS: recycle-pass real-exits=16 live-preserved old-start=expired "
+         "slots=8\n");
+    return 0;
 }
 static int lifecycle(const uint8_t domain[16], uint64_t nonce) {
     a20_app_session_t s;
@@ -568,6 +683,13 @@ int main(int argc, char **argv, char **envp) {
     if (cli_cancel())
         return fail("CLI signal stop actual remote exit");
     note("APPS: cli-cancel-pass remote-exit=137 active=0\n");
+    for (unsigned i = 0; i < 3; i++)
+        if (reusable(candidates[i], i == 1))
+            return fail("reusable application slots");
+    for (unsigned i = 0; i < 9; i++)
+        if (cli_run(0))
+            return fail("CLI persistent reuse");
+    note("APPS: cli-reuse-pass runs=9 no-daemon-restart\n");
     stop(daemon);
     note("APPS: PASS\n");
     return 0;
