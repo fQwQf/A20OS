@@ -94,3 +94,6 @@ MCU 使用 FAT 扇区 fixture；这一步没有执行 Java 字节码或加载 Mi
 从文件装载真实 Native 子进程、标准 CRT、argv/envp 和子程序双线程计算路径
 已继续接入，见 [42](42-native-file-spawn.md)。这使文件读取继续进入实际程序
 启动路径，仍未执行 Java 字节码或真实客户端。
+
+实际 Native 任务的公共停止、信号检查点及资源回收见
+[43-native-task-control.md](43-native-task-control.md)。
