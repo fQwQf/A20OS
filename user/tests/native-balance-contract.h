@@ -3,6 +3,9 @@
 #include "liba20rt/a20_task.h"
 #include "liba20rt/a20_execution.h"
 #include "liba20rt/a20_work.h"
+#ifdef A20_NATIVE_FILE_TEST
+#include "native-file-contract.h"
+#endif
 /* Two real user threads compute disjoint parts of one shared input. Neither
  * work thread is assigned a CPU: both admit the complete online domain. */
 static struct {
@@ -54,6 +57,20 @@ static int native_balance_work(unsigned part) {
             a20_thread_yield())
             return 6;
     }
+#ifdef A20_NATIVE_FILE_TEST
+    /* Both real workers use the same filesystem concurrently before claiming
+     * shared computation. Wait again so storage latency cannot consume all
+     * work on one worker before the other has reached the computation phase. */
+    if (native_file_contract() ||
+        a20_atomic32_store(&native_balance_shared.ready[part], 2))
+        return 8;
+    ready = 0;
+    while (ready < 2) {
+        if (a20_atomic32_load(&native_balance_shared.ready[1 - part], &ready) ||
+            a20_thread_yield())
+            return 9;
+    }
+#endif
     for (;;) {
         uint32_t job;
         a20_status_t status =

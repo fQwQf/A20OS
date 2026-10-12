@@ -249,6 +249,15 @@ MCU_SHARED_KERNEL ?= 0
 MCU_SHARED_RAM_KB ?= 1024
 MCU_SHARED_TEST ?= 0
 MCU_NATIVE_PROGRAM ?= 0
+NATIVE_FLAT_FILES ?= 0
+ifeq ($(filter $(NATIVE_FLAT_FILES),0 1),)
+$(error NATIVE_FLAT_FILES must be 0 or 1)
+endif
+ifeq ($(NATIVE_FLAT_FILES),1)
+ifneq ($(MCU_NATIVE_PROGRAM),1)
+$(error NATIVE_FLAT_FILES currently requires the native flat program profile)
+endif
+endif
 ifeq ($(filter $(MCU_NATIVE_PROGRAM),0 1),)
 $(error MCU_NATIVE_PROGRAM must be 0 or 1)
 endif
@@ -525,7 +534,7 @@ ifeq ($(MCU_SHARED_KERNEL),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-shared$(MCU_SHARED_RAM_KB)k$(if $(filter 1,$(MCU_SHARED_TEST)),-selftest,)
 endif
 ifeq ($(MCU_NATIVE_PROGRAM),1)
-BUILD_VARIANT := $(BUILD_VARIANT)-program
+BUILD_VARIANT := $(BUILD_VARIANT)-program$(if $(filter 1,$(NATIVE_FLAT_FILES)),-files,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -1287,6 +1296,9 @@ CFLAGS += -DCONFIG_MCU_SHARED_TEST
 endif
 ifeq ($(MCU_NATIVE_PROGRAM),1)
 CFLAGS += -DCONFIG_MCU_NATIVE_PROGRAM -DCONFIG_NATIVE_TASK_HANDLES_ONLY -DCONFIG_NATIVE_FLAT_THREAD
+ifeq ($(NATIVE_FLAT_FILES),1)
+CFLAGS += -DCONFIG_NATIVE_FLAT_FILES
+endif
 ifeq ($(MCU_SHARED_TEST),1)
 CFLAGS += -DMCU_TEST_ELF_PATH=\"$(BUILD_DIR)/mcu-test-program.elf\"
 endif

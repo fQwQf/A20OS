@@ -117,6 +117,15 @@ static int native_thread_contract(void) {
     a20_status_t handle = a20_thread_create(&args);
     T_CHECK(handle >= 0 && (uint32_t)handle == args.out_thread, 10);
     native_thread_shared.worker_handle = args.out_thread;
+#ifdef A20_NATIVE_FILE_TEST
+    uint8_t file_byte = 0;
+    uint64_t file_count;
+    T_CHECK(a20_hdl_read_buf(args.out_thread, &file_byte, 1, &file_count) ==
+                    -A20_ERR_INVALID_ARGUMENT &&
+                a20_hdl_write_buf(args.out_thread, &file_byte, 1,
+                                  &file_count) == -A20_ERR_INVALID_ARGUMENT,
+            37);
+#endif
     a20_handle_identity_t original_identity;
     T_CHECK(native_runtime_identity(args.out_thread, &original_identity,
                                     A20_OBJECT_LIVE),

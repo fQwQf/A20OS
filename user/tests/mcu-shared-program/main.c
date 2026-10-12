@@ -6,6 +6,9 @@
 #include "../native-memory-contract.h"
 #include "../native-domain-contract.h"
 #include "../native-thread-contract.h"
+#ifdef A20_NATIVE_FILE_TEST
+#include "../native-file-contract.h"
+#endif
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
 static const uint32_t *volatile relocated = magic;
@@ -84,6 +87,10 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     record->balance_sum =
         native_balance_shared.sum[0] + native_balance_shared.sum[1];
     CHECK(thread_result == 0, 84);
+#ifdef A20_NATIVE_FILE_TEST
+    CHECK(native_file_contract() == 0 && native_file_reopen(17) == 0, 89);
+    record->files_passed = 1;
+#endif
     record->threads_passed = 1;
     record->objects_passed = native_object_releases == 1 &&
                              !native_object_close_error &&

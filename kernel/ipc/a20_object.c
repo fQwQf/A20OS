@@ -43,6 +43,12 @@ void a20_object_ref(void *object, uint16_t type)
     }
 #endif
 #ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
+#ifdef CONFIG_NATIVE_FLAT_FILES
+    if (type == A20_OBJ_FILE) {
+        vfile_get((vfile_t *)object);
+        return;
+    }
+#endif
     /* Other object types are absent from this minimal build. */
     (void)object;
     (void)type;
@@ -105,6 +111,12 @@ void a20_object_release(void *object, uint16_t type)
     }
 #endif
 #ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
+#ifdef CONFIG_NATIVE_FLAT_FILES
+    if (type == A20_OBJ_FILE) {
+        vfs_put_file((vfile_t *)object);
+        return;
+    }
+#endif
     /* Other object types are absent from this minimal build. */
     (void)object;
     (void)type;

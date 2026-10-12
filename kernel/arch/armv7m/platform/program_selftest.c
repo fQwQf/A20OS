@@ -25,6 +25,7 @@ unsigned program_test_rejections;
     } while (0)
 
 #include "program_app_test.h"
+#include "program_file_test.h"
 
 static void reject_image(const void *elf, size_t length) {
     CHECK(mcu_program_spawn(elf, length, 8192, NULL, 0, 2) == -ENOEXEC);
@@ -50,6 +51,10 @@ static void controller(void) {
     CHECK(record->threads_passed == 1 && record->thread_parent_cpu == 1 &&
           record->thread_worker_cpu == 0);
     CHECK(record->objects_passed == 1);
+#ifdef CONFIG_NATIVE_FLAT_FILES
+    CHECK(record->files_passed == 1);
+    printf("[PROGRAM-FILES] PASS bytes=2048 fnv=60f4edc5 shared-native-io=1\n");
+#endif
     CHECK(record->balance_mask == 3 && record->balance_jobs == 32 &&
           record->balance_sum == 4359168);
     printf("[PROGRAM-BALANCE] PASS jobs=32 sum=4359168 cpu-mask=3 unpinned=1 "
@@ -184,6 +189,9 @@ void mcu_program_selftest_start(void) {
     task_t *control = proc_find_get(controller_pid);
     CHECK(control);
     app_test_init(control, length);
+#ifdef CONFIG_NATIVE_FLAT_FILES
+    program_file_test_bind();
+#endif
     program_heap_baseline = mcu_heap_available();
     app_test_launch();
     proc_publish_deferred_task(control);
