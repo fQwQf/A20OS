@@ -5,8 +5,8 @@
 #include "heap.h"
 #ifdef CONFIG_MCU_SHARED_KERNEL
 #include "shared_kernel.h"
-#define heap_lock() mcu_fabric_lock(MCU_FABRIC_HEAP_LOCK)
-#define heap_unlock(flags) mcu_fabric_unlock(MCU_FABRIC_HEAP_LOCK, flags)
+#define heap_lock() mcu_fabric_lock(A20_FABRIC_HEAP_GATE)
+#define heap_unlock(flags) mcu_fabric_unlock(A20_FABRIC_HEAP_GATE, flags)
 #else
 #define heap_lock() arch_irq_save()
 #define heap_unlock(flags) arch_irq_restore(flags)

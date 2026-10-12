@@ -43,6 +43,7 @@ class Domain:
             self.loads = [(int(p["p_paddr"]), p.data()) for p in obj.iter_segments()
                           if p["p_type"] == "PT_LOAD" and int(p["p_filesz"])]
         self.n = cpus
+        self.program_mode = "program_test_done" in self.symbols
         self.quantum = quantum
         self.rng = random.Random(seed)
         self.shared_size = self.symbols["_heap_end"] - SHARED
@@ -254,20 +255,26 @@ class Domain:
         for cycle in range(rounds):
             self.rng.shuffle(order)
             for cpu in order:
-                self.step(cpu, cycle % 4 == 0)
+                self.step(cpu, cycle % (1000 if self.program_mode else 4) == 0)
             assert not self.fault, f"fabric fault={self.fault}"
-            if ("heap=cross-cpu\r\n" in "".join(self.logs)
-                    and self.scalar("done") == 1 and sum(self.exits) == 2
+            marker = "SVC=native released=all\r\n" if self.program_mode else "heap=cross-cpu\r\n"
+            done = "program_test_done" if self.program_mode else "done"
+            if (marker in "".join(self.logs)
+                    and self.scalar(done) == 1 and sum(self.exits) == 2
                     and self.post_exit_idle[0] > 0):
                 break
         else:
             details = [(i, hex(e.reg_read(UC_ARM_REG_PC)),
                         hex(e.reg_read(UC_ARM_REG_SP))) for i,e in enumerate(self.engines)]
-            raise AssertionError(f"timeout: phase={self.scalar('phase')} {details} ticks={self.ticks} global_ticks={self.scalar('stm32_ticks', 8)} gates={self.gates} contexts={[c is not None for c in self.context]} primask={[e.reg_read(UC_ARM_REG_PRIMASK) for e in self.engines]}")
+            phase = self.scalar("program_test_done" if self.program_mode else "phase")
+            raise AssertionError(f"timeout: phase={phase} {details} ticks={self.ticks} global_ticks={self.scalar('stm32_ticks', 8)} gates={self.gates} contexts={[c is not None for c in self.context]} primask={[e.reg_read(UC_ARM_REG_PRIMASK) for e in self.engines]}")
         assert self.main_entries == [1] + [0] * (self.n - 1), self.main_entries
         assert self.secondary_entries == [0] + [1] * (self.n - 1)
-        assert self.scalar("count32") == 256
-        assert self.scalar("count64", 8) == 0x100000080
+        if self.program_mode:
+            assert self.scalar("mcu_program_live") == 0
+        else:
+            assert self.scalar("count32") == 256
+            assert self.scalar("count64", 8) == 0x100000080
         assert self.contention[0] > 0, "no interleaved atomic contention observed"
         assert self.ipi_sent > 0 and self.ipi_acked > 0
         # Reset each MCU separately. Sticky attachment must reject re-entry

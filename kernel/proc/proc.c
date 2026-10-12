@@ -672,7 +672,7 @@ task_t *proc_alloc_task_slot(void) {
 }
 
 // Allocate a kernel thread
-static int proc_alloc_kernel(void (*entry)(void), int detached) {
+static int proc_alloc_kernel(void (*entry)(void), int detached, int defer_ready) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_pid_alloc();
@@ -720,19 +720,25 @@ static int proc_alloc_kernel(void (*entry)(void), int detached) {
     t->kstack = (uintptr_t)ctx;
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
-    proc_make_ready(t);
+    if (!defer_ready)
+        proc_make_ready(t);
     return t->pid;
 }
 
 int proc_alloc(void (*entry)(void))
 {
-    return proc_alloc_kernel(entry, 0);
+    return proc_alloc_kernel(entry, 0, 0);
+}
+
+int proc_alloc_deferred(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 0, 1);
 }
 
 /* Internal workers have no user parent and are reaped by the scheduler. */
 int proc_alloc_detached(void (*entry)(void))
 {
-    return proc_alloc_kernel(entry, 1);
+    return proc_alloc_kernel(entry, 1, 0);
 }
 
 /* Allocate a user-mode task with given entry point and stack */

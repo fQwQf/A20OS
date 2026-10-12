@@ -7,6 +7,11 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
+# Execute the production common fabric driver for x86-64, AArch64 and RV64.
+.PHONY: check-shared-fabric-portability
+check-shared-fabric-portability:
+	$(PYTHON) tools/check-shared-fabric-portability.py
+
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment \
         check-trim-registry regen-trim-fragment \

@@ -48,7 +48,11 @@ SRAM、Xuanwu 的 1 MiB 外部 SRAM或原型的 1 MiB 共享 RAM足以启动客�
 
 ## 3. 需要补齐的实现
 
-现有 MCU trim 只运行内核线程；它没有完整 Java 用户态环境。需要补齐：
+最初 MCU trim 只运行内核线程；现有可选应用模式已运行 ARM 静态 PIE、PSP
+非特权应用和部分 Native 系统调用，完成休眠期间迁移，见
+[26-native-programs.md](26-native-programs.md)。它仍没有完整 Java 用户态环境。
+集群公共机制不以 STM32 为限，跨平台契约与缺口见
+[27-portable-domains.md](27-portable-domains.md)。需要继续补齐：
 
 1. 物理共享总线和仲裁器，主从固件启动及任务迁移的板上验收。
 2. NOMMU 用户态入口、系统调用、可执行文件/动态库装载或明确的原生运行时

@@ -48,6 +48,8 @@ sources = [
     "kernel/core/panic.c",
     "kernel/core/sync.c",
     "kernel/core/smp.c",
+    "kernel/core/shared_fabric.c",
+    "kernel/abi/native/sys_thread_basic.c",
     "kernel/core/klog.c",
     "kernel/core/timekeeping.c",
     "kernel/core/stack_protector.c",

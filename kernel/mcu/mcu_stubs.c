@@ -162,12 +162,23 @@ void vfs_task_fs_pins_copy(task_t *dst, const task_t *src) {
     (void)dst;
     (void)src;
 }
-/* This profile has no user mappings; never pretend a user write succeeded. */
+/* The optional shared-program profile copies only into its owned image/stack.
+ * Other MCU profiles have no user mappings. */
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+#include "program.h"
+#include "core/string.h"
+long copy_to_user(void *dst, const void *src, size_t n) {
+    if (!mcu_program_user_range(dst, n)) return -EFAULT;
+    memcpy(dst, src, n);
+    return 0;
+}
+#else
 long copy_to_user(void *dst, const void *src, size_t n) {
     (void)dst;
     (void)src;
     return n ? -EFAULT : 0;
 }
+#endif
 void kallsyms_print(uint64_t addr) {
     printf("0x%llx", (unsigned long long)addr);
 }
