@@ -58,4 +58,12 @@ int a20_fabric_gate_lock(const a20_fabric_t *f, unsigned gate,
 int a20_fabric_gate_unlock(const a20_fabric_t *f, unsigned gate,
                            uintptr_t irq_token);
 void a20_fabric_latch_fault(const a20_fabric_t *f, uint16_t code);
+
+#ifdef CONFIG_SHARED_FABRIC_ATOMICS
+/* Binding hooks for the portable GCC atomic runtime. The current CPU must
+ * select its own port; no heap, locks or compiler atomics inside these hooks.
+ * On a fenced domain the stop hook must never resume shared-memory access. */
+const a20_fabric_t *arch_shared_fabric(void);
+void arch_shared_fabric_stop(void) __attribute__((noreturn));
+#endif
 #endif

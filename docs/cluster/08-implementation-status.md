@@ -543,3 +543,23 @@ RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺
 本阶段提交对应归档为 `evidence/portable-domain-<commit>/`。
 细节见 [26-native-programs.md](26-native-programs.md) 和
 [27-portable-domains.md](27-portable-domains.md)。整体目标保持未完成。
+
+## 28. 四 ISA 共用硬件门原子运行库
+
+2026-10-12，将 ARMv7-M 的原子 libcall 实现移至 `core/fabric_atomics.c`，
+由 `CONFIG_SHARED_FABRIC_ATOMICS` 选择。平台只绑定当前 CPU 的 fabric 与
+不可返回的故障 stop hook；IRQ token 全程为 `uintptr_t`。默认一致性 SMP
+原子路径保持原样，ARM 共享固件实际改用这个公共实现。
+
+同一测试与生产驱动/原子库在 x86-64、AArch64、RV64、RV32 执行通过。
+包含 1/2/4/8 字节原子读写、CAS、交换、算术/位操作、失败时 expected 更新、
+回绕、64 位进位，以及每个端口 46 个实际 GCC libcall 的门屏障计数。
+四 ISA 的独立故障进程也均证明：fabric 已故障时先恢复 IRQ token 并 stop，
+不会执行随后对未映射地址的 atomic load。ARM/RV32 freestanding 编译通过。
+
+实际 ARM 应用与 RTL 迁移测试、旧双 CPU 内核线程及三 CPU 指令回归通过；
+默认 STM32 QEMU 固件仍与归档逐字节一致，RV64 双 CPU 内核再次构建通过。
+报告仍使用 `fabric-portability/`、`shared-program/` 与 `shared-kernel/`。
+本阶段证据单独归档为 `evidence/portable-atomics-<commit>/`。
+RV32 的 Linux syscall shim 只是测试工具，不是一个新 MCU 板级端口。
+树莓派、非 ARM 多芯片板级适配、应用同步、JVM/客户端和物理验证仍待完成。

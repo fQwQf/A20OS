@@ -49,6 +49,13 @@ static const a20_fabric_io_t bus_io = {
 };
 static const a20_fabric_t fabric = {.io = &bus_io};
 
+const a20_fabric_t *arch_shared_fabric(void) {
+    return &fabric;
+}
+void arch_shared_fabric_stop(void) {
+    arch_halt();
+}
+
 /* No shared variables, compiler atomics, or kernel locks may be used before
  * fabric CLAIM succeeds. Registers are 16-bit transactions on the FSMC bus. */
 static void fabric_fault(uint16_t code) __attribute__((noreturn));
