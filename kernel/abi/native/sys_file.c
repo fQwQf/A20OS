@@ -210,7 +210,7 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
         rights |=
             A20_RIGHT_EXEC; /* exec permission is gated by file mode, not open flags */
 #ifdef CONFIG_NATIVE_FLAT_FILES
-    rights &= A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_SEEK;
+    rights &= A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_EXEC;
 #endif
     if (kargs->rights != 0)
         rights = kargs->rights & rights; /* user can only restrict */

@@ -44,6 +44,7 @@ class Domain:
                           if p["p_type"] == "PT_LOAD" and int(p["p_filesz"])]
         self.n = cpus
         self.program_mode = "program_test_done" in self.symbols
+        self.expected_exits = (11 if "sys_a20_task_spawn" in self.symbols else 5) if self.program_mode else 2
         self.quantum = quantum
         self.rng = random.Random(seed)
         self.shared_size = self.symbols["_heap_end"] - SHARED
@@ -121,7 +122,7 @@ class Domain:
         self.exits[cpu] += 1
 
     def idle_hook(self, uc, address, size, cpu):
-        if sum(self.exits) == (5 if self.program_mode else 2):
+        if sum(self.exits) == self.expected_exits:
             self.post_exit_idle[cpu] += 1
 
     def fabric_read(self, uc, offset, size, cpu):
@@ -260,7 +261,7 @@ class Domain:
             marker = "SVC=native released=all\r\n" if self.program_mode else "heap=cross-cpu\r\n"
             done = "program_test_done" if self.program_mode else "done"
             if (marker in "".join(self.logs)
-                    and self.scalar(done) == 1 and sum(self.exits) == (5 if self.program_mode else 2)
+                    and self.scalar(done) == 1 and sum(self.exits) == self.expected_exits
                     and self.post_exit_idle[0] > 0):
                 break
         else:

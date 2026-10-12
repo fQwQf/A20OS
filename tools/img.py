@@ -98,6 +98,10 @@ def build_fat32(a) -> int:
             continue
         mcopy(str(img), str(f), f"::/{f.name}")
 
+    # Common 8.3 executable path also supported by the flat FAT profile.
+    spawn = user_build / ("native-spawn-" + a.tag)
+    if spawn.is_file():
+        mcopy(str(img), str(spawn), "::/SPAWN.ELF")
     # sh and bash are the mksh binary, as symlinks.
     for alias in ("sh", "bash"):
         mcopy(str(img), str(user_build / "mksh"), f"::/{alias}")

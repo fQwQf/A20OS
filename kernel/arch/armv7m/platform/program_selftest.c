@@ -52,7 +52,8 @@ static void controller(void) {
           record->thread_worker_cpu == 0);
     CHECK(record->objects_passed == 1);
 #ifdef CONFIG_NATIVE_FLAT_FILES
-    CHECK(record->files_passed == 1);
+    CHECK(record->files_passed == 1 && record->spawn_passed == 1);
+    printf("[PROGRAM-SPAWN] PASS children=2 exit=37 args=4 env=2 work=32\n");
     printf("[PROGRAM-FILES] PASS bytes=2048 fnv=60f4edc5 shared-native-io=1\n");
 #endif
     CHECK(record->balance_mask == 3 && record->balance_jobs == 32 &&
