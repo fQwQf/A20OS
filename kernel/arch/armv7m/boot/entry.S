@@ -36,6 +36,9 @@ Reset_Handler:
      * A physical reset loads MSP from vector[0].  Some low-cost CMSIS-DAP
      * probes resume by changing PC only, so establish MSP here as well.
      */
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    cpsid i
+#endif
     ldr sp, =_stack_top
     ldr r0, =_data_load
     ldr r1, =_data_start
@@ -74,7 +77,11 @@ Reset_Handler:
     str r0, [r1]
     dsb
     isb
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    bl armv7m_shared_reset
+#else
     bl kernel_main
+#endif
 5:
     wfi
     b 5b
@@ -126,9 +133,18 @@ SVC_Handler:
     ite eq
     mrseq r0, msp
     mrsne r0, psp
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    /* Keep AAPCS 8-byte stack alignment at the C exception hook. */
+    push {r3, lr}
+#else
     push {lr}
+#endif
     bl armv7m_svc_handler
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    pop {r3, pc}
+#else
     pop {pc}
+#endif
 
     .thumb_func
 PendSV_Handler:
@@ -141,9 +157,18 @@ PendSV_Handler:
     ite eq
     mrseq r0, msp
     mrsne r0, psp
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    /* Keep AAPCS 8-byte stack alignment at the C exception hook. */
+    push {r3, lr}
+#else
     push {lr}
+#endif
     bl armv7m_pendsv_prepare
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    pop {r3, lr}
+#else
     pop {lr}
+#endif
     bx lr
 
     .global armv7m_preempt_trampoline
@@ -160,15 +185,33 @@ armv7m_preempt_trampoline:
 
     .thumb_func
 SysTick_Handler:
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    /* Keep AAPCS 8-byte stack alignment at the C exception hook. */
+    push {r3, lr}
+#else
     push {lr}
+#endif
     bl armv7m_systick_handler
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    pop {r3, pc}
+#else
     pop {pc}
+#endif
 
     .thumb_func
 External_IRQHandler:
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    /* Keep AAPCS 8-byte stack alignment at the C exception hook. */
+    push {r3, lr}
+#else
     push {lr}
+#endif
     bl armv7m_external_irq_handler
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    pop {r3, pc}
+#else
     pop {pc}
+#endif
 
     .global __switch
     .thumb_func
@@ -200,6 +243,10 @@ __switch:
     str r2, [r1, #8]           /* ctx->tp (current task pointer) */
     mrs r4, control
     str r4, [r1, #12]          /* ctx->control */
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    mrs r4, primask
+    str r4, [r1, #20]          /* ctx->status: saved local IRQ mask */
+#endif
 
     /*
      * Restore the next task's context.  r0 still holds next->kstack
@@ -219,6 +266,10 @@ __switch:
 
     /* Switch to the next task's stack and resume. */
     mov sp, r1
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    ldr r0, [r0, #20]          /* next ctx->status */
+    msr primask, r0
+#endif
     bx r2
 
     .global user_trap_return

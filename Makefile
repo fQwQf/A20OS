@@ -242,6 +242,40 @@ STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
 # Dedicated raw USART2/3 cluster firmware; 0 preserves the peripheral image.
 STM32_CLUSTER_PORT ?= 0
+# Experimental native shared-RAM kernel; requires the documented fabric ABI.
+MCU_SHARED_KERNEL ?= 0
+MCU_SHARED_RAM_KB ?= 1024
+MCU_SHARED_TEST ?= 0
+ifeq ($(filter $(MCU_SHARED_KERNEL),0 1),)
+$(error MCU_SHARED_KERNEL must be 0 or 1)
+endif
+ifeq ($(filter $(MCU_SHARED_TEST),0 1),)
+$(error MCU_SHARED_TEST must be 0 or 1)
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+ifneq ($(ARCH),armv7m)
+$(error MCU_SHARED_KERNEL currently requires ARCH=armv7m)
+endif
+ifeq ($(filter $(NR_CPUS),2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+$(error MCU_SHARED_KERNEL requires NR_CPUS=2..16)
+endif
+ifneq ($(STM32_CLUSTER_PORT),0)
+$(error MCU_SHARED_KERNEL requires STM32_CLUSTER_PORT=0)
+endif
+ifeq ($(STM32_QEMU),1)
+$(error MCU_SHARED_KERNEL requires the shared-memory fabric, absent in stm32vldiscovery)
+endif
+ifeq ($(STM32_XUANWU),1)
+$(error MCU_SHARED_KERNEL uses a custom fabric board, not the Xuanwu SRAM wiring)
+endif
+ifeq ($(filter $(MCU_SHARED_RAM_KB),64 128 256 512 1024),)
+$(error MCU_SHARED_RAM_KB must be 64, 128, 256, 512 or 1024 for the current FSMC address-pin map)
+endif
+else
+ifneq ($(MCU_SHARED_TEST),0)
+$(error MCU_SHARED_TEST requires MCU_SHARED_KERNEL=1)
+endif
+endif
 # Derive the artifact dirs from BUILD_VARIANT (f<flash>k-r<ram>k[-qemu]) so a
 # change to STM32_FLASH_KB/RAM_KB/STM32_QEMU never desyncs the hardcoded paths.
 STM32_XUANWU_BUILD_DIR = $(BUILD_DIR)
@@ -257,6 +291,11 @@ STM32_RAM_KB ?= 20
 STM32_XUANWU ?= 0
 else
 BOARD ?= qemu-virt-$(ARCH)
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+ifneq ($(BOARD),stm32f103)
+$(error MCU_SHARED_KERNEL currently requires BOARD=stm32f103 with custom fabric wiring)
+endif
 endif
 
 # MCU-class builds (components/trim.toml [profile.mcu]) replace the whole
@@ -467,6 +506,9 @@ BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)$(if $(fi
 endif
 ifeq ($(CLUSTER_UART_COM2),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-clcom2
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shared$(MCU_SHARED_RAM_KB)k$(if $(filter 1,$(MCU_SHARED_TEST)),-selftest,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -1195,6 +1237,14 @@ CFLAGS += -DARCH_ELF_MACHINE=$(ELF_MACHINE_$(ARCH)) \
 endif
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
+ifeq ($(MCU_SHARED_KERNEL),1)
+# Distinct physical chips do not share a Cortex-M exclusive monitor.
+# Every GCC atomic operation goes through the fabric semaphore implementation.
+CFLAGS += -DCONFIG_MCU_SHARED_KERNEL -fno-inline-atomics -mno-unaligned-access
+ifeq ($(MCU_SHARED_TEST),1)
+CFLAGS += -DCONFIG_MCU_SHARED_TEST
+endif
+endif
 ifneq ($(shell printf '%s' '$(STM32_BT_NAME)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{1,32}$$' && echo yes),yes)
 $(error STM32_BT_NAME must contain 1-32 ASCII letters, digits, '_' or '-')
 endif
@@ -1314,11 +1364,18 @@ else
 LDSCRIPT = $(BOARD_LDSCRIPT)
 endif
 
+ifeq ($(MCU_SHARED_KERNEL),1)
+LDSCRIPT = $(KERNEL_DIR)/arch/armv7m/boot/shared.ld
+endif
+
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(LDSCRIPT) $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
 ifeq ($(ARCH),armv7m)
 LDFLAGS += -Wl,--defsym=CLUSTER_NVRAM_LENGTH=$(if $(filter 1,$(STM32_QEMU)),0,$(if $(filter 16 32 64 128,$(STM32_FLASH_KB)),2,4))K \
            -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
            -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
+ifeq ($(MCU_SHARED_KERNEL),1)
+LDFLAGS += -Wl,--defsym=SHARED_LENGTH=$(MCU_SHARED_RAM_KB)K
+endif
 endif
 
 # ================================================================

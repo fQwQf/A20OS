@@ -59,3 +59,25 @@ run-stm32f103-qemu:
 
 run-stm32f103-qemu-impl:
 	@$(PYTHON) tools/stm32.py qemu-run --kernel-bin "$(STM32_QEMU_BIN)"
+
+# Full kernel functional instruction test. Python requires unicorn/pyelftools;
+# this target does not claim stm32vldiscovery implements the external fabric.
+.PHONY: check-mcu-shared-kernel
+check-mcu-shared-kernel:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 _check-mcu-shared-kernel
+
+.PHONY: _check-mcu-shared-kernel
+_check-mcu-shared-kernel: kernel-only
+	$(PYTHON) tools/check-mcu-shared-kernel.py \
+		$(BUILD_DIR)/kernel.elf \
+		--report .kernel-build/cluster/shared-kernel/report.json
+
+.PHONY: check-mcu-shared-fabric
+check-mcu-shared-fabric:
+	verilator --binary --timing --top-module a20_fabric_tb \
+		-Mdir .kernel-build/cluster/shared-fabric-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fabric_tb.sv
+	.kernel-build/cluster/shared-fabric-verilator/Va20_fabric_tb

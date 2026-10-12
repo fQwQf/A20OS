@@ -418,3 +418,51 @@ UDP 64 B 一万次 CALL 的 p50 为 3.136 ms，本次低于 5 ms；64 KiB 一千
 顺序 CALL 为 1.575 MB/s，低于上一历史测量，原因未定位，不能声称普遍提速。
 两阶段业务总执行 11200 次且回复逐字节一致。完整数字见
 [21-performance.md](21-performance.md)。
+
+## 25. 多物理 MCU 原生共享内存内核原型
+
+2026-10-12，按用户允许增加共享 RAM 和硬件仲裁的方向，新增可选的
+`MCU_SHARED_KERNEL=1`。每个 MCU 执行同一原生固件，各有私有启动栈和
+当前任务指针；普通任务表、PID、运行队列、堆和任务栈只有一份，直接放在
+共享地址空间。复用服务器的 SMP 接口、调度器和任务生命周期，第一版使用
+同 ISA、静态拓扑、协作调度；未设置该选项时保留现有 MCU 构建路径。
+不以性能作为这个功能里程碑的验收条件。
+
+已交付独立共享链接布局、唯一冷启动初始化、从核释放、硬件门保护的
+1/2/4/8 字节原子操作和共享堆、统一时间与周期 IPI。测试固件通过真实
+Park/Wake 和 affinity 接口将同一 PID 的线程从 CPU1 迁到 CPU0；迁移后
+原栈内容、原堆指针保持有效，并可在另一 CPU 释放分配。上下文切换保存
+PRIMASK，异常调用 C 时保持栈对齐。单芯片复位被 sticky attach 拒绝，
+不能清除运行中共享状态；恢复仍要求整域复位。
+
+两个、三个独立 Cortex-M3 指令引擎执行实际编译 ELF 通过验收；双 CPU
+还通过每次只执行一条指令的交错。检查覆盖唯一主入口、全部从核上线、
+真实原子门争用、256 次累加和 64 位进位、迁移后定时唤醒、IPI、两个任务
+退出后主核回到 idle，以及错误 MAGIC/拓扑/早期异常拒绝。移除固件副本
+中 PRIMASK 恢复指令后测试失败，负向对照有效。最终 ELF 未含跨芯片不适用
+的 LDREX/STREX。测试器不修改任务状态或替换调度算法，但它仍是指令模拟，
+不是物理 MCU 运行证据。
+
+新增 `hardware/shared-mcu/a20_fabric.sv` 事务核心，三端口 Verilator 测试
+通过启动权、attached/release、IPI、互斥门、RAM/控制操作完成顺序、字节
+通道、错误所有者释放、故障后写屏蔽和整域复位，RTL lint 无警告。
+尚缺 FSMC 异步捕获/CDC 桥、实际 RAM 后端、FPGA 引脚/时序闭合和物理板
+验证；RTL 与固件外设模型分开测试，尚无联合仿真证据。当前 FSMC 接线
+只允许至多 1 MiB，未连接 NWAIT，不能直接当作 Minecraft 所需硬件。
+
+回归：默认 MCU、Xuanwu、USART2/3 叶子、STM32 QEMU 和服务器双 CPU
+`ABI=both` 构建通过；默认 STM32 QEMU 到达原 idle probe，服务器 QEMU
+报告 2/2 CPU 上线、系统就绪并正常关机。24 项集群宿主门禁、trim 注册、
+SMP 边界和 11 项新配置拒绝检查通过。全仓格式门禁仍有 114 个既有漂移
+文件，新加 C/H 文件已格式化；本次尝试服务器 `ABI=native` 仍在原有
+`sys_core.c` 到 `sys_execve` 链接处失败，不能计为通过。
+
+可重跑入口是 `make check-mcu-shared-kernel` 和
+`make check-mcu-shared-fabric`，报告位于
+`.kernel-build/cluster/shared-kernel/`；提交对应的固件、报告和日志归档在
+`.kernel-build/cluster/evidence/native-shared-<commit>/`。
+完整硬件契约、构建方法与限制见
+[25-native-shared-kernel.md](25-native-shared-kernel.md)。
+后续仍需真实多 MCU 验收、用户程序执行、设备/IRQ 所有权、JVM 和图形输入
+栈；当前没有启动真实 Minecraft Java 客户端，目标尚未完成，应用验收见
+[24-single-system-minecraft.md](24-single-system-minecraft.md)。

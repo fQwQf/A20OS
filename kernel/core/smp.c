@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_SHARED_KERNEL)
 #include "core/smp.h"
 #include "core/stdio.h"
 #include "core/timer.h"
@@ -337,3 +338,5 @@ void smp_secondary_init(unsigned cpu_id)
     timer_init();
     smp_cpu_mark_online(cpu_id);
 }
+
+#endif

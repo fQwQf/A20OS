@@ -1,12 +1,13 @@
 #include "drivers/char/uart.h"
 #include "console.h"
 #include "core/arch.h"
+#include "shared_kernel.h"
 
 #define MCU_UART_RX_SIZE 128U
 
-static volatile unsigned uart_rx_head;
-static volatile unsigned uart_rx_tail;
-static volatile char uart_rx_buffer[MCU_UART_RX_SIZE];
+static volatile unsigned uart_rx_head MCU_PRIVATE_BSS;
+static volatile unsigned uart_rx_tail MCU_PRIVATE_BSS;
+static volatile char uart_rx_buffer[MCU_UART_RX_SIZE] MCU_PRIVATE_BSS;
 
 void uart_init(void) {
     uart_rx_head = 0;
