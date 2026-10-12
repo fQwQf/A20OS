@@ -1,5 +1,6 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
+#include "../../kernel/include/uapi/a20/cluster_app_manifest.h"
 static volatile uint32_t limit = 1000, work;
 int main(int argc, char **argv, char **envp) {
     (void)argc;
@@ -11,7 +12,7 @@ int main(int argc, char **argv, char **envp) {
     if (sum != 500500)
         return 91;
     a20_start_info_t *si = a20_get_start_info();
-    if (!si || argc != 1 || !argv || !argv[0])
+    if (!si || (argc != 1 && argc != 4) || !argv || !argv[0])
         return 92;
     a20_path_open_args_t file = {.dir = si->root_dir,
                                  .path = (uint64_t)(uintptr_t)argv[0],
@@ -21,6 +22,15 @@ int main(int argc, char **argv, char **envp) {
         return 93;
     if (a20_hdl_close(file.out_handle) < 0)
         return 94;
+    if (argc == 4) {
+        if (!a20_app_text_equal(argv[1], "hello world") || argv[2][0] ||
+            !a20_app_text_equal(argv[3], "多架构") || argv[4] || !envp ||
+            !envp[0] || !a20_app_text_equal(envp[0], "A20_TEST=cluster") ||
+            !envp[1] || !a20_app_text_equal(envp[1], "A20_EMPTY=") || envp[2])
+            return 95;
+        a20_hdl_write_buf(si->stdout_handle, "APP-ARGS: PASS argc=4 envc=2\n",
+                          29, 0);
+    }
     if (si && si->stdout_handle != A20_HANDLE_NULL)
         a20_hdl_write_buf(si->stdout_handle, "APP-WORK: PASS sum=500500\n", 26,
                           0);

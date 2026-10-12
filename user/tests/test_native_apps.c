@@ -159,11 +159,161 @@ static int start_daemon(void) {
     }
     return -1;
 }
+static int start_configured_daemon(void) {
+    static const char path[] = "/tmp/a20-apps.manifest";
+    a20_execution_info_t exec;
+    if (a20_execution_info(&exec) < 0)
+        return -1;
+    const char *chunks[] = {
+        "A20APPS1\napp c5000000000000000000000000000005 /bin/native-app-exit-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\narg hello world\narg \narg 多架构\nenv A20_TEST=cluster\nenv "
+        "A20_EMPTY=\nend\n",
+        "app c6000000000000000000000000000006 /bin/native-app-child-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\nend\n"};
+    a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
+                                 .path = (uint64_t)(uintptr_t)path,
+                                 .path_len = sizeof(path) - 1,
+                                 .rights = A20_RIGHT_READ | A20_RIGHT_WRITE,
+                                 .flags = A20_PATH_OPEN_CREATE |
+                                          A20_PATH_OPEN_RDWR |
+                                          A20_PATH_OPEN_TRUNC,
+                                 .mode = 0600};
+    if (a20_path_open(&file) < 0)
+        return -1;
+    for (unsigned i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+        uint64_t wrote = 0;
+        unsigned len = a20_strlen(chunks[i]);
+        if (a20_hdl_write_buf(file.out_handle, chunks[i], len, &wrote) < 0 ||
+            wrote != len) {
+            a20_hdl_close(file.out_handle);
+            return -1;
+        }
+    }
+    a20_hdl_close(file.out_handle);
+    stop(daemon);
+    daemon = A20_HANDLE_NULL;
+    const char *argv[] = {"/bin/appd-" A20_CLUSTER_ARCH_TAG, "--manifest", path,
+                          0};
+    if (spawn(argv[0], argv, 3, &daemon))
+        return -1;
+    for (unsigned i = 0; i < 2000; i++) {
+        a20_app_session_t session;
+        if (a20_app_connect(local_domain, 100, &session) >= 0) {
+            a20_app_close(&session);
+            return 0;
+        }
+        sleep_ms(10);
+    }
+    return -1;
+}
+static int cli_run(unsigned target) {
+    const char *argv[] = {"/bin/appctl-run-" A20_CLUSTER_ARCH_TAG,
+                          "c5000000000000000000000000000005",
+                          "700",
+                          "30000",
+                          identities[target],
+                          0};
+    a20_handle_t task;
+    if (spawn(argv[0], argv, 5, &task))
+        return -1;
+    a20_task_status_t status = {.size = sizeof(status), .version = 1};
+    for (unsigned i = 0; i < 4500; i++) {
+        a20_status_t result =
+            a20_task_wait(task, A20_TASK_WAIT_NONBLOCK, &status);
+        if (result >= 0) {
+            a20_hdl_close(task);
+            return status.exit_code == 37 ? 0 : -1;
+        }
+        if (result != -A20_ERR_WOULD_BLOCK)
+            break;
+        sleep_ms(10);
+    }
+    stop(task);
+    return -1;
+}
+static int cli_cancel(void) {
+    const char *argv[] = {"/bin/appctl-run-" A20_CLUSTER_ARCH_TAG,
+                          "c6000000000000000000000000000006",
+                          "701",
+                          "30000",
+                          identities[1],
+                          0};
+    a20_handle_t task;
+    if (spawn(argv[0], argv, 5, &task))
+        return -1;
+    a20_node_id_t node;
+    a20_node_id_parse_hex(identities[1], &node);
+    uint8_t manifest[16] = {0xc6};
+    manifest[15] = 6;
+    int started = 0;
+    for (unsigned i = 0; i < 200; i++) {
+        a20_app_session_t session;
+        a20_app_result_t offer;
+        if (a20_app_connect(node.bytes, 4000, &session) >= 0) {
+            int ok = a20_app_offer(&session, manifest, 4000, &offer) >= 0 &&
+                     offer.active == 1;
+            a20_app_close(&session);
+            if (ok) {
+                started = 1;
+                break;
+            }
+        }
+        sleep_ms(10);
+    }
+    if (!started || a20_task_kill(task, 15) < 0) {
+        stop(task);
+        return -1;
+    }
+    int exited = 0;
+    for (unsigned i = 0; i < 4500; i++) {
+        a20_task_status_t status = {.size = sizeof(status), .version = 1};
+        a20_status_t result =
+            a20_task_wait(task, A20_TASK_WAIT_NONBLOCK, &status);
+        if (result >= 0) {
+            exited = status.exit_code == 137;
+            break;
+        }
+        if (result != -A20_ERR_WOULD_BLOCK)
+            break;
+        sleep_ms(10);
+    }
+    if (!exited) {
+        stop(task);
+        return -1;
+    }
+    a20_hdl_close(task);
+    a20_app_session_t session;
+    a20_app_result_t offer;
+    if (a20_app_connect(node.bytes, 8000, &session) < 0)
+        return -1;
+    int ok =
+        a20_app_offer(&session, manifest, 4000, &offer) >= 0 && !offer.active;
+    a20_app_close(&session);
+    return ok ? 0 : -1;
+}
 static int control(void *ctx, const uint8_t *q, uint32_t n, uint8_t *reply,
                    uint32_t cap) {
     (void)ctx;
     if (n != 4 || cap < 4 || q[0] != 'A' || q[1] != 'T' || q[2] != 1 ||
-        q[3] > 2 || !q[3])
+        q[3] > 3 || !q[3])
         return -1;
     if (q[3] == 2) {
         stop(daemon);
@@ -171,6 +321,8 @@ static int control(void *ctx, const uint8_t *q, uint32_t n, uint8_t *reply,
         if (start_daemon())
             return -1;
     }
+    if (q[3] == 3 && start_configured_daemon())
+        return -1;
     a20_memcpy(reply, q, 4);
     return 4;
 }
@@ -407,6 +559,15 @@ int main(int argc, char **argv, char **envp) {
     if (peer(1, 1) || a20_app_resume(&ticket, 8000, &s) != -A20_ERR_EXPIRED ||
         lifecycle(b, 201))
         return fail("kernel reboot");
+    if (start_configured_daemon() || peer(1, 3) || peer(2, 3))
+        return fail("manifest deployment");
+    for (unsigned i = 0; i < 3; i++)
+        if (cli_run(i))
+            return fail("CLI run args/env/exit");
+    note("APPS: cli-pass real-args-env exit=37 nodes=3\n");
+    if (cli_cancel())
+        return fail("CLI signal stop actual remote exit");
+    note("APPS: cli-cancel-pass remote-exit=137 active=0\n");
     stop(daemon);
     note("APPS: PASS\n");
     return 0;

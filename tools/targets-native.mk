@@ -732,3 +732,6 @@ $(NATIVE_APP_CHILD_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NAT
 
 $(NATIVE_APP_EXIT_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,-DAPP_EXIT=37 user/tests/test_native_app_child.c,$@)
+
+$(NATIVE_APPCTL_BIN): user/svc/appctl_run.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/appctl_run.c,$@)

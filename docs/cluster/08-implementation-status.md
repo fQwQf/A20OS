@@ -720,3 +720,6 @@ Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进�
 三种服务器 ISA 联合运行实际程序；MCU 测试引导使用同一 owner 调用真实装载器。
 接口、复现命令与按程序数量均衡的准确边界见 [37](37-application-execution.md)。
 物理多板、MCU 常规网络启动服务、完整应用资源代理和 Minecraft 仍待实现。
+
+普通应用部署补充了带 argv/envp 的清单文件和实际 `appctl-run` 命令，复用
+原应用 owner 与按活动数分配接口，见 [38](38-application-launch-inputs.md)。
