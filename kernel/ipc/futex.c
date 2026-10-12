@@ -12,6 +12,9 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#ifdef CONFIG_FLAT_USER_MEMORY
+#include "mm/flat_user.h"
+#endif
 #include "proc/proc_internal.h"
 #include <stdint.h>
 #include "mm/slab.h"
@@ -192,12 +195,18 @@ static volatile int *futex_user_word_locked(task_t *task, int *uaddr,
     if (!task || !uaddr)
         return NULL;
 #ifdef CONFIG_NOMMU
-    /* Flat programs own immutable image/stack allocations for the lifetime
-     * of their executing task. There is no address-space remap operation.
-     * Validate the complete word before the non-faulting atomic recheck. */
-    int probe;
-    if (copy_from_user(&probe, uaddr, sizeof(probe)) < 0)
-        return NULL;
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user) {
+        if (!a20_flat_range_locked(task->flat_user, (uintptr_t)uaddr,
+                                   sizeof(*uaddr)))
+            return NULL;
+    } else
+#endif
+    {
+        int probe;
+        if (copy_from_user(&probe, uaddr, sizeof(probe)) < 0)
+            return NULL;
+    }
     *pkey = (uintptr_t)uaddr;
     return uaddr;
 #else
@@ -251,6 +260,10 @@ static void futex_requeue_rekey(wait_queue_entry_t *entry, void *arg)
 
 static uint64_t futex_wait_mapping_lock(task_t *task) {
 #ifdef CONFIG_NOMMU
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user)
+        return spin_lock_irqsave(&task->flat_user->lock);
+#endif
     if (!task->mm)
         return 0;
 #endif
@@ -259,6 +272,12 @@ static uint64_t futex_wait_mapping_lock(task_t *task) {
 
 static void futex_wait_mapping_unlock(task_t *task, uint64_t flags) {
 #ifdef CONFIG_NOMMU
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user) {
+        spin_unlock_irqrestore(&task->flat_user->lock, flags);
+        return;
+    }
+#endif
     if (!task->mm)
         return;
 #endif
@@ -341,9 +360,8 @@ int futex_atomic_user32(uint32_t *uaddr, unsigned operation, uint32_t expected,
  * matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
  */
 /* ticks == 0 waits indefinitely. */
-int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
-                           uint32_t bitset, int private)
-{
+static int futex_wait_ticks_pinned(int *uaddr, int expected, uint64_t ticks,
+                                   uint32_t bitset, int private) {
     if (!uaddr) return -EFAULT;
     if ((uintptr_t)uaddr & (sizeof(int) - 1)) return -EINVAL;
     if (bitset == 0) return -EINVAL;
@@ -450,6 +468,27 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
     if (reason == PROC_WAKE_TIMEOUT)
         return -ETIMEDOUT;
     return 0;
+}
+
+/* Dynamic flat words retain their allocation throughout wait admission,
+ * sleep, wake and unlink. Unmap returns BUSY instead of reusing a live key. */
+int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
+                          uint32_t bitset, int private) {
+#ifdef CONFIG_FLAT_USER_MEMORY
+    task_t *task = proc_current();
+    if (task && task->flat_user && uaddr && !((uintptr_t)uaddr & 3U) &&
+        bitset) {
+        a20_flat_region_t *lease =
+            a20_flat_pin(task->flat_user, (uintptr_t)uaddr, sizeof(*uaddr));
+        if (!lease)
+            return -EFAULT;
+        int result =
+            futex_wait_ticks_pinned(uaddr, expected, ticks, bitset, private);
+        a20_flat_unpin(task->flat_user, lease);
+        return result;
+    }
+#endif
+    return futex_wait_ticks_pinned(uaddr, expected, ticks, bitset, private);
 }
 
 int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)

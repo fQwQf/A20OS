@@ -1362,6 +1362,11 @@ endif
 
 ifeq ($(NOMMU),1)
 CFLAGS += -DCONFIG_NOMMU
+# Flat user ownership is a memory-model capability. Tiny firmware without
+# userspace retains its original task layout and memory budget.
+ifneq ($(filter-out mcu,$(PROFILE))$(filter 1,$(MCU_NATIVE_PROGRAM)),)
+CFLAGS += -DCONFIG_FLAT_USER_MEMORY
+endif
 endif
 
 # Synthetic driver lifecycle test (disabled by default).

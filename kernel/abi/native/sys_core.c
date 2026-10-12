@@ -5,7 +5,6 @@
  *   abi_info, feature_test,
  *   handle_close/dup/query/replace/close_many/seek,
  *   task_exit, task_wait,
- *   vm_alloc, vm_unmap,
  *   path_open, handle_read, handle_write, handle_stat,
  *   clock_get.
  *
@@ -1012,38 +1011,6 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
             return -A20_ERR_FAULT;
     }
     return A20_OK;
-}
-
-/* ===== Memory (0x0300) ===== */
-
-int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
-{
-    a20_vm_alloc_args_t *uargs = (a20_vm_alloc_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs) return -A20_ERR_FAULT;
-
-    a20_vm_alloc_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
-
-    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
-
-    uint64_t addr = proc_mmap(kargs.addr_hint, (size_t)kargs.length,
-                              (int)kargs.prot, 0x20 /* MAP_ANONYMOUS */,
-                              -1, 0);
-    if (addr == 0 || mm_addr_is_error((vaddr_t)addr))
-        return -A20_ERR_NO_MEMORY;
-
-    kargs.out_addr = addr;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-    return A20_OK;
-}
-
-int64_t sys_a20_vm_unmap(const a20_syscall_args_t *args)
-{
-    uint64_t addr = A20_ARG(0);
-    uint64_t len  = A20_ARG(1);
-    if (len == 0) return -A20_ERR_INVALID_ARGUMENT;
-    return proc_munmap(addr, (size_t)len);
 }
 
 /* ===== Path / Filesystem (0x0400) ===== */

@@ -180,8 +180,10 @@ def main():
         domain = ProgramDomain(args.elf, bus, args.cpus, args.seed)
         result = domain.run(args.rounds, reset_cpus=[1] if bus else None)
         assert all(n > 0 for n in domain.user_instructions[:2])
-        assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x7fff} <= domain.syscall_numbers
+        assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers
         assert domain.scalar("program_test_rejections") == 8
+        assert any("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free" in log for log in domain.logs)
+        assert any("[PROGRAM-HEAP] PASS checks=20 wait-pinned=1 cross-cpu=1" in log for log in domain.logs)
         result.update(user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
                       exception_returns=domain.returns, native_syscalls=sorted(domain.syscall_numbers),
                       seed=args.seed, quantum=1, elf_rejections=8,

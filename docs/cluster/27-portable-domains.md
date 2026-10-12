@@ -12,6 +12,7 @@ STM32 是一个硬件适配与验证样本，不是公共集群规范。
 | 一个原生执行域 | 同一任务表/PID/运行队列，Park/Wake、亲和性、任务退出 | 一致性 RAM 或硬件仲裁的共享 RAM |
 | CPU 上线与通知 | `smp_platform_ops_t`：discover/start/send_ipi/secondary_init | SBI、PSCI、APIC、设备寄存器、fabric RELEASE |
 | 非一致性外部共享域 | `a20_fabric_t` / `a20_fabric_io_t` | FSMC、其他并行总线、MMIO 桥等 |
+| 应用内存 | Native vm_alloc/vm_unmap、动态同步字生命周期 | 公共 flat ownership 或既有 MMU 映射 |
 | 架构上下文 | 同一调度器调用架构上下文切换/异常接口 | ARM、RISC-V、x86 各自寄存器与机器指令 |
 | 设备与传输 | board/driver、`a20_clx_transport_t` | UART、以太网及其他链路驱动 |
 
@@ -137,3 +138,9 @@ sleep、所有在线 CPU 的 timer IRQ、远端 IPI 应答与退出回收。它�
 在终态输出后停止模拟器。树莓派仍缺少网卡、存储、完整用户态与物理证据，
 不能将芯片内 SMP 等同于已经完成跨板共享内核。详见
 [树莓派端口](../platforms/raspberrypi4.md)。
+
+## 公共 flat 用户内存
+
+[30](30-flat-user-memory.md) 增加与 ISA/板型无关的用户内存所有权层，
+复用 Native 页分配/释放接口。ARMv7-M Native 装载器首先接入；其他 NOMMU
+端口需要为任务绑定该空间，不能仅凭交叉编译宣称完整应用端口已完成。

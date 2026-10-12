@@ -308,6 +308,9 @@ typedef struct task_t {
     struct signal_state *signals;
 
     mm_struct_t *mm;
+#ifdef CONFIG_FLAT_USER_MEMORY
+    struct a20_flat_space *flat_user; /* Owner outlives task references/pins. */
+#endif
 
     uintptr_t entry;
     uintptr_t first_kernel_entry;

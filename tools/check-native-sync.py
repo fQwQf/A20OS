@@ -50,7 +50,7 @@ def run_case(arch, args, output):
                     phase = "application"
                     deadline = time.monotonic() + args.timeout
                 elif phase == "application" and "NATIVE_FUTEX: PASS" in content:
-                    assert "NATIVE_ATOMIC32: PASS" in content, str(log)
+                    assert "NATIVE_ATOMIC32: PASS" in content and "NATIVE_ALLOCATOR: PASS" in content, str(log)
                     process.stdin.write(b"poweroff\n")
                     process.stdin.flush()
                     phase = "shutdown"

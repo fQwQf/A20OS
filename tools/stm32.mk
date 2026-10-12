@@ -134,9 +134,10 @@ _check-mcu-program-rtl: kernel-only
 
 ifeq ($(MCU_NATIVE_PROGRAM)$(MCU_SHARED_TEST),11)
 $(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
-$(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c \
+$(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c user/liba20rt/a20_compiler_rt.c \
+    user/liba20rt/a20_malloc.c user/liba20rt/a20_string.h user/tests/native-memory-contract.h \
     user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
-    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h user/liba20rt/a20_sync.h \
+    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h user/liba20rt/a20_sync.h user/liba20rt/a20_mem.h \
     kernel/arch/armv7m/include/program_test.h user/liba20rt/a20_execution.h \
     kernel/include/uapi/a20/execution.h
 	@mkdir -p $(@D)
@@ -144,5 +145,5 @@ $(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c \
 		-fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \
 		-Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 \
 		-Wl,-T,user/tests/mcu-shared-program/link.ld \
-		-Iuser/liba20rt -Ikernel/arch/armv7m/include $< -o $@
+		-Iuser/liba20rt -Ikernel/arch/armv7m/include $< user/liba20rt/a20_compiler_rt.c user/liba20rt/a20_malloc.c -lgcc -o $@
 endif

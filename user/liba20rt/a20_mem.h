@@ -6,11 +6,16 @@
 
 static inline a20_status_t a20_vm_alloc(const a20_vm_alloc_args_t *args)
 {
-    return a20_syscall6(A20_SYS_vm_alloc, (uint64_t)args, 0, 0, 0, 0, 0);
+    return a20_syscall6(A20_SYS_vm_alloc, (uint64_t)(uintptr_t)args, 0, 0, 0, 0,
+                        0);
 }
 
 static inline a20_status_t a20_vm_unmap(uint64_t addr, uint64_t len)
 {
+    /* A narrow syscall register must never silently truncate an address or
+     * length into a different valid allocation. */
+    if (addr > UINTPTR_MAX || len > UINTPTR_MAX)
+        return -A20_ERR_INVALID_ARGUMENT;
     return a20_syscall6(A20_SYS_vm_unmap, addr, len, 0, 0, 0, 0);
 }
 
@@ -22,6 +27,8 @@ static inline a20_status_t a20_vm_protect(uint64_t addr, uint64_t len, uint32_t 
 static inline a20_status_t a20_vm_alloc_pages(uint64_t num_pages, uint32_t flags,
                                                uint64_t *out_addr)
 {
+    if (!num_pages || num_pages > UINT64_MAX / 4096)
+        return -A20_ERR_INVALID_ARGUMENT;
     a20_vm_alloc_args_t args;
     args.size      = sizeof(args);
     args.version   = 1;
@@ -58,7 +65,8 @@ static inline a20_status_t a20_vm_map(a20_handle_t source, uint64_t length,
     args.flags     = 0;
     args.out_addr  = 0;
     args.vmar      = A20_HANDLE_NULL;
-    a20_status_t r = a20_syscall6(A20_SYS_vm_map, (uint64_t)&args, 0, 0, 0, 0, 0);
+    a20_status_t r =
+        a20_syscall6(A20_SYS_vm_map, (uint64_t)(uintptr_t)&args, 0, 0, 0, 0, 0);
     if (r >= 0 && out_addr) *out_addr = args.out_addr;
     return r;
 }
@@ -83,7 +91,8 @@ static inline a20_status_t a20_vm_create_vmar(a20_handle_t parent,
     args.base    = base;
     args.length  = length;
     args.flags   = flags;
-    a20_status_t st = a20_syscall6(A20_SYS_vm_create_vmar, (uint64_t)&args, 0, 0, 0, 0, 0);
+    a20_status_t st = a20_syscall6(A20_SYS_vm_create_vmar,
+                                   (uint64_t)(uintptr_t)&args, 0, 0, 0, 0, 0);
     if (st >= 0 && out_vmar) *out_vmar = args.out_vmar;
     return st;
 }
@@ -109,7 +118,8 @@ static inline a20_status_t a20_vm_map_in_vmar(a20_handle_t vmar,
     args.flags     = flags;
     args.out_addr  = 0;
     args.vmar      = vmar;
-    a20_status_t st = a20_syscall6(A20_SYS_vm_map, (uint64_t)&args, 0, 0, 0, 0, 0);
+    a20_status_t st =
+        a20_syscall6(A20_SYS_vm_map, (uint64_t)(uintptr_t)&args, 0, 0, 0, 0, 0);
     if (st >= 0 && out_addr) *out_addr = args.out_addr;
     return st;
 }

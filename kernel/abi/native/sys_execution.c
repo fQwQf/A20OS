@@ -25,8 +25,8 @@ int64_t sys_a20_execution_info(const a20_syscall_args_t *args) {
         .calling_abi = ARCH_NATIVE_CALL_ABI,
         .native_major = A20_ABI_MAJOR,
         .native_minor = A20_ABI_MINOR,
-        .features =
-            A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE | A20_EXEC_ATOMIC32,
+        .features = A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE |
+                    A20_EXEC_ATOMIC32 | A20_EXEC_USER_HEAP,
 #ifdef CONFIG_NOMMU
         .memory_model = A20_EXEC_MEMORY_FLAT,
 #else
