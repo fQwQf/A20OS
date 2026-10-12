@@ -466,3 +466,42 @@ SMP 边界和 11 项新配置拒绝检查通过。全仓格式门禁仍有 114 �
 后续仍需真实多 MCU 验收、用户程序执行、设备/IRQ 所有权、JVM 和图形输入
 栈；当前没有启动真实 Minecraft Java 客户端，目标尚未完成，应用验收见
 [24-single-system-minecraft.md](24-single-system-minecraft.md)。
+
+## 26. FSMC 桥、推导 RAM 与完整固件联合仿真
+
+2026-10-12，在第 25 阶段原生共享内核上补齐每 MCU 的 FSMC 异步事务桥、
+带 byte enable 的推导 FPGA RAM 后端和顶层连接。新共享模式接 PD6/NWAIT，
+启用 ASYNCWAIT；原固定周期方案不能覆盖任意仲裁等待，已由响应完成后才
+释放 NWAIT 替代。默认 MCU 模式仍不执行这些配置。
+
+三端口总线测试通过 40 笔事务，包含同发访问、共享门唯一所有者、长时间
+保持 strobe 时破坏性寄存器只执行一次、DQ 方向/保持、跨端口字节写入、
+RAM 跨整域复位保留和请求撤销后的全域错误围栏。RAM 故意延迟 3 µs，
+超过旧固定 DATAST，仍正确等待。桥错误 `0x82` 锁存，已受理事务排空一次
+且可能已经写入，不能声称回滚；其他端口可继续读出 FAULT。仲裁核心回归
+及顶层 Verilator lint 通过。
+
+新增 `make check-mcu-shared-rtl`，实际双 Cortex-M3 ELF 的每次共享 RAM
+读写与控制寄存器访问均经 C++ 引脚适配进入同一套 RTL 桥、核心和 RAM。
+原生调度器完成同 PID 的 CPU1→CPU0 迁移、同一栈/堆继续使用、定时唤醒、
+跨核 free、原子累加、两任务退出及返回 idle；CPU1 隔离复位被实际 RTL
+的 sticky attach 拒绝并锁存 fault=5。检查实际固件 BCR/PD6 配置，且与
+独立寄存器 oracle 对比。两个执行顺序种子均通过，其中 seed=20 由最终
+Make 入口复现；禁用高字节 RAM 写入的 RTL 副本令完整固件失败，反向对照
+有效。日志和报告归档在本阶段提交的 `shared-bus-<commit>/` 证据目录。
+
+联合测试限定逐条指令：Unicorn 2.1.4 的 RAM hook 配合某些多指令边界会
+跳过 Thumb 指令，空 hook 也复现；原无 RAM hook 的指令测试继续通过。
+早期失败和空 hook 复现日志保留。联合适配器逐笔完成总线事务，因此并发
+在途的桥接证据来自独立三端口总线测试。这里没有真实 MCU 内部 FSMC、
+完整 NVIC、电气 CDC 或物理时序证据。
+
+当前共享正式固件与三 CPU 自检固件构建通过，三 CPU 指令测试再次通过；
+默认 STM32 QEMU 固件重新构建与第 25 阶段归档逐字节相同。此前报告的全仓
+格式漂移和服务器 native-only 链接失败没有在本阶段修复或宣称通过。
+尚需 FPGA 目标、I/O wrapper、RAM 资源及综合/时序报告、布线/供电/整域复位
+和真实板验证。推导 RAM 不等于已交付外部 SRAM/SDRAM 控制器；默认 1 MiB
+参数也不证明某块 FPGA 容量足够。用户态、JVM、图形输入和真实 Minecraft
+客户端仍未实现，整体目标保持未完成。接口与复现见
+[25-native-shared-kernel.md](25-native-shared-kernel.md) 和
+[hardware/shared-mcu/README.md](../../hardware/shared-mcu/README.md)。

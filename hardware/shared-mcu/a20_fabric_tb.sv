@@ -4,6 +4,7 @@ module a20_fabric_tb;
     logic clk = 0;
     always #5 clk = ~clk;
     logic reset_n = 0;
+    logic [15:0] external_fault = 0;
     logic [N-1:0] req_valid = 0, req_control = 0, req_write = 0;
     logic [N-1:0][25:0] req_addr = 0;
     logic [N-1:0][15:0] req_wdata = 0;

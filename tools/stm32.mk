@@ -81,3 +81,31 @@ check-mcu-shared-fabric:
 		-Mdir .kernel-build/cluster/shared-fabric-verilator \
 		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fabric_tb.sv
 	.kernel-build/cluster/shared-fabric-verilator/Va20_fabric_tb
+
+.PHONY: check-mcu-shared-bus
+check-mcu-shared-bus:
+	verilator --binary --timing --top-module a20_shared_top_tb \
+		-Mdir .kernel-build/cluster/shared-bus-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fsmc_bridge.sv \
+		hardware/shared-mcu/a20_shared_ram.sv hardware/shared-mcu/a20_shared_top.sv \
+		hardware/shared-mcu/a20_shared_top_tb.sv
+	.kernel-build/cluster/shared-bus-verilator/Va20_shared_top_tb
+
+.PHONY: build-mcu-shared-rtl check-mcu-shared-rtl _check-mcu-shared-rtl
+build-mcu-shared-rtl:
+	verilator --cc --exe --build -j 4 --top-module a20_shared_top \
+		-GCPUS=2 -GRAM_ADDR_BITS=20 -Mdir .kernel-build/cluster/shared-rtl-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fsmc_bridge.sv \
+		hardware/shared-mcu/a20_shared_ram.sv hardware/shared-mcu/a20_shared_top.sv \
+		$(CURDIR)/hardware/shared-mcu/a20_bus_cosim.cpp
+
+check-mcu-shared-rtl: build-mcu-shared-rtl
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 _check-mcu-shared-rtl
+
+_check-mcu-shared-rtl: kernel-only
+	$(PYTHON) tools/check-mcu-shared-rtl.py $(BUILD_DIR)/kernel.elf \
+		--backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
+		--report .kernel-build/cluster/shared-kernel/report-rtl.json
