@@ -764,3 +764,6 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 
 真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
 [45-native-execution-reliability.md](45-native-execution-reliability.md)。
+
+无 CPU 绑定的真实 pthread 执行、空闲 CPU 接取和线程组终结通知见
+[46-unbound-program-execution.md](46-unbound-program-execution.md)。

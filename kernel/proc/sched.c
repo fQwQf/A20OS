@@ -1670,10 +1670,12 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         if (!spin_trylock_irqsave(&rrq->lock, &rrf))
             continue;
 
-        /* Steal only a genuine surplus: keep at least one task on the remote
-         * so a deliberately-placed single task is never yanked off its CPU. */
-        if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) < 2 ||
-            !rrq->eevdf_last) {
+        /* nr_running counts queued tasks, excluding the current task. One
+         * queued task behind a non-idle current is already a surplus. Keep a
+         * lone task on an idle remote, and retain the affinity/RT checks below.
+         * The current-slot snapshot is only a balancing hint. */
+        unsigned queued = __atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED);
+        if (!rrq->eevdf_last || (queued < 2 && proc_cpu_is_idle(remote))) {
             spin_unlock_irqrestore(&rrq->lock, rrf);
             continue;
         }

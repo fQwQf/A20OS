@@ -76,6 +76,7 @@ void proc_switch_out_finish_pending(void);
 void proc_current_slots_init(void);
 
 task_t *proc_idle_task(void);
+int proc_cpu_is_idle(unsigned cpu);
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);
 /* INV-P3: nest two different tasks' park_locks in ascending task-pointer

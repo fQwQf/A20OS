@@ -100,3 +100,6 @@ python3 tools/check-native-sync.py --arches x86_64 --cpus 1 --timeout 180 \
 最终共享 MCU ELF SHA256 为 `7bc37cce899fe81924bf0a1ba89f8b57ef858a22128d1a72142046337fa5e275`。
 ABI、IDL、裁剪、共享 fabric 可移植性检查通过；文档 1498 个行号引用有效。
 格式门禁仍有与父提交逐项相同的 114 个失败路径，没有增加豁免。
+
+无 CPU 绑定的真实 pthread 执行、空闲 CPU 接取和线程组终结通知见
+[46-unbound-program-execution.md](46-unbound-program-execution.md)。

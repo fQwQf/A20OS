@@ -192,6 +192,9 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     t->policy.thp_disabled = parent ? parent->policy.thp_disabled : 0;
     t->clone_flags = 0;
     t->exit_signal = SIGCHLD;
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    t->exit_parent_notified = 0;
+#endif
     t->clear_child_tid = NULL;
     t->robust_list_head = 0;
     t->sigaltstack.ss_sp = 0;
