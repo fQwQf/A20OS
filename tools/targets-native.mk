@@ -184,7 +184,7 @@ $(1) -ffreestanding -nostdlib -static \
     $(NATIVE_SDK_SRC) \
     $(NATIVE_COMPILER_RT_SRC) \
     $(NATIVE_ARCH_SRC) \
-    user/tests/test_native_futex.c user/tests/native-memory-contract.h \
+    user/tests/test_native_futex.c user/tests/native-memory-contract.h user/tests/native-domain-contract.h kernel/include/uapi/a20/execution_domain.h \
     $(NATIVE_LIBS) \
     -o $(4)
 endef

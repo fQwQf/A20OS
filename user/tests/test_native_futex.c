@@ -11,6 +11,7 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "native-memory-contract.h"
+#include "native-domain-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -62,6 +63,16 @@ int main(int argc, char **argv, char **envp)
     if (out == A20_HANDLE_NULL)
         return 90;
 
+    a20_execution_domain_info_t domain;
+    if (native_domain_contract(&domain))
+        return fail(out, 94, "execution domain",
+                    sizeof("execution domain") - 1);
+    char domain_line[] = "NATIVE_DOMAIN_CPUS: 00\n";
+    domain_line[sizeof(domain_line) - 4] = '0' + domain.cpu_online / 10;
+    domain_line[sizeof(domain_line) - 3] = '0' + domain.cpu_online % 10;
+    a20_hdl_write_buf(out, domain_line, sizeof(domain_line) - 1, (void *)0);
+    a20_hdl_write_buf(out, "NATIVE_DOMAIN: PASS\n",
+                      sizeof("NATIVE_DOMAIN: PASS\n") - 1, (void *)0);
     if (native_memory_contract())
         return fail(out, 93, "allocator contract",
                     sizeof("allocator contract") - 1);

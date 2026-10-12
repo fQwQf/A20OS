@@ -4,6 +4,7 @@
 #include "a20_mem.h"
 #include "program_test.h"
 #include "../native-memory-contract.h"
+#include "../native-domain-contract.h"
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
 static const uint32_t *volatile relocated = magic;
@@ -46,6 +47,11 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     CHECK(a20_syscall6(0x7fff, 0, 0, 0, 0, 0, 0) == -A20_ERR_NOT_SUPPORTED, 5);
     record->stack_before = (uintptr_t)&local[0];
     CHECK(a20_thread_yield() == 0, 6);
+    a20_execution_domain_info_t domain;
+    CHECK(native_domain_contract(&domain) == 0 && domain.cpu_online == 2 &&
+              domain.online_mask == 3,
+          82);
+    record->domain_mask_before = domain.online_mask;
     CHECK(native_memory_contract() == 0, 81);
     record->allocator_passed = 1;
     uint64_t heap = 0, temp = 0;
@@ -194,6 +200,8 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
         record->futex_waits++;
     }
     CHECK(observed == 2, 35);
+    CHECK(native_domain_contract(&domain) == 0, 83);
+    record->domain_mask_after = domain.online_mask;
     record->phase = 3;
     a20_task_exit(0);
     __builtin_unreachable();

@@ -182,6 +182,8 @@ def main():
         assert all(n > 0 for n in domain.user_instructions[:2])
         assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers
         assert domain.scalar("program_test_rejections") == 8
+        assert 3 in domain.syscall_numbers
+        assert any("[PROGRAM-DOMAIN] PASS same kernel before/after CPU migration mask=3" in log for log in domain.logs)
         assert any("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free" in log for log in domain.logs)
         assert any("[PROGRAM-HEAP] PASS checks=20 wait-pinned=1 cross-cpu=1" in log for log in domain.logs)
         result.update(user_instructions=domain.user_instructions, svc_entries=domain.svc_count,

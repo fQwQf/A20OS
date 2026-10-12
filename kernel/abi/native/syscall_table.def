@@ -12,6 +12,7 @@
 A20_NATIVE_SYSCALL(abi_info,          sys_a20_abi_info(args))
 A20_NATIVE_SYSCALL(feature_test,      sys_a20_feature_test(args))
 A20_NATIVE_SYSCALL(execution_info,    sys_a20_execution_info(args))
+A20_NATIVE_SYSCALL(execution_domain_info, sys_a20_execution_domain_info(args))
 A20_NATIVE_SYSCALL(handle_close,      sys_a20_handle_close(args))
 A20_NATIVE_SYSCALL(handle_dup,        sys_a20_handle_dup(args))
 A20_NATIVE_SYSCALL(handle_query,      sys_a20_handle_query(args))

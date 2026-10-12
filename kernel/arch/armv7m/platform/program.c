@@ -17,6 +17,7 @@ unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
 extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
+extern int64_t sys_a20_execution_domain_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
 extern int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args);
@@ -279,6 +280,9 @@ static void program_syscall_thread(void) {
             break;
         case A20_SYS_futex_wake:
             result = sys_a20_futex_wake(&args);
+            break;
+        case A20_SYS_execution_domain_info:
+            result = sys_a20_execution_domain_info(&args);
             break;
         case A20_SYS_execution_info:
             result = sys_a20_execution_info(&args);
