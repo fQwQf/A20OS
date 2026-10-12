@@ -22,7 +22,7 @@ MCU、内核测试服务和 Native 用户态服务共用
 
 头后紧接输入或输出，长度必须精确匹配。结果解码器同时校验作业、分片、
 算子、种类和 attempt，旧尝试的迟到回复不能完成新尝试。
-任务种类为 QUERY=1、OPERATOR=2、PROCESS=3。
+任务种类为 QUERY=1、OPERATOR=2、PROCESS=3、QUERY_EXECUTION=4。
 非查询请求必须有非零 job_id 和时间预算；预算超出 agent 上限会拒绝。
 工作状态为 OK、INVALID、UNSUPPORTED、NO_SPACE、DEADLINE、CANCELED、FAILED。
 工作失败以完整结果返回，不关闭业务连接；CL 传输错误仍按代理取消规则处理。
@@ -33,6 +33,13 @@ kind 位图、最大输入字节、最大输出字节、最大在途、最大预
 REPLAY_SAFE 表示作业层可重派；ASSOCIATIVE 表示可做树形归约。
 进程能力只在实际装载 manifest 时发布，当前 manifest ID 固定为 1。
 算子输出上限不包含 32 字节工作头，能力查询自身不受算子输出上限限制。
+
+QUERY_EXECUTION 同样要求无输入、operator_id=0，成功返回 64 B 执行描述。
+旧 QUERY 的 24 B 能力头、算子描述和位图不变；旧 agent 或未绑定执行描述时
+返回 UNSUPPORTED。Native agent 通过内核 `execution_info` 查询实际构建的
+用户镜像 profile 后绑定描述，查询失败则保留未知状态。固件 agent 可绑定
+静态描述，但不能照抄服务器的句柄、futex 或镜像能力。格式和使用限制见
+[28-execution-capabilities.md](28-execution-capabilities.md)。
 
 ## 2. 共同算子
 

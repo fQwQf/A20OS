@@ -600,3 +600,23 @@ Pi poweroff/reboot 仍为 halt，
 默认 STM32 QEMU 固件仍为 `c6f1737ce1523db0c20caeb2334815fa624377f65530a6fe176b48a92914b21d`。
 trim registry 与九项 SMP 平台边界检查通过。全仓格式门禁仍有 114 个既有
 漂移；本次修改/新增 C/H 的格式检查没有增加失败，没有改写格式豁免基线。
+
+## 30. MCU/服务器共用执行信息查询
+
+新增 Native 0x0002 `execution_info` 与 CW/1 QUERY_EXECUTION=4，公共 64 B 描述
+区分镜像 ISA/位宽/端序/调用 ABI、Native 版本、接口、地址模型及特权原子机制。
+同一处理函数同时接入服务器 syscall 表和 MCU Native SVC。Native agent 从内核
+查询事实后发布；旧 agent 未提供描述时返回 UNSUPPORTED，旧 CW QUERY 不变。
+修复既有 abi_info 的指针宽度写死 64。公共匹配器检查镜像清单要求，但还没有
+完整镜像清单工具、远程 ELF 传送或自动派发；PROCESS 仍为预装 manifest。
+测试与剩余范围见 [28-execution-capabilities.md](28-execution-capabilities.md)。
+
+本阶段验证：真实 RISC-V Native 用户态/agent 查询及原有集群作业 smoke、MCU
+原生应用/RTL、三种服务器 ISA 公共 SMP 和树莓派十类启动配置均通过。
+同一执行描述/CW 协议测试在 x86-64、AArch64、RV64 宿主指令环境和宿主
+ASan/UBSan 通过；这些宿主测试不替代内核或物理板验证。默认 STM32
+固件 SHA256 仍为 `c6f1737ce1523db0c20caeb2334815fa624377f65530a6fe176b48a92914b21d`。
+ABI 边界、文档漂移/引用和裁剪注册表门禁通过，证据归档为
+`evidence/execution-<commit>/`。完整目标保持未完成。
+
+全仓格式门禁仍为 114 个既有漂移，本次没有增加失败，也未修改格式豁免基线。

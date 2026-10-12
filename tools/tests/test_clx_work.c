@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "uapi/a20/cluster_work.h"
 
 static unsigned executed;
@@ -26,6 +27,90 @@ static uint32_t custom(void *ctx, const a20_work_request_t *r, uint8_t *out,
     return A20_WORK_OK;
 }
 
+static void execution_contract(a20_work_agent_t *agent) {
+    const uint32_t machines[] = {62, 183, 243, 243, 40, 40, 258, 258, 21};
+    const uint32_t widths[] = {64, 64, 64, 32, 32, 32, 64, 32, 64};
+    uint8_t request[32], reply[96], encoded[64];
+    a20_work_request_t q = {
+        .kind = A20_WORK_QUERY_EXECUTION, .job = 123, .attempt = 7};
+    assert(a20_work_encode(request, sizeof(request), &q) == 32);
+    assert(a20_work_dispatch(agent, request, 32, reply, sizeof(reply)) == 32);
+    assert(a20_work_u32(reply + 20) == A20_WORK_UNSUPPORTED);
+    for (unsigned k = 0; k < 9; k++) {
+        a20_execution_info_t info = {
+            .size = 64,
+            .version = 1,
+            .elf_machine = machines[k],
+            .pointer_bits = widths[k],
+            .byte_order = A20_EXEC_LITTLE_ENDIAN,
+            .calling_abi = k + 1,
+            .native_major = 1,
+            .features = A20_EXEC_NATIVE_IMAGE | A20_EXEC_THREAD_BASIC,
+            .memory_model = A20_EXEC_MEMORY_FLAT,
+            .atomic_model = A20_EXEC_ATOMIC_FABRIC_GATE};
+        a20_execution_requirement_t required = {
+            machines[k], widths[k], 1, k + 1, 1, 0, A20_EXEC_THREAD_BASIC};
+        assert(sizeof(info) == 64 && a20_execution_valid(&info));
+        assert(a20_execution_image_matches(&info, &required));
+        /* Each admission dimension independently excludes an incompatible image. */
+        uint32_t *dimensions[] = {
+            &required.elf_machine,      &required.pointer_bits,
+            &required.byte_order,       &required.calling_abi,
+            &required.native_major,     &required.minimum_minor,
+            &required.required_features};
+        for (unsigned d = 0; d < 7; d++) {
+            uint32_t old = *dimensions[d];
+            *dimensions[d] = d == 6 ? A20_EXEC_FUTEX : old + 1;
+            assert(!a20_execution_image_matches(&info, &required));
+            *dimensions[d] = old;
+        }
+        assert(a20_execution_encode(encoded, sizeof(encoded), &info) == 64);
+        assert(encoded[0] == 64 && encoded[4] == 1 &&
+               a20_work_u32(encoded + 8) == machines[k]);
+        a20_execution_info_t decoded;
+        assert(a20_execution_decode(encoded, sizeof(encoded), &decoded) == 0);
+        assert(!memcmp(&decoded, &info, sizeof(info)));
+        for (unsigned size = 0; size < 64; size++) {
+            a20_execution_info_t before = decoded;
+            assert(a20_execution_decode(encoded, size, &decoded) == -1);
+            assert(!memcmp(&decoded, &before, sizeof(decoded)));
+        }
+        agent->execution = &info;
+        assert(a20_work_dispatch(agent, request, 32, reply, sizeof(reply)) ==
+               96);
+        a20_work_result_t result;
+        assert(a20_work_result_decode(reply, 96, &q, &result) == 0 &&
+               !result.status);
+        assert(a20_execution_decode(result.output, result.output_len,
+                                    &decoded) == 0);
+        assert(a20_execution_image_matches(&decoded, &required));
+        assert(a20_work_dispatch(agent, request, 32, reply, 95) == 32);
+        assert(a20_work_u32(reply + 20) == A20_WORK_NO_SPACE);
+        for (unsigned reserved = 44; reserved < 64; reserved++) {
+            encoded[reserved] = 1;
+            assert(a20_execution_decode(encoded, 64, &decoded) == -1);
+            encoded[reserved] = 0;
+        }
+        /* Invalid enum, version and layout fields must not escape decoding. */
+        const unsigned offsets[] = {0, 4, 8, 12, 16, 20, 24, 32, 36, 40};
+        for (unsigned d = 0; d < sizeof(offsets) / sizeof(offsets[0]); d++) {
+            uint32_t old = a20_work_u32(encoded + offsets[d]);
+            a20_work_put32(encoded + offsets[d],
+                           offsets[d] == 24 ? 0 : UINT32_MAX);
+            assert(a20_execution_decode(encoded, 64, &decoded) == -1);
+            a20_work_put32(encoded + offsets[d], old);
+        }
+        info.features |= 0x80000000U;
+        assert(!a20_execution_valid(&info));
+        assert(a20_work_dispatch(agent, request, 32, reply, sizeof(reply)) ==
+               32);
+        assert(a20_work_u32(reply + 20) == A20_WORK_UNSUPPORTED);
+        agent->execution = 0;
+    }
+    puts("execution contract: 9 profiles, 7 mismatch dimensions, LE wire, "
+         "truncation, reserved fields and legacy agents passed");
+}
+
 int main(void) {
     a20_work_operator_t ops[] = {
         {A20_WORK_DOT, A20_WORK_REPLAY_SAFE, 140, 8, a20_work_dot, 0},
@@ -42,6 +127,7 @@ int main(void) {
                               .clock_ms = clock_ms,
                               .canceled = canceled};
     assert(a20_work_agent_valid(&agent));
+    execution_contract(&agent);
     uint8_t input[256] = {0}, reply[256], data[28] = {0};
     a20_work_request_t r = {.kind = A20_WORK_QUERY};
     int len = a20_work_encode(input, sizeof(input), &r);

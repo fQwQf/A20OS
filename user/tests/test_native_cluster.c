@@ -371,6 +371,36 @@ static int abi_snapshot_and_agent(void) {
         a20_thread_sleep((a20_time_t){.nsecs = 1000000});
     }
     int ok = client != A20_HANDLE_NULL;
+    a20_execution_info_t local_execution = {0}, remote_execution = {0};
+    ok = ok && a20_execution_info(&local_execution) == A20_OK &&
+         a20_execution_valid(&local_execution) &&
+         local_execution.pointer_bits == sizeof(void *) * 8 &&
+         a20_cluster_execution_query(client, 1000, &remote_execution) ==
+             A20_OK &&
+         !a20_memcmp(&local_execution, &remote_execution,
+                     sizeof(local_execution));
+#if defined(__riscv) && __riscv_xlen == 64
+    /* The kernel C ABI is lp64; this query describes actual SDK lp64d images. */
+    ok = ok && local_execution.elf_machine == 243 &&
+         local_execution.calling_abi == A20_EXEC_ABI_RV64_DOUBLE;
+#endif
+    a20_execution_requirement_t requirement = {
+        .elf_machine = local_execution.elf_machine,
+        .pointer_bits = local_execution.pointer_bits,
+        .byte_order = local_execution.byte_order,
+        .calling_abi = local_execution.calling_abi,
+        .native_major = local_execution.native_major,
+        .minimum_minor = local_execution.native_minor,
+        .required_features = A20_EXEC_NATIVE_IMAGE | A20_EXEC_HANDLES};
+    ok = ok && a20_execution_image_matches(&remote_execution, &requirement);
+    requirement.pointer_bits = requirement.pointer_bits == 64 ? 32 : 64;
+    ok = ok && !a20_execution_image_matches(&remote_execution, &requirement) &&
+         a20_syscall6(A20_SYS_execution_info, (uintptr_t)&local_execution,
+                      sizeof(local_execution) - 1, 0, 0, 0,
+                      0) == -A20_ERR_INVALID_ARGUMENT &&
+         a20_execution_info(0) == -A20_ERR_FAULT;
+    if (ok)
+        note("execution-local-agent-match ok\n", 31);
     if (!ok)
         note("agent-connect timed out\n", 24);
     uint8_t input[128], reply[200], data[12];

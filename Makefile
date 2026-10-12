@@ -1237,6 +1237,17 @@ ifneq ($(filter $(ARCH),$(TRIM_CAP_PCIE_MMIO_ECAM_ARCHES)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
 endif
 endif
+ELF_MACHINE_armv7m      := 40
+ELF_CLASS_armv7m        := 1
+NATIVE_CALL_ABI_x86_64 := A20_EXEC_ABI_X86_64
+NATIVE_CALL_ABI_aarch64 := A20_EXEC_ABI_AARCH64
+NATIVE_CALL_ABI_riscv64 := A20_EXEC_ABI_RV64_DOUBLE
+NATIVE_CALL_ABI_riscv32 := A20_EXEC_ABI_RV32_DOUBLE
+NATIVE_CALL_ABI_arm32 := A20_EXEC_ABI_ARM_HARD
+NATIVE_CALL_ABI_armv7m := A20_EXEC_ABI_THUMB_SOFT
+NATIVE_CALL_ABI_loongarch64 := A20_EXEC_ABI_LA64_DOUBLE
+NATIVE_CALL_ABI_loongarch32 := A20_EXEC_ABI_LA32_SOFT
+NATIVE_CALL_ABI_ppc64le := A20_EXEC_ABI_PPC64_ELFV2
 ELF_MACHINE_riscv64     := 243
 ELF_MACHINE_loongarch64 := 258
 ELF_MACHINE_loongarch32 := 258
@@ -1253,10 +1264,9 @@ ELF_CLASS_x86_64        := 2
 ELF_CLASS_arm32         := 1
 ELF_CLASS_riscv32       := 1
 ELF_CLASS_ppc64le       := 2
-ifneq ($(ARCH),armv7m)
 CFLAGS += -DARCH_ELF_MACHINE=$(ELF_MACHINE_$(ARCH)) \
-          -DARCH_ELF_CLASS=$(ELF_CLASS_$(ARCH))
-endif
+          -DARCH_ELF_CLASS=$(ELF_CLASS_$(ARCH)) \
+          -DARCH_NATIVE_CALL_ABI=$(NATIVE_CALL_ABI_$(ARCH))
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
 ifeq ($(MCU_SHARED_KERNEL),1)
@@ -1604,6 +1614,7 @@ include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
 include tools/raspberrypi4.mk
+include tools/execution.mk
 include tools/target-console.mk
 include tools/run-targets.mk
 include tools/targets-images.mk

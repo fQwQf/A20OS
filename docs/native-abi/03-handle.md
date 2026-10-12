@@ -417,6 +417,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0000 | `abi_info` | `int64_t abi_info(a20_abi_info_t *out)` | 查询 ABI 版本和能力 |
 | 0x0001 | `feature_test` | `int64_t feature_test(uint64_t feature_id)` | 测试 feature 可用性 |
+| 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/28-execution-capabilities.md) |
 
 ### Handle (0x0100)
 

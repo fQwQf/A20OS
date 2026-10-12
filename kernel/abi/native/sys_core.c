@@ -95,7 +95,7 @@ int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
     info.abi_major = A20_ABI_MAJOR;
     info.abi_minor = A20_ABI_MINOR;
     info.abi_patch = A20_ABI_PATCH;
-    info.pointer_bits = 64;
+    info.pointer_bits = sizeof(void *) * 8;
     info.page_size = 4096;
     info.handle_bits = 32;
     /* feature_bits: bit 0 = handle_table, bit 1 = temporal_capabilities,
