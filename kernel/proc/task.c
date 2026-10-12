@@ -1,6 +1,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
+#include "proc/task_object.h"
 #include "proc/signal.h"
 #include "ipc/seccomp.h"
 #include "drivers/core/udriver.h"
@@ -444,6 +445,8 @@ void proc_put(task_t *t)
     }
 
     proc_task_release_resources(t);
+    a20_task_object_task_release(t);
+    proc_pid_final_release(t);
     proc_lifetime_note_task_free();
     memset(t, 0, sizeof(*t));
     kfree(t);
@@ -500,7 +503,11 @@ void proc_destroy_task(task_t *t)
         spin_unlock_irqrestore(&tasklist_lock, list_flags);
         return;
     }
+#ifdef A20_TASK_OBJECTS_ENABLED
+    __atomic_store_n(&t->destroy_started, 1, __ATOMIC_RELEASE);
+#else
     t->destroy_started = 1;
+#endif
     t->state = PROC_UNUSED;
     proc_wait_timer_cancel_locked(t, t->wait_seq);
     proc_alarm_cancel(t);
@@ -509,6 +516,7 @@ void proc_destroy_task(task_t *t)
     proc_unlink_task_locked(t);
     spin_unlock_irqrestore(&tasklist_lock, list_flags);
 
+    a20_task_object_detach(t);
     proc_pid_unregister(t);
     /* Drop the allocation/global-list lifetime reference. */
     proc_put(t);

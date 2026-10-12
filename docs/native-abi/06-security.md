@@ -302,7 +302,7 @@ network/PID/device 三个类型没有任何消费点——写入的 `ns_ctx.net_
 ### 8.1 调试接口
 
 ```c
-/* 会话对象：A20_OBJ_DEBUG，object = 目标 pid */
+/* 会话对象：A20_OBJ_DEBUG，object = 目标任务的独立身份对象 */
 int64_t debug_attach(a20_handle_t task);              /* ADMIN on task handle */
 int64_t debug_traceme(void);                          /* 子任务声明可被调试 */
 int64_t debug_wait(a20_handle_t dbg, uint64_t timeout_us, a20_debug_event_info_t *out);  /* WAIT */

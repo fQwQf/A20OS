@@ -20,13 +20,11 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r =
-        a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_CONTROL, &entry);
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                    A20_RIGHT_CONTROL, &target);
     if (r < 0)
         return r;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     if (!target)
         return -A20_ERR_BAD_HANDLE;
 
@@ -60,12 +58,11 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_STAT, &entry);
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID, A20_RIGHT_STAT,
+                                    &target);
     if (r < 0)
         return r;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     a20_sched_args_t kinfo;
     memset(&kinfo, 0, sizeof(kinfo));
     kinfo.size = sizeof(kinfo);

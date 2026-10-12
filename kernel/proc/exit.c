@@ -1,4 +1,5 @@
 #include "proc/proc.h"
+#include "proc/task_object.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
@@ -576,11 +577,14 @@ void proc_exit(int exit_code)
     hyp_bridge_task_exit(t->pid);
 #endif
 
-    /* Native ABI task handles store the pid as the object pointer, so the
-     * watch key must be pid-as-pointer (docs/native-abi/05-ipc.md §3.3). */
+#ifdef A20_TASK_OBJECTS_ENABLED
+    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)exit_code, 0, 1);
+#else
+    /* Keep the existing non-Native/tiny path and its generated code. */
     a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
                      A20_EVENT_EXITED, (uint64_t)exit_code, 0);
     a20_eventq_on_object_destroy((void *)(uintptr_t)t->pid, A20_OBJ_TASK);
+#endif
 
     task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
     proc_reparent_children(t, init_reaper);

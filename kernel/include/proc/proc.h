@@ -340,6 +340,9 @@ typedef struct task_t {
     size_t    scratch_size;
 #if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
     (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
+#define A20_TASK_OBJECTS_ENABLED 1
+    struct a20_task_object
+        *a20_object;       /* weak task binding; task owns one ref */
     unsigned a20_joinable; /* immutable after Native thread publication */
 #endif
     void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,

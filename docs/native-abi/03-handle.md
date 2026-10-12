@@ -4,9 +4,14 @@
 
 ---
 
+TASK/THREAD/DEBUG 的内部身份与 PID 生命周期已分离。句柄和在途 IPC 引用持有
+小型身份对象；任务回收后旧身份失去目标，操作返回 BAD_HANDLE，PID 复用不
+改变结果。关闭旧句柄仍成功，不保留目标的整个地址空间。具体约束见
+[任务对象生命周期](../cluster/33-task-object-lifetime.md)。用户句柄布局和编号未变。
+
 ## 1. 对象类型
 
-A20OS Native ABI 保留 14 个对象类型编号。`A20_OBJ_THREAD` 当前只是保留编号；`thread_create` 安装并返回 `A20_OBJ_TASK` handle，其余已使用类型各有特定的合法操作和权限集。
+A20OS Native ABI 的对象类型由公共对象模型定义。`thread_create` 安装并返回 `A20_OBJ_THREAD` handle；TASK 与 THREAD 共用任务操作，但保留各自类型与权限检查。
 
 ```c
 typedef enum a20_object_type {
@@ -39,19 +44,19 @@ typedef enum a20_object_type {
 | A20_OBJ_CHANNEL_ENDPOINT | 新增 `struct a20_channel_ep` | `refcount_t` |
 | A20_OBJ_EVENT_QUEUE | 新增 `struct a20_eventq` | `refcount_t` |
 | A20_OBJ_TIMER | timer slot 编号 `slot+1` | timer slot refcount |
-| A20_OBJ_TASK | 整数 pid | 操作时 `proc_find_get()`；handle 本身不持 task 引用 |
-| A20_OBJ_THREAD | 保留，当前不安装该类型 | `thread_create` 返回指向线程 pid 的 `A20_OBJ_TASK` handle |
+| A20_OBJ_TASK | 独立任务身份对象 | handle 持身份引用，操作时安全取得原任务引用 |
+| A20_OBJ_THREAD | 独立任务身份对象 | thread_create 返回 THREAD，生命周期同 TASK |
 | A20_OBJ_MEMORY | `struct vmo *` | `vmo_ref` / `vmo_release` |
 | A20_OBJ_DEVICE | global fd | `vfs_ref_fd` / `vfs_close` |
 | A20_OBJ_NAMESPACE | 新增 `struct a20_namespace` | `refcount_t` |
-| A20_OBJ_DEBUG | 整数目标 pid | 调试状态由 `proc_debug_*` 管理 |
+| A20_OBJ_DEBUG | 与目标 TASK/THREAD 相同的身份对象 | 会话持身份引用，调试状态由 `proc_debug_*` 管理 |
 | A20_OBJ_EXT_PROG | 整数 KEP program id | `kep_prog_release` |
 
 ### 1.2 设计原则
 
 - file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
 - channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体，独立分配。
-- **handle entry 的 object 字段是 `void *`**，既可持对象指针，也可编码 global fd、pid、timer slot 或 KEP id，必须始终结合 `type` 解释。
+- **handle entry 的 object 字段是 `void *`**，TASK/THREAD/DEBUG 持独立任务身份对象指针，其他类型可持对象指针，也可编码 global fd、timer slot 或 KEP id，必须始终结合 `type` 解释。
 
 ---
 

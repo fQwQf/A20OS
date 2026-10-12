@@ -118,12 +118,10 @@ int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_STAT, &entry);
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID, A20_RIGHT_STAT,
+                                    &target);
     if (r < 0) return r;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     struct a20_resource_limits limits;
     a20_resource_limits_init_default(&limits);
     if (target) {
@@ -148,25 +146,28 @@ int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_CONTROL, &entry);
-    if (r < 0) return r;
-
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                    A20_RIGHT_CONTROL, &target);
+    if (r < 0)
+        return r;
+    if (!target)
+        return -A20_ERR_BAD_HANDLE;
     if (kargs.max_handles > A20_LIMIT_HANDLES_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_channels > A20_LIMIT_CHANNELS_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_threads > A20_LIMIT_THREADS_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_memory_bytes > A20_LIMIT_MEMORY_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
 
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (!target) return -A20_ERR_BAD_HANDLE;
     if (target->limits.nofile == 0 || kargs.max_handles < target->limits.nofile)
         target->limits.nofile = (uint32_t)kargs.max_handles;
 
     proc_put(target);
     return A20_OK;
+out_access:
+    proc_put(target);
+    return -A20_ERR_ACCESS;
 }

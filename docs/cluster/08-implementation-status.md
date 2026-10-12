@@ -657,3 +657,12 @@ flat ISA 适配仅准备上下文与共享资源引用，通用生命周期位�
 
 本阶段提交的报告、内核、用户 ELF 与日志归档于
 `.kernel-build/cluster/evidence/native-thread-<commit>/`，清单记录 SHA256。
+
+## 任务身份生命周期（2026-10-12）
+
+TASK/THREAD/DEBUG 从 PID 值改为独立引用对象。任务回收先解除弱绑定，任务
+最后引用释放后允许 PID 复用；保留的旧句柄、dup 和在途 IPC 引用仍标识原对象，
+不会解析到新任务。对象不强引用任务，避免自身句柄环与地址空间长期占用。
+等待、调度、资源、调试、内存、namespace 与事件键复用同一公共身份路径。
+这补齐执行域内部生命周期，不等于全局对象目录或跨重启身份。
+设计、复现命令和证据边界见 [33-task-object-lifetime.md](33-task-object-lifetime.md)。

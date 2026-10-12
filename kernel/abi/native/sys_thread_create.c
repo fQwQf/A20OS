@@ -38,8 +38,8 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
         proc_free_pid(pid);
         return -A20_ERR_NO_MEMORY;
     }
-    int64_t h = a20_handle_install(
-        ht, (void *)(uintptr_t)pid, A20_OBJ_THREAD,
+    int64_t h = a20_handle_install_task(
+        ht, child, A20_OBJ_THREAD,
         A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
             A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
             A20_RIGHT_READ | A20_RIGHT_WRITE);
@@ -91,13 +91,11 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
         return -A20_ERR_BAD_HANDLE;
 
     /* Lookup task handle with WAIT right docs/native-abi/06-security.md §3.2) */
-    a20_handle_entry_t entry;
-    int64_t ret =
-        a20_handle_lookup_task_like(ht, task_h, A20_RIGHT_WAIT, &entry);
+    task_t *target = NULL;
+    int64_t ret = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                      A20_RIGHT_WAIT, &target);
     if (ret < 0)
         return ret;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     if (!target)
         return -A20_ERR_BAD_HANDLE;
 

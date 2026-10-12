@@ -19,6 +19,7 @@
 #include "mm/vmo.h"
 #include "ipc/objstats.h"
 #include "ext/kep.h"
+#include "proc/task_object.h"
 
 a20_objstats_t g_a20_objstats;
 
@@ -34,9 +35,15 @@ int a20_object_is_vfile_backed(uint16_t type)
 
 void a20_object_ref(void *object, uint16_t type)
 {
+#ifdef A20_TASK_OBJECTS_ENABLED
+    if (type == A20_OBJ_TASK || type == A20_OBJ_THREAD ||
+        type == A20_OBJ_DEBUG) {
+        a20_task_object_ref(object);
+        return;
+    }
+#endif
 #ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
-    /* Admission rejects object types absent from this build. PID-valued task
-     * objects follow the existing Native lifetime contract. */
+    /* Other object types are absent from this minimal build. */
     (void)object;
     (void)type;
 #else
@@ -73,7 +80,7 @@ void a20_object_ref(void *object, uint16_t type)
         vmar_acquire((vmar_t *)object);
         break;
     default:
-        /* TASK/THREAD/DEBUG store integer pids — no backing object. */
+        /* No owned backing object for this type. */
         break;
     }
 #endif
@@ -90,9 +97,15 @@ void a20_eventq_on_vfile_destroy(struct vfile *vf)
 
 void a20_object_release(void *object, uint16_t type)
 {
+#ifdef A20_TASK_OBJECTS_ENABLED
+    if (type == A20_OBJ_TASK || type == A20_OBJ_THREAD ||
+        type == A20_OBJ_DEBUG) {
+        a20_task_object_put(object);
+        return;
+    }
+#endif
 #ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
-    /* Admission rejects object types absent from this build. PID-valued task
-     * objects follow the existing Native lifetime contract. */
+    /* Other object types are absent from this minimal build. */
     (void)object;
     (void)type;
 #else

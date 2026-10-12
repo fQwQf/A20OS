@@ -100,3 +100,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 统一运行实例与当前原生执行域状态接口见 [31-runtime-instance.md](31-runtime-instance.md)。
 
 统一 Native 用户线程与生命周期扩展见 [32-native-threads.md](32-native-threads.md)。
+
+同一内核中的稳定任务引用、PID 复用与关闭语义见
+[33-task-object-lifetime.md](33-task-object-lifetime.md)。
