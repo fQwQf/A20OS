@@ -33,10 +33,9 @@ int proc_wait4(int pid, int *status, int flags);
 int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
                                 vaddr_t tls, size_t size, task_t **out);
 struct a20_ht_internal *task_get_a20_ht(task_t *task);
-int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
-                           uint16_t type, a20_rights_t rights);
+int64_t a20_handle_install_task(struct a20_ht_internal *ht, task_t *task,
+                                uint16_t type, a20_rights_t rights);
 int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t handle);
-int64_t a20_handle_lookup_task_like(struct a20_ht_internal *ht,
-                                    a20_handle_t handle, a20_rights_t rights,
-                                    a20_handle_entry_t *out);
+int64_t a20_handle_task_get(struct a20_ht_internal *ht, a20_handle_t handle,
+                            uint16_t type, a20_rights_t rights, task_t **out);
 #endif

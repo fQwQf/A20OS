@@ -1,6 +1,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
+#include "proc/task_object.h"
 #include "core/lock.h"
 #include "core/string.h"
 
@@ -147,14 +148,27 @@ void proc_pid_unregister(task_t *t)
         }
         pp = &(*pp)->pid_hash_next;
     }
+#ifndef A20_TASK_OBJECTS_ENABLED
     if (removed)
         pid_bitmap_clear(t->pid);
+#endif
     spin_unlock_irqrestore(&pid_lock, flags);
     if (removed) {
         proc_lifetime_note_pid_remove();
         proc_put(t);
     }
 }
+
+#ifdef A20_TASK_OBJECTS_ENABLED
+/* Pinned Native operations still call PID-based core APIs. Keep the number
+ * reserved until the last task reference so those calls cannot hit a successor.
+ * Handles retain only the identity object, allowing normal PID recycling. */
+void proc_pid_final_release(task_t *task) {
+    uint64_t flags = spin_lock_irqsave(&pid_lock);
+    pid_bitmap_clear(task->pid);
+    spin_unlock_irqrestore(&pid_lock, flags);
+}
+#endif
 
 task_t *proc_find_get(int pid)
 {

@@ -73,6 +73,12 @@ struct a20_ht_internal *a20_ht_get_ref(struct a20_ht_internal *ht);
 void a20_ht_put_ref(struct a20_ht_internal *ht);
 
 /* ---- Handle operations ---- */
+/* Install a new reference to stable task identity. Caller pins task. A type
+ * of INVALID in task_get accepts TASK/THREAD; DEBUG selects debug sessions. */
+int64_t a20_handle_install_task(struct a20_ht_internal *ht, task_t *task,
+                                uint16_t type, a20_rights_t rights);
+int64_t a20_handle_task_get(struct a20_ht_internal *ht, a20_handle_t handle,
+                            uint16_t type, a20_rights_t rights, task_t **out);
 
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                            uint16_t type, a20_rights_t rights);

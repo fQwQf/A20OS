@@ -699,16 +699,16 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         }
     }
 
-    int64_t child_self_h = a20_handle_install(new_ht, (void *)(uintptr_t)new_pid, A20_OBJ_TASK,
-                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
-                        A20_RIGHT_CONTROL | A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+    int64_t child_self_h = a20_handle_install_task(
+        new_ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+            A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
 
-    int64_t task_h = a20_handle_install(ht, (void *)(uintptr_t)new_pid,
-                                          A20_OBJ_TASK,
-                                          A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                          A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
-                                          A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
-                                          A20_RIGHT_READ | A20_RIGHT_WRITE);
+    int64_t task_h = a20_handle_install_task(
+        ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+            A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
+            A20_RIGHT_READ | A20_RIGHT_WRITE);
     if (task_h < 0) {
         proc_force_exit(new_task, 1);
         proc_make_ready(new_task);
@@ -818,11 +818,10 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
 
     /* Standard handles: self task, root dir, cwd dir (mirror task_spawn). */
     a20_handle_t child_self = A20_HANDLE_NULL;
-    int64_t self_h = a20_handle_install(new_ht, (void *)(uintptr_t)child_pid,
-                                        A20_OBJ_TASK,
-                                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                        A20_RIGHT_STAT | A20_RIGHT_CONTROL |
-                                        A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+    int64_t self_h = a20_handle_install_task(
+        new_ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+            A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
     if (self_h >= 0) {
         child_self = (a20_handle_t)self_h;
         new_task->a20_self_h = child_self;
@@ -878,11 +877,10 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
 
     /* The parent receives a child task handle. */
     a20_handle_t task_h = A20_HANDLE_NULL;
-    int64_t ph = a20_handle_install(ht, (void *)(uintptr_t)child_pid, A20_OBJ_TASK,
-                                    A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                    A20_RIGHT_STAT | A20_RIGHT_CONTROL |
-                                    A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
-                                    A20_RIGHT_ADMIN);
+    int64_t ph = a20_handle_install_task(
+        ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+            A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
     if (ph >= 0) task_h = (a20_handle_t)ph;
     kargs.out_task = task_h;
 

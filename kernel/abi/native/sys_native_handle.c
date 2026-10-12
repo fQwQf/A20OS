@@ -14,6 +14,7 @@
 #include "core/random.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
+#include "proc/task_object.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
 #include "mm/frame.h"
@@ -528,7 +529,7 @@ int64_t sys_a20_handle_poll(const a20_syscall_args_t *args)
     }
     case A20_OBJ_TASK:
     case A20_OBJ_THREAD: {
-        task_t *target = proc_find_get((int)(uintptr_t)entry.object);
+        task_t *target = a20_task_object_get_task(entry.object);
         if (target) {
             if (target->state == PROC_ZOMBIE)
                 active |= 1ull << A20_EVENT_EXITED;

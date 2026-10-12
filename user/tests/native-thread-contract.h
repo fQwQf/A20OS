@@ -108,6 +108,14 @@ static int native_thread_contract(void) {
             a20_thread_yield();
     }
     T_CHECK(ready == 1, 12);
+    a20_handle_t duplicate = A20_HANDLE_NULL;
+    if (execution.features & A20_EXEC_HANDLES) {
+        a20_handle_dup_args_t dup = {.source = args.out_thread,
+                                     .rights_mask =
+                                         A20_RIGHT_WAIT | A20_RIGHT_STAT};
+        T_CHECK(a20_hdl_dup(&dup) == A20_OK, 26);
+        duplicate = dup.out_handle;
+    }
     T_CHECK(a20_task_wait(args.out_thread, A20_TASK_WAIT_NONBLOCK, 0) ==
                 -A20_ERR_WOULD_BLOCK,
             13);
@@ -144,6 +152,17 @@ static int native_thread_contract(void) {
     T_CHECK(a20_atomic32_load(&native_thread_shared.nested, &ready) == A20_OK &&
                 ready == 19,
             18);
+    /* Reaped identity remains safely closeable but cannot resolve a task. */
+    T_CHECK(a20_task_wait(args.out_thread, A20_TASK_WAIT_NONBLOCK, 0) ==
+                    -A20_ERR_BAD_HANDLE &&
+                a20_sched_get(args.out_thread, &sched) == -A20_ERR_BAD_HANDLE,
+            27);
+    if (duplicate != A20_HANDLE_NULL) {
+        T_CHECK(a20_task_wait(duplicate, A20_TASK_WAIT_NONBLOCK, 0) ==
+                        -A20_ERR_BAD_HANDLE &&
+                    a20_hdl_close(duplicate) == A20_OK,
+                28);
+    }
     T_CHECK(a20_hdl_close(args.out_thread) == A20_OK, 19);
     T_CHECK(a20_hdl_close(args.out_thread) == -A20_ERR_BAD_HANDLE, 20);
     T_CHECK(a20_task_wait(args.out_thread, 0, 0) == -A20_ERR_BAD_HANDLE, 21);

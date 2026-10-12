@@ -90,3 +90,7 @@ RV32 同一用户测试仅编译链接；其其他 SDK 头的既有指针转换�
 用户线程与主线程先退出的真实应用生命周期扩展见
 [32-native-threads.md](32-native-threads.md)。它提供同一原生执行域内的共享
 应用线程，不替代全局运行实例身份、对象目录或跨域应用管理。
+
+本内核内的 TASK/THREAD/DEBUG 稳定引用与 PID 复用隔离已实现，见
+[33-task-object-lifetime.md](33-task-object-lifetime.md)。这些对象地址只供内核
+内部引用，不能作为跨域 ID、持久 ID 或重启代次发送到线上。
