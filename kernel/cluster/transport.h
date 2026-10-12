@@ -63,6 +63,13 @@ void a20_clx_link_event(uint32_t transport_id, const uint8_t *next_hop,
 /* ---- 链路计数（02-§10，cluster_link_status 的数据源） ------------------- */
 
 /* RX 侧丢弃/畸形计数（无链路上下文时 nh 传 NULL）。 */
+enum {
+    A20_CLX_RX_DROP_OTHER = 0,
+    A20_CLX_RX_DROP_QUEUE_FULL = 1,
+    A20_CLX_RX_DROP_NO_MEMORY = 2
+};
+void a20_clx_link_rx_drop_kind(uint32_t transport_id, const uint8_t *nh,
+                               uint32_t nh_len, unsigned kind);
 void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
                           uint32_t nh_len);
 void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,
