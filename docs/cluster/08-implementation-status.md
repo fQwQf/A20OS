@@ -723,3 +723,9 @@ Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进�
 
 普通应用部署补充了带 argv/envp 的清单文件和实际 `appctl-run` 命令，复用
 原应用 owner 与按活动数分配接口，见 [38](38-application-launch-inputs.md)。
+
+CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察退出后
+回收记录，固定表可持续执行，运行任务和原 CA/1 记录保持。机制与验收见
+[39](39-application-recycling.md)。
+首次双入口真实运行暴露了一次 AArch64 init 引用下溢；后续重跑通过但根因
+尚未定位，仍保留为长期稳定性验收的未解决项，不能据重跑通过视为修复。

@@ -106,11 +106,14 @@ static void app_test_init(task_t *control, size_t length) {
                               app_test_variant, 1, app_test_record, 1, 0,
                               app_test_start, app_test_poll, app_test_stop,
                               app_test_release));
-    app_test_request = (a20_app_request_t){.op = A20_APP_START,
-                                           .nonce = 1,
-                                           .controller = controller,
-                                           .client = controller,
-                                           .manifest = {0xd1}};
+    app_test_request =
+        (a20_app_request_t){.op = A20_APP_START,
+                            .version = 2,
+                            .token = a20_app_owner_offer(&app_test_owner),
+                            .nonce = 1,
+                            .controller = controller,
+                            .client = controller,
+                            .manifest = {0xd1}};
     app_test_length = length;
 }
 static void app_test_launch(void) {
@@ -138,4 +141,19 @@ static void app_test_finished(void) {
     result = app_test_call();
     CHECK(result.status == A20_APP_STALE && app_test_starts == 1);
     printf("[PROGRAM-APPS] PASS exit tombstone stale owner release=1\n");
+    app_test_request.controller.serial--;
+    app_test_request.op = A20_APP_RELEASE;
+    result = app_test_call();
+    CHECK(!result.status && !result.occupied && !result.active &&
+          app_test_releases == 1);
+    uint64_t retired = app_test_request.token;
+    app_test_request.op = A20_APP_START;
+    result = app_test_call();
+    CHECK(result.status == A20_APP_STALE && app_test_starts == 1);
+    app_test_request = (a20_app_request_t){.op = A20_APP_HELLO, .version = 2};
+    result = app_test_call();
+    CHECK(!result.status && result.token && result.token != retired &&
+          !result.occupied && !result.active);
+    printf("[PROGRAM-APPS] PASS recycle old START stale slot=available "
+           "release=1\n");
 }

@@ -45,7 +45,7 @@ argv/envp 交给真实 task_spawn v2，沿用 root/cwd/stdin/stdout/stderr 句�
 ```
 
 参数依次为清单 UUID、非零十进制 nonce、启动预算毫秒、1–16 个候选域 UUID。
-预算不超过 30 秒。命令通过同一 `a20_app_start_any` 选择活动程序数最少的兼容
+预算不超过 30 秒。新版命令通过 `a20_app_start_any_reusable` 选择活动程序数最少的兼容
 域，并打印实际 owner、controller、client 和 nonce。它保持调用任务存活，
 查询真实根任务直到退出，把实际退出码作为命令退出码返回。启动预算不限制
 程序运行时长；收到 Native SIGINT/SIGTERM 时向原 owner 提交根任务停止，
@@ -56,7 +56,8 @@ argv/envp 交给真实 task_spawn v2，沿用 root/cwd/stdin/stdout/stderr 句�
 程序输出仍使用所在节点 appd 继承的标准输出，尚未代理到发起命令的终端。
 命令行当前选择已部署清单，不上传任意 argv/envp 或应用文件。已有客户端
 身份约束意味着命令退出后不能换一个 CLI 任务继续使用原 ticket。appd 保留的
-8 次启动上限（包括终态）也仍存在，长期持续运行所需的安全回收将继续实现。
+8 项记录容量不变，但新版 CLI 已在观察终态后回收 CA/2 记录，不再有正常
+累计 8 次执行上限；协议兼容性和保留记录的边界见 [39](39-application-recycling.md)。
 
 ## 验证
 

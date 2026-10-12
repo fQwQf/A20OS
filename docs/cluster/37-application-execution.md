@@ -65,8 +65,9 @@ clusterd 成员表生成。每次候选查询检查 CD/2 实例身份、传输�
 一次启动由 `(controller object_id, client object_id, nonce)` 定位。controller
 是实际 appd 任务的稳定对象名，因此服务进程重启即改变该身份；不是仅依赖
 内核 boot_epoch。请求键对应固定 manifest，重复 START 返回同一根任务/结果，
-改用另一 manifest 则冲突。当前每个 owner 最多保留 8 次启动，包括终态。
-需要长期运行时的持久记录和显式安全回收协议尚未实现。
+改用另一 manifest 则冲突。CA/1 每个 owner 最多保留 8 次启动，包括终态。
+新增 CA/2 的显式回收和持续执行见 [39](39-application-recycling.md)，原 CA/1
+记录不会被隐式淘汰。跨重启持久记录仍未实现。
 
 | 状态 | 实际含义 |
 |---|---|
