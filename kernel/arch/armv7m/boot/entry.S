@@ -216,6 +216,19 @@ armv7m_preempt_trampoline:
 
     .thumb_func
 SysTick_Handler:
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    tst lr, #4
+    ite eq
+    mrseq r0, msp
+    mrsne r0, psp
+    /* The capture hook needs all interrupted callee-saved user registers. */
+    push {r3-r11, lr}
+    add r1, sp, #4
+    mov r2, lr
+    bl armv7m_program_tick
+    pop {r3-r11, lr}
+    bx lr
+#else
 #ifdef CONFIG_MCU_SHARED_KERNEL
     /* Keep AAPCS 8-byte stack alignment at the C exception hook. */
     push {r3, lr}
@@ -223,10 +236,6 @@ SysTick_Handler:
     push {lr}
 #endif
     bl armv7m_systick_handler
-#ifdef CONFIG_MCU_NATIVE_PROGRAM
-    pop {r3, lr}
-    bx lr
-#else
 #ifdef CONFIG_MCU_SHARED_KERNEL
     pop {r3, pc}
 #else

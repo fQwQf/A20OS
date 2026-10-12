@@ -6,6 +6,7 @@
 #include "program_stack.h"
 uint64_t armv7m_exception_stack[ARMV7M_EXCEPTION_STACK_BYTES /
                                 sizeof(uint64_t)] MCU_PRIVATE_BSS;
+uint32_t armv7m_program_user_ticks MCU_PRIVATE_BSS;
 #endif
 
 volatile uint32_t armv7m_trap_cause MCU_PRIVATE_BSS;

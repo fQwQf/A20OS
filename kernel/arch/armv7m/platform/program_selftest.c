@@ -18,6 +18,10 @@ static task_t *program_task;
 static size_t program_heap_baseline;
 unsigned program_test_done;
 unsigned program_test_rejections;
+uint32_t program_test_compute_pc[2];
+#ifdef CONFIG_NATIVE_FLAT_FILES
+unsigned program_test_compute_enabled = 1;
+#endif
 #define CHECK(x)                                                               \
     do {                                                                       \
         if (!(x))                                                              \
@@ -53,7 +57,11 @@ static void controller(void) {
     CHECK(record->objects_passed == 1);
 #ifdef CONFIG_NATIVE_FLAT_FILES
     CHECK(record->files_passed == 1 && record->spawn_passed == 1);
-    CHECK(record->control_passed == 1);
+    CHECK(program_test_compute_enabled == 1 && record->control_passed == 1 &&
+          record->compute_passed == 1);
+    for (unsigned i = 0; i < 2; i++)
+        program_test_compute_pc[i] = record->compute_loop_pc[i];
+    printf("[PROGRAM-COMPUTE-CANCEL] PASS workers=2 exit=137 pure-user=1\n");
     printf("[PROGRAM-TASK-CONTROL] PASS signal=12 masked=1 exit=137\n");
     printf("[PROGRAM-SPAWN] PASS children=2 exit=37 args=4 env=2 work=32\n");
     printf("[PROGRAM-FILES] PASS bytes=2048 fnv=60f4edc5 shared-native-io=1\n");

@@ -132,3 +132,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 实际 Native 任务的公共停止、信号检查点及资源回收见
 [43-native-task-control.md](43-native-task-control.md)。
+
+持续纯计算 Native 线程的用户态时间片、停止与实际执行检查见
+[44-native-user-preemption.md](44-native-user-preemption.md)。
