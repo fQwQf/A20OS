@@ -327,6 +327,11 @@ typedef struct task_t {
     int       exit_signal;
     int       pdeathsig;       /* PR_SET_PDEATHSIG: one-shot signal delivered
                                 * when the parent exits (0 = none) */
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
+#define PROC_GROUP_EXIT_NOTIFY_ENABLED 1
+    /* tasklist_lock owns the once-only reportable group-exit notification. */
+    int exit_parent_notified;
+#endif
     int      *clear_child_tid;
     uintptr_t robust_list_head;
 

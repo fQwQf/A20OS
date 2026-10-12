@@ -217,6 +217,29 @@ void proc_wake_child_waiters(task_t *parent)
     spin_unlock_irqrestore(&tasklist_lock, lf);
 }
 
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+/* Caller holds tasklist_lock. Signal-based parents (e.g. a POSIX shell) may
+ * consume SIGCHLD with WNOHANG before the last sibling exits. Publish exactly
+ * one notification when the whole group is reportable, and pin its parent
+ * across the unlocked wake/signal work. No remote current task is accessed. */
+static task_t *proc_group_exit_parent_get_locked(task_t *leader, int *signal) {
+    if (!leader || leader->exit_parent_notified ||
+        proc_task_state_get(leader) != PROC_ZOMBIE ||
+        !proc_tg_group_dead_locked(leader))
+        return NULL;
+    task_t *parent = leader->parent;
+    if (!parent || parent == proc_idle_task() ||
+        proc_child_auto_reaps(leader, parent))
+        return NULL;
+    task_t *referenced = proc_get(parent);
+    if (!referenced)
+        return NULL;
+    leader->exit_parent_notified = 1;
+    *signal = leader->exit_signal;
+    return referenced;
+}
+#endif
+
 static void proc_release_exiting_mm(task_t *t)
 {
     if (!t)
@@ -532,6 +555,13 @@ void proc_exit(int exit_code)
      * that leader reportable, so wake the leader's parent after checking the
      * group under tasklist_lock and taking references for the unlocked wake. */
     task_t *completed_parent = NULL;
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    int completed_signal = 0;
+    lf = spin_lock_irqsave(&tasklist_lock);
+    completed_parent = proc_group_exit_parent_get_locked(
+        thread_leader ? thread_leader : t, &completed_signal);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+#else
     if (thread_leader) {
         lf = spin_lock_irqsave(&tasklist_lock);
         if (proc_task_state_get(thread_leader) == PROC_ZOMBIE &&
@@ -541,6 +571,7 @@ void proc_exit(int exit_code)
             completed_parent = proc_get(thread_leader->parent);
         spin_unlock_irqrestore(&tasklist_lock, lf);
     }
+#endif
 
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
@@ -557,10 +588,14 @@ void proc_exit(int exit_code)
     }
     if (completed_parent)
         proc_wake_child_waiters(completed_parent);
+#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     proc_put(completed_parent);
+#endif
     proc_put(thread_leader);
+#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
     int notify_parent_pid =
         !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
+#endif
 
     if (vfork_completed)
         complete(&t->vfork_done);
@@ -594,8 +629,14 @@ void proc_exit(int exit_code)
      * terminated, stopped tracees are resumed. */
     proc_debug_tracer_exiting(t);
 
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    if (completed_parent && completed_signal > 0)
+        signal_send_task(completed_parent, completed_signal);
+    proc_put(completed_parent);
+#else
     if (notify_parent_pid > 0)
         signal_send(notify_parent_pid, t->exit_signal);
+#endif
 
     sched();
     panic("proc_exit: sched returned");

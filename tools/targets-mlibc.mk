@@ -21,6 +21,20 @@ $(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
 
 mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
 
+# Optional full-libc concurrency workload; not part of ordinary rootfs builds.
+MLIBC_THREADS_BIN := $(NATIVE_BUILD_DIR)/mlibc-threads-$(NATIVE_TAG)
+.PHONY: mlibc-threads
+ifeq ($(ARCH),riscv64)
+$(MLIBC_THREADS_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_threads.c user/mlibc/a20-mlibc.ld $(wildcard user/liba20rt/*.h) kernel/include/uapi/a20/execution.h kernel/include/uapi/a20/execution_domain.h
+	$(call MLIBC_LINK_RECIPE,-O2 -Iuser user/tests/test_mlibc_threads.c,-lc -lpthread -lm -lrt,$@)
+
+mlibc-threads: $(MLIBC_THREADS_BIN)
+else
+mlibc-threads:
+	@echo "mlibc-threads requires the existing riscv64 full-libc port" >&2
+	@exit 1
+endif
+
 define MLIBC_LINK_RECIPE
 @mkdir -p $(dir $(3))
 $(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \

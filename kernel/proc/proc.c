@@ -656,6 +656,14 @@ void proc_init_secondary(unsigned cpu_id)
 
 task_t *proc_idle_task(void) { return &idle_tasks[cpu_current_id()]; }
 
+/* A remote current slot is a placement hint, not a referenced task pointer.
+ * Compare with permanent idle storage; never dereference a remote task which
+ * may switch out and be reaped immediately after the acquire load. */
+int proc_cpu_is_idle(unsigned cpu) {
+    task_t *current = proc_current_on_cpu(cpu);
+    return !current || current == &idle_tasks[cpu];
+}
+
 pt_root_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 /* ---- Base task allocation ---- */

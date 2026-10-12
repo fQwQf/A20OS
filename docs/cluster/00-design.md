@@ -138,3 +138,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
 [45-native-execution-reliability.md](45-native-execution-reliability.md)。
+
+无 CPU 绑定的真实 pthread 执行、空闲 CPU 接取和线程组终结通知见
+[46-unbound-program-execution.md](46-unbound-program-execution.md)。
