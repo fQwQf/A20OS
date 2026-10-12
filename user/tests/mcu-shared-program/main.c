@@ -11,6 +11,7 @@
 #define A20_SPAWN_FLAT_TEST 1
 #include "../native-spawn-contract.h"
 #include "../native-task-control-contract.h"
+#include "../native-compute-cancel-contract.h"
 #endif
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
@@ -83,6 +84,12 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
           82);
     record->domain_mask_before = domain.online_mask;
     CHECK(native_runtime_contract() == 0, 85);
+#ifdef A20_NATIVE_FILE_TEST
+    record->compute_loop_pc[0] = (uintptr_t)native_compute_loop0;
+    record->compute_loop_pc[1] = (uintptr_t)native_compute_loop1;
+    CHECK(native_compute_cancel_contract() == 0, 91);
+    record->compute_passed = 1;
+#endif
     int thread_result = native_thread_contract();
     record->balance_mask = native_balance_mask();
     record->balance_jobs =

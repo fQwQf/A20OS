@@ -19,6 +19,8 @@
 unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
+extern void armv7m_systick_handler(void);
+extern uint32_t armv7m_program_user_ticks;
 #ifdef CONFIG_NATIVE_FLAT_FILES
 extern int64_t sys_a20_task_spawn(const a20_syscall_args_t *args);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
@@ -511,6 +513,63 @@ static void program_syscall_thread(void) {
     panic("program syscall resume returned");
 }
 
+/* The exception hook only captures registers and selects a Thread-mode entry.
+ * Scheduling/exit happens after EXC_RETURN, on this task's own PSP. */
+static void program_capture_user(armv7m_program_t *p, const uint32_t *frame,
+                                 const uint32_t *callee) {
+    unsigned padding = (frame[7] & 0x200U) ? 4 : 0;
+    if (!within((uintptr_t)p->stack, p->stack_size, (uintptr_t)frame,
+                32 + padding))
+        panic("program exception stack bounds");
+    trap_context_t *r = &p->registers;
+    memcpy(&r->r[0], frame, 16);
+    memcpy(&r->r[4], callee, 32);
+    r->r[12] = frame[4];
+    r->lr = frame[5];
+    r->pc = frame[6];
+    r->xpsr = frame[7];
+    r->sp = (uintptr_t)frame + 32 + padding;
+    p->in_kernel = 1;
+}
+static void program_redirect_user(uint32_t *frame, void (*entry)(void)) {
+    unsigned padding = frame[7] & 0x200U;
+    frame[6] = (uintptr_t)entry & ~1U;
+    frame[7] = 0x01000000U | padding;
+    uint32_t control;
+    __asm__ __volatile__("mrs %0, control" : "=r"(control));
+    control &= ~1U;
+    __asm__ __volatile__("msr control, %0\nisb" ::"r"(control) : "memory");
+}
+static void program_interrupt_thread(void) {
+    proc_check_exit_pending();
+    proc_yield();
+    proc_check_exit_pending();
+    __asm__ __volatile__("svc #0x21" ::: "memory");
+    panic("program interrupt resume returned");
+}
+void armv7m_program_tick(uint32_t *frame, const uint32_t *callee,
+                         uint32_t exception_return) {
+    armv7m_systick_handler();
+    task_t *task = proc_current();
+    armv7m_program_t *p = task ? task->arch_program : NULL;
+    uint32_t control;
+    __asm__ __volatile__("mrs %0, control" : "=r"(control));
+    if (!frame || !p || p->in_kernel || !(control & 1U) ||
+        !(exception_return & 4U) || task->state != PROC_RUNNING)
+        return;
+    int redirect = __atomic_load_n(&task->exit_pending, __ATOMIC_ACQUIRE);
+    /* User preemption is separate from CONFIG_KERNEL_PREEMPT: the MCU
+     * intentionally keeps privileged kernel code cooperative. */
+    if (++armv7m_program_user_ticks >= 10U) {
+        armv7m_program_user_ticks = 0;
+        redirect = 1;
+    }
+    if (!redirect)
+        return;
+    program_capture_user(p, frame, callee);
+    program_redirect_user(frame, program_interrupt_thread);
+}
+
 uint32_t *armv7m_program_svc(uint32_t *frame, const uint32_t *callee,
                              uint32_t exception_return) {
     task_t *task = proc_current();
@@ -545,23 +604,8 @@ uint32_t *armv7m_program_svc(uint32_t *frame, const uint32_t *callee,
             frame[0] = (uint32_t)-A20_ERR_NOT_SUPPORTED;
             return NULL;
         }
-        unsigned padding = (frame[7] & 0x200U) ? 4 : 0;
-        if (!within((uintptr_t)p->stack, p->stack_size, (uintptr_t)frame,
-                    32 + padding))
-            panic("program exception stack bounds");
-        trap_context_t *r = &p->registers;
-        memcpy(&r->r[0], frame, 16);
-        memcpy(&r->r[4], callee, 32);
-        r->r[12] = frame[4];
-        r->lr = frame[5];
-        r->pc = frame[6];
-        r->xpsr = frame[7];
-        r->sp = (uintptr_t)frame + 32 + padding;
-        p->in_kernel = 1;
-        frame[6] = (uintptr_t)program_syscall_thread & ~1U;
-        frame[7] = 0x01000000U | (padding ? 0x200U : 0);
-        control &= ~1U;
-        __asm__ __volatile__("msr control, %0\nisb" ::"r"(control) : "memory");
+        program_capture_user(p, frame, callee);
+        program_redirect_user(frame, program_syscall_thread);
         return NULL;
     }
     armv7m_svc_handler(frame);

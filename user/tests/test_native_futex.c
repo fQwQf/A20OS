@@ -17,6 +17,7 @@
 #include "native-file-contract.h"
 #include "native-spawn-contract.h"
 #include "native-task-control-contract.h"
+#include "native-compute-cancel-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -81,6 +82,19 @@ int main(int argc, char **argv, char **envp)
     if (native_runtime_contract())
         return fail(out, 96, "runtime identity",
                     sizeof("runtime identity") - 1);
+    int compute_result = native_compute_cancel_contract();
+    if (compute_result) {
+        char error[] = "NATIVE_COMPUTE_CANCEL_ERROR: 00\n";
+        error[sizeof(error) - 4] = '0' + compute_result / 10;
+        error[sizeof(error) - 3] = '0' + compute_result % 10;
+        a20_hdl_write_buf(out, error, sizeof(error) - 1, 0);
+        return fail(out, 101, "compute cancel", sizeof("compute cancel") - 1);
+    }
+    a20_hdl_write_buf(
+        out, "NATIVE_COMPUTE_CANCEL: PASS workers=2 exit=137 pure-user=1\n",
+        sizeof("NATIVE_COMPUTE_CANCEL: PASS workers=2 exit=137 pure-user=1\n") -
+            1,
+        0);
     int file_result = native_file_contract();
     if (file_result) {
         char error[] = "NATIVE_FILE_ERROR: 00\n";

@@ -65,8 +65,8 @@ void armv7m_systick_handler(void) {
     mcu_fabric_poll_ipi();
     if (arch_current_cpu_id() == 0)
         __atomic_fetch_add(&stm32_ticks, 1, __ATOMIC_RELEASE);
-    /* First native multi-chip milestone is cooperative. SysTick on each chip
-     * services IPIs; deadlines all use CPU0's shared monotonic clock. */
+    /* Kernel code remains cooperative. The optional Native user return hook
+     * can yield safely after this IRQ; deadlines use CPU0's shared clock. */
 #else
     stm32_ticks++;
     armv7m_platform_systick(stm32_ticks);

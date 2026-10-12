@@ -7,6 +7,7 @@ Optional --backend routes shared data AND instruction-byte checks through RTL.
 No task state is modified by the host. Not physical board evidence.
 """
 import argparse
+from collections import Counter
 import hashlib
 import importlib.util
 import json
@@ -43,6 +44,7 @@ class ProgramDomain(rtl.RtlDomain):
         assert self.program_mode, "requires MCU_NATIVE_PROGRAM=1 selftest firmware"
         self.exceptions = [0] * self.n
         self.user_instructions = [0] * self.n
+        self.user_pc_counts = [Counter() for _ in range(self.n)]
         self.syscall_numbers = set()
         self.svc_count = [0] * self.n
         self.returns = [0] * self.n
@@ -158,6 +160,7 @@ class ProgramDomain(rtl.RtlDomain):
             assert engine.reg_read(UC_ARM_REG_XPSR) & 0x1ff == 0
             assert self.read_hardware(cpu, address, size) == bytes(engine.mem_read(address, size))
             self.user_instructions[cpu] += 1
+            self.user_pc_counts[cpu][address] += 1
 
     def step(self, cpu, inject_tick):
         engine = self.engines[cpu]
@@ -208,6 +211,29 @@ def main():
             assert any("[PROGRAM-TASK-CONTROL] PASS signal=12 masked=1 exit=137" in log for log in domain.logs)
             assert {0x0201, 0x0203, 0x020f, 0x0210} <= domain.syscall_numbers
             assert {0x0400, 0x0401, 0x0105, 0x0403} <= domain.syscall_numbers
+        compute = "program_test_compute_enabled" in domain.symbols
+        if compute:
+            assert any("[PROGRAM-COMPUTE-CANCEL] PASS workers=2 exit=137 pure-user=1" in log for log in domain.logs)
+            with (args.elf.parent / "mcu-test-program.elf").open("rb") as stream:
+                table = kernel.ELFFile(stream).get_section_by_name(".symtab")
+                sizes = {sym.name: int(sym["st_size"]) for sym in table.iter_symbols()}
+            pcs = domain.scalar("program_test_compute_pc", 8)
+            loop_counts = []
+            for index in range(2):
+                start = ((pcs >> (32 * index)) & 0xffffffff) & ~1
+                size = sizes["native_compute_loop" + str(index)]
+                assert kernel.SHARED <= start < kernel.SHARED + domain.shared_size and size > 0
+                counts = [sum(n for pc, n in counter.items() if start <= pc < start + size)
+                          for counter in domain.user_pc_counts]
+                assert sum(counts) >= 1000, (index, counts)
+                loop_counts.append(counts)
+            compute_mask = sum(1 << cpu for cpu in range(domain.n)
+                               if sum(counts[cpu] for counts in loop_counts))
+            assert compute_mask.bit_count() >= 2, (compute_mask, loop_counts)
+            assert sum(domain.exits) == 14
+            result.update(native_pure_compute_cancel_checked=True,
+                          pure_compute_loop_instructions=loop_counts,
+                          pure_compute_cpu_mask=compute_mask)
         assert all(n > 0 for n in domain.user_instructions[:2])
         assert all(n > 0 for n in domain.private_stack_checks[:2])
         assert {0x0002, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers

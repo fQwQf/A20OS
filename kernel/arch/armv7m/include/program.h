@@ -34,6 +34,8 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
 int mcu_program_user_range(const void *pointer, size_t length);
 uint32_t *armv7m_program_svc(uint32_t *frame, const uint32_t *callee,
                              uint32_t exception_return);
+void armv7m_program_tick(uint32_t *frame, const uint32_t *callee,
+                         uint32_t exception_return);
 extern unsigned mcu_program_live;
 #endif
 #endif

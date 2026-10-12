@@ -12,5 +12,6 @@ typedef struct mcu_program_test_record {
     uint32_t objects_passed;
     uint32_t balance_mask, balance_jobs, balance_sum;
     uint32_t files_passed, spawn_passed, control_passed;
+    uint32_t compute_passed, compute_loop_pc[2];
 } mcu_program_test_record_t;
 #endif
