@@ -103,6 +103,8 @@ void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages) {
 
 /* From kernel/proc/exit.c: BPF program references. */
 
+/* Native flat programs use the common futex engine. */
+#ifndef CONFIG_MCU_NATIVE_PROGRAM
 /* From kernel/proc/exit.c: robust futex list. */
 void exit_robust_list(task_t *t) {
     (void)t;
@@ -114,6 +116,8 @@ int futex_wake_user(int *uaddr, int nr) {
     (void)nr;
     return 0;
 }
+
+#endif
 
 /* From kernel/proc/exit.c: MM teardown for exec/exit. */
 void mm_destroy(mm_struct_t *mm) {
@@ -167,6 +171,12 @@ void vfs_task_fs_pins_copy(task_t *dst, const task_t *src) {
 #ifdef CONFIG_MCU_NATIVE_PROGRAM
 #include "program.h"
 #include "core/string.h"
+long copy_from_user(void *dst, const void *src, size_t n) {
+    if (!mcu_program_user_range(src, n))
+        return -EFAULT;
+    memcpy(dst, src, n);
+    return 0;
+}
 long copy_to_user(void *dst, const void *src, size_t n) {
     if (!mcu_program_user_range(dst, n)) return -EFAULT;
     memcpy(dst, src, n);

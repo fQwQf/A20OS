@@ -190,7 +190,7 @@ typedef struct a20_thread_create_args {
     uint32_t version;
     uint64_t entry;              /* 入口函数地址 */
     uint64_t arg;                /* 入口参数 */
-    uint64_t stack_base;         /* 栈基址 */
+    uint64_t stack_base;         /* 16 字节对齐的栈顶（高地址） */
     uint64_t stack_size;         /* 栈大小 */
     uint64_t tls_base;           /* TLS 基址 */
     uint32_t flags;
@@ -198,6 +198,11 @@ typedef struct a20_thread_create_args {
     a20_handle_t out_thread;     /* 输出：新线程 handle */
 } a20_thread_create_args_t;
 ```
+
+线程入口是接收 `arg` 的本机 C 函数，必须显式调用 `thread_exit`，不能返回。
+调用者在所有 ISA 上提供 16 字节对齐的栈顶；架构入口负责本机调用约定所需的
+偏移，例如 x86-64 在直接函数入口预留 8 字节，使 RSP 模 16 为 8。
+此规则仅用于 Native `thread_create`，不修改 Linux clone 或进程启动。
 
 ### a20_task_status_t — 进程退出状态
 
@@ -1013,9 +1018,9 @@ Linux 的 `inotify_init`/`inotify_add_watch`/`inotify_rm_watch` 是独立于 epo
 
 ## 22. Sync 结构体
 
-futex 是**用户地址上的同步原语，不是内核对象**，因此不分配 handle、不携带 rights。这与 Zircon `zx_futex_wait`/`zx_futex_wake` 的定位一致：快速路径是纯用户态原子操作，只有竞争路径才进入内核睡眠。
+futex 是**用户地址上的同步原语，不是内核对象**，因此不分配 handle、不携带 rights。这与 Zircon `zx_futex_wait`/`zx_futex_wake` 的定位一致：支持用户硬件原子的 profile 可以在无竞争路径使用原子指令；通用应用也可使用 Native atomic32 系统调用。
 
-早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适，Sync 分区因此回归地址型 futex。快速路径（无竞争）与 Linux futex 一样快，纯用户态 CAS；慢路径通过 `futex_wait`/`futex_wake` 进入内核，复用内核 futex 等待表。跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效，等待键同时匹配虚拟地址与物理页。
+早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适，Sync 分区因此回归地址型 futex。无竞争路径可使用用户态 CAS；跨 MCU 的通用路径使用 `atomic32`，不以性能作为首轮目标。慢路径通过 `futex_wait`/`futex_wake` 进入内核，复用内核 futex 等待表。跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效，等待键同时匹配虚拟地址与物理页。
 
 ```c
 #define A20_TIMEOUT_INFINITE  ((uint64_t)-1)  /* futex_wait 无限等待 */
@@ -1043,3 +1048,21 @@ typedef struct a20_futex_wake_args {
 错误映射：`A20_ERR_WOULD_BLOCK`（值不匹配）、`A20_ERR_TIMED_OUT`（超时）、`A20_ERR_FAULT`（地址无效）、`A20_ERR_INVALID_ARGUMENT`（对齐/flag 错误）、`A20_ERR_INTERRUPTED`（被中断）。
 
 能力发现：`abi_info.feature_bits[0]` 的 bit 2 表示 Sync (0x0B00) 分区可用。
+
+
+`atomic32`（0x0B02）使用以下固定 40 B 结构，所有操作均顺序一致；
+LOAD=0、STORE=1、EXCHANGE=2、COMPARE_EXCHANGE=3。
+
+```c
+typedef struct a20_atomic32_args {
+    uint32_t size, version;
+    uint64_t addr;
+    uint32_t operation, expected, desired, flags;
+    uint32_t observed, exchanged;
+} a20_atomic32_args_t;
+```
+
+`observed` 是观察到的旧值，CAS 成功时 `exchanged=1`，其他情况为 0。
+`abi_info.feature_bits[0]` bit 3 与 `execution_info` 的 ATOMIC32 位分别公布
+接口可用性。地址权限、超时与副作用错误语义及跨平台实现见
+[公共应用同步](../cluster/29-native-sync.md)。

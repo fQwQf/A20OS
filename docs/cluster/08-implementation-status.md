@@ -620,3 +620,17 @@ ABI 边界、文档漂移/引用和裁剪注册表门禁通过，证据归档为
 `evidence/execution-<commit>/`。完整目标保持未完成。
 
 全仓格式门禁仍为 114 个既有漂移，本次没有增加失败，也未修改格式豁免基线。
+
+## 公共 Native 应用同步（2026-10-12）
+
+MCU Native 程序与服务器复用 `sys_native_sync.c` 和 `ipc/futex.c`，新增
+0x0B02 atomic32 公共接口，解决非特权应用无法直接使用特权 fabric 原子库的
+缺口。执行能力新增 ATOMIC32 位；MCU 同时公布真实接通的 FUTEX。默认 MCU
+配置仍裁剪相关代码。详细契约、测试入口与限制见 [29-native-sync.md](29-native-sync.md)。
+完整跨板硬件矩阵、Native 运行时和 Minecraft Java 客户端仍未完成。
+
+实际验收：RV64、AArch64、x86-64 双核内核运行同一 Native 同步测试均通过，
+MCU 原生应用及 RTL 联合验证通过，原有集群作业和 Linux futex 压力回归通过。
+x86 测试暴露的 C 线程入口栈偏移已放入架构适配，Linux clone 不走该路径；
+RV32 Native 同步程序编译链接通过，尚未声明其用户态开机验收。证据随提交
+保存在 `evidence/native-sync-<commit>/`，格式门禁的既有 114 项失败未增加。

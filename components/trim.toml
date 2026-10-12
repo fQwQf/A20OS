@@ -52,6 +52,8 @@ sources = [
     "kernel/core/fabric_atomics.c",
     "kernel/abi/native/sys_thread_basic.c",
     "kernel/abi/native/sys_execution.c",
+    "kernel/abi/native/sys_native_sync.c",
+    "kernel/ipc/futex.c",
     "kernel/core/klog.c",
     "kernel/core/timekeeping.c",
     "kernel/core/stack_protector.c",

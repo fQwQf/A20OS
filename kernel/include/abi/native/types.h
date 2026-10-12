@@ -982,6 +982,18 @@ typedef struct a20_handle_poll_args {
  * zx_futex_wait / zx_futex_wake: atomically compare *addr against expected,
  * sleeping on equality and otherwise returning A20_ERR_WOULD_BLOCK at once. */
 
+/* 32-bit user atomics: sequentially consistent on every execution domain.
+ * The kernel pins the mapping and uses its configured atomic provider. */
+#define A20_ATOMIC32_LOAD 0u
+#define A20_ATOMIC32_STORE 1u
+#define A20_ATOMIC32_EXCHANGE 2u
+#define A20_ATOMIC32_COMPARE_EXCHANGE 3u
+typedef struct a20_atomic32_args {
+    uint32_t size, version;
+    uint64_t addr;
+    uint32_t operation, expected, desired, flags;
+    uint32_t observed, exchanged;
+} a20_atomic32_args_t;
 
 typedef struct a20_futex_wait_args {
     uint32_t       size;

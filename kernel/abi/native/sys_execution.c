@@ -25,7 +25,8 @@ int64_t sys_a20_execution_info(const a20_syscall_args_t *args) {
         .calling_abi = ARCH_NATIVE_CALL_ABI,
         .native_major = A20_ABI_MAJOR,
         .native_minor = A20_ABI_MINOR,
-        .features = A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE,
+        .features =
+            A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE | A20_EXEC_ATOMIC32,
 #ifdef CONFIG_NOMMU
         .memory_model = A20_EXEC_MEMORY_FLAT,
 #else
@@ -41,6 +42,9 @@ int64_t sys_a20_execution_info(const a20_syscall_args_t *args) {
     info.features |= A20_EXEC_HANDLES | A20_EXEC_FUTEX;
     if (sizeof(void *) == 8)
         info.features |= A20_EXEC_WIDE_ARGS;
+#endif
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    info.features |= A20_EXEC_FUTEX;
 #endif
     if (copy_to_user(out, &info, sizeof(info)) < 0)
         return -A20_ERR_FAULT;

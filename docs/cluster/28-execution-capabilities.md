@@ -27,9 +27,10 @@ SDK `a20_cluster_execution_query(endpoint, budget_ms, &info)` 校验完整 CW
 | 40 | 特权内核原子机制：NATIVE=1、FABRIC_GATE=2 |
 | 44–63 | 保留五个 u32，必须为零 |
 
-接口位为 THREAD_BASIC=1、NATIVE_IMAGE=2、HANDLES=4、FUTEX=8、WIDE_ARGS=16。
-MCU 实验 Native profile 目前只发布 BASIC 和 IMAGE；不能因内核原子函数可用
-就宣称非特权程序具备 futex、线程创建或用户态原子库。
+接口位为 THREAD_BASIC=1、NATIVE_IMAGE=2、HANDLES=4、FUTEX=8、WIDE_ARGS=16、
+ATOMIC32=32。MCU 实验 Native profile 发布 BASIC、IMAGE、FUTEX 和 ATOMIC32；
+等待/唤醒与原子系统调用见 [29-native-sync.md](29-native-sync.md)。
+这些位不表示已支持用户线程创建或直接调用特权原子库。
 WIDE_ARGS 表示现有 syscall 入口可传递完整 64 位标量，当前只对 64 位 profile
 发布。它不表示其他所有 Native 调用已经实现。
 FLAT 只描述无独立 VM 的地址模型，不证明多个芯片实际连接了共享 RAM。
@@ -81,5 +82,5 @@ jobd 二叉归约和词频作业。MCU 原生应用通过真实 SVC 调用相同
 32 位/Thumb soft/flat/fabric profile，并验证短容量和跨越用户范围的输出拒绝；
 随后继续原有同 PID/栈跨 CPU 迁移与正常退出回收。
 
-物理板、非 ARM MCU 多芯片端口、应用同步、完整 Native ABI/JVM/图形输入和
+物理板、非 ARM MCU 多芯片端口、完整 Native ABI/JVM/图形输入和
 Minecraft Java 客户端仍待完成；执行描述不会将这些待完成能力自动变成可用。

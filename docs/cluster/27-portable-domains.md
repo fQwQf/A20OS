@@ -113,8 +113,8 @@ atomic gate，使用完整屏障；较弱 memory_order 也按此更强顺序实�
 RV32 进程使用测试专用 Linux write/exit 汇编 shim，在 qemu-riscv32 中执行；
 这不构成 RV32 MCU 内核或物理板证据。ARMv7-M 完整固件已改用同一公共原子
 运行库，内核线程与原生应用/RTL 回归通过。这个运行库属于特权内核，当前
-非特权 MCU 应用尚不能直接使用它作为线程同步 API；后续需接统一 Native
-线程同步系统调用，不能让应用直接调用内核的 IRQ 屏蔽适配。
+非特权 MCU 应用通过 [公共 Native 同步接口](29-native-sync.md) 使用同一个
+provider；不能直接调用内核的 IRQ 屏蔽适配。
 
 
 ## 树莓派与服务器的共同功能验收

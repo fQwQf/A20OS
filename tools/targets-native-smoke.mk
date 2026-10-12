@@ -240,3 +240,8 @@ smoke-native-debug:
 .PHONY: smoke-native-cluster-supervisor
 smoke-native-cluster-supervisor:
 	$(PYTHON) tools/smoke.py smoke-native-cluster-supervisor
+
+# One Native application contract across server ISAs, real kernel boots.
+.PHONY: check-native-sync
+check-native-sync:
+	$(PYTHON) tools/check-native-sync.py

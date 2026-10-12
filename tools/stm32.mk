@@ -136,7 +136,7 @@ ifeq ($(MCU_NATIVE_PROGRAM)$(MCU_SHARED_TEST),11)
 $(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
 $(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c \
     user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
-    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h \
+    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h user/liba20rt/a20_sync.h \
     kernel/arch/armv7m/include/program_test.h user/liba20rt/a20_execution.h \
     kernel/include/uapi/a20/execution.h
 	@mkdir -p $(@D)
