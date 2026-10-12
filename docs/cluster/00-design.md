@@ -83,5 +83,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 - [20-hardening.md](20-hardening.md)：随机丢包、延迟、CRC、身份洪泛、分区、慢服务与 CI。
 - [11-api-tutorial.md](11-api-tutorial.md)：从导出到 any 算子调用与自定义图。
 - [19-routed-fragmentation.md](19-routed-fragmentation.md)：多跳分片协商与资源降级。
+- [24-single-system-minecraft.md](24-single-system-minecraft.md)：多 MCU 承载单个逻辑实例及 Java 客户端的候选路线，尚未实现。
 
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。
