@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 /*
  * A20OS Native ABI — Type-aware object lifetime for handle entries.
  * Design reference: docs/native-abi/03-handle.md §1.1
@@ -33,6 +34,12 @@ int a20_object_is_vfile_backed(uint16_t type)
 
 void a20_object_ref(void *object, uint16_t type)
 {
+#ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
+    /* Admission rejects object types absent from this build. PID-valued task
+     * objects follow the existing Native lifetime contract. */
+    (void)object;
+    (void)type;
+#else
     if (!object) return;
     if (a20_object_is_vfile_backed(type)) {
         /* Vfile-backed native objects are vfile pointers, each handle owns
@@ -69,6 +76,7 @@ void a20_object_ref(void *object, uint16_t type)
         /* TASK/THREAD/DEBUG store integer pids — no backing object. */
         break;
     }
+#endif
 }
 
 void a20_eventq_on_vfile_destroy(struct vfile *vf)
@@ -82,6 +90,12 @@ void a20_eventq_on_vfile_destroy(struct vfile *vf)
 
 void a20_object_release(void *object, uint16_t type)
 {
+#ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
+    /* Admission rejects object types absent from this build. PID-valued task
+     * objects follow the existing Native lifetime contract. */
+    (void)object;
+    (void)type;
+#else
     if (!object) return;
     if (a20_object_is_vfile_backed(type)) {
         vfs_put_file((struct vfile *)object);
@@ -126,4 +140,7 @@ void a20_object_release(void *object, uint16_t type)
     default:
         break;
     }
+#endif
 }
+
+#endif

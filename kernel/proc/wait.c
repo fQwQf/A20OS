@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
@@ -223,3 +224,5 @@ int proc_wait(int *status)
 {
     return proc_wait4(-1, status, 0);
 }
+
+#endif

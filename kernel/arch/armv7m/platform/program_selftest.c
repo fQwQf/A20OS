@@ -15,6 +15,7 @@
 
 extern const uint8_t mcu_test_elf[], mcu_test_elf_end[];
 static task_t *program_task;
+static size_t program_heap_baseline;
 unsigned program_test_done;
 unsigned program_test_rejections;
 #define CHECK(x)                                                               \
@@ -44,11 +45,17 @@ static void controller(void) {
         }
         proc_yield();
     }
+    CHECK(record->threads_passed == 1 && record->thread_parent_cpu == 1 &&
+          record->thread_worker_cpu == 0);
+    printf("[PROGRAM-THREAD] PASS public affinity parent=1 child=0\n");
+    printf("[PROGRAM-THREAD] PASS nested-create join close shared-space "
+           "stack-pin=1\n");
     CHECK(record->allocator_passed == 1);
     printf("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free\n");
     CHECK(record->heap_checks == 20);
-    CHECK(a20_flat_unmap(&program->memory, record->heap_base, 8192) == -EBUSY);
-    CHECK(a20_flat_destroy(&program->memory) == -EBUSY);
+    CHECK(a20_flat_unmap(&program->owner->memory, record->heap_base, 8192) ==
+          -EBUSY);
+    CHECK(a20_flat_destroy(&program->owner->memory) == -EBUSY);
     uint32_t *word = (void *)(uintptr_t)record->heap_base;
     printf("[PROGRAM-HEAP] PASS checks=%u wait-pinned=1 cross-cpu=1\n",
            record->heap_checks);
@@ -94,9 +101,19 @@ static void controller(void) {
         proc_yield();
     }
     CHECK(program_task->pid == pid && program_task->exit_code == 0);
-    proc_put(program_task);
-    while (__atomic_load_n(&mcu_program_live, __ATOMIC_ACQUIRE))
+    __atomic_store_n(&record->parent_exited, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&record->orphan_done, __ATOMIC_ACQUIRE)) {
+        CHECK(!record->error);
         proc_yield();
+    }
+    printf("[PROGRAM-THREAD] PASS child survives leader exit image heap "
+           "startup=live\n");
+    proc_put(program_task);
+    while (__atomic_load_n(&mcu_program_live, __ATOMIC_ACQUIRE) ||
+           mcu_heap_available() != program_heap_baseline)
+        proc_yield();
+    printf("[PROGRAM-THREAD] PASS final heap restored handles stacks "
+           "image=freed\n");
     printf("[PROGRAM-TEST] PASS pid=%d migrated=1->0 stack=0x%x ELF=ARM32-PIE "
            "SVC=native released=all\n",
            pid, (unsigned)stack);
@@ -152,12 +169,19 @@ void mcu_program_selftest_start(void) {
     reject_image(bad, length);
     kfree(bad);
     CHECK(mcu_heap_available() == before && !mcu_program_live);
+    int controller_pid = proc_alloc_deferred(controller);
+    CHECK(controller_pid > 0);
+    program_heap_baseline = mcu_heap_available();
     mcu_program_test_record_t startup = {0};
     int pid = mcu_program_spawn(mcu_test_elf, length, 8192, &startup,
                                 sizeof(startup), 2);
     CHECK(pid > 0);
     program_task = proc_find_get(pid);
-    CHECK(program_task && program_task->arch_program);
-    CHECK(proc_alloc(controller) > 0);
+    CHECK(program_task && program_task->arch_program &&
+          program_task->abi_mode == 1);
+    task_t *control = proc_find_get(controller_pid);
+    CHECK(control);
+    proc_publish_deferred_task(control);
+    proc_put(control);
 }
 #endif

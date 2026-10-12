@@ -137,9 +137,11 @@ void a20_registry_task_exit(int pid) {
 void kep_release_process(int pid) {
     (void)pid;
 }
+#ifndef CONFIG_MCU_NATIVE_PROGRAM
 void a20_ht_put_ref(struct a20_ht_internal *ht) {
     (void)ht;
 }
+#endif
 void proc_debug_tracer_exiting(task_t *tracer) {
     (void)tracer;
 }

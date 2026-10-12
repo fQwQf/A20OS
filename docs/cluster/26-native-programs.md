@@ -26,7 +26,7 @@ PT_INTERP、PT_TLS、DT_NEEDED、RELA、PLT 导入和其他重定位类型明确
 返回使用内部 `svc #0x21` 重建异常帧，保留 IT/NZCV 和栈对齐信息。
 
 本阶段系统调用继续点仍使用同一 PSP 应用栈；没有独立受保护的内核栈切换，
-也没有 MPU 地址隔离。用户指针复制只检查所属镜像/栈范围。这是可信应用的
+也没有 MPU 地址隔离。用户指针复制检查所属镜像、栈及已登记动态堆范围。这是可信应用的
 NOMMU 功能原型，非完整的进程内存保护实现。
 
 ## 统一的系统调用实现
@@ -39,6 +39,12 @@ NOMMU 功能原型，非完整的进程内存保护实现。
 | Native 编号 | 本阶段行为 |
 |---|---|
 | `0x0002` execution_info | 公共执行能力描述，见 [28](28-execution-capabilities.md) |
+| `0x0003` execution_domain_info | 当前原生执行域状态，见 [31](31-runtime-instance.md) |
+| `0x0100` handle_close | 关闭线程句柄 |
+| `0x0202` task_wait | 加入线程并取得退出码 |
+| `0x0205` thread_create | 创建共享空间的用户线程，见 [32](32-native-threads.md) |
+| `0x0209` / `0x020A` task_set/get_sched | 公共调度配置和亲和性 |
+| `0x0300` / `0x0301` vm_alloc/unmap | 公共动态堆，见 [30](30-flat-user-memory.md) |
 | `0x0200` task_exit | 退出任务组 |
 | `0x0206` thread_exit | 退出当前线程 |
 | `0x0207` thread_sleep | 定时阻塞，可在别的 CPU 恢复 |
@@ -65,7 +71,7 @@ make PYTHON=/path/to/venv/bin/python check-mcu-program-rtl
 测试实际编译 SDK 应用 ELF 并嵌入固件；应用检查重定位、BSS、坏输出指针、
 未知 syscall、让出、休眠、CPU1→CPU0 恢复及栈/全局数据保留。控制线程只通过
 真实亲和性接口改变已阻塞任务的目标 CPU。退出后检查唯一 PID、退出码、
-程序资源全部回收、两个任务退出、主 CPU 回到 idle，以及隔离复位被拒绝。
+程序资源全部回收、五个任务退出、主 CPU 回到 idle，以及隔离复位被拒绝。
 固件另拒绝 8 种坏 ELF，并检查失败加载前后可用堆完全恢复。
 
 `tools/check-mcu-program.py` 执行真实应用、SVC 入口、内核处理函数和调度器
@@ -81,7 +87,7 @@ RTL 模式下共享数据、异常硬件帧及共享代码字节检查进入实�
 
 ## 仍待实现
 
-完整 Native ABI、从文件系统启动、动态库、TLS/libc 启动、线程创建/更高层同步、
+完整 Native ABI、从文件系统启动、动态库、TLS/libc 启动、更高层同步、
 JVM、显示/input/runtime 依赖，以及实际多板验证仍未闭合。
 没有启动真实 Minecraft Java 客户端；验收继续遵循
 [24-single-system-minecraft.md](24-single-system-minecraft.md)。
@@ -95,3 +101,11 @@ Native 程序现可通过同一 SDK 的 vm_alloc/vm_unmap 分配和释放共享�
 并将动态同步字用于公共 futex/atomic32。公共所有权、等待期间的引用固定、
 退出回收与验证方法见 [30](30-flat-user-memory.md)。这仍未提供完整 JVM、
 文件/图形/输入运行时，也不构成 Minecraft 已启动的证据。
+
+## 用户线程扩展
+
+现已通过同一 Native thread_create/task_wait/handle_close 与调度亲和性接口
+创建共享地址空间的用户线程，并验证嵌套创建、跨 CPU 执行、退出码与栈回收。
+主线程先退出不会释放仍被子线程使用的映像、参数和堆。实际接通的补充编号
+为 0x0100、0x0202、0x0205、0x0209、0x020A，详细契约与限制见
+[32-native-threads.md](32-native-threads.md)。

@@ -1864,10 +1864,12 @@ void sched_reap_zombies(void)
             task_t *parent = t->parent;
             if (state == PROC_ZOMBIE && !is_current &&
                 t != proc_idle_task()) {
-                if (!parent || parent == proc_idle_task() ||
-                    t->ppid == 0 || (t->clone_flags & CLONE_THREAD))
+                if (!parent || parent == proc_idle_task() || t->ppid == 0 ||
+                    ((t->clone_flags & CLONE_THREAD) &&
+                     !proc_native_thread_waitable(t, parent)))
                     reap = 1;
-                else if (signal_task_sigchld_auto_reap(parent))
+                else if (!proc_native_thread_waitable(t, parent) &&
+                         signal_task_sigchld_auto_reap(parent))
                     reap = 1;
             }
             spin_unlock_irqrestore(&t->park_lock, tf);

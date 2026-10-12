@@ -28,12 +28,13 @@ SDK `a20_cluster_execution_query(endpoint, budget_ms, &info)` 校验完整 CW
 | 44–63 | 保留五个 u32，必须为零 |
 
 接口位为 THREAD_BASIC=1、NATIVE_IMAGE=2、HANDLES=4、FUTEX=8、WIDE_ARGS=16、
-ATOMIC32=32、USER_HEAP=64（已知位掩码 127）。MCU 实验 Native profile 发布
-BASIC、IMAGE、FUTEX、ATOMIC32 和 USER_HEAP；
+ATOMIC32=32、USER_HEAP=64、THREAD_CREATE=128（已知位掩码 255）。MCU 实验 Native profile 发布
+BASIC、IMAGE、FUTEX、ATOMIC32、USER_HEAP 和 THREAD_CREATE；
 等待/唤醒与原子系统调用见 [29-native-sync.md](29-native-sync.md)。
 USER_HEAP 表示支持基本匿名页分配/释放，flat 的整块释放与固定 RW 权限契约见
-[30-flat-user-memory.md](30-flat-user-memory.md)。这些位不表示已支持用户线程
-创建、完整 VMAR/VMO 或直接调用特权原子库。
+[30-flat-user-memory.md](30-flat-user-memory.md)。THREAD_CREATE 的真实创建、加入与共享空间契约见
+[32-native-threads.md](32-native-threads.md)，仍不表示 TLS、完整 VMAR/VMO
+或直接调用特权原子库。
 WIDE_ARGS 表示现有 syscall 入口可传递完整 64 位标量，当前只对 64 位 profile
 发布。它不表示其他所有 Native 调用已经实现。
 FLAT 只描述无独立 VM 的地址模型，不证明多个芯片实际连接了共享 RAM。

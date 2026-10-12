@@ -10,12 +10,19 @@
 #include "abi/native/syscall_entry.h"
 #include "abi/native/errno.h"
 #include "sys/usercopy.h"
+#include "ipc/handle_table.h"
+#include "core/flat_thread.h"
 
 #define PROGRAM_MAX (256U * 1024U)
 #define PROGRAM_RESUME_SVC 0x21U
 unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
+extern int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args);
+extern int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args);
+extern int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
+extern int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
+extern int64_t sys_a20_handle_close(const a20_syscall_args_t *args);
 extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_execution_domain_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
@@ -37,19 +44,28 @@ int mcu_program_user_range(const void *pointer, size_t length) {
     armv7m_program_t *p = task ? task->arch_program : NULL;
     if (!p)
         return 0;
-    uint64_t flags = spin_lock_irqsave(&p->memory.lock);
-    int valid = a20_flat_range_locked(&p->memory, (uintptr_t)pointer, length);
-    spin_unlock_irqrestore(&p->memory.lock, flags);
+    uint64_t flags = spin_lock_irqsave(&p->owner->memory.lock);
+    int valid =
+        a20_flat_range_locked(&p->owner->memory, (uintptr_t)pointer, length);
+    spin_unlock_irqrestore(&p->owner->memory.lock, flags);
     return valid;
 }
 
 void armv7m_program_release(armv7m_program_t *p) {
     if (!p)
         return;
-    if (a20_flat_destroy(&p->memory))
-        panic("program released with pinned memory");
-    kfree(p->stack);
-    kfree(p->allocation);
+    armv7m_program_image_t *owner = p->owner;
+    if (owner) {
+        if (p->stack_pin)
+            a20_flat_unpin(&owner->memory, p->stack_pin);
+        if (refcount_dec_and_test(&owner->refs)) {
+            if (a20_flat_destroy(&owner->memory))
+                panic("program released with pinned memory");
+            kfree(owner->stack);
+            kfree(owner->allocation);
+            kfree(owner);
+        }
+    }
     if (p->counted)
         __atomic_fetch_sub(&mcu_program_live, 1, __ATOMIC_RELEASE);
     kfree(p);
@@ -119,20 +135,28 @@ static int load_image(const void *file, size_t size, armv7m_program_t *p) {
         !dynamic_size ||
         !loaded_range(ph, header.e_phnum, dynamic, dynamic_size, PF_R))
         return -ENOEXEC;
-    p->allocation = kcalloc(1, span + align - 1);
-    if (!p->allocation)
+    p->owner->allocation = kcalloc(1, span + align - 1);
+    if (!p->owner->allocation)
         return -ENOMEM;
-    p->image = ((uintptr_t)p->allocation + align - 1) & ~(uintptr_t)(align - 1);
-    p->image_size = span;
+    p->owner->image =
+        ((uintptr_t)p->owner->allocation + align - 1) & ~(uintptr_t)(align - 1);
+    p->owner->image_size = span;
     for (unsigned i = 0; i < header.e_phnum; i++)
-        if (ph[i].p_type == PT_LOAD)
-            memcpy((void *)(p->image + ph[i].p_vaddr),
+        if (ph[i].p_type == PT_LOAD) {
+            if (ph[i].p_flags & PF_X) {
+                unsigned index = p->owner->executable_count++;
+                p->owner->executable_base[index] =
+                    p->owner->image + ph[i].p_vaddr;
+                p->owner->executable_size[index] = ph[i].p_memsz;
+            }
+            memcpy((void *)(p->owner->image + ph[i].p_vaddr),
                    (const uint8_t *)file + ph[i].p_offset, ph[i].p_filesz);
+        }
     uint32_t rel = 0, rel_size = 0, rel_ent = 8, got = 0;
     int terminated = 0;
     for (unsigned off = 0; off < dynamic_size; off += sizeof(Elf32_Dyn)) {
         Elf32_Dyn d;
-        memcpy(&d, (void *)(p->image + dynamic + off), sizeof(d));
+        memcpy(&d, (void *)(p->owner->image + dynamic + off), sizeof(d));
         if (d.d_tag == DT_NULL) {
             terminated = 1;
             break;
@@ -168,34 +192,35 @@ static int load_image(const void *file, size_t size, armv7m_program_t *p) {
     for (unsigned pass = 0; pass < 2; pass++)
         for (unsigned off = 0; off < rel_size; off += 8) {
             uint32_t r[2], addend;
-            memcpy(r, (void *)(p->image + rel + off), sizeof(r));
+            memcpy(r, (void *)(p->owner->image + rel + off), sizeof(r));
             if (r[1] != 23 || (r[0] & 3U) ||
                 !loaded_range(ph, header.e_phnum, r[0], 4, PF_W) ||
                 (r[0] < rel + rel_size && rel < r[0] + 4))
                 return -ENOEXEC;
-            memcpy(&addend, (void *)(p->image + r[0]), 4);
+            memcpy(&addend, (void *)(p->owner->image + r[0]), 4);
             if (!pass && addend >= span)
                 return -ENOEXEC;
             if (!pass)
                 for (unsigned previous = 0; previous < off; previous += 8) {
                     uint32_t target;
-                    memcpy(&target, (void *)(p->image + rel + previous), 4);
+                    memcpy(&target, (void *)(p->owner->image + rel + previous),
+                           4);
                     if (target == r[0])
                         return -ENOEXEC;
                 }
             if (pass) {
-                addend += (uint32_t)p->image;
-                memcpy((void *)(p->image + r[0]), &addend, 4);
+                addend += (uint32_t)p->owner->image;
+                memcpy((void *)(p->owner->image + r[0]), &addend, 4);
             }
         }
-    p->registers.pc = (uint32_t)p->image + (header.e_entry & ~1U);
-    p->registers.r[9] = got ? (uint32_t)p->image + got : 0;
+    p->registers.pc = (uint32_t)p->owner->image + (header.e_entry & ~1U);
+    p->registers.r[9] = got ? (uint32_t)p->owner->image + got : 0;
     p->registers.xpsr = 0x01000000U;
     arch_fence_i();
     return 0;
 }
 
-static void program_enter(void) {
+void arch_flat_program_enter(void) {
     __asm__ __volatile__("svc #0x21" ::: "memory");
     panic("program enter returned");
 }
@@ -210,7 +235,13 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     armv7m_program_t *p = kcalloc(1, sizeof(*p));
     if (!p)
         return -ENOMEM;
-    a20_flat_init(&p->memory);
+    p->owner = kcalloc(1, sizeof(*p->owner));
+    if (!p->owner) {
+        kfree(p);
+        return -ENOMEM;
+    }
+    refcount_set(&p->owner->refs, 1);
+    a20_flat_init(&p->owner->memory);
     int result = load_image(elf, length, p);
     if (result) {
         armv7m_program_release(p);
@@ -221,11 +252,12 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
         armv7m_program_release(p);
         return -ENOMEM;
     }
+    p->owner->stack = p->stack;
     p->stack_size = stack_size;
-    if (a20_flat_add_fixed(&p->memory, &p->image_region, p->image,
-                           p->image_size) ||
-        a20_flat_add_fixed(&p->memory, &p->stack_region, (uintptr_t)p->stack,
-                           stack_size))
+    if (a20_flat_add_fixed(&p->owner->memory, &p->owner->image_region,
+                           p->owner->image, p->owner->image_size) ||
+        a20_flat_add_fixed(&p->owner->memory, &p->owner->stack_region,
+                           (uintptr_t)p->stack, stack_size))
         panic("program memory ranges rejected");
     p->startup = (void *)(((uintptr_t)p->stack + stack_size - startup_size) &
                           ~(uintptr_t)15);
@@ -234,7 +266,7 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     p->registers.sp = (uintptr_t)p->startup;
     p->registers.r[0] = (uintptr_t)p->startup;
     p->in_kernel = 1;
-    result = proc_alloc_deferred(program_enter);
+    result = proc_alloc_deferred(arch_flat_program_enter);
     if (result < 0) {
         armv7m_program_release(p);
         return result;
@@ -242,8 +274,15 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     task_t *task = proc_find_get(result);
     if (!task)
         panic("deferred program task disappeared");
+    task->abi_mode = 1;
     task->arch_program = p;
-    task->flat_user = &p->memory;
+    task->flat_user = &p->owner->memory;
+    task->a20_ht = a20_ht_create();
+    if (!task->a20_ht) {
+        proc_free_pid(result);
+        proc_put(task);
+        return -ENOMEM;
+    }
     p->counted = 1;
     __atomic_fetch_add(&mcu_program_live, 1, __ATOMIC_RELEASE);
     proc_set_name(task, "native-mcu");
@@ -256,6 +295,51 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     return result;
 }
 
+/* ISA adapter: distinct registers/PSP, common owned space and task lifetime.
+ * The current static-PIE Thumb profile has a PIC r9, but no TLS segment. */
+int arch_flat_thread_attach(task_t *parent, task_t *child, uintptr_t entry,
+                            uintptr_t arg, uintptr_t top, size_t size,
+                            uintptr_t tls) {
+    armv7m_program_t *source = parent->arch_program;
+    if (!source || !source->owner || !size || top < size || (top & 15U) ||
+        size < 128 || !(entry & 1U))
+        return -EINVAL;
+    if (tls)
+        return -EOPNOTSUPP;
+    int executable = 0;
+    for (unsigned i = 0; i < source->owner->executable_count; i++)
+        if (within(source->owner->executable_base[i],
+                   source->owner->executable_size[i], entry & ~1U, 2))
+            executable = 1;
+    if (!executable)
+        return -EFAULT;
+    a20_flat_region_t *pin =
+        a20_flat_pin(&source->owner->memory, top - size, size);
+    if (!pin)
+        return -EFAULT;
+    armv7m_program_t *p = kcalloc(1, sizeof(*p));
+    if (!p) {
+        a20_flat_unpin(&source->owner->memory, pin);
+        return -ENOMEM;
+    }
+    p->owner = source->owner;
+    refcount_inc(&p->owner->refs);
+    p->stack_pin = pin;
+    p->stack = (void *)(top - size);
+    p->stack_size = size;
+    p->registers.sp = top;
+    p->registers.pc = entry & ~1U;
+    p->registers.r[0] = arg;
+    p->registers.r[9] = source->registers.r[9];
+    p->registers.xpsr = 0x01000000U;
+    p->in_kernel = 1;
+    p->counted = 1;
+    __atomic_fetch_add(&mcu_program_live, 1, __ATOMIC_RELEASE);
+    child->arch_program = p;
+    child->flat_user = &p->owner->memory;
+    return 0;
+}
+
 static void program_syscall_thread(void) {
     task_t *task = proc_current();
     armv7m_program_t *p = task ? task->arch_program : NULL;
@@ -266,6 +350,21 @@ static void program_syscall_thread(void) {
         args.arg[i] = p->registers.r[i];
     int64_t result;
     switch (args.nr) {
+        case A20_SYS_task_set_sched:
+            result = sys_a20_task_set_sched(&args);
+            break;
+        case A20_SYS_task_get_sched:
+            result = sys_a20_task_get_sched(&args);
+            break;
+        case A20_SYS_thread_create:
+            result = sys_a20_thread_create(&args);
+            break;
+        case A20_SYS_task_wait:
+            result = sys_a20_task_wait(&args);
+            break;
+        case A20_SYS_handle_close:
+            result = sys_a20_handle_close(&args);
+            break;
         case A20_SYS_vm_alloc:
             result = sys_a20_vm_alloc(&args);
             break;

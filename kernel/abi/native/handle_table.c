@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 /*
  * A20OS Native ABI — Handle table implementation.
  * Design reference: docs/native-abi/03-handle.md §2
@@ -229,6 +230,10 @@ static const a20_rights_t a20_type_rights[A20_OBJ_VMAR + 1] = {
 
 a20_rights_t a20_type_valid_rights(uint16_t type)
 {
+#ifdef CONFIG_NATIVE_TASK_HANDLES_ONLY
+    if (type != A20_OBJ_TASK && type != A20_OBJ_THREAD)
+        return 0;
+#endif
     if (type > A20_OBJ_VMAR) return 0;
     return a20_type_rights[type];
 }
@@ -270,6 +275,7 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
 {
     if (!ht) return;
 
+#ifndef CONFIG_NATIVE_TASK_HANDLES_ONLY
     extern void a20_channel_trace_dump(void);
     extern void a20_channel_trace(uint32_t op, uint32_t len, void *p1,
                                   void *p2, uint32_t meta);
@@ -278,6 +284,7 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
            (void *)ht, (void *)ht->entries, (void *)ht->free_bitmap,
            ht->capacity, (int)ht->refcount.value, proc_current() ? proc_current()->pid : -1);
 
+#endif
     uint64_t rflags = spin_lock_irqsave(&g_a20_ht_registry_lock);
     struct a20_ht_internal **pp = &g_a20_ht_registry;
     while (*pp) {
@@ -930,3 +937,5 @@ uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask)
     spin_unlock_irqrestore(&ht->lock, flags);
     return old;
 }
+
+#endif
