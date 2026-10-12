@@ -13,6 +13,7 @@
 
 #define UDP_RX_BUDGET 16u
 #define UDP_PING_MS 1000u
+#define CLX_UDP_PEER_WORDS ((CLX_LIMIT_ROUTES + 63u) / 64u)
 
 typedef struct clx_udp_peer {
     int used;
@@ -29,6 +30,8 @@ typedef struct clx_udp_peer {
 
 static spinlock_t g_udp_lock = SPINLOCK_INIT;
 static clx_udp_peer_t g_udp_peers[CLX_LIMIT_ROUTES];
+/* Occupancy and peer contents are published together under g_udp_lock. */
+static uint64_t g_udp_active[CLX_UDP_PEER_WORDS];
 static vfile_t *g_udp_file;
 static net_socket_t *g_udp_socket;
 static int g_udp_starting;
@@ -150,6 +153,8 @@ int a20_clx_udp_peer_add(const uint8_t node_id[16], const uint8_t *nh,
     free_peer->challenge = (uint32_t)random_u64() | 1u;
     memcpy(free_peer->nh, nh, 6);
     memcpy(free_peer->node.bytes, node_id, 16);
+    uint32_t index = (uint32_t)(free_peer - g_udp_peers);
+    g_udp_active[index / 64u] |= UINT64_C(1) << (index % 64u);
     spin_unlock_irqrestore(&g_udp_lock, irq);
     return 0;
 }
@@ -159,8 +164,10 @@ void a20_clx_udp_peer_del(const uint8_t *nh, uint32_t nh_len) {
         return;
     uint64_t irq = spin_lock_irqsave(&g_udp_lock);
     for (uint32_t i = 0; i < CLX_LIMIT_ROUTES; i++) {
-        if (g_udp_peers[i].used && memcmp(g_udp_peers[i].nh, nh, 6) == 0)
+        if (g_udp_peers[i].used && memcmp(g_udp_peers[i].nh, nh, 6) == 0) {
             memset(&g_udp_peers[i], 0, sizeof(g_udp_peers[i]));
+            g_udp_active[i / 64u] &= ~(UINT64_C(1) << (i % 64u));
+        }
     }
     spin_unlock_irqrestore(&g_udp_lock, irq);
 }
@@ -391,43 +398,58 @@ static void udp_poll(void *ctx) {
         memcpy(nh + 4, &from.sin_port, 2);
         udp_receive(nh, g_udp_rx, (uint32_t)n);
     }
+    /* Snapshot only occupancy, not all peer records. Deletions are rechecked
+     * below; additions after this snapshot become eligible on the next poll. */
+    uint64_t active[CLX_UDP_PEER_WORDS];
+    irq = spin_lock_irqsave(&g_udp_lock);
+    memcpy(active, g_udp_active, sizeof(active));
+    spin_unlock_irqrestore(&g_udp_lock, irq);
     uint64_t now = timer_get_ticks();
-    for (uint32_t i = 0; i < CLX_LIMIT_ROUTES; i++) {
-        clx_udp_peer_t peer;
-        irq = spin_lock_irqsave(&g_udp_lock);
-        peer = g_udp_peers[i];
-        int due = peer.used && (!peer.last_tx ||
-                                now - peer.last_tx >= MS_TO_TICKS(UDP_PING_MS));
-        if (due) {
-            g_udp_peers[i].last_tx = now;
-            if (peer.state != A20_CLX_LINK_DOWN &&
-                now - peer.last_rx >= MS_TO_TICKS(6000))
-                g_udp_peers[i].state = A20_CLX_LINK_DOWN;
-            else if (peer.state == A20_CLX_LINK_UP &&
-                     now - peer.last_rx >= MS_TO_TICKS(3000))
-                g_udp_peers[i].state = A20_CLX_LINK_SUSPECT;
+    for (uint32_t word = 0; word < CLX_UDP_PEER_WORDS; word++) {
+        while (active[word]) {
+            uint32_t i = word * 64u + (uint32_t)__builtin_ctzll(active[word]);
+            active[word] &= active[word] - 1u;
+            if (i >= CLX_LIMIT_ROUTES)
+                continue;
+            clx_udp_peer_t peer;
+            irq = spin_lock_irqsave(&g_udp_lock);
+            peer = g_udp_peers[i];
+            int due =
+                peer.used && (!peer.last_tx ||
+                              now - peer.last_tx >= MS_TO_TICKS(UDP_PING_MS));
+            if (due) {
+                g_udp_peers[i].last_tx = now;
+                if (peer.state != A20_CLX_LINK_DOWN &&
+                    now - peer.last_rx >= MS_TO_TICKS(6000))
+                    g_udp_peers[i].state = A20_CLX_LINK_DOWN;
+                else if (peer.state == A20_CLX_LINK_UP &&
+                         now - peer.last_rx >= MS_TO_TICKS(3000))
+                    g_udp_peers[i].state = A20_CLX_LINK_SUSPECT;
+            }
+            uint32_t state = g_udp_peers[i].state;
+            if (due && state == A20_CLX_LINK_DOWN && !g_udp_peers[i].challenge)
+                g_udp_peers[i].challenge = (uint32_t)random_u64() | 1u;
+            peer.challenge = g_udp_peers[i].challenge;
+            spin_unlock_irqrestore(&g_udp_lock, irq);
+            if (!due)
+                continue;
+            if (state == A20_CLX_LINK_SUSPECT && peer.state != state)
+                a20_clx_link_state_note(A20_CLX_TRANSPORT_UDP, peer.nh, 6,
+                                        state);
+            if (state == A20_CLX_LINK_DOWN && peer.state != A20_CLX_LINK_DOWN) {
+                kinfo("[CLX-UDP] peer=%u timeout now=%lu last_rx=%lu "
+                      "silent_ms=%lu\n",
+                      peer.node.bytes[15], (unsigned long)now,
+                      (unsigned long)peer.last_rx,
+                      (unsigned long)((now - peer.last_rx) * 1000 /
+                                      TICKS_PER_SEC));
+                a20_clx_link_event(A20_CLX_TRANSPORT_UDP, peer.nh, 6, 0);
+            }
+            udp_control(&peer,
+                        state == A20_CLX_LINK_DOWN ? A20_CLX_TYPE_HELLO
+                                                   : A20_CLX_TYPE_PING,
+                        NULL, 0);
         }
-        uint32_t state = g_udp_peers[i].state;
-        if (due && state == A20_CLX_LINK_DOWN && !g_udp_peers[i].challenge)
-            g_udp_peers[i].challenge = (uint32_t)random_u64() | 1u;
-        peer.challenge = g_udp_peers[i].challenge;
-        spin_unlock_irqrestore(&g_udp_lock, irq);
-        if (!due)
-            continue;
-        if (state == A20_CLX_LINK_SUSPECT && peer.state != state)
-            a20_clx_link_state_note(A20_CLX_TRANSPORT_UDP, peer.nh, 6, state);
-        if (state == A20_CLX_LINK_DOWN && peer.state != A20_CLX_LINK_DOWN) {
-            kinfo(
-                "[CLX-UDP] peer=%u timeout now=%lu last_rx=%lu silent_ms=%lu\n",
-                peer.node.bytes[15], (unsigned long)now,
-                (unsigned long)peer.last_rx,
-                (unsigned long)((now - peer.last_rx) * 1000 / TICKS_PER_SEC));
-            a20_clx_link_event(A20_CLX_TRANSPORT_UDP, peer.nh, 6, 0);
-        }
-        udp_control(&peer,
-                    state == A20_CLX_LINK_DOWN ? A20_CLX_TYPE_HELLO
-                                               : A20_CLX_TYPE_PING,
-                    NULL, 0);
     }
 }
 
