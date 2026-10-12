@@ -608,6 +608,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
+| 0x0B02 | `atomic32` | `int64_t atomic32(a20_atomic32_args_t *args)` | 顺序一致的 load/store/exchange/CAS，MCU 与服务器共享实现 |
 
 ### Device / user-space drivers (0x0C00)
 
@@ -664,4 +665,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
 
-总计：154 个 syscall（`syscall_table.def` 当前登记数）。
+总计：156 个 syscall（`syscall_table.def` 当前登记数）。

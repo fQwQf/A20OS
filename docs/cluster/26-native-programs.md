@@ -38,16 +38,20 @@ NOMMU 功能原型，非完整的进程内存保护实现。
 
 | Native 编号 | 本阶段行为 |
 |---|---|
+| `0x0002` execution_info | 公共执行能力描述，见 [28](28-execution-capabilities.md) |
 | `0x0200` task_exit | 退出任务组 |
 | `0x0206` thread_exit | 退出当前线程 |
 | `0x0207` thread_sleep | 定时阻塞，可在别的 CPU 恢复 |
 | `0x0208` thread_yield | 现有调度器让出 |
 | `0x020e` thread_get_cpu | 写入当前逻辑 CPU ID |
+| `0x0b00` / `0x0b01` futex_wait/wake | 公共等待/唤醒，见 [29](29-native-sync.md) |
+| `0x0b02` atomic32 | 公共顺序一致原子操作，见 [29](29-native-sync.md) |
 | 其他 | `-A20_ERR_NOT_SUPPORTED` |
 
 ARM32 SDK 目前每个参数仅用一个 32 位寄存器，返回值按 int32 符号扩展。
 因此本测试的纳秒睡眠参数限制在 uint32 范围内；不能据此声称完整的 64 位
-Native ABI 已支持。后续需完成统一的 ARM32 参数封装与能力查询。
+Native ABI 已支持。完整 ARM32 标量参数封装仍待完成；能力查询已经实现。
+futex timeout_ns 通过指针参数结构传递，支持完整 u64，不受这个标量限制。
 
 ## 可复现证据
 
@@ -77,7 +81,7 @@ RTL 模式下共享数据、异常硬件帧及共享代码字节检查进入实�
 
 ## 仍待实现
 
-完整 Native ABI、从文件系统启动、动态库、TLS/libc 启动、线程创建/同步、
+完整 Native ABI、从文件系统启动、动态库、TLS/libc 启动、线程创建/更高层同步、
 JVM、显示/input/runtime 依赖，以及实际多板验证仍未闭合。
 没有启动真实 Minecraft Java 客户端；验收继续遵循
 [24-single-system-minecraft.md](24-single-system-minecraft.md)。

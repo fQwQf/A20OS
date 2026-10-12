@@ -11,6 +11,7 @@
 #include "mm/elf.h"
 #include "proc/proc.h"
 #include "mcu/heap.h"
+#include "sys/futex.h"
 
 extern const uint8_t mcu_test_elf[], mcu_test_elf_end[];
 static task_t *program_task;
@@ -45,7 +46,18 @@ static void controller(void) {
     }
     proc_sched_config_t config = {.fields = PROC_SCHED_AFFINITY, .affinity = 1};
     CHECK(proc_sched_set(program_task, &config) == 0);
+    __atomic_store_n(&record->futex_word, 1, __ATOMIC_RELEASE);
     record->phase = 2;
+    CHECK(futex_wake_user((int *)&record->futex_word, 1) == 1);
+    while (record->phase != 4) {
+        CHECK(!record->error);
+        proc_yield();
+    }
+    /* Race a wake against wait admission: before linkage gives WOULD_BLOCK,
+     * after linkage wakes the waiter. Either ordering must make progress. */
+    __atomic_store_n(&record->futex_word, 2, __ATOMIC_RELEASE);
+    int woke = futex_wake_user((int *)&record->futex_word, 1);
+    CHECK(woke == 0 || woke == 1);
     while (record->phase != 3) {
         CHECK(!record->error);
         proc_yield();
@@ -54,10 +66,17 @@ static void controller(void) {
     CHECK(record->stack_before == record->stack_after &&
           record->stack_before >= 0x60000000U);
     uintptr_t stack = record->stack_after;
+    CHECK(record->futex_checks == 12 && record->futex_waits >= 1);
+    CHECK(futex_wake_user((int *)&record->futex_word, 1) == 0);
+    printf(
+        "[PROGRAM-FUTEX] PASS checks=%u waits=%u remote-wake=1 race-wake=%d\n",
+        record->futex_checks, record->futex_waits, woke);
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&program_task->park_lock);
-        int exited =
-            program_task->state == PROC_ZOMBIE && !program_task->on_cpu;
+        int exited = (program_task->state == PROC_ZOMBIE ||
+                      (program_task->state == PROC_UNUSED &&
+                       program_task->destroy_started)) &&
+                     !program_task->on_cpu;
         spin_unlock_irqrestore(&program_task->park_lock, flags);
         if (exited)
             break;

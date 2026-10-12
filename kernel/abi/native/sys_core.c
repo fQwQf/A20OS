@@ -99,8 +99,9 @@ int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
     info.page_size = 4096;
     info.handle_bits = 32;
     /* feature_bits: bit 0 = handle_table, bit 1 = temporal_capabilities,
-     * bit 2 = futex (Sync 0x0B00) */
-    info.feature_bits[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2);
+     * bit 2 = futex (Sync 0x0B00), bit 3 = atomic32 (0x0B02) */
+    info.feature_bits[0] =
+        (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3);
     if (copy_to_user(out, &info, sizeof(info)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -115,7 +116,8 @@ int64_t sys_a20_feature_test(const a20_syscall_args_t *args)
 
     /* Match the feature_bits from abi_info */
     uint64_t features[4] = {0};
-    features[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2); /* handle_table + temporal + futex */
+    features[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2) |
+                  (1ULL << 3); /* handle_table + temporal + futex + atomic32 */
 
     if (features[word] & (1ULL << bit))
         return A20_OK;

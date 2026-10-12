@@ -14,6 +14,16 @@
  *   - user_trap_return
  */
 
+/* Native thread_create takes a 16-byte-aligned stack top on every ISA.
+ * Architectures with a stack return-address slot reserve its ABI bias before
+ * direct function entry. Process startup and Linux clone keep their own rules. */
+#ifndef ARCH_NATIVE_THREAD_STACK_BIAS
+#define ARCH_NATIVE_THREAD_STACK_BIAS 0U
+#endif
+static inline uintptr_t arch_native_thread_initial_sp(uintptr_t stack_top) {
+    return stack_top - ARCH_NATIVE_THREAD_STACK_BIAS;
+}
+
 /* C handlers called from assembly */
 void trap_handler(trap_context_t *ctx);
 void kernel_trap_handler(trap_context_t *ctx);

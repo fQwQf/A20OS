@@ -180,7 +180,7 @@ def main():
         domain = ProgramDomain(args.elf, bus, args.cpus, args.seed)
         result = domain.run(args.rounds, reset_cpus=[1] if bus else None)
         assert all(n > 0 for n in domain.user_instructions[:2])
-        assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x7fff} <= domain.syscall_numbers
+        assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x7fff} <= domain.syscall_numbers
         assert domain.scalar("program_test_rejections") == 8
         result.update(user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
                       exception_returns=domain.returns, native_syscalls=sorted(domain.syscall_numbers),

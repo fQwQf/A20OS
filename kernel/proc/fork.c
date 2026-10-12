@@ -487,6 +487,9 @@ int proc_clone_deferred(vaddr_t stack, task_t **out_task)
  */
 int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls)
 {
+    if (sp <= ARCH_NATIVE_THREAD_STACK_BIAS || (sp & 15U))
+        return -EINVAL;
+    sp = arch_native_thread_initial_sp(sp);
     task_t *t = NULL;
     uint64_t flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND |
                      CLONE_THREAD | CLONE_SETTLS;

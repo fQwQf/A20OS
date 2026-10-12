@@ -158,6 +158,7 @@
 /* Sync (0x0B00) */
 #define A20_SYS_futex_wait 0x0B00
 #define A20_SYS_futex_wake 0x0B01
+#define A20_SYS_atomic32 0x0B02
 
 /* Device / user-space drivers (0x0C00) */
 #define A20_SYS_device_map_mmio 0x0C00

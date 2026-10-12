@@ -93,4 +93,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 - [27-portable-domains.md](27-portable-domains.md)：公共 fabric 驱动、跨架构接口、平台矩阵与缺口。
 - [28-execution-capabilities.md](28-execution-capabilities.md)：统一执行信息、镜像初筛、Native/CW 查询与验收边界。
 
+- [29-native-sync.md](29-native-sync.md)：公共用户原子操作、futex、MMU/flat 地址适配与验收边界。
+
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。
