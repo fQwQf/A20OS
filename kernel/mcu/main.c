@@ -73,7 +73,12 @@ void kernel_main(void) {
     if (smp_online_cpu_count() != CONFIG_NR_CPUS)
         panic("shared kernel secondary startup incomplete");
 #ifdef CONFIG_MCU_SHARED_TEST
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    extern void mcu_program_selftest_start(void);
+    mcu_program_selftest_start();
+#else
     mcu_shared_selftest_start();
+#endif
 #endif
     printf("[SHARED] one native kernel, %u physical CPU ports\n",
            smp_online_cpu_count());

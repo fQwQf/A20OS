@@ -129,6 +129,27 @@ armv7m_fault_entry:
 
     .thumb_func
 SVC_Handler:
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    tst lr, #4
+    ite eq
+    mrseq r0, msp
+    mrsne r0, psp
+    push {r3-r11, lr}
+    add r1, sp, #4             /* interrupted r4-r11 */
+    mov r2, lr
+    bl armv7m_program_svc
+    pop {r3-r11, lr}
+    cbz r0, 8f
+    /* Resume a complete user frame, including flags/Thumb IT state. */
+    ldmia r0!, {r4-r11}
+    msr psp, r0
+    movs r0, #3
+    msr control, r0
+    isb
+    ldr lr, =0xfffffffd
+8:
+    bx lr
+#else
     tst lr, #4
     ite eq
     mrseq r0, msp
@@ -144,6 +165,7 @@ SVC_Handler:
     pop {r3, pc}
 #else
     pop {pc}
+#endif
 #endif
 
     .thumb_func
@@ -192,10 +214,15 @@ SysTick_Handler:
     push {lr}
 #endif
     bl armv7m_systick_handler
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+    pop {r3, lr}
+    bx lr
+#else
 #ifdef CONFIG_MCU_SHARED_KERNEL
     pop {r3, pc}
 #else
     pop {pc}
+#endif
 #endif
 
     .thumb_func

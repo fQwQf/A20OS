@@ -343,6 +343,10 @@ static void proc_task_release_resources(task_t *t)
     }
     t->pgdir = NULL;
 
+#ifdef ARCH_TASK_RELEASE
+    ARCH_TASK_RELEASE(t);
+#endif
+
     keyring_release_task(t);
     landlock_release_task(t);
     env_release_task(t);

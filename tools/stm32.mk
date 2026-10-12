@@ -67,7 +67,7 @@ check-mcu-shared-kernel:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
 		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
 		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
-		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 _check-mcu-shared-kernel
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=0 _check-mcu-shared-kernel
 
 .PHONY: _check-mcu-shared-kernel
 _check-mcu-shared-kernel: kernel-only
@@ -103,9 +103,45 @@ check-mcu-shared-rtl: build-mcu-shared-rtl
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
 		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
 		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
-		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 _check-mcu-shared-rtl
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=0 _check-mcu-shared-rtl
 
 _check-mcu-shared-rtl: kernel-only
 	$(PYTHON) tools/check-mcu-shared-rtl.py $(BUILD_DIR)/kernel.elf \
 		--backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
 		--report .kernel-build/cluster/shared-kernel/report-rtl.json
+
+.PHONY: check-mcu-program check-mcu-program-rtl _check-mcu-program _check-mcu-program-rtl
+check-mcu-program:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 _check-mcu-program
+
+check-mcu-program-rtl: build-mcu-shared-rtl
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 _check-mcu-program-rtl
+
+_check-mcu-program: kernel-only
+	$(PYTHON) tools/check-mcu-program.py $(BUILD_DIR)/kernel.elf \
+		--report .kernel-build/cluster/shared-program/report.json
+
+_check-mcu-program-rtl: kernel-only
+	$(PYTHON) tools/check-mcu-program.py $(BUILD_DIR)/kernel.elf \
+		--backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
+		--report .kernel-build/cluster/shared-program/report-rtl.json
+
+ifeq ($(MCU_NATIVE_PROGRAM)$(MCU_SHARED_TEST),11)
+$(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
+$(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c \
+    user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
+    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h \
+    kernel/arch/armv7m/include/program_test.h
+	@mkdir -p $(@D)
+	$(CC) -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -Os -ffreestanding \
+		-fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \
+		-Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 \
+		-Wl,-T,user/tests/mcu-shared-program/link.ld \
+		-Iuser/liba20rt -Ikernel/arch/armv7m/include $< -o $@
+endif

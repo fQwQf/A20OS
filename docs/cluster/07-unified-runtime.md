@@ -11,6 +11,11 @@
 MCU、普通主机、服务器是资源预算，不是三个互不兼容的协议。
 节点角色（工作节点、网关、调度器）与处理器架构独立。
 
+STM32、树莓派、RISC-V 开发板/MCU、x86/ARM 服务器沿用同一公共接口。
+当前公共 fabric 实现与逐平台证据见
+[27-portable-domains.md](27-portable-domains.md)；缺少板级实现的平台明确列为
+待实现，不能以同 ISA 的 QEMU 或编译测试代替该板的支持。
+
 统一机制分为共享内存域内的原生 SMP 和域间的服务集群。用户要求的单内核
 跨物理 MCU 采用共享 RAM 与硬件仲裁，复用服务器的任务/PID/调度器机制；
 实现与硬件契约见 [25-native-shared-kernel.md](25-native-shared-kernel.md)。

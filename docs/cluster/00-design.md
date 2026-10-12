@@ -1,6 +1,7 @@
 # A20OS 统一集群架构
 
-本轮目标是让 MCU 与服务器使用同一套身份、寻址、调用、服务与作业机制。
+本轮目标是让 STM32、树莓派、RISC-V 开发板/MCU 与 x86/ARM 服务器使用
+同一套身份、寻址、调用、服务、作业与原生执行域接口。
 资源档决定容量，节点能力决定可以执行什么。完整设计及验收约束见
 [07-unified-runtime.md](07-unified-runtime.md)，实际证据见
 [08-implementation-status.md](08-implementation-status.md)。
@@ -53,8 +54,9 @@ MCU 没有进程加载能力时，使用静态缓冲和算子回调；主机可�
 | 执行入口 | 预置算子/回调 | 算子与进程服务 |
 | 控制策略 | 可交由网关代理 | 可运行成员与调度服务 |
 
-统一不要求把服务器调度器搬进只有几十 KiB RAM 的 MCU，也不允许为 MCU
-再造一套不兼容的业务协议。任务分配必须检查能力和消息预算。
+具备共享 RAM 的 MCU 已复用服务器的原生调度器；资源有限的独立节点可使用
+静态服务适配。两者共用业务协议，任务分配检查实际能力和消息预算。
+CPU/板级接口和跨 ISA 的边界见 [27-portable-domains.md](27-portable-domains.md)。
 
 ## 4. 故障与信任
 
@@ -86,5 +88,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 - [24-single-system-minecraft.md](24-single-system-minecraft.md)：多 MCU 原生单内核与 Java 客户端目标，客户端尚未实现。
 
 - [25-native-shared-kernel.md](25-native-shared-kernel.md)：共享 RAM 与硬件仲裁的原生内核端口、功能证据及物理验收边界。
+- [26-native-programs.md](26-native-programs.md)：静态 PIE、非特权 PSP、阻塞 Native SVC 与应用迁移证据。
+- [27-portable-domains.md](27-portable-domains.md)：公共 fabric 驱动、跨架构接口、平台矩阵与缺口。
 
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。

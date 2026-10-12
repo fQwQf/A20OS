@@ -505,3 +505,41 @@ Make 入口复现；禁用高字节 RAM 写入的 RTL 副本令完整固件失�
 客户端仍未实现，整体目标保持未完成。接口与复现见
 [25-native-shared-kernel.md](25-native-shared-kernel.md) 和
 [hardware/shared-mcu/README.md](../../hardware/shared-mcu/README.md)。
+
+## 27. 原生应用、阻塞 SVC 与公共 fabric 抽取
+
+2026-10-12，增加独立可选的 ARMv7-M 静态 PIE 应用模式。实际 SDK 应用从
+共享 RAM 执行，非特权 Thread/PSP 通过真实 SVC 入口转入特权 Thread 继续点，
+使用与服务器相同的 Native sleep/yield/get_cpu/exit 处理函数。应用休眠期间
+通过现有亲和性接口将同一 PID 从 CPU1 迁到 CPU0，随后保留原栈地址、局部
+内容、重定位指针与 BSS，正常退出并释放程序镜像/栈。8 种坏 ELF 拒绝且堆
+完整恢复，坏用户指针与未知 syscall 返回明确错误。
+
+新增 `check-mcu-program`、`check-mcu-program-rtl`。完整固件与实际桥/仲裁/RAM
+RTL 联合测试通过，共享数据、异常帧与共享代码字节核对进入 RTL；CPU1 单独
+复位仍被 sticky attach 拒绝。测试模型补充 Cortex-M 异常压栈/退栈，执行
+真实内核与应用指令，不修改任务状态。它不是完整 NVIC 或物理板；tick 注入
+不代表实际 CPU 周期。移除返回用户态的非特权位后，负向固件被测试拒绝。
+两个执行顺序种子通过，资源释放后主 CPU 回到 idle。
+
+按用户关于通用性的最新要求，启动/加入、互斥门、通知与围栏已抽到
+`core/shared_fabric.c`，通过 `a20_fabric_io_t` 接受总线、屏障和 IRQ 适配，
+不依赖 MCU 宏或 ARM 指令。STM32 实际固件使用这份公共驱动。x86-64、
+AArch64、RV64 执行同一份公共驱动的 2–16 端口测试通过，ARMv7-M/RV32
+freestanding 编译通过。公共 SMP 接口、调度器与域间 CL/作业协议继续复用。
+公共接口的通用性不表示各板的硬件适配已经完成。
+
+回归：x86-64、AArch64、RV64 `ABI=both` 双 CPU 内核构建并在 QEMU 上报告
+2/2 上线、System ready。RV64/AArch64 正常关机退出；x86 打印关机消息后由
+测试夹具终止，不能声称其 QEMU 电源关闭已通过。默认 STM32 QEMU 到达原
+idle probe，其固件与此前归档逐字节相同。旧共享内核线程测试及启动拒绝
+回归、trim 注册、9 项 SMP 平台边界和 4 项新配置拒绝检查通过。全仓格式
+门禁仍为 114 个既有漂移，新 C/H 文件格式检查没有增加失败。
+
+本阶段没有完整 Native ABI、MPU 保护、独立应用内核栈、libc/TLS/VFS 启动、
+JVM 或 Minecraft。ARM32 参数仍为单寄存器宽度。树莓派专用板级入口、
+RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺失。
+报告在 `.kernel-build/cluster/shared-program/` 与 `fabric-portability/`，
+本阶段提交对应归档为 `evidence/portable-domain-<commit>/`。
+细节见 [26-native-programs.md](26-native-programs.md) 和
+[27-portable-domains.md](27-portable-domains.md)。整体目标保持未完成。
