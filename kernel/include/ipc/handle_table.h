@@ -148,6 +148,12 @@ uint64_t a20_ht_sig_take(struct a20_ht_internal *ht);
 uint64_t a20_ht_sig_blocked(struct a20_ht_internal *ht);
 uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask);
 
+/* Optional thread checkpoints. The table lock protects both the process
+ * queue and these per-task fields. Caller holds a live task reference. */
+void a20_thread_sig_pend(task_t *task, int sig);
+uint64_t a20_thread_sig_check(task_t *task, uint32_t flags, uint64_t selected);
+uint64_t a20_thread_sig_mask(task_t *task, uint64_t mask, int query);
+
 /* Temporal sweeper. */
 void a20_temporal_sweep(struct a20_ht_internal *ht);
 void a20_temporal_sweep_all(void);

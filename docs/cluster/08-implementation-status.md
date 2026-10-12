@@ -770,3 +770,6 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 
 真实 JamVM Native 启动、完整类库构建和文件映射修复见
 [47-jamvm-native-bootstrap.md](47-jamvm-native-bootstrap.md)。
+
+真实 pthread 定向通知、每线程 mask、信号等待及多架构执行回归见
+[48-native-thread-signals.md](48-native-thread-signals.md)。

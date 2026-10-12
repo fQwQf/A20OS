@@ -110,3 +110,6 @@ python tools/tests/test_mlibc_filemap.py
 成功返回、关闭 GC 或忽略线程暂停来宣称 Java 已启动。pthread 资源回收、
 JNI 附加栈查询、跨架构 full libc/VM 端口、图形/输入和真实 Minecraft 客户端
 仍需继续实现；物理多 MCU 的共享 RAM/仲裁和同一内核验收仍未完成。
+
+后续已实现的 Native 线程身份、定向通知与等待，以及初始化推进到原生类库
+装载的实际结果见 [48](48-native-thread-signals.md)。上述本阶段失败日志保留原样。

@@ -455,9 +455,9 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0200 | `task_exit` | `void task_exit(int32_t code)` | 退出当前 task |
 | 0x0201 | `task_spawn` | `int64_t task_spawn(a20_task_spawn_args_t *args)` | 创建新 task |
 | 0x0202 | `task_wait` | `int64_t task_wait(a20_handle_t task, a20_flags_t flags, a20_task_status_t *out)` | 等待 task 退出 |
-| 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t reason)` | 终止 task |
+| 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t signal, uint64_t flags)` | 信号/强制退出；flags=0 保留原调用 |
 | 0x0204 | `task_info` | `int64_t task_info(a20_handle_t task, a20_task_info_t *out)` | 查询 task 信息 |
-| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；当前返回 `A20_OBJ_TASK` handle，`A20_OBJ_THREAD` 保留未用 |
+| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；返回 `A20_OBJ_THREAD` handle，发布前完成句柄和结果安装 |
 | 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
 | 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
 | 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
@@ -467,8 +467,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
 | 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
 | 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
-| 0x020F | `signal_check` | `int64_t signal_check(a20_signal_info_t *out)` | 检查点式信号模拟：查询挂起信号 |
-| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old)` | 检查点式信号模拟：设置/查询信号掩码 |
+| 0x020F | `signal_check` | `int64_t signal_check(uint64_t flags, uint64_t selected_or_control)` | flags=0 消费原进程级未屏蔽 bitmap；STRUCT 固定宽度形式及 THREAD/PEEK/SELECT 见 [线程通知](../cluster/48-native-thread-signals.md) |
+| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old, uint64_t flags)` | flags=0 保留进程级 mask；THREAD/QUERY 见 [线程通知](../cluster/48-native-thread-signals.md) |
 | 0x0211 | `task_mem_read` | `int64_t task_mem_read(a20_task_mem_args_t *args)` | 按 iovec 从目标 task 的地址空间读入本地 |
 | 0x0212 | `task_mem_write` | `int64_t task_mem_write(a20_task_mem_args_t *args)` | 按 iovec 把本地数据写入目标 task 的地址空间 |
 | 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
