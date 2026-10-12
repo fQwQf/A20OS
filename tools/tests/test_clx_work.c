@@ -3,6 +3,57 @@
 #include <stdio.h>
 #include <string.h>
 #include "uapi/a20/cluster_work.h"
+#include "uapi/a20/execution_domain.h"
+
+static void domain_contract(void) {
+    _Static_assert(sizeof(a20_execution_domain_info_t) == 64, "domain ABI");
+    assert(!a20_execution_domain_valid(0));
+    for (uint32_t n = 1; n <= 32; n++) {
+        a20_execution_domain_info_t info = {
+            .size = 64,
+            .version = 1,
+            .scope = A20_DOMAIN_CURRENT_KERNEL,
+            .state = A20_DOMAIN_READY,
+            .flags = n > 1 ? A20_DOMAIN_SHARED_KERNEL : 0,
+            .cpu_capacity = 32,
+            .cpu_present = n,
+            .cpu_configured = n,
+            .cpu_online = n,
+            .online_mask = n == 32 ? 0xffffffffu : (1u << n) - 1,
+            .memory_model = A20_EXEC_MEMORY_PRIVATE_VM,
+            .atomic_model = A20_EXEC_ATOMIC_NATIVE,
+        };
+        assert(a20_execution_domain_valid(&info));
+        a20_execution_domain_info_t bad = info;
+        bad.cpu_online = 0;
+        assert(!a20_execution_domain_valid(&bad));
+        bad = info;
+        bad.online_mask &= ~1u;
+        assert(!a20_execution_domain_valid(&bad));
+        bad = info;
+        bad.cpu_configured = 0;
+        assert(!a20_execution_domain_valid(&bad));
+        bad = info;
+        bad.scope = 2;
+        assert(!a20_execution_domain_valid(&bad));
+        for (unsigned k = 0; k < 4; k++) {
+            bad = info;
+            bad.reserved[k] = 1;
+            assert(!a20_execution_domain_valid(&bad));
+        }
+        if (n > 1) {
+            info.cpu_online = 1;
+            info.online_mask = 1;
+            assert(!a20_execution_domain_valid(&info));
+            info.state = A20_DOMAIN_DEGRADED;
+            info.memory_model = A20_EXEC_MEMORY_FLAT;
+            info.atomic_model = A20_EXEC_ATOMIC_FABRIC_GATE;
+            assert(a20_execution_domain_valid(&info));
+        }
+    }
+    puts("domain contract: 32 capacities, ready/degraded, mask/count and "
+         "reserved fields passed");
+}
 
 static unsigned executed;
 static uint64_t now;
@@ -112,6 +163,7 @@ static void execution_contract(a20_work_agent_t *agent) {
 }
 
 int main(void) {
+    domain_contract();
     a20_work_operator_t ops[] = {
         {A20_WORK_DOT, A20_WORK_REPLAY_SAFE, 140, 8, a20_work_dot, 0},
         {A20_WORK_SUM64, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 136, 8,

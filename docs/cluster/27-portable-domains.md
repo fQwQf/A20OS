@@ -144,3 +144,5 @@ sleep、所有在线 CPU 的 timer IRQ、远端 IPI 应答与退出回收。它�
 [30](30-flat-user-memory.md) 增加与 ISA/板型无关的用户内存所有权层，
 复用 Native 页分配/释放接口。ARMv7-M Native 装载器首先接入；其他 NOMMU
 端口需要为任务绑定该空间，不能仅凭交叉编译宣称完整应用端口已完成。
+
+统一运行实例与当前原生执行域状态接口见 [31-runtime-instance.md](31-runtime-instance.md)。

@@ -417,6 +417,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0000 | `abi_info` | `int64_t abi_info(a20_abi_info_t *out)` | 查询 ABI 版本和能力 |
 | 0x0001 | `feature_test` | `int64_t feature_test(uint64_t feature_id)` | 测试 feature 可用性 |
+| 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/31-runtime-instance.md) |
 | 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/28-execution-capabilities.md) |
 
 ### Handle (0x0100)
@@ -665,4 +666,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
 
-总计：156 个 syscall（`syscall_table.def` 当前登记数）。
+总计：157 个 syscall（`syscall_table.def` 当前登记数）。

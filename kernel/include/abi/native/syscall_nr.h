@@ -9,6 +9,7 @@
 #define A20_SYS_abi_info 0x0000
 #define A20_SYS_feature_test 0x0001
 #define A20_SYS_execution_info 0x0002
+#define A20_SYS_execution_domain_info 0x0003
 
 /* Handle (0x0100) */
 #define A20_SYS_handle_close 0x0100

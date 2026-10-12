@@ -71,6 +71,9 @@ static void controller(void) {
         proc_yield();
     }
     CHECK(!record->error && record->cpu_before == 1 && record->cpu_after == 0);
+    CHECK(record->domain_mask_before == 3 && record->domain_mask_after == 3);
+    printf("[PROGRAM-DOMAIN] PASS same kernel before/after CPU migration "
+           "mask=3\n");
     CHECK(record->stack_before == record->stack_after &&
           record->stack_before >= 0x60000000U);
     uintptr_t stack = record->stack_after;

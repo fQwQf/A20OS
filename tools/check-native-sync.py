@@ -50,7 +50,8 @@ def run_case(arch, args, output):
                     phase = "application"
                     deadline = time.monotonic() + args.timeout
                 elif phase == "application" and "NATIVE_FUTEX: PASS" in content:
-                    assert "NATIVE_ATOMIC32: PASS" in content and "NATIVE_ALLOCATOR: PASS" in content, str(log)
+                    assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS"]), str(log)
+                    assert f"NATIVE_DOMAIN_CPUS: {args.cpus:02d}\n" in content, str(log)
                     process.stdin.write(b"poweroff\n")
                     process.stdin.flush()
                     phase = "shutdown"
@@ -75,7 +76,7 @@ def run_case(arch, args, output):
                 process.wait()
             process.stdin.close()
     assert phase == "complete", f"{arch} stopped at {phase}; see {log}"
-    return dict(arch=arch, cpus=args.cpus, passed=True, build=build, command=command,
+    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, passed=True, build=build, command=command,
                 log=str(log.relative_to(ROOT)), kernel=str(kernel.relative_to(ROOT)),
                 kernel_sha256=sha(kernel), image=str(image.relative_to(ROOT)),
                 image_sha256=sha(image), returncode=process.returncode,

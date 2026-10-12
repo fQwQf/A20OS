@@ -31,11 +31,14 @@ for arch, compiler, runner in [
                          stderr=subprocess.STDOUT, timeout=60)
     log = out / (arch + '.log')
     log.write_text(run.stdout)
-    assert run.returncode == 0 and 'execution contract: 9 profiles' in run.stdout, str(log)
+    assert run.returncode == 0 and 'execution contract: 9 profiles' in run.stdout and 'domain contract: 32 capacities' in run.stdout, str(log)
     results.append(dict(arch=arch, build=build, command=command, log=str(log),
                         binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                         passed=True, evidence='hosted ISA execution, not kernel boot'))
     print('PASS execution contract:', arch, flush=True)
 report = dict(passed=True, tests=results, physical_boards_tested=False,
-              source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+              source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+              headers_sha256={s: hashlib.sha256((root / s).read_bytes()).hexdigest() for s in [
+                  "kernel/include/uapi/a20/execution.h", "kernel/include/uapi/a20/execution_domain.h",
+                  "kernel/include/uapi/a20/cluster_work.h"]})
 (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
