@@ -412,6 +412,20 @@ task_t *proc_get(task_t *t)
     return t;
 }
 
+#ifdef A20_TASK_OBJECTS_ENABLED
+/* Failure-only snapshot. Keep formatting and extra argument setup out of the
+ * normal reference-release path; no locks may be acquired from this helper. */
+static __attribute__((cold, noinline, noreturn)) void
+proc_ref_underflow(task_t *t, int old) {
+    proc_lifetime_note_ref_underflow();
+    panic("proc_put: pid=%d reference underflow old=%d task=%p state=%d "
+          "destroy=%d dynamic=%d on_rq=%d on_cpu=%d dispatch=%d owner=%u "
+          "kstack=%p",
+          t->pid, old, t, t->state, t->destroy_started, t->dynamic_alloc,
+          t->on_rq, t->on_cpu, t->dispatching, t->owner_cpu, t->kstack_base);
+}
+#endif
+
 void proc_put(task_t *t)
 {
     if (!t)
@@ -424,8 +438,12 @@ void proc_put(task_t *t)
                                         __ATOMIC_RELAXED)) {
     }
     if (old <= 0) {
+#ifdef A20_TASK_OBJECTS_ENABLED
+        proc_ref_underflow(t, old);
+#else
         proc_lifetime_note_ref_underflow();
         panic("proc_put: pid=%d reference underflow old=%d", t->pid, old);
+#endif
     }
     proc_lifetime_note_ref_put();
     if (old != 1)

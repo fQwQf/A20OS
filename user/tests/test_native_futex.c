@@ -77,8 +77,28 @@ int main(int argc, char **argv, char **envp)
     if (native_runtime_contract())
         return fail(out, 96, "runtime identity",
                     sizeof("runtime identity") - 1);
-    if (native_thread_contract())
+    int thread_result = native_thread_contract();
+    if (thread_result) {
+        char code[] = "NATIVE_THREAD_ERROR: 00 mask=00000000\n";
+        unsigned error_offset = sizeof("NATIVE_THREAD_ERROR: ") - 1;
+        unsigned mask_offset = sizeof("NATIVE_THREAD_ERROR: 00 mask=") - 1;
+        code[error_offset] = '0' + thread_result / 10;
+        code[error_offset + 1] = '0' + thread_result % 10;
+        for (unsigned i = 0; i < 8; i++)
+            code[mask_offset + i] =
+                "0123456789abcdef"[(native_balance_mask() >> (28 - 4 * i)) &
+                                   15];
+        a20_hdl_write_buf(out, code, sizeof(code) - 1, 0);
         return fail(out, 95, "thread contract", sizeof("thread contract") - 1);
+    }
+    char balance[] = "NATIVE_BALANCE: PASS jobs=32 sum=4359168 mask=00000000 "
+                     "range=dynamic\n";
+    unsigned balance_offset =
+        sizeof("NATIVE_BALANCE: PASS jobs=32 sum=4359168 mask=") - 1;
+    for (unsigned i = 0; i < 8; i++)
+        balance[balance_offset + i] =
+            "0123456789abcdef"[(native_balance_mask() >> (28 - 4 * i)) & 15];
+    a20_hdl_write_buf(out, balance, sizeof(balance) - 1, 0);
     a20_hdl_write_buf(out, "NATIVE_OBJECT_DIRECTORY: PASS\n",
                       sizeof("NATIVE_OBJECT_DIRECTORY: PASS\n") - 1, 0);
     a20_hdl_write_buf(out, "NATIVE_THREAD: PASS\n",

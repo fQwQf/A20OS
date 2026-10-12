@@ -43,8 +43,10 @@ static int app_test_poll(void *ctx, uintptr_t object, int32_t *code) {
     (void)ctx;
     task_t *task = (task_t *)object;
     uint64_t flags = spin_lock_irqsave(&task->park_lock);
-    int exited = (task->state == PROC_ZOMBIE ||
-                  (task->state == PROC_UNUSED && task->destroy_started)) &&
+    /* A published task held by this owner can be detached (UNUSED) before
+     * the reaper starts destruction. Its exit code is already final and the
+     * reference keeps storage valid; destroy_started is not an exit fence. */
+    int exited = (task->state == PROC_ZOMBIE || task->state == PROC_UNUSED) &&
                  !task->on_cpu;
     *code = task->exit_code;
     spin_unlock_irqrestore(&task->park_lock, flags);

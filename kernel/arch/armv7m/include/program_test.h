@@ -10,5 +10,6 @@ typedef struct mcu_program_test_record {
     uint32_t threads_passed, thread_parent_cpu, thread_worker_cpu;
     volatile uint32_t parent_exited, orphan_done;
     uint32_t objects_passed;
+    uint32_t balance_mask, balance_jobs, balance_sum;
 } mcu_program_test_record_t;
 #endif

@@ -50,6 +50,10 @@ static void controller(void) {
     CHECK(record->threads_passed == 1 && record->thread_parent_cpu == 1 &&
           record->thread_worker_cpu == 0);
     CHECK(record->objects_passed == 1);
+    CHECK(record->balance_mask == 3 && record->balance_jobs == 32 &&
+          record->balance_sum == 4359168);
+    printf("[PROGRAM-BALANCE] PASS jobs=32 sum=4359168 cpu-mask=3 unpinned=1 "
+           "range=dynamic\n");
     printf("[PROGRAM-OBJECTS] PASS production directory real identities LIVE "
            "RETIRED revoke close=1\n");
     printf("[PROGRAM-RUNTIME] PASS immutable binding serial IDs survive join "
@@ -99,8 +103,7 @@ static void controller(void) {
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&program_task->park_lock);
         int exited = (program_task->state == PROC_ZOMBIE ||
-                      (program_task->state == PROC_UNUSED &&
-                       program_task->destroy_started)) &&
+                      program_task->state == PROC_UNUSED) &&
                      !program_task->on_cpu;
         spin_unlock_irqrestore(&program_task->park_lock, flags);
         if (exited)

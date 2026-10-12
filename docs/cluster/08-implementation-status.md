@@ -729,3 +729,13 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 [39](39-application-recycling.md)。
 首次双入口真实运行暴露了一次 AArch64 init 引用下溢；后续重跑通过但根因
 尚未定位，仍保留为长期稳定性验收的未解决项，不能据重跑通过视为修复。
+
+## 同一应用内的工作领取与 CPU 分摊（2026-10-13）
+
+公共 SDK 新增 a20_work_range_init/take，复用既有 atomic32 syscall，在共享地址
+空间中由工作线程竞争领取索引，不预先分配固定份额或目的 CPU。单个 Native
+应用的两个真实线程共同处理 32 项计算，检查没有重复和遗漏、结果与实际 CPU。
+统一用户态代码用于共享 MCU、RV64、AArch64、x86，接口与验收见
+[40](40-native-application-balance.md)。跨网络域的实际应用启动仍按活动程序数
+分配，不据此宣称已经按 CPU 利用率均衡。AArch64 引用下溢补充失败现场输出，
+尚未定位根因；物理多 MCU 与 Minecraft 继续保留未完成。
