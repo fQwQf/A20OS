@@ -98,7 +98,7 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
         native_balance_shared.sum[0] + native_balance_shared.sum[1];
     CHECK(thread_result == 0, 84);
 #ifdef A20_NATIVE_FILE_TEST
-    CHECK(native_file_contract() == 0 && native_file_reopen(17) == 0, 89);
+    CHECK(native_file_contract(1) == 0 && native_file_reopen(17) == 0, 89);
     record->files_passed = 1;
     CHECK(native_spawn_contract() == 0, 88);
     record->spawn_passed = 1;

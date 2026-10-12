@@ -26,7 +26,9 @@ static __attribute__((noreturn)) void native_thread_worker(uintptr_t arg) {
     volatile uintptr_t local = arg;
     if (!native_runtime_matches())
         a20_thread_exit(89);
-    if (a20_atomic32_store(&native_thread_shared.ready, 1))
+    uint32_t woken;
+    if (a20_atomic32_store(&native_thread_shared.ready, 1) ||
+        a20_futex_wake(&native_thread_shared.ready, 1, &woken))
         a20_thread_exit(92);
     uint32_t value;
     for (;;) {
@@ -132,12 +134,17 @@ static int native_thread_contract(void) {
             29);
     T_CHECK(native_object_begin(args.out_thread) == 0, 34);
     uint32_t ready = 0;
-    for (unsigned i = 0; i < 100000 && !ready; i++) {
+    while (!ready) {
         T_CHECK(a20_atomic32_load(&native_thread_shared.ready, &ready) ==
                     A20_OK,
                 11);
-        if (!ready)
-            a20_thread_yield();
+        if (!ready) {
+            a20_status_t waited = a20_futex_wait(&native_thread_shared.ready, 0,
+                                                 A20_TIMEOUT_INFINITE);
+            T_CHECK(waited == A20_OK || waited == -A20_ERR_WOULD_BLOCK ||
+                        waited == -A20_ERR_INTERRUPTED,
+                    12);
+        }
     }
     T_CHECK(ready == 1, 12);
     a20_handle_t duplicate = A20_HANDLE_NULL;

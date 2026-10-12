@@ -18,7 +18,7 @@ int main(int argc, char **argv, char **envp) {
         return 72;
     if (native_runtime_contract())
         return 73;
-    if (native_file_contract() || native_file_reopen(3))
+    if (native_file_contract(1) || native_file_reopen(3))
         return 74;
     if (native_thread_contract())
         return 75;

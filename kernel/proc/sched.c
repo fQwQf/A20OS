@@ -2228,8 +2228,10 @@ void proc_yield(void) {
     task_t *cur = proc_current();
     task_t *idle = proc_idle_task();
     if (cur && cur != idle && cur->state == PROC_RUNNING) {
+#ifndef CONFIG_KERNEL_PREEMPT
         uint64_t now = timer_get_ticks();
         eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
+#endif
         if (cur->pid >= 4)
             ktrace_sched("[SCHED] yield: pid=%d\n", cur->pid);
         /* A local reschedule is not an event wake. In particular, when a
@@ -2244,6 +2246,14 @@ void proc_yield(void) {
                 __atomic_load_n(&cur->owner_cpu, __ATOMIC_RELAXED) !=
                     cpu_current_id())
                 panic("sched yield: pid=%d not owned by current cpu", cur->pid);
+#ifdef CONFIG_KERNEL_PREEMPT
+            /* The tick path charges this same task. Sample and account with
+             * local IRQs masked so an intervening tick cannot make `now`
+             * older than last_account (unsigned elapsed-time underflow).
+             * park_lock already pins this RUNNING -> READY publication. */
+            uint64_t now = timer_get_ticks();
+            eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
+#endif
             cur->state = PROC_READY;
             cur->cpu_id = cpu_current_id();
         }
