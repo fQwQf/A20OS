@@ -470,11 +470,10 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
             arch_local_irq_enable();
         return obj;
     }
-    if (irq_gate)
-        arch_local_irq_enable();
-
+    /* Keep the selected CPU array pinned through refill. Restoring IRQs
+     * here permits reentry or migration before the cache lock is taken. */
     slab_cache_t *c = &caches[idx];
-    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
+    spin_lock(&c->lock);
     void *obj = slab_alloc_obj_locked(idx);
     if (obj) {
         /* Refill the local array while the lock is already held, so the
@@ -486,7 +485,7 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
             arr->objs[arr->count++] = extra;
         }
     }
-    spin_unlock_irqrestore(&c->lock, irq_flags);
+    spin_unlock_irqrestore(&c->lock, irq_gate);
 
     if (!obj && can_reclaim) {
         oom_try_reclaim();
@@ -573,17 +572,16 @@ void kfree(void *ptr) {
             arch_local_irq_enable();
         return;
     }
-    if (irq_gate)
-        arch_local_irq_enable();
-
     /* Array full: drain half back to their slabs under the lock, then park
-     * this object in the array. */
+     * this object in the array. Keep IRQs masked from the full check through
+     * the drain: reentry can otherwise empty the array and underflow count,
+     * and migration can leave arr pointing at another CPU's live array. */
     slab_cache_t *c = &caches[idx];
-    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
+    spin_lock(&c->lock);
     for (uint16_t i = 0; i < SLAB_CPU_ARRAY_CAP / 2; i++)
         slab_free_obj_locked(arr->objs[--arr->count], caller_ra);
     arr->objs[arr->count++] = ptr;
-    spin_unlock_irqrestore(&c->lock, irq_flags);
+    spin_unlock_irqrestore(&c->lock, irq_gate);
 }
 
 void *krealloc(void *ptr, size_t new_size) {

@@ -295,7 +295,7 @@ def main():
                "kernel/include/uapi/a20/cluster_snapshot.h",
                "kernel/cluster/udp_selftest.c", "kernel/net/socket_inet.c",
                "kernel/net/lwip_compat.c", "kernel/net/lwip_port/arch/cc.h",
-               "kernel/net/lwip_port/arch/heap.h", "tools/check-cluster-udp.py"]
+               "kernel/net/lwip_port/arch/heap.h", "kernel/mm/slab.c", "tools/check-cluster-udp.py"]
     hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in sources}
     profiles = [args.profile, args.peer_profile or args.profile] + ([2] if args.routed else [])
     commands = {}

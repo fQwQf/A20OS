@@ -368,3 +368,29 @@ Ethernet 帧，性能达标布尔值与业务正确性通过分别报告。
 让出 CPU 的客户端曾发生链路超时，已保留失败现场；使用正常阻塞背压后
 通过，但该进展故障尚未完成定位。程序完成七架构链接，CI 手动扩展任务
 已接入。方法、原始日志与剩余验收见 [23-four-node-load.md](23-four-node-load.md)。
+
+
+## 23. RX 空间背压与 slab CPU-array 窗口
+
+增加共同 RX ring 满与分配失败的原因计数，仍使用 192 B kind=5 信封的
+保留指标；无 next-hop 的诊断桶不再冒充 DOWN 物理链路。poll owner 在
+32 项高水位等待空间，消费者降至 31 项时唤醒，ring 容量保持不变。
+每个 adapter 连续 100 ms 未轮询时仍推进一次有界控制 I/O。
+生产函数交错测试新增 25 万组空间等待边界。
+
+负载触发了 slab 慢路径的既有 IRQ 窗口：检查 CPU-array 后恢复 IRQ，重入
+可清空数组，drain 随后下溢，迁移也可留下旧 CPU 指针。现保持本 CPU IRQ
+屏蔽直到 refill/drain 结束；原中断状态和锁外 OOM reclaim 保持原语义。
+新增 `check-slab-cpu-window` 执行实际生产函数体，旧代码复现越界，修复后
+10 万组边界、重入、迁移与 IRQ 恢复检查通过 ASan/UBSan，并加入 CI 门禁。
+
+当前 100 ms 控制轮询保障版本的四节点无主动丢帧 60 秒核对通过，RX ring
+满/分配失败均为零，吞吐 187.017–201.983 SEND/秒。持续 10% 丢帧的 60 秒
+诊断版本也通过，但约 66–78 SEND/秒仍低于 soak 负载要求；此前一次
+warmup-query 失败仍未定位，不能据后续通过结案。
+
+全部 24 项宿主门禁、完整 `check-doc-test-gates`、当前双 CPU 持续丢帧场景
+通过；七架构 hosted 构建和 Native 负载程序链接通过，STM32 USART2/3 固件
+仍成功链接。隔离本机十万次 CALL 均值 69.864 µs，单次测量不作统计等价
+结论。失败现场、指标成本、精确测量范围见
+[23-four-node-load.md](23-four-node-load.md)。

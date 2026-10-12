@@ -9,6 +9,8 @@
 #define CLX_RX_RING 64u
 #define A20_CLX_LINK_ADDR_MAX 16u
 #define A20_CLX_HDR_LEN 32u
+#define A20_CLX_RX_DROP_QUEUE_FULL 1
+#define A20_CLX_RX_DROP_NO_MEMORY 2
 #define MS_TO_TICKS(ms) (ms)
 #define PROC_WAIT_UNINTERRUPTIBLE 0
 #define PROC_WAKE_EVENT 1
@@ -70,8 +72,10 @@ static void *kmalloc(unsigned len) {
 static void kfree(void *pointer) {
     free(pointer);
 }
-static void a20_clx_link_rx_drop(uint32_t id, const uint8_t *nh, uint32_t len) {
+static void a20_clx_link_rx_drop_kind(uint32_t id, const uint8_t *nh, uint32_t len,
+                                     unsigned kind) {
     assert(id == 2 && nh && len == 6 && !held);
+    assert(kind == (oom ? A20_CLX_RX_DROP_NO_MEMORY : A20_CLX_RX_DROP_QUEUE_FULL));
     drops++;
 }
 static unsigned wait_queue_wake_one(wait_queue_t *queue, uintptr_t key,

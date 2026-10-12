@@ -58,7 +58,10 @@ enum a20_cluster_link_metric {
     A20_CLX_LINK_RX_DROPS,
     A20_CLX_LINK_RX_MALFORMED,
     A20_CLX_LINK_RETRANSMITS,
-    A20_CLX_LINK_MAX_LINKS
+    A20_CLX_LINK_MAX_LINKS,
+    /* Subsets of RX_DROPS at the common CL receive admission boundary. */
+    A20_CLX_LINK_RX_QUEUE_FULL,
+    A20_CLX_LINK_RX_NO_MEMORY
 };
 typedef struct a20_cluster_resource_args {
     uint32_t size, version, kind, index;

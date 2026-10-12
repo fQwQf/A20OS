@@ -1,0 +1,258 @@
+/* Real kmalloc_flags/kfree bodies, with architecture and backing-slab seams.
+ * Inject reentrant allocations exactly when local IRQs become enabled. */
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define PAGE_SIZE 4096UL
+#define SLAB_NR_CACHES 7
+#define SLAB_MAX_OBJ 2048u
+#define SLAB_CPU_ARRAY_CAP 16u
+#define SLAB_CPU_REFILL 8u
+#define BIG_MAGIC 0x42494741u
+#define BIG_CANARY 0xcafebabeu
+#define MAX_ORDER 10
+#define FRAME_F_ALLOC 1
+#define PFN_NONE ((pfn_t) - 1)
+#define ROUND_UP(n, a) (((n) + (a) - 1) & ~((a) - 1))
+typedef uintptr_t pfn_t;
+typedef unsigned spinlock_t;
+typedef struct {
+    uint32_t magic;
+    uint16_t order, _pad;
+    uint64_t reserved;
+} big_alloc_hdr_t;
+typedef struct {
+    unsigned cache_idx;
+} slab_page_t;
+typedef struct {
+    spinlock_t lock;
+} slab_cache_t;
+typedef struct {
+    void *objs[SLAB_CPU_ARRAY_CAP];
+    uint16_t count;
+} slab_cpu_array_t;
+static const size_t slab_sizes[SLAB_NR_CACHES] = {32,  64,   128, 256,
+                                                  512, 1024, 2048};
+static slab_cache_t caches[SLAB_NR_CACHES];
+static slab_cpu_array_t arrays[2];
+static struct {
+    unsigned flags, refcount;
+    int order;
+} frame_meta;
+static struct {
+    typeof(frame_meta) *meta;
+} pfa = {&frame_meta};
+#define OBJECTS 93u
+static _Alignas(PAGE_SIZE) uint8_t pages[3][PAGE_SIZE];
+static void *objects[OBJECTS], *central[OBJECTS], *interrupt_objects[16];
+static unsigned central_count, interrupt_count, irq_enabled, cpu,
+    array_cpu_seen, expected_irq;
+static unsigned held, inject, migrate, lock_count, reclaim_count, main_reserved;
+static void *kmalloc_flags(size_t size, int can_reclaim);
+static void kfree(void *ptr);
+static unsigned cpu_current_id(void) {
+    return cpu;
+}
+static int arch_irqs_enabled(void) {
+    return irq_enabled;
+}
+static void arch_local_irq_disable(void) {
+    irq_enabled = 0;
+}
+static void arch_local_irq_enable(void) {
+    assert(!held);
+    irq_enabled = 1;
+    if (inject) {
+        inject = 0;
+        for (unsigned i = 0; i < 16; i++) {
+            interrupt_objects[interrupt_count++] = kmalloc_flags(128, 0);
+            assert(interrupt_objects[i]);
+        }
+        if (migrate)
+            cpu ^= 1;
+    }
+}
+static slab_cpu_array_t *slab_cpu_array(int idx) {
+    assert(!irq_enabled && idx == 2);
+    array_cpu_seen = cpu;
+    return &arrays[cpu];
+}
+static void spin_lock(spinlock_t *lock) {
+    assert(!irq_enabled && !held && lock == &caches[2].lock);
+    assert(array_cpu_seen == cpu);
+    held = 1;
+    lock_count++;
+}
+static __attribute__((unused)) uint64_t spin_lock_irqsave(spinlock_t *lock) {
+    unsigned flags = irq_enabled;
+    arch_local_irq_disable();
+    spin_lock(lock);
+    return flags;
+}
+static void spin_unlock_irqrestore(spinlock_t *lock, uint64_t flags) {
+    assert(!irq_enabled && held && lock == &caches[2].lock);
+    held = 0;
+    if (flags)
+        arch_local_irq_enable();
+}
+static void *slab_alloc_obj_locked(int idx) {
+    assert(idx == 2 && held && !irq_enabled);
+    if (!central_count)
+        return NULL;
+    return central[--central_count];
+}
+static void slab_free_obj_locked(void *ptr, uintptr_t ra) {
+    (void)ra;
+    assert(held && !irq_enabled && ptr && central_count < OBJECTS);
+    central[central_count++] = ptr;
+}
+static int slab_page_valid(slab_page_t *page) {
+    for (unsigned i = 0; i < 3; i++)
+        if ((void *)page == pages[i])
+            return page->cache_idx == 2;
+    return 0;
+}
+static pfn_t pfa_alloc_flags(int order, int reclaim) {
+    (void)order;
+    (void)reclaim;
+    return PFN_NONE;
+}
+static void *pfn_to_virt(pfn_t pfn) {
+    (void)pfn;
+    abort();
+}
+static pfn_t virt_to_pfn(const void *ptr) {
+    return (uintptr_t)ptr / PAGE_SIZE;
+}
+static int pfn_valid(pfn_t pfn) {
+    (void)pfn;
+    return 0;
+}
+static void pfa_free(pfn_t pfn, int order) {
+    (void)pfn;
+    (void)order;
+    abort();
+}
+static int big_alloc_canary_ok(const big_alloc_hdr_t *hdr) {
+    (void)hdr;
+    return 1;
+}
+static uintptr_t arch_read_ra(void) {
+    return 0;
+}
+static void oom_try_reclaim(void) {
+    assert(!held && irq_enabled == expected_irq);
+    reclaim_count++;
+}
+void a20_channel_trace_dump(void) {
+    abort();
+}
+void frame_trace_dump_pfn(pfn_t pfn) {
+    (void)pfn;
+    abort();
+}
+#define panic(...) abort()
+/* PRODUCTION_kmalloc_flags */
+/* PRODUCTION_kfree */
+static void reset(unsigned count, unsigned irq) {
+    memset(pages, 0, sizeof(pages));
+    memset(arrays, 0, sizeof(arrays));
+    unsigned at = 0;
+    for (unsigned p = 0; p < 3; p++) {
+        ((slab_page_t *)pages[p])->cache_idx = 2;
+        for (unsigned j = 0; j < 31; j++)
+            objects[at++] = pages[p] + 64 + j * 128;
+    }
+    central_count = 0;
+    for (unsigned i = 0; i < OBJECTS; i++) {
+        if (i < count)
+            arrays[0].objs[arrays[0].count++] = objects[i];
+        else if (i != 16)
+            central[central_count++] = objects[i];
+    }
+    interrupt_count = cpu = array_cpu_seen = held = inject = migrate =
+        lock_count = reclaim_count = 0;
+    irq_enabled = expected_irq = irq;
+    main_reserved = 1;
+}
+static void mark(unsigned seen[OBJECTS], void *ptr) {
+    unsigned i;
+    for (i = 0; i < OBJECTS && objects[i] != ptr; i++)
+        ;
+    assert(i < OBJECTS && !seen[i]);
+    seen[i] = 1;
+}
+static void verify(void *held_object) {
+    unsigned seen[OBJECTS] = {0};
+    for (unsigned i = 0; i < central_count; i++)
+        mark(seen, central[i]);
+    for (unsigned c = 0; c < 2; c++) {
+        assert(arrays[c].count <= SLAB_CPU_ARRAY_CAP);
+        for (unsigned i = 0; i < arrays[c].count; i++)
+            mark(seen, arrays[c].objs[i]);
+    }
+    for (unsigned i = 0; i < interrupt_count; i++)
+        mark(seen, interrupt_objects[i]);
+    if (held_object)
+        mark(seen, held_object);
+    if (main_reserved)
+        mark(seen, objects[16]);
+    for (unsigned i = 0; i < OBJECTS; i++)
+        assert(seen[i]);
+    assert(!held && !reclaim_count);
+}
+int main(void) {
+    /* The old free slow path enables IRQs with a full CPU array. Reentry
+     * consumes all 16 entries; its blind eight-object drain then underflows. */
+    reset(16, 1);
+    inject = 1;
+    main_reserved = 0;
+    kfree(objects[16]);
+    assert(interrupt_count == 16 && irq_enabled);
+    verify(NULL);
+    /* A task may migrate as soon as IRQs are restored. Refill must finish
+     * with the array still pinned to its original CPU. */
+    reset(0, 1);
+    inject = migrate = 1;
+    void *obj = kmalloc_flags(128, 0);
+    assert(obj && interrupt_count == 16 && irq_enabled && cpu == 1);
+    verify(obj);
+    for (unsigned i = 0; i < 100000; i++) {
+        reset(i % 17, i & 1);
+        unsigned original_irq = irq_enabled;
+        main_reserved = 0;
+        kfree(objects[16]);
+        assert(irq_enabled == original_irq);
+        assert(lock_count == (i % 17 == SLAB_CPU_ARRAY_CAP));
+        verify(NULL);
+        obj = kmalloc_flags(128, 0);
+        assert(obj && irq_enabled == original_irq);
+        verify(obj);
+        kfree(obj);
+        assert(irq_enabled == original_irq);
+        verify(NULL);
+        /* Independently exercise allocation from an empty array, including
+         * callers that arrived with IRQs already masked. */
+        reset(i % 17, i & 1);
+        obj = kmalloc_flags(128, 0);
+        assert(obj && irq_enabled == original_irq);
+        assert(lock_count == (i % 17 == 0));
+        verify(obj);
+        kfree(obj);
+        assert(irq_enabled == original_irq);
+        verify(NULL);
+    }
+    for (unsigned irq = 0; irq < 2; irq++) {
+        reset(0, irq);
+        central_count = 0;
+        assert(!kmalloc_flags(128, 1));
+        assert(!held && irq_enabled == irq && reclaim_count == 1);
+        assert(!arrays[0].count && !arrays[1].count);
+    }
+    puts("slab_cpu_window: real alloc/free, injected IRQ reentry/migration and "
+         "100K array boundary/IRQ preservation cases PASS");
+    return 0;
+}

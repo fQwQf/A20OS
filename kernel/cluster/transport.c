@@ -15,6 +15,7 @@
 #include "proc/proc.h"
 
 #define CLX_RX_RING 64 /* queued frame pointers, not bytes */
+#define CLX_RX_POLL_HIGH_WATER (CLX_RX_RING / 2)
 
 typedef struct clx_rx_item {
     uint8_t *frame;
@@ -48,6 +49,7 @@ typedef struct clx_link_stats {
     uint32_t state; /* A20_CLX_LINK_* */
     uint64_t tx_frames, rx_frames, tx_drops, rx_drops, rx_malformed;
     uint64_t retransmits;
+    uint64_t rx_queue_full, rx_no_memory;
     uint64_t last_hello_tick;
 } clx_link_stats_t;
 static clx_link_stats_t g_clx_links[CLX_LIMIT_ROUTES + 4];
@@ -84,13 +86,23 @@ static clx_link_stats_t *clx_link_find(uint32_t transport_id, const uint8_t *nh,
     return free_slot;
 }
 
-void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
-                          uint32_t nh_len) {
+void a20_clx_link_rx_drop_kind(uint32_t transport_id, const uint8_t *nh,
+                               uint32_t nh_len, unsigned kind) {
     uint64_t flags = spin_lock_irqsave(&g_clx_links_lock);
     clx_link_stats_t *l = clx_link_find(transport_id, nh, nh_len, 1);
-    if (l)
+    if (l) {
         l->rx_drops++;
+        if (kind == A20_CLX_RX_DROP_QUEUE_FULL)
+            l->rx_queue_full++;
+        else if (kind == A20_CLX_RX_DROP_NO_MEMORY)
+            l->rx_no_memory++;
+    }
     spin_unlock_irqrestore(&g_clx_links_lock, flags);
+}
+
+void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
+                          uint32_t nh_len) {
+    a20_clx_link_rx_drop_kind(transport_id, nh, nh_len, A20_CLX_RX_DROP_OTHER);
 }
 
 void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,
@@ -295,7 +307,8 @@ void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
      * 拷贝，不共享缓冲). */
     copy = kmalloc(len);
     if (!copy) {
-        a20_clx_link_rx_drop(transport_id, next_hop_src, nh_len);
+        a20_clx_link_rx_drop_kind(transport_id, next_hop_src, nh_len,
+                                  A20_CLX_RX_DROP_NO_MEMORY);
         return;
     }
     memcpy(copy, frame, len);
@@ -305,7 +318,8 @@ void a20_clx_rx_frame(uint32_t transport_id, const uint8_t *next_hop_src,
     if (next == g_clx_rx_tail) {
         spin_unlock_irqrestore(&g_clx_rx_lock, flags);
         kfree(copy);
-        a20_clx_link_rx_drop(transport_id, next_hop_src, nh_len);
+        a20_clx_link_rx_drop_kind(transport_id, next_hop_src, nh_len,
+                                  A20_CLX_RX_DROP_QUEUE_FULL);
         return;
     }
     clx_rx_item_t *it = &g_clx_rx_ring[g_clx_rx_head];
@@ -332,8 +346,50 @@ static int clx_rx_pop(clx_rx_item_t *out) {
     *out = g_clx_rx_ring[g_clx_rx_tail];
     g_clx_rx_bytes -= out->len;
     g_clx_rx_tail = (g_clx_rx_tail + 1) % CLX_RX_RING;
+    int wake_space =
+        (g_clx_rx_head + CLX_RX_RING - g_clx_rx_tail) % CLX_RX_RING ==
+        CLX_RX_POLL_HIGH_WATER - 1;
     spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    if (wake_space)
+        wait_queue_wake_one(&g_clx_rx_waiters, 2, PROC_WAKE_EVENT);
     return 1;
+}
+
+static int clx_rx_poll_ready(void) {
+    uint64_t flags = spin_lock_irqsave(&g_clx_rx_lock);
+    int ready = (g_clx_rx_head + CLX_RX_RING - g_clx_rx_tail) % CLX_RX_RING <
+                CLX_RX_POLL_HIGH_WATER;
+    spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    if (ready)
+        return 1;
+
+    /* Stop pulling adapter packets before the shared bounded ring overflows.
+     * Parking, rather than repeated yielding, also lets the RX owner run.
+     * Slot-space events use key 2; the consumer's data events use key 1. */
+    proc_wait_token_t token = proc_park_prepare(
+        PROC_WAIT_UNINTERRUPTIBLE, timer_get_ticks() + MS_TO_TICKS(1));
+    if (!token.task) {
+        proc_sleep_until(timer_get_ticks() + MS_TO_TICKS(1));
+        return 0;
+    }
+    wait_queue_entry_t entry = {0};
+    flags = spin_lock_irqsave(&g_clx_rx_lock);
+    int linked = (g_clx_rx_head + CLX_RX_RING - g_clx_rx_tail) % CLX_RX_RING >=
+                     CLX_RX_POLL_HIGH_WATER &&
+                 __atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) != 3 &&
+                 wait_queue_link(&g_clx_rx_waiters, &entry, token, 2);
+    spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    if (linked)
+        (void)proc_park_commit(token);
+    else
+        (void)proc_park_cancel(token);
+    wait_queue_unlink(&g_clx_rx_waiters, &entry);
+    proc_park_finish(token);
+    flags = spin_lock_irqsave(&g_clx_rx_lock);
+    ready = (g_clx_rx_head + CLX_RX_RING - g_clx_rx_tail) % CLX_RX_RING <
+            CLX_RX_POLL_HIGH_WATER;
+    spin_unlock_irqrestore(&g_clx_rx_lock, flags);
+    return ready;
 }
 
 static void clx_rx_wait(void) {
@@ -513,6 +569,7 @@ static void clx_rx_thread(void) {
 /* Drivers must progress even while RX dispatch waits for a service queue. */
 static void clx_poll_thread(void) {
     proc_set_name(proc_current(), "clx-poll");
+    uint64_t control_poll_at[A20_CLX_MAX_TRANSPORTS] = {0};
     for (;;) {
         if (__atomic_load_n(&g_clx_core_ready, __ATOMIC_ACQUIRE) == 3)
             return;
@@ -523,8 +580,17 @@ static void clx_poll_thread(void) {
             if (present)
                 t = g_clx_transports[i];
             spin_unlock_irqrestore(&g_clx_lock, flags);
-            if (present && (t.flags & A20_CLX_TFL_POLLING) && t.poll)
-                t.poll(t.ctx);
+            if (present && (t.flags & A20_CLX_TFL_POLLING) && t.poll) {
+                int ready = clx_rx_poll_ready();
+                uint64_t now = timer_get_ticks();
+                /* Backpressure must not suppress control I/O forever. Give
+                 * each adapter one bounded poll after 100 ms without a poll;
+                 * normal space-driven progress refreshes this deadline. */
+                if (ready || now >= control_poll_at[i]) {
+                    control_poll_at[i] = now + MS_TO_TICKS(100);
+                    t.poll(t.ctx);
+                }
+            }
         }
 #ifndef CONFIG_MCU
         a20_clx_udp_wait(timer_get_ticks() + MS_TO_TICKS(1));
@@ -659,19 +725,25 @@ void a20_clx_link_resources(a20_cluster_resource_args_t *out) {
         const clx_link_stats_t *l = &g_clx_links[i];
         if (!l->in_use)
             continue;
-        v[A20_CLX_LINK_COUNT]++;
-        if (l->state == A20_CLX_LINK_UP)
-            v[A20_CLX_LINK_UP_COUNT]++;
-        else if (l->state == A20_CLX_LINK_SUSPECT)
-            v[A20_CLX_LINK_SUSPECT_COUNT]++;
-        else
-            v[A20_CLX_LINK_DOWN_COUNT]++;
+        /* Context-free drops have no next-hop identity. Keep their counters
+         * in the aggregate without inventing an extra DOWN physical link. */
+        if (l->nh_len) {
+            v[A20_CLX_LINK_COUNT]++;
+            if (l->state == A20_CLX_LINK_UP)
+                v[A20_CLX_LINK_UP_COUNT]++;
+            else if (l->state == A20_CLX_LINK_SUSPECT)
+                v[A20_CLX_LINK_SUSPECT_COUNT]++;
+            else
+                v[A20_CLX_LINK_DOWN_COUNT]++;
+        }
         v[A20_CLX_LINK_TX_FRAMES] += l->tx_frames;
         v[A20_CLX_LINK_RX_FRAMES] += l->rx_frames;
         v[A20_CLX_LINK_TX_DROPS] += l->tx_drops;
         v[A20_CLX_LINK_RX_DROPS] += l->rx_drops;
         v[A20_CLX_LINK_RX_MALFORMED] += l->rx_malformed;
         v[A20_CLX_LINK_RETRANSMITS] += l->retransmits;
+        v[A20_CLX_LINK_RX_QUEUE_FULL] += l->rx_queue_full;
+        v[A20_CLX_LINK_RX_NO_MEMORY] += l->rx_no_memory;
     }
     spin_unlock_irqrestore(&g_clx_links_lock, irq);
 }

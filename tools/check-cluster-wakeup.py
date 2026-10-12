@@ -15,12 +15,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix="clx-wakeup-", dir=directory) as tmp:
         compiler = shlex.split(os.environ.get("HOST_CC", "cc"))
         cases = (("transport.c", "clx_wakeup_fixture.c.in", ("a20_clx_rx_frame", "clx_rx_wait")),
+                 ("transport.c", "clx_rx_backpressure_fixture.c.in", ("clx_rx_pop", "clx_rx_poll_ready", "clx_poll_thread")),
                  ("udp.c", "clx_udp_wakeup_fixture.c.in", ("a20_clx_udp_wait",)))
         for source_name, fixture_name, functions in cases:
             source = (root / "kernel/cluster" / source_name).read_text()
             fixture = (root / "tools/tests" / fixture_name).read_text()
             for name in functions:
-                match = re.search(r"(?:static )?void " + name + r"\([^)]*\)\s*\{.*?\n}\n", source, re.S)
+                match = re.search(r"(?:static )?(?:void|int) " + name + r"\([^)]*\)\s*\{.*?\n}\n", source, re.S)
                 marker = "/* PRODUCTION_" + name + " */"
                 if not match or fixture.count(marker) != 1:
                     raise RuntimeError("missing production function or fixture splice: " + name)

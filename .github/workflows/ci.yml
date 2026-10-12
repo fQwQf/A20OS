@@ -86,6 +86,9 @@ jobs:
       - name: Cluster receive wake and park race boundaries
         run: make check-cluster-wakeup
 
+      - name: Slab CPU array IRQ reentry and migration boundaries
+        run: make check-slab-cpu-window
+
       # 把 kernel/include/drivers/gpu/drm.h 的每个 DRM_IOCTL_* 编号与
       # 宿主 linux-headers 的 include/uapi/drm 逐条比对，并实测线结构体
       # 尺寸与字段偏移。tools/ci/Dockerfile 刻意不带 linux-headers，所以

@@ -244,6 +244,7 @@ CHECK_FAST_GATES := \
     check-cluster-unit \
     check-cluster-fuzz \
     check-cluster-wakeup \
+    check-slab-cpu-window \
     check-virtio-net-completion \
     check-drm-abi \
     check-task-lifetime-boundary \
@@ -368,6 +369,10 @@ check-virtio-net-completion:
 .PHONY: check-cluster-wakeup
 check-cluster-wakeup:
 	$(PYTHON) tools/check-cluster-wakeup.py
+
+.PHONY: check-slab-cpu-window
+check-slab-cpu-window:
+	$(PYTHON) tools/check-slab-cpu-window.py
 
 .PHONY: check-cluster-uart
 check-cluster-uart:

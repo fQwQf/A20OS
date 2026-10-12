@@ -138,6 +138,7 @@ static int export_server(const char *name, unsigned flags,
     a20_hdl_close(pair.endpoints[0]);
     return 0;
 }
+static int report_resources(void);
 static int query(a20_handle_t ep, unsigned op, unsigned seconds,
                  uint8_t reply[32]) {
     uint8_t request[16];
@@ -145,12 +146,23 @@ static int query(a20_handle_t ep, unsigned op, unsigned seconds,
     a20_work_put32(request + 8, op);
     a20_work_put32(request + 12, seconds);
     uint32_t len = 32;
-    return a20_cluster_exchange(ep, request, sizeof(request), reply, &len,
-                                3000) < 0 ||
-                   len != 32 || a20_work_u32(reply + 4) ||
-                   a20_work_u32(reply + 8)
-               ? -1
-               : 0;
+    a20_status_t status =
+        a20_cluster_exchange(ep, request, sizeof(request), reply, &len, 3000);
+    if (status < 0 || len != 32 || a20_work_u32(reply + 4) ||
+        a20_work_u32(reply + 8)) {
+        put("CLUSTER_LOAD: query_error node=");
+        number(self_id);
+        put(" op=");
+        number(op);
+        put(" error=");
+        number(status < 0 ? (uint64_t)-status : 0);
+        put(" reply_len=");
+        number(len);
+        put("\n");
+        (void)report_resources();
+        return -1;
+    }
+    return 0;
 }
 static int send_one(a20_handle_t ep, uint32_t sequence) {
     uint8_t bytes[LOAD_BYTES];
@@ -161,7 +173,7 @@ static int send_one(a20_handle_t ep, uint32_t sequence) {
     for (unsigned i = 16; i < sizeof(bytes); i++)
         bytes[i] = (uint8_t)(sequence ^ self_id ^ i);
     a20_status_t status = a20_channel_send_flags(ep, bytes, sizeof(bytes), 0, 0,
-                                               A20_MSG_NONBLOCK);
+                                                 A20_MSG_NONBLOCK);
     if (status == -A20_ERR_WOULD_BLOCK)
         status = a20_channel_send(ep, bytes, sizeof(bytes), 0, 0);
     return status == -A20_ERR_WOULD_BLOCK ? 0 : status < 0 ? -1 : 1;
