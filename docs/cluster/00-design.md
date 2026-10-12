@@ -114,3 +114,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 当前接口与验证边界见 [36-object-directory.md](36-object-directory.md)。
 
 实际 ELF 启动、ISA 变体选择与按活动程序数分配见 [37](37-application-execution.md)。
+
+普通应用参数、环境与实际集群命令行执行见
+[38-application-launch-inputs.md](38-application-launch-inputs.md)。

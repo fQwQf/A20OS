@@ -80,7 +80,8 @@ root 字段是 [36](36-object-directory.md) 使用的全局任务名；身份观
 可以为空，即使随后观察到退出也不会编造 root。appd 目前没有自动把 root
 注册到 objectd，应用的 query 通过 owner 持有的真实任务引用完成。启动的程序
 继承 appd 的 root_dir、cwd_dir 和标准输入输出句柄，沿用普通 Native 文件和
-读写接口；当前参数固定为镜像路径一个 argv，不传递任意参数或环境。
+读写接口。原七参数入口的 argv 只有镜像路径；新增清单入口支持配置 argv/envp，
+见 [38](38-application-launch-inputs.md)。客户端仍选择已部署清单，不上传任意参数。
 
 SDK 在发送 START 前写回 ticket。超时是结果未知，调用者应 resume 原 ticket
 并 query，或在同一 controller 上显式重试同一键。`start_any` 不会在未知结果

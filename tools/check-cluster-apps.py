@@ -48,7 +48,7 @@ def main():
         reserve.append(a); lanes.append(b); ports.append(a.getsockname()[1])
     processes, logs, commands, outputs, pending = [None]*3, [], [], [None]*3, {}
     trace = []
-    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "real_workloads": [], "dropped_start_replies": 0, "reboots": []}
+    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "reboots": []}
     macs = [bytes.fromhex(f"52540012340{i+1}") for i in range(3)]
 
     def stop(i):
@@ -106,6 +106,14 @@ def main():
                 if source==1 and drop and ca>=0 and int.from_bytes(cl[ca+16:ca+24],"little")==99 and len(cl)>=ca+192:
                     events["dropped_start_replies"] += 1
                     continue
+                stop_ca = cl.find(b"CA\x01\x04",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
+                if stop_ca>=0 and len(cl)>=stop_ca+176 and int.from_bytes(cl[stop_ca+16:stop_ca+24],"little")==701:
+                    if source==0 and "APPCTL: stop retry original owner" not in outputs[0].read_text(errors="replace"):
+                        events["dropped_stop_requests"]+=1
+                        continue
+                    if source==1 and len(cl)>=stop_ca+192:
+                        events["dropped_stop_replies"]+=1
+                        continue
                 targets = [macs.index(packet[:6])] if packet[:6] in macs else range(3)
                 for target in targets:
                     if target != source:
@@ -128,6 +136,15 @@ def main():
                 events["real_workloads"]=[(directory / f"node-{i}-mode-0.log").read_text(errors="replace").count("APP-WORK: PASS sum=500500") for i in range(3)]
                 if "APPS: balance-pass real-programs=6 active=2,2,2" not in out or any(n<4 for n in events["real_workloads"]):
                     raise RuntimeError(f"missing actual balanced workloads: {events}")
+                all_logs=[(directory / f"node-{i}-mode-0.log").read_text(errors="replace") for i in range(3)]
+                all_logs[1]+=(directory / "node-1-mode-1.log").read_text(errors="replace")
+                events["real_argument_workloads"]=[s.count("APP-ARGS: PASS argc=4 envc=2") for s in all_logs]
+                events["cli_exits"]=out.count("APPCTL: exit=00000025")
+                if "APPS: cli-pass real-args-env exit=37 nodes=3" not in out or any(n!=1 for n in events["real_argument_workloads"]) or events["cli_exits"]!=3:
+                    raise RuntimeError(f"missing actual configured CLI workloads: {events}")
+                events["cli_cancel_exits"]=out.count("APPCTL: exit=00000089")
+                if "APPS: cli-cancel-pass remote-exit=137 active=0" not in out or events["cli_cancel_exits"]!=1 or not events["dropped_stop_requests"] or not events["dropped_stop_replies"]:
+                    raise RuntimeError(f"missing actual remote CLI cancellation: {events}")
                 events["passed"] = True
                 print(f"check-cluster-apps: PASS ({','.join(arches)}, variant launch, dedup/lost reply, exit/stop, daemon restart and kernel reboot)")
                 return

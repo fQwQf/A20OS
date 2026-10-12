@@ -3,45 +3,62 @@
  * Same manifest UUID may have several ISA variants. No architecture #ifdef. */
 #include "liba20rt/a20_apps.h"
 #include "liba20rt/crt0_a20.h"
+#include "../../kernel/include/uapi/a20/cluster_app_manifest.h"
 #define VARIANTS 8u
 #define APPLICATIONS 8u
 static a20_app_variant_t variants[VARIANTS];
 static a20_app_record_t records[APPLICATIONS];
 static a20_app_owner_t owner;
 static a20_start_info_t *startup;
-static int number(const char *s, uint32_t *out) {
-    uint32_t value = 0;
-    if (!s || !*s)
+static a20_app_manifest_entry_t entries[VARIANTS];
+static char manifest_bytes[A20_APP_MANIFEST_BYTES + 1];
+static int load_manifest(const char *path, uint32_t *count) {
+    a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
+                                 .path = (uint64_t)(uintptr_t)path,
+                                 .path_len = (uint32_t)a20_strlen(path),
+                                 .rights = A20_RIGHT_READ};
+    if (a20_path_open(&file) < 0)
         return -1;
-    for (; *s; s++) {
-        if (*s < '0' || *s > '9' ||
-            value > (UINT32_MAX - (unsigned)(*s - '0')) / 10)
-            return -1;
-        value = value * 10 + (unsigned)(*s - '0');
+    uint32_t used = 0;
+    int result = -1;
+    while (used < sizeof(manifest_bytes)) {
+        uint64_t got = 0;
+        if (a20_hdl_read_buf(file.out_handle, manifest_bytes + used,
+                             sizeof(manifest_bytes) - used, &got) < 0 ||
+            got > sizeof(manifest_bytes) - used)
+            break;
+        if (!got) {
+            result = a20_app_manifest_parse(manifest_bytes, used, entries,
+                                            VARIANTS, count);
+            break;
+        }
+        used += (uint32_t)got;
     }
-    *out = value;
-    return 0;
+    a20_hdl_close(file.out_handle);
+    return result;
 }
 static int start(void *ctx, uintptr_t image, uintptr_t *object,
                  a20_object_id_t *root) {
     (void)ctx;
-    const char *path = (const char *)image;
+    const a20_app_manifest_entry_t *entry = (const void *)image;
+    const char *path = entry->argv[0];
     a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
-                                 .path = (uint64_t)image,
+                                 .path = (uint64_t)(uintptr_t)path,
                                  .path_len = (uint32_t)a20_strlen(path),
                                  .rights = A20_RIGHT_READ | A20_RIGHT_EXEC};
     a20_status_t status = a20_path_open(&file);
     if (status < 0)
         return (int)status;
-    const char *argv[] = {path, 0};
     a20_task_spawn_args_t args = {.size = sizeof(args),
                                   .version = 2,
                                   .image = file.out_handle,
                                   .root_dir = startup->root_dir,
                                   .cwd_dir = startup->cwd_dir,
                                   .event_queue = A20_HANDLE_NULL,
-                                  .argv = (uint64_t)(uintptr_t)argv,
-                                  .argc = 1,
+                                  .argv = (uint64_t)(uintptr_t)entry->argv,
+                                  .argc = entry->argc,
+                                  .envp = (uint64_t)(uintptr_t)entry->envp,
+                                  .envc = entry->envc,
                                   .flags = A20_SPAWN_PARENT_BOUND,
                                   .stdin_handle = startup->stdin_handle,
                                   .stdout_handle = startup->stdout_handle,
@@ -84,24 +101,37 @@ static int dispatch(void *ctx, const uint8_t *q, uint32_t n, uint8_t *reply,
 int main(int argc, char **argv, char **envp) {
     (void)envp;
     startup = a20_get_start_info();
-    if (!startup || argc < 8 || (argc - 1) % 7 ||
-        (unsigned)(argc - 1) / 7 > VARIANTS)
+    if (!startup)
         return 2;
-    unsigned count = (unsigned)(argc - 1) / 7;
-    for (unsigned i = 0; i < count; i++) {
-        char **a = argv + 1 + i * 7;
-        a20_node_id_t id;
-        if (a20_node_id_parse_hex(a[0], &id) || !a[1] || a[1][0] != '/')
+    uint32_t count = 0;
+    if (argc == 3 && a20_app_text_equal(argv[1], "--manifest")) {
+        if (load_manifest(argv[2], &count))
             return 2;
-        a20_memcpy(variants[i].manifest, id.bytes, 16);
-        variants[i].image = (uintptr_t)a[1];
-        a20_execution_requirement_t *v = &variants[i].requirement;
-        v->native_major = 1;
-        if (number(a[2], &v->elf_machine) || number(a[3], &v->pointer_bits) ||
-            number(a[4], &v->byte_order) || number(a[5], &v->calling_abi) ||
-            number(a[6], &v->required_features))
+    } else {
+        if (argc < 8 || (argc - 1) % 7 || (unsigned)(argc - 1) / 7 > VARIANTS)
             return 2;
+        count = (unsigned)(argc - 1) / 7;
+        for (unsigned i = 0; i < count; i++) {
+            char **a = argv + 1 + i * 7;
+            a20_app_manifest_entry_t *entry = &entries[i];
+            if (a20_app_manifest_uuid(a[0], entry->variant.manifest) || !a[1] ||
+                a[1][0] != '/')
+                return 2;
+            entry->argv[0] = a[1];
+            entry->argc = 1;
+            entry->variant.image = (uintptr_t)entry;
+            a20_execution_requirement_t *v = &entry->variant.requirement;
+            v->native_major = 1;
+            if (a20_app_decimal(a[2], &v->elf_machine) ||
+                a20_app_decimal(a[3], &v->pointer_bits) ||
+                a20_app_decimal(a[4], &v->byte_order) ||
+                a20_app_decimal(a[5], &v->calling_abi) ||
+                a20_app_decimal(a[6], &v->required_features))
+                return 2;
+        }
     }
+    for (unsigned i = 0; i < count; i++)
+        variants[i] = entries[i].variant;
     a20_runtime_info_t runtime;
     a20_handle_identity_t identity;
     a20_execution_info_t execution;
