@@ -133,4 +133,56 @@ static inline int a20_object_id_decode(const uint8_t *p, uint32_t len,
     *out = id;
     return 0;
 }
+/* Runtime snapshots use explicit LE fields too. Decode is transactional. */
+static inline int a20_runtime_info_encode(uint8_t *p, uint32_t cap,
+                                          const a20_runtime_info_t *info) {
+    if (!p || cap < A20_RUNTIME_BYTES || !a20_runtime_info_valid(info))
+        return -1;
+    /* Snapshot first, so an in-place codec is well-defined. */
+    a20_runtime_info_t value = *info;
+    for (unsigned i = 0; i < 64; i++)
+        p[i] = 0;
+    p[0] = 64;
+    p[4] = 1;
+    p[8] = (uint8_t)value.state;
+    for (unsigned i = 0; i < 16; i++) {
+        p[16 + i] = value.instance_id[i];
+        p[32 + i] = value.domain_id[i];
+    }
+    a20_runtime_put64(p + 48, value.boot_epoch);
+    return 0;
+}
+static inline int a20_runtime_info_decode(const uint8_t *p, uint32_t len,
+                                          a20_runtime_info_t *out) {
+    if (!p || !out || len != 64 || p[0] != 64 || p[4] != 1 || p[8] > 1)
+        return -1;
+    for (unsigned i = 1; i < 16; i++)
+        if (i != 4 && i != 8 && p[i])
+            return -1;
+    for (unsigned i = 56; i < 64; i++)
+        if (p[i])
+            return -1;
+    a20_runtime_info_t value = {.size = 64,
+                                .version = 1,
+                                .state = p[8],
+                                .boot_epoch = a20_runtime_get64(p + 48)};
+    for (unsigned i = 0; i < 16; i++) {
+        value.instance_id[i] = p[16 + i];
+        value.domain_id[i] = p[32 + i];
+    }
+    if (!a20_runtime_info_valid(&value))
+        return -1;
+    *out = value;
+    return 0;
+}
+/* Same instance, expected domain. Transport nonces remain separate. */
+static inline int a20_runtime_admits(const a20_runtime_info_t *local,
+                                     const a20_runtime_info_t *peer,
+                                     const uint8_t domain[16]) {
+    return a20_runtime_info_valid(local) && local->state == A20_RUNTIME_BOUND &&
+           a20_runtime_info_valid(peer) && peer->state == A20_RUNTIME_BOUND &&
+           domain &&
+           a20_runtime_id_equal(local->instance_id, peer->instance_id) &&
+           a20_runtime_id_equal(peer->domain_id, domain);
+}
 #endif

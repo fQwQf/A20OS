@@ -106,3 +106,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 运行实例的公共身份、不可变启动绑定与指针无关对象名见
 [34-runtime-namespace.md](34-runtime-namespace.md)。同一接口用于共享 MCU 内核与服务器域。
+
+运行实例的公共成员准入、跨 ISA 发现证明与兼容策略见
+[35-instance-membership.md](35-instance-membership.md)。

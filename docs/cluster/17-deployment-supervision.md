@@ -106,3 +106,6 @@ VFS BUG、PANIC 和 SIGSEGV。日志在
 `.kernel-build/smoke/native-cluster-supervisor-riscv64.log`。
 共享解析器额外运行 10 万次截断/变异 ASan/UBSan 检查；退避上限、重置和计数
 溢出均有确定性测试。这些是主机/QEMU 证据，没有物理 MCU 文件配置运行证据。
+
+慢速执行环境可用 `timing-scale 1..16` 成比例放宽控制面期限与租约，默认 1
+保持既有行为；协议、取舍和跨架构验收见 [35](35-instance-membership.md)。

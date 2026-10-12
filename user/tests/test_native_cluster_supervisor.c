@@ -241,7 +241,7 @@ int main(int argc, char **argv, char **envp) {
     const char normal[] =
         "version 1\nnode 00000000000000000000000000000001\ninstance "
         "a2200000000000000000000000000001\nepoch 72623859790382856\nrole "
-        "worker\nseed 00000000000000000000000000000003 "
+        "worker\ntiming-scale 10\nseed 00000000000000000000000000000003 "
         "udp:10.0.3.3:44020\nservice agent /bin/cluster-agent-rv\nservice "
         "control "
         "/bin/clusterd-rv\nservice jobs /bin/jobd-rv\nprocess "

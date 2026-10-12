@@ -20,7 +20,7 @@ typedef struct peer_probe {
     uint32_t phase, index, count, control_slot, pending_control, steps;
     uint32_t gossip_cursor, gossip_pages;
     uint8_t node_id[16];
-    uint64_t cookie, generation, epoch, deadline, next_probe;
+    uint64_t cookie, generation, epoch, deadline, next_probe, runtime_epoch;
     a20_member_service_t scratch[DIRECTORY_SERVICES];
     a20_member_service_t candidate;
 } peer_probe_t;
@@ -35,6 +35,7 @@ static a20_gossip_route_t learned[A20_CLUSTERD_MEMBERS];
 static a20_gossip_table_t gossip = {.routes = learned,
                                     .capacity = A20_CLUSTERD_MEMBERS};
 static uint64_t route_overflow;
+static uint32_t timing_scale = 1;
 
 static void probe_close(peer_probe_t *p) {
     if (p->directory != A20_HANDLE_NULL)
@@ -63,6 +64,37 @@ static int track_node(const uint8_t node[16]) {
     return index;
 }
 
+/* A late UNBOUND -> BOUND kernel binding invalidates all pre-binding views.
+ * Check at dispatch as well as periodic refresh, before serving selections. */
+static int refresh_runtime(void) {
+    a20_runtime_info_t info = {.size = 64, .version = 1};
+    a20_status_t status = a20_runtime_info(&info);
+    if (status == -A20_ERR_NOT_SUPPORTED)
+        info = (a20_runtime_info_t){.size = 64, .version = 1};
+    else if (status < 0 || !a20_runtime_info_valid(&info))
+        return -1;
+    if (!a20_memcmp(&info, &cluster.runtime, sizeof(info)))
+        return 0;
+    if (cluster.runtime.state == A20_RUNTIME_BOUND ||
+        info.state != A20_RUNTIME_BOUND ||
+        !a20_runtime_id_equal(info.domain_id, self.node_id))
+        return -1;
+    for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++) {
+        probe_close(&probes[i]);
+        probes[i] = (peer_probe_t){.directory = A20_HANDLE_NULL,
+                                   .capability = A20_HANDLE_NULL};
+    }
+    uint64_t cookie = cluster.next_cookie;
+    if (a20_membership_init(&cluster, members, A20_CLUSTERD_MEMBERS, services,
+                            A20_CLUSTERD_MEMBERS * 2, 1500 * timing_scale,
+                            3000 * timing_scale, 30000 * timing_scale) ||
+        a20_membership_set_runtime(&cluster, &info))
+        return -1;
+    cluster.next_cookie = cookie;
+    a20_memset(route_seen, 0, sizeof(route_seen));
+    return track_node(self.node_id) < 0 ? -1 : 1;
+}
+
 /* Local directory capacity must not turn a live peer into a failed node.
  * Keep the previous atomic snapshot until its lease expires and retry. */
 static void directory_full(peer_probe_t *p, uint64_t now) {
@@ -72,7 +104,10 @@ static void directory_full(peer_probe_t *p, uint64_t now) {
 
 static int directory_send(peer_probe_t *p) {
     uint8_t request[16];
-    a20_directory_request(request, p->index, p->generation);
+    if (cluster.runtime.state == A20_RUNTIME_BOUND)
+        a20_directory_runtime_request(request, p->index, p->generation);
+    else
+        a20_directory_request(request, p->index, p->generation);
     p->phase = PHASE_DIRECTORY;
     return a20_channel_send_flags(p->directory, request, sizeof(request), 0, 0,
                                   A20_MSG_NONBLOCK) < 0
@@ -80,9 +115,10 @@ static int directory_send(peer_probe_t *p) {
                : 0;
 }
 
-static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
-                            uint8_t *reply, uint32_t capacity) {
-    (void)ctx;
+static int control_dispatch_body(void *ctx, const uint8_t *request,
+                                 uint32_t len, uint8_t *reply,
+                                 uint32_t capacity) {
+    a20_runtime_info_t *proof = ctx;
     if (capacity < A20_CONTROL_REPLY)
         return -1;
     a20_memset(reply, 0, A20_CONTROL_REPLY);
@@ -103,6 +139,8 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
         for (unsigned i = index; i < A20_CLUSTERD_MEMBERS; i++) {
             a20_member_t *m = &members[i];
             if (!m->state || !m->boot_epoch || !route_seen[i] ||
+                (cluster.runtime.state == A20_RUNTIME_BOUND &&
+                 !m->runtime_admitted) ||
                 !a20_gossip_advertise(&gossip, m->node_id, request + 32, now))
                 continue;
             uint32_t distance = route_view[i].metric & ~A20_GOSSIP_ROUTE_MARK;
@@ -117,6 +155,8 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
             a20_work_put32(reply + 48, i + 1);
             a20_work_put64(reply + 72, m->incarnation);
             a20_work_put32(reply + 4, 0);
+            if (proof)
+                a20_member_runtime(&cluster, i, proof);
             return A20_CONTROL_REPLY;
         }
         a20_work_put32(reply + 4, A20_ERR_NOT_FOUND);
@@ -129,7 +169,9 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
         if (service >= 0)
             found = (int)services[service].member_index;
     } else if (request[3] == A20_CONTROL_MEMBER) {
-        if (index < A20_CLUSTERD_MEMBERS && members[index].state)
+        if (index < A20_CLUSTERD_MEMBERS && members[index].state &&
+            (cluster.runtime.state != A20_RUNTIME_BOUND ||
+             members[index].runtime_admitted))
             found = (int)index;
     } else if (request[3] == A20_CONTROL_INDIRECT &&
                a20_work_u32(request + 16) == 16 && a20_work_u64(request + 24)) {
@@ -142,18 +184,31 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
             record.profile = self.profile;
             record.caps = self.caps;
             alive = 1;
+            if (proof)
+                *proof = cluster.runtime;
         } else {
             a20_handle_t ep = A20_HANDLE_NULL;
             if (a20_cluster_connect(&target, A20_DIRECTORY_SLOT, 0,
                                     A20_CONNECT_RELIABLE, 0, &ep) >= 0) {
-                uint8_t query[16], wire[128];
+                uint8_t query[16], wire[A20_DIRECTORY_RUNTIME_REPLY];
                 uint32_t n = sizeof(wire);
-                a20_directory_request(query, 0, 0);
-                alive =
-                    a20_cluster_exchange(ep, query, sizeof(query), wire, &n,
-                                         300) >= 0 &&
-                    a20_directory_decode(wire, n, target.bytes, &record) == 0 &&
-                    record.status != A20_DIRECTORY_INVALID;
+                int bound = cluster.runtime.state == A20_RUNTIME_BOUND;
+                if (bound)
+                    a20_directory_runtime_request(query, 0, 0);
+                else
+                    a20_directory_request(query, 0, 0);
+                a20_runtime_info_t observed = {.size = 64, .version = 1};
+                alive = a20_cluster_exchange(ep, query, sizeof(query), wire, &n,
+                                             300 * timing_scale) >= 0 &&
+                        (bound ? a20_directory_runtime_decode(
+                                     wire, n, target.bytes, &record, &observed)
+                               : a20_directory_decode(wire, n, target.bytes,
+                                                      &record)) == 0 &&
+                        record.status != A20_DIRECTORY_INVALID &&
+                        (!bound || a20_runtime_admits(&cluster.runtime,
+                                                      &observed, target.bytes));
+                if (alive && bound && proof)
+                    *proof = observed;
                 a20_hdl_close(ep);
             }
         }
@@ -172,6 +227,8 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
     if (found < 0)
         return A20_CONTROL_REPLY;
     a20_member_t *m = &members[found];
+    if (proof)
+        a20_member_runtime(&cluster, (uint32_t)found, proof);
     a20_memcpy(reply + 8, m->node_id, 16);
     a20_work_put64(reply + 24, m->boot_epoch);
     a20_work_put64(reply + 72, m->incarnation);
@@ -189,6 +246,32 @@ static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
                 a20_work_put32(reply + 56, s->operators[i].flags);
     }
     return A20_CONTROL_REPLY;
+}
+
+/* CM/2 appends the checked target namespace. Old CM/1 callers retain their
+ * wire shape, but a bound owner still filters every result by instance. */
+static int control_dispatch(void *ctx, const uint8_t *request, uint32_t len,
+                            uint8_t *reply, uint32_t capacity) {
+    (void)ctx;
+    if (refresh_runtime() < 0)
+        return -1;
+    int extended = len == A20_CONTROL_REQUEST && request[0] == 'C' &&
+                   request[1] == 'M' && request[2] == 2;
+    if (capacity < (extended ? A20_CONTROL_RUNTIME_REPLY : A20_CONTROL_REPLY))
+        return -1;
+    a20_runtime_info_t proof = {.size = 64, .version = 1};
+    int result = control_dispatch_body(&proof, request, len, reply, capacity);
+    if (result < 0 || !extended)
+        return result;
+    reply[2] = 2;
+    if (!a20_work_u32(reply + 4) &&
+        !a20_runtime_admits(&cluster.runtime, &proof, reply + 8))
+        a20_work_put32(reply + 4, A20_ERR_NOT_SUPPORTED);
+    if (a20_work_u32(reply + 4))
+        proof = (a20_runtime_info_t){.size = 64, .version = 1};
+    if (a20_runtime_info_encode(reply + 80, 64, &proof))
+        return -1;
+    return A20_CONTROL_RUNTIME_REPLY;
 }
 
 static int gossip_send(peer_probe_t *p) {
@@ -211,7 +294,7 @@ static void gossip_start(unsigned i, uint64_t now) {
                                   &p->directory) < 0)
         return;
     p->phase = PHASE_GOSSIP;
-    p->deadline = now + 700;
+    p->deadline = now + 700 * timing_scale;
     p->gossip_pages = 0;
     if (gossip_send(p) < 0)
         directory_full(p, now);
@@ -299,6 +382,8 @@ static void gossip_receive(unsigned provider, const uint8_t *wire, uint32_t len,
 static int indirect(unsigned target, uint64_t cookie) {
     for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++) {
         if (i == target || members[i].state != A20_MEMBER_ALIVE ||
+            (cluster.runtime.state == A20_RUNTIME_BOUND &&
+             !members[i].runtime_admitted) ||
             !probes[i].control_slot ||
             !a20_memcmp(members[i].node_id, self.node_id, 16))
             continue;
@@ -307,22 +392,29 @@ static int indirect(unsigned target, uint64_t cookie) {
         if (a20_cluster_connect(&helper, probes[i].control_slot, 0,
                                 A20_CONNECT_RELIABLE, 0, &ep) < 0)
             continue;
-        uint8_t request[96], reply[80];
+        uint8_t request[96], reply[A20_CONTROL_RUNTIME_REPLY];
         uint32_t len = sizeof(reply);
         a20_control_request(request, A20_CONTROL_INDIRECT, 0, 0, 0,
                             (const char *)members[target].node_id, 16, cookie);
-        int ok = a20_cluster_exchange(ep, request, sizeof(request), reply, &len,
-                                      450) >= 0 &&
-                 len == 80 && reply[0] == 'C' && reply[1] == 'M' &&
-                 reply[2] == 1 && reply[3] == A20_CONTROL_INDIRECT &&
-                 !a20_work_u32(reply + 4) &&
-                 a20_work_u64(reply + 64) == cookie &&
-                 !a20_memcmp(reply + 8, members[target].node_id, 16);
+        int bound = cluster.runtime.state == A20_RUNTIME_BOUND;
+        if (bound)
+            request[2] = 2;
+        a20_runtime_info_t proof = {.size = 64, .version = 1};
+        int ok =
+            a20_cluster_exchange(ep, request, sizeof(request), reply, &len,
+                                 450 * timing_scale) >= 0 &&
+            len == (bound ? A20_CONTROL_RUNTIME_REPLY : A20_CONTROL_REPLY) &&
+            reply[0] == 'C' && reply[1] == 'M' && reply[2] == (bound ? 2 : 1) &&
+            reply[3] == A20_CONTROL_INDIRECT && !a20_work_u32(reply + 4) &&
+            a20_work_u64(reply + 64) == cookie &&
+            !a20_memcmp(reply + 8, members[target].node_id, 16) &&
+            (!bound || !a20_control_runtime_decode(reply, len, &proof));
         a20_hdl_close(ep);
-        if (ok && a20_member_observe(
+        if (ok && a20_member_observe_runtime(
                       &cluster, target, cookie, a20_work_u64(reply + 24),
                       members[target].incarnation, a20_work_u32(reply + 40),
-                      a20_work_u32(reply + 44), a20_agent_clock_ms(0), 0) == 0)
+                      a20_work_u32(reply + 44), a20_agent_clock_ms(0), 0,
+                      bound ? &proof : 0) == 0)
             return 0;
         break; /* One helper per round keeps fallback latency bounded. */
     }
@@ -353,13 +445,21 @@ static void probe_start(unsigned i, uint64_t now) {
     if (!p->cookie)
         return;
     p->index = p->count = p->steps = p->pending_control = 0;
-    p->generation = p->epoch = 0;
-    p->deadline = now + 700; /* Leave room for one indirect probe. */
+    p->generation = p->epoch = p->runtime_epoch = 0;
+    p->deadline =
+        now + 700 * timing_scale; /* Leave room for one indirect probe. */
     a20_node_id_t node = member_node(i);
     if (a20_cluster_connect(&node, A20_DIRECTORY_SLOT, 0, A20_CONNECT_RELIABLE,
                             0, &p->directory) < 0 ||
         directory_send(p) < 0)
         probe_failed(i, now);
+}
+
+static void probe_runtime_rejected(unsigned i, uint64_t now) {
+    probe_close(&probes[i]);
+    a20_member_runtime_reject(&cluster, i, now);
+    probes[i].control_slot = 0;
+    probes[i].next_probe = now + 1000;
 }
 
 static void probe_pump(unsigned i, uint64_t now) {
@@ -413,23 +513,41 @@ static void probe_pump(unsigned i, uint64_t now) {
         return;
     }
     a20_directory_record_t record;
-    if (a20_directory_decode(wire, len, members[i].node_id, &record) < 0 ||
-        (p->epoch && p->epoch != record.boot_epoch)) {
+    a20_runtime_info_t runtime = {.size = 64, .version = 1};
+    int bound = cluster.runtime.state == A20_RUNTIME_BOUND;
+    int decoded =
+        bound ? a20_directory_runtime_decode(wire, len, members[i].node_id,
+                                             &record, &runtime)
+              : a20_directory_decode(wire, len, members[i].node_id, &record);
+    if (bound &&
+        (decoded < 0 ||
+         !a20_runtime_admits(&cluster.runtime, &runtime, members[i].node_id) ||
+         (p->runtime_epoch && p->runtime_epoch != runtime.boot_epoch))) {
+        probe_runtime_rejected(i, now);
+        return;
+    }
+    if (decoded < 0 || (p->epoch && p->epoch != record.boot_epoch)) {
         probe_failed(i, now);
         return;
     }
     if (!p->epoch) {
         if (members[i].boot_epoch != record.boot_epoch)
             p->control_slot = 0;
-        if (a20_member_observe(&cluster, i, p->cookie, record.boot_epoch,
-                               members[i].boot_epoch == record.boot_epoch
-                                   ? members[i].incarnation
-                                   : 0,
-                               record.caps, record.profile, now, 1) < 0) {
-            probe_failed(i, now);
+        if (a20_member_observe_runtime(
+                &cluster, i, p->cookie, record.boot_epoch,
+                members[i].boot_epoch == record.boot_epoch
+                    ? members[i].incarnation
+                    : 0,
+                record.caps, record.profile, now, 1,
+                bound ? &runtime : 0) < 0) {
+            if (bound)
+                probe_runtime_rejected(i, now);
+            else
+                probe_failed(i, now);
             return;
         }
         p->epoch = record.boot_epoch;
+        p->runtime_epoch = bound ? runtime.boot_epoch : 0;
     }
     if (record.status == A20_DIRECTORY_CHANGED) {
         p->index = p->count = p->pending_control = 0;
@@ -440,7 +558,8 @@ static void probe_pump(unsigned i, uint64_t now) {
     }
     if (record.status == A20_DIRECTORY_END) {
         if (a20_member_publish(&cluster, i, p->scratch, p->count,
-                               record.generation, 5000, now) < 0) {
+                               record.generation, 5000 * timing_scale,
+                               now) < 0) {
             directory_full(p, now);
             return;
         }
@@ -560,6 +679,13 @@ static void gossip_expire(uint64_t now) {
 
 int main(int argc, char **argv, char **envp) {
     (void)envp;
+    int seeds_begin = 2;
+    if (argc >= 4 && !a20_strcmp(argv[2], "--timing-scale")) {
+        timing_scale = a20_control_timing_scale(argv[3]);
+        if (!timing_scale)
+            return 2;
+        seeds_begin = 4;
+    }
     if (a20_cluster_snapshot(&self) < 0) {
         a20_node_id_t id;
         if (argc < 2 || a20_node_id_parse_hex(argv[1], &id) < 0 ||
@@ -569,9 +695,9 @@ int main(int argc, char **argv, char **envp) {
     if (argc >= 2) {
         a20_node_id_t id;
         if (a20_node_id_parse_hex(argv[1], &id) < 0 ||
-            a20_memcmp(id.bytes, self.node_id, 16) || (argc - 2) % 2)
+            a20_memcmp(id.bytes, self.node_id, 16) || (argc - seeds_begin) % 2)
             return 2;
-        for (int i = 2; i + 1 < argc; i += 2) {
+        for (int i = seeds_begin; i + 1 < argc; i += 2) {
             uint8_t hop[6] = {0};
             uint32_t transport = A20_CLX_TRANSPORT_UDP, hop_len = 6;
             if (a20_node_id_parse_hex(argv[i], &id) < 0)
@@ -589,10 +715,12 @@ int main(int argc, char **argv, char **envp) {
         }
     }
     a20_membership_init(&cluster, members, A20_CLUSTERD_MEMBERS, services,
-                        A20_CLUSTERD_MEMBERS * 2, 1500, 3000, 30000);
+                        A20_CLUSTERD_MEMBERS * 2, 1500 * timing_scale,
+                        3000 * timing_scale, 30000 * timing_scale);
     for (unsigned i = 0; i < A20_CLUSTERD_MEMBERS; i++)
         probes[i].directory = probes[i].capability = A20_HANDLE_NULL;
-    if (track_node(self.node_id) < 0 || refresh_routes() < 0)
+    if (refresh_runtime() < 0 || track_node(self.node_id) < 0 ||
+        refresh_routes() < 0)
         return 4;
     a20_channel_pair_t pair;
     if (a20_channel_create(&pair) < 0 ||
@@ -610,7 +738,7 @@ int main(int argc, char **argv, char **envp) {
             return 0;
         uint64_t now = a20_agent_clock_ms(0);
         if (now >= refresh_at) {
-            if (refresh_routes() < 0)
+            if (refresh_runtime() < 0 || refresh_routes() < 0)
                 return 6;
             refresh_at = now + 1000;
         }
