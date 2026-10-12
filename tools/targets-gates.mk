@@ -409,3 +409,7 @@ check-cluster-objects:
 .PHONY: check-object-directory-portability
 check-object-directory-portability:
 	$(PYTHON) tools/check-object-directory-portability.py
+
+.PHONY: check-cluster-apps
+check-cluster-apps:
+	$(PYTHON) tools/check-cluster-apps.py

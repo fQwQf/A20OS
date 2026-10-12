@@ -711,3 +711,12 @@ Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进�
 隔离目录重启、重发布和域重启。普通应用与内核热路径没有自动目录工作。
 这是对象元数据查询，跨域原生任务操作和统一应用生命周期仍待实现。
 协议、部署、MCU 适配及实际验收见 [36](36-object-directory.md)。
+
+## 实际应用启动与负载分配（2026-10-12）
+
+新增公共 app owner、可选 Native appd 与统一 SDK。真实 ELF 按清单匹配 ISA
+变体，经真实 task_spawn/wait/kill 管理；按活动程序数选择兼容执行域，启动时
+复核采样负载。重复请求和终态保留避免重复执行，未知结果只查询原 owner。
+三种服务器 ISA 联合运行实际程序；MCU 测试引导使用同一 owner 调用真实装载器。
+接口、复现命令与按程序数量均衡的准确边界见 [37](37-application-execution.md)。
+物理多板、MCU 常规网络启动服务、完整应用资源代理和 Minecraft 仍待实现。

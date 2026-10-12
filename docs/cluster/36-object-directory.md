@@ -112,3 +112,5 @@ LIVE→RETIRED→revoke，关闭次数恰为一，并继续原有线程/分配�
 自动注册、目录遍历或额外系统调用。此边界不表示启用服务完全没有资源竞争，
 也不代替硬件性能测量。逐项运行结果、二进制和源文件摘要随提交归档在
 `.kernel-build/cluster/evidence/object-directory-<commit>/manifest.json`。
+
+实际 ELF 启动、ISA 变体选择与按活动程序数分配见 [37](37-application-execution.md)。
