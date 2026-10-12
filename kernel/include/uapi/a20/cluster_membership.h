@@ -16,6 +16,8 @@ typedef struct a20_member {
     uint32_t state, caps, profile, load;
     uint64_t boot_epoch, incarnation, last_seen, state_deadline;
     uint64_t probe_cookie, probe_deadline;
+    uint64_t runtime_epoch; /* retained last confirmed namespace boot */
+    uint32_t runtime_admitted;
 } a20_member_t;
 typedef struct a20_member_operator {
     uint32_t id, flags, max_input, max_output;
@@ -32,6 +34,7 @@ typedef struct a20_membership {
     a20_member_service_t *services;
     uint32_t member_capacity, service_capacity, cursor;
     uint64_t next_cookie, probe_ms, suspect_ms, tombstone_ms;
+    a20_runtime_info_t runtime; /* UNBOUND retains the legacy policy */
 } a20_membership_t;
 
 static inline int a20_member_capabilities(a20_member_service_t *s,
@@ -108,6 +111,7 @@ a20_membership_init(a20_membership_t *m, a20_member_t *members,
                             .services = services,
                             .member_capacity = member_count,
                             .service_capacity = service_count,
+                            .runtime = {.size = 64, .version = 1},
                             .probe_ms = probe_ms,
                             .suspect_ms = suspect_ms,
                             .tombstone_ms = tombstone_ms};
@@ -115,6 +119,33 @@ a20_membership_init(a20_membership_t *m, a20_member_t *members,
         members[i] = (a20_member_t){0};
     for (uint32_t i = 0; i < service_count; i++)
         services[i] = (a20_member_service_t){0};
+    return 0;
+}
+/* Install before adding members. Activation after a kernel binding must reset
+ * the table first so pre-binding services cannot leak into the instance. */
+static inline int a20_membership_set_runtime(a20_membership_t *m,
+                                             const a20_runtime_info_t *info) {
+    if (!m || !a20_runtime_info_valid(info) || info->state != A20_RUNTIME_BOUND)
+        return -1;
+    for (uint32_t i = 0; i < m->member_capacity; i++)
+        if (m->members[i].state)
+            return -1;
+    for (uint32_t i = 0; i < m->service_capacity; i++)
+        if (m->services[i].used)
+            return -1;
+    m->runtime = *info;
+    return 0;
+}
+static inline int a20_member_runtime(const a20_membership_t *m, uint32_t index,
+                                     a20_runtime_info_t *out) {
+    if (!m || !out || index >= m->member_capacity ||
+        m->runtime.state != A20_RUNTIME_BOUND ||
+        !m->members[index].runtime_admitted)
+        return -1;
+    *out = m->runtime;
+    out->boot_epoch = m->members[index].runtime_epoch;
+    for (unsigned i = 0; i < 16; i++)
+        out->domain_id[i] = m->members[index].node_id[i];
     return 0;
 }
 static inline int a20_member_add(a20_membership_t *m, const uint8_t node[16]) {
@@ -158,11 +189,11 @@ static inline uint64_t a20_member_probe(a20_membership_t *m, uint32_t index,
 /* Indirect results can confirm only an already known epoch. A helper cannot
  * invent a reboot or replace a direct peer's boot identity. Both paths must
  * echo the current outstanding probe cookie before its deadline. */
-static inline int a20_member_observe(a20_membership_t *m, uint32_t index,
-                                     uint64_t cookie, uint64_t epoch,
-                                     uint64_t incarnation, uint32_t caps,
-                                     uint32_t profile, uint64_t now,
-                                     int direct) {
+static inline int
+a20_member_observe_runtime(a20_membership_t *m, uint32_t index, uint64_t cookie,
+                           uint64_t epoch, uint64_t incarnation, uint32_t caps,
+                           uint32_t profile, uint64_t now, int direct,
+                           const a20_runtime_info_t *runtime) {
     if (!m || index >= m->member_capacity || !epoch || profile < 1 ||
         profile > 3)
         return -1;
@@ -171,12 +202,26 @@ static inline int a20_member_observe(a20_membership_t *m, uint32_t index,
         now >= r->probe_deadline || (!direct && r->boot_epoch != epoch) ||
         (r->boot_epoch == epoch && incarnation < r->incarnation))
         return -1;
+    if (m->runtime.state == A20_RUNTIME_BOUND) {
+        if (!a20_runtime_admits(&m->runtime, runtime, r->node_id))
+            return -1;
+        if (r->runtime_epoch &&
+            (r->boot_epoch == epoch ? r->runtime_epoch != runtime->boot_epoch
+                                    : r->runtime_epoch == runtime->boot_epoch))
+            return -1;
+        if (!direct &&
+            (!r->runtime_admitted || r->runtime_epoch != runtime->boot_epoch))
+            return -1;
+    }
     if (r->boot_epoch != epoch) {
         a20_member_forget_services(m, index);
         r->incarnation = incarnation;
     } else if (incarnation > r->incarnation) {
         r->incarnation = incarnation;
     }
+    r->runtime_admitted = m->runtime.state == A20_RUNTIME_BOUND;
+    r->runtime_epoch =
+        m->runtime.state == A20_RUNTIME_BOUND ? runtime->boot_epoch : 0;
     r->boot_epoch = epoch;
     r->caps = caps;
     r->profile = profile;
@@ -187,6 +232,29 @@ static inline int a20_member_observe(a20_membership_t *m, uint32_t index,
     return 0;
 }
 
+/* Legacy callers cannot bypass a bound instance's admission policy. */
+static inline int a20_member_observe(a20_membership_t *m, uint32_t index,
+                                     uint64_t cookie, uint64_t epoch,
+                                     uint64_t incarnation, uint32_t caps,
+                                     uint32_t profile, uint64_t now,
+                                     int direct) {
+    return a20_member_observe_runtime(m, index, cookie, epoch, incarnation,
+                                      caps, profile, now, direct, 0);
+}
+static inline void a20_member_runtime_reject(a20_membership_t *m,
+                                             uint32_t index, uint64_t now) {
+    if (!m || index >= m->member_capacity)
+        return;
+    a20_member_t *r = &m->members[index];
+    if (!r->state)
+        return;
+    a20_member_forget_services(m, index);
+    r->runtime_admitted = 0;
+    r->probe_cookie = 0;
+    r->state = A20_MEMBER_SUSPECT;
+    if (!r->state_deadline)
+        r->state_deadline = now + m->suspect_ms;
+}
 static inline void a20_membership_tick(a20_membership_t *m, uint64_t now) {
     for (uint32_t i = 0; i < m->member_capacity; i++) {
         a20_member_t *r = &m->members[i];
@@ -240,7 +308,9 @@ static inline int a20_member_publish(a20_membership_t *m, uint32_t index,
     if (!m || index >= m->member_capacity || (count && !records) ||
         !generation || !lease_ms ||
         m->members[index].state != A20_MEMBER_ALIVE ||
-        !m->members[index].boot_epoch)
+        !m->members[index].boot_epoch ||
+        (m->runtime.state == A20_RUNTIME_BOUND &&
+         !m->members[index].runtime_admitted))
         return -1;
     uint32_t space = 0;
     for (uint32_t i = 0; i < m->service_capacity; i++)
@@ -299,7 +369,8 @@ static inline int a20_member_select(a20_membership_t *m, const char *name,
             input_len > s->max_input)
             continue;
         a20_member_t *r = &m->members[s->member_index];
-        if (r->state != A20_MEMBER_ALIVE || r->boot_epoch != s->boot_epoch)
+        if (r->state != A20_MEMBER_ALIVE || r->boot_epoch != s->boot_epoch ||
+            (m->runtime.state == A20_RUNTIME_BOUND && !r->runtime_admitted))
             continue;
         uint32_t k = 0;
         while (k < name_len && s->name[k] == name[k])

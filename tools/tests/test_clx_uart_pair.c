@@ -185,6 +185,13 @@ int main(void) {
     uint8_t leaf_id[16] = {0};
     leaf_id[15] = 2;
     assert(a20_mcu_leaf_configure(leaf_id, 200) == 0);
+    a20_runtime_info_t runtime = {.size = 64,
+                                  .version = 1,
+                                  .state = A20_RUNTIME_BOUND,
+                                  .instance_id = {1},
+                                  .boot_epoch = 600};
+    memcpy(runtime.domain_id, leaf_id, 16);
+    assert(!a20_mcu_leaf_publish_runtime(&runtime));
     a20_clx_uart_link_cfg_t cfg = {0};
     cfg.self_node_id[15] = 1;
     cfg.assigned_addr = 7;
@@ -373,6 +380,30 @@ int main(void) {
            directory.slot == A20_MCU_LEAF_WORK_SLOT);
     assert(directory.name_len == 4 && !memcmp(directory.name, "work", 4));
     assert(directory.boot_epoch == remote);
+    /* CD/2 reliable reply is 246 bytes including both epochs and CRC. */
+    uint8_t extended[32];
+    a20_clx_session_encode(extended, local, remote);
+    a20_directory_runtime_request(extended + 16, 1, 0);
+    n = a20_clx_build_frame(
+        frame, sizeof(frame), A20_CLX_TYPE_CALL, A20_CLX_FLAG_RELIABLE, 0, 206,
+        a20_clx_fnv1a32(cfg.self_node_id), a20_clx_fnv1a32(leaf_id),
+        A20_DIRECTORY_SLOT, extended, sizeof(extended));
+    leaf_set_reliable_seq(frame, n, 206);
+    assert(!a20_clx_uart_send_frame(nh, 2, frame, n));
+    pump(50);
+    assert(received_len == 246 && !a20_clx_get_le32(received + 48));
+    a20_runtime_info_t observed;
+    assert(!a20_directory_runtime_decode(received + 52, received_len - 54,
+                                         leaf_id, &directory, &observed));
+    assert(observed.boot_epoch == 600 && directory.boot_epoch == remote);
+    /* ACK releases the production leaf's bounded protected replay slot. */
+    receipt_len = a20_clx_build_frame(
+        receipt, sizeof(receipt), A20_CLX_TYPE_CALL, A20_CLX_FLAG_RELIABLE, 0,
+        206, a20_clx_fnv1a32(cfg.self_node_id), a20_clx_fnv1a32(leaf_id), 0,
+        extended, 16);
+    leaf_set_reliable_seq(receipt, receipt_len, 206);
+    assert(!a20_clx_uart_send_frame(nh, 2, receipt, receipt_len));
+    pump(50);
     /* One real UART leaf and one hosted agent execute a single binary tree.
      * Lose the leaf root's reply AFTER execution, then reassign that shard.
      * The retired attempt must never add its result a second time. */

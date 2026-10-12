@@ -675,7 +675,7 @@ instance/domain/boot_epoch，绑定在本内核启动内不可变，控制服务
 固定结构与显式小端编解码适用于 32/64 位平台。配置可选 instance+epoch，旧
 配置保持可用。细节与验证入口见 [34](34-runtime-namespace.md)。
 
-BOUND 仅是命名空间配置状态；持久代次分配、多域实例准入、全局对象目录与
+BOUND 仅是命名空间配置状态；持久代次分配、全局对象目录与
 Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经实现。
 
 实际验证：三种服务器 ISA 双核、共享 MCU 原生 ELF/SVC/RTL、第二种 MCU
@@ -683,3 +683,21 @@ Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经�
 栈被异常处理覆盖的问题；异常处理改用独立 CPU 私有栈。默认精简 MCU 固件
 及 RV64 Linux-only 原始内核二进制与上一提交完全一致。详细证据及性能边界见
 [34](34-runtime-namespace.md)。
+
+## 运行实例成员准入（2026-10-12）
+
+公共 runtime 身份已接入 CD/2 和 CM/2；绑定的 clusterd 按实例/域检查直接和
+间接发现，不接纳错误实例、未绑定节点或与保留记录矛盾的启动代次。首次绑定
+清空旧服务视图，控制进程重启重读内核绑定。旧 CD/1、CM/1 和普通 any 接口
+保留。MCU leaf 和服务器共用协议，具体状态、成本、持久历史限制与实际验收
+入口见 [35](35-instance-membership.md)。完整全局运行状态和 Minecraft 未完成。
+
+
+实际 RV64/AArch64/x86 混合实例流程两次通过，覆盖跨 ISA 工作调用、首次绑定、
+外部实例/未绑定域排除、重启复用代次拒绝、全新代次和控制进程恢复。新增统一
+可选 timing-scale 配置，默认值保持原行为。混合运行暴露的 AArch64 异常返回
+IRQ 竞争已修复，双核 Native 同步/线程/分配器及 AArch64 Linux futex 回归
+通过；旧三节点集群和普通
+Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进制保持
+不变，实际 UART leaf 固件编译链接通过。物理板运行、完整全局对象/应用状态
+与 Minecraft 客户端继续保留为未完成；原始证据及成本见 [35](35-instance-membership.md)。

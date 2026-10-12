@@ -8,6 +8,7 @@
 #include "cluster/uart.h"
 #include "cluster/operator.h"
 #include "uapi/a20/cluster_work.h"
+#include "uapi/a20/runtime.h"
 
 /* ------------------------------------------------------------------ */
 /* Built-in demo operator: u32 vector dot product.                     */
@@ -57,6 +58,13 @@ int a20_mcu_leaf_set_agent(const a20_work_agent_t *agent);
 /* Production board provisioning: stable unique identity and a nonzero boot
  * epoch that never repeats for this identity. Refuse changes while linked. */
 int a20_mcu_leaf_configure(const uint8_t node_id[16], uint64_t boot_epoch);
+
+/* Read-only protocol presentation of an already provisioned runtime snapshot,
+ * not a second runtime binder. Publish before the first handshake, after node
+ * configuration; exact retries are idempotent, conflicting snapshots fail.
+ * Native shared kernels obtain the snapshot from core/runtime. A standalone
+ * operator leaf stays UNBOUND unless trusted boot provisioning supplies it. */
+int a20_mcu_leaf_publish_runtime(const a20_runtime_info_t *runtime);
 
 /* Leaf link state, 04 §4: exactly two states. */
 #define A20_MCU_LEAF_DISCONNECTED 0u

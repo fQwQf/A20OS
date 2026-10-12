@@ -1,6 +1,8 @@
 #ifndef A20_CLUSTER_DIRECTORY_H
 #define A20_CLUSTER_DIRECTORY_H
 #include "cluster_work.h"
+#include "runtime.h"
+#define A20_DIRECTORY_RUNTIME_REPLY 192u
 
 /* Stable read-only discovery endpoint, independent of user-daemon lifetime.
  * Export slots below it are never reused during a boot. */
@@ -91,6 +93,60 @@ static inline int a20_directory_decode(const uint8_t *p, uint32_t len,
         (!r->slot || r->slot >= A20_DIRECTORY_SLOT || !r->name_len ||
          !r->next_index))
         return -1;
+    return 0;
+}
+/* CD/2 preserves the first 128-byte record and appends one runtime snapshot.
+ * Request shape and generation semantics are unchanged; CD/1 remains valid. */
+static inline void a20_directory_runtime_request(uint8_t out[16],
+                                                 uint32_t index,
+                                                 uint64_t generation) {
+    a20_directory_request(out, index, generation);
+    out[2] = 2;
+}
+static inline int a20_directory_decode_request_version(const uint8_t *p,
+                                                       uint32_t len,
+                                                       uint32_t *index,
+                                                       uint64_t *generation,
+                                                       uint8_t *version) {
+    if (!p || len != 16 || p[0] != 'C' || p[1] != 'D' ||
+        (p[2] != 1 && p[2] != 2) || p[3])
+        return -1;
+    *index = a20_work_u32(p + 4);
+    *generation = a20_work_u64(p + 8);
+    *version = p[2];
+    return 0;
+}
+static inline int
+a20_directory_runtime_encode(uint8_t *p, uint32_t cap,
+                             const a20_directory_record_t *record,
+                             const a20_runtime_info_t *runtime) {
+    if (!p || cap < 192 || !record || !a20_runtime_info_valid(runtime) ||
+        (runtime->state == A20_RUNTIME_BOUND &&
+         !a20_runtime_id_equal(record->node_id, runtime->domain_id)))
+        return -1;
+    a20_directory_encode(p, record);
+    p[2] = 2;
+    return a20_runtime_info_encode(p + 128, 64, runtime);
+}
+static inline int a20_directory_runtime_decode(const uint8_t *p, uint32_t len,
+                                               const uint8_t expected_node[16],
+                                               a20_directory_record_t *record,
+                                               a20_runtime_info_t *runtime) {
+    if (!p || !record || !runtime || len != 192 || p[2] != 2)
+        return -1;
+    uint8_t legacy[128];
+    for (unsigned i = 0; i < 128; i++)
+        legacy[i] = p[i];
+    legacy[2] = 1;
+    a20_directory_record_t value = {0};
+    a20_runtime_info_t info;
+    if (a20_directory_decode(legacy, 128, expected_node, &value) ||
+        a20_runtime_info_decode(p + 128, 64, &info) ||
+        (info.state == A20_RUNTIME_BOUND &&
+         !a20_runtime_id_equal(info.domain_id, value.node_id)))
+        return -1;
+    *record = value;
+    *runtime = info;
     return 0;
 }
 #endif

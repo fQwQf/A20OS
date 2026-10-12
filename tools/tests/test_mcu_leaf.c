@@ -499,11 +499,69 @@ static void test_malformed_frames_are_counted_not_served(void) {
     assert(harness_tx_len == 0); /* unassigned leaf may not send ERROR */
 }
 
+/* Drive actual leaf discovery over SLIP, including CD/2 at the 256-byte MTU. */
+static void test_instance_directory(void) {
+    uint8_t query[16], frame[256], reply[256];
+    a20_mcu_leaf_init();
+    harness_reset();
+    a20_runtime_info_t info = {.size = 64,
+                               .version = 1,
+                               .state = A20_RUNTIME_BOUND,
+                               .instance_id = {1},
+                               .boot_epoch = 200};
+    memcpy(info.domain_id, leaf_self_id, 16);
+    assert(!a20_mcu_leaf_publish_runtime(&info));
+    assert(!a20_mcu_leaf_publish_runtime(&info));
+    info.boot_epoch++;
+    assert(a20_mcu_leaf_publish_runtime(&info));
+    info.boot_epoch--;
+    head_build_hello(frame, sizeof(frame), head_assigned_addr);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN);
+    harness_pump();
+    assert(harness_take_reply(reply, sizeof(reply)));
+    a20_directory_runtime_request(query, 0, 0);
+    head_build_call(frame, sizeof(frame), ++head_txid, A20_DIRECTORY_SLOT,
+                    query, 16);
+    head_slip_and_send(frame, A20_CLX_HDR_LEN + 16 + A20_CLX_CRC_LEN);
+    harness_pump();
+    unsigned n = harness_take_reply(reply, sizeof(reply));
+    assert(n ==
+           A20_CLX_HDR_LEN + A20_DIRECTORY_RUNTIME_REPLY + A20_CLX_CRC_LEN);
+    a20_directory_record_t record;
+    a20_runtime_info_t observed;
+    assert(!a20_directory_runtime_decode(reply + A20_CLX_HDR_LEN, 192,
+                                         leaf_self_id, &record, &observed));
+    assert(observed.boot_epoch == 200 &&
+           record.boot_epoch != observed.boot_epoch);
+    a20_directory_request(query, 0, 0);
+    head_build_call(frame, sizeof(frame), ++head_txid, A20_DIRECTORY_SLOT,
+                    query, 16);
+    head_slip_and_send(frame, A20_CLX_HDR_LEN + 16 + A20_CLX_CRC_LEN);
+    harness_pump();
+    n = harness_take_reply(reply, sizeof(reply));
+    assert(n == A20_CLX_HDR_LEN + 128 + A20_CLX_CRC_LEN);
+    assert(!a20_directory_decode(reply + A20_CLX_HDR_LEN, 128, leaf_self_id,
+                                 &record));
+    a20_mcu_leaf_init();
+    harness_reset(); /* standalone leaf is explicitly UNBOUND */
+    assert(leaf_directory(query, 16, reply) == 128);
+    a20_directory_runtime_request(query, 0, 0);
+    assert(leaf_directory(query, 16, reply) == 192);
+    assert(!a20_directory_runtime_decode(reply, 192, leaf_self_id, &record,
+                                         &observed));
+    assert(observed.state == A20_RUNTIME_UNBOUND);
+    test_hello_handshake_assigns_address();
+    assert(a20_mcu_leaf_publish_runtime(
+        &info)); /* first provision is forbidden after handshake */
+}
+
 int main(void) {
     static const char *hdr = "HEAD-DEMO-000001";
 
     memcpy(head_id, hdr, 16);
 
+    test_instance_directory();
     test_hello_handshake_assigns_address();
     test_ping_pong_echo();
     test_call_dot_product_and_dedup();

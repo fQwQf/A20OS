@@ -27,8 +27,19 @@ int main(void) {
         "18446744073709551615\n";
     assert(!a20_cluster_config_parse(runtime, strlen(runtime), &c, &line));
     assert(c.instance[0] == 0xa2 && c.runtime_epoch == UINT64_MAX);
+    const char *timed =
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ntiming-scale 10\n";
+    assert(!a20_cluster_config_parse(timed, strlen(timed), &c, &line) &&
+           c.timing_scale == 10);
     c = before;
     const char *bad[] = {
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ntiming-scale 0\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ntiming-scale 17\n",
+        "version 1\nnode 00000000000000000000000000000001\nrole "
+        "worker\ntiming-scale 2\ntiming-scale 3\n",
         "",
         "version 1\nnode 00000000000000000000000000000001\nrole "
         "worker\ninstance a2200000000000000000000000000001\n",

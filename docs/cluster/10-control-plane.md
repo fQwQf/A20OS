@@ -97,3 +97,6 @@ channel 继续工作；新进程重建成员和能力目录。服务退出由导
 绑定为 `ARCH=x86_64 CLUSTER_UART_COM2=1` 的独立 COM2；UART node_id 必须与
 实际 leaf 身份一致，不能用短地址代替持久身份。配置示例见
 [13-uart-head.md](13-uart-head.md)。
+
+显式绑定运行实例时使用 CD/2 准入，旧 CM/1 的 any 解析也执行实例过滤；
+CM/2 证明与启动代次限制见 [35](35-instance-membership.md)。

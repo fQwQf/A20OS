@@ -59,6 +59,55 @@ a20_cluster_execution_query(a20_handle_t ep, uint32_t budget_ms,
     return A20_OK;
 }
 
+/* Explicit runtime discovery. UNBOUND is returned as such; old CD/1 replies
+ * are NOT_SUPPORTED, never inferred to be the caller's instance. */
+static inline a20_status_t
+a20_cluster_runtime_query(const a20_node_id_t *node, uint32_t budget_ms,
+                          a20_runtime_info_t *out, uint64_t *transport_epoch) {
+    if (!node || !out || !budget_ms || budget_ms > 30000)
+        return -A20_ERR_INVALID_ARGUMENT;
+    a20_handle_t ep = A20_HANDLE_NULL;
+    uint64_t started = a20_agent_clock_ms(0);
+    a20_status_t status;
+    do {
+        status = a20_cluster_connect(node, A20_DIRECTORY_SLOT, 0,
+                                     A20_CONNECT_RELIABLE, 0, &ep);
+        if (status != -A20_ERR_NODE_UNREACHABLE)
+            break;
+        if (a20_agent_clock_ms(0) - started >= budget_ms)
+            return -A20_ERR_TIMED_OUT;
+        a20_thread_sleep((a20_time_t){.nsecs = 1000000});
+    } while (1);
+    if (status < 0)
+        return status;
+    uint64_t elapsed = a20_agent_clock_ms(0) - started;
+    if (elapsed >= budget_ms) {
+        a20_hdl_close(ep);
+        return -A20_ERR_TIMED_OUT;
+    }
+    uint8_t request[16], reply[A20_DIRECTORY_RUNTIME_REPLY];
+    a20_directory_runtime_request(request, 0, 0);
+    uint32_t length = sizeof(reply);
+    status = a20_cluster_exchange(ep, request, sizeof(request), reply, &length,
+                                  budget_ms - (uint32_t)elapsed);
+    a20_hdl_close(ep);
+    if (status < 0)
+        return status;
+    if (length == A20_DIRECTORY_REPLY && reply[0] == 'C' && reply[1] == 'D' &&
+        reply[2] == 1)
+        return -A20_ERR_NOT_SUPPORTED;
+    a20_directory_record_t record;
+    a20_runtime_info_t runtime;
+    if (a20_directory_runtime_decode(reply, length, node->bytes, &record,
+                                     &runtime) ||
+        record.status == A20_DIRECTORY_INVALID)
+        return -A20_ERR_INVALID_ARGUMENT;
+    *out = runtime;
+    if (transport_epoch)
+        *transport_epoch = record.boot_epoch;
+    return A20_OK;
+}
+
 /* Resolve on one node using the fixed endpoint. CHANGED restarts enumeration
  * inside the same overall budget. LOCAL names use cluster_connect directly. */
 static inline a20_status_t

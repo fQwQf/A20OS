@@ -110,8 +110,21 @@ static void start_child(unsigned i, uint64_t now) {
         c->policy.exhausted = 1;
         return;
     }
-    const char *argv[4] = {config.service[i], 0, 0, 0};
+    const char *argv[5] = {config.service[i], 0, 0, 0, 0};
+    char scale[3] = {0};
     unsigned argc = 1;
+    if (i == A20_CONFIG_CONTROL && config.timing_scale != 1) {
+        unsigned n = config.timing_scale;
+        if (n >= 10) {
+            scale[0] = '1';
+            scale[1] = (char)('0' + n - 10);
+        } else
+            scale[0] = (char)('0' + n);
+        argv[1] = identity;
+        argv[2] = "--timing-scale";
+        argv[3] = scale;
+        argc = 4;
+    }
     if (i == A20_CONFIG_AGENT && config.process[0]) {
         argv[1] = identity;
         argv[2] = config.process;

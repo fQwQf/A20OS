@@ -20,7 +20,7 @@ typedef struct a20_config_seed {
 typedef struct a20_cluster_config {
     uint8_t node[16], instance[16];
     uint64_t runtime_epoch;
-    uint32_t caps, seed_count;
+    uint32_t caps, seed_count, timing_scale;
     a20_config_seed_t seeds[A20_CONFIG_SEEDS];
     char service[A20_CONFIG_SERVICES][A20_CONFIG_PATH];
     char process[A20_CONFIG_PATH];
@@ -129,7 +129,7 @@ static inline int a20_config_epoch(const char *s, uint64_t *out) {
 static inline int a20_cluster_config_parse(const char *text, uint32_t len,
                                            a20_cluster_config_t *out,
                                            uint32_t *error_line) {
-    a20_cluster_config_t c = {0};
+    a20_cluster_config_t c = {.timing_scale = 1};
     unsigned seen = 0, line_no = 0, pos = 0, features = 0;
     if (error_line)
         *error_line = 0;
@@ -183,6 +183,13 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
             if ((seen & 16) || a20_config_epoch(tokens[1], &c.runtime_epoch))
                 goto bad;
             seen |= 16;
+        } else if (a20_config_equal(tokens[0], "timing-scale") && count == 2) {
+            uint64_t scale;
+            if ((seen & 32) || a20_config_epoch(tokens[1], &scale) ||
+                scale > 16)
+                goto bad;
+            c.timing_scale = (uint32_t)scale;
+            seen |= 32;
         } else if (a20_config_equal(tokens[0], "role") && count == 2) {
             if (seen & 4)
                 goto bad;
@@ -227,7 +234,7 @@ static inline int a20_cluster_config_parse(const char *text, uint32_t len,
         } else
             goto bad;
     }
-    if ((seen != 7 && seen != 31) ||
+    if (((seen & ~32u) != 7 && (seen & ~32u) != 31) ||
         (c.process[0] && !c.service[A20_CONFIG_AGENT][0]))
         goto bad;
     c.caps |= features;

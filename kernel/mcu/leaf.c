@@ -26,6 +26,10 @@
 #endif
 
 #if A20_MCU_LEAF_ENABLED
+_Static_assert(A20_CLX_HDR_LEN + A20_CLX_REPLY_PREFIX +
+                       A20_DIRECTORY_RUNTIME_REPLY + A20_CLX_CRC_LEN <=
+                   A20_CLX_UART_MTU,
+               "CD/2 reliable reply must fit the static MCU UART frame");
 
 /* Application-level status for a CALL whose operator rejected the payload.
  * Value is A20_ERR_INVALID_ARGUMENT (kernel/include/ipc/ipc.h, verified
@@ -41,6 +45,7 @@
  */
 static uint8_t leaf_rx_buf[512];
 static uint8_t leaf_tx_buf[320];
+static a20_runtime_info_t leaf_runtime;
 
 static int leaf_console_send(void *ctx, uint8_t byte) {
     (void)ctx;
@@ -430,7 +435,9 @@ static int leaf_directory(const uint8_t *input, uint32_t len, uint8_t *output) {
     memcpy(r.node_id, leaf_self_id, 16);
     uint32_t index;
     uint64_t generation;
-    if (!a20_directory_decode_request(input, len, &index, &generation)) {
+    uint8_t version = 1;
+    if (!a20_directory_decode_request_version(input, len, &index, &generation,
+                                              &version)) {
         if (generation && generation != 1) {
             r.status = A20_DIRECTORY_CHANGED;
         } else if (index >= (leaf_sink ? 3u : 2u)) {
@@ -451,6 +458,12 @@ static int leaf_directory(const uint8_t *input, uint32_t len, uint8_t *output) {
                 memcpy(r.name, index ? "work" : "dot", r.name_len);
             }
         }
+    }
+    if (version == 2) {
+        if (a20_directory_runtime_encode(output, A20_DIRECTORY_RUNTIME_REPLY,
+                                         &r, &leaf_runtime))
+            return 0;
+        return A20_DIRECTORY_RUNTIME_REPLY;
     }
     a20_directory_encode(output, &r);
     return A20_DIRECTORY_REPLY;
@@ -834,6 +847,7 @@ void a20_mcu_leaf_disable(void) {
 }
 
 void a20_mcu_leaf_init(void) {
+    leaf_runtime = (a20_runtime_info_t){.size = 64, .version = 1};
     leaf_enabled = 1;
     leaf_byte_send = leaf_console_send;
     leaf_byte_receive = leaf_console_receive;
@@ -904,9 +918,24 @@ int a20_mcu_leaf_set_agent(const a20_work_agent_t *agent) {
     return 0;
 }
 
+int a20_mcu_leaf_publish_runtime(const a20_runtime_info_t *runtime) {
+    if (!a20_runtime_info_valid(runtime) ||
+        runtime->state != A20_RUNTIME_BOUND ||
+        !a20_runtime_id_equal(runtime->domain_id, leaf_self_id))
+        return -1;
+    if (leaf_runtime.state == A20_RUNTIME_BOUND)
+        return memcmp(&leaf_runtime, runtime, sizeof(*runtime)) ? -1 : 0;
+    if (leaf_state != A20_MCU_LEAF_DISCONNECTED || leaf_hello_cookie)
+        return -1;
+    leaf_runtime = *runtime;
+    return 0;
+}
+
 int a20_mcu_leaf_configure(const uint8_t node_id[16], uint64_t boot_epoch) {
     if (leaf_state != A20_MCU_LEAF_DISCONNECTED || leaf_hello_cookie ||
-        !node_id || leaf_id_is_reserved(node_id) || !boot_epoch)
+        !node_id || leaf_id_is_reserved(node_id) || !boot_epoch ||
+        (leaf_runtime.state == A20_RUNTIME_BOUND &&
+         !a20_runtime_id_equal(leaf_runtime.domain_id, node_id)))
         return -1;
     memcpy(leaf_self_id, node_id, 16);
     leaf_enabled = 1;
@@ -986,6 +1015,10 @@ int a20_mcu_leaf_set_io(int (*send)(void *, uint8_t), int (*receive)(void *),
 
 int a20_mcu_leaf_set_agent(const a20_work_agent_t *agent) {
     (void)agent;
+    return -1;
+}
+int a20_mcu_leaf_publish_runtime(const a20_runtime_info_t *runtime) {
+    (void)runtime;
     return -1;
 }
 int a20_mcu_leaf_configure(const uint8_t node_id[16], uint64_t boot_epoch) {

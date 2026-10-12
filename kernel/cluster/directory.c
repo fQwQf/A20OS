@@ -2,6 +2,8 @@
  * one published export per call, excluding local-only services. */
 #include "cluster/clx_internal.h"
 #include "uapi/a20/cluster_directory.h"
+#include "proc/proc.h"
+#include "core/runtime.h"
 
 void a20_clx_directory_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
                           const uint8_t *input) {
@@ -15,8 +17,9 @@ void a20_clx_directory_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
     record.status = A20_DIRECTORY_INVALID;
     uint32_t index;
     uint64_t generation;
-    if (!a20_directory_decode_request(input, h->payload_len, &index,
-                                      &generation)) {
+    uint8_t version = 1;
+    if (!a20_directory_decode_request_version(input, h->payload_len, &index,
+                                              &generation, &version)) {
         a20_cluster_snapshot_args_t snapshot = {.index = index,
                                                 .generation = generation};
         int r;
@@ -36,13 +39,25 @@ void a20_clx_directory_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
             memcpy(record.name, snapshot.name, record.name_len);
         }
     }
-    uint8_t reply[A20_DIRECTORY_REPLY];
-    a20_directory_encode(reply, &record);
+    uint8_t reply[A20_DIRECTORY_RUNTIME_REPLY];
+    uint32_t reply_len = A20_DIRECTORY_REPLY;
+    if (version == 2) {
+        a20_runtime_info_t runtime = {.size = 64, .version = 1};
+#ifdef A20_TASK_OBJECTS_ENABLED
+        a20_runtime_snapshot(&runtime);
+#endif
+        if (a20_directory_runtime_encode(reply, sizeof(reply), &record,
+                                         &runtime))
+            return;
+        reply_len = A20_DIRECTORY_RUNTIME_REPLY;
+    } else
+        a20_directory_encode(reply, &record);
     if (h->flags & A20_CLX_FLAG_RELIABLE) {
         a20_clx_reliable_reply(src, h->txid, h->dst_hash, h->src_session,
-                               h->dst_session, reply, sizeof(reply), 0);
+                               h->dst_session, reply, reply_len, 0);
     } else {
-        uint8_t frame[A20_CLX_HDR_LEN + A20_DIRECTORY_REPLY + A20_CLX_CRC_LEN];
+        uint8_t frame[A20_CLX_HDR_LEN + A20_DIRECTORY_RUNTIME_REPLY +
+                      A20_CLX_CRC_LEN];
         a20_frame_hdr_t response = {0};
         response.type = A20_CLX_TYPE_CALL_REPLY;
         response.txid = h->txid;
@@ -51,7 +66,7 @@ void a20_clx_directory_rx(const a20_node_id_t *src, const a20_frame_hdr_t *h,
         response.dst_slot = A20_DIRECTORY_SLOT;
         response.ttl = A20_CLX_TTL_DEFAULT;
         response.csum_kind = A20_CLX_CSUM_CCITT;
-        response.payload_len = sizeof(reply);
+        response.payload_len = reply_len;
         int n = a20_frame_encode(frame, sizeof(frame), sizeof(frame), &response,
                                  reply);
         if (n > 0)

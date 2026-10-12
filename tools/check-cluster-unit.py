@@ -25,7 +25,7 @@ def main():
         compiler = shlex.split(os.environ.get("HOST_CC", "cc"))
         for name in ("test_clx_frame", "test_clx_fragment", "test_clx_uart", "test_clx_operator",
                      "test_mcu_leaf", "test_clx_uart_pair", "test_clx_oneway", "test_clx_transaction", "test_clx_session", "test_clx_reliable",
-                     "test_clx_work", "test_clx_membership", "test_clx_gossip", "test_clx_config", "test_clx_job", "test_clx_word_job", "test_clx_epoch", "test_clx_board_uart"):
+                     "test_clx_work", "test_clx_membership", "test_clx_instance", "test_clx_gossip", "test_clx_config", "test_clx_job", "test_clx_word_job", "test_clx_epoch", "test_clx_board_uart"):
             binary = Path(directory) / name
             run(compiler + ["-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
                             "-Ikernel/arch/riscv64/include", "-Ikernel/include", "-Ikernel",

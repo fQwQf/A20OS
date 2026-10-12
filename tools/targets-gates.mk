@@ -397,3 +397,7 @@ check-cluster-hardening:
 	$(PYTHON) tools/check-cluster-udp.py --faults --restart --stress --random-loss 0.1 --corrupt --timeout 420 --log-dir .kernel-build/cluster/random-loss1000
 	$(PYTHON) tools/check-cluster-udp.py --faults --restart --random-delay --corrupt --hello-flood --timeout 240 --log-dir .kernel-build/cluster/delay-crc-flood
 	$(PYTHON) tools/check-cluster-udp.py --faults --partition --slow-consumer --timeout 150 --log-dir .kernel-build/cluster/partition-slow
+
+.PHONY: check-cluster-instance
+check-cluster-instance:
+	$(PYTHON) tools/check-cluster-instance.py
