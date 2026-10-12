@@ -755,3 +755,6 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 独立子进程退出。标准 CRT、参数/环境快照、Native ELF 标记和发布前回滚
 边界见 [42](42-native-file-spawn.md)。普通 full VFS 装载路径保留，JVM、
 物理多 MCU、Minecraft 与 AArch64 偶发引用问题尚未完成。
+
+实际 Native 任务的公共停止、信号检查点及资源回收见
+[43-native-task-control.md](43-native-task-control.md)。

@@ -129,3 +129,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 标准 Native 文件装载、参数环境和子进程启动见
 [42-native-file-spawn.md](42-native-file-spawn.md)。
+
+实际 Native 任务的公共停止、信号检查点及资源回收见
+[43-native-task-control.md](43-native-task-control.md)。

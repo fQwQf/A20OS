@@ -106,3 +106,7 @@ ABI、裁剪注册、IDL、文档门禁通过。格式门禁仍为父提交同�
 `.kernel-build/cluster/evidence/native-spawn-<commit>/manifest.json`，逐项保存
 源文件、报告、日志、用户程序和内核二进制哈希。所有上述硬件执行证据为
 模型或虚拟机，不表示真实 Minecraft 客户端或物理多 MCU 已运行。
+
+后续公共停止接口和新增控制线程的 12 次退出验收见
+[43-native-task-control.md](43-native-task-control.md)；本页 11 次退出是 a263ef17 阶段的
+已归档结果，未改写为后续映像结果。

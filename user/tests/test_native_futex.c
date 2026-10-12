@@ -16,6 +16,7 @@
 #include "native-thread-contract.h"
 #include "native-file-contract.h"
 #include "native-spawn-contract.h"
+#include "native-task-control-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -103,6 +104,18 @@ int main(int argc, char **argv, char **envp)
         a20_hdl_write_buf(out, error, sizeof(error) - 1, 0);
         return fail(out, 99, "file spawn", sizeof("file spawn") - 1);
     }
+    int control_result = native_task_control_contract();
+    if (control_result) {
+        char error[] = "NATIVE_TASK_CONTROL_ERROR: 00\n";
+        error[sizeof(error) - 4] = '0' + control_result / 10;
+        error[sizeof(error) - 3] = '0' + control_result % 10;
+        a20_hdl_write_buf(out, error, sizeof(error) - 1, 0);
+        return fail(out, 100, "task control", sizeof("task control") - 1);
+    }
+    a20_hdl_write_buf(
+        out, "NATIVE_TASK_CONTROL: PASS signal=12 masked=1 exit=137\n",
+        sizeof("NATIVE_TASK_CONTROL: PASS signal=12 masked=1 exit=137\n") - 1,
+        0);
     a20_hdl_write_buf(
         out, "NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32\n",
         sizeof("NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32\n") -

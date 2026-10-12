@@ -51,6 +51,7 @@ sources = [
     "kernel/core/shared_fabric.c",
     "kernel/core/fabric_atomics.c",
     "kernel/abi/native/sys_thread_basic.c",
+    "kernel/abi/native/sys_task_signal.c",
     "kernel/abi/native/sys_file.c",
     "kernel/abi/native/sys_spawn_flat.c",
     "kernel/fs/file.c",

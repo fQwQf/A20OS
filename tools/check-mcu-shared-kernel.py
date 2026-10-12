@@ -44,7 +44,7 @@ class Domain:
                           if p["p_type"] == "PT_LOAD" and int(p["p_filesz"])]
         self.n = cpus
         self.program_mode = "program_test_done" in self.symbols
-        self.expected_exits = (11 if "sys_a20_task_spawn" in self.symbols else 5) if self.program_mode else 2
+        self.expected_exits = (12 if "sys_a20_task_spawn" in self.symbols else 5) if self.program_mode else 2
         self.quantum = quantum
         self.rng = random.Random(seed)
         self.shared_size = self.symbols["_heap_end"] - SHARED

@@ -30,6 +30,9 @@ extern int64_t sys_a20_handle_stat(const a20_syscall_args_t *args);
 extern int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args);
 extern int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
+extern int64_t sys_a20_task_kill(const a20_syscall_args_t *args);
+extern int64_t sys_a20_signal_check(const a20_syscall_args_t *args);
+extern int64_t sys_a20_signal_mask(const a20_syscall_args_t *args);
 extern int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 extern int64_t sys_a20_handle_close(const a20_syscall_args_t *args);
 extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
@@ -233,6 +236,8 @@ static int load_image(const void *file, size_t size, armv7m_program_t *p) {
 }
 
 void arch_flat_program_enter(void) {
+    /* First user entry is a task-owned, lock-free cancellation boundary. */
+    proc_check_exit_pending();
     __asm__ __volatile__("svc #0x21" ::: "memory");
     panic("program enter returned");
 }
@@ -401,6 +406,9 @@ static void program_syscall_thread(void) {
     a20_syscall_args_t args = {.nr = p->registers.r[7], .ctx = &p->registers};
     for (unsigned i = 0; i < 6; i++)
         args.arg[i] = p->registers.r[i];
+    /* Consume persistent remote exit requests in Thread mode, never inside
+     * exception entry or while a syscall still owns a futex/handle lease. */
+    proc_check_exit_pending();
     int64_t result;
     switch (args.nr) {
 #ifdef CONFIG_NATIVE_FLAT_FILES
@@ -431,6 +439,15 @@ static void program_syscall_thread(void) {
             break;
         case A20_SYS_thread_create:
             result = sys_a20_thread_create(&args);
+            break;
+        case A20_SYS_task_kill:
+            result = sys_a20_task_kill(&args);
+            break;
+        case A20_SYS_signal_check:
+            result = sys_a20_signal_check(&args);
+            break;
+        case A20_SYS_signal_mask:
+            result = sys_a20_signal_mask(&args);
             break;
         case A20_SYS_task_wait:
             result = sys_a20_task_wait(&args);
@@ -486,6 +503,9 @@ static void program_syscall_thread(void) {
             result = -A20_ERR_NOT_SUPPORTED;
             break;
     }
+    /* Blocking syscalls may have been woken by task_kill. Their cleanup has
+     * completed here, so an exit cannot strand a wait node or memory pin. */
+    proc_check_exit_pending();
     p->registers.r[0] = (uint32_t)result;
     __asm__ __volatile__("svc #0x21" ::: "memory");
     panic("program syscall resume returned");

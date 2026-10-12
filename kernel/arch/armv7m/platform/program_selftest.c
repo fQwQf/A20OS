@@ -53,6 +53,8 @@ static void controller(void) {
     CHECK(record->objects_passed == 1);
 #ifdef CONFIG_NATIVE_FLAT_FILES
     CHECK(record->files_passed == 1 && record->spawn_passed == 1);
+    CHECK(record->control_passed == 1);
+    printf("[PROGRAM-TASK-CONTROL] PASS signal=12 masked=1 exit=137\n");
     printf("[PROGRAM-SPAWN] PASS children=2 exit=37 args=4 env=2 work=32\n");
     printf("[PROGRAM-FILES] PASS bytes=2048 fnv=60f4edc5 shared-native-io=1\n");
 #endif

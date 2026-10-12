@@ -205,7 +205,8 @@ def main():
         if file_io:
             assert any("[PROGRAM-FILES] PASS bytes=2048 fnv=60f4edc5 shared-native-io=1" in log for log in domain.logs)
             assert any("[PROGRAM-SPAWN] PASS children=2 exit=37 args=4 env=2 work=32" in log for log in domain.logs)
-            assert {0x0201} <= domain.syscall_numbers
+            assert any("[PROGRAM-TASK-CONTROL] PASS signal=12 masked=1 exit=137" in log for log in domain.logs)
+            assert {0x0201, 0x0203, 0x020f, 0x0210} <= domain.syscall_numbers
             assert {0x0400, 0x0401, 0x0105, 0x0403} <= domain.syscall_numbers
         assert all(n > 0 for n in domain.user_instructions[:2])
         assert all(n > 0 for n in domain.private_stack_checks[:2])
@@ -226,7 +227,7 @@ def main():
         assert any("[PROGRAM-APPS] PASS common owner real ELF launch dedup root=stable" in log for log in domain.logs)
         assert any("[PROGRAM-APPS] PASS exit tombstone stale owner release=1" in log for log in domain.logs)
         assert any("[PROGRAM-APPS] PASS recycle old START stale slot=available release=1" in log for log in domain.logs)
-        result.update(native_file_spawn_checked=file_io, native_file_io_checked=file_io, concurrent_file_threads_checked=file_io, native_unpinned_balance_checked=True, native_dynamic_work_range_checked=True, balance_jobs=32, balance_sum=4359168, balance_cpu_mask=3, native_app_recycle_checked=True, native_app_owner_checked=True, native_object_directory_checked=True,user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
+        result.update(native_task_control_checked=file_io, native_file_spawn_checked=file_io, native_file_io_checked=file_io, concurrent_file_threads_checked=file_io, native_unpinned_balance_checked=True, native_dynamic_work_range_checked=True, balance_jobs=32, balance_sum=4359168, balance_cpu_mask=3, native_app_recycle_checked=True, native_app_owner_checked=True, native_object_directory_checked=True,user_instructions=domain.user_instructions, svc_entries=domain.svc_count,
                       exception_returns=domain.returns, psp_exception_private_stack_checks=domain.private_stack_checks, native_syscalls=sorted(domain.syscall_numbers),
                       seed=args.seed, quantum=1, elf_rejections=8,
                       tick_injection="at most one SysTick per 1000 interleaving rounds; not cycle timing",
