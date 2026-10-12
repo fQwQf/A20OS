@@ -49,6 +49,7 @@ sources = [
     "kernel/core/sync.c",
     "kernel/core/smp.c",
     "kernel/core/shared_fabric.c",
+    "kernel/core/fabric_atomics.c",
     "kernel/abi/native/sys_thread_basic.c",
     "kernel/core/klog.c",
     "kernel/core/timekeeping.c",

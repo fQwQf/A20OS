@@ -19,7 +19,7 @@ STM32 是一个硬件适配与验证样本，不是公共集群规范。
 不要求服务器采用 STM32 的寄存器或每次原子操作都绕过自己的硬件一致性。
 共享内核要求共享对象、互斥与内存可见性成立；网络连接自身不能提供这些条件。
 
-同 ISA、相同执行 ABI、相容虚拟地址/内存布局的 CPU 才能直接恢复同一份原生
+同 ISA、端序、指针宽度、执行 ABI 与相容虚拟地址/内存布局的 CPU 才能直接恢复同一份原生
 线程上下文。ARM 与 x86 可属于同一个服务/作业集群，接口和业务协议相同；
 当前实现不能把一个 ARM 返回地址直接作为 x86 返回地址执行。
 异构节点执行各自的算子/本机程序，进程任务能力也不等于可执行任意远程 ELF。
@@ -48,8 +48,8 @@ STM32 早期 reset 函数禁用栈保护，因为其 canary 也位于未初始�
 
 STM32 的 `arch/armv7m/platform/shared.c` 现在调用这份公共驱动；地址映射、
 DSB/PRIMASK、Flash 链接布局、UART 和 CPU 异常入口留在适配层。
-非一致性域的 GCC 原子 libcall 适配目前仍为 ARMv7-M 实现；新 ISA 必须提供
-正确的编译器 ABI 与屏障适配，不能只改板名。公共 fabric ABI v1 当前最多
+GCC 原子 libcall 现也由公共 `core/fabric_atomics.c` 实现。新 ISA 必须提供
+正确的编译器 ABI 与屏障/总线适配，不能只改板名。公共 fabric ABI v1 当前最多
 16 个端口；服务器 SMP 的 32 CPU 调度掩码限制是另一个资源边界。
 
 `MCU_SHARED_KERNEL` 和 `MCU_NATIVE_PROGRAM` 是现有实验端口的构建选择器，
@@ -62,8 +62,8 @@ make check-shared-fabric-portability
 ```
 
 默认要求 x86-64/AArch64/RV64 Linux 交叉工具链及对应 QEMU user，另要求
-ARM bare-metal 和 RV32 bare-metal 编译器。测试直接编译公共生产驱动，
-在 x86-64 宿主进程和 AArch64/RV64 指令模拟进程中执行相同的 2–16 端口测试。
+ARM/RV32 bare-metal 编译器及 qemu-riscv32。测试直接编译公共生产驱动与原子库，
+在 x86-64 宿主进程和 AArch64/RV64/RV32 指令模拟进程中执行相同的 2–16 端口测试。
 覆盖加入、启动、通知一次消费、竞争、完整宽度 IRQ token、复位拒绝、故障后
 拒绝及非法目标。ARMv7-M/RV32 另做 freestanding 编译。报告逐项区分
 “执行通过”和“仅编译”，在 `.kernel-build/cluster/fabric-portability/`。
@@ -74,7 +74,7 @@ fake bus 验证公共代码语义，不构成相应板型开机证据。ARMv7-M 
 |---|---|
 | STM32F103 多 MCU | 原生内核/应用与 fabric RTL 联合仿真；没有物理板证据 |
 | RISC-V 开发板 | 仓库已有 VF2、Milk-V Duo 等板级入口；本阶段不声明新物理联调 |
-| RISC-V MCU | 公共 fabric 驱动通过 RV32 freestanding 编译；多芯片板级适配尚缺 |
+| RISC-V MCU | 公共 fabric/原子库在 RV32 指令环境执行并通过 freestanding 编译；多芯片板级适配尚缺 |
 | AArch64 / x86 / RV64 服务器 | 既有公共 SMP/集群接口；本阶段分别记录构建/开机回归结果 |
 | 树莓派 | 仓库目前没有树莓派专用 board.c，不能以 AArch64 编译代替树莓派支持 |
 
@@ -88,3 +88,29 @@ fake bus 验证公共代码语义，不构成相应板型开机证据。ARMv7-M 
 需要继续补统一的执行能力查询与镜像 ABI 匹配、非 ARMv7-M fabric 适配、
 树莓派板级支持、设备所有权与物理测试矩阵。未完成项保留为未完成；不能
 通过把功能名称改成“通用”来声明所有平台可用。功能优先，性能不作首轮门槛。
+
+## 公共原子运行库接入
+
+`CONFIG_SHARED_FABRIC_ATOMICS` 选择同一份 GCC size-specific runtime，提供
+1/2/4/8 字节 load/store/exchange/CAS 和 add/sub/and/or/xor 的 fetch 操作。
+所有编译单元必须使用 `-fno-inline-atomics`，禁止在同一共享对象上混用本地
+LDREX/STREX、LR/SC 或本地 IRQ 屏蔽替代跨端口原子性。每次操作持有公共
+atomic gate，使用完整屏障；较弱 memory_order 也按此更强顺序实现。
+它不是 lock-free 实现，当前没有提供完整 GNU atomic runtime 的所有扩展。
+
+平台提供 `arch_shared_fabric()` 选择当前 CPU 的有效绑定，以及不返回的
+`arch_shared_fabric_stop()`。前者不得依赖堆、软件锁或编译器原子；后者在域
+故障时停止访问。IRQ token 在公共层全程使用 `uintptr_t`。普通硬件一致性
+服务器继续使用原有编译器原子，不选择这个非一致性域适配。
+
+跨架构测试使用 GCC 实际发出的 libcall，不通过手工调用替代编译器 ABI。
+每个端口核对 46 次操作恰好产生 138 次门屏障，覆盖失败 CAS 更新 expected、
+弱 CAS、各宽度回绕、64 位跨 32 位进位与完整 IRQ token 恢复。额外故障进程
+对未映射地址发起 atomic load，要求先检测 fabric FAULT、恢复 IRQ token，
+再进入 stop hook，不能访问该地址。四 ISA 均通过。
+
+RV32 进程使用测试专用 Linux write/exit 汇编 shim，在 qemu-riscv32 中执行；
+这不构成 RV32 MCU 内核或物理板证据。ARMv7-M 完整固件已改用同一公共原子
+运行库，内核线程与原生应用/RTL 回归通过。这个运行库属于特权内核，当前
+非特权 MCU 应用尚不能直接使用它作为线程同步 API；后续需接统一 Native
+线程同步系统调用，不能让应用直接调用内核的 IRQ 屏蔽适配。

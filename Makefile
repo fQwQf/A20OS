@@ -1255,7 +1255,8 @@ CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
 ifeq ($(MCU_SHARED_KERNEL),1)
 # Distinct physical chips do not share a Cortex-M exclusive monitor.
 # Every GCC atomic operation goes through the fabric semaphore implementation.
-CFLAGS += -DCONFIG_MCU_SHARED_KERNEL -fno-inline-atomics -mno-unaligned-access
+CFLAGS += -DCONFIG_MCU_SHARED_KERNEL -DCONFIG_SHARED_FABRIC_ATOMICS \
+          -fno-inline-atomics -mno-unaligned-access
 ifeq ($(MCU_SHARED_TEST),1)
 CFLAGS += -DCONFIG_MCU_SHARED_TEST
 endif

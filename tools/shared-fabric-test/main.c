@@ -2,7 +2,7 @@
  * This tests software semantics, not a Raspberry Pi/FPGA/board controller. */
 #include "core/shared_fabric.h"
 extern int puts(const char *);
-extern void exit(int);
+extern void exit(int) __attribute__((noreturn));
 #define CHECK(x)                                                               \
     do {                                                                       \
         if (!(x)) {                                                            \
@@ -119,6 +119,67 @@ static const a20_fabric_io_t io = {
     .irq_restore = irq_restore,
 };
 
+#ifdef CONFIG_SHARED_FABRIC_ATOMICS
+static const a20_fabric_t *selected_fabric;
+const a20_fabric_t *arch_shared_fabric(void) {
+    return selected_fabric;
+}
+void arch_shared_fabric_stop(void) {
+#ifdef A20_TEST_ATOMIC_FAULT
+    port_t *p = selected_fabric->ctx;
+    CHECK(p->d->fault == 5 && !p->d->owner[0] && p->irq == ~(uintptr_t)0);
+    puts("PASS atomic fault: stopped before shared access, IRQ token restored");
+    exit(0);
+#endif
+    puts("unexpected atomic fabric stop");
+    exit(1);
+}
+
+/* Compile with -fno-inline-atomics: these are compiler-emitted runtime calls
+ * into production fabric_atomics.c, not host native atomics. */
+#define PROBE(T)                                                               \
+    do {                                                                       \
+        T value = 7, expected = 7;                                             \
+        CHECK(__atomic_load_n(&value, __ATOMIC_ACQUIRE) == 7);                 \
+        CHECK(__atomic_compare_exchange_n(                                     \
+            &value, &expected, (T)9, 0, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE));  \
+        expected = 7;                                                          \
+        CHECK(!__atomic_compare_exchange_n(                                    \
+            &value, &expected, (T)11, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE)); \
+        CHECK(expected == 9);                                                  \
+        CHECK(__atomic_exchange_n(&value, (T)11, __ATOMIC_ACQ_REL) == 9);      \
+        CHECK(__atomic_fetch_add(&value, (T)3, __ATOMIC_RELAXED) == 11 &&      \
+              value == 14);                                                    \
+        CHECK(__atomic_sub_fetch(&value, (T)2, __ATOMIC_RELAXED) == 12);       \
+        CHECK(__atomic_fetch_or(&value, (T)3, __ATOMIC_RELAXED) == 12 &&       \
+              value == 15);                                                    \
+        CHECK(__atomic_and_fetch(&value, (T)7, __ATOMIC_RELAXED) == 7);        \
+        CHECK(__atomic_fetch_xor(&value, (T)5, __ATOMIC_RELAXED) == 7 &&       \
+              value == 2);                                                     \
+        __atomic_store_n(&value, (T) ~(T)0, __ATOMIC_RELEASE);                 \
+        CHECK(__atomic_add_fetch(&value, (T)1, __ATOMIC_SEQ_CST) == 0);        \
+    } while (0)
+static void atomic_probe(const a20_fabric_t *f) {
+    selected_fabric = f;
+    port_t *p = f->ctx;
+    uintptr_t before = p->irq;
+    unsigned grants = p->d->barriers;
+    PROBE(uint8_t);
+    PROBE(uint16_t);
+    PROBE(unsigned int);
+    PROBE(uint64_t);
+    uint64_t carry = 0xffffffffULL, expected = 0;
+    CHECK(__atomic_add_fetch(&carry, 1, __ATOMIC_SEQ_CST) == 0x100000000ULL);
+    CHECK(!__atomic_compare_exchange_n(&carry, &expected, 1, 0,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE));
+    CHECK(expected == 0x100000000ULL);
+    /* Every one of the 46 emitted atomic libcalls acquired and released the
+     * fabric gate: one acquire + two release barriers each. */
+    CHECK(p->irq == before && !p->d->owner[0] &&
+          p->d->barriers - grants == 138);
+}
+#endif
+
 int main(void) {
     for (unsigned count = 2; count <= 16; count++) {
         domain_t d = {.magic = A20_FABRIC_MAGIC, .count = count};
@@ -150,6 +211,9 @@ int main(void) {
             CHECK(token == saved && !ports[cpu].irq && d.owner[0] == cpu + 1);
             CHECK(a20_fabric_gate_unlock(&f[cpu], 0, token) == 0);
             CHECK(ports[cpu].irq == saved && !d.owner[0]);
+#ifdef CONFIG_SHARED_FABRIC_ATOMICS
+            atomic_probe(&f[cpu]);
+#endif
         }
         unsigned writes = d.writes;
         uintptr_t token;
@@ -163,6 +227,13 @@ int main(void) {
         CHECK(a20_fabric_take_notification(&f[0]) == -1);
         CHECK(a20_fabric_gate_lock(&f[0], 0, &token) == -1);
         CHECK(ports[0].irq == ~(uintptr_t)0);
+#ifdef A20_TEST_ATOMIC_FAULT
+        selected_fabric = &f[0];
+        (void)__atomic_load_n((uint32_t *)(uintptr_t)0x12345000U,
+                              __ATOMIC_ACQUIRE);
+        CHECK(
+            0); /* Must stop without ever dereferencing the invalid address. */
+#endif
         d.fault = 0;
         d.attached = 0;
         d.magic = 0;
@@ -173,6 +244,6 @@ int main(void) {
         CHECK(a20_fabric_probe_attach(&f[0], count + 1, &id) != 0);
     }
     puts("PASS shared fabric: 2..16 ports, attachment, startup, gates, IRQ "
-         "tokens, notifications, fencing");
+         "tokens, notifications, fencing, GCC atomics 1/2/4/8");
     return 0;
 }

@@ -1,5 +1,18 @@
-#ifdef CONFIG_MCU_SHARED_KERNEL
-#include "shared_kernel.h"
+#ifdef CONFIG_SHARED_FABRIC_ATOMICS
+#include "core/shared_fabric.h"
+
+static uintptr_t atomic_begin(void) {
+    uintptr_t token;
+    if (a20_fabric_gate_lock(arch_shared_fabric(), A20_FABRIC_ATOMIC_GATE,
+                             &token))
+        arch_shared_fabric_stop();
+    return token;
+}
+static void atomic_end(uintptr_t token) {
+    if (a20_fabric_gate_unlock(arch_shared_fabric(), A20_FABRIC_ATOMIC_GATE,
+                               token))
+        arch_shared_fabric_stop();
+}
 
 /* GCC's intrinsic CAS takes weak, but its size-specific runtime libcall ABI
  * omits that argument. Bind a separate C name to the ABI symbol to avoid the
@@ -12,55 +25,55 @@
                                                                                \
     T __atomic_load_##N(const volatile void *ptr, int order) {                 \
         (void)order;                                                           \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         T value = *(const volatile T *)ptr;                                    \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
         return value;                                                          \
     }                                                                          \
     void __atomic_store_##N(volatile void *ptr, T value, int order) {          \
         (void)order;                                                           \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         *(volatile T *)ptr = value;                                            \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
     }                                                                          \
     T __atomic_exchange_##N(volatile void *ptr, T value, int order) {          \
         (void)order;                                                           \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         T old = *(volatile T *)ptr;                                            \
         *(volatile T *)ptr = value;                                            \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
         return old;                                                            \
     }                                                                          \
     _Bool a20_compare_exchange_##N(volatile void *ptr, void *expected,         \
                                    T desired, int success, int failure) {      \
         (void)success;                                                         \
         (void)failure;                                                         \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         T old = *(volatile T *)ptr;                                            \
         bool equal = old == *(T *)expected;                                    \
         if (equal)                                                             \
             *(volatile T *)ptr = desired;                                      \
         else                                                                   \
             *(T *)expected = old;                                              \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
         return equal;                                                          \
     }
 
 #define DEFINE_FETCH(N, T, NAME, OP)                                           \
     T __atomic_fetch_##NAME##_##N(volatile void *ptr, T value, int order) {    \
         (void)order;                                                           \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         T old = *(volatile T *)ptr;                                            \
         *(volatile T *)ptr = (T)(old OP value);                                \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
         return old;                                                            \
     }                                                                          \
     T __atomic_##NAME##_fetch_##N(volatile void *ptr, T value, int order) {    \
         (void)order;                                                           \
-        uint32_t flags = mcu_fabric_lock(A20_FABRIC_ATOMIC_GATE);              \
+        uintptr_t flags = atomic_begin();                                      \
         T result = (T)(*(volatile T *)ptr OP value);                           \
         *(volatile T *)ptr = result;                                           \
-        mcu_fabric_unlock(A20_FABRIC_ATOMIC_GATE, flags);                      \
+        atomic_end(flags);                                                     \
         return result;                                                         \
     }
 #define DEFINE_WIDTH(N, T)                                                     \
