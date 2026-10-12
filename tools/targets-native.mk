@@ -720,3 +720,15 @@ $(NATIVE_OBJECTD_BIN): user/svc/objectd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NAT
 
 $(NATIVE_OBJECT_TEST_BIN): user/tests/test_native_objects.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_objects.c,$@)
+
+$(NATIVE_APPD_BIN): user/svc/appd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/appd.c,$@)
+
+$(NATIVE_APP_TEST_BIN): user/tests/test_native_apps.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_apps.c,$@)
+
+$(NATIVE_APP_CHILD_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_app_child.c,$@)
+
+$(NATIVE_APP_EXIT_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DAPP_EXIT=37 user/tests/test_native_app_child.c,$@)

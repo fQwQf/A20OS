@@ -24,6 +24,8 @@ unsigned program_test_rejections;
             panic("program test: " #x);                                        \
     } while (0)
 
+#include "program_app_test.h"
+
 static void reject_image(const void *elf, size_t length) {
     CHECK(mcu_program_spawn(elf, length, 8192, NULL, 0, 2) == -ENOEXEC);
     program_test_rejections++;
@@ -113,7 +115,7 @@ static void controller(void) {
     }
     printf("[PROGRAM-THREAD] PASS child survives leader exit image heap "
            "startup=live\n");
-    proc_put(program_task);
+    app_test_finished();
     while (__atomic_load_n(&mcu_program_live, __ATOMIC_ACQUIRE) ||
            mcu_heap_available() != program_heap_baseline)
         proc_yield();
@@ -176,16 +178,11 @@ void mcu_program_selftest_start(void) {
     CHECK(mcu_heap_available() == before && !mcu_program_live);
     int controller_pid = proc_alloc_deferred(controller);
     CHECK(controller_pid > 0);
-    program_heap_baseline = mcu_heap_available();
-    mcu_program_test_record_t startup = {0};
-    int pid = mcu_program_spawn(mcu_test_elf, length, 8192, &startup,
-                                sizeof(startup), 2);
-    CHECK(pid > 0);
-    program_task = proc_find_get(pid);
-    CHECK(program_task && program_task->arch_program &&
-          program_task->abi_mode == 1);
     task_t *control = proc_find_get(controller_pid);
     CHECK(control);
+    app_test_init(control, length);
+    program_heap_baseline = mcu_heap_available();
+    app_test_launch();
     proc_publish_deferred_task(control);
     proc_put(control);
 }
