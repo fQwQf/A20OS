@@ -372,36 +372,15 @@ static void free_arg_vector(char **vec, int count)
     }
 }
 
+#include "spawn_params.h"
+
 int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 {
     a20_task_spawn_args_t *uargs = (a20_task_spawn_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs) return -A20_ERR_FAULT;
-
-    /* Version-aware validation (types.md §2): v1 = base layout, v2 appends
-     * the stdio handles.  Unknown trailing bytes are ignored, missing
-     * trailing fields default to "not inherited". */
     a20_task_spawn_args_t kargs;
-    memset(&kargs, 0, sizeof(kargs));
-    uint32_t hdr[2];
-    if (copy_from_user(hdr, uargs, sizeof(hdr)) < 0)
-        return -A20_ERR_FAULT;
-    if (hdr[1] < 1 || hdr[1] > 2)
-        return -A20_ERR_INVALID_ARGUMENT;
-    uint32_t min_size = (hdr[1] == 1) ? A20_TASK_SPAWN_ARGS_V1_SIZE
-                                      : (uint32_t)sizeof(kargs);
-    if (hdr[0] < min_size)
-        return -A20_ERR_INVALID_ARGUMENT;
-    uint32_t copy_size = hdr[0] < (uint32_t)sizeof(kargs) ? hdr[0]
-                                                          : (uint32_t)sizeof(kargs);
-    kargs.stdin_handle = A20_HANDLE_NULL;
-    kargs.stdout_handle = A20_HANDLE_NULL;
-    kargs.stderr_handle = A20_HANDLE_NULL;
-    if (copy_from_user(&kargs, uargs, copy_size) < 0)
-        return -A20_ERR_FAULT;
-    kargs.version = hdr[1];
-    if ((kargs.flags & ~A20_SPAWN_PARENT_BOUND) ||
-        (kargs.version == 2 && kargs.reserved))
-        return -A20_ERR_INVALID_ARGUMENT;
+    int validated = a20_spawn_copy_params(uargs, &kargs);
+    if (validated)
+        return validated;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);

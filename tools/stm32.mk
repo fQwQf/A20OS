@@ -135,7 +135,7 @@ _check-mcu-program-rtl: kernel-only
 ifeq ($(MCU_NATIVE_PROGRAM)$(MCU_SHARED_TEST),11)
 $(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
 $(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c user/liba20rt/a20_compiler_rt.c \
-    user/liba20rt/a20_malloc.c user/liba20rt/a20_string.h user/tests/native-memory-contract.h user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/liba20rt/a20_fs.h user/liba20rt/a20_handle.h user/liba20rt/a20_work.h user/tests/native-object-contract.h kernel/include/uapi/a20/cluster_objects.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h \
+    user/liba20rt/a20_malloc.c user/liba20rt/a20_string.h user/tests/native-memory-contract.h user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-spawn-contract.h user/liba20rt/a20_fs.h user/liba20rt/a20_handle.h user/liba20rt/a20_work.h user/tests/native-object-contract.h kernel/include/uapi/a20/cluster_objects.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h \
     user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
     user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h user/liba20rt/a20_sync.h user/liba20rt/a20_mem.h \
     kernel/arch/armv7m/include/program_test.h user/liba20rt/a20_execution.h \
@@ -149,8 +149,13 @@ $(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c user/lib
 endif
 
 ifeq ($(NATIVE_FLAT_FILES)$(MCU_SHARED_TEST),11)
-$(BUILD_DIR)/flat-files/flat-file-fixture.h: tools/make-native-file-fixture.py
-	$(PYTHON) $< --out-dir $(BUILD_DIR)/flat-files
+$(BUILD_DIR)/mcu-spawn-program.elf: user/tests/native-spawn-child.c user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-runtime-contract.h user/tests/native-object-contract.h user/tests/mcu-shared-program/spawn.ld user/tests/mcu-shared-program/spawn-start.S $(wildcard user/liba20rt/*.h) user/liba20rt/a20_malloc.c user/liba20rt/a20_compiler_rt.c
+	@mkdir -p $(@D)
+	$(CC) -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -Os -ffreestanding -fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \
+		-Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 -Wl,-T,user/tests/mcu-shared-program/spawn.ld \
+		-Iuser -Iuser/liba20rt user/tests/mcu-shared-program/spawn-start.S user/tests/native-spawn-child.c user/liba20rt/a20_malloc.c user/liba20rt/a20_compiler_rt.c -lgcc -o $@
+$(BUILD_DIR)/flat-files/flat-file-fixture.h: tools/make-native-file-fixture.py $(BUILD_DIR)/mcu-spawn-program.elf
+	$(PYTHON) $< --out-dir $(BUILD_DIR)/flat-files --program $(BUILD_DIR)/mcu-spawn-program.elf
 $(BUILD_DIR)/arch/armv7m/platform/program_selftest.o: $(BUILD_DIR)/flat-files/flat-file-fixture.h
 CFLAGS += -I$(BUILD_DIR)/flat-files
 endif

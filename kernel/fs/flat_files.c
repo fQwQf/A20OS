@@ -91,6 +91,33 @@ int a20_flat_file_open(const char *path, int flags, vfile_t **out) {
     return 0;
 }
 
+int a20_flat_file_image(vfile_t *vf, size_t limit, void **data,
+                        size_t *length) {
+    if (!vf || vf->ops != &file_ops || !data || !length)
+        return -EINVAL;
+    fat32lite_file_t file;
+    mutex_lock(&files_lock);
+    file = *(fat32lite_file_t *)vf->priv;
+    mutex_unlock(&files_lock);
+    if (!file.size || file.size > limit)
+        return -ENOEXEC;
+    void *buffer = kmalloc(file.size);
+    if (!buffer)
+        return -ENOMEM;
+    mutex_lock(&files_lock);
+    int result = fat32lite_seek(&file, 0);
+    if (!result)
+        result = fat32lite_read(&file, buffer, file.size);
+    mutex_unlock(&files_lock);
+    if (result != (int)file.size) {
+        kfree(buffer);
+        return -EIO;
+    }
+    *data = buffer;
+    *length = file.size;
+    return 0;
+}
+
 /* Small profile VFS dispatch. File identity/refcount/allocation and Native
  * handle ownership are the same production modules as the full VFS profile. */
 int vfs_read_file(vfile_t *vf, char *buf, size_t count) {

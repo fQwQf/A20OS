@@ -91,7 +91,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP) $(GU
 	@echo "Building FAT32 image..."
 	@$(PYTHON) tools/img.py fat32 \
 		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
-		--user-build-dir "$(USER_BUILD_DIR)" --mkfs-fat "$(MKFS_FAT)" \
+		--user-build-dir "$(USER_BUILD_DIR)" --tag "$(NATIVE_TAG)" --mkfs-fat "$(MKFS_FAT)" \
 		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
 		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
 		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \

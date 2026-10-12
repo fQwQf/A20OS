@@ -8,6 +8,8 @@
 #include "../native-thread-contract.h"
 #ifdef A20_NATIVE_FILE_TEST
 #include "../native-file-contract.h"
+#define A20_SPAWN_FLAT_TEST 1
+#include "../native-spawn-contract.h"
 #endif
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
@@ -90,6 +92,8 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
 #ifdef A20_NATIVE_FILE_TEST
     CHECK(native_file_contract() == 0 && native_file_reopen(17) == 0, 89);
     record->files_passed = 1;
+    CHECK(native_spawn_contract() == 0, 88);
+    record->spawn_passed = 1;
 #endif
     record->threads_passed = 1;
     record->objects_passed = native_object_releases == 1 &&

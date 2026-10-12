@@ -52,6 +52,7 @@ sources = [
     "kernel/core/fabric_atomics.c",
     "kernel/abi/native/sys_thread_basic.c",
     "kernel/abi/native/sys_file.c",
+    "kernel/abi/native/sys_spawn_flat.c",
     "kernel/fs/file.c",
     "kernel/fs/flat_files.c",
     "kernel/mm/objcache.c",

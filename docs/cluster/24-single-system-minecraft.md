@@ -90,3 +90,7 @@ SRAM、Xuanwu 的 1 MiB 外部 SRAM或原型的 1 MiB 共享 RAM足以启动客�
 共同处理计算任务，见 [41](41-native-files.md)。该后端当前只读、短文件名，
 MCU 使用 FAT 扇区 fixture；这一步没有执行 Java 字节码或加载 Minecraft，
 下一步仍需在真实 Native 程序中逐项接入 Java 运行时及所选客户端依赖。
+
+从文件装载真实 Native 子进程、标准 CRT、argv/envp 和子程序双线程计算路径
+已继续接入，见 [42](42-native-file-spawn.md)。这使文件读取继续进入实际程序
+启动路径，仍未执行 Java 字节码或真实客户端。

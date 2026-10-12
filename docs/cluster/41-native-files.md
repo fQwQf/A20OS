@@ -18,8 +18,9 @@ ISA 编号。回调上下文及只读介质必须存活到内核结束，绑定�
 
 flat 配置目前支持只读 FAT32 和 fat32lite 的短文件名路径，文件大小使用 32 位值，seek
 偏移上限为 2 GiB−1。打开要求 `dir=A20_HANDLE_NULL`、flags=0、mode=0；0 是
-有效 Native 句柄，不能当作 NULL。提供 READ/STAT/SEEK 权限并允许调用者缩减
-权限。写入、创建、目录句柄、mmap、动态库和路径可执行文件装载尚未提供。
+有效 Native 句柄，不能当作 NULL。本阶段最初提供 READ/STAT/SEEK 权限并允许调用者缩减
+权限。写入、创建、目录句柄、mmap 和动态库尚未提供；文件可执行装载与新增 EXEC
+权限继续接入于 [42](42-native-file-spawn.md)。
 没有因此宣告完整 HANDLES 能力，执行能力发现尚未增加单独的文件支持位。
 普通 full VFS 的目录、写入及其他功能不受这个配置限制。
 
@@ -65,7 +66,8 @@ python3 tools/check-mcu-program.py <上一步 kernel.elf> \
 
 MCU selftest 通过 `tools/make-native-file-fixture.py` 制作真实 64 MiB FAT32
 逻辑磁盘，保存完整磁盘哈希，再把全部非零扇区作为只读 Flash fixture 链入
-固件；零扇区由回调返回零。该载荷约 12 个非零扇区，不能把逻辑磁盘大小算作
+固件；零扇区由回调返回零。本阶段仅含数据文件的载荷约 12 个非零扇区；加入程序后的值见 42 的生成报告。
+不能把逻辑磁盘大小算作
 MCU RAM/Flash 实际容量，也不是物理 SD 控制器测试。实际文件解析、用户读取、
 异常和系统调用执行都在 MCU 固件中，宿主不代替用户程序计算或写入结果。
 自测以外的硬件需提供真正的扇区驱动和足够的存储，当前没有物理多板证据。

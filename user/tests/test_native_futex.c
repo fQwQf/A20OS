@@ -15,6 +15,7 @@
 #include "native-domain-contract.h"
 #include "native-thread-contract.h"
 #include "native-file-contract.h"
+#include "native-spawn-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -94,6 +95,19 @@ int main(int argc, char **argv, char **envp)
         return fail(out, 98, "file reopen", sizeof("file reopen") - 1);
     a20_hdl_write_buf(out, "NATIVE_FILES_REOPEN: PASS count=4100\n",
                       sizeof("NATIVE_FILES_REOPEN: PASS count=4100\n") - 1, 0);
+    int spawn_result = native_spawn_contract();
+    if (spawn_result) {
+        char error[] = "NATIVE_SPAWN_ERROR: 00\n";
+        error[sizeof(error) - 4] = '0' + spawn_result / 10;
+        error[sizeof(error) - 3] = '0' + spawn_result % 10;
+        a20_hdl_write_buf(out, error, sizeof(error) - 1, 0);
+        return fail(out, 99, "file spawn", sizeof("file spawn") - 1);
+    }
+    a20_hdl_write_buf(
+        out, "NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32\n",
+        sizeof("NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32\n") -
+            1,
+        0);
     int thread_result = native_thread_contract();
     if (thread_result) {
         char code[] = "NATIVE_THREAD_ERROR: 00 mask=00000000\n";

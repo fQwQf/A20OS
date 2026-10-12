@@ -126,3 +126,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 可选 flat 文件后端、公共 Native 文件接口与并发读取/计算验收见
 [41-native-files.md](41-native-files.md)。
+
+标准 Native 文件装载、参数环境和子进程启动见
+[42-native-file-spawn.md](42-native-file-spawn.md)。

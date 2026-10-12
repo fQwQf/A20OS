@@ -257,3 +257,7 @@ check-native-task-object:
 .PHONY: check-native-runtime
 check-native-runtime:
 	$(PYTHON) tools/check-native-runtime.py
+
+.PHONY: check-native-spawn-admission
+check-native-spawn-admission:
+	$(PYTHON) tools/check-native-spawn-admission.py

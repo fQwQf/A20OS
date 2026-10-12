@@ -748,3 +748,10 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 新增 4100 次打开关闭回归并用父提交内核观察到失败。构建与证据见
 [41](41-native-files.md)。文件支持不等于 JVM、物理 SD、多板或 Minecraft
 已经运行；执行能力发现的文件支持位和 AArch64 偶发引用下溢仍待处理。
+
+## 从文件启动 Native 子进程（2026-10-13）
+
+共享 flat 内核接入既有 task_spawn v1/v2，程序可打开 ELF 文件、传参并等待
+独立子进程退出。标准 CRT、参数/环境快照、Native ELF 标记和发布前回滚
+边界见 [42](42-native-file-spawn.md)。普通 full VFS 装载路径保留，JVM、
+物理多 MCU、Minecraft 与 AArch64 偶发引用问题尚未完成。

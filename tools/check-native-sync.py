@@ -51,7 +51,7 @@ def run_case(arch, args, output):
                     phase = "application"
                     deadline = time.monotonic() + args.timeout
                 elif phase == "application" and "NATIVE_FUTEX: PASS" in content:
-                    assert all(marker in content for marker in ["NATIVE_FILES_REOPEN: PASS count=4100", "NATIVE_FILES: PASS bytes=2048 fnv=60f4edc5", "NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS", "NATIVE_RUNTIME: PASS", "NATIVE_OBJECT_DIRECTORY: PASS"]), str(log)
+                    assert all(marker in content for marker in ["NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32", "NATIVE_FILES_REOPEN: PASS count=4100", "NATIVE_FILES: PASS bytes=2048 fnv=60f4edc5", "NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS", "NATIVE_RUNTIME: PASS", "NATIVE_OBJECT_DIRECTORY: PASS"]), str(log)
                     match = re.search(r"NATIVE_THREAD_CPUS: (\d+)->(\d+)", content)
                     assert match, str(log)
                     balance = re.search(r"NATIVE_BALANCE: PASS jobs=32 sum=4359168 mask=([0-9a-f]{8}) range=dynamic", content)
@@ -87,7 +87,7 @@ def run_case(arch, args, output):
                 process.wait()
             process.stdin.close()
     assert phase == "complete", f"{arch} stopped at {phase}; see {log}"
-    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, thread_cpus_verified=thread_cpus, balance_cpu_mask=balance_mask, balance_jobs=32, balance_sum=4359168, dynamic_work_range_checked=True, native_file_io_checked=True, concurrent_file_threads_checked=True, passed=True, build=build, command=command,
+    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, thread_cpus_verified=thread_cpus, balance_cpu_mask=balance_mask, balance_jobs=32, balance_sum=4359168, dynamic_work_range_checked=True, native_file_spawn_checked=True, native_file_io_checked=True, concurrent_file_threads_checked=True, passed=True, build=build, command=command,
                 log=str(log.relative_to(ROOT)), kernel=str(kernel.relative_to(ROOT)),
                 kernel_sha256=sha(kernel), image=str(image.relative_to(ROOT)),
                 image_sha256=sha(image), returncode=process.returncode,

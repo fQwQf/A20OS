@@ -15,6 +15,7 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--program", type=Path)
     parser.add_argument("--mkfs", default="/usr/sbin/mkfs.fat")
     args = parser.parse_args()
     directory = args.out_dir
@@ -29,6 +30,8 @@ def main():
     subprocess.run([args.mkfs, "--invariant", "-F", "32", str(image)], check=True)
     subprocess.run(["mmd", "-i", str(image), "::/BIN"], check=True)
     subprocess.run(["mcopy", "-i", str(image), str(payload), "::/BIN/INPUT.DAT"], check=True)
+    if args.program:
+        subprocess.run(["mcopy", "-i", str(image), str(args.program), "::/BIN/SPAWN.ELF"], check=True)
     records = []
     full_hash = hashlib.sha256()
     sparse_hash = hashlib.sha256()
@@ -54,6 +57,7 @@ def main():
         "image_sha256": full_hash.hexdigest(), "bytes": image.stat().st_size,
         "stored_sectors": len(records), "sector_bytes": 512,
         "payload_sha256": hashlib.sha256(data).hexdigest(),
+        "program_sha256": hashlib.sha256(args.program.read_bytes()).hexdigest() if args.program else None,
         "storage": "lossless sparse ROM fixture; not SD hardware"}, indent=2) + "\n")
 
 

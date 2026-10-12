@@ -12,6 +12,7 @@
 #include "sys/usercopy.h"
 #include "ipc/handle_table.h"
 #include "core/flat_thread.h"
+#include "core/flat_program.h"
 
 #define PROGRAM_MAX (256U * 1024U)
 #define PROGRAM_RESUME_SVC 0x21U
@@ -19,6 +20,7 @@ unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
 #ifdef CONFIG_NATIVE_FLAT_FILES
+extern int64_t sys_a20_task_spawn(const a20_syscall_args_t *args);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 extern int64_t sys_a20_handle_read(const a20_syscall_args_t *args);
 extern int64_t sys_a20_handle_write(const a20_syscall_args_t *args);
@@ -235,12 +237,9 @@ void arch_flat_program_enter(void) {
     panic("program enter returned");
 }
 
-int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
-                      const void *startup, size_t startup_size,
-                      uint32_t affinity) {
-    if (!elf || stack_size < 4096 || stack_size > 65536 || startup_size > 256 ||
-        (startup_size && !startup) || !affinity ||
-        (affinity & ~((1U << CONFIG_NR_CPUS) - 1)))
+static int prepare_program(const void *elf, size_t length, size_t stack_size,
+                           a20_flat_program_t *out) {
+    if (!elf || !out || stack_size < 4096 || stack_size > 65536)
         return -EINVAL;
     armv7m_program_t *p = kcalloc(1, sizeof(*p));
     if (!p)
@@ -269,12 +268,6 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
         a20_flat_add_fixed(&p->owner->memory, &p->owner->stack_region,
                            (uintptr_t)p->stack, stack_size))
         panic("program memory ranges rejected");
-    p->startup = (void *)(((uintptr_t)p->stack + stack_size - startup_size) &
-                          ~(uintptr_t)15);
-    if (startup_size)
-        memcpy(p->startup, startup, startup_size);
-    p->registers.sp = (uintptr_t)p->startup;
-    p->registers.r[0] = (uintptr_t)p->startup;
     p->in_kernel = 1;
     result = proc_alloc_deferred(arch_flat_program_enter);
     if (result < 0) {
@@ -296,13 +289,63 @@ int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
     p->counted = 1;
     __atomic_fetch_add(&mcu_program_live, 1, __ATOMIC_RELEASE);
     proc_set_name(task, "native-mcu");
+    *out = (a20_flat_program_t){.task = task,
+                                .stack_base = (uintptr_t)p->stack,
+                                .stack_size = stack_size};
+    return result;
+}
+
+void arch_flat_program_set_stack(task_t *task, uintptr_t startup) {
+    armv7m_program_t *p = task->arch_program;
+    p->startup = (void *)startup;
+    p->registers.sp = startup;
+    p->registers.r[0] = startup;
+}
+
+int arch_flat_program_create(const void *elf, size_t length, size_t stack_size,
+                             a20_flat_program_t *out) {
+    /* Public task_spawn requires the same Native ELF marker as the full VFS
+     * loader. Legacy embedded selftest images retain their explicit entry. */
+    Elf32_Ehdr h;
+    if (!elf || length < sizeof(h))
+        return -ENOEXEC;
+    memcpy(&h, elf, sizeof(h));
+    if (h.e_phentsize != sizeof(Elf32_Phdr) || !h.e_phnum || h.e_phnum > 16 ||
+        !within(0, length, h.e_phoff, h.e_phnum * sizeof(Elf32_Phdr)))
+        return -ENOEXEC;
+    int native = 0;
+    for (unsigned i = 0; i < h.e_phnum; i++) {
+        Elf32_Phdr ph;
+        memcpy(&ph, (const uint8_t *)elf + h.e_phoff + i * sizeof(ph),
+               sizeof(ph));
+        if (ph.p_type == PT_A20_START_INFO)
+            native = 1;
+    }
+    return native ? prepare_program(elf, length, stack_size, out) : -ENOEXEC;
+}
+
+int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
+                      const void *startup, size_t startup_size,
+                      uint32_t affinity) {
+    if (startup_size > 256 || (startup_size && !startup) || !affinity ||
+        (affinity & ~((1U << CONFIG_NR_CPUS) - 1)))
+        return -EINVAL;
+    a20_flat_program_t created;
+    int pid = prepare_program(elf, length, stack_size, &created);
+    if (pid < 0)
+        return pid;
+    uintptr_t sp =
+        (created.stack_base + stack_size - startup_size) & ~(uintptr_t)15;
+    if (startup_size)
+        memcpy((void *)sp, startup, startup_size);
+    arch_flat_program_set_stack(created.task, sp);
     proc_sched_config_t config = {.fields = PROC_SCHED_AFFINITY,
                                   .affinity = affinity};
-    if (proc_sched_set(task, &config))
+    if (proc_sched_set(created.task, &config))
         panic("program affinity rejected");
-    proc_publish_deferred_task(task);
-    proc_put(task);
-    return result;
+    proc_publish_deferred_task(created.task);
+    proc_put(created.task);
+    return pid;
 }
 
 /* ISA adapter: distinct registers/PSP, common owned space and task lifetime.
@@ -361,6 +404,9 @@ static void program_syscall_thread(void) {
     int64_t result;
     switch (args.nr) {
 #ifdef CONFIG_NATIVE_FLAT_FILES
+        case A20_SYS_task_spawn:
+            result = sys_a20_task_spawn(&args);
+            break;
         case A20_SYS_path_open:
             result = sys_a20_path_open(&args);
             break;
