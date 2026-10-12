@@ -30,6 +30,35 @@ a20_cluster_exchange(a20_handle_t ep, const void *input, uint32_t len,
     }
 }
 
+/* Query an already connected, epoch-bound service. Old agents return
+ * UNSUPPORTED: absence of metadata must never count as a matching image.
+ * As with exchange, close the endpoint on an error before issuing more RPCs. */
+static inline a20_status_t
+a20_cluster_execution_query(a20_handle_t ep, uint32_t budget_ms,
+                            a20_execution_info_t *out) {
+    if (!out)
+        return -A20_ERR_INVALID_ARGUMENT;
+    a20_work_request_t query = {.kind = A20_WORK_QUERY_EXECUTION,
+                                .job = a20_agent_clock_ms(0) | 1};
+    uint8_t request[A20_WORK_HEADER],
+        reply[A20_WORK_HEADER + A20_EXECUTION_BYTES];
+    int n = a20_work_encode(request, sizeof(request), &query);
+    uint32_t length = sizeof(reply);
+    a20_status_t r =
+        a20_cluster_exchange(ep, request, n, reply, &length, budget_ms);
+    if (r < 0)
+        return r;
+    a20_work_result_t result;
+    if (a20_work_result_decode(reply, length, &query, &result) < 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (result.status == A20_WORK_UNSUPPORTED)
+        return -A20_ERR_NOT_SUPPORTED;
+    if (result.status ||
+        a20_execution_decode(result.output, result.output_len, out) < 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+    return A20_OK;
+}
+
 /* Resolve on one node using the fixed endpoint. CHANGED restarts enumeration
  * inside the same overall budget. LOCAL names use cluster_connect directly. */
 static inline a20_status_t

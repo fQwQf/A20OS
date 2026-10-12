@@ -5,6 +5,7 @@
  * shared by firmware, kernel adapters and Native applications. All wire
  * integers are explicitly little endian; C structs never cross the wire. */
 #include <stdint.h>
+#include "execution.h"
 
 #define A20_WORK_MAGIC 0x5743u
 #define A20_WORK_VERSION 1u
@@ -12,6 +13,7 @@
 #define A20_WORK_QUERY 1u
 #define A20_WORK_OPERATOR 2u
 #define A20_WORK_PROCESS 3u
+#define A20_WORK_QUERY_EXECUTION 4u
 #define A20_WORK_OK 0u
 #define A20_WORK_INVALID 1u
 #define A20_WORK_UNSUPPORTED 2u
@@ -129,6 +131,8 @@ typedef struct a20_work_agent {
     uint64_t (*clock_ms)(void *ctx);
     int (*canceled)(void *ctx, const a20_work_request_t *r);
     void *clock_ctx;
+    /* Optional execution metadata; NULL means unknown, not unsupported ISA. */
+    const a20_execution_info_t *execution;
 } a20_work_agent_t;
 
 static inline int a20_work_agent_valid(const a20_work_agent_t *a) {
@@ -161,7 +165,21 @@ static inline int a20_work_dispatch(const a20_work_agent_t *a,
     uint32_t status = A20_WORK_INVALID, n = 0;
     int decoded = a20_work_decode(input, len, &r) == 0;
     if (decoded && a20_work_agent_valid(a)) {
-        if (r.kind == A20_WORK_QUERY) {
+        if (r.kind == A20_WORK_QUERY_EXECUTION) {
+            if (!r.input_len && !r.operator_id) {
+                status = A20_WORK_UNSUPPORTED;
+                if (a->execution && a20_execution_valid(a->execution)) {
+                    status = A20_WORK_NO_SPACE;
+                    int encoded = a20_execution_encode(
+                        reply + A20_WORK_HEADER, capacity - A20_WORK_HEADER,
+                        a->execution);
+                    if (encoded >= 0) {
+                        n = (uint32_t)encoded;
+                        status = A20_WORK_OK;
+                    }
+                }
+            }
+        } else if (r.kind == A20_WORK_QUERY) {
             if (!r.input_len && !r.operator_id) {
                 uint32_t required =
                     A20_WORK_CAP_BYTES +

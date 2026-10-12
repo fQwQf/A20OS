@@ -113,6 +113,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 /* ===== Core (0x0000) ===== */
 #define A20_SYS_abi_info 0x0000
 #define A20_SYS_feature_test 0x0001
+#define A20_SYS_execution_info 0x0002
 
 /* ===== Handle (0x0100) ===== */
 #define A20_SYS_handle_close 0x0100

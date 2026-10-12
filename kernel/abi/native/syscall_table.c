@@ -11,6 +11,7 @@
 /* Forward declarations for implemented syscalls */
 int64_t sys_a20_abi_info(const a20_syscall_args_t *args);
 int64_t sys_a20_feature_test(const a20_syscall_args_t *args);
+int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_close(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_dup(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_query(const a20_syscall_args_t *args);

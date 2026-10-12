@@ -1,4 +1,5 @@
 #include "a20_task.h"
+#include "a20_execution.h"
 #include "program_test.h"
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
@@ -18,6 +19,22 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     CHECK(relocated[0] == 0xa20beef && relocated[1] == 0xc0ffee, 1);
     CHECK(zero_bss[0] == 0 && zero_bss[3] == 0, 2);
     zero_bss[3] = 99;
+    a20_execution_info_t execution;
+    CHECK(a20_execution_info(&execution) == A20_OK &&
+              a20_execution_valid(&execution) && execution.pointer_bits == 32 &&
+              execution.elf_machine == 40 &&
+              execution.calling_abi == A20_EXEC_ABI_THUMB_SOFT &&
+              execution.features ==
+                  (A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE) &&
+              execution.memory_model == A20_EXEC_MEMORY_FLAT &&
+              execution.atomic_model == A20_EXEC_ATOMIC_FABRIC_GATE,
+          11);
+    CHECK(a20_syscall6(A20_SYS_execution_info, (uintptr_t)&execution,
+                       sizeof(execution) - 1, 0, 0, 0,
+                       0) == -A20_ERR_INVALID_ARGUMENT,
+          12);
+    CHECK(a20_execution_info((void *)0x20000000UL) == -A20_ERR_FAULT, 13);
+
     CHECK(a20_thread_get_cpu(&record->cpu_before) == 0 &&
               record->cpu_before == 1,
           3);

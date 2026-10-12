@@ -19,7 +19,7 @@ typedef uint64_t a20_size_t;       /* 大小 */
 typedef uint64_t a20_vaddr_t;      /* 虚拟地址 */
 ```
 
-指针大小由 `a20_abi_info.pointer_bits` 指示。64 位架构上 native ABI 首选 64 位用户指针。若未来支持 32 位用户态，应视为单独 ABI profile。
+指针大小由 `a20_abi_info.pointer_bits` 指示，处理函数读取实际指针宽度。64 位架构使用 64 位用户指针；32 位用户态和 MCU Native 实验端口使用独立 ABI profile。更详细的 ISA/调用约定、内存模型与接口可用性由 [execution_info](../cluster/28-execution-capabilities.md) 查询；MCU 尚未提供完整 abi_info/句柄/futex 接口。
 
 ---
 
@@ -65,7 +65,7 @@ typedef struct a20_abi_info {
 } a20_abi_info_t;
 ```
 
-当前 `abi_info` 填充版本、指针/页/handle 宽度以及 feature bits；`syscall_bitmap_addr` 和 `syscall_bitmap_size` 仍保持清零，调用方不能用这两个保留字段枚举 142 个登记入口。
+当前 `abi_info` 填充版本、指针/页/handle 宽度以及 feature bits；`syscall_bitmap_addr` 和 `syscall_bitmap_size` 仍保持清零，调用方不能用这两个保留字段枚举登记入口。
 
 ---
 

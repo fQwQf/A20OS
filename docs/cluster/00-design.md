@@ -56,7 +56,7 @@ MCU 没有进程加载能力时，使用静态缓冲和算子回调；主机可�
 
 具备共享 RAM 的 MCU 已复用服务器的原生调度器；资源有限的独立节点可使用
 静态服务适配。两者共用业务协议，任务分配检查实际能力和消息预算。
-CPU/板级接口和跨 ISA 的边界见 [27-portable-domains.md](27-portable-domains.md)。
+CPU/板级接口和跨 ISA 的边界见 [27-portable-domains.md](27-portable-domains.md)；执行能力契约见 [28-execution-capabilities.md](28-execution-capabilities.md)。
 
 ## 4. 故障与信任
 
@@ -91,5 +91,6 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 - [26-native-programs.md](26-native-programs.md)：静态 PIE、非特权 PSP、阻塞 Native SVC 与应用迁移证据。
 - [../platforms/raspberrypi4.md](../platforms/raspberrypi4.md)：树莓派原生启动与公共 SMP 功能验收、设备和实物缺口。
 - [27-portable-domains.md](27-portable-domains.md)：公共 fabric 驱动、跨架构接口、平台矩阵与缺口。
+- [28-execution-capabilities.md](28-execution-capabilities.md)：统一执行信息、镜像初筛、Native/CW 查询与验收边界。
 
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。

@@ -1,17 +1,17 @@
 # A20 Native ABI 设计
 
-A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
+A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对，Native 入口计数及新增执行查询更新至 2026-10-12；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
 
 ## 设计定位
 
 > 注：`user/archive/` 已于 2026-10 从仓库删除，下文与表格中的 archive 相关内容均为历史记录。
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 142 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 155 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
 
 长期布局：
 
 ```text
 kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
-kernel/abi/native/   A20OS native ABI（142 个登记入口，部分功能仍有边界）
+kernel/abi/native/   A20OS native ABI（155 个登记入口，部分功能仍有边界）
 user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（当前仅 riscv64 构建/运行入口）
 ```
 
@@ -195,7 +195,7 @@ Native ABI 一旦稳定，需要遵守：
 |------|------|------|------|
 | Linux ABI | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口 |
 | Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | Phase 1 核心 syscall |
-| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c`、`sys_native_*.c` | 已登记 | 142 个入口覆盖各分区；`event_watch_fs`、VMAR 层级、部分 EventQ 事件源等仍是有限实现，登记数不表示完整语义 |
+| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c`、`sys_native_*.c` | 已登记 | 155 个入口覆盖各分区；`event_watch_fs`、VMAR 层级、部分 EventQ 事件源等仍是有限实现，登记数不表示完整语义 |
 | Handle table | `kernel/abi/native/handle_table.c` | 已实现 | handle 状态机 + 查找/安装/移除 |
 | 启动协议 | `kernel/abi/native/startup.c` | 已实现 | 用户态 Native 启动 |
 | Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
@@ -209,7 +209,7 @@ Native ABI 一旦稳定，需要遵守：
 
 ```text
 kernel/abi/native/syscall_table.c      syscall 分发表
-syscall_table.def                      syscall 编号宏定义（142 条）
+syscall_table.def                      syscall 编号宏定义（155 条）
 sys_core.c                             核心 syscall 实现
 sys_native_{handle,task,mm,fs,ipc,net,time,security,debug,system,sync,device,ext}.c  分区 syscall
 sys_native_debug.c                     Debug (0x0900) syscall（包装 proc_debug_*）
@@ -269,7 +269,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 142 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
+Native ABI 当前登记 155 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
 
 `event_queue` 为 channel/timer/task 等对象提供统一等待模型，但 file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
 

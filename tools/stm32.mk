@@ -137,7 +137,8 @@ $(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
 $(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c \
     user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
     user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h \
-    kernel/arch/armv7m/include/program_test.h
+    kernel/arch/armv7m/include/program_test.h user/liba20rt/a20_execution.h \
+    kernel/include/uapi/a20/execution.h
 	@mkdir -p $(@D)
 	$(CC) -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -Os -ffreestanding \
 		-fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \

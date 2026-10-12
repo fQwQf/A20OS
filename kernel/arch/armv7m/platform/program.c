@@ -16,6 +16,7 @@
 unsigned mcu_program_live;
 
 extern void armv7m_svc_handler(uint32_t *frame);
+extern int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_sleep(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_yield(const a20_syscall_args_t *args);
 extern int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args);
@@ -249,6 +250,9 @@ static void program_syscall_thread(void) {
         args.arg[i] = p->registers.r[i];
     int64_t result;
     switch (args.nr) {
+        case A20_SYS_execution_info:
+            result = sys_a20_execution_info(&args);
+            break;
         case A20_SYS_task_exit:
             proc_exit_group((int32_t)args.arg[0]);
         case A20_SYS_thread_exit:

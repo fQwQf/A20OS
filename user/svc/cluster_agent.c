@@ -118,6 +118,12 @@ int main(int argc, char **argv, char **envp) {
         {A20_WORK_CONCAT, A20_WORK_REPLAY_SAFE | A20_WORK_ASSOCIATIVE, 344, 168,
          a20_work_concat, 0},
     };
+    a20_execution_info_t execution;
+    const a20_execution_info_t *execution_ptr =
+        a20_execution_info(&execution) == A20_OK &&
+                a20_execution_valid(&execution)
+            ? &execution
+            : 0;
     a20_cluster_agent_server_t server = {0};
     server.agent = (a20_work_agent_t){
         .operators = ops,
@@ -127,7 +133,8 @@ int main(int argc, char **argv, char **envp) {
         .max_inflight = 1,
         .max_budget_ms = 30000,
         .process = process_image != A20_HANDLE_NULL ? run_process : 0,
-        .clock_ms = a20_agent_clock_ms};
+        .clock_ms = a20_agent_clock_ms,
+        .execution = execution_ptr};
     a20_channel_pair_t pair;
     if (a20_channel_create(&pair) < 0 ||
         a20_cluster_export(pair.endpoints[0], "work",
