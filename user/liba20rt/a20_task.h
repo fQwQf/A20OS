@@ -3,6 +3,7 @@
 
 #include "a20_types.h"
 #include "a20_syscall.h"
+#include "../../kernel/include/uapi/a20/task_signal.h"
 
 static inline void a20_task_exit(int code)
 {
@@ -137,4 +138,42 @@ static inline a20_status_t a20_signal_mask(uint64_t new_mask, uint64_t *old_mask
     return a20_syscall6(A20_SYS_signal_mask, new_mask, (uint64_t)(uintptr_t)old_mask, 0, 0, 0, 0);
 }
 
+/* These variants opt into isolated thread masks/queues. The original calls
+ * above retain their process-wide checkpoint semantics. */
+static inline a20_status_t a20_thread_signal(a20_handle_t thread,
+                                             uint32_t sig) {
+    return a20_syscall6(A20_SYS_task_kill, thread, sig, A20_SIGNAL_THREAD, 0, 0,
+                        0);
+}
+static inline a20_status_t
+a20_thread_signal_control(a20_signal_control_t *args) {
+    return a20_syscall6(A20_SYS_signal_check, A20_SIGNAL_STRUCT,
+                        (uint64_t)(uintptr_t)args, 0, 0, 0, 0);
+}
+static inline int64_t a20_thread_signal_check(uint32_t flags,
+                                              uint64_t selected) {
+    a20_signal_control_t args = {sizeof(args),
+                                 1,
+                                 A20_SIGNAL_CONTROL_CHECK,
+                                 (uint32_t)A20_SIGNAL_THREAD | flags,
+                                 selected,
+                                 0,
+                                 0};
+    a20_status_t status = a20_thread_signal_control(&args);
+    return status < 0 ? status : (int64_t)args.result;
+}
+static inline a20_status_t a20_thread_signal_mask(uint64_t mask, uint64_t *old,
+                                                  uint32_t flags) {
+    a20_signal_control_t args = {sizeof(args),
+                                 1,
+                                 A20_SIGNAL_CONTROL_MASK,
+                                 (uint32_t)A20_SIGNAL_THREAD | flags,
+                                 0,
+                                 mask,
+                                 0};
+    a20_status_t status = a20_thread_signal_control(&args);
+    if (status == A20_OK && old)
+        *old = args.result;
+    return status;
+}
 #endif

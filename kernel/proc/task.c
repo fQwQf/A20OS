@@ -214,6 +214,10 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     }
     t->sig_old_blocked = 0;
     t->thread_pending = 0;
+#ifdef A20_TASK_OBJECTS_ENABLED
+    t->a20_signal_pending = 0;
+    t->a20_signal_blocked = parent ? a20_thread_sig_mask(parent, 0, 1) : 0;
+#endif
     ARCH_TASK_INIT(t);
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;

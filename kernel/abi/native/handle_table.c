@@ -9,6 +9,7 @@
  * transfer, and partial-delivery consistency gates.
  */
 #include "core/types.h"
+#include "uapi/a20/task_signal.h"
 #include "core/string.h"
 #include "core/lock.h"
 #include "core/refcount.h"
@@ -938,6 +939,58 @@ uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask)
     uint64_t flags = spin_lock_irqsave(&ht->lock);
     uint64_t old = ht->sig_blocked;
     ht->sig_blocked = mask & ~(1ULL << 9);   /* SIGKILL cannot be blocked */
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return old;
+}
+
+/* Thread checkpoints deliberately share the table lock, so taking a process
+ * signal and a thread signal is one transaction. No scheduler lock is taken. */
+void a20_thread_sig_pend(task_t *task, int sig) {
+    struct a20_ht_internal *ht = task_get_a20_ht_ref(task);
+    if (!ht)
+        return;
+    if (sig <= 0 || sig >= 64) {
+        a20_ht_put_ref(ht);
+        return;
+    }
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    task->a20_signal_pending |= 1ULL << sig;
+    spin_unlock_irqrestore(&ht->lock, flags);
+    a20_ht_put_ref(ht);
+}
+
+uint64_t a20_thread_sig_check(task_t *task, uint32_t mode, uint64_t selected) {
+    struct a20_ht_internal *ht = task_get_a20_ht(task);
+    if (!ht)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    uint64_t pending = ht->sig_pending | task->a20_signal_pending;
+    uint64_t deliver = pending & ~task->a20_signal_blocked;
+    if (mode & A20_SIGNAL_SELECT) {
+        deliver = pending & selected;
+        /* sigwait consumes one signal, including signals blocked by caller. */
+        if (!(mode & A20_SIGNAL_PEEK))
+            deliver &= 0ULL - deliver;
+    }
+    if (!(mode & A20_SIGNAL_PEEK)) {
+        /* A signal pending in both scopes represents two occurrences. Prefer
+         * the thread occurrence and leave the process occurrence queued. */
+        uint64_t local = deliver & task->a20_signal_pending;
+        task->a20_signal_pending &= ~local;
+        ht->sig_pending &= ~(deliver & ~local);
+    }
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return deliver;
+}
+
+uint64_t a20_thread_sig_mask(task_t *task, uint64_t mask, int query) {
+    struct a20_ht_internal *ht = task_get_a20_ht(task);
+    if (!ht)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&ht->lock);
+    uint64_t old = task->a20_signal_blocked;
+    if (!query)
+        task->a20_signal_blocked = mask & ~((1ULL << 9) | (1ULL << 19) | 1ULL);
     spin_unlock_irqrestore(&ht->lock, flags);
     return old;
 }

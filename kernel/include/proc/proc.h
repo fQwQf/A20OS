@@ -349,6 +349,10 @@ typedef struct task_t {
     struct a20_task_object
         *a20_object;       /* weak task binding; task owns one ref */
     unsigned a20_joinable; /* immutable after Native thread publication */
+    /* Native thread checkpoint state, protected by its shared handle-table
+     * lock. Separate from Linux signal state and legacy process checkpoints. */
+    uint64_t a20_signal_pending;
+    uint64_t a20_signal_blocked;
 #endif
     void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,
                          * which is reused by Linux ABI I/O buffers) */
