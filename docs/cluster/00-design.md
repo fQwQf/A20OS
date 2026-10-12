@@ -89,6 +89,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 - [25-native-shared-kernel.md](25-native-shared-kernel.md)：共享 RAM 与硬件仲裁的原生内核端口、功能证据及物理验收边界。
 - [26-native-programs.md](26-native-programs.md)：静态 PIE、非特权 PSP、阻塞 Native SVC 与应用迁移证据。
+- [../platforms/raspberrypi4.md](../platforms/raspberrypi4.md)：树莓派原生启动与公共 SMP 功能验收、设备和实物缺口。
 - [27-portable-domains.md](27-portable-domains.md)：公共 fabric 驱动、跨架构接口、平台矩阵与缺口。
 
 历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。

@@ -135,6 +135,8 @@ NR_CPUS ?= 1
 # preemption default must exist before the QEMU image paths are captured, or
 # `-kernel` and `-drive` can point at different build directories.
 CONFIG_KERNEL_PREEMPT ?= 1
+# Functional diagnostic; separate artifacts, never enabled in normal builds.
+SMP_SELFTEST ?= 0
 # Network lanes. 1 keeps every lane index folded to 0, which is the
 # embedded shape and byte-for-byte the pre-lane behaviour. Raise it
 # only together with stage D of docs/net/net-lanes.md; stages A-C
@@ -510,7 +512,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -981,7 +983,12 @@ QEMU_LIBPATH ?= $(patsubst %/,%,$(abspath $(dir $(QEMU_VIRGL_LIB))))
 ifneq ($(strip $(QEMU_LIBPATH)),)
 QEMU         := env LD_LIBRARY_PATH=$(QEMU_LIBPATH):$$LD_LIBRARY_PATH $(QEMU)
 endif
-QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m $(QEMU_MEMORY) -nographic -smp $(NR_CPUS)
+# Boards may select a QEMU model/handoff without changing architecture code.
+-include $(BOARD_INCLUDE_DIR)/board.mk
+QEMU_MACHINE_CPUS ?= $(NR_CPUS)
+QEMU_KERNEL ?= $(KERNEL_ELF)
+QEMU_FLAGS := $(or $(QEMU_FLAGS_BASE_$(BOARD)),$(QEMU_FLAGS_BASE_$(ARCH))) \
+              -m $(QEMU_MEMORY) -nographic -smp $(QEMU_MACHINE_CPUS) $(QEMU_BOOT_FLAGS)
 # Virtualization back-end.  Non-x86_64 targets run under QEMU TCG
 # (multi-threaded once SMP).  x86_64 guests on an x86_64 host prefer KVM
 # when /dev/kvm is present, falling back to TCG otherwise.
@@ -1323,6 +1330,19 @@ CFLAGS += -DCONFIG_ABI_NATIVE
 endif
 
 # Bringup / ramfs-user mode markers for conditional compilation.
+ifeq ($(SMP_SELFTEST),1)
+ifeq ($(PROFILE),mcu)
+$(error SMP_SELFTEST=1 is a hosted bringup diagnostic; use check-mcu-shared-kernel for the MCU profile)
+endif
+ifneq ($(BRINGUP),1)
+$(error SMP_SELFTEST=1 requires BRINGUP=1)
+endif
+ifeq ($(NR_CPUS),1)
+$(error SMP_SELFTEST=1 requires NR_CPUS greater than one)
+endif
+CFLAGS += -DCONFIG_SMP_SELFTEST
+endif
+
 ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
@@ -1550,7 +1570,8 @@ $(VDSO_BLOB): $(VDSO_ELF)
 	    vdso.elf vdso_blob.o
 
 # ASM sources
-ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
+ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort) \
+          $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.S)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
 DEP_FILES = $(filter-out $(RAMFS_USER_BLOBS:.o=.d),$(KERNEL_OBJ:.o=.d)) \
             $(ASM_OBJ:.o=.d)
@@ -1582,6 +1603,7 @@ include tools/targets-smoke.mk
 include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
+include tools/raspberrypi4.mk
 include tools/target-console.mk
 include tools/run-targets.mk
 include tools/targets-images.mk

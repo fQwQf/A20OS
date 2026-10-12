@@ -1,4 +1,5 @@
 #include "core/progress.h"
+#include "core/smp_test.h"
 
 #include "core/cpu.h"
 #include "net/lwip_stack.h"
@@ -10,7 +11,8 @@
 
 /* virtio-net is optional in generic and is supplied by a .a20drv package.
  * The progress service must not create a link-time dependency on it. */
-extern void virtio_net_poll_rx_all_bounded(unsigned budget) __attribute__((weak));
+extern void virtio_net_poll_rx_all_bounded(unsigned budget)
+    __attribute__((weak));
 
 /*
  * IO_PROGRESS_SERVICE (event-driven model):
@@ -57,13 +59,11 @@ extern void virtio_net_poll_rx_all_bounded(unsigned budget) __attribute__((weak)
 static _Atomic uint32_t g_progress_pending;
 static uint64_t g_progress_fallback_ticks;
 
-void kernel_progress_note_pending(uint32_t bits)
-{
+void kernel_progress_note_pending(uint32_t bits) {
     __atomic_fetch_or(&g_progress_pending, bits, __ATOMIC_RELAXED);
 }
 
-static void kernel_progress_devices(void)
-{
+static void kernel_progress_devices(void) {
     __atomic_fetch_and(&g_progress_pending, ~KERNEL_PROGRESS_PENDING_DEVICE,
                        __ATOMIC_RELEASE);
     driver_progress_class(DEV_CLASS_BLOCK);
@@ -75,21 +75,21 @@ static void kernel_progress_devices(void)
 /* One CPU stages the single device RX ring. Protocol consumers run on every
  * CPU under independent owner lane locks; the ingress lock is not a core lock
  * in multi-lane builds. */
-static void kernel_progress_net_rx(void)
-{
+static void kernel_progress_net_rx(void) {
     if (cpu_current_id() == 0 && virtio_net_poll_rx_all_bounded)
         virtio_net_poll_rx_all_bounded(0);
 }
 
-void kernel_progress_poll(kernel_progress_reason_t reason)
-{
+void kernel_progress_poll(kernel_progress_reason_t reason) {
     (void)reason;
     kernel_progress_devices();
     kernel_progress_net_rx();
 }
 
-void kernel_progress_timer_tick(void)
-{
+void kernel_progress_timer_tick(void) {
+#if defined(BRINGUP) && !defined(CONFIG_MCU)
+    smp_selftest_note_timer_irq();
+#endif
     /* CPU 0 publishes the timer hint; multi-lane work runs in process context. */
     if (cpu_current_id() != 0)
         return;
@@ -118,8 +118,7 @@ void kernel_progress_timer_tick(void)
         virtio_net_poll_rx_all_bounded(CONFIG_NET_RX_IRQ_BUDGET);
 }
 
-void kernel_progress_run_bottom_halves(void)
-{
+void kernel_progress_run_bottom_halves(void) {
     if (__atomic_load_n(&g_progress_pending, __ATOMIC_ACQUIRE) &
         KERNEL_PROGRESS_PENDING_DEVICE)
         kernel_progress_devices();
