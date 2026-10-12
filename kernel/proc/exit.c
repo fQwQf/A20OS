@@ -178,7 +178,7 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
     if (!parent || parent == proc_idle_task())
         return 1;
     if (child->clone_flags & CLONE_THREAD)
-        return 1;
+        return !proc_native_thread_waitable(child, parent);
     if (child->exit_signal != SIGCHLD)
         return 0;
     return proc_ignores_sigchld(parent);
@@ -356,7 +356,8 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         if (reap_group_dead &&
             (actual_reaper == proc_idle_task() ||
              child->exit_signal != SIGCHLD ||
-             (child->clone_flags & CLONE_THREAD)) &&
+             ((child->clone_flags & CLONE_THREAD) &&
+              !proc_native_thread_waitable(child, actual_reaper))) &&
             proc_task_state_get(child) == PROC_ZOMBIE &&
             !proc_task_is_current_any_cpu(child)) {
             if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {

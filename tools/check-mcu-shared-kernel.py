@@ -121,7 +121,7 @@ class Domain:
         self.exits[cpu] += 1
 
     def idle_hook(self, uc, address, size, cpu):
-        if sum(self.exits) == 2:
+        if sum(self.exits) == (5 if self.program_mode else 2):
             self.post_exit_idle[cpu] += 1
 
     def fabric_read(self, uc, offset, size, cpu):
@@ -260,7 +260,7 @@ class Domain:
             marker = "SVC=native released=all\r\n" if self.program_mode else "heap=cross-cpu\r\n"
             done = "program_test_done" if self.program_mode else "done"
             if (marker in "".join(self.logs)
-                    and self.scalar(done) == 1 and sum(self.exits) == 2
+                    and self.scalar(done) == 1 and sum(self.exits) == (5 if self.program_mode else 2)
                     and self.post_exit_idle[0] > 0):
                 break
         else:

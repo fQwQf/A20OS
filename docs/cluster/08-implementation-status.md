@@ -634,3 +634,26 @@ MCU 原生应用及 RTL 联合验证通过，原有集群作业和 Linux futex �
 x86 测试暴露的 C 线程入口栈偏移已放入架构适配，Linux clone 不走该路径；
 RV32 Native 同步程序编译链接通过，尚未声明其用户态开机验收。证据随提交
 保存在 `evidence/native-sync-<commit>/`，格式门禁的既有 114 项失败未增加。
+
+## 统一 Native 用户线程（2026-10-12）
+
+共享 RAM MCU 与 MMU 服务器复用 thread_create/task_wait/handle_close 处理函数、
+生产句柄表和公共调度配置接口。创建先完成句柄和用户写回，再发布任务；失败
+回滚。Native 可加入线程保留退出记录，Linux clone 的自动回收规则保持不变。
+flat ISA 适配仅准备上下文与共享资源引用，通用生命周期位于 proc 模块。
+同一应用测试覆盖嵌套创建、共享堆/futex、跨 CPU 亲和性、join 与关闭；MCU
+额外覆盖活跃栈不能 unmap，以及主线程先退出后子线程继续使用映像和初始参数。
+执行能力新增 THREAD_CREATE=128，MCU 仍不公布完整 HANDLES。完整接口、
+验证和未完成项见 [32-native-threads.md](32-native-threads.md)。
+
+本阶段实际验证：三种服务器 ISA 双核的父/子线程均报告 CPU1→CPU0，RV64
+单核路径报告 CPU0→CPU0；MCU
+真实 ELF/SVC 与 RTL 联合运行通过，五次退出后程序资源全部回收，内核堆恢复
+至应用启动前基线。生产 syscall 的七条发布/失败路径在 x86/AArch64/RV64
+宿主环境通过。原有 Linux 进程压力、futex 压力与 Native 集群作业回归通过。
+默认精简 MCU 固件保持原 SHA256；格式门禁仍为同一组 114 个既有漂移，未增加
+失败或修改豁免。物理多板、其他 MCU ISA 适配、全局实例/对象代次和 Minecraft
+仍待推进，不将这些回归表述为完整目标完成。
+
+本阶段提交的报告、内核、用户 ELF 与日志归档于
+`.kernel-build/cluster/evidence/native-thread-<commit>/`，清单记录 SHA256。

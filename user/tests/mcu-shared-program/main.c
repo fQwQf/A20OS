@@ -5,10 +5,33 @@
 #include "program_test.h"
 #include "../native-memory-contract.h"
 #include "../native-domain-contract.h"
+#include "../native-thread-contract.h"
 
 static const uint32_t magic[2] = {0xa20beef, 0xc0ffee};
 static const uint32_t *volatile relocated = magic;
 static uint32_t zero_bss[4];
+
+static __attribute__((noreturn)) void orphan_entry(uintptr_t arg) {
+    mcu_program_test_record_t *record = (void *)arg;
+    uint32_t ready = 0;
+    do {
+        if (a20_atomic32_load((uint32_t *)&record->parent_exited, &ready))
+            a20_thread_exit(99);
+        if (!ready)
+            a20_thread_yield();
+    } while (!ready);
+    a20_execution_domain_info_t domain;
+    uint64_t page = 0;
+    if (relocated[0] != 0xa20beef || zero_bss[3] != 99 ||
+        native_domain_contract(&domain) || a20_vm_alloc_pages(1, 3, &page) ||
+        a20_vm_unmap(page, 4096)) {
+        record->error = 87;
+        a20_thread_exit(87);
+    }
+    a20_atomic32_store((uint32_t *)&record->orphan_done, 1);
+    a20_thread_exit(0);
+    __builtin_unreachable();
+}
 
 __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     volatile uint32_t local[4] = {11, 22, 33, 44};
@@ -30,7 +53,8 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
               execution.calling_abi == A20_EXEC_ABI_THUMB_SOFT &&
               execution.features ==
                   (A20_EXEC_THREAD_BASIC | A20_EXEC_NATIVE_IMAGE |
-                   A20_EXEC_FUTEX | A20_EXEC_ATOMIC32 | A20_EXEC_USER_HEAP) &&
+                   A20_EXEC_FUTEX | A20_EXEC_ATOMIC32 | A20_EXEC_USER_HEAP |
+                   A20_EXEC_THREAD_CREATE) &&
               execution.memory_model == A20_EXEC_MEMORY_FLAT &&
               execution.atomic_model == A20_EXEC_ATOMIC_FABRIC_GATE,
           11);
@@ -52,6 +76,10 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
               domain.online_mask == 3,
           82);
     record->domain_mask_before = domain.online_mask;
+    CHECK(native_thread_contract() == 0, 84);
+    record->threads_passed = 1;
+    record->thread_parent_cpu = native_thread_shared.parent_cpu;
+    record->thread_worker_cpu = native_thread_shared.worker_cpu;
     CHECK(native_memory_contract() == 0, 81);
     record->allocator_passed = 1;
     uint64_t heap = 0, temp = 0;
@@ -202,7 +230,15 @@ __attribute__((noreturn)) void _start(mcu_program_test_record_t *record) {
     CHECK(observed == 2, 35);
     CHECK(native_domain_contract(&domain) == 0, 83);
     record->domain_mask_after = domain.online_mask;
+    uint64_t orphan_stack = 0;
+    CHECK(a20_vm_alloc_pages(4, 3, &orphan_stack) == A20_OK, 85);
+    a20_thread_create_args_t orphan = {.entry = (uintptr_t)orphan_entry,
+                                       .arg = (uintptr_t)record,
+                                       .stack_base = orphan_stack + 16384,
+                                       .stack_size = 16384};
+    CHECK(a20_thread_create(&orphan) >= 0, 86);
     record->phase = 3;
-    a20_task_exit(0);
+    /* Leave a live thread, its stack and handle to the shared finalizer. */
+    a20_thread_exit(0);
     __builtin_unreachable();
 }

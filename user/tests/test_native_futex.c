@@ -12,6 +12,7 @@
 #include "liba20rt/crt0_a20.h"
 #include "native-memory-contract.h"
 #include "native-domain-contract.h"
+#include "native-thread-contract.h"
 
 static volatile uint32_t g_futex_word;
 static volatile uint32_t g_worker_woke;
@@ -73,6 +74,17 @@ int main(int argc, char **argv, char **envp)
     a20_hdl_write_buf(out, domain_line, sizeof(domain_line) - 1, (void *)0);
     a20_hdl_write_buf(out, "NATIVE_DOMAIN: PASS\n",
                       sizeof("NATIVE_DOMAIN: PASS\n") - 1, (void *)0);
+    if (native_thread_contract())
+        return fail(out, 95, "thread contract", sizeof("thread contract") - 1);
+    a20_hdl_write_buf(out, "NATIVE_THREAD: PASS\n",
+                      sizeof("NATIVE_THREAD: PASS\n") - 1, (void *)0);
+    char thread_line[] = "NATIVE_THREAD_CPUS: 00->00\n";
+    unsigned offset = sizeof("NATIVE_THREAD_CPUS: ") - 1;
+    thread_line[offset] = '0' + native_thread_shared.parent_cpu / 10;
+    thread_line[offset + 1] = '0' + native_thread_shared.parent_cpu % 10;
+    thread_line[offset + 4] = '0' + native_thread_shared.worker_cpu / 10;
+    thread_line[offset + 5] = '0' + native_thread_shared.worker_cpu % 10;
+    a20_hdl_write_buf(out, thread_line, sizeof(thread_line) - 1, (void *)0);
     if (native_memory_contract())
         return fail(out, 93, "allocator contract",
                     sizeof("allocator contract") - 1);

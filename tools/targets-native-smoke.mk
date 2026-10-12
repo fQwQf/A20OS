@@ -245,3 +245,7 @@ smoke-native-cluster-supervisor:
 .PHONY: check-native-sync
 check-native-sync:
 	$(PYTHON) tools/check-native-sync.py
+
+.PHONY: check-native-thread-admission
+check-native-thread-admission:
+	$(PYTHON) tools/check-native-thread-admission.py

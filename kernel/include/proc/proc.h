@@ -338,6 +338,10 @@ typedef struct task_t {
     int       dynamic_alloc;
     void     *scratch_buf;
     size_t    scratch_size;
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
+    (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
+    unsigned a20_joinable; /* immutable after Native thread publication */
+#endif
     void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,
                          * which is reused by Linux ABI I/O buffers) */
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
@@ -635,7 +639,27 @@ int      proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *
 
 /* Native ABI thread creation: shares address space / fd table / handle table,
  * starts at `entry` with `arg` in the first argument register. */
-int      proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
+int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
+/* Referenced unpublished child; caller must publish or destroy and proc_put. */
+int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
+                                vaddr_t tls, size_t stack_size,
+                                task_t **out_task);
+
+/* Called with tasklist_lock, or before publishing the new task. Linux clone
+ * threads retain their existing auto-reap path. A Native child retains its
+ * exit record only while another member can join it. */
+static inline int proc_native_thread_waitable(const task_t *task,
+                                              const task_t *parent) {
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
+    (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
+    return task && task->a20_joinable && parent && parent != task &&
+           parent->tgid == task->tgid;
+#else
+    (void)task;
+    (void)parent;
+    return 0;
+#endif
+}
 
 /* Global task-list membership (task_list_head/tail, ->all_next/->all_prev) and
  * the parent/children/sibling plus thread-group chains are guarded by

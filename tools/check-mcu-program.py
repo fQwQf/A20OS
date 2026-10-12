@@ -173,6 +173,9 @@ def main():
     args = parser.parse_args()
     if not 2 <= args.cpus <= 16 or args.rounds < 1 or (args.backend and args.cpus != 2):
         parser.error("cpus must be 2..16; RTL backend is two ports; rounds positive")
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps({"result": "RUNNING", "passed": False}) + "\n")
     dis = subprocess.check_output(["arm-none-eabi-objdump", "-d", str(args.elf)], text=True)
     assert not re.search(r"\b(?:ldrex|strex)(?:b|h|d)?\b", dis, re.I)
     bus = rtl.Bus(args.backend) if args.backend else None
@@ -180,9 +183,13 @@ def main():
         domain = ProgramDomain(args.elf, bus, args.cpus, args.seed)
         result = domain.run(args.rounds, reset_cpus=[1] if bus else None)
         assert all(n > 0 for n in domain.user_instructions[:2])
-        assert {0x0002, 0x0200, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers
+        assert {0x0002, 0x0207, 0x0208, 0x020e, 0x0b00, 0x0b01, 0x0b02, 0x0300, 0x0301, 0x7fff} <= domain.syscall_numbers
         assert domain.scalar("program_test_rejections") == 8
-        assert 3 in domain.syscall_numbers
+        assert any("[PROGRAM-THREAD] PASS final heap restored handles stacks image=freed" in log for log in domain.logs)
+        assert any("[PROGRAM-THREAD] PASS public affinity parent=1 child=0" in log for log in domain.logs)
+        assert {3, 0x0100, 0x0202, 0x0205, 0x0209, 0x020a} <= domain.syscall_numbers
+        assert any("[PROGRAM-THREAD] PASS nested-create join close shared-space stack-pin=1" in log for log in domain.logs)
+        assert any("[PROGRAM-THREAD] PASS child survives leader exit image heap startup=live" in log for log in domain.logs)
         assert any("[PROGRAM-DOMAIN] PASS same kernel before/after CPU migration mask=3" in log for log in domain.logs)
         assert any("[PROGRAM-ALLOCATOR] PASS common SDK malloc/calloc/realloc/free" in log for log in domain.logs)
         assert any("[PROGRAM-HEAP] PASS checks=20 wait-pinned=1 cross-cpu=1" in log for log in domain.logs)

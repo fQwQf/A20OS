@@ -35,6 +35,7 @@ def run_case(arch, args, output):
     log = output / f"{arch}.log"
     tag = {"riscv64": "rv", "aarch64": "aarch64", "x86_64": "x86_64"}[arch]
     phase = "boot"
+    thread_cpus = None
     host_terminated = False
     with log.open("wb") as stream:
         process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.PIPE,
@@ -50,7 +51,12 @@ def run_case(arch, args, output):
                     phase = "application"
                     deadline = time.monotonic() + args.timeout
                 elif phase == "application" and "NATIVE_FUTEX: PASS" in content:
-                    assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS"]), str(log)
+                    assert all(marker in content for marker in ["NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_DOMAIN: PASS", "NATIVE_THREAD: PASS"]), str(log)
+                    match = re.search(r"NATIVE_THREAD_CPUS: (\d+)->(\d+)", content)
+                    assert match, str(log)
+                    thread_cpus = [int(match[1]), int(match[2])]
+                    assert all(cpu < args.cpus for cpu in thread_cpus), str(log)
+                    assert args.cpus == 1 or thread_cpus[0] != thread_cpus[1], str(log)
                     assert f"NATIVE_DOMAIN_CPUS: {args.cpus:02d}\n" in content, str(log)
                     process.stdin.write(b"poweroff\n")
                     process.stdin.flush()
@@ -76,7 +82,7 @@ def run_case(arch, args, output):
                 process.wait()
             process.stdin.close()
     assert phase == "complete", f"{arch} stopped at {phase}; see {log}"
-    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, passed=True, build=build, command=command,
+    return dict(arch=arch, cpus=args.cpus, domain_online_verified=args.cpus, thread_cpus_verified=thread_cpus, passed=True, build=build, command=command,
                 log=str(log.relative_to(ROOT)), kernel=str(kernel.relative_to(ROOT)),
                 kernel_sha256=sha(kernel), image=str(image.relative_to(ROOT)),
                 image_sha256=sha(image), returncode=process.returncode,

@@ -485,9 +485,11 @@ int proc_clone_deferred(vaddr_t stack, task_t **out_task)
  * space, fd table, signal handlers and (for native tasks) handle table, and
  * starts executing at `entry` with `arg` in the first argument register.
  */
-int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls)
-{
-    if (sp <= ARCH_NATIVE_THREAD_STACK_BIAS || (sp & 15U))
+int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
+                                vaddr_t tls, size_t stack_size,
+                                task_t **out_task) {
+    (void)stack_size;
+    if (!out_task || sp <= ARCH_NATIVE_THREAD_STACK_BIAS || (sp & 15U))
         return -EINVAL;
     sp = arch_native_thread_initial_sp(sp);
     task_t *t = NULL;
@@ -500,6 +502,6 @@ int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls)
     trap_context_t *tc = t->trap_ctx;
     TRAP_CTX_EPC(tc) = entry;
     TRAP_CTX_SET_ARG0(tc, arg);
-    proc_make_ready(t);
+    *out_task = proc_get(t);
     return pid;
 }

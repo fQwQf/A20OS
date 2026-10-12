@@ -5,17 +5,27 @@
 #include "trap_frame.h"
 #include "mm/flat_user.h"
 
-typedef struct armv7m_program {
-    trap_context_t registers;
+#include "core/refcount.h"
+struct task_t;
+typedef struct armv7m_program_image {
+    refcount_t refs;
     a20_flat_space_t memory;
     a20_flat_region_t image_region, stack_region;
     void *allocation, *stack;
     uintptr_t image;
-    size_t image_size, stack_size;
-    void *startup;
+    size_t image_size;
+    uintptr_t executable_base[16];
+    size_t executable_size[16];
+    unsigned executable_count;
+} armv7m_program_image_t;
+typedef struct armv7m_program {
+    trap_context_t registers;
+    armv7m_program_image_t *owner;
+    a20_flat_region_t *stack_pin;
+    void *stack, *startup;
+    size_t stack_size;
     unsigned in_kernel, counted;
 } armv7m_program_t;
-
 /* Initial static-PIE profile: no interpreter, TLS or dynamic dependencies.
  * Ownership transfers to the deferred task before publication. */
 int mcu_program_spawn(const void *elf, size_t length, size_t stack_size,
