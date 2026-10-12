@@ -20,7 +20,7 @@ uint32_t armv7m_platform_core_clock_hz(void) {
 }
 
 void armv7m_platform_systick(uint64_t ticks) {
-#ifndef CONFIG_STM32_QEMU
+#if !defined(CONFIG_STM32_QEMU) && !defined(CONFIG_MCU_SHARED_KERNEL)
     stm32_backlight_systick();
 #endif
     if ((ticks % 500U) == 0U)

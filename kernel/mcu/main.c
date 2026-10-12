@@ -2,6 +2,8 @@
 #include "core/panic.h"
 #include "core/stdio.h"
 #include "core/timer.h"
+#include "core/smp.h"
+#include "shared_kernel.h"
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_core.h"
 #include "mm/slab.h"
@@ -15,7 +17,7 @@
 void mcu_heap_init(void);
 size_t mcu_heap_available(void);
 
-#ifndef CONFIG_STM32_QEMU
+#if !defined(CONFIG_STM32_QEMU) && !defined(CONFIG_MCU_SHARED_KERNEL)
 static void stm32_service_thread(void) {
     for (;;) {
         uint64_t now = timer_get_ticks();
@@ -60,11 +62,22 @@ void kernel_main(void) {
     printf("[BOOT] allocator=%s\n", probe ? "ok" : "failed");
     kfree(probe);
 
-#if !defined(CONFIG_STM32_QEMU) && !defined(CONFIG_STM32_CLUSTER_PORT)
+#if !defined(CONFIG_STM32_QEMU) && !defined(CONFIG_STM32_CLUSTER_PORT) &&      \
+    !defined(CONFIG_MCU_SHARED_KERNEL)
     stm32_peripherals_init();
 #endif
     proc_init();
-#ifdef CONFIG_STM32_QEMU
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    smp_init();
+    smp_boot_secondaries();
+    if (smp_online_cpu_count() != CONFIG_NR_CPUS)
+        panic("shared kernel secondary startup incomplete");
+#ifdef CONFIG_MCU_SHARED_TEST
+    mcu_shared_selftest_start();
+#endif
+    printf("[SHARED] one native kernel, %u physical CPU ports\n",
+           smp_online_cpu_count());
+#elif defined(CONFIG_STM32_QEMU)
     /* stm32vldiscovery exposes only 8 KiB SRAM.  proc_init() already creates
      * the idle scheduler context; two additional 512-byte task stacks leave
      * too little heap for the architecture smoke image. */

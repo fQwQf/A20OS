@@ -21,7 +21,14 @@ static inline void arch_flush_icache_range(const void *addr, size_t size) {
     arch_fence_i();
 }
 
+#ifdef CONFIG_MCU_SHARED_KERNEL
+extern unsigned armv7m_private_cpu_id;
+static inline unsigned arch_current_cpu_id(void) {
+    return armv7m_private_cpu_id;
+}
+#else
 static inline unsigned arch_current_cpu_id(void) { return 0; }
+#endif
 
 static inline uint32_t arch_read_primask(void) {
     uint32_t value;

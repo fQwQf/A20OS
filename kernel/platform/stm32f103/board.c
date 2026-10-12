@@ -3,6 +3,7 @@
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
 #include "core/timer.h"
+#include "shared_kernel.h"
 #include "board.h"
 #include "drivers/stm32f1/bluetooth.h"
 #include "drivers/stm32f1/sdcard.h"
@@ -173,6 +174,9 @@ static const board_config_t stm32f103_board = {
     .name = "stm32f103",
     .ram_base = PHYS_MEMORY_BASE,
     .ram_end = PHYS_MEMORY_END,
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    .smp = &mcu_fabric_smp_ops,
+#endif
     .irqchip = &stm32_irqchip_ops,
     .timer = &stm32_timer_ops,
     .early_init = stm32_early_init,

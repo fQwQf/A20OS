@@ -76,6 +76,15 @@ void __aeabi_memclr(void *dst, size_t n) { memset(dst, 0, n); }
 void __aeabi_memclr4(void *dst, size_t n) { memset(dst, 0, n); }
 void __aeabi_memclr8(void *dst, size_t n) { memset(dst, 0, n); }
 
+#ifdef CONFIG_MCU_SHARED_KERNEL
+int __popcountsi2(unsigned int value) {
+    value -= (value >> 1) & 0x55555555U;
+    value = (value & 0x33333333U) + ((value >> 2) & 0x33333333U);
+    value = (value + (value >> 4)) & 0x0f0f0f0fU;
+    return (int)((value * 0x01010101U) >> 24);
+}
+#endif
+
 int raise(int sig) {
     (void)sig;
     return 0;

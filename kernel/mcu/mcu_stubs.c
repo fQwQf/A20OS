@@ -32,7 +32,8 @@
 void kernel_progress_run_bottom_halves(void) {
 }
 
-/* The MCU profile is deliberately single-core. */
+#ifndef CONFIG_MCU_SHARED_KERNEL
+/* The ordinary MCU profile is deliberately single-core. */
 uint32_t smp_online_cpu_mask(void) {
     return 1U;
 }
@@ -42,6 +43,8 @@ int smp_cpu_is_online(unsigned cpu) {
 void smp_send_reschedule(unsigned cpu) {
     (void)cpu;
 }
+
+#endif
 
 /* MCU tasks are kernel threads and never own a user address space. */
 void mm_context_enter(mm_struct_t *mm, unsigned cpu) {
@@ -242,6 +245,7 @@ void vfile_free(vfile_t *vf) {
     (void)vf;
 }
 
+#ifndef CONFIG_MCU_SHARED_KERNEL
 /* 64-bit atomic helpers required by Cortex-M3 (no native 8-byte atomics). */
 uint64_t __atomic_load_8(const volatile void *ptr, int memorder) {
     (void)memorder;
@@ -301,3 +305,5 @@ bool __atomic_compare_exchange_8(volatile void *ptr, void *expected,
     arch_irq_restore(flags);
     return equal;
 }
+
+#endif

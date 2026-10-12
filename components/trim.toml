@@ -47,6 +47,7 @@ sources = [
     "kernel/core/string.c",
     "kernel/core/panic.c",
     "kernel/core/sync.c",
+    "kernel/core/smp.c",
     "kernel/core/klog.c",
     "kernel/core/timekeeping.c",
     "kernel/core/stack_protector.c",

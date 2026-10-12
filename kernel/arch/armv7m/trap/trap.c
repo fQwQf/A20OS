@@ -4,6 +4,7 @@
 #include "core/stdio.h"
 #include "arch/platform_hooks.h"
 #include "proc/proc.h"
+#include "shared_kernel.h"
 
 #define ARMV7M_PREEMPT_SVC 0x20U
 
@@ -29,6 +30,10 @@ void armv7m_pendsv_prepare(uint32_t *stack) {
 }
 
 void armv7m_default_handler(void) {
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    if (!armv7m_private_shared_ready)
+        arch_halt();
+#endif
     uint32_t ipsr;
     __asm__ __volatile__("mrs %0, ipsr" : "=r"(ipsr));
     printf("\n[ARMV7M] unhandled exception %u\n", ipsr);
@@ -37,6 +42,12 @@ void armv7m_default_handler(void) {
 }
 
 void armv7m_fault_handler(uint32_t exception, uint32_t *stack) {
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    /* A missing/invalid external fabric may fault before shared globals or
+     * atomic gates exist. Never enter the shared console lock in that phase. */
+    if (!armv7m_private_shared_ready)
+        arch_halt();
+#endif
     uint32_t cfsr = *(volatile uint32_t *)0xE000ED28UL;
     uint32_t hfsr = *(volatile uint32_t *)0xE000ED2CUL;
     armv7m_trap_cause = CAUSE_LOAD_FAULT;
