@@ -767,3 +767,6 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 
 无 CPU 绑定的真实 pthread 执行、空闲 CPU 接取和线程组终结通知见
 [46-unbound-program-execution.md](46-unbound-program-execution.md)。
+
+真实 JamVM Native 启动、完整类库构建和文件映射修复见
+[47-jamvm-native-bootstrap.md](47-jamvm-native-bootstrap.md)。

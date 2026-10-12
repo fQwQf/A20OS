@@ -124,3 +124,6 @@ mlibc 通用线程层的 TCB 释放、Native 线程句柄回收和 GC 所需的�
 QEMU 10.0 的 [执行日志实现](https://raw.githubusercontent.com/qemu/qemu/v10.0.0/accel/tcg/cpu-exec.c)
 将 Trace 后的编号取自 cpu_index。这里据此核对计算块进入了两个 CPU；
 TB 日志次数不能换算为退休指令数、各 CPU 的工作比例或性能指标。
+
+真实 JamVM Native 启动、完整类库构建和文件映射修复见
+[47-jamvm-native-bootstrap.md](47-jamvm-native-bootstrap.md)。
