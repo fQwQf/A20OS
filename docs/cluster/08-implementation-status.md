@@ -563,3 +563,40 @@ RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺
 本阶段证据单独归档为 `evidence/portable-atomics-<commit>/`。
 RV32 的 Linux syscall shim 只是测试工具，不是一个新 MCU 板级端口。
 树莓派、非 ARM 多芯片板级适配、应用同步、JVM/客户端和物理验证仍待完成。
+
+
+## 29. 树莓派原生端口与跨架构 SMP 功能矩阵
+
+2026-10-12，新增 BCM2711 Raspberry Pi 4 board，接入既有公共 SMP/调度/PID/
+Park/Wake/退出机制。架构入口增加可选的布局与 EL 归一参数，board 仅绑定
+PL011/GIC 地址、GPIO、固件 CPU/RAM 事实和 spin-table 启动。
+有界 FDT reader 位于公共 core，静态元数据在分配器启动前收窄 RAM。
+GICv2 device adapter 由 virt 和 Pi 共用，Pi 的时间换算读取实际 CNTFRQ。
+
+修复 AArch64 C 与异常入口假定 Aff0 等于逻辑 CPU ID 的问题；CPU 本地
+TPIDRRO_EL0 不随任务上下文保存/恢复。QEMU raspi4b 的四核、CPU 节点乱序、
+只启用硬件 CPU0/CPU3、reserve map 和 reserved-memory 五类有效配置执行
+真实线程自检；五类无效固件描述在初始化早期拒绝。单核构建另到达 System ready。
+同一 `core/smp_selftest.c` 在 x86-64、AArch64、RV64 双核内核运行。
+测试验证同 PID/栈迁移、跨 CPU 堆对象、公共 sleep、所有在线 CPU timer IRQ、
+IPI 应答与 worker/controller 退出回收；不是性能或模拟任务状态测试。
+
+新增 `raspberrypi4[-qemu]` 实例、`check-raspberrypi4`、`check-smp-native` 与
+`check-fdt-view`。FDT reader 的宿主 ASan/UBSan 边界测试覆盖 926 个截断、
+926 个字节变异及七个无效 header。报告在 `raspberrypi4/`、`smp-native/`、
+`fdt-view/`；提交对应证据在 `evidence/raspberrypi4-<commit>/`。
+AArch64/RV64 新功能测试为 QEMU 自然退出，x86 在关机输出后由夹具停止。
+Pi poweroff/reboot 仍为 halt，
+测试在终态输出后停止模拟器，不声明其电源关闭通过。
+
+这里只完成树莓派的原生启动/SMP 功能端口。没有 Pi 物理验证、网络与存储、
+完整用户态、远端 TLB shootdown 或跨板共享 RAM；非 ARM MCU fabric 适配、
+应用线程同步、完整 Native ABI/JVM/图形输入和 Minecraft Java 客户端仍待实现。
+源码和启动契约见 [树莓派端口](../platforms/raspberrypi4.md)；公共机制边界见
+[27-portable-domains.md](27-portable-domains.md)。整体目标保持未完成。
+
+本阶段回归：既有多 MCU Native 应用/RTL 联合测试通过，固件 ELF 仍为
+`8fdfd50a4cc133c7fda7c790db4dc7179caca8752327842ac528376514277c19`；
+默认 STM32 QEMU 固件仍为 `c6f1737ce1523db0c20caeb2334815fa624377f65530a6fe176b48a92914b21d`。
+trim registry 与九项 SMP 平台边界检查通过。全仓格式门禁仍有 114 个既有
+漂移；本次修改/新增 C/H 的格式检查没有增加失败，没有改写格式豁免基线。

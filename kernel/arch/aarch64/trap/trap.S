@@ -32,8 +32,7 @@
          * timer IRQs included.  Multi-CPU builds still need both.
          */
 #if CONFIG_NR_CPUS > 1
-        mrs     x10, mpidr_el1
-        and     x10, x10, #0xff
+        mrs     x10, tpidrro_el0
         cmp     x10, #CONFIG_NR_CPUS
         csel    x10, x10, xzr, lo
         add     x9, x9, x10, lsl #3
