@@ -179,10 +179,14 @@ int64_t sys_a20_timer_set(const a20_syscall_args_t *args)
     uint64_t expire_tick = 0;
     uint64_t interval_ticks = interval_ns * TICKS_PER_SEC / 1000000000ULL;
     if (deadline_ns != 0) {
-        uint64_t now_ns = timer_get_ticks() * (1000000000ULL / TICKS_PER_SEC);
+        /* timer_set uses the same boot-relative epoch as CLOCK_MONOTONIC;
+         * raw hardware ticks may include time before timekeeping_init(). */
+        uint64_t ts[2];
+        timekeeping_get_monotonic(ts);
+        uint64_t now_ns = ts[0] * 1000000000ULL + ts[1];
         uint64_t delta_ns = (deadline_ns > now_ns) ? (deadline_ns - now_ns) : 1;
-        expire_tick = timer_get_ticks() +
-                      delta_ns * TICKS_PER_SEC / 1000000000ULL;
+        uint64_t delta_ticks = delta_ns * TICKS_PER_SEC / 1000000000ULL;
+        expire_tick = timer_get_ticks() + (delta_ticks ? delta_ticks : 1);
     }
 
     uint64_t flags = spin_lock_irqsave(&g_a20_timers_lock);
