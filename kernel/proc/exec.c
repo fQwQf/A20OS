@@ -23,6 +23,7 @@
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "fs/vfs/path.h"
+#include "ipc/landlock.h"
 #include "mm/elf.h"
 #include "mm/mm.h"
 #include "mm/vdso.h"
@@ -260,14 +261,33 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
  *
  * Returns fd >= 0 on success, negative errno on failure.
  */
-static int exec_open_and_check(const char *path, kstat_t *st_out)
+static int exec_open_and_check(const char *path, kstat_t *st_out,
+                               char resolved[MAX_PATH_LEN])
 {
-    int fd = vfs_open(path, O_RDONLY, 0);
+    int lr = landlock_check_path(path, LANDLOCK_ACCESS_FS_READ_FILE);
+    if (lr < 0)
+        return lr;
+    /* openat2 records the path after following all symlinks on the very file
+     * opened, avoiding a separate realpath walk racing a rename/replacement. */
+    int fd = vfs_openat2(AT_FDCWD, path, O_RDONLY, 0, 0);
     if (fd < 0)
         return fd;
 
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
+    if (!vf) {
+        vfs_close(fd);
+        return -EBADF;
+    }
+    strncpy(resolved, vf->path, MAX_PATH_LEN - 1);
+    resolved[MAX_PATH_LEN - 1] = '\0';
+    vfs_put_file(vf);
+
     kstat_t st;
-    int sr = vfs_stat(path, &st);
+    int sr = vfs_fstat(fd, &st);
+    if (sr < 0) {
+        vfs_close(fd);
+        return sr;
+    }
     if (sr == 0) {
         if ((st.st_mode & S_IFMT) == S_IFDIR) {
             vfs_close(fd);
@@ -1190,11 +1210,10 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
 
     /* ---- 3. Iterative format resolution loop ---- */
     kstat_t exec_st;
-    int exec_stat_ok = 0;
 
     for (bprm.depth = 0; bprm.depth < EXEC_MAX_DEPTH; bprm.depth++) {
         /* Open and validate the file */
-        int fd = exec_open_and_check(bprm.path, &exec_st);
+        int fd = exec_open_and_check(bprm.path, &exec_st, abs_path);
         if (fd < 0) {
             bprm_free(&bprm);
             return fd;
@@ -1203,22 +1222,15 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         /* Try ELF first */
         elf_load_info_t info;
         memset(&info, 0, sizeof(info));
-        r = elf_load(fd, bprm.path, &info);
+        r = elf_load(fd, abs_path, &info);
 
         if (r == 0) {
-            /* ELF loaded successfully — install the new process image */
+            /* Keep metadata from the opened ELF. A pathname stat here could
+             * select a replacement inode and apply its set-id credentials. */
             vfs_close(fd);
 
-            /* Check execute permission on the actual ELF binary.
-             * Scripts are allowed to lack +x (the interpreter must have it),
-             * but ELF binaries require it. */
-            exec_stat_ok = (vfs_stat(bprm.path, &exec_st) == 0);
-            if (exec_stat_ok == 0) {
-                memset(&exec_st, 0, sizeof(exec_st));
-            }
-
             r = exec_install_process(t, &info, &bprm, abs_path,
-                                      exec_stat_ok ? &exec_st : NULL);
+                                      &exec_st);
             bprm_free_strings(&bprm);
             kfree(bprm.path);
             if (r == 0)

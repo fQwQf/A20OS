@@ -1269,13 +1269,13 @@ static int chmod_chown_boundary(void)
 #define STATX_MODE 0x00000004U
 #endif
 
-struct statx_timestamp {
+struct vfs_statx_timestamp {
     int64_t tv_sec;
     uint32_t tv_nsec;
     int32_t __reserved;
 };
 
-struct statx {
+struct vfs_statx {
     uint32_t stx_mask;
     uint32_t stx_blksize;
     uint64_t stx_attributes;
@@ -1288,10 +1288,10 @@ struct statx {
     uint64_t stx_size;
     uint64_t stx_blocks;
     uint64_t stx_attributes_mask;
-    struct statx_timestamp stx_atime;
-    struct statx_timestamp stx_btime;
-    struct statx_timestamp stx_ctime;
-    struct statx_timestamp stx_mtime;
+    struct vfs_statx_timestamp stx_atime;
+    struct vfs_statx_timestamp stx_btime;
+    struct vfs_statx_timestamp stx_ctime;
+    struct vfs_statx_timestamp stx_mtime;
     uint32_t __spare1[14];
     uint64_t __spare2[12];
 };
@@ -1309,7 +1309,7 @@ static int statx_boundary(void)
     }
     close(fd);
 
-    struct statx sx;
+    struct vfs_statx sx;
     memset(&sx, 0, sizeof(sx));
     long r = syscall(SYS_statx, AT_FDCWD, path, 0,
                      STATX_TYPE | STATX_SIZE | STATX_MODE, &sx);
@@ -1576,10 +1576,58 @@ static int isofs_read(void)
     return rc;
 }
 
+static int exec_symlink_origin(void)
+{
+    char real[512];
+    ssize_t n = readlink("/proc/self/exe", real, sizeof(real) - 1);
+    if (n <= 0 || (size_t)n >= sizeof(real) - 1)
+        return fail("exec-origin-readlink");
+    real[n] = '\0';
+    if (mkdir("/tmp/vfs-exec-origin", 0755) < 0 && errno != EEXIST)
+        return fail("exec-origin-mkdir");
+    unlink("/tmp/vfs-exec-dir");
+    unlink("/tmp/vfs-exec-origin/binary");
+    unlink("/tmp/vfs-exec-origin/entry");
+    if (symlink(real, "/tmp/vfs-exec-origin/binary") < 0 ||
+        symlink("binary", "/tmp/vfs-exec-origin/entry") < 0 ||
+        symlink("/tmp/vfs-exec-origin", "/tmp/vfs-exec-dir") < 0)
+        return fail("exec-origin-symlink");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("exec-origin-fork");
+    if (!child) {
+        if (chdir("/tmp") < 0)
+            _exit(2);
+        char *args[] = {"vfs-origin", "--exec-path-probe", real, NULL};
+        execv("/tmp/vfs-exec-dir/entry", args);
+        _exit(3);
+    }
+    int status = 0;
+    int waited = waitpid(child, &status, 0);
+    unlink("/tmp/vfs-exec-dir");
+    unlink("/tmp/vfs-exec-origin/entry");
+    unlink("/tmp/vfs-exec-origin/binary");
+    rmdir("/tmp/vfs-exec-origin");
+    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status))
+        return fail("exec-origin-child");
+    printf("VFS_STRESS: exec-symlink-origin PASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--fat32-dir"))
         return fat32_directory_buffers();
+    if (argc == 3 && strcmp(argv[1], "--exec-path-probe") == 0) {
+        char real[512];
+        ssize_t n = readlink("/proc/self/exe", real, sizeof(real) - 1);
+        if (n <= 0 || (size_t)n >= sizeof(real) - 1)
+            return 4;
+        real[n] = '\0';
+        return strcmp(real, argv[2]) != 0;
+    }
+    if (exec_symlink_origin() != 0)
+        return 1;
     printf("VFS_STRESS: start\n");
     mkdir("/tmp", 0755);
     if (file_dup_close_range() != 0)
