@@ -115,6 +115,7 @@ static void sig_sleeper_entry(uint64_t arg)
         uint32_t hn = 0;
         a20_channel_recv(g_sig_rx, sb, &bl, NULL, &hn);
     }
+    a20_thread_exit(0);
 }
 
 int main(int argc, char **argv, char **envp)
