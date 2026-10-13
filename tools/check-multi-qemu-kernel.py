@@ -101,7 +101,9 @@ def main():
             "kernel/arch/x86_64/include/platform.h", "kernel/platform/qemu-virt-x86_64/board.c",
             "kernel/core/smp_selftest.c", "kernel/fs/rootfs_user.c", "tools/targets-images.mk",
             "kernel/proc/sched.c", "kernel/proc/current.c", "kernel/include/proc/proc.h",
-            "user/cmds/stress/cluster_threads.c")}
+            "user/cmds/stress/cluster_threads.c", "kernel/core/shared_device_call.c",
+            "kernel/include/core/shared_device_call.h", "kernel/arch/x86_64/platform/shared_console.c",
+            "kernel/arch/x86_64/include/console.h", "kernel/arch/x86_64/include/cpu.h")}
         build = subprocess.check_output(["make", "-s", *flags, "print-build-dir"],
                                         cwd=ROOT, text=True).strip()
         with (out / "build.log").open("wb") as log:
@@ -138,7 +140,10 @@ def main():
                 base += ["-object", f"memory-backend-file,id=shared,size=512M,mem-path={ram},share=on"]
             commands = [base + ["-kernel", str(elf)]]
             if shared:
-                commands.append(base + ["-bios", str(rom)])
+                secondary = list(base)
+                serial = secondary.index("-serial")
+                secondary[serial + 1] = "none"
+                commands.append(secondary + ["-bios", str(rom)])
             for i, cmd in enumerate(commands):
                 cmd += ["-qmp", f"unix:{runtime / str(i)},server=on,wait=off"]
             report["commands"] = commands
@@ -169,21 +174,28 @@ def main():
                             raise RuntimeError("QEMU does not map the same RAM shared/writable")
                 print(f"{args.mode}: running QEMU PIDs {report['pids']}", flush=True)
                 application_started = False
+                console_input_sent = False
                 while time.monotonic() < deadline:
                     texts = [(out / f"node-{i}.log").read_text(errors="replace")
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
                     if args.workload in ("native", "linux"):
-                        content = "\n".join(texts)
+                        content = texts[0]
+                        if shared and ("NATIVE_" in texts[1] or "CLUSTER_THREADS:" in texts[1]):
+                            raise RuntimeError("user output escaped primary console owner")
                         if "NATIVE_FUTEX: FAIL" in content or "CLUSTER_THREADS: FAIL" in content:
                             raise RuntimeError("user application contract failed")
                         if not application_started and re.search(r"(?:^|[\r\n])# ", content):
                             processes[0].stdin.write((b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n" if args.workload == "native"
-                                                      else b"/bin/cluster_threads; echo A20_LINUX_EXIT:$?\n"))
+                                                      else b"/bin/cluster_threads --console; echo A20_LINUX_EXIT:$?\n"))
                             processes[0].stdin.flush()
                             application_started = True
                             deadline = time.monotonic() + args.timeout
+                        if args.workload == "linux" and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
+                            processes[0].stdin.write(b"owner-ok\n")
+                            processes[0].stdin.flush()
+                            console_input_sent = True
                         exited = re.search(r"A20_(?:NATIVE|LINUX)_EXIT:(\d+)", content)
                         if application_started and exited and int(exited[1]) != 0:
                             raise RuntimeError("user application exited " + exited[1])
@@ -191,7 +203,13 @@ def main():
                             match = re.search(r"CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=(\d+) tls=preserved tlb-rounds=64 protection-faults=128 jobs=1024 split=(\d+)/(\d+) sum=(\d+) mask=3 destructors=2 cond-timeout=checked", content)
                             if not match or not 126 <= int(match[1]) <= 128 or sum(map(int, match.groups()[1:3])) != 1024 or min(map(int, match.groups()[1:3])) <= 0 or int(match[4]) != 8256 * 1024 * 1025 // 2:
                                 raise RuntimeError("missing Linux/POSIX execution evidence")
-                            report.update(passed=True, linux_threads=2, migrations=int(match[1]), tlb_rounds=64, protection_faults=128,
+                            if not console_input_sent or "CLUSTER_CONSOLE: PASS cpu=1 input=owner-ok blocks=32" not in content:
+                                raise RuntimeError("missing remote console input/output acceptance")
+                            for block in range(32):
+                                marker = f"CLUSTER_CONSOLE_BLOCK:{block:02d}:abcdefghijklmnopqrstuvwxyz012345"
+                                if content.count(marker) != 1:
+                                    raise RuntimeError("missing/duplicate remote console block " + str(block))
+                            report.update(passed=True, console_owner=0, console_client_cpu=1, console_blocks=32, linux_threads=2, migrations=int(match[1]), tlb_rounds=64, protection_faults=128,
                                           work_split=list(map(int, match.groups()[1:3])), work_sum=int(match[4]), exit_code=0)
                             break
                         if application_started and "NATIVE_FUTEX: PASS" in content and "A20_NATIVE_EXIT:0" in content:

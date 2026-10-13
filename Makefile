@@ -1189,7 +1189,7 @@ endif
 ifneq ($(BRINGUP),1)
 $(error QEMU_SHARED_SMP currently requires BRINGUP=1: cross-instance device ownership is not implemented)
 endif
-CFLAGS += -DCONFIG_QEMU_SHARED_SMP
+CFLAGS += -DCONFIG_QEMU_SHARED_SMP -DCONFIG_SHARED_DEVICE_CALL
 endif
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
