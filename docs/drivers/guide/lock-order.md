@@ -56,7 +56,7 @@ socket-table bucket 锁嵌套，回调通过延后工作进入 socket 状态；�
 对驱动而言，这意味着：
 
 - 设备私有锁永远是最内层锁。
-- 持有设备私有锁时，绝不能获取 `tasklist_lock` 或 `park_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
+- 持有设备私有锁时，绝不能获取 `tasklist_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
 - 持有 spinlock 时绝不能阻塞、睡眠或调入调度器。
 - 持有设备锁或 lwIP 锁时，绝不能调用内存分配、VFS 或 scheduler 路径，除非 callee 明确记录为非阻塞。
 

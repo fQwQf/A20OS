@@ -681,18 +681,36 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 失败时检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误，确认 `native-handle-rv` 已生成并放入 fat32 镜像，并查看 `.kernel-build/smoke/native-handle-riscv64.log`。
 
-#### Native 门禁的架构覆盖现状（2026-10 核实）
+#### Native 门禁的架构覆盖（2026-10-13 编码阶段）
 
-这一段记的是**现状**而不是计划；新增 native 门禁前先读它，免得把“多跑了一条 riscv64”当成“架构覆盖已经有了”。
+`make ARCH=riscv64 smoke-native-suite` 枚举 22 条 Native 用例；
+`make ARCH=aarch64 smoke-native-suite` 复用同一份命令流和断言，经
+`tools/smoke_platforms.py` 变换平台参数。单条目标也接受 `ARCH=aarch64`。
+RTC、registry RTC 重启和 UBD 三条依赖 RISC-V 私有 MMIO/IRQ，在 AArch64 明确
+报告 SKIP，单独请求不支持的平台会失败；其余 19 条共享断言。mlibc Native sysdeps
+仍只有 RISC-V，不能由本矩阵推断其多架构可用。
 
-- 运行时（QEMU）：`tools/smoke_cases.py` 共 87 条用例，其中 21 条名字带 `native`，**全部**写死 `ARCH=riscv64` + `ABI=both`（`'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0']}`，`qemu: qemu-system-riscv64`）；这一组配置在用例表里出现 32 次，另外 11 条非 native 用例也用它，所以复用 both-ABI dev-build 的收益比 21 条更大。没有 x86_64 / aarch64 / loongarch64 的 native smoke，用例表里也没有让 smoke 换架构的参数。Native 运行时因此只有一个架构，且 mlibc 的 Native sysdeps（`user/external/mlibc/sysdeps/a20/`）也只支持 riscv64。
-- CI（核实于本文件这次更新）：在把 `make smoke-native-contract` 加进 `.github/workflows/ci.yml` 的 `smoke` job 之前，`smoke-native` 在该文件里出现 **0** 次——21 条 native 运行时门禁没有一条在 CI 跑过，本地绿与主干红之间没有任何 native 差异。现在跑的是 `smoke-native-contract`（timeout 20s，`pre` 无附加镜像，复用 `smoke` job 已有的 riscv64 both-ABI dev-build 产物），断言 rights algebra / BPF / EventQ / VMOL / DMA 五项加正常关机；其余 20 条仍未进 CI。
-- **VMO 生命周期回归（2026-10-08）**：基线 `709c8016` 的 `make smoke-native-contract` 在 `vmol-leak-vmo` 失败。测试先关闭 VMO handle，再触达映射的三个页面；unmap 成功后要求 `vmos` 与 `vmo_pages` 都回到基线。旧索引持有的 VMA 引用直到下一次查找才释放，而读取 procfs 对象统计不会必然触发索引重建。成功 unmap 现会清空旧索引，索引最后引用经 `vma_put()` 进入延迟队列，在 TLB shootdown 完成后释放 backing 资源。修复后原断言未改，`make smoke-native-contract`、`make smoke-mm-stress` 与 `make smoke-mm-seg-index-overflow` 均通过；日志位于 `.kernel-build/smoke/` 下各用例对应的 `*-riscv64.log`。
-- **FILE 映射回归（2026-10-08）**：相邻的 `make smoke-native-mm` 在修复前失败于 `vm_map FILE failed`。Native FILE handle 持有 `vfile` 引用，旧路径却把该对象指针转换成整数 fd。新 `mm_mmap_vfile()` 接受并消费已引用的文件对象；成功交给 VMA，失败在释放 MM 锁并结束 TLB 事务后清理，Linux 的两个 locked 调用点也遵守同一引用契约。测试现会在映射后先关闭 source handle，再触发文件缺页、检查 ELF 内容并 unmap。`make smoke-native-mm` 与 `make smoke-abi-linux` 均通过，对应日志为 `.kernel-build/smoke/native-mm-riscv64.log` 与 `.kernel-build/smoke/smoke-abi-linux.log`。
-- 编译（交叉编译，不起 QEMU）：`tools/targets-native*.mk` 里有 24 个 `native-<prog>-arch` 目标，其中 10 个家族有 `-all` 聚合目标（如 `native-contract-all`），每个覆盖 riscv64 / loongarch64 / aarch64 / x86_64 / arm32 / riscv32 / ppc64le 七个架构。CI 的 `build` 矩阵只跑 `dev-build`，不调用这些目标，所以**非 riscv64 的 native 用户态能否编译成功在 CI 里同样没有任何断言**。
-- 源码侧：`check-native-abi-coverage` 与 `check-abi-config-guard` 覆盖全部架构共用的那半边（Native ABI 的登记表/编号表/文档对齐，以及 `CONFIG_ABI_*` 守卫写法），见上面两节。这两条不能替代任何架构的运行门禁。
+`.github/workflows/native.yml` 为 CI 与 release 共用的 RISC-V/AArch64 矩阵：
+先构建 `native-programs`，再运行套件并保存日志，发布创建依赖整个矩阵成功。
+这些配方已接线，**本轮未运行，不记录 PASS**。Native 程序及自启动服务路径由
+`user/liba20rt/a20_arch.h` 生成，不再假定 `-rv`；fakeld 探针包含四个已实现入口的
+64 位架构。
 
-扩到第二个架构需要先让 `tools/smoke_cases.py` 的 `argv`/`build.vars` 可按架构参数化（例如 `qemu-system-$(ARCH)` 与 `AX=ARCH=…`），再在 `smoke` job 里开一个架构矩阵；只把某条用例复制成 riscv64/x86_64 两份会让同一份断言在两处漂移。
+新增 `smoke-pty-stress-aarch64`、`smoke-timeout-test-aarch64` 复用既有断言，
+接入 AArch64 job。UFS/UBD 用例的 build 额外目标生成其附加 scratch 镜像，
+QEMU 路径仍经 Make 的构建目录解析器适配 preempt/SMP 变体。
+
+本轮新增的运行断言（待允许后执行）：`native-mm` 的 PROT_NONE 上限、越界
+MAP_FIXED 不破坏既有页、反复 open/close 不占满 fd 表；`native-deepen` 的名称
+前缀替换与过滤；`sched_stress` 的 RT 零上限拒绝、软上限放行、硬上限提权拒绝，
+以及同 CPU FIFO 任务的普通进展和预算恢复；`futex_stress` 的 PI 私有页 COW 隔离；
+`vfs_stress` 的目录与最终文件多层符号链接 exec 后 `/proc/self/exe` 路径。
+`/proc/a20/lock_contention` 的 `park_lock` 是所有任务锁的静态汇总，任务退出
+不移除历史计数；`/proc/a20/perf` 的 `kernel_preempts` / `trap_storms` / `rt_throttles` 按 CPU 报告。
+
+历史 `native-mm` 的 FILE 失败与 VMO 索引引用问题修复仍需在本次提交重验；
+`check-native-abi-coverage`、`check-abi-config-guard` 是源码契约，不能代替运行。
+`ABI=linux` 与 `ABI=both` 的同语义结果交叉比较仍未接线。
 
 ### 用户态文件系统宿主（uxfs + ufsd）
 

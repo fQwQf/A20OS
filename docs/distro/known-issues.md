@@ -4,6 +4,27 @@
 [XFCE 桌面验收](../testing-gates.md#xfce-桌面验收) 重新检查；历史启动日志、
 Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口交互的验收。
 
+## 当前工程队列（2026-10-13 编码复核）
+
+本页与主路线图共同作为当前工程入口。下面长篇排查过程保留当期证据，早期假设
+可能已被后续条目撤回；不能把中间一条“排除”或“已修”当作最终症状验收。
+
+| 当前剩余问题 | 本轮状态 / 下一项证据 |
+| --- | --- |
+| RISC-V 桌面交互、MCS 持锁调度与 pgrep 崩溃 | x86_64 已有 10-11 交互验收记录（见下），其结论不覆盖 RISC-V；本轮未运行复验 |
+| mpv/LuaJIT、tumblerd 与 JVM 退出异常 | 既有 COW、FP、TLS 修复不能证明这些症状全部消失，仍需干净镜像复现 |
+| futex PI 的 prepare 后 fork/COW 窗口 | 编码已补持锁可写复查、解锁重试，并在 COW 后选择桶；待执行 `pi-cow-isolation` 及 SMP 交错验收 |
+| JVM 经符号链接启动时的 `$ORIGIN` | exec 已从打开文件记录最终路径，并为基线解析补入长度/IN_ROOT 边界检查；待执行 `exec-symlink-origin` 与 JVM 端到端验收 |
+| dbus NoReply、SCM_CREDENTIALS pid=-1、udev worker 等待 | 接收 socket 的 PASSCRED 继承已在基线；当前凭据捕获/送达链已复核，尚无能解释 pid=-1 的新证据 |
+| 菜单、Backspace 与部分客户端呈现的历史兼容性问题 | 先按下述 x86_64 最新验证记录确认覆盖范围；未覆盖的交互仍需证据，不能用进程存活替代 |
+| guest 写盘后的 ext4 位图一致性 | 仍需按本页历史触发场景复验；journal 窄门禁不覆盖所有桌面写负载 |
+| IPv6 pbuf 越界 / 引用计数 panic | RX 长度上界保护在基线已有；不能把这项保护当成已解释 IPv6 panic |
+| arm32 FP 上下文、arm32/loongarch32 构建 | 尚缺实现或当前工具链验证；本轮双架构语法检查不覆盖它们 |
+
+已实现条目不再作为“待编码”项。以上待运行条件继续保留；本轮未启动 VM、未全量
+构建或运行任何测试。完整编码记录见 [阶段记录](../development-docs-completion-2026-10-13.md)。
+
+
 ## 最新 x86_64 修复状态（2026-10-11）
 
 本轮移除了 trap 中的 x86 专用诊断与桌面组件循环重启，修复 COW 本地 TLB、
@@ -413,7 +434,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
 而 `wait` 没被唤醒。**这也是「面板不绘制」在 fix10/fix11 上重现的直接原因**——
 与 fix7 那种「起来就被打死、进程消失」不是同一种形态。
 
-### java 退出码 255 / mpv 偶发崩溃（JVM 本身可用；多线程内存已定位，见本节末「根因已定位并修复」）
+### java 退出码 255 / mpv 偶发崩溃（历史排查；症状仍待复验）
 `java -version` 能打印完整且正确的版本号，但每隔一次就 exit 255（20 次里 9 次失败；另一次 6 次里
 3 次失败，模式是 255/0/255/0），全程没有任何 SIGSEGV。mpv 那条是约 1/10 次崩溃
 （`sepc=0x638a6320 stval=0x8`、`comm=lua/<script>`），反汇编为 LuaJIT 在 `libluajit+0x53320` 读
@@ -977,9 +998,6 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
     修复后：pi 00000000 clean      pi-control 00000000 clean   # 20/20 与 20/20 ← 与宿主逐项一致
     ```
     20/20 的跨进程污染全部消失，与宿主（Linux，5/5 clean）一致。
-  - 残留：`user_prepare_write()` 是在取锁之前破坏 COW，因此「prepare 之后、
-    锁内存储之前」若恰好发生 `fork()` 使该页重新变成 COW，理论上仍有极窄的竞态窗口。
-    要彻底关闭它，需在 `mm->lock` 内复查 PTE 可写性（不可写则解锁重试）；本轮未实施。
 
 - **【第三处 + 第四处同类缺陷】**信号投递路径也在「拿裸帧重新映射」；另有影子栈 token 一处
 
@@ -1202,9 +1220,10 @@ per-thread 状态 bug → SIGSEGV。`load-scripts=no` 关不掉这些内建脚�
 `/proc/<pid>/exe` 与 `/proc/<pid>/cwd` 现在是 magic symlink（`kernel/fs/procfs/procfs.c`：vnode 类型 +
 `procfs_readlink`），实测 `ls -l /proc/self/exe` 已显示 `-> /bin/ls`，这一半已修。
 
-另一半仍未修：`exec_path` 不解析符号链接，经 `/usr/bin/java`（符号链接）启动时 `$ORIGIN` 与 libjli
-推导的 `java.home` 都落在 `/usr/bin`。正解是在 `kernel/proc/exec.c` 记录 `exec_path` 时做 realpath
-（`vfs_resolve`）；当前用 overlay 的 `/usr/bin/java` 薄封装绕过，直接 exec 真实路径。
+2026-10-13 编码阶段已补：exec 通过保留最终解析路径的打开入口读取同一个文件的
+`vfile->path`，用于 ELF 路径与安装后的 `exec_path`。基线已经修正目录链接后续
+分量和相对链接基点；本轮另补长度、空目标与 IN_ROOT 边界检查。运行断言和 JVM
+端到端复验尚未执行；封装当前仍保留堆参数。
 
 堆参数是另一件事：不显式给 `-Xms/-Xmx` 时 VM 报 `Too small maximum/initial heap`（guest 内
 `MemTotal` 1048576 kB、`MemAvailable` 541068 kB）。封装默认 `-Xms256m -Xmx512m`，命令行参数仍可覆盖。
@@ -1597,13 +1616,6 @@ pbuf[0..15] = 0600000000000000 98d281000080ffff
 
 结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
 `PBUF_POOL` payload 的尾部，落在下一个元素的头部。
-
-**顺带发现的独立缺陷**（非本 panic 的成因，尚未修）：
-`lwip_stack.c` 的 RX 循环只用 `len <= 0` 挡住了 `recv()` 的错误返回，
-没有上界校验；`len` 随后原样进入 `pbuf_take(p, st->rx_frame, (u16_t)len)`。
-若某个 `recv` 实现返回大于 `sizeof(rx_frame)`（1536）的长度，
-`pbuf_take` 会越过 1536 字节的 `rx_frame` 读取。当前各 `recv` 实现均未观察到
-越界返回，故尚未触发，但这是一处真实的边界缺失，应补上裁剪。
 
 **仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
 落在 PBUF_POOL 相邻元素），不给身份。下一步应从 pool 元素尺寸与

@@ -113,7 +113,7 @@ RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在
 1. `proc_runq_pick_local()` 只持有本 CPU 的 runqueue 锁，选择任务并原子地 转为 `dispatching`；本地队列为空时，它还会在持有本地锁的情况下尝试从 其他 CPU 的非阻塞窃取（只窃 EEVDF 任务、远端 `nr_running >= 2`、且本地 CPU 在被窃任务的允许掩码内）；
 2. `sched()` 释放 runqueue 锁后获取 current/next 的 `park_lock`，复核 current/next， 必要时 unpick，随后发布 context switch。
 
-迁移一个已排队任务时，同时获取源、目标 runqueue 锁，锁顺序固定为 CPU 编号升序。任务在受锁保护的短暂区间内先从源队列摘除、更新 `cpu_id`，再进入目标队列；runqueue 持有的引用贯穿整个迁移，不发生释放后重取。
+变更已排队任务的调度属性时，持有 task 的 `park_lock`，先在源 runqueue 锁内摘除并保留队列引用，再修改调度键、选择目标 CPU，随后在目标队列锁内入队并释放保留的旧引用；两把队列锁不同时持有。空闲窃取走另一条路径：持有本地队列锁并 trylock 远端队列，在释放源锁前发布 dispatch 所有权，避免任务既未入队又没有 dispatch owner 的窗口。
 
 ## 4. 持久抢占请求与 IPI
 
