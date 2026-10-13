@@ -1595,7 +1595,7 @@ endif
 ifneq ($(ABI),both)
 $(error RAMFS_NATIVE_TESTS requires ABI=both for the Linux shell and Native tests)
 endif
-RAMFS_USER_PROGRAMS += native_futex native_spawn native_input
+RAMFS_USER_PROGRAMS += native_futex native_spawn native_input cluster_threads
 CFLAGS += -DCONFIG_RAMFS_NATIVE_TESTS
 endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user

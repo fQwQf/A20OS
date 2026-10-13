@@ -256,6 +256,7 @@ typedef struct task_t {
     int      dispatching;
     int      on_cpu;
     unsigned owner_cpu;
+    unsigned affinity_migrate_pending; /* park_lock; consumed after stack retirement */
     int      vfork_waiting;
 #ifdef CONFIG_NOMMU
     /* A NOMMU vfork child shares writable memory until exec/exit. */
@@ -619,6 +620,9 @@ void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);
 void     proc_yield(void);
 int      proc_sched_get(task_t *t, proc_sched_config_t *out);
+/* May yield when the current task excludes its executing CPU. That case
+ * requires IRQs enabled and no spinlock/hardirq context; migration is only
+ * published after the old kernel stack has stopped executing. */
 int      proc_sched_set(task_t *t, const proc_sched_config_t *config);
 int      proc_sched_priority_range(int policy, int *min, int *max);
 uint32_t proc_sched_effective_affinity(task_t *t);
