@@ -16,10 +16,13 @@
 #include "a20_channel.h"
 #include "a20_clock.h"
 #include "a20_sync.h"
+#include "a20_work.h"
 #include "a20_net.h"
 #include "a20_device.h"
 #include "a20_registry.h"
 #include "a20_system.h"
+#include "a20_execution.h"
+#include "a20_runtime.h"
 #include "a20_pager.h"
 #include "a20_cluster.h"
 

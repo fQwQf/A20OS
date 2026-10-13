@@ -420,4 +420,11 @@
 #define SYS_hyp_vcpu_set_boot    912
 #define SYS_hyp_vm_set_marker    913
 #define SYS_hyp_vm_status        914
+#define SYS_hyp_vcpu_destroy     915
+#define SYS_hyp_console          916
+#define SYS_hyp_vm_set_ram 917
+#define SYS_hyp_vcpu_control 918
+#define SYS_hyp_vcpu_irq 919
+#define SYS_hyp_stats 920
+#define SYS_hyp_vm_smp 921
 #endif /* _CORE_SYSCALL_NR_H */

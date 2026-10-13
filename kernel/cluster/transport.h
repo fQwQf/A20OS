@@ -13,32 +13,37 @@
 
 /* transport_id values (kernel/include/abi/native/types.h). */
 #define A20_CLX_TRANSPORT_LOOPBACK_ID 0u
-#define A20_CLX_TRANSPORT_UDP_ID      1u
-#define A20_CLX_TRANSPORT_UART_ID     2u
+#define A20_CLX_TRANSPORT_UDP_ID 1u
+#define A20_CLX_TRANSPORT_UART_ID 2u
 
 /* 04-§1 flags. */
-#define A20_CLX_TFL_RELIABLE_CAPABLE  (1u << 0)
+#define A20_CLX_TFL_RELIABLE_CAPABLE (1u << 0)
 #define A20_CLX_TFL_BROADCAST_CAPABLE (1u << 1)
-#define A20_CLX_TFL_POLLING           (1u << 2)
+#define A20_CLX_TFL_POLLING (1u << 2)
 
 #define A20_CLX_MAX_TRANSPORTS 8u
-#define A20_CLX_LINK_ADDR_MAX  16u
+#define A20_CLX_LINK_ADDR_MAX 16u
 
 typedef struct a20_clx_transport {
-    uint32_t transport_id;     /* 0=loopback 1=udp 2=uart, fixed at注册 */
-    uint32_t mtu;              /* 单帧上限，含帧头与 CRC (04-§1) */
-    uint32_t flags;            /* A20_CLX_TFL_* */
+    uint32_t transport_id; /* 0=loopback 1=udp 2=uart, fixed at注册 */
+    uint32_t mtu;          /* 单帧上限，含帧头与 CRC (04-§1) */
+    uint32_t flags;        /* A20_CLX_TFL_* */
     /* 发送一帧到下一跳链路地址；返回 0 或 -errno。允许丢帧（04-§1）。 */
-    int  (*send)(void *ctx, const uint8_t *next_hop, uint32_t nh_len,
-                 const void *frame, uint32_t len);
+    int (*send)(void *ctx, const uint8_t *next_hop, uint32_t nh_len,
+                const void *frame, uint32_t len);
     /* POLLING 档收包泵；非 POLLING 档置 NULL。 */
     void (*poll)(void *ctx);
+    /* Direct peer session after HELLO. node_id==NULL queries adjacency for
+     * routed discovery; a non-NULL identity must match the direct peer. */
+    int (*session)(void *ctx, const uint8_t *nh, uint32_t nh_len,
+                   const uint8_t node_id[16], uint64_t *local, uint64_t *remote,
+                   uint32_t *caps);
     void *ctx;
 } a20_clx_transport_t;
 
 /* 注册表：先注册先得，重复 id 拒绝（-A20_ERR_EXISTS 语义，返回 -1）。
  * 注册即触发 lazy core init（RX 线程等）。 */
-int  a20_clx_transport_register(const a20_clx_transport_t *t);
+int a20_clx_transport_register(const a20_clx_transport_t *t);
 const a20_clx_transport_t *a20_clx_transport_get(uint32_t transport_id);
 uint32_t a20_clx_transport_mtu(uint32_t transport_id);
 
@@ -58,6 +63,13 @@ void a20_clx_link_event(uint32_t transport_id, const uint8_t *next_hop,
 /* ---- 链路计数（02-§10，cluster_link_status 的数据源） ------------------- */
 
 /* RX 侧丢弃/畸形计数（无链路上下文时 nh 传 NULL）。 */
+enum {
+    A20_CLX_RX_DROP_OTHER = 0,
+    A20_CLX_RX_DROP_QUEUE_FULL = 1,
+    A20_CLX_RX_DROP_NO_MEMORY = 2
+};
+void a20_clx_link_rx_drop_kind(uint32_t transport_id, const uint8_t *nh,
+                               uint32_t nh_len, unsigned kind);
 void a20_clx_link_rx_drop(uint32_t transport_id, const uint8_t *nh,
                           uint32_t nh_len);
 void a20_clx_link_rx_malformed(uint32_t transport_id, const uint8_t *nh,

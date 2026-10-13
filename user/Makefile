@@ -694,7 +694,7 @@ $(OBJ_DIR)/arch/%.o: arch/%.c Makefile | build_dir musl_prepare
 
 # The two guest-boot commands additionally link the shared loader.  Prerequisite
 # only, no recipe: the rule above already gave both targets one.
-$(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm: $(HYP_GUEST_OBJ)
+$(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm $(BUILD_DIR)/a20-vmd: $(HYP_GUEST_OBJ)
 
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
@@ -714,6 +714,9 @@ $(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 
 $(OBJ_DIR)/cmds/core/audioplay.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/audioplay.o: ../kernel/include/uapi/a20/audio.h
+
+$(OBJ_DIR)/cmds/stress/cluster_threads.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/stress/cluster_threads.o: ../kernel/include/uapi/a20/block.h
 
 $(OBJ_DIR)/cmds/core/virtio_scsi_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/virtio_scsi_test.o: ../kernel/include/uapi/a20/block.h
@@ -823,3 +826,7 @@ DEP_FILES := $(filter %.d,$(USER_INTERMEDIATE_TARGETS:%.o=%.d)) \
 .PHONY: all clean distclean musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)
 .SECONDARY: $(USER_INTERMEDIATE_TARGETS)
+
+# VM supervisor wire ABI and vport ioctl are shared source headers.
+$(OBJ_DIR)/cmds/core/a20-vmd.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/core/a20-vmd.o: cmds/core/hyp/vmd_protocol.h ../kernel/include/drivers/char/virtio_console.h

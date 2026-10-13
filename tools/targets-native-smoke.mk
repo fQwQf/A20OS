@@ -245,3 +245,32 @@ smoke-native-ext:
 
 smoke-native-debug:
 	$(PYTHON) tools/smoke.py smoke-native-debug --arch $(ARCH)
+
+.PHONY: smoke-native-cluster-supervisor
+smoke-native-cluster-supervisor:
+	$(PYTHON) tools/smoke.py smoke-native-cluster-supervisor
+
+# One Native application contract across server ISAs, real kernel boots.
+.PHONY: check-native-sync
+check-native-sync:
+	$(PYTHON) tools/check-native-sync.py
+
+.PHONY: check-native-thread-admission
+check-native-thread-admission:
+	$(PYTHON) tools/check-native-thread-admission.py
+
+.PHONY: check-native-task-object
+check-native-task-object:
+	$(PYTHON) tools/check-native-task-object.py
+
+.PHONY: check-native-runtime
+check-native-runtime:
+	$(PYTHON) tools/check-native-runtime.py
+
+.PHONY: check-native-spawn-admission
+check-native-spawn-admission:
+	$(PYTHON) tools/check-native-spawn-admission.py
+
+.PHONY: check-native-exec-features
+check-native-exec-features:
+	$(PYTHON) tools/check-native-exec-features.py

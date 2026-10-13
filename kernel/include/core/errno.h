@@ -16,6 +16,8 @@
 #define EBADF        9
 #define ECHILD       10
 #define EAGAIN       11
+#define ESHUTDOWN    108
+#define EALREADY     114
 #define ENOMEM       12
 #define EACCES       13
 #define EFAULT       14

@@ -6,10 +6,29 @@
  * VA = PAGE_OFFSET + PA.
  */
 
+#include "boot_config.h"
+
     .section .text.entry
     .global _start
     .extern early_uart_init
 _start:
+#if AARCH64_BOOT_IMAGE_HEADER
+    /* Standard AArch64 Image handoff: executable 64-byte header, DTB in x0. */
+    b       .Limage_entry
+    .long   0
+    .quad   AARCH64_BOOT_TEXT_OFFSET
+    .quad   _end - _start
+    .quad   2 /* little endian, 4-KiB pages, load near RAM base */
+    .quad   0, 0, 0
+    .long   0x644d5241
+    .long   0
+.Limage_entry:
+#endif
+#if AARCH64_BOOT_NORMALIZE_EL
+    bl      aarch64_boot_enter_el1
+#endif
+    msr     tpidrro_el0, xzr /* Boot CPU is always logical CPU zero. */
+    msr     tpidr_el1, xzr /* No inherited firmware task pointer. */
     mov     x5, x0
 #ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
     /* The UEFI loader passes the ACPI RSDP physical address in x0. */
@@ -64,7 +83,15 @@ _start:
     str     x2, [x0, #(0 * 8)]
     str     x2, [x0, #(1 * 8)]
 
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#if AARCH64_BOOT_CUSTOM_LAYOUT
+#ifdef CONFIG_NOMMU
+#error "Custom AArch64 boot layouts currently require MMU builds"
+#endif
+    ldr     x2, =AARCH64_BOOT_RAM_BLOCK
+    str     x2, [x1, #(AARCH64_BOOT_RAM_SLOT * 8)]
+    ldr     x2, =AARCH64_BOOT_DEVICE_BLOCK
+    str     x2, [x1, #(AARCH64_BOOT_DEVICE_SLOT * 8)]
+#elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
     /*
      * VirtualBox ARM places RAM at 0x08000000 and its platform MMIO near
      * 0xfc000000.  The shared L1 table supplies both the physical bootstrap
@@ -182,6 +209,8 @@ _start:
     add     x7, x7, #(1 << 21)
     cmp     x5, x10
     b.lo    .Lnommu_l2_loop
+#elif AARCH64_BOOT_CUSTOM_LAYOUT
+    /* Board RAM/device blocks are already installed above. */
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
     /* RAM and the mixed ACPI/MMIO window are already covered above. */
 #else
@@ -199,6 +228,10 @@ _start:
 
     msr     ttbr0_el1, x0
     dsb     sy
+#if AARCH64_BOOT_NORMALIZE_EL
+    tlbi    vmalle1 /* Firmware's EL1 translations must not survive handoff. */
+    dsb     sy
+#endif
     isb
 
     mrs     x2, sctlr_el1
@@ -266,9 +299,14 @@ _start:
 
     .global aarch64_secondary_start
 aarch64_secondary_start:
+#if AARCH64_BOOT_NORMALIZE_EL
+    bl      aarch64_boot_enter_el1
+#endif
     /* PSCI enters with the MMU off and the logical CPU number in x0. */
     msr     daifset, #2
     mov     x19, x0
+    msr     tpidrro_el0, x19
+    msr     tpidr_el1, xzr
     adrp    x1, _stack_end
     add     x1, x1, :lo12:_stack_end
     mov     x2, #(4096 * 16)
@@ -288,6 +326,10 @@ aarch64_secondary_start:
     msr     tcr_el1, x2
     msr     ttbr0_el1, x0
     dsb     sy
+#if AARCH64_BOOT_NORMALIZE_EL
+    tlbi    vmalle1 /* Firmware's EL1 translations must not survive handoff. */
+    dsb     sy
+#endif
     isb
     mrs     x2, sctlr_el1
     bic     x2, x2, #(1 << 25)
@@ -331,6 +373,46 @@ aarch64_secondary_start:
     mov     x0, x19
     bl      aarch64_secondary_entry
     b       .Lhalt
+
+#if AARCH64_BOOT_NORMALIZE_EL
+    /* Boot handoff requires translation/caches off (or coherent clean image).
+     * No stack or BSS is used. Preserve x0 and the caller's link register. */
+aarch64_boot_enter_el1:
+    msr     daifset, #15
+    mrs     x9, CurrentEL
+    cmp     x9, #0xc
+    b.ne    .Lnot_el3
+    mov     x9, #0x531 /* SCR: NS, RES1[5:4], HCE, AArch64 EL2 */
+    msr     scr_el3, x9
+    msr     cptr_el3, xzr
+    ldr     x9, =0x30c50830 /* EL2 RES1 bits, MMU/cache off */
+    msr     sctlr_el2, x9
+    adr     x9, .Lfrom_el3
+    msr     elr_el3, x9
+    mov     x9, #0x3c9 /* EL2h, all exceptions masked */
+    msr     spsr_el3, x9
+    eret
+.Lfrom_el3:
+.Lnot_el3:
+    mrs     x9, CurrentEL
+    cmp     x9, #8
+    b.ne    .Lboot_el1
+    mov     x9, #(1 << 31) /* HCR.RW: EL1 AArch64 */
+    msr     hcr_el2, x9
+    mov     x9, #3 /* EL1 physical counter and timer access */
+    msr     cnthctl_el2, x9
+    msr     cntvoff_el2, xzr
+    msr     cptr_el2, xzr
+    ldr     x9, =0x30d00800 /* EL1 RES1 bits, MMU/cache off */
+    msr     sctlr_el1, x9
+    adr     x9, .Lboot_el1
+    msr     elr_el2, x9
+    mov     x9, #0x3c5 /* EL1h, all exceptions masked */
+    msr     spsr_el2, x9
+    eret
+.Lboot_el1:
+    ret
+#endif
 
     .section .bss
     .align 12

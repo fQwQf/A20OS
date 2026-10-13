@@ -10,7 +10,7 @@
  * uses.
  *
  * Object model: a debug session is an A20_OBJ_DEBUG handle whose object is
- * the target's pid.  Operation rights (docs/native-abi/06-security.md §3.2):
+ * a stable task identity object. Operation rights (docs/native-abi/06-security.md §3.2):
  *   READ      debug_read / debug_read_regs / debug_map_memory
  *   WRITE     debug_write / debug_write_regs
  *   WAIT      debug_wait / debug_event
@@ -46,12 +46,15 @@ static task_t *a20_debug_target_get(struct a20_ht_internal *ht,
                                     a20_handle_t dbg_h,
                                     a20_rights_t required_rights)
 {
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            required_rights, &entry);
-    if (r < 0)
-        return NULL;
-    return proc_find_get((int)(uintptr_t)entry.object);
+    task_t *target = NULL;
+    (void)a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, required_rights,
+                              &target);
+    return target;
+}
+
+/* GCC cleanup covers every partial-copy/error return below. */
+static void a20_debug_target_put(task_t **target) {
+    proc_put(*target);
 }
 
 /* Snapshot the current stop into a user-visible event structure.  Caller
@@ -112,15 +115,12 @@ int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
 
     /* docs/native-abi/06-security.md §8.1: attach requires ADMIN right on
      * the target task handle; proc_debug_attach re-checks uid/capability. */
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_ADMIN, &entry);
-    if (r < 0) return r;
-
-    int pid = (int)(uintptr_t)entry.object;
-    task_t *target = proc_find_get(pid);
-    if (!target) return -A20_ERR_BAD_HANDLE;
-    proc_put(target);
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                    A20_RIGHT_ADMIN, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
     if (target && proc_current())
         printf("[NDBG] attach pid=%d cur=%d state=%d cur_uid=%d/%d/%d/%d tgt_uid=%d/%d/%d/%d cap=0x%lx\n",
                pid, proc_current()->pid, (int)target->state,
@@ -137,10 +137,10 @@ int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
 
     /* The session handle carries every debug operation right; a holder may
      * narrow them with handle_replace later. */
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_DEBUG,
-                                   A20_RIGHT_READ | A20_RIGHT_WRITE |
-                                   A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                   A20_RIGHT_CONTROL | A20_RIGHT_ADMIN);
+    int64_t h = a20_handle_install_task(
+        ht, target, A20_OBJ_DEBUG,
+        A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+            A20_RIGHT_CONTROL | A20_RIGHT_ADMIN);
     if (h < 0)
         (void)proc_debug_detach(pid, 0);
     return h;
@@ -264,11 +264,12 @@ int64_t sys_a20_debug_resume(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_CONTROL, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r = a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_CONTROL,
+                                    &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     int pr = proc_debug_resume(pid, 0,
                 mode == A20_DEBUG_RESUME_SYSCALL ?
@@ -285,11 +286,12 @@ int64_t sys_a20_debug_detach(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_CONTROL, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r = a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_CONTROL,
+                                    &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     int pr = proc_debug_detach(pid, 0);
     (void)a20_handle_remove(ht, dbg_h);
@@ -305,11 +307,12 @@ int64_t sys_a20_debug_kill(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_SIGNAL, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r = a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_SIGNAL,
+                                    &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     int pr = proc_debug_kill(pid);
     if (pr == -ESRCH) return -A20_ERR_BAD_HANDLE;
@@ -328,11 +331,12 @@ int64_t sys_a20_debug_read(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_READ, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r =
+        a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_READ, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     char kbuf[512];
     uint64_t done = 0;
@@ -363,11 +367,12 @@ int64_t sys_a20_debug_write(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_WRITE, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r =
+        a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_WRITE, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     char kbuf[512];
     uint64_t done = 0;
@@ -396,11 +401,12 @@ int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_READ, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r =
+        a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_READ, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     proc_debug_regs_t regs;
     r = proc_debug_getregs(pid, &regs);
@@ -433,11 +439,12 @@ int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_WRITE, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r =
+        a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_WRITE, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     /* Fetch first so arch-specific fields outside a20_regs_t survive. */
     proc_debug_regs_t regs;
@@ -468,11 +475,12 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, dbg_h, A20_OBJ_DEBUG,
-                                            A20_RIGHT_READ, &entry);
-    if (r < 0) return r;
-    int pid = (int)(uintptr_t)entry.object;
+    task_t *target __attribute__((cleanup(a20_debug_target_put))) = NULL;
+    int64_t r =
+        a20_handle_task_get(ht, dbg_h, A20_OBJ_DEBUG, A20_RIGHT_READ, &target);
+    if (r < 0)
+        return r;
+    int pid = target->pid;
 
     uint64_t local = proc_mmap(0, (size_t)len, (int)prot ? (int)prot : 3,
                                0x20 /* MAP_ANONYMOUS */, -1, 0);

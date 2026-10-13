@@ -30,8 +30,7 @@ int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
  * matter how large the filesystem's blocks are. */
 #define EXT4_SB_FREE_BLOCKS_OFF   0x0c
 #define EXT4_SB_FREE_INODES_OFF   0x10
-#define EXT4_SB_FREE_BLOCKS_HI_OFF 0x150
-#define EXT4_SB_FREE_INODES_HI_OFF 0x154
+#define EXT4_SB_FREE_BLOCKS_HI_OFF 0x158
 #define EXT4_SB_CHECKSUM_OFF      0x3fc
 
 static void ext4_put_le32(uint8_t *p, uint32_t v)
@@ -343,7 +342,11 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     if (!ext4_has_metadata_csum(sb)) {
         uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
                      sb->desc_size : sizeof(ext4_group_desc_t);
-        ext4_meta_write(sb, off, &sb->group_descs[group], n);
+        uint8_t raw[sizeof(ext4_group_desc_t)];
+        memcpy(raw, &sb->group_descs[group], n);
+        ext4_group_desc_checksum_put(sb, group, raw, n);
+        ext4_meta_write(sb, off, raw, n);
+        ext4_superblock_sync_counts(sb);
         return;
     }
     /* Every path that changes a bitmap reaches this function immediately
@@ -371,9 +374,8 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     /* The checksum covers the bytes the filesystem will read back, so it has to
      * be taken over the on-disk descriptor and not over the in-memory struct:
      * on a 64-byte descriptor the checksum includes the padding past the last
-     * field, and on a legacy 32-byte one the fields after bg_flags sit four
-     * bytes earlier and the tail is truncated.  Start from what is already on
-     * disk so that a reserved field the driver never models survives. */
+     * field. A legacy 32-byte descriptor is the common prefix, without high
+     * halves. Start from disk so reserved fields survive. */
     uint8_t raw[sizeof(ext4_group_desc_t)];
     memset(raw, 0, sizeof(raw));
     if (bcache_read_bytes(sb->bc, off, raw, sb->desc_size) < 0)
@@ -381,8 +383,7 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     if (sb->desc_size >= sizeof(ext4_group_desc_t)) {
         memcpy(raw, &sb->group_descs[group], sizeof(ext4_group_desc_t));
     } else {
-        /* The driver always tracks the 64-byte layout; reserialise it down to
-         * the narrower on-disk shape rather than truncating the struct. */
+        /* The 32-byte format uses precisely the common descriptor prefix. */
         uint8_t legacy[32];
         ext4_group_desc_pack_legacy(&sb->group_descs[group], legacy);
         memcpy(raw, legacy, sizeof(legacy));
@@ -413,7 +414,7 @@ void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
     uint32_t fb_lo = (uint32_t)(free_blocks & 0xffffffffU);
     uint32_t fb_hi = (uint32_t)(free_blocks >> 32);
     uint32_t fi_lo = (uint32_t)(free_inodes & 0xffffffffU);
-    uint32_t fi_hi = (uint32_t)(free_inodes >> 32);
+    int wide = (sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) != 0;
     if (raw[EXT4_SB_FREE_BLOCKS_OFF + 0] != (uint8_t)fb_lo ||
         raw[EXT4_SB_FREE_BLOCKS_OFF + 1] != (uint8_t)(fb_lo >> 8) ||
         raw[EXT4_SB_FREE_BLOCKS_OFF + 2] != (uint8_t)(fb_lo >> 16) ||
@@ -422,18 +423,13 @@ void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
         raw[EXT4_SB_FREE_INODES_OFF + 1] != (uint8_t)(fi_lo >> 8) ||
         raw[EXT4_SB_FREE_INODES_OFF + 2] != (uint8_t)(fi_lo >> 16) ||
         raw[EXT4_SB_FREE_INODES_OFF + 3] != (uint8_t)(fi_lo >> 24) ||
-        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 0] != (uint8_t)fb_hi ||
+        (wide && (raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 0] != (uint8_t)fb_hi ||
         raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 1] != (uint8_t)(fb_hi >> 8) ||
         raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 2] != (uint8_t)(fb_hi >> 16) ||
-        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 3] != (uint8_t)(fb_hi >> 24) ||
-        raw[EXT4_SB_FREE_INODES_HI_OFF + 0] != (uint8_t)fi_hi ||
-        raw[EXT4_SB_FREE_INODES_HI_OFF + 1] != (uint8_t)(fi_hi >> 8) ||
-        raw[EXT4_SB_FREE_INODES_HI_OFF + 2] != (uint8_t)(fi_hi >> 16) ||
-        raw[EXT4_SB_FREE_INODES_HI_OFF + 3] != (uint8_t)(fi_hi >> 24)) {
+        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 3] != (uint8_t)(fb_hi >> 24)))) {
         ext4_put_le32(raw + EXT4_SB_FREE_BLOCKS_OFF, fb_lo);
         ext4_put_le32(raw + EXT4_SB_FREE_INODES_OFF, fi_lo);
-        ext4_put_le32(raw + EXT4_SB_FREE_BLOCKS_HI_OFF, fb_hi);
-        ext4_put_le32(raw + EXT4_SB_FREE_INODES_HI_OFF, fi_hi);
+        if (wide) ext4_put_le32(raw + EXT4_SB_FREE_BLOCKS_HI_OFF, fb_hi);
     } else {
         /* Nothing moved: skip the write so a read-only filesystem and an idle
          * allocator cost one block read and no I/O. */

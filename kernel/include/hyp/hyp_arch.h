@@ -41,12 +41,8 @@ void     hyp_arch_vsatp_set(uint64_t satp);
 uint64_t hyp_arch_vstimecmp_get(void);
 void     hyp_arch_vstimecmp_set(uint64_t deadline);
 
-/* Invalidate the translations THIS hart may reuse on the host side, i.e. the
- * host-execution-context fence, not the stage-2 one above (that is
- * hyp_arch_s2_fence and it is per-VMID).  The run loop issues it for a guest
- * SFENCE.VMA executed under hstatus.VTVM: the guest asked to drop its own
- * mappings, and on a CPU where the instruction is ungated in HS-mode the way
- * to honour that is to drop everything this hart has cached.  Stub: no-op. */
+/* Legacy hook name: invalidate guest stage-1 translations from the host.
+ * RISC-V implements HFENCE.VVMA, not a host SFENCE.VMA. */
 void     hyp_arch_host_tlb_fence(void);
 
 #endif /* _HYP_ARCH_H */

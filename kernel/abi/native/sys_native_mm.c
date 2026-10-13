@@ -311,12 +311,10 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
     task_t *target_task = NULL;
     struct a20_ht_internal *target_ht = ht;
     if (target_h != A20_HANDLE_NULL) {
-        a20_handle_entry_t tgt_entry;
-        r = a20_handle_lookup_task_like(ht, target_h,
-                                       A20_RIGHT_CONTROL, &tgt_entry);
+        target_task = NULL;
+        r = a20_handle_task_get(ht, target_h, A20_OBJ_INVALID,
+                                A20_RIGHT_CONTROL, &target_task);
         if (r < 0) goto out_vmo;
-
-        target_task = proc_find_get((int)(uintptr_t)tgt_entry.object);
         if (!target_task) {
             r = -A20_ERR_BAD_HANDLE;
             goto out_vmo;

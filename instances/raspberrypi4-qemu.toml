@@ -1,0 +1,15 @@
+# Native BCM2711 model, not QEMU virt. No filesystem/network device claims.
+name = "raspberrypi4-qemu"
+description = "Raspberry Pi 4 native kernel with common SMP migration/timer/IPI selftest"
+arch = "aarch64"
+board = "raspberrypi4"
+abi = "both"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 4
+memory = "2G"
+allow_unverified_smp = true

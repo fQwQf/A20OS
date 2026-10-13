@@ -484,3 +484,19 @@ Every former explicit `-ENOSYS` placeholder in `syscall_table.def` is now implem
 `arch_prctl` is not one of these 16 direct placeholders. The x86_64 implementation supports `ARCH_SET_FS`/`ARCH_GET_FS` and `ARCH_SET_GS`/`ARCH_GET_GS` plus `ARCH_GET_CPUID`; unsupported operations return `-EINVAL`, and the generic non-x86_64 fallback returns `-EOPNOTSUPP` (the arch-correct answer on platforms without x86 segment registers). The generated table classifies it `partial` for the x86_64 surface with the arch fallback documented.
 
 **Scope Note:** The remaining `-ENOSYS` returns in the ABI are the arch/version-correct Linux semantics, not placeholders: `nfsservctl` was removed in Linux 4.19 and `map_shadow_stack` is an x86 CET syscall, so `-ENOSYS` on RISC-V matches Linux. The syscalls above are `partial`: they cover the common ABI surface with documented gaps in Linux edge semantics.
+
+本轮新增 hypervisor 扩展（仅静态检查，运行门禁待授权）：
+
+| syscall | 编号 | 状态 | 说明 |
+|---|---:|---|---|
+| `hyp_vcpu_destroy` | 915 | implemented, unverified | 显式归还 vCPU slot 引用 |
+| `hyp_console` | 916 | implemented, unverified | 每 VM 控制台配置/写入/读取，单次至多 256 字节 |
+| `hyp_vm_set_ram` | 917 | implemented, unverified | 在首次分配前设置 RAM 窗口 |
+
+后续共享核心接口（仅静态检查，未运行）：
+
+| syscall | 编号 | 状态 | 说明 |
+|---|---:|---|---|
+| `hyp_vcpu_control` | 918 | implemented, unverified | kick/pause/resume/stop，所属 CPU 处理 |
+| `hyp_vcpu_irq` | 919 | implemented, unverified | software/timer/external pending IRQ 队列 |
+| `hyp_stats` | 920 | implemented, unverified | VM/vCPU/mapping/table 计数与空闲页 |

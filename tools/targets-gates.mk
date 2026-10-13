@@ -5,6 +5,12 @@ HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
+HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
+
+# Execute the production common fabric driver for x86-64, AArch64 and RV64.
+.PHONY: check-shared-fabric-portability
+check-shared-fabric-portability:
+	$(PYTHON) tools/check-shared-fabric-portability.py
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment \
@@ -96,24 +102,46 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
-# The MCU protocol harness includes the real UART header, whose types need
-# the selected architecture headers even though no architecture code runs.
-$(TMPDIR)/a20-host-test_mcu_leaf: tools/tests/test_mcu_leaf.c
-	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel $< -o $@
+# The MCU protocol harness uses architecture type definitions but executes
+# no target assembly. The generic host rule lacks this include directory.
+$(TMPDIR)/a20-host-test_clx_fragment $(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_oneway $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include \
+		-Ikernel/include -Ikernel $< -o $@
+
+$(TMPDIR)/a20-host-test_clx_oneway: tools/tests/test_clx_uart_pair.c kernel/mcu/leaf.c kernel/cluster/uart.c
+
+.PHONY: check-cluster-unit check-cluster-udp check-cluster-loopback check-cluster-reliable
+check-cluster-unit:
+	@$(PYTHON) tools/check-cluster-unit.py
+
+check-cluster-udp:
+	@$(PYTHON) tools/check-cluster-udp.py
+
+check-cluster-loopback:
+	@$(PYTHON) tools/check-cluster-loopback.py
 
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
-# host port supplies only the architecture types and lock shims; allocator and
+# host ports supply architecture types, CPU identity and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
-$(TMPDIR)/a20-host-test_lwip_allocator_concurrency: \
+$(TMPDIR)/a20-host-test_lwip_allocator_concurrency \
+$(TMPDIR)/a20-host-test_lwip_allocator_single_lane: \
         tools/tests/test_lwip_allocator_concurrency.c \
         kernel/external/lwip/src/core/mem.c \
         kernel/external/lwip/src/core/memp.c \
-        kernel/external/lwip/src/core/pbuf.c
+        kernel/external/lwip/src/core/pbuf.c \
+        kernel/net/lwip_compat.c \
+        kernel/net/lwip_port/arch/heap.h \
+        tools/tests/lwip_host_port/core/lock.h \
+        tools/tests/lwip_host_port/arch/cc.h \
+        tools/tests/lwip_host_port/lwipopts.h \
+        tools/tests/net_lane_host_port/core/cpu.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -ffunction-sections -fdata-sections \
-	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=4 \
-	  -Itools/tests/lwip_host_port -Itools/tests/net_lane_host_port \
+	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=9 \
+	  -DCONFIG_NET_LANES=$(if $(findstring single_lane,$@),1,4) \
+	  -Itools/tests/lwip_host_port \
+	  -Itools/tests/net_lane_host_port \
 	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
-	  $^ -Wl,--gc-sections -o $@
+	  $(filter %.c,$^) -Wl,--gc-sections -o $@
 
 # Compile the real lane queue implementation, with only CPU identity shimmed.
 $(TMPDIR)/a20-host-test_net_lane_concurrency: tools/tests/test_net_lane_concurrency.c \
@@ -218,6 +246,11 @@ CHECK_FAST_GATES := \
     check-smoke-cases \
     check-xlator-guests \
     host-tests \
+    check-cluster-unit \
+    check-cluster-fuzz \
+    check-cluster-wakeup \
+    check-slab-cpu-window \
+    check-virtio-net-completion \
     check-drm-abi \
     check-task-lifetime-boundary \
     check-smp-platform-boundary \
@@ -302,3 +335,81 @@ ifeq ($(CLANG_FORMAT),)
 else
 	@$(PYTHON) tools/clang_format_gate.py --clang-format "$(CLANG_FORMAT)" --write
 endif
+
+check-cluster-reliable:
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --log-dir .kernel-build/cluster/reliable
+
+.PHONY: check-cluster-send check-cluster-smp
+check-cluster-smp:
+	NR_CPUS=2 $(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-smp2
+
+check-cluster-send:
+	$(PYTHON) tools/check-cluster-udp.py --send --faults --random-loss 0.1 --profile 3 --timeout 240 --log-dir .kernel-build/cluster/send-server
+	$(PYTHON) tools/check-cluster-udp.py --send --routed --faults --profile 3 --peer-profile 2 --timeout 180 --log-dir .kernel-build/cluster/send-routed-mixed
+	$(PYTHON) tools/check-cluster-gateway.py --send --timeout 180
+
+.PHONY: check-cluster-mesh
+check-cluster-mesh:
+	$(PYTHON) tools/check-cluster-mesh.py
+
+.PHONY: check-cluster-fuzz
+check-cluster-fuzz:
+	$(PYTHON) tools/check-cluster-fuzz.py
+
+.PHONY: check-cluster-fuzz-smoke check-cluster-performance
+check-cluster-fuzz-smoke:
+	$(PYTHON) tools/check-cluster-fuzz.py --seconds 300
+
+check-cluster-performance:
+	$(PYTHON) tools/check-cluster-performance.py
+
+.PHONY: check-cluster-load
+check-cluster-load:
+	$(PYTHON) tools/check-cluster-load.py
+
+.PHONY: check-virtio-net-completion
+check-virtio-net-completion:
+	$(PYTHON) tools/check-virtio-net-completion.py
+
+.PHONY: check-cluster-wakeup
+check-cluster-wakeup:
+	$(PYTHON) tools/check-cluster-wakeup.py
+
+.PHONY: check-slab-cpu-window
+check-slab-cpu-window:
+	$(PYTHON) tools/check-slab-cpu-window.py
+
+.PHONY: check-cluster-uart
+check-cluster-uart:
+	$(PYTHON) tools/check-cluster-uart.py
+
+.PHONY: check-cluster-gateway
+check-cluster-gateway:
+	$(PYTHON) tools/check-cluster-gateway.py
+
+.PHONY: demo-wordcount
+demo-wordcount:
+	$(PYTHON) tools/check-cluster-wordcount.py
+	$(PYTHON) tools/check-cluster-wordcount.py --mixed
+
+.PHONY: check-cluster-hardening
+check-cluster-hardening:
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --stress --random-loss 0.1 --corrupt --timeout 420 --log-dir .kernel-build/cluster/random-loss1000
+	$(PYTHON) tools/check-cluster-udp.py --faults --restart --random-delay --corrupt --hello-flood --timeout 240 --log-dir .kernel-build/cluster/delay-crc-flood
+	$(PYTHON) tools/check-cluster-udp.py --faults --partition --slow-consumer --timeout 150 --log-dir .kernel-build/cluster/partition-slow
+
+.PHONY: check-cluster-instance
+check-cluster-instance:
+	$(PYTHON) tools/check-cluster-instance.py
+
+.PHONY: check-cluster-objects
+check-cluster-objects:
+	$(PYTHON) tools/check-cluster-objects.py
+
+.PHONY: check-object-directory-portability
+check-object-directory-portability:
+	$(PYTHON) tools/check-object-directory-portability.py
+
+.PHONY: check-cluster-apps
+check-cluster-apps:
+	$(PYTHON) tools/check-cluster-apps.py
