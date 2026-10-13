@@ -1740,6 +1740,8 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                 /* A larger-than-needed leaf already covers the range.  The
                  * caller must demote it (mm_demote_huge_page) before a
                  * transaction can address individual pages inside it. */
+                mm_pt_read_exit(mm);
+                cur->in_read_side = 0;
                 return 1;
             }
 

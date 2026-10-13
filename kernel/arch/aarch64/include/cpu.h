@@ -124,15 +124,25 @@ static inline void arch_tlb_flush(void) {
 #endif
 }
 
-/* VAE1IS discards every EL1 translation of one VA and shares the
- * invalidation across the inner-shareable domain, so a peer CPU cannot
- * retain a stale copy of a page that is being unmapped.  The instruction
- * ignores the in-page offset. */
+/* VAAE1IS invalidates one EL0/EL1 VA for every ASID and broadcasts the
+ * operation across the inner-shareable domain. Its operand stores VA[55:12]
+ * in Xt[43:0] (upper operand fields are RES0 here), not the byte VA. Keep
+ * accepting byte addresses at this interface and encode the architectural
+ * operand here. The 12-bit shift is fixed by the TLBI encoding; with larger
+ * granules the address is already aligned so the extra low operand bits are
+ * zero. */
 static inline void arch_tlb_flush_page_local(uint64_t addr) {
+    uint64_t operand;
+#ifdef CONFIG_AARCH64_TLBI_DIAG_RAW_OPERAND
+    /* Paired diagnostic control only; never enable in a release build. */
+    operand = addr;
+#else
+    operand = (addr >> 12) & 0x00000FFFFFFFFFFFULL;
+#endif
     __asm__ __volatile__("dsb ishst\n\t"
                          "tlbi vaae1is, %0\n\t"
                          "dsb ish\n\t"
-                         "isb" ::"r"(addr)
+                         "isb" ::"r"(operand)
                          : "memory");
 }
 static inline void arch_tlb_flush_page(uint64_t addr) {

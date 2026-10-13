@@ -3,6 +3,7 @@
  */
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_register.h"
+#include "drivers/core/driver_registry_test.h"
 #include "drivers/core/driver_class.h"
 #include "core/stdio.h"
 #include "core/klog.h"
@@ -38,6 +39,67 @@ static int         g_device_cap;
 static bus_type_t **g_buses;
 static int         g_bus_count;
 static int         g_bus_cap;
+
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+/* Consumed by the next registry backing-array growth while the core lock is
+ * held.  It does not affect progress mirrors or any unrelated allocation. */
+static int g_registry_fail_next_kind;
+static int g_registry_test_last_failure_kind;
+
+void driver_registry_test_fail_next(int kind)
+{
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    g_registry_fail_next_kind = kind;
+    g_registry_test_last_failure_kind = 0;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+}
+
+int driver_registry_test_last_failure(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    int kind = g_registry_test_last_failure_kind;
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    return kind;
+}
+
+void driver_registry_test_snapshot(int kind, int *count, int *capacity)
+{
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    switch (kind) {
+    case DRIVER_REGISTRY_TEST_DRIVER:
+        if (count) *count = g_driver_count;
+        if (capacity) *capacity = g_driver_cap;
+        break;
+    case DRIVER_REGISTRY_TEST_DEVICE:
+        if (count) *count = g_device_count;
+        if (capacity) *capacity = g_device_cap;
+        break;
+    case DRIVER_REGISTRY_TEST_BUS:
+        if (count) *count = g_bus_count;
+        if (capacity) *capacity = g_bus_cap;
+        break;
+    default:
+        if (count) *count = -1;
+        if (capacity) *capacity = -1;
+        break;
+    }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+}
+#endif
+
+static void *driver_registry_realloc(void *old, size_t size, int kind)
+{
+#ifdef CONFIG_DRIVER_LIFECYCLE_TEST
+    if (g_registry_fail_next_kind == kind) {
+        g_registry_fail_next_kind = 0;
+        g_registry_test_last_failure_kind = kind;
+        return NULL;
+    }
+#else
+    (void)kind;
+#endif
+    return krealloc(old, size);
+}
 
 /* The scheduler bridge runs driver_progress_class() from every CPU on every
  * pass, and it must never block or skip a device, so it cannot take
@@ -221,9 +283,12 @@ int driver_register(driver_t *drv) {
     }
     if (g_driver_count >= g_driver_cap) {
         int new_cap = g_driver_cap * 2;
-        driver_t **new_arr = krealloc(g_drivers, sizeof(driver_t *) * new_cap);
+        driver_t **new_arr = driver_registry_realloc(
+            g_drivers, sizeof(*g_drivers) * (size_t)new_cap,
+            DRIVER_REGISTRY_TEST_DRIVER);
         if (!new_arr) {
-            kerr("[DRIVER] driver_register: capacity exhausted (%d)\n", g_driver_cap);
+            kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=driver capacity=%d error=%d\n",
+                 g_driver_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
             mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;
@@ -310,9 +375,12 @@ int device_register(device_t *dev) {
     }
     if (g_device_count >= g_device_cap) {
         int new_cap = g_device_cap * 2;
-        device_t **new_arr = krealloc(g_devices, sizeof(device_t *) * new_cap);
+        device_t **new_arr = driver_registry_realloc(
+            g_devices, sizeof(*g_devices) * (size_t)new_cap,
+            DRIVER_REGISTRY_TEST_DEVICE);
         if (!new_arr) {
-            kerr("[DRIVER] device_register: capacity exhausted (%d)\n", g_device_cap);
+            kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=device capacity=%d error=%d\n",
+                 g_device_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
             mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;
@@ -405,9 +473,12 @@ int bus_register(bus_type_t *bus) {
     }
     if (g_bus_count >= g_bus_cap) {
         int new_cap = g_bus_cap * 2;
-        bus_type_t **new_arr = krealloc(g_buses, sizeof(bus_type_t *) * new_cap);
+        bus_type_t **new_arr = driver_registry_realloc(
+            g_buses, sizeof(*g_buses) * (size_t)new_cap,
+            DRIVER_REGISTRY_TEST_BUS);
         if (!new_arr) {
-            kerr("[DRIVER] bus_register: capacity exhausted (%d)\n", g_bus_cap);
+            kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=bus capacity=%d error=%d\n",
+                 g_bus_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
             mutex_unlock(&g_driver_core_ops);
             return -ENOMEM;

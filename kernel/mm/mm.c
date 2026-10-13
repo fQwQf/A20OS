@@ -332,10 +332,16 @@ int mm_fetch_user_insn32(pt_root_t *pgdir, vaddr_t va, uint32_t *out) {
 int mm_mark_leaf_dirty_if_writable(pt_root_t *pgdir, vaddr_t va) {
     if (!pgdir)
         return -1;
-    pte_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, NULL);
+    size_t leaf_size = 0;
+    pte_t *pte = pt_lookup_leaf(pgdir, va, NULL, NULL, &leaf_size);
     if (!pte || !(*pte & PTE_V) || !(*pte & PTE_W))
         return -1;
     pte_t flags = arch_pte_flags(*pte) | PTE_D;
+#ifdef ARCH_HAS_PTE_BLOCK
+    if (leaf_size >= PMD_SIZE)
+        *pte = arch_pte_block(arch_pte_addr(*pte), flags);
+    else
+#endif
     *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
     arch_tlb_flush_page(va);
     return 0;
@@ -702,7 +708,13 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
             pfn_t nf = pfa_alloc(order);
             if (nf == PFN_NONE) { pt_destroy(dst); return NULL; }
             memcpy(pfn_to_virt(nf), arch_pte_to_ptr(pte), leaf_size);
+#ifdef ARCH_HAS_PTE_BLOCK
+            dst[i] = (leaf_size >= PMD_SIZE)
+                         ? arch_pte_block(pfn_to_phys(nf), arch_pte_flags(pte))
+                         : arch_pte_leaf(pfn_to_phys(nf), arch_pte_flags(pte));
+#else
             dst[i] = arch_pte_leaf(pfn_to_phys(nf), arch_pte_flags(pte));
+#endif
         } else {
             pte_t *next_src = arch_pte_to_ptr(pte);
             pte_t *next_dst = pt_clone_level(next_src, level - 1);

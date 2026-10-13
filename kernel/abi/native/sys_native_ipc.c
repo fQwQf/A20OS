@@ -35,8 +35,35 @@
 #include "abi/native/vmar.h"
 #include "abi/native/ipc_internal.h"
 #include "abi/native/resource.h"
+#include "channel_recv_txn.h"
 
 #define A20_ARG(n) (args->arg[(n)])
+
+typedef struct a20_recv_publish_context {
+    void *user_args;
+    void *kernel_args;
+    int is_call;
+} a20_recv_publish_context_t;
+
+static int a20_channel_recv_publish(void *opaque, uint32_t data_len,
+                                    uint32_t handle_count)
+{
+    a20_recv_publish_context_t *context = opaque;
+    if (!context || !context->user_args || !context->kernel_args)
+        return -1;
+    if (context->is_call) {
+        a20_channel_call_args_t *kargs = context->kernel_args;
+        kargs->out_reply_len = data_len;
+        kargs->out_reply_handles = handle_count;
+        return a20_copy_struct_to_user(context->user_args, kargs,
+                                       sizeof(*kargs)) < 0 ? -1 : 0;
+    }
+    a20_msg_recv_args_t *kargs = context->kernel_args;
+    kargs->out_data_len = data_len;
+    kargs->out_handle_count = handle_count;
+    return a20_copy_struct_to_user(context->user_args, kargs,
+                                   sizeof(*kargs)) < 0 ? -1 : 0;
+}
 
 extern struct a20_ht_internal *task_get_a20_ht(task_t *t);
 extern int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
@@ -408,117 +435,15 @@ int64_t sys_a20_channel_recv(const a20_syscall_args_t *args)
     }
     a20_channel_ep_t *ep = (a20_channel_ep_t *)entry.object;
 
-    /* Phase 1: wait for a message; ep->lock is held on success. */
-    uint32_t msg_data_len = 0;
-    uint32_t msg_handles = 0;
-    r = a20_channel_recv_begin(ep, kargs.flags, &msg_data_len, &msg_handles);
-    if (r < 0) goto out_ep;
-
-    if ((msg_data_len > 0 && (!kargs.data_buf ||
-                              kargs.data_buf_len < msg_data_len)) ||
-        (msg_handles > 0 && (!kargs.handle_buf ||
-                             kargs.handle_buf_count < msg_handles))) {
-        a20_channel_recv_abort(ep);
-        r = -A20_ERR_NO_SPACE;
-        goto out_ep;
-    }
-
-    /* Phase 2: reserve receiver slots BEFORE dequeuing so a full table
-     * yields NO_SPACE with the message still queued (docs/native-abi/
-     * 05-ipc.md §2.6: no partial delivery). */
-    a20_handle_t reserved[A20_CH_MAX_HANDLES];
-    uint32_t nreserved = 0;
-    if (msg_handles > 0) {
-        r = a20_handle_reserve_many(ht, reserved, msg_handles);
-        if (r < 0) {
-            a20_channel_recv_abort(ep);
-            goto out_ep;
-        }
-        nreserved = msg_handles;
-    }
-
-    void *kdata = NULL;
-    if (msg_data_len > 0) {
-        kdata = kmalloc(msg_data_len);
-        if (!kdata) {
-            a20_handle_abort_reserved(ht, reserved, nreserved);
-            a20_channel_recv_abort(ep);
-            r = -A20_ERR_NO_MEMORY;
-            goto out_ep;
-        }
-    }
-
-    a20_ch_handle_info_t hinfos[A20_CH_MAX_HANDLES];
-    uint32_t out_hcount = msg_handles;
-    uint32_t out_len = msg_data_len;
-    r = a20_channel_recv_finish(ep, kdata, &out_len, hinfos, &out_hcount);
-    if (r < 0) {
-        kfree(kdata);
-        a20_handle_abort_reserved(ht, reserved, nreserved);
-        goto out_ep;
-    }
-
-    /* Install received handles into the reserved slots; temporal limits and
-     * security labels are inherited from the sender's entries. */
-    a20_handle_t out_handles[A20_CH_MAX_HANDLES];
-    a20_rights_t out_rights[A20_CH_MAX_HANDLES];
-    uint32_t installed = 0;
-    for (uint32_t i = 0; i < out_hcount; i++) {
-        out_rights[i] = hinfos[i].transfer_rights;
-        int64_t cr = a20_handle_commit_reserved_temporal(
-            ht, reserved[i], hinfos[i].object, hinfos[i].type,
-            hinfos[i].transfer_rights,
-            hinfos[i].expiry_tick, hinfos[i].remaining_ops,
-            hinfos[i].temporal_flags, hinfos[i].security_label);
-        if (cr < 0) {
-            a20_object_release(hinfos[i].object, hinfos[i].type);
-            for (uint32_t j = i + 1; j < out_hcount; j++)
-                a20_object_release(hinfos[j].object, hinfos[j].type);
-            for (uint32_t j = 0; j < installed; j++)
-                a20_handle_remove(ht, out_handles[j]);
-            a20_handle_abort_reserved(ht, &reserved[i], out_hcount - i);
-            kfree(kdata);
-            r = cr;
-            goto out_ep;
-        }
-        out_handles[i] = reserved[i];
-        installed++;
-    }
-
-    /* Copy results to user.  If a late fault still happens, roll back the
-     * freshly installed handles rather than leaking unnamed capabilities. */
-    kargs.out_data_len = out_len;
-    kargs.out_handle_count = installed;
-    if (out_len > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.data_buf, kdata, out_len) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_rollback;
-    }
-    if (installed > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.handle_buf, out_handles,
-                     installed * sizeof(a20_handle_t)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_rollback;
-    }
-    if (kargs.out_rights_buf && installed > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.out_rights_buf, out_rights,
-                     installed * sizeof(a20_rights_t)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_rollback;
-    }
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_rollback;
-    }
-
-    kfree(kdata);
+    a20_recv_publish_context_t publish = {uargs, &kargs, 0};
+    r = a20_channel_recv_txn(
+        ep, ht, kargs.flags, 0,
+        (void *)(uintptr_t)kargs.data_buf, kargs.data_buf_len,
+        (void *)(uintptr_t)kargs.handle_buf, kargs.handle_buf_count,
+        (void *)(uintptr_t)kargs.out_rights_buf, &publish,
+        a20_channel_recv_publish);
     a20_object_release(entry.object, entry.type);
-    return (int64_t)out_len;
-
-out_rollback:
-    for (uint32_t i = 0; i < installed; i++)
-        a20_handle_remove(ht, out_handles[i]);
-    kfree(kdata);
+    return r;
 out_ep:
     a20_object_release(entry.object, entry.type);
     return r;
@@ -656,111 +581,16 @@ out_data:
     if (r < 0) goto out_ep; /* send stage failed: request not delivered */
 
     /* ---- Reply stage (mirrors sys_a20_channel_recv) ---- */
-    uint32_t msg_data_len = 0;
-    uint32_t msg_handles = 0;
-    r = a20_channel_recv_begin_donate(ep, kargs.flags, &msg_data_len,
-                                      &msg_handles);
-    if (r < 0) goto out_ep;
-
-    if ((msg_data_len > 0 && (!kargs.reply_buf ||
-                              kargs.reply_buf_len < msg_data_len)) ||
-        (msg_handles > 0 && (!kargs.reply_handle_buf ||
-                             kargs.reply_handle_buf_count < msg_handles))) {
-        a20_channel_recv_abort(ep);
-        r = -A20_ERR_NO_SPACE;
-        goto out_ep;
-    }
-
-    a20_handle_t reserved[A20_CH_MAX_HANDLES];
-    uint32_t nreserved = 0;
-    if (msg_handles > 0) {
-        r = a20_handle_reserve_many(ht, reserved, msg_handles);
-        if (r < 0) {
-            a20_channel_recv_abort(ep);
-            goto out_ep;
-        }
-        nreserved = msg_handles;
-    }
-
-    void *rdata = NULL;
-    if (msg_data_len > 0) {
-        rdata = kmalloc(msg_data_len);
-        if (!rdata) {
-            a20_handle_abort_reserved(ht, reserved, nreserved);
-            a20_channel_recv_abort(ep);
-            r = -A20_ERR_NO_MEMORY;
-            goto out_ep;
-        }
-    }
-
-    a20_ch_handle_info_t rhinfos[A20_CH_MAX_HANDLES];
-    uint32_t out_hcount = msg_handles;
-    uint32_t out_len = msg_data_len;
-    r = a20_channel_recv_finish(ep, rdata, &out_len, rhinfos, &out_hcount);
-    if (r < 0) {
-        kfree(rdata);
-        a20_handle_abort_reserved(ht, reserved, nreserved);
-        goto out_ep;
-    }
-
-    a20_handle_t out_handles[A20_CH_MAX_HANDLES];
-    a20_rights_t out_rights[A20_CH_MAX_HANDLES];
-    uint32_t installed = 0;
-    for (uint32_t i = 0; i < out_hcount; i++) {
-        out_rights[i] = rhinfos[i].transfer_rights;
-        int64_t cr = a20_handle_commit_reserved_temporal(
-            ht, reserved[i], rhinfos[i].object, rhinfos[i].type,
-            rhinfos[i].transfer_rights,
-            rhinfos[i].expiry_tick, rhinfos[i].remaining_ops,
-            rhinfos[i].temporal_flags, rhinfos[i].security_label);
-        if (cr < 0) {
-            a20_object_release(rhinfos[i].object, rhinfos[i].type);
-            for (uint32_t j = i + 1; j < out_hcount; j++)
-                a20_object_release(rhinfos[j].object, rhinfos[j].type);
-            for (uint32_t j = 0; j < installed; j++)
-                a20_handle_remove(ht, out_handles[j]);
-            a20_handle_abort_reserved(ht, &reserved[i], out_hcount - i);
-            kfree(rdata);
-            r = cr;
-            goto out_ep;
-        }
-        out_handles[i] = reserved[i];
-        installed++;
-    }
-
-    kargs.out_reply_len = out_len;
-    kargs.out_reply_handles = installed;
-    if (out_len > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.reply_buf, rdata, out_len) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_call_rollback;
-    }
-    if (installed > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.reply_handle_buf, out_handles,
-                     installed * sizeof(a20_handle_t)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_call_rollback;
-    }
-    if (kargs.reply_rights_buf && installed > 0 &&
-        copy_to_user((void *)(uintptr_t)kargs.reply_rights_buf, out_rights,
-                     installed * sizeof(a20_rights_t)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_call_rollback;
-    }
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
-        r = -A20_ERR_FAULT;
-        goto out_call_rollback;
-    }
-
-    kfree(rdata);
+    a20_recv_publish_context_t publish = {uargs, &kargs, 1};
+    r = a20_channel_recv_txn(
+        ep, ht, kargs.flags, 1,
+        (void *)(uintptr_t)kargs.reply_buf, kargs.reply_buf_len,
+        (void *)(uintptr_t)kargs.reply_handle_buf,
+        kargs.reply_handle_buf_count,
+        (void *)(uintptr_t)kargs.reply_rights_buf, &publish,
+        a20_channel_recv_publish);
     a20_object_release(entry.object, entry.type);
-    return (int64_t)out_len;
-
-out_call_rollback:
-    for (uint32_t i = 0; i < installed; i++)
-        a20_handle_remove(ht, out_handles[i]);
-    kfree(rdata);
-    goto out_ep;
+    return r;
 
 out_ep:
     a20_object_release(entry.object, entry.type);

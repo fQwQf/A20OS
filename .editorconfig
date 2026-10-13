@@ -57,6 +57,11 @@ insert_final_newline = false
 [kernel/fs/rootfs_overlay.c]
 trim_trailing_whitespace = false
 
+# Generated at build time by tools/a20idl.py and not tracked by git.  Excluded
+# from tools/clang_format_gate.py for the same reason as rootfs_overlay.c.
+[user/svc/a20_services_idl.h]
+trim_trailing_whitespace = false
+
 [*.hex]
 insert_final_newline = false
 trim_trailing_whitespace = false

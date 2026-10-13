@@ -1069,6 +1069,350 @@ static int shared_file_mremap_dontunmap(void)
     unlink(path);
     return 0;
 }
+
+static long self_rss_pages(void)
+{
+    int fd = open("/proc/self/statm", O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[96];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    unsigned long total = 0, rss = 0;
+    if (sscanf(buf, "%lu %lu", &total, &rss) != 2) return -1;
+    return (long)rss;
+}
+
+/* Prime the parent-side fork/wait and procfs paths before RSS accounting.
+ * A deeper stack page first touched by waitpid() after the measurements begin
+ * would otherwise look like a page that mremap failed to release.  Requiring
+ * the second cycle to hold the same RSS also detects a per-cycle residue. */
+static int dontunmap_warm_rss_path(void)
+{
+    volatile unsigned char stack_warm[8 * 4096];
+    for (size_t i = 0; i < sizeof(stack_warm); i += 4096)
+        stack_warm[i] = (unsigned char)i;
+    (void)stack_warm[0];
+
+    long previous = self_rss_pages();
+    if (previous < 0)
+        return -1;
+    for (int i = 0; i < 2; i++) {
+        pid_t pid = fork();
+        if (pid < 0)
+            return -1;
+        if (pid == 0)
+            _exit(0);
+        int status = 0;
+        if (waitpid(pid, &status, 0) != pid ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+        long current = self_rss_pages();
+        if (current < 0 || (i != 0 && current != previous))
+            return -1;
+        previous = current;
+    }
+    return 0;
+}
+
+/* Linux MREMAP_DONTUNMAP keeps the original VMA but drops its PTEs.  The
+ * destination retains the populated pages; the original range faults back
+ * independently, and fork/COW must preserve the same split. */
+static int private_anon_mremap_dontunmap(void)
+{
+    const size_t len = 2 * 4096;
+    /* Touch the test's deepest userspace stack page before taking RSS
+     * baselines so later helper calls do not look like leaked resident pages. */
+    volatile unsigned char rss_stack_warm[8 * 4096];
+    for (size_t i = 0; i < sizeof(rss_stack_warm); i += 4096)
+        rss_stack_warm[i] = (unsigned char)i;
+    (void)rss_stack_warm[0];
+    if (dontunmap_warm_rss_path() < 0)
+        return fail("dontunmap-rss-warm-path");
+    unsigned char *mem = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return fail("dontunmap-anon-mmap");
+    long rss_base = self_rss_pages();
+    if (rss_base < 0) {
+        munmap(mem, len);
+        return fail("dontunmap-rss-read-before");
+    }
+    mem[0] = 0x21;
+    mem[4095] = 0x22;
+    mem[4096] = 0x31;
+    mem[8191] = 0x32;
+    long rss_source = self_rss_pages();
+    if (rss_source < rss_base + 2) {
+        munmap(mem, len);
+        return fail("dontunmap-rss-source-populated");
+    }
+
+    errno = 0;
+    if (mremap(mem, len, len, MREMAP_DONTUNMAP) != MAP_FAILED || errno != EINVAL) {
+        munmap(mem, len);
+        return fail("dontunmap-requires-maymove");
+    }
+    errno = 0;
+    if (mremap(mem, len, len + 4096, MREMAP_MAYMOVE | MREMAP_DONTUNMAP) != MAP_FAILED ||
+        errno != EINVAL) {
+        munmap(mem, len);
+        return fail("dontunmap-equal-length-required");
+    }
+    errno = 0;
+    if (mremap(mem, len, len, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+               mem + 4096) != MAP_FAILED || errno != EINVAL) {
+        munmap(mem, len);
+        return fail("dontunmap-overlap-rejected");
+    }
+    if (mem[0] != 0x21 || mem[4096] != 0x31) {
+        munmap(mem, len);
+        return fail("dontunmap-invalid-request-preserved-source");
+    }
+
+    unsigned char *moved = mremap(mem, len, len,
+                                 MREMAP_MAYMOVE | MREMAP_DONTUNMAP);
+    if (moved == MAP_FAILED || moved == mem) {
+        munmap(mem, len);
+        return fail("dontunmap-anon-remap");
+    }
+    if (moved[0] != 0x21 || moved[4095] != 0x22 ||
+        moved[4096] != 0x31 || moved[8191] != 0x32) {
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-anon-destination-retains-data");
+    }
+    long rss_after_move = self_rss_pages();
+    /* Reads are the first access to the source after remap and therefore
+     * exercise the real fault path. */
+    int source_zero = mem[0] == 0 && mem[4095] == 0 &&
+                      mem[4096] == 0 && mem[8191] == 0;
+    int rss_conserved = rss_after_move == rss_source;
+    if (!source_zero || !rss_conserved) {
+        printf("MM_DONTUNMAP_ANON: source_zero=%d rss_source=%ld rss_after_move=%ld\n",
+               source_zero, rss_source, rss_after_move);
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-source-refault-and-rss");
+    }
+    if (moved[0] != 0x21 || moved[4096] != 0x31) {
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-source-refault-independent");
+    }
+    long rss_after_refault = self_rss_pages();
+    if (rss_after_refault != rss_after_move + 2) {
+        printf("MM_DONTUNMAP_ANON: refault_rss source=%ld moved=%ld refault=%ld\n",
+               rss_source, rss_after_move, rss_after_refault);
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-rss-after-source-refault");
+    }
+    mem[0] = 0x44;
+    moved[4096] = 0x55;
+    if (mem[4096] != 0 || moved[0] != 0x21 || moved[4096] != 0x55) {
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-write-independence");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-fork");
+    }
+    if (pid == 0) {
+        int ok = mem[0] == 0x44 && mem[4096] == 0 &&
+                 moved[0] == 0x21 && moved[4096] == 0x55;
+        mem[0] = 0x66;
+        moved[0] = 0x77;
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        mem[0] != 0x44 || moved[0] != 0x21) {
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-fork-cow");
+    }
+
+    long rss_after_child = self_rss_pages();
+    if (rss_after_child < 0 || rss_after_child != rss_after_refault) {
+        printf("MM_DONTUNMAP_ANON: child_rss refault=%ld after_child=%ld\n",
+               rss_after_refault, rss_after_child);
+        munmap(moved, len); munmap(mem, len);
+        return fail("dontunmap-child-rss-stable");
+    }
+
+    if (munmap(mem, len) < 0 || munmap(moved, len) < 0)
+        return fail("dontunmap-anon-unmap");
+    long rss_end = self_rss_pages();
+    if (rss_end < 0 || rss_end != rss_after_refault - 4) {
+        printf("MM_DONTUNMAP_ANON: cleanup_rss refault=%ld end=%ld\n",
+               rss_after_refault, rss_end);
+        return fail("dontunmap-rss-cleanup");
+    }
+    printf("MM_DONTUNMAP_ANON: PASS rss_pages=%ld->%ld->%ld->%ld->%ld->%ld\n",
+           rss_base, rss_source, rss_after_move, rss_after_refault,
+           rss_after_child, rss_end);
+    return 0;
+}
+
+/* A fixed target immediately before the source can be merged with that source
+ * by mmap insertion. The transaction must reacquire the live source VMA after
+ * splitting destination boundaries instead of carrying a potentially retired
+ * source-record pointer across destination allocation. */
+static int dontunmap_adjacent_destination_before_source(void)
+{
+    const size_t len = 2 * 4096;
+    unsigned char *region = mmap(NULL, 2 * len, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED)
+        return fail("dontunmap-adjacent-reserve");
+    unsigned char *source = region + len;
+    source[0] = 0x41;
+    source[4096] = 0x52;
+    source[len - 1] = 0x63;
+    if (munmap(region, len) < 0) {
+        munmap(region, 2 * len);
+        return fail("dontunmap-adjacent-target-release");
+    }
+
+    unsigned char *destination = mremap(source, len, len,
+        MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, region);
+    if (destination != region) {
+        if (destination != MAP_FAILED) munmap(destination, len);
+        munmap(source, len);
+        return fail("dontunmap-adjacent-remap");
+    }
+    if (destination[0] != 0x41 || destination[4096] != 0x52 ||
+        destination[len - 1] != 0x63 || source[0] != 0 ||
+        source[4096] != 0 || source[len - 1] != 0) {
+        munmap(source, len);
+        munmap(destination, len);
+        return fail("dontunmap-adjacent-source-destination");
+    }
+    if (munmap(source, len) < 0 || munmap(destination, len) < 0)
+        return fail("dontunmap-adjacent-cleanup");
+    printf("MM_DONTUNMAP_ADJACENT: PASS source_record_reacquired=1\n");
+    return 0;
+}
+
+static int private_anon_mremap_dontunmap_rollback(void)
+{
+    const size_t len = 2 * 4096;
+    volatile unsigned char rss_stack_warm[3 * 4096];
+    for (size_t i = 0; i < sizeof(rss_stack_warm); i += 4096)
+        rss_stack_warm[i] = (unsigned char)i;
+    (void)rss_stack_warm[0];
+
+    /* Warm the ordinary destination-copy/unmap call path before measuring
+     * rollback accounting.  Its mapping does not arm/consume the test hook. */
+    unsigned char *warm_src = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (warm_src == MAP_FAILED) return fail("dontunmap-rollback-warm-source");
+    warm_src[0] = 0x11;
+    warm_src[4096] = 0x22;
+    void *warm_target = mmap(NULL, len, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (warm_target == MAP_FAILED) {
+        munmap(warm_src, len);
+        return fail("dontunmap-rollback-warm-target");
+    }
+    if (munmap(warm_target, len) < 0) {
+        munmap(warm_src, len);
+        return fail("dontunmap-rollback-warm-target-release");
+    }
+    unsigned char *warm_moved = mremap(warm_src, len, len,
+                                        MREMAP_MAYMOVE | MREMAP_FIXED,
+                                        warm_target);
+    if (warm_moved != warm_target || warm_moved[0] != 0x11 ||
+        warm_moved[4096] != 0x22) {
+        if (warm_moved != MAP_FAILED) munmap(warm_moved, len);
+        else munmap(warm_src, len);
+        return fail("dontunmap-rollback-warm-remap");
+    }
+    if (munmap(warm_moved, len) < 0)
+        return fail("dontunmap-rollback-warm-cleanup");
+
+    long stable_rss = self_rss_pages();
+    if (stable_rss < 0) return fail("dontunmap-rollback-warm-rss");
+    int stable_samples = 0;
+    for (int i = 0; i < 8 && stable_samples < 2; i++) {
+        long sample = self_rss_pages();
+        if (sample < 0) return fail("dontunmap-rollback-warm-rss-repeat");
+        if (sample == stable_rss)
+            stable_samples++;
+        else {
+            stable_rss = sample;
+            stable_samples = 0;
+        }
+    }
+    if (stable_samples < 2) return fail("dontunmap-rollback-rss-never-stabilized");
+
+    unsigned char *mem = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return fail("dontunmap-rollback-source-mmap");
+    mem[0] = 0x5a;
+    mem[4096] = 0xa5;
+
+    void *target = mmap(NULL, len, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) {
+        munmap(mem, len);
+        return fail("dontunmap-rollback-target-reserve");
+    }
+    if (munmap(target, len) < 0) {
+        munmap(mem, len);
+        return fail("dontunmap-rollback-target-release");
+    }
+    long rss_before = self_rss_pages();
+    if (rss_before < 0) {
+        munmap(mem, len);
+        return fail("dontunmap-rollback-rss-before");
+    }
+
+    errno = 0;
+    void *result = mremap(mem, len, len,
+                          MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+                          target);
+    if (result != MAP_FAILED || errno != ENOMEM) {
+        if (result != MAP_FAILED) munmap(result, len);
+        munmap(mem, len);
+        return fail("dontunmap-rollback-injected-error");
+    }
+    if (mem[0] != 0x5a || mem[4096] != 0xa5) {
+        munmap(mem, len);
+        return fail("dontunmap-rollback-source-preserved");
+    }
+    mem[0] = 0x5b; /* The source must retain its original writable permission. */
+    long rss_after = self_rss_pages();
+    if (rss_after != rss_before) {
+        printf("MM_DONTUNMAP_ROLLBACK: rss_before=%ld rss_after=%ld\n",
+               rss_before, rss_after);
+        munmap(mem, len);
+        return fail("dontunmap-rollback-rss-preserved");
+    }
+    void *probe = mmap(target, len, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+    if (probe != target) {
+        if (probe != MAP_FAILED) munmap(probe, len);
+        munmap(mem, len);
+        return fail("dontunmap-rollback-destination-cleared");
+    }
+    munmap(probe, len);
+    unsigned char *moved = mremap(mem, len, len,
+                                 MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+                                 target);
+    if (moved != target) {
+        munmap(mem, len);
+        return fail("dontunmap-rollback-retry");
+    }
+    if (moved[0] != 0x5b || moved[4096] != 0xa5 ||
+        mem[0] != 0 || mem[4096] != 0) {
+        munmap(mem, len); munmap(moved, len);
+        return fail("dontunmap-rollback-retry-source-destination");
+    }
+    munmap(mem, len); munmap(moved, len);
+    printf("MM_DONTUNMAP_ROLLBACK: PASS source_preserved=1 destination_cleared=1 retry=1 rss=%ld\n",
+           rss_before);
+    return 0;
+}
 static int shared_file_mremap_merge_guard(void)
 {
     /* Regression: mm_mmap(MAP_ANONYMOUS) may merge the mremap destination with
@@ -1854,6 +2198,9 @@ static int huge_page_fork_cow(void)
         return fail("huge-fork-wait");
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("MM_STRESS: huge-fork-child-status raw=0x%x exited=%d exit=%d signaled=%d signal=%d\n",
+               status, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+               WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0);
         munmap(mem, len);
         return fail("huge-fork-child");
     }
@@ -1863,6 +2210,15 @@ static int huge_page_fork_cow(void)
             munmap(mem, len);
             return fail("huge-fork-verify");
         }
+    }
+
+    /* After the child exits, the parent is the sole owner of its COW block.
+     * Its first write must upgrade the existing huge leaf in place. */
+    mem[0] = (char)0x5a;
+    mem[HPSIZE - 1] = (char)0xa5;
+    if (mem[0] != (char)0x5a || mem[HPSIZE - 1] != (char)0xa5) {
+        munmap(mem, len);
+        return fail("huge-fork-exclusive-upgrade");
     }
 
     if (munmap(mem, len) < 0)
@@ -1944,6 +2300,22 @@ static int huge_page_mprotect(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--dontunmap-only") == 0) {
+        printf("MM_DONTUNMAP_ANON: start pages=2\n");
+        if (private_anon_mremap_dontunmap() != 0 ||
+            dontunmap_adjacent_destination_before_source() != 0)
+            return 1;
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--dontunmap-rollback-only") == 0)
+        return private_anon_mremap_dontunmap_rollback() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--huge-fork-only") == 0) {
+        printf("MM_STRESS: huge-fork start\n");
+        if (huge_page_fork_cow() != 0)
+            return 1;
+        printf("MM_STRESS: huge-fork PASS\n");
+        return 0;
+    }
     if (argc == 2 &&
         strcmp(argv[1], "--verify-vma-fork-exec-child") == 0)
         return verify_vma_fork_exec_child();
@@ -2023,6 +2395,8 @@ int main(int argc, char **argv)
         return 1;
     printf("MM_STRESS: dontunmap start\n");
     if (shared_file_mremap_dontunmap() != 0)
+        return 1;
+    if (dontunmap_adjacent_destination_before_source() != 0)
         return 1;
     printf("MM_STRESS: merge start\n");
     if (shared_file_mremap_merge_guard() != 0)

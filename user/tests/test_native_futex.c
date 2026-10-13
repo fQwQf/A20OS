@@ -9,6 +9,7 @@
  * Also covers proc_create_thread (native thread_create) end to end.
  */
 #define A20_NATIVE_FILE_TEST 1
+#define A20_NATIVE_TASK_IDENTITY_BENCH 1
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "native-memory-contract.h"

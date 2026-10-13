@@ -87,8 +87,13 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
                                            uint64_t deadline);
 int proc_park_cancel(proc_wait_token_t token);
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token);
+typedef void (*proc_park_donate_fallback_t)(void *context);
+/* If direct local handoff does not happen, fallback runs with scheduler locks
+ * released and before the caller schedules/returns. */
 proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
-                                           struct task_t *donate_to);
+                                           struct task_t *donate_to,
+                                           proc_park_donate_fallback_t fallback,
+                                           void *fallback_context);
 void proc_park_finish(proc_wait_token_t token);
 proc_wake_reason_t proc_park_wait(proc_wait_mode_t mode, uint64_t deadline);
 

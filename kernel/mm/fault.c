@@ -14,6 +14,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/lock.h"
+#include "core/cpu.h"
 #include "core/perf.h"
 #include "core/panic.h"
 #include "core/klog.h"
@@ -60,6 +61,79 @@
 /* COW breaks served by the status-led path (mm_cow_from_status).  See
  * fault.h -- plain global so the shutdown audit can assert non-vacuity. */
 uint64_t mm_cow_from_status_count;
+
+#if defined(CONFIG_AARCH64) && defined(CONFIG_MM_COW_TLBI_DIAG)
+static volatile uint32_t aarch64_cow_tlbi_diag_seen;
+
+static int aarch64_cow_tlbi_diag_begin(task_t *t, mm_struct_t *mm, vaddr_t va,
+                                       vaddr_t leaf_base, size_t leaf_size,
+                                       pte_t *pte)
+{
+    if (leaf_size < PMD_SIZE || !(*pte & PTE_COW) ||
+        __atomic_exchange_n(&aarch64_cow_tlbi_diag_seen, 1,
+                            __ATOMIC_RELAXED))
+        return 0;
+
+    uint64_t token = arch_read_addr_space_token();
+    printf("[A64-COW-TLBI] before pid=%d mm=%p pgdir=%p pteslot=%p cpu=%u ttbr0=0x%lx asid=0x%lx active=0x%x va=0x%lx leaf=0x%lx size=%lu pte=0x%lx pa=0x%lx flags=0x%lx\n",
+           t ? t->pid : -1, (void *)mm, (void *)mm->pgdir, (void *)pte,
+           cpu_current_id(), (unsigned long)token,
+           (unsigned long)((token >> 48) & 0xffffUL),
+           __atomic_load_n(&mm->active_cpus, __ATOMIC_ACQUIRE),
+           (unsigned long)va, (unsigned long)leaf_base,
+           (unsigned long)leaf_size, (unsigned long)*pte,
+           (unsigned long)arch_pte_addr(*pte),
+           (unsigned long)(*pte & ~ARCH_PTE_PPN_MASK));
+    return 1;
+}
+
+static void aarch64_cow_tlbi_diag_after(int enabled, task_t *t, mm_struct_t *mm,
+                                        vaddr_t va,
+                                        pte_t *pte, const char *branch)
+{
+    if (!enabled)
+        return;
+    uint64_t tlbi_xt;
+#ifdef CONFIG_AARCH64_TLBI_DIAG_RAW_OPERAND
+    tlbi_xt = va;
+#else
+    tlbi_xt = (va >> 12) & 0x00000FFFFFFFFFFFULL;
+#endif
+    printf("[A64-COW-TLBI] after branch=%s pid=%d mm=%p pgdir=%p pteslot=%p cpu=%u ttbr0=0x%lx va=0x%lx pte=0x%lx pa=0x%lx flags=0x%lx tlbi_xt=0x%lx spec_va_field=0x%lx\n",
+           branch, t ? t->pid : -1, (void *)mm, (void *)mm->pgdir, (void *)pte,
+           cpu_current_id(),
+           (unsigned long)arch_read_addr_space_token(), (unsigned long)va,
+           (unsigned long)*pte, (unsigned long)arch_pte_addr(*pte),
+           (unsigned long)(*pte & ~ARCH_PTE_PPN_MASK),
+           (unsigned long)tlbi_xt,
+           (unsigned long)(((va >> 12) & 0x00000FFFFFFFFFFFULL)));
+}
+#else
+static int aarch64_cow_tlbi_diag_begin(task_t *t, mm_struct_t *mm, vaddr_t va,
+                                       vaddr_t leaf_base, size_t leaf_size,
+                                       pte_t *pte)
+{
+    (void)t;
+    (void)mm;
+    (void)va;
+    (void)leaf_base;
+    (void)leaf_size;
+    (void)pte;
+    return 0;
+}
+
+static void aarch64_cow_tlbi_diag_after(int enabled, task_t *t, mm_struct_t *mm,
+                                        vaddr_t va,
+                                        pte_t *pte, const char *branch)
+{
+    (void)enabled;
+    (void)t;
+    (void)mm;
+    (void)va;
+    (void)pte;
+    (void)branch;
+}
+#endif
 
 /*
  * Install one mapping through the transactional cursor.  Every fault-path PTE
@@ -278,6 +352,21 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
 }
 #endif /* CONFIG_NOMMU */
 
+/* COW may replace either a base-page leaf or an AArch64 PMD block leaf.
+ * arch_pte_leaf() always emits descriptor type 11, which is a table/page
+ * descriptor and therefore corrupts a level-2 block mapping. Preserve the
+ * block descriptor type when the lookup returned a huge leaf. */
+static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
+{
+#ifdef ARCH_HAS_PTE_BLOCK
+    if (leaf_size >= PMD_SIZE)
+        return arch_pte_block(pa, flags);
+#else
+    (void)leaf_size;
+#endif
+    return arch_pte_leaf(pa, flags);
+}
+
 static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                    pfn_t *old_pfn_out,
                                    page_cache_page_t **old_page_out) {
@@ -299,6 +388,8 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
     pte_t *pte = pt_lookup_leaf(t->mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
         return -1;
+    int cow_diag = aarch64_cow_tlbi_diag_begin(t, t->mm, stval, leaf_base,
+                                                leaf_size, pte);
 
     if (*pte & PTE_COW) {
         paddr_t old_pa = arch_pte_addr(*pte);
@@ -342,8 +433,11 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                 return -1;
             }
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
-            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
+                                        leaf_size);
             cow_sync_status(t->mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+                                         "cache-copy");
             arch_tlb_flush_page_local(stval);
             if (old_page_out)
                 *old_page_out = cache_page;
@@ -381,8 +475,11 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
              * fill walking the stale PTE reads the corrupted contents.  Updating
              * the PTE first means the page is released only after nothing
              * references it any more. */
-            *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
+                                        leaf_size);
             cow_sync_status(t->mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+                                         "copy");
             arch_tlb_flush_page_local(stval);
 
             /* Release only after the wrapper has completed the remote TLB
@@ -392,8 +489,10 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                 *old_pfn_out = old_pfn;
             return 0;
         } else {
-            *pte = arch_pte_leaf(old_pa, flags);
+            *pte = cow_replacement_leaf(old_pa, flags, leaf_size);
             cow_sync_status(t->mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+                                         "reuse");
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
             arch_tlb_flush_page_local(stval);
             return 0;
@@ -405,7 +504,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
         uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
                                   PTE_G | PTE_A | PTE_MAT1 |
                                   PTE_LEAF | PTE_COW)) | PTE_D;
-        *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+        *pte = cow_replacement_leaf(arch_pte_addr(*pte), flags, leaf_size);
         cow_sync_status(t->mm, leaf_base, mm_seg_find(t->mm, leaf_base));
         arch_tlb_flush_page_local(stval);
         return 0;

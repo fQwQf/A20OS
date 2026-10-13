@@ -126,23 +126,34 @@ static a20_status_t spawn_echod(a20_handle_t *out_ep, a20_handle_t *out_task)
 /* One RPC round trip; returns A20_OK when the reply echoes the request. */
 static a20_status_t echo_verify(a20_handle_t ep, uint32_t seq)
 {
+    /* ENVELOPE.size counts the whole frame, envelope and payload included,
+     * and the bytes are written by the generated little-endian codec rather
+     * than inherited from the struct layout. */
     struct {
         a20_idl_envelope_t env;
         a20_idl_svcmgr_echo_t body;
-    } req = {
-        { A20_SERVICES_IDL_VERSION, SVCMGR_REQ_ECHO, sizeof(req) },
-        { seq },
-    };
+    } req;
+    _Static_assert(sizeof(req) == A20_IDL_ENVELOPE_WIRE_SIZE +
+                                  A20_IDL_SVCMGR_ECHO_WIRE_SIZE,
+                   "echo frame: envelope and payload are contiguous");
+    uint8_t *wire = (uint8_t *)&req;
+    req.env.version = A20_SERVICES_IDL_VERSION;
+    req.env.type = SVCMGR_REQ_ECHO;
+    req.env.size = (uint32_t)sizeof(req);
+    req.body.seq = seq;
+    a20_idl_envelope_encode(wire, &req.env);
+    a20_idl_svcmgr_echo_encode(wire + A20_IDL_ENVELOPE_WIRE_SIZE, &req.body);
+
     uint8_t rep[sizeof(req)];
     uint32_t rep_len = sizeof(rep);
     uint32_t rep_hcnt = 0;
-    a20_status_t st = a20_channel_call(ep, &req, sizeof(req), 0, 0,
+    a20_status_t st = a20_channel_call(ep, wire, sizeof(req), 0, 0,
                                        rep, &rep_len, 0, &rep_hcnt);
     if (st < 0)
         return st;
     if (rep_len != sizeof(req))
         return -1000;
-    if (a20_memcmp(rep, &req, sizeof(req)) != 0)
+    if (a20_memcmp(rep, wire, sizeof(req)) != 0)
         return -1001;
     return A20_OK;
 }
@@ -177,10 +188,12 @@ int main(int argc, char **argv, char **envp)
 
     for (restarts = 1; restarts <= 2; restarts++) {
         /* Ask the service to crash; no reply is sent for this request. */
-        a20_idl_envelope_t crash_req = {
-            A20_SERVICES_IDL_VERSION, SVCMGR_REQ_CRASH, sizeof(crash_req)
-        };
-        if (a20_channel_send(ep, &crash_req, sizeof(crash_req), 0, 0) != A20_OK)
+        a20_idl_envelope_t crash_env;
+        crash_env.version = A20_SERVICES_IDL_VERSION;
+        crash_env.type = SVCMGR_REQ_CRASH;
+        crash_env.size = (uint32_t)sizeof(crash_env);
+        a20_idl_envelope_encode((uint8_t *)&crash_env, &crash_env);
+        if (a20_channel_send(ep, &crash_env, sizeof(crash_env), 0, 0) != A20_OK)
             return fail(5, "crash request failed");
 
         /* Wait for the EXITED event (bounded: 2 s). */

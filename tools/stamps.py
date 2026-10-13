@@ -94,6 +94,12 @@ def submake(args: list[str]) -> int:
     return r.returncode
 
 
+def resolved_user_build_dir(user_build_dir: str) -> Path:
+    """Resolve the user output directory exactly as the top-level Makefile does."""
+    path = Path(user_build_dir)
+    return path if path.is_absolute() else REPO / path
+
+
 @contextmanager
 def user_output_lock(user_build_dir: str):
     """Serialize stamp decisions and writers that share a user output tree.
@@ -143,9 +149,10 @@ def cmd_user(a) -> int:
         # the sibling stamp while holding the same output-root lock so another
         # make process cannot treat deleted native artifacts as current.
         (stamp.parent / ".native-build-id").unlink(missing_ok=True)
+        user_build_dir = resolved_user_build_dir(a.user_build_dir)
         common = [f"ARCH={a.arch}", f"NOMMU={a.nommu}",
                   f"OPT={a.user_opt}", f"PROFILE={a.profile}",
-                  f"BUILD_DIR=build/{a.user_variant}"]
+                  f"BUILD_DIR={user_build_dir}"]
         if need_clean:
             rc = submake(["-C", "user", *common, "clean"])
             if rc != 0:
@@ -160,13 +167,42 @@ def cmd_user(a) -> int:
 def cmd_native(a) -> int:
     if not a.build_id:
         raise SystemExit("error: native stamp needs --build-id")
-    with user_output_lock(a.stamp.rsplit("/", 1)[0]):
+    native_rust_peer = str(getattr(a, "native_rust_peer", "0"))
+    if native_rust_peer not in ("0", "1"):
+        raise SystemExit("error: --native-rust-peer must be 0 or 1")
+    user_build_dir = getattr(a, "user_build_dir", str(Path(a.stamp).parent))
+    resolved_build_dir = resolved_user_build_dir(user_build_dir)
+    rust_peer_binary = getattr(a, "rust_peer_binary", "")
+    peer_path = None
+    if rust_peer_binary:
+        candidate = Path(rust_peer_binary)
+        if not candidate.is_absolute():
+            candidate = REPO / candidate
+        if candidate.name in ("", ".", ".."):
+            raise SystemExit("error: Rust peer cleanup path must name a file")
+        # Resolve only the directory. Resolving the final component would
+        # follow a symlink and unlink its target instead of the generated
+        # directory entry when cleaning a disabled peer.
+        peer_path = candidate.parent.resolve() / candidate.name
+        if peer_path.parent != resolved_build_dir.resolve():
+            raise SystemExit("error: Rust peer cleanup path must be a top-level file in USER_BUILD_DIR")
+    with user_output_lock(str(resolved_build_dir)):
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
+        # The same native output directory is shared by C-only and opt-in
+        # builds. Include the selector in the cache identity so switching
+        # either way always runs the matching recursive native-programs build.
+        effective_build_id = f"{a.build_id}\nNATIVE_RUST_PEER={native_rust_peer}"
         need_build = False
-        if stamp_id(stamp) != a.build_id:
+        if stamp_id(stamp) != effective_build_id:
             need_build = True
         elif any(not os.access(REPO / b, os.X_OK) for b in a.binaries.split()):
+            need_build = True
+        elif (native_rust_peer == "0" and peer_path is not None and
+              (peer_path.exists() or peer_path.is_symlink())):
+            # A direct `native-rust-idl-peer` invocation can create the ELF
+            # without changing the C-only stamp. Force this build to clean it
+            # and rewrite the stamp so dependent images are rebuilt as well.
             need_build = True
         elif any_newer(stamp, a.roots.split(), []):
             need_build = True
@@ -175,10 +211,17 @@ def cmd_native(a) -> int:
             print(f"[NATIVE] {a.build_id} up to date")
             return 0
         rc = submake([f"ARCH={a.arch}", f"NOMMU={a.nommu}", f"OPT={a.opt}",
+                      f"NATIVE_RUST_PEER={native_rust_peer}",
+                      f"USER_BUILD_DIR={resolved_build_dir}",
                       "native-programs"])
         if rc != 0:
             return rc
-        stamp.write_text(a.build_id + "\n")
+        # The FAT image builder copies every top-level user build file. Remove
+        # only this generated opt-in artifact after a successful C-only build;
+        # otherwise a 1→0 transition would silently package a stale peer.
+        if native_rust_peer == "0" and peer_path is not None:
+            peer_path.unlink(missing_ok=True)
+        stamp.write_text(effective_build_id + "\n")
         return 0
 
 
@@ -296,7 +339,10 @@ def main() -> int:
             s.add_argument("--profile", default="")
             s.add_argument("--user-variant", required=True)
         else:
+            s.add_argument("--user-build-dir")
             s.add_argument("--binaries", default="")
+            s.add_argument("--native-rust-peer", choices=("0", "1"), default="0")
+            s.add_argument("--rust-peer-binary", default="")
     s = sub.add_parser("clean")
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])
