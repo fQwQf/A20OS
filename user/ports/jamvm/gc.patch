@@ -1,0 +1,207 @@
+--- a/thread.h
++++ b/thread.h
+@@ -81,7 +81,11 @@
+ 
+ typedef struct monitor {
+     pthread_mutex_t lock;
++#ifdef __a20__
++    _Atomic(Thread *) owner;
++#else
+     Thread *owner;
++#endif
+     Object *obj;
+     int count;
+     int in_wait;
+@@ -97,10 +101,18 @@
+     ExecEnv *ee;
+     void *stack_top;
+     void *stack_base;
++#ifdef __a20__
++    _Atomic(Monitor *) wait_mon;
++#else
+     Monitor *wait_mon;
++#endif
+     Monitor *blocked_mon;
+     Thread *wait_prev;
++#ifdef __a20__
++    _Atomic(Thread *) wait_next;
++#else
+     Thread *wait_next;
++#endif
+     pthread_cond_t wait_cv;
+     pthread_cond_t park_cv;
+     pthread_mutex_t park_lock;
+@@ -109,11 +121,24 @@
+     Thread *prev, *next;
+     unsigned int wait_id;
+     unsigned int notify_id;
++#ifdef __a20__
++    _Atomic char suspend;
++#else
+     char suspend;
++#endif
+     char park_state;
++#ifdef __a20__
++    _Atomic char interrupted;
++    _Atomic char interrupting;
++#else
+     char interrupted;
+     char interrupting;
++#endif
++#ifdef __a20__
++    _Atomic char suspend_state;
++#else
+     char suspend_state;
++#endif
+     CLASSLIB_THREAD_EXTRA_FIELDS
+ };
+ 
+@@ -158,6 +183,11 @@
+ 
+ extern Thread *findThreadById(long long id);
+ extern Thread *findRunningThreadByTid(int tid);
++#ifdef __a20__
++/* Called only at a complete bytecode boundary, with Java locals on the
++   interpreter stack. suspendLoop saves the C registers/stack before publish. */
++extern void nativeThreadSafepoint(Thread *thread);
++#endif
+ extern void suspendThread(Thread *thread);
+ extern void resumeThread(Thread *thread);
+ extern Object *runningThreadStackTrace(Thread *thread, int max_depth,
+--- a/thread.c
++++ b/thread.c
+@@ -874,7 +874,9 @@
+     if(thread->suspend_state == SUSP_NONE) {
+         TRACE("Sending suspend signal to thread %p id: %d\n",
+               thread, thread->id);
++#ifndef __a20__
+         pthread_kill(thread->tid, SIGUSR1);
++#endif
+     }
+ 
+     while(thread->suspend_state != SUSP_BLOCKING &&
+@@ -892,7 +894,9 @@
+     if(thread->suspend_state == SUSP_SUSPENDED) {
+         TRACE("Sending resume signal to thread %p id: %d\n",
+               thread, thread->id);
++#ifndef __a20__
+         pthread_kill(thread->tid, SIGUSR1);
++#endif
+     }
+ 
+     while(thread->suspend_state == SUSP_SUSPENDED) {
+@@ -918,6 +922,7 @@
+         if(thread->suspend_state == SUSP_NONE) {
+             TRACE("Sending suspend signal to thread %p id: %d\n",
+                   thread, thread->id);
++#ifndef __a20__
+             if(pthread_kill(thread->tid, SIGUSR1) == ESRCH) {
+                 /* ESRCH indicates that the thread has died.  This can only
+                    occur when an external thread has been attached to the VM
+@@ -932,6 +937,7 @@
+                       "as it has died\n", thread, thread->id);
+                 thread->suspend_state = SUSP_BLOCKING;
+             }
++#endif
+         }
+     }
+ 
+@@ -969,7 +975,9 @@
+         if(thread->suspend_state == SUSP_SUSPENDED) {
+             TRACE("Sending resume signal to thread %p id: %d\n",
+                   thread, thread->id);
++#ifndef __a20__
+             pthread_kill(thread->tid, SIGUSR1);
++#endif
+         }
+     }
+ 
+@@ -1006,16 +1014,38 @@
+     sigdelset(&mask, SIGUSR1);
+     sigdelset(&mask, SIGTERM);
+ 
+-    while(thread->suspend && old_state == SUSP_NONE)
++    while(thread->suspend && old_state == SUSP_NONE) {
++#ifdef __a20__
++        /* Native delivers handlers at libc checkpoints. A GC request must
++           also stop pure bytecode loops, so the interpreter cooperates here.
++           No internal SIGUSR1 is queued; nested handlers cannot replace the
++           saved stack_top while the collector is scanning it. */
++        sched_yield();
++#else
+         sigsuspend(&mask);
++#endif
++    }
+ 
+     thread->suspend_state = old_state;
+     MBARRIER();
+ }
+ 
++#ifdef __a20__
++void nativeThreadSafepoint(Thread *thread) {
++    if(thread->suspend && thread->suspend_state == SUSP_NONE)
++        suspendLoop(thread);
++}
++#endif
++
+ static void suspendHandler(int sig) {
+     Thread *thread = threadSelf();
++#ifdef __a20__
++    /* Interrupting a blocked JNI/VM wait must preserve its published roots.
++       The EINTR is enough; only an active VM suspension request needs a stop. */
++    nativeThreadSafepoint(thread);
++#else
+     suspendLoop(thread);
++#endif
+ }
+ 
+ /* The "slow" disable.  Normally used when a thread enters
+--- a/lock.c
++++ b/lock.c
+@@ -223,6 +223,13 @@
+         /* Add the thread onto the end of the wait set */
+         waitSetAppend(mon, self);
+ 
++#ifdef __a20__
++        /* Close the interrupt-before-enqueue window. The interrupter either
++           sees this published wait set or this final check sees its flag. */
++        if(interruptible && self->interrupted)
++            self->interrupting = TRUE;
++#endif
++
+         if(timed)
+             getTimeoutRelative(&ts, ms, ns);
+ 
+--- a/interp/engine/interp-indirect.h
++++ b/interp/engine/interp-indirect.h
+@@ -18,6 +18,22 @@
+  * along with this program; if not, write to the Free Software
+  * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+  */
++
++#ifdef __a20__
++#if defined(THREADED) || defined(USE_CACHE)
++#error "Native GC safepoints currently require the uncached switch interpreter"
++#endif
++#define NATIVE_GC_SAFEPOINT()                                 \
++    do {                                                     \
++        Thread *self = threadSelf();                         \
++        if(self->suspend) {                                  \
++            frame->last_pc = pc;                             \
++            nativeThreadSafepoint(self);                     \
++        }                                                    \
++    } while(0)
++#else
++#define NATIVE_GC_SAFEPOINT() do { } while(0)
++#endif
+ 
+ #ifdef THREADED
+ #include "interp-threading.h"
+@@ -117,6 +133,7 @@
+ #define DISPATCH(level, ins_len)                \
+ {                                               \
+     pc += ins_len;                              \
++    NATIVE_GC_SAFEPOINT();                       \
+     break;                                      \
+ }
+ #endif

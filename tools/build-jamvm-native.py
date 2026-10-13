@@ -131,6 +131,8 @@ def main():
         run(['make', 'install'], ffi, 'ffi-install', env)
         run(['patch', '-p1', '--fuzz=0', '-i', str(port / 'native.patch')],
             source / 'jamvm-2.0.0', 'jamvm-native-patch')
+        run(['patch', '-p1', '--fuzz=0', '-i', str(port / 'gc.patch')],
+            source / 'jamvm-2.0.0/src', 'jamvm-native-gc-patch')
         jam = source / 'jamvm-2.0.0/src'
         generated = output / 'generated'
         generated.mkdir()

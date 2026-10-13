@@ -102,7 +102,8 @@ def main():
                     raise ValueError('class library checksum mismatch: ' + name)
                 shutil.copy2(library / name, frozen / name)
             shutil.copy2(ROOT / 'user/tests/test_jamvm_execution.c', frozen / 'test_jamvm_execution.c')
-            shutil.copy2(ROOT / 'user/tests/java/A20NativeWorkload.java', frozen / 'A20NativeWorkload.java')
+            for name in ['A20NativeWorkload.java', 'A20NativeGC.java']:
+                shutil.copy2(ROOT / 'user/tests/java' / name, frozen / name)
         native = out / 'native'
         native.mkdir()
         for name in ['sysroot', 'objects', 'generated', 'deps', 'inputs']:
@@ -206,7 +207,8 @@ def main():
             classes.mkdir()
             run([args.java, '-Xmx768m', '-jar', str(frozen / 'ecj-4.6.1.jar'),
                  '-source', '1.5', '-target', '1.5', '-bootclasspath', str(frozen / 'glibj.zip'),
-                 '-d', str(classes), str(frozen / 'A20NativeWorkload.java')], out, 'java-workload-compile')
+                 '-d', str(classes), str(frozen / 'A20NativeWorkload.java'),
+                 str(frozen / 'A20NativeGC.java')], out, 'java-workload-compile')
             with zipfile.ZipFile(out / 'workload.jar', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
                 for path in sorted(classes.rglob('*.class')):
                     data = path.read_bytes()
@@ -214,6 +216,7 @@ def main():
                         raise ValueError('expected real Java 5 class file')
                     archive.write(path, str(path.relative_to(classes)))
             report['java_workload_sha256'] = sha(out / 'workload.jar')
+            report['gc_workload_built'] = True
         registry = out / 'registry.c'
         text = '#include "static-jni.h"\n#include <jni.h>\n'
         text += ''.join('#include <' + header + '>\n' for header in sorted(headers))
