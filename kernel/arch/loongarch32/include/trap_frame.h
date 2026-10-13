@@ -102,6 +102,14 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
     (void)stack_top;
 }
 
+/* Stack pointer __switch will resume this context with: __switch derives it
+ * from the context pointer itself (sp = ctx + TASK_CONTEXT_SIZE), so the saved
+ * sp field is not the resume value.  context_switch_locked() range-checks
+ * this value against the task's kernel stack on every switch. */
+static inline uintptr_t arch_task_context_resume_sp(const task_context_t *ctx) {
+    return (uintptr_t)ctx + TASK_CONTEXT_SIZE;
+}
+
 static inline task_context_t *arch_task_context_base(void *kstack_base,
                                                       uint32_t stack_top,
                                                       trap_context_t *trap) {
