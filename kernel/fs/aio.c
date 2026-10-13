@@ -252,7 +252,7 @@ int aio_context_destroy(struct mm_struct *mm, uint64_t ctx)
 static int64_t aio_do_io(int fd, uint64_t buf, uint64_t nbytes,
                          int64_t offset, int write)
 {
-    if (offset < 0 || nbytes > (uint64_t)INT64_MAX - (uint64_t)offset)
+    if (offset < 0 || nbytes > (uint64_t)__INT64_MAX__ - (uint64_t)offset)
         return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0)
