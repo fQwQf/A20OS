@@ -12,6 +12,7 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/timekeeping.h"
+#include "core/lock_counters.h"
 #include "cg/cgroup.h"
 #include "ipc/keyring.h"
 #include "ipc/landlock.h"
@@ -62,10 +63,22 @@ task_t *proc_task_alloc_storage(void)
     return t;
 }
 
+/* Task objects are freed, while the counter registry keeps pointers forever.
+ * Aggregate park contention into one static sink, including callsite samples. */
+static spinlock_t park_counters = SPINLOCK_INIT;
+
+void proc_task_park_counters_init(void)
+{
+    lock_counters_register(&park_counters, "park_lock");
+    lock_counters_enable_callsite(&park_counters);
+}
+
 void proc_task_init_idle_state(task_t *t, unsigned cpu)
 {
     if (!t)
         return;
+    spin_init(&t->park_lock);
+    t->park_lock.counter_sink = &park_counters;
     refcount_set(&t->refs, 1);
     proc_lifetime_note_task_init(0);
     t->destroy_started = 0;
@@ -136,6 +149,11 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->eevdf_last_account = 0;
     t->sched_policy = parent ? parent->sched_policy : SCHED_NORMAL;
     t->sched_reset_on_fork = 0;
+    t->fault_storm_pc = 0;
+    t->fault_storm_va = 0;
+    t->fault_storm_cause = 0;
+    t->fault_storm_start = 0;
+    t->fault_storm_count = 0;
     t->waiting_for_child = 0;
     t->exit_pending = 0;
     t->pending_exit_code = 0;
@@ -150,6 +168,7 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
     t->wake_reason = PROC_WAKE_NONE;
     spin_init(&t->park_lock);
+    t->park_lock.counter_sink = &park_counters;
     completion_init(&t->vfork_done);
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
@@ -220,6 +239,14 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
      * is enforced at fork time against a uid-wide count. */
     t->limits.as = parent ? parent->limits.as : 0;
     t->limits.nproc = parent ? parent->limits.nproc : 0;
+    t->limits.rtprio = 0;
+    t->limits.rtprio_max = 0;
+    if (parent) {
+        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
+        t->limits.rtprio = parent->limits.rtprio;
+        t->limits.rtprio_max = parent->limits.rtprio_max;
+        spin_unlock_irqrestore(&parent->park_lock, pf);
+    }
     t->mm        = NULL;
     t->first_kernel_entry = 0;
 

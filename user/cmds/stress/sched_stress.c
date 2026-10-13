@@ -9,6 +9,7 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -197,6 +198,48 @@ static int priority_bounds(void)
     errno = 0;
     if (syscall(SYS_sched_get_priority_min, 999) >= 0 || errno != EINVAL)
         return fail("invalid-policy-prio");
+    return 0;
+}
+
+static int rt_permission_limits(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) return fail("rt-limit-fork");
+    if (pid == 0) {
+        struct rlimit limit = { .rlim_cur = 0, .rlim_max = 10 };
+        struct sched_param param = { .sched_priority = 1 };
+        if (setrlimit(RLIMIT_RTPRIO, &limit) || setuid(1000))
+            _exit(fail("rt-limit-setup"));
+        errno = 0;
+        if (sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
+            _exit(fail("rt-zero-limit-entry"));
+        limit.rlim_cur = 10;
+        if (setrlimit(RLIMIT_RTPRIO, &limit))
+            _exit(fail("rt-soft-raise"));
+        struct rlimit observed;
+        if (getrlimit(RLIMIT_RTPRIO, &observed) || observed.rlim_cur != 10 ||
+            observed.rlim_max != 10)
+            _exit(fail("rt-limit-roundtrip"));
+        limit.rlim_max = 11;
+        errno = 0;
+        if (setrlimit(RLIMIT_RTPRIO, &limit) != -1 || errno != EPERM)
+            _exit(fail("rt-hard-raise"));
+        param.sched_priority = 11;
+        errno = 0;
+        if (sched_setscheduler(0, SCHED_FIFO, &param) != -1 || errno != EPERM)
+            _exit(fail("rt-over-limit"));
+        param.sched_priority = 10;
+        if (sched_setscheduler(0, SCHED_FIFO, &param))
+            _exit(fail("rt-within-limit"));
+        param.sched_priority = 0;
+        if (sched_setscheduler(0, SCHED_OTHER, &param))
+            _exit(fail("rt-limit-restore"));
+        _exit(0);
+    }
+    int status;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status))
+        return fail("rt-permission-child");
+    printf("SCHED_STRESS: rt permission/limits ok\n");
     return 0;
 }
 
@@ -661,6 +704,59 @@ static int cgroup_cpuset_affinity(void)
     return 0;
 }
 
+static int rt_bandwidth_progress(void)
+{
+    unsigned char original[8] = {0};
+    unsigned cpu = 0;
+    if (syscall(SYS_sched_getaffinity, 0, sizeof(original), original) <= 0 ||
+        syscall(SYS_getcpu, &cpu, NULL, NULL) < 0 ||
+        set_single_cpu_retry(0, cpu) != 0)
+        return fail("rt-budget-affinity");
+    unsigned long *progress = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (progress == MAP_FAILED)
+        return fail("rt-budget-map");
+    int ready[2];
+    if (pipe(ready) < 0)
+        return fail("rt-budget-pipe");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("rt-budget-fork");
+    if (!child) {
+        close(ready[0]);
+        struct sched_param param = {.sched_priority = 99};
+        if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &param) < 0 ||
+            write(ready[1], "R", 1) != 1)
+            _exit(2);
+        for (;;)
+            __atomic_fetch_add(progress, 1, __ATOMIC_RELAXED);
+    }
+    close(ready[1]);
+    char byte = 0;
+    int result = wait_byte(ready[0], &byte, 3000);
+    close(ready[0]);
+    unsigned long last = __atomic_load_n(progress, __ATOMIC_RELAXED);
+    for (int i = 0; result == 0 && i < 2; i++) {
+        usleep(550000);
+        usleep(550000);
+        unsigned long next = __atomic_load_n(progress, __ATOMIC_RELAXED);
+        if (next == last)
+            result = -1;
+        last = next;
+    }
+    /* Reaching here proves normal work on the SAME CPU progresses beside a
+     * non-yielding FIFO task; increasing counters prove budget replenishment. */
+    if (kill(child, SIGKILL) < 0 || waitpid(child, NULL, 0) != child)
+        result = -1;
+    munmap(progress, 4096);
+    if (syscall(SYS_sched_setaffinity, 0, sizeof(original), original) < 0)
+        result = -1;
+    if (result || byte != 'R' || !last)
+        return fail("rt-budget-progress");
+    printf("SCHED_STRESS: rt-bandwidth-progress PASS\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("SCHED_STRESS: start\n");
@@ -668,7 +764,11 @@ int main(void)
         return 1;
     if (policy_param_roundtrip() != 0)
         return 1;
+    if (rt_permission_limits() != 0)
+        return 1;
     if (affinity_roundtrip() != 0)
+        return 1;
+    if (rt_bandwidth_progress() != 0)
         return 1;
     if (smp_runqueue_preempt() != 0)
         return 1;

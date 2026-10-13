@@ -35,27 +35,28 @@
 `kernel/include/core/lock.h` 中的全局顺序为：
 
 ```text
-cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
-proc_lock -> park_lock
-proc_lock -> runq_lock
-proc_lock -> signal_state.lock
+tasklist_lock -> park_lock -> runq_lock -> pfa.lock
+tasklist_lock -> runq_lock
 park_lock -> signal_state.lock
 park_lock -> g_wait_timer_lock
-park_lock -> runq_lock
-proc_lock -> files_struct.lock -> VFS global-file/vnode locks
-proc_lock -> mm_struct.lock
-proc_lock -> a20_handle_table.lock
+park_lock -> files_struct.lock -> VFS global-file/vnode locks
+park_lock -> mm_struct.lock
+park_lock -> a20_handle_table.lock
 driver registry/IRQ locks -> device-private locks
-g_lwip_lock -> g_net_lock
-g_lwip_lock -> virtio-net nonblocking send/recv paths only
+lwIP ingress -> stage frame -> release ingress -> lane/control core
+lwIP lane/control -> keyed shared guard (released before socket/ingress locks)
+lwIP core -> heap -> allocator SYS_ARCH_PROTECT
+lwIP TX staging -> conntrack/NAT guard (released) -> nonblocking driver
 ```
 
-`g_lwip_lock -> g_net_lock` 是全局允许顺序的上界；当前网络实现采用更严格规则：二者不同时持有，lwIP callback 通过原子 ring 把工作转交给只持有 `g_net_lock` 的 bottom-half。驱动侧仍会在 `g_lwip_lock` 外层进入非阻塞设备私有锁。
+`cg_node.lock` 不与 `tasklist_lock` 同持。lwIP core 锁不与 socket 或
+socket-table bucket 锁嵌套，回调通过延后工作进入 socket 状态；设备回调必须非阻塞
+且不得同步重入 lwIP。具体多 lane 顺序见 [网络锁契约](../../net/network-lock-contract.md)。
 
 对驱动而言，这意味着：
 
 - 设备私有锁永远是最内层锁。
-- 持有设备私有锁时，绝不能获取 `proc_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
+- 持有设备私有锁时，绝不能获取 `tasklist_lock` 或 `park_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
 - 持有 spinlock 时绝不能阻塞、睡眠或调入调度器。
 - 持有设备锁或 lwIP 锁时，绝不能调用内存分配、VFS 或 scheduler 路径，除非 callee 明确记录为非阻塞。
 
@@ -93,7 +94,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 ### UART
 
-`rx_lock` 是单个全局 spinlock，保护接收环形缓冲区（`rx_buffer`、`rx_head`、`rx_tail`）、`rx_waiter` 和 `tty_foreground_pgid`。它没有局部顺序，`rx_lock` 不与 `proc_lock` 嵌套：
+`rx_lock` 是单个全局 spinlock，保护接收环形缓冲区（`rx_buffer`、`rx_head`、`rx_tail`）、`rx_waiter` 和 `tty_foreground_pgid`。它没有局部顺序，`rx_lock` 不与 `tasklist_lock` 或 `park_lock` 嵌套：
 
 - 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和前台 PGID。
 - RX 唤醒在 `rx_lock` 下 collect wait entry，释放锁后 flush wake queue。
@@ -361,7 +362,7 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
    - `PTY` 在 `g_pty_alloc_lock` 下执行 `kmalloc`，并在 per-pair lock 下执行最终 `kfree`。驱动完成路径若需要唤醒任务，只能在驱动锁内 collect，在解锁后 flush。 USB storage 的锁内同步硬件等待和 USB HID completion 的锁覆盖缺口是已知不符合项，不属于允许例外。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
-> 不要在设备锁下调用 `kmalloc`、VFS 或 scheduler；不要在 spinlock 里轮询硬件直到超时；不要临时发明"先拿设备锁，再拿 proc_lock"这种嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing-gates.md)。
+> 不要在设备锁下调用 `kmalloc`、VFS 或 scheduler；不要在 spinlock 里轮询硬件直到超时；不要临时发明"先拿设备锁，再拿 tasklist_lock/park_lock"这种嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing-gates.md)。
 
 ## 参考
 

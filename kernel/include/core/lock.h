@@ -178,6 +178,9 @@ typedef struct spinlock {
      * lock_counters_enable_callsite()); the contended path records the
      * caller's return address so the audit can attribute contention. */
     struct lock_callsite_sample *samples;
+    /* Optional static aggregate for short-lived locks. Set before publishing
+     * the lock; never register a task-owned pointer in the static registry. */
+    struct spinlock *counter_sink;
 } spinlock_t;
 
 /* Per-callsite contention record.  Only the contended path touches the sample
@@ -190,7 +193,7 @@ typedef struct lock_callsite_sample {
     uint64_t max_spins;
 } lock_callsite_sample_t;
 
-#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL, 0, 0, 0, NULL }
+#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL, 0, 0, 0, NULL, NULL }
 
 /* GCC/clang expose no atomic fetch-max builtin, so a monotonic max needs a CAS
  * loop.  Contended path only, matching the counter discipline above. */
@@ -213,6 +216,7 @@ static inline void spin_init(spinlock_t *lock) {
     lock->contended_spins = 0;
     lock->contended_max_spins = 0;
     lock->samples = NULL;
+    lock->counter_sink = NULL;
 }
 
 static inline void spin_set_debug(spinlock_t *lock, const char *name, void *container) {
@@ -235,23 +239,12 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
      * enter the critical section unlocked (two CPUs both believing they hold
      * the lock).  The counters are only touched when the lock is contended,
      * so the uncontended fast path stays a single exchange. */
-    /* Resolve the call-site slot before waiting.  The spin count is only known
+    /* Resolve the call-site slot on the first contended observation. The spin count is only known
      * once the inner loop drains, and it has to land on the same slot the
      * acquire is charged to; resolving it up front is what lets the audit show
      * per-site spin cost instead of a column that merely repeats the acquires. */
     lock_callsite_sample_t *site = NULL;
-    if (lock->samples) {
-        unsigned slot = (unsigned)(((waiter_ra >> 4) ^ (waiter_ra >> 20)) &
-                                   (LOCK_CALLSITE_SAMPLES - 1));
-        site = &lock->samples[slot];
-        if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra) {
-            uintptr_t expect = 0;
-            __atomic_compare_exchange_n(&site->ra, &expect, waiter_ra, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-        }
-        if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra)
-            site = NULL;
-    }
+    spinlock_t *counters = lock;
     for (;;) {
         /* Publish non-preemptibility before ownership becomes visible.  If an
          * enabled timer IRQ lands after the exchange but before this counter
@@ -263,9 +256,6 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
             break;
         preempt_enable();
 
-        __atomic_fetch_add(&lock->contended_acquires, 1, __ATOMIC_RELAXED);
-        if (site)
-            __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
         uint64_t spun_before = spins;
         /* The stall clock and the reporting identity are read on the first
          * contended observation, not before the exchange: timer_get_ticks()
@@ -273,11 +263,27 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
          * cpuid on SMP x86, and neither value means anything until this CPU
          * has actually failed to take the lock. */
         if (!armed) {
+            counters = lock->counter_sink ? lock->counter_sink : lock;
+            lock_callsite_sample_t *samples =
+                __atomic_load_n(&counters->samples, __ATOMIC_ACQUIRE);
+            if (samples) {
+                unsigned slot = (unsigned)(((waiter_ra >> 4) ^ (waiter_ra >> 20)) &
+                                           (LOCK_CALLSITE_SAMPLES - 1));
+                site = &samples[slot];
+                uintptr_t expect = 0;
+                __atomic_compare_exchange_n(&site->ra, &expect, waiter_ra, 0,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+                if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra)
+                    site = NULL;
+            }
             armed = 1;
             stall_start = timer_get_ticks();
             next_report = stall_start + MS_TO_TICKS(5000);
             cur = proc_current();
         }
+        __atomic_fetch_add(&counters->contended_acquires, 1, __ATOMIC_RELAXED);
+        if (site)
+            __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
                 uint64_t now = timer_get_ticks();
@@ -317,8 +323,8 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                                __ATOMIC_RELAXED);
     }
     if (spins) {
-        __atomic_fetch_add(&lock->contended_spins, spins, __ATOMIC_RELAXED);
-        spin_atomic_max(&lock->contended_max_spins, spins);
+        __atomic_fetch_add(&counters->contended_spins, spins, __ATOMIC_RELAXED);
+        spin_atomic_max(&counters->contended_max_spins, spins);
         if (site)
             spin_atomic_max(&site->max_spins, spins);
     }

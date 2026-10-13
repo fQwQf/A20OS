@@ -64,7 +64,8 @@ prepare 与 commit 之间的本地 yield 不属于等待事件：它只在 `park
 
 | 数据 | 锁或所有权 |
 | --- | --- |
-| task list、parent/wait、reap、非本地-pick 状态转换 | `proc_lock` |
+| task list、parent/children、thread-group 链与 wait/reap 扫描 | `tasklist_lock` |
+| task 状态、CPU 运行发布、MM/files/cred 指针 | 对应 task 的 `park_lock` |
 | `wait_seq`、Park 状态、唤醒原因与 deadline | 对应 task 的 `park_lock` |
 | Park timeout heap | `g_wait_timer_lock` |
 | PID hash | 独立 PID 锁；查询返回带引用的 task |
@@ -76,18 +77,17 @@ prepare 与 commit 之间的本地 yield 不属于等待事件：它只在 `park
 主要顺序是：
 
 ```text
-cg_node.lock -> proc_lock -> runq.lock -> pfa.lock
-proc_lock -> park_lock
-proc_lock -> signal_state.lock
+tasklist_lock -> park_lock -> runq.lock -> pfa.lock
+tasklist_lock -> park_lock
 park_lock -> signal_state.lock
 park_lock -> g_wait_timer_lock
 park_lock -> runq.lock
-proc_lock -> files_struct.lock -> VFS locks
-proc_lock -> mm->lock
-proc_lock -> a20_handle_table.lock
+park_lock -> files_struct.lock -> VFS locks
+park_lock -> mm->lock
+park_lock -> a20_handle_table.lock
 ```
 
-本地 picker 是唯一重要例外：它只获取当前 CPU 的 `runq.lock`，完成`on_rq -> dispatching` 和引用转交后先释放队列锁，调用者随后才获取`proc_lock` 发布切换。任何路径都不得在持有 runqueue 锁时反向获取`proc_lock`。
+本地 picker 是唯一重要例外：它只获取当前 CPU 的 `runq.lock`，完成`on_rq -> dispatching` 和引用转交后先释放队列锁，调用者随后按地址升序获取 current/next 的 `park_lock` 复核并发布切换。任何路径都不得在持有 runqueue 锁时反向获取 `park_lock` 或 `tasklist_lock`。
 
 ## 3. Per-CPU runqueue 与迁移
 
@@ -95,10 +95,23 @@ proc_lock -> a20_handle_table.lock
 
 每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
 
+设置 RT policy/priority 的核心入口 `proc_sched_set()` 在目标 `park_lock` 内检查
+`CAP_SYS_NICE` 或 `RLIMIT_RTPRIO` 软上限；已有 RT 任务允许降优先级，不能借此
+越过当前优先级与软上限的较大值。RTPRIO 默认软硬上限均为零，fork 继承快照，
+提高硬上限要求 `CAP_SYS_RESOURCE`。Linux 修改其他用户任务还检查属主，
+Native 仍要求相应 TASK handle rights。
+
+RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在 runqueue 锁内
+计量。预算耗尽后暂停选择 RT 任务，`sched()` 也不得因 current 的 RT 优先级
+保留它；下周期恢复。暂停的任务保留队列引用和调度策略；无普通任务时 idle
+允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数
+（需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。
+`sched_stress` 新增同 CPU 普通进展与 RT 恢复断言；本轮尚未运行。
+
 本地选择分两段：
 
 1. `proc_runq_pick_local()` 只持有本 CPU 的 runqueue 锁，选择任务并原子地 转为 `dispatching`；本地队列为空时，它还会在持有本地锁的情况下尝试从 其他 CPU 的非阻塞窃取（只窃 EEVDF 任务、远端 `nr_running >= 2`、且本地 CPU 在被窃任务的允许掩码内）；
-2. `sched()` 释放 runqueue 锁后获取 `proc_lock`，复核 current/next， 必要时 unpick，随后发布 context switch。
+2. `sched()` 释放 runqueue 锁后获取 current/next 的 `park_lock`，复核 current/next， 必要时 unpick，随后发布 context switch。
 
 迁移一个已排队任务时，同时获取源、目标 runqueue 锁，锁顺序固定为 CPU 编号升序。任务在受锁保护的短暂区间内先从源队列摘除、更新 `cpu_id`，再进入目标队列；runqueue 持有的引用贯穿整个迁移，不发生释放后重取。
 
@@ -237,14 +250,13 @@ Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，
 共享 `signal_state` 保护 action、process pending、siginfo；同一对象下各 task 的 blocked mask、thread pending、`sigsuspend` 和 `sigtimedwait` 交接也受这把锁保护。需要同时持锁时顺序为：
 
 ```text
-proc_lock -> signal_state.lock
 park_lock -> signal_state.lock
-proc_lock -> park_lock -> signal_state.lock
+tasklist_lock -> park_lock -> signal_state.lock
 ```
 
 `PROC_STOPPED` 不使用 Park token，也不通过普通 `proc_make_ready()` 恢复。只有 `SIGCONT`、致命信号或任务退出通过显式 stopped-resume 路径改变状态；`WUNTRACED`/`WCONTINUED` 事件用一次性标志报告给父进程。
 
-远程退出发布持久 `exit_pending` 后，总会在 `proc_lock -> park_lock` 下对当前序列尝试 `PROC_WAKE_TASK_EXIT`，从而覆盖 `PREPARING -> PARKED` 窗口。它不能把任意 `BLOCKED` 任务直接改成 READY；不可中断等待仍需等对象操作结束，再在安全点观察退出请求。
+远程退出发布持久 `exit_pending` 后，总会在目标任务 `park_lock` 下对当前序列尝试 `PROC_WAKE_TASK_EXIT`，从而覆盖 `PREPARING -> PARKED` 窗口。它不能把任意 `BLOCKED` 任务直接改成 READY；不可中断等待仍需等对象操作结束，再在安全点观察退出请求。
 
 ## 9. Task 引用和异步所有者
 

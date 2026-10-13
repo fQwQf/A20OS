@@ -11,6 +11,9 @@ uint64_t g_perf_sw_page_faults_maj;
 uint64_t g_perf_sw_context_switches;
 
 static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
+    [A20_PERF_KERNEL_PREEMPTS] = "kernel_preempts",
+    [A20_PERF_TRAP_STORMS] = "trap_storms",
+    [A20_PERF_RT_THROTTLES] = "rt_throttles",
     [A20_PERF_VMA_LOOKUPS] = "vma_lookups",
     [A20_PERF_VMA_LOOKUP_STEPS] = "vma_lookup_steps",
     [A20_PERF_PAGE_CACHE_SCAN_CALLS] = "page_cache_scan_calls",

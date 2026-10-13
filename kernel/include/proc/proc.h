@@ -93,6 +93,8 @@ typedef struct proc_limits {
     uint64_t memlock;
     uint64_t as;      /* RLIMIT_AS: address-space bytes, 0 = unlimited */
     uint64_t nproc;   /* RLIMIT_NPROC: processes per uid, 0 = unlimited */
+    uint64_t rtprio;  /* RLIMIT_RTPRIO: zero forbids unprivileged RT entry */
+    uint64_t rtprio_max; /* Hard ceiling; both fields guarded by park_lock. */
 } proc_limits_t;
 
 typedef struct proc_policy {
@@ -299,6 +301,13 @@ typedef struct task_t {
     uint64_t eevdf_last_account; /* tick stamp of the last vruntime charge */
     int      sched_policy;
     int      sched_reset_on_fork;
+    /* Written only by this task's user-trap path. Interrupts do not reset a
+     * synchronous-fault streak; syscalls and different faults do. */
+    vaddr_t  fault_storm_pc;
+    vaddr_t  fault_storm_va;
+    reg_t    fault_storm_cause;
+    uint64_t fault_storm_start;
+    uint32_t fault_storm_count;
     int      waiting_for_child;
     int      exit_pending;
     int      pending_exit_code;

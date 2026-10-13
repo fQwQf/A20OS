@@ -51,6 +51,12 @@ typedef struct __attribute__((aligned(64))) proc_runq {
         task_t *tail;
     } rt_q[RT_PRI_LEVELS];
     uint32_t rt_bitmap[RT_BITMAP_WORDS];
+    /* Per-CPU RT bandwidth: reserve 5% of every second for normal work.
+     * All fields are protected by this runqueue's lock. */
+    uint64_t rt_period_start;
+    uint64_t rt_last_account;
+    uint64_t rt_used;
+    unsigned rt_account_initialized;
     /* Level 1: EEVDF — randomized BST ordered by earliest virtual deadline,
      * augmented with subtree-min vruntime for eligible-gated O(log n) pick. */
     eevdf_node_t *eevdf_root;
@@ -184,6 +190,54 @@ static int sched_level_clamp(int level) {
 static int sched_task_rt(task_t *t)
 {
     return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
+}
+
+static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
+{
+    uint64_t period = TICKS_PER_SEC;
+    if (period < 2)
+        period = 2;
+    uint64_t reserve = period / 20;
+    if (!reserve)
+        reserve = 1;
+    uint64_t budget = period - reserve;
+    int was_throttled = rq->rt_used >= budget;
+    if (!rq->rt_account_initialized) {
+        rq->rt_account_initialized = 1;
+        rq->rt_period_start = now;
+        rq->rt_last_account = now;
+    }
+    if (now - rq->rt_period_start >= period) {
+        rq->rt_period_start = now - (now - rq->rt_period_start) % period;
+        rq->rt_used = 0;
+    }
+    uint64_t since = rq->rt_last_account;
+    if (since < rq->rt_period_start)
+        since = rq->rt_period_start;
+    task_t *current = proc_current();
+    if (current && current->pid && sched_task_rt(current)) {
+        uint64_t elapsed = now - since;
+        rq->rt_used = elapsed >= budget - rq->rt_used
+                    ? budget : rq->rt_used + elapsed;
+    }
+    rq->rt_last_account = now;
+    int throttled = rq->rt_used >= budget;
+    if (throttled && !was_throttled)
+        a20_perf_add(A20_PERF_RT_THROTTLES, 1);
+    /* Tick while idle also replenishes a throttled queue.  Its runnable RT
+     * tasks keep their queue references and become selectable next period. */
+    if (throttled != was_throttled)
+        proc_sched_request_cpu(cpu_current_id(), 0);
+    return throttled;
+}
+
+static int sched_rt_throttled_local(void)
+{
+    unsigned cpu = cpu_current_id();
+    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
+    int throttled = sched_rt_account_locked(&sched_runq[cpu], timer_get_ticks());
+    RUNQ_UNLOCK_IRQ(cpu, rf);
+    return throttled;
 }
 
 static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
@@ -732,7 +786,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     const uint32_t all_fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY |
                                 PROC_SCHED_AFFINITY | PROC_SCHED_NICE;
     if (!t || !config || (config->fields & ~all_fields))
-        return -1;
+        return -EINVAL;
 
     /* Remove the old queue entry before changing keys: pickers use only
      * runqueue locks, so park_lock alone does not protect queued keys. */
@@ -754,6 +808,26 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if ((config->fields & PROC_SCHED_NICE) &&
         (config->nice < -20 || config->nice > 19))
         goto invalid;
+    if ((config->fields & PROC_SCHED_POLICY) && t->sched_reset_on_fork &&
+        !config->reset_on_fork && !proc_has_cap(proc_current(), CAP_SYS_NICE)) {
+        spin_unlock_irqrestore(&t->park_lock, lock_flags);
+        return -EPERM;
+    }
+    /* Both ABIs reach this choke point. A delegated Native CONTROL handle
+     * does not grant unlimited CPU priority. Limit checks and policy changes
+     * share park_lock with prlimit, so a concurrent limit reduction is ordered. */
+    if ((config->fields & (PROC_SCHED_POLICY | PROC_SCHED_PRIORITY)) &&
+        sched_policy_rt_value(policy) &&
+        !proc_has_cap(proc_current(), CAP_SYS_NICE)) {
+        uint64_t ceiling = t->limits.rtprio;
+        if (sched_policy_rt_value(t->sched_policy) && t->priority > 0 &&
+            (uint64_t)t->priority > ceiling)
+            ceiling = (uint64_t)t->priority;
+        if (!ceiling || (uint64_t)priority > ceiling) {
+            spin_unlock_irqrestore(&t->park_lock, lock_flags);
+            return -EPERM;
+        }
+    }
     uint32_t affinity_eligible = 0;
     if (config->fields & PROC_SCHED_AFFINITY) {
         uint32_t eligible = config->affinity & smp_online_cpu_mask();
@@ -842,7 +916,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
 
 invalid:
     spin_unlock_irqrestore(&t->park_lock, lock_flags);
-    return -1;
+    return -EINVAL;
 }
 
 unsigned proc_sched_select_cpu(task_t *t)
@@ -980,6 +1054,7 @@ void proc_sched_tick(int from_user)
         proc_sched_scan_signal_timers(now);
     unsigned tick_cpu = cpu_current_id();
     if (tick_cpu < CONFIG_NR_CPUS) {
+        (void)sched_rt_throttled_local();
         if (cur->pid == 0)
             __atomic_fetch_add(&g_cpu_ticks[tick_cpu].idle, 1,
                                __ATOMIC_RELAXED);
@@ -1071,6 +1146,7 @@ void kernel_preempt_at_irq_return(void)
         return;
     if (cur->state != PROC_RUNNING)
         return;
+    a20_perf_count(A20_PERF_KERNEL_PREEMPTS);
     /* sched()'s slow helpers (bottom halves, zombie reaping, the timer scan)
      * reach code that expects interrupts on, so hand them a CPU with
      * interrupts on rather than resuming into them masked. */
@@ -1100,10 +1176,9 @@ int proc_sched_idle_prepare(void)
         return 0;
 
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
-    int idle = rt_queues_empty(&sched_runq[cpu]) &&
+    int rt_throttled = sched_rt_account_locked(&sched_runq[cpu], timer_get_ticks());
+    int idle = (rt_queues_empty(&sched_runq[cpu]) || rt_throttled) &&
                sched_runq[cpu].eevdf_root == NULL &&
-               __atomic_load_n(&sched_runq[cpu].nr_running,
-                               __ATOMIC_ACQUIRE) == 0 &&
                !__atomic_load_n(&sched_cpu[cpu].need_resched,
                                 __ATOMIC_ACQUIRE);
     RUNQ_UNLOCK_IRQ(cpu, rf);
@@ -1695,11 +1770,12 @@ task_t *proc_runq_pick_local(void)
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
 
+    int rt_throttled = sched_rt_account_locked(rq, timer_get_ticks());
     for (;;) {
         task_t *t = NULL;
         int q = -1;
 
-        task_t *rt = rt_pick_best_locked(rq);
+        task_t *rt = rt_throttled ? NULL : rt_pick_best_locked(rq);
         if (rt) {
             t = rt;
             q = 0;
@@ -1917,6 +1993,7 @@ static void context_switch_locked(task_t *next) {
 
     task_t *prev = proc_current();
     unsigned cpu = cpu_current_id();
+    (void)sched_rt_throttled_local();
     eevdf_charge(&sched_runq[cpu], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
         /* Both cgroup helpers take the node lock on every context switch, and
@@ -2087,9 +2164,12 @@ void sched(void) {
      * exit, debug kill), which is exactly what the global lock used to exclude.
      */
     task_t *current = proc_current();
+    int current_rt_throttled = sched_rt_throttled_local() && sched_task_rt(current);
     task_t *picked = next;
     uint64_t nf = 0, cf = 0;
     proc_lock_two_tasks(picked, current, &nf, &cf);
+    if (current_rt_throttled && current && current->state == PROC_RUNNING)
+        current->state = PROC_READY;
     if (next) {
         /* The picked task must still be publishable: a wake, exit or stop
          * racing the pick may have moved it out of READY.  Returning it to the
@@ -2102,6 +2182,7 @@ void sched(void) {
         }
     }
     if (next && current && current != proc_idle_task() &&
+        !current_rt_throttled &&
         current->state == PROC_READY && current->on_cpu &&
         __atomic_load_n(&current->owner_cpu, __ATOMIC_RELAXED) ==
             cpu_current_id() &&
@@ -2142,7 +2223,8 @@ void sched(void) {
     task_t *cur = proc_current();
     if (cur) {
         uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-        if (cur->state == PROC_READY || cur->state == PROC_RUNNING) {
+        if (!current_rt_throttled &&
+            (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
             if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
                 proc_runq_remove_locked(cur);
             cur->state = PROC_RUNNING;
@@ -2162,7 +2244,8 @@ void sched(void) {
         int late_ready = 0;
         if (cur) {
             uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-            if ((cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
+            if (!current_rt_throttled &&
+                (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
                 if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
                     proc_runq_remove_locked(cur);
                 cur->state = PROC_RUNNING;

@@ -179,8 +179,9 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
         proc_put(target);
         return -A20_ERR_INVALID_ARGUMENT;
     }
-    int64_t result = proc_sched_set(target, &config) < 0
-                         ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
+    int sr = proc_sched_set(target, &config);
+    int64_t result = sr == -EPERM ? -A20_ERR_ACCESS :
+                     (sr < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK);
     proc_put(target);
     return result;
 }
