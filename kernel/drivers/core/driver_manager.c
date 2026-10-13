@@ -25,6 +25,9 @@
 #include "core/string.h"
 #include "core/errno.h"
 #include "proc/proc.h"
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+#include "ipc/handle_table.h"
+#endif
 #include "mm/elf.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
@@ -212,10 +215,9 @@ int driver_manager_spawn_user(const char *path)
 
     a20_handle_t self_h = 0;
     {
-        int64_t h = manager_handle_install(
-            ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
-            A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
-            A20_RIGHT_DUP);
+        int64_t h = a20_handle_install_task(ht, task, A20_OBJ_TASK,
+                                            A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                                A20_RIGHT_STAT | A20_RIGHT_DUP);
         if (h >= 0)
             self_h = (a20_handle_t)h;
     }

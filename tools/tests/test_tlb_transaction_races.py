@@ -119,7 +119,7 @@ int main(void) {
         text = (ROOT / 'kernel/mm/fault.c').read_text()
         start = text.index('int handle_present_page_fault(')
         end = text.index('\n}', start) + 2
-        run(r''' 
+        run(r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stddef.h>

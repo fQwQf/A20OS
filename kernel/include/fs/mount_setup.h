@@ -12,8 +12,8 @@
  *   ext4  -> /extra  (local sdcard image)
  *
  * The logic is independent of device ordering and works regardless of how the
- * disks are enumerated.  In BRINGUP mode there are no block devices and this
- * module compiles to nothing.
+ * disks are enumerated.  BRINGUP mode skips automatic root mounts; explicitly
+ * requested mounts may still use probed class devices.
  */
 
 #ifndef BRINGUP
@@ -22,7 +22,7 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype);
 #endif
 
 /* Class-based block-device lookup used by vfs_mount(/dev/vd*) and the swap
- * path.  Compiled in every profile; BRINGUP builds return NULL (no devices). */
+ * path.  Compiled in every profile; returns NULL when no matching device is probed. */
 block_dev_t *mount_setup_block_device(int index);
 
 /* Probe DOS/MBR storage and mount its first Linux partition read-only at

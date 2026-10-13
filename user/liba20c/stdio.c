@@ -204,10 +204,12 @@ FILE *fopen(const char *path, const char *mode)
         rights = 1;
     } else if (mode[0] == 'w') {
         rights = 2 | 1;
-        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_TRUNC;
+        oflags =
+            A20_PATH_OPEN_WRONLY | A20_PATH_OPEN_CREATE | A20_PATH_OPEN_TRUNC;
     } else if (mode[0] == 'a') {
         rights = 2 | 1;
-        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_APPEND;
+        oflags =
+            A20_PATH_OPEN_WRONLY | A20_PATH_OPEN_CREATE | A20_PATH_OPEN_APPEND;
     }
 
     char full[1024];
@@ -257,13 +259,14 @@ FILE *fopen(const char *path, const char *mode)
 int fclose(FILE *f)
 {
     if (!f) return 0;
-    _fflush_locked(f);
-    a20_syscall6(A20_SYS_handle_close, f->handle, 0, 0, 0, 0, 0);
+    int result = _fflush_locked(f);
+    if (a20_syscall6(A20_SYS_handle_close, f->handle, 0, 0, 0, 0, 0) < 0)
+        result = -1;
     __fd_free(f->fd);
     if (f->own_buf && f->buf) free(f->buf);
     if (f != &_stdin_file && f != &_stdout_file && f != &_stderr_file)
         free(f);
-    return 0;
+    return result < 0 ? EOF : 0;
 }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f)

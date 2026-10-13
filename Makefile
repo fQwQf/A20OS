@@ -128,6 +128,10 @@ ARCH ?= riscv64
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
+RAMFS_NATIVE_TESTS ?= 0
+ifeq ($(filter $(RAMFS_NATIVE_TESTS),0 1),)
+$(error RAMFS_NATIVE_TESTS must be 0 or 1)
+endif
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
@@ -135,6 +139,18 @@ NR_CPUS ?= 1
 # preemption default must exist before the QEMU image paths are captured, or
 # `-kernel` and `-drive` can point at different build directories.
 CONFIG_KERNEL_PREEMPT ?= 1
+# Functional diagnostic; separate artifacts, never enabled in normal builds.
+SMP_SELFTEST ?= 0
+# Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
+QEMU_SHARED_SMP ?= 0
+ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))
+$(error QEMU_SHARED_SMP must be 0 or 1)
+endif
+ifeq ($(QEMU_SHARED_SMP),1)
+ifneq ($(ARCH),x86_64)
+$(error QEMU_SHARED_SMP currently requires ARCH=x86_64)
+endif
+endif
 # Network lanes. 1 keeps every lane index folded to 0, which is the
 # embedded shape and byte-for-byte the pre-lane behaviour. Raise it
 # only together with stage D of docs/net/net-lanes.md; stages A-C
@@ -240,6 +256,63 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
+# Dedicated raw USART2/3 cluster firmware; 0 preserves the peripheral image.
+STM32_CLUSTER_PORT ?= 0
+# Experimental native shared-RAM kernel; requires the documented fabric ABI.
+MCU_SHARED_KERNEL ?= 0
+MCU_SHARED_RAM_KB ?= 1024
+MCU_SHARED_TEST ?= 0
+MCU_NATIVE_PROGRAM ?= 0
+NATIVE_FLAT_FILES ?= 0
+ifeq ($(filter $(NATIVE_FLAT_FILES),0 1),)
+$(error NATIVE_FLAT_FILES must be 0 or 1)
+endif
+ifeq ($(NATIVE_FLAT_FILES),1)
+ifneq ($(MCU_NATIVE_PROGRAM),1)
+$(error NATIVE_FLAT_FILES currently requires the native flat program profile)
+endif
+endif
+ifeq ($(filter $(MCU_NATIVE_PROGRAM),0 1),)
+$(error MCU_NATIVE_PROGRAM must be 0 or 1)
+endif
+ifeq ($(MCU_NATIVE_PROGRAM),1)
+ifeq ($(filter $(ABI),native both),)
+$(error MCU_NATIVE_PROGRAM requires ABI=native or ABI=both)
+endif
+ifneq ($(MCU_SHARED_KERNEL),1)
+$(error MCU_NATIVE_PROGRAM currently requires MCU_SHARED_KERNEL=1)
+endif
+endif
+ifeq ($(filter $(MCU_SHARED_KERNEL),0 1),)
+$(error MCU_SHARED_KERNEL must be 0 or 1)
+endif
+ifeq ($(filter $(MCU_SHARED_TEST),0 1),)
+$(error MCU_SHARED_TEST must be 0 or 1)
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+ifneq ($(ARCH),armv7m)
+$(error MCU_SHARED_KERNEL currently requires ARCH=armv7m)
+endif
+ifeq ($(filter $(NR_CPUS),2 3 4 5 6 7 8 9 10 11 12 13 14 15 16),)
+$(error MCU_SHARED_KERNEL requires NR_CPUS=2..16)
+endif
+ifneq ($(STM32_CLUSTER_PORT),0)
+$(error MCU_SHARED_KERNEL requires STM32_CLUSTER_PORT=0)
+endif
+ifeq ($(STM32_QEMU),1)
+$(error MCU_SHARED_KERNEL requires the shared-memory fabric, absent in stm32vldiscovery)
+endif
+ifeq ($(STM32_XUANWU),1)
+$(error MCU_SHARED_KERNEL uses a custom fabric board, not the Xuanwu SRAM wiring)
+endif
+ifeq ($(filter $(MCU_SHARED_RAM_KB),64 128 256 512 1024),)
+$(error MCU_SHARED_RAM_KB must be 64, 128, 256, 512 or 1024 for the current FSMC address-pin map)
+endif
+else
+ifneq ($(MCU_SHARED_TEST),0)
+$(error MCU_SHARED_TEST requires MCU_SHARED_KERNEL=1)
+endif
+endif
 # Derive the artifact dirs from BUILD_VARIANT (f<flash>k-r<ram>k[-qemu]) so a
 # change to STM32_FLASH_KB/RAM_KB/STM32_QEMU never desyncs the hardcoded paths.
 STM32_XUANWU_BUILD_DIR = $(BUILD_DIR)
@@ -255,6 +328,11 @@ STM32_RAM_KB ?= 20
 STM32_XUANWU ?= 0
 else
 BOARD ?= qemu-virt-$(ARCH)
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+ifneq ($(BOARD),stm32f103)
+$(error MCU_SHARED_KERNEL currently requires BOARD=stm32f103 with custom fabric wiring)
+endif
 endif
 
 # MCU-class builds (components/trim.toml [profile.mcu]) replace the whole
@@ -273,6 +351,27 @@ endif
 
 # Driver deployment depends on the selected architecture and board.
 include tools/driver-deployment.mk
+
+# One protocol, profile-selected resource budgets. MCU firmware keeps the
+# single-transaction budget; hosted kernels may select any bounded tier.
+CLUSTER_PROFILE ?= $(if $(filter mcu,$(PROFILE)),1,2)
+CLUSTER_UART_COM2 ?= 0
+ifeq ($(CLUSTER_UART_COM2),1)
+ifneq ($(ARCH),x86_64)
+$(error CLUSTER_UART_COM2 requires ARCH=x86_64)
+endif
+ifeq ($(CLUSTER_PROFILE),1)
+$(error CLUSTER_UART_COM2 requires DEFAULT or SERVER cluster profile)
+endif
+endif
+ifeq ($(filter 1 2 3,$(CLUSTER_PROFILE)),)
+$(error CLUSTER_PROFILE=$(CLUSTER_PROFILE) is invalid; use 1, 2 or 3)
+endif
+ifeq ($(PROFILE),mcu)
+ifneq ($(CLUSTER_PROFILE),1)
+$(error MCU firmware requires CLUSTER_PROFILE=1)
+endif
+endif
 
 NOMMU ?= 0
 NOMMU_SUPPORTED_ARCHES := $(TRIM_CAP_NOMMU_ARCHES)
@@ -396,6 +495,11 @@ help:
 	  '  Gates -- need a cross toolchain and/or QEMU' \
 	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
 	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
+	  '    make check-cluster-send        reliable one-way SEND, loss and mixed routed profiles' \
+	  '    make check-cluster-hardening   random loss/delay/CRC/flood/partition acceptance' \
+	  '    make check-cluster-fuzz-smoke  five minutes of varied sanitizer mutations' \
+	  '    make check-cluster-performance Native local/loopback/UDP RPC measurements' \
+	  '    make demo-wordcount            sixteen shards over eight servers or a mixed MCU cluster' \
 	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
 	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
 	  '    make check-concurrency-foundation  SMP lock-model contract, builds a 2-CPU config' \
@@ -431,11 +535,26 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
-BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)$(if $(filter-out 0,$(STM32_CLUSTER_PORT)),-cluart$(STM32_CLUSTER_PORT),)
+endif
+ifeq ($(CLUSTER_UART_COM2),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-clcom2
+endif
+ifeq ($(MCU_SHARED_KERNEL),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shared$(MCU_SHARED_RAM_KB)k$(if $(filter 1,$(MCU_SHARED_TEST)),-selftest,)
+endif
+ifeq ($(MCU_NATIVE_PROGRAM),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-program$(if $(filter 1,$(NATIVE_FLAT_FILES)),-files,)
+endif
+ifeq ($(RAMFS_NATIVE_TESTS),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-native-tests
+endif
+ifeq ($(QEMU_SHARED_SMP),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shared-qemu
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -457,7 +576,10 @@ EXT4_IMG = $(BUILD_DIR)/ext4.img
 EXT4_JOURNAL_IMG = $(BUILD_DIR)/ext4-journal.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 ISOFS_IMG = $(BUILD_DIR)/isofs.img
-USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+USER_LIBC_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+# Driver blobs contain inline CPU/MMIO helpers, so shared-domain modules must
+# never overwrite packages consumed by ordinary kernels.
+USER_VARIANT = $(USER_LIBC_VARIANT)$(if $(filter 1,$(QEMU_SHARED_SMP)),-shared-qemu,)
 USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
@@ -495,6 +617,7 @@ NATIVE_TAG             := $(NATIVE_TAG_$(ARCH))
 NATIVE_BUILD_DIR       := $(USER_BUILD_DIR)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
+NATIVE_SPAWN_BIN       := $(NATIVE_BUILD_DIR)/native-spawn-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
 NATIVE_DEEPEN_BIN      := $(NATIVE_BUILD_DIR)/native-deepen-$(NATIVE_TAG)
 NATIVE_DEBUG_BIN       := $(NATIVE_BUILD_DIR)/native-debug-$(NATIVE_TAG)
@@ -523,8 +646,29 @@ NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
 NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
+NATIVE_CLUSTER_AGENT_BIN := $(NATIVE_BUILD_DIR)/cluster-agent-$(NATIVE_TAG)
+NATIVE_CLUSTER_PROBE_BIN := $(NATIVE_BUILD_DIR)/cluster-task-probe-$(NATIVE_TAG)
+NATIVE_CLUSTER_HANG_BIN := $(NATIVE_BUILD_DIR)/cluster-hang-probe-$(NATIVE_TAG)
+NATIVE_CLUSTER_WORD8_BIN := $(NATIVE_BUILD_DIR)/native-cluster-word8-$(NATIVE_TAG)
+NATIVE_CLUSTER_BENCH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-bench-$(NATIVE_TAG)
+NATIVE_CLUSTER_LOAD_BIN := $(NATIVE_BUILD_DIR)/native-cluster-load-$(NATIVE_TAG)
+NATIVE_APPCTL_BIN := $(NATIVE_BUILD_DIR)/appctl-run-$(NATIVE_TAG)
+NATIVE_APPD_BIN := $(NATIVE_BUILD_DIR)/appd-$(NATIVE_TAG)
+NATIVE_APPEXEC_BIN := $(NATIVE_BUILD_DIR)/app-exec-$(NATIVE_TAG)
+NATIVE_APP_TEST_BIN := $(NATIVE_BUILD_DIR)/native-apps-$(NATIVE_TAG)
+NATIVE_APP_CHILD_BIN := $(NATIVE_BUILD_DIR)/native-app-child-$(NATIVE_TAG)
+NATIVE_APP_EXIT_BIN := $(NATIVE_BUILD_DIR)/native-app-exit-$(NATIVE_TAG)
+NATIVE_OBJECTD_BIN := $(NATIVE_BUILD_DIR)/objectd-$(NATIVE_TAG)
+NATIVE_OBJECT_TEST_BIN := $(NATIVE_BUILD_DIR)/native-objects-$(NATIVE_TAG)
+NATIVE_CLUSTER_INSTANCE_BIN := $(NATIVE_BUILD_DIR)/native-cluster-instance-$(NATIVE_TAG)
+NATIVE_CLUSTER_MESH_BIN := $(NATIVE_BUILD_DIR)/native-cluster-mesh-$(NATIVE_TAG)
+NATIVE_CLUSTER_WORDCOUNT_BIN := $(NATIVE_BUILD_DIR)/cluster-wordcount-$(NATIVE_TAG)
+NATIVE_JOBD_BIN := $(NATIVE_BUILD_DIR)/jobd-$(NATIVE_TAG)
+NATIVE_CLUSTER_SUPERVISOR_BIN := $(NATIVE_BUILD_DIR)/cluster-supervisor-$(NATIVE_TAG)
+NATIVE_CLUSTER_SUPERVISOR_TEST_BIN := $(NATIVE_BUILD_DIR)/native-cluster-supervisor-$(NATIVE_TAG)
+NATIVE_CLUSTERD_BIN := $(NATIVE_BUILD_DIR)/clusterd-$(NATIVE_TAG)
 NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
-                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
+                          $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_SPAWN_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
                           $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
                           $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \
@@ -537,7 +681,9 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
-                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN)
+                          $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
+                          $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
+                          $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_INSTANCE_BIN) $(NATIVE_OBJECTD_BIN) $(NATIVE_OBJECT_TEST_BIN) $(NATIVE_APPCTL_BIN) $(NATIVE_APPD_BIN) $(NATIVE_APPEXEC_BIN) $(NATIVE_APP_TEST_BIN) $(NATIVE_APP_CHILD_BIN) $(NATIVE_APP_EXIT_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN) $(NATIVE_CLUSTER_WORDCOUNT_BIN) $(NATIVE_CLUSTER_WORD8_BIN) $(NATIVE_CLUSTER_BENCH_BIN) $(NATIVE_CLUSTER_LOAD_BIN)
 # fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
 # §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
 # other ARCH breaks the whole native-program graph. Keep them rv64-only.
@@ -879,7 +1025,12 @@ QEMU_LIBPATH ?= $(patsubst %/,%,$(abspath $(dir $(QEMU_VIRGL_LIB))))
 ifneq ($(strip $(QEMU_LIBPATH)),)
 QEMU         := env LD_LIBRARY_PATH=$(QEMU_LIBPATH):$$LD_LIBRARY_PATH $(QEMU)
 endif
-QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m $(QEMU_MEMORY) -nographic -smp $(NR_CPUS)
+# Boards may select a QEMU model/handoff without changing architecture code.
+-include $(BOARD_INCLUDE_DIR)/board.mk
+QEMU_MACHINE_CPUS ?= $(NR_CPUS)
+QEMU_KERNEL ?= $(KERNEL_ELF)
+QEMU_FLAGS := $(or $(QEMU_FLAGS_BASE_$(BOARD)),$(QEMU_FLAGS_BASE_$(ARCH))) \
+              -m $(QEMU_MEMORY) -nographic -smp $(QEMU_MACHINE_CPUS) $(QEMU_BOOT_FLAGS)
 # Virtualization back-end.  Non-x86_64 targets run under QEMU TCG
 # (multi-threaded once SMP).  x86_64 guests on an x86_64 host prefer KVM
 # when /dev/kvm is present, falling back to TCG otherwise.
@@ -1014,6 +1165,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
          -DCONFIG_NET_LANES=$(NET_LANES) \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
+         -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
@@ -1025,8 +1177,23 @@ endif
 # unreachable there.  Building two images with
 # EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=<n> and interleaving the runs gives
 # the same time-adjacent A/B that a runtime switch gives elsewhere.
+ifeq ($(CLUSTER_UART_COM2),1)
+CFLAGS += -DCONFIG_CLUSTER_UART_COM2
+endif
 EXTRA_CFLAGS ?=
 CFLAGS += $(EXTRA_CFLAGS)
+ifeq ($(QEMU_SHARED_SMP),1)
+ifneq ($(BOARD),qemu-virt-x86_64)
+$(error QEMU_SHARED_SMP requires BOARD=qemu-virt-x86_64)
+endif
+ifneq ($(NR_CPUS),2)
+$(error QEMU_SHARED_SMP currently requires NR_CPUS=2)
+endif
+ifneq ($(BRINGUP),1)
+$(error QEMU_SHARED_SMP currently requires BRINGUP=1: full disk-root and graphics ownership are not validated)
+endif
+CFLAGS += -DCONFIG_QEMU_SHARED_SMP -DCONFIG_SHARED_DEVICE_CALL -DCONFIG_SHARED_MMIO_OWNER=0
+endif
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
 # tools/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
@@ -1124,6 +1291,17 @@ ifneq ($(filter $(ARCH),$(TRIM_CAP_PCIE_MMIO_ECAM_ARCHES)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
 endif
 endif
+ELF_MACHINE_armv7m      := 40
+ELF_CLASS_armv7m        := 1
+NATIVE_CALL_ABI_x86_64 := A20_EXEC_ABI_X86_64
+NATIVE_CALL_ABI_aarch64 := A20_EXEC_ABI_AARCH64
+NATIVE_CALL_ABI_riscv64 := A20_EXEC_ABI_RV64_DOUBLE
+NATIVE_CALL_ABI_riscv32 := A20_EXEC_ABI_RV32_DOUBLE
+NATIVE_CALL_ABI_arm32 := A20_EXEC_ABI_ARM_HARD
+NATIVE_CALL_ABI_armv7m := A20_EXEC_ABI_THUMB_SOFT
+NATIVE_CALL_ABI_loongarch64 := A20_EXEC_ABI_LA64_DOUBLE
+NATIVE_CALL_ABI_loongarch32 := A20_EXEC_ABI_LA32_SOFT
+NATIVE_CALL_ABI_ppc64le := A20_EXEC_ABI_PPC64_ELFV2
 ELF_MACHINE_riscv64     := 243
 ELF_MACHINE_loongarch64 := 258
 ELF_MACHINE_loongarch32 := 258
@@ -1140,12 +1318,29 @@ ELF_CLASS_x86_64        := 2
 ELF_CLASS_arm32         := 1
 ELF_CLASS_riscv32       := 1
 ELF_CLASS_ppc64le       := 2
-ifneq ($(ARCH),armv7m)
 CFLAGS += -DARCH_ELF_MACHINE=$(ELF_MACHINE_$(ARCH)) \
-          -DARCH_ELF_CLASS=$(ELF_CLASS_$(ARCH))
-endif
+          -DARCH_ELF_CLASS=$(ELF_CLASS_$(ARCH)) \
+          -DARCH_NATIVE_CALL_ABI=$(NATIVE_CALL_ABI_$(ARCH))
 ifeq ($(ARCH),armv7m)
 CFLAGS += -DSTM32_FLASH_KB=$(STM32_FLASH_KB) -DSTM32_RAM_KB=$(STM32_RAM_KB)
+ifeq ($(MCU_SHARED_KERNEL),1)
+# Distinct physical chips do not share a Cortex-M exclusive monitor.
+# Every GCC atomic operation goes through the fabric semaphore implementation.
+CFLAGS += -DCONFIG_MCU_SHARED_KERNEL -DCONFIG_SHARED_FABRIC_ATOMICS \
+          -fno-inline-atomics -mno-unaligned-access
+ifeq ($(MCU_SHARED_TEST),1)
+CFLAGS += -DCONFIG_MCU_SHARED_TEST
+endif
+ifeq ($(MCU_NATIVE_PROGRAM),1)
+CFLAGS += -DCONFIG_MCU_NATIVE_PROGRAM -DCONFIG_NATIVE_TASK_HANDLES_ONLY -DCONFIG_NATIVE_FLAT_THREAD
+ifeq ($(NATIVE_FLAT_FILES),1)
+CFLAGS += -DCONFIG_NATIVE_FLAT_FILES
+endif
+ifeq ($(MCU_SHARED_TEST),1)
+CFLAGS += -DMCU_TEST_ELF_PATH=\"$(BUILD_DIR)/mcu-test-program.elf\"
+endif
+endif
+endif
 ifneq ($(shell printf '%s' '$(STM32_BT_NAME)' | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]{1,32}$$' && echo yes),yes)
 $(error STM32_BT_NAME must contain 1-32 ASCII letters, digits, '_' or '-')
 endif
@@ -1172,8 +1367,19 @@ endif
 ifeq ($(STM32_XUANWU),1)
 CFLAGS += -DCONFIG_STM32_XUANWU
 endif
+ifeq ($(filter $(STM32_CLUSTER_PORT),0 2 3),)
+$(error STM32_CLUSTER_PORT must be 0, 2 or 3; USART1 is the console)
+endif
+ifneq ($(STM32_CLUSTER_PORT),0)
 ifeq ($(STM32_QEMU),1)
-CFLAGS += -DCONFIG_STM32_QEMU
+$(error STM32_CLUSTER_PORT requires a physical STM32 configuration)
+endif
+CFLAGS += -DCONFIG_STM32_CLUSTER_PORT=$(STM32_CLUSTER_PORT)
+endif
+ifeq ($(STM32_QEMU),1)
+# The 8 KiB QEMU probe carries only idle; use the existing bounded timer
+# heap override instead of spending 2.5 KiB on the 64-entry MCU default.
+CFLAGS += -DCONFIG_STM32_QEMU -DCONFIG_WAIT_TIMER_HEAP_MAX=4
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32 loongarch32),)
@@ -1191,6 +1397,19 @@ CFLAGS += -DCONFIG_ABI_NATIVE
 endif
 
 # Bringup / ramfs-user mode markers for conditional compilation.
+ifeq ($(SMP_SELFTEST),1)
+ifeq ($(PROFILE),mcu)
+$(error SMP_SELFTEST=1 is a hosted bringup diagnostic; use check-mcu-shared-kernel for the MCU profile)
+endif
+ifneq ($(BRINGUP),1)
+$(error SMP_SELFTEST=1 requires BRINGUP=1)
+endif
+ifeq ($(NR_CPUS),1)
+$(error SMP_SELFTEST=1 requires NR_CPUS greater than one)
+endif
+CFLAGS += -DCONFIG_SMP_SELFTEST
+endif
+
 ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
@@ -1200,6 +1419,11 @@ endif
 
 ifeq ($(NOMMU),1)
 CFLAGS += -DCONFIG_NOMMU
+# Flat user ownership is a memory-model capability. Tiny firmware without
+# userspace retains its original task layout and memory budget.
+ifneq ($(filter-out mcu,$(PROFILE))$(filter 1,$(MCU_NATIVE_PROGRAM)),)
+CFLAGS += -DCONFIG_FLAT_USER_MEMORY
+endif
 endif
 
 # Synthetic driver lifecycle test (disabled by default).
@@ -1254,10 +1478,18 @@ else
 LDSCRIPT = $(BOARD_LDSCRIPT)
 endif
 
+ifeq ($(MCU_SHARED_KERNEL),1)
+LDSCRIPT = $(KERNEL_DIR)/arch/armv7m/boot/shared.ld
+endif
+
 LDFLAGS = -nostdlib -nostartfiles -Wl,--build-id=none -T $(LDSCRIPT) $(ARCH_LDFLAGS) $(LDFLAGS_NOMMU)
 ifeq ($(ARCH),armv7m)
-LDFLAGS += -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
+LDFLAGS += -Wl,--defsym=CLUSTER_NVRAM_LENGTH=$(if $(filter 1,$(STM32_QEMU)),0,$(if $(filter 16 32 64 128,$(STM32_FLASH_KB)),2,4))K \
+           -Wl,--defsym=FLASH_LENGTH=$(STM32_FLASH_KB)K \
            -Wl,--defsym=RAM_LENGTH=$(STM32_RAM_KB)K
+ifeq ($(MCU_SHARED_KERNEL),1)
+LDFLAGS += -Wl,--defsym=SHARED_LENGTH=$(MCU_SHARED_RAM_KB)K
+endif
 endif
 
 # ================================================================
@@ -1359,10 +1591,22 @@ RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle
 ifeq ($(STORAGE_READ_ONLY),1)
 RAMFS_USER_PROGRAMS += storage_read_test
 endif
+ifeq ($(RAMFS_NATIVE_TESTS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_NATIVE_TESTS requires RAMFS_USER=1)
+endif
+ifneq ($(ABI),both)
+$(error RAMFS_NATIVE_TESTS requires ABI=both for the Linux shell and Native tests)
+endif
+RAMFS_USER_PROGRAMS += native_futex native_spawn native_input cluster_threads
+CFLAGS += -DCONFIG_RAMFS_NATIVE_TESTS
+endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
 RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
+RAMFS_USER_OBJCOPY_x86_64    := -O elf64-x86-64 -B i386:x86-64
+RAMFS_USER_OBJCOPY_aarch64   := -O elf64-littleaarch64 -B aarch64
 ifeq ($(RAMFS_USER),1)
 # Gate on the objcopy entry rather than on an arch list, so adding an
 # architecture is one table line instead of two places that can disagree.  The
@@ -1410,7 +1654,8 @@ $(VDSO_BLOB): $(VDSO_ELF)
 	    vdso.elf vdso_blob.o
 
 # ASM sources
-ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
+ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort) \
+          $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.S)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
 DEP_FILES = $(filter-out $(RAMFS_USER_BLOBS:.o=.d),$(KERNEL_OBJ:.o=.d)) \
             $(ASM_OBJ:.o=.d)
@@ -1442,6 +1687,8 @@ include tools/targets-smoke.mk
 include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
+include tools/raspberrypi4.mk
+include tools/execution.mk
 include tools/target-console.mk
 include tools/run-targets.mk
 include tools/targets-images.mk

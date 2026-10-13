@@ -269,6 +269,9 @@ typedef struct a20_spawn_handle {
 
 /* ---- Task structures ---- */
 
+/* Kill this child when its spawning parent exits. */
+#define A20_SPAWN_PARENT_BOUND (1u << 0)
+
 typedef struct a20_task_spawn_args {
     uint32_t       size;
     uint32_t       version;        /* 1 = base layout; 2 = adds the stdio fields */
@@ -979,6 +982,18 @@ typedef struct a20_handle_poll_args {
  * zx_futex_wait / zx_futex_wake: atomically compare *addr against expected,
  * sleeping on equality and otherwise returning A20_ERR_WOULD_BLOCK at once. */
 
+/* 32-bit user atomics: sequentially consistent on every execution domain.
+ * The kernel pins the mapping and uses its configured atomic provider. */
+#define A20_ATOMIC32_LOAD 0u
+#define A20_ATOMIC32_STORE 1u
+#define A20_ATOMIC32_EXCHANGE 2u
+#define A20_ATOMIC32_COMPARE_EXCHANGE 3u
+typedef struct a20_atomic32_args {
+    uint32_t size, version;
+    uint64_t addr;
+    uint32_t operation, expected, desired, flags;
+    uint32_t observed, exchanged;
+} a20_atomic32_args_t;
 
 typedef struct a20_futex_wait_args {
     uint32_t       size;
@@ -1110,23 +1125,31 @@ typedef struct a20_node_id {
 #define A20_CLUSTER_CAP_RELAY     (1u << 0)  /* forwards frames for other nodes */
 #define A20_CLUSTER_CAP_RELIABLE  (1u << 1)  /* ACK / retransmit / reassembly */
 #define A20_CLUSTER_CAP_LEAF      (1u << 2)  /* answers only, never dials out */
+#define A20_CLUSTER_CAP_ONEWAY    (1u << 4) /* opt-in reliable business SEND */
 #define A20_CLUSTER_CAPS_ALL      (A20_CLUSTER_CAP_RELAY | \
                                    A20_CLUSTER_CAP_RELIABLE | \
-                                   A20_CLUSTER_CAP_LEAF)
+                                   A20_CLUSTER_CAP_LEAF | A20_CLUSTER_CAP_ONEWAY)
 
 /* cluster_export flags. */
 #define A20_EXPORT_REPLACE      (1u << 0)
 #define A20_EXPORT_LOCAL_ONLY   (1u << 1)
-#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY)
+#define A20_EXPORT_WORK         (1u << 2) /* service speaks CW/1 */
+#define A20_EXPORT_ONEWAY       (1u << 3) /* receive only; no business replies */
+#define A20_EXPORT_FLAGS_ALL    (A20_EXPORT_REPLACE | A20_EXPORT_LOCAL_ONLY | \
+                                  A20_EXPORT_WORK | A20_EXPORT_ONEWAY)
 
 /* cluster_connect flags. */
 #define A20_CONNECT_RELIABLE    (1u << 0)
-#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE)
+#define A20_CONNECT_ONEWAY      (1u << 1) /* requires RELIABLE; write-only handle */
+#define A20_CONNECT_FLAGS_ALL   (A20_CONNECT_RELIABLE | A20_CONNECT_ONEWAY)
 
 /* cluster_route op. */
 #define A20_ROUTE_ADD       0u
 #define A20_ROUTE_DEL       1u
 #define A20_ROUTE_REPLACE   2u
+#define A20_ROUTE_DEL_MATCH 3u /* Delete only an exact route tuple. */
+#define A20_ROUTE_LEARN     4u /* Upsert only absent or dynamic routes. */
+#define A20_ROUTE_DYNAMIC  0x80000000u
 
 /* cluster_event_subscribe mask. */
 #define A20_CLX_EVENT_LINK_UP        (1u << 0)
@@ -1180,6 +1203,12 @@ typedef struct a20_cluster_connect_args {
     uint32_t       timeout_ms;    /* 0 = 5000 default */
     uint32_t       reserved;      /* must be zero */
 } a20_cluster_connect_args_t;
+
+/* Version 2 appends a mandatory expected boot epoch. Version 1 is unchanged. */
+typedef struct a20_cluster_connect_args_v2 {
+    a20_cluster_connect_args_t base;
+    uint64_t expected_boot_epoch;
+} a20_cluster_connect_args_v2_t;
 
 typedef struct a20_cluster_route_args {
     uint32_t       size;

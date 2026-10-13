@@ -31,7 +31,15 @@ static unsigned use_hpet;
  * take it uncontended instead of serialising every reader in the system on a
  * single cache line.
  */
+#ifdef CONFIG_QEMU_SHARED_SMP
+/* Each KVM VM has its own TSC epoch. CPU 0 owns the domain clock; its timer
+ * IRQ publishes at least once per programmed 1 ms interval. Remote CPUs
+ * consume this clock without adding a VM-local counter. A stalled owner
+ * stalls domain time; independent owner failover is not supported. */
+static volatile uint64_t shared_clock_ticks;
+#else
 static volatile uint64_t last_ticks[CONFIG_NR_CPUS];
+#endif
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
                   uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
@@ -260,6 +268,17 @@ static void ensure_tsc_freq(void) {
         cpu_relax();
 }
 
+static uint64_t calibration_ticks(void) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* AP calibration precedes online publication, while the boot CPU may
+     * wait with IRQs disabled. Measure this local device with its own TSC;
+     * this counter must never escape into shared scheduler deadlines. */
+    return scale_ticks_reduced(read_tsc());
+#else
+    return timer_get_ticks();
+#endif
+}
+
 static void calibrate_lapic(void) {
     unsigned cpu = arch_current_cpu_id();
     lapic_freq[cpu] = LAPIC_FREQ_FALLBACK;
@@ -267,10 +286,10 @@ static void calibrate_lapic(void) {
     lapic_write(LAPIC_LVT_TIMER, IRQ_VECTOR_TIMER | LAPIC_LVT_MASKED);
     lapic_write(LAPIC_TIMER_INIT, 0xffffffffU);
 
-    uint64_t start = timer_get_ticks();
-    while (timer_get_ticks() - start < LAPIC_CALIBRATION_TICKS)
+    uint64_t start = calibration_ticks();
+    while (calibration_ticks() - start < LAPIC_CALIBRATION_TICKS)
         cpu_relax();
-    uint64_t elapsed = timer_get_ticks() - start;
+    uint64_t elapsed = calibration_ticks() - start;
     uint32_t count = 0xffffffffU - lapic_read(LAPIC_TIMER_CUR);
     uint64_t measured = count && elapsed
         ? scale_ticks(count, elapsed, ARCH_TIMER_FREQ) : 0;
@@ -288,6 +307,12 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* Each unmodified QEMU owns its LAPIC. Poll shared IPI intents even when
+     * this kernel CPU is idle; default platform keeps its tickless path. */
+    if (ticks > ARCH_TIMER_FREQ / 1000)
+        ticks = ARCH_TIMER_FREQ / 1000;
+#endif
     uint64_t count = scale_ticks(ticks, ARCH_TIMER_FREQ,
                                  lapic_freq[arch_current_cpu_id()]);
     if (count == 0) count = 1;
@@ -296,10 +321,18 @@ void timer_set_interval(uint64_t ticks) {
 }
 
 uint64_t timer_get_ticks(void) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    if (cpu_current_id() != 0)
+        return __atomic_load_n(&shared_clock_ticks, __ATOMIC_ACQUIRE);
+#endif
     ensure_tsc_freq();
     uint64_t ticks = scale_ticks_reduced(use_hpet ? hpet_read(HPET_COUNTER)
                                                   : read_tsc());
+#ifdef CONFIG_QEMU_SHARED_SMP
+    volatile uint64_t *last = &shared_clock_ticks;
+#else
     volatile uint64_t *last = &last_ticks[cpu_current_id()];
+#endif
 
     uint64_t previous = __atomic_load_n(last, __ATOMIC_RELAXED);
     while (ticks > previous &&
@@ -327,6 +360,10 @@ uint64_t arch_vdso_counter(void)
 
 uint64_t arch_vdso_counter_freq(void)
 {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* User RDTSC would reintroduce the unrelated per-VM clock epochs. */
+    return 0;
+#else
     ensure_tsc_freq();
     /* When HPET is the time source user space cannot read it; report no
      * usable counter so the vDSO stays off rather than disagreeing with the
@@ -334,6 +371,7 @@ uint64_t arch_vdso_counter_freq(void)
     if (use_hpet)
         return 0;
     return tsc_freq ? tsc_freq : ARCH_TIMER_FREQ;
+#endif
 }
 
 #endif

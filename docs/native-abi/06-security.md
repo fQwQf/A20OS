@@ -293,7 +293,7 @@ network/PID/device 三个类型没有任何消费点——写入的 `ns_ctx.net_
 
 ### 7.3 Spawn 中的 Namespace
 
-`task_spawn`/`task_clone` 的 `flags` 当前只有 `A20_CLONE_COW_VM` 与 `A20_CLONE_STACK`，没有 namespace 选择位。子进程无条件从父进程复制 `fs.root_path`（`kernel/proc/task.c`），即继承父进程的 filesystem namespace；子进程自己的 namespace 需要在创建后用 `ns_apply` 设置。
+`task_spawn` 的 `flags` 支持 `A20_SPAWN_PARENT_BOUND`（bit0，父退出时 SIGKILL 子进程），`task_clone` 支持 `A20_CLONE_COW_VM` 与 `A20_CLONE_STACK`；都没有 namespace 选择位。子进程无条件从父进程复制 `fs.root_path`（`kernel/proc/task.c`），即继承父进程的 filesystem namespace；子进程自己的 namespace 需要在创建后用 `ns_apply` 设置。
 
 ---
 
@@ -302,7 +302,7 @@ network/PID/device 三个类型没有任何消费点——写入的 `ns_ctx.net_
 ### 8.1 调试接口
 
 ```c
-/* 会话对象：A20_OBJ_DEBUG，object = 目标 pid */
+/* 会话对象：A20_OBJ_DEBUG，object = 目标任务的独立身份对象 */
 int64_t debug_attach(a20_handle_t task);              /* ADMIN on task handle */
 int64_t debug_traceme(void);                          /* 子任务声明可被调试 */
 int64_t debug_wait(a20_handle_t dbg, uint64_t timeout_us, a20_debug_event_info_t *out);  /* WAIT */

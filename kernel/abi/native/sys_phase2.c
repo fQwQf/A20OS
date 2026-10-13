@@ -108,83 +108,6 @@ void resolve_path(const char *in, char *out)
 
 /* ===== Thread create — complex, Phase 2 ===== */
 
-int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
-{
-    a20_thread_create_args_t *uargs = (a20_thread_create_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs) return -A20_ERR_FAULT;
-
-    a20_thread_create_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
-
-    if (!kargs.entry || !kargs.stack_base || !kargs.stack_size)
-        return -A20_ERR_INVALID_ARGUMENT;
-    if (kargs.flags != 0) return -A20_ERR_INVALID_ARGUMENT;
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
-
-    int pid = proc_create_thread(kargs.entry, kargs.arg,
-                                 (vaddr_t)kargs.stack_base,
-                                 (vaddr_t)kargs.tls_base);
-    if (pid < 0) return -A20_ERR_NO_MEMORY;
-
-    /* Threads publish the dedicated A20_OBJ_THREAD type; task-like
-     * syscalls accept it via a20_handle_lookup_*_task_like
-     * ADMIN is granted because the creator owns the thread (debug_attach
-     * requires it, docs/native-abi/06-security.md §8.1). */
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_THREAD,
-                                    A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                    A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
-                                    A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
-                                    A20_RIGHT_READ | A20_RIGHT_WRITE);
-    if (h < 0) return h;
-
-    kargs.out_thread = (a20_handle_t)h;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-    return h;
-}
-
-int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
-{
-    a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    a20_sched_args_t *uargs = (a20_sched_args_t *)(uintptr_t)A20_ARG(1);
-    if (!uargs) return -A20_ERR_FAULT;
-
-    a20_sched_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
-
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_CONTROL, &entry);
-    if (r < 0) return r;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (!target) return -A20_ERR_BAD_HANDLE;
-
-    proc_sched_config_t config = {
-        .fields = kargs.flags,
-        .policy = kargs.policy,
-        .priority = kargs.priority,
-        .nice = kargs.nice,
-        .affinity = (uint32_t)kargs.affinity,
-    };
-    if ((kargs.flags & A20_SCHED_AFFINITY) &&
-        (kargs.affinity_size < sizeof(uint64_t) || (kargs.affinity >> 32))) {
-        proc_put(target);
-        return -A20_ERR_INVALID_ARGUMENT;
-    }
-    int64_t result = proc_sched_set(target, &config) < 0
-                         ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
-    proc_put(target);
-    return result;
-}
-
 int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
@@ -195,12 +118,10 @@ int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_STAT, &entry);
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID, A20_RIGHT_STAT,
+                                    &target);
     if (r < 0) return r;
-
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
     struct a20_resource_limits limits;
     a20_resource_limits_init_default(&limits);
     if (target) {
@@ -225,25 +146,28 @@ int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_task_like(ht, task_h,
-                                            A20_RIGHT_CONTROL, &entry);
-    if (r < 0) return r;
-
+    task_t *target = NULL;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
+                                    A20_RIGHT_CONTROL, &target);
+    if (r < 0)
+        return r;
+    if (!target)
+        return -A20_ERR_BAD_HANDLE;
     if (kargs.max_handles > A20_LIMIT_HANDLES_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_channels > A20_LIMIT_CHANNELS_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_threads > A20_LIMIT_THREADS_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
     if (kargs.max_memory_bytes > A20_LIMIT_MEMORY_ABSOLUTE)
-        return -A20_ERR_ACCESS;
+        goto out_access;
 
-    task_t *target = proc_find_get((int)(uintptr_t)entry.object);
-    if (!target) return -A20_ERR_BAD_HANDLE;
     if (target->limits.nofile == 0 || kargs.max_handles < target->limits.nofile)
         target->limits.nofile = (uint32_t)kargs.max_handles;
 
     proc_put(target);
     return A20_OK;
+out_access:
+    proc_put(target);
+    return -A20_ERR_ACCESS;
 }

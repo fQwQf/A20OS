@@ -470,10 +470,9 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
             arch_local_irq_enable();
         return obj;
     }
+    /* Keep the selected CPU array pinned through refill. Restoring IRQs
+     * here permits reentry or migration before the cache lock is taken. */
     slab_cache_t *c = &caches[idx];
-    /* Keep this CPU selected through the refill. Re-enabling interrupts
-     * before taking the cache lock allows migration, leaving arr owned by
-     * another CPU whose fast path does not take c->lock. */
     spin_lock(&c->lock);
     void *obj = slab_alloc_obj_locked(idx);
     if (obj) {
@@ -574,8 +573,9 @@ void kfree(void *ptr) {
         return;
     }
     /* Array full: drain half back to their slabs under the lock, then park
-     * this object in the array. Keep interrupts masked so arr remains local
-     * throughout the drain, just as on the allocation refill path. */
+     * this object in the array. Keep IRQs masked from the full check through
+     * the drain: reentry can otherwise empty the array and underflow count,
+     * and migration can leave arr pointing at another CPU's live array. */
     slab_cache_t *c = &caches[idx];
     spin_lock(&c->lock);
     for (uint16_t i = 0; i < SLAB_CPU_ARRAY_CAP / 2; i++)

@@ -25,7 +25,15 @@ static inline void arch_wfi(void) {
 static inline void arch_idle_wait(void) {
     __asm__ __volatile__("sti; hlt" ::: "memory");
 }
-static inline void arch_cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
+#ifdef CONFIG_SHARED_DEVICE_CALL
+void shared_device_poll(void);
+#endif
+static inline void arch_cpu_relax(void) {
+#ifdef CONFIG_SHARED_DEVICE_CALL
+    shared_device_poll();
+#endif
+    __asm__ __volatile__("pause" ::: "memory");
+}
 
 /* An unused data descriptor records the logical CPU in its byte-granularity
  * limit. LSL reads the current CPU's GDT without touching task GS or causing a

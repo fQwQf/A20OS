@@ -10,10 +10,9 @@
 /*
  * Shared CPU-local helpers.
  *
- * The current build still starts one CPU, but shared kernel code should go
- * through this wrapper instead of assuming CPU 0. When SMP bringup grows real
- * secondary CPU startup, only the arch_current_cpu_id() backend and scheduler
- * policy need to change.
+ * The architecture supplies a dense logical ID for the physical CPU running
+ * this instruction. The ID must remain CPU-local when tasks migrate, and
+ * agree with the SMP topology and per-CPU scheduler/current slots.
  */
 static inline unsigned cpu_current_id(void)
 {

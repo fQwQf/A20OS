@@ -120,10 +120,10 @@ _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
 # without the guest arguments.  The dual invariant is that flag values contain
 # single quotes or double quotes, never both.
 _qemu_argv:
-	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)"
+	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(QEMU_KERNEL)"
 
 _qemu_argv_debug:
-	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s"
+	@printf '%s\n' "$(QEMU) $(QEMU_FLAGS) -kernel $(QEMU_KERNEL) -S -s"
 
 _run_impl:
 	$(PYTHON) tools/qemu.py run --arch $(ARCH) --bringup $(BRINGUP)

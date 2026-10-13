@@ -96,6 +96,8 @@ static proc_runq_t sched_runq[2];
 static unsigned long sched_runqueue_migrations;
 static task_t target;
 static int smp_cpu_is_online(unsigned cpu) { (void)cpu; return 1; }
+/* The ownership scenario has two queued tasks; idle is only a hint. */
+static int proc_cpu_is_idle(unsigned cpu) { assert(cpu < 2); return 0; }
 static int spin_trylock_irqsave(int *lock, uint64_t *flags) {
     assert(!*lock); *lock = 1; *flags = 0; return 1;
 }

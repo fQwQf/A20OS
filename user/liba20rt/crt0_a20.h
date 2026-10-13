@@ -35,7 +35,8 @@ void _start_c(a20_start_info_t *si)
 {
     __start_info = si;
     __a20_libc_init();
-    int ret = main((int)si->argc, (char **)si->argv, (char **)si->envp);
+    int ret = main((int)si->argc, (char **)(uintptr_t)si->argv,
+                   (char **)(uintptr_t)si->envp);
     __a20_exit_run_hooks();
     a20_task_exit(ret);
 }

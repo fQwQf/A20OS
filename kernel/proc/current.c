@@ -77,9 +77,15 @@ static int proc_switch_complete_locked(unsigned cpu)
     if (old->state == PROC_READY &&
         !__atomic_load_n(&old->dispatching, __ATOMIC_RELAXED) &&
         !__atomic_load_n(&old->on_rq, __ATOMIC_RELAXED)) {
+        unsigned target = cpu;
+        if (old->affinity_migrate_pending) {
+            target = proc_sched_select_cpu_locked(old);
+            old->cpu_id = target;
+            old->affinity_migrate_pending = 0;
+        }
         proc_runq_enqueue_locked(old);
-        if (old->on_rq && proc_sched_should_preempt_locked(old, cpu))
-            proc_sched_request_cpu(cpu, 1);
+        if (old->on_rq && (target != cpu || proc_sched_should_preempt_locked(old, target)))
+            proc_sched_request_cpu(target, 1);
     }
     proc_sched_assert_task_locked(old);
 

@@ -129,7 +129,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - 级联释放：`handle_close` 此前只关闭 vfile 类对象，channel/eventq/VMO/timer/namespace 全部泄漏且对端永远收不到 `peer_closed`。现按类型统一释放，并在对象销毁时清理 event watch（`a20_eventq_on_object_destroy` 已接线到 channel、event queue、VMO、timer、namespace、task 与 vfile fd 键）。
 - channel recv 原子性：实现 reserve/abort/commit 槽位预留，接收方 HT 满时返回 `NO_SPACE`、消息留队，符合 05-ipc.md §2.6 的"不做部分投递"决策。接收 handle 继承发送方的时态约束与安全标签（此前被清零）。
 - vm_map source：`vm_map` 此前忽略 `source` 恒创建匿名 VMO。现支持 `MEMORY` handle 直接共享映射（`prot_eff = prot_req ∩ prot_handle`）和 `FILE`/`DEVICE` 的按需分页映射（demand-paged，经核心 page cache，见下文 §7）。
-- 事件常量：`A20_EVENT_*` 事件位定义补齐（01-types.md），timer → `EXPIRED`、task 退出 → `EXITED`、channel → `MESSAGE_READY`/`PEER_CLOSED`/`CLOSED`。task/timer 的事件键统一为 handle entry 的 object 值（pid/slot+1），修复 watch 永不触发的问题。
+- 事件常量：`A20_EVENT_*` 事件位定义补齐（01-types.md），timer → `EXPIRED`、task 退出 → `EXITED`、channel → `MESSAGE_READY`/`PEER_CLOSED`/`CLOSED`。task/timer 的事件键统一为 handle entry 的 object 值（任务身份对象 / slot+1），修复 watch 永不触发的问题。
 - timer 对象：handle entry object 由 slot 改为 slot+1（slot 0 此前是 NULL 指针、handle 不可用）；timer 槽改为引用计数，`closing` 标记阻断 slot ABA，set/cancel/tick 均在 `g_a20_timers_lock` 下读写，tick 触发时持临时引用完成 notify。
 - 对象并发访问：新增 `a20_handle_lookup_ref_internal()`，在 HT 锁内同步取得对象引用；channel/event/VMO/vfile/socket/namespace 等长期访问路径均已切换，close/sweeper 不再能在 syscall 持有裸指针期间释放对象。
 - 用户指针边界：channel send/recv、native net sendmsg/recvmsg、xattr、`handle_close_many`、`vm_remap` 与 debug memory map 均改为内核 bounce buffer + `copy_from_user`/`copy_to_user`，不再将用户指针交给核心子系统直接解引用。

@@ -97,8 +97,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
 
     a20_rights_t task_rights = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                A20_RIGHT_STAT | A20_RIGHT_DUP;
-    int64_t self = a20_handle_install(
-        ht, (void *)(uintptr_t)task->pid, A20_OBJ_TASK, task_rights);
+    int64_t self = a20_handle_install_task(ht, task, A20_OBJ_TASK, task_rights);
     info.self_task = self < 0 ? A20_HANDLE_NULL : (a20_handle_t)self;
 
     info.main_thread = info.self_task;

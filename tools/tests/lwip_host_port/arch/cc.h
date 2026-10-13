@@ -21,12 +21,11 @@ typedef uintptr_t mem_ptr_t;
 
 #define LWIP_HAVE_INT64 1
 #define LWIP_ERR_T int
+#ifndef CONFIG_NET_LANES
 #define CONFIG_NET_LANES 4
-#define LWIP_HEAP_LOCK()   a20_lwip_heap_lock()
-#define LWIP_HEAP_UNLOCK() a20_lwip_heap_unlock()
+#endif
+#include "net/lwip_port/arch/heap.h"
 typedef uint64_t sys_prot_t;
-void a20_lwip_heap_lock(void);
-void a20_lwip_heap_unlock(void);
 #define LWIP_PLATFORM_DIAG(x) do { fprintf(stderr, x); } while (0)
 #define LWIP_PLATFORM_ASSERT(x) do { \
     fprintf(stderr, "lwIP assertion failed: %s\n", (x)); abort(); \

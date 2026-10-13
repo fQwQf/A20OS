@@ -139,15 +139,14 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
         return -A20_ERR_NOT_SUPPORTED;
     }
 
-    a20_handle_entry_t task_entry;
-    r = a20_handle_lookup_task_like(ht, task_h,
-                                    A20_RIGHT_CONTROL, &task_entry);
+    task_t *target = NULL;
+    r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID, A20_RIGHT_CONTROL,
+                            &target);
     if (r < 0) {
         a20_object_release(ns_entry.object, ns_entry.type);
         return r;
     }
 
-    task_t *target = proc_find_get((int)(uintptr_t)task_entry.object);
     if (!target) {
         a20_object_release(ns_entry.object, ns_entry.type);
         return -A20_ERR_BAD_HANDLE;

@@ -32,6 +32,9 @@ DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
 endif
 DRVMOD_CFLAGS += -std=gnu99
+ifeq ($(QEMU_SHARED_SMP),1)
+DRVMOD_CFLAGS += -DCONFIG_SHARED_DEVICE_CALL -DCONFIG_SHARED_MMIO_OWNER=0
+endif
 # A drvmod blob embeds a driver_t, so it shares the kernel's struct layout.  These
 # rules list their headers by hand, and any header left off the list turns a
 # driver_t or device_t change into a silent ABI mismatch: the blob keeps the old

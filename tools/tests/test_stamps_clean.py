@@ -211,6 +211,42 @@ class CleanSymlinkTests(unittest.TestCase):
 
 
 class UserBuildLockTests(unittest.TestCase):
+    def test_native_uapi_header_change_rebuilds_same_build_id(self):
+        targets = (STAMPS.parent / "targets-dev.mk").read_text()
+        recipe = targets.split("--roots \"", 2)[2].split('"', 1)[0]
+        roots = recipe.split()
+        self.assertIn("kernel/include/uapi/a20", roots)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "user/build/riscv64"
+            out.mkdir(parents=True)
+            binary = out / "native-tool"
+            binary.write_text("old binary")
+            binary.chmod(0o755)
+            stamp = out / ".native-build-id"
+            stamp.write_text("same-id\n")
+            header = repo / "kernel/include/uapi/a20/cluster_gossip.h"
+            header.parent.mkdir(parents=True)
+            header.write_text("new shared protocol\n")
+            os.utime(stamp, (1, 1))
+            os.utime(header, (2, 2))
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            calls = []
+            stamps.REPO = repo
+            stamps.submake = lambda args: calls.append(args) or 0
+            try:
+                args = argparse.Namespace(
+                    build_id="same-id", stamp=str(stamp.relative_to(repo)),
+                    binaries=str(binary.relative_to(repo)), arch="riscv64",
+                    nommu="0", opt="-O3", roots=" ".join(roots))
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][-1], "native-programs")
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(len(calls), 1)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
     def test_different_arch_output_roots_are_not_serialized(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = multiprocessing.get_context("fork")

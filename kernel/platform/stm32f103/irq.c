@@ -20,7 +20,7 @@ uint32_t armv7m_platform_core_clock_hz(void) {
 }
 
 void armv7m_platform_systick(uint64_t ticks) {
-#ifndef CONFIG_STM32_QEMU
+#if !defined(CONFIG_STM32_QEMU) && !defined(CONFIG_MCU_SHARED_KERNEL)
     stm32_backlight_systick();
 #endif
     if ((ticks % 500U) == 0U)
@@ -43,10 +43,18 @@ void armv7m_platform_irq_dispatch(uint32_t irq) {
         break;
 #ifndef CONFIG_STM32_QEMU
     case STM32_IRQ_USART2:
+#if defined(CONFIG_STM32_CLUSTER_PORT) && CONFIG_STM32_CLUSTER_PORT == 2
+        stm32_cluster_uart_irq();
+#elif !defined(CONFIG_STM32_CLUSTER_PORT)
         stm32_wifi_irq();
+#endif
         break;
     case STM32_IRQ_USART3:
+#if defined(CONFIG_STM32_CLUSTER_PORT) && CONFIG_STM32_CLUSTER_PORT == 3
+        stm32_cluster_uart_irq();
+#elif !defined(CONFIG_STM32_CLUSTER_PORT)
         stm32_bluetooth_irq();
+#endif
         break;
 #endif
     default:

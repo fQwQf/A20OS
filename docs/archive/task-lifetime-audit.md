@@ -12,7 +12,7 @@
 |---|---|---|
 | 分配/全局任务列表 | `proc_task_alloc_storage()` 在 `proc_alloc_task_slot()` 发布任务之前创建分配引用 | `proc_destroy_task()` 标记 `destroy_started`，移除调度器/全局可达性，然后释放分配引用 |
 | 静态空闲任务 | `proc_task_init_idle_state()` 安装一个永久基础引用 | 永不释放；`/proc/a20/task_lifetime` 检查每个当前静态任务除 CPU 所有权之外仍持有其基础引用 |
-| PID 表 | `proc_pid_register()` 在发布前调用 `proc_get()` | `proc_pid_unregister()` 移除哈希/位图条目，然后调用 `proc_put()` |
+| PID 表 | `proc_pid_register()` 在发布前调用 `proc_get()` | `proc_pid_unregister()` 移除哈希并调用 `proc_put()`；Native 对象配置的位图保留到最终任务释放 |
 | 运行队列 | `proc_runq_enqueue_locked()` 在设置 `on_rq` 之前调用 `proc_get()` | `proc_runq_pick_local()` 在本地运行队列锁下将同一引用转移给 `dispatching`；`proc_runq_remove_locked()` 释放它 |
 | 派发/当前 CPU | 被选中的任务在 `dispatching` 期间保留运行队列引用；`proc_set_current()` 获取当前槽位引用 | `context_switch()` 释放派发引用；`proc_switch_complete()` 在旧栈不再活动之后释放出去的当前/切换引用 |
 | 等待条目 | `wait_queue_link()` 和 `futex_waiter_alloc()` 在发布前调用 `proc_get()` | 解除链接/移除释放它，或回收将其转移给唤醒批次 |
@@ -41,3 +41,8 @@
 - futex wake/exit。
 
 它会在运行前后采样诊断面，并要求任务对象、总引用数、列出的任务/引用、PID 条目、等待条目、唤醒条目和超时条目回到相同基线。它还要求 `lifetime_errors: 0`。宿主机侧目标还要求每个压力 PASS 标记、零 QEMU 状态码以及正常的关机标记。
+
+Native TASK/THREAD/DEBUG 句柄现在持有独立身份对象。它对 task_t 使用弱绑定，
+回收时先解绑；活动操作通过引用查找取得原任务引用。PID 数字在最终任务引用
+释放时才回到位图，身份对象可以继续被旧句柄持有而不保留任务/地址空间。
+这一补充的锁与复用约束见 [任务对象生命周期](../cluster/33-task-object-lifetime.md)。

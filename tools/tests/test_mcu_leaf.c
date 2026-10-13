@@ -70,39 +70,33 @@ static uint8_t harness_tx_q[4096];
 static unsigned harness_tx_len;
 static uint64_t harness_ticks;
 
-uint64_t timer_get_ticks(void)
-{
+uint64_t timer_get_ticks(void) {
     return harness_ticks;
 }
 
 /* timer.h resolves TICKS_PER_SEC through this on riscv64 (QEMU: 10 MHz). */
-uint64_t riscv64_timer_freq(void)
-{
+uint64_t riscv64_timer_freq(void) {
     return 10000000ULL;
 }
 
-void uart_putc(char c)
-{
+void uart_putc(char c) {
     assert(harness_tx_len < sizeof(harness_tx_q));
     harness_tx_q[harness_tx_len++] = (uint8_t)c;
 }
 
-int uart_try_getc(void)
-{
+int uart_try_getc(void) {
     if (harness_rx_head == harness_rx_tail)
         return -1;
     return harness_rx_q[harness_rx_tail++ % sizeof(harness_rx_q)];
 }
 
-static void harness_reset(void)
-{
+static void harness_reset(void) {
     harness_rx_head = harness_rx_tail = 0;
     harness_tx_len = 0;
 }
 
 /* Queue raw wire bytes for the leaf to pump. */
-static void harness_feed(const uint8_t *bytes, unsigned len)
-{
+static void harness_feed(const uint8_t *bytes, unsigned len) {
     unsigned i;
 
     for (i = 0; i < len; i++) {
@@ -111,24 +105,24 @@ static void harness_feed(const uint8_t *bytes, unsigned len)
     }
 }
 
-/* One poll() turn of the leaf. */
-static void harness_pump(void)
-{
-    a20_mcu_leaf_poll();
+/* Drain a scripted input through the production bounded pump. */
+static void harness_pump(void) {
+    do {
+        a20_mcu_leaf_poll();
+    } while (harness_rx_head != harness_rx_tail);
 }
 
 /* Decode what the leaf emitted this turn into exactly one frame; returns
  * its length via *out_len, or 0 when the leaf stayed silent. */
-static unsigned harness_take_reply(uint8_t *frame, unsigned cap)
-{
+static unsigned harness_take_reply(uint8_t *frame, unsigned cap) {
     a20_clx_slip_rx_t rx;
     unsigned consumed = 0;
     int got = 0;
 
     a20_clx_slip_rx_init(&rx, frame, cap, 1000);
     while (consumed < harness_tx_len) {
-        int r = a20_clx_slip_rx_byte(&rx, harness_tx_q[consumed],
-                                     harness_ticks);
+        int r =
+            a20_clx_slip_rx_byte(&rx, harness_tx_q[consumed], harness_ticks);
         consumed++;
         if (r == 1) {
             got = 1;
@@ -153,13 +147,11 @@ static uint16_t head_assigned_addr = 0x0021;
 static uint64_t head_nonce = 0x1111111122222222ULL;
 static uint32_t head_txid = 100;
 
-static void head_build_hello(uint8_t *frame, unsigned cap, uint16_t assign)
-{
+static void head_build_hello(uint8_t *frame, unsigned cap, uint16_t assign) {
     uint8_t payload[A20_CLX_HELLO_LEN];
 
     a20_clx_build_hello_payload(head_id, 0, 0, A20_CLX_TIER_DEFAULT,
-                                A20_CLX_CAP_RELAY, assign, head_nonce,
-                                payload);
+                                A20_CLX_CAP_RELAY, assign, head_nonce, payload);
     /* Dial HELLO: dst unknown on a point-to-point wire (matches uart.c). */
     int n = a20_clx_build_frame(frame, cap, A20_CLX_TYPE_HELLO, 0, 0, 0,
                                 a20_clx_fnv1a32(head_id), 0, 0, payload,
@@ -167,8 +159,7 @@ static void head_build_hello(uint8_t *frame, unsigned cap, uint16_t assign)
     assert(n > 0);
 }
 
-static void head_slip_and_send(const uint8_t *frame, unsigned len)
-{
+static void head_slip_and_send(const uint8_t *frame, unsigned len) {
     uint8_t wire[2 * A20_CLX_UART_MTU + 2];
 
     int n = a20_clx_slip_encode(frame, len, wire, sizeof(wire));
@@ -176,8 +167,7 @@ static void head_slip_and_send(const uint8_t *frame, unsigned len)
     harness_feed(wire, (unsigned)n);
 }
 
-static void head_build_ping(uint8_t *frame, unsigned cap, uint64_t ts_us)
-{
+static void head_build_ping(uint8_t *frame, unsigned cap, uint64_t ts_us) {
     uint8_t payload[8];
 
     a20_clx_put_le64(payload, ts_us);
@@ -191,17 +181,14 @@ static void head_build_ping(uint8_t *frame, unsigned cap, uint64_t ts_us)
 
 static void head_build_call(uint8_t *frame, unsigned cap, uint32_t txid,
                             uint32_t slot, const uint8_t *payload,
-                            uint16_t payload_len)
-{
-    int n = a20_clx_build_frame(frame, cap, A20_CLX_TYPE_CALL, 0, 0, txid,
-                                a20_clx_fnv1a32(head_id),
-                                a20_clx_fnv1a32(leaf_self_id), slot, payload,
-                                payload_len);
+                            uint16_t payload_len) {
+    int n = a20_clx_build_frame(
+        frame, cap, A20_CLX_TYPE_CALL, 0, 0, txid, a20_clx_fnv1a32(head_id),
+        a20_clx_fnv1a32(leaf_self_id), slot, payload, payload_len);
     assert(n > 0);
 }
 
-static void head_build_close(uint8_t *frame, unsigned cap, uint32_t slot)
-{
+static void head_build_close(uint8_t *frame, unsigned cap, uint32_t slot) {
     int n = a20_clx_build_frame(frame, cap, A20_CLX_TYPE_CLOSE, 0, 0, 0,
                                 a20_clx_fnv1a32(head_id),
                                 a20_clx_fnv1a32(leaf_self_id), slot, NULL, 0);
@@ -212,8 +199,7 @@ static void head_build_close(uint8_t *frame, unsigned cap, uint32_t slot)
 /* Scenarios                                                           */
 /* ------------------------------------------------------------------ */
 
-static void test_hello_handshake_assigns_address(void)
-{
+static void test_hello_handshake_assigns_address(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     a20_mcu_leaf_status_t st;
@@ -224,8 +210,8 @@ static void test_hello_handshake_assigns_address(void)
     assert(leaf_short_addr == A20_CLX_UART_SHORT_UNASSIGNED);
 
     head_build_hello(frame, sizeof(frame), head_assigned_addr);
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN +
-                                  A20_CLX_CRC_LEN);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN);
     harness_pump();
 
     /* 04 §4: the leaf answers HELLO with HELLO_ACK and adopts the address. */
@@ -242,10 +228,11 @@ static void test_hello_handshake_assigns_address(void)
         const uint8_t *payload = reply + A20_CLX_OFF_PAYLOAD;
         /* 02 §6: HELLO_ACK payload mirrors HELLO; the leaf echoes the
          * assignment and carries its own identity + LEAF cap. */
-        assert(memcmp(payload + A20_CLX_HELLO_OFF_NODE_ID, leaf_self_id,
-                      16) == 0);
+        assert(memcmp(payload + A20_CLX_HELLO_OFF_NODE_ID, leaf_self_id, 16) ==
+               0);
         assert(payload[A20_CLX_HELLO_OFF_TIER] == A20_CLX_TIER_MCU);
-        assert(payload[A20_CLX_HELLO_OFF_CAPS] == A20_CLX_CAP_LEAF);
+        assert(payload[A20_CLX_HELLO_OFF_CAPS] ==
+               (A20_CLX_CAP_LEAF | A20_CLX_CAP_RELIABLE));
         assert(a20_clx_get_le16(payload + A20_CLX_HELLO_OFF_SHORT_ADDR) ==
                head_assigned_addr);
         assert(a20_clx_get_le32(reply + A20_CLX_OFF_DST_HASH) ==
@@ -258,8 +245,7 @@ static void test_hello_handshake_assigns_address(void)
     }
 }
 
-static void test_ping_pong_echo(void)
-{
+static void test_ping_pong_echo(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     unsigned rl;
@@ -278,8 +264,7 @@ static void test_ping_pong_echo(void)
                   8) == 0);
 }
 
-static void test_call_dot_product_and_dedup(void)
-{
+static void test_call_dot_product_and_dedup(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     uint8_t payload[4 + 24];
@@ -297,10 +282,10 @@ static void test_call_dot_product_and_dedup(void)
     a20_clx_put_le32(payload + 24, 6);
 
     harness_reset();
-    head_build_call(frame, sizeof(frame), head_txid,
-                    A20_MCU_LEAF_OP_DOT_SLOT, payload, (uint16_t)sizeof(payload));
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + sizeof(payload) +
-                                  A20_CLX_CRC_LEN);
+    head_build_call(frame, sizeof(frame), head_txid, A20_MCU_LEAF_OP_DOT_SLOT,
+                    payload, (uint16_t)sizeof(payload));
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + sizeof(payload) + A20_CLX_CRC_LEN);
     harness_pump();
 
     /* 02 §2: CALL_REPLY matches the request txid; operator reply is
@@ -317,8 +302,8 @@ static void test_call_dot_product_and_dedup(void)
     /* 02 §4 at-most-once: the same (src_hash, txid) re-delivery re-sends
      * the cached reply and counts dedup_drops instead of re-executing. */
     harness_reset();
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + sizeof(payload) +
-                                  A20_CLX_CRC_LEN);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + sizeof(payload) + A20_CLX_CRC_LEN);
     harness_pump();
     {
         uint8_t reply2[A20_CLX_UART_MTU];
@@ -332,8 +317,7 @@ static void test_call_dot_product_and_dedup(void)
     }
 }
 
-static void test_call_negative_dot_and_malformed(void)
-{
+static void test_call_negative_dot_and_malformed(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     uint8_t payload[4 + 8];
@@ -345,9 +329,10 @@ static void test_call_negative_dot_and_malformed(void)
     a20_clx_put_le32(payload + 8, 7);
     harness_reset();
     head_build_call(frame, sizeof(frame), head_txid + 1,
-                    A20_MCU_LEAF_OP_DOT_SLOT, payload, (uint16_t)sizeof(payload));
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + sizeof(payload) +
-                                  A20_CLX_CRC_LEN);
+                    A20_MCU_LEAF_OP_DOT_SLOT, payload,
+                    (uint16_t)sizeof(payload));
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + sizeof(payload) + A20_CLX_CRC_LEN);
     harness_pump();
     rl = harness_take_reply(reply, sizeof(reply));
     assert(rl == A20_CLX_HDR_LEN + 12 + A20_CLX_CRC_LEN);
@@ -360,9 +345,10 @@ static void test_call_negative_dot_and_malformed(void)
     a20_clx_put_le32(payload, 5); /* claims 5 vectors, carries 1 */
     harness_reset();
     head_build_call(frame, sizeof(frame), head_txid + 2,
-                    A20_MCU_LEAF_OP_DOT_SLOT, payload, (uint16_t)sizeof(payload));
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + sizeof(payload) +
-                                  A20_CLX_CRC_LEN);
+                    A20_MCU_LEAF_OP_DOT_SLOT, payload,
+                    (uint16_t)sizeof(payload));
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + sizeof(payload) + A20_CLX_CRC_LEN);
     harness_pump();
     rl = harness_take_reply(reply, sizeof(reply));
     assert(rl == A20_CLX_HDR_LEN + 12 + A20_CLX_CRC_LEN);
@@ -371,8 +357,7 @@ static void test_call_negative_dot_and_malformed(void)
     assert(a20_clx_get_le32(reply + A20_CLX_OFF_TXID) == head_txid + 2);
 }
 
-static void test_call_unknown_slot_sends_error(void)
-{
+static void test_call_unknown_slot_sends_error(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     uint8_t payload[4];
@@ -391,12 +376,10 @@ static void test_call_unknown_slot_sends_error(void)
     assert(reply[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_ERROR);
     assert(a20_clx_get_le32(reply + A20_CLX_OFF_PAYLOAD) ==
            A20_CLX_WERR_NOT_FOUND);
-    assert(a20_clx_get_le32(reply + A20_CLX_OFF_PAYLOAD + 4) ==
-           head_txid + 3);
+    assert(a20_clx_get_le32(reply + A20_CLX_OFF_PAYLOAD + 4) == head_txid + 3);
 }
 
-static void test_close_invalidates_cached_reply(void)
-{
+static void test_close_invalidates_cached_reply(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t payload[4 + 8];
     a20_mcu_leaf_status_t st;
@@ -440,8 +423,7 @@ static void test_close_invalidates_cached_reply(void)
     }
 }
 
-static void test_unassigned_leaf_tx_gate_and_idle_watchdog(void)
-{
+static void test_unassigned_leaf_tx_gate_and_idle_watchdog(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     uint8_t reply[A20_CLX_UART_MTU];
     a20_mcu_leaf_status_t st;
@@ -475,8 +457,8 @@ static void test_unassigned_leaf_tx_gate_and_idle_watchdog(void)
      * 重协商成功（可能拿到新短地址）"). */
     head_assigned_addr = 0x0042;
     head_build_hello(frame, sizeof(frame), head_assigned_addr);
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN +
-                                  A20_CLX_CRC_LEN);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN);
     harness_pump();
     a20_mcu_leaf_get_status(&st);
     assert(st.state == A20_MCU_LEAF_UP);
@@ -492,8 +474,7 @@ static void test_unassigned_leaf_tx_gate_and_idle_watchdog(void)
     }
 }
 
-static void test_malformed_frames_are_counted_not_served(void)
-{
+static void test_malformed_frames_are_counted_not_served(void) {
     uint8_t frame[A20_CLX_UART_MTU];
     a20_mcu_leaf_status_t st;
 
@@ -509,8 +490,8 @@ static void test_malformed_frames_are_counted_not_served(void)
         uint16_t crc = a20_clx_crc16_ccitt(frame, A20_CLX_HDR_LEN + 32);
         a20_clx_put_le16(frame + A20_CLX_HDR_LEN + 32, crc);
     }
-    head_slip_and_send(frame, A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN +
-                                  A20_CLX_CRC_LEN);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN);
     harness_pump();
     a20_mcu_leaf_get_status(&st);
     assert(st.state == A20_MCU_LEAF_DISCONNECTED);
@@ -518,12 +499,69 @@ static void test_malformed_frames_are_counted_not_served(void)
     assert(harness_tx_len == 0); /* unassigned leaf may not send ERROR */
 }
 
-int main(void)
-{
+/* Drive actual leaf discovery over SLIP, including CD/2 at the 256-byte MTU. */
+static void test_instance_directory(void) {
+    uint8_t query[16], frame[256], reply[256];
+    a20_mcu_leaf_init();
+    harness_reset();
+    a20_runtime_info_t info = {.size = 64,
+                               .version = 1,
+                               .state = A20_RUNTIME_BOUND,
+                               .instance_id = {1},
+                               .boot_epoch = 200};
+    memcpy(info.domain_id, leaf_self_id, 16);
+    assert(!a20_mcu_leaf_publish_runtime(&info));
+    assert(!a20_mcu_leaf_publish_runtime(&info));
+    info.boot_epoch++;
+    assert(a20_mcu_leaf_publish_runtime(&info));
+    info.boot_epoch--;
+    head_build_hello(frame, sizeof(frame), head_assigned_addr);
+    head_slip_and_send(frame,
+                       A20_CLX_HDR_LEN + A20_CLX_HELLO_LEN + A20_CLX_CRC_LEN);
+    harness_pump();
+    assert(harness_take_reply(reply, sizeof(reply)));
+    a20_directory_runtime_request(query, 0, 0);
+    head_build_call(frame, sizeof(frame), ++head_txid, A20_DIRECTORY_SLOT,
+                    query, 16);
+    head_slip_and_send(frame, A20_CLX_HDR_LEN + 16 + A20_CLX_CRC_LEN);
+    harness_pump();
+    unsigned n = harness_take_reply(reply, sizeof(reply));
+    assert(n ==
+           A20_CLX_HDR_LEN + A20_DIRECTORY_RUNTIME_REPLY + A20_CLX_CRC_LEN);
+    a20_directory_record_t record;
+    a20_runtime_info_t observed;
+    assert(!a20_directory_runtime_decode(reply + A20_CLX_HDR_LEN, 192,
+                                         leaf_self_id, &record, &observed));
+    assert(observed.boot_epoch == 200 &&
+           record.boot_epoch != observed.boot_epoch);
+    a20_directory_request(query, 0, 0);
+    head_build_call(frame, sizeof(frame), ++head_txid, A20_DIRECTORY_SLOT,
+                    query, 16);
+    head_slip_and_send(frame, A20_CLX_HDR_LEN + 16 + A20_CLX_CRC_LEN);
+    harness_pump();
+    n = harness_take_reply(reply, sizeof(reply));
+    assert(n == A20_CLX_HDR_LEN + 128 + A20_CLX_CRC_LEN);
+    assert(!a20_directory_decode(reply + A20_CLX_HDR_LEN, 128, leaf_self_id,
+                                 &record));
+    a20_mcu_leaf_init();
+    harness_reset(); /* standalone leaf is explicitly UNBOUND */
+    assert(leaf_directory(query, 16, reply) == 128);
+    a20_directory_runtime_request(query, 0, 0);
+    assert(leaf_directory(query, 16, reply) == 192);
+    assert(!a20_directory_runtime_decode(reply, 192, leaf_self_id, &record,
+                                         &observed));
+    assert(observed.state == A20_RUNTIME_UNBOUND);
+    test_hello_handshake_assigns_address();
+    assert(a20_mcu_leaf_publish_runtime(
+        &info)); /* first provision is forbidden after handshake */
+}
+
+int main(void) {
     static const char *hdr = "HEAD-DEMO-000001";
 
     memcpy(head_id, hdr, 16);
 
+    test_instance_directory();
     test_hello_handshake_assigns_address();
     test_ping_pong_echo();
     test_call_dot_product_and_dedup();

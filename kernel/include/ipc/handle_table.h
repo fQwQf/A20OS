@@ -73,6 +73,12 @@ struct a20_ht_internal *a20_ht_get_ref(struct a20_ht_internal *ht);
 void a20_ht_put_ref(struct a20_ht_internal *ht);
 
 /* ---- Handle operations ---- */
+/* Install a new reference to stable task identity. Caller pins task. A type
+ * of INVALID in task_get accepts TASK/THREAD; DEBUG selects debug sessions. */
+int64_t a20_handle_install_task(struct a20_ht_internal *ht, task_t *task,
+                                uint16_t type, a20_rights_t rights);
+int64_t a20_handle_task_get(struct a20_ht_internal *ht, a20_handle_t handle,
+                            uint16_t type, a20_rights_t rights, task_t **out);
 
 int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
                            uint16_t type, a20_rights_t rights);
@@ -141,6 +147,12 @@ void     a20_ht_sig_pend(struct a20_ht_internal *ht, int sig);
 uint64_t a20_ht_sig_take(struct a20_ht_internal *ht);
 uint64_t a20_ht_sig_blocked(struct a20_ht_internal *ht);
 uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask);
+
+/* Optional thread checkpoints. The table lock protects both the process
+ * queue and these per-task fields. Caller holds a live task reference. */
+void a20_thread_sig_pend(task_t *task, int sig);
+uint64_t a20_thread_sig_check(task_t *task, uint32_t flags, uint64_t selected);
+uint64_t a20_thread_sig_mask(task_t *task, uint64_t mask, int query);
 
 /* Temporal sweeper. */
 void a20_temporal_sweep(struct a20_ht_internal *ht);

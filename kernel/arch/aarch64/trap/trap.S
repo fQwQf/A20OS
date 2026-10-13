@@ -32,8 +32,7 @@
          * timer IRQs included.  Multi-CPU builds still need both.
          */
 #if CONFIG_NR_CPUS > 1
-        mrs     x10, mpidr_el1
-        and     x10, x10, #0xff
+        mrs     x10, tpidrro_el0
         cmp     x10, #CONFIG_NR_CPUS
         csel    x10, x10, xzr, lo
         add     x9, x9, x10, lsl #3
@@ -248,6 +247,11 @@ __trap_from_kernel:
     mov     x0, sp
     bl      kernel_trap_handler
 
+    /* Handlers may schedule and resume with IRQs enabled. Keep restoration of
+     * ELR/SPSR, registers and the final SP release atomic until ERET applies
+     * the saved PSTATE. A nested IRQ in this window can overwrite ELR/SPSR or
+     * reuse the frame after SP is released while we still read from it. */
+    msr     daifset, #2
     mov     x2, sp
     ldr     x3, [x2, #SP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
@@ -327,6 +331,8 @@ arch_return_to_user:
 
 __return_to_user:
 user_trap_return:
+    /* ERET restores the user PSTATE; no IRQ may observe a partial restore. */
+    msr     daifset, #2
     mov     x2, sp
     ldr     x3, [x2, #SP_OFF]
     ldr     x4, [x2, #KSP_OFF]

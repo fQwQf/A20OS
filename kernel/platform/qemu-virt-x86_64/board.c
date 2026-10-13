@@ -70,6 +70,16 @@ static const timer_ops_t x86_64_timer_ops = {
 
 static unsigned x86_64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
                                      uint64_t boot_hw_id) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    (void)boot_hw_id;
+    if (capacity < 2)
+        return 0;
+    for (unsigned cpu = 0; cpu < 2; cpu++) {
+        cpus[cpu].hw_id = cpu; /* Shared-memory endpoint, not remote APIC ID. */
+        cpus[cpu].platform_cookie = cpu;
+    }
+    return 2;
+#else
     uint32_t apic_ids[CONFIG_NR_CPUS];
     size_t count = firmware_acpi_apic_ids(apic_ids, capacity,
                                           (uint32_t)boot_hw_id);
@@ -84,6 +94,7 @@ static unsigned x86_64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
         cpus[cpu].platform_cookie = apic_ids[cpu];
     }
     return (unsigned)count;
+#endif
 }
 
 static int x86_64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
