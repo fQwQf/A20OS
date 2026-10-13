@@ -24,10 +24,17 @@
 
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
+    /* page_count is u32; reject rounding and allocation-size overflow before
+     * a truncated page array can be indexed by a later demand fault. */
+    if (size > (uint64_t)-1 - (PAGE_SIZE - 1))
+        return NULL;
+    uint64_t count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (count > (uint32_t)-1 || count > SIZE_MAX / sizeof(pfn_t))
+        return NULL;
     struct vmo *vmo = kmalloc(sizeof(*vmo));
     if (!vmo) return NULL;
 
-    uint32_t npages = (uint32_t)((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    uint32_t npages = (uint32_t)count;
     vmo->pages = NULL;
     if (npages > 0) {
         vmo->pages = kmalloc(npages * sizeof(pfn_t));
@@ -59,6 +66,9 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 static void vmo_destroy(struct vmo *vmo)
 {
     if (!vmo) return;
+    /* A lookup/duplicate release is not object destruction. Mappings can
+     * keep this VMO alive after the last handle closes. */
+    a20_eventq_on_object_destroy(vmo, A20_OBJ_MEMORY);
     if (vmo->pager)
         a20_pager_detach_vmo(vmo);
     a20_objstat_add(&g_a20_objstats.vmos, -1);
@@ -127,6 +137,13 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     }
 
     spin_lock(&vmo->lock);
+    /* Another mapper may have populated the canonical page while the lock
+     * was dropped to inspect the pager. Never replace or leak that frame. */
+    if (vmo->pages[index] != PFN_NONE) {
+        pfn_t pfn = vmo->pages[index];
+        spin_unlock(&vmo->lock);
+        return pfn;
+    }
     pfn_t pfn = pfa_alloc_page();
     if (pfn == PFN_NONE) {
         spin_unlock(&vmo->lock);

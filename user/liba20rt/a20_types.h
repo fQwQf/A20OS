@@ -2,7 +2,7 @@
  * A20OS Native SDK — Types and constants.
  *
  * User-side copy of the kernel ABI type definitions.
- * Struct layouts MUST match kernel/include/abi/native/*.h exactly.
+ * Struct layouts MUST match the headers in kernel/include/abi/native exactly.
  *
  * Copied from:
  *   kernel/include/abi/native/types.h
@@ -15,6 +15,7 @@
 #define _A20_TYPES_H
 
 #include <stdint.h>
+#include "a20_arch.h"
 
 #ifdef __cplusplus
 extern "C" {

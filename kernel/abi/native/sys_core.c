@@ -1013,17 +1013,35 @@ int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
     a20_vm_alloc_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
-    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (!kargs.length || kargs.length > SIZE_MAX - (PAGE_SIZE - 1) ||
+        (kargs.prot & ~7U) || kargs.flags ||
+        kargs.addr_hint >= USER_VA_LIMIT || (kargs.addr_hint & (PAGE_SIZE - 1)))
+        return -A20_ERR_INVALID_ARGUMENT;
 
-    uint64_t addr = proc_mmap(kargs.addr_hint, (size_t)kargs.length,
-                              (int)kargs.prot, 0x20 /* MAP_ANONYMOUS */,
-                              -1, 0);
+    task_t *cur = proc_current();
+    if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
+    mm_struct_t *mm = cur->mm;
+    mm_tlb_invalidate_begin(mm);
+    uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+    uint64_t pages = ROUND_UP((size_t)kargs.length, PAGE_SIZE) / PAGE_SIZE;
+    uint64_t limit = cur->limits.as / PAGE_SIZE;
+    uint64_t addr;
+    if (cur->limits.as && (mm->total_vm > limit || pages > limit - mm->total_vm))
+        addr = (vaddr_t)-ENOMEM;
+    else
+        addr = mm_mmap_native_locked(mm, (vaddr_t)kargs.addr_hint,
+                                          (size_t)kargs.length, kargs.prot,
+                                          0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */);
+    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    mm_tlb_invalidate_finish(mm);
     if (addr == 0 || mm_addr_is_error((vaddr_t)addr))
         return -A20_ERR_NO_MEMORY;
 
     kargs.out_addr = addr;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        mm_munmap(mm, addr, (size_t)kargs.length);
         return -A20_ERR_FAULT;
+    }
     return A20_OK;
 }
 
@@ -1137,10 +1155,10 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
     if (gfd < 0) return -A20_ERR_NOT_FOUND;
 
     uint16_t obj_type = A20_OBJ_INVALID;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(gfd);
     if (vf && vf->vnode && vf->vnode->type == VFS_FT_DIR)
         obj_type = A20_OBJ_DIRECTORY;
-    if (vf) vfs_put_file_ref(gfd, vf);
+    if (vf) vfs_put_file(vf);
 
     a20_rights_t rights = A20_RIGHT_STAT | A20_RIGHT_SEEK | A20_RIGHT_DUP |
                           A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
@@ -1154,7 +1172,11 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
     if (kargs->rights != 0)
         rights = kargs->rights & rights; /* user can only restrict */
 
-    return a20_install_gfd_handle(gfd, obj_type, rights, out_handle);
+    r = a20_install_gfd_handle(gfd, obj_type, rights, out_handle);
+    /* path_open creates a Native handle, not a second, hidden Linux fd.
+     * The installed handle owns its own vfile reference on success. */
+    fdtable_close_current(gfd);
+    return r;
 }
 
 int64_t sys_a20_path_open(const a20_syscall_args_t *args)

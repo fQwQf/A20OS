@@ -78,6 +78,8 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
         return -A20_ERR_INVALID_ARGUMENT;
 
     const uint64_t a20_off_max = ~(1ULL << 63);
+    if (kargs.length > a20_off_max)
+        return -A20_ERR_INVALID_ARGUMENT;
     if (kargs.source_offset != A20_OFFSET_CURRENT &&
         kargs.source_offset > a20_off_max)
         return -A20_ERR_INVALID_ARGUMENT;
@@ -98,6 +100,8 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t src, dst;
+    vfile_t *svf = NULL;
+    long src_orig = -1;
     int64_t r = a20_handle_lookup_ref_internal(ht, kargs.source,
                                                A20_OBJ_INVALID,
                                                A20_RIGHT_READ | A20_RIGHT_TRANSFER,
@@ -122,16 +126,15 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
         goto out_both;
     }
 
-    int src_gfd = (int)(uintptr_t)src.object;
-    int dst_gfd = (int)(uintptr_t)dst.object;
-    if (src_gfd == dst_gfd) {
+    svf = (vfile_t *)src.object;
+    vfile_t *dvf = (vfile_t *)dst.object;
+    if (svf == dvf) {
         r = -A20_ERR_INVALID_ARGUMENT;
         goto out_both;
     }
 
-    long src_orig = -1;
     if (kargs.flags & A20_TRANSFER_PEEK) {
-        src_orig = vfs_lseek(src_gfd, 0, SEEK_CUR);
+        src_orig = vfs_lseek_vfile(svf, 0, SEEK_CUR);
         if (src_orig < 0) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_both;
@@ -139,7 +142,7 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
     }
 
     if (kargs.source_offset != A20_OFFSET_CURRENT) {
-        long off = vfs_lseek(src_gfd, (long)kargs.source_offset, SEEK_SET);
+        long off = vfs_lseek_vfile(svf, (long)kargs.source_offset, SEEK_SET);
         if (off < 0) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_both;
@@ -148,13 +151,13 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
 
     long dst_orig = -1;
     if (kargs.dest_offset != A20_OFFSET_CURRENT) {
-        dst_orig = vfs_lseek(dst_gfd, 0, SEEK_CUR);
+        dst_orig = vfs_lseek_vfile(dvf, 0, SEEK_CUR);
         if (dst_orig < 0) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_both;
         }
-        if (vfs_lseek(dst_gfd, (long)kargs.dest_offset, SEEK_SET) < 0) {
-            vfs_lseek(dst_gfd, dst_orig, SEEK_SET);
+        if (vfs_lseek_vfile(dvf, (long)kargs.dest_offset, SEEK_SET) < 0) {
+            vfs_lseek_vfile(dvf, dst_orig, SEEK_SET);
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_both;
         }
@@ -166,22 +169,22 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
     while (total < len) {
         uint64_t chunk = len - total;
         if (chunk > sizeof(buf)) chunk = sizeof(buf);
-        vfile_t *svf = vfs_get_file_ref(src_gfd);
-        if (!svf) break;
         int64_t n = vfs_read_file(svf, buf, (size_t)chunk);
-        vfs_put_file_ref(src_gfd, svf);
-        if (n <= 0) break;
-        vfile_t *dvf = vfs_get_file_ref(dst_gfd);
-        if (!dvf) break;
+        if (n <= 0) {
+            if (n < 0) r = a20_native_vfs_result((int)n);
+            break;
+        }
         int64_t wn = vfs_write_file(dvf, buf, (size_t)n);
-        vfs_put_file_ref(dst_gfd, dvf);
-        if (wn <= 0) break;
+        if (wn <= 0) {
+            r = wn < 0 ? a20_native_vfs_result((int)wn) : -A20_ERR_IO;
+            break;
+        }
         total += (uint64_t)wn;
         if (wn < n) break;
     }
 
     if ((kargs.flags & A20_TRANSFER_PEEK) && src_orig >= 0)
-        vfs_lseek(src_gfd, src_orig, SEEK_SET);
+        vfs_lseek_vfile(svf, src_orig, SEEK_SET);
 
     kargs.out_transferred = total;
     a20_object_release(dst.object, dst.type);
@@ -189,9 +192,11 @@ int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
     if (copy_to_user(&uargs->out_transferred, &kargs.out_transferred,
                      sizeof(kargs.out_transferred)) < 0)
         return -A20_ERR_FAULT;
-    return (int64_t)total;
+    return total ? (int64_t)total : r;
 
 out_both:
+    if (svf && (kargs.flags & A20_TRANSFER_PEEK) && src_orig >= 0)
+        vfs_lseek_vfile(svf, src_orig, SEEK_SET);
     a20_object_release(dst.object, dst.type);
 out_src:
     a20_object_release(src.object, src.type);

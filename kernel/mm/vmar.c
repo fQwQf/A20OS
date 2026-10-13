@@ -22,12 +22,14 @@
 #include "mm/slab.h"
 #include "mm/swap.h"      /* PAGE_SIZE */
 #include "mm/vmar.h"
+#include "mm/vm.h"
 
 vmar_t *vmar_create_root(struct mm_struct *mm, uint64_t base, uint64_t len,
                          uint32_t cap)
 {
     (void)mm;
-    if (len == 0 || base + len < base) return NULL;
+    if (len == 0 || base >= USER_VA_LIMIT || len > USER_VA_LIMIT - base)
+        return NULL;
     if ((base & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1))) return NULL;
 
     vmar_t *v = kmalloc(sizeof(*v));
@@ -138,10 +140,8 @@ void vmar_release(vmar_t *v)
     if (refcount_dec_and_test(&v->refs)) {
         vmar_t *parent = v->parent;
         if (parent) {
-            /* Hold the parent across the unlink: this may be the last
-             * reference to it, and it must not be freed underneath the lock
-             * this node is about to be removed under. */
-            vmar_acquire(parent);
+            /* The reference acquired at child insertion keeps the parent
+             * alive through unlink. It is released below, outside the lock. */
 
             uint64_t flags = spin_lock_irqsave(&parent->lock);
             vmar_t **pp = &parent->child_head;
