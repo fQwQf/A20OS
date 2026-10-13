@@ -118,3 +118,7 @@ ISA 的消息协议。跨 ISA 集群继续使用既有程序格式、能力匹�
 物理多 MCU 共享域还需要真实共享 RAM、原子操作/仲裁和缓存维护后端。
 owner 失效后的请求取消、fencing 和设备恢复也未完成。当前不能宣称多 MCU
 Minecraft 已经可用，亦没有普通模式性能基准来支持整体零性能损失的结论。
+
+后续文件系统挂载、从磁盘 exec 和真实文件 fsync 已推进至
+[58](58-shared-filesystem-execution.md)。JVM、图形和 Minecraft 跨实例验收
+尚未完成。

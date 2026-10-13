@@ -23,47 +23,8 @@
  *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  */
 
-#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY)
-typedef struct {
-    block_dev_t block;
-    block_dev_t *parent;
-    uint64_t first_lba;
-    uint64_t sectors;
-    int read_only;
-} partition_block_dev_t;
-
-static int partition_read_sector(block_dev_t *block, uint64_t lba, void *buf,
-                                 size_t count) {
-    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
-    if (!part || !part->parent || lba > part->sectors ||
-        count > part->sectors - lba)
-        return -1;
-    return part->parent->read_sector(part->parent, part->first_lba + lba, buf, count);
-}
-
-static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *buf,
-                                  size_t count) {
-    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
-    if (!part || !part->parent || lba > part->sectors ||
-        count > part->sectors - lba)
-        return -1;
-    if (part->read_only)
-        return -EROFS;
-    return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
-}
-
-/* A flush is device-wide, not range-scoped, so a partition forwards it to the
- * whole-disk parent unchanged.  Omitting it here would silently strip the
- * durability guarantee from every filesystem mount, since all of them sit on
- * a partition. */
-static int partition_flush(block_dev_t *block)
-{
-    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
-    if (!part || !part->parent || !part->parent->flush)
-        return -EOPNOTSUPP;
-    return part->parent->flush(part->parent);
-}
-
+/* Explicit mounts may use already-probed class devices even in a RAM-root
+ * bringup. Automatic root probing below retains its existing profile gate. */
 typedef struct class_block_dev {
     block_dev_t block;
     device_t *dev;
@@ -114,6 +75,47 @@ block_dev_t *mount_setup_block_device(int index)
     class_block->block.priv = class_block;
     class_block->block.release = NULL;
     return &class_block->block;
+}
+
+#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY)
+typedef struct {
+    block_dev_t block;
+    block_dev_t *parent;
+    uint64_t first_lba;
+    uint64_t sectors;
+    int read_only;
+} partition_block_dev_t;
+
+static int partition_read_sector(block_dev_t *block, uint64_t lba, void *buf,
+                                 size_t count) {
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || lba > part->sectors ||
+        count > part->sectors - lba)
+        return -1;
+    return part->parent->read_sector(part->parent, part->first_lba + lba, buf, count);
+}
+
+static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *buf,
+                                  size_t count) {
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || lba > part->sectors ||
+        count > part->sectors - lba)
+        return -1;
+    if (part->read_only)
+        return -EROFS;
+    return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
+}
+
+/* A flush is device-wide, not range-scoped, so a partition forwards it to the
+ * whole-disk parent unchanged.  Omitting it here would silently strip the
+ * durability guarantee from every filesystem mount, since all of them sit on
+ * a partition. */
+static int partition_flush(block_dev_t *block)
+{
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || !part->parent->flush)
+        return -EOPNOTSUPP;
+    return part->parent->flush(part->parent);
 }
 
 /* Expose individual GPT partitions to the filesystem probe.  VF2's boot
@@ -376,14 +378,6 @@ void mount_block_devices(void) {
     }
 }
 #else /* BRINGUP without explicit storage experiment */
-
-/* No block devices exist in BRINGUP builds; keep the class lookup linkable
- * for vfs_mount(/dev/vd*) and the swap path. */
-block_dev_t *mount_setup_block_device(int index)
-{
-    (void)index;
-    return NULL;
-}
 
 void mount_read_only_storage(void)
 {

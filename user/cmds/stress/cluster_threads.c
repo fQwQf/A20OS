@@ -2,6 +2,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <uapi/a20/block.h>
 #include <pthread.h>
 #include <sched.h>
@@ -136,12 +139,59 @@ static void disk_roundtrip(void) {
     puts("CLUSTER_DISK: PASS cpu=1 sectors=32 bytes=16384 flush=32 readback=32");
 }
 
+static int filesystem_child(void) {
+    check(sched_getcpu() == 1, "exec preserved remote CPU affinity");
+    int fd = open("/mnt/result.tmp", O_CREAT | O_EXCL | O_RDWR, 0600);
+    check(fd >= 0, "create filesystem output");
+    unsigned char buffer[4096];
+    for (unsigned block = 0; block < 16; block++) {
+        for (unsigned i = 0; i < sizeof(buffer); i++)
+            buffer[i] = (unsigned char)(i * 13 + block * 7 + 0xa2);
+        check(write(fd, buffer, sizeof(buffer)) == sizeof(buffer), "filesystem write");
+    }
+    check(!fsync(fd) && !close(fd), "filesystem fsync/close");
+    check(!rename("/mnt/result.tmp", "/mnt/result.bin"), "filesystem rename");
+    fd = open("/mnt", O_RDONLY | O_DIRECTORY);
+    check(fd >= 0 && !fsync(fd) && !close(fd), "filesystem directory sync");
+    check(sched_getcpu() == 1, "filesystem remote execution");
+    puts("CLUSTER_FS_CHILD: PASS cpu=1 bytes=65536 fsync=file+directory");
+    return 37;
+}
+static void filesystem_roundtrip(void) {
+    bind(2);
+    check(!mkdir("/mnt", 0755) || errno == EEXIST, "mount directory");
+    check(!mount("/dev/vda", "/mnt", "ext4", 0, NULL), "mount scratch ext4");
+    pid_t pid = fork();
+    check(pid >= 0, "filesystem fork");
+    if (!pid) {
+        execl("/mnt/program", "program", "--filesystem-child", (char *)NULL);
+        check(0, "exec from disk");
+    }
+    int status = 0;
+    check(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 37,
+          "filesystem child exit");
+    int fd = open("/mnt/result.bin", O_RDONLY);
+    check(fd >= 0, "reopen filesystem output");
+    unsigned char buffer[4096];
+    for (unsigned block = 0; block < 16; block++) {
+        check(read(fd, buffer, sizeof(buffer)) == sizeof(buffer), "filesystem readback");
+        for (unsigned i = 0; i < sizeof(buffer); i++)
+            check(buffer[i] == (unsigned char)(i * 13 + block * 7 + 0xa2), "filesystem data");
+    }
+    check(read(fd, buffer, 1) == 0 && !close(fd), "filesystem EOF/close");
+    check(!umount("/mnt"), "filesystem unmount");
+    check(sched_getcpu() == 1, "filesystem affinity preserved");
+    puts("CLUSTER_FS: PASS cpu=1 exec=disk child-exit=37 bytes=65536 unmounted=1");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    int console = 0, disk = 0;
+    if (argc == 2 && !strcmp(argv[1], "--filesystem-child")) return filesystem_child();
+    int console = 0, disk = 0, filesystem = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--console")) console = 1;
         else if (!strcmp(argv[i], "--disk")) disk = 1;
+        else if (!strcmp(argv[i], "--filesystem")) filesystem = 1;
         else check(0, "arguments");
     }
     struct sigaction action = {.sa_sigaction = protection_fault, .sa_flags = SA_SIGINFO};
@@ -202,6 +252,7 @@ int main(int argc, char **argv) {
         puts("CLUSTER_CONSOLE: PASS cpu=1 input=owner-ok blocks=32");
     }
     if (disk) disk_roundtrip();
+    if (filesystem) filesystem_roundtrip();
     printf("CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=%u tls=preserved tlb-rounds=64 protection-faults=128 "
            "jobs=%u split=%u/%u sum=%llu mask=%x destructors=2 cond-timeout=checked\n",
            migrations, JOBS, jobs[0], jobs[1], (unsigned long long)expected, cpu_mask);
