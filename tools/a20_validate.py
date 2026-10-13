@@ -101,6 +101,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     trim = _trim(inst, repo_root, e)
     if trim is not None:
         _validate_capabilities(inst, trim, e)
+    if m.accel is not None and m.accel not in {"tcg", "kvm"}:
+        e.append("machine.accel must be tcg or kvm")
     if m.smp is not None:
         if m.smp < 1:
             e.append("machine.smp: must be >= 1")

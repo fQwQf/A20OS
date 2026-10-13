@@ -70,6 +70,7 @@ class KernelCfg:
 
 @dataclass(frozen=True, slots=True)
 class MachineCfg:
+    accel: str | None = None
     smp: int | None = None
     memory: str | None = None
     allow_unverified_smp: bool | None = None
