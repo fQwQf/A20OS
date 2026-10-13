@@ -576,7 +576,10 @@ EXT4_IMG = $(BUILD_DIR)/ext4.img
 EXT4_JOURNAL_IMG = $(BUILD_DIR)/ext4-journal.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 ISOFS_IMG = $(BUILD_DIR)/isofs.img
-USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+USER_LIBC_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
+# Driver blobs contain inline CPU/MMIO helpers, so shared-domain modules must
+# never overwrite packages consumed by ordinary kernels.
+USER_VARIANT = $(USER_LIBC_VARIANT)$(if $(filter 1,$(QEMU_SHARED_SMP)),-shared-qemu,)
 USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
@@ -1187,9 +1190,9 @@ ifneq ($(NR_CPUS),2)
 $(error QEMU_SHARED_SMP currently requires NR_CPUS=2)
 endif
 ifneq ($(BRINGUP),1)
-$(error QEMU_SHARED_SMP currently requires BRINGUP=1: cross-instance device ownership is not implemented)
+$(error QEMU_SHARED_SMP currently requires BRINGUP=1: full disk-root and graphics ownership are not validated)
 endif
-CFLAGS += -DCONFIG_QEMU_SHARED_SMP -DCONFIG_SHARED_DEVICE_CALL
+CFLAGS += -DCONFIG_QEMU_SHARED_SMP -DCONFIG_SHARED_DEVICE_CALL -DCONFIG_SHARED_MMIO_OWNER=0
 endif
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在

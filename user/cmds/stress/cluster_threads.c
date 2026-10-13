@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <uapi/a20/block.h>
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
@@ -99,8 +102,48 @@ static void *worker(void *arg) {
     }
     return (void *)(uintptr_t)(id + 17);
 }
+static void disk_roundtrip(void) {
+    bind(2);
+    check(sched_getcpu() == 1, "remote disk CPU");
+    int fd = open("/dev/disk0", O_RDWR);
+    check(fd >= 0, "open scratch disk");
+    uint64_t capacity = 0;
+    uint32_t sector_size = 0;
+    check(!ioctl(fd, A20_BLK_IOCTL_GET_CAPACITY, &capacity) && capacity == 4096 &&
+          !ioctl(fd, A20_BLK_IOCTL_GET_SECTOR_SZ, &sector_size) && sector_size == 512,
+          "scratch disk geometry");
+    unsigned char buffer[512];
+    check(lseek(fd, 7 * 512, SEEK_SET) == 7 * 512 && read(fd, buffer, 512) == 512,
+          "read scratch signature");
+    for (unsigned i = 0; i < 512; i++)
+        check(buffer[i] == (unsigned char)(i * 17 + 0xa2), "scratch signature");
+    for (unsigned round = 0; round < 32; round++) {
+        off_t offset = (8 + round) * 512;
+        for (unsigned i = 0; i < 512; i++) buffer[i] = (unsigned char)(i * 29 + round * 7 + 0x20);
+        check(lseek(fd, offset, SEEK_SET) == offset && write(fd, buffer, 512) == 512,
+              "remote disk write");
+        /* Existing raw block ioctl: fsync on a raw devfs node does not flush
+         * the hardware. A mounted filesystem uses its normal fsync path. */
+        check(!ioctl(fd, A20_BLK_IOCTL_SYNC), "remote disk flush");
+        memset(buffer, 0, sizeof(buffer));
+        check(lseek(fd, offset, SEEK_SET) == offset && read(fd, buffer, 512) == 512,
+              "remote disk readback");
+        for (unsigned i = 0; i < 512; i++)
+            check(buffer[i] == (unsigned char)(i * 29 + round * 7 + 0x20), "disk data");
+        check(sched_getcpu() == 1, "disk affinity preserved");
+    }
+    check(!close(fd), "close scratch disk");
+    puts("CLUSTER_DISK: PASS cpu=1 sectors=32 bytes=16384 flush=32 readback=32");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    int console = 0, disk = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--console")) console = 1;
+        else if (!strcmp(argv[i], "--disk")) disk = 1;
+        else check(0, "arguments");
+    }
     struct sigaction action = {.sa_sigaction = protection_fault, .sa_flags = SA_SIGINFO};
     sigemptyset(&action.sa_mask);
     check(!sigaction(SIGSEGV, &action, NULL), "sigaction");
@@ -146,7 +189,7 @@ int main(int argc, char **argv) {
     check(!pthread_mutex_unlock(&mutex) && !pthread_cond_destroy(&cond) &&
           !pthread_condattr_destroy(&attr) && !pthread_mutex_destroy(&mutex), "sync cleanup");
     check(!pthread_key_delete(key) && !pthread_barrier_destroy(&gate) && !munmap(page, 4096), "cleanup");
-    if (argc == 2 && !strcmp(argv[1], "--console")) {
+    if (console) {
         bind(2);
         check(sched_getcpu() == 1, "remote console CPU");
         puts("CLUSTER_CONSOLE: remote-cpu=1 ready");
@@ -157,9 +200,8 @@ int main(int argc, char **argv) {
             printf("CLUSTER_CONSOLE_BLOCK:%02u:abcdefghijklmnopqrstuvwxyz012345\n", i);
         check(sched_getcpu() == 1, "console affinity preserved");
         puts("CLUSTER_CONSOLE: PASS cpu=1 input=owner-ok blocks=32");
-    } else {
-        check(argc == 1, "arguments");
     }
+    if (disk) disk_roundtrip();
     printf("CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=%u tls=preserved tlb-rounds=64 protection-faults=128 "
            "jobs=%u split=%u/%u sum=%llu mask=%x destructors=2 cond-timeout=checked\n",
            migrations, JOBS, jobs[0], jobs[1], (unsigned long long)expected, cpu_mask);
