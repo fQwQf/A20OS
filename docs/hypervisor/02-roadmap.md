@@ -1,5 +1,10 @@
 # hypervisor 路线图
 
+> 历史设计记录：下文的“当前”“未提交”和单 vCPU 等状态描述属于 v2 设计阶段。
+> 现行实现与实际验证边界以 [实现状态](05-implementation-status.md) 和
+> [guest supervisor](07-guest-supervisor.md) 为准。2026-10-13 已更新拆分后的源码引用；
+> 新的运行入口使用每 CPU 活跃槽，旧的全局单槽描述不再代表当前实现。
+
 最后核实：本文记录的是 v2（`01-a20os-guest.md`）之后的切片顺序与各自的
 前置条件。**§0–§6 没有任何一整项已落地**，写在这里是为了说明"为什么是这个顺序"
 以及每一项被什么卡着。已落地的部分见
@@ -121,16 +126,16 @@ v2 已定义的委托/设备/引导面
 | --- | --- | --- |
 | guest trap 借宿主 trap 路径，`sscratch` + per-vcpu trampoline bank | 同样借标准 trap 路径，`vcpu->tramp[]` 是那段 bank，汇编可见偏移钉在 `HYP_VCPU_TRAMP_U64` | `kernel/include/hyp/hyp_vcpu.h:46-52`、`kernel/arch/riscv64/hyp/hyp_asm_offsets.h` |
 | 宿主页表机制（Guest memory slots、缺页回调、map/unmap 按页） | stage-2 页表 + `hyp_ram_fill()` 按页补零 + `mm_s2_audit()` 双向审计 | `kernel/hyp/hyp.c`；`kernel/hyp/hyp_vcpu.c:186-259` |
-| vcpu run loop 是一个"进 guest / 陷出来 / 分类 / sret 回去"的循环 | 同款四段，分类器是 `hyp_arch_guest_trap()` 与 `hyp_vcpu_handle_trap()` | `kernel/hyp/hyp_vcpu.c:1046-1150`、`hyp_vcpu_asm.S` |
-| "trap 帧就是 guest 状态，不必另存一份" | 同样：`hyp_vcpu_handle_trap()` 只改 `vcpu->regs[]`/`pc`，从不碰交给它的帧 | `hyp_vcpu.c:1046-1049`（`(void)trap_frame;`） |
-| guest 的 vCPU 创建要有 canary / magic 防止野指针 | `HYP_VM_MAGIC` / `HYP_VCPU_MAGIC`，每次入口都查 | `hyp_vcpu.c:1051,1159-1162` |
+| vcpu run loop 是一个"进 guest / 陷出来 / 分类 / sret 回去"的循环 | 同款四段，分类器是 `hyp_arch_guest_trap()` 与 `hyp_vcpu_handle_trap()` | `kernel/arch/riscv64/hyp/hyp_emulate.c:954`、`hyp_vcpu_asm.S` |
+| "trap 帧就是 guest 状态，不必另存一份" | 同样：`hyp_vcpu_handle_trap()` 只改 `vcpu->regs[]`/`pc`，从不碰交给它的帧 | `kernel/arch/riscv64/hyp/hyp_emulate.c:957`（`(void)trap_frame;`） |
+| guest 的 vCPU 创建要有 canary / magic 防止野指针 | `HYP_VM_MAGIC` / `HYP_VCPU_MAGIC`，每次入口都查 | `kernel/arch/riscv64/hyp/hyp_emulate.c:959` |
 
 **一条借鉴的形状值得单独说**：最初的设计提过"KVM-riscv 的 sscratch 双区方案"，
 落地时**没有采用**——guest trap 走的是内核自己的标准 trap 路径，帧本身就是 guest
 状态（`00-design.md` §5 的"帧即状态 / 唯一接缝"）。所以这里借鉴的是 KVM 的**接口
 形状**，不是它的**实现位置**：KVM 把 guest 的 trap 状态放在自己的数据结构里，
 本树让 guest 状态住在内核的 trap 帧里。代价是宿主 IRQ 必须在 guest 帧上就地跑完
-再 `sret`（`hyp_vcpu.c:1074-1077` 的即时返回），收益是不需要第二套寄存器保存代码。
+再 `sret`（`kernel/arch/riscv64/hyp/hyp_emulate.c:985` 的即时返回），收益是不需要第二套寄存器保存代码。
 
 ### 明确**不**借鉴的，以及为什么
 
@@ -138,7 +143,7 @@ v2 已定义的委托/设备/引导面
 | --- | --- |
 | **用户态设备模型**（KVM 把 virtio / PCI 整个放在 QEMU 里） | 本树的 guest 帧要过 `mm_s2_audit()` 的双向交叉检查（status↔PTE、标志↔映射）。设备要往 guest 内存写 DMA，目标地址必须能被 stage-2 翻译并且能被审计；这条约束在用户态就没有对应物（`01-a20os-guest.md` §9 的"核心差别只有一条"） |
 | **memslot / `KVM_SET_USER_MEMORY_REGION` 式的地址空间登记** | 同上。guest RAM 是一组被出借的帧（`FRAME_F_GUEST` 身份标志 + 引用计数），不是一个由外部登记的地址区间。零拷贝（§3）是把同一个语义推到 VMO 级，不是把 memslot 搬进来 |
-| **vCPU 是可抢占线程，有独立调度类与定时器** | 全局单 guest 槽 + `spin_trylock_irqsave()`，输了竞争回 `-EBUSY`（`hyp_vcpu.c:1181-1184`）。多 vcpu 是 §2，是一次显式的契约变更（`g_hyp_arch_vcpu` 与 `arch[]` 的归属要重新定），不是"照搬 KVM 的调度器" |
+| **vCPU 是可抢占线程，有独立调度类与定时器** | 全局单 guest 槽 + `spin_trylock_irqsave()`，输了竞争回 `-EBUSY`（`kernel/hyp/hyp_vcpu.c:430`）。多 vcpu 是 §2，是一次显式的契约变更（`g_hyp_arch_vcpu` 与 `arch[]` 的归属要重新定），不是"照搬 KVM 的调度器" |
 | **注入式时器中断**（KVM 在 vcpu 定时器到点时置 `hvip.VSTIP`） | 在 H 扩展 + Sstc 上这是多余的一次写：vstimecmp 到期由硬件置 `mip.VSTIP`，`hideleg` bit 6 已委托（§2.2 的依据表）。这正是"借鉴"与"照抄"分界的地方——KVM 需要注入是因为它没有 sstc 的 guest 面 |
 | **用户态 /dev/kvm ioctl 接口 + QEMU 的 vCPU 抽象** | 本树的机器形状收进内核（`01-a20os-guest.md` §9）。用户入口是 Native ABI 的几个调用加上 Linux ABI 桥 |
 | **guest 内存的页保护分级**（KVM 允许按 slot 标 RWX） | 本设计一次只跑一个 guest，窗口页一律 RWX（`01-a20os-guest.md` §10 第 3 条）。等 guest 之间的隔离真的成为对象时再分级 |
@@ -195,7 +200,7 @@ guest 中断到达 VS-mode 的是 QEMU 在 V=1 时无条件置的 `hsie`（见
 ## 2. SMP：多 vcpu 与中断虚拟化
 
 **状态：未落地。** v1/v2 都是全局单 guest 槽
-（`kernel/hyp/hyp_vcpu.c:1157-1190`）。
+（`kernel/hyp/hyp_vcpu.c:418`）。
 
 ### 2.1 阻塞项
 
@@ -224,7 +229,7 @@ guest 中断到达 VS-mode 的是 QEMU 在 V=1 时无条件置的 `hsie`（见
 | `hstatus.VIE` 随 `HYP_HSTATUS_GUEST_ON` 一起置位 | `hyp_arch.c:151,166-167,315`，汇编侧 `kernel/arch/riscv64/hyp/hyp_vcpu_asm.S:52-53` |
 | vstimecmp 到期由 QEMU 置 `mip.VSTIP`，不是软件注入 | `target/riscv/time_helper.c:25-30`（QEMU 10.0.13）的 `riscv_vstimer_cb()`；挂定时器的是写 CSR 0x24d，`target/riscv/csr.c:1680-1692` |
 | 被委托的 VS 位由硬件交给 VS-mode | `target/riscv/cpu_helper.c:585`（V=1 时 `hsie` 恒 1）与 `:617-634` |
-| guest 侧两条入口都接上了 | Sstc：`kernel/hyp/hyp_vcpu.c:988-1003` 仿真 CSR 0x24d；legacy `set_timer`：`hyp_vcpu.c:386-388` 由分派器代写 |
+| guest 侧两条入口都接上了 | Sstc：`kernel/arch/riscv64/hyp/hyp_emulate.c:910` 仿真 CSR 0x24d；legacy `set_timer`：`hyp_vcpu.c:386-388` 由分派器代写 |
 
 所以规格里的**第 3 条路（"让 guest 的 vstimecmp 真的驱动物理 CLINT"）已经在走**，
 QEMU 实现了 sstc 的 guest 面。原先写在这里的"本片未验证"可以划掉：验证方式是读

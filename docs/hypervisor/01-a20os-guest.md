@@ -1,5 +1,10 @@
 # v2：A20OS 作为 guest
 
+> 历史设计记录：下文的“当前”“未提交”和单 vCPU 等状态描述属于 v2 设计阶段。
+> 现行实现与实际验证边界以 [实现状态](05-implementation-status.md) 和
+> [guest supervisor](07-guest-supervisor.md) 为准。2026-10-13 已更新拆分后的源码引用；
+> 新的运行入口使用每 CPU 活跃槽，旧的全局单槽描述不再代表当前实现。
+
 最后核实：契约已落地（`6364d1138`，`kernel/include/hyp/hyp_vcpu.h` 的 v2 段）。
 **实现半在工作树里**：设备模型（`kernel/hyp/hyp_dev.c`）、RAM 窗口与 marker
 （`kernel/hyp/hyp.c`、`kernel/include/hyp/hyp.h`）、Linux ABI 桥新增的三个调用、
@@ -10,7 +15,7 @@
 §2.3 的两条修正里，**（一）`HYP_HIDELEG_DEFAULT` 已修**：掩码改为 VS 级位
 2/6/10（`kernel/include/hyp/hyp_vcpu.h:216-222`）。**（二）`hstatus.VTVM` 未按本文
 原建议去掉**，代码选择保留 VTVM=1 并在 scause 22 上模拟 guest 的 `csrw satp` /
-`sfence.vma` / `csrw vstimecmp`（`kernel/hyp/hyp_vcpu.c:927-1015`）；本文 §2.3(二)
+`sfence.vma` / `csrw vstimecmp`（`kernel/arch/riscv64/hyp/hyp_emulate.c:846`）；本文 §2.3(二)
 与 §3 的相关段落已按**已实现的策略**改写，理由见那里。v1 的已落地范围见
 [00-design.md](00-design.md)，后续切片见 [02-roadmap.md](02-roadmap.md)。
 
@@ -86,7 +91,7 @@ cause 编号见同文件的编号 cause 表：8 = from U/VU、9 = from HS、10 =
 > 所以 `14` 是 0x14 = 20 = guest 取指缺页**，正是 QEMU 10.0.13 的
 > `RISCV_EXCP_INST_GUEST_PAGE_FAULT = 0x14`（`target/riscv/cpu_bits.h:720`），也正是
 > 树里 `HYP_SCAUSE_GPF_INST`（`kernel/hyp/hyp_vcpu.c:71`）处理的那一条
-> （`hyp_vcpu.c:810-822`）。同一份日志里还有 `scause=15`（0x15 = 21 =
+> （`kernel/arch/riscv64/hyp/hyp_emulate.c:703`）。同一份日志里还有 `scause=15`（0x15 = 21 =
 > `RISCV_EXCP_LOAD_GUEST_ACCESS_FAULT`）与 `scause=17`（0x17 = 23 =
 > `RISCV_EXCP_STORE_GUEST_AMO_ACCESS_FAULT`，`cpu_bits.h:721,723`）。
 > **读成十进制会把 guest 取指缺页误判成规格里的 Reserved 14。** 这条 guest 为什么
@@ -154,7 +159,7 @@ handler 上（除非 HS 把它留在 HS 侧处理，那正是本文不建议的�
 **当前状态：没有去掉，改走另一条路。** 工作树保留 `VTVM=1`
 （`hyp_arch.c:166-167` 与 `hyp_vcpu_asm.S:47-53` 的 `HYP_HSTATUS_GUEST_ON` /
 `HSTATUS_GUEST_ON` 都含该位），并在运行循环里模拟被 VTVM 拦下的那三条
-（`kernel/hyp/hyp_vcpu.c:927-1015`，`hyp_emulate_virt_inst()`）：
+（`kernel/arch/riscv64/hyp/hyp_emulate.c:846`，`hyp_emulate_virt_inst()`）：
 
 - `csrr`/`csrw satp` → 转成 HS-mode 下的 `csrr`/`csrw vsatp`（CSR `0x180` ↔ `0x280`）；
 - `sfence.vma` → 在 HS-mode 直接执行；
@@ -290,7 +295,7 @@ guest 是 A20OS 自己，它的 SBI 调用面由
 - **"静默按需补页"这条禁令已被一条可判定的规则替代**：窗口内的 GPA 补页并让
   guest **重试同一条指令**，窗口外交给设备模型并由宿主**代执行这条指令**，
   补页失败就是一次记下来的 fault——三条都在 `hyp_guest_mem_fault()` 的注释与
-  实现里（`kernel/hyp/hyp_vcpu.c:780-789` 的两出口说明、`815`、`843-848`、
+  实现里（`kernel/arch/riscv64/hyp/hyp_emulate.c:675` 的两出口说明、`815`、`843-848`、
   `851-857`、`866-872`）。契约头还留着"no silent on-demand fill"那句
   （`kernel/include/hyp/hyp_vcpu.h:154-155`），指的是"补页不能藏在 trap 里悄无声息地
   进行"，与这里写的是同一件事。
@@ -678,7 +683,7 @@ VMO 级。
 
 ## 10. 已知限制
 
-1. **单 vcpu。** 全局槽 + trylock（`hyp_vcpu.c:1157-1190`）。guest 的 secondary
+1. **单 vcpu。** 全局槽 + trylock（`kernel/hyp/hyp_vcpu.c:418`）。guest 的 secondary
    路径要 `sbi_hart_start()`，不在 v2 SBI 面里。
 2. **不注入外部中断。** —— **本条此前写的是"guest 的时钟中断与外部中断不会到来"，
    前半句是错的，已更正。** `hideleg` 委托了 VS 级中断位
@@ -690,7 +695,7 @@ VMO 级。
    V=1 时 `hsie` 恒 1（`target/riscv/cpu_helper.c:585`），被委托的 VS 位被重编号
    后交给 VS-mode（`:617-634`）。**所以 guest 用 Sstc 时定时器中断是通的**，两条入口
    本树都接上了：guest 自己写 CSR 0x24d 由虚拟指令路径仿真
-   （`kernel/hyp/hyp_vcpu.c:988-1003`），或 guest 发 legacy `set_timer` 由分派器代写
+   （`kernel/arch/riscv64/hyp/hyp_emulate.c:910`），或 guest 发 legacy `set_timer` 由分派器代写
    （`hyp_vcpu.c:386-388`）。
 
    **真正缺的是外部中断注入**：`hvip`（CSR 0x646）与 `hgeip`/`hgeie` 在全树零引用
