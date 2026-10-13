@@ -34,6 +34,8 @@
 #define HYP_GUEST_EXIT_FAULT    2
 #define HYP_GUEST_EXIT_ERROR    3
 #define HYP_GUEST_EXIT_YIELD    4
+#define HYP_GUEST_EXIT_STOPPED  5
+#define HYP_GUEST_EXIT_PAUSED   6
 
 /* "shutdown" / "fault" / "error" / "none", for the exit=N(name) reports. */
 const char *hyp_guest_exit_name(long exit_reason);
@@ -50,6 +52,11 @@ struct hyp_guest_status {
     uint64_t console_bytes;
     uint64_t rx_bytes;     /* v3: host bytes handed to the guest's UART */
 };
+
+struct hyp_guest_stats {
+    uint64_t vms, vcpus, mapped_pages, table_pages, free_host_pages;
+};
+int hyp_guest_get_stats(struct hyp_guest_stats *out);
 
 /* ---- files ---- */
 
@@ -104,6 +111,8 @@ int hyp_guest_vcpu_destroy(long vcpu);
 int  hyp_guest_vcpu_set_boot(long vcpu, uint64_t hartid, uint64_t dtb_gpa);
 int  hyp_guest_vm_set_marker(long vm, const char *marker);
 long hyp_guest_vcpu_run(long vcpu);
+int hyp_guest_vcpu_control(long vcpu, unsigned command);
+int hyp_guest_vcpu_irq(long vcpu, unsigned irq, int level);
 long hyp_guest_vm_status(long vm, struct hyp_guest_status *st);
 int hyp_guest_console_config(long vm, int managed);
 int hyp_guest_console_write(long vm, const void *data, size_t len);

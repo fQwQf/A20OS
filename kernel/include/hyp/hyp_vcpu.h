@@ -56,6 +56,8 @@ typedef enum hyp_exit_reason {
     HYP_EXIT_FAULT,        /* fatal guest fault; detail in exit_* fields */
     HYP_EXIT_ERROR,        /* internal error: never make this the happy path */
     HYP_EXIT_YIELD,        /* resumable managed-console I/O or host IRQ */
+    HYP_EXIT_STOPPED,      /* explicit controller cancellation */
+    HYP_EXIT_PAUSED,       /* resumable controller pause */
 } hyp_exit_reason_t;
 
 typedef struct hyp_vcpu {
@@ -105,6 +107,10 @@ typedef struct hyp_vcpu {
     uint64_t trap_seen, trap_loop_pc, trap_loop_scause, trap_loop_run;
     uint64_t fpu[32];
     uint64_t fcsr;
+    unsigned claimed, host_cpu;
+    unsigned requests;
+    unsigned irq_set, irq_clear;
+    uint64_t hvip;
 } hyp_vcpu_t;
 
 /* ---- kernel C API (kernel/hyp/hyp_vcpu.c implements) ---- */
@@ -123,10 +129,26 @@ int  hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len);
 
 /* Run the guest until a terminal exit or a managed-mode HYP_EXIT_YIELD.  Returns 0 when the guest exited
  * cleanly (vcpu->exit says why; HYP_EXIT_SHUTDOWN is the demo's success
- * case) and a negative errno on internal failure.  Not reentrant: one
- * running guest kernel-wide in this slice, enforced, not assumed. */
+ * case) and a negative errno on internal failure. One owner per vCPU, one
+ * active vCPU per VM, and one hardware activation per host CPU. */
 int  hyp_vcpu_run(hyp_vcpu_t *vcpu);
 int  hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason);
+
+#define HYP_CONTROL_KICK   0u
+#define HYP_CONTROL_PAUSE  1u
+#define HYP_CONTROL_RESUME 2u
+#define HYP_CONTROL_STOP   3u
+#define HYP_REQUEST_YIELD  1u
+#define HYP_REQUEST_PAUSE  2u
+#define HYP_REQUEST_STOP   4u
+#define HYP_IRQ_SOFTWARE 0u
+#define HYP_IRQ_TIMER    1u
+#define HYP_IRQ_EXTERNAL 2u
+int hyp_vcpu_inject_irq(hyp_vcpu_t *vcpu, unsigned irq, int level);
+void hyp_vcpu_sync_irqs(hyp_vcpu_t *vcpu);
+
+int hyp_vcpu_control(hyp_vcpu_t *vcpu, unsigned command);
+int hyp_vcpu_control_exit(hyp_vcpu_t *vcpu);
 
 /* ---- arch-provided (kernel/arch/riscv64/hyp/) ---- */
 
@@ -151,8 +173,8 @@ int  hyp_arch_guest_trap(void *trap_frame);
 
 /* ---- the arch/run-loop seam (both sides code against these) ---- */
 
-/* The vcpu whose guest is live kernel-wide right now, or NULL.  Single
- * running guest in this slice, enforced by hyp_vcpu_run(), not assumed. */
+/* The vcpu whose guest is live on this host CPU right now, or NULL. One
+ * running guest on the current host CPU, published by hyp_vcpu_run(). */
 hyp_vcpu_t *hyp_vcpu_active(void);
 
 /* Implemented by kernel/hyp/hyp_vcpu.c; called by the arch trap dispatch

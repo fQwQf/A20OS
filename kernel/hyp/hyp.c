@@ -18,6 +18,28 @@
 /* Host PTE permission input is translated by the selected stage-2 backend. */
 #define HYP_RAM_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
+static uint64_t hyp_live_vms, hyp_live_vcpus, hyp_mapped_pages, hyp_table_pages;
+void hyp_account_vcpu(int delta)
+{
+    __atomic_fetch_add(&hyp_live_vcpus, delta, __ATOMIC_RELAXED);
+}
+void hyp_account_mapped(int delta)
+{
+    __atomic_fetch_add(&hyp_mapped_pages, delta, __ATOMIC_RELAXED);
+}
+void hyp_account_tables(int delta)
+{
+    __atomic_fetch_add(&hyp_table_pages, delta, __ATOMIC_RELAXED);
+}
+void hyp_stats_get(struct hyp_stats *out)
+{
+    out->vms = __atomic_load_n(&hyp_live_vms, __ATOMIC_ACQUIRE);
+    out->vcpus = __atomic_load_n(&hyp_live_vcpus, __ATOMIC_ACQUIRE);
+    out->mapped_pages = __atomic_load_n(&hyp_mapped_pages, __ATOMIC_ACQUIRE);
+    out->table_pages = __atomic_load_n(&hyp_table_pages, __ATOMIC_ACQUIRE);
+    out->free_host_pages = pfa_free_count();
+}
+
 hyp_vm_t *hyp_vm_create(uint64_t mem_size)
 {
     const hyp_backend_t *backend = hyp_arch_backend();
@@ -44,6 +66,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
         return NULL;
     }
     vm->magic = HYP_VM_MAGIC;
+    __atomic_fetch_add(&hyp_live_vms, 1, __ATOMIC_RELEASE);
     return vm;
 }
 
@@ -57,6 +80,7 @@ void hyp_vm_put(hyp_vm_t *vm)
     if (vm->charge_cg && vm->charged_pages)
         cg_mem_uncharge(vm->charge_cg, vm->charged_pages);
     vm->magic = 0;
+    __atomic_fetch_sub(&hyp_live_vms, 1, __ATOMIC_RELEASE);
     kfree(vm);
 }
 
@@ -79,6 +103,50 @@ paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa)
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return 0;
     return vm->backend->translate(vm, gpa);
+}
+
+static int hyp_vm_copy_guest(hyp_vm_t *vm, uint64_t gpa, void *bytes,
+                             uint64_t len, int write)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC || (!bytes && len)) return -EINVAL;
+    if (!len) return 0;
+    if (!vm->backend->pin) return -EOPNOTSUPP;
+    hyp_vm_get(vm);
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    uint64_t base = vm->ram_base, size = vm->ram_size;
+    int updating = vm->updating;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    if (updating || len > size || gpa < base || gpa - base > size - len) {
+        hyp_vm_put(vm);
+        return updating ? -EBUSY : -EFAULT;
+    }
+    int rc = 0;
+    uint64_t done = 0;
+    while (done < len) {
+        pfn_t pfn;
+        rc = vm->backend->pin(vm, gpa, &pfn);
+        if (rc) break;
+        uint64_t offset = gpa & (PAGE_SIZE - 1);
+        uint64_t n = PAGE_SIZE - offset;
+        if (n > len - done) n = len - done;
+        uint8_t *page = (uint8_t *)pfn_to_virt(pfn) + offset;
+        if (write) memcpy(page, (uint8_t *)bytes + done, n);
+        else memcpy((uint8_t *)bytes + done, page, n);
+        frame_put(pfn);
+        gpa += n; done += n;
+    }
+    hyp_vm_put(vm);
+    return rc;
+}
+
+int hyp_vm_copy_from_guest(hyp_vm_t *vm, void *dst, uint64_t gpa, uint64_t len)
+{
+    return hyp_vm_copy_guest(vm, gpa, dst, len, 0);
+}
+
+int hyp_vm_copy_to_guest(hyp_vm_t *vm, uint64_t gpa, const void *src, uint64_t len)
+{
+    return hyp_vm_copy_guest(vm, gpa, (void *)src, len, 1);
 }
 
 int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)

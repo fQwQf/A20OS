@@ -380,3 +380,35 @@ int64_t sys_a20_hyp_vm_status(const a20_syscall_args_t *args)
     return copy_to_user((void *)(uintptr_t)args->arg[1], &status, sizeof(status)) < 0 ?
            -A20_ERR_FAULT : A20_OK;
 }
+
+int64_t sys_a20_hyp_vcpu_control(const a20_syscall_args_t *args)
+{
+    struct a20_ht_internal *ht = hyp_ht();
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+    hyp_vcpu_t *vcpu = hyp_get_vcpu(ht, (a20_handle_t)args->arg[0]);
+    if (!vcpu) return -A20_ERR_BAD_HANDLE;
+    int rc = args->arg[1] > HYP_CONTROL_STOP ? -EINVAL :
+             hyp_vcpu_control(vcpu, (unsigned)args->arg[1]);
+    hyp_vcpu_put(vcpu);
+    return rc < 0 ? hyp_errno_map(rc) : rc;
+}
+
+int64_t sys_a20_hyp_vcpu_irq(const a20_syscall_args_t *args)
+{
+    struct a20_ht_internal *ht = hyp_ht();
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+    hyp_vcpu_t *vcpu = hyp_get_vcpu(ht, (a20_handle_t)args->arg[0]);
+    if (!vcpu) return -A20_ERR_BAD_HANDLE;
+    int rc = args->arg[1] > HYP_IRQ_EXTERNAL || args->arg[2] > 1 ? -EINVAL :
+             hyp_vcpu_inject_irq(vcpu, (unsigned)args->arg[1], (int)args->arg[2]);
+    hyp_vcpu_put(vcpu);
+    return rc < 0 ? hyp_errno_map(rc) : rc;
+}
+
+int64_t sys_a20_hyp_stats(const a20_syscall_args_t *args)
+{
+    struct hyp_stats stats;
+    hyp_stats_get(&stats);
+    return copy_to_user((void *)(uintptr_t)args->arg[0], &stats, sizeof(stats)) < 0 ?
+           -A20_ERR_FAULT : A20_OK;
+}
