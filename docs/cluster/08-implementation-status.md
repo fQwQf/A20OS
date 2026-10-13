@@ -795,3 +795,7 @@ main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS �
 统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
 分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
 [53-linux-application-execution.md](53-linux-application-execution.md)。
+
+系统自带 QEMU 的双进程共享内核已取得同 PID/栈/堆跨实例迁移和资源回收证据。
+可复现脚本、默认构建隔离、限制及 Minecraft 尚未覆盖的部分见
+[54-stock-qemu-shared-kernel.md](54-stock-qemu-shared-kernel.md)。

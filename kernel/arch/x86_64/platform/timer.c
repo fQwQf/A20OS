@@ -288,6 +288,12 @@ void timer_init(void) {
 }
 
 void timer_set_interval(uint64_t ticks) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* Each unmodified QEMU owns its LAPIC. Poll shared IPI intents even when
+     * this kernel CPU is idle; default platform keeps its tickless path. */
+    if (ticks > ARCH_TIMER_FREQ / 1000)
+        ticks = ARCH_TIMER_FREQ / 1000;
+#endif
     uint64_t count = scale_ticks(ticks, ARCH_TIMER_FREQ,
                                  lapic_freq[arch_current_cpu_id()]);
     if (count == 0) count = 1;

@@ -46,8 +46,18 @@ x86_64_ap_trampoline_gdt:
     .quad 0
     .quad 0x00af9a000000ffff
     .quad 0x00cf92000000ffff
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* The remote VM's local APIC ID is also zero. Publish logical CPU 1 in
+     * the same GDT descriptor used by the normal architecture fast path. */
+    .quad 0, 0, 0, 0
+    .quad 0x000a920000002001
+#endif
 ap_gdt_desc:
+#ifdef CONFIG_QEMU_SHARED_SMP
+    .word 63
+#else
     .word 23
+#endif
 x86_64_ap_trampoline_gdt_base:
     .long 0
 
