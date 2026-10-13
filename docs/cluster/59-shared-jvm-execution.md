@@ -100,3 +100,7 @@ python3 tools/check-multi-qemu-kernel.py --mode smp --workload jvm-threads \
 以及运行时驱动初始化，再在同一共享域启动实际客户端菜单并完成输入/退出。
 本用例也没有覆盖物理多 MCU、混合指针 ABI 的共享 JVM、owner 故障恢复或
 普通模式的性能基准。已有其他 ISA 的公共代码验证不能替代这些运行验收。
+
+后续 x86_64 GPU 像素回读及实际键盘鼠标事件已通过，见
+[60](60-shared-graphics-input.md)。这些证据仍不等于跨实例 Minecraft 客户端
+验收；其他架构可能需要 JVM、本地库和图形栈移植。
