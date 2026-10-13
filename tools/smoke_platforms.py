@@ -50,6 +50,10 @@ def case_for_arch(name: str, case: dict, arch: str) -> dict:
     if "-bios" in argv:
         pos = argv.index("-bios")
         del argv[pos:pos + 2]
+    # Raw AArch64 boot follows the Linux protocol and passes the DTB in x0.
+    # ELF bare-metal boot does not forward -append through that register.
+    pos = argv.index("-kernel") + 1
+    argv[pos] = argv[pos].removesuffix(".elf") + ".bin"
     pos = argv.index("-machine") + 2
     argv[pos:pos] = ["-cpu", "cortex-a57"]
     return result
