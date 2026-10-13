@@ -204,10 +204,10 @@ FILE *fopen(const char *path, const char *mode)
         rights = 1;
     } else if (mode[0] == 'w') {
         rights = 2 | 1;
-        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_TRUNC;
+        oflags = A20_PATH_OPEN_WRONLY | A20_PATH_OPEN_CREATE | A20_PATH_OPEN_TRUNC;
     } else if (mode[0] == 'a') {
         rights = 2 | 1;
-        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_APPEND;
+        oflags = A20_PATH_OPEN_WRONLY | A20_PATH_OPEN_CREATE | A20_PATH_OPEN_APPEND;
     }
 
     char full[1024];
