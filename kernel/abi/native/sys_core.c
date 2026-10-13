@@ -24,6 +24,7 @@
 #include "core/defs.h"
 #include "core/string.h"
 #include "core/consts.h"
+#include "core/mman.h"
 #include "core/stdio.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
@@ -1014,7 +1015,7 @@ int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     if (!kargs.length || kargs.length > SIZE_MAX - (PAGE_SIZE - 1) ||
-        (kargs.prot & ~7U) || kargs.flags ||
+        (kargs.prot & ~7U) || (kargs.flags & ~MAP_ANONYMOUS) ||
         kargs.addr_hint >= USER_VA_LIMIT || (kargs.addr_hint & (PAGE_SIZE - 1)))
         return -A20_ERR_INVALID_ARGUMENT;
 
