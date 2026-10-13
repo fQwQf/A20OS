@@ -132,3 +132,8 @@ Debian 10.0.13，两进程 PID 为 267740 / 267739；这两个测试进程已经
 统一设备访问，验证 Linux/JVM 线程，再将真实 Java 客户端接到这套平台上；
 MCU 端还需对应架构运行时与
 硬件后端的验收。
+
+后续进展：`--workload linux` 已接入普通 pthread 程序，覆盖线程自迁移、TLS、
+共享页权限与真实保护异常、动态计算和超时；见
+[55-linux-threads-shared-kernel.md](55-linux-threads-shared-kernel.md)。统一设备和
+实际 JVM/客户端跨实例仍未完成。

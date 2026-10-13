@@ -66,7 +66,7 @@ def qmp_snapshot(path, process, deadline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory")
-    parser.add_argument("--workload", choices=("kernel", "native"), default="kernel")
+    parser.add_argument("--workload", choices=("kernel", "native", "linux"), default="kernel")
     parser.add_argument("--mode", choices=("shared", "smp"), default="shared")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
     parser.add_argument("--jobs", type=int, default=4)
@@ -83,7 +83,7 @@ def main():
     out.mkdir(parents=True, exist_ok=False)  # Never replace an earlier run.
     shared = args.mode == "shared"
     flags = FLAGS + [f"QEMU_SHARED_SMP={int(shared)}"]
-    if args.workload == "native":
+    if args.workload in ("native", "linux"):
         flags += ["SMP_SELFTEST=0", "RAMFS_USER=1", "RAMFS_NATIVE_TESTS=1"]
     report = {"passed": False, "mode": args.mode, "workload": args.workload, "make_flags": flags,
               "evidence": args.workload + " execution; not Minecraft acceptance",
@@ -99,7 +99,9 @@ def main():
             "kernel/arch/x86_64/boot/ap_trampoline.S", "kernel/arch/x86_64/platform/smp.c",
             "kernel/arch/x86_64/platform/timer.c", "kernel/arch/x86_64/trap/irqchip.c",
             "kernel/arch/x86_64/include/platform.h", "kernel/platform/qemu-virt-x86_64/board.c",
-            "kernel/core/smp_selftest.c", "kernel/fs/rootfs_user.c", "tools/targets-images.mk")}
+            "kernel/core/smp_selftest.c", "kernel/fs/rootfs_user.c", "tools/targets-images.mk",
+            "kernel/proc/sched.c", "kernel/proc/current.c", "kernel/include/proc/proc.h",
+            "user/cmds/stress/cluster_threads.c")}
         build = subprocess.check_output(["make", "-s", *flags, "print-build-dir"],
                                         cwd=ROOT, text=True).strip()
         with (out / "build.log").open("wb") as log:
@@ -146,7 +148,7 @@ def main():
                 for i in reversed(range(len(commands))):
                     log = (out / f"node-{i}.log").open("wb")
                     logs.append(log)
-                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload == "native" else subprocess.DEVNULL,
+                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux") else subprocess.DEVNULL,
                                                     stdout=log, stderr=subprocess.STDOUT)
                 report["pids"] = [p.pid for p in processes]
                 report["qmp"] = [qmp_snapshot(runtime / str(i), p, deadline)
@@ -172,15 +174,26 @@ def main():
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
-                    if args.workload == "native":
+                    if args.workload in ("native", "linux"):
                         content = "\n".join(texts)
-                        if "NATIVE_FUTEX: FAIL" in content:
-                            raise RuntimeError("Native application contract failed")
+                        if "NATIVE_FUTEX: FAIL" in content or "CLUSTER_THREADS: FAIL" in content:
+                            raise RuntimeError("user application contract failed")
                         if not application_started and re.search(r"(?:^|[\r\n])# ", content):
-                            processes[0].stdin.write(b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n")
+                            processes[0].stdin.write((b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n" if args.workload == "native"
+                                                      else b"/bin/cluster_threads; echo A20_LINUX_EXIT:$?\n"))
                             processes[0].stdin.flush()
                             application_started = True
                             deadline = time.monotonic() + args.timeout
+                        exited = re.search(r"A20_(?:NATIVE|LINUX)_EXIT:(\d+)", content)
+                        if application_started and exited and int(exited[1]) != 0:
+                            raise RuntimeError("user application exited " + exited[1])
+                        if args.workload == "linux" and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
+                            match = re.search(r"CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=(\d+) tls=preserved tlb-rounds=64 protection-faults=128 jobs=1024 split=(\d+)/(\d+) sum=(\d+) mask=3 destructors=2 cond-timeout=checked", content)
+                            if not match or not 126 <= int(match[1]) <= 128 or sum(map(int, match.groups()[1:3])) != 1024 or min(map(int, match.groups()[1:3])) <= 0 or int(match[4]) != 8256 * 1024 * 1025 // 2:
+                                raise RuntimeError("missing Linux/POSIX execution evidence")
+                            report.update(passed=True, linux_threads=2, migrations=int(match[1]), tlb_rounds=64, protection_faults=128,
+                                          work_split=list(map(int, match.groups()[1:3])), work_sum=int(match[4]), exit_code=0)
+                            break
                         if application_started and "NATIVE_FUTEX: PASS" in content and "A20_NATIVE_EXIT:0" in content:
                             markers = ["NATIVE_DOMAIN_CPUS: 02", "NATIVE_DOMAIN: PASS",
                                 "NATIVE_COMPUTE_CANCEL: PASS workers=2 exit=137 pure-user=1",

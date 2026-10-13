@@ -805,3 +805,8 @@ main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS �
 回收均使用已有接口。已修复独立 KVM 时钟 epoch 导致的跨 CPU 时间倒序；完整
 命令和失败/修复证据见 [54](54-stock-qemu-shared-kernel.md)。Minecraft 跨实例
 和统一设备访问仍未完成。
+
+通用调度器现支持可调度上下文中的当前线程亲和性迁移。双 QEMU 的普通 Linux
+pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护异常及恢复、
+1024 片动态计算和条件变量超时。原 Native 程序回归通过；命令、失败/修复记录
+及尚未完成的设备/JVM 部分见 [55-linux-threads-shared-kernel.md](55-linux-threads-shared-kernel.md)。

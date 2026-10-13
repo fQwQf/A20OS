@@ -734,6 +734,9 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if (!t || !config || (config->fields & ~all_fields))
         return -1;
 
+    int self_can_migrate = t == proc_current() && t != proc_idle_task() &&
+        arch_irqs_enabled() && !preempt_count() && !in_hardirq();
+    int migrate_self = 0;
     /* Remove the old queue entry before changing keys: pickers use only
      * runqueue locks, so park_lock alone does not protect queued keys. */
     uint64_t lock_flags = spin_lock_irqsave(&t->park_lock);
@@ -769,8 +772,11 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         if ((t->on_cpu || __atomic_load_n(&t->dispatching, __ATOMIC_RELAXED)) &&
             (__atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED) >= 32 ||
              !(eligible & (1U << __atomic_load_n(&t->owner_cpu,
-                                                 __ATOMIC_RELAXED)))))
-            goto invalid;
+                                                 __ATOMIC_RELAXED))))) {
+            if (!self_can_migrate || !t->on_cpu || t->state != PROC_RUNNING)
+                goto invalid;
+            migrate_self = 1;
+        }
     }
 
     int ready = sched_runq_detach_locked(t);
@@ -810,6 +816,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
     if (config->fields & PROC_SCHED_AFFINITY) {
         t->cpus_allowed = config->affinity & SCHED_CPU_MASK_ALL;
+        if (migrate_self)
+            t->affinity_migrate_pending = 1;
     }
 
     unsigned target_cpu = t->cpu_id;
@@ -838,6 +846,11 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if (queued &&
         (target_cpu != cpu_current_id() || priority_preempt))
         proc_sched_request_cpu(target_cpu, priority_preempt);
+    /* The old CPU retains stack ownership until switch completion. Only that
+     * completion may publish us to the destination queue. Both Native and
+     * Linux callers return on a CPU allowed by the effective new mask. */
+    if (migrate_self)
+        proc_yield();
     return 0;
 
 invalid:
@@ -2107,6 +2120,7 @@ void sched(void) {
     }
     if (next && current && current != proc_idle_task() &&
         current->state == PROC_READY && current->on_cpu &&
+        !current->affinity_migrate_pending &&
         __atomic_load_n(&current->owner_cpu, __ATOMIC_RELAXED) ==
             cpu_current_id() &&
         sched_task_strictly_preempts(current, next)) {
@@ -2146,7 +2160,8 @@ void sched(void) {
     task_t *cur = proc_current();
     if (cur) {
         uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-        if (cur->state == PROC_READY || cur->state == PROC_RUNNING) {
+        if (!cur->affinity_migrate_pending &&
+            (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
             if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
                 proc_runq_remove_locked(cur);
             cur->state = PROC_RUNNING;
@@ -2166,7 +2181,8 @@ void sched(void) {
         int late_ready = 0;
         if (cur) {
             uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-            if ((cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
+            if (!cur->affinity_migrate_pending &&
+                (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
                 if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
                     proc_runq_remove_locked(cur);
                 cur->state = PROC_RUNNING;
