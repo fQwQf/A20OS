@@ -1440,7 +1440,7 @@ CASES: dict[str, dict] = {
         'timeout': '180s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/ufs-scratch.img,if=none,format=raw,id=xfs1', '-device', 'virtio-blk-device,drive=xfs1,bus=virtio-mmio-bus.2', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/ufs-ext4.img,if=none,format=raw,id=xfs2', '-device', 'virtio-blk-device,drive=xfs2,bus=virtio-mmio-bus.4', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/ufs-iso.img,if=none,format=raw,id=xfs3', '-device', 'virtio-blk-device,drive=xfs3,bus=virtio-mmio-bus.6', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/ufs-ntfs.img,if=none,format=raw,id=xfs4', '-device', 'virtio-blk-device,drive=xfs4,bus=virtio-mmio-bus.7', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.ufsd_blk=1'],
-        'expect': ['UXFS_ALL: PASS', 'System is going down for power-off NOW', 'SVC_MGR: ufsd blk=1 (cmdline)'],
+        'expect': ['UXFS_ALL: PASS', 'System is going down for power-off NOW', r'SVC_MGR: ufsd blk=1 \(cmdline\)'],
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-native-fs-all: PASS; log saved to $log',
