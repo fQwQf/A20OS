@@ -284,31 +284,29 @@ static int exec_open_and_check(const char *path, kstat_t *st_out,
 
     kstat_t st;
     int sr = vfs_fstat(fd, &st);
-    if (sr < 0) {
+    if (sr != 0) {
         vfs_close(fd);
-        return sr;
+        return sr < 0 ? sr : -EIO;
     }
-    if (sr == 0) {
-        if ((st.st_mode & S_IFMT) == S_IFDIR) {
-            vfs_close(fd);
-            return -EACCES;
-        }
-        if ((st.st_mode & S_IFMT) != S_IFREG) {
-            vfs_close(fd);
-            return -EACCES;
-        }
-        if (st.st_mode & 0111) {
-            int xr = vfs_faccessat2(AT_FDCWD, path, X_OK, AT_EACCESS);
-            if (xr < 0) {
-                vfs_close(fd);
-                return xr;
-            }
-        } else {
-            /* No execute bit — only allowed if it's a script (checked later) */
-        }
-        if (st_out)
-            *st_out = st;
+    if ((st.st_mode & S_IFMT) == S_IFDIR) {
+        vfs_close(fd);
+        return -EACCES;
     }
+    if ((st.st_mode & S_IFMT) != S_IFREG) {
+        vfs_close(fd);
+        return -EACCES;
+    }
+    if (st.st_mode & 0111) {
+        int xr = vfs_faccessat2(AT_FDCWD, path, X_OK, AT_EACCESS);
+        if (xr < 0) {
+            vfs_close(fd);
+            return xr;
+        }
+    } else {
+        /* No execute bit — only allowed if it's a script (checked later) */
+    }
+    if (st_out)
+        *st_out = st;
 
     return fd;
 }
