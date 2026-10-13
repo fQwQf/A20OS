@@ -14,7 +14,7 @@ A20OS 的当前能力边界、已知的结构性限制，以及按严重度排�
 不用推测填空。
 
 运行类结论以当期提交为准；历史记录见 [archive/](archive/)。
-2026-10-13 编码阶段修订见 [阶段记录](development-docs-completion-2026-10-13.md)；本轮未运行测试。
+2026-10-13 编码阶段修订见 [阶段记录](development-docs-completion-2026-10-13.md)；实际构建和运行结果见 [验证记录](validation-docs-completion-2026-10-13.md)。
 
 ## 一句话结论
 
@@ -782,7 +782,7 @@ RT 选择，普通任务可以竞争剩余时间；下一周期恢复。计量�
 
 ### 其余条目
 
-- `SCHED_FIFO` 的长内核路径 deadline 与预算下的恢复尚待运行验收（见上）。
+- `SCHED_FIFO` 的预算恢复已通过同 CPU 回归，长内核路径 deadline 尚待运行验收（见上）。
 - **[2026-10-06 更正] 本条描述的全局锁已不在当前树上。** `proc_lock` 已由并入本
   分支基线的锁拆分轮删除（`65bd609eb`：全树 0 处获取点、定义已删；调度状态改由
   per-task `park_lock` 保护，runq 成员关系仍归 per-CPU `runq_lock`，任务表迭代/
@@ -1396,7 +1396,7 @@ CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过�
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| P0 | 抢占与 RT 隔离验收 | 基线已有 `CONFIG_KERNEL_PREEMPT`；2026-10-13 编码阶段补入 RTPRIO / 能力检查与 per-CPU 一秒周期 95% RT 预算。新增同 CPU 普通任务进展与 RT 恢复断言，尚未运行。IRQ 线程化、长内核路径有界延迟与真机 watchdog 仍缺 |
+| P0 | 抢占与 RT 隔离验收 | 基线已有 `CONFIG_KERNEL_PREEMPT`；2026-10-13 编码阶段补入 RTPRIO / 能力检查与 per-CPU 一秒周期 95% RT 预算。同 CPU 普通任务进展与 RT 恢复断言已通过 `smoke-sched-stress`。IRQ 线程化、长内核路径有界延迟与真机 watchdog 仍缺 |
 | ~~P0~~ | ~~`proc_lock` 超长持有的成因未定~~ | **该行描述的锁已不在当前树上**：`proc_lock` 已由锁拆分轮删除（`65bd609eb`，`kernel/proc/proc.c:45` 记载了它被什么取代，全树 0 处获取点）；调度状态归 per-task `park_lock`，任务表迭代/OOM/聚合统计等低频残余归新 `tasklist_lock`（`kernel/proc/proc.c:56`），设计见 [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)，"成因未定"对已删除的锁失效。**未收口、不声称热点已消除**：`park_lock` 已通过静态 sink 注册进 `/proc/a20/lock_contention`，锁拆分之后的 proc 侧竞争现状尚未采样；`docs/measured/lock-after.md` 末节自列了收口前提（当前仍需补 B1 基线和竞争复测）。原文要点（历史）：已证伪"被抢占"——当时全树 69 处获取全部走 `spin_lock_irqsave`、持锁临界区内无 `sched()`/`proc_yield()`，持有者确实在长时间执行；"持锁临界区全系统遍历"成因说已撤回（4 处候选在实测负载下不执行）；观测窗口缺陷已修（`/proc/a20/{perf,lock_contention}` 的 `reset` 写入口） |
 | ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
 | ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）**本轮已全部跑起来**——引用计数账本在 4 CPU + 4 lane 下 20 次引导全部 `live=1 faults=0`（`allocs` 159–167、`frees` 恒为 `allocs-1`），`LOCK_COUNTERS_MAX=192` 在 DEFAULT 档（48）与 server 档（141）都够且 `dropped=0`；`-ENOTCONN` 侧做成了按 reason 归因（`total=0 window=0 reasons=13`，`reasons=` 是已登记的 reason 个数不是命中次数），**20 次引导里该窗口一次未命中**——归因可用，但没有证据说窗口已被排除。**仍未做的**：ASAN 压力测试与合并后全量回归 |

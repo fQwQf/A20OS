@@ -692,15 +692,18 @@ RTC、registry RTC 重启和 UBD 三条依赖 RISC-V 私有 MMIO/IRQ，在 AArch
 
 `.github/workflows/native.yml` 为 CI 与 release 共用的 RISC-V/AArch64 矩阵：
 先构建 `native-programs`，再运行套件并保存日志，发布创建依赖整个矩阵成功。
-这些配方已接线，**本轮未运行，不记录 PASS**。Native 程序及自启动服务路径由
+这些配方已进入实际运行，逐项结果与跳过项见
+[本轮验证](validation-docs-completion-2026-10-13.md)。Native 程序及自启动服务路径由
 `user/liba20rt/a20_arch.h` 生成，不再假定 `-rv`；fakeld 探针包含四个已实现入口的
 64 位架构。
 
 新增 `smoke-pty-stress-aarch64`、`smoke-timeout-test-aarch64` 复用既有断言，
 接入 AArch64 job。UFS/UBD 用例的 build 额外目标生成其附加 scratch 镜像，
 QEMU 路径仍经 Make 的构建目录解析器适配 preempt/SMP 变体。
+共享 Native 门禁等待 shell 提示符后发送命令，短用例最少 60 秒；AArch64 使用
+raw `kernel.bin` 以按启动协议传递 DTB/命令行，全文件系统与重启用例限时 300 秒。
 
-本轮新增的运行断言（待允许后执行）：`native-mm` 的 PROT_NONE 上限、越界
+本轮新增的运行断言：`native-mm` 的 PROT_NONE 上限、越界
 MAP_FIXED 不破坏既有页、反复 open/close 不占满 fd 表、关闭 owner handle 后
 区域约束与失败回滚（`remap-owner-rollback PASS`）；`native-deepen` 的名称
 前缀替换与过滤；`sched_stress` 的 RT 零上限拒绝、软上限放行、硬上限提权拒绝，
@@ -716,7 +719,7 @@ WAKE_OP 原子累加/参数/COW 与同桶 70 等待者批次唤醒；
 
 Futex 新增 `smoke-futex-stress-smp4` 与 `smoke-futex-stress-aarch64-smp4`，
 两者都显式构建 `NR_CPUS=4`、启动 4 vCPU，并要求 `wake-op-atomicity PASS`。
-它们与原单核用例共享断言，已接入 CI，本轮未运行。
+它们与原单核用例共享断言，已接入 CI；双架构单核/四核本地运行均已通过。
 
 ### 用户态文件系统宿主（uxfs + ufsd）
 
@@ -1188,7 +1191,19 @@ CMOS 不可信就把机器卡在 probe 里。
 
 `make smoke-swap` 让 `swap_test.c` 在 ramfs 上造 backing 文件，经 loop-control `LOOP_CTL_GET_FREE` + `LOOP_SET_FD` 绑定，再 `mkswap` → `swapon` → 断言 `sysinfo` totalswap>0 与 `/proc/swaps` 条目；重复 swapon 返回 EBUSY；触访匿名内存；`swapoff` 后 totalswap 归零。
 
-失败时查看 `.kernel-build/smoke/swap-riscv64.log` 中首个 `SWAP_TEST: FAIL`，对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c` 与 `kernel/drivers/block/loop.c`。已知边界：门禁不驱动真实换出（1 GiB 冒烟无法现实触发），`swap_read_page` 缺页读回只有编译覆盖；`CONFIG_SWAP` 在 riscv32/loongarch32（无 swap PTE 编码）与 NOMMU 目标上被构建入口强制关闭。
+`MADV_PAGEOUT` 还驱动真实换出：用 `mincore` 和 `/proc/swaps` 的 KiB 用量确认
+四页已非驻留；fork 子进程读回并修改私有数据，父进程仍持原槽；固定 remap 移动
+已换出的四页并扩展，校验旧数据与新尾部零填充，最后槽用量回到基线。忙设备
+swapoff、活动设备 mkswap 均返回 EBUSY，非管理员管理调用返回 EPERM。
+必须出现 `SWAP_TEST: pageout-fork-remap PASS`、`SWAP_TEST: admin-permissions PASS`
+和总 PASS。双架构单核/四核入口为 `smoke-swap`、`smoke-swap-smp4`、
+`smoke-swap-aarch64`、`smoke-swap-aarch64-smp4`。
+
+失败时查看 `.kernel-build/smoke/swap-<arch>[-smp4].log` 中首个 `SWAP_TEST: FAIL`，
+对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c`、`kernel/mm/oom.c` 与缺页路径。
+上述四组已在本轮实际通过，见 [验证记录](validation-docs-completion-2026-10-13.md)。
+边界：门禁通过范围换出，不证明低内存 OOM 策略或 swapoff 排空活跃页；当前忙设备
+拒绝关闭。`CONFIG_SWAP` 在 riscv32/loongarch32 与 NOMMU 上仍由构建入口关闭。
 
 ### 用户态网络控制面（SIOCGIFCONF / /proc/net / NETLINK_ROUTE / MSG_OOB）
 

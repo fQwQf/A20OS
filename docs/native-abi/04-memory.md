@@ -1,7 +1,7 @@
 # A20OS Native ABI：内存子系统设计
 
 > 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
-> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订经源码与单文件编译检查，尚未运行验收。
+> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 [验证记录](../validation-docs-completion-2026-10-13.md)。
 >
 > **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
 > `docs/roadmap/single-level-mm-model.md` §13.18）。原先并存的两种映射记录
@@ -289,7 +289,7 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，映射在插入/合并前持有 `vmar_owner`，fork、拆分和 remap 复制引用；不同节点的映射不合并。核心 remap 的原地扩展、目标空隙与显式固定移动都受原节点区间约束，关闭 handle 不撤销约束。
 
 
-### 2026-10-13 remap 编码增量（未运行）
+### 2026-10-13 remap 增量
 
 常驻页移动先在目标完整建立映射并应用 Native 保护，成功后才撤源；源叶的状态、
 权限和 frame/page-cache pin 来自同一节点锁内快照。预留 TLB 延迟释放记录覆盖
@@ -301,9 +301,10 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 
 `test_native_mm` 新增关闭所属 VMAR/VMO handle 后的区域约束、失败后数据和可写性
 保留、等长原地保护、被 blocker 阻挡后的区域内增长移动及再次越界增长拒绝。
-要求标记 `NATIVE_MM: remap-owner-rollback PASS`。目前只有单文件编译结果；
+双架构运行已出现 `NATIVE_MM: remap-owner-rollback PASS`，见验证记录；
 尚待并发、分配失败注入与对象计数验收。TLB 记录当前按两个虚拟跨度的页数上界
 预留，会增加大范围稀疏移动的临时内存需求，后续应在保持回滚保证的前提下优化。
 
-已换出 PTE 的克隆及 `MREMAP_DONTUNMAP` 源端再次缺页语义仍需完善，本段不把
-常驻页修复当作整个 remap 行为已经验证。
+已换出 PTE 的 fork/remap 克隆已补槽引用，真实换出和读回通过双架构单核/四核
+Linux 门禁，见 [验证记录](../validation-docs-completion-2026-10-13.md)。
+`MREMAP_DONTUNMAP` 源端再次缺页语义仍需完善，普通 remap 通过不覆盖该行为。

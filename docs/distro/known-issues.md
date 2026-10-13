@@ -4,7 +4,7 @@
 [XFCE 桌面验收](../testing-gates.md#xfce-桌面验收) 重新检查；历史启动日志、
 Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口交互的验收。
 
-## 当前工程队列（2026-10-13 编码复核）
+## 当前工程队列（2026-10-13 运行复核）
 
 本页与主路线图共同作为当前工程入口。下面长篇排查过程保留当期证据，早期假设
 可能已被后续条目撤回；不能把中间一条“排除”或“已修”当作最终症状验收。
@@ -13,17 +13,19 @@ Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口
 | --- | --- |
 | RISC-V 桌面交互、MCS 持锁调度与 pgrep 崩溃 | x86_64 已有 10-11 交互验收记录（见下），其结论不覆盖 RISC-V；本轮未运行复验 |
 | mpv/LuaJIT、tumblerd 与 JVM 退出异常 | 既有 COW、FP、TLS 修复不能证明这些症状全部消失，仍需干净镜像复现 |
-| futex PI 的 prepare 后 fork/COW 窗口 | 编码已补持锁可写复查、解锁重试，并在 COW 后选择桶；待执行 `pi-cow-isolation` 及 SMP 交错验收 |
-| FUTEX_WAKE_OP 并发丢更新与唤醒事务 | 已补 COW 后 CAS、有符号参数及有序双桶摘除；新增并发和 70 等待者用例，待运行双架构 SMP 门禁 |
-| JVM 经符号链接启动时的 `$ORIGIN` | exec 已从打开文件记录最终路径，并为基线解析补入长度/IN_ROOT 边界检查；待执行 `exec-symlink-origin` 与 JVM 端到端验收 |
+| futex PI 的 prepare 后 fork/COW 窗口 | 编码已补持锁可写复查、解锁重试，并在 COW 后选择桶；双架构单核/四核 `pi-cow-isolation` 已通过；确定性窄窗口故障注入仍待补充 |
+| JVM 经符号链接启动时的 `$ORIGIN` | exec 已从打开文件记录最终路径，并为基线解析补入长度/IN_ROOT 边界检查；`exec-symlink-origin` 已通过；JVM 端到端仍待验收 |
+| Native 服务监督的强制终止语义 | AArch64 文件系统门禁虽通过，但日志仍有 ufsd 健康探测超时；源码中 svcmgr 超时调用 `task_kill(..., 0)`，而 `sys_a20_task_kill` 的 sig=9 分支退出当前调用者。该恢复路径仍需修正与独立验收；RTC 服务本身也不支持此板级设备。 |
 | dbus NoReply、SCM_CREDENTIALS pid=-1、udev worker 等待 | 接收 socket 的 PASSCRED 继承已在基线；当前凭据捕获/送达链已复核，尚无能解释 pid=-1 的新证据 |
 | 菜单、Backspace 与部分客户端呈现的历史兼容性问题 | 先按下述 x86_64 最新验证记录确认覆盖范围；未覆盖的交互仍需证据，不能用进程存活替代 |
 | guest 写盘后的 ext4 位图一致性 | 仍需按本页历史触发场景复验；journal 窄门禁不覆盖所有桌面写负载 |
 | IPv6 pbuf 越界 / 引用计数 panic | RX 长度上界保护在基线已有；不能把这项保护当成已解释 IPv6 panic |
-| arm32 FP 上下文、arm32/loongarch32 构建 | 尚缺实现或当前工具链验证；本轮双架构语法检查不覆盖它们 |
+| arm32 FP 上下文、arm32/loongarch32 构建 | 尚缺实现或当前工具链验证；本轮四种额外架构构建不覆盖它们 |
 
-已实现条目不再作为“待编码”项。以上待运行条件继续保留；本轮未启动 VM、未全量
-构建或运行任何测试。完整编码记录见 [阶段记录](../development-docs-completion-2026-10-13.md)。
+已移除通过双架构单核/四核门禁的 WAKE_OP 丢更新条目；其他未覆盖条件继续保留。
+本轮已实际构建和运行 QEMU，命令、配置与结果见
+[验证记录](../validation-docs-completion-2026-10-13.md)，编码历史见
+[阶段记录](../development-docs-completion-2026-10-13.md)。
 
 
 ## 最新 x86_64 修复状态（2026-10-11）

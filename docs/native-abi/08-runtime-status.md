@@ -1,6 +1,6 @@
 # A20OS Native ABI 运行时状态
 
-最后核实：2026-10。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。本页是对 [00-overview.md](00-overview.md) 中实现状态的补充。
+最后核实：2026-10-13。共享 Native runtime smoke 已支持 RISC-V64/AArch64；实际运行与硬件专属跳过项见 [本轮验证](../validation-docs-completion-2026-10-13.md)。本页是对 [00-overview.md](00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
 
@@ -40,7 +40,7 @@ struct a20_vm_alloc_args args = {
 int64_t r = a20_vm_alloc(&args);
 ```
 
-迁移期历史记录中 `smoke-native-libc` 曾跑通；当前源码仍提供该 RISC-V64 目标，引用前需在当前提交复验。裸参数数组调用已不存在于 `user/liba20c/*.c`。
+`smoke-native-libc` 已在本轮 RISC-V64 与 AArch64 实际运行中通过，配置见本轮验证记录。裸参数数组调用已不存在于 `user/liba20c/*.c`。
 
 ### 2. liba20rt 类型头与内核类型头已对齐
 
@@ -143,7 +143,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 拒绝 NUL 和 `/`；空前缀监听全部名称。匹配使用生产点的完整名称，再截断输出的
 `fs_name[32]`。替换 watch 同步替换前缀。它不递归监听子目录；没有名称的事件仅匹配
 空前缀，现有 `FS_MODIFY` 生产点仍不提供名称。回归入口为 `smoke-native-deepen`，
-本轮只编译检查，没有运行。
+本轮已进入双架构实际运行；结果见 [验证记录](../validation-docs-completion-2026-10-13.md)。
 
 
 > 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
@@ -166,7 +166,6 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 中期：聚合现有测试并补齐多架构运行
 
-- 运行已接线的 `smoke-native-suite` RISC-V/AArch64 矩阵，保留逐用例日志与硬件专属跳过记录。
 - 为当前只构建未运行的架构增加 QEMU smoke，优先 LoongArch64。
 - 增加 VMO rights/`vm_protect`/`vm_flush` 边界测试，避免把保留接口当成已实现语义。
 
