@@ -32,12 +32,19 @@
 
 **高性能、高兼容性的混合内核操作系统**
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20LoongArch32%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20ARMv7-orange.svg)](#)
 [![Boards](https://img.shields.io/badge/Boards-18-in--tree-blue.svg)](#)
 
 </div>
 
 ## 项目简介
+
+**1.0 开发方向**：以 Rust 为主要内核实现语言完成核心重写，同时完成现有开发中子系统、
+修复缺陷，并通过既有功能对照与性能不回退验收。当前实现仍以 C/汇编为主，外部接口尚未
+正式冻结。LoongArch32、PPC64LE 已退出 1.0 支持范围，活跃构建入口已清理；旧源码与验证记录保留追溯。
+范围与完成定义见 [1.0 计划](docs/releases/v1.0.md)，比较基线和判定规则见
+[功能与性能验收](docs/releases/v1.0-validation.md)。
+
 A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)，具备长期的演进与迭代计划。
 
 在架构选型上，A20OS 兼具宏内核与微内核的双重优势：调度、MM、VFS 核心、页缓存与 TCP/IP 数据面等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——面向能力的 Handle、VMO/VMAR 内存容器与 Channel 通信之上，设备驱动（RTC/input/virtio-blk scratch）与文件系统实现（FAT/ext4/ISO9660/NTFS 只读）均可作为可崩溃、可重启的用户态服务运行。
@@ -56,8 +63,8 @@ Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子
 
 A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以及 Linux 生态工具链）直接运行在内核机制之上：
 
-* **双 ABI 架构**：`abi/linux`（Linux syscall，运行 musl 生态）与 `abi/native`（面向能力、句柄与事件的 A20 原生接口）共享同一套对象/等待/IPC 底座；Linux 侧只是线格式翻译（`syscall_table.def` 当前登记 366 个入口）。
-* **实现全部有效 Linux syscall，覆盖比 Linux 更全面**：riscv64 / aarch64 / loongarch64 / x86_64 四条主线架构完整实现各自的 Linux syscall 编号表——`x86_64` 463 槽全表映射、LoongArch 私有 `file_getattr/file_setattr`、以及 `mseal`/`io_uring`/`landlock`/`pidfd` 等现代 syscall，一应俱全；甚至覆盖了 Linux 编号表中的内部占位槽，无任何未实现的空位。
+* **双 ABI 架构**：`abi/linux`（Linux syscall，运行 musl 生态）与 `abi/native`（面向能力、句柄与事件的 A20 原生接口）共享同一套对象/等待/IPC 底座；登记入口以各自 `syscall_table.def` 为准。
+* **Linux 编号覆盖与语义覆盖分别验证**：四条主线架构提供 Linux syscall 分派与兼容实现，包括 `mseal`、`io_uring`、`landlock`、`pidfd` 等接口。已登记入口仍可能存在 flag、对象或并发语义限制；编号无空位不能证明完整 Linux 兼容，逐项状态与缺口见覆盖表。
 * **核心实现、ABI 薄包装**：调度、MM（映射记录 + 每页元数据）、VFS、页缓存等状态归属内核子系统，ABI 层只做参数翻译——例如 `mseal` 的区间封禁、fileattr 属性模型、`utime`/`utimes` 时间戳写入都落在核心层。
 * **运行真实用户态**：可引导 stock Alpine + XFCE Wayland rootfs，直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序；`vDSO` 提供 `clock_gettime`/`gettimeofday`/`getcpu` 零陷入快路径。
 * **验证门禁**：`make smoke-abi-linux`、`smoke-syscall-ext`、`smoke-mm-stress` 等在 QEMU 中逐组验证 syscall 语义。
@@ -65,10 +72,11 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 > 逐项兼容等级详见 [kernel/abi/linux/syscall_coverage.md](kernel/abi/linux/syscall_coverage.md)。
 
 ## 支持的硬件平台
-A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支持和维护以下目标。
-用 `tools/a20 boards` 可以列出树里全部板子及其架构、SMP 与链接脚本情况。
+A20OS 的硬件抽象层已接入以下平台，运行、构建与真机验证边界分别列出。
+1.0 保留平台与退出目标见 [平台范围](docs/releases/v1.0.md#2-平台范围)。
+`tools/a20 boards` 列出当前树中的板子，过渡期仍可能包含退出目标，不等于 1.0 支持清单。
 
-* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）、`virtualbox-aarch64`
+* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`virtualbox-aarch64`
 * **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
 * **廉价 SBC / 瘦客户机**（均为 build-verified，尚未上板验证）：
   * [Sipeed LicheeRV Nano](docs/platforms/licheerv-nano.md)（SophGo SG2002，riscv64，256 MiB，约 USD 9–14）
@@ -89,7 +97,7 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 
 `tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口；`make check-trim-registry` 保证实例校验与构建读到的矩阵不漂移。
 
-* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向 NaiLoong Core LA32R SoC（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
+* **退出 1.0 的历史移植**：LoongArch32（LA32R / NaiLoong）与 PPC64LE（pSeries）。不再承诺继续完善或 Rust 迁移；历史资料见 [LoongArch32](docs/platforms/loongarch32.md) 和 [PPC64LE](docs/platforms/ppc64le.md)。
 
 ## 网络栈的当前边界
 按名字读大这份能力是最容易出错的地方，所以把边界写在 README 而不是只留在设计文档里：
@@ -134,7 +142,7 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 ## 构建与运行
 
 ### 1. 环境准备
-需要本机安装各架构交叉工具链（RISC-V/LoongArch/AArch64/x86_64/PPC64LE/ARM）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/build.md](docs/build.md) 的"环境准备"一节。
+需要本机安装活跃架构的交叉工具链（RISC-V/LoongArch64/AArch64/x86_64/ARM；LoongArch32 与 PPC64LE 已退出 1.0）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/build.md](docs/build.md) 的"环境准备"一节。
 
 ### 2. 编译内核
 
@@ -160,13 +168,6 @@ tools/a20 test smoke-riscv64       # 冒烟测试实例
 ```bash
 # 构建其他架构 (例: aarch64)
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
-
-# QEMU pSeries 上运行 PPC64LE（MMU、单核）
-make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
-
-# LoongArch32 (LA32R) 内核 bring-up（NaiLoong Core，需 LA32R 工具链，
-# 无 QEMU 目标；验证走 cemu 模拟器，见 docs/platforms/loongarch32.md）
-make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 
 # 廉价 SBC / 瘦客户机（build-verified，尚未上板验证）
 make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only

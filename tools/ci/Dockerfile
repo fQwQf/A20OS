@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         qemu-system-misc qemu-system-x86 qemu-system-arm qemu-user-static \
         gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
         gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu \
-        gcc-powerpc64le-linux-gnu gcc-arm-linux-gnueabihf \
+        gcc-arm-linux-gnueabihf \
         gcc-arm-none-eabi binutils-arm-none-eabi \
         python3 ccache \
     && rm -rf /var/lib/apt/lists/*

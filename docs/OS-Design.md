@@ -1,6 +1,11 @@
 # A20OS 设计速查
 
-A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`，另有独立的 `armv7m` MCU profile；内核同时提供 Linux 兼容 musl 程序运行环境和 Native ABI。
+本文描述当前 C/汇编实现。[1.0 计划](releases/v1.0.md) 规定 Rust 主导的核心重写、
+开发中子系统完成及平台范围；[验收规范](releases/v1.0-validation.md) 要求功能对照和
+性能不回退。内部实现可调整，外部契约经验证后冻结；计划不能作为当前功能证据。
+LoongArch32/PPC64LE 已退出 1.0，以下涉及它们的构建事实仅说明尚存的旧入口。
+
+A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32` 和 `riscv32`，另有独立的 `armv7m` MCU profile；内核同时提供 Linux 兼容 musl 程序运行环境和 Native ABI。
 
 完整的 Native ABI 规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
@@ -77,13 +82,12 @@ Native ABI 的完整规范见 [docs/native-abi/00-overview.md](native-abi/00-ove
 
 ## 构建目标与已验证平台
 
-A20OS 的七个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-M 使用独立 MCU profile：
+A20OS 当前六个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-M 使用独立 MCU profile：
 
 * RISC-V 64：QEMU `qemu-virt-riscv64` 和 StarFive VisionFive 2 开发板
 * ARM64：QEMU `qemu-virt-aarch64`
 * x86_64：QEMU `qemu-virt-x86_64`
 * LoongArch 64：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
-* PPC64LE：QEMU `qemu-virt-ppc64le`（pSeries 固件）
 * ARM32：QEMU `qemu-virt-arm32`
 * RISC-V 32：QEMU `qemu-virt-riscv32`
 * ARMv7-M：STM32F103 MCU profile（Cortex-M3、NOMMU，不属于 hosted 用户态矩阵）
@@ -94,9 +98,9 @@ A20OS 的七个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-M �
 x86_64 PC（实体瘦客户机）。另有 Kendryte K230 与全志 D1s/F133 两个目标**刻意未移植**，
 阻塞原因见 [platforms/not-yet-ported.md](platforms/not-yet-ported.md)。
 
-构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。PPC64LE 当前按 QEMU pSeries 单核边界记录。
+PPC64LE 是保留源码的历史移植，不属于当前构建矩阵；Makefile 会在解析阶段拒绝它。构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他活跃组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。
 
-NOMMU 构建支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`NOMMU_SUPPORTED_ARCHES`，声明于 `components/trim.toml` 的能力矩阵，经生成的 `components/trim.mk` 进入构建；实例校验读同一份 TOML）。其中 hosted 运行矩阵 `smoke-arch-mmu-matrix` 只覆盖前四个 hosted 架构的 MMU/NOMMU 组合；ARMv7-M 由 STM32 目标单独覆盖。LoongArch64、x86_64 和 PPC64LE 的 NOMMU 构建在入口被拒绝。
+NOMMU 构建支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`NOMMU_SUPPORTED_ARCHES`，声明于 `components/trim.toml` 的能力矩阵，经生成的 `components/trim.mk` 进入构建；实例校验读同一份 TOML）。其中 hosted 运行矩阵 `smoke-arch-mmu-matrix` 只覆盖前四个 hosted 架构的 MMU/NOMMU 组合；ARMv7-M 由 STM32 目标单独覆盖。LoongArch64 与 x86_64 的 NOMMU 构建在入口被拒绝；PPC64LE/LoongArch32 则由退休架构 guard 在构建入口拒绝。
 
 典型构建命令：
 
@@ -107,10 +111,9 @@ make ARCH=x86_64 BOARD=qemu-virt-x86_64 run
 make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
 make ARCH=arm32 BOARD=qemu-virt-arm32 run
 make ARCH=riscv32 BOARD=qemu-virt-riscv32 run
-make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 ```
 
-在 Linux 主机上，`make check-kernel-build` 和 `make check-user-build` 的默认集合是上述七个 hosted 架构；macOS 默认集合较小。`make check-kernel-build-all`、`make check-user-build-all` 或 `make check-build-matrix-all` 使用显式七架构集合。PPC64LE 的独立入口是 `make check-ppc64le-bringup` 和 `make check-ppc64le-user`。
+在 Linux 主机上，`make check-kernel-build` 和 `make check-user-build` 的默认集合是上述六个 hosted 架构；macOS 默认集合较小。`make check-kernel-build-all`、`make check-user-build-all` 或 `make check-build-matrix-all` 使用显式六架构集合。PPC64LE 的旧独立入口已撤下。
 
 ---
 
@@ -232,7 +235,7 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 * 统一 hwapi：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
 * 类 ops vtable：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
 
-静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all`、ARMv7-M 和 PPC64LE 默认）把完整驱动集静态链接进内核。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
+静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all` 与 ARMv7-M 默认）把完整驱动集静态链接进内核。PPC64LE 的历史默认值不再适用于当前构建。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
 
 ```text
 trap/MM/time init -> board->early_init() -> driver_core_init()
@@ -261,7 +264,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 两套 ABI 各有多少系统调用？Linux ABI 366 个，Native ABI 142 个（均为 `syscall_table.def` 当前登记数）。
 
-支持哪些构建目标？七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
+支持哪些构建目标？六个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32；另有 ARMv7-M STM32 MCU profile。LoongArch32/PPC64LE 是不参与当前构建的历史移植。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 
 SMP 并发如何保证安全？通过文档化的锁顺序、per-CPU 运行队列、显式 `on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
 
@@ -269,7 +272,7 @@ Native ABI 内存共享怎么工作？先用 `vm_create_object` 创建 VMO，再
 
 网络如何配置？通过 `a20.*` bootargs 或 DHCP 填充运行时配置；部分 QEMU/VirtualBox board 当前会提供 NAT 静态 bootargs。`/proc/net/config` 是只读状态面，不是通用写配置接口。
 
-如何为特定板子构建运行？`make ARCH=<arch> BOARD=<board> run`。用 `make check-build-matrix-all` 显式构建七个 hosted 架构的内核和用户态；`make all` 只构建 RISC-V64/LoongArch64 发布产物。
+如何为特定板子构建运行？`make ARCH=<arch> BOARD=<board> run`。用 `make check-build-matrix-all` 显式构建六个 hosted 架构的内核和用户态；`make all` 只构建 RISC-V64/LoongArch64 发布产物。
 
 Native ABI 完整规范在哪里？见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 

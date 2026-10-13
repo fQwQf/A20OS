@@ -29,7 +29,6 @@ run-arm64:              ; $(call A20_RUN,aarch64)
 run-x86_64:             ; $(call A20_RUN,x86_64)
 run-arm32:              ; $(call A20_RUN,arm32)
 run-riscv32:            ; $(call A20_RUN,riscv32)
-run-ppc64le:            ; $(call A20_RUN,ppc64le)
 
 run-nommu-riscv64:      ; tools/a20 run qemu-riscv64-nommu
 run-nommu-aarch64 run-nommu-arm64: ; tools/a20 run qemu-aarch64-nommu
@@ -46,7 +45,6 @@ debug-arm64:      ; $(call A20_DEBUG,aarch64)
 debug-x86_64:     ; $(call A20_DEBUG,x86_64)
 debug-arm32:      ; $(call A20_DEBUG,arm32)
 debug-riscv32:    ; $(call A20_DEBUG,riscv32)
-debug-ppc64le:    ; $(call A20_DEBUG,ppc64le)
 
 # Thin wrappers: VirtualBox image configurations live in instances/vbox-*.toml.
 vbox-iso-x86_64:        ; tools/a20 package vbox-iso-x86_64

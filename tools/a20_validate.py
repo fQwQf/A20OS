@@ -24,10 +24,12 @@ from a20_registry import (
 )
 from a20_instance import (
     ABI_CHOICES,
+    ACTIVE_ARCHES,
     DRIVER_DEPLOYMENTS,
     KNOWN_ARCHES,
     PACKAGE_KINDS,
     PROFILES,
+    RETIRED_ARCHES,
     QEMU_RUNNABLE_ARCHES,
     RELEASE_ARCH_ARTIFACTS,
     Instance,
@@ -85,8 +87,10 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     """Semantic cross-checks mirroring the Makefile's own guards."""
     e: list[str] = []
     k, m, g, n, r, t = inst.kernel, inst.machine, inst.gui, inst.net, inst.rootfs, inst.test
-    if inst.arch not in KNOWN_ARCHES:
-        e.append(f"arch: unsupported '{inst.arch}'; supported: {', '.join(KNOWN_ARCHES)}")
+    if inst.arch in RETIRED_ARCHES:
+        e.append(f"arch: '{inst.arch}' is retired from active builds; use a clean v0.18 checkout for historical reproduction")
+    elif inst.arch not in KNOWN_ARCHES:
+        e.append(f"arch: unsupported '{inst.arch}'; supported: {', '.join(ACTIVE_ARCHES)}")
     if not _NAME_RE.fullmatch(inst.name):
         e.append(f"name: '{inst.name}' must match {_NAME_RE.pattern}")
     if inst.board and not (repo_root / "kernel" / "platform" / inst.board).is_dir():

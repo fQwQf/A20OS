@@ -20,8 +20,8 @@ workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner�
 
 `tools/ci/Dockerfile` 基于 `debian:trixie-slim`，固化：
 
-- 全架构交叉工具链（riscv64 / aarch64 / x86_64 / loongarch64 /
-  ppc64le / arm，含 `riscv64-unknown-elf` 裸机工具链）；
+- 活跃架构交叉工具链（riscv64 / aarch64 / x86_64 / loongarch64 /
+  arm32，含 `riscv64-unknown-elf` 与 riscv32 multilib 裸机工具链）；
 - QEMU（riscv64/x86/arm）、镜像工具（mtools / dosfstools / e2fsprogs）、
   `fakeroot`、`ccache`、`openssl`、Python 3。
 
@@ -109,14 +109,11 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
 
 ## CI 的内核构建矩阵
 
-`SUPPORTED_HOSTED_ARCHES` 是七架构的单一真源，CI 逐架构构建的也是这七项
-（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le`，
-由 `make print-ci-kernel-arches` 解析给 `strategy.matrix`）。唯一在集合之外的是
-`loongarch32`，理由写在 `Makefile` 的 `CI_KERNEL_ARCHES` 注释里，不是静默丢弃：
-
-| 架构 | 排除原因 |
-|------|----------|
-| `loongarch32` | LA32R 没有发行版交叉工具链可装：Debian 不提供 loongarch32 gcc，项目是从源码构建 cloudspurs 的 binutils/gcc la32 分支（[platforms/loongarch32.md](../platforms/loongarch32.md)）。`tools/ci/Dockerfile` 无法 apt-get 一个上游不存在的包。它同时也不是 hosted 架构，因此不在 `SUPPORTED_HOSTED_ARCHES` 里，`check-kernel-build-all` 中单独的 `check-loongarch32-bringup` 仍只在本机跑。 |
+`SUPPORTED_HOSTED_ARCHES` 是六个活跃 hosted 架构的单一真源，CI 逐架构构建的也是这六项
+（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 arm32 riscv32`，由
+`make print-ci-kernel-arches` 解析给 `strategy.matrix`）。ARM32 和 RISC-V32 仍在矩阵中；
+LoongArch32/PPC64LE 已按 1.0 平台决策退出，相关源码与历史门禁证据保留在文档和版本历史中，
+但不再安装旧工具链、不进入 active matrix。
 
 `arm32` 曾以"编译不过"为由被排除（`kernel/mm/fault.c` 曾直接调用只在
 `ARCH_HAS_PGTABLE_OPS` 下声明的 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口，

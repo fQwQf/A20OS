@@ -104,13 +104,13 @@ arches = ["riscv64", "riscv32", "aarch64", "arm32", "armv7m"]
 # pte_to_swp_entry / swp_entry_to_pte in kernel/arch/<arch>/include/page_table.h);
 # riscv32 and loongarch32 have not defined one.
 [capability.swap]
-arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "ppc64le"]
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32"]
 
 # A translator JITs guest code, which needs a 64-bit host with real page
 # protections (mprotect RWX) and an MMU to demand-page from; armv7m/arm32 and
 # riscv32 are 32-bit or NOMMU.
 [capability.xlator]
-arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "ppc64le"]
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64"]
 
 # The make side gates RAMFS_USER on the RAMFS_USER_OBJCOPY_<arch> table (the
 # enforceable build fact), so this list is the instance-facing policy that

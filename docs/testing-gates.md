@@ -1,5 +1,20 @@
 # 测试与文档门禁
 
+## 1.0 重写与子系统完成验收
+
+[1.0 计划](releases/v1.0.md) 要求完成现有开发中子系统，并保留既有正确行为与性能。
+本页仍是当前可执行门禁索引；新增发布要求见 [功能与性能验收规范](releases/v1.0-validation.md)。
+固定 C 基线、最近已验收版本和候选必须对照，按架构/ABI/CPU/设备/部署方式记录矩阵，
+覆盖失败注入、取消/回收、反复运行与真实工作负载。性能逐项检查吞吐、尾延迟、内存及
+MCU 预算；没有统计显著差异不等于已证明不回退。新比较 runner 尚未全部实现。
+
+LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下这两个目标，默认
+构建会明确拒绝它们。历史源码与验证结果继续保留，不再据此扩充稳定版矩阵。Rust 迁移须
+保留行为断言与负控，允许改写绑定 C 源码形态的测试。
+文档修改运行 `make check-doc-drift`；不要把包含构建和 QEMU 的聚合目标当作纯文档检查。
+
+## 当前门禁索引
+
 `DOCS_AS_FACT_CONTRACT`：`docs/`、`kernel/abi/*/*.md` 以及顶层状态文件中的架构文档描述当前实现。未来设计应放在规划材料中，而不是事实文档中。
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
@@ -33,13 +48,13 @@
 | 3D 通路像素回读（三种架构） | `tools/a20 test smoke-gpu3d-riscv64` / `-x86_64` / `-aarch64`（需 host virgl + `tools/with-virgl-display.sh`；见 [graphics/3d-graphics.md](graphics/3d-graphics.md)） |
 | stock Mesa/virgl attach 门禁 | `make smoke-mesa-attach`（需 host virgl）。**断言 guest 起来了 virgl virtio-gpu，且 Mesa 真的 bind 到 virgl**（renderer 字符串判据 `profile renderer: *virgl`）。默认硬失败；`MESA_REQUIRE_VIRGL_ATTACH=0` 可降级为只报告。已通过（renderer `virgl (…radeonsi…)`）。详见 [graphics/3d-graphics.md §0.8](graphics/3d-graphics.md) |
 
-`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong LA32R，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
+`BUILD_MATRIX_GATE_CONTRACT`：当前 hosted 构建集合为 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32`。Linux 上 `make check-build-matrix` 使用这六项，macOS 的默认集合只含 RISC-V64；`make check-build-matrix-all` 使用相同六项，并额外包含 VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵；LoongArch32/PPC64LE 的历史检查不再属于活跃矩阵。
 
-`CI_BUILD_MATRIX_CONTRACT`：CI 逐架构构建的就是上述全部七项，由根 `Makefile` 的 `CI_KERNEL_ARCHES` 声明（`riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le`），`.github/workflows/ci.yml` 的 `kernel-build` 矩阵经 `make print-ci-kernel-arches` 解析得到，因此 CI 不会与 `SUPPORTED_HOSTED_ARCHES` 漂移。`arm32` 曾因 `kernel/mm/fault.c` 直接调用只在 `ARCH_HAS_PGTABLE_OPS` 下声明的 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口而被排除；这两处现已改经 `fault.c` 的架构 hook 调用，arm32 因此**在** CI 列表里。`pt.h` 的 `ARCH_HAS_PGTABLE_OPS` 守卫本身**没有**被放宽——声明一个没有实现支撑的 cursor 是会静默失败的能力。唯一在 hosted 集合之外的是 `loongarch32`：它需要从源码构建的 cloudspurs la32 工具链，发行版没有可安装的包，CI 容器无法提供。CI 的宿主侧源码契约门禁（`check-honesty-policy`、`check-smoke-cases`、`host-tests`、`check-drm-abi` 与 `check-doc-test-gates` 中不依赖 QEMU 的 6 个子门禁）不进入构建容器，见 [packaging/ci.md](packaging/ci.md)。arm32 的实测红灯（推送树 `cow.c` 缺守卫）、CI 自 2026-09-29 起的全红状态，以及本机无 arm32 工具链时用宿主 gcc 语法沙箱做的验证及其边界，同样记录在 [packaging/ci.md §CI 的内核构建矩阵](packaging/ci.md)。
+`CI_BUILD_MATRIX_CONTRACT`：CI 逐架构构建的是上述全部六项，由根 `Makefile` 的 `CI_KERNEL_ARCHES` 声明（`riscv64 loongarch64 aarch64 x86_64 arm32 riscv32`），`.github/workflows/ci.yml` 的 `kernel-build` 矩阵经 `make print-ci-kernel-arches` 解析得到，因此 CI 不会与 `SUPPORTED_HOSTED_ARCHES` 漂移。`arm32` 曾因 `kernel/mm/fault.c` 直接调用只在 `ARCH_HAS_PGTABLE_OPS` 下声明的 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口而被排除；这两处现已改经 `fault.c` 的架构 hook 调用，arm32 因此**在** CI 列表里。`pt.h` 的 `ARCH_HAS_PGTABLE_OPS` 守卫本身**没有**被放宽——声明一个没有实现支撑的 cursor 是会静默失败的能力。LoongArch32/PPC64LE 已退出活跃构建矩阵，其历史决策与复现路径见平台文档。CI 的宿主侧源码契约门禁（`check-honesty-policy`、`check-smoke-cases`、`host-tests`、`check-drm-abi` 与 `check-doc-test-gates` 中不依赖 QEMU 的 6 个子门禁）不进入构建容器，见 [packaging/ci.md](packaging/ci.md)。arm32 的实测红灯（推送树 `cow.c` 缺守卫）、CI 自 2026-09-29 起的全红状态，以及本机无 arm32 工具链时用宿主 gcc 语法沙箱做的验证及其边界，同样记录在 [packaging/ci.md §CI 的内核构建矩阵](packaging/ci.md)。
 
 2026-10-08，本地在清空外置 `.kernel-build` 缓存与七个用户态架构输出后，运行 `make -j8 FF_LINUX_UAPI_ROOT=/tmp/a20-arm-toolchain/root/usr check-build-matrix`，七项 hosted 架构内核 bring-up 与用户态构建全部通过。ARM32 使用临时解包的交叉工具链和 Linux UAPI 头文件；详细命令、边界及远端 CI 状态见 [packaging/ci.md](packaging/ci.md)。此结果仅证明当前本地树构建通过，不能作为远端 CI 绿灯证据。
 
-`ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。LoongArch64、x86_64、PPC64LE 的 NOMMU 配置在构建入口被拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
+`ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。活跃 LoongArch64、x86_64 的 NOMMU 配置在构建入口被拒绝；PPC64LE/LoongArch32 则因平台已退休由更早的架构 guard 拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
 `SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/platform/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
 
@@ -55,8 +70,9 @@
 
 ### XFCE 桌面验收
 
-`tools/a20 run xfce-riscv64` 与 `tools/a20 run xfce-x86_64` 是交互式桌面实例，
-不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
+`tools/a20 run xfce-{riscv64,x86_64,aarch64,loongarch64}` 是交互式桌面实例
+（aarch64 因 SMP 竞态暂以单 CPU 运行，见
+[发行版排查笔记](distro/known-issues.md)），不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
 `labwc` / `xfce4-panel` 进程出现，都不能单独证明桌面可用。3D 门禁的像素回读
 也不能证明 XFCE 面板、dock 与窗口交互正确。
 
@@ -75,6 +91,12 @@
 通过。已知故障、修复依据与实际验收记录见
 [发行版排查笔记](distro/known-issues.md)。x86_64 的缺页/futex/PTY 回归与
 浏览器测试步骤见 [XFCE x86_64 验证记录](distro/xfce-x86_64-validation.md)。
+
+Minecraft 桌面在 x86_64、aarch64、riscv64 上用
+`tools/a20 run minecraft-<arch> -- GUI_MEDIA=build/minecraft/1.21.11-<arch>`
+启动；客户端目录按架构获取，验收范围见
+[Minecraft Java 客户端](distro/minecraft.md)。loongarch64 因无 LWJGL
+native 不在矩阵内。
 
 ### 宿主资源预检
 
@@ -442,13 +464,13 @@ vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第�
 
 ### 架构边界
 
-`make check-arch-boundary` 禁止通用内核代码中出现 `CONFIG_AARCH64`/`CONFIG_ARM32`/`__aarch64__`/`__arm__` 等架构条件编译；验证 LoongArch64、x86_64、PPC64LE 的 NOMMU 构建在入口即被拒绝；确认 `smoke-arch-mmu-matrix` 在 Makefile 与 `docs/OS-Design.md` 中存在。
+`make check-arch-boundary` 禁止通用内核代码中出现 `CONFIG_AARCH64`/`CONFIG_ARM32`/`__aarch64__`/`__arm__` 等架构条件编译；验证 LoongArch64、x86_64 的 NOMMU 构建在入口即被拒绝，LoongArch32/PPC64LE 则由退休架构 guard 拒绝；确认 `smoke-arch-mmu-matrix` 在 Makefile 与 `docs/OS-Design.md` 中存在。
 
 失败时看 `rg` 扫描结果中是否在 `kernel/arch/**`、`kernel/platform/**`、`kernel/external/**`、`kernel/include/core/arch.h` 之外出现架构宏，并确认 `docs/testing-gates.md` 与 `docs/OS-Design.md` 包含 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT` 与 `smoke-arch-mmu-matrix`。
 
 ### 构建矩阵
 
-`make check-build-matrix` 运行当前主机的默认内核 bring-up 与用户态集合；`check-build-matrix-all` 显式运行七个 hosted 架构。两者都确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
+`make check-build-matrix` 运行当前主机的默认内核 bring-up 与用户态集合；`check-build-matrix-all` 显式运行六个 hosted 架构。两者都确认 `BUILD_MATRIX_GATE_CONTRACT` 字符串仍存在于本文档。
 
 失败时按 `check-build-matrix` 报告的架构逐个修复 `check-<arch>-bringup` 或 `check-<arch>-user` 错误，并确保 `BUILD_MATRIX_GATE_CONTRACT` 仍存在于本文档。
 
@@ -1234,6 +1256,8 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 
 ### 跨架构陷阱：同一份代码只在某些架构下坏
 
+下列 PPC64LE 细节是历史移植与排障记录，不代表当前活跃矩阵仍构建或运行该平台。
+
 下面几条都不是逻辑 bug，而是「按 x86 写出来的假设在其他架构上不成立」。它们共同的特征是**在 x86_64 上完全看不出来**，所以每修一条都必须按架构各跑一遍 `smoke-ext4-journal`，不能只跑一个。
 
 **1. `O_*` 常量不是 asm-generic。** Linux 把 `O_DIRECTORY`、`O_NOFOLLOW`、`O_DIRECT`、`O_LARGEFILE` 放在 `arch/<arch>/include/uapi/asm/fcntl.h` 里逐架构定义，三套布局互不相同：
@@ -1277,3 +1301,23 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 ### Native cluster ABI smoke
 
 `make smoke-native-cluster` 通过真实 Native syscall ABI 检查集群入口号、节点 ID 哈希、`set_self` 一次成功和重复调用 `A20_ERR_EXISTS`，以及 LOCAL 导出/按 slot 连接、loopback route 与 link-status。参数与结构版本测试继续验证非法输入在真实处理器中返回对应错误；它不再把 WA1 已落地的 syscall 当作统一 stub。
+
+### 1.0 paired C/Rust comparison runner
+
+`python3 tools/v1_compare.py <protocol.toml> --out <new-evidence-dir>` runs
+the explicit C0/Cn/candidate commands, records each run in its own directory,
+and writes `report.json` plus the exact protocol copy. See
+[the protocol and status rules](releases/v1.0-comparison.md). Each command must
+emit exactly one `A20_COMPARE_JSON` record with an independently expected
+contract and the protocol's declared metrics. The runner retains failed rounds,
+audits complete output for panic/fatal markers, hashes commands/logs/artifacts,
+and terminates a timed-out process group.
+
+Performance cases require at least six repetitions, a pre-registered order
+seed, and a separately reviewed baseline calibration hash with fixed
+measurement resolution. Current C0/Cn self-controls may show the run is too
+noisy, but cannot widen that resolution. A tag, build, host oracle, or NAT
+microbenchmark is not by itself a validated baseline or whole-OS result. The
+runner's hermetic negative-control tests are `python3 -m unittest
+tools.tests.test_v1_compare`; the command is not yet part of Make or CI, and no
+production comparison has been accepted.

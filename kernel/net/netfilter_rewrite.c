@@ -12,6 +12,93 @@
 
 #include "net/netfilter_rewrite.h"
 
+#ifdef CONFIG_NETFILTER_REWRITE_RUST
+
+/* This branch is the C ABI adapter. The Rust layer deliberately sees scalar
+ * packet metadata rather than duplicating the C structs' target-dependent
+ * layout. Keep this file as the executable C reference below the #else. */
+uint16_t a20_rust_netfilter_csum_delta(uint16_t old_csum, uint32_t old_word,
+                                       uint32_t new_word);
+uint16_t a20_rust_netfilter_get16(const uint8_t *p);
+void a20_rust_netfilter_put16(uint8_t *p, uint16_t v);
+uint16_t a20_rust_netfilter_l4_ckoff(const uint8_t *frame, size_t len,
+                                     uint16_t l4_off, uint8_t proto);
+void a20_rust_netfilter_set_addr(uint8_t *frame, size_t len, uint16_t ip_off,
+                                 uint16_t l4_off, uint8_t proto,
+                                 uint32_t old_src, uint32_t old_dst,
+                                 uint32_t new_src, uint32_t new_dst);
+void a20_rust_netfilter_set_port(uint8_t *frame, size_t len, uint16_t l4_off,
+                                 uint8_t proto, int is_src, uint16_t new_port);
+uint32_t a20_rust_netfilter_masq_addr(int net_idx);
+uint64_t a20_rust_netfilter_reply_source(uint8_t nat, uint32_t dst_addr,
+                                         uint16_t dst_port,
+                                         uint32_t nat_dst_addr,
+                                         uint16_t nat_dst_port);
+uint64_t a20_rust_netfilter_reply_destination(uint8_t nat, uint32_t src_addr,
+                                              uint16_t src_port,
+                                              uint32_t nat_src_addr,
+                                              uint16_t nat_src_port);
+
+uint16_t netfilter_csum_delta(uint16_t old_csum, uint32_t old_word,
+                              uint32_t new_word) {
+    return a20_rust_netfilter_csum_delta(old_csum, old_word, new_word);
+}
+
+uint16_t netfilter_get16(const uint8_t *p) {
+    return a20_rust_netfilter_get16(p);
+}
+
+void netfilter_put16(uint8_t *p, uint16_t v) {
+    a20_rust_netfilter_put16(p, v);
+}
+
+uint16_t netfilter_l4_ckoff(const uint8_t *frame, size_t len,
+                            const netfilter_frame_t *pkt) {
+    if (!pkt)
+        return 0;
+    return a20_rust_netfilter_l4_ckoff(frame, len, pkt->l4_off, pkt->proto);
+}
+
+void netfilter_set_addr(uint8_t *frame, size_t len,
+                        const netfilter_frame_t *pkt, uint32_t new_src,
+                        uint32_t new_dst) {
+    if (!pkt)
+        return;
+    a20_rust_netfilter_set_addr(frame, len, pkt->ip_off, pkt->l4_off,
+                                pkt->proto, pkt->src_addr, pkt->dst_addr,
+                                new_src, new_dst);
+}
+
+void netfilter_set_port(uint8_t *frame, size_t len,
+                        const netfilter_frame_t *pkt, int is_src,
+                        uint16_t new_port) {
+    if (!pkt)
+        return;
+    a20_rust_netfilter_set_port(frame, len, pkt->l4_off, pkt->proto, is_src,
+                                new_port);
+}
+
+uint32_t netfilter_masq_addr(int net_idx) {
+    return a20_rust_netfilter_masq_addr(net_idx);
+}
+
+void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e, uint32_t *rsrc,
+                              uint32_t *rdst, uint16_t *rsport,
+                              uint16_t *rdport) {
+    if (!e || !rsrc || !rdst || !rsport || !rdport)
+        return;
+    uint64_t src = a20_rust_netfilter_reply_source(
+        e->nat, e->dst_addr, e->dst_port, e->nat_dst_addr, e->nat_dst_port);
+    uint64_t dst = a20_rust_netfilter_reply_destination(
+        e->nat, e->src_addr, e->src_port, e->nat_src_addr, e->nat_src_port);
+    *rsrc = (uint32_t)(src >> 16);
+    *rsport = (uint16_t)src;
+    *rdst = (uint32_t)(dst >> 16);
+    *rdport = (uint16_t)dst;
+}
+
+#else
+
 /* Implemented in kernel/net/lwip_stack.c; the host test supplies its own. */
 uint32_t a20_lwip_netif_ipv4(int net_idx);
 
@@ -197,3 +284,5 @@ void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e, uint32_t *rsrc,
         *rdport = e->src_port;
     }
 }
+
+#endif /* CONFIG_NETFILTER_REWRITE_RUST */

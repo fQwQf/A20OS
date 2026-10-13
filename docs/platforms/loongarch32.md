@@ -1,5 +1,10 @@
 # LoongArch32 (LA32R) 移植状态
 
+> **2026-10-13：退出 1.0 支持。** 该目标没有明确用户、维护者或不可替代的研究价值，
+> 不再列入稳定版开发和 Rust 迁移范围。以下保留历史实现、限制与复现记录。当前 Makefile
+> 会拒绝 `ARCH=loongarch32`；历史命令仅适用于干净的 `v0.18` checkout。活跃入口状态见
+> [1.0 计划](../releases/v1.0.md)。
+
 > 目标平台是 NaiLoong Core，一个以 Chisel 编写的 `LoongArch32 Reduced`（LA32R）乱序超标量处理器核，挂接 NaiLoong LA32R SoC（32 位 AXI）。README 声称该核可在龙芯实验箱约 80 MHz 运行性能测试并启动 Linux。内核 bring-up 已完成，并在 LA32R 全系统模拟器（cemu）上验证到 `init_kthread (pid=1)`。**尚未**在任何真实 LA32R 硬件（NaiLoong Core / 龙芯实验箱）上运行，也**尚未**提供用户态（musl loongarch32 尚未移植）。
 
 LoongArch32 是本仓库第五个 32 位架构（在 riscv32 / arm32 / armv7m 之后），也是第三个 LoongArch 目标（与 loongarch64 并列）。架构目录 `kernel/arch/loongarch32/` 完整实现了指令集机制层，板级 `kernel/platform/nailoong/` 描述 NaiLoong SoC。
@@ -32,7 +37,7 @@ LA32R 与 LA64 共享指令编码，但目标核 NaiLoong Core 的实现有一�
 - 配置：`--target=loongarch32-linux-gnu`，默认 `-march=la32v1.0 -mabi=ilp32s`，按 `-march=la32v1.0 -mabi=ilp32s` 构建 libgcc（含 `__udivdi3/__divdi3` 等）；
 - 该 gcc 的默认 ABI 仍是 `ilp32d`，链接时会有 ABI 警告但产物一致，无碍内核构建。
 
-内核构建：
+以下命令是 `v0.18` 历史复现步骤，不能在当前 checkout 中运行：
 
 ```sh
 export PATH="$HOME/loongarch32-toolchain/install/bin:$PATH"
@@ -43,14 +48,14 @@ make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 # 开发构建：启动到 init_kthread，尝试加载 /bin/init
 make ARCH=loongarch32 BOARD=nailoong BRINGUP=0 kernel-only
 
-# 架构边界门禁
+# 历史架构边界门禁
 make check-arch-boundary
 make check-smp-platform-boundary
 ```
 
 产出：`.kernel-build/loongarch32-nailoong-*/kernel.elf`（ELF32 LoongArch，入口 `0x80000000`）。
 
-## 运行验证（cemu 模拟器）
+## 历史运行验证（cemu 模拟器）
 
 上游 QEMU 目前没有 LoongArch32 机器，因此用 `github.com/cyyself/cemu`（支持 LoongArch32(Reduced) + TLB + 16550 UART 的全系统模拟器）做验证。cemu 的 la32r 实现**不是完整的 LA32R**，验证过程中给 cemu 补了缺失指令并修了若干解码问题（见下文“cemu 补丁”）。
 

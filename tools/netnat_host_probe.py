@@ -18,15 +18,23 @@ import sys
 import time
 
 DEFAULT_PORT = 18081
+DEFAULT_TRANSACTIONS = 1
 DEADLINE_S = 40.0
 
 
 def main() -> int:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    transactions = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_TRANSACTIONS
+    if transactions <= 0 or transactions > 1024:
+        sys.stderr.write("netnat-host-probe: transaction count must be 1..1024\n")
+        return 2
     deadline = time.time() + DEADLINE_S
     last = "no attempt made"
     attempts = 0
-    while time.time() < deadline:
+    completed = 0
+    while completed < transactions:
+        if time.time() >= deadline:
+            break
         attempts += 1
         s = socket.socket()
         s.settimeout(2.0)
@@ -34,19 +42,24 @@ def main() -> int:
             s.connect(("127.0.0.1", port))
             s.sendall(b"A")
             if s.recv(1) == b"A":
-                print(
-                    "netnat-host-probe: connected and echoed after %d attempt(s)"
-                    % attempts
-                )
-                return 0
+                completed += 1
+                continue
             last = "connected but the echo byte did not come back"
+            break
         except OSError as exc:
             last = str(exc)
         finally:
             s.close()
         time.sleep(0.5)
+    if completed == transactions:
+        print(
+            "netnat-host-probe: completed %d echo transaction(s) after %d attempt(s)"
+            % (completed, attempts)
+        )
+        return 0
     sys.stderr.write(
-        "netnat-host-probe: FAILED after %d attempts: %s\n" % (attempts, last)
+        "netnat-host-probe: FAILED after %d/%d transaction(s), %d attempt(s): %s\n"
+        % (completed, transactions, attempts, last)
     )
     return 1
 

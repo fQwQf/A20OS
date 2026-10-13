@@ -23,7 +23,7 @@ all:
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
-check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build check-lao64-board-builds check-arm-board-builds check-x86_64-pc-build
+check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-visionfive2-build check-ls2k1000-build check-lao64-board-builds check-arm-board-builds check-x86_64-pc-build
 
 # Physical-board build gates: keep the VisionFive 2 and LS2K1000 sources
 # building on every commit.  The generic profile is the boot substrate; the
@@ -204,9 +204,6 @@ check-riscv64-bringup:
 check-loongarch64-bringup:
 	$(MAKE) ARCH=loongarch64 ABI=$(ABI) BRINGUP=1 kernel-only
 
-check-loongarch32-bringup:
-	$(MAKE) ARCH=loongarch32 BOARD=nailoong ABI=$(ABI) BRINGUP=1 kernel-only
-
 check-aarch64-bringup:
 	$(MAKE) ARCH=aarch64 ABI=$(ABI) BRINGUP=1 kernel-only
 
@@ -218,9 +215,6 @@ check-arm32-bringup:
 
 check-riscv32-bringup:
 	$(MAKE) ARCH=riscv32 ABI=$(ABI) BRINGUP=1 kernel-only
-
-check-ppc64le-bringup:
-	$(MAKE) ARCH=ppc64le ABI=$(ABI) BRINGUP=1 kernel-only
 
 check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 
@@ -348,9 +342,6 @@ check-arm32-user:
 
 check-riscv32-user:
 	$(MAKE) ARCH=riscv32 USER_OPT="$(USER_OPT)" check-user-build-stamp
-
-check-ppc64le-user:
-	$(MAKE) ARCH=ppc64le USER_OPT="$(USER_OPT)" check-user-build-stamp
 
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build

@@ -28,9 +28,10 @@ DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
 else
 # Canonical hosted build matrix (BUILD_MATRIX_GATE_CONTRACT).  Every per-arch
 # gate list below is derived from this single source of truth so an added or
-# renamed arch cannot drift across targets.  loongarch32 is a kernel-only
-# bring-up member (no QEMU target) and is tracked separately below.
-SUPPORTED_HOSTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
+# renamed arch cannot drift across targets.  Retired LoongArch32/PPC64LE
+# implementations remain in the source tree for historical reference, but do
+# not participate in active build, run, or test matrices.
+SUPPORTED_HOSTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32
 # Native-ABI check targets use short arch names (riscv64 -> rv, loongarch64 ->
 # la, riscv32 -> rv32; other arches keep their name).
 NATIVE_ARCH_NAME = $(if $(filter riscv64,$(1)),rv,$(if $(filter loongarch64,$(1)),la,$(if $(filter riscv32,$(1)),rv32,$(1))))
@@ -46,51 +47,11 @@ DEFAULT_NATIVE_LIBC_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-libc-$(n))
 # ================================================================
 # .github/workflows/ci.yml resolves its per-arch kernel build matrix from
 # `make -s print-ci-kernel-arches` instead of hardcoding an arch list in YAML.
-# That is the point: a hand-maintained YAML list is a second source of truth
-# that can silently fall behind SUPPORTED_HOSTED_ARCHES, which is exactly how
-# arm32, riscv32 and ppc64le went unbuilt in CI while the local gate covered
-# them.  print-ci-kernel-arches also rejects any member that is not a hosted
-# arch, so a typo here fails loudly instead of spawning a job that cannot
-# build.
-#
-# This is deliberately a strict subset of SUPPORTED_HOSTED_ARCHES, and the one
-# remaining omission is recorded here rather than dropped silently:
-#
-#   loongarch32 LA32R has no distro cross-toolchain to install: Debian ships
-#               no loongarch32 gcc, and the project builds a from-source
-#               cloudspurs binutils/gcc la32 fork instead
-#               (docs/platforms/loongarch32.md).  tools/ci/Dockerfile cannot
-#               apt-get something that does not exist upstream, so CI cannot
-#               build it without vendoring a toolchain build.  It is also not
-#               a hosted arch, so it is out of SUPPORTED_HOSTED_ARCHES by
-#               construction and check-kernel-build-all's separate
-#               check-loongarch32-bringup stays local-only.
-#
-# arm32 used to be omitted here for exactly one reason, and that reason is now
-# fixed rather than waived.  Makefile:866-869 below deliberately withholds
-# ARCH_HAS_PGTABLE_OPS from arm32, which supplies its own short-descriptor
-# page-table backend (kernel/arch/arm32/mm/pgtbl.c), so kernel/include/mm/pt.h
-# never declares the transactional cursor there.  Two fault-path sites in
-# kernel/mm/fault.c nevertheless called mm_addrspace_lock()/mm_cursor_map()/
-# mm_cursor_query()/mm_cursor_unlock() outside any guard, which made
-# check-arm32-bringup fail to compile with four implicit-declaration errors --
-# and because nothing built arm32 in CI, nobody saw it.  Both sites now go
-# through arch hooks in fault.c instead of the cursor directly: the
-# fault-around window maps through fault_map_window(), which is one transaction
-# where a cursor exists and a per-page pt_map() loop where one does not, so
-# arm32 keeps the whole optimisation minus the single descent; and the
-# status-driven fault path is compiled out where the per-PTE status sidecar
-# does not exist, reported as absent (see
-# FAULT_FROM_STATUS_ABSENT_WITHOUT_PGTABLE_OPS in fault.c) rather than declared
-# against a backend that cannot implement it.  The guard in pt.h was NOT
-# widened: a declared cursor with no implementation behind it is a fabricated
-# capability, which fails silently instead of loudly.
-#
 # Every member below must have its cross toolchain installed by
 # tools/ci/Dockerfile; riscv32 uses the rv32 multilib of
 # gcc-riscv64-unknown-elf rather than a riscv32-specific package, which
 # Makefile:329-341 detects via RISCV_ELF_RV32_MULTIDIR.
-CI_KERNEL_ARCHES ?= riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
+CI_KERNEL_ARCHES ?= riscv64 loongarch64 aarch64 x86_64 arm32 riscv32
 endif
 
 empty :=
@@ -125,6 +86,10 @@ print-ci-kernel-arches:
 include components/trim.mk
 
 ARCH ?= riscv64
+RETIRED_ARCHES := loongarch32 ppc64le
+ifneq ($(filter $(ARCH),$(RETIRED_ARCHES)),)
+$(error ARCH=$(ARCH) is retired from active builds; for historical reproduction, check out v0.18 or earlier (see docs/releases/v1.0.md))
+endif
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
@@ -472,7 +437,7 @@ help:
 	  '  Day-to-day development' \
 	  '    make run                       build ARCH=$$ARCH and boot it in QEMU' \
 	  '    make run-riscv64               ... same, for a named arch (also -loongarch64,' \
-	  '                                   -aarch64/-arm64, -x86_64, -arm32, -riscv32, -ppc64le)' \
+	  '                                   -aarch64/-arm64, -x86_64, -arm32, -riscv32)' \
 	  '    make debug-riscv64             boot paused with a GDB server on :1234' \
 	  '    make dev-build                 kernel + userspace + test images, no QEMU' \
 	  '    make kernel-only               just the kernel, for ARCH/BOARD' \
@@ -532,10 +497,22 @@ help:
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
 
+# The NAT algorithm slice can be selected independently while its C reference
+# remains buildable. The Rust object has a separate output directory so a C
+# image and a Rust image can never reuse one another's kernel artifacts.
+NETFILTER_REWRITE_IMPL ?= c
+ifeq ($(filter $(NETFILTER_REWRITE_IMPL),c rust),)
+$(error NETFILTER_REWRITE_IMPL must be c or rust)
+endif
+
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
 BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+
+ifeq ($(NETFILTER_REWRITE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
+endif
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -1165,6 +1142,9 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
          -DCONFIG_CLUSTER_PROFILE=$(CLUSTER_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
+ifeq ($(NETFILTER_REWRITE_IMPL),rust)
+CFLAGS += -DCONFIG_NETFILTER_REWRITE_RUST
+endif
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
@@ -1576,10 +1556,17 @@ include tools/driver-modules.mk
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
 LFS_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/littlefs/%.c,$(KERNEL_SRC))
+include tools/rust-kernel.mk
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
+ifeq ($(NETFILTER_REWRITE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/net/netfilter_rewrite.c,$(KERNEL_SRC)),)
+$(error NETFILTER_REWRITE_IMPL=rust requires kernel/net/netfilter_rewrite.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_NETFILTER_OBJECT)
+endif
 
 # Optional self-contained userspace for physical-board bring-up.  Each static
 # ELF is linked as read-only kernel data, then copied into the root ramfs by

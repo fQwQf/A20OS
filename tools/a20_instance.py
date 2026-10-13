@@ -20,11 +20,13 @@ KNOWN_ARCHES: Final = (
     "riscv64", "loongarch64", "aarch64", "x86_64",
     "arm32", "riscv32", "ppc64le", "armv7m", "loongarch32",
 )
+RETIRED_ARCHES: Final = frozenset(("loongarch32", "ppc64le"))
+ACTIVE_ARCHES: Final = tuple(arch for arch in KNOWN_ARCHES if arch not in RETIRED_ARCHES)
 # Arches bootable through the generic QEMU _run_impl flow. armv7m runs
-# through the stm32vldiscovery path ([stm32] qemu = true) and loongarch32
-# runs on the cemu simulator, so neither is in this list.
+# through the stm32vldiscovery path ([stm32] qemu = true), so it is not in
+# this list. Retired architectures are intentionally excluded.
 QEMU_RUNNABLE_ARCHES: Final = (
-    "riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "riscv32", "ppc64le",
+    "riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "riscv32",
 )
 # Capability arch matrices (nommu, swap, xlator, ramfs-user, smp-verified-qemu)
 # moved to components/trim.toml -- the same registry the Makefile consumes via
