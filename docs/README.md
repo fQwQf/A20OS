@@ -33,6 +33,7 @@
 - [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
+- [validation-docs-completion-2026-10-13.md](validation-docs-completion-2026-10-13.md)：当前文档完善分支的实际构建与运行结果
 - [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮开发中断恢复、分支集成、验证结果与剩余边界
 - [releases/v0.17.md](releases/v0.17.md)：v0.17 候选版本范围、构建修正与发布检查
 - [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及代码与注释规范（语言、格式、何时该写注释、锁序与 ABI 注释约定）

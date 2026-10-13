@@ -8,10 +8,10 @@
 [../../kernel/abi/linux/syscall_coverage.md](../../kernel/abi/linux/syscall_coverage.md)），
 下一个量级的方向评估见 [next-horizon.md](next-horizon.md)。
 
-2026-10-13 编码阶段按源码复核：已完成的实现项删除，运行验收条件保留。
-本轮仅做逻辑审查与单文件编译检查，未全量构建、未运行宿主测试或 QEMU；
-接线完成不等于门禁通过。改动及待验收入口见
-[编码阶段记录](../development-docs-completion-2026-10-13.md)。
+2026-10-13 已转入完整构建、宿主测试和 QEMU 实际验证。已通过的工程项删除，
+未覆盖条件继续保留；命令、配置与结果见
+[验证记录](../validation-docs-completion-2026-10-13.md)，编码历史见
+[阶段记录](../development-docs-completion-2026-10-13.md)。
 
 面向服务器部署的当前能力边界与阻塞项排序见
 [../server-readiness.md](../server-readiness.md)。
@@ -23,7 +23,8 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 ## P0：距可投产最远的一项——内核抢占与 RT 限流
 
-权限与周期预算已补入实现，但尚未运行验收，不能据此承诺 RT 任务失控时仍能恢复。
+权限与周期预算已通过 `sched_stress` 的同 CPU 普通进展与 RT 恢复验收；
+长 syscall 和真机边界仍需下述工作。
 当前边界见 [../server-readiness.md](../server-readiness.md) §四。
 
 - [ ] IRQ 线程化与长内核路径的抢占运行验收
@@ -31,33 +32,17 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
     `kernel_preempt_at_irq_return()` 调度。`/proc/a20/perf` 的 per-CPU
     `kernel_preempts` 已接线，尚未在本轮采样。
   - 仍缺 IRQ 线程化，以及长 syscall 下低优先级任务能在有界时间内运行的断言。
-- [ ] RT 权限与周期预算的运行验收
-  - `RLIMIT_RTPRIO` 软硬上限、继承、`CAP_SYS_RESOURCE` 硬上限提升检查、
-    `CAP_SYS_NICE` / 软上限调度授权已实现，Linux 与 Native 共用持锁检查。
-  - 每个 CPU 的 RT 队列共用一秒周期、95% 预算；tick 和切换路径计量，预算耗尽
-    后跳过 RT 选择与保留 current 的分支，下周期恢复。保留普通任务 5% 时间，
-    无普通任务时允许 idle 等待补充。参数当前固定，没有 Linux sysctl 接口。
-  - 待运行：`sched_stress` 的 `rt permission/limits ok` 与
-    `rt-bandwidth-progress PASS`；后者把普通父进程和不让出的 FIFO 子进程钉在
-    同一 CPU，并检查普通进展与两个周期后的 RT 恢复。
 
 ## P0：默认 ABI=both 的运行验收
 
-- [ ] 复验 Native handle、MM 与对象生命周期
-  - `smoke-native-contract` 的 VMO 索引引用修复已存在于基线；本轮补了 VMO
-    并发物化复查与最终销毁时的 watch 清理。
-  - `handle_transfer` 已改用引用持有的 `vfile_t *`；`path_open` 在安装 Native
-    handle 后关闭临时 fd；FILE 映射失败释放引用，
-    VMAR 定点边界检查在替换映射之前完成，Native 权限上限在核心 MM 锁内执行。
-  - 剩余条件：在当前提交运行 `smoke-native-handle`、`smoke-native-mm`、
-    `smoke-native-deepen`、`smoke-native-contract`，确认新增断言均被执行，包含 `remap-owner-rollback PASS`；本轮已补
-    所属 VMAR 引用、常驻页回滚与 TLB 记录预留，尚未运行。
-- [ ] 复验 Native 双架构 CI 与发布前置门禁
-  - 共享套件、RISC-V/AArch64 参数化、Native 用户程序构建、CI 与 release 前置
-    已接线（`.github/workflows/native.yml`），尚未运行。
-  - 22 条 Native 用例中，RTC、服务注册表 RTC 重启和 UBD 三条依赖 RISC-V 私有
-    MMIO/IRQ；AArch64 明确跳过这三条，其余复用同一份断言。不能把跳过计为覆盖。
-  - 同时复验新增 `smoke-pty-stress-aarch64` 与 `smoke-timeout-test-aarch64`。
+已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期
+和 `remap-owner-rollback PASS`，通过结果与配置见
+[本轮验证](../validation-docs-completion-2026-10-13.md)。相关本地复验项已移除。
+
+- [ ] 在云端复验 Native CI 与发布前置门禁
+  - `.github/workflows/native.yml` 已接线；本轮只验证本地配方，未触发云端 CI 或发布。
+  - RTC、服务注册表 RTC 重启和 UBD 依赖 RISC-V 私有 MMIO/IRQ，AArch64 明确跳过，
+    跳过不计为覆盖。AArch64 PTY 与 timeout 新增入口本地已通过。
 - [ ] `ABI=linux` 与 `ABI=both` 的行为交叉断言
   - 仍需对同一组语义在两种构建中运行并比较可观测结果；源码登记表和配置守卫
     检查不能代替此项。
@@ -129,19 +114,10 @@ IDL 化）已落地，已从本文删除。
 
 ## P0：MM、Page Cache 与文件映射
 
-- [ ] 为 swap 的真实换出路径补运行门禁
-  - 现状：`CONFIG_SWAP` 默认开启（NOMMU 与没有 swap PTE 编码的 riscv32/loongarch32
-    由构建入口强制关闭）；`/dev/loopN` 可作 swap 目标，同一 bdev 重复 swapon 返回
-    `-EBUSY`，`/proc/swaps` 渲染正确。`make smoke-swap` 覆盖 loop 绑定 → mkswap →
-    swapon → `sysinfo` totalswap 与 `/proc/swaps` 断言 → 重复 swapon EBUSY → 触访
-    匿名内存 → swapoff 归零。
-  - 仍缺实现：fork/remap 需要保留非 present 的 swap PTE 及其槽引用，不能把它们
-    当作尚未物化的零页。`MREMAP_DONTUNMAP` 源端再次缺页也需独立语义验收。
-  - 仍缺：门禁不驱动真实换出。OOM reclaim 每次最多换出 `MAX_SWAP_RECLAIM`=8 页且
-    受 2s 冷却限制，1 GiB QEMU 冒烟无法现实触发；`swap_read_page`/缺页读回路径只有
-    编译覆盖。
-  - 完成条件：低内存实例（或可注入的换出阈值）下门禁真实触发一次换出-读回，并校验
-    换出前后的数据一致性。
+- [ ] 完善 `MREMAP_DONTUNMAP` 的源端再次缺页语义
+  - 常驻页移动与已换出 PTE 的 fork/remap 引用保留已实现；真实换出、数据读回与槽回收
+    已通过 RISC-V/AArch64 单核及四核门禁，见 [本轮验证](../validation-docs-completion-2026-10-13.md)。
+  - DONTUNMAP 仍需独立实现与运行验收，不能用普通 remap 的通过结果替代。
 - [ ] 为 driver/device/bus registry 的容量耗尽补运行测试
   - 现状：`kernel/drivers/core/driver_core.c` 的 registry 已从初始容量起在锁保护下
     `krealloc` 扩容，扩容失败记录 capacity-exhausted 错误并返回失败，不再静默丢失
