@@ -2,6 +2,8 @@
 
 #if CONFIG_NET_LANES > 1
 #include "core/string.h"
+#include "core/panic.h"
+#include "proc/proc.h"
 #endif
 
 /*
@@ -46,7 +48,16 @@ unsigned a20_net_lane_cur[CONFIG_NR_CPUS];
  * work is bounded by the caller's budget, and no other CPU waits on the flag --
  * it tries, fails, and takes a different lane.
  */
-static volatile int g_lane_rx_claim[CONFIG_NET_LANES];
+static volatile uintptr_t g_lane_rx_claim[CONFIG_NET_LANES];
+
+static uintptr_t net_lane_rx_owner(void)
+{
+    /* The consumer can be preempted and migrated while holding the claim.
+     * A task identity survives that; a CPU number does not. Odd values cover
+     * early contexts with no task, disjoint from aligned task pointers. */
+    task_t *task = proc_current();
+    return task ? (uintptr_t)task : ((uintptr_t)cpu_current_id() << 1) | 1;
+}
 
 /* Frames staged and not yet popped, across every lane.  A counter rather than a
  * scan of the lanes because the poll point asks the question on the scheduler
@@ -103,14 +114,28 @@ unsigned net_lane_rx_queued_total(void)
 
 int net_lane_rx_claim(unsigned lane)
 {
-    return __atomic_exchange_n(&g_lane_rx_claim[lane % CONFIG_NET_LANES], 1,
-                               __ATOMIC_ACQUIRE) == 0;
+    if (lane >= CONFIG_NET_LANES)
+        return 0;
+    uintptr_t empty = 0;
+    return __atomic_compare_exchange_n(&g_lane_rx_claim[lane % CONFIG_NET_LANES],
+                                       &empty, net_lane_rx_owner(), 0,
+                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+int net_lane_rx_is_held(unsigned lane)
+{
+    return lane < CONFIG_NET_LANES &&
+        __atomic_load_n(&g_lane_rx_claim[lane], __ATOMIC_ACQUIRE) == net_lane_rx_owner();
 }
 
 void net_lane_rx_release(unsigned lane)
 {
-    __atomic_store_n(&g_lane_rx_claim[lane % CONFIG_NET_LANES], 0,
-                     __ATOMIC_RELEASE);
+    if (lane >= CONFIG_NET_LANES)
+        panic("net lane RX invalid release: lane=%u", lane);
+    uintptr_t owner = net_lane_rx_owner();
+    if (!__atomic_compare_exchange_n(&g_lane_rx_claim[lane % CONFIG_NET_LANES],
+                                     &owner, 0, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        panic("net lane RX claim released by non-owner: lane=%u", lane);
 }
 
 int net_lane_rx_ready(unsigned lane)
@@ -124,6 +149,8 @@ int net_lane_rx_ready(unsigned lane)
 struct netif *net_lane_rx_peek(unsigned lane, const uint8_t **frame,
                               unsigned *len)
 {
+    if (!net_lane_rx_is_held(lane))
+        panic("net lane RX peek without claim: lane=%u", lane);
     struct net_lane *l = net_lane(lane);
     uint32_t tail = __atomic_load_n(&l->rx_tail, __ATOMIC_RELAXED);
     uint32_t head = __atomic_load_n(&l->rx_head, __ATOMIC_ACQUIRE);
@@ -170,8 +197,12 @@ unsigned long long net_lane_rx_stat(unsigned lane, int which)
 
 void net_lane_rx_consume(unsigned lane)
 {
+    if (!net_lane_rx_is_held(lane))
+        panic("net lane RX consume without claim: lane=%u", lane);
     struct net_lane *l = net_lane(lane);
     uint32_t tail = __atomic_load_n(&l->rx_tail, __ATOMIC_RELAXED);
+    if (tail == __atomic_load_n(&l->rx_head, __ATOMIC_ACQUIRE))
+        panic("net lane RX consume empty queue: lane=%u", lane);
     __atomic_store_n(&l->rx_tail, tail + 1, __ATOMIC_RELEASE);
     __atomic_fetch_sub(&g_lane_rx_queued_total, 1, __ATOMIC_RELAXED);
 }

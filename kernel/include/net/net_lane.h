@@ -287,6 +287,8 @@ bool net_lane_rx_put(unsigned lane, struct netif *nif,
  * protocol stack sees.  Callers must release before returning. */
 int  net_lane_rx_claim(unsigned lane);
 void net_lane_rx_release(unsigned lane);
+/* Current task owns the consumer claim, even if it migrated after claiming. */
+int  net_lane_rx_is_held(unsigned lane);
 
 /* Non-empty test, safe without the claim: a producer only ever adds. */
 int  net_lane_rx_ready(unsigned lane);
