@@ -137,7 +137,14 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - channel 并发关闭：端点最终释放在 `g_ch_lock` 下同时持有濒死端点锁；阻塞发送在等待期间持有 peer 引用，修复对端 close 与 enqueue/wait queue 并发导致的 UAF。
 - ELF 映像清理/栈页：新增 `elf_load_info_discard()` 回收 spawn 失败路径的 VMA/pgdir/NOMMU 映像；初始用户栈页与栈增长页在映射前清零，避免跨进程页内容泄漏。
 
-### 7. 仍存在的差距（未实现）
+### 7. 当前边界与剩余工作
+
+2026-10-13 源码修订：`event_watch_fs.path` 支持直接子项名称前缀，最长 255 字节，
+拒绝 NUL 和 `/`；空前缀监听全部名称。匹配使用生产点的完整名称，再截断输出的
+`fs_name[32]`。替换 watch 同步替换前缀。它不递归监听子目录；没有名称的事件仅匹配
+空前缀，现有 `FS_MODIFY` 生产点仍不提供名称。回归入口为 `smoke-native-deepen`，
+本轮只编译检查，没有运行。
+
 
 > 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
 >
@@ -151,23 +158,15 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 > - vm_share_region（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
 
 - file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
-- `event_watch_fs` 的路径前缀过滤（`path` 字段）未实现，仅目录级 watch。
 - VMO 映射已是**按需调页**：`vmar_map` 只建立 `VM_VMO` VMA，页面在首次 fault 时经核心 `handle_demand_fault_locked` 的 VMO 分支按 `vmo_get_page()` 物化；VMO 帧由 VMO 自身持有（类比 page-cache 帧），fork 时父子共享同一批 canonical 帧而非 COW。文件映射走核心 `mm_mmap_file`，经 page cache 需求填充。
-- ~~仍缺层级 VMAR~~ 层级 VMAR 树已落地（04-memory §3.1：`A20_SYS_vm_create_vmar` + `vm_map` 路由 + `vmar_cap` 印章）；`vm_lock` 仍只是 VMA flag；`vm_share` 的旧三参形式保留（新结构化形式为 `vm_share_region`）。
+- `vm_lock` 仍只设置 VMA flag，尚未完整物化并固定物理页。
 - 性能未实测（研究文档 05 的 G1–G7 阈值仍待验证）；静态能力流分析工具未实现。
 
 ## 路线图
 
-### 近期：修复 liba20c ABI 结构体使用（已完成）
-
-- [x] 将 `liba20c` 中所有裸参数数组调用改为带 `size` 和 `version` 的版本化 ABI 结构体。
-- [x] 统一使用 `a20_types.h` 中定义的 `a20_vm_alloc_args_t`、`a20_path_open_args_t`、`a20_io_args_t` 等结构体。
-- [x] 在修改过程中对照 `kernel/include/abi/native/types.h`，同步修正 `liba20rt/a20_types.h` 中的布局偏差。
-- [x] 完成后在目标架构上跑通现有 liba20c 示例测试（`smoke-native-libc`）。
-
 ### 中期：聚合现有测试并补齐多架构运行
 
-- 将现有 handle/MM/channel/EventQ/contract/liba20c/mlibc 目标纳入可枚举的 Native 矩阵。
+- 运行已接线的 `smoke-native-suite` RISC-V/AArch64 矩阵，保留逐用例日志与硬件专属跳过记录。
 - 为当前只构建未运行的架构增加 QEMU smoke，优先 LoongArch64。
 - 增加 VMO rights/`vm_protect`/`vm_flush` 边界测试，避免把保留接口当成已实现语义。
 
@@ -179,8 +178,6 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 已批准设计、待排期的深水区（2026-08 评审通过）
 
-- ~~VMAR 子树化~~ **已落地（2026-08）**：`vmar_t` 保留区间树 + `A20_SYS_vm_create_vmar(0x030a)` + `vm_map` E-APPEND 路由字段；天花板经 `vmar_cap` 印章在 protect 路径持续生效（04-memory §3.1）。回归：test_native_mm 第 6 分区（重叠拒绝/上限拒绝/定点映射/cap 印章）。
-- ~~信号 EventQ 化~~ **已落地（2026-08）**：`signal_queue_task` 在既有 checkpoint 挂钩旁同步推送 `A20_EVENT_SIGNALED` 事件（signo 走 `data0`，复用现有 pending_event 载荷字段、无需结构演进），TASK/THREAD 两类 watch 皆通知；`a20_task_watch_signals` 包装器就绪，回归见 test_native_deepen 分区 8。mlibc 阻塞路径继续走 checkpoint（futex INTERRUPTED），EventQ 面向监督者/sigwait 式消费推送；CPU 密集循环的完全异步派发仍为文档化限制。
 - ~~动态链接联调~~ **内核侧已落地（2026-08）**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
 
 ## 与用户决策的对应关系

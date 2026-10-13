@@ -1057,7 +1057,9 @@ int main(int argc, char *argv[]) {
 
 - [x] 静态 libc/sysroot、线程与 Native futex。
 - [x] pipe/poll/socketpair 与 `posix_spawn`/`waitpid` 的已接入子集。
-- [ ] fork/execve、完整异步信号、非 stdio handle 继承和动态链接。
+- [ ] 完整异步信号、exec 后非 stdio handle 继承和动态链接。
+  fork 的 manifest/COW continuation 与原地 execve 已在 mlibc Sysdeps 中实现，
+  对应构建目标见 `tools/targets-mlibc.mk`；不能把这两项继续记为未编码。
 - [ ] 将当前 RISC-V64 构建/smoke 扩展为明确的多架构矩阵。
 
 ### 关键依赖关系

@@ -14,6 +14,7 @@ A20OS 的当前能力边界、已知的结构性限制，以及按严重度排�
 不用推测填空。
 
 运行类结论以当期提交为准；历史记录见 [archive/](archive/)。
+2026-10-13 编码阶段修订见 [阶段记录](development-docs-completion-2026-10-13.md)；本轮未运行测试。
 
 ## 一句话结论
 
@@ -34,8 +35,7 @@ P1 提为表首 P0（重新定级，不是新增阻塞项）；另外「`proc_lo
 见 §四 的更正注记与 §八 对应行。唯一可以说的是：§七点六 把「默认发布配置里有
 一整块代码是死的、有几个 syscall 会返回成功但不做事」这件事从推测变成了有编号
 有行号的既定事实，所以这份评估的**置信度**下降了——不是「更接近服务器内核」或
-「更远」，而是对现状知道得更多了。具体到服务器选型：**内核抢占与 RT 限流仍然
-缺席**，且它是当前距可投产最远的一项，后果见 §四 开头与 §八 首行。
+「更远」，而是对现状知道得更多了。具体到服务器选型：**抢占与 RT 预算的实现不能代替运行验收**；当前实现与剩余条件见 §四 开头与 §八 首行。
 
 ### 整合到 main 时留下的三个红灯（2026-10-06，`b21565373`）
 
@@ -767,48 +767,22 @@ OOM 评分。
 
 ## 四、进程与调度
 
-### 首先：无内核抢占 + 无 RT 限流是当前距可投产最远的一项
+### 首先：抢占与 RT 隔离仍需运行验收
 
-**这一条排在所有其他阻塞项之前，理由不是它最容易修，而是它的后果是「整机永久
-停摆且不可观测」。** 具体到代码事实（下面每一条都在本次复核中重新读过）：
+2026-10-13 按当前源码更正：`CONFIG_KERNEL_PREEMPT` 已在基线实现，硬件 IRQ
+返回时可以消费调度请求。本轮补入 `RLIMIT_RTPRIO` 软硬上限与 `CAP_SYS_NICE`
+授权，并对每个 CPU 的 RT 队列施加一秒周期、95% 运行预算。耗尽预算后跳过
+RT 选择，普通任务可以竞争剩余时间；下一周期恢复。计量由 tick 和上下文切换
+路径完成，`rt_throttles` 与 `kernel_preempts` 接入 perf。
 
-- **没有 `CONFIG_PREEMPT`，全树一处都没有。** 对整个仓库
-  （`*.c` / `*.h` / `Makefile` / `*.mk` / `*.toml`）grep `CONFIG_PREEMPT` 命中 0 次。
-  调度器唯一的让出点是 `kernel/core/trap.c:589` 的
-  `proc_sched_safe_point()`，位置在 `trap_handler()` 的**用户态陷阱出口**——
-  也就是"从内核回到用户态的那一刻"才消费 `need_resched`。而
-  `proc_sched_safe_point()`（`kernel/proc/sched.c:1046-1053`，另一个编译单元）
-  读的也只是 per-CPU 的标志位，它本身不构成一个内核路径上的抢占点。
-- **`SCHED_FIFO` 头节点永不轮转。** `rt_pick_best_locked()`
-  （`kernel/proc/sched.c:350`）只在 `t->sched_policy == SCHED_RR` 时把头节点移到
-  队尾；FIFO 头被选中即返回。源码自己的注释（`kernel/proc/sched.c:346-348`）写明：
-  *"Forcing a switch mid-slice needs kernel preemption, which A20OS does not have;
-  without it an RR task that never blocks still runs until it does."*
-- **进入 RT 调度没有门槛。** `sys_sched_setscheduler()`
-  （`kernel/abi/linux/sys_sched.c:319-321`）对 RT policy 只校验
-  `1 <= sched_priority <= 99`，不做能力判定，也不查任何 RT 相关的 rlimit——
-  任何进程可以把自己设成 SCHED_FIFO 99。
-- **没有 RT 限流。** `sched_rt_runtime_us` 在 `kernel/` 与 `user/` 下 grep 命中 0 次；
-  `RLIMIT_RTPRIO` 只出现在 `user/external/` 下的 musl/mlibc/mksh 用户态头文件里，
-  内核侧没有任何一处定义或强制它。
-
-把四条合起来读，得到的就是"一个 `SCHED_FIFO` 任务可以独占 100% CPU，无预算、
-无计量"这个后果，而且不是"内核会慢慢公平回来"，是**不会回来**：只要它不阻塞、
-不返回用户态、没有一次陷阱落到 `trap_handler()` 的出口，它就不让出。叠加 §六 的
-两条——**无 watchdog**（只有 STM32 MCU 的 IWDG）、**panic 是关机不是重启**
-（`panic.c:89` 调 `firmware_shutdown()`，失败则 `arch_halt()` 死循环）——一次用户态
-的 RT 任务跑飞或一次内核里的长循环在这台机器上就是**永久挂死，且没有任何东西会
-来发现它**。对数据库或不受信任的工作负载，这意味着不是"尾延迟不达标"，而是
-"整机失联"。这也是 §八 把这一项排到表首的原因。
-
-`SCHED_RR` 已修成真正轮转（`rt_pick_best_locked()` 里按 policy 轮转），但正如上面
-那段源码注释所述，它只在**调度器下次运行时**让出 peers，无法按时间片强制抢占——
-同一个抢占缺口。修它需要的是内核态可抢占点（或 IRQ 线程化）加上 RT 运行时间预算
-与计量，二者本文件都没有找到任何在建的痕迹。
+这些是源码事实，**本轮没有运行证明**。`sched_stress` 已新增同 CPU FIFO 失控
+时的普通任务进展、RT 预算恢复和权限边界断言，必须获允许运行后复验。仍缺 IRQ
+线程化、长 syscall 的有界延迟证据、可调 RT sysctl 与真机 watchdog。预算不解决
+长时间屏蔽中断、持锁死循环或硬件故障；不能据此声称服务器失联风险已经消除。
 
 ### 其余条目
 
-- `SCHED_FIFO` 存在，但过不了长内核路径的 deadline（同上，无抢占）。
+- `SCHED_FIFO` 的长内核路径 deadline 与预算下的恢复尚待运行验收（见上）。
 - **[2026-10-06 更正] 本条描述的全局锁已不在当前树上。** `proc_lock` 已由并入本
   分支基线的锁拆分轮删除（`65bd609eb`：全树 0 处获取点、定义已删；调度状态改由
   per-task `park_lock` 保护，runq 成员关系仍归 per-CPU `runq_lock`，任务表迭代/
@@ -816,8 +790,8 @@ OOM 评分。
   `kernel/proc/proc.c:56`；设计、验收标准与门禁演进见
   [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)）。
   下面保留的实测与分析因此只是**那把已删除的锁的历史**，「成因未定」的问题对它
-  失效。替代锁的竞争面尚未收口：`park_lock` 未注册进
-  `/proc/a20/lock_contention`，锁拆分轮自己的
+  失效。替代锁的竞争面尚未收口：`park_lock` 已在编码阶段通过静态汇总 sink 注册进
+  `/proc/a20/lock_contention`，但尚未采样；锁拆分轮自己的
   [measured/lock-after.md](measured/lock-after.md) 末节列出了使 proc 侧
   对比可解释还需做的事——本文件因此不声称「热点已消除」，只声称「该锁已删除」。
   原文如下（其中 `sched.c` 的行号是产生这些结论的树上的，与当期文件对不上，
@@ -1422,8 +1396,8 @@ CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过�
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| ~~P0~~ | ~~内核抢占~~ | **抢占已落地**（`CONFIG_KERNEL_PREEMPT`，Makefile:995-1001：hosted 架构默认开、MCU profile 保持协作式，构建目录名带 `-preempt`）。**残留**：RT 限流未随之解决——`sched_rt_runtime_us` 与内核侧 `RLIMIT_RTPRIO` 仍不存在，`rt_pick_best_locked()` 对 FIFO 头仍不轮转，`sys_sched_setscheduler()` 仍只校验优先级 1..99 而无能力判定，因此一个 `SCHED_FIFO` 任务仍可独占 100% CPU、无预算无计量。叠加"无 watchdog"与"panic 是关机不是重启"，一次 RT 任务跑飞等于整机永久失联 |
-| ~~P0~~ | ~~`proc_lock` 超长持有的成因未定~~ | **该行描述的锁已不在当前树上**：`proc_lock` 已由锁拆分轮删除（`65bd609eb`，`kernel/proc/proc.c:45` 记载了它被什么取代，全树 0 处获取点）；调度状态归 per-task `park_lock`，任务表迭代/OOM/聚合统计等低频残余归新 `tasklist_lock`（`kernel/proc/proc.c:56`），设计见 [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)，"成因未定"对已删除的锁失效。**未收口、不声称热点已消除**：`park_lock` 未注册进 `/proc/a20/lock_contention`，锁拆分之后的 proc 侧竞争现状不可测；`docs/measured/lock-after.md` 末节自列了收口前提（注册 `park_lock`、补 B1 基线、注册 slab 锁）。原文要点（历史）：已证伪"被抢占"——当时全树 69 处获取全部走 `spin_lock_irqsave`、持锁临界区内无 `sched()`/`proc_yield()`，持有者确实在长时间执行；"持锁临界区全系统遍历"成因说已撤回（4 处候选在实测负载下不执行）；观测窗口缺陷已修（`/proc/a20/{perf,lock_contention}` 的 `reset` 写入口） |
+| P0 | 抢占与 RT 隔离验收 | 基线已有 `CONFIG_KERNEL_PREEMPT`；2026-10-13 编码阶段补入 RTPRIO / 能力检查与 per-CPU 一秒周期 95% RT 预算。新增同 CPU 普通任务进展与 RT 恢复断言，尚未运行。IRQ 线程化、长内核路径有界延迟与真机 watchdog 仍缺 |
+| ~~P0~~ | ~~`proc_lock` 超长持有的成因未定~~ | **该行描述的锁已不在当前树上**：`proc_lock` 已由锁拆分轮删除（`65bd609eb`，`kernel/proc/proc.c:45` 记载了它被什么取代，全树 0 处获取点）；调度状态归 per-task `park_lock`，任务表迭代/OOM/聚合统计等低频残余归新 `tasklist_lock`（`kernel/proc/proc.c:56`），设计见 [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)，"成因未定"对已删除的锁失效。**未收口、不声称热点已消除**：`park_lock` 已通过静态 sink 注册进 `/proc/a20/lock_contention`，锁拆分之后的 proc 侧竞争现状尚未采样；`docs/measured/lock-after.md` 末节自列了收口前提（当前仍需补 B1 基线和竞争复测）。原文要点（历史）：已证伪"被抢占"——当时全树 69 处获取全部走 `spin_lock_irqsave`、持锁临界区内无 `sched()`/`proc_yield()`，持有者确实在长时间执行；"持锁临界区全系统遍历"成因说已撤回（4 处候选在实测负载下不执行）；观测窗口缺陷已修（`/proc/a20/{perf,lock_contention}` 的 `reset` 写入口） |
 | ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
 | ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）**本轮已全部跑起来**——引用计数账本在 4 CPU + 4 lane 下 20 次引导全部 `live=1 faults=0`（`allocs` 159–167、`frees` 恒为 `allocs-1`），`LOCK_COUNTERS_MAX=192` 在 DEFAULT 档（48）与 server 档（141）都够且 `dropped=0`；`-ENOTCONN` 侧做成了按 reason 归因（`total=0 window=0 reasons=13`，`reasons=` 是已登记的 reason 个数不是命中次数），**20 次引导里该窗口一次未命中**——归因可用，但没有证据说窗口已被排除。**仍未做的**：ASAN 压力测试与合并后全量回归 |
 | ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
