@@ -2028,7 +2028,7 @@ static void context_switch_locked(task_t *next) {
     if (next->pid != 0) {
         uintptr_t kc = (uintptr_t)next->kstack;
         uintptr_t kb = (uintptr_t)next->kstack_base;
-        if (!kb || kc < kb || kc - kb > KERNEL_STACK_SIZE - TASK_CONTEXT_SIZE)
+        if (!kb || kc < kb || kc - kb > KERNEL_STACK_SIZE - sizeof(task_context_t))
             panic("context switch: next pid=%d kstack=0x%lx base=%p outside kernel stack",
                   next->pid, (unsigned long)kc, next->kstack_base);
         uintptr_t ksp = arch_task_context_resume_sp((task_context_t *)kc);
