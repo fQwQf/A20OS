@@ -116,3 +116,7 @@ MCU 使用 FAT 扇区 fixture；这一步没有执行 Java 字节码或加载 Mi
 真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
 [49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
 GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。
+
+原生 Java 的并发回收、栈根保存和实际对象移动已在 RV64 Native 单核/双核
+验证，见 [50-native-java-gc.md](50-native-java-gc.md)。物理多 MCU、其他架构
+完整 VM 和真实 Minecraft 客户端仍未验收。

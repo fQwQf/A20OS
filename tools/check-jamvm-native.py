@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--cycles', type=int, default=5)
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--diagnose-bootstrap', action='store_true')
+    parser.add_argument('--execute-gc', action='store_true', help='require actual concurrent GC, live roots and reclamation')
+    parser.add_argument('--gc-compact', action='store_true', help='also require actual object movement during GC')
     parser.add_argument('--execute-java', action='store_true', help='require real Java workload completion and CPU mask')
     parser.add_argument('--classlib', type=Path, help='freeze real class archives for diagnosis or Java execution')
     args = parser.parse_args()
@@ -56,6 +58,10 @@ def main():
         parser.error('--classlib requires --diagnose-bootstrap or --execute-java')
     if args.execute_java and (not args.classlib or args.cpus not in [1, 2]):
         parser.error('--execute-java requires --classlib and one or two CPUs')
+    if args.execute_gc and not args.execute_java:
+        parser.error('--execute-gc requires --execute-java')
+    if args.gc_compact and not args.execute_gc:
+        parser.error('--gc-compact requires --execute-gc')
     if args.cycles < 1 or args.timeout <= 0:
         parser.error('positive cycles and timeout required')
     output, build = args.output.resolve(), args.build.resolve()
@@ -112,6 +118,8 @@ def main():
             subprocess.run(['mcopy', '-o', '-i', str(output / 'fat32.img'),
                             str(output / 'workload.jar'), '::/workload.jar'], check=True)
             class_inputs.append('workload.jar')
+            if args.execute_gc and not manifest.get('gc_workload_built'):
+                raise ValueError('GC workload was not built')
             report['scope'] = 'upstream Native Java program, JNI, file I/O and automatic thread placement'
         flags = ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
         if args.cpus > 1:
@@ -130,6 +138,10 @@ def main():
         if args.execute_java:
             invocation = '/bin/jamvm -Xbootclasspath/v:/bin/classes.zip -Xbootclasspath/c:/bin/glibj.zip -cp /bin/workload.jar A20NativeWorkload'
             probes += [(invocation, 'JAVA_NATIVE: PASS', 0)] * args.cycles
+        if args.execute_gc:
+            flags = ' -Xcompactalways' if args.gc_compact else ''
+            invocation = '/bin/jamvm -Xbootclasspath/v:/bin/classes.zip -Xbootclasspath/c:/bin/glibj.zip -Xms4m -Xmx4m -verbose:gc' + flags + ' -cp /bin/workload.jar A20NativeGC'
+            probes += [(invocation, 'JAVA_GC: PASS', 0)] * args.cycles
         if args.diagnose_bootstrap:
             options = ' -Xbootclasspath/v:/bin/classes.zip -Xbootclasspath/c:/bin/glibj.zip -verbose:class' if args.classlib else ''
             probes.append(('/bin/jamvm' + options + ' A20MissingClass', None, None))
@@ -161,6 +173,15 @@ def main():
                                 if not work or int(work[1], 16) != (1 << args.cpus) - 1 or min(int(work[2]), int(work[3])) < 1 or int(work[2]) + int(work[3]) != 32:
                                     raise RuntimeError('Java work or automatic CPU placement mismatch')
                                 entry.update(cpu_mask=int(work[1], 16), worker_jobs=[int(work[2]), int(work[3])])
+                            if expected == 'JAVA_GC: PASS':
+                                work = re.search(r'JAVA_GC: PASS rounds=16 allocated=67108864 roots=128 reclaimed=([0-9]+) ticks=([0-9]+)/([0-9]+)', segment)
+                                collections = len(re.findall(r'<GC: Mark took ', segment))
+                                freed = sum(int(n) for n in re.findall(r'<GC: Freed ([0-9]+) object', segment))
+                                moved = sum(int(n) for n in re.findall(r'<GC: Moved ([0-9]+) objects', segment))
+                                if not work or not 1 <= int(work[1]) <= 16 or min(int(work[2]), int(work[3])) < 1 or collections < 32 or freed < 1 or (args.gc_compact and moved < 1):
+                                    raise RuntimeError('GC execution, roots, reclamation or movement mismatch')
+                                entry.update(collections=collections, freed_objects=freed, moved_objects=moved,
+                                             reclaimed_weak_refs=int(work[1]), worker_ticks=[int(work[2]), int(work[3])])
                             report['probes'].append(entry)
                         else:
                             report['bootstrap_diagnostic'] = dict(command=invocation, exit_status=actual, output=segment,
@@ -189,6 +210,8 @@ def main():
             raise RuntimeError('QEMU did not exit successfully')
         report['passed'] = True
         report['java_application_verified'] = args.execute_java
+        report['gc_verified'] = args.execute_gc
+        report['gc_compaction_verified'] = args.gc_compact
     except Exception as error:
         report['failure'] = str(error)
         raise
