@@ -11,6 +11,9 @@ struct a20_ht_internal {
 static struct a20_ht_internal table;
 static int allocations, fail_alloc, fail_install, notifications, destroyed_keys;
 static void *last_key;
+static void *notification_keys[16];
+static task_t *reenter_task;
+static int reenter_on_destroy;
 void *kcalloc(size_t n, size_t size) {
     if (__atomic_exchange_n(&fail_alloc, 0, __ATOMIC_RELAXED))
         return NULL;
@@ -108,12 +111,19 @@ void a20_event_notify(void *object, uint16_t type, uint32_t event, uint64_t d0,
                       uint64_t d1) {
     assert(object && type && event == A20_EVENT_EXITED && d0 == 37 && !d1);
     last_key = object;
+    if (notifications < (int)(sizeof(notification_keys) /
+                              sizeof(notification_keys[0])))
+        notification_keys[notifications] = object;
     notifications++;
 }
 void a20_eventq_on_object_destroy(void *object, uint16_t type) {
     assert(object && (type == A20_OBJ_TASK || type == A20_OBJ_THREAD ||
                       type == A20_OBJ_DEBUG));
     __atomic_add_fetch(&destroyed_keys, 1, __ATOMIC_RELAXED);
+    /* This callback re-enters identity lookup/notify through a different live
+     * object. It must run after task_object_lock has been released. */
+    if (__atomic_exchange_n(&reenter_on_destroy, 0, __ATOMIC_ACQ_REL))
+        a20_task_object_notify(reenter_task, A20_EVENT_EXITED, 37, 0, 0);
 }
 static void *race(void *arg) {
     task_t *task = arg;
@@ -166,8 +176,21 @@ int main(void) {
     a20_handle_entry_t flight;
     assert(a20_handle_lookup_ref_task_like(&table, h, A20_RIGHT_WAIT,
                                            &flight) == 0);
+    task_t callback_task = {0};
+    refcount_set(&callback_task.refs, 1);
+    int64_t callback_handle = a20_handle_install_task(
+        &table, &callback_task, A20_OBJ_TASK, A20_RIGHT_WAIT);
+    assert(callback_handle >= 0);
+    reenter_task = &callback_task;
+    reenter_on_destroy = 1;
     a20_task_object_notify(task, A20_EVENT_EXITED, 37, 0, 1);
-    assert(notifications == 3 && last_key == flight.object);
+    assert(notifications == 6 && notification_keys[0] == flight.object &&
+           notification_keys[1] == callback_task.a20_object &&
+           notification_keys[2] == callback_task.a20_object &&
+           notification_keys[3] == callback_task.a20_object &&
+           notification_keys[4] == flight.object &&
+           notification_keys[5] == flight.object);
+    reenter_task = NULL;
     /* Production marks destruction under task locks before weak detach. */
     __atomic_store_n(&task->destroy_started, 1, __ATOMIC_RELEASE);
     assert(!a20_task_object_get_task(flight.object));
@@ -204,6 +227,10 @@ int main(void) {
                                A20_RIGHT_WAIT, &pin) == -A20_ERR_BAD_HANDLE);
     close_handle(delivered);
     destroy(replacement);
+    __atomic_store_n(&callback_task.destroy_started, 1, __ATOMIC_RELEASE);
+    a20_task_object_detach(&callback_task);
+    close_handle(callback_handle);
+    a20_task_object_task_release(&callback_task);
     assert(allocations == 0 && destroyed_keys >= 6);
     /* Self handle holds only the small identity, never its task. */
     task = new_task();

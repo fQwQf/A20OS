@@ -97,8 +97,26 @@ class SmokeBuildPathTests(unittest.TestCase):
             for line in make_db.splitlines()
             if line.startswith("GUEST_KERNEL_RAMFS_DIR :=")
         )
-        expected = build_dir.replace("-dev", "-dev-ramfs-user", 1)
+        expected = build_dir + "-ramfs-user"
         self.assertEqual(ramfs_dir, expected)
+
+    def test_ramfs_companion_is_distinct_for_default_and_custom_build_dirs(self):
+        base = ("ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=linux", "BRINGUP=0")
+        cases = [
+            (base, ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt"),
+            (base + ("BUILD_DIR=/tmp/a20-custom-build",), "/tmp/a20-custom-build"),
+        ]
+        for variables, build_dir in cases:
+            with self.subTest(build_dir=build_dir):
+                ramfs_dir = build_dir + "-ramfs-user"
+                output = subprocess.run(
+                    ["make", "--no-print-directory", *variables, "-n",
+                     f"{ramfs_dir}/.ramfs-user-elf.stamp"],
+                    check=True, capture_output=True, text=True,
+                ).stdout
+                self.assertIn(
+                    f"RAMFS_USER=1 BUILD_DIR={ramfs_dir} kernel-only", output
+                )
 
     def test_netopt_lwip_uses_resolved_smp4_lane4_image_and_real_lwip_mode(self):
         case = smoke.CASES["smoke-netopt-lwip"]

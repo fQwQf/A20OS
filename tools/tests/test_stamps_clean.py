@@ -211,6 +211,211 @@ class CleanSymlinkTests(unittest.TestCase):
 
 
 class UserBuildLockTests(unittest.TestCase):
+    def test_user_submake_builds_only_in_requested_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            default = repo / "user/build/riscv64"
+            default.mkdir(parents=True)
+            marker = default / "keep-me"
+            marker.write_text("untouched")
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                build_dir = Path(next(x.split("=", 1)[1] for x in args
+                                      if x.startswith("BUILD_DIR=")))
+                if args[-1] == "clean":
+                    shutil.rmtree(build_dir, ignore_errors=True)
+                else:
+                    build_dir.mkdir(parents=True, exist_ok=True)
+                    for name in ("init", "mksh"):
+                        path = build_dir / name
+                        path.write_text("binary")
+                        path.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="isolated-user-build", stamp=str(out / ".build-id"),
+                    user_build_dir=str(out), arch="riscv64", nommu="0",
+                    user_opt="-O3", profile="full", user_variant="riscv64",
+                    roots="", skip="",
+                )
+                self.assertEqual(stamps.cmd_user(args), 0)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(calls[0][-1], "clean")
+            self.assertNotIn("clean", calls[1])
+            self.assertTrue(all(f"BUILD_DIR={out}" in args for args in calls))
+            self.assertTrue((out / "init").is_file())
+            self.assertTrue((out / "mksh").is_file())
+            self.assertEqual(marker.read_text(), "untouched")
+
+    def test_native_submake_builds_only_in_requested_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            default = repo / "user/build/riscv64"
+            default.mkdir(parents=True)
+            marker = default / "keep-me"
+            marker.write_text("untouched")
+            binary = out / "native-tool"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                build_dir = Path(next(x.split("=", 1)[1] for x in args
+                                      if x.startswith("USER_BUILD_DIR=")))
+                build_dir.mkdir(parents=True, exist_ok=True)
+                binary_path = build_dir / "native-tool"
+                binary_path.write_text("binary")
+                binary_path.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="isolated-native-build",
+                    stamp=str(out / ".native-build-id"), binaries=str(binary),
+                    user_build_dir=str(out), arch="riscv64", nommu="0",
+                    opt="-O3", roots="",
+                )
+                self.assertEqual(stamps.cmd_native(args), 0)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 1)
+            self.assertIn(f"USER_BUILD_DIR={out}", calls[0])
+            self.assertTrue(os.access(binary, os.X_OK))
+            self.assertEqual(marker.read_text(), "untouched")
+
+    def test_native_peer_selector_invalidates_cache_and_removes_stale_image_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            default = repo / "user" / "build" / "riscv64"
+            default.mkdir(parents=True)
+            marker = default / "keep-me"
+            marker.write_text("untouched")
+            out.mkdir(parents=True)
+            native = out / "native-tool"
+            peer = out / "rust-idl-peer-riscv64"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                build_dir = Path(next(x.split("=", 1)[1] for x in args
+                                      if x.startswith("USER_BUILD_DIR=")))
+                build_dir.mkdir(parents=True, exist_ok=True)
+                binary = build_dir / "native-tool"
+                binary.write_text("native")
+                binary.chmod(0o755)
+                selected_peer = next(x.split("=", 1)[1] for x in args
+                                     if x.startswith("NATIVE_RUST_PEER="))
+                if selected_peer == "1":
+                    peer.write_text("peer")
+                    peer.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", rust_peer_binary=str(peer),
+                )
+                for enabled in ("0", "1", "0", "0"):
+                    args.native_rust_peer = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                # A direct opt-in target can create the peer after a C-only
+                # stamp was written. Disabled dev-build must evict it and
+                # refresh the stamp-dependent image even though the C cache
+                # would otherwise be current.
+                peer.write_text("direct peer target")
+                peer.chmod(0o755)
+                self.assertEqual(stamps.cmd_native(args), 0)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 4)
+            self.assertEqual([next(x.split("=", 1)[1] for x in c
+                                   if x.startswith("NATIVE_RUST_PEER="))
+                              for c in calls], ["0", "1", "0", "0"])
+            self.assertTrue(all(c[-1] == "native-programs" for c in calls))
+            self.assertFalse(peer.exists(), "disabled image must not retain peer ELF")
+            self.assertTrue(os.access(native, os.X_OK))
+            self.assertEqual(marker.read_text(), "untouched")
+            self.assertIn("NATIVE_RUST_PEER=0", stamp.read_text())
+
+            dev_recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-peer "$(NATIVE_RUST_PEER)"', dev_recipe)
+            self.assertIn('--rust-peer-binary "$(RUST_USER_PEER_BIN)"', dev_recipe)
+
+    def test_native_rust_peer_binary_cleanup_is_confined_to_user_build_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "user-build"
+            out.mkdir()
+            outside = repo / "keep-this"
+            outside.write_text("not a generated user binary")
+            binary = out / "native-tool"
+            binary.write_text("old")
+            binary.chmod(0o755)
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            stamps.submake = lambda args: 0
+            try:
+                args = argparse.Namespace(
+                    build_id="build", stamp=str(out / ".native-build-id"),
+                    binaries=str(binary), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", rust_peer_binary=str(outside),
+                )
+                with self.assertRaises(SystemExit):
+                    stamps.cmd_native(args)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+            self.assertEqual(outside.read_text(), "not a generated user binary")
+
+    def test_native_peer_cleanup_unlinks_only_symlink_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "user-build"
+            out.mkdir()
+            target = repo / "preserve-target"
+            target.write_text("keep")
+            peer = out / "rust-idl-peer-rv"
+            peer.symlink_to(target)
+            binary = out / "native-tool"
+            binary.write_text("native")
+            binary.chmod(0o755)
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            stamps.submake = lambda args: 0
+            try:
+                args = argparse.Namespace(
+                    build_id="build", stamp=str(out / ".native-build-id"),
+                    binaries=str(binary), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", rust_peer_binary=str(peer),
+                )
+                self.assertEqual(stamps.cmd_native(args), 0)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+            self.assertFalse(peer.is_symlink())
+            self.assertEqual(target.read_text(), "keep")
+
     def test_native_uapi_header_change_rebuilds_same_build_id(self):
         targets = (STAMPS.parent / "targets-dev.mk").read_text()
         recipe = targets.split("--roots \"", 2)[2].split('"', 1)[0]

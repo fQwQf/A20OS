@@ -16,6 +16,24 @@
 
 static a20_handle_t g_out = A20_HANDLE_NULL;
 
+static int is_wake_race_arg(const char *arg)
+{
+    static const char expected[] = "--wake-race";
+    if (!arg) return 0;
+    for (uint32_t i = 0; i < sizeof(expected); i++)
+        if (arg[i] != expected[i]) return 0;
+    return 1;
+}
+
+static int is_queued_reply_arg(const char *arg)
+{
+    static const char expected[] = "--queued-reply";
+    if (!arg) return 0;
+    for (uint32_t i = 0; i < sizeof(expected); i++)
+        if (arg[i] != expected[i]) return 0;
+    return 1;
+}
+
 static void put(const char *s, uint32_t len)
 {
     a20_hdl_write_buf(g_out, s, len, (void *)0);
@@ -51,7 +69,14 @@ typedef struct {
     a20_handle_t ep;
     uint32_t     iters;
     uint32_t     fail;
+    volatile uint32_t ready;
+    volatile uint32_t done;
 } echo_ctx_t;
+
+static echo_ctx_t g_donate_test_ctx;
+static uint64_t g_donate_test_stack;
+static echo_ctx_t g_queued_reply_ctx;
+static uint64_t g_queued_reply_stack;
 
 static void echo_server_entry(uint64_t argp)
 {
@@ -61,13 +86,23 @@ static void echo_server_entry(uint64_t argp)
         uint32_t blen = MSG_LEN;
         a20_handle_t hbuf[1];
         uint32_t hcnt = 1;
+        __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
         a20_status_t st = a20_channel_recv(ctx->ep, buf, &blen, hbuf, &hcnt);
-        if (st < 0) { ctx->fail = 1; a20_thread_exit(1); }
+        if (st < 0) {
+            ctx->fail = 1;
+            __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+            a20_thread_exit(1);
+        }
         /* Kernel rejects a non-NULL handles pointer when count is 0. */
         st = a20_channel_send(ctx->ep, buf, blen, hcnt ? hbuf : 0, hcnt);
-        if (st < 0) { ctx->fail = 2; a20_thread_exit(1); }
+        if (st < 0) {
+            ctx->fail = 2;
+            __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+            a20_thread_exit(1);
+        }
         /* The reply transferred our reference away; nothing to close. */
     }
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     a20_thread_exit(0);
 }
 
@@ -77,6 +112,8 @@ static a20_handle_t start_echo_server(echo_ctx_t *ctx, a20_handle_t server_ep,
     ctx->ep = server_ep;
     ctx->iters = iters;
     ctx->fail = 0;
+    __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->done, 0, __ATOMIC_RELEASE);
 
     uint64_t stack;
     if (a20_vm_alloc_pages(16, 3 /* RW */, &stack) != A20_OK)
@@ -110,14 +147,259 @@ void ipc_yield_worker(uint64_t arg)
     a20_thread_exit(0);
 }
 
+static int test_recv_transaction_rollback(void)
+{
+    put_str("NATIVE_IPC: recv-txn pre-dequeue start\n");
+    a20_channel_pair_t pair;
+    a20_handle_t sent[2], received[2] = {A20_HANDLE_NULL, A20_HANDLE_NULL};
+    if (a20_channel_create(&pair) != A20_OK ||
+        a20_event_queue_create(&sent[0]) != A20_OK ||
+        a20_event_queue_create(&sent[1]) != A20_OK)
+        return fail(40, "recv rollback setup failed");
+    if (a20_channel_send(pair.endpoints[0], 0, 0, sent, 2) < 0)
+        return fail(41, "recv rollback send failed");
+
+    /* A too-small user handle array must fail before dequeue; retrying with
+     * enough space receives the same queued message. */
+    uint32_t length = 0, count = 1;
+    a20_status_t st = a20_channel_recv_flags(pair.endpoints[1], 0, &length,
+                                             received, &count,
+                                             A20_MSG_NONBLOCK);
+    if (st != -A20_ERR_NO_SPACE)
+        return fail(42, "short handle buffer did not return NO_SPACE");
+    count = 2;
+    st = a20_channel_recv_flags(pair.endpoints[1], 0, &length, received,
+                                &count, A20_MSG_NONBLOCK);
+    if (st < 0 || count != 2)
+        return fail(43, "pre-dequeue failure consumed queued message");
+    a20_hdl_close(received[0]);
+    a20_hdl_close(received[1]);
+    a20_hdl_close(sent[0]);
+    a20_hdl_close(sent[1]);
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+    put_str("NATIVE_IPC: recv-txn pre-dequeue PASS\n");
+
+    /* Force a usercopy fault after the first handle word has crossed into a
+     * valid page. The syscall consumes the dequeued message, but rolls back
+     * the installed capability so the partially written value is stale. */
+    put_str("NATIVE_IPC: recv-txn partial-copy start\n");
+    if (a20_channel_create(&pair) != A20_OK ||
+        a20_event_queue_create(&sent[0]) != A20_OK ||
+        a20_event_queue_create(&sent[1]) != A20_OK)
+        return fail(44, "partial-copy setup failed");
+    if (a20_channel_send(pair.endpoints[0], 0, 0, sent, 2) < 0)
+        return fail(45, "partial-copy send failed");
+    uint64_t pages;
+    if (a20_vm_alloc_pages(2, A20_PROT_READ | A20_PROT_WRITE, &pages) < 0)
+        return fail(46, "partial-copy pages allocation failed");
+    if (a20_vm_unmap(pages + 4096, 4096) < 0)
+        return fail(47, "partial-copy guard page setup failed");
+    a20_handle_t *crossing = (a20_handle_t *)(uintptr_t)(pages + 4096 -
+                                                          sizeof(a20_handle_t));
+    *crossing = 0xeeeeeeeeu;
+    length = 0;
+    count = 2;
+    st = a20_channel_recv_flags(pair.endpoints[1], 0, &length, crossing,
+                                &count, A20_MSG_NONBLOCK);
+    if (st != -A20_ERR_FAULT)
+        return fail(48, "cross-page output did not fault");
+    if (*crossing == 0xeeeeeeeeu || a20_hdl_close(*crossing) != -A20_ERR_BAD_HANDLE)
+        return fail(49, "partially copied handle remained installed");
+    length = 0;
+    count = 0;
+    st = a20_channel_recv_flags(pair.endpoints[1], 0, &length, 0, &count,
+                                A20_MSG_NONBLOCK);
+    if (st != -A20_ERR_WOULD_BLOCK)
+        return fail(50, "post-dequeue fault did not consume message");
+    a20_vm_unmap(pages, 4096);
+    a20_hdl_close(sent[0]);
+    a20_hdl_close(sent[1]);
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+    put_str("NATIVE_IPC: recv-txn partial-copy PASS\n");
+
+    /* The fused call's final argument-structure copy is also inside the
+     * transaction: make its args readable but not writable after setup. */
+    put_str("NATIVE_IPC: recv-txn final-args start\n");
+    if (a20_channel_create(&pair) != A20_OK ||
+        a20_event_queue_create(&sent[0]) != A20_OK)
+        return fail(51, "call publish setup failed");
+    put_str("NATIVE_IPC: recv-txn final-args endpoints ready\n");
+    echo_ctx_t ctx;
+    uint64_t stack;
+    if (start_echo_server(&ctx, pair.endpoints[1], 1, &stack) == A20_HANDLE_NULL)
+        return fail(52, "call publish server start failed");
+    put_str("NATIVE_IPC: recv-txn final-args server ready\n");
+    uint64_t args_page;
+    if (a20_vm_alloc_pages(1, A20_PROT_READ | A20_PROT_WRITE, &args_page) < 0)
+        return fail(53, "call publish args allocation failed");
+    a20_channel_call_args_t *call = (a20_channel_call_args_t *)(uintptr_t)args_page;
+    uint8_t request[MSG_LEN], reply[MSG_LEN];
+    for (uint32_t i = 0; i < MSG_LEN; i++) request[i] = (uint8_t)(0x40 + i);
+    a20_handle_t reply_handle = A20_HANDLE_NULL;
+    *call = (a20_channel_call_args_t){0};
+    call->size = sizeof(*call);
+    call->version = 1;
+    call->channel = pair.endpoints[0];
+    call->data = (uint64_t)(uintptr_t)request;
+    call->data_len = MSG_LEN;
+    call->handles = (uint64_t)(uintptr_t)&sent[0];
+    call->handle_count = 1;
+    call->reply_buf = (uint64_t)(uintptr_t)reply;
+    call->reply_buf_len = MSG_LEN;
+    call->reply_handle_buf = (uint64_t)(uintptr_t)&reply_handle;
+    call->reply_handle_buf_count = 1;
+    put_str("NATIVE_IPC: recv-txn final-args args ready\n");
+    if (a20_vm_protect(args_page, 4096, A20_PROT_READ) < 0)
+        return fail(54, "call publish args protection failed");
+    put_str("NATIVE_IPC: recv-txn final-args invoking call\n");
+    st = a20_syscall6(A20_SYS_channel_call, args_page, 0, 0, 0, 0, 0);
+    put_str("NATIVE_IPC: recv-txn final-args call returned\n");
+    if (st != -A20_ERR_FAULT)
+        return fail(55, "read-only final args copy did not fault");
+    if (reply_handle == A20_HANDLE_NULL ||
+        a20_hdl_close(reply_handle) != -A20_ERR_BAD_HANDLE)
+        return fail(56, "call reply handle survived final-copy rollback");
+    a20_vm_unmap(args_page, 4096);
+    a20_hdl_close(sent[0]);
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+    put_str("NATIVE_IPC: recv-txn final-args PASS\n");
+    return 0;
+}
+
+/* The dedicated wake-race kernel build pre-wakes the caller after a local
+ * parked receiver is selected but immediately before donate commit. The
+ * channel must still wake that receiver, let it consume the queued request,
+ * and leave the reply available after channel_call reports interruption. */
+static int test_donate_pre_woken_fallback(void)
+{
+    a20_channel_pair_t pair;
+    if (a20_channel_create(&pair) != A20_OK)
+        return fail(57, "donate wake race channel setup failed");
+
+    if (start_echo_server(&g_donate_test_ctx, pair.endpoints[1], 8,
+                          &g_donate_test_stack) ==
+        A20_HANDLE_NULL)
+        return fail(58, "donate wake race server start failed");
+
+    uint8_t request[MSG_LEN] = {
+        'D', 'N', 'O', 'W', 'A', 'K', 'E', '1'
+    };
+    uint8_t reply[MSG_LEN];
+    uint32_t reply_handle_count = 0;
+    int saw_pre_woken = 0;
+    for (uint32_t attempt = 0; attempt < 8; attempt++) {
+        uint32_t reply_len = MSG_LEN;
+        a20_status_t st = a20_channel_call(pair.endpoints[0], request,
+                                           MSG_LEN, 0, 0, reply, &reply_len,
+                                           0, 0);
+        if (st == -A20_ERR_INTERRUPTED) {
+            reply_len = MSG_LEN;
+            st = a20_channel_recv(pair.endpoints[0], reply, &reply_len,
+                                  0, &reply_handle_count);
+            if (st < 0 || reply_len != MSG_LEN)
+                return fail(59, "pre-woken request did not produce reply");
+            saw_pre_woken = 1;
+        } else if (st < 0 || reply_len != MSG_LEN) {
+            return fail(60, "donate wake race RPC failed");
+        }
+        for (uint32_t i = 0; i < MSG_LEN; i++)
+            if (reply[i] != request[i])
+                return fail(61, "donate wake race reply mismatch");
+    }
+    if (!saw_pre_woken)
+        return fail(62, "donor-prewoken injection was not observed");
+
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+    if (saw_pre_woken)
+        put_str("NATIVE_IPC: donor-woken fallback PASS\n");
+    return 0;
+}
+
+/* Exercise the earlier deferred-wake exit: channel_call has a stale reply
+ * already queued, while its peer is parked waiting for the new request. The
+ * call returns the stale reply immediately, but must still wake the server so
+ * the request receives its own later reply. */
+static int test_queued_reply_deferred_wake(void)
+{
+    static const uint8_t stale[] = {'S', 'T', 'A', 'L', 'E', '0', '0', '1'};
+    static const uint8_t request[] = {'Q', 'R', 'E', 'P', 'L', 'Y', '0', '1'};
+    a20_channel_pair_t pair;
+    if (a20_channel_create(&pair) != A20_OK)
+        return fail(63, "queued-reply channel setup failed");
+    if (a20_channel_send(pair.endpoints[1], stale, sizeof(stale), 0, 0) < 0)
+        return fail(64, "queued-reply stale message setup failed");
+
+    if (start_echo_server(&g_queued_reply_ctx, pair.endpoints[1], 1,
+                          &g_queued_reply_stack) ==
+        A20_HANDLE_NULL)
+        return fail(65, "queued-reply server start failed");
+    uint32_t spins = 0;
+    while (!__atomic_load_n(&g_queued_reply_ctx.ready, __ATOMIC_ACQUIRE) &&
+           spins++ < 100000)
+        a20_thread_yield();
+    if (!__atomic_load_n(&g_queued_reply_ctx.ready, __ATOMIC_ACQUIRE))
+        return fail(66, "queued-reply server did not reach recv");
+    /* On this SMP1 fixture, yielding once returns only after the server has
+     * linked its receive wait and parked. The kernel test hook independently
+     * checks that a real waiter exists before accepting the scenario. */
+    a20_thread_yield();
+
+    uint8_t reply[MSG_LEN];
+    uint32_t reply_len = MSG_LEN;
+    uint32_t reply_handle_count = 0;
+    a20_status_t st = a20_channel_call(pair.endpoints[0], request,
+                                      sizeof(request), 0, 0, reply,
+                                      &reply_len, 0, &reply_handle_count);
+    if (st < 0 || reply_len != sizeof(stale))
+        return fail(67, "queued-reply call did not return stale reply");
+    for (uint32_t i = 0; i < sizeof(stale); i++)
+        if (reply[i] != stale[i])
+            return fail(68, "queued-reply stale payload mismatch");
+
+    reply_len = MSG_LEN;
+    st = a20_channel_recv(pair.endpoints[0], reply, &reply_len, 0,
+                          &reply_handle_count);
+    if (st < 0 || reply_len != sizeof(request))
+        return fail(69, "queued-reply request was not serviced");
+    for (uint32_t i = 0; i < sizeof(request); i++)
+        if (reply[i] != request[i])
+            return fail(70, "queued-reply request response mismatch");
+    spins = 0;
+    while (!__atomic_load_n(&g_queued_reply_ctx.done, __ATOMIC_ACQUIRE) &&
+           spins++ < 100000)
+        a20_thread_yield();
+    if (!__atomic_load_n(&g_queued_reply_ctx.done, __ATOMIC_ACQUIRE))
+        return fail(71, "queued-reply server did not exit");
+    if (g_queued_reply_ctx.fail)
+        return fail(71, "queued-reply server reported failure");
+
+    a20_hdl_close(pair.endpoints[0]);
+    a20_hdl_close(pair.endpoints[1]);
+    put_str("NATIVE_IPC: queued-reply deferred wake PASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv, char **envp)
 {
-    (void)argc; (void)argv; (void)envp;
+    (void)envp;
 
     a20_start_info_t *si = a20_get_start_info();
     g_out = si ? si->stdout_handle : A20_HANDLE_NULL;
     if (g_out == A20_HANDLE_NULL)
         return 90;
+
+    if (test_recv_transaction_rollback() != 0)
+        return 91;
+    if (argc > 1 && is_wake_race_arg(argv[1]) &&
+        test_donate_pre_woken_fallback() != 0)
+        return 92;
+    if (argc > 1 && is_queued_reply_arg(argv[1]) &&
+        test_queued_reply_deferred_wake() != 0)
+        return 93;
 
     /* 1. Functional RPC round trip. */
     a20_channel_pair_t pair;

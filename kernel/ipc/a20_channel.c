@@ -27,6 +27,7 @@
 #include "proc/proc.h"
 #include "core/panic.h"
 #include "core/timer.h"
+#include "core/cpu.h"
 #include "ipc/objstats.h"
 
 extern void a20_object_ref(void *object, uint16_t type);
@@ -484,6 +485,106 @@ void a20_channel_recv_abort(a20_channel_ep_t *ep)
     a20_channel_ep_release(ep);
 }
 
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+static int g_ch_donate_test_injected;
+static int g_ch_donate_test_fallback_armed;
+static int g_ch_donate_test_queued_reply_armed;
+#define CH_DONATE_TEST_MAGIC UINT64_C(0x31454b41574f4e44) /* "DNOWAKE1" */
+#define CH_DONATE_TEST_QUEUED_REPLY_MAGIC UINT64_C(0x3130594c50455251) /* "QREPLY01" */
+
+static int ch_donate_test_request_matches(a20_channel_ep_t *ep)
+{
+    int matches = 0;
+    spin_lock(&g_ch_lock);
+    a20_channel_ep_t *peer = ep->peer;
+    if (peer) {
+        spin_lock(&peer->lock);
+        a20_ch_message_t *msg = peer->msg_head;
+        if (msg && msg->data_len >= sizeof(uint64_t)) {
+            uint64_t magic;
+            memcpy(&magic, msg->data, sizeof(magic));
+            matches = magic == CH_DONATE_TEST_MAGIC;
+        }
+        spin_unlock(&peer->lock);
+    }
+    spin_unlock(&g_ch_lock);
+    return matches;
+}
+
+/* The dedicated queued-reply fixture sends QREPLY01 while the receiver is
+ * already parked, then channel_call observes an older reply on its own
+ * endpoint. Require the actual peer waiter here so the test cannot pass from
+ * a scheduling race where the receiver simply runs later. */
+static int ch_donate_test_arm_queued_reply(a20_channel_ep_t *ep)
+{
+    int matches = 0;
+    int has_waiter = 0;
+    spin_lock(&g_ch_lock);
+    a20_channel_ep_t *peer = ep->peer;
+    if (peer && !peer->peer_closed) {
+        spin_lock(&peer->lock);
+        a20_ch_message_t *msg = peer->msg_head;
+        if (msg && msg->data_len >= sizeof(uint64_t)) {
+            uint64_t magic;
+            memcpy(&magic, msg->data, sizeof(magic));
+            matches = magic == CH_DONATE_TEST_QUEUED_REPLY_MAGIC;
+        }
+        spin_unlock(&peer->lock);
+        if (matches) {
+            task_t *waiter = wait_queue_peek_key(&peer->waiters,
+                                                 A20_CH_WAIT_RECV);
+            has_waiter = waiter != NULL;
+            if (waiter)
+                proc_put(waiter);
+        }
+    }
+    spin_unlock(&g_ch_lock);
+    if (matches && !has_waiter)
+        panic("channel queued-reply test receiver was not parked");
+    if (matches)
+        __atomic_store_n(&g_ch_donate_test_queued_reply_armed, 1,
+                         __ATOMIC_RELEASE);
+    return matches;
+}
+#endif
+
+/* Wake the peer whose request/reply wake was deferred for a possible direct
+ * handoff. Called by proc_park_commit_donate only on a no-handoff path, with
+ * scheduler locks released and before the caller can block in sched(). The
+ * recv_begin reference keeps ep alive while this callback reacquires the
+ * channel lock and resolves its current peer. */
+static void ch_donate_fallback_wake(void *context)
+{
+    a20_channel_ep_t *ep = (a20_channel_ep_t *)context;
+    if (!ep)
+        return;
+
+    spin_lock(&g_ch_lock);
+    a20_channel_ep_t *peer = ep->peer;
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+    unsigned woken = 0;
+    if (peer && !peer->peer_closed)
+        woken = wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV,
+                                    PROC_WAKE_EVENT);
+#else
+    if (peer && !peer->peer_closed)
+        wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV,
+                            PROC_WAKE_EVENT);
+#endif
+    spin_unlock(&g_ch_lock);
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+    if (__atomic_exchange_n(&g_ch_donate_test_queued_reply_armed, 0,
+                            __ATOMIC_ACQ_REL)) {
+        if (woken == 0)
+            panic("channel queued-reply test wake did not reach receiver");
+        printf("[CH_DONATE_TEST] queued-reply-fallback\n");
+    }
+    if (__atomic_exchange_n(&g_ch_donate_test_fallback_armed, 0,
+                            __ATOMIC_ACQ_REL))
+        printf("[CH_DONATE_TEST] fallback-wake\n");
+#endif
+}
+
 /*
  * a20_channel_recv_begin_donate — recv_begin with time-slice donation
  * (docs/hybrid-kernel/02-mainstream-plan.md M1): when the caller must
@@ -504,9 +605,25 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
      * donates when the target is fully parked on this CPU and falls back to
      * the normal park path otherwise. */
     int donate = 1;
+    /* channel_call deferred the request wake when entering this path. Own
+     * that wake obligation until we either attempt commit_donate (which calls
+     * the fallback callback on every no-handoff path) or resolve it here. */
+    int deferred_wake_pending = donate;
 
     for (;;) {
         spin_lock(&ep->lock);
+        /* A pre-existing reply can make recv return without parking, but the
+         * just-sent request still owns a deferred peer wake. Drop ep->lock
+         * before resolving it because the wake callback acquires g_ch_lock. */
+        if (ep->msg_count > 0 && deferred_wake_pending) {
+            spin_unlock(&ep->lock);
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+            (void)ch_donate_test_arm_queued_reply(ep);
+#endif
+            ch_donate_fallback_wake(ep);
+            deferred_wake_pending = 0;
+            continue;
+        }
         if (ep->msg_count > 0) {
             a20_ch_message_t *msg = ep->msg_head;
             if (msg->handle_count > 0) {
@@ -535,11 +652,19 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
         }
         if (ep->peer_closed) {
             spin_unlock(&ep->lock);
+            if (deferred_wake_pending) {
+                ch_donate_fallback_wake(ep);
+                deferred_wake_pending = 0;
+            }
             a20_channel_ep_release(ep);
             return -A20_ERR_CANCELED;
         }
         if (flags & A20_MSG_NONBLOCK) {
             spin_unlock(&ep->lock);
+            if (deferred_wake_pending) {
+                ch_donate_fallback_wake(ep);
+                deferred_wake_pending = 0;
+            }
             a20_channel_ep_release(ep);
             return -A20_ERR_WOULD_BLOCK;
         }
@@ -547,6 +672,10 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
 
         proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
         if (!token.task) {
+            if (deferred_wake_pending) {
+                ch_donate_fallback_wake(ep);
+                deferred_wake_pending = 0;
+            }
             a20_channel_ep_release(ep);
             return -A20_ERR_WOULD_BLOCK;
         }
@@ -569,23 +698,62 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
                     spin_unlock(&g_ch_lock);
                     donate = 0;
                 }
+                int donate_local_parked = 0;
                 if (target) {
-                    reason = proc_park_commit_donate(token, target);
+                    /* A deferred channel_call wake may see a receiver parked
+                     * on another CPU. Direct donation only handles a parked
+                     * task on this CPU; otherwise proc_park_commit_donate()
+                     * falls back to sched() without waking the remote waiter.
+                     * Verify the exact direct-switch preconditions under the
+                     * target lock, and use the normal wait-queue wake path for
+                     * PREPARING, remote, or otherwise ineligible receivers. */
+                    uint64_t target_flags =
+                        spin_lock_irqsave(&target->park_lock);
+                    donate_local_parked =
+                        target->park_state == PROC_PARK_PARKED &&
+                        target->state == PROC_BLOCKED && !target->on_cpu &&
+                        !__atomic_load_n(&target->on_rq, __ATOMIC_RELAXED) &&
+                        !__atomic_load_n(&target->dispatching,
+                                         __ATOMIC_RELAXED) &&
+                        __atomic_load_n(&target->cpu_id, __ATOMIC_RELAXED) ==
+                            cpu_current_id();
+                    spin_unlock_irqrestore(&target->park_lock, target_flags);
+                }
+                if (target && donate_local_parked) {
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+                    int expected = 0;
+                    if (ch_donate_test_request_matches(ep) &&
+                        __atomic_compare_exchange_n(
+                            &g_ch_donate_test_injected, &expected, 1, 0,
+                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                        if (!proc_try_wake(proc_current(), token.seq,
+                                           PROC_WAKE_SIGNAL))
+                            panic("channel donate test failed to pre-wake donor");
+                        __atomic_store_n(&g_ch_donate_test_fallback_armed, 1,
+                                         __ATOMIC_RELEASE);
+                        printf("[CH_DONATE_TEST] donor-prewoken\n");
+                    }
+#endif
+                    deferred_wake_pending = 0;
+                    reason = proc_park_commit_donate(
+                        token, target, ch_donate_fallback_wake, ep);
                     proc_put(target);
                 } else {
-                    /* Donation impossible (server running, remote CPU, or
-                     * already woken): deliver the wake deferred by the
-                     * channel_call send stage, then park normally. */
-                    spin_lock(&g_ch_lock);
-                    a20_channel_ep_t *peer = ep->peer;
-                    if (peer && !peer->peer_closed)
-                        wait_queue_wake_one(&peer->waiters,
-                                            A20_CH_WAIT_RECV,
-                                            PROC_WAKE_EVENT);
-                    spin_unlock(&g_ch_lock);
+                    /* The send stage deferred its receiver wake for possible
+                     * same-CPU donation. Deliver it before ordinary commit. */
+                    if (target)
+                        proc_put(target);
+                    if (deferred_wake_pending) {
+                        ch_donate_fallback_wake(ep);
+                        deferred_wake_pending = 0;
+                    }
                     reason = proc_park_commit(token);
                 }
             } else {
+                if (deferred_wake_pending) {
+                    ch_donate_fallback_wake(ep);
+                    deferred_wake_pending = 0;
+                }
                 (void)proc_park_cancel(token);
                 reason = PROC_WAKE_CANCEL;
             }

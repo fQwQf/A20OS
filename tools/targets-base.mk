@@ -28,6 +28,7 @@
 		check-a20-idl \
 		smoke-iommu-discovery \
 		native-svc-arch native-svc-rv smoke-native-svc \
+		native-rust-idl-peer-arch native-rust-idl-peer-rv native-rust-idl-peer smoke-native-rust-peer \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \
 		native-rtcd-arch native-rtcd-rv smoke-native-rtcd \
 		native-registry-arch native-registry-rv smoke-native-registry \

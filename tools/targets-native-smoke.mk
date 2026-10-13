@@ -2,7 +2,8 @@
 # The TCP/IP stack lives in the kernel (kernel/external/lwip + kernel/net);
 # the user-space netd frame-ring/socket-proxy plane was abandoned.
 
-.PHONY: smoke-native-dynlink smoke-native-mm smoke-native-signal
+.PHONY: smoke-native-dynlink smoke-native-mm smoke-native-signal \
+	smoke-native-ipc-wake-race smoke-native-ipc-queued-reply
 
 .PHONY: smoke-native-suite
 smoke-native-suite:
@@ -210,6 +211,9 @@ smoke-clock-vdso:
 smoke-native-svc:
 	$(PYTHON) tools/smoke.py smoke-native-svc --arch $(ARCH)
 
+smoke-native-rust-peer:
+	$(PYTHON) tools/smoke.py smoke-native-rust-peer --arch $(ARCH)
+
 smoke-native-contract:
 	$(PYTHON) tools/smoke.py smoke-native-contract --arch $(ARCH)
 
@@ -224,6 +228,12 @@ smoke-native-linux:
 
 smoke-native-ipc:
 	$(PYTHON) tools/smoke.py smoke-native-ipc --arch $(ARCH)
+
+smoke-native-ipc-wake-race:
+	$(PYTHON) tools/smoke.py smoke-native-ipc-wake-race
+
+smoke-native-ipc-queued-reply:
+	$(PYTHON) tools/smoke.py smoke-native-ipc-queued-reply
 
 smoke-native-signal:
 	$(PYTHON) tools/smoke.py smoke-native-signal --arch $(ARCH)
@@ -253,7 +263,7 @@ smoke-native-cluster-supervisor:
 # One Native application contract across server ISAs, real kernel boots.
 .PHONY: check-native-sync
 check-native-sync:
-	$(PYTHON) tools/check-native-sync.py
+	$(PYTHON) tools/check-native-sync.py --task-objects-impl $(TASK_OBJECTS_IMPL)
 
 .PHONY: check-native-thread-admission
 check-native-thread-admission:

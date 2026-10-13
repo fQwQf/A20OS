@@ -24,10 +24,10 @@ static int pump(a20_handle_t ep, int is_serve)
         return 0;
     if (st < 0)
         return is_serve ? -1 : 0; /* ping slot may be absent (standalone) */
-    if (blen < sizeof(a20_idl_envelope_t))
+    if (blen < A20_IDL_ENVELOPE_WIRE_SIZE)
         return 1;
     a20_idl_envelope_t env;
-    a20_memcpy(&env, buf, sizeof(env));
+    a20_idl_envelope_decode(&env, buf);
     if (env.version != A20_SERVICES_IDL_VERSION || env.size != blen)
         return 1; /* protocol mismatch: ignore, do not crash */
     if (env.type == SVCMGR_REQ_CRASH)

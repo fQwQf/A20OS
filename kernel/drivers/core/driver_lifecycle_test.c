@@ -7,6 +7,7 @@
  * CONFIG_DRIVER_LIFECYCLE_TEST.
  */
 #include "drivers/core/driver_lifecycle_test.h"
+#include "drivers/core/driver_registry_test.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "core/klog.h"
@@ -308,6 +309,9 @@ out:
     device_unregister(&dev_nomatch);
     driver_unregister(&g_lifecycle_driver);
     bus_unregister(&g_lifecycle_bus);
+
+    if (pass && driver_registry_capacity_test_run() != 0)
+        pass = 0;
 
     if (pass) {
         kinfo("DRIVER_LIFECYCLE: PASS\n");

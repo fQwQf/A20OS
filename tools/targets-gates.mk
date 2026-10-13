@@ -102,6 +102,30 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
+# The IDL wire tests need the Native SDK type header, which the generic rule's
+# -Ikernel/include -Ikernel does not reach, and a generated IDL header.  The
+# literal user/svc/a20_services_idl.h (not $(A20_SERVICES_IDL_HDR)) is
+# deliberate: this file is included before tools/targets-native.mk defines it.
+# HOST_TESTS_SRC is a $(wildcard tools/tests/*.c), so both binaries below are
+# already in HOST_TESTS_BIN and `make host-tests` runs them; the explicit rules
+# exist only to override the pattern rule's include path and to generate the
+# mixed-width header first.
+#
+# test_a20_idl_wire pins the v1 bytes (the shipped header).
+# test_a20_idl_mixed compiles a header generated from a synthetic IDL whose
+# message is NOT packed on any target, which is the only way to catch a codec
+# that quietly defers to host struct layout -- and, before this existed, the
+# only way to notice a u8 field that emitted non-C.  tools/tests/idl_mixed.idl
+# has a .idl suffix so the wildcard above does not try to compile it as a test.
+$(TMPDIR)/a20-idl-mixed.h: tools/tests/idl_mixed.idl tools/a20idl.py
+	$(PYTHON) tools/a20idl.py tools/tests/idl_mixed.idl $@
+
+$(TMPDIR)/a20-host-test_a20_idl_wire: tools/tests/test_a20_idl_wire.c user/svc/a20_services_idl.h user/svc/a20_services.idl tools/a20idl.py
+	$(HOST_CC) $(HOST_CFLAGS) -Iuser/liba20rt -Iuser/svc $< -o $@
+
+$(TMPDIR)/a20-host-test_a20_idl_mixed: tools/tests/test_a20_idl_mixed.c $(TMPDIR)/a20-idl-mixed.h
+	$(HOST_CC) $(HOST_CFLAGS) -Iuser/liba20rt -I$(TMPDIR) $< -o $@
+
 $(TMPDIR)/a20-host-test_flat_user: tools/tests/test_flat_user.c kernel/mm/flat_user.c tools/tests/flat_user_shim.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -DA20_FLAT_HOST_TEST -Ikernel/include \
 		-include tools/tests/flat_user_shim.h $(filter %.c,$^) -o $@

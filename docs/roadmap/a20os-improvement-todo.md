@@ -125,13 +125,11 @@ FUTEX_WAKE_OP 的双架构单核/四核运行已有
   - 常驻页移动与已换出 PTE 的 fork/remap 引用保留已实现；真实换出、数据读回与槽回收
     已通过 RISC-V/AArch64 单核及四核门禁，见 [本轮验证](../validation-docs-completion-2026-10-13.md)。
   - DONTUNMAP 仍需独立实现与运行验收，不能用普通 remap 的通过结果替代。
-- [ ] 为 driver/device/bus registry 的容量耗尽补运行测试
-  - 现状：`kernel/drivers/core/driver_core.c` 的 registry 已从初始容量起在锁保护下
-    `krealloc` 扩容，扩容失败记录 capacity-exhausted 错误并返回失败，不再静默丢失
-    注册项。源码已满足动态扩容与结构化失败要求，但全仓库没有专用的 exhaustion
-    运行测试。
-  - 完成条件：注入分配失败后断言注册项未静默丢失，且错误可从 `/proc` 或日志结构化
-    读出。
+- driver/device/bus registry 容量耗尽的 RV64 QEMU 验收已完成：注入 backing-array
+  `krealloc` 失败后，三种注册均保留旧项、返回 `-ENOMEM`，记录结构化日志，并在重试后
+  成功；移除测试项后数量回到基线。证据仅覆盖本轮 RV64 单核 QEMU，不代表其他架构或
+  实机验收；registry backing array 按设计保留增长后的容量。详见
+  [注册表容量验证记录](../validation-driver-registry-capacity-2026-10-13.md)。
 ## P1：内核核心锁收敛的后续（2026-10 feat/kernel-core-scalability 分支）
 
 已落地：EventQ 反向索引 256 桶分锁、per-vnode 缓冲写锁、mount 表稳定

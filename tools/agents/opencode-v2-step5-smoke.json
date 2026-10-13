@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/step-5-preview-free",
+  "default_agent": "free-probe",
+  "update": "disable",
+  "snapshots": false,
+  "plugins": [],
+  "mcp": {"servers": {}},
+  "providers": {
+    "opencode": {
+      "models": {
+        "step-5-preview-free": {
+          "modelID": "step-5-preview-free",
+          "name": "Step 5 Preview Free",
+          "capabilities": {"tools": false, "input": ["text"], "output": ["text"]}
+        }
+      }
+    }
+  },
+  "permissions": [{"action": "*", "resource": "*", "effect": "deny"}],
+  "agents": {
+    "free-probe": {
+      "description": "One short text connectivity test; every tool denied.",
+      "mode": "primary",
+      "model": "opencode/step-5-preview-free",
+      "system": "Answer only the user's short text prompt. Do not use tools.",
+      "steps": 1,
+      "permissions": [{"action": "*", "resource": "*", "effect": "deny"}]
+    }
+  },
+  "experimental": {
+    "policies": [
+      {"action": "provider.use", "resource": "*", "effect": "deny"},
+      {"action": "provider.use", "resource": "opencode", "effect": "allow"},
+      {"action": "permission", "resource": "*", "effect": "deny"}
+    ]
+  }
+}

@@ -189,6 +189,7 @@ XLATOR_SUPPORTED_ARCHES := $(TRIM_CAP_XLATOR_ARCHES)
 # and the gate invocations keep working unchanged.
 CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
 CONFIG_PLATFORM_IRQ_TEST ?= 0
+CONFIG_CHANNEL_DONATE_TEST ?= n
 CONFIG_HDA_SMOKE_TEST ?= 0
 CONFIG_NVME_SMOKE_TEST ?= 0
 
@@ -504,14 +505,68 @@ NETFILTER_REWRITE_IMPL ?= c
 ifeq ($(filter $(NETFILTER_REWRITE_IMPL),c rust),)
 $(error NETFILTER_REWRITE_IMPL must be c or rust)
 endif
+TASK_OBJECTS_IMPL ?= c
+ifeq ($(filter $(TASK_OBJECTS_IMPL),c rust),)
+$(error TASK_OBJECTS_IMPL must be c or rust)
+endif
+CHANNEL_RECV_TXN_IMPL ?= c
+ifeq ($(filter $(CHANNEL_RECV_TXN_IMPL),c rust),)
+$(error CHANNEL_RECV_TXN_IMPL must be c or rust)
+endif
+DONTUNMAP_TXN_IMPL ?= c
+ifeq ($(filter $(DONTUNMAP_TXN_IMPL),c rust),)
+$(error DONTUNMAP_TXN_IMPL must be c or rust)
+endif
+HANDLE_SLOT_TRANSITIONS_IMPL ?= c
+ifeq ($(filter $(HANDLE_SLOT_TRANSITIONS_IMPL),c rust),)
+$(error HANDLE_SLOT_TRANSITIONS_IMPL must be c or rust)
+endif
+HANDLE_SLOT_TRANSITIONS_ACTIVE := $(if $(filter $(ABI),native both),1,)
+ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
+ifeq ($(HANDLE_SLOT_TRANSITIONS_ACTIVE),)
+$(error HANDLE_SLOT_TRANSITIONS_IMPL=rust requires ABI=native or ABI=both)
+endif
+endif
+ifeq ($(DONTUNMAP_TXN_IMPL),rust)
+ifeq ($(NOMMU),1)
+$(error DONTUNMAP_TXN_IMPL=rust requires an MMU profile)
+endif
+endif
+CHANNEL_RECV_TXN_ACTIVE := $(if $(filter $(ABI),native both),1,)
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+ifeq ($(CHANNEL_RECV_TXN_ACTIVE),)
+$(error CHANNEL_RECV_TXN_IMPL=rust requires ABI=native or ABI=both)
+endif
+endif
+TASK_OBJECTS_ACTIVE := $(if $(filter $(ABI),native both),1,)
+ifeq ($(ARCH),armv7m)
+ifneq ($(MCU_NATIVE_PROGRAM),1)
+TASK_OBJECTS_ACTIVE :=
+endif
+endif
 
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
+endif
+ifeq ($(TASK_OBJECTS_IMPL),rust)
+ifeq ($(TASK_OBJECTS_ACTIVE),)
+$(error TASK_OBJECTS_IMPL=rust requires an active Native task-object profile (ABI=native/both; MCU also requires MCU_NATIVE_PROGRAM=1))
+endif
+BUILD_VARIANT := $(BUILD_VARIANT)-taskrust
+endif
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-recvtxnrust
+endif
+ifeq ($(DONTUNMAP_TXN_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-mremaprust
+endif
+ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-handleslotrust
 endif
 
 ifeq ($(ARCH),armv7m)
@@ -1145,6 +1200,18 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 CFLAGS += -DCONFIG_NETFILTER_REWRITE_RUST
 endif
+ifeq ($(TASK_OBJECTS_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_OBJECT_RUST
+endif
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+CFLAGS += -DCONFIG_CHANNEL_RECV_TXN_RUST
+endif
+ifeq ($(DONTUNMAP_TXN_IMPL),rust)
+CFLAGS += -DCONFIG_MREMAP_DONTUNMAP_TXN_RUST
+endif
+ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
+CFLAGS += -DCONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+endif
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
@@ -1416,6 +1483,12 @@ ifeq ($(CONFIG_PLATFORM_IRQ_TEST),y)
 CFLAGS += -DCONFIG_PLATFORM_IRQ_TEST
 endif
 
+# Deterministic regression hook for the channel-call deferred-wake fallback.
+# Enabled only by smoke-native-ipc-wake-race.
+ifeq ($(CONFIG_CHANNEL_DONATE_TEST),y)
+CFLAGS += -DCONFIG_CHANNEL_DONATE_TEST
+endif
+
 # CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST deliberately add nothing to
 # the kernel CFLAGS: the built-in HDA/NVMe drivers were migrated into the
 # loadable packages, so these macros are reached only through DRVMOD_SMOKE in
@@ -1567,6 +1640,30 @@ $(error NETFILTER_REWRITE_IMPL=rust requires kernel/net/netfilter_rewrite.c in t
 endif
 KERNEL_OBJ += $(RUST_NETFILTER_OBJECT)
 endif
+ifeq ($(TASK_OBJECTS_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/task_object.c,$(KERNEL_SRC)),)
+$(error TASK_OBJECTS_IMPL=rust requires kernel/proc/task_object.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_TASK_OBJECT)
+endif
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/abi/native/sys_native_ipc.c,$(KERNEL_SRC)),)
+$(error CHANNEL_RECV_TXN_IMPL=rust requires the Native IPC syscall source in this profile)
+endif
+KERNEL_OBJ += $(RUST_CHANNEL_RECV_TXN_OBJECT)
+endif
+ifeq ($(DONTUNMAP_TXN_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/mremap.c,$(KERNEL_SRC)),)
+$(error DONTUNMAP_TXN_IMPL=rust requires kernel/mm/mremap.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_DONTUNMAP_TXN_OBJECT)
+endif
+ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/abi/native/handle_table.c,$(KERNEL_SRC)),)
+$(error HANDLE_SLOT_TRANSITIONS_IMPL=rust requires kernel/abi/native/handle_table.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_HANDLE_SLOT_OBJECT)
+endif
 
 # Optional self-contained userspace for physical-board bring-up.  Each static
 # ELF is linked as read-only kernel data, then copied into the root ramfs by
@@ -1683,6 +1780,7 @@ include tools/targets-distro.mk
 include tools/targets-extra.mk
 include tools/targets-native.mk
 include tools/targets-native-smoke.mk
+include tools/rust-user.mk
 include tools/targets-mlibc.mk
 include tools/targets-xlator.mk
 include tools/targets-bench.mk

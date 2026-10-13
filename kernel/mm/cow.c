@@ -235,7 +235,13 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
 
     pte_t flags = shared ? arch_pte_flags(source) : mm_cow_flags(source);
     if (!shared && (source & (PTE_W | PTE_COW))) {
+#ifdef ARCH_HAS_PTE_BLOCK
+        *src_pte = (leaf_size >= PMD_SIZE)
+                       ? arch_pte_block(pa, flags)
+                       : arch_pte_leaf(pa, flags);
+#else
         *src_pte = arch_pte_leaf(pa, flags);
+#endif
         mm_tlb_note_change(parent, va, leaf_size);
 #if defined(ARCH_HAS_PGTABLE_OPS)
         if (stab)

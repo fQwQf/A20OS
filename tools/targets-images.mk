@@ -41,7 +41,11 @@ endif
 # only copy inside fat32.img was whatever leftover somebody had last produced by
 # hand.  A guard that cannot fail loudly is worse than no guard -- write it so a
 # typo shows up as a missing prerequisite on the next `make -p`.
-GUEST_KERNEL_RAMFS_DIR := $(subst -dev,-dev-ramfs-user,$(BUILD_DIR))
+# Keep the companion distinct even when BUILD_DIR is an explicit path that does
+# not end in the default `-dev` variant suffix.  The recursive make below gets
+# this exact path so command-line BUILD_DIR overrides cannot collapse both
+# kernel configurations into one object directory.
+GUEST_KERNEL_RAMFS_DIR := $(BUILD_DIR)-ramfs-user
 GUEST_KERNEL_RAMFS_ELF := $(GUEST_KERNEL_RAMFS_DIR)/kernel-nosyms.elf
 GUEST_KERNEL_RAMFS_STAMP := $(GUEST_KERNEL_RAMFS_DIR)/.ramfs-user-elf.stamp
 GUEST_KERNEL_RAMFS_DEP :=
@@ -83,7 +87,8 @@ endif
 # ramfs guest kernel change?" answerable at all, which is the question this rule
 # exists to answer.
 $(GUEST_KERNEL_RAMFS_STAMP): FORCE
-	$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=0 RAMFS_USER=1 kernel-only
+	$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=0 \
+		RAMFS_USER=1 BUILD_DIR=$(GUEST_KERNEL_RAMFS_DIR) kernel-only
 	@mkdir -p $(dir $@)
 	@touch -r $(GUEST_KERNEL_RAMFS_ELF) $@
 

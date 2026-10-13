@@ -4,6 +4,9 @@
 #include "liba20rt/a20_handle.h"
 #include "liba20rt/a20_sync.h"
 #include "liba20rt/a20_mem.h"
+#ifdef A20_NATIVE_TASK_IDENTITY_BENCH
+#include "liba20rt/a20_clock.h"
+#endif
 #include "liba20rt/a20_execution.h"
 #include "native-runtime-contract.h"
 #include "native-object-contract.h"
@@ -15,6 +18,89 @@ static struct {
     uint64_t nested_serial;
     a20_handle_t worker_handle;
 } native_thread_shared;
+#ifdef A20_NATIVE_TASK_IDENTITY_BENCH
+#define A20_TASK_IDENTITY_BENCH_WARMUP_CALLS 1000U
+#define A20_TASK_IDENTITY_BENCH_CALLS 100000U
+static size_t native_identity_append_text(char *out, size_t capacity,
+                                          size_t at, const char *text) {
+    while (*text) {
+        if (at >= capacity)
+            return capacity + 1;
+        out[at++] = *text++;
+    }
+    return at;
+}
+static size_t native_identity_append_u64(char *out, size_t capacity,
+                                         size_t at, uint64_t value) {
+    char digits[20];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    if (at > capacity || count > capacity - at)
+        return capacity + 1;
+    while (count)
+        out[at++] = digits[--count];
+    return at;
+}
+static int native_task_identity_bench(a20_handle_t worker) {
+    a20_time_ns_t started = 0, finished = 0;
+    for (uint32_t i = 0; i < A20_TASK_IDENTITY_BENCH_WARMUP_CALLS; ++i) {
+        if (a20_task_wait(worker, A20_TASK_WAIT_NONBLOCK, 0) !=
+            -A20_ERR_WOULD_BLOCK)
+            return -1;
+    }
+    if (a20_clock_get(A20_CLOCK_MONOTONIC, &started) != A20_OK)
+        return -2;
+    uint32_t errors = 0;
+    uint32_t hash = 2166136261U;
+    for (uint32_t i = 0; i < A20_TASK_IDENTITY_BENCH_CALLS; ++i) {
+        a20_status_t result =
+            a20_task_wait(worker, A20_TASK_WAIT_NONBLOCK, 0);
+        hash = (hash ^ (uint32_t)result) * 16777619U;
+        if (result != -A20_ERR_WOULD_BLOCK)
+            errors++;
+    }
+    if (a20_clock_get(A20_CLOCK_MONOTONIC, &finished) != A20_OK ||
+        finished <= started)
+        return -3;
+    uint64_t elapsed = finished - started;
+    char line[256];
+    size_t at = 0;
+#define A20_ID_APPEND_TEXT(text)                                               \
+    do {                                                                        \
+        at = native_identity_append_text(line, sizeof(line), at, (text));      \
+        if (at > sizeof(line))                                                  \
+            return -4;                                                          \
+    } while (0)
+#define A20_ID_APPEND_U64(value)                                                \
+    do {                                                                        \
+        at = native_identity_append_u64(line, sizeof(line), at, (value));      \
+        if (at > sizeof(line))                                                  \
+            return -4;                                                          \
+    } while (0)
+    A20_ID_APPEND_TEXT(
+        "A20_COMPARE_JSON: {\"schema\":1,\"case\":\"task-identity/live-handle-weak-pin-v1\",\"contract\":{\"warmup_calls\":");
+    A20_ID_APPEND_U64(A20_TASK_IDENTITY_BENCH_WARMUP_CALLS);
+    A20_ID_APPEND_TEXT(",\"calls\":");
+    A20_ID_APPEND_U64(A20_TASK_IDENTITY_BENCH_CALLS);
+    A20_ID_APPEND_TEXT(",\"errors\":");
+    A20_ID_APPEND_U64(errors);
+    A20_ID_APPEND_TEXT(",\"status_hash_fnv1a32\":");
+    A20_ID_APPEND_U64(hash);
+    A20_ID_APPEND_TEXT("},\"metrics\":{\"elapsed_ns\":");
+    A20_ID_APPEND_U64(elapsed);
+    A20_ID_APPEND_TEXT(",\"ns_per_transaction\":");
+    A20_ID_APPEND_U64(elapsed / A20_TASK_IDENTITY_BENCH_CALLS);
+    A20_ID_APPEND_TEXT("}}\n");
+#undef A20_ID_APPEND_U64
+#undef A20_ID_APPEND_TEXT
+    if (a20_hdl_write_buf(1, line, at, 0) < 0)
+        return -5;
+    return errors ? -5 : 0;
+}
+#endif
 static __attribute__((noreturn)) void native_thread_nested(uintptr_t arg) {
     if (arg != 0xa20 || native_balance_work(1) ||
         a20_atomic32_store(&native_thread_shared.nested, 19))
@@ -162,6 +248,9 @@ static int native_thread_contract(void) {
     T_CHECK(a20_task_wait(args.out_thread, A20_TASK_WAIT_NONBLOCK, 0) ==
                 -A20_ERR_WOULD_BLOCK,
             13);
+#ifdef A20_NATIVE_TASK_IDENTITY_BENCH
+    T_CHECK(native_task_identity_bench(args.out_thread) == 0, 38);
+#endif
     if (execution.memory_model == A20_EXEC_MEMORY_FLAT)
         T_CHECK(a20_vm_unmap(stack, 16384) == -A20_ERR_BUSY, 14);
     a20_execution_domain_info_t domain;

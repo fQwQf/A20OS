@@ -2,6 +2,7 @@
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
 #include "mm/pt.h"
+#include "mm/mremap_dontunmap_txn.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
@@ -272,7 +273,14 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
 }
 
 static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_t old_addr,
-                                 vaddr_t dst, size_t len) {
+                                 vaddr_t dst, size_t len, int dontunmap) {
+#if !defined(CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT)
+    (void)dontunmap;
+#endif
+#if defined(CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT)
+    size_t test_mapped_leaves = 0;
+    static int inject_once = 1;
+#endif
     for (vaddr_t off = 0; off < len; ) {
         int level = 0;
         vaddr_t base = 0;
@@ -331,9 +339,271 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
          * destination (and optional new protection) has succeeded. */
         mm_rss_add(mm, leaf_size / PAGE_SIZE);
         off += leaf_size;
+#if defined(CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT)
+        /* Build-only deterministic rollback probe.  This compile-time hook is
+         * never enabled in normal images and fails after the configured number
+         * of successful destination leaves, before source teardown begins. */
+        if (dontunmap &&
+            ++test_mapped_leaves == CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT &&
+            inject_once) {
+            inject_once = 0;
+            klog_write("MM_DONTUNMAP_TEST: injected-failure leaves=%lu\n",
+                       (unsigned long)test_mapped_leaves);
+            return -ENOMEM;
+        }
+#endif
     }
     return 0;
 }
+
+/* DONTUNMAP is committed only after the destination has been completely
+ * populated and protected.  The source VMA stays in place, but its present
+ * and swapped entries must be dropped so later accesses take the original
+ * VMA's normal fault path.  All fallible destination work has already
+ * completed; the enclosing remap reserved enough TLB holds before creating
+ * the destination, so this source teardown has no recoverable failure point.
+ */
+#ifndef CONFIG_NOMMU
+static int mm_mremap_dontunmap_preflight(mm_struct_t *mm, vaddr_t start,
+                                         size_t len)
+{
+    vaddr_t end = start + len;
+    for (vaddr_t va = start; va < end;) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t leaf_size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &leaf_size);
+        if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) && level > 0 &&
+            (base < start || base + leaf_size > end))
+            return -EINVAL;
+        vaddr_t next = leaf_size ? base + leaf_size : va + PAGE_SIZE;
+        va = next > va ? next : va + PAGE_SIZE;
+    }
+    return 0;
+}
+
+static void mm_mremap_dontunmap_clear_source(mm_struct_t *mm, vaddr_t start,
+                                             size_t len)
+{
+    vaddr_t end = start + len;
+    for (vaddr_t va = start; va < end;) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t leaf_size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &leaf_size);
+#ifdef CONFIG_SWAP
+        if (pte && pte_is_swap(*pte)) {
+            if (pt_unmap_leaf(mm, va, NULL, &base, &leaf_size, NULL) == 0) {
+                mm_tlb_note_change(mm, base, leaf_size);
+                va = base + leaf_size;
+            }
+            /* A concurrent page-in may have replaced the swap entry.  Retry
+             * this address and discard whichever mapping is current. */
+            continue;
+        }
+#endif
+        if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
+            va += PAGE_SIZE;
+            continue;
+        }
+
+        mm_seg_t *vma = mm_seg_find(mm, va);
+        if (!vma || va < vma->start || va >= vma->end)
+            panic("mremap: DONTUNMAP source lost VMA va=%p", (void *)va);
+
+        if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+            vma->file_vnode && (*pte & PTE_D)) {
+            uint64_t index = vma->backing_offset + (va - vma->start);
+            page_cache_page_t *dirty = page_cache_get(vma->file_vnode,
+                                                       index / PAGE_SIZE, 0);
+            if (dirty) {
+                page_cache_mark_dirty(dirty);
+                page_cache_put(dirty);
+            }
+        }
+
+        paddr_t pa = 0;
+        int ur = pt_unmap_leaf(mm, va, &pa, &base, &leaf_size, NULL);
+        if (ur < 0) {
+            /* The status-driven COW/page-in paths can replace a PTE without
+             * mm->lock.  In that case re-read and discard the replacement. */
+            continue;
+        }
+        mm_tlb_note_change(mm, base, leaf_size);
+        if (pa) {
+            pfn_t pfn = phys_to_pfn(pa);
+            page_cache_page_t *pcp = mm_file_cache_mapping_get(vma, va, pfn);
+            if (pcp) {
+                if (mm_tlb_hold_page(mm, pcp) < 0)
+                    panic("mremap: reserved DONTUNMAP page hold unavailable");
+                /* pcp owns the cache lookup reference; the old source PTE
+                 * owned one more.  The queued TLB hold survives both puts. */
+                page_cache_put(pcp);
+                page_cache_put(pcp);
+            } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
+                if (!pfn_valid(pfn) || mm_tlb_hold_frame(mm, pfn) < 0)
+                    panic("mremap: reserved DONTUNMAP frame hold unavailable");
+                frame_put(pfn);
+            }
+            mm_rss_sub_clamped(mm, leaf_size / PAGE_SIZE);
+        }
+        va = base + leaf_size;
+    }
+}
+
+/* Primitive adapters used by the selectable C/Rust DONTUNMAP transaction.
+ * Each callback performs one existing MM operation; the transaction module
+ * owns sequencing and rollback, rather than hiding the old C sequence behind
+ * one callback. */
+typedef struct mm_dontunmap_context {
+    mm_struct_t *mm;
+    mm_seg_t *source_vma;
+    vaddr_t source;
+    size_t source_len;
+    vaddr_t destination;
+    size_t destination_len;
+    int reprot;
+} mm_dontunmap_context_t;
+
+static int dontunmap_prepare_destination(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    int r = mm_split_vma_at(ctx->mm, ctx->destination);
+    if (r < 0) return r;
+    r = mm_split_vma_at(ctx->mm, ctx->destination + ctx->destination_len);
+    if (r < 0) return r;
+    mm_seg_t *vma = mm_seg_find(ctx->mm, ctx->destination);
+    if (!vma || vma->start != ctx->destination ||
+        vma->end != ctx->destination + ctx->destination_len)
+        return -ENOMEM;
+
+    /* mm_insert_vma may have merged an adjacent anonymous destination into
+     * the source and deferred the source's old VMA record. Rebuild the source
+     * boundaries and reacquire by address before any callback dereferences it. */
+    r = mm_split_vma_at(ctx->mm, ctx->source);
+    if (r < 0) return r;
+    r = mm_split_vma_at(ctx->mm, ctx->source + ctx->source_len);
+    if (r < 0) return r;
+    ctx->source_vma = mm_seg_find(ctx->mm, ctx->source);
+    if (!ctx->source_vma || ctx->source_vma->start != ctx->source ||
+        ctx->source_vma->end != ctx->source + ctx->source_len)
+        return -EFAULT;
+    return 0;
+}
+
+static int dontunmap_copy_backing(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    mm_seg_t *dst_vma = mm_seg_find(ctx->mm, ctx->destination);
+    if (!dst_vma || dst_vma->start != ctx->destination ||
+        dst_vma->end != ctx->destination + ctx->destination_len)
+        return -ENOMEM;
+    return mm_remap_copy_backing(ctx->mm, dst_vma, ctx->source_vma,
+                                 ctx->source);
+}
+
+static int dontunmap_move_pages(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    return mm_move_mapping_pages(ctx->mm, ctx->source, ctx->destination,
+                                 ctx->source_len, 1);
+}
+
+static int dontunmap_reprotect(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    return ctx->reprot >= 0
+               ? mm_mprotect_locked(ctx->mm, ctx->destination,
+                                    ctx->destination_len, ctx->reprot)
+               : 0;
+}
+
+static int dontunmap_preflight_source(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    return mm_mremap_dontunmap_preflight(ctx->mm, ctx->source,
+                                         ctx->source_len);
+}
+
+static void dontunmap_clear_source(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    mm_mremap_dontunmap_clear_source(ctx->mm, ctx->source,
+                                     ctx->source_len);
+}
+
+static void dontunmap_release_source_lock(void *opaque)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    if (ctx->source_vma->vm_flags & VM_LOCKED) {
+        ctx->source_vma->vm_flags &= ~(uint64_t)VM_LOCKED;
+        ctx->mm->locked_vm = ctx->mm->locked_vm >= ctx->source_len
+                                 ? ctx->mm->locked_vm - ctx->source_len : 0;
+    }
+}
+
+static int dontunmap_rollback_destination(void *opaque, int exact_vma)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    if (exact_vma) {
+        mm_seg_t *vma = mm_seg_find(ctx->mm, ctx->destination);
+        if (!vma || vma->start != ctx->destination ||
+            vma->end != ctx->destination + ctx->destination_len)
+            return -EFAULT;
+    }
+    return mm_munmap_locked(ctx->mm, ctx->destination,
+                            ctx->destination_len);
+}
+
+static void dontunmap_rollback_failed(void *opaque, int primary_error,
+                                      int cleanup_error)
+{
+    mm_dontunmap_context_t *ctx = opaque;
+    klog_write("MM_DONTUNMAP_TXN: rollback failed primary=%d cleanup=%d dst=%p len=%lu\n",
+               primary_error, cleanup_error, (void *)ctx->destination,
+               (unsigned long)ctx->destination_len);
+}
+
+static const mm_dontunmap_txn_ops_t dontunmap_txn_ops = {
+    .prepare_destination = dontunmap_prepare_destination,
+    .copy_backing = dontunmap_copy_backing,
+    .move_pages = dontunmap_move_pages,
+    .reprotect = dontunmap_reprotect,
+    .preflight_source = dontunmap_preflight_source,
+    .clear_source = dontunmap_clear_source,
+    .release_source_lock = dontunmap_release_source_lock,
+    .rollback_destination = dontunmap_rollback_destination,
+    .rollback_failed = dontunmap_rollback_failed,
+};
+
+static int mm_mremap_dontunmap_transaction(mm_struct_t *mm,
+                                           vaddr_t source, size_t source_len,
+                                           vaddr_t destination,
+                                           size_t destination_len, int reprot,
+                                           vaddr_t *out_destination)
+{
+    mm_dontunmap_context_t ctx = {
+        .mm = mm,
+        .source_vma = NULL,
+        .source = source,
+        .source_len = source_len,
+        .destination = destination,
+        .destination_len = destination_len,
+        .reprot = reprot,
+    };
+    uintptr_t out = 0;
+#ifdef CONFIG_MREMAP_DONTUNMAP_TXN_RUST
+    int r = mm_mremap_dontunmap_txn_rust(&dontunmap_txn_ops, &ctx,
+                                         destination, destination_len, &out);
+#else
+    int r = mm_mremap_dontunmap_txn_c(&dontunmap_txn_ops, &ctx,
+                                      destination, destination_len, &out);
+#endif
+    if (r == 0)
+        *out_destination = (vaddr_t)out;
+    return r;
+}
+#endif
 
 static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                     size_t new_size, int flags, vaddr_t new_addr,
@@ -362,6 +632,14 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
     mm_seg_t *vma = mm_seg_find(mm, old_addr);
     if (!vma || old_addr < vma->start || old_addr >= vma->end) return -EFAULT;
     if (vma->vm_flags & VM_SEALED) return -EPERM;
+#ifdef CONFIG_NOMMU
+    if (flags & MREMAP_DONTUNMAP) return -EOPNOTSUPP;
+#else
+    /* Raw PFN mappings have no ordinary VMA fault source to recreate a
+     * cleared entry.  Linux rejects DONTUNMAP for VM_PFNMAP for this reason. */
+    if ((flags & MREMAP_DONTUNMAP) && (vma->vm_flags & VM_PFNMAP))
+        return -EINVAL;
+#endif
     int force_copy = reprot >= 0 && reprot != mm_pte_flags_to_prot(vma->pte_flags);
     if (reprot >= 0 && ((reprot & ~7) ||
         ((vma->vm_flags & VM_NATIVE_CAP) && ((uint32_t)reprot & ~vma->vmar_cap))))
@@ -500,6 +778,16 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
     if (mm_addr_is_error(dst))
         return mm_addr_error(dst);
 
+    if (flags & MREMAP_DONTUNMAP) {
+#ifndef CONFIG_NOMMU
+        /* The destination is now allocated. The selected transaction owns it
+         * through split/backing/copy/reprotect/preflight and either source
+         * commit or rollback; the other mremap modes remain on the C path. */
+        return mm_mremap_dontunmap_transaction(mm, old_addr, old_len,
+                                               dst, new_len, reprot, out_addr);
+#endif
+    }
+
     /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
      * boundaries before turning it into a file-backed mapping. */
     int sr = mm_split_vma_at(mm, dst);
@@ -530,7 +818,7 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
     memcpy((void *)dst, (void *)old_addr, move_len);
     r = 0;
 #else
-    r = mm_move_mapping_pages(mm, old_addr, dst, move_len);
+    r = mm_move_mapping_pages(mm, old_addr, dst, move_len, 0);
 #endif
     if (r < 0) {
         mm_munmap_locked(mm, dst, new_len);
@@ -544,12 +832,10 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
             return r;
         }
     }
-    if (!(flags & MREMAP_DONTUNMAP)) {
-        r = mm_munmap_locked(mm, old_addr, old_len);
-        if (r < 0) {
-            mm_munmap_locked(mm, dst, new_len);
-            return r;
-        }
+    r = mm_munmap_locked(mm, old_addr, old_len);
+    if (r < 0) {
+        mm_munmap_locked(mm, dst, new_len);
+        return r;
     }
 
     *out_addr = dst;

@@ -290,6 +290,27 @@ smoke-procfs-stress:
 smoke-mm-stress:
 	$(PYTHON) tools/smoke.py smoke-mm-stress
 
+# Focused real page-table/fault/accounting contract for MREMAP_DONTUNMAP.
+smoke-mm-dontunmap:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap
+
+# Focused DONTUNMAP source-refault contract on AArch64 Linux and Native.
+smoke-mm-dontunmap-aarch64-both-focused:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-aarch64-both-focused
+
+# Aggregate AArch64 acceptance: focused DONTUNMAP plus the full existing
+# file-backed/MM suite. Keep huge-fork-child and all other existing checks.
+smoke-mm-dontunmap-aarch64-both:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-aarch64-both
+
+# Deterministic partial destination-map failure and rollback probe; this image
+# alone enables CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_FIRST_MAP.
+smoke-mm-dontunmap-rollback-leaf1:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf1
+
+smoke-mm-dontunmap-rollback-leaf2:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf2
+
 # Preserve RV64 caller-saved t0 across a real supervisor timer trap.
 smoke-rv64-trap-t0:
 	$(PYTHON) tools/smoke.py smoke-rv64-trap-t0

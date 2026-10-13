@@ -364,25 +364,36 @@ void proc_park_finish(proc_wait_token_t token)
  * it again.
  */
 proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
-                                           task_t *donate_to)
+                                           task_t *donate_to,
+                                           proc_park_donate_fallback_t fallback,
+                                           void *fallback_context)
 {
     task_t *task = token.task;
-    if (!task || !token.seq)
+    if (!task || !token.seq) {
+        if (fallback)
+            fallback(fallback_context);
         return PROC_WAKE_CANCEL;
+    }
 
     uint64_t flags = spin_lock_irqsave(&task->park_lock);
     if (task != proc_current() || task->wait_seq != token.seq) {
         spin_unlock_irqrestore(&task->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
         return PROC_WAKE_CANCEL;
     }
 
     if (task->park_state == PROC_PARK_WOKEN) {
         proc_wake_reason_t reason = task->wake_reason;
         spin_unlock_irqrestore(&task->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
         return reason;
     }
     if (task->park_state != PROC_PARK_PREPARING) {
         spin_unlock_irqrestore(&task->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
         return PROC_WAKE_CANCEL;
     }
 
@@ -400,6 +411,8 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     spin_unlock_irqrestore(&task->park_lock, flags);
 
     if (!can_donate) {
+        if (fallback)
+            fallback(fallback_context);
         sched();
         goto out_reason;
     }
@@ -412,6 +425,8 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
           !donate_to->on_cpu && !donate_to->on_rq &&
           !donate_to->dispatching && donate_to->cpu_id == cur_cpu)) {
         spin_unlock_irqrestore(&donate_to->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
         sched();
         goto out_reason;
     }

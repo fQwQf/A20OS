@@ -28,5 +28,8 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	@$(PYTHON) tools/stamps.py native \
 		--stamp "$(NATIVE_BUILD_STAMP)" --build-id "$(USER_BUILD_ID)" \
 		--arch "$(ARCH)" --nommu "$(NOMMU)" --opt="$(OPT)" \
+		--native-rust-peer "$(NATIVE_RUST_PEER)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--rust-peer-binary "$(RUST_USER_PEER_BIN)" \
 		--binaries "$(NATIVE_BINS)" \
-		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual kernel/include/uapi/a20 tools/targets-native.mk tools/targets-dev.mk"
+		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual kernel/include/uapi/a20 tools/targets-native.mk tools/targets-dev.mk tools/rust-user.mk $(if $(filter 1,$(NATIVE_RUST_PEER)),user/svc/rust_idl_peer.rs user/svc/rust_peer_crt0.c user/svc/a20_services.idl tools/a20idl.py)"
