@@ -799,3 +799,9 @@ main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS �
 系统自带 QEMU 的双进程共享内核已取得同 PID/栈/堆跨实例迁移和资源回收证据。
 可复现脚本、默认构建隔离、限制及 Minecraft 尚未覆盖的部分见
 [54-stock-qemu-shared-kernel.md](54-stock-qemu-shared-kernel.md)。
+
+双 QEMU 共享内核进一步通过真实 Native 用户程序验收：32 个计算片段动态领取，
+总和 4359168、执行掩码 3，用户线程、共享地址空间、文件并发读取、子程序启动与
+回收均使用已有接口。已修复独立 KVM 时钟 epoch 导致的跨 CPU 时间倒序；完整
+命令和失败/修复证据见 [54](54-stock-qemu-shared-kernel.md)。Minecraft 跨实例
+和统一设备访问仍未完成。

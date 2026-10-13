@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Run the real SMP task-migration test on stock x86 QEMU/KVM.
+"""Run kernel migration or Native user-thread contracts on stock x86 QEMU/KVM.
 
 shared: two independent QEMU processes, one RAM file and kernel instance.
 smp: ordinary single-QEMU SMP baseline. No QEMU sources are needed.
-This is a kernel execution test, not a cross-instance Minecraft acceptance.
+Native mode uses the existing application, SDK and RAMFS; no disk emulation
+is shared. Neither mode is cross-instance Minecraft acceptance.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -64,6 +66,7 @@ def qmp_snapshot(path, process, deadline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory")
+    parser.add_argument("--workload", choices=("kernel", "native"), default="kernel")
     parser.add_argument("--mode", choices=("shared", "smp"), default="shared")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
     parser.add_argument("--jobs", type=int, default=4)
@@ -80,8 +83,10 @@ def main():
     out.mkdir(parents=True, exist_ok=False)  # Never replace an earlier run.
     shared = args.mode == "shared"
     flags = FLAGS + [f"QEMU_SHARED_SMP={int(shared)}"]
-    report = {"passed": False, "mode": args.mode, "make_flags": flags,
-              "evidence": "kernel task migration; not userspace or Minecraft acceptance",
+    if args.workload == "native":
+        flags += ["SMP_SELFTEST=0", "RAMFS_USER=1", "RAMFS_NATIVE_TESTS=1"]
+    report = {"passed": False, "mode": args.mode, "workload": args.workload, "make_flags": flags,
+              "evidence": args.workload + " execution; not Minecraft acceptance",
               "qemu": str(Path(qemu).resolve()), "qemu_sha256": sha(Path(qemu)),
               "qemu_version": subprocess.check_output([qemu, "--version"], text=True).splitlines()[0]}
     processes, logs = [], []
@@ -94,7 +99,7 @@ def main():
             "kernel/arch/x86_64/boot/ap_trampoline.S", "kernel/arch/x86_64/platform/smp.c",
             "kernel/arch/x86_64/platform/timer.c", "kernel/arch/x86_64/trap/irqchip.c",
             "kernel/arch/x86_64/include/platform.h", "kernel/platform/qemu-virt-x86_64/board.c",
-            "kernel/core/smp_selftest.c")}
+            "kernel/core/smp_selftest.c", "kernel/fs/rootfs_user.c", "tools/targets-images.mk")}
         build = subprocess.check_output(["make", "-s", *flags, "print-build-dir"],
                                         cwd=ROOT, text=True).strip()
         with (out / "build.log").open("wb") as log:
@@ -141,7 +146,7 @@ def main():
                 for i in reversed(range(len(commands))):
                     log = (out / f"node-{i}.log").open("wb")
                     logs.append(log)
-                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.DEVNULL,
+                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload == "native" else subprocess.DEVNULL,
                                                     stdout=log, stderr=subprocess.STDOUT)
                 report["pids"] = [p.pid for p in processes]
                 report["qmp"] = [qmp_snapshot(runtime / str(i), p, deadline)
@@ -161,14 +166,44 @@ def main():
                                 int(line.split()[4]) == ram.stat().st_ino for line in entries):
                             raise RuntimeError("QEMU does not map the same RAM shared/writable")
                 print(f"{args.mode}: running QEMU PIDs {report['pids']}", flush=True)
+                application_started = False
                 while time.monotonic() < deadline:
                     texts = [(out / f"node-{i}.log").read_text(errors="replace")
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
-                    if "[SMP-TEST] CLEANUP PASS" in texts[0]:
+                    if args.workload == "native":
+                        content = "\n".join(texts)
+                        if "NATIVE_FUTEX: FAIL" in content:
+                            raise RuntimeError("Native application contract failed")
+                        if not application_started and re.search(r"(?:^|[\r\n])# ", content):
+                            processes[0].stdin.write(b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n")
+                            processes[0].stdin.flush()
+                            application_started = True
+                            deadline = time.monotonic() + args.timeout
+                        if application_started and "NATIVE_FUTEX: PASS" in content and "A20_NATIVE_EXIT:0" in content:
+                            markers = ["NATIVE_DOMAIN_CPUS: 02", "NATIVE_DOMAIN: PASS",
+                                "NATIVE_COMPUTE_CANCEL: PASS workers=2 exit=137 pure-user=1",
+                                "NATIVE_TASK_CONTROL: PASS signal=12 masked=1 exit=137",
+                                "NATIVE_SPAWN: PASS children=2 exit=37 args=4 env=2 work=32",
+                                "NATIVE_FILES_REOPEN: PASS count=4100",
+                                "NATIVE_FILES: PASS bytes=2048 fnv=60f4edc5",
+                                "NATIVE_ATOMIC32: PASS", "NATIVE_ALLOCATOR: PASS", "NATIVE_THREAD: PASS",
+                                "NATIVE_RUNTIME: PASS", "NATIVE_OBJECT_DIRECTORY: PASS",
+                                "NATIVE_BALANCE: PASS jobs=32 sum=4359168 mask=00000003 range=dynamic"]
+                            if not all(marker in content for marker in markers):
+                                raise RuntimeError("missing Native contract markers: " + str(
+                                    [marker for marker in markers if marker not in content]))
+                            cpus = re.search(r"NATIVE_THREAD_CPUS: (\d+)->(\d+)", content)
+                            if not cpus or set(map(int, cpus.groups())) != {0, 1}:
+                                raise RuntimeError("Native worker did not execute on remote CPU")
+                            report.update(passed=True, native_thread_cpus=list(map(int, cpus.groups())),
+                                          work_jobs=32, work_sum=4359168, work_cpu_mask=3, exit_code=0)
+                            break
+                    elif "[SMP-TEST] CLEANUP PASS" in texts[0]:
                         for marker in (PASS, "migrated=1->0", "heap=cross-cpu",
-                                       "timer-irqs=all-online ipi=acked exit=0"):
+                                       "timer-irqs=all-online ipi=acked exit=0",
+                                       "clock=" + ("ordered" if shared else "sampled") + " sleep=remote"):
                             if marker not in texts[0]:
                                 raise RuntimeError("missing guest assertion: " + marker)
                         report["passed"] = True
@@ -190,6 +225,9 @@ def main():
                         except subprocess.TimeoutExpired:
                             p.kill()
                             p.wait()
+                for p in processes:
+                    if p and p.stdin:
+                        p.stdin.close()
                 report["returncodes"] = [p.returncode if p else None for p in processes]
                 report["termination"] = "owned QEMU processes stopped by harness after acceptance/failure"
                 report["temporary_ram_removed_after_stop"] = True
@@ -201,7 +239,7 @@ def main():
             log.close()
         report["log_sha256"] = {p.name: sha(p) for p in out.glob("node-*.log")}
         (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(f"PASS {args.mode}: same PID, stack and heap migrated CPU 1 -> 0; {out}")
+    print(f"PASS {args.mode} {args.workload}: verified guest execution; {out}")
 
 
 if __name__ == "__main__":

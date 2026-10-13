@@ -128,6 +128,10 @@ ARCH ?= riscv64
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
+RAMFS_NATIVE_TESTS ?= 0
+ifeq ($(filter $(RAMFS_NATIVE_TESTS),0 1),)
+$(error RAMFS_NATIVE_TESTS must be 0 or 1)
+endif
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
@@ -545,6 +549,9 @@ BUILD_VARIANT := $(BUILD_VARIANT)-shared$(MCU_SHARED_RAM_KB)k$(if $(filter 1,$(M
 endif
 ifeq ($(MCU_NATIVE_PROGRAM),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-program$(if $(filter 1,$(NATIVE_FLAT_FILES)),-files,)
+endif
+ifeq ($(RAMFS_NATIVE_TESTS),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-native-tests
 endif
 ifeq ($(QEMU_SHARED_SMP),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-shared-qemu
@@ -1581,10 +1588,22 @@ RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle
 ifeq ($(STORAGE_READ_ONLY),1)
 RAMFS_USER_PROGRAMS += storage_read_test
 endif
+ifeq ($(RAMFS_NATIVE_TESTS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_NATIVE_TESTS requires RAMFS_USER=1)
+endif
+ifneq ($(ABI),both)
+$(error RAMFS_NATIVE_TESTS requires ABI=both for the Linux shell and Native tests)
+endif
+RAMFS_USER_PROGRAMS += native_futex native_spawn native_input
+CFLAGS += -DCONFIG_RAMFS_NATIVE_TESTS
+endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
 RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
+RAMFS_USER_OBJCOPY_x86_64    := -O elf64-x86-64 -B i386:x86-64
+RAMFS_USER_OBJCOPY_aarch64   := -O elf64-littleaarch64 -B aarch64
 ifeq ($(RAMFS_USER),1)
 # Gate on the objcopy entry rather than on an arch list, so adding an
 # architecture is one table line instead of two places that can disagree.  The
