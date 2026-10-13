@@ -544,6 +544,7 @@ void proc_init(void) {
     spin_set_debug(&tasklist_lock, "tasklist", NULL);
     lock_counters_register(&tasklist_lock, "tasklist");
     lock_counters_enable_callsite(&tasklist_lock);
+    proc_task_park_counters_init();
 
     task_t *idle = &idle_tasks[0];
     proc_link_task_locked(idle);

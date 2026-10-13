@@ -1343,6 +1343,14 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
  */
 static int rlimit_get(task_t *t, int resource, uint64_t pair[2])
 {
+    if (resource == RLIMIT_RTPRIO) {
+        if (!t) return -ESRCH;
+        uint64_t flags = spin_lock_irqsave(&t->park_lock);
+        pair[0] = t->limits.rtprio;
+        pair[1] = t->limits.rtprio_max;
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return 0;
+    }
     uint64_t v = 0;
     switch (resource) {
     case RLIMIT_STACK: v = t ? t->limits.stack : USER_STACK_MAX_SIZE; break;
@@ -1365,6 +1373,19 @@ static int rlimit_set(task_t *t, int resource, uint64_t cur, uint64_t max)
 {
     if (!t)
         return -ESRCH;
+    if (resource == RLIMIT_RTPRIO) {
+        if (cur > max) return -EINVAL;
+        uint64_t flags = spin_lock_irqsave(&t->park_lock);
+        if (max > t->limits.rtprio_max &&
+            !proc_has_cap(proc_current(), CAP_SYS_RESOURCE)) {
+            spin_unlock_irqrestore(&t->park_lock, flags);
+            return -EPERM;
+        }
+        t->limits.rtprio = cur;
+        t->limits.rtprio_max = max;
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        return 0;
+    }
     switch (resource) {
     case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(cur, max); break;
     case RLIMIT_CORE:  signal_task_set_rlim_core(t, cur); break;

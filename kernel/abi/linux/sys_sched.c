@@ -13,6 +13,16 @@ static task_t *sched_task_for_pid(int pid)
     return proc_find_get_user(pid);
 }
 
+static int sched_apply_config(task_t *t, const proc_sched_config_t *config)
+{
+    task_t *caller = proc_current();
+    if (!caller) return -ESRCH;
+    if (caller != t && !proc_has_cap(caller, CAP_SYS_NICE) &&
+        caller->cred.euid != t->cred.uid && caller->cred.euid != t->cred.euid)
+        return -EPERM;
+    return proc_sched_set(t, config);
+}
+
 static size_t sched_cpu_mask_bytes(void)
 {
     size_t word_bits = sizeof(unsigned long) * 8;
@@ -146,7 +156,7 @@ int64_t sys_sched_setaffinity(int pid, size_t cpusetsize, const void *mask)
         .fields = PROC_SCHED_AFFINITY,
         .affinity = allowed,
     };
-    int64_t result = proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
+    int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
 }
@@ -179,7 +189,7 @@ int64_t sys_sched_setparam(int pid, const void *param)
         .fields = PROC_SCHED_PRIORITY,
         .priority = prio,
     };
-    int64_t result = proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
+    int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
 }
@@ -214,7 +224,7 @@ int64_t sys_sched_setscheduler(int pid, int policy, const void *param)
         .priority = prio,
         .reset_on_fork = reset_on_fork,
     };
-    int64_t result = proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
+    int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
 }
@@ -252,7 +262,7 @@ int64_t sys_setpriority(int which, int who, int prio)
         .fields = PROC_SCHED_NICE,
         .nice = prio,
     };
-    int64_t result = proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
+    int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
 }
@@ -335,7 +345,7 @@ int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags)
         .nice = sched_policy_rt(policy) ? 0 : sched_nice,
         .reset_on_fork = reset_on_fork,
     };
-    int64_t result = proc_sched_set(t, &config) < 0 ? -EINVAL : 0;
+    int64_t result = sched_apply_config(t, &config);
     proc_put(t);
     return result;
 }

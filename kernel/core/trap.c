@@ -17,6 +17,7 @@
 #include "core/klog.h"
 #include "core/kallsyms.h"
 #include "core/preempt.h"
+#include "core/perf.h"
 
 __attribute__((weak)) int arch_hyp_guest_trap(trap_context_t *ctx)
 {
@@ -320,6 +321,7 @@ static void user_trap_handler(trap_context_t *ctx) {
         task_t *cur = current;
         uint32_t user_insn = 0;
         if (code == CAUSE_ECALL_U) {
+            if (cur) cur->fault_storm_count = 0;
 #ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
             TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
 #endif
@@ -336,6 +338,39 @@ static void user_trap_handler(trap_context_t *ctx) {
          * successful syscalls avoid two emulated CSR reads under QEMU TCG. */
         vaddr_t stval = arch_read_tval();
         vaddr_t sepc = TRAP_CTX_EPC(ctx);
+        int page_fault = code == CAUSE_LOAD_PAGE_FAULT ||
+                         code == CAUSE_STORE_PAGE_FAULT ||
+                         code == CAUSE_INSN_PAGE_FAULT ||
+                         code == CAUSE_PAGE_MODIFICATION;
+        if (cur && page_fault) {
+            uint64_t now = timer_get_ticks();
+            /* A successful fix must let this instruction make progress.
+             * Age the streak so legitimate accessed-bit refaults over a long
+             * lifetime cannot be mistaken for one tight retry loop. */
+            if (!cur->fault_storm_count || cur->fault_storm_pc != sepc ||
+                cur->fault_storm_va != stval || cur->fault_storm_cause != code ||
+                now - cur->fault_storm_start > TICKS_PER_SEC) {
+                cur->fault_storm_pc = sepc;
+                cur->fault_storm_va = stval;
+                cur->fault_storm_cause = code;
+                cur->fault_storm_start = now;
+                cur->fault_storm_count = 1;
+            } else if (++cur->fault_storm_count >= 4096) {
+                a20_perf_count(A20_PERF_TRAP_STORMS);
+                kerr("[TRAP-STORM] pid=%d pc=0x%lx va=0x%lx cause=%lu count=%u\n",
+                     cur->pid, (unsigned long)sepc, (unsigned long)stval,
+                     (unsigned long)code, cur->fault_storm_count);
+                arch_dump_trap_ring();
+                dump_trap_context(ctx);
+                dump_fault_pte(cur, stval);
+                dump_fault_pte(cur, sepc);
+                /* Do not deliver a catchable signal that can restart the same
+                 * broken retry path. Other tasks must retain the CPU. */
+                proc_exit_group(-SIGKILL);
+            }
+        } else if (cur) {
+            cur->fault_storm_count = 0;
+        }
 #ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
         TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
 #endif
