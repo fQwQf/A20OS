@@ -96,9 +96,9 @@ a20_eventq_t *a20_eventq_create(uint32_t capacity_hint)
     return eq;
 }
 
-int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_obj,
+static int64_t eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_obj,
                          uint16_t target_type, uint64_t event_mask, uint64_t user_data,
-                         uint16_t watch_flags)
+                         uint16_t watch_flags, const char *fs_prefix)
 {
     if (!eq || !target_obj) return -A20_ERR_INVALID_ARGUMENT;
 
@@ -113,6 +113,9 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
     w->event_mask = event_mask;
     w->user_data = user_data;
     w->flags = watch_flags;
+    memset(w->fs_prefix, 0, sizeof(w->fs_prefix));
+    if (fs_prefix)
+        strncpy(w->fs_prefix, fs_prefix, sizeof(w->fs_prefix) - 1);
     w->owner_queue = eq;
     w->next = NULL;
 
@@ -125,6 +128,9 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
         if (old->target_object == target_obj && old->target_type == target_type) {
             old->event_mask = event_mask;
             old->user_data = user_data;
+            old->target_handle = target_h;
+            old->flags = watch_flags;
+            memcpy(old->fs_prefix, w->fs_prefix, sizeof(old->fs_prefix));
             spin_unlock_irqrestore(&eq->lock, eq_flags);
             spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
             kfree(node);
@@ -143,6 +149,25 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
     spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
     wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
     return A20_OK;
+}
+
+int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h,
+                         void *target_obj, uint16_t target_type,
+                         uint64_t event_mask, uint64_t user_data,
+                         uint16_t watch_flags)
+{
+    return eventq_watch(eq, target_h, target_obj, target_type, event_mask,
+                       user_data, watch_flags, NULL);
+}
+
+int64_t a20_eventq_watch_fs(a20_eventq_t *eq, a20_handle_t target_h,
+                            void *vnode, uint64_t event_mask,
+                            uint64_t user_data, const char *prefix)
+{
+    if (!prefix || strlen(prefix) >= sizeof(((a20_watch_entry_t *)0)->fs_prefix))
+        return -A20_ERR_INVALID_ARGUMENT;
+    return eventq_watch(eq, target_h, vnode, A20_OBJ_DIRECTORY, event_mask,
+                       user_data, 0, prefix);
 }
 
 uint64_t a20_eventq_level_bits(const void *object, uint16_t type)
@@ -569,6 +594,15 @@ void a20_fs_notify(void *vn, uint32_t event_type, const char *name,
             a20_eventq_t *eq = we->owner_queue;
             int should_wake = 0;
             uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
+            /* Match the full producer name before the public 32-byte name
+             * is truncated. Unnamed self-events only match an empty prefix. */
+            if (we->fs_prefix[0] &&
+                (!name || strncmp(name, we->fs_prefix,
+                                  strlen(we->fs_prefix)) != 0)) {
+                spin_unlock_irqrestore(&eq->lock, eq_flags);
+                node = node->next;
+                continue;
+            }
             if (eq->ring_count < eq->ring_cap) {
                 a20_pending_event_t ev;
                 memset(&ev, 0, sizeof(ev));

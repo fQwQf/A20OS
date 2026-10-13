@@ -6,7 +6,7 @@
 
 ## 1. 设计概览
 
-Native ABI 提供两个互补的 IPC 原语。Channel 是同步/异步消息传递，支持 handle 传递，用于 RPC、请求-响应和数据流。Event Queue 的目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合；当前已接入 channel、timer、task 退出、用户态驱动 IRQ、socket/pipe readiness、signal delivery 和文件系统路径事件。`event_watch` 默认边沿触发，可选 `A20_WATCH_LEVEL` 对非 vfile 类型在 park 前直接查对象就绪位（file/pipe/socket 一类 vfile-backed 对象走 park 失败后的 readiness/poll 子系统）；普通 file fd 仍无 readiness 生产者，`event_watch_fs` 只支持目录级 watch，因此还不是 epoll/signalfd 的完整替代。
+Native ABI 提供两个互补的 IPC 原语。Channel 是同步/异步消息传递，支持 handle 传递，用于 RPC、请求-响应和数据流。Event Queue 的目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合；当前已接入 channel、timer、task 退出、用户态驱动 IRQ、socket/pipe readiness、signal delivery 和文件系统路径事件。`event_watch` 默认边沿触发，可选 `A20_WATCH_LEVEL` 对非 vfile 类型在 park 前直接查对象就绪位（file/pipe/socket 一类 vfile-backed 对象走 park 失败后的 readiness/poll 子系统）；普通 file fd 仍无 readiness 生产者，`event_watch_fs` 支持目录及直接子项名称前缀 watch（不递归），因此还不是 epoll/signalfd 的完整替代。
 
 两者都基于 handle：创建后返回 handle，操作通过 handle 进行，权限通过 rights 控制。
 

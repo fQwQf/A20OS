@@ -776,8 +776,28 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
     a20_event_watch_fs_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
-    if (kargs.event_mask == 0)
+    uint32_t fs_mask = (1u << A20_EVENT_FS_CREATE) |
+                       (1u << A20_EVENT_FS_DELETE) |
+                       (1u << A20_EVENT_FS_MODIFY) |
+                       (1u << A20_EVENT_FS_RENAME);
+    if (kargs.event_mask == 0 || (kargs.event_mask & ~fs_mask))
         return -A20_ERR_INVALID_ARGUMENT;
+
+    char prefix[256] = {0};
+    if (kargs.path_len >= sizeof(prefix))
+        return -A20_ERR_NAME_TOO_LONG;
+    if (kargs.path_len) {
+        if (!kargs.path ||
+            copy_from_user(prefix, (const void *)(uintptr_t)kargs.path,
+                           kargs.path_len) < (long)kargs.path_len)
+            return -A20_ERR_FAULT;
+        /* Paths here filter direct child names. Recursive traversal would
+         * require watches on each descendant directory, not a string match. */
+        for (uint32_t i = 0; i < kargs.path_len; i++) {
+            if (!prefix[i] || prefix[i] == '/')
+                return -A20_ERR_INVALID_ARGUMENT;
+        }
+    }
 
     a20_handle_t dir_h = kargs.dir;
     a20_handle_t queue_h = kargs.queue;
@@ -805,10 +825,8 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
      * the same directory receives the same change events (docs/native-abi/
      * 09-native-abi-deepening.md §6).  The vnode is referenced by the fd
      * throughout the watch; vnode_put() cleans up the watch on release. */
-    int gfd = (int)(uintptr_t)dir_entry.object;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = (vfile_t *)dir_entry.object;
     if (!vf || !vf->vnode) {
-        if (vf) vfs_put_file_ref(gfd, vf);
         a20_object_release(eq_entry.object, eq_entry.type);
         a20_object_release(dir_entry.object, dir_entry.type);
         return -A20_ERR_BAD_HANDLE;
@@ -816,9 +834,8 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
     vnode_t *vn = vf->vnode;
 
     a20_eventq_t *eq = (a20_eventq_t *)eq_entry.object;
-    r = a20_eventq_watch(eq, dir_h, vn, A20_OBJ_DIRECTORY,
-                         (uint64_t)event_mask, user_data, 0);
-    vfs_put_file_ref(gfd, vf);
+    r = a20_eventq_watch_fs(eq, dir_h, vn, (uint64_t)event_mask,
+                            user_data, prefix);
     a20_object_release(eq_entry.object, eq_entry.type);
     a20_object_release(dir_entry.object, dir_entry.type);
     return r;
