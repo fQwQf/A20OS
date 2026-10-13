@@ -96,6 +96,11 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
+# The MCU protocol harness includes the real UART header, whose types need
+# the selected architecture headers even though no architecture code runs.
+$(TMPDIR)/a20-host-test_mcu_leaf: tools/tests/test_mcu_leaf.c
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel $< -o $@
+
 # Exercise the actual vendored lwIP heap and pbuf code under host threads. The
 # host port supplies only the architecture types and lock shims; allocator and
 # reference-count algorithms come from the kernel's lwIP sources.
@@ -105,8 +110,8 @@ $(TMPDIR)/a20-host-test_lwip_allocator_concurrency: \
         kernel/external/lwip/src/core/memp.c \
         kernel/external/lwip/src/core/pbuf.c
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -ffunction-sections -fdata-sections \
-	  -DCONFIG_X86_64 \
-	  -Itools/tests/lwip_host_port \
+	  -DCONFIG_X86_64 -DCONFIG_NR_CPUS=4 \
+	  -Itools/tests/lwip_host_port -Itools/tests/net_lane_host_port \
 	  -Ikernel/external/lwip/src/include -Ikernel/include -Ikernel \
 	  $^ -Wl,--gc-sections -o $@
 
