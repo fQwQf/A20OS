@@ -1,0 +1,21 @@
+# Physical BSP contract; UART and CPU startup have only QEMU evidence so far.
+name = "raspberrypi4"
+description = "Raspberry Pi 4 AArch64 native bring-up; physical validation pending"
+arch = "aarch64"
+board = "raspberrypi4"
+abi = "both"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 4
+allow_unverified_smp = true
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 3
+boot_timeout = "60s"
+console_check = ["[RPi4] firmware CPUs=4", "4/4 configured CPUs online", "System ready"]

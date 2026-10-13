@@ -74,6 +74,21 @@ jobs:
       - name: Host-side unit tests for kernel format/helper logic
         run: make host-tests
 
+      - name: Shared cluster protocol, MCU runtime and bounded job tests
+        run: make check-cluster-unit
+
+      - name: Cluster codecs and runtime under ASan and UBSan
+        run: make check-cluster-fuzz
+
+      - name: Virtio network descriptor completion and wraparound
+        run: make check-virtio-net-completion
+
+      - name: Cluster receive wake and park race boundaries
+        run: make check-cluster-wakeup
+
+      - name: Slab CPU array IRQ reentry and migration boundaries
+        run: make check-slab-cpu-window
+
       # 把 kernel/include/drivers/gpu/drm.h 的每个 DRM_IOCTL_* 编号与
       # 宿主 linux-headers 的 include/uapi/drm 逐条比对，并实测线结构体
       # 尺寸与字段偏移。tools/ci/Dockerfile 刻意不带 linux-headers，所以
@@ -137,6 +152,55 @@ jobs:
 
       - id: arches
         run: make -s print-ci-kernel-arches >> "$GITHUB_OUTPUT"
+
+  cluster-runtime:
+    name: cluster-independent-kernel-runtime
+    needs: buildenv-image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.buildenv-image.outputs.image }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Trust workspace ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache compiler output
+        uses: actions/cache@v4
+        with:
+          path: build/cache/ccache
+          key: ccache-cluster-${{ github.sha }}
+          restore-keys: ccache-cluster-
+
+      - name: Loopback resource and lifecycle regression
+        run: make check-cluster-loopback
+
+      - name: Independent UDP kernels with faults and reboot
+        run: make check-cluster-reliable
+
+      - name: Native services, process cancellation and supervision
+        run: make smoke-native-cluster smoke-native-cluster-supervisor
+
+      - name: Native membership, indirect probe and job recovery
+        run: make check-cluster-mesh
+
+      - name: Extended mixed architecture and MCU simulation acceptance
+        if: github.event_name == 'workflow_dispatch'
+        run: make check-cluster-hardening check-cluster-send check-cluster-smp demo-wordcount check-cluster-fuzz-smoke check-cluster-performance check-cluster-load
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-runtime-evidence
+          path: |
+            .kernel-build/cluster/**/*.log
+            .kernel-build/cluster/**/*.json
+            .kernel-build/smoke/native-cluster*.log
+          if-no-files-found: warn
 
   build:
     name: build-${{ matrix.arch }}

@@ -37,13 +37,13 @@
 /* frag field (02 §1: low 12 bits sequence, bit15 last, bit12-14 res.) */
 /* ------------------------------------------------------------------ */
 
-#define A20_CLX_FRAG_SEQ_MASK  0x0FFFu
-#define A20_CLX_FRAG_LAST      0x8000u
-#define A20_CLX_FRAG_RESERVED  0x7000u
+#define A20_CLX_FRAG_SEQ_MASK 0x0FFFu
+#define A20_CLX_FRAG_LAST 0x8000u
+#define A20_CLX_FRAG_RESERVED 0x7000u
 
 /* Known flag set (02 §3).  Bits 4..15 are reserved: senders zero them,
  * receivers ignore them (A-16 for COMPRESSED). */
-#define A20_CLX_FLAGS_KNOWN    0x000Fu
+#define A20_CLX_FLAGS_KNOWN 0x000Fu
 
 /* ------------------------------------------------------------------ */
 /* Layer-1 verdicts.  The enum order mirrors the decision order of      */
@@ -52,18 +52,18 @@
 /* ------------------------------------------------------------------ */
 
 typedef enum a20_frame_verdict {
-    A20_FRAME_OK                        = 0,
-    A20_FRAME_SHORT_FRAME               = 1,  /* short_frame               */
-    A20_FRAME_BAD_MAGIC                 = 2,  /* bad_magic                 */
-    A20_FRAME_UNSUPPORTED_VER           = 3,  /* unsupported_ver           */
-    A20_FRAME_UNKNOWN_TYPE              = 4,  /* unknown_type              */
-    A20_FRAME_UNSUPPORTED_CSUM_KIND     = 5,  /* unsupported_csum_kind     */
-    A20_FRAME_PAYLOAD_OVER_MTU          = 6,  /* payload_len_over_mtu      */
-    A20_FRAME_PAYLOAD_LEN_MISMATCH      = 7,  /* payload_len_mismatch      */
-    A20_FRAME_CRC_MISMATCH              = 8,  /* crc_mismatch              */
-    A20_FRAME_FRAG_FLAG_MISMATCH        = 9,  /* frag_flag_mismatch        */
-    A20_FRAME_SEQ_ON_UNRELIABLE         = 10, /* seq_on_unreliable_frame   */
-    A20_FRAME_TXID_ON_SEND              = 11, /* txid_on_send              */
+    A20_FRAME_OK = 0,
+    A20_FRAME_SHORT_FRAME = 1,                /* short_frame               */
+    A20_FRAME_BAD_MAGIC = 2,                  /* bad_magic                 */
+    A20_FRAME_UNSUPPORTED_VER = 3,            /* unsupported_ver           */
+    A20_FRAME_UNKNOWN_TYPE = 4,               /* unknown_type              */
+    A20_FRAME_UNSUPPORTED_CSUM_KIND = 5,      /* unsupported_csum_kind     */
+    A20_FRAME_PAYLOAD_OVER_MTU = 6,           /* payload_len_over_mtu      */
+    A20_FRAME_PAYLOAD_LEN_MISMATCH = 7,       /* payload_len_mismatch      */
+    A20_FRAME_CRC_MISMATCH = 8,               /* crc_mismatch              */
+    A20_FRAME_FRAG_FLAG_MISMATCH = 9,         /* frag_flag_mismatch        */
+    A20_FRAME_SEQ_ON_UNRELIABLE = 10,         /* seq_on_unreliable_frame   */
+    A20_FRAME_TXID_ON_SEND = 11,              /* txid_on_send              */
     A20_FRAME_FIXED_PAYLOAD_LEN_MISMATCH = 12 /* fixed_payload_len_mismatch */
 } a20_frame_verdict_t;
 
@@ -76,26 +76,26 @@ const char *a20_frame_verdict_str(int verdict);
 /* ------------------------------------------------------------------ */
 
 typedef struct a20_frame_hdr {
-    uint8_t  ver;
-    uint8_t  type;
+    uint8_t ver;
+    uint8_t type;
     uint16_t flags;
-    uint16_t frag;        /* raw field: seq | last | reserved            */
+    uint16_t frag; /* raw field: seq | last | reserved            */
     uint32_t txid;
     uint32_t src_hash;
     uint32_t dst_hash;
     uint32_t dst_slot;
     uint32_t seq;
-    uint16_t payload_len;
-    uint8_t  ttl;
-    uint8_t  csum_kind;
-    uint8_t  crc_present; /* 1 when csum_kind == A20_CLX_CSUM_CCITT      */
-    uint16_t crc_value;   /* received CRC (valid when crc_present)       */
+    uint32_t payload_len; /* Internal logical view; wire field remains u16. */
+    uint8_t ttl;
+    uint8_t csum_kind;
+    uint8_t crc_present; /* 1 when csum_kind == A20_CLX_CSUM_CCITT      */
+    uint64_t src_session, dst_session; /* Internal view; not wire fields. */
+    uint16_t crc_value; /* received CRC (valid when crc_present)       */
 } a20_frame_hdr_t;
 
 /* 02 §1 via A-09: payload_len <= mtu - 32 - 2, the 2 CRC bytes are
  * subtracted unconditionally, also when csum_kind=0. */
-static inline uint32_t a20_frame_max_payload(uint32_t mtu)
-{
+static inline uint32_t a20_frame_max_payload(uint32_t mtu) {
     return (mtu >= A20_CLX_HDR_LEN + A20_CLX_CRC_LEN)
                ? mtu - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN
                : 0;
@@ -123,6 +123,19 @@ int a20_frame_fixed_payload_len(uint8_t type);
 int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
                      const a20_frame_hdr_t *h, const uint8_t *payload);
 
+/* Owned retry/replay buffers may represent a 64 KiB business message plus
+ * session metadata. A saturated u16 length is private to these buffers and
+ * is NEVER accepted by wire decoders; TX fragments it before driver I/O. */
+int a20_frame_encode_logical(uint8_t *buf, uint32_t cap, uint32_t mtu,
+                             const a20_frame_hdr_t *h, const uint8_t *payload);
+a20_frame_verdict_t a20_frame_decode_logical(const uint8_t *buf, uint32_t len,
+                                             uint32_t mtu, a20_frame_hdr_t *out,
+                                             const uint8_t **payload);
+
+/* Forward an already valid frame in place, preserving all fields except
+ * TTL and CRC. Reject exhaustion or a smaller outgoing MTU. */
+int a20_frame_forward(uint8_t *buf, uint32_t len, uint32_t outgoing_mtu);
+
 /*
  * Layer-1 decode, same contract and decision order as
  * clframe.decode_frame()/refdec.c (02 §9 offline vectors):
@@ -146,5 +159,11 @@ int a20_frame_encode(uint8_t *buf, uint32_t cap, uint32_t mtu,
 a20_frame_verdict_t a20_frame_decode(const uint8_t *buf, uint32_t len,
                                      uint32_t mtu, a20_frame_hdr_t *out,
                                      const uint8_t **payload);
+
+/* Runtime decoder accepts the negotiated session extension (v1). The v0
+ * reference entry above remains strict for the original gold corpus. */
+a20_frame_verdict_t a20_frame_decode_session(const uint8_t *buf, uint32_t len,
+                                             uint32_t mtu, a20_frame_hdr_t *out,
+                                             const uint8_t **payload);
 
 #endif /* _CLUSTER_FRAME_H */

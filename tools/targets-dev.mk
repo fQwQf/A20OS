@@ -29,4 +29,4 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		--stamp "$(NATIVE_BUILD_STAMP)" --build-id "$(USER_BUILD_ID)" \
 		--arch "$(ARCH)" --nommu "$(NOMMU)" --opt="$(OPT)" \
 		--binaries "$(NATIVE_BINS)" \
-		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual"
+		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual kernel/include/uapi/a20 tools/targets-native.mk tools/targets-dev.mk"

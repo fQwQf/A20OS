@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
 #include "core/futex.h"
 #include "core/errno.h"
 #include "core/lock.h"
@@ -11,6 +12,9 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#ifdef CONFIG_FLAT_USER_MEMORY
+#include "mm/flat_user.h"
+#endif
 #include "proc/proc_internal.h"
 #include <stdint.h>
 #include "mm/slab.h"
@@ -188,13 +192,25 @@ static uintptr_t futex_phys_key(int *uaddr)
 static volatile int *futex_user_word_locked(task_t *task, int *uaddr,
                                             uintptr_t *pkey)
 {
-    if (!task || !task->mm || !uaddr)
+    if (!task || !uaddr)
         return NULL;
 #ifdef CONFIG_NOMMU
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user) {
+        if (!a20_flat_range_locked(task->flat_user, (uintptr_t)uaddr,
+                                   sizeof(*uaddr)))
+            return NULL;
+    } else
+#endif
+    {
+        int probe;
+        if (copy_from_user(&probe, uaddr, sizeof(probe)) < 0)
+            return NULL;
+    }
     *pkey = (uintptr_t)uaddr;
     return uaddr;
 #else
-    if (!task->pgdir)
+    if (!task->mm || !task->pgdir)
         return NULL;
     paddr_t pa = pt_translate(task->pgdir, (vaddr_t)(uintptr_t)uaddr);
     if (!pa)
@@ -242,6 +258,99 @@ static void futex_requeue_rekey(wait_queue_entry_t *entry, void *arg)
     w->mm = r->mm;
 }
 
+static uint64_t futex_wait_mapping_lock(task_t *task) {
+#ifdef CONFIG_NOMMU
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user)
+        return spin_lock_irqsave(&task->flat_user->lock);
+#endif
+    if (!task->mm)
+        return 0;
+#endif
+    return spin_lock_irqsave(&task->mm->lock);
+}
+
+static void futex_wait_mapping_unlock(task_t *task, uint64_t flags) {
+#ifdef CONFIG_NOMMU
+#ifdef CONFIG_FLAT_USER_MEMORY
+    if (task->flat_user) {
+        spin_unlock_irqrestore(&task->flat_user->lock, flags);
+        return;
+    }
+#endif
+    if (!task->mm)
+        return;
+#endif
+    spin_unlock_irqrestore(&task->mm->lock, flags);
+}
+
+/* Native user atomics keep all word mutations in the same domain provider as
+ * the wait-side recheck. No unprivileged compiler LDREX/LR.SC or direct access
+ * to a privileged hardware gate is required. The numeric operations are the
+ * internal LOAD/STORE/EXCHANGE/CAS contract, independent of any ABI header. */
+int futex_atomic_user32(uint32_t *uaddr, unsigned operation, uint32_t expected,
+                        uint32_t desired, uint32_t *observed,
+                        uint32_t *exchanged) {
+    if (!uaddr)
+        return -EFAULT;
+    if ((uintptr_t)uaddr & 3U || operation > 3 || !observed || !exchanged)
+        return -EINVAL;
+    task_t *task = proc_current();
+    if (!task)
+        return -ESRCH;
+#ifndef CONFIG_NOMMU
+    if (!task->mm)
+        return -EFAULT;
+    /* Write operations must resolve a writable/COW mapping before pinning. */
+    if (operation) {
+        int prepared = user_prepare_write(task, (uintptr_t)uaddr);
+        if (prepared < 0)
+            return prepared;
+    }
+#endif
+    uint32_t probe;
+    if (copy_from_user(&probe, uaddr, sizeof(probe)) < 0)
+        return -EFAULT;
+    uint64_t flags = futex_wait_mapping_lock(task);
+#ifndef CONFIG_NOMMU
+    /* Recheck permissions with the mapping pinned: another thread may have
+     * replaced/protected it after user_prepare_write resolved COW. */
+    mm_leaf_info_t leaf;
+    uint64_t required = PTE_U | PTE_R | (operation ? PTE_W : 0);
+    if (!mm_query_leaf(task->pgdir, (uintptr_t)uaddr, &leaf) ||
+        (leaf.flags & required) != required) {
+        futex_wait_mapping_unlock(task, flags);
+        return -EFAULT;
+    }
+#endif
+    uintptr_t pkey;
+    volatile uint32_t *word =
+        (volatile uint32_t *)futex_user_word_locked(task, (int *)uaddr, &pkey);
+    if (!word) {
+        futex_wait_mapping_unlock(task, flags);
+        return -EFAULT;
+    }
+    *exchanged = 0;
+    switch (operation) {
+        case 0:
+            *observed = __atomic_load_n(word, __ATOMIC_SEQ_CST);
+            break;
+        case 1:
+            /* Exchanging also returns the previous value for STORE. */
+        case 2:
+            *observed = __atomic_exchange_n(word, desired, __ATOMIC_SEQ_CST);
+            break;
+        case 3:
+            *exchanged =
+                __atomic_compare_exchange_n(word, &expected, desired, 0,
+                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            *observed = expected;
+            break;
+    }
+    futex_wait_mapping_unlock(task, flags);
+    return 0;
+}
+
 /*
  * FUTEX_WAIT_RECHECK_PROTOCOL
  *
@@ -251,19 +360,23 @@ static void futex_requeue_rekey(wait_queue_entry_t *entry, void *arg)
  * matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
  */
 /* ticks == 0 waits indefinitely. */
-int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
-                           uint32_t bitset, int private)
-{
+static int futex_wait_ticks_pinned(int *uaddr, int expected, uint64_t ticks,
+                                   uint32_t bitset, int private) {
     if (!uaddr) return -EFAULT;
     if ((uintptr_t)uaddr & (sizeof(int) - 1)) return -EINVAL;
     if (bitset == 0) return -EINVAL;
 
     task_t *t = proc_current();
     if (!t) return -ESRCH;
+#ifndef CONFIG_NOMMU
+    if (!t->mm)
+        return -EFAULT;
+#endif
 
     int uval;
     if (copy_from_user(&uval, uaddr, sizeof(uval)) < 0) return -EFAULT;
-    if (uval != expected) return -EAGAIN;
+    /* Preflight accessibility only. On a narrow shared bus memcpy is not an
+     * atomic observation; the provider load below decides the condition. */
 
     uint64_t until = ticks ? timer_get_ticks() + ticks : 0;
     uintptr_t vkey = (uintptr_t)uaddr;
@@ -277,22 +390,22 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
     /* The bucket depends on the physical key, so the word has to be mapped
      * before the bucket is known; mm->lock pins the translation from here to
      * the link, so the pointer stays valid across the bucket-lock acquire. */
-    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t mm_flags = futex_wait_mapping_lock(t);
     volatile int *word = futex_user_word_locked(t, uaddr, &pkey);
     if (!word) {
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -EFAULT;
     }
     if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) {
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -EAGAIN;
     }
     if (signal_task_has_unblocked(t)) {
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ERESTARTSYS;
@@ -308,7 +421,7 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
      * decides between parking and reporting -EAGAIN. */
     if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) {
         spin_unlock_irqrestore(&q->lock, flags);
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -EAGAIN;
@@ -317,7 +430,7 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
     futex_node_t *node = kmalloc(sizeof(*node));
     if (!node) {
         spin_unlock_irqrestore(&q->lock, flags);
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ENOMEM;
@@ -334,14 +447,14 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
     (void)wait_queue_purge_task_locked(q, t);
     if (!wait_queue_link_locked(q, &node->entry, token, vkey)) {
         spin_unlock_irqrestore(&q->lock, flags);
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        futex_wait_mapping_unlock(t, mm_flags);
         kfree(node);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ESRCH;
     }
     spin_unlock_irqrestore(&q->lock, flags);
-    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+    futex_wait_mapping_unlock(t, mm_flags);
 
     proc_wake_reason_t reason = proc_park_commit(token);
     proc_park_finish(token);
@@ -355,6 +468,27 @@ int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
     if (reason == PROC_WAKE_TIMEOUT)
         return -ETIMEDOUT;
     return 0;
+}
+
+/* Dynamic flat words retain their allocation throughout wait admission,
+ * sleep, wake and unlink. Unmap returns BUSY instead of reusing a live key. */
+int futex_wait_ticks_mode(int *uaddr, int expected, uint64_t ticks,
+                          uint32_t bitset, int private) {
+#ifdef CONFIG_FLAT_USER_MEMORY
+    task_t *task = proc_current();
+    if (task && task->flat_user && uaddr && !((uintptr_t)uaddr & 3U) &&
+        bitset) {
+        a20_flat_region_t *lease =
+            a20_flat_pin(task->flat_user, (uintptr_t)uaddr, sizeof(*uaddr));
+        if (!lease)
+            return -EFAULT;
+        int result =
+            futex_wait_ticks_pinned(uaddr, expected, ticks, bitset, private);
+        a20_flat_unpin(task->flat_user, lease);
+        return result;
+    }
+#endif
+    return futex_wait_ticks_pinned(uaddr, expected, ticks, bitset, private);
 }
 
 int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
@@ -380,11 +514,14 @@ int futex_wait_user_ns(int *uaddr, int expected, uint64_t timeout_ns)
         uint64_t sec = timeout_ns / 1000000000ULL;
         uint64_t nsec = timeout_ns % 1000000000ULL;
         uint64_t now = timer_get_ticks();
-        if (sec > (UINT64_MAX - now) / TICKS_PER_SEC) {
-            ticks = UINT64_MAX - now; /* saturate: effectively infinite */
+        uint64_t room = UINT64_MAX - now;
+        uint64_t fraction =
+            (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+        if (sec > room / TICKS_PER_SEC) {
+            ticks = room;
         } else {
-            ticks = sec * TICKS_PER_SEC +
-                    (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+            ticks = sec * TICKS_PER_SEC;
+            ticks = fraction > room - ticks ? room : ticks + fraction;
             if (!ticks) ticks = 1;
         }
     }
@@ -803,3 +940,5 @@ next:
 
     t->robust_list_head = 0;
 }
+
+#endif

@@ -24,6 +24,10 @@
 #include "drvmod/drvmod.h"
 
 #include "core/bootargs.h"
+#ifdef CONFIG_SHARED_DEVICE_CALL
+#include "core/shared_device_call.h"
+#include "core/shared_mmio.h"
+#endif
 #include "core/kallsyms.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -307,6 +311,11 @@ __attribute__((weak)) const unsigned arch_drv_export_count = 0;
 extern bus_type_t platform_bus;
 
 const struct drv_export drv_export_table[] = {
+#ifdef CONFIG_SHARED_DEVICE_CALL
+    { "shared_device_poll", (void *)shared_device_poll },
+    { "shared_mmio_read",   (void *)shared_mmio_read },
+    { "shared_mmio_write",  (void *)shared_mmio_write },
+#endif
     { "strncpy",             strncpy },
     { "memset",              memset },
     { "memcpy",              memcpy },

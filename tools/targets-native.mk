@@ -33,7 +33,7 @@ NATIVE_CC_loongarch64 := loongarch64-linux-gnu-gcc
 NATIVE_CC_aarch64     := aarch64-linux-gnu-gcc
 NATIVE_CC_x86_64      := x86_64-linux-gnu-gcc
 NATIVE_CC_arm32       := arm-none-eabi-gcc
-NATIVE_CC_riscv32     := riscv32-linux-gnu-gcc
+NATIVE_CC_riscv32     := $(CROSS_PREFIX_riscv32)gcc
 NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
 NATIVE_CC := $(CCACHE_PREFIX)$(NATIVE_CC_$(ARCH))
 NATIVE_CFLAGS_riscv64     := -march=rv64gc -mabi=lp64d -mcmodel=medany
@@ -89,7 +89,7 @@ NATIVE_LIBC_SRC  := \
 # instead: over-declaring is the safe direction for a correctness net, and
 # $(wildcard) yields an empty list for an absent directory rather than a
 # literal unexpanded path.
-NATIVE_SDK_HDRS := $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+NATIVE_SDK_HDRS := kernel/include/uapi/a20/abi_features.h $(wildcard kernel/include/uapi/a20/cluster*.h) kernel/include/uapi/a20/runtime.h $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
 
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
@@ -184,12 +184,13 @@ $(1) -ffreestanding -nostdlib -static \
     $(NATIVE_SDK_SRC) \
     $(NATIVE_COMPILER_RT_SRC) \
     $(NATIVE_ARCH_SRC) \
-    user/tests/test_native_futex.c \
+    user/tests/test_native_futex.c user/tests/native-memory-contract.h user/tests/native-domain-contract.h kernel/include/uapi/a20/execution_domain.h \
     $(NATIVE_LIBS) \
     -o $(4)
 endef
 
-$(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c \
+$(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c user/tests/native-memory-contract.h \
+        user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-spawn-contract.h user/tests/native-task-control-contract.h user/tests/native-compute-cancel-contract.h user/liba20rt/a20_work.h user/tests/native-object-contract.h kernel/include/uapi/a20/cluster_objects.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h kernel/include/uapi/a20/execution_domain.h \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
@@ -481,6 +482,38 @@ $(NATIVE_CLUSTER_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC
 
 native-cluster-arch: $(NATIVE_CLUSTER_BIN)
 
+define NATIVE_CLUSTER_APP_RECIPE
+@mkdir -p $(dir $(2))
+$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) \
+    -Iuser -Iuser/liba20rt -T$(NATIVE_LD) $(NATIVE_CRT0) \
+    $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    $(1) $(NATIVE_LIBS) -o $(2)
+endef
+
+$(NATIVE_CLUSTER_AGENT_BIN): user/svc/cluster_agent.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_agent.c,$@)
+
+$(NATIVE_CLUSTER_PROBE_BIN): user/svc/cluster_task_probe.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_task_probe.c,$@)
+
+.PHONY: native-cluster-agent
+native-cluster-agent: $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) $(NATIVE_CLUSTER_HANG_BIN) $(NATIVE_CLUSTERD_BIN) $(NATIVE_JOBD_BIN) $(NATIVE_CLUSTER_WORDCOUNT_BIN) $(NATIVE_CLUSTER_SUPERVISOR_BIN) $(NATIVE_CLUSTER_MESH_BIN) $(NATIVE_CLUSTER_INSTANCE_BIN)
+
+$(NATIVE_CLUSTER_INSTANCE_BIN): user/tests/test_native_cluster_instance.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_cluster_instance.c,$@)
+
+$(NATIVE_CLUSTER_MESH_BIN): user/tests/test_native_cluster_mesh.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_mesh.c,$@)
+
+$(NATIVE_JOBD_BIN): user/svc/jobd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/jobd.c,$@)
+
+$(NATIVE_CLUSTERD_BIN): user/svc/clusterd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/clusterd.c,$@)
+
+$(NATIVE_CLUSTER_HANG_BIN): user/svc/cluster_hang_probe.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_hang_probe.c,$@)
+
 native-cluster-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-cluster-arch
 
@@ -657,3 +690,55 @@ native-chess-ppc64le:
 	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-chess-arch
 
 native-chess-all: native-chess-rv native-chess-la native-chess-aarch64 native-chess-x86_64 native-chess-arm32 native-chess-rv32 native-chess-ppc64le
+
+$(NATIVE_CLUSTER_SUPERVISOR_BIN): user/svc/cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_supervisor.c,$@)
+
+$(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN): user/tests/test_native_cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_supervisor.c,$@)
+
+$(NATIVE_CLUSTER_WORDCOUNT_BIN): user/svc/cluster_wordcount.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_wordcount.c,$@)
+
+$(NATIVE_CLUSTER_WORD8_BIN): user/tests/test_native_cluster_word8.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_word8.c,$@)
+
+$(NATIVE_CLUSTER_BENCH_BIN): user/tests/test_native_cluster_bench.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_bench.c,$@)
+
+.PHONY: native-cluster-bench
+native-cluster-bench: $(NATIVE_CLUSTER_BENCH_BIN)
+
+$(NATIVE_CLUSTER_LOAD_BIN): user/tests/test_native_cluster_load.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_load.c,$@)
+
+.PHONY: native-cluster-load
+native-cluster-load: $(NATIVE_CLUSTER_LOAD_BIN)
+
+$(NATIVE_OBJECTD_BIN): user/svc/objectd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/objectd.c,$@)
+
+$(NATIVE_OBJECT_TEST_BIN): user/tests/test_native_objects.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_objects.c,$@)
+
+$(NATIVE_APPD_BIN): user/svc/appd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/appd.c,$@)
+
+$(NATIVE_APPEXEC_BIN): user/svc/app_exec.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/app_exec.c,$@)
+
+$(NATIVE_APP_TEST_BIN): user/tests/test_native_apps.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_apps.c,$@)
+
+$(NATIVE_APP_CHILD_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_app_child.c,$@)
+
+$(NATIVE_APP_EXIT_BIN): user/tests/test_native_app_child.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DAPP_EXIT=37 user/tests/test_native_app_child.c,$@)
+
+$(NATIVE_APPCTL_BIN): user/svc/appctl_run.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/appctl_run.c,$@)
+
+$(NATIVE_SPAWN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/native-spawn-child.c user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-runtime-contract.h user/tests/native-object-contract.h $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	@mkdir -p $(@D)
+	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/native-spawn-child.c $(NATIVE_LIBS) -o $@

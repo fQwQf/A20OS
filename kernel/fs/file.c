@@ -1,3 +1,4 @@
+#if !defined(CONFIG_MCU) || defined(CONFIG_NATIVE_FLAT_FILES)
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
@@ -19,13 +20,19 @@
  * (and its bucket locks) was removed with the per-task pointer model.
  */
 
-static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
+#ifdef CONFIG_NATIVE_FLAT_FILES
+#define VFILE_CACHE_LIMIT 0
+#else
+#define VFILE_CACHE_LIMIT 256
+#endif
+static obj_cache_t g_vfile_cache =
+    OBJ_CACHE_INIT("vfile", vfile_t, VFILE_CACHE_LIMIT);
 static size_t g_vfile_live;
 static uint64_t g_vfile_next_identity;
 
 void file_table_init(void)
 {
-    obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), 256);
+    obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), VFILE_CACHE_LIMIT);
     g_vfile_live = 0;
     g_vfile_next_identity = 0;
 }
@@ -119,3 +126,5 @@ void vfs_put_file(vfile_t *vf)
     if (vfile_put_ref_only(vf))
         vfs_finalize_closed_vfile(vf);
 }
+
+#endif

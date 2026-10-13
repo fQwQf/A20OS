@@ -3,6 +3,14 @@
 #include "core/string.h"
 #include "drivers/stm32f1/extsram.h"
 #include "heap.h"
+#ifdef CONFIG_MCU_SHARED_KERNEL
+#include "shared_kernel.h"
+#define heap_lock() mcu_fabric_lock(A20_FABRIC_HEAP_GATE)
+#define heap_unlock(flags) mcu_fabric_unlock(A20_FABRIC_HEAP_GATE, flags)
+#else
+#define heap_lock() arch_irq_save()
+#define heap_unlock(flags) arch_irq_restore(flags)
+#endif
 
 typedef struct mcu_heap_block {
     size_t size;
@@ -39,8 +47,10 @@ size_t mcu_heap_available(void) {
     mcu_heap_stats_t stats;
     mcu_heap_get_stats(&stats);
     size_t total = stats.free_bytes;
+#ifndef CONFIG_MCU_SHARED_KERNEL
     if (stm32_extsram_ready())
         total += stm32_extsram_available();
+#endif
     return total;
 }
 
@@ -53,7 +63,7 @@ void mcu_heap_get_stats(mcu_heap_stats_t *stats) {
     stats->free_bytes = 0;
     stats->largest_free_bytes = 0;
 
-    uint32_t flags = arch_irq_save();
+    uint32_t flags = heap_lock();
     for (mcu_heap_block_t *b = heap_head; b; b = b->next) {
         if (!b->free)
             continue;
@@ -61,7 +71,7 @@ void mcu_heap_get_stats(mcu_heap_stats_t *stats) {
         if (b->size > stats->largest_free_bytes)
             stats->largest_free_bytes = b->size;
     }
-    arch_irq_restore(flags);
+    heap_unlock(flags);
     stats->used_bytes = stats->arena_bytes - stats->free_bytes;
 }
 
@@ -69,7 +79,7 @@ void *kmalloc(size_t size) {
     if (size == 0)
         return NULL;
     size = align8(size);
-    uint32_t flags = arch_irq_save();
+    uint32_t flags = heap_lock();
     for (mcu_heap_block_t *b = heap_head; b; b = b->next) {
         if (!b->free || b->size < size)
             continue;
@@ -83,25 +93,31 @@ void *kmalloc(size_t size) {
             b->size = size;
         }
         b->free = 0;
-        arch_irq_restore(flags);
+        heap_unlock(flags);
         return b + 1;
     }
-    arch_irq_restore(flags);
+    heap_unlock(flags);
+#ifdef CONFIG_MCU_SHARED_KERNEL
+    return NULL;
+#else
     return stm32_extsram_alloc(size);
+#endif
 }
 
 void kfree(void *ptr) {
     if (!ptr)
         return;
+#ifndef CONFIG_MCU_SHARED_KERNEL
     if (stm32_extsram_owns(ptr)) {
         stm32_extsram_free(ptr);
         return;
     }
+#endif
     uintptr_t value = (uintptr_t)ptr;
     if (value < heap_start_addr + sizeof(mcu_heap_block_t) ||
         value >= heap_end_addr)
         return;
-    uint32_t flags = arch_irq_save();
+    uint32_t flags = heap_lock();
     mcu_heap_block_t *block = (mcu_heap_block_t *)ptr - 1;
     block->free = 1;
     for (mcu_heap_block_t *b = heap_head; b && b->next; ) {
@@ -112,7 +128,7 @@ void kfree(void *ptr) {
             b = b->next;
         }
     }
-    arch_irq_restore(flags);
+    heap_unlock(flags);
 }
 
 void *kcalloc(size_t nmemb, size_t size) {
@@ -133,9 +149,12 @@ void *krealloc(void *ptr, size_t size) {
         return NULL;
     }
     size_t old_size;
+#ifndef CONFIG_MCU_SHARED_KERNEL
     if (stm32_extsram_owns(ptr)) {
         old_size = stm32_extsram_allocation_size(ptr);
-    } else {
+    } else
+#endif
+    {
         uintptr_t value = (uintptr_t)ptr;
         if (value < heap_start_addr + sizeof(mcu_heap_block_t) ||
             value >= heap_end_addr)

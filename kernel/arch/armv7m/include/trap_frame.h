@@ -27,13 +27,30 @@ typedef struct {
 } task_context_t;
 
 /* Architecture-private task state used by exception-return preemption. */
+#ifdef CONFIG_MCU_NATIVE_PROGRAM
+struct armv7m_program;
+void armv7m_program_release(struct armv7m_program *program);
+#define ARCH_PROGRAM_FIELD struct armv7m_program *arch_program;
+#define ARCH_PROGRAM_INIT(task) ((task)->arch_program = NULL)
+#define ARCH_TASK_RELEASE(task)                                                \
+    do {                                                                       \
+        armv7m_program_release((task)->arch_program);                          \
+        (task)->arch_program = NULL;                                           \
+        (task)->flat_user = NULL;                                              \
+    } while (0)
+#else
+#define ARCH_PROGRAM_FIELD
+#define ARCH_PROGRAM_INIT(task) ((void)(task))
+#endif
 #define ARCH_TASK_FIELDS \
+    ARCH_PROGRAM_FIELD \
     uintptr_t arch_preempt_resume_pc; \
     uint32_t arch_preempt_resume_xpsr; \
     uint32_t arch_preempt_active; \
     uint32_t arch_preempt_disable;
 
 #define ARCH_TASK_INIT(task) do { \
+    ARCH_PROGRAM_INIT(task); \
     (task)->arch_preempt_resume_pc = 0; \
     (task)->arch_preempt_resume_xpsr = 0; \
     (task)->arch_preempt_active = 0; \

@@ -1,6 +1,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
+#include "proc/task_object.h"
 #include "proc/signal.h"
 #include "ipc/seccomp.h"
 #include "drivers/core/udriver.h"
@@ -105,9 +106,11 @@ void *proc_scratch_buffer(size_t size)
     return buf;
 }
 
-void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
+static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
+                      int detached)
 {
     (void)clone_flags;
+    (void)detached;
     int parent_pgid = parent ? parent->pgid : 0;
     int parent_sid = parent ? parent->sid : 0;
 
@@ -116,7 +119,6 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->state     = PROC_READY;
     t->parent    = parent;
     t->exit_code = 0;
-    t->exit_notified = 0;
     t->priority  = parent ? parent->priority : 0;
     t->sched_level = 0;
     t->cpu_id    = parent ? parent->cpu_id : cpu_current_id();
@@ -191,6 +193,9 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->policy.no_new_privs = parent ? parent->policy.no_new_privs : 0;
     t->clone_flags = 0;
     t->exit_signal = SIGCHLD;
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    t->exit_parent_notified = 0;
+#endif
     t->clear_child_tid = NULL;
     t->robust_list_head = 0;
     t->sigaltstack.ss_sp = 0;
@@ -210,6 +215,10 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     }
     t->sig_old_blocked = 0;
     t->thread_pending = 0;
+#ifdef A20_TASK_OBJECTS_ENABLED
+    t->a20_signal_pending = 0;
+    t->a20_signal_blocked = parent ? a20_thread_sig_mask(parent, 0, 1) : 0;
+#endif
     t->thread_signal_info = NULL;
     ARCH_TASK_INIT(t);
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
@@ -257,6 +266,12 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     }
 
 #ifndef CONFIG_MCU
+    /* Internal workers have no user descriptors or signal disposition. */
+    if (detached) {
+        t->files = NULL;
+        t->signals = NULL;
+        return;
+    }
     if (parent && (clone_flags & (CLONE_FILES | CLONE_THREAD)))
         fdtable_share(t, parent);
     else if (parent)
@@ -276,6 +291,16 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->files = NULL;
     t->signals = NULL;
 #endif
+}
+
+void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
+{
+    task_init(t, parent, clone_flags, 0);
+}
+
+void proc_task_init_detached(task_t *t)
+{
+    task_init(t, NULL, 0, 1);
 }
 
 void proc_task_first_entry(void)
@@ -328,6 +353,10 @@ static void proc_task_release_resources(task_t *t)
         t->mm = NULL;
     }
     t->pgdir = NULL;
+
+#ifdef ARCH_TASK_RELEASE
+    ARCH_TASK_RELEASE(t);
+#endif
 
     keyring_release_task(t);
     landlock_release_task(t);
@@ -395,6 +424,20 @@ task_t *proc_get(task_t *t)
     return t;
 }
 
+#ifdef A20_TASK_OBJECTS_ENABLED
+/* Failure-only snapshot. Keep formatting and extra argument setup out of the
+ * normal reference-release path; no locks may be acquired from this helper. */
+static __attribute__((cold, noinline, noreturn)) void
+proc_ref_underflow(task_t *t, int old) {
+    proc_lifetime_note_ref_underflow();
+    panic("proc_put: pid=%d reference underflow old=%d task=%p state=%d "
+          "destroy=%d dynamic=%d on_rq=%d on_cpu=%d dispatch=%d owner=%u "
+          "kstack=%p",
+          t->pid, old, t, t->state, t->destroy_started, t->dynamic_alloc,
+          t->on_rq, t->on_cpu, t->dispatching, t->owner_cpu, t->kstack_base);
+}
+#endif
+
 void proc_put(task_t *t)
 {
     if (!t)
@@ -407,8 +450,12 @@ void proc_put(task_t *t)
                                         __ATOMIC_RELAXED)) {
     }
     if (old <= 0) {
+#ifdef A20_TASK_OBJECTS_ENABLED
+        proc_ref_underflow(t, old);
+#else
         proc_lifetime_note_ref_underflow();
         panic("proc_put: pid=%d reference underflow old=%d", t->pid, old);
+#endif
     }
     proc_lifetime_note_ref_put();
     if (old != 1)
@@ -428,6 +475,8 @@ void proc_put(task_t *t)
     }
 
     proc_task_release_resources(t);
+    a20_task_object_task_release(t);
+    proc_pid_final_release(t);
     proc_lifetime_note_task_free();
     memset(t, 0, sizeof(*t));
     kfree(t);
@@ -488,7 +537,11 @@ void proc_destroy_task(task_t *t)
         spin_unlock_irqrestore(&tasklist_lock, list_flags);
         return;
     }
+#ifdef A20_TASK_OBJECTS_ENABLED
+    __atomic_store_n(&t->destroy_started, 1, __ATOMIC_RELEASE);
+#else
     t->destroy_started = 1;
+#endif
     t->state = PROC_UNUSED;
     proc_wait_timer_cancel_locked(t, t->wait_seq);
     proc_alarm_cancel(t);
@@ -497,6 +550,7 @@ void proc_destroy_task(task_t *t)
     proc_unlink_task_locked(t);
     spin_unlock_irqrestore(&tasklist_lock, list_flags);
 
+    a20_task_object_detach(t);
     proc_pid_unregister(t);
     /* Drop the allocation/global-list lifetime reference. */
     proc_put(t);

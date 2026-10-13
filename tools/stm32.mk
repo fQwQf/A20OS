@@ -59,3 +59,103 @@ run-stm32f103-qemu:
 
 run-stm32f103-qemu-impl:
 	@$(PYTHON) tools/stm32.py qemu-run --kernel-bin "$(STM32_QEMU_BIN)"
+
+# Full kernel functional instruction test. Python requires unicorn/pyelftools;
+# this target does not claim stm32vldiscovery implements the external fabric.
+.PHONY: check-mcu-shared-kernel
+check-mcu-shared-kernel:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=0 _check-mcu-shared-kernel
+
+.PHONY: _check-mcu-shared-kernel
+_check-mcu-shared-kernel: kernel-only
+	$(PYTHON) tools/check-mcu-shared-kernel.py \
+		$(BUILD_DIR)/kernel.elf \
+		--report .kernel-build/cluster/shared-kernel/report.json
+
+.PHONY: check-mcu-shared-fabric
+check-mcu-shared-fabric:
+	verilator --binary --timing --top-module a20_fabric_tb \
+		-Mdir .kernel-build/cluster/shared-fabric-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fabric_tb.sv
+	.kernel-build/cluster/shared-fabric-verilator/Va20_fabric_tb
+
+.PHONY: check-mcu-shared-bus
+check-mcu-shared-bus:
+	verilator --binary --timing --top-module a20_shared_top_tb \
+		-Mdir .kernel-build/cluster/shared-bus-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fsmc_bridge.sv \
+		hardware/shared-mcu/a20_shared_ram.sv hardware/shared-mcu/a20_shared_top.sv \
+		hardware/shared-mcu/a20_shared_top_tb.sv
+	.kernel-build/cluster/shared-bus-verilator/Va20_shared_top_tb
+
+.PHONY: build-mcu-shared-rtl check-mcu-shared-rtl _check-mcu-shared-rtl
+build-mcu-shared-rtl:
+	verilator --cc --exe --build -j 4 --top-module a20_shared_top \
+		-GCPUS=2 -GRAM_ADDR_BITS=20 -Mdir .kernel-build/cluster/shared-rtl-verilator \
+		hardware/shared-mcu/a20_fabric.sv hardware/shared-mcu/a20_fsmc_bridge.sv \
+		hardware/shared-mcu/a20_shared_ram.sv hardware/shared-mcu/a20_shared_top.sv \
+		$(CURDIR)/hardware/shared-mcu/a20_bus_cosim.cpp
+
+check-mcu-shared-rtl: build-mcu-shared-rtl
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=0 _check-mcu-shared-rtl
+
+_check-mcu-shared-rtl: kernel-only
+	$(PYTHON) tools/check-mcu-shared-rtl.py $(BUILD_DIR)/kernel.elf \
+		--backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
+		--report .kernel-build/cluster/shared-kernel/report-rtl.json
+
+.PHONY: check-mcu-program check-mcu-program-rtl _check-mcu-program _check-mcu-program-rtl
+check-mcu-program:
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 _check-mcu-program
+
+check-mcu-program-rtl: build-mcu-shared-rtl
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 ABI=native STM32_FLASH_KB=512 \
+		STM32_RAM_KB=64 STM32_QEMU=0 STM32_XUANWU=0 STM32_CLUSTER_PORT=0 \
+		NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 CONFIG_KERNEL_PREEMPT=1 \
+		MCU_SHARED_KERNEL=1 MCU_SHARED_RAM_KB=1024 MCU_SHARED_TEST=1 MCU_NATIVE_PROGRAM=1 _check-mcu-program-rtl
+
+_check-mcu-program: kernel-only
+	$(PYTHON) tools/check-mcu-program.py $(BUILD_DIR)/kernel.elf \
+		--report .kernel-build/cluster/shared-program/report.json
+
+_check-mcu-program-rtl: kernel-only
+	$(PYTHON) tools/check-mcu-program.py $(BUILD_DIR)/kernel.elf \
+		--backend .kernel-build/cluster/shared-rtl-verilator/Va20_shared_top \
+		--report .kernel-build/cluster/shared-program/report-rtl.json
+
+ifeq ($(MCU_NATIVE_PROGRAM)$(MCU_SHARED_TEST),11)
+$(BUILD_DIR)/arch/armv7m/boot/program_test.o: $(BUILD_DIR)/mcu-test-program.elf
+$(BUILD_DIR)/mcu-test-program.elf: user/tests/mcu-shared-program/main.c user/liba20rt/a20_compiler_rt.c \
+    user/liba20rt/a20_malloc.c user/liba20rt/a20_string.h user/tests/native-memory-contract.h user/tests/native-domain-contract.h user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-spawn-contract.h user/tests/native-task-control-contract.h user/tests/native-compute-cancel-contract.h user/liba20rt/a20_fs.h user/liba20rt/a20_handle.h user/liba20rt/a20_work.h user/tests/native-object-contract.h kernel/include/uapi/a20/cluster_objects.h user/tests/native-runtime-contract.h user/liba20rt/a20_runtime.h kernel/include/uapi/a20/runtime.h \
+    user/tests/mcu-shared-program/link.ld user/liba20rt/a20_task.h \
+    user/liba20rt/a20_syscall.h user/liba20rt/a20_types.h user/liba20rt/a20_sync.h user/liba20rt/a20_mem.h \
+    kernel/arch/armv7m/include/program_test.h user/liba20rt/a20_execution.h \
+    kernel/include/uapi/a20/execution.h kernel/include/uapi/a20/execution_domain.h
+	@mkdir -p $(@D)
+	$(CC) -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -Os -ffreestanding \
+		-fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \
+		-Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 \
+		-Wl,-T,user/tests/mcu-shared-program/link.ld \
+		$(if $(filter 1,$(NATIVE_FLAT_FILES)),-DA20_NATIVE_FILE_TEST,) -Iuser -Iuser/liba20rt -Ikernel/arch/armv7m/include $< user/liba20rt/a20_compiler_rt.c user/liba20rt/a20_malloc.c -lgcc -o $@
+endif
+
+ifeq ($(NATIVE_FLAT_FILES)$(MCU_SHARED_TEST),11)
+$(BUILD_DIR)/mcu-spawn-program.elf: user/tests/native-spawn-child.c user/tests/native-thread-contract.h user/tests/native-balance-contract.h user/tests/native-file-contract.h user/tests/native-runtime-contract.h user/tests/native-object-contract.h user/tests/mcu-shared-program/spawn.ld user/tests/mcu-shared-program/spawn-start.S $(wildcard user/liba20rt/*.h) user/liba20rt/a20_malloc.c user/liba20rt/a20_compiler_rt.c
+	@mkdir -p $(@D)
+	$(CC) -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -Os -ffreestanding -fPIE -fomit-frame-pointer -fno-stack-protector -nostdlib -Wall -Wextra -Werror \
+		-Wl,-pie,--no-dynamic-linker,--build-id=none,-z,max-page-size=4096 -Wl,-T,user/tests/mcu-shared-program/spawn.ld \
+		-Iuser -Iuser/liba20rt user/tests/mcu-shared-program/spawn-start.S user/tests/native-spawn-child.c user/liba20rt/a20_malloc.c user/liba20rt/a20_compiler_rt.c -lgcc -o $@
+$(BUILD_DIR)/flat-files/flat-file-fixture.h: tools/make-native-file-fixture.py $(BUILD_DIR)/mcu-spawn-program.elf
+	$(PYTHON) $< --out-dir $(BUILD_DIR)/flat-files --program $(BUILD_DIR)/mcu-spawn-program.elf
+$(BUILD_DIR)/arch/armv7m/platform/program_selftest.o: $(BUILD_DIR)/flat-files/flat-file-fixture.h
+CFLAGS += -I$(BUILD_DIR)/flat-files
+endif

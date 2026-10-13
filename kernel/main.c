@@ -13,6 +13,7 @@
 #include "sys/syscall.h"
 #include "core/timer.h"
 #include "core/smp.h"
+#include "core/smp_test.h"
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/defs.h"
@@ -50,7 +51,8 @@ void init_kthread(void);
 
 /* Architecture-owned bootarg diagnostics are a no-op unless an architecture
  * provides a real implementation. */
-__attribute__((weak)) void arch_run_bootarg_selftests(void) { }
+__attribute__((weak)) void arch_run_bootarg_selftests(void) {
+}
 
 /* ============================================================
  * Block-device mount — unified strategy
@@ -63,7 +65,6 @@ __attribute__((weak)) void arch_run_bootarg_selftests(void) { }
  *   Alt QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
  *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  * ============================================================ */
-
 
 #if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
 static void bringup_smoke_test(void) {
@@ -200,6 +201,7 @@ void kernel_main(void) {
 
 #if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
     printf("[INIT] System ready (bringup, no userspace)\n\n");
+    smp_selftest_boot();
     bringup_smoke_test();
 #else
 #ifdef CONFIG_COOPERATIVE_BOOT
@@ -225,30 +227,54 @@ void kernel_main(void) {
 
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
-    printf("%s\n", "                    :%%%%%%%.                                 ");
-    printf("%s\n", "                    %%%%%%%*                                  ");
-    printf("%s\n", "                   -%%%%%%%                                   ");
-    printf("%s\n", "                   %%%%%%%-                                   ");
-    printf("%s\n", "                  -%%%%%%%                                    ");
-    printf("%s\n", "                  %%%%%%%=                                    ");
-    printf("%s\n", "                 *%%%%%%%                                     ");
-    printf("%s\n", "                .%%%%%%%:=+                                   ");
-    printf("%s\n", "                @%%%%%%% %%                                   ");
-    printf("%s\n", "                %%%%%%% +%%+                                  ");
-    printf("%s\n", "               #%%%%%%+ %%%%                                  ");
-    printf("%s\n", "              :%%%%%%% %%%%%-                                 ");
-    printf("%s\n", "              %%%%%%%# %%%%%%    ........  .........          ");
-    printf("%s\n", "             =%%%%%%% -%%%%%%-   ######### #########=         ");
-    printf("%s\n", "             %%%%%%%=  %%%%%%#   ++*+*+*## #*++++++#=         ");
-    printf("%s\n", "            *%%%%%%%   :%%%%%%:         ## #+      #=         ");
-    printf("%s\n", "            %%%%%%%.    %%%%%%%         ## #+      #=         ");
-    printf("%s\n", "           +%%%%%%%     =%%%%%%         *# #+      #=         ");
-    printf("%s\n", "           %%%%%%%:      %%%%%%*  ######## #+      #=         ");
-    printf("%s\n", "          %%%%%%%%       %%%%%%% :######## #+      #=         ");
-    printf("%s\n", "         :%%%%%%%.        %%%%%%::#=       #+      #=         ");
-    printf("%s\n", "         %%%%%%%* %%%%%%%%%%%%%%::#=       #+      #=         ");
-    printf("%s\n", "        :%%%%%%% -%%%%%%%%%%%%%%::#=       #+      #=         ");
-    printf("%s\n", "        %%%%%%%: %%%%%%%%%%%%%%%::######## #########=         ");
+    printf("%s\n",
+           "                    :%%%%%%%.                                 ");
+    printf("%s\n",
+           "                    %%%%%%%*                                  ");
+    printf("%s\n",
+           "                   -%%%%%%%                                   ");
+    printf("%s\n",
+           "                   %%%%%%%-                                   ");
+    printf("%s\n",
+           "                  -%%%%%%%                                    ");
+    printf("%s\n",
+           "                  %%%%%%%=                                    ");
+    printf("%s\n",
+           "                 *%%%%%%%                                     ");
+    printf("%s\n",
+           "                .%%%%%%%:=+                                   ");
+    printf("%s\n",
+           "                @%%%%%%% %%                                   ");
+    printf("%s\n",
+           "                %%%%%%% +%%+                                  ");
+    printf("%s\n",
+           "               #%%%%%%+ %%%%                                  ");
+    printf("%s\n",
+           "              :%%%%%%% %%%%%-                                 ");
+    printf("%s\n",
+           "              %%%%%%%# %%%%%%    ........  .........          ");
+    printf("%s\n",
+           "             =%%%%%%% -%%%%%%-   ######### #########=         ");
+    printf("%s\n",
+           "             %%%%%%%=  %%%%%%#   ++*+*+*## #*++++++#=         ");
+    printf("%s\n",
+           "            *%%%%%%%   :%%%%%%:         ## #+      #=         ");
+    printf("%s\n",
+           "            %%%%%%%.    %%%%%%%         ## #+      #=         ");
+    printf("%s\n",
+           "           +%%%%%%%     =%%%%%%         *# #+      #=         ");
+    printf("%s\n",
+           "           %%%%%%%:      %%%%%%*  ######## #+      #=         ");
+    printf("%s\n",
+           "          %%%%%%%%       %%%%%%% :######## #+      #=         ");
+    printf("%s\n",
+           "         :%%%%%%%.        %%%%%%::#=       #+      #=         ");
+    printf("%s\n",
+           "         %%%%%%%* %%%%%%%%%%%%%%::#=       #+      #=         ");
+    printf("%s\n",
+           "        :%%%%%%% -%%%%%%%%%%%%%%::#=       #+      #=         ");
+    printf("%s\n",
+           "        %%%%%%%: %%%%%%%%%%%%%%%::######## #########=         ");
     printf("%s\n", "       :======= .===============. -------- ---------:    ");
     printf("\033[0m");
     printf("Welcome to A20OS!\n\n");
@@ -298,7 +324,7 @@ void init_kthread(void) {
                 vnode_t *distro_root = vfs_resolve("/extra");
                 if (distro_root) {
                     vfs_task_root_set(cur, distro_root->mnt, distro_root,
-                                       "/extra");
+                                      "/extra");
                     vnode_put(distro_root);
                 } else {
                     strncpy(cur->fs.root_path, "/extra", MAX_PATH_LEN - 1);
@@ -318,7 +344,8 @@ void init_kthread(void) {
                     if (n > 0) {
                         buf[n] = '\0';
                         char *cp = buf + 2;
-                        while (*cp == ' ' || *cp == '\t') cp++;
+                        while (*cp == ' ' || *cp == '\t')
+                            cp++;
                         char *end = cp;
                         while (*end && *end != ' ' && *end != '\t' &&
                                *end != '\n' && *end != '\r')
@@ -328,8 +355,8 @@ void init_kthread(void) {
                         distro_interp[MAX_PATH_LEN - 1] = '\0';
                         strncpy(distro_script, "/sbin/init", MAX_PATH_LEN - 1);
                         is_distro_shebang = 1;
-                        printf("[INIT] Distro shebang: %s %s\n",
-                               distro_interp, distro_script);
+                        printf("[INIT] Distro shebang: %s %s\n", distro_interp,
+                               distro_script);
                     }
                 }
                 vfs_close(init_fd);
@@ -407,7 +434,8 @@ void init_kthread(void) {
         valid_ident = 0;
     }
     if (valid_ident) {
-        printf("[INIT] image: size=%lu fnv1a64=%016lx class=%u machine=%u file-entry=0x%lx\n",
+        printf("[INIT] image: size=%lu fnv1a64=%016lx class=%u machine=%u "
+               "file-entry=0x%lx\n",
                (unsigned long)init_size, (unsigned long)init_hash,
                (unsigned)ident[4], (unsigned)image_machine,
                (unsigned long)image_entry);
@@ -463,7 +491,7 @@ void init_kthread(void) {
      * this, __libc_start_main dereferences garbage and the init
      * process crashes silently before ever reaching main().
      */
-    char *init_argv[4] = { NULL };
+    char *init_argv[4] = {NULL};
     int init_argc = 1;
     if (is_distro_shebang) {
         init_argv[0] = distro_interp;
@@ -476,8 +504,8 @@ void init_kthread(void) {
      * gets the vDSO through the regular exec path (proc/exec.c). */
     uintptr_t init_auxv[A20_AUXV_MAX_PAIRS][2];
     uint32_t init_auxv_n = 0;
-    uint64_t user_sp = elf_setup_stack(info.stack_top, init_argc, init_argv, NULL, &info, 0,
-                                       init_auxv, &init_auxv_n);
+    uint64_t user_sp = elf_setup_stack(info.stack_top, init_argc, init_argv,
+                                       NULL, &info, 0, init_auxv, &init_auxv_n);
     if (user_sp == 0) {
         panic("init: elf_setup_stack failed");
     }
@@ -491,10 +519,12 @@ void init_kthread(void) {
                                 info.brk, info.stack_top, init_total_vm,
                                 info.tls_tp
 #ifdef CONFIG_NOMMU
-                                , info.nommu_allocs, info.nommu_alloc_sizes,
+                                ,
+                                info.nommu_allocs, info.nommu_alloc_sizes,
                                 info.nommu_alloc_types, info.num_nommu_allocs
 #endif
-                                , 0);
+                                ,
+                                0);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
     }
@@ -505,7 +535,8 @@ void init_kthread(void) {
         task_t *init_task = proc_find_get(ret);
         if (init_task && init_task->mm) {
             init_task->mm->auxv_n = init_auxv_n;
-            for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
+            for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS;
+                 i++) {
                 init_task->mm->auxv[i][0] = init_auxv[i][0];
                 init_task->mm->auxv[i][1] = init_auxv[i][1];
             }
@@ -521,8 +552,8 @@ void init_kthread(void) {
     arch_fence_i();
 #endif
 
-    printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n",
-           ret, (unsigned long)info.entry, (unsigned long)user_sp);
+    printf("[INIT] user init created: pid=%d entry=0x%lx sp=0x%lx\n", ret,
+           (unsigned long)info.entry, (unsigned long)user_sp);
 
 #ifdef CONFIG_COOPERATIVE_BOOT
     /* PID 0 remains the reaper and scheduler host. */

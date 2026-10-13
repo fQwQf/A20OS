@@ -715,6 +715,9 @@ $(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 $(OBJ_DIR)/cmds/core/audioplay.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/audioplay.o: ../kernel/include/uapi/a20/audio.h
 
+$(OBJ_DIR)/cmds/stress/cluster_threads.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/stress/cluster_threads.o: ../kernel/include/uapi/a20/block.h
+
 $(OBJ_DIR)/cmds/core/virtio_scsi_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/virtio_scsi_test.o: ../kernel/include/uapi/a20/block.h
 

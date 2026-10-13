@@ -1,4 +1,5 @@
 #include "proc/proc.h"
+#include "proc/task_object.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
@@ -175,8 +176,10 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
 {
     if (!child)
         return 0;
-    if (child->clone_flags & CLONE_THREAD)
+    if (!parent || parent == proc_idle_task())
         return 1;
+    if (child->clone_flags & CLONE_THREAD)
+        return !proc_native_thread_waitable(child, parent);
     if (child->exit_signal != SIGCHLD)
         return 0;
     return proc_ignores_sigchld(parent);
@@ -213,6 +216,29 @@ void proc_wake_child_waiters(task_t *parent)
     }
     spin_unlock_irqrestore(&tasklist_lock, lf);
 }
+
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+/* Caller holds tasklist_lock. Signal-based parents (e.g. a POSIX shell) may
+ * consume SIGCHLD with WNOHANG before the last sibling exits. Publish exactly
+ * one notification when the whole group is reportable, and pin its parent
+ * across the unlocked wake/signal work. No remote current task is accessed. */
+static task_t *proc_group_exit_parent_get_locked(task_t *leader, int *signal) {
+    if (!leader || leader->exit_parent_notified ||
+        proc_task_state_get(leader) != PROC_ZOMBIE ||
+        !proc_tg_group_dead_locked(leader))
+        return NULL;
+    task_t *parent = leader->parent;
+    if (!parent || parent == proc_idle_task() ||
+        proc_child_auto_reaps(leader, parent))
+        return NULL;
+    task_t *referenced = proc_get(parent);
+    if (!referenced)
+        return NULL;
+    leader->exit_parent_notified = 1;
+    *signal = leader->exit_signal;
+    return referenced;
+}
+#endif
 
 static void proc_release_exiting_mm(task_t *t)
 {
@@ -354,7 +380,8 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         if (reap_group_dead &&
             (actual_reaper == proc_idle_task() ||
              child->exit_signal != SIGCHLD ||
-             (child->clone_flags & CLONE_THREAD)) &&
+             ((child->clone_flags & CLONE_THREAD) &&
+              !proc_native_thread_waitable(child, actual_reaper))) &&
             proc_task_state_get(child) == PROC_ZOMBIE &&
             !proc_task_is_current_any_cpu(child)) {
             if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
@@ -528,13 +555,17 @@ void proc_exit(int exit_code)
      * and sleep forever in sigsuspend if the last sibling never notifies it.
      * Claim notification once under tasklist_lock, after the whole group is
      * dead, and retain both identities across unlocked cleanup and delivery. */
-    task_t *completed_parent = NULL;
-    task_t *notify_leader = NULL;
-    task_t *group_leader = thread_leader ? thread_leader : t;
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     struct hyp_bridge_drop hyp_drop = { .count = 0 };
 #endif
+    task_t *completed_parent = NULL;
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    int completed_signal = 0;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    task_t *notify_leader = NULL;
+#endif
     lf = spin_lock_irqsave(&tasklist_lock);
+    task_t *group_leader = thread_leader ? thread_leader : t;
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (proc_task_state_get(group_leader) == PROC_ZOMBIE &&
         proc_tg_group_dead_locked(group_leader) && !group_leader->hyp_cleanup_done) {
@@ -542,21 +573,28 @@ void proc_exit(int exit_code)
         hyp_bridge_detach_group(proc_task_tgid(group_leader), &hyp_drop);
     }
 #endif
-    if ((group_leader != t || !auto_reap) &&
-        proc_task_state_get(group_leader) == PROC_ZOMBIE &&
-        proc_tg_group_dead_locked(group_leader) && group_leader->parent &&
-        group_leader->parent != proc_idle_task()) {
-        completed_parent = proc_get(group_leader->parent);
-        if (!group_leader->exit_notified && group_leader->exit_signal > 0) {
-            group_leader->exit_notified = 1;
-            notify_leader = proc_get(group_leader);
-        }
-    }
+    completed_parent = proc_group_exit_parent_get_locked(
+        group_leader, &completed_signal);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (completed_parent && completed_signal > 0)
+        notify_leader = proc_get(group_leader);
+#endif
     spin_unlock_irqrestore(&tasklist_lock, lf);
+#else
+    if (thread_leader) {
+        lf = spin_lock_irqsave(&tasklist_lock);
+        if (proc_task_state_get(thread_leader) == PROC_ZOMBIE &&
+            proc_tg_group_dead_locked(thread_leader) &&
+            thread_leader->parent &&
+            thread_leader->parent != proc_idle_task())
+            completed_parent = proc_get(thread_leader->parent);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+    }
+#endif
+
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     hyp_bridge_release_group(&hyp_drop);
 #endif
-
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
 
@@ -572,7 +610,14 @@ void proc_exit(int exit_code)
     }
     if (completed_parent)
         proc_wake_child_waiters(completed_parent);
+#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    proc_put(completed_parent);
+#endif
     proc_put(thread_leader);
+#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    int notify_parent_pid =
+        !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
+#endif
 
     if (vfork_completed)
         complete(&t->vfork_done);
@@ -586,11 +631,14 @@ void proc_exit(int exit_code)
     a20_registry_task_exit(t->pid);
 #endif
 
-    /* Native ABI task handles store the pid as the object pointer, so the
-     * watch key must be pid-as-pointer (docs/native-abi/05-ipc.md §3.3). */
+#ifdef A20_TASK_OBJECTS_ENABLED
+    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)exit_code, 0, 1);
+#else
+    /* Keep the existing non-Native/tiny path and its generated code. */
     a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
                      A20_EVENT_EXITED, (uint64_t)exit_code, 0);
     a20_eventq_on_object_destroy((void *)(uintptr_t)t->pid, A20_OBJ_TASK);
+#endif
 
     task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
     proc_reparent_children(t, init_reaper);
@@ -600,10 +648,20 @@ void proc_exit(int exit_code)
      * terminated, stopped tracees are resumed. */
     proc_debug_tracer_exiting(t);
 
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (notify_leader)
         signal_notify_child_exit(completed_parent, notify_leader);
     proc_put(notify_leader);
+#else
+    if (completed_parent && completed_signal > 0)
+        signal_send_task(completed_parent, completed_signal);
+#endif
     proc_put(completed_parent);
+#else
+    if (notify_parent_pid > 0)
+        signal_send(notify_parent_pid, t->exit_signal);
+#endif
 
     sched();
     panic("proc_exit: sched returned");

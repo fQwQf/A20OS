@@ -17,6 +17,7 @@
 #include "core/random.h"
 #include "trap_frame.h"
 #include "proc/proc.h"
+#include "proc/task_object.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
 #include "mm/frame.h"
@@ -217,11 +218,10 @@ int64_t sys_a20_monitor_create(const a20_syscall_args_t *args)
 
     task_t *target = NULL;
     if (kargs.target != A20_HANDLE_NULL) {
-        a20_handle_entry_t te;
-        int64_t r = a20_handle_lookup_task_like(ht, kargs.target,
-                                               A20_RIGHT_STAT, &te);
+        target = NULL;
+        int64_t r = a20_handle_task_get(ht, kargs.target, A20_OBJ_INVALID,
+                                        A20_RIGHT_STAT, &target);
         if (r < 0) return r;
-        target = proc_find_get((int)(uintptr_t)te.object);
         if (!target) return -A20_ERR_BAD_HANDLE;
     }
 
@@ -311,8 +311,7 @@ static int64_t a20_task_mem_rw(const a20_syscall_args_t *args, int write)
                                                need, &te);
     if (r < 0) return r;
 
-    int target_pid = (int)(uintptr_t)te.object;
-    task_t *target = proc_find_get(target_pid);
+    task_t *target = a20_task_object_get_task(te.object);
     a20_object_release(te.object, te.type);
     if (!target) return -A20_ERR_BAD_HANDLE;
     if (!target->mm) {

@@ -91,10 +91,10 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP) $(GU
 	@echo "Building FAT32 image..."
 	@$(PYTHON) tools/img.py fat32 \
 		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
-		--user-build-dir "$(USER_BUILD_DIR)" --mkfs-fat "$(MKFS_FAT)" \
+		--user-build-dir "$(USER_BUILD_DIR)" --tag "$(NATIVE_TAG)" --mkfs-fat "$(MKFS_FAT)" \
 		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
 		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
-		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \
+		--libc "$(if $(wildcard user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so,)" \
 		--libgcc "$(LIBGCC_S_ARCH)" \
 		--protocols "$(PROTOCOLS_LINES)" \
 		--guest-kernel "$(GUEST_KERNEL_ELF)" \
@@ -148,6 +148,21 @@ $(BUILD_DIR)/lfs.img: $(BUILD_DIR)/mkfs_lfs tools/mkfs_lfs.c \
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
+
+# Stable binary symbol names keep the rootfs overlay independent of ISA tags.
+$(RAMFS_USER_BLOB_DIR)/native_futex: $(NATIVE_FUTEX_BIN)
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(RAMFS_USER_BLOB_DIR)/native_spawn: $(NATIVE_SPAWN_BIN)
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(RAMFS_USER_BLOB_DIR)/native_input:
+	@mkdir -p $(dir $@)
+	$(PYTHON) -c 'from pathlib import Path; Path("$@").write_bytes(bytes((i*37+11)&255 for i in range(2048)))'
+$(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o): $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BLOB_DIR)/%
+	cd $(RAMFS_USER_BLOB_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		$* $(abspath $@)
 
 $(RAMFS_USER_BLOB_DIR)/%.o: $(USER_BUILD_STAMP)
 	@mkdir -p $(dir $@)

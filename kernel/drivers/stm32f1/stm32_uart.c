@@ -1,6 +1,7 @@
 #ifdef CONFIG_BOARD_STM32F103
 
 #include "drivers/stm32f1/stm32_uart.h"
+#include "shared_kernel.h"
 
 #define RCC_CFGR    (*(volatile uint32_t *)0x40021004UL)
 #define RCC_APB1RSTR (*(volatile uint32_t *)0x40021010UL)
@@ -90,8 +91,8 @@ static const stm32_uart_desc_t uart_desc[STM32_UART_PORT_COUNT] = {
     },
 };
 
-static stm32_uart_info_t uart_info[STM32_UART_PORT_COUNT];
-static int uart_rx_level[STM32_UART_PORT_COUNT] = {-1, -1, -1};
+static stm32_uart_info_t uart_info[STM32_UART_PORT_COUNT] MCU_PRIVATE_BSS;
+static int uart_rx_level[STM32_UART_PORT_COUNT] MCU_PRIVATE_DATA = {-1, -1, -1};
 
 static int uart_port_valid(stm32_uart_port_t port) {
     return (unsigned)port < STM32_UART_PORT_COUNT;
