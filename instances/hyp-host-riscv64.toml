@@ -1,5 +1,5 @@
 name = "hyp-host-riscv64"
-description = "RISC-V H host with bundled hypvm and A20OS RAMFS guest; runtime validation pending"
+description = "RISC-V H host with bundled hypvm and A20OS RAMFS guest; experimental; single pair passed, repeat stability pending"
 arch = "riscv64"
 abi = "both"
 
