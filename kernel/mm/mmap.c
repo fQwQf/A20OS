@@ -222,8 +222,8 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
     spin_unlock_irqrestore(&tasklist_lock, proc_flags);
 }
 
-vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
-                         int prot, int flags) {
+static vaddr_t mm_mmap_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                   int prot, int flags, int native_cap) {
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
         return (vaddr_t)-EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
@@ -242,6 +242,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vmf |= VM_EXEC;
     if (flags & MAP_SHARED) vmf |= VM_SHARED;
     if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
+    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL))
@@ -292,7 +293,8 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
-    vma->vmar_cap  = (uint32_t)mm_pte_flags_to_prot(ptef);
+    vma->vmar_cap  = native_cap >= 0 ? (uint32_t)native_cap :
+                    (uint32_t)mm_pte_flags_to_prot(ptef);
     vma->file      = NULL;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
@@ -335,9 +337,21 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     return addr;
 }
 
-vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                       int prot, int flags)
+{
+    return mm_mmap_impl_locked(mm, addr, len, prot, flags, -1);
+}
+
+vaddr_t mm_mmap_native_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                              int prot, int flags)
+{
+    return mm_mmap_impl_locked(mm, addr, len, prot, flags, prot);
+}
+
+static vaddr_t mm_mmap_file_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                             int prot, int flags, struct vfile *file,
-                            uint64_t file_offset)
+                            uint64_t file_offset, int native_cap)
 {
     /* @file arrives referenced. On success the VMA takes ownership; on
      * failure ownership stays with the caller so it can release the reference
@@ -393,6 +407,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #endif
 
     uint64_t vmf = VM_FILE;
+    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
     if (prot & 1) vmf |= VM_READ;
     if (prot & 2) vmf |= VM_WRITE;
     if (prot & 4) vmf |= VM_EXEC;
@@ -410,7 +425,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
-    vma->vmar_cap    = (uint32_t)prot;
+    vma->vmar_cap    = native_cap >= 0 ? (uint32_t)native_cap : (uint32_t)prot;
     vma->file        = file;   /* the record takes over the caller's reference */
     vma->backing_offset = file_offset;
 #ifdef CONFIG_NOMMU
@@ -447,9 +462,23 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     return addr;
 }
 
-vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                            int prot, int flags, struct vfile *file,
+                            uint64_t offset)
+{
+    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, -1);
+}
+
+vaddr_t mm_mmap_file_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                int prot, int flags, struct vfile *file,
+                                uint64_t offset, uint32_t cap)
+{
+    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, cap);
+}
+
+static vaddr_t mm_mmap_vmo_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                               int prot, int flags, struct vmo *vmo,
-                              uint64_t vmo_offset)
+                              uint64_t vmo_offset, int native_cap)
 {
     if (!mm || !vmo)
         return (vaddr_t)-EINVAL;
@@ -482,8 +511,8 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         if (mr < 0)
             return (vaddr_t)mr;
     } else if (addr != 0) {
-        mm_seg_t *existing = mm_seg_find(mm, addr);
-        if (existing && existing->start < addr + len && existing->end > addr)
+        if (addr + len < addr || addr + len > USER_VA_LIMIT ||
+            mm_range_overlaps(mm, addr, len, NULL))
             addr = 0;
     }
 
@@ -499,6 +528,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #endif
 
     uint64_t vmf = VM_VMO;
+    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
     if (prot & 1) vmf |= VM_READ;
     if (prot & 2) vmf |= VM_WRITE;
     if (prot & 4) vmf |= VM_EXEC;
@@ -511,7 +541,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
-    vma->vmar_cap    = (uint32_t)prot;   /* Native VMAR capability at creation */
+    vma->vmar_cap    = native_cap >= 0 ? (uint32_t)native_cap : (uint32_t)prot;
     vma->file        = NULL;
     vma->vmo         = vmo;
     vma->backing_offset  = vmo_offset;
@@ -520,6 +550,20 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     return addr;
+}
+
+vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                           int prot, int flags, struct vmo *vmo,
+                           uint64_t offset)
+{
+    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, -1);
+}
+
+vaddr_t mm_mmap_vmo_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                               int prot, int flags, struct vmo *vmo,
+                               uint64_t offset, uint32_t cap)
+{
+    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, cap);
 }
 
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)

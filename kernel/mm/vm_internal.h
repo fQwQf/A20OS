@@ -9,9 +9,6 @@
  * API in mm/vm.h and must not be referenced outside kernel/mm/.
  */
 
-int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
-                      mm_seg_t *ignore);
-
 void vma_release_file(mm_seg_t *vma);
 void vma_release_ipc(mm_seg_t *vma);
 void vma_release(mm_seg_t *vma);

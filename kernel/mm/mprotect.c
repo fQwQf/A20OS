@@ -58,6 +58,15 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (covered < end)
         return -ENOMEM;
 
+    /* A Native handle's map ceiling survives Linux mprotect as well as
+     * vm_protect. Check before splitting VMAs or changing any PTE. */
+    for (mm_seg_t *v = mm_seg_find(mm, addr);
+         v && v->start < end; v = v->next) {
+        if ((v->vm_flags & VM_NATIVE_CAP) &&
+            ((uint32_t)prot & ~v->vmar_cap))
+            return -EACCES;
+    }
+
     /* mseal(2): mprotect over a sealed VMA is refused. */
     for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; v = v->next) {
         if (v->start >= end || v->end <= addr)

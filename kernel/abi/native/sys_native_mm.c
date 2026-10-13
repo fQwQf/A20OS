@@ -64,6 +64,7 @@ extern void a20_object_release(void *object, uint16_t type);
 extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 extern void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label);
 
+extern int64_t a20_native_vfs_result(int r);
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
@@ -107,137 +108,126 @@ static uint32_t a20_vm_prot_eff(uint32_t prot, a20_rights_t rights)
 
 int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 {
-    a20_vm_map_args_t *uargs = (a20_vm_map_args_t *)(uintptr_t)A20_ARG(0);
+    a20_vm_map_args_t *uargs = (void *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
-
     a20_vm_map_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
-    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (!kargs.length || kargs.length > SIZE_MAX - (PAGE_SIZE - 1) ||
+        (kargs.prot & ~(A20_PROT_READ | A20_PROT_WRITE | A20_PROT_EXEC)) ||
+        (kargs.flags & ~(MAP_FIXED | MAP_FIXED_NOREPLACE)))
+        return -A20_ERR_INVALID_ARGUMENT;
+    size_t length = ROUND_UP((size_t)kargs.length, PAGE_SIZE);
+    if (length > USER_VA_LIMIT || kargs.addr_hint >= USER_VA_LIMIT ||
+        (kargs.offset & (PAGE_SIZE - 1)))
+        return -A20_ERR_INVALID_ARGUMENT;
+    int fixed = kargs.flags & (MAP_FIXED | MAP_FIXED_NOREPLACE);
+    if ((kargs.addr_hint & (PAGE_SIZE - 1)) || (fixed && !kargs.addr_hint))
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    /* Map through a VMAR reservation when one is supplied (04-memory §3):
-     * the range must land inside the node and prot must fit its ceiling. */
     vmar_t *route = NULL;
-    if (kargs.vmar != A20_HANDLE_NULL) {
-        struct a20_ht_internal *ht0 = task_get_a20_ht(cur);
-        if (!ht0) return -A20_ERR_BAD_HANDLE;
-        a20_handle_entry_t ve;
-        int64_t vr = a20_handle_lookup_ref_internal(
-            ht0, kargs.vmar, A20_OBJ_VMAR, A20_RIGHT_MAP, &ve);
-        if (vr < 0) return vr;
-        route = (vmar_t *)ve.object; /* ref held until after install */
-    }
-
-    /* Ceiling checks for maps routed through a VMAR (04-memory §3):
-     * requested prot bits must fit the node's ceiling and fixed-address
-     * placement needs VMAR_CAN_MAP_SPECIFIC.  After success the ceiling is
-     * stamped into the VMA's vmar_cap so later protect() stays within what
-     * authorized the mapping. */
-    uint32_t route_can = 0;
-    if (route) {
-        if (kargs.prot & A20_PROT_READ)  route_can |= VMAR_CAN_MAP_READ;
-        if (kargs.prot & A20_PROT_WRITE) route_can |= VMAR_CAN_MAP_WRITE;
-        if (kargs.prot & A20_PROT_EXEC)  route_can |= VMAR_CAN_MAP_EXEC;
-        if ((kargs.flags & MAP_FIXED) &&
-            !(route->cap & VMAR_CAN_MAP_SPECIFIC)) {
-            a20_object_release(route, A20_OBJ_VMAR);
-            return -A20_ERR_ACCESS;
-        }
-        if (!vmar_cap_allows(route, route_can)) {
-            a20_object_release(route, A20_OBJ_VMAR);
-            return -A20_ERR_ACCESS;
-        }
-    }
-
-    uint64_t addr = 0;
+    a20_handle_entry_t src = {0};
+    struct vmo *anonymous = NULL;
     int64_t r = A20_OK;
-
+    uint32_t prot = kargs.prot;
+    if (kargs.vmar != A20_HANDLE_NULL) {
+        a20_handle_entry_t ve;
+        r = a20_handle_lookup_ref_internal(ht, kargs.vmar, A20_OBJ_VMAR,
+                                           A20_RIGHT_MAP, &ve);
+        if (r < 0) return r;
+        route = (vmar_t *)ve.object;
+        if (!vmar_cap_allows(route, prot) ||
+            (fixed && !(route->cap & VMAR_CAN_MAP_SPECIFIC))) {
+            r = -A20_ERR_ACCESS;
+            goto out;
+        }
+        /* Check before MAP_FIXED can replace an existing mapping. Rolling
+         * back an out-of-region map afterwards cannot restore its victim. */
+        if (fixed && !vmar_contains(route, kargs.addr_hint, length)) {
+            r = -A20_ERR_NO_SPACE;
+            goto out;
+        }
+    }
     if (kargs.source != A20_HANDLE_NULL) {
-        struct a20_ht_internal *ht = task_get_a20_ht(cur);
-        if (!ht) return -A20_ERR_BAD_HANDLE;
-
-        a20_handle_entry_t src;
         r = a20_handle_lookup_ref_internal(ht, kargs.source, A20_OBJ_INVALID,
                                            A20_RIGHT_MAP, &src);
-        if (r < 0) return r;
-
-        if (src.type == A20_OBJ_MEMORY) {
-            /* Map an existing VMO: shared canonical frames, prot intersected
-             * with the handle's rights.  The VMA takes its own VMO reference. */
-            struct vmo *vmo = (struct vmo *)src.object;
-            uint32_t prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
-            if (kargs.offset & (PAGE_SIZE - 1)) {
-                r = -A20_ERR_INVALID_ARGUMENT;
-            } else if (kargs.offset >= vmo->size ||
-                       kargs.length > vmo->size - kargs.offset) {
-                r = -A20_ERR_INVALID_ARGUMENT;
-            } else {
-                r = a20_vmar_map(vmo, kargs.offset, kargs.length, prot_eff,
-                                 kargs.flags, kargs.addr_hint, &addr);
-            }
-            a20_object_release(src.object, src.type);
-            if (r < 0) return r;
-        } else if (src.type == A20_OBJ_FILE || src.type == A20_OBJ_DEVICE) {
-            if (!(src.rights & A20_RIGHT_READ)) {
-                a20_object_release(src.object, src.type);
-                return -A20_ERR_ACCESS;
-            }
-            uint32_t prot_eff = a20_vm_prot_eff(kargs.prot, src.rights);
-            /* Demand-paged file mapping through the core page cache. The
-             * handle lookup reference transfers directly to the VMA wrapper;
-             * the VMA owns it on success, and the wrapper drops it after
-             * releasing mm->lock on failure. */
-            if (kargs.offset & (PAGE_SIZE - 1)) {
-                a20_object_release(src.object, src.type);
-                return -A20_ERR_INVALID_ARGUMENT;
-            }
-            addr = mm_mmap_vfile(cur->mm, kargs.addr_hint, kargs.length,
-                                 a20_prot_to_mmap(prot_eff), MAP_PRIVATE,
-                                 (struct vfile *)src.object, kargs.offset);
-            if (mm_addr_is_error((vaddr_t)addr)) {
-                if (route)
-                    a20_object_release(route, A20_OBJ_VMAR);
-                return -A20_ERR_NO_MEMORY;
-            }
-        } else {
-            a20_object_release(src.object, src.type);
-            return -A20_ERR_INVALID_ARGUMENT;
+        if (r < 0) goto out;
+        prot = a20_vm_prot_eff(prot, src.rights);
+        if (src.type != A20_OBJ_MEMORY && src.type != A20_OBJ_FILE &&
+            src.type != A20_OBJ_DEVICE) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out;
+        }
+        if (src.type != A20_OBJ_MEMORY && !(src.rights & A20_RIGHT_READ)) {
+            r = -A20_ERR_ACCESS;
+            goto out;
         }
     } else {
-        struct vmo *vmo = vmo_create(VMO_ANONYMOUS, kargs.length, 0);
-        if (!vmo) return -A20_ERR_NO_MEMORY;
-        r = a20_vmar_map(vmo, 0, kargs.length, kargs.prot, kargs.flags,
-                         kargs.addr_hint, &addr);
-        vmo_release(vmo);
-        if (r < 0) return r;
-    }
-
-    if (route && !vmar_contains(route, addr, kargs.length)) {
-        a20_vmar_unmap(addr, kargs.length);
-        a20_object_release(route, A20_OBJ_VMAR);
-        return -A20_ERR_NO_SPACE;
-    }
-    if (route) {
-        mm_seg_t *nv = mm_seg_find(cur->mm, (vaddr_t)addr);
-        if (nv && nv->start == (vaddr_t)addr) {
-            uint32_t cap_bits = 0;
-            if (route_can & VMAR_CAN_MAP_READ)  cap_bits |= A20_PROT_READ;
-            if (route_can & VMAR_CAN_MAP_WRITE) cap_bits |= A20_PROT_WRITE;
-            if (route_can & VMAR_CAN_MAP_EXEC)  cap_bits |= A20_PROT_EXEC;
-            nv->vmar_cap = nv->vmar_cap ? (nv->vmar_cap & cap_bits) : cap_bits;
+        anonymous = vmo_create(VMO_ANONYMOUS, length, 0);
+        if (!anonymous) {
+            r = -A20_ERR_NO_MEMORY;
+            goto out;
         }
-        a20_object_release(route, A20_OBJ_VMAR);
     }
 
+    mm_struct_t *mm = cur->mm;
+    vaddr_t addr = (vaddr_t)kargs.addr_hint;
+    int placement = kargs.flags;
+    mm_tlb_invalidate_begin(mm);
+    uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
+    uint64_t limit = cur->limits.as / PAGE_SIZE;
+    if (cur->limits.as && (mm->total_vm > limit ||
+                          length / PAGE_SIZE > limit - mm->total_vm)) {
+        r = -A20_ERR_NO_MEMORY;
+        goto unlock;
+    }
+    if (route && !fixed) {
+        /* Gap selection, containment and insertion share mm->lock. A hint
+         * never lets the core gap search escape the reservation. */
+        if (!addr || (addr & (PAGE_SIZE - 1)) ||
+            !vmar_contains(route, addr, length) ||
+            mm_range_overlaps(mm, addr, length, NULL))
+            addr = mm_find_gap(mm, route->base, length);
+        if (!addr || !vmar_contains(route, addr, length)) {
+            r = -A20_ERR_NO_SPACE;
+            goto unlock;
+        }
+        placement = MAP_FIXED_NOREPLACE;
+    }
+    if (anonymous || src.type == A20_OBJ_MEMORY) {
+        struct vmo *vmo = anonymous ? anonymous : (struct vmo *)src.object;
+        addr = mm_mmap_vmo_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
+                                      MAP_SHARED | placement, vmo, kargs.offset, prot);
+    } else {
+        addr = mm_mmap_file_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
+                                   MAP_PRIVATE | placement,
+                                   (struct vfile *)src.object, kargs.offset, prot);
+        if (!mm_addr_is_error(addr))
+            src.object = NULL; /* VMA consumes the file lookup reference. */
+    }
+    if (mm_addr_is_error(addr)) {
+        r = a20_native_vfs_result(mm_addr_error(addr));
+        goto unlock;
+    }
+unlock:
+    spin_unlock_irqrestore(&mm->lock, lock_flags);
+    mm_tlb_invalidate_finish(mm);
+    if (r < 0) goto out;
     kargs.out_addr = addr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
-        a20_vmar_unmap(addr, kargs.length);
-        return -A20_ERR_FAULT;
+        a20_vmar_unmap(addr, length);
+        r = -A20_ERR_FAULT;
     }
-    return A20_OK;
+out:
+    if (src.object) a20_object_release(src.object, src.type);
+    if (anonymous) vmo_release(anonymous);
+    if (route) vmar_release(route);
+    return r;
 }
 
 /* vm_create_vmar — sub-allocate an address-range reservation under a
@@ -256,7 +246,10 @@ int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
     const uint64_t known = A20_VMAR_CAN_MAP_READ | A20_VMAR_CAN_MAP_WRITE |
                            A20_VMAR_CAN_MAP_EXEC | A20_VMAR_CAN_MAP_SPECIFIC;
     if (kargs.flags & ~known) return -A20_ERR_INVALID_ARGUMENT;
-    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (!kargs.length || kargs.base >= USER_VA_LIMIT ||
+        kargs.length > USER_VA_LIMIT - kargs.base ||
+        ((kargs.base | kargs.length) & (PAGE_SIZE - 1)))
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -277,6 +270,8 @@ int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
         r = vmar_create_child(parent, kargs.base, kargs.length,
                               (uint32_t)kargs.flags, &v);
         a20_object_release(parent, A20_OBJ_VMAR);
+        if (r < 0)
+            return a20_native_vfs_result((int)r);
     } else {
         v = vmar_create_root(cur->mm, kargs.base, kargs.length,
                              (uint32_t)kargs.flags);
@@ -462,6 +457,7 @@ static int64_t a20_mm_errno_map(int r)
     case -EINVAL:  return -A20_ERR_INVALID_ARGUMENT;
     case -ENOMEM:  return -A20_ERR_NO_MEMORY;
     case -EFAULT:  return -A20_ERR_FAULT;
+    case -EACCES:  return -A20_ERR_ACCESS;
     case -EPERM:   return -A20_ERR_PERM;
     case -ENOSYS:  return -A20_ERR_NOT_SUPPORTED;
     default:       return -A20_ERR_INVALID_ARGUMENT;
@@ -500,7 +496,7 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     uint64_t new_addr_hint = A20_ARG(4);
 
     if (old_len == 0 && new_len == 0) return -A20_ERR_INVALID_ARGUMENT;
-    if (new_len > (256ULL << 20) || old_len > (256ULL << 20))
+    if (new_len > (256ULL << 20) || old_len > (256ULL << 20) || (prot & ~7U))
         return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
@@ -508,18 +504,39 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
         return -A20_ERR_FAULT;
 
+    mm_struct_t *mm = cur->mm;
+    mm_tlb_invalidate_begin(mm);
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    mm_seg_t *source = mm_seg_find(mm, old_addr);
+    int r = 0;
     vaddr_t out = 0;
-    int r = mm_mremap(cur->mm, (vaddr_t)old_addr, (size_t)old_len,
+    if (!source || source->start > old_addr || source->end <= old_addr) {
+        r = -EFAULT;
+        goto remap_out;
+    }
+    /* Reject permission errors before a move can invalidate the old address.
+     * Source validation and remap share the lock with protect and unmap. */
+    if (prot && (source->vm_flags & VM_NATIVE_CAP) && (prot & ~source->vmar_cap)) {
+        r = -EACCES;
+        goto remap_out;
+    }
+    if (prot) {
+        int filtered = mm_wx_filter_prot(prot, "native_remap");
+        if (filtered < 0) {
+            r = filtered;
+            goto remap_out;
+        }
+        prot = (uint32_t)filtered;
+    }
+    r = mm_mremap_locked(mm, (vaddr_t)old_addr, (size_t)old_len,
                       (size_t)new_len, MREMAP_MAYMOVE,
                       (vaddr_t)new_addr_hint, &out);
-    if (r < 0)
-        return a20_mm_errno_map(r);
-
-    if (prot && new_len) {
-        int pr = mm_mprotect(cur->mm, out, (size_t)new_len, (int)prot);
-        if (pr < 0)
-            return a20_mm_errno_map(pr);
-    }
+    if (r == 0 && prot && new_len)
+        r = mm_mprotect_locked(mm, out, (size_t)new_len, (int)prot);
+remap_out:
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_tlb_invalidate_finish(mm);
+    if (r < 0) return a20_mm_errno_map(r);
     return (int64_t)out;
 }
 

@@ -95,9 +95,6 @@ void a20_object_release(void *object, uint16_t type)
         a20_eventq_release((a20_eventq_t *)object);
         break;
     case A20_OBJ_MEMORY:
-        /* Native watchers key on the VMO object; fire before the final ref
-         * drops so a destroyed object still notifies its event queue. */
-        a20_eventq_on_object_destroy(object, A20_OBJ_MEMORY);
         vmo_release((struct vmo *)object);
         break;
     case A20_OBJ_TIMER:

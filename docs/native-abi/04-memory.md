@@ -1,7 +1,7 @@
 # A20OS Native ABI：内存子系统设计
 
 > 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
-> `kernel/include/mm/vm.h` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
+> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订经源码与单文件编译检查，尚未运行验收。
 >
 > **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
 > `docs/roadmap/single-level-mm-model.md` §13.18）。原先并存的两种映射记录
@@ -54,7 +54,7 @@ Address Region) 当前只是 Native syscall 对核心 `mm_seg_t`/`mm_mmap_*` 的
 |-----------|-----------|
 | 匿名映射没有独立可传递对象 | `vm_alloc` 同样建立普通匿名映射记录；需要共享时显式创建 VMO handle |
 | 共享内存通常通过 SysV/POSIX shm 或共享文件 | Native 共享路径是传递 MEMORY handle，再由接收方 `vm_map` |
-| 保护位与映射绑定 | 当前保护位也保存在映射记录；source handle rights 只收紧首次 `vm_map` |
+| 保护位与映射绑定 | 当前保护位也保存在映射记录；Native 创建时登记权限上限，后续两套 ABI 的 protect 均检查该上限 |
 | `mremap`、`madvise`、`msync` 分别操作映射 | Native 提供对应操作，但 `vm_remap`/`vm_advise`/`vm_flush` 都只有受限语义 |
 
 ---
@@ -102,7 +102,7 @@ VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical lay
 
 ### 3.1 定义
 
-层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
+层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
 
 Native VMAR 操作的地址空间语义仍直接作用于核心映射记录，与后端相关的字段可简化为：
 
@@ -112,7 +112,7 @@ struct mm_seg {
     uint64_t     vm_flags;      /* VM_* 位：anon / file / vmo / shared / 保护位 */
     pte_t        pte_flags;     /* 架构叶子保护位（不能由 vm_flags 完全推导，故显式携带）*/
     uint64_t     backing_offset;/* 后端对象内的偏移：VM_FILE 对 vnode，VM_VMO 对 vmo */
-    int          file_fd;       /* VM_FILE 后端 */
+    struct vfile *file;         /* VM_FILE 后端，持有引用 */
     struct vmo  *vmo;           /* 仅 VM_VMO 后端非 NULL */
     /* 另有 magic、共用 refcount、vmar_cap、sysv_shmid、链表指针等 */
 };
@@ -133,7 +133,7 @@ $$VMAR = ([base, base+len), prot, backing)$$
 - `prot`：保护位（R/W/X 组合）
 - `backing`：普通匿名页、FILE/DEVICE 的 file/page-cache 后端，或 MEMORY source 的 VMO
 
-### 3.3 VMAR 标志（保留接口）
+### 3.3 VMAR 能力标志
 
 | 标志 | 说明 |
 |------|------|
@@ -157,12 +157,12 @@ int64_t vm_alloc(a20_vm_alloc_args_t *args);
 
 语义：
 1. 校验版本化参数与非零长度
-2. 调用 `proc_mmap(..., MAP_ANONYMOUS, -1, 0)` 建立普通匿名映射记录
+2. 在 MM 锁与 TLB 事务内调用 `mm_mmap_native_locked` 建立普通匿名映射记录并登记权限上限；检查 `RLIMIT_AS`
 3. 返回映射地址；不会返回 VMO handle
 
 错误条件有三类。`NO_MEMORY` 表示核心匿名 mmap 失败；`INVALID_ARGUMENT` 表示版本化结构校验失败或 `length == 0`；`FAULT` 表示参数结构不可访问，或结果复制回用户态失败。
 
-当前 syscall 不单独校验未知 `prot` 位，地址空间无空洞等核心 mmap 失败也统一映射为 `NO_MEMORY`，不会返回 `NO_SPACE`。
+拒绝未知 `prot` 位、非零保留 `flags`、长度舍入溢出与超出用户空间的地址提示。地址空间无空洞等核心 mmap 失败统一映射为 `NO_MEMORY`；结果回写失败会解除刚建立的映射。
 
 ### 4.2 vm_map — 对象映射
 
@@ -176,7 +176,7 @@ int64_t vm_map(a20_vm_map_args_t *args);
 3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界；`offset` 需页对齐
 4. source 是 `FILE`/`DEVICE`：走核心 `mm_mmap_file`，经 page cache **按需分页**填充（不再 eager-load 到匿名 VMO）；`offset` 需页对齐
 5. 计算 READ/WRITE/EXEC 的 `prot_eff` 与 handle rights 交集（`a20_vm_prot_eff`；无 `A20_RIGHT_EXEC` 则不给 EXEC 位）
-6. MEMORY source 创建 `VM_VMO` 映射记录并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有映射记录并持 fd 引用
+6. MEMORY source 创建 `VM_VMO` 映射记录并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有映射记录并持 `vfile` 引用；失败引用在 MM 锁外释放
 
 与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE/EXEC rights 都会收紧对应保护位；此外经 VMAR 路由的映射还要满足节点天花板与 `MAP_FIXED` 的 `VMAR_CAN_MAP_SPECIFIC` 要求（`vmar_cap_allows`）。
 
@@ -200,9 +200,9 @@ int64_t vm_protect(uint64_t addr, uint64_t length, uint32_t prot);
 ```
 
 语义：
-1. 查找目标 VMAR
-2. 先做能力检查：逐个覆盖 `[addr, addr+length)` 的 VMA，任何 `vmar_cap != 0` 的 VMA 都要求 `new_prot` 不超出该 cap，否则返回 `ACCESS`（`a20_vmar_protect`）。`vmar_cap` 是映射建立时盖的章：`mm_mmap`/`mm_mmap_file`/`mm_mmap_vmo` 三条入口都无条件写入（Linux ABI 的 mmap 经 `proc_mmap` 也走前两条，因此同样带 cap），fork 按结构体整拷继承；只有不经这三条入口拼装的记录（如 vDSO/vvar）该字段为 0，不受此检查限制
-3. 调用核心 `mm_mprotect`，由核心路径更新页表项并执行所需 TLB invalidation
+1. 校验地址、长度和保护位，进入核心 `mm_mprotect`
+2. 核心在 `mm->lock` 内检查整个覆盖区间：带 `VM_NATIVE_CAP` 的记录要求 `new_prot` 不超出 `vmar_cap`，零 cap 代表真实的 `PROT_NONE`，超限返回 `ACCESS`
+3. 检查通过后才拆分记录、更新 PTE 和执行 TLB invalidation；Linux `mprotect` 同样不能放宽 Native 映射。普通 Linux 映射没有 `VM_NATIVE_CAP`，仍遵守 Linux 的保护变更语义。fork、拆分与 remap 保留 cap，只有 cap 与其他后端属性一致的相邻记录才可合并
 
 回归测试在 `user/tests/test_native_mm.c` 第 6 分区：先经 VMAR 以 `R|W` 映射失败（cap 不含 WRITE）、以 `R` 成功，随后对该区间 `vm_protect(R|W)` 必须被拒。
 
@@ -215,7 +215,7 @@ int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task,
 
 当前 syscall 形式为 `vm_share(vmo_handle, target_task, rights)`：source 必须是 `A20_OBJ_MEMORY` 并需要 `READ | TRANSFER` right。`target_task == A20_HANDLE_NULL` 时安装到当前进程 HT，否则 task handle 需要 `CONTROL`，内核找到目标进程 HT 再安装。接收权限是 `rights ∩ source.rights`，空集返回 `ACCESS`。新 handle 继承源 VMO handle 的 expiry、remaining_ops、temporal flags 与安全标签，并增加 VMO 引用；安装后还要对目标进程执行 Bell-LaPadula No Read Up 检查。
 
-接收方通过返回的目标 HT handle 编号调用 `vm_map`。当前仍未提供“按地址区间反查 VMO 并导出”的 `a20_vm_share_args_t` 形式；用户应先使用 `vm_create_object` 创建 VMO，再映射和分享。
+接收方通过返回的目标 HT handle 编号调用 `vm_map`。另有结构化 `vm_share_region`：在 MM 锁内反查单条 `VM_VMO` 记录，导出相应 MEMORY handle；普通匿名和 FILE 映射不能由此导出。
 
 ### 4.6 vm_flush — 刷新
 
@@ -286,4 +286,4 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 
 保护位在映射时由以下因素共同决定：
 
-目标模型是请求、handle rights 和 VMAR capability 的交集。当前实现只对 `vm_map` 的 READ/WRITE 做 handle-rights 交集；VMAR flags 未执行，EXEC 直接透传，后续 `vm_protect` 也不重新检查原 handle rights。因此该公式是待收口契约，不是当前完整保证。
+请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，当前 remap 不保留 VMAR 节点引用。

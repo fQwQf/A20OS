@@ -51,6 +51,8 @@ static int vma_can_merge(mm_seg_t *a, mm_seg_t *b)
         return 0;
     if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
         return 0;
+    if (a->vmar_cap != b->vmar_cap)
+        return 0;
     if ((a->vm_flags | b->vm_flags) & VM_FILE) {
         if (a->file != b->file)
             return 0;

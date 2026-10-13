@@ -132,8 +132,8 @@ int main(int argc, char **argv, char **envp)
             return failh(out, 10, "vmar child st=", 14, st);
 
         /* Overlap must be refused. */
-        a20_handle_t ov;
-        st = a20_vm_create_vmar(root, 0x10800000ULL, 16 * 1024 * 1024ULL,
+        a20_handle_t ov = A20_HANDLE_NULL;
+        st = a20_vm_create_vmar(root, 0x100800000ULL, 16 * 1024 * 1024ULL,
                                 R | W, &ov);
         if (st == A20_OK)
             return fail(out, 11, "vmar overlap allowed", 21);
@@ -141,9 +141,10 @@ int main(int argc, char **argv, char **envp)
 
         /* Map a VMO through the child at a fixed address: WRITE exceeds the
          * child ceiling -> ACCESS; read-only fits. */
-        a20_handle_t vmo = a20_vm_create_object(2 * PAGE, 0);
-        if (vmo < 0)
+        a20_status_t created = a20_vm_create_object(2 * PAGE, 0);
+        if (created < 0)
             return fail(out, 12, "vm_create_object failed", 23);
+        a20_handle_t vmo = (a20_handle_t)created;
 
         uint64_t maddr = 0;
         st = a20_vm_map_in_vmar(child, vmo, 0x100010000ULL, 2 * PAGE, 0,
@@ -161,6 +162,29 @@ int main(int argc, char **argv, char **envp)
         if (st == A20_OK)
             return fail(out, 15, "vmar stamp lost", 17);
 
+        /* Reject an out-of-region MAP_FIXED before it can destroy another
+         * mapping. The victim is allocated outside the reserved window. */
+        uint64_t victim = 0;
+        st = a20_vm_alloc_pages(1, 3, &victim);
+        if (st != A20_OK || !victim)
+            return fail(out, 60, "victim alloc", 12);
+        *(volatile uint64_t *)(uintptr_t)victim = 0x123456789abcdef0ULL;
+        uint64_t escaped = 0;
+        st = a20_vm_map_in_vmar(child, vmo, victim, PAGE, 0, 1,
+                                0x10 /* MAP_FIXED */, &escaped);
+        if (st == A20_OK || *(volatile uint64_t *)(uintptr_t)victim !=
+                               0x123456789abcdef0ULL)
+            return fail(out, 61, "fixed escape damaged victim", 27);
+        a20_vm_unmap(victim, PAGE);
+
+        uint64_t guard = 0;
+        st = a20_vm_map(vmo, PAGE, 0, 0 /* NONE */, &guard);
+        if (st != A20_OK || !guard ||
+            a20_vm_protect(guard, PAGE, 1) != -A20_ERR_ACCESS)
+            return fail(out, 62, "zero cap not enforced", 21);
+        a20_vm_unmap(guard, PAGE);
+        a20_vm_unmap(maddr, 2 * PAGE);
+
         a20_hdl_close(vmo);
         a20_hdl_close(child);
         a20_hdl_close(root);
@@ -173,8 +197,15 @@ int main(int argc, char **argv, char **envp)
         po.dir = A20_HANDLE_NULL;
         po.flags = A20_PATH_OPEN_RDONLY;
         po.rights = A20_RIGHT_READ | A20_RIGHT_MAP;
-        po.path = (uint64_t)(uintptr_t)"/bin/native-mm-rv";
-        po.path_len = 17;
+        po.path = (uint64_t)(uintptr_t)A20_NATIVE_BIN("native-mm");
+        po.path_len = sizeof(A20_NATIVE_BIN("native-mm")) - 1;
+        /* A Native open/close must not leave a hidden Linux fd behind. */
+        for (unsigned i = 0; i < 1024; ++i) {
+            st = a20_path_open(&po);
+            if (st != A20_OK)
+                return fail(out, 63, "path_open leaked fds", 20);
+            a20_hdl_close(po.out_handle);
+        }
         st = a20_path_open(&po);
         if (st != A20_OK || po.out_handle == A20_HANDLE_NULL)
             return fail(out, 16, "path_open failed", 16);

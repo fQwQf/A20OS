@@ -60,6 +60,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
     }
 
     dst_vma->vm_flags = src_vma->vm_flags;
+    dst_vma->vmar_cap = src_vma->vmar_cap;
     dst_vma->pte_flags = src_vma->pte_flags;
     dst_vma->file = src_vma->file;
     dst_vma->backing_offset = src_vma->backing_offset + (src_addr - src_vma->start);
@@ -274,6 +275,12 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     if (old_len == 0) return -EINVAL;
     if (old_addr + old_len < old_addr || old_addr + old_len > vma->end)
         return -EFAULT;
+    if ((vma->vm_flags & VM_VMO) && vma->vmo) {
+        uint64_t offset = vma->backing_offset + (old_addr - vma->start);
+        if (offset < vma->backing_offset || offset > vma->vmo->size ||
+            new_len > vma->vmo->size - offset)
+            return -EINVAL;
+    }
     if ((flags & MREMAP_DONTUNMAP) && old_len != new_len)
         return -EINVAL;
 
@@ -342,6 +349,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     }
 
     dst_vma->vm_flags = vma->vm_flags;
+    dst_vma->vmar_cap = vma->vmar_cap;
     dst_vma->pte_flags = vma->pte_flags;
     dst_vma->file = vma->file;
     dst_vma->backing_offset = vma->backing_offset + (old_addr - vma->start);

@@ -38,6 +38,8 @@ struct page_cache_page;
  * in the core MM mutation paths (mm_mmap_locked / mm_mprotect_locked /
  * mm_munmap_locked / mm_mremap_locked), not in the ABI layer. */
 #define VM_SEALED    (1UL << 18)
+/* Mapping created with a Native capability ceiling, including PROT_NONE. */
+#define VM_NATIVE_CAP (1UL << 19)
 
 /* Typical compiler processes have O(100) mappings.  Keep a compact secondary
  * pointer index for binary-search lookup while retaining the linked list as
@@ -548,10 +550,23 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot, int flags, struct vmo *vmo,
                            uint64_t vmo_offset);
+/* Native ceilings are installed before insertion/merging. Zero means NONE,
+ * rather than an absent ceiling. Callers hold mm->lock and a TLB transaction. */
+vaddr_t mm_mmap_native_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                              int prot, int flags);
+vaddr_t mm_mmap_file_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                int prot, int flags, struct vfile *file,
+                                uint64_t offset, uint32_t cap);
+vaddr_t mm_mmap_vmo_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
+                               int prot, int flags, struct vmo *vmo,
+                               uint64_t offset, uint32_t cap);
 int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len);
 /* A mapping record.  Created with one reference the creator owns; the index
  * and every annotation walk take their own with mm_seg_get(). */
 mm_seg_t *mm_seg_new(void);
+/* Caller holds mm->lock; used for bounded Native VMAR placement. */
+int mm_range_overlaps(mm_struct_t *mm, vaddr_t addr, vaddr_t len,
+                      mm_seg_t *skip);
 /* Naming a mapping in the page-table node-entry index, and un-naming it.  All
  * three are no-ops without page-table ops.
  *
