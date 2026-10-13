@@ -104,9 +104,11 @@ static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int 
         spin_unlock_irqrestore(&u->lock, flags);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
+        wait_queue_entry_t entry = {0};
         uint64_t f2 = spin_lock_irqsave(&u->lock);
-        bool linked = token.task &&
-            wait_queue_link(&u->waiters, &(wait_queue_entry_t){0}, token, 0);
+        bool linked = token.task && !u->driver_dead &&
+            u->in_flight >= UDISK_RING_REQS - 1 &&
+            wait_queue_link(&u->waiters, &entry, token, 0);
         spin_unlock_irqrestore(&u->lock, f2);
         proc_wake_reason_t reason;
         if (linked)
@@ -115,10 +117,14 @@ static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int 
             (void)proc_park_cancel(token);
             reason = PROC_WAKE_CANCEL;
         }
-        wait_queue_unlink(&u->waiters, &(wait_queue_entry_t){0});
+        wait_queue_unlink(&u->waiters, &entry);
         proc_park_finish(token);
         (void)reason;
         flags = spin_lock_irqsave(&u->lock);
+        if (u->driver_dead || !token.task) {
+            spin_unlock_irqrestore(&u->lock, flags);
+            return -1;
+        }
     }
     id = u->id_counter++;
     u->in_flight++;
@@ -146,9 +152,12 @@ static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int 
         proc_wait_token_t token = proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, 0);
         if (!token.task)
             return -1;
+        wait_queue_entry_t entry = {0};
         uint64_t f2 = spin_lock_irqsave(&u->lock);
-        bool linked = token.task && wait_queue_link(&u->waiters,
-                        &(wait_queue_entry_t){0}, token, 0);
+        /* Completion and registration share this lock: a completion before
+         * registration must cancel the park rather than lose its wake. */
+        bool linked = !__atomic_load_n(&req->done, __ATOMIC_ACQUIRE) &&
+            wait_queue_link(&u->waiters, &entry, token, 0);
         spin_unlock_irqrestore(&u->lock, f2);
         proc_wake_reason_t reason;
         if (linked)
@@ -157,7 +166,7 @@ static int udisk_rw(udisk_inst_t *u, uint64_t lba, void *buf, size_t count, int 
             (void)proc_park_cancel(token);
             reason = PROC_WAKE_CANCEL;
         }
-        wait_queue_unlink(&u->waiters, &(wait_queue_entry_t){0});
+        wait_queue_unlink(&u->waiters, &entry);
         proc_park_finish(token);
         (void)reason;
         if (__atomic_load_n(&req->done, __ATOMIC_ACQUIRE))
