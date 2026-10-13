@@ -634,6 +634,16 @@ static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
     uintptr_t pkey = 0;
     if (!task || !word)
         return -EFAULT;
+#ifndef CONFIG_NOMMU
+    /* prepare_write ran without mm->lock.  Fork may have write-protected
+     * the leaf since then; never perform an atomic store into its COW frame.
+     * The caller retries preparation with all locks dropped. */
+    pte_t *pte = pt_lookup_leaf(task->pgdir, (vaddr_t)(uintptr_t)uaddr,
+                                NULL, NULL, NULL);
+    if (!pte || !arch_pte_is_leaf(*pte) ||
+        (*pte & (PTE_V | PTE_U | PTE_W)) != (PTE_V | PTE_U | PTE_W))
+        return -EAGAIN;
+#endif
     volatile int *w = futex_user_word_locked(task, uaddr, &pkey);
     if (!w)
         return -EFAULT;
@@ -645,15 +655,13 @@ static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
 
 int futex_pi_acquire(int *uaddr, int try_only)
 {
+    if ((uintptr_t)uaddr & (sizeof(int) - 1))
+        return -EINVAL;
     task_t *t = proc_current();
     if (!t)
         return -ESRCH;
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
-    /* Same bucket the wait side parks in, or the compare-and-swap on the user
-     * word would not serialise against concurrent operations on that word. */
-    wait_queue_t *q = &g_futex_buckets[
-        futex_bucket_index(futex_bucket_key(vkey, futex_phys_key(uaddr)))];
 
     for (;;) {
         int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
@@ -661,16 +669,20 @@ int futex_pi_acquire(int *uaddr, int try_only)
             return pr;
 
         uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
-        uint64_t q_flags = spin_lock_irqsave(&q->lock);
-
         volatile int *word = NULL;
         uintptr_t pkey = 0;
         int mr = futex_user_word_map(t, uaddr, &word, &pkey);
         if (mr < 0) {
-            spin_unlock_irqrestore(&q->lock, q_flags);
             spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+            if (mr == -EAGAIN)
+                continue;
             return mr;
         }
+        /* COW may change the physical key.  Derive the bucket only after the
+         * writable translation has been validated under mm->lock. */
+        wait_queue_t *q = &g_futex_buckets[
+            futex_bucket_index(futex_bucket_key(vkey, pkey))];
+        uint64_t q_flags = spin_lock_irqsave(&q->lock);
         int oldv = __atomic_load_n(word, __ATOMIC_ACQUIRE);
         if ((oldv & FUTEX_TID_MASK) == 0 &&
             (oldv == 0 || (oldv & FUTEX_OWNER_DIED))) {
@@ -728,27 +740,31 @@ int futex_pi_acquire(int *uaddr, int try_only)
 
 int futex_pi_release(int *uaddr)
 {
+    if ((uintptr_t)uaddr & (sizeof(int) - 1))
+        return -EINVAL;
     task_t *t = proc_current();
     if (!t)
         return -ESRCH;
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
-    wait_queue_t *q = &g_futex_buckets[
-        futex_bucket_index(futex_bucket_key(vkey, futex_phys_key(uaddr)))];
-
+retry:
     int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
     if (pr < 0)
         return pr;
 
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
-    uint64_t q_flags = spin_lock_irqsave(&q->lock);
     volatile int *word = NULL;
-    int mr = futex_user_word_map(t, uaddr, &word, NULL);
+    uintptr_t pkey = 0;
+    int mr = futex_user_word_map(t, uaddr, &word, &pkey);
     if (mr < 0) {
-        spin_unlock_irqrestore(&q->lock, q_flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        if (mr == -EAGAIN)
+            goto retry;
         return mr;
     }
+    wait_queue_t *q = &g_futex_buckets[
+        futex_bucket_index(futex_bucket_key(vkey, pkey))];
+    uint64_t q_flags = spin_lock_irqsave(&q->lock);
     int oldv = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     if ((oldv & FUTEX_TID_MASK) != tid) {
         spin_unlock_irqrestore(&q->lock, q_flags);
