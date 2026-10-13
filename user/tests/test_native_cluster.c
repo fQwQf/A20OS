@@ -343,14 +343,14 @@ static int abi_snapshot_and_agent(void) {
         return fail("snapshot-invalid-kind");
     a20_path_open_args_t image = {0};
     image.dir = A20_HANDLE_NULL;
-    const char path[] = "/bin/cluster-agent-rv";
+    const char path[] = "/bin/cluster-agent-" A20_CLUSTER_ARCH_TAG;
     image.path = (uint64_t)(uintptr_t)path;
     image.path_len = sizeof(path) - 1;
     image.rights = A20_RIGHT_READ | A20_RIGHT_EXEC;
     if (a20_path_open(&image) < 0)
         return fail("agent-open-image");
     const char *argv[] = {path, "101112131415161718191a1b1c1d1e1f",
-                          "/bin/cluster-task-probe-rv", 0};
+                          "/bin/cluster-task-probe-" A20_CLUSTER_ARCH_TAG, 0};
     a20_task_spawn_args_t spawn = {0};
     spawn.root_dir = spawn.cwd_dir = spawn.event_queue = A20_HANDLE_NULL;
     spawn.stdin_handle = A20_HANDLE_NULL;
@@ -466,7 +466,7 @@ static int abi_snapshot_and_agent(void) {
         return fail("agent-real-work-or-process");
     /* Restart only the user agent, keeping identity and data-plane state.
      * Its process image now deliberately runs until the work deadline. */
-    argv[2] = "/bin/cluster-hang-probe-rv";
+    argv[2] = "/bin/cluster-hang-probe-" A20_CLUSTER_ARCH_TAG;
     if (a20_path_open(&image) < 0)
         return fail("agent-restart-open");
     spawn.image = image.out_handle;
@@ -554,8 +554,8 @@ static int abi_clusterd(void) {
     a20_hdl_close(unrelated.endpoints[1]);
     a20_handle_t agent = A20_HANDLE_NULL, daemon = A20_HANDLE_NULL,
                  client = A20_HANDLE_NULL;
-    int ok = spawn_service("/bin/cluster-agent-rv", &agent) == 0 &&
-             spawn_service("/bin/clusterd-rv", &daemon) == 0;
+    int ok = spawn_service("/bin/cluster-agent-" A20_CLUSTER_ARCH_TAG, &agent) == 0 &&
+             spawn_service("/bin/clusterd-" A20_CLUSTER_ARCH_TAG, &daemon) == 0;
     uint64_t started = a20_agent_clock_ms(0);
     a20_cluster_selection_t target;
     while (ok && a20_agent_clock_ms(0) - started < 4000) {
@@ -578,7 +578,7 @@ static int abi_clusterd(void) {
     if (client != A20_HANDLE_NULL)
         a20_hdl_close(client);
     client = A20_HANDLE_NULL;
-    ok = ok && spawn_service("/bin/clusterd-rv", &daemon) == 0;
+    ok = ok && spawn_service("/bin/clusterd-" A20_CLUSTER_ARCH_TAG, &daemon) == 0;
     started = a20_agent_clock_ms(0);
     while (ok && a20_agent_clock_ms(0) - started < 4000) {
         if (a20_cluster_connect_uri("service://any/work", A20_WORK_OPERATOR, 1,
@@ -597,7 +597,7 @@ static int abi_clusterd(void) {
                                        &stale) == -A20_ERR_NODE_UNREACHABLE;
     }
     a20_handle_t coordinator = A20_HANDLE_NULL, jobs = A20_HANDLE_NULL;
-    ok = ok && spawn_service("/bin/jobd-rv", &coordinator) == 0;
+    ok = ok && spawn_service("/bin/jobd-" A20_CLUSTER_ARCH_TAG, &coordinator) == 0;
     started = a20_agent_clock_ms(0);
     while (ok && a20_agent_clock_ms(0) - started < 2000) {
         if (a20_cluster_connect(0, 0, "cluster.jobs", 0, 0, &jobs) >= 0)
@@ -677,7 +677,7 @@ static int abi_clusterd(void) {
             a20_hdl_close(file.out_handle);
         } else
             ok = 0;
-        const char *word_argv[] = {"/bin/cluster-wordcount-rv", word_path, 0};
+        const char *word_argv[] = {"/bin/cluster-wordcount-" A20_CLUSTER_ARCH_TAG, word_path, 0};
         a20_handle_t submitter = A20_HANDLE_NULL;
         ok = ok && !spawn_argv(word_argv[0], word_argv, 2, &submitter);
         if (submitter != A20_HANDLE_NULL) {

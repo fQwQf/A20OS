@@ -3,7 +3,7 @@
 #include "liba20rt/crt0_a20.h"
 static a20_handle_t output = A20_HANDLE_NULL;
 static const char path[] = "/tmp/a20-cluster-supervisor.conf";
-static const char supervisor[] = "/bin/cluster-supervisor-rv";
+static const char supervisor[] = "/bin/cluster-supervisor-" A20_CLUSTER_ARCH_TAG;
 static void note(const char *s) {
     if (output != A20_HANDLE_NULL)
         a20_hdl_write_buf(output, s, a20_strlen(s), 0);
@@ -242,10 +242,10 @@ int main(int argc, char **argv, char **envp) {
         "version 1\nnode 00000000000000000000000000000001\ninstance "
         "a2200000000000000000000000000001\nepoch 72623859790382856\nrole "
         "worker\ntiming-scale 10\nseed 00000000000000000000000000000003 "
-        "udp:10.0.3.3:44020\nservice agent /bin/cluster-agent-rv\nservice "
+        "udp:10.0.3.3:44020\nservice agent /bin/cluster-agent-" A20_CLUSTER_ARCH_TAG "\nservice "
         "control "
-        "/bin/clusterd-rv\nservice jobs /bin/jobd-rv\nprocess "
-        "/bin/cluster-task-probe-rv\n";
+        "/bin/clusterd-" A20_CLUSTER_ARCH_TAG "\nservice jobs /bin/jobd-" A20_CLUSTER_ARCH_TAG "\nprocess "
+        "/bin/cluster-task-probe-" A20_CLUSTER_ARCH_TAG "\n";
     if (write_config(normal) || spawn(&task) || running(0) || call_work())
         return fail("configured services");
     a20_runtime_info_t bound;
@@ -281,8 +281,8 @@ int main(int argc, char **argv, char **envp) {
     const char crash[] =
         "version 1\nnode 00000000000000000000000000000001\ninstance "
         "a2200000000000000000000000000001\nepoch 72623859790382856\nrole "
-        "worker\nservice agent /bin/cluster-task-probe-rv\nservice control "
-        "/bin/clusterd-rv\nservice jobs /bin/jobd-rv\n";
+        "worker\nservice agent /bin/cluster-task-probe-" A20_CLUSTER_ARCH_TAG "\nservice control "
+        "/bin/clusterd-" A20_CLUSTER_ARCH_TAG "\nservice jobs /bin/jobd-" A20_CLUSTER_ARCH_TAG "\n";
     if (write_config(crash) || spawn(&task) || running(3))
         return fail("restart backoff");
     if (a20_task_kill(task, 15) < 0 || wait_exit(task, 0, 3000) || quiescent())
