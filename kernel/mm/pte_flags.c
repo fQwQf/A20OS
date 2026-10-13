@@ -62,7 +62,7 @@ int mm_pte_flags_allow_access(pte_t pte_flags) {
 }
 
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags) {
-    pte_t flags = old_flags & (PTE_R | PTE_W | PTE_X | PTE_U |
+    pte_t flags = old_flags & (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U |
                                   PTE_G | PTE_A | PTE_D | PTE_COW |
                                   PTE_LEAF | PTE_MAT1);
     flags &= ~(uint64_t)(PTE_R | PTE_W | PTE_X | PTE_U | PTE_D);
