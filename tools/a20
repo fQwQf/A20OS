@@ -1004,20 +1004,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
 
-    # Unknown arguments (after an optional `--`) are forwarded to make. Using
-    ns, passthrough = parser.parse_known_args(argv)
-    # Everything after an explicit "--" is make's.  Anything else that a20 did
-    # not recognise is a typo, and forwarding it would hand it to make as a
-    # variable override or goal -- so `--dry-rnu` has to be an error, not a
-    # silently-ignored flag that changes what gets built.
-    if passthrough and passthrough[0] == "--":
-        ns.make_args = passthrough[1:]
-    elif passthrough:
-        parser.error(f"unrecognized argument(s): {' '.join(passthrough)}\n"
-                     "a20 flags must be spelled correctly; make arguments go after '--', "
-                     "e.g. `a20 build <instance> -- -j8`")
-    else:
-        ns.make_args = []
+    raw = list(sys.argv[1:] if argv is None else argv)
+    split = raw.index("--") if "--" in raw else len(raw)
+    ns, unknown = parser.parse_known_args(raw[:split])
+    if unknown:
+        parser.error(f"unrecognized argument(s): {' '.join(unknown)}\n"
+                     "make arguments go after '--', e.g. `a20 build <instance> -- -j8`")
+    ns.make_args = raw[split + 1:] if split < len(raw) else []
+    if ns.make_args and ns.command not in {"build", "run", "debug", "test", "flash", "package", "deploy"}:
+        parser.error(f"{ns.command} does not accept make arguments")
 
     rc = _dispatch(ns)
     # Commands that delegate to make report success by returning None; main()

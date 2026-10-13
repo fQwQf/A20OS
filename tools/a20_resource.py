@@ -534,10 +534,13 @@ def gate_qemu(*, memory: str, vcpus: int, disk_path: str, image: Path | None,
             budget = max(0.0, float(raw))
         except ValueError:
             budget = QEMU_WAIT_DEFAULT_S
-    policy = Policy(wait_timeout_s=budget)
+    env_policy = Policy.from_env()
+    policy = Policy(env_policy.reserve_mem_mb, env_policy.min_disk_mb,
+                    env_policy.max_concurrent, budget)
     mem_mb = (int(parse_size(memory) * MEMORY_HEADROOM_RATIO) >> 20) \
         + MEMORY_RESERVE_BYTES // (1 << 20)
-    need = Requirement(mem_mb=mem_mb, cpus=vcpus, disk_mb=QEMU_DISK_MIN_MB)
+    need = Requirement(mem_mb=mem_mb, cpus=vcpus,
+                       disk_mb=_env_int("A20_MIN_DISK_MB", QEMU_DISK_MIN_MB))
     gate(need, policy, Path(disk_path), wait=True, echo=echo, label=label)
 
 
