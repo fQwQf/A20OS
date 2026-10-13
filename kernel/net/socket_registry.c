@@ -252,7 +252,8 @@ bool net_socket_unregister(net_socket_t *s) {
     if (g_sockets[i] == s) {
         g_sockets[i] = NULL;
         net_bh_slot_clear(i);
-        g_net_buckets[b].free_bits[i / 32] &= ~(1U << (i % 32));
+        unsigned local = (unsigned)i % NET_SOCK_SLOTS_PER_BUCKET;
+        g_net_buckets[b].free_bits[local / 32] &= ~(1U << (local % 32));
     }
     s->in_registry = 0;
     s->reg_idx = -1;

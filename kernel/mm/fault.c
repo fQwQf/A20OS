@@ -529,6 +529,17 @@ static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
 }
 #endif /* CONFIG_NOMMU */
 
+/* Check software mapping policy before allocating or resolving a fault.
+ * A PTE's read bit may be its validity bit, so it cannot express PROT_NONE. */
+static int fault_access_allowed(uint64_t flags, enum mm_fault_access access)
+{
+    if (access == MM_FAULT_ACCESS_WRITE)
+        return (flags & VM_WRITE) != 0;
+    if (access == MM_FAULT_ACCESS_EXEC)
+        return (flags & VM_EXEC) != 0;
+    return (flags & (VM_READ | VM_WRITE)) != 0;
+}
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -542,6 +553,9 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
     if (!t->mm || !t->mm->pgdir) return -1;
 
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
+    mm_seg_t *policy = mm_seg_find(t->mm, page_va);
+    if (policy && !fault_access_allowed(policy->vm_flags, access))
+        return -1;
     pte_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
 
 #ifdef CONFIG_SWAP
@@ -1305,6 +1319,10 @@ int handle_cow_fault(task_t *t, uint64_t stval)
      * address space's leaf.  Keep them in the same per-mm transaction so the
      * fallback's in-place rc==1 upgrade cannot race a status-led replacement.
      * Its allocation is non-reclaiming, so this lock does not enter reclaim. */
+    /* Fork publishes read-only PTEs before its shootdown completes. A COW
+     * copy must wait for that transaction: a sibling still using a writable
+     * TLB entry could otherwise update the old frame after we copied it. */
+    mutex_lock(&mm->tlb_lock);
     spin_lock(&mm->lock);
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
     /* Prefer the status-led private-anon copy; it uses a cursor and compare-
@@ -1319,6 +1337,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
             frame_put(status_old_pfn);
             frame_put(status_old_pfn);
         }
+        mutex_unlock(&mm->tlb_lock);
         return 0;
     }
 #endif
@@ -1342,6 +1361,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
         __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     }
+    mutex_unlock(&mm->tlb_lock);
     return r;
 #endif
 }
@@ -1375,7 +1395,8 @@ int handle_demand_fault(task_t *t, uint64_t stval)
  *
  * Returns 1 if it served the fault, 0 if the caller must take the VMA path. */
 static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
-                                uint64_t page_va, uint64_t stval)
+                                uint64_t page_va, uint64_t stval,
+                                enum mm_fault_access access)
 {
     mm_cursor_t qcur;
     if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur) != 0)
@@ -1401,7 +1422,11 @@ static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
      * here: riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and an
      * explicit NX, and the helper encodes the W=>R dependency. */
     pte_t allow = mm_prot_to_pte_flags(prot);
-    if (!mm_pte_flags_allow_access(allow))
+    uint64_t vm_flags = 0;
+    if (prot & PROT_READ) vm_flags |= VM_READ;
+    if (prot & PROT_WRITE) vm_flags |= VM_WRITE;
+    if (prot & PROT_EXEC) vm_flags |= VM_EXEC;
+    if (!fault_access_allowed(vm_flags, access))
         goto decline;
 
     pfn_t np = pfa_alloc_flags(0, 0);
@@ -1470,7 +1495,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
     /* Lock-free: the status fast path runs before mm->lock is taken. */
-    if (mm_fault_from_status(t, mm, page_va, stval))
+    if (mm_fault_from_status(t, mm, page_va, stval, access))
         return 0;
 #endif
     spin_lock(&mm->lock);
@@ -1495,6 +1520,10 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
 
 
     mm_seg_t *vma = mm_seg_find(mm, page_va);
+    if (vma && !fault_access_allowed(vma->vm_flags, access)) {
+        spin_unlock(&mm->lock);
+        return -1;
+    }
     /*
      * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
      * userfaultfd hand the fault to the handler before the kernel fabricates
@@ -1543,7 +1572,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
         if (sflags & VM_WRITE) prot |= PROT_WRITE;
         if (sflags & VM_EXEC)  prot |= PROT_EXEC;
         pte_t seg_ptef = mm_prot_to_pte_flags(prot);
-        if (!mm_pte_flags_allow_access(seg_ptef)) {
+        if (!fault_access_allowed(sflags, access)) {
             mm_seg_put(seg);
             spin_unlock(&mm->lock);
             return -1;
@@ -1599,7 +1628,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
     }
     mm_seg_put(seg);
     if (vma && (vma->vm_flags & VM_FILE) && vma->file) {
-        mm_seg_dispatch_fallback++;        if (!mm_pte_flags_allow_access(vma->pte_flags)) {
+        mm_seg_dispatch_fallback++;
+        if (!fault_access_allowed(vma->vm_flags, access)) {
             spin_unlock(&mm->lock);
             return -1;
         }
@@ -1699,6 +1729,8 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
     pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
     int allowed = pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
                   (*pte & PTE_U);
+    int retry_cow = allowed && access == MM_FAULT_ACCESS_WRITE &&
+                    (*pte & PTE_COW);
     if (allowed) {
         if (access == MM_FAULT_ACCESS_WRITE)
             allowed = (*pte & PTE_W) != 0;
@@ -1727,17 +1759,14 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
      * the correct one: a clean SIGSEGV naming a mapping the process was never
      * allowed to execute.
      */
-    if (allowed) {
+    if (allowed || retry_cow) {
         mm_seg_t *vma = mm_seg_find(mm, stval);
-        if (vma) {
-            if (access == MM_FAULT_ACCESS_EXEC &&
-                !((vma->pte_flags & PTE_X) && (vma->vm_flags & VM_EXEC)))
-                allowed = 0;
-            else if (access == MM_FAULT_ACCESS_WRITE &&
-                     !(vma->vm_flags & VM_WRITE))
-                allowed = 0;
+        if (vma && !fault_access_allowed(vma->vm_flags, access)) {
+            allowed = 0;
+            retry_cow = 0;
         }
     }
+
     /*
      * Radix-style MMUs take a reference/access (R/C) fault on a present
      * page whose R bit is clear.  Mark the leaf referenced so the retry
@@ -1747,6 +1776,11 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
         *pte |= PTE_A;
     spin_unlock(&mm->lock);
 
+    /* A concurrent fork can write-protect a leaf between the initial COW
+     * attempt and demand-fault recheck. Resolve that new COW state rather
+     * than rejecting a write the VMA permits. */
+    if (retry_cow)
+        return handle_cow_fault(t, stval);
     if (!allowed)
         return -1;
 

@@ -59,6 +59,7 @@ typedef struct {
     /* Large 3D command staging: SUBMIT_3D and capset blobs exceed the
      * fixed 128-byte command slot.  Guarded by command_lock; only one
      * in-flight large command at a time. */
+    uint64_t           next_fence; /* command_lock protects the sequence */
     uint8_t           *big_req;
     size_t             big_req_cap;
     uint8_t           *big_resp;
@@ -332,13 +333,14 @@ static int virtio_gpu_send_cmd_big(virtio_gpu_inst_t *inst, const void *req,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
         if (deadline && clock_get_ticks() >= deadline)
             break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
@@ -581,6 +583,17 @@ static int gpu_flush(struct device *dev, uint32_t x, uint32_t y, uint32_t w, uin
         resp.type != VIRTIO_GPU_RESP_OK_NODATA)
         return -1;
     
+    struct virtio_gpu_set_scanout scanout;
+    memset(&scanout, 0, sizeof(scanout));
+    scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    scanout.resource_id = 1;
+    scanout.r.width = inst->width;
+    scanout.r.height = inst->height;
+    memset(&resp, 0, sizeof(resp));
+    if (virtio_gpu_send_cmd(inst, &scanout, sizeof(scanout), &resp, sizeof(resp)) < 0 ||
+        resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        return -EIO;
+
     struct virtio_gpu_resource_flush flush ALIGNED(64);
     memset(&flush, 0, sizeof(flush));
     flush.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
@@ -617,54 +630,67 @@ static int virtio_gpu_resource_unref(virtio_gpu_inst_t *inst, uint32_t resource_
 static int virtio_gpu_ctx_attach_resource(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                           uint32_t resource_id);
 
-/* VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D: pull a rendered region back into the
- * guest's own pages.
- *
- * The host renders into its own GL object, so a submit alone leaves the guest's
- * buffer holding whatever it held before.  Reading it directly is not a race and
- * not a coherency problem -- the bytes were never written.  The mem entries are
- * mandatory here: this command is what tells the host which guest frames to
- * deposit into, so a copy without them has no destination. */
-static int virtio_gpu_transfer_from_host_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
-                                            uint32_t resource_id,
-                                            const struct virtio_gpu_box *box,
-                                            uint32_t level, uint32_t stride,
-                                            uint32_t layer_stride, uint64_t offset,
-                                            const struct virtio_gpu_mem_entry *entries,
-                                            uint32_t nr_entries)
+/* Backing entries are published by RESOURCE_ATTACH_BACKING, not appended to
+ * transfer commands. Both directions have the same fixed wire payload. */
+static int virtio_gpu_transfer_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
+                                 uint32_t resource_id,
+                                 const struct virtio_gpu_box *box,
+                                 uint32_t level, uint32_t stride,
+                                 uint32_t layer_stride, uint64_t offset,
+                                 int to_host)
 {
     if (!inst->virgl)
         return -ENXIO;
-    if (!box || !entries || nr_entries == 0)
+    if (!box)
         return -EINVAL;
-
-    /* The trailing entry list makes the request variable-length, which is what
-     * the big sender is for; a fixed descriptor would advertise a body shorter
-     * than the one the device is about to parse. */
-    size_t body = sizeof(struct virtio_gpu_transfer_from_host_3d) +
-                  (size_t)nr_entries * sizeof(struct virtio_gpu_mem_entry);
-    uint8_t *req = kmalloc(body);
-    if (!req)
-        return -ENOMEM;
-
-    struct virtio_gpu_transfer_from_host_3d *hdr =
-        (struct virtio_gpu_transfer_from_host_3d *)req;
-    memset(hdr, 0, sizeof(*hdr));
-    hdr->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
-    hdr->hdr.ctx_id = ctx_id;
-    hdr->box = *box;
-    hdr->offset = offset;
-    hdr->resource_id = resource_id;
-    hdr->level = level;
-    hdr->stride = stride;
-    hdr->layer_stride = layer_stride;
-    memcpy(req + sizeof(*hdr), entries,
-           (size_t)nr_entries * sizeof(*entries));
-
+    struct virtio_gpu_transfer_to_host_3d req;
+    memset(&req, 0, sizeof(req));
+    req.hdr.type = to_host ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
+                            VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+    req.hdr.ctx_id = ctx_id;
+    req.box = *box;
+    req.offset = offset;
+    req.resource_id = resource_id;
+    req.level = level;
+    req.stride = stride;
+    req.layer_stride = layer_stride;
     struct virtio_gpu_ctrl_hdr resp;
     memset(&resp, 0, sizeof(resp));
-    int rc = virtio_gpu_send_cmd_big(inst, req, body, &resp, sizeof(resp));
-    kfree(req);
+    int rc = virtio_gpu_send_cmd(inst, &req, sizeof(req), &resp, sizeof(resp));
+    if (rc < 0)
+        return rc;
+    return resp.type == VIRTIO_GPU_RESP_OK_NODATA ? 0 : -EIO;
+}
+
+static int gpu_scanout_resource(struct device *dev, uint32_t resource_id,
+                                uint32_t x, uint32_t y, uint32_t width,
+                                uint32_t height)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    struct virtio_gpu_set_scanout req;
+    memset(&req, 0, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    req.resource_id = resource_id;
+    req.r.x = x;
+    req.r.y = y;
+    req.r.width = width;
+    req.r.height = height;
+    struct virtio_gpu_ctrl_hdr resp;
+    memset(&resp, 0, sizeof(resp));
+    int rc = virtio_gpu_send_cmd(inst, &req, sizeof(req), &resp, sizeof(resp));
+    if (rc < 0)
+        return rc;
+    if (resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        return -EIO;
+    struct virtio_gpu_resource_flush flush;
+    memset(&flush, 0, sizeof(flush));
+    flush.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    flush.resource_id = resource_id;
+    flush.r = req.r;
+    memset(&resp, 0, sizeof(resp));
+    rc = virtio_gpu_send_cmd(inst, &flush, sizeof(flush), &resp, sizeof(resp));
     if (rc < 0)
         return rc;
     return resp.type == VIRTIO_GPU_RESP_OK_NODATA ? 0 : -EIO;
@@ -800,6 +826,10 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     memset(&inst->submit_hdr, 0, sizeof(inst->submit_hdr));
     inst->submit_hdr.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     inst->submit_hdr.hdr.ctx_id = ctx_id;
+    /* Queue consumption only confirms decoding. Request a host GPU fence so
+     * synchronous completion and exported sync_files mean rendering finished. */
+    inst->submit_hdr.hdr.flags = 1; /* VIRTIO_GPU_FLAG_FENCE */
+    inst->submit_hdr.hdr.fence_id = ++inst->next_fence;
     inst->submit_hdr.size = (uint32_t)len;
     arch_dma_sync_for_device(&inst->submit_hdr, sizeof(inst->submit_hdr));
     memset(&inst->submit_resp, 0, sizeof(inst->submit_resp));
@@ -842,6 +872,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
@@ -853,7 +884,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
          * while holding command_lock, starving the host backend thread that
          * has to consume this very descriptor.  Bounded chunks keep a lost
          * completion interrupt from parking forever. */
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
@@ -1009,6 +1040,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
@@ -1019,7 +1051,7 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
         if (deadline && clock_get_ticks() >= deadline)
             break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
@@ -1162,20 +1194,16 @@ static int gpu_ctx_attach_resource(struct device *dev, uint32_t ctx_id,
     return virtio_gpu_ctx_attach_resource(inst, ctx_id, resource_id);
 }
 
-static int gpu_transfer_from_host_3d(struct device *dev, uint32_t ctx_id,
-                                     uint32_t resource_id,
-                                     const struct virtio_gpu_box *box,
-                                     uint32_t level, uint32_t stride,
-                                     uint32_t layer_stride, uint64_t offset,
-                                     const struct virtio_gpu_mem_entry *entries,
-                                     uint32_t nr_entries)
+static int gpu_transfer_3d(struct device *dev, uint32_t ctx_id,
+                            uint32_t resource_id, const struct virtio_gpu_box *box,
+                            uint32_t level, uint32_t stride, uint32_t layer_stride,
+                            uint64_t offset, int to_host)
 {
     virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
         return -ENODEV;
-    return virtio_gpu_transfer_from_host_3d(inst, ctx_id, resource_id, box, level,
-                                            stride, layer_stride, offset, entries,
-                                            nr_entries);
+    return virtio_gpu_transfer_3d(inst, ctx_id, resource_id, box, level,
+                                  stride, layer_stride, offset, to_host);
 }
 
 static const gpu_dev_ops_t gpu_ops = {
@@ -1192,7 +1220,8 @@ static const gpu_dev_ops_t gpu_ops = {
     .resource_create_3d = gpu_res_create_3d,
     .resource_unref = gpu_res_unref,
     .ctx_attach_resource = gpu_ctx_attach_resource,
-    .transfer_from_host_3d = gpu_transfer_from_host_3d,
+    .transfer_3d = gpu_transfer_3d,
+    .scanout_resource = gpu_scanout_resource,
     .submit_3d = gpu_submit_3d,
 };
 

@@ -33,6 +33,9 @@
  * conservative fallbacks when an architecture does not override them.
  * init_kthread() calls the bootarg diagnostics once after scheduler startup. */
 void arch_run_bootarg_selftests(void);
+/* Optional architecture-owned fields following a /proc/cpuinfo processor ID.
+ * Return the number of bytes formatted, with snprintf truncation semantics. */
+int arch_cpuinfo_fields(char *buf, size_t size);
 /* Physical byte address just past memory reserved before frame allocation. */
 paddr_t arch_pfa_init_limit(void);
 /* Reserved module allocator: 1=allocated, with *addr_out set to the load VA;

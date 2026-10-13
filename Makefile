@@ -578,7 +578,7 @@ USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 # $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
-USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common \
+USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/arch user/init_common \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/apps/fastfetch)
 NATIVE_TAG_riscv64     := rv

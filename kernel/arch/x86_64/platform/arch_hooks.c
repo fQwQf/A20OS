@@ -8,6 +8,36 @@
 
 #include "abi/linux/ptrace_layout.h"
 #include "proc/debug_regs.h"
+#include "core/stdio.h"
+#include "core/string.h"
+
+int arch_cpuinfo_fields(char *buf, size_t size)
+{
+    uint32_t a, b, c, d;
+    char vendor[13] = {0};
+    char model[49] = "x86_64";
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(0), "c"(0));
+    memcpy(vendor, &b, 4);
+    memcpy(vendor + 4, &d, 4);
+    memcpy(vendor + 8, &c, 4);
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(0x80000000U), "c"(0));
+    if (a >= 0x80000004U) {
+        for (unsigned i = 0; i < 3; i++) {
+            __asm__ volatile("cpuid"
+                             : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                             : "a"(0x80000002U + i), "c"(0));
+            memcpy(model + i * 16, &a, 4);
+            memcpy(model + i * 16 + 4, &b, 4);
+            memcpy(model + i * 16 + 8, &c, 4);
+            memcpy(model + i * 16 + 12, &d, 4);
+        }
+        model[48] = '\0';
+    }
+    return snprintf(buf, size, "vendor_id\t: %s\nmodel name\t: %s\n",
+                    vendor, model);
+}
 
 /* ---- drvmod MMIO window: low-4 GiB direct-map window ---- */
 

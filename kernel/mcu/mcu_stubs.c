@@ -26,6 +26,7 @@
 #include "mm/vm.h"
 #include "proc/debug.h"
 #include "proc/proc.h"
+#include "proc/resource_ns.h"
 #include "sys/futex.h"
 
 /* From kernel/proc/sched.c: event-driven network / block bottom halves. */
@@ -91,10 +92,18 @@ void lock_counters_enable_callsite(spinlock_t *lock) {
  * reference the allocator descriptor while compiling exit paths. */
 pfa_t pfa;
 
+/* The trimmed Native MCU build has no Linux resource namespace syscalls
+ * or full IPC/network/cgroup tables. Its shared boot path still calls init. */
+void resource_ns_init(void) {
+}
+
 /* From kernel/proc/exit.c / cgroup integration. */
-void cg_detach_task(struct cg_node *cg, int pid) {
-    (void)cg;
-    (void)pid;
+void cg_detach_task(struct task_t *t) {
+    (void)t;
+}
+void cg_inherit_task(struct task_t *child, struct task_t *parent) {
+    (void)child;
+    (void)parent;
 }
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages) {
     (void)cg;

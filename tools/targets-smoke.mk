@@ -624,6 +624,24 @@ smoke-futex-stress:
 smoke-futex-stress-aarch64:
 	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64
 
+.PHONY: smoke-symlink-mount smoke-drm-sysfs smoke-drm-prime
+smoke-symlink-mount:
+	$(PYTHON) tools/smoke.py smoke-symlink-mount
+
+smoke-drm-sysfs:
+	$(PYTHON) tools/smoke.py smoke-drm-sysfs
+
+smoke-drm-prime:
+	$(PYTHON) tools/smoke.py smoke-drm-prime
+
+.PHONY: smoke-cpuinfo
+smoke-cpuinfo:
+	$(PYTHON) tools/smoke.py smoke-cpuinfo
+
+.PHONY: smoke-sigchld-group
+smoke-sigchld-group:
+	$(PYTHON) tools/smoke.py smoke-sigchld-group
+
 smoke-scm-stress:
 	$(PYTHON) tools/smoke.py smoke-scm-stress
 
@@ -1803,3 +1821,17 @@ smoke-serial-fidelity:
 # Copyout after COW, adjacent first faults, and signal-stack ABI.
 smoke-vm-fault-x86_64:
 	$(PYTHON) tools/smoke.py smoke-vm-fault-x86_64
+
+# UTS/IPC/network/cgroup membership, isolation and namespace lifetime.
+smoke-resource-ns-x86_64:
+	$(PYTHON) tools/smoke.py smoke-resource-ns-x86_64
+
+smoke-resource-ns:
+	$(PYTHON) tools/smoke.py smoke-resource-ns
+
+# Four-CPU dispatch ownership and scheduling-key update races.
+smoke-sched-stress-x86_64:
+	$(PYTHON) tools/smoke.py smoke-sched-stress-x86_64
+
+smoke-sandbox:
+	$(PYTHON) tools/smoke.py smoke-sandbox

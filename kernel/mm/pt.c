@@ -1901,6 +1901,8 @@ static int cursor_span_ok(const mm_cursor_t *cur, vaddr_t addr)
 
 uint8_t mm_pt_prot_bits(pte_t flags)
 {
+    if (!(flags & PTE_U))
+        return 0;
     uint8_t prot = 0;
     if (flags & PTE_R) prot |= MM_ST_PROT_R;
     if (flags & PTE_W) prot |= MM_ST_PROT_W;

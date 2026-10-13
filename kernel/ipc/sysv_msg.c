@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "ipc/sysv_msg.h"
 
 #include "core/consts.h"
@@ -104,6 +105,7 @@ typedef struct sysv_msg_node {
 
 typedef struct {
     int used;
+    uint64_t namespace_ino;
     int key;
     sysv_ipc_perm64_t perm;
     uint64_t stime;
@@ -125,7 +127,7 @@ static spinlock_t g_msg_lock = SPINLOCK_INIT;
 
 static int msg_valid_locked(int msqid)
 {
-    return msqid >= 0 && msqid < SYSV_MSG_MAX && g_msg[msqid].used;
+    return msqid >= 0 && msqid < SYSV_MSG_MAX && g_msg[msqid].used && g_msg[msqid].namespace_ino == resource_ns_ino(PROCNS_IPC);
 }
 
 static int msg_calc_qbytes(void)
@@ -147,7 +149,7 @@ int sysv_msg_get(int key, int msgflg)
     uint64_t flags = spin_lock_irqsave(&g_msg_lock);
 
     for (int i = 0; i < SYSV_MSG_MAX; i++) {
-        if (g_msg[i].used && g_msg[i].key == key && key != 0) {
+        if (g_msg[i].used && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && g_msg[i].key == key && key != 0) {
             if ((msgflg & IPC_CREAT) && (msgflg & IPC_EXCL)) {
                 spin_unlock_irqrestore(&g_msg_lock, flags);
                 return -EEXIST;
@@ -156,7 +158,7 @@ int sysv_msg_get(int key, int msgflg)
             return i;
         }
     }
-    if (!(msgflg & IPC_CREAT)) {
+    if (key != 0 && !(msgflg & IPC_CREAT)) {
         spin_unlock_irqrestore(&g_msg_lock, flags);
         return -ENOENT;
     }
@@ -176,6 +178,7 @@ int sysv_msg_get(int key, int msgflg)
     sysv_msg_queue_t *q = &g_msg[slot];
     memset(q, 0, sizeof(*q));
     q->used = 1;
+    q->namespace_ino = resource_ns_ino(PROCNS_IPC);
     q->key = key;
     q->perm.key = key;
     q->perm.uid = uid;
@@ -495,8 +498,22 @@ int sysv_msg_count(void)
     int n = 0;
     uint64_t flags = spin_lock_irqsave(&g_msg_lock);
     for (int i = 0; i < SYSV_MSG_MAX; i++)
-        if (g_msg[i].used)
+        if (g_msg[i].used && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC))
             n++;
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return n;
+}
+
+void sysv_msg_namespace_destroy(uint64_t ino)
+{
+    uint64_t irq = spin_lock_irqsave(&g_msg_lock);
+    for (int i = 0; i < SYSV_MSG_MAX; i++) {
+        sysv_msg_queue_t *q = &g_msg[i];
+        if (!q->used || q->namespace_ino != ino) continue;
+        sysv_msg_node_t *n = q->head;
+        while (n) { sysv_msg_node_t *next = n->next; kfree(n); n = next; }
+        msg_wake_blocked(q);
+        memset(q, 0, sizeof(*q));
+    }
+    spin_unlock_irqrestore(&g_msg_lock, irq);
 }

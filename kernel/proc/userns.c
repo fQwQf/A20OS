@@ -12,6 +12,25 @@
 #include "mm/slab.h"
 #include "core/errno.h"
 
+static int g_overflow_uid = USERNS_OVERFLOW_UID;
+static int g_overflow_gid = USERNS_OVERFLOW_GID;
+
+int userns_overflow_id(int group)
+{
+    return __atomic_load_n(group ? &g_overflow_gid : &g_overflow_uid,
+                           __ATOMIC_RELAXED);
+}
+
+int userns_set_overflow_id(int group, int value)
+{
+    if (!userns_capable(proc_current(), userns_init_ns(), CAP_SYS_ADMIN))
+        return -EPERM;
+    if (value < 0 || value > 65535) return -EINVAL;
+    __atomic_store_n(group ? &g_overflow_gid : &g_overflow_uid, value,
+                     __ATOMIC_RELAXED);
+    return 0;
+}
+
 static user_namespace_t  g_init_userns;
 static user_namespace_t *g_userns_list;
 static spinlock_t        g_userns_lock = SPINLOCK_INIT;
@@ -219,21 +238,21 @@ int userns_to_kgid(user_namespace_t *ns, int ns_gid)
 
 int userns_from_kuid(user_namespace_t *ns, int kuid)
 {
-    if (!ns || kuid < 0) return USERNS_OVERFLOW_UID;
+    if (!ns || kuid < 0) return userns_overflow_id(0);
     uint32_t local = 0;
     if (map_from_global(ns->uid_map, ns->uid_map_extents,
                         (uint32_t)kuid, &local) < 0)
-        return USERNS_OVERFLOW_UID;
+        return userns_overflow_id(0);
     return (int)local;
 }
 
 int userns_from_kgid(user_namespace_t *ns, int kgid)
 {
-    if (!ns || kgid < 0) return USERNS_OVERFLOW_GID;
+    if (!ns || kgid < 0) return userns_overflow_id(1);
     uint32_t local = 0;
     if (map_from_global(ns->gid_map, ns->gid_map_extents,
                         (uint32_t)kgid, &local) < 0)
-        return USERNS_OVERFLOW_GID;
+        return userns_overflow_id(1);
     return (int)local;
 }
 

@@ -100,6 +100,17 @@ uint32_t pci_device_id(const device_t *dev) {
     return ((uint32_t)info->vendor << 16) | info->device;
 }
 
+int pci_device_location(const device_t *dev, unsigned *bus,
+                        unsigned *slot, unsigned *function) {
+    if (!dev || dev->bus != &pci_bus || !dev->plat_data)
+        return -ENODEV;
+    const pci_dev_info_t *info = (const pci_dev_info_t *)dev->plat_data;
+    if (bus) *bus = info->bus;
+    if (slot) *slot = info->dev;
+    if (function) *function = info->func;
+    return 0;
+}
+
 /* Resolve the INTx interrupt line for an enumerated PCI function through the
  * platform routing hook (arch_pci_intx_irq).  Returns -1 when the function
  * has no interrupt pin or the platform provides no routing for it; callers
@@ -559,7 +570,10 @@ static void pci_virtio_write32(virtio_transport_t *transport, uint32_t off,
                (uintptr_t)notify_off * vt->notify_multiplier));
         break;
     }
-    default: break;
+    default:
+        if (off >= VIRTIO_MMIO_CONFIG && vt->config)
+            writel(value, (volatile void *)(vt->config + off - VIRTIO_MMIO_CONFIG));
+        break;
     }
 }
 

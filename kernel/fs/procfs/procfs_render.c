@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mount.h"
 #include "net/netfilter.h"
@@ -29,6 +30,7 @@
 #include "mm/swap.h"
 #include "core/timer.h"
 #include "core/timekeeping.h"
+#include "core/smp.h"
 #include "core/perf.h"
 #include "core/lock_counters.h"
 #include "core/string.h"
@@ -49,6 +51,11 @@
 extern size_t  frame_free_count(void);
 extern int     vfs_mount_count(void);
 extern struct mount *vfs_mount_at(int index);
+
+__attribute__((weak)) int arch_cpuinfo_fields(char *buf, size_t size)
+{
+    return snprintf(buf, size, "model name\t: %s\n", ARCH_NAME);
+}
 
 /*
  * On-demand content generation for the synthetic /proc files.  Split out of
@@ -698,13 +705,19 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
          * the same content here. */
         snprintf(buf, bufsz, "%s\n", bootargs_get() ? bootargs_get() : "");
         break;
-    case PF_CPUINFO:
-        snprintf(buf, bufsz,
-            "processor\t: 0\n"
-            "hart\t\t: 0\n"
-            "isa\t\t: rv64gc\n"
-            "mmu\t\t: sv39\n\n");
+    case PF_CPUINFO: {
+        size_t off = 0;
+        uint32_t online = smp_online_cpu_mask();
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+            if (!(online & (1U << cpu)))
+                continue;
+            appendf(buf, bufsz, &off, "processor\t: %u\n", cpu);
+            char fields[256];
+            arch_cpuinfo_fields(fields, sizeof(fields));
+            appendf(buf, bufsz, &off, "%s\n", fields);
+        }
         break;
+    }
     case PF_MOUNTS: {
         buf[0] = '\0';
         int pos = 0;
@@ -1086,10 +1099,14 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_CGROUP:
-        snprintf(buf, bufsz,
-            "0::/init.scope\n");
+    case PF_PID_CGROUP: {
+        task_t *t = proc_find_get(pid);
+        char path[1024];
+        resource_ns_cgroup_path(t, path, sizeof(path));
+        snprintf(buf, bufsz, "0::%s\n", path);
+        proc_put(t);
         break;
+    }
     case PF_PID_CMDLINE: {
         task_t *t = proc_find_get(pid);
         if (!t || !t->exec_path[0]) {
@@ -1219,10 +1236,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_UTS:
+    case PF_PID_NS_UTS: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "uts:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_UTS);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_UTS));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_USER: {
         /* Real user namespaces: report the target task's namespace ino, so a
          * container and the host are distinguishable by reading
@@ -1233,10 +1253,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_IPC:
+    case PF_PID_NS_IPC: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "ipc:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_IPC);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_IPC));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_MNT: {
         /* Real mount namespaces: report the target task's namespace ino. */
         task_t *t = proc_find_get(pid);
@@ -1245,14 +1268,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_NET:
+    case PF_PID_NS_NET: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "net:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_NET);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_NET));
+        proc_put(t);
         break;
-    case PF_PID_NS_CGROUP:
+    }
+    case PF_PID_NS_CGROUP: {
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "cgroup:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_CGROUP);
+                 (unsigned long long)resource_ns_task_ino(t, PROCNS_CGROUP));
+        proc_put(t);
         break;
+    }
     case PF_PID_MOUNTINFO: {
         buf[0] = '\0';
         int pos = 0;
@@ -1447,6 +1476,11 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                  sysv_msg_count(), sysv_sem_count(), sysv_shm_count());
         break;
     }
+    case PF_SYS_KERNEL_OVERFLOW_UID:
+    case PF_SYS_KERNEL_OVERFLOW_GID:
+        snprintf(buf, bufsz, "%d\n",
+                 userns_overflow_id(type == PF_SYS_KERNEL_OVERFLOW_GID));
+        break;
     case PF_SYS_KERNEL_HOSTNAME: {
         extern const char *linux_kernel_hostname(void);
         snprintf(buf, bufsz, "%s\n", linux_kernel_hostname());

@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "net/lwip_stack.h"
 #include "net/lwip_concurrency.h"
 #include "core/bootargs.h"
@@ -1917,6 +1918,8 @@ int a20_lwip_format_route(char *buf, size_t bufsz)
     if (!buf || bufsz == 0)
         return 0;
 
+    if (!resource_ns_is_initial(resource_ns_current(PROCNS_NET)))
+        return snprintf(buf, bufsz, "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n");
     uint64_t flags = a20_lwip_lock();
     size_t off = 0;
     char row[192], name[8];
@@ -1946,6 +1949,8 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
     if (!buf || bufsz == 0)
         return 0;
 
+    if (!resource_ns_is_initial(resource_ns_current(PROCNS_NET)))
+        return snprintf(buf, bufsz, "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
     uint64_t flags = a20_lwip_lock();
     size_t off = 0;
     char row[256], name[8];

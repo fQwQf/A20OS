@@ -1,4 +1,6 @@
+#define _GNU_SOURCE
 #include <errno.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -231,6 +233,57 @@ static int concurrent_tcp_stress(void)
 int main(void)
 {
     printf("SOCKET_STRESS: start\n");
+    /* Each registering CPU starts in a different registry shard. Repeated
+     * close/reopen must recycle that shard's local bits, without touching a
+     * different shard or exhausting the global table. */
+    cpu_set_t available;
+    CPU_ZERO(&available);
+    if (sched_getaffinity(0, sizeof(available), &available))
+        return fail("registry-affinity");
+    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+        if (!CPU_ISSET(cpu, &available)) continue;
+        int start[2], ready[2];
+        if (pipe(start) || pipe(ready)) return fail("registry-pipe");
+        pid_t child = fork();
+        if (!child) {
+            close(start[1]); close(ready[0]);
+            char c;
+            if (write(ready[1], "r", 1) != 1 || read(start[0], &c, 1) != 1)
+                _exit(1);
+            close(start[0]); close(ready[1]);
+            for (int i = 0; i < 1100; i++) {
+                int pair[2];
+                if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
+                    fprintf(stderr, "SOCKET_STRESS: cpu=%d iteration=%d errno=%d\n", cpu, i, errno);
+                    _exit(2);
+                }
+                close(pair[0]); close(pair[1]);
+            }
+            _exit(0);
+        }
+        close(start[0]); close(ready[1]);
+        char c;
+        int ok = child > 0 && read(ready[0], &c, 1) == 1;
+        cpu_set_t one;
+        CPU_ZERO(&one); CPU_SET(cpu, &one);
+        /* Configure the sleeping worker before it resumes. The readiness
+         * byte can reach us before its read has finished entering sleep. */
+        if (ok) {
+            for (int retry = 0; retry < 100; retry++) {
+                if (!sched_setaffinity(child, sizeof(one), &one)) break;
+                if (retry == 99) ok = 0;
+                usleep(1000);
+            }
+        }
+        if (ok) ok = write(start[1], "s", 1) == 1;
+        close(start[1]); close(ready[0]);
+        int status;
+        pid_t waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        if (!ok || waited != child ||
+            !WIFEXITED(status) || WEXITSTATUS(status))
+            return fail("registry-shard-recycle");
+    }
+    puts("SOCKET_STRESS: registry-shard-recycle PASS");
     if (concurrent_tcp_stress() != 0)
         return 1;
     if (udp_ping_pong() != 0)

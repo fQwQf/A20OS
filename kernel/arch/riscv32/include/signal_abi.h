@@ -10,8 +10,7 @@ typedef struct {
     int32_t si_signo;
     int32_t si_errno;
     int32_t si_code;
-    int32_t si_pid;
-    int32_t _sifields[28];
+    int32_t _sifields[29];
 } __attribute__((aligned(16))) arch_siginfo_t;
 
 typedef struct arch_sigaltstack {

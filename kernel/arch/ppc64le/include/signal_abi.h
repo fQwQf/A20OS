@@ -10,8 +10,13 @@ typedef struct {
     int si_signo;
     int si_errno;
     int si_code;
-    int _sifields[29];
+    int _pad; /* Linux aligns the payload union to a machine word. */
+    int _sifields[28];
 } __attribute__((aligned(16))) arch_siginfo_t;
+
+_Static_assert(sizeof(arch_siginfo_t) == 128, "Linux siginfo size");
+_Static_assert(__builtin_offsetof(arch_siginfo_t, _sifields) == 16,
+               "Linux siginfo payload alignment");
 
 typedef struct arch_sigaltstack {
     void   *ss_sp;

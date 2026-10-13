@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Minecraft Java Edition
+Comment=Launch the installed Java Edition client
+Exec=minecraft --demo
+Icon=applications-games
+Terminal=false
+Categories=Game;

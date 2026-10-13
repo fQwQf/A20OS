@@ -56,6 +56,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -64,10 +65,6 @@
 #include <unistd.h>
 
 
-/* A20-private: the Linux UAPI has no GEM_CREATE, so there is no upstream
- * number to match.  tools/check-drm-abi.sh checks the real DRM_* numbers here
- * against the installed UAPI headers. */
-#define A20_GPU_IOCTL_GEM_CREATE 0x00004710UL
 #define DRM_IOCTL_GEM_CLOSE   0x40086409UL
 #define DRM_IOCTL_VIRTGPU_GETPARAM        0xc0106443UL
 #define DRM_IOCTL_VIRTGPU_GET_CAPS        0xc0186449UL
@@ -75,10 +72,8 @@
 #define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE 0xc0386444UL
 #define DRM_IOCTL_VIRTGPU_RESOURCE_INFO   0xc0106445UL
 #define DRM_IOCTL_VIRTGPU_EXECBUFFER      0xc0406442UL
-/* A20-private: the Linux VIRTGPU UAPI has no transfer ioctl, because its
- * clients read rendered results through the resource's own mapping once the
- * host has copied them there.  tools/check-drm-abi.sh checks the DRM_* numbers
- * above against the installed UAPI headers. */
+/* Linux native virtgpu transfer ioctls. */
+#define DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST 0xc02c6447UL
 #define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST 0xc02c6446UL
 
 #define VIRTGPU_PARAM_3D_FEATURES          1
@@ -119,9 +114,6 @@
 #define PIPE_CLEAR_COLOR0 0x4
 
 
-struct drm_gem_create {
-    uint32_t width, height, format, bpp, size, handle;
-};
 
 struct drm_gem_close {
     uint32_t handle, pad;
@@ -292,24 +284,7 @@ int main(void)
         printf("GPU3D_TEST: GET_CAPS returned a %u byte capset\n", caps.size);
     }
 
-    /* A real GEM buffer, then a 3D resource on top of it.  RESOURCE_CREATE is
-     * where the guest must publish its own pages to the host; if backing
-     * attach were missing this is the call that would silently do nothing. */
-    struct drm_gem_create g;
-    g.width = TEST_W;
-    g.height = TEST_H;
-    g.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
-    g.bpp = TEST_BPP * 8;
-    g.size = TEST_SIZE;
-    g.handle = 0;
-    if (ioctl(fd, A20_GPU_IOCTL_GEM_CREATE, &g) < 0)
-        return fail("GEM_CREATE");
-    if (g.handle == 0) {
-        printf("GPU3D_TEST: FAIL GEM_CREATE returned handle 0\n");
-        return EXIT_FAIL;
-    }
-    printf("GPU3D_TEST: GEM handle %u allocated (%u bytes)\n", g.handle, g.size);
-
+    /* RESOURCE_CREATE itself allocates the GEM, as stock Mesa requests. */
     struct drm_virtgpu_resource_create rc;
     memset(&rc, 0, sizeof(rc));
     rc.target = 2; /* GL_TEXTURE_2D */
@@ -319,18 +294,17 @@ int main(void)
     rc.height = TEST_H;
     rc.depth = 1;
     rc.array_size = 1;
-    rc.bo_handle = g.handle;
-    rc.size = g.size;
+    rc.size = TEST_SIZE;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, &rc) < 0)
         return fail("VIRTGPU_RESOURCE_CREATE");
-    if (rc.res_handle == 0) {
+    if (rc.res_handle == 0 || rc.bo_handle == 0) {
         printf("GPU3D_TEST: FAIL RESOURCE_CREATE returned res_handle 0\n");
         return EXIT_FAIL;
     }
     printf("GPU3D_TEST: 3D resource %u created with host backing\n", rc.res_handle);
 
     struct drm_virtgpu_resource_info ri;
-    ri.bo_handle = g.handle;
+    ri.bo_handle = rc.bo_handle;
     ri.res_handle = 0;
     ri.size = 0;
     ri.blob_mem = 0;
@@ -348,7 +322,7 @@ int main(void)
      * same physical frames the host renders into, so this reads what the host
      * produced rather than a copy of what this program last wrote. */
     struct drm_virtgpu_map m;
-    m.handle = g.handle;
+    m.handle = rc.bo_handle;
     m.pad = 0;
     m.offset = 0;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &m) < 0)
@@ -358,11 +332,54 @@ int main(void)
     if (pix == MAP_FAILED)
         return fail("mmap the virgl resource");
 
+    /* Upload nonuniform pixels, erase guest backing, then download. A no-op
+     * upload or download cannot produce the original pattern again. */
+    for (uint32_t i = 0; i < TEST_SIZE / 4; i++)
+        pix[i] = 0xff000000u | (i * 65537u);
+    struct drm_virtgpu_3d_transfer upload = {0};
+    upload.bo_handle = rc.bo_handle;
+    upload.box.w = TEST_W;
+    upload.box.h = TEST_H;
+    upload.box.d = 1;
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, &upload) < 0)
+        return fail("VIRTGPU_TRANSFER_TO_HOST");
+    memset(pix, 0, TEST_SIZE);
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, &upload) < 0)
+        return fail("VIRTGPU_TRANSFER_FROM_HOST uploaded pixels");
+    for (uint32_t i = 0; i < TEST_SIZE / 4; i++) {
+        if (pix[i] != (0xff000000u | (i * 65537u))) {
+            printf("GPU3D_TEST: FAIL upload round-trip pixel %u got %08x\n", i, pix[i]);
+            return EXIT_FAIL;
+        }
+    }
+    printf("GPU3D_TEST: upload/download round-trip PASS\n");
+
+    struct { uint32_t handle, flags; int32_t fd; } prime = {
+        rc.bo_handle, O_CLOEXEC | O_RDWR, -1
+    };
+    if (ioctl(fd, 0xc00c642dUL, &prime) < 0)
+        return fail("PRIME_HANDLE_TO_FD");
+    uint64_t cpu_sync = 2; /* START WRITE */
+    if (ioctl(prime.fd, 0x40086200UL, &cpu_sync) < 0)
+        return fail("DMA_BUF_SYNC START WRITE");
+    for (uint32_t i = 0; i < TEST_SIZE / 4; i++)
+        pix[i] = 0xff00ff00u ^ i;
+    cpu_sync = 6; /* END WRITE uploads CPU changes */
+    if (ioctl(prime.fd, 0x40086200UL, &cpu_sync) < 0)
+        return fail("DMA_BUF_SYNC END WRITE");
+    memset(pix, 0, TEST_SIZE);
+    if (ioctl(fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, &upload) < 0)
+        return fail("read back DMA-BUF upload");
+    for (uint32_t i = 0; i < TEST_SIZE / 4; i++)
+        if (pix[i] != (0xff00ff00u ^ i))
+            return fail("DMA-BUF CPU upload contents");
+
     /* A sentinel the host has to overwrite, so a colour that matches
      * afterwards cannot be something this program put there itself. */
     for (uint32_t i = 0; i < TEST_SIZE / 4; i++)
         pix[i] = 0xdeadbeef;
 
+    int previous_fence = -1;
     /* Two colours, not one: if only the first pass were being checked, a
      * buffer that merely happened to hold the expected value would pass.
      *
@@ -384,12 +401,14 @@ int main(void)
 
         struct drm_virtgpu_execbuffer eb;
         memset(&eb, 0, sizeof(eb));
-        eb.flags = 0;
+        eb.flags = 2; /* export a native sync_file */
+        if (previous_fence >= 0)
+            eb.flags |= 1;
         eb.size = len;
         eb.command = (uint64_t)(uintptr_t)test_stream;
-        eb.bo_handles = (uint64_t)(uintptr_t)&g.handle;
+        eb.bo_handles = (uint64_t)(uintptr_t)&rc.bo_handle;
         eb.num_bo_handles = 1;
-        eb.fence_fd = -1;
+        eb.fence_fd = previous_fence;
         if (ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, &eb) < 0) {
             /* A rejected stream is a failure, not a note.  It means the
              * encoding is wrong, which is what this test exists to catch, and
@@ -399,6 +418,23 @@ int main(void)
                    "(errno=%d)\n", len, errno);
             return EXIT_FAIL;
         }
+        if (previous_fence >= 0)
+            close(previous_fence);
+        previous_fence = eb.fence_fd;
+        if (previous_fence < 0 || !(fcntl(previous_fence, F_GETFD) & FD_CLOEXEC))
+            return fail("EXECBUFFER native fence fd");
+        struct pollfd ready = {previous_fence, POLLIN, 0};
+        if (poll(&ready, 1, 0) != 1 || !(ready.revents & POLLIN))
+            return fail("EXECBUFFER completed fence poll");
+        struct {
+            char name[32];
+            int32_t status;
+            uint32_t flags, num_fences, pad;
+            uint64_t details;
+        } info = {0};
+        if (ioctl(previous_fence, 0xc0383e04UL, &info) < 0 ||
+            info.status != 1 || info.num_fences != 1)
+            return fail("SYNC_IOC_FILE_INFO");
         printf("GPU3D_TEST: EXECBUFFER accepted a %u byte clear stream\n", len);
 
         /* Pull the result into this buffer before reading it.  The host renders
@@ -407,7 +443,7 @@ int main(void)
          * read it directly and reported that as a rendering failure. */
         struct drm_virtgpu_3d_transfer tr;
         memset(&tr, 0, sizeof(tr));
-        tr.bo_handle = g.handle;
+        tr.bo_handle = rc.bo_handle;
         tr.box.x = 0;
         tr.box.y = 0;
         tr.box.z = 0;
@@ -416,7 +452,7 @@ int main(void)
         tr.box.d = 1;
         tr.level = 0;
         tr.offset = 0;
-        tr.stride = TEST_W * TEST_BPP;
+        tr.stride = 0;
         tr.layer_stride = 0;
         if (ioctl(fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, &tr) < 0)
             return fail("VIRTGPU_TRANSFER_FROM_HOST");
@@ -443,15 +479,62 @@ int main(void)
         }
         printf("GPU3D_TEST: pixel readback ok (0x%08x across %u pixels)\n",
                passes[i].expect, TEST_SIZE / 4);
+        memset(pix, 0, TEST_SIZE);
+        cpu_sync = 1; /* START READ downloads GPU writes */
+        if (ioctl(prime.fd, 0x40086200UL, &cpu_sync) < 0)
+            return fail("DMA_BUF_SYNC START READ");
+        for (uint32_t p = 0; p < TEST_SIZE / 4; p++)
+            if (pix[p] != passes[i].expect)
+                return fail("DMA-BUF CPU download contents");
+        cpu_sync = 5;
+        if (ioctl(prime.fd, 0x40086200UL, &cpu_sync) < 0)
+            return fail("DMA_BUF_SYNC END READ");
     }
 
+    close(previous_fence);
+    close(prime.fd);
+    printf("GPU3D_TEST: DMA-BUF CPU upload/download PASS\n");
+    printf("GPU3D_TEST: native fence export/import/poll PASS\n");
     munmap(pix, TEST_SIZE);
 
     struct drm_gem_close cl;
-    cl.handle = g.handle;
+    cl.handle = rc.bo_handle;
     cl.pad = 0;
     if (ioctl(fd, DRM_IOCTL_GEM_CLOSE, &cl) < 0)
         return fail("GEM_CLOSE");
+
+    /* Exercise allocation beyond the old 64-entry device-wide table. The
+     * zero size requests one page and input handle fields must be ignored. */
+    uint32_t handles[96];
+    for (unsigned i = 0; i < 96; i++) {
+        struct drm_virtgpu_resource_create many = rc;
+        many.width = many.height = 4;
+        many.size = 0;
+        many.bo_handle = many.res_handle = UINT32_MAX;
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, &many) < 0)
+            return fail("RESOURCE_CREATE simultaneous objects");
+        handles[i] = many.bo_handle;
+        if (!handles[i] || handles[i] == UINT32_MAX || !many.res_handle)
+            return fail("RESOURCE_CREATE output handles");
+        struct drm_virtgpu_resource_info info = {0};
+        info.bo_handle = handles[i];
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &info) < 0 || info.size != 4096)
+            return fail("RESOURCE_CREATE zero-size page");
+        for (unsigned j = 0; j < i; j++)
+            if (handles[j] == handles[i])
+                return fail("RESOURCE_CREATE duplicate live handle");
+    }
+    for (unsigned i = 0; i < 96; i++) {
+        struct drm_gem_close close_bo = {handles[i], 0};
+        if (ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close_bo) < 0)
+            return fail("GEM_CLOSE simultaneous objects");
+        struct drm_virtgpu_resource_info gone = {0};
+        gone.bo_handle = handles[i];
+        errno = 0;
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &gone) != -1 || errno != ENOENT)
+            return fail("GEM_CLOSE retained object");
+    }
+    printf("GPU3D_TEST: native allocation 96 simultaneous objects PASS\n");
 
     close(fd);
     printf("GPU3D_TEST: PASS (UAPI works and the host rendered the colours "

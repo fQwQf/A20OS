@@ -115,7 +115,7 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
      * time and comes back with a reference instead of running inside s's own
      * critical section.  It never mutates, so publishing s->local afterwards
      * needs s's bucket alone. */
-    net_socket_t *clash = net_find_bound_socket(AF_UNIX, s->type, bind_addr,
+    net_socket_t *clash = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, bind_addr,
                                                 bind_len);
     if (clash) {
         net_socket_free(clash);
@@ -130,7 +130,7 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     s->local_len = bind_len;
     s->bound = 1;
     if (owner) {
-        s->owner_pid = owner->pid;
+        s->owner_pid = owner->tgid;
         s->owner_uid = owner->cred.uid;
         s->owner_gid = owner->cred.gid;
     }
@@ -173,7 +173,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
      * bucket first and scanning inside it would nest an arbitrary bucket under
      * a held one, which is the ABBA the ascending order exists to forbid.
      */
-    net_socket_t *listener = net_find_bound_socket(AF_UNIX, s->type,
+    net_socket_t *listener = net_find_bound_socket(s->net_ns, AF_UNIX, s->type,
                                                   peer_addr, peer_len);
     if (!listener)
         return -ECONNREFUSED;
@@ -245,7 +245,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         task_t *cur = proc_current();
         if (cur) {
             if (s->peer && s->peer->connected) {
-                s->peer->peer_pid = cur->pid;
+                s->peer->peer_pid = cur->tgid;
                 s->peer->peer_uid = cur->cred.uid;
                 s->peer->peer_gid = cur->cred.gid;
             }
@@ -329,7 +329,7 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         net_sock_unlock(s, sf);
     }
     if (!dst && dst_addr)
-        dst = net_find_bound_socket(AF_UNIX, s->type, dst_addr, dst_len);
+        dst = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, dst_addr, dst_len);
     if (!dst)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 
@@ -414,7 +414,7 @@ int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len
     uint64_t irq = net_sock_lock(dst);
     task_t *cur = proc_current();
     if (cur) {
-        dst->ch_cred_pid = cur->pid;
+        dst->ch_cred_pid = cur->tgid;
         dst->ch_cred_uid = cur->cred.uid;
         dst->ch_cred_gid = cur->cred.gid;
     }

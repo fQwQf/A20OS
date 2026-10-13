@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -5,6 +6,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -75,6 +77,32 @@ int main(void)
     sigemptyset(&pending);
     if (sigpending(&pending) < 0 || sigismember(&pending, SIGUSR1))
         return fail("signal must be dequeued");
+
+    /* Thread and process pending instances of the same standard signal must
+     * retain independent siginfo and consuming one must not erase the other. */
+    for (int via_fd = 0; via_fd < 2; via_fd++) {
+        if (kill(getpid(), SIGUSR1) ||
+            syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), SIGUSR1))
+            return fail("queue both scopes");
+        for (int scope = 0; scope < 2; scope++) {
+            int code;
+            if (via_fd) {
+                if (read(fd, &fdsi, sizeof(fdsi)) != (ssize_t)sizeof(fdsi) ||
+                    fdsi.ssi_pid != (uint32_t)getpid())
+                    return fail("two scopes signalfd read");
+                code = fdsi.ssi_code;
+            } else {
+                siginfo_t info;
+                struct timespec zero = {0};
+                if (sigtimedwait(&mask, &info, &zero) != SIGUSR1 ||
+                    info.si_pid != getpid())
+                    return fail("two scopes sigtimedwait");
+                code = info.si_code;
+            }
+            if (code != (scope == 0 ? SI_TKILL : SI_USER))
+                return fail("two scopes info");
+        }
+    }
 
     /* Mask update on an existing fd. */
     sigset_t mask2;

@@ -16,12 +16,12 @@ typedef struct {
     uint64_t r8,  r9,  r10, r11;
     uint64_t r12, r13, r14, r15;
     uint64_t rip, rflags, cs, ss;
-    uint64_t kernel_tp;           /* 160: MSR_KERNEL_GS_BASE, read via RDMSR   */
+    uint64_t kernel_tp;           /* 160: kernel task pointer (active GS in kernel) */
     uint64_t kscratch0;           /* 168: CR2 for #PF, else reused for ptrace   */
     uint64_t kernel_stack_top;    /* 176: outer kernel RSP for CPL3 -> CPL0    */
     uint64_t user_fs_base;        /* 184: MSR_FS_BASE, the user TLS base        */
     uint64_t saved_kstack;        /* 192: original task->kstack (saved ctx ptr) */
-    uint64_t reserved;            /* 200: pad to 16 bytes */
+    uint64_t user_gs_base;        /* 200: user GS; kernel IRQs reuse for trap state */
 } __attribute__((aligned(16))) trap_context_t;
 
 _Static_assert(sizeof(trap_context_t) == 26 * 8, "TrapContext must be 208 bytes");
@@ -165,11 +165,8 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
  * the IF state the trap interrupted rather than the cleared one. */
 #define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->rflags & SSTATUS_SIE) != 0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->kscratch0)
-/* trap.S already stores the fault address (CR2) in kscratch0 for every user
- * trap, and build_siginfo_fault() reports kscratch0 as si_addr.  Overwriting
- * it with CR3 the way an arch whose CSR 0 holds the page table base does turns
- * every SIGSEGV into a report of the page table base instead of the faulting
- * address. */
+/* trap.S stores CR2 in kscratch0 for diagnostics. The saved CR3 lives in
+ * its dedicated trap-frame field, so generic entry must not overwrite CR2. */
 #define ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN 1
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->cr3)

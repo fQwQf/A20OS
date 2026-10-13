@@ -642,6 +642,56 @@ static int fat32_rename_root(void)
     return 0;
 }
 
+/* Small getdents buffers must enumerate every long filename exactly once,
+ * including a retry after a buffer too small for even one record. */
+static int fat32_directory_buffers(void)
+{
+    const char *dir = "/bin/vfs_directory_buffers";
+    char path[160];
+    unsigned seen = 0;
+    if (mkdir(dir, 0755) < 0)
+        return fail("fatdir-mkdir");
+    for (int i = 0; i < 24; i++) {
+        snprintf(path, sizeof(path), "%s/long-file-number-%02d.txt", dir, i);
+        int fd = open(path, O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) return fail("fatdir-create");
+        close(fd);
+    }
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return fail("fatdir-open");
+    char buf[128];
+    errno = 0;
+    if (syscall(SYS_getdents64, fd, buf, 1) != -1 || errno != EINVAL)
+        return fail("fatdir-small-buffer");
+    long n;
+    while ((n = syscall(SYS_getdents64, fd, buf, sizeof(buf))) > 0) {
+        for (long off = 0; off < n;) {
+            /* Linux dirent64 has a 19-byte header, without tail padding. */
+            unsigned short len;
+            memcpy(&len, buf + off + 16, sizeof(len));
+            if (len < 20 || off + len > n) return fail("fatdir-record");
+            const char *name = buf + off + 19;
+            if (strcmp(name, ".") && strcmp(name, "..")) {
+                int i = -1;
+                if (sscanf(name, "long-file-number-%02d.txt", &i) != 1 ||
+                    i < 0 || i >= 24 || (seen & (1U << i)))
+                    return fail("fatdir-name");
+                seen |= 1U << i;
+            }
+            off += len;
+        }
+    }
+    close(fd);
+    for (int i = 0; i < 24; i++) {
+        snprintf(path, sizeof(path), "%s/long-file-number-%02d.txt", dir, i);
+        unlink(path);
+    }
+    rmdir(dir);
+    if (n < 0 || seen != 0xffffffU) return fail("fatdir-missing-file");
+    printf("VFS_STRESS: directory buffers PASS\n");
+    return 0;
+}
+
 static int fat32_open_unlink(void)
 {
     mkdir("/tmp/fatm", 0755);
@@ -660,6 +710,8 @@ static int fat32_open_unlink(void)
     else if (fat32_long_names("/tmp/fatm") != 0)
         rc = 1;
     else if (fat32_rename_root() != 0)
+        rc = 1;
+    else if (fat32_directory_buffers() != 0)
         rc = 1;
     if (syscall(SYS_umount2, "/tmp/fatm", 0) < 0 && rc == 0)
         rc = fail("fat32-umount");
@@ -1524,8 +1576,10 @@ static int isofs_read(void)
     return rc;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--fat32-dir"))
+        return fat32_directory_buffers();
     printf("VFS_STRESS: start\n");
     mkdir("/tmp", 0755);
     if (file_dup_close_range() != 0)

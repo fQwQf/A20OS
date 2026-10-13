@@ -2,12 +2,16 @@
 #define _ABI_LINUX_RESOURCE_H
 
 #define PR_SET_PDEATHSIG      1
+#define PR_GET_DUMPABLE       3
+#define PR_SET_DUMPABLE       4
 #define PR_GET_PDEATHSIG      2
 #define PR_SET_NAME          15
 #define PR_GET_SECCOMP       21
 #define PR_SET_SECCOMP       22
 #define PR_CAPBSET_READ      23
 #define PR_CAPBSET_DROP      24
+#define PR_SET_NO_NEW_PRIVS  38
+#define PR_GET_NO_NEW_PRIVS  39
 #define PR_SET_THP_DISABLE   41
 #define PR_GET_THP_DISABLE   42
 

@@ -190,6 +190,7 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     t->cred.cap_bounding = parent ? parent->cred.cap_bounding : ~(uint64_t)0;
     t->policy.oom_score_adj = parent ? parent->policy.oom_score_adj : 0;
     t->policy.thp_disabled = parent ? parent->policy.thp_disabled : 0;
+    t->policy.no_new_privs = parent ? parent->policy.no_new_privs : 0;
     t->clone_flags = 0;
     t->exit_signal = SIGCHLD;
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
@@ -218,6 +219,7 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     t->a20_signal_pending = 0;
     t->a20_signal_blocked = parent ? a20_thread_sig_mask(parent, 0, 1) : 0;
 #endif
+    t->thread_signal_info = NULL;
     ARCH_TASK_INIT(t);
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
@@ -246,6 +248,7 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
          * chdir and pivot_root independently from here on, and each exit
          * path releases its own pins. */
         vfs_task_fs_pins_copy(t, parent);
+        cg_inherit_task(t, parent);
     } else {
         t->fs.cwd[0] = '/';
         t->fs.cwd[1] = '\0';
@@ -335,7 +338,7 @@ static void proc_task_release_resources(task_t *t)
         return;
 
     if (t->cgroup) {
-        cg_detach_task(t->cgroup, t->pid);
+        cg_detach_task(t);
         t->cgroup = NULL;
     }
 
@@ -359,6 +362,8 @@ static void proc_task_release_resources(task_t *t)
     landlock_release_task(t);
     env_release_task(t);
 
+    kfree(t->thread_signal_info);
+    t->thread_signal_info = NULL;
     if (t->signals) {
         signal_state_t *ss = (signal_state_t *)t->signals;
         t->signals = NULL;
@@ -504,8 +509,12 @@ int proc_task_may_access(const task_t *caller, const task_t *target)
     uint64_t cf = 0, tf = 0;
     proc_lock_two_tasks(a, b, &cf, &tf);
     int allowed = caller->tgid == target->tgid ||
-        proc_has_cap(caller, CAP_SYS_PTRACE) ||
-        (caller->cred.fsuid == target->cred.uid &&
+        userns_capable(caller, userns_task_own((task_t *)target), CAP_SYS_PTRACE) ||
+        (mm_dumpable(target->mm) == 1 &&
+         caller->cred.fsgid == target->cred.gid &&
+         caller->cred.fsgid == target->cred.egid &&
+         caller->cred.fsgid == target->cred.sgid &&
+         caller->cred.fsuid == target->cred.uid &&
          caller->cred.fsuid == target->cred.euid &&
          caller->cred.fsuid == target->cred.suid);
     proc_unlock_two_tasks(a, b, cf, tf);

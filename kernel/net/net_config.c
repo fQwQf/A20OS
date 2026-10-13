@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "net/net_config.h"
 #include "core/bootargs.h"
 #include "core/string.h"
@@ -177,6 +178,8 @@ int a20_net_config_format(char *buf, size_t bufsz)
     if (!buf || bufsz == 0)
         return 0;
 
+    if (!resource_ns_is_initial(resource_ns_current(PROCNS_NET)))
+        return snprintf(buf, bufsz, "ip=127.0.0.1\nnetmask=255.0.0.0\ngateway=0.0.0.0\ndns_count=0\ndhcp=0\n");
     uint64_t flags = a20_lwip_lock();
     a20_net_config_sync_from_lwip();
     a20_lwip_unlock(flags);
@@ -235,6 +238,7 @@ a20_tcp_path_t g_a20_tcp_path = A20_TCP_PATH_FAST;
 
 int a20_net_config_write(const char *buf, size_t count)
 {
+    if (!resource_ns_is_initial(resource_ns_current(PROCNS_NET))) return -EOPNOTSUPP;
     char tmp[32];
     size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
     memcpy(tmp, buf, n);

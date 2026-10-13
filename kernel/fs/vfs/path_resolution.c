@@ -98,7 +98,9 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
     char cur_abs_path[MAX_PATH_LEN];
     int symlink_depth = 0;
 
-    strncpy(cur_abs_path, start, sizeof(cur_abs_path) - 1);
+    /* The walk starts at the selected mount root, not at the dirfd used to
+     * interpret the original relative path. */
+    strncpy(cur_abs_path, mnt->path, sizeof(cur_abs_path) - 1);
     cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
     vfs_path_trim_trailing_slashes(cur_abs_path);
     if (cur_abs_path[0] == '\0') {
@@ -173,7 +175,7 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                         return NULL;
                     }
                     vnode_put(cur);
-                    cur = vnode_lookup_path(parent_mnt->root, parent_rel);
+                    cur = vnode_lookup_path(parent_mnt, parent_rel);
                     if (!cur) {
                         *lookup_err = vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
                         return NULL;
@@ -258,6 +260,12 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                     return NULL;
                 }
                 link_target[len] = '\0';
+                if (link_target[0] == '/' && (resolve & RESOLVE_BENEATH)) {
+                    vnode_put(cur);
+                    vnode_put(parent);
+                    *lookup_err = -EXDEV;
+                    return NULL;
+                }
 
                 vnode_t *old = cur;
                 char rest[MAX_PATH_LEN];
@@ -270,11 +278,9 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
 
                 char new_path[MAX_PATH_LEN];
                 if (link_target[0] == '/') {
-                    if (resolve & RESOLVE_IN_ROOT) {
-                        snprintf(new_path, sizeof(new_path), "%s%s", start, link_target);
-                    } else {
-                        snprintf(new_path, sizeof(new_path), "%s", link_target);
-                    }
+                    const char *anchor = (resolve & RESOLVE_IN_ROOT) ?
+                                         start : root_path;
+                    snprintf(new_path, sizeof(new_path), "%s%s", anchor, rest);
                 } else {
                     vfs_path_join(cur_abs_path, rest, new_path, sizeof(new_path));
                 }
@@ -307,7 +313,7 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                 cur = new_mnt->root;
                 vnode_get(cur);
                 depth = 0;
-                strncpy(cur_abs_path, new_path, sizeof(cur_abs_path) - 1);
+                strncpy(cur_abs_path, new_mnt->path, sizeof(cur_abs_path) - 1);
                 cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
                 vfs_path_trim_trailing_slashes(cur_abs_path);
                 if (cur_abs_path[0] == '\0') {
@@ -345,150 +351,28 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
 }
 
 /* Resolve an absolute path within a vnode tree */
-vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
-    if (!root) return NULL;
+/* Ordinary lookup shares the mount-aware symlink walk with openat2. The
+ * explicit mount preserves the chosen path when a filesystem is bind-mounted. */
+vnode_t *vnode_lookup_path(mount_t *mnt, const char *path) {
+    if (!mnt || !mnt->root) return NULL;
     vfs_set_lookup_errno(0);
-
-    vnode_t *cur = root;
-    vnode_get(cur);
-
-    if (!path || !*path) return cur;
-
-    char buf[MAX_PATH_LEN];
-    strncpy(buf, path, MAX_PATH_LEN - 1);
-    buf[MAX_PATH_LEN - 1] = '\0';
-
-    char *p = buf;
-    while (*p == '/') p++;
-
-    int symlink_depth = 0;
-    int depth = 0;
-
-    while (*p) {
-        char *sep = strchr(p, '/');
-        if (sep) *sep = '\0';
-
-        if (*p == '\0') {
-        } else if (strcmp(p, ".") == 0) {
-            /* stay */
-        } else if (strcmp(p, "..") == 0) {
-            if (depth > 0 && cur->parent && cur->parent != cur) {
-                vnode_t *parent = cur->parent;
-                vnode_get(parent);
-                vnode_put(cur);
-                cur = parent;
-                depth--;
-            } else if (vnode_is_mount_root(cur)) {
-                mount_t *parent_mnt = vfs_mount_parent(cur->mnt);
-                if (parent_mnt) {
-                    const char *mp_rel = vfs_strip_mount_prefix(cur->mnt->path, parent_mnt);
-                    char parent_rel[MAX_PATH_LEN];
-                    if (strcmp(mp_rel, "") == 0 || strcmp(mp_rel, "/") == 0) {
-                        parent_rel[0] = '\0';
-                    } else {
-                        strncpy(parent_rel, mp_rel, sizeof(parent_rel) - 1);
-                        parent_rel[sizeof(parent_rel) - 1] = '\0';
-                        char *s = strrchr(parent_rel, '/');
-                        if (s) {
-                            if (s == parent_rel)
-                                parent_rel[1] = '\0';
-                            else
-                                *s = '\0';
-                        } else {
-                            parent_rel[0] = '\0';
-                        }
-                    }
-                    vnode_put(cur);
-                    cur = vnode_lookup_path(parent_mnt->root, parent_rel);
-                    if (!cur) return NULL;
-                    depth = count_path_components(parent_rel);
-                }
-            }
-        } else {
-            if (strlen(p) >= MAX_NAME_LEN) {
-                vnode_put(cur);
-                vfs_set_lookup_errno(-ENAMETOOLONG);
-                return NULL;
-            }
-            if (cur->type != VFS_FT_DIR || !cur->ops || !cur->ops->lookup) {
-                vnode_put(cur);
-                vfs_set_lookup_errno(-ENOTDIR);
-                return NULL;
-            }
-            if (vfs_vnode_permission(cur, X_OK) < 0) {
-                vnode_put(cur);
-                vfs_set_lookup_errno(-EACCES);
-                return NULL;
-            }
-            vnode_t *next = vfs_dcache_lookup(cur, p);
-            if (!next) {
-                int r = cur->ops->lookup(cur, p, &next);
-                if (r < 0 || !next) {
-                    vnode_put(cur);
-                    vfs_set_lookup_errno(r < 0 ? r : -ENOENT);
-                    return NULL;
-                }
-                vfs_dcache_insert(cur, p, next);
-            }
-            vnode_t *parent = cur;
-            cur = next;
-
-            if (cur->type == VFS_FT_SYMLINK) {
-                if (++symlink_depth > MAX_SYMLINKS) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    vfs_set_lookup_errno(-ELOOP);
-                    return NULL;
-                }
-                if (!cur->ops || !cur->ops->readlink) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    return NULL;
-                }
-                char link_target[MAX_PATH_LEN];
-                int len = cur->ops->readlink(cur, link_target, sizeof(link_target));
-                if (len < 0) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    return NULL;
-                }
-                link_target[len] = '\0';
-
-                char rest[MAX_PATH_LEN];
-                if (sep) {
-                    snprintf(rest, sizeof(rest), "%s/%s", link_target, sep + 1);
-                } else {
-                    strncpy(rest, link_target, sizeof(rest) - 1);
-                    rest[sizeof(rest) - 1] = '\0';
-                }
-
-                vnode_t *old = cur;
-                if (link_target[0] == '/') {
-                    cur = root;
-                    vnode_get(cur);
-                    depth = 0;
-                } else {
-                    cur = parent;
-                    vnode_get(cur);   /* compensate: we reuse parent, but it gets decremented below */
-                }
-                vnode_put(old);
-                vnode_put(parent);
-
-                strncpy(buf, rest, MAX_PATH_LEN - 1);
-                buf[MAX_PATH_LEN - 1] = '\0';
-                p = buf;
-                while (*p == '/') p++;
-                continue;
-            }
-            if (cur->type == VFS_FT_DIR)
-                depth++;
-            vnode_put(parent);
-        }
-
-        if (sep) p = sep + 1;
-        else break;
+    if (!path || !*path) {
+        vnode_get(mnt->root);
+        return mnt->root;
     }
-    return cur;
+    while (*path == '/') path++;
+    char absolute[MAX_PATH_LEN], resolved[MAX_PATH_LEN];
+    if (vfs_path_join(mnt->path, path, absolute, sizeof(absolute)) < 0) {
+        vfs_set_lookup_errno(-ENAMETOOLONG);
+        return NULL;
+    }
+    task_t *task = proc_current();
+    const char *root = task && task->fs.root_path[0] ? task->fs.root_path : "/";
+    int error = 0;
+    vnode_t *vn = vnode_lookup_path_openat2(absolute, mnt->path, root, 0,
+                                          resolved, sizeof(resolved), &error);
+    if (!vn) vfs_set_lookup_errno(error);
+    return vn;
 }
 
 vnode_t *vfs_resolve(const char *path) {
@@ -526,5 +410,5 @@ vnode_t *vfs_resolve_at(const char *path, const char *cwd) {
     if (!mnt) return NULL;
 
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
-    return vnode_lookup_path(mnt->root, rel);
+    return vnode_lookup_path(mnt, rel);
 }

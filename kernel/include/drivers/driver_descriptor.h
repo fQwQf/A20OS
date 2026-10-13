@@ -29,8 +29,11 @@
  * 2: net_dev_ops_t grew send_sg() and caps() (scatter-gather transmit and a
  * negotiated-capability query).  Both are appended, so a module built against
  * ABI 1 still has a shorter vtable -- which the kernel would read past the end
- * of -- and must be refused rather than called. */
-#define A20_DRIVER_ABI 2U
+ * of -- and must be refused rather than called.
+ * 3: gpu_dev_ops_t gains bidirectional 3D transfer and resource scanout;
+ * the old readback callback and following submit slot change layout.
+ * vfile_ops_t also gains a generic mmap callback for shared device buffers. */
+#define A20_DRIVER_ABI 3U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

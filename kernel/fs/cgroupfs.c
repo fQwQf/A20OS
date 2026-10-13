@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
 #include "core/fcntl.h"
@@ -582,6 +583,20 @@ static void cg_node_free_recursive(cg_node_t *node)
     kfree(node);
 }
 
+static int cg_tree_busy(cg_node_t *node)
+{
+    if (__atomic_load_n(&node->namespace_refs, __ATOMIC_ACQUIRE)) return 1;
+    for (int i = 0; i < node->pid_count; i++) {
+        task_t *t = proc_find_get(node->pids[i]);
+        int busy = t && t->cgroup == node;
+        proc_put(t);
+        if (busy) return 1;
+    }
+    for (int i = 0; i < node->child_count; i++)
+        if (cg_tree_busy(node->children[i])) return 1;
+    return 0;
+}
+
 static int cg_rmdir(vnode_t *dir, const char *name)
 {
     cg_node_t *parent = (cg_node_t *)dir->fs_data;
@@ -590,6 +605,7 @@ static int cg_rmdir(vnode_t *dir, const char *name)
     for (int i = 0; i < parent->child_count; i++) {
         if (parent->children[i] && strcmp(parent->children[i]->name, name) == 0) {
             cg_node_t *child = parent->children[i];
+            if (cg_tree_busy(child)) return -EBUSY;
             cg_node_free_recursive(child);
             /* move last child into this slot */
             parent->children[i] = parent->children[parent->child_count - 1];
@@ -1104,14 +1120,22 @@ vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb)
         }
     }
 
-    cg_node_t *root = cg_node_create("", NULL);
-    if (!root) { kfree(sb); return NULL; }
-    root->is_root = 1;
-    cg_node_populate_files(root, sb);
+    /* A mount exposes the existing hierarchy relative to the caller's
+     * namespace root. Remounting must not allocate a fresh resource tree. */
+    resource_namespace_t *ns = resource_ns_current(PROCNS_CGROUP);
+    cg_node_t *root = ns->cgroup_root;
+    if (!root && cg_global_sb) root = cg_global_sb->root;
+    if (!root) {
+        root = cg_node_create("", NULL);
+        if (!root) { kfree(sb); return NULL; }
+        root->is_root = 1;
+        cg_node_populate_files(root, sb);
+    }
     sb->root = root;
+    __atomic_fetch_add(&root->namespace_refs, 1, __ATOMIC_RELAXED);
 
     vnode_t *vn = (vnode_t *)kmalloc(sizeof(vnode_t));
-    if (!vn) { kfree(root); kfree(sb); return NULL; }
+    if (!vn) { __atomic_fetch_sub(&root->namespace_refs, 1, __ATOMIC_RELEASE); kfree(sb); return NULL; }
     memset(vn, 0, sizeof(*vn));
     vn->ino = 0;
     vn->type = VFS_FT_DIR;
@@ -1120,7 +1144,7 @@ vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb)
     vn->ops = &g_cg_vnode_ops;
     vn->fs_data = root;
     if (out_sb) *out_sb = sb;
-    cg_global_sb = sb;
+    if (!cg_global_sb) cg_global_sb = sb;
     return vn;
 }
 
@@ -1128,11 +1152,9 @@ void cgroupfs_unmount(vnode_t *root)
 {
     if (!root) return;
     cg_node_t *node = (cg_node_t *)root->fs_data;
-    if (node) {
-        cg_node_free_recursive(node);
-    }
+    if (node) __atomic_fetch_sub(&node->namespace_refs, 1, __ATOMIC_RELEASE);
     if (root->mnt && root->mnt->fs_data) {
-        kfree(root->mnt->fs_data);
+        if (root->mnt->fs_data != cg_global_sb) kfree(root->mnt->fs_data);
         root->mnt->fs_data = NULL;
     }
     kfree(root);
@@ -1149,7 +1171,11 @@ void cg_attach_task(struct cg_node *cg, int pid)
 {
     task_t *t = proc_find_get(pid);
     if (!t) return;
-    t->cgroup = cg;
+    if (t->cgroup != cg) {
+        if (t->cgroup) __atomic_fetch_sub(&t->cgroup->namespace_refs, 1, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&((cg_node_t *)cg)->namespace_refs, 1, __ATOMIC_RELAXED);
+        t->cgroup = cg;
+    }
     uint64_t flags = spin_lock_irqsave(&((cg_node_t *)cg)->lock);
     t->cpus_allowed = ((cg_node_t *)cg)->res.cpuset.cpus_allowed;
     spin_unlock_irqrestore(&((cg_node_t *)cg)->lock, flags);
@@ -1158,12 +1184,18 @@ void cg_attach_task(struct cg_node *cg, int pid)
     proc_put(t);
 }
 
-void cg_detach_task(struct cg_node *cg, int pid)
+void cg_detach_task(task_t *t)
 {
-    (void)cg;
-    task_t *t = proc_find_get(pid);
     if (!t) return;
+    cg_node_t *old = t->cgroup;
     t->cgroup = NULL;
     t->cg_throttled = 0;
-    proc_put(t);
+    if (old) __atomic_fetch_sub(&old->namespace_refs, 1, __ATOMIC_RELEASE);
+}
+
+void cg_inherit_task(task_t *child, task_t *parent)
+{
+    child->cgroup = parent ? parent->cgroup : NULL;
+    if (child->cgroup)
+        __atomic_fetch_add(&child->cgroup->namespace_refs, 1, __ATOMIC_RELAXED);
 }

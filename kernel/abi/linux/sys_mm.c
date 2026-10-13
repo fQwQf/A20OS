@@ -9,7 +9,6 @@
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
 #include "drivers/gpu/framebuffer.h"
-#include "drivers/gpu/drm.h"
 
 static uint64_t linux_mm_lock(task_t *t)
 {
@@ -70,12 +69,12 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                 if (off < 0) return -EINVAL;
                 return fbdev_linux_mmap(addr, len, prot, flags, (uint64_t)off);
             }
-            if (drm_is_drm_vfile(vf)) {
+            if (vf->ops && vf->ops->mmap) {
                 if (off < 0) { vfs_put_file_ref(gfd, vf); return -EINVAL; }
-                int64_t drm_ret = drm_linux_mmap(vf, addr, len, prot, flags,
-                                                 (uint64_t)off);
+                int64_t ret = vf->ops->mmap(vf, addr, len, prot, flags,
+                                             (uint64_t)off);
                 vfs_put_file_ref(gfd, vf);
-                return drm_ret;
+                return ret;
             }
             /* Anonymous descriptor types without an mmap implementation
              * (eventfd, epoll, the current partial io_uring backend, ...)
@@ -220,12 +219,24 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_SEQUENTIAL:
     case MADV_WILLNEED:
         break;
+    case MADV_COLD:
+    case MADV_PAGEOUT:
+        /* These are reclaim hints, not permission to discard live data.
+         * Keep the pages resident until reclaim can preserve their contents;
+         * Linux also permits ignoring these hints.  In particular an anonymous
+         * page must not turn into a fresh zero page on its next fault. */
+        for (mm_seg_t *vma = mm_seg_find(t->mm, start);
+             vma && vma->start < end; vma = vma->next) {
+            if (vma->vm_flags & (VM_LOCKED | VM_PFNMAP)) {
+                ret = -EINVAL;
+                break;
+            }
+        }
+        break;
 #ifndef CONFIG_NOMMU
     case MADV_DONTNEED:
     case MADV_FREE:
     case MADV_REMOVE:
-    case MADV_COLD:
-    case MADV_PAGEOUT:
         /* mseal(2): the page-releasing advices are refused on sealed ranges.
          * MADV_COLD and MADV_PAGEOUT are hints and are allowed by Linux even
          * on sealed ranges; the releasing advices are not. */

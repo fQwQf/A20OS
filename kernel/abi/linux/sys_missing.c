@@ -449,9 +449,8 @@ int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
                          cls == SECCOMP_RET_TRAP || cls == SECCOMP_RET_ERRNO ||
                          cls == SECCOMP_RET_TRACE || cls == SECCOMP_RET_LOG ||
                          cls == SECCOMP_RET_ALLOW);
-        uint32_t answer = supported ? 1u : 0u;
-        return copy_to_user((void *)uargs, &answer,
-                            sizeof(answer)) < 0 ? -EFAULT : 0;
+        if (flags) return -EINVAL;
+        return supported ? 0 : -EOPNOTSUPP;
     }
     case SECCOMP_GET_NOTIF_SIZES: {
         struct {

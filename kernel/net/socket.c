@@ -177,6 +177,7 @@ int net_notconn_format(char *buf, size_t bufsz)
 net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
     if (s) {
+        s->net_ns = resource_ns_task_get(proc_current(), PROCNS_NET);
         s->ipv6_checksum_offset = -1;
         s->reg_idx = -1;
         /* SO_SNDBUF / SO_RCVBUF defaults.  Zero has to mean "never set" for
@@ -248,6 +249,7 @@ void net_socket_free(net_socket_t *s) {
         kfree(s->ch_buf);
         s->ch_buf = NULL;
     }
+    resource_ns_put(s->net_ns);
     obj_cache_free(&g_net_socket_cache, s);
 }
 
@@ -299,6 +301,7 @@ typedef struct {
     const void    *addr;
     size_t         addrlen;
     uint16_t       port;
+    resource_namespace_t *net_ns;
     net_socket_t  *want;        /* bind-conflict only: the socket being bound */
     int            want_reuseaddr;
     int            want_reuseport;
@@ -320,6 +323,8 @@ static bool net_find_bound_slot(net_socket_t *s, int idx, void *arg)
 {
     net_find_arg_t *a = arg;
     (void)idx;
+    if ((a->domain != AF_UNIX || (a->addrlen > 2 && ((const uint8_t *)a->addr)[2] == 0)) &&
+        s->net_ns != a->net_ns) return false;
     if (s->domain == AF_UNIX) {
         if (!s->bound || s->domain != a->domain || s->type != a->type)
             return false;
@@ -342,11 +347,11 @@ static bool net_find_bound_slot(net_socket_t *s, int idx, void *arg)
     return true;
 }
 
-net_socket_t *net_find_bound_socket(int domain, int type,
+net_socket_t *net_find_bound_socket(resource_namespace_t *ns, int domain, int type,
                                     const void *addr, size_t addrlen)
 {
     net_find_arg_t a = {
-        .domain = domain, .type = type, .addr = addr, .addrlen = addrlen,
+        .net_ns = ns, .domain = domain, .type = type, .addr = addr, .addrlen = addrlen,
         .port = 0, .found = NULL,
     };
     if (domain != AF_UNIX && net_sockaddr_port(addr, addrlen, &a.port) < 0)
@@ -387,6 +392,7 @@ static int net_bind_reuse_allowed(const net_find_arg_t *a,
 static bool net_find_conflict_slot(net_socket_t *s, int idx, void *arg)
 {
     net_find_arg_t *a = arg;
+    if (s->net_ns != a->want->net_ns) return false;
     (void)idx;
     if (s == a->want || !s->bound || s->type != a->want->type)
         return false;
@@ -646,7 +652,7 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     {
         task_t *cur = proc_current();
         if (cur) {
-            int32_t pid = cur->pid;
+            int32_t pid = cur->tgid;
             int32_t uid = cur->cred.uid;
             int32_t gid = cur->cred.gid;
             sa->peer_pid = pid; sa->peer_uid = uid; sa->peer_gid = gid;
@@ -702,7 +708,9 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
         uint16_t port = 0;
         if (s->domain == AF_INET) {
             const net_sockaddr_in_t *in = (const net_sockaddr_in_t *)bind_addr;
-            if (!net_sockaddr_in_local(in))
+            if ((!resource_ns_is_initial(s->net_ns) && in->sin_addr != 0 &&
+                 ((const uint8_t *)&in->sin_addr)[0] != 127) ||
+                (resource_ns_is_initial(s->net_ns) && !net_sockaddr_in_local(in)))
                 return -EADDRNOTAVAIL;
             if (net_sockaddr_port(bind_addr, addrlen, &port) == 0 &&
                 net_ntohs(port) < 1024 && net_ntohs(port) != 0) {
@@ -710,6 +718,14 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
                 if (cur && cur->cred.euid != 0)
                     return -EACCES;
             }
+        }
+        if (s->domain == AF_INET6 && !resource_ns_is_initial(s->net_ns)) {
+            const net_sockaddr_in6_t *in = (const net_sockaddr_in6_t *)bind_addr;
+            static const uint8_t any[16] = {0};
+            static const uint8_t loopback[16] = {[15] = 1};
+            if (memcmp(in->sin6_addr, any, 16) &&
+                memcmp(in->sin6_addr, loopback, 16))
+                return -EADDRNOTAVAIL;
         }
         if (net_sockaddr_port(bind_addr, addrlen, &port) == 0 && port == 0)
             net_sockaddr_set_port(bind_addr, addrlen, net_alloc_ephemeral_port_locked());
@@ -917,10 +933,11 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
             return net_netlink_uevent_send(s, buf, len, addr, addrlen);
         return -EPROTONOSUPPORT;
     }
+    if (!resource_ns_is_initial(s->net_ns) && s->type == SOCK_RAW) return -ENETUNREACH;
     if (s->domain == AF_INET6 && s->type == SOCK_RAW)
         return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        (s->udp || s->raw || s->tcp))
+        (s->type == SOCK_DGRAM || s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, len, flags, addr, addrlen);
     /*
      * A stream socket with no pcb, in a family the stack owns, is a connection
@@ -1003,7 +1020,7 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
         net_sock_unlock(s, sf);
     }
     if (!dst && dst_addr)
-        dst = net_find_bound_socket(s->domain, s->type, dst_addr, dst_len);
+        dst = net_find_bound_socket(s->net_ns, s->domain, s->type, dst_addr, dst_len);
     if (!dst) {
         /* Linux ABI: writes on a once-connected stream whose endpoint vanished
          * report EPIPE. */

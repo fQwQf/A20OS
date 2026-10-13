@@ -550,16 +550,25 @@ void proc_exit(int exit_code)
     t->state = PROC_ZOMBIE;
     spin_unlock_irqrestore(&t->park_lock, flags);
 
-    /* A thread-group leader may already be a zombie while sibling threads
-     * keep the process unreportable to wait4.  The last member's exit makes
-     * that leader reportable, so wake the leader's parent after checking the
-     * group under tasklist_lock and taking references for the unlocked wake. */
+    /* SIGCHLD describes a waitable thread group, not just a zombie leader.
+     * A shell can consume an early signal, find live siblings with WNOHANG,
+     * and sleep forever in sigsuspend if the last sibling never notifies it.
+     * Claim notification once under tasklist_lock, after the whole group is
+     * dead, and retain both identities across unlocked cleanup and delivery. */
     task_t *completed_parent = NULL;
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
     int completed_signal = 0;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    task_t *notify_leader = NULL;
+#endif
     lf = spin_lock_irqsave(&tasklist_lock);
+    task_t *group_leader = thread_leader ? thread_leader : t;
     completed_parent = proc_group_exit_parent_get_locked(
-        thread_leader ? thread_leader : t, &completed_signal);
+        group_leader, &completed_signal);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (completed_parent && completed_signal > 0)
+        notify_leader = proc_get(group_leader);
+#endif
     spin_unlock_irqrestore(&tasklist_lock, lf);
 #else
     if (thread_leader) {
@@ -630,8 +639,14 @@ void proc_exit(int exit_code)
     proc_debug_tracer_exiting(t);
 
 #ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (notify_leader)
+        signal_notify_child_exit(completed_parent, notify_leader);
+    proc_put(notify_leader);
+#else
     if (completed_parent && completed_signal > 0)
         signal_send_task(completed_parent, completed_signal);
+#endif
     proc_put(completed_parent);
 #else
     if (notify_parent_pid > 0)

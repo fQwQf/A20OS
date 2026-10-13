@@ -221,6 +221,9 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     if (!mm)
         return;
 
+    /* CPU identity, local flush and per-CPU generation publication form one
+     * pinned operation, just as in the single-page shootdown path. */
+    preempt_disable();
     int transaction_flushed = 0;
 
     uint64_t generation = __atomic_load_n(&mm->tlb_generation,
@@ -272,6 +275,8 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
             __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
                              __ATOMIC_RELEASE);
     }
+
+    preempt_enable();
 
     /* Count one transaction if it requested any local, global, or remote
      * shootdown. This is not a count of every architecture-local flush. */
@@ -539,6 +544,7 @@ mm_struct_t *mm_create(void) {
     if (!mm->pgdir) { kfree(mm); return NULL; }
     pt_map_kernel(mm->pgdir);
 
+    mm->dumpable   = 1;
     mm->mmap       = NULL;
     mm->brk        = 0;
     mm->start_brk  = 0;
@@ -560,6 +566,16 @@ mm_struct_t *mm_create(void) {
     refcount_set(&mm->refcount, 1);
     ktrace_mm("[MMDBG] mm=%p lock=%p\n", (void *)mm, (void *)&mm->lock);
     return mm;
+}
+
+int mm_dumpable(const mm_struct_t *mm)
+{
+    return mm ? __atomic_load_n(&mm->dumpable, __ATOMIC_ACQUIRE) : 0;
+}
+
+void mm_set_dumpable(mm_struct_t *mm, int value)
+{
+    if (mm) __atomic_store_n(&mm->dumpable, value, __ATOMIC_RELEASE);
 }
 
 mm_struct_t *mm_get(mm_struct_t *mm) {
