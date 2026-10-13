@@ -1043,4 +1043,3 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
         return 0;
     }
 }
-
