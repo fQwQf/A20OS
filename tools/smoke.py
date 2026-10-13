@@ -40,6 +40,7 @@ devnull = subprocess.DEVNULL
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from smoke_cases import CASES  # noqa: E402
+from smoke_platforms import ARCHES, RISCV_ONLY, case_for_arch  # noqa: E402
 
 TIMEOUT_HELPER = "tools/run_with_timeout.py"
 GATE = "tools/a20_resource.py"
@@ -51,6 +52,9 @@ STEP35_APPEND = ("a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.
                  "a20.dns=10.0.2.3 a20.hostname=a20os")
 STEP35_MARKERS = [
     "SCHED_STRESS: PASS", "FUTEX_STRESS: PASS",
+    "SCHED_STRESS: rt-bandwidth-progress PASS",
+    "FUTEX_STRESS: pi-cow-isolation PASS",
+    "VFS_STRESS: exec-symlink-origin PASS",
     "FUTEX_STRESS: unrelated-wake-isolation PASS",
     "FUTEX_STRESS: stale-timeout-isolation PASS",
     "PROC_STRESS: PASS", "PROC_STRESS: vfork-auto-reap PASS",
@@ -75,7 +79,8 @@ STEP35_LOCK_SPLIT = [
 STEP35_FORBID = r"PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]"
 # Positional args main() handles itself instead of looking up in CASES;
 # smoke_audit.py reads this so a wired subcommand is not read as a typo'd case.
-SUBCOMMANDS = {"step35", "arch-mmu-matrix", "devtools", "mesa-attach"}
+SUBCOMMANDS = {"step35", "arch-mmu-matrix", "devtools", "mesa-attach",
+               "native-suite"}
 # arch -> (board, qemu binary, base qemu flags, needs -embedded build dir)
 MATRIX_ARCHS: dict[str, tuple[str, str, list[str], bool]] = {
     "arm32": ("qemu-virt-arm32", "qemu-system-arm",
@@ -123,9 +128,10 @@ def run_build(case: dict) -> None:
     if not b:
         return
     sink = devnull if case.get("quiet") else None
-    r = sh(["make", *b["vars"], b["target"]], stdout=sink, stderr=sink)
+    targets = [b["target"], *b.get("extra-targets", [])]
+    r = sh(["make", *b["vars"], *targets], stdout=sink, stderr=sink)
     if r.returncode != 0:
-        raise SystemExit(f"build failed: make {' '.join(b['vars'])} {b['target']}")
+        raise SystemExit(f"build failed: make {' '.join(b['vars'] + targets)}")
 
 
 def resolve_build_dir(case: dict) -> str:
@@ -636,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--print-argv", action="store_true",
                     help="print the QEMU argv and exit (for diffing against make)")
     ap.add_argument("--list", action="store_true", help="list case names and exit")
+    ap.add_argument("--arch", choices=ARCHES,
+                    help="platform for shared Native/pty/timeout cases")
     ap.add_argument("--label")
     ap.add_argument("--log-dir")
     ap.add_argument("--qemu")
@@ -652,6 +660,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--require-virgl-attach", action="store_true",
                     help="mesa-attach: fail unless Mesa binds virtio_gpu_dri")
     a = ap.parse_args(argv)
+    if a.case == "native-suite":
+        arch = a.arch or "riscv64"
+        failures = []
+        for name in sorted(n for n in CASES if n.startswith("smoke-native-")):
+            if name in RISCV_ONLY and arch != "riscv64":
+                print(f"{name}: SKIP on {arch} ({RISCV_ONLY[name]} required)")
+                continue
+            command = [name, "--arch", arch]
+            if a.print_argv:
+                command.append("--print-argv")
+            try:
+                result = main(command)
+            except SystemExit as exc:
+                print(f"{name}: failed: {exc}", file=sys.stderr)
+                result = 1
+            if result:
+                failures.append(name)
+        if failures:
+            print(f"native-suite ({arch}): FAIL {failures}", file=sys.stderr)
+            return 1
+        return 0
     if a.case == "arch-mmu-matrix":
         return matrix_main(a)
     if a.case == "devtools":
@@ -671,7 +700,13 @@ def main(argv: list[str] | None = None) -> int:
     if a.case not in CASES:
         print(f"unknown case {a.case!r}; try --list", file=sys.stderr)
         return 2
-    case = resolve_case_build_paths(dict(CASES[a.case]))
+    case = dict(CASES[a.case])
+    if a.arch:
+        try:
+            case = case_for_arch(a.case, case, a.arch)
+        except ValueError as exc:
+            ap.error(str(exc))
+    case = resolve_case_build_paths(case)
     case.setdefault("name", a.case)
     if a.print_argv:
         print(" ".join(qemu_argv(case)))

@@ -13,6 +13,7 @@
  *   6. After unlinking ROUND.BIN, confirm it is gone.
  */
 #define _GNU_SOURCE
+#include "../../liba20rt/a20_arch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,7 @@ static void spawn_ufsd(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        execl("/bin/ufsd-rv", "ufsd-rv", "/ufs", "1", (char *)0);
+        execl(A20_NATIVE_BIN("ufsd"), "ufsd", "/ufs", "1", (char *)0);
         _exit(90);
     }
     (void)pid; /* the service stays resident; the parent keeps polling the

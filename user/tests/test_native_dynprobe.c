@@ -11,10 +11,8 @@
 
 /* The linker script declares the INTERP segment but ld does not
  * synthesize .interp contents — provide the interpreter path here. */
-__asm__(
-    ".section .interp,\"a\",@progbits\n"
-    ".string \"/bin/fakeld-rv\"\n"
-    ".previous\n");
+__attribute__((section(".interp"), used))
+static const char interpreter[] = A20_NATIVE_BIN("fakeld");
 
 int main(int argc, char **argv, char **envp)
 {

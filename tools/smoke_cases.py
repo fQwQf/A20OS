@@ -16,6 +16,8 @@ Semantics worth knowing when editing a case:
 
 from __future__ import annotations
 
+from smoke_platforms import case_for_arch
+
 CASES: dict[str, dict] = {
     'smoke-a20-channel': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -2808,3 +2810,20 @@ CASES: dict[str, dict] = {
         'pass_msg': 'smoke-exec-xlator-shim: PASS; log saved to $log',
     },
 }
+
+CASES["smoke-native-ubd"]["build"]["extra-targets"] = ["native-ubd-image"]
+CASES["smoke-futex-stress"]["expect"].append("FUTEX_STRESS: pi-cow-isolation PASS")
+CASES["smoke-sched-stress"]["expect"].extend([
+    "SCHED_STRESS: rt permission/limits ok",
+    "SCHED_STRESS: rt-bandwidth-progress PASS",
+])
+CASES["smoke-vfs-stress"]["expect"].append("VFS_STRESS: exec-symlink-origin PASS")
+CASES["smoke-native-ufs"]["build"]["extra-targets"] = ["native-ufs-image"]
+CASES["smoke-native-fs-all"]["build"]["extra-targets"] = ["native-ufs-images"]
+
+# Share the command stream and assertions with RISC-V; only the platform
+# changes. These aliases remain visible to the make/case reachability audit.
+for _base in ("smoke-pty-stress", "smoke-timeout-test"):
+    _alias = _base + "-aarch64"
+    CASES[_alias] = case_for_arch(_base, CASES[_base], "aarch64")
+    CASES[_alias]["pass_msg"] = f"{_alias}: PASS; log saved to $log"

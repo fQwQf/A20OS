@@ -259,7 +259,7 @@ smoke-pci-portability:
 	$(PYTHON) tools/smoke.py smoke-pci-portability
 
 smoke-native-handle:
-	$(PYTHON) tools/smoke.py smoke-native-handle
+	$(PYTHON) tools/smoke.py smoke-native-handle --arch $(ARCH)
 
 smoke-unix-ch:
 	$(PYTHON) tools/smoke.py smoke-unix-ch

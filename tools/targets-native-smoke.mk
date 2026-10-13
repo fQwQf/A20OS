@@ -4,6 +4,10 @@
 
 .PHONY: smoke-native-dynlink smoke-native-mm smoke-native-signal
 
+.PHONY: smoke-native-suite
+smoke-native-suite:
+	$(PYTHON) tools/smoke.py native-suite --arch $(ARCH)
+
 native-rtcd-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-rtcd-arch
 
@@ -152,6 +156,11 @@ UFS_EXT4_IMG := $(BUILD_DIR)/ufs-ext4.img
 UFS_ISO_IMG  := $(BUILD_DIR)/ufs-iso.img
 UFS_NTFS_IMG := $(BUILD_DIR)/ufs-ntfs.img
 
+.PHONY: native-ubd-image native-ufs-image native-ufs-images
+native-ubd-image: $(UBD_SCRATCH_IMG)
+native-ufs-image: $(UFS_SCRATCH_IMG)
+native-ufs-images: $(UFS_SCRATCH_IMG) $(UFS_EXT4_IMG) $(UFS_ISO_IMG) $(UFS_NTFS_IMG)
+
 $(UFS_EXT4_IMG): FORCE
 	@$(PYTHON) tools/img.py scratch --scratch-kind ext4 \
 		--scratch-out "$@" --scratch-mb 32 \
@@ -168,71 +177,71 @@ $(UFS_NTFS_IMG): FORCE
 # 盘位（避开 bus.3/bus.5 的用户驱动预留）：bus.2=fat(1) bus.4=ext4(2)
 # bus.6=iso9660(3) bus.7=ntfs(4)；主存储在 bus.0。
 smoke-native-fs-all:
-	$(PYTHON) tools/smoke.py smoke-native-fs-all
+	$(PYTHON) tools/smoke.py smoke-native-fs-all --arch $(ARCH)
 
 # smoke-native-ufs：文件系统实现运行在用户态服务（ufsd）的端到端门禁。
 # 第二块盘挂在空闲槽位 bus.2（bus.3/bus.5 已预留给 ubd/uinputd），
 # DEV_CLASS_BLOCK 序号 1 由 ufsd 经 fs_block_io 访问；FAT32 解析全部发生
 # 在 ufsd 进程内，内核仅保留 VFS 代理。
 smoke-native-ufs:
-	$(PYTHON) tools/smoke.py smoke-native-ufs
+	$(PYTHON) tools/smoke.py smoke-native-ufs --arch $(ARCH)
 
 smoke-dual-input:
 	$(PYTHON) tools/smoke.py smoke-dual-input
 
 smoke-native-ubd:
-	$(PYTHON) tools/smoke.py smoke-native-ubd
+	$(PYTHON) tools/smoke.py smoke-native-ubd --arch $(ARCH)
 
 smoke-native-isolation:
-	$(PYTHON) tools/smoke.py smoke-native-isolation
+	$(PYTHON) tools/smoke.py smoke-native-isolation --arch $(ARCH)
 
 smoke-native-registry:
-	$(PYTHON) tools/smoke.py smoke-native-registry
+	$(PYTHON) tools/smoke.py smoke-native-registry --arch $(ARCH)
 
 smoke-native-rtcd:
-	$(PYTHON) tools/smoke.py smoke-native-rtcd
+	$(PYTHON) tools/smoke.py smoke-native-rtcd --arch $(ARCH)
 
 smoke-native-shmring:
-	$(PYTHON) tools/smoke.py smoke-native-shmring
+	$(PYTHON) tools/smoke.py smoke-native-shmring --arch $(ARCH)
 
 smoke-clock-vdso:
 	$(PYTHON) tools/smoke.py smoke-clock-vdso
 
 smoke-native-svc:
-	$(PYTHON) tools/smoke.py smoke-native-svc
+	$(PYTHON) tools/smoke.py smoke-native-svc --arch $(ARCH)
 
 smoke-native-contract:
-	$(PYTHON) tools/smoke.py smoke-native-contract
+	$(PYTHON) tools/smoke.py smoke-native-contract --arch $(ARCH)
 
 smoke-native-cluster:
-	$(PYTHON) tools/smoke.py smoke-native-cluster
+	$(PYTHON) tools/smoke.py smoke-native-cluster --arch $(ARCH)
 
 smoke-native-personality:
-	$(PYTHON) tools/smoke.py smoke-native-personality
+	$(PYTHON) tools/smoke.py smoke-native-personality --arch $(ARCH)
 
 smoke-native-linux:
-	$(PYTHON) tools/smoke.py smoke-native-linux
+	$(PYTHON) tools/smoke.py smoke-native-linux --arch $(ARCH)
 
 smoke-native-ipc:
-	$(PYTHON) tools/smoke.py smoke-native-ipc
+	$(PYTHON) tools/smoke.py smoke-native-ipc --arch $(ARCH)
 
 smoke-native-signal:
-	$(PYTHON) tools/smoke.py smoke-native-signal
+	$(PYTHON) tools/smoke.py smoke-native-signal --arch $(ARCH)
 
 smoke-native-dynlink:
-	$(PYTHON) tools/smoke.py smoke-native-dynlink
+	$(PYTHON) tools/smoke.py smoke-native-dynlink --arch $(ARCH)
 
 smoke-native-mm:
-	$(PYTHON) tools/smoke.py smoke-native-mm
+	$(PYTHON) tools/smoke.py smoke-native-mm --arch $(ARCH)
 
 smoke-native-futex:
-	$(PYTHON) tools/smoke.py smoke-native-futex
+	$(PYTHON) tools/smoke.py smoke-native-futex --arch $(ARCH)
 
 smoke-native-deepen:
-	$(PYTHON) tools/smoke.py smoke-native-deepen
+	$(PYTHON) tools/smoke.py smoke-native-deepen --arch $(ARCH)
 
 smoke-native-ext:
-	$(PYTHON) tools/smoke.py smoke-native-ext
+	$(PYTHON) tools/smoke.py smoke-native-ext --arch $(ARCH)
 
 smoke-native-debug:
-	$(PYTHON) tools/smoke.py smoke-native-debug
+	$(PYTHON) tools/smoke.py smoke-native-debug --arch $(ARCH)

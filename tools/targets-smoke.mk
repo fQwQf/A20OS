@@ -654,8 +654,15 @@ smoke-signalfd-stress:
 smoke-pty-stress:
 	$(PYTHON) tools/smoke.py smoke-pty-stress
 
+.PHONY: smoke-pty-stress-aarch64 smoke-timeout-test-aarch64
+smoke-pty-stress-aarch64:
+	$(PYTHON) tools/smoke.py smoke-pty-stress-aarch64
+
 smoke-timeout-test:
 	$(PYTHON) tools/smoke.py smoke-timeout-test
+
+smoke-timeout-test-aarch64:
+	$(PYTHON) tools/smoke.py smoke-timeout-test-aarch64
 
 # ================================================================
 # Coredump smoke (fatal-signal ELF core dump generation)

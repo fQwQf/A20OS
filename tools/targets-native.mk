@@ -597,7 +597,7 @@ native-fakeld-rv:
 
 define NATIVE_DYNPROBE_RECIPE
 @mkdir -p $(dir $(3))
-$(1) -ffreestanding -nostdlib -Wl,--dynamic-linker=/bin/fakeld-rv \
+$(1) -ffreestanding -nostdlib -Wl,--dynamic-linker=/bin/fakeld-$(NATIVE_TAG) \
     $(2) \
     -Iuser -Iuser/liba20rt \
     -Tuser/liba20rt/a20-dynamic.ld \
