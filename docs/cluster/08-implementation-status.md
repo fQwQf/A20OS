@@ -815,3 +815,9 @@ pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护
 Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x86_64/AArch64/RV64
 四端点并发用例中各通过 80000 次调用。机制、进度约束和未完成的磁盘/图形/JVM
 部分见 [56-shared-device-owner.md](56-shared-device-owner.md)。
+
+共享设备机制已接入通用驱动 MMIO。只有主实例挂载磁盘的双 QEMU 中，CPU 1
+内核线程及 Linux 用户程序已完成真实 virtio-blk 读写、flush 和回读；宿主在
+进程结束后验证整块镜像。已修复可加载驱动锁等待未处理 owner 请求造成的
+死锁，并隔离共享/普通驱动构建。接口、复现、边界见
+[57-shared-disk-execution.md](57-shared-disk-execution.md)。

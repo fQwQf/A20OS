@@ -13,7 +13,7 @@ parser.add_argument('--out', type=Path, required=True)
 args = parser.parse_args()
 out = args.out.resolve()
 out.mkdir(parents=True, exist_ok=False)
-sources = ['kernel/core/shared_device_call.c', 'tools/shared-device-test/main.c']
+sources = ['kernel/core/shared_device_call.c', 'kernel/core/shared_mmio.c', 'tools/shared-device-test/main.c']
 compiler = {'x86_64': 'gcc', 'aarch64': 'aarch64-linux-gnu-gcc', 'riscv64': 'riscv64-linux-gnu-gcc'}[args.arch]
 runner = [] if args.arch == 'x86_64' else ['qemu-' + args.arch]
 checks = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie'] if not runner else ['-static']
@@ -30,6 +30,8 @@ try:
     (out/'run.log').write_text(run.stdout + run.stderr)
     if 'PASS shared device calls=80000 endpoints=4 nested=316' not in run.stdout:
         raise RuntimeError('missing acceptance output')
+    if 'PASS shared MMIO pairs=80000 widths=1,2,4,8' not in run.stdout:
+        raise RuntimeError('missing MMIO acceptance output')
     report['passed'] = True
     print(run.stdout, end='')
 except Exception as error:
@@ -38,7 +40,7 @@ except Exception as error:
     raise
 finally:
     report['sources'] = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in [root/sources[0], root/'kernel/include/core/shared_device_call.h',
+        for p in [root/sources[0], root/sources[1], root/'kernel/include/core/shared_mmio.h', root/'kernel/include/core/shared_device_call.h',
                   *sorted((root/'tools/shared-device-test').rglob('*.c')),
                   *sorted((root/'tools/shared-device-test').rglob('*.h'))]}
     (out/'report.json').write_text(json.dumps(report, indent=2)+'\n')

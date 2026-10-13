@@ -4,6 +4,8 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include "core/shared_mmio.h"
 #include "core/shared_device_call.h"
 #include "core/cpu.h"
 
@@ -12,6 +14,8 @@ _Thread_local int test_irq = 1;
 static unsigned done, calls[CONFIG_NR_CPUS], nested_rejected;
 static unsigned online_mask = (1U << CONFIG_NR_CPUS) - 1;
 static pthread_barrier_t start;
+static union { uint64_t q; uint32_t l; uint16_t w; uint8_t b; } registers[CONFIG_NR_CPUS];
+_Noreturn void panic(const char *format, ...) { (void)format; abort(); }
 void shared_test_pause(void) { sched_yield(); }
 int smp_cpu_is_online(unsigned cpu) { return cpu < CONFIG_NR_CPUS && (online_mask & (1U << cpu)); }
 static int operation(uint32_t owner, uint64_t argument, uint64_t *result) {
@@ -38,6 +42,12 @@ static void *run(void *argument) {
         assert(status == ((input & 1) ? -EAGAIN : 0));
         assert(result == ((input * 0x100000001b3ULL) ^ owner));
         assert(test_irq == (int)(i & 1));
+        unsigned width = 1U << (i % 4);
+        uint64_t value = input ^ 0xa2b3c4d5e6f78901ULL;
+        uint64_t mask = width == 8 ? UINT64_MAX : (1ULL << (width * 8)) - 1;
+        shared_mmio_write(owner, &registers[test_cpu], width, value);
+        assert(shared_mmio_read(owner, &registers[test_cpu], width) == (value & mask));
+        assert(test_irq == (int)(i & 1));
     }
     __atomic_fetch_add(&done, 1, __ATOMIC_RELEASE);
     while (__atomic_load_n(&done, __ATOMIC_ACQUIRE) != CONFIG_NR_CPUS)
@@ -62,6 +72,7 @@ int main(void) {
     for (unsigned i = 0; i < CONFIG_NR_CPUS; i++) { assert(calls[i]); total += calls[i]; }
     assert(total == 20000 * CONFIG_NR_CPUS && nested_rejected == 79 * CONFIG_NR_CPUS);
     assert(!pthread_barrier_destroy(&start));
+    puts("PASS shared MMIO pairs=80000 widths=1,2,4,8 truncation=checked irq-restore=checked");
     printf("PASS shared device calls=%u endpoints=%u nested=%u owner-reuse=checked irq-restore=checked\n",
            total, CONFIG_NR_CPUS, nested_rejected);
 }

@@ -4,8 +4,8 @@
  * Arch-independent hardware access primitives.  Drivers include
  * ONLY this header for MMIO/DMA/IRQ — never arch/ headers.
  *
- * readl/writel are static inline (zero overhead, arch-specific
- * barrier semantics already provided by mb/rmb/wmb).
+ * Ordinary builds use inline direct accesses with arch-specific barriers.
+ * Shared-device platforms may route registers through a logical CPU owner.
  */
 #ifndef _DRIVER_HWAPI_H
 #define _DRIVER_HWAPI_H
@@ -13,63 +13,110 @@
 #include "core/types.h"
 #include "core/defs.h"
 
+/* Platform policy for a shared device address space. Ordinary builds retain
+ * the exact direct, inline accesses below. CPU-local APIC/timer accesses do
+ * not use this driver HAL and must stay local. */
+#ifdef CONFIG_SHARED_MMIO_OWNER
+#include "core/shared_mmio.h"
+#endif
+
 struct device;
 
 /* ============================================================
- * MMIO access — static inline for zero overhead
+ * MMIO access — direct by default; optional shared owner backend
  * ============================================================ */
 
 static inline uint8_t readb(const volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    uint8_t val = (uint8_t)shared_mmio_read(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint8_t));
+#else
     uint8_t val = *(volatile const uint8_t *)addr;
+#endif
     rmb();
     return val;
 }
 
 static inline uint16_t readw(const volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    uint16_t val = (uint16_t)shared_mmio_read(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint16_t));
+#else
     uint16_t val = *(volatile const uint16_t *)addr;
+#endif
     rmb();
     return val;
 }
 
 static inline uint32_t readl(const volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    uint32_t val = (uint32_t)shared_mmio_read(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint32_t));
+#else
     uint32_t val = *(volatile const uint32_t *)addr;
+#endif
     rmb();
     return val;
 }
 
 static inline uint64_t readq(const volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    uint64_t val = (uint64_t)shared_mmio_read(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint64_t));
+#else
     uint64_t val = *(volatile const uint64_t *)addr;
+#endif
     rmb();
     return val;
 }
 
 static inline void writeb(uint8_t val, volatile void *addr) {
     wmb();
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    shared_mmio_write(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint8_t), val);
+#else
     *(volatile uint8_t *)addr = val;
+#endif
 }
 
 static inline void writew(uint16_t val, volatile void *addr) {
     wmb();
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    shared_mmio_write(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint16_t), val);
+#else
     *(volatile uint16_t *)addr = val;
+#endif
 }
 
 static inline void writel(uint32_t val, volatile void *addr) {
     wmb();
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    shared_mmio_write(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint32_t), val);
+#else
     *(volatile uint32_t *)addr = val;
+#endif
 }
 
 static inline void writeq(uint64_t val, volatile void *addr) {
     wmb();
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    shared_mmio_write(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint64_t), val);
+#else
     *(volatile uint64_t *)addr = val;
+#endif
 }
 
 /* relaxed variants — no barriers, use in tightly loops */
 static inline uint32_t readl_relaxed(const volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    return (uint32_t)shared_mmio_read(CONFIG_SHARED_MMIO_OWNER, addr, 4);
+#else
     return *(volatile const uint32_t *)addr;
+#endif
 }
 
 static inline void writel_relaxed(uint32_t val, volatile void *addr) {
+#ifdef CONFIG_SHARED_MMIO_OWNER
+    shared_mmio_write(CONFIG_SHARED_MMIO_OWNER, addr, sizeof(uint32_t), val);
+#else
     *(volatile uint32_t *)addr = val;
+#endif
 }
 
 /* Port-mapped I/O. Unsupported architectures return all-ones on reads and

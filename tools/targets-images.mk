@@ -94,7 +94,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP) $(GU
 		--user-build-dir "$(USER_BUILD_DIR)" --tag "$(NATIVE_TAG)" --mkfs-fat "$(MKFS_FAT)" \
 		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
 		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
-		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \
+		--libc "$(if $(wildcard user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_LIBC_VARIANT)/lib/libc.so,)" \
 		--libgcc "$(LIBGCC_S_ARCH)" \
 		--protocols "$(PROTOCOLS_LINES)" \
 		--guest-kernel "$(GUEST_KERNEL_ELF)" \

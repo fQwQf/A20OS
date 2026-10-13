@@ -9,9 +9,12 @@
 #include "core/string.h"
 #include "core/timer.h"
 #include "mm/slab.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
 #include "proc/lifetime.h"
 #include "proc/proc.h"
 
+static int disk_test;
 static unsigned timer_irqs[CONFIG_NR_CPUS];
 static unsigned phase, finished, remote_cpu;
 static task_t *worker_task;
@@ -39,6 +42,33 @@ static int set_cpu(task_t *task, unsigned cpu) {
     return proc_sched_set(task, &config);
 }
 
+/* Opt-in scratch disk only. Validate the host fixture before any writes.
+ * Direct class operations bypass the filesystem/page cache, exercising DMA,
+ * transport notification and completion on the real device owner. */
+static void disk_roundtrip(void) {
+    device_t *dev = device_find_by_class(DEV_CLASS_BLOCK, 0);
+    CHECK(dev && dev->drv && dev->drv->class_ops);
+    const block_dev_ops_t *ops = dev->drv->class_ops;
+    CHECK(ops->read && ops->write && ops->flush && ops->capacity && ops->sector_size);
+    CHECK(ops->capacity(dev) == 4096 && ops->sector_size(dev) == 512);
+    unsigned char *buffer = kmalloc(512);
+    CHECK(buffer);
+    CHECK(ops->read(dev, 7, buffer, 1) == 0);
+    for (unsigned i = 0; i < 512; i++) CHECK(buffer[i] == (unsigned char)(i * 17 + 0xa2));
+    for (unsigned round = 0; round < 32; round++) {
+        for (unsigned i = 0; i < 512; i++) buffer[i] = (unsigned char)(i * 29 + round * 7 + 0x20);
+        CHECK(ops->write(dev, 8 + round, buffer, 1) == 0);
+        CHECK(ops->flush(dev) == 0);
+        memset(buffer, 0, 512);
+        CHECK(ops->read(dev, 8 + round, buffer, 1) == 0);
+        for (unsigned i = 0; i < 512; i++)
+            CHECK(buffer[i] == (unsigned char)(i * 29 + round * 7 + 0x20));
+        CHECK(cpu_current_id() == remote_cpu);
+    }
+    kfree(buffer);
+    printf("[SMP-DISK] PASS cpu=%u sectors=32 bytes=16384 flush=32 readback=32\n", cpu_current_id());
+}
+
 static void worker(void) {
     CHECK(cpu_current_id() == remote_cpu);
     clock_remote = timer_get_ticks();
@@ -50,6 +80,7 @@ static void worker(void) {
     CHECK(cpu_current_id() == remote_cpu);
     CHECK(timer_get_ticks() >= remote_deadline);
     CHECK(proc_current()->pid == worker_pid);
+    if (disk_test) disk_roundtrip();
     volatile uint32_t stack_words[4] = {0xa201, 0xa202, 0xa203, 0xa204};
     stack_address = (uintptr_t)&stack_words[0];
     uint32_t *p = kmalloc(64);
@@ -162,6 +193,9 @@ void smp_selftest_boot(void) {
         if (n == sizeof("a20.smp_test=1") - 1 &&
             memcmp(args, "a20.smp_test=1", n) == 0)
             enabled = 1;
+        if (n == sizeof("a20.smp_disk_test=1") - 1 &&
+            memcmp(args, "a20.smp_disk_test=1", n) == 0)
+            disk_test = 1;
         args += n;
     }
     if (!enabled)

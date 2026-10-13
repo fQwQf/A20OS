@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run kernel migration or Native user-thread contracts on stock x86 QEMU/KVM.
+"""Run kernel, Native/Linux threads and remote disk I/O on stock x86 QEMU/KVM.
 
 shared: two independent QEMU processes, one RAM file and kernel instance.
 smp: ordinary single-QEMU SMP baseline. No QEMU sources are needed.
-Native mode uses the existing application, SDK and RAMFS; no disk emulation
-is shared. Neither mode is cross-instance Minecraft acceptance.
+Disk modes attach a fresh scratch disk only to the primary. The secondary
+has neither a disk nor a UART. These tests are not Minecraft acceptance.
 """
 import argparse
 import hashlib
@@ -66,7 +66,7 @@ def qmp_snapshot(path, process, deadline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory")
-    parser.add_argument("--workload", choices=("kernel", "native", "linux"), default="kernel")
+    parser.add_argument("--workload", choices=("kernel", "native", "linux", "disk", "linux-disk"), default="kernel")
     parser.add_argument("--mode", choices=("shared", "smp"), default="shared")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
     parser.add_argument("--jobs", type=int, default=4)
@@ -83,7 +83,7 @@ def main():
     out.mkdir(parents=True, exist_ok=False)  # Never replace an earlier run.
     shared = args.mode == "shared"
     flags = FLAGS + [f"QEMU_SHARED_SMP={int(shared)}"]
-    if args.workload in ("native", "linux"):
+    if args.workload in ("native", "linux", "linux-disk"):
         flags += ["SMP_SELFTEST=0", "RAMFS_USER=1", "RAMFS_NATIVE_TESTS=1"]
     report = {"passed": False, "mode": args.mode, "workload": args.workload, "make_flags": flags,
               "evidence": args.workload + " execution; not Minecraft acceptance",
@@ -103,7 +103,10 @@ def main():
             "kernel/proc/sched.c", "kernel/proc/current.c", "kernel/include/proc/proc.h",
             "user/cmds/stress/cluster_threads.c", "kernel/core/shared_device_call.c",
             "kernel/include/core/shared_device_call.h", "kernel/arch/x86_64/platform/shared_console.c",
-            "kernel/arch/x86_64/include/console.h", "kernel/arch/x86_64/include/cpu.h")}
+            "kernel/arch/x86_64/include/console.h", "kernel/arch/x86_64/include/cpu.h",
+            "kernel/core/shared_mmio.c", "kernel/include/core/shared_mmio.h",
+            "kernel/drivers/core/driver_hwapi.h", "kernel/drivers/bus/pci_bus.c",
+            "tools/driver-modules.mk", "kernel/drvmod/framework.c", "user/Makefile")}
         build = subprocess.check_output(["make", "-s", *flags, "print-build-dir"],
                                         cwd=ROOT, text=True).strip()
         with (out / "build.log").open("wb") as log:
@@ -144,6 +147,17 @@ def main():
                 serial = secondary.index("-serial")
                 secondary[serial + 1] = "none"
                 commands.append(secondary + ["-bios", str(rom)])
+            disk = out / "scratch-disk.raw"
+            if args.workload in ("disk", "linux-disk"):
+                with disk.open("xb") as f:
+                    f.truncate(2 * 1024 * 1024)
+                    f.seek(7 * 512)
+                    f.write(bytes((i * 17 + 0xa2) & 255 for i in range(512)))
+                report["disk_before_sha256"] = sha(disk)
+                commands[0] += ["-drive", f"file={disk},format=raw,if=none,id=scratch,cache=writeback",
+                                "-device", "virtio-blk-pci,drive=scratch,disable-legacy=on"]
+                if args.workload == "disk":
+                    commands[0] += ["-fw_cfg", "name=opt/x86/cmdline,string=a20.smp_disk_test=1"]
             for i, cmd in enumerate(commands):
                 cmd += ["-qmp", f"unix:{runtime / str(i)},server=on,wait=off"]
             report["commands"] = commands
@@ -153,7 +167,7 @@ def main():
                 for i in reversed(range(len(commands))):
                     log = (out / f"node-{i}.log").open("wb")
                     logs.append(log)
-                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux") else subprocess.DEVNULL,
+                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux", "linux-disk") else subprocess.DEVNULL,
                                                     stdout=log, stderr=subprocess.STDOUT)
                 report["pids"] = [p.pid for p in processes]
                 report["qmp"] = [qmp_snapshot(runtime / str(i), p, deadline)
@@ -180,7 +194,7 @@ def main():
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
-                    if args.workload in ("native", "linux"):
+                    if args.workload in ("native", "linux", "linux-disk"):
                         content = texts[0]
                         if shared and ("NATIVE_" in texts[1] or "CLUSTER_THREADS:" in texts[1]):
                             raise RuntimeError("user output escaped primary console owner")
@@ -188,23 +202,25 @@ def main():
                             raise RuntimeError("user application contract failed")
                         if not application_started and re.search(r"(?:^|[\r\n])# ", content):
                             processes[0].stdin.write((b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n" if args.workload == "native"
-                                                      else b"/bin/cluster_threads --console; echo A20_LINUX_EXIT:$?\n"))
+                                                      else ("/bin/cluster_threads --console" + (" --disk" if args.workload == "linux-disk" else "") + "; echo A20_LINUX_EXIT:$?\n").encode()))
                             processes[0].stdin.flush()
                             application_started = True
                             deadline = time.monotonic() + args.timeout
-                        if args.workload == "linux" and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
+                        if args.workload in ("linux", "linux-disk") and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
                             processes[0].stdin.write(b"owner-ok\n")
                             processes[0].stdin.flush()
                             console_input_sent = True
                         exited = re.search(r"A20_(?:NATIVE|LINUX)_EXIT:(\d+)", content)
                         if application_started and exited and int(exited[1]) != 0:
                             raise RuntimeError("user application exited " + exited[1])
-                        if args.workload == "linux" and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
+                        if args.workload in ("linux", "linux-disk") and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
                             match = re.search(r"CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=(\d+) tls=preserved tlb-rounds=64 protection-faults=128 jobs=1024 split=(\d+)/(\d+) sum=(\d+) mask=3 destructors=2 cond-timeout=checked", content)
                             if not match or not 126 <= int(match[1]) <= 128 or sum(map(int, match.groups()[1:3])) != 1024 or min(map(int, match.groups()[1:3])) <= 0 or int(match[4]) != 8256 * 1024 * 1025 // 2:
                                 raise RuntimeError("missing Linux/POSIX execution evidence")
                             if not console_input_sent or "CLUSTER_CONSOLE: PASS cpu=1 input=owner-ok blocks=32" not in content:
                                 raise RuntimeError("missing remote console input/output acceptance")
+                            if args.workload == "linux-disk" and "CLUSTER_DISK: PASS cpu=1 sectors=32 bytes=16384 flush=32 readback=32" not in content:
+                                raise RuntimeError("missing user disk execution")
                             for block in range(32):
                                 marker = f"CLUSTER_CONSOLE_BLOCK:{block:02d}:abcdefghijklmnopqrstuvwxyz012345"
                                 if content.count(marker) != 1:
@@ -237,6 +253,8 @@ def main():
                                        "clock=" + ("ordered" if shared else "sampled") + " sleep=remote"):
                             if marker not in texts[0]:
                                 raise RuntimeError("missing guest assertion: " + marker)
+                        if args.workload in ("disk", "linux-disk") and "[SMP-DISK] PASS cpu=1 sectors=32 bytes=16384 flush=32 readback=32" not in texts[0]:
+                            raise RuntimeError("missing remote disk execution")
                         report["passed"] = True
                         break
                     if any(p.poll() is not None for p in processes):
@@ -262,7 +280,20 @@ def main():
                 report["returncodes"] = [p.returncode if p else None for p in processes]
                 report["termination"] = "owned QEMU processes stopped by harness after acceptance/failure"
                 report["temporary_ram_removed_after_stop"] = True
+            if args.workload in ("disk", "linux-disk"):
+                actual = disk.read_bytes()
+                expected = bytearray(2 * 1024 * 1024)
+                expected[7*512:8*512] = bytes((i * 17 + 0xa2) & 255 for i in range(512))
+                for round in range(32):
+                    expected[(8+round)*512:(9+round)*512] = bytes((i * 29 + round * 7 + 0x20) & 255 for i in range(512))
+                if actual != expected:
+                    report["passed"] = False
+                    raise RuntimeError("host scratch disk content mismatch")
+                report.update(disk_after_sha256=sha(disk), disk_host_verified=True,
+                              disk_owner=0, disk_client_cpu=1, disk_bytes=16384,
+                              disk_flushes=32)
     except Exception as exc:
+        report["passed"] = False
         report["failure"] = repr(exc)
         raise
     finally:
