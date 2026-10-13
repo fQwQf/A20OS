@@ -396,6 +396,16 @@ smoke-oom-stress:
 smoke-swap:
 	$(PYTHON) tools/smoke.py smoke-swap
 
+.PHONY: smoke-swap-aarch64 smoke-swap-smp4 smoke-swap-aarch64-smp4
+smoke-swap-aarch64:
+	$(PYTHON) tools/smoke.py smoke-swap-aarch64
+
+smoke-swap-smp4:
+	$(PYTHON) tools/smoke.py smoke-swap-smp4
+
+smoke-swap-aarch64-smp4:
+	$(PYTHON) tools/smoke.py smoke-swap-aarch64-smp4
+
 smoke-mm-fork-exec-race:
 	$(PYTHON) tools/smoke.py smoke-mm-fork-exec-race
 

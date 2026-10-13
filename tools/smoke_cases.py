@@ -2813,6 +2813,23 @@ CASES: dict[str, dict] = {
 }
 
 CASES["smoke-native-mm"]["expect"].append("NATIVE_MM: remap-owner-rollback PASS")
+CASES["smoke-swap"]["expect"].extend([
+    "SWAP_TEST: pageout-fork-remap PASS",
+    "SWAP_TEST: admin-permissions PASS",
+])
+CASES["smoke-swap-aarch64"] = case_for_arch("smoke-swap", CASES["smoke-swap"], "aarch64")
+CASES["smoke-swap-aarch64"]["pass_msg"] = "smoke-swap-aarch64: PASS; log saved to $log"
+for _base in ("smoke-swap", "smoke-swap-aarch64"):
+    _alias = _base + "-smp4"
+    CASES[_alias] = deepcopy(CASES[_base])
+    CASES[_alias]["build"]["vars"] = [
+        v for v in CASES[_alias]["build"]["vars"] if not v.startswith("NR_CPUS=")
+    ] + ["NR_CPUS=4"]
+    CASES[_alias]["gate"]["cpus"] = "4"
+    _argv = CASES[_alias]["argv"]
+    _argv[_argv.index("-smp") + 1] = "4"
+    CASES[_alias]["log"] = CASES[_base]["log"].replace(".log", "-smp4.log")
+    CASES[_alias]["pass_msg"] = f"{_alias}: PASS; log saved to $log"
 CASES["smoke-native-ubd"]["build"]["extra-targets"] = ["native-ubd-image"]
 for _base in ("smoke-futex-stress", "smoke-futex-stress-aarch64"):
     CASES[_base]["expect"].extend([

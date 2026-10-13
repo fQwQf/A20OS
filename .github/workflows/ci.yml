@@ -328,6 +328,8 @@ jobs:
           make smoke-proc-stress
           make smoke-futex-stress
           make smoke-futex-stress-smp4
+          make smoke-swap
+          make smoke-swap-smp4
           make smoke-mm-stress
           make smoke-vfs-stress
           make smoke-vfs-stress-smp2

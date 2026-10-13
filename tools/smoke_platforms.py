@@ -16,7 +16,7 @@ def case_for_arch(name: str, case: dict, arch: str) -> dict:
     if arch not in ARCHES:
         raise ValueError(f"unsupported shared smoke architecture: {arch}")
     if not (name.startswith("smoke-native-") or
-            name in {"smoke-pty-stress", "smoke-timeout-test"}):
+            name in {"smoke-pty-stress", "smoke-timeout-test", "smoke-swap"}):
         raise ValueError(f"{name} has no shared platform definition")
     if name in RISCV_ONLY and arch != "riscv64":
         raise ValueError(f"{name} requires {RISCV_ONLY[name]}")

@@ -8,15 +8,11 @@
  * few MiB of anonymous memory with swap enabled, swapoff must succeed and
  * totalswap must return to zero.
  *
- * Boundary: this does NOT drive the swap_out_victim_pages() reclaim path.
- * Real write-out only happens when global free frames drop below
- * OOM_MIN_FREE_PAGES (kernel/mm/oom.c), and reclaim swaps at most
- * MAX_SWAP_RECLAIM=8 pages per 2s cooldown window, so forcing meaningful
- * swap-out inside a 1 GiB QEMU smoke is not practical.  swap_read_page /
- * swap_write_page are still exercised partially: mkswap and swapon perform
- * real header/badmap I/O through the loop block adapter.  A dedicated
- * low-memory instance would be needed to gate the actual reclaim path.
+ * MADV_PAGEOUT drives real page write-out without the global OOM threshold.
+ * mincore and /proc/swaps prove eviction before fork/remap; child and parent
+ * then verify independent data, busy swapoff and final slot reclamation.
  */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -28,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef SYS_swapon
@@ -50,6 +47,9 @@
 #define BACKING_PATH "/tmp/swap_backing.bin"
 #define BACKING_SIZE (16UL * 1024 * 1024)
 #define TOUCH_SIZE   (8UL * 1024 * 1024)
+#ifndef MADV_PAGEOUT
+#define MADV_PAGEOUT 21
+#endif
 
 static int fail(const char *what)
 {
@@ -103,6 +103,82 @@ static int proc_swaps_lists(const char *path)
     return 0;
 }
 
+static long used_swap_kb(const char *path)
+{
+    FILE *file = fopen("/proc/swaps", "r");
+    if (!file) return -1;
+    char line[256], name[128], type[32];
+    unsigned long size, used;
+    long result = -1;
+    while (fgets(line, sizeof(line), file)) {
+        if (sscanf(line, "%127s %31s %lu %lu", name, type, &size, &used) == 4 &&
+            !strcmp(name, path)) {
+            result = (long)used;
+            break;
+        }
+    }
+    fclose(file);
+    return result;
+}
+
+static int real_pageout_fork_remap(const char *path)
+{
+    enum { PAGE = 4096, PAGES = 4 };
+    size_t len = PAGE * PAGES;
+    unsigned char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return fail("pageout-map");
+    for (size_t i = 0; i < len; i++) p[i] = (unsigned char)(i * 13 + i / PAGE);
+    long before = used_swap_kb(path);
+    if (before < 0 || madvise(p, len, MADV_PAGEOUT) < 0)
+        return fail("pageout-advice");
+    unsigned char resident[PAGES];
+    if (mincore(p, len, resident) < 0) return fail("pageout-mincore");
+    for (int i = 0; i < PAGES; i++)
+        if (resident[i] & 1) return fail("pageout-still-resident");
+    if (used_swap_kb(path) != before + PAGES * (PAGE / 1024))
+        return fail("pageout-used-slots");
+    errno = 0;
+    if (syscall(SYS_swapoff, path) != -1 || errno != EBUSY)
+        return fail("pageout-busy-swapoff");
+    pid_t child = fork();
+    if (child < 0) return fail("pageout-fork");
+    if (!child) {
+        for (size_t i = 0; i < len; i++)
+            if (p[i] != (unsigned char)(i * 13 + i / PAGE)) _exit(2);
+        p[0] = 99; /* private readback must not alter the parent's disk slot */
+        if (munmap(p, len) < 0) _exit(3);
+        _exit(0);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status))
+        return fail("pageout-child-data");
+    if (mincore(p, len, resident) < 0) return fail("pageout-parent-mincore");
+    for (int i = 0; i < PAGES; i++)
+        if (resident[i] & 1) return fail("pageout-parent-unexpected-readback");
+    if (used_swap_kb(path) != before + PAGES * (PAGE / 1024))
+        return fail("pageout-child-freed-parent-slots");
+
+    void *target = mmap(NULL, 2 * len, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) return fail("pageout-target");
+    unsigned char *moved = mremap(p, len, 2 * len,
+                                  MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    if (moved == MAP_FAILED || moved != target) return fail("pageout-remap");
+    if (mincore(moved, len, resident) < 0) return fail("pageout-remap-mincore");
+    for (int i = 0; i < PAGES; i++)
+        if (resident[i] & 1) return fail("pageout-remap-lost-swap-state");
+    for (size_t i = 0; i < len; i++)
+        if (moved[i] != (unsigned char)(i * 13 + i / PAGE))
+            return fail("pageout-remap-data");
+    for (size_t i = len; i < 2 * len; i++)
+        if (moved[i]) return fail("pageout-remap-tail");
+    if (used_swap_kb(path) != before) return fail("pageout-slot-leak");
+    if (munmap(moved, 2 * len) < 0) return fail("pageout-final-unmap");
+    puts("SWAP_TEST: pageout-fork-remap PASS");
+    return 0;
+}
+
 int main(void)
 {
     if (totalswap() != 0)
@@ -143,6 +219,27 @@ int main(void)
     errno = 0;
     if (syscall(SYS_swapon, loop_path, 0) != -1 || errno != EBUSY)
         return fail("swapon-duplicate-not-EBUSY");
+    errno = 0;
+    if (syscall(SYS_mkswap, loop_path, 0) != -1 || errno != EBUSY)
+        return fail("mkswap-active-not-EBUSY");
+    if (real_pageout_fork_remap(loop_path)) return 1;
+    pid_t unprivileged = fork();
+    if (unprivileged < 0) return fail("swap-admin-fork");
+    if (!unprivileged) {
+        if (setuid(1000) < 0) _exit(4);
+        errno = 0;
+        if (syscall(SYS_swapon, loop_path, 0) != -1 || errno != EPERM) _exit(5);
+        errno = 0;
+        if (syscall(SYS_swapoff, loop_path) != -1 || errno != EPERM) _exit(6);
+        errno = 0;
+        if (syscall(SYS_mkswap, loop_path, 0) != -1 || errno != EPERM) _exit(7);
+        _exit(0);
+    }
+    int admin_status;
+    if (waitpid(unprivileged, &admin_status, 0) != unprivileged ||
+        !WIFEXITED(admin_status) || WEXITSTATUS(admin_status))
+        return fail("swap-admin-permissions");
+    puts("SWAP_TEST: admin-permissions PASS");
 
     /* Prove anonymous memory still works with an active swap device. */
     volatile char *p = mmap(NULL, TOUCH_SIZE, PROT_READ | PROT_WRITE,
