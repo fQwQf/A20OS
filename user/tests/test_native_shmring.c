@@ -180,7 +180,7 @@ int main(int argc, char **argv, char **envp)
     r->total_lo = A20_SHMRING_TOTAL;
 
     a20_handle_t ring_task;
-    int64_t spawn_rc = spawn_child("/bin/shmringd-rv", vmo, A20_SHMRING_VMO_SLOT,
+    int64_t spawn_rc = spawn_child(A20_NATIVE_BIN("shmringd"), vmo, A20_SHMRING_VMO_SLOT,
                                    A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP,
                                    &ring_task);
     put_str("NATIVE_SHMRING: spawn rc=");
@@ -219,7 +219,7 @@ int main(int argc, char **argv, char **envp)
         return fail(5, "channel_create failed");
 
     a20_handle_t chan_task;
-    int64_t chand_rc = spawn_child("/bin/chand-rv", pair.endpoints[1],
+    int64_t chand_rc = spawn_child(A20_NATIVE_BIN("chand"), pair.endpoints[1],
                                    A20_CHAND_EP_SLOT,
                                    A20_RIGHT_READ | A20_RIGHT_WRITE,
                                    &chan_task);

@@ -19,6 +19,7 @@
  *         restart persistence / delete
  */
 #define _GNU_SOURCE
+#include "../../liba20rt/a20_arch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,7 @@ static pid_t spawn_ufsd(const char *mp, const char *idx, const char *fstype)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        execl("/bin/ufsd-rv", "ufsd-rv", mp, idx, fstype, (char *)0);
+        execl(A20_NATIVE_BIN("ufsd"), "ufsd", mp, idx, fstype, (char *)0);
         _exit(90);
     }
     return pid;

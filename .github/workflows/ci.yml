@@ -257,6 +257,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  native:
+    needs: buildenv-image
+    uses: ./.github/workflows/native.yml
+    with:
+      buildenv-image: ${{ needs.buildenv-image.outputs.image }}
+
   # QEMU 冒烟门禁（riscv64，TCG）：PR 与主干同一标准，套件对应
   # docs/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
   # 调度/进程/futex/MM/VFS 压力、SMP），最后跑需要网络与包仓库的
@@ -325,17 +331,7 @@ jobs:
           make smoke-vfs-stress
           make smoke-vfs-stress-smp2
           make smoke-smp-bringup
-          # 第一条 Native 运行时门禁。tools/smoke_cases.py 里 21 条 native
-          # smoke 全部写死 ARCH=riscv64 + ABI=both，所以选它不会新增一次构建：
-          # 复用上面 dev-build 已经产出的 riscv64-qemu-virt-riscv64-both-dev
-          # 目录，代价是一次 20s 的 QEMU 启动（该用例的 timeout 就是 20s，
-          # pre 无附加镜像）。覆盖面按 syscall 分区挑的 rights algebra /
-          # BPF / EventQ / VMOL / DMA 五项，不与上面 Linux 侧用例重叠。
-          #
-          # VMOL 同时检查 unmap 后 VMO 对象和页面计数回到基线，防止映射索引
-          # 的陈旧引用跨过 munmap 完成边界。详见 docs/testing-gates.md 的
-          # “Native 门禁的架构覆盖现状”。
-          make smoke-native-contract
+          # Native coverage runs in the separate shared two-architecture job.
         timeout-minutes: 60
 
       # Networking had no CI coverage at all until this block, which is why a

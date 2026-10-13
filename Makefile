@@ -538,10 +538,8 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN)
-# fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
-# §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
-# other ARCH breaks the whole native-program graph. Keep them rv64-only.
-NATIVE_OUTPUTS += $(if $(filter riscv64,$(ARCH)),$(NATIVE_FAKELD_BIN) $(NATIVE_DYNPROBE_BIN))
+# fake_ld.c provides entry shims for these four 64-bit architectures.
+NATIVE_OUTPUTS += $(if $(filter riscv64 aarch64 x86_64 loongarch64,$(ARCH)),$(NATIVE_FAKELD_BIN) $(NATIVE_DYNPROBE_BIN))
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 
 # ================================================================

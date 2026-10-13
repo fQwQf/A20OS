@@ -169,5 +169,5 @@ smoke-mlibc-mksh:
 	$(PYTHON) tools/smoke.py smoke-mlibc-mksh
 
 smoke-native-libc:
-	$(PYTHON) tools/smoke.py smoke-native-libc
+	$(PYTHON) tools/smoke.py smoke-native-libc --arch $(ARCH)
 

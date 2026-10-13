@@ -449,17 +449,17 @@ int main(int argc, char **argv, char **envp)
 
     /* Declarative manifest, spawn order = dependency order. */
     g_svcs[0].name = "rtcd";
-    g_svcs[0].path = "/bin/rtcd-rv.a20drv";
+    g_svcs[0].path = A20_NATIVE_BIN("rtcd") ".a20drv";
     g_svcs[0].ep_slot = A20_RTCD_EP_SLOT;
     g_svcs[0].ping_kind = 1;
     g_svcs[1].name = "echod";
-    g_svcs[1].path = "/bin/svc-echod-rv";
+    g_svcs[1].path = A20_NATIVE_BIN("svc-echod");
     g_svcs[1].ep_slot = 104u /* A20_SVC_ENDPOINT_SLOT */;
     g_svcs[1].ping_kind = 0;
     g_svcs[2].name = "ufsd";
     g_svcs[2].ep_slot = 104u;
     g_svcs[2].ping_kind = 0;
-    g_svcs[2].path = "/bin/ufsd-rv";
+    g_svcs[2].path = A20_NATIVE_BIN("ufsd");
     g_nsvcs = 3;
 
     /* Board-configured supervised index: the command line overrides the

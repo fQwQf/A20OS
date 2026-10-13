@@ -10,7 +10,9 @@
  *      page cache absorbs the user-driver path, the mainstream claim).
  */
 #define _GNU_SOURCE
+#include "../../liba20rt/a20_arch.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -44,7 +46,7 @@ int main(void)
     if (!mounted) {
         pid_t pid = fork();
         if (pid == 0) {
-            execl("/bin/ubd-rv.a20drv", "ubd-rv.a20drv", (char *)0);
+            execl(A20_NATIVE_BIN("ubd") ".a20drv", "ubd", (char *)0);
             _exit(90);
         }
         for (int i = 0; i < 500; i++) {

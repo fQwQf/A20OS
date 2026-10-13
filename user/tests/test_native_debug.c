@@ -50,7 +50,7 @@ static int child_main(void)
 
 static a20_status_t spawn_child(a20_handle_t *out_task)
 {
-    static const char path[] = "/bin/native-debug-rv";
+    static const char path[] = A20_NATIVE_BIN("native-debug");
     a20_path_open_args_t oa;
     oa.size = sizeof(oa);
     oa.version = 1;

@@ -17,7 +17,7 @@
 #include "a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
 
-#define ECHOD_PATH   "/bin/svc-echod-rv"
+#define ECHOD_PATH   A20_NATIVE_BIN("svc-echod")
 #define BACKOFF_MS   50
 
 static a20_handle_t g_out = A20_HANDLE_NULL;
