@@ -3,7 +3,7 @@
 # format regressions are caught without booting the kernel.
 HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
-HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
+HOST_TESTS_SRC := $(filter-out tools/tests/fdt_view.c,$(wildcard tools/tests/*.c))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
@@ -96,14 +96,31 @@ check-drm-abi:
 	@tools/check-drm-abi.sh
 
 host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
-            check-tg-leader-lifetime $(HOST_TESTS_BIN)
+            check-tg-leader-lifetime check-fdt-view $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
-$(TMPDIR)/a20-host-fdt_view: tools/tests/fdt_view.c kernel/core/fdt_view.c kernel/include/core/fdt_view.h
-	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include $(filter %.c,$^) -o $@
+$(TMPDIR)/a20-host-test_flat_user: tools/tests/test_flat_user.c kernel/mm/flat_user.c tools/tests/flat_user_shim.h
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -DA20_FLAT_HOST_TEST -Ikernel/include \
+		-include tools/tests/flat_user_shim.h $(filter %.c,$^) -o $@
+
+$(TMPDIR)/a20-host-test_native_runtime: tools/tests/test_native_runtime.c kernel/core/runtime.c kernel/abi/native/sys_runtime.c tools/tests/native_runtime_shim.h tools/tests/native_task_object_shim.h
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -Ikernel/include -Ikernel \
+		-include tools/tests/native_runtime_shim.h $(filter %.c,$^) -o $@
+
+$(TMPDIR)/a20-host-test_native_task_object: tools/tests/test_native_task_object.c kernel/proc/task_object.c kernel/proc/pid.c kernel/ipc/a20_object.c tools/tests/native_task_object_shim.h
+	$(HOST_CC) $(HOST_CFLAGS) -pthread -Ikernel/include -Ikernel \
+		-include tools/tests/native_task_object_shim.h $(filter %.c,$^) -o $@
+
+$(TMPDIR)/a20-host-test_native_spawn_admission: tools/tests/test_native_spawn_admission.c kernel/abi/native/sys_spawn_flat.c tools/tests/native_spawn_shim.h
+	$(HOST_CC) $(HOST_CFLAGS) -DCONFIG_NATIVE_FLAT_FILES -Ikernel/include -Ikernel/abi/native \
+		-include tools/tests/native_spawn_shim.h $(filter %.c,$^) -o $@
+
+$(TMPDIR)/a20-host-test_native_thread_admission: tools/tests/test_native_thread_admission.c kernel/abi/native/sys_thread_create.c tools/tests/native_thread_shim.h
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel/abi/native \
+		-include tools/tests/native_thread_shim.h $(filter %.c,$^) -o $@
 
 # The MCU protocol harness uses architecture type definitions but executes
 # no target assembly. The generic host rule lacks this include directory.

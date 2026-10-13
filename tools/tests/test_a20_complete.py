@@ -67,10 +67,10 @@ class TestCandidates(unittest.TestCase):
         self.assertNotIn("complete", got, "the plumbing command must not be suggested")
 
     def test_partial_command_word(self) -> None:
-        self.assertEqual(self.complete("ru"), ["run"])
+        self.assertEqual(self.complete("ru"), ["run", "running"])
 
     def test_cursor_on_command_word_suggests_commands(self) -> None:
-        self.assertEqual(self.complete("run"), ["run"])
+        self.assertEqual(self.complete("run"), ["run", "running"])
 
     def test_instance_positional_lists_instances(self) -> None:
         self.assertEqual(self.complete("run", "xf"), ["xfce-y"])

@@ -19,7 +19,9 @@
 #include "mm/vmo.h"
 #include "ipc/objstats.h"
 #include "ext/kep.h"
+#ifndef CONFIG_NATIVE_TASK_HANDLES_ONLY
 #include "hyp/hyp_vcpu.h"
+#endif
 #include "proc/task_object.h"
 
 a20_objstats_t g_a20_objstats;
