@@ -236,8 +236,13 @@ static void *hyp_slot_get(int owner, int kind, int64_t id)
     uint64_t flags = spin_lock_irqsave(&g_hyp_slots_lock);
     void *obj = NULL;
     if (g_hyp_slots[id].used && g_hyp_slots[id].owner == owner &&
-        g_hyp_slots[id].kind == kind)
+        g_hyp_slots[id].kind == kind) {
         obj = g_hyp_slots[id].obj;
+        if (kind == HYP_SLOT_VM)
+            hyp_vm_get(obj);
+        else
+            hyp_vcpu_get(obj);
+    }
     spin_unlock_irqrestore(&g_hyp_slots_lock, flags);
     return obj;
 }
@@ -351,8 +356,10 @@ int64_t sys_hyp_vm_load(const linux_syscall_args_t *args)
         return -EBADF;
 
     char *page = kmalloc(PAGE_SIZE);
-    if (!page)
+    if (!page) {
+        hyp_vm_put(vm);
         return -ENOMEM;
+    }
 
     int64_t rc = 0;
     uint64_t done = 0;
@@ -378,6 +385,7 @@ int64_t sys_hyp_vm_load(const linux_syscall_args_t *args)
 
     hyp_scrub_page(page);
     kfree(page);
+    hyp_vm_put(vm);
     return rc;
 }
 
@@ -394,6 +402,7 @@ int64_t sys_hyp_vcpu_create(const linux_syscall_args_t *args)
         return -EBADF;
 
     hyp_vcpu_t *vcpu = hyp_vcpu_create(vm, args->arg[1]);
+    hyp_vm_put(vm);
     if (!vcpu)
         return -ENOMEM;
 
@@ -424,9 +433,11 @@ int64_t sys_hyp_vcpu_run(const linux_syscall_args_t *args)
     if (!vcpu)
         return -EBADF;
 
-    if (hyp_vcpu_run(vcpu) < 0)
-        return -EIO;
-    return (int64_t)vcpu->exit;
+    hyp_exit_reason_t reason = HYP_EXIT_NONE;
+    int rc = hyp_vcpu_run_result(vcpu, &reason);
+    int64_t result = rc < 0 ? rc : (int64_t)reason;
+    hyp_vcpu_put(vcpu);
+    return result;
 }
 
 /*
@@ -442,6 +453,18 @@ int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return -EBADF;
     hyp_vm_put(vm);
+    return 0;
+}
+
+int64_t sys_hyp_vcpu_destroy(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied())
+        return -EPERM;
+    hyp_vcpu_t *vcpu = hyp_slot_take(proc_current()->pid, HYP_SLOT_VCPU,
+                                    (int64_t)args->arg[0]);
+    if (!vcpu)
+        return -EBADF;
+    hyp_vcpu_put(vcpu);
     return 0;
 }
 
@@ -478,9 +501,9 @@ int64_t sys_hyp_vcpu_set_boot(const linux_syscall_args_t *args)
     if (!vcpu)
         return -EBADF;
 
-    if (hyp_vcpu_set_boot(vcpu, args->arg[1], args->arg[2]) != 0)
-        return -EINVAL;
-    return 0;
+    int rc = hyp_vcpu_set_boot(vcpu, args->arg[1], args->arg[2]);
+    hyp_vcpu_put(vcpu);
+    return rc;
 }
 
 /* SYS_hyp_vm_set_marker(vm, marker) -> 0.  The string is copied rather than
@@ -495,18 +518,25 @@ int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args)
         return -EBADF;
 
     const char *umarker = (const char *)(uintptr_t)args->arg[1];
-    if (!umarker)
+    if (!umarker) {
+        hyp_vm_put(vm);
         return -EFAULT;
+    }
 
     char marker[HYP_MARKER_MAX + 1];
-    if (copy_from_user(marker, umarker, HYP_MARKER_MAX) < 0)
+    if (copy_from_user(marker, umarker, HYP_MARKER_MAX) < 0) {
+        hyp_vm_put(vm);
         return -EFAULT;
+    }
     marker[HYP_MARKER_MAX] = '\0';
-    if (strlen(marker) == HYP_MARKER_MAX)
-        return -EINVAL;   /* no room for the terminator the contract wants */
+    if (strlen(marker) == HYP_MARKER_MAX) {
+        hyp_vm_put(vm);
+        return -EINVAL;
+    }
 
-    hyp_vm_set_marker(vm, marker);
-    return 0;
+    int rc = hyp_vm_set_marker(vm, marker);
+    hyp_vm_put(vm);
+    return rc;
 }
 
 /*
@@ -520,16 +550,6 @@ int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args)
  * APPENDED and never reordered: the whole struct is one copy_to_user, and the
  * user copy is a separate translation unit that has to agree by hand.
  */
-struct hyp_vm_status {
-    uint64_t exit;            /* hyp_exit_reason_t of the vcpu that ran */
-    uint64_t scause;
-    uint64_t stval;
-    uint64_t htval;
-    uint64_t marker_seen;
-    uint64_t console_bytes;
-    uint64_t rx_bytes;        /* v3: host bytes handed to the guest's UART */
-};
-
 /* SYS_hyp_vm_status(vm, out) -> 0 */
 int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
 {
@@ -540,36 +560,14 @@ int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
         return -EBADF;
 
     void *uout = (void *)(uintptr_t)args->arg[1];
-    if (!uout)
+    if (!uout) {
+        hyp_vm_put(vm);
         return -EFAULT;
-
-    /* The exit detail is the VM's most recent vcpu, not the VM: the caller
-     * names the VM and asks what came back.  Only one guest runs at a time in
-     * this slice (hyp_vcpu.h), so the slot scan is the whole lookup. */
-    hyp_vcpu_t *last = NULL;
-    uint64_t flags = spin_lock_irqsave(&g_hyp_slots_lock);
-    for (int i = 0; i < HYP_BRIDGE_SLOTS; i++) {
-        if (!g_hyp_slots[i].used || g_hyp_slots[i].owner != proc_current()->pid ||
-            g_hyp_slots[i].kind != HYP_SLOT_VCPU)
-            continue;
-        hyp_vcpu_t *vcpu = (hyp_vcpu_t *)g_hyp_slots[i].obj;
-        if (vcpu && vcpu->magic == HYP_VCPU_MAGIC && vcpu->vm == vm)
-            last = vcpu;
     }
-    spin_unlock_irqrestore(&g_hyp_slots_lock, flags);
 
     struct hyp_vm_status st;
-    memset(&st, 0, sizeof(st));
-    if (last) {
-        st.exit   = (uint64_t)last->exit;
-        st.scause = last->exit_scause;
-        st.stval  = last->exit_stval;
-        st.htval  = last->exit_htval;
-    }
-    st.marker_seen    = (uint64_t)hyp_vm_marker_seen(vm);
-    st.console_bytes  = hyp_vm_console_bytes(vm);
-    st.rx_bytes       = hyp_vm_rx_bytes(vm);
-
+    hyp_vm_get_status(vm, &st);
+    hyp_vm_put(vm);
     if (copy_to_user(uout, &st, sizeof(st)) < 0)
         return -EFAULT;
     return 0;
@@ -617,4 +615,46 @@ void hyp_bridge_task_exit(int pid)
         hyp_vcpu_put(drop_vcpu[i]);
     for (int i = 0; i < n_vm; i++)
         hyp_vm_put(drop_vm[i]);
+}
+
+int64_t sys_hyp_console(const linux_syscall_args_t *args)
+{
+    uint64_t op = args->arg[1], len = args->arg[3];
+    void *user = (void *)(uintptr_t)args->arg[2];
+    uint8_t data[256];
+    int rc;
+    if (hyp_envelope_denied())
+        return -EPERM;
+    hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
+    if (!vm)
+        return -EBADF;
+    if (op == HYP_CONSOLE_CONFIG) {
+        rc = args->arg[2] > 1 || len ? -EINVAL :
+             hyp_console_config(vm, (int)args->arg[2]);
+    } else if (len > sizeof(data)) {
+        rc = -EINVAL;
+    } else if (op == HYP_CONSOLE_WRITE) {
+        rc = copy_from_user(data, user, len) < 0 ? -EFAULT :
+             hyp_console_write(vm, data, (unsigned)len);
+    } else if (op == HYP_CONSOLE_READ) {
+        rc = hyp_console_read(vm, data, (unsigned)len);
+        if (rc > 0 && copy_to_user(user, data, rc) < 0)
+            rc = -EFAULT;
+    } else {
+        rc = -EINVAL;
+    }
+    hyp_vm_put(vm);
+    return rc;
+}
+
+int64_t sys_hyp_vm_set_ram(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied())
+        return -EPERM;
+    hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
+    if (!vm)
+        return -EBADF;
+    int rc = hyp_vm_set_ram(vm, args->arg[1], args->arg[2]);
+    hyp_vm_put(vm);
+    return rc;
 }

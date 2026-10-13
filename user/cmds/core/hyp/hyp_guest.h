@@ -33,6 +33,7 @@
 #define HYP_GUEST_EXIT_SHUTDOWN 1
 #define HYP_GUEST_EXIT_FAULT    2
 #define HYP_GUEST_EXIT_ERROR    3
+#define HYP_GUEST_EXIT_YIELD    4
 
 /* "shutdown" / "fault" / "error" / "none", for the exit=N(name) reports. */
 const char *hyp_guest_exit_name(long exit_reason);
@@ -99,10 +100,15 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
 long hyp_guest_vm_create(uint64_t mem_size);
 int  hyp_guest_vm_load(long vm, uint64_t gpa, const void *src, uint64_t len);
 long hyp_guest_vcpu_create(long vm, uint64_t entry_gpa);
+int hyp_guest_vcpu_destroy(long vcpu);
 int  hyp_guest_vcpu_set_boot(long vcpu, uint64_t hartid, uint64_t dtb_gpa);
 int  hyp_guest_vm_set_marker(long vm, const char *marker);
 long hyp_guest_vcpu_run(long vcpu);
 long hyp_guest_vm_status(long vm, struct hyp_guest_status *st);
+int hyp_guest_console_config(long vm, int managed);
+int hyp_guest_console_write(long vm, const void *data, size_t len);
+int hyp_guest_console_read(long vm, void *data, size_t len);
+int hyp_guest_vm_set_ram(long vm, uint64_t base, uint64_t size);
 int  hyp_guest_vm_destroy(long vm);
 
 /* What to say about a syscall that came back -1.  Returns NULL when the kernel

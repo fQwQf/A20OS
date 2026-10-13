@@ -3,23 +3,10 @@
  * frozen contract is kernel/include/hyp/hyp_vcpu.h (v2); the design record is
  * docs/hypervisor/00-design.md.
  *
- * ONE MMIO ACCESS AT A TIME, NO LOCK.  hyp_dev_mmio() runs in the guest's trap
- * path -- the guest is stopped in HS-mode with a trap frame live, and the
- * handler that called it is on the way to sret.  Anything taken here must not
- * block and must not need a lock: a lock would be held across the return into
- * guest execution, and a sleep would never be woken on this path.  So every
- * piece of shared state below is reached through __atomic ops, and the guest's
- * own UART never waits for anything.
- *
- * THE ONE LOCK THIS FILE TAKES.  hyp_dev_pump_rx(), called on the same guest
- * trap path just before the dispatcher routes the trap, drains the host
- * console with uart_try_getc() -- which takes the host UART's rx_lock and
- * releases it again before returning.  It is a leaf lock (the LOCK_ORDER note
- * in kernel/drivers/char/uart.c says nothing is taken under it), it is not
- * held across the sret, and no sleep happens under it, so the constraint
- * above holds.  It is spelled out here rather than left implicit because the
- * header otherwise reads as an absolute, and the next reader needs to know
- * which line to distrust.
+ * The active-run claim serializes guest device accesses. Managed console
+ * queues additionally use console_lock for concurrent host readers/writers;
+ * it is released before returning to guest execution. Legacy mode retains
+ * direct host UART input/output, while managed mode never drains that UART.
  *
  * WHAT IS MODELLED, AND WHY SO LITTLE.  The guest is a real kernel, not a
  * device-test program: its boot walks a DTB, sizes the CLINT, initializes a
@@ -172,11 +159,87 @@ static void hyp_dev_console_byte(hyp_vm_t *vm, uint8_t ch)
     __atomic_store_n(&vm->marker_pos, pos, __ATOMIC_RELAXED);
 }
 
-void hyp_vm_set_marker(hyp_vm_t *vm, const char *marker)
+int hyp_console_config(hyp_vm_t *vm, int managed)
+{
+    if (managed != 0 && managed != 1)
+        return -EINVAL;
+    int rc = hyp_vm_begin_update(vm);
+    if (rc)
+        return rc;
+    uint64_t flags = spin_lock_irqsave(&vm->console_lock);
+    __atomic_store_n(&vm->managed_console, managed, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&vm->console_lock, flags);
+    hyp_vm_end_update(vm);
+    return 0;
+}
+
+int hyp_console_write(hyp_vm_t *vm, const uint8_t *data, unsigned len)
+{
+    uint64_t flags = spin_lock_irqsave(&vm->console_lock);
+    if (!vm->managed_console) {
+        spin_unlock_irqrestore(&vm->console_lock, flags);
+        return -EINVAL;
+    }
+    unsigned n = 0;
+    while (n < len) {
+        unsigned head = __atomic_load_n(&vm->rx_head, __ATOMIC_RELAXED);
+        unsigned next = (head + 1) % HYP_VM_RX_RING;
+        if (next == __atomic_load_n(&vm->rx_tail, __ATOMIC_ACQUIRE))
+            break;
+        vm->rx_buf[head] = data[n++];
+        __atomic_store_n(&vm->rx_head, next, __ATOMIC_RELEASE);
+    }
+    __atomic_add_fetch(&vm->rx_bytes, n, __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&vm->console_lock, flags);
+    return (int)n;
+}
+
+int hyp_console_read(hyp_vm_t *vm, uint8_t *data, unsigned len)
+{
+    uint64_t flags = spin_lock_irqsave(&vm->console_lock);
+    unsigned n = 0;
+    while (n < len && vm->tx_tail != vm->tx_head) {
+        data[n++] = vm->tx_buf[vm->tx_tail];
+        vm->tx_tail = (vm->tx_tail + 1) % sizeof(vm->tx_buf);
+    }
+    spin_unlock_irqrestore(&vm->console_lock, flags);
+    return (int)n;
+}
+
+int hyp_console_pending(hyp_vm_t *vm)
+{
+    uint64_t flags = spin_lock_irqsave(&vm->console_lock);
+    int pending = vm->tx_head != vm->tx_tail;
+    spin_unlock_irqrestore(&vm->console_lock, flags);
+    return pending;
+}
+
+void hyp_console_putchar(hyp_vm_t *vm, uint8_t ch)
+{
+    if (__atomic_load_n(&vm->managed_console, __ATOMIC_ACQUIRE)) {
+        uint64_t flags = spin_lock_irqsave(&vm->console_lock);
+        unsigned next = (vm->tx_head + 1) % sizeof(vm->tx_buf);
+        /* RUN refuses re-entry until pending output has been drained. Each
+         * emulated UART/SBI write yields, so there is room for this byte. */
+        if (next != vm->tx_tail) {
+            vm->tx_buf[vm->tx_head] = ch;
+            vm->tx_head = next;
+        }
+        spin_unlock_irqrestore(&vm->console_lock, flags);
+    } else {
+        putchar((char)ch);
+    }
+    hyp_dev_console_byte(vm, ch);
+}
+
+int hyp_vm_set_marker(hyp_vm_t *vm, const char *marker)
 {
     if (!vm || vm->magic != HYP_VM_MAGIC)
-        return;
+        return -EINVAL;
 
+    int rc = hyp_vm_begin_update(vm);
+    if (rc)
+        return rc;
     uint32_t n = 0;
     if (marker) {
         while (n < HYP_VM_MARKER_MAX && marker[n])
@@ -192,6 +255,8 @@ void hyp_vm_set_marker(hyp_vm_t *vm, const char *marker)
     __atomic_store_n(&vm->marker_seen, 0, __ATOMIC_RELAXED);
     /* Release: everything above is visible to a reader that acquires this. */
     __atomic_store_n(&vm->marker_len, n, __ATOMIC_RELEASE);
+    hyp_vm_end_update(vm);
+    return 0;
 }
 
 int hyp_vm_marker_seen(hyp_vm_t *vm)
@@ -221,6 +286,9 @@ uint64_t hyp_vm_console_bytes(hyp_vm_t *vm)
  */
 void hyp_dev_pump_rx(hyp_vm_t *vm)
 {
+    if (__atomic_load_n(&vm->managed_console, __ATOMIC_ACQUIRE))
+        return;
+
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return;
 
@@ -328,8 +396,7 @@ static uint8_t hyp_uart_read_reg(hyp_vm_t *vm, uint64_t off, int byte_index)
 static void hyp_uart_write_reg(hyp_vm_t *vm, uint64_t off, uint8_t v)
 {
     if (off == HYP_UART_THR) {
-        putchar((char)v);
-        hyp_dev_console_byte(vm, v);
+        hyp_console_putchar(vm, v);
     }
     /* Everything else stores silently: the 16550 accepts a configuration the
      * model does not need to honour (divisors, FIFOs, modem control), and

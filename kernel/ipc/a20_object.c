@@ -18,6 +18,7 @@
 #include "mm/vmo.h"
 #include "ipc/objstats.h"
 #include "ext/kep.h"
+#include "hyp/hyp_vcpu.h"
 
 a20_objstats_t g_a20_objstats;
 
@@ -61,6 +62,12 @@ void a20_object_ref(void *object, uint16_t type)
         break;
     case A20_OBJ_MONITOR:
         a20_monitor_ref((a20_monitor_t *)object);
+        break;
+    case A20_OBJ_HYP_VM:
+        hyp_vm_get(object);
+        break;
+    case A20_OBJ_HYP_VCPU:
+        hyp_vcpu_get(object);
         break;
     case A20_OBJ_VMAR:
         vmar_acquire((vmar_t *)object);
@@ -114,6 +121,12 @@ void a20_object_release(void *object, uint16_t type)
         break;
     case A20_OBJ_MONITOR:
         a20_monitor_release((a20_monitor_t *)object);
+        break;
+    case A20_OBJ_HYP_VM:
+        hyp_vm_put(object);
+        break;
+    case A20_OBJ_HYP_VCPU:
+        hyp_vcpu_put(object);
         break;
     case A20_OBJ_VMAR:
         vmar_release((vmar_t *)object);
