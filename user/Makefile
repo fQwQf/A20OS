@@ -694,7 +694,7 @@ $(OBJ_DIR)/arch/%.o: arch/%.c Makefile | build_dir musl_prepare
 
 # The two guest-boot commands additionally link the shared loader.  Prerequisite
 # only, no recipe: the rule above already gave both targets one.
-$(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm: $(HYP_GUEST_OBJ)
+$(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm $(BUILD_DIR)/a20-vmd: $(HYP_GUEST_OBJ)
 
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
@@ -823,3 +823,7 @@ DEP_FILES := $(filter %.d,$(USER_INTERMEDIATE_TARGETS:%.o=%.d)) \
 .PHONY: all clean distclean musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)
 .SECONDARY: $(USER_INTERMEDIATE_TARGETS)
+
+# VM supervisor wire ABI and vport ioctl are shared source headers.
+$(OBJ_DIR)/cmds/core/a20-vmd.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/core/a20-vmd.o: cmds/core/hyp/vmd_protocol.h ../kernel/include/drivers/char/virtio_console.h

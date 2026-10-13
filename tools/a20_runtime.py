@@ -119,7 +119,7 @@ def _checked(argv: list[str]) -> str:
     return result.stdout
 
 
-def _prepare(argv: list[str], path: Path, name: str) -> list[str]:
+def _prepare(argv: list[str], path: Path, name: str, *, vm_manager: bool = False) -> list[str]:
     result: list[str] = []
     i = 0
     disk = 0
@@ -180,6 +180,22 @@ def _prepare(argv: list[str], path: Path, name: str) -> list[str]:
             result += [flag, value]
         else:
             result.append(flag)
+    if vm_manager:
+        # Preserve existing network/boot arguments, but make one -append value.
+        bootargs = []
+        filtered = []
+        j = 0
+        while j < len(result):
+            if result[j] == "-append":
+                if j + 1 >= len(result):
+                    raise A20Error("missing -append value")
+                bootargs.append(result[j + 1]); j += 2
+            else:
+                filtered.append(result[j]); j += 1
+        result = filtered + ["-append", " ".join(bootargs + ["a20.vmd=1"])]
+        result += ["-chardev", f"socket,id=a20management,path={path / 'control.sock'},server=on,wait=off",
+                   "-device", "virtio-serial-pci,id=a20managementbus",
+                   "-device", "virtconsole,chardev=a20management,bus=a20managementbus.0"]
     result += ["-display", "none", "-monitor", "none", "-daemonize",
                "-pidfile", str(path / "qemu.pid"),
                "-qmp", f"unix:{path / 'qmp.sock'},server=on,wait=off",
@@ -210,10 +226,11 @@ def start(inst, name: str, *, detach: bool, no_build: bool, dry_run: bool,
         argv = _qemu_cmdline(inst)
         path.mkdir(mode=0o700)
         state = {"schema": 1, "name": name, "template": inst.name,
-                 "repository": str(REPO_ROOT), "pid": None, "birth": None}
+                 "repository": str(REPO_ROOT), "pid": None, "birth": None,
+                 "vm_manager": bool(inst.machine.vm_manager)}
         (path / "state.json").write_text(json.dumps(state, indent=2) + "\n")
         try:
-            argv = _prepare(argv, path, name)
+            argv = _prepare(argv, path, name, vm_manager=bool(inst.machine.vm_manager))
             (path / "argv.json").write_text(json.dumps(argv, indent=2) + "\n")
             _checked(argv)
             pid = int((path / "qemu.pid").read_text())

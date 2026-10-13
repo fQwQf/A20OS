@@ -101,6 +101,12 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     trim = _trim(inst, repo_root, e)
     if trim is not None:
         _validate_capabilities(inst, trim, e)
+    if m.vm_manager:
+        if (inst.arch != "riscv64" or inst.abi == "native" or k.bringup or k.nommu or
+                k.external_root or k.ramfs_user or g.enabled or r.world is not None):
+            e.append("machine.vm_manager requires a riscv64 Linux/both headless base-image host")
+        if k.driver_deployment == "embedded":
+            e.append("machine.vm_manager requires generic driver deployment for virtio-console")
     if m.accel is not None and m.accel not in {"tcg", "kvm"}:
         e.append("machine.accel must be tcg or kvm")
     if m.smp is not None:
