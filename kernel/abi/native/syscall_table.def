@@ -156,6 +156,12 @@ A20_NATIVE_SYSCALL(hyp_vm_load,        sys_a20_hyp_vm_load(args))
 A20_NATIVE_SYSCALL(hyp_vcpu_create,    sys_a20_hyp_vcpu_create(args))
 A20_NATIVE_SYSCALL(hyp_vcpu_run,       sys_a20_hyp_vcpu_run(args))
 A20_NATIVE_SYSCALL(hyp_vm_destroy,     sys_a20_hyp_vm_destroy(args))
+A20_NATIVE_SYSCALL(hyp_vcpu_destroy,   sys_a20_hyp_vcpu_destroy(args))
+A20_NATIVE_SYSCALL(hyp_console,        sys_a20_hyp_console(args))
+A20_NATIVE_SYSCALL(hyp_vm_set_ram, sys_a20_hyp_vm_set_ram(args))
+A20_NATIVE_SYSCALL(hyp_vm_status, sys_a20_hyp_vm_status(args))
+A20_NATIVE_SYSCALL(hyp_vm_set_marker, sys_a20_hyp_vm_set_marker(args))
+A20_NATIVE_SYSCALL(hyp_vcpu_set_boot, sys_a20_hyp_vcpu_set_boot(args))
 
 /* Cluster (0x0520, docs/cluster/01-abi.md) */
 A20_NATIVE_SYSCALL(cluster_set_self,        sys_a20_cluster_set_self(args))

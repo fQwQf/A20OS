@@ -31,6 +31,9 @@
  * banner on one shared console.
  */
 #include <errno.h>
+#include <poll.h>
+#include <sched.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -92,6 +95,7 @@ static void usage(const char *prog)
     printf("  -e <gpa>    guest entry GPA (default: e_entry translated "
            "through the\n"
            "                program headers, i.e. the image's LMA)\n");
+    printf("  --managed   use per-VM console queues and resumable RUN slices\n");
     printf("  -h          this text\n\n");
     printf("Exit codes: %d pass, %d guest ran but the marker was not seen,\n"
            "            %d bad arguments, %d guest ELF unreadable,\n"
@@ -139,6 +143,60 @@ static int parse_u64(const char *s, uint64_t *out)
     return 0;
 }
 
+/* Managed mode returns to the host on IRQ or console output, allowing the
+ * host scheduler to run another VMM. Pending input survives short writes. */
+static long run_managed(long vm, long vcpu)
+{
+    unsigned char input[256], output[256];
+    size_t begin = 0, end = 0;
+    int input_open = 1;
+    long exit_reason = HYP_GUEST_EXIT_YIELD;
+    for (;;) {
+        int n;
+        while ((n = hyp_guest_console_read(vm, output, sizeof(output))) > 0) {
+            int done = 0;
+            while (done < n) {
+                ssize_t wrote = write(STDOUT_FILENO, output + done, (size_t)(n - done));
+                if (wrote < 0 && errno == EINTR)
+                    continue;
+                if (wrote <= 0)
+                    return -1;
+                done += (int)wrote;
+            }
+        }
+        if (n < 0 || exit_reason != HYP_GUEST_EXIT_YIELD)
+            return n < 0 ? -1 : exit_reason;
+        if (begin == end && input_open) {
+            struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+            int ready = poll(&pfd, 1, 0);
+            if (ready < 0 && errno != EINTR)
+                return -1;
+            if (ready > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
+                ssize_t got = read(STDIN_FILENO, input, sizeof(input));
+                if (got == 0)
+                    input_open = 0;
+                else if (got > 0) {
+                    begin = 0;
+                    end = (size_t)got;
+                } else if (errno != EINTR && errno != EAGAIN) {
+                    return -1;
+                }
+            }
+        }
+        if (begin < end) {
+            n = hyp_guest_console_write(vm, input + begin, end - begin);
+            if (n < 0)
+                return -1;
+            begin += (size_t)n;
+        }
+        exit_reason = hyp_guest_vcpu_run(vcpu);
+        if (exit_reason < 0 && errno == EBUSY) {
+            sched_yield();
+            exit_reason = HYP_GUEST_EXIT_YIELD;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *elf_path = HYPVM_ELF_PATH;
@@ -148,6 +206,7 @@ int main(int argc, char **argv)
     uint64_t base    = HYPVM_BASE;
     uint64_t entry_arg = 0;
     int have_entry = 0;
+    int managed = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -163,6 +222,8 @@ int main(int argc, char **argv)
             if (++i >= argc) { printf("HYPVM: FAIL -b needs a string\n");
                                return HYPVM_EXIT_USAGE; }
             bootargs = argv[i];
+        } else if (!strcmp(a, "--managed")) {
+            managed = 1;
         } else if (!strcmp(a, "--marker")) {
             if (++i >= argc) { printf("HYPVM: FAIL --marker needs a string\n");
                                return HYPVM_EXIT_USAGE; }
@@ -202,8 +263,8 @@ int main(int argc, char **argv)
 
     /* Two MiB is the floor for a window this tool can lay a DTB into at all;
      * the real limit is the image, which is checked once it has been read. */
-    if (mem_mib < 2) {
-        printf("HYPVM: FAIL -m %llu is below the 2 MiB floor\n",
+    if (mem_mib < 2 || mem_mib > (HYPVM_BOOT_MAP_SIZE >> 20)) {
+        printf("HYPVM: FAIL -m %llu is outside the supported RAM size range\n",
                (unsigned long long)mem_mib);
         return HYPVM_EXIT_USAGE;
     }
@@ -214,7 +275,7 @@ int main(int argc, char **argv)
         return HYPVM_EXIT_USAGE;
     }
     if (base < HYPVM_BOOT_MAP_BASE ||
-        base + mem > HYPVM_BOOT_MAP_BASE + HYPVM_BOOT_MAP_SIZE) {
+        base > HYPVM_BOOT_MAP_BASE + HYPVM_BOOT_MAP_SIZE - mem) {
         /* Not fatal in itself, but it is the difference between a guest that
          * prints and one that faults on the first DTB read, and it is invisible
          * from the guest side -- so it is said here, before the run. */
@@ -262,6 +323,11 @@ int main(int argc, char **argv)
 
     /* The ELF walk loads through the VM, so it happens after the VM exists; a
      * malformed image is reported and the VM dropped. */
+    if (hyp_guest_vm_set_ram(vm, base, mem) < 0) {
+        hyp_guest_vm_destroy(vm);
+        free(img);
+        return fail_call("vm_set_ram", -1);
+    }
     uint64_t entry_gpa = 0, image_end = 0;
     int nseg = hyp_guest_load_elf(vm, img, img_len, &entry_gpa, &image_end);
     if (nseg < 0) {
@@ -271,6 +337,11 @@ int main(int argc, char **argv)
         printf("HYPVM: FAIL guest ELF rejected (entry=0x%llx)\n",
                (unsigned long long)entry_gpa);
         return HYPVM_EXIT_LAYOUT;
+    }
+    if (!have_entry && (entry_gpa < base || entry_gpa >= base + mem)) {
+        hyp_guest_vm_destroy(vm);
+        free(img);
+        return failf("ELF entry is outside the guest RAM window");
     }
     if (have_entry) {
         if (entry_arg < base || entry_arg >= base + mem) {
@@ -335,6 +406,7 @@ int main(int argc, char **argv)
     /* hartid 0 is not a default: entry.S branches past its SBI HSM lottery
      * handoff only on a0 == 0 (entry.S:44), and the vcpu slice has one hart. */
     if (hyp_guest_vcpu_set_boot(vcpu, 0, dtb_gpa) < 0) {
+        hyp_guest_vcpu_destroy(vcpu);
         hyp_guest_vm_destroy(vm);
         free(img);
         free(dtb);
@@ -342,6 +414,7 @@ int main(int argc, char **argv)
     }
 
     if (hyp_guest_vm_set_marker(vm, marker) < 0) {
+        hyp_guest_vcpu_destroy(vcpu);
         hyp_guest_vm_destroy(vm);
         free(img);
         free(dtb);
@@ -354,12 +427,17 @@ int main(int argc, char **argv)
     printf("HYPVM: running\n");
     fflush(stdout);
 
-    long exit_reason = hyp_guest_vcpu_run(vcpu);
+    long exit_reason;
+    if (managed && hyp_guest_console_config(vm, 1) < 0)
+        exit_reason = -1;
+    else
+        exit_reason = managed ? run_managed(vm, vcpu) : hyp_guest_vcpu_run(vcpu);
 
     struct hyp_guest_status st;
     memset(&st, 0, sizeof(st));
     long r = hyp_guest_vm_status(vm, &st);
 
+    hyp_guest_vcpu_destroy(vcpu);
     hyp_guest_vm_destroy(vm);
     free(img);
     free(dtb);
@@ -382,6 +460,8 @@ int main(int argc, char **argv)
      * console bytes (so the host's own identical banner cannot satisfy it),
      * and it was not a degenerate hit against a guest that printed nothing
      * else. */
+    if (exit_reason != 1 || st.exit != 1)
+        return failf("guest did not shut down cleanly (exit=%ld)", exit_reason);
     if (!st.marker_seen)
         return failf("guest never printed '%s' (exit=%ld)", marker, exit_reason);
     if (st.console_bytes <= (uint64_t)marker_len)

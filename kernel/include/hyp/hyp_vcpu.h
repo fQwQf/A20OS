@@ -55,6 +55,7 @@ typedef enum hyp_exit_reason {
     HYP_EXIT_SHUTDOWN,     /* guest executed the legacy SBI shutdown call */
     HYP_EXIT_FAULT,        /* fatal guest fault; detail in exit_* fields */
     HYP_EXIT_ERROR,        /* internal error: never make this the happy path */
+    HYP_EXIT_YIELD,        /* resumable managed-console I/O or host IRQ */
 } hyp_exit_reason_t;
 
 typedef struct hyp_vcpu {
@@ -98,6 +99,12 @@ typedef struct hyp_vcpu {
     uint64_t exit_scause;
     uint64_t exit_stval;   /* faulting guest VA */
     uint64_t exit_htval;   /* second-stage fault: guest GPA >> 2, raw */
+    /* Backend state is appended so the assembly register bank stays stable. */
+    uint64_t vsstatus, vsie, vstvec, vsscratch, vsepc, vscause, vstval, vsatp;
+    uint64_t timer_deadline;
+    uint64_t trap_seen, trap_loop_pc, trap_loop_scause, trap_loop_run;
+    uint64_t fpu[32];
+    uint64_t fcsr;
 } hyp_vcpu_t;
 
 /* ---- kernel C API (kernel/hyp/hyp_vcpu.c implements) ---- */
@@ -105,6 +112,7 @@ typedef struct hyp_vcpu {
 /* Create a vcpu over vm with its entry pinned to entry_gpa (the demo guest
  * runs at 0x80000000).  Takes one reference on vm. */
 hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa);
+void        hyp_vcpu_get(hyp_vcpu_t *vcpu);
 void        hyp_vcpu_put(hyp_vcpu_t *vcpu);
 
 /* Copy len bytes into guest memory starting at gpa, allocating and lending
@@ -113,11 +121,12 @@ void        hyp_vcpu_put(hyp_vcpu_t *vcpu);
  * gpa and len must be page-consistent (gpa page-aligned; len rounds up). */
 int  hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len);
 
-/* Run the guest until a terminal exit.  Returns 0 when the guest exited
+/* Run the guest until a terminal exit or a managed-mode HYP_EXIT_YIELD.  Returns 0 when the guest exited
  * cleanly (vcpu->exit says why; HYP_EXIT_SHUTDOWN is the demo's success
  * case) and a negative errno on internal failure.  Not reentrant: one
  * running guest kernel-wide in this slice, enforced, not assumed. */
 int  hyp_vcpu_run(hyp_vcpu_t *vcpu);
+int  hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason);
 
 /* ---- arch-provided (kernel/arch/riscv64/hyp/) ---- */
 
@@ -237,7 +246,7 @@ int  hyp_vcpu_set_boot(hyp_vcpu_t *vcpu, uint64_t hartid, uint64_t dtb_gpa);
  * against `marker` (<= 32 bytes) -- this is how the boot smoke asserts
  * "the guest reached its banner" without trusting host/guest log
  * interleaving on one shared console. */
-void hyp_vm_set_marker(hyp_vm_t *vm, const char *marker);
+int hyp_vm_set_marker(hyp_vm_t *vm, const char *marker);
 int  hyp_vm_marker_seen(hyp_vm_t *vm);
 
 /* Guest console byte count since run start (for the smoke's report). */

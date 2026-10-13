@@ -163,6 +163,12 @@ int64_t sys_a20_hyp_vm_load(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_create(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_run(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vm_destroy(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_destroy(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_console(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_set_ram(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_status(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_set_marker(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_set_boot(const a20_syscall_args_t *args);
 /* Forward declarations for Cluster syscalls (sys_native_cluster.c) */
 int64_t sys_a20_cluster_set_self(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_export(const a20_syscall_args_t *args);

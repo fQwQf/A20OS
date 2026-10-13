@@ -28,6 +28,9 @@
 #define SYS_hyp_vcpu_set_boot  912
 #define SYS_hyp_vm_set_marker  913
 #define SYS_hyp_vm_status      914
+#define SYS_hyp_vcpu_destroy   915
+#define SYS_hyp_console        916
+#define SYS_hyp_vm_set_ram     917
 
 /* Source for the zero-fill tail of every PT_LOAD segment ([p_filesz, p_memsz)
  * is .bss).  The host's hyp_vm_load() copies from this pointer and zeroes the
@@ -41,6 +44,7 @@ const char *hyp_guest_exit_name(long exit_reason)
     case HYP_GUEST_EXIT_SHUTDOWN: return "shutdown";
     case HYP_GUEST_EXIT_FAULT:    return "fault";
     case HYP_GUEST_EXIT_ERROR:    return "error";
+    case HYP_GUEST_EXIT_YIELD:    return "yield";
     default:                      return "none";
     }
 }
@@ -497,4 +501,25 @@ fail:
     free(st.p);
     free(sr.p);
     return 0;
+}
+int hyp_guest_vcpu_destroy(long vcpu)
+{
+    return (int)syscall(SYS_hyp_vcpu_destroy, vcpu);
+}
+
+int hyp_guest_console_config(long vm, int managed)
+{
+    return (int)syscall(SYS_hyp_console, vm, 0, managed, 0);
+}
+int hyp_guest_console_write(long vm, const void *data, size_t len)
+{
+    return (int)syscall(SYS_hyp_console, vm, 1, (unsigned long)data, len);
+}
+int hyp_guest_console_read(long vm, void *data, size_t len)
+{
+    return (int)syscall(SYS_hyp_console, vm, 2, (unsigned long)data, len);
+}
+int hyp_guest_vm_set_ram(long vm, uint64_t base, uint64_t size)
+{
+    return (int)syscall(SYS_hyp_vm_set_ram, vm, base, size);
 }

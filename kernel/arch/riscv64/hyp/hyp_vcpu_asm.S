@@ -327,6 +327,44 @@ hyp_arch_vcpu_enter:
      * the sret -- the trap-return into the guest parks it and promotes vsatp
      * in its place, then hands satp back on the way out -- so the host
      * fetches its own trap vector exactly as it does normally. */
+    /* A new VM must never observe a previous guest's physical FP bank. */
+    li      t0, SSTATUS_FS_INITIAL
+    csrs    sstatus, t0
+    fld     f0, HYP_ASM_VCPU_FPU_OFF + 0*8(a0)
+    fld     f1, HYP_ASM_VCPU_FPU_OFF + 1*8(a0)
+    fld     f2, HYP_ASM_VCPU_FPU_OFF + 2*8(a0)
+    fld     f3, HYP_ASM_VCPU_FPU_OFF + 3*8(a0)
+    fld     f4, HYP_ASM_VCPU_FPU_OFF + 4*8(a0)
+    fld     f5, HYP_ASM_VCPU_FPU_OFF + 5*8(a0)
+    fld     f6, HYP_ASM_VCPU_FPU_OFF + 6*8(a0)
+    fld     f7, HYP_ASM_VCPU_FPU_OFF + 7*8(a0)
+    fld     f8, HYP_ASM_VCPU_FPU_OFF + 8*8(a0)
+    fld     f9, HYP_ASM_VCPU_FPU_OFF + 9*8(a0)
+    fld     f10, HYP_ASM_VCPU_FPU_OFF + 10*8(a0)
+    fld     f11, HYP_ASM_VCPU_FPU_OFF + 11*8(a0)
+    fld     f12, HYP_ASM_VCPU_FPU_OFF + 12*8(a0)
+    fld     f13, HYP_ASM_VCPU_FPU_OFF + 13*8(a0)
+    fld     f14, HYP_ASM_VCPU_FPU_OFF + 14*8(a0)
+    fld     f15, HYP_ASM_VCPU_FPU_OFF + 15*8(a0)
+    fld     f16, HYP_ASM_VCPU_FPU_OFF + 16*8(a0)
+    fld     f17, HYP_ASM_VCPU_FPU_OFF + 17*8(a0)
+    fld     f18, HYP_ASM_VCPU_FPU_OFF + 18*8(a0)
+    fld     f19, HYP_ASM_VCPU_FPU_OFF + 19*8(a0)
+    fld     f20, HYP_ASM_VCPU_FPU_OFF + 20*8(a0)
+    fld     f21, HYP_ASM_VCPU_FPU_OFF + 21*8(a0)
+    fld     f22, HYP_ASM_VCPU_FPU_OFF + 22*8(a0)
+    fld     f23, HYP_ASM_VCPU_FPU_OFF + 23*8(a0)
+    fld     f24, HYP_ASM_VCPU_FPU_OFF + 24*8(a0)
+    fld     f25, HYP_ASM_VCPU_FPU_OFF + 25*8(a0)
+    fld     f26, HYP_ASM_VCPU_FPU_OFF + 26*8(a0)
+    fld     f27, HYP_ASM_VCPU_FPU_OFF + 27*8(a0)
+    fld     f28, HYP_ASM_VCPU_FPU_OFF + 28*8(a0)
+    fld     f29, HYP_ASM_VCPU_FPU_OFF + 29*8(a0)
+    fld     f30, HYP_ASM_VCPU_FPU_OFF + 30*8(a0)
+    fld     f31, HYP_ASM_VCPU_FPU_OFF + 31*8(a0)
+    ld      t0, HYP_ASM_VCPU_FCSR_OFF(a0)
+    fscsr   t0
+
     ld      t0, 33*8(sp)
     csrw    sepc, t0
     ld      t0, 32*8(sp)

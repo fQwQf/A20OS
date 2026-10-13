@@ -195,5 +195,11 @@
 #define A20_SYS_hyp_vcpu_create    0x0F02
 #define A20_SYS_hyp_vcpu_run       0x0F03
 #define A20_SYS_hyp_vm_destroy     0x0F04
+#define A20_SYS_hyp_vcpu_destroy   0x0F05
+#define A20_SYS_hyp_console        0x0F06
+#define A20_SYS_hyp_vm_set_ram 0x0F07
+#define A20_SYS_hyp_vm_status 0x0F0A
+#define A20_SYS_hyp_vm_set_marker 0x0F09
+#define A20_SYS_hyp_vcpu_set_boot 0x0F08
 
 #endif
