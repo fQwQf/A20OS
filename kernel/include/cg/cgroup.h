@@ -18,10 +18,10 @@
 typedef struct cg_mem_state {
     spinlock_t lock;
     size_t limit;            /* max RSS in pages (SIZE_MAX = unlimited) */
-    size_t swap_limit;       /* RSS+swap limit in pages (future) */
+    size_t swap_limit;       /* physical swap slots; 0 forbids, SIZE_MAX unlimited */
     size_t rss;              /* current resident set size in pages */
     size_t cache;            /* page cache pages */
-    size_t swap_usage;       /* swap pages (future) */
+    size_t swap_usage;       /* charged physical swap slots, independent of PTE aliases */
     size_t total_vm;         /* total virtual memory in pages */
     uint64_t failcnt;        /* how many times limit was hit */
     int oom_kill_disable;    /* 1 = disable OOM killer for this cgroup */
@@ -78,6 +78,11 @@ int  cg_mem_charge(struct cg_node *cg, size_t nr_pages);
 void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages);
 int  cg_mem_swap_charge(struct task_t *t, size_t pages);
 void cg_mem_swap_uncharge(struct task_t *t, size_t pages);
+int cg_mem_swap_charge_node(struct cg_node *cg, size_t pages);
+void cg_mem_swap_uncharge_node(struct cg_node *cg, size_t pages);
+struct cg_node *cg_task_group_pin(struct task_t *t);
+void cg_group_pin(struct cg_node *cg);
+void cg_group_unpin(struct cg_node *cg);
 void cg_mem_oom_kill(struct cg_node *cg);
 
 /* ---- CPU controller API ---- */

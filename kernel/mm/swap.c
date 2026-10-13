@@ -5,10 +5,12 @@
 #include "core/consts.h"
 #include "core/errno.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/random.h"
 #include "core/string.h"
 #include "drivers/block/block_dev.h"
 #include "mm/slab.h"
+#include "cg/cgroup.h"
 
 #define SWAP_SECTOR_SIZE 512UL
 #define SWAP_SECTORS_PER_PAGE (PAGE_SIZE / SWAP_SECTOR_SIZE)
@@ -20,10 +22,12 @@ size_t total_swap_pages;
 size_t nr_swap_pages;
 static spinlock_t swap_locks[MAX_SWAPFILES];
 static spinlock_t swap_stats_lock;
+static mutex_t swap_registry_lock; /* swapon/format/swapoff provider ownership */
+static struct cg_node **swap_owners[MAX_SWAPFILES];
 
 /*
  * Allocation index, one word per 64 slots of an area's swap_map, with a bit set
- * for every slot that is free and not bad.  swap_map alone is one byte per page,
+ * for every slot that is free and not bad.  swap_map stores a reference count per page,
  * so scanning it for a free slot is O(pages) of byte loads under the area lock
  * and gets steadily worse as the area fills.  The bitmap makes a scan 64x
  * cheaper and the hint makes the common case O(1): allocation continues from
@@ -37,16 +41,11 @@ static uint64_t *swap_free_bits[MAX_SWAPFILES];
 static uint64_t  swap_alloc_hint[MAX_SWAPFILES];
 
 /*
- * Transfers holding a reference to an area's block device without holding the
- * area lock, and the device captured by swap_unregister_device() awaiting
- * release once they drain.  swap_page_io() drops the lock before driving the
- * device because the I/O can block, so swap_unregister_device() cannot know on
- * its own that nobody is still inside the driver.  The pending slot is cleared
- * under the lock by whichever of the two finds the count at zero, so the
- * release happens exactly once and never on a device still being driven.
+ * In-flight transfers pin the provider without holding the area lock across
+ * blocking I/O. swapoff refuses the area until both slot and I/O refs drain.
  */
 static unsigned int  swap_io_refs[MAX_SWAPFILES];
-static block_dev_t  *swap_pending_bdev[MAX_SWAPFILES];
+
 
 static inline void swap_bit_set(uint64_t *bits, uint64_t i)
 {
@@ -107,6 +106,8 @@ static int swap_bitmap_find_free(swap_info_struct *si, int type,
             /* Drop the bits before `start` in the word `start` lands in. */
             if (w == first_w && (start & 63))
                 word &= ~(((uint64_t)1 << (start & 63)) - 1);
+            if ((end & 63) && w == (end >> 6))
+                word &= ((uint64_t)1 << (end & 63)) - 1;
             if (!word)
                 continue;
             uint64_t bit = swap_highest_bit(word);
@@ -118,23 +119,6 @@ static int swap_bitmap_find_free(swap_info_struct *si, int type,
         }
     }
     return 0;
-}
-
-/*
- * Claim the pending device if no transfer is still in flight, and return it
- * unlocked so the caller can call ->release() outside the area lock.  Only one
- * of swap_page_io() and swap_unregister_device() can win the claim.
- */
-static block_dev_t *swap_take_pending_bdev(int type)
-{
-    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
-    block_dev_t *bdev = NULL;
-    if (swap_io_refs[type] == 0) {
-        bdev = swap_pending_bdev[type];
-        swap_pending_bdev[type] = NULL;
-    }
-    spin_unlock_irqrestore(&swap_locks[type], flags);
-    return bdev;
 }
 
 static int swap_device_valid(block_dev_t *bdev)
@@ -180,16 +164,18 @@ void swap_init(void) {
     total_swap_pages = 0;
     nr_swap_pages = 0;
     spin_init(&swap_stats_lock);
+    mutex_init(&swap_registry_lock);
     for (int i = 0; i < MAX_SWAPFILES; i++) {
         spin_init(&swap_locks[i]);
         swap_free_bits[i] = NULL;
-        swap_pending_bdev[i] = NULL;
+        swap_owners[i] = NULL;
+
         swap_alloc_hint[i] = 1;
         swap_io_refs[i] = 0;
     }
 }
 
-int swap_register_device(block_dev_t *bdev, const char *name) {
+static int swap_register_device_impl(block_dev_t *bdev, const char *name) {
     if (!name || !swap_device_valid(bdev))
         return -EINVAL;
 
@@ -255,12 +241,13 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
         }
         spin_unlock_irqrestore(&swap_locks[type], flags);
 
-        uint8_t *map = kmalloc((size_t)pages);
+        if (pages > SIZE_MAX / sizeof(uint32_t)) { kfree(badmap); return -ENOMEM; }
+        uint32_t *map = kcalloc((size_t)pages, sizeof(*map));
         if (!map) {
             kfree(badmap);
             return -ENOMEM;
         }
-        uint64_t *bits = kmalloc(swap_bitmap_words(pages) * sizeof(uint64_t));
+        uint64_t *bits = kcalloc(swap_bitmap_words(pages), sizeof(*bits));
         if (!bits) {
             kfree(map);
             kfree(badmap);
@@ -274,11 +261,16 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
             kfree(badmap);
             return -ENOMEM;
         }
+        struct cg_node **owners = kcalloc((size_t)pages, sizeof(*owners));
+        if (!owners) {
+            kfree(name_copy); kfree(bits); kfree(map); kfree(badmap);
+            return -ENOMEM;
+        }
         memcpy(name_copy, name, name_len);
-        memset(map, 0, (size_t)pages);
+
         size_t available_pages = 0;
         for (uint64_t offset = 0; offset < pages; offset++) {
-            if (swap_badmap_test(badmap, offset)) {
+            if (offset < header_pages || swap_badmap_test(badmap, offset)) {
                 map[offset] = SWAP_MAP_BAD;
             } else {
                 /* Bit 0 stays clear: the header is never allocatable. */
@@ -293,6 +285,7 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
             kfree(map);
             kfree(bits);
             kfree(name_copy);
+            kfree(owners);
             continue;
         }
         kfree(badmap);
@@ -303,6 +296,7 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
         si->inuse_pages = 0;
         si->active = 1;
         swap_free_bits[type] = bits;
+        swap_owners[type] = owners;
         swap_alloc_hint[type] = 1;
         swap_io_refs[type] = 0;
         uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
@@ -316,7 +310,15 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
     return -ENOSPC;
 }
 
-int swap_format_device(block_dev_t *bdev, const char *name, int priority,
+int swap_register_device(block_dev_t *bdev, const char *name)
+{
+    mutex_lock(&swap_registry_lock);
+    int r = swap_register_device_impl(bdev, name);
+    mutex_unlock(&swap_registry_lock);
+    return r;
+}
+
+static int swap_format_device_impl(block_dev_t *bdev, const char *name, int priority,
                        const char *label)
 {
     if (!swap_device_valid(bdev))
@@ -356,19 +358,45 @@ int swap_format_device(block_dev_t *bdev, const char *name, int priority,
     return ret;
 }
 
-void swap_unregister_device(int type) {
+int swap_format_device(block_dev_t *bdev, const char *name, int priority,
+                        const char *label)
+{
+    mutex_lock(&swap_registry_lock);
+    int r = 0;
+    for (int i = 0; i < MAX_SWAPFILES; i++) {
+        uint64_t flags = spin_lock_irqsave(&swap_locks[i]);
+        int busy = swap_info[i].active && swap_info[i].bdev == bdev;
+        spin_unlock_irqrestore(&swap_locks[i], flags);
+        if (busy) { r = -EBUSY; break; }
+    }
+    if (!r) r = swap_format_device_impl(bdev, name, priority, label);
+    mutex_unlock(&swap_registry_lock);
+    return r;
+}
+
+static int swap_unregister_device_impl(int type, const char *expected_name) {
     if (type < 0 || type >= MAX_SWAPFILES)
-        return;
+        return -EINVAL;
 
     swap_info_struct *si = &swap_info[type];
     uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
-    uint8_t *map = si->swap_map;
+    uint32_t *map = si->swap_map;
     const char *name = si->name;
     block_dev_t *bdev = si->bdev;
-    if (!si->active) {
+    if (!si->active || (expected_name && strcmp(si->name, expected_name))) {
         spin_unlock_irqrestore(&swap_locks[type], flags);
-        return;
+        return -ENOENT;
     }
+    /* Check under the same lock that allocates and duplicates slot refs. */
+    if (si->inuse_pages || swap_io_refs[type]) {
+        spin_unlock_irqrestore(&swap_locks[type], flags);
+        return -EBUSY;
+    }
+    uint64_t *bits = swap_free_bits[type];
+    struct cg_node **owners = swap_owners[type];
+    swap_owners[type] = NULL;
+    swap_free_bits[type] = NULL;
+    swap_alloc_hint[type] = 1;
     size_t total_pages = 0;
     size_t free_pages = 0;
     for (uint64_t offset = 0; offset < si->pages; offset++) {
@@ -387,23 +415,23 @@ void swap_unregister_device(int type) {
     si->pages = 0;
     si->inuse_pages = 0;
     si->active = 0;
-    /* Hand the device to the drain path rather than releasing it here.  A
-     * swap_page_io() transfer may have snapshotted this same bdev and be inside
-     * read_sector()/write_sector() right now; releasing underneath it would
-     * drive a device the provider has already torn down. */
-    swap_pending_bdev[type] = bdev;
     spin_unlock_irqrestore(&swap_locks[type], flags);
-
-    block_dev_t *drained = swap_take_pending_bdev(type);
-    /* Released after the swap lock so the provider's own lock is never
-     * nested under it. */
-    if (drained && drained->release)
-        drained->release(drained);
-    kfree(swap_free_bits[type]);
-    swap_free_bits[type] = NULL;
-    swap_alloc_hint[type] = 1;
+    /* Live slots and I/O were rejected under the area lock. The detached
+     * provider is ours alone even if this area index is immediately reused. */
+    if (bdev && bdev->release) bdev->release(bdev);
+    kfree(bits);
+    kfree(owners);
     kfree(map);
     kfree((void *)name);
+    return 0;
+}
+
+int swap_unregister_device(int type, const char *expected_name)
+{
+    mutex_lock(&swap_registry_lock);
+    int r = swap_unregister_device_impl(type, expected_name);
+    mutex_unlock(&swap_registry_lock);
+    return r;
 }
 
 int swap_list_area(int type, swap_listing_t *out) {
@@ -428,7 +456,8 @@ int swap_list_area(int type, swap_listing_t *out) {
     return rc;
 }
 
-swap_entry_t get_swap_page(void) {
+swap_entry_t get_swap_page_owned(struct cg_node *owner) {
+    if (cg_mem_swap_charge_node(owner, 1) < 0) return 0;
     for (unsigned int type = 0; type < MAX_SWAPFILES; type++) {
         swap_info_struct *si = &swap_info[type];
         uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
@@ -439,6 +468,8 @@ swap_entry_t get_swap_page(void) {
                  * concurrent swap_free() for this slot cannot see it free. */
                 swap_bit_clear(swap_free_bits[type], offset);
                 si->swap_map[offset] = 1;
+                cg_group_pin(owner);
+                swap_owners[type][offset] = owner;
                 /* Resume the search past this slot next time. */
                 swap_alloc_hint[type] = offset + 1;
                 uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
@@ -451,7 +482,32 @@ swap_entry_t get_swap_page(void) {
         }
         spin_unlock_irqrestore(&swap_locks[type], flags);
     }
+    cg_mem_swap_uncharge_node(owner, 1);
     return 0;
+}
+
+swap_entry_t get_swap_page(void)
+{
+    return get_swap_page_owned(NULL);
+}
+
+int swap_duplicate(swap_entry_t entry)
+{
+    unsigned type = swp_type(entry);
+    uint64_t offset = swp_offset(entry);
+    if (type >= MAX_SWAPFILES) return -EINVAL;
+    swap_info_struct *si = &swap_info[type];
+    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
+    int r = -EINVAL;
+    if (si->active && offset && offset < si->pages) {
+        uint32_t refs = si->swap_map[offset];
+        if (refs && refs != SWAP_MAP_BAD) {
+            if (refs == SWAP_MAP_BAD - 1) r = -EOVERFLOW;
+            else { si->swap_map[offset] = refs + 1; r = 0; }
+        }
+    }
+    spin_unlock_irqrestore(&swap_locks[type], flags);
+    return r;
 }
 
 void swap_free(swap_entry_t entry) {
@@ -461,10 +517,16 @@ void swap_free(swap_entry_t entry) {
         return;
 
     swap_info_struct *si = &swap_info[type];
+    struct cg_node *owner = NULL;
     uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
     if (si->active && offset > 0 && offset < si->pages &&
-        si->swap_map[offset] == 1) {
-        si->swap_map[offset] = 0;
+        si->swap_map[offset] && si->swap_map[offset] != SWAP_MAP_BAD) {
+        if (--si->swap_map[offset]) {
+            spin_unlock_irqrestore(&swap_locks[type], flags);
+            return;
+        }
+        owner = swap_owners[type][offset];
+        swap_owners[type][offset] = NULL;
         /* Rewind the hint so this slot is reachable again without a full wrap
          * when the area is nearly full. */
         if (swap_alloc_hint[type] > offset)
@@ -476,6 +538,8 @@ void swap_free(swap_entry_t entry) {
         spin_unlock_irqrestore(&swap_stats_lock, stats_flags);
     }
     spin_unlock_irqrestore(&swap_locks[type], flags);
+    cg_mem_swap_uncharge_node(owner, 1);
+    cg_group_unpin(owner);
 }
 
 static int swap_page_io(swap_entry_t entry, void *page, int write) {
@@ -488,10 +552,9 @@ static int swap_page_io(swap_entry_t entry, void *page, int write) {
     uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
     block_dev_t *bdev = si->bdev;
     int valid = si->active && bdev && offset < si->pages &&
-                si->swap_map[offset] == 1;
-    /* Count this transfer against the area.  swap_unregister_device() defers
-     * the device release until the count drains, so the bdev pointer above
-     * stays live for the whole call below. */
+                offset > 0 && si->swap_map[offset] &&
+                si->swap_map[offset] != SWAP_MAP_BAD;
+    /* swapoff rejects a nonzero I/O count, keeping this provider live. */
     if (valid)
         swap_io_refs[type]++;
     spin_unlock_irqrestore(&swap_locks[type], flags);
@@ -506,15 +569,8 @@ static int swap_page_io(swap_entry_t entry, void *page, int write) {
         rc = bdev->read_sector(bdev, lba, page, SWAP_SECTORS_PER_PAGE);
 
     flags = spin_lock_irqsave(&swap_locks[type]);
-    if (--swap_io_refs[type] == 0) {
-        spin_unlock_irqrestore(&swap_locks[type], flags);
-        /* Last one out releases the device if swapoff claimed it meanwhile. */
-        block_dev_t *drained = swap_take_pending_bdev(type);
-        if (drained && drained->release)
-            drained->release(drained);
-    } else {
-        spin_unlock_irqrestore(&swap_locks[type], flags);
-    }
+    --swap_io_refs[type];
+    spin_unlock_irqrestore(&swap_locks[type], flags);
     return rc;
 }
 

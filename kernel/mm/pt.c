@@ -1975,6 +1975,24 @@ static int cursor_install(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
     return 0;
 }
 
+#ifdef CONFIG_SWAP
+int mm_cursor_map_swap(mm_cursor_t *cur, vaddr_t addr, uint64_t entry, pte_t prot)
+{
+    if (!cursor_span_ok(cur, addr) || !entry) return -EINVAL;
+    pte_t *pte = cursor_leaf_slot(cur, addr, 1);
+    if (!pte) return -ENOMEM;
+    int r = -EEXIST;
+    if (!*pte) {
+        *pte = swp_entry_to_pte(entry);
+        mm_pt_note_present(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
+                          MM_ST_CLS_BYTE(MM_ST_SWAPPED) | mm_pt_prot_bits(prot));
+        r = 0;
+    }
+    cursor_leaf_unlock(cur);
+    return r;
+}
+#endif
+
 int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
                       uint8_t cls, paddr_t *old_pa_out)
 {
@@ -2355,7 +2373,7 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
     if (pte_is_swap(pte)) {
         if (cls_out)
             *cls_out = MM_ST_CLS_BYTE(MM_ST_SWAPPED) |
-                       mm_pt_prot_bits(arch_pte_flags(pte));
+                       (mm_pt_peek(table, 0, idx) & MM_ST_PROT_MASK);
         cursor_leaf_unlock(cur);
         return 1;
     }

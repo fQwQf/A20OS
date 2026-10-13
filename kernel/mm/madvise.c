@@ -6,6 +6,8 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/vmo.h"
+#include "mm/oom.h"
+#include "proc/proc.h"
 #include "fs/page_cache.h"
 
 /*
@@ -53,6 +55,7 @@ struct vmo *mm_lookup_vmo_region(mm_struct_t *mm, vaddr_t addr, size_t len,
  * nothing at all. */
 static int mm_madvise_end(vaddr_t addr, size_t len, vaddr_t *end_out)
 {
+    if (addr >= USER_VA_LIMIT || len > USER_VA_LIMIT - addr) return -EINVAL;
     vaddr_t end = (addr + len + PAGE_SIZE - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
     if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
     *end_out = end;
@@ -267,16 +270,29 @@ int mm_madvise(mm_struct_t *mm, vaddr_t addr, size_t len, int advice)
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
 
     switch (advice) {
+    case MADV_PAGEOUT: {
+        task_t *t = proc_current();
+        if (!t || t->mm != mm) return -EINVAL;
+        vaddr_t end;
+        int r = mm_madvise_end(addr, len, &end);
+        if (r < 0) return r;
+        uint64_t flags = spin_lock_irqsave(&mm->lock);
+        r = mm_madvise_covered(mm, addr, end);
+        if (!r) {
+            for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; v = v->next)
+                if (v->vm_flags & (VM_LOCKED | VM_PFNMAP)) { r = -EINVAL; break; }
+        }
+        spin_unlock_irqrestore(&mm->lock, flags);
+        if (r < 0) return r;
+        r = oom_swap_reclaim_range(t, addr, end - addr);
+        return r < 0 ? r : 0;
+    }
     case MADV_DONTNEED:
     case MADV_FREE:
         return mm_madvise_dontneed(mm, addr, len);
     case MADV_REMOVE:
-        /* The range must survive the unmap: a later access has to bring the
-         * contents back from swap.  The only swapout path this kernel has is
-         * the OOM victim's own reclaim, which picks a task and walks all of
-         * its swappable VMAs -- there is no per-range swapout to call, and
-         * discarding instead would lose data the caller was promised to get
-         * back. */
+        /* Removing backing-store contents requires a filesystem hole-punch
+         * operation; swapping private pages out does not implement it. */
         return -ENOSYS;
     case MADV_DONTFORK:
         return mm_madvise_set_fork_flags(mm, addr, len, VM_DONTFORK, 1);
@@ -300,7 +316,6 @@ int mm_madvise(mm_struct_t *mm, vaddr_t addr, size_t len, int advice)
     case MADV_DONTDUMP:
     case MADV_DODUMP:
     case MADV_COLD:
-    case MADV_PAGEOUT:
     case MADV_POPULATE_READ:
     case MADV_POPULATE_WRITE: {
         vaddr_t end;

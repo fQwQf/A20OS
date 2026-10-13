@@ -23,6 +23,11 @@ struct page_cache_page *mm_file_cache_mapping_get(mm_seg_t *vma,
 
 void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma);
 
+#ifdef CONFIG_SWAP
+/* Source mm lock required; duplicate a non-present slot reference, not a zero page. */
+int mm_clone_swap_page(mm_struct_t *dst, vaddr_t dst_va,
+                        mm_struct_t *src, vaddr_t src_va);
+#endif
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                        int shared);
 int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,

@@ -200,6 +200,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     uint64_t start = addr;
     uint64_t end = ROUND_UP(addr + len, PAGE_SIZE);
     if (end < start) return -EINVAL;
+    if (advice == MADV_PAGEOUT) return mm_madvise(t->mm, addr, len, advice);
 
     mm_tlb_invalidate_begin(t->mm);
     uint64_t mm_flags = linux_mm_lock(t);
@@ -220,7 +221,6 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_WILLNEED:
         break;
     case MADV_COLD:
-    case MADV_PAGEOUT:
         /* These are reclaim hints, not permission to discard live data.
          * Keep the pages resident until reclaim can preserve their contents;
          * Linux also permits ignoring these hints.  In particular an anonymous

@@ -2,6 +2,7 @@
 #include "core/errno.h"
 #include "drivers/block/loop.h"
 #include "fs/mount_setup.h"
+#include "proc/userns.h"
 
 #ifdef CONFIG_SWAP
 
@@ -56,6 +57,7 @@ static block_dev_t *swap_path_to_block_dev(const char *path)
 
 long sys_swapon(const char *path, int flags)
 {
+    if (!userns_capable(proc_current(), userns_init_ns(), CAP_SYS_ADMIN)) return -EPERM;
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
@@ -74,6 +76,7 @@ long sys_swapon(const char *path, int flags)
 
 long sys_mkswap(const char *path, int flags)
 {
+    if (!userns_capable(proc_current(), userns_init_ns(), CAP_SYS_ADMIN)) return -EPERM;
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
@@ -89,6 +92,7 @@ long sys_mkswap(const char *path, int flags)
 
 long sys_swapoff(const char *path)
 {
+    if (!userns_capable(proc_current(), userns_init_ns(), CAP_SYS_ADMIN)) return -EPERM;
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
@@ -97,13 +101,8 @@ long sys_swapoff(const char *path)
         return pr0;
 
     for (int type = 0; type < MAX_SWAPFILES; type++) {
-        swap_info_struct *si = &swap_info[type];
-        if (!si->active || !si->name || strcmp(si->name, kpath) != 0)
-            continue;
-        if (si->inuse_pages != 0)
-            return -EBUSY;
-        swap_unregister_device(type);
-        return 0;
+        int r = swap_unregister_device(type, kpath);
+        if (r != -ENOENT && r != -EINVAL) return r;
     }
     return -EINVAL;
 }

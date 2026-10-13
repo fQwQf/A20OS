@@ -12,7 +12,7 @@
 #define SWP_OFFSET_BITS 40
 #endif
 
-#define SWAP_MAP_BAD 128
+#define SWAP_MAP_BAD UINT32_MAX
 #define SWAP_MAGIC "A20SWAP0"
 #define SWAP_VERSION 1
 
@@ -36,13 +36,14 @@ typedef uint64_t swap_entry_t;
 
 #include "../core/errno.h"
 
+struct cg_node;
 struct block_dev;
 typedef struct block_dev block_dev_t;
 
 typedef struct swap_info_struct {
     block_dev_t *bdev;
     const char *name;
-    uint8_t *swap_map;
+    uint32_t *swap_map; /* slot references; zero free, UINT32_MAX bad */
     uint64_t pages;
     size_t inuse_pages;
     int active;
@@ -56,13 +57,16 @@ extern size_t nr_swap_pages;
 int swap_read_page(swap_entry_t entry, void *page);
 int swap_write_page(swap_entry_t entry, const void *page);
 swap_entry_t get_swap_page(void);
+/* owner must be pinned by the caller; a slot takes its own pin and charge. */
+swap_entry_t get_swap_page_owned(struct cg_node *owner);
+int swap_duplicate(swap_entry_t entry);
 void swap_free(swap_entry_t entry);
 void swap_init(void);
 
 int swap_register_device(block_dev_t *bdev, const char *name);
 int swap_format_device(block_dev_t *bdev, const char *name, int priority,
                        const char *label);
-void swap_unregister_device(int type);
+int swap_unregister_device(int type, const char *expected_name);
 
 /* Snapshot of one swap area for /proc/swaps.  The name is copied under the
  * per-area lock: swap_unregister_device() frees it once the lock is dropped,
@@ -94,6 +98,18 @@ static inline int swap_write_page(swap_entry_t entry, const void *page)
 
 static inline swap_entry_t get_swap_page(void)
 {
+    return 0;
+}
+
+static inline int swap_duplicate(swap_entry_t entry)
+{
+    (void)entry;
+    return -EOPNOTSUPP;
+}
+
+static inline swap_entry_t get_swap_page_owned(struct cg_node *owner)
+{
+    (void)owner;
     return 0;
 }
 
