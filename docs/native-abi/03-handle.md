@@ -4,9 +4,14 @@
 
 ---
 
+TASK/THREAD/DEBUG 的内部身份与 PID 生命周期已分离。句柄和在途 IPC 引用持有
+小型身份对象；任务回收后旧身份失去目标，操作返回 BAD_HANDLE，PID 复用不
+改变结果。关闭旧句柄仍成功，不保留目标的整个地址空间。具体约束见
+[任务对象生命周期](../cluster/33-task-object-lifetime.md)。用户句柄布局和编号未变。
+
 ## 1. 对象类型
 
-A20OS Native ABI 保留 14 个对象类型编号。`A20_OBJ_THREAD` 当前只是保留编号；`thread_create` 安装并返回 `A20_OBJ_TASK` handle，其余已使用类型各有特定的合法操作和权限集。
+A20OS Native ABI 的对象类型由公共对象模型定义。`thread_create` 安装并返回 `A20_OBJ_THREAD` handle；TASK 与 THREAD 共用任务操作，但保留各自类型与权限检查。
 
 ```c
 typedef enum a20_object_type {
@@ -39,19 +44,19 @@ typedef enum a20_object_type {
 | A20_OBJ_CHANNEL_ENDPOINT | 新增 `struct a20_channel_ep` | `refcount_t` |
 | A20_OBJ_EVENT_QUEUE | 新增 `struct a20_eventq` | `refcount_t` |
 | A20_OBJ_TIMER | timer slot 编号 `slot+1` | timer slot refcount |
-| A20_OBJ_TASK | 整数 pid | 操作时 `proc_find_get()`；handle 本身不持 task 引用 |
-| A20_OBJ_THREAD | 保留，当前不安装该类型 | `thread_create` 返回指向线程 pid 的 `A20_OBJ_TASK` handle |
+| A20_OBJ_TASK | 独立任务身份对象 | handle 持身份引用，操作时安全取得原任务引用 |
+| A20_OBJ_THREAD | 独立任务身份对象 | thread_create 返回 THREAD，生命周期同 TASK |
 | A20_OBJ_MEMORY | `struct vmo *` | `vmo_ref` / `vmo_release` |
 | A20_OBJ_DEVICE | global fd | `vfs_ref_fd` / `vfs_close` |
 | A20_OBJ_NAMESPACE | 新增 `struct a20_namespace` | `refcount_t` |
-| A20_OBJ_DEBUG | 整数目标 pid | 调试状态由 `proc_debug_*` 管理 |
+| A20_OBJ_DEBUG | 与目标 TASK/THREAD 相同的身份对象 | 会话持身份引用，调试状态由 `proc_debug_*` 管理 |
 | A20_OBJ_EXT_PROG | 整数 KEP program id | `kep_prog_release` |
 
 ### 1.2 设计原则
 
 - file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
 - channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体，独立分配。
-- **handle entry 的 object 字段是 `void *`**，既可持对象指针，也可编码 global fd、pid、timer slot 或 KEP id，必须始终结合 `type` 解释。
+- **handle entry 的 object 字段是 `void *`**，TASK/THREAD/DEBUG 持独立任务身份对象指针，其他类型可持对象指针，也可编码 global fd、timer slot 或 KEP id，必须始终结合 `type` 解释。
 
 ---
 
@@ -417,6 +422,11 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0000 | `abi_info` | `int64_t abi_info(a20_abi_info_t *out)` | 查询 ABI 版本和能力 |
 | 0x0001 | `feature_test` | `int64_t feature_test(uint64_t feature_id)` | 测试 feature 可用性 |
+| 0x0003 | `execution_domain_info` | `int64_t execution_domain_info(a20_execution_domain_info_t *out, uint32_t capacity)` | 当前原生执行域状态，见 [契约](../cluster/31-runtime-instance.md) |
+| 0x0002 | `execution_info` | `int64_t execution_info(a20_execution_info_t *out, uint32_t capacity)` | MCU/服务器统一镜像执行信息，见 [契约](../cluster/28-execution-capabilities.md) |
+
+| 0x0004 | `runtime_info` | `int64_t runtime_info(a20_runtime_info_t *out, uint32_t capacity)` | 不可变运行实例命名空间，见 [契约](../cluster/34-runtime-namespace.md) |
+| 0x0005 | `runtime_bind` | `int64_t runtime_bind(const a20_runtime_binding_t *in, uint32_t capacity)` | 管理员显式绑定；完全相同的重试幂等 |
 
 ### Handle (0x0100)
 
@@ -436,6 +446,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性（要求 `WRITE`；同 0x0108，目录句柄不可用） |
 | 0x010C | `handle_poll` | `int64_t handle_poll(a20_handle_t h, uint32_t events, uint64_t timeout_ns)` | 非阻塞就绪查询（复用 `vfs_poll_events`，见 08-runtime-status.md §5a） |
 
+| 0x010D | `handle_identity` | `int64_t handle_identity(a20_handle_t h, a20_handle_identity_t *out, uint32_t capacity)` | TASK/THREAD/DEBUG 统一对象名；要求 STAT，未绑定返回 WOULD_BLOCK |
+
 ### Task / Thread (0x0200)
 
 | 编号 | 名称 | 签名 | 说明 |
@@ -443,9 +455,9 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0200 | `task_exit` | `void task_exit(int32_t code)` | 退出当前 task |
 | 0x0201 | `task_spawn` | `int64_t task_spawn(a20_task_spawn_args_t *args)` | 创建新 task |
 | 0x0202 | `task_wait` | `int64_t task_wait(a20_handle_t task, a20_flags_t flags, a20_task_status_t *out)` | 等待 task 退出 |
-| 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t reason)` | 终止 task |
+| 0x0203 | `task_kill` | `int64_t task_kill(a20_handle_t task, int32_t signal, uint64_t flags)` | 信号/强制退出；flags=0 保留原调用 |
 | 0x0204 | `task_info` | `int64_t task_info(a20_handle_t task, a20_task_info_t *out)` | 查询 task 信息 |
-| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；当前返回 `A20_OBJ_TASK` handle，`A20_OBJ_THREAD` 保留未用 |
+| 0x0205 | `thread_create` | `int64_t thread_create(a20_thread_create_args_t *args)` | 创建线程；返回 `A20_OBJ_THREAD` handle，发布前完成句柄和结果安装 |
 | 0x0206 | `thread_exit` | `void thread_exit(int32_t code)` | 退出当前线程 |
 | 0x0207 | `thread_sleep` | `int64_t thread_sleep(a20_time_ns_t duration_ns)` | 线程睡眠指定纳秒数（相对当前时间） |
 | 0x0208 | `thread_yield` | `int64_t thread_yield(void)` | 主动让出 CPU |
@@ -455,8 +467,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x020C | `task_set_limits` | `int64_t task_set_limits(a20_handle_t task, a20_resource_limits_t *args)` | 设置聚合资源限制 |
 | 0x020D | `task_get_usage` | `int64_t task_get_usage(a20_handle_t task, a20_rusage_t *out)` | 查询资源使用量 |
 | 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
-| 0x020F | `signal_check` | `int64_t signal_check(a20_signal_info_t *out)` | 检查点式信号模拟：查询挂起信号 |
-| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old)` | 检查点式信号模拟：设置/查询信号掩码 |
+| 0x020F | `signal_check` | `int64_t signal_check(uint64_t flags, uint64_t selected_or_control)` | flags=0 消费原进程级未屏蔽 bitmap；STRUCT 固定宽度形式及 THREAD/PEEK/SELECT 见 [线程通知](../cluster/48-native-thread-signals.md) |
+| 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old, uint64_t flags)` | flags=0 保留进程级 mask；THREAD/QUERY 见 [线程通知](../cluster/48-native-thread-signals.md) |
 | 0x0211 | `task_mem_read` | `int64_t task_mem_read(a20_task_mem_args_t *args)` | 按 iovec 从目标 task 的地址空间读入本地 |
 | 0x0212 | `task_mem_write` | `int64_t task_mem_write(a20_task_mem_args_t *args)` | 按 iovec 把本地数据写入目标 task 的地址空间 |
 | 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
@@ -536,6 +548,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0523 | `cluster_route` | `int64_t cluster_route(a20_cluster_route_args_t *args)` | 注入/更新/删除路由表项，需 `A20_RIGHT_CLUSTER_ADMIN` |
 | 0x0524 | `cluster_event_subscribe` | `int64_t cluster_event_subscribe(a20_cluster_event_subscribe_args_t *args)` | 订阅链路/路由/导出事件，返回 EventQ 句柄 |
 | 0x0525 | `cluster_link_status` | `int64_t cluster_link_status(a20_cluster_link_status_args_t *args)` | 查询链路状态、RTT 与收发计数器 |
+| 0x0526 | `cluster_snapshot` | `int64_t cluster_snapshot(a20_cluster_snapshot_args_t *args)` | 只读枚举当前身份、资源档、路由和导出服务；代数变化时重新枚举，支持控制面重启恢复 |
 
 ### Network (0x0600)
 
@@ -606,6 +619,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 |------|------|------|------|
 | 0x0B00 | `futex_wait` | `int64_t futex_wait(a20_futex_wait_args_t *args)` | futex 等待（复用内核 futex 核心，见 01-types.md §22） |
 | 0x0B01 | `futex_wake` | `int64_t futex_wake(a20_futex_wake_args_t *args)` | futex 唤醒 |
+| 0x0B02 | `atomic32` | `int64_t atomic32(a20_atomic32_args_t *args)` | 顺序一致的 load/store/exchange/CAS，MCU 与服务器共享实现 |
 
 ### Device / user-space drivers (0x0C00)
 
@@ -662,4 +676,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
 
-总计：153 个 syscall（`syscall_table.def` 当前登记数）。
+总计：160 个 syscall（`syscall_table.def` 当前登记数）。

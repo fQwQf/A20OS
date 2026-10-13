@@ -56,6 +56,10 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
  * writing it from that CPU; this IPI is how the request gets there. */
 #define IRQ_VECTOR_MSIX_VECTOR 0xF2
 
+#ifdef CONFIG_QEMU_SHARED_SMP
+void x86_64_shared_qemu_poll(void);
+#endif
+
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
 /* The I/O APIC windows, as learned from the MADT.  Count is 0 when firmware
  * published none, in which case every accessor falls back to a single

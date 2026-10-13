@@ -53,18 +53,9 @@ typedef intptr_t  ptrdiff_t;
 
 #define LWIP_PROVIDE_ERRNO 1
 
-/* The NO_SYS heap has one global free list.  When packet lanes are enabled,
- * protect that list with a kernel SMP lock; the one-lane build keeps the
- * upstream single-context allocator path. */
-#if CONFIG_NET_LANES > 1
-void a20_lwip_heap_lock(void);
-void a20_lwip_heap_unlock(void);
-#define LWIP_HEAP_LOCK()   a20_lwip_heap_lock()
-#define LWIP_HEAP_UNLOCK() a20_lwip_heap_unlock()
-#else
-#define LWIP_HEAP_LOCK()   ((void)0)
-#define LWIP_HEAP_UNLOCK() ((void)0)
-#endif
+/* NO_SYS has one global heap free list. Socket callers can allocate outside
+ * the lwIP core lock on every CPU, independently of the network lane count. */
+#include "net/lwip_port/arch/heap.h"
 
 #endif /* A20_LWIP_ARCH_CC_H */
 

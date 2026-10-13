@@ -37,6 +37,7 @@
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/ipc.h"
 #include "ipc/start_info.h"
+#include "ipc/handle_table.h"
 
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);
@@ -794,10 +795,10 @@ static uint64_t exec_setup_native_abi(task_t *t,
         if (preserve && t->a20_stdio_adopted) {
             self_h = t->a20_self_h;
         } else {
-            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)t->pid,
-                                           A20_OBJ_TASK,
-                                           A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                           A20_RIGHT_STAT | A20_RIGHT_DUP);
+            int64_t h =
+                a20_handle_install_task(ht, t, A20_OBJ_TASK,
+                                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                            A20_RIGHT_STAT | A20_RIGHT_DUP);
             if (h >= 0) self_h = (a20_handle_t)h;
         }
     }

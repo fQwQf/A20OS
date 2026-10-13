@@ -47,10 +47,9 @@
     .set HSTATUS_SPV,  (1 << 7)
     .set HSTATUS_SPVP, (1 << 8)
     .set HSTATUS_HU,   (1 << 9)
-    .set HSTATUS_VIE,  (1 << 10)
     .set HSTATUS_VTVM, (1 << 20)
-    .set HSTATUS_GUEST_ON,  (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_VIE)
-    .set HSTATUS_GUEST_OFF, (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_VIE | HSTATUS_HU)
+    .set HSTATUS_GUEST_ON,  (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM)
+    .set HSTATUS_GUEST_OFF, (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_HU)
 
     .equ SSTATUS_SIE,  (1 << 1)
     .equ SSTATUS_SPIE, (1 << 5)
@@ -191,14 +190,6 @@ hyp_arch_vcpu_enter:
     sd      s10, HYP_VCPU_ARCH_OFF + 21*8(a0)
     sd      s11, HYP_VCPU_ARCH_OFF + 22*8(a0)
 
-    /* Publish the vcpu for the C half's "is this frame a guest" path.  The
-     * prelude no longer reads it -- it finds its bank through sscratch -- but
-     * it is the arch half's statement about which vcpu owns the trap path, and
-     * hyp_arch_vcpu_exit() clears it so nothing can keep naming a vcpu that is
-     * being torn down. */
-    la      t0, g_hyp_arch_vcpu
-    sd      a0, 0(t0)
-
     /* Arm the guest trap channel.  sscratch is how hyp_guest_trap_entry finds
      * the bank without spending a register on the address; tramp[HOST_SP] and
      * tramp[HOST_TP] are the host's sp and tp, which it reloads after the
@@ -250,7 +241,7 @@ hyp_arch_vcpu_enter:
 
     /* Guest sstatus: SPP=1 because VS-mode's privilege is S (sret reads SPP
      * for the privilege and hstatus.SPV for the virtual side), FS=Initial so
-     * guest FP instructions are executable at all, and SPIE|SIE so the host
+     * guest FP instructions are executable at all, and SPIE so the host
      * timer interrupt reaches the guest as a trap to HS rather than sitting
      * pending behind it (sret copies SPIE into SIE, so SPIE is the load-bearing
      * half).
@@ -274,20 +265,19 @@ hyp_arch_vcpu_enter:
      * whether the FPRs are context-switched.  The host's trap entry turns
      * FS on and restores the register file around every HS trap it takes, so
      * the guest's FP image also survives each trip out to the hypervisor. */
-    li      t0, SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_FS_INITIAL
+    li      t0, SSTATUS_SPIE | SSTATUS_FS_INITIAL
+    ld      t1, HYP_VCPU_ARCH_OFF + 23*8(a0)
+    bnez    t1, .Lhyp_vu_return
+    ori     t0, t0, SSTATUS_SPP
+.Lhyp_vu_return:
     sd      t0, 32*8(sp)
 
     /* kernel_tp: the host task pointer, which is what the trap entry expects
      * to find in tp when the guest traps. */
     sd      tp, 35*8(sp)
 
-    /* hstatus for the guest.  Only the VS-facing permission bits are
-     * touched; hstatus.SIE and everything else the host owns is left alone,
-     * because sret does not restore SPV (hardware cleared it on the last
-     * trap-return) and that is the one field enter has to re-assert.  VIE is
-     * re-asserted here for the same reason of not trusting a caller's earlier
-     * hstatus write: it is what the spec uses as the guest's interrupt
-     * enable, and hyp_arch_vcpu_setup() programs it too. */
+    /* Reassert the virtual return destination; guest interrupt enables are
+     * in vsstatus/vsie, not a reserved hstatus bit. */
     csrr    t0, hstatus
     li      t1, HSTATUS_GUEST_ON
     or      t0, t0, t1
@@ -296,26 +286,8 @@ hyp_arch_vcpu_enter:
     and     t0, t0, t1
     csrw    hstatus, t0
 
-    /* Guest exceptions and host interrupts both land on the prelude, which
-     * joins the ordinary kernel entry.  A host interrupt is delivered to HS
-     * because hideleg leaves every H-level interrupt bit with the
-     * hypervisor, so those still trap here instead of being handled by the
-     * guest; the frame's sstatus carries SIE, which is what lets the guest's
-     * own interrupts pending be a separate question (they are delegated).
-     * hstatus.VIE is programmed above: on the platform this slice is measured
-     * on it is belt and braces, because QEMU's VS-to-HS path takes hsie = 1
-     * unconditionally while V=1 (target/riscv/cpu_helper.c,
-     * riscv_cpu_pending_to_irq) and has no interrupt-enable field in hstatus at
-     * all -- bit 5 is VSBE there, and bit 10 is simply unimplemented (the
-     * HSTATUS_* defines in target/riscv/cpu_bits.h stop at SPV/SPVP/HU).  The
-     * field is written because it is what the spec says gates VS interrupts,
-     * not because this platform needs it.
-     *
-     * From here to the sret there is no window for a host trap: hstatus.SPV is
-     * already set, so anything that arrived now would be taken for a guest trap
-     * and this function's own sp/tp banked as the guest's.  Interrupts are off
-     * across the window and the sret re-arms them from the frame's sstatus,
-     * which carries SPIE|SIE for the guest. */
+    /* Host interrupts are disabled through the final entry window. Guest
+     * and host interrupt routing are enabled by their respective CSRs. */
     csrc    sstatus, SSTATUS_SIE
 
     la      t0, hyp_guest_trap_entry
@@ -327,9 +299,49 @@ hyp_arch_vcpu_enter:
      * the sret -- the trap-return into the guest parks it and promotes vsatp
      * in its place, then hands satp back on the way out -- so the host
      * fetches its own trap vector exactly as it does normally. */
+    /* A new VM must never observe a previous guest's physical FP bank. */
+    li      t0, SSTATUS_FS_INITIAL
+    csrs    sstatus, t0
+    fld     f0, HYP_ASM_VCPU_FPU_OFF + 0*8(a0)
+    fld     f1, HYP_ASM_VCPU_FPU_OFF + 1*8(a0)
+    fld     f2, HYP_ASM_VCPU_FPU_OFF + 2*8(a0)
+    fld     f3, HYP_ASM_VCPU_FPU_OFF + 3*8(a0)
+    fld     f4, HYP_ASM_VCPU_FPU_OFF + 4*8(a0)
+    fld     f5, HYP_ASM_VCPU_FPU_OFF + 5*8(a0)
+    fld     f6, HYP_ASM_VCPU_FPU_OFF + 6*8(a0)
+    fld     f7, HYP_ASM_VCPU_FPU_OFF + 7*8(a0)
+    fld     f8, HYP_ASM_VCPU_FPU_OFF + 8*8(a0)
+    fld     f9, HYP_ASM_VCPU_FPU_OFF + 9*8(a0)
+    fld     f10, HYP_ASM_VCPU_FPU_OFF + 10*8(a0)
+    fld     f11, HYP_ASM_VCPU_FPU_OFF + 11*8(a0)
+    fld     f12, HYP_ASM_VCPU_FPU_OFF + 12*8(a0)
+    fld     f13, HYP_ASM_VCPU_FPU_OFF + 13*8(a0)
+    fld     f14, HYP_ASM_VCPU_FPU_OFF + 14*8(a0)
+    fld     f15, HYP_ASM_VCPU_FPU_OFF + 15*8(a0)
+    fld     f16, HYP_ASM_VCPU_FPU_OFF + 16*8(a0)
+    fld     f17, HYP_ASM_VCPU_FPU_OFF + 17*8(a0)
+    fld     f18, HYP_ASM_VCPU_FPU_OFF + 18*8(a0)
+    fld     f19, HYP_ASM_VCPU_FPU_OFF + 19*8(a0)
+    fld     f20, HYP_ASM_VCPU_FPU_OFF + 20*8(a0)
+    fld     f21, HYP_ASM_VCPU_FPU_OFF + 21*8(a0)
+    fld     f22, HYP_ASM_VCPU_FPU_OFF + 22*8(a0)
+    fld     f23, HYP_ASM_VCPU_FPU_OFF + 23*8(a0)
+    fld     f24, HYP_ASM_VCPU_FPU_OFF + 24*8(a0)
+    fld     f25, HYP_ASM_VCPU_FPU_OFF + 25*8(a0)
+    fld     f26, HYP_ASM_VCPU_FPU_OFF + 26*8(a0)
+    fld     f27, HYP_ASM_VCPU_FPU_OFF + 27*8(a0)
+    fld     f28, HYP_ASM_VCPU_FPU_OFF + 28*8(a0)
+    fld     f29, HYP_ASM_VCPU_FPU_OFF + 29*8(a0)
+    fld     f30, HYP_ASM_VCPU_FPU_OFF + 30*8(a0)
+    fld     f31, HYP_ASM_VCPU_FPU_OFF + 31*8(a0)
+    ld      t0, HYP_ASM_VCPU_FCSR_OFF(a0)
+    fscsr   t0
+
     ld      t0, 33*8(sp)
     csrw    sepc, t0
     ld      t0, 32*8(sp)
+    /* SIE must remain clear until sret: stvec already names the guest
+     * prelude, which cannot classify a host IRQ during register restore. */
     csrw    sstatus, t0
 
     ld      x1, 1*8(sp)
@@ -368,19 +380,6 @@ hyp_arch_vcpu_exit:
     /* Back to the host's own vector before any host trap can be taken. */
     la      t0, __trap_from_kernel
     csrw    stvec, t0
-
-    /* And unpublish the vcpu before anything downstream can look at it.
-     * hyp_arch_guest_trap() already cleared it on the way into C, so this
-     * store is normally writing NULL over NULL -- the point is that the exit
-     * path does not DEPEND on that having happened.  A pointer left
-     * published here outlives this function: hyp_vcpu_run() drops the claim
-     * and hyp_vcpu_put() frees the object, so anything that read the pointer
-     * afterwards would be reading a freed vcpu through the guest trap prelude.
-     * Clearing it here makes "no vcpu is published once the guest is gone" a
-     * property of this function instead of an invariant about a caller's
-     * earlier behaviour. */
-    la      t0, g_hyp_arch_vcpu
-    sd      zero, 0(t0)
 
     /* arch[1] is the kernel sp this function's caller was standing on, so
      * restoring it discards the guest frame and the whole C trap path below it

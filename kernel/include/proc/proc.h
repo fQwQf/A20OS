@@ -258,6 +258,7 @@ typedef struct task_t {
     int      dispatching;
     int      on_cpu;
     unsigned owner_cpu;
+    unsigned affinity_migrate_pending; /* park_lock; consumed after stack retirement */
     int      vfork_waiting;
 #ifdef CONFIG_NOMMU
     /* A NOMMU vfork child shares writable memory until exec/exit. */
@@ -317,6 +318,9 @@ typedef struct task_t {
     struct signal_state *signals;
 
     mm_struct_t *mm;
+#ifdef CONFIG_FLAT_USER_MEMORY
+    struct a20_flat_space *flat_user; /* Owner outlives task references/pins. */
+#endif
 
     uintptr_t entry;
     uintptr_t first_kernel_entry;
@@ -331,9 +335,14 @@ typedef struct task_t {
     proc_policy_t policy;
     int       clone_flags;
     int       exit_signal;
-    int       exit_notified; /* tasklist_lock: group completion claimed once */
+    int       hyp_cleanup_done; /* group leader, tasklist_lock; one-shot VM bridge teardown */
     int       pdeathsig;       /* PR_SET_PDEATHSIG: one-shot signal delivered
                                 * when the parent exits (0 = none) */
+#if !defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM)
+#define PROC_GROUP_EXIT_NOTIFY_ENABLED 1
+    /* tasklist_lock owns the once-only reportable group-exit notification. */
+    int exit_parent_notified;
+#endif
     int      *clear_child_tid;
     uintptr_t robust_list_head;
 
@@ -345,6 +354,17 @@ typedef struct task_t {
     int       dynamic_alloc;
     void     *scratch_buf;
     size_t    scratch_size;
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
+    (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
+#define A20_TASK_OBJECTS_ENABLED 1
+    struct a20_task_object
+        *a20_object;       /* weak task binding; task owns one ref */
+    unsigned a20_joinable; /* immutable after Native thread publication */
+    /* Native thread checkpoint state, protected by its shared handle-table
+     * lock. Separate from Linux signal state and legacy process checkpoints. */
+    uint64_t a20_signal_pending;
+    uint64_t a20_signal_blocked;
+#endif
     void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,
                          * which is reused by Linux ABI I/O buffers) */
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
@@ -585,6 +605,10 @@ int      proc_set_pid_max(int value);
 void     proc_get_vm_stats(proc_vm_stats_t *stats);
 size_t   proc_format_pidmap(char *buf, size_t bufsz);
 int      proc_alloc(void (*entry)(void));
+/* Initialize architecture/loader-owned state before exposing a runnable task. */
+int      proc_alloc_deferred(void (*entry)(void));
+/* Detached kernel workers do not inherit user process resources. */
+int      proc_alloc_detached(void (*entry)(void));
 int      proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir);
 int      proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                                struct mm_seg *mmap, vaddr_t brk,
@@ -606,6 +630,9 @@ void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);
 void     proc_yield(void);
 int      proc_sched_get(task_t *t, proc_sched_config_t *out);
+/* May yield when the current task excludes its executing CPU. That case
+ * requires IRQs enabled and no spinlock/hardirq context; migration is only
+ * published after the old kernel stack has stopped executing. */
 int      proc_sched_set(task_t *t, const proc_sched_config_t *config);
 int      proc_sched_priority_range(int policy, int *min, int *max);
 uint32_t proc_sched_effective_affinity(task_t *t);
@@ -640,7 +667,27 @@ int      proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *
 
 /* Native ABI thread creation: shares address space / fd table / handle table,
  * starts at `entry` with `arg` in the first argument register. */
-int      proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
+int proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
+/* Referenced unpublished child; caller must publish or destroy and proc_put. */
+int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
+                                vaddr_t tls, size_t stack_size,
+                                task_t **out_task);
+
+/* Called with tasklist_lock, or before publishing the new task. Linux clone
+ * threads retain their existing auto-reap path. A Native child retains its
+ * exit record only while another member can join it. */
+static inline int proc_native_thread_waitable(const task_t *task,
+                                              const task_t *parent) {
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
+    (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
+    return task && task->a20_joinable && parent && parent != task &&
+           parent->tgid == task->tgid;
+#else
+    (void)task;
+    (void)parent;
+    return 0;
+#endif
+}
 
 /* Global task-list membership (task_list_head/tail, ->all_next/->all_prev) and
  * the parent/children/sibling plus thread-group chains are guarded by

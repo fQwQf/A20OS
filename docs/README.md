@@ -119,10 +119,14 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
 - [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
+- [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计——共享核心、架构后端、多实例与 QEMU/KVM 路线
+- [hypervisor/05-implementation-status.md](hypervisor/05-implementation-status.md)：当前代码、静态验证证据和未完成项
+- [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)：命名 QEMU 宿主实例、磁盘隔离和交互控制台（待运行验证）
+- [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：双 guest 管理、控制协议、重连和待运行门禁
 
 验证入口包括 8 个正向门禁：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`；以及负向门禁 `make smoke-hyp-no-h`。正向门禁覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell，并显式以 `-cpu rv64,h=true` 表达 CPU 前提；负向门禁以 `h=false` 检查内核安全拒绝缺少 H 扩展的 CPU。
 
-CPU 必须实际支持 RISC-V H 扩展。当前 `hyp_probe()` 在执行 H CSR 探测前先查询启动阶段缓存的 FDT ISA 声明；FDT 如实声明 `h=false` 时，内核会拒绝虚拟化并安全跳过，`smoke-hyp-no-h` 覆盖此路径。固件若错误地声明 H 存在，内核仍无法仅凭 CSR 可读性安全识别不支持 H 的 CPU，后续 H 指令可能触发宿主异常。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，正向门禁可运行；显式 `-cpu rv64,h=true` 用于表达测试前提，不是运行时能力判据。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
+当前实现要求 CPU 支持 RISC-V H 和 Sstc，且 firmware 允许虚拟 timer 的 STCE。以下 smoke 记录属于此前实现，本轮静态修改尚未重跑。当前 `hyp_probe()` 在执行 H CSR 探测前先查询启动阶段缓存的 FDT ISA 声明；FDT 如实声明 `h=false` 时，内核会拒绝虚拟化并安全跳过，`smoke-hyp-no-h` 覆盖此路径。固件若错误地声明 H 存在，内核仍无法仅凭 CSR 可读性安全识别不支持 H 的 CPU，后续 H 指令可能触发宿主异常。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，正向门禁可运行；显式 `-cpu rv64,h=true` 用于表达测试前提，不是运行时能力判据。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
 
 ## 当前契约与恢复记录
 

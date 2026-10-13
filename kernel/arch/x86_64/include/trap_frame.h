@@ -212,6 +212,10 @@ static inline uint64_t arch_user_initial_status(void) {
     return SSTATUS_SPIE | SSTATUS_FS_CLEAN;
 }
 
+/* SysV C function entry expects rsp % 16 == 8, as if CALL pushed a return
+ * address. Native threads enter directly and must supply that same bias. */
+#define ARCH_NATIVE_THREAD_STACK_BIAS 8U
+
 static inline void arch_trap_ctx_set_user_entry(trap_context_t *ctx,
                                                 uint64_t entry) {
     TRAP_CTX_EPC(ctx) = entry;

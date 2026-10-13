@@ -17,6 +17,14 @@ static inline void arch_uart_init(void) {
     outb(0x3F8 + 1, 0x01);  /* Enable received-data-available interrupt */
 }
 
+#ifdef CONFIG_QEMU_SHARED_SMP
+void x86_shared_console_putc(char c);
+int x86_shared_console_getc(void);
+void x86_shared_console_flush(void);
+static inline void arch_uart_putc(char c) { x86_shared_console_putc(c); }
+static inline int arch_uart_poll_getc(void) { return x86_shared_console_getc(); }
+static inline void arch_uart_flush(void) { x86_shared_console_flush(); }
+#else
 static inline void arch_uart_putc(char c) {
     while ((inb(0x3F8 + 5) & 0x20) == 0)
         ;
@@ -34,6 +42,8 @@ static inline void arch_uart_flush(void) {
     while ((inb(0x3F8 + 5) & 0x40) == 0)
         ;
 }
+
+#endif
 
 static inline void arch_uart_ack_irq(void) {}
 

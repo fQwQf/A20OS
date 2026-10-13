@@ -1,0 +1,11 @@
+name = "hyp-host-riscv64"
+description = "RISC-V H host with bundled hypvm and A20OS RAMFS guest; experimental; single pair passed, repeat stability pending"
+arch = "riscv64"
+abi = "both"
+
+[machine]
+vm_manager = true
+smp = 1
+memory = "1G"
+accel = "tcg"
+extra_qemu = ["-cpu", "rv64,h=true,sstc=true"]

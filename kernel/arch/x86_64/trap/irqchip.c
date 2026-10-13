@@ -673,6 +673,9 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 #endif
     if (irq == IRQ_VECTOR_TIMER) {
+#ifdef CONFIG_QEMU_SHARED_SMP
+        x86_64_shared_qemu_poll();
+#endif
         handle_timer_irq(from_user);
     } else if (irq == IRQ_VECTOR_UART || irq == IRQ_VECTOR_KEYBOARD ||
                irq == PS2_MOUSE_IRQ_VECTOR || irq == IRQ_VECTOR_PCI ||

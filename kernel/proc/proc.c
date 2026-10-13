@@ -659,6 +659,14 @@ void proc_init_secondary(unsigned cpu_id)
 
 task_t *proc_idle_task(void) { return &idle_tasks[cpu_current_id()]; }
 
+/* A remote current slot is a placement hint, not a referenced task pointer.
+ * Compare with permanent idle storage; never dereference a remote task which
+ * may switch out and be reaped immediately after the acquire load. */
+int proc_cpu_is_idle(unsigned cpu) {
+    task_t *current = proc_current_on_cpu(cpu);
+    return !current || current == &idle_tasks[cpu];
+}
+
 pt_root_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 /* ---- Base task allocation ---- */
@@ -675,7 +683,7 @@ task_t *proc_alloc_task_slot(void) {
 }
 
 // Allocate a kernel thread
-int proc_alloc(void (*entry)(void)) {
+static int proc_alloc_kernel(void (*entry)(void), int detached, int defer_ready) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
     t->pid = proc_pid_alloc();
@@ -683,12 +691,17 @@ int proc_alloc(void (*entry)(void)) {
         proc_destroy_task(t);
         return -EAGAIN;
     }
-    proc_task_init_common(t, proc_current(), 0);
+    if (detached)
+        proc_task_init_detached(t);
+    else
+        proc_task_init_common(t, proc_current(), 0);
     proc_link_newborn(t);
     proc_pid_register(t);
 #ifndef CONFIG_MCU
-    fdtable_close_all(t);
-    fdtable_init_stdio(t);
+    if (!detached) {
+        fdtable_close_all(t);
+        fdtable_init_stdio(t);
+    }
 #endif
     t->fs.cwd[0] = '/';
     t->fs.cwd[1] = '\0';
@@ -718,8 +731,25 @@ int proc_alloc(void (*entry)(void)) {
     t->kstack = (uintptr_t)ctx;
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
-    proc_make_ready(t);
+    if (!defer_ready)
+        proc_make_ready(t);
     return t->pid;
+}
+
+int proc_alloc(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 0, 0);
+}
+
+int proc_alloc_deferred(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 0, 1);
+}
+
+/* Internal workers have no user parent and are reaped by the scheduler. */
+int proc_alloc_detached(void (*entry)(void))
+{
+    return proc_alloc_kernel(entry, 1, 0);
 }
 
 /* Allocate a user-mode task with given entry point and stack */

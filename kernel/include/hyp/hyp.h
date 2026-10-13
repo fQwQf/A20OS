@@ -3,15 +3,16 @@
 
 #include "core/types.h"
 #include "mm/pt.h"
+#include "core/lock.h"
 #include "hyp/hyp_arch.h"
+#include "hyp/hyp_backend.h"
 
 /*
  * Hypervisor foundation: guest physical address spaces (stage-2) and the VM
  * container around them.  Design record: docs/hypervisor/00-design.md.
  *
- * The load-bearing decision is that a stage-2 tree is a page table of the
- * SAME shape as a host one and reuses the single-level model's machinery
- * wholesale:
+ * The RISC-V backend reuses the host page-table metadata machinery. Other
+ * backends provide their own second-stage representation through hyp_backend:
  *
  *   - every stage-2 page-table page carries a pt_meta_t (same node MCS lock,
  *     same per-entry status byte), so the concurrency and audit story of
@@ -23,11 +24,9 @@
  *     mapping exists (mm_pt_frame_lend/return), and mm_s2_audit()
  *     cross-checks flag against mapping so a frame whose VM died without
  *     returning it cannot hide;
- *   - hgatp is Sv39x4, but this file only ever programs root entries
- *     [0,512): guest physical memory must live below 512 GiB (HYP_GPA_LIMIT).
- *     The demo guest lives at 0x80000000; lifting the limit means an x4 root
- *     (2048 entries, 16 KiB) and a wider root metadata block, which is a
- *     format change to pt_meta_t and is deliberately deferred.
+ *   - Sv39x4 requires a 16 KiB aligned, 16 KiB root even while only
+ *     entries [0,512) are used. The backend supplies the allocation order;
+ *     metadata and the public GPA limit still cover only those 512 entries.
  *
  * Everything here runs in host kernel context on behalf of a host process.
  * The vcpu run loop (register save/restore, guest trap entry) is arch code;
@@ -43,6 +42,8 @@
  * kernel/drivers/char/uart.c) -- the two cannot grow independently anyway,
  * since this ring is filled by draining the host one. */
 #define HYP_VM_RX_RING 256
+#define HYP_MAX_VCPUS 8
+struct hyp_vcpu;
 
 typedef struct hyp_vm {
     uint32_t magic;
@@ -94,20 +95,68 @@ typedef struct hyp_vm {
      * Touched only from the guest trap path that is running this VM, with
      * __atomic ops so a later reader does not have to know that. */
     int       above_window_logged;
+    const hyp_backend_t *backend;
+    unsigned s2_root_order;
+    struct cg_node *charge_cg;
+    uint64_t charged_pages;
+    spinlock_t control_lock;
+    int updating;
+    unsigned run_count;
+    spinlock_t console_lock;
+    int managed_console;
+    uint8_t tx_buf[256];
+    unsigned tx_head, tx_tail;
+    uint64_t last_exit[4];
+    struct hyp_vcpu *vcpus[HYP_MAX_VCPUS]; /* weak, protected by control_lock */
+    unsigned vcpu_count, vcpu_limit, parallel_limit;
+    uint32_t active_cpu_mask;
+    int shutdown, broken;
 } hyp_vm_t;
+
+struct hyp_stats {
+    uint64_t vms, vcpus, mapped_pages, table_pages, free_host_pages;
+};
+void hyp_stats_get(struct hyp_stats *out);
+void hyp_account_vcpu(int delta);
+void hyp_account_mapped(int delta);
+void hyp_account_tables(int delta);
+
+struct hyp_vm_status {
+    uint64_t exit, scause, stval, htval;
+    uint64_t marker_seen, console_bytes, rx_bytes;
+};
+void hyp_vm_get_status(hyp_vm_t *vm, struct hyp_vm_status *status);
+
+/* Console commands are shared by Native and Linux wrappers. */
+#define HYP_CONSOLE_CONFIG 0
+#define HYP_CONSOLE_WRITE  1
+#define HYP_CONSOLE_READ   2
+int hyp_console_config(hyp_vm_t *vm, int managed);
+int hyp_console_write(hyp_vm_t *vm, const uint8_t *data, unsigned len);
+int hyp_console_read(hyp_vm_t *vm, uint8_t *data, unsigned len);
+int hyp_console_pending(hyp_vm_t *vm);
+int hyp_console_putchar(hyp_vm_t *vm, uint8_t ch);
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
  * the arch layer can drive it.  Cheap enough to call per syscall. */
 int  hyp_supported(void);
 
-/* Create a VM with an empty stage-2.  mem_size is bookkeeping for now (the
- * guest RAM is provisioned page by page through hyp_s2_map); it caps nothing
- * yet and that is documented, not hidden.  Returns NULL on failure. */
+/* Create an empty VM. mem_size bounds the configured RAM window. Loaded and
+ * demand-filled RAM is charged to the creating task's cgroup; page-table and
+ * device allocations are not yet included in that charge. NULL on failure. */
 hyp_vm_t *hyp_vm_create(uint64_t mem_size);
+int       hyp_vm_begin_update(hyp_vm_t *vm);
+void      hyp_vm_end_update(hyp_vm_t *vm);
+void      hyp_vm_get(hyp_vm_t *vm);
 void      hyp_vm_put(hyp_vm_t *vm);
 
+int hyp_vm_configure_smp(hyp_vm_t *vm, unsigned count);
+int hyp_vm_remote_fence(hyp_vm_t *vm, uint32_t cpus, unsigned kind);
+void hyp_vm_shutdown(hyp_vm_t *vm);
+void hyp_vm_fail(hyp_vm_t *vm);
+
 /* Map one 4 KiB guest page: gpa -> host frame, lending the frame to the VM.
- * prot is a host PTE flag set; PTE_U is stripped (stage-2 has no U bit).
+ * prot is a host PTE flag set; the RISC-V G-stage requires PTE_U.
  * Returns 0, or a negative errno.  -EEXIST when the gpa is already mapped. */
 int  hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot);
 /* Remove one 4 KiB guest page mapping, returning the frame. */
@@ -115,6 +164,12 @@ int  hyp_s2_unmap(hyp_vm_t *vm, uint64_t gpa);
 /* Translate gpa -> host physical address, or 0 when unmapped.  Audit/test
  * helper; the guest hardware does its own walks. */
 paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa);
+
+/* Device-model memory access. Only RAM is accepted. Each backing frame is
+ * pinned under its stage-2 leaf lock before copying. Failure can leave a
+ * copied prefix; callers needing transactions must stage them separately. */
+int hyp_vm_copy_from_guest(hyp_vm_t *vm, void *dst, uint64_t gpa, uint64_t len);
+int hyp_vm_copy_to_guest(hyp_vm_t *vm, uint64_t gpa, const void *src, uint64_t len);
 
 /* Audit the stage-2 tree against its metadata (mm_s2_audit) plus the
  * frame-flag cross-check.  Returns 0 when clean. */

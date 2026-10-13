@@ -617,6 +617,7 @@ void mm_pt_core_init(void);
 
 /* Install / tear down the metadata block for a freshly allocated PT page. */
 int  mm_pt_node_init(pte_t *table, int level);
+int  mm_pt_node_init_atomic(pte_t *table, int level);
 void mm_pt_node_fini(pte_t *table);
 
 /* ---- backing-object segments (P6) ----

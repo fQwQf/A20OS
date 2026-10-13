@@ -12,4 +12,8 @@ typedef unsigned long long uint64_t;
 typedef long               intptr_t;
 typedef unsigned long      uintptr_t;
 
+/* Limits used by the shared SDK on both narrow and wide targets. */
+#define UINT64_MAX ((uint64_t)-1)
+#define UINTPTR_MAX ((uintptr_t)-1)
+
 #endif

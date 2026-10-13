@@ -36,6 +36,7 @@
 #include "drivers/core/driver_register.h"
 #include "drvmod/drvmod.h"
 #include "core/errno.h"
+#include "core/bootargs.h"
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/stdio.h"
@@ -402,6 +403,18 @@ static void vport_fail(vport_inst_t *p, int irq_registered, int irq)
     memset(p, 0, sizeof(*p));
 }
 
+static int vport_is_management(void)
+{
+    const char *p = bootargs_get();
+    while (p && *p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+        if (p - start == 9 && !memcmp(start, "a20.vmd=1", 9)) return 1;
+    }
+    return 0;
+}
+
 static int vport_probe(device_t *dev)
 {
     if (g_vport.valid)
@@ -415,7 +428,7 @@ static int vport_probe(device_t *dev)
     memset(p, 0, sizeof(*p));
     spin_init(&p->lock);
     p->vt = vt;
-    p->console_mirror = 1;
+    p->console_mirror = !vport_is_management();
     p->irq = vt.irq;
 
     /* Feature negotiation: VIRTIO_F_VERSION_1 only, so the queues are the
@@ -683,6 +696,8 @@ static int vport_class_ioctl(device_t *dev, unsigned long req, void *arg)
         int32_t attach = 0;
         if (!arg || copy_from_user(&attach, arg, sizeof(attach)) < 0)
             return -EFAULT;
+        if (attach && vport_is_management())
+            return -EPERM;
         uint64_t flags = spin_lock_irqsave(&p->lock);
         p->console_mirror = attach ? 1 : 0;
         spin_unlock_irqrestore(&p->lock, flags);

@@ -421,7 +421,7 @@ static int pt_meta_order(size_t bytes)
     return order;
 }
 
-int mm_pt_node_init(pte_t *table, int level)
+static int mm_pt_node_init_mode(pte_t *table, int level, int can_reclaim)
 {
     if (!table)
         return -EINVAL;
@@ -430,7 +430,7 @@ int mm_pt_node_init(pte_t *table, int level)
         return -EINVAL;
 
     int order = pt_meta_order(sizeof(pt_meta_t));
-    pfn_t mpfn = pfa_alloc(order);
+    pfn_t mpfn = pfa_alloc_flags(order, can_reclaim);
     if (mpfn == PFN_NONE)
         return -ENOMEM;
 
@@ -445,6 +445,15 @@ int mm_pt_node_init(pte_t *table, int level)
     pfa.meta[pfn].flags = FRAME_F_PT;
     spin_unlock_irqrestore(&pfa.lock, flags);
     return 0;
+}
+
+int mm_pt_node_init(pte_t *table, int level)
+{
+    return mm_pt_node_init_mode(table, level, 1);
+}
+int mm_pt_node_init_atomic(pte_t *table, int level)
+{
+    return mm_pt_node_init_mode(table, level, 0);
 }
 
 void mm_pt_node_fini(pte_t *table)

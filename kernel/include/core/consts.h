@@ -17,7 +17,9 @@
 #endif
 
 /* ---------- Kernel / user stack sizes ---------- */
-#ifdef CONFIG_MCU
+#ifdef CONFIG_MCU_SHARED_KERNEL
+#define KERNEL_STACK_SIZE        8192
+#elif defined(CONFIG_MCU)
 /* STM32VL QEMU exposes only 8 KiB; it runs one diagnostic task. */
 #ifdef CONFIG_STM32_QEMU
 #define KERNEL_STACK_SIZE        512

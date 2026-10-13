@@ -8,9 +8,14 @@
 
 #define A20_ARG(n) (args->arg[(n)])
 
+int64_t sys_a20_runtime_info(const a20_syscall_args_t *args);
+int64_t sys_a20_runtime_bind(const a20_syscall_args_t *args);
+int64_t sys_a20_handle_identity(const a20_syscall_args_t *args);
 /* Forward declarations for implemented syscalls */
 int64_t sys_a20_abi_info(const a20_syscall_args_t *args);
 int64_t sys_a20_feature_test(const a20_syscall_args_t *args);
+int64_t sys_a20_execution_info(const a20_syscall_args_t *args);
+int64_t sys_a20_execution_domain_info(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_close(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_dup(const a20_syscall_args_t *args);
 int64_t sys_a20_handle_query(const a20_syscall_args_t *args);
@@ -137,6 +142,7 @@ int64_t sys_a20_system_reboot(const a20_syscall_args_t *args);
 int64_t sys_a20_registry_claim(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wait(const a20_syscall_args_t *args);
 int64_t sys_a20_futex_wake(const a20_syscall_args_t *args);
+int64_t sys_a20_atomic32(const a20_syscall_args_t *args);
 int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args);
 int64_t sys_a20_device_irq_listen(const a20_syscall_args_t *args);
 int64_t sys_a20_device_irq_ack(const a20_syscall_args_t *args);
@@ -163,6 +169,16 @@ int64_t sys_a20_hyp_vm_load(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_create(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_run(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vm_destroy(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_destroy(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_console(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_set_ram(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_control(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_irq(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_stats(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_smp(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_status(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_set_marker(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_set_boot(const a20_syscall_args_t *args);
 /* Forward declarations for Cluster syscalls (sys_native_cluster.c) */
 int64_t sys_a20_cluster_set_self(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_export(const a20_syscall_args_t *args);
@@ -170,11 +186,14 @@ int64_t sys_a20_cluster_connect(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_route(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_event_subscribe(const a20_syscall_args_t *args);
 int64_t sys_a20_cluster_link_status(const a20_syscall_args_t *args);
+int64_t sys_a20_cluster_snapshot(const a20_syscall_args_t *args);
 
 /* Generate handler stubs from .def */
-#define A20_NATIVE_SYSCALL(name, ...) \
-    static int64_t a20_handle_##name(const a20_syscall_args_t *args) \
-    { (void)args; return __VA_ARGS__; }
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    static int64_t a20_handle_##name(const a20_syscall_args_t *args) {         \
+        (void)args;                                                            \
+        return __VA_ARGS__;                                                    \
+    }
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
@@ -184,28 +203,28 @@ int64_t sys_a20_cluster_link_status(const a20_syscall_args_t *args);
  * a bounds check. */
 
 /* One const entry per syscall, so the index below can point into it. */
-#define A20_NATIVE_SYSCALL(name, ...) \
-    static const a20_syscall_entry_t a20_entry_##name = \
-        { A20_SYS_##name, #name, a20_handle_##name };
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    static const a20_syscall_entry_t a20_entry_##name = {                      \
+        A20_SYS_##name, #name, a20_handle_##name};
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
-#define A20_NATIVE_SYSCALL(name, ...) \
-    _Static_assert(A20_SYS_##name < A20_SYSCALL_TABLE_SIZE, \
+#define A20_NATIVE_SYSCALL(name, ...)                                          \
+    _Static_assert(A20_SYS_##name < A20_SYSCALL_TABLE_SIZE,                    \
                    "Native syscall number exceeds the dispatch index");
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
 /* Every lookup returns a pointer into this array, so it must stay const: a
  * shared mutable copy would be one data race between two CPUs in syscalls. */
-static const a20_syscall_entry_t *const a20_syscall_index[A20_SYSCALL_TABLE_SIZE] = {
+static const a20_syscall_entry_t *const
+    a20_syscall_index[A20_SYSCALL_TABLE_SIZE] = {
 #define A20_NATIVE_SYSCALL(name, ...) [A20_SYS_##name] = &a20_entry_##name,
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 };
 
-const a20_syscall_entry_t *a20_syscall_lookup(uint64_t nr)
-{
+const a20_syscall_entry_t *a20_syscall_lookup(uint64_t nr) {
     if (nr >= A20_SYSCALL_TABLE_SIZE)
         return NULL;
     return a20_syscall_index[nr];

@@ -15,342 +15,215 @@
 #include "core/stdio.h"
 #include "core/string.h"
 
-/* Root entries this implementation programs.  Sv39x4 could address 4x this
- * through the same root shape; see the header comment before raising it. */
-#define HYP_GPA_LIMIT (1ULL << 39)
-
-/* The guest's default RAM window: where the qemu-virt demo guest (and A20OS
- * as a guest) is loaded, which is also where a DTB gets copied to. */
-#define HYP_RAM_BASE_DEFAULT 0x80000000ULL
-
-/*
- * What an on-demand guest RAM page gets in stage-2.
- *
- * R|W|X, and all three are needed here rather than a narrower set: the window
- * exists to supply the pages the guest allocates for ITSELF -- page tables,
- * bss, stacks -- but nothing in the interface says which kind of page a given
- * GPA is, so the leaf has to permit both halves of the access space.  The
- * alternative split (R|X for anything the guest might fetch and R|W for
- * anything it might store) needs a per-page classification the contract's
- * hyp_ram_fill(vm, gpa) signature has no room to carry.
- *
- * The priv spec calls R|W|X in a leaf PTE a reserved encoding, and this is
- * known: it is one of the cases the G-stage walk refuses.  What QEMU 10.0.13
- * actually does with it (target/riscv/cpu_helper.c, get_physical_address(),
- * the reserved-RWX switch at :1598) is switch on (pte & (R|W|X)) with cases
- * PTE_W|PTE_X, PTE_W and PTE_R -- i.e. only the R-less combinations are
- * refused; the value 7 (R|W|X) falls through and yields
- * prot = PAGE_READ|PAGE_WRITE|PAGE_EXEC.  The guest's stage-1 has already had
- * its say by the time this leaf is walked, so permitting everything in stage-2
- * does not weaken it: it defers to a table that says nothing.  A guest with a
- * real stage-1 would be protected by it instead.  hyp_s2_map() adds A|D|U on
- * top of this, which the walk also requires (adue off: a leaf without A, or a
- * leaf without D for a store, fails).
- */
+/* Host PTE permission input is translated by the selected stage-2 backend. */
 #define HYP_RAM_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
-/* One VMID per VM, never reused while the kernel runs: hgatp.VMID tags the
- * guest TLB, and handing a dead VM's tag to a new VM would let stale guest
- * translations survive an hfence that names the tag.  A counter costs one
- * fence per VM creation instead.  Width: hgatp.VMID is implementation
- * defined (QEMU: 14 bits); the counter wraps long after any real run, and
- * the wrap is a documented limit, not a silent alias. */
-/*
- * Everything below this line -- the stage-2 tree and the walk over it -- is
- * built out of the HOST page-table machinery: the mm_pt_node/lock/note calls,
- * the mm_pt_frame_lend/return pair, mm_s2_audit() and frame_is_lent_to_guest()
- * are declared under pt.h's own guard
- * (ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU), so they are not merely unbuilt in a
- * NOMMU or non-pagetable configuration, they are UNDECLARED.  The guard used
- * here is deliberately that same expression, spelled the same way, so the two
- * halves cannot disagree about when the machinery exists.
- *
- * What is left in the #else is not a second implementation: it is every public
- * entry point answering "impossible here".  A build with no page tables has no
- * stage-2 tree to build, so there is nothing for the vcpu run loop or the
- * device model to be handed, and the honest answer is the one the contract
- * already allows -- hyp_vm_create() returns NULL, which is its documented
- * failure return, and a caller that gets NULL cannot go on to map or run
- * anything.
- */
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-
-static uint16_t hyp_next_vmid;
+static uint64_t hyp_live_vms, hyp_live_vcpus, hyp_mapped_pages, hyp_table_pages;
+void hyp_account_vcpu(int delta)
+{
+    __atomic_fetch_add(&hyp_live_vcpus, delta, __ATOMIC_RELAXED);
+}
+void hyp_account_mapped(int delta)
+{
+    __atomic_fetch_add(&hyp_mapped_pages, delta, __ATOMIC_RELAXED);
+}
+void hyp_account_tables(int delta)
+{
+    __atomic_fetch_add(&hyp_table_pages, delta, __ATOMIC_RELAXED);
+}
+void hyp_stats_get(struct hyp_stats *out)
+{
+    out->vms = __atomic_load_n(&hyp_live_vms, __ATOMIC_ACQUIRE);
+    out->vcpus = __atomic_load_n(&hyp_live_vcpus, __ATOMIC_ACQUIRE);
+    out->mapped_pages = __atomic_load_n(&hyp_mapped_pages, __ATOMIC_ACQUIRE);
+    out->table_pages = __atomic_load_n(&hyp_table_pages, __ATOMIC_ACQUIRE);
+    out->free_host_pages = pfa_free_count();
+}
 
 hyp_vm_t *hyp_vm_create(uint64_t mem_size)
 {
-    /* The window is [HYP_RAM_BASE_DEFAULT, +mem_size) and has to land inside
-     * what hgatp can name -- the same bound hyp_vm_set_ram() enforces, and for
-     * the same reason: this implementation programs stage-2 root entries [0,512)
-     * only, so a window reaching past HYP_GPA_LIMIT would be silently
-     * unreachable rather than refused, and the guest would fault on memory it
-     * had been told it had.  Written as `mem_size > LIMIT - BASE` and not as
-     * `BASE > LIMIT - mem_size` so that a size past the limit cannot wrap the
-     * subtraction into a value that passes. */
-    if (mem_size == 0 || mem_size > HYP_GPA_LIMIT - HYP_RAM_BASE_DEFAULT)
+    const hyp_backend_t *backend = hyp_arch_backend();
+    if (!hyp_supported() || !backend || !backend->vm_init || !backend->vm_destroy ||
+        !backend->map || !backend->unmap || !backend->translate ||
+        mem_size == 0 || (mem_size & (PAGE_SIZE - 1)) ||
+        backend->ram_base >= backend->gpa_limit ||
+        mem_size > backend->gpa_limit - backend->ram_base)
         return NULL;
-
     hyp_vm_t *vm = kcalloc(1, sizeof(*vm));
     if (!vm)
         return NULL;
-    pte_t *root = (pte_t *)frame_alloc();
-    if (!root) {
-        kfree(vm);
-        return NULL;
-    }
-    memset(root, 0, PAGE_SIZE);
-    if (mm_pt_node_init(root, ARCH_PT_ROOT_LEVEL) != 0) {
-        pfa_free(virt_to_pfn(root), 0);
-        kfree(vm);
-        return NULL;
-    }
-    vm->magic    = HYP_VM_MAGIC;
-    vm->s2_root  = root;
-    vm->vmid     = hyp_next_vmid++;
+    vm->backend = backend;
     vm->mem_size = mem_size;
-    vm->refcount = 1;
-    /* Default RAM window (hyp_vcpu.h v2): the guest RAM this VM is provisioned
-     * for, at the address the demo guest is loaded at.  A loader that wants
-     * the window somewhere else calls hyp_vm_set_ram() before the run. */
-    vm->ram_base = HYP_RAM_BASE_DEFAULT;
+    vm->ram_base = backend->ram_base;
     vm->ram_size = mem_size;
-    /* Fresh VMID: no guest translation under this tag can exist anywhere. */
-    hyp_arch_vmid_fenced(vm->vmid);
+    vm->refcount = 1;
+    vm->vcpu_limit = vm->parallel_limit = 1;
+    spin_init(&vm->control_lock);
+    spin_init(&vm->console_lock);
+    task_t *owner = proc_current();
+    vm->charge_cg = owner ? owner->cgroup : NULL;
+    if (backend->vm_init(vm) != 0) {
+        kfree(vm);
+        return NULL;
+    }
+    vm->magic = HYP_VM_MAGIC;
+    __atomic_fetch_add(&hyp_live_vms, 1, __ATOMIC_RELEASE);
     return vm;
 }
 
-/* Destroy one stage-2 tree.  Callers guarantee no vcpu of this VM is
- * running and no host thread touches the tree (one reference, held by the
- * destroyer), so a direct recursive free is safe -- the same contract
- * pt_destroy() relies on for a dying address space.  Unlike pt_destroy,
- * leaves here are OURS: stage-2 leaves name frames lent to the VM, so the
- * walk returns each one. */
-static void hyp_s2_destroy_level(pte_t *table, int level)
-{
-    if (!table)
-        return;
-    int entries = arch_pt_level_entries(level);
-    for (int i = 0; i < entries; i++) {
-        pte_t pte = table[i];
-        if (!(pte & PTE_V))
-            continue;
-        paddr_t pa = arch_pte_addr(pte);
-        pfn_t pfn = phys_to_pfn(pa);
-        if (!pfn_valid(pfn)) {
-            kerr("hyp: stage-2 corrupt entry level=%d idx=%d pte=%lx\n",
-                 level, i, (unsigned long)pte);
-            table[i] = 0;
-            continue;
-        }
-        if (!arch_pte_is_leaf(pte)) {
-            hyp_s2_destroy_level(arch_pte_to_ptr(pte), level - 1);
-        } else {
-            mm_pt_frame_return(pfn);
-            frame_put(pfn);
-        }
-        table[i] = 0;
-    }
-    /* Same free shape as pt_free_table(): drop the metadata block, then the
-     * frame.  The root was allocated at order 0 like any table here. */
-    mm_pt_node_fini(table);
-    pfa_free(virt_to_pfn(table), 0);
-}
-
 void hyp_vm_put(hyp_vm_t *vm)
 {
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return;
-    if (--vm->refcount > 0)
+    if (__atomic_sub_fetch(&vm->refcount, 1, __ATOMIC_ACQ_REL) != 0)
         return;
-    hyp_s2_destroy_level(vm->s2_root, ARCH_PT_ROOT_LEVEL);
+    vm->backend->vm_destroy(vm);
+    if (vm->charge_cg && vm->charged_pages)
+        cg_mem_uncharge(vm->charge_cg, vm->charged_pages);
     vm->magic = 0;
+    __atomic_fetch_sub(&hyp_live_vms, 1, __ATOMIC_RELEASE);
     kfree(vm);
 }
 
-/*
- * Stage-2 walk.  The shape mirrors the host pt_map_cls()/pt_unmap_leaf()
- * pair, with two differences the header records: leaves carry
- * MM_ST_GUEST_MEM, and installing one lends the frame.
- *
- * Intermediate nodes are allocated with the NON-reclaiming allocator:
- * hyp_s2_map holds the parent node's lock while installing a child, and a
- * reclaiming allocation under that lock reaches oom_try_reclaim(), whose
- * victim teardown wants node locks -- the exact hazard that pinned
- * frame_alloc_nr() for the host cursor (docs 11.7).
- */
-static pte_t *hyp_s2_walk(hyp_vm_t *vm, uint64_t gpa, int alloc)
+int hyp_vm_configure_smp(hyp_vm_t *vm, unsigned count)
 {
-    pte_t *table = vm->s2_root;
-    for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
-        int idx = arch_pt_vpn(gpa, level);
-        pte_t pte = table[idx];
-        if (pte & PTE_V) {
-            if (arch_pte_is_leaf(pte))
-                return NULL;    /* a huge leaf covers the whole slot */
-            table = arch_pte_to_ptr(pte);
-            continue;
-        }
-        if (!alloc)
-            return NULL;
-        pte_t *next = (pte_t *)frame_alloc_nr();
-        if (!next)
-            return NULL;
-        memset(next, 0, PAGE_SIZE);
-        mm_pt_node_init(next, level - 1);
-        table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
-        mm_pt_note_present(table, level, idx,
-                           MM_ST_CLS_BYTE(MM_ST_PT_NODE));
-        table = next;
+    if (!vm || vm->magic != HYP_VM_MAGIC || !count || count > HYP_MAX_VCPUS)
+        return -EINVAL;
+    int rc = hyp_vm_begin_update(vm);
+    if (rc) return rc;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    unsigned existing = vm->vcpu_count;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    if (existing) rc = -EBUSY;
+    else if (count > 1 && (!vm->backend->reset || !vm->backend->probe_smp))
+        rc = -EOPNOTSUPP;
+    else if (count > 1) rc = vm->backend->probe_smp(vm);
+    if (!rc) {
+        vm->vcpu_limit = count;
+        vm->parallel_limit = count;
     }
-    return table;
+    hyp_vm_end_update(vm);
+    return rc;
+}
+
+int hyp_vm_remote_fence(hyp_vm_t *vm, uint32_t cpus, unsigned kind)
+{
+    cpus &= ~(1u << cpu_current_id());
+    if (!cpus) return 0;
+    if (!vm->backend->remote_fence) return -EOPNOTSUPP;
+    return vm->backend->remote_fence(vm, cpus, kind);
 }
 
 int hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
 {
-    if (!vm || vm->magic != HYP_VM_MAGIC || gpa & (PAGE_SIZE - 1))
+    if (!vm || vm->magic != HYP_VM_MAGIC)
         return -EINVAL;
-    if (gpa >= HYP_GPA_LIMIT)
-        return -ERANGE;
-    if (!pfn_valid(pfn))
-        return -EINVAL;
-
-    pte_t *table = hyp_s2_walk(vm, gpa, 1);
-    if (!table)
-        return -ENOMEM;
-    int idx = arch_pt_vpn(gpa, 0);
-
-    /* Stage-2 makes no privilege decision about the GUEST: the guest's own
-     * stage-1 has already had its say by the time this table is walked.  It
-     * is the G-stage WALK itself that runs at the privilege the guest's access
-     * implies, and that privilege is U for a VS-mode access -- a leaf without
-     * U is refused before its R/W/X are even looked at ("supervisor PTE flags
-     * when not S mode", QEMU target/riscv/cpu_helper.c).  So U is set here
-     * and a caller that wants a supervisor leaf cannot have one. */
-    pte_t flags = (prot | PTE_R | PTE_A | PTE_D | PTE_U);
-
-    mm_pt_node_lock(table);
-    if (table[idx] & PTE_V) {
-        mm_pt_node_unlock(table);
-        return -EEXIST;
-    }
-    table[idx] = arch_pte_leaf(pfn_to_phys(pfn), flags);
-    mm_pt_note_present(table, 0, idx,
-                       (uint8_t)(MM_ST_CLS_BYTE(MM_ST_GUEST_MEM) |
-                                 mm_pt_prot_bits(flags)));
-    mm_pt_node_unlock(table);
-
-    /* The frame becomes the guest's: flag it (identity side; the reference
-     * the caller holds is what keeps it alive), then fence the stale
-     * translation for this VMID/page -- a remap after unmap must not read
-     * the old entry out of a guest TLB. */
-    mm_pt_frame_lend(pfn);
-    hyp_arch_s2_fence(vm->vmid, gpa);
-    return 0;
+    return vm->backend->map(vm, gpa, pfn, prot);
 }
 
 int hyp_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
 {
-    if (!vm || vm->magic != HYP_VM_MAGIC || gpa & (PAGE_SIZE - 1))
+    if (!vm || vm->magic != HYP_VM_MAGIC)
         return -EINVAL;
-
-    pte_t *table = hyp_s2_walk(vm, gpa, 0);
-    if (!table)
-        return -ENOENT;
-    int idx = arch_pt_vpn(gpa, 0);
-
-    mm_pt_node_lock(table);
-    pte_t pte = table[idx];
-    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte)) {
-        mm_pt_node_unlock(table);
-        return -ENOENT;
-    }
-    table[idx] = 0;
-    mm_pt_note_absent(table, 0, idx);
-    mm_pt_node_unlock(table);
-
-    pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-    mm_pt_frame_return(pfn);
-    /* The reference goes back to the caller, which owns it again. */
-    hyp_arch_s2_fence(vm->vmid, gpa);
-    return 0;
+    return vm->backend->unmap(vm, gpa);
 }
 
 paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa)
 {
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return 0;
-    pte_t *table = hyp_s2_walk(vm, gpa, 0);
-    if (!table)
-        return 0;
-    pte_t pte = table[arch_pt_vpn(gpa, 0)];
-    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
-        return 0;
-    return arch_pte_addr(pte);
+    return vm->backend->translate(vm, gpa);
+}
+
+static int hyp_vm_copy_guest(hyp_vm_t *vm, uint64_t gpa, void *bytes,
+                             uint64_t len, int write)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC || (!bytes && len)) return -EINVAL;
+    if (!len) return 0;
+    if (!vm->backend->pin) return -EOPNOTSUPP;
+    hyp_vm_get(vm);
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    uint64_t base = vm->ram_base, size = vm->ram_size;
+    int updating = vm->updating;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    if (updating || len > size || gpa < base || gpa - base > size - len) {
+        hyp_vm_put(vm);
+        return updating ? -EBUSY : -EFAULT;
+    }
+    int rc = 0;
+    uint64_t done = 0;
+    while (done < len) {
+        pfn_t pfn;
+        rc = vm->backend->pin(vm, gpa, &pfn);
+        if (rc) break;
+        uint64_t offset = gpa & (PAGE_SIZE - 1);
+        uint64_t n = PAGE_SIZE - offset;
+        if (n > len - done) n = len - done;
+        uint8_t *page = (uint8_t *)pfn_to_virt(pfn) + offset;
+        if (write) memcpy(page, (uint8_t *)bytes + done, n);
+        else memcpy((uint8_t *)bytes + done, page, n);
+        frame_put(pfn);
+        gpa += n; done += n;
+    }
+    hyp_vm_put(vm);
+    return rc;
+}
+
+int hyp_vm_copy_from_guest(hyp_vm_t *vm, void *dst, uint64_t gpa, uint64_t len)
+{
+    return hyp_vm_copy_guest(vm, gpa, dst, len, 0);
+}
+
+int hyp_vm_copy_to_guest(hyp_vm_t *vm, uint64_t gpa, const void *src, uint64_t len)
+{
+    return hyp_vm_copy_guest(vm, gpa, (void *)src, len, 1);
 }
 
 int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
 {
-    if (!vm || vm->magic != HYP_VM_MAGIC)
-        return -EINVAL;
-    return mm_s2_audit(vm->s2_root, ARCH_PT_ROOT_LEVEL, out);
+    if (!vm || vm->magic != HYP_VM_MAGIC || !vm->backend->audit)
+        return -EOPNOTSUPP;
+    return vm->backend->audit(vm, out);
 }
 
-#else /* no host page tables in this configuration: every entry point is a no */
-
-/* The contract's failure returns, unchanged: NULL from create is what a caller
- * must already handle, and a caller that got NULL never reaches the rest. */
-hyp_vm_t *hyp_vm_create(uint64_t mem_size)
+/* Reserve configuration work without holding a spinlock over allocation or
+ * user copy. RUN and configuration changes cannot overlap. */
+int hyp_vm_begin_update(hyp_vm_t *vm)
 {
-    (void)mem_size;
-    return NULL;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    int rc = vm->updating || vm->run_count ? -EBUSY : 0;
+    if (!rc)
+        vm->updating = 1;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    return rc;
 }
 
-void hyp_vm_put(hyp_vm_t *vm)
+void hyp_vm_end_update(hyp_vm_t *vm)
 {
-    if (!vm || vm->magic != HYP_VM_MAGIC)
-        return;
-    if (--vm->refcount > 0)
-        return;
-    /* No s2_root to walk: nothing in this configuration can have set one.  The
-     * reference accounting is kept identical to the real half so a caller
-     * cannot tell the two apart by how it cleans up. */
-    vm->magic = 0;
-    kfree(vm);
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    vm->updating = 0;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
 }
 
-/* No tree, so no mapping can be created.  -ENOSYS is the honest answer and is
- * distinct from -EEXIST, which a caller reading "already mapped" would take as
- * a stage-2 entry existing. */
-int hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
+void hyp_vm_get(hyp_vm_t *vm)
 {
-    (void)vm; (void)gpa; (void)pfn; (void)prot;
-    return -ENOSYS;
+    if (vm)
+        __atomic_add_fetch(&vm->refcount, 1, __ATOMIC_RELAXED);
 }
 
-/* -ENOENT rather than -ENOSYS: nothing is mapped here, and that is the
- * contract's answer for a gpa with no mapping. */
-int hyp_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
+void hyp_vm_get_status(hyp_vm_t *vm, struct hyp_vm_status *status)
 {
-    (void)vm; (void)gpa;
-    return -ENOENT;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    status->exit = __atomic_load_n(&vm->broken, __ATOMIC_ACQUIRE) ? HYP_EXIT_ERROR :
+                   __atomic_load_n(&vm->shutdown, __ATOMIC_ACQUIRE) ? HYP_EXIT_SHUTDOWN : vm->last_exit[0];
+    status->scause = vm->last_exit[1];
+    status->stval = vm->last_exit[2];
+    status->htval = vm->last_exit[3];
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    status->marker_seen = hyp_vm_marker_seen(vm);
+    status->console_bytes = hyp_vm_console_bytes(vm);
+    status->rx_bytes = hyp_vm_rx_bytes(vm);
 }
-
-/* 0 is the contract's "no translation for this gpa". */
-paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa)
-{
-    (void)vm; (void)gpa;
-    return 0;
-}
-
-/* There is no tree to audit, so there is nothing to certify: a 0 return would
- * be read as "clean", which is a claim this configuration cannot make. */
-int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
-{
-    (void)vm; (void)out;
-    return -ENOSYS;
-}
-
-#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
 /* ---- v2: the on-demand RAM window (hyp_vcpu.h) ---- */
 
@@ -363,14 +236,24 @@ int hyp_vm_set_ram(hyp_vm_t *vm, uint64_t base, uint64_t size)
     /* The window must be inside what hgatp can name: this implementation
      * programs root entries [0,512) only, so a window that reaches past
      * HYP_GPA_LIMIT would be silently unreachable rather than refused. */
-    if (base > HYP_GPA_LIMIT - size)
+    if (size > vm->mem_size || size > vm->backend->gpa_limit ||
+        base > vm->backend->gpa_limit - size ||
+        ((base | size) & (PAGE_SIZE - 1)))
         return -ERANGE;
 
     /* Plain stores, and that is enough: the host sets the window before the
      * run, and while a guest is live only hyp_ram_fill() reads it -- on the
      * CPU running the guest, which is the CPU that published it. */
+    int rc = hyp_vm_begin_update(vm);
+    if (rc)
+        return rc;
+    if (vm->charged_pages) {
+        hyp_vm_end_update(vm);
+        return -EBUSY;
+    }
     vm->ram_base = base;
     vm->ram_size = size;
+    hyp_vm_end_update(vm);
     return 0;
 }
 
@@ -407,7 +290,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
     if (hyp_s2_translate(vm, gpa) != 0)
         return 0;
 
-    pfn_t pfn = pfa_alloc_page();
+    pfn_t pfn = pfa_alloc_flags(0, 0);
     if (pfn == PFN_NONE)
         return -ENOMEM;
     memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
@@ -415,19 +298,19 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
     /* Charged to whoever is running the guest, the same rule every other
      * allocation on this path uses (mm/fault.c, ipc/userfaultfd.c): the cgroup
      * of the current task is the thing that gets the guest's memory bill. */
-    task_t *t = proc_current();
-    if (t && cg_mem_charge(t->cgroup, 1) != 0) {
+    if (vm->charge_cg && cg_mem_charge(vm->charge_cg, 1) != 0) {
         frame_put(pfn);
         return -ENOMEM;
     }
 
     int rc = hyp_s2_map(vm, gpa, pfn, HYP_RAM_PAGE_PROT);
     if (rc) {
-        if (t)
-            cg_mem_uncharge(t->cgroup, 1);
+        if (vm->charge_cg)
+            cg_mem_uncharge(vm->charge_cg, 1);
         frame_put(pfn);
-        return rc;
+        return rc == -EEXIST ? 0 : rc;
     }
+    __atomic_add_fetch(&vm->charged_pages, 1, __ATOMIC_RELAXED);
     return 0;
 #else
     /* Without a stage-2 there is nowhere to put the page even if one could be
@@ -516,7 +399,6 @@ int hyp_selftest(void)
     for (int i = 0; i < 4; i++) {
         if (frame_is_lent_to_guest(pfns[i]))
             return st_fail("destroy-flag");
-        frame_put(pfns[i]);
     }
 
     kinfo("HYP_SELFTEST: PASS (vmid=%u entries=%lu)\n",

@@ -4,7 +4,7 @@
 #include "core/types.h"
 #include "platform.h"
 
-#define AARCH64_TRAP_FLAG_IRQ  (1UL << 0)
+#define AARCH64_TRAP_FLAG_IRQ (1UL << 0)
 
 extern volatile uint64_t aarch64_trap_flags[CONFIG_NR_CPUS];
 
@@ -17,11 +17,21 @@ static inline uint64_t arch_read_esr(void) {
     return v;
 }
 
-static inline void arch_mb(void)  { __asm__ __volatile__("dmb ish" ::: "memory"); }
-static inline void arch_rmb(void) { __asm__ __volatile__("dmb ishld" ::: "memory"); }
-static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory"); }
-static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
-static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
+static inline void arch_mb(void) {
+    __asm__ __volatile__("dmb ish" ::: "memory");
+}
+static inline void arch_rmb(void) {
+    __asm__ __volatile__("dmb ishld" ::: "memory");
+}
+static inline void arch_wmb(void) {
+    __asm__ __volatile__("dmb ishst" ::: "memory");
+}
+static inline void arch_wfi(void) {
+    __asm__ __volatile__("wfi");
+}
+static inline void arch_cpu_relax(void) {
+    __asm__ __volatile__("yield");
+}
 
 static inline uint64_t arch_read_ctr(void) {
     uint64_t ctr;
@@ -38,21 +48,21 @@ static inline size_t arch_icache_line_size(void) {
 }
 
 static inline void arch_fence_i(void) {
-    __asm__ __volatile__(
-        "dsb ish\n\t"
-        "ic iallu\n\t"
-        "dsb ish\n\t"
-        "isb"
-        ::: "memory");
+    __asm__ __volatile__("dsb ish\n\t"
+                         "ic iallu\n\t"
+                         "dsb ish\n\t"
+                         "isb" ::
+                             : "memory");
 }
 
 static inline void arch_flush_icache_range(const void *addr, size_t size) {
     size_t dline = arch_dcache_line_size();
     size_t iline = arch_icache_line_size();
     uintptr_t start = (uintptr_t)addr & ~((uintptr_t)dline - 1);
-    uintptr_t end = ((uintptr_t)addr + size + dline - 1) & ~((uintptr_t)dline - 1);
+    uintptr_t end =
+        ((uintptr_t)addr + size + dline - 1) & ~((uintptr_t)dline - 1);
     for (uintptr_t p = start; p < end; p += dline)
-        __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
+        __asm__ __volatile__("dc civac, %0" ::"r"(p) : "memory");
     __asm__ __volatile__("dsb sy" ::: "memory");
 
     /*
@@ -67,9 +77,11 @@ static inline void arch_flush_icache_range(const void *addr, size_t size) {
 }
 
 static inline unsigned arch_current_cpu_id(void) {
-    uint64_t mpidr;
-    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
-    return (unsigned)(mpidr & 0xff);
+    uint64_t logical;
+    /* CPU-local and intentionally absent from task_context_t: a migrated
+     * thread must observe the destination CPU, independent of DT ordering. */
+    __asm__ __volatile__("mrs %0, tpidrro_el0" : "=r"(logical));
+    return (unsigned)logical;
 }
 
 static inline void arch_local_irq_disable(void) {
@@ -98,18 +110,17 @@ static inline void aarch64_enable_pan(void) {
     uint64_t sctlr;
     __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
     sctlr |= 1UL << 22; /* PAN */
-    __asm__ __volatile__("msr sctlr_el1, %0" :: "r"(sctlr) : "memory");
+    __asm__ __volatile__("msr sctlr_el1, %0" ::"r"(sctlr) : "memory");
     __asm__ __volatile__("isb" ::: "memory");
 }
 
 static inline void arch_tlb_flush(void) {
 #ifndef CONFIG_NOMMU
-    __asm__ __volatile__(
-        "dsb ishst\n\t"
-        "tlbi vmalle1\n\t"
-        "dsb ish\n\t"
-        "isb"
-        ::: "memory");
+    __asm__ __volatile__("dsb ishst\n\t"
+                         "tlbi vmalle1\n\t"
+                         "dsb ish\n\t"
+                         "isb" ::
+                             : "memory");
 #endif
 }
 
@@ -118,20 +129,18 @@ static inline void arch_tlb_flush(void) {
  * retain a stale copy of a page that is being unmapped.  The instruction
  * ignores the in-page offset. */
 static inline void arch_tlb_flush_page_local(uint64_t addr) {
-    __asm__ __volatile__(
-        "dsb ishst\n\t"
-        "tlbi vaae1is, %0\n\t"
-        "dsb ish\n\t"
-        "isb"
-        :: "r"(addr)
-        : "memory");
+    __asm__ __volatile__("dsb ishst\n\t"
+                         "tlbi vaae1is, %0\n\t"
+                         "dsb ish\n\t"
+                         "isb" ::"r"(addr)
+                         : "memory");
 }
 static inline void arch_tlb_flush_page(uint64_t addr) {
     arch_tlb_flush_page_local(addr);
 }
 
 static inline void arch_set_task_pointer(void *task) {
-    __asm__ __volatile__("msr tpidr_el1, %0" :: "r"(task));
+    __asm__ __volatile__("msr tpidr_el1, %0" ::"r"(task));
 }
 
 static inline void *arch_get_task_pointer(void) {
@@ -168,15 +177,13 @@ static inline uint64_t arch_read_tval(void) {
 }
 
 static inline void arch_write_epc(uint64_t v) {
-    __asm__ __volatile__("msr elr_el1, %0" :: "r"(v));
+    __asm__ __volatile__("msr elr_el1, %0" ::"r"(v));
 }
 
 static inline void arch_write_tvec(uint64_t v) {
-    __asm__ __volatile__(
-        "msr vbar_el1, %0\n\t"
-        "isb"
-        :: "r"(v)
-        : "memory");
+    __asm__ __volatile__("msr vbar_el1, %0\n\t"
+                         "isb" ::"r"(v)
+                         : "memory");
 }
 
 static inline uint64_t arch_read_satp(void) {
@@ -193,15 +200,17 @@ static inline void arch_write_satp(uint64_t v) {
 #ifdef CONFIG_NOMMU
     (void)v;
 #else
-    __asm__ __volatile__(
-        "msr ttbr0_el1, %0\n\t"
-        "isb"
-        :: "r"(v)
-        : "memory");
+    __asm__ __volatile__("msr ttbr0_el1, %0\n\t"
+                         "isb" ::"r"(v)
+                         : "memory");
 #endif
 }
-static inline uint64_t arch_read_addr_space_token(void) { return arch_read_satp(); }
-static inline void arch_write_addr_space_token(uint64_t v) { arch_write_satp(v); }
+static inline uint64_t arch_read_addr_space_token(void) {
+    return arch_read_satp();
+}
+static inline void arch_write_addr_space_token(uint64_t v) {
+    arch_write_satp(v);
+}
 
 static inline uint64_t arch_read_sstatus(void) {
     uint64_t v;
@@ -210,7 +219,7 @@ static inline uint64_t arch_read_sstatus(void) {
 }
 
 static inline void arch_write_sstatus(uint64_t v) {
-    __asm__ __volatile__("msr daif, %0" :: "r"(v));
+    __asm__ __volatile__("msr daif, %0" ::"r"(v));
 }
 
 static inline uint64_t arch_read_sie(void) {
@@ -222,10 +231,18 @@ static inline void arch_write_sie(uint64_t v) {
     else
         arch_local_irq_disable();
 }
-static inline uint64_t arch_read_sip(void) { return 0; }
-static inline void arch_write_sip(uint64_t v) { (void)v; }
-static inline uint64_t arch_read_sscratch(void) { return 0; }
-static inline void arch_write_sscratch(uint64_t v) { (void)v; }
+static inline uint64_t arch_read_sip(void) {
+    return 0;
+}
+static inline void arch_write_sip(uint64_t v) {
+    (void)v;
+}
+static inline uint64_t arch_read_sscratch(void) {
+    return 0;
+}
+static inline void arch_write_sscratch(uint64_t v) {
+    (void)v;
+}
 
 static inline void __attribute__((noreturn)) arch_halt(void) {
     arch_local_irq_disable();
@@ -250,19 +267,21 @@ static inline int arch_is_kernel_address(const void *ptr) {
 static inline void arch_dma_sync_for_device(const void *addr, size_t size) {
     size_t line = arch_dcache_line_size();
     uintptr_t start = (uintptr_t)addr & ~((uintptr_t)line - 1);
-    uintptr_t end = ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
+    uintptr_t end =
+        ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
     for (uintptr_t p = start; p < end; p += line)
-        __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
+        __asm__ __volatile__("dc civac, %0" ::"r"(p) : "memory");
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 static inline void arch_dma_sync_for_cpu(const void *addr, size_t size) {
     size_t line = arch_dcache_line_size();
     uintptr_t start = (uintptr_t)addr & ~((uintptr_t)line - 1);
-    uintptr_t end = ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
+    uintptr_t end =
+        ((uintptr_t)addr + size + line - 1) & ~((uintptr_t)line - 1);
     __asm__ __volatile__("dsb sy" ::: "memory");
     for (uintptr_t p = start; p < end; p += line)
-        __asm__ __volatile__("dc ivac, %0" :: "r"(p) : "memory");
+        __asm__ __volatile__("dc ivac, %0" ::"r"(p) : "memory");
     __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
@@ -279,15 +298,16 @@ static inline int arch_unwind_frames(uint64_t fp,
         if (!arch_is_kernel_address(frame))
             break;
         uint64_t next_fp = frame[0];
-        uint64_t lr      = frame[1];
-        if (!lr) break;
+        uint64_t lr = frame[1];
+        if (!lr)
+            break;
         frames[n++].pc = lr;
-        if (!next_fp || next_fp <= fp) break;
+        if (!next_fp || next_fp <= fp)
+            break;
         fp = next_fp;
     }
     return n;
 }
-
 
 /* Local-only full flush. */
 static inline void arch_tlb_flush_local(void) {

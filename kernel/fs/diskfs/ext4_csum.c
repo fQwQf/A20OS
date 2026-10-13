@@ -62,12 +62,23 @@ int ext4_has_metadata_csum(const ext4_sb_info_t *sb)
     return (sb->s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) != 0;
 }
 
-/* The two on-disk descriptor shapes disagree about where bg_checksum lives: the
- * 64-byte descriptor carries bg_exclude_bitmap_lo, which pushes every later
- * field four bytes further out than in the legacy 32-byte one. */
+/* Both descriptor sizes share their first 32 bytes. bg_checksum is at
+ * 0x1e in each; the larger descriptor appends high halves after it.
+ * See Linux ext4 group_descr.html (on-disk format specification). */
 size_t ext4_group_desc_checksum_offset(size_t desc_size)
 {
-    return desc_size >= 64 ? 0x1e : 0x1c;
+    (void)desc_size;
+    return 0x1e;
+}
+
+static uint16_t ext4_crc16(uint16_t crc, const uint8_t *data, size_t size)
+{
+    while (size--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xa001U : 0);
+    }
+    return crc;
 }
 
 void ext4_group_desc_checksum_put(ext4_sb_info_t *sb, uint32_t group,
@@ -75,34 +86,26 @@ void ext4_group_desc_checksum_put(ext4_sb_info_t *sb, uint32_t group,
 {
     uint8_t le_group[4];
     ext4_csum_put_le32(le_group, group);
-
     size_t csum_off = ext4_group_desc_checksum_offset(desc_size);
-    ext4_csum_put_le16(raw + csum_off, 0);
-    uint32_t crc = ext4_checksum_seed(sb);
-    crc = ext4_crc32c(crc, le_group, sizeof(le_group));
-    crc = ext4_crc32c(crc, raw, desc_size);
-    ext4_csum_put_le16(raw + csum_off, (uint16_t)(crc & 0xffffU));
+    if (ext4_has_metadata_csum(sb)) {
+        ext4_csum_put_le16(raw + csum_off, 0);
+        uint32_t crc = ext4_checksum_seed(sb);
+        crc = ext4_crc32c(crc, le_group, sizeof(le_group));
+        crc = ext4_crc32c(crc, raw, desc_size);
+        ext4_csum_put_le16(raw + csum_off, (uint16_t)crc);
+    } else if (sb->s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_GDT_CSUM) {
+        /* Legacy CRC16 skips the checksum field rather than zeroing it. */
+        uint16_t crc = ext4_crc16(0xffffU, sb->s_uuid, sizeof(sb->s_uuid));
+        crc = ext4_crc16(crc, le_group, sizeof(le_group));
+        crc = ext4_crc16(crc, raw, csum_off);
+        crc = ext4_crc16(crc, raw + csum_off + 2, desc_size - csum_off - 2);
+        ext4_csum_put_le16(raw + csum_off, crc);
+    }
 }
 
-/* Rewrite the in-memory descriptor (always the 64-byte layout) into the
- * narrower on-disk shape a filesystem with s_desc_size == 32 reads back. */
 void ext4_group_desc_pack_legacy(const ext4_group_desc_t *gd, uint8_t *out)
 {
-    memset(out, 0, 32);
-    memcpy(out + 0x00, &gd->bg_block_bitmap_lo, 4);
-    memcpy(out + 0x04, &gd->bg_inode_bitmap_lo, 4);
-    memcpy(out + 0x08, &gd->bg_inode_table_lo, 4);
-    memcpy(out + 0x0c, &gd->bg_free_blocks_count_lo, 2);
-    memcpy(out + 0x0e, &gd->bg_free_inodes_count_lo, 2);
-    memcpy(out + 0x10, &gd->bg_used_dirs_count_lo, 2);
-    memcpy(out + 0x12, &gd->bg_flags, 2);
-    memcpy(out + 0x14, &gd->bg_block_bitmap_csum_lo, 2);
-    memcpy(out + 0x16, &gd->bg_inode_bitmap_csum_lo, 2);
-    memcpy(out + 0x18, &gd->bg_itable_unused_lo, 2);
-    memcpy(out + 0x1a, &gd->bg_checksum, 2);
-    /* The 32-byte descriptor has no high halves at all; its tail after the
-     * checksum is unused. */
-    memset(out + 0x1c, 0, 4);
+    memcpy(out, gd, 32);
 }
 
 void ext4_inode_checksum_put(ext4_sb_info_t *sb, uint32_t ino, uint8_t *raw,

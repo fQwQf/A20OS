@@ -202,3 +202,12 @@ QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以 `run
 3. 把 MCU 兼容桩替换为必需的 IPC 和小型 VFS 实现，然后挂载现有 TF `block_dev_t`。
 4. 在 STM32F1 驱动层扩展可复用的 GPIO、EXTI、SPI、I2C 和 SPI-flash 控制器接口。
 5. 把 SDIO 传输移到 DMA，并用外部 SRAM 做块缓存。
+
+## 原生多芯片共享内核实验
+
+新增默认关闭的 `MCU_SHARED_KERNEL=1` 端口，使用独立固件目录及共享链接脚本。
+它要求新增共享 RAM 和硬件仲裁器，NE1/NE2 接线不同于 Xuanwu 的 NE3 单端口
+外部 SRAM，不能直接在现有板上运行。已用两个 Cortex-M3 指令引擎运行完整
+固件，验证原生线程迁移；没有物理运行证据。构建、仲裁 ABI、私有/共享内存
+布局与后续验收见 [原生共享内核设计](../cluster/25-native-shared-kernel.md)。
+现有单 MCU、Xuanwu 外设、UART leaf 和 stm32vldiscovery 配置继续保留。

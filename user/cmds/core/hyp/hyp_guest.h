@@ -33,6 +33,11 @@
 #define HYP_GUEST_EXIT_SHUTDOWN 1
 #define HYP_GUEST_EXIT_FAULT    2
 #define HYP_GUEST_EXIT_ERROR    3
+#define HYP_GUEST_EXIT_YIELD    4
+#define HYP_GUEST_EXIT_STOPPED  5
+#define HYP_GUEST_EXIT_PAUSED   6
+#define HYP_GUEST_EXIT_HART_STOPPED 7
+#define HYP_GUEST_MAX_VCPUS 8
 
 /* "shutdown" / "fault" / "error" / "none", for the exit=N(name) reports. */
 const char *hyp_guest_exit_name(long exit_reason);
@@ -49,6 +54,12 @@ struct hyp_guest_status {
     uint64_t console_bytes;
     uint64_t rx_bytes;     /* v3: host bytes handed to the guest's UART */
 };
+
+struct hyp_guest_stats {
+    uint64_t vms, vcpus, mapped_pages, table_pages, free_host_pages;
+};
+int hyp_guest_get_stats(struct hyp_guest_stats *out);
+int hyp_guest_vm_smp(long vm, unsigned count);
 
 /* ---- files ---- */
 
@@ -89,6 +100,10 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
                            uint64_t mem_base, uint64_t mem_size,
                            const char *bootargs);
 
+size_t hyp_guest_fdt_build_smp(unsigned char *out, size_t cap,
+                              uint64_t mem_base, uint64_t mem_size,
+                              const char *bootargs, unsigned cpus);
+
 /* ---- syscalls ---- */
 
 /* Thin wrappers over the Linux ABI bridge.  All of them return what syscall()
@@ -99,10 +114,17 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
 long hyp_guest_vm_create(uint64_t mem_size);
 int  hyp_guest_vm_load(long vm, uint64_t gpa, const void *src, uint64_t len);
 long hyp_guest_vcpu_create(long vm, uint64_t entry_gpa);
+int hyp_guest_vcpu_destroy(long vcpu);
 int  hyp_guest_vcpu_set_boot(long vcpu, uint64_t hartid, uint64_t dtb_gpa);
 int  hyp_guest_vm_set_marker(long vm, const char *marker);
 long hyp_guest_vcpu_run(long vcpu);
+int hyp_guest_vcpu_control(long vcpu, unsigned command);
+int hyp_guest_vcpu_irq(long vcpu, unsigned irq, int level);
 long hyp_guest_vm_status(long vm, struct hyp_guest_status *st);
+int hyp_guest_console_config(long vm, int managed);
+int hyp_guest_console_write(long vm, const void *data, size_t len);
+int hyp_guest_console_read(long vm, void *data, size_t len);
+int hyp_guest_vm_set_ram(long vm, uint64_t base, uint64_t size);
 int  hyp_guest_vm_destroy(long vm);
 
 /* What to say about a syscall that came back -1.  Returns NULL when the kernel

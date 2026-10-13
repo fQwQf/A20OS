@@ -248,6 +248,20 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
+    if inst.machine.vm_manager and not args.name:
+        raise A20Error("machine.vm_manager requires a named host (--name)")
+    if args.detach and not args.name:
+        raise A20Error("--detach requires --name")
+    if args.no_build and not args.name:
+        raise A20Error("--no-build requires --name")
+    if args.name:
+        from a20_runtime import start
+        _check_runnable(inst, "run")
+        _gate_resources(inst, args)
+        _gate_qemu(inst, "run")
+        return start(inst, args.name, detach=args.detach,
+                     no_build=args.no_build, dry_run=args.dry_run,
+                     make_args=list(args.make_args))
     if inst.arch == "armv7m":
         if not inst.stm32.qemu:
             raise A20Error(
@@ -934,7 +948,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_instance_cmd("trim", "show the kernel trim plan the instance builds with",
                    with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
-    add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
+    prun = add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
+    prun.add_argument("--name", help="create a named runtime with private writable disks")
+    prun.add_argument("--detach", action="store_true", help="leave the named runtime running")
+    prun.add_argument("--no-build", action="store_true", help="use existing artifacts for a named run")
+    pvm = sub.add_parser("vm", help="manage guests inside a named hypervisor host")
+    vm_sub = pvm.add_subparsers(dest="vm_action", required=True)
+    for action in ("start", "list", "stats", "console", "pause", "resume", "stop", "destroy"):
+        command = vm_sub.add_parser(action)
+        command.add_argument("--host", required=True, help="named QEMU hypervisor host")
+        if action == "start":
+            command.add_argument("profile", help="VM profile name or TOML path")
+            command.add_argument("--name", required=True, help="guest runtime identity")
+        elif action not in ("list", "stats"):
+            command.add_argument("guest")
+    sub.add_parser("running", help="list named QEMU runtimes and their state")
+    for action in ("attach", "pause", "resume", "stop", "destroy"):
+        runtime = sub.add_parser(action, help=f"{action} a named QEMU runtime")
+        runtime.add_argument("name")
     add_instance_cmd("debug", "build with -O0 -g and boot under QEMU GDB stub", with_make_args=True)
     add_instance_cmd("test", "build, boot, inject [test].commands, and check [test].expect",
                      with_make_args=True)
@@ -973,20 +1004,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
 
-    # Unknown arguments (after an optional `--`) are forwarded to make. Using
-    ns, passthrough = parser.parse_known_args(argv)
-    # Everything after an explicit "--" is make's.  Anything else that a20 did
-    # not recognise is a typo, and forwarding it would hand it to make as a
-    # variable override or goal -- so `--dry-rnu` has to be an error, not a
-    # silently-ignored flag that changes what gets built.
-    if passthrough and passthrough[0] == "--":
-        ns.make_args = passthrough[1:]
-    elif passthrough:
-        parser.error(f"unrecognized argument(s): {' '.join(passthrough)}\n"
-                     "a20 flags must be spelled correctly; make arguments go after '--', "
-                     "e.g. `a20 build <instance> -- -j8`")
-    else:
-        ns.make_args = []
+    raw = list(sys.argv[1:] if argv is None else argv)
+    split = raw.index("--") if "--" in raw else len(raw)
+    ns, unknown = parser.parse_known_args(raw[:split])
+    if unknown:
+        parser.error(f"unrecognized argument(s): {' '.join(unknown)}\n"
+                     "make arguments go after '--', e.g. `a20 build <instance> -- -j8`")
+    ns.make_args = raw[split + 1:] if split < len(raw) else []
+    if ns.make_args and ns.command not in {"build", "run", "debug", "test", "flash", "package", "deploy"}:
+        parser.error(f"{ns.command} does not accept make arguments")
 
     rc = _dispatch(ns)
     # Commands that delegate to make report success by returning None; main()
@@ -996,6 +1022,18 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(ns: argparse.Namespace) -> int | None:
     match ns.command:
+        case "vm":
+            from a20_vm import dispatch
+            return dispatch(ns)
+        case "running":
+            from a20_runtime import list_runs
+            return list_runs()
+        case "attach":
+            from a20_runtime import attach
+            return attach(ns.name)
+        case "pause" | "resume" | "stop" | "destroy":
+            from a20_runtime import control
+            return control(ns.name, ns.command)
         case "check":
             return cmd_check(ns)
         case "check-registry":

@@ -99,3 +99,21 @@ SMP_BENCH cpus 0:1 1:1 2:1 3:1 4:1 5:1 6:1 7:1
 SCHED_STRESS: PASS
 PROC_STRESS: PASS
 ```
+
+
+## 可复用启动与功能门禁补充（2026-10-12）
+
+AArch64 新板可通过可选 `board_platform.h`、assembler-safe `board_boot.h`
+提供布局参数，不必在 arch/smp.c 增加板型分支。board 顶层 `.S` 现在与该
+板的 C 文件一同构建。`board.mk` 是可选构建适配入口，可声明 QEMU machine、
+物理 CPU 数和启动镜像，默认架构参数保持原样。当前首个使用者为
+[raspberrypi4](raspberrypi4.md)，不是所有既有 AArch64 BSP 已完成该迁移。
+
+`core/fdt_view.h` 提供带映射大小的只读 FDT v17 cursor，适合在无堆早期启动
+读取固件事实。调用者负责提供真实可读映射、解释设备属性、保存必要数据，
+以及将 RAM/保留区信息交给分配器；reader 不会自动完成所有板级发现。
+
+首轮功能可先运行 `make check-smp-native` 或新板自己的门禁，验证同一线程的
+迁移、栈/堆、sleep、timer IRQ、IPI 和退出回收，再补设备与完整用户态。
+`SMP_SELFTEST=1` 仅用于 hosted bringup，默认关闭且单独隔离构建产物。
+这些功能结果不能替代物理设备、线程压力与完整用户态的后续验收。

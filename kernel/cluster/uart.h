@@ -54,9 +54,9 @@
 #endif
 #endif
 
-#define A20_CLX_PROFILE_MCU     1
+#define A20_CLX_PROFILE_MCU 1
 #define A20_CLX_PROFILE_DEFAULT 2
-#define A20_CLX_PROFILE_SERVER  3
+#define A20_CLX_PROFILE_SERVER 3
 
 /* ------------------------------------------------------------------ */
 /* Frame layout, 02-wire-protocol.md §1.  All multi-byte fields        */
@@ -64,71 +64,84 @@
 /* below, never through a struct memory image (02 §1 hard rule).       */
 /* ------------------------------------------------------------------ */
 
-#define A20_CLX_HDR_LEN        32u
-#define A20_CLX_CRC_LEN        2u
-#define A20_CLX_MAGIC          0x4C43u /* "CL", LE on the wire: 'C' then 'L' */
-#define A20_CLX_WIRE_VER       0u
-#define A20_CLX_TTL_DEFAULT    8u
-#define A20_CLX_CSUM_NONE      0u
-#define A20_CLX_CSUM_CCITT     1u
+#define A20_CLX_HDR_LEN 32u
+#define A20_CLX_CRC_LEN 2u
+#define A20_CLX_MAGIC 0x4C43u /* "CL", LE on the wire: 'C' then 'L' */
+#define A20_CLX_WIRE_VER 0u
+#define A20_CLX_SESSION_VER 1u
+#define A20_CLX_TTL_DEFAULT 8u
+#define A20_CLX_CSUM_NONE 0u
+#define A20_CLX_CSUM_CCITT 1u
 
 /* Field offsets into the 32-byte header. */
-#define A20_CLX_OFF_MAGIC       0u  /* u16 */
-#define A20_CLX_OFF_VER         2u  /* u8  */
-#define A20_CLX_OFF_TYPE        3u  /* u8  */
-#define A20_CLX_OFF_FLAGS       4u  /* u16 */
-#define A20_CLX_OFF_FRAG        6u  /* u16 */
-#define A20_CLX_OFF_TXID        8u  /* u32 */
-#define A20_CLX_OFF_SRC_HASH   12u  /* u32 */
-#define A20_CLX_OFF_DST_HASH   16u  /* u32 */
-#define A20_CLX_OFF_DST_SLOT   20u  /* u32 */
-#define A20_CLX_OFF_SEQ        24u  /* u32 */
+#define A20_CLX_OFF_MAGIC 0u        /* u16 */
+#define A20_CLX_OFF_VER 2u          /* u8  */
+#define A20_CLX_OFF_TYPE 3u         /* u8  */
+#define A20_CLX_OFF_FLAGS 4u        /* u16 */
+#define A20_CLX_OFF_FRAG 6u         /* u16 */
+#define A20_CLX_OFF_TXID 8u         /* u32 */
+#define A20_CLX_OFF_SRC_HASH 12u    /* u32 */
+#define A20_CLX_OFF_DST_HASH 16u    /* u32 */
+#define A20_CLX_OFF_DST_SLOT 20u    /* u32 */
+#define A20_CLX_OFF_SEQ 24u         /* u32 */
 #define A20_CLX_OFF_PAYLOAD_LEN 28u /* u16 */
-#define A20_CLX_OFF_TTL        30u  /* u8  */
-#define A20_CLX_OFF_CSUM_KIND  31u  /* u8  */
-#define A20_CLX_OFF_PAYLOAD    32u
+#define A20_CLX_OFF_TTL 30u         /* u8  */
+#define A20_CLX_OFF_CSUM_KIND 31u   /* u8  */
+#define A20_CLX_OFF_PAYLOAD 32u
 
 /* Message types, 02 §2. */
-#define A20_CLX_TYPE_HELLO      1u
-#define A20_CLX_TYPE_HELLO_ACK  2u
-#define A20_CLX_TYPE_PING       3u
-#define A20_CLX_TYPE_PONG       4u
-#define A20_CLX_TYPE_SEND       5u
-#define A20_CLX_TYPE_CALL       6u
+#define A20_CLX_TYPE_HELLO 1u
+#define A20_CLX_TYPE_HELLO_ACK 2u
+#define A20_CLX_TYPE_PING 3u
+#define A20_CLX_TYPE_PONG 4u
+#define A20_CLX_TYPE_SEND 5u
+#define A20_CLX_TYPE_CALL 6u
 #define A20_CLX_TYPE_CALL_REPLY 7u
-#define A20_CLX_TYPE_CLOSE      8u
-#define A20_CLX_TYPE_ACK        9u
-#define A20_CLX_TYPE_NACK      10u
-#define A20_CLX_TYPE_ERROR     11u
+#define A20_CLX_TYPE_CLOSE 8u
+#define A20_CLX_TYPE_ACK 9u
+#define A20_CLX_TYPE_NACK 10u
+#define A20_CLX_TYPE_ERROR 11u
+
+/* CLOSE is directional: a caller release must not revoke an unrelated
+ * outgoing proxy to the same peer/slot. Zero retains legacy service close. */
+#define A20_CLX_CLOSE_CALLER 0xffffffffu
 
 /* Flags, 02 §3.  Bits 4..15 are reserved: send zero, ignore on receive. */
-#define A20_CLX_FLAG_RELIABLE   (1u << 0)
+#define A20_CLX_FLAG_RELIABLE (1u << 0)
 #define A20_CLX_FLAG_FRAGMENTED (1u << 1)
-#define A20_CLX_FLAG_BROADCAST  (1u << 2)
+#define A20_CLX_FLAG_BROADCAST (1u << 2)
 #define A20_CLX_FLAG_COMPRESSED (1u << 3) /* v0: reserved, must be 0 */
 
 /* HELLO payload, 02 §6: fixed 32 bytes. */
-#define A20_CLX_HELLO_LEN            32u
-#define A20_CLX_HELLO_OFF_NODE_ID     0u  /* 16 bytes */
-#define A20_CLX_HELLO_OFF_PROTO_MIN  16u
-#define A20_CLX_HELLO_OFF_PROTO_MAX  17u
-#define A20_CLX_HELLO_OFF_TIER       18u
-#define A20_CLX_HELLO_OFF_CAPS       19u
+#define A20_CLX_HELLO_LEN 32u
+#define A20_CLX_HELLO_OFF_NODE_ID 0u /* 16 bytes */
+#define A20_CLX_HELLO_OFF_PROTO_MIN 16u
+#define A20_CLX_HELLO_OFF_PROTO_MAX 17u
+#define A20_CLX_HELLO_OFF_TIER 18u
+#define A20_CLX_HELLO_OFF_CAPS 19u
 #define A20_CLX_HELLO_OFF_SHORT_ADDR 20u /* u16 LE */
 #define A20_CLX_HELLO_OFF_LINK_ADDR_LEN 22u
-#define A20_CLX_HELLO_OFF_RESERVED   23u
-#define A20_CLX_HELLO_OFF_NONCE      24u /* 8 opaque bytes */
-#define A20_CLX_NODE_ID_LEN          16u
+#define A20_CLX_HELLO_OFF_RESERVED 23u
+#define A20_CLX_HELLO_OFF_NONCE 24u /* 8 opaque bytes */
+#define A20_CLX_NODE_ID_LEN 16u
 
 /* Capability bits, 01-abi §能力位. */
-#define A20_CLX_CAP_RELAY    (1u << 0)
+#define A20_CLX_CAP_RELAY (1u << 0)
 #define A20_CLX_CAP_RELIABLE (1u << 1)
-#define A20_CLX_CAP_LEAF     (1u << 2)
+#define A20_CLX_CAP_LEAF (1u << 2)
+/* Transport feature, not a Native set_self capability. */
+#define A20_CLX_CAP_FRAGMENT (1u << 3)
+#define A20_CLX_CAP_ONEWAY (1u << 4)
+
+/* Transport-neutral states, numerically identical to the Native ABI. */
+#define A20_CLX_STATE_DOWN 0u
+#define A20_CLX_STATE_SUSPECT 1u
+#define A20_CLX_STATE_UP 2u
 
 /* Profile tier values carried in the HELLO payload (01-abi/03-§4). */
-#define A20_CLX_TIER_MCU     1u
+#define A20_CLX_TIER_MCU 1u
 #define A20_CLX_TIER_DEFAULT 2u
-#define A20_CLX_TIER_SERVER  3u
+#define A20_CLX_TIER_SERVER 3u
 
 /*
  * errno values carried in the ERROR frame payload (02 §2: 4B errno + 4B
@@ -137,10 +150,10 @@
  * NOT_FOUND 24, NODE_UNREACHABLE 26, CLUSTER_TIMEOUT 27, REMOTE_CLOSED 28,
  * CLUSTER_UNSUPPORTED 29.  An unknown code decodes as CLUSTER_UNSUPPORTED.
  */
-#define A20_CLX_WERR_NOT_FOUND           24u
-#define A20_CLX_WERR_NODE_UNREACHABLE    26u
-#define A20_CLX_WERR_CLUSTER_TIMEOUT     27u
-#define A20_CLX_WERR_REMOTE_CLOSED       28u
+#define A20_CLX_WERR_NOT_FOUND 24u
+#define A20_CLX_WERR_NODE_UNREACHABLE 26u
+#define A20_CLX_WERR_CLUSTER_TIMEOUT 27u
+#define A20_CLX_WERR_REMOTE_CLOSED 28u
 #define A20_CLX_WERR_CLUSTER_UNSUPPORTED 29u
 
 /* Per-link counters, 02 §10.  Append-only: new counters go at the tail. */
@@ -161,15 +174,15 @@ typedef struct a20_clx_link_counters {
 /* UART transport constants, 04-transports.md §4.                      */
 /* ------------------------------------------------------------------ */
 
-#define A20_CLX_UART_TRANSPORT_ID     2u
-#define A20_CLX_UART_MTU              256u /* header + payload + CRC, no SLIP */
-#define A20_CLX_UART_MAX_PAYLOAD \
+#define A20_CLX_UART_TRANSPORT_ID 2u
+#define A20_CLX_UART_MTU 256u /* header + payload + CRC, no SLIP */
+#define A20_CLX_UART_MAX_PAYLOAD                                               \
     (A20_CLX_UART_MTU - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN) /* 222 */
 #define A20_CLX_UART_SHORT_UNASSIGNED 0xFFFFu
 
 /* SLIP variant, 04 §4 table: END delimits head and tail, ESC prefixes. */
-#define A20_CLX_SLIP_END    0xC0u
-#define A20_CLX_SLIP_ESC    0xDBu
+#define A20_CLX_SLIP_END 0xC0u
+#define A20_CLX_SLIP_ESC 0xDBu
 #define A20_CLX_SLIP_ESC_END 0xDCu
 #define A20_CLX_SLIP_ESC_ESC 0xDDu
 
@@ -188,7 +201,7 @@ typedef struct a20_clx_link_counters {
  * integration step can retune it in one place.
  */
 #define A20_CLX_UART_HELLO_TIMEOUT_MS 2000u
-#define A20_CLX_UART_HELLO_RETRIES    3u
+#define A20_CLX_UART_HELLO_RETRIES 3u
 
 /*
  * 04 §4 头节点侧: "一 UART 一叶子，多叶子用多 UART" -- so the head-side
@@ -204,39 +217,33 @@ typedef struct a20_clx_link_counters {
 /* Explicit little-endian field accessors (02 §1: no struct images).   */
 /* ------------------------------------------------------------------ */
 
-static inline uint16_t a20_clx_get_le16(const uint8_t *p)
-{
+static inline uint16_t a20_clx_get_le16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-static inline uint32_t a20_clx_get_le32(const uint8_t *p)
-{
+static inline uint32_t a20_clx_get_le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
 }
 
-static inline uint64_t a20_clx_get_le64(const uint8_t *p)
-{
+static inline uint64_t a20_clx_get_le64(const uint8_t *p) {
     return (uint64_t)a20_clx_get_le32(p) |
            ((uint64_t)a20_clx_get_le32(p + 4) << 32);
 }
 
-static inline void a20_clx_put_le16(uint8_t *p, uint16_t v)
-{
+static inline void a20_clx_put_le16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v & 0xFFu);
     p[1] = (uint8_t)((v >> 8) & 0xFFu);
 }
 
-static inline void a20_clx_put_le32(uint8_t *p, uint32_t v)
-{
+static inline void a20_clx_put_le32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)(v & 0xFFu);
     p[1] = (uint8_t)((v >> 8) & 0xFFu);
     p[2] = (uint8_t)((v >> 16) & 0xFFu);
     p[3] = (uint8_t)((v >> 24) & 0xFFu);
 }
 
-static inline void a20_clx_put_le64(uint8_t *p, uint64_t v)
-{
+static inline void a20_clx_put_le64(uint8_t *p, uint64_t v) {
     a20_clx_put_le32(p, (uint32_t)(v & 0xFFFFFFFFu));
     a20_clx_put_le32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFu));
 }
@@ -252,8 +259,7 @@ static inline void a20_clx_put_le64(uint8_t *p, uint64_t v)
  * "123456789" is 0x29B1 (asserted in tools/tests/test_clx_uart.c so the
  * parameterisation cannot silently drift).
  */
-static inline uint16_t a20_clx_crc16_ccitt(const uint8_t *data, uint32_t len)
-{
+static inline uint16_t a20_clx_crc16_ccitt(const uint8_t *data, uint32_t len) {
     uint16_t crc = 0xFFFFu;
     uint32_t i;
     int b;
@@ -275,8 +281,7 @@ static inline uint16_t a20_clx_crc16_ccitt(const uint8_t *data, uint32_t len)
  * 2166136261, prime 16777619.  Anchors (same ones tools/cluster-ref
  * asserts): all-zero -> 0x69691905, all-0xff -> 0x360779f5.
  */
-static inline uint32_t a20_clx_fnv1a32(const uint8_t *id16)
-{
+static inline uint32_t a20_clx_fnv1a32(const uint8_t *id16) {
     uint32_t h = 2166136261u;
     int i;
 
@@ -297,13 +302,12 @@ static inline uint32_t a20_clx_fnv1a32(const uint8_t *id16)
  * Returns the frame length (32 + payload_len + 2), or -1 when it does not
  * fit cap or the payload exceeds the UART single-frame budget.
  */
-static inline int a20_clx_build_frame(uint8_t *buf, uint32_t cap,
-                                      uint8_t type, uint16_t flags,
-                                      uint16_t frag, uint32_t txid,
-                                      uint32_t src_hash, uint32_t dst_hash,
-                                      uint32_t dst_slot, const uint8_t *payload,
-                                      uint16_t payload_len)
-{
+static inline int a20_clx_build_frame(uint8_t *buf, uint32_t cap, uint8_t type,
+                                      uint16_t flags, uint16_t frag,
+                                      uint32_t txid, uint32_t src_hash,
+                                      uint32_t dst_hash, uint32_t dst_slot,
+                                      const uint8_t *payload,
+                                      uint16_t payload_len) {
     uint32_t len = A20_CLX_HDR_LEN + (uint32_t)payload_len + A20_CLX_CRC_LEN;
     uint16_t crc;
     uint32_t i;
@@ -340,8 +344,7 @@ static inline void a20_clx_build_hello_payload(const uint8_t *node_id16,
                                                uint8_t proto_max, uint8_t tier,
                                                uint8_t caps,
                                                uint16_t short_addr,
-                                               uint64_t nonce, uint8_t *out32)
-{
+                                               uint64_t nonce, uint8_t *out32) {
     int i;
 
     for (i = 0; i < 16; i++)
@@ -356,6 +359,45 @@ static inline void a20_clx_build_hello_payload(const uint8_t *node_id16,
     a20_clx_put_le64(out32 + A20_CLX_HELLO_OFF_NONCE, nonce);
 }
 
+/* Shared identity/version/capability validation for every node adapter.
+ * The transport has already checked frame bounds and CRC. -2 is self-loop. */
+static inline int a20_clx_validate_hello(const uint8_t *payload, uint32_t len,
+                                         uint8_t version, uint32_t src_hash,
+                                         const uint8_t self[16], uint64_t nonce,
+                                         uint8_t address_len) {
+    if (!payload || len != A20_CLX_HELLO_LEN || version != A20_CLX_WIRE_VER ||
+        src_hash != a20_clx_fnv1a32(payload) ||
+        payload[A20_CLX_HELLO_OFF_PROTO_MIN] > A20_CLX_SESSION_VER ||
+        payload[A20_CLX_HELLO_OFF_PROTO_MIN] >
+            payload[A20_CLX_HELLO_OFF_PROTO_MAX] ||
+        payload[A20_CLX_HELLO_OFF_TIER] < 1 ||
+        payload[A20_CLX_HELLO_OFF_TIER] > 3 ||
+        payload[A20_CLX_HELLO_OFF_LINK_ADDR_LEN] != address_len)
+        return -1;
+    int zero = 1, broadcast = 1, same = 1;
+    for (uint32_t i = 0; i < 16; i++) {
+        zero &= payload[i] == 0;
+        broadcast &= payload[i] == 255;
+        same &= payload[i] == self[i];
+    }
+    if (zero || broadcast || same)
+        return -1;
+    uint8_t caps = payload[A20_CLX_HELLO_OFF_CAPS];
+    if ((caps & ~31u) ||
+        ((caps & A20_CLX_CAP_ONEWAY) &&
+         (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER ||
+          !(caps & A20_CLX_CAP_RELIABLE))) ||
+        ((caps & A20_CLX_CAP_FRAGMENT) &&
+         (payload[A20_CLX_HELLO_OFF_PROTO_MAX] < A20_CLX_SESSION_VER ||
+          payload[A20_CLX_HELLO_OFF_TIER] == 1 ||
+          !(caps & A20_CLX_CAP_RELIABLE))) ||
+        ((caps & A20_CLX_CAP_LEAF) && (caps & A20_CLX_CAP_RELAY)))
+        return -1;
+    if (a20_clx_get_le64(payload + A20_CLX_HELLO_OFF_NONCE) == nonce)
+        return -2;
+    return 0;
+}
+
 /*
  * 04 §4 SLIP variant encoder: one END at the head, one at the tail, 0xC0
  * inside the frame becomes DB DC, 0xDB becomes DB DD.  The head END doubles
@@ -363,8 +405,7 @@ static inline void a20_clx_build_hello_payload(const uint8_t *node_id16,
  * -1 when out_cap is too small (worst case is A20_CLX_SLIP_ENCODED_LEN(len)).
  */
 static inline int a20_clx_slip_encode(const uint8_t *frame, uint32_t len,
-                                      uint8_t *out, uint32_t out_cap)
-{
+                                      uint8_t *out, uint32_t out_cap) {
     uint32_t need = A20_CLX_SLIP_ENCODED_LEN(len);
     uint32_t o = 0, i;
 
@@ -418,20 +459,19 @@ static inline int a20_clx_slip_encode(const uint8_t *frame, uint32_t len,
  * the codec depending on the kernel timer (keeps this half host-testable).
  */
 typedef struct a20_clx_slip_rx {
-    uint8_t *buf;                 /* caller-owned decode buffer          */
-    uint32_t cap;                 /* size of ->buf                       */
-    uint32_t len;                 /* bytes decoded into ->buf            */
-    uint64_t interbyte_ticks;     /* silence budget in timer ticks       */
-    uint64_t last_byte_ticks;     /* tick of the most recently fed byte  */
-    uint8_t in_frame;             /* saw a head END, accumulating        */
-    uint8_t in_escape;            /* previous byte was ESC               */
-    uint8_t overflow;             /* current frame exceeded ->cap        */
+    uint8_t *buf;             /* caller-owned decode buffer          */
+    uint32_t cap;             /* size of ->buf                       */
+    uint32_t len;             /* bytes decoded into ->buf            */
+    uint64_t interbyte_ticks; /* silence budget in timer ticks       */
+    uint64_t last_byte_ticks; /* tick of the most recently fed byte  */
+    uint8_t in_frame;         /* saw a head END, accumulating        */
+    uint8_t in_escape;        /* previous byte was ESC               */
+    uint8_t overflow;         /* current frame exceeded ->cap        */
 } a20_clx_slip_rx_t;
 
 static inline void a20_clx_slip_rx_init(a20_clx_slip_rx_t *rx, uint8_t *buf,
                                         uint32_t cap,
-                                        uint64_t interbyte_ticks)
-{
+                                        uint64_t interbyte_ticks) {
     rx->buf = buf;
     rx->cap = cap;
     rx->len = 0;
@@ -442,8 +482,7 @@ static inline void a20_clx_slip_rx_init(a20_clx_slip_rx_t *rx, uint8_t *buf,
     rx->overflow = 0;
 }
 
-static inline void a20_clx_slip_rx_reset(a20_clx_slip_rx_t *rx)
-{
+static inline void a20_clx_slip_rx_reset(a20_clx_slip_rx_t *rx) {
     rx->len = 0;
     rx->in_frame = 0;
     rx->in_escape = 0;
@@ -451,8 +490,7 @@ static inline void a20_clx_slip_rx_reset(a20_clx_slip_rx_t *rx)
 }
 
 static inline int a20_clx_slip_rx_byte(a20_clx_slip_rx_t *rx, uint8_t b,
-                                       uint64_t now_ticks)
-{
+                                       uint64_t now_ticks) {
     rx->last_byte_ticks = now_ticks;
 
     /* An open escape consumes the next byte unconditionally -- a raw END
@@ -525,8 +563,7 @@ static inline int a20_clx_slip_rx_byte(a20_clx_slip_rx_t *rx, uint8_t b,
  * rx_drops), 0 otherwise.
  */
 static inline int a20_clx_slip_rx_timeout(a20_clx_slip_rx_t *rx,
-                                          uint64_t now_ticks)
-{
+                                          uint64_t now_ticks) {
     if (!rx->in_frame)
         return 0;
     if (now_ticks - rx->last_byte_ticks <= rx->interbyte_ticks)
@@ -548,12 +585,11 @@ static inline int a20_clx_slip_rx_timeout(a20_clx_slip_rx_t *rx,
  *             length bounds violation (02 §1 hard rules, 04 §4 csum_kind=1)
  *   DROP      well-formed but refused: TTL exhausted in transit (02 §1)
  */
-#define A20_CLX_SCREEN_OK        0
+#define A20_CLX_SCREEN_OK 0
 #define A20_CLX_SCREEN_MALFORMED 1
-#define A20_CLX_SCREEN_DROP      2
+#define A20_CLX_SCREEN_DROP 2
 
-static inline int a20_clx_screen_frame(const uint8_t *frame, uint32_t len)
-{
+static inline int a20_clx_screen_frame(const uint8_t *frame, uint32_t len) {
     uint16_t magic, payload_len, crc_rx, crc_calc;
 
     if (len < A20_CLX_HDR_LEN + A20_CLX_CRC_LEN || len > A20_CLX_UART_MTU)
@@ -568,6 +604,10 @@ static inline int a20_clx_screen_frame(const uint8_t *frame, uint32_t len)
     payload_len = a20_clx_get_le16(frame + A20_CLX_OFF_PAYLOAD_LEN);
     if ((uint32_t)payload_len != len - A20_CLX_HDR_LEN - A20_CLX_CRC_LEN ||
         payload_len > A20_CLX_UART_MAX_PAYLOAD)
+        return A20_CLX_SCREEN_MALFORMED;
+    if ((frame[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_HELLO ||
+         frame[A20_CLX_OFF_TYPE] == A20_CLX_TYPE_HELLO_ACK) &&
+        payload_len != A20_CLX_HELLO_LEN)
         return A20_CLX_SCREEN_MALFORMED;
     if (frame[A20_CLX_OFF_TTL] == 0)
         return A20_CLX_SCREEN_DROP;
@@ -584,8 +624,7 @@ static inline int a20_clx_screen_frame(const uint8_t *frame, uint32_t len)
  * both ends: sink writes one raw wire byte and returns 0 or -errno.
  */
 static inline int a20_clx_slip_emit(uint8_t b, int (*sink)(void *, uint8_t),
-                                    void *ctx)
-{
+                                    void *ctx) {
     int rc;
 
     if (b == A20_CLX_SLIP_END) {
@@ -629,6 +668,8 @@ typedef struct a20_clx_uart_link_cfg {
     uint16_t assigned_addr;                    /* short addr announced in  */
                                                /* HELLO/HELLO_ACK          */
     a20_clx_uart_drv_t drv;
+    uint32_t caps;
+    uint64_t session; /* Optional persistent boot epoch from the board. */
 } a20_clx_uart_link_cfg_t;
 
 /*
@@ -648,6 +689,9 @@ int a20_clx_uart_link_unregister(int link_id);
  * forbids fragmentation, 02 §5), or -ENOENT (no UP link owns that address;
  * counted, and the frame is gone -- 04 §1 lets a transport drop).
  */
+int a20_clx_uart_session(const uint8_t *nh, uint32_t nh_len,
+                         const uint8_t node[16], uint64_t *local,
+                         uint64_t *remote, uint32_t *caps);
 int a20_clx_uart_send_frame(const uint8_t *next_hop, uint32_t nh_len,
                             const uint8_t *frame, uint32_t len);
 
@@ -685,10 +729,10 @@ void a20_clx_uart_set_link_event_handler(a20_clx_uart_link_event_fn fn,
  * kernel/include/abi/native/types.h: HELLO_SENT and DOWN both report
  * LINK_DOWN, SUSPECT reports SUSPECT, UP reports UP).
  */
-#define A20_CLX_UART_L_DOWN       0u
+#define A20_CLX_UART_L_DOWN 0u
 #define A20_CLX_UART_L_HELLO_SENT 1u /* reported as LINK_DOWN upstream */
-#define A20_CLX_UART_L_UP         2u
-#define A20_CLX_UART_L_SUSPECT    3u
+#define A20_CLX_UART_L_UP 2u
+#define A20_CLX_UART_L_SUSPECT 3u
 
 typedef struct a20_clx_uart_link_status {
     int link_id;
