@@ -292,6 +292,7 @@ int main(int argc, char **argv, char **envp)
         a20_path_open_args_t args = {0};
         args.size = sizeof(args);
         args.version = 1;
+        args.dir = A20_HANDLE_NULL;
         args.flags = 0x41; /* O_CREAT|O_WRONLY */
         args.rights = A20_RIGHT_WRITE;
         args.path = (uint64_t)(uintptr_t)names[i];
