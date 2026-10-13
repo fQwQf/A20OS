@@ -255,7 +255,7 @@ unsigned wait_queue_collect_all(wait_queue_t *q, uintptr_t key,
     return collected;
 }
 
-unsigned wait_queue_collect_matching(wait_queue_t *q,
+unsigned wait_queue_collect_matching_locked(wait_queue_t *q,
                                      wait_queue_match_fn match, void *arg,
                                      unsigned limit,
                                      proc_wake_reason_t reason,
@@ -269,7 +269,6 @@ unsigned wait_queue_collect_matching(wait_queue_t *q,
 
     unsigned collected = 0;
     bool drained = true;
-    uint64_t flags = spin_lock_irqsave(&q->lock);
     wait_queue_entry_t *entry = q->head;
     while (entry) {
         wait_queue_entry_t *next = entry->next;
@@ -289,9 +288,26 @@ unsigned wait_queue_collect_matching(wait_queue_t *q,
         }
         entry = next;
     }
-    spin_unlock_irqrestore(&q->lock, flags);
     if (complete)
         *complete = drained;
+    return collected;
+}
+
+unsigned wait_queue_collect_matching(wait_queue_t *q,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     proc_wake_reason_t reason,
+                                     proc_wake_q_t *wake_q,
+                                     bool *complete)
+{
+    if (!q) {
+        if (complete) *complete = false;
+        return 0;
+    }
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    unsigned collected = wait_queue_collect_matching_locked(q, match, arg,
+                                       limit, reason, wake_q, complete);
+    spin_unlock_irqrestore(&q->lock, flags);
     return collected;
 }
 
