@@ -155,3 +155,8 @@ GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。
 原生 Java 的并发回收、栈根保存和实际对象移动已在 RV64 Native 单核/双核
 验证，见 [50-native-java-gc.md](50-native-java-gc.md)。物理多 MCU、其他架构
 完整 VM 和真实 Minecraft 客户端仍未验收。
+
+完整 Native Java 运行时已继续接入 AArch64，并通过同字节码的单核/双核
+计算与 GC 压缩，RV64 回归同时通过；实际次数、JNI 修复和剩余范围见
+[51-native-java-portable.md](51-native-java-portable.md)。物理多 MCU 和
+Minecraft Java 客户端仍待实现与验收。

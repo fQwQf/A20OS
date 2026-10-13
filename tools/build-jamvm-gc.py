@@ -60,6 +60,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     report = dict(built=False, gc_workload_built=False, gc_verified=False,
                   java_application_verified=False, minecraft_verified=False,
+                  arch=bm.get('arch', 'riscv64'),
+                  toolchain=bm.get('toolchain') or dict(prefix='riscv64-unknown-elf-', host='riscv64-unknown-elf'),
                   base_build=str(base), base_program_sha256=bm['program_sha256'],
                   reused_inputs=reused, commands=[])
 
@@ -88,7 +90,7 @@ def main():
             shutil.copy2(base / 'inputs' / name, frozen / name)
             if sha(frozen / name) != bm['frozen_inputs'][name]:
                 raise ValueError('class/compiler archive checksum mismatch: ' + name)
-        shutil.copy2(native / 'inputs/test_jamvm_jni.c', frozen / 'test_jamvm_jni.c')
+        shutil.copy2(ROOT / 'user/tests/test_jamvm_jni.c', frozen / 'test_jamvm_jni.c')
         source = out / 'source'
         shutil.copytree(native / 'source/jamvm-2.0.0', source)
         patch = ['patch', '-p1', '--fuzz=0', '-i', str(frozen / 'port/gc.patch')]
@@ -96,12 +98,19 @@ def main():
             run([*patch, '--reverse', '--dry-run'], 'gc-existing-patch-check', source / 'src')
         else:
             run(patch, 'gc-patch', source / 'src')
+        patch = ['patch', '-p1', '--fuzz=0', '-i', str(frozen / 'port/jni.patch')]
+        if 'return &ffi_type_sint32;' in (source / 'src/dll_ffi.c').read_text():
+            run([*patch, '--reverse', '--dry-run'], 'jni-existing-patch-check', source / 'src')
+        else:
+            run(patch, 'jni-patch', source / 'src')
         generated = out / 'generated'
         shutil.copytree(native / 'generated', generated)
         port = frozen / 'port'
-        for name in ['arch.h', 'config.h']:
-            if sha(generated / name) != sha(port / name):
-                raise ValueError('base and current VM configuration differ: ' + name)
+        if sha(generated / 'config.h') != sha(port / 'config.h'):
+            raise ValueError('base and current VM configuration differ: config.h')
+        # The entire core is rebuilt with the current architecture adapter.
+        # JNI objects use the same target compiler/dependencies and public JNI ABI.
+        shutil.copy2(port / 'arch.h', generated / 'arch.h')
         wrapper = out / 'native-cc'
         shutil.copy2(native / 'native-cc', wrapper)
         wrapper.chmod(0o755)

@@ -124,3 +124,8 @@ wide-single 内核/镜像和 `--cpus 1`。每条测试的默认超时为 180 秒
 Minecraft Java 客户端依赖也未完成。最终标准继续使用
 [24](24-single-system-minecraft.md)：至少两块物理 MCU 上的同一原生 A20OS，
 实际客户端显示主菜单并响应真实输入。
+
+完整 Native Java 运行时已继续接入 AArch64，并通过同字节码的单核/双核
+计算与 GC 压缩，RV64 回归同时通过；实际次数、JNI 修复和剩余范围见
+[51-native-java-portable.md](51-native-java-portable.md)。物理多 MCU 和
+Minecraft Java 客户端仍待实现与验收。

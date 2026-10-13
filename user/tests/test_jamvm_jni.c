@@ -84,8 +84,13 @@ int main(void) {
         memset(stack, 0xa5, sizeof(stack));                                    \
         end = callJNIMethod(&env_token, (Class *)&class_token, (sig), 2,       \
                             stack, (unsigned char *)(fn));                     \
-        if (end != stack + 1 || stack[0] != (uintptr_t)(expected))             \
+        if (end != stack + 1 || stack[0] != (uintptr_t)(expected)) {           \
+            fprintf(stderr,                                                    \
+                    "JAMVM_JNI: FAIL return %s got=%llx expected=%llx\n",      \
+                    (sig), (unsigned long long)stack[0],                       \
+                    (unsigned long long)(uintptr_t)(expected));                \
             errors++;                                                          \
+        }                                                                      \
     } while (0)
     CHECK_INT_RETURN("()B", ret_byte, -117);
     CHECK_INT_RETURN("()S", ret_short, -30001);
