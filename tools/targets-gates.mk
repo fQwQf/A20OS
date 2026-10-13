@@ -102,6 +102,9 @@ host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
 
+$(TMPDIR)/a20-host-fdt_view: tools/tests/fdt_view.c kernel/core/fdt_view.c kernel/include/core/fdt_view.h
+	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include $(filter %.c,$^) -o $@
+
 # The MCU protocol harness uses architecture type definitions but executes
 # no target assembly. The generic host rule lacks this include directory.
 $(TMPDIR)/a20-host-test_clx_fragment $(TMPDIR)/a20-host-test_mcu_leaf $(TMPDIR)/a20-host-test_clx_uart_pair $(TMPDIR)/a20-host-test_clx_oneway $(TMPDIR)/a20-host-test_clx_fuzz: $(TMPDIR)/a20-host-%: tools/tests/%.c
