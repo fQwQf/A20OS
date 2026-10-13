@@ -10,6 +10,9 @@
 #include <pthread.h>
 #include "a20_execution.h"
 #include "jam.h"
+#ifdef A20_STATIC_JNI
+#include "static-jni.h"
+#endif
 
 void initialisePlatform(void) {
 }
@@ -45,12 +48,25 @@ char *nativeLibPath(void) {
     return getenv("LD_LIBRARY_PATH");
 }
 void *nativeLibOpen(char *path) {
+#ifdef A20_STATIC_JNI
+    void *module = a20_jni_open(path);
+    if (module)
+        return module;
+#endif
     return dlopen(path, RTLD_LAZY);
 }
 void nativeLibClose(void *handle) {
+#ifdef A20_STATIC_JNI
+    if (a20_jni_is_static(handle))
+        return;
+#endif
     dlclose(handle);
 }
 void *nativeLibSym(void *handle, char *name) {
+#ifdef A20_STATIC_JNI
+    if (a20_jni_is_static(handle))
+        return a20_jni_symbol(handle, name);
+#endif
     return dlsym(handle, name);
 }
 char *nativeLibMapName(char *name) {

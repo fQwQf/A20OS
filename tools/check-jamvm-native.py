@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Execute upstream Native JamVM launcher and real JNI adapter probes in A20OS.
 
-This gate proves launcher/ABI execution only. It does not accept Java, GC,
-Minecraft, other architectures or physical boards. All runtime inputs freeze
+The default gate proves launcher/ABI execution only. The optional Java gate
+verifies actual computation, automatic placement and file I/O. GC, Minecraft,
+other architectures and physical boards require separate acceptance. Inputs freeze
 before QEMU starts; the optional bootstrap diagnostic remains a separate result.
 """
 import argparse
@@ -48,10 +49,13 @@ def main():
     parser.add_argument('--cycles', type=int, default=5)
     parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('--diagnose-bootstrap', action='store_true')
-    parser.add_argument('--classlib', type=Path, help='freeze real class archives for bootstrap diagnosis')
+    parser.add_argument('--execute-java', action='store_true', help='require real Java workload completion and CPU mask')
+    parser.add_argument('--classlib', type=Path, help='freeze real class archives for diagnosis or Java execution')
     args = parser.parse_args()
-    if args.classlib and not args.diagnose_bootstrap:
-        parser.error('--classlib requires --diagnose-bootstrap')
+    if args.classlib and not (args.diagnose_bootstrap or args.execute_java):
+        parser.error('--classlib requires --diagnose-bootstrap or --execute-java')
+    if args.execute_java and (not args.classlib or args.cpus not in [1, 2]):
+        parser.error('--execute-java requires --classlib and one or two CPUs')
     if args.cycles < 1 or args.timeout <= 0:
         parser.error('positive cycles and timeout required')
     output, build = args.output.resolve(), args.build.resolve()
@@ -79,7 +83,7 @@ def main():
             shutil.copy2(build / name, output / name)
         shutil.copy2(build / 'build.json', output / 'build.json')
         shutil.copy2(args.kernel, output / 'kernel.elf')
-        shutil.copy2(args.image, output / 'fat32.img')
+        subprocess.run(['cp', '--sparse=always', str(args.image), str(output / 'fat32.img')], check=True)
         for name, dest in [('jamvm.elf', 'jamvm'), ('jni-probe.elf', 'jni-probe')]:
             subprocess.run(['mcopy', '-o', '-i', str(output / 'fat32.img'), str(output / name), '::/' + dest], check=True)
         class_inputs = []
@@ -97,6 +101,18 @@ def main():
                 class_inputs.append(name)
             shutil.copy2(classlib / 'build.json', output / 'classlib-build.json')
             class_inputs.append('classlib-build.json')
+        if args.execute_java:
+            path = build / 'workload.jar'
+            if sha(path) != manifest.get('java_workload_sha256'):
+                raise ValueError('execution workload checksum mismatch')
+            for name in ['glibj.zip', 'classes.zip']:
+                if sha(output / name) != sha(build / 'inputs' / name):
+                    raise ValueError('execution/build class library mismatch: ' + name)
+            shutil.copy2(path, output / 'workload.jar')
+            subprocess.run(['mcopy', '-o', '-i', str(output / 'fat32.img'),
+                            str(output / 'workload.jar'), '::/workload.jar'], check=True)
+            class_inputs.append('workload.jar')
+            report['scope'] = 'upstream Native Java program, JNI, file I/O and automatic thread placement'
         flags = ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
         if args.cpus > 1:
             flags += ['ALLOW_UNVERIFIED_SMP=1']
@@ -111,6 +127,9 @@ def main():
                   ('/bin/jamvm -version', 'JamVM version 2.0.0', 0),
                   ('/bin/jamvm -fullversion', 'java full version "jamvm-1.5.0"', 0),
                   ('/bin/jamvm -help', 'Usage: /bin/jamvm', 0)] * args.cycles
+        if args.execute_java:
+            invocation = '/bin/jamvm -Xbootclasspath/v:/bin/classes.zip -Xbootclasspath/c:/bin/glibj.zip -cp /bin/workload.jar A20NativeWorkload'
+            probes += [(invocation, 'JAVA_NATIVE: PASS', 0)] * args.cycles
         if args.diagnose_bootstrap:
             options = ' -Xbootclasspath/v:/bin/classes.zip -Xbootclasspath/c:/bin/glibj.zip -verbose:class' if args.classlib else ''
             probes.append(('/bin/jamvm' + options + ' A20MissingClass', None, None))
@@ -136,7 +155,13 @@ def main():
                         if expected is not None:
                             if expected not in segment or actual != status:
                                 raise RuntimeError('probe failed: ' + invocation)
-                            report['probes'].append(dict(command=invocation, exit_status=actual))
+                            entry = dict(command=invocation, exit_status=actual)
+                            if expected == 'JAVA_NATIVE: PASS':
+                                work = re.search(r'JAVA_NATIVE: PASS jobs=32 sum=4359168 mask=([0-9a-f]+) workers=([0-9]+)/([0-9]+)', segment)
+                                if not work or int(work[1], 16) != (1 << args.cpus) - 1 or min(int(work[2]), int(work[3])) < 1 or int(work[2]) + int(work[3]) != 32:
+                                    raise RuntimeError('Java work or automatic CPU placement mismatch')
+                                entry.update(cpu_mask=int(work[1], 16), worker_jobs=[int(work[2]), int(work[3])])
+                            report['probes'].append(entry)
                         else:
                             report['bootstrap_diagnostic'] = dict(command=invocation, exit_status=actual, output=segment,
                                 accepted_as_java_execution=False)
@@ -160,7 +185,10 @@ def main():
                 time.sleep(0.05)
             if phase != 'complete':
                 raise RuntimeError('stopped in ' + phase)
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError('QEMU did not exit successfully')
         report['passed'] = True
+        report['java_application_verified'] = args.execute_java
     except Exception as error:
         report['failure'] = str(error)
         raise

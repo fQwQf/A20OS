@@ -147,3 +147,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 真实 pthread 定向通知、每线程 mask、信号等待及多架构执行回归见
 [48-native-thread-signals.md](48-native-thread-signals.md)。
+
+真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
+[49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
+GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。

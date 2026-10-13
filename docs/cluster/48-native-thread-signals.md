@@ -104,3 +104,7 @@ python tools/check-native-sync.py --cpus 2 --timeout 180 \
 运行器冻结输入，拒绝覆盖已有目录，校验 PASS、数值退出码 0、shell 返回和
 QEMU 自然退出；源码工作区哈希明确不作为外部 ELF 的构建来源。JamVM 的
 完整构建和类库诊断命令继续使用 [47](47-jamvm-native-bootstrap.md)。
+
+真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
+[49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
+GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。
