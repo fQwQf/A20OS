@@ -307,7 +307,7 @@ int main(int argc, char **argv, char **envp)
         a20_strcmp(ev.fs_name, "other-file"))
         return fail(52, "fs prefix filter", 16);
     a20_time_t poll = { .secs = 0, .nsecs = 0 };
-    if (a20_event_wait(queue, poll, &ev) != -A20_ERR_TIMED_OUT)
+    if (a20_event_wait(queue, poll, &ev) != -A20_ERR_WOULD_BLOCK)
         return fail(53, "fs prefix extra event", 21);
     a20_hdl_close(queue);
     a20_hdl_close(dir);
