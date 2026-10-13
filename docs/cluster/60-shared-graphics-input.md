@@ -56,13 +56,14 @@ GPU 程序、payload 和日志哈希。共享输入运行的 report 尚未单列
 **Minecraft 已知可运行环境是 x86_64。** [52](52-main-minecraft-integration.md)
 和 [53](53-linux-application-execution.md) 的客户端菜单证据均属于 x86_64
 单实例；[59](59-shared-jvm-execution.md) 的单 JVM 跨实例证据和本页图形输入
-证据同样仅覆盖 x86_64。Minecraft 客户端跨两个实例仍未完成验收。
+证据同样仅覆盖 x86_64。本页阶段尚未验收客户端；后续已在 x86_64 完成跨两个实例的菜单、输入和
+正常退出，见 [61](61-shared-minecraft-client.md)。
 
 AArch64、RISC-V、STM32 等平台继续共用内核集群接口与设备抽象，但公共机制
 通过不代表 Minecraft 可运行。其 JVM、LWJGL、本地动态库、图形栈及平台资源
 可能需要额外移植，必须各自验证，不能继承 x86_64 的客户端支持结论。
 
-下一阶段在 x86_64 共享内核中整合现有系统镜像与客户端，验证菜单、输入和
-正常退出。当前 embedded 初始化结果没有覆盖任意 CPU 上的动态 PCI 探测：
+后续客户端验证见 [61](61-shared-minecraft-client.md)。当前 embedded 初始化
+结果没有覆盖任意 CPU 上的动态 PCI 探测：
 PCI 配置空间等直接访问仍需 owner 路由完善。物理多 MCU、混合指针 ABI 的
 共享堆、设备 owner 故障恢复和普通模式性能基准也仍未验收。

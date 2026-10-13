@@ -836,3 +836,9 @@ ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收
 与 fence 操作，并通过唯一键盘鼠标接收实际设备事件；普通 SMP 对照通过，
 见 [60](60-shared-graphics-input.md)。Minecraft 已知可运行平台仅为 x86_64，
 跨实例客户端尚未验收；其他 ISA 的运行时与本地库可能需要额外移植。
+
+单个真实 Minecraft Java 1.21.11 客户端现已在 x86_64 双 QEMU 共享内核中显示
+欢迎页、主菜单和 Options，实际键盘导航与 Quit Game 退出 0 通过；同一 JVM
+的渲染、编译和 GC 线程均观察到 CPU 0/1 调度赋值。普通 SMP 对照通过，原始
+磁盘哈希未变，临时 RAM 已清理。证据和完整边界见
+[61](61-shared-minecraft-client.md)。物理多 MCU 和其他 ISA 客户端仍未验收。
