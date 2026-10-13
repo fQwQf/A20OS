@@ -121,6 +121,7 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计——共享核心、架构后端、多实例与 QEMU/KVM 路线
 - [hypervisor/05-implementation-status.md](hypervisor/05-implementation-status.md)：当前代码、静态验证证据和未完成项
 - [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)：命名 QEMU 宿主实例、磁盘隔离和交互控制台（待运行验证）
+- [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：双 guest 管理、控制协议、重连和待运行门禁
 
 验证入口包括 8 个正向门禁：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-console-p0`、`make smoke-hyp-a20os`、`make smoke-hyp-vm`、`make smoke-hyp-vm-96`、`make smoke-hyp-console` 与 `make smoke-hyp-shell`；以及负向门禁 `make smoke-hyp-no-h`。正向门禁覆盖宿主自检、vcpu、guest 16550 收发、完整 A20OS guest、RAM 窗口配置、控制台入口及交互式 shell，并显式以 `-cpu rv64,h=true` 表达 CPU 前提；负向门禁以 `h=false` 检查内核安全拒绝缺少 H 扩展的 CPU。
 

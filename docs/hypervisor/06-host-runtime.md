@@ -11,7 +11,7 @@ tools/a20 running
 tools/a20 attach lab-a
 ```
 
-模板 `instances/hyp-host-riscv64.toml` 选择 RISC-V、ABI=both、1 CPU、1 GiB RAM、TCG 与 H/Sstc。现有镜像打包规则提供 hypvm 及 guest ELF。进入 A20 宿主 shell 后可使用：
+模板 `instances/hyp-host-riscv64.toml` 选择 RISC-V、ABI=both、1 CPU、1 GiB RAM、TCG 与 H/Sstc。现有镜像打包规则提供 hypvm 及 guest ELF。模板还启用 `machine.vm_manager=true`，命名运行时接入专用 virtio-serial 控制端口并自动启动 manager。双 guest 管理见 [07-guest-supervisor.md](07-guest-supervisor.md)。也可在 A20 宿主 shell 手工使用：
 
 ```sh
 hypvm --managed -k /bin/boot/guest-kernel-ramfs.elf
