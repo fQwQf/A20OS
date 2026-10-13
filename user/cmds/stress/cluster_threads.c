@@ -5,6 +5,8 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/time.h>
+#include <poll.h>
 #include <uapi/a20/block.h>
 #include <pthread.h>
 #include <sched.h>
@@ -225,14 +227,76 @@ static void jvm_start(int threads) {
          "CLUSTER_JVM: PASS cpu=1 java-exit=0 unmounted=1");
 }
 
+static void input_roundtrip(void) {
+    struct event { struct timeval time; uint16_t type, code; int32_t value; } events[32];
+    struct pollfd fds[8];
+    unsigned count = 0, keys = 0;
+    int dx = 0, dy = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/event%u", i);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd >= 0) fds[count++] = (struct pollfd){.fd = fd, .events = POLLIN};
+    }
+    check(count >= 2 && sched_getcpu() == 1, "remote keyboard/mouse devices");
+    puts("CLUSTER_INPUT: ready cpu=1");
+    struct timespec start, now;
+    check(!clock_gettime(CLOCK_MONOTONIC, &start), "input clock");
+    while (keys != 15 || dx != 17 || dy != -9) {
+        check(poll(fds, count, 100) >= 0, "remote input poll");
+        for (unsigned i = 0; i < count; i++) {
+            if (!(fds[i].revents & POLLIN)) continue;
+            ssize_t bytes = read(fds[i].fd, events, sizeof(events));
+            check(bytes > 0 && bytes % sizeof(events[0]) == 0, "remote input read");
+            for (unsigned n = 0; n < bytes / sizeof(events[0]); n++) {
+                struct event *e = &events[n];
+                if (e->type == 1 && e->code == 30 && e->value == 1) keys |= 1;
+                if (e->type == 1 && e->code == 30 && e->value == 0) keys |= 2;
+                if (e->type == 1 && e->code == 0x110 && e->value == 1) keys |= 4;
+                if (e->type == 1 && e->code == 0x110 && e->value == 0) keys |= 8;
+                if (e->type == 2 && e->code == 0) dx += e->value;
+                if (e->type == 2 && e->code == 1) dy += e->value;
+            }
+        }
+        check(!clock_gettime(CLOCK_MONOTONIC, &now) && now.tv_sec - start.tv_sec < 15,
+              "keyboard/mouse delivery timeout");
+        check(sched_getcpu() == 1, "input affinity preserved");
+    }
+    for (unsigned i = 0; i < count; i++) check(!close(fds[i].fd), "input close");
+    puts("CLUSTER_INPUT: PASS cpu=1 key=a press+release button=left press+release relative=17,-9");
+}
+
+static void gpu_start(int input) {
+    bind(2);
+    check(!mkdir("/mnt", 0755) || errno == EEXIST, "GPU mount directory");
+    check(!mount("/dev/vda", "/mnt", "ext4", MS_RDONLY, NULL), "GPU payload mount");
+    pid_t pid = fork();
+    check(pid >= 0, "GPU fork");
+    if (!pid) {
+        check(sched_getcpu() == 1, "remote GPU CPU");
+        puts("CLUSTER_GPU: starting cpu=1");
+        execl("/mnt/program", "gpu3d_test", (char *)NULL);
+        check(0, "GPU test exec");
+    }
+    int status = 0;
+    check(waitpid(pid, &status, 0) == pid, "GPU wait");
+    printf("CLUSTER_GPU: child-status=%d\n", status);
+    check(WIFEXITED(status) && !WEXITSTATUS(status), "GPU exit (SKIP is not PASS)");
+    check(!umount("/mnt"), "GPU payload unmount");
+    puts("CLUSTER_GPU: PASS cpu=1 exit=0 unmounted=1");
+    if (input) input_roundtrip();
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 2 && !strcmp(argv[1], "--filesystem-child")) return filesystem_child();
-    int console = 0, disk = 0, filesystem = 0, jvm = 0;
+    int console = 0, disk = 0, filesystem = 0, jvm = 0, gpu = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--console")) console = 1;
         else if (!strcmp(argv[i], "--disk")) disk = 1;
         else if (!strcmp(argv[i], "--filesystem")) filesystem = 1;
+        else if (!strcmp(argv[i], "--gpu")) gpu = 1;
+        else if (!strcmp(argv[i], "--gpu-input")) gpu = 2;
         else if (!strcmp(argv[i], "--jvm")) jvm = 1;
         else if (!strcmp(argv[i], "--jvm-threads")) jvm = 2;
         else check(0, "arguments");
@@ -297,6 +361,7 @@ int main(int argc, char **argv) {
     if (disk) disk_roundtrip();
     if (filesystem) filesystem_roundtrip();
     if (jvm) jvm_start(jvm == 2);
+    if (gpu) gpu_start(gpu == 2);
     printf("CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=%u tls=preserved tlb-rounds=64 protection-faults=128 "
            "jobs=%u split=%u/%u sum=%llu mask=%x destructors=2 cond-timeout=checked\n",
            migrations, JOBS, jobs[0], jobs[1], (unsigned long long)expected, cpu_mask);
