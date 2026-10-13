@@ -9,6 +9,7 @@
 #include "mm/frame.h"
 
 struct vmo;
+struct vmar;
 struct vnode;
 struct vfile;
 struct page_cache_page;
@@ -124,13 +125,14 @@ struct mm_seg {
     /* Policy metadata that is NOT backing-object state:
      *
      *   vmar_cap   native VMAR's ceiling -- protect() may not grant a bit that
-     *              was not available when the VMAR was created.  0 means "no
-     *              ceiling recorded" (every Linux-created mapping).
+     *              was available when mapped. VM_NATIVE_CAP distinguishes a zero
+     *              ceiling from an uncapped Linux mapping.
      *   sysv_shmid SysV shared memory identity, so a fault can name the shmid
      *              without walking back to a mapping record.
      *
      * VM_SEALED is not here: it is a VM_* bit, so it rides in vm_flags. */
     uint32_t         vmar_cap;
+    struct vmar     *vmar_owner; /* referenced immutable placement boundary */
     int32_t          sysv_shmid; /* -1 = not SysV shared memory */
     /* FILE: the record owns one reference to the open file description it was
      * mapped from, so a fork's copy takes one vfile_get() rather than a
@@ -337,6 +339,7 @@ typedef struct mm_struct {
      * blocking I/O.
      */
     spinlock_t vma_ref_lock;
+    mm_tlb_hold_t *tlb_spares; /* unused records reserved before fallible mutations */
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
     /* PT pages detached from the tree, awaiting a grace period.  Deliberately
      * NOT the tlb_holds list: a PT page is unreachable through the page table,
@@ -556,10 +559,10 @@ vaddr_t mm_mmap_native_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                               int prot, int flags);
 vaddr_t mm_mmap_file_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                                 int prot, int flags, struct vfile *file,
-                                uint64_t offset, uint32_t cap);
+                                uint64_t offset, uint32_t cap, struct vmar *owner);
 vaddr_t mm_mmap_vmo_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                                int prot, int flags, struct vmo *vmo,
-                               uint64_t offset, uint32_t cap);
+                               uint64_t offset, uint32_t cap, struct vmar *owner);
 int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len);
 /* A mapping record.  Created with one reference the creator owns; the index
  * and every annotation walk take their own with mm_seg_get(). */
@@ -587,6 +590,9 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
 int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                      size_t new_size, int flags, vaddr_t new_addr,
                      vaddr_t *out_addr);
+/* Native permission changes commit before the source mapping is removed. */
+int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                     size_t new_size, vaddr_t hint, int prot, vaddr_t *out_addr);
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len,
                 int prot, int flags);
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
@@ -626,6 +632,8 @@ void mm_tlb_invalidate_begin(mm_struct_t *mm);
 void mm_tlb_invalidate_finish(mm_struct_t *mm);
 void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr);
 void mm_tlb_note_change(mm_struct_t *mm, vaddr_t addr, size_t size);
+/* MM lock and TLB transaction required; unused records drain at finish. */
+int  mm_tlb_reserve_holds(mm_struct_t *mm, size_t count);
 int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
 int  mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level);
 int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);

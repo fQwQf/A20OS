@@ -46,12 +46,36 @@ enum {
     MM_TLB_HOLD_PT = 3,
 };
 
+/* Reserve bookkeeping before a mutation whose commit/rollback must not
+ * allocate. The caller owns mm->lock and the transaction's tlb_lock. */
+int mm_tlb_reserve_holds(mm_struct_t *mm, size_t count)
+{
+    if (!mm || count > SIZE_MAX / sizeof(mm_tlb_hold_t)) return -ENOMEM;
+    while (count--) {
+        mm_tlb_hold_t *hold = kcalloc_atomic(1, sizeof(*hold));
+        if (!hold) return -ENOMEM;
+        hold->next = mm->tlb_spares;
+        mm->tlb_spares = hold;
+    }
+    return 0;
+}
+
+static mm_tlb_hold_t *mm_tlb_alloc_hold(mm_struct_t *mm)
+{
+    mm_tlb_hold_t *hold = mm->tlb_spares;
+    if (!hold) return kcalloc_atomic(1, sizeof(*hold));
+    mm->tlb_spares = hold->next;
+    memset(hold, 0, sizeof(*hold));
+    return hold;
+}
+
 /* Queue a detached page-table page for release after the shootdown barrier.
  * The PT frame is pinned like any other deferred frame so the buddy cannot
  * reuse it while a cursor might still hold a cached pointer into the subtree. */
 int mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level)
 {
-    mm_tlb_hold_t *hold = kcalloc_atomic(1, sizeof(*hold));
+    if (!mm) return -EINVAL;
+    mm_tlb_hold_t *hold = mm_tlb_alloc_hold(mm);
     if (!hold)
         return -ENOMEM;
     if (!pfn_valid(pfn)) {
@@ -168,7 +192,7 @@ static int mm_tlb_queue_hold(mm_struct_t *mm, pfn_t frame,
 {
     if (!mm)
         return -EINVAL;
-    mm_tlb_hold_t *hold = kcalloc_atomic(1, sizeof(*hold));
+    mm_tlb_hold_t *hold = mm_tlb_alloc_hold(mm);
     if (!hold)
         return -ENOMEM;
 
@@ -285,7 +309,9 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_tlb_hold_t *hold = mm->tlb_holds;
+    mm_tlb_hold_t *spares = mm->tlb_spares;
     mm->tlb_holds = NULL;
+    mm->tlb_spares = NULL;
     spin_unlock_irqrestore(&mm->lock, flags);
 
     /* A detached page-table page may still be reachable by a cursor that
@@ -344,6 +370,12 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
         }
         if (frame_count)
             frame_put_many(frame_chunk, frame_count);
+    }
+
+    while (spares) {
+        mm_tlb_hold_t *next = spares->next;
+        kfree(spares);
+        spares = next;
     }
 
     /* VMA release may drop the final VMO or page-cache owner and therefore
@@ -561,6 +593,7 @@ mm_struct_t *mm_create(void) {
     spin_set_debug(&mm->vma_ref_lock, "mm_vma_ref", mm);
     mutex_init(&mm->tlb_lock);
     mm->tlb_holds = NULL;
+    mm->tlb_spares = NULL;
     mm->active_cpus = 0;
     mm_arch_context_init(mm);
     refcount_set(&mm->refcount, 1);
@@ -742,6 +775,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
      */
     child->deferred_vma = NULL;
     child->tlb_holds = NULL;
+    child->tlb_spares = NULL;
     child->active_cpus = 0;
     child->tlb_pending = 0;
     child->tlb_start = 0;

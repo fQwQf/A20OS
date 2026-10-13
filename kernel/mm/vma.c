@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vmo.h"
+#include "mm/vmar.h"
 #include "mm/slab.h"
 #include "mm/pt.h"
 #include "fs/vfs.h"
@@ -51,7 +52,7 @@ static int vma_can_merge(mm_seg_t *a, mm_seg_t *b)
         return 0;
     if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
         return 0;
-    if (a->vmar_cap != b->vmar_cap)
+    if (a->vmar_cap != b->vmar_cap || a->vmar_owner != b->vmar_owner)
         return 0;
     if ((a->vm_flags | b->vm_flags) & VM_FILE) {
         if (a->file != b->file)
@@ -115,6 +116,10 @@ void vma_release(mm_seg_t *vma)
 {
     vma_release_file(vma);
     vma_release_ipc(vma);
+    if (vma && vma->vmar_owner) {
+        vmar_release(vma->vmar_owner);
+        vma->vmar_owner = NULL;
+    }
     if (vma && (vma->vm_flags & VM_VMO) && vma->vmo) {
         vmo_release(vma->vmo);
         vma->vmo = NULL;
@@ -150,6 +155,8 @@ int vma_ref_fork(mm_seg_t *vma)
     }
     if (vma && (vma->vm_flags & VM_VMO) && vma->vmo)
         vmo_ref(vma->vmo);
+    if (vma && vma->vmar_owner)
+        vmar_acquire(vma->vmar_owner);
     return 0;
 }
 
@@ -165,6 +172,8 @@ int vma_ref_aux(mm_seg_t *vma)
         return r;
     if (vma && (vma->vm_flags & VM_VMO) && vma->vmo)
         vmo_ref(vma->vmo);
+    if (vma && vma->vmar_owner)
+        vmar_acquire(vma->vmar_owner);
     return 0;
 }
 

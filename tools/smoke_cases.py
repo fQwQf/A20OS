@@ -2812,6 +2812,7 @@ CASES: dict[str, dict] = {
     },
 }
 
+CASES["smoke-native-mm"]["expect"].append("NATIVE_MM: remap-owner-rollback PASS")
 CASES["smoke-native-ubd"]["build"]["extra-targets"] = ["native-ubd-image"]
 for _base in ("smoke-futex-stress", "smoke-futex-stress-aarch64"):
     CASES[_base]["expect"].extend([
