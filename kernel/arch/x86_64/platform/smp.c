@@ -53,7 +53,7 @@ unsigned x86_64_apic_to_cpu(unsigned apic_id)
     return 0;
 }
 
-#if CONFIG_NR_CPUS > 1
+#if CONFIG_NR_CPUS > 1 && !defined(CONFIG_QEMU_SHARED_SMP)
 static int lapic_wait_icr(void)
 {
     uint64_t deadline = timer_get_ticks() + AP_ICR_WAIT_TICKS;
@@ -129,6 +129,7 @@ int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
         (uint64_t)entry;
     __atomic_thread_fence(__ATOMIC_RELEASE);
 
+#ifndef CONFIG_QEMU_SHARED_SMP
     /* The two writes of a message are adjacent with interrupts off on every
      * path that brings an AP up, so no per-message serialization is needed
      * here.  Note that ICR_LOW has no delivery status to wait on: bit 8 is the
@@ -136,6 +137,14 @@ int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
      * write back on read, so polling it would report every INIT/SIPI as still
      * in flight.  Counting TSC cycles instead ties the sequence to an assumed
      * clock frequency that says nothing about how far the target has got. */
+#endif
+#ifdef CONFIG_QEMU_SHARED_SMP
+    (void)apic_id;
+    /* Remote reset ROM only waits for this release; it never initializes the
+     * shared kernel data, allocator or PID namespace a second time. */
+    __atomic_store_n((uint32_t *)(PAGE_OFFSET + 0x6f00), 0xa20c0001U,
+                     __ATOMIC_RELEASE);
+#else
     if (lapic_send(apic_id, 0x0000c500) != 0)
         goto startup_timeout;
     if (lapic_send(apic_id, 0x00008500) != 0)
@@ -145,6 +154,7 @@ int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
     if (lapic_send(apic_id, 0x00004600 | (AP_TRAMPOLINE_PA >> 12)) != 0)
         goto startup_timeout;
 
+#endif
     uint64_t deadline = timer_get_ticks() + AP_START_WAIT_TICKS;
     while (!__atomic_load_n(&ap_started[logical_id], __ATOMIC_ACQUIRE) &&
            timer_get_ticks() < deadline)
@@ -152,7 +162,9 @@ int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
     if (__atomic_load_n(&ap_started[logical_id], __ATOMIC_ACQUIRE))
         return 0;
 
+#ifndef CONFIG_QEMU_SHARED_SMP
 startup_timeout:
+#endif
     trampoline_usable = 0;
     printf("[SMP] AP cpu=%u apic=%u startup timed out\n", logical_id, apic_id);
     return -1;
@@ -164,9 +176,35 @@ startup_timeout:
 #endif
 }
 
+#ifdef CONFIG_QEMU_SHARED_SMP
+static uint32_t shared_qemu_ipis[CONFIG_NR_CPUS];
+void x86_64_shared_qemu_poll(void)
+{
+    unsigned cpu = arch_current_cpu_id();
+    uint32_t bits = __atomic_exchange_n(&shared_qemu_ipis[cpu], 0,
+                                       __ATOMIC_ACQUIRE);
+    if (bits & 1U)
+        proc_sched_handle_reschedule_ipi();
+    if (bits & 2U)
+        x86_64_ipi_tlb_flush_handler();
+    if (bits & 4U)
+        x86_64_ipi_msix_vector_handler();
+}
+#endif
+
 int x86_64_smp_send_ipi(unsigned apic_id, uint32_t vector)
 {
-#if CONFIG_NR_CPUS > 1
+#ifdef CONFIG_QEMU_SHARED_SMP
+    if (apic_id >= CONFIG_NR_CPUS)
+        return -1;
+    uint32_t bit = vector == IRQ_VECTOR_RESCHEDULE ? 1U :
+                   vector == IRQ_VECTOR_TLB_FLUSH ? 2U :
+                   vector == IRQ_VECTOR_MSIX_VECTOR ? 4U : 0;
+    if (!bit)
+        return -1;
+    __atomic_fetch_or(&shared_qemu_ipis[apic_id], bit, __ATOMIC_RELEASE);
+    return 0;
+#elif CONFIG_NR_CPUS > 1
     return lapic_send(apic_id, vector);
 #else
     (void)apic_id;

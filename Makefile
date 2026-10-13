@@ -137,6 +137,16 @@ NR_CPUS ?= 1
 CONFIG_KERNEL_PREEMPT ?= 1
 # Functional diagnostic; separate artifacts, never enabled in normal builds.
 SMP_SELFTEST ?= 0
+# Optional shared-RAM multi-process QEMU platform; ordinary builds unchanged.
+QEMU_SHARED_SMP ?= 0
+ifneq ($(filter $(QEMU_SHARED_SMP),0 1),$(QEMU_SHARED_SMP))
+$(error QEMU_SHARED_SMP must be 0 or 1)
+endif
+ifeq ($(QEMU_SHARED_SMP),1)
+ifneq ($(ARCH),x86_64)
+$(error QEMU_SHARED_SMP currently requires ARCH=x86_64)
+endif
+endif
 # Network lanes. 1 keeps every lane index folded to 0, which is the
 # embedded shape and byte-for-byte the pre-lane behaviour. Raise it
 # only together with stage D of docs/net/net-lanes.md; stages A-C
@@ -535,6 +545,9 @@ BUILD_VARIANT := $(BUILD_VARIANT)-shared$(MCU_SHARED_RAM_KB)k$(if $(filter 1,$(M
 endif
 ifeq ($(MCU_NATIVE_PROGRAM),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-program$(if $(filter 1,$(NATIVE_FLAT_FILES)),-files,)
+endif
+ifeq ($(QEMU_SHARED_SMP),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-shared-qemu
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
@@ -1159,6 +1172,18 @@ CFLAGS += -DCONFIG_CLUSTER_UART_COM2
 endif
 EXTRA_CFLAGS ?=
 CFLAGS += $(EXTRA_CFLAGS)
+ifeq ($(QEMU_SHARED_SMP),1)
+ifneq ($(BOARD),qemu-virt-x86_64)
+$(error QEMU_SHARED_SMP requires BOARD=qemu-virt-x86_64)
+endif
+ifneq ($(NR_CPUS),2)
+$(error QEMU_SHARED_SMP currently requires NR_CPUS=2)
+endif
+ifneq ($(BRINGUP),1)
+$(error QEMU_SHARED_SMP currently requires BRINGUP=1: cross-instance device ownership is not implemented)
+endif
+CFLAGS += -DCONFIG_QEMU_SHARED_SMP
+endif
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
 # tools/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。

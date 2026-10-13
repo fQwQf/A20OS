@@ -253,3 +253,8 @@ Unicorn 2.1.4 安装 RAM hook 后在部分多指令步长边界跳过 Thumb 指�
    固件/运行时/游戏哈希、串口日志和屏幕证据。性能不作为该验收的通过条件。
 
 第 3–4 项的详细应用边界见 [24-single-system-minecraft.md](24-single-system-minecraft.md)。
+
+无需真实 MCU 的另一个执行验证入口是
+[系统自带 QEMU 的双进程共享内核](54-stock-qemu-shared-kernel.md)：已验证真实
+内核任务跨进程迁移；当前为 x86_64/KVM bringup 后端，MCU 与完整客户端的
+验收要求仍按上述步骤推进。
