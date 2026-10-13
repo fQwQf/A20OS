@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "mm/swap.h"
+#include "mm/pt.h"
 #include "cg/cgroup.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -72,127 +73,160 @@ static int vma_is_swappable(const mm_seg_t *vma)
                               VM_VMO | VM_FILE));
 }
 
-static int swap_out_victim_pages(int target_pages)
+static int swap_out_task_pages(task_t *victim, int target_pages,
+                                vaddr_t first, vaddr_t last, int forced)
 {
-    int victim_pid = oom_pick_victim_pid();
-    if (victim_pid <= 0)
-        return 0;
-
-    task_t *victim = proc_find_get(victim_pid);
-    if (!victim)
-        return 0;
     mm_struct_t *mm = proc_task_get_mm(victim);
     if (!mm || !mm->pgdir) {
         if (mm)
             mm_destroy(mm);
-        proc_put(victim);
         return 0;
     }
 
-    /*
-     * SWAP_OUT_IO_LOCKING:
-     * Each candidate page is first pinned and a swap slot reserved under
-     * mm->lock; the block I/O (swap_write_page) then runs with mm->lock
-     * dropped so the IRQ-disabling spinlock is never held across a device
-     * request.  After the I/O the PTE is re-validated under mm->lock: it is
-     * only replaced with the swap entry if it still maps the same page.  A
-     * concurrent fault sees the still-present PTE and does not reallocate;
-     * the mm_tlb_hold keeps the frame alive until the remote shootdown in
-     * mm_tlb_invalidate_finish() completes.
-     */
+    struct cg_node *owner = cg_task_group_pin(victim);
     int reclaimed = 0;
-    mm_tlb_invalidate_begin(mm);
-    for (mm_seg_t *vma = mm->mmap;
-         vma && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
-         vma = vma->next) {
-        if (!vma_is_swappable(vma))
+    vaddr_t scan = first;
+    int limit = forced || target_pages < MAX_SWAP_RECLAIM ? target_pages : MAX_SWAP_RECLAIM;
+    while (reclaimed < limit && scan < last) {
+        swap_entry_t entry = 0;
+        pfn_t pfn = PFN_NONE;
+        mm_seg_t *source = NULL;
+        vaddr_t va = 0;
+        int exhausted = 0;
+        unsigned budget = 256;
+        /* SWAP_OUT_IO_LOCKING: protect the private frame and finish its TLB
+         * shootdown BEFORE reading it for I/O. A racing writer must COW to a
+         * different frame; merely checking the PFN after I/O misses writes. */
+        mm_tlb_invalidate_begin(mm);
+        uint64_t flags = spin_lock_irqsave(&mm->lock);
+        mm_seg_t *vma = mm_seg_find(mm, scan);
+        for (; vma && vma->start < last && budget && !entry; vma = entry ? vma : vma->next) {
+            if (!vma_is_swappable(vma)) { scan = vma->end; continue; }
+            va = scan > vma->start ? scan : vma->start;
+            for (; va < vma->end && va < last && budget && !entry; va += PAGE_SIZE) {
+                scan = va + PAGE_SIZE;
+                budget--;
+                int level = 0;
+                vaddr_t base = 0;
+                size_t size = 0;
+                pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+                if (!pte || level || base != va || size != PAGE_SIZE) continue;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+                pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
+                if (table) mm_pt_node_lock(table);
+#endif
+                pte_t snapshot = *pte;
+                pfn_t candidate = phys_to_pfn(arch_pte_addr(snapshot));
+                int eligible = pte_present(snapshot) && arch_pte_is_leaf(snapshot) &&
+                               (snapshot & PTE_U) && pfn_valid(candidate);
+                if (eligible) {
+                    uint64_t pf = spin_lock_irqsave(&pfa.lock);
+                    eligible = pfa.meta[candidate].refcount == 1;
+                    spin_unlock_irqrestore(&pfa.lock, pf);
+                }
+                if (eligible) {
+                    entry = get_swap_page_owned(owner);
+                    if (entry) {
+                        pfn = candidate;
+                        frame_get(pfn); /* immutable I/O snapshot pin */
+                        source = mm_seg_get(vma);
+                        pte_t prot = arch_pte_flags(snapshot);
+                        if (prot & (PTE_W | PTE_COW)) {
+                            prot &= ~(pte_t)(PTE_W | PTE_D);
+                            prot |= PTE_COW;
+                        }
+                        *pte = arch_pte_leaf(arch_pte_addr(snapshot), prot);
+#if defined(ARCH_HAS_PGTABLE_OPS)
+                        if (table) (void)mm_pt_sync_status(table, 0,
+                                            arch_pt_vpn(va, 0), MM_ST_ANON_MAPPED);
+#endif
+                        if (*pte != snapshot) mm_tlb_note_change(mm, va, PAGE_SIZE);
+                    } else exhausted = 1;
+                }
+#if defined(ARCH_HAS_PGTABLE_OPS)
+                if (table) mm_pt_node_unlock(table);
+#endif
+                if (exhausted) break;
+            }
+            if (entry) { va -= PAGE_SIZE; break; }
+            if (exhausted || !budget) break;
+        }
+        if (!vma || vma->start >= last || scan >= last) exhausted = 1;
+        spin_unlock_irqrestore(&mm->lock, flags);
+        mm_tlb_invalidate_finish(mm);
+        if (!entry) {
+            if (exhausted) break;
             continue;
+        }
 
-        for (vaddr_t va = vma->start;
-             va < vma->end && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
-             va += PAGE_SIZE) {
-            pfn_t pfn = PFN_NONE;
-            swap_entry_t entry = 0;
-
-            uint64_t flags = spin_lock_irqsave(&mm->lock);
-            int level = 0;
-            vaddr_t base = 0;
-            size_t size = 0;
-            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            if (!pte || !pte_present(*pte) || !arch_pte_is_leaf(*pte) ||
-                !(*pte & PTE_U) || level != 0 || base != va || size != PAGE_SIZE) {
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-
-            pfn = phys_to_pfn(arch_pte_addr(*pte));
-            if (!pfn_valid(pfn)) {
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-
-            uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
-            uint16_t refs = pfa.meta[pfn].refcount;
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            if (refs > 1) {
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-
-            entry = get_swap_page();
-            if (!entry) {
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-            if (cg_mem_swap_charge(victim, 1) < 0) {
-                swap_free(entry);
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-            if (mm_tlb_hold_frame(mm, pfn) < 0) {
-                cg_mem_swap_uncharge(victim, 1);
-                swap_free(entry);
-                spin_unlock_irqrestore(&mm->lock, flags);
-                continue;
-            }
-            frame_get(pfn); /* pin for the I/O window */
-            spin_unlock_irqrestore(&mm->lock, flags);
-
-            int written = swap_write_page(entry, pfn_to_virt(pfn));
-
+        int written = swap_write_page(entry, pfn_to_virt(pfn));
+        int committed = 0;
+        if (written >= 0) {
+            mm_tlb_invalidate_begin(mm);
             flags = spin_lock_irqsave(&mm->lock);
-            pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            int still_maps = written >= 0 && pte &&
-                             pte_present(*pte) && arch_pte_is_leaf(*pte) &&
-                             level == 0 && base == va && size == PAGE_SIZE &&
-                             phys_to_pfn(arch_pte_addr(*pte)) == pfn;
-            if (still_maps) {
+            mm_seg_t *current = mm_seg_find(mm, va);
+            int level = 0;
+            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, NULL, NULL);
+#if defined(ARCH_HAS_PGTABLE_OPS)
+            pte_t *table = level == 0 ? mm_pt_leaf_table(mm->pgdir, va) : NULL;
+            if (table) mm_pt_node_lock(table);
+#endif
+            if (current == source && va >= source->start && va < source->end &&
+                vma_is_swappable(source) && pte && !level &&
+                pte_present(*pte) && arch_pte_is_leaf(*pte) && !(*pte & PTE_W) &&
+                phys_to_pfn(arch_pte_addr(*pte)) == pfn && mm_tlb_hold_frame(mm, pfn) == 0) {
                 *pte = swp_entry_to_pte(entry);
+#if defined(ARCH_HAS_PGTABLE_OPS)
+                if (table) mm_pt_note_present(table, 0, arch_pt_vpn(va, 0),
+                    MM_ST_CLS_BYTE(MM_ST_SWAPPED) | mm_pt_prot_bits(source->pte_flags));
+#endif
                 mm_tlb_note_change(mm, va, PAGE_SIZE);
-                frame_put(pfn); /* release the I/O pin; the mapping ref is
-                                 * held for the TLB flush and dropped by
-                                 * mm_tlb_invalidate_finish() */
-                cg_mem_uncharge(victim->cgroup, 1);
+                frame_put(pfn); /* old mapping; the TLB hold outlives shootdown */
                 mm_rss_sub_clamped(mm, 1);
                 reclaimed++;
-            } else {
-                frame_put(pfn);
-                cg_mem_swap_uncharge(victim, 1);
-                swap_free(entry);
+                committed = 1;
             }
+#if defined(ARCH_HAS_PGTABLE_OPS)
+            if (table) mm_pt_node_unlock(table);
+#endif
             spin_unlock_irqrestore(&mm->lock, flags);
-
-            if (pfa_free_count() >= OOM_MIN_FREE_PAGES)
-                break;
+            mm_tlb_invalidate_finish(mm);
         }
+        if (committed) cg_mem_uncharge(owner, 1);
+        else swap_free(entry);
+        frame_put(pfn);
+        mm_seg_put(source);
+        if (!forced && pfa_free_count() >= OOM_MIN_FREE_PAGES) break;
     }
-
-    mm_tlb_invalidate_finish(mm);
+    cg_group_unpin(owner);
     mm_destroy(mm);
-    proc_put(victim);
     return reclaimed;
 }
+static int swap_out_victim_pages(int target_pages)
+{
+    int pid = oom_pick_victim_pid();
+    task_t *victim = pid > 0 ? proc_find_get(pid) : NULL;
+    if (!victim) return 0;
+    int r = swap_out_task_pages(victim, target_pages, 0, USER_VA_LIMIT, 0);
+    proc_put(victim);
+    return r;
+}
+
+int oom_swap_reclaim_range(task_t *t, vaddr_t start, size_t len)
+{
+    if (!t || !len || (start & (PAGE_SIZE - 1)) ||
+        (len & (PAGE_SIZE - 1)) || start >= USER_VA_LIMIT || len > USER_VA_LIMIT - start)
+        return -EINVAL;
+    size_t pages = len / PAGE_SIZE;
+    int limit = pages > 2147483647U ? 2147483647 : (int)pages;
+    return swap_out_task_pages(t, limit, start, start + len, 1);
+}
 #else
+int oom_swap_reclaim_range(task_t *t, vaddr_t start, size_t len)
+{
+    (void)t; (void)start; (void)len;
+    return 0; /* no swap backing: PAGEOUT remains a best-effort hint */
+}
 static int swap_out_victim_pages(int target_pages)
 {
     (void)target_pages;

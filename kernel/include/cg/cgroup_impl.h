@@ -60,7 +60,7 @@ typedef struct cg_node {
     cg_file_t files[CG_MAX_FILES];
     int file_count;
     int is_root;
-    unsigned namespace_refs; /* pins from namespaces, mounts and tasks */
+    unsigned namespace_refs; /* pins from namespaces, mounts, tasks and swap slots */
     int clone_children;
     int pids[CG_MAX_PIDS];
     int pid_count;

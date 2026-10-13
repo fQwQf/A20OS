@@ -199,6 +199,15 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         size_t leaf_size = 0;
         uint64_t src_va = src_addr + off;
         pte_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
+#ifdef CONFIG_SWAP
+        if (src && pte_is_swap(*src)) {
+            int sr = mm_clone_swap_page(mm, dst + off, mm, src_va);
+            if (sr == -EAGAIN) continue;
+            if (sr < 0) { mm_munmap_locked(mm, dst, len); return sr; }
+            off += PAGE_SIZE;
+            continue;
+        }
+#endif
         if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         {
             off += PAGE_SIZE;
@@ -270,6 +279,15 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         size_t leaf_size = 0;
         uint64_t src_va = old_addr + off;
         pte_t *src = pt_lookup_leaf(mm->pgdir, src_va, &level, &base, &leaf_size);
+#ifdef CONFIG_SWAP
+        if (src && pte_is_swap(*src)) {
+            int sr = mm_clone_swap_page(mm, dst + off, mm, src_va);
+            if (sr == -EAGAIN) continue;
+            if (sr < 0) return sr;
+            off += PAGE_SIZE;
+            continue;
+        }
+#endif
         if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         {
             off += PAGE_SIZE;

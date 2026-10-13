@@ -540,6 +540,77 @@ static int fault_access_allowed(uint64_t flags, enum mm_fault_access access)
     return (flags & (VM_READ | VM_WRITE)) != 0;
 }
 
+#if defined(CONFIG_SWAP) && !defined(CONFIG_NOMMU)
+/* Speculative I/O holds its own slot reference. Only a matching PTE/VMA may
+ * consume the data, so simultaneous faults, munmap and remap cannot overwrite
+ * a newer page or recycle the disk slot while the read is in flight. */
+static int handle_swap_fault(task_t *t, uint64_t stval, enum mm_fault_access access)
+{
+    mm_struct_t *mm = mm_get(t->mm);
+    if (!mm) return -EFAULT;
+    struct cg_node *charge = cg_task_group_pin(t);
+    vaddr_t va = stval & ~(vaddr_t)(PAGE_SIZE - 1);
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    mm_seg_t *vma = mm_seg_find(mm, va);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    int r = MM_FAULT_RETRY;
+    if (t->mm != mm || !vma || va < vma->start || va >= vma->end ||
+        !fault_access_allowed(vma->vm_flags, access) || !pte || !pte_is_swap(*pte)) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        goto out_mm;
+    }
+    swap_entry_t entry = pte_to_swp_entry(*pte);
+    r = swap_duplicate(entry);
+    if (r < 0) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        goto out_mm;
+    }
+    mm_seg_get(vma);
+    spin_unlock_irqrestore(&mm->lock, flags);
+    pfn_t pfn = pfa_alloc_page();
+    int charged = 0;
+    r = -ENOMEM;
+    if (pfn == PFN_NONE) goto out_slot;
+    if (cg_mem_charge(charge, 1) < 0) goto out_frame;
+    charged = 1;
+    r = swap_read_page(entry, pfn_to_virt(pfn));
+    if (r < 0) goto out_frame;
+
+    flags = spin_lock_irqsave(&mm->lock);
+    mm_seg_t *current = mm_seg_find(mm, va);
+    pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    r = MM_FAULT_RETRY;
+    if (t->mm == mm && current == vma && va >= vma->start && va < vma->end &&
+        fault_access_allowed(vma->vm_flags, access) && pte &&
+        pte_is_swap(*pte) && pte_to_swp_entry(*pte) == entry) {
+        r = fault_install(mm, va, pfn, vma->pte_flags, MM_ST_ANON_MAPPED, 1);
+        if (!r) mm_rss_add(mm, 1);
+    }
+    spin_unlock_irqrestore(&mm->lock, flags);
+    if (!r) {
+        /* Drop the replaced PTE's reference, then the speculative I/O pin. */
+        swap_free(entry);
+        pfn = PFN_NONE;
+        charged = 0;
+        arch_tlb_flush_page_local(stval);
+        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
+    }
+out_frame:
+    if (charged) cg_mem_uncharge(charge, 1);
+    if (pfn != PFN_NONE) frame_put(pfn);
+out_slot:
+    swap_free(entry);
+    mm_seg_put(vma);
+out_mm:
+    cg_group_unpin(charge);
+    mm_destroy(mm);
+    return r;
+}
+#endif
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -558,49 +629,6 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         return -1;
     pte_t *pte = pt_lookup_leaf(t->mm->pgdir, page_va, NULL, NULL, NULL);
 
-#ifdef CONFIG_SWAP
-    if (pte && pte_is_swap(*pte)) {
-        mm_seg_t *vma = mm_seg_find(t->mm, page_va);
-        if (!vma) {
-            signal_send(t->pid, SIGBUS);
-            return -1;
-        }
-
-        swap_entry_t entry = pte_to_swp_entry(*pte);
-        pfn_t pfn = pfa_alloc_page();
-        if (pfn == PFN_NONE)
-            return -1;
-        if (cg_mem_charge(t->cgroup, 1) != 0) {
-            frame_put(pfn);
-            return -ENOMEM;
-        }
-        if (swap_read_page(entry, pfn_to_virt(pfn)) < 0) {
-            cg_mem_uncharge(t->cgroup, 1);
-            frame_put(pfn);
-            return -1;
-        }
-
-        /* Swap-in replaces the non-present swap entry; demand maps must
-         * instead refuse to overwrite a racing installed leaf. */
-        int r = fault_install(t->mm, page_va, pfn, vma->pte_flags,
-                              MM_ST_ANON_MAPPED, 1);
-        if (r < 0) {
-            cg_mem_uncharge(t->cgroup, 1);
-            frame_put(pfn);
-            return -1;
-        }
-
-        swap_free(entry);
-        cg_mem_swap_uncharge(t, 1);
-        mm_rss_add(t->mm, 1);
-        arch_tlb_flush_page_local(stval);
-        __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
-        return 0;
-    }
-#endif
 
     if (t->mm->stack_top != 0) {
 
@@ -1502,10 +1530,9 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
     pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
 #ifdef CONFIG_SWAP
     if (pte && pte_is_swap(*pte)) {
-        /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
-         * busy swap PTE will close the remaining duplicate-swapin race. */
+        /* Read outside the MM lock, retaining and revalidating the slot. */
         spin_unlock(&mm->lock);
-        int r = handle_demand_fault_locked(t, stval, access, 0);
+        int r = handle_swap_fault(t, stval, access);
         if (r == -ENOMEM) {
             cg_mem_oom_kill(t->cgroup);
             return -1;

@@ -1,6 +1,9 @@
 #ifndef _OOM_H
 #define _OOM_H
 
+#include "core/types.h"
+struct task_t;
+
 /*
  * OOM_RECLAIM_LIFETIME_CONTRACT:
  * - Reclaim may free only objects with no task/mm, VMA, page-table, page-cache,
@@ -28,6 +31,8 @@ int oom_try_reclaim(void);
 /* Paced swap-only reclaim for the background reclaimer (no OOM kill, no
  * cooldown); returns pages reclaimed. */
 int oom_swap_reclaim_pages(int target_pages);
+/* Explicit PAGEOUT: own range, no victim selection or low-memory threshold. */
+int oom_swap_reclaim_range(struct task_t *t, vaddr_t start, size_t len);
 /* Kernel-thread entry for the background reclaimer; main.c spawns it with
  * proc_alloc() after the MM is up. */
 void oom_kswapd_thread(void);

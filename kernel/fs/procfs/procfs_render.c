@@ -683,8 +683,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             /* core/printf.c has no '-' flag support; emit unaligned fields. */
             appendf(buf, bufsz, &off, "%s\tpartition\t%llu\t%lu\t-2\n",
                     sl.name,
-                    (unsigned long long)sl.pages,
-                    (unsigned long)sl.inuse_pages);
+                    (unsigned long long)sl.pages * (PAGE_SIZE / 1024),
+                    (unsigned long)sl.inuse_pages * (PAGE_SIZE / 1024));
         }
 #endif
         break;

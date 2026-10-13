@@ -67,16 +67,15 @@ void cg_mem_uncharge(struct cg_node *cg, size_t nr_pages)
     spin_unlock_irqrestore(&node->lock, flags);
 }
 
-int cg_mem_swap_charge(task_t *t, size_t pages)
+int cg_mem_swap_charge_node(struct cg_node *cg, size_t pages)
 {
-    if (!t || !t->cgroup)
-        return 0;
-
-    cg_node_t *node = (cg_node_t *)t->cgroup;
+    if (!cg) return 0;
+    cg_node_t *node = (cg_node_t *)cg;
     uint64_t flags = spin_lock_irqsave(&node->lock);
     cg_mem_state_t *m = &node->res.mem;
 
-    if (m->swap_limit != 0 && m->swap_usage + pages > m->swap_limit) {
+    if (pages > SIZE_MAX - m->swap_usage ||
+        m->swap_usage > m->swap_limit || pages > m->swap_limit - m->swap_usage) {
         m->failcnt++;
         spin_unlock_irqrestore(&node->lock, flags);
         return -ENOMEM;
@@ -87,12 +86,10 @@ int cg_mem_swap_charge(task_t *t, size_t pages)
     return 0;
 }
 
-void cg_mem_swap_uncharge(task_t *t, size_t pages)
+void cg_mem_swap_uncharge_node(struct cg_node *cg, size_t pages)
 {
-    if (!t || !t->cgroup)
-        return;
-
-    cg_node_t *node = (cg_node_t *)t->cgroup;
+    if (!cg) return;
+    cg_node_t *node = (cg_node_t *)cg;
     uint64_t flags = spin_lock_irqsave(&node->lock);
     cg_mem_state_t *m = &node->res.mem;
     if (m->swap_usage >= pages)
@@ -100,6 +97,41 @@ void cg_mem_swap_uncharge(task_t *t, size_t pages)
     else
         m->swap_usage = 0;
     spin_unlock_irqrestore(&node->lock, flags);
+}
+
+void cg_group_pin(struct cg_node *cg)
+{
+    if (cg) __atomic_fetch_add(&((cg_node_t *)cg)->namespace_refs, 1, __ATOMIC_RELAXED);
+}
+
+void cg_group_unpin(struct cg_node *cg)
+{
+    if (cg) __atomic_fetch_sub(&((cg_node_t *)cg)->namespace_refs, 1, __ATOMIC_RELEASE);
+}
+
+struct cg_node *cg_task_group_pin(task_t *t)
+{
+    if (!t) return NULL;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    struct cg_node *cg = t->cgroup;
+    cg_group_pin(cg);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    return cg;
+}
+
+int cg_mem_swap_charge(task_t *t, size_t pages)
+{
+    struct cg_node *cg = cg_task_group_pin(t);
+    int r = cg_mem_swap_charge_node(cg, pages);
+    cg_group_unpin(cg);
+    return r;
+}
+
+void cg_mem_swap_uncharge(task_t *t, size_t pages)
+{
+    struct cg_node *cg = cg_task_group_pin(t);
+    cg_mem_swap_uncharge_node(cg, pages);
+    cg_group_unpin(cg);
 }
 
 void cg_mem_oom_kill(struct cg_node *cg)

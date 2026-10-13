@@ -54,7 +54,9 @@
 #define PTE_D              PTE_W
 
 #ifdef CONFIG_SWAP
-#define PTE_SWAP            PTE_LEAF
+/* Invalid descriptors ignore bit 2. Keep the marker below the swap
+ * payload: PTE_LEAF at bit 55 overlaps entry bit 43 after the shift. */
+#define PTE_SWAP            (1UL << 2)
 
 static inline int pte_present(uint64_t pte) {
     return (pte & PTE_V) != 0;

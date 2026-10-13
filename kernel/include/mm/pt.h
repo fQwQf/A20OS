@@ -756,6 +756,10 @@ int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
  * the existing mapping and leaves ownership of pa with the caller. */
 int mm_cursor_map_if_absent(mm_cursor_t *cur, vaddr_t addr, paddr_t pa,
                             pte_t flags, uint8_t cls);
+#ifdef CONFIG_SWAP
+/* Installs an already-owned swap reference only into an empty PTE. */
+int mm_cursor_map_swap(mm_cursor_t *cur, vaddr_t addr, uint64_t entry, pte_t prot);
+#endif
 
 
 /* Install a mapping and report the displaced frame in *old_pa_out WITHOUT

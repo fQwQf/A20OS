@@ -4,6 +4,7 @@
 #include "mm/pt.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
+#include "mm/swap.h"
 #include "fs/page_cache.h"
 #include "proc/proc.h"
 #include "core/string.h"
@@ -83,12 +84,67 @@ static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
 }
 #endif /* ARCH_HAS_PGTABLE_OPS */
 
+#ifdef CONFIG_SWAP
+int mm_clone_swap_page(mm_struct_t *dst, vaddr_t dst_va,
+                        mm_struct_t *src, vaddr_t src_va)
+{
+    pte_t *pte = pt_lookup_leaf(src->pgdir, src_va, NULL, NULL, NULL);
+    if (!pte) return -EAGAIN;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    pte_t *table = mm_pt_leaf_table(src->pgdir, src_va);
+    if (table) mm_pt_node_lock(table);
+#endif
+    pte_t snapshot = *pte;
+    int r = -EAGAIN;
+    swap_entry_t entry = 0;
+    if (pte_is_swap(snapshot)) {
+        entry = pte_to_swp_entry(snapshot);
+        r = swap_duplicate(entry);
+    }
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    if (table) mm_pt_node_unlock(table);
+#endif
+    if (r < 0) return r;
+    mm_seg_t *vma = mm_seg_find(dst, dst_va);
+    if (!vma || dst_va < vma->start || dst_va >= vma->end) {
+        swap_free(entry);
+        return -EFAULT;
+    }
+    pte_t prot = vma ? vma->pte_flags : 0;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    mm_cursor_t cur;
+    r = mm_addrspace_lock(dst, dst_va, dst_va + PAGE_SIZE, &cur);
+    if (r == 0) {
+        r = mm_cursor_map_swap(&cur, dst_va, entry, prot);
+        mm_cursor_unlock(&cur);
+    } else if (r > 0) r = -EFAULT;
+#else
+    (void)prot;
+    pte_t *target = pt_walk(dst->pgdir, dst_va, 1);
+    r = target ? (*target ? -EEXIST : 0) : -ENOMEM;
+    if (!r) *target = swp_entry_to_pte(entry);
+#endif
+    if (r < 0) swap_free(entry);
+    return r;
+}
+#endif
+
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                        int shared) {
+    mm_seg_t *policy = mm_seg_find(parent, va);
+    if (policy && va >= policy->start && va < policy->end &&
+        (policy->vm_flags & (VM_DONTFORK | VM_WIPEONFORK)))
+        return 0;
     int level = 0;
     vaddr_t base = 0;
     size_t size = 0;
     pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
+#ifdef CONFIG_SWAP
+    if (src && pte_is_swap(*src)) {
+        int r = mm_clone_swap_page(child, va, parent, va);
+        return r == -EEXIST || r == -EAGAIN ? 0 : r;
+    }
+#endif
     if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
         return 0;
     if (va != base)
@@ -224,6 +280,13 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
             break;
 
         pte_t *pte = &table[i];
+#ifdef CONFIG_SWAP
+        if (level == 0 && pte_is_swap(*pte)) {
+            int r = mm_clone_swap_page(child, entry_base, parent, entry_base);
+            if (r < 0 && r != -EEXIST && r != -EAGAIN) return r;
+            continue;
+        }
+#endif
         if (!(*pte & PTE_V))
             continue;
 
