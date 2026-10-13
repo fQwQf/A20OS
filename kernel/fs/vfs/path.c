@@ -7,6 +7,8 @@
 int path_is_beneath(const char *start, const char *resolved) {
     size_t len = strlen(start);
     while (len > 1 && start[len - 1] == '/') len--;
+    if (len == 1 && start[0] == '/')
+        return resolved[0] == '/';
     if (strcmp(resolved, start) == 0) return 1;
     if (strncmp(resolved, start, len) == 0 && (resolved[len] == '/' || resolved[len] == '\0'))
         return 1;
