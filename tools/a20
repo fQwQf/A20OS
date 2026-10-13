@@ -248,6 +248,18 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
+    if args.detach and not args.name:
+        raise A20Error("--detach requires --name")
+    if args.no_build and not args.name:
+        raise A20Error("--no-build requires --name")
+    if args.name:
+        from a20_runtime import start
+        _check_runnable(inst, "run")
+        _gate_resources(inst, args)
+        _gate_qemu(inst, "run")
+        return start(inst, args.name, detach=args.detach,
+                     no_build=args.no_build, dry_run=args.dry_run,
+                     make_args=list(args.make_args))
     if inst.arch == "armv7m":
         if not inst.stm32.qemu:
             raise A20Error(
@@ -934,7 +946,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_instance_cmd("trim", "show the kernel trim plan the instance builds with",
                    with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
-    add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
+    prun = add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
+    prun.add_argument("--name", help="create a named runtime with private writable disks")
+    prun.add_argument("--detach", action="store_true", help="leave the named runtime running")
+    prun.add_argument("--no-build", action="store_true", help="use existing artifacts for a named run")
+    sub.add_parser("running", help="list named QEMU runtimes and their state")
+    for action in ("attach", "pause", "resume", "stop", "destroy"):
+        runtime = sub.add_parser(action, help=f"{action} a named QEMU runtime")
+        runtime.add_argument("name")
     add_instance_cmd("debug", "build with -O0 -g and boot under QEMU GDB stub", with_make_args=True)
     add_instance_cmd("test", "build, boot, inject [test].commands, and check [test].expect",
                      with_make_args=True)
@@ -996,6 +1015,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(ns: argparse.Namespace) -> int | None:
     match ns.command:
+        case "running":
+            from a20_runtime import list_runs
+            return list_runs()
+        case "attach":
+            from a20_runtime import attach
+            return attach(ns.name)
+        case "pause" | "resume" | "stop" | "destroy":
+            from a20_runtime import control
+            return control(ns.name, ns.command)
         case "check":
             return cmd_check(ns)
         case "check-registry":

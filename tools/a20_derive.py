@@ -46,6 +46,8 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"EXTERNAL_ROOT={_b(k.external_root)}")
     if k.ramfs_user is not None:
         v.append(f"RAMFS_USER={_b(k.ramfs_user)}")
+    if m.accel is not None:
+        v.append(f"QEMU_ACCEL={m.accel}")
     if m.smp is not None:
         v.append(f"NR_CPUS={m.smp}")
     if m.memory is not None:
