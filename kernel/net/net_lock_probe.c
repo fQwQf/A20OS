@@ -71,6 +71,29 @@ void net_lock_probe_arm(void)
     __atomic_store_n(&g_net_lock_armed, 1, __ATOMIC_RELEASE);
 }
 
+int net_lock_probe_held(const void *lock, int kind)
+{
+    if (!__atomic_load_n(&g_net_lock_armed, __ATOMIC_ACQUIRE))
+        return -1;
+    /* Queries outside a critical section must not migrate while reading the
+     * CPU-local set.  A query inside one leaves IRQs disabled on return. */
+    int enabled = arch_irqs_enabled();
+    arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    unsigned n = g_net_lock_held_n[cpu];
+    int held = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (g_net_lock_held[cpu][i].lock == lock &&
+            g_net_lock_held[cpu][i].kind == kind) {
+            held = 1;
+            break;
+        }
+    }
+    if (enabled)
+        arch_local_irq_enable();
+    return held;
+}
+
 static void net_lock_note_site(const void *site)
 {
     for (unsigned i = 0; i < NET_LOCK_PROBE_SITES; i++) {
@@ -274,6 +297,12 @@ void net_lock_probe_release(const void *lock, int kind)
     (void)kind;
 }
 void net_lock_probe_arm(void) {}
+int net_lock_probe_held(const void *lock, int kind)
+{
+    (void)lock;
+    (void)kind;
+    return -1;
+}
 unsigned net_lock_probe_violations(void) { return 0; }
 void net_lockcounters_short(unsigned got, unsigned want, unsigned dropped)
 {

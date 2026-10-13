@@ -728,9 +728,9 @@ int net_bh_slot_clear(int idx);
  * g_lwip_lock_armed documents: nothing before that point may be judged, because
  * the registry locks do not exist yet.
  */
-#if CONFIG_NET_LOCK_ASSERT
 #define NET_LOCK_PROBE_SOCKET 0
 #define NET_LOCK_PROBE_BUCKET 1
+#if CONFIG_NET_LOCK_ASSERT
 
 /* Deep enough for the contract's own ceiling (two socket + one bucket) plus one
  * slot of slack, so an overflow is reported as a violation instead of silently
@@ -753,6 +753,9 @@ void net_lock_probe_arm(void);
  * Returns the number of bytes it would have written, like the snprintf it uses. */
 int net_lock_probe_format(char *buf, size_t bufsz);
 unsigned net_lock_probe_violations(void);
+/* 1 held, 0 not held, -1 unavailable (probe disabled or not yet armed).
+ * Intended for assertions, never for deciding whether to acquire a lock. */
+int net_lock_probe_held(const void *lock, int kind);
 /* Reported by net_socket_registry_init() when lock_counters_register() could not
  * fit a bucket lock; see net_lock_probe.c. */
 void net_lockcounters_short(unsigned got, unsigned want, unsigned dropped);

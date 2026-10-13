@@ -896,20 +896,24 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
       （见 `net-lanes.md`「放大实验第二轮」）。**两组故意注入**的对照只证明其中两个
       分支（桶锁在 socket 锁之下 / 地址乱序），第三把 socket 锁、第二把桶锁、重复取锁
       三支没有单独注入过——详见上方「net 锁一侧的探针」末段与 `impl-notes-net.md` §11.3。
-- [ ] 仍然没有的是**正向**查询原语："当前 CPU 是否持有 socket X 的锁"。
-      探针只回答"这一把取得合不合规"，调用方无法问"我此刻持有什么"。
-      谁需要它：`net_inet_*` 里几处"我刚在 pair 里改过 `s`，现在想在不取第二次锁的
-      前提下确认"的地方——目前一律再取一次锁。
-- [ ] `net_socket_unregister()` 的返回值把"槽位释放了没有"告诉了调用方
+- `net_socket_unregister()` 的返回值把"槽位释放了没有"告诉了调用方
       （`2dd28758c`），但这是**引用计数**的对账，不是锁的断言：探针看不见
       "某条路径多释放了一次引用"。那件事由 `net_sock_ref:` 账本负责，见
       `impl-notes-net.md` §11。**该账本本轮有新的多核数据**：20 次 4 CPU + 4 lane
       引导全部 `live=1 faults=0`，`allocs` 落在 159–167、`frees` 恒等于 `allocs-1`
       （单 CPU 那个读数只有三个自带用例的量级，见 `impl-notes-net.md` §11.4 补记）。
-- [ ] lane claim 一侧同样没有探针：没有"当前 CPU 是否持有某条 lane 的消费权"的
-      运行期判据，`net-lanes.md` 里"claim 先于 `g_lwip_lock`、判空在锁外"两条同样只由
-      代码评审保证。
 - [ ] **本轮未做**：ASAN 压力测试与全量回归（`smoke-network-suite`、
       `smoke-smp-lock-contention` 等）没有跑——按分工由编排层在合并后统一执行。
       上面那些 `violations=0` 的读数因此只覆盖到各自那一组负载，**不构成"探针在
       全量回归下也干净"的证据**。
+
+### 2026-10-13 编码增量（未运行）
+
+`net_lock_probe_held(lock, kind)` 提供当前 CPU 的正向持锁查询，返回 1/0；探针
+未开启或未 armed 时返回 -1，不能把缺席解释为未持锁，也不能据此省略必要的取锁。
+查询临时屏蔽 IRQ 以稳定 CPU-local 集合，返回时恢复原状态。
+
+RX consumer claim 记录任务身份，允许持有者被抢占后迁移；`net_lane_rx_is_held()`
+可以核对当前消费者。peek、consume 与 release 检查所有权，consume 还检查队列非空。
+这不是 core lane 锁的替代：核心锁已有 `a20_lwip_lane_is_held()` 与
+`a20_lwip_control_is_held()`。上述改动已做单文件编译检查，尚无故障注入或运行结果。
