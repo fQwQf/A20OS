@@ -137,3 +137,8 @@ MCU 端还需对应架构运行时与
 共享页权限与真实保护异常、动态计算和超时；见
 [55-linux-threads-shared-kernel.md](55-linux-threads-shared-kernel.md)。统一设备和
 实际 JVM/客户端跨实例仍未完成。
+
+设备后续进展：[56-shared-device-owner.md](56-shared-device-owner.md) 已将串口
+统一到主实例；最新检查器取消次实例 UART，只从主实例日志验收用户输出，
+并要求 CPU 1 上的用户程序完成定向收发。先前双串口日志描述保留为早期证据；
+块设备与 GPU 仍未接入。

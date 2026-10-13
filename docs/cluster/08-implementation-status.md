@@ -810,3 +810,8 @@ main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS �
 pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护异常及恢复、
 1024 片动态计算和条件变量超时。原 Native 程序回归通过；命令、失败/修复记录
 及尚未完成的设备/JVM 部分见 [55-linux-threads-shared-kernel.md](55-linux-threads-shared-kernel.md)。
+
+共享内核新增通用设备 owner 调用入口；次 QEMU 不创建串口时，CPU 1 上的普通
+Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x86_64/AArch64/RV64
+四端点并发用例中各通过 80000 次调用。机制、进度约束和未完成的磁盘/图形/JVM
+部分见 [56-shared-device-owner.md](56-shared-device-owner.md)。

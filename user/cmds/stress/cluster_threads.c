@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -98,7 +99,7 @@ static void *worker(void *arg) {
     }
     return (void *)(uintptr_t)(id + 17);
 }
-int main(void) {
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     struct sigaction action = {.sa_sigaction = protection_fault, .sa_flags = SA_SIGINFO};
     sigemptyset(&action.sa_mask);
@@ -145,6 +146,20 @@ int main(void) {
     check(!pthread_mutex_unlock(&mutex) && !pthread_cond_destroy(&cond) &&
           !pthread_condattr_destroy(&attr) && !pthread_mutex_destroy(&mutex), "sync cleanup");
     check(!pthread_key_delete(key) && !pthread_barrier_destroy(&gate) && !munmap(page, 4096), "cleanup");
+    if (argc == 2 && !strcmp(argv[1], "--console")) {
+        bind(2);
+        check(sched_getcpu() == 1, "remote console CPU");
+        puts("CLUSTER_CONSOLE: remote-cpu=1 ready");
+        char input[32];
+        check(fgets(input, sizeof(input), stdin) && !strcmp(input, "owner-ok\n"),
+              "remote console input");
+        for (unsigned i = 0; i < 32; i++)
+            printf("CLUSTER_CONSOLE_BLOCK:%02u:abcdefghijklmnopqrstuvwxyz012345\n", i);
+        check(sched_getcpu() == 1, "console affinity preserved");
+        puts("CLUSTER_CONSOLE: PASS cpu=1 input=owner-ok blocks=32");
+    } else {
+        check(argc == 1, "arguments");
+    }
     printf("CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=%u tls=preserved tlb-rounds=64 protection-faults=128 "
            "jobs=%u split=%u/%u sum=%llu mask=%x destructors=2 cond-timeout=checked\n",
            migrations, JOBS, jobs[0], jobs[1], (unsigned long long)expected, cpu_mask);

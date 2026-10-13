@@ -180,6 +180,7 @@ startup_timeout:
 static uint32_t shared_qemu_ipis[CONFIG_NR_CPUS];
 void x86_64_shared_qemu_poll(void)
 {
+    shared_device_poll();
     unsigned cpu = arch_current_cpu_id();
     uint32_t bits = __atomic_exchange_n(&shared_qemu_ipis[cpu], 0,
                                        __ATOMIC_ACQUIRE);
