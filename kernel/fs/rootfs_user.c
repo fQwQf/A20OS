@@ -18,6 +18,12 @@ extern const unsigned char _binary_storage_read_test_start[];
 extern const unsigned char _binary_storage_read_test_end[];
 #endif
 
+#ifdef CONFIG_RAMFS_NATIVE_TESTS
+extern const unsigned char _binary_native_futex_start[], _binary_native_futex_end[];
+extern const unsigned char _binary_native_spawn_start[], _binary_native_spawn_end[];
+extern const unsigned char _binary_native_input_start[], _binary_native_input_end[];
+#endif
+
 static const unsigned char ramfs_shell_marker[] = "ram-only\n";
 
 #define USER_ENTRY(path_, name_) \
@@ -28,6 +34,11 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     { "/etc/a20-ramfs-shell", ramfs_shell_marker,
       sizeof(ramfs_shell_marker) - 1, 0644 },
     USER_ENTRY("/bin/init", init),
+#ifdef CONFIG_RAMFS_NATIVE_TESTS
+    USER_ENTRY("/bin/native-futex", native_futex),
+    USER_ENTRY("/bin/SPAWN.ELF", native_spawn),
+    USER_ENTRY("/bin/INPUT.DAT", native_input),
+#endif
     USER_ENTRY("/bin/mksh", mksh),
     USER_ENTRY("/bin/help", help),
     USER_ENTRY("/bin/ls", ls),

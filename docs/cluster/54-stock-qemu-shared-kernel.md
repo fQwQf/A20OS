@@ -22,6 +22,11 @@
 python3 tools/check-multi-qemu-kernel.py \
   --out .kernel-build/cluster/multi-qemu/shared-run
 
+# 同一个真实 Native 用户程序跨实例创建线程和分配计算任务。
+python3 tools/check-multi-qemu-kernel.py --workload native \
+  --out .kernel-build/cluster/multi-qemu/native-run
+
+# 用户程序对照也可组合 --workload native --mode smp。
 # 对照：普通单 QEMU、双 vCPU，关闭新增配置。
 python3 tools/check-multi-qemu-kernel.py --mode smp \
   --out .kernel-build/cluster/multi-qemu/ordinary-smp-run
@@ -34,7 +39,7 @@ python3 tools/check-multi-qemu-kernel.py --mode smp \
 保留内核、ROM、串口日志、构建日志、源码差异/哈希和 `report.json`。
 
 报告通过 QMP 记录每个进程的 vCPU 和 KVM 状态，并读取 `/proc/<pid>/maps` 验证
-两个进程使用同一 inode 的可写共享映射。guest 必须报告：
+两个进程使用同一 inode 的可写共享映射。内核模式的 guest 必须报告：
 
 ```text
 [SMP-TEST] PASS cpus=2 mask=0x3 ... migrated=1->0 ... heap=cross-cpu timer-irqs=all-online ipi=acked exit=0
@@ -47,6 +52,24 @@ python3 tools/check-multi-qemu-kernel.py --mode smp \
 宿主只启动进程、读取证据和结束测试，不写入 guest 任务状态或通过标志。
 迁移由测试显式改变亲和性触发；这本身不是自动负载均衡的验证。
 
+用户程序模式启用 `RAMFS_USER=1 RAMFS_NATIVE_TESTS=1`，将既有 Native futex
+测试 ELF、spawn 子程序和确定性输入文件放入 RAMFS。它仍使用正常 Linux init、
+mksh、exec 与 Native SDK/syscall，宿主只向串口 shell 输入测试命令。RAMFS 配置
+独立于 QEMU 后端，普通构建不包含这些测试资源；要求 BOTH ABI，以同时运行
+Linux shell 和 Native 程序。新增 x86_64/AArch64 的 RAMFS objcopy 映射，前者
+已有运行验证；后者仅补齐构建表项，不据此声称新的运行结果。
+
+用户程序检查根身份/对象目录、用户线程创建、跨 CPU 唤醒和取消、共享地址空间
+分配/保护/解除映射、4100 次文件打开关闭、并发读取同一输入、两次真实 ELF 子
+程序启动及退出。两个工作线程通过既有 `a20_work_range_take` 动态领取 32 个
+计算片段，检查无遗漏、无重复、总和为 4359168、执行 CPU 掩码为 3；该模式
+验证了实际用户计算分布到两个实例，不代表等量分配或 CPU 利用率最优。
+通过条件包括 `NATIVE_FUTEX: PASS` 和 shell 获取的真实退出码 0。
+
+当前 UART 输出仍可从任一 CPU 的本地虚拟串口发出。检查器分别保留两个日志，
+在检查用户程序标志时汇总两端输出；没有实现统一输出终端。共享 UART RX 环
+允许 shell 读取主端输入，这不等于统一了任意设备的访问。
+
 ## 平台实现
 
 - 主端使用正常 `-kernel` 引导。次端使用 `tools/boot/shared-qemu-reset.S` 生成的
@@ -58,6 +81,12 @@ python3 tools/check-multi-qemu-kernel.py --mode smp \
 - QEMU 的 LAPIC 不能跨进程发送 IPI。平台将重调度、TLB 和向量配置请求发布到
   共享原子位图，由各端真实 LAPIC 定时中断轮询，再调用原来的 handler。
   为唤醒空闲 CPU，此配置将定时间隔上限设为 1 ms；只在显式启用时生效。
+- 两个 KVM 的 TSC epoch 并不一致。此配置由 CPU 0 发布共享单调时间，其他
+  CPU 读取同一时间，不叠加本地 TSC；本地 LAPIC 标定仍使用本地计数器，以免
+  次级上线前主端关中断等待造成标定死锁。主端定时 IRQ 更新时钟，空闲时的
+  编程周期上限为 1 ms，实际更新也受宿主调度和关中断区间影响。主端停滞会
+  停止全域时间，尚无时钟 owner 故障接管。此配置关闭直接读取 TSC 的 vDSO，
+  用户时间 API 使用正常 syscall；普通平台的 vDSO 和时钟路径不变。
 - 共享内存原子性使用 KVM 下宿主 CPU 的一致性保证。脚本不自动退回 TCG；
   多 TCG 进程对共享内存原子操作的完整语义尚未验证。
 
@@ -72,18 +101,34 @@ Debian 10.0.13，两进程 PID 为 267740 / 267739；这两个测试进程已经
 随后 `multi-qemu/shared-02` 通过严格脚本，QMP 确认 PID 278907 / 278906
 各有一个 vCPU，实际 RAM 映射的 inode 一致且为 `rw-s`。普通 SMP 对照
 `multi-qemu/baseline-01` 同样通过，PID 286313 的单一 QEMU 拥有两个 vCPU。
+后续 `clock-before-01` 捕获了真实时钟错误：主端前采样 31725437707，远端
+31726417545，主端后采样 31726396812，远端值超出因果顺序允许的区间，内核
+断言失败。修复后 `clock-after-02` 通过时间顺序握手、主端生成/远端等待的
+绝对截止时间和原有迁移/回收断言。`native-01` 的两个 QEMU PID 为
+298748 / 298747，实际用户线程与动态工作分配检查通过；`native-baseline-01`
+在普通单实例 SMP 上运行相同用户程序也通过。
+
+新增的严格时间顺序检查在普通 SMP `clock-baseline-01` 中也观测到 689 ns 的
+远端领先（31683245694 大于主端后采样 31683245005）。普通平台原本只对每 CPU
+读数做单调钳制，没有全域发布顺序。本次保留该生产路径和性能；严格顺序断言
+只对新增的共享时钟后端成立。普通 SMP 继续记录三次采样，并检验远端睡眠、
+任务迁移和回收，输出 `clock=sampled`，不把它当成严格全域时钟的通过证据。
+最终 `clock-final-01`（双实例）和 `clock-baseline-02`（普通 SMP）均通过各自
+上述门槛。`execution-evidence.json` 汇总成功/失败运行并核对保存的内核和
+串口日志哈希；失败记录未被覆盖。
 这些测试进程均已结束；详细命令、输入哈希、映射和日志哈希保存在各次
 `report.json`。四项非法配置拒绝检查及文档一致性检查也通过。
 
 该配置仍限制在 bringup 阶段：各 QEMU 的块设备、图形、UART、APIC 和时钟设备
 是独立的虚拟设备。共享 RAM 不会自动把这些设备变成统一设备。目前没有完整
-设备所有权与远程访问路径，也没有验证两端时钟偏差、用户态 TLB 高压力、
+设备所有权与远程访问路径，仍未验证高压力下的用户态 TLB 一致性、
 跨实例 Linux/JVM 线程或单端故障后的安全继续运行。应整组启动和停止，使用
 新建且清零的 RAM 文件，不支持复用旧 RAM 或单端重启。
 
 因此，本项证明了**单一原生内核中的实际任务可以跨两个 QEMU 进程继续执行**，
 尚未证明单个 Minecraft 跨进程运行。已有真实 Minecraft 客户端菜单/输入证据
 属于 [52](52-main-minecraft-integration.md) 和 [53](53-linux-application-execution.md)
-中的单执行域。下一步需要统一设备访问和时钟，验证用户线程、共享地址空间与
-负载分配，再将真实 Java 客户端接到这套平台上；MCU 端还需对应架构运行时与
+中的单执行域。当前已经验证共享时间和 Native 用户线程/工作分配；下一步需要
+统一设备访问，验证 Linux/JVM 线程，再将真实 Java 客户端接到这套平台上；
+MCU 端还需对应架构运行时与
 硬件后端的验收。

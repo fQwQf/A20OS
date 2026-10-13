@@ -18,6 +18,8 @@ static task_t *worker_task;
 static int worker_pid;
 static uintptr_t stack_address;
 static uint32_t *allocation;
+static uint64_t clock_before, clock_remote, remote_deadline;
+static unsigned clock_sampled, clock_checked;
 
 #define CHECK(c)                                                               \
     do {                                                                       \
@@ -39,6 +41,14 @@ static int set_cpu(task_t *task, unsigned cpu) {
 
 static void worker(void) {
     CHECK(cpu_current_id() == remote_cpu);
+    clock_remote = timer_get_ticks();
+    __atomic_store_n(&clock_sampled, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&clock_checked, __ATOMIC_ACQUIRE))
+        proc_yield();
+    /* Deadline was formed on CPU 0, but expires on the remote CPU. */
+    proc_sleep_until(remote_deadline);
+    CHECK(cpu_current_id() == remote_cpu);
+    CHECK(timer_get_ticks() >= remote_deadline);
     CHECK(proc_current()->pid == worker_pid);
     volatile uint32_t stack_words[4] = {0xa201, 0xa202, 0xa203, 0xa204};
     stack_address = (uintptr_t)&stack_words[0];
@@ -70,8 +80,25 @@ static void controller(void) {
     CHECK(worker_pid > 0);
     worker_task = proc_find_get(worker_pid);
     CHECK(worker_task && set_cpu(worker_task, remote_cpu) == 0);
+    clock_before = timer_get_ticks();
     proc_publish_deferred_task(worker_task);
     uint64_t limit = timer_get_ticks() + MS_TO_TICKS(5000);
+    while (!__atomic_load_n(&clock_sampled, __ATOMIC_ACQUIRE)) {
+        CHECK(timer_get_ticks() < limit);
+        proc_yield();
+    }
+    uint64_t clock_after = timer_get_ticks();
+    printf("[SMP-TEST] clock before=%lu remote=%lu after=%lu\n",
+           (unsigned long)clock_before, (unsigned long)clock_remote,
+           (unsigned long)clock_after);
+#ifdef CONFIG_QEMU_SHARED_SMP
+    /* This backend promises one published clock. Ordinary platform counters
+     * have their own synchronization bounds; record the sample there without
+     * imposing this new strict cross-CPU ordering contract on them. */
+    CHECK(clock_remote >= clock_before && clock_remote <= clock_after);
+#endif
+    remote_deadline = clock_after + MS_TO_TICKS(30);
+    __atomic_store_n(&clock_checked, 1, __ATOMIC_RELEASE);
     for (;;) {
         if (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) == 1) {
             uint64_t flags = spin_lock_irqsave(&worker_task->park_lock);
@@ -105,7 +132,12 @@ static void controller(void) {
     }
     printf(
         "[SMP-TEST] PASS cpus=%u mask=0x%x pid=%d migrated=%u->0 "
-        "stack=0x%lx heap=cross-cpu timer-irqs=all-online ipi=acked exit=0\n",
+        "stack=0x%lx heap=cross-cpu timer-irqs=all-online ipi=acked exit=0 "
+#ifdef CONFIG_QEMU_SHARED_SMP
+        "clock=ordered sleep=remote\n",
+#else
+        "clock=sampled sleep=remote\n",
+#endif
         smp_online_cpu_count(), mask, worker_pid, remote_cpu,
         (unsigned long)stack_address);
     __atomic_store_n(&finished, 1, __ATOMIC_RELEASE);
