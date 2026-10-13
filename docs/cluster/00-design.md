@@ -165,3 +165,7 @@ main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS �
 实际显示 1.21.11 主菜单，键盘交互及正常退出通过，Native/MCU 回归与准确
 边界见 [52-main-minecraft-integration.md](52-main-minecraft-integration.md)。
 物理多 MCU 客户端仍未完成。
+
+统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
+分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
+[53-linux-application-execution.md](53-linux-application-execution.md)。

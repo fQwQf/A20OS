@@ -89,7 +89,7 @@ int main(int argc, char **argv, char **envp) {
      * never a second placement after a potentially accepted launch. */
     a20_app_session_t session = {.endpoint = A20_HANDLE_NULL};
     uint64_t recovery = a20_agent_clock_ms(0);
-    unsigned cancelled = 0;
+    unsigned cancelled = 0, reported_root = 0;
     for (;;) {
         if (a20_agent_clock_ms(0) - recovery >= 12000) {
             a20_app_close(&session);
@@ -117,6 +117,15 @@ int main(int argc, char **argv, char **envp) {
             continue;
         }
         recovery = a20_agent_clock_ms(0);
+        if (!reported_root && a20_object_id_valid(&result.root)) {
+            text("APPCTL: root=");
+            for (unsigned i = 0; i < 16; i++)
+                hex(result.root.domain_id[i], 2);
+            text("/");
+            hex(result.root.serial, 16);
+            text("\n");
+            reported_root = 1;
+        }
         if (result.state == A20_APP_EXITED) {
             int32_t code = result.exit_code;
             retire(&session, &ticket);

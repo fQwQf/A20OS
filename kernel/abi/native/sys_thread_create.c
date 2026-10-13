@@ -118,7 +118,10 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
         memset(&ts, 0, sizeof(ts));
         ts.size = sizeof(ts);
         ts.version = 1;
-        ts.exit_code = (status >> 8) & 0xFF;
+        /* Preserve fatal Linux exits after an owner-managed task execs.
+         * Native explicit exit codes retain their existing representation. */
+        ts.exit_code =
+            (status & 0x7f) ? 128 + (status & 0x7f) : (status >> 8) & 0xff;
         ts.exit_reason = 0;
         if (copy_to_user(out, &ts, sizeof(ts)) < 0)
             return -A20_ERR_FAULT;

@@ -130,8 +130,24 @@ int main(int argc, char **argv, char **envp) {
                 return 2;
         }
     }
-    for (unsigned i = 0; i < count; i++)
-        variants[i] = entries[i].variant;
+    uint32_t eligible = 0;
+    a20_abi_info_t abi = {0};
+    int queried = 0;
+    for (unsigned i = 0; i < count; i++) {
+        const uint64_t *required = entries[i].required_abi_features;
+        if (!queried &&
+            (required[0] || required[1] || required[2] || required[3])) {
+            queried = 1;
+            if (a20_syscall6(A20_SYS_abi_info, (uintptr_t)&abi, 0, 0, 0, 0, 0) <
+                0)
+                a20_memset(&abi, 0, sizeof(abi));
+        }
+        if (a20_app_manifest_features_match(&entries[i], abi.feature_bits))
+            variants[eligible++] = entries[i].variant;
+    }
+    count = eligible;
+    if (!count)
+        return 3;
     a20_runtime_info_t runtime;
     a20_handle_identity_t identity;
     a20_execution_info_t execution;

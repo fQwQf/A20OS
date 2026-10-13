@@ -1,6 +1,7 @@
 #ifndef A20_CLUSTER_APP_MANIFEST_H
 #define A20_CLUSTER_APP_MANIFEST_H
 #include "cluster_apps.h"
+#include "abi_features.h"
 /* Owner-local deployment input. Mutable backing bytes and entries must outlive
  * all launches. Pointers never cross the cluster wire. No allocation or ISA
  * policy: the same parsed entry is usable by a firmware or Native adapter. */
@@ -12,7 +13,16 @@ typedef struct a20_app_manifest_entry {
     const char *argv[A20_APP_MANIFEST_ARGC + 1];
     const char *envp[A20_APP_MANIFEST_ENVC + 1];
     uint32_t argc, envc;
+    uint64_t required_abi_features[4];
 } a20_app_manifest_entry_t;
+static inline int
+a20_app_manifest_features_match(const a20_app_manifest_entry_t *entry,
+                                const uint64_t supported[4]) {
+    for (unsigned i = 0; i < 4; i++)
+        if (entry->required_abi_features[i] & ~supported[i])
+            return 0;
+    return 1;
+}
 static inline int a20_app_text_equal(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -146,6 +156,20 @@ static inline int a20_app_manifest_parse(char *bytes, uint32_t length,
             if (p == value || *p != '=')
                 return -1;
             current->envp[current->envc++] = value;
+        } else if (line[0] == 'r' && line[1] == 'e' && line[2] == 'q' &&
+                   line[3] == 'u' && line[4] == 'i' && line[5] == 'r' &&
+                   line[6] == 'e' && line[7] == '-' && line[8] == 'f' &&
+                   line[9] == 'e' && line[10] == 'a' && line[11] == 't' &&
+                   line[12] == 'u' && line[13] == 'r' && line[14] == 'e' &&
+                   line[15] == ' ') {
+            uint32_t feature;
+            if (a20_app_decimal(line + 16, &feature) ||
+                feature >= A20_ABI_FEATURE_COUNT ||
+                (current->required_abi_features[feature / 64] &
+                 (1ULL << (feature % 64))))
+                return -1;
+            current->required_abi_features[feature / 64] |= 1ULL
+                                                            << (feature % 64);
         } else if (a20_app_text_equal(line, "end")) {
             used++;
             current = 0;
