@@ -233,7 +233,7 @@ int main(int argc, char **argv, char **envp)
         args.size = sizeof(args);
         args.version = 1;
         args.dir = A20_HANDLE_NULL;
-        args.flags = 0x40; /* O_DIRECTORY */
+        args.flags = A20_PATH_OPEN_RDONLY;
         args.rights = A20_RIGHT_READ | A20_RIGHT_CONTROL | A20_RIGHT_STAT;
         args.path = mkdir_path;
         args.path_len = 4;
@@ -241,7 +241,7 @@ int main(int argc, char **argv, char **envp)
         dir = args.out_handle;
     }
     if (dir == A20_HANDLE_NULL) return fail(23, "fs dir open", 12);
-    st = a20_event_watch_fs(queue, dir, 0, 0,
+    st = a20_event_watch_fs(queue, dir, "watch", 5,
                             A20_EVENT_MASK(A20_EVENT_FS_CREATE), 0xfeed);
     if (st < 0) return fail(24, "fs watch", 9);
 
@@ -279,6 +279,35 @@ int main(int argc, char **argv, char **envp)
     if (st < 0) return fail(25, "fs event wait", 14);
     if (ev.type != A20_EVENT_FS_CREATE || ev.user_data != 0xfeed)
         return fail(26, "fs event payload", 16);
+
+    /* Replacing a watch must replace its prefix as well. The old matching
+     * name must now be ignored; the new matching name must be delivered. */
+    st = a20_event_watch_fs(queue, dir, "other", 5,
+                            A20_EVENT_MASK(A20_EVENT_FS_CREATE), 0xbeef);
+    if (st < 0) return fail(50, "fs prefix replace", 17);
+    a20_path_unlink(A20_HANDLE_NULL, "/tmp/watch-again", 16);
+    a20_path_unlink(A20_HANDLE_NULL, "/tmp/other-file", 15);
+    const char *names[] = {"/tmp/watch-again", "/tmp/other-file"};
+    for (unsigned i = 0; i < 2; ++i) {
+        a20_path_open_args_t args = {0};
+        args.flags = 0x41; /* O_CREAT|O_WRONLY */
+        args.rights = A20_RIGHT_WRITE;
+        args.path = (uint64_t)(uintptr_t)names[i];
+        args.path_len = (uint32_t)a20_strlen(names[i]);
+        args.mode = 0600;
+        st = a20_path_open(&args);
+        if (st < 0) return fail(51, "fs prefix create", 16);
+        a20_hdl_close(args.out_handle);
+    }
+    st = a20_event_wait(queue, to, &ev);
+    if (st < 0 || ev.type != A20_EVENT_FS_CREATE || ev.user_data != 0xbeef ||
+        a20_strcmp(ev.fs_name, "other-file"))
+        return fail(52, "fs prefix filter", 16);
+    a20_time_t poll = { .secs = 0, .nsecs = 0 };
+    if (a20_event_wait(queue, poll, &ev) != -A20_ERR_TIMED_OUT)
+        return fail(53, "fs prefix extra event", 21);
+    a20_hdl_close(queue);
+    a20_hdl_close(dir);
 
     a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-sockev\n", 25, (void *)0);
     /* ---- 7. Socket event source ---- */

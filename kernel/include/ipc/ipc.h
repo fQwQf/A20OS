@@ -238,6 +238,7 @@ typedef struct a20_watch_entry {
 #define A20_WATCH_F_LEVEL  0x0001u
     uint64_t                event_mask;
     uint64_t                user_data;
+    char                    fs_prefix[256]; /* relative entry-name prefix */
     struct a20_eventq      *owner_queue;
     struct a20_watch_entry *next;
 } a20_watch_entry_t;
@@ -378,6 +379,9 @@ a20_channel_ep_t *a20_channel_ep_peer_ref(a20_channel_ep_t *ep);
 a20_eventq_t *a20_eventq_create(uint32_t capacity_hint);
 int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_obj,
                          uint16_t target_type, uint64_t event_mask, uint64_t user_data, uint16_t watch_flags);
+int64_t a20_eventq_watch_fs(a20_eventq_t *eq, a20_handle_t target_h,
+                            void *vnode, uint64_t event_mask,
+                            uint64_t user_data, const char *prefix);
 
 /* Synchronous readiness bits for non-vfile-backed objects (channel
  * endpoints today): the level-mode complement of handle_poll's dispatch. */
