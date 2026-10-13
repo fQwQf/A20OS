@@ -51,6 +51,7 @@ static void append_if_dir(char *buf, size_t cap, const char *path)
 
 static pid_t shell_pid;
 static pid_t telnet_pid;
+static pid_t vmd_pid;
 static volatile sig_atomic_t got_signal;
 
 static void sig_handler(int sig)
@@ -61,6 +62,24 @@ static void sig_handler(int sig)
         kill(shell_pid, SIGTERM);
     if (telnet_pid > 0)
         kill(telnet_pid, SIGTERM);
+    if (vmd_pid > 0)
+        kill(vmd_pid, SIGTERM);
+}
+
+static int vm_manager_enabled(void)
+{
+    char command[2048];
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t size = read(fd, command, sizeof(command) - 1);
+    close(fd);
+    if (size <= 0) return 0;
+    command[size] = 0;
+    char *save = NULL;
+    for (char *word = strtok_r(command, " \n\t", &save); word;
+         word = strtok_r(NULL, " \n\t", &save))
+        if (!strcmp(word, "a20.vmd=1")) return 1;
+    return 0;
 }
 
 static void setup_console(void)
@@ -223,6 +242,17 @@ int main(void)
     };
     char **envp = external_root ? minimal_envp : legacy_envp;
 
+    if (!external_root && !ramfs_shell && vm_manager_enabled()) {
+        vmd_pid = fork();
+        if (vmd_pid == 0) {
+            char *vmd_argv[] = { "a20-vmd", NULL };
+            execve("/bin/a20-vmd", vmd_argv, envp);
+            perror("execve a20-vmd");
+            _exit(127);
+        }
+        if (vmd_pid < 0) { perror("fork a20-vmd"); vmd_pid = 0; }
+    }
+
     if (!external_root && !ramfs_shell) {
         telnet_pid = fork();
         if (telnet_pid == 0) {
@@ -273,12 +303,21 @@ int main(void)
             shell_pid = 0;
             break;
         }
+        if (w == vmd_pid) {
+            vmd_pid = 0;
+            printf("[init] a20-vmd exited; guest processes receive parent-death SIGKILL\n");
+        }
         if (w == telnet_pid) {
             telnet_pid = 0;
             printf("[init] telnetd exited\n");
         }
     }
 
+    if (vmd_pid > 0) {
+        kill(vmd_pid, SIGTERM);
+        while (waitpid(vmd_pid, NULL, 0) < 0 && errno == EINTR) ;
+        vmd_pid = 0;
+    }
     reap_children();
     do_shutdown();
 #endif

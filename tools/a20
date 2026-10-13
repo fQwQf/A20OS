@@ -248,6 +248,8 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
+    if inst.machine.vm_manager and not args.name:
+        raise A20Error("machine.vm_manager requires a named host (--name)")
     if args.detach and not args.name:
         raise A20Error("--detach requires --name")
     if args.no_build and not args.name:
@@ -950,6 +952,16 @@ def build_parser() -> argparse.ArgumentParser:
     prun.add_argument("--name", help="create a named runtime with private writable disks")
     prun.add_argument("--detach", action="store_true", help="leave the named runtime running")
     prun.add_argument("--no-build", action="store_true", help="use existing artifacts for a named run")
+    pvm = sub.add_parser("vm", help="manage guests inside a named hypervisor host")
+    vm_sub = pvm.add_subparsers(dest="vm_action", required=True)
+    for action in ("start", "list", "stats", "console", "pause", "resume", "stop", "destroy"):
+        command = vm_sub.add_parser(action)
+        command.add_argument("--host", required=True, help="named QEMU hypervisor host")
+        if action == "start":
+            command.add_argument("profile", help="VM profile name or TOML path")
+            command.add_argument("--name", required=True, help="guest runtime identity")
+        elif action not in ("list", "stats"):
+            command.add_argument("guest")
     sub.add_parser("running", help="list named QEMU runtimes and their state")
     for action in ("attach", "pause", "resume", "stop", "destroy"):
         runtime = sub.add_parser(action, help=f"{action} a named QEMU runtime")
@@ -1015,6 +1027,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(ns: argparse.Namespace) -> int | None:
     match ns.command:
+        case "vm":
+            from a20_vm import dispatch
+            return dispatch(ns)
         case "running":
             from a20_runtime import list_runs
             return list_runs()

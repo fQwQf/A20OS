@@ -4,6 +4,7 @@ arch = "riscv64"
 abi = "both"
 
 [machine]
+vm_manager = true
 smp = 1
 memory = "1G"
 accel = "tcg"
