@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build upstream JamVM 2.0.0 on the Native RV64 full-libc port.
+"""Build upstream JamVM 2.0.0 on a Native full-libc port.
 
 This is an optional interpreter/JNI build, not Java or Minecraft acceptance.
 Requires an existing A20 mlibc sysroot and three checksum-pinned source archives.
@@ -18,6 +18,12 @@ import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
+TARGETS = {
+    'riscv64': dict(prefix='riscv64-unknown-elf-', host='riscv64-unknown-elf',
+                    flags=['-march=rv64gc', '-mabi=lp64d', '-mcmodel=medany']),
+    'aarch64': dict(prefix='aarch64-linux-gnu-', host='aarch64-unknown-elf',
+                    flags=['-fno-pie', '-mno-outline-atomics', '-U__linux__', '-U__linux', '-Ulinux']),
+}
 ARCHIVES = {
     'jamvm-2.0.0': '76428e96df0ae9dd964c7a7c74c1e9a837e2f312c39e9a357fa8178f7eff80da',
     'zlib-1.3.1': '9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23',
@@ -42,11 +48,14 @@ def main():
     parser.add_argument('--archives', type=Path, required=True)
     parser.add_argument('--sysroot', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--cc', default='riscv64-unknown-elf-gcc')
+    parser.add_argument('--arch', choices=list(TARGETS), default='riscv64')
+    parser.add_argument('--cc', help='target C compiler, defaults to the selected architecture')
     parser.add_argument('--jobs', type=int, default=4)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error('--jobs must be positive')
+    target = TARGETS[args.arch]
+    args.cc = args.cc or target['prefix'] + 'gcc'
     output = args.output.resolve()
     sysroot = args.sysroot.resolve()
     archives = args.archives.resolve()
@@ -56,7 +65,7 @@ def main():
         parser.error('build the Native full-mlibc sysroot first')
     output.mkdir(parents=True, exist_ok=True)
     report = dict(built=False, java_bytecode_executed=False, minecraft=False,
-                  arch='riscv64', abi='a20-native', commands=[])
+                  arch=args.arch, abi='a20-native', toolchain=target, commands=[])
 
     def save():
         (output / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -101,13 +110,15 @@ def main():
             with tarfile.open(archives / (name + '.tar.gz')) as archive:
                 archive.extractall(source, filter='data')
         wrapper = output / 'native-cc'
-        cflags = ['-march=rv64gc', '-mabi=lp64d', '-mcmodel=medany', '-fno-stack-protector',
+        cflags = [*target['flags'], '-fno-stack-protector',
                   '-D_GNU_SOURCE', '-D__a20__', '-D__INT_FAST8_TYPE__=signed char',
                   '-D__INT_FAST16_TYPE__=long', '-D__INT_FAST32_TYPE__=long',
                   '-D__UINT_FAST8_TYPE__=unsigned char', '-D__UINT_FAST16_TYPE__=unsigned long',
                   '-D__UINT_FAST32_TYPE__=unsigned long', '-isystem', str(sysroot / 'include')]
         link_head = ['-static', '-nostdlib', '-T', str(inputs_dir / 'a20-mlibc.ld'),
                      str(sysroot / 'lib/crt1.o'), str(sysroot / 'lib/a20_thread_entry.o')]
+        if args.arch == 'aarch64':
+            link_head += ['-no-pie', '-Wl,-z,max-page-size=4096']
         link_tail = ['-L' + str(sysroot / 'lib'), '-Wl,--start-group', '-lc', '-lpthread', '-lm', '-lrt', '-ldl', '-lgcc', '-Wl,--end-group']
         wrapper.write_text('#!' + sys.executable + '\nimport os, sys\n'
                            + 'args=sys.argv[1:]\n'
@@ -117,15 +128,15 @@ def main():
                            + 'os.execvp(cmd[0], cmd)\n')
         wrapper.chmod(0o755)
         env = os.environ.copy()
-        env.update(CC=str(wrapper), AR='riscv64-unknown-elf-ar', RANLIB='riscv64-unknown-elf-ranlib',
-                   STRIP='riscv64-unknown-elf-strip', CFLAGS='-O2 -fPIC', LDFLAGS='', LIBS='')
+        env.update(CC=str(wrapper), AR=target['prefix'] + 'ar', RANLIB=target['prefix'] + 'ranlib',
+                   STRIP=target['prefix'] + 'strip', CFLAGS='-O2 -fPIC', LDFLAGS='', LIBS='')
         deps = output / 'deps'
         run(['./configure', '--static', '--prefix=' + str(deps)], source / 'zlib-1.3.1', 'zlib-configure', env)
         run(['make', '-j' + str(args.jobs)], source / 'zlib-1.3.1', 'zlib-build', env)
         run(['make', 'install'], source / 'zlib-1.3.1', 'zlib-install', env)
         ffi = output / 'ffi'
         ffi.mkdir()
-        run([str(source / 'libffi-3.4.6/configure'), '--host=riscv64-unknown-elf', '--disable-shared',
+        run([str(source / 'libffi-3.4.6/configure'), '--host=' + target['host'], '--disable-shared',
              '--enable-static', '--disable-docs', '--disable-multi-os-directory', '--prefix=' + str(deps)], ffi, 'ffi-configure', env)
         run(['make', '-j' + str(args.jobs)], ffi, 'ffi-build', env)
         run(['make', 'install'], ffi, 'ffi-install', env)
@@ -133,6 +144,8 @@ def main():
             source / 'jamvm-2.0.0', 'jamvm-native-patch')
         run(['patch', '-p1', '--fuzz=0', '-i', str(port / 'gc.patch')],
             source / 'jamvm-2.0.0/src', 'jamvm-native-gc-patch')
+        run(['patch', '-p1', '--fuzz=0', '-i', str(port / 'jni.patch')],
+            source / 'jamvm-2.0.0/src', 'jamvm-native-jni-patch')
         jam = source / 'jamvm-2.0.0/src'
         generated = output / 'generated'
         generated.mkdir()

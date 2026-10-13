@@ -1,19 +1,23 @@
 /* A20OS JamVM architecture adapter, GPL-2.0-or-later (JamVM linkage).
  * The interpreter uses C atomics and libffi rather than Linux assembly stubs.
- * This first Native build is RV64; this header is not MCU atomic admission.
+ * RV64/AArch64 use the same VM atomics; this is not MCU atomic admission.
  */
 #ifndef A20_JAMVM_ARCH_H
 #define A20_JAMVM_ARCH_H
 #include <stdint.h>
 #include <float.h>
-_Static_assert(sizeof(void *) == 8, "Native JamVM currently requires RV64");
+_Static_assert(sizeof(void *) == 8,
+               "This Native JamVM port requires 64-bit pointers");
 _Static_assert(sizeof(float) == 4 && sizeof(double) == 8 && FLT_RADIX == 2 &&
                    DBL_MANT_DIG == 53,
                "Java IEEE floating point required");
-#if !defined(__riscv) || __riscv_xlen != 64
-#error "This full-libc JamVM build currently supports RV64 only"
-#endif
+#if defined(__riscv) && __riscv_xlen == 64
 #define OS_ARCH "riscv64"
+#elif defined(__aarch64__)
+#define OS_ARCH "aarch64"
+#else
+#error "This full-libc JamVM port currently supports RV64/AArch64"
+#endif
 #define FFI_RET_EXTEND
 #define HANDLER_TABLE_T static const void
 #define DOUBLE_1_BITS 0x3ff0000000000000LL

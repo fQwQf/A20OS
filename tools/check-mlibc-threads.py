@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot real RV64 A20OS and run unbound full-libc pthread computations.
+"""Boot real A20OS and run unbound full-libc pthread computations.
 
 This is optional QEMU evidence, not a JVM or physical MCU acceptance test.
 Frozen kernel/image/program inputs allow exact before/after comparisons.
@@ -24,6 +24,7 @@ def sha(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--arch', choices=['riscv64', 'aarch64'], default='riscv64')
     parser.add_argument('--cpus', type=int, choices=[1, 2, 4], default=2)
     parser.add_argument('--cycles', type=int, default=1)
     parser.add_argument('--jobs', type=int, default=6)
@@ -37,11 +38,13 @@ def main():
     args = parser.parse_args()
     if min(args.cycles, args.jobs, args.timeout) <= 0 or bool(args.kernel) != bool(args.image):
         parser.error('positive cycles/jobs/timeout and paired --kernel/--image required')
+    if args.arch != 'riscv64' and not args.program:
+        parser.error('provide a full-libc --program for the selected architecture')
     output = (ROOT / args.output).resolve()
     if output.exists() and any(output.iterdir()):
         parser.error('output must be empty; never overwrite frozen evidence')
     output.mkdir(parents=True, exist_ok=True)
-    report = dict(passed=False, arch='riscv64', cpus=args.cpus, cycles=[],
+    report = dict(passed=False, arch=args.arch, cpus=args.cpus, cycles=[],
                   physical_board=False, java_bytecode=False)
 
     def save():
@@ -52,7 +55,7 @@ def main():
             subprocess.run(command, cwd=ROOT, check=True, stdout=log, stderr=subprocess.STDOUT)
 
     save()
-    flags = ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
+    flags = ['ARCH=' + args.arch, 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
     if args.cpus > 1:
         flags += ['ALLOW_UNVERIFIED_SMP=1']
     process = None
@@ -66,7 +69,7 @@ def main():
         kernel = ROOT / (args.kernel or command[command.index('-kernel') + 1])
         image = ROOT / (args.image or command[command.index('-drive') + 1].split('file=', 1)[1].split(',', 1)[0])
         shutil.copy2(kernel, output / 'kernel.elf')
-        shutil.copy2(image, output / 'fat32.img')
+        subprocess.run(['cp', '--sparse=always', str(image), str(output / 'fat32.img')], check=True)
         if args.program:
             shutil.copy2(ROOT / args.program, output / 'program.elf')
         else:
@@ -143,6 +146,8 @@ def main():
                 time.sleep(0.05)
             if phase != 'complete':
                 raise RuntimeError(f'stopped in {phase}; see run.log')
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError('QEMU did not exit successfully')
         report['passed'] = True
     except Exception as error:
         report['failure'] = str(error)

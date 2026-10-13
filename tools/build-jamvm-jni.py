@@ -54,7 +54,7 @@ def main():
     p.add_argument('--build-triplet', required=True)
     p.add_argument('--java', default='java')
     p.add_argument('--classlib', type=Path, help='include actual Java execution probe, using this verified class library')
-    p.add_argument('--nm', default='riscv64-unknown-elf-nm')
+    p.add_argument('--nm', help='target nm, defaults to the frozen Native build toolchain')
     args = p.parse_args()
     out, original = args.output.resolve(), args.native_build.resolve()
     if out.exists() and any(out.iterdir()):
@@ -62,9 +62,12 @@ def main():
     base = json.loads((original / 'build.json').read_text())
     if not base['built'] or sha(original / 'jamvm.elf') != base['program_sha256']:
         p.error('completed, hash-matching Native build required')
+    target = base.get('toolchain', dict(prefix='riscv64-unknown-elf-', host='riscv64-unknown-elf'))
+    args.nm = args.nm or target['prefix'] + 'nm'
     out.mkdir(parents=True, exist_ok=True)
     report = dict(built=False, java_application_verified=False, gc_verified=False,
-                  minecraft_verified=False, commands=[], native_base=base['program_sha256'])
+                  minecraft_verified=False, arch=base.get('arch', 'riscv64'), toolchain=target,
+                  commands=[], native_base=base['program_sha256'])
 
     def save():
         (out / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -137,9 +140,9 @@ def main():
         decoder.chmod(0o755)
         env = os.environ.copy()
         env['PATH'] = str(host_tools) + os.pathsep + env['PATH']
-        env.update(CC=str(wrapper), AR='riscv64-unknown-elf-ar', RANLIB='riscv64-unknown-elf-ranlib',
+        env.update(CC=str(wrapper), AR=target['prefix'] + 'ar', RANLIB=target['prefix'] + 'ranlib',
                    JAVAC=shlex.join([args.java, '-Xmx768m', '-jar', str(frozen / 'ecj-4.6.1.jar')]))
-        command = [str(cp / 'configure'), '--build=' + args.build_triplet, '--host=riscv64-unknown-elf',
+        command = [str(cp / 'configure'), '--build=' + args.build_triplet, '--host=' + target['host'],
                    '--prefix=/usr/lib/classpath', '--with-glibj=zip', '--enable-jni', '--enable-core-jni',
                    '--disable-shared', '--enable-static', '--disable-tools', '--disable-examples',
                    '--disable-gjdoc', '--disable-gtk-peer', '--disable-gconf-peer', '--disable-alsa',

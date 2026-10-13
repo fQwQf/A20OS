@@ -24,13 +24,14 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def native_elf(path):
+def native_elf(path, arch):
     data = path.read_bytes()
     if data[:6] != b'\x7fELF\x02\x01':
         raise ValueError('expected ELF64 little endian: ' + str(path))
     header = struct.unpack_from('<16sHHIQQQIHHHHHH', data)
-    if header[1] != 2 or header[2] != 243 or header[7] & 6 != 4:
-        raise ValueError('expected RV64 double-float executable: ' + str(path))
+    machine = {'riscv64': 243, 'aarch64': 183}[arch]
+    if header[1] != 2 or header[2] != machine or (arch == 'riscv64' and header[7] & 6 != 4):
+        raise ValueError('expected Native ' + arch + ' executable: ' + str(path))
     offset, size, count = header[5], header[9], header[10]
     if size != 56 or offset + size * count > len(data):
         raise ValueError('invalid ELF program header table')
@@ -41,6 +42,7 @@ def native_elf(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--arch', choices=['riscv64', 'aarch64'], default='riscv64')
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--kernel', type=Path, required=True)
     parser.add_argument('--image', type=Path, required=True)
@@ -69,7 +71,7 @@ def main():
         parser.error('--output must be empty; retain existing evidence')
     output.mkdir(parents=True, exist_ok=True)
     report = dict(passed=False, scope='launcher and JNI call adapter',
-                  cpus=args.cpus, cycles=args.cycles, probes=[], java_application_verified=False,
+                  arch=args.arch, cpus=args.cpus, cycles=args.cycles, probes=[], java_application_verified=False,
                   gc_verified=False, minecraft_verified=False, physical_board=False)
     process = None
     phase = 'freeze'
@@ -80,12 +82,14 @@ def main():
     save()
     try:
         manifest = json.loads((build / 'build.json').read_text())
+        if manifest.get('arch', 'riscv64') != args.arch:
+            raise ValueError('selected architecture differs from the frozen VM build')
         if not manifest['built']:
             raise ValueError('build did not complete')
         for name, key in [('jamvm.elf', 'program_sha256'), ('jni-probe.elf', 'jni_probe_sha256')]:
             if sha(build / name) != manifest[key]:
                 raise ValueError('build/program checksum mismatch: ' + name)
-            native_elf(build / name)
+            native_elf(build / name, args.arch)
             shutil.copy2(build / name, output / name)
         shutil.copy2(build / 'build.json', output / 'build.json')
         shutil.copy2(args.kernel, output / 'kernel.elf')
@@ -121,7 +125,7 @@ def main():
             if args.execute_gc and not manifest.get('gc_workload_built'):
                 raise ValueError('GC workload was not built')
             report['scope'] = 'upstream Native Java program, JNI, file I/O and automatic thread placement'
-        flags = ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
+        flags = ['ARCH=' + args.arch, 'ABI=both', 'BRINGUP=0', f'NR_CPUS={args.cpus}']
         if args.cpus > 1:
             flags += ['ALLOW_UNVERIFIED_SMP=1']
         command = shlex.split(subprocess.check_output(['make', '-s', *flags, '_qemu_argv'], cwd=ROOT, text=True))

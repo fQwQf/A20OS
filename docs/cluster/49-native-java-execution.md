@@ -117,3 +117,8 @@ python tools/check-jamvm-native.py \
 仍对应 GC 之前的构建。线程资源完整回收、JNI 外部线程附加栈查询、32 位
 MCU/其他 ISA 的 full libc/JVM、图形/输入和真实 Minecraft Java 客户端仍待
 完成。物理多 MCU 的共享 RAM/硬件仲裁和同一原生内核执行仍需实物验收。
+
+完整 Native Java 运行时已继续接入 AArch64，并通过同字节码的单核/双核
+计算与 GC 压缩，RV64 回归同时通过；实际次数、JNI 修复和剩余范围见
+[51-native-java-portable.md](51-native-java-portable.md)。物理多 MCU 和
+Minecraft Java 客户端仍待实现与验收。
