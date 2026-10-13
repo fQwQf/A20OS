@@ -478,7 +478,7 @@ endef
 
 $(NATIVE_CLUSTER_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_cluster.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
-	$(call NATIVE_CLUSTER_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+	$(call NATIVE_CLUSTER_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS) -DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"',$(NATIVE_CRT0),$@)
 
 native-cluster-arch: $(NATIVE_CLUSTER_BIN)
 
@@ -695,7 +695,7 @@ $(NATIVE_CLUSTER_SUPERVISOR_BIN): user/svc/cluster_supervisor.c $(NATIVE_CRT0) $
 	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_supervisor.c,$@)
 
 $(NATIVE_CLUSTER_SUPERVISOR_TEST_BIN): user/tests/test_native_cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
-	$(call NATIVE_CLUSTER_APP_RECIPE,user/tests/test_native_cluster_supervisor.c,$@)
+	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_cluster_supervisor.c,$@)
 
 $(NATIVE_CLUSTER_WORDCOUNT_BIN): user/svc/cluster_wordcount.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_wordcount.c,$@)
