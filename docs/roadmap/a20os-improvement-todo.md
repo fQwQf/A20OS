@@ -50,7 +50,8 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
     handle 后关闭临时 fd；FILE 映射失败释放引用，
     VMAR 定点边界检查在替换映射之前完成，Native 权限上限在核心 MM 锁内执行。
   - 剩余条件：在当前提交运行 `smoke-native-handle`、`smoke-native-mm`、
-    `smoke-native-deepen`、`smoke-native-contract`，确认新增断言均被执行。
+    `smoke-native-deepen`、`smoke-native-contract`，确认新增断言均被执行，包含 `remap-owner-rollback PASS`；本轮已补
+    所属 VMAR 引用、常驻页回滚与 TLB 记录预留，尚未运行。
 - [ ] 复验 Native 双架构 CI 与发布前置门禁
   - 共享套件、RISC-V/AArch64 参数化、Native 用户程序构建、CI 与 release 前置
     已接线（`.github/workflows/native.yml`），尚未运行。
@@ -134,6 +135,8 @@ IDL 化）已落地，已从本文删除。
     `-EBUSY`，`/proc/swaps` 渲染正确。`make smoke-swap` 覆盖 loop 绑定 → mkswap →
     swapon → `sysinfo` totalswap 与 `/proc/swaps` 断言 → 重复 swapon EBUSY → 触访
     匿名内存 → swapoff 归零。
+  - 仍缺实现：fork/remap 需要保留非 present 的 swap PTE 及其槽引用，不能把它们
+    当作尚未物化的零页。`MREMAP_DONTUNMAP` 源端再次缺页也需独立语义验收。
   - 仍缺：门禁不驱动真实换出。OOM reclaim 每次最多换出 `MAX_SWAP_RECLAIM`=8 页且
     受 2s 冷却限制，1 GiB QEMU 冒烟无法现实触发；`swap_read_page`/缺页读回路径只有
     编译覆盖。

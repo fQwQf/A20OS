@@ -102,7 +102,7 @@ VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical lay
 
 ### 3.1 定义
 
-层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
+层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查，越界在任何替换映射之前返回 NO_SPACE。关闭句柄仅减引用：子节点持有父引用，映射持有所属节点引用，树随最后一个引用消亡。
 
 Native VMAR 操作的地址空间语义仍直接作用于核心映射记录，与后端相关的字段可简化为：
 
@@ -286,4 +286,24 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 
 保护位在映射时由以下因素共同决定：
 
-请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，当前 remap 不保留 VMAR 节点引用。
+请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，映射在插入/合并前持有 `vmar_owner`，fork、拆分和 remap 复制引用；不同节点的映射不合并。核心 remap 的原地扩展、目标空隙与显式固定移动都受原节点区间约束，关闭 handle 不撤销约束。
+
+
+### 2026-10-13 remap 编码增量（未运行）
+
+常驻页移动先在目标完整建立映射并应用 Native 保护，成功后才撤源；源叶的状态、
+权限和 frame/page-cache pin 来自同一节点锁内快照。预留 TLB 延迟释放记录覆盖
+源提交或目标回滚，未使用的记录在事务结束释放；fork 不继承临时记录。
+
+等长 Native reprotect 在原地址完成，mprotect 先完成全部可能分配的 huge-leaf
+降级，再写权限，避免中途失败只改变前半段权限。remap 的 RLIMIT_AS 与锁页预算
+按净增量检查；临时目标继承源锁页策略，RSS 对复制和撤旧分别记账。
+
+`test_native_mm` 新增关闭所属 VMAR/VMO handle 后的区域约束、失败后数据和可写性
+保留、等长原地保护、被 blocker 阻挡后的区域内增长移动及再次越界增长拒绝。
+要求标记 `NATIVE_MM: remap-owner-rollback PASS`。目前只有单文件编译结果；
+尚待并发、分配失败注入与对象计数验收。TLB 记录当前按两个虚拟跨度的页数上界
+预留，会增加大范围稀疏移动的临时内存需求，后续应在保持回滚保证的前提下优化。
+
+已换出 PTE 的克隆及 `MREMAP_DONTUNMAP` 源端再次缺页语义仍需完善，本段不把
+常驻页修复当作整个 remap 行为已经验证。

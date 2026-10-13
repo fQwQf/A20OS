@@ -109,6 +109,76 @@ int main(int argc, char **argv, char **envp)
     if (st != A20_OK)
         return fail(out, 8, "vm_unmap failed", 16);
 
+    /* Closed VMAR handles must not remove a mapping's placement boundary.
+     * Failed growth/reprotection must preserve the source and its data. */
+    {
+        const uint64_t region = 0x200000000ULL;
+        a20_handle_t owner = A20_HANDLE_NULL;
+        st = a20_vm_create_vmar(A20_HANDLE_NULL, region, 6 * PAGE,
+                    A20_VMAR_CAN_MAP_READ | A20_VMAR_CAN_MAP_WRITE |
+                    A20_VMAR_CAN_MAP_SPECIFIC, &owner);
+        if (st != A20_OK) return fail(out, 64, "remap owner create", 18);
+        a20_status_t backing = a20_vm_create_object(6 * PAGE, 0);
+        a20_status_t block = a20_vm_create_object(4 * PAGE, 0);
+        if (backing < 0 || block < 0) return fail(out, 65, "remap backing", 13);
+        uint64_t source = 0, blocker = 0;
+        st = a20_vm_map_in_vmar(owner, (a20_handle_t)backing, region,
+                    2 * PAGE, 0, 3, 0x10, &source);
+        if (st != A20_OK || source != region)
+            return fail(out, 66, "remap source map", 16);
+        st = a20_vm_map_in_vmar(owner, (a20_handle_t)block, region + 2 * PAGE,
+                    4 * PAGE, 0, 3, 0x10, &blocker);
+        if (st != A20_OK || blocker != region + 2 * PAGE)
+            return fail(out, 67, "remap blocker map", 17);
+        volatile uint64_t *first = (void *)(uintptr_t)source;
+        first[0] = 0x123456789abcdef0ULL;
+        first[PAGE / 8] = 0xfedcba9876543210ULL;
+        *(volatile uint64_t *)(uintptr_t)blocker = 0x987654321ULL;
+        /* Exercise owner reference duplication and re-merge during protect. */
+        if (a20_vm_protect(source, PAGE, 1) != A20_OK ||
+            a20_vm_protect(source, PAGE, 3) != A20_OK)
+            return fail(out, 68, "remap split owner", 17);
+        a20_hdl_close(owner);
+        a20_hdl_close((a20_handle_t)backing);
+        a20_hdl_close((a20_handle_t)block);
+        st = a20_syscall6(A20_SYS_vm_remap, source, 2 * PAGE, 3 * PAGE, 0, 0, 0);
+        if (st != -A20_ERR_NO_MEMORY || first[0] != 0x123456789abcdef0ULL ||
+            first[PAGE / 8] != 0xfedcba9876543210ULL ||
+            *(volatile uint64_t *)(uintptr_t)blocker != 0x987654321ULL)
+            return fail(out, 69, "remap escaped owner", 19);
+        st = a20_syscall6(A20_SYS_vm_remap, source, 2 * PAGE, 2 * PAGE, 4, 0, 0);
+        if (st != -A20_ERR_ACCESS)
+            return fail(out, 70, "remap reprotect rollback", 23);
+        first[0] = 0x123456789abcdef0ULL; /* still writable after failure */
+        st = a20_syscall6(A20_SYS_vm_remap, source, 2 * PAGE, 2 * PAGE, 1, 0, 0);
+        if (st < 0 || (uint64_t)st != source ||
+            a20_vm_protect(source, 2 * PAGE, 3) != A20_OK)
+            return fail(out, 76, "remap in-place protect", 22);
+        /* Keep one blocker page so in-place growth is impossible, and leave
+         * a three-page gap inside the original owner for a genuine move. */
+        if (a20_vm_unmap(blocker + PAGE, 3 * PAGE) != A20_OK)
+            return fail(out, 71, "remap free blocker", 18);
+        st = a20_syscall6(A20_SYS_vm_remap, source, 2 * PAGE, 3 * PAGE,
+                          1, blocker + PAGE, 0);
+        if (st < 0 || (uint64_t)st != blocker + PAGE)
+            return fail(out, 72, "remap bounded move", 18);
+        uint64_t moved = (uint64_t)st;
+        volatile uint64_t *data = (void *)(uintptr_t)moved;
+        if (data[0] != 0x123456789abcdef0ULL ||
+            data[PAGE / 8] != 0xfedcba9876543210ULL || data[2 * PAGE / 8] != 0 ||
+            a20_vm_protect(source, PAGE, 1) != -A20_ERR_NO_MEMORY ||
+            a20_vm_protect(moved, 3 * PAGE, 3) != A20_OK)
+            return fail(out, 73, "remap data/ceiling", 18);
+        st = a20_syscall6(A20_SYS_vm_remap, moved, 3 * PAGE, 4 * PAGE, 0, 0, 0);
+        if (st != -A20_ERR_NO_MEMORY || data[0] != 0x123456789abcdef0ULL)
+            return fail(out, 74, "remap lost placement", 20);
+        if (a20_vm_unmap(moved, 3 * PAGE) != A20_OK ||
+            a20_vm_unmap(blocker, PAGE) != A20_OK)
+            return fail(out, 75, "remap final unmap", 17);
+        a20_hdl_write_buf(out, "NATIVE_MM: remap-owner-rollback PASS\n",
+                          sizeof("NATIVE_MM: remap-owner-rollback PASS\n") - 1, (void *)0);
+    }
+
     /* 6. VMAR reservations (04-memory §3): hierarchy, monotonic ceilings,
      *    containment and cap stamping. */
     {

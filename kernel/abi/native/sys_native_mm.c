@@ -202,11 +202,11 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
     if (anonymous || src.type == A20_OBJ_MEMORY) {
         struct vmo *vmo = anonymous ? anonymous : (struct vmo *)src.object;
         addr = mm_mmap_vmo_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
-                                      MAP_SHARED | placement, vmo, kargs.offset, prot);
+                                      MAP_SHARED | placement, vmo, kargs.offset, prot, route);
     } else {
         addr = mm_mmap_file_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
                                    MAP_PRIVATE | placement,
-                                   (struct vfile *)src.object, kargs.offset, prot);
+                                   (struct vfile *)src.object, kargs.offset, prot, route);
         if (!mm_addr_is_error(addr))
             src.object = NULL; /* VMA consumes the file lookup reference. */
     }
@@ -496,7 +496,8 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     uint64_t new_addr_hint = A20_ARG(4);
 
     if (old_len == 0 && new_len == 0) return -A20_ERR_INVALID_ARGUMENT;
-    if (new_len > (256ULL << 20) || old_len > (256ULL << 20) || (prot & ~7U))
+    if (new_len > (256ULL << 20) || old_len > (256ULL << 20) || (prot & ~7U) ||
+        new_addr_hint >= USER_VA_LIMIT || (new_addr_hint & (PAGE_SIZE - 1)))
         return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
@@ -528,11 +529,8 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
         }
         prot = (uint32_t)filtered;
     }
-    r = mm_mremap_locked(mm, (vaddr_t)old_addr, (size_t)old_len,
-                      (size_t)new_len, MREMAP_MAYMOVE,
-                      (vaddr_t)new_addr_hint, &out);
-    if (r == 0 && prot && new_len)
-        r = mm_mprotect_locked(mm, out, (size_t)new_len, (int)prot);
+    r = mm_mremap_native_locked(mm, (vaddr_t)old_addr, (size_t)old_len,
+                      (size_t)new_len, (vaddr_t)new_addr_hint, (int)prot, &out);
 remap_out:
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_tlb_invalidate_finish(mm);

@@ -4,6 +4,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
+#include "mm/vmar.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
 #include "mm/pt.h"
@@ -351,7 +352,7 @@ vaddr_t mm_mmap_native_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 static vaddr_t mm_mmap_file_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                             int prot, int flags, struct vfile *file,
-                            uint64_t file_offset, int native_cap)
+                            uint64_t file_offset, int native_cap, struct vmar *owner)
 {
     /* @file arrives referenced. On success the VMA takes ownership; on
      * failure ownership stays with the caller so it can release the reference
@@ -457,6 +458,8 @@ static vaddr_t mm_mmap_file_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t le
     if ((vma->vm_flags & VM_SHARED) && vma->file_vnode)
         vnode_shared_map_inc(vma->file_vnode);
 
+    vma->vmar_owner = owner;
+    if (owner) vmar_acquire(owner);
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     return addr;
@@ -466,19 +469,19 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                             int prot, int flags, struct vfile *file,
                             uint64_t offset)
 {
-    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, -1);
+    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, -1, NULL);
 }
 
 vaddr_t mm_mmap_file_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                                 int prot, int flags, struct vfile *file,
-                                uint64_t offset, uint32_t cap)
+                                uint64_t offset, uint32_t cap, struct vmar *owner)
 {
-    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, cap);
+    return mm_mmap_file_impl_locked(mm, addr, len, prot, flags, file, offset, cap, owner);
 }
 
 static vaddr_t mm_mmap_vmo_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                               int prot, int flags, struct vmo *vmo,
-                              uint64_t vmo_offset, int native_cap)
+                              uint64_t vmo_offset, int native_cap, struct vmar *owner)
 {
     if (!mm || !vmo)
         return (vaddr_t)-EINVAL;
@@ -547,6 +550,8 @@ static vaddr_t mm_mmap_vmo_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len
     vma->backing_offset  = vmo_offset;
     vmo_ref(vmo);
 
+    vma->vmar_owner = owner;
+    if (owner) vmar_acquire(owner);
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     return addr;
@@ -556,14 +561,14 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot, int flags, struct vmo *vmo,
                            uint64_t offset)
 {
-    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, -1);
+    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, -1, NULL);
 }
 
 vaddr_t mm_mmap_vmo_cap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                                int prot, int flags, struct vmo *vmo,
-                               uint64_t offset, uint32_t cap)
+                               uint64_t offset, uint32_t cap, struct vmar *owner)
 {
-    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, cap);
+    return mm_mmap_vmo_impl_locked(mm, addr, len, prot, flags, vmo, offset, cap, owner);
 }
 
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)

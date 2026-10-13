@@ -62,7 +62,7 @@ int64_t a20_vmar_map(struct vmo *vmo, uint64_t vmo_offset, uint64_t length,
     uint64_t addr = mm_mmap_vmo_cap_locked(cur->mm, hint, length, a20_prot_to_mmap(prot),
                                 MAP_ANONYMOUS | MAP_SHARED |
                                 (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)),
-                                vmo, vmo_offset, prot);
+                                vmo, vmo_offset, prot, NULL);
     spin_unlock_irqrestore(&cur->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(cur->mm);
     if (mm_addr_is_error((vaddr_t)addr)) {

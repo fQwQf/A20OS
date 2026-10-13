@@ -5,6 +5,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
+#include "mm/vmar.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
 #include "fs/vfs.h"
@@ -19,28 +20,155 @@
 
 /* mremap: relocate/grow/shrink an existing mapping. */
 
+static int mm_remap_placement(mm_struct_t *mm, mm_seg_t *source, size_t len,
+                              int flags, vaddr_t hint, int native,
+                              vaddr_t *target, int *placement)
+{
+    struct vmar *owner = source->vmar_owner;
+    *target = ((flags & MREMAP_FIXED) || native) ? hint : 0;
+    *placement = (flags & MREMAP_FIXED) ? MAP_FIXED : 0;
+    if (flags & MREMAP_FIXED) {
+        if (owner && (!vmar_contains(owner, *target, len) ||
+                      !(owner->cap & VMAR_CAN_MAP_SPECIFIC)))
+            return -EACCES;
+        return 0;
+    }
+    if (*target && ((*target & (PAGE_SIZE - 1)) ||
+        *target >= USER_VA_LIMIT || len > USER_VA_LIMIT - *target ||
+        (owner && !vmar_contains(owner, *target, len)) ||
+        mm_range_overlaps(mm, *target, len, NULL)))
+        *target = 0;
+    if (owner && !*target)
+        *target = mm_find_gap(mm, owner->base, len);
+    if (owner && (!*target || !vmar_contains(owner, *target, len)))
+        return -ENOMEM;
+    if (*target) *placement = MAP_FIXED_NOREPLACE;
+    return 0;
+}
+
+static vaddr_t mm_remap_allocate(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                 int prot, int flags)
+{
+    /* Remap preserves the source lock policy, not the current MCL_FUTURE
+     * default. Its net lock charge was checked before entering this phase. */
+    uint32_t saved = mm->def_flags;
+    mm->def_flags &= ~(uint32_t)VM_LOCKED;
+    vaddr_t out = mm_mmap_locked(mm, addr, len, prot, flags);
+    mm->def_flags = saved;
+    return out;
+}
+
+static int mm_remap_copy_backing(mm_struct_t *mm, mm_seg_t *dst,
+                                  mm_seg_t *src, vaddr_t addr)
+{
+    dst->vm_flags = src->vm_flags;
+    if (dst->vm_flags & VM_LOCKED) mm->locked_vm += dst->end - dst->start;
+    dst->pte_flags = src->pte_flags;
+    dst->vmar_cap = src->vmar_cap;
+    dst->vmar_owner = src->vmar_owner;
+    dst->sysv_shmid = src->sysv_shmid;
+    dst->file = src->file;
+    dst->file_vnode = src->file_vnode;
+    dst->vmo = src->vmo;
+    dst->backing_offset = src->backing_offset + (addr - src->start);
+    int r = vma_ref_fork(dst);
+    if (r < 0) {
+        /* vma_ref_fork has already rolled back file references; VMO and
+         * placement references are acquired only after the fallible IPC step. */
+        dst->file = NULL;
+        dst->file_vnode = NULL;
+        dst->vmo = NULL;
+        dst->vmar_owner = NULL;
+        dst->vm_flags &= ~(uint64_t)(VM_VMO | VM_SYSV_SHM);
+    }
+    return r;
+}
+
+static int mm_remap_prepare_unmap(mm_struct_t *mm, vaddr_t start, size_t len)
+{
+#ifndef CONFIG_NOMMU
+    vaddr_t edges[2] = { start, start + len - 1 };
+    for (unsigned i = 0; i < 2; i++) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, edges[i], &level, &base, &size);
+        if (pte && (*pte & PTE_V) && level > 0 &&
+            (base < start || base + size > start + len)) {
+            int r = mm_demote_huge_page(mm, edges[i]);
+            if (r < 0) return r;
+        }
+    }
+#else
+    (void)start;
+#endif
+    size_t pages = len / PAGE_SIZE;
+    if (pages > SIZE_MAX / (ARCH_PT_LEVELS + 1)) return -ENOMEM;
+    return mm_tlb_reserve_holds(mm, pages * (ARCH_PT_LEVELS + 1));
+}
+
+
+/* Pin the same PTE snapshot whose flags are copied. Status-driven COW can
+ * replace a base-page leaf without mm->lock, so its node lock is required. */
+static int mm_remap_pin_leaf(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
+                            pte_t *pte, pte_t *snapshot, pfn_t *pfn,
+                            page_cache_page_t **page, uint8_t *cls)
+{
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
+    if (table) mm_pt_node_lock(table);
+#else
+    (void)mm;
+#endif
+    *cls = MM_ST_INVALID;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    *cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, va));
+#endif
+    *snapshot = *pte;
+    int r = -EAGAIN;
+    *page = NULL;
+    if ((*snapshot & PTE_V) && arch_pte_is_leaf(*snapshot)) {
+        *pfn = phys_to_pfn(arch_pte_addr(*snapshot));
+        r = -ENOMEM;
+        if (pfn_valid(*pfn)) {
+            *page = mm_file_cache_mapping_get(vma, va, *pfn);
+            if (!*page && !(vma->vm_flags & (VM_VMO | VM_PFNMAP))) frame_get(*pfn);
+            r = 0;
+        }
+    }
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    if (table) mm_pt_node_unlock(table);
+#endif
+    return r;
+}
+
 static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
                                    vaddr_t src_addr, size_t len,
                                    int flags, vaddr_t new_addr,
-                                   vaddr_t *out_addr) {
+                                   vaddr_t *out_addr, int reprot, int native) {
     if (!(src_vma->vm_flags & VM_SHARED))
         return -EINVAL;
     if (src_addr + len < src_addr || src_addr + len > src_vma->end)
         return -EINVAL;
 
+#ifdef CONFIG_NOMMU
+    return -EOPNOTSUPP;
+#endif
     int prot = mm_pte_flags_to_prot(src_vma->pte_flags);
-    vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    vaddr_t dst = mm_mmap_locked(mm, target, len, prot,
-                           (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
+    vaddr_t target;
+    int placement;
+    int pr = mm_remap_placement(mm, src_vma, len, flags, new_addr,
+                                native, &target, &placement);
+    if (pr < 0) return pr;
+    vaddr_t dst = mm_remap_allocate(mm, target, len, prot,
+                           placement | MAP_ANONYMOUS |
                            ((src_vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if (mm_addr_is_error(dst))
         return mm_addr_error(dst);
 
     /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
      * boundaries before turning it into a file-backed mapping. */
-#ifdef CONFIG_NOMMU
-    return -EINVAL; // Not supported on NOMMU
-#else
+#ifndef CONFIG_NOMMU
     int sr = mm_split_vma_at(mm, dst);
     if (sr < 0) {
         mm_munmap_locked(mm, dst, len);
@@ -59,30 +187,10 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         return -ENOMEM;
     }
 
-    dst_vma->vm_flags = src_vma->vm_flags;
-    dst_vma->vmar_cap = src_vma->vmar_cap;
-    dst_vma->pte_flags = src_vma->pte_flags;
-    dst_vma->file = src_vma->file;
-    dst_vma->backing_offset = src_vma->backing_offset + (src_addr - src_vma->start);
-    dst_vma->file_vnode = src_vma->file_vnode;
-    /* A VM_VMO VMA owns a vmo reference; the destination inherits it, or the
-     * source's later teardown would free frames this VMA still maps. */
-    if (src_vma->vm_flags & VM_VMO) {
-        dst_vma->vmo = src_vma->vmo;
-        dst_vma->backing_offset = src_vma->backing_offset + (src_addr - src_vma->start);
-        if (dst_vma->vmo)
-            vmo_ref(dst_vma->vmo);
-    }
-    if (vma_ref_file(dst_vma) < 0) {
-        dst_vma->file = NULL;
-        if (dst_vma->file_vnode) {
-            if (dst_vma->vm_flags & VM_SHARED)
-                vnode_shared_map_dec(dst_vma->file_vnode);
-            vnode_put(dst_vma->file_vnode);
-            dst_vma->file_vnode = NULL;
-        }
+    int br = mm_remap_copy_backing(mm, dst_vma, src_vma, src_addr);
+    if (br < 0) {
         mm_munmap_locked(mm, dst, len);
-        return -EBADF;
+        return br;
     }
 
     for (vaddr_t off = 0; off < len; ) {
@@ -96,7 +204,8 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
             off += PAGE_SIZE;
             continue;
         }
-        if (level > 0 && (base < src_addr || base + leaf_size > src_addr + len)) {
+        if (level > 0 && (base < src_addr || base + leaf_size > src_addr + len ||
+                          ((dst + off) & (leaf_size - 1)))) {
             int dr = mm_demote_huge_page(mm, src_va);
             if (dr < 0) {
                 mm_munmap_locked(mm, dst, len);
@@ -105,36 +214,30 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
             continue;
         }
 
-        paddr_t pa = arch_pte_addr(*src);
-        pfn_t pfn = phys_to_pfn(pa);
-        if (!pfn_valid(pfn)) {
+        pte_t snapshot;
+        pfn_t pfn;
+        page_cache_page_t *pcp;
+        uint8_t move_cls;
+        int pin = mm_remap_pin_leaf(mm, src_vma, src_va, src, &snapshot, &pfn, &pcp, &move_cls);
+        if (pin == -EAGAIN) continue;
+        if (pin < 0) {
             mm_munmap_locked(mm, dst, len);
-            return -ENOMEM;
+            return pin;
         }
-
-        page_cache_page_t *pcp =
-            mm_file_cache_mapping_get(src_vma, src_va, pfn);
-        /* VMO frames are owned by the VMO; mappings never hold frame refs. */
-        int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
-        if (!pcp && !vmo_owned)
-            frame_get(pfn);
+        paddr_t pa = arch_pte_addr(snapshot);
+        int vmo_owned = (src_vma->vm_flags & (VM_VMO | VM_PFNMAP)) != 0;
         /* Keep the source's class across the move so the copy's status still
          * names the same backing; a huge leaf's slot is level-aware.  The
          * status sidecar is a pgtable-ops feature -- arm32's short-descriptor
          * backend has none and NOMMU has no table at all -- so where it is
          * absent the move starts from MM_ST_INVALID and takes the default
          * below, the same answer the query gives when the slot is unreadable. */
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
-#else
-        uint8_t move_cls = MM_ST_INVALID;
-#endif
         if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
             move_cls = MM_ST_ANON_MAPPED;
         int r = (level > 0) ? pt_map_huge(mm, dst + off, pa,
-                                          arch_pte_flags(*src), move_cls)
+                                          arch_pte_flags(snapshot), move_cls)
                             : pt_map(mm->pgdir, dst + off, pa,
-                                     arch_pte_flags(*src));
+                                     arch_pte_flags(snapshot));
         if (r < 0) {
             if (pcp) {
                 page_cache_put(pcp);
@@ -148,12 +251,19 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         off += leaf_size;
     }
 
+    if (reprot >= 0) {
+        int r = mm_mprotect_locked(mm, dst, len, reprot);
+        if (r < 0) {
+            mm_munmap_locked(mm, dst, len);
+            return r;
+        }
+    }
     *out_addr = dst;
     return 0;
 }
 
 static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_t old_addr,
-                                 vaddr_t dst, size_t len, int dontunmap) {
+                                 vaddr_t dst, size_t len) {
     for (vaddr_t off = 0; off < len; ) {
         int level = 0;
         vaddr_t base = 0;
@@ -173,27 +283,18 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
             continue;
         }
 
-        paddr_t pa = arch_pte_addr(*src);
-        pfn_t pfn = phys_to_pfn(pa);
-        if (!pfn_valid(pfn))
-            return -ENOMEM;
-
-        uint64_t pte_flags = arch_pte_flags(*src);
         mm_seg_t *src_vma = mm_seg_find(mm, src_va);
-        page_cache_page_t *pcp =
-            mm_file_cache_mapping_get(src_vma, src_va, pfn);
-        /* VMO frames are owned by the VMO; mappings never hold frame refs. */
-        int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
-        if (!pcp && !vmo_owned)
-            frame_get(pfn);
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
-#else
-        /* Same reason as the move path above: no readable status slot, so
-         * the class starts out the one the default below turns into
-         * MM_ST_ANON_MAPPED. */
-        uint8_t move_cls = MM_ST_INVALID;
-#endif
+        if (!src_vma) return -EFAULT;
+        pte_t snapshot;
+        pfn_t pfn;
+        page_cache_page_t *pcp;
+        uint8_t move_cls;
+        int pin = mm_remap_pin_leaf(mm, src_vma, src_va, src, &snapshot, &pfn, &pcp, &move_cls);
+        if (pin == -EAGAIN) continue;
+        if (pin < 0) return pin;
+        paddr_t pa = arch_pte_addr(snapshot);
+        uint64_t pte_flags = arch_pte_flags(snapshot);
+        int vmo_owned = (src_vma->vm_flags & (VM_VMO | VM_PFNMAP)) != 0;
         if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
             move_cls = MM_ST_ANON_MAPPED;
         int r = (level > 0) ? pt_map_huge(mm, dst + off, pa, pte_flags,
@@ -208,26 +309,20 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
             return r;
         }
 
-        if (!dontunmap &&
-            pt_unmap_leaf(mm, src_va, NULL, NULL, NULL, NULL) == 0)
-            mm_tlb_note_change(mm, base, leaf_size);
-        if (pcp) {
-            if (!dontunmap)
-                page_cache_put(pcp);
-        } else if (!vmo_owned) {
-            if (!dontunmap)
-                frame_put(pfn);
-        }
+        /* Keep every source PTE and mapping reference until the entire
+         * destination (and optional new protection) has succeeded. */
+        mm_rss_add(mm, leaf_size / PAGE_SIZE);
         off += leaf_size;
     }
     return 0;
 }
 
-int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                     size_t new_size, int flags, vaddr_t new_addr,
-                    vaddr_t *out_addr) {
+                    vaddr_t *out_addr, int reprot, int native) {
     if (!mm || !out_addr) return -EINVAL;
-    if (new_size == 0) return -EINVAL;
+    if (!new_size || old_size > SIZE_MAX - (PAGE_SIZE - 1) ||
+        new_size > SIZE_MAX - (PAGE_SIZE - 1)) return -EINVAL;
     if (old_addr & (PAGE_SIZE - 1)) return -EINVAL;
     if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP))
         return -EINVAL;
@@ -247,7 +342,32 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         return -EINVAL;
 
     mm_seg_t *vma = mm_seg_find(mm, old_addr);
-    if (!vma) return -EFAULT;
+    if (!vma || old_addr < vma->start || old_addr >= vma->end) return -EFAULT;
+    if (vma->vm_flags & VM_SEALED) return -EPERM;
+    int force_copy = reprot >= 0 && reprot != mm_pte_flags_to_prot(vma->pte_flags);
+    if (reprot >= 0 && ((reprot & ~7) ||
+        ((vma->vm_flags & VM_NATIVE_CAP) && ((uint32_t)reprot & ~vma->vmar_cap))))
+        return -EACCES;
+    size_t extra = (old_size == 0 || (flags & MREMAP_DONTUNMAP)) ? new_len :
+                   (new_len > old_len ? new_len - old_len : 0);
+    task_t *cur = proc_current();
+    if (cur && cur->mm == mm) {
+        uint64_t limit = cur->limits.as / PAGE_SIZE;
+        if (extra && cur->limits.as &&
+            (mm->total_vm > limit || extra / PAGE_SIZE > limit - mm->total_vm))
+            return -ENOMEM;
+        if (extra && (vma->vm_flags & VM_LOCKED) &&
+            !proc_has_cap(cur, CAP_SYS_ADMIN) &&
+            (mm->locked_vm > cur->limits.memlock ||
+             extra > cur->limits.memlock - mm->locked_vm))
+            return -ENOMEM;
+    }
+    /* SysV's unmap contract does not permit partial segment teardown. Do not
+     * split one attachment into VMAs whose independent releases undercount it. */
+    if (old_size && (vma->vm_flags & VM_SYSV_SHM) &&
+        (old_addr != vma->start || old_len != vma->end - vma->start || new_len != old_len))
+        return -EINVAL;
+
 
     /* mseal(2): remapping (move/shrink/grow or DONTUNMAP) of a sealed VMA is
      * refused. */
@@ -268,8 +388,12 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         if ((flags & MREMAP_FIXED) &&
             new_addr < old_addr + new_len && old_addr < new_addr + new_len)
             return -EINVAL;
+        size_t pages = new_len / PAGE_SIZE;
+        if (pages > SIZE_MAX / (2 * (ARCH_PT_LEVELS + 1))) return -ENOMEM;
+        int hr = mm_tlb_reserve_holds(mm, pages * 2 * (ARCH_PT_LEVELS + 1));
+        if (hr < 0) return hr;
         return mm_clone_shared_mapping(mm, vma, old_addr, new_len, flags,
-                                       new_addr, out_addr);
+                                       new_addr, out_addr, reprot, native);
     }
 
     if (old_len == 0) return -EINVAL;
@@ -292,22 +416,39 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     if (!vma || vma->start != old_addr || vma->end < old_addr + old_len)
         return -EFAULT;
 
-    if (new_len <= old_len && !(flags & (MREMAP_DONTUNMAP | MREMAP_FIXED))) {
-        if (new_len < old_len)
-            mm_munmap_locked(mm, old_addr + new_len, old_len - new_len);
+    if (native && new_len == old_len &&
+        !(flags & (MREMAP_DONTUNMAP | MREMAP_FIXED))) {
+        if (reprot >= 0) {
+            r = mm_mprotect_locked(mm, old_addr, old_len, reprot);
+            if (r < 0) return r;
+        }
         *out_addr = old_addr;
         return 0;
     }
 
-    if (new_len > old_len && !(flags & MREMAP_DONTUNMAP)) {
+    if (!force_copy && new_len <= old_len && !(flags & (MREMAP_DONTUNMAP | MREMAP_FIXED))) {
+        if (new_len < old_len) {
+            r = mm_remap_prepare_unmap(mm, old_addr + new_len, old_len - new_len);
+            if (r < 0) return r;
+            r = mm_munmap_locked(mm, old_addr + new_len, old_len - new_len);
+            if (r < 0) return r;
+        }
+        *out_addr = old_addr;
+        return 0;
+    }
+
+    if (!force_copy && new_len > old_len && !(flags & MREMAP_DONTUNMAP)) {
         vaddr_t new_end = old_addr + new_len;
-        int can_grow = !(flags & MREMAP_FIXED);
+        int can_grow = !(flags & MREMAP_FIXED) &&
+                       new_end <= USER_VA_LIMIT &&
+                       (!vma->vmar_owner || vmar_contains(vma->vmar_owner, old_addr, new_len));
         if (old_addr + old_len != vma->end)
             can_grow = 0;
         if (can_grow && !mm_range_overlaps(mm, old_addr + old_len,
                                            new_len - old_len, vma)) {
             vma->end = new_end;
             mm->total_vm += (new_len - old_len) / PAGE_SIZE;
+            if (vma->vm_flags & VM_LOCKED) mm->locked_vm += new_len - old_len;
             vma_try_merge(mm, vma);
             *out_addr = old_addr;
             return 0;
@@ -321,10 +462,22 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         new_addr < old_addr + old_len && old_addr < new_addr + new_len)
         return -EINVAL;
 
+    /* One frame/cache hold and at most ARCH_PT_LEVELS retired table records
+     * per page cover source commit or destination rollback. Include both spans
+     * for fixed-target replacement and huge-leaf demotion bookkeeping. */
+    size_t pages = old_len / PAGE_SIZE + new_len / PAGE_SIZE;
+    if (pages > SIZE_MAX / (ARCH_PT_LEVELS + 1)) return -ENOMEM;
+    int hr = mm_tlb_reserve_holds(mm, pages * (ARCH_PT_LEVELS + 1));
+    if (hr < 0) return hr;
+
     int prot = mm_pte_flags_to_prot(vma->pte_flags);
-    vaddr_t target = (flags & MREMAP_FIXED) ? new_addr : 0;
-    vaddr_t dst = mm_mmap_locked(mm, target, new_len, prot,
-                           (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
+    vaddr_t target;
+    int placement;
+    int pr = mm_remap_placement(mm, vma, new_len, flags, new_addr,
+                                native, &target, &placement);
+    if (pr < 0) return pr;
+    vaddr_t dst = mm_remap_allocate(mm, target, new_len, prot,
+                           placement | MAP_ANONYMOUS |
                            ((vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
     if (mm_addr_is_error(dst))
         return mm_addr_error(dst);
@@ -348,28 +501,10 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         return -ENOMEM;
     }
 
-    dst_vma->vm_flags = vma->vm_flags;
-    dst_vma->vmar_cap = vma->vmar_cap;
-    dst_vma->pte_flags = vma->pte_flags;
-    dst_vma->file = vma->file;
-    dst_vma->backing_offset = vma->backing_offset + (old_addr - vma->start);
-    dst_vma->file_vnode = vma->file_vnode;
-    if (vma->vm_flags & VM_VMO) {
-        dst_vma->vmo = vma->vmo;
-        dst_vma->backing_offset = vma->backing_offset + (old_addr - vma->start);
-        if (dst_vma->vmo)
-            vmo_ref(dst_vma->vmo);
-    }
-    if (vma_ref_file(dst_vma) < 0) {
-        dst_vma->file = NULL;
-        if (dst_vma->file_vnode) {
-            if (dst_vma->vm_flags & VM_SHARED)
-                vnode_shared_map_dec(dst_vma->file_vnode);
-            vnode_put(dst_vma->file_vnode);
-            dst_vma->file_vnode = NULL;
-        }
+    int br = mm_remap_copy_backing(mm, dst_vma, vma, old_addr);
+    if (br < 0) {
         mm_munmap_locked(mm, dst, new_len);
-        return -EBADF;
+        return br;
     }
 
     size_t move_len = old_len < new_len ? old_len : new_len;
@@ -377,19 +512,45 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     memcpy((void *)dst, (void *)old_addr, move_len);
     r = 0;
 #else
-    r = mm_move_mapping_pages(mm, old_addr, dst, move_len,
-                              (flags & MREMAP_DONTUNMAP) != 0);
+    r = mm_move_mapping_pages(mm, old_addr, dst, move_len);
 #endif
     if (r < 0) {
         mm_munmap_locked(mm, dst, new_len);
         return r;
     }
 
-    if (!(flags & MREMAP_DONTUNMAP))
-        mm_munmap_locked(mm, old_addr, old_len);
+    if (reprot >= 0) {
+        r = mm_mprotect_locked(mm, dst, new_len, reprot);
+        if (r < 0) {
+            mm_munmap_locked(mm, dst, new_len);
+            return r;
+        }
+    }
+    if (!(flags & MREMAP_DONTUNMAP)) {
+        r = mm_munmap_locked(mm, old_addr, old_len);
+        if (r < 0) {
+            mm_munmap_locked(mm, dst, new_len);
+            return r;
+        }
+    }
 
     *out_addr = dst;
     return 0;
+}
+
+int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                    size_t new_size, int flags, vaddr_t new_addr,
+                    vaddr_t *out_addr)
+{
+    return mm_mremap_impl_locked(mm, old_addr, old_size, new_size, flags,
+                                 new_addr, out_addr, -1, 0);
+}
+
+int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
+                     size_t new_size, vaddr_t hint, int prot, vaddr_t *out_addr)
+{
+    return mm_mremap_impl_locked(mm, old_addr, old_size, new_size,
+                                 MREMAP_MAYMOVE, hint, out_addr, prot ? prot : -1, 1);
 }
 
 int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,

@@ -91,6 +91,22 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     r = mm_split_vma_at(mm, end);
     if (r < 0) return r;
 
+    /* Finish every fallible huge-leaf demotion before changing any access
+     * bits. An allocation failure may change table shape, never permissions
+     * on only the first part of the requested range. */
+    for (vaddr_t va = addr; va < end; ) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        if (pte && (*pte & PTE_V) && level > 0) {
+            int dr = mm_demote_huge_page(mm, va);
+            if (dr < 0) return dr;
+            continue;
+        }
+        va += PAGE_SIZE;
+    }
+
 
     for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
         mm_seg_t *next = v->next;
