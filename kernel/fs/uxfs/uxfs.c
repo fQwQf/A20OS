@@ -90,13 +90,13 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         return -ENOMEM;
     }
     for (;;) {
-        uint32_t in_len = sizeof(rx);
+        uint32_t in_len = A20_CH_MAX_DATA;
         a20_ch_handle_info_t hinfos[1];
         uint32_t nh = 0;
         r = a20_channel_recv_begin(sb->ep, 0, &in_len, &nh);
         if (r < 0)
             break;
-        if (in_len > sizeof(rx)) {
+        if (in_len > A20_CH_MAX_DATA) {
             a20_channel_recv_abort(sb->ep);
             r = -A20_ERR_INVALID_ARGUMENT;
             break;
