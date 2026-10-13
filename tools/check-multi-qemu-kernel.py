@@ -4,7 +4,9 @@
 shared: two independent QEMU processes, one RAM file and kernel instance.
 smp: ordinary single-QEMU SMP baseline. No QEMU sources are needed.
 Disk modes attach a fresh scratch disk only to the primary. The secondary
-has neither a disk nor a UART. These tests are not Minecraft acceptance.
+has neither a disk nor a UART. Minecraft mode checks lifecycle; menu/input
+acceptance additionally needs inspection of retained framebuffer screenshots
+and interaction records.
 """
 import argparse
 import hashlib
@@ -21,6 +23,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 FLAGS = ["ARCH=x86_64", "ABI=both", "BRINGUP=1", "NR_CPUS=2", "SMP_SELFTEST=1"]
 PASS = "[SMP-TEST] PASS cpus=2 mask=0x3"
+LINUX_WORKLOADS = ("linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input", "minecraft")
+USER_WORKLOADS = ("native", *LINUX_WORKLOADS)
 
 
 def sha(path):
@@ -49,6 +53,36 @@ def verify_fsck_output(content, filesystem):
         raise RuntimeError("filesystem consistency diagnostic: " + line)
     if seen != {1, 2, 3, 4, 5} or not summary:
         raise RuntimeError("incomplete filesystem consistency check")
+
+
+
+def minecraft_thread_evidence(content):
+    """Summarize real guest procfs observations; this is not a per-CPU profiler."""
+    roots, threads, cpus, samples = set(), {}, set(), 0
+    pattern = r"MINECRAFT_THREAD_STAT: root=(\d+) (\d+) \(([^\n]*)\) ([^\n]+)"
+    for match in re.finditer(pattern, content):
+        fields = match[4].split()
+        # comm can contain spaces. Fields after its closing ')' begin at 3.
+        # Skip interrupted serial lines rather than interpreting mixed output.
+        if len(fields) != 37: continue
+        try:
+            cpu = int(fields[36])
+            ticks = int(fields[11]) + int(fields[12])
+        except ValueError:
+            continue
+        if cpu not in (0, 1): raise RuntimeError("invalid guest thread CPU")
+        root, tid = int(match[1]), int(match[2])
+        roots.add(root)
+        samples += 1
+        entry = threads.setdefault(tid, {"name": match[3], "cpu_assignments": [], "max_ticks": 0})
+        if cpu not in entry["cpu_assignments"]: entry["cpu_assignments"].append(cpu)
+        entry["max_ticks"] = max(entry["max_ticks"], ticks)
+        if ticks: cpus.add(cpu)
+    if len(roots) != 1 or cpus != {0, 1} or len(threads) < 2:
+        raise RuntimeError("missing same-JVM cross-CPU thread observations")
+    return {"root": roots.pop(), "samples": samples, "cpu_mask": 3,
+            "scope": "guest scheduler CPU assignments and accumulated ticks; not per-CPU runtime shares",
+            "threads": threads}
 
 
 def qmp_snapshot(path, process, deadline):
@@ -109,14 +143,20 @@ def qmp_input(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory")
-    parser.add_argument("--workload", choices=("kernel", "native", "linux", "disk", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input"), default="kernel")
+    parser.add_argument("--workload", choices=("kernel", "native", "linux", "disk", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input", "minecraft"), default="kernel")
     parser.add_argument("--system-image", type=Path, help="existing raw root image for JVM; opened only as qcow2 backing")
     parser.add_argument("--ext4-checksums", choices=("legacy", "metadata32", "metadata64"), default="legacy")
     parser.add_argument("--mode", choices=("shared", "smp"), default="shared")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
     parser.add_argument("--jobs", type=int, default=4)
-    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--memory-mib", type=int, help="RAM size; default 3072 for Minecraft, otherwise 512")
+    parser.add_argument("--rendernode", default="/dev/dri/renderD128")
+    parser.add_argument("--timeout", type=float, help="guest timeout; default 900 for Minecraft, otherwise 90")
     args = parser.parse_args()
+    if args.timeout is None: args.timeout = 900 if args.workload == "minecraft" else 90
+    memory_mib = args.memory_mib if args.memory_mib is not None else (3072 if args.workload == "minecraft" else 512)
+    if memory_mib < 512 or memory_mib > 3072:
+        parser.error("this runner currently supports 512..3072 MiB")
     if args.timeout <= 0 or args.jobs < 1:
         parser.error("timeout and jobs must be positive")
     qemu = shutil.which(args.qemu)
@@ -124,18 +164,19 @@ def main():
         parser.error("qemu-system-x86_64 is required")
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         parser.error("accessible /dev/kvm required; cross-process TCG atomics are not validated")
-    if args.workload in ("jvm", "jvm-threads") and (not args.system_image or not args.system_image.is_file()):
+    if args.workload in ("jvm", "jvm-threads", "minecraft") and (not args.system_image or not args.system_image.is_file()):
         parser.error("JVM requires an existing raw --system-image")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)  # Never replace an earlier run.
     shared = args.mode == "shared"
     flags = FLAGS + [f"QEMU_SHARED_SMP={int(shared)}"]
-    if args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input"):
+    if args.workload in USER_WORKLOADS:
         flags += ["SMP_SELFTEST=0", "RAMFS_USER=1", "RAMFS_NATIVE_TESTS=1"]
-    if args.workload in ("gpu", "gpu-input"):
+    if args.workload in ("gpu", "gpu-input", "minecraft"):
         flags += ["DRIVER_DEPLOYMENT=embedded"]
     report = {"passed": False, "mode": args.mode, "workload": args.workload, "make_flags": flags,
-              "evidence": args.workload + " execution; not Minecraft acceptance",
+              "memory_mib": memory_mib,
+              "evidence": args.workload + " execution; Minecraft visual/input acceptance needs retained screenshots and QMP events",
               "qemu": str(Path(qemu).resolve()), "qemu_sha256": sha(Path(qemu)),
               "qemu_version": subprocess.check_output([qemu, "--version"], text=True).splitlines()[0]}
     processes, logs = [], []
@@ -157,7 +198,8 @@ def main():
             "kernel/drivers/core/driver_hwapi.h", "kernel/drivers/bus/pci_bus.c",
             "tools/driver-modules.mk", "kernel/drvmod/framework.c", "user/Makefile",
             "kernel/fs/mount_setup.c", "kernel/include/fs/mount_setup.h", "tools/mkrootfs.py",
-            "kernel/fs/diskfs/ext4.c", "kernel/fs/diskfs/ext4_csum.c")}
+            "kernel/fs/diskfs/ext4.c", "kernel/fs/diskfs/ext4_csum.c",
+            "kernel/fs/procfs/procfs_render.c")}
         build = subprocess.check_output(["make", "-s", *flags, "print-build-dir"],
                                         cwd=ROOT, text=True).strip()
         with (out / "build.log").open("wb") as log:
@@ -181,17 +223,17 @@ def main():
             runtime = Path(temp)
             ram = runtime / "ram"
             if shared:
-                if shutil.disk_usage(runtime).free < 600 * 1024 * 1024:
-                    raise RuntimeError("need at least 600 MiB free in temporary directory")
+                if shutil.disk_usage(runtime).free < (memory_mib + 128) * 1024 * 1024:
+                    raise RuntimeError("not enough free space for shared RAM plus 128 MiB margin")
                 with ram.open("xb") as f:
-                    f.truncate(512 * 1024 * 1024)
+                    f.truncate(memory_mib * 1024 * 1024)
                 report["ram"] = {"path": str(ram), "inode": ram.stat().st_ino,
                                  "size": ram.stat().st_size}
             base = [qemu, "-machine", "q35" + (",memory-backend=shared" if shared else ""),
-                    "-m", "512M", "-accel", "kvm", "-cpu", "host", "-smp", "1" if shared else "2",
+                    "-m", f"{memory_mib}M", "-accel", "kvm", "-cpu", "host", "-smp", "1" if shared else "2",
                     "-display", "none", "-monitor", "none", "-nodefaults", "-serial", "stdio", "-no-reboot"]
             if shared:
-                base += ["-object", f"memory-backend-file,id=shared,size=512M,mem-path={ram},share=on"]
+                base += ["-object", f"memory-backend-file,id=shared,size={memory_mib}M,mem-path={ram},share=on"]
             commands = [base + ["-kernel", str(elf)]]
             if shared:
                 secondary = list(base)
@@ -227,7 +269,7 @@ def main():
                 report.update(filesystem_before_sha256=sha(filesystem), disk_program_sha256=sha(seed / "program"), mkfs=mkfs, ext4_checksums=args.ext4_checksums)
                 commands[0] += ["-drive", f"file={filesystem},format=raw,if=none,id=filesystem,cache=writeback",
                                 "-device", "virtio-blk-pci,drive=filesystem,disable-legacy=on"]
-            if args.workload in ("jvm", "jvm-threads"):
+            if args.workload in ("jvm", "jvm-threads", "minecraft"):
                 source = args.system_image.resolve()
                 report.update(system_image=str(source), system_image_before_sha256=sha(source))
                 overlay = out / "jvm-root.qcow2"
@@ -267,14 +309,41 @@ def main():
                 with gpu_payload.open("xb") as f: f.truncate(16 * 1024 * 1024)
                 from mkrootfs import EXT4_MKFS_ARGS, resolve_mkfs_ext4
                 subprocess.run([resolve_mkfs_ext4(), *EXT4_MKFS_ARGS[1:], "-d", str(seed), str(gpu_payload)], check=True)
-                commands[0][commands[0].index("-display") + 1] = "egl-headless,rendernode=/dev/dri/renderD128"
+                commands[0][commands[0].index("-display") + 1] = f"egl-headless,rendernode={args.rendernode}"
                 commands[0] += ["-vga", "none", "-device", "virtio-gpu-gl-pci",
                                 "-drive", f"file={gpu_payload},format=raw,if=none,id=gpu_payload,readonly=on",
                                 "-device", "virtio-blk-pci,drive=gpu_payload,disable-legacy=on"]
                 report.update(gpu_payload_sha256=sha(gpu_payload), gpu_program_sha256=sha(seed / "program"),
                               gpu_test_source_sha256=sha(ROOT / "user/cmds/core/gpu3d_test.c"))
-            if args.workload == "gpu-input":
+            if args.workload in ("gpu-input", "minecraft"):
                 commands[0] += ["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]
+            if args.workload == "minecraft":
+                seed = out / "minecraft-payload"
+                shutil.copytree(ROOT / "tools/shared-minecraft-test", seed)
+                variant = "x86_64" + ("-shared-qemu" if shared else "")
+                binaries = [f"user/build/{variant}/{n}-x86_64" for n in
+                            ("cluster-supervisor", "appd", "app-exec", "appctl-run")]
+                with (out / "native-build.log").open("wb") as log:
+                    subprocess.run(["make", "--no-print-directory", *flags, "CCACHE=", f"-j{args.jobs}", *binaries],
+                                   cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
+                for binary in binaries:
+                    shutil.copyfile(ROOT / binary, seed / Path(binary).name)
+                for name, source_path in (("minecraft", "packages/overlay/xfce/usr/local/bin/minecraft"),
+                                          ("java", "packages/overlay/xfce/usr/bin/java")):
+                    shutil.copyfile(ROOT / source_path, seed / name)
+                for p in seed.iterdir(): p.chmod(0o755)
+                payload = out / "minecraft-payload.img"
+                with payload.open("xb") as f: f.truncate(16 * 1024 * 1024)
+                from mkrootfs import EXT4_MKFS_ARGS, resolve_mkfs_ext4
+                subprocess.run([resolve_mkfs_ext4(), *EXT4_MKFS_ARGS[1:], "-d", str(seed), str(payload)], check=True)
+                commands[0][commands[0].index("-display") + 1] = f"egl-headless,rendernode={args.rendernode}"
+                commands[0] += ["-vnc", f"unix:{runtime / 'vnc'}",
+                                "-vga", "none", "-device", "virtio-gpu-gl-pci",
+                                "-audiodev", "driver=none,id=a20audio", "-device", "intel-hda",
+                                "-device", "hda-duplex,audiodev=a20audio",
+                                "-drive", f"file={payload},format=raw,if=none,id=payload,readonly=on",
+                                "-device", "virtio-blk-pci,drive=payload,disable-legacy=on"]
+                report.update(minecraft_payload_sha256=sha(payload), minecraft_files={p.name: sha(p) for p in seed.iterdir()})
             for i, cmd in enumerate(commands):
                 cmd += ["-qmp", f"unix:{runtime / str(i)},server=on,wait=off"]
             report["commands"] = commands
@@ -284,7 +353,7 @@ def main():
                 for i in reversed(range(len(commands))):
                     log = (out / f"node-{i}.log").open("wb")
                     logs.append(log)
-                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input") else subprocess.DEVNULL,
+                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in USER_WORKLOADS else subprocess.DEVNULL,
                                                     stdout=log, stderr=subprocess.STDOUT)
                 report["pids"] = [p.pid for p in processes]
                 report["qmp"] = [qmp_snapshot(runtime / str(i), p, deadline)
@@ -303,7 +372,8 @@ def main():
                         if not entries or not all(line.split()[1] == "rw-s" and
                                 int(line.split()[4]) == ram.stat().st_ino for line in entries):
                             raise RuntimeError("QEMU does not map the same RAM shared/writable")
-                print(f"{args.mode}: running QEMU PIDs {report['pids']}", flush=True)
+                print(f"{args.mode}: running QEMU PIDs {report['pids']}; primary QMP {runtime / '0'}", flush=True)
+                (out / "running.json").write_text(json.dumps(report, indent=2) + "\n")
                 application_started = False
                 console_input_sent = False
                 hardware_input_sent = False
@@ -312,7 +382,7 @@ def main():
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
-                    if args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input"):
+                    if args.workload in USER_WORKLOADS:
                         content = texts[0]
                         if shared and ("NATIVE_" in texts[1] or "CLUSTER_THREADS:" in texts[1]):
                             raise RuntimeError("user output escaped primary console owner")
@@ -320,11 +390,11 @@ def main():
                             raise RuntimeError("user application contract failed")
                         if not application_started and re.search(r"(?:^|[\r\n])# ", content):
                             processes[0].stdin.write((b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n" if args.workload == "native"
-                                                      else ("/bin/cluster_threads --console" + (" --disk" if args.workload == "linux-disk" else " --filesystem" if args.workload == "linux-fs" else " --jvm" if args.workload == "jvm" else " --jvm-threads" if args.workload == "jvm-threads" else " --gpu" if args.workload == "gpu" else " --gpu-input" if args.workload == "gpu-input" else "") + "; echo A20_LINUX_EXIT:$?\n").encode()))
+                                                      else ("/bin/cluster_threads --console" + (" --disk" if args.workload == "linux-disk" else " --filesystem" if args.workload == "linux-fs" else " --jvm" if args.workload == "jvm" else " --jvm-threads" if args.workload == "jvm-threads" else " --gpu" if args.workload == "gpu" else " --gpu-input" if args.workload == "gpu-input" else " --minecraft" if args.workload == "minecraft" else "") + "; echo A20_LINUX_EXIT:$?\n").encode()))
                             processes[0].stdin.flush()
                             application_started = True
                             deadline = time.monotonic() + args.timeout
-                        if args.workload in ("linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input") and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
+                        if args.workload in LINUX_WORKLOADS and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
                             processes[0].stdin.write(b"owner-ok\n")
                             processes[0].stdin.flush()
                             console_input_sent = True
@@ -334,7 +404,7 @@ def main():
                         exited = re.search(r"A20_(?:NATIVE|LINUX)_EXIT:(\d+)", content)
                         if application_started and exited and int(exited[1]) != 0:
                             raise RuntimeError("user application exited " + exited[1])
-                        if args.workload in ("linux", "linux-disk", "linux-fs", "jvm", "jvm-threads", "gpu", "gpu-input") and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
+                        if args.workload in LINUX_WORKLOADS and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
                             match = re.search(r"CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=(\d+) tls=preserved tlb-rounds=64 protection-faults=128 jobs=1024 split=(\d+)/(\d+) sum=(\d+) mask=3 destructors=2 cond-timeout=checked", content)
                             if not match or not 126 <= int(match[1]) <= 128 or sum(map(int, match.groups()[1:3])) != 1024 or min(map(int, match.groups()[1:3])) <= 0 or int(match[4]) != 8256 * 1024 * 1025 // 2:
                                 raise RuntimeError("missing Linux/POSIX execution evidence")
@@ -372,6 +442,15 @@ def main():
                                     if not hardware_input_sent or "CLUSTER_INPUT: PASS cpu=1 key=a press+release button=left press+release relative=17,-9" not in content:
                                         raise RuntimeError("missing remote keyboard/mouse acceptance")
                                     report.update(hardware_input_verified=True, input_cpu=1)
+                            if args.workload == "minecraft":
+                                if "MINECRAFT_OWNER: appctl exit status=0" not in content or "CLUSTER_MINECRAFT: session-exit=0" not in content:
+                                    raise RuntimeError("missing Minecraft application/session exit")
+                                for marker in ("CLUSTER_PROC_CPU: PASS field=39 cpus=0,1",
+                                               "[Render thread/INFO]: Backend library: LWJGL version",
+                                               "minecraft:textures/atlas/gui.png-atlas"):
+                                    if marker not in content: raise RuntimeError("missing Minecraft runtime evidence: " + marker)
+                                report.update(minecraft_exit=0, minecraft_threads=minecraft_thread_evidence(content),
+                                              visual_acceptance="requires separate screenshot inspection")
                             for block in range(32):
                                 marker = f"CLUSTER_CONSOLE_BLOCK:{block:02d}:abcdefghijklmnopqrstuvwxyz012345"
                                 if content.count(marker) != 1:
@@ -465,7 +544,7 @@ def main():
                 verify_fsck_output(fsck_text, filesystem)
                 report.update(filesystem_after_sha256=sha(filesystem), filesystem_host_verified=True,
                               filesystem_bytes=65536, filesystem_child_exit=37, filesystem_fsck=True)
-            if args.workload in ("jvm", "jvm-threads"):
+            if args.workload in ("jvm", "jvm-threads", "minecraft"):
                 report["system_image_after_sha256"] = sha(source)
                 if report["system_image_after_sha256"] != report["system_image_before_sha256"]:
                     raise RuntimeError("backing system image changed during test")

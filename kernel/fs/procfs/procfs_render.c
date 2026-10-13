@@ -992,8 +992,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
          * priority nice num_threads itrealvalue starttime vsize rss */
         size_t vsize = t->mm ? t->mm->total_vm * PAGE_SIZE : 0;
         long rss_pages = (long)mm_rss_get(t->mm);
+        proc_task_sched_state_t sched;
+        proc_task_sched_state_snapshot(t, &sched);
+        unsigned processor = sched.task_cpu_id;
+        /* Extend through Linux field 39 (processor), preserving the existing
+         * prefix. Read CPU assignment via the scheduler snapshot API. */
         snprintf(buf, bufsz,
-            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 %lu %lu %ld %ld %d %d %d 0 %lu %lu %ld\n",
+            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 %lu %lu %ld %ld %d %d %d 0 %lu %lu %ld -1 0 0 0 0 0 0 0 0 0 0 0 0 0 %u\n",
             t->pid, t->name, procfs_task_state_char(t),
             t->ppid, t->pgid, t->sid,
             (unsigned long)t->utime_ticks,
@@ -1002,7 +1007,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (long)t->child_stime,
             t->priority, 0, 1,
             (unsigned long)t->start_jiffies,
-            (unsigned long)vsize, rss_pages);
+            (unsigned long)vsize, rss_pages, processor);
         proc_put(t);
         break;
     }

@@ -227,6 +227,54 @@ static void jvm_start(int threads) {
          "CLUSTER_JVM: PASS cpu=1 java-exit=0 unmounted=1");
 }
 
+static void proc_cpu_roundtrip(void) {
+    for (unsigned cpu = 0; cpu < 2; cpu++) {
+        bind(1U << cpu);
+        FILE *file = fopen("/proc/self/stat", "r");
+        char line[1024];
+        check(file && fgets(line, sizeof(line), file), "proc stat read");
+        check(!fclose(file), "proc stat close");
+        char *end = strrchr(line, ')'), *save = NULL, *value = NULL;
+        check(end && end[1] == ' ', "proc stat comm");
+        unsigned fields = 2;
+        for (char *word = strtok_r(end + 2, " \n", &save); word;
+             word = strtok_r(NULL, " \n", &save)) {
+            fields++;
+            if (fields == 39) value = word;
+        }
+        check(fields >= 39 && value && strtoul(value, NULL, 10) == cpu && sched_getcpu() == (int)cpu,
+              "proc stat processor matches executing CPU");
+    }
+    puts("CLUSTER_PROC_CPU: PASS field=39 cpus=0,1");
+}
+
+static void minecraft_start(void) {
+    bind(2);
+    check(!mkdir("/mnt", 0755) || errno == EEXIST, "Minecraft mount directory");
+    check(!mount("/dev/vda", "/mnt", "ext4", 0, NULL), "Minecraft root mount");
+    check(!mount("none", "/mnt/dev", "devtmpfs", 0, NULL), "Minecraft dev mount");
+    check(!mount("proc", "/mnt/proc", "proc", 0, NULL), "Minecraft proc mount");
+    check(!mount("sysfs", "/mnt/sys", "sysfs", 0, NULL), "Minecraft sys mount");
+    check(!mount("none", "/mnt/tmp", "tmpfs", 0, NULL), "Minecraft tmp mount");
+    check(!mkdir("/mnt/a20-cluster-payload", 0755) || errno == EEXIST, "Minecraft payload directory");
+    check(!mount("/dev/vdb", "/mnt/a20-cluster-payload", "ext4", MS_RDONLY, NULL), "Minecraft payload mount");
+    pid_t pid = fork();
+    check(pid >= 0, "Minecraft fork");
+    if (!pid) {
+        check(!chroot("/mnt") && !chdir("/"), "Minecraft chroot");
+        bind(3);
+        puts("CLUSTER_MINECRAFT: starting affinity-mask=3");
+        execl("/bin/sh", "sh", "/a20-cluster-payload/start.sh", (char *)NULL);
+        check(0, "Minecraft session exec");
+    }
+    int status = 0;
+    check(waitpid(pid, &status, 0) == pid, "Minecraft session wait");
+    printf("CLUSTER_MINECRAFT: session-exit=%d\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    check(WIFEXITED(status) && !WEXITSTATUS(status), "Minecraft session exit");
+    /* Desktop services hold mounts until this test VM stops. Do not claim an
+     * unmount/daemon teardown acceptance from the application exit alone. */
+}
+
 static void input_roundtrip(void) {
     struct event { struct timeval time; uint16_t type, code; int32_t value; } events[32];
     struct pollfd fds[8];
@@ -290,11 +338,12 @@ static void gpu_start(int input) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 2 && !strcmp(argv[1], "--filesystem-child")) return filesystem_child();
-    int console = 0, disk = 0, filesystem = 0, jvm = 0, gpu = 0;
+    int console = 0, disk = 0, filesystem = 0, jvm = 0, gpu = 0, minecraft = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--console")) console = 1;
         else if (!strcmp(argv[i], "--disk")) disk = 1;
         else if (!strcmp(argv[i], "--filesystem")) filesystem = 1;
+        else if (!strcmp(argv[i], "--minecraft")) minecraft = 1;
         else if (!strcmp(argv[i], "--gpu")) gpu = 1;
         else if (!strcmp(argv[i], "--gpu-input")) gpu = 2;
         else if (!strcmp(argv[i], "--jvm")) jvm = 1;
@@ -347,6 +396,7 @@ int main(int argc, char **argv) {
           !pthread_condattr_destroy(&attr) && !pthread_mutex_destroy(&mutex), "sync cleanup");
     check(!pthread_key_delete(key) && !pthread_barrier_destroy(&gate) && !munmap(page, 4096), "cleanup");
     if (console) {
+        proc_cpu_roundtrip();
         bind(2);
         check(sched_getcpu() == 1, "remote console CPU");
         puts("CLUSTER_CONSOLE: remote-cpu=1 ready");
@@ -362,6 +412,7 @@ int main(int argc, char **argv) {
     if (filesystem) filesystem_roundtrip();
     if (jvm) jvm_start(jvm == 2);
     if (gpu) gpu_start(gpu == 2);
+    if (minecraft) minecraft_start();
     printf("CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=%u tls=preserved tlb-rounds=64 protection-faults=128 "
            "jobs=%u split=%u/%u sum=%llu mask=%x destructors=2 cond-timeout=checked\n",
            migrations, JOBS, jobs[0], jobs[1], (unsigned long long)expected, cpu_mask);
