@@ -214,22 +214,24 @@ int hyp_console_pending(hyp_vm_t *vm)
     return pending;
 }
 
-void hyp_console_putchar(hyp_vm_t *vm, uint8_t ch)
+int hyp_console_putchar(hyp_vm_t *vm, uint8_t ch)
 {
     if (__atomic_load_n(&vm->managed_console, __ATOMIC_ACQUIRE)) {
         uint64_t flags = spin_lock_irqsave(&vm->console_lock);
         unsigned next = (vm->tx_head + 1) % sizeof(vm->tx_buf);
-        /* RUN refuses re-entry until pending output has been drained. Each
-         * emulated UART/SBI write yields, so there is room for this byte. */
-        if (next != vm->tx_tail) {
-            vm->tx_buf[vm->tx_head] = ch;
-            vm->tx_head = next;
+        if (next == vm->tx_tail) {
+            spin_unlock_irqrestore(&vm->console_lock, flags);
+            return -EAGAIN;
         }
+        vm->tx_buf[vm->tx_head] = ch;
+        vm->tx_head = next;
+        hyp_dev_console_byte(vm, ch);
         spin_unlock_irqrestore(&vm->console_lock, flags);
     } else {
         putchar((char)ch);
+        hyp_dev_console_byte(vm, ch);
     }
-    hyp_dev_console_byte(vm, ch);
+    return 0;
 }
 
 int hyp_vm_set_marker(hyp_vm_t *vm, const char *marker)
@@ -286,10 +288,9 @@ uint64_t hyp_vm_console_bytes(hyp_vm_t *vm)
  */
 void hyp_dev_pump_rx(hyp_vm_t *vm)
 {
-    if (__atomic_load_n(&vm->managed_console, __ATOMIC_ACQUIRE))
-        return;
-
     if (!vm || vm->magic != HYP_VM_MAGIC)
+        return;
+    if (__atomic_load_n(&vm->managed_console, __ATOMIC_ACQUIRE))
         return;
 
     /* ONE BYTE AT A TIME, AND ONLY WHAT FITS.  uart_try_getc() is the
@@ -354,13 +355,15 @@ static int hyp_uart_rx_ready(hyp_vm_t *vm)
 /* Pop the oldest byte, or -1 when the guest ring is empty. */
 static int hyp_uart_pop_rx(hyp_vm_t *vm)
 {
+    uint64_t flags = spin_lock_irqsave(&vm->console_lock);
     uint32_t tail = __atomic_load_n(&vm->rx_tail, __ATOMIC_RELAXED);
     uint32_t head = __atomic_load_n(&vm->rx_head, __ATOMIC_ACQUIRE);
-    if (tail == head)
-        return -1;
-    int c = (int)vm->rx_buf[tail];
-    __atomic_store_n(&vm->rx_tail, (tail + 1) % HYP_VM_RX_RING,
-                     __ATOMIC_RELEASE);
+    int c = -1;
+    if (tail != head) {
+        c = vm->rx_buf[tail];
+        __atomic_store_n(&vm->rx_tail, (tail + 1) % HYP_VM_RX_RING, __ATOMIC_RELEASE);
+    }
+    spin_unlock_irqrestore(&vm->console_lock, flags);
     return c;
 }
 
@@ -391,17 +394,6 @@ static uint8_t hyp_uart_read_reg(hyp_vm_t *vm, uint64_t off, int byte_index)
     }
     default:               return 0;   /* IER/LCR/MCR/SCR: RAZ */
     }
-}
-
-static void hyp_uart_write_reg(hyp_vm_t *vm, uint64_t off, uint8_t v)
-{
-    if (off == HYP_UART_THR) {
-        hyp_console_putchar(vm, v);
-    }
-    /* Everything else stores silently: the 16550 accepts a configuration the
-     * model does not need to honour (divisors, FIFOs, modem control), and
-     * refusing to accept the store would only turn a harmless register into a
-     * guest trap. */
 }
 
 /* ---- CLINT ---- */
@@ -496,7 +488,7 @@ static uint8_t hyp_uart_rd(void *vm, uint64_t off, int i)
 
 static void hyp_uart_wr(void *vm, uint64_t off, uint8_t v)
 {
-    hyp_uart_write_reg((hyp_vm_t *)vm, off, v);
+    (void)vm; (void)off; (void)v; /* THR handled atomically in dispatch. */
 }
 
 static uint8_t hyp_clint_rd(void *vm, uint64_t off, int i)
@@ -535,6 +527,10 @@ int hyp_dev_mmio(hyp_vm_t *vm, uint64_t gpa, int store, uint64_t *value, int len
      * crosses a device boundary. */
     if (gpa >= HYP_UART_BASE && gpa - HYP_UART_BASE < HYP_UART_SIZE &&
         (uint64_t)len <= HYP_UART_SIZE - (gpa - HYP_UART_BASE)) {
+        if (store && gpa == HYP_UART_BASE) {
+            int rc = hyp_console_putchar(vm, (uint8_t)*value);
+            return rc ? rc : 1;
+        }
         hyp_dev_access(vm, gpa - HYP_UART_BASE, store, value, len,
                        hyp_uart_rd, hyp_uart_wr);
         return 1;

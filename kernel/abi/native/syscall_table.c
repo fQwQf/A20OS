@@ -169,6 +169,7 @@ int64_t sys_a20_hyp_vm_set_ram(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_control(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_irq(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_stats(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_smp(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vm_status(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vm_set_marker(const a20_syscall_args_t *args);
 int64_t sys_a20_hyp_vcpu_set_boot(const a20_syscall_args_t *args);

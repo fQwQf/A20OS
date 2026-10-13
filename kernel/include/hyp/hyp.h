@@ -42,6 +42,8 @@
  * kernel/drivers/char/uart.c) -- the two cannot grow independently anyway,
  * since this ring is filled by draining the host one. */
 #define HYP_VM_RX_RING 256
+#define HYP_MAX_VCPUS 8
+struct hyp_vcpu;
 
 typedef struct hyp_vm {
     uint32_t magic;
@@ -105,6 +107,10 @@ typedef struct hyp_vm {
     uint8_t tx_buf[256];
     unsigned tx_head, tx_tail;
     uint64_t last_exit[4];
+    struct hyp_vcpu *vcpus[HYP_MAX_VCPUS]; /* weak, protected by control_lock */
+    unsigned vcpu_count, vcpu_limit, parallel_limit;
+    uint32_t active_cpu_mask;
+    int shutdown, broken;
 } hyp_vm_t;
 
 struct hyp_stats {
@@ -129,7 +135,7 @@ int hyp_console_config(hyp_vm_t *vm, int managed);
 int hyp_console_write(hyp_vm_t *vm, const uint8_t *data, unsigned len);
 int hyp_console_read(hyp_vm_t *vm, uint8_t *data, unsigned len);
 int hyp_console_pending(hyp_vm_t *vm);
-void hyp_console_putchar(hyp_vm_t *vm, uint8_t ch);
+int hyp_console_putchar(hyp_vm_t *vm, uint8_t ch);
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
  * the arch layer can drive it.  Cheap enough to call per syscall. */
@@ -143,6 +149,11 @@ int       hyp_vm_begin_update(hyp_vm_t *vm);
 void      hyp_vm_end_update(hyp_vm_t *vm);
 void      hyp_vm_get(hyp_vm_t *vm);
 void      hyp_vm_put(hyp_vm_t *vm);
+
+int hyp_vm_configure_smp(hyp_vm_t *vm, unsigned count);
+int hyp_vm_remote_fence(hyp_vm_t *vm, uint32_t cpus, unsigned kind);
+void hyp_vm_shutdown(hyp_vm_t *vm);
+void hyp_vm_fail(hyp_vm_t *vm);
 
 /* Map one 4 KiB guest page: gpa -> host frame, lending the frame to the VM.
  * prot is a host PTE flag set; the RISC-V G-stage requires PTE_U.

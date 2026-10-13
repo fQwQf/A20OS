@@ -412,3 +412,15 @@ int64_t sys_a20_hyp_stats(const a20_syscall_args_t *args)
     return copy_to_user((void *)(uintptr_t)args->arg[0], &stats, sizeof(stats)) < 0 ?
            -A20_ERR_FAULT : A20_OK;
 }
+
+int64_t sys_a20_hyp_vm_smp(const a20_syscall_args_t *args)
+{
+    struct a20_ht_internal *ht = hyp_ht();
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+    hyp_vm_t *vm = hyp_get_vm(ht, (a20_handle_t)args->arg[0], A20_RIGHT_CONTROL);
+    if (!vm) return -A20_ERR_BAD_HANDLE;
+    int rc = args->arg[1] > HYP_MAX_VCPUS ? -EINVAL :
+             hyp_vm_configure_smp(vm, (unsigned)args->arg[1]);
+    hyp_vm_put(vm);
+    return rc < 0 ? hyp_errno_map(rc) : rc;
+}

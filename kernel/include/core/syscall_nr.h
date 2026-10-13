@@ -426,4 +426,5 @@
 #define SYS_hyp_vcpu_control 918
 #define SYS_hyp_vcpu_irq 919
 #define SYS_hyp_stats 920
+#define SYS_hyp_vm_smp 921
 #endif /* _CORE_SYSCALL_NR_H */

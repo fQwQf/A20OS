@@ -1,23 +1,23 @@
 #ifndef A20_VMD_PROTOCOL_H
 #define A20_VMD_PROTOCOL_H
-/* Wire protocol v1, little endian; all offsets are explicit. No C struct
+/* Wire protocol v2, little endian; all offsets are explicit. No C struct
  * layout, guest pointer, shell command or host descriptor crosses the wire. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#define VMD_VERSION 1u
+#define VMD_VERSION 2u
 #define VMD_HEADER 24u
 #define VMD_PAYLOAD 4096u
 #define VMD_FRAME (VMD_HEADER + VMD_PAYLOAD)
 #define VMD_NAME 32u
 #define VMD_PATH 256u
-#define VMD_START_SIZE (VMD_NAME + 4u + VMD_PATH)
+#define VMD_START_SIZE (VMD_NAME + 8u + VMD_PATH)
 #define VMD_RESPONSE 0x8000u
 #define VMD_MAX_GUESTS 8u
 #define VMD_MEMORY_MB 512u
 #define VMD_HISTORY 65536u
 #define VMD_INPUT 4096u
-#define VMD_RECORD 64u
+#define VMD_RECORD 72u
 #define VMD_HELLO 1u
 #define VMD_START 2u
 #define VMD_LIST 3u

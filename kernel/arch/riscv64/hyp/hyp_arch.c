@@ -16,6 +16,8 @@
 #include "core/trap.h"
 #include "core/errno.h"
 #include "core/stdio.h"
+#include "core/timer.h"
+#include "proc/proc.h"
 #include "hyp_asm_offsets.h"
 _Static_assert(__builtin_offsetof(hyp_vcpu_t, fpu) == HYP_ASM_VCPU_FPU_OFF, "FPU offset");
 _Static_assert(__builtin_offsetof(hyp_vcpu_t, fcsr) == HYP_ASM_VCPU_FCSR_OFF, "FCSR offset");
@@ -142,11 +144,12 @@ void hyp_arch_host_tlb_fence(void)
 #define HYP_HSTATUS_SPV  (1ULL << 7)   /* trap-return destination is virtual */
 #define HYP_HSTATUS_SPVP (1ULL << 8)
 #define HYP_HSTATUS_HU   (1ULL << 9)
+#define HYP_HSTATUS_VTW  (1ULL << 21)
 #define HYP_HSTATUS_VTVM (1ULL << 20)  /* guest VS-CSR accesses trap to HS */
 
 /* SPV/SPVP select VS supervisor return, VTVM intercepts VS address-space
  * changes, HU remains clear. Bit 10 is reserved; there is no hstatus.VIE. */
-#define HYP_HSTATUS_GUEST_ON  (HYP_HSTATUS_SPV | HYP_HSTATUS_SPVP | HYP_HSTATUS_VTVM)
+#define HYP_HSTATUS_GUEST_ON  (HYP_HSTATUS_SPV | HYP_HSTATUS_SPVP | HYP_HSTATUS_VTVM | HYP_HSTATUS_VTW)
 #define HYP_HSTATUS_GUEST_OFF (HYP_HSTATUS_GUEST_ON | HYP_HSTATUS_HU)
 
 /*
@@ -283,9 +286,18 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
      * only a VS-mode access runs the G-stage -- so programming it while the
      * host is still executing is inert for the host and arms the guest's own
      * walks for guest entry. Full activation fences follow the CSR restore. */
+    /* RUN owns a CPU until the next HS trap. Arm a bounded host slice even
+     * when the previous task left no immediate timer work. Guest timers use
+     * vstimecmp and cannot substitute for this host scheduling deadline. */
+    timer_set_interval(riscv64_timer_freq() / 100);
+    __asm__ volatile("csrs sie, %0" :: "r"(1ULL << 5) : "memory");
+    task_t *host = proc_current();
+    if (host && host->trap_ctx) ARCH_TRAP_FAST_RETURN_DISARM(host->trap_ctx);
+
     uint64_t hgatp = hyp_make_hgatp(vcpu->vm->s2_root, vcpu->vm->vmid);
     __asm__ volatile("csrw hgatp, %0" :: "r"(hgatp) : "memory");
 
+    __asm__ volatile("fence.i" ::: "memory");
     /* The guest's view of the hypervisor.  enter() re-asserts the same bits:
      * SPV in particular is cleared by every trap-return, so nothing here may be
      * treated as the entry state. */
@@ -337,6 +349,8 @@ static void hyp_frame_to_vcpu(hyp_vcpu_t *vcpu, trap_context_t *ctx)
     vcpu->regs[0] = 0;
     vcpu->regs[2] = vcpu->tramp[HYP_ASM_TRAMP_GUEST_SP];
     vcpu->pc = TRAP_CTX_EPC(ctx);
+    /* arch[23] records VU versus VS across a resumable RUN exit. */
+    vcpu->arch[23] = !(ctx->sstatus & (1ULL << 8));
     for (int i = 0; i < 32; ++i)
         vcpu->fpu[i] = ctx->f[i];
     vcpu->fcsr = ctx->fcsr;
@@ -433,6 +447,10 @@ int hyp_arch_guest_trap(void *trap_frame)
 
     int resume = hyp_vcpu_handle_trap(vcpu, ctx, scause, arch_read_tval(),
                                       hyp_read_htval());
+    if (__atomic_load_n(&vcpu->vm->broken, __ATOMIC_ACQUIRE)) {
+        vcpu->exit = HYP_EXIT_ERROR; resume = 0;
+    }
+    if (resume && vcpu->exit == HYP_EXIT_YIELD) resume = 0;
     if (resume) hyp_vcpu_sync_irqs(vcpu);
     if (resume && hyp_vcpu_control_exit(vcpu)) resume = 0;
     if (resume && vcpu->vm->managed_console &&
@@ -508,6 +526,9 @@ static __attribute__((unused)) void hyp_riscv_sync_irqs(hyp_vcpu_t *vcpu,
 }
 
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+extern int hyp_riscv_probe_smp(hyp_vm_t *);
+extern int hyp_riscv_remote_fence(hyp_vm_t *, uint32_t, unsigned);
+extern void hyp_riscv_reset(hyp_vcpu_t *, uint64_t, uint64_t, uint64_t);
 extern int hyp_riscv_vm_init(hyp_vm_t *vm);
 extern void hyp_riscv_vm_destroy(hyp_vm_t *vm);
 extern int hyp_riscv_s2_map(hyp_vm_t *, uint64_t, pfn_t, pte_t);
@@ -526,6 +547,8 @@ const hyp_backend_t *hyp_arch_backend(void)
 {
     static const hyp_backend_t backend = {
         .name = "riscv-h", .s2_root_order = 2, .max_running_vcpus = CONFIG_NR_CPUS,
+        .probe_smp = hyp_riscv_probe_smp, .remote_fence = hyp_riscv_remote_fence,
+        .reset = hyp_riscv_reset,
         .gpa_limit = 1ULL << 39, .ram_base = 0x80000000ULL,
         .vm_init = hyp_riscv_vm_init, .vm_destroy = hyp_riscv_vm_destroy,
         .pin = hyp_riscv_s2_pin, .sync_irqs = hyp_riscv_sync_irqs,

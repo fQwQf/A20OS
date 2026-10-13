@@ -77,7 +77,7 @@ static pte_t *hyp_s2_walk(hyp_vm_t *vm, uint64_t gpa, int alloc)
             if (!next)
                 return NULL;
             memset(next, 0, PAGE_SIZE);
-            if (mm_pt_node_init(next, level - 1) != 0) {
+            if (mm_pt_node_init_atomic(next, level - 1) != 0) {
                 pfa_free(virt_to_pfn(next), 0);
                 return NULL;
             }
@@ -101,6 +101,15 @@ static pte_t *hyp_s2_walk(hyp_vm_t *vm, uint64_t gpa, int alloc)
         table = arch_pte_to_ptr(pte);
     }
     return table;
+}
+
+static int hyp_s2_fence_all(hyp_vm_t *vm, uint64_t gpa)
+{
+    hyp_arch_s2_fence(vm->vmid, gpa);
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    uint32_t cpus = vm->active_cpu_mask;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    return hyp_vm_remote_fence(vm, cpus, 2);
 }
 
 int hyp_riscv_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
@@ -131,19 +140,18 @@ int hyp_riscv_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
         mm_pt_node_unlock(table);
         return -EEXIST;
     }
+    mm_pt_frame_lend(pfn);
     table[idx] = arch_pte_leaf(pfn_to_phys(pfn), flags);
     mm_pt_note_present(table, 0, idx,
                        (uint8_t)(MM_ST_CLS_BYTE(MM_ST_GUEST_MEM) |
                                  mm_pt_prot_bits(flags)));
-    mm_pt_node_unlock(table);
-
-    /* The frame becomes the guest's: flag it (identity side; the reference
-     * the caller holds is what keeps it alive), then fence the stale
-     * translation for this VMID/page -- a remap after unmap must not read
-     * the old entry out of a guest TLB. */
-    mm_pt_frame_lend(pfn);
     hyp_account_mapped(1);
-    hyp_arch_s2_fence(vm->vmid, gpa);
+    int rc = hyp_s2_fence_all(vm, gpa);
+    mm_pt_node_unlock(table);
+    /* Publication transferred ownership. On a failed remote fence retain
+     * this backing, quarantine the VM and stop all vCPUs; never return it
+     * as an unmapped caller-owned frame while a stale remote walk may exist. */
+    if (rc) hyp_vm_fail(vm);
     return 0;
 }
 
@@ -182,13 +190,19 @@ int hyp_riscv_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
     }
     table[idx] = 0;
     mm_pt_note_absent(table, 0, idx);
+    int rc = hyp_s2_fence_all(vm, gpa);
+    if (rc) {
+        table[idx] = pte;
+        mm_pt_note_present(table, 0, idx,
+                          MM_ST_CLS_BYTE(MM_ST_GUEST_MEM) | mm_pt_prot_bits(pte));
+        mm_pt_node_unlock(table);
+        hyp_vm_fail(vm);
+        return rc;
+    }
     mm_pt_node_unlock(table);
-
     pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
-    hyp_arch_s2_fence(vm->vmid, gpa);
     mm_pt_frame_return(pfn);
     hyp_account_mapped(-1);
-    /* The reference goes back to the caller after invalidation. */
     return 0;
 }
 

@@ -12,6 +12,9 @@ typedef struct hyp_backend {
     unsigned max_running_vcpus;
     uint64_t gpa_limit;
     uint64_t ram_base;
+    int (*probe_smp)(struct hyp_vm *vm);
+    int (*remote_fence)(struct hyp_vm *vm, uint32_t cpus, unsigned kind);
+    void (*reset)(struct hyp_vcpu *vcpu, uint64_t entry, uint64_t hart, uint64_t opaque);
     int (*vm_init)(struct hyp_vm *vm);
     void (*vm_destroy)(struct hyp_vm *vm);
     int (*map)(struct hyp_vm *vm, uint64_t gpa, pfn_t pfn, pte_t prot);

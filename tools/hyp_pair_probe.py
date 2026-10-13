@@ -83,12 +83,16 @@ def probe(host: str, profile_name: str, timeout: float, report: Path) -> None:
         evidence["baseline_stats"] = list(struct.unpack("<5Q", baseline))
         for name in names:
             kernel = profile["boot"]["kernel"].encode().ljust(256, b"\0")
-            result, epoch = _rpc(host, START, _name(name) + struct.pack("<I", profile["memory_mb"]) + kernel)
+            result, epoch = _rpc(host, START, _name(name) + struct.pack("<II", profile["memory_mb"], profile["vcpus"]) + kernel)
             if len(result) != 8: raise A20Error("truncated start acknowledgement")
             generation, = struct.unpack("<Q", result)
             identities[name] = epoch, generation
-        wait_for(lambda _: all(b"A20OS Kernel" in output[n] and b"# " in output[n] for n in names),
+        wait_for(lambda _: all(b"A20OS Kernel" in output[n] and b"\n# " in output[n] for n in names),
                  "two independent guest shells booted")
+        if profile["vcpus"] > 1:
+            marker = f"[SMP] {profile['vcpus']}/{profile['vcpus']} configured CPUs online".encode()
+            wait_for(lambda _: all(marker in output[n] for n in names),
+                     "both guest kernels report all requested virtual CPUs online")
         tokens = [f"A20_{n}".encode() for n in names]
         for name in names:
             # Adjacent quoted pieces mean the expected token is absent from

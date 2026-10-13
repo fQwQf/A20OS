@@ -1,0 +1,8 @@
+schema = 1
+arch = "riscv64"
+vmm = "hypvm"
+accel = "native"
+vcpus = 2
+memory_mb = 128
+[boot]
+kernel = "/bin/boot/guest-kernel-ramfs.elf"

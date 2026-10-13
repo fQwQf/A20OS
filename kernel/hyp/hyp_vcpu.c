@@ -47,8 +47,8 @@
  */
 #define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
-/* CPU-local hardware activation; one RUN owner per vCPU and, until remote
- * stage-2 invalidation exists, one executing vCPU per VM. Distinct managed
+/* CPU-local activation: one RUN owner per vCPU, with each VM bounded by
+ * its configured parallel limit and synchronous stage-2 fences. Distinct managed
  * VMs may execute on different host CPUs. The legacy UART has one owner. */
 static hyp_vcpu_t *hyp_active_vcpus[CONFIG_NR_CPUS];
 static hyp_vcpu_t *hyp_legacy_vcpu;
@@ -78,7 +78,21 @@ hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa)
 
     /* The guest's initial sp and satp are the arch half's call: only
      * hyp_arch_vcpu_setup() knows the guest RAM layout it is entering. */
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    unsigned id;
+    for (id = 0; id < vm->vcpu_limit; id++) if (!vm->vcpus[id]) break;
+    if (id == vm->vcpu_limit || vm->updating || __atomic_load_n(&vm->broken, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&vm->shutdown, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&vm->control_lock, flags);
+        kfree(vcpu);
+        return NULL;
+    }
+    vcpu->id = id;
+    vcpu->hart_state = id ? HYP_HART_STOPPED : HYP_HART_STARTED;
+    vm->vcpus[id] = vcpu;
+    vm->vcpu_count++;
     hyp_vm_get(vm);
+    spin_unlock_irqrestore(&vm->control_lock, flags);
     hyp_account_vcpu(1);
     return vcpu;
 }
@@ -92,7 +106,7 @@ int hyp_vcpu_set_boot(hyp_vcpu_t *vcpu, uint64_t hartid, uint64_t dtb_gpa)
     if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
         return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
-    if (vcpu->claimed) {
+    if (vcpu->claimed || hartid != vcpu->id) {
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
         return -EBUSY;
     }
@@ -113,10 +127,15 @@ void hyp_vcpu_put(hyp_vcpu_t *vcpu)
     if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
         return;
 
-    if (__atomic_sub_fetch(&vcpu->refcount, 1, __ATOMIC_ACQ_REL) != 0)
-        return;
-
     hyp_vm_t *vm = vcpu->vm;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    if (__atomic_sub_fetch(&vcpu->refcount, 1, __ATOMIC_ACQ_REL) != 0) {
+        spin_unlock_irqrestore(&vm->control_lock, flags);
+        return;
+    }
+    vm->vcpus[vcpu->id] = NULL;
+    vm->vcpu_count--;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
     vcpu->vm = NULL;
     vcpu->magic = 0;
     hyp_account_vcpu(-1);
@@ -124,6 +143,118 @@ void hyp_vcpu_put(hyp_vcpu_t *vcpu)
     /* The VM outlives the vcpu only while someone else holds it. */
     if (vm)
         hyp_vm_put(vm);
+}
+
+hyp_vcpu_t *hyp_vm_vcpu_get(hyp_vm_t *vm, uint64_t hartid)
+{
+    if (hartid >= HYP_MAX_VCPUS) return NULL;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    hyp_vcpu_t *vcpu = vm->vcpus[hartid];
+    if (vcpu) hyp_vcpu_get(vcpu);
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    return vcpu;
+}
+
+int hyp_vm_hart_status(hyp_vm_t *vm, uint64_t hartid)
+{
+    hyp_vcpu_t *vcpu = hyp_vm_vcpu_get(vm, hartid);
+    if (!vcpu) return -EINVAL;
+    int state = (int)__atomic_load_n(&vcpu->hart_state, __ATOMIC_ACQUIRE);
+    hyp_vcpu_put(vcpu);
+    return state;
+}
+
+int hyp_vm_hart_start(hyp_vm_t *vm, uint64_t hartid, uint64_t entry, uint64_t opaque)
+{
+    if ((entry & 1) || !hyp_vm_ram_contains(vm, entry) || !vm->backend->reset)
+        return -EINVAL;
+    hyp_vcpu_t *vcpu = hyp_vm_vcpu_get(vm, hartid);
+    if (!vcpu) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+    int rc = 0;
+    if (vcpu->claimed || __atomic_load_n(&vcpu->hart_state, __ATOMIC_ACQUIRE) != HYP_HART_STOPPED)
+        rc = -EALREADY;
+    else if (__atomic_load_n(&vm->shutdown, __ATOMIC_ACQUIRE) ||
+             (vcpu->requests & HYP_REQUEST_STOP)) rc = -ESHUTDOWN;
+    else {
+        vm->backend->reset(vcpu, entry, hartid, opaque);
+        vcpu->requests &= HYP_REQUEST_PAUSE;
+        vcpu->irq_set = vcpu->irq_clear = 0;
+        __atomic_store_n(&vcpu->hart_state, HYP_HART_START_PENDING, __ATOMIC_RELEASE);
+    }
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+    hyp_vcpu_put(vcpu);
+    return rc;
+}
+
+static int hyp_vm_hart_mask(hyp_vm_t *vm, uint64_t mask, uint64_t base, unsigned kind, int ipi)
+{
+    uint32_t cpus = 0;
+    hyp_vcpu_t *targets[HYP_MAX_VCPUS] = {0};
+    unsigned n = 0;
+    for (unsigned id = 0; id < HYP_MAX_VCPUS; id++) {
+        if (base != (uint64_t)-1 && (id < base || id - base >= 64 || !(mask & (1ULL << (id - base)))))
+            continue;
+        hyp_vcpu_t *target = hyp_vm_vcpu_get(vm, id);
+        if (!target) {
+            if (base == (uint64_t)-1) continue;
+            for (unsigned i = 0; i < n; i++) hyp_vcpu_put(targets[i]);
+            return -EINVAL;
+        }
+        targets[n++] = target;
+    }
+    if (base != (uint64_t)-1) {
+        uint64_t valid = base < HYP_MAX_VCPUS ? ((1ULL << (HYP_MAX_VCPUS - base)) - 1) : 0;
+        if (mask & ~valid) {
+            for (unsigned i = 0; i < n; i++) hyp_vcpu_put(targets[i]);
+            return -EINVAL;
+        }
+    }
+    int rc = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (ipi) rc = hyp_vcpu_inject_irq(targets[i], HYP_IRQ_SOFTWARE, 1);
+        else {
+            uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+            if (targets[i]->claimed) cpus |= 1u << targets[i]->host_cpu;
+            spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        }
+        if (rc) break;
+    }
+    if (!ipi) rc = hyp_vm_remote_fence(vm, cpus, kind);
+    for (unsigned i = 0; i < n; i++) hyp_vcpu_put(targets[i]);
+    return rc;
+}
+
+int hyp_vm_ipi(hyp_vm_t *vm, uint64_t mask, uint64_t base)
+{
+    return hyp_vm_hart_mask(vm, mask, base, 0, 1);
+}
+int hyp_vm_fence(hyp_vm_t *vm, uint64_t mask, uint64_t base, unsigned kind)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return hyp_vm_hart_mask(vm, mask, base, kind, 0);
+}
+
+void hyp_vm_fail(hyp_vm_t *vm)
+{
+    __atomic_store_n(&vm->broken, 1, __ATOMIC_RELEASE);
+    for (unsigned id = 0; id < HYP_MAX_VCPUS; id++) {
+        hyp_vcpu_t *target = hyp_vm_vcpu_get(vm, id);
+        if (!target) continue;
+        hyp_vcpu_control(target, HYP_CONTROL_STOP);
+        hyp_vcpu_put(target);
+    }
+}
+
+void hyp_vm_shutdown(hyp_vm_t *vm)
+{
+    __atomic_store_n(&vm->shutdown, 1, __ATOMIC_RELEASE);
+    for (unsigned id = 0; id < HYP_MAX_VCPUS; id++) {
+        hyp_vcpu_t *target = hyp_vm_vcpu_get(vm, id);
+        if (!target) continue;
+        hyp_vcpu_control(target, HYP_CONTROL_STOP);
+        hyp_vcpu_put(target);
+    }
 }
 
 int hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len)
@@ -163,6 +294,7 @@ int hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len)
      * holds no page-table node lock, which is the condition that makes
      * reclaim safe here (S2: reclaim takes node locks). */
     uint64_t done  = 0;   /* bytes handed to a mapped page */
+    uint64_t retained = 0;
     uint64_t pages = 0;   /* pages currently in the table */
     pfn_t    cur   = PFN_NONE;
     int      rc    = 0;
@@ -202,8 +334,8 @@ int hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len)
         /* Partial load: unwind, so a failed load leaves the VM's address
          * space exactly as it found it. */
         for (uint64_t j = 0; j < pages; j++) {
-            hyp_s2_unmap(vm, gpa + j * PAGE_SIZE);
-            frame_put(pfns[j]);
+            if (!hyp_s2_unmap(vm, gpa + j * PAGE_SIZE)) frame_put(pfns[j]);
+            else retained++; /* failed invalidation keeps table ownership */
         }
         if (cur != PFN_NONE)
             frame_put(cur);
@@ -213,7 +345,8 @@ int hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len)
 
     if (rc) {
         if (vm->charge_cg)
-            cg_mem_uncharge(vm->charge_cg, npages);
+            cg_mem_uncharge(vm->charge_cg, npages - retained);
+        __atomic_add_fetch(&vm->charged_pages, retained, __ATOMIC_RELAXED);
     } else {
         __atomic_add_fetch(&vm->charged_pages, npages, __ATOMIC_RELAXED);
     }
@@ -295,16 +428,38 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     uint64_t vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
     int legacy = !vcpu->vm->managed_console;
     if (vcpu->claimed || hyp_active_vcpus[cpu] || vcpu->vm->updating ||
-        vcpu->vm->run_count || (legacy && hyp_legacy_vcpu)) {
+        vcpu->vm->run_count >= vcpu->vm->parallel_limit || (legacy && hyp_legacy_vcpu)) {
         spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
         preempt_enable();
         if (irqs_were_on) arch_local_irq_enable();
         return -EBUSY;
     }
+    if (__atomic_load_n(&vcpu->vm->broken, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&vcpu->vm->shutdown, __ATOMIC_ACQUIRE)) {
+        int broken = __atomic_load_n(&vcpu->vm->broken, __ATOMIC_ACQUIRE);
+        vcpu->exit = broken ? HYP_EXIT_ERROR : HYP_EXIT_STOPPED;
+        if (reason) *reason = vcpu->exit;
+        spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
+        spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        preempt_enable();
+        if (irqs_were_on) arch_local_irq_enable();
+        return broken ? -EIO : 0;
+    }
+    if (__atomic_load_n(&vcpu->hart_state, __ATOMIC_ACQUIRE) == HYP_HART_STOPPED &&
+        !(__atomic_load_n(&vcpu->requests, __ATOMIC_ACQUIRE) & HYP_REQUEST_STOP)) {
+        vcpu->exit = HYP_EXIT_HART_STOPPED;
+        if (reason) *reason = HYP_EXIT_HART_STOPPED;
+        spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
+        spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        preempt_enable();
+        if (irqs_were_on) arch_local_irq_enable();
+        return 0;
+    }
     vcpu->claimed = 1;
     vcpu->host_cpu = cpu;
     vcpu->vm->run_count++;
+    vcpu->vm->active_cpu_mask |= 1u << cpu;
     hyp_vcpu_get(vcpu);
     if (legacy) hyp_legacy_vcpu = vcpu;
     __atomic_store_n(&hyp_active_vcpus[cpu], vcpu, __ATOMIC_RELEASE);
@@ -314,7 +469,12 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     int rc = 0;
     vcpu->exit = HYP_EXIT_NONE;
     vcpu->exit_scause = vcpu->exit_stval = vcpu->exit_htval = 0;
+    if (__atomic_load_n(&vcpu->vm->broken, __ATOMIC_ACQUIRE)) { rc = -EIO; goto out; }
     if (hyp_vcpu_control_exit(vcpu)) goto out;
+    if (__atomic_load_n(&vcpu->hart_state, __ATOMIC_ACQUIRE) == HYP_HART_STOPPED) {
+        vcpu->exit = HYP_EXIT_HART_STOPPED;
+        goto out;
+    }
     if (vcpu->vm->managed_console && hyp_console_pending(vcpu->vm)) {
         vcpu->exit = HYP_EXIT_YIELD;
         goto out;
@@ -322,6 +482,7 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     rc = vcpu->vm->backend->load(vcpu);
     if (rc) goto out;
     hyp_vcpu_sync_irqs(vcpu);
+    __atomic_store_n(&vcpu->hart_state, HYP_HART_STARTED, __ATOMIC_RELEASE);
     vcpu->running = 1;
     vcpu->vm->backend->enter(vcpu);
     arch_local_irq_disable();
@@ -329,6 +490,8 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     vcpu->running = 0;
     if (vcpu->exit == HYP_EXIT_NONE || vcpu->exit == HYP_EXIT_ERROR) rc = -EIO;
 out:
+    int failed = rc < 0 || vcpu->exit == HYP_EXIT_FAULT || vcpu->exit == HYP_EXIT_ERROR;
+    if (failed) __atomic_store_n(&vcpu->vm->broken, 1, __ATOMIC_RELEASE);
     flags = spin_lock_irqsave(&g_hyp_active_lock);
     vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
     if (reason) *reason = vcpu->exit;
@@ -337,11 +500,15 @@ out:
     vcpu->vm->last_exit[2] = vcpu->exit_stval;
     vcpu->vm->last_exit[3] = vcpu->exit_htval;
     vcpu->vm->run_count--;
+    vcpu->vm->active_cpu_mask &= ~(1u << cpu);
+    if (vcpu->exit == HYP_EXIT_HART_STOPPED)
+        __atomic_store_n(&vcpu->hart_state, HYP_HART_STOPPED, __ATOMIC_RELEASE);
     vcpu->claimed = 0;
     __atomic_store_n(&hyp_active_vcpus[cpu], NULL, __ATOMIC_RELEASE);
     if (hyp_legacy_vcpu == vcpu) hyp_legacy_vcpu = NULL;
     spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
     spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+    if (failed) hyp_vm_fail(vcpu->vm);
     hyp_vcpu_put(vcpu);
     preempt_enable();
     if (irqs_were_on) arch_local_irq_enable();

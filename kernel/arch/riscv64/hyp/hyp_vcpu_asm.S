@@ -241,7 +241,7 @@ hyp_arch_vcpu_enter:
 
     /* Guest sstatus: SPP=1 because VS-mode's privilege is S (sret reads SPP
      * for the privilege and hstatus.SPV for the virtual side), FS=Initial so
-     * guest FP instructions are executable at all, and SPIE|SIE so the host
+     * guest FP instructions are executable at all, and SPIE so the host
      * timer interrupt reaches the guest as a trap to HS rather than sitting
      * pending behind it (sret copies SPIE into SIE, so SPIE is the load-bearing
      * half).
@@ -265,7 +265,11 @@ hyp_arch_vcpu_enter:
      * whether the FPRs are context-switched.  The host's trap entry turns
      * FS on and restores the register file around every HS trap it takes, so
      * the guest's FP image also survives each trip out to the hypervisor. */
-    li      t0, SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | SSTATUS_FS_INITIAL
+    li      t0, SSTATUS_SPIE | SSTATUS_FS_INITIAL
+    ld      t1, HYP_VCPU_ARCH_OFF + 23*8(a0)
+    bnez    t1, .Lhyp_vu_return
+    ori     t0, t0, SSTATUS_SPP
+.Lhyp_vu_return:
     sd      t0, 32*8(sp)
 
     /* kernel_tp: the host task pointer, which is what the trap entry expects
@@ -336,6 +340,8 @@ hyp_arch_vcpu_enter:
     ld      t0, 33*8(sp)
     csrw    sepc, t0
     ld      t0, 32*8(sp)
+    /* SIE must remain clear until sret: stvec already names the guest
+     * prelude, which cannot classify a host IRQ during register restore. */
     csrw    sstatus, t0
 
     ld      x1, 1*8(sp)

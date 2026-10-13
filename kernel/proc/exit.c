@@ -17,7 +17,7 @@ extern void a20_registry_task_exit(int pid);
 /* Slot ownership in the Linux ABI hypervisor bridge is keyed on the pid, and
  * pids are recycled, so the keys have to go before the pid does. */
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-extern void hyp_bridge_task_exit(int pid);
+#include "hyp/hyp_bridge.h"
 #endif
 extern void udisk_task_exit(int pid);
 #include "mm/frame.h"
@@ -531,7 +531,17 @@ void proc_exit(int exit_code)
     task_t *completed_parent = NULL;
     task_t *notify_leader = NULL;
     task_t *group_leader = thread_leader ? thread_leader : t;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    struct hyp_bridge_drop hyp_drop = { .count = 0 };
+#endif
     lf = spin_lock_irqsave(&tasklist_lock);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (proc_task_state_get(group_leader) == PROC_ZOMBIE &&
+        proc_tg_group_dead_locked(group_leader) && !group_leader->hyp_cleanup_done) {
+        group_leader->hyp_cleanup_done = 1;
+        hyp_bridge_detach_group(proc_task_tgid(group_leader), &hyp_drop);
+    }
+#endif
     if ((group_leader != t || !auto_reap) &&
         proc_task_state_get(group_leader) == PROC_ZOMBIE &&
         proc_tg_group_dead_locked(group_leader) && group_leader->parent &&
@@ -543,6 +553,9 @@ void proc_exit(int exit_code)
         }
     }
     spin_unlock_irqrestore(&tasklist_lock, lf);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    hyp_bridge_release_group(&hyp_drop);
+#endif
 
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
@@ -571,9 +584,6 @@ void proc_exit(int exit_code)
     udisk_task_exit(t->pid);
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     a20_registry_task_exit(t->pid);
-#endif
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    hyp_bridge_task_exit(t->pid);
 #endif
 
     /* Native ABI task handles store the pid as the object pointer, so the
