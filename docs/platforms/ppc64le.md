@@ -1,10 +1,18 @@
 # PPC64LE 平台状态
 
+> **2026-10-13：退出 1.0 支持。** 该目标没有明确用户、维护者或不可替代的研究价值，
+> 不再列入稳定版开发和 Rust 迁移范围。以下保留历史实现、限制与复现记录。当前 Makefile
+> 会拒绝 `ARCH=ppc64le`；历史命令仅适用于干净的 `v0.18` checkout。活跃入口状态见
+> [1.0 计划](../releases/v1.0.md)。PPC64LE 实例快照归档在
+> [retired-instances](retired-instances/)。
+
 > 源码边界：PPC64LE 构建、QEMU pSeries MMU、embedded driver 默认值、单核限制和 NOMMU 拒绝，已与源码核对（2026-08）。下文 shell/native PASS、具体故障和修复列表是 2026-08-04 的运行证据，**不是**当前提交的重新测试结果。
 
-PPC64LE 当前由 QEMU pSeries（`qemu-virt-ppc64le`）提供受支持的 MMU 运行目标。启动入口切换到 64 位 little-endian 模式，使用 PowerPC Radix 页表；用户地址空间保留低半根页表，内核高半映射通过每个进程共享的根项继承。异常入口同时覆盖用户态系统调用、用户缺页和内核态 timer/device 中断，地址空间切换使用 pSeries process table 的 PID 1。
+PPC64LE 的旧 MMU 运行目标为 QEMU pSeries（`qemu-virt-ppc64le`）。启动入口切换到 64 位 little-endian 模式，使用 PowerPC Radix 页表；用户地址空间保留低半根页表，内核高半映射通过每个进程共享的根项继承。异常入口同时覆盖用户态系统调用、用户缺页和内核态 timer/device 中断，地址空间切换使用 pSeries process table 的 PID 1。
 
-## 构建与运行
+## 历史构建与运行（v0.18）
+
+先在干净 checkout 中切换到 `v0.18`，再运行下面的旧命令。当前分支已撤下这些活跃入口。
 
 ```sh
 make ARCH=ppc64le BOARD=qemu-virt-ppc64le ABI=linux BRINGUP=1 kernel-only

@@ -1,18 +1,22 @@
 # 混合内核：能力与边界清单
 
+1.0 的整体完成条件见 [发布计划](../releases/v1.0.md) 的 V1-ABI/V1-DRIVER/V1-MM。
+本页阶段性“已实现”不等于子系统完成；同源双态、完整人格层、协议协商以及功能/性能对照
+仍需逐项收口。2026-10-13 另核对并更正了下述 driver_manager 头文件依赖。
+
 最后核实：2026-08。运行类结论需在文末复现入口给出的命令上重新执行，历史里程碑记录见 [../archive/](../archive/)。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
 
-## 核心架构原则（总体已贯彻，含已知债务）
+## 核心架构原则与核对范围
 
 ```
 用户态 ── syscall 线格式 ──> ABI 层（薄包装）── 内部 API ──> 内部实现
 ```
 
 - `kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按 ABI 无关内部层组织；
-- `kernel/drivers` 目前不是零 ABI 依赖：`kernel/drivers/core/driver_manager.c` 直接包含 `abi/native/types.h` 和 `abi/native/rights.h`，用 Native 对象类型与 rights 安装服务启动句柄。这是需要改为 core-owned 类型/API 的显式架构债务，因此不能宣称驱动目录或全仓已通过“对 `abi/` 零依赖”审计；
+- `kernel/drivers/core/driver_manager.c` 已直接包含 `ipc/ipc.h` 与 `ipc/handle_table.h`，此前关于它直接包含 Native ABI 头的债务描述已过时；这项局部核对不替代全仓依赖门禁；
 - Linux ABI 线格式常量由 `kernel/include/core/` 自持，`abi/linux/*` 再导出；
 - 内部 IPC 子系统头位于 `kernel/include/ipc/`；
-- 目标是让新增 ABI 只需薄包装即可共享内部混合内核机制；上述驱动管理器例外尚未收敛。
+- 目标是让新增 ABI 只需薄包装即可共享内部混合内核机制；Rust 重写继续维护该边界。
 
 ## 能力清单
 

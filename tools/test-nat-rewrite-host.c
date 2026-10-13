@@ -32,18 +32,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 #include "net/netfilter.h"
 #include "net/netfilter_rewrite.h"
+
+/* The Rust side receives only scalar metadata through the C adapter, but keep
+ * the adapter's public declarations pinned to this header's C layout. Target
+ * builds compile this same adapter with their native ABI. */
+_Static_assert(offsetof(netfilter_frame_t, proto) == 12,
+               "netfilter_frame_t proto layout changed");
+_Static_assert(offsetof(netfilter_frame_t, ip_off) == 14,
+               "netfilter_frame_t ip_off layout changed");
+_Static_assert(offsetof(netfilter_frame_t, l4_off) == 16,
+               "netfilter_frame_t l4_off layout changed");
+_Static_assert(sizeof(netfilter_frame_t) == 28,
+               "netfilter_frame_t scalar ABI size changed on host");
+_Static_assert(offsetof(net_conntrack_entry_t, nat) == 14,
+               "conntrack nat field layout changed");
+_Static_assert(offsetof(net_conntrack_entry_t, packets) == 32,
+               "conntrack packet counter alignment changed on host");
 
 /* ------------------------------------------------------------------ harness */
 
 static int g_fail;
 static int g_checks;
+static uint32_t g_check_names_hash = 2166136261u;
+
+static void hash_check_name(const char *s) {
+    while (*s) {
+        g_check_names_hash = (g_check_names_hash ^ (uint8_t)*s++) * 16777619u;
+    }
+    g_check_names_hash = (g_check_names_hash ^ (uint8_t)'\n') * 16777619u;
+}
 
 #define CHK(cond, ...)                                                         \
     do {                                                                       \
         g_checks++;                                                            \
+        hash_check_name(__VA_ARGS__);                                          \
         if (!(cond)) {                                                         \
             g_fail++;                                                          \
             printf("NAT_REWRITE_TEST: FAIL %s:%d ", __func__, __LINE__);       \
@@ -304,6 +330,67 @@ static void test_ports(void) {
         "rewriting a port to the value it already has changes nothing");
 }
 
+/* Bounds, zero-checksum, and non-first fragment boundaries shared with the C
+ * reference. Invalid lengths that make the old C helper subtract past the
+ * frame are tested only in the Rust adapter's guarded entry points; those are
+ * recorded as a separate known C defect rather than run as unsafe C. */
+static void test_boundaries(void) {
+    uint8_t f[128];
+    netfilter_frame_t pkt;
+    size_t len = build_frame(f, &pkt, 6, CLIENT, SERVER, 44444, 443);
+
+    CHK(netfilter_l4_ckoff(f, pkt.l4_off + 19, &pkt) == 0,
+        "tcp: checksum offset rejects a truncated base header");
+    CHK(netfilter_l4_ckoff(f, len, &pkt) == pkt.l4_off + 16,
+        "tcp: checksum remains before options at the exact header boundary");
+
+    put16(f + pkt.l4_off + 16, 0);
+    netfilter_set_addr(f, len, &pkt, ip4(GATEWAY), pkt.dst_addr);
+    CHK(get16(f + pkt.l4_off + 16) == 0,
+        "tcp: a zero checksum is preserved as the historical invalid-packet behavior");
+    netfilter_set_port(f, len, &pkt, 1, 40000);
+    CHK(get16(f + pkt.l4_off + 16) == 0,
+        "tcp: a zero checksum remains zero after a port rewrite");
+
+    memset(f, 0, sizeof(f));
+    memset(&pkt, 0, sizeof(pkt));
+    len = IP_OFF + IP_HDR;
+    f[IP_OFF] = 0x45;
+    put16(f + IP_OFF + 2, IP_HDR);
+    put16(f + IP_OFF + 6, 0x2001); /* MF plus nonzero fragment offset. */
+    f[IP_OFF + 9] = 6;
+    pkt.ip_off = IP_OFF;
+    pkt.l4_off = 0; /* parser contract for a non-first fragment */
+    pkt.proto = 6;
+    pkt.src_addr = ip4(CLIENT);
+    pkt.dst_addr = ip4(SERVER);
+    f[IP_OFF + 12] = (uint8_t)(pkt.src_addr >> 24);
+    f[IP_OFF + 13] = (uint8_t)(pkt.src_addr >> 16);
+    f[IP_OFF + 14] = (uint8_t)(pkt.src_addr >> 8);
+    f[IP_OFF + 15] = (uint8_t)pkt.src_addr;
+    f[IP_OFF + 16] = (uint8_t)(pkt.dst_addr >> 24);
+    f[IP_OFF + 17] = (uint8_t)(pkt.dst_addr >> 16);
+    f[IP_OFF + 18] = (uint8_t)(pkt.dst_addr >> 8);
+    f[IP_OFF + 19] = (uint8_t)pkt.dst_addr;
+    ip_checksum(f + IP_OFF);
+    uint8_t before[128];
+    memcpy(before, f, len);
+    netfilter_set_port(f, len, &pkt, 1, 40000);
+    CHK(memcmp(before, f, len) == 0,
+        "fragment: no transport port is rewritten when l4_off is absent");
+    netfilter_set_addr(f, len, &pkt, ip4(GATEWAY), pkt.dst_addr);
+    CHK(frame_src(f, &pkt) == ip4(GATEWAY),
+        "fragment: IPv4 address is rewritten on a non-first fragment");
+    uint8_t ipcopy[IP_HDR];
+    memcpy(ipcopy, f + IP_OFF, IP_HDR);
+    put16(ipcopy + 10, 0);
+    CHK(get16(f + IP_OFF + 10) == full_sum(ipcopy, IP_HDR, 0),
+        "fragment: IPv4 checksum is recomputed without touching payload");
+    CHK(memcmp(f + IP_OFF + IP_HDR, before + IP_OFF + IP_HDR,
+               len - IP_OFF - IP_HDR) == 0,
+        "fragment: opaque fragment payload is unchanged");
+}
+
 /* 5. MASQUERADE's address choice: the interface being left, not the address
  *    that happened to be in the header. */
 static uint32_t g_netif_addr[4] = {0, 0, 0, 0};
@@ -446,6 +533,13 @@ static void test_reply_tuple(void) {
         "round trip: the reply leaves addressed to the original client port");
     CHK(checksums_valid(rev, rlen, &rpkt),
         "round trip: the reply's checksums are valid after being rewritten");
+
+    uint32_t aliased_addr = 0;
+    uint16_t alias_sport = 0, alias_dport = 0;
+    netfilter_ct_reply_tuple(&e, &aliased_addr, &aliased_addr, &alias_sport,
+                             &alias_dport);
+    CHK(aliased_addr == e.nat_src_addr,
+        "reply alias: shared address output follows C write order");
 }
 
 int main(void) {
@@ -453,13 +547,18 @@ int main(void) {
     test_dnat_addr();
     test_udp_checksum();
     test_ports();
+    test_boundaries();
     test_masq_addr();
     test_reply_tuple();
 
     if (g_fail) {
         printf("NAT_REWRITE_TEST: FAIL %d of %d checks\n", g_fail, g_checks);
+        printf("A20_COMPARE_JSON: {\"schema\":1,\"case\":\"nat-rewrite/host-oracle-v1\",\"contract\":{\"checks\":%d,\"failures\":%d,\"check_names_fnv1a32\":%u},\"metrics\":{}}\n",
+               g_checks, g_fail, g_check_names_hash);
         return 1;
     }
     printf("NAT_REWRITE_TEST: PASS %d checks\n", g_checks);
+    printf("A20_COMPARE_JSON: {\"schema\":1,\"case\":\"nat-rewrite/host-oracle-v1\",\"contract\":{\"checks\":%d,\"failures\":%d,\"check_names_fnv1a32\":%u},\"metrics\":{}}\n",
+           g_checks, g_fail, g_check_names_hash);
     return 0;
 }

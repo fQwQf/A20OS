@@ -58,10 +58,6 @@ smoke-arch-mmu-matrix:
 	@$(PYTHON) tools/smoke.py arch-mmu-matrix \
 		--input-delay "$(SMOKE_INPUT_DELAY)" \
 		--timeout "$(SMOKE_TIMEOUT)"
-# Thin wrapper: the smoke definition lives in instances/smoke-ppc64le.toml.
-smoke-ppc64le:
-	tools/a20 test smoke-ppc64le
-
 # Thin wrapper: the smoke definition lives in instances/smoke-abi-linux.toml.
 smoke-abi-linux:
 	tools/a20 test smoke-abi-linux
@@ -184,13 +180,17 @@ smoke-netfilter:
 # kernel/net/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
 # and no port forward can ever complete -- NAT would be exonerated of a failure
 # that is really the listener model.  Same knob smoke-net-accept uses.
-NET_NAT_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
+NET_NAT_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NETFILTER_REWRITE_IMPL=$(NETFILTER_REWRITE_IMPL) print-build-dir)
+NET_NAT_TRANSACTIONS := 16
+ifneq ($(NET_NAT_TRANSACTIONS),16)
+$(error smoke-netfilter-nat fixture is fixed at 16 transactions)
+endif
 smoke-netfilter-nat: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081
 smoke-netfilter-nat:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NET_HOSTFWD='hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081' dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NETFILTER_REWRITE_IMPL=$(NETFILTER_REWRITE_IMPL) NET_HOSTFWD='hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081' dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
-	log="$(SMOKE_LOG_DIR)/netfilter-nat-riscv64.log"; \
+	log="$(SMOKE_LOG_DIR)/netfilter-nat-riscv64-$(NETFILTER_REWRITE_IMPL).log"; \
 	status=0; probe=0; \
 	rm -f "$$log"; \
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'netnat_test\npoweroff\n'; } | \
@@ -204,31 +204,15 @@ smoke-netfilter-nat:
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 & \
 	qemu_pid=$$!; \
-	$(PYTHON) tools/netnat_host_probe.py 18081 || probe=$$?; \
+	$(PYTHON) tools/netnat_host_probe.py 18081 16 || probe=$$?; \
 	wait $$qemu_pid || status=$$?; \
-	if [ "$$probe" -ne 0 ]; then \
-		echo "smoke-netfilter-nat: FAIL -- the host never completed the port forward"; \
-		echo "  (tools/netnat_host_probe.py exit $$probe). Guest verdict, if any:"; \
-		grep -E 'NETNAT_TEST' "$$log" || echo "  (none: the guest never got that far)"; \
-		echo "  log saved to $$log"; \
-		exit 1; \
-	elif grep -q 'NETNAT_TEST: PASS' "$$log"; then \
-		echo "smoke-netfilter-nat: PASS dnat 18081 -> 10.0.2.15:18082"; \
-		echo "  log saved to $$log"; \
-	elif grep -q 'NETNAT_TEST: FAIL' "$$log"; then \
-		echo "smoke-netfilter-nat: FAIL -- the guest reported a failure:"; \
-		grep -E 'NETNAT_TEST' "$$log" | tail -n 5; \
-		echo "  log saved to $$log"; \
-		exit 1; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-netfilter-nat: timeout without verdict; tail of $$log:"; \
+	$(PYTHON) tools/netnat_result.py "$$log" --qemu-status "$$status" --probe-status "$$probe" --expected-transactions 16 || { \
+		echo "smoke-netfilter-nat: FAIL; evidence log: $$log"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
-	else \
-		echo "smoke-netfilter-nat: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	}; \
+	echo "smoke-netfilter-nat: PASS dnat 18081 -> 10.0.2.15:18082"; \
+	echo "  log saved to $$log"
 
 # conntrack capacity (LRU eviction) and idle-timeout reclamation.
 #
@@ -1046,9 +1030,8 @@ smoke-smp-lock-contention:
 # result.  The gate lives in tools/ext4_journal_gate.py because it is eight
 # boots plus four host-side fsck runs; inline shell here would be unreadable.
 #
-# ARCH selects the build directory as well as the QEMU machine, so this is the
-# same gate on every architecture the kernel boots under QEMU rather than one
-# that only proves x86_64.
+# ARCH selects the build directory as well as the QEMU machine, so this gate
+# exercises each architecture listed by tools/ext4_journal_gate.py.
 smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 	$(PYTHON) tools/ext4_journal_gate.py --arch "$(ARCH)" \
 		--build-dir "$(BUILD_DIR)" \

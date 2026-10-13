@@ -1,8 +1,12 @@
 # 多架构虚拟化平台总体设计
 
-状态：**设计提案，未实现**。日期：2026-10-13。检查基线：`85fa78d2` 加当前工作区修改。
+1.0 交付范围与验收统一见 [发布计划](../releases/v1.0.md) 的 V1-HYP。本设计的首批平台
+目标须完成，后文明确另立项的扩展仍保留其边界。最初编写时的“未实现”不代表所有内容
+仍缺失；逐项当前事实见 [实现状态](05-implementation-status.md)，不得以设计替代运行证据。
 
-本文定义 A20OS hypervisor 从单 guest 原型走向多架构、多实例平台的目标结构、接口边界和验收顺序。所有新增目录、配置字段、命令、接口和测试名都是拟议内容；当前可用命令仍以 [使用指南](03-usage.md) 和 [实例文档](../instances.md) 为准。本轮仅形成设计，不修改内核、ABI 或运行工具。
+状态：**目标设计，部分已实现，整体未验收**。最初设计日期：2026-10-13；原检查基线为 `85fa78d2` 加当时工作区修改。
+
+本文定义 A20OS hypervisor 从单 guest 原型走向多架构、多实例平台的目标结构、接口边界和验收顺序。设计中的目录、配置、接口和测试须逐项对照 [实现状态](05-implementation-status.md)；未落地部分仍为目标。当前可用命令以 [使用指南](03-usage.md) 和 [实例文档](../instances.md) 为准。最初设计阶段仅形成方案，后续已有实现与运行记录，不能再将全篇一概标为未实现。
 
 ## 1. 目标和使用场景
 
@@ -88,11 +92,11 @@ flowchart TB
 | x86_64 / VMX | Intel VMX 可用且固件允许 | VMXON/VMCS、EPT、VPID、MSR/CPUID、APIC、XSAVE、进入状态校验 | 主线后端 |
 | x86_64 / SVM | AMD SVM 可用且固件允许 | VMCB、NPT、ASID、intercept、MSR/CPUID、AVIC 可选 | 与 VMX 共用 x86 层，独立验收 |
 | loongarch64 | 具体 CPU 的虚拟化扩展和宿主权限 | guest CSR、GID、TLB、timer/IRQ、对应 KVM UAPI | 后续主线，先定 runner 和 CPU |
-| ppc64le | 具体 POWER 平台的 HV 或可用嵌套接口 | MMU 模式、特权状态、interrupt、firmware/hcall 平台模型 | 专项后端，不能沿用普通 pseries 启动即视为具备 HV |
+| ppc64le | 已退出 1.0；源码和平台研究仅供历史追溯 | 当前不安排后端实现 | 不属于活跃虚拟化目标 |
 | arm32 | 带 Virtualization Extensions 的 A-profile CPU，进入 Hyp 模式 | stage-2、GIC、banked registers、timer | Native 实验后端；现代 QEMU 的 32 位 Arm KVM host 路线已移除 |
 | riscv32 | 实际提供 H 的 CPU/模拟平台 | Sv32x4、64 位 GPA 表达、RV32 CSR 和寄存器接口 | 实验后端；QEMU/KVM 支持另立 profile 验证 |
 | armv7m | 当前 MCU 平台无本方案所需的虚拟化/MMU 环境 | 保留明确的 unavailable 原因 | 不提供硬件 hypervisor；可由开发机模拟为 guest |
-| loongarch32 | 当前仓库未建立硬件虚拟化条件与 runner | 保留探测/能力框架，先完成平台研究 | 不承诺硬件后端完成度；软件模拟需单独支持 |
+| loongarch32 | 已退出 1.0；仓库未建立硬件虚拟化条件与 runner | 当前不安排后端实现 | 不属于活跃虚拟化目标；软件模拟仅作历史研究 |
 
 以上“主线/实验”是工作排序，不是已支持声明。32 位宿主上的新 QEMU 可用性还受 QEMU 自身 host 支持范围限制，不能因为内核后端存在就承诺 QEMU 可用。跨 ISA 使用 TCG；同 ISA 的 32 位 guest on 64 位 host 也必须独立检查 CPU 与后端能力。
 

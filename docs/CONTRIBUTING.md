@@ -1,5 +1,10 @@
 # 贡献指南
 
+1.0 的范围、子系统完成定义和 Rust 迁移顺序见 [发布计划](releases/v1.0.md)，
+功能对照与性能要求见 [验收规范](releases/v1.0-validation.md)。新实现必须对应 V1 工作包，
+保留现有行为用例并补失败路径；不得靠缩小功能、禁用 SMP 或放宽性能阈值完成迁移。
+LoongArch32/PPC64LE 已退出 1.0，不再接受面向该版本的新增移植承诺。
+
 本仓库的补丁流程尽量简单直接。
 
 ## 1. fork 与分支
@@ -23,13 +28,14 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 
 ## 3. 通过测试门禁
 
-提交前至少运行以下门禁，详细说明见 [docs/testing-gates.md](testing-gates.md)：
+纯文档修改运行 `make check-doc-drift` 并核对变更链接；无需为措辞修改重跑完整 OS。
+代码修改按影响范围运行以下门禁及子系统用例，发布候选执行完整适用矩阵，详细说明见 [docs/testing-gates.md](testing-gates.md)：
 
 ```bash
 # 构建矩阵
 make check-build-matrix
 
-# 基础 bring-up smoke；timeout 可接受，不验证 syscall
+# 基础 bring-up smoke；必须正常关机，timeout 失败，不验证 syscall
 make smoke-riscv64
 
 # 广泛聚合门禁；包含构建和 QEMU runtime，可能耗时较长

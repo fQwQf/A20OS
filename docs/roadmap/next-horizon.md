@@ -1,6 +1,9 @@
-# 下一阶段生态纵深评估（2026-09 记录，2026-10 修订网络部分）
+# 生态纵深：历史评估与当前工程入口
 
-多数为多日级工程。标注「已落地」的部分给出实现事实与验证入口，其余给出成本与路径。
+2026-10-13 修订。原 2026-09 评估中的 NAT、可写 journal 和 ACPI 缺失结论已经过时，
+本页更新其去向，不再沿用未经复验的工期估计。当前工程子系统的完整交付要求见
+[1.0 计划](../releases/v1.0.md)，详细缺口见 [工程清单](a20os-improvement-todo.md)。
+下文早期测量保留历史含义，不证明当前性能；候选须执行 [功能/性能对照](../releases/v1.0-validation.md)。
 
 ## 0. 网络：入站 TCP 与可测量性（2026-10 修订）
 
@@ -37,43 +40,41 @@
 - 验证：`make smoke-netfilter`（`user/cmds/net/netfilter_test.c`）。除控制面
   外，断言匹配 drop 规则的 UDP 发送确实让 `out_dropped` 增长。实测
   `dropped=3 out_packets=3`，证明 hook 在真实数据面执行而非空过。
-- 仍缺：conntrack 与 NAT。二者需要跨包状态，是独立的一层，不在第一切片内。
-  在此之前，本过滤器只能做无状态丢弃，**不能**做端口转发或地址转换。
+- 后续已实现 IPv4 conntrack 与 NAT，旧稿“仍缺、不能转发/转换”的结论失效。
+  当前支持边界、回程与分片/ICMP 限制见 [conntrack/NAT](../net/conntrack-nat.md)。
+  完成现有网络子系统还需真实双向流量、耗尽/回收、错误路径与性能验收；不能仅凭首个
+  无状态过滤 smoke 宣布完成，也不能把未实现的网络目标直接删掉。
 
-## 2. 树内动态链接 libc
+## 2. Native 完整 libc 与动态链接
 
-- 现状：内核 ELF loader 支持 PT_INTERP（kernel/mm/elf.c
-  resolve_interp），能跑 Alpine 预编译动态 musl 程序；但树内
-  mlibc 只产 libc.a（tools/targets-mlibc.mk），全架构
-  `-static -no-pie` 写死。
-- 成本评估：工具链工程而非内核工程。最小切片：mlibc 增加
-  libc.so/ld.so 构建产物 + 一个动态链接的 hello 冒烟
-  （内核 PT_INTERP 路径已被 Alpine 包验证，风险低）。估计 1-2 天。
+Linux ABI 下 Alpine 动态程序和 Native 完整 libc 是不同验收范围。Native 的动态链接、
+线程、信号与 exec 继承按 [运行时状态](../native-abi/08-runtime-status.md) 和
+[启动协议](../native-abi/07-startup.md) 收口，纳入 V1-RUNTIME。最小 hello 只证明加载链路，
+不能代替完整运行时和真实应用；迁移期间同步验证既有 musl 生态不回退。
 
-## 3. ext4 可写 journal / xattr / ACL
+## 3. 文件系统 journal、持久化与元数据
 
-- 现状：`kernel/fs/diskfs/ext4_journal.c` 明确 fail-closed 只读回放
-  （"does not implement a writable journal"）；VFS 有 xattr 框架
-  （kernel/fs/xattr.c）但 diskfs 下零实现；无 ACL。
-- 成本评估：journal 写入是正确性敏感工程（崩溃一致性），建议先做
-  xattr 落盘（ext4 的 EA 块/inode 内联，1-2 天，可测试性好），
-  journal 写入单独立项（一周级，需要断电/崩溃注入测试基础设施）。
-- 前置已就位：块层现在有真实的设备 flush（见
-  [../security/hardening.md](../security/hardening.md) 的「存储持久性」），
-  因此崩溃注入测试有了一个可断言的落点；此前 `fsync()` 连设备都到不了，
-  断电测试无从判断成败。
-- ACL 依赖 xattr 先行。
+ext4 可写 journal 和 ordered 提交/回放已有实现及 `smoke-ext4-journal` 入口，旧稿“只读
+回放、写 journal 尚未立项”的结论失效。当前剩余特性、格式兼容与数据保护边界见
+[工程清单](a20os-improvement-todo.md) 和 [一致性模型](../fs/fs-consistency-model.md)。
+已开展的文件系统工作纳入 V1-FS，继续完成其详细目标、失败回滚与断电恢复；VFS 的 xattr
+接口存在不证明每个后端都已持久化，元数据校验也不等于文件内容校验。各项分别验收，
+不沿用旧稿的一两天/一周工期估计。
 
-## 4. 电源管理
+本页既有的 ext4 xattr 落盘与 ACL 开发目标继续保留：分别验证持久化、权限检查、
+复制/继承及重启后行为，先完成 xattr 存储契约再验收依赖它的 ACL，不能在改写状态时删项。
 
-- 现状：无 cpufreq/suspend/resume/CPU 热插拔/ACPI；QEMU 为主要
-  运行环境，电源管理收益主要在物理板（VisionFive2、LS2K1000）。
-- 成本评估：与板级支持深度绑定。最小切片：WFI idle 已有
-  （arch_cpu_relax/wfi 存在），可补 cpuidle 统计与 SBI suspend
-  （riscv64）。真机验证是瓶颈；没有 CI 真机门禁前不建议投入。
+## 4. 电源与板级能力
 
-## 排除项
+x86_64 已有 ACPI 接入，不能再笼统写“无 ACPI”；其真实固件、IRQ 和关机边界见
+[x86_64 平台](../platforms/x86_64-pc.md)。这不自动证明 cpufreq、系统 suspend/resume
+或 CPU 热插拔完成。已有板级工程按 V1-DELIVERY 逐板收口；新的电源管理候选先明确需求、
+硬件与验收再立项，不用历史评估给出当前未核实的能力或工期结论。
 
-- exFAT、btrfs 类 CoW 文件系统：无需求驱动，不立项。
+## 原评估中未立项或暂缓的扩展
+
+原评估列出以下候选边界；它们不取消其他文档中已经立项的工程要求。
+
+- 新增文件系统（原评估举 exFAT、btrfs 为例）：没有单独立项决定时不因本页自动加入 1.0。
 - KASLR：评估结论见 docs/security/hardening.md（需 PAGE_OFFSET
   运行时化前置重构，暂缓）。

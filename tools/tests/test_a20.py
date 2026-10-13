@@ -113,6 +113,52 @@ def _pump(proc, log: Path, stop) -> None:
                 return
 
 
+class TestRetiredArchitectures(unittest.TestCase):
+    def test_instance_validation_names_historical_reproduction_base(self) -> None:
+        cases = (("loongarch32", "nailoong"),
+                 ("ppc64le", "qemu-virt-ppc64le"))
+        for arch, board in cases:
+            with self.subTest(arch=arch):
+                inst = load(self.tmp, f'arch = "{arch}"\nboard = "{board}"\n')
+                errors = validate_instance(inst, REPO_ROOT)
+                self.assertTrue(any("retired from active builds" in e and
+                                    "v0.18 checkout" in e for e in errors), errors)
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="a20-retired-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_make_rejects_retired_arches_before_building(self) -> None:
+        for arch in ("loongarch32", "ppc64le"):
+            with self.subTest(arch=arch):
+                proc = subprocess.run(
+                    ["make", "-s", f"ARCH={arch}", "-n", "kernel-only"],
+                    cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("is retired from active builds", proc.stderr)
+                self.assertIn("v0.18 or earlier", proc.stderr)
+
+    def test_removed_arch_targets_cannot_silently_succeed(self) -> None:
+        for target in ("run-ppc64le", "debug-ppc64le", "smoke-ppc64le",
+                       "check-ppc64le-bringup", "check-loongarch32-bringup",
+                       "native-handle-test-ppc64le"):
+            with self.subTest(target=target):
+                proc = subprocess.run(
+                    ["make", "-s", "-n", target], cwd=REPO_ROOT,
+                    text=True, capture_output=True, check=False)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("No rule to make target", proc.stderr)
+
+    def test_retired_arch_is_not_an_ext4_smoke_cli_choice(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, "tools/ext4_journal_gate.py", "--arch", "ppc64le"],
+            cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("invalid choice: 'ppc64le'", proc.stderr)
+
+
 class TestDeriveMakeVars(unittest.TestCase):
     """The field -> make-variable contract documented in docs/instances.md.
 

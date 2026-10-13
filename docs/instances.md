@@ -1,5 +1,12 @@
 # 实例化构建与运行（instances/ 与 tools/a20）
 
+1.0 的 [平台决策](releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。
+当前 `instances/` 只登记活跃目标；旧 PPC64LE 清单归档在
+[`platforms/retired-instances/`](platforms/retired-instances/)，LoongArch32 的历史运行
+记录见平台文档。Makefile 和 `tools/a20` 都会拒绝这两个目标，并指向干净的 `v0.18`
+checkout 作为历史复现基线。功能与性能实例的证据要求见
+[1.0 验收](releases/v1.0-validation.md)。
+
 A20OS 的构建、运行与冒烟测试配置统一由实例清单声明：`instances/` 目录下的每个 TOML 文件描述一个完整的、可构建、可运行、可测试的系统实例（架构、板卡、ABI、内核选项、机器配置、根文件系统、网络、GUI、测试期望）。`tools/a20` 读取实例、做完整校验、推导出对应的 Makefile 变量，再调用 make 执行。Makefile 仍是唯一的构建引擎，实例层只负责"配置声明 + 变量推导"，两者通过 `make -n` 输出的 QEMU 命令行保持一致。
 
 设计要点：
@@ -18,6 +25,10 @@ tools/a20 show vf2-physical                # 这个实例支持什么、要多�
 tools/a20 trim qemu-riscv64               # 这个实例按什么剪裁计划构建（profile/能力/内存预算）
 tools/a20 run qemu-riscv64                # 构建并在 QEMU 启动（文本模式）
 tools/a20 run xfce-x86_64                 # 图形桌面实例（apk world，含 virtio-gpu + 声卡）
+tools/a20 run xfce-aarch64                # aarch64 桌面（SMP 竞态未决，暂为单 CPU）
+tools/a20 run xfce-riscv64                # riscv64 桌面（xfce-loongarch64 同理）
+tools/a20 run minecraft-x86_64 -- GUI_MEDIA=build/minecraft/1.21.11  # Minecraft 桌面
+tools/a20 run minecraft-aarch64 -- GUI_MEDIA=build/minecraft/1.21.11-aarch64  # 其他架构同理
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
 tools/a20 test smoke-riscv64              # 跑一个冒烟测试实例
 tools/a20 flash stm32f103-xuanwu          # 构建固件并经 OpenOCD 烧录开发板
@@ -221,7 +232,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 - `smp > 1` 只允许在已验证的 QEMU virt 平台（riscv64/aarch64/loongarch64/x86_64），否则必须显式 `allow_unverified_smp = true`。
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`swap`、`ramfs_user` 有架构白名单（出处是 `components/trim.toml` 的 capability 矩阵；此前 Makefile 只会在构建期把这些请求静默 force-off，现在 `a20 check` 直接拒绝）；`kernel.profile` 必须与架构一致——`mcu` 只用于 MCU 级架构，而 MCU 级架构上的其他 profile 会被 Makefile 强制成 `mcu`，写错都会在编译前被拒绝。`driver_deployment` 是取值枚举（`generic` | `embedded`）。
-- `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
+- `run`/`debug`/`test` 仅支持活跃且有对应运行路径的架构；armv7m 走 `tools/stm32.mk`。LoongArch32/PPC64LE 在当前注册表中会被明确拒绝；归档实例只用于历史追溯。
 
 ### 互斥组合
 
@@ -587,7 +598,7 @@ bringup = true               # ……以及 BRINGUP=1（kernel-only）
 sources = [ "kernel/mcu/main.c", "kernel/core/panic.c", … ]  # 策展源码白名单
 
 [capability.swap]            # 能力矩阵：架构白名单 + 可选 board 排除
-arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "ppc64le"]
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32"]
 
 [arch-cppflags]              # 每架构无条件 -D 特性宏
 x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
@@ -643,6 +654,8 @@ world_size_mb = 4096
 ```
 
 `tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从 Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false` 可做纯本地仓库组合。x86_64 变体 `xfce-x86_64` 使用同一个 `xfce` world（Wayland/labwc），并在带 `/dev/kvm` 的宿主机上自动启用 KVM 加速。注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted 架构。
+
+`run` 本身就做全量构建（内核、软件包、world 镜像），所以**不需要**先跑 `tools/a20 build`；`build` 只是"只构建不启动"的快捷方式。world 镜像是无日志 ext4，而 QEMU 结束时是被直接杀掉的，所以下一次看镜像永远是"脏"的——这是预期状态，不是上一轮的遗产：`mkrootfs.py` 每轮都会从 `packages/world/xfce.world` 重新铺满整块盘（实测 522 个 apk 全部 Installing），前一轮写进去的数据不会带进下一轮。也正因如此，`a20 run` 对 world 实例**跳过启动前的 fsck**（`_gate_qemu(..., check_image=inst.rootfs.world is None)`）：既查不出真问题，失败信息又会让人误以为得先 `build`。
 
 ## 与旧 make 目标的对照
 

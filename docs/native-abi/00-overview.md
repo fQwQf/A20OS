@@ -1,17 +1,21 @@
 # A20 Native ABI 设计
 
-A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对，Native 入口计数及新增执行查询更新至 2026-10-12；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
+外部 Native ABI 尚未正式冻结。1.0 按 [发布计划](../releases/v1.0.md) 完成语义、运行时
+和 C/Rust 绑定后冻结 v1；内部 Rust 类型与函数不承诺稳定二进制布局。已有正确行为须通过
+[新旧实现对照](../releases/v1.0-validation.md)，有意变更须记录版本、迁移方式并同步调用者。
+
+A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对，Native 入口计数更新至 2026-10-13；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
 
 ## 设计定位
 
 > 注：`user/archive/` 已于 2026-10 从仓库删除，下文与表格中的 archive 相关内容均为历史记录。
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 160 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 170 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
 
 长期布局：
 
 ```text
 kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
-kernel/abi/native/   A20OS native ABI（160 个登记入口，部分功能仍有边界）
+kernel/abi/native/   A20OS native ABI（170 个登记入口，部分功能仍有边界）
 user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（当前仅 riscv64 构建/运行入口）
 ```
 

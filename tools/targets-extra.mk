@@ -51,7 +51,7 @@ extra-fetch-sources:
 # tools/targets-base.mk, and .PHONY suppresses pattern-rule lookup, so a stem
 # pattern here would silently do nothing.  The arch comes out of $@ instead.
 run-riscv64-extra run-loongarch64-extra run-aarch64-extra run-arm64-extra \
-run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra:
+run-x86_64-extra run-arm32-extra run-riscv32-extra:
 	@arch="$@"; arch="$${arch#run-}"; arch="$${arch%-extra}"; \
 	echo "[extra] '$@' was removed: it booted a disk compiled from vendored source." >&2; \
 	echo "[extra] Use the apk world for the same software:" >&2; \

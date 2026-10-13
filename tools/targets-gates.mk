@@ -318,13 +318,13 @@ check:
 # The SNAT/MASQUERADE half of netfilter has no end-to-end gate and cannot have
 # one on QEMU's user-mode network: there is no peer behind the guest's own NAT to
 # send a reply.  So the address rewrite, the port rewrite and the reply-direction
-# match are asserted here, on the host, against the shipped
-# kernel/net/netfilter_rewrite.c.  In `make check` because it takes about a
-# second and needs nothing the other gates do not already need.
+# match are asserted here, on the host, against the shipped C reference or the
+# selected Rust implementation through its production C ABI shim. In `make
+# check` because it takes about a second and needs no target runtime.
 .PHONY: test-nat-rewrite
 test-nat-rewrite:
-	@sh tools/test-nat-rewrite-host.sh
-	@echo "test-nat-rewrite: PASS"
+	@sh tools/test-nat-rewrite-host.sh $(NETFILTER_REWRITE_IMPL)
+	@echo "test-nat-rewrite ($(NETFILTER_REWRITE_IMPL)): PASS"
 
 # ----------------------------------------------------------------
 # clang-format drift gate (docs/CONTRIBUTING.md 4.2)

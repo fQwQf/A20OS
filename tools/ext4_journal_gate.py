@@ -87,15 +87,6 @@ QEMU = {
         "-device", "virtio-blk-pci,drive=xe",
         "-kernel", k,
     ] + a,
-    "ppc64le": lambda k, f, e, a: [
-        "qemu-system-ppc64le", "-machine", "pseries", "-m", "1G", "-nographic",
-        "-smp", "1", "-no-reboot",
-        "-drive", f"file={f},if=none,format=raw,id=xf",
-        "-device", "virtio-blk-pci,drive=xf",
-        "-drive", f"file={e},if=none,format=raw,id=xe",
-        "-device", "virtio-blk-pci,drive=xe",
-        "-kernel", k,
-    ] + a,
     "loongarch64": lambda k, f, e, a: [
         "qemu-system-loongarch64", "-machine", "virt", "-m", "1G", "-nographic",
         "-smp", "1", "-no-reboot",

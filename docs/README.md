@@ -1,10 +1,14 @@
 # A20OS 文档首页
 
+1.0 开发与范围决策以 [1.0 计划](releases/v1.0.md) 为入口：Rust 主导核心重写、现有
+开发中子系统完成、LoongArch32/PPC64LE 退出支持，以及 [功能与性能验收](releases/v1.0-validation.md)。
+这些是发布要求，不能引用为当前已实现能力；早期阶段边界不豁免 1.0 验收。
+
 五分钟上手：先读 [OS-Design.md](OS-Design.md) 把握整体架构，再跑 `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` 把开发镜像在 QEMU 里启动起来。根目录 `make all` 是双架构发布构建，不是这个开发流程的缩写。
 
 ---
 
-这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务与文件系统宿主机制（uxfs/ufsd）。Linux ABI（`syscall_table.def` 登记 366 个 syscall）兼容现有 musl 生态，Native ABI（`kernel/abi/native/syscall_table.def` 登记 153 个 syscall）提供面向能力、句柄与事件的新接口；登记数量表示表中入口数，不等同于每项语义均完整实现。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务与文件系统宿主机制（uxfs/ufsd）。Linux ABI兼容现有 musl 生态，Native ABI提供面向能力、句柄与事件的新接口；登记入口以各自 `syscall_table.def` 为准，数量不等同于语义完整性。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 ## 文档范围与权威性
 
@@ -33,6 +37,11 @@
 - [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
+- [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、Rust 重写与接口冻结
+- [releases/v1.0-validation.md](releases/v1.0-validation.md)：固定 C 基线、行为对照、性能不回退与发布阻塞
+- [releases/v1.0-comparison.md](releases/v1.0-comparison.md)：成对比较 runner 的 JSON 协议、统计方法和证据规则
+- [releases/v1.0-progress.md](releases/v1.0-progress.md)：12 个 V1 工作包的首波状态与下一步验证交付（非完整 TODO 台账）
+- [validation-main-integration-2026-10-13.md](validation-main-integration-2026-10-13.md)：main 集成修复与实际运行范围
 - [validation-docs-completion-2026-10-13.md](validation-docs-completion-2026-10-13.md)：当前文档完善分支的实际构建与运行结果
 - [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮开发中断恢复、分支集成、验证结果与剩余边界
 - [releases/v0.17.md](releases/v0.17.md)：v0.17 候选版本范围、构建修正与发布检查
@@ -65,7 +74,7 @@
 - [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
-- [platforms/loongarch32.md](platforms/loongarch32.md)：LoongArch32（LA32R / NaiLoong Core）移植与验证
+- [platforms/loongarch32.md](platforms/loongarch32.md)、[platforms/ppc64le.md](platforms/ppc64le.md)：已退出 1.0 支持的历史移植资料
 - [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
 - [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈
 
@@ -107,7 +116,7 @@
 
 ### Linux ABI 兼容层
 
-- `kernel/abi/linux/syscall_coverage.md`：366 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
+- `kernel/abi/linux/syscall_coverage.md`：Linux syscall 的逐项兼容等级与证据（含四主线架构编号覆盖说明）
 - `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
 - [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
 
@@ -119,7 +128,7 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
 - [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
-- [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计——共享核心、架构后端、多实例与 QEMU/KVM 路线
+- [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计提案（未实现）——多架构后端、多 VM/vCPU、`tools/a20` 交互实例、用户态设备模型与 QEMU/KVM 兼容路线，以及分阶段验收标准
 - [hypervisor/05-implementation-status.md](hypervisor/05-implementation-status.md)：当前代码、静态验证证据和未完成项
 - [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)：命名 QEMU 宿主实例、磁盘隔离和交互控制台（待运行验证）
 - [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：双 guest 管理、控制协议、重连和待运行门禁

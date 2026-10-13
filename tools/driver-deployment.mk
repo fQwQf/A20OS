@@ -8,7 +8,7 @@
 DEFAULT_DRIVER_DEPLOYMENT := generic
 # MCU targets and platforms without a supported loadable-driver ELF format
 # statically link the complete driver set.
-ifeq ($(filter $(ARCH),armv7m arm32 riscv32 ppc64le),$(ARCH))
+ifeq ($(filter $(ARCH),armv7m arm32 riscv32),$(ARCH))
 DEFAULT_DRIVER_DEPLOYMENT := embedded
 endif
 

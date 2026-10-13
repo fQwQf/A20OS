@@ -1,5 +1,10 @@
 # A20OS 改进 TODO
 
+1.0 的总范围与完成标准以 [发布计划](../releases/v1.0.md) 为准：本页不是全部工作包，
+集群、虚拟化、运行时、桌面等已推进子系统还须按各自设计完成。Rust 重写与这些缺口一起
+收口；既有行为和性能按 [对照规范](../releases/v1.0-validation.md) 验收。
+LoongArch32/PPC64LE 已退出 1.0；其源码、实例、构建和 CI 清理归入 V1-DELIVERY。
+
 只记录**尚未完成**的工程瓶颈与剩余工作（最后核实：2026-10，含 `wt/practical-readiness`
 的一次全表复核）。条目在落地时即从本文删除，不保留已完成的 checkbox；实现细节与验证
 入口留在源码注释、提交历史和事实文档
@@ -50,8 +55,12 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 ## P0：混合内核改造（Native ABI 本体化）
 
 改造定位、边界原则与阶段验收标准见 [../hybrid-kernel/03-refactor-plan.md](../hybrid-kernel/03-refactor-plan.md)。
-阶段一（核心原语契约化）、阶段二（Native ABI SMP 正确性收口）、阶段四（服务接口
-IDL 化）已落地，已从本文删除。
+阶段一、二已有阶段性实现与运行记录；IDL 常量/消息头生成已接线，但动态版本协商和
+完整双端绑定仍需完成。早期里程碑通过不等于整个混合内核已达到 1.0 完成条件。
+
+- [ ] 完成服务协议与 C/Rust 绑定
+  - 在已有 IDL 基础上明确布局、长度、版本/未知位与协商语义，生成双端绑定并验证旧/新端互操作。
+  - 固定消息头与常量生成不能替代该验收；范围见 [IDL 与人格层](../hybrid-kernel/05-idl-and-personality.md)。
 
 - [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离
   - IOMMU/DMA 真隔离子项已达成（2026-09-24）：RISC-V IOMMU per-device domain 动态
@@ -73,18 +82,16 @@ IDL 化）已落地，已从本文删除。
   - 已完成起步（作为基线保留在此）：`a20_personality.h` 提供 pipe-shaped
     channel/EventQ facade，`smoke-native-personality` 验证写入、MESSAGE_READY、
     读取和关闭。
-  - 仍缺：fd 表、byte-stream accumulator、mmap/VMO、socket 等关键子集在直通实现
-    与人格层实现下同通过，语义 diff 与性能对照归档。
+  - pipe 的跨消息字节流、部分读与 pending-ready 已有专项实现；仍需 fd 表、mmap/VMO、
+    socket、epoll 等关键子集的完整语义 diff 与性能对照，不能由 pipe 样板外推。
   - 完成条件：同上。
 
 ## P0：并发与 SMP 就绪
 
-- [ ] FUTEX_WAKE_OP 原子更新与双桶唤醒事务的运行验收
-  - 已补 COW 后持锁映射复查、CAS、有符号参数与桶地址排序；全部目标在
-    同次持锁事务中摘除，锁外分批唤醒。分配失败在修改用户字之前返回。
-  - 待执行双架构 `smoke-futex-stress*-smp4`：并发 syscall/用户态原子累加、
-    私有页隔离、负数参数/比较、同桶 70 等待者批次与错误路径。
-  - 本轮只有单文件编译；原覆盖表的 futex `full` 标签不能替代新增断言的运行结果。
+FUTEX_WAKE_OP 的双架构单核/四核运行已有
+[分支记录](../validation-docs-completion-2026-10-13.md) 和
+[main 集成记录](../validation-main-integration-2026-10-13.md)，移除“仅编译、尚未运行”的旧条目。
+相关原子性、COW 与批次唤醒断言继续作为 Rust 迁移及 1.0 候选回归，不由此宣称所有 futex 交错已证明。
 
 - [ ] 补锁拆分的 B1 基线与竞争复测
   - `park_lock` 已通过静态汇总 sink 接入 `/proc/a20/lock_contention`，包含调用点
@@ -161,7 +168,7 @@ virtio-pci 与 e1000e 都把表位置写在后者里。BAR 号一律从能力读
       `arch_msix_vector_setup()` / `arch_irq_msix_cpu_count()` 目前只有
       x86_64 有实现，其余架构返回失败（`arch_irq_msix_cpu_count()` 返回 1，只有
       boot CPU 合法），驱动干净地退回 INTx/轮询；riscv64/aarch64
-      的 GIC、loongarch64 的 EIOINTC、ppc64le 的 MPIC 都没有接线。
+      的目标中断控制器与 loongarch64 的 EIOINTC 仍需接线；PPC64LE 已退出 1.0。
 - [ ] e1000e 的 MSI-X 只验证到表被解析并 arm。门禁里网卡收不到流量，两个向量没有
       真实投递；真实投递的那一路是 virtio-blk。见
       [../testing-gates.md](../testing-gates.md) "MSI-X 消息中断"。
@@ -212,21 +219,12 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
 
 ## P2：仓库卫生与依赖边界
 
-- [ ] 跨架构 `-Werror` 复核
-  - 当前证据（2026-10-04 复核，`check-kernel-build-all` 中可在本机执行的部分）：riscv64、
-    loongarch64、aarch64、x86_64、riscv32、ppc64le 以及 VisionFive2 / LS2K1000 板级
-    `kernel-only` 全部零警告通过。
-  - riscv32 原有的 11 处 `-Wint-to-pointer-cast`（`kernel/ipc/kexec.c`、
-    `kernel/syscall/trace.c`、`kernel/abi/linux/sys_proc.c`、
-    `kernel/abi/native/sys_core.c`、`kernel/abi/native/sys_native_fs.c`、
-    `kernel/abi/native/sys_native_mm.c`）已全部改经 `uintptr_t` 中转，
-    `kernel/proc/proc.c` 的 `proc_mmap` 区间判定也已改用 `(long)`。
-    **实测 riscv32 `kernel-only` 零警告通过（2026-10-04）**，本项完成。
-  - 仍缺：
-    - arm32、loongarch32、armv7m 在当前主机缺交叉工具链，未复核。
-      arm32 与 loongarch32 由 CI 覆盖（arm32 工具链在镜像里，loongarch32 需从源码
-      构建 cloudspurs 工具链），armv7m 由 STM32 目标覆盖。
-  - 完成条件：在有工具链的主机复核 arm32 / loongarch32 / armv7m。
+- [ ] 保留平台的发布配置与工具链复核
+  - [main 集成记录](../validation-main-integration-2026-10-13.md) 已记录 x86_64、LoongArch64、
+    RISC-V32 等内核构建；这些是指定工作区的构建证据，不是完整运行或所有板级零警告证明。
+  - 在候选工具链上复核四条 64 位主线及保留的 ARM32/RISC-V32/ARMv7-M 范围，记录
+    配置、警告策略和产物；缺工具链或实板仍列待验收。
+  - LoongArch32/PPC64LE 不再作为待补支持项，转为 V1-DELIVERY 的活跃配置清理。
 
 ## 验证环境说明
 
@@ -234,7 +232,7 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
   的工具缺失状态。
 - 本文按 2026-09 源码核对。文中的验证记录均为历史记录，PASS 只表示它在标注的日期
   与配置下通过，引用为当前结论前必须在当前提交上重新运行。
-- Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、
+- Proc/Sched 的当前聚合门禁是 `make check-doc-test-gates`，包含构建与 QEMU 运行；双架构 debug/release、
   1 核/8 核运行矩阵是 `make check-proc-step8-local`。
 - 需要完整双架构运行矩阵时运行 `make check-proc-step8`，它聚合 RISC-V64 与
   LoongArch64 的 debug/release、单核/八核压力矩阵。

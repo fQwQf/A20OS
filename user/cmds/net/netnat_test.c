@@ -48,12 +48,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 
 /* Must match the hostfwd rule in tools/targets-smoke.mk:smoke-netfilter-nat. */
 #define FWD_PORT 18081
 #define LISTEN_PORT 18082
+#define NAT_BENCH_TRANSACTIONS 16
 
 #define GUEST_IP "10.0.2.15"
 #define GATEWAY_IP "10.0.2.2"
@@ -68,6 +71,13 @@
             return 1;                                                          \
         }                                                                      \
     } while (0)
+
+static uint64_t monotonic_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static int nf_read(char *buf, size_t bufsz) {
     int fd = open(NF_PATH, O_RDONLY);
@@ -214,7 +224,7 @@ int main(void) {
     la.sin_port = htons(LISTEN_PORT);
     la.sin_addr.s_addr = inet_addr(GUEST_IP);
     CHK(bind(lfd, (struct sockaddr *)&la, sizeof(la)) == 0, "bind listener");
-    CHK(listen(lfd, 4) == 0, "listen");
+    CHK(listen(lfd, NAT_BENCH_TRANSACTIONS) == 0, "listen");
     printf("NETNAT_TEST: listening on %s:%d, forwarding %d\n", GUEST_IP,
            LISTEN_PORT, FWD_PORT);
 
@@ -253,16 +263,43 @@ int main(void) {
         return 1;
     }
 
-    int cfd = accept(lfd, NULL, NULL);
-    CHK(cfd >= 0, "accept the DNAT'd connection");
-
-    ssize_t w = write(cfd, "A", 1);
-    CHK(w == 1, "write the echo byte");
-    char rb = 0;
-    ssize_t r = read(cfd, &rb, 1);
-    CHK(r == 1 && rb == 'A', "the byte came back through the reverse rewrite");
-    close(cfd);
+    uint64_t started_ns = monotonic_ns();
+    CHK(started_ns != 0, "read the guest monotonic clock before the workload");
+    uint32_t payload_hash = 2166136261u;
+    unsigned completed = 0;
+    unsigned errors = 0;
+    for (unsigned i = 0; i < NAT_BENCH_TRANSACTIONS; i++) {
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd < 0) {
+            errors++;
+            break;
+        }
+        char request = 0;
+        ssize_t r = read(cfd, &request, 1);
+        if (r != 1 || request != 'A') {
+            errors++;
+            close(cfd);
+            break;
+        }
+        ssize_t w = write(cfd, &request, 1);
+        if (w != 1) {
+            errors++;
+            close(cfd);
+            break;
+        }
+        payload_hash = (payload_hash ^ (uint8_t)request) * 16777619u;
+        payload_hash = (payload_hash ^ (uint8_t)request) * 16777619u;
+        completed++;
+        close(cfd);
+    }
+    uint64_t finished_ns = monotonic_ns();
+    CHK(finished_ns >= started_ns && finished_ns != 0,
+        "read the guest monotonic clock after the workload");
+    uint64_t elapsed_ns = finished_ns - started_ns;
     close(lfd);
+    CHK(completed == NAT_BENCH_TRANSACTIONS && errors == 0,
+        "complete every host-forwarded echo transaction");
+    CHK(elapsed_ns > 0, "measure a positive guest workload duration");
 
     /* 5. the binding was recorded, not just applied. */
     CHK(nf_read(buf, sizeof(buf)) > 0, "read after the forward");
@@ -272,7 +309,12 @@ int main(void) {
         "the forwarded flow has a conntrack entry with a state");
     CHK(nf_stat(buf, "ct_tracked") >= 1, "the table is not empty");
 
-    printf("NETNAT_TEST: PASS dnat %d -> %s:%d\n", FWD_PORT, GUEST_IP,
-           LISTEN_PORT);
+    printf("NETNAT_TEST: PASS dnat %d -> %s:%d completed=%u\n", FWD_PORT,
+           GUEST_IP, LISTEN_PORT, completed);
+    printf("A20_COMPARE_JSON: {\"schema\":1,\"case\":\"nat-rewrite/dnat-tcp-echo-v1\",\"contract\":{\"completed\":%u,\"errors\":%u,\"payload_hash_fnv1a32\":%u,\"forward_port\":%d,\"listen_port\":%d,\"nat_action\":\"dnat\"},\"metrics\":{\"elapsed_ns\":%llu,\"ns_per_transaction\":%.3f,\"transactions_per_second\":%.3f}}\n",
+           completed, errors, payload_hash, FWD_PORT, LISTEN_PORT,
+           (unsigned long long)elapsed_ns,
+           (double)elapsed_ns / (double)completed,
+           (double)completed * 1000000000.0 / (double)elapsed_ns);
     return 0;
 }

@@ -139,7 +139,7 @@ jobs:
 
   # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
   # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
-  # 之后悄悄落后——arm32、riscv32、ppc64le 长期没进 CI 就是这么来的。
+  # 之后悄悄落后；当前由 Makefile 的活动架构矩阵提供唯一列表。
   # strategy.matrix 必须在矩阵 job 的任何 step 之前拿到列表，所以用与
   # buildenv-image 同样的独立 resolver job 形状。
   ci-kernel-arches:
@@ -267,10 +267,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # BUILD_MATRIX_GATE_CONTRACT 的 CI 一半：每个"CI 装得了工具链"的
-  # hosted 架构都跑一次内核 bring-up 构建门禁。此前 CI 只构建
-  # riscv64/x86_64/aarch64/loongarch64 四个，riscv32 与 ppc64le 从未构建，
-  # arm32 的构建断裂因此长期无人看见。
+  # BUILD_MATRIX_GATE_CONTRACT 的 CI 一半：每个当前支持的 hosted 架构都跑一次
+  # 内核 bring-up 构建门禁。RISC-V32、ARM32 均保留在矩阵；LoongArch32/PPC64LE
+  # 按 1.0 平台决策退出活跃矩阵，历史源码与验证记录仍保留。
   #
   # 与 build 分开是有原因的，不是重复：build 要产出发布打包产物（apk 仓库 +
   # world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前构建不过

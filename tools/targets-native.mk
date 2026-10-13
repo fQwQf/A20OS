@@ -6,14 +6,14 @@ A20_SERVICES_IDL_GEN := tools/a20idl.py
 A20_SERVICES_IDL_HDR := user/svc/a20_services_idl.h
 A20_IDL_PYTHON      ?= $(PYTHON)
 
-.PHONY: native-mm-arch native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-ppc64le native-mm-all \
-	native-signal-arch native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-ppc64le native-signal-all \
-	native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-ppc64le native-futex-all \
-	native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-ppc64le native-debug-test-all \
-	native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-ppc64le native-ext-test-all \
-	native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-ppc64le native-ipc-all \
-	native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all \
-	native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-ppc64le native-cluster-all
+.PHONY: native-mm-arch native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-all \
+	native-signal-arch native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-all \
+	native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-all \
+	native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-all \
+	native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-all \
+	native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-all \
+	native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-all \
+	native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-all
 
 $(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
 	@mkdir -p $(dir $@)
@@ -124,12 +124,9 @@ native-handle-test-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-handle-test-arch
 native-handle-test-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-handle-test-arch
-native-handle-test-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-handle-test-arch
-
 native-handle-test: $(DEFAULT_NATIVE_HANDLE_TARGETS)
 
-native-handle-test-all: native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le
+native-handle-test-all: native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32
 
 define NATIVE_LIBC_RECIPE
 @mkdir -p $(dir $(4))
@@ -165,12 +162,9 @@ native-libc-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-libc-arch
 native-libc-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-libc-arch
-native-libc-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-libc-arch
-
 native-libc: $(DEFAULT_NATIVE_LIBC_TARGETS)
 
-native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le
+native-libc-all: native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32
 
 native-programs: $(NATIVE_OUTPUTS)
 
@@ -208,10 +202,7 @@ native-futex-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-futex-arch
 native-futex-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-futex-arch
-native-futex-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-futex-arch
-
-native-futex-all: native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-ppc64le
+native-futex-all: native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32
 
 define NATIVE_DEEPEN_RECIPE
 @mkdir -p $(dir $(4))
@@ -281,10 +272,7 @@ native-ext-test-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-ext-test-arch
 native-ext-test-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-ext-test-arch
-native-ext-test-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-ext-test-arch
-
-native-ext-test-all: native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-ppc64le
+native-ext-test-all: native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32
 
 native-debug-test-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-debug-test-arch
@@ -298,10 +286,7 @@ native-debug-test-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-debug-test-arch
 native-debug-test-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-debug-test-arch
-native-debug-test-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-debug-test-arch
-
-native-debug-test-all: native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-ppc64le
+native-debug-test-all: native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32
 
 define NATIVE_MM_RECIPE
 @mkdir -p $(dir $(4))
@@ -336,10 +321,7 @@ native-mm-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-mm-arch
 native-mm-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-mm-arch
-native-mm-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-mm-arch
-
-native-mm-all: native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-ppc64le
+native-mm-all: native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32
 
 define NATIVE_SIGNAL_RECIPE
 @mkdir -p $(dir $(4))
@@ -374,10 +356,7 @@ native-signal-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-signal-arch
 native-signal-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-signal-arch
-native-signal-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-signal-arch
-
-native-signal-all: native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-ppc64le
+native-signal-all: native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32
 
 define NATIVE_IPC_RECIPE
 @mkdir -p $(dir $(4))
@@ -414,10 +393,7 @@ native-ipc-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-ipc-arch
 native-ipc-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-ipc-arch
-native-ipc-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-ipc-arch
-
-native-ipc-all: native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-ppc64le
+native-ipc-all: native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32
 
 define NATIVE_CONTRACT_RECIPE
 @mkdir -p $(dir $(4))
@@ -454,10 +430,7 @@ native-contract-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-contract-arch
 native-contract-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-contract-arch
-native-contract-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-contract-arch
-
-native-contract-all: native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le
+native-contract-all: native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32
 
 # Cluster ABI contract (docs/cluster/01-abi.md, stage W0). Same shape as the
 # contract recipe above: freestanding, no libc, boots as a native program.
@@ -528,10 +501,7 @@ native-cluster-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-cluster-arch
 native-cluster-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-cluster-arch
-native-cluster-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-cluster-arch
-
-native-cluster-all: native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32 native-cluster-ppc64le
+native-cluster-all: native-cluster-rv native-cluster-la native-cluster-aarch64 native-cluster-x86_64 native-cluster-arm32 native-cluster-rv32
 
 define NATIVE_SVC_RECIPE
 @mkdir -p $(dir $(5))
@@ -686,10 +656,7 @@ native-chess-arm32:
 	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-chess-arch
 native-chess-rv32:
 	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-chess-arch
-native-chess-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-chess-arch
-
-native-chess-all: native-chess-rv native-chess-la native-chess-aarch64 native-chess-x86_64 native-chess-arm32 native-chess-rv32 native-chess-ppc64le
+native-chess-all: native-chess-rv native-chess-la native-chess-aarch64 native-chess-x86_64 native-chess-arm32 native-chess-rv32
 
 $(NATIVE_CLUSTER_SUPERVISOR_BIN): user/svc/cluster_supervisor.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/cluster_supervisor.c,$@)

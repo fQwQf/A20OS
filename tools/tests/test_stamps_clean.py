@@ -275,7 +275,7 @@ class UserBuildLockTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("check-user-build-stamp: $(USER_BUILD_STAMP)", targets)
         for arch in ("riscv64", "loongarch64", "aarch64", "x86_64",
-                     "arm32", "riscv32", "ppc64le"):
+                     "arm32", "riscv32"):
             marker = f"check-{arch}-user:\n"
             self.assertIn(marker, targets)
             recipe = targets.split(marker, 1)[1].split("\n\n", 1)[0]
