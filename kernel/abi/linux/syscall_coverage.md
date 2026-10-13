@@ -492,3 +492,11 @@ Every former explicit `-ENOSYS` placeholder in `syscall_table.def` is now implem
 | `hyp_vcpu_destroy` | 915 | implemented, unverified | 显式归还 vCPU slot 引用 |
 | `hyp_console` | 916 | implemented, unverified | 每 VM 控制台配置/写入/读取，单次至多 256 字节 |
 | `hyp_vm_set_ram` | 917 | implemented, unverified | 在首次分配前设置 RAM 窗口 |
+
+后续共享核心接口（仅静态检查，未运行）：
+
+| syscall | 编号 | 状态 | 说明 |
+|---|---:|---|---|
+| `hyp_vcpu_control` | 918 | implemented, unverified | kick/pause/resume/stop，所属 CPU 处理 |
+| `hyp_vcpu_irq` | 919 | implemented, unverified | software/timer/external pending IRQ 队列 |
+| `hyp_stats` | 920 | implemented, unverified | VM/vCPU/mapping/table 计数与空闲页 |

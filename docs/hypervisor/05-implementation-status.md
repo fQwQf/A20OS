@@ -15,9 +15,9 @@
 
 ## 多实例边界
 
-代码支持创建多个 VM、各自持有状态和控制台，并为托管模式提供串行时间片运行路径。**仍保留全局一个正在执行的 vCPU 限制**，没有宣称多物理 CPU 并行或 guest SMP 可用。传统 `hypvm` 的直通 UART 模式不适合作为多个 VM 的控制台管理方式。
+代码支持创建多个 VM、各自持有状态和控制台，并为托管模式提供串行时间片运行路径。已改为 CPU-local 激活；不同 VM 可以占用不同宿主 CPU，但尚未运行验收。**同一 VM 仍只允许一个正在执行的 vCPU**，不能宣称 guest SMP 可用。传统 `hypvm` 的直通 UART 模式不适合作为多个 VM 的控制台管理方式。
 
-`tools/a20` 的多个命名 QEMU 宿主实例与 A20 内核中的多个 guest 是两个层次。宿主工具用法见 [06-host-runtime.md](06-host-runtime.md)。目前没有 `a20-vmd` 或 `tools/a20 vm start --host` 管理协议。
+`tools/a20` 的多个命名 QEMU 宿主实例与 A20 内核中的多个 guest 是两个层次。宿主工具用法见 [06-host-runtime.md](06-host-runtime.md)。现已接入 `a20-vmd` 和 `tools/a20 vm start --host`，管理通道使用专用 vport0，源码和协议见 [07-guest-supervisor.md](07-guest-supervisor.md)，运行证据仍待授权。
 
 ## 验证证据
 
@@ -34,12 +34,34 @@
 ## 仍需实现
 
 1. Arm EL2、Intel VMX、AMD SVM、LoongArch LV、POWER HV 等实际后端；当前只有 RISC-V 后端。现有其它架构 stub 仍返回不支持。
-2. vCPU 的跨 CPU 调度、kick/stop、同步远程 TLB 回收、VMID 分配器、多 vCPU 中断与时间模型。
+2. 完成已加入的 CPU-local 激活、kick/pause/stop、中断注入与设备复制的运行验证，并实现同步远程 TLB 回收、VMID 分配器、同一 VM 多 vCPU、SBI HSM/IPI 和完整 IRQ controller。
 3. 正式 memslot/VMO、HVA/mm 失效通知、共享页面借用账本、stage-2/device 内存与 CPU 完整配额。
 4. `/dev/kvm` device/VM/vCPU fd、ioctl、mmap run page、寄存器 ABI、MMIO/PIO exit/completion，以及固定 QEMU profile 的 Linux ABI 依赖审计。不能报告 KVM API 12 或 QEMU/KVM 可用。
-5. 用户态设备模型、virtio、guest 进程监督和独立控制传输协议。
+5. 用户态设备模型、virtio，以及已加入的 guest 监督/独立控制协议的故障与重连验证。
 6. 授权后做全量构建，以及重复启动、双 VM 控制台隔离、长时间运行、关闭竞态、资源回收、FP/CSR 隔离和真实硬件验证。
 
 ## 授权后运行门禁
 
 先执行原有 hypervisor smokes，特别是无 H 拒绝与 guest shell；再做同一宿主连续启动/销毁 100 次并检查 cgroup 和帧回收。随后用两份 `hypvm --managed` 进程配独立 PTY，交替输入不同标记，检查输出串线和 FP/CSR 交叉污染。最后测并发 close/RUN/config、低内存失败回滚和托管 guest 忙循环时宿主调度。未完成这些门禁前，不把静态实现标为生产可用。
+
+## 后续代码进度（仍无运行验收）
+
+- 运行占用改为每 CPU 的 vCPU 指针，显式禁止 load/enter/put 之间迁移，移除汇编全局 vCPU 指针。每 vCPU/每 VM 的执行占用仍互斥。
+- Native/Linux 新增共享控制：918/0x0F0B 为 kick/pause/resume/stop，919/0x0F0C 为 software/timer/external IRQ 注入，920/0x0F0D 为回收统计。远程控制只排队，所属 CPU 在 trap/entry 时处理，使用宿主 reschedule IPI 唤醒。
+- RISC-V 保存恢复 hvip，修正 guest SFENCE emulation 为 HFENCE.VVMA，移除不存在的 hstatus.VIE 并设置 VSXL=RV64。
+- 设备访问 RAM 通过 backend pin 在叶锁下持有 frame 引用，再执行分段复制；不把可变 stage-2 返回的裸地址保留到复制之外。
+- `hyp_stats` 返回 VM/vCPU/映射/page-table 页数和宿主空闲页数，供静止点回收门禁使用。多个字段不是事务快照，活动并发期间不能据此断言泄漏。
+- 新增 `a20-vmd`、init opt-in 启动、专用 virtio-serial 通道、VM profiles 和 `tools/a20 vm` 操作。manager 资源上限为 8 个记录、512 MiB 总 guest RAM；单 VM 8–256 MiB。
+- 新增 `tools/hyp_pair_probe.py` 真实场景门禁源码；本轮仅做 AST 检查，未执行。它覆盖两台 RAMFS guest、命令执行、串线检测、重连、pause/resume、关机、destroy 和四类资源计数回归，不覆盖 SMP、KVM 或长稳。
+
+| 阶段 | 当前证据与欠缺 |
+|---|---|
+| P0 | 根表、CSR/FP、释放与统计代码已修改并静态检查；全量构建、100 次重复启动和回收实测缺失 |
+| P1 | 共享核心、CPU-local 激活和独立队列已编码；双 guest 真实运行证据缺失 |
+| P2 | 启动宿主/创建双 guest/独立交互/重连的代码路径和运行门禁已加入；端到端验收缺失 |
+| P3 | 控制、IRQ 注入、设备 RAM pin/copy 的基础已编码；同 VM 多 vCPU、HSM/IPI、IRQ controller 与时序验收缺失 |
+| P4 | AArch64、Intel VMX、AMD SVM 实际后端与分别验收尚未完成 |
+| P5 | A20 `/dev/kvm` 与 QEMU/Linux disk/network guest 尚未完成 |
+| P6 | 其它架构和真机、性能、长稳、故障隔离验收尚未完成 |
+
+完整 P0–P6 目标保持开放；任何阶段都没有仅凭单文件检查标为完成。
