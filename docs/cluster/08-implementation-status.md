@@ -821,3 +821,8 @@ Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x
 进程结束后验证整块镜像。已修复可加载驱动锁等待未处理 owner 请求造成的
 死锁，并隔离共享/普通驱动构建。接口、复现、边界见
 [57-shared-disk-execution.md](57-shared-disk-execution.md)。
+
+已进一步验证 CPU 1 挂载主实例磁盘上的 ext4 并 exec 磁盘程序，真实文件与
+目录 fsync、重命名、回读、卸载及宿主独立检查通过。测试发现并修复了既有
+ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收漏洞。三种
+文件系统格式和普通 SMP 对照见 [58](58-shared-filesystem-execution.md)。
