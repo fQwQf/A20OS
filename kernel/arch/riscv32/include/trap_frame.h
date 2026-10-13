@@ -86,7 +86,7 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx, trap_co
 
 /* Stack pointer restored by this architecture's __switch. */
 static inline uintptr_t arch_task_context_resume_sp(const task_context_t *ctx) {
-    return (uintptr_t)ctx + TASK_CONTEXT_SIZE;
+    return (uintptr_t)ctx + sizeof(*ctx);
 }
 
 static inline task_context_t *arch_task_context_base(void *kstack_base, uint64_t stack_top, trap_context_t *trap) {
