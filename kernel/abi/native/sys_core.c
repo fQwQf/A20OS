@@ -493,8 +493,9 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
     r = elf_load(img_fd, path_buf, &info);
+    /* Closing the temporary fd releases the consumed lookup reference.
+     * The image handle and lazy ELF VMAs retain their own references. */
     fdtable_close_current(img_fd);
-    a20_object_release(img_entry.object, img_entry.type);
 
     if (r < 0) return -A20_ERR_IO;
     if (!info.is_native_abi) {
