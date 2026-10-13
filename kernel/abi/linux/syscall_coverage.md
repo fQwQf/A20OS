@@ -453,6 +453,13 @@ strength of a boilerplate note.
 | `hyp_vcpu_create` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: create a vcpu pinned to an entry GPA |
 | `hyp_vcpu_run` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: run the guest to a terminal exit and return the reason |
 | `hyp_vm_destroy` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: drop the caller's own VM reference |
+| `hyp_vcpu_destroy` | hypervisor | `partial` | `-` | A20OS extension: Drop the caller-owned vCPU reference; envelope callers denied; hardware-dependent |
+| `hyp_console` | hypervisor | `partial` | `-` | A20OS extension: Configure guest console or transfer at most 256 bytes per call; envelope callers denied; hardware-dependent |
+| `hyp_vm_set_ram` | hypervisor | `partial` | `-` | A20OS extension: Configure guest RAM mapping before execution; envelope callers denied; hardware-dependent |
+| `hyp_vcpu_control` | hypervisor | `partial` | `-` | A20OS extension: Control vCPU lifecycle with a validated operation; envelope callers denied; hardware-dependent |
+| `hyp_vcpu_irq` | hypervisor | `partial` | `-` | A20OS extension: Set or clear a validated virtual interrupt; envelope callers denied; hardware-dependent |
+| `hyp_stats` | hypervisor | `partial` | `-` | A20OS extension: Copy a hypervisor statistics snapshot to the caller; envelope callers denied; hardware-dependent |
+| `hyp_vm_smp` | hypervisor | `partial` | `-` | A20OS extension: Configure the bounded guest vCPU count; envelope callers denied; hardware-dependent |
 | `hyp_vcpu_set_boot` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: set the guest entry registers a0=hartid, a1=DTB GPA |
 | `hyp_vm_set_marker` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: name the guest console substring (max 32 bytes) that proves the guest reached its own banner |
 | `hyp_vm_status` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: post-run exit reason and fault detail, marker_seen, guest console byte count |

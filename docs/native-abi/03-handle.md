@@ -675,5 +675,15 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0F02 | `hyp_vcpu_create` | `int64_t hyp_vcpu_create(a20_handle_t vm, uint64_t entry_gpa)` | 创建从指定 GPA 启动的 vCPU，返回 vCPU handle |
 | 0x0F03 | `hyp_vcpu_run` | `int64_t hyp_vcpu_run(a20_handle_t vcpu)` | 运行 guest 至退出并返回退出原因；负值表示接口错误 |
 | 0x0F04 | `hyp_vm_destroy` | `int64_t hyp_vm_destroy(a20_handle_t vm)` | 释放 VM handle；仍存活的 vCPU 会持有 VM 引用 |
+| 0x0F05 | `hyp_vcpu_destroy` | `int64_t hyp_vcpu_destroy(a20_handle_t vcpu)` | 释放 vCPU handle |
+| 0x0F06 | `hyp_console` | `int64_t hyp_console(a20_handle_t vm, uint64_t op, void *buf_or_enable, uint64_t len)` | 配置或读写 guest 控制台；单次读写最多 256 字节 |
+| 0x0F07 | `hyp_vm_set_ram` | `int64_t hyp_vm_set_ram(a20_handle_t vm, uint64_t base, uint64_t size)` | 配置 guest RAM 映射 |
+| 0x0F08 | `hyp_vcpu_set_boot` | `int64_t hyp_vcpu_set_boot(a20_handle_t vcpu, uint64_t hartid, uint64_t dtb_gpa)` | 配置 guest 启动参数 |
+| 0x0F09 | `hyp_vm_set_marker` | `int64_t hyp_vm_set_marker(a20_handle_t vm, const char *marker)` | 配置 guest 控制台完成标记 |
+| 0x0F0A | `hyp_vm_status` | `int64_t hyp_vm_status(a20_handle_t vm, struct hyp_vm_status *out)` | 读取 guest 退出状态和控制台统计 |
+| 0x0F0B | `hyp_vcpu_control` | `int64_t hyp_vcpu_control(a20_handle_t vcpu, uint64_t op)` | 控制 vCPU 生命周期 |
+| 0x0F0C | `hyp_vcpu_irq` | `int64_t hyp_vcpu_irq(a20_handle_t vcpu, uint64_t irq, uint64_t asserted)` | 置位或清除虚拟中断 |
+| 0x0F0D | `hyp_stats` | `int64_t hyp_stats(struct hyp_stats *out)` | 读取 hypervisor 统计快照 |
+| 0x0F0E | `hyp_vm_smp` | `int64_t hyp_vm_smp(a20_handle_t vm, uint64_t count)` | 配置有上限的 guest vCPU 数量 |
 
-总计：160 个 syscall（`syscall_table.def` 当前登记数）。
+总计：170 个 syscall（`syscall_table.def` 当前登记数）。
