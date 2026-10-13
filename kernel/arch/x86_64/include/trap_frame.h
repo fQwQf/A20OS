@@ -193,6 +193,14 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
     *(uint32_t *)(void *)(ctx->fpu + 24) = 0x1F80;
 }
 
+/* Stack pointer __switch will resume this context with: __switch loads rsp
+ * straight from the saved context, so unlike the sp-derived arches this is a
+ * genuine saved stack pointer, not the context base.  context_switch_locked()
+ * range-checks it against the task's kernel stack on every switch. */
+static inline uintptr_t arch_task_context_resume_sp(const task_context_t *ctx) {
+    return (uintptr_t)ctx->rsp;
+}
+
 static inline task_context_t *arch_task_context_base(void *kstack_base,
                                                       uint64_t stack_top,
                                                       trap_context_t *trap) {

@@ -2006,6 +2006,37 @@ static void context_switch_locked(task_t *next) {
     if (!next || !next->kstack)
         return;
 
+    /*
+     * The resumed task executes its first instruction with sp = the saved
+     * architecture-defined resume sp and no chance to validate anything: if that pointer has
+     * strayed outside the task's own kernel stack, the first stack spill
+     * faults in the exception entry stub, which recurses on the same bad sp
+     * with interrupts masked until the CPU wedges, discarding every frame
+     * on the way down.  Check both ends here, while the task struct is
+     * intact and named -- the C twin of the trap-time sp guard
+     * (aarch64/riscv64 trap.S), catching the corrupting write at its source
+     * instead of the first fault it causes.  Unconditional like the
+     * preempt_count assert above: the invariant is checked, not merely
+     * encouraged.
+     *
+     * Idle (pid 0) is exempt: it runs on the static boot stack, so its
+     * first switch-out rewires kstack onto that stack while kstack_base
+     * still names the heap stack its context never occupies.  The boot
+     * stack is static and can never be freed, so the use-after-free class
+     * this check exists for cannot touch it.
+     */
+    if (next->pid != 0) {
+        uintptr_t kc = (uintptr_t)next->kstack;
+        uintptr_t kb = (uintptr_t)next->kstack_base;
+        if (!kb || kc < kb || kc - kb > KERNEL_STACK_SIZE - TASK_CONTEXT_SIZE)
+            panic("context switch: next pid=%d kstack=0x%lx base=%p outside kernel stack",
+                  next->pid, (unsigned long)kc, next->kstack_base);
+        uintptr_t ksp = arch_task_context_resume_sp((task_context_t *)kc);
+        if (ksp < kb || ksp - kb > KERNEL_STACK_SIZE)
+            panic("context switch: next pid=%d saved sp=0x%lx kstack=0x%lx base=%p",
+                  next->pid, (unsigned long)ksp, (unsigned long)kc, next->kstack_base);
+    }
+
     uint64_t now = timer_get_ticks();
 
     task_t *prev = proc_current();

@@ -133,6 +133,14 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
     ctx->sp = trap ? (uint32_t)(uintptr_t)trap : (uint32_t)stack_top;
 }
 
+/* Stack pointer __switch will resume this context with: __switch loads sp
+ * straight from the saved context, so this is a genuine saved stack pointer,
+ * not the context base.  context_switch_locked() range-checks it against the
+ * task's kernel stack on every switch. */
+static inline uintptr_t arch_task_context_resume_sp(const task_context_t *ctx) {
+    return (uintptr_t)ctx->sp;
+}
+
 static inline task_context_t *arch_task_context_base(void *base, uint64_t top,
                                                       trap_context_t *trap) {
     (void)top;
