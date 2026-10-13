@@ -107,6 +107,14 @@ typedef struct hyp_vm {
     uint64_t last_exit[4];
 } hyp_vm_t;
 
+struct hyp_stats {
+    uint64_t vms, vcpus, mapped_pages, table_pages, free_host_pages;
+};
+void hyp_stats_get(struct hyp_stats *out);
+void hyp_account_vcpu(int delta);
+void hyp_account_mapped(int delta);
+void hyp_account_tables(int delta);
+
 struct hyp_vm_status {
     uint64_t exit, scause, stval, htval;
     uint64_t marker_seen, console_bytes, rx_bytes;
@@ -145,6 +153,12 @@ int  hyp_s2_unmap(hyp_vm_t *vm, uint64_t gpa);
 /* Translate gpa -> host physical address, or 0 when unmapped.  Audit/test
  * helper; the guest hardware does its own walks. */
 paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa);
+
+/* Device-model memory access. Only RAM is accepted. Each backing frame is
+ * pinned under its stage-2 leaf lock before copying. Failure can leave a
+ * copied prefix; callers needing transactions must stage them separately. */
+int hyp_vm_copy_from_guest(hyp_vm_t *vm, void *dst, uint64_t gpa, uint64_t len);
+int hyp_vm_copy_to_guest(hyp_vm_t *vm, uint64_t gpa, const void *src, uint64_t len);
 
 /* Audit the stage-2 tree against its metadata (mm_s2_audit) plus the
  * frame-flag cross-check.  Returns 0 when clean. */

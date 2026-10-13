@@ -658,3 +658,33 @@ int64_t sys_hyp_vm_set_ram(const linux_syscall_args_t *args)
     hyp_vm_put(vm);
     return rc;
 }
+
+int64_t sys_hyp_vcpu_control(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied()) return -EPERM;
+    hyp_vcpu_t *vcpu = hyp_bridge_vcpu((int64_t)args->arg[0]);
+    if (!vcpu) return -EBADF;
+    int rc = args->arg[1] > HYP_CONTROL_STOP ? -EINVAL :
+             hyp_vcpu_control(vcpu, (unsigned)args->arg[1]);
+    hyp_vcpu_put(vcpu);
+    return rc;
+}
+
+int64_t sys_hyp_vcpu_irq(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied()) return -EPERM;
+    hyp_vcpu_t *vcpu = hyp_bridge_vcpu((int64_t)args->arg[0]);
+    if (!vcpu) return -EBADF;
+    int rc = args->arg[1] > HYP_IRQ_EXTERNAL || args->arg[2] > 1 ? -EINVAL :
+             hyp_vcpu_inject_irq(vcpu, (unsigned)args->arg[1], (int)args->arg[2]);
+    hyp_vcpu_put(vcpu);
+    return rc;
+}
+
+int64_t sys_hyp_stats(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied()) return -EPERM;
+    struct hyp_stats stats;
+    hyp_stats_get(&stats);
+    return copy_to_user((void *)(uintptr_t)args->arg[0], &stats, sizeof(stats)) < 0 ? -EFAULT : 0;
+}

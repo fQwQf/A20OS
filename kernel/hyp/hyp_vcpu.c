@@ -21,6 +21,8 @@
 #include "mm/slab.h"
 #include "cg/cgroup.h"
 #include "core/cpu.h"
+#include "core/smp.h"
+#include "core/preempt.h"
 #include "core/klog.h"
 #include "core/lock.h"
 #include "core/stdio.h"
@@ -45,28 +47,16 @@
  */
 #define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
-/* The one vcpu whose guest is live kernel-wide, or NULL.  A lock is not held
- * across it, because hyp_arch_vcpu_enter() ends in sret and a lock held across
- * that would be a lock held across arbitrary guest execution.  What makes the
- * slice single-guest is the claim under g_hyp_active_lock, not that lock's
- * scope: it is taken to claim and to release, and across neither the guest nor
- * anything that can block.  The IRQ-off windows in hyp_vcpu_run() are a
- * different thing -- they cover the plain store of vcpu->running that this
- * CPU's own dispatcher reads, which is not shared state. */
-static hyp_vcpu_t *hyp_active_vcpu;
-
-/* The claim's lock.  A real cross-CPU lock, unlike arch_local_irq_disable(),
- * which only closes a window on the CPU that executes it: an IRQ-off
- * test-and-set on hyp_active_vcpu would let two CPUs each find the slot free
- * and both program hgatp/hstatus and sret into VS-mode on it. */
+/* CPU-local hardware activation; one RUN owner per vCPU and, until remote
+ * stage-2 invalidation exists, one executing vCPU per VM. Distinct managed
+ * VMs may execute on different host CPUs. The legacy UART has one owner. */
+static hyp_vcpu_t *hyp_active_vcpus[CONFIG_NR_CPUS];
+static hyp_vcpu_t *hyp_legacy_vcpu;
 static spinlock_t g_hyp_active_lock = SPINLOCK_INIT;
 
 hyp_vcpu_t *hyp_vcpu_active(void)
 {
-    /* Acquire, because a CPU that sees a vcpu published here must also see
-     * everything hyp_vcpu_run() wrote before publishing it (hgatp, hstatus,
-     * vcpu->running); a plain load would not order against the claim's store. */
-    return __atomic_load_n(&hyp_active_vcpu, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&hyp_active_vcpus[cpu_current_id()], __ATOMIC_ACQUIRE);
 }
 
 hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa)
@@ -89,6 +79,7 @@ hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa)
     /* The guest's initial sp and satp are the arch half's call: only
      * hyp_arch_vcpu_setup() knows the guest RAM layout it is entering. */
     hyp_vm_get(vm);
+    hyp_account_vcpu(1);
     return vcpu;
 }
 
@@ -101,7 +92,7 @@ int hyp_vcpu_set_boot(hyp_vcpu_t *vcpu, uint64_t hartid, uint64_t dtb_gpa)
     if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
         return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
-    if (hyp_active_vcpu == vcpu) {
+    if (vcpu->claimed) {
         spin_unlock_irqrestore(&g_hyp_active_lock, flags);
         return -EBUSY;
     }
@@ -128,6 +119,7 @@ void hyp_vcpu_put(hyp_vcpu_t *vcpu)
     hyp_vm_t *vm = vcpu->vm;
     vcpu->vm = NULL;
     vcpu->magic = 0;
+    hyp_account_vcpu(-1);
     kfree(vcpu);
     /* The VM outlives the vcpu only while someone else holds it. */
     if (vm)
@@ -230,123 +222,129 @@ int hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len)
     return rc;
 }
 
+/* Pending controls are read on the owning CPU at every guest trap. They
+ * never edit the live register bank from a remote CPU. */
+int hyp_vcpu_control(hyp_vcpu_t *vcpu, unsigned command)
+{
+    if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC || command > HYP_CONTROL_STOP)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+    if (command == HYP_CONTROL_RESUME)
+        __atomic_fetch_and(&vcpu->requests, ~HYP_REQUEST_PAUSE, __ATOMIC_RELEASE);
+    else
+        __atomic_fetch_or(&vcpu->requests,
+                          command == HYP_CONTROL_STOP ? HYP_REQUEST_STOP :
+                          command == HYP_CONTROL_PAUSE ? HYP_REQUEST_PAUSE : HYP_REQUEST_YIELD,
+                          __ATOMIC_RELEASE);
+    unsigned cpu = vcpu->claimed ? vcpu->host_cpu : CONFIG_NR_CPUS;
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+    if (cpu < CONFIG_NR_CPUS)
+        smp_send_reschedule(cpu);
+    return 0;
+}
+
+int hyp_vcpu_inject_irq(hyp_vcpu_t *vcpu, unsigned irq, int level)
+{
+    if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC || irq > HYP_IRQ_EXTERNAL ||
+        (level != 0 && level != 1)) return -EINVAL;
+    if (!vcpu->vm->backend->sync_irqs) return -EOPNOTSUPP;
+    unsigned bit = 1u << irq;
+    uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+    if (level) { vcpu->irq_set |= bit; vcpu->irq_clear &= ~bit; }
+    else { vcpu->irq_clear |= bit; vcpu->irq_set &= ~bit; }
+    unsigned cpu = vcpu->claimed ? vcpu->host_cpu : CONFIG_NR_CPUS;
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+    if (cpu < CONFIG_NR_CPUS) smp_send_reschedule(cpu);
+    return 0;
+}
+
+void hyp_vcpu_sync_irqs(hyp_vcpu_t *vcpu)
+{
+    uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+    unsigned set = vcpu->irq_set, clear = vcpu->irq_clear;
+    vcpu->irq_set = vcpu->irq_clear = 0;
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+    if ((set || clear) && vcpu->vm->backend->sync_irqs)
+        vcpu->vm->backend->sync_irqs(vcpu, set, clear);
+}
+
+int hyp_vcpu_control_exit(hyp_vcpu_t *vcpu)
+{
+    unsigned request = __atomic_load_n(&vcpu->requests, __ATOMIC_ACQUIRE);
+    if (request & HYP_REQUEST_STOP)
+        vcpu->exit = HYP_EXIT_STOPPED;
+    else if (request & HYP_REQUEST_PAUSE)
+        vcpu->exit = HYP_EXIT_PAUSED;
+    else if (request & HYP_REQUEST_YIELD) {
+        __atomic_fetch_and(&vcpu->requests, ~HYP_REQUEST_YIELD, __ATOMIC_ACQ_REL);
+        vcpu->exit = HYP_EXIT_YIELD;
+    } else return 0;
+    return 1;
+}
+
 int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
 {
-    if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
+    if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC ||
+        !vcpu->vm || vcpu->vm->magic != HYP_VM_MAGIC)
         return -EINVAL;
-    if (!vcpu->vm || vcpu->vm->magic != HYP_VM_MAGIC)
-        return -EINVAL;
-
-    /* Claim the single guest slot before anything else: a setup that is
-     * about to program this CPU's virtualization state must not race a
-     * second CPU claiming the same slice.  The window is a test-and-set, and
-     * it has to be a LOCKED one: arch_local_irq_disable() only closes the
-     * window on the CPU that runs it, so a plain IRQ-off read-modify-write
-     * leaves two CPUs free to both find the slot free and then both program
-     * hgatp/hstatus and sret into VS-mode on the same guest slot.  This is
-     * the same idiom the frame allocator uses for its own exclusive claim
-     * (frame.c, spin_lock_irqsave(&pfa.lock)), and for the same reason: the
-     * lock is a real cross-CPU lock, not a local one.
-     *
-     * Nothing holds the lock across the guest -- it is taken to claim and
-     * released before hyp_arch_vcpu_enter() -- so this is not a lock held
-     * across arbitrary guest execution, which is why trylock (never sleep,
-     * never wait for the owner) is the right shape here: losing the race
-     * means answering -EBUSY, not waiting. */
-    uint64_t claim_flags;
-    if (!spin_trylock_irqsave(&g_hyp_active_lock, &claim_flags)) {
-        return -EBUSY;
-    }
-    if (hyp_active_vcpu) {
-        spin_unlock_irqrestore(&g_hyp_active_lock, claim_flags);
-        return -EBUSY;
-    }
-    uint64_t vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
-    if (vcpu->vm->updating) {
-        spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
-        spin_unlock_irqrestore(&g_hyp_active_lock, claim_flags);
-        return -EBUSY;
-    }
-    vcpu->vm->run_count++;
-    spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
-    hyp_vcpu_get(vcpu); /* Run owns a reference independent of its handle. */
-    hyp_active_vcpu = vcpu;
-    spin_unlock_irqrestore(&g_hyp_active_lock, claim_flags);
-
-    /* Kept for the two IRQ-off windows around vcpu->running below, which
-     * guard a plain store this CPU's own dispatcher reads, not shared state. */
     int irqs_were_on = arch_irqs_enabled();
-    /* CPU-local backend state must not migrate between load, entry and put. */
+    preempt_disable();
     arch_local_irq_disable();
+    unsigned cpu = cpu_current_id();
+    uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
+    uint64_t vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
+    int legacy = !vcpu->vm->managed_console;
+    if (vcpu->claimed || hyp_active_vcpus[cpu] || vcpu->vm->updating ||
+        vcpu->vm->run_count || (legacy && hyp_legacy_vcpu)) {
+        spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
+        spin_unlock_irqrestore(&g_hyp_active_lock, flags);
+        preempt_enable();
+        if (irqs_were_on) arch_local_irq_enable();
+        return -EBUSY;
+    }
+    vcpu->claimed = 1;
+    vcpu->host_cpu = cpu;
+    vcpu->vm->run_count++;
+    hyp_vcpu_get(vcpu);
+    if (legacy) hyp_legacy_vcpu = vcpu;
+    __atomic_store_n(&hyp_active_vcpus[cpu], vcpu, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
 
+    int rc = 0;
+    vcpu->exit = HYP_EXIT_NONE;
+    vcpu->exit_scause = vcpu->exit_stval = vcpu->exit_htval = 0;
+    if (hyp_vcpu_control_exit(vcpu)) goto out;
     if (vcpu->vm->managed_console && hyp_console_pending(vcpu->vm)) {
         vcpu->exit = HYP_EXIT_YIELD;
-        if (reason)
-            *reason = HYP_EXIT_YIELD;
-        /* No backend state has been loaded yet. */
-        uint64_t flags = spin_lock_irqsave(&g_hyp_active_lock);
-        vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
-        vcpu->vm->run_count--;
-        spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
-        hyp_active_vcpu = NULL;
-        spin_unlock_irqrestore(&g_hyp_active_lock, flags);
-        hyp_vcpu_put(vcpu);
-        if (irqs_were_on)
-            arch_local_irq_enable();
-        return 0;
-    }
-    vcpu->exit        = HYP_EXIT_NONE;
-    vcpu->exit_scause = 0;
-    vcpu->exit_stval  = 0;
-    vcpu->exit_htval  = 0;
-
-    int rc = vcpu->vm->backend->load(vcpu);
-    if (rc != 0) {
-        kerr("hyp: arch_vcpu_setup failed: %d\n", rc);
         goto out;
     }
-
-    /* running and active go up together: the trap dispatcher reads the pair,
-     * and between them the host must see a complete "a guest is live"
-     * statement, never half of one. */
-    arch_local_irq_disable();
+    rc = vcpu->vm->backend->load(vcpu);
+    if (rc) goto out;
+    hyp_vcpu_sync_irqs(vcpu);
     vcpu->running = 1;
     vcpu->vm->backend->enter(vcpu);
-    if (vcpu->vm->backend->put)
-        vcpu->vm->backend->put(vcpu);
-
     arch_local_irq_disable();
+    if (vcpu->vm->backend->put) vcpu->vm->backend->put(vcpu);
     vcpu->running = 0;
-
-    /* A guest shutdown and a guest fault are both terminal exits, and both
-     * are reported through vcpu->exit; a negative return is reserved for the
-     * host failing to run the guest at all.  Enter coming back with nothing
-     * recorded is exactly that. */
-    if (vcpu->exit == HYP_EXIT_NONE || vcpu->exit == HYP_EXIT_ERROR)
-        rc = -EIO;
-    else
-        rc = 0;
-
+    if (vcpu->exit == HYP_EXIT_NONE || vcpu->exit == HYP_EXIT_ERROR) rc = -EIO;
 out:
-    /* Release the claim under the lock it was taken with, so another CPU's
-     * claim cannot interleave with this one.  The restore flags come from
-     * this lock acquisition, not from the claim above: the interrupt state
-     * then is not the one the claim found. */
-    uint64_t release_flags = spin_lock_irqsave(&g_hyp_active_lock);
+    flags = spin_lock_irqsave(&g_hyp_active_lock);
     vm_flags = spin_lock_irqsave(&vcpu->vm->control_lock);
-    if (reason)
-        *reason = vcpu->exit;
+    if (reason) *reason = vcpu->exit;
     vcpu->vm->last_exit[0] = rc < 0 ? HYP_EXIT_ERROR : vcpu->exit;
     vcpu->vm->last_exit[1] = vcpu->exit_scause;
     vcpu->vm->last_exit[2] = vcpu->exit_stval;
     vcpu->vm->last_exit[3] = vcpu->exit_htval;
     vcpu->vm->run_count--;
+    vcpu->claimed = 0;
+    __atomic_store_n(&hyp_active_vcpus[cpu], NULL, __ATOMIC_RELEASE);
+    if (hyp_legacy_vcpu == vcpu) hyp_legacy_vcpu = NULL;
     spin_unlock_irqrestore(&vcpu->vm->control_lock, vm_flags);
-    hyp_active_vcpu = NULL;
-    spin_unlock_irqrestore(&g_hyp_active_lock, release_flags);
+    spin_unlock_irqrestore(&g_hyp_active_lock, flags);
     hyp_vcpu_put(vcpu);
-    if (irqs_were_on)
-        arch_local_irq_enable();
+    preempt_enable();
+    if (irqs_were_on) arch_local_irq_enable();
     return rc;
 }
 

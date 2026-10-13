@@ -20,6 +20,7 @@ int hyp_riscv_vm_init(hyp_vm_t *vm)
     }
     vm->s2_root = root;
     vm->s2_root_order = 2;
+    hyp_account_tables(4);
     return 0;
 }
 static void hyp_s2_destroy_level(pte_t *table, int level, unsigned order)
@@ -44,6 +45,7 @@ static void hyp_s2_destroy_level(pte_t *table, int level, unsigned order)
         } else {
             mm_pt_frame_return(pfn);
             frame_put(pfn);
+            hyp_account_mapped(-1);
         }
         table[i] = 0;
     }
@@ -51,6 +53,7 @@ static void hyp_s2_destroy_level(pte_t *table, int level, unsigned order)
      * frame. The backend root allocation can span more than one page. */
     mm_pt_node_fini(table);
     pfa_free(virt_to_pfn(table), order);
+    hyp_account_tables(-(1 << order));
 }
 
 void hyp_riscv_vm_destroy(hyp_vm_t *vm)
@@ -84,6 +87,7 @@ static pte_t *hyp_s2_walk(hyp_vm_t *vm, uint64_t gpa, int alloc)
             if (installed) {
                 pte = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
                 table[idx] = pte;
+                hyp_account_tables(1);
                 mm_pt_note_present(table, level, idx, MM_ST_CLS_BYTE(MM_ST_PT_NODE));
             }
             mm_pt_node_unlock(table);
@@ -138,8 +142,26 @@ int hyp_riscv_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
      * translation for this VMID/page -- a remap after unmap must not read
      * the old entry out of a guest TLB. */
     mm_pt_frame_lend(pfn);
+    hyp_account_mapped(1);
     hyp_arch_s2_fence(vm->vmid, gpa);
     return 0;
+}
+
+/* The caller owns the returned frame reference even if a concurrent loader
+ * rollback unmaps the GPA. Holding a VM reference keeps table nodes alive. */
+int hyp_riscv_s2_pin(hyp_vm_t *vm, uint64_t gpa, pfn_t *out)
+{
+    pte_t *table = hyp_s2_walk(vm, gpa, 0);
+    if (!table) return -EFAULT;
+    mm_pt_node_lock(table);
+    pte_t pte = table[arch_pt_vpn(gpa, 0)];
+    int rc = -EFAULT;
+    if ((pte & PTE_V) && arch_pte_is_leaf(pte)) {
+        pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+        if (pfn_valid(pfn)) { frame_get(pfn); *out = pfn; rc = 0; }
+    }
+    mm_pt_node_unlock(table);
+    return rc;
 }
 
 int hyp_riscv_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
@@ -165,6 +187,7 @@ int hyp_riscv_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
     pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
     hyp_arch_s2_fence(vm->vmid, gpa);
     mm_pt_frame_return(pfn);
+    hyp_account_mapped(-1);
     /* The reference goes back to the caller after invalidation. */
     return 0;
 }

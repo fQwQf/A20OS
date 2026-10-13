@@ -15,10 +15,12 @@ typedef struct hyp_backend {
     int (*vm_init)(struct hyp_vm *vm);
     void (*vm_destroy)(struct hyp_vm *vm);
     int (*map)(struct hyp_vm *vm, uint64_t gpa, pfn_t pfn, pte_t prot);
+    int (*pin)(struct hyp_vm *vm, uint64_t gpa, pfn_t *pfn);
     int (*unmap)(struct hyp_vm *vm, uint64_t gpa);
     paddr_t (*translate)(struct hyp_vm *vm, uint64_t gpa);
     int (*audit)(struct hyp_vm *vm, mm_pt_audit_report_t *out);
     int (*set_boot)(struct hyp_vcpu *vcpu, uint64_t hartid, uint64_t dtb);
+    void (*sync_irqs)(struct hyp_vcpu *vcpu, unsigned set, unsigned clear);
     int (*load)(struct hyp_vcpu *vcpu);
     void (*enter)(struct hyp_vcpu *vcpu);
     void (*put)(struct hyp_vcpu *vcpu);

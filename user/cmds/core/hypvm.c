@@ -164,7 +164,8 @@ static long run_managed(long vm, long vcpu)
                 done += (int)wrote;
             }
         }
-        if (n < 0 || exit_reason != HYP_GUEST_EXIT_YIELD)
+        if (n < 0 || (exit_reason != HYP_GUEST_EXIT_YIELD &&
+                      exit_reason != HYP_GUEST_EXIT_PAUSED))
             return n < 0 ? -1 : exit_reason;
         if (begin == end && input_open) {
             struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
@@ -189,6 +190,7 @@ static long run_managed(long vm, long vcpu)
                 return -1;
             begin += (size_t)n;
         }
+        if (exit_reason == HYP_GUEST_EXIT_PAUSED) usleep(1000);
         exit_reason = hyp_guest_vcpu_run(vcpu);
         if (exit_reason < 0 && errno == EBUSY) {
             sched_yield();
