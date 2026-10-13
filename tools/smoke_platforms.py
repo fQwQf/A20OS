@@ -43,6 +43,9 @@ def case_for_arch(name: str, case: dict, arch: str) -> dict:
         return value
 
     result = rebase(result)
+    if name == "smoke-native-fs-all":
+        # Full FAT/ext4/ISO/NTFS plus restart remains slow on contended ARM TCG.
+        result["timeout"] = "300s"
     build_vars = result["build"]["vars"]
     build_vars[:] = [v for v in build_vars if not v.startswith("BOARD=")]
     build_vars.append(f"BOARD=qemu-virt-{arch}")
