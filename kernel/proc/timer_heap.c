@@ -14,7 +14,7 @@
 /*
  * Tokenized deadline min-heap and timer/alarm scan machinery, split out of
  * proc/sched.c.  The wait-timer heap is protected by g_wait_timer_lock, and
- * the two next-scan deadlines are updated atomically and consumed by
+ * the next-scan deadlines are updated atomically and consumed by
  * proc_next_timer_interval() (arch timer rearm) and sched_scan_timers()
  * (sched()/idle).  Lock order: park_lock -> g_wait_timer_lock; the timer scan
  * collects expired entries under g_wait_timer_lock, releases it, then wakes
@@ -156,6 +156,8 @@ void proc_alarm_cancel(task_t *t)
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 static uint64_t next_posix_scan = SCHED_NO_DEADLINE;
+/* Native callbacks require process context; IRQ signal scans must not consume them. */
+static uint64_t next_native_scan = SCHED_NO_DEADLINE;
 
 unsigned proc_wait_timer_count_locked(void)
 {
@@ -216,6 +218,7 @@ uint64_t proc_next_timer_interval(uint64_t now)
     uint64_t wake = __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED);
     uint64_t alarm = __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
     uint64_t posix = __atomic_load_n(&next_posix_scan, __ATOMIC_RELAXED);
+    uint64_t native = __atomic_load_n(&next_native_scan, __ATOMIC_RELAXED);
 
     if (wake < next)
         next = wake;
@@ -223,6 +226,8 @@ uint64_t proc_next_timer_interval(uint64_t now)
         next = alarm;
     if (posix < next)
         next = posix;
+    if (native < next)
+        next = native;
     if (next <= now)
         return SCHED_MIN_TIMER_INTERVAL;
 
@@ -438,7 +443,7 @@ void sched_note_timer_deadline(uint64_t deadline)
 {
     if (!deadline)
         return;
-    if (sched_note_deadline(&next_alarm_scan, deadline))
+    if (sched_note_deadline(&next_native_scan, deadline))
         sched_rearm_timer();
 }
 
@@ -583,6 +588,8 @@ void sched_scan_timers(uint64_t now)
     psi_tick();
 
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    __atomic_exchange_n(&next_native_scan, SCHED_NO_DEADLINE,
+                        __ATOMIC_RELAXED);
     a20_timer_tick();
     /* Periodic monitor sampling (Native ABI perf-style counters). */
     extern void a20_monitor_tick(void);
@@ -600,11 +607,13 @@ void proc_timer_heap_init(void)
     __atomic_store_n(&next_wake_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
     __atomic_store_n(&next_posix_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
+    __atomic_store_n(&next_native_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
 }
 
 int proc_sched_timers_due(uint64_t now)
 {
     return now >= __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED) ||
            now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED) ||
-           now >= __atomic_load_n(&next_posix_scan, __ATOMIC_RELAXED);
+           now >= __atomic_load_n(&next_posix_scan, __ATOMIC_RELAXED) ||
+           now >= __atomic_load_n(&next_native_scan, __ATOMIC_RELAXED);
 }

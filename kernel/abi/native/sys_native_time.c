@@ -284,16 +284,18 @@ void a20_timer_tick(void)
                 t->expire_tick = 0;
             }
         }
+        if (t->used && !t->closing && t->active && t->expire_tick)
+            next_tick = t->expire_tick;
         spin_unlock_irqrestore(&g_a20_timers_lock, flags);
 
+        if (next_tick > 0)
+            sched_note_timer_deadline(next_tick);
         if (!fire)
             continue;
 
         /* The watch key is the handle entry's object: (void *)(slot + 1). */
         a20_event_notify((void *)(uintptr_t)(i + 1), A20_OBJ_TIMER,
                          A20_EVENT_EXPIRED, user_data, fired_tick);
-        if (next_tick > 0)
-            sched_note_timer_deadline(next_tick);
         a20_timer_object_release(i);
     }
 
@@ -301,8 +303,8 @@ void a20_timer_tick(void)
     if (now - last_sweep >= A20_SWEEP_INTERVAL_TICKS) {
         last_sweep = now;
         a20_temporal_sweep_all();
-        sched_note_timer_deadline(now + A20_SWEEP_INTERVAL_TICKS);
     }
+    sched_note_timer_deadline(last_sweep + A20_SWEEP_INTERVAL_TICKS);
 }
 
 int64_t sys_a20_clock_set(const a20_syscall_args_t *args)
