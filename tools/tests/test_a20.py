@@ -1095,6 +1095,13 @@ class TestCliArgumentHandling(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(seen["extra"], ["-j8"])
 
+    def test_double_dash_immediately_after_instance(self) -> None:
+        mod, _ = self.cli()
+        seen = {}
+        mod.build_instance = lambda _inst, extra, _dry: seen.update(extra=extra)
+        self.assertEqual(mod.main(["build", "qemu-riscv64", "--", "-j4"]), 0)
+        self.assertEqual(seen["extra"], ["-j4"])
+
     def test_show_vars_prints_without_running_anything(self) -> None:
         import contextlib
         import io
@@ -2410,6 +2417,27 @@ class TestHostPortGate(unittest.TestCase):
             # which lives under /tmp -- and /tmp is a tmpfs that may sit
             # near full. wait_timeout is 0 (forever), so a full /tmp would
             # hang the test on a host condition unrelated to ports.
-            verdict = preflight(inst, Policy(min_disk_mb=0), self.tmp,
+            verdict = preflight(inst, Policy(min_disk_mb=0, max_concurrent=1024,
+                                             wait_timeout_s=5), self.tmp,
                                 wait=True, echo=lambda _m: None)
         self.assertTrue(verdict.ok)
+
+
+class TestQemuResourcePolicy(unittest.TestCase):
+    def test_launch_gate_honors_disk_and_concurrency_overrides(self):
+        from a20_resource import gate_qemu
+        with patch.dict(os.environ, {"A20_MIN_DISK_MB": "512",
+                                    "A20_MAX_CONCURRENT": "7"}, clear=True), \
+             patch("a20_resource.gate") as gate:
+            gate_qemu(memory="1G", vcpus=1, disk_path="/tmp",
+                      image=None, label="test")
+        need, policy, _ = gate.call_args.args
+        self.assertEqual(need.disk_mb, 512)
+        self.assertEqual(policy.max_concurrent, 7)
+
+    def test_launch_gate_retains_default_disk_budget(self):
+        from a20_resource import gate_qemu, QEMU_DISK_MIN_MB
+        with patch.dict(os.environ, {}, clear=True), patch("a20_resource.gate") as gate:
+            gate_qemu(memory="1G", vcpus=1, disk_path="/tmp",
+                      image=None, label="test")
+        self.assertEqual(gate.call_args.args[0].disk_mb, QEMU_DISK_MIN_MB)
