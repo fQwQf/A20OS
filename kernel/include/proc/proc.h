@@ -322,6 +322,7 @@ typedef struct task_t {
     proc_policy_t policy;
     int       clone_flags;
     int       exit_signal;
+    int       hyp_cleanup_done; /* group leader, tasklist_lock; one-shot VM bridge teardown */
     int       exit_notified; /* tasklist_lock: group completion claimed once */
     int       pdeathsig;       /* PR_SET_PDEATHSIG: one-shot signal delivered
                                 * when the parent exits (0 = none) */

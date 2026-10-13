@@ -32,6 +32,7 @@
  */
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -95,6 +96,7 @@ static void usage(const char *prog)
     printf("  -e <gpa>    guest entry GPA (default: e_entry translated "
            "through the\n"
            "                program headers, i.e. the image's LMA)\n");
+    printf("  --smp <n>  virtual hart count, 1..8 (enables managed mode)\n");
     printf("  --managed   use per-VM console queues and resumable RUN slices\n");
     printf("  -h          this text\n\n");
     printf("Exit codes: %d pass, %d guest ran but the marker was not seen,\n"
@@ -143,9 +145,52 @@ static int parse_u64(const char *s, uint64_t *out)
     return 0;
 }
 
+struct vmm_group {
+    long vm, vcpus[HYP_GUEST_MAX_VCPUS];
+    unsigned count;
+    int done, terminal, error;
+};
+struct vmm_runner { struct vmm_group *group; unsigned id; };
+static void stop_group(struct vmm_group *group, int reason, int error)
+{
+    int expected = 0;
+    __atomic_compare_exchange_n(&group->terminal, &expected, reason, 0,
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    if (error) {
+        expected = 0;
+        __atomic_compare_exchange_n(&group->error, &expected, error, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+    __atomic_store_n(&group->done, 1, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < group->count; i++)
+        hyp_guest_vcpu_control(group->vcpus[i], 3); /* shared core STOP */
+}
+static void *run_secondary(void *opaque)
+{
+    struct vmm_runner *runner = opaque;
+    struct vmm_group *group = runner->group;
+    while (!__atomic_load_n(&group->done, __ATOMIC_ACQUIRE)) {
+        long reason = hyp_guest_vcpu_run(group->vcpus[runner->id]);
+        if (reason < 0 && errno == EBUSY) { sched_yield(); continue; }
+        if (reason == HYP_GUEST_EXIT_YIELD) { sched_yield(); continue; }
+        if (reason == HYP_GUEST_EXIT_PAUSED || reason == HYP_GUEST_EXIT_HART_STOPPED) {
+            usleep(1000); continue;
+        }
+        if (__atomic_load_n(&group->done, __ATOMIC_ACQUIRE)) break;
+        if (reason == HYP_GUEST_EXIT_STOPPED) {
+            struct hyp_guest_status status;
+            if (!hyp_guest_vm_status(group->vm, &status) && status.exit == HYP_GUEST_EXIT_SHUTDOWN)
+                reason = HYP_GUEST_EXIT_SHUTDOWN;
+        }
+        stop_group(group, reason < 0 ? HYP_GUEST_EXIT_ERROR : (int)reason,
+                    reason < 0 ? errno : 0);
+    }
+    return NULL;
+}
+
 /* Managed mode returns to the host on IRQ or console output, allowing the
  * host scheduler to run another VMM. Pending input survives short writes. */
-static long run_managed(long vm, long vcpu)
+static long run_managed(long vm, long vcpu, struct vmm_group *group)
 {
     unsigned char input[256], output[256];
     size_t begin = 0, end = 0;
@@ -164,8 +209,11 @@ static long run_managed(long vm, long vcpu)
                 done += (int)wrote;
             }
         }
+        if (group && __atomic_load_n(&group->done, __ATOMIC_ACQUIRE))
+            return __atomic_load_n(&group->terminal, __ATOMIC_ACQUIRE);
         if (n < 0 || (exit_reason != HYP_GUEST_EXIT_YIELD &&
-                      exit_reason != HYP_GUEST_EXIT_PAUSED))
+                      exit_reason != HYP_GUEST_EXIT_PAUSED &&
+                      exit_reason != HYP_GUEST_EXIT_HART_STOPPED))
             return n < 0 ? -1 : exit_reason;
         if (begin == end && input_open) {
             struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
@@ -190,13 +238,51 @@ static long run_managed(long vm, long vcpu)
                 return -1;
             begin += (size_t)n;
         }
-        if (exit_reason == HYP_GUEST_EXIT_PAUSED) usleep(1000);
+        if (exit_reason == HYP_GUEST_EXIT_PAUSED || exit_reason == HYP_GUEST_EXIT_HART_STOPPED)
+            usleep(1000);
+        else if (exit_reason == HYP_GUEST_EXIT_YIELD)
+            sched_yield();
         exit_reason = hyp_guest_vcpu_run(vcpu);
         if (exit_reason < 0 && errno == EBUSY) {
             sched_yield();
             exit_reason = HYP_GUEST_EXIT_YIELD;
         }
     }
+}
+
+static long run_group(struct vmm_group *group)
+{
+    pthread_t threads[HYP_GUEST_MAX_VCPUS];
+    struct vmm_runner runners[HYP_GUEST_MAX_VCPUS];
+    unsigned started = 0;
+    for (unsigned id = 1; id < group->count; id++) {
+        runners[id].group = group; runners[id].id = id;
+        int rc = pthread_create(&threads[id], NULL, run_secondary, &runners[id]);
+        if (rc) { stop_group(group, HYP_GUEST_EXIT_ERROR, rc); break; }
+        started++;
+    }
+    if (!__atomic_load_n(&group->done, __ATOMIC_ACQUIRE)) {
+        long reason = run_managed(group->vm, group->vcpus[0], group);
+        stop_group(group, reason < 0 ? HYP_GUEST_EXIT_ERROR : (int)reason, reason < 0 ? errno : 0);
+    }
+    for (unsigned id = 1; id <= started; id++) pthread_join(threads[id], NULL);
+    /* All producers are now quiescent; retain the last peer's bytes even if
+     * it exited just after the main console loop's final drain. */
+    unsigned char bytes[256];
+    int n;
+    while ((n = hyp_guest_console_read(group->vm, bytes, sizeof(bytes))) > 0) {
+        int done = 0;
+        while (done < n) {
+            ssize_t wrote = write(STDOUT_FILENO, bytes + done, (size_t)(n - done));
+            if (wrote < 0 && errno == EINTR) continue;
+            if (wrote <= 0) return -1;
+            done += (int)wrote;
+        }
+    }
+    if (n < 0) return -1;
+    int error = __atomic_load_n(&group->error, __ATOMIC_ACQUIRE);
+    if (error) { errno = error; return -1; }
+    return __atomic_load_n(&group->terminal, __ATOMIC_ACQUIRE);
 }
 
 int main(int argc, char **argv)
@@ -209,6 +295,7 @@ int main(int argc, char **argv)
     uint64_t entry_arg = 0;
     int have_entry = 0;
     int managed = 0;
+    uint64_t smp = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -224,6 +311,11 @@ int main(int argc, char **argv)
             if (++i >= argc) { printf("HYPVM: FAIL -b needs a string\n");
                                return HYPVM_EXIT_USAGE; }
             bootargs = argv[i];
+        } else if (!strcmp(a, "--smp")) {
+            if (++i >= argc || parse_u64(argv[i], &smp) || !smp || smp > HYP_GUEST_MAX_VCPUS) {
+                printf("HYPVM: FAIL --smp needs 1..%d vCPUs\n", HYP_GUEST_MAX_VCPUS);
+                return HYPVM_EXIT_USAGE;
+            }
         } else if (!strcmp(a, "--managed")) {
             managed = 1;
         } else if (!strcmp(a, "--marker")) {
@@ -252,6 +344,8 @@ int main(int argc, char **argv)
             return HYPVM_EXIT_USAGE;
         }
     }
+
+    if (smp > 1) managed = 1;
 
     /* The marker is matched by the device model over guest console bytes; it
      * has to be something, and it has to be short enough not to be truncated
@@ -303,7 +397,7 @@ int main(int argc, char **argv)
         printf("HYPVM: FAIL dtb alloc\n");
         return HYPVM_EXIT_VERDICT;
     }
-    size_t dtb_len = hyp_guest_fdt_build(dtb, dtb_cap, base, mem, bootargs);
+    size_t dtb_len = hyp_guest_fdt_build_smp(dtb, dtb_cap, base, mem, bootargs, (unsigned)smp);
     if (!dtb_len) {
         free(img);
         free(dtb);
@@ -329,6 +423,12 @@ int main(int argc, char **argv)
         hyp_guest_vm_destroy(vm);
         free(img);
         return fail_call("vm_set_ram", -1);
+    }
+    if ((managed && hyp_guest_console_config(vm, 1) < 0) ||
+        hyp_guest_vm_smp(vm, (unsigned)smp) < 0) {
+        hyp_guest_vm_destroy(vm);
+        free(img);
+        return fail_call("vm_smp/console", -1);
     }
     uint64_t entry_gpa = 0, image_end = 0;
     int nseg = hyp_guest_load_elf(vm, img, img_len, &entry_gpa, &image_end);
@@ -397,49 +497,32 @@ int main(int argc, char **argv)
         return fail_call("dtb load", -1);
     }
 
-    long vcpu = hyp_guest_vcpu_create(vm, entry_gpa);
-    if (vcpu < 0) {
-        hyp_guest_vm_destroy(vm);
-        free(img);
-        free(dtb);
-        return fail_call("vcpu_create", vcpu);
+    struct vmm_group group;
+    memset(&group, 0, sizeof(group));
+    group.vm = vm;
+    int boot_failed = 0;
+    for (unsigned id = 0; id < smp; id++) {
+        long handle = hyp_guest_vcpu_create(vm, entry_gpa);
+        if (handle < 0) break;
+        group.vcpus[group.count++] = handle;
+        if (hyp_guest_vcpu_set_boot(handle, id, dtb_gpa) < 0) { boot_failed = 1; break; }
     }
-
-    /* hartid 0 is not a default: entry.S branches past its SBI HSM lottery
-     * handoff only on a0 == 0 (entry.S:44), and the vcpu slice has one hart. */
-    if (hyp_guest_vcpu_set_boot(vcpu, 0, dtb_gpa) < 0) {
-        hyp_guest_vcpu_destroy(vcpu);
-        hyp_guest_vm_destroy(vm);
-        free(img);
-        free(dtb);
-        return fail_call("vcpu_set_boot", -1);
+    if (boot_failed || group.count != smp || hyp_guest_vm_set_marker(vm, marker) < 0) {
+        for (unsigned i = 0; i < group.count; i++) hyp_guest_vcpu_destroy(group.vcpus[i]);
+        hyp_guest_vm_destroy(vm); free(img); free(dtb);
+        return fail_call("vcpu_create/boot/marker", -1);
     }
-
-    if (hyp_guest_vm_set_marker(vm, marker) < 0) {
-        hyp_guest_vcpu_destroy(vcpu);
-        hyp_guest_vm_destroy(vm);
-        free(img);
-        free(dtb);
-        return fail_call("vm_set_marker", -1);
-    }
-
     printf("HYPVM: segments=%d entry_gpa=0x%llx image_end=0x%llx dtb_gpa=0x%llx\n",
            nseg, (unsigned long long)entry_gpa, (unsigned long long)image_end,
            (unsigned long long)dtb_gpa);
     printf("HYPVM: running\n");
     fflush(stdout);
 
-    long exit_reason;
-    if (managed && hyp_guest_console_config(vm, 1) < 0)
-        exit_reason = -1;
-    else
-        exit_reason = managed ? run_managed(vm, vcpu) : hyp_guest_vcpu_run(vcpu);
-
+    long exit_reason = managed ? run_group(&group) : hyp_guest_vcpu_run(group.vcpus[0]);
     struct hyp_guest_status st;
     memset(&st, 0, sizeof(st));
     long r = hyp_guest_vm_status(vm, &st);
-
-    hyp_guest_vcpu_destroy(vcpu);
+    for (unsigned i = 0; i < group.count; i++) hyp_guest_vcpu_destroy(group.vcpus[i]);
     hyp_guest_vm_destroy(vm);
     free(img);
     free(dtb);

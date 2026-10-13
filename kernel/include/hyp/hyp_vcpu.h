@@ -40,8 +40,8 @@
 #include "hyp/hyp.h"
 
 /* arch[] layout, pinned for the assembly (riscv64):
- *   [0]=ra [1]=sp [2]=gp [3]=tp [4..10]=t0-t6 [11..22]=s0-s11
- * 24 slots so widening by one register never moves another field. */
+ *   [0]=ra [1]=sp [2]=gp [3]=tp [4..10]=t0-t6 [11..22]=s0-s11, [23]=RISC-V guest VU return flag
+ * 24 slots; the final slot preserves guest privilege across RUN slices. */
 #define HYP_VCPU_ARCH_U64 24
 
 /* tramp[] layout, pinned for the assembly on the same terms as arch[] (the
@@ -58,6 +58,7 @@ typedef enum hyp_exit_reason {
     HYP_EXIT_YIELD,        /* resumable managed-console I/O or host IRQ */
     HYP_EXIT_STOPPED,      /* explicit controller cancellation */
     HYP_EXIT_PAUSED,       /* resumable controller pause */
+    HYP_EXIT_HART_STOPPED, /* guest HSM stopped hart, can be restarted */
 } hyp_exit_reason_t;
 
 typedef struct hyp_vcpu {
@@ -111,6 +112,7 @@ typedef struct hyp_vcpu {
     unsigned requests;
     unsigned irq_set, irq_clear;
     uint64_t hvip;
+    unsigned id, hart_state;
 } hyp_vcpu_t;
 
 /* ---- kernel C API (kernel/hyp/hyp_vcpu.c implements) ---- */
@@ -118,6 +120,16 @@ typedef struct hyp_vcpu {
 /* Create a vcpu over vm with its entry pinned to entry_gpa (the demo guest
  * runs at 0x80000000).  Takes one reference on vm. */
 hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa);
+#define HYP_HART_STARTED       0u
+#define HYP_HART_STOPPED       1u
+#define HYP_HART_START_PENDING 2u
+#define HYP_HART_STOP_PENDING  3u
+hyp_vcpu_t *hyp_vm_vcpu_get(hyp_vm_t *vm, uint64_t hartid);
+int hyp_vm_hart_start(hyp_vm_t *vm, uint64_t hartid, uint64_t entry, uint64_t opaque);
+int hyp_vm_hart_status(hyp_vm_t *vm, uint64_t hartid);
+int hyp_vm_ipi(hyp_vm_t *vm, uint64_t mask, uint64_t base);
+int hyp_vm_fence(hyp_vm_t *vm, uint64_t mask, uint64_t base, unsigned kind);
+
 void        hyp_vcpu_get(hyp_vcpu_t *vcpu);
 void        hyp_vcpu_put(hyp_vcpu_t *vcpu);
 
@@ -129,8 +141,8 @@ int  hyp_vm_load(hyp_vm_t *vm, uint64_t gpa, const void *bytes, uint64_t len);
 
 /* Run the guest until a terminal exit or a managed-mode HYP_EXIT_YIELD.  Returns 0 when the guest exited
  * cleanly (vcpu->exit says why; HYP_EXIT_SHUTDOWN is the demo's success
- * case) and a negative errno on internal failure. One owner per vCPU, one
- * active vCPU per VM, and one hardware activation per host CPU. */
+ * case) and a negative errno on internal failure. One owner per vCPU, a
+ * configured parallel limit per VM, and one hardware activation per host CPU. */
 int  hyp_vcpu_run(hyp_vcpu_t *vcpu);
 int  hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason);
 

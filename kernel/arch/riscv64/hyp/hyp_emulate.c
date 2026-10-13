@@ -184,7 +184,10 @@ static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
             vcpu->regs[10] = 0;
             break;
         case HYP_SBI_CONSOLE_PUTCHAR:
-            hyp_console_putchar(vcpu->vm, (uint8_t)vcpu->regs[10]);
+            if (hyp_console_putchar(vcpu->vm, (uint8_t)vcpu->regs[10]) == -EAGAIN) {
+                vcpu->exit = HYP_EXIT_YIELD;
+                return 0; /* retry the same ecall after host drains output */
+            }
             vcpu->regs[10] = 0;    /* the legacy convention's success value */
             break;
         case HYP_SBI_CONSOLE_GETCHAR:
@@ -192,6 +195,7 @@ static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
             break;
         case HYP_SBI_SHUTDOWN:
             vcpu->exit_scause = scause;
+            hyp_vm_shutdown(vcpu->vm);
             vcpu->exit = HYP_EXIT_SHUTDOWN;
             return 0;
         default:
@@ -207,37 +211,56 @@ static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
     }
 
     if (eid == HYP_SBI_EID_SRST) {
-        if (fid == 0) {
+        if (fid == 0 && vcpu->regs[10] == 0) {
             vcpu->exit_scause = scause;
+            hyp_vm_shutdown(vcpu->vm);
             vcpu->exit = HYP_EXIT_SHUTDOWN;
             return 0;
         }
-        if (fid == HYP_SBI_FID_SRST_RESET) {
-            kwarn("hyp: guest asked for a system reset, which this slice "
-                  "cannot honour\n");
-            hyp_vcpu_record_fault(vcpu, scause, eid, fid);
-            return 0;
-        }
-    } else if (eid == HYP_SBI_EID_HSM && fid == 0) {
-        kwarn("hyp: guest SBI hart_start (hw_id=%lu) -> NOT_SUPPORTED, "
-              "single-vcpu slice\n", (unsigned long)vcpu->regs[10]);
-        vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
-        vcpu->pc += 4;
-        return 1;
-    } else if (eid == HYP_SBI_EID_IPI && fid == 0) {
-        vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
-        vcpu->pc += 4;
-        return 1;
     }
-
-    /* The v0.2 subset is closed on purpose: an unknown call is a guest bug,
-     * not an invitation to implement the next one here.  The extension id goes
-     * in stval because that is the register the guest chose it with, and it is
-     * the only detail this exit has. */
-    kwarn("hyp: guest SBI call eid=%lx fid=%lu is not implemented\n",
-          (unsigned long)eid, (unsigned long)fid);
-    hyp_vcpu_record_fault(vcpu, scause, eid, fid);
-    return 0;
+    int rc = -EOPNOTSUPP;
+    uint64_t result = 0;
+    if (eid == 0x10) {
+        rc = 0;
+        switch (fid) {
+        case 0: result = 2; break; /* SBI 0.2: no unsupported newer HSM promises */
+        case 1: result = 0xa20; break; /* experimental A20 implementation ID */
+        case 2: result = 1; break;
+        case 3: {
+            uint64_t ext = vcpu->regs[10];
+            result = ext == 0x10 || ext == 0x54494d45 || ext == HYP_SBI_EID_IPI ||
+                     ext == HYP_SBI_EID_HSM || ext == 0x52464e43 || ext == HYP_SBI_EID_SRST;
+            break;
+        }
+        case 4: case 5: case 6: result = 0; break;
+        default: rc = -EOPNOTSUPP;
+        }
+    } else if (eid == 0x54494d45 && fid == 0) {
+        hyp_write_vstimecmp(vcpu->regs[10]); rc = 0;
+    } else if (eid == HYP_SBI_EID_HSM) {
+        if (fid == 0)
+            rc = hyp_vm_hart_start(vcpu->vm, vcpu->regs[10], vcpu->regs[11], vcpu->regs[12]);
+        else if (fid == 1) {
+            __atomic_store_n(&vcpu->hart_state, HYP_HART_STOP_PENDING, __ATOMIC_RELEASE);
+            vcpu->exit = HYP_EXIT_HART_STOPPED;
+            return 0;
+        } else if (fid == 2) {
+            rc = hyp_vm_hart_status(vcpu->vm, vcpu->regs[10]);
+            if (rc >= 0) { result = (uint64_t)rc; rc = 0; }
+        }
+    } else if (eid == HYP_SBI_EID_IPI && fid == 0) {
+        rc = hyp_vm_ipi(vcpu->vm, vcpu->regs[10], vcpu->regs[11]);
+    } else if (eid == 0x52464e43 && fid <= 2) {
+        if (fid == 0) __asm__ volatile("fence.i" ::: "memory");
+        else hyp_arch_host_tlb_fence();
+        rc = hyp_vm_fence(vcpu->vm, vcpu->regs[10], vcpu->regs[11], fid == 0 ? 0 : 1);
+    }
+    int64_t error = !rc ? 0 : rc == -EOPNOTSUPP ? -2 : rc == -EINVAL ? -3 :
+                    rc == -EALREADY ? -6 : -1;
+    vcpu->regs[10] = (uint64_t)error;
+    vcpu->regs[11] = result;
+    vcpu->pc += 4;
+    return 1;
 }
 
 /* ---- second-stage faults: what a guest memory access that leaves stage-1
@@ -734,7 +757,9 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
     }
 
     uint64_t value = a.value;
-    if (!hyp_dev_mmio(vcpu->vm, gpa, a.store, &value, a.len)) {
+    int io = hyp_dev_mmio(vcpu->vm, gpa, a.store, &value, a.len);
+    if (io == -EAGAIN) { vcpu->exit = HYP_EXIT_YIELD; return 0; }
+    if (io <= 0) {
         kerr("hyp: no device for guest %s of %d byte(s) at gpa=%lx\n",
              a.store ? "store" : "load", a.len, (unsigned long)gpa);
         hyp_vcpu_record_fault(vcpu, scause, gpa, htval);
@@ -834,17 +859,10 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
         unsigned f7    = (insn >> 25) & 0x7f;
 
         if (imm == HYP_SYS_WFI) {
-            /* WFI, treated as recoverable and stepped over.  The semantic
-             * trade-off is deliberate and narrow: this slice gives the
-             * guest's idle loop NO power semantics -- the instruction is
-             * consumed and the guest keeps running.  That is sound here
-             * because hstatus.VTW is left clear, so a guest WFI is not
-             * trapped by the hardware in the first place and this branch
-             * only exists for a platform that does gate it.  Where it
-             * matters, the guest's idle spin is woken by its own DELEGATED
-             * interrupts (hideleg carries the VS timer, bits 2/6/10), so
-             * "do not sleep" costs a spinning guest, not a lost wakeup. */
+            /* Never park a managed VMM inside hardware WFI. Return an idle
+             * slice so its host process can service input and cancellation. */
             vcpu->pc += 4;
+            if (vcpu->vm->managed_console) vcpu->exit = HYP_EXIT_YIELD;
             return 0;
         }
         if (f7 == HYP_SYS_FENCE_F7) {

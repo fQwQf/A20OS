@@ -453,6 +453,7 @@ LINUX_SYSCALL(hyp_vm_set_ram, 0, sys_hyp_vm_set_ram(args))
 LINUX_SYSCALL(hyp_vcpu_control, 0, sys_hyp_vcpu_control(args))
 LINUX_SYSCALL(hyp_vcpu_irq, 0, sys_hyp_vcpu_irq(args))
 LINUX_SYSCALL(hyp_stats, 0, sys_hyp_stats(args))
+LINUX_SYSCALL(hyp_vm_smp, 0, sys_hyp_vm_smp(args))
 /* A20OS-as-guest (hyp_vcpu.h v2): hand the vcpu its boot registers, name the
  * console substring that proves the guest reached its own banner, and read the
  * post-run status back. */

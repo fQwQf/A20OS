@@ -22,6 +22,7 @@
 #include "mm/slab.h"
 #include "hyp/hyp.h"
 #include "hyp/hyp_vcpu.h"
+#include "hyp/hyp_bridge.h"
 
 /* a20_channel_fd_install() returns a task-local fd.  Resolve its global fd
  * before exposing it to userspace so the bridge follows the same acquisition
@@ -194,7 +195,6 @@ int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args)
  * key cannot outlive its task.
  * ------------------------------------------------------------------------- */
 
-#define HYP_BRIDGE_SLOTS 16
 #define HYP_LOAD_MAX     (16 * 1024 * 1024)
 
 enum { HYP_SLOT_FREE = 0, HYP_SLOT_VM, HYP_SLOT_VCPU };
@@ -264,9 +264,15 @@ static void *hyp_slot_take(int owner, int kind, int64_t id)
     return obj;
 }
 
+static int hyp_bridge_owner(void)
+{
+    task_t *task = proc_current();
+    return task->tgid > 0 ? task->tgid : task->pid;
+}
+
 static hyp_vm_t *hyp_bridge_vm(int64_t id)
 {
-    hyp_vm_t *vm = (hyp_vm_t *)hyp_slot_get(proc_current()->pid, HYP_SLOT_VM, id);
+    hyp_vm_t *vm = (hyp_vm_t *)hyp_slot_get(hyp_bridge_owner(), HYP_SLOT_VM, id);
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return NULL;
     return vm;
@@ -275,7 +281,7 @@ static hyp_vm_t *hyp_bridge_vm(int64_t id)
 static hyp_vcpu_t *hyp_bridge_vcpu(int64_t id)
 {
     hyp_vcpu_t *vcpu =
-        (hyp_vcpu_t *)hyp_slot_get(proc_current()->pid, HYP_SLOT_VCPU, id);
+        (hyp_vcpu_t *)hyp_slot_get(hyp_bridge_owner(), HYP_SLOT_VCPU, id);
     if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
         return NULL;
     return vcpu;
@@ -304,7 +310,7 @@ int64_t sys_hyp_vm_create(const linux_syscall_args_t *args)
     if (!vm)
         return -ENOMEM;
 
-    int64_t id = hyp_slot_install(proc_current()->pid, HYP_SLOT_VM, vm);
+    int64_t id = hyp_slot_install(hyp_bridge_owner(), HYP_SLOT_VM, vm);
     if (id < 0) {
         hyp_vm_put(vm);
         return -ENOSPC;
@@ -406,7 +412,7 @@ int64_t sys_hyp_vcpu_create(const linux_syscall_args_t *args)
     if (!vcpu)
         return -ENOMEM;
 
-    int64_t id = hyp_slot_install(proc_current()->pid, HYP_SLOT_VCPU, vcpu);
+    int64_t id = hyp_slot_install(hyp_bridge_owner(), HYP_SLOT_VCPU, vcpu);
     if (id < 0) {
         hyp_vcpu_put(vcpu);
         return -ENOSPC;
@@ -447,7 +453,7 @@ int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
 {
     if (hyp_envelope_denied())
         return -EPERM;
-    hyp_vm_t *vm = (hyp_vm_t *)hyp_slot_take(proc_current()->pid,
+    hyp_vm_t *vm = (hyp_vm_t *)hyp_slot_take(hyp_bridge_owner(),
                                              HYP_SLOT_VM,
                                              (int64_t)args->arg[0]);
     if (!vm || vm->magic != HYP_VM_MAGIC)
@@ -460,7 +466,7 @@ int64_t sys_hyp_vcpu_destroy(const linux_syscall_args_t *args)
 {
     if (hyp_envelope_denied())
         return -EPERM;
-    hyp_vcpu_t *vcpu = hyp_slot_take(proc_current()->pid, HYP_SLOT_VCPU,
+    hyp_vcpu_t *vcpu = hyp_slot_take(hyp_bridge_owner(), HYP_SLOT_VCPU,
                                     (int64_t)args->arg[0]);
     if (!vcpu)
         return -EBADF;
@@ -592,29 +598,28 @@ int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
  * hyp_vm_put() free, and hyp_vm_put() tears down a stage-2 page table walk.
  * Vcpus go first, because each one holds a reference on its VM.
  */
-void hyp_bridge_task_exit(int pid)
+void hyp_bridge_detach_group(int pid, struct hyp_bridge_drop *drop)
 {
-    hyp_vcpu_t *drop_vcpu[HYP_BRIDGE_SLOTS];
-    hyp_vm_t    *drop_vm[HYP_BRIDGE_SLOTS];
-    int n_vcpu = 0, n_vm = 0;
-
+    drop->count = 0;
     uint64_t flags = spin_lock_irqsave(&g_hyp_slots_lock);
-    for (int i = 0; i < HYP_BRIDGE_SLOTS; i++) {
-        if (!g_hyp_slots[i].used || g_hyp_slots[i].owner != pid)
-            continue;
-        if (g_hyp_slots[i].kind == HYP_SLOT_VCPU && n_vcpu < HYP_BRIDGE_SLOTS)
-            drop_vcpu[n_vcpu++] = (hyp_vcpu_t *)g_hyp_slots[i].obj;
-        else if (g_hyp_slots[i].kind == HYP_SLOT_VM && n_vm < HYP_BRIDGE_SLOTS)
-            drop_vm[n_vm++] = (hyp_vm_t *)g_hyp_slots[i].obj;
+    for (unsigned i = 0; i < HYP_BRIDGE_SLOTS; i++) {
+        if (!g_hyp_slots[i].used || g_hyp_slots[i].owner != pid) continue;
+        unsigned n = drop->count++;
+        drop->objects[n] = g_hyp_slots[i].obj;
+        drop->kinds[n] = (unsigned char)g_hyp_slots[i].kind;
         g_hyp_slots[i].used = 0;
         g_hyp_slots[i].obj = NULL;
     }
     spin_unlock_irqrestore(&g_hyp_slots_lock, flags);
+}
 
-    for (int i = 0; i < n_vcpu; i++)
-        hyp_vcpu_put(drop_vcpu[i]);
-    for (int i = 0; i < n_vm; i++)
-        hyp_vm_put(drop_vm[i]);
+void hyp_bridge_release_group(struct hyp_bridge_drop *drop)
+{
+    for (unsigned i = 0; i < drop->count; i++)
+        if (drop->kinds[i] == HYP_SLOT_VCPU) hyp_vcpu_put(drop->objects[i]);
+    for (unsigned i = 0; i < drop->count; i++)
+        if (drop->kinds[i] == HYP_SLOT_VM) hyp_vm_put(drop->objects[i]);
+    drop->count = 0;
 }
 
 int64_t sys_hyp_console(const linux_syscall_args_t *args)
@@ -687,4 +692,15 @@ int64_t sys_hyp_stats(const linux_syscall_args_t *args)
     struct hyp_stats stats;
     hyp_stats_get(&stats);
     return copy_to_user((void *)(uintptr_t)args->arg[0], &stats, sizeof(stats)) < 0 ? -EFAULT : 0;
+}
+
+int64_t sys_hyp_vm_smp(const linux_syscall_args_t *args)
+{
+    if (hyp_envelope_denied()) return -EPERM;
+    hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
+    if (!vm) return -EBADF;
+    int rc = args->arg[1] > HYP_MAX_VCPUS ? -EINVAL :
+             hyp_vm_configure_smp(vm, (unsigned)args->arg[1]);
+    hyp_vm_put(vm);
+    return rc;
 }

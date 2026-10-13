@@ -34,6 +34,7 @@
 #define SYS_hyp_vcpu_control   918
 #define SYS_hyp_vcpu_irq       919
 #define SYS_hyp_stats          920
+#define SYS_hyp_vm_smp         921
 
 /* Source for the zero-fill tail of every PT_LOAD segment ([p_filesz, p_memsz)
  * is .bss).  The host's hyp_vm_load() copies from this pointer and zeroes the
@@ -50,6 +51,7 @@ const char *hyp_guest_exit_name(long exit_reason)
     case HYP_GUEST_EXIT_YIELD:    return "yield";
     case HYP_GUEST_EXIT_STOPPED:  return "stopped";
     case HYP_GUEST_EXIT_PAUSED:   return "paused";
+    case HYP_GUEST_EXIT_HART_STOPPED: return "hart-stopped";
     default:                      return "none";
     }
 }
@@ -405,13 +407,14 @@ size_t hyp_guest_fdt_capacity(void)
 {
     /* The blob is a few hundred bytes; this is its upper bound with room to
      * spare, and the caller checks the build's return against it. */
-    return 2048;
+    return 8192;
 }
 
-size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
-                           uint64_t mem_base, uint64_t mem_size,
-                           const char *bootargs)
+size_t hyp_guest_fdt_build_smp(unsigned char *out, size_t cap,
+                              uint64_t mem_base, uint64_t mem_size,
+                              const char *bootargs, unsigned cpus)
 {
+    if (!cpus || cpus > HYP_GUEST_MAX_VCPUS) return 0;
     size_t cap_st = cap / 2;          /* struct block gets half */
     size_t cap_sr = cap - cap_st;     /* strings block the rest */
     struct blob st = { malloc(cap_st), 0, cap_st };
@@ -426,7 +429,7 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
 
     if (!bootargs)
         bootargs = "";
-    const char *isa   = "rv64imafdch_sstc";
+    const char *isa   = "rv64imafdc_zicsr_zifencei_sstc";
     uint32_t timebase = 10000000;   /* qemu-virt aclin-mtimer */
     char memname[32];
 
@@ -460,6 +463,35 @@ size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
     blob_u32(&st, (uint32_t)strlen(isa) + 1);
     blob_u32(&st, blob_str(&sr, "riscv,isa"));
     blob_value(&st, isa, strlen(isa) + 1);
+    /* Dense virtual hart IDs are independent of host CPU/hart numbers. */
+    blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+    blob_u32(&st, blob_str(&sr, "#address-cells")); blob_u32(&st, 1);
+    blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+    blob_u32(&st, blob_str(&sr, "#size-cells")); blob_u32(&st, 0);
+    for (unsigned cpu = 0; cpu < cpus; cpu++) {
+        char name[32]; snprintf(name, sizeof(name), "cpu@%x", cpu);
+        blob_u32(&st, FDT_BEGIN_NODE); blob_name(&st, name);
+        const char *keys[] = {"device_type", "compatible", "status", "riscv,isa", "mmu-type"};
+        const char *values[] = {"cpu", "riscv", "okay", isa, "riscv,sv39"};
+        for (unsigned i = 0; i < 5; i++) {
+            blob_u32(&st, FDT_PROP); blob_u32(&st, (uint32_t)strlen(values[i]) + 1);
+            blob_u32(&st, blob_str(&sr, keys[i]));
+            blob_value(&st, values[i], strlen(values[i]) + 1);
+        }
+        blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+        blob_u32(&st, blob_str(&sr, "reg")); blob_u32(&st, cpu);
+        blob_u32(&st, FDT_BEGIN_NODE); blob_name(&st, "interrupt-controller");
+        blob_u32(&st, FDT_PROP); blob_u32(&st, sizeof("riscv,cpu-intc"));
+        blob_u32(&st, blob_str(&sr, "compatible"));
+        blob_value(&st, "riscv,cpu-intc", sizeof("riscv,cpu-intc"));
+        blob_u32(&st, FDT_PROP); blob_u32(&st, 0);
+        blob_u32(&st, blob_str(&sr, "interrupt-controller"));
+        blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+        blob_u32(&st, blob_str(&sr, "#interrupt-cells")); blob_u32(&st, 1);
+        blob_u32(&st, FDT_PROP); blob_u32(&st, 4);
+        blob_u32(&st, blob_str(&sr, "phandle")); blob_u32(&st, cpu + 1);
+        blob_u32(&st, FDT_END_NODE); blob_u32(&st, FDT_END_NODE);
+    }
     blob_u32(&st, FDT_END_NODE);
 
     blob_u32(&st, FDT_END_NODE);   /* root */
@@ -542,4 +574,14 @@ int hyp_guest_vcpu_irq(long vcpu, unsigned irq, int level)
 int hyp_guest_get_stats(struct hyp_guest_stats *out)
 {
     return (int)syscall(SYS_hyp_stats, (unsigned long)out);
+}
+
+size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
+                           uint64_t base, uint64_t size, const char *args)
+{
+    return hyp_guest_fdt_build_smp(out, cap, base, size, args, 1);
+}
+int hyp_guest_vm_smp(long vm, unsigned count)
+{
+    return (int)syscall(SYS_hyp_vm_smp, vm, count);
 }

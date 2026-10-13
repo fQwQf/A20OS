@@ -1,0 +1,10 @@
+name = "hyp-host-riscv64-smp2"
+description = "Experimental RISC-V H SMP2 host; runtime acceptance not passed"
+arch = "riscv64"
+abi = "both"
+[machine]
+vm_manager = true
+smp = 2
+memory = "2G"
+accel = "tcg"
+extra_qemu = ["-cpu", "rv64,h=true,sstc=true"]

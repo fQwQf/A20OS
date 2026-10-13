@@ -57,6 +57,7 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     vm->ram_base = backend->ram_base;
     vm->ram_size = mem_size;
     vm->refcount = 1;
+    vm->vcpu_limit = vm->parallel_limit = 1;
     spin_init(&vm->control_lock);
     spin_init(&vm->console_lock);
     task_t *owner = proc_current();
@@ -82,6 +83,35 @@ void hyp_vm_put(hyp_vm_t *vm)
     vm->magic = 0;
     __atomic_fetch_sub(&hyp_live_vms, 1, __ATOMIC_RELEASE);
     kfree(vm);
+}
+
+int hyp_vm_configure_smp(hyp_vm_t *vm, unsigned count)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC || !count || count > HYP_MAX_VCPUS)
+        return -EINVAL;
+    int rc = hyp_vm_begin_update(vm);
+    if (rc) return rc;
+    uint64_t flags = spin_lock_irqsave(&vm->control_lock);
+    unsigned existing = vm->vcpu_count;
+    spin_unlock_irqrestore(&vm->control_lock, flags);
+    if (existing) rc = -EBUSY;
+    else if (count > 1 && (!vm->backend->reset || !vm->backend->probe_smp))
+        rc = -EOPNOTSUPP;
+    else if (count > 1) rc = vm->backend->probe_smp(vm);
+    if (!rc) {
+        vm->vcpu_limit = count;
+        vm->parallel_limit = count;
+    }
+    hyp_vm_end_update(vm);
+    return rc;
+}
+
+int hyp_vm_remote_fence(hyp_vm_t *vm, uint32_t cpus, unsigned kind)
+{
+    cpus &= ~(1u << cpu_current_id());
+    if (!cpus) return 0;
+    if (!vm->backend->remote_fence) return -EOPNOTSUPP;
+    return vm->backend->remote_fence(vm, cpus, kind);
 }
 
 int hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
@@ -184,7 +214,8 @@ void hyp_vm_get(hyp_vm_t *vm)
 void hyp_vm_get_status(hyp_vm_t *vm, struct hyp_vm_status *status)
 {
     uint64_t flags = spin_lock_irqsave(&vm->control_lock);
-    status->exit = vm->last_exit[0];
+    status->exit = __atomic_load_n(&vm->broken, __ATOMIC_ACQUIRE) ? HYP_EXIT_ERROR :
+                   __atomic_load_n(&vm->shutdown, __ATOMIC_ACQUIRE) ? HYP_EXIT_SHUTDOWN : vm->last_exit[0];
     status->scause = vm->last_exit[1];
     status->stval = vm->last_exit[2];
     status->htval = vm->last_exit[3];
@@ -259,7 +290,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
     if (hyp_s2_translate(vm, gpa) != 0)
         return 0;
 
-    pfn_t pfn = pfa_alloc_page();
+    pfn_t pfn = pfa_alloc_flags(0, 0);
     if (pfn == PFN_NONE)
         return -ENOMEM;
     memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
@@ -277,7 +308,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
         if (vm->charge_cg)
             cg_mem_uncharge(vm->charge_cg, 1);
         frame_put(pfn);
-        return rc;
+        return rc == -EEXIST ? 0 : rc;
     }
     __atomic_add_fetch(&vm->charged_pages, 1, __ATOMIC_RELAXED);
     return 0;

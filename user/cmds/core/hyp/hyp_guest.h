@@ -36,6 +36,8 @@
 #define HYP_GUEST_EXIT_YIELD    4
 #define HYP_GUEST_EXIT_STOPPED  5
 #define HYP_GUEST_EXIT_PAUSED   6
+#define HYP_GUEST_EXIT_HART_STOPPED 7
+#define HYP_GUEST_MAX_VCPUS 8
 
 /* "shutdown" / "fault" / "error" / "none", for the exit=N(name) reports. */
 const char *hyp_guest_exit_name(long exit_reason);
@@ -57,6 +59,7 @@ struct hyp_guest_stats {
     uint64_t vms, vcpus, mapped_pages, table_pages, free_host_pages;
 };
 int hyp_guest_get_stats(struct hyp_guest_stats *out);
+int hyp_guest_vm_smp(long vm, unsigned count);
 
 /* ---- files ---- */
 
@@ -96,6 +99,10 @@ size_t hyp_guest_fdt_capacity(void);
 size_t hyp_guest_fdt_build(unsigned char *out, size_t cap,
                            uint64_t mem_base, uint64_t mem_size,
                            const char *bootargs);
+
+size_t hyp_guest_fdt_build_smp(unsigned char *out, size_t cap,
+                              uint64_t mem_base, uint64_t mem_size,
+                              const char *bootargs, unsigned cpus);
 
 /* ---- syscalls ---- */
 

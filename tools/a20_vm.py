@@ -27,12 +27,12 @@ from a20_make import REPO_ROOT
 from a20_runtime import _alive, _path, _read
 
 HEADER = struct.Struct("<4sHHQII")
-VERSION = 1
+VERSION = 2
 MAX_PAYLOAD = 4096
 HELLO, START, LIST, READ, WRITE, PAUSE, RESUME, STOP, DESTROY = range(1, 10)
 STATS = 10
 RESPONSE = 0x8000
-RECORD = struct.Struct("<32sIIiIQQ")
+RECORD = struct.Struct("<32sIIiIQQII")
 STATES = {1: "running", 2: "paused", 3: "stopping", 4: "exited", 5: "pausing", 6: "draining"}
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,30}\Z")
 
@@ -156,8 +156,8 @@ def _profile(value: str) -> dict:
     if (type(profile["schema"]) is not int or profile["schema"] != 1 or
             profile["arch"] != "riscv64" or profile["vmm"] != "hypvm" or
             profile["accel"] != "native" or type(profile["vcpus"]) is not int or
-            profile["vcpus"] != 1):
-        raise A20Error("current guest profile requires schema=1, riscv64, hypvm, native, vcpus=1")
+            not 1 <= profile["vcpus"] <= 8):
+        raise A20Error("current guest profile requires schema=1, riscv64, hypvm, native, vcpus=1..8")
     if type(profile["memory_mb"]) is not int or not 8 <= profile["memory_mb"] <= 256:
         raise A20Error("guest memory_mb must be 8–256")
     boot = profile["boot"]
@@ -175,10 +175,10 @@ def list_guests(host: str) -> tuple[list[dict], int]:
         raise A20Error("VM manager returned a truncated guest list")
     records = []
     for offset in range(0, len(data), RECORD.size):
-        name, pid, state, code, memory, generation, output_end = RECORD.unpack_from(data, offset)
+        name, pid, state, code, memory, generation, output_end, vcpus, reserved = RECORD.unpack_from(data, offset)
         records.append(dict(name=name.split(b"\0", 1)[0].decode("ascii"), pid=pid,
                             state=state, code=code, memory_mb=memory,
-                            generation=generation, output_end=output_end))
+                            generation=generation, output_end=output_end, vcpus=vcpus))
     return records, epoch
 
 
@@ -275,7 +275,7 @@ def dispatch(args) -> None:
         kernel = profile["boot"]["kernel"].encode()
         if len(kernel) >= 256:
             raise A20Error("guest kernel path exceeds 255 bytes")
-        payload = _name(name) + struct.pack("<I", profile["memory_mb"]) + kernel.ljust(256, b"\0")
+        payload = _name(name) + struct.pack("<II", profile["memory_mb"], profile["vcpus"]) + kernel.ljust(256, b"\0")
         data, epoch = _rpc(host, START, payload)
         if len(data) != 8:
             raise A20Error("VM manager returned an invalid start result")
@@ -286,7 +286,7 @@ def dispatch(args) -> None:
         records, _ = list_guests(host)
         for guest in records:
             print(f"{guest['name']}\t{STATES.get(guest['state'], 'unknown')}\t"
-                  f"{guest['memory_mb']} MiB\tpid={guest['pid']}\texit={guest['code']}")
+                  f"{guest['memory_mb']} MiB\tvcpus={guest['vcpus']}\tpid={guest['pid']}\texit={guest['code']}")
     elif action == "stats":
         data, _ = _rpc(host, STATS)
         if len(data) != 40: raise A20Error("VM manager stats layout mismatch")

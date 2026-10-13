@@ -19,11 +19,12 @@
 #include "hyp/vmd_protocol.h"
 #include "hyp/hyp_guest.h"
 #include <drivers/char/virtio_console.h>
+#define HYP_MAX_GUEST_CPUS HYP_GUEST_MAX_VCPUS
 
 struct guest {
     char name[VMD_NAME], kernel[VMD_PATH];
     pid_t pid;
-    unsigned state, memory_mb;
+    unsigned state, memory_mb, vcpus;
     int exit_code, input_fd, output_fd;
     uint64_t output_end, stop_deadline, generation;
     uint8_t history[VMD_HISTORY], input[VMD_INPUT];
@@ -87,8 +88,9 @@ static void close_pipes(struct guest *g)
 static int start_guest(const uint8_t *p)
 {
     unsigned memory = (unsigned)vmd_get(p + VMD_NAME, 4);
-    const char *kernel = (const char *)p + VMD_NAME + 4;
-    if (memory < 8 || memory > 256 ||
+    unsigned vcpus = (unsigned)vmd_get(p + VMD_NAME + 4, 4);
+    const char *kernel = (const char *)p + VMD_NAME + 8;
+    if (!vcpus || vcpus > HYP_MAX_GUEST_CPUS || memory < 8 || memory > 256 ||
         !memchr(kernel, 0, VMD_PATH) || strncmp(kernel, "/bin/boot/", 10) ||
         strstr(kernel, "..") || !kernel[10]) return -EINVAL;
     /* Boot artifacts, never executable paths. No shell parsing is involved. */
@@ -98,7 +100,7 @@ static int start_guest(const uint8_t *p)
             return -EINVAL;
     struct guest *same = find_guest(p);
     if (same)
-        return same->memory_mb == memory && !strcmp(same->kernel, kernel) ?
+        return same->memory_mb == memory && same->vcpus == vcpus && !strcmp(same->kernel, kernel) ?
                0 : -EEXIST;
     unsigned total = 0;
     struct guest *g = NULL;
@@ -143,10 +145,11 @@ static int start_guest(const uint8_t *p)
         /* Close other guests' inherited pipe ends, preventing false EOF. */
         for (unsigned i = 0; i < VMD_MAX_GUESTS; i++) close_pipes(&guests[i]);
         if (control_fd >= 0) close(control_fd);
-        char mb[16];
+        char mb[16], cpu_count[16];
         snprintf(mb, sizeof(mb), "%u", memory);
+        snprintf(cpu_count, sizeof(cpu_count), "%u", vcpus);
         char *const argv[] = { "hypvm", "--managed", "-k", (char *)kernel,
-                               "-m", mb, NULL };
+                               "-m", mb, "--smp", cpu_count, NULL };
         execv("/bin/hypvm", argv);
         perror("a20-vmd: exec hypvm");
         _exit(127);
@@ -156,7 +159,7 @@ static int start_guest(const uint8_t *p)
     memcpy(g->name, p, VMD_NAME);
     snprintf(g->kernel, sizeof(g->kernel), "%s", kernel);
     g->generation = ++generation_count;
-    g->pid = pid; g->state = VMD_RUNNING; g->memory_mb = memory;
+    g->pid = pid; g->state = VMD_RUNNING; g->memory_mb = memory; g->vcpus = vcpus;
     g->input_fd = input[1]; g->output_fd = output[0];
     return 0;
 }
@@ -205,6 +208,7 @@ static int dispatch(uint16_t op, const uint8_t *p, size_t len,
             vmd_put(record + 44, g->memory_mb, 4);
             vmd_put(record + 48, g->generation, 8);
             vmd_put(record + 56, g->output_end, 8);
+            vmd_put(record + 64, g->vcpus, 4); vmd_put(record + 68, 0, 4);
             *out_len += VMD_RECORD;
         }
         return 0;

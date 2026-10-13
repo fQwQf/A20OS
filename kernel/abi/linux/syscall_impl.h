@@ -332,6 +332,7 @@ int64_t sys_hyp_vm_set_ram(const linux_syscall_args_t *args);
 int64_t sys_hyp_vcpu_control(const linux_syscall_args_t *args);
 int64_t sys_hyp_vcpu_irq(const linux_syscall_args_t *args);
 int64_t sys_hyp_stats(const linux_syscall_args_t *args);
+int64_t sys_hyp_vm_smp(const linux_syscall_args_t *args);
 
 /* A20OS-as-guest additions (hyp_vcpu.h v2): the boot arguments a guest kernel
  * is entered with, the console marker its output is scanned for, and the

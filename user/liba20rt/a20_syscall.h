@@ -301,6 +301,7 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 #define A20_SYS_hyp_vcpu_control 0x0F0B
 #define A20_SYS_hyp_vcpu_irq 0x0F0C
 #define A20_SYS_hyp_stats 0x0F0D
+#define A20_SYS_hyp_vm_smp 0x0F0E
 #define A20_SYS_hyp_vm_status 0x0F0A
 #define A20_SYS_hyp_vm_set_marker 0x0F09
 #define A20_SYS_hyp_vcpu_set_boot 0x0F08
