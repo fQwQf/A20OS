@@ -522,7 +522,7 @@ static int futex_wake_op_new_value(int oldval, int op, int oparg, int *out)
 {
     switch (op & 0xf) {
     case FUTEX_OP_SET:  *out = oparg; return 0;
-    case FUTEX_OP_ADD:  *out = oldval + oparg; return 0;
+    case FUTEX_OP_ADD:  *out = (int)((uint32_t)oldval + (uint32_t)oparg); return 0;
     case FUTEX_OP_OR:   *out = oldval | oparg; return 0;
     case FUTEX_OP_ANDN: *out = oldval & ~oparg; return 0;
     case FUTEX_OP_XOR:  *out = oldval ^ oparg; return 0;
@@ -530,79 +530,127 @@ static int futex_wake_op_new_value(int oldval, int op, int oparg, int *out)
     }
 }
 
+/* Preparation may fault/COW; mapping and the atomic store share mm->lock. */
+static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
+                               uintptr_t *pkey_out);
+
+static unsigned futex_count_locked(wait_queue_t *q, futex_wake_arg_t *arg,
+                                    unsigned limit)
+{
+    unsigned count = 0;
+    for (wait_queue_entry_t *e = q->head; e && count < limit; e = e->next)
+        if (futex_wake_match(e, arg)) count++;
+    return count;
+}
+
+static unsigned futex_collect_batches_locked(wait_queue_t *q,
+                                    futex_wake_arg_t *arg, unsigned limit,
+                                    proc_wake_q_t *batches, size_t nr_batches)
+{
+    unsigned total = 0;
+    for (size_t i = 0; i < nr_batches && total < limit; i++) {
+        unsigned got = wait_queue_collect_matching_locked(q, futex_wake_match,
+                          arg, limit - total, PROC_WAKE_EVENT, &batches[i], NULL);
+        total += got;
+        if (!got) break;
+    }
+    return total;
+}
+
 int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
                          int *uaddr2, int encoded_op, int private)
 {
     if (!uaddr || !uaddr2) return -EFAULT;
+    if ((uintptr_t)uaddr > USER_VA_LIMIT - sizeof(int) ||
+        (uintptr_t)uaddr2 > USER_VA_LIMIT - sizeof(int))
+        return -EFAULT;
+    if (((uintptr_t)uaddr | (uintptr_t)uaddr2) & (sizeof(int) - 1))
+        return -EINVAL;
     if (wake_nr < 0 || wake2_nr < 0) return -EINVAL;
 
-    int oldval;
-    if (copy_from_user(&oldval, uaddr2, sizeof(oldval)) < 0)
-        return -EFAULT;
-
-    int op = (encoded_op >> 28) & 0xf;
-    int cmp = (encoded_op >> 24) & 0xf;
-    int oparg = (encoded_op >> 12) & 0xfff;
-    int cmparg = encoded_op & 0xfff;
-    if (op & FUTEX_OP_OPARG_SHIFT) {
-        op &= ~FUTEX_OP_OPARG_SHIFT;
-        if (oparg >= 31) return -EINVAL;
-        oparg = 1 << oparg;
-    }
-
-    int newval;
-    int vr = futex_wake_op_new_value(oldval, op, oparg, &newval);
-    if (vr < 0) return vr;
-    if (copy_to_user(uaddr2, &newval, sizeof(newval)) < 0)
-        return -EFAULT;
+    uint32_t encoded = (uint32_t)encoded_op;
+    int op = (int)((encoded >> 28) & 7);
+    int cmp = (int)((encoded >> 24) & 0xf);
+    int oparg = (int)(((encoded >> 12) & 0xfff) ^ 0x800) - 0x800;
+    int cmparg = (int)((encoded & 0xfff) ^ 0x800) - 0x800;
+    /* Match Linux's legacy masked-shift behavior, including bit 31. */
+    if (encoded & ((uint32_t)FUTEX_OP_OPARG_SHIFT << 28))
+        oparg = (int)(1U << ((unsigned)oparg & 31));
+    if (op > FUTEX_OP_XOR) return -ENOSYS;
 
     task_t *cur = proc_current();
-    mm_struct_t *mm = cur ? cur->mm : NULL;
-    uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t phys1 = private ? 0 : futex_phys_key(uaddr);
-    uintptr_t pkey1 = private ? 0 : phys1;
-    uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t phys2 = private ? 0 : futex_phys_key(uaddr2);
-    uintptr_t pkey2 = private ? 0 : phys2;
-    unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
-    unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));
-
-    int woke = 0;
-    futex_wake_arg_t arg1 = { mm, vkey1, pkey1, FUTEX_BITSET_MATCH_ANY };
-    while (woke < wake_nr) {
-        unsigned want = (unsigned)(wake_nr - woke);
-        if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        unsigned got = futex_collect_below(b1, !private && phys1 == 0,
-                                           futex_wake_match, &arg1,
-                                           want, PROC_WAKE_EVENT, &wake_q, NULL);
-        if (got == 0)
-            break;
-        (void)proc_wake_q_flush(&wake_q);
-        woke += (int)got;
-    }
-
-    if (futex_wake_op_cmp(oldval, cmp, cmparg)) {
-        int woke2 = 0;
-        futex_wake_arg_t arg2 = { mm, vkey2, pkey2, FUTEX_BITSET_MATCH_ANY };
-        while (woke2 < wake2_nr) {
-            unsigned want = (unsigned)(wake2_nr - woke2);
-            if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
-            proc_wake_q_t wake_q;
-            proc_wake_q_init(&wake_q);
-            unsigned got = futex_collect_below(b2, !private && phys2 == 0,
-                                               futex_wake_match, &arg2,
-                                               want, PROC_WAKE_EVENT,
-                                               &wake_q, NULL);
-            if (got == 0)
-                break;
-            (void)proc_wake_q_flush(&wake_q);
-            woke += (int)got;
-            woke2 += (int)got;
+    if (!cur || !cur->mm) return -ESRCH;
+    mm_struct_t *mm = cur->mm;
+    uintptr_t vkey1 = (uintptr_t)uaddr, vkey2 = (uintptr_t)uaddr2;
+    for (;;) {
+        int dummy;
+        /* A shared key requires a resident translation. Private keys do not
+         * dereference uaddr1, matching the wake side's virtual-key contract. */
+        if (!private && copy_from_user(&dummy, uaddr, sizeof(dummy)) < 0)
+            return -EFAULT;
+        int r = user_prepare_write(cur, (uint64_t)vkey2);
+        if (r < 0) return r;
+        uint64_t mf = spin_lock_irqsave(&mm->lock);
+        volatile int *word = NULL;
+        uintptr_t phys1 = 0, phys2 = 0;
+        r = futex_user_word_map(cur, uaddr2, &word, &phys2);
+        if (r < 0 || (!private &&
+                      !futex_user_word_locked(cur, uaddr, &phys1))) {
+            spin_unlock_irqrestore(&mm->lock, mf);
+            if (r < 0 && r != -EAGAIN) return r;
+            continue;
         }
+        if (private) phys2 = 0;
+        unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
+        unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));
+        wait_queue_t *q1 = &g_futex_buckets[b1], *q2 = &g_futex_buckets[b2];
+        wait_queue_t *lo = b1 < b2 ? q1 : q2;
+        wait_queue_t *hi = b1 < b2 ? q2 : q1;
+        uint64_t lf = spin_lock_irqsave(&lo->lock), hf = 0;
+        if (hi != lo) hf = spin_lock_irqsave(&hi->lock);
+        futex_wake_arg_t arg1 = { mm, vkey1, phys1, FUTEX_BITSET_MATCH_ANY };
+        futex_wake_arg_t arg2 = { mm, vkey2, phys2, FUTEX_BITSET_MATCH_ANY };
+        unsigned count1 = cmp <= FUTEX_OP_CMP_GE ?
+                          futex_count_locked(q1, &arg1, (unsigned)wake_nr) : 0;
+        unsigned count2 = cmp <= FUTEX_OP_CMP_GE ?
+                          futex_count_locked(q2, &arg2, (unsigned)wake2_nr) : 0;
+        size_t n1 = ((size_t)count1 + PROC_WAKE_Q_CAPACITY - 1) / PROC_WAKE_Q_CAPACITY;
+        size_t n2 = ((size_t)count2 + PROC_WAKE_Q_CAPACITY - 1) / PROC_WAKE_Q_CAPACITY;
+        size_t n = n1 + n2;
+        /* Reserve only for existing matches, not the caller's potentially
+         * huge wake count. Allocate before modifying the word. All selected
+         * references are detached while both buckets remain locked; flushing
+         * batches afterwards must not select newly arrived waiters. */
+        proc_wake_q_t *batches = n && n <= SIZE_MAX / sizeof(*batches) ?
+                                  kcalloc_atomic(n, sizeof(*batches)) : NULL;
+        int result = -ENOMEM;
+        if (!n || batches) {
+            int oldval = __atomic_load_n(word, __ATOMIC_SEQ_CST);
+            int newval = oldval;
+            do {
+                (void)futex_wake_op_new_value(oldval, op, oparg, &newval);
+            } while (!__atomic_compare_exchange_n(word, &oldval, newval, 0,
+                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+            /* Linux reports an unknown comparison after the atomic update,
+             * but wakes neither queue. An unknown operation changes nothing. */
+            result = -ENOSYS;
+            if (cmp <= FUTEX_OP_CMP_GE) {
+                result = (int)futex_collect_batches_locked(q1, &arg1, count1, batches, n1);
+                if (futex_wake_op_cmp(oldval, cmp, cmparg) && count2)
+                    result += (int)futex_collect_batches_locked(q2, &arg2,
+                                                         count2, batches + n1, n2);
+            }
+        }
+        if (hi != lo) spin_unlock_irqrestore(&hi->lock, hf);
+        spin_unlock_irqrestore(&lo->lock, lf);
+        spin_unlock_irqrestore(&mm->lock, mf);
+        if (batches) {
+            for (size_t i = 0; i < n; ++i)
+                (void)proc_wake_q_flush(&batches[i]);
+            kfree(batches);
+        }
+        return result;
     }
-    return woke;
 }
 
 /*

@@ -54,6 +54,7 @@ STEP35_MARKERS = [
     "SCHED_STRESS: PASS", "FUTEX_STRESS: PASS",
     "SCHED_STRESS: rt-bandwidth-progress PASS",
     "FUTEX_STRESS: pi-cow-isolation PASS",
+    "FUTEX_STRESS: wake-op-atomicity PASS",
     "VFS_STRESS: exec-symlink-origin PASS",
     "FUTEX_STRESS: unrelated-wake-isolation PASS",
     "FUTEX_STRESS: stale-timeout-isolation PASS",

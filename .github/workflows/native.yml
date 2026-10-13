@@ -40,11 +40,12 @@ jobs:
         run: make ARCH=${{ matrix.arch }} smoke-native-suite
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
-      - name: AArch64 PTY and timeout ownership pressure
+      - name: AArch64 PTY, timeout and SMP futex pressure
         if: matrix.arch == 'aarch64'
         run: |
           make smoke-pty-stress-aarch64
           make smoke-timeout-test-aarch64
+          make smoke-futex-stress-aarch64-smp4
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
       - name: Upload Native smoke logs

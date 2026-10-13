@@ -703,7 +703,8 @@ QEMU 路径仍经 Make 的构建目录解析器适配 preempt/SMP 变体。
 本轮新增的运行断言（待允许后执行）：`native-mm` 的 PROT_NONE 上限、越界
 MAP_FIXED 不破坏既有页、反复 open/close 不占满 fd 表；`native-deepen` 的名称
 前缀替换与过滤；`sched_stress` 的 RT 零上限拒绝、软上限放行、硬上限提权拒绝，
-以及同 CPU FIFO 任务的普通进展和预算恢复；`futex_stress` 的 PI 私有页 COW 隔离；
+以及同 CPU FIFO 任务的普通进展和预算恢复；`futex_stress` 的 PI 私有页 COW 隔离、
+WAKE_OP 原子累加/参数/COW 与同桶 70 等待者批次唤醒；
 `vfs_stress` 的目录与最终文件多层符号链接 exec 后 `/proc/self/exe` 路径。
 `/proc/a20/lock_contention` 的 `park_lock` 是所有任务锁的静态汇总，任务退出
 不移除历史计数；`/proc/a20/perf` 的 `kernel_preempts` / `trap_storms` / `rt_throttles` 按 CPU 报告。
@@ -711,6 +712,10 @@ MAP_FIXED 不破坏既有页、反复 open/close 不占满 fd 表；`native-deep
 历史 `native-mm` 的 FILE 失败与 VMO 索引引用问题修复仍需在本次提交重验；
 `check-native-abi-coverage`、`check-abi-config-guard` 是源码契约，不能代替运行。
 `ABI=linux` 与 `ABI=both` 的同语义结果交叉比较仍未接线。
+
+Futex 新增 `smoke-futex-stress-smp4` 与 `smoke-futex-stress-aarch64-smp4`，
+两者都显式构建 `NR_CPUS=4`、启动 4 vCPU，并要求 `wake-op-atomicity PASS`。
+它们与原单核用例共享断言，已接入 CI，本轮未运行。
 
 ### 用户态文件系统宿主（uxfs + ufsd）
 

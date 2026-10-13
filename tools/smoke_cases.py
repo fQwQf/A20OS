@@ -16,6 +16,7 @@ Semantics worth knowing when editing a case:
 
 from __future__ import annotations
 
+from copy import deepcopy
 from smoke_platforms import case_for_arch
 
 CASES: dict[str, dict] = {
@@ -2812,7 +2813,22 @@ CASES: dict[str, dict] = {
 }
 
 CASES["smoke-native-ubd"]["build"]["extra-targets"] = ["native-ubd-image"]
-CASES["smoke-futex-stress"]["expect"].append("FUTEX_STRESS: pi-cow-isolation PASS")
+for _base in ("smoke-futex-stress", "smoke-futex-stress-aarch64"):
+    CASES[_base]["expect"].extend([
+        "FUTEX_STRESS: pi-cow-isolation PASS",
+        "FUTEX_STRESS: wake-op-atomicity PASS",
+    ])
+    CASES[_base]["timeout"] = "60s"
+    _alias = _base + "-smp4"
+    CASES[_alias] = deepcopy(CASES[_base])
+    CASES[_alias]["build"]["vars"] = [
+        v for v in CASES[_alias]["build"]["vars"] if not v.startswith("NR_CPUS=")
+    ] + ["NR_CPUS=4"]
+    CASES[_alias]["gate"]["cpus"] = "4"
+    _argv = CASES[_alias]["argv"]
+    _argv[_argv.index("-smp") + 1] = "4"
+    CASES[_alias]["log"] = CASES[_base]["log"].replace(".log", "-smp4.log")
+    CASES[_alias]["pass_msg"] = f"{_alias}: PASS; log saved to $log"
 CASES["smoke-sched-stress"]["expect"].extend([
     "SCHED_STRESS: rt permission/limits ok",
     "SCHED_STRESS: rt-bandwidth-progress PASS",

@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -24,6 +25,7 @@
 #define FUTEX_WAKE 1
 #define FUTEX_REQUEUE 3
 #define FUTEX_CMP_REQUEUE 4
+#define FUTEX_WAKE_OP 5
 #define FUTEX_LOCK_PI 6
 #define FUTEX_UNLOCK_PI 7
 #define FUTEX_WAIT_BITSET 9
@@ -356,6 +358,187 @@ static int pi_self_deadlock(void)
     return 0;
 }
 
+static uint32_t wake_op_encoding(unsigned op, int arg, unsigned cmp, int cmp_arg)
+{
+    return (op << 28) | (cmp << 24) |
+           (((uint32_t)arg & 0xfff) << 12) | ((uint32_t)cmp_arg & 0xfff);
+}
+
+static int wake_op_batched_waiters(void)
+{
+    enum { WAITERS = 70 };
+    int *words = shared_words(2);
+    if (!words) return fail("wake-op-batch-map");
+    words[0] = words[1] = 0;
+    pid_t children[WAITERS];
+    int count = 0, rc = 0;
+    for (; count < WAITERS; count++) {
+        children[count] = fork();
+        if (children[count] < 0) {
+            rc = fail("wake-op-batch-fork");
+            break;
+        }
+        if (!children[count]) {
+            __atomic_fetch_add(&words[1], 1, __ATOMIC_SEQ_CST);
+            struct timespec timeout = {10, 0};
+            long r = syscall(SYS_futex, &words[0], FUTEX_WAIT, 0,
+                              &timeout, NULL, 0);
+            _exit(r == 0 ? 0 : 5);
+        }
+    }
+    if (!rc) {
+        for (int i = 0; i < 5000 &&
+             __atomic_load_n(&words[1], __ATOMIC_SEQ_CST) != WAITERS; i++)
+            usleep(1000);
+        if (words[1] != WAITERS) rc = fail("wake-op-batch-ready");
+    }
+    if (!rc) {
+        /* Both addresses deliberately hash to the same queue. The second
+         * phase has fewer entries than its pre-update count after the first
+         * 64 entries have been removed. It must not overrun its wake batches. */
+        usleep(20000);
+        uint32_t op = wake_op_encoding(1, 0, 0, 0);
+        int total = 0;
+        for (int i = 0; i < 1000 && total < WAITERS; i++) {
+            long n = syscall(SYS_futex, &words[0], FUTEX_WAKE_OP, 64,
+                              64, &words[0], op);
+            if (n < 0 || n > WAITERS - total) {
+                rc = fail("wake-op-batch-count");
+                break;
+            }
+            total += (int)n;
+            if (total < WAITERS) usleep(1000);
+        }
+        if (total != WAITERS) rc = fail("wake-op-batch-incomplete");
+    }
+    for (int i = 0; i < count; i++) {
+        if (rc) kill(children[i], SIGKILL);
+        int status;
+        if (waitpid(children[i], &status, 0) != children[i] ||
+            !WIFEXITED(status) || WEXITSTATUS(status)) rc = 1;
+    }
+    munmap(words, 2 * sizeof(int));
+    return rc;
+}
+
+static int wake_op_atomicity(void)
+{
+    int *words = shared_words(3);
+    if (!words)
+        return fail("wake-op-map");
+    memset(words, 0, 3 * sizeof(int));
+    uint32_t add = wake_op_encoding(1 /* ADD */, 1, 0 /* EQ */, 0);
+    pid_t workers[2];
+    for (int worker = 0; worker < 2; ++worker) {
+        workers[worker] = fork();
+        if (workers[worker] < 0) {
+            __atomic_store_n(&words[2], 1, __ATOMIC_RELEASE);
+            for (int j = 0; j < worker; ++j)
+                (void)wait_exit(workers[j], 0, "wake-op-fork-cleanup");
+            munmap(words, 3 * sizeof(int));
+            return fail("wake-op-fork");
+        }
+        if (!workers[worker]) {
+            while (!__atomic_load_n(&words[2], __ATOMIC_ACQUIRE))
+                usleep(1000);
+            for (int i = 0; i < 4000; ++i) {
+                if (worker == 0) {
+                    if (syscall(SYS_futex, &words[0], FUTEX_WAKE_OP, 0,
+                                0, &words[1], add) < 0)
+                        _exit(2);
+                } else {
+                    __atomic_fetch_add(&words[1], 1, __ATOMIC_SEQ_CST);
+                    if (!(i % 64)) usleep(1000);
+                }
+            }
+            _exit(0);
+        }
+    }
+    __atomic_store_n(&words[2], 1, __ATOMIC_RELEASE);
+    int rc = 0;
+    for (int i = 0; i < 4000; ++i) {
+        if (syscall(SYS_futex, &words[0], FUTEX_WAKE_OP, 0,
+                    0, &words[1], add) < 0) {
+            rc = fail("wake-op-add");
+            break;
+        }
+    }
+    for (int i = 0; i < 2; ++i)
+        if (wait_exit(workers[i], 0, "wake-op-worker")) rc = 1;
+    if (!rc && words[1] != 12000)
+        rc = fail("wake-op-lost-update");
+    munmap(words, 3 * sizeof(int));
+    if (rc) return rc;
+
+    int *private_word = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (private_word == MAP_FAILED) return fail("wake-op-cow-map");
+    *private_word = 17;
+    pid_t child = fork();
+    if (child < 0) {
+        munmap(private_word, 4096);
+        return fail("wake-op-cow-fork");
+    }
+    uint32_t subtract = wake_op_encoding(1, -1, 0, -1);
+    if (!child) {
+        long r = syscall(SYS_futex, private_word, FUTEX_WAKE_OP, 0,
+                          0, private_word, subtract);
+        _exit(r == 0 && *private_word == 16 ? 0 : 3);
+    }
+    rc = wait_exit(child, 0, "wake-op-cow-child");
+    if (*private_word != 17) rc = fail("wake-op-cow-polluted");
+    uint32_t shift = wake_op_encoding(4 | 8 /* XOR|SHIFT */, 31, 0, 0);
+    if (syscall(SYS_futex, private_word, FUTEX_WAKE_OP, 0,
+                0, private_word, shift) < 0 || (uint32_t)*private_word != 0x80000011U)
+        rc = fail("wake-op-shift31");
+    int before = *private_word;
+    uint32_t invalid = wake_op_encoding(7, 1, 0, 0);
+    errno = 0;
+    if (syscall(SYS_futex, private_word, FUTEX_WAKE_OP, 0,
+                0, private_word, invalid) != -1 || errno != ENOSYS ||
+        *private_word != before)
+        rc = fail("wake-op-invalid-mutated");
+    invalid = wake_op_encoding(0 /* SET */, 1, 15, 0);
+    errno = 0;
+    if (syscall(SYS_futex, private_word, FUTEX_WAKE_OP, 0,
+                0, private_word, invalid) != -1 || errno != ENOSYS ||
+        *private_word != 1)
+        rc = fail("wake-op-invalid-comparison");
+    errno = 0;
+    if (syscall(SYS_futex, private_word, FUTEX_WAKE_OP, 0,
+                0, (char *)private_word + 1, add) != -1 || errno != EINVAL)
+        rc = fail("wake-op-alignment");
+    munmap(private_word, 4096);
+    words = shared_words(2);
+    if (!words) return fail("wake-op-compare-map");
+    words[0] = 0;
+    words[1] = -1;
+    child = fork();
+    if (child < 0) {
+        munmap(words, 2 * sizeof(int));
+        return fail("wake-op-compare-fork");
+    }
+    if (!child) {
+        struct timespec timeout = {2, 0};
+        long r = syscall(SYS_futex, &words[1], FUTEX_WAIT, -1,
+                          &timeout, NULL, 0);
+        _exit(r == 0 ? 0 : 4);
+    }
+    uint32_t compare = wake_op_encoding(1 /* ADD */, 0, 0 /* EQ */, -1);
+    long woke = 0;
+    for (int i = 0; i < 1000 && !woke; ++i) {
+        woke = syscall(SYS_futex, &words[0], FUTEX_WAKE_OP, 0,
+                        1, &words[1], compare);
+        if (!woke) usleep(1000);
+    }
+    if (woke != 1 || words[1] != -1) rc = fail("wake-op-signed-compare");
+    if (wait_exit(child, 0, "wake-op-compare-child")) rc = 1;
+    munmap(words, 2 * sizeof(int));
+    if (!rc) rc = wake_op_batched_waiters();
+    if (!rc) printf("FUTEX_STRESS: wake-op-atomicity PASS\n");
+    return rc;
+}
+
 static int pi_cow_isolation(void)
 {
     int *word = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -532,6 +715,8 @@ int main(void)
     if (pi_self_deadlock() != 0)
         return 1;
     if (pi_cow_isolation() != 0)
+        return 1;
+    if (wake_op_atomicity() != 0)
         return 1;
     if (pi_owner_died() != 0)
         return 1;

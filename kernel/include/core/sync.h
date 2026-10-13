@@ -89,6 +89,14 @@ unsigned wait_queue_collect_matching(wait_queue_t *q,
                                      proc_wake_reason_t reason,
                                      proc_wake_q_t *wake_q,
                                      bool *complete);
+/* Same operation with q->lock already held; flush only after dropping all
+ * object/MM/queue locks. Detached references transfer to wake_q. */
+unsigned wait_queue_collect_matching_locked(wait_queue_t *q,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit,
+                                     proc_wake_reason_t reason,
+                                     proc_wake_q_t *wake_q,
+                                     bool *complete);
 /*
  * Move up to @limit matching entries from q_from to q_to, invoking @rekey on
  * each moved entry so its key/priv can be rebound to the destination object.

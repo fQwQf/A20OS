@@ -624,6 +624,13 @@ smoke-futex-stress:
 smoke-futex-stress-aarch64:
 	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64
 
+.PHONY: smoke-futex-stress-smp4 smoke-futex-stress-aarch64-smp4
+smoke-futex-stress-smp4:
+	$(PYTHON) tools/smoke.py smoke-futex-stress-smp4
+
+smoke-futex-stress-aarch64-smp4:
+	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64-smp4
+
 .PHONY: smoke-symlink-mount smoke-drm-sysfs smoke-drm-prime
 smoke-symlink-mount:
 	$(PYTHON) tools/smoke.py smoke-symlink-mount

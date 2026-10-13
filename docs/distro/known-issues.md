@@ -14,6 +14,7 @@ Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口
 | RISC-V 桌面交互、MCS 持锁调度与 pgrep 崩溃 | x86_64 已有 10-11 交互验收记录（见下），其结论不覆盖 RISC-V；本轮未运行复验 |
 | mpv/LuaJIT、tumblerd 与 JVM 退出异常 | 既有 COW、FP、TLS 修复不能证明这些症状全部消失，仍需干净镜像复现 |
 | futex PI 的 prepare 后 fork/COW 窗口 | 编码已补持锁可写复查、解锁重试，并在 COW 后选择桶；待执行 `pi-cow-isolation` 及 SMP 交错验收 |
+| FUTEX_WAKE_OP 并发丢更新与唤醒事务 | 已补 COW 后 CAS、有符号参数及有序双桶摘除；新增并发和 70 等待者用例，待运行双架构 SMP 门禁 |
 | JVM 经符号链接启动时的 `$ORIGIN` | exec 已从打开文件记录最终路径，并为基线解析补入长度/IN_ROOT 边界检查；待执行 `exec-symlink-origin` 与 JVM 端到端验收 |
 | dbus NoReply、SCM_CREDENTIALS pid=-1、udev worker 等待 | 接收 socket 的 PASSCRED 继承已在基线；当前凭据捕获/送达链已复核，尚无能解释 pid=-1 的新证据 |
 | 菜单、Backspace 与部分客户端呈现的历史兼容性问题 | 先按下述 x86_64 最新验证记录确认覆盖范围；未覆盖的交互仍需证据，不能用进程存活替代 |
