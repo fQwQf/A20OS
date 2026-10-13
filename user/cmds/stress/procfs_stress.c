@@ -1,3 +1,7 @@
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/syscall.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -95,19 +99,70 @@ static int check_lookup_semantics(void)
     if (fd < 0)
         return fail("open self ns mnt");
     close(fd);
-    const char *unsupported[] = {"uts", "ipc", "net", "cgroup"};
-    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+    const char *implemented[] = {"uts", "ipc", "net", "cgroup"};
+    for (size_t i = 0; i < sizeof(implemented) / sizeof(implemented[0]); i++) {
         char path[64];
-        snprintf(path, sizeof(path), "/proc/self/ns/%s", unsupported[i]);
-        errno = 0;
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", implemented[i]);
         fd = open(path, O_RDONLY);
-        if (fd >= 0 || errno != ENOENT) {
-            if (fd >= 0)
-                close(fd);
-            return fail("unsupported namespace must not be advertised");
-        }
+        if (fd < 0) return fail("open implemented namespace");
+        close(fd);
     }
     return 0;
+}
+
+static void *task_directory_worker(void *arg)
+{
+    int *pipes = arg;
+    int tid = (int)syscall(SYS_gettid);
+    if (write(pipes[1], &tid, sizeof(tid)) != sizeof(tid))
+        return (void *)1;
+    char release;
+    return read(pipes[2], &release, 1) == 1 ? NULL : (void *)1;
+}
+
+static int check_task_directory(void)
+{
+    int ready[2], release[2];
+    if (pipe(ready) || pipe(release))
+        return fail("task directory pipes");
+    int pipes[] = {ready[0], ready[1], release[0], release[1]};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, task_directory_worker, pipes))
+        return fail("task directory thread");
+    int tid = 0;
+    if (read(ready[0], &tid, sizeof(tid)) != sizeof(tid))
+        return fail("task directory worker tid");
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir)
+        return fail("open task directory");
+    int found_self = 0, found_worker = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        int id = atoi(entry->d_name);
+        found_self |= id == (int)getpid();
+        found_worker |= id == tid;
+    }
+    closedir(dir);
+    char path[96];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
+    char *status;
+    size_t length;
+    if (read_all(path, &status, &length))
+        return fail("read worker status through task directory");
+    free(status);
+    /* A process with a different thread group is never a child of task/. */
+    snprintf(path, sizeof(path), "/proc/self/task/%d/status", (int)getppid());
+    errno = 0;
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0 || errno != ENOENT)
+        return fail("task directory excludes other processes");
+    if (write(release[1], "x", 1) != 1)
+        return fail("release task directory worker");
+    void *result;
+    if (pthread_join(thread, &result) || result)
+        return fail("join task directory worker");
+    close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
+    return found_self && found_worker ? 0 : fail("enumerate thread ids");
 }
 
 static int check_large_maps(void)
@@ -437,7 +492,7 @@ static int check_concurrent_fd_reuse(void)
 
 int main(void)
 {
-    if (check_lookup_semantics() || check_large_maps() ||
+    if (check_lookup_semantics() || check_task_directory() || check_large_maps() ||
         check_concurrent_maps() || check_fdinfo() ||
         check_fd_open_semantics() ||
         check_fd_access() ||

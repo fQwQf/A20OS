@@ -338,7 +338,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     if (!mnt) { kdebug("[VFS] open '%s': no mount\n", resolved); return -ENOENT; }
 
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
-    vnode_t *vn = vnode_lookup_path(mnt->root, rel);
+    vnode_t *vn = vnode_lookup_path(mnt, rel);
     if (!vn) {
         if (vfs_lookup_errno() && !(flags & O_CREAT))
             return vfs_lookup_errno();
@@ -353,7 +353,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
         if (sr < 0)
             return sr;
 
-        vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
+        vnode_t *parent = vnode_lookup_path(mnt, parent_path);
         if (!parent) {
             return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
         }
@@ -543,7 +543,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                                             fname, sizeof(fname)) < 0)
                 return -ENAMETOOLONG;
 
-            vnode_t *parent = vnode_lookup_path(mnt->root,
+            vnode_t *parent = vnode_lookup_path(mnt,
                                                 vfs_strip_mount_prefix(parent_path, mnt));
             if (!parent || parent->type != VFS_FT_DIR) {
                 vnode_put(parent);
@@ -711,7 +711,7 @@ int vfs_mkdir(const char *path, int mode) {
     if (sr < 0)
         return sr;
 
-    vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
+    vnode_t *parent = vnode_lookup_path(mnt, parent_path);
     if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
@@ -771,7 +771,7 @@ int vfs_unlink(const char *path) {
     if (sr < 0)
         return sr;
 
-    vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
+    vnode_t *parent = vnode_lookup_path(mnt, parent_path);
     if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
@@ -874,8 +874,8 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (!old_mnt || !new_mnt) return -ENOENT;
     if (old_mnt != new_mnt) return -EXDEV;
 
-    vnode_t *old_dir = vnode_lookup_path(old_mnt->root, vfs_strip_mount_prefix(old_parent, old_mnt));
-    vnode_t *new_dir = vnode_lookup_path(new_mnt->root, vfs_strip_mount_prefix(new_parent, new_mnt));
+    vnode_t *old_dir = vnode_lookup_path(old_mnt, vfs_strip_mount_prefix(old_parent, old_mnt));
+    vnode_t *new_dir = vnode_lookup_path(new_mnt, vfs_strip_mount_prefix(new_parent, new_mnt));
     if (!old_dir || !new_dir) {
         vnode_put(old_dir);
         vnode_put(new_dir);
@@ -976,7 +976,7 @@ int vfs_rmdir(const char *path) {
     mount_t *mnt = vfs_find_mount(parent_path);
     if (!mnt || !mnt->root) return -ENOENT;
 
-    vnode_t *parent = vnode_lookup_path(mnt->root, vfs_strip_mount_prefix(parent_path, mnt));
+    vnode_t *parent = vnode_lookup_path(mnt, vfs_strip_mount_prefix(parent_path, mnt));
     if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
@@ -1203,7 +1203,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     mount_t *mnt = vfs_find_mount(parent_path);
     if (!mnt) return -ENOENT;
     const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
-    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    vnode_t *parent = vnode_lookup_path(mnt, rel);
     if (!parent)
         return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
@@ -1281,7 +1281,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     if (!mnt) { vnode_put(target); return -ENOENT; }
     if (target->mnt != mnt) { vnode_put(target); return -EXDEV; }
 
-    vnode_t *parent = vnode_lookup_path(mnt->root, vfs_strip_mount_prefix(parent_path, mnt));
+    vnode_t *parent = vnode_lookup_path(mnt, vfs_strip_mount_prefix(parent_path, mnt));
     if (!parent || parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         vnode_put(target);
@@ -1328,7 +1328,7 @@ int vfs_symlink(const char *target, const char *linkpath) {
     mount_t *mnt = vfs_find_mount(parent_path);
     if (!mnt) return -ENOENT;
     const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
-    vnode_t *parent = vnode_lookup_path(mnt->root, rel);
+    vnode_t *parent = vnode_lookup_path(mnt, rel);
     if (!parent || parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOENT;

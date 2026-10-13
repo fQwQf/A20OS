@@ -84,6 +84,7 @@ typedef struct proc_cred {
 #define CAP_SYS_ADMIN        21
 #define CAP_SYS_RESOURCE     24
 #define CAP_SYS_BOOT         22
+#define CAP_NET_ADMIN        12
 #define CAP_NET_RAW          13
 
 typedef struct proc_limits {
@@ -97,6 +98,7 @@ typedef struct proc_limits {
 typedef struct proc_policy {
     int oom_score_adj;
     int thp_disabled;
+    int no_new_privs;
     int mempolicy_mode;
     uint64_t mempolicy_nmask;
 } proc_policy_t;
@@ -290,8 +292,6 @@ typedef struct task_t {
     uint64_t io_syscw;
     uint64_t io_read_bytes;
     uint64_t io_write_bytes;
-    uint64_t user_gs_base;         /* x86_64 ARCH_SET_GS value (kernel GS is
-                                    * reserved for per-CPU data) */
     uint32_t cfs_weight;
     uint32_t pi_boost_weight;    /* PI-futex waiter weight donation, atomic */
     uint64_t eevdf_vruntime;     /* weighted virtual run time (ticks) */
@@ -379,6 +379,7 @@ typedef struct task_t {
     int            sigwait_active;
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
+    void          *thread_signal_info; /* lazily allocated, signals->lock */
 
     /* Debug/tracing state (kernel/proc/debug.c).  Protected by the task's own
      * park_lock for transitions; the tracer reads the snapshot fields only
@@ -418,6 +419,7 @@ typedef struct task_t {
      * ownership rule as mnt_ns: one reference, released by
      * userns_release_task() from fdtable_close_all(). */
     struct user_namespace *user_ns;
+    struct resource_namespace *resource_ns[8];
     proc_ns_context_t ns_ctx;
 
     /* PID namespace membership (kernel/proc/pidns.c).  pid_ns is the

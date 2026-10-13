@@ -125,3 +125,8 @@ RV64 使用 `tools/build-jamvm-gc.py` 重编全部 46 个核心编译单元，�
 图形/输入和 Minecraft 客户端依赖仍需继续。最终目标保持
 [24](24-single-system-minecraft.md)：至少两块物理 MCU 的同一原生
 A20OS 上，真实 Minecraft Java 客户端显示主菜单并响应输入。
+
+main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS 内核
+实际显示 1.21.11 主菜单，键盘交互及正常退出通过，Native/MCU 回归与准确
+边界见 [52-main-minecraft-integration.md](52-main-minecraft-integration.md)。
+物理多 MCU 客户端仍未完成。

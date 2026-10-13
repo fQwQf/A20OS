@@ -329,7 +329,7 @@ int net_listen_sock(net_socket_t *s, int backlog)
      * and left the port unreachable, and the lwip path refused outright.
      */
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        g_a20_tcp_path == A20_TCP_PATH_LWIP) {
+        resource_ns_is_initial(s->net_ns) && g_a20_tcp_path == A20_TCP_PATH_LWIP) {
         int r = net_inet_tcp_listen(s, backlog);
         if (r < 0) {
             s->listening = 0;
@@ -1002,7 +1002,7 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
                 return net_notconn(NET_NOTCONN_PEERPIDFD);
             if (*optlen < sizeof(int32_t))
                 return -EINVAL;
-            int pfd = linux_pidfd_create(s->peer_pid, 0);
+            int pfd = linux_pidfd_create(s->peer_pid, O_CLOEXEC);
             if (pfd < 0)
                 return pfd;
             int32_t out = pfd;

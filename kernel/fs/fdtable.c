@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
@@ -420,6 +421,7 @@ void fdtable_close_all(task_t *task)
     pidns_release_task(task);
     /* And the user namespace reference, on the same reasoning: a namespace
      * that outlives its last task would keep its parent pinned. */
+    resource_ns_release_task(task);
     userns_release_task(task);
     /* Release the per-process root/cwd references.  Idempotent, so the
      * exit and destroy paths that both reach this hook are safe. */

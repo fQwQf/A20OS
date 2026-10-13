@@ -16,6 +16,7 @@
 #include "drivers/input/virtio_input.h"
 #include "mm/slab.h"
 #include "core/errno.h"
+#include "drivers/input/evdev.h"
 
 #define USB_HID_REPORT_MAX  64U
 #define USB_HID_EVENTS      64U
@@ -27,12 +28,6 @@
 #define VBOX_USB_VENDOR 0x80eeU
 #define VBOX_USB_TABLET 0x0021U
 
-#define SYN_REPORT  0x00U
-#define REL_X       0x00U
-#define REL_Y       0x01U
-#define REL_WHEEL   0x08U
-#define ABS_X       0x00U
-#define ABS_Y       0x01U
 #define BTN_LEFT    0x110U
 #define BTN_RIGHT   0x111U
 #define BTN_MIDDLE  0x112U
@@ -277,10 +272,42 @@ static int usb_hid_poll(device_t *dev, short events)
 
 static int usb_hid_ioctl(device_t *dev, unsigned long request, void *argument)
 {
-    (void)dev;
-    (void)request;
-    (void)argument;
-    return -ENOSYS;
+    if (request != INPUT_IOCTL_GET_INFO || !argument)
+        return -ENOTTY;
+    usb_hid_dev_t *h = dev ? dev->drv_priv : NULL;
+    if (!h)
+        return -ENODEV;
+    struct input_device_info *info = argument;
+    memset(info, 0, sizeof(*info));
+    strncpy(info->name, h->kind == USB_HID_KBD ? "USB HID keyboard" :
+                       h->kind == USB_HID_MOUSE ? "USB HID mouse" : "USB HID tablet", sizeof(info->name) - 1);
+    info->id.bustype = 3; /* BUS_USB */
+    info->id.vendor = h->iface->dev->vendor;
+    info->id.product = h->iface->dev->product;
+    input_info_bit(info, EV_SYN, SYN_REPORT);
+    if (h->kind == USB_HID_KBD) {
+        for (unsigned i = 0; i < ARRAY_SIZE(hid_usage_to_linux); i++)
+            if (hid_usage_to_linux[i])
+                input_info_bit(info, EV_KEY, hid_usage_to_linux[i]);
+        static const uint16_t modifiers[] = {29, 42, 56, 125, 97, 54, 100, 126};
+        for (unsigned i = 0; i < ARRAY_SIZE(modifiers); i++)
+            input_info_bit(info, EV_KEY, modifiers[i]);
+    } else {
+        for (unsigned button = BTN_LEFT; button <= BTN_MIDDLE; button++)
+            input_info_bit(info, EV_KEY, button);
+        input_info_bit(info, EV_REL, REL_WHEEL);
+        if (h->kind == USB_HID_MOUSE) {
+            input_info_bit(info, EV_REL, REL_X);
+            input_info_bit(info, EV_REL, REL_Y);
+        } else {
+            info->properties[0] = 1; /* INPUT_PROP_POINTER */
+            for (unsigned axis = ABS_X; axis <= ABS_Y; axis++) {
+                input_info_bit(info, EV_ABS, axis);
+                info->abs[axis].maximum = 32767;
+            }
+        }
+    }
+    return 0;
 }
 
 static const input_dev_ops_t usb_hid_ops = {

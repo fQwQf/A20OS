@@ -14,14 +14,10 @@
 /*
  * arch_prctl(2) on x86_64.
  *
- * FS base is the user-space TLS pointer and is carried in the trap frame
- * (restored to MSR_FS_BASE on every return to user).  GS base is reserved on
- * A20OS for the kernel's per-CPU data pointer (MSR_GS_BASE), so the user GS
- * value requested through ARCH_SET_GS is kept per task and reported back by
- * ARCH_GET_GS; user code that wants a GS segment must use FS or a memory
- * model that does not depend on GS.  ARCH_GET_CPUID reports CPUID as enabled;
- * disabling CPUID (ARCH_SET_CPUID with 0) is refused with -EINVAL because the
- * kernel does not trap the CPUID instruction.
+ * FS and GS bases travel in the architecture trap frame. SWAPGS keeps the
+ * kernel task pointer separate from the user GS base on every entry/exit.
+ * User bases must stay in the lower canonical address range, including when
+ * no page is mapped there yet. CPUID disabling is not implemented.
  */
 
 int64_t sys_arch_prctl(int op, uint64_t addr)
@@ -32,6 +28,7 @@ int64_t sys_arch_prctl(int op, uint64_t addr)
 
     switch (op) {
         case ARCH_SET_FS:
+            if (addr >= USER_VA_LIMIT) return -EPERM;
             TRAP_CTX_TP(t->trap_ctx) = addr;
             return 0;
         case ARCH_GET_FS:
@@ -39,20 +36,17 @@ int64_t sys_arch_prctl(int op, uint64_t addr)
                 return -EFAULT;
             return 0;
         case ARCH_SET_GS:
-            t->user_gs_base = addr;
+            if (addr >= USER_VA_LIMIT) return -EPERM;
+            t->trap_ctx->user_gs_base = addr;
             return 0;
         case ARCH_GET_GS:
-            if (copy_to_user((void *)addr, &t->user_gs_base, sizeof(uint64_t)) < 0)
+            if (copy_to_user((void *)addr, &t->trap_ctx->user_gs_base, sizeof(uint64_t)) < 0)
                 return -EFAULT;
             return 0;
-        case ARCH_GET_CPUID: {
-            uint64_t one = 1;
-            if (copy_to_user((void *)addr, &one, sizeof(one)) < 0)
-                return -EFAULT;
-            return 0;
-        }
+        case ARCH_GET_CPUID:
+            return 1;
         case ARCH_SET_CPUID:
-            return -EINVAL; /* CPUID is always enabled; cannot be disabled */
+            return addr == 1 ? 0 : -ENODEV;
         default:
             return -EINVAL;
     }

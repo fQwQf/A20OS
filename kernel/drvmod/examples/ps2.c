@@ -25,6 +25,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "core/input.h"
+#include "drivers/input/evdev.h"
 #include "proc/park.h"
 #include "core/lock.h"
 #include "core/string.h"
@@ -413,9 +414,20 @@ static int ps2_class_poll(device_t *dev, short events)
 static int ps2_class_ioctl(device_t *dev, unsigned long req, void *arg)
 {
     (void)dev;
-    (void)req;
-    (void)arg;
-    return -ENOSYS;
+    if (req != INPUT_IOCTL_GET_INFO || !arg)
+        return -ENOTTY;
+    struct input_device_info *info = arg;
+    memset(info, 0, sizeof(*info));
+    strncpy(info->name, "PS/2 keyboard and mouse", sizeof(info->name) - 1);
+    info->id.bustype = 0x11; /* BUS_I8042 */
+    input_info_bit(info, EV_SYN, SYN_REPORT);
+    for (unsigned key = 1; key < 128; key++)
+        input_info_bit(info, EV_KEY, key);
+    for (unsigned key = 0x110; key <= 0x112; key++)
+        input_info_bit(info, EV_KEY, key);
+    input_info_bit(info, EV_REL, REL_X);
+    input_info_bit(info, EV_REL, REL_Y);
+    return 0;
 }
 
 static const input_dev_ops_t ps2_class_ops = {

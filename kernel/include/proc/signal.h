@@ -40,8 +40,14 @@ typedef struct sigaction {
 #define SI_TKILL    (-6)
 #define CLD_EXITED     1
 #define CLD_KILLED     2
+#define CLD_DUMPED     3
 
 /* Per-process signal state */
+typedef struct signal_pending_info {
+    uint8_t has_info[NSIG];
+    uint8_t info[NSIG][SIGNAL_INFO_SIZE];
+} signal_pending_info_t;
+
 typedef struct signal_state {
     refcount_t refcount;
     /*
@@ -92,9 +98,14 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 int  signal_send(int pid, int signum);
 /* Caller must hold a task reference for the duration of this call. */
 int  signal_send_task(void *task, int signum);
+void signal_notify_child_exit(void *parent, void *child);
 int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);
 int  signal_send_thread(int tid, int signum);
+int  signal_send_thread_fault(int tid, int signum, uintptr_t addr, int code);
+int  signal_send_thread_info(int tid, int signum, const void *info, size_t size);
+/* Caller holds signals->lock; consumes only one scope, thread before process. */
+int signal_take_pending_info_locked(void *task, int sig, void *out, size_t size);
 int  signal_send_thread_user(int tid, int signum);
 
 /* Copy the siginfo queued for `signum` into `out` (ptrace GETSIGINFO

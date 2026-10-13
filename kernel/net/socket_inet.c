@@ -261,6 +261,7 @@ static bool net_find_stream_listener_slot(net_socket_t *cand, int idx,
 {
     (void)idx;
     net_inet_find_arg_t *a = (net_inet_find_arg_t *)arg;
+    if (cand->net_ns != a->src->net_ns) return false;
     if (!cand->bound || !cand->listening || cand->type != SOCK_STREAM)
         return false;
     if (!net_inet_domains_overlap(cand->domain, a->domain))
@@ -301,6 +302,7 @@ static bool net_find_udp_dst_slot(net_socket_t *cand, int idx, void *arg)
 {
     (void)idx;
     net_inet_find_arg_t *a = (net_inet_find_arg_t *)arg;
+    if (cand->net_ns != a->src->net_ns) return false;
     if (cand == a->src || !cand->bound || cand->type != SOCK_DGRAM)
         return false;
     if (!net_inet_domains_overlap(cand->domain, a->domain))
@@ -1101,7 +1103,9 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                  * this drain was adopted into a v4 socket while holding a v6
                  * pcb -- every later address lookup on that fd read a 16-byte
                  * v6 sockaddr back as a 16-byte v4 one. */
-                child->domain = listener->domain;
+                resource_ns_put(child->net_ns);
+            child->net_ns = resource_ns_get(listener->net_ns);
+            child->domain = listener->domain;
                 child->type = SOCK_STREAM;
                 child->protocol = listener->protocol;
                 child->bound = 1;
@@ -1924,6 +1928,7 @@ int net_inet_socket_init(net_socket_t *s)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
         return 0;
+    if (!resource_ns_is_initial(s->net_ns)) return 0;
 
     uint64_t flags = a20_lwip_lock();
     a20_lwip_lane_enter(net_socket_lane_load(s));
@@ -2075,6 +2080,7 @@ int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
         return 0;
+    if (!resource_ns_is_initial(s->net_ns)) return 0;
     if (s->type == SOCK_DGRAM) {
         ip_addr_t ip;
         uint16_t port = 0;
@@ -2132,6 +2138,22 @@ int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
     return 0;
 }
 
+static int net_namespace_target(net_socket_t *s, const void *addr, size_t len)
+{
+    if (resource_ns_is_initial(s->net_ns)) return 0;
+    if (!addr || len < sizeof(net_sockaddr_in_t)) return -EINVAL;
+    int family = *(const uint16_t *)addr;
+    if (family == AF_INET) {
+        const net_sockaddr_in_t *in = addr;
+        if (((const uint8_t *)&in->sin_addr)[0] != 127) return -ENETUNREACH;
+    } else if (family == AF_INET6 && len >= sizeof(net_sockaddr_in6_t)) {
+        const net_sockaddr_in6_t *in = addr;
+        static const uint8_t loopback[16] = { [15] = 1 };
+        if (memcmp(in->sin6_addr, loopback, 16)) return -ENETUNREACH;
+    } else return -EAFNOSUPPORT;
+    return __atomic_load_n(&s->net_ns->loopback_up, __ATOMIC_ACQUIRE) ? 0 : -ENETUNREACH;
+}
+
 static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t addrlen,
                                    const void *connect_addr, size_t peer_len)
 {
@@ -2154,8 +2176,9 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     /* A20_TCP_PATH_LWIP exists so a load can be driven through the real stack;
      * see the a20_tcp_path_t comment.  The shortcut is only taken when it is
      * both the configured mode and applicable. */
-    int local_target = g_a20_tcp_path == A20_TCP_PATH_FAST &&
-                       net_sockaddr_is_local_target(connect_addr, peer_len);
+    int local_target = !resource_ns_is_initial(s->net_ns) ||
+                       (g_a20_tcp_path == A20_TCP_PATH_FAST &&
+                        net_sockaddr_is_local_target(connect_addr, peer_len));
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     /* Resolved outside every other lock: the search walks the table one bucket
@@ -2174,6 +2197,8 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         bool gate = net_socket_is_live(listener) && listener->listening &&
                     listener->accept_count < NET_MAX_QUEUE;
         if (gate) {
+            resource_ns_put(child->net_ns);
+            child->net_ns = resource_ns_get(listener->net_ns);
             child->domain = listener->domain;
             child->type = SOCK_STREAM;
             child->protocol = s->protocol;
@@ -2245,6 +2270,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         net_socket_free(listener);
     }
     net_socket_free(child);
+    if (!resource_ns_is_initial(s->net_ns)) return -ECONNREFUSED;
 
     /* The stack path.  s->tcp exists for both families now
      * (net_inet_socket_init), and tcp_connect() reads the family off the
@@ -2363,6 +2389,9 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
         return 0;
+    int ns_result = net_namespace_target(s, connect_addr, peer_len);
+    if (ns_result < 0) return ns_result;
+    if (!resource_ns_is_initial(s->net_ns) && s->type == SOCK_DGRAM) return 0;
     if (s->type == SOCK_DGRAM && s->domain == AF_INET6)
         return 0;
     if (s->type == SOCK_DGRAM && s->domain == AF_INET) {
@@ -2602,6 +2631,8 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
     }
     if (!local_dst && dst_addr)
         local_dst = net_find_udp_dst(s, dst_addr, dst_len);
+    int ns_result = net_namespace_target(s, dst_addr, dst_len);
+    if (ns_result < 0) { net_socket_free(local_dst); return ns_result; }
     if (local_dst) {
         net_sock_pair_t pair = net_sock_lock2(s, local_dst);
         if (!net_socket_is_live(local_dst)) {
@@ -2629,6 +2660,9 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         net_socket_free(local_dst);
         return rr;
     }
+
+    if (!resource_ns_is_initial(s->net_ns))
+        return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 
     if (s->domain == AF_INET6)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
@@ -2678,6 +2712,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
 static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
                              const void *addr, size_t addrlen)
 {
+    if (!resource_ns_is_initial(s->net_ns)) return -ENETUNREACH;
     /* Same datagram ceiling as the UDP path, and for the same reason.  Checked
      * before the pbuf is allocated: the allocation is sized by len, and a
      * request the socket has already said it will not send should not be able
@@ -2828,12 +2863,48 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                    ? (uint32_t)TCP_SND_BUF : (uint32_t)avail;
             if (room32 > 0xffff)
                 room32 = 0xffff;
+            if (s->tcp->snd_queuelen >= TCP_SND_QUEUELEN)
+                room32 = 0;
         }
         if (!tcp_alive) {
             a20_lwip_lane_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
         }
         net_inet_ip_opts_apply_snapshot_locked(s, &ip_opts);
+        bool allocation_blocked = false;
+        if (room32) {
+            size_t n = len - sent;
+            if (n > room32)
+                n = room32;
+            err_t e;
+            /* snd_buf counts bytes, while tcp_write also needs queue entries
+             * and pbufs. A smaller prefix may fit when the full write does not. */
+            for (;;) {
+                e = tcp_write(s->tcp, (const uint8_t *)buf + sent,
+                              (u16_t)n, TCP_WRITE_FLAG_COPY);
+                if (e != ERR_MEM || n == 1)
+                    break;
+                n /= 2;
+            }
+            if (e == ERR_OK) {
+                /* tcp_write already owns these bytes. An output failure leaves
+                 * them queued for retransmission; reporting failure here would
+                 * make the caller resend data that we have accepted. */
+                sent += n;
+                e = tcp_output(s->tcp);
+                if (e != ERR_OK)
+                    ktrace_net("[NET] queued TCP output deferred: %d\n", (int)e);
+                a20_lwip_lane_unlock(lwip_flags);
+                continue;
+            }
+            if (e != ERR_MEM) {
+                a20_lwip_lane_unlock(lwip_flags);
+                return sent ? (int)sent :
+                       (e == ERR_CONN || e == ERR_CLSD ? -EPIPE : -EIO);
+            }
+            allocation_blocked = true;
+            room32 = 0;
+        }
         if (room32 == 0) {
             a20_lwip_lane_unlock(lwip_flags);
             if (sent || s->nonblock)
@@ -2847,6 +2918,13 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -EAGAIN;
             uint64_t timeout = net_socket_timeout_snapshot(s, 1);
             uint64_t deadline = timeout ? start + timeout : 0;
+            /* Allocation can fail even with an empty queue. Retry after a tick
+             * instead of waiting forever for an ACK that cannot arrive. */
+            if (allocation_blocked) {
+                uint64_t retry = timer_get_ticks() + 1;
+                if (!deadline || retry < deadline)
+                    deadline = retry;
+            }
             proc_wait_token_t token =
                 proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
             if (!token.task)
@@ -2863,7 +2941,8 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 /* Same question as the loop asked, one re-check later: has an
                  * ACK landed since we parked, and does that mean room?  Answered
                  * from snd_buf for the reason spelled out above. */
-                room_now = s->tcp->snd_buf > 0;
+                room_now = !allocation_blocked && s->tcp->snd_buf > 0 &&
+                           s->tcp->snd_queuelen < TCP_SND_QUEUELEN;
             }
             a20_lwip_lane_unlock(room_flags);
             if (room_now)
@@ -2879,36 +2958,12 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             proc_park_finish(token);
             if (proc_wake_reason_is_task_interrupt(reason))
                 return -ERESTARTSYS;
-            if (reason == PROC_WAKE_TIMEOUT)
+            if (reason == PROC_WAKE_TIMEOUT &&
+                (!allocation_blocked || net_socket_wait_expired(s, start, 1)))
                 return -EAGAIN;
             continue;
         }
-        /* room32 > 0: merge the sndbuf check with write/output under one lock
-         * acquisition.  The lock above measured room and confirmed liveness;
-         * re-verify liveness under the same lock before writing, because
-         * tcp_write() would otherwise have to fail on a dead pcb. */
-        size_t n = len - sent;
-        if (n > room32)
-            n = room32;
-        if (n > 0xffff)
-            n = 0xffff;
-        if (!s->tcp || s->closed || !s->connected) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EPIPE;
-        }
-        err_t e = tcp_write(s->tcp, (const uint8_t *)buf + sent,
-                            (u16_t)n, TCP_WRITE_FLAG_COPY);
-        if (e != ERR_OK) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EIO;
-        }
-        e = tcp_output(s->tcp);
-        if (e != ERR_OK) {
-            a20_lwip_lane_unlock(lwip_flags);
-            return sent ? (int)sent : -EIO;
-        }
-        a20_lwip_lane_unlock(lwip_flags);
-        sent += n;
+
     }
     /* Outside the lwIP lane lock, for the same reason the loop does not run them.
      * The error returns above skip this, which is safe because sched() runs

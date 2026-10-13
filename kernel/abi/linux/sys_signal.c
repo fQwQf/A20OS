@@ -254,13 +254,9 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
                 if (!(matching & signal_mask_bit(sig)))
                     continue;
                 selected = sig;
-                ss->pending &= ~signal_mask_bit(sig);
-                t->thread_pending &= ~signal_mask_bit(sig);
-                if (ss->pending_has_info[sig])
-                    memcpy(infobuf, ss->pending_info[sig], sizeof(infobuf));
-                else
+                if (signal_take_pending_info_locked(t, sig, infobuf,
+                                                    sizeof(infobuf)) < 0)
                     *(int *)infobuf = sig;
-                ss->pending_has_info[sig] = 0;
                 break;
             }
         } else if (!poll_only) {

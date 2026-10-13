@@ -285,3 +285,28 @@ int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot)
     mm_tlb_invalidate_finish(mm);
     return r;
 }
+
+/* In-frame signal trampolines need execute without replacing a live stack
+ * mapping. Use the ordinary VMA/PTE protection protocol, including remote
+ * TLB invalidation, rather than an unmap/remap that can free the backing page. */
+int mm_make_page_exec(mm_struct_t *mm, vaddr_t addr)
+{
+    if (!mm) return -EINVAL;
+    addr &= ~(vaddr_t)(PAGE_SIZE - 1);
+    mm_tlb_invalidate_begin(mm);
+    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    mm_seg_t *vma = mm_seg_find(mm, addr);
+    int r = -EFAULT;
+    if (vma) {
+        r = 0;
+        if (!(vma->vm_flags & VM_EXEC)) {
+            int prot = PROT_EXEC;
+            if (vma->vm_flags & VM_READ) prot |= PROT_READ;
+            if (vma->vm_flags & VM_WRITE) prot |= PROT_WRITE;
+            r = mm_mprotect_locked(mm, addr, PAGE_SIZE, prot);
+        }
+    }
+    spin_unlock_irqrestore(&mm->lock, flags);
+    mm_tlb_invalidate_finish(mm);
+    return r;
+}

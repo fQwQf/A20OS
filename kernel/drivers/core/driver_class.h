@@ -291,17 +291,14 @@ typedef struct gpu_dev_ops {
      * through here first. */
     int     (*ctx_attach_resource)(struct device *dev, uint32_t ctx_id,
                                    uint32_t resource_id);
-    /* Pull a rendered region of a 3D resource back into guest memory.  This is
-     * the only way a guest observes the result of a submit: the host renders
-     * into its own copy, so a guest that reads its own pages without asking for
-     * a transfer reads pre-render contents no matter what the renderer did. */
-    int     (*transfer_from_host_3d)(struct device *dev, uint32_t ctx_id,
-                                     uint32_t resource_id,
-                                     const struct virtio_gpu_box *box,
-                                     uint32_t level, uint32_t stride,
-                                     uint32_t layer_stride, uint64_t offset,
-                                     const struct virtio_gpu_mem_entry *entries,
-                                     uint32_t nr_entries);
+    /* Transfer between host resources and their already attached backing. */
+    int     (*transfer_3d)(struct device *dev, uint32_t ctx_id,
+                          uint32_t resource_id, const struct virtio_gpu_box *box,
+                          uint32_t level, uint32_t stride, uint32_t layer_stride,
+                          uint64_t offset, int to_host);
+    int     (*scanout_resource)(struct device *dev, uint32_t resource_id,
+                               uint32_t x, uint32_t y, uint32_t width,
+                               uint32_t height);
     int     (*submit_3d)(struct device *dev, uint32_t ctx_id,
                          const void *cmdbuf, size_t len);
 } gpu_dev_ops_t;

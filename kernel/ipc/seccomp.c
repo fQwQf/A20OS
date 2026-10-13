@@ -1,4 +1,5 @@
 #include "ipc/seccomp.h"
+#include "arch/syscall_hook.h"
 
 #include "core/klog.h"
 #include "core/lock.h"
@@ -90,7 +91,9 @@ typedef struct {
 } seccomp_data_wire_t;
 
 static const uint32_t SECCOMP_ARCH_TOKEN =
-    0xc0000000U | (uint32_t)ARCH_ELF_MACHINE; /* AUDIT_ARCH_<ISA> */
+    (sizeof(uintptr_t) == 8 ? 0x80000000U : 0) |
+    (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ ? 0x40000000U : 0) |
+    (uint32_t)ARCH_ELF_MACHINE; /* AUDIT_ARCH_<ISA> */
 
 /* seccomp_data field offsets for ABS/IND loads */
 #define SD_NR        0
@@ -149,7 +152,7 @@ static int bpf_verify(const sock_filter_t *fp, int len)
             break;
         case BPF_ST:
         case BPF_STX:
-            if (BPF_SIZE(code) != BPF_W || BPF_MODE(code) != BPF_MEM)
+            if (code != BPF_ST && code != BPF_STX)
                 return -EINVAL;
             if (f->k >= BPF_MEMWORDS)
                 return -EINVAL;
@@ -171,7 +174,7 @@ static int bpf_verify(const sock_filter_t *fp, int len)
         case BPF_JMP:
             switch (BPF_OP(code)) {
             case BPF_JA:
-                if ((int)i + 1 + (int)f->k >= len)
+                if (f->k >= (uint32_t)(len - i - 1))
                     return -EINVAL;
                 break;
             case BPF_JEQ: case BPF_JGT: case BPF_JGE: case BPF_JSET:
@@ -219,7 +222,8 @@ static uint32_t bpf_run(const sock_filter_t *insns, uint16_t len,
         pc++;
 
         switch (BPF_CLASS(f->code)) {
-        case BPF_LD: case BPF_LDX:
+        case BPF_LD: case BPF_LDX: {
+            uint32_t saved_a = A;
             switch (BPF_MODE(f->code)) {
             case BPF_IMM:
                 A = k;
@@ -247,7 +251,12 @@ static uint32_t bpf_run(const sock_filter_t *insns, uint16_t len,
             default:
                 return SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA);
             }
+            if (BPF_CLASS(f->code) == BPF_LDX) {
+                X = A;
+                A = saved_a;
+            }
             break;
+        }
         case BPF_ST:
             M[k & (BPF_MEMWORDS - 1)] = A;
             break;
@@ -309,7 +318,7 @@ static uint32_t bpf_run(const sock_filter_t *insns, uint16_t len,
 #endif
 
 typedef struct {
-    uint64_t call_addr;
+    uintptr_t call_addr;
     int32_t syscall;
     uint32_t arch;
 } sigsys_fields_t;
@@ -338,8 +347,11 @@ int64_t seccomp_gate(trap_context_t *ctx, uint64_t nr, int64_t *ret_out)
         *ret_out = -(int64_t)data;
         return 1;
     case SECCOMP_RET_KILL_PROCESS:
+        proc_exit_group(-SIGSYS);
+        *ret_out = -EINTR;
+        return 1;
     case SECCOMP_RET_KILL_THREAD:
-        proc_exit_group(-SIGKILL);
+        proc_exit(-SIGSYS);
         *ret_out = -EINTR;
         return 1;
     case SECCOMP_RET_TRAP: {
@@ -349,22 +361,28 @@ int64_t seccomp_gate(trap_context_t *ctx, uint64_t nr, int64_t *ret_out)
         si.si_code = SYS_SECCOMP;
         si.si_errno = (int)data;
         sigsys_fields_t f = {
-            .call_addr = (uint64_t)TRAP_CTX_EPC(ctx),
+            .call_addr = (uintptr_t)TRAP_CTX_EPC(ctx),
             .syscall = (int32_t)nr,
             .arch = SECCOMP_ARCH_TOKEN,
         };
         memcpy(si._sifields, &f, sizeof(f));
-        signal_send_info(t->pid, SIGSYS, &si, sizeof(si));
-        *ret_out = -ENOSYS;
+        if (signal_send_thread_info(t->pid, SIGSYS, &si, sizeof(si)) < 0)
+            proc_exit_group(-SIGSYS);
+        /* SIGSYS describes the trapped instruction, including the original
+         * syscall/result register. The handler supplies the eventual result. */
+        *ret_out = (int64_t)TRAP_CTX_RET(ctx);
         return 1;
     }
     case SECCOMP_RET_TRACE:
     case SECCOMP_RET_USER_NOTIF:
-    default:
         /* No ptrace-stop notification channel is wired for TRACE and the
          * USER_NOTIF fd does not exist; Linux also degrades TRACE to
          * -ENOSYS when nobody listens. */
         *ret_out = -ENOSYS;
+        return 1;
+    default:
+        proc_exit_group(-SIGSYS);
+        *ret_out = -EINTR;
         return 1;
     }
 }
@@ -396,9 +414,7 @@ void seccomp_release(task_t *t)
 
 int seccomp_get_mode(const task_t *t)
 {
-    if (!t || !t->seccomp_chain)
-        return -EINVAL;
-    return t->seccomp_mode;
+    return t ? (int)t->seccomp_mode : -ESRCH;
 }
 
 int seccomp_set_strict(task_t *t)
@@ -416,13 +432,24 @@ int seccomp_install_filter(task_t *t, const void *ufprog)
     if (!t)
         return -ESRCH;
 
-    uint16_t usrlen = 0;
-    if (copy_from_user(&usrlen, ufprog, sizeof(usrlen)) < 0)
+    if (t->seccomp_mode == SECCOMP_MODE_STRICT)
+        return -EINVAL;
+
+    /* Linux sock_fprog contains an aligned user pointer, not an inline
+     * instruction array.  Its native pointer layout matches this ABI. */
+    struct {
+        uint16_t len;
+        const void *filter;
+    } prog;
+    if (copy_from_user(&prog, ufprog, sizeof(prog)) < 0)
         return -EFAULT;
-    const void *uinsns = (const void *)((uintptr_t)ufprog +
-                                        sizeof(uint16_t));
+    uint16_t usrlen = prog.len;
+    const void *uinsns = prog.filter;
     if (usrlen < 1 || usrlen > BPF_MAXINSNS)
         return -EINVAL;
+
+    if (!t->policy.no_new_privs && !proc_has_cap(t, CAP_SYS_ADMIN))
+        return -EACCES;
 
     seccomp_filter_t *f = kmalloc(sizeof(*f));
     if (!f)
@@ -461,9 +488,11 @@ uint32_t seccomp_evaluate(const task_t *t, uint64_t nr, uint64_t ip,
     seccomp_filter_t *f = t ? (seccomp_filter_t *)t->seccomp_chain : NULL;
     if (!f) {
         if (t && t->seccomp_mode == SECCOMP_MODE_STRICT) {
-            switch (nr) {
+            linux_syscall_args_t call = {.nr = nr};
+            arch_syscall_adjust_args(&call);
+            switch (call.nr) {
             case SYS_read: case SYS_write: case SYS_exit:
-            case SYS_exit_group: case SYS_sigreturn:
+            case SYS_sigreturn:
                 return SECCOMP_RET_ALLOW;
             default:
                 return SECCOMP_RET_KILL_THREAD;
@@ -480,10 +509,13 @@ uint32_t seccomp_evaluate(const task_t *t, uint64_t nr, uint64_t ip,
     for (int i = 0; i < 6; i++)
         sd.args[i] = args[i];
 
+    uint32_t result = SECCOMP_RET_ALLOW;
     for (; f; f = f->prev) {
         uint32_t act = bpf_run(f->insns, f->len, &sd);
-        if ((act & SECCOMP_RET_ACTION_FULL) != SECCOMP_RET_ALLOW)
-            return act;
+        /* Signed action ordering places KILL_PROCESS first. Keep the newest
+         * filter's data when equally restrictive actions are stacked. */
+        if ((int32_t)(act & SECCOMP_RET_ACTION_FULL) <
+            (int32_t)(result & SECCOMP_RET_ACTION_FULL)) result = act;
     }
-    return SECCOMP_RET_ALLOW;
+    return result;
 }

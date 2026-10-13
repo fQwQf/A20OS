@@ -174,7 +174,7 @@ static void net_packet_deliver(const net_packet_slot_t *slot,
         /* Bucket outer, socket inner: the same nesting net_bucket_scan() does,
          * and the only order a bucket lock is ever taken in. */
         uint64_t sf = net_sock_lock(s);
-        bool skip = s->domain != AF_PACKET || s->closed || !s->pkt_bound ||
+        bool skip = !resource_ns_is_initial(s->net_ns) || s->domain != AF_PACKET || s->closed || !s->pkt_bound ||
                     (s->pkt_ifindex > 0 &&
                      (unsigned)s->pkt_ifindex != slot->ifindex) ||
                     (s->pkt_protocol != ETH_P_ALL &&
@@ -247,6 +247,7 @@ int net_packet_ifindex_by_name(const char *name)
 
 int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
 {
+    if (!resource_ns_is_initial(s->net_ns)) return -ENODEV;
     if (!s || s->domain != AF_PACKET)
         return -EAFNOSUPPORT;
     if (!addr || addrlen < sizeof(net_sockaddr_ll_t))
@@ -290,6 +291,7 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
 int net_packet_socket_send(net_socket_t *s, const void *buf, size_t len,
                            const void *addr, size_t addrlen)
 {
+    if (!resource_ns_is_initial(s->net_ns)) return -ENODEV;
     if (!s || s->domain != AF_PACKET)
         return -EAFNOSUPPORT;
     if (!buf || len == 0)

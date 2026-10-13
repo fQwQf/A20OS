@@ -70,23 +70,15 @@ static int signalfd_dequeue(task_t *t, uint64_t mask,
             if (!(matching & signal_mask_bit(sig)))
                 continue;
             selected = sig;
-            ss->pending &= ~signal_mask_bit(sig);
-            t->thread_pending &= ~signal_mask_bit(sig);
+            arch_siginfo_t info;
             memset(out, 0, sizeof(*out));
             out->ssi_signo = (uint32_t)sig;
-            if (ss->pending_has_info[sig]) {
-                const uint8_t *pi = ss->pending_info[sig];
-                int32_t v;
-                memcpy(&v, pi + 4, 4);
-                out->ssi_errno = v;
-                memcpy(&v, pi + 8, 4);
-                out->ssi_code = v;
-                memcpy(&v, pi + 16, 4);
-                out->ssi_pid = (uint32_t)v;
-                memcpy(&v, pi + 20, 4);
-                out->ssi_uid = (uint32_t)v;
+            if (signal_take_pending_info_locked(t, sig, &info, sizeof(info)) == 0) {
+                out->ssi_errno = info.si_errno;
+                out->ssi_code = info.si_code;
+                out->ssi_pid = (uint32_t)info._sifields[0];
+                out->ssi_uid = (uint32_t)info._sifields[1];
             }
-            ss->pending_has_info[sig] = 0;
             break;
         }
     }

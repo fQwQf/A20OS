@@ -341,11 +341,52 @@ static void body_rootless(void)
     _exit(0);
 }
 
+static int overflow_sysctl_probe(void)
+{
+    const char *paths[2] = {"/proc/sys/kernel/overflowuid",
+                            "/proc/sys/kernel/overflowgid"};
+    const char *values[2] = {"65532\n", "65533\n"};
+    int fds[2] = {-1, -1}, saved[2] = {0, 0}, failed = 0;
+    char original[2][32];
+    for (int i = 0; i < 2; i++) {
+        fds[i] = open(paths[i], O_RDWR);
+        if (fds[i] < 0) { failed = 1; goto restore; }
+        saved[i] = read(fds[i], original[i], sizeof(original[i]));
+        if (saved[i] <= 0) { failed = 1; goto restore; }
+        if (write(fds[i], values[i], strlen(values[i])) != (ssize_t)strlen(values[i])) {
+            failed = 1; goto restore;
+        }
+        errno = 0;
+        if (write(fds[i], "65536\n", 6) != -1 || errno != EINVAL) {
+            failed = 1; goto restore;
+        }
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        if (syscall(SYS_unshare, CLONE_NEWUSER) ||
+            getuid() != 65532 || getgid() != 65533) _exit(1);
+        errno = 0;
+        _exit(write(fds[0], "65534\n", 6) == -1 && errno == EPERM ? 0 : 2);
+    }
+    int code = 0;
+    failed = child < 0 || wait_exit(child, &code) || code;
+restore:
+    for (int i = 0; i < 2; i++) {
+        if (fds[i] < 0) continue;
+        if (saved[i] > 0 && write(fds[i], original[i], saved[i]) != saved[i]) failed = 1;
+        close(fds[i]);
+    }
+    return failed;
+}
+
 int main(void)
 {
     unsigned long long init_ino = 0, own_ino = 0, listed = 0;
     unsigned long long pid_ino = 0, listed_pid = 0;
     char buf[160];
+
+    CHECK(overflow_sysctl_probe() == 0,
+          "overflow sysctls control unmapped ids and require initial-namespace authority");
 
     /* 1. Namespace identity is readable, and the initial one is a real id. */
     CHECK(read_ns_file("/proc/self/ns/user", "user", &init_ino) == 0,

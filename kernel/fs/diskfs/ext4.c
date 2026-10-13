@@ -829,9 +829,8 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
          * e2fsck believe freshly allocated inodes were never initialised, and
          * it then treats the directory entries that reference them as pointing
          * into the unused area. */
-        if (sb->group_descs[g].bg_itable_unused_lo > bit) {
-            uint32_t unused = bit;
-            if (unused > 0xffffU) unused = 0xffffU;
+        uint32_t unused = valid - (uint32_t)bit - 1;
+        if (sb->group_descs[g].bg_itable_unused_lo > unused) {
             sb->group_descs[g].bg_itable_unused_lo = (uint16_t)unused;
         }
         ext4_writeback_gd(sb, g);
@@ -875,13 +874,9 @@ void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
     if (sb->inode_alloc_hints)
         sb->inode_alloc_hints[g] = bit;
     ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes + 1);
-    /* A released inode is trailing-unused again, so the count can only grow. */
-    uint16_t unused = sb->group_descs[g].bg_itable_unused_lo;
-    if (bit + 1 > unused) {
-        if (bit + 1 > valid) unused = (uint16_t)valid;
-        else unused = (uint16_t)(bit + 1);
-        sb->group_descs[g].bg_itable_unused_lo = unused;
-    }
+    /* Freeing an inode does not make the following live inode table entries
+     * uninitialized. Keep the initialized high-water mark conservatively;
+     * increasing unused would require inspecting the entire trailing bitmap. */
     ext4_writeback_gd(sb, g);
     mutex_unlock(&sb->alloc_lock);
 }

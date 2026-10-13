@@ -428,7 +428,7 @@ static void coredump_build_notes(task_t *t, int sig, trap_context_t *ctx,
 int coredump_on_fatal_signal(int sig, trap_context_t *ctx)
 {
     task_t *t = proc_current();
-    if (!t || !t->mm || !t->pgdir)
+    if (!t || !t->mm || !t->pgdir || mm_dumpable(t->mm) != 1)
         return 0;
 
     /* RLIMIT_CORE == 0 suppresses the dump (Linux semantics). */

@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "ipc/posix_mq.h"
 
 #include "core/consts.h"
@@ -40,6 +41,7 @@ typedef struct mq_message {
 
 typedef struct mq_queue {
     int used;
+    uint64_t namespace_ino;
     char name[MQ_NAME_MAX];
     int64_t mq_flags;
     int64_t mq_maxmsg;
@@ -69,7 +71,7 @@ static spinlock_t g_mq_desc_lock = SPINLOCK_INIT;
 static mq_queue_t *mq_lookup_locked(const char *name)
 {
     for (int i = 0; i < MQ_MAX_QUEUES; i++)
-        if (g_mq[i].used && strcmp(g_mq[i].name, name) == 0)
+        if (g_mq[i].used && !g_mq[i].unlinked && g_mq[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && strcmp(g_mq[i].name, name) == 0)
             return &g_mq[i];
     return NULL;
 }
@@ -88,6 +90,7 @@ static mq_queue_t *mq_alloc_locked(const char *name, const mq_attr_kern_t *attr)
     mq_queue_t *q = &g_mq[slot];
     memset(q, 0, sizeof(*q));
     q->used = 1;
+    q->namespace_ino = resource_ns_ino(PROCNS_IPC);
     strncpy(q->name, name, MQ_NAME_MAX - 1);
     q->name[MQ_NAME_MAX - 1] = '\0';
     q->mq_maxmsg = attr ? attr->mq_maxmsg : MQ_DEFAULT_MAXMSG;
@@ -480,4 +483,20 @@ void posix_mq_release_task(struct task_t *t)
     /* Descriptors are kernel-global (mqd), not per-task; the fd-close path
      * in the ABI layer calls posix_mq_close when the mq fd is closed.  There
      * is no per-task descriptor storage to release here. */
+}
+
+void posix_mq_namespace_destroy(uint64_t ino)
+{
+    uint64_t irq = spin_lock_irqsave(&g_mq_lock);
+    for (int i = 0; i < MQ_MAX_QUEUES; i++) {
+        mq_queue_t *q = &g_mq[i];
+        if (!q->used || q->namespace_ino != ino) continue;
+        q->unlinked = 1;
+        q->name[0] = 0;
+        if (q->refcount) continue;
+        mq_message_t *m = q->head;
+        while (m) { mq_message_t *next = m->next; kfree(m); m = next; }
+        memset(q, 0, sizeof(*q));
+    }
+    spin_unlock_irqrestore(&g_mq_lock, irq);
 }

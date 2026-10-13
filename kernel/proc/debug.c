@@ -53,9 +53,8 @@ static void ptrace_fill_default_siginfo(task_t *t, int sig, int code)
     memset(si, 0, sizeof(*si));
     si->si_signo = sig;
     si->si_code = code;
-    si->_sifields[0] = 0;
-    si->_sifields[1] = proc_current() ? proc_current()->pid : 0;
-    si->_sifields[2] = proc_current() ? (int)proc_current()->cred.uid : 0;
+    si->_sifields[0] = proc_current() ? proc_current()->pid : 0;
+    si->_sifields[1] = proc_current() ? (int)proc_current()->cred.uid : 0;
     t->ptrace_siginfo_valid = 1;
 }
 

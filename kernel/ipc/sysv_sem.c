@@ -1,3 +1,4 @@
+#include "proc/resource_ns.h"
 #include "ipc/sysv_sem.h"
 
 #include "core/consts.h"
@@ -75,6 +76,7 @@ typedef struct {
 
 typedef struct {
     int used;
+    uint64_t namespace_ino;
     int key;
     int nsems;
     unsigned int uid;
@@ -94,7 +96,7 @@ static spinlock_t g_sem_lock = SPINLOCK_INIT;
 
 static int sem_valid_locked(int semid)
 {
-    return semid >= 0 && semid < SYSV_SEM_MAX && g_sem[semid].used;
+    return semid >= 0 && semid < SYSV_SEM_MAX && g_sem[semid].used && g_sem[semid].namespace_ino == resource_ns_ino(PROCNS_IPC);
 }
 
 int sysv_sem_get(int key, int nsems, int semflg)
@@ -107,7 +109,7 @@ int sysv_sem_get(int key, int nsems, int semflg)
     unsigned int gid = cur ? (unsigned int)cur->cred.egid : 0;
     uint64_t flags = spin_lock_irqsave(&g_sem_lock);
     for (int i = 0; i < SYSV_SEM_MAX; i++) {
-        if (g_sem[i].used && g_sem[i].key == key && key != 0) {
+        if (g_sem[i].used && g_sem[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && g_sem[i].key == key && key != 0) {
             if ((semflg & IPC_CREAT) && (semflg & IPC_EXCL)) {
                 spin_unlock_irqrestore(&g_sem_lock, flags);
                 return -EEXIST;
@@ -121,7 +123,7 @@ int sysv_sem_get(int key, int nsems, int semflg)
         }
     }
 
-    if (!(semflg & IPC_CREAT)) {
+    if (key != 0 && !(semflg & IPC_CREAT)) {
         spin_unlock_irqrestore(&g_sem_lock, flags);
         return -ENOENT;
     }
@@ -134,6 +136,7 @@ int sysv_sem_get(int key, int nsems, int semflg)
         if (!g_sem[i].used) {
             memset(&g_sem[i], 0, sizeof(g_sem[i]));
             g_sem[i].used = 1;
+            g_sem[i].namespace_ino = resource_ns_ino(PROCNS_IPC);
             g_sem[i].key = key;
             g_sem[i].nsems = nsems;
             g_sem[i].uid = uid;
@@ -170,7 +173,7 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
         int highest = -1;
         int used = 0;
         for (int i = 0; i < SYSV_SEM_MAX; i++) {
-            if (g_sem[i].used) {
+            if (g_sem[i].used && g_sem[i].namespace_ino == resource_ns_ino(PROCNS_IPC)) {
                 highest = i;
                 used++;
             }
@@ -473,8 +476,19 @@ int sysv_sem_count(void)
     int n = 0;
     uint64_t flags = spin_lock_irqsave(&g_sem_lock);
     for (int i = 0; i < SYSV_SEM_MAX; i++)
-        if (g_sem[i].used)
+        if (g_sem[i].used && g_sem[i].namespace_ino == resource_ns_ino(PROCNS_IPC))
             n++;
     spin_unlock_irqrestore(&g_sem_lock, flags);
     return n;
+}
+
+void sysv_sem_namespace_destroy(uint64_t ino)
+{
+    uint64_t irq = spin_lock_irqsave(&g_sem_lock);
+    for (int i = 0; i < SYSV_SEM_MAX; i++) {
+        if (!g_sem[i].used || g_sem[i].namespace_ino != ino) continue;
+        wait_queue_wake_all(&g_sem[i].waiters, 0, PROC_WAKE_EVENT);
+        memset(&g_sem[i], 0, sizeof(g_sem[i]));
+    }
+    spin_unlock_irqrestore(&g_sem_lock, irq);
 }

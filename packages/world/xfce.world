@@ -114,7 +114,8 @@ mesa-demos
 # 低于直接看它停在哪一步；宿主网络已通，依赖随取随装。
 strace
 
-# 网络与浏览器（GTK3 原生 Wayland；curl 用于 DNS/TLS 诊断）
+# 网络与浏览器（Firefox 用于现代网页；NetSurf 用于轻量 HTML）
+firefox
 netsurf
 curl
 networkmanager

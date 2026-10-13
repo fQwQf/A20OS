@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -199,6 +200,74 @@ static int test_epoll_modes(void)
     return 0;
 }
 
+static int test_eventfd_waiters(void)
+{
+    uint64_t value = UINT64_MAX - 2, increment = 4;
+    int fd = eventfd(0, EFD_NONBLOCK);
+    if (fd < 0 || write(fd, &value, 8) != 8) return -1;
+    errno = 0;
+    int ok = write(fd, &increment, 8) == -1 && errno == EAGAIN &&
+             read(fd, &increment, 8) == 8 && increment == value;
+    close(fd);
+    if (!ok) return -1;
+
+    /* Completion has a shorter deadline than the children's poll timeout:
+     * a lost notification must not pass by rescanning after that timeout. */
+    for (int mode = 0; mode < 3; mode++) {
+        int ready[2], done[2];
+        pid_t children[4] = {0};
+        fd = eventfd(0, mode == 1 ? EFD_SEMAPHORE : 0);
+        if (fd < 0 || pipe(ready) || pipe(done)) return -1;
+        int nchildren = mode == 2 ? 1 : 4;
+        if (mode == 2) {
+            value = UINT64_MAX - 2;
+            if (write(fd, &value, 8) != 8) return -1;
+        }
+        ok = 1;
+        for (int i = 0; i < nchildren; i++) {
+            children[i] = fork();
+            if (!children[i]) {
+                close(ready[0]); close(done[0]);
+                alarm(2);
+                if (write(ready[1], "r", 1) != 1) _exit(1);
+                uint64_t v = 2;
+                int result;
+                if (mode == 2) result = write(fd, &v, 8) == 8;
+                else if (mode == 1) result = read(fd, &v, 8) == 8 && v == 1;
+                else {
+                    struct pollfd p = {.fd = fd, .events = POLLIN};
+                    result = poll(&p, 1, 1000) == 1 && (p.revents & POLLIN);
+                }
+                if (result) write(done[1], "d", 1);
+                _exit(result ? 0 : 1);
+            }
+            if (children[i] < 0) { ok = 0; break; }
+        }
+        close(ready[1]); close(done[1]);
+        char c;
+        for (int i = 0; ok && i < nchildren; i++)
+            ok = read(ready[0], &c, 1) == 1;
+        usleep(50000);
+        value = mode == 1 ? 4 : 1;
+        if (ok) ok = mode == 2 ? read(fd, &value, 8) == 8
+                               : write(fd, &value, 8) == 8;
+        for (int i = 0; ok && i < nchildren; i++) {
+            struct pollfd p = {.fd = done[0], .events = POLLIN};
+            ok = poll(&p, 1, 300) == 1 && read(done[0], &c, 1) == 1;
+        }
+        for (int i = 0; i < nchildren; i++) if (children[i] > 0) {
+            if (!ok) kill(children[i], SIGKILL);
+            int status;
+            if (waitpid(children[i], &status, 0) != children[i] ||
+                !WIFEXITED(status) || WEXITSTATUS(status)) ok = 0;
+        }
+        close(fd); close(ready[0]); close(done[0]);
+        if (!ok) return -1;
+    }
+    puts("IO_EVENT_TEST: eventfd overflow+observers+semaphore+writer PASS");
+    return 0;
+}
+
 static int test_timerfd_poll(void)
 {
     int fd = timerfd_create(CLOCK_MONOTONIC, 0);
@@ -253,6 +322,10 @@ int main(void)
     }
     if (test_epoll_modes() < 0) {
         printf("IO_EVENT_TEST: FAIL epoll modes errno=%d\n", errno);
+        return 1;
+    }
+    if (test_eventfd_waiters() < 0) {
+        printf("IO_EVENT_TEST: FAIL eventfd waiters errno=%d\n", errno);
         return 1;
     }
     if (test_timerfd_poll() < 0) {

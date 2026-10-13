@@ -39,6 +39,10 @@ uint8_t pci_find_capability(const device_t *dev, uint8_t cap_id);
 uint32_t pci_class_code(const device_t *dev);
 /* PCI vendor/device as vendor << 16 | device. */
 uint32_t pci_device_id(const device_t *dev);
+/* Published function address, without exposing the private enumeration record.
+ * Returns -ENODEV for devices on another bus. */
+int pci_device_location(const device_t *dev, unsigned *bus,
+                        unsigned *slot, unsigned *function);
 /* Return the resource corresponding to a physical PCI BAR number.  MMIO
  * resources are compacted in device->res, so display drivers must not assume
  * that BAR2 is the second resource when BAR0 is a 64-bit BAR. */

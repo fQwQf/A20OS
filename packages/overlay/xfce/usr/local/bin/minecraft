@@ -44,51 +44,29 @@ USERNAME=${USERNAME:-Player}
 CP=$(sed "s|[^:]*/libraries/|$MC_HOME/libraries/|g" "$MC_HOME/classpath.txt" | tr '\n' ':')
 CP="${CP%:}:"
 mkdir -p "$GAMEDIR"
+# Seed new installations only. Existing player settings remain authoritative.
+MC_DEFAULT_OPTIONS=/usr/lib/a20/minecraft/options-$VERSION.txt
+if [ ! -s "$GAMEDIR/options.txt" ] && [ -f "$MC_DEFAULT_OPTIONS" ]; then
+    cp "$MC_DEFAULT_OPTIONS" "$GAMEDIR/options.txt"
+fi
 
 echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
-# A20OS workarounds, all required to get this far (see docs/distro/minecraft.md):
-#   * -XX:-ImplicitNullChecks (diagnostic, hence the Unlock flag): A20OS's
-#     SIGSEGV path trips HotSpot's implicit null check, which otherwise aborts
-#     the VM while it loads classes from client.jar.
-#   * -Dos.name=Linux: LWJGL/Minecraft refuse to run on an unknown platform
-#     name ("A20OS").
-#   * org.lwjgl.system.allocator=system: LWJGL's bundled libjemalloc faults on
-#     A20OS shortly after it loads.
-#   * org.lwjgl.openal.libname=/usr/lib/libopenal.so.1: LWJGL's bundled libopenal is
-#     a GLIBC build, and under gcompat in this musl guest its C++ exception machinery
-#     faults during sound-engine init (al::backend_exception / std::system_error,
-#     from libopenal.so+0xf168), which killed the process before the main menu.  The
-#     image already carries a musl build of the same library and LWJGL's OpenAL
-#     support is pure dynamic binding (there is no liblwjgl_openal.so), so pointing
-#     libname at it takes the glibc C++ library out of the process altogether.
-#     MC then reports a Java-level failure and carries on instead of dying.  Which
-#     device it ends up with is decided by /etc/openal/alsoft.conf; see
-#     docs/distro/minecraft-components.md for the audio stack's current state.
-#   * XDG_SESSION_TYPE=wayland: force GLFW onto its Wayland backend and off the
-#     broken XWayland one.  The bundled GLFW is 3.4.0 and it picks its backend in
-#     _glfwSelectPlatform (glfw src/platform.c): 3.4 has no GLFW_PLATFORM
-#     environment variable, and MC never calls glfwInitHint(GLFW_PLATFORM, ...),
-#     so the environment is the only lever.  With GLFW_ANY_PLATFORM and both
-#     backends compiled in, that function honours XDG_SESSION_TYPE=wayland +
-#     WAYLAND_DISPLAY first, and only otherwise falls back to trying Wayland and
-#     then X11 -- which lands on X11 as soon as DISPLAY is set (XWayland), and
-#     labwc's xwm never presents those windows (docs/graphics/3d-graphics.md
-#     9.22/9.24).  The Wayland backend needs only xdg-shell, wl_shm, wl_compositor
-#     and wl_seat (glfw src/wl_init.c), so llvmpipe's wl_shm path is enough and no
-#     zwp_linux_dmabuf_v1 is involved.  Undo with XDG_SESSION_TYPE=x11.
-: "${XDG_SESSION_TYPE:=wayland}"
-export XDG_SESSION_TYPE
-# The Wayland branch is only taken when WAYLAND_DISPLAY is set, and resolving it
-# also needs XDG_RUNTIME_DIR; without either GLFW silently falls back to X11
-# again, so say so instead of showing an invisible game.
+# Match LWJGL's supported platform name and select the native musl OpenAL.
+# The system allocator avoids loading LWJGL's foreign glibc jemalloc build.
+# Prefer the desktop's Wayland session for GLFW.
+MC_MIN_HEAP=${MC_MIN_HEAP:-256m}
+MC_MAX_HEAP=${MC_MAX_HEAP:-1536m}
 [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] || {
-    echo "minecraft: WAYLAND_DISPLAY/XDG_RUNTIME_DIR is unset, so GLFW would fall" >&2
-    echo "minecraft: back to its X11 backend and the window would never be" >&2
-    echo "minecraft: presented on A20OS.  Run this from inside the labwc session." >&2
+    echo "minecraft: run this from the Wayland desktop session" >&2
     exit 1
 }
+# GLFW also considers DISPLAY when selecting its default platform. The desktop
+# exports both displays for Xwayland applications; choose the native session.
+XDG_SESSION_TYPE=wayland
+export XDG_SESSION_TYPE
+unset DISPLAY
 exec java \
-    -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
+    -Xms"$MC_MIN_HEAP" -Xmx"$MC_MAX_HEAP" \
     -Dos.name=Linux \
     -Dorg.lwjgl.system.allocator=system \
     -Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1 \
@@ -102,6 +80,5 @@ exec java \
     --assetsDir "$MC_HOME/assets" \
     --assetIndex "$ASSET_INDEX" \
     --accessToken 0 \
-    --userType legacy \
     --versionType release \
     "$@"

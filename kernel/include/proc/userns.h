@@ -39,10 +39,12 @@ struct task_t;
  */
 #define USERNS_INIT_INO       4026531837ULL
 #define USERNS_MAP_MAX        5
-/* Id reported to a process for a global uid its namespace cannot map --
- * Linux's (uid_t)-1, which is also the value the audit log uses. */
+/* Default IDs reported when a namespace cannot map a global UID or GID.
+ * /proc/sys/kernel/overflow{uid,gid} controls the live fallback values. */
 #define USERNS_OVERFLOW_UID   65534
 #define USERNS_OVERFLOW_GID   65534
+int userns_overflow_id(int group);
+int userns_set_overflow_id(int group, int value);
 
 /* One contiguous run of the map: ids [lower, lower+count) inside the
  * namespace correspond to [parent_lower, parent_lower+count) outside it. */
