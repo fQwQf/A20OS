@@ -112,3 +112,7 @@ MCU 使用 FAT 扇区 fixture；这一步没有执行 Java 字节码或加载 Mi
 
 真实线程通知与等待已接入，JamVM 类库初始化推进到 Native JNI 库装载；
 见 [48](48-native-thread-signals.md)。Java 应用、GC 和物理多板客户端仍未验收。
+
+真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
+[49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
+GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。

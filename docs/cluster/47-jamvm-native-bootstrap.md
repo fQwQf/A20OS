@@ -113,3 +113,7 @@ JNI 附加栈查询、跨架构 full libc/VM 端口、图形/输入和真实 Min
 
 后续已实现的 Native 线程身份、定向通知与等待，以及初始化推进到原生类库
 装载的实际结果见 [48](48-native-thread-signals.md)。上述本阶段失败日志保留原样。
+
+真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
+[49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
+GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。
