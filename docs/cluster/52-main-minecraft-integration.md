@@ -86,3 +86,7 @@ world 是有变化的测试磁盘，不能把它称作初始输入镜像；原�
 继续实现的目标保持 [24](24-single-system-minecraft.md)：至少两块物理
 MCU 上同一原生 A20OS 的真实 Java 客户端。此次主机客户端验证与 Native
 跨架构执行回归分别提供依赖和机制证据，没有替代该最终验收。
+
+统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
+分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
+[53-linux-application-execution.md](53-linux-application-execution.md)。

@@ -88,3 +88,7 @@ Minecraft 所需 Java 运行时和物理多 MCU 验收仍见
 4 个启动回复后，停止流程仍返回真实退出码 137，活动数为 0。原六程序
 2/2/2 均衡继续通过。完整报文、内核、应用 ELF、日志与源码摘要归档于
 `.kernel-build/cluster/evidence/application-inputs-<commit>/manifest.json`。
+
+统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
+分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
+[53-linux-application-execution.md](53-linux-application-execution.md)。

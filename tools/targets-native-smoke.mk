@@ -261,3 +261,7 @@ check-native-runtime:
 .PHONY: check-native-spawn-admission
 check-native-spawn-admission:
 	$(PYTHON) tools/check-native-spawn-admission.py
+
+.PHONY: check-native-exec-features
+check-native-exec-features:
+	$(PYTHON) tools/check-native-exec-features.py

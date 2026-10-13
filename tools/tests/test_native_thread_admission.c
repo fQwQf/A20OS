@@ -6,7 +6,7 @@
 static task_t parent, child;
 static struct a20_ht_internal table;
 static int mode, created, destroyed, published, put_count, installed, removed;
-static int waiting, wait_result;
+static int waiting, wait_result, wait_status = 37 << 8;
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 task_t *proc_current(void) {
@@ -30,7 +30,7 @@ void proc_publish_deferred_task(task_t *task) {
 }
 int proc_wait4(int pid, int *status, int flags) {
     assert(waiting && pid == 42 && flags == 0);
-    *status = 37 << 8;
+    *status = wait_status;
     return wait_result;
 }
 int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
@@ -138,6 +138,13 @@ int main(void) {
         else
             assert(status.size == sizeof(status) && status.version == 1 &&
                    status.exit_code == 37);
+    }
+    for (unsigned signal = 1; signal <= 31; signal++) {
+        wait_status = signal | 0x80; /* Includes the core-dump flag. */
+        a20_task_status_t status;
+        a20_syscall_args_t args = {.arg = {7, 0, (uintptr_t)&status}};
+        assert(sys_a20_task_wait(&args) == A20_OK);
+        assert(status.exit_code == (int32_t)(128 + signal));
     }
     printf("PASS Native thread admission: 7 failure/publication paths; 5 wait "
            "results\n");

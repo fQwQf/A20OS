@@ -198,7 +198,59 @@ static int start_configured_daemon(void) {
         exec.calling_abi == 3   ? "3"
         : exec.calling_abi == 2 ? "2"
                                 : "1",
-        " 2\nend\n"};
+        " 2\nend\n",
+        "app c8000000000000000000000000000008 /bin/app-exec-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\nrequire-feature 4\narg /bin/cluster_linux_child\narg exit\narg "
+        "hello world\narg \narg 多架构\nenv A20_TEST=cluster\nenv "
+        "A20_EMPTY=\nend\n",
+        "app c9000000000000000000000000000009 /bin/app-exec-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\nrequire-feature 4\narg /bin/cluster_linux_child\narg hold\narg "
+        "hello world\narg \narg 多架构\nenv A20_TEST=cluster\nenv "
+        "A20_EMPTY=\nend\n",
+        "app ca00000000000000000000000000000a /bin/app-exec-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\nrequire-feature 255\narg /bin/cluster_linux_child\narg exit\narg "
+        "hello world\narg \narg 多架构\nenv A20_TEST=cluster\nenv "
+        "A20_EMPTY=\nend\n",
+        "app cb00000000000000000000000000000b /bin/app-exec-",
+        A20_CLUSTER_ARCH_TAG,
+        " ",
+        exec.elf_machine == 243   ? "243"
+        : exec.elf_machine == 183 ? "183"
+                                  : "62",
+        " 64 1 ",
+        exec.calling_abi == 3   ? "3"
+        : exec.calling_abi == 2 ? "2"
+                                : "1",
+        " 2\nrequire-feature 4\narg /bin/no-such-linux-application\nenv "
+        "A20_TEST=cluster\nenv A20_EMPTY=\nend\n",
+    };
     a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
                                  .path = (uint64_t)(uintptr_t)path,
                                  .path_len = sizeof(path) - 1,
@@ -378,6 +430,105 @@ static int exited(a20_app_session_t *s, a20_app_ticket_t *ticket, int expected,
         sleep_ms(10);
     }
     return -1;
+}
+static int linux_applications(uint8_t domains[3][16]) {
+    uint8_t loop[16] = {0xc9}, short_app[16] = {0xc8};
+    uint8_t unavailable[16] = {0xca}, missing[16] = {0xcb};
+    loop[15] = 9;
+    short_app[15] = 8;
+    unavailable[15] = 10;
+    missing[15] = 11;
+    a20_app_ticket_t tickets[6];
+    a20_object_id_t roots[6];
+    a20_app_result_t result = {0};
+    unsigned placed[3] = {0};
+    for (unsigned i = 0; i < 6; i++) {
+        if (a20_app_start_any_reusable(domains, 3, loop, 3000 + i, 30000,
+                                       &tickets[i], &result) < 0 ||
+            result.state != A20_APP_RUNNING) {
+            note("APPS-LINUX: failure line/state/active/exit\n");
+            number(__LINE__);
+            number(result.state);
+            number(result.active);
+            number(result.exit_code);
+            return -1;
+        }
+        roots[i] = result.root;
+        for (unsigned k = 0; k < 3; k++)
+            if (a20_runtime_id_equal(result.root.domain_id, domains[k]))
+                placed[k]++;
+    }
+    if (placed[0] != 2 || placed[1] != 2 || placed[2] != 2)
+        return -1;
+    sleep_ms(3000);
+    for (unsigned i = 0; i < 6; i++) {
+        a20_app_session_t session = {.endpoint = A20_HANDLE_NULL};
+        if (a20_app_resume(&tickets[i], 8000, &session) < 0 ||
+            a20_app_query(&session, &tickets[i], 4000, &result) < 0 ||
+            result.state != A20_APP_RUNNING || result.active != 2 - i / 3 ||
+            !a20_object_id_equal(&roots[i], &result.root) ||
+            a20_app_stop(&session, &tickets[i], 9, 4000, &result) < 0 ||
+            exited(&session, &tickets[i], 137, &result) ||
+            !a20_object_id_equal(&roots[i], &result.root) ||
+            a20_app_release(&session, &tickets[i], 4000, &result) < 0) {
+            note("APPS-LINUX: failure line/state/active/exit\n");
+            number(__LINE__);
+            number(result.state);
+            number(result.active);
+            number(result.exit_code);
+            return -1;
+        }
+        a20_app_close(&session);
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        a20_app_session_t session = {.endpoint = A20_HANDLE_NULL};
+        a20_app_ticket_t ticket;
+        if (a20_app_connect_reusable(domains[i], 8000, &session) < 0 ||
+            a20_app_offer(&session, unavailable, 4000, &result) !=
+                -A20_ERR_NOT_SUPPORTED)
+            return -1;
+        a20_app_close(&session);
+        if (a20_app_resume(&tickets[i], 8000, &session) < 0 ||
+            a20_app_query(&session, &tickets[i], 4000, &result) !=
+                -A20_ERR_EXPIRED) {
+            note("APPS-LINUX: failure line/state/active/exit\n");
+            number(__LINE__);
+            number(result.state);
+            number(result.active);
+            number(result.exit_code);
+            return -1;
+        }
+        a20_app_close(&session);
+        if (a20_app_start_any_reusable(&domains[i], 1, short_app, 3100 + i,
+                                       30000, &ticket, &result) < 0 ||
+            a20_app_resume(&ticket, 8000, &session) < 0 ||
+            exited(&session, &ticket, 41, &result) || result.active ||
+            a20_app_release(&session, &ticket, 4000, &result) < 0) {
+            note("APPS-LINUX: failure line/state/active/exit\n");
+            number(__LINE__);
+            number(result.state);
+            number(result.active);
+            number(result.exit_code);
+            return -1;
+        }
+        a20_app_close(&session);
+        if (a20_app_start_any_reusable(&domains[i], 1, missing, 3200 + i, 30000,
+                                       &ticket, &result) < 0 ||
+            a20_app_resume(&ticket, 8000, &session) < 0 ||
+            exited(&session, &ticket, 127, &result) || result.active ||
+            a20_app_release(&session, &ticket, 4000, &result) < 0) {
+            note("APPS-LINUX: failure line/state/active/exit\n");
+            number(__LINE__);
+            number(result.state);
+            number(result.active);
+            number(result.exit_code);
+            return -1;
+        }
+        a20_app_close(&session);
+    }
+    note("APPS: linux-pass real-programs=6 active=2,2,2 threads=3 "
+         "identity=stable stop=137 exit=41 missing=127 capability=filtered\n");
+    return 0;
 }
 static int reusable(const uint8_t domain[16], int lose_reply) {
     uint8_t loop[16] = {0xc6}, short_app[16] = {0xc7};
@@ -690,6 +841,8 @@ int main(int argc, char **argv, char **envp) {
         if (cli_run(0))
             return fail("CLI persistent reuse");
     note("APPS: cli-reuse-pass runs=9 no-daemon-restart\n");
+    if (linux_applications(candidates))
+        return fail("Linux executable lifecycle");
     stop(daemon);
     note("APPS: PASS\n");
     return 0;

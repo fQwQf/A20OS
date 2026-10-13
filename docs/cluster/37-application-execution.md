@@ -152,3 +152,7 @@ MCU 的 `apps-mcu-seed21.json` 为 PASS，两个 CPU 共执行 56,442 条用户�
 提交逐字节一致。公共头跨 ISA 执行、ASan/UBSan、ARMv7-M/RV32 freestanding
 编译、集群单元测试、文档及 ABI 检查通过。全仓格式检查仍报告原有 114 个文件，
 本轮新增/修改文件未增加失败，未修改格式基线。
+
+统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
+分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
+[53-linux-application-execution.md](53-linux-application-execution.md)。

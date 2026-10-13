@@ -89,7 +89,7 @@ NATIVE_LIBC_SRC  := \
 # instead: over-declaring is the safe direction for a correctness net, and
 # $(wildcard) yields an empty list for an absent directory rather than a
 # literal unexpanded path.
-NATIVE_SDK_HDRS := $(wildcard kernel/include/uapi/a20/cluster*.h) kernel/include/uapi/a20/runtime.h $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+NATIVE_SDK_HDRS := kernel/include/uapi/a20/abi_features.h $(wildcard kernel/include/uapi/a20/cluster*.h) kernel/include/uapi/a20/runtime.h $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
 
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
@@ -723,6 +723,9 @@ $(NATIVE_OBJECT_TEST_BIN): user/tests/test_native_objects.c $(NATIVE_CRT0) $(NAT
 
 $(NATIVE_APPD_BIN): user/svc/appd.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/appd.c,$@)
+
+$(NATIVE_APPEXEC_BIN): user/svc/app_exec.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
+	$(call NATIVE_CLUSTER_APP_RECIPE,user/svc/app_exec.c,$@)
 
 $(NATIVE_APP_TEST_BIN): user/tests/test_native_apps.c $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(NATIVE_SDK_HDRS) $(NATIVE_LD)
 	$(call NATIVE_CLUSTER_APP_RECIPE,-DA20_CLUSTER_ARCH_TAG='"$(NATIVE_TAG)"' user/tests/test_native_apps.c,$@)

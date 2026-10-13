@@ -35,6 +35,18 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
         proc_put(target);
         return A20_OK;
     }
+#ifdef CONFIG_ABI_BOTH
+    /* An owner keeps the same task handle across Native -> Linux exec.
+     * Linux signals must enter the shared signal state so fatal signals end
+     * the whole pthread group, including sleeping workers. */
+    if (target->abi_mode == 0) {
+        int sent = (mode & A20_SIGNAL_THREAD)
+                       ? signal_send_thread(target->pid, sig)
+                       : signal_send_task(target, sig);
+        proc_put(target);
+        return sent < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
+    }
+#endif
     if (sig == 9) {
         /* Force the referenced target to exit at its safe boundary. Calling
          * proc_exit here would terminate the requesting agent instead. */

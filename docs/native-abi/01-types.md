@@ -1066,3 +1066,9 @@ typedef struct a20_atomic32_args {
 `abi_info.feature_bits[0]` bit 3 与 `execution_info` 的 ATOMIC32 位分别公布
 接口可用性。地址权限、超时与副作用错误语义及跨平台实现见
 [公共应用同步](../cluster/29-native-sync.md)。
+
+`abi_info.feature_bits[0]` bit 4（`A20_ABI_FEATURE_LINUX_EXEC`）表示当前
+BOTH 构建提供 Native 根任务通过 exec 替换为 Linux ABI 程序的能力，
+`feature_test(4)` 返回 0；纯 Native 返回 NOT_SUPPORTED。该索引与
+`execution_info` 位图分开编号。使用与生命周期见
+[统一应用执行](../cluster/53-linux-application-execution.md)。

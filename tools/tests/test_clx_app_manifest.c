@@ -35,6 +35,15 @@ int main(void) {
                                       .memory_model = 2,
                                       .atomic_model = 1};
     assert(a20_execution_image_matches(&execution, &e->variant.requirement));
+    assert(!parse("A20APPS1\napp c5000000000000000000000000000005 /x 62 64 1 1 "
+                  "2\nrequire-feature 4\nrequire-feature 255\nend\n",
+                  2, &count));
+    uint64_t supported[4] = {0};
+    assert(!a20_app_manifest_features_match(&entries[0], supported));
+    supported[0] = 1ULL << 4;
+    assert(!a20_app_manifest_features_match(&entries[0], supported));
+    supported[3] = 1ULL << 63;
+    assert(a20_app_manifest_features_match(&entries[0], supported));
     const char *invalid[] = {
         "",
         "A20APPS1\n",
@@ -50,8 +59,15 @@ int main(void) {
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
         assert(parse(invalid[i], 2, &count) < 0);
     char input[4096];
-    const char *bad_tail[] = {"arg before end\n", "env BAD\nend\n",
-                              "env =value\nend\n", "other\nend\n"};
+    const char *bad_tail[] = {"arg before end\n",
+                              "env BAD\nend\n",
+                              "env =value\nend\n",
+                              "other\nend\n",
+                              "require-feature 256\nend\n",
+                              "require-feature 4\nrequire-feature 4\nend\n",
+                              "require-feature -1\nend\n",
+                              "require-feature 4 extra\nend\n",
+                              "require-feature \nend\n"};
     for (unsigned i = 0; i < sizeof(bad_tail) / sizeof(bad_tail[0]); i++) {
         strcpy(input, header);
         strcat(input, bad_tail[i]);

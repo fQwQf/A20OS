@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Three real kernels (RV64, AArch64, x86): application launch, variant admission and lifecycle."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import select
 import shlex
 import socket
 import subprocess
+import tempfile
 import time
 
 
@@ -19,13 +21,18 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     directory = (root / args.log_dir).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    if directory.exists() and any(directory.iterdir()):
+        directory = Path(tempfile.mkdtemp(prefix=directory.name + "-", dir=directory.parent))
+    else:
+        directory.mkdir(exist_ok=True)
+    print(f"check-cluster-apps: evidence {directory}", flush=True)
     (directory / "events.json").write_text(json.dumps({"passed": False, "phase": "build"})+"\n")
     arches = tuple(args.arches.split(","))
     if len(arches)!=3 or any(a not in ("riscv64","aarch64","x86_64") for a in arches):
         parser.error("--arches needs three supported architectures")
     tags = tuple("rv" if a=="riscv64" else a for a in arches)
-    bases = []
+    bases, inputs = [], {}
     for arch in dict.fromkeys(arches):
         make = ["make", "--no-print-directory", "CCACHE=", f"ARCH={arch}", "ABI=both", "BRINGUP=0", "QEMU_ACCEL=tcg,thread=multi"]
         if not args.skip_build:
@@ -40,6 +47,19 @@ def main():
         if arch == "aarch64":
             i = cmd.index("-kernel")+1
             cmd[i] = str(Path(cmd[i]).with_suffix(".bin"))
+        frozen = directory / ("inputs-" + arch)
+        frozen.mkdir(exist_ok=False)
+        for option in ("-kernel", "-drive"):
+            index = cmd.index(option) + 1
+            original = cmd[index]
+            path = original.split("file=", 1)[1].split(",", 1)[0] if option == "-drive" else original
+            source = root / path
+            target = frozen / source.name
+            subprocess.run(["cp", "--reflink=auto", "--sparse=always", str(source), str(target)], check=True)
+            with target.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            inputs[str(target.relative_to(directory))] = digest
+            cmd[index] = original.replace("file=" + path, "file=" + str(target), 1) if option == "-drive" else str(target)
         bases.append((arch,cmd))
     reserve, lanes, ports = [], [], []
     for _ in arches:
@@ -49,6 +69,7 @@ def main():
     processes, logs, commands, outputs, pending = [None]*3, [], [], [None]*3, {}
     trace = []
     events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "ca2": 0, "dropped_release_replies": 0, "dropped_reusable_start_replies": 0, "recycle_domains": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "reboots": []}
+    events["inputs"] = inputs
     macs = [bytes.fromhex(f"52540012340{i+1}") for i in range(3)]
 
     def stop(i):
@@ -158,6 +179,9 @@ def main():
                 events["recycle_domains"]=out.count("APPS: recycle-pass real-exits=16 live-preserved old-start=expired slots=8")
                 if events["recycle_domains"]!=3 or not events["dropped_reusable_start_replies"] or "APPS: reusable-start-timeout-pass original-root=live" not in out or not events["ca2"] or not events["dropped_release_replies"] or "APPS: release-timeout-pass old-start=expired" not in out or "APPS: cli-reuse-pass runs=9 no-daemon-restart" not in out:
                     raise RuntimeError(f"missing real reusable application lifecycle: {events}")
+                events["linux_workloads"] = [s.count("APP-LINUX: PASS sum=500500 workers=2 argc=5 env=2") for s in all_logs]
+                if events["linux_workloads"] != [3, 3, 3] or "APPS: linux-pass real-programs=6 active=2,2,2 threads=3 identity=stable stop=137 exit=41 missing=127 capability=filtered" not in out:
+                    raise RuntimeError(f"missing actual Linux application execution/lifecycle: {events}")
                 events["passed"] = True
                 print(f"check-cluster-apps: PASS ({','.join(arches)}, variant launch, dedup/lost reply, exit/stop, daemon restart and kernel reboot)")
                 return
