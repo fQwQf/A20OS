@@ -278,7 +278,7 @@ static int stale_timeout_isolation(void)
             (int64_t)(finish.tv_sec - start.tv_sec) * 1000000000LL +
             (int64_t)finish.tv_nsec - (int64_t)start.tv_nsec;
         if (second != -1 || saved_errno != ETIMEDOUT ||
-            elapsed_ns < 200000000ULL)
+            elapsed_ns < 200000000LL)
             _exit(33);
         _exit(0);
     }
@@ -353,6 +353,54 @@ static int pi_self_deadlock(void)
         return fail("pi-dlk-unlock");
     munmap(w, sizeof(int));
     printf("FUTEX_STRESS: pi-self-deadlock PASS\n");
+    return 0;
+}
+
+static int pi_cow_isolation(void)
+{
+    int *word = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (word == MAP_FAILED)
+        return fail("pi-cow-map");
+    *word = 0;
+    pid_t child = fork();
+    if (child < 0)
+        return fail("pi-cow-fork");
+    if (child == 0) {
+        if (syscall(SYS_futex, word, FUTEX_LOCK_PI, 0, NULL, NULL, 0) < 0)
+            _exit(2);
+        /* Keep the child's acquired word intact until the parent checks its
+         * private copy; child exit does not unlock this non-robust word. */
+        _exit(0);
+    }
+    if (wait_exit(child, 0, "pi-cow-child") != 0 || *word != 0)
+        return fail("pi-cow-parent-polluted");
+
+    if (syscall(SYS_futex, word, FUTEX_LOCK_PI, 0, NULL, NULL, 0) < 0)
+        return fail("pi-cow-parent-lock");
+    int owned = *word;
+    int ready[2];
+    if (pipe(ready) < 0)
+        return fail("pi-cow-pipe");
+    child = fork();
+    if (child < 0)
+        return fail("pi-cow-unlock-fork");
+    if (child == 0) {
+        close(ready[1]);
+        char byte;
+        if (read(ready[0], &byte, 1) != 1)
+            _exit(3);
+        _exit(*word == owned ? 0 : 4);
+    }
+    close(ready[0]);
+    if (syscall(SYS_futex, word, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0) < 0 ||
+        write(ready[1], "x", 1) != 1)
+        return fail("pi-cow-parent-unlock");
+    close(ready[1]);
+    if (wait_exit(child, 0, "pi-cow-unlock-child") != 0)
+        return fail("pi-cow-child-polluted");
+    munmap(word, 4096);
+    printf("FUTEX_STRESS: pi-cow-isolation PASS\n");
     return 0;
 }
 
@@ -482,6 +530,8 @@ int main(void)
     if (pi_roundtrip() != 0)
         return 1;
     if (pi_self_deadlock() != 0)
+        return 1;
+    if (pi_cow_isolation() != 0)
         return 1;
     if (pi_owner_died() != 0)
         return 1;
