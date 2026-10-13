@@ -165,7 +165,8 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
         if (!target)
             return -A20_ERR_BAD_HANDLE;
 
-        uint64_t flags = spin_lock_irqsave(&target->park_lock);
+        uint64_t park_flags, flags;
+        proc_lock_two_tasks(cur, target, &park_flags, &flags);
         int stopped = a20_debug_target_has_event(target);
         if (stopped) {
             a20_debug_event_info_t info;
@@ -177,7 +178,7 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
             } else {
                 a20_debug_fill_exit_event(target, &info);
             }
-            spin_unlock_irqrestore(&target->park_lock, flags);
+            proc_unlock_two_tasks(cur, target, park_flags, flags);
             proc_put(target);
             if (out) {
                 if (copy_to_user(out, &info, sizeof(info)) < 0)
@@ -186,26 +187,23 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
             return A20_OK;
         }
         if (deadline != 0 && timer_get_ticks() >= deadline) {
-            spin_unlock_irqrestore(&target->park_lock, flags);
+            proc_unlock_two_tasks(cur, target, park_flags, flags);
             proc_put(target);
             return -A20_ERR_TIMED_OUT;
         }
         if (timeout_us == 0) {
-            spin_unlock_irqrestore(&target->park_lock, flags);
+            proc_unlock_two_tasks(cur, target, park_flags, flags);
             proc_put(target);
             return -A20_ERR_WOULD_BLOCK;
         }
 
-        /* Park like a child waiter; the tracee's stop path wakes child
-         * waiters of its (reparented) parent, i.e. us. */
-        /* The waiter's own park_lock, in its own critical section: the
-         * target's lock was released above, so no two task park_locks are
-         * ever nested here (INV-P3). */
-        uint64_t park_flags = spin_lock_irqsave(&cur->park_lock);
+        /* Publish the wait while the event predicate is still protected.
+         * Ordered task locks prevent both lock inversion and a stop arriving
+         * between the predicate check and waiter registration. */
         cur->waiting_for_child = 1;
         proc_wait_token_t token =
             proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, deadline);
-        spin_unlock_irqrestore(&cur->park_lock, park_flags);
+        proc_unlock_two_tasks(cur, target, park_flags, flags);
         proc_put(target);
 
         proc_wake_reason_t reason = proc_park_commit(token);
