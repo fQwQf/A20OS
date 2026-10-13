@@ -21,6 +21,13 @@ def case_for_arch(name: str, case: dict, arch: str) -> dict:
     if name in RISCV_ONLY and arch != "riscv64":
         raise ValueError(f"{name} requires {RISCV_ONLY[name]}")
     result = deepcopy(case)
+    if name.startswith("smoke-native-"):
+        # Wait for the shell instead of losing input during a slow TCG boot.
+        if result.get("stdin", {}).get("kind") == "pipe":
+            result["stdin"] = {"kind": "sendline", "expect": "# ",
+                               "lines": result["stdin"]["lines"]}
+        seconds = int(result["timeout"].removesuffix("s"))
+        result["timeout"] = f"{max(60, seconds)}s"
     if arch == "riscv64":
         return result
 
