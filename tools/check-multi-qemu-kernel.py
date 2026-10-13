@@ -86,7 +86,8 @@ def qmp_snapshot(path, process, deadline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new evidence directory")
-    parser.add_argument("--workload", choices=("kernel", "native", "linux", "disk", "linux-disk", "linux-fs"), default="kernel")
+    parser.add_argument("--workload", choices=("kernel", "native", "linux", "disk", "linux-disk", "linux-fs", "jvm", "jvm-threads"), default="kernel")
+    parser.add_argument("--system-image", type=Path, help="existing raw root image for JVM; opened only as qcow2 backing")
     parser.add_argument("--ext4-checksums", choices=("legacy", "metadata32", "metadata64"), default="legacy")
     parser.add_argument("--mode", choices=("shared", "smp"), default="shared")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
@@ -100,11 +101,13 @@ def main():
         parser.error("qemu-system-x86_64 is required")
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):
         parser.error("accessible /dev/kvm required; cross-process TCG atomics are not validated")
+    if args.workload in ("jvm", "jvm-threads") and (not args.system_image or not args.system_image.is_file()):
+        parser.error("JVM requires an existing raw --system-image")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)  # Never replace an earlier run.
     shared = args.mode == "shared"
     flags = FLAGS + [f"QEMU_SHARED_SMP={int(shared)}"]
-    if args.workload in ("native", "linux", "linux-disk", "linux-fs"):
+    if args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads"):
         flags += ["SMP_SELFTEST=0", "RAMFS_USER=1", "RAMFS_NATIVE_TESTS=1"]
     report = {"passed": False, "mode": args.mode, "workload": args.workload, "make_flags": flags,
               "evidence": args.workload + " execution; not Minecraft acceptance",
@@ -199,6 +202,36 @@ def main():
                 report.update(filesystem_before_sha256=sha(filesystem), disk_program_sha256=sha(seed / "program"), mkfs=mkfs, ext4_checksums=args.ext4_checksums)
                 commands[0] += ["-drive", f"file={filesystem},format=raw,if=none,id=filesystem,cache=writeback",
                                 "-device", "virtio-blk-pci,drive=filesystem,disable-legacy=on"]
+            if args.workload in ("jvm", "jvm-threads"):
+                source = args.system_image.resolve()
+                report.update(system_image=str(source), system_image_before_sha256=sha(source))
+                overlay = out / "jvm-root.qcow2"
+                subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw",
+                                "-b", str(source), str(overlay)], check=True)
+                commands[0] += ["-drive", f"file={overlay},format=qcow2,if=none,id=jvm,cache=writeback",
+                                "-device", "virtio-blk-pci,drive=jvm,disable-legacy=on"]
+            if args.workload == "jvm-threads":
+                seed = out / "jvm-payload"
+                seed.mkdir()
+                java = shutil.which("java") or "/usr/lib/jvm/java-21-openjdk-amd64/bin/java"
+                compile_java = [java, "-m", "jdk.compiler/com.sun.tools.javac.Main", "-source", "21", "-target", "21",
+                                "-d", str(seed), str(ROOT / "tools/shared-jvm-test/ClusterProbe.java")]
+                compile_jni = ["x86_64-linux-gnu-gcc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                               "-fPIC", "-shared", "-nostdlib", "-Wl,--hash-style=both",
+                               str(ROOT / "tools/shared-jvm-test/cpu.c"), "-o", str(seed / "libclusterprobe.so")]
+                with (out / "payload-build.log").open("wb") as log:
+                    subprocess.run(compile_java, stdout=log, stderr=subprocess.STDOUT, check=True)
+                    subprocess.run(compile_jni, stdout=log, stderr=subprocess.STDOUT, check=True)
+                payload = out / "jvm-payload.img"
+                with payload.open("xb") as f: f.truncate(16 * 1024 * 1024)
+                from mkrootfs import EXT4_MKFS_ARGS, resolve_mkfs_ext4
+                subprocess.run([resolve_mkfs_ext4(), *EXT4_MKFS_ARGS[1:], "-d", str(seed), str(payload)], check=True)
+                commands[0] += ["-drive", f"file={payload},format=raw,if=none,id=payload,readonly=on",
+                                "-device", "virtio-blk-pci,drive=payload,disable-legacy=on"]
+                report.update(java_compiler=compile_java, jni_compiler=compile_jni,
+                              java_payload_sha256=sha(payload),
+                              java_sources={str(p.relative_to(ROOT)): sha(p) for p in
+                                            (ROOT / "tools/shared-jvm-test").iterdir() if p.is_file()})
             for i, cmd in enumerate(commands):
                 cmd += ["-qmp", f"unix:{runtime / str(i)},server=on,wait=off"]
             report["commands"] = commands
@@ -208,7 +241,7 @@ def main():
                 for i in reversed(range(len(commands))):
                     log = (out / f"node-{i}.log").open("wb")
                     logs.append(log)
-                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux", "linux-disk", "linux-fs") else subprocess.DEVNULL,
+                    processes[i] = subprocess.Popen(commands[i], cwd=ROOT, stdin=subprocess.PIPE if i == 0 and args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads") else subprocess.DEVNULL,
                                                     stdout=log, stderr=subprocess.STDOUT)
                 report["pids"] = [p.pid for p in processes]
                 report["qmp"] = [qmp_snapshot(runtime / str(i), p, deadline)
@@ -235,7 +268,7 @@ def main():
                              for i in range(len(commands))]
                     if any("PANIC" in t or "panic:" in t for t in texts):
                         raise RuntimeError("guest panic")
-                    if args.workload in ("native", "linux", "linux-disk", "linux-fs"):
+                    if args.workload in ("native", "linux", "linux-disk", "linux-fs", "jvm", "jvm-threads"):
                         content = texts[0]
                         if shared and ("NATIVE_" in texts[1] or "CLUSTER_THREADS:" in texts[1]):
                             raise RuntimeError("user output escaped primary console owner")
@@ -243,18 +276,18 @@ def main():
                             raise RuntimeError("user application contract failed")
                         if not application_started and re.search(r"(?:^|[\r\n])# ", content):
                             processes[0].stdin.write((b"/bin/native-futex; echo A20_NATIVE_EXIT:$?\n" if args.workload == "native"
-                                                      else ("/bin/cluster_threads --console" + (" --disk" if args.workload == "linux-disk" else " --filesystem" if args.workload == "linux-fs" else "") + "; echo A20_LINUX_EXIT:$?\n").encode()))
+                                                      else ("/bin/cluster_threads --console" + (" --disk" if args.workload == "linux-disk" else " --filesystem" if args.workload == "linux-fs" else " --jvm" if args.workload == "jvm" else " --jvm-threads" if args.workload == "jvm-threads" else "") + "; echo A20_LINUX_EXIT:$?\n").encode()))
                             processes[0].stdin.flush()
                             application_started = True
                             deadline = time.monotonic() + args.timeout
-                        if args.workload in ("linux", "linux-disk", "linux-fs") and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
+                        if args.workload in ("linux", "linux-disk", "linux-fs", "jvm", "jvm-threads") and not console_input_sent and "CLUSTER_CONSOLE: remote-cpu=1 ready" in content:
                             processes[0].stdin.write(b"owner-ok\n")
                             processes[0].stdin.flush()
                             console_input_sent = True
                         exited = re.search(r"A20_(?:NATIVE|LINUX)_EXIT:(\d+)", content)
                         if application_started and exited and int(exited[1]) != 0:
                             raise RuntimeError("user application exited " + exited[1])
-                        if args.workload in ("linux", "linux-disk", "linux-fs") and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
+                        if args.workload in ("linux", "linux-disk", "linux-fs", "jvm", "jvm-threads") and "CLUSTER_THREADS: PASS" in content and "A20_LINUX_EXIT:0" in content:
                             match = re.search(r"CLUSTER_THREADS: PASS threads=2 affinity-rounds=128 migrations=(\d+) tls=preserved tlb-rounds=64 protection-faults=128 jobs=1024 split=(\d+)/(\d+) sum=(\d+) mask=3 destructors=2 cond-timeout=checked", content)
                             if not match or not 126 <= int(match[1]) <= 128 or sum(map(int, match.groups()[1:3])) != 1024 or min(map(int, match.groups()[1:3])) <= 0 or int(match[4]) != 8256 * 1024 * 1025 // 2:
                                 raise RuntimeError("missing Linux/POSIX execution evidence")
@@ -266,6 +299,18 @@ def main():
                                 for marker in ("CLUSTER_FS_CHILD: PASS cpu=1 bytes=65536 fsync=file+directory",
                                                "CLUSTER_FS: PASS cpu=1 exec=disk child-exit=37 bytes=65536 unmounted=1"):
                                     if marker not in content: raise RuntimeError("missing filesystem acceptance: " + marker)
+                            if args.workload == "jvm":
+                                if 'openjdk version "21.' not in content or "CLUSTER_JVM: PASS cpu=1 java-exit=0 unmounted=1" not in content:
+                                    raise RuntimeError("missing real JVM acceptance")
+                                report.update(jvm_version_started=True, jvm_cpu=1, jvm_exit=0)
+                            if args.workload == "jvm-threads":
+                                java_result = re.search(r"CLUSTER_JAVA: PASS threads=2 affinity-checks=16 mask=3 jobs=512 split=(\d+)/(\d+) sum=(\d+)", content)
+                                if (not java_result or sum(map(int, java_result.groups()[:2])) != 512 or
+                                    min(map(int, java_result.groups()[:2])) < 1 or int(java_result[3]) != 8256 * 512 * 513 // 2 or
+                                    "CLUSTER_JVM: PASS affinity-mask=3 java-exit=0 unmounted=1" not in content):
+                                    raise RuntimeError("missing cross-CPU Java work execution")
+                                report.update(java_threads=2, java_affinity_checks=16, java_cpu_mask=3,
+                                              java_work_split=list(map(int, java_result.groups()[:2])), java_sum=int(java_result[3]), jvm_exit=0)
                             for block in range(32):
                                 marker = f"CLUSTER_CONSOLE_BLOCK:{block:02d}:abcdefghijklmnopqrstuvwxyz012345"
                                 if content.count(marker) != 1:
@@ -359,6 +404,11 @@ def main():
                 verify_fsck_output(fsck_text, filesystem)
                 report.update(filesystem_after_sha256=sha(filesystem), filesystem_host_verified=True,
                               filesystem_bytes=65536, filesystem_child_exit=37, filesystem_fsck=True)
+            if args.workload in ("jvm", "jvm-threads"):
+                report["system_image_after_sha256"] = sha(source)
+                if report["system_image_after_sha256"] != report["system_image_before_sha256"]:
+                    raise RuntimeError("backing system image changed during test")
+                report["jvm_overlay_sha256"] = sha(overlay)
     except Exception as exc:
         report["passed"] = False
         report["failure"] = repr(exc)

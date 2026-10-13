@@ -98,3 +98,6 @@ Minecraft 镜像的功能配置。测试覆盖这三种格式，不代表所有 
 图形设备与 Minecraft 客户端仍需实际启动验证；物理 MCU 的共享 RAM/仲裁/
 缓存维护、异构部署和设备故障恢复仍保留原设计与验收要求。不能用本用例
 代替单个 Minecraft 跨 MCU/跨实例运行的最终验收。
+
+后续真实 JVM 启动及同一 JVM 的跨实例 Java 线程执行已见
+[59](59-shared-jvm-execution.md)。Minecraft 图形与输入仍需继续验收。
