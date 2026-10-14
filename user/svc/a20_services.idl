@@ -26,6 +26,30 @@ interface a20_services version 1 {
   }
   const SVCMGR_REQ_ECHO = 0x21;
   const SVCMGR_REQ_CRASH = 0x22;
+  // Negotiation is itself carried in the unchanged v1 envelope. The request
+  // and response use distinct message types so a legacy unknown-type echo is
+  // never accepted as an acknowledgement. A nonce correlates this exchange;
+  // it is not an authentication mechanism.
+  const SVCMGR_REQ_VERSION_NEGOTIATE = 0x23;
+  const SVCMGR_REP_VERSION_NEGOTIATE = 0x24;
+  const SVCMGR_VERSION_NEGOTIATE_OK = 0;
+  const SVCMGR_VERSION_NEGOTIATE_NO_COMMON = 1;
+  const SVCMGR_VERSION_NEGOTIATE_INVALID_RANGE = 2;
+  // The client advertises an inclusive, nonzero range. The response reports
+  // the server's inclusive supported range, echoes nonce, and selects the
+  // highest member of the intersection. Non-OK statuses require selection 0.
+  message SVCMGR_VERSION_REQUEST {
+    u16 min_version;
+    u16 max_version;
+    u32 nonce;
+  }
+  message SVCMGR_VERSION_RESPONSE {
+    u16 min_version;
+    u16 max_version;
+    u16 selected_version;
+    u16 status;
+    u32 nonce;
+  }
   // Binding slots: task_spawn target_slot values, one service each.
   // Slot numbers are global conventions; the ping channel shares 41 with
   // the shmring VMO because they belong to different service tasks.

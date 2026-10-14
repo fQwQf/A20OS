@@ -3,12 +3,14 @@
 #include "core/defs.h"
 #include "core/errno.h"
 #include "core/lock.h"
+#include "core/stdio.h"
 #include "core/string.h"
 #include "mm/fault.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "proc/proc.h"
+#include "core/cpu.h"
 
 /*
  * Cross-process memory copy.
@@ -108,6 +110,86 @@ static int process_vm_pin_leaf(mm_struct_t *mm, vaddr_t va, int for_write,
     return 0;
 }
 
+#ifdef CONFIG_PROCESS_VM_RUST
+/* Rust owns the walk and reference guards; these callbacks retain the
+ * architecture-sensitive PTE/frame operations in C. */
+int a20_process_vm_range_ok(uintptr_t address, size_t length)
+{
+    return process_vm_range_ok((uint64_t)address, length);
+}
+
+void *a20_process_vm_mm_get(task_t *task)
+{
+    mm_struct_t *mm = proc_task_get_mm(task);
+    if (!mm || !mm->pgdir) {
+        mm_destroy(mm);
+        return NULL;
+    }
+    return mm;
+}
+
+void a20_process_vm_mm_put(mm_struct_t *mm) { mm_destroy(mm); }
+
+int a20_process_vm_pin_leaf(mm_struct_t *mm, uintptr_t address, int for_write,
+                            void **kernel_address, size_t *available,
+                            uintptr_t *frame_token)
+{
+    pfn_t pfn = PFN_NONE;
+    int r = process_vm_pin_leaf(mm, (vaddr_t)address, for_write,
+                                kernel_address, available, &pfn);
+    *frame_token = (uintptr_t)pfn;
+    return r;
+}
+
+void a20_process_vm_frame_put(uintptr_t frame_token)
+{
+    frame_put((pfn_t)frame_token);
+}
+
+/* Test-only rendezvous: hold a process_vm COW retry on its old, pinned MM
+ * until the target completes the atomic exec mm swap. The COW operation that
+ * follows must still use `mm`; task->mm is read here solely to establish that
+ * the exec race window actually happened. */
+#ifdef CONFIG_PROCESS_VM_EXEC_RACE_TEST
+static int process_vm_test_wait_exec_switch(task_t *task, mm_struct_t *mm)
+{
+    if (!task || !mm)
+        return -EINVAL;
+    for (unsigned long spin = 0; spin < 10000000UL; spin++) {
+        uint64_t flags = spin_lock_irqsave(&task->park_lock);
+        mm_struct_t *current = task->mm;
+        spin_unlock_irqrestore(&task->park_lock, flags);
+        if (current != mm)
+            return current ? 0 : -ESRCH;
+        cpu_relax();
+    }
+    return -ETIMEDOUT;
+}
+#endif
+
+int a20_process_vm_break_cow(task_t *task, mm_struct_t *mm,
+                             uintptr_t address)
+{
+#ifdef CONFIG_PROCESS_VM_EXEC_RACE_TEST
+    int r = process_vm_test_wait_exec_switch(task, mm);
+    if (r < 0)
+        return r;
+    int cow_result = handle_cow_fault_mm(task, mm, (vaddr_t)address);
+    if (cow_result == 0)
+        printf("PROCESS_VM_EXEC_RACE_HOOK: PASS exec_swap_seen=1 pinned_mm_cow=1\n");
+    return cow_result;
+#else
+    return handle_cow_fault_mm(task, mm, (vaddr_t)address);
+#endif
+}
+
+void a20_process_vm_mark_dirty(mm_struct_t *mm, uintptr_t address)
+{
+    (void)mm_mark_leaf_dirty_if_writable(mm->pgdir, (vaddr_t)address);
+}
+#endif
+
+#ifndef CONFIG_PROCESS_VM_RUST
 long process_vm_read_kernel(struct task_t *src_task, const void *src,
                             void *dst, size_t len)
 {
@@ -177,3 +259,19 @@ long process_vm_write_kernel(struct task_t *dst_task, void *dst,
     }
     return (long)done;
 }
+#else
+extern long a20_process_vm_read_kernel_rust(task_t *, const void *, void *, size_t);
+extern long a20_process_vm_write_kernel_rust(task_t *, void *, const void *, size_t);
+
+long process_vm_read_kernel(task_t *src_task, const void *src,
+                            void *dst, size_t len)
+{
+    return a20_process_vm_read_kernel_rust(src_task, src, dst, len);
+}
+
+long process_vm_write_kernel(task_t *dst_task, void *dst,
+                             const void *src, size_t len)
+{
+    return a20_process_vm_write_kernel_rust(dst_task, dst, src, len);
+}
+#endif

@@ -21,11 +21,13 @@
  * each target under its park_lock (never holding both).
  */
 
+#ifndef CONFIG_WAIT_TIMER_RUST
 typedef struct wait_timer {
     uint64_t deadline;
     task_t *task;
     uint64_t wait_seq;
 } wait_timer_t;
+#endif
 
 #ifndef CONFIG_WAIT_TIMER_HEAP_MAX
 #ifdef CONFIG_MCU
@@ -40,11 +42,27 @@ typedef struct wait_timer {
 /* Tokenized deadline min-heap.  Protected by g_wait_timer_lock; the *_locked
  * accessors require it to be held (callers hold the target's park_lock first). */
 static spinlock_t g_wait_timer_lock = SPINLOCK_INIT;
+#ifndef CONFIG_WAIT_TIMER_RUST
 static wait_timer_t wait_timer_heap[WAIT_TIMER_HEAP_MAX];
 static unsigned wait_timer_count;
 static unsigned long wait_timer_full_failures;
 static unsigned long wait_timer_duplicate_rejections;
 static unsigned long wait_timer_stale_expirations;
+#else
+extern void a20_wait_timer_init_rust(void);
+extern int a20_wait_timer_register_rust(task_t *, uint64_t, uint64_t);
+extern void a20_wait_timer_cancel_rust(task_t *, uint64_t);
+extern void a20_wait_timer_expire_rust(uint64_t);
+struct a20_wait_timer_stats {
+    uint32_t entries;
+    uint32_t capacity;
+    uint64_t full_failures;
+    uint64_t duplicate_rejections;
+    uint64_t stale_expirations;
+    uint32_t violations;
+};
+extern void a20_wait_timer_stats_rust(struct a20_wait_timer_stats *);
+#endif
 
 /*
  * Per-task SIGALRM (ITIMER_REAL) deadline min-heap.  Protected by
@@ -159,48 +177,53 @@ static uint64_t next_posix_scan = SCHED_NO_DEADLINE;
 /* Native callbacks require process context; IRQ signal scans must not consume them. */
 static uint64_t next_native_scan = SCHED_NO_DEADLINE;
 
-unsigned proc_wait_timer_count_locked(void)
-{
-    return wait_timer_count;
-}
-
 unsigned proc_wait_timer_capacity(void)
 {
     return WAIT_TIMER_HEAP_MAX;
 }
 
-unsigned long proc_wait_timer_full_failures_locked(void)
+void proc_wait_timer_snapshot(proc_wait_timer_stats_t *stats)
 {
-    return wait_timer_full_failures;
-}
-
-unsigned long proc_wait_timer_duplicate_rejections_locked(void)
-{
-    return wait_timer_duplicate_rejections;
-}
-
-unsigned long proc_wait_timer_stale_expirations_locked(void)
-{
-    return wait_timer_stale_expirations;
-}
-
-unsigned proc_wait_timer_violations_locked(void)
-{
+    if (!stats)
+        return;
+#ifdef CONFIG_WAIT_TIMER_RUST
+    struct a20_wait_timer_stats rust_stats = {0};
+    extern void a20_wait_timer_stats_rust(struct a20_wait_timer_stats *);
+    a20_wait_timer_stats_rust(&rust_stats);
+    stats->entries = rust_stats.entries;
+    stats->capacity = rust_stats.capacity;
+    stats->full_failures = rust_stats.full_failures;
+    stats->duplicate_rejections = rust_stats.duplicate_rejections;
+    stats->stale_expirations = rust_stats.stale_expirations;
+    stats->violations = rust_stats.violations;
+#else
+    uint64_t flags = spin_lock_irqsave(&g_wait_timer_lock);
+    stats->entries = wait_timer_count;
+    stats->capacity = WAIT_TIMER_HEAP_MAX;
+    stats->full_failures = wait_timer_full_failures;
+    stats->duplicate_rejections = wait_timer_duplicate_rejections;
+    stats->stale_expirations = wait_timer_stale_expirations;
     unsigned violations = wait_timer_count > WAIT_TIMER_HEAP_MAX;
-    for (unsigned i = 0; i < wait_timer_count; i++) {
+    /* Keep the diagnostic itself bounded if count metadata is corrupted. */
+    for (unsigned i = 0;
+         i < wait_timer_count && i < WAIT_TIMER_HEAP_MAX; i++) {
         wait_timer_t *timer = &wait_timer_heap[i];
         if (!timer->task || !timer->deadline || !timer->wait_seq)
             violations++;
         if (timer->task &&
             (timer->task->wait_timer_index != (int)i ||
-             timer->task->wait_seq != timer->wait_seq ||
-             timer->task->wait_deadline != timer->deadline))
+             __atomic_load_n(&timer->task->wait_seq, __ATOMIC_ACQUIRE) !=
+                 timer->wait_seq ||
+             __atomic_load_n(&timer->task->wait_deadline, __ATOMIC_RELAXED) !=
+                 timer->deadline))
             violations++;
         if (i > 0 &&
             wait_timer_heap[(i - 1) / 2].deadline > timer->deadline)
             violations++;
     }
-    return violations;
+    stats->violations = violations;
+    spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+#endif
 }
 
 #define SCHED_TICK_INTERVAL       (TICKS_PER_SEC / 100)
@@ -267,13 +290,113 @@ static void sched_rearm_timer(void)
     timer_set_interval(proc_next_timer_interval(now));
 }
 
+#ifdef CONFIG_WAIT_TIMER_RUST
+uint64_t a20_wait_timer_lock(void)
+{
+    return spin_lock_irqsave(&g_wait_timer_lock);
+}
+
+void a20_wait_timer_unlock(uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+}
+
+uint32_t a20_wait_timer_capacity(void)
+{
+    return WAIT_TIMER_HEAP_MAX;
+}
+
+task_t *a20_wait_timer_task_ref(task_t *task)
+{
+    return proc_get(task);
+}
+
+void a20_wait_timer_task_put(task_t *task)
+{
+    proc_put(task);
+}
+
+int a20_wait_timer_task_index(task_t *task)
+{
+    return task ? __atomic_load_n(&task->wait_timer_index, __ATOMIC_ACQUIRE)
+                : -1;
+}
+
+void a20_wait_timer_set_task_index(task_t *task, int index)
+{
+    if (task)
+        __atomic_store_n(&task->wait_timer_index, index, __ATOMIC_RELEASE);
+}
+
+void a20_wait_timer_set_wake_time(task_t *task, uint64_t deadline)
+{
+    if (task)
+        __atomic_store_n(&task->wake_time, deadline, __ATOMIC_RELAXED);
+}
+
+void a20_wait_timer_publish_next(uint64_t deadline)
+{
+    __atomic_store_n(&next_wake_scan, deadline, __ATOMIC_RELAXED);
+}
+
+void a20_wait_timer_rearm_if_earlier(uint64_t deadline)
+{
+    uint64_t old = __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED);
+    if (deadline < old) {
+        __atomic_store_n(&next_wake_scan, deadline, __ATOMIC_RELAXED);
+        sched_rearm_timer();
+    }
+}
+
+int a20_wait_timer_entry_valid(task_t *task, unsigned index,
+                               uint64_t deadline, uint64_t seq)
+{
+    return task &&
+           a20_wait_timer_task_index(task) == (int)index &&
+           __atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE) == seq &&
+           __atomic_load_n(&task->wait_deadline, __ATOMIC_RELAXED) == deadline;
+}
+
+void a20_wait_timer_after_dequeue(task_t *task, uint64_t seq)
+{
+    extern void proc_wait_timer_test_after_dequeue(task_t *, uint64_t);
+    proc_wait_timer_test_after_dequeue(task, seq);
+}
+#endif
+
+void proc_wait_timer_test_after_dequeue(task_t *task, uint64_t seq)
+{
+#ifdef CONFIG_SMP_SELFTEST
+    extern void smp_test_wait_timer_after_dequeue(task_t *, uint64_t);
+    smp_test_wait_timer_after_dequeue(task, seq);
+#else
+    (void)task;
+    (void)seq;
+#endif
+}
+
+void proc_wait_timer_test_after_fire(task_t *task, uint64_t seq, int result)
+{
+#ifdef CONFIG_SMP_SELFTEST
+    extern void smp_test_wait_timer_after_fire(task_t *, uint64_t, int);
+    smp_test_wait_timer_after_fire(task, seq, result);
+#else
+    (void)task;
+    (void)seq;
+    (void)result;
+#endif
+}
+
+#ifndef CONFIG_WAIT_TIMER_RUST
 static void wait_timer_heap_swap(unsigned a, unsigned b)
 {
     wait_timer_t tmp = wait_timer_heap[a];
     wait_timer_heap[a] = wait_timer_heap[b];
     wait_timer_heap[b] = tmp;
-    wait_timer_heap[a].task->wait_timer_index = (int)a;
-    wait_timer_heap[b].task->wait_timer_index = (int)b;
+    __atomic_store_n(&wait_timer_heap[a].task->wait_timer_index, (int)a,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&wait_timer_heap[b].task->wait_timer_index, (int)b,
+                     __ATOMIC_RELEASE);
 }
 
 static void wait_timer_sift_up(unsigned index)
@@ -317,11 +440,13 @@ static wait_timer_t wait_timer_remove_index_locked(unsigned index)
 
     removed = wait_timer_heap[index];
     if (removed.task)
-        removed.task->wait_timer_index = -1;
+        __atomic_store_n(&removed.task->wait_timer_index, -1,
+                         __ATOMIC_RELEASE);
     wait_timer_count--;
     if (index != wait_timer_count) {
         wait_timer_heap[index] = wait_timer_heap[wait_timer_count];
-        wait_timer_heap[index].task->wait_timer_index = (int)index;
+        __atomic_store_n(&wait_timer_heap[index].task->wait_timer_index,
+                         (int)index, __ATOMIC_RELEASE);
         if (index > 0 &&
             wait_timer_heap[index].deadline <
             wait_timer_heap[(index - 1) / 2].deadline)
@@ -361,8 +486,8 @@ int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
     wait_timer_heap[index].deadline = deadline;
     wait_timer_heap[index].task = owned;
     wait_timer_heap[index].wait_seq = wait_seq;
-    t->wait_timer_index = (int)index;
-    t->wake_time = deadline;
+    __atomic_store_n(&t->wait_timer_index, (int)index, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->wake_time, deadline, __ATOMIC_RELAXED);
     wait_timer_sift_up(index);
     __atomic_store_n(&next_wake_scan, wait_timer_heap[0].deadline,
                      __ATOMIC_RELAXED);
@@ -381,25 +506,34 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq)
         wait_timer_heap[index].wait_seq != wait_seq)
         return;
     wait_timer_t removed = wait_timer_remove_index_locked(index);
-    t->wake_time = 0;
+    __atomic_store_n(&t->wake_time, 0, __ATOMIC_RELAXED);
     proc_put(removed.task);
 }
+#endif
 
 /* Public wrappers: acquire g_wait_timer_lock around the *_locked helpers.
  * Callers typically hold the target's park_lock (park_lock -> timer lock). */
 int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq)
 {
+#ifdef CONFIG_WAIT_TIMER_RUST
+    return a20_wait_timer_register_rust(t, deadline, wait_seq);
+#else
     uint64_t flags = spin_lock_irqsave(&g_wait_timer_lock);
     int r = proc_wait_timer_register_locked(t, deadline, wait_seq);
     spin_unlock_irqrestore(&g_wait_timer_lock, flags);
     return r;
+#endif
 }
 
 void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq)
 {
+#ifdef CONFIG_WAIT_TIMER_RUST
+    a20_wait_timer_cancel_rust(t, wait_seq);
+#else
     uint64_t flags = spin_lock_irqsave(&g_wait_timer_lock);
     proc_wait_timer_cancel_locked(t, wait_seq);
     spin_unlock_irqrestore(&g_wait_timer_lock, flags);
+#endif
 }
 
 void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
@@ -468,6 +602,9 @@ void sched_set_posix_deadline(uint64_t deadline)
  */
 void proc_sched_expire_wait_timers(uint64_t now)
 {
+#ifdef CONFIG_WAIT_TIMER_RUST
+    a20_wait_timer_expire_rust(now);
+#else
     struct { task_t *task; uint64_t seq; } expired[128];
     unsigned expired_count;
     uint64_t flags;
@@ -493,16 +630,20 @@ void proc_sched_expire_wait_timers(uint64_t now)
              * signal wake; the removed timer entry makes the cancel inside
              * the wake a no-op.  A task already woken (WOKEN/IDLE) is left
              * alone. */
+            proc_wait_timer_test_after_dequeue(t, expired[i].seq);
             uint64_t plf = spin_lock_irqsave(&t->park_lock);
             int stale = t->wait_seq != expired[i].seq;
             int woke = proc_try_wake_locked_common(
                 t, expired[i].seq, PROC_WAKE_TIMEOUT, NULL, NULL);
             spin_unlock_irqrestore(&t->park_lock, plf);
-            if (!woke && stale)
+            int result = stale ? 2 : (woke ? 1 : 0);
+            proc_wait_timer_test_after_fire(t, expired[i].seq, result);
+            if (result == 2)
                 wait_timer_stale_expirations++;
             proc_put(t);
         }
     } while (expired_count == 128);
+#endif
 }
 
 /*
@@ -600,10 +741,14 @@ void sched_scan_timers(uint64_t now)
 
 void proc_timer_heap_init(void)
 {
+#ifdef CONFIG_WAIT_TIMER_RUST
+    a20_wait_timer_init_rust();
+#else
     wait_timer_count = 0;
     wait_timer_full_failures = 0;
     wait_timer_duplicate_rejections = 0;
     wait_timer_stale_expirations = 0;
+#endif
     __atomic_store_n(&next_wake_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
     __atomic_store_n(&next_posix_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);

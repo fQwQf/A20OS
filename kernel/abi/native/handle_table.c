@@ -14,6 +14,7 @@
 #include "core/lock.h"
 #include "core/refcount.h"
 #include "core/klog.h"
+#include "core/panic.h"
 #include "core/defs.h"
 #include "core/timer.h"
 #include "mm/slab.h"
@@ -29,7 +30,7 @@
 #include "proc/proc.h"
 #include "handle_table.h"
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-#include "handle_slot.h"
+#include "handle_table_state.h"
 _Static_assert(sizeof(a20_handle_entry_t) == (sizeof(void *) == 8 ? 48 : 40), "handle entry ABI size mismatch");
 #if defined(__arm__)
 _Static_assert(__alignof__(a20_handle_entry_t) == 8, "handle entry ABI alignment mismatch");
@@ -45,13 +46,18 @@ _Static_assert(__builtin_offsetof(a20_handle_entry_t, state) == (sizeof(void *) 
 #endif
 
 struct a20_ht_internal {
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    a20_rust_handle_table_state_t *rust_state;
+#else
     a20_handle_entry_t *entries;
     uint32_t            capacity;
     uint32_t            count;
     uint32_t            free_hint;
-    spinlock_t          lock;
     uint64_t           *free_bitmap;
     uint32_t            bitmap_size;
+    uint32_t            max_handles;
+#endif
+    spinlock_t          lock;
     uint8_t             security_label; /* Bell-LaPadula process label: 0=L, 1=M, 2=H */
     refcount_t          refcount;       /* shared by all threads of a process */
     struct a20_ht_internal *registry_next; /* global sweeper registry */
@@ -59,8 +65,20 @@ struct a20_ht_internal {
      * bit n == signal n; SIGKILL (9) is handled immediately, never queued. */
     uint64_t            sig_pending;
     uint64_t            sig_blocked;
-    uint32_t            max_handles;    /* hard quota (M2); install fails above this */
 };
+
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+static void *ht_state_alloc(size_t bytes) { return kmalloc(bytes); }
+static void ht_state_free(void *ptr) { kfree(ptr); }
+
+static inline uint32_t ht_capacity(const struct a20_ht_internal *ht)
+{
+    return a20_rust_handle_table_capacity(ht->rust_state);
+}
+
+#else
+static inline uint32_t ht_capacity(const struct a20_ht_internal *ht) { return ht->capacity; }
+#endif
 
 /* ---- Global handle-table registry (sweeper) ----
  * Every live handle table is linked here so a20_temporal_sweep_all() can
@@ -132,6 +150,7 @@ void a20_ht_set_label(struct a20_ht_internal *ht, uint8_t label)
         ht->security_label = label;
 }
 
+#ifndef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
 static int ht_alloc_slot(struct a20_ht_internal *ht)
 {
     for (uint32_t i = ht->free_hint / 64; i < ht->bitmap_size; i++) {
@@ -193,6 +212,7 @@ static int ht_grow(struct a20_ht_internal *ht)
     kfree(old_bitmap);
     return 0;
 }
+#endif
 
 static const a20_rights_t a20_type_rights[A20_OBJ_HYP_VCPU + 1] = {
     [A20_OBJ_INVALID]          = 0,
@@ -267,16 +287,39 @@ struct a20_ht_internal *a20_ht_create(void)
     struct a20_ht_internal *ht = kmalloc(sizeof(*ht));
     if (!ht) return NULL;
 
-    ht->capacity = A20_HT_INITIAL_CAP;
-    ht->count = 0;
-    ht->free_hint = 0;
-    ht->max_handles = A20_HT_DEFAULT_QUOTA;
     ht->security_label = 0; /* default: L (docs/native-abi/06-security.md §5.1) */
     refcount_set(&ht->refcount, 1);
     spin_init(&ht->lock);
     spin_set_debug(&ht->lock, "a20_handle_table", ht);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    uint32_t initial_bitmap_words = (A20_HT_INITIAL_CAP + 63) / 64;
+    a20_handle_entry_t *initial_entries = kmalloc(
+        A20_HT_INITIAL_CAP * sizeof(a20_handle_entry_t));
+    uint64_t *initial_bitmap = kmalloc(initial_bitmap_words * sizeof(uint64_t));
+    size_t state_size = a20_rust_handle_table_state_size();
+    size_t state_align = a20_rust_handle_table_state_align();
+    ht->rust_state = state_size && state_align && (state_align & (state_align - 1)) == 0
+        ? kmalloc(state_size) : NULL;
+    if (!initial_entries || !initial_bitmap || !ht->rust_state ||
+        ((uintptr_t)ht->rust_state & (state_align - 1)) != 0 ||
+        a20_rust_handle_table_state_init(
+            ht->rust_state, (uint8_t *)initial_entries,
+            sizeof(a20_handle_entry_t), __alignof__(a20_handle_entry_t),
+            A20_HT_INITIAL_CAP, initial_bitmap, initial_bitmap_words,
+            A20_HT_MAX_CAP, A20_HT_DEFAULT_QUOTA,
+            ht_state_alloc, ht_state_free) < 0) {
+        kfree(initial_entries);
+        kfree(initial_bitmap);
+        kfree(ht->rust_state);
+        kfree(ht);
+        return NULL;
+    }
+#else
+    ht->capacity = A20_HT_INITIAL_CAP;
+    ht->count = 0;
+    ht->free_hint = 0;
+    ht->max_handles = A20_HT_DEFAULT_QUOTA;
     ht->bitmap_size = (ht->capacity + 63) / 64;
-
     ht->entries = kmalloc(ht->capacity * sizeof(a20_handle_entry_t));
     ht->free_bitmap = kmalloc(ht->bitmap_size * sizeof(uint64_t));
     if (!ht->entries || !ht->free_bitmap) {
@@ -287,6 +330,7 @@ struct a20_ht_internal *a20_ht_create(void)
     }
     memset(ht->entries, 0, ht->capacity * sizeof(a20_handle_entry_t));
     memset(ht->free_bitmap, 0, ht->bitmap_size * sizeof(uint64_t));
+#endif
 
     uint64_t rflags = spin_lock_irqsave(&g_a20_ht_registry_lock);
     ht->registry_next = g_a20_ht_registry;
@@ -299,7 +343,11 @@ struct a20_ht_internal *a20_ht_create(void)
 void a20_handle_host_set_quota(struct a20_ht_internal *ht, uint32_t quota)
 {
     uint64_t flags = spin_lock_irqsave(&ht->lock);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    (void)a20_rust_handle_table_set_quota(ht->rust_state, quota);
+#else
     ht->max_handles = quota;
+#endif
     spin_unlock_irqrestore(&ht->lock, flags);
 }
 #endif
@@ -312,10 +360,17 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
     extern void a20_channel_trace_dump(void);
     extern void a20_channel_trace(uint32_t op, uint32_t len, void *p1,
                                   void *p2, uint32_t meta);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    a20_channel_trace(9, 0, ht, ht->rust_state, 0);
+    printf("[HT-DESTROY] ht=%p state=%p cap=%u refs=%d pid=%d\n",
+           (void *)ht, (void *)ht->rust_state, ht_capacity(ht),
+           (int)ht->refcount.value, proc_current() ? proc_current()->pid : -1);
+#else
     a20_channel_trace(9, 0, ht, ht->entries, 0);
     printf("[HT-DESTROY] ht=%p entries=%p bitmap=%p cap=%u refs=%d pid=%d\n",
            (void *)ht, (void *)ht->entries, (void *)ht->free_bitmap,
            ht->capacity, (int)ht->refcount.value, proc_current() ? proc_current()->pid : -1);
+#endif
 
 #endif
     uint64_t rflags = spin_lock_irqsave(&g_a20_ht_registry_lock);
@@ -333,15 +388,24 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
     /* The table is dead (refcount hit zero): no concurrent lookups remain.
      * Drop every entry's object reference so channels see peer_closed,
      * event queues are released and vfile fds are closed on process exit. */
-    for (uint32_t i = 0; i < ht->capacity; i++) {
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-        void *obj = NULL;
-        uint16_t type = A20_OBJ_INVALID;
-        if (a20_rust_handle_slot_destroy(&ht->entries[i], &obj, &type)) {
+    uint32_t cursor = 0;
+    void *destroyed_object = NULL;
+    uint16_t destroyed_type = A20_OBJ_INVALID;
+    while (a20_rust_handle_table_destroy_next(
+               ht->rust_state, &cursor, &destroyed_object, &destroyed_type)) {
+        if (destroyed_object) {
             a20_objstat_add(&g_a20_objstats.handles, -1);
-            a20_object_release(obj, type);
+            a20_object_release(destroyed_object, destroyed_type);
         }
+        destroyed_object = NULL;
+        destroyed_type = A20_OBJ_INVALID;
+    }
+    if (a20_rust_handle_table_state_fini(ht->rust_state) != 0)
+        panic("handle table Rust state not empty at final teardown");
+    kfree(ht->rust_state);
 #else
+    for (uint32_t i = 0; i < ht->capacity; i++) {
         if (ht->entries[i].object != NULL && ht->entries[i].state != A20_HS_FREE) {
             void *obj = ht->entries[i].object;
             uint16_t type = ht->entries[i].type;
@@ -350,10 +414,10 @@ void a20_ht_destroy(struct a20_ht_internal *ht)
             a20_objstat_add(&g_a20_objstats.handles, -1);
             a20_object_release(obj, type);
         }
-#endif
     }
     kfree(ht->entries);
     kfree(ht->free_bitmap);
+#endif
     kfree(ht);
 }
 
@@ -387,6 +451,14 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
         rights &= valid;
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    int64_t slot = a20_rust_handle_table_install(
+        ht->rust_state, object, type, rights, 0, 0, 0, 0);
+    if (slot >= 0)
+        a20_objstat_add(&g_a20_objstats.handles, 1);
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return slot;
+#else
     int slot = -1;
     if (ht->count < ht->max_handles)
         slot = ht_alloc_slot(ht);
@@ -398,14 +470,6 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
         spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_NO_SPACE;
     }
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (!a20_rust_handle_slot_install(&ht->entries[slot], object, type, rights,
-                                      0, 0, 0, 0)) {
-        ht_free_slot(ht, (uint32_t)slot);
-        spin_unlock_irqrestore(&ht->lock, flags);
-        return -A20_ERR_BAD_HANDLE;
-    }
-#else
     ht->entries[slot].object = object;
     ht->entries[slot].type = type;
     ht->entries[slot].rights = rights;
@@ -414,11 +478,11 @@ int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
     ht->entries[slot].temporal_flags = 0;
     ht->entries[slot].security_label = 0;
     ht->entries[slot].state = A20_HS_ACTIVE;
-#endif
     ht->count++;
     a20_objstat_add(&g_a20_objstats.handles, 1);
     spin_unlock_irqrestore(&ht->lock, flags);
     return (int64_t)slot;
+#endif
 }
 
 /*
@@ -439,6 +503,15 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
         rights &= valid;
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    int64_t slot = a20_rust_handle_table_install(
+        ht->rust_state, object, type, rights, expiry_tick, remaining_ops,
+        temporal_flags, security_label);
+    if (slot >= 0)
+        a20_objstat_add(&g_a20_objstats.handles, 1);
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return slot;
+#else
     int slot = -1;
     if (ht->count < ht->max_handles)
         slot = ht_alloc_slot(ht);
@@ -450,15 +523,6 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
         spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_NO_SPACE;
     }
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (!a20_rust_handle_slot_install(&ht->entries[slot], object, type, rights,
-                                      expiry_tick, remaining_ops, temporal_flags,
-                                      security_label)) {
-        ht_free_slot(ht, (uint32_t)slot);
-        spin_unlock_irqrestore(&ht->lock, flags);
-        return -A20_ERR_BAD_HANDLE;
-    }
-#else
     ht->entries[slot].object = object;
     ht->entries[slot].type = type;
     ht->entries[slot].rights = rights;
@@ -467,11 +531,11 @@ int64_t a20_handle_install_temporal(struct a20_ht_internal *ht, void *object,
     ht->entries[slot].temporal_flags = temporal_flags;
     ht->entries[slot].security_label = security_label;
     ht->entries[slot].state = A20_HS_ACTIVE;
-#endif
     ht->count++;
     a20_objstat_add(&g_a20_objstats.handles, 1);
     spin_unlock_irqrestore(&ht->lock, flags);
     return (int64_t)slot;
+#endif
 }
 
 /* Install at a caller-selected slot for Native fd inheritance.  The reserved
@@ -493,6 +557,15 @@ int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
         rights &= valid;
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    int64_t result = a20_rust_handle_table_install_at(
+        ht->rust_state, slot, object, type, rights, expiry_tick,
+        remaining_ops, temporal_flags, security_label);
+    if (result >= 0)
+        a20_objstat_add(&g_a20_objstats.handles, 1);
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return result;
+#else
     while (slot >= ht->capacity) {
         if (ht_grow(ht) < 0) {
             spin_unlock_irqrestore(&ht->lock, flags);
@@ -514,15 +587,6 @@ int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
     ht->free_bitmap[word_idx] |= (1ULL << bit_idx);
     if (ht->free_hint <= slot)
         ht->free_hint = slot + 1;
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (!a20_rust_handle_slot_install(&ht->entries[slot], object, type, rights,
-                                      expiry_tick, remaining_ops, temporal_flags,
-                                      security_label)) {
-        ht_free_slot(ht, slot);
-        spin_unlock_irqrestore(&ht->lock, flags);
-        return -A20_ERR_BAD_HANDLE;
-    }
-#else
     ht->entries[slot].object = object;
     ht->entries[slot].type = type;
     ht->entries[slot].rights = rights;
@@ -531,11 +595,11 @@ int64_t a20_handle_install_at_temporal(struct a20_ht_internal *ht,
     ht->entries[slot].temporal_flags = temporal_flags;
     ht->entries[slot].security_label = security_label;
     ht->entries[slot].state = A20_HS_ACTIVE;
-#endif
     a20_objstat_add(&g_a20_objstats.handles, 1);
     ht->count++;
     spin_unlock_irqrestore(&ht->lock, flags);
     return (int64_t)slot;
+#endif
 }
 
 static int64_t a20_handle_lookup_ref_mode(struct a20_ht_internal *ht,
@@ -546,19 +610,22 @@ static int64_t a20_handle_lookup_ref_mode(struct a20_ht_internal *ht,
                                           int take_ref)
 {
     uint64_t flags = spin_lock_irqsave(&ht->lock);
-    if (h >= ht->capacity) {
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    if (h >= ht_capacity(ht)) {
         spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    int64_t rust_result = a20_rust_handle_slot_lookup(
-        &ht->entries[h], expected_type, required_rights, a20_current_tick(),
-        out);
+    int64_t rust_result = a20_rust_handle_table_lookup(
+        ht->rust_state, h, expected_type, required_rights, a20_current_tick(), out);
     if (rust_result == A20_OK && take_ref)
         a20_object_ref(out->object, out->type);
     spin_unlock_irqrestore(&ht->lock, flags);
     return rust_result;
 #else
+    if (h >= ht->capacity) {
+        spin_unlock_irqrestore(&ht->lock, flags);
+        return -A20_ERR_BAD_HANDLE;
+    }
     a20_handle_entry_t *e = &ht->entries[h];
     if (e->object == NULL || e->state == A20_HS_FREE) {
         spin_unlock_irqrestore(&ht->lock, flags);
@@ -650,9 +717,7 @@ int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h)
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (h < ht->capacity && a20_rust_handle_slot_remove(&ht->entries[h], &obj, &type)) {
-        ht_free_slot(ht, h);
-        ht->count--;
+    if (a20_rust_handle_table_remove(ht->rust_state, h, &obj, &type)) {
         a20_objstat_add(&g_a20_objstats.handles, -1);
     }
 #else
@@ -689,10 +754,12 @@ int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (!a20_rust_handle_slot_quota_allows(ht->count, count, ht->max_handles)) {
+    int32_t rust_result = a20_rust_handle_table_reserve_many(
+        ht->rust_state, count, (uint32_t *)handles);
+    spin_unlock_irqrestore(&ht->lock, flags);
+    return rust_result;
 #else
     if (count > ht->max_handles || ht->count > ht->max_handles - count) {
-#endif
         spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_NO_SPACE;
     }
@@ -710,14 +777,7 @@ int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
     for (uint32_t i = 0; i < count; i++) {
         int slot = ht_alloc_slot(ht);
         if (slot < 0) break;
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-        if (!a20_rust_handle_slot_reserve(&ht->entries[slot])) {
-            ht_free_slot(ht, (uint32_t)slot);
-            break;
-        }
-#else
         ht->entries[slot].state = A20_HS_CLOSING; /* reserved: invisible to lookup */
-#endif
         ht->count++;
         handles[i] = (a20_handle_t)slot;
         done++;
@@ -729,29 +789,29 @@ int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
         return -A20_ERR_NO_SPACE;
     }
     return A20_OK;
+#endif
 }
 
 void a20_handle_abort_reserved(struct a20_ht_internal *ht,
                                a20_handle_t *handles, uint32_t count)
 {
     uint64_t flags = spin_lock_irqsave(&ht->lock);
+#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
+    (void)a20_rust_handle_table_abort_many(
+        ht->rust_state, (const uint32_t *)handles, count);
+    spin_unlock_irqrestore(&ht->lock, flags);
+#else
     for (uint32_t i = 0; i < count; i++) {
         a20_handle_t h = handles[i];
         if (h >= ht->capacity) continue;
-#ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-        if (a20_rust_handle_slot_abort(&ht->entries[h])) {
-            ht_free_slot(ht, h);
-            ht->count--;
-        }
-#else
         a20_handle_entry_t *e = &ht->entries[h];
         if (e->state != A20_HS_CLOSING || e->object != NULL) continue;
         e->state = A20_HS_FREE;
         ht_free_slot(ht, h);
         ht->count--;
-#endif
     }
     spin_unlock_irqrestore(&ht->lock, flags);
+#endif
 }
 
 int64_t a20_handle_commit_reserved_temporal(struct a20_ht_internal *ht,
@@ -771,9 +831,9 @@ int64_t a20_handle_commit_reserved_temporal(struct a20_ht_internal *ht,
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (h >= ht->capacity || !a20_rust_handle_slot_commit(
-            &ht->entries[h], object, type, rights, expiry_tick, remaining_ops,
-            temporal_flags, security_label)) {
+    if (a20_rust_handle_table_commit(ht->rust_state, h, object, type, rights,
+                                     expiry_tick, remaining_ops,
+                                     temporal_flags, security_label) != 0) {
         spin_unlock_irqrestore(&ht->lock, flags);
         return -A20_ERR_BAD_HANDLE;
     }
@@ -836,12 +896,8 @@ int64_t a20_handle_set_temporal(struct a20_ht_internal *ht, a20_handle_t h,
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    if (h >= ht->capacity) {
-        spin_unlock_irqrestore(&ht->lock, flags);
-        return -A20_ERR_BAD_HANDLE;
-    }
-    int64_t rust_result = a20_rust_handle_slot_set_temporal(
-        &ht->entries[h], expiry_tick, remaining_ops, temporal_flags);
+    int64_t rust_result = a20_rust_handle_table_set_temporal(
+        ht->rust_state, h, expiry_tick, remaining_ops, temporal_flags);
     spin_unlock_irqrestore(&ht->lock, flags);
     if (rust_result < 0)
         return rust_result;
@@ -897,9 +953,8 @@ int64_t a20_handle_get_temporal(struct a20_ht_internal *ht, a20_handle_t h,
 {
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    int64_t rust_result = h >= ht->capacity ? -A20_ERR_BAD_HANDLE :
-        a20_rust_handle_slot_get_temporal(&ht->entries[h], expiry_tick,
-                                          remaining_ops, temporal_flags);
+    int64_t rust_result = a20_rust_handle_table_get_temporal(
+        ht->rust_state, h, expiry_tick, remaining_ops, temporal_flags);
     spin_unlock_irqrestore(&ht->lock, flags);
     return rust_result;
 #else
@@ -932,8 +987,8 @@ int64_t a20_handle_set_label(struct a20_ht_internal *ht, a20_handle_t h,
 
     uint64_t flags = spin_lock_irqsave(&ht->lock);
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-    int64_t rust_result = h >= ht->capacity ? -A20_ERR_BAD_HANDLE :
-        a20_rust_handle_slot_set_label(&ht->entries[h], label);
+    int64_t rust_result = a20_rust_handle_table_set_label(
+        ht->rust_state, h, label);
     spin_unlock_irqrestore(&ht->lock, flags);
     return rust_result;
 #else
@@ -978,17 +1033,15 @@ void a20_temporal_sweep(struct a20_ht_internal *ht)
         uint64_t now = timer_get_ticks();
 
         uint64_t flags = spin_lock_irqsave(&ht->lock);
-        for (uint32_t i = 0; i < ht->capacity && n < A20_SWEEP_BATCH; i++) {
+        for (uint32_t i = 0; i < ht_capacity(ht) && n < A20_SWEEP_BATCH; i++) {
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
             void *detached_object = NULL;
             uint16_t detached_type = A20_OBJ_INVALID;
-            if (a20_rust_handle_slot_expire(&ht->entries[i], now,
-                                             &detached_object, &detached_type)) {
+            if (a20_rust_handle_table_expire(ht->rust_state, i, now,
+                                              &detached_object, &detached_type)) {
                 objs[n] = detached_object;
                 types[n] = detached_type;
                 n++;
-                ht_free_slot(ht, i);
-                ht->count--;
                 a20_objstat_add(&g_a20_objstats.handles, -1);
             }
 #else

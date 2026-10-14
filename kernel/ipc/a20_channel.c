@@ -899,16 +899,66 @@ int a20_channel_peer_closed(a20_channel_ep_t *ep)
     return r;
 }
 
+int a20_channel_ep_set_peer_close_hook(a20_channel_ep_t *ep,
+                                       void (*hook)(void *),
+                                       void (*ctx_ref)(void *),
+                                       void (*ctx_put)(void *), void *ctx)
+{
+    if (!ep || !hook || !ctx_ref || !ctx_put || !ctx)
+        return -A20_ERR_INVALID_ARGUMENT;
+    spin_lock(&g_ch_lock);
+    spin_lock(&ep->lock);
+    if (ep->peer_close_hook || ep->peer_closed) {
+        spin_unlock(&ep->lock);
+        spin_unlock(&g_ch_lock);
+        return -A20_ERR_BUSY;
+    }
+    ctx_ref(ctx); /* endpoint-owned reference */
+    ep->peer_close_hook = hook;
+    ep->peer_close_ref = ctx_ref;
+    ep->peer_close_put = ctx_put;
+    ep->peer_close_ctx = ctx;
+    spin_unlock(&ep->lock);
+    spin_unlock(&g_ch_lock);
+    return A20_OK;
+}
+
+void a20_channel_ep_clear_peer_close_hook(a20_channel_ep_t *ep)
+{
+    if (!ep) return;
+    void (*ctx_put)(void *) = NULL;
+    void *ctx = NULL;
+    spin_lock(&g_ch_lock);
+    spin_lock(&ep->lock);
+    ctx_put = ep->peer_close_put;
+    ctx = ep->peer_close_ctx;
+    ep->peer_close_hook = NULL;
+    ep->peer_close_ref = NULL;
+    ep->peer_close_put = NULL;
+    ep->peer_close_ctx = NULL;
+    spin_unlock(&ep->lock);
+    spin_unlock(&g_ch_lock);
+    if (ctx_put) ctx_put(ctx);
+}
+
 void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
 {
     if (!ep)
         return;
+    void (*hook)(void *) = NULL;
+    void (*ctx_put)(void *) = NULL;
+    void *hook_ctx = NULL;
     spin_lock(&g_ch_lock);
     spin_lock(&ep->lock);
     a20_channel_ep_t *peer = ep->peer;
     if (peer) {
         spin_lock(&peer->lock);
         peer->peer_closed = 1;
+        hook = peer->peer_close_hook;
+        ctx_put = peer->peer_close_put;
+        hook_ctx = peer->peer_close_ctx;
+        if (hook && peer->peer_close_ref)
+            peer->peer_close_ref(hook_ctx);
         spin_unlock(&peer->lock);
         wait_queue_wake_all(&peer->waiters, 0, PROC_WAKE_EVENT);
         a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
@@ -916,6 +966,10 @@ void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
     }
     spin_unlock(&ep->lock);
     spin_unlock(&g_ch_lock);
+    if (hook) {
+        hook(hook_ctx);
+        if (ctx_put) ctx_put(hook_ctx);
+    }
 }
 
 /*
@@ -949,12 +1003,21 @@ void a20_channel_ep_release(a20_channel_ep_t *ep)
     if (!refcount_dec_and_test(&ep->refcount)) return;
     a20_objstat_add(&g_a20_objstats.channel_eps, -1);
 
+    void (*hook)(void *) = NULL;
+    void (*ctx_put)(void *) = NULL;
+    void *hook_ctx = NULL;
+
     spin_lock(&g_ch_lock);
     spin_lock(&ep->lock);
     a20_channel_ep_t *peer = ep->peer;
     if (peer) {
         spin_lock(&peer->lock);
         peer->peer_closed = 1;
+        hook = peer->peer_close_hook;
+        ctx_put = peer->peer_close_put;
+        hook_ctx = peer->peer_close_ctx;
+        if (hook && peer->peer_close_ref)
+            peer->peer_close_ref(hook_ctx);
         spin_unlock(&peer->lock);
         if (peer->peer == ep)
             peer->peer = NULL;
@@ -969,6 +1032,11 @@ void a20_channel_ep_release(a20_channel_ep_t *ep)
     a20_eventq_on_object_destroy(ep, A20_OBJ_CHANNEL_ENDPOINT);
     spin_unlock(&ep->lock);
     spin_unlock(&g_ch_lock);
+
+    if (hook) {
+        hook(hook_ctx);
+        if (ctx_put) ctx_put(hook_ctx);
+    }
 
     a20_ch_message_t *msg = ep->msg_head;
     while (msg) {

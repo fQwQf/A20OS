@@ -170,9 +170,34 @@ def cmd_native(a) -> int:
     native_rust_peer = str(getattr(a, "native_rust_peer", "0"))
     if native_rust_peer not in ("0", "1"):
         raise SystemExit("error: --native-rust-peer must be 0 or 1")
+    native_rust_idl_service = str(getattr(a, "native_rust_idl_service", "0"))
+    if native_rust_idl_service not in ("0", "1"):
+        raise SystemExit("error: --native-rust-idl-service must be 0 or 1")
+    if native_rust_idl_service == "1" and native_rust_peer != "1":
+        raise SystemExit("error: Rust IDL service requires --native-rust-peer 1")
+    native_rust_echod = str(getattr(a, "native_rust_echod", "0"))
+    if native_rust_echod not in ("0", "1"):
+        raise SystemExit("error: --native-rust-echod must be 0 or 1")
+    if native_rust_echod == "1" and a.arch != "riscv64":
+        raise SystemExit("error: Rust echod currently requires ARCH=riscv64")
+    native_rust_svcmgr = str(getattr(a, "native_rust_svcmgr", "0"))
+    if native_rust_svcmgr not in ("0", "1"):
+        raise SystemExit("error: --native-rust-svcmgr must be 0 or 1")
+    native_rust_rtcd = str(getattr(a, "native_rust_rtcd", "0"))
+    if native_rust_rtcd not in ("0", "1"):
+        raise SystemExit("error: --native-rust-rtcd must be 0 or 1")
+    if native_rust_rtcd == "1" and a.arch != "riscv64":
+        raise SystemExit("error: Rust rtcd currently requires ARCH=riscv64")
+    native_rust_ufsd = str(getattr(a, "native_rust_ufsd", "0"))
+    if native_rust_ufsd not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd must be 0 or 1")
+    if native_rust_ufsd == "1" and a.arch != "riscv64":
+        raise SystemExit("error: Rust ufsd currently requires ARCH=riscv64")
     user_build_dir = getattr(a, "user_build_dir", str(Path(a.stamp).parent))
     resolved_build_dir = resolved_user_build_dir(user_build_dir)
     rust_peer_binary = getattr(a, "rust_peer_binary", "")
+    rust_service_binary = getattr(a, "rust_service_binary", "")
+    rust_service_test_binary = getattr(a, "rust_service_test_binary", "")
     peer_path = None
     if rust_peer_binary:
         candidate = Path(rust_peer_binary)
@@ -186,15 +211,60 @@ def cmd_native(a) -> int:
         peer_path = candidate.parent.resolve() / candidate.name
         if peer_path.parent != resolved_build_dir.resolve():
             raise SystemExit("error: Rust peer cleanup path must be a top-level file in USER_BUILD_DIR")
+    def generated_user_binary(raw_path: str, label: str) -> Path | None:
+        if not raw_path:
+            return None
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = REPO / candidate
+        if candidate.name in ("", ".", ".."):
+            raise SystemExit(f"error: {label} cleanup path must name a file")
+        # Preserve the final directory entry; if it is a symlink, cleanup must
+        # unlink that link rather than follow it to another user's file.
+        result = candidate.parent.resolve() / candidate.name
+        if result.parent != resolved_build_dir.resolve():
+            raise SystemExit(f"error: {label} cleanup path must be a top-level file in USER_BUILD_DIR")
+        return result
+
+    service_path = generated_user_binary(rust_service_binary, "Rust IDL service")
+    service_test_path = generated_user_binary(rust_service_test_binary, "Rust IDL service test")
+    rust_echod_path = generated_user_binary(
+        getattr(a, "rust_echod_binary", ""), "Rust echod")
+    rust_svcmgr_path = generated_user_binary(
+        getattr(a, "rust_svcmgr_binary", ""), "Rust svcmgr")
+    rust_rtcd_path = generated_user_binary(
+        getattr(a, "rust_rtcd_binary", ""), "Rust rtcd")
+    rust_ufsd_path = generated_user_binary(
+        getattr(a, "rust_ufsd_binary", ""), "Rust ufsd")
     with user_output_lock(str(resolved_build_dir)):
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
         # The same native output directory is shared by C-only and opt-in
         # builds. Include the selector in the cache identity so switching
         # either way always runs the matching recursive native-programs build.
-        effective_build_id = f"{a.build_id}\nNATIVE_RUST_PEER={native_rust_peer}"
+        effective_build_id = (f"{a.build_id}\nNATIVE_RUST_PEER={native_rust_peer}"
+                              f"\nNATIVE_RUST_IDL_SERVICE={native_rust_idl_service}"
+                              f"\nNATIVE_RUST_ECHOD={native_rust_echod}"
+                              f"\nNATIVE_RUST_SVCMGR={native_rust_svcmgr}"
+                              f"\nNATIVE_RUST_RTCD={native_rust_rtcd}"
+                              f"\nNATIVE_RUST_UFSD={native_rust_ufsd}")
+        old_build_id = stamp_id(stamp)
+        old_rust_svcmgr = "NATIVE_RUST_SVCMGR=1" in old_build_id.splitlines()
+        old_rust_echod = "NATIVE_RUST_ECHOD=1" in old_build_id.splitlines()
+        echod_binary = (resolved_build_dir / "svc-echod-rv"
+                        if a.arch == "riscv64" else None)
+        echod_c_reference = (resolved_build_dir / "svc-echod-c-rv"
+                             if a.arch == "riscv64" else None)
+        manager_binary = (resolved_build_dir / "svcmgr-rv"
+                          if a.arch == "riscv64" else None)
+        manager_c_reference = (resolved_build_dir / "svcmgr-c-rv"
+                               if a.arch == "riscv64" else None)
+        rtcd_binary = (resolved_build_dir / "rtcd-rv.a20drv"
+                       if a.arch == "riscv64" else None)
+        rtcd_c_reference = (resolved_build_dir / "rtcd-c-rv.a20drv"
+                            if a.arch == "riscv64" else None)
         need_build = False
-        if stamp_id(stamp) != effective_build_id:
+        if old_build_id != effective_build_id:
             need_build = True
         elif any(not os.access(REPO / b, os.X_OK) for b in a.binaries.split()):
             need_build = True
@@ -204,14 +274,78 @@ def cmd_native(a) -> int:
             # without changing the C-only stamp. Force this build to clean it
             # and rewrite the stamp so dependent images are rebuilt as well.
             need_build = True
+        elif (native_rust_idl_service == "0" and (
+                (native_rust_echod == "0" and service_path is not None and
+                 (service_path.exists() or service_path.is_symlink())) or
+                (service_test_path is not None and
+                 (service_test_path.exists() or service_test_path.is_symlink())))):
+            # A direct service target can create both top-level artifacts
+            # without changing the native stamp. A later disabled dev-build
+            # must refresh the image inputs and remove those generated files.
+            need_build = True
+        elif (native_rust_svcmgr == "0" and rust_svcmgr_path is not None and
+              (rust_svcmgr_path.exists() or rust_svcmgr_path.is_symlink())):
+            # A direct Rust supervisor target may leave an ELF in the shared
+            # image input directory. A disabled dev-build must remove it.
+            need_build = True
+        elif (native_rust_echod == "0" and rust_echod_path is not None and
+              (rust_echod_path.exists() or rust_echod_path.is_symlink())):
+            # A direct Rust echod build can leave an ELF in the shared image
+            # input directory. A disabled dev-build must remove it.
+            need_build = True
+        elif (native_rust_rtcd == "0" and rust_rtcd_path is not None and
+              (rust_rtcd_path.exists() or rust_rtcd_path.is_symlink())):
+            need_build = True
+        elif (native_rust_ufsd == "0" and rust_ufsd_path is not None and
+              (rust_ufsd_path.exists() or rust_ufsd_path.is_symlink())):
+            need_build = True
         elif any_newer(stamp, a.roots.split(), []):
             need_build = True
 
         if not need_build:
             print(f"[NATIVE] {a.build_id} up to date")
             return 0
+        selector_changed = (old_rust_svcmgr != (native_rust_svcmgr == "1"))
+        echod_selector_changed = (old_rust_echod != (native_rust_echod == "1"))
+        old_rust_rtcd = "NATIVE_RUST_RTCD=1" in old_build_id.splitlines()
+        rtcd_selector_changed = (old_rust_rtcd != (native_rust_rtcd == "1"))
+        old_rust_ufsd = "NATIVE_RUST_UFSD=1" in old_build_id.splitlines()
+        ufsd_selector_changed = (old_rust_ufsd != (native_rust_ufsd == "1"))
+        ufsd_binary = resolved_build_dir / "ufsd-rv" if a.arch == "riscv64" else None
+        ufsd_c_reference = resolved_build_dir / "ufsd-c-rv" if a.arch == "riscv64" else None
+        if echod_binary is not None and echod_c_reference is not None:
+            if echod_c_reference.is_file():
+                shutil.copy2(echod_c_reference, echod_binary)
+            elif echod_selector_changed:
+                echod_binary.unlink(missing_ok=True)
+        if manager_binary is not None and manager_c_reference is not None:
+            # Seed the normal make target with the preserved C output before
+            # submake.  That gives incremental dependency checks a C artifact
+            # to compare against, while a C-source change still rebuilds it.
+            # When switching from Rust without a reference (for example an
+            # interrupted first opt-in build), remove the wrong implementation
+            # so make cannot accept it as the requested C target.
+            if manager_c_reference.is_file():
+                shutil.copy2(manager_c_reference, manager_binary)
+            elif selector_changed:
+                manager_binary.unlink(missing_ok=True)
+        if rtcd_binary is not None and rtcd_c_reference is not None:
+            if rtcd_c_reference.is_file():
+                shutil.copy2(rtcd_c_reference, rtcd_binary)
+            elif rtcd_selector_changed:
+                rtcd_binary.unlink(missing_ok=True)
+        if ufsd_binary is not None and ufsd_c_reference is not None:
+            if ufsd_c_reference.is_file():
+                shutil.copy2(ufsd_c_reference, ufsd_binary)
+            elif ufsd_selector_changed:
+                ufsd_binary.unlink(missing_ok=True)
         rc = submake([f"ARCH={a.arch}", f"NOMMU={a.nommu}", f"OPT={a.opt}",
                       f"NATIVE_RUST_PEER={native_rust_peer}",
+                      f"NATIVE_RUST_IDL_SERVICE={native_rust_idl_service}",
+                      f"NATIVE_RUST_ECHOD={native_rust_echod}",
+                      f"NATIVE_RUST_SVCMGR={native_rust_svcmgr}",
+                      f"NATIVE_RUST_RTCD={native_rust_rtcd}",
+                      f"NATIVE_RUST_UFSD={native_rust_ufsd}",
                       f"USER_BUILD_DIR={resolved_build_dir}",
                       "native-programs"])
         if rc != 0:
@@ -221,6 +355,59 @@ def cmd_native(a) -> int:
         # otherwise a 1→0 transition would silently package a stale peer.
         if native_rust_peer == "0" and peer_path is not None:
             peer_path.unlink(missing_ok=True)
+        if native_rust_idl_service == "0":
+            if service_test_path is not None:
+                service_test_path.unlink(missing_ok=True)
+            if native_rust_echod == "0" and service_path is not None:
+                service_path.unlink(missing_ok=True)
+        if native_rust_svcmgr == "0" and rust_svcmgr_path is not None:
+            rust_svcmgr_path.unlink(missing_ok=True)
+        if native_rust_rtcd == "0" and rust_rtcd_path is not None:
+            rust_rtcd_path.unlink(missing_ok=True)
+        if native_rust_ufsd == "0" and rust_ufsd_path is not None:
+            rust_ufsd_path.unlink(missing_ok=True)
+        if manager_binary is not None and manager_c_reference is not None:
+            if native_rust_svcmgr == "1":
+                # Keep the C implementation available for behavior comparison,
+                # but publish Rust at the pathname consumed by smoke scripts
+                # and runtime service launchers.  Preserve the last C-linked
+                # output across repeated opt-in builds before replacing it.
+                shutil.copy2(manager_binary, manager_c_reference)
+                if rust_svcmgr_path is None or not rust_svcmgr_path.is_file():
+                    raise SystemExit("error: Rust svcmgr build succeeded without its ELF")
+                shutil.copy2(rust_svcmgr_path, manager_binary)
+            else:
+                manager_c_reference.unlink(missing_ok=True)
+        if echod_binary is not None and echod_c_reference is not None:
+            if native_rust_echod == "1":
+                if not echod_binary.is_file():
+                    raise SystemExit("error: C echod build succeeded without its runtime ELF")
+                shutil.copy2(echod_binary, echod_c_reference)
+                if rust_echod_path is None or not rust_echod_path.is_file():
+                    raise SystemExit("error: Rust echod build succeeded without its ELF")
+                shutil.copy2(rust_echod_path, echod_binary)
+            else:
+                echod_c_reference.unlink(missing_ok=True)
+        if rtcd_binary is not None and rtcd_c_reference is not None:
+            if native_rust_rtcd == "1":
+                if not rtcd_binary.is_file():
+                    raise SystemExit("error: C rtcd build succeeded without its runtime ELF")
+                shutil.copy2(rtcd_binary, rtcd_c_reference)
+                if rust_rtcd_path is None or not rust_rtcd_path.is_file():
+                    raise SystemExit("error: Rust rtcd build succeeded without its ELF")
+                shutil.copy2(rust_rtcd_path, rtcd_binary)
+            else:
+                rtcd_c_reference.unlink(missing_ok=True)
+        if ufsd_binary is not None and ufsd_c_reference is not None:
+            if native_rust_ufsd == "1":
+                if not ufsd_binary.is_file():
+                    raise SystemExit("error: C ufsd build succeeded without its runtime ELF")
+                shutil.copy2(ufsd_binary, ufsd_c_reference)
+                if rust_ufsd_path is None or not rust_ufsd_path.is_file():
+                    raise SystemExit("error: Rust ufsd build succeeded without its ELF")
+                shutil.copy2(rust_ufsd_path, ufsd_binary)
+            else:
+                ufsd_c_reference.unlink(missing_ok=True)
         stamp.write_text(effective_build_id + "\n")
         return 0
 
@@ -343,6 +530,17 @@ def main() -> int:
             s.add_argument("--binaries", default="")
             s.add_argument("--native-rust-peer", choices=("0", "1"), default="0")
             s.add_argument("--rust-peer-binary", default="")
+            s.add_argument("--native-rust-idl-service", choices=("0", "1"), default="0")
+            s.add_argument("--rust-service-binary", default="")
+            s.add_argument("--rust-service-test-binary", default="")
+            s.add_argument("--native-rust-echod", choices=("0", "1"), default="0")
+            s.add_argument("--rust-echod-binary", default="")
+            s.add_argument("--native-rust-svcmgr", choices=("0", "1"), default="0")
+            s.add_argument("--rust-svcmgr-binary", default="")
+            s.add_argument("--native-rust-rtcd", choices=("0", "1"), default="0")
+            s.add_argument("--rust-rtcd-binary", default="")
+            s.add_argument("--native-rust-ufsd", choices=("0", "1"), default="0")
+            s.add_argument("--rust-ufsd-binary", default="")
     s = sub.add_parser("clean")
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])

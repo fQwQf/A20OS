@@ -1,4 +1,5 @@
 #include "proc/park.h"
+#include "proc/park_wait_state.h"
 
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -8,6 +9,51 @@
 #include "core/klog.h"
 #include "core/panic.h"
 #include "core/timer.h"
+
+#ifdef CONFIG_PARK_WAIT_RUST
+#define PARK_WAIT_INIT a20_rust_park_wait_init
+#define PARK_WAIT_PREPARE a20_rust_park_wait_prepare
+#define PARK_WAIT_PREPARE_ROLLBACK a20_rust_park_wait_prepare_rollback
+#define PARK_WAIT_WAKE a20_rust_park_wait_wake
+#define PARK_WAIT_CANCEL a20_rust_park_wait_cancel
+#define PARK_WAIT_COMMIT a20_rust_park_wait_commit
+#define PARK_WAIT_FINISH a20_rust_park_wait_finish
+#define PARK_WAIT_REASON a20_rust_park_wait_reason
+#else
+#define PARK_WAIT_INIT a20_c_park_wait_init
+#define PARK_WAIT_PREPARE a20_c_park_wait_prepare
+#define PARK_WAIT_PREPARE_ROLLBACK a20_c_park_wait_prepare_rollback
+#define PARK_WAIT_WAKE a20_c_park_wait_wake
+#define PARK_WAIT_CANCEL a20_c_park_wait_cancel
+#define PARK_WAIT_COMMIT a20_c_park_wait_commit
+#define PARK_WAIT_FINISH a20_c_park_wait_finish
+#define PARK_WAIT_REASON a20_c_park_wait_reason
+#endif
+
+static a20_park_wait_fields_t proc_park_wait_fields(task_t *task)
+{
+    a20_park_wait_fields_t fields = {
+        .wait_seq = &task->wait_seq,
+        .wait_deadline = &task->wait_deadline,
+        .park_state = (int *)&task->park_state,
+        .wait_mode = (int *)&task->wait_mode,
+        .wake_reason = (int *)&task->wake_reason,
+    };
+    return fields;
+}
+
+static void proc_park_cancel_timer_callback(void *context, uint64_t seq)
+{
+    proc_wait_timer_cancel((task_t *)context, seq);
+}
+
+void proc_park_wait_state_init(task_t *task)
+{
+    if (!task)
+        return;
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    PARK_WAIT_INIT(&fields);
+}
 
 static proc_wait_token_t
 proc_wait_token_none(proc_park_prepare_error_t prepare_error)
@@ -24,30 +70,20 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                                        uint64_t *remote_cpus,
                                        uint64_t *priority_cpus)
 {
-    if (!task || !seq || task->wait_seq != seq ||
-        task->state == PROC_UNUSED || task->state == PROC_ZOMBIE)
+    if (!task || !seq || task->state == PROC_UNUSED ||
+        task->state == PROC_ZOMBIE)
         return 0;
-
-    /* PARK_SIGNAL_MODE_PROTOCOL */
-    if (reason == PROC_WAKE_SIGNAL &&
-        task->wait_mode != PROC_WAIT_INTERRUPTIBLE)
-        return 0;
-    if ((reason == PROC_WAKE_FATAL_SIGNAL ||
-         reason == PROC_WAKE_TASK_EXIT) &&
-        task->wait_mode == PROC_WAIT_UNINTERRUPTIBLE)
-        return 0;
-
-    switch (task->park_state) {
-    case PROC_PARK_PREPARING:
-        proc_wait_timer_cancel(task, seq);
-        task->park_state = PROC_PARK_WOKEN;
-        task->wake_reason = reason;
-        task->wait_deadline = 0;
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    int action = PARK_WAIT_WAKE(&fields, seq, reason,
+                                proc_park_cancel_timer_callback, task);
+    if (action == 1) {
         task->wake_time = 0;
         proc_sched_assert_task_locked(task);
         return 1;
-
-    case PROC_PARK_PARKED: {
+    }
+    if (action != 2)
+        return 0;
+    {
         /* INV-P4b: the pick side publishes dispatching/->owner_cpu under the
          * runqueue lock alone and must never take this park_lock, so the park
          * side cannot trust a plain load of those fields.  They are read
@@ -61,10 +97,6 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
             (task->on_cpu ||
              __atomic_load_n(&task->dispatching, __ATOMIC_RELAXED))
                 ? owner_cpu : task->cpu_id;
-        proc_wait_timer_cancel(task, seq);
-        task->park_state = PROC_PARK_WOKEN;
-        task->wake_reason = reason;
-        task->wait_deadline = 0;
         task->wake_time = 0;
         task->state = PROC_READY;
         /*
@@ -93,10 +125,21 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         proc_sched_assert_task_locked(task);
         return 1;
     }
+}
 
-    default:
+/* Called by the Rust timer owner after it has dequeued an expired entry and
+ * released g_wait_timer_lock. The parked-state transition remains protected
+ * by park_lock, so a concurrent signal wake may legitimately win. */
+int a20_wait_timer_fire_timeout(task_t *task, uint64_t seq)
+{
+    if (!task || !seq)
         return 0;
-    }
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
+    int stale = task->wait_seq != seq;
+    int woke = proc_try_wake_locked_common(
+        task, seq, PROC_WAKE_TIMEOUT, NULL, NULL);
+    spin_unlock_irqrestore(&task->park_lock, flags);
+    return stale ? 2 : (woke ? 1 : 0);
 }
 
 proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
@@ -107,34 +150,23 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
         task->state == PROC_UNUSED || task->state == PROC_ZOMBIE)
         return proc_wait_token_none(PROC_PARK_PREPARE_INVALID);
 
-    /*
-     * A task owns only one active park token.  A non-IDLE state here means a
-     * caller forgot finish(); do not overwrite the live sequence.
-     */
-    if (task->park_state != PROC_PARK_IDLE) {
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    uint64_t seq = 0;
+    if (PARK_WAIT_PREPARE(&fields, mode, deadline, &seq) != 0) {
+        /* A non-IDLE state means a caller forgot finish(); do not overwrite
+         * the live sequence. */
 #if defined(CONFIG_DEBUG_KERNEL) && CONFIG_DEBUG_KERNEL
         panic("park: nested prepare pid=%d state=%d seq=%lu",
               task->pid, task->park_state, (unsigned long)task->wait_seq);
 #endif
         return proc_wait_token_none(PROC_PARK_PREPARE_INVALID);
     }
-
-    task->wait_seq++;
-    if (task->wait_seq == 0)
-        task->wait_seq++;
-    task->wait_deadline = deadline;
-    task->wait_mode = mode;
-    task->wake_reason = PROC_WAKE_NONE;
-    task->park_state = PROC_PARK_PREPARING;
     int timer_result = deadline
-        ? proc_wait_timer_register(task, deadline, task->wait_seq)
+        ? proc_wait_timer_register(task, deadline, seq)
         : PROC_PARK_PREPARE_OK;
     if (timer_result != PROC_PARK_PREPARE_OK) {
-        task->wait_deadline = 0;
+        PARK_WAIT_PREPARE_ROLLBACK(&fields, seq);
         task->wake_time = 0;
-        task->wake_reason = PROC_WAKE_NONE;
-        task->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
-        task->park_state = PROC_PARK_IDLE;
         return proc_wait_token_none(
             (proc_park_prepare_error_t)timer_result);
     }
@@ -142,7 +174,7 @@ proc_wait_token_t proc_park_prepare_locked(proc_wait_mode_t mode,
 
     proc_wait_token_t token = {
         .task = task,
-        .seq = task->wait_seq,
+        .seq = seq,
         .prepare_error = PROC_PARK_PREPARE_OK,
     };
 
@@ -226,15 +258,14 @@ int proc_park_cancel(proc_wait_token_t token)
 
     uint64_t flags = spin_lock_irqsave(&task->park_lock);
     int cancelled = 0;
-    if (task == proc_current() && task->wait_seq == token.seq &&
-        task->park_state == PROC_PARK_PREPARING) {
-        proc_wait_timer_cancel(task, token.seq);
-        task->wait_deadline = 0;
+    if (task == proc_current()) {
+        a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+        cancelled = PARK_WAIT_CANCEL(&fields, token.seq,
+                                     proc_park_cancel_timer_callback, task);
+    }
+    if (cancelled) {
         task->wake_time = 0;
-        task->wake_reason = PROC_WAKE_CANCEL;
-        task->park_state = PROC_PARK_WOKEN;
         proc_sched_assert_task_locked(task);
-        cancelled = 1;
     }
     spin_unlock_irqrestore(&task->park_lock, flags);
     return cancelled;
@@ -251,10 +282,8 @@ int proc_park_cancel(proc_wait_token_t token)
 static proc_wake_reason_t proc_park_wake_reason_unlocked(task_t *task,
                                                          uint64_t seq)
 {
-    if (__atomic_load_n(&task->wait_seq, __ATOMIC_ACQUIRE) != seq)
-        return PROC_WAKE_CANCEL;
-    return (proc_wake_reason_t)__atomic_load_n(&task->wake_reason,
-                                               __ATOMIC_ACQUIRE);
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    return (proc_wake_reason_t)PARK_WAIT_REASON(&fields, seq);
 }
 
 proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
@@ -269,17 +298,17 @@ proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
         return PROC_WAKE_CANCEL;
     }
 
-    if (task->park_state == PROC_PARK_WOKEN) {
-        proc_wake_reason_t reason = task->wake_reason;
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    int early_reason = PROC_WAKE_CANCEL;
+    int transition = PARK_WAIT_COMMIT(&fields, token.seq, &early_reason);
+    if (transition == 0) {
         spin_unlock_irqrestore(&task->park_lock, flags);
-        return reason;
+        return (proc_wake_reason_t)early_reason;
     }
-    if (task->park_state != PROC_PARK_PREPARING) {
+    if (transition < 0) {
         spin_unlock_irqrestore(&task->park_lock, flags);
         return PROC_WAKE_CANCEL;
     }
-
-    task->park_state = PROC_PARK_PARKED;
     task->state = PROC_BLOCKED;
     proc_sched_assert_task_locked(task);
     spin_unlock_irqrestore(&task->park_lock, flags);
@@ -320,34 +349,21 @@ void proc_park_finish(proc_wait_token_t token)
     if (__atomic_load_n(&task->park_state, __ATOMIC_ACQUIRE) != PROC_PARK_WOKEN)
         return;
 
-    /*
-     * The wake that resumed this task already cancelled its timer
-     * (proc_try_wake_locked_common and the timer expiry both reset
-     * wait_timer_index to -1), so the common case needs no scheduler lock at
-     * all.
-     * Only a stale pending index falls back to the heap lock.  The reset
-     * fields have no writer other than this task once it is running, and a
-     * concurrent stale wake on a WOKEN/IDLE task is a no-op.
-     */
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    int finished;
     if (__atomic_load_n(&task->wait_timer_index, __ATOMIC_ACQUIRE) >= 0) {
         uint64_t flags = spin_lock_irqsave(&task->park_lock);
-        proc_wait_timer_cancel(task, token.seq);
-        task->wait_deadline = 0;
-        task->wake_time = 0;
-        task->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
-        task->wake_reason = PROC_WAKE_NONE;
-        task->park_state = PROC_PARK_IDLE;
-        proc_sched_assert_task_locked(task);
+        __atomic_store_n(&task->wake_time, 0, __ATOMIC_RELAXED);
+        finished = PARK_WAIT_FINISH(&fields, token.seq, 1,
+                                    proc_park_cancel_timer_callback, task);
+        if (finished) {
+            proc_sched_assert_task_locked(task);
+        }
         spin_unlock_irqrestore(&task->park_lock, flags);
         return;
     }
-
-    __atomic_store_n(&task->wait_deadline, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&task->wake_time, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&task->wait_mode, PROC_WAIT_UNINTERRUPTIBLE,
-                     __ATOMIC_RELAXED);
-    __atomic_store_n(&task->wake_reason, PROC_WAKE_NONE, __ATOMIC_RELAXED);
-    __atomic_store_n(&task->park_state, PROC_PARK_IDLE, __ATOMIC_RELEASE);
+    (void)PARK_WAIT_FINISH(&fields, token.seq, 0, NULL, NULL);
 }
 
 /*
@@ -376,28 +392,28 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     }
 
     uint64_t flags = spin_lock_irqsave(&task->park_lock);
-    if (task != proc_current() || task->wait_seq != token.seq) {
+    if (task != proc_current()) {
+        spin_unlock_irqrestore(&task->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
+        return PROC_WAKE_CANCEL;
+    }
+    a20_park_wait_fields_t fields = proc_park_wait_fields(task);
+    int early_reason = PROC_WAKE_CANCEL;
+    int transition = PARK_WAIT_COMMIT(&fields, token.seq, &early_reason);
+    if (transition == 0) {
+        spin_unlock_irqrestore(&task->park_lock, flags);
+        if (fallback)
+            fallback(fallback_context);
+        return (proc_wake_reason_t)early_reason;
+    }
+    if (transition < 0) {
         spin_unlock_irqrestore(&task->park_lock, flags);
         if (fallback)
             fallback(fallback_context);
         return PROC_WAKE_CANCEL;
     }
 
-    if (task->park_state == PROC_PARK_WOKEN) {
-        proc_wake_reason_t reason = task->wake_reason;
-        spin_unlock_irqrestore(&task->park_lock, flags);
-        if (fallback)
-            fallback(fallback_context);
-        return reason;
-    }
-    if (task->park_state != PROC_PARK_PREPARING) {
-        spin_unlock_irqrestore(&task->park_lock, flags);
-        if (fallback)
-            fallback(fallback_context);
-        return PROC_WAKE_CANCEL;
-    }
-
-    task->park_state = PROC_PARK_PARKED;
     task->state = PROC_BLOCKED;
 
     unsigned cur_cpu = cpu_current_id();
@@ -432,10 +448,18 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
     }
     {
         uint64_t now = timer_get_ticks();
-        proc_wait_timer_cancel(donate_to, donate_to->wait_seq);
-        donate_to->park_state = PROC_PARK_WOKEN;
-        donate_to->wake_reason = PROC_WAKE_EVENT;
-        donate_to->wait_deadline = 0;
+        a20_park_wait_fields_t donate_fields =
+            proc_park_wait_fields(donate_to);
+        int donate_action = PARK_WAIT_WAKE(
+            &donate_fields, donate_to->wait_seq, PROC_WAKE_EVENT,
+            proc_park_cancel_timer_callback, donate_to);
+        if (donate_action != 2) {
+            spin_unlock_irqrestore(&donate_to->park_lock, flags);
+            if (fallback)
+                fallback(fallback_context);
+            sched();
+            goto out_reason;
+        }
         donate_to->wake_time = 0;
         donate_to->state = PROC_READY;
         donate_to->exec_start = now;

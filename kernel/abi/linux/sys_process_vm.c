@@ -39,6 +39,36 @@ static int process_vm_check_target(task_t *self, task_t *target)
     return 0;
 }
 
+#ifdef CONFIG_PROCESS_VM_RUST
+int a20_process_vm_target_get(int pid, task_t **target_out)
+{
+    if (!target_out)
+        return -EINVAL;
+    *target_out = NULL;
+    task_t *self = proc_current();
+    task_t *target = proc_find_get_user(pid);
+    int error = process_vm_check_target(self, target);
+    if (error < 0) {
+        if (target) proc_put(target);
+        return error;
+    }
+    *target_out = target;
+    return 0;
+}
+
+void a20_process_vm_target_put(task_t *target) { proc_put(target); }
+long a20_process_vm_copy_from_user(void *dst, const void *src, size_t len)
+{
+    return copy_from_user(dst, src, len);
+}
+long a20_process_vm_copy_to_user(void *dst, const void *src, size_t len)
+{
+    return copy_to_user(dst, src, len);
+}
+void *a20_process_vm_scratch_buffer(size_t len) { return proc_scratch_buffer(len); }
+#endif
+
+#ifndef CONFIG_PROCESS_VM_RUST
 static int64_t process_vm_io_common(int pid, const void *riov,
                                     unsigned long riovcnt,
                                     const void *wiov, unsigned long wiovcnt,
@@ -91,7 +121,7 @@ static int64_t process_vm_io_common(int pid, const void *riov,
             char *kbuf = proc_scratch_buffer(chunk);
             if (!kbuf) {
                 if (target) proc_put(target);
-                return total > 0 ? total : -ENOMEM;
+                return total + (long)done > 0 ? total + (long)done : -ENOMEM;
             }
             long r;
             if (to_target) {
@@ -100,7 +130,7 @@ static int64_t process_vm_io_common(int pid, const void *riov,
                                    (const char *)wlocal[wi].iov_base + woff + done,
                                    chunk) < 0) {
                     if (target) proc_put(target);
-                    return total > 0 ? total : -EFAULT;
+                    return total + (long)done > 0 ? total + (long)done : -EFAULT;
                 }
                 r = process_vm_write_kernel(
                     target, (char *)rlocal[ri].iov_base + roff + done,
@@ -114,12 +144,13 @@ static int64_t process_vm_io_common(int pid, const void *riov,
                         (char *)wlocal[wi].iov_base + woff + done,
                         kbuf, (size_t)r) < 0) {
                     if (target) proc_put(target);
-                    return total > 0 ? total : -EFAULT;
+                    return total + (long)done > 0 ? total + (long)done : -EFAULT;
                 }
             }
             if (r <= 0) {
                 if (target) proc_put(target);
-                return total > 0 ? total : (r < 0 ? r : -EFAULT);
+                return total + (long)done > 0 ? total + (long)done
+                                               : (r < 0 ? r : -EFAULT);
             }
             done += (size_t)r;
         }
@@ -131,21 +162,34 @@ static int64_t process_vm_io_common(int pid, const void *riov,
     if (target) proc_put(target);
     return total;
 }
+#endif
 
 int64_t sys_process_vm_readv(int pid, const void *lvec, unsigned long liovcnt,
                              const void *rvec, unsigned long riovcnt,
                              unsigned long flags)
 {
+#ifdef CONFIG_PROCESS_VM_RUST
+    extern long a20_sys_process_vm_readv_rust(int, const void *, size_t,
+                                               const void *, size_t, size_t);
+    return a20_sys_process_vm_readv_rust(pid, lvec, liovcnt, rvec, riovcnt, flags);
+#else
     /* Linux: lvec = local (caller) buffers, rvec = remote (target) buffers.
      * We copy from the remote to the local. */
     return process_vm_io_common(pid, rvec, riovcnt, lvec, liovcnt, flags, 0);
+#endif
 }
 
 int64_t sys_process_vm_writev(int pid, const void *lvec, unsigned long liovcnt,
                               const void *rvec, unsigned long riovcnt,
                               unsigned long flags)
 {
+#ifdef CONFIG_PROCESS_VM_RUST
+    extern long a20_sys_process_vm_writev_rust(int, const void *, size_t,
+                                                const void *, size_t, size_t);
+    return a20_sys_process_vm_writev_rust(pid, lvec, liovcnt, rvec, riovcnt, flags);
+#else
     return process_vm_io_common(pid, rvec, riovcnt, lvec, liovcnt, flags, 1);
+#endif
 }
 
 int64_t sys_process_madvise(int pid, const void *iov, unsigned long iovcnt,

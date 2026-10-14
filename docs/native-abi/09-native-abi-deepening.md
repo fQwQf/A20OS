@@ -114,10 +114,10 @@ typedef struct a20_pager_supply_args {
 
 1. `pager_create` → 创建 `struct a20_pager`（refcount 对象）+ 一个 channel 对，一端挂 pager 对象作为请求接收队列，一端作为 `out_requests` handle 返回。
 2. `vm_create_object(size, flags)` 支持 `A20_VMO_PAGED`：`flags & A20_VMO_PAGED` 创建 `VMO_PAGED` VMO（`vmo_create(VMO_PAGED, ...)`）。
-3. `pager_vmo_attach(pager, vmo)`：把 PAGED VMO 关联到 pager（VMO 持有 pager ref；pager 持有 VMO 的 watch 引用）。未关联的 PAGED VMO 缺页退回填零。
+3. `pager_vmo_attach(pager, vmo)`：把 PAGED VMO 关联到 pager（VMO 持有 pager ref；pager 的注册表只保存受锁保护的弱 VMO watch，不额外持有 VMO ref，避免 pager↔VMO 引用环）。重复 attach 返回 `-A20_ERR_BUSY`，非 PAGED VMO 返回 `-A20_ERR_INVALID_ARGUMENT`；未关联的 PAGED VMO 缺页退回填零。
 4. 缺页路径（`kernel/mm/vmo.c` 的 `vmo_get_page*` 增加 PAGED 分支）：
    - 页未物化且 VMO 关联 pager → 向 pager 请求 channel 发送页请求消息 （`a20_channel_send` 内部形式），faulting 线程 park 在 VMO 页级 wait-queue；
-   - pager 收到请求 → `pager_supply_pages` 把源页拷入 VMO `pages[idx]`、 `arch_tlb_flush` 并唤醒该页的 waiters；
+   - pager 收到请求 → `pager_supply_pages` 把源页拷入 VMO `pages[idx]`、 `arch_tlb_flush` 并唤醒该页的 waiters；request endpoint 关闭时，channel close hook 标记 pager dead、清除所有关联并唤醒已 park 的 fault waiters，之后 fault 退回零填充路径；
    - 唤醒后 faulting 线程重查页，已物化则继续，未物化则重新请求。
 5. 权限：pager handle `{READ, WRITE, STAT, DUP, TRANSFER, CONTROL}`；PAGED VMO 与普通 MEMORY 一致。页供给不跨越 BLP 标签（源 label ≤ VMO label 才允许）。
 

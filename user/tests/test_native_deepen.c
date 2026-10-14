@@ -23,6 +23,10 @@ static volatile uint32_t g_pager_fail;
 static a20_handle_t g_requests = A20_HANDLE_NULL;
 static a20_handle_t g_pager_h = A20_HANDLE_NULL;
 static a20_handle_t g_source_vmo = A20_HANDLE_NULL;
+static a20_handle_t g_death_requests = A20_HANDLE_NULL;
+static uint64_t g_death_addr;
+static volatile uint32_t g_death_fault_done;
+static volatile uint32_t g_death_fault_value;
 
 #define MAGIC_BYTE 0x5A
 
@@ -104,6 +108,14 @@ static a20_status_t spawn_pager_thread(void (*fn)(uint64_t))
     return a20_thread_create(&tc);
 }
 
+static void pager_death_fault_thread(uint64_t arg)
+{
+    (void)arg;
+    g_death_fault_value = *(volatile uint8_t *)g_death_addr;
+    g_death_fault_done = 1;
+    a20_thread_exit(0);
+}
+
 static a20_handle_t g_sig_rx = A20_HANDLE_NULL;
 static volatile int g_sig_keep = 1;
 static void sig_sleeper_entry(uint64_t arg)
@@ -142,13 +154,17 @@ int main(int argc, char **argv, char **envp)
     /* Pager object + request channel. */
     st = a20_pager_create(0, &g_pager_h, &g_requests);
     if (st < 0) return fail(3, "pager create", 13);
+    if (a20_pager_vmo_attach(g_pager_h, g_source_vmo) != -A20_ERR_INVALID_ARGUMENT)
+        return fail(31, "nonpaged attach accepted", 24);
 
     /* PAGED VMO, attach, map. */
     st = a20_vm_create_object(4096, A20_VMO_PAGED);
     if (st < 0) return fail(4, "paged vmo create", 17);
     a20_handle_t paged_vmo = (a20_handle_t)st;
     st = a20_pager_vmo_attach(g_pager_h, paged_vmo);
-    if (st < 0) return fail(5, "pager attach", 13);
+    if (st < 0) return fail(5, "pager attach", 12);
+    if (a20_pager_vmo_attach(g_pager_h, paged_vmo) != -A20_ERR_BUSY)
+        return fail(32, "duplicate attach accepted", 25);
     uint64_t paged_addr = 0;
     st = a20_vm_map(paged_vmo, 4096, 0, 1 /* R */, &paged_addr);
     if (st < 0 || paged_addr == 0) return fail(6, "paged vmo map", 14);
@@ -162,6 +178,48 @@ int main(int argc, char **argv, char **envp)
     /* The read blocks until the pager supplies the page; the byte check below
      * is the proof of a successful request+supply round trip. */
     if (got != MAGIC_BYTE) return fail(10, "pager data mismatch", 19);
+
+    /* A second pager has no serving thread. Let one fault enqueue and park,
+     * then close the request endpoint. The close hook must detach/wake the
+     * pending fault, which retries through the now-unpaged zero-fill path. */
+    a20_handle_t death_pager = A20_HANDLE_NULL;
+    st = a20_pager_create(0, &death_pager, &g_death_requests);
+    if (st < 0) return fail(33, "death pager create", 18);
+    st = a20_vm_create_object(4096, A20_VMO_PAGED);
+    if (st < 0) return fail(34, "death vmo create", 16);
+    a20_handle_t death_vmo = (a20_handle_t)st;
+    st = a20_pager_vmo_attach(death_pager, death_vmo);
+    if (st < 0) return fail(35, "death attach", 12);
+    g_death_addr = 0;
+    st = a20_vm_map(death_vmo, 4096, 0, 1 /* R */, &g_death_addr);
+    if (st < 0 || !g_death_addr) return fail(36, "death map", 9);
+    g_death_fault_done = 0;
+    g_death_fault_value = 0xff;
+    st = spawn_pager_thread(pager_death_fault_thread);
+    if (st < 0) return fail(37, "death fault thread", 18);
+    a20_handle_t death_thread = (a20_handle_t)st;
+    uint8_t death_msg[16];
+    a20_handle_t death_handles[2];
+    uint32_t death_len = sizeof(death_msg), death_handle_count = 2;
+    st = a20_channel_recv(g_death_requests, death_msg, &death_len,
+                          death_handles, &death_handle_count);
+    if (st < 0 || death_handle_count != 1)
+        return fail(38, "death request missing", 21);
+    a20_hdl_close(death_handles[0]);
+    if (g_death_fault_done)
+        return fail(39, "fault did not park", 18);
+    a20_time_t close_delay = {0, 20000000};
+    a20_thread_sleep(close_delay);
+    a20_hdl_close(g_death_requests);
+    g_death_requests = A20_HANDLE_NULL;
+    for (uint32_t spin = 0; spin < 100000 && !g_death_fault_done; ++spin)
+        a20_thread_yield();
+    if (!g_death_fault_done || g_death_fault_value != 0)
+        return fail(40, "peer close fault stuck", 22);
+    a20_hdl_close(death_thread);
+    a20_hdl_close(death_vmo);
+    a20_hdl_close(death_pager);
+    a20_hdl_write_buf(g_out, "PAGER_CLOSE_WAKE: PASS queued=1 fallback=zero\n", 46, (void *)0);
 
     a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-monitor\n", 26, (void *)0);
     /* ---- 2. Monitor ---- */

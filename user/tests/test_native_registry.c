@@ -100,6 +100,44 @@ static int rtcd_time_rpc(a20_handle_t ep, uint64_t *sec_out)
     return 0;
 }
 
+static int echod_echo_rpc(a20_handle_t reg)
+{
+    a20_handle_t ep = A20_HANDLE_NULL;
+    if (reg_lookup(reg, "echod", &ep) != A20_OK)
+        return -1;
+
+    struct {
+        a20_idl_envelope_t env;
+        a20_idl_svcmgr_echo_t body;
+    } req = {
+        { A20_SERVICES_IDL_VERSION, SVCMGR_REQ_ECHO,
+          sizeof(a20_idl_envelope_t) + A20_IDL_SVCMGR_ECHO_WIRE_SIZE },
+        { .seq = 0x51ec0deu },
+    };
+    uint8_t req_wire[sizeof(req)];
+    a20_idl_envelope_encode(req_wire, &req.env);
+    a20_idl_svcmgr_echo_encode(req_wire + A20_IDL_ENVELOPE_WIRE_SIZE,
+                               &req.body);
+
+    uint8_t rep[sizeof(req_wire)];
+    uint32_t rep_len = sizeof(rep);
+    uint32_t rep_handles = 0;
+    a20_status_t st = a20_channel_call(ep, req_wire, sizeof(req_wire),
+                                       0, 0, rep, &rep_len, 0, &rep_handles);
+    a20_hdl_close(ep);
+    if (st < 0 || rep_handles != 0 ||
+        rep_len != A20_IDL_ENVELOPE_WIRE_SIZE + A20_IDL_SVCMGR_ECHO_WIRE_SIZE)
+        return -1;
+
+    a20_idl_envelope_t env;
+    a20_idl_envelope_decode(&env, rep);
+    a20_idl_svcmgr_echo_t body;
+    a20_idl_svcmgr_echo_decode(&body, rep + A20_IDL_ENVELOPE_WIRE_SIZE);
+    return env.version == A20_SERVICES_IDL_VERSION &&
+           env.type == SVCMGR_REQ_ECHO && env.size == rep_len &&
+           body.seq == req.body.seq ? 0 : -1;
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
@@ -111,6 +149,13 @@ int main(int argc, char **argv, char **envp)
         return 90;
     if (reg == A20_HANDLE_NULL)
         return fail(1, "no service_registry in start_info");
+
+    /* Exercise the runtime echod service selected by the manager, not only
+     * the standalone Rust IDL fixture. Both C and Rust services echo this
+     * established v1 request byte-for-byte. */
+    if (echod_echo_rpc(reg) != 0)
+        return fail(7, "echod echo RPC failed");
+    put_str("NATIVE_REGISTRY: echod echo=PASS\n");
 
     /* 1. Resolve rtcd by name and call it. */
     a20_handle_t rtcd = A20_HANDLE_NULL;

@@ -521,6 +521,80 @@ HANDLE_SLOT_TRANSITIONS_IMPL ?= c
 ifeq ($(filter $(HANDLE_SLOT_TRANSITIONS_IMPL),c rust),)
 $(error HANDLE_SLOT_TRANSITIONS_IMPL must be c or rust)
 endif
+USER_COPY_IMPL ?= c
+ifeq ($(filter $(USER_COPY_IMPL),c rust),)
+$(error USER_COPY_IMPL must be c or rust)
+endif
+PROCESS_VM_IMPL ?= c
+ifeq ($(filter $(PROCESS_VM_IMPL),c rust),)
+$(error PROCESS_VM_IMPL must be c or rust)
+endif
+ifeq ($(PROCESS_VM_IMPL),rust)
+ifeq ($(filter $(ABI),linux both),)
+$(error PROCESS_VM_IMPL=rust requires ABI=linux or ABI=both)
+endif
+endif
+PARK_WAIT_IMPL ?= c
+ifeq ($(filter $(PARK_WAIT_IMPL),c rust),)
+$(error PARK_WAIT_IMPL must be c or rust)
+endif
+WAIT_TIMER_IMPL ?= c
+ifeq ($(filter $(WAIT_TIMER_IMPL),c rust),)
+$(error WAIT_TIMER_IMPL must be c or rust)
+endif
+WAIT_QUEUE_IMPL ?= c
+ifeq ($(filter $(WAIT_QUEUE_IMPL),c rust),)
+$(error WAIT_QUEUE_IMPL must be c or rust)
+endif
+RW_MUTEX_IMPL ?= c
+ifeq ($(filter $(RW_MUTEX_IMPL),c rust),)
+$(error RW_MUTEX_IMPL must be c or rust)
+endif
+MUTEX_STATE_IMPL ?= c
+ifeq ($(filter $(MUTEX_STATE_IMPL),c rust),)
+$(error MUTEX_STATE_IMPL must be c or rust)
+endif
+COMPLETION_IMPL ?= c
+ifeq ($(filter $(COMPLETION_IMPL),c rust),)
+$(error COMPLETION_IMPL must be c or rust)
+endif
+VMA_IMPL ?= c
+ifeq ($(filter $(VMA_IMPL),c rust),)
+$(error VMA_IMPL must be c or rust)
+endif
+VMO_PAGE_IMPL ?= c
+ifeq ($(filter $(VMO_PAGE_IMPL),c rust),)
+$(error VMO_PAGE_IMPL must be c or rust)
+endif
+VMO_LIFECYCLE_IMPL ?= c
+ifeq ($(filter $(VMO_LIFECYCLE_IMPL),c rust),)
+$(error VMO_LIFECYCLE_IMPL must be c or rust)
+endif
+ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+ifneq ($(VMO_PAGE_IMPL),rust)
+$(error VMO_LIFECYCLE_IMPL=rust requires VMO_PAGE_IMPL=rust)
+endif
+endif
+VMO_PAGER_IMPL ?= c
+ifeq ($(filter $(VMO_PAGER_IMPL),c rust),)
+$(error VMO_PAGER_IMPL must be c or rust)
+endif
+VMO_PAGER_TEST ?= 0
+ifeq ($(filter $(VMO_PAGER_TEST),0 1),)
+$(error VMO_PAGER_TEST must be 0 or 1)
+endif
+ifeq ($(VMO_PAGER_TEST),1)
+ifneq ($(VMO_PAGER_IMPL),rust)
+$(error VMO_PAGER_TEST=1 requires VMO_PAGER_IMPL=rust)
+endif
+ifeq ($(NOMMU),1)
+$(error VMO_PAGER_TEST=1 requires an MMU profile)
+endif
+endif
+USER_COPY_TEST ?= 0
+ifeq ($(filter $(USER_COPY_TEST),0 1),)
+$(error USER_COPY_TEST must be 0 or 1)
+endif
 HANDLE_SLOT_TRANSITIONS_ACTIVE := $(if $(filter $(ABI),native both),1,)
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 ifeq ($(HANDLE_SLOT_TRANSITIONS_ACTIVE),)
@@ -567,6 +641,48 @@ BUILD_VARIANT := $(BUILD_VARIANT)-mremaprust
 endif
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-handleslotrust
+endif
+ifeq ($(USER_COPY_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-usercopyrust
+endif
+ifeq ($(PROCESS_VM_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-processvmrust
+endif
+ifeq ($(PARK_WAIT_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-parkwaitrust
+endif
+ifeq ($(WAIT_TIMER_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-waittimerrust
+endif
+ifeq ($(WAIT_QUEUE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-waitqueuerust
+endif
+ifeq ($(RW_MUTEX_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-rwmutexrust
+endif
+ifeq ($(MUTEX_STATE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-mutexrust
+endif
+ifeq ($(COMPLETION_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-completionrust
+endif
+ifeq ($(VMA_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmarust
+endif
+ifeq ($(VMO_PAGE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmopagerust
+endif
+ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmolifecycle-rust
+endif
+ifeq ($(VMO_PAGER_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmopager-rust
+endif
+ifeq ($(VMO_PAGER_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmo-pager-test
+endif
+ifeq ($(USER_COPY_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-usercopy-test
 endif
 
 ifeq ($(ARCH),armv7m)
@@ -804,6 +920,12 @@ SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_LOG_DIR ?= .kernel-build/smoke/step35
 WAIT_TIMER_HEAP_MAX ?=
+WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS ?= 0
+ifeq ($(WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS),1)
+ifneq ($(WAIT_TIMER_HEAP_MAX),1)
+$(error WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS=1 requires WAIT_TIMER_HEAP_MAX=1)
+endif
+endif
 REQUIRE_TIMEOUT_CAPACITY ?= 0
 REQUIRE_SMP_RUNQUEUE ?= 0
 REQUIRE_LOCK_SPLIT ?= 0
@@ -1212,6 +1334,48 @@ endif
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 CFLAGS += -DCONFIG_HANDLE_SLOT_TRANSITIONS_RUST
 endif
+ifeq ($(USER_COPY_IMPL),rust)
+CFLAGS += -DCONFIG_USER_COPY_RUST
+endif
+ifeq ($(PROCESS_VM_IMPL),rust)
+CFLAGS += -DCONFIG_PROCESS_VM_RUST
+endif
+ifeq ($(PARK_WAIT_IMPL),rust)
+CFLAGS += -DCONFIG_PARK_WAIT_RUST
+endif
+ifeq ($(WAIT_TIMER_IMPL),rust)
+CFLAGS += -DCONFIG_WAIT_TIMER_RUST
+endif
+ifeq ($(WAIT_QUEUE_IMPL),rust)
+CFLAGS += -DCONFIG_WAIT_QUEUE_RUST
+endif
+ifeq ($(RW_MUTEX_IMPL),rust)
+CFLAGS += -DCONFIG_RW_MUTEX_RUST
+endif
+ifeq ($(MUTEX_STATE_IMPL),rust)
+CFLAGS += -DCONFIG_MUTEX_STATE_RUST
+endif
+ifeq ($(COMPLETION_IMPL),rust)
+CFLAGS += -DCONFIG_COMPLETION_RUST
+endif
+ifeq ($(VMA_IMPL),rust)
+CFLAGS += -DCONFIG_VMA_REGION_RUST
+endif
+ifeq ($(VMO_PAGE_IMPL),rust)
+CFLAGS += -DCONFIG_VMO_PAGE_RUST
+endif
+ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+CFLAGS += -DCONFIG_VMO_LIFECYCLE_RUST
+endif
+ifeq ($(VMO_PAGER_IMPL),rust)
+CFLAGS += -DCONFIG_VMO_PAGER_RUST
+endif
+ifeq ($(VMO_PAGER_TEST),1)
+CFLAGS += -DCONFIG_VMO_PAGER_TEST
+endif
+ifeq ($(USER_COPY_TEST),1)
+CFLAGS += -DCONFIG_USER_COPY_TEST
+endif
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
@@ -1255,6 +1419,9 @@ CFLAGS += -fsanitize=undefined -fno-sanitize=alignment,bounds-strict \
 endif
 ifneq ($(strip $(WAIT_TIMER_HEAP_MAX)),)
 CFLAGS += -DCONFIG_WAIT_TIMER_HEAP_MAX=$(WAIT_TIMER_HEAP_MAX)
+endif
+ifeq ($(WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS),1)
+CFLAGS += -DCONFIG_WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS
 endif
 # pbuf pool canary.  Off by default because it costs a comparison per pool
 # operation; turn it on when a pbuf refcount or ownership bug is being hunted,
@@ -1663,6 +1830,79 @@ ifeq ($(filter $(KERNEL_DIR)/abi/native/handle_table.c,$(KERNEL_SRC)),)
 $(error HANDLE_SLOT_TRANSITIONS_IMPL=rust requires kernel/abi/native/handle_table.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_HANDLE_SLOT_OBJECT)
+KERNEL_OBJ += $(RUST_HANDLE_TABLE_STATE_OBJECT)
+endif
+ifeq ($(USER_COPY_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/mm.c,$(KERNEL_SRC)),)
+$(error USER_COPY_IMPL=rust requires kernel/mm/mm.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_USERCOPY_OBJECT)
+endif
+ifeq ($(PROCESS_VM_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/process_vm.c,$(KERNEL_SRC)),)
+$(error PROCESS_VM_IMPL=rust requires kernel/mm/process_vm.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_PROCESS_VM_OBJECT)
+endif
+ifeq ($(PARK_WAIT_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/park.c,$(KERNEL_SRC)),)
+$(error PARK_WAIT_IMPL=rust requires kernel/proc/park.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_PARK_WAIT_OBJECT)
+endif
+ifeq ($(WAIT_TIMER_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/timer_heap.c,$(KERNEL_SRC)),)
+$(error WAIT_TIMER_IMPL=rust requires kernel/proc/timer_heap.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_WAIT_TIMER_OBJECT)
+endif
+ifeq ($(WAIT_QUEUE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC)),)
+$(error WAIT_QUEUE_IMPL=rust requires kernel/core/sync.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_WAIT_QUEUE_STATE_OBJECT)
+endif
+ifeq ($(RW_MUTEX_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC)),)
+$(error RW_MUTEX_IMPL=rust requires kernel/core/sync.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_RW_MUTEX_STATE_OBJECT)
+endif
+ifeq ($(MUTEX_STATE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC)),)
+$(error MUTEX_STATE_IMPL=rust requires kernel/core/sync.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_MUTEX_STATE_OBJECT)
+endif
+ifeq ($(COMPLETION_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/core/sync.c,$(KERNEL_SRC)),)
+$(error COMPLETION_IMPL=rust requires kernel/core/sync.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_COMPLETION_STATE_OBJECT)
+endif
+ifeq ($(VMA_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vma.c,$(KERNEL_SRC)),)
+$(error VMA_IMPL=rust requires kernel/mm/vma.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_VMA_REGION_OBJECT)
+endif
+ifeq ($(VMO_PAGE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),)
+$(error VMO_PAGE_IMPL=rust requires kernel/mm/vmo.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_VMO_PAGE_OBJECT)
+endif
+ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),)
+$(error VMO_LIFECYCLE_IMPL=rust requires kernel/mm/vmo.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_VMO_LIFECYCLE_OBJECT)
+endif
+ifeq ($(VMO_PAGER_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/ipc/a20_pager.c,$(KERNEL_SRC)),)
+$(error VMO_PAGER_IMPL=rust requires kernel/ipc/a20_pager.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_VMO_PAGER_OBJECT)
 endif
 
 # Optional self-contained userspace for physical-board bring-up.  Each static

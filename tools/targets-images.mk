@@ -274,7 +274,14 @@ $(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(KERNEL_NOSYMS_ELF) $(L
 # __ubsan_handle_* references.  Track a per-build-dir signature stamp: when the
 # flags change the stamp is touched and every kernel object is rebuilt with the
 # new flags, so build directories can never mix objects from two flag sets.
-BUILD_FLAGS_SIG := $(CC) $(CFLAGS) $(LDFLAGS)
+TIMER_HEAP_TEST_CFLAGS :=
+ifeq ($(WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS),1)
+ifneq ($(WAIT_TIMER_HEAP_MAX),1)
+$(error WAIT_TIMER_HEAP_TEST_ARRAY_BOUNDS=1 requires WAIT_TIMER_HEAP_MAX=1)
+endif
+TIMER_HEAP_TEST_CFLAGS := -Wno-array-bounds
+endif
+BUILD_FLAGS_SIG := $(CC) $(CFLAGS) $(LDFLAGS) timer_heap_test_cflags=$(TIMER_HEAP_TEST_CFLAGS)
 BUILD_FLAGS_STAMP := $(BUILD_DIR)/.build-flags
 
 $(BUILD_FLAGS_STAMP): FORCE
@@ -285,6 +292,14 @@ $(BUILD_FLAGS_STAMP): FORCE
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# The one-slot park/wait diagnostic specializes both timer arrays to one item.
+# GCC's -O3 range analysis warns on guarded heap-index paths in this object;
+# keep the test-only suppression local to timer_heap.o, with -Werror intact for
+# every other translation unit.
+$(BUILD_DIR)/proc/timer_heap.o: $(KERNEL_DIR)/proc/timer_heap.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(TIMER_HEAP_TEST_CFLAGS) -c $< -o $@
 
 # lwIP lives under the kernel tree (kernel/external/lwip); the kernel compiles
 # the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
