@@ -4,6 +4,9 @@
 #include "fs/fdtable.h"
 #include "fs/file.h"
 #include "ipc/envelope.h"
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+#include "ipc/envelope_acquire_race_test.h"
+#endif
 #include "lwip/raw.h"
 #include "abi/linux/scm_rights.h"
 #ifdef CONFIG_LINUX_MMSG_TXN_RUST
@@ -173,9 +176,21 @@ static int linux_scm_install_recv_file(void *opaque, void *file, int cloexec,
     if (env_active(proc_current())) {
         const uint64_t base_rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
                                      A20_RIGHT_STAT | A20_RIGHT_SEEK;
-        int mr = env_mediate_acquire_vfile(gfd, vf, base_rights);
+        int mr = 0;
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+        int injected = a20_envelope_race_test_before_mediation(
+            A20_ENVELOPE_RACE_OP_SCM, gfd, vf);
+        if (injected < 0)
+            mr = injected;
+#endif
+        if (!mr)
+            mr = env_mediate_acquire_vfile(gfd, vf, base_rights);
         if (mr) {
             (void)fdtable_close_current_if_file(gfd, vf);
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+            a20_envelope_race_test_note_pin_release(
+                A20_ENVELOPE_RACE_OP_SCM, vf->identity);
+#endif
             vfs_put_file(vf);
             return mr;
         }
@@ -1174,10 +1189,24 @@ static int64_t linux_recvmsg_with_socket_header(
                             const uint64_t base_rights = A20_RIGHT_READ |
                                 A20_RIGHT_WRITE | A20_RIGHT_STAT |
                                 A20_RIGHT_SEEK;
-                            int mr = env_mediate_acquire_vfile(g2, vf,
-                                                               base_rights);
+                            int mr = 0;
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+                            int injected =
+                                a20_envelope_race_test_before_mediation(
+                                    A20_ENVELOPE_RACE_OP_SCM, g2, vf);
+                            if (injected < 0)
+                                mr = injected;
+#endif
+                            if (!mr)
+                                mr = env_mediate_acquire_vfile(
+                                    g2, vf, base_rights);
                             if (mr) {
                                 (void)fdtable_close_current_if_file(g2, vf);
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+                                a20_envelope_race_test_note_pin_release(
+                                    A20_ENVELOPE_RACE_OP_SCM,
+                                    vf->identity);
+#endif
                                 vfs_put_file(vf);
                                 ctrunc = 1;
                                 continue;

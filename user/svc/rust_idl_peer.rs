@@ -112,6 +112,8 @@ const A20_SVC_ENDPOINT_SLOT: Handle = a20_services_idl::A20_SVC_ENDPOINT_SLOT as
 // this crate only builds for ARCH=riscv64 (tools/rust-user.mk), so the literal
 // below is exactly A20_NATIVE_BIN("svc-echod").
 const ECHOD_PATH: &[u8] = b"/bin/svc-echod-rv";
+#[cfg(idl_ack_test)]
+const ACK_ADVERSARY_PATH: &[u8] = b"/bin/rust-idl-adversary-rv";
 
 // The peer's own exit status.  Nothing here is part of the wire protocol.
 const EXIT_PASS: c_int = 0;
@@ -497,10 +499,23 @@ fn generated_negotiation_frame(min_version: u16, max_version: u16,
 /// full request; then an independent ordinary echo proves the service is
 /// still responsive. No malformed ACK or NO_COMMON result can downgrade.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NegotiationOutcome { Selected(u16), NoCommon, LegacyEcho }
+enum NegotiationOutcome { Selected(u16), NoCommon, LegacyEcho, Rejected }
+
+fn reject_ack(label: &str, expected_reject: bool, reason: &str)
+    -> Result<NegotiationOutcome, ()>
+{
+    if expected_reject {
+        Ok(NegotiationOutcome::Rejected)
+    } else {
+        fail(label, reason);
+        Err(())
+    }
+}
 
 fn negotiate_service(ep: Handle, min_version: u16, max_version: u16,
-                     nonce: u32, label: &str) -> Result<NegotiationOutcome, ()> {
+                     nonce: u32, label: &str, expected_reject: bool)
+    -> Result<NegotiationOutcome, ()>
+{
     let request = generated_negotiation_frame(min_version, max_version, nonce);
     wire(label, "tx", &request);
     let start = monotonic_now_ns().map_err(|st| {
@@ -519,8 +534,8 @@ fn negotiate_service(ep: Handle, min_version: u16, max_version: u16,
 
     if got.len() == request.len() && bytes_eq(got, &request) {
         if !idl_negotiation::legacy_v1_in_range(min_version, max_version) {
-            fail(label, "legacy service only offers v1 outside client range");
-            return Err(());
+            return reject_ack(label, expected_reject,
+                              "legacy service only offers v1 outside client range");
         }
         put_line("RUST_NATIVE_SVC: negotiation legacy-echo detected");
         if !expect_echo(ep, "legacy_liveness_echo", &generated_echo_frame()) {
@@ -530,22 +545,30 @@ fn negotiate_service(ep: Handle, min_version: u16, max_version: u16,
         return Ok(NegotiationOutcome::LegacyEcho);
     }
 
-    let envelope_bytes = got.get(..a20_services_idl::ENVELOPE_WIRE_SIZE)
-        .ok_or_else(|| fail(label, "negotiation reply is shorter than envelope"))?;
-    let envelope = a20_services_idl::envelope_decode(envelope_bytes)
-        .ok_or_else(|| fail(label, "negotiation reply envelope is malformed"))?;
+    let Some(envelope_bytes) = got.get(..a20_services_idl::ENVELOPE_WIRE_SIZE) else {
+        return reject_ack(label, expected_reject,
+                          "negotiation reply is shorter than envelope");
+    };
+    let Some(envelope) = a20_services_idl::envelope_decode(envelope_bytes) else {
+        return reject_ack(label, expected_reject,
+                          "negotiation reply envelope is malformed");
+    };
     if envelope.version != a20_services_idl::A20_SERVICES_IDL_VERSION ||
         envelope.r#type != SVCMGR_REP_VERSION_NEGOTIATE ||
         envelope.size as usize != got.len() ||
         got.len() != a20_services_idl::ENVELOPE_WIRE_SIZE +
                      a20_services_idl::SVCMGR_VERSION_RESPONSE_WIRE_SIZE {
-        fail(label, "wrong negotiation reply type, version, or length");
-        return Err(());
+        return reject_ack(label, expected_reject,
+                          "wrong negotiation reply type, version, or length");
     }
-    let response_bytes = got.get(a20_services_idl::ENVELOPE_WIRE_SIZE..)
-        .ok_or_else(|| fail(label, "negotiation response payload is missing"))?;
-    let response = a20_services_idl::svcmgr_version_response_decode(response_bytes)
-        .ok_or_else(|| fail(label, "negotiation response payload is malformed"))?;
+    let Some(response_bytes) = got.get(a20_services_idl::ENVELOPE_WIRE_SIZE..) else {
+        return reject_ack(label, expected_reject,
+                          "negotiation response payload is missing");
+    };
+    let Some(response) = a20_services_idl::svcmgr_version_response_decode(response_bytes) else {
+        return reject_ack(label, expected_reject,
+                          "negotiation response payload is malformed");
+    };
     match idl_negotiation::validate_response(
         min_version, max_version, nonce,
         response.min_version, response.max_version, response.selected_version,
@@ -561,8 +584,7 @@ fn negotiate_service(ep: Handle, min_version: u16, max_version: u16,
             Ok(NegotiationOutcome::NoCommon)
         }
         Err(_) => {
-            fail(label, "invalid negotiation acknowledgement");
-            Err(())
+            reject_ack(label, expected_reject, "invalid negotiation acknowledgement")
         }
     }
 }
@@ -926,8 +948,12 @@ fn path_open(path: &[u8]) -> Result<Handle, Status> {
 /// user/svc/svcman.c:spawn_echod(), the same shape: fresh channel, install the
 /// service endpoint at A20_SVC_ENDPOINT_SLOT, spawn, keep the client side.
 fn spawn_echod() -> Result<(Handle, Handle), Status> {
+    spawn_service(ECHOD_PATH)
+}
+
+fn spawn_service(path: &[u8]) -> Result<(Handle, Handle), Status> {
     let pair = channel_create()?;
-    let image = match path_open(ECHOD_PATH) {
+    let image = match path_open(path) {
         Ok(h) => h,
         Err(st) => {
             let _ = handle_close(pair[0]);
@@ -1267,7 +1293,7 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
     put_line("RUST_NATIVE_SVC: service ready");
 
     // -- 0. negotiate the unchanged v1 envelope --------------------------
-    let legacy_peer = match negotiate_service(ep, 1, 3, 0x1357_9bdf, "negotiate_overlap") {
+    let legacy_peer = match negotiate_service(ep, 1, 3, 0x1357_9bdf, "negotiate_overlap", false) {
         Ok(NegotiationOutcome::Selected(1)) => false,
         Ok(NegotiationOutcome::LegacyEcho) => {
             put_line("RUST_NATIVE_SVC: legacy v1 echo fallback verified");
@@ -1281,7 +1307,7 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
         Err(()) => { retire(task, ep); return EXIT_FAIL; }
     };
     if !legacy_peer {
-        match negotiate_service(ep, 2, 3, 0x2468_ace0, "negotiate_no_common") {
+        match negotiate_service(ep, 2, 3, 0x2468_ace0, "negotiate_no_common", false) {
             Ok(NegotiationOutcome::NoCommon) => {}
             Ok(_) => {
                 fail("negotiate_no_common", "server accepted or echoed a disjoint range");
@@ -1392,8 +1418,70 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
         return EXIT_FAIL;
     }
 
+    #[cfg(idl_ack_test)]
+    if !run_adversarial_ack_cases() { return EXIT_FAIL; }
+
     put_line("RUST_NATIVE_SVC: PASS restarts=1");
     EXIT_PASS
+}
+
+/// Exercise the production negotiation path against a Rust service that
+/// deliberately emits malformed or inconsistent acknowledgments. Each child
+/// handles one request and exits, so an accidental downgrade challenge or
+/// business echo cannot be mistaken for a successful negative case.
+#[cfg(idl_ack_test)]
+fn run_adversarial_ack_cases() -> bool {
+    let cases: [(&str, u16, u16, u32); 6] = [
+        ("wrong_nonce", 1, 3, 0xa001_0001),
+        ("selection_outside_overlap", 1, 3, 0xa002_0002),
+        ("short_frame", 1, 3, 0xa003_0003),
+        ("trailing_frame", 1, 3, 0xa004_0004),
+        ("status_selection_conflict", 1, 3, 0xa005_0005),
+        ("legacy_echo_excludes_v1", 2, 3, 0xa006_0006),
+    ];
+    for (label, min_version, max_version, nonce) in cases {
+        let (ep, task) = match spawn_service(ACK_ADVERSARY_PATH) {
+            Ok(v) => v,
+            Err(st) => {
+                put_status("task_spawn", label, st);
+                return false;
+            }
+        };
+        let outcome = negotiate_service(ep, min_version, max_version,
+                                        nonce, label, true);
+        if !matches!(outcome, Ok(NegotiationOutcome::Rejected)) {
+            fail(label, "malformed acknowledgment was not rejected by negotiation path");
+            retire(task, ep);
+            return false;
+        }
+        let deadline = match monotonic_now_ns() {
+            Ok(now) => now.saturating_add(2_000_000_000),
+            Err(st) => {
+                put_status("clock_get", label, st);
+                retire(task, ep);
+                return false;
+            }
+        };
+        let mut status = TaskStatus {
+            size: 0, version: 0, exit_code: 0, exit_reason: 0,
+            utime_ns: 0, stime_ns: 0,
+        };
+        let waited = task_wait_until(task, &mut status, deadline);
+        if waited != A20_OK || status.exit_code != 0 {
+            fail(label, "adversarial peer did not exit cleanly after one response");
+            let _ = retire(task, ep);
+            return false;
+        }
+        if !close_task_and_endpoint(task, ep) {
+            fail(label, "failed to close adversarial peer handles");
+            return false;
+        }
+        put_str("IDL_ACK_REJECT: case=");
+        put(label.as_bytes());
+        put_line(" PASS rejected-before-fallback response_count=1 cleanup=PASS");
+    }
+    put_line("IDL_ACK_ADVERSARIAL: PASS cases=6 cleanup=6");
+    true
 }
 
 /// Terminate the child, prove it was reaped before the deadline, and close

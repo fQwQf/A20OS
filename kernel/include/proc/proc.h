@@ -127,7 +127,8 @@ typedef struct proc_vm_stats {
  *   current CPU slots. Every pointer which survives its protecting lock owns a
  *   task reference.
  * - Normal task state flows are:
- *     PROC_UNUSED -> PROC_READY -> PROC_RUNNING
+ *     private ALLOCATED -> INITIALIZING -> PUBLISHED -> PROC_READY
+ *     PROC_READY -> PROC_RUNNING
  *     PROC_RUNNING -> PROC_READY     (yield/preemption)
  *     PROC_RUNNING -> PROC_BLOCKED   (wait queue, sleep, child wait, futex)
  *     PROC_BLOCKED -> PROC_READY     (wake, timeout, signal)
@@ -521,6 +522,9 @@ typedef struct task_t {
     proc_park_state_t  park_state;
     proc_wait_mode_t   wait_mode;
     proc_wake_reason_t wake_reason;
+    /* Lifecycle phase is initialized before global-list publication and is
+     * changed under tasklist_lock/park_lock at the corresponding boundaries. */
+    uint32_t           lifecycle_phase;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&

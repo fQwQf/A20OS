@@ -262,7 +262,9 @@ typedef struct {
     int (*write_head)(void *, uint32_t);
     int (*read_inode)(void *, uint32_t, uint16_t *, uint32_t *);
     int (*write_inode)(void *, uint32_t, uint16_t, uint32_t);
-    int (*finish_inode)(void *, uint32_t, uint16_t);
+    int (*truncate_linked_inode)(void *, uint32_t);
+    int (*truncate_unlinked_inode)(void *, uint32_t);
+    int (*release_unlinked_inode)(void *, uint32_t);
     void (*abort_transaction)(void *);
 } ext4_orphan_ops_t;
 
@@ -314,32 +316,46 @@ static int ext4_orphan_write_inode(void *ctx, uint32_t ino, uint16_t links,
     return ext4_write_inode(sb, ino, &inode);
 }
 
-static int ext4_orphan_finish_inode(void *ctx, uint32_t ino, uint16_t links)
+static int ext4_orphan_truncate_linked_inode(void *ctx, uint32_t ino)
 {
     ext4_sb_info_t *sb = ctx;
     ext4_inode_t inode;
     int ret = ext4_read_inode(sb, ino, &inode);
     if (ret < 0) return ret;
-    if (links != inode.i_links_count) return -EIO;
-    if (links) {
-        uint64_t size = ext4_inode_size(&inode);
-        uint64_t cutoff = size / sb->block_size + (size % sb->block_size != 0);
-        if (cutoff > 0xffffffffULL) return -EFBIG;
-        ret = ext4_block_truncate_at_checked(sb, ino, &inode, (uint32_t)cutoff);
-        if (ret < 0) {
-            if (sb->journal) (void)ext4_journal_poison(sb);
-            return ret;
-        }
-        ret = ext4_write_inode(sb, ino, &inode);
-        if (ret < 0 && sb->journal) (void)ext4_journal_poison(sb);
+    if (inode.i_links_count == 0) return -EIO;
+    uint64_t size = ext4_inode_size(&inode);
+    uint64_t cutoff = size / sb->block_size + (size % sb->block_size != 0);
+    if (cutoff > 0xffffffffULL) return -EFBIG;
+    ret = ext4_block_truncate_at_checked(sb, ino, &inode, (uint32_t)cutoff);
+    if (ret < 0) {
+        if (sb->journal) (void)ext4_journal_poison(sb);
         return ret;
     }
+    return 0;
+}
 
+static int ext4_orphan_truncate_unlinked_inode(void *ctx, uint32_t ino)
+{
+    ext4_sb_info_t *sb = ctx;
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    if (inode.i_links_count != 0) return -EIO;
     ret = ext4_block_truncate_checked(sb, ino, &inode);
     if (ret < 0) {
         if (sb->journal) (void)ext4_journal_poison(sb);
         return ret;
     }
+    return 0;
+}
+
+static int ext4_orphan_release_unlinked_inode(void *ctx, uint32_t ino)
+{
+    ext4_sb_info_t *sb = ctx;
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    if (inode.i_links_count != 0) return -EIO;
     ext4_inode_mark_deleted(&inode);
     ret = ext4_write_inode(sb, ino, &inode);
     if (ret == 0) ret = ext4_free_inode(sb, ino);
@@ -363,7 +379,9 @@ static ext4_orphan_ops_t ext4_orphan_ops(ext4_sb_info_t *sb)
         .write_head = ext4_orphan_write_head,
         .read_inode = ext4_orphan_read_inode,
         .write_inode = ext4_orphan_write_inode,
-        .finish_inode = ext4_orphan_finish_inode,
+        .truncate_linked_inode = ext4_orphan_truncate_linked_inode,
+        .truncate_unlinked_inode = ext4_orphan_truncate_unlinked_inode,
+        .release_unlinked_inode = ext4_orphan_release_unlinked_inode,
         .abort_transaction = ext4_orphan_abort_transaction,
     };
     return ops;
@@ -398,19 +416,28 @@ static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino)
 {
     ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
 #ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
-    return a20_ext4_orphan_add_last_link(&ops, ino);
+    return ext4_record_status(sb, a20_ext4_orphan_add_last_link(&ops, ino));
 #else
     int ret = ext4_orphan_chain_contains(&ops, ino);
     if (ret < 0) return ret;
     uint16_t links;
-    uint32_t head;
-    if (ops.read_inode(ops.context, ino, &links, &head) < 0 || links != 1)
+    uint32_t old_next, head;
+    if (ops.read_inode(ops.context, ino, &links, &old_next) < 0 || links != 1)
         return -EIO;
     if (ops.read_head(ops.context, &head) < 0) return -EIO;
     ret = ops.write_inode(ops.context, ino, 0, head);
-    if (ret < 0) { ops.abort_transaction(ops.context); return ret; }
+    if (ret < 0) {
+        int restore = ops.write_inode(ops.context, ino, links, old_next);
+        ops.abort_transaction(ops.context);
+        return restore < 0 ? ext4_record_status(sb, -117) : ret;
+    }
     ret = ops.write_head(ops.context, ino);
-    if (ret < 0) ops.abort_transaction(ops.context);
+    if (ret < 0) {
+        int restore = ops.write_inode(ops.context, ino, links, old_next);
+        if (restore == 0) restore = ops.write_head(ops.context, head);
+        ops.abort_transaction(ops.context);
+        return restore < 0 ? ext4_record_status(sb, -117) : ret;
+    }
     return ret;
 #endif
 }
@@ -419,7 +446,7 @@ static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
 {
     ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
 #ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
-    return a20_ext4_orphan_reap(&ops, ino);
+    return ext4_record_status(sb, a20_ext4_orphan_reap(&ops, ino));
 #else
     uint32_t prev = 0, cur = 0, steps = 0, found_prev = 0;
     uint16_t found_links = 0;
@@ -443,21 +470,52 @@ static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
         cur = next;
     }
     if (!found) return -EIO;
-    int ret = ops.finish_inode(ops.context, ino, found_links);
+    int ret = found_links ? ops.truncate_linked_inode(ops.context, ino)
+                          : ops.truncate_unlinked_inode(ops.context, ino);
     if (ret < 0) { ops.abort_transaction(ops.context); return ret; }
-    if (!found_prev) {
-        ret = ops.write_head(ops.context, found_next);
-        if (ret < 0) ops.abort_transaction(ops.context);
-        return ret;
-    }
-    uint16_t prev_links;
-    uint32_t ignored;
-    if (ops.read_inode(ops.context, found_prev, &prev_links, &ignored) < 0) {
+    uint16_t prev_links = 0;
+    uint32_t ignored = 0;
+    if (found_prev && ops.read_inode(ops.context, found_prev,
+                                     &prev_links, &ignored) < 0) {
         ops.abort_transaction(ops.context);
         return -EIO;
     }
-    ret = ops.write_inode(ops.context, found_prev, prev_links, found_next);
-    if (ret < 0) ops.abort_transaction(ops.context);
+    if (!found_prev) {
+        ret = ops.write_head(ops.context, found_next);
+    } else {
+        ret = ops.write_inode(ops.context, found_prev, prev_links, found_next);
+    }
+    if (ret < 0) {
+        int restore = ops.write_inode(ops.context, ino, found_links, found_next);
+        if (restore == 0) {
+            if (!found_prev)
+                restore = ops.write_head(ops.context, ino);
+            else
+                restore = ops.write_inode(ops.context, found_prev,
+                                          prev_links, ino);
+        }
+        ops.abort_transaction(ops.context);
+        return restore < 0 ? ext4_record_status(sb, -117) : ret;
+    }
+    if (found_links == 0) {
+        ret = ops.release_unlinked_inode(ops.context, ino);
+        if (ret < 0) {
+            if (ret == -117) {
+                ops.abort_transaction(ops.context);
+                return ret;
+            }
+            int restore = ops.write_inode(ops.context, ino, found_links, found_next);
+            if (restore == 0) {
+                if (!found_prev)
+                    restore = ops.write_head(ops.context, ino);
+                else
+                    restore = ops.write_inode(ops.context, found_prev,
+                                              prev_links, ino);
+            }
+            ops.abort_transaction(ops.context);
+            return restore < 0 ? ext4_record_status(sb, -117) : ret;
+        }
+    }
     return ret;
 #endif
 }
@@ -467,7 +525,8 @@ int ext4_orphan_recover(ext4_sb_info_t *sb)
     ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
 #ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
     uint32_t recovered = 0;
-    return a20_ext4_orphan_recover(&ops, &recovered);
+    return ext4_record_status(sb,
+        a20_ext4_orphan_recover(&ops, &recovered));
 #else
     uint32_t cur = 0, steps = 0;
     if (ops.read_head(ops.context, &cur) < 0) return -EIO;

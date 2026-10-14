@@ -88,21 +88,39 @@ static void proc_link_task_locked(task_t *t)
     task_list_tail = t;
 }
 
+/* Publish a fully initialized task on the global list. Caller holds
+ * tasklist_lock; taking park_lock here follows the established list->park
+ * nesting and makes the phase commit atomic with list visibility. */
+int proc_publish_task_slot_locked(task_t *t)
+{
+    if (!t)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    int rc = proc_task_lifecycle_advance(t, PROC_TASK_EVENT_PUBLISH);
+    if (!rc)
+        proc_link_task_locked(t);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    return rc;
+}
+
 /* Link a freshly created (non-fork) task into the wait4 children-list
  * model: fork() does this inline, but the a20 task_spawn/exec creation
  * paths (proc_alloc, proc_alloc_user_image) historically relied on the
  * old global-list wait4 scan and never linked -- breaking both wait4
  * (-ECHILD on live children) and orphan reparenting under the list
- * model.  Takes and releases tasklist_lock internally. */
-void proc_link_newborn(task_t *t)
+ * model. Takes and releases tasklist_lock internally. */
+int proc_link_newborn(task_t *t)
 {
     if (!t)
-        return;
+        return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     if (!t->tg_leader)
         t->tg_leader = t;
-    proc_children_link_locked(t->parent, t);
+    int rc = proc_publish_task_slot_locked(t);
+    if (!rc)
+        proc_children_link_locked(t->parent, t);
     spin_unlock_irqrestore(&tasklist_lock, flags);
+    return rc;
 }
 
 void proc_children_link_locked(task_t *parent, task_t *child)
@@ -675,10 +693,6 @@ task_t *proc_alloc_task_slot(void) {
     task_t *t = proc_task_alloc_storage();
     if (!t)
         return NULL;
-
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    proc_link_task_locked(t);
-    spin_unlock_irqrestore(&tasklist_lock, flags);
     return t;
 }
 
@@ -695,8 +709,6 @@ static int proc_alloc_kernel(void (*entry)(void), int detached, int defer_ready)
         proc_task_init_detached(t);
     else
         proc_task_init_common(t, proc_current(), 0);
-    proc_link_newborn(t);
-    proc_pid_register(t);
 #ifndef CONFIG_MCU
     if (!detached) {
         fdtable_close_all(t);
@@ -729,6 +741,13 @@ static int proc_alloc_kernel(void (*entry)(void), int detached, int defer_ready)
     arch_task_context_set_initial_sp(ctx, NULL, stack_top);
     t->kstack_base = stack;
     t->kstack = (uintptr_t)ctx;
+
+    int publish_rc = proc_link_newborn(t);
+    if (publish_rc < 0) {
+        proc_destroy_task(t);
+        return publish_rc;
+    }
+    proc_pid_register(t);
 
     kdebug("[PROC] kthread pid=%d\n", t->pid);
     if (!defer_ready)
@@ -770,8 +789,6 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
-    proc_link_newborn(t);
-    proc_pid_register(t);
     t->entry = entry;
     t->pgdir = pgdir;
     proc_set_name(t, "user");
@@ -858,6 +875,13 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
     arch_task_context_set_initial_sp(ctx, trap, ks_top);
     t->kstack = (uintptr_t)ctx;
+
+    int publish_rc = proc_link_newborn(t);
+    if (publish_rc < 0) {
+        proc_destroy_task(t);
+        return publish_rc;
+    }
+    proc_pid_register(t);
 
     kinfo("[PROC] user task pid=%d entry=0x%lx sp=0x%lx trap_sp=0x%lx\n", t->pid,
           (unsigned long)entry, (unsigned long)sp, (unsigned long)TRAP_CTX_SP(trap));

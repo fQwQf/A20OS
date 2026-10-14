@@ -1,6 +1,7 @@
 #include "proc/resource_ns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/task_construction.h"
 #include "proc/signal.h"
 #include "core/consts.h"
 #include "core/string.h"
@@ -134,62 +135,66 @@ static uint32_t proc_count_tasks_for_uid(int uid)
     return n;
 }
 
-static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
-                 int exit_signal, task_t **out_task)
+typedef struct proc_clone_transaction {
+    uint64_t flags;
+    vaddr_t stack;
+    int *ptid;
+    vaddr_t tls;
+    int *ctid;
+    int exit_signal;
+    task_t **out_task;
+    task_t *parent;
+    task_t *task;
+    task_t *vfork_child_ref;
+    int child_pid;
+    int parent_vfork_armed;
+} proc_clone_transaction_t;
+
+static int clone_validate(void *opaque)
 {
-    task_t *parent = proc_current();
-    if (!parent)
+    proc_clone_transaction_t *tx = opaque;
+    tx->parent = proc_current();
+    if (!tx->parent)
         return -ESRCH;
 #ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone begin: parent=%d flags=0x%lx\n",
-          parent ? parent->pid : -1, (unsigned long)flags);
+          tx->parent->pid, (unsigned long)tx->flags);
 #endif
-
 #ifdef CONFIG_NOMMU
-    /*
-     * A NOMMU child cannot own a private copy of an address space.  Enforce
-     * that invariant in the process core so every ABI gets the same behavior
-     * and mm_fork() can never duplicate allocation ownership.
-     */
-    if (!(flags & CLONE_VM))
+    if (!(tx->flags & CLONE_VM))
         return -EINVAL;
 #endif
-
-    /* RLIMIT_NPROC, checked before the slot is taken so a rejected fork
-     * leaves no trace.  CAP_SYS_RESOURCE is exempt, matching Linux. */
-    if (parent && parent->limits.nproc &&
-        !proc_has_cap(parent, CAP_SYS_RESOURCE) &&
-        proc_count_tasks_for_uid(parent->cred.uid) >= parent->limits.nproc)
+    if (tx->parent->limits.nproc &&
+        !proc_has_cap(tx->parent, CAP_SYS_RESOURCE) &&
+        proc_count_tasks_for_uid(tx->parent->cred.uid) >=
+            tx->parent->limits.nproc)
         return -EAGAIN;
+    if (tx->exit_signal < 0 || tx->exit_signal >= NSIG)
+        return -EINVAL;
+    return 0;
+}
 
-    task_t *t = proc_alloc_task_slot();
-    if (!t)
+static int clone_allocate(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    tx->task = proc_alloc_task_slot();
+    if (!tx->task)
         return -EAGAIN;
+    tx->task->pid = proc_pid_alloc();
+    if (tx->task->pid < 0)
+        return -EAGAIN;
+    tx->child_pid = tx->task->pid;
+    return 0;
+}
 
-    t->pid = proc_pid_alloc();
-    if (t->pid < 0) {
-        proc_destroy_task(t);
-        return -EAGAIN;
-    }
-    int child_pid = t->pid;
-    proc_task_init_common_deferred_files(t, parent, flags);
-#ifndef CONFIG_MCU
-    if (parent && (flags & (CLONE_FILES | CLONE_THREAD))) {
-        fdtable_share(t, parent);
-    } else if (parent) {
-        int copy_error = fdtable_copy_checked(t, parent);
-        if (copy_error < 0) {
-            proc_destroy_task(t);
-            return copy_error;
-        }
-    }
-#endif
+static int clone_base(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    task_t *parent = tx->parent;
+    proc_task_init_base(t, parent);
     t->abi_mode = parent ? parent->abi_mode : 0;
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    /* Adopted native stdio wiring describes the process's fd 0/1/2 and
-     * must survive fork: a clone child that execve()s without re-running
-     * task_adopt would otherwise fall back to the Linux-fdtable stdio,
-     * which is console for native tasks (breaks shell pipelines). */
     if (parent && parent->a20_stdio_adopted) {
         t->a20_stdio_adopted = 1;
         t->a20_stdin_h = parent->a20_stdin_h;
@@ -197,8 +202,6 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         t->a20_stderr_h = parent->a20_stderr_h;
         t->a20_root_h = parent->a20_root_h;
         t->a20_cwd_h = parent->a20_cwd_h;
-        /* a20_self_h left 0 here: it must reference a TASK handle in the
-         * CHILD's table, which only task_clone can install (below). */
     }
 #endif
     if (parent && parent->sched_reset_on_fork) {
@@ -211,117 +214,85 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
             t->cfs_weight = sched_weight_for_nice(0);
         }
     }
-    proc_pid_register(t);
-
-    if (exit_signal < 0 || exit_signal >= NSIG) {
-        proc_destroy_task(t);
-        return -EINVAL;
-    }
-    t->exit_signal = (flags & CLONE_THREAD) ? 0 : exit_signal;
-
-    if ((flags & CLONE_PARENT) && parent && parent->parent) {
+    t->exit_signal = (tx->flags & CLONE_THREAD) ? 0 : tx->exit_signal;
+    if ((tx->flags & CLONE_PARENT) && parent && parent->parent) {
         t->parent = parent->parent;
         t->ppid = parent->parent->pid;
     }
-    if (flags & CLONE_THREAD)
+    if (tx->flags & CLONE_THREAD)
         t->tgid = parent ? parent->tgid : t->pid;
-
-    /* The thread-group and children chains are tasklist_lock-owned (INV-P5). */
-    uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
-    if (flags & CLONE_THREAD) {
-        if (parent && parent->tg_leader)
-            t->tg_leader = parent->tg_leader;
-        else if (parent)
-            t->tg_leader = parent;
-        else
-            t->tg_leader = t;
-    } else {
-        t->tg_leader = t;
-    }
-    int tg_link_error = 0;
-    if (t->tg_leader != t)
-        tg_link_error = proc_tg_link_locked(t);
-    if (!tg_link_error)
-        proc_children_link_locked(t->parent, t);
-    spin_unlock_irqrestore(&tasklist_lock, list_flags);
-    if (tg_link_error) {
-        proc_destroy_task(t);
-        return tg_link_error;
-    }
-
-    t->clone_flags = (int)flags;
-    if (flags & CLONE_CHILD_CLEARTID)
-        t->clear_child_tid = ctid;
+    t->clone_flags = (int)tx->flags;
+    if (tx->flags & CLONE_CHILD_CLEARTID)
+        t->clear_child_tid = tx->ctid;
     proc_set_name(t, parent->name);
-
     t->exec_load_addr = parent->exec_load_addr;
     t->exec_load_size = parent->exec_load_size;
+    return 0;
+}
 
-    /*
-     * Share signal handlers when CLONE_SIGHAND or CLONE_THREAD is set.
-     * Per-thread pending signals remain separate (each task has its own
-     * pending mask inside the shared signal_state), but sigaction
-     * entries must be shared across all threads.
-     */
-    if ((flags & (CLONE_SIGHAND | CLONE_THREAD)) && parent && parent->signals) {
-        if (t->signals)
-            kfree(t->signals);
-        t->signals = parent->signals;
-        refcount_inc(&((signal_state_t *)t->signals)->refcount);
+static int clone_seccomp(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    proc_task_init_seccomp(tx->task, tx->parent);
+    return 0;
+}
+
+static int clone_fs_cgroup(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    proc_task_init_fs_cgroup(tx->task, tx->parent);
+    return 0;
+}
+
+static int clone_files(void *opaque)
+{
+#ifndef CONFIG_MCU
+    proc_clone_transaction_t *tx = opaque;
+    if (!tx->parent)
+        return 0;
+    if (tx->flags & (CLONE_FILES | CLONE_THREAD)) {
+        fdtable_share(tx->task, tx->parent);
+        return 0;
     }
+    return fdtable_copy_checked(tx->task, tx->parent);
+#else
+    (void)opaque;
+    return 0;
+#endif
+}
 
-    /* Share the session keyring with the parent (kernel/ipc/keyring.c). */
-    keyring_inherit(t, parent);
+static int clone_signals(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    return proc_task_init_signals(tx->task, tx->parent, 1);
+}
 
-    /* Mount namespace: share the parent's, or deep-copy the mount table
-     * when CLONE_NEWNS is set (kernel/fs/vfs/mntns.c). */
-    if (mntns_fork(t, parent, flags) < 0) {
-        proc_destroy_task(t);
+static int clone_namespaces(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    task_t *parent = tx->parent;
+    int rc = mntns_fork(t, parent, tx->flags);
+    if (rc < 0)
         return -ENOMEM;
-    }
+    rc = pidns_fork(t, parent, tx->flags);
+    if (rc < 0)
+        return rc;
+    rc = userns_fork(t, parent, tx->flags);
+    if (rc < 0)
+        return rc;
+    return resource_ns_fork(t, parent, tx->flags);
+}
 
-    /* PID namespace: the child joins the namespace the parent is spawning
-     * into, and clone(CLONE_NEWPID) makes it the first member of a brand new
-     * one (kernel/proc/pidns.c).  Done after the mount namespace so a child
-     * that fails here still has a coherent fs context to be torn down. */
-    int pidns_r = pidns_fork(t, parent, flags);
-    if (pidns_r < 0) {
-        mntns_release_task(t);
-        proc_destroy_task(t);
-        return pidns_r;
-    }
-
-    /* User namespace last of the three, because it is the one that can fail
-     * for a reason the parent could not have predicted (a new namespace is
-     * one allocation more than a shared one).  Until it is placed the child is
-     * in the parent's namespace, which is the correct rollback state. */
-    int userns_r = userns_fork(t, parent, flags);
-    if (userns_r < 0) {
-        pidns_release_task(t);
-        mntns_release_task(t);
-        proc_destroy_task(t);
-        return userns_r;
-    }
-    int resource_r = resource_ns_fork(t, parent, flags);
-    if (resource_r < 0) {
-        userns_release_task(t);
-        pidns_release_task(t);
-        mntns_release_task(t);
-        proc_destroy_task(t);
-        return resource_r;
-    }
-
-
-    /* Capability envelopes are inherited (shared root budget, refcounted);
-     * see kernel/abi/linux/envelope.c and docs/research/05. */
+static int clone_capabilities(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    task_t *parent = tx->parent;
+    keyring_inherit(t, parent);
     env_inherit_task(t, parent);
-
-    /*
-     * Native ABI: the handle table is process-local (docs/native-abi/03-handle.md
-     * §2), so threads share it and hold one reference each.
-     */
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    if ((flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
+    if ((tx->flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
         parent->a20_ht) {
         __atomic_store_n(
             &t->a20_ht,
@@ -329,38 +300,53 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
             __ATOMIC_RELEASE);
     }
 #endif
+    return 0;
+}
 
-    if (parent->pgdir) {
-        if (parent->mm && (flags & CLONE_VM)) {
-            t->mm = parent->mm;
-            refcount_inc(&t->mm->refcount);
-            t->pgdir = parent->pgdir;
-        } else if (parent->mm) {
-            t->mm = mm_fork(parent->mm);
-            if (!t->mm) {
-                proc_destroy_task(t);
-                return -ENOMEM;
-            }
-            t->pgdir = t->mm->pgdir;
+static int clone_mm(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    task_t *parent = tx->parent;
+    if (!parent->pgdir)
+        goto stage_complete;
+    if (parent->mm && (tx->flags & CLONE_VM)) {
+        t->mm = parent->mm;
+        refcount_inc(&t->mm->refcount);
+        t->pgdir = parent->pgdir;
+    } else if (parent->mm) {
+        t->mm = mm_fork(parent->mm);
+        if (!t->mm)
+            return -ENOMEM;
+        t->pgdir = t->mm->pgdir;
 #ifdef CONFIG_COOPERATIVE_BOOT
-            kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
-                  child_pid, (unsigned long)mm_rss_get(t->mm),
-                  (unsigned long)t->mm->total_vm);
+        kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
+              tx->child_pid, (unsigned long)mm_rss_get(t->mm),
+              (unsigned long)t->mm->total_vm);
 #endif
-        } else {
-            t->pgdir = parent->pgdir;
-        }
+    } else {
+        t->pgdir = parent->pgdir;
     }
+stage_complete:
+#ifdef CONFIG_TASK_CONSTRUCTION_TEST
+    return proc_task_construction_test_fail_after(tx->parent,
+                                                   TASK_CONSTRUCTION_STAGE_MM);
+#else
+    return 0;
+#endif
+}
+
+static int clone_arch(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    task_t *parent = tx->parent;
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
-    if (!kstack) {
-        proc_destroy_task(t);
+    if (!kstack)
         return -ENOMEM;
-    }
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
-
     uint64_t ks_top = (uint64_t)(uintptr_t)kstack + KERNEL_STACK_SIZE;
-
     if (parent->trap_ctx) {
         trap_context_t *trap = (trap_context_t *)(uintptr_t)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
@@ -371,17 +357,11 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, ks_top);
         t->trap_ctx = trap;
-        t->ustack = stack ? stack : parent->ustack;
-        if (stack)
-            TRAP_CTX_SP(trap) = stack;
-        if (flags & CLONE_SETTLS)
-            TRAP_CTX_TP(trap) = tls;
-
-        /*
-         * Ask the architecture where the task_context_t belongs.  x86_64
-         * places it at the bottom of the kernel stack; the other arches place
-         * it just below the pre-allocated trap frame.
-         */
+        t->ustack = tx->stack ? tx->stack : parent->ustack;
+        if (tx->stack)
+            TRAP_CTX_SP(trap) = tx->stack;
+        if (tx->flags & CLONE_SETTLS)
+            TRAP_CTX_TP(trap) = tx->tls;
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         t->first_kernel_entry = (uintptr_t)user_trap_return;
         ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
@@ -401,89 +381,152 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         arch_task_context_set_initial_sp(ctx, NULL, ks_top);
         t->kstack = (uint64_t)(uintptr_t)ctx;
     }
+    return 0;
+}
 
-    if ((flags & CLONE_PARENT_SETTID) && ptid) {
-        int child_tid = t->pid;
-        if (copy_to_user(ptid, &child_tid, sizeof(child_tid)) < 0) {
-            proc_destroy_task(t);
-            return -EFAULT;
-        }
+static int clone_publish(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
+    int rc = proc_publish_task_slot_locked(t);
+    if (!rc && (tx->flags & CLONE_THREAD)) {
+        if (tx->parent && tx->parent->tg_leader)
+            t->tg_leader = tx->parent->tg_leader;
+        else if (tx->parent)
+            t->tg_leader = tx->parent;
+        else
+            t->tg_leader = t;
+    } else if (!rc) {
+        t->tg_leader = t;
     }
-    if ((flags & CLONE_CHILD_SETTID) && ctid) {
-        int child_tid = t->pid;
-        if (proc_copy_to_task_user(t, ctid, &child_tid, sizeof(child_tid)) < 0) {
-            proc_destroy_task(t);
-            return -EFAULT;
-        }
-    }
+    if (!rc && t->tg_leader != t)
+        rc = proc_tg_link_locked(t);
+    if (!rc)
+        proc_children_link_locked(t->parent, t);
+    spin_unlock_irqrestore(&tasklist_lock, list_flags);
+    if (rc < 0)
+        return rc;
+    proc_pid_register(t);
+    return 0;
+}
 
+static int clone_post_publish(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    task_t *t = tx->task;
+    if ((tx->flags & CLONE_PARENT_SETTID) && tx->ptid) {
+        int tid = t->pid;
+        if (copy_to_user(tx->ptid, &tid, sizeof(tid)) < 0)
+            return -EFAULT;
+    }
+    if ((tx->flags & CLONE_CHILD_SETTID) && tx->ctid) {
+        int tid = t->pid;
+        if (proc_copy_to_task_user(t, tx->ctid, &tid, sizeof(tid)) < 0)
+            return -EFAULT;
+    }
 #ifdef CONFIG_NOMMU
-    if (flags & CLONE_VFORK) {
-        int snapshot_ret = nommu_vfork_snapshot_create(parent);
-        if (snapshot_ret < 0) {
-            proc_destroy_task(t);
-            return snapshot_ret;
-        }
+    if (tx->flags & CLONE_VFORK) {
+        int rc = nommu_vfork_snapshot_create(tx->parent);
+        if (rc < 0)
+            return rc;
     }
 #endif
-
-    if (flags & CLONE_VFORK) {
-        /* Pairs with proc_complete_vfork(), which clears the flag under the
-         * same parent park_lock. */
-        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
-        parent->vfork_waiting = 1;
-        spin_unlock_irqrestore(&parent->park_lock, pf);
-    }
-
-    /*
-     * The completion is embedded in the child task.  Once the child is made
-     * runnable it may exit, complete vfork_done, and be auto-reaped by another
-     * CPU before the parent has unlinked its completion wait entry.  Pin the
-     * child across the whole wait so the completion object remains alive.
-     */
-    task_t *vfork_child_ref = NULL;
-    if (flags & CLONE_VFORK) {
-        vfork_child_ref = proc_get(t);
-        if (!vfork_child_ref) {
-            uint64_t pf = spin_lock_irqsave(&parent->park_lock);
-            parent->vfork_waiting = 0;
-            spin_unlock_irqrestore(&parent->park_lock, pf);
-#ifdef CONFIG_NOMMU
-            nommu_vfork_snapshot_discard(parent);
-#endif
-            proc_destroy_task(t);
+    if (tx->flags & CLONE_VFORK) {
+        uint64_t pf = spin_lock_irqsave(&tx->parent->park_lock);
+        tx->parent->vfork_waiting = 1;
+        spin_unlock_irqrestore(&tx->parent->park_lock, pf);
+        tx->parent_vfork_armed = 1;
+        tx->vfork_child_ref = proc_get(t);
+        if (!tx->vfork_child_ref)
             return -ESRCH;
-        }
     }
+    if (tx->out_task)
+        *tx->out_task = t;
+    return 0;
+}
 
-    /*
-     * Deferred-ready path (native thread creation): the caller finalizes the
-     * child's trap frame (entry PC, argument register) and then calls
-     * proc_make_ready() itself.  Never combined with CLONE_VFORK.
-     */
-    if (out_task) {
-        *out_task = t;
-        return child_pid;
-    }
-
-    proc_make_ready(t);
+static int clone_ready(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    proc_make_ready(tx->task);
 #ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
-          child_pid, (unsigned long)t->kstack);
-
-    /* VirtualBox ARM does not expose a usable architectural timer, so there
-     * is no interrupt which can preempt the parent after clone returns.  Run
-     * the newly published child once while both trap frames are still valid.
-     * The parent resumes here when the child next yields or blocks, exactly as
-     * it would after a timer-driven context switch on the normal boards. */
-    if (!(flags & CLONE_VFORK))
+          tx->child_pid, (unsigned long)tx->task->kstack);
+    if (!(tx->flags & CLONE_VFORK))
         proc_yield();
 #endif
-    if (flags & CLONE_VFORK) {
-        wait_for_completion(&vfork_child_ref->vfork_done);
-        proc_put(vfork_child_ref);
+    return 0;
+}
+
+static void clone_vfork_wait(void *opaque)
+{
+    proc_clone_transaction_t *tx = opaque;
+    if (!(tx->flags & CLONE_VFORK))
+        return;
+    wait_for_completion(&tx->vfork_child_ref->vfork_done);
+    proc_put(tx->vfork_child_ref);
+    tx->vfork_child_ref = NULL;
+}
+
+static void clone_abort(void *opaque, uint8_t publication_attempted)
+{
+    proc_clone_transaction_t *tx = opaque;
+    (void)publication_attempted;
+    if (!tx->task)
+        return;
+    if (tx->parent_vfork_armed) {
+        uint64_t pf = spin_lock_irqsave(&tx->parent->park_lock);
+        tx->parent->vfork_waiting = 0;
+        spin_unlock_irqrestore(&tx->parent->park_lock, pf);
+#ifdef CONFIG_NOMMU
+        nommu_vfork_snapshot_discard(tx->parent);
+#endif
+        tx->parent_vfork_armed = 0;
     }
-    return child_pid;
+    if (tx->vfork_child_ref) {
+        proc_put(tx->vfork_child_ref);
+        tx->vfork_child_ref = NULL;
+    }
+    proc_destroy_task(tx->task);
+    tx->task = NULL;
+}
+
+static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls,
+                           int *ctid, int exit_signal, task_t **out_task)
+{
+    proc_clone_transaction_t tx = {
+        .flags = flags,
+        .stack = stack,
+        .ptid = ptid,
+        .tls = tls,
+        .ctid = ctid,
+        .exit_signal = exit_signal,
+        .out_task = out_task,
+    };
+    task_construction_ops_t ops = {
+        .context = &tx,
+        .validate = clone_validate,
+        .allocate = clone_allocate,
+        .base = clone_base,
+        .seccomp = clone_seccomp,
+        .fs_cgroup = clone_fs_cgroup,
+        .files = clone_files,
+        .signals = clone_signals,
+        .namespaces = clone_namespaces,
+        .capabilities = clone_capabilities,
+        .mm = clone_mm,
+        .arch = clone_arch,
+        .publish = clone_publish,
+        .post_publish = clone_post_publish,
+        .ready = clone_ready,
+        .vfork_wait = clone_vfork_wait,
+        .abort = clone_abort,
+        .deferred = out_task != NULL,
+        .vfork = (flags & CLONE_VFORK) != 0,
+    };
+    int rc = proc_task_construction_run(&ops);
+    return rc < 0 ? rc : tx.child_pid;
 }
 
 int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,

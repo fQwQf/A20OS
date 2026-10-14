@@ -1,6 +1,7 @@
 ARCH ?= riscv64
 OPT ?= -O3
 PROFILE ?= full
+ENVELOPE_ACQUIRE_RACE_TEST ?= 0
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
 PYTHON ?= python3
@@ -25,7 +26,7 @@ MUSL_BUILD_WAS_OVERRIDDEN := $(if $(filter undefined,$(origin MUSL_BUILD)),0,1)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
 ARCH_STAMP := $(BUILD_DIR)/.build-id
-ARCH_BUILD_ID := $(ARCH):$(NOMMU):$(OPT):$(PROFILE)
+ARCH_BUILD_ID := $(ARCH):$(NOMMU):$(OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)
 
 .PHONY: arch-stamp-refresh
 arch-stamp-refresh:
@@ -126,6 +127,9 @@ MUSL_INC = -isystem $(MUSL_BUILD)/obj/include \
 # the same way the kernel side wires CFLAGS -MMD -MP into DEP_FILES.
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdinc -MMD -MP $(MUSL_INC) \
           -Iinit_common -Icmds $(ARCH_CFLAGS)
+ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
+CFLAGS += -DENVELOPE_ACQUIRE_RACE_TEST
+endif
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
 ifeq ($(NOMMU),1)

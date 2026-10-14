@@ -16,6 +16,7 @@
 #include "core/string.h"
 #include "fs/fdtable.h"
 #include "ipc/envelope.h"
+#include "ipc/envelope_acquire_race_test.h"
 #include "ipc/ipc.h"
 #include "ipc/channel_fd.h"
 #include "proc/proc.h"
@@ -171,6 +172,31 @@ int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args)
     extern int64_t env_audit(struct a20_env_audit *out);
     return env_audit((struct a20_env_audit *)(uintptr_t)args->arg[0]);
 }
+
+/* Test-only deterministic injection at the descriptor-install/mediation
+ * boundary.  Neither implementation nor dispatch entry exists in production. */
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+int64_t sys_a20_envelope_acquire_race_test(const linux_syscall_args_t *args)
+{
+    int command = (int)args->arg[0];
+    if (command == A20_ENVELOPE_RACE_CMD_ARM)
+        return a20_envelope_race_test_arm((int)args->arg[1],
+                                          (int)args->arg[2]);
+    if (command == A20_ENVELOPE_RACE_CMD_CANCEL) {
+        a20_envelope_race_test_cancel_task(proc_current());
+        return 0;
+    }
+    if (command == A20_ENVELOPE_RACE_CMD_RESULT) {
+        a20_envelope_race_test_result_t result;
+        int rc = a20_envelope_race_test_result(&result);
+        if (rc < 0)
+            return rc;
+        return copy_to_user((void *)(uintptr_t)args->arg[3], &result,
+                            sizeof(result)) < 0 ? -EFAULT : 0;
+    }
+    return -EINVAL;
+}
+#endif
 
 /* ---------------------------------------------------------------------------
  * Hypervisor VM/vcpu bridge.

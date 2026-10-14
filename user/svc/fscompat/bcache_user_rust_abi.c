@@ -52,16 +52,20 @@ int32_t a20_ubc_read_sector(void *dev, uint64_t lba, uint8_t *out,
                             uint32_t count)
 {
     block_dev_t *block = (block_dev_t *)dev;
-    return block && block->read_sector &&
-           block->read_sector(block, lba, out, count) == 0 ? 0 : -1;
+    if (!block || !block->read_sector)
+        return -95;
+    int rc = block->read_sector(block, lba, out, count);
+    return rc == 0 ? 0 : (rc < 0 ? rc : -5);
 }
 
 int32_t a20_ubc_write_sector(void *dev, uint64_t lba, const uint8_t *input,
                              uint32_t count)
 {
     block_dev_t *block = (block_dev_t *)dev;
-    return block && block->write_sector &&
-           block->write_sector(block, lba, input, count) == 0 ? 0 : -1;
+    if (!block || !block->write_sector)
+        return -95;
+    int rc = block->write_sector(block, lba, input, count);
+    return rc == 0 ? 0 : (rc < 0 ? rc : -5);
 }
 
 int32_t a20_ubc_flush_device(void *dev, int32_t *has_flush)

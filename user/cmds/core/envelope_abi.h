@@ -14,6 +14,22 @@
 #define SYS_a20_envelope_revoke 904
 #define SYS_a20_envelope_stats  905
 #define SYS_a20_envelope_audit  906
+#ifdef ENVELOPE_ACQUIRE_RACE_TEST
+#define SYS_a20_envelope_acquire_race_test 922
+
+#define ENVELOPE_RACE_OP_SCM   1
+#define ENVELOPE_RACE_OP_PIDFD 2
+#define ENVELOPE_RACE_CMD_ARM  1
+#define ENVELOPE_RACE_CMD_RESULT 2
+#define ENVELOPE_RACE_CMD_CANCEL 3
+struct envelope_race_result {
+    int operation;
+    int status;
+    int installed_fd;
+    int pin_release_count;
+};
+
+#endif
 
 /* Must match kernel/include/ipc/ipc.h object types and right bits. */
 #define ENV_OBJ_FILE    3
@@ -37,5 +53,21 @@ struct env_policy {
     unsigned int propagation_types;
     unsigned int flags;
 };
+
+#ifdef ENVELOPE_ACQUIRE_RACE_TEST
+struct env_stats {
+    unsigned long long acquire_ok;
+    unsigned long long acquire_deny_type;
+    unsigned long long acquire_deny_rights;
+    unsigned long long use_ok;
+    unsigned long long use_deny_ops;
+    unsigned long long use_deny_data;
+    unsigned long long use_deny_rights;
+    unsigned long long use_deny_expired;
+    unsigned long long bytes_charged;
+    int expired;
+    int n_shadows;
+};
+#endif
 
 #endif /* A20_CMDS_ENVELOPE_ABI_H */

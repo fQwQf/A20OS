@@ -1090,6 +1090,7 @@ static int jbd2_record_block(ext4_journal_t *ej, uint64_t block)
 int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
                             const void *buf, size_t len)
 {
+    if (ext4_is_inconsistent(fs)) return -117;
     ext4_journal_t *ej = fs ? fs->journal : NULL;
     if (!ej || !ej->enabled)
         return bcache_write_bytes(fs->bc, byte_off, buf, len);
@@ -1524,6 +1525,7 @@ int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
 
 int ext4_journal_commit(ext4_sb_info_t *fs)
 {
+    if (ext4_is_inconsistent(fs)) return -117;
     ext4_journal_t *ej = fs ? fs->journal : NULL;
     if (!ej || !ej->enabled)
         return 0;

@@ -375,19 +375,26 @@ fn decimal_arg(buf: &mut [u8; 12], value: u32) -> *const c_char {
     let mut count = 0usize;
     let mut n = value;
     if n == 0 {
-        digits[count] = b'0';
+        // A u32 has at most ten decimal digits, so every write below is
+        // within this fixed buffer. Raw pointer access keeps freestanding
+        // binaries independent of Rust's hosted bounds-panic formatter.
+        unsafe { digits.as_mut_ptr().write(b'0') };
         count = 1;
     } else {
         while n != 0 {
-            digits[count] = b'0' + (n % 10) as u8;
+            unsafe { digits.as_mut_ptr().add(count).write(b'0' + (n % 10) as u8) };
             count += 1;
             n /= 10;
         }
     }
     for i in 0..count {
-        buf[i] = digits[count - i - 1];
+        unsafe {
+            buf.as_mut_ptr().add(i).write(
+                digits.as_ptr().add(count - i - 1).read(),
+            );
+        }
     }
-    buf[count] = 0;
+    unsafe { buf.as_mut_ptr().add(count).write(0) };
     buf.as_ptr().cast()
 }
 

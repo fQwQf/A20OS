@@ -274,6 +274,9 @@ typedef struct ext4_sb_info {
     uint32_t *inode_alloc_hints;
     uint32_t block_group_rotor;
     uint32_t inode_group_rotor;
+    /* Sticky for this mounted instance after metadata compensation becomes
+     * uncertain. Reads remain possible; all later writes fail closed. */
+    int inconsistent;
     bcache_t *bc;
     mutex_t alloc_lock;
     /* Namespace lock: read mode for lookups (concurrent cold lookups through
@@ -283,6 +286,16 @@ typedef struct ext4_sb_info {
      * paid on each dcache miss. */
     rw_mutex_t metadata_lock;
 } ext4_sb_info_t;
+
+static inline int ext4_is_inconsistent(const ext4_sb_info_t *sb)
+{
+    return sb && __atomic_load_n(&sb->inconsistent, __ATOMIC_ACQUIRE) != 0;
+}
+
+static inline void ext4_mark_inconsistent(ext4_sb_info_t *sb)
+{
+    if (sb) __atomic_store_n(&sb->inconsistent, 1, __ATOMIC_RELEASE);
+}
 
 typedef struct ext4_vnode_priv {
     ext4_sb_info_t *sb;
@@ -312,6 +325,7 @@ typedef struct ext4_fctx {
 vnode_t *ext4_mount(bcache_t *bc);
 vnode_t *ext4_mount_flags(bcache_t *bc, int flags);
 int ext4_vnode_finalize_unlinked(vnode_t *vn);
+int ext4_record_status(ext4_sb_info_t *sb, int status);
 int      ext4_unmount(vnode_t *root);
 void     ext4_vnode_cache_prune_all(void);
 /* Scoped fsync: flush only this vnode's data and allocation metadata. */

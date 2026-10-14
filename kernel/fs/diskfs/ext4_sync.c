@@ -153,6 +153,8 @@ int ext4_vn_sync(vnode_t *vn)
     ext4_sb_info_t *sb = p->sb;
     if (!sb || !sb->bc)
         return -EINVAL;
+    if (ext4_is_inconsistent(sb))
+        return -117;
 
     /* Commit the open transaction first, and report its failure to fsync()
      * rather than letting a later writeback hide it.  The block cache's

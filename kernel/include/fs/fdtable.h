@@ -108,6 +108,11 @@ int  fdtable_close_files_if_file(files_struct_t *files, int fd, int pid,
                                  vfile_t *expected_vf);
 int  fdtable_close_if_file(task_t *task, int fd, vfile_t *expected_vf);
 int  fdtable_close_current_if_file(int fd, vfile_t *expected_vf);
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+/* Test-only atomic slot replacement used to inject reuse at mediation. */
+int fdtable_test_replace_current_if_file(int fd, vfile_t *expected_vf,
+                                         vfile_t *replacement_vf);
+#endif
 /* Release a slot in the caller's table: the current task's, or the boot table
  * when there is no current task. */
 int  fdtable_close_active(int fd);

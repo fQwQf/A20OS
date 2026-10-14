@@ -31,7 +31,7 @@ RUST_RV32_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --s
 # for both the matching core and every kernel Rust object.
 RUST_AARCH64_TARGET := aarch64-unknown-none-softfloat
 RUST_AARCH64_CORE_CACHE_ROOT ?= $(HOME)/.cache/a20os/rust-target-core
-RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL))
+RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
 RUST_AARCH64_RUSTSRC_DIR := $(shell $(RUSTC) --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
@@ -139,7 +139,7 @@ RUST_HANDLE_SLOT_OBJECT := $(BUILD_DIR)/rust/handle_slot.o
 RUST_HANDLE_TABLE_STATE_OBJECT := $(BUILD_DIR)/rust/handle_table_state.o
 
 ifeq ($(strip $(RUST_OPT_FLAG)),)
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL)),)
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
 endif
@@ -1286,4 +1286,155 @@ $(RUST_RW_MUTEX_STATE_OBJECT): $(RUST_RW_MUTEX_STATE_SRC) tools/rust-kernel.mk $
 		$(RUST_RW_MUTEX_STATE_EXTRA) \
 		$(if $(RUST_RW_MUTEX_STATE_FEATURES),-C target-feature=$(RUST_RW_MUTEX_STATE_FEATURES)) \
 		$< -o $@
+endif
+
+# TASK_LIFECYCLE owns legal construction/publication phase edges. C retains
+# task-list, park and runqueue locks plus the publication/resource operations.
+RUST_TASK_LIFECYCLE_SRC := kernel/proc/task_lifecycle.rs
+RUST_TASK_LIFECYCLE_TARGET_x86_64 := x86_64-unknown-none
+RUST_TASK_LIFECYCLE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_TASK_LIFECYCLE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_TASK_LIFECYCLE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_TASK_LIFECYCLE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_TASK_LIFECYCLE_TARGET_arm32 := armv7a-none-eabihf
+RUST_TASK_LIFECYCLE_TARGET_armv7m := thumbv7m-none-eabi
+RUST_TASK_LIFECYCLE_TARGET := $(RUST_TASK_LIFECYCLE_TARGET_$(ARCH))
+RUST_TASK_LIFECYCLE_OBJECT := $(BUILD_DIR)/rust/task_lifecycle.o
+
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+ifeq ($(strip $(RUST_TASK_LIFECYCLE_TARGET)),)
+$(error TASK_LIFECYCLE_IMPL=rust has no Rust target for ARCH=$(ARCH))
+endif
+RUST_TASK_LIFECYCLE_CODE_MODEL_x86_64 := large
+RUST_TASK_LIFECYCLE_CODE_MODEL_aarch64 := large
+RUST_TASK_LIFECYCLE_CODE_MODEL_loongarch64 := medium
+RUST_TASK_LIFECYCLE_CODE_MODEL_riscv64 := medium
+RUST_TASK_LIFECYCLE_CODE_MODEL_arm32 := small
+RUST_TASK_LIFECYCLE_CODE_MODEL_armv7m := small
+RUST_TASK_LIFECYCLE_FEATURES_aarch64 :=
+RUST_TASK_LIFECYCLE_FEATURES_arm32 := -neon
+RUST_TASK_LIFECYCLE_FEATURES_armv7m := -neon
+RUST_TASK_LIFECYCLE_EXTRA_x86_64 := -C no-redzone=yes
+RUST_TASK_LIFECYCLE_CODE_MODEL := $(RUST_TASK_LIFECYCLE_CODE_MODEL_$(ARCH))
+RUST_TASK_LIFECYCLE_FEATURES := $(RUST_TASK_LIFECYCLE_FEATURES_$(ARCH))
+RUST_TASK_LIFECYCLE_EXTRA := $(RUST_TASK_LIFECYCLE_EXTRA_$(ARCH))
+RUST_TASK_LIFECYCLE_FLAGS_STAMP := $(BUILD_DIR)/rust/.task-lifecycle-flags
+.PHONY: FORCE_RUST_TASK_LIFECYCLE_FLAGS
+FORCE_RUST_TASK_LIFECYCLE_FLAGS:
+
+$(RUST_TASK_LIFECYCLE_FLAGS_STAMP): FORCE_RUST_TASK_LIFECYCLE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_TASK_LIFECYCLE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_TASK_LIFECYCLE_OBJECT): $(RUST_TASK_LIFECYCLE_SRC) tools/rust-kernel.mk $(RUST_TASK_LIFECYCLE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_TASK_LIFECYCLE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+endif
+
+# Rust owns clone-stage sequencing and the transaction rollback decision.
+RUST_TASK_CONSTRUCTION_SRC := kernel/proc/task_construction.rs
+RUST_TASK_CONSTRUCTION_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
+RUST_TASK_CONSTRUCTION_OBJECT := $(BUILD_DIR)/rust/task_construction.o
+
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+ifeq ($(strip $(RUST_TASK_CONSTRUCTION_TARGET)),)
+$(error TASK_CONSTRUCTION_IMPL=rust has no Rust target for ARCH=$(ARCH))
+endif
+RUST_TASK_CONSTRUCTION_FLAGS_STAMP := $(BUILD_DIR)/rust/.task-construction-flags
+.PHONY: FORCE_RUST_TASK_CONSTRUCTION_FLAGS
+FORCE_RUST_TASK_CONSTRUCTION_FLAGS:
+
+$(RUST_TASK_CONSTRUCTION_FLAGS_STAMP): FORCE_RUST_TASK_CONSTRUCTION_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_TASK_CONSTRUCTION_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_TASK_CONSTRUCTION_OBJECT): $(RUST_TASK_CONSTRUCTION_SRC) tools/rust-kernel.mk $(RUST_TASK_CONSTRUCTION_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_TASK_CONSTRUCTION_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+endif
+
+# TASK_EXIT owns process-exit and final-reference teardown ordering. C retains
+# the resource, lock, ABI, scheduler, and final-free operations as callbacks.
+RUST_TASK_EXIT_SRC := kernel/proc/task_exit.rs
+RUST_TASK_EXIT_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
+RUST_TASK_EXIT_OBJECT := $(BUILD_DIR)/rust/task_exit.o
+
+ifeq ($(TASK_EXIT_IMPL),rust)
+ifeq ($(strip $(RUST_TASK_EXIT_TARGET)),)
+$(error TASK_EXIT_IMPL=rust has no Rust target for ARCH=$(ARCH))
+endif
+
+RUST_TASK_EXIT_FLAGS_STAMP := $(BUILD_DIR)/rust/.task-exit-flags
+.PHONY: FORCE_RUST_TASK_EXIT_FLAGS
+FORCE_RUST_TASK_EXIT_FLAGS:
+
+$(RUST_TASK_EXIT_FLAGS_STAMP): FORCE_RUST_TASK_EXIT_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_TASK_EXIT_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_TASK_EXIT_OBJECT): $(RUST_TASK_EXIT_SRC) tools/rust-kernel.mk $(RUST_TASK_EXIT_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_TASK_EXIT_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+endif
+
+# EXT4_EXTENT_TXN owns bounded extent-root trim planning and rollback; C keeps
+# alloc_lock and the raw bitmap, descriptor, inode-write, and journal calls.
+RUST_EXT4_EXTENT_TXN_SRC := kernel/fs/diskfs/ext4_extent_txn.rs
+RUST_EXT4_EXTENT_TXN_TARGET_x86_64 := x86_64-unknown-none
+RUST_EXT4_EXTENT_TXN_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_EXT4_EXTENT_TXN_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_EXT4_EXTENT_TXN_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_EXT4_EXTENT_TXN_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_EXT4_EXTENT_TXN_TARGET_arm32 := armv7a-none-eabihf
+RUST_EXT4_EXTENT_TXN_TARGET := $(RUST_EXT4_EXTENT_TXN_TARGET_$(ARCH))
+RUST_EXT4_EXTENT_TXN_OBJECT := $(BUILD_DIR)/rust/ext4_extent_txn.o
+ifeq ($(EXT4_EXTENT_TXN_IMPL),rust)
+ifeq ($(strip $(RUST_EXT4_EXTENT_TXN_TARGET)),)
+$(error EXT4_EXTENT_TXN_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+RUST_EXT4_EXTENT_TXN_FLAGS_STAMP := $(BUILD_DIR)/rust/.ext4-extent-txn-flags
+.PHONY: FORCE_RUST_EXT4_EXTENT_TXN_FLAGS
+FORCE_RUST_EXT4_EXTENT_TXN_FLAGS:
+
+$(RUST_EXT4_EXTENT_TXN_FLAGS_STAMP): FORCE_RUST_EXT4_EXTENT_TXN_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_EXT4_EXTENT_TXN_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_EXT4_EXTENT_TXN_OBJECT): $(RUST_EXT4_EXTENT_TXN_SRC) tools/rust-kernel.mk $(RUST_EXT4_EXTENT_TXN_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_EXT4_EXTENT_TXN_TARGET) $(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
+		-C codegen-units=1 -C relocation-model=static $< -o $@
 endif

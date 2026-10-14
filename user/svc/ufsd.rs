@@ -18,6 +18,8 @@ mod jbd2_txn;
 mod jbd2_record;
 #[path = "ext4_orphan.rs"]
 mod ext4_orphan;
+#[path = "../../kernel/fs/diskfs/ext4_extent_txn.rs"]
+mod ext4_extent_txn;
 #[path = "ufs_lifetime.rs"]
 mod lifetime;
 #[allow(dead_code)]
@@ -148,6 +150,22 @@ fn log_number(handle: Handle, prefix: &[u8], value: u32, suffix: &[u8]) {
     log(handle, suffix);
 }
 
+#[inline]
+fn diagnostic_log_number(handle: Handle, prefix: &[u8], value: u32, suffix: &[u8]) {
+    #[cfg(ufsd_test_close_orphan)]
+    log_number(handle, prefix, value, suffix);
+    #[cfg(not(ufsd_test_close_orphan))]
+    let _ = (handle, prefix, value, suffix);
+}
+
+#[inline]
+fn diagnostic_log(handle: Handle, bytes: &[u8]) {
+    #[cfg(ufsd_test_close_orphan)]
+    log(handle, bytes);
+    #[cfg(not(ufsd_test_close_orphan))]
+    let _ = (handle, bytes);
+}
+
 unsafe fn c_bytes<'a>(pointer: *const c_char, max_len: usize) -> Option<&'a [u8]> {
     if pointer.is_null() { return None; }
     let bytes = pointer.cast::<u8>();
@@ -171,7 +189,15 @@ fn reap_and_drop(backend: u32, ino: u64) -> i64 {
     }
 }
 
-fn sync_and_retry_pending(backend: u32, lifetimes: &mut lifetime::Lifetimes) -> i64 {
+fn sync_and_retry_pending(_output: Handle, backend: u32,
+                          lifetimes: &mut lifetime::Lifetimes) -> i64 {
+    #[cfg(ufsd_test_close_orphan)]
+    {
+    let mut cursor = 0;
+    if lifetimes.pending(&mut cursor).is_some() {
+        diagnostic_log(_output, b"UFSD_RUST_SYNC_RETRY: pending\n");
+    }
+    }
     let sync = unsafe { a20_ufsd_backend_sync(backend) };
     if sync != 0 { return sync; }
     let mut cursor = 0;
@@ -184,6 +210,7 @@ fn sync_and_retry_pending(backend: u32, lifetimes: &mut lifetime::Lifetimes) -> 
 }
 
 fn dispatch_request(
+    output: Handle,
     backend: u32,
     lifetimes: &mut lifetime::Lifetimes,
     request: &protocol::Request,
@@ -193,11 +220,22 @@ fn dispatch_request(
     response: &mut protocol::Response,
 ) -> i64 {
     if backend != BACKEND_FAT && backend != BACKEND_VNFS { return -(ERR_INVALID as i64); }
-    unsafe {
+    const ERR_INCONSISTENT: i64 = -117;
+    if !lifetimes.request_allowed(request.opcode, protocol::OP_INIT) {
+        #[cfg(ufsd_test_close_orphan)]
+        diagnostic_log_number(output, b"UFSD_QUARANTINE_REJECT: opcode=",
+                              request.opcode, b"\n");
+        return ERR_INCONSISTENT;
+    }
+    let result = unsafe {
         match request.opcode {
             protocol::OP_INIT => {
                 response.out0 = protocol::ROOT_INO;
                 response.out1 = protocol::lifetime_capability_for(backend);
+                if backend == BACKEND_VNFS &&
+                   request.version == protocol::LEGACY_PROTO_VERSION {
+                    diagnostic_log(output, b"UFSD_RUST_LIFETIME_CAPABILITY: v2\n");
+                }
                 0
             }
             protocol::OP_LOOKUP => a20_ufsd_backend_lookup(backend, request.ino, name,
@@ -225,8 +263,13 @@ fn dispatch_request(
                                                                     target.out0,
                                                                     &mut links);
                         if links_rc != 0 { links_rc }
-                        else if links == 0 && lifetimes.unlinked(target.out0) {
-                            reap_and_drop(backend, target.out0)
+                        else if links == 0 {
+                            #[cfg(ufsd_test_close_orphan)]
+                            diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_UNLINK: opens=",
+                                lifetimes.open_count(target.out0), b"\n");
+                            if lifetimes.unlinked(target.out0) {
+                                reap_and_drop(backend, target.out0)
+                            } else { 0 }
                         } else { 0 }
                     }
                 }
@@ -245,7 +288,7 @@ fn dispatch_request(
                                                           payload, request.payload_len, response),
             protocol::OP_RENAME => a20_ufsd_backend_rename(backend, request.ino, name,
                 request.arg0, rename_target, response),
-            protocol::OP_SYNC => sync_and_retry_pending(backend, lifetimes),
+            protocol::OP_SYNC => sync_and_retry_pending(output, backend, lifetimes),
             protocol::OP_OPEN => {
                 if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
                     return ERR_NOTSUPP;
@@ -260,7 +303,12 @@ fn dispatch_request(
                         if hold_rc != 0 {
                             let _ = lifetimes.closed(request.ino);
                             hold_rc
-                        } else { 0 }
+                        } else {
+                            #[cfg(ufsd_test_close_orphan)]
+                            diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_OPEN: opens=",
+                                       lifetimes.open_count(request.ino), b"\n");
+                            0
+                        }
                     }
                 }
             }
@@ -268,27 +316,45 @@ fn dispatch_request(
                 if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
                     return ERR_NOTSUPP;
                 }
-                if !lifetimes.is_open(request.ino) { return -2; }
+                if !lifetimes.is_open(request.ino) { -2 }
+                else {
                 let close_rc = a20_ufsd_backend_close(backend, request.ino);
-                if close_rc != 0 { return close_rc; }
-                match lifetimes.closed(request.ino) {
+                if close_rc != 0 { close_rc }
+                else { match lifetimes.closed(request.ino) {
                     Err(error) => error,
                     Ok(true) => {
+                        diagnostic_log(output, b"UFSD_RUST_LIFETIME_PENDING: zero-open orphan\n");
                         let rc = reap_and_drop(backend, request.ino);
                         if rc == 0 {
                             match lifetimes.reaped(request.ino) {
-                                Ok(()) => 0,
+                                Ok(()) => {
+                                    diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAPED: PASS\n");
+                                    0
+                                }
                                 Err(error) => error,
                             }
-                        } else { rc }
+                        } else {
+                            diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_REAP_ERROR: errno=",
+                                       rc.unsigned_abs() as u32, b"\n");
+                            diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAP_FAILED: pending retained\n");
+                            rc
+                        }
                     }
                     Ok(false) => 0,
+                }}
                 }
             }
             protocol::OP_STATFS => { a20_ufsd_backend_statfs(backend, response); 0 }
             _ => -(38i64),
         }
+    };
+    // A failed rollback means allocation state is not known. Stop all
+    // further service requests for this generation, including SYNC retry.
+    #[cfg(ufsd_test_close_orphan)]
+    if result == ERR_INCONSISTENT {
+        diagnostic_log(output, b"UFSD_QUARANTINE_ENTER: inconsistent state\n");
     }
+    lifetimes.observe_result(result, ERR_INCONSISTENT)
 }
 
 unsafe fn pump_supervision(endpoint: Handle, output: Handle) -> i32 {
@@ -377,7 +443,7 @@ fn serve_loop(
             opcode: request.opcode, req_id: request.req_id, status: 0, ..protocol::Response::default() };
         let payload_pointer = unsafe { a20_ufsd_payload_buffer() };
         let _capacity = unsafe { a20_ufsd_payload_capacity() };
-        let result = dispatch_request(backend, &mut lifetimes, &request, name_pointer,
+        let result = dispatch_request(output, backend, &mut lifetimes, &request, name_pointer,
             payload_bytes.as_ptr(), rename_pointer, &mut response);
         response.status = result.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let cap = unsafe { a20_ufsd_payload_capacity() } as usize;

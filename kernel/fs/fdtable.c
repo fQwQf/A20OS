@@ -1302,6 +1302,37 @@ int fdtable_close_current_if_file(int fd, vfile_t *expected_vf)
     return fdtable_close_if_file(proc_current(), fd, expected_vf);
 }
 
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+int fdtable_test_replace_current_if_file(int fd, vfile_t *expected_vf,
+                                         vfile_t *replacement_vf)
+{
+    task_t *task = proc_current();
+    if (!task || !expected_vf || !replacement_vf || fd < 0 ||
+        fd >= MAX_FILES)
+        return -EINVAL;
+    files_struct_t *files = fdtable_active_files(task);
+    if (!files)
+        return -EBADF;
+    uint64_t flags = spin_lock_irqsave(&files->lock);
+    if (files->fd[fd] != expected_vf ||
+        files->fd[fd]->identity != expected_vf->identity) {
+        spin_unlock_irqrestore(&files->lock, flags);
+        return -EBADF;
+    }
+    uint8_t cloexec = files->cloexec[fd];
+    vfile_get(replacement_vf);
+    files->fd[fd] = replacement_vf;
+    files->cloexec[fd] = cloexec;
+    spin_unlock_irqrestore(&files->lock, flags);
+
+    env_kind_unregister(fd);
+    wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
+    fdtable_wake_if_last_slot(expected_vf);
+    vfs_release_process_file_locks(expected_vf, task->pid);
+    return fdtable_slot_put(expected_vf);
+}
+#endif
+
 /* Release a slot in whichever table the caller is actually using.  With no
  * current task that is the boot table, which has no owning task, so
  * fdtable_close() cannot express it -- the slot used to survive the close,

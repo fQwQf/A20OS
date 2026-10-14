@@ -1,6 +1,9 @@
 #include "syscall_impl.h"
 
 #include "ipc/envelope.h"
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+#include "ipc/envelope_acquire_race_test.h"
+#endif
 #include "ipc/ipc.h"
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
@@ -292,9 +295,21 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     if (env_active(self)) {
         const uint64_t base_rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
                                      A20_RIGHT_STAT | A20_RIGHT_SEEK;
-        int mr = env_mediate_acquire_vfile(r, target_file, base_rights);
+        int mr = 0;
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+        int injected = a20_envelope_race_test_before_mediation(
+            A20_ENVELOPE_RACE_OP_PIDFD, r, target_file);
+        if (injected < 0)
+            mr = injected;
+#endif
+        if (!mr)
+            mr = env_mediate_acquire_vfile(r, target_file, base_rights);
         if (mr) {
             (void)fdtable_close_current_if_file(r, target_file);
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+            a20_envelope_race_test_note_pin_release(
+                A20_ENVELOPE_RACE_OP_PIDFD, target_file->identity);
+#endif
             vfs_put_file(target_file);
             return mr;
         }

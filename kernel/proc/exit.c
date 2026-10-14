@@ -31,6 +31,9 @@ extern void udisk_task_exit(int pid);
 #include "ipc/ipc.h"
 #include "sys/usercopy.h"
 #include "cg/cgroup.h"
+#ifdef CONFIG_TASK_EXIT_RUST
+#include "proc/task_exit.h"
+#endif
 
 static int proc_ignores_sigchld(task_t *parent)
 {
@@ -445,11 +448,300 @@ static void proc_clear_child_tid_direct(task_t *t)
     (void)copy_to_user(ctid, &zero, sizeof(zero));
 }
 
+#ifdef CONFIG_TASK_EXIT_RUST
+typedef struct task_exit_context {
+    task_t *task;
+    int exit_code;
+    int *clear_tid;
+    task_t *parent;
+    int auto_reap;
+    int vfork_completed;
+    task_t *thread_leader;
+    task_t *completed_parent;
+    int completed_signal;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    task_t *notify_leader;
+    struct hyp_bridge_drop hyp_drop;
+#endif
+} task_exit_context_t;
+
+static task_exit_context_t *exit_ctx(void *opaque)
+{
+    return (task_exit_context_t *)opaque;
+}
+
+static void exit_begin(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    t->exit_pending = 0;
+    t->pending_exit_code = ctx->exit_code;
+    ktrace_exit("[EXIT] proc_exit: pid=%d tgid=%d thread=%d exit_code=%d\n",
+                t->pid, t->tgid,
+                (t->clone_flags & CLONE_THREAD) != 0, ctx->exit_code);
+}
+
+static void exit_clear_tid(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    ctx->clear_tid = t->clear_child_tid;
+    proc_clear_child_tid_direct(t);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (ctx->clear_tid)
+        futex_wake_user(ctx->clear_tid, 1);
+#endif
+}
+
+static void exit_robust_list_stage(void *opaque)
+{
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    task_t *t = exit_ctx(opaque)->task;
+    if (t->robust_list_head)
+        exit_robust_list(t);
+#else
+    (void)opaque;
+#endif
+}
+
+static void exit_release_locks(void *opaque)
+{
+    task_t *t = exit_ctx(opaque)->task;
+    vfs_release_process_locks(t->pid);
+    kep_release_process(t->pid);
+}
+
+static void exit_account(void *opaque)
+{
+    acct_task_exit(exit_ctx(opaque)->task);
+}
+
+static void exit_close_files(void *opaque)
+{
+    task_t *t = exit_ctx(opaque)->task;
+    ktrace_exit("[EXIT] pid=%d: closing fds and releasing mm ref\n", t->pid);
+    fdtable_close_all(t);
+}
+
+static void exit_release_mm(void *opaque)
+{
+    proc_release_exiting_mm(exit_ctx(opaque)->task);
+}
+
+static void exit_debug_stop(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    if (proc_debug_is_traced(t) &&
+        (t->ptrace_flags & PT_DEBUG_FLAG_TRACEEXIT) &&
+        ctx->exit_code != -SIGKILL)
+        (void)proc_debug_event_stop(SIGTRAP, PT_DEBUG_EVENT_EXIT,
+                                    (uint64_t)(uintptr_t)ctx->exit_code);
+}
+
+/* Resolve parent/vfork and retain the thread leader before publishing zombie. */
+static void exit_resolve_parent(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    ctx->parent = proc_get(t->parent);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+    if (!proc_task_is_live_locked(ctx->parent)) {
+        proc_put(ctx->parent);
+        ctx->parent = NULL;
+    }
+    ctx->auto_reap = proc_child_auto_reaps(t, ctx->parent);
+
+    uint64_t cf = 0, pf = 0;
+    proc_lock_two_tasks(t, ctx->parent, &cf, &pf);
+    ctx->vfork_completed = proc_complete_vfork_locked(t, ctx->parent);
+    proc_unlock_two_tasks(t, ctx->parent, cf, pf);
+    if (ctx->vfork_completed)
+        complete(&t->vfork_done);
+
+    lf = spin_lock_irqsave(&tasklist_lock);
+    if (t->tg_leader && t->tg_leader != t)
+        ctx->thread_leader = proc_get(t->tg_leader);
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+}
+
+static void exit_publish_zombie(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    proc_runq_remove_locked(t);
+    t->exit_code = ctx->exit_code;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    t->state = PROC_ZOMBIE;
+    spin_unlock_irqrestore(&t->park_lock, flags);
+}
+
+static void exit_parent_bookkeeping(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    uint64_t lf;
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    int completed_signal = 0;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    ctx->hyp_drop.count = 0;
+#endif
+    lf = spin_lock_irqsave(&tasklist_lock);
+    task_t *group_leader = ctx->thread_leader ? ctx->thread_leader : t;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (proc_task_state_get(group_leader) == PROC_ZOMBIE &&
+        proc_tg_group_dead_locked(group_leader) &&
+        !group_leader->hyp_cleanup_done) {
+        group_leader->hyp_cleanup_done = 1;
+        hyp_bridge_detach_group(proc_task_tgid(group_leader), &ctx->hyp_drop);
+    }
+#endif
+    ctx->completed_parent = proc_group_exit_parent_get_locked(
+        group_leader, &completed_signal);
+    ctx->completed_signal = completed_signal;
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (ctx->completed_parent && completed_signal > 0)
+        ctx->notify_leader = proc_get(group_leader);
+#endif
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+#else
+    if (ctx->thread_leader) {
+        lf = spin_lock_irqsave(&tasklist_lock);
+        if (proc_task_state_get(ctx->thread_leader) == PROC_ZOMBIE &&
+            proc_tg_group_dead_locked(ctx->thread_leader) &&
+            ctx->thread_leader->parent &&
+            ctx->thread_leader->parent != proc_idle_task())
+            ctx->completed_parent = proc_get(ctx->thread_leader->parent);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+    }
+#endif
+
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    hyp_bridge_release_group(&ctx->hyp_drop);
+#endif
+#endif
+    ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
+                t->pid, ctx->auto_reap, (void *)ctx->clear_tid);
+    if (ctx->auto_reap) {
+        lf = spin_lock_irqsave(&tasklist_lock);
+        proc_sched_note_zombie();
+        t->parent = proc_idle_task();
+        t->ppid = 0;
+        proc_children_unlink_locked(t);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
+    } else {
+        proc_wake_child_waiters(ctx->parent);
+    }
+    if (ctx->completed_parent)
+        proc_wake_child_waiters(ctx->completed_parent);
+#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
+    proc_put(ctx->completed_parent);
+    ctx->completed_parent = NULL;
+#endif
+    proc_put(ctx->thread_leader);
+    ctx->thread_leader = NULL;
+    /* Keep ctx->parent pinned until the final notification stage. */
+}
+
+static void exit_task_services(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *t = ctx->task;
+    /* Release driver registrations before notifying EXITED observers. */
+    udriver_task_cleanup(t->pid);
+    udisk_task_exit(t->pid);
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    a20_registry_task_exit(t->pid);
+#endif
+#ifdef A20_TASK_OBJECTS_ENABLED
+    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0, 1);
+#else
+    a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
+                     A20_EVENT_EXITED, (uint64_t)ctx->exit_code, 0);
+    a20_eventq_on_object_destroy((void *)(uintptr_t)t->pid, A20_OBJ_TASK);
+#endif
+}
+
+static void exit_reparent_children(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+    task_t *init_reaper = ctx->auto_reap ? NULL : proc_find_get(1);
+    proc_reparent_children(ctx->task, init_reaper);
+    proc_put(init_reaper);
+}
+
+static void exit_tracer_detach(void *opaque)
+{
+    proc_debug_tracer_exiting(exit_ctx(opaque)->task);
+}
+
+static void exit_notify_parent(void *opaque)
+{
+    task_exit_context_t *ctx = exit_ctx(opaque);
+#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    if (ctx->notify_leader)
+        signal_notify_child_exit(ctx->completed_parent, ctx->notify_leader);
+    proc_put(ctx->notify_leader);
+#else
+    if (ctx->completed_parent && ctx->completed_signal > 0)
+        signal_send_task(ctx->completed_parent, ctx->completed_signal);
+#endif
+    proc_put(ctx->completed_parent);
+#else
+    if (!ctx->auto_reap && ctx->parent && ctx->task->exit_signal > 0)
+        signal_send_task(ctx->parent, ctx->task->exit_signal);
+#endif
+    proc_put(ctx->parent);
+    ctx->parent = NULL;
+}
+
+static void exit_schedule(void *opaque)
+{
+    (void)opaque;
+    sched();
+    panic("proc_exit: sched returned");
+}
+
+static void proc_exit_rust(task_t *t, int exit_code)
+{
+    task_exit_context_t ctx = { .task = t, .exit_code = exit_code };
+    const task_exit_ops_t ops = {
+        .context = &ctx,
+        .begin = exit_begin,
+        .clear_tid = exit_clear_tid,
+        .robust_list = exit_robust_list_stage,
+        .release_locks = exit_release_locks,
+        .account = exit_account,
+        .close_files = exit_close_files,
+        .release_mm = exit_release_mm,
+        .debug_stop = exit_debug_stop,
+        .resolve_parent = exit_resolve_parent,
+        .publish_zombie = exit_publish_zombie,
+        .parent_bookkeeping = exit_parent_bookkeeping,
+        .task_services = exit_task_services,
+        .reparent_children = exit_reparent_children,
+        .tracer_detach = exit_tracer_detach,
+        .notify_parent = exit_notify_parent,
+        .schedule = exit_schedule,
+    };
+    a20_task_exit_run(&ops);
+    panic("proc_exit: Rust controller returned");
+}
+#endif
+
 void proc_exit(int exit_code)
 {
     task_t *t = proc_current();
     if (!t)
         panic("proc_exit: no current task");
+#ifdef CONFIG_TASK_EXIT_RUST
+    proc_exit_rust(t, exit_code);
+    panic("proc_exit: returned from Rust path");
+#else
     t->exit_pending = 0;
     t->pending_exit_code = exit_code;
 
@@ -507,10 +799,12 @@ void proc_exit(int exit_code)
      */
     task_t *parent = NULL;
     uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    parent = t->parent;
+    parent = proc_get(t->parent);
     spin_unlock_irqrestore(&tasklist_lock, lf);
-    if (!proc_task_is_live_locked(parent))
+    if (!proc_task_is_live_locked(parent)) {
+        proc_put(parent);
         parent = NULL;
+    }
     int auto_reap = proc_child_auto_reaps(t, parent);
 
     uint64_t cf = 0, pf = 0;
@@ -600,13 +894,7 @@ void proc_exit(int exit_code)
     proc_put(completed_parent);
 #endif
     proc_put(thread_leader);
-#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
-    int notify_parent_pid =
-        !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
-#endif
-
-    if (vfork_completed)
-        complete(&t->vfork_done);
+    /* Keep the parent pinned through its eventual signal notification. */
 
     /* Release user-space driver IRQ registrations BEFORE the EXITED
      * event fires, so a supervisor reacting to that event can immediately
@@ -645,12 +933,15 @@ void proc_exit(int exit_code)
 #endif
     proc_put(completed_parent);
 #else
-    if (notify_parent_pid > 0)
-        signal_send(notify_parent_pid, t->exit_signal);
+    if (!auto_reap && parent && t->exit_signal > 0)
+        signal_send_task(parent, t->exit_signal);
 #endif
+    proc_put(parent);
+    parent = NULL;
 
     sched();
     panic("proc_exit: sched returned");
+#endif
 }
 
 void proc_force_exit(task_t *t, int exit_code)

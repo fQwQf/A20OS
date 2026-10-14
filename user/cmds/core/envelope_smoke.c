@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/eventfd.h>
 #include <sys/shm.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -64,6 +65,167 @@ static void die(int code)
     printf("ENVELOPE_SMOKE: SCENARIO FAIL code=%d\n", code);
     exit(code);
 }
+
+#ifdef ENVELOPE_ACQUIRE_RACE_TEST
+static int race_test_ioctl(int command, int operation, int fd,
+                           struct envelope_race_result *result)
+{
+    return (int)syscall(SYS_a20_envelope_acquire_race_test, command,
+                       operation, fd, result);
+}
+
+static int test_acquire_reuse_races(void)
+{
+    int sp[2], ready[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sp) < 0 || pipe(ready) < 0)
+        return 1;
+    int source = open("/tmp/envelope-race-source", O_CREAT | O_RDWR, 0600);
+    if (source < 0)
+        return 1;
+    pid_t child = fork();
+    if (child < 0)
+        return 1;
+    if (child == 0) {
+        close(sp[0]);
+        close(ready[0]);
+        int replacement_scm = eventfd(0, EFD_NONBLOCK);
+        int replacement_pidfd = eventfd(0, EFD_NONBLOCK);
+        int pidfd = (int)syscall(434 /* pidfd_open */, getppid(), 0);
+        if (replacement_scm < 0 || replacement_pidfd < 0 || pidfd < 0)
+            _exit(141);
+
+        struct env_policy policy;
+        memset(&policy, 0, sizeof(policy));
+        policy.allowed_types = (1u << ENV_OBJ_EVENT_QUEUE) |
+                               (1u << ENV_OBJ_SOCKET);
+        policy.rights_by_class[ENV_OBJ_SOCKET] =
+            ENV_R_READ | ENV_R_WRITE | ENV_R_STAT | ENV_R_CONNECT |
+            ENV_R_ACCEPT;
+        policy.rights_by_class[ENV_OBJ_EVENT_QUEUE] =
+            ENV_R_READ | ENV_R_WRITE | ENV_R_STAT;
+        /* Other setup operations (including recvmsg) run under this policy;
+         * assert acquisition counters directly instead of relying on a
+         * one-operation budget that would fail before the injected race. */
+        policy.op_budget = 1000;
+        policy.data_budget = 65536;
+        long env = env_create(&policy);
+        if (env < 0 || env_enter(env) < 0)
+            _exit(142);
+
+        /* Exercise arm/cancel/re-arm and repeated cancellation before the
+         * real deterministic replacement. */
+        if (race_test_ioctl(ENVELOPE_RACE_CMD_ARM, ENVELOPE_RACE_OP_SCM,
+                            replacement_scm, NULL) != 0 ||
+            race_test_ioctl(ENVELOPE_RACE_CMD_CANCEL, 0, 0, NULL) != 0 ||
+            race_test_ioctl(ENVELOPE_RACE_CMD_CANCEL, 0, 0, NULL) != 0 ||
+            race_test_ioctl(ENVELOPE_RACE_CMD_ARM, ENVELOPE_RACE_OP_SCM,
+                            replacement_scm, NULL) != 0)
+            _exit(143);
+        if (write(ready[1], "r", 1) != 1)
+            _exit(144);
+
+        struct env_stats stats_before;
+        memset(&stats_before, 0, sizeof(stats_before));
+        if (syscall(SYS_a20_envelope_stats, env, &stats_before) != 0)
+            _exit(157);
+
+        char payload[1] = {0};
+        struct iovec iov = { .iov_base = payload, .iov_len = sizeof(payload) };
+        union { char bytes[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } c;
+        memset(&c, 0, sizeof(c));
+        struct msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = c.bytes;
+        msg.msg_controllen = sizeof(c.bytes);
+        long race_recv = recvmsg(sp[1], &msg, 0);
+        if (race_recv != 1)
+            _exit(154);
+        if (!(msg.msg_flags & MSG_CTRUNC))
+            _exit(155);
+        struct envelope_race_result result;
+        memset(&result, 0, sizeof(result));
+        if (race_test_ioctl(ENVELOPE_RACE_CMD_RESULT, 0, 0, &result) != 0 ||
+            result.operation != ENVELOPE_RACE_OP_SCM || result.status != 0 ||
+            result.installed_fd < 0 || result.pin_release_count != 1)
+            _exit(146);
+        uint64_t token = 17, observed = 0;
+        if (write(replacement_scm, &token, sizeof(token)) != sizeof(token) ||
+            read(result.installed_fd, &observed, sizeof(observed)) !=
+                sizeof(observed) || observed != token)
+            _exit(147);
+        if (race_test_ioctl(ENVELOPE_RACE_CMD_CANCEL, 0, 0, NULL) != 0 ||
+            race_test_ioctl(ENVELOPE_RACE_CMD_CANCEL, 0, 0, NULL) != 0)
+            _exit(148);
+
+        if (race_test_ioctl(ENVELOPE_RACE_CMD_ARM, ENVELOPE_RACE_OP_PIDFD,
+                            replacement_pidfd, NULL) != 0)
+            _exit(149);
+        errno = 0;
+        long acquired = syscall(438 /* pidfd_getfd */, pidfd, source, 0);
+        if (!(acquired < 0 && errno == EBADF))
+            _exit(150);
+        memset(&result, 0, sizeof(result));
+        if (race_test_ioctl(ENVELOPE_RACE_CMD_RESULT, 0, 0, &result) != 0 ||
+            result.operation != ENVELOPE_RACE_OP_PIDFD || result.status != 0 ||
+            result.installed_fd < 0 || result.pin_release_count != 1)
+            _exit(151);
+        token = 23;
+        observed = 0;
+        if (write(replacement_pidfd, &token, sizeof(token)) != sizeof(token) ||
+            read(result.installed_fd, &observed, sizeof(observed)) !=
+                sizeof(observed) || observed != token)
+            _exit(152);
+
+        struct env_stats stats;
+        memset(&stats, 0, sizeof(stats));
+        if (syscall(SYS_a20_envelope_stats, env, &stats) != 0 ||
+            stats.acquire_ok != stats_before.acquire_ok ||
+            stats.acquire_deny_type != stats_before.acquire_deny_type ||
+            stats.use_deny_ops != stats_before.use_deny_ops)
+            _exit(153);
+        close(result.installed_fd);
+        close(replacement_scm);
+        close(replacement_pidfd);
+        close(pidfd);
+        _exit(0);
+    }
+
+    close(sp[1]);
+    close(ready[1]);
+    char byte;
+    if (read(ready[0], &byte, 1) != 1)
+        return 1;
+    struct iovec iov = { .iov_base = (void *)"x", .iov_len = 1 };
+    union { char bytes[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } c;
+    memset(&c, 0, sizeof(c));
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = c.bytes;
+    msg.msg_controllen = sizeof(c.bytes);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type = SCM_RIGHTS;
+    cm->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &source, sizeof(source));
+    if (sendmsg(sp[0], &msg, 0) != 1)
+        return 1;
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        printf("ENVELOPE_SMOKE: acquire-reuse FAIL status=%d\n", status);
+        return 1;
+    }
+    close(sp[0]);
+    close(ready[0]);
+    close(source);
+    printf("ENVELOPE_SMOKE: acquire-reuse PASS scm+pidfd pins=1\n");
+    return 0;
+}
+#endif
 
 /* T1: enveloped process does normal file work. */
 static int t1_functional(long env_id)
@@ -317,6 +479,10 @@ int main(void)
     printf("ENVELOPE_SMOKE: start\n");
 
     int failures = 0;
+#ifdef ENVELOPE_ACQUIRE_RACE_TEST
+    if (test_acquire_reuse_races() != 0)
+        failures++;
+#endif
     long ids[8];
     struct env_policy p;
 
