@@ -91,6 +91,7 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
     t->owner_cpu = cpu;
     t->wait_timer_index = -1;
     t->alarm_timer_index = -1;
+    proc_park_wait_state_init(t);
 }
 
 void proc_set_name(task_t *t, const char *name)
@@ -162,13 +163,9 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     t->stop_report_pending = 0;
     t->continue_report_pending = 0;
     t->wake_time = 0;
-    t->wait_seq = 0;
-    t->wait_deadline = 0;
     t->wait_timer_index = -1;
     t->alarm_timer_index = -1;
-    t->park_state = PROC_PARK_IDLE;
-    t->wait_mode = PROC_WAIT_UNINTERRUPTIBLE;
-    t->wake_reason = PROC_WAKE_NONE;
+    proc_park_wait_state_init(t);
     spin_init(&t->park_lock);
     t->park_lock.counter_sink = &park_counters;
     completion_init(&t->vfork_done);
@@ -570,7 +567,7 @@ void proc_destroy_task(task_t *t)
     t->destroy_started = 1;
 #endif
     t->state = PROC_UNUSED;
-    proc_wait_timer_cancel_locked(t, t->wait_seq);
+    proc_wait_timer_cancel(t, t->wait_seq);
     proc_alarm_cancel(t);
     proc_runq_remove_locked(t);
     spin_unlock_irqrestore(&t->park_lock, flags);

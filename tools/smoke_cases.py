@@ -679,6 +679,95 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-dontunmap: PASS (RV64 linux SMP2); log saved to $log',
     },
+    'smoke-mm-usercopy-contract-c': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=2',
+                           'CONFIG_KERNEL_PREEMPT=1', 'USER_COPY_IMPL=c',
+                           'USER_COPY_TEST=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-usercopy-contract-c.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --usercopy-contract', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': [
+            'MM_USERCOPY_STRINGS: PASS pathname=1 page_end_nul=1 arg_limit=E2BIG',
+            'MM_PROCESS_VM: PASS readv=partial writev=partial iovec=advance',
+            r'MM_USERCOPY_CONTRACT: PASS partial_return=EFAULT copied_prefix=1 range_overflow=EFAULT demand_retry=1 cow_retry=1 cow_isolation=1 concurrent_unmap=128 full=\d+ fault=\d+',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_STRESS: FAIL', 'PANIC|Kernel panic|LOCK-STALL|Kernel BUG'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-usercopy-contract-c: PASS (C usercopy/string/process_vm reference, RV64 Linux SMP2); log saved to $log',
+    },
+    'smoke-mm-usercopy-contract-rust': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=2',
+                           'CONFIG_KERNEL_PREEMPT=1', 'USER_COPY_IMPL=rust',
+                           'PROCESS_VM_IMPL=rust', 'USER_COPY_TEST=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-usercopy-contract-rust.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --usercopy-contract', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': [
+            'MM_USERCOPY_STRINGS: PASS pathname=1 page_end_nul=1 arg_limit=E2BIG',
+            'MM_PROCESS_VM: PASS readv=partial writev=partial iovec=advance',
+            r'MM_USERCOPY_CONTRACT: PASS partial_return=EFAULT copied_prefix=1 range_overflow=EFAULT demand_retry=1 cow_retry=1 cow_isolation=1 concurrent_unmap=128 full=\d+ fault=\d+',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_STRESS: FAIL', 'PANIC|Kernel panic|LOCK-STALL|Kernel BUG'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-usercopy-contract-rust: PASS (Rust usercopy/string/process_vm candidate, RV64 Linux SMP2); log saved to $log',
+    },
+    'smoke-mm-process-vm-exec-cow-rust': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=2',
+                           'USER_COPY_IMPL=rust', 'PROCESS_VM_IMPL=rust',
+                           'EXTRA_CFLAGS=-DCONFIG_PROCESS_VM_EXEC_RACE_TEST', '-j2'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-process-vm-exec-cow-rust.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --process-vm-exec-cow-only', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic',
+                 '-smp', '2', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device',
+                 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev',
+                 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': [
+            'PROCESS_VM_EXEC_RACE_HOOK: PASS exec_swap_seen=1 pinned_mm_cow=1',
+            'MM_PROCESS_VM_EXEC_COW: PASS pinned_old_mm=1 exec_switch=1 parent_isolation=1',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_STRESS: FAIL', 'PANIC|Kernel panic|LOCK-STALL|Kernel BUG'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-process-vm-exec-cow-rust: PASS (pinned-MM COW across actual exec swap, RV64 Linux SMP2); log saved to $log',
+    },
     'smoke-mm-dontunmap-aarch64-both-focused': {
         'gate': {'mem': '1G', 'cpus': '2'},
         'pre': [],
@@ -1531,6 +1620,34 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-native-deepen: PASS; log saved to $log',
     },
+    'smoke-native-pager-rust': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0',
+                           'NR_CPUS=2', 'VMO_PAGE_IMPL=rust',
+                           'VMO_LIFECYCLE_IMPL=rust', 'VMO_PAGER_IMPL=rust',
+                           'VMO_PAGER_TEST=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/native-pager-rust-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8,
+                  'lines': ['/bin/native-deepen-rv', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G',
+                 '-nographic', '-smp', '2', '-bios', 'default',
+                 '-global', 'virtio-mmio.force-legacy=false',
+                 '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0',
+                 '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0',
+                 '-netdev', 'user,id=net',
+                 '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['PAGER_CLOSE_WAKE: waiters=1',
+                   'PAGER_CLOSE_WAKE: PASS queued=1 fallback=zero',
+                   'NATIVE_DEEPEN: PASS',
+                   'System is going down for power-off NOW'],
+        'forbid': ['FATAL:', 'PANIC', 'LOCK-STALL', 'NATIVE_DEEPEN: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-native-pager-rust: PASS; log saved to $log',
+    },
     'smoke-native-dynlink': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -1834,8 +1951,36 @@ CASES: dict[str, dict] = {
             '[SD] audit errors=0',
         ],
         'forbid': ['RUST_NATIVE_SVC: FAIL', '[PANIC]', 'lockstall'],
+        'require_exit_zero': True,
         'timeout_msg': False,
         'pass_msg': 'smoke-native-rust-peer: PASS; log saved to $log',
+    },
+    'smoke-native-rust-idl-service': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0',
+                           'NATIVE_RUST_IDL_SERVICE=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/native-rust-idl-service-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8,
+                  'lines': ['/bin/native-rust-idl-service-rv', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G',
+                 '-nographic', '-smp', '1', '-bios', 'default', '-global',
+                 'virtio-mmio.force-legacy=false', '-drive',
+                 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0',
+                 '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0',
+                 '-netdev', 'user,id=net', '-device',
+                 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4',
+                 '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['NATIVE_RUST_IDL_SERVICE: PASS negotiation=1 echo=1 ping=1',
+                   'ping-crash=ignored ping-close=alive exit=42',
+                   'System is going down for power-off NOW',
+                   '[SD] audit errors=0'],
+        'forbid': ['NATIVE_RUST_IDL_SERVICE: FAIL', 'PANIC', 'FATAL', 'LOCKSTALL'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-native-rust-idl-service: PASS; log saved to $log',
     },
     'smoke-native-ubd': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -3081,10 +3226,144 @@ CASES["smoke-mm-dontunmap-rollback-leaf2"]["log"] = (
 CASES["smoke-mm-dontunmap-rollback-leaf2"]["pass_msg"] = (
     "smoke-mm-dontunmap-rollback-leaf2: PASS (failure after second destination leaf); log saved to $log"
 )
+
+# Exercise Rust DestinationMapping::drop after the exact destination VMA has
+# been established and a destination leaf has already been copied.  The split
+# hook value 99 enables transaction trace markers without arming a split
+# failure; the separate map-count hook triggers the actual rollback.
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"] = deepcopy(
+    CASES["smoke-mm-dontunmap-rollback-leaf1"]
+)
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["build"]["vars"] = [
+    value.replace("rollback-leaf1-candidate-01", "rollback-leaf1-rust-candidate-01")
+         .replace("EXTRA_CFLAGS=-DCONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT=1",
+                  "EXTRA_CFLAGS=-DCONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT=1 -DCONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT=99")
+    for value in CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["build"]["vars"]
+]
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["build"]["vars"] += [
+    "DONTUNMAP_TXN_IMPL=rust",
+]
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["log"] = (
+    ".kernel-build/evidence/mm-dontunmap/rollback-leaf1-rust-candidate-01/guest.log"
+)
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["expect"] += [
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
+    "MM_DONTUNMAP_TEST: injected-failure leaves=1",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-begin exact=1 rc=0",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-end exact=1 rc=0",
+    "MM_DONTUNMAP_ROLLBACK_RETRY: begin",
+    "MM_DONTUNMAP_ROLLBACK: PASS source_preserved=1 destination_cleared=1 retry=1",
+]
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["ordered_expect"] = [
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
+    "MM_DONTUNMAP_TEST: injected-failure leaves=1",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-begin exact=1 rc=0",
+    "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-end exact=1 rc=0",
+    "MM_DONTUNMAP_ROLLBACK_RETRY: begin",
+    "MM_DONTUNMAP_ROLLBACK: PASS source_preserved=1 destination_cleared=1 retry=1",
+]
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["pass_msg"] = (
+    "smoke-mm-dontunmap-rollback-leaf1-rust: PASS (Rust destination guard Drop after copied leaf); log saved to $log"
+)
+CASES["smoke-mm-dontunmap-rollback-leaf1-rust"]["require_exit_zero"] = True
 CASES["smoke-mm-dontunmap-rollback-leaf2"]["expect"] = [
     value.replace("leaves=1", "leaves=2")
     for value in CASES["smoke-mm-dontunmap-rollback-leaf2"]["expect"]
 ]
+
+# Deterministically fail reachable VMA-tail allocations: destination
+# boundaries (1/2) and source pre-splits (5/6). Calls 3/4 are explicit
+# nonallocating boundary controls in the tested adjacent layouts; they must
+# report would_allocate=0 and must not consume the hook.
+for _split_call in range(1, 7):
+    _kind = "split-noop" if _split_call in (3, 4) else "split-fail"
+    _name = f"smoke-mm-dontunmap-{_kind}-{_split_call}"
+    CASES[_name] = deepcopy(CASES["smoke-mm-dontunmap-rollback-leaf1"])
+    CASES[_name]["require_exit_zero"] = True
+    CASES[_name]["build"]["vars"] = [
+        value.replace("rollback-leaf1-candidate-01",
+                      f"{_kind}-{_split_call}-candidate-01")
+             .replace("FAIL_AFTER_MAP_COUNT=1", f"FAIL_SPLIT={_split_call}")
+        for value in CASES[_name]["build"]["vars"]
+    ]
+    CASES[_name]["log"] = (
+        f".kernel-build/evidence/mm-dontunmap/{_kind}-{_split_call}-candidate-01/guest.log"
+    )
+    CASES[_name]["stdin"]["lines"] = [
+        f"mm_stress --dontunmap-split-failure {_split_call}", "poweroff"
+    ]
+    CASES[_name]["expect"] = [
+        value for value in CASES[_name]["expect"]
+        if "injected-failure leaves=" not in value
+        and "MM_DONTUNMAP_ROLLBACK: PASS" not in value
+    ]
+    if _split_call in (1, 2):
+        CASES[_name]["expect"] += [
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
+            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error exact=0 rc=-12",
+            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin exact=0 rc=0",
+            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+        ]
+        CASES[_name]["ordered_expect"] = [
+            rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=1",
+            f"MM_DONTUNMAP_TEST: injected-vma-allocation-failure split={_split_call}",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error exact=0 rc=-12",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end exact=0 rc=0",
+            "MM_DONTUNMAP_SPLIT_RETRY: begin",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call}",
+        ]
+    elif _split_call in (3, 4):
+        CASES[_name]["expect"] += [
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+        ]
+        CASES[_name]["ordered_expect"] = [
+            rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            f"MM_DONTUNMAP_SPLIT_NOOP: PASS split={_split_call}",
+        ]
+    else:
+        CASES[_name]["expect"] += [
+            f"MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split={_split_call} rc=-12",
+            f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call} source_preserved=1 destination_cleared=1 retry=1",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+        ]
+        CASES[_name]["ordered_expect"] = [
+            rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=1",
+            f"MM_DONTUNMAP_TEST: injected-vma-allocation-failure split={_split_call}",
+            f"MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split={_split_call} rc=-12",
+            "MM_DONTUNMAP_SPLIT_RETRY: begin",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call}",
+        ]
+        CASES[_name]["ordered_forbid_before"] = [{
+            "before": f"MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split={_split_call} rc=-12",
+            "forbid": r"MM_DONTUNMAP_TXN_TEST: impl=(c|rust) phase=",
+        }]
+        CASES[_name]["forbid"] += [
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin",
+            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end",
+        ]
+    if _split_call in (3, 4):
+        CASES[_name]["forbid"].append(
+            f"MM_DONTUNMAP_TEST: injected-vma-allocation-failure split={_split_call}"
+        )
+    CASES[_name]["pass_msg"] = (
+        f"{_name}: PASS ({'nonallocating boundary control' if _split_call in (3, 4) else 'real VMA-tail allocation failure'} at split call {_split_call}); log saved to $log"
+    )
 
 # Share the command stream and assertions with RISC-V; only the platform
 # changes. These aliases remain visible to the make/case reachability audit.
@@ -3092,3 +3371,60 @@ for _base in ("smoke-pty-stress", "smoke-timeout-test"):
     _alias = _base + "-aarch64"
     CASES[_alias] = case_for_arch(_base, CASES[_base], "aarch64")
     CASES[_alias]["pass_msg"] = f"{_alias}: PASS; log saved to $log"
+
+# Exercise the full Linux MM stress workload with the Rust VMA interval and
+# split/merge transaction owner selected in the kernel build.
+CASES["smoke-mm-vma-region-rust"] = deepcopy(CASES["smoke-mm-stress"])
+CASES["smoke-mm-vma-region-rust"]["build"]["vars"] += [
+    "VMA_IMPL=rust",
+    "BUILD_DIR=.kernel-build/evidence/vma-region-rust/full-mm-stress",
+]
+CASES["smoke-mm-vma-region-rust"]["argv"] = [
+    value.replace(".kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img",
+                  "@BUILD_DIR@/fat32.img")
+         .replace(".kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf",
+                  "@BUILD_DIR@/kernel.elf")
+    for value in CASES["smoke-mm-vma-region-rust"]["argv"]
+]
+CASES["smoke-mm-vma-region-rust"]["log"] = (
+    ".kernel-build/evidence/vma-region-rust/full-mm-stress/guest.log"
+)
+CASES["smoke-mm-vma-region-rust"]["require_exit_zero"] = True
+CASES["smoke-mm-vma-region-rust"]["forbid"] += [
+    "PANIC|Kernel panic|LOCK-STALL|Kernel BUG|MM_STRESS: FAIL",
+]
+CASES["smoke-mm-vma-region-rust"]["expect"] += [
+    "System is going down for power-off NOW",
+]
+CASES["smoke-mm-vma-region-rust"]["pass_msg"] = (
+    "smoke-mm-vma-region-rust: PASS (mmap/mprotect/mremap full MM stress); log saved to $log"
+)
+
+# Keep the existing precise allocation-failure contract while routing the
+# actual split allocation through Rust's reservation transaction.
+CASES["smoke-mm-vma-region-split-fail-rust"] = deepcopy(
+    CASES["smoke-mm-dontunmap-split-fail-1"]
+)
+CASES["smoke-mm-vma-region-split-fail-rust"]["build"]["vars"] = [
+    value.replace(".kernel-build/mm-dontunmap-split-fail-1-candidate-01",
+                  ".kernel-build/evidence/vma-region-rust/split-fail")
+    for value in CASES["smoke-mm-vma-region-split-fail-rust"]["build"]["vars"]
+] + ["VMA_IMPL=rust"]
+CASES["smoke-mm-vma-region-split-fail-rust"]["log"] = (
+    ".kernel-build/evidence/vma-region-rust/split-fail/guest.log"
+)
+CASES["smoke-mm-vma-region-split-fail-rust"]["argv"] = [
+    value.replace("@BUILD_DIR@", ".kernel-build/evidence/vma-region-rust/split-fail")
+    for value in CASES["smoke-mm-vma-region-split-fail-rust"]["argv"]
+]
+CASES["smoke-mm-vma-region-split-fail-rust"]["pass_msg"] = (
+    "smoke-mm-vma-region-split-fail-rust: PASS (Rust split allocator returns injected ENOMEM); log saved to $log"
+)
+CASES["smoke-mm-vma-region-split-fail-rust"]["expect"] += [
+    "MM_DONTUNMAP_TEST: injected-vma-allocation-failure split=1",
+    "MM_DONTUNMAP_SPLIT_FAILURE: PASS split=1 source_preserved=1 destination_cleared=1 retry=1",
+]
+CASES["smoke-mm-vma-region-split-fail-rust"]["forbid"] += [
+    "MM_DONTUNMAP_SPLIT_FAILURE: FAIL",
+    "MM_DONTUNMAP_TEST: injected-failure leaves=",
+]

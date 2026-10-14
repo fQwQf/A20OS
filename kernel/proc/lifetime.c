@@ -165,16 +165,16 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
      * runqueue lock, and the runqueue lock is below tasklist_lock in the
      * documented order. */
     uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    stats->timeout_entries = proc_wait_timer_count_locked();
-    stats->timeout_capacity = proc_wait_timer_capacity();
-    stats->timeout_full_failures =
-        proc_wait_timer_full_failures_locked();
+    proc_wait_timer_stats_t wait_timer_stats;
+    proc_wait_timer_snapshot(&wait_timer_stats);
+    stats->timeout_entries = wait_timer_stats.entries;
+    stats->timeout_capacity = wait_timer_stats.capacity;
+    stats->timeout_full_failures = wait_timer_stats.full_failures;
     stats->timeout_duplicate_rejections =
-        proc_wait_timer_duplicate_rejections_locked();
+        wait_timer_stats.duplicate_rejections;
     stats->timeout_stale_expirations =
-        proc_wait_timer_stale_expirations_locked();
-    stats->timeout_heap_violations =
-        proc_wait_timer_violations_locked();
+        wait_timer_stats.stale_expirations;
+    stats->timeout_heap_violations = wait_timer_stats.violations;
     for (task_t *t = proc_first_task_locked(); t;
          t = proc_next_task_locked(t)) {
         stats->listed_tasks++;

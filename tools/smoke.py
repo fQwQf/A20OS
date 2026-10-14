@@ -185,6 +185,16 @@ def resolve_case_build_paths(case: dict) -> dict:
     return resolve_build_paths(case, resolve_build_dir(case))
 
 
+def resolve_log_path(case_log: str, log_dir: str | None = None) -> str:
+    """Keep the configured default unless a caller requests an isolated log dir."""
+    if not log_dir:
+        return case_log
+    directory = Path(log_dir)
+    if not directory.is_absolute():
+        directory = REPO / directory
+    return str(directory / Path(case_log).name)
+
+
 def qemu_argv(case: dict) -> list[str]:
     """The full QEMU command line, as the make recipe invoked it."""
     argv = [sys.executable, TIMEOUT_HELPER]
@@ -380,11 +390,49 @@ def grep_matches(pattern: str, text: str) -> bool:
     return re.search(pattern, text, re.MULTILINE) is not None
 
 
+def _ordered_expect_missing(patterns: list[str], text: str) -> list[str]:
+    """Return ordered markers that are absent or occur before their predecessor."""
+    missing = []
+    cursor = 0
+    for pattern in patterns:
+        match = re.search(pattern, text[cursor:], re.MULTILINE)
+        if match is None:
+            missing.append(pattern)
+        else:
+            cursor += match.end()
+    return missing
+
+
+def _ordered_forbid_before_violations(rules: list[dict], text: str) -> list[str]:
+    """Reject markers that appear before a named boundary marker."""
+    violations = []
+    for rule in rules:
+        anchor = re.search(rule["before"], text, re.MULTILINE)
+        if anchor is None:
+            continue
+        if re.search(rule["forbid"], text[:anchor.start()], re.MULTILINE):
+            violations.append(rule["forbid"])
+    return violations
+
+
+def _exit_status_missing(require_zero: bool, status: int) -> str | None:
+    if require_zero and status != 0:
+        return f"expected exit status 0, got {status}"
+    return None
+
+
 def report(name: str, case: dict, status: int) -> int:
     log = Path(case["log"])
     text = log.read_text(encoding="utf-8", errors="replace")
     missing = [p for p in case["expect"] if not grep_matches(p, text)]
+    exit_status_issue = _exit_status_missing(case.get("require_exit_zero", False), status)
+    if exit_status_issue:
+        missing.append(f"[exit-status] {exit_status_issue}")
+    ordered_missing = _ordered_expect_missing(case.get("ordered_expect") or [], text)
+    missing.extend(f"[ordered] {pattern}" for pattern in ordered_missing)
     violated = [p for p in case.get("forbid") or [] if grep_matches(p, text)]
+    violated.extend(_ordered_forbid_before_violations(
+        case.get("ordered_forbid_before") or [], text))
     if not missing and not violated:
         # pass_msg was captured from the make recipe, where $log was a shell
         # variable; render it with this case's real path.
@@ -709,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(str(exc))
     case = resolve_case_build_paths(case)
     case.setdefault("name", a.case)
+    # Keep separately prepared run logs disjoint. This also avoids writing
+    # through a broken or user-selected .kernel-build symlink.
+    case["log"] = resolve_log_path(case["log"], a.log_dir)
     if a.print_argv:
         print(" ".join(qemu_argv(case)))
         return 0

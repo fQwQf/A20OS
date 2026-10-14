@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "ipc/handle_table.h"
 #include "ipc/objstats.h"
@@ -13,6 +14,7 @@ typedef struct test_object {
 } test_object_t;
 
 a20_objstats_t g_a20_objstats;
+_Noreturn void panic(const char *fmt, ...) { (void)fmt; abort(); }
 static _Atomic uint64_t g_now;
 static _Atomic int g_fail_kmalloc_after = -1;
 extern void a20_handle_host_set_quota(struct a20_ht_internal *ht, uint32_t quota);
@@ -163,6 +165,11 @@ static void test_reservation_quota_and_stats(struct a20_ht_internal *ht) {
     assert(a20_handle_commit_reserved_temporal(ht, slots[0], &committed,
            A20_OBJ_TASK, A20_RIGHT_WAIT, 0, 0, 0, 0) == A20_OK);
     assert(atomic_load(&g_a20_objstats.handles) == before + 1);
+    test_object_t rejected_duplicate = { .refs = 1 };
+    assert(a20_handle_commit_reserved_temporal(ht, slots[0], &rejected_duplicate,
+           A20_OBJ_TASK, A20_RIGHT_WAIT, 0, 0, 0, 0) == -A20_ERR_BAD_HANDLE);
+    assert(atomic_load(&g_a20_objstats.handles) == before + 1);
+    assert(atomic_load(&rejected_duplicate.refs) == 1);
     assert(a20_handle_remove(ht, slots[0]) == A20_OK);
     assert(atomic_load(&g_a20_objstats.handles) == before);
     assert(atomic_load(&committed.refs) == 0);
@@ -216,16 +223,23 @@ static void test_final_table_destroy_releases_live_slots(void) {
     struct a20_ht_internal *ht = a20_ht_create();
     assert(ht);
     test_object_t live = { .refs = 1 };
+    test_object_t expired = { .refs = 1 };
     int64_t live_handle = a20_handle_install(ht, &live, A20_OBJ_TASK, A20_RIGHT_WAIT);
     assert(live_handle >= 0);
+    int64_t expired_handle = a20_handle_install_temporal(
+        ht, &expired, A20_OBJ_TASK, A20_RIGHT_WAIT, 1, 0, 0, 0);
+    assert(expired_handle >= 0);
+    a20_handle_t reserved = UINT32_MAX;
+    assert(a20_handle_reserve_many(ht, &reserved, 1) == A20_OK);
     a20_handle_entry_t live_snapshot;
     int64_t live_lookup = a20_handle_lookup_internal(ht, (a20_handle_t)live_handle,
         A20_OBJ_TASK, A20_RIGHT_WAIT, &live_snapshot);
     assert(live_lookup == A20_OK);
     assert(live_snapshot.object == &live);
-    assert(atomic_load(&g_a20_objstats.handles) == 1);
+    assert(atomic_load(&g_a20_objstats.handles) == 2);
     a20_ht_destroy(ht);
     assert(atomic_load(&live.refs) == 0);
+    assert(atomic_load(&expired.refs) == 0);
     assert(atomic_load(&g_a20_objstats.handles) == 0);
 }
 

@@ -44,6 +44,9 @@ mod a20_services_idl {
     include!(env!("A20_IDL_RUST_BINDINGS"));
 }
 
+#[path = "idl_negotiation.rs"]
+mod idl_negotiation;
+
 // ===========================================================================
 // Constants mirrored from user/liba20rt/a20_types.h, a20_syscall.h and from
 // the generated user/svc/a20_services_idl.h.  Each one names its header of
@@ -98,6 +101,10 @@ const A20_SERVICES_IDL_VERSION: u16 = a20_services_idl::A20_SERVICES_IDL_VERSION
 const A20_SVC_CRASH_CODE: c_int = a20_services_idl::A20_SVC_CRASH_CODE as c_int;
 const SVCMGR_REQ_ECHO: u16 = a20_services_idl::SVCMGR_REQ_ECHO as u16;
 const SVCMGR_REQ_CRASH: u16 = a20_services_idl::SVCMGR_REQ_CRASH as u16;
+const SVCMGR_REQ_VERSION_NEGOTIATE: u16 =
+    a20_services_idl::SVCMGR_REQ_VERSION_NEGOTIATE as u16;
+const SVCMGR_REP_VERSION_NEGOTIATE: u16 =
+    a20_services_idl::SVCMGR_REP_VERSION_NEGOTIATE as u16;
 const A20_SVC_ENDPOINT_SLOT: Handle = a20_services_idl::A20_SVC_ENDPOINT_SLOT as Handle;
 
 // The service binary this peer spawns.  user/liba20rt/a20_arch.h maps
@@ -465,6 +472,99 @@ fn generated_echo_frame() -> [u8; 12] {
     frame[..envelope.len()].copy_from_slice(&envelope);
     frame[envelope.len()..].copy_from_slice(&payload);
     frame
+}
+
+fn generated_negotiation_frame(min_version: u16, max_version: u16,
+                               nonce: u32) -> [u8; 16] {
+    let payload = a20_services_idl::svcmgr_version_request_encode(
+        &a20_services_idl::SVCMGR_VERSION_REQUEST {
+            min_version, max_version, nonce,
+        });
+    let envelope = a20_services_idl::envelope_encode(
+        &a20_services_idl::ENVELOPE {
+            version: a20_services_idl::A20_SERVICES_IDL_VERSION,
+            r#type: SVCMGR_REQ_VERSION_NEGOTIATE,
+            size: (a20_services_idl::ENVELOPE_WIRE_SIZE + payload.len()) as u32,
+        });
+    let mut frame = [0u8; 16];
+    frame[..envelope.len()].copy_from_slice(&envelope);
+    frame[envelope.len()..].copy_from_slice(&payload);
+    frame
+}
+
+/// Perform the new request/reply exchange or the deliberately narrow legacy
+/// fallback. A v1 echo is recognized only when every returned byte equals the
+/// full request; then an independent ordinary echo proves the service is
+/// still responsive. No malformed ACK or NO_COMMON result can downgrade.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NegotiationOutcome { Selected(u16), NoCommon, LegacyEcho }
+
+fn negotiate_service(ep: Handle, min_version: u16, max_version: u16,
+                     nonce: u32, label: &str) -> Result<NegotiationOutcome, ()> {
+    let request = generated_negotiation_frame(min_version, max_version, nonce);
+    wire(label, "tx", &request);
+    let start = monotonic_now_ns().map_err(|st| {
+        put_status("clock_get", label, st);
+    })?;
+    let deadline = start.saturating_add(2_000_000_000);
+    send_until(ep, label, &request, deadline).map_err(|st| {
+        put_status("channel_send", label, st);
+    })?;
+    let mut reply = [0u8; 64];
+    let n = recv_until(ep, label, &mut reply, deadline).map_err(|st| {
+        if st != A20_ERR_TIMED_OUT { put_status("channel_recv", label, st); }
+    })?;
+    let got = reply.get(..n).ok_or_else(|| fail(label, "reply exceeds buffer"))?;
+    wire(label, "rx", got);
+
+    if got.len() == request.len() && bytes_eq(got, &request) {
+        if !idl_negotiation::legacy_v1_in_range(min_version, max_version) {
+            fail(label, "legacy service only offers v1 outside client range");
+            return Err(());
+        }
+        put_line("RUST_NATIVE_SVC: negotiation legacy-echo detected");
+        if !expect_echo(ep, "legacy_liveness_echo", &generated_echo_frame()) {
+            fail(label, "legacy echo challenge failed");
+            return Err(());
+        }
+        return Ok(NegotiationOutcome::LegacyEcho);
+    }
+
+    let envelope_bytes = got.get(..a20_services_idl::ENVELOPE_WIRE_SIZE)
+        .ok_or_else(|| fail(label, "negotiation reply is shorter than envelope"))?;
+    let envelope = a20_services_idl::envelope_decode(envelope_bytes)
+        .ok_or_else(|| fail(label, "negotiation reply envelope is malformed"))?;
+    if envelope.version != a20_services_idl::A20_SERVICES_IDL_VERSION ||
+        envelope.r#type != SVCMGR_REP_VERSION_NEGOTIATE ||
+        envelope.size as usize != got.len() ||
+        got.len() != a20_services_idl::ENVELOPE_WIRE_SIZE +
+                     a20_services_idl::SVCMGR_VERSION_RESPONSE_WIRE_SIZE {
+        fail(label, "wrong negotiation reply type, version, or length");
+        return Err(());
+    }
+    let response_bytes = got.get(a20_services_idl::ENVELOPE_WIRE_SIZE..)
+        .ok_or_else(|| fail(label, "negotiation response payload is missing"))?;
+    let response = a20_services_idl::svcmgr_version_response_decode(response_bytes)
+        .ok_or_else(|| fail(label, "negotiation response payload is malformed"))?;
+    match idl_negotiation::validate_response(
+        min_version, max_version, nonce,
+        response.min_version, response.max_version, response.selected_version,
+        response.status, response.nonce) {
+        Ok(Some(selected)) => {
+            put_str("RUST_NATIVE_SVC: negotiation selected=");
+            put_u64(selected as u64);
+            put(b"\n");
+            Ok(NegotiationOutcome::Selected(selected))
+        }
+        Ok(None) => {
+            put_line("RUST_NATIVE_SVC: negotiation no-common");
+            Ok(NegotiationOutcome::NoCommon)
+        }
+        Err(_) => {
+            fail(label, "invalid negotiation acknowledgement");
+            Err(())
+        }
+    }
 }
 
 // Pin each vector against the structs above, so the hex literals and the
@@ -1165,6 +1265,32 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
         }
     };
     put_line("RUST_NATIVE_SVC: service ready");
+
+    // -- 0. negotiate the unchanged v1 envelope --------------------------
+    let legacy_peer = match negotiate_service(ep, 1, 3, 0x1357_9bdf, "negotiate_overlap") {
+        Ok(NegotiationOutcome::Selected(1)) => false,
+        Ok(NegotiationOutcome::LegacyEcho) => {
+            put_line("RUST_NATIVE_SVC: legacy v1 echo fallback verified");
+            true
+        }
+        Ok(_) => {
+            fail("negotiate_overlap", "server did not select highest common v1");
+            retire(task, ep);
+            return EXIT_FAIL;
+        }
+        Err(()) => { retire(task, ep); return EXIT_FAIL; }
+    };
+    if !legacy_peer {
+        match negotiate_service(ep, 2, 3, 0x2468_ace0, "negotiate_no_common") {
+            Ok(NegotiationOutcome::NoCommon) => {}
+            Ok(_) => {
+                fail("negotiate_no_common", "server accepted or echoed a disjoint range");
+                retire(task, ep);
+                return EXIT_FAIL;
+            }
+            Err(()) => { retire(task, ep); return EXIT_FAIL; }
+        }
+    }
 
     // -- 2. exact v1 echo ------------------------------------------------
     let generated_echo = generated_echo_frame();

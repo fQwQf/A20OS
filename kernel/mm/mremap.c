@@ -465,13 +465,49 @@ typedef struct mm_dontunmap_context {
     int reprot;
 } mm_dontunmap_context_t;
 
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+#ifdef CONFIG_MREMAP_DONTUNMAP_TXN_RUST
+#define DONTUNMAP_TEST_IMPL "rust"
+#else
+#define DONTUNMAP_TEST_IMPL "c"
+#endif
+static void dontunmap_test_txn_marker(const char *phase, int exact, int rc)
+{
+    klog_write("MM_DONTUNMAP_TXN_TEST: impl=%s phase=%s exact=%d rc=%d\n",
+               DONTUNMAP_TEST_IMPL, phase, exact, rc);
+}
+#else
+#define dontunmap_test_txn_marker(phase, exact, rc) do { \
+    (void)(phase); (void)(exact); (void)(rc); \
+} while (0)
+#endif
+
+static int dontunmap_split_boundary(mm_struct_t *mm, vaddr_t addr,
+                                   unsigned int split_call)
+{
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+    return mm_split_vma_at_dontunmap_test(mm, addr, split_call);
+#else
+    (void)split_call;
+    return mm_split_vma_at(mm, addr);
+#endif
+}
+
 static int dontunmap_prepare_destination(void *opaque)
 {
     mm_dontunmap_context_t *ctx = opaque;
-    int r = mm_split_vma_at(ctx->mm, ctx->destination);
-    if (r < 0) return r;
-    r = mm_split_vma_at(ctx->mm, ctx->destination + ctx->destination_len);
-    if (r < 0) return r;
+    dontunmap_test_txn_marker("prepare-enter", 0, 0);
+    int r = dontunmap_split_boundary(ctx->mm, ctx->destination, 1);
+    if (r < 0) {
+        dontunmap_test_txn_marker("prepare-error", 0, r);
+        return r;
+    }
+    r = dontunmap_split_boundary(ctx->mm,
+                                 ctx->destination + ctx->destination_len, 2);
+    if (r < 0) {
+        dontunmap_test_txn_marker("prepare-error", 0, r);
+        return r;
+    }
     mm_seg_t *vma = mm_seg_find(ctx->mm, ctx->destination);
     if (!vma || vma->start != ctx->destination ||
         vma->end != ctx->destination + ctx->destination_len)
@@ -480,14 +516,21 @@ static int dontunmap_prepare_destination(void *opaque)
     /* mm_insert_vma may have merged an adjacent anonymous destination into
      * the source and deferred the source's old VMA record. Rebuild the source
      * boundaries and reacquire by address before any callback dereferences it. */
-    r = mm_split_vma_at(ctx->mm, ctx->source);
-    if (r < 0) return r;
-    r = mm_split_vma_at(ctx->mm, ctx->source + ctx->source_len);
-    if (r < 0) return r;
+    r = dontunmap_split_boundary(ctx->mm, ctx->source, 3);
+    if (r < 0) {
+        dontunmap_test_txn_marker("prepare-error", 0, r);
+        return r;
+    }
+    r = dontunmap_split_boundary(ctx->mm, ctx->source + ctx->source_len, 4);
+    if (r < 0) {
+        dontunmap_test_txn_marker("prepare-error", 0, r);
+        return r;
+    }
     ctx->source_vma = mm_seg_find(ctx->mm, ctx->source);
     if (!ctx->source_vma || ctx->source_vma->start != ctx->source ||
         ctx->source_vma->end != ctx->source + ctx->source_len)
         return -EFAULT;
+    dontunmap_test_txn_marker("prepare-ready", 0, 0);
     return 0;
 }
 
@@ -545,14 +588,19 @@ static void dontunmap_release_source_lock(void *opaque)
 static int dontunmap_rollback_destination(void *opaque, int exact_vma)
 {
     mm_dontunmap_context_t *ctx = opaque;
+    dontunmap_test_txn_marker("rollback-begin", exact_vma, 0);
     if (exact_vma) {
         mm_seg_t *vma = mm_seg_find(ctx->mm, ctx->destination);
         if (!vma || vma->start != ctx->destination ||
-            vma->end != ctx->destination + ctx->destination_len)
+            vma->end != ctx->destination + ctx->destination_len) {
+            dontunmap_test_txn_marker("rollback-end", exact_vma, -EFAULT);
             return -EFAULT;
+        }
     }
-    return mm_munmap_locked(ctx->mm, ctx->destination,
-                            ctx->destination_len);
+    int r = mm_munmap_locked(ctx->mm, ctx->destination,
+                             ctx->destination_len);
+    dontunmap_test_txn_marker("rollback-end", exact_vma, r);
+    return r;
 }
 
 static void dontunmap_rollback_failed(void *opaque, int primary_error,
@@ -593,9 +641,11 @@ static int mm_mremap_dontunmap_transaction(mm_struct_t *mm,
     };
     uintptr_t out = 0;
 #ifdef CONFIG_MREMAP_DONTUNMAP_TXN_RUST
+    dontunmap_test_txn_marker("enter", -1, 0);
     int r = mm_mremap_dontunmap_txn_rust(&dontunmap_txn_ops, &ctx,
                                          destination, destination_len, &out);
 #else
+    dontunmap_test_txn_marker("enter", -1, 0);
     int r = mm_mremap_dontunmap_txn_c(&dontunmap_txn_ops, &ctx,
                                       destination, destination_len, &out);
 #endif
@@ -704,10 +754,34 @@ static int mm_mremap_impl_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_s
     if ((flags & MREMAP_DONTUNMAP) && old_len != new_len)
         return -EINVAL;
 
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+    int r = (flags & MREMAP_DONTUNMAP)
+        ? mm_split_vma_at_dontunmap_test(mm, old_addr, 5)
+        : mm_split_vma_at(mm, old_addr);
+#else
     int r = mm_split_vma_at(mm, old_addr);
-    if (r < 0) return r;
+#endif
+    if (r < 0) {
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+        if (flags & MREMAP_DONTUNMAP)
+            klog_write("MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split=5 rc=%d\n", r);
+#endif
+        return r;
+    }
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+    r = (flags & MREMAP_DONTUNMAP)
+        ? mm_split_vma_at_dontunmap_test(mm, old_addr + old_len, 6)
+        : mm_split_vma_at(mm, old_addr + old_len);
+#else
     r = mm_split_vma_at(mm, old_addr + old_len);
-    if (r < 0) return r;
+#endif
+    if (r < 0) {
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+        if (flags & MREMAP_DONTUNMAP)
+            klog_write("MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split=6 rc=%d\n", r);
+#endif
+        return r;
+    }
     vma = mm_seg_find(mm, old_addr);
     if (!vma || vma->start != old_addr || vma->end < old_addr + old_len)
         return -EFAULT;

@@ -25,6 +25,7 @@
 #include "mm/frame.h"
 #include "mm/pt.h"
 #include "drivers/driver_descriptor.h"
+#include <stdint.h>
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/start_info.h"
 #endif

@@ -46,6 +46,10 @@ V1_LAYOUT = {
     "RTCD_ALARM_REQUEST": (4, {"MILLISECONDS": 0}),
     "RTCD_TIME_RESPONSE": (16, {"SECONDS": 0, "NANOSECONDS": 8}),
     "SVCMGR_ECHO": (4, {"SEQ": 0}),
+    "SVCMGR_VERSION_REQUEST": (8, {"MIN_VERSION": 0, "MAX_VERSION": 2, "NONCE": 4}),
+    "SVCMGR_VERSION_RESPONSE": (12, {"MIN_VERSION": 0, "MAX_VERSION": 2,
+                                     "SELECTED_VERSION": 4, "STATUS": 6,
+                                     "NONCE": 8}),
 }
 
 # MIXED is deliberately NOT packed on any of these targets: the u32 would sit
@@ -80,6 +84,8 @@ class RepoIdlTests(unittest.TestCase):
         self.assertIn("#define A20_SERVICES_IDL_VERSION 1u", self.text)
         self.assertIn("#define SVCMGR_REQ_ECHO (0x21)", self.text)
         self.assertIn("#define SVCMGR_REQ_CRASH (0x22)", self.text)
+        self.assertIn("#define SVCMGR_REQ_VERSION_NEGOTIATE (0x23)", self.text)
+        self.assertIn("#define SVCMGR_REP_VERSION_NEGOTIATE (0x24)", self.text)
         self.assertIn("#ifndef _A20_SERVICES_IDL_H", self.text)
         self.assertIn("#define _A20_SERVICES_IDL_H", self.text)
 
@@ -467,6 +473,91 @@ fn signed_minimum_values_are_twos_complement_little_endian() {
                                     str(Path(tmp) / "services.o")],
                                    text=True, capture_output=True)
             self.assertEqual(built.returncode, 0, built.stderr)
+
+    def test_repository_negotiation_codecs_match_independent_v1_goldens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generated = root / "generated.rs"
+            generated.write_text(a20idl.generate_rust(IDL), encoding="utf-8")
+            test = root / "golden.rs"
+            test.write_text(r'''#[path = "generated.rs"] mod idl;
+#[test]
+fn request_is_packed_little_endian_and_roundtrips() {
+    let value = idl::SVCMGR_VERSION_REQUEST { min_version: 1,
+        max_version: 3, nonce: 0x12345678 };
+    let golden: [u8; 8] = [1,0,3,0,0x78,0x56,0x34,0x12];
+    assert_eq!(idl::svcmgr_version_request_encode(&value), golden);
+    assert_eq!(idl::svcmgr_version_request_decode(&golden), Some(value));
+    assert_eq!(idl::svcmgr_version_request_decode(&golden[..7]), None);
+}
+#[test]
+fn response_is_packed_little_endian_and_roundtrips() {
+    let value = idl::SVCMGR_VERSION_RESPONSE { min_version: 1,
+        max_version: 1, selected_version: 1, status: 0, nonce: 0xa1b2c3d4 };
+    let golden: [u8; 12] = [1,0,1,0,1,0,0,0,0xd4,0xc3,0xb2,0xa1];
+    assert_eq!(idl::svcmgr_version_response_encode(&value), golden);
+    assert_eq!(idl::svcmgr_version_response_decode(&golden), Some(value));
+    assert_eq!(idl::svcmgr_version_response_decode(&golden[..11]), None);
+}
+''', encoding="utf-8")
+            binary = root / "golden"
+            built = subprocess.run([RUSTC, "--edition=2021", "--test", str(test),
+                                    "-o", str(binary)], text=True, capture_output=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([str(binary)], text=True, capture_output=True)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("2 passed", ran.stdout)
+
+    def test_negotiation_validator_rejects_inconsistent_ack_vectors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "negotiation-tests"
+            built = subprocess.run([RUSTC, "--edition=2021", "--test",
+                                    str(ROOT / "user/svc/idl_negotiation.rs"),
+                                    "-o", str(binary)], text=True, capture_output=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([str(binary)], text=True, capture_output=True)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("5 passed", ran.stdout)
+
+    def test_repository_c_negotiation_codecs_match_independent_goldens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a20_services_idl.h").write_text(
+                a20idl.generate(IDL), encoding="ascii")
+            source = root / "golden.c"
+            source.write_text(r'''#include <string.h>
+#include "a20_services_idl.h"
+int main(void) {
+    const uint8_t req_golden[8] = {1,0,3,0,0x78,0x56,0x34,0x12};
+    a20_idl_svcmgr_version_request_t req = {1,3,0x12345678};
+    uint8_t req_bytes[8] = {0};
+    a20_idl_svcmgr_version_request_encode(req_bytes, &req);
+    if (memcmp(req_bytes, req_golden, sizeof(req_bytes))) return 1;
+    a20_idl_svcmgr_version_request_t req_copy;
+    a20_idl_svcmgr_version_request_decode(&req_copy, req_bytes);
+    if (req_copy.min_version != 1 || req_copy.max_version != 3 ||
+        req_copy.nonce != 0x12345678) return 2;
+
+    const uint8_t rep_golden[12] = {1,0,1,0,1,0,0,0,0xd4,0xc3,0xb2,0xa1};
+    a20_idl_svcmgr_version_response_t rep = {1,1,1,0,0xa1b2c3d4};
+    uint8_t rep_bytes[12] = {0};
+    a20_idl_svcmgr_version_response_encode(rep_bytes, &rep);
+    if (memcmp(rep_bytes, rep_golden, sizeof(rep_bytes))) return 3;
+    a20_idl_svcmgr_version_response_t rep_copy;
+    a20_idl_svcmgr_version_response_decode(&rep_copy, rep_bytes);
+    if (rep_copy.min_version != 1 || rep_copy.max_version != 1 ||
+        rep_copy.selected_version != 1 || rep_copy.status != 0 ||
+        rep_copy.nonce != 0xa1b2c3d4) return 4;
+    return 0;
+}
+''', encoding="ascii")
+            binary = root / "golden"
+            built = subprocess.run([HOST_CC, *compile_flags(), "-Iuser/liba20rt",
+                                    str(source), "-o", str(binary)], cwd=ROOT,
+                                   text=True, capture_output=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([str(binary)], text=True, capture_output=True)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
 
 
 if __name__ == "__main__":

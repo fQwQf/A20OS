@@ -34,6 +34,41 @@ typedef struct a20_page_req {
     uint64_t offset;    /* vmo byte offset of the missing page */
 } a20_page_req_t;
 
+#ifdef CONFIG_VMO_PAGER_RUST
+typedef struct a20_pager_close_watch {
+    refcount_t refs;
+    spinlock_t lock;
+    a20_pager_t *pager; /* weak; protected by lock and inc_not_zero */
+} a20_pager_close_watch_t;
+
+static void pager_watch_ref(void *ctx)
+{
+    a20_pager_close_watch_t *watch = ctx;
+    refcount_inc(&watch->refs);
+}
+
+static void pager_watch_put(void *ctx)
+{
+    a20_pager_close_watch_t *watch = ctx;
+    if (refcount_dec_and_test(&watch->refs))
+        kfree(watch);
+}
+
+static void pager_watch_peer_closed(void *ctx)
+{
+    a20_pager_close_watch_t *watch = ctx;
+    a20_pager_t *pager = NULL;
+    spin_lock(&watch->lock);
+    if (watch->pager && refcount_inc_not_zero(&watch->pager->refcount))
+        pager = watch->pager;
+    spin_unlock(&watch->lock);
+    if (pager) {
+        a20_pager_peer_closed_rust(pager);
+        a20_pager_put(pager);
+    }
+}
+#endif
+
 /* The security label of the faulting task lives in the Native handle table,
  * which is not linked in Linux-only kernels.  Weak defaults keep the request
  * message safe (label 0 = lowest) when the Native ABI is absent. */
@@ -52,12 +87,116 @@ a20_pager_t *a20_pager_create(a20_channel_ep_t *requests)
     refcount_set(&p->refcount, 1);
     spin_init(&p->lock);
     p->requests = requests;   /* takes ownership of this endpoint reference */
+#ifdef CONFIG_VMO_PAGER_RUST
+    a20_pager_close_watch_t *watch = kmalloc(sizeof(*watch));
+    if (!watch) {
+        kfree(p);
+        return NULL;
+    }
+    refcount_set(&watch->refs, 1); /* pager-owned reference */
+    spin_init(&watch->lock);
+    watch->pager = p;
+    p->close_watch = watch;
+    if (a20_channel_ep_set_peer_close_hook(requests, pager_watch_peer_closed,
+                                           pager_watch_ref, pager_watch_put,
+                                           watch) != A20_OK) {
+        p->close_watch = NULL;
+        spin_lock(&watch->lock);
+        watch->pager = NULL;
+        spin_unlock(&watch->lock);
+        pager_watch_put(watch);
+        kfree(p);
+        return NULL;
+    }
+#endif
     return p;
 }
+
+#ifdef CONFIG_VMO_PAGER_RUST
+int a20_pager_vmo_lock_pager(a20_pager_t *pager, uint64_t *flags)
+{
+    if (!pager || !flags) return -A20_ERR_INVALID_ARGUMENT;
+    *flags = spin_lock_irqsave(&pager->lock);
+    return 0;
+}
+void a20_pager_vmo_unlock_pager(a20_pager_t *pager, uint64_t flags)
+{ spin_unlock_irqrestore(&pager->lock, flags); }
+int a20_pager_vmo_lock_vmo(struct vmo *vmo, uint64_t *flags)
+{
+    if (!vmo || !flags) return -A20_ERR_INVALID_ARGUMENT;
+    *flags = spin_lock_irqsave(&vmo->lock);
+    return 0;
+}
+void a20_pager_vmo_unlock_vmo(struct vmo *vmo, uint64_t flags)
+{ spin_unlock_irqrestore(&vmo->lock, flags); }
+uint32_t a20_pager_vmo_type_locked(struct vmo *vmo) { return vmo->type; }
+a20_pager_t *a20_pager_vmo_get_locked(struct vmo *vmo) { return vmo->pager; }
+void a20_pager_vmo_set_locked(struct vmo *vmo, a20_pager_t *pager)
+{ vmo->pager = pager; }
+int a20_pager_vmo_dead_locked(a20_pager_t *pager) { return pager->dead != 0; }
+void a20_pager_vmo_set_dead_locked(a20_pager_t *pager) { pager->dead = 1; }
+uint32_t a20_pager_vmo_count_locked(a20_pager_t *pager) { return pager->vmo_count; }
+uint32_t a20_pager_vmo_capacity_locked(a20_pager_t *pager) { return pager->vmo_cap; }
+struct vmo *a20_pager_vmo_slot_locked(a20_pager_t *pager, uint32_t index)
+{ return pager->vmos[index]; }
+void a20_pager_vmo_set_slot_locked(a20_pager_t *pager, uint32_t index,
+                                   struct vmo *vmo)
+{ pager->vmos[index] = vmo; }
+void a20_pager_vmo_set_count_locked(a20_pager_t *pager, uint32_t count)
+{ pager->vmo_count = count; }
+struct vmo **a20_pager_vmo_publish_list_locked(a20_pager_t *pager,
+                                                struct vmo **list,
+                                                uint32_t cap)
+{
+    struct vmo **old = pager->vmos;
+    pager->vmos = list;
+    pager->vmo_cap = cap;
+    return old;
+}
+struct vmo **a20_pager_vmo_alloc_list(uint32_t cap)
+{
+    if (!cap) return NULL;
+#if SIZE_MAX <= UINT32_MAX
+    if (cap > UINT32_MAX / sizeof(struct vmo *)) return NULL;
+#endif
+    return kmalloc((size_t)cap * sizeof(struct vmo *));
+}
+void a20_pager_vmo_free_list(struct vmo **list) { if (list) kfree(list); }
+void a20_pager_vmo_ref_pager(a20_pager_t *pager) { a20_pager_ref(pager); }
+void a20_pager_vmo_put_pager(a20_pager_t *pager) { a20_pager_put(pager); }
+int a20_pager_vmo_try_ref_vmo(struct vmo *vmo)
+{ return vmo && refcount_inc_not_zero(&vmo->refcount); }
+void a20_pager_vmo_put_vmo(struct vmo *vmo) { vmo_release(vmo); }
+void a20_pager_vmo_wake(struct vmo *vmo)
+{
+    unsigned woke = wait_queue_wake_all(&vmo->faulters, 0, PROC_WAKE_EVENT);
+#ifdef CONFIG_VMO_PAGER_TEST
+    if (woke)
+        kinfo("PAGER_CLOSE_WAKE: waiters=%u\n", woke);
+#else
+    (void)woke;
+#endif
+}
+#endif
 
 static void a20_pager_free(a20_pager_t *p)
 {
     if (!p) return;
+#ifdef CONFIG_VMO_PAGER_RUST
+    a20_pager_close_watch_t *watch = p->close_watch;
+    if (p->requests)
+        a20_channel_ep_clear_peer_close_hook(p->requests);
+    if (watch) {
+        spin_lock(&watch->lock);
+        watch->pager = NULL;
+        spin_unlock(&watch->lock);
+        pager_watch_put(watch);
+    }
+#endif
+    /* Rust pager associations keep this weak registry compact while live;
+     * the allocation outlives the last attached VMO until this final put. */
+    if (p->vmos)
+        kfree(p->vmos);
     if (p->requests)
         a20_channel_ep_release(p->requests);
     kfree(p);
@@ -78,6 +217,9 @@ void a20_pager_put(a20_pager_t *p)
  * dropped by a20_pager_detach_vmo() on VMO destruction. */
 int a20_pager_attach_vmo(a20_pager_t *pager, struct vmo *vmo)
 {
+#ifdef CONFIG_VMO_PAGER_RUST
+    return a20_pager_attach_vmo_rust(pager, vmo);
+#else
     if (!pager || !vmo || vmo->type != VMO_PAGED)
         return -A20_ERR_INVALID_ARGUMENT;
 
@@ -90,12 +232,16 @@ int a20_pager_attach_vmo(a20_pager_t *pager, struct vmo *vmo)
     vmo->pager = pager;
     spin_unlock(&vmo->lock);
     return A20_OK;
+#endif
 }
 
 /* Detach @vmo from its pager; wakes all faulters (they fall back to the
  * zero-fill path via the no-pager branch). */
 void a20_pager_detach_vmo(struct vmo *vmo)
 {
+#ifdef CONFIG_VMO_PAGER_RUST
+    a20_pager_detach_vmo_rust(vmo);
+#else
     if (!vmo) return;
     a20_pager_t *pager = NULL;
     spin_lock(&vmo->lock);
@@ -108,6 +254,7 @@ void a20_pager_detach_vmo(struct vmo *vmo)
         wait_queue_wake_all(&vmo->faulters, 0, PROC_WAKE_EVENT);
         a20_pager_put(pager);
     }
+#endif
 }
 
 /*
@@ -118,12 +265,30 @@ void a20_pager_detach_vmo(struct vmo *vmo)
  */
 int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
 {
-    if (!vmo || !vmo->pager || index >= vmo->page_count)
+    if (!vmo)
         return -A20_ERR_INVALID_ARGUMENT;
 
+    /* The VMO association owns a pager reference. Pin it while holding the
+     * VMO lock so detach/final-handle close cannot free the endpoint below. */
+    spin_lock(&vmo->lock);
+    if (index >= vmo->page_count) {
+        spin_unlock(&vmo->lock);
+        return -A20_ERR_INVALID_ARGUMENT;
+    }
     a20_pager_t *pager = vmo->pager;
-    if (a20_channel_peer_closed(pager->requests))
+    if (!pager) {
+        spin_unlock(&vmo->lock);
+        return -EAGAIN;
+    }
+    a20_pager_ref(pager);
+    spin_unlock(&vmo->lock);
+    if (a20_channel_peer_closed(pager->requests)) {
+#ifdef CONFIG_VMO_PAGER_RUST
+        a20_pager_peer_closed_rust(pager);
+#endif
+        a20_pager_put(pager);
         return -A20_ERR_CANCELED;
+    }
 
     a20_page_req_t req;
     req.kind = write_access ? A20_PAGE_REQ_WRITE : A20_PAGE_REQ_READ;
@@ -142,8 +307,14 @@ int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
     task_t *t = proc_current();
     hinfo.security_label = t ? a20_ht_get_label(task_get_a20_ht(t)) : 0;
 
-    return a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
-                                NULL, A20_MSG_NONBLOCK, 0);
+    int rc = a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
+                                  NULL, A20_MSG_NONBLOCK, 0);
+#ifdef CONFIG_VMO_PAGER_RUST
+    if (rc == -A20_ERR_CANCELED)
+        a20_pager_peer_closed_rust(pager);
+#endif
+    a20_pager_put(pager);
+    return rc;
 }
 
 /*

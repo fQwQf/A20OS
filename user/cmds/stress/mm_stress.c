@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -37,6 +39,39 @@ static volatile int vma_fork_exec_ready;
 static volatile int vma_fork_exec_start;
 static volatile int vma_fork_exec_stop;
 static volatile int vma_fork_exec_failed;
+static char *usercopy_race_base;
+static volatile int usercopy_race_ready;
+static volatile int usercopy_race_start;
+static volatile int usercopy_race_unmaps;
+static volatile int usercopy_race_unmapped;
+static volatile int usercopy_race_resume;
+static volatile int usercopy_race_remapped;
+static volatile int usercopy_race_stress;
+static volatile int usercopy_race_failed;
+
+static int process_vm_race_pin_cpu(unsigned cpu)
+{
+    unsigned char mask[8] = {0};
+    if (cpu >= sizeof(mask) * 8)
+        return -1;
+    mask[cpu / 8] = (unsigned char)(1U << (cpu % 8));
+    for (int attempt = 0; attempt < 10000; attempt++) {
+        if (syscall(SYS_sched_setaffinity, 0, sizeof(mask), mask) == 0)
+            return 0;
+        if (errno != EINVAL && errno != ESRCH)
+            return -1;
+        syscall(SYS_sched_yield);
+    }
+    return -1;
+}
+
+static int process_vm_race_wait_child(pid_t pid)
+{
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -1292,6 +1327,642 @@ static int dontunmap_adjacent_destination_before_source(void)
     return 0;
 }
 
+static int private_anon_mremap_dontunmap_split_failure(unsigned int split_call)
+{
+    const size_t len = 2 * 4096;
+    const size_t region_len = split_call >= 5 ? 8 * len : 4 * len;
+    unsigned char *region = mmap(NULL, region_len, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED)
+        return fail("dontunmap-split-region-mmap");
+
+    /* Keep same-attribute neighbors on both sides so destination insertion
+     * can coalesce VMAs. In the observed merge order, calls 3 and 4 are
+     * already-boundary no-ops in both layouts; calls 1/2 and the source
+     * pre-splits 5/6 are the allocation sites. */
+    size_t source_off = split_call == 4 ? 2 * len : len;
+    size_t target_off = split_call == 4 ? len : 2 * len;
+    if (split_call >= 5) {
+        source_off = 2 * len;
+        target_off = 5 * len;
+    }
+    unsigned char *source = region + source_off;
+    unsigned char *target = region + target_off;
+    for (size_t off = 0; off < region_len; off += 4096)
+        region[off] = (unsigned char)(0x20 + (off / 4096));
+    unsigned char expected0 = source[0];
+    unsigned char expected1 = source[4096];
+    unsigned char expected_last = source[len - 1];
+
+    if (munmap(target, len) < 0) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-target-unmap");
+    }
+    volatile unsigned char rss_stack_warm[8 * 4096];
+    for (size_t i = 0; i < sizeof(rss_stack_warm); i += 4096)
+        rss_stack_warm[i] = (unsigned char)i;
+    (void)rss_stack_warm[0];
+    long stable_rss = self_rss_pages();
+    if (stable_rss < 0) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-rss-warm");
+    }
+    int stable_samples = 0;
+    for (int i = 0; i < 8 && stable_samples < 2; i++) {
+        long sample = self_rss_pages();
+        if (sample < 0) {
+            munmap(region, region_len);
+            return fail("dontunmap-split-rss-warm-repeat");
+        }
+        if (sample == stable_rss)
+            stable_samples++;
+        else {
+            stable_rss = sample;
+            stable_samples = 0;
+        }
+    }
+    if (stable_samples < 2) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-rss-never-stabilized");
+    }
+    long rss_before = self_rss_pages();
+    if (rss_before < 0) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-rss-before");
+    }
+
+    /* The source pre-splits plus destination boundary splits leave source
+     * start/end as no-ops in these layouts. Keep explicit negative controls:
+     * the hook must report would_allocate=0, must not consume the one-shot
+     * injection, and the ordinary transaction must still succeed. */
+    if (split_call == 3 || split_call == 4) {
+        unsigned char *moved = mremap(source, len, len,
+            MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, target);
+        if (moved != target || moved[0] != expected0 ||
+            moved[4096] != expected1 || moved[len - 1] != expected_last ||
+            source[0] != 0 || source[4096] != 0 || source[len - 1] != 0) {
+            if (moved != MAP_FAILED) munmap(moved, len);
+            munmap(region, region_len);
+            return fail("dontunmap-split-noop-source-start");
+        }
+        if (munmap(region, region_len) < 0)
+            return fail("dontunmap-split-noop-cleanup");
+        printf("MM_DONTUNMAP_SPLIT_NOOP: PASS split=%u allocation_not_reached=1\n",
+               split_call);
+        return 0;
+    }
+
+    errno = 0;
+    void *result = mremap(source, len, len,
+        MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, target);
+    if (result != MAP_FAILED || errno != ENOMEM) {
+        if (result != MAP_FAILED) munmap(result, len);
+        munmap(region, region_len);
+        return fail("dontunmap-split-injected-ENOMEM");
+    }
+    if (source[0] != expected0 || source[4096] != expected1 ||
+        source[len - 1] != expected_last) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-source-data");
+    }
+    unsigned char writable0 = (unsigned char)(expected0 ^ 0x5a);
+    unsigned char writable1 = (unsigned char)(expected1 ^ 0xa5);
+    source[0] = writable0;
+    source[4096] = writable1;
+    long rss_after = self_rss_pages();
+    if (rss_after != rss_before) {
+        printf("MM_DONTUNMAP_SPLIT_FAILURE: rss_before=%ld rss_after=%ld split=%u\n",
+               rss_before, rss_after, split_call);
+        munmap(region, region_len);
+        return fail("dontunmap-split-source-rss");
+    }
+
+    void *probe = mmap(target, len, PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (probe != target) {
+        if (probe != MAP_FAILED) munmap(probe, len);
+        munmap(region, region_len);
+        return fail("dontunmap-split-destination-leaked");
+    }
+    if (munmap(probe, len) < 0) {
+        munmap(region, region_len);
+        return fail("dontunmap-split-destination-probe-unmap");
+    }
+
+    printf("MM_DONTUNMAP_SPLIT_RETRY: begin split=%u\n", split_call);
+    unsigned char *moved = mremap(source, len, len,
+        MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, target);
+    if (moved != target || moved[0] != writable0 ||
+        moved[4096] != writable1 || moved[len - 1] != expected_last ||
+        source[0] != 0 || source[4096] != 0 || source[len - 1] != 0) {
+        if (moved != MAP_FAILED) munmap(moved, len);
+        munmap(region, region_len);
+        return fail("dontunmap-split-same-process-retry");
+    }
+    for (size_t off = 0; off < region_len; off += 4096) {
+        if (off >= target_off && off < target_off + len)
+            continue;
+        if (off >= source_off && off < source_off + len)
+            continue;
+        if (region[off] != (unsigned char)(0x20 + (off / 4096))) {
+            munmap(region, region_len);
+            return fail("dontunmap-split-neighbor-data");
+        }
+    }
+    if (munmap(region, region_len) < 0)
+        return fail("dontunmap-split-cleanup");
+    printf("MM_DONTUNMAP_SPLIT_FAILURE: PASS split=%u source_preserved=1 destination_cleared=1 retry=1 rss=%ld\n",
+           split_call, rss_before);
+    return 0;
+}
+
+/* Exercise usercopy's public syscall-visible partial-copy contract before the
+ * copy loop is moved behind the Rust selector.  The first case commits one
+ * 64 KiB file-write chunk, then faults halfway through the next user buffer
+ * chunk; the second makes copy_to_user fault on its second page after copying
+ * the first. */
+static void *usercopy_unmapper(void *arg)
+{
+    const size_t page = 4096;
+    (void)arg;
+    __atomic_store_n(&usercopy_race_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&usercopy_race_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+    char *tail = usercopy_race_base + page;
+    if (munmap(tail, page) < 0) {
+        __atomic_store_n(&usercopy_race_failed, 1, __ATOMIC_RELEASE);
+        return (void *)(intptr_t)1;
+    }
+    __atomic_store_n(&usercopy_race_unmapped, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&usercopy_race_resume, __ATOMIC_ACQUIRE))
+        sched_yield();
+    void *again = mmap(tail, page, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (again == MAP_FAILED || again != tail) {
+        __atomic_store_n(&usercopy_race_failed, 1, __ATOMIC_RELEASE);
+        return (void *)(intptr_t)1;
+    }
+    memset(again, 0, page);
+    __atomic_add_fetch(&usercopy_race_unmaps, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&usercopy_race_remapped, 1, __ATOMIC_RELEASE);
+    /* Keep this restored mapping stable until the main thread proves a full
+     * usercopy succeeds; only then begin the probabilistic stress rounds. */
+    while (!__atomic_load_n(&usercopy_race_stress, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    for (int i = 1; i < 128; i++) {
+        if (munmap(tail, page) < 0) {
+            __atomic_store_n(&usercopy_race_failed, 1, __ATOMIC_RELEASE);
+            return (void *)(intptr_t)1;
+        }
+        /* Keep an observable interval where copy_from_user has to fail or
+         * where the retry path must wait for the next mapping. */
+        sched_yield();
+        again = mmap(tail, page, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (again == MAP_FAILED || again != tail) {
+            __atomic_store_n(&usercopy_race_failed, 1, __ATOMIC_RELEASE);
+            return (void *)(intptr_t)1;
+        }
+        memset(again, i, page);
+        __atomic_add_fetch(&usercopy_race_unmaps, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+/* Exercise the string helpers through syscall entry points: pathname copy
+ * reaches user_strncpy(), and exec argument admission reaches user_strnlen(). */
+static int usercopy_strings_syscall_contract(void)
+{
+    const size_t page = 4096;
+    int fd = open("/dev/null", O_RDONLY);
+    if (fd < 0 || close(fd) < 0)
+        return fail("usercopy-strings-pathname-copy");
+
+    char *path_fault = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (path_fault == MAP_FAILED)
+        return fail("usercopy-strings-path-fault-mmap");
+    memset(path_fault, 'p', 2 * page);
+    if (mprotect(path_fault + page, page, PROT_NONE) < 0) {
+        munmap(path_fault, 2 * page);
+        return fail("usercopy-strings-path-fault-protect");
+    }
+    errno = 0;
+    fd = open(path_fault + page - 8, O_RDONLY);
+    int path_errno = errno;
+    if (fd >= 0) close(fd);
+    if (munmap(path_fault, 2 * page) < 0 || fd >= 0 || path_errno != EFAULT)
+        return fail("usercopy-strings-path-fault-boundary");
+
+    /* A NUL in the last mapped byte must let exec argument length scanning
+     * stop without touching the protected following page. */
+    char *arg = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (arg == MAP_FAILED)
+        return fail("usercopy-strings-page-end-mmap");
+    memset(arg, 'a', page);
+    arg[page - 1] = '\0';
+    if (mprotect(arg + page, page, PROT_NONE) < 0) {
+        munmap(arg, 2 * page);
+        return fail("usercopy-strings-page-end-protect");
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        munmap(arg, 2 * page);
+        return fail("usercopy-strings-page-end-fork");
+    }
+    if (child == 0) {
+        char *argv[] = {arg, NULL};
+        char *envp[] = {NULL};
+        execve("/bin/echo", argv, envp);
+        _exit(100 + (errno & 0x3f));
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0 || munmap(arg, 2 * page) < 0)
+        return fail("usercopy-strings-page-end-exec");
+
+    /* exec_copy_args scans at most 128KiB-1 bytes. Arrange the rejected next
+     * byte at a protected page boundary; E2BIG proves it was not probed. */
+    const size_t arg_limit = 128 * 1024;
+    char *large = mmap(NULL, arg_limit + page, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (large == MAP_FAILED)
+        return fail("usercopy-strings-limit-mmap");
+    memset(large, 'b', arg_limit + page);
+    char *bounded = large + 1;
+    if (mprotect(large + arg_limit, page, PROT_NONE) < 0) {
+        munmap(large, arg_limit + page);
+        return fail("usercopy-strings-limit-protect");
+    }
+    child = fork();
+    if (child < 0) {
+        munmap(large, arg_limit + page);
+        return fail("usercopy-strings-limit-fork");
+    }
+    if (child == 0) {
+        char *argv[] = {bounded, NULL};
+        char *envp[] = {NULL};
+        execve("/bin/echo", argv, envp);
+        _exit(errno == E2BIG ? 42 : 100 + (errno & 0x3f));
+    }
+    status = 0;
+    int wait_ok = waitpid(child, &status, 0) == child;
+    int cleanup_ok = munmap(large, arg_limit + page) == 0;
+    if (!wait_ok || !WIFEXITED(status) || WEXITSTATUS(status) != 42 || !cleanup_ok)
+        return fail("usercopy-strings-limit-no-overread");
+
+    puts("MM_USERCOPY_STRINGS: PASS pathname=1 page_end_nul=1 arg_limit=E2BIG");
+    return 0;
+}
+
+static int usercopy_partial_contract(void)
+{
+    const size_t page = 4096;
+    const size_t io_chunk = 65536;
+    const size_t src_len = io_chunk + 2 * page;
+    char path[96];
+    snprintf(path, sizeof(path), "/tmp/mm-usercopy-contract-%ld", (long)getpid());
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if (fd < 0)
+        return fail("usercopy-contract-open");
+
+    unsigned char *src = mmap(NULL, src_len, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (src == MAP_FAILED) {
+        close(fd); unlink(path);
+        return fail("usercopy-contract-source-mmap");
+    }
+    for (size_t i = 0; i < src_len; i++)
+        src[i] = (unsigned char)(i * 37u + 11u);
+    if (mprotect(src + io_chunk + page, page, PROT_NONE) < 0) {
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-source-protect");
+    }
+    errno = 0;
+    ssize_t written = write(fd, src, src_len);
+    struct stat st;
+    if (written != (ssize_t)io_chunk || fstat(fd, &st) < 0 ||
+        st.st_size != (off_t)io_chunk) {
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-from-user-partial-write");
+    }
+
+    unsigned char *verify = mmap(NULL, io_chunk, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (verify == MAP_FAILED || pread(fd, verify, io_chunk, 0) != (ssize_t)io_chunk) {
+        if (verify != MAP_FAILED) munmap(verify, io_chunk);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-write-prefix-readback");
+    }
+    for (size_t i = 0; i < io_chunk; i++) {
+        if (verify[i] != (unsigned char)(i * 37u + 11u)) {
+            munmap(verify, io_chunk); munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-write-prefix-data");
+        }
+    }
+    munmap(verify, io_chunk);
+
+    if (mprotect(src + io_chunk + page, page, PROT_READ | PROT_WRITE) < 0 ||
+        ftruncate(fd, (off_t)(2 * page)) < 0 ||
+        pwrite(fd, src, 2 * page, 0) != (ssize_t)(2 * page)) {
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-copyto-setup");
+    }
+    unsigned char *dst = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (dst == MAP_FAILED) {
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-destination-mmap");
+    }
+    memset(dst, 0xcc, 2 * page);
+    if (mprotect(dst + page, page, PROT_NONE) < 0) {
+        munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-destination-protect");
+    }
+    errno = 0;
+    ssize_t read_result = pread(fd, dst, 2 * page, 0);
+    if (read_result != -1 || errno != EFAULT) {
+        munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-to-user-partial-status");
+    }
+    for (size_t i = 0; i < page; i++) {
+        if (dst[i] != (unsigned char)(i * 37u + 11u)) {
+            munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-to-user-prefix-data");
+        }
+    }
+    if (mprotect(dst + page, page, PROT_READ | PROT_WRITE) < 0) {
+        munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-destination-unprotect");
+    }
+    for (size_t i = page; i < 2 * page; i++) {
+        if (dst[i] != 0xcc) {
+            munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-to-user-no-later-write");
+        }
+    }
+    errno = 0;
+    read_result = pread(fd, (void *)(uintptr_t)(UINTPTR_MAX - 3), 8, 0);
+    if (read_result != -1 || errno != EFAULT) {
+        munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-range-overflow");
+    }
+
+    /* Untouched anonymous destination: pread must fault it in through
+     * copy_to_user, release the MM lock, resolve, and retry. */
+    unsigned char *demand = mmap(NULL, page, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (demand == MAP_FAILED || pread(fd, demand, page, 0) != (ssize_t)page) {
+        if (demand != MAP_FAILED) munmap(demand, page);
+        munmap(dst, 2 * page); munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-demand-page");
+    }
+    for (size_t i = 0; i < page; i++) {
+        if (demand[i] != (unsigned char)(i * 37u + 11u)) {
+            munmap(demand, page); munmap(dst, 2 * page);
+            munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-demand-page-data");
+        }
+    }
+
+    /* Fork leaves a writable anonymous page COW-shared. The child's pread
+     * takes the copy_to_user write-fault path; the parent's byte pattern must
+     * remain unchanged after the child exits. */
+    unsigned char *cow = mmap(NULL, page, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (cow == MAP_FAILED) {
+        munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-cow-mmap");
+    }
+    memset(cow, 0x55, page);
+    pid_t child = fork();
+    if (child < 0) {
+        munmap(cow, page); munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-cow-fork");
+    }
+    if (child == 0) {
+        if (pread(fd, cow, page, 0) != (ssize_t)page)
+            _exit(1);
+        for (size_t i = 0; i < page; i++)
+            if (cow[i] != (unsigned char)(i * 37u + 11u))
+                _exit(2);
+        _exit(0);
+    }
+    int child_status = 0;
+    if (waitpid(child, &child_status, 0) != child || !WIFEXITED(child_status) ||
+        WEXITSTATUS(child_status) != 0) {
+        munmap(cow, page); munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-cow-child");
+    }
+    for (size_t i = 0; i < page; i++) {
+        if (cow[i] != 0x55) {
+            munmap(cow, page); munmap(demand, page); munmap(dst, 2 * page);
+            munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-cow-parent-isolation");
+        }
+    }
+
+    /* Race real copy_from_user traffic against same-mm unmap/remap of the
+     * second page. A request may finish before unmap or fail EFAULT while the
+     * range is absent; other return values violate the existing contract. */
+    usercopy_race_base = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (usercopy_race_base == MAP_FAILED) {
+        munmap(cow, page); munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-race-mmap");
+    }
+    memset(usercopy_race_base, 0x31, 2 * page);
+    usercopy_race_ready = usercopy_race_start = usercopy_race_unmaps = 0;
+    usercopy_race_unmapped = usercopy_race_resume = 0;
+    usercopy_race_remapped = usercopy_race_stress = usercopy_race_failed = 0;
+    pthread_t unmapper;
+    int thread_error = pthread_create(&unmapper, NULL, usercopy_unmapper, NULL);
+    if (thread_error != 0) {
+        errno = thread_error;
+        munmap(usercopy_race_base, 2 * page); munmap(cow, page);
+        munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-race-thread");
+    }
+    while (!__atomic_load_n(&usercopy_race_ready, __ATOMIC_ACQUIRE))
+        sched_yield();
+    __atomic_store_n(&usercopy_race_start, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&usercopy_race_unmapped, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&usercopy_race_failed, __ATOMIC_ACQUIRE))
+        sched_yield();
+    errno = 0;
+    ssize_t absent_result = pwrite(fd, usercopy_race_base, 2 * page, 0);
+    int absent_errno = errno;
+    __atomic_store_n(&usercopy_race_resume, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&usercopy_race_remapped, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&usercopy_race_failed, __ATOMIC_ACQUIRE))
+        sched_yield();
+    ssize_t restored_result = pwrite(fd, usercopy_race_base, 2 * page, 0);
+    __atomic_store_n(&usercopy_race_stress, 1, __ATOMIC_RELEASE);
+    if (absent_result != -1 || absent_errno != EFAULT ||
+        restored_result != (ssize_t)(2 * page)) {
+        pthread_join(unmapper, NULL);
+        munmap(usercopy_race_base, 2 * page); munmap(cow, page);
+        munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-race-handshake");
+    }
+    unsigned full = 1, fault = 1;
+    for (unsigned i = 0; i < 128; i++) {
+        errno = 0;
+        ssize_t copied = pwrite(fd, usercopy_race_base, 2 * page, 0);
+        if (copied == (ssize_t)(2 * page))
+            full++;
+        else if (copied < 0 && errno == EFAULT)
+            fault++;
+        else {
+            pthread_join(unmapper, NULL);
+            munmap(usercopy_race_base, 2 * page); munmap(cow, page);
+            munmap(demand, page); munmap(dst, 2 * page);
+            munmap(src, src_len); close(fd); unlink(path);
+            return fail("usercopy-contract-race-result");
+        }
+    }
+    void *unmapper_result = NULL;
+    if (pthread_join(unmapper, &unmapper_result) != 0 || unmapper_result != NULL ||
+        usercopy_race_unmaps != 128) {
+        munmap(usercopy_race_base, 2 * page); munmap(cow, page);
+        munmap(demand, page); munmap(dst, 2 * page);
+        munmap(src, src_len); close(fd); unlink(path);
+        return fail("usercopy-contract-race-join");
+    }
+
+    if (munmap(usercopy_race_base, 2 * page) < 0 || munmap(cow, page) < 0 ||
+        munmap(demand, page) < 0 || munmap(dst, 2 * page) < 0 ||
+        munmap(src, src_len) < 0 ||
+        close(fd) < 0 || unlink(path) < 0)
+        return fail("usercopy-contract-cleanup");
+    if (usercopy_strings_syscall_contract() != 0)
+        return 1;
+    printf("MM_USERCOPY_CONTRACT: PASS partial_return=EFAULT copied_prefix=1 range_overflow=EFAULT demand_retry=1 cow_retry=1 cow_isolation=1 concurrent_unmap=128 full=%u fault=%u\n",
+           full, fault);
+    return 0;
+}
+
+static int process_vm_contract(void)
+{
+    const size_t page = 4096;
+    unsigned char *remote = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char *local = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (remote == MAP_FAILED || local == MAP_FAILED)
+        return fail("process-vm-mmap");
+    memset(remote, 0x39, page);
+    memset(local, 0, 2 * page);
+    if (mprotect(remote + page, page, PROT_NONE) < 0)
+        return fail("process-vm-protect");
+
+    /* The mismatched iovec boundaries force the implementation to advance
+     * both sides independently. The inaccessible second remote range should
+     * return the four bytes already transferred across two local iovecs. */
+    struct iovec local_read[2] = {{local, 2}, {local + 2, 6}};
+    struct iovec remote_read[2] = {{remote, 4}, {remote + page, 4}};
+    long n = syscall(SYS_process_vm_readv, getpid(), local_read, 2,
+                     remote_read, 2, 0);
+    if (n != 4 || memcmp(local, remote, 4) != 0)
+        return fail("process-vm-readv-partial-iovec");
+
+    const unsigned char input[8] = {0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28};
+    struct iovec local_write[2] = {{(void *)input, 2}, {(void *)(input + 2), 6}};
+    struct iovec remote_write[2] = {{remote, 4}, {remote + page, 4}};
+    n = syscall(SYS_process_vm_writev, getpid(), local_write, 2,
+                remote_write, 2, 0);
+    if (n != 4 || memcmp(remote, input, 4) != 0)
+        return fail("process-vm-writev-partial-iovec");
+
+    munmap(local, 2 * page);
+    munmap(remote, 2 * page);
+    puts("MM_PROCESS_VM: PASS readv=partial writev=partial iovec=advance");
+    return 0;
+}
+
+static int process_vm_exec_cow_race(void)
+{
+    unsigned char *remote = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (remote == MAP_FAILED)
+        return fail("process-vm-exec-cow-mmap");
+    remote[0] = 0x39;
+
+    int gate[2], ready[2], exec_note[2], release[2];
+    if (pipe(gate) || pipe(ready) || pipe(exec_note) || pipe(release))
+        return fail("process-vm-exec-cow-pipe");
+    unsigned char cpu0[8] = {1};
+    if (syscall(SYS_sched_setaffinity, 0, sizeof(cpu0), cpu0) < 0)
+        return fail("process-vm-exec-cow-pin-parent");
+
+    pid_t child = fork();
+    if (child < 0)
+        return fail("process-vm-exec-cow-fork");
+    if (child == 0) {
+        close(gate[1]);
+        close(ready[0]);
+        close(exec_note[0]);
+        close(release[1]);
+        if (process_vm_race_pin_cpu(1) < 0 || write(ready[1], "R", 1) != 1)
+            _exit(90);
+        char start;
+        if (read(gate[0], &start, 1) != 1)
+            _exit(91);
+        char ready_fd[16], release_fd[16];
+        snprintf(ready_fd, sizeof(ready_fd), "%d", exec_note[1]);
+        snprintf(release_fd, sizeof(release_fd), "%d", release[0]);
+        char *child_argv[] = {"/bin/mm_stress", "--process-vm-exec-cow-child",
+                              ready_fd, release_fd, NULL};
+        execv("/bin/mm_stress", child_argv);
+        _exit(92);
+    }
+
+    close(gate[0]);
+    close(ready[1]);
+    close(exec_note[1]);
+    close(release[0]);
+    char byte;
+    if (read(ready[0], &byte, 1) != 1 || byte != 'R')
+        return fail("process-vm-exec-cow-child-ready");
+    if (write(gate[1], "G", 1) != 1)
+        return fail("process-vm-exec-cow-release-child");
+
+    const unsigned char value = 0xa7;
+    struct iovec local = {(void *)&value, 1};
+    struct iovec remote_iov = {remote, 1};
+    long n = syscall(SYS_process_vm_writev, child, &local, 1,
+                     &remote_iov, 1, 0);
+    if (n != 1 || remote[0] != 0x39)
+        return fail("process-vm-exec-cow-pinned-mm-isolation");
+    if (read(exec_note[0], &byte, 1) != 1 || byte != 'E')
+        return fail("process-vm-exec-cow-exec-notification");
+    if (write(release[1], "X", 1) != 1 ||
+        process_vm_race_wait_child(child) < 0)
+        return fail("process-vm-exec-cow-child-reap");
+
+    close(gate[1]); close(ready[0]); close(exec_note[0]); close(release[1]);
+    if (munmap(remote, 4096) < 0)
+        return fail("process-vm-exec-cow-cleanup");
+    puts("MM_PROCESS_VM_EXEC_COW: PASS pinned_old_mm=1 exec_switch=1 parent_isolation=1");
+    return 0;
+}
+
+static int process_vm_exec_cow_child(int ready_fd, int release_fd)
+{
+    char value;
+    if (write(ready_fd, "E", 1) != 1 || read(release_fd, &value, 1) != 1)
+        return fail("process-vm-exec-cow-child-hold");
+    return 0;
+}
+
 static int private_anon_mremap_dontunmap_rollback(void)
 {
     const size_t len = 2 * 4096;
@@ -1396,6 +2067,7 @@ static int private_anon_mremap_dontunmap_rollback(void)
         return fail("dontunmap-rollback-destination-cleared");
     }
     munmap(probe, len);
+    printf("MM_DONTUNMAP_ROLLBACK_RETRY: begin\n");
     unsigned char *moved = mremap(mem, len, len,
                                  MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
                                  target);
@@ -2300,6 +2972,10 @@ static int huge_page_mprotect(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && strcmp(argv[1], "--process-vm-exec-cow-child") == 0)
+        return process_vm_exec_cow_child(atoi(argv[2]), atoi(argv[3]));
+    if (argc == 2 && strcmp(argv[1], "--process-vm-exec-cow-only") == 0)
+        return process_vm_exec_cow_race();
     if (argc == 2 && strcmp(argv[1], "--dontunmap-only") == 0) {
         printf("MM_DONTUNMAP_ANON: start pages=2\n");
         if (private_anon_mremap_dontunmap() != 0 ||
@@ -2309,6 +2985,15 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "--dontunmap-rollback-only") == 0)
         return private_anon_mremap_dontunmap_rollback() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--usercopy-contract") == 0)
+        return usercopy_partial_contract() == 0 && process_vm_contract() == 0 ? 0 : 1;
+    if (argc == 3 && strcmp(argv[1], "--dontunmap-split-failure") == 0) {
+        unsigned long split_call = strtoul(argv[2], NULL, 10);
+        if (split_call < 1 || split_call > 6)
+            return fail("dontunmap-split-invalid-call");
+        return private_anon_mremap_dontunmap_split_failure(
+            (unsigned int)split_call) == 0 ? 0 : 1;
+    }
     if (argc == 2 && strcmp(argv[1], "--huge-fork-only") == 0) {
         printf("MM_STRESS: huge-fork start\n");
         if (huge_page_fork_cow() != 0)

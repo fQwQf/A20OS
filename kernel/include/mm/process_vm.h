@@ -16,12 +16,16 @@
 struct task_t;
 
 /* Copy @len bytes from @src_task's user address @src to the current task's
- * kernel buffer @dst.  Returns the number copied or a negative errno. */
+ * kernel buffer @dst. The caller keeps a task reference for the duration; the
+ * Rust implementation separately pins/releases the task's MM around the page
+ * walk. Returns the number copied or a negative errno. */
 long process_vm_read_kernel(struct task_t *src_task, const void *src,
                             void *dst, size_t len);
 
 /* Copy @len bytes from the current task's kernel buffer @src to @dst_task's
- * user address @dst.  Returns the number copied or a negative errno. */
+ * user address @dst. The caller keeps a task reference for the duration; the
+ * Rust implementation separately pins/releases the task's MM around the page
+ * walk. Returns the number copied or a negative errno. */
 long process_vm_write_kernel(struct task_t *dst_task, void *dst,
                              const void *src, size_t len);
 

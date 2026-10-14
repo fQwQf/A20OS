@@ -153,18 +153,21 @@ int proc_sched_should_preempt_locked(task_t *t, unsigned cpu);
 unsigned proc_current_owner_memberships_locked(task_t *t);
 unsigned proc_current_slot_count_locked(void);
 unsigned proc_current_lifetime_violations_locked(void);
-unsigned proc_wait_timer_count_locked(void);
-unsigned proc_wait_timer_capacity(void);
-unsigned long proc_wait_timer_full_failures_locked(void);
-unsigned long proc_wait_timer_duplicate_rejections_locked(void);
-unsigned long proc_wait_timer_stale_expirations_locked(void);
-unsigned proc_wait_timer_violations_locked(void);
+typedef struct proc_wait_timer_stats {
+    unsigned entries;
+    unsigned capacity;
+    unsigned long full_failures;
+    unsigned long duplicate_rejections;
+    unsigned long stale_expirations;
+    unsigned violations;
+} proc_wait_timer_stats_t;
+void proc_wait_timer_snapshot(proc_wait_timer_stats_t *stats);
 int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
                                     uint64_t wait_seq);
 void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
-/* Public wrappers that acquire the wait-timer heap lock; the *_locked
- * variants above require the caller to hold it (callers hold the target's
- * park_lock first). */
+/* Both entry points acquire the wait-timer heap lock internally. The
+ * *_locked forms are called with the target park_lock held, preserving the
+ * lock order park_lock -> wait-timer lock. */
 int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq);
 void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq);
 /* Park-state wake transition; requires task->park_lock held (tasklist_lock ->

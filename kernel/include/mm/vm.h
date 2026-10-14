@@ -479,6 +479,10 @@ int  mm_vma_set_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end, int on);
 vaddr_t    mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, mm_seg_t *newv);
 int        mm_split_vma_at(mm_struct_t *mm, vaddr_t addr);
+#ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
+int        mm_split_vma_at_dontunmap_test(mm_struct_t *mm, vaddr_t addr,
+                                           unsigned int split_call);
+#endif
 
 void mm_sync_shared_dirty_for_vnode(struct vnode *vn);
 

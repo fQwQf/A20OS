@@ -22,6 +22,19 @@
 #include "proc/signal.h"
 #include "proc/park.h"
 
+#ifdef CONFIG_VMO_PAGE_RUST
+extern pfn_t a20_vmo_get_page_rust(struct vmo *vmo, uint32_t index);
+extern int a20_vmo_get_page_charged_rust(struct vmo *vmo, uint32_t index,
+                                         struct cg_node *cg, pfn_t *out);
+extern int64_t a20_vmo_resize_rust(struct vmo *vmo, uint64_t new_size);
+extern void a20_vmo_destroy_rust(struct vmo *vmo);
+#endif
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+extern void a20_vmo_ref_rust(struct vmo *vmo);
+extern void a20_vmo_release_rust(struct vmo *vmo);
+extern pfn_t a20_vmo_peek_page_rust(struct vmo *vmo, uint32_t index);
+#endif
+
 struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
 {
     /* page_count is u32; reject rounding and allocation-size overflow before
@@ -63,6 +76,7 @@ struct vmo *vmo_create(uint32_t type, uint64_t size, uint32_t options)
     return vmo;
 }
 
+#ifndef CONFIG_VMO_PAGE_RUST
 static void vmo_destroy(struct vmo *vmo)
 {
     if (!vmo) return;
@@ -97,16 +111,30 @@ static void vmo_destroy(struct vmo *vmo)
         cg_mem_uncharge(vmo->charge_cg, vmo->charged_pages);
     kfree(vmo);
 }
+#endif
 
 void vmo_release(struct vmo *vmo)
 {
-    if (vmo && refcount_dec_and_test(&vmo->refcount))
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+    a20_vmo_release_rust(vmo);
+#else
+    if (vmo && refcount_dec_and_test(&vmo->refcount)) {
+#ifdef CONFIG_VMO_PAGE_RUST
+        a20_vmo_destroy_rust(vmo);
+#else
         vmo_destroy(vmo);
+#endif
+    }
+#endif
 }
 
 void vmo_ref(struct vmo *vmo)
 {
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+    a20_vmo_ref_rust(vmo);
+#else
     if (vmo) refcount_inc(&vmo->refcount);
+#endif
 }
 
 /*
@@ -116,6 +144,9 @@ void vmo_ref(struct vmo *vmo)
  */
 pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
 {
+#ifdef CONFIG_VMO_PAGE_RUST
+    return a20_vmo_get_page_rust(vmo, index);
+#else
     if (!vmo || index >= vmo->page_count) return PFN_NONE;
 
     spin_lock(&vmo->lock);
@@ -163,6 +194,7 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
     a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
     spin_unlock(&vmo->lock);
     return pfn;
+#endif
 }
 
 /*
@@ -172,13 +204,54 @@ pfn_t vmo_get_page(struct vmo *vmo, uint32_t index)
  */
 pfn_t vmo_peek_page(struct vmo *vmo, uint32_t index)
 {
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+    return a20_vmo_peek_page_rust(vmo, index);
+#else
     if (!vmo || index >= vmo->page_count)
         return PFN_NONE;
     spin_lock(&vmo->lock);
     pfn_t pfn = vmo->pages[index];
     spin_unlock(&vmo->lock);
     return pfn;
+#endif
 }
+
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+/* Small C atomic/lock/slot primitives. Rust owns public ref/release/peek
+ * policy and the final-reference dispatch into the page destruction owner. */
+void a20_vmo_lifecycle_ref_inc(struct vmo *vmo)
+{
+    refcount_inc(&vmo->refcount);
+}
+
+int a20_vmo_lifecycle_ref_dec_last(struct vmo *vmo)
+{
+    return refcount_dec_and_test(&vmo->refcount) ? 0 : 1;
+}
+
+int a20_vmo_lifecycle_lock(struct vmo *vmo, uint64_t *flags_out)
+{
+    if (!vmo || !flags_out)
+        return -EINVAL;
+    *flags_out = spin_lock_irqsave(&vmo->lock);
+    return 0;
+}
+
+void a20_vmo_lifecycle_unlock(struct vmo *vmo, uint64_t flags)
+{
+    spin_unlock_irqrestore(&vmo->lock, flags);
+}
+
+uint32_t a20_vmo_lifecycle_page_count_locked(struct vmo *vmo)
+{
+    return vmo->page_count;
+}
+
+pfn_t a20_vmo_lifecycle_slot_locked(struct vmo *vmo, uint32_t index)
+{
+    return vmo->pages[index];
+}
+#endif
 
 /*
  * PAGED-VMO fault: request the page from the user-space pager and park until
@@ -200,19 +273,19 @@ int vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
             spin_unlock(&vmo->lock);
             return 0;
         }
-        a20_pager_t *pager = vmo->pager;
+        int has_pager = vmo->pager != NULL;
         spin_unlock(&vmo->lock);
 
-        if (!pager)
+        if (!has_pager)
             return -EAGAIN;
 
-        if (a20_channel_peer_closed(pager->requests)) {
-            /* Pager disconnected: faulters can never be satisfied. */
-            wait_queue_wake_all(&vmo->faulters, index, PROC_WAKE_EVENT);
-            return -EIO;
-        }
-
         int rq = a20_pager_request_page(vmo, index, write_access);
+        if (rq == -EAGAIN)
+            return -EAGAIN;
+#ifdef CONFIG_VMO_PAGER_RUST
+        if (rq == -A20_ERR_CANCELED)
+            return -EAGAIN; /* the close sweep detached this VMO */
+#endif
         if (rq != A20_OK)
             return -EIO;
 
@@ -232,6 +305,15 @@ int vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return 0;
+        }
+        /* Peer-close detaches the VMO and wakes existing waiters. If it ran
+         * after send but before this waiter linked, do not sleep past that
+         * one-shot wake; the caller falls back to the unpaged zero-fill path. */
+        if (!vmo->pager) {
+            spin_unlock(&vmo->lock);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return -EAGAIN;
         }
         bool linked = wait_queue_link(&vmo->faulters, &entry, token, index);
         spin_unlock(&vmo->lock);
@@ -259,6 +341,9 @@ int vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
 int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
                          struct cg_node *cg, pfn_t *out)
 {
+#ifdef CONFIG_VMO_PAGE_RUST
+    return a20_vmo_get_page_charged_rust(vmo, index, cg, out);
+#else
     if (!vmo || !out || index >= vmo->page_count)
         return -EINVAL;
 
@@ -320,10 +405,93 @@ int vmo_get_page_charged(struct vmo *vmo, uint32_t index,
     spin_unlock(&vmo->lock);
     *out = pfn;
     return 0;
+#endif
 }
+
+#ifdef CONFIG_VMO_PAGE_RUST
+/* Narrow frame/cgroup/VMO-lock primitives for the Rust materialization
+ * transaction. The callback contract requires the VMO lock for `*_locked`
+ * and `publish`; pager calls happen after unlock because they may park. */
+int a20_vmo_page_lock(struct vmo *vmo, uint32_t index, uint64_t *flags_out)
+{
+    if (!vmo || !flags_out)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&vmo->lock);
+    if (index >= vmo->page_count) {
+        spin_unlock_irqrestore(&vmo->lock, flags);
+        return -EINVAL;
+    }
+    *flags_out = flags;
+    return 0;
+}
+
+void a20_vmo_page_unlock(struct vmo *vmo, uint64_t flags)
+{
+    spin_unlock_irqrestore(&vmo->lock, flags);
+}
+
+pfn_t a20_vmo_page_slot_locked(struct vmo *vmo, uint32_t index)
+{
+    return vmo->pages[index];
+}
+
+int a20_vmo_page_is_paged_locked(struct vmo *vmo)
+{
+    return vmo->type == VMO_PAGED && vmo->pager != NULL;
+}
+
+int a20_vmo_page_paged_fault(struct vmo *vmo, uint32_t index, int write_access)
+{
+    return vmo_paged_fault(vmo, index, write_access);
+}
+
+int a20_vmo_page_charge(struct cg_node *cg)
+{
+    return cg_mem_charge(cg, 1);
+}
+
+void a20_vmo_page_uncharge(struct cg_node *cg)
+{
+    cg_mem_uncharge(cg, 1);
+}
+
+pfn_t a20_vmo_page_alloc(void)
+{
+    return pfa_alloc_page();
+}
+
+void a20_vmo_page_free(pfn_t pfn)
+{
+    pfa_free_page(pfn);
+}
+
+void a20_vmo_page_zero(pfn_t pfn)
+{
+    void *va = pfn_to_virt(pfn);
+    uint32_t *probe = (uint32_t *)va;
+    if (*probe != 0 || probe[1] != 0)
+        a20_objstat_add(&g_a20_objstats.vmo_dirty_frames, 1);
+    memset(va, 0, PAGE_SIZE);
+}
+
+void a20_vmo_page_publish_locked(struct vmo *vmo, uint32_t index,
+                                 pfn_t pfn, struct cg_node *cg)
+{
+    vmo->pages[index] = pfn;
+    vmo->phys_size += PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
+    if (cg) {
+        vmo->charge_cg = cg;
+        vmo->charged_pages++;
+    }
+}
+#endif
 
 int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 {
+#ifdef CONFIG_VMO_PAGE_RUST
+    return a20_vmo_resize_rust(vmo, new_size);
+#else
     if (!vmo) return -1;
 
     uint32_t new_np = (uint32_t)((new_size + PAGE_SIZE - 1) / PAGE_SIZE);
@@ -375,4 +543,166 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
 
     kfree(old);
     return 0;
+#endif
 }
+
+#ifdef CONFIG_VMO_PAGE_RUST
+int a20_vmo_resize_lock(struct vmo *vmo, uint64_t *flags_out)
+{
+    if (!vmo || !flags_out)
+        return -EINVAL;
+    *flags_out = spin_lock_irqsave(&vmo->lock);
+    return 0;
+}
+
+void a20_vmo_resize_unlock(struct vmo *vmo, uint64_t flags)
+{
+    spin_unlock_irqrestore(&vmo->lock, flags);
+}
+
+uint32_t a20_vmo_resize_page_count(struct vmo *vmo)
+{
+    return vmo->page_count;
+}
+
+pfn_t a20_vmo_resize_slot(struct vmo *vmo, uint32_t index)
+{
+    return vmo->pages[index];
+}
+
+void *a20_vmo_resize_alloc_table(uint32_t count)
+{
+    size_t bytes = (size_t)count * sizeof(pfn_t);
+    if (!count || bytes / sizeof(pfn_t) != count)
+        return NULL;
+    return kmalloc(bytes);
+}
+
+void a20_vmo_resize_free_table(void *table)
+{
+    kfree(table);
+}
+
+void a20_vmo_resize_table_set(void *table, uint32_t index, pfn_t pfn)
+{
+    ((pfn_t *)table)[index] = pfn;
+}
+
+void *a20_vmo_resize_publish(struct vmo *vmo, void *table,
+                             uint32_t count, uint64_t size)
+{
+    if (!table) {
+        vmo->page_count = count;
+        vmo->size = size;
+        return NULL;
+    }
+    pfn_t *old = vmo->pages;
+    vmo->pages = table;
+    vmo->page_count = count;
+    vmo->size = size;
+    return old;
+}
+
+void a20_vmo_resize_flush_tlb(void)
+{
+    arch_tlb_flush();
+}
+
+void a20_vmo_resize_release_page(struct vmo *vmo, uint32_t index)
+{
+    pfn_t pfn = vmo->pages[index];
+    if (pfn == PFN_NONE)
+        return;
+    if (!pfn_valid(pfn))
+        panic("vmo_resize: vmo %p page %u has out-of-range pfn %llu",
+              (void *)vmo, index, (unsigned long long)pfn);
+    if (vmo->phys_size < PAGE_SIZE)
+        panic("vmo_resize: vmo %p phys_size underflow at page %u",
+              (void *)vmo, index);
+    pfa_free_page(pfn);
+    vmo->pages[index] = PFN_NONE;
+    vmo->phys_size -= PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, -1);
+    if (vmo->charge_cg && vmo->charged_pages) {
+        cg_mem_uncharge(vmo->charge_cg, 1);
+        vmo->charged_pages--;
+        if (vmo->charged_pages == 0)
+            vmo->charge_cg = NULL;
+    }
+}
+
+void a20_vmo_resize_finish_shrink(struct vmo *vmo)
+{
+    if (vmo->charge_cg && vmo->charged_pages == 0)
+        vmo->charge_cg = NULL;
+}
+
+void a20_vmo_destroy_notify(struct vmo *vmo)
+{
+    a20_eventq_on_object_destroy(vmo, A20_OBJ_MEMORY);
+}
+
+void a20_vmo_destroy_detach_pager(struct vmo *vmo)
+{
+    if (vmo->pager)
+        a20_pager_detach_vmo(vmo);
+}
+
+uint32_t a20_vmo_destroy_page_count(struct vmo *vmo)
+{
+    return vmo->page_count;
+}
+
+pfn_t a20_vmo_destroy_page(struct vmo *vmo, uint32_t index)
+{
+    return vmo->pages ? vmo->pages[index] : PFN_NONE;
+}
+
+uint64_t a20_vmo_destroy_phys_size(struct vmo *vmo)
+{
+    return vmo->phys_size;
+}
+
+uint64_t a20_vmo_destroy_charged_pages(struct vmo *vmo)
+{
+    return vmo->charged_pages;
+}
+
+void a20_vmo_destroy_stats(uint64_t phys_size)
+{
+    a20_objstat_add(&g_a20_objstats.vmos, -1);
+    a20_objstat_add(&g_a20_objstats.vmo_pages,
+                    -(int64_t)(phys_size / PAGE_SIZE));
+}
+
+void a20_vmo_destroy_flush_tlb(void)
+{
+    arch_tlb_flush();
+}
+
+void a20_vmo_destroy_release_page(struct vmo *vmo, uint32_t index, pfn_t pfn)
+{
+    if (!pfn_valid(pfn))
+        panic("vmo_destroy: vmo %p page %u/%u has out-of-range "
+              "pfn %llu (pages array corrupted?)",
+              (void *)vmo, index, vmo->page_count,
+              (unsigned long long)pfn);
+    pfa_free_page(pfn);
+}
+
+void a20_vmo_destroy_uncharge(struct vmo *vmo, uint64_t pages)
+{
+    if (vmo->charge_cg)
+        cg_mem_uncharge(vmo->charge_cg, pages);
+}
+
+void a20_vmo_destroy_free_pages(struct vmo *vmo)
+{
+    kfree(vmo->pages);
+}
+
+void a20_vmo_destroy_free_object(struct vmo *vmo)
+{
+    kfree(vmo);
+}
+#endif

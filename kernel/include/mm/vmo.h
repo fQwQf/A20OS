@@ -79,4 +79,67 @@ int         vmo_get_page_charged(struct vmo *vmo, uint32_t index,
  * -EINTR (killed), or -EIO (pager request peer closed). */
 int         vmo_paged_fault(struct vmo *vmo, uint32_t index, int write_access);
 
+#ifdef CONFIG_VMO_PAGE_RUST
+/* Rust-owned page materialization transaction; these C functions are narrow
+ * lock/frame/cgroup/pager primitives, not a second transaction wrapper. */
+pfn_t       a20_vmo_get_page_rust(struct vmo *vmo, uint32_t index);
+int         a20_vmo_get_page_charged_rust(struct vmo *vmo, uint32_t index,
+                                          struct cg_node *cg, pfn_t *out);
+int64_t     a20_vmo_resize_rust(struct vmo *vmo, uint64_t new_size);
+void        a20_vmo_destroy_rust(struct vmo *vmo);
+int         a20_vmo_page_lock(struct vmo *vmo, uint32_t index,
+                              uint64_t *flags_out);
+void        a20_vmo_page_unlock(struct vmo *vmo, uint64_t flags);
+pfn_t       a20_vmo_page_slot_locked(struct vmo *vmo, uint32_t index);
+int         a20_vmo_page_is_paged_locked(struct vmo *vmo);
+int         a20_vmo_page_paged_fault(struct vmo *vmo, uint32_t index,
+                                     int write_access);
+int         a20_vmo_page_charge(struct cg_node *cg);
+void        a20_vmo_page_uncharge(struct cg_node *cg);
+pfn_t       a20_vmo_page_alloc(void);
+void        a20_vmo_page_free(pfn_t pfn);
+void        a20_vmo_page_zero(pfn_t pfn);
+void        a20_vmo_page_publish_locked(struct vmo *vmo, uint32_t index,
+                                        pfn_t pfn, struct cg_node *cg);
+int         a20_vmo_resize_lock(struct vmo *vmo, uint64_t *flags_out);
+void        a20_vmo_resize_unlock(struct vmo *vmo, uint64_t flags);
+uint32_t    a20_vmo_resize_page_count(struct vmo *vmo);
+pfn_t       a20_vmo_resize_slot(struct vmo *vmo, uint32_t index);
+void       *a20_vmo_resize_alloc_table(uint32_t count);
+void        a20_vmo_resize_free_table(void *table);
+void        a20_vmo_resize_table_set(void *table, uint32_t index, pfn_t pfn);
+void       *a20_vmo_resize_publish(struct vmo *vmo, void *table,
+                                   uint32_t count, uint64_t size);
+void        a20_vmo_resize_flush_tlb(void);
+void        a20_vmo_resize_release_page(struct vmo *vmo, uint32_t index);
+void        a20_vmo_resize_finish_shrink(struct vmo *vmo);
+void        a20_vmo_destroy_notify(struct vmo *vmo);
+void        a20_vmo_destroy_detach_pager(struct vmo *vmo);
+uint32_t    a20_vmo_destroy_page_count(struct vmo *vmo);
+pfn_t       a20_vmo_destroy_page(struct vmo *vmo, uint32_t index);
+uint64_t    a20_vmo_destroy_phys_size(struct vmo *vmo);
+uint64_t    a20_vmo_destroy_charged_pages(struct vmo *vmo);
+void        a20_vmo_destroy_stats(uint64_t phys_size);
+void        a20_vmo_destroy_flush_tlb(void);
+void        a20_vmo_destroy_release_page(struct vmo *vmo, uint32_t index,
+                                         pfn_t pfn);
+void        a20_vmo_destroy_uncharge(struct vmo *vmo, uint64_t pages);
+void        a20_vmo_destroy_free_pages(struct vmo *vmo);
+void        a20_vmo_destroy_free_object(struct vmo *vmo);
+#endif
+
+#ifdef CONFIG_VMO_LIFECYCLE_RUST
+/* Rust owns public VMO ref/release/peek decisions; these C functions expose
+ * only atomic refcount and lock-protected field access. */
+void        a20_vmo_ref_rust(struct vmo *vmo);
+void        a20_vmo_release_rust(struct vmo *vmo);
+pfn_t       a20_vmo_peek_page_rust(struct vmo *vmo, uint32_t index);
+void        a20_vmo_lifecycle_ref_inc(struct vmo *vmo);
+int         a20_vmo_lifecycle_ref_dec_last(struct vmo *vmo);
+int         a20_vmo_lifecycle_lock(struct vmo *vmo, uint64_t *flags_out);
+void        a20_vmo_lifecycle_unlock(struct vmo *vmo, uint64_t flags);
+uint32_t    a20_vmo_lifecycle_page_count_locked(struct vmo *vmo);
+pfn_t       a20_vmo_lifecycle_slot_locked(struct vmo *vmo, uint32_t index);
+#endif
+
 #endif /* _MM_VMO_H */

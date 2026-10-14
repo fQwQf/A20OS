@@ -230,6 +230,12 @@ typedef struct a20_channel_ep {
     uint32_t                msg_count;
     uint32_t                msg_cap;
     uint32_t                total_data;
+    /* Optional owner notification for peer shutdown. Registration is
+     * serialized by g_ch_lock; callbacks run after channel locks release. */
+    void                  (*peer_close_hook)(void *ctx);
+    void                  (*peer_close_ref)(void *ctx);
+    void                  (*peer_close_put)(void *ctx);
+    void                   *peer_close_ctx;
 } a20_channel_ep_t;
 
 typedef struct a20_watch_entry {
@@ -305,6 +311,8 @@ typedef struct a20_pager {
     struct vmo           **vmos;       /* attached PAGED VMOs (weak)       */
     uint32_t              vmo_count;
     uint32_t              vmo_cap;
+    uint32_t              dead;        /* peer closure is terminal         */
+    void                 *close_watch; /* private channel notification ref  */
 } a20_pager_t;
 
 /* Monitor: perf-style software-event counter object.
@@ -416,6 +424,37 @@ int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
  * queued or the page is already materialized.  Called under the fault path. */
 int  a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access);
 
+#ifdef CONFIG_VMO_PAGER_RUST
+int  a20_pager_attach_vmo_rust(a20_pager_t *pager, struct vmo *vmo);
+void a20_pager_detach_vmo_rust(struct vmo *vmo);
+void a20_pager_peer_closed_rust(a20_pager_t *pager);
+int  a20_pager_vmo_lock_pager(a20_pager_t *pager, uint64_t *flags);
+void a20_pager_vmo_unlock_pager(a20_pager_t *pager, uint64_t flags);
+int  a20_pager_vmo_lock_vmo(struct vmo *vmo, uint64_t *flags);
+void a20_pager_vmo_unlock_vmo(struct vmo *vmo, uint64_t flags);
+uint32_t a20_pager_vmo_type_locked(struct vmo *vmo);
+a20_pager_t *a20_pager_vmo_get_locked(struct vmo *vmo);
+void a20_pager_vmo_set_locked(struct vmo *vmo, a20_pager_t *pager);
+int  a20_pager_vmo_dead_locked(a20_pager_t *pager);
+void a20_pager_vmo_set_dead_locked(a20_pager_t *pager);
+uint32_t a20_pager_vmo_count_locked(a20_pager_t *pager);
+uint32_t a20_pager_vmo_capacity_locked(a20_pager_t *pager);
+struct vmo *a20_pager_vmo_slot_locked(a20_pager_t *pager, uint32_t index);
+void a20_pager_vmo_set_slot_locked(a20_pager_t *pager, uint32_t index,
+                                   struct vmo *vmo);
+void a20_pager_vmo_set_count_locked(a20_pager_t *pager, uint32_t count);
+struct vmo **a20_pager_vmo_publish_list_locked(a20_pager_t *pager,
+                                                struct vmo **list,
+                                                uint32_t cap);
+struct vmo **a20_pager_vmo_alloc_list(uint32_t cap);
+void a20_pager_vmo_free_list(struct vmo **list);
+void a20_pager_vmo_ref_pager(a20_pager_t *pager);
+void a20_pager_vmo_put_pager(a20_pager_t *pager);
+int  a20_pager_vmo_try_ref_vmo(struct vmo *vmo);
+void a20_pager_vmo_put_vmo(struct vmo *vmo);
+void a20_pager_vmo_wake(struct vmo *vmo);
+#endif
+
 /* ---- Monitor core (kernel/ipc/a20_monitor.c) ---- */
 
 a20_monitor_t *a20_monitor_create(uint32_t kind, uint32_t flags,
@@ -434,5 +473,10 @@ void    a20_monitor_tick(void);   /* scheduler/fault tick hook (periodic notify)
 int  a20_channel_readable(a20_channel_ep_t *ep);   /* msg pending or peer closed */
 int  a20_channel_writable(a20_channel_ep_t *ep);   /* enqueue would not block */
 int  a20_channel_peer_closed(a20_channel_ep_t *ep);
+int  a20_channel_ep_set_peer_close_hook(a20_channel_ep_t *ep,
+                                         void (*hook)(void *),
+                                         void (*ctx_ref)(void *),
+                                         void (*ctx_put)(void *), void *ctx);
+void a20_channel_ep_clear_peer_close_hook(a20_channel_ep_t *ep);
 
 #endif /* _IPC_IPC_H */

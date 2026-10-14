@@ -35,6 +35,10 @@ for impl in c rust; do
     "$rustc_bin" --edition=2021 --crate-type lib --emit=obj \
       --target x86_64-unknown-linux-gnu -C panic=abort -C opt-level=2 \
       "$repo_root/kernel/abi/native/handle_slot.rs" -o "$build_root/rust/handle_slot.o"
+    "$rustc_bin" --edition=2021 --crate-type lib --emit=obj \
+      --target x86_64-unknown-linux-gnu -C panic=abort -C opt-level=2 \
+      "$repo_root/kernel/abi/native/handle_table_state.rs" \
+      -o "$build_root/rust/handle_table_state.o"
   fi
   "$cc_bin" "${cflags[@]}" -c "$repo_root/kernel/abi/native/handle_table.c" \
     -o "$build_root/c/handle_table-$impl.o"
@@ -42,7 +46,7 @@ for impl in c rust; do
     -o "$build_root/c/host-test.o"
   link_inputs=("$build_root/c/host-test.o" "$build_root/c/handle_table-$impl.o")
   if [[ "$impl" == rust ]]; then
-    link_inputs+=("$build_root/rust/handle_slot.o")
+    link_inputs+=("$build_root/rust/handle_slot.o" "$build_root/rust/handle_table_state.o")
   fi
   "$cc_bin" -pthread -fsanitize=${HOST_SANITIZERS:-address,undefined} \
     -Wl,--gc-sections "${link_inputs[@]}" -o "$build_root/c/test-$impl"

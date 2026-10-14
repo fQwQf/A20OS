@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 struct task_t;
+void proc_park_wait_state_init(struct task_t *task);
 
 typedef enum {
     PROC_PARK_IDLE = 0,

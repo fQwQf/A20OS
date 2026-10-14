@@ -362,6 +362,209 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertIn('--native-rust-peer "$(NATIVE_RUST_PEER)"', dev_recipe)
             self.assertIn('--rust-peer-binary "$(RUST_USER_PEER_BIN)"', dev_recipe)
 
+    def test_native_rust_service_selector_transitions_and_peer_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            native = out / "native-tool"
+            peer = out / "rust-idl-peer-rv"
+            service = out / "rust-idl-echod-rv"
+            fixture = out / "native-rust-idl-service-rv"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                def value(name):
+                    return next(x.split("=", 1)[1] for x in args
+                                if x.startswith(name + "="))
+                native.write_text("native")
+                native.chmod(0o755)
+                if value("NATIVE_RUST_PEER") == "1":
+                    peer.write_text("peer")
+                    peer.chmod(0o755)
+                if value("NATIVE_RUST_IDL_SERVICE") == "1":
+                    for path in (service, fixture):
+                        path.write_text("service")
+                        path.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0",
+                    rust_peer_binary=str(peer), rust_service_binary=str(service),
+                    rust_service_test_binary=str(fixture),
+                )
+                for peer_on, service_on in (("0", "0"), ("1", "1"),
+                                            ("1", "0"), ("0", "0")):
+                    args.native_rust_peer = peer_on
+                    args.native_rust_idl_service = service_on
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    self.assertEqual(service.exists(), service_on == "1")
+                    self.assertEqual(fixture.exists(), service_on == "1")
+                    self.assertEqual(peer.exists(), peer_on == "1")
+                # A directly-built service can appear without changing the
+                # stamp. A disabled dev build must evict both image inputs.
+                for path in (service, fixture):
+                    path.write_text("direct target")
+                    path.chmod(0o755)
+                self.assertEqual(stamps.cmd_native(args), 0)
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 5)
+            self.assertEqual([
+                (next(x.split("=", 1)[1] for x in call if x.startswith("NATIVE_RUST_PEER=")),
+                 next(x.split("=", 1)[1] for x in call if x.startswith("NATIVE_RUST_IDL_SERVICE=")))
+                for call in calls
+            ], [("0", "0"), ("1", "1"), ("1", "0"), ("0", "0"), ("0", "0")])
+            self.assertTrue(all(call[-1] == "native-programs" for call in calls))
+            self.assertFalse(service.exists())
+            self.assertFalse(fixture.exists())
+            self.assertIn("NATIVE_RUST_IDL_SERVICE=0", stamp.read_text())
+            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-idl-service "$(NATIVE_RUST_IDL_SERVICE)"', recipe)
+            self.assertIn('--rust-service-binary "$(RUST_USER_SERVICE_BIN)"', recipe)
+            self.assertIn('--rust-service-test-binary "$(RUST_USER_SERVICE_TEST_BIN)"', recipe)
+
+    def test_native_rust_echod_runtime_selector_restores_c_and_cleans_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime = out / "svc-echod-rv"
+            rust = out / "rust-idl-echod-rv"
+            c_reference = out / "svc-echod-c-rv"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                def value(name):
+                    return next(x.split("=", 1)[1] for x in args
+                                if x.startswith(name + "="))
+                runtime.write_text("C echod")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                if value("NATIVE_RUST_ECHOD") == "1":
+                    rust.write_text("Rust echod")
+                    rust.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0",
+                    native_rust_echod="0", native_rust_svcmgr="0",
+                    rust_peer_binary="", rust_service_binary=str(rust),
+                    rust_service_test_binary="", rust_echod_binary=str(rust),
+                    rust_svcmgr_binary="",
+                )
+                for enabled in ("0", "1", "0"):
+                    args.native_rust_echod = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    if enabled == "1":
+                        self.assertEqual(runtime.read_text(), "Rust echod")
+                        self.assertEqual(c_reference.read_text(), "C echod")
+                        self.assertTrue(rust.exists())
+                    else:
+                        self.assertEqual(runtime.read_text(), "C echod")
+                        self.assertFalse(c_reference.exists())
+                        self.assertFalse(rust.exists())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([
+                next(x.split("=", 1)[1] for x in call if x.startswith("NATIVE_RUST_ECHOD="))
+                for call in calls
+            ], ["0", "1", "0"])
+            self.assertTrue(all(call[-1] == "native-programs" for call in calls))
+            self.assertIn("NATIVE_RUST_ECHOD=0", stamp.read_text())
+            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-echod "$(NATIVE_RUST_ECHOD)"', recipe)
+            self.assertIn('--rust-echod-binary "$(RUST_USER_SERVICE_BIN)"', recipe)
+
+    def test_native_rust_rtcd_runtime_selector_restores_c_and_cleans_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime = out / "rtcd-rv.a20drv"
+            rust = out / "rtcd-rust-rv.a20drv"
+            c_reference = out / "rtcd-c-rv.a20drv"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                def value(name):
+                    return next(x.split("=", 1)[1] for x in args
+                                if x.startswith(name + "="))
+                runtime.write_text("C rtcd")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                if value("NATIVE_RUST_RTCD") == "1":
+                    rust.write_text("Rust rtcd")
+                    rust.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0",
+                    native_rust_echod="0", native_rust_svcmgr="0",
+                    native_rust_rtcd="0", rust_peer_binary="",
+                    rust_service_binary="", rust_service_test_binary="",
+                    rust_echod_binary="", rust_svcmgr_binary="",
+                    rust_rtcd_binary=str(rust),
+                )
+                for enabled in ("0", "1", "0"):
+                    args.native_rust_rtcd = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    if enabled == "1":
+                        self.assertEqual(runtime.read_text(), "Rust rtcd")
+                        self.assertEqual(c_reference.read_text(), "C rtcd")
+                        self.assertTrue(rust.exists())
+                    else:
+                        self.assertEqual(runtime.read_text(), "C rtcd")
+                        self.assertFalse(c_reference.exists())
+                        self.assertFalse(rust.exists())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([
+                next(x.split("=", 1)[1] for x in call if x.startswith("NATIVE_RUST_RTCD="))
+                for call in calls
+            ], ["0", "1", "0"])
+            self.assertTrue(all(call[-1] == "native-programs" for call in calls))
+            self.assertIn("NATIVE_RUST_RTCD=0", stamp.read_text())
+            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-rtcd "$(NATIVE_RUST_RTCD)"', recipe)
+            self.assertIn('--rust-rtcd-binary "$(RUST_USER_RTCD_BIN)"', recipe)
+
     def test_native_rust_peer_binary_cleanup_is_confined_to_user_build_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -653,6 +856,134 @@ class CleanSafetyTests(unittest.TestCase):
                 stamps.REPO = old_repo
             self.assertEqual(marker.read_text(), "important")
             self.assertTrue(link.is_symlink())
+
+
+class NativeRustServiceSelectorTests(unittest.TestCase):
+    def test_svcmgr_selector_restores_c_and_removes_inactive_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime = out / "svcmgr-rv"
+            rust = out / "svcmgr-rust-rv"
+            c_reference = out / "svcmgr-c-rv"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+
+                def value(name):
+                    return next(x.split("=", 1)[1] for x in args
+                                if x.startswith(name + "="))
+
+                runtime.write_text("C svcmgr")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                if value("NATIVE_RUST_SVCMGR") == "1":
+                    rust.write_text("Rust svcmgr")
+                    rust.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out),
+                    arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0",
+                    native_rust_echod="0", native_rust_svcmgr="0",
+                    rust_peer_binary="", rust_service_binary="",
+                    rust_service_test_binary="", rust_echod_binary="",
+                    rust_svcmgr_binary=str(rust),
+                )
+                for enabled in ("0", "1", "0"):
+                    args.native_rust_svcmgr = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    if enabled == "1":
+                        self.assertEqual(runtime.read_text(), "Rust svcmgr")
+                        self.assertEqual(c_reference.read_text(), "C svcmgr")
+                        self.assertTrue(rust.exists())
+                    else:
+                        self.assertEqual(runtime.read_text(), "C svcmgr")
+                        self.assertFalse(c_reference.exists())
+                        self.assertFalse(rust.exists())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([
+                next(x.split("=", 1)[1] for x in call
+                     if x.startswith("NATIVE_RUST_SVCMGR="))
+                for call in calls
+            ], ["0", "1", "0"])
+            self.assertTrue(all(call[-1] == "native-programs" for call in calls))
+            self.assertIn("NATIVE_RUST_SVCMGR=0", stamp.read_text())
+            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-svcmgr "$(NATIVE_RUST_SVCMGR)"', recipe)
+            self.assertIn('--rust-svcmgr-binary "$(RUST_USER_SVCMGR_BIN)"', recipe)
+
+
+    def test_ufsd_selector_restores_c_and_removes_inactive_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime, rust, c_reference = (out / "ufsd-rv", out / "ufsd-rust-rv", out / "ufsd-c-rv")
+            native, stamp = out / "native-tool", out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                selected = next(x.split("=", 1)[1] for x in args
+                                if x.startswith("NATIVE_RUST_UFSD="))
+                runtime.write_text("C ufsd")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                if selected == "1":
+                    rust.write_text("Rust ufsd")
+                    rust.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp), binaries=str(native),
+                    user_build_dir=str(out), arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0", native_rust_echod="0",
+                    native_rust_svcmgr="0", native_rust_rtcd="0", native_rust_ufsd="0",
+                    rust_peer_binary="", rust_service_binary="", rust_service_test_binary="",
+                    rust_echod_binary="", rust_svcmgr_binary="", rust_rtcd_binary="",
+                    rust_ufsd_binary=str(rust))
+                for enabled in ("0", "1", "0"):
+                    args.native_rust_ufsd = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    if enabled == "1":
+                        self.assertEqual(runtime.read_text(), "Rust ufsd")
+                        self.assertEqual(c_reference.read_text(), "C ufsd")
+                        self.assertTrue(rust.exists())
+                    else:
+                        self.assertEqual(runtime.read_text(), "C ufsd")
+                        self.assertFalse(c_reference.exists())
+                        self.assertFalse(rust.exists())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([next(x.split("=", 1)[1] for x in call
+                                   if x.startswith("NATIVE_RUST_UFSD=")) for call in calls],
+                             ["0", "1", "0"])
+            self.assertIn("NATIVE_RUST_UFSD=0", stamp.read_text())
+            recipe = (STAMPS.parent / "targets-dev.mk").read_text()
+            self.assertIn('--native-rust-ufsd "$(NATIVE_RUST_UFSD)"', recipe)
+            self.assertIn('--rust-ufsd-binary "$(RUST_USER_UFSD_BIN)"', recipe)
 
 
 if __name__ == "__main__":

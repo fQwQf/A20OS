@@ -10,8 +10,11 @@
 //! after the state transition.
 
 use core::ffi::c_void;
-use core::mem::{align_of, offset_of, size_of};
+use core::mem::align_of;
 use core::ptr;
+#[path = "handle_entry.rs"]
+mod handle_entry;
+use handle_entry::Entry;
 
 const FREE: u8 = 0;
 const ACTIVE: u8 = 1;
@@ -26,36 +29,6 @@ const ERR_ACCESS: i64 = -7;
 const ERR_EXPIRED: i64 = -25;
 
 type Rights = u64;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Entry {
-    object: *mut c_void,
-    object_type: u16,
-    pad: u16,
-    rights: Rights,
-    expiry_tick: u64,
-    remaining_ops: u32,
-    temporal_flags: u32,
-    security_label: u8,
-    state: u8,
-    pad2: [u8; 6],
-}
-
-const _: () = {
-    assert!(size_of::<Entry>() == if usize::BITS == 64 { 48 } else { 40 });
-    assert!(offset_of!(Entry, object) == 0);
-    assert!(offset_of!(Entry, object_type) == size_of::<usize>());
-    assert!(offset_of!(Entry, rights) == if usize::BITS == 64 { 16 } else { 8 });
-    assert!(offset_of!(Entry, expiry_tick) == if usize::BITS == 64 { 24 } else { 16 });
-    assert!(offset_of!(Entry, remaining_ops) == if usize::BITS == 64 { 32 } else { 24 });
-    assert!(offset_of!(Entry, temporal_flags) == if usize::BITS == 64 { 36 } else { 28 });
-    assert!(offset_of!(Entry, security_label) == if usize::BITS == 64 { 40 } else { 32 });
-    #[cfg(target_arch = "arm")]
-    assert!(align_of::<Entry>() == 8);
-    #[cfg(not(target_arch = "arm"))]
-    assert!(align_of::<Entry>() == if usize::BITS == 64 { 8 } else { 8 });
-};
 
 #[inline]
 unsafe fn entry_mut<'a>(entry: *mut Entry) -> Option<&'a mut Entry> {

@@ -290,6 +290,23 @@ smoke-procfs-stress:
 smoke-mm-stress:
 	$(PYTHON) tools/smoke.py smoke-mm-stress
 
+smoke-mm-vma-region-rust:
+	$(PYTHON) tools/smoke.py smoke-mm-vma-region-rust
+
+smoke-mm-vma-region-split-fail-rust:
+	$(PYTHON) tools/smoke.py smoke-mm-vma-region-split-fail-rust
+
+# Compare C and Rust usercopy ownership with identical partial-copy, pathname,
+# and exec-argument string boundary checks.
+smoke-mm-usercopy-contract-c:
+	$(PYTHON) tools/smoke.py smoke-mm-usercopy-contract-c
+
+smoke-mm-usercopy-contract-rust:
+	$(PYTHON) tools/smoke.py smoke-mm-usercopy-contract-rust
+
+smoke-mm-process-vm-exec-cow-rust:
+	$(PYTHON) tools/smoke.py smoke-mm-process-vm-exec-cow-rust
+
 # Focused real page-table/fault/accounting contract for MREMAP_DONTUNMAP.
 smoke-mm-dontunmap:
 	$(PYTHON) tools/smoke.py smoke-mm-dontunmap
@@ -310,6 +327,28 @@ smoke-mm-dontunmap-rollback-leaf1:
 
 smoke-mm-dontunmap-rollback-leaf2:
 	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf2
+
+# Rust ownership/drop path after a destination leaf has been copied.
+smoke-mm-dontunmap-rollback-leaf1-rust:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf1-rust
+
+smoke-mm-dontunmap-split-fail-1:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-fail-1
+
+smoke-mm-dontunmap-split-fail-2:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-fail-2
+
+smoke-mm-dontunmap-split-noop-3:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-noop-3
+
+smoke-mm-dontunmap-split-noop-4:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-noop-4
+
+smoke-mm-dontunmap-split-fail-5:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-fail-5
+
+smoke-mm-dontunmap-split-fail-6:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-split-fail-6
 
 # Preserve RV64 caller-saved t0 across a real supervisor timer trap.
 smoke-rv64-trap-t0:

@@ -9,6 +9,10 @@ struct mm_seg;
 struct vfile;
 
 int handle_cow_fault(struct task_t *t, uint64_t stval);
+/* Break COW in a caller-pinned address space, even if exec has already
+ * replaced task->mm. The caller must retain both task and mm references. */
+int handle_cow_fault_mm(struct task_t *t, struct mm_struct *mm,
+                        uint64_t stval);
 int handle_demand_fault(struct task_t *t, uint64_t stval);
 
 /* COW breaks served by the status-led path (mm_cow_from_status).  Plain

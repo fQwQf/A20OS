@@ -367,11 +367,12 @@ static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
     return arch_pte_leaf(pa, flags);
 }
 
-static int handle_cow_fault_locked(task_t *t, uint64_t stval,
+static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
                                    pfn_t *old_pfn_out,
                                    page_cache_page_t **old_page_out) {
 #ifdef CONFIG_NOMMU
     (void)t;
+    (void)mm;
     (void)stval;
     (void)old_pfn_out;
     (void)old_page_out;
@@ -381,14 +382,14 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
         *old_pfn_out = PFN_NONE;
     if (old_page_out)
         *old_page_out = NULL;
-    if (!t->mm || !t->mm->pgdir) return -1;
+    if (!mm || !mm->pgdir) return -1;
 
     vaddr_t leaf_base = 0;
     size_t leaf_size = 0;
-    pte_t *pte = pt_lookup_leaf(t->mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
         return -1;
-    int cow_diag = aarch64_cow_tlbi_diag_begin(t, t->mm, stval, leaf_base,
+    int cow_diag = aarch64_cow_tlbi_diag_begin(t, mm, stval, leaf_base,
                                                 leaf_size, pte);
 
     if (*pte & PTE_COW) {
@@ -411,7 +412,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
         /* A private file page may still be the canonical page-cache frame.
          * Its allocator refcount describes cache ownership, not the number of
          * user mappings, so rc==1 must never make it writable in place. */
-        mm_seg_t *vma = mm_seg_find(t->mm, leaf_base);
+        mm_seg_t *vma = mm_seg_find(mm, leaf_base);
         page_cache_page_t *cache_page =
             leaf_size == PAGE_SIZE
                 ? mm_file_cache_mapping_get(vma, leaf_base, old_pfn)
@@ -435,8 +436,8 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
             *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
                                         leaf_size);
-            cow_sync_status(t->mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+            cow_sync_status(mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
                                          "cache-copy");
             arch_tlb_flush_page_local(stval);
             if (old_page_out)
@@ -477,8 +478,8 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
              * references it any more. */
             *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
                                         leaf_size);
-            cow_sync_status(t->mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+            cow_sync_status(mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
                                          "copy");
             arch_tlb_flush_page_local(stval);
 
@@ -490,8 +491,8 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
             return 0;
         } else {
             *pte = cow_replacement_leaf(old_pa, flags, leaf_size);
-            cow_sync_status(t->mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, t->mm, stval, pte,
+            cow_sync_status(mm, leaf_base, vma);
+            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
                                          "reuse");
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
             arch_tlb_flush_page_local(stval);
@@ -505,7 +506,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                   PTE_G | PTE_A | PTE_MAT1 |
                                   PTE_LEAF | PTE_COW)) | PTE_D;
         *pte = cow_replacement_leaf(arch_pte_addr(*pte), flags, leaf_size);
-        cow_sync_status(t->mm, leaf_base, mm_seg_find(t->mm, leaf_base));
+        cow_sync_status(mm, leaf_base, mm_seg_find(mm, leaf_base));
         arch_tlb_flush_page_local(stval);
         return 0;
     }
@@ -1434,14 +1435,13 @@ decline_pinned:
 }
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
-int handle_cow_fault(task_t *t, uint64_t stval)
+int handle_cow_fault_mm(task_t *t, mm_struct_t *mm, uint64_t stval)
 {
 #ifdef CONFIG_NOMMU
-    return handle_cow_fault_locked(t, stval, NULL, NULL);
+    return handle_cow_fault_locked(t, mm, stval, NULL, NULL);
 #else
-    if (!t || !t->mm)
+    if (!t || !mm)
         return -1;
-    mm_struct_t *mm = t->mm;
     /* The status-led copy and the legacy/cache fallback both mutate this
      * address space's leaf.  Keep them in the same per-mm transaction so the
      * fallback's in-place rc==1 upgrade cannot race a status-led replacement.
@@ -1470,7 +1470,7 @@ int handle_cow_fault(task_t *t, uint64_t stval)
 #endif
     pfn_t old_pfn = PFN_NONE;
     page_cache_page_t *old_page = NULL;
-    int r = handle_cow_fault_locked(t, stval, &old_pfn, &old_page);
+    int r = handle_cow_fault_locked(t, mm, stval, &old_pfn, &old_page);
     spin_unlock(&mm->lock);
     if (r == 0) {
         a20_perf_count(A20_PERF_MM_COW_FAULTS);
@@ -1491,6 +1491,13 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     mutex_unlock(&mm->tlb_lock);
     return r;
 #endif
+}
+
+int handle_cow_fault(task_t *t, uint64_t stval)
+{
+    if (!t || !t->mm)
+        return -1;
+    return handle_cow_fault_mm(t, t->mm, stval);
 }
 
 int handle_demand_fault(task_t *t, uint64_t stval)
@@ -1816,6 +1823,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
             spin_unlock(&mm->lock);
             int pr = vmo_paged_fault(vma->vmo, pg_idx,
                                      access == MM_FAULT_ACCESS_WRITE);
+            if (pr == -EAGAIN)
+                return MM_FAULT_RETRY;
             if (pr < 0)
                 return -1;
             return handle_demand_fault_access(t, stval, access);

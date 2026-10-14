@@ -44,6 +44,23 @@ class RustUserMakeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not support USER_OPT='-O0'", result.stderr)
 
+    def test_rust_service_is_not_in_default_native_programs(self):
+        result = make_dry_run("ARCH=riscv64", "native-programs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout + result.stderr
+        self.assertNotIn("rust_idl_echod.rs", output)
+        self.assertNotIn("native-rust-idl-service-rv", output)
+
+    def test_rust_service_opt_in_builds_rust_service_and_c_client(self):
+        result = make_dry_run("ARCH=riscv64", "NATIVE_RUST_IDL_SERVICE=1",
+                              "native-programs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn("user/svc/rust_idl_echod.rs", output)
+        self.assertIn("rust-idl-echod-rv", output)
+        self.assertIn("test_native_rust_idl_service.c", output)
+        self.assertIn("native-rust-idl-service-rv", output)
+
     def test_direct_arch_target_requires_selector(self):
         result = make_dry_run("ARCH=riscv64", "native-rust-idl-peer-arch")
         self.assertNotEqual(result.returncode, 0)

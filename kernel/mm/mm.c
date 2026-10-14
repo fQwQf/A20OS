@@ -20,7 +20,9 @@
 #include "mm/vm.h"
 #include "mm/pt.h"
 #include "mm/fault.h"
+#include "mm/usercopy.h"
 #include "core/panic.h"
+#include "core/preempt.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/klog.h"
@@ -835,6 +837,7 @@ int user_prepare_write(struct task_t *t, uint64_t va)
  * otherwise replace it after lookup and before memcpy. Fault resolution can
  * sleep, so it runs outside the lock and the next iteration re-reads the PTE.
  * Limit each locked access to one base page, including huge mappings. */
+#ifndef CONFIG_USER_COPY_RUST
 static int user_access_begin(task_t *t, uint64_t va, int write,
                              void **kaddr, size_t *chunk, uint64_t *flags)
 {
@@ -872,7 +875,190 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
     }
 #endif
 }
+#endif
 
+#ifdef CONFIG_USER_COPY_RUST
+/* Rust owns the page-at-a-time copy loop. These narrow C operations retain
+ * page-table/VMA policy and the existing fault resolver. A successful access
+ * leaves this exact mm locked; retry requests are always returned unlocked. */
+int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
+                             int write, void **kernel_address, size_t *chunk,
+                             uint64_t *irq_flags, unsigned *preempt_before)
+{
+#ifdef CONFIG_NOMMU
+    if (!t || !mm || !kernel_address || !chunk || !irq_flags || !preempt_before ||
+        (write != 0 && write != 1))
+        return -EFAULT;
+    uint64_t user_va = (uint64_t)(vaddr_t)address;
+    if (!user_range_ok(user_va, 1))
+        return -EFAULT;
+    /* NOMMU user addresses are identity-mapped. There is no page-table lock
+     * or demand-fault path; the Rust loop still advances one page at a time
+     * through this adapter so it shares the bounded-copy and string logic. */
+    *kernel_address = (void *)(uintptr_t)user_va;
+    size_t page_chunk = PAGE_SIZE - (user_va & (PAGE_SIZE - 1));
+    size_t user_chunk = (size_t)(USER_VA_LIMIT - user_va);
+    *chunk = page_chunk < user_chunk ? page_chunk : user_chunk;
+    *irq_flags = arch_irqs_enabled() ? 1 : 0;
+    *preempt_before = preempt_count();
+    return 0;
+#else
+    if (!t || !mm || !kernel_address || !chunk || !irq_flags || !preempt_before ||
+        (write != 0 && write != 1))
+        return -EFAULT;
+    uint64_t user_va = (uint64_t)(vaddr_t)address;
+    if (!user_range_ok(user_va, 1))
+        return -EFAULT;
+    uint64_t original_irq = arch_irqs_enabled() ? 1 : 0;
+    unsigned original_preempt = preempt_count();
+    *irq_flags = original_irq;
+    *preempt_before = original_preempt;
+
+    /* park_lock owns task->mm. Nest it before the address-space lock, then
+     * release it while the exact pinned mm stays locked for the copy. */
+    uint64_t task_flags = spin_lock_irqsave(&t->park_lock);
+    if (t->mm != mm || !mm->pgdir || t->pgdir != mm->pgdir) {
+        spin_unlock_irqrestore(&t->park_lock, task_flags);
+#ifdef CONFIG_USER_COPY_TEST
+        if (arch_irqs_enabled() != (int)original_irq ||
+            preempt_count() != original_preempt)
+            panic("usercopy task-binding lock state");
+#endif
+        return -EFAULT;
+    }
+    /* Interrupts are already disabled by park_lock's irqsave. Acquire the
+     * nested MM lock without a second irqsave token, then hand the original
+     * token to the eventual page guard. Restoring task_flags here would enable
+     * interrupts while mm->lock is still held. */
+    spin_lock(&mm->lock);
+    spin_unlock(&t->park_lock);
+
+    uint64_t va = user_va;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    int allowed = pte && (write ? pte_user_writable(*pte)
+                                : pte_user_readable(*pte));
+    mm_seg_t *vma = mm_seg_find(mm, va);
+    if (vma && !(vma->vm_flags & (write ? VM_WRITE : VM_READ))) {
+        spin_unlock_irqrestore(&mm->lock, task_flags);
+#ifdef CONFIG_USER_COPY_TEST
+        if (arch_irqs_enabled() != (int)original_irq ||
+            preempt_count() != original_preempt)
+            panic("usercopy permission lock state");
+#endif
+        return -EFAULT;
+    }
+    if (!allowed) {
+        spin_unlock_irqrestore(&mm->lock, task_flags);
+#ifdef CONFIG_USER_COPY_TEST
+        if (arch_irqs_enabled() != (int)original_irq ||
+            preempt_count() != original_preempt)
+            panic("usercopy retry lock state");
+#endif
+        return 1; /* Rust resolves faults only after this lock is released. */
+    }
+
+    vaddr_t base;
+    size_t mapped_size;
+    pte = pt_lookup_leaf(mm->pgdir, va, NULL, &base, &mapped_size);
+    if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
+        spin_unlock_irqrestore(&mm->lock, task_flags);
+#ifdef CONFIG_USER_COPY_TEST
+        if (arch_irqs_enabled() != (int)original_irq ||
+            preempt_count() != original_preempt)
+            panic("usercopy stale-PTE lock state");
+#endif
+        return 1;
+    }
+#ifdef CONFIG_USER_COPY_TEST
+#ifdef CONFIG_KERNEL_PREEMPT
+    if (arch_irqs_enabled() || preempt_count() != original_preempt + 1)
+#else
+    if (arch_irqs_enabled() || preempt_count() != original_preempt)
+#endif
+        panic("usercopy page guard acquire state");
+#endif
+    (void)mapped_size;
+    *kernel_address = (void *)(uintptr_t)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
+    size_t page_chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+    size_t user_chunk = (size_t)(USER_VA_LIMIT - va);
+    *chunk = page_chunk < user_chunk ? page_chunk : user_chunk;
+    *irq_flags = task_flags;
+    *pte |= PTE_A | (write ? PTE_D : 0);
+    return 0;
+#endif
+}
+
+int a20_usercopy_resolve_fault(task_t *t, mm_struct_t *mm,
+                               uintptr_t address, int write,
+                               uint64_t irq_before, unsigned preempt_before)
+{
+    (void)irq_before;
+    (void)preempt_before;
+#ifdef CONFIG_NOMMU
+    (void)t; (void)mm; (void)address; (void)write;
+    return -EFAULT;
+#else
+    if (!t || !mm || (write != 0 && write != 1))
+        return -EFAULT;
+#ifdef CONFIG_USER_COPY_TEST
+    if (arch_irqs_enabled() != (int)irq_before ||
+        preempt_count() != preempt_before)
+        panic("usercopy fault resolver entered with lock state");
+#endif
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    int same_mm = t->mm == mm;
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    if (!same_mm)
+        return -EFAULT;
+    return handle_demand_fault_access(t, (uint64_t)(vaddr_t)address,
+                                      write ? MM_FAULT_ACCESS_WRITE
+                                            : MM_FAULT_ACCESS_READ);
+#endif
+}
+
+void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq_flags,
+                              unsigned preempt_before)
+{
+    (void)preempt_before;
+#ifndef CONFIG_NOMMU
+#ifdef CONFIG_USER_COPY_TEST
+#ifdef CONFIG_KERNEL_PREEMPT
+    if (arch_irqs_enabled() || preempt_count() != preempt_before + 1)
+#else
+    if (arch_irqs_enabled() || preempt_count() != preempt_before)
+#endif
+        panic("usercopy page guard release state");
+#endif
+    spin_unlock_irqrestore(&mm->lock, irq_flags);
+#ifdef CONFIG_USER_COPY_TEST
+    if (arch_irqs_enabled() != (int)irq_flags ||
+        preempt_count() != preempt_before)
+        panic("usercopy page guard restore state");
+#endif
+#else
+    (void)mm; (void)irq_flags; (void)preempt_before;
+#endif
+}
+
+extern long a20_usercopy_copy_from_rust(task_t *t, mm_struct_t *mm,
+                                        void *dst, const void *src, size_t n);
+extern long a20_usercopy_copy_to_rust(task_t *t, mm_struct_t *mm,
+                                      void *dst, const void *src, size_t n);
+extern long a20_user_strncpy_rust(task_t *t, mm_struct_t *mm, char *dst,
+                                  const char *src, size_t max);
+extern long a20_user_strnlen_rust(task_t *t, mm_struct_t *mm,
+                                  const char *src, size_t max);
+
+static mm_struct_t *usercopy_pin_mm(task_t *t)
+{
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    mm_struct_t *mm = mm_get(t->mm);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    return mm;
+}
+#endif
+
+#ifndef CONFIG_USER_COPY_RUST
 static void user_access_end(task_t *t, uint64_t flags)
 {
 #ifndef CONFIG_NOMMU
@@ -882,11 +1068,19 @@ static void user_access_end(task_t *t, uint64_t flags)
     (void)flags;
 #endif
 }
+#endif
 
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
     if (!user_range_ok((uint64_t)(uintptr_t)src, n)) return -EFAULT;
+#ifdef CONFIG_USER_COPY_RUST
+    mm_struct_t *mm = usercopy_pin_mm(t);
+    if (!mm) return -EFAULT;
+    long result = a20_usercopy_copy_from_rust(t, mm, dst, src, n);
+    mm_destroy(mm);
+    return result;
+#else
     size_t copied = 0;
     while (copied < n) {
         void *kaddr;
@@ -902,12 +1096,20 @@ long copy_from_user(void *dst, const void *src, size_t n) {
         copied += chunk;
     }
     return (long)copied;
+#endif
 }
 
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
     if (!user_range_ok((uint64_t)(uintptr_t)dst, n)) return -EFAULT;
+#ifdef CONFIG_USER_COPY_RUST
+    mm_struct_t *mm = usercopy_pin_mm(t);
+    if (!mm) return -EFAULT;
+    long result = a20_usercopy_copy_to_rust(t, mm, dst, src, n);
+    mm_destroy(mm);
+    return result;
+#else
     size_t copied = 0;
     while (copied < n) {
         void *kaddr;
@@ -923,11 +1125,19 @@ long copy_to_user(void *dst, const void *src, size_t n) {
         copied += chunk;
     }
     return (long)copied;
+#endif
 }
 
 long user_strncpy(char *dst, const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
+#ifdef CONFIG_USER_COPY_RUST
+    mm_struct_t *mm = usercopy_pin_mm(t);
+    if (!mm) return -EFAULT;
+    long result = a20_user_strncpy_rust(t, mm, dst, src, max);
+    mm_destroy(mm);
+    return result;
+#else
     if (max == 0) return -EINVAL;
     size_t i = 0;
     while (i < max - 1) {
@@ -952,11 +1162,19 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     }
     dst[i] = '\0';
     return (long)i;
+#endif
 }
 
 long user_strnlen(const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
+#ifdef CONFIG_USER_COPY_RUST
+    mm_struct_t *mm = usercopy_pin_mm(t);
+    if (!mm) return -EFAULT;
+    long result = a20_user_strnlen_rust(t, mm, src, max);
+    mm_destroy(mm);
+    return result;
+#else
     if (max == 0) return 0;
     size_t i = 0;
     while (i < max) {
@@ -979,4 +1197,5 @@ long user_strnlen(const char *src, size_t max) {
         i += chunk;
     }
     return (long)max;
+#endif
 }

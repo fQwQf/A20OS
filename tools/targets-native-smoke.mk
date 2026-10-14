@@ -214,6 +214,9 @@ smoke-native-svc:
 smoke-native-rust-peer:
 	$(PYTHON) tools/smoke.py smoke-native-rust-peer --arch $(ARCH)
 
+smoke-native-rust-idl-service:
+	$(PYTHON) tools/smoke.py smoke-native-rust-idl-service --arch $(ARCH)
+
 smoke-native-contract:
 	$(PYTHON) tools/smoke.py smoke-native-contract --arch $(ARCH)
 
@@ -249,6 +252,9 @@ smoke-native-futex:
 
 smoke-native-deepen:
 	$(PYTHON) tools/smoke.py smoke-native-deepen --arch $(ARCH)
+
+smoke-native-pager-rust:
+	$(PYTHON) tools/smoke.py smoke-native-pager-rust --arch $(ARCH)
 
 smoke-native-ext:
 	$(PYTHON) tools/smoke.py smoke-native-ext --arch $(ARCH)

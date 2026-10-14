@@ -523,6 +523,22 @@ typedef struct task_t {
     proc_wake_reason_t wake_reason;
 } task_t;
 
+_Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&
+               sizeof(proc_wait_mode_t) == sizeof(int32_t) &&
+               sizeof(proc_wake_reason_t) == sizeof(int32_t),
+               "park wait C/Rust scalar ABI changed");
+_Static_assert(offsetof(task_t, wait_deadline) ==
+                   offsetof(task_t, wait_seq) + 8 &&
+               offsetof(task_t, wait_timer_index) ==
+                   offsetof(task_t, wait_seq) + 16 &&
+               offsetof(task_t, alarm_timer_index) ==
+                   offsetof(task_t, wait_seq) + 20 &&
+               offsetof(task_t, park_state) ==
+                   offsetof(task_t, wait_seq) + 24 &&
+               offsetof(task_t, wake_reason) ==
+                   offsetof(task_t, wait_seq) + 32,
+               "task park/wait field offsets changed");
+
 _Static_assert(offsetof(task_t, kstack) == 0,
                "task_t.kstack must remain at assembly ABI offset 0");
 _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
