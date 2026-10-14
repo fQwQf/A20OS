@@ -1416,6 +1416,11 @@ void proc_make_ready(task_t *t)
         spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
+    if (proc_task_lifecycle_advance(t, PROC_TASK_EVENT_READY) < 0) {
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        panic("proc_make_ready: invalid task lifecycle pid=%d phase=%u",
+              t->pid, t->lifecycle_phase);
+    }
     if (t->park_state == PROC_PARK_PREPARING ||
         t->park_state == PROC_PARK_PARKED) {
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);

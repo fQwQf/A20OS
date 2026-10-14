@@ -439,6 +439,9 @@ LINUX_SYSCALL(a20_envelope_enter, 0, sys_a20_envelope_enter(args))
 LINUX_SYSCALL(a20_envelope_revoke, 0, sys_a20_envelope_revoke(args))
 LINUX_SYSCALL(a20_envelope_stats, 0, sys_a20_envelope_stats(args))
 LINUX_SYSCALL(a20_envelope_audit, 0, sys_a20_envelope_audit(args))
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+LINUX_SYSCALL(a20_envelope_acquire_race_test, 0, sys_a20_envelope_acquire_race_test(args))
+#endif
 
 /* A20OS extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c,
  * docs/hypervisor/00-design.md S5). */

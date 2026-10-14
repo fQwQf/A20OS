@@ -427,4 +427,7 @@
 #define SYS_hyp_vcpu_irq 919
 #define SYS_hyp_stats 920
 #define SYS_hyp_vm_smp 921
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+#define SYS_a20_envelope_acquire_race_test 922
+#endif /* CONFIG_ENVELOPE_ACQUIRE_RACE_TEST */
 #endif /* _CORE_SYSCALL_NR_H */

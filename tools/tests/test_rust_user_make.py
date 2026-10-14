@@ -32,6 +32,18 @@ class RustUserMakeTests(unittest.TestCase):
         self.assertIn("rustc", output)
         self.assertIn("user/svc/rust_idl_peer.rs", output)
         self.assertIn("rust-idl-peer-rv", output)
+        self.assertNotIn("rust_idl_adversary.rs", output)
+        self.assertNotIn("rust-idl-peer-ack-rv", output)
+
+    def test_ack_adversarial_profile_is_explicit_and_builds_test_peers(self):
+        result = make_dry_run("ARCH=riscv64", "NATIVE_RUST_PEER=1",
+                              "native-rust-idl-ack-test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn("--cfg idl_ack_test", output)
+        self.assertIn("user/svc/rust_idl_adversary.rs", output)
+        self.assertIn("rust-idl-peer-ack-rv", output)
+        self.assertIn("rust-idl-adversary-rv", output)
 
     def test_opt_in_peer_rejects_unsupported_architecture(self):
         result = make_dry_run("ARCH=x86_64", "NATIVE_RUST_PEER=1", "native-programs")

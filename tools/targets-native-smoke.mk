@@ -85,7 +85,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_UFSD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(UFSD_CORE_SRCS) $(UFSD_VNFS_SRCS) \
-		kernel/include/fs/fat32lite.h kernel/include/fs/ufs_proto.h \
+		kernel/include/fs/fat32lite.h kernel/include/fs/ufs_proto.h kernel/fs/diskfs/ext4_inode_free_txn.h \
 		user/svc/ufs_backends.h user/svc/ufs_fat_backend.c user/svc/ufs_vnfs_backend.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
 	$(call NATIVE_UFSD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ufsd.c,$@)

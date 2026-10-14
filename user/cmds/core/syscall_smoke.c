@@ -24,6 +24,11 @@ static int fail(const char *what)
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
 #endif
+#ifndef SYS_prctl
+#define SYS_prctl 167
+#endif
+#define PR_A20_TASK_CONSTRUCTION_FAIL 0xA20F
+#define TASK_CONSTRUCTION_STAGE_MM 9
 
 static int thread_wait_pipe[2];
 static int thread_wait_pid;
@@ -296,6 +301,93 @@ static void *thread_spawn_child(void *unused)
     return NULL;
 }
 
+static int test_parent_exit_reap_race(void)
+{
+    enum { ROUNDS = 32 };
+
+    for (int round = 0; round < ROUNDS; round++) {
+        int report_pipe[2], parent_gate[2], child_gate[2];
+        if (pipe(report_pipe) < 0 || pipe(parent_gate) < 0 ||
+            pipe(child_gate) < 0)
+            return fail("parent-reap-race-pipe");
+
+        pid_t parent = fork();
+        if (parent < 0)
+            return fail("parent-reap-race-fork-parent");
+        if (parent == 0) {
+            close(report_pipe[0]);
+            close(parent_gate[1]);
+            close(child_gate[1]);
+
+            pid_t child = fork();
+            if (child < 0)
+                _exit(80);
+            if (child == 0) {
+                close(report_pipe[1]);
+                close(parent_gate[0]);
+                char token;
+                if (read(child_gate[0], &token, 1) != 1)
+                    _exit(81);
+                close(child_gate[0]);
+                _exit(73);
+            }
+
+            close(child_gate[0]);
+
+            if (write(report_pipe[1], &child, sizeof(child)) !=
+                (ssize_t)sizeof(child))
+                _exit(82);
+            close(report_pipe[1]);
+            char token;
+            if (read(parent_gate[0], &token, 1) != 1)
+                _exit(83);
+            close(parent_gate[0]);
+            _exit(74);
+        }
+
+        close(report_pipe[1]);
+        close(parent_gate[0]);
+        close(child_gate[0]);
+        pid_t child = -1;
+        if (read(report_pipe[0], &child, sizeof(child)) !=
+            (ssize_t)sizeof(child))
+            return fail("parent-reap-race-child-pid");
+        close(report_pipe[0]);
+        int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+
+        /* Release the nested child and its parent back-to-back. Alternating
+         * order covers both parent-first reparenting and child-first exit. */
+        char token = 'x';
+        if (round & 1) {
+            if (write(parent_gate[1], &token, 1) != 1 ||
+                write(child_gate[1], &token, 1) != 1)
+                return fail("parent-reap-race-release");
+        } else {
+            if (write(child_gate[1], &token, 1) != 1 ||
+                write(parent_gate[1], &token, 1) != 1)
+                return fail("parent-reap-race-release");
+        }
+        close(parent_gate[1]);
+        close(child_gate[1]);
+
+        int status = 0;
+        if (waitpid(parent, &status, 0) != parent || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 74)
+            return fail("parent-reap-race-parent-exit");
+        if (pidfd < 0)
+            return fail("parent-reap-race-pidfd");
+        struct pollfd pfd = {.fd = pidfd, .events = POLLIN, .revents = 0};
+        if (poll(&pfd, 1, 5000) != 1 || !(pfd.revents & POLLIN)) {
+            close(pidfd);
+            return fail("parent-reap-race-child-exit");
+        }
+        close(pidfd);
+    }
+
+    printf("SYSCALL_SMOKE: parent-exit-reap stress PASS rounds=%d\n", ROUNDS);
+    return 0;
+}
+
 static int test_thread_group_pidfd_wait(void)
 {
     if (pipe(thread_wait_pipe) < 0)
@@ -378,8 +470,13 @@ int main(int argc, char **argv)
 {
     if (argc > 1) {
         if (argc != 3 || !argv[1] || !argv[2] ||
-            strcmp(argv[1], "exec-argv") != 0 ||
             strcmp(argv[2], "sentinel") != 0)
+            return fail("exec-argv");
+        if (strcmp(argv[1], "vfork-exec") == 0) {
+            puts("SYSCALL_SMOKE: vfork-exec-child PASS");
+            return 0;
+        }
+        if (strcmp(argv[1], "exec-argv") != 0)
             return fail("exec-argv");
         return 0;
     }
@@ -475,6 +572,16 @@ int main(int argc, char **argv)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
         return fail("clock_gettime");
 
+#ifdef SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST
+    if (syscall(SYS_prctl, PR_A20_TASK_CONSTRUCTION_FAIL,
+                TASK_CONSTRUCTION_STAGE_MM, 0, 0, 0) < 0)
+        return fail("task-construction-arm-failure");
+    errno = 0;
+    if (fork() != -1 || errno != ENOMEM)
+        return fail("task-construction-mm-failure");
+    puts("SYSCALL_SMOKE: task-construction-mm-rollback PASS");
+#endif
+
     int pid = fork();
     if (pid < 0)
         return fail("fork");
@@ -485,6 +592,43 @@ int main(int argc, char **argv)
         return fail("waitpid");
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 42)
         return fail("wait-status");
+
+    /* vfork must keep the parent suspended until the child execs.  The child
+     * touches no shared state before exec and uses only async-safe failure
+     * exit if exec fails. */
+    pid_t vpid = vfork();
+    if (vpid < 0)
+        return fail("vfork");
+    if (vpid == 0) {
+        char *vfork_argv[] = {
+            "syscall_smoke", "vfork-exec", "sentinel", NULL
+        };
+        execv("/bin/syscall_smoke", vfork_argv);
+        _exit(127);
+    }
+    status = 0;
+    if (waitpid(vpid, &status, 0) != vpid)
+        return fail("vfork-waitpid");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return fail("vfork-status");
+    puts("SYSCALL_SMOKE: vfork-exec-parent PASS");
+
+    /* Exercise the other vfork completion route: the child exits without
+     * exec, so the parent is released by task exit rather than exec teardown. */
+    vpid = vfork();
+    if (vpid < 0)
+        return fail("vfork-noexec");
+    if (vpid == 0)
+        _exit(43);
+    status = 0;
+    if (waitpid(vpid, &status, 0) != vpid)
+        return fail("vfork-noexec-waitpid");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 43)
+        return fail("vfork-noexec-status");
+    puts("SYSCALL_SMOKE: vfork-noexec-parent PASS");
+
+    if (test_parent_exit_reap_race())
+        return 1;
 
     /* P_PIDFD identifies a task, but does not waive wait-child eligibility.
      * This also ensures waitid does not accidentally accept a live unrelated

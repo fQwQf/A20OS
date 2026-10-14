@@ -565,6 +565,22 @@ COMPLETION_IMPL ?= c
 ifeq ($(filter $(COMPLETION_IMPL),c rust),)
 $(error COMPLETION_IMPL must be c or rust)
 endif
+TASK_LIFECYCLE_IMPL ?= c
+ifeq ($(filter $(TASK_LIFECYCLE_IMPL),c rust),)
+$(error TASK_LIFECYCLE_IMPL must be c or rust)
+endif
+TASK_EXIT_IMPL ?= c
+ifeq ($(filter $(TASK_EXIT_IMPL),c rust),)
+$(error TASK_EXIT_IMPL must be c or rust)
+endif
+TASK_CONSTRUCTION_IMPL ?= c
+ifeq ($(filter $(TASK_CONSTRUCTION_IMPL),c rust),)
+$(error TASK_CONSTRUCTION_IMPL must be c or rust)
+endif
+TASK_CONSTRUCTION_TEST ?= 0
+ifeq ($(filter $(TASK_CONSTRUCTION_TEST),0 1),)
+$(error TASK_CONSTRUCTION_TEST must be 0 or 1)
+endif
 VMA_IMPL ?= c
 ifeq ($(filter $(VMA_IMPL),c rust),)
 $(error VMA_IMPL must be c or rust)
@@ -590,6 +606,15 @@ ifeq ($(filter $(VIRTIO_BLK_CORE_IMPL),c rust),)
 $(error VIRTIO_BLK_CORE_IMPL must be c or rust)
 endif
 ENVELOPE_POLICY_IMPL ?= c
+ENVELOPE_ACQUIRE_RACE_TEST ?= 0
+ifeq ($(filter $(ENVELOPE_ACQUIRE_RACE_TEST),0 1),)
+$(error ENVELOPE_ACQUIRE_RACE_TEST must be 0 or 1)
+endif
+ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
+ifeq ($(filter $(ABI),linux both),)
+$(error ENVELOPE_ACQUIRE_RACE_TEST requires ABI=linux or ABI=both)
+endif
+endif
 ifeq ($(filter $(ENVELOPE_POLICY_IMPL),c rust),)
 $(error ENVELOPE_POLICY_IMPL must be c or rust)
 endif
@@ -617,6 +642,10 @@ NET_SOCKET_QUEUE_IMPL ?= c
 ifeq ($(filter $(NET_SOCKET_QUEUE_IMPL),c rust),)
 $(error NET_SOCKET_QUEUE_IMPL must be c or rust)
 endif
+EXT4_EXTENT_TXN_IMPL ?= c
+ifeq ($(filter $(EXT4_EXTENT_TXN_IMPL),c rust),)
+$(error EXT4_EXTENT_TXN_IMPL must be c or rust)
+endif
 ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
 ifeq ($(filter $(ABI),linux both),)
 $(error LINUX_SCM_RIGHTS_IMPL=rust requires ABI=linux or ABI=both)
@@ -632,7 +661,7 @@ ifeq ($(filter $(RUST_RUNTIME_TEST),0 1),)
 $(error RUST_RUNTIME_TEST must be 0 or 1)
 endif
 ifeq ($(RUST_RUNTIME_TEST),1)
-ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL)),)
+ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL)),)
 $(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
 endif
 endif
@@ -762,6 +791,18 @@ endif
 ifeq ($(COMPLETION_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-completionrust
 endif
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-tasklifecycle-rust
+endif
+ifeq ($(TASK_EXIT_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskexit-rust
+endif
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-rust
+endif
+ifeq ($(TASK_CONSTRUCTION_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-test
+endif
 ifeq ($(VMA_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-vmarust
 endif
@@ -791,6 +832,9 @@ BUILD_VARIANT := $(BUILD_VARIANT)-eventpoll-rust
 endif
 ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-event-desc-rust
+endif
+ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-envelope-acquire-race-test
 endif
 ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-scm-rights-rust
@@ -880,7 +924,7 @@ EXT4_IMAGE_MB ?= 128
 # and an apk world image fills it -- see VF2_WORLD in tools/targets-build.mk.
 # RISCV_GNU_CC stays: the vDSO is built with it, not with an extra package.
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)
 # $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
@@ -1493,6 +1537,18 @@ endif
 ifeq ($(COMPLETION_IMPL),rust)
 CFLAGS += -DCONFIG_COMPLETION_RUST
 endif
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_LIFECYCLE_RUST
+endif
+ifeq ($(TASK_EXIT_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_EXIT_RUST
+endif
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_CONSTRUCTION_RUST
+endif
+ifeq ($(TASK_CONSTRUCTION_TEST),1)
+CFLAGS += -DCONFIG_TASK_CONSTRUCTION_TEST
+endif
 ifeq ($(VMA_IMPL),rust)
 CFLAGS += -DCONFIG_VMA_REGION_RUST
 endif
@@ -1513,6 +1569,9 @@ CFLAGS += -DCONFIG_VIRTIO_BLK_CORE_RUST
 endif
 ifeq ($(ENVELOPE_POLICY_IMPL),rust)
 CFLAGS += -DCONFIG_ENVELOPE_POLICY_RUST
+endif
+ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
+CFLAGS += -DCONFIG_ENVELOPE_ACQUIRE_RACE_TEST
 endif
 ifeq ($(FDTABLE_STATE_IMPL),rust)
 CFLAGS += -DCONFIG_FDTABLE_STATE_RUST
@@ -1565,6 +1624,9 @@ CFLAGS += -DCONFIG_CLUSTER_UART_COM2
 endif
 EXTRA_CFLAGS ?=
 CFLAGS += $(EXTRA_CFLAGS)
+ifeq ($(EXT4_EXTENT_TXN_IMPL),rust)
+CFLAGS += -DCONFIG_EXT4_RUST_EXTENT_TXN
+endif
 ifeq ($(QEMU_SHARED_SMP),1)
 ifneq ($(BOARD),qemu-virt-x86_64)
 $(error QEMU_SHARED_SMP requires BOARD=qemu-virt-x86_64)
@@ -1969,6 +2031,14 @@ include $(KERNEL_DIR)/external/lwip/sources.mk
 include $(KERNEL_DIR)/external/littlefs/sources.mk
 endif
 
+ifeq ($(PROFILE),mcu)
+else
+KERNEL_SRC := $(filter-out $(KERNEL_DIR)/ipc/envelope_acquire_race_test.c,$(KERNEL_SRC))
+ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
+KERNEL_SRC += $(KERNEL_DIR)/ipc/envelope_acquire_race_test.c
+endif
+endif
+
 include tools/driver-modules.mk
 
 # Object files
@@ -2058,6 +2128,24 @@ $(error COMPLETION_IMPL=rust requires kernel/core/sync.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_COMPLETION_STATE_OBJECT)
 endif
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/task_lifecycle.c,$(KERNEL_SRC)),)
+$(error TASK_LIFECYCLE_IMPL=rust requires kernel/proc/task_lifecycle.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_TASK_LIFECYCLE_OBJECT)
+endif
+ifeq ($(TASK_EXIT_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/exit.c,$(KERNEL_SRC)),)
+$(error TASK_EXIT_IMPL=rust requires kernel/proc/exit.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_TASK_EXIT_OBJECT)
+endif
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/proc/task_construction.c,$(KERNEL_SRC)),)
+$(error TASK_CONSTRUCTION_IMPL=rust requires kernel/proc/task_construction.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_TASK_CONSTRUCTION_OBJECT)
+endif
 ifeq ($(VMA_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/mm/vma.c,$(KERNEL_SRC)),)
 $(error VMA_IMPL=rust requires kernel/mm/vma.c in this profile)
@@ -2145,7 +2233,13 @@ $(error NET_SOCKET_QUEUE_IMPL=rust requires kernel/net/socket_queue.c in this pr
 endif
 KERNEL_OBJ += $(RUST_NET_SOCKET_QUEUE_OBJECT)
 endif
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL)),)
+ifeq ($(EXT4_EXTENT_TXN_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/fs/diskfs/ext4.c,$(KERNEL_SRC)),)
+$(error EXT4_EXTENT_TXN_IMPL=rust requires kernel/fs/diskfs/ext4.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_EXT4_EXTENT_TXN_OBJECT)
+endif
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL)),)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 

@@ -2,6 +2,7 @@
 #define _PROC_INTERNAL_H
 
 #include "proc/proc.h"
+#include "proc/task_lifecycle.h"
 #include "core/lock.h"
 
 #define SCHED_LEVELS 8
@@ -89,7 +90,9 @@ void proc_unlock_two_tasks(task_t *a, task_t *b, uint64_t flags_a,
                            uint64_t flags_b);
 void proc_unlink_task_locked(task_t *t);
 void proc_children_link_locked(task_t *parent, task_t *child);
-void proc_link_newborn(task_t *t);
+int proc_link_newborn(task_t *t);
+/* Called with tasklist_lock held; publishes a fully initialized task. */
+int proc_publish_task_slot_locked(task_t *t);
 void proc_children_unlink_locked(task_t *t);
 void proc_reparent_task_locked(task_t *new_parent, task_t *t);
 int proc_tg_link_locked(task_t *t);
@@ -109,6 +112,13 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags);
  * report allocation/corruption errors instead of panicking. */
 void proc_task_init_common_deferred_files(task_t *t, task_t *parent,
                                          uint64_t clone_flags);
+/* Base initialization is resource-free; Rust construction chooses later
+ * seccomp, cwd/cgroup, files and signal stages. */
+void proc_task_init_base(task_t *t, task_t *parent);
+void proc_task_init_seccomp(task_t *t, task_t *parent);
+void proc_task_init_fs_cgroup(task_t *t, task_t *parent);
+void proc_task_init_files(task_t *t, task_t *parent, uint64_t clone_flags);
+int proc_task_init_signals(task_t *t, task_t *parent, int checked);
 void proc_task_park_counters_init(void);
 void proc_task_init_detached(task_t *t);
 task_t *proc_task_alloc_storage(void);

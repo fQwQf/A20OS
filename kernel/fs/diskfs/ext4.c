@@ -1,6 +1,7 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
 #include "fs/ext4_journal.h"
+#include "ext4_inode_free_txn.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
@@ -23,7 +24,16 @@
 int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
                     size_t len)
 {
-    return ext4_journal_meta_write(sb, byte_off, buf, len);
+    if (!sb) return -EINVAL;
+    if (ext4_is_inconsistent(sb)) return -117;
+    return ext4_record_status(sb,
+        ext4_journal_meta_write(sb, byte_off, buf, len));
+}
+
+int ext4_record_status(ext4_sb_info_t *sb, int status)
+{
+    if (status == -117) ext4_mark_inconsistent(sb);
+    return status;
 }
 
 /* The primary superblock always occupies the second 1 KiB of the device, no
@@ -564,9 +574,13 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
                  * available for retry. Restore the old allocation bit before
                  * returning so callers can safely retry the allocation. */
                 byte &= (uint8_t)~(1U << (bit % 8));
-                if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0)
+                if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0) {
                     printf("[EXT4] bitmap allocation rollback failed block=%lu bit=%u\n",
                            (unsigned long)bm_blk, bit);
+                    a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
+                    a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
+                    return -117;
+                }
                 a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
                 a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
                 return -1;
@@ -603,9 +617,11 @@ int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
          * back before returning, otherwise orphan retry sees an already-free
          * block and can neither complete nor safely free it again. */
         byte |= (uint8_t)(1U << (bit % 8));
-        if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0)
+        if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0) {
             printf("[EXT4] bitmap free rollback failed block=%lu bit=%u\n",
                    (unsigned long)bm_blk, bit);
+            return -117;
+        }
         return -EIO;
     }
     return 0;
@@ -691,6 +707,7 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
 {
     if (!sb || !first_phys || wanted == 0)
         return 0;
+    if (ext4_is_inconsistent(sb)) return 0;
     if (wanted > 256)
         wanted = 256;
 
@@ -699,6 +716,11 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
         return 0;
 
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        kfree(bitmap);
+        return 0;
+    }
     uint64_t group_probes = 0;
     for (uint32_t n = 0; n < sb->groups_count; n++) {
         group_probes++;
@@ -779,12 +801,18 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
 }
 
 uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
+    if (!sb || ext4_is_inconsistent(sb)) return 0;
     /* Allocate the zeroing buffer before taking the allocator mutex. */
     char *zero_buf = (char *)kmalloc(sb->block_size);
     if (zero_buf)
         memset(zero_buf, 0, sb->block_size);
 
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        if (zero_buf) kfree(zero_buf);
+        return 0;
+    }
     uint64_t group_probes = 0;
     for (uint32_t n = 0; n < sb->groups_count; n++) {
         group_probes++;
@@ -799,11 +827,25 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
         int bit = ext4_bitmap_alloc(sb, bm, valid,
                                     sb->block_alloc_hints[g]);
+        if (bit == -117) {
+            /* The bitmap write and its compensation both failed. Do not
+             * continue probing another group and mutate more allocator state. */
+            ext4_mark_inconsistent(sb);
+            a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
+            mutex_unlock(&sb->alloc_lock);
+            if (zero_buf) kfree(zero_buf);
+            return 0;
+        }
         if (bit < 0) continue;
         sb->block_alloc_hints[g] = ((uint32_t)bit + 1) % valid;
         sb->block_group_rotor = g;
         ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks - 1);
         ext4_writeback_gd(sb, g);
+        if (ext4_is_inconsistent(sb)) {
+            mutex_unlock(&sb->alloc_lock);
+            if (zero_buf) kfree(zero_buf);
+            return 0;
+        }
         uint64_t phys = (uint64_t)sb->first_data_block +
                         (uint64_t)g * sb->blocks_per_group + bit;
         a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
@@ -835,8 +877,9 @@ static int ext4_free_block_locked(ext4_sb_info_t *sb, uint64_t phys) {
     uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
     if (free_blocks >= valid)
         return -EINVAL;
-    if (ext4_bitmap_free(sb, bm, bit) < 0)
-        return -EIO;
+    int bitmap_ret = ext4_bitmap_free(sb, bm, bit);
+    if (bitmap_ret < 0)
+        return bitmap_ret == -117 ? -117 : -EIO;
     if (sb->block_alloc_hints)
         sb->block_alloc_hints[g] = bit;
     ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks + 1);
@@ -851,9 +894,11 @@ static int ext4_free_block_locked(ext4_sb_info_t *sb, uint64_t phys) {
         ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks);
         int bit_ret = ext4_bitmap_mark_allocated(sb, bm, bit);
         int desc_ret = ext4_writeback_gd(sb, g);
-        if (bit_ret < 0 || desc_ret < 0)
+        if (bit_ret < 0 || desc_ret < 0) {
             printf("[EXT4] failed block-free compensation phys=%lu bit=%d desc=%d\n",
                    (unsigned long)phys, bit_ret, desc_ret);
+            return -117;
+        }
     }
     return ret;
 }
@@ -861,10 +906,16 @@ static int ext4_free_block_locked(ext4_sb_info_t *sb, uint64_t phys) {
 int ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
     if (!sb)
         return -EINVAL;
+    if (ext4_is_inconsistent(sb)) return -117;
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        return -117;
+    }
     int ret = ext4_free_block_locked(sb, phys);
+    if (ret == -117) ext4_mark_inconsistent(sb);
     mutex_unlock(&sb->alloc_lock);
-    return ret;
+    return ext4_record_status(sb, ret);
 }
 
 /* Re-allocate an exact block freed earlier in a checked truncate. The caller
@@ -872,6 +923,7 @@ int ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
  * block while the inode still references it or while rollback is in flight. */
 static int ext4_reserve_block_locked(ext4_sb_info_t *sb, uint64_t phys)
 {
+    if (ext4_is_inconsistent(sb)) return -117;
     if (phys < sb->first_data_block || phys >= sb->blocks_count)
         return -EINVAL;
     uint32_t rel = (uint32_t)(phys - sb->first_data_block);
@@ -892,15 +944,22 @@ static int ext4_reserve_block_locked(ext4_sb_info_t *sb, uint64_t phys)
         ext4_bg_set_free_blocks(&sb->group_descs[group], free_blocks);
         int restore_bit = ext4_bitmap_free(sb, bitmap, bit);
         int restore_desc = ext4_writeback_gd(sb, group);
-        if (restore_bit < 0 || restore_desc < 0)
+        if (restore_bit < 0 || restore_desc < 0) {
             printf("[EXT4] failed block-reserve compensation phys=%lu bit=%d desc=%d\n",
                    (unsigned long)phys, restore_bit, restore_desc);
+            return -117;
+        }
     }
     return ret;
 }
 
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
+    if (!sb || ext4_is_inconsistent(sb)) return 0;
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        return 0;
+    }
     uint64_t group_probes = 0;
     for (uint32_t n = 0; n < sb->groups_count; n++) {
         group_probes++;
@@ -915,6 +974,13 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
         uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo;
         int bit = ext4_bitmap_alloc(sb, bm, valid,
                                     sb->inode_alloc_hints[g]);
+        if (bit == -117) {
+            /* Do not continue allocating after an uncertain bitmap rollback. */
+            ext4_mark_inconsistent(sb);
+            a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
+            mutex_unlock(&sb->alloc_lock);
+            return 0;
+        }
         if (bit < 0) continue;
         sb->inode_alloc_hints[g] = ((uint32_t)bit + 1) % valid;
         sb->inode_group_rotor = g;
@@ -929,6 +995,10 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
             sb->group_descs[g].bg_itable_unused_lo = (uint16_t)unused;
         }
         ext4_writeback_gd(sb, g);
+        if (ext4_is_inconsistent(sb)) {
+            mutex_unlock(&sb->alloc_lock);
+            return 0;
+        }
         uint32_t ino = g * sb->inodes_per_group + bit + 1;
         a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
         mutex_unlock(&sb->alloc_lock);
@@ -939,8 +1009,45 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
     return 0;
 }
 
+typedef struct {
+    ext4_sb_info_t *sb;
+    uint32_t group;
+    uint32_t bit;
+    uint32_t old_free_count;
+    uint64_t bitmap_block;
+} ext4_inode_free_rollback_context_t;
+
+static void ext4_restore_free_inode_count(void *opaque, uint32_t count)
+{
+    ext4_inode_free_rollback_context_t *ctx = opaque;
+    ext4_bg_set_free_inodes(&ctx->sb->group_descs[ctx->group], count);
+}
+
+static int ext4_mark_inode_allocated_for_rollback(void *opaque)
+{
+    ext4_inode_free_rollback_context_t *ctx = opaque;
+    return ext4_bitmap_mark_allocated(ctx->sb, ctx->bitmap_block, ctx->bit);
+}
+
+static int ext4_write_inode_group_for_rollback(void *opaque)
+{
+    ext4_inode_free_rollback_context_t *ctx = opaque;
+    return ext4_writeback_gd(ctx->sb, ctx->group);
+}
+
+static void ext4_poison_inode_free_journal(void *opaque)
+{
+    ext4_inode_free_rollback_context_t *ctx = opaque;
+    (void)ext4_journal_poison(ctx->sb);
+}
+
 int ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
+    if (ext4_is_inconsistent(sb)) return -117;
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        return -117;
+    }
     if (!ino || ino > sb->inodes_count) {
         mutex_unlock(&sb->alloc_lock);
         return -EINVAL;
@@ -962,19 +1069,45 @@ int ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
         mutex_unlock(&sb->alloc_lock);
         return -EINVAL;
     }
-    if (ext4_bitmap_free(sb, bm, bit) < 0) {
+    int bitmap_ret = ext4_bitmap_free(sb, bm, bit);
+    if (bitmap_ret < 0) {
+        if (bitmap_ret == -117) ext4_mark_inconsistent(sb);
         mutex_unlock(&sb->alloc_lock);
-        return -EIO;
+        return bitmap_ret == -117 ? -117 : -EIO;
     }
-    if (sb->inode_alloc_hints)
-        sb->inode_alloc_hints[g] = bit;
+    /* Do not publish the updated count/rotor until the descriptor is durable.
+     * If the descriptor or superblock write fails on a no-journal filesystem,
+     * restore the inode allocation bit while alloc_lock still excludes reuse.
+     * Journaled filesystems poison the pending transaction and rely on replay. */
     ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes + 1);
     /* Freeing an inode does not make the following live inode table entries
      * uninitialized. Keep the initialized high-water mark conservatively;
      * increasing unused would require inspecting the entire trailing bitmap. */
     int ret = ext4_writeback_gd(sb, g);
+    if (ret < 0) {
+        ext4_inode_free_rollback_context_t ctx = {
+            .sb = sb, .group = g, .bit = bit,
+            .old_free_count = free_inodes, .bitmap_block = bm,
+        };
+        ext4_inode_free_rollback_ops_t rollback = {
+            .context = &ctx,
+            .restore_free_inode_count = ext4_restore_free_inode_count,
+            .mark_inode_allocated = ext4_mark_inode_allocated_for_rollback,
+            .write_group_descriptor = ext4_write_inode_group_for_rollback,
+            .poison_journal = ext4_poison_inode_free_journal,
+        };
+        ret = ext4_inode_free_rollback(&rollback, free_inodes, ret,
+                                       sb->journal != NULL);
+        if (ret == -117) {
+            ext4_mark_inconsistent(sb);
+            printf("[EXT4] inode-free compensation failed ino=%u; allocation state uncertain\n",
+                   ino);
+        }
+    } else if (sb->inode_alloc_hints) {
+        sb->inode_alloc_hints[g] = bit;
+    }
     mutex_unlock(&sb->alloc_lock);
-    return ret;
+    return ext4_record_status(sb, ret);
 }
 
 /* ================================================================
@@ -1915,15 +2048,83 @@ void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
 /* Checked orphan-recovery truncate for the depth-0 extent trees emitted by
  * this driver. Unsupported trees fail closed; the caller must keep the inode
  * on the orphan list so a more capable implementation can retry it. */
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+typedef struct {
+    ext4_sb_info_t *sb;
+    uint32_t ino;
+    ext4_inode_t *inode;
+} ext4_extent_txn_context_t;
+
+static int ext4_extent_txn_free(void *opaque, uint64_t block)
+{
+    ext4_extent_txn_context_t *ctx = opaque;
+    return ext4_free_block_locked(ctx->sb, block);
+}
+
+static int ext4_extent_txn_reserve(void *opaque, uint64_t block)
+{
+    ext4_extent_txn_context_t *ctx = opaque;
+    return ext4_reserve_block_locked(ctx->sb, block);
+}
+
+static int ext4_extent_txn_write_inode(void *opaque, uint8_t *i_block)
+{
+    ext4_extent_txn_context_t *ctx = opaque;
+    ext4_inode_t candidate = *ctx->inode;
+    memcpy((uint8_t *)&candidate + offsetof(ext4_inode_t, i_block), i_block,
+           sizeof(candidate.i_block));
+    ext4_inode_sync_i_blocks(ctx->sb, &candidate);
+    int ret = ext4_write_inode(ctx->sb, ctx->ino, &candidate);
+    if (ret >= 0) *ctx->inode = candidate;
+    return ret;
+}
+
+static int ext4_extent_txn_poison(void *opaque)
+{
+    ext4_extent_txn_context_t *ctx = opaque;
+    return ext4_journal_poison(ctx->sb);
+}
+
+extern int a20_ext4_extent_root_trim_txn(uint32_t ino, uint8_t *i_block,
+                                         uint32_t first_kept_lblk,
+                                         const ext4_extent_txn_ops_t *ops);
+#endif
+
 static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
                                          ext4_inode_t *inode, uint32_t lblk)
 {
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    if (!sb || !inode) return -EINVAL;
+    mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        return -117;
+    }
+    ext4_extent_txn_context_t context = { sb, ino, inode };
+    ext4_extent_txn_ops_t ops = {
+        .context = &context,
+        .free_block = ext4_extent_txn_free,
+        .reserve_block = ext4_extent_txn_reserve,
+        .write_inode = ext4_extent_txn_write_inode,
+        .poison_journal = ext4_extent_txn_poison,
+        .journaled = sb->journal != NULL,
+        .first_data_block = sb->first_data_block,
+        .blocks_count = sb->blocks_count,
+    };
+    int ret = a20_ext4_extent_root_trim_txn(
+        ino, (uint8_t *)inode + offsetof(ext4_inode_t, i_block), lblk, &ops);
+    if (ret == -117) ext4_mark_inconsistent(sb);
+    mutex_unlock(&sb->alloc_lock);
+    return ret;
+#else
+    ext4_inode_t original = *inode;
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr;
     memcpy(&hdr, raw, sizeof(hdr));
     if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_depth != 0 ||
         hdr.eh_entries > EXT4_EXT_ROOT_MAX || hdr.eh_max != EXT4_EXT_ROOT_MAX)
         return -EOPNOTSUPP;
+    uint16_t original_count = hdr.eh_entries;
     ext4_extent_t ext[EXT4_EXT_ROOT_MAX];
     memset(ext, 0, sizeof(ext));
     memcpy(ext, raw + sizeof(hdr), hdr.eh_entries * sizeof(ext[0]));
@@ -1963,6 +2164,10 @@ static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
     /* Keep removed blocks unavailable to concurrent allocations until either
      * the whole truncate succeeds or every successful free can be undone. */
     mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        return -117;
+    }
     for (uint16_t i = 0; i < hdr.eh_entries; i++) {
         uint32_t keep = 0;
         if (ext[i].ee_block < lblk) {
@@ -1973,6 +2178,13 @@ static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
         for (uint32_t j = keep; j < lengths[i]; j++) {
             ret = ext4_free_block_locked(sb, phys[i] + j);
             if (ret < 0) {
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
+                uint32_t completed_blocks = 0;
+                for (uint16_t done = 0; done <= i; done++)
+                    completed_blocks += freed_per_extent[done];
+                printf("[EXT4] orphan truncate write failure ino=%u completed_blocks=%u err=%d\n",
+                       ino, completed_blocks, ret);
+#endif
                 /* The current block helper compensates its own partial
                  * failure. Roll back earlier successful frees in reverse
                  * order, before dropping alloc_lock and exposing them to a
@@ -1989,12 +2201,13 @@ static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
                                    ino, (unsigned long)(phys[index] + block_index),
                                    undo_ret);
                             if (!sb->journal)
-                                ret = -EIO;
-                            else
-                                (void)ext4_journal_poison(sb);
+                                ret = -117;
+                            else if (ext4_journal_poison(sb) < 0)
+                                ret = -117;
                         }
                     }
                 }
+                if (ret == -117) ext4_mark_inconsistent(sb);
                 mutex_unlock(&sb->alloc_lock);
                 return ret;
             }
@@ -2006,16 +2219,59 @@ static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
             kept[kept_count++] = ext[i];
         }
     }
-    mutex_unlock(&sb->alloc_lock);
-
     hdr.eh_entries = kept_count;
     memcpy(raw, &hdr, sizeof(hdr));
     memset(raw + sizeof(hdr), 0, 60 - sizeof(hdr));
     if (kept_count)
         memcpy(raw + sizeof(hdr), kept, kept_count * sizeof(kept[0]));
     ext4_inode_sync_i_blocks(sb, inode);
-    (void)ino;
+    ext4_inode_t trimmed = *inode;
+    ret = ext4_write_inode(sb, ino, inode);
+    if (ret < 0) {
+        *inode = original;
+        if (sb->journal) {
+            int poison_ret = ext4_journal_poison(sb);
+            mutex_unlock(&sb->alloc_lock);
+            return poison_ret < 0 ? -117 : ret;
+        }
+        /* The inode write-through failed after the bitmap frees. Restore the
+         * blocks before releasing alloc_lock, then restore the old extent
+         * image. A retry must never observe an inode still referencing a
+         * block that another allocator can reuse. */
+        int rollback_failed = 0;
+        for (uint16_t undo = original_count; undo > 0; undo--) {
+            uint16_t index = undo - 1;
+            while (freed_per_extent[index]) {
+                uint32_t block_index = keep_from[index] +
+                                       --freed_per_extent[index];
+                int undo_ret = ext4_reserve_block_locked(
+                    sb, phys[index] + block_index);
+                if (undo_ret < 0) {
+                    printf("[EXT4] orphan inode-write rollback failed ino=%u block=%lu err=%d\n",
+                           ino, (unsigned long)(phys[index] + block_index),
+                           undo_ret);
+                    rollback_failed = 1;
+                }
+            }
+        }
+        /* If any block could not be reserved again, keep the shortened inode
+         * image so it cannot reference that now-free block. Otherwise restore
+         * the original extent tree, now backed by reserved blocks. */
+        *inode = rollback_failed ? trimmed : original;
+        int inode_ret = ext4_write_inode(sb, ino, inode);
+        if (inode_ret < 0) {
+            printf("[EXT4] orphan inode image restore failed ino=%u err=%d\n",
+                   ino, inode_ret);
+            ret = -117;
+        }
+        if (rollback_failed) ret = -117;
+        if (ret == -117) ext4_mark_inconsistent(sb);
+        mutex_unlock(&sb->alloc_lock);
+        return ret;
+    }
+    mutex_unlock(&sb->alloc_lock);
     return 0;
+#endif
 }
 
 int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
@@ -2023,7 +2279,9 @@ int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
 {
     if (!sb || !inode)
         return -EOPNOTSUPP;
-    return ext4_extent_root_trim_checked(sb, ino, inode, 0);
+    if (ext4_is_inconsistent(sb)) return -117;
+    return ext4_record_status(sb,
+        ext4_extent_root_trim_checked(sb, ino, inode, 0));
 }
 
 int ext4_block_truncate_at_checked(ext4_sb_info_t *sb, uint32_t ino,
@@ -2031,7 +2289,9 @@ int ext4_block_truncate_at_checked(ext4_sb_info_t *sb, uint32_t ino,
 {
     if (!sb || !inode)
         return -EOPNOTSUPP;
-    return ext4_extent_root_trim_checked(sb, ino, inode, lblk);
+    if (ext4_is_inconsistent(sb)) return -117;
+    return ext4_record_status(sb,
+        ext4_extent_root_trim_checked(sb, ino, inode, lblk));
 }
 
 /* ================================================================

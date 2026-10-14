@@ -321,6 +321,9 @@ int64_t sys_a20_envelope_enter(const linux_syscall_args_t *args);
 int64_t sys_a20_envelope_revoke(const linux_syscall_args_t *args);
 int64_t sys_a20_envelope_stats(const linux_syscall_args_t *args);
 int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args);
+#ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
+int64_t sys_a20_envelope_acquire_race_test(const linux_syscall_args_t *args);
+#endif
 
 /* A20OS extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c). */
 int64_t sys_hyp_vm_create(const linux_syscall_args_t *args);

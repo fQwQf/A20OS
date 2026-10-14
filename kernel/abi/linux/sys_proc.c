@@ -14,6 +14,7 @@
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
+#include "proc/task_construction.h"
 #include "proc/cred.h"
 #include "proc/signal.h"
 #include "mm/pt.h"
@@ -1244,6 +1245,14 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     task_t *t = proc_current();
+#ifdef CONFIG_TASK_CONSTRUCTION_TEST
+    /* Private test-profile operation: fail one clone after MM acquisition. */
+    if ((unsigned)op == 0xA20FU) {
+        if (!t || a2 || a3 || a4)
+            return -EINVAL;
+        return proc_task_construction_test_arm(t, (unsigned)a1);
+    }
+#endif
     if (op == PR_GET_DUMPABLE)
         return t && t->mm ? mm_dumpable(t->mm) : -ESRCH;
     if (op == PR_SET_DUMPABLE) {

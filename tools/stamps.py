@@ -152,6 +152,7 @@ def cmd_user(a) -> int:
         user_build_dir = resolved_user_build_dir(a.user_build_dir)
         common = [f"ARCH={a.arch}", f"NOMMU={a.nommu}",
                   f"OPT={a.user_opt}", f"PROFILE={a.profile}",
+                  f"ENVELOPE_ACQUIRE_RACE_TEST={a.envelope_acquire_race_test}",
                   f"BUILD_DIR={user_build_dir}"]
         if need_clean:
             rc = submake(["-C", "user", *common, "clean"])
@@ -191,6 +192,22 @@ def cmd_native(a) -> int:
     native_rust_ufsd = str(getattr(a, "native_rust_ufsd", "0"))
     if native_rust_ufsd not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd must be 0 or 1")
+    native_rust_ufsd_ext4_orphan = str(getattr(a, "native_rust_ufsd_ext4_orphan", "1"))
+    if native_rust_ufsd_ext4_orphan not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-ext4-orphan must be 0 or 1")
+    test_close_orphan = str(getattr(a, "native_rust_ufsd_test_close_orphan_write_fail_once", "0"))
+    test_close_orphan_after = str(getattr(a, "native_rust_ufsd_test_close_orphan_write_fail_after", "1"))
+    test_close_orphan_restore = str(getattr(a, "native_rust_ufsd_test_close_orphan_restore_fail", "0"))
+    if test_close_orphan not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-test-close-orphan-write-fail-once must be 0 or 1")
+    if test_close_orphan_after not in tuple(str(n) for n in range(1, 17)):
+        raise SystemExit("error: --native-rust-ufsd-test-close-orphan-write-fail-after must be in 1..16")
+    if test_close_orphan_restore not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-test-close-orphan-restore-fail must be 0 or 1")
+    if test_close_orphan_restore == "1" and test_close_orphan != "1":
+        raise SystemExit("error: restore-failure injection requires close-orphan fail-once")
+    if test_close_orphan_restore == "1" and test_close_orphan_after == "16":
+        raise SystemExit("error: restore-failure injection needs a write index below 16")
     if native_rust_ufsd == "1" and a.arch != "riscv64":
         raise SystemExit("error: Rust ufsd currently requires ARCH=riscv64")
     user_build_dir = getattr(a, "user_build_dir", str(Path(a.stamp).parent))
@@ -247,7 +264,11 @@ def cmd_native(a) -> int:
                               f"\nNATIVE_RUST_ECHOD={native_rust_echod}"
                               f"\nNATIVE_RUST_SVCMGR={native_rust_svcmgr}"
                               f"\nNATIVE_RUST_RTCD={native_rust_rtcd}"
-                              f"\nNATIVE_RUST_UFSD={native_rust_ufsd}")
+                              f"\nNATIVE_RUST_UFSD={native_rust_ufsd}"
+                              f"\nNATIVE_RUST_UFSD_EXT4_ORPHAN={native_rust_ufsd_ext4_orphan}"
+                              f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}"
+                              f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}")
+        effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}"
         old_build_id = stamp_id(stamp)
         old_rust_svcmgr = "NATIVE_RUST_SVCMGR=1" in old_build_id.splitlines()
         old_rust_echod = "NATIVE_RUST_ECHOD=1" in old_build_id.splitlines()
@@ -346,6 +367,10 @@ def cmd_native(a) -> int:
                       f"NATIVE_RUST_SVCMGR={native_rust_svcmgr}",
                       f"NATIVE_RUST_RTCD={native_rust_rtcd}",
                       f"NATIVE_RUST_UFSD={native_rust_ufsd}",
+                      f"NATIVE_RUST_UFSD_EXT4_ORPHAN={native_rust_ufsd_ext4_orphan}",
+                      f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}",
+                      f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}",
+                      f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}",
                       f"USER_BUILD_DIR={resolved_build_dir}",
                       "native-programs"])
         if rc != 0:
@@ -524,6 +549,7 @@ def main() -> int:
             s.add_argument("--user-build-dir", required=True)
             s.add_argument("--user-opt", default="")
             s.add_argument("--profile", default="")
+            s.add_argument("--envelope-acquire-race-test", choices=("0", "1"), default="0")
             s.add_argument("--user-variant", required=True)
         else:
             s.add_argument("--user-build-dir")
@@ -540,6 +566,13 @@ def main() -> int:
             s.add_argument("--native-rust-rtcd", choices=("0", "1"), default="0")
             s.add_argument("--rust-rtcd-binary", default="")
             s.add_argument("--native-rust-ufsd", choices=("0", "1"), default="0")
+            s.add_argument("--native-rust-ufsd-ext4-orphan", choices=("0", "1"), default="1")
+            s.add_argument("--native-rust-ufsd-test-close-orphan-write-fail-once",
+                           choices=("0", "1"), default="0")
+            s.add_argument("--native-rust-ufsd-test-close-orphan-write-fail-after",
+                           choices=tuple(str(n) for n in range(1, 17)), default="1")
+            s.add_argument("--native-rust-ufsd-test-close-orphan-restore-fail",
+                           choices=("0", "1"), default="0")
             s.add_argument("--rust-ufsd-binary", default="")
     s = sub.add_parser("clean")
     s.add_argument("--find-root", action="append", default=[])

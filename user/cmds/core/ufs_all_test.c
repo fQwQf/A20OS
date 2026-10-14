@@ -20,6 +20,7 @@
  */
 #define _GNU_SOURCE
 #include "../../liba20rt/a20_arch.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,10 +270,15 @@ static int test_ext4_open_unlink(void)
     return 0;
 }
 
-static int test_ext4_close_retry(void)
+static uint8_t g_close_retry_multi_payload[8192];
+
+static int test_ext4_close_retry(int multi)
 {
-    const char *tag = "UXFS_EXT4_CLOSE_RETRY";
-    const char *target = "/uext4/CLOSE-RETRY.BIN";
+    int quarantine = multi == 2;
+    const char *tag = quarantine ? "UXFS_EXT4_CLOSE_QUARANTINE" :
+        (multi ? "UXFS_EXT4_CLOSE_RETRY_MULTI" : "UXFS_EXT4_CLOSE_RETRY");
+    const char *target = multi ? "/uext4/CLOSE-RETRY-MULTI.BIN" :
+                                 "/uext4/CLOSE-RETRY.BIN";
     const char *keeper = "/uext4/CLOSE-KEEPER.BIN";
     spawn_ufsd("/uext4", "2", "ext4");
     if (wait_path("/uext4/hello.txt", 500))
@@ -287,28 +293,76 @@ static int test_ext4_close_retry(void)
            (unsigned long)target_st.st_ino,
            (unsigned long)target_st.st_size,
            (unsigned long)target_st.st_blocks);
-    static const char content[] = "close cleanup retry\n";
-    if (write(fd, content, sizeof(content) - 1) != (ssize_t)(sizeof(content) - 1) ||
-        fsync(fd) != 0)
-        return fail(tag, "initial write/fsync");
+    if (multi) {
+        memset(g_close_retry_multi_payload, 0xa5,
+               sizeof(g_close_retry_multi_payload));
+        for (size_t offset = 0; offset < sizeof(g_close_retry_multi_payload); ) {
+            size_t count = sizeof(g_close_retry_multi_payload) - offset;
+            if (count > 512) count = 512;
+            ssize_t written = write(fd, g_close_retry_multi_payload + offset,
+                                    count);
+            if (written != (ssize_t)count)
+                return fail(tag, "multi-block write");
+            offset += count;
+        }
+        if (fsync(fd) != 0)
+            return fail(tag, "multi-block fsync");
+        if (lseek(fd, 0, SEEK_SET) != 0)
+            return fail(tag, "multi-block rewind");
+        uint8_t readback[sizeof(g_close_retry_multi_payload)];
+        if (read(fd, readback, sizeof(readback)) != (ssize_t)sizeof(readback) ||
+            memcmp(readback, g_close_retry_multi_payload, sizeof(readback)) != 0)
+            return fail(tag, "multi-block data readback");
+        printf("%s: wrote and read back %lu bytes\n", tag,
+               (unsigned long)sizeof(g_close_retry_multi_payload));
+    } else {
+        static const char content[] = "close cleanup retry\n";
+        if (write(fd, content, sizeof(content) - 1) !=
+                (ssize_t)(sizeof(content) - 1))
+            return fail(tag, "initial write");
+    }
+    if (fsync(fd) != 0) return fail(tag, "initial fsync");
     if (unlink(target) != 0) return fail(tag, "unlink final name");
     errno = 0;
     int close_rc = close(fd);
     int close_errno = errno;
-    int close_eio = close_rc < 0 && close_errno == EIO;
-    if (close_rc < 0 && !close_eio)
-        return fail(tag, "first close did not report metadata EIO");
-    if (close_eio)
+    int expected_errno = quarantine ? 117 : EIO;
+    int close_expected = close_rc < 0 && close_errno == expected_errno;
+    printf("%s: first close rc=%d errno=%d\n", tag, close_rc,
+           close_rc < 0 ? close_errno : 0);
+    if (close_expected)
         printf("%s: first close returned errno=%d\n", tag, close_errno);
     else
-        printf("%s: first close returned success despite metadata EIO\n", tag);
+        printf("%s: first close did not return expected errno=%d\n", tag,
+               expected_errno);
+    if (close_rc < 0) {
+        errno = 0;
+        if (fcntl(fd, F_GETFD) != -1 || errno != EBADF)
+            return fail(tag, "failed close did not consume the descriptor");
+        printf("%s: old fd consumed (EBADF)\n", tag);
+    }
+    if (quarantine) {
+        errno = 0;
+        int create_rc = open("/uext4/QUARANTINE-NEW.BIN",
+                             O_CREAT | O_RDWR, 0644);
+        if (create_rc >= 0 || errno != 117)
+            return fail(tag, "mutation was not rejected after fatal rollback");
+        printf("%s: later create rejected errno=117\n", tag);
+        errno = 0;
+        int sync_rc = fsync(keepfd);
+        if (sync_rc == 0 || errno != 117)
+            return fail(tag, "SYNC was not rejected after fatal rollback");
+        printf("%s: later SYNC rejected errno=117\n", tag);
+        printf("%s: PASS\n", tag);
+        return 0;
+    }
     /* The next operation sends OP_SYNC. Rust must retain the zero-open pending
      * lifetime slot after the failed CLOSE and retry the same orphan cleanup. */
     if (fsync(keepfd) != 0) return fail(tag, "sync retry");
     if (close(keepfd) != 0) return fail(tag, "close keeper");
     if (unlink(keeper) != 0) return fail(tag, "remove keeper");
     sync();
-    if (!close_eio)
+    if (!close_expected)
         return fail(tag, "cleanup retried but kernel swallowed close EIO");
     printf("%s: PASS\n", tag);
     return 0;
@@ -494,7 +548,11 @@ int main(int argc, char **argv)
         if (strcmp(argv[1], "lifetime") == 0)
             return test_ext4_open_unlink();
         if (strcmp(argv[1], "close-retry") == 0)
-            return test_ext4_close_retry();
+            return test_ext4_close_retry(0);
+        if (strcmp(argv[1], "close-retry-multi") == 0)
+            return test_ext4_close_retry(1);
+        if (strcmp(argv[1], "close-quarantine") == 0)
+            return test_ext4_close_retry(2);
         if (strcmp(argv[1], "ntfs") == 0)
             return test_ntfs();
         g_ext4_stop_stage = argv[1];

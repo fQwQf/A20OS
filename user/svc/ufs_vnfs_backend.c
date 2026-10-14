@@ -46,6 +46,10 @@ static int         g_ext4_backend;
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
 static volatile uint32_t g_close_orphan_reap_active;
 static volatile uint32_t g_close_orphan_write_failed;
+static volatile uint32_t g_close_orphan_write_count;
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
+static volatile uint32_t g_close_orphan_restore_failed;
+#endif
 extern void a20_ufsd_test_log(const char *line);
 #endif
 
@@ -164,6 +168,13 @@ int64_t vnfs_inode_reap_unlinked(uint64_t ino)
     int64_t ret = ext4_vnode_finalize_unlinked(vn);
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
     __atomic_store_n(&g_close_orphan_reap_active, 0, __ATOMIC_RELEASE);
+    if (ret != 0) {
+        char line[96];
+        int length = snprintf(line, sizeof(line),
+            "UFSD_CLOSE_ORPHAN_REAP_RC: %d", (int)ret);
+        if (length > 0)
+            a20_ufsd_test_log(line);
+    }
     if (ret == 0 && __atomic_load_n(&g_close_orphan_write_failed, __ATOMIC_ACQUIRE))
         a20_ufsd_test_log("UFSD_CLOSE_ORPHAN_RETRY: PASS");
 #endif
@@ -196,7 +207,7 @@ static int dev_read_sector(struct block_dev *dev, uint64_t lba, void *buf,
                            size_t count)
 {
     (void)dev;
-    return fsio_read(lba, buf, (uint32_t)count) ? -1 : 0;
+    return fsio_read(lba, buf, (uint32_t)count) ? -U_EIO : 0;
 }
 
 static int dev_write_sector(struct block_dev *dev, uint64_t lba,
@@ -204,15 +215,39 @@ static int dev_write_sector(struct block_dev *dev, uint64_t lba,
 {
     (void)dev;
     if (g_readonly)
-        return -1;
+        return -U_EROFS;
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
-    if (__atomic_load_n(&g_close_orphan_reap_active, __ATOMIC_ACQUIRE) &&
-        !__atomic_exchange_n(&g_close_orphan_write_failed, 1, __ATOMIC_ACQ_REL)) {
-        a20_ufsd_test_log("UFSD_CLOSE_ORPHAN_WRITE_EIO: HIT");
-        return -1;
+    if (__atomic_load_n(&g_close_orphan_reap_active, __ATOMIC_ACQUIRE)) {
+        uint32_t write_index = __atomic_add_fetch(&g_close_orphan_write_count, 1,
+                                                 __ATOMIC_ACQ_REL);
+        int inject = 0;
+        if (write_index == CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER &&
+            !__atomic_exchange_n(&g_close_orphan_write_failed, 1, __ATOMIC_ACQ_REL))
+            inject = 1;
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
+        if (write_index == CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 1 &&
+            !__atomic_exchange_n(&g_close_orphan_restore_failed, 1, __ATOMIC_ACQ_REL))
+            inject = 1;
+#endif
+        if (inject) {
+            char line[96];
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL
+            const char *kind = write_index ==
+                CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER + 1 ?
+                "UFSD_CLOSE_ORPHAN_RESTORE_EIO: HIT write=%u" :
+                "UFSD_CLOSE_ORPHAN_WRITE_EIO: HIT write=%u";
+#else
+            const char *kind = "UFSD_CLOSE_ORPHAN_WRITE_EIO: HIT write=%u";
+#endif
+            int length = snprintf(line, sizeof(line),
+                                  kind, write_index);
+            if (length > 0)
+                a20_ufsd_test_log(line);
+            return -U_EIO;
+        }
     }
 #endif
-    return fsio_write(lba, buf, (uint32_t)count) ? -1 : 0;
+    return fsio_write(lba, buf, (uint32_t)count) ? -U_EIO : 0;
 }
 
 static int dev_flush(struct block_dev *dev)

@@ -108,6 +108,7 @@ int ext4_fread(vfile_t *vf, char *buf, size_t count) {
 
 int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
+    if (ext4_is_inconsistent(fc->sb)) return -117;
     if (fc->is_dir) return -EISDIR;
     if (count == 0) return 0;
 

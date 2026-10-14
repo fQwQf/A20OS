@@ -22,6 +22,7 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 		--arch "$(ARCH)" --nommu "$(NOMMU)" \
 		--user-build-dir "$(USER_BUILD_DIR)" --user-variant "$(USER_VARIANT)" \
 		--user-opt="$(USER_OPT)" --opt="$(OPT)" --profile "$(PROFILE)" \
+		--envelope-acquire-race-test "$(ENVELOPE_ACQUIRE_RACE_TEST)" \
 		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
 		--skip "*/.git user/build user/external/musl/build-*"
 $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
@@ -34,6 +35,10 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		--native-rust-svcmgr "$(NATIVE_RUST_SVCMGR)" \
 		--native-rust-rtcd "$(NATIVE_RUST_RTCD)" \
 		--native-rust-ufsd "$(NATIVE_RUST_UFSD)" \
+		--native-rust-ufsd-ext4-orphan "$(NATIVE_RUST_UFSD_EXT4_ORPHAN)" \
+		--native-rust-ufsd-test-close-orphan-write-fail-once "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)" \
+		--native-rust-ufsd-test-close-orphan-write-fail-after "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)" \
+		--native-rust-ufsd-test-close-orphan-restore-fail "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)" \
 		--user-build-dir "$(USER_BUILD_DIR)" \
 		--rust-peer-binary "$(RUST_USER_PEER_BIN)" \
 		--rust-service-binary "$(RUST_USER_SERVICE_BIN)" \

@@ -6,6 +6,7 @@ const MAX_OPEN_INODES: usize = 512;
 const ERR_NOENT: i64 = -2;
 const ERR_NOSPC: i64 = -28;
 const ERR_OVERFLOW: i64 = -24;
+const ERR_INCONSISTENT: i64 = -117;
 
 #[derive(Clone, Copy)]
 struct Slot {
@@ -21,10 +22,31 @@ impl Slot {
 
 pub struct Lifetimes {
     slots: [Slot; MAX_OPEN_INODES],
+    quarantined: bool,
 }
 
 impl Lifetimes {
-    pub const fn new() -> Self { Self { slots: [Slot::EMPTY; MAX_OPEN_INODES] } }
+    pub const fn new() -> Self {
+        Self { slots: [Slot::EMPTY; MAX_OPEN_INODES], quarantined: false }
+    }
+
+    /// Stop requests after allocation metadata could not be restored to a
+    /// known state. This is sticky for the current service generation;
+    /// restart-time recovery remains a separate on-disk contract.
+    pub fn quarantine(&mut self) { self.quarantined = true; }
+
+    pub fn is_quarantined(&self) -> bool { self.quarantined }
+
+    /// Apply the dispatcher policy to a status returned by a backend
+    /// operation. Production dispatch uses this after every opcode result.
+    pub fn observe_result(&mut self, result: i64, inconsistent: i64) -> i64 {
+        if result == inconsistent { self.quarantine(); }
+        result
+    }
+
+    pub fn request_allowed(&self, opcode: u32, init_opcode: u32) -> bool {
+        !self.quarantined || opcode == init_opcode
+    }
 
     fn find(&self, ino: u64) -> Option<usize> {
         self.slots.iter().position(|slot| slot.occupied && slot.ino == ino)
@@ -32,6 +54,11 @@ impl Lifetimes {
 
     pub fn is_open(&self, ino: u64) -> bool {
         self.find(ino).is_some_and(|index| self.slots[index].opens != 0)
+    }
+
+    #[cfg(ufsd_test_close_orphan)]
+    pub fn open_count(&self, ino: u64) -> u32 {
+        self.find(ino).map_or(0, |index| self.slots[index].opens)
     }
 
     pub fn opened(&mut self, ino: u64) -> i64 {
@@ -130,6 +157,26 @@ mod tests {
         assert_eq!(state.opened(19), ERR_NOENT);
         assert_eq!(state.reaped(19), Ok(()));
         let mut cursor = 0;
+        assert_eq!(state.pending(&mut cursor), None);
+    }
+
+    #[test]
+    fn inconsistent_release_quarantine_is_sticky_and_does_not_clear_pending() {
+        let mut state = Lifetimes::new();
+        assert_eq!(state.opened(31), 0);
+        assert!(!state.unlinked(31));
+        assert_eq!(state.closed(31), Ok(true));
+        // Model a mutating C adapter callback whose compensating write also
+        // failed; the same result path is used by dispatch_request.
+        assert_eq!(state.observe_result(-117, ERR_INCONSISTENT), -117);
+        assert!(state.is_quarantined());
+        assert!(state.request_allowed(1, 1));
+        assert!(!state.request_allowed(2, 1));
+        assert_eq!(ERR_INCONSISTENT, -117);
+        let mut cursor = 0;
+        assert_eq!(state.pending(&mut cursor), Some(31));
+        // The service must not acknowledge a reap after fatal metadata
+        // uncertainty; only a confirmed adapter success can clear the slot.
         assert_eq!(state.pending(&mut cursor), None);
     }
 }
