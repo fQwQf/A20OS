@@ -270,6 +270,11 @@ static inline void vnode_shared_map_dec(vnode_t *vn)
 typedef struct vfile {
     vnode_t        *vnode;
     uint64_t        identity;
+    /* Immutable A20 envelope object class. Zero means an ordinary FILE unless
+     * the vfile's operations identify a socket. Set before fdtable publish;
+     * it follows the open-file object across dup/fork and is never cleared by
+     * closing one descriptor alias. */
+    uint8_t         envelope_kind;
     int             flags;
     size_t          offset;
     mutex_t         offset_lock;
@@ -324,10 +329,13 @@ typedef struct mount {
     char            opts[256];      /* mount options */
     vnode_t        *root;           /* root vnode of this mount */
     void           *fs_data;
-    /* Number of mount namespaces whose table still holds this entry.  1 for a
-     * namespace-private mount.  The filesystem teardown runs only when the
-     * last namespace drops it; VFS_MOUNT_NS_SHARED marks the shared case. */
+    /* Number of namespace entries which depend on this source mount.  The
+     * source entry owns one hold; each copied-namespace entry keeps an
+     * explicit shared_source pointer and contributes another hold. */
     int             ns_users;
+    struct mount   *shared_source;  /* non-NULL only on a namespace copy */
+    int             teardown_running; /* protected by the mount-table lock */
+    int             publish_ready; /* fields/tree are initialized for lookup */
     /* Graveyard link: after umount the object stays allocated (vnode->mnt,
      * dcache and quota caches may still point at it) until its namespace is
      * torn down. */

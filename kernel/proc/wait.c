@@ -63,8 +63,11 @@ static task_t *wait_group_start_locked(task_t *t, int options)
 }
 
 static int wait_child_matches_locked(task_t *child, task_t *waiting_task,
-                                     int pid, int options)
+                                     int pid, int options,
+                                     task_t *target_task)
 {
+    if (target_task && child != target_task)
+        return 0;
     if (!wait_is_child_for_waiter_locked(child, waiting_task, options))
         return 0;
     if (pid > 0 && child->pid != pid)
@@ -76,7 +79,8 @@ static int wait_child_matches_locked(task_t *child, task_t *waiting_task,
     return 1;
 }
 
-int proc_wait4(int pid, int *status, int options)
+static int proc_wait4_internal(int pid, task_t *target_task, int *status,
+                               int options)
 {
     task_t *t = proc_current();
 
@@ -95,7 +99,8 @@ int proc_wait4(int pid, int *status, int options)
                 task_t *next = child->sibling_next;
                 int cstate = proc_task_state_get(child);
                 if (cstate != PROC_UNUSED &&
-                    wait_child_matches_locked(child, t, pid, options)) {
+                    wait_child_matches_locked(child, t, pid, options,
+                                              target_task)) {
                     found = 1;
                     if (cstate == PROC_ZOMBIE &&
                         !proc_tg_group_dead_locked(child)) {
@@ -218,6 +223,21 @@ int proc_wait4(int pid, int *status, int options)
         if (proc_wake_reason_is_task_interrupt(reason) || sig)
             return -ERESTARTSYS;
     }
+}
+
+int proc_wait4(int pid, int *status, int options)
+{
+    return proc_wait4_internal(pid, NULL, status, options);
+}
+
+/* @target_task is pinned by the caller for the full wait. Matching by pointer
+ * keeps P_PIDFD stable across PID reuse while retaining the ordinary child,
+ * thread-group, wait-option, and reap rules. */
+int proc_wait4_task(task_t *target_task, int *status, int options)
+{
+    if (!target_task)
+        return -ESRCH;
+    return proc_wait4_internal(-1, target_task, status, options);
 }
 
 int proc_wait(int *status)

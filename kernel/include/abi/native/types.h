@@ -650,7 +650,7 @@ typedef struct a20_fs_block_io_args {
     uint32_t       size;
     uint32_t       version;
     int32_t        block_index;
-    uint32_t       write;           /* 0 = read, 1 = write */
+    uint32_t       write;           /* 0=read; nonzero=write; v1 count=0/write=2/buf=0=flush; v2 same with buf!=0 queries flush support */
     uint64_t       lba;
     uint32_t       count;           /* sector count */
     uint32_t       _pad;

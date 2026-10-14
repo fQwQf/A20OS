@@ -31,6 +31,11 @@ typedef struct vfile vfile_t;
  */
 typedef struct files_struct {
     spinlock_t lock;
+    /* fdtable registry membership protects scans of both published and
+     * private/in-progress tables. Never acquire the registry lock while
+     * holding this table's lock. */
+    struct files_struct *registry_next;
+    bool registry_registered;
     wait_queue_t readiness_waiters;
     refcount_t refcount;
     int     owners;
@@ -45,6 +50,20 @@ struct vfile;
 
 void fdtable_init(task_t *task);
 void fdtable_init_stdio(task_t *task);
+/* Checked inheritance copy. Validates slot/bitmap/cloexec correspondence;
+ * source next_fd is a trusted search hint copied verbatim (allocation clamps
+ * and falls back to the bitmap). The private destination starts next_fd=0.
+ * Builds a private table and publishes it only after
+ * validation/reference acquisition succeeds. Replaces an existing dst table
+ * on success; on error dst->files, its owner count, and all of its slot refs
+ * are unchanged. src must remain a live task for the duration of the call;
+ * its files_struct is independently pinned under src->park_lock. Returns
+ * -ENOMEM for table-allocation failure, -EBADF for malformed source, and
+ * -ESRCH when src or its descriptor table is absent. A future fallible
+ * reference callback error is propagated; production vfile_get() is
+ * infallible. */
+int fdtable_copy_checked(task_t *dst, const task_t *src);
+/* Panic-on-error compatibility entry point for legacy void initializers. */
 void fdtable_copy(task_t *dst, const task_t *src);
 void fdtable_share(task_t *dst, const task_t *src);
 int  fdtable_unshare(task_t *task);
@@ -61,6 +80,13 @@ void fdtable_close_on_exec(task_t *task);
  * failing that, the current task's table) is used. */
 struct vfile *fdtable_get_file_ref(task_t *task, int fd, int *cloexec);
 struct vfile *fdtable_get_current_file_ref(int fd);
+/* Run a short nonblocking callback while local_fd still names expected_vf.
+ * The callback runs with files_struct.lock held (therefore it may take
+ * envelope.lock, but must never allocate, sleep, copy user data, signal tasks,
+ * or call VFS). expected_vf must remain pinned by the caller. */
+int fdtable_with_current_vfile(int local_fd, vfile_t *expected_vf,
+                               int (*callback)(vfile_t *, void *),
+                               void *context);
 /* Validate that @fd is open in @task; returns @fd or -EBADF.  Same-task
  * callers can feed the result straight back into the vfs_* fd API. */
 int  fdtable_get(task_t *task, int fd);
@@ -76,6 +102,12 @@ int  fdtable_close_current(int fd);
 /* Release a slot in @files directly.  For descriptors that live in the boot
  * table, which fdtable_close() cannot reach because it has no owning task. */
 int  fdtable_close_files(files_struct_t *files, int fd, int pid);
+/* Close only when the descriptor still names expected_vf. Used to roll back
+ * fd installs after a copyout failure without closing a concurrent reuse. */
+int  fdtable_close_files_if_file(files_struct_t *files, int fd, int pid,
+                                 vfile_t *expected_vf);
+int  fdtable_close_if_file(task_t *task, int fd, vfile_t *expected_vf);
+int  fdtable_close_current_if_file(int fd, vfile_t *expected_vf);
 /* Release a slot in the caller's table: the current task's, or the boot table
  * when there is no current task. */
 int  fdtable_close_active(int fd);
@@ -85,9 +117,14 @@ int  fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags);
 int  fdtable_get_cloexec(task_t *task, int fd);
 int  fdtable_set_cloexec(task_t *task, int fd, int cloexec);
 wait_queue_t *fdtable_current_readiness_queue(void);
+/* Global wake source for readiness watches that retain a VFile directly and
+ * must observe its final descriptor-slot close in any task's table. */
+wait_queue_t *fdtable_global_close_readiness_queue(void);
 /* True when @fd currently resolves to the same open file (same vfile and
  * identity) it had when @vf/@identity were recorded. */
 bool fdtable_current_matches_file(int fd, vfile_t *vf, uint64_t identity);
+/* True if any live task/boot descriptor slot currently owns this vfile. */
+bool fdtable_file_has_open_slot(vfile_t *vf);
 /* System-wide count of open fd slots across every task table (plus the boot
  * table).  Backs /proc-style fd accounting. */
 size_t fdtable_open_fd_count(void);

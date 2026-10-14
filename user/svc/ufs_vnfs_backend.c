@@ -27,6 +27,8 @@
 
 extern int  fsio_read(uint32_t lba, void *buf, uint32_t count);
 extern int  fsio_write(uint32_t lba, const void *buf, uint32_t count);
+extern int  fsio_flush(void);
+extern int  fsio_flush_supported(void);
 extern uint64_t fsio_capacity_sectors(void);
 
 #define VNFS_MAX_NODES 512
@@ -40,6 +42,12 @@ static bcache_t   *g_bc;
 static vnode_t    *g_root;
 static vn_node_t   g_nodes[VNFS_MAX_NODES];
 static int         g_readonly;
+static int         g_ext4_backend;
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
+static volatile uint32_t g_close_orphan_reap_active;
+static volatile uint32_t g_close_orphan_write_failed;
+extern void a20_ufsd_test_log(const char *line);
+#endif
 
 static vnode_t *vn_map_get(uint64_t ino)
 {
@@ -49,15 +57,37 @@ static vnode_t *vn_map_get(uint64_t ino)
     return 0;
 }
 
-static void vn_map_insert(uint64_t ino, vnode_t *vn)
+static int vn_map_insert(uint64_t ino, vnode_t *vn, vnode_t **canonical)
 {
+    if (!vn)
+        return -U_EINVAL;
+    /* The inode registry owns one vnode reference per inode, not per lookup.
+     * Filesystem lookup/create returns a caller reference; duplicate paths
+     * must release that reference instead of creating an alias entry. */
+    for (int i = 0; i < VNFS_MAX_NODES; i++) {
+        if (g_nodes[i].vn && g_nodes[i].ino == ino) {
+            /* Backends may return distinct vnode objects for the same inode.
+             * The map's object is canonical; publish it before dropping the
+             * caller's temporary reference. */
+            if (canonical)
+                *canonical = g_nodes[i].vn;
+            vnode_put(vn);
+            return 0;
+        }
+    }
     for (int i = 0; i < VNFS_MAX_NODES; i++) {
         if (!g_nodes[i].vn) {
             g_nodes[i].ino = ino;
             g_nodes[i].vn = vn;
-            return;
+            if (canonical)
+                *canonical = vn;
+            return 0;
         }
     }
+    /* A full bounded map must fail the request and release the unregistered
+     * vnode; silently returning an ino would create an unreachable handle. */
+    vnode_put(vn);
+    return -U_ENOSPC;
 }
 
 static void vn_map_drop(uint64_t ino)
@@ -66,9 +96,88 @@ static void vn_map_drop(uint64_t ino)
         if (g_nodes[i].vn && g_nodes[i].ino == ino) {
             vnode_put(g_nodes[i].vn);
             g_nodes[i].vn = 0;
-            return;
         }
     }
+}
+
+static int vn_map_has_room(uint64_t ino)
+{
+    for (int i = 0; i < VNFS_MAX_NODES; i++)
+        if (g_nodes[i].vn && g_nodes[i].ino == ino)
+            return 1;
+    for (int i = 0; i < VNFS_MAX_NODES; i++)
+        if (!g_nodes[i].vn)
+            return 1;
+    return 0;
+}
+
+int64_t vnfs_has_inode(uint64_t ino)
+{
+    return vn_map_get(ino) ? 0 : -U_ESTALE;
+}
+
+int64_t vnfs_inode_open(uint64_t ino)
+{
+    for (int i = 0; i < VNFS_MAX_NODES; i++) {
+        if (g_nodes[i].vn && g_nodes[i].ino == ino) {
+            /* Rust owns the bounded open count. The adapter only supplies one
+             * vnode reference per successful OPEN RPC. */
+            vnode_get(g_nodes[i].vn);
+            return 0;
+        }
+    }
+    return -U_ESTALE;
+}
+
+int64_t vnfs_inode_close(uint64_t ino)
+{
+    for (int i = 0; i < VNFS_MAX_NODES; i++) {
+        if (g_nodes[i].vn && g_nodes[i].ino == ino) {
+            vnode_put(g_nodes[i].vn);
+            return 0;
+        }
+    }
+    return -U_ESTALE;
+}
+
+int64_t vnfs_inode_link_count(uint64_t ino, uint64_t *links_out)
+{
+    vnode_t *vn = vn_map_get(ino);
+    if (!vn || !links_out) return -U_ESTALE;
+    if (!vn->ops || !vn->ops->stat) return -U_ENOSYS;
+    kstat_t st;
+    memset(&st, 0, sizeof(st));
+    int rc = vn->ops->stat(vn, &st);
+    if (rc != 0) return rc;
+    *links_out = st.st_nlink;
+    return 0;
+}
+
+int64_t vnfs_inode_reap_unlinked(uint64_t ino)
+{
+    vnode_t *vn = vn_map_get(ino);
+    if (!vn) return -U_ESTALE;
+    if (!g_ext4_backend) return 0;
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
+    __atomic_store_n(&g_close_orphan_reap_active, 1, __ATOMIC_RELEASE);
+#endif
+    int64_t ret = ext4_vnode_finalize_unlinked(vn);
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
+    __atomic_store_n(&g_close_orphan_reap_active, 0, __ATOMIC_RELEASE);
+    if (ret == 0 && __atomic_load_n(&g_close_orphan_write_failed, __ATOMIC_ACQUIRE))
+        a20_ufsd_test_log("UFSD_CLOSE_ORPHAN_RETRY: PASS");
+#endif
+    return ret;
+}
+
+int64_t vnfs_inode_drop(uint64_t ino)
+{
+    if (!vn_map_get(ino)) return 0;
+    /* Rust may drop the registry reference only after its own OPEN count
+     * reaches zero. Per-open vnode references are independent and remain
+     * valid if a malformed peer attempts an early drop. */
+    vn_map_drop(ino);
+    return 0;
 }
 
 static uint8_t ft_of(const vnode_t *vn)
@@ -96,7 +205,20 @@ static int dev_write_sector(struct block_dev *dev, uint64_t lba,
     (void)dev;
     if (g_readonly)
         return -1;
+#ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
+    if (__atomic_load_n(&g_close_orphan_reap_active, __ATOMIC_ACQUIRE) &&
+        !__atomic_exchange_n(&g_close_orphan_write_failed, 1, __ATOMIC_ACQ_REL)) {
+        a20_ufsd_test_log("UFSD_CLOSE_ORPHAN_WRITE_EIO: HIT");
+        return -1;
+    }
+#endif
     return fsio_write(lba, buf, (uint32_t)count) ? -1 : 0;
+}
+
+static int dev_flush(struct block_dev *dev)
+{
+    (void)dev;
+    return fsio_flush();
 }
 
 int vnfs_mount_generic(const char *fstype)
@@ -104,6 +226,7 @@ int vnfs_mount_generic(const char *fstype)
     static block_dev_t dev;
     dev.read_sector = dev_read_sector;
     dev.write_sector = dev_write_sector;
+    dev.flush = fsio_flush_supported() ? dev_flush : NULL;
     dev.sector_size = 512;
     dev.capacity = fsio_capacity_sectors() * 512ull;
     dev.priv = 0;
@@ -113,12 +236,15 @@ int vnfs_mount_generic(const char *fstype)
         return -U_EIO;
 
     if (strcmp(fstype, "ext4") == 0) {
+        g_ext4_backend = 1;
         g_root = ext4_mount(g_bc);
         g_readonly = 0;
     } else if (strcmp(fstype, "iso9660") == 0) {
+        g_ext4_backend = 0;
         g_root = isofs_mount(g_bc);
         g_readonly = 1;
     } else     if (strcmp(fstype, "ntfs") == 0) {
+        g_ext4_backend = 0;
         /* The kernel ntfs write path is already covered by the in-tree
          * end-to-end tests in smoke-native-fs-all (create/write-read/directory/
          * delete/crash restart persistence), so read-write semantics are
@@ -145,7 +271,37 @@ int vnfs_mount_generic(const char *fstype)
 
     for (int i = 0; i < VNFS_MAX_NODES; i++)
         g_nodes[i].vn = 0;
-    vn_map_insert(UFS_ROOT_INO, g_root);
+    if (vn_map_insert(UFS_ROOT_INO, g_root, NULL) < 0) {
+        g_root = NULL;
+        return -U_ENOSPC;
+    }
+    return 0;
+}
+
+/* Explicit compatibility fallback used only by the Rust service policy.
+ * ext4_mount_flags permits this only for a clean legacy-checksum journal; all
+ * writes are then rejected by both the backend operations and sector callback. */
+int vnfs_mount_generic_readonly(const char *fstype)
+{
+    if (!fstype || strcmp(fstype, "ext4") != 0 || !g_bc || g_root)
+        return -U_EINVAL;
+    g_ext4_backend = 1;
+    g_readonly = 1;
+    g_root = ext4_mount_flags(g_bc, VFS_MOUNT_RDONLY);
+    if (!g_root) {
+        g_readonly = 0;
+        return -U_EINVAL;
+    }
+    if (g_root->type != VFS_FT_DIR) {
+        g_root->type = VFS_FT_DIR;
+        g_root->mode = (g_root->mode & 07777u) | 0040000u;
+    }
+    for (int i = 0; i < VNFS_MAX_NODES; i++)
+        g_nodes[i].vn = 0;
+    if (vn_map_insert(UFS_ROOT_INO, g_root, NULL) < 0) {
+        g_root = NULL;
+        return -U_ENOSPC;
+    }
     return 0;
 }
 
@@ -175,10 +331,16 @@ static int64_t vn_lookup(uint64_t dir_ino, const char *name,
         put_fail(r, rc);
         return rc;
     }
-    vn_map_insert(out->ino, out);
-    r->out0 = out->ino;
-    r->out1 = ft_of(out);
-    r->out2 = ((uint64_t)out->mode << 32) | (uint32_t)out->size;
+    vnode_t *canonical = NULL;
+    uint64_t ino = out->ino;
+    int mapped = vn_map_insert(ino, out, &canonical);
+    if (mapped < 0) {
+        put_fail(r, mapped);
+        return mapped;
+    }
+    r->out0 = canonical->ino;
+    r->out1 = ft_of(canonical);
+    r->out2 = ((uint64_t)canonical->mode << 32) | (uint32_t)canonical->size;
     return 0;
 }
 
@@ -266,8 +428,16 @@ static int64_t vn_create(uint64_t dir_ino, const char *name, uint32_t mode,
         put_fail(r, -U_ESTALE);
         return r->status;
     }
+    if (g_readonly) {
+        put_fail(r, -U_EROFS);
+        return r->status;
+    }
     if (!dir->ops || !dir->ops->create) {
-        put_fail(r, g_readonly ? -U_EROFS : -U_ENOSYS);
+        put_fail(r, -U_ENOSYS);
+        return r->status;
+    }
+    if (!vn_map_has_room(0)) {
+        put_fail(r, -U_ENOSPC);
         return r->status;
     }
     vnode_t *out = NULL;
@@ -276,8 +446,13 @@ static int64_t vn_create(uint64_t dir_ino, const char *name, uint32_t mode,
         put_fail(r, rc);
         return rc;
     }
-    vn_map_insert(out->ino, out);
-    r->out0 = out->ino;
+    uint64_t ino = out->ino;
+    int mapped = vn_map_insert(ino, out, NULL);
+    if (mapped < 0) {
+        put_fail(r, mapped);
+        return mapped;
+    }
+    r->out0 = ino;
     return 0;
 }
 
@@ -289,10 +464,16 @@ static int64_t vn_mkdir(uint64_t dir_ino, const char *name,
         put_fail(r, -U_ESTALE);
         return r->status;
     }
-    if (!dir->ops || !dir->ops->mkdir) {
-        put_fail(r, g_readonly ? -U_EROFS : -U_ENOSYS);
+    if (g_readonly) {
+        put_fail(r, -U_EROFS);
         return r->status;
     }
+    if (!dir->ops || !dir->ops->mkdir) {
+        put_fail(r, -U_ENOSYS);
+        return r->status;
+    }
+    if (!vn_map_has_room(0))
+        return -U_ENOSPC;
     int rc = dir->ops->mkdir(dir, name, 0755);
     if (rc != 0) {
         put_fail(r, rc);
@@ -302,8 +483,13 @@ static int64_t vn_mkdir(uint64_t dir_ino, const char *name,
     vnode_t *created = NULL;
     if (dir->ops->lookup && dir->ops->lookup(dir, name, &created) == 0 &&
         created) {
-        vn_map_insert(created->ino, created);
-        r->out0 = created->ino;
+        uint64_t ino = created->ino;
+        int mapped = vn_map_insert(ino, created, NULL);
+        if (mapped < 0) {
+            put_fail(r, mapped);
+            return mapped;
+        }
+        r->out0 = ino;
     }
     return 0;
 }
@@ -311,8 +497,10 @@ static int64_t vn_mkdir(uint64_t dir_ino, const char *name,
 static int64_t vn_unlink(uint64_t dir_ino, const char *name)
 {
     vnode_t *dir = vn_map_get(dir_ino);
+    if (dir && g_readonly)
+        return -U_EROFS;
     if (!dir || !dir->ops || !dir->ops->unlink)
-        return g_readonly ? -U_EROFS : -U_ENOSYS;
+        return -U_ENOSYS;
 
     /* Resolve the target first so the mapping can be invalidated */
     vnode_t *victim = NULL;
@@ -321,19 +509,30 @@ static int64_t vn_unlink(uint64_t dir_ino, const char *name)
 
     int rc = dir->ops->unlink(dir, name);
     if (victim) {
-        if (rc == 0)
-            vn_map_drop(victim->ino);
-        else
-            vnode_put(victim); /* lookup reference */
+        /* Rust decides whether this was the final hard link from the post-
+         * unlink stat result. This adapter keeps the canonical map entry. */
+        vnode_put(victim); /* lookup reference, independent of map ownership */
     }
     return rc;
+}
+
+int64_t vnfs_link(uint64_t dir_ino, const char *name, uint64_t target_ino)
+{
+    vnode_t *dir = vn_map_get(dir_ino);
+    vnode_t *target = vn_map_get(target_ino);
+    if (g_readonly) return -U_EROFS;
+    if (!dir || !target) return -U_ESTALE;
+    if (!dir->ops || !dir->ops->link) return -U_ENOSYS;
+    return dir->ops->link(dir, name, target);
 }
 
 static int64_t vn_rmdir(uint64_t dir_ino, const char *name)
 {
     vnode_t *dir = vn_map_get(dir_ino);
+    if (dir && g_readonly)
+        return -U_EROFS;
     if (!dir || !dir->ops || !dir->ops->rmdir)
-        return g_readonly ? -U_EROFS : -U_ENOSYS;
+        return -U_ENOSYS;
 
     vnode_t *victim = NULL;
     if (dir->ops->lookup)
@@ -343,8 +542,7 @@ static int64_t vn_rmdir(uint64_t dir_ino, const char *name)
     if (victim) {
         if (rc == 0)
             vn_map_drop(victim->ino);
-        else
-            vnode_put(victim);
+        vnode_put(victim); /* lookup reference, independent of map ownership */
     }
     return rc;
 }
@@ -354,8 +552,10 @@ static int64_t vn_truncate(uint64_t ino, uint64_t size)
     vnode_t *vn = vn_map_get(ino);
     if (!vn)
         return -U_ESTALE;
+    if (g_readonly)
+        return -U_EROFS;
     if (!vn->ops || !vn->ops->truncate)
-        return g_readonly ? -U_EROFS : -U_ENOSYS;
+        return -U_ENOSYS;
     return vn->ops->truncate(vn, (size_t)size);
 }
 
@@ -365,11 +565,13 @@ static int64_t vn_rw_open(uint64_t ino, int write, vfile_t **out_vf,
     vnode_t *vn = vn_map_get(ino);
     if (!vn)
         return -U_ESTALE;
+    if (write && g_readonly)
+        return -U_EROFS;
     if (!vn->ops || !vn->ops->open)
         return -U_ENOSYS;
     vfile_t *vf = vn->ops->open(vn, write ? 1 : 0);
     if (!vf)
-        return write && g_readonly ? -U_EROFS : -U_EIO;
+        return -U_EIO;
     *out_vf = vf;
     *out_vn = vn;
     return 0;
@@ -454,8 +656,12 @@ static int64_t vn_rename(uint64_t old_dir, const char *old_name,
         put_fail(r, -U_ESTALE);
         return r->status;
     }
+    if (g_readonly) {
+        put_fail(r, -U_EROFS);
+        return r->status;
+    }
     if (!od->ops || !od->ops->rename) {
-        put_fail(r, g_readonly ? -U_EROFS : -U_ENOSYS);
+        put_fail(r, -U_ENOSYS);
         return r->status;
     }
     int rc = od->ops->rename(od, old_name, nd, new_name, 0);
@@ -466,9 +672,7 @@ static int64_t vn_rename(uint64_t old_dir, const char *old_name,
 
 static int64_t vn_sync(void)
 {
-    if (g_bc)
-        bcache_sync(g_bc);
-    return 0;
+    return g_bc ? bcache_sync_checked(g_bc) : -U_EIO;
 }
 
 static void vn_statfs(ufs_resp_hdr_t *r)

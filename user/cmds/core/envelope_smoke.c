@@ -700,7 +700,68 @@ int main(void)
     }
 
     {
-        /* T13: attaching a shm segment requires the MEMORY class
+        /* T13: a later transfer acquisition of the same open-file object
+         * must not widen a READ grant shared through one envelope. */
+        struct env_policy pe;
+        policy_file_rw(&pe);
+        long id13 = env_create(&pe);
+        if (id13 < 0)
+            return 1;
+        int init = open("/tmp/env_reacquire.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (init < 0 || write(init, "r", 1) != 1)
+            return 1;
+        close(init);
+        pid_t owner13 = fork();
+        if (owner13 < 0)
+            return 1;
+        if (owner13 == 0) {
+            if (env_enter(id13) < 0)
+                _exit(131);
+            int ro = open("/tmp/env_reacquire.txt", O_RDONLY);
+            if (ro < 0)
+                _exit(132);
+            pid_t receiver = fork();
+            if (receiver < 0)
+                _exit(133);
+            if (receiver == 0) {
+                long pfd = syscall(434 /* SYS_pidfd_open */, getppid(), 0);
+                if (pfd < 0)
+                    _exit(134);
+                long stolen = syscall(438 /* SYS_pidfd_getfd */, pfd, ro, 0);
+                if (stolen < 0)
+                    _exit(135);
+                char path[64];
+                snprintf(path, sizeof(path), "/proc/self/fd/%ld", stolen);
+                int reopened = open(path, O_RDWR);
+                if (reopened < 0)
+                    _exit(136);
+                errno = 0;
+                if (!(write(reopened, "w", 1) < 0 && errno == EACCES))
+                    _exit(137);
+                close(reopened);
+                close((int)stolen);
+                close((int)pfd);
+                _exit(0);
+            }
+            int child_status = 0;
+            if (waitpid(receiver, &child_status, 0) != receiver ||
+                !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0)
+                _exit(138);
+            close(ro);
+            _exit(0);
+        }
+        int owner_status = 0;
+        if (waitpid(owner13, &owner_status, 0) != owner13 ||
+            !WIFEXITED(owner_status) || WEXITSTATUS(owner_status) != 0) {
+            printf("ENVELOPE_SMOKE: reacquire-readonly FAIL st=%d\n", owner_status);
+            failures++;
+        } else {
+            printf("ENVELOPE_SMOKE: reacquire-readonly PASS\n");
+        }
+    }
+
+    {
+        /* T14: attaching a shm segment requires the MEMORY class
          * (05 §2.5.1 A5). */
         struct env_policy pd;
         policy_file_rw(&pd); /* MEMORY absent */
@@ -728,6 +789,144 @@ int main(void)
             printf("ENVELOPE_SMOKE: shmat-deny PASS\n");
         } else {
             printf("ENVELOPE_SMOKE: shmat-deny FAIL st=%d\n", st13);
+            failures++;
+        }
+    }
+
+    /* T14: the creator exits while a separately forked, previously
+     * unenveloped worker remains attached and can still use its authority. */
+    {
+        int id_pipe[2], ready_pipe[2], go_pipe[2], owner_pipe[2], done_pipe[2];
+        if (pipe(id_pipe) < 0 || pipe(ready_pipe) < 0 || pipe(go_pipe) < 0 ||
+            pipe(owner_pipe) < 0 || pipe(done_pipe) < 0)
+            return 1;
+        pid_t owner = fork();
+        if (owner < 0)
+            return 1;
+        if (owner == 0) {
+            close(id_pipe[0]);
+            close(ready_pipe[0]); close(ready_pipe[1]);
+            close(go_pipe[0]); close(go_pipe[1]);
+            close(owner_pipe[1]);
+            close(done_pipe[0]); close(done_pipe[1]);
+            struct env_policy p;
+            policy_file_rw(&p);
+            long id = env_create(&p);
+            if (id < 0 || write(id_pipe[1], &id, sizeof(id)) !=
+                              (ssize_t)sizeof(id))
+                _exit(123);
+            char release;
+            if (read(owner_pipe[0], &release, 1) != 1)
+                _exit(124);
+            _exit(0); /* releases the creator reference */
+        }
+        close(id_pipe[1]);
+        close(owner_pipe[0]);
+        long id = -1;
+        if (read(id_pipe[0], &id, sizeof(id)) != (ssize_t)sizeof(id) ||
+            id < 0) {
+            printf("ENVELOPE_SMOKE: owner-exit-attached FAIL create/read id\n");
+            failures++;
+            (void)write(owner_pipe[1], "X", 1);
+            (void)waitpid(owner, NULL, 0);
+        } else {
+            pid_t worker = fork();
+            if (worker < 0) {
+                printf("ENVELOPE_SMOKE: owner-exit-attached FAIL worker fork\n");
+                failures++;
+                (void)write(owner_pipe[1], "X", 1);
+                (void)waitpid(owner, NULL, 0);
+                close(id_pipe[0]); close(ready_pipe[0]); close(go_pipe[1]);
+                close(owner_pipe[1]); close(done_pipe[0]);
+                return 1;
+            }
+            if (worker == 0) {
+                close(id_pipe[0]);
+                close(ready_pipe[0]);
+                close(go_pipe[1]);
+                close(owner_pipe[1]);
+                close(done_pipe[0]);
+                if (env_enter(id) < 0 || write(ready_pipe[1], "R", 1) != 1)
+                    _exit(125);
+                char go;
+                if (read(go_pipe[0], &go, 1) != 1)
+                    _exit(126);
+                int fd = open("/tmp/env_owner_exit.txt",
+                              O_CREAT | O_TRUNC | O_WRONLY, 0644);
+                if (fd < 0 || write(fd, "alive", 5) != 5)
+                    _exit(127);
+                close(fd);
+                if (write(done_pipe[1], "D", 1) != 1)
+                    _exit(128);
+                _exit(0);
+            }
+            close(ready_pipe[1]);
+            close(go_pipe[0]);
+            close(done_pipe[1]);
+            char ready;
+            int owner_status = 0;
+            if (read(ready_pipe[0], &ready, 1) != 1 ||
+                write(owner_pipe[1], "X", 1) != 1 ||
+                waitpid(owner, &owner_status, 0) != owner ||
+                !WIFEXITED(owner_status) || WEXITSTATUS(owner_status) != 0 ||
+                write(go_pipe[1], "G", 1) != 1) {
+                printf("ENVELOPE_SMOKE: owner-exit-attached FAIL status=%d\n",
+                       owner_status);
+                failures++;
+            } else {
+                char done;
+                if (read(done_pipe[0], &done, 1) == 1)
+                    printf("ENVELOPE_SMOKE: owner-exit-attached PASS\n");
+                else {
+                    printf("ENVELOPE_SMOKE: owner-exit-attached FAIL worker completion missing\n");
+                    failures++;
+                }
+            }
+        }
+        close(id_pipe[0]); close(ready_pipe[0]); close(go_pipe[1]);
+        close(owner_pipe[1]); close(done_pipe[0]);
+
+        int cycle_pipe[2];
+        if (pipe(cycle_pipe) < 0)
+            return 1;
+        long stale_id = -1;
+        for (int i = 0; i < 1025; i++) {
+            pid_t owner = fork();
+            if (owner < 0)
+                return 1;
+            if (owner == 0) {
+                close(cycle_pipe[0]);
+                struct env_policy cycle_policy;
+                policy_file_rw(&cycle_policy);
+                long id = env_create(&cycle_policy);
+                if (id < 0)
+                    _exit(121);
+                if (i == 0 && write(cycle_pipe[1], &id, sizeof(id)) !=
+                                  (ssize_t)sizeof(id))
+                    _exit(122);
+                _exit(0);
+            }
+            int owner_status = 0;
+            if (i == 0 && read(cycle_pipe[0], &stale_id, sizeof(stale_id)) !=
+                              (ssize_t)sizeof(stale_id))
+                return 1;
+            if (waitpid(owner, &owner_status, 0) != owner ||
+                !WIFEXITED(owner_status) || WEXITSTATUS(owner_status) != 0) {
+                printf("ENVELOPE_SMOKE: registry-reuse FAIL iteration=%d status=%d\n",
+                       i, owner_status);
+                failures++;
+                break;
+            }
+        }
+        close(cycle_pipe[1]);
+        close(cycle_pipe[0]);
+        errno = 0;
+        long stale_rc = env_enter(stale_id);
+        if (stale_rc == -1 && errno == ENOENT) {
+            printf("ENVELOPE_SMOKE: registry-reuse PASS cycles=1025 stale=ENOENT\n");
+        } else {
+            printf("ENVELOPE_SMOKE: registry-reuse FAIL stale_rc=%ld errno=%d id=%ld\n",
+                   stale_rc, errno, stale_id);
             failures++;
         }
     }

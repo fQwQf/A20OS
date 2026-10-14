@@ -27,6 +27,13 @@ typedef struct readiness_state {
     bool enabled;
 } readiness_state_t;
 
+/* Optional policy hook run synchronously during readiness_scan.  The owner
+ * must keep arg alive for the whole readiness_wait_once call.  Implementations
+ * must be nonblocking and must not retain arg; generation identifies the
+ * source snapshot used for this scan. */
+typedef short (*readiness_filter_fn)(short raw, uint64_t generation,
+                                     void *arg);
+
 typedef struct readiness_interest {
     int fd;                 /* calling task's fd (ignored with F_GLOBAL_FD) */
     struct vfile *vfile;    /* direct target with F_GLOBAL_FD */
@@ -36,6 +43,8 @@ typedef struct readiness_interest {
     uintptr_t cookie;
     uint64_t expected_identity;
     readiness_state_t *state;
+    readiness_filter_fn filter;
+    void *filter_arg;
 } readiness_interest_t;
 
 typedef bool (*readiness_extra_ready_fn)(void *arg);

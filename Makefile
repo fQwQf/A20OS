@@ -538,6 +538,13 @@ PARK_WAIT_IMPL ?= c
 ifeq ($(filter $(PARK_WAIT_IMPL),c rust),)
 $(error PARK_WAIT_IMPL must be c or rust)
 endif
+ifeq ($(ARCH),riscv32)
+ifeq ($(PARK_WAIT_IMPL),rust)
+ifneq ($(NR_CPUS),1)
+$(error PARK_WAIT_IMPL=rust on ARCH=riscv32 currently requires NR_CPUS=1; its 64-bit adapter masks local IRQs but is not cross-hart atomic)
+endif
+endif
+endif
 WAIT_TIMER_IMPL ?= c
 ifeq ($(filter $(WAIT_TIMER_IMPL),c rust),)
 $(error WAIT_TIMER_IMPL must be c or rust)
@@ -570,14 +577,64 @@ VMO_LIFECYCLE_IMPL ?= c
 ifeq ($(filter $(VMO_LIFECYCLE_IMPL),c rust),)
 $(error VMO_LIFECYCLE_IMPL must be c or rust)
 endif
-ifeq ($(VMO_LIFECYCLE_IMPL),rust)
-ifneq ($(VMO_PAGE_IMPL),rust)
-$(error VMO_LIFECYCLE_IMPL=rust requires VMO_PAGE_IMPL=rust)
-endif
-endif
 VMO_PAGER_IMPL ?= c
 ifeq ($(filter $(VMO_PAGER_IMPL),c rust),)
 $(error VMO_PAGER_IMPL must be c or rust)
+endif
+DRIVER_REGISTRY_IMPL ?= c
+ifeq ($(filter $(DRIVER_REGISTRY_IMPL),c rust),)
+$(error DRIVER_REGISTRY_IMPL must be c or rust)
+endif
+VIRTIO_BLK_CORE_IMPL ?= c
+ifeq ($(filter $(VIRTIO_BLK_CORE_IMPL),c rust),)
+$(error VIRTIO_BLK_CORE_IMPL must be c or rust)
+endif
+ENVELOPE_POLICY_IMPL ?= c
+ifeq ($(filter $(ENVELOPE_POLICY_IMPL),c rust),)
+$(error ENVELOPE_POLICY_IMPL must be c or rust)
+endif
+FDTABLE_STATE_IMPL ?= c
+ifeq ($(filter $(FDTABLE_STATE_IMPL),c rust),)
+$(error FDTABLE_STATE_IMPL must be c or rust)
+endif
+EVENTPOLL_STATE_IMPL ?= c
+ifeq ($(filter $(EVENTPOLL_STATE_IMPL),c rust),)
+$(error EVENTPOLL_STATE_IMPL must be c or rust)
+endif
+EVENT_DESCRIPTOR_STATE_IMPL ?= c
+ifeq ($(filter $(EVENT_DESCRIPTOR_STATE_IMPL),c rust),)
+$(error EVENT_DESCRIPTOR_STATE_IMPL must be c or rust)
+endif
+LINUX_SCM_RIGHTS_IMPL ?= c
+ifeq ($(filter $(LINUX_SCM_RIGHTS_IMPL),c rust),)
+$(error LINUX_SCM_RIGHTS_IMPL must be c or rust)
+endif
+LINUX_MMSG_TXN_IMPL ?= c
+ifeq ($(filter $(LINUX_MMSG_TXN_IMPL),c rust),)
+$(error LINUX_MMSG_TXN_IMPL must be c or rust)
+endif
+NET_SOCKET_QUEUE_IMPL ?= c
+ifeq ($(filter $(NET_SOCKET_QUEUE_IMPL),c rust),)
+$(error NET_SOCKET_QUEUE_IMPL must be c or rust)
+endif
+ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
+ifeq ($(filter $(ABI),linux both),)
+$(error LINUX_SCM_RIGHTS_IMPL=rust requires ABI=linux or ABI=both)
+endif
+endif
+ifeq ($(LINUX_MMSG_TXN_IMPL),rust)
+ifeq ($(filter $(ABI),linux both),)
+$(error LINUX_MMSG_TXN_IMPL=rust requires ABI=linux or ABI=both)
+endif
+endif
+RUST_RUNTIME_TEST ?= 0
+ifeq ($(filter $(RUST_RUNTIME_TEST),0 1),)
+$(error RUST_RUNTIME_TEST must be 0 or 1)
+endif
+ifeq ($(RUST_RUNTIME_TEST),1)
+ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL)),)
+$(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
+endif
 endif
 VMO_PAGER_TEST ?= 0
 ifeq ($(filter $(VMO_PAGER_TEST),0 1),)
@@ -589,6 +646,45 @@ $(error VMO_PAGER_TEST=1 requires VMO_PAGER_IMPL=rust)
 endif
 ifeq ($(NOMMU),1)
 $(error VMO_PAGER_TEST=1 requires an MMU profile)
+endif
+endif
+ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+ifneq ($(VMO_PAGE_IMPL),rust)
+$(error VMO_LIFECYCLE_IMPL=rust requires VMO_PAGE_IMPL=rust)
+endif
+endif
+VMO_PAGE_TEST ?= 0
+ifeq ($(filter $(VMO_PAGE_TEST),0 1),)
+$(error VMO_PAGE_TEST must be 0 or 1)
+endif
+ifeq ($(VMO_PAGE_TEST),1)
+ifneq ($(VMO_PAGE_IMPL),rust)
+$(error VMO_PAGE_TEST=1 requires VMO_PAGE_IMPL=rust)
+endif
+ifeq ($(NOMMU),1)
+$(error VMO_PAGE_TEST=1 requires an MMU profile)
+endif
+endif
+MNTNS_TEST ?= 0
+ifeq ($(filter $(MNTNS_TEST),0 1),)
+$(error MNTNS_TEST must be 0 or 1)
+endif
+RV32_SYNC_TEST ?= 0
+ifeq ($(filter $(RV32_SYNC_TEST),0 1),)
+$(error RV32_SYNC_TEST must be 0 or 1)
+endif
+ifeq ($(RV32_SYNC_TEST),1)
+ifneq ($(ARCH),riscv32)
+$(error RV32_SYNC_TEST=1 requires ARCH=riscv32)
+endif
+ifneq ($(NR_CPUS),1)
+$(error RV32_SYNC_TEST=1 requires NR_CPUS=1)
+endif
+ifneq ($(BRINGUP),1)
+$(error RV32_SYNC_TEST=1 requires BRINGUP=1)
+endif
+ifeq ($(PROFILE),mcu)
+$(error RV32_SYNC_TEST=1 requires the RV32 kernel profile)
 endif
 endif
 USER_COPY_TEST ?= 0
@@ -678,8 +774,47 @@ endif
 ifeq ($(VMO_PAGER_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-vmopager-rust
 endif
+ifeq ($(DRIVER_REGISTRY_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-driverregistry-rust
+endif
+ifeq ($(VIRTIO_BLK_CORE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-virtio-blk-core-rust
+endif
+ifeq ($(ENVELOPE_POLICY_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-envelope-policy-rust
+endif
+ifeq ($(FDTABLE_STATE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-fdtable-rust
+endif
+ifeq ($(EVENTPOLL_STATE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-eventpoll-rust
+endif
+ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-event-desc-rust
+endif
+ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-scm-rights-rust
+endif
+ifeq ($(LINUX_MMSG_TXN_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-linux-mmsg-rust
+endif
+ifeq ($(NET_SOCKET_QUEUE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-net-socket-queue-rust
+endif
 ifeq ($(VMO_PAGER_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-vmo-pager-test
+endif
+ifeq ($(RUST_RUNTIME_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-rust-runtime-test
+endif
+ifeq ($(VMO_PAGE_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-vmo-page-test
+endif
+ifeq ($(MNTNS_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-mntns-test
+endif
+ifeq ($(RV32_SYNC_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-rv32-sync-test
 endif
 ifeq ($(USER_COPY_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-usercopy-test
@@ -1370,8 +1505,47 @@ endif
 ifeq ($(VMO_PAGER_IMPL),rust)
 CFLAGS += -DCONFIG_VMO_PAGER_RUST
 endif
+ifeq ($(DRIVER_REGISTRY_IMPL),rust)
+CFLAGS += -DCONFIG_DRIVER_REGISTRY_RUST
+endif
+ifeq ($(VIRTIO_BLK_CORE_IMPL),rust)
+CFLAGS += -DCONFIG_VIRTIO_BLK_CORE_RUST
+endif
+ifeq ($(ENVELOPE_POLICY_IMPL),rust)
+CFLAGS += -DCONFIG_ENVELOPE_POLICY_RUST
+endif
+ifeq ($(FDTABLE_STATE_IMPL),rust)
+CFLAGS += -DCONFIG_FDTABLE_STATE_RUST
+endif
+ifeq ($(EVENTPOLL_STATE_IMPL),rust)
+CFLAGS += -DCONFIG_EVENTPOLL_STATE_RUST
+endif
+ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
+CFLAGS += -DCONFIG_EVENT_DESCRIPTOR_STATE_RUST
+endif
+ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
+CFLAGS += -DCONFIG_LINUX_SCM_RIGHTS_RUST
+endif
+ifeq ($(LINUX_MMSG_TXN_IMPL),rust)
+CFLAGS += -DCONFIG_LINUX_MMSG_TXN_RUST
+endif
+ifeq ($(NET_SOCKET_QUEUE_IMPL),rust)
+CFLAGS += -DCONFIG_NET_SOCKET_QUEUE_RUST
+endif
 ifeq ($(VMO_PAGER_TEST),1)
 CFLAGS += -DCONFIG_VMO_PAGER_TEST
+endif
+ifeq ($(RUST_RUNTIME_TEST),1)
+CFLAGS += -DCONFIG_RUST_RUNTIME_PANIC_TEST
+endif
+ifeq ($(VMO_PAGE_TEST),1)
+CFLAGS += -DCONFIG_VMO_PAGE_TEST
+endif
+ifeq ($(MNTNS_TEST),1)
+CFLAGS += -DCONFIG_MNTNS_TEST
+endif
+ifeq ($(RV32_SYNC_TEST),1)
+CFLAGS += -DCONFIG_RV32_SYNC_TEST
 endif
 ifeq ($(USER_COPY_TEST),1)
 CFLAGS += -DCONFIG_USER_COPY_TEST
@@ -1751,7 +1925,7 @@ else
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
              $(wildcard $(KERNEL_DIR)/hyp/*.c) \
-             $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
+             $(filter-out $(KERNEL_DIR)/mm/nommu.c $(KERNEL_DIR)/mm/vmo_page_selftest.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
              $(if $(filter-out y,$(CONFIG_XLATOR)),$(filter-out $(KERNEL_DIR)/proc/xlator.c,$(wildcard $(KERNEL_DIR)/proc/*.c)),$(wildcard $(KERNEL_DIR)/proc/*.c)) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
              $(wildcard $(KERNEL_DIR)/fs/*/*.c) \
@@ -1786,6 +1960,10 @@ ROOTFS_OVERLAY_SRC   = kernel/fs/rootfs_overlay.c
 ROOTFS_OVERLAY_HDR   = kernel/include/fs/rootfs_overlay.h
 ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
+
+ifeq ($(VMO_PAGE_TEST),1)
+KERNEL_SRC += $(KERNEL_DIR)/mm/vmo_page_selftest.c
+endif
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
 include $(KERNEL_DIR)/external/littlefs/sources.mk
@@ -1903,6 +2081,72 @@ ifeq ($(filter $(KERNEL_DIR)/ipc/a20_pager.c,$(KERNEL_SRC)),)
 $(error VMO_PAGER_IMPL=rust requires kernel/ipc/a20_pager.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_VMO_PAGER_OBJECT)
+endif
+ifeq ($(DRIVER_REGISTRY_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/drivers/core/driver_core.c,$(KERNEL_SRC)),)
+$(error DRIVER_REGISTRY_IMPL=rust requires kernel/drivers/core/driver_core.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_DRIVER_REGISTRY_OBJECT)
+endif
+ifeq ($(VIRTIO_BLK_CORE_IMPL),rust)
+ifneq ($(filter kernel-only dev-build,$(MAKECMDGOALS)),)
+ifeq ($(filter $(KERNEL_DIR)/drivers/block/virtio_blk.c,$(KERNEL_SRC)),)
+$(error VIRTIO_BLK_CORE_IMPL=rust requires embedded driver deployment with virtio_blk.c)
+endif
+KERNEL_OBJ += $(RUST_VIRTIO_BLK_CORE_OBJECT)
+endif
+endif
+ifeq ($(ENVELOPE_POLICY_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/ipc/envelope.c,$(KERNEL_SRC)),)
+$(error ENVELOPE_POLICY_IMPL=rust requires kernel/ipc/envelope.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_ENVELOPE_POLICY_OBJECT)
+endif
+ifeq ($(FDTABLE_STATE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error FDTABLE_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/fdtable.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_FDTABLE_STATE_OBJECT)
+endif
+endif
+ifeq ($(EVENTPOLL_STATE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error EVENTPOLL_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/eventpoll.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_EVENTPOLL_STATE_OBJECT)
+endif
+endif
+ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error EVENT_DESCRIPTOR_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+KERNEL_OBJ += $(RUST_EVENT_DESCRIPTOR_STATE_OBJECT)
+endif
+ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error LINUX_SCM_RIGHTS_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+KERNEL_OBJ += $(RUST_LINUX_SCM_RIGHTS_OBJECT)
+endif
+ifeq ($(LINUX_MMSG_TXN_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error LINUX_MMSG_TXN_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+KERNEL_OBJ += $(RUST_LINUX_MMSG_TXN_OBJECT)
+endif
+ifeq ($(NET_SOCKET_QUEUE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error NET_SOCKET_QUEUE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifeq ($(filter $(KERNEL_DIR)/net/socket_queue.c,$(KERNEL_SRC)),)
+$(error NET_SOCKET_QUEUE_IMPL=rust requires kernel/net/socket_queue.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_NET_SOCKET_QUEUE_OBJECT)
+endif
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL)),)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 
 # Optional self-contained userspace for physical-board bring-up.  Each static

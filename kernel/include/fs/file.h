@@ -26,6 +26,9 @@ void vfs_put_file(struct vfile *vf);
 /* Run by the final ref drop: fire EventQ destroy hooks, run the file's
  * close op, free the vfile and drop the vnode.  Defined in fs/vfs.c;
  * called from fs/file.c and fs/fdtable.c. */
-void vfs_finalize_closed_vfile(struct vfile *vf);
+/* Returns a synchronous close-op error after consuming/freeing the final
+ * vfile reference. The descriptor is already detached and must not be reused
+ * as a retry handle. Other reference drops cannot observe a deferred error. */
+int vfs_finalize_closed_vfile(struct vfile *vf);
 
 #endif /* _FS_FILE_H */

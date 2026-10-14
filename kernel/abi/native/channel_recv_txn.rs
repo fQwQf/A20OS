@@ -54,14 +54,19 @@ const _: () = {
     // The 32-bit Arm AAPCS aligns uint64_t fields to eight bytes, while the
     // 32-bit Rust ABI used by this slice does the same. Do not infer aggregate
     // alignment from pointer width alone: other 32-bit targets may use four.
-    #[cfg(target_arch = "arm")]
+    #[cfg(any(target_arch = "arm", target_arch = "riscv32"))]
     assert!(align_of::<HandleInfo>() == 8);
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(not(any(target_arch = "arm", target_arch = "riscv32")))]
     assert!(align_of::<HandleInfo>() == if usize::BITS == 64 { 8 } else { 4 });
     assert!(offset_of!(HandleInfo, object) == 0);
     assert!(offset_of!(HandleInfo, object_type) == size_of::<usize>());
+    assert!(offset_of!(HandleInfo, pad) == size_of::<usize>() + 2);
     assert!(offset_of!(HandleInfo, transfer_rights) == if usize::BITS == 64 { 16 } else { 8 });
     assert!(offset_of!(HandleInfo, expiry_tick) == if usize::BITS == 64 { 24 } else { 16 });
+    assert!(offset_of!(HandleInfo, remaining_ops) == if usize::BITS == 64 { 32 } else { 24 });
+    assert!(offset_of!(HandleInfo, temporal_flags) == if usize::BITS == 64 { 36 } else { 28 });
+    assert!(offset_of!(HandleInfo, security_label) == if usize::BITS == 64 { 40 } else { 32 });
+    assert!(offset_of!(HandleInfo, pad2) == if usize::BITS == 64 { 41 } else { 33 });
 };
 
 type Publish = unsafe extern "C" fn(*mut c_void, u32, u32) -> i32;

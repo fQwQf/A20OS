@@ -1,7 +1,9 @@
 #![no_std]
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, Ordering};
+#[cfg(not(target_arch = "riscv32"))]
+use core::sync::atomic::AtomicU64;
 
 const PARK_IDLE: i32 = 0;
 const PARK_PREPARING: i32 = 1;
@@ -27,6 +29,18 @@ pub struct ParkWaitFields {
 
 type CancelTimer = unsafe extern "C" fn(*mut c_void, u64);
 
+#[cfg(target_arch = "riscv32")]
+unsafe extern "C" {
+    // RV32 has no native 64-bit atomic instruction. These adapters use the
+    // kernel's existing IRQ-safe atomic64 implementation. Rust still owns
+    // wait-state transitions; the C bridge performs only indivisible field
+    // accesses with the requested memory ordering.
+    fn a20_park_wait_load_u64_relaxed(ptr: *mut u64) -> u64;
+    fn a20_park_wait_load_u64_acquire(ptr: *mut u64) -> u64;
+    fn a20_park_wait_store_u64_relaxed(ptr: *mut u64, value: u64);
+    fn a20_park_wait_store_u64_release(ptr: *mut u64, value: u64);
+}
+
 #[inline]
 unsafe fn fields_from(raw: *mut ParkWaitFields) -> Option<ParkWaitFields> {
     if raw.is_null() { return None; }
@@ -42,12 +56,31 @@ unsafe fn fields_from(raw: *mut ParkWaitFields) -> Option<ParkWaitFields> {
 #[inline]
 unsafe fn load_u64(ptr: *mut u64, order: Ordering) -> u64 {
     // SAFETY: the C layout gives u64 fields native alignment and validity.
+    #[cfg(target_arch = "riscv32")]
+    {
+        return if order == Ordering::Acquire {
+            unsafe { a20_park_wait_load_u64_acquire(ptr) }
+        } else {
+            unsafe { a20_park_wait_load_u64_relaxed(ptr) }
+        };
+    }
+    #[cfg(not(target_arch = "riscv32"))]
     unsafe { (&*(ptr as *const AtomicU64)).load(order) }
 }
 
 #[inline]
 unsafe fn store_u64(ptr: *mut u64, value: u64, order: Ordering) {
     // SAFETY: the C layout gives u64 fields native alignment and validity.
+    #[cfg(target_arch = "riscv32")]
+    {
+        if order == Ordering::Release {
+            unsafe { a20_park_wait_store_u64_release(ptr, value) }
+        } else {
+            unsafe { a20_park_wait_store_u64_relaxed(ptr, value) }
+        }
+        return;
+    }
+    #[cfg(not(target_arch = "riscv32"))]
     unsafe { (&*(ptr as *const AtomicU64)).store(value, order) }
 }
 
@@ -291,7 +324,7 @@ pub unsafe extern "C" fn a20_rust_park_wait_reason(
     let f = unsafe { raw.read() };
     if f.wait_seq.is_null() || f.wake_reason.is_null() { return WAKE_CANCEL; }
     unsafe {
-        let got_seq = (&*(f.wait_seq as *const AtomicU64)).load(Ordering::Acquire);
+        let got_seq = load_u64(f.wait_seq, Ordering::Acquire);
         if got_seq != seq { return WAKE_CANCEL; }
         (&*(f.wake_reason as *const AtomicI32)).load(Ordering::Acquire)
     }

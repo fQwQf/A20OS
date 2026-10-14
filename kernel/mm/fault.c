@@ -62,6 +62,7 @@
  * fault.h -- plain global so the shutdown audit can assert non-vacuity. */
 uint64_t mm_cow_from_status_count;
 
+#ifndef CONFIG_NOMMU
 #if defined(CONFIG_AARCH64) && defined(CONFIG_MM_COW_TLBI_DIAG)
 static volatile uint32_t aarch64_cow_tlbi_diag_seen;
 
@@ -134,6 +135,7 @@ static void aarch64_cow_tlbi_diag_after(int enabled, task_t *t, mm_struct_t *mm,
     (void)branch;
 }
 #endif
+#endif /* !CONFIG_NOMMU */
 
 /*
  * Install one mapping through the transactional cursor.  Every fault-path PTE
@@ -356,6 +358,7 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
  * arch_pte_leaf() always emits descriptor type 11, which is a table/page
  * descriptor and therefore corrupts a level-2 block mapping. Preserve the
  * block descriptor type when the lookup returned a huge leaf. */
+#ifndef CONFIG_NOMMU
 static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
 {
 #ifdef ARCH_HAS_PTE_BLOCK
@@ -366,6 +369,7 @@ static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
 #endif
     return arch_pte_leaf(pa, flags);
 }
+#endif
 
 static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
                                    pfn_t *old_pfn_out,
@@ -631,6 +635,7 @@ static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
 
 /* Check software mapping policy before allocating or resolving a fault.
  * A PTE's read bit may be its validity bit, so it cannot express PROT_NONE. */
+#ifndef CONFIG_NOMMU
 static int fault_access_allowed(uint64_t flags, enum mm_fault_access access)
 {
     if (access == MM_FAULT_ACCESS_WRITE)
@@ -639,6 +644,7 @@ static int fault_access_allowed(uint64_t flags, enum mm_fault_access access)
         return (flags & VM_EXEC) != 0;
     return (flags & (VM_READ | VM_WRITE)) != 0;
 }
+#endif
 
 #if defined(CONFIG_SWAP) && !defined(CONFIG_NOMMU)
 /* Speculative I/O holds its own slot reference. Only a matching PTE/VMA may

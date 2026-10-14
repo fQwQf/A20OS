@@ -3,7 +3,8 @@
 
     .equ MODE_USR, 0x10
     .equ MODE_SVC, 0x13
-    .equ TASK_TRAP_CTX,         40
+    /* Keep in sync with offsetof(task_t, trap_ctx), asserted in proc.h. */
+    .equ TASK_TRAP_CTX,         68
 
     .equ TF_SP,                 52
     .equ TF_LR,                 56

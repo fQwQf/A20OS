@@ -1,6 +1,7 @@
 #include "syscall_impl.h"
 
 #include "ipc/envelope.h"
+#include "ipc/ipc.h"
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
@@ -8,10 +9,21 @@
 #include "fs/vfs.h"
 #include "mm/slab.h"
 #include "proc/proc_internal.h"
+#include "abi/linux/pidfd.h"
 
 typedef struct pidfd_file {
-    int pid;
+    task_t *task;
 } pidfd_file_t;
+
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+void a20_pidfd_state_init_rust(void **task, void *value);
+void *a20_pidfd_state_task_rust(void *const *task);
+bool a20_pidfd_state_drop_rust(
+    void **task, void (*release)(void *));
+bool a20_pidfd_group_exited_rust(bool task_found, bool state_unused,
+                                 bool state_zombie, bool thread_group_dead);
+int a20_pidfd_poll_events_rust(bool exited, int events);
+#endif
 
 /*
  * Linux pidfd semantics: poll() reports readable only after the referenced
@@ -22,19 +34,28 @@ typedef struct pidfd_file {
 static int pidfd_poll(vfile_t *vf, short events)
 {
     pidfd_file_t *pf = vf ? (pidfd_file_t *)vf->priv : NULL;
-    if (!pf)
+    task_t *target = pf ? pf->task : NULL;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    if (pf)
+        target = a20_pidfd_state_task_rust((void *const *)&pf->task);
+#endif
+    if (!target)
         return POLLNVAL;
 
-    task_t *t = proc_find_get(pf->pid);
-    int exited = 1;
-    if (t) {
-        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-        int state = proc_task_state_get(t);
-        exited = state == PROC_UNUSED ||
-                 (state == PROC_ZOMBIE && proc_tg_group_dead_locked(t));
-        spin_unlock_irqrestore(&tasklist_lock, flags);
-        proc_put(t);
-    }
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+    int state = proc_task_state_get(target);
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    int exited = a20_pidfd_group_exited_rust(
+        true, state == PROC_UNUSED, state == PROC_ZOMBIE,
+        state == PROC_ZOMBIE && proc_tg_group_dead_locked(target));
+#else
+    int exited = state == PROC_UNUSED ||
+                 (state == PROC_ZOMBIE && proc_tg_group_dead_locked(target));
+#endif
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    return a20_pidfd_poll_events_rust(exited != 0, events);
+#else
     if (!exited)
         return 0;
 
@@ -42,51 +63,144 @@ static int pidfd_poll(vfile_t *vf, short events)
     if (events & POLLIN)
         revents |= POLLIN;
     return revents;
+#endif
+}
+
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+static void pidfd_release_task_ref(void *value);
+#endif
+
+/* Once the task pin has been stored in pidfd_file_t, release it through the
+ * selected state owner on every teardown path, including vfile allocation
+ * failure before the pidfd is published. */
+static void pidfd_state_release(pidfd_file_t *pf)
+{
+    if (!pf)
+        return;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    (void)a20_pidfd_state_drop_rust((void **)&pf->task,
+                                    pidfd_release_task_ref);
+#else
+    task_t *target = pf->task;
+    if (target)
+        proc_put(target);
+#endif
 }
 
 static int pidfd_close(vfile_t *vf)
 {
-    return anonfd_free_priv_close(vf);
+    pidfd_file_t *pf = vf ? (pidfd_file_t *)vf->priv : NULL;
+    if (!pf)
+        return 0;
+    pidfd_state_release(pf);
+    vf->priv = NULL;
+    kfree(pf);
+    return 0;
 }
+
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+static void pidfd_release_task_ref(void *value)
+{
+    proc_put((task_t *)value);
+}
+#endif
 
 static vfile_ops_t g_pidfd_ops = {
     .poll = pidfd_poll,
     .close = pidfd_close,
 };
 
-int linux_pidfd_pid(int pidfd)
+static int pidfd_target_exited(task_t *target)
+{
+    if (!target)
+        return 1;
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+    int state = proc_task_state_get(target);
+    int exited = state == PROC_UNUSED ||
+                 (state == PROC_ZOMBIE &&
+                  proc_tg_group_dead_locked(target));
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+    return exited;
+}
+
+task_t *linux_pidfd_get_task_ref(int pidfd)
 {
     vfile_t *vf = fdtable_get_current_file_ref(pidfd);
     if (!vf)
-        return -EBADF;
+        return NULL;
     if (vf->ops != &g_pidfd_ops || !vf->priv) {
         vfs_put_file(vf);
-        return -EBADF;
+        return NULL;
     }
-    int pid = ((pidfd_file_t *)vf->priv)->pid;
+    pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
+    task_t *target = pf->task;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    target = a20_pidfd_state_task_rust((void *const *)&pf->task);
+#endif
+    if (target)
+        target = proc_get(target);
     vfs_put_file(vf);
+    return target;
+}
+
+int linux_pidfd_pid(int pidfd)
+{
+    task_t *target = linux_pidfd_get_task_ref(pidfd);
+    if (!target)
+        return -EBADF;
+    int pid = target->pid;
+    proc_put(target);
     return pid;
 }
 
-int linux_pidfd_create(int pid, int flags)
+static int linux_pidfd_create_task(task_t *target, int flags)
 {
-    if (flags & ~O_CLOEXEC)
+    /* This function consumes the caller's task reference on every path. */
+    if (!target)
         return -EINVAL;
+    if (flags & ~O_CLOEXEC) {
+        proc_put(target);
+        return -EINVAL;
+    }
 
     pidfd_file_t *pf = (pidfd_file_t *)kmalloc(sizeof(*pf));
-    if (!pf)
+    if (!pf) {
+        proc_put(target);
         return -ENOMEM;
-    pf->pid = pid;
+    }
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    a20_pidfd_state_init_rust((void **)&pf->task, target);
+#else
+    pf->task = target;
+#endif
 
     vfile_t *vf = vfile_alloc();
     if (!vf) {
+        pidfd_state_release(pf);
         kfree(pf);
         return -ENOMEM;
     }
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_pidfd_ops;
     vf->priv = pf;
+    int tag_rc = env_kind_tag_vfile(vf, A20_OBJ_TASK);
+    if (tag_rc < 0) {
+        vfile_free(vf);
+        pidfd_state_release(pf);
+        kfree(pf);
+        return tag_rc;
+    }
     return anonfd_install_vfile(vf, flags);
+}
+
+/* Compatibility entry for primary-owned clone3 and SO_PEERPIDFD callers.
+ * New Linux pidfd operations should use the stable task-ref accessor. */
+int linux_pidfd_create(int pid, int flags)
+{
+    task_t *target = proc_find_get_user(pid);
+    if (!target)
+        return -ESRCH;
+    return linux_pidfd_create_task(target, flags);
 }
 
 int64_t sys_pidfd_open(int pid, unsigned flags)
@@ -105,9 +219,7 @@ int64_t sys_pidfd_open(int pid, unsigned flags)
         return -EPERM;
     }
 
-    int fd = linux_pidfd_create(pid, (int)flags);
-    proc_put(target);
-    return fd;
+    return linux_pidfd_create_task(target, (int)flags);
 }
 
 int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
@@ -122,17 +234,24 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
         vfs_put_file(vf);
         return -EBADF;
     }
-    int pid = ((pidfd_file_t *)vf->priv)->pid;
+    pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
+    task_t *target = pf->task;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    target = a20_pidfd_state_task_rust((void *const *)&pf->task);
+#endif
+    if (target)
+        target = proc_get(target);
     vfs_put_file(vf);
-
-    if (targetfd < 0)
-        return -EINVAL;
-
-    task_t *self = proc_current();
-    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
-    if (target->state == PROC_ZOMBIE) {
+
+    if (targetfd < 0) {
+        proc_put(target);
+        return -EINVAL;
+    }
+
+    task_t *self = proc_current();
+    if (pidfd_target_exited(target)) {
         proc_put(target);
         return -ESRCH;
     }
@@ -152,12 +271,17 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
         proc_put(target);
         return -EACCES;
     }
-    /* Install into THIS task's table; the install consumes the lookup
-     * reference. */
+    /* Keep a separate pin so a mediation denial can close only the exact
+     * installed vfile even if another thread reuses the returned fd. */
+    vfile_get(target_file);
+    /* Install into THIS task's table; the install consumes one reference. */
     int r = fdtable_install_vfile(self, target_file, (int)flags);
     proc_put(target);
-    if (r < 0)
+    if (r < 0) {
+        vfs_put_file(target_file);
+        vfs_put_file(target_file);
         return r;
+    }
     /* A7 acquire side: the stolen descriptor is a fresh authority entering
      * this task, so the receiver's envelope decides whether it may be used
      * (docs/research/05 §2.5.1).  Mediation keys on the NEW fd number, which
@@ -166,12 +290,16 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
      * fd is closed rather than left installed, so a denial cannot be
      * side-stepped by using the number afterwards. */
     if (env_active(self)) {
-        int mr = env_mediate_acquire_gfd(r);
+        const uint64_t base_rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
+                                     A20_RIGHT_STAT | A20_RIGHT_SEEK;
+        int mr = env_mediate_acquire_vfile(r, target_file, base_rights);
         if (mr) {
-            fdtable_close_current(r);
+            (void)fdtable_close_current_if_file(r, target_file);
+            vfs_put_file(target_file);
             return mr;
         }
     }
+    vfs_put_file(target_file);
     return r;
 }
 
@@ -182,25 +310,27 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
     if (sig < 0 || sig >= NSIG)
         return -EINVAL;
 
-    int gfd = fdtable_get_current(pidfd);
-    if (gfd < 0)
-        return gfd;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(pidfd);
     if (!vf)
         return -EBADF;
     if (vf->ops != &g_pidfd_ops || !vf->priv) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EBADF;
     }
 
-    int pid = ((pidfd_file_t *)vf->priv)->pid;
-    vfs_put_file_ref(gfd, vf);
-
-    task_t *self = proc_current();
-    task_t *target = proc_find_get_user(pid);
+    pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
+    task_t *target = pf->task;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    target = a20_pidfd_state_task_rust((void *const *)&pf->task);
+#endif
+    if (target)
+        target = proc_get(target);
+    vfs_put_file(vf);
     if (!target)
         return -ESRCH;
-    if (target->state == PROC_ZOMBIE) {
+
+    task_t *self = proc_current();
+    if (pidfd_target_exited(target)) {
         proc_put(target);
         return -ESRCH;
     }
@@ -224,9 +354,13 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
             return -EFAULT;
         }
         *(int *)info = sig;
+        /* Keep the pidfd task identity pinned through process-directed
+         * siginfo delivery; do not resolve the PID a second time. */
+        int result = signal_send_task_info(target, sig, info, sizeof(info));
         proc_put(target);
-        return signal_send_info(pid, sig, info, sizeof(info));
+        return result;
     }
+    int result = signal_send_task(target, sig);
     proc_put(target);
-    return signal_send(pid, sig);
+    return result;
 }

@@ -2,6 +2,7 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "abi/linux/siginfo.h"
+#include "abi/linux/pidfd.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
 #include "mm/fault.h"
@@ -1035,6 +1036,7 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
         options |= WEXITED;
 
     int pid = -1;
+    task_t *pidfd_target = NULL;
     switch (type) {
     case 0: /* P_ALL */
         pid = -1;
@@ -1046,9 +1048,9 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
         pid = (id == 0) ? 0 : -id;
         break;
     case 3: /* P_PIDFD */
-        pid = linux_pidfd_pid(id);
-        if (pid < 0)
-            return pid;
+        pidfd_target = linux_pidfd_get_task_ref(id);
+        if (!pidfd_target)
+            return -EBADF;
         break;
     default:
         return -EINVAL;
@@ -1059,7 +1061,11 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     if (options & WSTOPPED) wait_opts |= 2;
     if (options & WCONTINUED) wait_opts |= WCONTINUED;
     if (options & WNOWAIT) wait_opts |= WNOWAIT;
-    int ret = proc_wait4(pid, &status, wait_opts);
+    int ret = pidfd_target
+        ? proc_wait4_task(pidfd_target, &status, wait_opts)
+        : proc_wait4(pid, &status, wait_opts);
+    if (pidfd_target)
+        proc_put(pidfd_target);
     if (ret < 0) return ret;
 
     if (info) {

@@ -486,6 +486,25 @@ int main(int argc, char **argv)
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 42)
         return fail("wait-status");
 
+    /* P_PIDFD identifies a task, but does not waive wait-child eligibility.
+     * This also ensures waitid does not accidentally accept a live unrelated
+     * task after resolving its pidfd. */
+    int self_pidfd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+    if (self_pidfd < 0)
+        return fail("waitid-nonchild-pidfd-open");
+    siginfo_t nonchild_info;
+    memset(&nonchild_info, 0, sizeof(nonchild_info));
+    errno = 0;
+    int nonchild_wait = waitid(P_PIDFD, (id_t)self_pidfd, &nonchild_info,
+                               WEXITED | WNOHANG);
+    int nonchild_errno = errno;
+    close(self_pidfd);
+    if (nonchild_wait != -1 || nonchild_errno != ECHILD) {
+        errno = nonchild_errno;
+        return fail("waitid-pidfd-nonchild-echild");
+    }
+    printf("SYSCALL_SMOKE: pidfd-nonchild ECHILD PASS\n");
+
     /* waitid siginfo_t follows the Linux ABI: on 64-bit targets the
      * siginfo union begins at offset 16 (offset 12 on 32-bit targets).
      * pidfd + WNOWAIT checks both that layout and non-consuming semantics. */

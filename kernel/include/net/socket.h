@@ -208,6 +208,11 @@ int net_set_nonblock_vfile(struct vfile *vf, int nonblock);
 int net_poll_events(int gfd, short events);
 int net_is_socket_vfile(struct vfile *vf);
 struct net_socket *net_socket_from_vfile(struct vfile *vf);
+/* Resolve a local fd under its table lock and pin both the vfile and socket.
+ * Keep both references for the complete syscall; release with vfs_put_file()
+ * and net_socket_free(). Returns -EBADF/-ENOTSOCK on lookup/type errors. */
+int net_socket_pin_current_fd(int local_fd, struct vfile **out_vf,
+                              struct net_socket **out_sock);
 /* Socket-object variants for callers holding the socket directly (native
  * file handles); the fd-level wrappers resolve through the task fd table. */
 int net_bind_sock(struct net_socket *s, const void *addr, size_t addrlen);

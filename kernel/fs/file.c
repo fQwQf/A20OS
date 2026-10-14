@@ -11,6 +11,9 @@
 #include "core/string.h"
 #include "mm/objcache.h"
 #include "ipc/objstats.h"
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+#include "ipc/envelope.h"
+#endif
 
 /*
  * The vfile layer owns vfile allocation, identity and refcounting only.
@@ -30,6 +33,25 @@ static obj_cache_t g_vfile_cache =
 static size_t g_vfile_live;
 static uint64_t g_vfile_next_identity;
 
+/* Identity keys may remain in authorization tables until final vfile release.
+ * Fail closed at exhaustion instead of wrapping and aliasing a live object. */
+static int vfile_allocate_identity(uint64_t *identity)
+{
+    uint64_t current = __atomic_load_n(&g_vfile_next_identity,
+                                       __ATOMIC_RELAXED);
+    for (;;) {
+        if (current == ~(uint64_t)0)
+            return 0;
+        uint64_t next = current + 1;
+        if (__atomic_compare_exchange_n(&g_vfile_next_identity, &current,
+                                        next, 0, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED)) {
+            *identity = next;
+            return 1;
+        }
+    }
+}
+
 void file_table_init(void)
 {
     obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), VFILE_CACHE_LIMIT);
@@ -46,11 +68,13 @@ vfile_t *vfile_alloc(void)
 {
     vfile_t *vf = (vfile_t *)obj_cache_alloc_zero(&g_vfile_cache);
     if (vf) {
-        vf->identity = __atomic_add_fetch(&g_vfile_next_identity, 1,
-                                          __ATOMIC_RELAXED);
-        if (!vf->identity)
-            vf->identity = __atomic_add_fetch(&g_vfile_next_identity, 1,
-                                              __ATOMIC_RELAXED);
+        if (!vfile_allocate_identity(&vf->identity)) {
+            obj_cache_free(&g_vfile_cache, vf);
+            return NULL;
+        }
+        /* obj_cache_alloc_zero() already guarantees this, but make the
+         * identity-bound envelope default explicit at object creation. */
+        __atomic_store_n(&vf->envelope_kind, 0, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_vfile_live, 1, __ATOMIC_RELAXED);
         a20_objstat_add(&g_a20_objstats.vfiles, 1);
         mutex_init(&vf->offset_lock);
@@ -69,6 +93,11 @@ vfile_t *vfile_alloc(void)
 void vfile_free(vfile_t *vf)
 {
     if (vf) {
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+        /* Authorization shadows are keyed by this unique open-file identity.
+         * Reclaim them before the storage/identity can be reused. */
+        env_vfile_retire(vf);
+#endif
         __atomic_fetch_sub(&g_vfile_live, 1, __ATOMIC_RELAXED);
         a20_objstat_add(&g_a20_objstats.vfiles, -1);
     }

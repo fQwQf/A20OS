@@ -52,6 +52,16 @@ static mutex_t mutex_owner_test = MUTEX_INIT;
 static task_t *mutex_waiter_task;
 static int mutex_waiter_pid;
 static unsigned mutex_waiter_started, mutex_waiter_acquired;
+#if defined(CONFIG_RV32_SYNC_TEST)
+#define SYNC_TEST_CPU 0U
+static completion_t rv32_completion_test = COMPLETION_INIT;
+static task_t *rv32_completion_task;
+static int rv32_completion_pid;
+static unsigned rv32_completion_started, rv32_completion_returned;
+static unsigned rv32_sync_test_finished;
+#else
+#define SYNC_TEST_CPU 1U
+#endif
 
 #define WAIT_QUEUE_TEST_KEY ((uintptr_t)0xa20)
 
@@ -108,7 +118,7 @@ static int set_cpu(task_t *task, unsigned cpu) {
 
 static void rw_mutex_fairness_writer(void)
 {
-    CHECK(cpu_current_id() == 1);
+    CHECK(cpu_current_id() == SYNC_TEST_CPU);
     __atomic_store_n(&rw_mutex_writer_started, 1, __ATOMIC_RELEASE);
     rw_mutex_write_lock(&rw_mutex_fairness_test);
     __atomic_store_n(&rw_mutex_writer_acquired, 1, __ATOMIC_RELEASE);
@@ -120,7 +130,7 @@ static void rw_mutex_fairness_writer(void)
 
 static void rw_mutex_fairness_reader(void)
 {
-    CHECK(cpu_current_id() == 1);
+    CHECK(cpu_current_id() == SYNC_TEST_CPU);
     __atomic_store_n(&rw_mutex_reader_started, 1, __ATOMIC_RELEASE);
     rw_mutex_read_lock(&rw_mutex_fairness_test);
     __atomic_store_n(&rw_mutex_reader_acquired, 1, __ATOMIC_RELEASE);
@@ -130,7 +140,7 @@ static void rw_mutex_fairness_reader(void)
 
 static void mutex_owner_waiter(void)
 {
-    CHECK(cpu_current_id() == 1);
+    CHECK(cpu_current_id() == SYNC_TEST_CPU);
     __atomic_store_n(&mutex_waiter_started, 1, __ATOMIC_RELEASE);
     mutex_lock(&mutex_owner_test);
     __atomic_store_n(&mutex_waiter_acquired, 1, __ATOMIC_RELEASE);
@@ -162,7 +172,7 @@ static void run_rw_mutex_writer_preference_test(void)
     rw_mutex_writer_pid = proc_alloc_deferred(rw_mutex_fairness_writer);
     CHECK(rw_mutex_writer_pid > 0);
     rw_mutex_writer_task = proc_find_get(rw_mutex_writer_pid);
-    CHECK(rw_mutex_writer_task && set_cpu(rw_mutex_writer_task, 1) == 0);
+    CHECK(rw_mutex_writer_task && set_cpu(rw_mutex_writer_task, SYNC_TEST_CPU) == 0);
     proc_publish_deferred_task(rw_mutex_writer_task);
 
     uint64_t limit = timer_get_ticks() + MS_TO_TICKS(5000);
@@ -175,7 +185,7 @@ static void run_rw_mutex_writer_preference_test(void)
     rw_mutex_reader_pid = proc_alloc_deferred(rw_mutex_fairness_reader);
     CHECK(rw_mutex_reader_pid > 0);
     rw_mutex_reader_task = proc_find_get(rw_mutex_reader_pid);
-    CHECK(rw_mutex_reader_task && set_cpu(rw_mutex_reader_task, 1) == 0);
+    CHECK(rw_mutex_reader_task && set_cpu(rw_mutex_reader_task, SYNC_TEST_CPU) == 0);
     proc_publish_deferred_task(rw_mutex_reader_task);
     limit = timer_get_ticks() + MS_TO_TICKS(5000);
     while (!task_is_fully_parked(rw_mutex_reader_task)) {
@@ -211,7 +221,7 @@ static void run_rw_mutex_writer_preference_test(void)
     rw_mutex_reader_task = NULL;
     proc_lifetime_snapshot(&after);
     CHECK(after.task_refs == before.task_refs);
-    printf("[RW_MUTEX_WRITER_PREFERENCE: PASS writer_first=1 blocked_reader=1 cpu=1 refs=stable]\n");
+    printf("[RW_MUTEX_WRITER_PREFERENCE: PASS writer_first=1 blocked_reader=1 cpu=%u refs=stable]\n", SYNC_TEST_CPU);
 }
 
 static void run_mutex_owner_wait_test(void)
@@ -233,7 +243,7 @@ static void run_mutex_owner_wait_test(void)
     mutex_waiter_pid = proc_alloc_deferred(mutex_owner_waiter);
     CHECK(mutex_waiter_pid > 0);
     mutex_waiter_task = proc_find_get(mutex_waiter_pid);
-    CHECK(mutex_waiter_task && set_cpu(mutex_waiter_task, 1) == 0);
+    CHECK(mutex_waiter_task && set_cpu(mutex_waiter_task, SYNC_TEST_CPU) == 0);
     proc_publish_deferred_task(mutex_waiter_task);
     uint64_t limit = timer_get_ticks() + MS_TO_TICKS(5000);
     while (!task_is_fully_parked(mutex_waiter_task)) {
@@ -264,8 +274,71 @@ static void run_mutex_owner_wait_test(void)
     spin_unlock_irqrestore(&mutex_owner_test.lock, flags);
     proc_lifetime_snapshot(&after);
     CHECK(after.task_refs == before.task_refs);
-    printf("[MUTEX_OWNER_WAIT: PASS recursive_depth=2 waiter_cpu=1 wake=1 refs=stable]\n");
+    printf("[MUTEX_OWNER_WAIT: PASS recursive_depth=2 waiter_cpu=%u wake=1 refs=stable]\n", SYNC_TEST_CPU);
 }
+
+#if defined(CONFIG_RV32_SYNC_TEST)
+static void rv32_completion_waiter(void)
+{
+    __atomic_store_n(&rv32_completion_started, 1, __ATOMIC_RELEASE);
+    wait_for_completion(&rv32_completion_test);
+    __atomic_store_n(&rv32_completion_returned, 1, __ATOMIC_RELEASE);
+    proc_exit(0);
+}
+
+static void run_rv32_completion_test(void)
+{
+    proc_lifetime_stats_t before, after;
+    proc_lifetime_snapshot(&before);
+    completion_init(&rv32_completion_test);
+    rv32_completion_started = 0;
+    rv32_completion_returned = 0;
+    rv32_completion_pid = proc_alloc_deferred(rv32_completion_waiter);
+    CHECK(rv32_completion_pid > 0);
+    rv32_completion_task = proc_find_get(rv32_completion_pid);
+    CHECK(rv32_completion_task && set_cpu(rv32_completion_task, 0) == 0);
+    proc_publish_deferred_task(rv32_completion_task);
+    uint64_t limit = timer_get_ticks() + MS_TO_TICKS(5000);
+    while (!task_is_fully_parked(rv32_completion_task)) {
+        CHECK(timer_get_ticks() < limit);
+        proc_yield();
+    }
+    CHECK(__atomic_load_n(&rv32_completion_started, __ATOMIC_ACQUIRE));
+    CHECK(!__atomic_load_n(&rv32_completion_returned, __ATOMIC_ACQUIRE));
+    uint64_t flags = spin_lock_irqsave(&rv32_completion_test.waiters.lock);
+    CHECK(rv32_completion_test.waiters.head != NULL &&
+          rv32_completion_test.waiters.head->task == rv32_completion_task &&
+          rv32_completion_test.waiters.head->linked);
+    spin_unlock_irqrestore(&rv32_completion_test.waiters.lock, flags);
+    proc_lifetime_stats_t blocked;
+    proc_lifetime_snapshot(&blocked);
+    CHECK(blocked.wait_entries > before.wait_entries);
+    complete(&rv32_completion_test);
+    while (!__atomic_load_n(&rv32_completion_returned, __ATOMIC_ACQUIRE)) {
+        CHECK(timer_get_ticks() < limit);
+        proc_yield();
+    }
+    int status = -1;
+    CHECK(proc_wait4(rv32_completion_pid, &status, 0) == rv32_completion_pid &&
+          status == 0);
+    proc_put(rv32_completion_task);
+    rv32_completion_task = NULL;
+    proc_lifetime_snapshot(&after);
+    CHECK(after.task_refs == before.task_refs);
+    CHECK(after.wait_entries == before.wait_entries);
+    printf("[RV32_COMPLETION_BLOCK_WAKE: PASS cpu=0 blocked=1 wake=1 refs=stable]\n");
+}
+
+static void rv32_sync_test_controller(void)
+{
+    CHECK(cpu_current_id() == 0);
+    run_rv32_completion_test();
+    run_mutex_owner_wait_test();
+    run_rw_mutex_writer_preference_test();
+    __atomic_store_n(&rv32_sync_test_finished, 1, __ATOMIC_RELEASE);
+    proc_exit(0);
+}
+#endif
 
 /* Opt-in scratch disk only. Validate the host fixture before any writes.
  * Direct class operations bypass the filesystem/page cache, exercising DMA,
@@ -442,7 +515,7 @@ static void run_wait_timer_cancel_expire_race(void)
 }
 #endif
 
-static void controller(void) {
+static void __attribute__((unused)) controller(void) {
     CHECK(cpu_current_id() == 0);
     worker_pid = proc_alloc_deferred(worker);
     CHECK(worker_pid > 0);
@@ -631,6 +704,9 @@ void smp_selftest_boot(void) {
 #else
     int enabled = 0;
 #endif
+#if defined(CONFIG_RV32_SYNC_TEST)
+    enabled = 1;
+#endif
     /* Match a complete bootarg token, so incidental substring text cannot
      * turn a normal bring-up into a scheduling test. */
     while (args && *args) {
@@ -649,6 +725,37 @@ void smp_selftest_boot(void) {
     }
     if (!enabled)
         return;
+#if defined(CONFIG_RV32_SYNC_TEST)
+    CHECK(cpu_current_id() == 0 && CONFIG_NR_CPUS == 1 &&
+          smp_online_cpu_count() == 1);
+    proc_lifetime_stats_t before, after;
+    proc_lifetime_snapshot(&before);
+    int pid = proc_alloc_deferred(rv32_sync_test_controller);
+    CHECK(pid > 0);
+    task_t *task = proc_find_get(pid);
+    CHECK(task && set_cpu(task, 0) == 0);
+    proc_publish_deferred_task(task);
+    proc_put(task);
+    uint64_t limit = timer_get_ticks() + MS_TO_TICKS(15000);
+    while (!__atomic_load_n(&rv32_sync_test_finished, __ATOMIC_ACQUIRE)) {
+        CHECK(timer_get_ticks() < limit);
+        proc_yield();
+    }
+    int status = -1;
+    CHECK(proc_wait4(pid, &status, 0) == pid && status == 0);
+    do {
+        proc_yield();
+        proc_lifetime_snapshot(&after);
+        CHECK(timer_get_ticks() < limit);
+    } while (after.task_objects != before.task_objects ||
+             after.pid_entries != before.pid_entries ||
+             after.listed_tasks != before.listed_tasks);
+    CHECK(after.task_refs == before.task_refs &&
+          after.lifetime_errors == before.lifetime_errors &&
+          after.state_violations == before.state_violations);
+    printf("[RV32_SYNC_TEST: PASS cpus=1 completion=blocked-wake mutex=recursive-wait rwmutex=writer-preference cleanup=stable]\n");
+    return;
+#else
     CHECK(smp_online_cpu_count() >= 2 && cpu_current_id() == 0);
     for (unsigned cpu = 1; cpu < CONFIG_NR_CPUS; cpu++)
         if (smp_cpu_is_online(cpu))
@@ -693,5 +800,6 @@ void smp_selftest_boot(void) {
     arch_local_irq_disable();
     if (saved)
         arch_local_irq_enable();
+#endif
 }
 #endif

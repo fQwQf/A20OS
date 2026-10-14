@@ -10,6 +10,8 @@
  *  - mount() inside the namespace is invisible to a process in the parent
  *    namespace, and visible to a forked child (shared namespace)
  *  - setns() via /proc/<pid>/ns/mnt moves the caller between namespaces
+ *  - a detached cloned mount keeps its source busy while the clone namespace
+ *    is pinned, and releases the source after the namespace fd closes
  *  - setns() through a /proc/<pid>/ns/pid file is accepted; the pid
  *    namespace semantics themselves are covered by pidns_test
  *
@@ -93,9 +95,11 @@ static int wait_exit0(pid_t pid)
 int main(void)
 {
     unsigned long long init_ino = 0, child_ino = 0, new_ino = 0;
+    unsigned long long shared_source_ino = 0;
     int pipe_to_witness[2] = { -1, -1 };
     pid_t witness = -1;
     int fd_newns = -1, fd_initns = -1, fd_pidns = -1;
+    int fd_sharedns = -1, fd_shared_source_ns = -1;
 
     /* The mount point lives on the shared rootfs so both namespaces have it. */
     if (mkdir("/tmp/ns_test", 0755) < 0 && errno != EEXIST) {
@@ -249,6 +253,15 @@ int main(void)
     /* 13. Shared-mount path: a mount that existed before the unshare is
      * inherited by the new namespace.  Unmounting it there must only detach
      * the copy -- the parent keeps its mount and its files. */
+    CHECK(fd_newns >= 0 && xsetns(fd_newns, CLONE_NEWNS) == 0,
+          "rejoin the private namespace before creating the source mount");
+    CHECK(xunshare(CLONE_NEWNS) == 0,
+          "create private source namespace for deferred teardown test");
+    CHECK(read_ns_file("/proc/self/ns/mnt", "mnt", &shared_source_ino) == 0 &&
+          shared_source_ino != new_ino,
+          "source namespace differs from earlier mount namespace");
+    fd_shared_source_ns = open("/proc/self/ns/mnt", O_RDONLY);
+    CHECK(fd_shared_source_ns >= 0, "pin shared-mount source namespace");
     CHECK(mkdir("/tmp/ns_shared", 0755) == 0 || errno == EEXIST,
           "create shared mount point");
     CHECK(mount("none", "/tmp/ns_shared", "ramfs", 0, NULL) == 0,
@@ -264,6 +277,9 @@ int main(void)
         CHECK(read_ns_file("/proc/self/ns/mnt", "mnt", &shared_ino) == 0 &&
               shared_ino != new_ino,
               "second unshare yields another namespace");
+        fd_sharedns = open("/proc/self/ns/mnt", O_RDONLY);
+        CHECK(fd_sharedns >= 0,
+              "pin copied namespace across setns");
         errno = 0;
         CHECK(access("/tmp/ns_shared/before", F_OK) == 0,
               "inherited mount is visible in the new namespace");
@@ -273,14 +289,28 @@ int main(void)
         CHECK(access("/tmp/ns_shared/before", F_OK) == -1 && errno == ENOENT,
               "inherited mount detached in the new namespace");
     }
-    /* setns back to the namespace that created the mount (new_ino) and
+    /* setns back to the namespace that created the mount and
      * confirm it survived the other namespace's detach. */
-    if (fd_newns >= 0) {
-        CHECK(xsetns(fd_newns, CLONE_NEWNS) == 0, "setns back to mounting ns");
+    if (fd_shared_source_ns >= 0) {
+        CHECK(xsetns(fd_shared_source_ns, CLONE_NEWNS) == 0,
+              "setns back to mounting source namespace");
         errno = 0;
         CHECK(access("/tmp/ns_shared/before", F_OK) == 0,
               "mounting namespace keeps its mount after the other detached it");
-        CHECK(umount2("/tmp/ns_shared", 0) == 0, "umount shared mount in owner");
+        errno = 0;
+        CHECK(umount2("/tmp/ns_shared", 0) == -1 && errno == EBUSY,
+              "detached clone namespace still pins source mount");
+        CHECK(xsetns(fd_initns, CLONE_NEWNS) == 0,
+              "leave source namespace while clone remains pinned");
+        close(fd_shared_source_ns);
+        fd_shared_source_ns = -1;
+        if (fd_sharedns >= 0) {
+            close(fd_sharedns);
+            fd_sharedns = -1;
+        }
+        errno = 0;
+        CHECK(access("/tmp/ns_shared/before", F_OK) == -1 && errno == ENOENT,
+              "pending source namespace tears down after clone pin drops");
     }
 
 out:
@@ -293,6 +323,8 @@ out:
         (void)waitpid(witness, &st, 0);
     }
     if (fd_newns >= 0) close(fd_newns);
+    if (fd_shared_source_ns >= 0) close(fd_shared_source_ns);
+    if (fd_sharedns >= 0) close(fd_sharedns);
     if (fd_initns >= 0) close(fd_initns);
     if (fd_pidns >= 0) close(fd_pidns);
     if (failures)

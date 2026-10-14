@@ -32,6 +32,13 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 static int fail(const char *what, long got)
 {
     printf("POLL_EDGE: FAIL %s (got=%ld errno=%d)\n", what, got, errno);
@@ -452,6 +459,137 @@ static int test_epoll_oneshot(void)
     return 0;
 }
 
+static void epoll_race_signal_handler(int signo)
+{
+    (void)signo;
+}
+
+/* Race signal cancellation against a newly ready source. Either readiness or
+ * EINTR may win the first wait; after EINTR the still-pending edge must be
+ * observable on the next wait. */
+static int test_epoll_cancel_readiness_race(void)
+{
+    for (int iteration = 0; iteration < 8; iteration++) {
+        int p[2], ready[2];
+        if (pipe(p) < 0 || pipe(ready) < 0)
+            return fail("cancel-race pipe", errno);
+        int ep = epoll_create1(0);
+        if (ep < 0)
+            return fail("cancel-race epoll", errno);
+        struct epoll_event ev = { .events = EPOLLIN | EPOLLET };
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) != 0)
+            return fail("cancel-race ADD", errno);
+        pid_t child = fork();
+        if (child < 0)
+            return fail("cancel-race fork", errno);
+        if (child == 0) {
+            close(ready[0]);
+            sigset_t blocked, unblocked;
+            sigemptyset(&blocked);
+            sigaddset(&blocked, SIGUSR1);
+            if (sigprocmask(SIG_BLOCK, &blocked, NULL) != 0)
+                _exit(2);
+            struct sigaction action;
+            memset(&action, 0, sizeof(action));
+            action.sa_handler = epoll_race_signal_handler;
+            sigemptyset(&action.sa_mask);
+            if (sigaction(SIGUSR1, &action, NULL) != 0 ||
+                write(ready[1], "R", 1) != 1)
+                _exit(3);
+            close(ready[1]);
+            sigemptyset(&unblocked);
+            struct epoll_event out;
+            int result = epoll_pwait(ep, &out, 1, 2000, &unblocked);
+            if (result < 0 && errno == EINTR)
+                result = epoll_wait(ep, &out, 1, 2000);
+            if (result != 1 || !(out.events & EPOLLIN))
+                _exit(4);
+            char byte;
+            if (read(p[0], &byte, 1) != 1 || byte != 'x')
+                _exit(5);
+            _exit(0);
+        }
+
+        close(ready[1]);
+        char marker;
+        if (read(ready[0], &marker, 1) != 1 || marker != 'R')
+            return fail("cancel-race ready handshake", -1);
+        close(ready[0]);
+        usleep(1000);
+        if (kill(child, SIGUSR1) != 0 || write(p[1], "x", 1) != 1)
+            return fail("cancel-race signal/readiness injection", errno);
+        int status = 0;
+        if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0)
+            return fail("cancel-race child outcome", status);
+        close(ep);
+        close(p[0]);
+        close(p[1]);
+    }
+    return 0;
+}
+
+/* Closing the last descriptor for a disabled ONESHOT watch must not leave a
+ * stale notification attached to the integer when that number is reused. */
+static int test_epoll_final_close_reuse(void)
+{
+    int p[2];
+    if (pipe(p) < 0)
+        return fail("final-close pipe", errno);
+    int ep = epoll_create1(0);
+    if (ep < 0)
+        return fail("final-close epoll", errno);
+    struct epoll_event ev = { .events = EPOLLIN | EPOLLONESHOT,
+                              .data.u64 = 0xabcddcba };
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) != 0)
+        return fail("final-close ADD", errno);
+    if (write(p[1], "x", 1) != 1)
+        return fail("final-close initial ready", errno);
+    struct epoll_event out;
+    if (epoll_wait(ep, &out, 1, 500) != 1 || !(out.events & EPOLLIN))
+        return fail("final-close disable ONESHOT", -1);
+
+    int watched_fd = p[0];
+    close(p[0]);
+    void (*old_sigpipe)(int) = signal(SIGPIPE, SIG_IGN);
+    if (old_sigpipe == SIG_ERR)
+        return fail("final-close ignore SIGPIPE", errno);
+    errno = 0;
+    ssize_t after_final_read_close = write(p[1], "y", 1);
+    int write_errno = errno;
+    if (signal(SIGPIPE, old_sigpipe) == SIG_ERR)
+        return fail("final-close restore SIGPIPE", errno);
+    if (after_final_read_close != -1 || write_errno != EPIPE) {
+        errno = write_errno;
+        return fail("final-close did not release pipe reader", errno);
+    }
+    close(p[1]);
+    int replacement = eventfd(0, EFD_NONBLOCK);
+    if (replacement < 0)
+        return fail("final-close replacement", errno);
+    if (replacement != watched_fd) {
+        if (dup2(replacement, watched_fd) != watched_fd)
+            return fail("final-close force fd reuse", errno);
+        close(replacement);
+        replacement = watched_fd;
+    }
+    ev.events = EPOLLIN;
+    ev.data.u64 = 0x12344321;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, replacement, &ev) != 0)
+        return fail("final-close reuse ADD", errno);
+    uint64_t one = 1;
+    if (write(replacement, &one, sizeof(one)) != (ssize_t)sizeof(one))
+        return fail("final-close replacement ready", errno);
+    int result = epoll_wait(ep, &out, 1, 500);
+    if (result != 1 || out.data.u64 != ev.data.u64 ||
+        !(out.events & EPOLLIN))
+        return fail("final-close reused identity delivery", result);
+
+    close(ep);
+    close(replacement);
+    return 0;
+}
+
 /* EPOLLHUP is delivered even when only EPOLLIN was requested; the data
  * union round-trips. */
 static int test_epoll_hup_and_data(void)
@@ -596,8 +734,70 @@ static int test_eventfd_edges(void)
     return 0;
 }
 
-int main(void)
+/* Paired guest microbenchmark for close-path watch lookup/pruning. All
+ * creation and epoll_ctl setup is outside the timed region. Each watched
+ * close drops the final descriptor slot for that registered eventfd. */
+static int bench_epoll_final_close(void)
 {
+    enum { TARGETS = 256, SAMPLES = 5 };
+    static const int watch_counts[] = { 0, 1, 64, 256 };
+    int targets[TARGETS];
+    struct timespec resolution;
+    if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0)
+        return fail("close-bench clock_getres", errno);
+    printf("EVENTPOLL_CLOSE_BENCH: clock_resolution_ns=%llu\n",
+           (unsigned long long)resolution.tv_sec * 1000000000ULL +
+               (unsigned long long)resolution.tv_nsec);
+    for (size_t wi = 0; wi < sizeof(watch_counts) / sizeof(watch_counts[0]); wi++) {
+        int watched = watch_counts[wi];
+        uint64_t sample_ns[SAMPLES];
+        for (int sample = 0; sample < SAMPLES; sample++) {
+            int ep = epoll_create1(0);
+            if (ep < 0)
+                return fail("close-bench epoll", errno);
+            for (int i = 0; i < TARGETS; i++) {
+                int fd = eventfd(0, EFD_NONBLOCK);
+                if (fd < 0)
+                    return fail("close-bench target eventfd", errno);
+                if (i < watched) {
+                    struct epoll_event ev = { .events = EPOLLIN,
+                                              .data.u64 = 0x10000u + (uint64_t)i };
+                    if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) != 0)
+                        return fail("close-bench target ADD", errno);
+                }
+                targets[i] = fd;
+            }
+            uint64_t start = now_ns();
+            for (int i = 0; i < TARGETS; i++) {
+                if (close(targets[i]) != 0)
+                    return fail("close-bench target close", errno);
+            }
+            sample_ns[sample] = now_ns() - start;
+            close(ep);
+        }
+        uint64_t total = 0;
+        for (int i = 0; i < SAMPLES; i++)
+            total += sample_ns[i];
+        printf("EVENTPOLL_CLOSE_BENCH: watches=%d closes=%d samples=%d mean_ns_per_close=%llu samples_ns=",
+               watched, TARGETS, SAMPLES,
+               (unsigned long long)(total / SAMPLES / TARGETS));
+        for (int i = 0; i < SAMPLES; i++)
+            printf("%s%llu", i ? "," : "",
+                   (unsigned long long)sample_ns[i]);
+        printf("\n");
+    }
+    printf("EVENTPOLL_CLOSE_BENCH: PASS\n");
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--bench-close") == 0)
+        return bench_epoll_final_close() == 0 ? 0 : 1;
+    if (argc != 1) {
+        printf("usage: poll_edge [--bench-close]\n");
+        return 2;
+    }
     struct {
         const char *name;
         int (*fn)(void);
@@ -611,6 +811,8 @@ int main(void)
         { "epoll_dup", test_epoll_dup },
         { "epoll_et_lt", test_epoll_et_lt },
         { "epoll_oneshot", test_epoll_oneshot },
+        { "epoll_cancel_readiness_race", test_epoll_cancel_readiness_race },
+        { "epoll_final_close_reuse", test_epoll_final_close_reuse },
         { "epoll_hup_and_data", test_epoll_hup_and_data },
         { "epoll_pwait2", test_epoll_pwait2 },
         { "eventfd_edges", test_eventfd_edges },

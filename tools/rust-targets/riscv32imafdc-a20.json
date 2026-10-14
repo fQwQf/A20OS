@@ -1,0 +1,24 @@
+{
+  "arch": "riscv32",
+  "cpu": "generic-rv32",
+  "crt-objects-fallback": "false",
+  "data-layout": "e-m:e-p:32:32-i64:64-n32-S128",
+  "eh-frame-header": false,
+  "emit-debug-gdb-scripts": false,
+  "features": "+m,+a,+f,+d,+c",
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "llvm-abiname": "ilp32d",
+  "llvm-target": "riscv32",
+  "max-atomic-width": 32,
+  "metadata": {
+    "description": "A20OS bare-metal RV32IMAFDC ILP32D",
+    "host_tools": false,
+    "std": false,
+    "tier": 2
+  },
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "target-endian": "little",
+  "target-pointer-width": 32
+}

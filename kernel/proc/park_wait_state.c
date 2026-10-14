@@ -2,6 +2,30 @@
 
 #include <stddef.h>
 
+/* RV32 has no native 64-bit atomic instructions. Route the Rust state
+ * machine's primitive accesses through GCC's atomic64 ABI, which the RISC-V
+ * platform supplies with its IRQ-safe implementation. Callers already hold
+ * park_lock except init and the documented lock-free acquire read. */
+uint64_t a20_park_wait_load_u64_relaxed(uint64_t *ptr)
+{
+    return __atomic_load_n(ptr, __ATOMIC_RELAXED);
+}
+
+uint64_t a20_park_wait_load_u64_acquire(uint64_t *ptr)
+{
+    return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+}
+
+void a20_park_wait_store_u64_relaxed(uint64_t *ptr, uint64_t value)
+{
+    __atomic_store_n(ptr, value, __ATOMIC_RELAXED);
+}
+
+void a20_park_wait_store_u64_release(uint64_t *ptr, uint64_t value)
+{
+    __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
+}
+
 static int fields_valid(const a20_park_wait_fields_t *f)
 {
     return f && f->wait_seq && f->wait_deadline && f->park_state &&

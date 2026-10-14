@@ -2,7 +2,11 @@
 
 pub const REQ_MAGIC: u32 = 0x5546_5352;
 pub const RESP_MAGIC: u32 = 0x5546_5350;
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
+pub const LEGACY_PROTO_VERSION: u32 = 1;
+pub const LIFETIME_CAPABILITY: u64 = 0x5546_534c_4946_4532;
+pub const BACKEND_FAT: u32 = 1;
+pub const BACKEND_VNFS: u32 = 2;
 pub const ROOT_INO: u64 = 1;
 pub const OP_INIT: u32 = 1;
 pub const OP_LOOKUP: u32 = 2;
@@ -18,6 +22,9 @@ pub const OP_WRITE: u32 = 11;
 pub const OP_SYNC: u32 = 12;
 pub const OP_STATFS: u32 = 13;
 pub const OP_RENAME: u32 = 14;
+pub const OP_OPEN: u32 = 15;
+pub const OP_CLOSE: u32 = 16;
+pub const OP_LINK: u32 = 17;
 pub const MAX_MESSAGE: usize = 65536;
 pub const MAX_NAME: usize = 511;
 
@@ -100,6 +107,13 @@ pub fn backend_for(name: &[u8]) -> Option<u32> {
     }
 }
 
+/// Only the vnode-backed backend can currently preserve an inode mapping
+/// across unlink. FAT keeps its established path/ino behavior and must not
+/// advertise the new OPEN/CLOSE lifetime RPCs.
+pub fn lifetime_capability_for(backend: u32) -> u64 {
+    if backend == BACKEND_VNFS { LIFETIME_CAPABILITY } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +152,12 @@ mod tests {
             assert_eq!(backend_for(fs), Some(2));
         }
         assert_eq!(backend_for(b"unknown"), None);
+    }
+
+    #[test]
+    fn lifetime_capability_is_only_advertised_by_vnode_backend() {
+        assert_eq!(lifetime_capability_for(BACKEND_VNFS), LIFETIME_CAPABILITY);
+        assert_eq!(lifetime_capability_for(BACKEND_FAT), 0);
+        assert_eq!(lifetime_capability_for(99), 0);
     }
 }

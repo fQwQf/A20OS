@@ -639,19 +639,23 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
 /* Runs when the last reference to an open file goes away: fire EventQ
  * destroy hooks (watches key on the vfile pointer), release file locks,
  * run the close op, free the vfile, drop the vnode. */
-void vfs_finalize_closed_vfile(vfile_t *vf)
+int vfs_finalize_closed_vfile(vfile_t *vf)
 {
     if (!vf)
-        return;
+        return 0;
     vnode_t *vn = vf->vnode;
+    unsigned long identity = (unsigned long)vf->identity;
+    (void)identity; /* ktrace_vfs compiles away in non-trace builds. */
     a20_eventq_on_vfile_destroy(vf);
     vfs_release_open_file_locks(vf, 0);
+    int close_error = 0;
     if (vf->ops && vf->ops->close)
-        vf->ops->close(vf);
+        close_error = vf->ops->close(vf);
+    ktrace_vfs("[VFS] close: file=%p identity=%lu done err=%d\n",
+               (void *)vf, identity, close_error);
     vfile_free(vf);
     vnode_put(vn);
-    ktrace_vfs("[VFS] close: file=%p identity=%lu done\n",
-               (void *)vf, (unsigned long)vf->identity);
+    return close_error;
 }
 
 /*
@@ -1781,6 +1785,7 @@ void vfs_init(void) {
         strcpy(mnt->fstype, "rootfs");
         strcpy(mnt->opts, "rw");
         mnt->root = ramfs_mount(mnt);
+        vfs_mount_link_tree(mnt);
         kdebug("[VFS] Initialized (root=ramfs)\n");
     }
 
@@ -1794,6 +1799,7 @@ void vfs_init(void) {
         strcpy(mnt->opts, "rw");
         mnt->root = devfs_mount();
         if (mnt->root) mnt->root->mnt = mnt;
+        vfs_mount_link_tree(mnt);
     }
 
     {
@@ -1808,6 +1814,7 @@ void vfs_init(void) {
             shm_mnt->root->mnt = shm_mnt;
             kdebug("[VFS] Mounted ramfs at /dev/shm\n");
         }
+        vfs_mount_link_tree(shm_mnt);
     }
 
     /* std streams: no global table any more.  Boot-context fd operations
@@ -1833,6 +1840,7 @@ void vfs_init(void) {
             strcpy(mnt->opts, "rw");
             mnt->root = procfs_root;
             procfs_root->mnt = mnt;
+            vfs_mount_link_tree(mnt);
             kdebug("[VFS] Mounted procfs at /proc\n");
         }
     }
@@ -1851,6 +1859,7 @@ void vfs_init(void) {
             strcpy(mnt->opts, "rw");
             mnt->root = sysfs_root;
             sysfs_root->mnt = mnt;
+            vfs_mount_link_tree(mnt);
             kdebug("[VFS] Mounted sysfs at /sys\n");
         }
     }

@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -157,6 +158,14 @@ static int test_fat(void)
     return 0;
 }
 
+static const char *g_ext4_stop_stage;
+
+static int ext4_stage_done(const char *stage)
+{
+    printf("UXFS_EXT4_STAGE: %s\n", stage);
+    return g_ext4_stop_stage && strcmp(g_ext4_stop_stage, stage) == 0;
+}
+
 static int test_ext4(void)
 {
     const char *tag = "UXFS_EXT4";
@@ -171,6 +180,8 @@ static int test_ext4(void)
 
     if (roundtrip(tag, "/uext4", "EXT4BIN.BIN"))
         return 1;
+    if (ext4_stage_done("created"))
+        return 0;
 
     /* rename semantics (ext4 supports the full rename primitive) */
     if (rename("/uext4/EXT4BIN.BIN", "/uext4/RENAMED.BIN") != 0)
@@ -178,10 +189,127 @@ static int test_ext4(void)
     struct stat st;
     if (stat("/uext4/EXT4BIN.BIN", &st) == 0 || stat("/uext4/RENAMED.BIN", &st) != 0)
         return fail(tag, "rename effect");
+    if (ext4_stage_done("renamed"))
+        return 0;
 
-    if (unlink("/uext4/RENAMED.BIN") != 0)
+    if (unlink("/uext4/RENAMED.BIN") != 0) {
+        printf("%s: unlink errno=%d\n", tag, errno);
         return fail(tag, "unlink");
+    }
+    if (ext4_stage_done("unlinked"))
+        return 0;
 
+    printf("%s: PASS\n", tag);
+    return 0;
+}
+
+static int test_ext4_open_unlink(void)
+{
+    const char *tag = "UXFS_EXT4_OPEN_UNLINK";
+    const char *a = "/uext4/LIFETIME.BIN";
+    const char *b = "/uext4/LIFETIME.HL";
+    spawn_ufsd("/uext4", "2", "ext4");
+    if (wait_path("/uext4/hello.txt", 500))
+        return fail(tag, "mount not visible");
+    printf("%s: mounted\n", tag);
+
+    int fd = open(a, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0) return fail(tag, "create/open");
+    printf("%s: opened first\n", tag);
+    static const char first[] = "open-unlink-before\n";
+    if (write(fd, first, sizeof(first) - 1) != (ssize_t)(sizeof(first) - 1) ||
+        fsync(fd) != 0)
+        return fail(tag, "initial write/fsync");
+    if (link(a, b) != 0)
+        return fail(tag, "hard link");
+    printf("%s: linked\n", tag);
+    if (unlink(a) != 0)
+        return fail(tag, "unlink non-final hard link");
+    printf("%s: unlinked first name\n", tag);
+    struct stat st;
+    if (stat(b, &st) != 0 || st.st_nlink != 1)
+        return fail(tag, "remaining hard link lost");
+    if (lseek(fd, 0, SEEK_SET) != 0)
+        return fail(tag, "seek linked fd");
+    char bytes[64] = {0};
+    if (read(fd, bytes, sizeof(bytes)) != (ssize_t)(sizeof(first) - 1) ||
+        memcmp(bytes, first, sizeof(first) - 1) != 0)
+        return fail(tag, "read after non-final unlink");
+    if (close(fd) != 0)
+        return fail(tag, "close non-final unlink fd");
+    printf("%s: closed first fd\n", tag);
+
+    fd = open(b, O_RDWR);
+    if (fd < 0) return fail(tag, "open final link");
+    printf("%s: opened final link\n", tag);
+    if (unlink(b) != 0)
+        return fail(tag, "unlink final hard link");
+    printf("%s: unlinked final name\n", tag);
+    if (stat(b, &st) == 0)
+        return fail(tag, "unlinked name still resolves");
+    if (lseek(fd, 0, SEEK_END) != (long)(sizeof(first) - 1))
+        return fail(tag, "seek open-unlinked fd");
+    static const char second[] = "after-unlink\n";
+    if (write(fd, second, sizeof(second) - 1) != (ssize_t)(sizeof(second) - 1) ||
+        fsync(fd) != 0)
+        return fail(tag, "write/fsync after unlink");
+    if (lseek(fd, 0, SEEK_SET) != 0)
+        return fail(tag, "rewind open-unlinked fd");
+    memset(bytes, 0, sizeof(bytes));
+    size_t expected = sizeof(first) + sizeof(second) - 2;
+    if (read(fd, bytes, expected) != (ssize_t)expected ||
+        memcmp(bytes, first, sizeof(first) - 1) != 0 ||
+        memcmp(bytes + sizeof(first) - 1, second, sizeof(second) - 1) != 0)
+        return fail(tag, "open-unlinked data mismatch");
+    if (close(fd) != 0)
+        return fail(tag, "last close cleanup");
+    printf("%s: last close complete\n", tag);
+    sync();
+    printf("%s: PASS\n", tag);
+    return 0;
+}
+
+static int test_ext4_close_retry(void)
+{
+    const char *tag = "UXFS_EXT4_CLOSE_RETRY";
+    const char *target = "/uext4/CLOSE-RETRY.BIN";
+    const char *keeper = "/uext4/CLOSE-KEEPER.BIN";
+    spawn_ufsd("/uext4", "2", "ext4");
+    if (wait_path("/uext4/hello.txt", 500))
+        return fail(tag, "mount not visible");
+
+    int keepfd = open(keeper, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    int fd = open(target, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (keepfd < 0 || fd < 0) return fail(tag, "create/open");
+    struct stat target_st;
+    if (fstat(fd, &target_st) != 0) return fail(tag, "stat target before unlink");
+    printf("%s: target ino=%lu size=%lu blocks=%lu\n", tag,
+           (unsigned long)target_st.st_ino,
+           (unsigned long)target_st.st_size,
+           (unsigned long)target_st.st_blocks);
+    static const char content[] = "close cleanup retry\n";
+    if (write(fd, content, sizeof(content) - 1) != (ssize_t)(sizeof(content) - 1) ||
+        fsync(fd) != 0)
+        return fail(tag, "initial write/fsync");
+    if (unlink(target) != 0) return fail(tag, "unlink final name");
+    errno = 0;
+    int close_rc = close(fd);
+    int close_errno = errno;
+    int close_eio = close_rc < 0 && close_errno == EIO;
+    if (close_rc < 0 && !close_eio)
+        return fail(tag, "first close did not report metadata EIO");
+    if (close_eio)
+        printf("%s: first close returned errno=%d\n", tag, close_errno);
+    else
+        printf("%s: first close returned success despite metadata EIO\n", tag);
+    /* The next operation sends OP_SYNC. Rust must retain the zero-open pending
+     * lifetime slot after the failed CLOSE and retry the same orphan cleanup. */
+    if (fsync(keepfd) != 0) return fail(tag, "sync retry");
+    if (close(keepfd) != 0) return fail(tag, "close keeper");
+    if (unlink(keeper) != 0) return fail(tag, "remove keeper");
+    sync();
+    if (!close_eio)
+        return fail(tag, "cleanup retried but kernel swallowed close EIO");
     printf("%s: PASS\n", tag);
     return 0;
 }
@@ -247,8 +375,10 @@ static int test_ntfs(void)
 
     /* Directory ops: mkdir -> nested create and read -> delete the file
      * before rmdir */
-    if (mkdir("/untfs/sub", 0755) != 0)
+    if (mkdir("/untfs/sub", 0755) != 0) {
+        printf("%s: mkdir errno=%d\n", tag, errno);
         return fail(tag, "mkdir");
+    }
     char npath[256];
     snprintf(npath, sizeof(npath), "%s/%s", "/untfs/sub", "NESTED.TXT");
     int fd = open(npath, O_CREAT | O_WRONLY, 0644);
@@ -358,8 +488,23 @@ static int test_restart(void)
     return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2) {
+        if (strcmp(argv[1], "lifetime") == 0)
+            return test_ext4_open_unlink();
+        if (strcmp(argv[1], "close-retry") == 0)
+            return test_ext4_close_retry();
+        if (strcmp(argv[1], "ntfs") == 0)
+            return test_ntfs();
+        g_ext4_stop_stage = argv[1];
+        if (strcmp(argv[1], "created") != 0 &&
+            strcmp(argv[1], "renamed") != 0 &&
+            strcmp(argv[1], "unlinked") != 0 &&
+            strcmp(argv[1], "close-retry") != 0)
+            return fail("UXFS_EXT4", "unknown stage");
+        return test_ext4();
+    }
     if (test_fat())
         return 1;
     if (test_ext4())

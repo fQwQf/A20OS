@@ -1,5 +1,6 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
+#include "fs/ext4_journal.h"
 #include "fs/page_cache.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
@@ -253,33 +254,298 @@ static void ext4_inode_mark_deleted(ext4_inode_t *inode)
     inode->i_dtime = (uint32_t)now[0];
 }
 
+typedef struct {
+    void *context;
+    uint32_t inode_count;
+    uint32_t first_ino;
+    int (*read_head)(void *, uint32_t *);
+    int (*write_head)(void *, uint32_t);
+    int (*read_inode)(void *, uint32_t, uint16_t *, uint32_t *);
+    int (*write_inode)(void *, uint32_t, uint16_t, uint32_t);
+    int (*finish_inode)(void *, uint32_t, uint16_t);
+    void (*abort_transaction)(void *);
+} ext4_orphan_ops_t;
+
+#ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
+extern int a20_ext4_orphan_add_last_link(const ext4_orphan_ops_t *, uint32_t);
+extern int a20_ext4_orphan_reap(const ext4_orphan_ops_t *, uint32_t);
+extern int a20_ext4_orphan_recover(const ext4_orphan_ops_t *, uint32_t *);
+#endif
+
+static int ext4_orphan_read_head(void *ctx, uint32_t *out)
+{
+    ext4_sb_info_t *sb = ctx;
+    if (!sb || !out) return -EINVAL;
+    uint8_t le[4];
+    if (bcache_read_bytes(sb->bc, EXT4_SB_OFFSET +
+        offsetof(ext4_superblock_t, s_last_orphan), le, sizeof(le)) < 0)
+        return -EIO;
+    *out = (uint32_t)le[0] | ((uint32_t)le[1] << 8) |
+           ((uint32_t)le[2] << 16) | ((uint32_t)le[3] << 24);
+    return 0;
+}
+
+static int ext4_orphan_write_head(void *ctx, uint32_t ino)
+{
+    return ext4_superblock_set_last_orphan(ctx, ino);
+}
+
+static int ext4_orphan_read_inode(void *ctx, uint32_t ino, uint16_t *links,
+                                  uint32_t *next)
+{
+    ext4_inode_t inode;
+    ext4_sb_info_t *sb = ctx;
+    if (!sb || !links || !next || ext4_read_inode(sb, ino, &inode) < 0)
+        return -EIO;
+    *links = inode.i_links_count;
+    *next = inode.i_dtime;
+    return 0;
+}
+
+static int ext4_orphan_write_inode(void *ctx, uint32_t ino, uint16_t links,
+                                   uint32_t next)
+{
+    ext4_sb_info_t *sb = ctx;
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    inode.i_links_count = links;
+    inode.i_dtime = next;
+    return ext4_write_inode(sb, ino, &inode);
+}
+
+static int ext4_orphan_finish_inode(void *ctx, uint32_t ino, uint16_t links)
+{
+    ext4_sb_info_t *sb = ctx;
+    ext4_inode_t inode;
+    int ret = ext4_read_inode(sb, ino, &inode);
+    if (ret < 0) return ret;
+    if (links != inode.i_links_count) return -EIO;
+    if (links) {
+        uint64_t size = ext4_inode_size(&inode);
+        uint64_t cutoff = size / sb->block_size + (size % sb->block_size != 0);
+        if (cutoff > 0xffffffffULL) return -EFBIG;
+        ret = ext4_block_truncate_at_checked(sb, ino, &inode, (uint32_t)cutoff);
+        if (ret < 0) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            return ret;
+        }
+        ret = ext4_write_inode(sb, ino, &inode);
+        if (ret < 0 && sb->journal) (void)ext4_journal_poison(sb);
+        return ret;
+    }
+
+    ret = ext4_block_truncate_checked(sb, ino, &inode);
+    if (ret < 0) {
+        if (sb->journal) (void)ext4_journal_poison(sb);
+        return ret;
+    }
+    ext4_inode_mark_deleted(&inode);
+    ret = ext4_write_inode(sb, ino, &inode);
+    if (ret == 0) ret = ext4_free_inode(sb, ino);
+    if (ret < 0 && sb->journal) (void)ext4_journal_poison(sb);
+    return ret;
+}
+
+static void ext4_orphan_abort_transaction(void *ctx)
+{
+    ext4_sb_info_t *sb = ctx;
+    if (sb && sb->journal) (void)ext4_journal_poison(sb);
+}
+
+static ext4_orphan_ops_t ext4_orphan_ops(ext4_sb_info_t *sb)
+{
+    ext4_orphan_ops_t ops = {
+        .context = sb,
+        .inode_count = sb ? sb->inodes_count : 0,
+        .first_ino = sb ? sb->first_ino : 0,
+        .read_head = ext4_orphan_read_head,
+        .write_head = ext4_orphan_write_head,
+        .read_inode = ext4_orphan_read_inode,
+        .write_inode = ext4_orphan_write_inode,
+        .finish_inode = ext4_orphan_finish_inode,
+        .abort_transaction = ext4_orphan_abort_transaction,
+    };
+    return ops;
+}
+
+static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino);
+static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino);
+
+/* C-profile reference state machine. The Rust profile dispatches the identical
+ * narrow callbacks through ext4_orphan.rs and owns validation/order there. */
+#ifndef CONFIG_UFSD_RUST_EXT4_ORPHAN
+static int ext4_orphan_chain_contains(ext4_orphan_ops_t *ops, uint32_t target)
+{
+    uint32_t cur = 0, steps = 0;
+    if (ops->read_head(ops->context, &cur) < 0) return -EIO;
+    while (cur) {
+        if (cur < ops->first_ino || cur > ops->inode_count ||
+            steps++ >= ops->inode_count)
+            return -EIO;
+        if (cur == target) return -EEXIST;
+        uint16_t links;
+        uint32_t next;
+        if (ops->read_inode(ops->context, cur, &links, &next) < 0) return -EIO;
+        (void)links;
+        cur = next;
+    }
+    return 0;
+}
+#endif
+
+static int ext4_orphan_add_last_link(ext4_sb_info_t *sb, uint32_t ino)
+{
+    ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
+#ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
+    return a20_ext4_orphan_add_last_link(&ops, ino);
+#else
+    int ret = ext4_orphan_chain_contains(&ops, ino);
+    if (ret < 0) return ret;
+    uint16_t links;
+    uint32_t head;
+    if (ops.read_inode(ops.context, ino, &links, &head) < 0 || links != 1)
+        return -EIO;
+    if (ops.read_head(ops.context, &head) < 0) return -EIO;
+    ret = ops.write_inode(ops.context, ino, 0, head);
+    if (ret < 0) { ops.abort_transaction(ops.context); return ret; }
+    ret = ops.write_head(ops.context, ino);
+    if (ret < 0) ops.abort_transaction(ops.context);
+    return ret;
+#endif
+}
+
+static int ext4_orphan_reap(ext4_sb_info_t *sb, uint32_t ino)
+{
+    ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
+#ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
+    return a20_ext4_orphan_reap(&ops, ino);
+#else
+    uint32_t prev = 0, cur = 0, steps = 0, found_prev = 0;
+    uint16_t found_links = 0;
+    uint32_t found_next = 0;
+    int found = 0;
+    if (ops.read_head(ops.context, &cur) < 0) return -EIO;
+    while (cur) {
+        if (cur < ops.first_ino || cur > ops.inode_count ||
+            steps++ >= ops.inode_count) return -EIO;
+        uint16_t links;
+        uint32_t next;
+        if (ops.read_inode(ops.context, cur, &links, &next) < 0) return -EIO;
+        if (cur == ino) {
+            if (found) return -EIO;
+            found = 1;
+            found_prev = prev;
+            found_links = links;
+            found_next = next;
+        }
+        prev = cur;
+        cur = next;
+    }
+    if (!found) return -EIO;
+    int ret = ops.finish_inode(ops.context, ino, found_links);
+    if (ret < 0) { ops.abort_transaction(ops.context); return ret; }
+    if (!found_prev) {
+        ret = ops.write_head(ops.context, found_next);
+        if (ret < 0) ops.abort_transaction(ops.context);
+        return ret;
+    }
+    uint16_t prev_links;
+    uint32_t ignored;
+    if (ops.read_inode(ops.context, found_prev, &prev_links, &ignored) < 0) {
+        ops.abort_transaction(ops.context);
+        return -EIO;
+    }
+    ret = ops.write_inode(ops.context, found_prev, prev_links, found_next);
+    if (ret < 0) ops.abort_transaction(ops.context);
+    return ret;
+#endif
+}
+
+int ext4_orphan_recover(ext4_sb_info_t *sb)
+{
+    ext4_orphan_ops_t ops = ext4_orphan_ops(sb);
+#ifdef CONFIG_UFSD_RUST_EXT4_ORPHAN
+    uint32_t recovered = 0;
+    return a20_ext4_orphan_recover(&ops, &recovered);
+#else
+    uint32_t cur = 0, steps = 0;
+    if (ops.read_head(ops.context, &cur) < 0) return -EIO;
+    /* Preflight the entire chain before modifying any inode or bitmap. */
+    uint32_t scan = cur;
+    while (scan) {
+        if (scan < ops.first_ino || scan > ops.inode_count ||
+            steps++ >= ops.inode_count) return -EIO;
+        uint16_t links;
+        uint32_t next;
+        if (ops.read_inode(ops.context, scan, &links, &next) < 0) return -EIO;
+        scan = next;
+    }
+    /* Reap_one validates the full chain itself; do it before each node so a
+     * corrupt tail never causes a prefix to be reclaimed. */
+    steps = 0;
+    while (cur) {
+        if (steps++ >= ops.inode_count) return -EIO;
+        int ret = ext4_orphan_reap(sb, cur);
+        if (ret < 0) return ret;
+        if (ops.read_head(ops.context, &cur) < 0) return -EIO;
+    }
+    return 0;
+#endif
+}
+
 int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
                                uint32_t dir_ino __attribute__((unused)),
                                ext4_inode_t *di, const char *name, uint32_t ino,
                                vnode_t **deferred_put) {
-    int r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
+    /* Read before removing the name so unsupported no-journal last-link
+     * removal can fail without changing the directory. */
+    ext4_inode_t victim;
+    int r = ext4_read_inode(sb, ino, &victim);
     if (r < 0) return r;
 
     /* Drop one link.  Hard-linked files survive until the last link is gone. */
-    ext4_inode_t victim;
-    r = ext4_read_inode(sb, ino, &victim);
-    if (r < 0) return r;
     if (victim.i_links_count > 1) {
+        r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
+        if (r < 0) return r;
         victim.i_links_count--;
         uint64_t now[2];
         timekeeping_get_realtime(now);
         victim.i_ctime = (uint32_t)now[0];
-        ext4_write_inode(sb, ino, &victim);
-        return 0;
+        r = ext4_write_inode(sb, ino, &victim);
+        if (r < 0 && sb->journal) (void)ext4_journal_poison(sb);
+        return r;
     }
 
-    /* If a vnode is still alive (open fd, dcache, ...), keep the inode and
-     * its blocks; ext4_release_vn() reclaims them when the last reference
-     * drops.  The inode number stays allocated until then, so it cannot be
-     * recycled while data is still reachable. */
+    /* Keep last-link cleanup usable on ext2-like ext4 volumes without JBD2.
+     * The same ordered orphan records are written through there, but without
+     * a journal they cannot promise transaction-level crash atomicity. */
+    if (victim.i_links_count != 1) {
+        printf("[EXT4] invalid last-link count ino=%u links=%u\n",
+               ino, victim.i_links_count);
+        return -EOPNOTSUPP;
+    }
+    r = ext4_orphan_add_last_link(sb, ino);
+    if (r < 0) {
+        printf("[EXT4] orphan add failed ino=%u err=%d\n", ino, r);
+        return r;
+    }
+    r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
+    if (r < 0) {
+        printf("[EXT4] unlink dirent remove failed ino=%u err=%d\n", ino, r);
+        (void)ext4_journal_poison(sb);
+        return r;
+    }
+
+    /* If a vnode is still alive (open fd, dcache, ...), retain its zero-link
+     * inode on the on-disk orphan chain. Final close completes the same
+     * journaled cleanup; a crash is recovered before the next mount is used. */
     vnode_t *live = ext4_vnode_cache_remove(sb, ino);
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
+        printf("[EXT4] unlink orphan ino=%u refs=%d vfile_opens=%u\n", ino,
+               vnode_ref_read(live), vp ?
+               __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) : 0);
         if (vp)
             __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
         /* The final link is gone, but open descriptors must retain dirty data
@@ -293,11 +559,12 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
         return 0;
     }
 
-    ext4_block_truncate(sb, ino, &victim);
-    ext4_inode_mark_deleted(&victim);
-    ext4_write_inode(sb, ino, &victim);
+    r = ext4_orphan_reap(sb, ino);
+    if (r < 0) {
+        (void)ext4_journal_poison(sb);
+        return r;
+    }
     vfs_drop_time_meta_identity(mnt, ino);
-    ext4_free_inode(sb, ino);
     return 0;
 }
 
@@ -366,7 +633,9 @@ int ext4_stat(vnode_t *vn, kstat_t *st) {
         st->st_mode = (st->st_mode & ~S_IFMT) | vtype_mode;
     st->st_uid = dinode.i_uid;
     st->st_gid = dinode.i_gid;
-    st->st_nlink = dinode.i_links_count ? dinode.i_links_count : 1;
+    /* POSIX reports zero links for an open-but-unlinked inode. Preserve the
+     * on-disk count so UFSD can distinguish a last unlink from a hard link. */
+    st->st_nlink = dinode.i_links_count;
     /* Keep metadata fingerprints stable by exposing the on-disk inode times. */
     st->st_atime = dinode.i_atime;
     st->st_mtime = dinode.i_mtime;
@@ -383,19 +652,47 @@ void ext4_release_vn(vnode_t *vn) {
         ext4_sb_info_t *sb = p->sb;
         p->unlinked = 0;
         rw_mutex_write_lock(&sb->metadata_lock);
-        ext4_inode_t victim;
-        if (ext4_read_inode(sb, p->inode_num, &victim) == 0) {
-            ext4_block_truncate(sb, p->inode_num, &victim);
-            ext4_inode_mark_deleted(&victim);
-            ext4_write_inode(sb, p->inode_num, &victim);
+        int ret = ext4_orphan_reap(sb, p->inode_num);
+        if (ret < 0) {
+            if (sb->journal) (void)ext4_journal_poison(sb);
+            printf("[EXT4] deferred orphan cleanup failed ino=%u err=%d; "
+                   "orphan retained for recovery\n", p->inode_num, ret);
+        } else {
+            vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         }
-        vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
-        ext4_free_inode(sb, p->inode_num);
         rw_mutex_write_unlock(&sb->metadata_lock);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
     if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
     kfree(vn);
+}
+
+/* Explicit last-close cleanup for the user-space backend. Keeping this as an
+ * error-returning operation lets Rust retain a bounded pending slot and the
+ * adapter's registry reference if metadata IO fails. The legacy orphan node
+ * remains on disk until the Rust transaction succeeds, so restart recovery
+ * is also available if the service dies before retry. */
+int ext4_vnode_finalize_unlinked(vnode_t *vn)
+{
+    if (!vn || !vn->fs_data) return -EINVAL;
+    ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
+    if (!__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return 0;
+    ext4_sb_info_t *sb = p->sb;
+    if (!sb) return -EIO;
+    rw_mutex_write_lock(&sb->metadata_lock);
+    if (!__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) {
+        rw_mutex_write_unlock(&sb->metadata_lock);
+        return 0;
+    }
+    int ret = ext4_orphan_reap(sb, p->inode_num);
+    if (ret < 0) {
+        if (sb->journal) (void)ext4_journal_poison(sb);
+    } else {
+        __atomic_store_n(&p->unlinked, 0, __ATOMIC_RELEASE);
+        vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
+    }
+    rw_mutex_write_unlock(&sb->metadata_lock);
+    return ret;
 }
 
 

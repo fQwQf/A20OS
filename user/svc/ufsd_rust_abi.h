@@ -27,6 +27,7 @@ void a20_ufsd_log(uint32_t handle, const uint8_t *bytes, uint32_t length);
 void a20_ufsd_exit(int32_t code);
 
 int64_t a20_ufsd_backend_mount(uint32_t backend, const char *fstype);
+int64_t a20_ufsd_backend_mount_readonly(uint32_t backend, const char *fstype);
 int64_t a20_ufsd_backend_lookup(uint32_t backend, uint64_t ino,
                                const char *name, uint32_t name_len,
                                ufs_resp_hdr_t *response);

@@ -32,34 +32,63 @@ void vfs_mount_table_init(void)
 
 int vfs_mount_count(void)
 {
-    return mntns_current()->nmounts;
+    uint64_t flags = mntns_mount_table_lock();
+    mnt_namespace_t *ns = mntns_current();
+    int count = 0;
+    for (int i = 0; i < ns->nmounts; i++)
+        count += ns->mounts[i]->publish_ready &&
+                 !ns->mounts[i]->teardown_running;
+    mntns_mount_table_unlock(flags);
+    return count;
 }
 
 mount_t *vfs_mount_at(int index)
 {
     mnt_namespace_t *ns = mntns_current();
-    if (index < 0 || index >= ns->nmounts)
+    uint64_t flags = mntns_mount_table_lock();
+    if (index < 0) {
+        mntns_mount_table_unlock(flags);
         return NULL;
-    return ns->mounts[index];
+    }
+    mount_t *mnt = NULL;
+    for (int i = 0; i < ns->nmounts; i++) {
+        if (!ns->mounts[i]->publish_ready ||
+            ns->mounts[i]->teardown_running)
+            continue;
+        if (index-- == 0) {
+            mnt = ns->mounts[i];
+            break;
+        }
+    }
+    mntns_mount_table_unlock(flags);
+    return mnt;
 }
 
 mount_t *vfs_mount_alloc(void)
 {
     mnt_namespace_t *ns = mntns_current();
-    if (ns->nmounts >= MNTNS_MAX_MOUNTS)
-        return NULL;
     mount_t *mnt = (mount_t *)kmalloc(sizeof(*mnt));
     if (!mnt)
         return NULL;
     memset(mnt, 0, sizeof(*mnt));
     mnt->attached = 1;
+    /* The namespace table itself is the source mount's initial ownership
+     * reference. Namespace copies pin this object through shared_source. */
+    mnt->ns_users = 1;
     /* One reference for the namespace table itself; process roots add to it
      * through vfs_mount_root_get().  An attached mount therefore never drops
      * below 1, which is what makes "is somebody's root?" a comparison
      * against a constant instead of a scan. */
     mnt->root_users = 1;
+    uint64_t flags = mntns_mount_table_lock();
+    if (ns->nmounts >= MNTNS_MAX_MOUNTS) {
+        mntns_mount_table_unlock(flags);
+        kfree(mnt);
+        return NULL;
+    }
     mnt->mnt_id = ++g_mount_id_seq;
     ns->mounts[ns->nmounts++] = mnt;
+    mntns_mount_table_unlock(flags);
     return mnt;
 }
 
@@ -80,6 +109,13 @@ static void mount_tree_unlink(mount_t *mnt)
         }
         pp = &(*pp)->mnt_sibling;
     }
+}
+
+static void vfs_mount_mark_ready(mount_t *mnt)
+{
+    uint64_t flags = mntns_mount_table_lock();
+    mnt->publish_ready = 1;
+    mntns_mount_table_unlock(flags);
 }
 
 /*
@@ -127,8 +163,12 @@ mount_t *vfs_mount_next_sibling(mount_t *mnt)
  */
 void vfs_mount_link_tree(mount_t *mnt)
 {
-    if (!mnt || mnt->mnt_parent || mnt->mnt_child)
+    if (!mnt)
+        return;
+    if (mnt->mnt_parent || mnt->mnt_child) {
+        vfs_mount_mark_ready(mnt);
         return;                 /* already positioned */
+    }
 
     const char *path = mnt->path;
     size_t plen = strlen(path);
@@ -138,25 +178,32 @@ void vfs_mount_link_tree(mount_t *mnt)
     /* Namespace root: no parent, no mountpoint. */
     if (plen <= 1) {
         mnt->mnt_parent = NULL;
+        vfs_mount_mark_ready(mnt);
         return;
     }
 
     char parent_path[MAX_PATH_LEN];
-    if (plen >= sizeof(parent_path))
+    if (plen >= sizeof(parent_path)) {
+        vfs_mount_mark_ready(mnt);
         return;
+    }
     memcpy(parent_path, path, plen);
     parent_path[plen] = '\0';
     char *slash = strrchr(parent_path, '/');
-    if (!slash)
+    if (!slash) {
+        vfs_mount_mark_ready(mnt);
         return;
+    }
     if (slash == parent_path)
         parent_path[1] = '\0';
     else
         *slash = '\0';
 
     mount_t *parent = vfs_find_mount(parent_path);
-    if (!parent)
+    if (!parent) {
+        vfs_mount_mark_ready(mnt);
         return;                 /* orphan: path resolution still works */
+    }
 
     /* The mountpoint vnode is the mount point resolved inside the parent,
      * which is the last component of @path.  It may legitimately fail to
@@ -173,6 +220,7 @@ void vfs_mount_link_tree(mount_t *mnt)
         mnt->mnt_sibling = parent->mnt_child;
         parent->mnt_child = mnt;
     }
+    vfs_mount_mark_ready(mnt);
 }
 
 /* True when @ancestor is @mnt or any of its ancestors. */
@@ -247,6 +295,7 @@ void vfs_mount_remove(mount_t *mnt)
     if (!mnt)
         return;
     mnt_namespace_t *ns = mntns_current();
+    uint64_t flags = mntns_mount_table_lock();
     int idx = -1;
     for (int i = 0; i < ns->nmounts; i++) {
         if (ns->mounts[i] == mnt) {
@@ -254,8 +303,10 @@ void vfs_mount_remove(mount_t *mnt)
             break;
         }
     }
-    if (idx < 0)
+    if (idx < 0) {
+        mntns_mount_table_unlock(flags);
         return;
+    }
     /* Detach without freeing: the table previously compacted an inline array
      * here, which repointed every vnode->mnt, dcache, quota and xattr
      * reference at the mount that shifted into the slot.  The heap object is
@@ -274,6 +325,8 @@ void vfs_mount_remove(mount_t *mnt)
         ns->mounts[i] = ns->mounts[i + 1];
     ns->mounts[ns->nmounts - 1] = NULL;
     ns->nmounts--;
+    mnt->teardown_running = 0;
+    mntns_mount_table_unlock(flags);
     vfs_mount_root_put(mnt); /* the namespace table's own reference */
 }
 
@@ -282,8 +335,11 @@ mount_t *vfs_find_mount(const char *path)
     mnt_namespace_t *ns = mntns_current();
     mount_t *best = NULL;
     size_t best_len = 0;
+    uint64_t flags = mntns_mount_table_lock();
     for (int i = 0; i < ns->nmounts; i++) {
         mount_t *m = ns->mounts[i];
+        if (!m->publish_ready || m->teardown_running)
+            continue;
         /* A detached mount (pivot_root's old root) is unreachable by path. */
         if (m->flags & VFS_MOUNT_DETACHED)
             continue;
@@ -302,6 +358,7 @@ mount_t *vfs_find_mount(const char *path)
             best_len = len;
         }
     }
+    mntns_mount_table_unlock(flags);
     return best;
 }
 
@@ -313,8 +370,11 @@ mount_t *vfs_find_mount_including_detached(const char *path)
     mnt_namespace_t *ns = mntns_current();
     mount_t *best = NULL;
     size_t best_len = 0;
+    uint64_t flags = mntns_mount_table_lock();
     for (int i = 0; i < ns->nmounts; i++) {
         mount_t *m = ns->mounts[i];
+        if (!m->publish_ready || m->teardown_running)
+            continue;
         size_t len = strlen(m->path);
         if (strncmp(path, m->path, len) == 0 &&
             (len == 1 || path[len] == '\0' || path[len] == '/') &&
@@ -323,6 +383,7 @@ mount_t *vfs_find_mount_including_detached(const char *path)
             best_len = len;
         }
     }
+    mntns_mount_table_unlock(flags);
     return best;
 }
 
@@ -347,10 +408,6 @@ int vfs_move_mount(const char *from, const char *to)
         (to[strlen(mnt->path)] == '\0' || to[strlen(mnt->path)] == '/'))
         return -EINVAL;
 
-    char old[MAX_PATH_LEN];
-    strncpy(old, mnt->path, sizeof(old) - 1);
-    old[sizeof(old) - 1] = '\0';
-
     /* The new parent is the mount that covers the destination; the new
      * mountpoint is the destination vnode resolved inside it. */
     mount_t *new_parent = vfs_find_mount(to);
@@ -371,12 +428,27 @@ int vfs_move_mount(const char *from, const char *to)
         return -ENOENT;
     }
 
+    uint64_t flags = mntns_mount_table_lock();
+    int present = 0;
+    mnt_namespace_t *ns = mntns_current();
+    for (int i = 0; i < ns->nmounts; i++) {
+        if (ns->mounts[i] == mnt) {
+            present = 1;
+            break;
+        }
+    }
+    if (!present || mnt->teardown_running) {
+        mntns_mount_table_unlock(flags);
+        if (new_mp)
+            vnode_put(new_mp);
+        return -EBUSY;
+    }
     strncpy(mnt->path, to, MAX_PATH_LEN - 1);
     mnt->path[MAX_PATH_LEN - 1] = '\0';
     vfs_mount_attach(mnt, new_parent == mnt ? NULL : new_parent, new_mp);
+    mntns_mount_table_unlock(flags);
     if (new_mp)
         vnode_put(new_mp); /* the mount holds its own reference now */
-    (void)old;
     vfs_dcache_invalidate_all();
     return 0;
 }

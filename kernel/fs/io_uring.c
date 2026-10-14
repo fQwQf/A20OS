@@ -8,6 +8,7 @@
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "ipc/eventfd.h"
+#include "ipc/ipc.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
@@ -244,6 +245,11 @@ int io_uring_create(unsigned entries)
     vfile_ref_init(vf, 1);
     vf->ops = &g_io_uring_ops;
     vf->priv = ring;
+    if (env_kind_tag_vfile(vf, A20_OBJ_EVENT_QUEUE) < 0) {
+        vf->ops->close(vf);
+        vfile_free(vf);
+        return -EINVAL;
+    }
     return anonfd_install_vfile(vf, O_CLOEXEC);
 }
 

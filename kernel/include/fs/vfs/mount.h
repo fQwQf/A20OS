@@ -63,10 +63,11 @@ int      vfs_umount_flags(const char *path, int flags);
  * destructor may run. */
 #define VFS_MOUNT_NS_SHARED 0x40000000
 
-/* Drop one namespace's hold on a mount entry, running the filesystem
- * teardown only when the last holder releases it. */
+/* Drop one namespace's hold on a mount entry. Source unmount is busy while
+ * copied namespaces still hold it; copied-entry teardown drops its explicit
+ * shared_source reference. */
 struct mnt_namespace;
-void     vfs_mount_fs_teardown(mount_t *mnt);
-void     vfs_mount_namespace_teardown(struct mnt_namespace *ns);
+int      vfs_mount_fs_teardown(mount_t *mnt);
+int      vfs_mount_namespace_teardown(struct mnt_namespace *ns);
 
 #endif /* _FS_VFS_MOUNT_H */

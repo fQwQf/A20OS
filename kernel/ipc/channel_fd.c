@@ -21,6 +21,7 @@
 #include "fs/anonfd.h"
 #include "ipc/ipc.h"
 #include "ipc/channel_fd.h"
+#include "ipc/envelope.h"
 
 static vfile_ops_t a20_ch_fd_ops;
 
@@ -157,5 +158,10 @@ int a20_channel_fd_install(a20_channel_ep_t *ep, int flags)
     vf->flags = flags;
     vf->ops = &a20_ch_fd_ops;
     vf->priv = ep;
+    if (env_kind_tag_vfile(vf, A20_OBJ_CHANNEL_ENDPOINT) < 0) {
+        vfile_free(vf);
+        a20_channel_ep_release(ep);
+        return -EINVAL;
+    }
     return anonfd_install_vfile(vf, flags);
 }

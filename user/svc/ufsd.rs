@@ -8,6 +8,18 @@ use core::panic::PanicInfo;
 
 #[path = "ufsd_protocol.rs"]
 mod protocol;
+#[path = "fscompat/bcache_user.rs"]
+mod bcache;
+#[path = "jbd2_legacy_policy.rs"]
+mod jbd2_legacy_policy;
+#[path = "jbd2_txn.rs"]
+mod jbd2_txn;
+#[path = "jbd2_record.rs"]
+mod jbd2_record;
+#[path = "ext4_orphan.rs"]
+mod ext4_orphan;
+#[path = "ufs_lifetime.rs"]
+mod lifetime;
 #[allow(dead_code)]
 mod idl { include!(env!("A20_IDL_RUST_BINDINGS")); }
 
@@ -22,6 +34,7 @@ const FS_EVENT_TAG: u64 = 1;
 const SERVICE_EVENT_TAG: u64 = 2;
 const BACKEND_FAT: u32 = 1;
 const BACKEND_VNFS: u32 = 2;
+const ERR_NOTSUPP: i64 = -95;
 
 #[repr(C, align(8))]
 struct MessageBuffer([u8; protocol::MAX_MESSAGE]);
@@ -45,6 +58,7 @@ unsafe extern "C" {
     fn a20_ufsd_close(handle: Handle) -> i64;
     fn a20_ufsd_log(handle: Handle, bytes: *const u8, length: u32);
     fn a20_ufsd_backend_mount(backend: u32, fstype: *const c_char) -> i64;
+    fn a20_ufsd_backend_mount_readonly(backend: u32, fstype: *const c_char) -> i64;
     fn a20_ufsd_backend_lookup(backend: u32, ino: u64, name: *const c_char,
                                name_len: u32, response: *mut protocol::Response) -> i64;
     fn a20_ufsd_backend_getattr(backend: u32, ino: u64,
@@ -56,6 +70,8 @@ unsafe extern "C" {
     fn a20_ufsd_backend_mkdir(backend: u32, ino: u64, name: *const c_char,
                               response: *mut protocol::Response) -> i64;
     fn a20_ufsd_backend_unlink(backend: u32, ino: u64, name: *const c_char) -> i64;
+    fn a20_ufsd_backend_link(backend: u32, dir: u64, name: *const c_char,
+                             target: u64) -> i64;
     fn a20_ufsd_backend_rmdir(backend: u32, ino: u64, name: *const c_char) -> i64;
     fn a20_ufsd_backend_truncate(backend: u32, ino: u64, size: u64) -> i64;
     fn a20_ufsd_backend_read(backend: u32, ino: u64, offset: u64, count: u32,
@@ -68,6 +84,12 @@ unsafe extern "C" {
                                response: *mut protocol::Response) -> i64;
     fn a20_ufsd_backend_sync(backend: u32) -> i64;
     fn a20_ufsd_backend_statfs(backend: u32, response: *mut protocol::Response);
+    fn a20_ufsd_backend_has_inode(backend: u32, ino: u64) -> i64;
+    fn a20_ufsd_backend_open(backend: u32, ino: u64) -> i64;
+    fn a20_ufsd_backend_close(backend: u32, ino: u64) -> i64;
+    fn a20_ufsd_backend_link_count(backend: u32, ino: u64, links: *mut u64) -> i64;
+    fn a20_ufsd_backend_reap_unlinked(backend: u32, ino: u64) -> i64;
+    fn a20_ufsd_backend_drop_inode(backend: u32, ino: u64) -> i64;
     fn a20_ufsd_payload_buffer() -> *mut u8;
     fn a20_ufsd_payload_capacity() -> u32;
 }
@@ -112,11 +134,17 @@ fn log_number(handle: Handle, prefix: &[u8], value: u32, suffix: &[u8]) {
     let mut digits = [0u8; 10];
     let mut count = 0usize;
     let mut number = value;
-    if number == 0 { digits[count] = b'0'; count = 1; }
-    while number != 0 { digits[count] = b'0' + (number % 10) as u8; count += 1; number /= 10; }
+    if number == 0 { unsafe { digits.as_mut_ptr().write(b'0') }; count = 1; }
+    while number != 0 {
+        unsafe { digits.as_mut_ptr().add(count).write(b'0' + (number % 10) as u8) };
+        count += 1;
+        number /= 10;
+    }
     let mut encoded = [0u8; 10];
-    for i in 0..count { encoded[i] = digits[count - i - 1]; }
-    log(handle, &encoded[..count]);
+    for i in 0..count {
+        unsafe { encoded.as_mut_ptr().add(i).write(digits.as_ptr().add(count - i - 1).read()); }
+    }
+    log(handle, unsafe { core::slice::from_raw_parts(encoded.as_ptr(), count) });
     log(handle, suffix);
 }
 
@@ -133,8 +161,31 @@ unsafe fn c_bytes<'a>(pointer: *const c_char, max_len: usize) -> Option<&'a [u8]
 
 fn decimal_arg(bytes: &[u8]) -> Option<i32> { protocol::parse_block_index(bytes) }
 
+fn reap_and_drop(backend: u32, ino: u64) -> i64 {
+    unsafe {
+        let reap = a20_ufsd_backend_reap_unlinked(backend, ino);
+        if reap != 0 { return reap; }
+        let sync = a20_ufsd_backend_sync(backend);
+        if sync != 0 { return sync; }
+        a20_ufsd_backend_drop_inode(backend, ino)
+    }
+}
+
+fn sync_and_retry_pending(backend: u32, lifetimes: &mut lifetime::Lifetimes) -> i64 {
+    let sync = unsafe { a20_ufsd_backend_sync(backend) };
+    if sync != 0 { return sync; }
+    let mut cursor = 0;
+    while let Some(ino) = lifetimes.pending(&mut cursor) {
+        let rc = reap_and_drop(backend, ino);
+        if rc != 0 { return rc; }
+        if let Err(error) = lifetimes.reaped(ino) { return error; }
+    }
+    0
+}
+
 fn dispatch_request(
     backend: u32,
+    lifetimes: &mut lifetime::Lifetimes,
     request: &protocol::Request,
     name: *const c_char,
     payload: *const u8,
@@ -144,7 +195,11 @@ fn dispatch_request(
     if backend != BACKEND_FAT && backend != BACKEND_VNFS { return -(ERR_INVALID as i64); }
     unsafe {
         match request.opcode {
-            protocol::OP_INIT => { response.out0 = protocol::ROOT_INO; 0 }
+            protocol::OP_INIT => {
+                response.out0 = protocol::ROOT_INO;
+                response.out1 = protocol::lifetime_capability_for(backend);
+                0
+            }
             protocol::OP_LOOKUP => a20_ufsd_backend_lookup(backend, request.ino, name,
                                                             request.name_len, response),
             protocol::OP_GETATTR => a20_ufsd_backend_getattr(backend, request.ino, response),
@@ -153,7 +208,35 @@ fn dispatch_request(
             protocol::OP_CREATE => a20_ufsd_backend_create(backend, request.ino, name,
                                                             request.arg0 as u32, response),
             protocol::OP_MKDIR => a20_ufsd_backend_mkdir(backend, request.ino, name, response),
-            protocol::OP_UNLINK => a20_ufsd_backend_unlink(backend, request.ino, name),
+            protocol::OP_UNLINK => {
+                if backend == BACKEND_FAT {
+                    return a20_ufsd_backend_unlink(backend, request.ino, name);
+                }
+                let mut target = protocol::Response::default();
+                let lookup = a20_ufsd_backend_lookup(backend, request.ino, name,
+                                                      request.name_len, &mut target);
+                if lookup != 0 { lookup }
+                else {
+                    let rc = a20_ufsd_backend_unlink(backend, request.ino, name);
+                    if rc != 0 { rc }
+                    else {
+                        let mut links = 0u64;
+                        let links_rc = a20_ufsd_backend_link_count(backend,
+                                                                    target.out0,
+                                                                    &mut links);
+                        if links_rc != 0 { links_rc }
+                        else if links == 0 && lifetimes.unlinked(target.out0) {
+                            reap_and_drop(backend, target.out0)
+                        } else { 0 }
+                    }
+                }
+            }
+            protocol::OP_LINK => {
+                if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
+                    return ERR_NOTSUPP;
+                }
+                a20_ufsd_backend_link(backend, request.ino, name, request.arg0)
+            }
             protocol::OP_RMDIR => a20_ufsd_backend_rmdir(backend, request.ino, name),
             protocol::OP_TRUNCATE => a20_ufsd_backend_truncate(backend, request.ino, request.arg0),
             protocol::OP_READ => a20_ufsd_backend_read(backend, request.ino, request.arg0,
@@ -162,7 +245,46 @@ fn dispatch_request(
                                                           payload, request.payload_len, response),
             protocol::OP_RENAME => a20_ufsd_backend_rename(backend, request.ino, name,
                 request.arg0, rename_target, response),
-            protocol::OP_SYNC => a20_ufsd_backend_sync(backend),
+            protocol::OP_SYNC => sync_and_retry_pending(backend, lifetimes),
+            protocol::OP_OPEN => {
+                if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
+                    return ERR_NOTSUPP;
+                }
+                let exists = a20_ufsd_backend_has_inode(backend, request.ino);
+                if exists != 0 { exists }
+                else {
+                    let state_rc = lifetimes.opened(request.ino);
+                    if state_rc != 0 { state_rc }
+                    else {
+                        let hold_rc = a20_ufsd_backend_open(backend, request.ino);
+                        if hold_rc != 0 {
+                            let _ = lifetimes.closed(request.ino);
+                            hold_rc
+                        } else { 0 }
+                    }
+                }
+            }
+            protocol::OP_CLOSE => {
+                if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
+                    return ERR_NOTSUPP;
+                }
+                if !lifetimes.is_open(request.ino) { return -2; }
+                let close_rc = a20_ufsd_backend_close(backend, request.ino);
+                if close_rc != 0 { return close_rc; }
+                match lifetimes.closed(request.ino) {
+                    Err(error) => error,
+                    Ok(true) => {
+                        let rc = reap_and_drop(backend, request.ino);
+                        if rc == 0 {
+                            match lifetimes.reaped(request.ino) {
+                                Ok(()) => 0,
+                                Err(error) => error,
+                            }
+                        } else { rc }
+                    }
+                    Ok(false) => 0,
+                }
+            }
             protocol::OP_STATFS => { a20_ufsd_backend_statfs(backend, response); 0 }
             _ => -(38i64),
         }
@@ -198,6 +320,7 @@ fn serve_loop(
     service_watch: bool,
     backend: u32,
 ) -> i32 {
+    let mut lifetimes = lifetime::Lifetimes::new();
     loop {
         if service_watch {
             loop {
@@ -218,7 +341,8 @@ fn serve_loop(
         let header_len = core::mem::size_of::<protocol::Request>();
         if (length as usize) < header_len { continue; }
         let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<protocol::Request>()) };
-        if request.magic != protocol::REQ_MAGIC || request.version != protocol::PROTO_VERSION { continue; }
+        if request.magic != protocol::REQ_MAGIC ||
+           (request.version != protocol::PROTO_VERSION && request.version != protocol::LEGACY_PROTO_VERSION) { continue; }
         let Some(layout) = protocol::validate_frame(length as usize, &request) else {
             let response = protocol::Response { magic: protocol::RESP_MAGIC,
                 opcode: request.opcode, req_id: request.req_id, status: -ERR_INVALID, ..protocol::Response::default() };
@@ -253,7 +377,7 @@ fn serve_loop(
             opcode: request.opcode, req_id: request.req_id, status: 0, ..protocol::Response::default() };
         let payload_pointer = unsafe { a20_ufsd_payload_buffer() };
         let _capacity = unsafe { a20_ufsd_payload_capacity() };
-        let result = dispatch_request(backend, &request, name_pointer,
+        let result = dispatch_request(backend, &mut lifetimes, &request, name_pointer,
             payload_bytes.as_ptr(), rename_pointer, &mut response);
         response.status = result.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let cap = unsafe { a20_ufsd_payload_capacity() } as usize;
@@ -308,7 +432,12 @@ pub extern "C" fn main(argc: c_int, argv: *const *const c_char,
         return 0;
     }
     if unsafe { a20_ufsd_backend_mount(backend, fstype_arg) } != 0 {
-        log(output, b"UFSD: mount backend failed\n"); return 1;
+        if backend == BACKEND_VNFS && fstype == b"ext4" &&
+           unsafe { a20_ufsd_backend_mount_readonly(backend, fstype_arg) } == 0 {
+            log(output, b"UFSD: ext4 mounted read-only by explicit legacy JBD2 checksum downgrade\n");
+        } else {
+            log(output, b"UFSD: mount backend failed\n"); return 1;
+        }
     }
     log(output, b"UFSD: serving "); log(output, mount_bytes); log(output, b" as "); log(output, fstype); log(output, b"\n");
     let mut raw_queue = HANDLE_NULL;

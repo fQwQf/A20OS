@@ -10,6 +10,7 @@
 #include "proc/proc.h"
 #include "proc/signal.h"
 #include "ipc/ipc.h"
+#include "ipc/envelope.h"
 
 #define PIPE_DEFAULT_SIZE (16 * PIPE_BUF_SIZE)
 
@@ -482,8 +483,20 @@ int pipe_create(int pipefd[2])
         return -ENOMEM;
     }
 
-    memset(rd, 0, sizeof(*rd)); rd->ops = &g_pipe_read_ops;  rd->priv = pb; rd->flags = O_RDONLY; vfile_ref_init(rd, 1);
-    memset(wr, 0, sizeof(*wr)); wr->ops = &g_pipe_write_ops; wr->priv = pb; wr->flags = O_WRONLY; vfile_ref_init(wr, 1);
+    /* vfile_alloc() initialized the object and assigned its stable identity;
+     * do not memset it here or aliases lose that identity. */
+    rd->ops = &g_pipe_read_ops; rd->priv = pb; rd->flags = O_RDONLY;
+    vfile_ref_init(rd, 1);
+    wr->ops = &g_pipe_write_ops; wr->priv = pb; wr->flags = O_WRONLY;
+    vfile_ref_init(wr, 1);
+    if (env_kind_tag_vfile(rd, A20_OBJ_PIPE_ENDPOINT) < 0 ||
+        env_kind_tag_vfile(wr, A20_OBJ_PIPE_ENDPOINT) < 0) {
+        vfile_free(rd);
+        vfile_free(wr);
+        kfree(pb->data);
+        kfree(pb);
+        return -EINVAL;
+    }
 
     int fdrd = fdtable_install_current_vfile(rd, 0);
     int fdwr = fdtable_install_current_vfile(wr, 0);

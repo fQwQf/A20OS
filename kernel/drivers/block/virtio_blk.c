@@ -1,4 +1,5 @@
 #include "drivers/block/virtio_blk.h"
+#include "drivers/block/virtio_blk_core.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_core.h"
@@ -21,6 +22,18 @@
 #include "proc/proc.h"
 #include "core/errno.h"
 
+_Static_assert(sizeof(virtq_desc_t) == sizeof(a20_virtio_blk_desc_t),
+               "shared VirtIO descriptor size");
+_Static_assert(__builtin_offsetof(virtq_desc_t, addr) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, addr) &&
+               __builtin_offsetof(virtq_desc_t, len) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, len) &&
+               __builtin_offsetof(virtq_desc_t, flags) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, flags) &&
+               __builtin_offsetof(virtq_desc_t, next) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, next),
+               "shared VirtIO descriptor offsets");
+
 #define VQ_SIZE  VIRTIO_QUEUE_SIZE
 #define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (clock_ticks_per_sec() * 30)
@@ -39,11 +52,13 @@
 
 typedef struct {
     int                in_use;
+    int                in_flight_counted;
     int                done;
     int                result;
     int                write;
     int                flush;   /* VIRTIO_BLK_T_FLUSH: no data descriptor */
     uint16_t           head;
+    uint16_t           queue_slot;
     void              *buf;
     void              *dma_buf;
     uint64_t           dma_addr;
@@ -64,6 +79,9 @@ typedef struct {
     virtio_blk_req_hdr_t *req_hdr;
     uint8_t           *status;
     virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    a20_virtio_blk_queue_state_t queue_state;
+#endif
     /* LOCK_ORDER: inst->lock is innermost; no nesting under or over other locks.
      * Protects req[], descriptor/avail/used rings, in_flight, status[],
      * req_hdr[], last_used, desc_idx. */
@@ -83,6 +101,9 @@ typedef struct {
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
 static int g_ninst = 0;
+
+static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
+                                         proc_wake_q_t *wake_q);
 
 static void virtio_blk_free_dma(virtio_blk_inst_t *inst)
 {
@@ -221,6 +242,12 @@ static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst) {
 
     memset(inst->queue_dma_mem, 0, VIRTIO_BLK_QUEUE_DMA_BYTES);
     memset(inst->request_dma_mem, 0, VIRTIO_BLK_REQUEST_DMA_BYTES);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    if (a20_virtio_blk_queue_reset(&inst->queue_state) != 0) {
+        printf("[VIRTIO%d] Rust queue state not quiescent during reset\n", idx);
+        return -1;
+    }
+#endif
     arch_dma_sync_for_device(inst->queue_dma_mem,
                              VIRTIO_BLK_QUEUE_DMA_BYTES);
     arch_dma_sync_for_device(inst->request_dma_mem,
@@ -282,6 +309,11 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst, device_t *dev) {
 
     inst->blk.legacy = inst->vt.legacy;
     spin_init(&inst->lock);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    if (a20_virtio_blk_queue_init(&inst->queue_state, VIRTIO_QUEUE_SIZE,
+                                  VIRTIO_BLK_REQ_SLOTS) != 0)
+        return -1;
+#endif
     if (virtio_blk_alloc_dma(inst, dev) != 0) {
         printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
         return -1;
@@ -371,6 +403,7 @@ int virtio_blk_init(void) {
     return 0;
 }
 
+#ifndef CONFIG_VIRTIO_BLK_CORE_RUST
 static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uint16_t head) {
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         virtio_blk_req_t *req = &inst->req[i];
@@ -379,6 +412,7 @@ static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uin
     }
     return NULL;
 }
+#endif
 
 /*
  * VIRTIO_BLK_COMPLETION_MODEL:
@@ -402,6 +436,59 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
     uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
     rmb();
     uint64_t completions = 0;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    for (;;) {
+        uint16_t ring_idx = 0;
+        int ready = a20_virtio_blk_queue_used_ring_slot(
+            &inst->queue_state, used_idx, &ring_idx);
+        if (ready == 0)
+            break;
+        if (ready < 0) {
+            printf("[VIRTIO%d] invalid used index %u\n", inst->slot, used_idx);
+            virtio_blk_fail_queue_locked(inst, wake_q);
+            return;
+        }
+        arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
+        uint32_t id = used->ring[ring_idx].id;
+        uint32_t used_len = used->ring[ring_idx].len;
+        uint16_t req_slot = 0;
+        if (id > UINT16_MAX || a20_virtio_blk_queue_validate_head(
+                &inst->queue_state, (uint16_t)id, &req_slot) != 0 ||
+            req_slot >= VIRTIO_BLK_REQ_SLOTS) {
+            printf("[VIRTIO%d] invalid used head %u\n", inst->slot, id);
+            virtio_blk_fail_queue_locked(inst, wake_q);
+            return;
+        }
+        virtio_blk_req_t *req = &inst->req[req_slot];
+        uint16_t head = req->head;
+        arch_dma_sync_for_cpu(&inst->status[head], 1);
+        if (!req->write)
+            arch_dma_sync_for_cpu(req->direct_dma ? req->buf : req->dma_buf,
+                                  req->bytes);
+        uint32_t expected_len = req->write ? 1U : (uint32_t)req->bytes + 1U;
+        uint16_t completed_slot = 0;
+        int result = -1;
+        int retired = a20_virtio_blk_queue_complete_used(
+            &inst->queue_state, used_idx, (uint16_t)id, used_len,
+            inst->status[head], &completed_slot, &result);
+        if (retired != 1 || completed_slot != req_slot) {
+            printf("[VIRTIO%d] Rust queue completion rejected head=%u\n",
+                   inst->slot, id);
+            virtio_blk_fail_queue_locked(inst, wake_q);
+            return;
+        }
+        req->result = result == 0 ? 0 : -1;
+        if (req->result < 0)
+            printf("[VIRTIO%d] bad completion head=%u status=%u used_len=%u expected>=%u\n",
+                   inst->slot, head, inst->status[head], used_len, expected_len);
+        req->done = 1;
+        if (wake_q)
+            (void)wait_queue_collect_all(&req->waiters, 0, PROC_WAKE_EVENT,
+                                         wake_q, NULL);
+        inst->blk.last_used++;
+        completions++;
+    }
+#else
     while (blk->last_used != used_idx) {
         completions++;
         uint16_t ring_idx = blk->last_used % VIRTIO_QUEUE_SIZE;
@@ -440,6 +527,7 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
 
         blk->last_used++;
     }
+#endif
     a20_perf_add(A20_PERF_VIRTIO_BLK_COMPLETIONS, completions);
 }
 
@@ -465,7 +553,14 @@ void virtio_blk_poll_all(void) {
 }
 
 static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
-                                                      proc_wake_q_t *wake_q) {
+                                                      proc_wake_q_t *wake_q,
+                                                      size_t sectors, int write,
+                                                      int flush) {
+#ifndef CONFIG_VIRTIO_BLK_CORE_RUST
+    (void)sectors;
+    (void)write;
+    (void)flush;
+#endif
     virtio_blk_complete_used_locked(inst, wake_q);
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         if (!inst->req[i].in_use) {
@@ -476,12 +571,53 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
             req->dma_buf = dma_buf;
             req->dma_addr = dma_addr;
             wait_queue_init(&req->waiters);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+            uint16_t queue_slot = 0, head = 0;
+            uint32_t expected_len = flush ? 1U :
+                (write ? 1U : (uint32_t)(sectors * VIRTIO_BLK_SECTOR_SIZE) + 1U);
+            int reserve = a20_virtio_blk_queue_reserve(
+                &inst->queue_state, flush ? 2 : 3, expected_len,
+                write ? 1U : 0U, &queue_slot, &head);
+            if (reserve != 0 || queue_slot != (uint16_t)i) {
+                if (reserve == 0)
+                    (void)a20_virtio_blk_queue_cancel(&inst->queue_state,
+                                                       queue_slot);
+                return NULL;
+            }
+            req->queue_slot = queue_slot;
+            req->head = head;
+#else
             req->in_use = 1;
             req->head = (uint16_t)(i * 3);
+#endif
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+            req->in_use = 1;
+#endif
             return req;
         }
     }
     return NULL;
+}
+
+static void virtio_blk_release_req_locked(virtio_blk_inst_t *inst,
+                                         virtio_blk_req_t *req) {
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    int ret = a20_virtio_blk_queue_release(&inst->queue_state, req->queue_slot);
+    if (ret != 0)
+        printf("[VIRTIO%d] Rust request release failed slot=%u err=%d\n",
+               inst->slot, req->queue_slot, ret);
+#endif
+    req->in_use = 0;
+    if (req->in_flight_counted && inst->in_flight > 0)
+        inst->in_flight--;
+    req->in_flight_counted = 0;
+}
+
+static void virtio_blk_drop_in_flight_locked(virtio_blk_inst_t *inst,
+                                             virtio_blk_req_t *req) {
+    if (req->in_flight_counted && inst->in_flight > 0)
+        inst->in_flight--;
+    req->in_flight_counted = 0;
 }
 
 /*
@@ -496,6 +632,25 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
     if (!inst->blk.valid)
         return;
 
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    uint16_t slots[VIRTIO_BLK_REQ_SLOTS];
+    int failed = a20_virtio_blk_queue_fail_all(
+        &inst->queue_state, slots, VIRTIO_BLK_REQ_SLOTS);
+    if (failed < 0) {
+        printf("[VIRTIO%d] Rust queue failure collection failed: %d\n",
+               inst->slot, failed);
+        inst->blk.valid = 0;
+        return;
+    }
+    for (int n = 0; n < failed; n++) {
+        virtio_blk_req_t *req = &inst->req[slots[n]];
+        req->result = -1;
+        req->done = 1;
+        if (wake_q)
+            (void)wait_queue_collect_all(&req->waiters, 0,
+                                         PROC_WAKE_EXIT, wake_q, NULL);
+    }
+#else
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         virtio_blk_req_t *req = &inst->req[i];
         if (!req->in_use)
@@ -506,6 +661,12 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
             (void)wait_queue_collect_all(&req->waiters, 0,
                                          PROC_WAKE_EXIT, wake_q, NULL);
     }
+#endif
+    /* device_init resets the aggregate counter. Clear each request's matching
+     * ownership bit first so old completed waiters cannot decrement a newer
+     * request after recovery. */
+    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++)
+        inst->req[i].in_flight_counted = 0;
 
     if (virtio_blk_device_init_locked(inst) != 0)
         printf("[VIRTIO%d] queue recovery failed; device stays disabled\n",
@@ -563,6 +724,58 @@ static int virtio_blk_irq_handler(int irq, void *priv) {
     return 0;
 }
 
+
+static int virtio_blk_build_chain(virtq_desc_t *descs, uint16_t queue_size,
+                                  uint16_t head, uint64_t header_addr,
+                                  uint32_t header_len,
+                                  const a20_virtio_blk_segment_t *segments,
+                                  uint16_t segment_count, uint64_t status_addr,
+                                  uint32_t device_writes)
+{
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    return a20_virtio_blk_build_chain((a20_virtio_blk_desc_t *)descs,
+        queue_size, head, header_addr, header_len, segments, segment_count,
+        status_addr, device_writes);
+#else
+    if (!descs || queue_size < 2 || (queue_size & (queue_size - 1)) ||
+        head >= queue_size || !header_len || !status_addr || device_writes > 1)
+        return -EINVAL;
+    uint32_t needed = (uint32_t)segment_count + 2;
+    if (needed > queue_size)
+        return -ENOSPC;
+    if (segment_count && !segments)
+        return -EINVAL;
+    for (uint16_t i = 0; i < segment_count; i++)
+        if (!segments[i].len)
+            return -EINVAL;
+    uint16_t mask = queue_size - 1;
+    uint16_t slot = head;
+    descs[slot] = (virtq_desc_t){ header_addr, header_len, VIRTQ_DESC_F_NEXT,
+                                  (uint16_t)((slot + 1) & mask) };
+    for (uint16_t i = 0; i < segment_count; i++) {
+        uint16_t next = (uint16_t)((slot + 1) & mask);
+        descs[next] = (virtq_desc_t){ segments[i].addr, segments[i].len,
+            (uint16_t)(VIRTQ_DESC_F_NEXT |
+                (device_writes ? VIRTQ_DESC_F_WRITE : 0)),
+            (uint16_t)((next + 1) & mask) };
+        slot = next;
+    }
+    uint16_t status_slot = (uint16_t)((slot + 1) & mask);
+    descs[status_slot] = (virtq_desc_t){ status_addr, 1,
+                                        VIRTQ_DESC_F_WRITE, 0 };
+    return (int)needed;
+#endif
+}
+
+static void virtio_blk_sync_desc_chain(virtio_blk_inst_t *inst, uint16_t head,
+                                       uint16_t count) {
+    uint16_t mask = VIRTIO_QUEUE_SIZE - 1;
+    for (uint16_t i = 0; i < count; i++) {
+        uint16_t index = (uint16_t)((head + i) & mask);
+        arch_dma_sync_for_device(&inst->blk.desc[index], sizeof(virtq_desc_t));
+    }
+}
+
 static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                  uint64_t lba, void *buf, size_t sectors,
                                  int write, int flush) {
@@ -573,8 +786,12 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     paddr_t pa = flush ? 0 : va_to_pa(buf);
     const pfa_range_t *range = flush ? NULL : pfa_range_for_pa(pa);
     int direct_dma = range && bytes <= range->end - pa;
-    if (!flush && !direct_dma && bytes > VIRTIO_BLK_BOUNCE_BYTES)
+    if (!flush && !direct_dma && bytes > VIRTIO_BLK_BOUNCE_BYTES) {
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+        (void)a20_virtio_blk_queue_cancel(&inst->queue_state, req->queue_slot);
+#endif
         return -EINVAL;
+    }
 
     req->done = 0;
     req->result = -1;
@@ -583,6 +800,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     req->buf = buf;
     req->bytes = bytes;
     inst->in_flight++;
+    req->in_flight_counted = 1;
 
     /*
      * Kernel buffers live in A20OS's linear direct map.  If this request is
@@ -615,33 +833,66 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     virtq_desc_t *desc  = inst->blk.desc;
     virtq_avail_t *avail = inst->blk.avail;
 
-    if (flush) {
-        /* virtio-blk 1.1 §5.2.6: a flush request carries the header and the
-         * status byte only -- no data buffer. */
-        desc[slot].addr  = inst->request_dma_addr +
+    uint64_t header_addr = inst->request_dma_addr +
                            (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
-        desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
-        desc[slot].flags = VIRTQ_DESC_F_NEXT;
-        desc[slot].next  = slot + 1;
+    uint64_t status_addr = inst->request_dma_addr +
+                           sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE + slot;
+    a20_virtio_blk_segment_t segment = { .addr = req->io_dma_addr,
+                                         .len = (uint32_t)bytes };
+    int desc_count = virtio_blk_build_chain(
+        desc, VIRTIO_QUEUE_SIZE, slot,
+        header_addr, sizeof(virtio_blk_req_hdr_t), flush ? NULL : &segment,
+        flush ? 0 : 1, status_addr, write ? 0 : 1);
+    if (desc_count < 0) {
+        virtio_blk_drop_in_flight_locked(inst, req);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+        (void)a20_virtio_blk_queue_cancel(&inst->queue_state, req->queue_slot);
+#endif
+        return desc_count;
+    }
 
-        desc[slot + 1].addr  = inst->request_dma_addr +
-                               sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE +
-                               slot;
-        desc[slot + 1].len   = 1;
-        desc[slot + 1].flags = VIRTQ_DESC_F_WRITE;
-        desc[slot + 1].next  = 0;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    uint16_t publish_slot = 0;
+    int prepare_ret = a20_virtio_blk_queue_prepare_publish(
+        &inst->queue_state, req->queue_slot, &publish_slot);
+    if (prepare_ret != 0) {
+        virtio_blk_drop_in_flight_locked(inst, req);
+        (void)a20_virtio_blk_queue_cancel(&inst->queue_state, req->queue_slot);
+        return prepare_ret;
+    }
+#endif
 
+    if (flush) {
+        /* Flush requests carry the header and status byte, but no data. */
         arch_dma_sync_for_device(&inst->status[slot], 1);
-        arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 2);
+        virtio_blk_sync_desc_chain(inst, slot, (uint16_t)desc_count);
 
-        uint16_t fslot = avail->idx % VIRTIO_QUEUE_SIZE;
+        uint16_t fslot =
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+            publish_slot;
+#else
+            avail->idx % VIRTIO_QUEUE_SIZE;
+#endif
         avail->ring[fslot] = slot;
         arch_dma_sync_for_device(&inst->req_hdr[slot],
                                  sizeof(inst->req_hdr[slot]));
         arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
         arch_dma_sync_for_device(&avail->ring[fslot], sizeof(uint16_t));
         wmb();
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+        uint16_t new_avail_idx = 0;
+        int commit_ret = a20_virtio_blk_queue_commit_publish(
+            &inst->queue_state, req->queue_slot, &new_avail_idx);
+        if (commit_ret != 0) {
+            (void)a20_virtio_blk_queue_cancel(&inst->queue_state,
+                                              req->queue_slot);
+            virtio_blk_drop_in_flight_locked(inst, req);
+            return commit_ret;
+        }
+        avail->idx = new_avail_idx;
+#else
         avail->idx++;
+#endif
         inst->blk.desc_idx++;
         arch_dma_sync_for_device(&avail->idx, sizeof(avail->idx));
         wmb();
@@ -653,38 +904,39 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         return 0;
     }
 
-    desc[slot].addr  = inst->request_dma_addr +
-                       (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
-    desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
-    desc[slot].flags = VIRTQ_DESC_F_NEXT;
-    desc[slot].next  = slot + 1;
-
-    desc[slot + 1].addr  = req->io_dma_addr;
-    desc[slot + 1].len   = (uint32_t)bytes;
-    desc[slot + 1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
-    desc[slot + 1].next  = slot + 2;
-
-    desc[slot + 2].addr  = inst->request_dma_addr +
-                           sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE +
-                           slot;
-    desc[slot + 2].len   = 1;
-    desc[slot + 2].flags = VIRTQ_DESC_F_WRITE;
-    desc[slot + 2].next  = 0;
 
     /* Clean each buffer before it is published, then clean the ring slot,
      * then bump idx behind a wmb().  virtio_net.c publishes first and cleans
      * after; both are correct.  See the DMA publication contract in
      * kernel/include/drivers/dual/virtq.h before reordering either sequence. */
-    uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
+    uint16_t avail_slot =
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+        publish_slot;
+#else
+        avail->idx % VIRTIO_QUEUE_SIZE;
+#endif
     avail->ring[avail_slot] = slot;
     arch_dma_sync_for_device(io_buf, bytes);
     arch_dma_sync_for_device(&inst->req_hdr[slot], sizeof(inst->req_hdr[slot]));
     arch_dma_sync_for_device(&inst->status[slot], 1);
-    arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 3);
+    virtio_blk_sync_desc_chain(inst, slot, (uint16_t)desc_count);
     arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
     wmb();
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    uint16_t new_avail_idx = 0;
+    int commit_ret = a20_virtio_blk_queue_commit_publish(
+        &inst->queue_state, req->queue_slot, &new_avail_idx);
+    if (commit_ret != 0) {
+        (void)a20_virtio_blk_queue_cancel(&inst->queue_state,
+                                          req->queue_slot);
+        virtio_blk_drop_in_flight_locked(inst, req);
+        return commit_ret;
+    }
+    avail->idx = new_avail_idx;
+#else
     avail->idx++;
+#endif
     inst->blk.desc_idx++;
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
     wmb();
@@ -711,9 +963,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             int ret = req->result;
             if (ret == 0 && req->bytes && !req->write && !req->direct_dma)
                 memcpy(req->buf, req->dma_buf, req->bytes);
-            req->in_use = 0;
-            if (inst->in_flight > 0)
-                inst->in_flight--;
+            virtio_blk_release_req_locked(inst, req);
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
             return ret;
@@ -724,9 +974,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                 int ret = req->result;
                 if (ret == 0 && req->bytes && !req->write && !req->direct_dma)
                     memcpy(req->buf, req->dma_buf, req->bytes);
-                req->in_use = 0;
-                if (inst->in_flight > 0)
-                    inst->in_flight--;
+                virtio_blk_release_req_locked(inst, req);
                 spin_unlock_irqrestore(&inst->lock, flags);
                 (void)proc_wake_q_flush(&wake_q);
                 return ret;
@@ -840,7 +1088,8 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors,
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
             uint64_t flags = spin_lock_irqsave(&inst->lock);
-            req = virtio_blk_alloc_req_locked(inst, &wake_q);
+            req = virtio_blk_alloc_req_locked(inst, &wake_q, sectors, write,
+                                              flush);
             if (req) {
                 int submit_ret = virtio_blk_submit_req(
                     inst, req, lba, buf, sectors, write, flush);

@@ -9,7 +9,33 @@
 #include "core/stdio.h"
 #include "lwip/pbuf.h"
 
+_Static_assert(__builtin_offsetof(net_msg_t, next) == 0,
+               "Rust socket queue ABI: net_msg.next must be first");
+_Static_assert(__builtin_offsetof(net_msg_t, len) == sizeof(void *),
+               "Rust socket queue ABI: net_msg.len offset mismatch");
+_Static_assert(__builtin_offsetof(net_msg_t, off) ==
+               sizeof(void *) + sizeof(size_t),
+               "Rust socket queue ABI: net_msg.off offset mismatch");
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+#include "abi/linux/scm_rights.h"
+#endif
+
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
+
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+extern int a20_net_rxq_check(int, int, uint32_t, uint32_t, int, int,
+                             uint64_t *, void *, size_t);
+extern int a20_net_rxq_link(void **, void **, int *, uint64_t *, void *, int);
+extern int a20_net_rxq_take(void **, void **, int *, uint64_t *, int, size_t,
+                            void **, size_t *, size_t *, void **);
+extern void *a20_net_rxq_detach(void **, void **, int *, uint64_t *);
+extern void a20_net_rxq_reset(uint64_t *);
+extern size_t a20_net_rxq_bytes(uint64_t *, int, void *, int);
+#endif
+
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+static void linux_scm_queue_release(void *ctx, void *file);
+#endif
 
 /*
  * Running receive-queue byte count.
@@ -36,6 +62,7 @@ static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
  * a teardown costs one rebuild rather than a permanently wrong total.
  */
 
+#ifndef CONFIG_NET_SOCKET_QUEUE_RUST
 static size_t net_rxq_sum_locked(const net_socket_t *s)
 {
     size_t total = 0;
@@ -43,15 +70,25 @@ static size_t net_rxq_sum_locked(const net_socket_t *s)
         total += (s->type == SOCK_STREAM) ? (m->len - m->off) : m->len;
     return total;
 }
+#endif
 
 void net_rxq_reset_locked(net_socket_t *s)
 {
-    if (s)
+    if (s) {
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+        a20_net_rxq_reset(&s->rxq_tally);
+#else
         s->rxq_tally = 0;
+#endif
+    }
 }
 
 void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
 {
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    (void)s;
+    (void)bytes;
+#else
     uint64_t t = s->rxq_tally;
     /* The queue grew by one message, so the tally must still describe the
      * pre-growth queue. */
@@ -59,6 +96,7 @@ void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
     s->rxq_tally = (t & 0xffffffff00000000ULL) |
                    ((uint32_t)t + (uint32_t)bytes);
+#endif
 }
 
 /* Called before the caller drops rx_count, so the tally still describes the
@@ -66,6 +104,10 @@ void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
  * place and only the byte half moves. */
 void net_rxq_bytes_removed_locked(net_socket_t *s, size_t bytes)
 {
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    (void)s;
+    (void)bytes;
+#else
     uint64_t t = s->rxq_tally;
     if ((int)(t >> 32) != s->rx_count)
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
@@ -73,16 +115,39 @@ void net_rxq_bytes_removed_locked(net_socket_t *s, size_t bytes)
     s->rxq_tally = (t & 0xffffffff00000000ULL) |
                    (have - (uint32_t)bytes < have ? have - (uint32_t)bytes
                                                  : 0);
+#endif
 }
 
 size_t net_rxq_bytes_locked(net_socket_t *s)
 {
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    return s ? a20_net_rxq_bytes(&s->rxq_tally, s->rx_count,
+                                  s->rx_head, s->type == SOCK_STREAM) : 0;
+#else
     uint64_t t = s->rxq_tally;
     if ((int)(t >> 32) != s->rx_count) {
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
         s->rxq_tally = ((uint64_t)(uint32_t)s->rx_count << 32) | (uint32_t)t;
     }
     return (size_t)(uint32_t)t;
+#endif
+}
+
+net_msg_t *net_rxq_detach_locked(net_socket_t *s)
+{
+    if (!s)
+        return NULL;
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    return (net_msg_t *)a20_net_rxq_detach(
+        (void **)&s->rx_head, (void **)&s->rx_tail, &s->rx_count,
+        &s->rxq_tally);
+#else
+    net_msg_t *m = s->rx_head;
+    s->rx_head = s->rx_tail = NULL;
+    s->rx_count = 0;
+    s->rxq_tally = 0;
+    return m;
+#endif
 }
 
 /*
@@ -111,12 +176,25 @@ void net_msg_free(net_msg_t *m)
 {
     if (!m)
         return;
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+    a20_linux_scm_queue_drop((void **)m->scm_files, &m->scm_nfiles,
+                             NULL, (void (*)(void *, void *))linux_scm_queue_release);
+#else
     for (int i = 0; i < m->scm_nfiles; i++)
         vfs_put_file(m->scm_files[i]);
     m->scm_nfiles = 0;
+#endif
     kfree(m->overflow);
     obj_cache_free(&g_net_msg_cache, m);
 }
+
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+static void linux_scm_queue_release(void *ctx, void *file)
+{
+    (void)ctx;
+    vfs_put_file((vfile_t *)file);
+}
+#endif
 
 void net_scm_drop_files(vfile_t **files, int nfiles)
 {
@@ -151,9 +229,9 @@ static uint8_t *net_msg_alloc_payload(net_msg_t **out, size_t len)
 
 /* Shared tail of every enqueue: address, ancillary metadata, sender
  * credentials, then the append onto the receive queue. */
-static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
-                                const void *addr, size_t addrlen,
-                                const net_bh_event_t *meta)
+static int net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
+                               const void *addr, size_t addrlen,
+                               const net_bh_event_t *meta)
 {
     if (addr && addrlen) {
         if (addrlen > NET_SOCKADDR_MAX)
@@ -171,6 +249,13 @@ static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
         m->tclass = meta->tclass;
     }
     net_capture_sender_cred(m);
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    int r = a20_net_rxq_link((void **)&dst->rx_head, (void **)&dst->rx_tail,
+                             &dst->rx_count, &dst->rxq_tally, m,
+                             dst->type == SOCK_STREAM);
+    if (r < 0)
+        return r;
+#else
     if (dst->rx_tail)
         dst->rx_tail->next = m;
     else
@@ -178,6 +263,8 @@ static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
     dst->rx_tail = m;
     dst->rx_count++;
     net_rxq_bytes_added_locked(dst, m->len);
+#endif
+    return 0;
 }
 
 /*
@@ -207,32 +294,50 @@ static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
  */
 static int net_rxq_fits(net_socket_t *dst, size_t len)
 {
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    return a20_net_rxq_check(dst->type, dst->closed, dst->rcv_buf,
+                             NET_DGRAM_RCV_BUF_DEFAULT, NET_MAX_QUEUE,
+                             dst->rx_count, &dst->rxq_tally, dst->rx_head,
+                             len);
+#else
     if (dst->type == SOCK_STREAM || dst->type == SOCK_SEQPACKET)
-        return 1;
+        return 0;
     uint32_t ceiling = dst->rcv_buf ? dst->rcv_buf : NET_DGRAM_RCV_BUF_DEFAULT;
     if (ceiling >= NET_DGRAM_RCV_BUF_DEFAULT)
-        return 1;
-    return net_rxq_bytes_locked(dst) + len <= (size_t)ceiling;
+        return 0;
+    return net_rxq_bytes_locked(dst) + len <= (size_t)ceiling ? 0 : -EAGAIN;
+#endif
 }
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen,
                                 const net_bh_event_t *meta)
 {
-    if (!dst || dst->closed)
+    if (!dst)
+        return net_notconn(NET_NOTCONN_ENQUEUE_META);
+#ifndef CONFIG_NET_SOCKET_QUEUE_RUST
+    if (dst->closed)
         return net_notconn(NET_NOTCONN_ENQUEUE_META);
     if (len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
         return -EAGAIN;
-    if (!net_rxq_fits(dst, len))
-        return -EAGAIN;
+#endif
+    int admission = net_rxq_fits(dst, len);
+    if (admission == -ENOTCONN)
+        return net_notconn(NET_NOTCONN_ENQUEUE_META);
+    if (admission < 0)
+        return admission;
     net_msg_t *m = NULL;
     uint8_t *payload = net_msg_alloc_payload(&m, len);
     if (!payload)
         return -EAGAIN;
     memcpy(payload, buf, len);
-    net_msg_link_locked(dst, m, addr, addrlen, meta);
+    int link = net_msg_link_locked(dst, m, addr, addrlen, meta);
+    if (link < 0) {
+        net_msg_free(m);
+        return link;
+    }
     return (int)len;
 }
 
@@ -244,7 +349,10 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
                                 const void *addr, size_t addrlen,
                                 const net_bh_event_t *meta)
 {
-    if (!dst || dst->closed)
+    if (!dst)
+        return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
+#ifndef CONFIG_NET_SOCKET_QUEUE_RUST
+    if (dst->closed)
         return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
     if (!p || len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
@@ -252,17 +360,30 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
         return -EAGAIN;
-    if (!net_rxq_fits(dst, len))
-        return -EAGAIN;
+#else
+    if (!p)
+        return -EMSGSIZE;
+    if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
+        return -EMSGSIZE;
+#endif
+    int admission = net_rxq_fits(dst, len);
+    if (admission == -ENOTCONN)
+        return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
+    if (admission < 0)
+        return admission;
     net_msg_t *m = NULL;
     uint8_t *payload = net_msg_alloc_payload(&m, len);
     if (!payload)
         return -EAGAIN;
-    if (pbuf_copy_partial(p, payload, (u16_t)len, (u16_t)off) != ERR_OK) {
+    if (pbuf_copy_partial(p, payload, (u16_t)len, (u16_t)off) != (u16_t)len) {
         net_msg_free(m);
         return -EAGAIN;
     }
-    net_msg_link_locked(dst, m, addr, addrlen, meta);
+    int link = net_msg_link_locked(dst, m, addr, addrlen, meta);
+    if (link < 0) {
+        net_msg_free(m);
+        return link;
+    }
     return (int)len;
 }
 
@@ -284,9 +405,24 @@ int net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
         return r;
     if (nfiles > 0 && files) {
         net_msg_t *m = dst->rx_tail;
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+        m->scm_nfiles = nfiles;
+        if (a20_linux_scm_queue_attach((void **)files, nfiles,
+                                       (void **)m->scm_files,
+                                       NET_SCM_MAX_FDS) < 0) {
+            /* Preconditions above and the queue's fixed array make this
+             * unreachable; retain a safe C ownership transfer if a future
+             * caller violates them so no successfully queued ref leaks. */
+            for (int i = 0; i < nfiles; i++) {
+                m->scm_files[i] = files[i];
+                files[i] = NULL;
+            }
+        }
+#else
         m->scm_nfiles = nfiles;
         for (int i = 0; i < nfiles; i++)
             m->scm_files[i] = files[i];
+#endif
     }
     return r;
 }
@@ -414,15 +550,29 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
                                 void *addr, size_t *addrlen,
                                 net_recv_meta_t *meta)
 {
-    net_msg_t *m = s->rx_head;
-    if (!m) {
+    if (!s->rx_head) {
         if (s->closed || s->peer_closed || s->shut_rd)
             return 0;
         return -EAGAIN;
     }
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    net_msg_t *m = NULL;
+    net_msg_t *detached = NULL;
+    size_t n = 0;
+    size_t copy_off = 0;
+    int take = a20_net_rxq_take((void **)&s->rx_head, (void **)&s->rx_tail,
+                                &s->rx_count, &s->rxq_tally,
+                                s->type == SOCK_STREAM, len, (void **)&m,
+                                &n, &copy_off, (void **)&detached);
+    if (take < 0 || !m)
+        return -EIO;
+#else
+    net_msg_t *m = s->rx_head;
     size_t avail = m->len - m->off;
     size_t n = avail < len ? avail : len;
-    memcpy(buf, net_msg_payload(m) + m->off, n);
+    size_t copy_off = m->off;
+#endif
+    memcpy(buf, net_msg_payload(m) + copy_off, n);
     if (addr && addrlen && *addrlen > 0) {
         size_t alen = m->addrlen < *addrlen ? m->addrlen : *addrlen;
         memcpy(addr, m->addr, alen);
@@ -445,7 +595,13 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
          * any fds already collected from earlier messages in the same
          * recv; overflow stays attached and is dropped when the message
          * is freed. */
-        if (m->off == 0 && m->scm_nfiles > 0) {
+        if (copy_off == 0 && m->scm_nfiles > 0) {
+#ifdef CONFIG_LINUX_SCM_RIGHTS_RUST
+            (void)a20_linux_scm_queue_take(
+                (void **)m->scm_files, &m->scm_nfiles,
+                (void **)meta->scm_files, &meta->scm_nfiles,
+                NET_SCM_MAX_FDS);
+#else
             for (int i = 0; i < m->scm_nfiles; i++) {
                 if (meta->scm_nfiles < NET_SCM_MAX_FDS) {
                     meta->scm_files[meta->scm_nfiles++] = m->scm_files[i];
@@ -458,21 +614,26 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
                     m->scm_files[left++] = m->scm_files[i];
             }
             m->scm_nfiles = left;
+#endif
         }
     }
 
+#ifdef CONFIG_NET_SOCKET_QUEUE_RUST
+    if (detached)
+        net_msg_free(detached);
+#else
     if (s->type == SOCK_STREAM && n < avail) {
         m->off += n;
         net_rxq_bytes_removed_locked(s, n);
         return (int)n;
     }
-
     net_rxq_bytes_removed_locked(s, avail);
     s->rx_head = m->next;
     if (!s->rx_head)
         s->rx_tail = NULL;
     s->rx_count--;
     net_msg_free(m);
+#endif
     return (int)n;
 }
 

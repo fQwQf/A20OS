@@ -337,7 +337,7 @@ int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
  * Bitmap / allocation
  * ================================================================ */
 
-void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
+int ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     uint64_t off = sb->block_group_desc_table_byte + (uint64_t)group * sb->desc_size;
     if (!ext4_has_metadata_csum(sb)) {
         uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
@@ -345,9 +345,9 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
         uint8_t raw[sizeof(ext4_group_desc_t)];
         memcpy(raw, &sb->group_descs[group], n);
         ext4_group_desc_checksum_put(sb, group, raw, n);
-        ext4_meta_write(sb, off, raw, n);
-        ext4_superblock_sync_counts(sb);
-        return;
+        int ret = ext4_meta_write(sb, off, raw, n);
+        if (ret < 0) return ret;
+        return ext4_superblock_sync_counts(sb);
     }
     /* Every path that changes a bitmap reaches this function immediately
      * afterwards, so refreshing the two bitmap checksums here -- rather than at
@@ -361,6 +361,7 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
                               (uint64_t)gd->bg_block_bitmap_lo * sb->block_size,
                               bm, sb->block_size) >= 0)
             ext4_block_bitmap_checksum_put(sb, group, bm, sb->block_size);
+        else { kfree(bm); return -EIO; }
         size_t inode_bmp_len = sb->inodes_per_group / 8;
         if (gd->bg_inode_bitmap_lo && inode_bmp_len &&
             inode_bmp_len <= sb->block_size &&
@@ -368,8 +369,9 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
                               (uint64_t)gd->bg_inode_bitmap_lo * sb->block_size,
                               bm, inode_bmp_len) >= 0)
             ext4_inode_bitmap_checksum_put(sb, group, bm, inode_bmp_len);
+        else { kfree(bm); return -EIO; }
         kfree(bm);
-    }
+    } else return -ENOMEM;
 
     /* The checksum covers the bytes the filesystem will read back, so it has to
      * be taken over the on-disk descriptor and not over the in-memory struct:
@@ -379,7 +381,7 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     uint8_t raw[sizeof(ext4_group_desc_t)];
     memset(raw, 0, sizeof(raw));
     if (bcache_read_bytes(sb->bc, off, raw, sb->desc_size) < 0)
-        return;
+        return -EIO;
     if (sb->desc_size >= sizeof(ext4_group_desc_t)) {
         memcpy(raw, &sb->group_descs[group], sizeof(ext4_group_desc_t));
     } else {
@@ -389,8 +391,9 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
         memcpy(raw, legacy, sizeof(legacy));
     }
     ext4_group_desc_checksum_put(sb, group, raw, sb->desc_size);
-    ext4_meta_write(sb, off, raw, sb->desc_size);
-    ext4_superblock_sync_counts(sb);
+    int ret = ext4_meta_write(sb, off, raw, sb->desc_size);
+    if (ret < 0) return ret;
+    return ext4_superblock_sync_counts(sb);
 }
 
 /* The superblock carries the filesystem-wide totals e2fsck cross-checks
@@ -400,11 +403,11 @@ void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
  * healthy image.  Recomputing from the descriptors rather than adjusting keeps
  * the totals correct after a crash, where the journal may have replayed some
  * of the transactions that moved them. */
-void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
+int ext4_superblock_sync_counts(ext4_sb_info_t *sb)
 {
     uint8_t raw[EXT4_SB_SIZE];
     if (bcache_read_bytes(sb->bc, EXT4_SB_OFFSET, raw, EXT4_SB_SIZE) < 0)
-        return;
+        return -EIO;
 
     uint64_t free_blocks = 0, free_inodes = 0;
     for (uint32_t g = 0; g < sb->groups_count; g++) {
@@ -433,7 +436,7 @@ void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
     } else {
         /* Nothing moved: skip the write so a read-only filesystem and an idle
          * allocator cost one block read and no I/O. */
-        return;
+        return 0;
     }
 
     /* s_checksum covers the first 1020 bytes of the superblock with its own
@@ -444,7 +447,24 @@ void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
                       ext4_crc32c(0xffffffffU, raw,
                                   EXT4_SB_CHECKSUM_OFF));
     }
-    ext4_meta_write(sb, EXT4_SB_OFFSET, raw, EXT4_SB_SIZE);
+    return ext4_meta_write(sb, EXT4_SB_OFFSET, raw, EXT4_SB_SIZE);
+}
+
+int ext4_superblock_set_last_orphan(ext4_sb_info_t *sb, uint32_t ino)
+{
+    if (!sb || ino > sb->inodes_count)
+        return -EINVAL;
+    uint8_t raw[EXT4_SB_SIZE];
+    if (bcache_read_bytes(sb->bc, EXT4_SB_OFFSET, raw, sizeof(raw)) < 0)
+        return -EIO;
+    size_t field = offsetof(ext4_superblock_t, s_last_orphan);
+    ext4_put_le32(raw + field, ino);
+    if (ext4_has_metadata_csum(sb)) {
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF, 0);
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF,
+                      ext4_crc32c(0xffffffffU, raw, EXT4_SB_CHECKSUM_OFF));
+    }
+    return ext4_meta_write(sb, EXT4_SB_OFFSET, raw, sizeof(raw));
 }
 
 /* A directory is counted against the group its inode lives in, not the group
@@ -540,6 +560,13 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
             byte |= (uint8_t)(1U << (bit % 8));
             if (ext4_meta_write(sb, byte_off,
                                    &byte, sizeof(byte)) < 0) {
+                /* A failed synchronous cache write leaves its dirty page
+                 * available for retry. Restore the old allocation bit before
+                 * returning so callers can safely retry the allocation. */
+                byte &= (uint8_t)~(1U << (bit % 8));
+                if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0)
+                    printf("[EXT4] bitmap allocation rollback failed block=%lu bit=%u\n",
+                           (unsigned long)bm_blk, bit);
                 a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
                 a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
                 return -1;
@@ -571,7 +598,34 @@ int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
         return -EINVAL;
     byte &= (uint8_t)~(1U << (bit % 8));
     int r = ext4_meta_write(sb, byte_off, &byte, sizeof(byte));
-    return r < 0 ? -EIO : 0;
+    if (r < 0) {
+        /* The page-cache retains failed dirty writes. Put the allocation bit
+         * back before returning, otherwise orphan retry sees an already-free
+         * block and can neither complete nor safely free it again. */
+        byte |= (uint8_t)(1U << (bit % 8));
+        if (ext4_meta_write(sb, byte_off, &byte, sizeof(byte)) < 0)
+            printf("[EXT4] bitmap free rollback failed block=%lu bit=%u\n",
+                   (unsigned long)bm_blk, bit);
+        return -EIO;
+    }
+    return 0;
+}
+
+/* Restore a block's allocation bit after a later group-descriptor write
+ * failed. This is used only by the checked no-journal free path to keep a
+ * failed orphan cleanup retryable; journaled filesystems use transaction
+ * poisoning/replay for crash atomicity. */
+static int ext4_bitmap_mark_allocated(ext4_sb_info_t *sb, uint64_t bm_blk,
+                                      uint32_t bit)
+{
+    if (!sb || bm_blk >= sb->blocks_count || bit >= sb->block_size * 8)
+        return -EINVAL;
+    uint64_t byte_off = bm_blk * sb->block_size + bit / 8;
+    uint8_t byte = 0;
+    if (bcache_read_bytes(sb->bc, byte_off, &byte, sizeof(byte)) < 0)
+        return -EIO;
+    byte |= (uint8_t)(1U << (bit % 8));
+    return ext4_meta_write(sb, byte_off, &byte, sizeof(byte));
 }
 
 static uint32_t ext4_group_block_count(ext4_sb_info_t *sb, uint32_t group)
@@ -765,39 +819,84 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
     return 0;
 }
 
-void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
-    mutex_lock(&sb->alloc_lock);
+static int ext4_free_block_locked(ext4_sb_info_t *sb, uint64_t phys) {
     if (phys < sb->first_data_block || phys >= sb->blocks_count) {
-        mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EINVAL;
     }
     uint32_t rel = (uint32_t)(phys - sb->first_data_block);
     uint32_t g = rel / sb->blocks_per_group;
     uint32_t bit = rel % sb->blocks_per_group;
-    if (g >= sb->groups_count) {
-        mutex_unlock(&sb->alloc_lock);
-        return;
-    }
+    if (g >= sb->groups_count)
+        return -EINVAL;
     uint32_t valid = ext4_group_block_count(sb, g);
-    if (bit >= valid) {
-        mutex_unlock(&sb->alloc_lock);
-        return;
-    }
+    if (bit >= valid)
+        return -EINVAL;
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
     uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
-    if (free_blocks >= valid) {
-        mutex_unlock(&sb->alloc_lock);
-        return;
-    }
-    if (ext4_bitmap_free(sb, bm, bit) < 0) {
-        mutex_unlock(&sb->alloc_lock);
-        return;
-    }
+    if (free_blocks >= valid)
+        return -EINVAL;
+    if (ext4_bitmap_free(sb, bm, bit) < 0)
+        return -EIO;
     if (sb->block_alloc_hints)
         sb->block_alloc_hints[g] = bit;
     ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks + 1);
-    ext4_writeback_gd(sb, g);
+    int ret = ext4_writeback_gd(sb, g);
+    if (ret < 0) {
+        /* ext4_bitmap_free may already have dirtied the bitmap page, and
+         * writeback_gd may have reached the descriptor before failing while
+         * updating the superblock totals. Put both pieces of cached metadata
+         * back into the allocated state so a later orphan retry does not see
+         * a double free. A failure to compensate remains an I/O error and the
+         * on-disk orphan entry is deliberately retained. */
+        ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks);
+        int bit_ret = ext4_bitmap_mark_allocated(sb, bm, bit);
+        int desc_ret = ext4_writeback_gd(sb, g);
+        if (bit_ret < 0 || desc_ret < 0)
+            printf("[EXT4] failed block-free compensation phys=%lu bit=%d desc=%d\n",
+                   (unsigned long)phys, bit_ret, desc_ret);
+    }
+    return ret;
+}
+
+int ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
+    if (!sb)
+        return -EINVAL;
+    mutex_lock(&sb->alloc_lock);
+    int ret = ext4_free_block_locked(sb, phys);
     mutex_unlock(&sb->alloc_lock);
+    return ret;
+}
+
+/* Re-allocate an exact block freed earlier in a checked truncate. The caller
+ * holds alloc_lock across the whole truncate, so no allocator can expose the
+ * block while the inode still references it or while rollback is in flight. */
+static int ext4_reserve_block_locked(ext4_sb_info_t *sb, uint64_t phys)
+{
+    if (phys < sb->first_data_block || phys >= sb->blocks_count)
+        return -EINVAL;
+    uint32_t rel = (uint32_t)(phys - sb->first_data_block);
+    uint32_t group = rel / sb->blocks_per_group;
+    uint32_t bit = rel % sb->blocks_per_group;
+    if (group >= sb->groups_count || bit >= ext4_group_block_count(sb, group))
+        return -EINVAL;
+    uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[group]);
+    if (free_blocks == 0)
+        return -EIO;
+    uint64_t bitmap = sb->group_descs[group].bg_block_bitmap_lo;
+    int ret = ext4_bitmap_mark_allocated(sb, bitmap, bit);
+    if (ret < 0)
+        return ret;
+    ext4_bg_set_free_blocks(&sb->group_descs[group], free_blocks - 1);
+    ret = ext4_writeback_gd(sb, group);
+    if (ret < 0) {
+        ext4_bg_set_free_blocks(&sb->group_descs[group], free_blocks);
+        int restore_bit = ext4_bitmap_free(sb, bitmap, bit);
+        int restore_desc = ext4_writeback_gd(sb, group);
+        if (restore_bit < 0 || restore_desc < 0)
+            printf("[EXT4] failed block-reserve compensation phys=%lu bit=%d desc=%d\n",
+                   (unsigned long)phys, restore_bit, restore_desc);
+    }
+    return ret;
 }
 
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
@@ -840,32 +939,32 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
     return 0;
 }
 
-void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
+int ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
     mutex_lock(&sb->alloc_lock);
     if (!ino || ino > sb->inodes_count) {
         mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EINVAL;
     }
     uint32_t g = (ino - 1) / sb->inodes_per_group;
     uint32_t bit = (ino - 1) % sb->inodes_per_group;
     if (g >= sb->groups_count) {
         mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EINVAL;
     }
     uint32_t valid = ext4_group_inode_count(sb, g);
     if (bit >= valid) {
         mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EINVAL;
     }
     uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo;
     uint32_t free_inodes = ext4_bg_free_inodes(&sb->group_descs[g]);
     if (free_inodes >= valid) {
         mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EINVAL;
     }
     if (ext4_bitmap_free(sb, bm, bit) < 0) {
         mutex_unlock(&sb->alloc_lock);
-        return;
+        return -EIO;
     }
     if (sb->inode_alloc_hints)
         sb->inode_alloc_hints[g] = bit;
@@ -873,8 +972,9 @@ void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
     /* Freeing an inode does not make the following live inode table entries
      * uninitialized. Keep the initialized high-water mark conservatively;
      * increasing unused would require inspecting the entire trailing bitmap. */
-    ext4_writeback_gd(sb, g);
+    int ret = ext4_writeback_gd(sb, g);
     mutex_unlock(&sb->alloc_lock);
+    return ret;
 }
 
 /* ================================================================
@@ -1812,6 +1912,128 @@ void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
         ext4_indirect_truncate_at(sb, ino, inode, lblk);
 }
 
+/* Checked orphan-recovery truncate for the depth-0 extent trees emitted by
+ * this driver. Unsupported trees fail closed; the caller must keep the inode
+ * on the orphan list so a more capable implementation can retry it. */
+static int ext4_extent_root_trim_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                         ext4_inode_t *inode, uint32_t lblk)
+{
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr;
+    memcpy(&hdr, raw, sizeof(hdr));
+    if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_depth != 0 ||
+        hdr.eh_entries > EXT4_EXT_ROOT_MAX || hdr.eh_max != EXT4_EXT_ROOT_MAX)
+        return -EOPNOTSUPP;
+    ext4_extent_t ext[EXT4_EXT_ROOT_MAX];
+    memset(ext, 0, sizeof(ext));
+    memcpy(ext, raw + sizeof(hdr), hdr.eh_entries * sizeof(ext[0]));
+
+    uint64_t prev_end = 0;
+    uint32_t lengths[EXT4_EXT_ROOT_MAX] = {0};
+    uint64_t phys[EXT4_EXT_ROOT_MAX] = {0};
+    for (uint16_t i = 0; i < hdr.eh_entries; i++) {
+        uint32_t len = ext[i].ee_len;
+        if (len > 0x8000U) len -= 0x8000U;
+        uint64_t p = (uint64_t)ext[i].ee_start_lo |
+                     ((uint64_t)ext[i].ee_start_hi << 32);
+        uint64_t logical_end = (uint64_t)ext[i].ee_block + len;
+        if (!len || logical_end > 0x100000000ULL ||
+            (i && ext[i].ee_block < prev_end) ||
+            p < sb->first_data_block || p >= sb->blocks_count ||
+            len > sb->blocks_count - p)
+            return -EIO;
+        prev_end = logical_end;
+        lengths[i] = len;
+        phys[i] = p;
+        /* A duplicate physical block would make a second free corrupt the
+         * bitmap after the first one succeeds. Reject overlaps pre-mutation. */
+        for (uint16_t j = 0; j < i; j++) {
+            uint64_t a_end = phys[j] + lengths[j];
+            uint64_t b_end = p + len;
+            if (p < a_end && phys[j] < b_end)
+                return -EIO;
+        }
+    }
+
+    ext4_extent_t kept[EXT4_EXT_ROOT_MAX];
+    uint16_t kept_count = 0;
+    uint32_t freed_per_extent[EXT4_EXT_ROOT_MAX] = {0};
+    uint32_t keep_from[EXT4_EXT_ROOT_MAX] = {0};
+    int ret = 0;
+    /* Keep removed blocks unavailable to concurrent allocations until either
+     * the whole truncate succeeds or every successful free can be undone. */
+    mutex_lock(&sb->alloc_lock);
+    for (uint16_t i = 0; i < hdr.eh_entries; i++) {
+        uint32_t keep = 0;
+        if (ext[i].ee_block < lblk) {
+            uint64_t end = (uint64_t)ext[i].ee_block + lengths[i];
+            keep = (uint32_t)((end < lblk ? end : lblk) - ext[i].ee_block);
+        }
+        keep_from[i] = keep;
+        for (uint32_t j = keep; j < lengths[i]; j++) {
+            ret = ext4_free_block_locked(sb, phys[i] + j);
+            if (ret < 0) {
+                /* The current block helper compensates its own partial
+                 * failure. Roll back earlier successful frees in reverse
+                 * order, before dropping alloc_lock and exposing them to a
+                 * different inode. */
+                for (uint16_t undo = i + 1; undo > 0; undo--) {
+                    uint16_t index = undo - 1;
+                    while (freed_per_extent[index]) {
+                        uint32_t block_index = keep_from[index] +
+                                               --freed_per_extent[index];
+                        int undo_ret = ext4_reserve_block_locked(
+                            sb, phys[index] + block_index);
+                        if (undo_ret < 0) {
+                            printf("[EXT4] orphan truncate rollback failed ino=%u block=%lu err=%d\n",
+                                   ino, (unsigned long)(phys[index] + block_index),
+                                   undo_ret);
+                            if (!sb->journal)
+                                ret = -EIO;
+                            else
+                                (void)ext4_journal_poison(sb);
+                        }
+                    }
+                }
+                mutex_unlock(&sb->alloc_lock);
+                return ret;
+            }
+            freed_per_extent[i]++;
+        }
+        if (keep) {
+            ext[i].ee_len = (uint16_t)(keep +
+                (ext[i].ee_len > 0x8000U ? 0x8000U : 0));
+            kept[kept_count++] = ext[i];
+        }
+    }
+    mutex_unlock(&sb->alloc_lock);
+
+    hdr.eh_entries = kept_count;
+    memcpy(raw, &hdr, sizeof(hdr));
+    memset(raw + sizeof(hdr), 0, 60 - sizeof(hdr));
+    if (kept_count)
+        memcpy(raw + sizeof(hdr), kept, kept_count * sizeof(kept[0]));
+    ext4_inode_sync_i_blocks(sb, inode);
+    (void)ino;
+    return 0;
+}
+
+int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                ext4_inode_t *inode)
+{
+    if (!sb || !inode)
+        return -EOPNOTSUPP;
+    return ext4_extent_root_trim_checked(sb, ino, inode, 0);
+}
+
+int ext4_block_truncate_at_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode, uint32_t lblk)
+{
+    if (!sb || !inode)
+        return -EOPNOTSUPP;
+    return ext4_extent_root_trim_checked(sb, ino, inode, lblk);
+}
+
 /* ================================================================
  * Directory helpers
  * ================================================================ */
@@ -1970,6 +2192,18 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         printf("[EXT4] Read-only mount refused: filesystem needs journal recovery\n");
         return NULL;
     }
+    /* ORPHAN_FILE alone only says the compatible inode table is allocated;
+     * after clean unmount ORPHAN_PRESENT is clear and old kernels may mount
+     * the image. Reject only active modern orphan-file state, whose records
+     * are not the legacy s_last_orphan/i_dtime chain. */
+    if (sb.s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT) {
+        printf("[EXT4] active orphan_file recovery is unsupported\n");
+        return NULL;
+    }
+    if ((flags & VFS_MOUNT_RDONLY) && sb.s_last_orphan != 0) {
+        printf("[EXT4] read-only mount refused: legacy orphan recovery required\n");
+        return NULL;
+    }
 
     /* ---- fail-closed feature gate ----
      * This driver understands extents, 64-bit block counts, flex_bg,
@@ -2096,6 +2330,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     rw_mutex_init(&esi->metadata_lock);
 
     esi->inodes_count = sb.s_inodes_count;
+    esi->first_ino = sb.s_first_ino >= 11 ? sb.s_first_ino : 11;
 
     esi->blocks_count = blocks_count;
     esi->reserved_blocks_count = reserved_blocks;
@@ -2131,8 +2366,20 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     /* Replay when either signal says so.  The feature bit is the fast path;
      * the journal superblock is authoritative and covers the crash window in
      * which the bit did not reach the device. */
+    int journal_pending = ext4_journal_log_pending(
+        esi, &sb, (flags & VFS_MOUNT_RDONLY) != 0);
+    if (journal_pending < 0 ||
+        ((flags & VFS_MOUNT_RDONLY) && journal_pending > 0 &&
+         journal_pending != EXT4_JOURNAL_READONLY_LEGACY)) {
+        printf("[EXT4] Journal state is not safe for this mount mode (%d)\n",
+               journal_pending);
+        kfree(esi->group_descs);
+        kfree(esi);
+        return NULL;
+    }
     if ((sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) ||
-        ext4_journal_log_pending(esi, &sb)) {
+        (journal_pending > 0 &&
+         journal_pending != EXT4_JOURNAL_READONLY_LEGACY)) {
         int jret = ext4_journal_recover(esi, &sb);
         if (jret < 0) {
             printf("[EXT4] Refusing mount after journal recovery failure\n");
@@ -2156,7 +2403,8 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     /* Open the log for writing.  This is fail-closed: a journal whose
      * superblock we cannot parse, or which is non-empty without the recover
      * flag, refuses the mount instead of being ignored. */
-    if (ext4_journal_open(esi, &sb) < 0) {
+    if (journal_pending != EXT4_JOURNAL_READONLY_LEGACY &&
+        ext4_journal_open(esi, &sb) < 0) {
         printf("[EXT4] Refusing mount: the filesystem has a journal this "
                "kernel cannot use\n");
         kfree(esi->group_descs);
@@ -2181,6 +2429,27 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         kfree(esi->inode_alloc_hints);
         kfree(esi->group_descs);
         kfree(esi);
+        return NULL;
+    }
+
+    /* Journal replay and writer initialization precede orphan processing.
+     * Only after replay is it safe to interpret s_last_orphan and issue the
+     * recovery metadata transaction. */
+    int orphan_ret = (flags & VFS_MOUNT_RDONLY) ? 0 : ext4_orphan_recover(esi);
+    if (orphan_ret < 0) {
+        printf("[EXT4] refusing mount: orphan recovery failed (%d)\n", orphan_ret);
+        if (ext4_journal_close(esi) == 0) {
+            bcache_set_sync_hook(esi->bc, NULL, NULL);
+            kfree(esi->block_alloc_hints);
+            kfree(esi->inode_alloc_hints);
+            kfree(esi->group_descs);
+            kfree(esi);
+        } else {
+            /* A poisoned transaction can still own dirty cache pages. Keep
+             * its ext4 context alive rather than leave a dangling hook or
+             * pretend its orphan cleanup committed. */
+            printf("[EXT4] retaining failed orphan recovery context for journal safety\n");
+        }
         return NULL;
     }
 
@@ -2214,20 +2483,13 @@ vnode_t *ext4_mount(bcache_t *bc) {
     return ext4_mount_flags(bc, 0);
 }
 
-void ext4_unmount(vnode_t *root) {
-    if (!root || !root->fs_data) return;
+int ext4_unmount(vnode_t *root) {
+    if (!root || !root->fs_data) return 0;
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
     ext4_sb_info_t *esi = fp->sb;
-    /* Commit the open transaction before anything else: unmount is the last
-     * chance to get the metadata into a log. */
-    ext4_journal_report(esi);
-    ext4_journal_close(esi);
-    bcache_set_sync_hook(esi->bc, NULL, NULL);
-    bcache_sync(esi->bc);
-
     /* Drop all cache-owned vnode references for this filesystem; survivors
-     * (still-open files) stay alive on their remaining references and
-     * unlinked inodes are reclaimed by release(). */
+     * (still-open files) stay alive on their remaining references. Keep the
+     * journal active while release() reaps last-link orphan records. */
     vnode_t *held[64];
     int held_count;
     do {
@@ -2247,6 +2509,19 @@ void ext4_unmount(vnode_t *root) {
             vnode_put(held[i]);
     } while (held_count != 0);
 
+    /* Commit only after vnode release has completed any last-link orphan
+     * cleanup. Closing first would strand the durable orphan list after its
+     * final in-memory reference disappeared. */
+    ext4_journal_report(esi);
+    int close_ret = ext4_journal_close(esi);
+    if (close_ret < 0) {
+        printf("[EXT4/JBD2] unmount refused: transaction remains live (%d)\n",
+               close_ret);
+        return close_ret;
+    }
+    bcache_set_sync_hook(esi->bc, NULL, NULL);
+    bcache_sync(esi->bc);
+
     if (root->ops && root->ops->release) root->ops->release(root);
     if (esi->group_descs) {
         kfree(esi->group_descs);
@@ -2257,6 +2532,7 @@ void ext4_unmount(vnode_t *root) {
     esi->block_alloc_hints = NULL;
     esi->inode_alloc_hints = NULL;
     kfree(esi);
+    return 0;
 }
 
 /* ================================================================

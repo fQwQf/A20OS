@@ -6,13 +6,139 @@
 #include "fs/vfs/mount.h"
 #include "proc/proc_internal.h"
 #include "core/lock.h"
+#include "core/stdio.h"
 #include "core/string.h"
+#include "core/timer.h"
 #include "mm/slab.h"
+#include "proc/proc.h"
 
 static mnt_namespace_t  g_init_ns;
 static mnt_namespace_t *g_ns_list;
 static spinlock_t       g_mntns_lock = SPINLOCK_INIT;
 static uint64_t         g_next_ino = MNTNS_INIT_INO + 1;
+static uint64_t         g_teardown_pass;
+static int              g_reaper_started;
+
+static int mntns_retry_pending_internal(int retry_busy);
+
+static void mntns_free(mnt_namespace_t *ns)
+{
+#ifdef CONFIG_MNTNS_TEST
+    int source_mount_released = 0;
+    printf("MNTNS_TEST: FREE ino=%llu refs=%u pending=%d nmounts=%d\n",
+           (unsigned long long)ns->ino, refcount_read(&ns->refs),
+           ns->teardown_pending, ns->nmounts);
+    for (int i = 0; i < ns->nmounts; i++) {
+        mount_t *mnt = ns->mounts[i];
+        if (mnt && (strcmp(mnt->path, "/tmp/ns_shared") == 0 ||
+                    mnt->shared_source))
+            printf("MNTNS_TEST: FREE_MOUNT path=%s users=%d flags=%x shared=%d\n",
+                   mnt->path, __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE),
+                   mnt->flags, mnt->shared_source != NULL);
+        if (mnt && !mnt->shared_source &&
+            !(mnt->flags & VFS_MOUNT_NS_SHARED) &&
+            __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE) == 0 &&
+            strcmp(mnt->path, "/tmp/ns_shared") == 0) {
+            source_mount_released = 1;
+            break;
+        }
+    }
+    if (!source_mount_released) {
+        for (mount_t *mnt = ns->dead_mounts; mnt; mnt = mnt->dead_next) {
+            if (strcmp(mnt->path, "/tmp/ns_shared") == 0 || mnt->shared_source)
+                printf("MNTNS_TEST: FREE_DEAD path=%s users=%d flags=%x shared=%d\n",
+                       mnt->path, __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE),
+                       mnt->flags, mnt->shared_source != NULL);
+            if (!mnt->shared_source &&
+                !(mnt->flags & VFS_MOUNT_NS_SHARED) &&
+                __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE) == 0 &&
+                strcmp(mnt->path, "/tmp/ns_shared") == 0) {
+                source_mount_released = 1;
+                break;
+            }
+        }
+    }
+    if (source_mount_released && refcount_read(&ns->refs) == 0 &&
+        !ns->teardown_pending)
+        printf("MNTNS_TEST: SOURCE_MOUNT_RELEASED users=0 namespace_refs=0 pending=0\n");
+#endif
+    for (int i = 0; i < ns->nmounts; i++)
+        kfree(ns->mounts[i]);
+    mount_t *dead = ns->dead_mounts;
+    while (dead) {
+        mount_t *next = dead->dead_next;
+        kfree(dead);
+        dead = next;
+    }
+    kfree(ns);
+}
+
+static void mntns_remove_locked(mnt_namespace_t *ns)
+{
+    mnt_namespace_t **pp = &g_ns_list;
+    while (*pp) {
+        if (*pp == ns) {
+            *pp = ns->next;
+            ns->next = NULL;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+#ifdef CONFIG_MNTNS_TEST
+static int mntns_test_tracks_shared_path(const mnt_namespace_t *ns)
+{
+    for (int i = 0; i < ns->nmounts; i++) {
+        mount_t *mnt = ns->mounts[i];
+        if (mnt && (strcmp(mnt->path, "/tmp/ns_shared") == 0 ||
+                    mnt->shared_source))
+            return 1;
+    }
+    for (mount_t *mnt = ns->dead_mounts; mnt; mnt = mnt->dead_next) {
+        if (strcmp(mnt->path, "/tmp/ns_shared") == 0 || mnt->shared_source)
+            return 1;
+    }
+    return 0;
+}
+#endif
+
+static void mntns_reaper_thread(void)
+{
+    for (;;) {
+        (void)mntns_retry_pending_internal(0);
+        uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+        int pending = 0;
+        for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
+            if (ns->teardown_pending && ns->teardown_retryable) {
+                pending = 1;
+                break;
+            }
+        }
+        if (!pending)
+            g_reaper_started = 0;
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        if (!pending)
+            return;
+        proc_sleep_until(timer_get_ticks() + 100);
+    }
+}
+
+static void mntns_start_reaper(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_reaper_started) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return;
+    }
+    g_reaper_started = 1;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    if (proc_alloc_detached(mntns_reaper_thread) < 0) {
+        flags = spin_lock_irqsave(&g_mntns_lock);
+        g_reaper_started = 0;
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+    }
+}
 
 void mntns_early_init(void)
 {
@@ -20,6 +146,16 @@ void mntns_early_init(void)
     g_init_ns.ino = MNTNS_INIT_INO;
     refcount_set(&g_init_ns.refs, 1);  /* pinned: never freed */
     g_ns_list = &g_init_ns;
+}
+
+uint64_t mntns_mount_table_lock(void)
+{
+    return spin_lock_irqsave(&g_mntns_lock);
+}
+
+void mntns_mount_table_unlock(uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
 }
 
 mnt_namespace_t *mntns_current(void)
@@ -38,9 +174,13 @@ mnt_namespace_t *mntns_current(void)
 
 uint64_t mntns_task_ino(const task_t *t)
 {
-    if (t && t->mnt_ns)
-        return ((const mnt_namespace_t *)t->mnt_ns)->ino;
-    return MNTNS_INIT_INO;
+    if (!t)
+        return MNTNS_INIT_INO;
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    const mnt_namespace_t *ns = (const mnt_namespace_t *)t->mnt_ns;
+    uint64_t ino = ns ? ns->ino : MNTNS_INIT_INO;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return ino;
 }
 
 mnt_namespace_t *mntns_task_get(task_t *t)
@@ -70,34 +210,55 @@ static mnt_namespace_t *mntns_alloc(void)
     return ns;
 }
 
-/* Deep-copy the mount table: entries are duplicated, root vnodes and
- * fs_data stay shared with the source namespace.  The source entry keeps the
- * real holder count (ns_users: itself + every copy) and is the only entry
- * allowed to run the filesystem teardown; each copy is marked
- * VFS_MOUNT_NS_SHARED so an umount there only detaches the local table entry.
- * Because a copy cannot reach back to its source to decrement the count, the
- * count is deliberately conservative: a shared filesystem is destroyed when
- * the source unmounts it, and a source that still lists copies simply keeps
- * the fs alive rather than risking a use-after-free. */
+/* Deep-copy a stable snapshot of the mount table: root vnodes and fs_data
+ * remain shared, but each copied table entry pins the original source mount.
+ * The source entry owns filesystem teardown and cannot be reclaimed while
+ * child namespaces hold these explicit pins. The mount-table lock serializes
+ * this snapshot against teardown admission and table removal. Entries already
+ * being torn down are omitted from the new snapshot, while copied entries
+ * release their source pin only when their namespace is destroyed, including
+ * when the entry already sits on that namespace's graveyard list.
+ */
 static void mntns_copy_mounts(mnt_namespace_t *dst, mnt_namespace_t *src)
 {
+    mount_t *sources[MNTNS_MAX_MOUNTS];
+    int count = 0;
+    uint64_t flags = mntns_mount_table_lock();
     for (int i = 0; i < src->nmounts; i++) {
+        mount_t *entry = src->mounts[i];
+        if (!entry || !entry->publish_ready || entry->teardown_running)
+            continue;
+        mount_t *source = entry->shared_source ? entry->shared_source : entry;
+        __atomic_add_fetch(&source->ns_users, 1, __ATOMIC_RELAXED);
+#ifdef CONFIG_MNTNS_TEST
+        if (strcmp(entry->path, "/tmp/ns_shared") == 0)
+            printf("MNTNS_TEST: COPY source_ns=%llu source_users=%d\n",
+                   (unsigned long long)src->ino,
+                   __atomic_load_n(&source->ns_users, __ATOMIC_ACQUIRE));
+#endif
+        sources[count++] = source;
+    }
+    mntns_mount_table_unlock(flags);
+
+    for (int i = 0; i < count; i++) {
         mount_t *mnt = (mount_t *)kmalloc(sizeof(*mnt));
         if (!mnt) {
-            /* Near-OOM: keep the partially copied table rather than failing
-             * the whole namespace; the copy simply sees fewer mounts. */
+            /* Preserve the historical partial-copy behavior, but return all
+             * source pins for entries that did not make it into the table. */
+            for (int j = i; j < count; j++)
+                __atomic_sub_fetch(&sources[j]->ns_users, 1, __ATOMIC_ACQ_REL);
             dst->nmounts = i;
             return;
         }
-        *mnt = *src->mounts[i];
+        *mnt = *sources[i];
         mnt->dead_next = NULL;
-        src->mounts[i]->ns_users++;
-        src->mounts[i]->flags |= VFS_MOUNT_NS_SHARED;
-        mnt->ns_users = 0;  /* copy: detach-only, never destroys */
+        mnt->ns_users = 0;  /* copies never run the filesystem destructor */
         mnt->flags |= VFS_MOUNT_NS_SHARED;
+        mnt->shared_source = sources[i];
+        mnt->teardown_running = 0;
         dst->mounts[i] = mnt;
     }
-    dst->nmounts = src->nmounts;
+    dst->nmounts = count;
 }
 
 int mntns_unshare(task_t *t)
@@ -156,7 +317,10 @@ int mntns_join(task_t *t, mnt_namespace_t *ns)
     t->mnt_ns = to_init ? NULL : ns;
     spin_unlock_irqrestore(&g_mntns_lock, flags);
     if (to_init) {
-        /* The caller's pin on the initial namespace is not a counted one. */
+        /* The initial namespace is statically pinned, but changing membership
+         * still releases the caller's reference to the old namespace. */
+        if (old)
+            mntns_put(old);
         return 0;
     }
     if (old)
@@ -173,27 +337,111 @@ void mntns_put(mnt_namespace_t *ns)
         spin_unlock_irqrestore(&g_mntns_lock, flags);
         return;
     }
-    mnt_namespace_t **pp = &g_ns_list;
-    while (*pp) {
-        if (*pp == ns) {
-            *pp = ns->next;
+    /* Reserve one internal reference before dropping the registry lock.  If
+     * filesystem teardown fails (for example a journal flush error), this
+     * pin keeps every mount/root pointer valid until retry succeeds. */
+    refcount_set(&ns->refs, 1);
+    ns->teardown_pending = 1;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    int teardown = mntns_retry_pending_internal(1);
+    uint64_t retry_flags = spin_lock_irqsave(&g_mntns_lock);
+    int pending = 0;
+    for (mnt_namespace_t *it = g_ns_list; it; it = it->next) {
+        if (it != &g_init_ns && it->teardown_pending &&
+            it->teardown_retryable) {
+            pending = 1;
             break;
         }
-        pp = &(*pp)->next;
     }
+    spin_unlock_irqrestore(&g_mntns_lock, retry_flags);
+    if (pending && teardown != -EBUSY)
+        mntns_start_reaper();
+}
+
+static int mntns_retry_pending_internal(int retry_busy)
+{
+    int result = 0;
+    int retry_after_shared_drop = 0;
+    int allow_busy_retry = retry_busy;
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    uint64_t pass = ++g_teardown_pass;
+    if (pass == 0)
+        pass = ++g_teardown_pass;
     spin_unlock_irqrestore(&g_mntns_lock, flags);
-    /* Release this namespace's holds on its mounts before freeing the table,
-     * so a shared filesystem still gets its teardown from the last holder. */
-    vfs_mount_namespace_teardown(ns);
-    for (int i = 0; i < ns->nmounts; i++)
-        kfree(ns->mounts[i]);
-    mount_t *dead = ns->dead_mounts;
-    while (dead) {
-        mount_t *next = dead->dead_next;
-        kfree(dead);
-        dead = next;
+    for (;;) {
+        flags = spin_lock_irqsave(&g_mntns_lock);
+        mnt_namespace_t *ns = NULL;
+        int released_shared_source = 0;
+        for (mnt_namespace_t *it = g_ns_list; it; it = it->next) {
+            if (it != &g_init_ns && it->teardown_pending &&
+                !it->teardown_running &&
+                it->teardown_attempt_pass != pass &&
+                (allow_busy_retry || it->teardown_retryable)) {
+                it->teardown_running = 1;
+                it->teardown_attempt_pass = pass;
+                ns = it;
+                for (int i = 0; i < it->nmounts; i++)
+                    released_shared_source |= it->mounts[i] &&
+                                              it->mounts[i]->shared_source;
+                for (mount_t *mnt = it->dead_mounts; mnt;
+                     mnt = mnt->dead_next)
+                    released_shared_source |= mnt->shared_source != NULL;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        if (!ns && retry_after_shared_drop) {
+            /* A child namespace's pins can be the only thing keeping a
+             * previously EBUSY source alive. Retry one new pass after that
+             * child has actually completed and released its shared entries.
+             * Each namespace is attempted at most once per pass, so a
+             * permanent destructor failure cannot spin here. */
+            retry_after_shared_drop = 0;
+            allow_busy_retry = 1;
+            flags = spin_lock_irqsave(&g_mntns_lock);
+            pass = ++g_teardown_pass;
+            if (pass == 0)
+                pass = ++g_teardown_pass;
+            spin_unlock_irqrestore(&g_mntns_lock, flags);
+            continue;
+        }
+        if (!ns)
+            return result;
+
+#ifdef CONFIG_MNTNS_TEST
+        if (mntns_test_tracks_shared_path(ns))
+            printf("MNTNS_TEST: RETRY ino=%llu refs=%u pass=%llu busy=%d\n",
+                   (unsigned long long)ns->ino, refcount_read(&ns->refs),
+                   (unsigned long long)pass, allow_busy_retry);
+#endif
+        int ret = vfs_mount_namespace_teardown(ns);
+#ifdef CONFIG_MNTNS_TEST
+        printf("MNTNS_TEST: RETRY_RESULT ino=%llu result=%d tracks=%d nmounts=%d\n",
+               (unsigned long long)ns->ino, ret,
+               mntns_test_tracks_shared_path(ns), ns->nmounts);
+#endif
+        flags = spin_lock_irqsave(&g_mntns_lock);
+        ns->teardown_running = 0;
+        if (ret == 0) {
+            ns->teardown_pending = 0;
+            ns->teardown_retryable = 0;
+            mntns_remove_locked(ns);
+            refcount_set(&ns->refs, 0);
+        } else {
+            ns->teardown_retryable = ret != -EBUSY;
+        }
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        if (ret == 0) {
+            mntns_free(ns);
+            retry_after_shared_drop |= released_shared_source;
+        } else if (result == 0 || (result == -EBUSY && ret != -EBUSY))
+            result = ret;
     }
-    kfree(ns);
+}
+
+void mntns_retry_pending(void)
+{
+    (void)mntns_retry_pending_internal(1);
 }
 
 void mntns_release_task(task_t *t)

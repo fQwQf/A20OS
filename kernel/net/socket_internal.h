@@ -1182,13 +1182,19 @@ int      net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void
 int      net_dequeue_msg_locked(net_socket_t *s, void *buf, size_t len,
                                 void *addr, size_t *addrlen);
 int      net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
-                                     void *addr, size_t *addrlen,
-                                     net_recv_meta_t *meta);
+                                      void *addr, size_t *addrlen,
+                                      net_recv_meta_t *meta);
+/* Detach the receive queue and reset its count/byte accounting under s->lock. */
+net_msg_t *net_rxq_detach_locked(net_socket_t *s);
 int      net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,
                            void *addr, size_t *addrlen, net_recv_meta_t *meta);
 int      net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len,
                                   int flags, void *addr, size_t *addrlen,
                                   net_recv_meta_t *meta);
+int      net_recvfrom_socket_meta_until(net_socket_t *s, void *buf, size_t len,
+                                        int flags, void *addr, size_t *addrlen,
+                                        net_recv_meta_t *meta,
+                                        uint64_t deadline);
 int      net_accept_queue_push_locked(net_socket_t *listener,
                                       net_socket_t *child);
 net_socket_t *net_accept_queue_pop_locked(net_socket_t *listener);

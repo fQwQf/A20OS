@@ -62,16 +62,19 @@ static int send_fds(int sock, const int *fds, int nfds, const void *data,
 }
 
 /* Returns number of received fds, or negative errno-style failure. */
-static int recv_fds(int sock, int *fds, int maxfds, void *data, size_t datalen,
-                    int flags, int *msg_flags) {
-    char cbuf[CMSG_SPACE((size_t)maxfds * sizeof(int))];
+static int recv_fds_capacity(int sock, int *fds, int maxfds, void *data,
+                             size_t datalen, int flags, int *msg_flags,
+                             size_t control_capacity) {
+    char cbuf[CMSG_SPACE(16 * sizeof(int))];
+    if (control_capacity > sizeof(cbuf))
+        return -1;
     struct iovec iov = {.iov_base = data, .iov_len = datalen};
     struct msghdr mh;
     memset(&mh, 0, sizeof(mh));
     mh.msg_iov = &iov;
     mh.msg_iovlen = 1;
     mh.msg_control = cbuf;
-    mh.msg_controllen = sizeof(cbuf);
+    mh.msg_controllen = control_capacity;
     ssize_t n = recvmsg(sock, &mh, flags);
     if (n < 0)
         return -1;
@@ -90,6 +93,12 @@ static int recv_fds(int sock, int *fds, int maxfds, void *data, size_t datalen,
         }
     }
     return got;
+}
+
+static int recv_fds(int sock, int *fds, int maxfds, void *data, size_t datalen,
+                    int flags, int *msg_flags) {
+    return recv_fds_capacity(sock, fds, maxfds, data, datalen, flags,
+                             msg_flags, CMSG_SPACE((size_t)maxfds * sizeof(int)));
 }
 
 /* Bypass libc's ancillary-message conversions and inspect the Linux wire.
@@ -337,18 +346,58 @@ int main(void) {
     int f = open("/scm_stress_tmp", O_CREAT | O_RDWR | O_TRUNC, 0644);
     if (f < 0)
         return fail("open tmp");
+    char data[16];
     if (write(f, "hello", 5) != 5)
         return fail("write tmp");
 
     if (empty_rights_test(f))
         return fail("empty rights");
 
+    /* A later invalid fd must roll back earlier staged refs and enqueue no
+     * message. The following valid transfer proves the stream remains usable. */
+    int invalid_pair[2] = {f, -1};
+    errno = 0;
+    if (send_fds(sv[0], invalid_pair, 2, "bad", 3, 0) != -1 || errno != EBADF)
+        return fail("invalid send fd rollback");
+
+    /* Aligned capacity must deliver a fitting prefix on every ABI.  Three
+     * queued descriptors and room for two avoid the x86_64 CMSG_SPACE(1)==
+     * CMSG_SPACE(2) alignment trap. */
+    int three_for_prefix[3] = {f, f, f};
+    if (send_fds(sv[0], three_for_prefix, 3, "P", 1, 0) != 1)
+        return fail("send 3-fd prefix");
+    int prefix[3] = {-1, -1, -1}, prefix_flags = 0;
+    int prefix_got = recv_fds_capacity(sv[1], prefix, 3, data, sizeof(data), 0,
+                                       &prefix_flags,
+                                       CMSG_SPACE(2 * sizeof(int)));
+    printf("SCM_STRESS: aligned prefix got=%d flags=0x%x fds=%d,%d,%d errno=%d\n",
+           prefix_got, prefix_flags, prefix[0], prefix[1], prefix[2], errno);
+    if (prefix_got != 2 || prefix[0] < 0 || prefix[1] < 0 || prefix[2] != -1 ||
+        !(prefix_flags & MSG_CTRUNC))
+        return fail("receive aligned 2-fd prefix with MSG_CTRUNC");
+    if (close(prefix[0]) || close(prefix[1]))
+        return fail("close aligned truncated prefix fds");
+
+    /* The final cmsg may use its compact, unpadded CMSG_LEN capacity. */
+    int two_for_compact[2] = {f, f};
+    if (send_fds(sv[0], two_for_compact, 2, "Q", 1, 0) != 1)
+        return fail("send compact prefix pair");
+    int compact[2] = {-1, -1}, compact_flags = 0;
+    int compact_got = recv_fds_capacity(sv[1], compact, 2, data, sizeof(data), 0,
+                                        &compact_flags, CMSG_LEN(sizeof(int)));
+    printf("SCM_STRESS: compact prefix got=%d flags=0x%x fds=%d,%d errno=%d\n",
+           compact_got, compact_flags, compact[0], compact[1], errno);
+    if (compact_got != 1 || compact[0] < 0 || compact[1] != -1 ||
+        !(compact_flags & MSG_CTRUNC))
+        return fail("receive compact CMSG_LEN prefix with MSG_CTRUNC");
+    if (close(compact[0]))
+        return fail("close compact truncated prefix fd");
+
     /* Single fd, single message. */
     if (send_fds(sv[0], &f, 1, "A", 1, 0) != 1)
         return fail("sendmsg 1 fd");
 
     int rfd = -1;
-    char data[16];
     int mflags = 0;
     int got = recv_fds(sv[1], &rfd, 1, data, sizeof(data), 0, &mflags);
     if (got != 1 || rfd < 0)
@@ -398,8 +447,7 @@ int main(void) {
         return fail("sendmsg for cloexec");
     int cefd = -1;
     if (recv_fds(sv[1], &cefd, 1, data, sizeof(data), MSG_CMSG_CLOEXEC, NULL) !=
-            1 ||
-        cefd < 0)
+            1 || cefd < 0 || fcntl(cefd, F_GETFD) != FD_CLOEXEC)
         return fail("recvmsg MSG_CMSG_CLOEXEC");
     close(cefd);
 

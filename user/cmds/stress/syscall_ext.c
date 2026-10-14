@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mqueue.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -23,11 +24,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -224,6 +227,15 @@ static int test_pidfd(void)
     if (pidfd < 0)
         return fail("pidfd_open", errno);
 
+    if (syscall(SYS_pidfd_send_signal, pidfd, 0, NULL, 0) != 0)
+        return fail("pidfd_send_signal self probe", errno);
+    errno = 0;
+    if (syscall(SYS_pidfd_getfd, -1, 1, 0) != -1 || errno != EBADF)
+        return fail("pidfd_getfd invalid pidfd", errno);
+    errno = 0;
+    if (syscall(SYS_pidfd_getfd, pidfd, -1, 0) != -1 || errno != EINVAL)
+        return fail("pidfd_getfd invalid target fd", errno);
+
     /* pidfd_getfd of our own stdout must succeed. */
     int dupfd = syscall(SYS_pidfd_getfd, pidfd, 1, 0);
     if (dupfd < 0)
@@ -232,6 +244,252 @@ static int test_pidfd(void)
         return fail("pidfd_getfd write", errno);
     close(dupfd);
     close(pidfd);
+
+    /* A process which changes only its own credentials must not be able to
+     * use the inherited pidfd to inspect or signal its still-root parent. */
+    struct pidfd_permission_result {
+        int setuid_result;
+        int send_result;
+        int send_errno;
+        int getfd_result;
+        int getfd_errno;
+    } permission_result;
+    int permission_report[2];
+    int permission_pidfd = syscall(SYS_pidfd_open, (int)getpid(), 0);
+    if (permission_pidfd < 0)
+        return fail("pidfd permission open", errno);
+    if (pipe(permission_report) < 0) {
+        close(permission_pidfd);
+        return fail("pidfd permission pipe", errno);
+    }
+    pid_t permission_child = fork();
+    if (permission_child < 0) {
+        close(permission_report[0]); close(permission_report[1]);
+        close(permission_pidfd);
+        return fail("pidfd permission fork", errno);
+    }
+    if (permission_child == 0) {
+        close(permission_report[0]);
+        memset(&permission_result, 0, sizeof(permission_result));
+        permission_result.send_result = -2;
+        permission_result.getfd_result = -2;
+        permission_result.setuid_result = setuid(1234);
+        if (permission_result.setuid_result == 0) {
+            errno = 0;
+            permission_result.send_result = (int)syscall(
+                SYS_pidfd_send_signal, permission_pidfd, 0, NULL, 0);
+            permission_result.send_errno = errno;
+            errno = 0;
+            permission_result.getfd_result = (int)syscall(
+                SYS_pidfd_getfd, permission_pidfd, 1, 0);
+            permission_result.getfd_errno = errno;
+            if (permission_result.getfd_result >= 0)
+                close(permission_result.getfd_result);
+        }
+        (void)write(permission_report[1], &permission_result,
+                    sizeof(permission_result));
+        _exit(0);
+    }
+    close(permission_report[1]);
+    ssize_t permission_bytes = read(permission_report[0], &permission_result,
+                                    sizeof(permission_result));
+    close(permission_report[0]);
+    close(permission_pidfd);
+    int permission_status = 0;
+    if (waitpid(permission_child, &permission_status, 0) != permission_child ||
+        !WIFEXITED(permission_status) || WEXITSTATUS(permission_status) != 0 ||
+        permission_bytes != (ssize_t)sizeof(permission_result) ||
+        permission_result.setuid_result != 0 ||
+        permission_result.send_result != -1 ||
+        permission_result.send_errno != EPERM ||
+        permission_result.getfd_result != -1 ||
+        permission_result.getfd_errno != EPERM)
+        return fail("pidfd permission boundary", errno);
+    printf("SYSCALL_EXT: pidfd permission boundary PASS\n");
+
+    /* The pidfd remains tied to the task object after exit/reap, and reports
+     * exit readiness without a second numeric PID lookup. */
+    int exit_gate[2];
+    if (pipe(exit_gate) < 0)
+        return fail("pidfd exit gate", errno);
+    pid_t exited_child = fork();
+    if (exited_child < 0)
+    {
+        close(exit_gate[0]); close(exit_gate[1]);
+        return fail("pidfd exit fork", errno);
+    }
+    if (exited_child == 0) {
+        close(exit_gate[1]);
+        char gate_byte;
+        if (read(exit_gate[0], &gate_byte, 1) != 1)
+            _exit(123);
+        close(exit_gate[0]);
+        _exit(0);
+    }
+    close(exit_gate[0]);
+    int exited_pidfd = syscall(SYS_pidfd_open, exited_child, 0);
+    if (exited_pidfd < 0) {
+        close(exit_gate[1]);
+        waitpid(exited_child, NULL, 0);
+        return fail("pidfd exit open", errno);
+    }
+    char exit_byte = 'x';
+    if (write(exit_gate[1], &exit_byte, 1) != 1) {
+        close(exit_gate[1]); close(exited_pidfd);
+        waitpid(exited_child, NULL, 0);
+        return fail("pidfd exit release", errno);
+    }
+    close(exit_gate[1]);
+    int exited_status = 0;
+    if (waitpid(exited_child, &exited_status, 0) != exited_child ||
+        !WIFEXITED(exited_status)) {
+        close(exited_pidfd);
+        return fail("pidfd exit wait", errno);
+    }
+    struct pollfd exited_poll = { .fd = exited_pidfd, .events = POLLIN };
+    if (poll(&exited_poll, 1, 0) != 1 || !(exited_poll.revents & POLLIN)) {
+        close(exited_pidfd);
+        return fail("pidfd exit readiness", errno);
+    }
+    errno = 0;
+    if (syscall(SYS_pidfd_send_signal, exited_pidfd, 0, NULL, 0) != -1 ||
+        errno != ESRCH) {
+        close(exited_pidfd);
+        return fail("pidfd exited send", errno);
+    }
+    close(exited_pidfd);
+    printf("SYSCALL_EXT: pidfd stable exit lifecycle PASS\n");
+
+    /* Force the receiver table full so fdtable_install_vfile fails after the
+     * target vfile is pinned. Closing the child reader must still release the
+     * pipe before any later syscall can mask a leaked lookup reference. */
+    int pipefd[2], command[2], reply[2];
+    if (pipe(pipefd) < 0 || pipe(command) < 0 || pipe(reply) < 0)
+        return fail("pidfd EMFILE pipes", errno);
+    pid_t child = fork();
+    if (child < 0)
+        return fail("pidfd EMFILE fork", errno);
+    if (child == 0) {
+        close(pipefd[1]);
+        close(command[1]);
+        close(reply[0]);
+        char byte;
+        if (read(command[0], &byte, 1) != 1 || byte != 'c')
+            _exit(121);
+        close(pipefd[0]);
+        byte = 'd';
+        if (write(reply[1], &byte, 1) != 1)
+            _exit(122);
+        _exit(0);
+    }
+    close(pipefd[0]);
+    close(command[0]);
+    close(reply[1]);
+    int target_pidfd = syscall(SYS_pidfd_open, child, 0);
+    if (target_pidfd < 0) {
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        return fail("pidfd EMFILE open", errno);
+    }
+    /* MAX_FILES is 4096 on hosted profiles, so a fixed 2048 dup loop does
+     * not reach EMFILE. Bound only this test process's soft limit while
+     * filling; keep the hard limit and restore the original soft limit on
+     * every path. This makes the install-rollback check deterministic without
+     * changing the kernel descriptor ceiling or affecting later test groups. */
+    struct rlimit saved_nofile;
+    if (getrlimit(RLIMIT_NOFILE, &saved_nofile) < 0) {
+        close(target_pidfd); close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        return fail("pidfd EMFILE getrlimit", errno);
+    }
+    struct rlimit test_nofile = saved_nofile;
+    if (test_nofile.rlim_cur > 128)
+        test_nofile.rlim_cur = 128;
+    int limit_errno = 0;
+    if (test_nofile.rlim_cur < 16)
+        limit_errno = EINVAL;
+    else if (setrlimit(RLIMIT_NOFILE, &test_nofile) < 0)
+        limit_errno = errno;
+    if (limit_errno != 0) {
+        close(target_pidfd); close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        errno = limit_errno;
+        return fail("pidfd EMFILE setrlimit", limit_errno);
+    }
+
+    int held[2048];
+    size_t held_count = 0;
+    for (; held_count < sizeof(held) / sizeof(held[0]); held_count++) {
+        held[held_count] = dup(pipefd[1]);
+        if (held[held_count] < 0)
+            break;
+    }
+    int fill_errno = errno;
+    if (held_count == sizeof(held) / sizeof(held[0]) || fill_errno != EMFILE) {
+        for (size_t i = 0; i < held_count; i++) close(held[i]);
+        int restore_errno = 0;
+        if (setrlimit(RLIMIT_NOFILE, &saved_nofile) < 0)
+            restore_errno = errno;
+        close(target_pidfd);
+        close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        if (restore_errno != 0)
+            return fail("pidfd EMFILE restore rlimit", restore_errno);
+        return fail("pidfd EMFILE fill table", fill_errno);
+    }
+    errno = 0;
+    long denied = syscall(SYS_pidfd_getfd, target_pidfd, pipefd[0], 0);
+    int install_errno = errno;
+    for (size_t i = 0; i < held_count; i++) close(held[i]);
+    if (setrlimit(RLIMIT_NOFILE, &saved_nofile) < 0) {
+        int restore_errno = errno;
+        close(target_pidfd); close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        return fail("pidfd EMFILE restore rlimit", restore_errno);
+    }
+    close(target_pidfd);
+    if (denied != -1 || install_errno != EMFILE) {
+        close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        errno = install_errno;
+        return fail("pidfd_getfd EMFILE expected", install_errno);
+    }
+
+    char byte = 'c';
+    if (write(command[1], &byte, 1) != 1 || read(reply[0], &byte, 1) != 1 ||
+        byte != 'd') {
+        close(pipefd[1]); close(command[1]); close(reply[0]);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        return fail("pidfd EMFILE child close", errno);
+    }
+    close(command[1]); close(reply[0]);
+    struct sigaction ignore_pipe, old_pipe;
+    memset(&ignore_pipe, 0, sizeof(ignore_pipe));
+    ignore_pipe.sa_handler = SIG_IGN;
+    sigemptyset(&ignore_pipe.sa_mask);
+    if (sigaction(SIGPIPE, &ignore_pipe, &old_pipe) < 0) {
+        close(pipefd[1]); waitpid(child, NULL, 0);
+        return fail("pidfd EMFILE SIGPIPE setup", errno);
+    }
+    errno = 0;
+    ssize_t write_result = write(pipefd[1], "x", 1);
+    int write_errno = errno;
+    sigaction(SIGPIPE, &old_pipe, NULL);
+    close(pipefd[1]);
+    int child_status = 0;
+    waitpid(child, &child_status, 0);
+    if (write_result != -1 || write_errno != EPIPE ||
+        !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        errno = write_errno;
+        return fail("pidfd_getfd EMFILE leaked target vfile", write_errno);
+    }
+    printf("SYSCALL_EXT: pidfd_getfd EMFILE rollback PASS\n");
     return 0;
 }
 

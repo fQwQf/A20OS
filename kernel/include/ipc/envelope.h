@@ -29,6 +29,7 @@
 #include "core/defs.h"
 
 struct task_t;
+struct vfile;
 
 /* Policy flags. */
 #define A20_ENV_F_KILL_ON_EXPIRE  (1u << 0) /* kill attached tasks on expiry */
@@ -97,19 +98,37 @@ int64_t env_audit(struct a20_env_audit *out);
 
 /*
  * Acquisition of a NEWLY CREATED authority (open/socket/pipe/memfd/...).
- * Registers gfd's object class in the global kind table, then runs the
- * policy checks (type x rights x time x ops) and installs a shadow entry.
- * Returns 0 to proceed, or a negative Linux errno to fail the syscall.
+ * The object's class is carried by its vfile (ordinary files default to
+ * FILE), then this runs the policy checks (type x rights x time x ops) and
+ * installs a shadow entry. New callers should keep their vfile pinned and use
+ * env_mediate_acquire_vfile() so a close/reuse cannot authorize a replacement.
  */
-int env_mediate_acquire(uint8_t obj_type, uint64_t rights, int gfd);
-int env_mediate_acquire_socket(uint64_t rights, int gfd);
+/* Legacy gfd-named entry points take a task-local descriptor index into the
+ * current files_struct; they do not take a global descriptor or vfile ID. */
+int env_mediate_acquire(uint8_t obj_type, uint64_t rights, int local_fd);
+int env_mediate_acquire_socket(uint64_t rights, int local_fd);
+
+/* Transfer acquisition for SCM_RIGHTS and pidfd_getfd. @pinned_vf is a
+ * caller-held reference to the exact transferred object, @local_fd is the
+ * receiving task's installed local descriptor, and @requested_rights is the
+ * legacy base grant (READ|WRITE|STAT|SEEK); CONNECT|ACCEPT are added only for
+ * socket vfiles. The fdtable callback verifies the slot still names @pinned_vf
+ * while charging and recording its stable vfile identity. Within one envelope,
+ * the first grant for that vfile identity is immutable: later reacquisition
+ * still consumes an op but cannot broaden or narrow authority shared by its
+ * aliases. Reopen paths must intersect requested rights with the source grant
+ * before creating a distinct vfile identity. This is not per-fd attenuation. */
+int env_mediate_acquire_vfile(int local_fd, struct vfile *pinned_vf,
+                              uint64_t requested_rights);
 
 /*
  * Acquisition of an authority created elsewhere entering this task via
- * descriptor transfer (A6 SCM_RIGHTS receive, A7 pidfd_getfd).  Classifies
- * by the global kind registry, checks policy, installs a shadow.
+ * descriptor transfer (A6 SCM_RIGHTS receive, A7 pidfd_getfd). Classification
+ * follows the acquired vfile identity; successful checks install a shadow
+ * keyed by that identity, shared across dup/fork aliases and retired when the
+ * final vfile reference is released.
  */
-int env_mediate_acquire_gfd(int gfd);
+int env_mediate_acquire_gfd(int local_fd);
 
 /*
  * Propagation check (A6 send side): the fd's class must appear in
@@ -117,6 +136,7 @@ int env_mediate_acquire_gfd(int gfd);
  * Charges one op.  Returns 0 or negative errno.
  */
 int env_mediate_send_fd(int gfd);
+int env_mediate_send_vfile(int local_fd, struct vfile *pinned_vf);
 
 /*
  * Resource-class-only mediation for authorities without an fd identity
@@ -130,26 +150,35 @@ int env_mediate_class(uint8_t obj_type);
  * the shadow rights of tracked authorities (grandfathered fds are exempt).
  * want_write: 0 = read, 1 = write, -1 = no direction requirement.
  */
-int env_mediate_use_dir(int gfd, size_t bytes, int want_write);
-int env_mediate_use(int gfd, size_t bytes); /* dir = -1 */
+int env_mediate_use_dir(int local_fd, size_t bytes, int want_write);
+int env_mediate_use(int local_fd, size_t bytes); /* dir = -1 */
 
 /*
  * A8 support: rights carried by the shadow for gfd in the CURRENT task's
  * envelope; *tracked is cleared when no shadow exists (grandfathered fd).
  */
-uint64_t env_shadow_rights_of_gfd(int gfd, int *tracked);
+uint64_t env_shadow_rights_of_gfd(int local_fd, int *tracked);
 
-/* ---- Global fd-kind registry (backs classification above) ---- */
+/* Called from the final vfile-free path after its last reference reaches zero.
+ * This reclaims every envelope's identity shadow before identity storage can
+ * be reused; caller holds no fdtable or VFS lock. */
+void env_vfile_retire(struct vfile *vf);
 
+/* ---- Vfile-bound object classification ---- */
+
+/* Tag a newly constructed vfile before publishing it into an fdtable. The
+ * class then follows dup/fork aliases and cannot be confused by local-fd
+ * reuse. Ordinary files need no explicit tag. */
+int env_kind_tag_vfile(struct vfile *vf, uint8_t obj_type);
+uint8_t env_kind_of_vfile(const struct vfile *vf);
+
+/* Transitional compatibility for syscall creation sites. New objects are
+ * tagged in their vfile constructor before fdtable publication; this legacy
+ * numeric-fd hook intentionally does not mutate classification. */
 void env_kind_register(int gfd, uint8_t obj_type);
-/*
- * Forget the class recorded for @gfd.  Required when a descriptor closes:
- * the registry is keyed by fd NUMBER and numbers are recycled, so a stale
- * byte classifies a brand-new descriptor as whatever the previous occupant
- * of that slot was.  A fresh file landing on a retired socket's number would
- * be refused as a socket; the converse -- a socket landing on a retired
- * file's number -- would be a real capability over-grant.
- */
+
+/* Compatibility hook called by descriptor close paths. Classification lives
+ * on the vfile, so closing one alias must not clear metadata for other aliases. */
 void env_kind_unregister(int gfd);
 uint8_t env_kind_of(int gfd);
 
@@ -161,7 +190,9 @@ bool env_active(const struct task_t *t);
 /* Fork inheritance: child shares the parent's envelope (refcounted root). */
 void env_inherit_task(struct task_t *child, const struct task_t *parent);
 
-/* Task teardown: drop this task's reference. */
+/* Task teardown: drop its attached reference and release creator references
+ * for envelopes owned by this task. A revoked envelope remains addressable
+ * until owner teardown, while attached tasks retain their own references. */
 void env_release_task(struct task_t *t);
 
 #endif /* _ABI_LINUX_ENVELOPE_H */

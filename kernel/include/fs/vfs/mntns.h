@@ -28,9 +28,9 @@ struct task_t;
  *   when the last reference goes away.
  *
  * Copied mounts share their root vnode and fs_data with the namespace they
- * were copied from; such entries carry VFS_MOUNT_NS_SHARED and umount only
- * detaches them from the local table without running the filesystem
- * unmount destructor (the other namespace still uses the filesystem).
+ * were copied from. Each copied entry pins its source mount object; dropping
+ * the source namespace is deferred until copied entries detach, so vnode->mnt
+ * never points at a freed table entry.
  */
 #define MNTNS_MAX_MOUNTS   64
 #define MNTNS_INIT_INO     4026531840ULL  /* Linux-compatible init mnt ns ino */
@@ -40,6 +40,12 @@ typedef struct mnt_namespace {
     uint64_t    ino;        /* immutable id reported as mnt:[ino] */
     refcount_t  refs;
     int         nmounts;
+    /* A last-put teardown that failed keeps one internal reference and the
+     * table alive until the reaper can safely retry it. */
+    int         teardown_pending;
+    int         teardown_running;
+    int         teardown_retryable;
+    uint64_t    teardown_attempt_pass;
     /* Heap-allocated mount_t objects behind stable pointers.  The previous
      * inline array shifted entries on umount, silently repointing every
      * vnode->mnt / dcache / quota reference at the wrong mount.  Removed
@@ -68,6 +74,12 @@ int              mntns_fork(struct task_t *child, struct task_t *parent,
 /* setns(2): move @t into @ns, consuming the caller's reference. */
 int              mntns_join(struct task_t *t, mnt_namespace_t *ns);
 void             mntns_put(mnt_namespace_t *ns);
+/* Retry tracked last-put teardown and shared-source mounts after a clone
+ * detaches.  The retry worker is started lazily on first failure. */
+void             mntns_retry_pending(void);
+/* Serialize mount-table snapshots, insertion/removal, and teardown admission. */
+uint64_t         mntns_mount_table_lock(void);
+void             mntns_mount_table_unlock(uint64_t flags);
 /* Idempotent task-teardown drop of t->mnt_ns. */
 void             mntns_release_task(struct task_t *t);
 
