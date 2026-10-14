@@ -41,12 +41,12 @@ struct a20_vma_merge_snapshot {
     const void *prev;
     const void *next;
 };
-#if UINTPTR_MAX == UINT64_MAX
+#if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(struct a20_vma_region_snapshot) == 24,
                "Rust/C VMA region snapshot ABI");
 _Static_assert(sizeof(struct a20_vma_merge_snapshot) == 88,
                "Rust/C VMA merge snapshot ABI");
-#elif UINTPTR_MAX == UINT32_MAX
+#elif __SIZEOF_POINTER__ == 4
 _Static_assert(sizeof(struct a20_vma_region_snapshot) == 12,
                "Rust/C VMA region snapshot ABI");
 _Static_assert(sizeof(struct a20_vma_merge_snapshot) == 56,

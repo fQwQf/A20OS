@@ -16,6 +16,12 @@ typedef struct a20_park_wait_fields {
 
 typedef void (*a20_park_timer_cancel_fn)(void *context, uint64_t seq);
 
+/* Narrow atomic64 adapters used by the Rust park state machine on RV32. */
+uint64_t a20_park_wait_load_u64_relaxed(uint64_t *ptr);
+uint64_t a20_park_wait_load_u64_acquire(uint64_t *ptr);
+void a20_park_wait_store_u64_relaxed(uint64_t *ptr, uint64_t value);
+void a20_park_wait_store_u64_release(uint64_t *ptr, uint64_t value);
+
 enum {
     A20_PARK_IDLE = 0,
     A20_PARK_PREPARING = 1,

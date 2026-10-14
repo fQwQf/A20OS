@@ -7,6 +7,17 @@
 typedef struct ext4_sb_info ext4_sb_info_t;
 typedef struct ext4_journal ext4_journal_t;
 
+/* Stable C/Rust record action layout used by the bounded JBD2 decoder. */
+typedef struct jbd2_record_action {
+    uint64_t target;
+    uint32_t checksum;
+    uint32_t flags;
+} jbd2_record_action_t;
+
+/* ext4_journal_log_pending result: a clean legacy-checksum journal that may
+ * be exposed only through an explicit read-only mount. */
+#define EXT4_JOURNAL_READONLY_LEGACY 2
+
 /*
  * ext4's internal JBD2 log: recovery (read-only replay) and writing.
  *
@@ -26,7 +37,7 @@ typedef struct ext4_journal ext4_journal_t;
 /* Open the journal for writing, after recovery has run.  A filesystem whose
  * superblock has no journal simply gets no writer. */
 int  ext4_journal_open(ext4_sb_info_t *fs, const void *disk_sb);
-void ext4_journal_close(ext4_sb_info_t *fs);
+int  ext4_journal_close(ext4_sb_info_t *fs);
 
 /* Record that the metadata covering [byte_off, byte_off + len) has been
  * written to the block cache, and pin those cache pages until the next
@@ -37,6 +48,9 @@ void ext4_journal_close(ext4_sb_info_t *fs);
  * has no journal. */
 int  ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
                              const void *buf, size_t len);
+/* Refuse to commit a partially completed metadata operation. This is used by
+ * multi-block orphan cleanup after any checked read/write/free failure. */
+int  ext4_journal_poison(ext4_sb_info_t *fs);
 
 /* Write, commit and checkpoint the pending transaction.  Idempotent: a commit
  * with nothing pending succeeds without touching the disk. */
@@ -55,7 +69,8 @@ int         ext4_journal_crash_points_format(char *buf, size_t bufsz);
 
 /* Non-zero when the on-disk journal still holds a transaction to replay.
  * Independent of the needs_recovery feature, which a crash can lose. */
-int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb);
+int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
+                             int read_only);
 /* bcache pre-sync hook; install with bcache_set_sync_hook() at mount. */
 int  ext4_journal_sync_hook(struct bcache *bc);
 

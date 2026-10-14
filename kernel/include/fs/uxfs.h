@@ -55,4 +55,8 @@ int uxfs_block_io(struct task_t *task, int block_index, int write, uint64_t lba,
 int uxfs_block_capacity(struct task_t *task, int block_index,
                         uint64_t *out_sectors);
 
+/* Commit the owned block device's volatile cache, if supported. */
+int uxfs_block_flush(struct task_t *task, int block_index);
+int uxfs_block_flush_supported(struct task_t *task, int block_index);
+
 #endif /* FS_UXFS_H */

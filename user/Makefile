@@ -21,7 +21,7 @@ MUSL_VARIANT := $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
 BUILD_DIR ?= build/$(MUSL_VARIANT)
 OBJ_DIR := $(BUILD_DIR)/obj
 MUSL_BASE := $(CURDIR)/external/musl
-MUSL_BUILD := $(MUSL_BASE)/build-$(MUSL_VARIANT)
+MUSL_BUILD_WAS_OVERRIDDEN := $(if $(filter undefined,$(origin MUSL_BUILD)),0,1)
 MUSL_CRT := $(MUSL_BUILD)/lib
 
 ARCH_STAMP := $(BUILD_DIR)/.build-id
@@ -113,7 +113,7 @@ OBJCOPY := $(CROSS_COMPILE)objcopy
 AR := $(CROSS_COMPILE)ar
 RANLIB := $(CROSS_COMPILE)ranlib
 
-MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
+MUSL_INC = -isystem $(MUSL_BUILD)/obj/include \
             -isystem $(MUSL_BASE)/include \
             -isystem $(MUSL_BASE)/arch/$(MUSL_ARCH) \
             -isystem $(MUSL_BASE)/arch/generic
@@ -124,7 +124,7 @@ MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
 # binary; -MP also emits empty rules for headers so a deleted one cannot wedge
 # the build.  The .d files are read back by DEP_FILES at the end of this file,
 # the same way the kernel side wires CFLAGS -MMD -MP into DEP_FILES.
-CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc -MMD -MP $(MUSL_INC) \
+CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdinc -MMD -MP $(MUSL_INC) \
           -Iinit_common -Icmds $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
@@ -159,22 +159,50 @@ ifeq ($(ARCH),riscv64)
 LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else ifeq ($(ARCH),riscv32)
-# The selected compiler already encodes the compatible RV32 multilib choice.
-LIBGCC := $(LIBGCC_DEFAULT)
+# NOMMU builds use the Linux cross compiler for its sysroot headers and crt,
+# but this host's riscv64-linux-gnu GCC has no RV32 multilib. Select libgcc
+# from the matching bare-metal RV32IMAFDC/ILP32D multilib instead. Keep an
+# explicit command-line LIBGCC override for toolchain setups with their own
+# compatible runtime, and validate the actual archive members before linking.
+RISCV32_LIBGCC_CC ?= $(RISCV_ELF_PREFIX)gcc
+RISCV32_LIBGCC_AR ?= $(RISCV_ELF_PREFIX)ar
+ifeq ($(origin LIBGCC),undefined)
+LIBGCC := $(shell $(RISCV32_LIBGCC_CC) $(ARCH_CFLAGS_riscv32) -print-libgcc-file-name 2>/dev/null)
+endif
+RISCV32_LIBGCC_VALID := $(shell $(PYTHON) ../tools/check-riscv-libgcc.py --ar $(RISCV32_LIBGCC_AR) "$(LIBGCC)" >/dev/null 2>&1; echo $$?)
+ifneq ($(RISCV32_LIBGCC_VALID),0)
+$(error RV32 requires an ELF32 RISC-V ILP32D LIBGCC archive; selected '$(LIBGCC)'. Set LIBGCC to a matching multilib archive)
+endif
 MUSL_CONFIG_LDFLAGS := -L$(dir $(LIBGCC))
 else
 LIBGCC := $(LIBGCC_DEFAULT)
 MUSL_CONFIG_LDFLAGS :=
 endif
 
+# Each user build gets an immutable musl output directory keyed by the source
+# identity and the complete target/compiler configuration. An explicit
+# MUSL_BUILD override is allowed for a pre-provisioned matching tree, but is
+# never cleaned or repurposed by this makefile.
+MUSL_BUILD_KEY := $(shell $(PYTHON) ../tools/musl_build_identity.py \
+	--source "$(MUSL_BASE)" --target "$(MUSL_TARGET)" --compiler "$(CROSS_COMPILE)gcc" \
+	--cflags="$(MUSL_CONFIG_CFLAGS)" --ldflags="$(MUSL_CONFIG_LDFLAGS)" 2>/dev/null)
+ifeq ($(strip $(MUSL_BUILD_KEY)),)
+$(error Could not compute musl source/build identity)
+endif
+ifeq ($(MUSL_BUILD_WAS_OVERRIDDEN),0)
+MUSL_BUILD := $(abspath $(BUILD_DIR)/.musl/$(MUSL_BUILD_KEY))
+endif
+MUSL_BUILD := $(abspath $(MUSL_BUILD))
+MUSL_CRT := $(MUSL_BUILD)/lib
+
 # musl's makefiles do not treat config.mak as an input to every object.  Keep
 # our own configuration signature so ABI, compiler, or flag changes cannot
 # silently reuse incompatible CRT and libc objects after a rebase/toolchain
 # upgrade.
-MUSL_BUILD_STAMP := $(BUILD_DIR)/.musl-build-id
+MUSL_BUILD_STAMP := $(MUSL_BUILD)/.a20os-build-id
 MUSL_CC_TARGET := $(shell $(CC) -dumpmachine 2>/dev/null)
 MUSL_CC_VERSION := $(shell $(CC) -dumpfullversion -dumpversion 2>/dev/null)
-MUSL_BUILD_ID := target=$(MUSL_TARGET);cc=$(CC);cc-target=$(MUSL_CC_TARGET);cc-version=$(MUSL_CC_VERSION);cflags=$(MUSL_CONFIG_CFLAGS);ldflags=$(MUSL_CONFIG_LDFLAGS)
+MUSL_BUILD_ID := key=$(MUSL_BUILD_KEY);target=$(MUSL_TARGET);cc=$(CC);cc-target=$(MUSL_CC_TARGET);cc-version=$(MUSL_CC_VERSION);cflags=$(MUSL_CONFIG_CFLAGS);ldflags=$(MUSL_CONFIG_LDFLAGS)
 
 ifeq ($(NOMMU),1)
 CRT_START := $(MUSL_CRT)/rcrt1.o $(MUSL_CRT)/crti.o
@@ -617,9 +645,9 @@ build_dir: $(ARCH_STAMP)
 
 musl_prepare:
 	@set -e; \
-	lock_file="$(BUILD_DIR).musl.lock"; \
+	lock_file="$(MUSL_BUILD).lock"; \
 	if command -v flock >/dev/null 2>&1; then \
-		mkdir -p "$(dir $(BUILD_DIR))"; \
+		mkdir -p "$(dir $(MUSL_BUILD))"; \
 		exec 9>"$$lock_file"; \
 		flock 9; \
 	fi; \
@@ -638,11 +666,18 @@ musl_prepare:
 		stale=1; \
 	fi; \
 	if [ "$$missing" -ne 0 ] || [ "$$stale" -ne 0 ]; then \
-		echo "[MUSL] build-$(MUSL_VARIANT) stale or missing, rebuilding..."; \
-		rm -rf "$(MUSL_BUILD)"; \
+		if [ "$(MUSL_BUILD_WAS_OVERRIDDEN)" = 1 ] && \
+		   [ -d "$(MUSL_BUILD)" ] && \
+		   [ -n "$$(find "$(MUSL_BUILD)" -mindepth 1 -maxdepth 1 -print -quit)" ]; then \
+			echo "[MUSL] refusing to rebuild explicit MUSL_BUILD with mismatched or incomplete identity: $(MUSL_BUILD)" >&2; \
+			exit 1; \
+		fi; \
+		echo "[MUSL] $(MUSL_VARIANT) identity stale or missing, rebuilding private output..."; \
+		if [ "$(MUSL_BUILD_WAS_OVERRIDDEN)" = 0 ]; then rm -rf "$(MUSL_BUILD)"; fi; \
 		mkdir -p "$(MUSL_BUILD)"; \
-		(cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh ../configure \
+		(cd "$(MUSL_BUILD)" && env -u ARCH -u MAKEFLAGS sh "$(MUSL_BASE)/configure" \
 			--target=$(MUSL_TARGET) \
+			--srcdir="$(MUSL_BASE)" \
 			--prefix=/opt/musl-$(ARCH) \
 			--disable-shared \
 			--disable-wrapper \
@@ -809,7 +844,7 @@ clean:
 	@test ! -e $(BUILD_DIR)
 
 distclean: clean
-	rm -rf $(MUSL_BASE)/build-*
+	@:
 
 # Header deps written by CFLAGS above, read back so make rebuilds the objects
 # whose translation unit included a changed header.  USER_INTERMEDIATE_TARGETS

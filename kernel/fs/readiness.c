@@ -128,6 +128,16 @@ static short readiness_filter(short raw, uint64_t generation,
     return raw;
 }
 
+static short readiness_interest_filter(readiness_interest_t *item,
+                                       short raw, uint64_t generation,
+                                       bool apply_default)
+{
+    if (item->filter)
+        return item->filter(raw, generation, item->filter_arg);
+    return apply_default ? readiness_filter(raw, generation, item->state) :
+                           raw;
+}
+
 static int readiness_scan(readiness_interest_t *items,
                           readiness_slot_t *slots, size_t count,
                           size_t max_ready)
@@ -147,16 +157,20 @@ static int readiness_scan(readiness_interest_t *items,
                                            slot->identity)) ||
             (item->expected_identity &&
              item->expected_identity != slot->identity)) {
-            item->revents = POLLNVAL;
-            ready++;
+            item->revents = readiness_interest_filter(
+                item, POLLNVAL,
+                slot->file ? readiness_slot_generation(slot) : 0,
+                false);
+            if (item->revents)
+                ready++;
             continue;
         }
 
         int result = vfs_poll_file(slot->file, item->events);
         short raw = result < 0 ? POLLNVAL : (short)result;
         raw &= (short)(item->events | POLLERR | POLLHUP | POLLNVAL);
-        item->revents = readiness_filter(
-            raw, readiness_slot_generation(slot), item->state);
+        item->revents = readiness_interest_filter(
+            item, raw, readiness_slot_generation(slot), true);
         if (item->revents)
             ready++;
     }

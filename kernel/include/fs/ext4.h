@@ -45,6 +45,8 @@
 #define EXT4_FEATURE_INCOMPAT_EA_INODE     0x0400
 #define EXT4_FEATURE_INCOMPAT_DIRDATA      0x1000
 #define EXT4_FEATURE_INCOMPAT_CSUM_SEED    0x2000
+#define EXT4_FEATURE_COMPAT_ORPHAN_FILE    0x1000
+#define EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT 0x10000
 
 #define EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER  0x0001
 #define EXT4_FEATURE_RO_COMPAT_LARGE_FILE    0x0002
@@ -261,6 +263,7 @@ typedef struct ext4_sb_info {
     uint32_t desc_per_block;
     uint32_t desc_size;
     uint32_t inodes_count;
+    uint32_t first_ino;
     uint32_t s_feature_incompat;
     uint32_t s_feature_ro_compat;
     /* Seed for every metadata_csum checksum; see fs/diskfs/ext4_csum.c. */
@@ -308,7 +311,8 @@ typedef struct ext4_fctx {
 
 vnode_t *ext4_mount(bcache_t *bc);
 vnode_t *ext4_mount_flags(bcache_t *bc, int flags);
-void     ext4_unmount(vnode_t *root);
+int ext4_vnode_finalize_unlinked(vnode_t *vn);
+int      ext4_unmount(vnode_t *root);
 void     ext4_vnode_cache_prune_all(void);
 /* Scoped fsync: flush only this vnode's data and allocation metadata. */
 int      ext4_vn_sync(vnode_t *vn);

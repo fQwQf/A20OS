@@ -9,6 +9,17 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/ip.h"
+#include <limits.h>
+#ifndef EDOM
+#define EDOM 33
+#endif
+#ifdef CONFIG_LINUX_MMSG_TXN_RUST
+#include "abi/linux/mmsg_transaction.h"
+extern int a20_linux_timeval_to_ticks(int64_t sec, int64_t usec,
+                                      uint64_t tps, uint64_t *out_ticks);
+extern int a20_linux_ticks_to_timeval(uint64_t ticks, uint64_t tps,
+                                      int64_t *sec_out, int64_t *usec_out);
+#endif
 /* TCP_CONGESTION name validation and the real algorithm name.  A20OS divergence
  * in lwIP; see kernel/external/lwip/DIVERGENCE.md 2.7.  Included
  * unconditionally: the TCP_CONG_* values are outside the header's
@@ -29,16 +40,59 @@
 #define ENETDOWN 100
 #endif
 
-static uint64_t timeval_to_ticks(const void *optval, size_t optlen)
+static int timeval_to_ticks(const void *optval, size_t optlen,
+                            uint64_t *out_ticks)
 {
-    if (!optval || optlen < sizeof(long) * 2)
-        return 0;
+    if (!optval || !out_ticks || optlen < sizeof(long) * 2)
+        return -EINVAL;
     const long *tv = (const long *)optval;
-    if (tv[0] < 0 || tv[1] < 0)
+    if (tv[1] < 0 || tv[1] >= 1000000L)
+        return -EDOM;
+    if (tv[0] < 0) {
+        *out_ticks = 0;
         return 0;
-    uint64_t ticks = (uint64_t)tv[0] * TICKS_PER_SEC +
-                     (uint64_t)tv[1] * TICKS_PER_SEC / 1000000ULL;
-    return ticks ? ticks : 1;
+    }
+#ifdef CONFIG_LINUX_MMSG_TXN_RUST
+    return a20_linux_timeval_to_ticks((int64_t)tv[0], (int64_t)tv[1],
+                                      TICKS_PER_SEC, out_ticks);
+#else
+    uint64_t tps = TICKS_PER_SEC;
+    uint64_t sec = (uint64_t)tv[0];
+    if (sec && tps > UINT64_MAX / sec)
+        return -EINVAL;
+    uint64_t whole = sec * tps;
+    uint64_t fraction = (uint64_t)tv[1] * tps / 1000000ULL;
+    if (fraction > UINT64_MAX - whole)
+        return -EINVAL;
+    uint64_t ticks = whole + fraction;
+    if (ticks == 0 && (tv[0] != 0 || tv[1] != 0))
+        ticks = 1;
+    *out_ticks = ticks;
+    return 0;
+#endif
+}
+
+static int timeout_ticks_to_timeval(uint64_t ticks, long *sec_out,
+                                    long *usec_out)
+{
+    if (!sec_out || !usec_out || TICKS_PER_SEC == 0)
+        return -EINVAL;
+#ifdef CONFIG_LINUX_MMSG_TXN_RUST
+    int64_t sec = 0, usec = 0;
+    int rc = a20_linux_ticks_to_timeval(ticks, TICKS_PER_SEC, &sec, &usec);
+    if (rc < 0 || sec > LONG_MAX || usec > LONG_MAX)
+        return -EINVAL;
+    *sec_out = (long)sec;
+    *usec_out = (long)usec;
+#else
+    uint64_t sec = ticks / TICKS_PER_SEC;
+    uint64_t usec = ((ticks % TICKS_PER_SEC) * 1000000ULL) / TICKS_PER_SEC;
+    if (sec > LONG_MAX || usec > LONG_MAX)
+        return -EINVAL;
+    *sec_out = (long)sec;
+    *usec_out = (long)usec;
+#endif
+    return 0;
 }
 
 static int net_copyout_int(void *optval, size_t *optlen, int val)
@@ -821,16 +875,24 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
     if (level == SOL_SOCKET && optname == SO_RCVTIMEO) {
         if (!optval || optlen < sizeof(long) * 2)
             return -EINVAL;
+        uint64_t ticks;
+        int rc = timeval_to_ticks(optval, optlen, &ticks);
+        if (rc < 0)
+            return rc;
         uint64_t sf = net_sock_lock(s);
-        s->recv_timeout_ticks = timeval_to_ticks(optval, optlen);
+        s->recv_timeout_ticks = ticks;
         net_sock_unlock(s, sf);
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_SNDTIMEO) {
         if (!optval || optlen < sizeof(long) * 2)
             return -EINVAL;
+        uint64_t ticks;
+        int rc = timeval_to_ticks(optval, optlen, &ticks);
+        if (rc < 0)
+            return rc;
         uint64_t sf = net_sock_lock(s);
-        s->send_timeout_ticks = timeval_to_ticks(optval, optlen);
+        s->send_timeout_ticks = ticks;
         net_sock_unlock(s, sf);
         return 0;
     }
@@ -944,6 +1006,7 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
     int val = 0;
     uint8_t tcp_congestion, tcp_nodelay, keepalive, reuseaddr, reuseport;
     int keep_idle, keep_intvl, keep_cnt;
+    uint64_t recv_timeout_ticks, send_timeout_ticks;
     uint64_t sf = net_sock_lock(s);
     tcp_congestion = s->tcp_congestion;
     tcp_nodelay = s->tcp_nodelay;
@@ -953,6 +1016,8 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
     keep_idle = s->keep_idle;
     keep_intvl = s->keep_intvl;
     keep_cnt = s->keep_cnt;
+    recv_timeout_ticks = s->recv_timeout_ticks;
+    send_timeout_ticks = s->send_timeout_ticks;
     net_sock_unlock(s, sf);
     if (level == SOL_SOCKET && optname == SO_TYPE)
         val = s->type;
@@ -973,6 +1038,20 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
          * datagram socket, where there is no pcb to write the clamp back onto,
          * it is the only place the clamp exists at all. */
         val = (int)net_socket_buf_in_force(s, optname == SO_SNDBUF);
+    else if (level == SOL_SOCKET &&
+             (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)) {
+        long tv[2];
+        uint64_t ticks = optname == SO_RCVTIMEO
+            ? recv_timeout_ticks : send_timeout_ticks;
+        int rc = timeout_ticks_to_timeval(ticks, &tv[0], &tv[1]);
+        if (rc < 0)
+            return rc;
+        size_t copy_len = *optlen < sizeof(tv) ? *optlen : sizeof(tv);
+        if (copy_len)
+            memcpy(optval, tv, copy_len);
+        *optlen = copy_len;
+        return 0;
+    }
     else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
         val = reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
@@ -1195,9 +1274,7 @@ int net_shutdown_sock(net_socket_t *s, int how)
     }
     if (how == SHUT_RD) {
         s->shut_rd = 1;
-        net_msg_t *m = s->rx_head;
-        s->rx_head = s->rx_tail = NULL;
-        s->rx_count = 0;
+        net_msg_t *m = net_rxq_detach_locked(s);
         net_sock_unlock2(pair);
         while (m) {
             net_msg_t *next = m->next;

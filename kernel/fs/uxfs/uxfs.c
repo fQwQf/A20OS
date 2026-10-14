@@ -34,8 +34,13 @@ extern block_dev_t *mount_setup_block_device(int index);
 typedef struct uxfs_sb {
     struct a20_channel_ep *ep;   /* service endpoint; ref owned by this sb */
     struct task_t         *server;
+    struct task_t         *lifetime_server;
     int                    block_index;
     uint32_t               next_req_id;
+    uint32_t               lifetime_mode; /* 0 unknown, 1 explicit v1, 2 v2 */
+    uint64_t               server_generation;
+    uint64_t               lifetime_generation;
+    mutex_t                lifetime_lock;
     mutex_t                req_lock;
 } uxfs_sb_t;
 
@@ -152,6 +157,53 @@ static void uxfs_req_init(uxfs_sb_t *sb, ufs_req_hdr_t *req, uint32_t opcode,
     req->arg1        = arg1;
     req->name_len    = name ? (uint32_t)strlen(name) : 0;
     req->payload_len = payload_len;
+}
+
+static int uxfs_negotiate_lifetime(uxfs_sb_t *sb)
+{
+    mutex_lock(&sb->lifetime_lock);
+    if (sb->lifetime_generation == sb->server_generation &&
+        sb->lifetime_server == sb->server && sb->lifetime_mode != 0) {
+        mutex_unlock(&sb->lifetime_lock);
+        return 0;
+    }
+    sb->lifetime_mode = 0;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp;
+    uxfs_req_init(sb, &req, UFS_OP_INIT, UFS_ROOT_INO, 0, 0, NULL, 0);
+    /* INIT is defined by v1 and old services always answer it.  Probing with
+     * v2 would let a legacy server silently ignore the frame and leave this
+     * synchronous RPC blocked forever. */
+    req.version = UFS_PROTO_VERSION_LEGACY;
+    int rc = uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
+    if (rc != 0) {
+        mutex_unlock(&sb->lifetime_lock);
+        return rc;
+    }
+    sb->lifetime_mode = resp.out1 == UFS_LIFETIME_CAPABILITY ? 2u : 1u;
+    printf("[UXFS] lifetime protocol version=%u server_generation=%u\n",
+           sb->lifetime_mode, sb->server_generation);
+    sb->lifetime_generation = sb->server_generation;
+    sb->lifetime_server = sb->server;
+    mutex_unlock(&sb->lifetime_lock);
+    return 0;
+}
+
+static int uxfs_lifetime_op(uxfs_sb_t *sb, uint32_t opcode, uint64_t ino,
+                            uint64_t flags)
+{
+    int rc = uxfs_negotiate_lifetime(sb);
+    if (rc != 0)
+        return rc;
+    /* A v1 peer was explicitly selected by its v1 INIT response.  Preserve
+     * its established inode-only RPC contract; OPEN/CLOSE lifetime claims
+     * are available only after the v2 capability handshake. */
+    if (sb->lifetime_mode == 1u)
+        return 0;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp;
+    uxfs_req_init(sb, &req, opcode, ino, flags, 0, NULL, 0);
+    return uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -315,6 +367,21 @@ static int uxfs_unlink(vnode_t *dir, const char *name)
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp;
     uxfs_req_init(p->sb, &req, UFS_OP_UNLINK, dir->ino, 0, 0, name, 0);
+    return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
+}
+
+static int uxfs_link(vnode_t *dir, const char *name, vnode_t *target)
+{
+    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
+    uxfs_vpriv_t *tp = target ? (uxfs_vpriv_t *)target->fs_data : NULL;
+    if (!p || !tp || p->sb != tp->sb) return -EXDEV;
+    int rc = uxfs_negotiate_lifetime(p->sb);
+    if (rc != 0) return rc;
+    if (p->sb->lifetime_mode != 2u) return -ENOSYS;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp;
+    uxfs_req_init(p->sb, &req, UFS_OP_LINK, dir->ino, target->ino, 0,
+                  name, 0);
     return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
 }
 
@@ -558,16 +625,18 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 static int uxfs_fclose(vfile_t *vf)
 {
     uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
+    int close_rc = 0;
     if (fc) {
         /* Flush dirty pages while the ufsd channel is guaranteed alive:
          * user-space FS servers crash/restart routinely, so write-behind
          * past close would race server death. */
         if (vf->vnode)
             page_cache_writeback_vnode(vf->vnode, NULL, NULL);
+        close_rc = uxfs_lifetime_op(fc->sb, UFS_OP_CLOSE, fc->ino, 0);
         kfree(fc);
         vf->priv = NULL;
     }
-    return 0;
+    return close_rc;
 }
 
 static vfile_ops_t g_uxfs_fops = {
@@ -582,9 +651,14 @@ static vfile_ops_t g_uxfs_fops = {
 static struct vfile *uxfs_open_vnode(vnode_t *vn, int flags)
 {
     uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)kmalloc(sizeof(uxfs_fctx_t));
-    if (!fc)
+    if (uxfs_lifetime_op(p->sb, UFS_OP_OPEN, vn->ino,
+                         (uint64_t)(flags & 3)) != 0)
         return NULL;
+    uxfs_fctx_t *fc = (uxfs_fctx_t *)kmalloc(sizeof(uxfs_fctx_t));
+    if (!fc) {
+        (void)uxfs_lifetime_op(p->sb, UFS_OP_CLOSE, vn->ino, 0);
+        return NULL;
+    }
     memset(fc, 0, sizeof(*fc));
     fc->sb     = p->sb;
     fc->ino    = vn->ino;
@@ -594,6 +668,7 @@ static struct vfile *uxfs_open_vnode(vnode_t *vn, int flags)
     vfile_t *vf = vfile_alloc();
     if (!vf) {
         kfree(fc);
+        (void)uxfs_lifetime_op(p->sb, UFS_OP_CLOSE, vn->ino, 0);
         return NULL;
     }
     vf->vnode = vn;
@@ -611,6 +686,7 @@ static vnode_ops_t g_uxfs_vnops = {
     .create    = uxfs_create,
     .mkdir     = uxfs_mkdir,
     .unlink    = uxfs_unlink,
+    .link      = uxfs_link,
     .rmdir     = uxfs_rmdir,
     .rename    = uxfs_rename,
     .stat      = uxfs_stat,
@@ -671,8 +747,15 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
 
     sb->ep          = ep;
     sb->server      = server;
+    sb->lifetime_server = NULL;
     sb->block_index = block_index;
     sb->next_req_id = 0;
+    sb->lifetime_mode = 0;
+    sb->lifetime_generation = 0;
+    sb->server_generation++;
+    if (sb->server_generation == 0)
+        sb->server_generation = 1;
+    mutex_init(&sb->lifetime_lock);
     mutex_init(&sb->req_lock);
 
     /*
@@ -757,4 +840,22 @@ int uxfs_block_capacity(struct task_t *task, int block_index,
         return -ENODEV;
     *out_sectors = dev->capacity;
     return 0;
+}
+
+int uxfs_block_flush(struct task_t *task, int block_index)
+{
+    block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
+    if (!dev)
+        return -ENODEV;
+    if (!dev->flush)
+        return -EOPNOTSUPP;
+    return dev->flush(dev);
+}
+
+int uxfs_block_flush_supported(struct task_t *task, int block_index)
+{
+    block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
+    if (!dev)
+        return -ENODEV;
+    return dev->flush != NULL;
 }

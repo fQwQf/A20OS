@@ -326,9 +326,10 @@ void vprintf(const char *fmt, va_list ap)
 
 void printf(const char *fmt, ...)
 {
-    if (fscompat_log_sink)
-        fscompat_log_sink("[P] printf reached");
-    return;
+    va_list ap;
+    va_start(ap, fmt);
+    emit(fmt, ap);
+    va_end(ap);
 }
 
 int puts(const char *s)
@@ -500,3 +501,27 @@ uint32_t g_a20_perf_enabled;
  * is provided */
 #include "core/perf.h"
 a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];
+
+/* RV32 has no native atomic 64-bit RMW, and the userspace diskfs backend
+ * still compiles the kernel's inline perf hooks.  Keep the compiler ABI
+ * operation correct even if a future compatibility build enables counters:
+ * serialize this process-local counter word with a native 32-bit lock and
+ * use full fences, which are stronger than every __atomic_fetch_add order. */
+#if defined(__riscv_xlen) && __riscv_xlen == 32
+static volatile uint32_t g_compat_atomic64_lock;
+
+uint64_t __atomic_fetch_add_8(volatile void *ptr, uint64_t value,
+                              int memorder)
+{
+    (void)memorder;
+    volatile uint64_t *word = (volatile uint64_t *)ptr;
+    while (__atomic_exchange_n(&g_compat_atomic64_lock, 1, __ATOMIC_ACQUIRE))
+        ;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint64_t previous = *word;
+    *word = previous + value;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_compat_atomic64_lock, 0, __ATOMIC_RELEASE);
+    return previous;
+}
+#endif

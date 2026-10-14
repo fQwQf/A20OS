@@ -34,9 +34,27 @@ native-isolation-arch: $(NATIVE_ISOLATION_BIN)
 native-isolation-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-isolation-arch
 
+NATIVE_UBD_RUST_OBJ := $(USER_BUILD_DIR)/rust/virtio_blk_core.o
+ifeq ($(VIRTIO_BLK_CORE_IMPL),rust)
+ifneq ($(ARCH),riscv64)
+$(error VIRTIO_BLK_CORE_IMPL=rust user placement currently requires ARCH=riscv64)
+endif
+$(NATIVE_UBD_RUST_OBJ): kernel/drivers/block/virtio_blk_core.rs
+	@mkdir -p $(dir $@)
+	$(RUSTC) --edition=2021 --crate-type lib --emit=obj --target riscv64gc-unknown-none-elf \
+		-C panic=abort -C opt-level=3 -C codegen-units=1 \
+		-C relocation-model=static -C code-model=medium $< -o $@
+NATIVE_UBD_CORE_DEFS := -DCONFIG_VIRTIO_BLK_CORE_RUST
+NATIVE_UBD_CORE_OBJ := $(NATIVE_UBD_RUST_OBJ)
+endif
+
 $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ubd.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h kernel/include/drivers/driver_descriptor.h
-	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h kernel/include/drivers/driver_descriptor.h \
+		kernel/include/drivers/block/virtio_blk_core.h $(NATIVE_UBD_CORE_OBJ)
+	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) $(NATIVE_UBD_CORE_DEFS) \
+		-Iuser -Iuser/liba20rt -Ikernel/include -T$(NATIVE_LD) $(NATIVE_CRT0) \
+		$(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ubd.c \
+		$(NATIVE_UBD_CORE_OBJ) $(NATIVE_LIBS) -o $@
 
 # ufsd：用户态 FAT32 文件系统服务；fat32lite 与内核 NOMMU 构建同源编译。
 # ufsd：用户态文件系统宿主。fat32lite 同源编译；ext4/isofs/ntfs 内核

@@ -19,9 +19,10 @@ extern void a20_object_release(void *object, uint16_t type);
 _Static_assert(sizeof(a20_ch_handle_info_t) ==
                (sizeof(void *) == 8 ? 48 : 40),
                "C/Rust channel handle-info size mismatch");
-#if defined(__arm__)
+#if defined(__arm__) || (defined(__riscv) && __riscv_xlen == 32)
 /* AAPCS32 gives uint64_t eight-byte aggregate alignment even though pointers
- * are four bytes. Keep this distinct from 32-bit ABIs that align it to four. */
+ * are four bytes. RV32 ILP32D also aligns these uint64_t fields to eight;
+ * keep both distinct from 32-bit ABIs that align them to four. */
 #define A20_CH_HANDLE_INFO_ALIGN 8
 #else
 #define A20_CH_HANDLE_INFO_ALIGN (sizeof(void *) == 8 ? 8 : 4)
@@ -31,12 +32,28 @@ _Static_assert(__alignof__(a20_ch_handle_info_t) ==
                "C/Rust channel handle-info alignment mismatch");
 _Static_assert(__builtin_offsetof(a20_ch_handle_info_t, object) == 0,
                "C/Rust handle-info object offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, type) == sizeof(void *),
+               "C/Rust handle-info type offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, _pad) == sizeof(void *) + 2,
+               "C/Rust handle-info pad offset mismatch");
 _Static_assert(__builtin_offsetof(a20_ch_handle_info_t, transfer_rights) ==
                (sizeof(void *) == 8 ? 16 : 8),
                "C/Rust handle-info rights offset mismatch");
 _Static_assert(__builtin_offsetof(a20_ch_handle_info_t, expiry_tick) ==
                (sizeof(void *) == 8 ? 24 : 16),
                "C/Rust handle-info expiry offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, remaining_ops) ==
+               (sizeof(void *) == 8 ? 32 : 24),
+               "C/Rust handle-info remaining-ops offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, temporal_flags) ==
+               (sizeof(void *) == 8 ? 36 : 28),
+               "C/Rust handle-info temporal-flags offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, security_label) ==
+               (sizeof(void *) == 8 ? 40 : 32),
+               "C/Rust handle-info label offset mismatch");
+_Static_assert(__builtin_offsetof(a20_ch_handle_info_t, _pad2) ==
+               (sizeof(void *) == 8 ? 41 : 33),
+               "C/Rust handle-info tail-pad offset mismatch");
 
 extern int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
                                        a20_handle_t *handles, uint32_t count);

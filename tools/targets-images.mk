@@ -251,9 +251,9 @@ KALLSYMS_SRC      := $(BUILD_DIR)/kallsyms/kallsyms.c
 KALLSYMS_OBJ      := $(BUILD_DIR)/kallsyms/kallsyms.o
 KERNEL_NOSYMS_ELF := $(GUEST_KERNEL_ELF)
 
-$(KERNEL_NOSYMS_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
+$(KERNEL_NOSYMS_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
+	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(ARCH_LIBS) -o $@
 
 $(KALLSYMS_SRC): $(KERNEL_NOSYMS_ELF) tools/gen_kallsyms.py
 	@$(PYTHON) tools/gensync.py kallsyms \
@@ -263,9 +263,9 @@ $(KALLSYMS_OBJ): $(KALLSYMS_SRC)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(KERNEL_NOSYMS_ELF) $(LDSCRIPT)
+$(KERNEL_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(KALLSYMS_OBJ) $(KERNEL_NOSYMS_ELF) $(LDSCRIPT)
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(ARCH_LIBS) -o $@
+	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(KALLSYMS_OBJ) $(RUST_KERNEL_RUNTIME_LINK) $(ARCH_LIBS) -o $@
 
 # Kernel objects treat Makefile as an order-only prerequisite, so a change in
 # compiler flags (e.g. the CONFIG_UBSAN choice that PROFILE flips between

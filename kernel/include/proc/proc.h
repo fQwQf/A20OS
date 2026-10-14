@@ -545,6 +545,10 @@ _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
                "task_t.kstack_base must remain at assembly ABI offset 8/4");
 _Static_assert(offsetof(task_t, trap_guard_scratch) == 2 * sizeof(uintptr_t),
                "task_t.trap_guard_scratch must remain at assembly ABI offset 16/8");
+#ifdef CONFIG_ARM32
+_Static_assert(offsetof(task_t, trap_ctx) == 68,
+               "ARM32 trap.S TASK_TRAP_CTX offset must match task_t");
+#endif
 
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)
@@ -644,6 +648,7 @@ void     proc_exec_terminate_siblings(task_t *self);
 void     proc_force_exit(task_t *t, int exit_code);
 void     proc_check_exit_pending(void);
 int      proc_wait4(int pid, int *status, int options);
+int      proc_wait4_task(task_t *target_task, int *status, int options);
 void     proc_yield(void);
 int      proc_sched_get(task_t *t, proc_sched_config_t *out);
 /* May yield when the current task excludes its executing CPU. That case

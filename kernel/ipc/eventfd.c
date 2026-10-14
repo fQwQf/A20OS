@@ -1,4 +1,6 @@
 #include "ipc/eventfd.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
 
 #include "core/consts.h"
 #include "core/lock.h"
@@ -19,6 +21,31 @@ typedef struct {
     int           semaphore;
 } eventfd_t;
 
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+bool a20_eventfd_readable_rust(uint64_t counter);
+uint64_t a20_eventfd_read_rust(uint64_t *counter, bool semaphore);
+bool a20_eventfd_can_write_rust(uint64_t counter, uint64_t value);
+bool a20_eventfd_write_rust(uint64_t *counter, uint64_t value);
+#endif
+
+static bool eventfd_readable(eventfd_t *efd)
+{
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    return a20_eventfd_readable_rust(efd->counter);
+#else
+    return efd->counter != 0;
+#endif
+}
+
+static bool eventfd_write_fits(eventfd_t *efd, uint64_t value)
+{
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    return a20_eventfd_can_write_rust(efd->counter, value);
+#else
+    return value <= (~0ULL - 1) - efd->counter;
+#endif
+}
+
 static int eventfd_read(vfile_t *vf, char *buf, size_t count)
 {
     eventfd_t *efd = vf ? vf->priv : NULL;
@@ -26,7 +53,7 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
     if (count < sizeof(uint64_t)) return -EINVAL;
 
     spin_lock(&efd->lock);
-    while (efd->counter == 0) {
+    while (!eventfd_readable(efd)) {
         if (vf->flags & O_NONBLOCK) {
             spin_unlock(&efd->lock);
             return -EAGAIN;
@@ -39,7 +66,7 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
 
         wait_queue_entry_t entry = {0};
         spin_lock(&efd->lock);
-        if (efd->counter != 0) {
+        if (eventfd_readable(efd)) {
             spin_unlock(&efd->lock);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
@@ -61,8 +88,12 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
             return -ERESTARTSYS;
         spin_lock(&efd->lock);
     }
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    uint64_t val = a20_eventfd_read_rust(&efd->counter, efd->semaphore != 0);
+#else
     uint64_t val = efd->semaphore ? 1 : efd->counter;
     efd->counter -= val;
+#endif
     spin_unlock(&efd->lock);
 
     /* Writers may request different increments, and poll observers share
@@ -82,7 +113,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
     if (val == ~0ULL) return -EINVAL;
 
     spin_lock(&efd->lock);
-    while (val > (~0ULL - 1) - efd->counter) {
+    while (!eventfd_write_fits(efd, val)) {
         if (vf->flags & O_NONBLOCK) {
             spin_unlock(&efd->lock);
             return -EAGAIN;
@@ -95,7 +126,7 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
 
         wait_queue_entry_t entry = {0};
         spin_lock(&efd->lock);
-        if (val <= (~0ULL - 1) - efd->counter) {
+        if (eventfd_write_fits(efd, val)) {
             spin_unlock(&efd->lock);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
@@ -117,7 +148,14 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
             return -ERESTARTSYS;
         spin_lock(&efd->lock);
     }
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    if (!a20_eventfd_write_rust(&efd->counter, val)) {
+        spin_unlock(&efd->lock);
+        return -EAGAIN;
+    }
+#else
     efd->counter += val;
+#endif
     spin_unlock(&efd->lock);
 
     /* Readiness notifications do not consume the counter. Waking only one
@@ -133,7 +171,7 @@ static int eventfd_poll(vfile_t *vf, short events)
         return POLLNVAL;
     short revents = 0;
     spin_lock(&efd->lock);
-    if ((events & POLLIN) && efd->counter != 0)
+    if ((events & POLLIN) && eventfd_readable(efd))
         revents |= POLLIN;
     if ((events & POLLOUT) && efd->counter < ~0ULL - 1)
         revents |= POLLOUT;
@@ -188,5 +226,10 @@ int eventfd_create(unsigned initval, int flags)
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_eventfd_ops;
     vf->priv = efd;
+    if (env_kind_tag_vfile(vf, A20_OBJ_EVENT_QUEUE) < 0) {
+        vfile_free(vf);
+        kfree(efd);
+        return -EINVAL;
+    }
     return anonfd_install_vfile(vf, flags);
 }

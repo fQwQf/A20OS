@@ -15,7 +15,9 @@
 
 #include <stdint.h>
 
-#define UFS_PROTO_VERSION 1u
+#define UFS_PROTO_VERSION 2u
+#define UFS_PROTO_VERSION_LEGACY 1u
+#define UFS_LIFETIME_CAPABILITY 0x5546534c49464532ull /* 'UFSLIFE2' */
 #define UFS_REQ_MAGIC 0x55465352u /* 'UFSR' */
 #define UFS_RESP_MAGIC 0x55465350u /* 'UFSP' */
 
@@ -34,6 +36,9 @@
 #define UFS_OP_SYNC 12
 #define UFS_OP_STATFS 13
 #define UFS_OP_RENAME 14
+#define UFS_OP_OPEN 15
+#define UFS_OP_CLOSE 16
+#define UFS_OP_LINK 17 /* v2: ino=directory, arg0=existing target inode, name=new name */
 
 /* Node type in a GETATTR/LOOKUP reply (aligned with the low 4 bits of VFS_FT_*) */
 #define UFS_FT_FILE 1

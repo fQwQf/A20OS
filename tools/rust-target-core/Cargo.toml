@@ -1,0 +1,8 @@
+[package]
+name = "a20-rust-target-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]

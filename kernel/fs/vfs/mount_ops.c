@@ -384,26 +384,42 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
     return vfs_mount_bc_flags(path, fstype, bc, 0);
 }
 
-/* Release one namespace's hold on a mount entry.
- *
- * mntns_copy_mounts() marks every copied entry VFS_MOUNT_NS_SHARED and leaves
- * the real holder count on the *source* entry (ns_users counts source + every
- * copy).  A copy is only ever detached here: running the destructor for it
- * would tear down a filesystem the source namespace is still using.  The
- * destructor runs when the source's own count reaches zero. */
-void vfs_mount_fs_teardown(mount_t *mnt) {
-    if (!mnt) return;
-    if (mnt->flags & VFS_MOUNT_NS_SHARED) {
-        /* Detach-only path (this entry is a copy): never destroy the fs. */
-        return;
+/* Release one namespace's hold on a mount entry. A copied entry carries an
+ * explicit shared_source pointer, so the source mount (and vnode->mnt target)
+ * stays alive until every copied table detaches. */
+int vfs_mount_fs_teardown(mount_t *mnt) {
+    if (!mnt) return 0;
+    uint64_t flags = mntns_mount_table_lock();
+    if (mnt->shared_source) {
+        mntns_mount_table_unlock(flags);
+        /* A detached clone entry still pins its source until the entire
+         * namespace is gone: open objects can retain vnode->mnt pointers. */
+        return 0;
     }
-    if (mnt->ns_users > 0) mnt->ns_users--;
-    if (mnt->ns_users > 0) return;   /* a copied namespace still uses it */
+    int users = __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE);
+#ifdef CONFIG_MNTNS_TEST
+    int test_shared_path = strcmp(mnt->path, "/tmp/ns_shared") == 0;
+    if (test_shared_path)
+        printf("MNTNS_TEST: FS_TEARDOWN path=%s users=%d\n", mnt->path, users);
+#endif
+    if (users == 0) {
+        mntns_mount_table_unlock(flags);
+        return 0;
+    }
+    if (users > 1 || mnt->teardown_running) {
+        mntns_mount_table_unlock(flags);
+        return -EBUSY; /* retain the source mount until clones detach */
+    }
+    mnt->teardown_running = 1;
+    mntns_mount_table_unlock(flags);
     vnode_t *root = mnt->root;
+    int ret = 0;
     if (mnt->type == FS_TYPE_FAT32) {
         fat32_unmount(root);
     } else if (mnt->type == FS_TYPE_EXT4) {
-        ext4_unmount(root);
+        ret = ext4_unmount(root);
+        if (ret < 0)
+            goto failed;
     } else if (mnt->type == FS_TYPE_NTFS) {
         ntfs_unmount(root);
     } else if (mnt->type == FS_TYPE_ISOFS) {
@@ -414,18 +430,72 @@ void vfs_mount_fs_teardown(mount_t *mnt) {
     } else if (mnt->type == FS_TYPE_LITTLEFS) {
         littlefs_unmount(root);
     }
+    flags = mntns_mount_table_lock();
+    __atomic_store_n(&mnt->ns_users, 0, __ATOMIC_RELEASE);
+    mntns_mount_table_unlock(flags);
+#ifdef CONFIG_MNTNS_TEST
+    if (test_shared_path)
+        printf("MNTNS_TEST: SOURCE_FS_UNMOUNTED users=0\n");
+#endif
+    return 0;
+
+failed:
+    flags = mntns_mount_table_lock();
+    mnt->teardown_running = 0;
+    mntns_mount_table_unlock(flags);
+    return ret;
 }
 
 /* Drop every hold this namespace's table has, so a namespace going away
  * cannot leak a shared filesystem forever.  Copied entries detach without
  * running the destructor; the source entry's ns_users is decremented when its
  * own namespace unmounts or is torn down. */
-void vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
-    if (!ns) return;
+static int vfs_mount_drop_shared_source(mount_t *mnt)
+{
+    if (!mnt || !mnt->shared_source)
+        return 0;
+    mount_t *source = mnt->shared_source;
+    int old = __atomic_fetch_sub(&source->ns_users, 1, __ATOMIC_ACQ_REL);
+#ifdef CONFIG_MNTNS_TEST
+    if (strcmp(source->path, "/tmp/ns_shared") == 0)
+        printf("MNTNS_TEST: DROP_SOURCE_PIN old=%d now=%d\n", old, old - 1);
+#endif
+    if (old <= 1) {
+        __atomic_add_fetch(&source->ns_users, 1, __ATOMIC_RELAXED);
+        return -EINVAL;
+    }
+    mnt->shared_source = NULL;
+    return 0;
+}
+
+int vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
+    if (!ns) return 0;
+    /* Complete every filesystem destructor before dropping any clone pins.
+     * A later destructor may fail; in that case this namespace and all source
+     * mount objects it points at must remain alive for the retry. */
     for (int i = 0; i < ns->nmounts; i++) {
         mount_t *mnt = ns->mounts[i];
-        if (mnt->ns_users > 0) vfs_mount_fs_teardown(mnt);
+        if (mnt->shared_source)
+            continue;
+        int ret = vfs_mount_fs_teardown(mnt);
+        if (ret < 0)
+            return ret;
     }
+    /* All remaining operations are no-fail reference releases. Explicit
+     * umount only removes an entry from the active table, so include both
+     * active and graveyard entries and keep each pin until final namespace
+     * destruction. */
+    for (int i = 0; i < ns->nmounts; i++) {
+        int ret = vfs_mount_drop_shared_source(ns->mounts[i]);
+        if (ret < 0)
+            return ret;
+    }
+    for (mount_t *mnt = ns->dead_mounts; mnt; mnt = mnt->dead_next) {
+        int ret = vfs_mount_drop_shared_source(mnt);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
 }
 
 /*
@@ -490,14 +560,17 @@ int vfs_umount_flags(const char *path, int flags) {
             if (busy < 0)
                 return busy;
         }
+        int teardown = vfs_mount_fs_teardown(mnt);
+        if (teardown < 0)
+            return teardown;
         if (mnt->mnt_child) {
             for (mount_t *c = mnt->mnt_child; c; c = c->mnt_sibling)
                 vfs_mount_detach_root(c);
         }
         vfs_dcache_invalidate_all();
         vfs_drop_time_meta_mount(mnt);
-        vfs_mount_fs_teardown(mnt);
         vfs_mount_remove(mnt);
+        mntns_retry_pending();
         return 0;
     }
     return -EINVAL;
@@ -529,10 +602,13 @@ int vfs_umount(const char *path) {
         }
 
         if (strcmp(mnt_norm, norm_path) == 0) {
+            int teardown = vfs_mount_fs_teardown(mnt);
+            if (teardown < 0)
+                return teardown;
             vfs_dcache_invalidate_all();
             vfs_drop_time_meta_mount(mnt);
-            vfs_mount_fs_teardown(mnt);
             vfs_mount_remove(mnt);
+            mntns_retry_pending();
             return 0;
         }
     }

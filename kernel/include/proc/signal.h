@@ -98,6 +98,10 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst);
 int  signal_send(int pid, int signum);
 /* Caller must hold a task reference for the duration of this call. */
 int  signal_send_task(void *task, int signum);
+/* Process-directed signal with siginfo to the exact referenced task; never
+ * resolves a PID. Caller holds the task reference through this call. */
+int  signal_send_task_info(void *task, int signum, const void *info,
+                           size_t info_size);
 void signal_notify_child_exit(void *parent, void *child);
 int  signal_send_user(int pid, int signum);
 int  signal_send_info(int pid, int signum, const void *info, size_t info_size);

@@ -101,7 +101,7 @@ LINUX_SYSCALL(sendmsg, 0, sys_sendmsg((int)A(0), (const void *)(uintptr_t)A(1), 
 LINUX_SYSCALL(recvmsg, 0, sys_recvmsg((int)A(0), (void *)(uintptr_t)A(1), (int)A(2)))
 LINUX_SYSCALL(sendmmsg, 0, sys_sendmmsg((int)A(0), (void *)(uintptr_t)A(1), (unsigned)A(2), (int)A(3)))
 LINUX_SYSCALL(recvmmsg, 0, sys_recvmmsg((int)A(0), (void *)(uintptr_t)A(1), (unsigned)A(2), (int)A(3), (void *)(uintptr_t)A(4)))
-LINUX_SYSCALL(recvmmsg_time64, 0, sys_recvmmsg((int)A(0), (void *)(uintptr_t)A(1), (unsigned)A(2), (int)A(3), (void *)(uintptr_t)A(4)))
+LINUX_SYSCALL(recvmmsg_time64, 0, sys_recvmmsg_time64((int)A(0), (void *)(uintptr_t)A(1), (unsigned)A(2), (int)A(3), (void *)(uintptr_t)A(4)))
 LINUX_SYSCALL(mkdirat, 0, sys_mkdirat((int)A(0), (const char *)(uintptr_t)A(1), (int)A(2)))
 LINUX_SYSCALL(unlinkat, 0, sys_unlinkat((int)A(0), (const char *)(uintptr_t)A(1), (int)A(2)))
 LINUX_SYSCALL(renameat2, 0, sys_renameat2((int)A(0), (const char *)(uintptr_t)A(1), (int)A(2), (const char *)(uintptr_t)A(3), (int)A(4)))

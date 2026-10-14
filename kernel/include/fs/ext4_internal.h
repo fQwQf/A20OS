@@ -112,7 +112,7 @@ int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
                     size_t len);
 int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) ;
 int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) ;
-void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) ;
+int ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) ;
 int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
                       uint32_t start) ;
 int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) ;
@@ -121,9 +121,9 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) ;
  * for callers that immediately overwrite every returned block in full. */
 size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
                                        uint64_t *first_phys) ;
-void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) ;
+int ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) ;
 uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) ;
-void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) ;
+int ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) ;
 uint64_t ext4_extent_leaf_search(ext4_extent_t *ex, int cnt, uint32_t lblk) ;
 uint64_t ext4_extent_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;
 int ext4_extent_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
@@ -137,7 +137,13 @@ void ext4_inode_sync_i_blocks(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
 
 /* Recompute the superblock's filesystem-wide free block / free inode totals
  * from the group descriptors and write them back, checksum included. */
-void ext4_superblock_sync_counts(ext4_sb_info_t *sb);
+int ext4_superblock_sync_counts(ext4_sb_info_t *sb);
+int ext4_superblock_set_last_orphan(ext4_sb_info_t *sb, uint32_t ino);
+int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                ext4_inode_t *inode);
+int ext4_block_truncate_at_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode, uint32_t lblk);
+int ext4_orphan_recover(ext4_sb_info_t *sb);
 
 /* Add (delta > 0) or remove (delta < 0) a directory from the used-directory
  * count of the group that owns the inode. */
@@ -234,7 +240,7 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
                                  int type, vnode_t *parent) ;
 vnode_t *ext4_mount(bcache_t *bc) ;
 vnode_t *ext4_mount_flags(bcache_t *bc, int flags) ;
-void ext4_unmount(vnode_t *root) ;
+int ext4_unmount(vnode_t *root) ;
 vfile_t *ext4_open_vnode(vnode_t *vn, int flags) ;
 
 extern vnode_ops_t g_ext4_vnode_ops;

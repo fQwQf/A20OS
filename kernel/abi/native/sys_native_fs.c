@@ -875,13 +875,36 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     a20_fs_block_io_args_t *uargs = (a20_fs_block_io_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_fs_block_io_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
+    int validate = a20_validate_struct_header(uargs, sizeof(kargs), 2);
+    if (validate < 0) return validate;
+    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
 
-    /* count == 0 is the capacity query: buf receives a u64 holding the
-     * sector count */
+    /* count == 0/write == 2 is a flush request. It needs no user buffer;
+     * devices without an explicit durability operation report unsupported. */
     if (kargs.count == 0) {
+        if (kargs.write == 2 && kargs.buf == 0)
+            return a20_native_vfs_result(
+                uxfs_block_flush(cur, (int)kargs.block_index));
+        /* UXFS extension capability query. The output is 0/1 and lets
+         * optional-flush clients leave their callback NULL when absent. */
+        if (kargs.version == 2 && kargs.write == 2 && kargs.buf != 0) {
+            int supported = uxfs_block_flush_supported(
+                cur, (int)kargs.block_index);
+            if (supported < 0)
+                return a20_native_vfs_result(supported);
+            /* Fixed-width magic response prevents a legacy u64 capacity
+             * value from being mistaken for this capability. */
+            uint64_t out = 0x5546585300000000ull | (uint32_t)supported;
+            if (copy_to_user((void *)(uintptr_t)kargs.buf, &out,
+                             sizeof(out)) < 0)
+                return -A20_ERR_FAULT;
+            return A20_OK;
+        }
+        /* Preserve the v1 capacity query for every non-flush write value:
+         * older callers treated this field as a boolean and ignored it here. */
         if (!kargs.buf)
             return -A20_ERR_INVALID_ARGUMENT;
         uint64_t sectors = 0;

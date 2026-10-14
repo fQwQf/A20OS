@@ -38,6 +38,7 @@
 #define JBD2_FEATURE_COMPAT_CHECKSUM  0x1U
 #define JBD2_FEATURE_INCOMPAT_REVOKE  0x1U
 #define JBD2_FEATURE_INCOMPAT_64BIT   0x2U
+#define JBD2_FEATURE_INCOMPAT_CSUM_V2 0x8U
 #define JBD2_FEATURE_INCOMPAT_CSUM_V3 0x10U
 #define JBD2_SUPPORTED_INCOMPAT       (JBD2_FEATURE_INCOMPAT_REVOKE | \
                                        JBD2_FEATURE_INCOMPAT_64BIT | \
@@ -51,6 +52,14 @@
 #define JBD2_SUPERBLOCK_BYTES         1024U
 #define JBD2_SUPERBLOCK_CHECKSUM_OFF  252U
 #define JBD2_MAX_JOURNAL_BLOCKS       65536U
+
+#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
+extern int a20_jbd2_allow_clean_legacy_readonly(
+    int read_only, uint32_t compat, uint32_t incompat, uint32_t ro_compat,
+    uint32_t checksum_type, uint32_t block_size, uint32_t maxlen,
+    uint32_t first, uint32_t start, uint32_t fs_block_size,
+    uint64_t inode_blocks);
+#endif
 /* s_sequence / s_start / s_head inside the journal superblock. */
 #define JBD2_SB_SEQUENCE_OFF          24U
 #define JBD2_SB_START_OFF             28U
@@ -59,6 +68,7 @@
  * checksum, and 16 bytes of UUID per tag.  Capped below what that allows so a
  * transaction can never come within one block of not fitting. */
 #define JBD2_MAX_TAGS_PER_DESCRIPTOR  240U
+#define JBD2_MAX_RECORD_ACTIONS       255U
 
 #define EXT4_SUPERBLOCK_CHECKSUM_OFF  1020U
 
@@ -93,21 +103,39 @@ typedef struct jbd2 {
     uint8_t uuid[16];
     uint8_t *meta;
     uint8_t *data;
+    void *record_scratch;
     jbd2_revoke_entry_t *revokes;
     uint32_t revoke_count;
     uint32_t revoke_capacity;
 } jbd2_t;
+
+#ifdef CONFIG_UFSD_RUST_JBD2_RECORD
+_Static_assert(sizeof(jbd2_record_action_t) == 16,
+               "Rust JBD2 action ABI layout changed");
+extern int a20_jbd2_parse_descriptor(const uint8_t *bytes, size_t len,
+        uint32_t has_64bit, uint64_t filesystem_blocks,
+        jbd2_record_action_t *output, size_t capacity, size_t *out_count);
+extern int a20_jbd2_parse_revoke(const uint8_t *bytes, size_t len,
+        size_t record_bytes, uint64_t filesystem_blocks, uint64_t *output,
+        size_t capacity, size_t *out_count);
+#endif
 
 /* ---- writer state ----------------------------------------------------- */
 
 struct ext4_journal {
     jbd2_t     j;
     mutex_t    lock;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    /* Rust owns the transaction block set, phase, and allocation lifetime. */
+    void      *txn;
+#else
     /* Physical filesystem blocks covered by the open transaction, in the
      * order they were first recorded. */
     uint64_t  *tx;
     uint32_t   tx_count;
     uint32_t   tx_capacity;
+    int        txn_faulted;
+#endif
     /* True once EXT4_FEATURE_INCOMPAT_RECOVER has been written and flushed
      * for this dirty period.  The on-disk flag is what makes a crash between
      * the commit block and the checkpoint replayable, so it is set before the
@@ -126,6 +154,63 @@ struct ext4_journal {
 
 static uint32_t crc32c_table[256];
 static int crc32c_table_ready;
+
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+extern void *a20_jbd2_txn_new(uint32_t capacity);
+extern void a20_jbd2_txn_free(void *txn);
+extern int a20_jbd2_txn_record(void *txn, uint64_t block);
+extern uint32_t a20_jbd2_txn_count(const void *txn);
+extern int a20_jbd2_txn_block(const void *txn, uint32_t index, uint64_t *out);
+extern int a20_jbd2_txn_clear(void *txn);
+extern uint32_t a20_jbd2_txn_phase(const void *txn);
+extern int a20_jbd2_txn_start_commit(void *txn);
+extern int a20_jbd2_txn_mark_committed(void *txn);
+extern int a20_jbd2_txn_mark_checkpointed(void *txn);
+extern int a20_jbd2_txn_mark_log_cleared(void *txn);
+extern int a20_jbd2_txn_poison(void *txn);
+#define JBD2_TXN_COLLECTING 0U
+#define JBD2_TXN_WRITING_LOG 1U
+#define JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT 2U
+#define JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR 3U
+#define JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR 4U
+#define JBD2_TXN_FAULTED 5U
+
+static uint32_t jbd2_txn_count(const ext4_journal_t *ej)
+{ return a20_jbd2_txn_count(ej->txn); }
+
+static int jbd2_txn_block(const ext4_journal_t *ej, uint32_t i, uint64_t *out)
+{ return a20_jbd2_txn_block(ej->txn, i, out); }
+
+static int jbd2_txn_clear(ext4_journal_t *ej)
+{ return a20_jbd2_txn_clear(ej->txn); }
+
+static uint32_t jbd2_txn_phase(const ext4_journal_t *ej)
+{ return a20_jbd2_txn_phase(ej->txn); }
+#else
+static uint32_t jbd2_txn_count(const ext4_journal_t *ej)
+{ return ej->tx_count; }
+
+#define JBD2_TXN_COLLECTING 0U
+#define JBD2_TXN_WRITING_LOG 1U
+#define JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT 2U
+#define JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR 3U
+#define JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR 4U
+#define JBD2_TXN_FAULTED 5U
+
+static int jbd2_txn_block(const ext4_journal_t *ej, uint32_t i, uint64_t *out)
+{
+    if (i >= ej->tx_count || !out) return -EINVAL;
+    *out = ej->tx[i];
+    return 0;
+}
+
+static int jbd2_txn_clear(ext4_journal_t *ej)
+{ ej->tx_count = 0; return 0; }
+
+static uint32_t jbd2_txn_phase(const ext4_journal_t *ej)
+{ return ej->txn_faulted ? JBD2_TXN_FAULTED :
+         (ej->tx_count ? JBD2_TXN_WRITING_LOG : JBD2_TXN_COLLECTING); }
+#endif
 
 static uint32_t get_be32(const void *ptr)
 {
@@ -302,8 +387,33 @@ static int jbd2_process_revoke(jbd2_t *j, uint8_t *block,
 {
     if (!jbd2_metadata_checksum_ok(j, block))
         return -EIO;
-    uint32_t count = get_be32(block + 12);
     uint32_t record_bytes = (j->incompat & JBD2_FEATURE_INCOMPAT_64BIT) ? 8U : 4U;
+#ifdef CONFIG_UFSD_RUST_JBD2_RECORD
+    size_t records = 0;
+    uint64_t *targets = (uint64_t *)j->record_scratch;
+    int parsed = a20_jbd2_parse_revoke(
+        block, j->block_size - JBD2_CHECKSUM_TAIL_BYTES, record_bytes,
+        j->fs->blocks_count, targets, j->block_size / 4U, &records);
+    if (parsed < 0)
+        return parsed;
+    if (j->scan_revoke_records > j->maxlen ||
+        (pass == JBD2_PASS_SCAN &&
+         records > j->maxlen - j->scan_revoke_records))
+        return -EINVAL;
+    if (pass == JBD2_PASS_SCAN) {
+        j->scan_revoke_records += (uint32_t)records;
+        return 0;
+    }
+    if (pass != JBD2_PASS_REVOKE)
+        return 0;
+    for (size_t i = 0; i < records; i++) {
+        int ret = jbd2_set_revoke(j, targets[i], sequence);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+#else
+    uint32_t count = get_be32(block + 12);
     if (count < JBD2_REVOKE_HEADER_BYTES ||
         count > j->block_size - JBD2_CHECKSUM_TAIL_BYTES ||
         (count - JBD2_REVOKE_HEADER_BYTES) % record_bytes != 0)
@@ -328,6 +438,7 @@ static int jbd2_process_revoke(jbd2_t *j, uint8_t *block,
             return ret;
     }
     return 0;
+#endif
 }
 
 static int jbd2_process_descriptor(jbd2_t *j, uint8_t *descriptor,
@@ -338,6 +449,50 @@ static int jbd2_process_descriptor(jbd2_t *j, uint8_t *descriptor,
     if (!jbd2_metadata_checksum_ok(j, descriptor))
         return -EIO;
     uint32_t limit = j->block_size - JBD2_CHECKSUM_TAIL_BYTES;
+#ifdef CONFIG_UFSD_RUST_JBD2_RECORD
+    jbd2_record_action_t *actions = (jbd2_record_action_t *)j->record_scratch;
+    size_t action_count = 0;
+    int parsed = a20_jbd2_parse_descriptor(
+        descriptor, limit, !!(j->incompat & JBD2_FEATURE_INCOMPAT_64BIT),
+        j->fs->blocks_count, actions, JBD2_MAX_RECORD_ACTIONS,
+        &action_count);
+    if (parsed < 0)
+        return parsed;
+    for (size_t i = 0; i < action_count; i++) {
+        uint64_t target = actions[i].target;
+        uint32_t flags = actions[i].flags;
+        uint32_t checksum = actions[i].checksum;
+        /* DELETED still consumes and checks its corresponding log data block:
+         * Linux and e2fsprogs recovery advance once per tag, without a
+         * JBD2_FLAG_DELETED branch. Treating it as a zero-length tag shifts
+         * every following action and rejects valid committed transactions. */
+        if (*consumed >= j->maxlen)
+            return -EINVAL;
+        uint32_t data_log_block = *log_block;
+        *log_block = jbd2_advance(j, *log_block);
+        (*consumed)++;
+        if (pass == JBD2_PASS_SCAN || pass == JBD2_PASS_REPLAY) {
+            int ret = jbd2_read_block(j, data_log_block, j->data);
+            if (ret < 0)
+                return ret;
+            if (!jbd2_data_checksum_ok(j, j->data, sequence, checksum))
+                return -EIO;
+        }
+        if (pass == JBD2_PASS_REPLAY) {
+            if (jbd2_is_revoked(j, target, sequence)) {
+                j->revoke_hits++;
+            } else {
+                if (flags & JBD2_FLAG_ESCAPE)
+                    put_be32(j->data, JBD2_MAGIC_NUMBER);
+                if (bcache_write_bytes(j->fs->bc, target * j->block_size,
+                                       j->data, j->block_size) < 0)
+                    return -EIO;
+                j->replayed_blocks++;
+            }
+        }
+    }
+    return 0;
+#else
     uint32_t offset = JBD2_HEADER_BYTES;
     for (;;) {
         if (offset + JBD2_TAG3_BYTES > limit)
@@ -390,6 +545,7 @@ static int jbd2_process_descriptor(jbd2_t *j, uint8_t *descriptor,
         if (flags & JBD2_FLAG_LAST_TAG)
             return 0;
     }
+#endif
 }
 
 /*
@@ -490,13 +646,19 @@ static int jbd2_load_superblock(jbd2_t *j)
     if (ret < 0)
         return ret;
     if (get_be32(j->meta) != JBD2_MAGIC_NUMBER ||
-        get_be32(j->meta + 4) != JBD2_SUPERBLOCK_V2 ||
-        !jbd2_superblock_checksum_ok(j->meta))
+        get_be32(j->meta + 4) != JBD2_SUPERBLOCK_V2)
         return -EINVAL;
 
     uint32_t compat = get_be32(j->meta + 36);
     j->incompat = get_be32(j->meta + 40);
     uint32_t ro_compat = get_be32(j->meta + 44);
+    /* The journal-superblock CRC is defined for csum-v2/v3. Legacy v1
+     * checksums live in transaction commit records, so this field cannot
+     * reject its explicit clean/read-only fallback. */
+    if ((j->incompat & (JBD2_FEATURE_INCOMPAT_CSUM_V2 |
+                        JBD2_FEATURE_INCOMPAT_CSUM_V3)) &&
+        !jbd2_superblock_checksum_ok(j->meta))
+        return -EINVAL;
     if (compat & JBD2_FEATURE_COMPAT_CHECKSUM)
         return -EOPNOTSUPP;
     if (ro_compat || (j->incompat & ~JBD2_SUPPORTED_INCOMPAT) ||
@@ -627,7 +789,14 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
     j.maxlen = (uint32_t)journal_blocks;
     j.meta = (uint8_t *)kmalloc(j.block_size);
     j.data = (uint8_t *)kmalloc(j.block_size);
-    if (!j.meta || !j.data) {
+#ifdef CONFIG_UFSD_RUST_JBD2_RECORD
+    j.record_scratch = kmalloc((size_t)j.block_size * 2U);
+#endif
+    if (!j.meta || !j.data
+#ifdef CONFIG_UFSD_RUST_JBD2_RECORD
+        || !j.record_scratch
+#endif
+    ) {
         ret = -ENOMEM;
         goto out;
     }
@@ -717,6 +886,8 @@ out:
         printf("[EXT4/JBD2] recovery failed: %d\n", ret);
     if (j.revokes)
         kfree(j.revokes);
+    if (j.record_scratch)
+        kfree(j.record_scratch);
     if (j.data)
         kfree(j.data);
     if (j.meta)
@@ -836,7 +1007,7 @@ static void jbd2_crash_point(ext4_journal_t *ej, const char *point)
         return;
     printf("[EXT4/JBD2] crash injection at %s: halting\n", point);
     printf("[EXT4/JBD2] CRASH-INJECT %s blocks=%u sequence=%u\n", point,
-           ej->tx_count, ej->j.sequence);
+           jbd2_txn_count(ej), ej->j.sequence);
     /* panic() halts without touching the block cache or syncing a filesystem,
      * so the image is left exactly as the last successful flush made it. */
     panic("a20.journal_crash=%s", point);
@@ -903,6 +1074,9 @@ static int jbd2_metadata_image(ext4_journal_t *ej, uint64_t block, uint8_t *out)
 
 static int jbd2_record_block(ext4_journal_t *ej, uint64_t block)
 {
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    return a20_jbd2_txn_record(ej->txn, block);
+#else
     for (uint32_t i = 0; i < ej->tx_count; i++)
         if (ej->tx[i] == block)
             return 0;
@@ -910,6 +1084,7 @@ static int jbd2_record_block(ext4_journal_t *ej, uint64_t block)
         return -ENOSPC;
     ej->tx[ej->tx_count++] = block;
     return 0;
+#endif
 }
 
 int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
@@ -918,8 +1093,32 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
     ext4_journal_t *ej = fs ? fs->journal : NULL;
     if (!ej || !ej->enabled)
         return bcache_write_bytes(fs->bc, byte_off, buf, len);
+    if (len == 0)
+        return 0;
+    if (byte_off > ~(uint64_t)0 - (uint64_t)len)
+        return -EINVAL;
 
     mutex_lock(&ej->lock);
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    /* A failed commit owns the pending metadata image. Freeze subsequent
+     * mutations until its retry reaches the empty-log state. */
+    if (jbd2_txn_phase(ej) != JBD2_TXN_COLLECTING) {
+        mutex_unlock(&ej->lock);
+        return -EIO;
+    }
+#endif
+#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
+    /* The Rust bcache preserves the legacy C callback's write-through
+     * contract for ordinary writes. Journal metadata must be held before the
+     * first cache mutation, so neither a concurrent eviction nor generic
+     * writeback can put it home before the descriptor/commit record. */
+    if (len != 0 && byte_off <= ~(uint64_t)0 - (uint64_t)len) {
+        uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
+        uint64_t last_page = (byte_off + len - 1) / PCACHE_PAGE_SIZE;
+        for (uint64_t page = first_page; page <= last_page; page++)
+            bcache_hold_page(fs->bc, page);
+    }
+#endif
     int ret = bcache_write_bytes(fs->bc, byte_off, buf, len);
     if (ret == 0) {
         /* Hold and record every filesystem block the write touched.  Doing
@@ -939,11 +1138,40 @@ int ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
              * shrunk: a commit missing a block would replay a filesystem whose
              * inode and bitmap disagree. */
             printf("[EXT4/JBD2] transaction overflow at %llu blocks; "
-                   "commit what fits\n", (unsigned long long)byte_off);
-            ej->tx_count = 0;
-            bcache_release_holds(fs->bc);
+                   "refusing further writes; retained held pages\n",
+                   (unsigned long long)byte_off);
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+            (void)a20_jbd2_txn_poison(ej->txn);
+#else
+            ej->txn_faulted = 1;
+#endif
         }
+    } else {
+        /* A failed metadata mutation may have left earlier blocks from the
+         * same filesystem operation dirty. Do not let a later commit claim a
+         * partial transaction complete. */
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+        (void)a20_jbd2_txn_poison(ej->txn);
+#else
+        ej->txn_faulted = 1;
+#endif
     }
+    mutex_unlock(&ej->lock);
+    return ret;
+}
+
+int ext4_journal_poison(ext4_sb_info_t *fs)
+{
+    ext4_journal_t *ej = fs ? fs->journal : NULL;
+    if (!ej || !ej->enabled)
+        return -EOPNOTSUPP;
+    mutex_lock(&ej->lock);
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    int ret = a20_jbd2_txn_poison(ej->txn);
+#else
+    ej->txn_faulted = 1;
+    int ret = 0;
+#endif
     mutex_unlock(&ej->lock);
     return ret;
 }
@@ -958,12 +1186,15 @@ static int jbd2_write_descriptor(ext4_journal_t *ej, uint32_t logical)
     put_be32(block + 8, j->sequence);
 
     uint32_t offset = JBD2_HEADER_BYTES;
-    for (uint32_t i = 0; i < ej->tx_count; i++) {
-        uint64_t target = ej->tx[i];
+    uint32_t tx_count = jbd2_txn_count(ej);
+    for (uint32_t i = 0; i < tx_count; i++) {
+        uint64_t target;
+        if (jbd2_txn_block(ej, i, &target) < 0)
+            return -EIO;
         if (target >= j->fs->blocks_count)
             return -EINVAL;
         uint32_t flags = 0;
-        if (i == ej->tx_count - 1)
+        if (i == tx_count - 1)
             flags |= JBD2_FLAG_LAST_TAG;
         /* tag3: blocknr_lo, flags, blocknr_hi, checksum.  Every tag carries
          * the full UUID rather than JBD2_FLAG_SAME_UUID: one 16-byte copy per
@@ -982,8 +1213,11 @@ static int jbd2_write_descriptor(ext4_journal_t *ej, uint32_t logical)
      * and rewrite the tags' checksum field in place.  The descriptor's own
      * checksum comes last, because those rewrites change bytes it covers. */
     uint32_t tag_offset = JBD2_HEADER_BYTES;
-    for (uint32_t i = 0; i < ej->tx_count; i++) {
-        int ret = jbd2_metadata_image(ej, ej->tx[i], j->data);
+    for (uint32_t i = 0; i < tx_count; i++) {
+        uint64_t target;
+        if (jbd2_txn_block(ej, i, &target) < 0)
+            return -EIO;
+        int ret = jbd2_metadata_image(ej, target, j->data);
         if (ret < 0)
             return ret;
         put_be32(block + tag_offset + 12,
@@ -998,8 +1232,12 @@ static int jbd2_write_transaction_data(ext4_journal_t *ej, uint32_t first_log)
 {
     jbd2_t *j = &ej->j;
     uint32_t logical = first_log;
-    for (uint32_t i = 0; i < ej->tx_count; i++) {
-        int ret = jbd2_metadata_image(ej, ej->tx[i], j->data);
+    uint32_t tx_count = jbd2_txn_count(ej);
+    for (uint32_t i = 0; i < tx_count; i++) {
+        uint64_t target;
+        if (jbd2_txn_block(ej, i, &target) < 0)
+            return -EIO;
+        int ret = jbd2_metadata_image(ej, target, j->data);
         if (ret < 0)
             return ret;
         ret = jbd2_direct_write(j, logical, j->data);
@@ -1094,9 +1332,14 @@ int ext4_journal_open(ext4_sb_info_t *fs, const void *disk_sb_ptr)
     memset(ej, 0, sizeof(*ej));
     mutex_init(&ej->lock);
     ej->j.fs = fs;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    ej->txn = a20_jbd2_txn_new(JBD2_MAX_TAGS_PER_DESCRIPTOR);
+    if (!ej->txn) {
+#else
     ej->tx_capacity = JBD2_MAX_TAGS_PER_DESCRIPTOR;
     ej->tx = (uint64_t *)kmalloc(sizeof(uint64_t) * ej->tx_capacity);
     if (!ej->tx) {
+#endif
         kfree(ej);
         return -ENOMEM;
     }
@@ -1160,32 +1403,45 @@ fail:
         kfree(ej->j.meta);
     if (ej->j.data)
         kfree(ej->j.data);
+ #ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    if (ej->txn)
+        a20_jbd2_txn_free(ej->txn);
+ #else
     if (ej->tx)
         kfree(ej->tx);
+ #endif
     kfree(ej);
     return ret;
 }
 
-void ext4_journal_close(ext4_sb_info_t *fs)
+int ext4_journal_close(ext4_sb_info_t *fs)
 {
     ext4_journal_t *ej = fs ? fs->journal : NULL;
     if (!ej)
-        return;
-    (void)ext4_journal_commit(fs);
+        return 0;
+    int ret = ext4_journal_commit(fs);
+    if (ret < 0)
+        return ret;
     fs->journal = NULL;
     if (ej->j.meta)
         kfree(ej->j.meta);
     if (ej->j.data)
         kfree(ej->j.data);
+ #ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    if (ej->txn)
+        a20_jbd2_txn_free(ej->txn);
+ #else
     if (ej->tx)
         kfree(ej->tx);
+ #endif
     kfree(ej);
+    return 0;
 }
 
 int ext4_journal_pending(const ext4_sb_info_t *fs)
 {
     const ext4_journal_t *ej = fs ? fs->journal : NULL;
-    return ej && ej->enabled ? (int)ej->tx_count : 0;
+    return ej && ej->enabled ? (int)jbd2_txn_count(ej) : 0;
 }
 
 void ext4_journal_report(ext4_sb_info_t *fs)
@@ -1198,7 +1454,7 @@ void ext4_journal_report(ext4_sb_info_t *fs)
     printf("[EXT4/JBD2] commits=%llu blocks=%llu pending=%u head=%u "
            "sequence=%u recover_flag=%d\n",
            (unsigned long long)ej->commits,
-           (unsigned long long)ej->committed_blocks, ej->tx_count,
+           (unsigned long long)ej->committed_blocks, jbd2_txn_count(ej),
            ej->head, ej->j.sequence, ej->recover_flag);
 }
 
@@ -1209,7 +1465,8 @@ void ext4_journal_report(ext4_sb_info_t *fs)
  * leave a non-empty log without it.  Reading the journal superblock is the
  * authoritative answer, and the cost is one block read on a path that already
  * reads it during recovery. */
-int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
+int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
+                             int read_only)
 {
     if (!fs || !disk_sb ||
         !(disk_sb->s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) ||
@@ -1219,22 +1476,48 @@ int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
     jbd2_t j;
     memset(&j, 0, sizeof(j));
     j.fs = fs;
-    if (ext4_read_inode(fs, disk_sb->s_journal_inum, &j.journal_inode) < 0)
-        return 0;
+    int ret = ext4_read_inode(fs, disk_sb->s_journal_inum, &j.journal_inode);
+    if (ret < 0)
+        return ret;
     j.block_size = fs->block_size;
     uint64_t journal_blocks = ext4_inode_size(&j.journal_inode) /
                               j.block_size;
     if (journal_blocks < 2 || journal_blocks > JBD2_MAX_JOURNAL_BLOCKS)
-        return 0;
+        return -EINVAL;
     j.maxlen = (uint32_t)journal_blocks;
     j.meta = (uint8_t *)kmalloc(j.block_size);
     if (!j.meta)
-        return 0;
-    int pending = 0;
+        return -ENOMEM;
     /* A journal we cannot read is not a journal we can replay, but it is
      * also not proof of an empty log: report it as pending and let the
      * recovery attempt produce the diagnostic. */
-    pending = jbd2_load_superblock(&j) < 0 ? 1 : (j.start != 0);
+    ret = jbd2_load_superblock(&j);
+    if (ret == -EOPNOTSUPP && read_only) {
+#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
+        uint32_t compat = get_be32(j.meta + 36);
+        uint32_t incompat = get_be32(j.meta + 40);
+        uint32_t ro_compat = get_be32(j.meta + 44);
+        uint32_t block_size = get_be32(j.meta + 12);
+        uint32_t maxlen = get_be32(j.meta + 16);
+        uint32_t first = get_be32(j.meta + 20);
+        uint32_t start = get_be32(j.meta + 28);
+        uint64_t inode_blocks = ext4_inode_size(&j.journal_inode) /
+                                fs->block_size;
+        int checksum_ok = !(incompat & (JBD2_FEATURE_INCOMPAT_CSUM_V2 |
+                                        JBD2_FEATURE_INCOMPAT_CSUM_V3)) ||
+                          jbd2_superblock_checksum_ok(j.meta);
+        if (checksum_ok && a20_jbd2_allow_clean_legacy_readonly(
+                1, compat, incompat, ro_compat, j.meta[80], block_size,
+                maxlen, first, start, fs->block_size, inode_blocks) == 1) {
+            printf("[EXT4/JBD2] clean legacy checksum journal; explicit read-only downgrade\n");
+            kfree(j.meta);
+            return EXT4_JOURNAL_READONLY_LEGACY;
+        }
+#endif
+        kfree(j.meta);
+        return -EOPNOTSUPP;
+    }
+    int pending = ret < 0 ? 1 : (j.start != 0);
     kfree(j.meta);
     return pending;
 }
@@ -1248,11 +1531,18 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
     jbd2_t *j = &ej->j;
     ext4_superblock_t disk_sb;
 
-    if (ej->tx_count == 0 && !ej->recover_flag) {
+    uint32_t tx_count = jbd2_txn_count(ej);
+    uint32_t txn_phase = jbd2_txn_phase(ej);
+    if (txn_phase == JBD2_TXN_FAULTED) {
+        mutex_unlock(&ej->lock);
+        return -EIO;
+    }
+    if (tx_count == 0 && txn_phase == JBD2_TXN_COLLECTING &&
+        !ej->recover_flag) {
         mutex_unlock(&ej->lock);
         return 0;
     }
-    if (ej->tx_count == 0) {
+    if (tx_count == 0 && txn_phase == JBD2_TXN_COLLECTING) {
         /* Nothing to write, but a previous commit raised the flag and did not
          * get to lower it.  Finish that now rather than leaving the next
          * mount a replay to do. */
@@ -1267,7 +1557,19 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
         return ret;
     }
 
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    int start = a20_jbd2_txn_start_commit(ej->txn);
+    if (start < 0) {
+        mutex_unlock(&ej->lock);
+        return start;
+    }
+    txn_phase = jbd2_txn_phase(ej);
+#endif
+
     int ret;
+    uint32_t committed_sequence = j->sequence;
+    uint32_t blocks = tx_count;
+    if (txn_phase == JBD2_TXN_WRITING_LOG) {
     /* 1. Ordered mode: the data a transaction's metadata refers to is forced
      *    out first.  Held pages are skipped by the block cache, so what
      *    lands here is data (and any page no transaction covers). */
@@ -1310,7 +1612,7 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
      * the pointer moves by the transaction's size -- advancing by one would
      * land the commit on top of a data block and the next mount would read
      * its own commit block back as log data and discard the transaction. */
-    log = jbd2_advance_n(j, log, ej->tx_count);
+    log = jbd2_advance_n(j, log, tx_count);
     jbd2_crash_point(ej, "post-journal");
 
     /* 4. Point the superblock at the transaction, then make it committed.
@@ -1329,43 +1631,73 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
     ret = jbd2_direct_flush(j);
     if (ret < 0)
         goto out;
-    uint32_t committed_sequence = j->sequence;
     uint32_t new_head = jbd2_advance(j, log);  /* commit block consumed */
-    uint32_t blocks = ej->tx_count;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+    ret = a20_jbd2_txn_mark_committed(ej->txn);
+    if (ret < 0)
+        goto out;
+#endif
     ej->j.sequence++;
     ej->head = new_head;
     ej->commits++;
     ej->committed_blocks += blocks;
     jbd2_crash_point(ej, "post-commit");
 
+    txn_phase = JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT;
+    }
+
     /* 5. Checkpoint.  The transaction is durable in the log, so the metadata
      *    may now reach its home location; the hold exists only to enforce the
      *    order above, and the checkpoint replays into the same bytes anyway. */
-    bcache_release_holds(fs->bc);
-    ej->tx_count = 0;
-    ret = bcache_sync_held(fs->bc);
-    if (ret < 0)
-        goto out;
-    jbd2_crash_point(ej, "post-checkpoint");
+    if (txn_phase == JBD2_TXN_COMMITTED_NEEDS_CHECKPOINT) {
+        bcache_release_holds(fs->bc);
+        ret = bcache_sync_held(fs->bc);
+        if (ret < 0)
+            goto out;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+        ret = a20_jbd2_txn_mark_checkpointed(ej->txn);
+        if (ret < 0)
+            goto out;
+#endif
+        txn_phase = JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR;
+        jbd2_crash_point(ej, "post-checkpoint");
+    }
 
     /* 6. Resolve the transaction: the log is empty again and the recover flag
      *    can come down. */
-    ret = jbd2_write_journal_superblock(ej, 0, j->sequence, ej->head);
-    if (ret < 0)
-        goto out;
-    ret = jbd2_direct_flush(j);
-    if (ret < 0)
-        goto out;
-    ret = bcache_read_bytes(fs->bc, 1024, &disk_sb, sizeof(disk_sb));
-    if (ret < 0)
-        goto out;
-    ret = ext4_set_recover_feature(j, &disk_sb, 0);
-    if (ret < 0)
-        goto out;
-    ret = bcache_sync_checked(fs->bc);
-    if (ret < 0)
-        goto out;
-    ej->recover_flag = 0;
+    if (txn_phase == JBD2_TXN_CHECKPOINTED_NEEDS_LOG_CLEAR) {
+        ret = jbd2_write_journal_superblock(ej, 0, j->sequence, ej->head);
+        if (ret < 0)
+            goto out;
+        ret = jbd2_direct_flush(j);
+        if (ret < 0)
+            goto out;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+        ret = a20_jbd2_txn_mark_log_cleared(ej->txn);
+        if (ret < 0)
+            goto out;
+#endif
+        txn_phase = JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR;
+    }
+    if (txn_phase == JBD2_TXN_LOG_CLEARED_NEEDS_RECOVER_CLEAR) {
+        ret = bcache_read_bytes(fs->bc, 1024, &disk_sb, sizeof(disk_sb));
+        if (ret < 0)
+            goto out;
+        ret = ext4_set_recover_feature(j, &disk_sb, 0);
+        if (ret < 0)
+            goto out;
+        ret = bcache_sync_checked(fs->bc);
+        if (ret < 0)
+            goto out;
+        ej->recover_flag = 0;
+#ifdef CONFIG_UFSD_RUST_JBD2_TXN
+        ret = jbd2_txn_clear(ej);
+        if (ret < 0)
+            goto out;
+#else
+        (void)jbd2_txn_clear(ej);
+#endif
+    }
     printf("[EXT4/JBD2] commit %u: %u metadata blocks, sequence %u->%u, "
            "head %u\n", (unsigned)ej->commits, blocks, committed_sequence,
            j->sequence, ej->head);

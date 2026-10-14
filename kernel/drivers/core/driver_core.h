@@ -211,6 +211,12 @@ typedef struct bus_type {
  * handlers or recursively from lifecycle callbacks.
  */
 void driver_core_init(void);
+#ifdef CONFIG_DRIVER_REGISTRY_RUST
+typedef void *(*driver_registry_grow_fn)(void *old, size_t bytes);
+int a20_driver_registry_insert(void **slots, int *count, int *capacity,
+                               void *item, driver_registry_grow_fn grow);
+int a20_driver_registry_remove(void **slots, int *count, void *item);
+#endif
 /* Format registered drivers for /proc/drivers. */
 int  driver_core_list_drivers(char *buf, size_t sz);
 int  driver_register(driver_t *drv);

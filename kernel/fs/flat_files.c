@@ -144,10 +144,14 @@ int vfs_vfile_stat(vfile_t *vf, kstat_t *out) {
     out->st_blocks = (out->st_size + 511) / 512;
     return 0;
 }
-void vfs_finalize_closed_vfile(vfile_t *vf) {
+int vfs_finalize_closed_vfile(vfile_t *vf) {
+    if (!vf)
+        return 0;
+    int close_error = 0;
     if (vf->ops && vf->ops->close)
-        vf->ops->close(vf);
+        close_error = vf->ops->close(vf);
     kfree(vf->vnode);
     vfile_free(vf);
+    return close_error;
 }
 #endif

@@ -1,4 +1,6 @@
 #include "ipc/timerfd.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
 
 #include "core/poll.h"
 #include "core/consts.h"
@@ -26,9 +28,38 @@ typedef struct {
     uint64_t cancel_gen;
 } timerfd_t;
 
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+uint64_t a20_timerfd_timespec_to_ticks_rust(uint64_t sec, uint64_t nsec,
+                                             uint64_t ticks_per_sec);
+void a20_timerfd_remaining_rust(uint64_t expire_tick, uint64_t now,
+                                uint64_t ticks_per_sec, uint64_t *sec_out,
+                                uint64_t *nsec_out);
+uint64_t a20_timerfd_consume_expirations_rust(uint64_t now,
+                                              uint64_t *expire_tick,
+                                              uint64_t interval_ticks,
+                                              int *armed);
+uint64_t a20_timerfd_absolute_deadline_rust(uint64_t now_sec,
+                                            uint64_t now_nsec,
+                                            uint64_t absolute_sec,
+                                            uint64_t absolute_nsec,
+                                            uint64_t now_tick,
+                                            uint64_t ticks_per_sec);
+#endif
+
 static uint64_t timerfd_timespec_to_ticks(uint64_t sec, uint64_t nsec)
 {
-    return sec * TICKS_PER_SEC + (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    return a20_timerfd_timespec_to_ticks_rust(sec, nsec, TICKS_PER_SEC);
+#else
+    if (sec > UINT64_MAX / TICKS_PER_SEC ||
+        nsec > UINT64_MAX / TICKS_PER_SEC)
+        return UINT64_MAX;
+    uint64_t whole = sec * TICKS_PER_SEC;
+    uint64_t scaled_nsec = nsec * TICKS_PER_SEC;
+    uint64_t fraction = scaled_nsec / 1000000000ULL +
+                        (scaled_nsec % 1000000000ULL != 0);
+    return whole > UINT64_MAX - fraction ? UINT64_MAX : whole + fraction;
+#endif
 }
 
 /* Linux TFD_TIMER_CANCEL_ON_SET: an armed realtime-abstime timer becomes
@@ -46,9 +77,14 @@ static void timerfd_remaining_locked(timerfd_t *tfd, uint64_t out[4])
     out[1] = tfd->interval_nsec;
     if (!tfd->armed) return;
     uint64_t now = timer_get_ticks();
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    a20_timerfd_remaining_rust(tfd->expire_tick, now, TICKS_PER_SEC,
+                               &out[2], &out[3]);
+#else
     uint64_t rem = tfd->expire_tick > now ? tfd->expire_tick - now : 0;
     out[2] = rem / TICKS_PER_SEC;
     out[3] = (rem % TICKS_PER_SEC) * 1000000000ULL / TICKS_PER_SEC;
+#endif
 }
 
 static int timerfd_read(vfile_t *vf, char *buf, size_t count)
@@ -100,6 +136,10 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     }
     uint64_t expirations = 1;
     uint64_t interval = timerfd_timespec_to_ticks(tfd->interval_sec, tfd->interval_nsec);
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+    expirations = a20_timerfd_consume_expirations_rust(
+        timer_get_ticks(), &tfd->expire_tick, interval, &tfd->armed);
+#else
     if (interval) {
         uint64_t now = timer_get_ticks();
         if (now > tfd->expire_tick)
@@ -108,6 +148,7 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     } else {
         tfd->armed = 0;
     }
+#endif
     spin_unlock(&tfd->lock);
     memcpy(buf, &expirations, sizeof(expirations));
     return sizeof(expirations);
@@ -176,6 +217,11 @@ int timerfd_create_file(int clockid, int flags)
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_timerfd_ops;
     vf->priv = tfd;
+    if (env_kind_tag_vfile(vf, A20_OBJ_TIMER) < 0) {
+        vfile_free(vf);
+        kfree(tfd);
+        return -EINVAL;
+    }
     return anonfd_install_vfile(vf, flags);
 }
 
@@ -202,13 +248,18 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
         vfs_put_file_ref(gfd, vf);
         return -EINVAL;
     }
-    tfd->interval_sec = new_value[0];
-    tfd->interval_nsec = new_value[1];
+    uint64_t interval_ticks = timerfd_timespec_to_ticks(new_value[0], new_value[1]);
     uint64_t ticks = timerfd_timespec_to_ticks(new_value[2], new_value[3]);
-    tfd->armed = ticks != 0;
-    tfd->cancel_on_set = 0;
-    tfd->cancel_gen = 0;
-    if (tfd->armed) {
+    if (interval_ticks == UINT64_MAX || ticks == UINT64_MAX) {
+        spin_unlock(&tfd->lock);
+        vfs_put_file_ref(gfd, vf);
+        return -EINVAL;
+    }
+    uint64_t new_expire_tick = 0;
+    int new_armed = ticks != 0;
+    int new_cancel_on_set = 0;
+    uint64_t new_cancel_gen = 0;
+    if (new_armed) {
         if (flags & 1) {
             /* TFD_TIMER_ABSTIME: value is absolute on the timer's clock. */
             uint64_t now_ts[2];
@@ -216,6 +267,16 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
                 timekeeping_get_realtime(now_ts);
             else
                 timekeeping_get_monotonic(now_ts);
+#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
+            new_expire_tick = a20_timerfd_absolute_deadline_rust(
+                now_ts[0], now_ts[1], new_value[2], new_value[3],
+                timer_get_ticks(), TICKS_PER_SEC);
+            if (new_expire_tick == UINT64_MAX) {
+                spin_unlock(&tfd->lock);
+                vfs_put_file_ref(gfd, vf);
+                return -EINVAL;
+            }
+#else
             uint64_t delta_ticks = 0;
             if (new_value[2] > now_ts[0] ||
                 (new_value[2] == now_ts[0] && new_value[3] > now_ts[1])) {
@@ -230,15 +291,35 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
                 delta_ticks = timerfd_timespec_to_ticks(sec, nsec);
             }
             /* A past absolute time expires immediately. */
-            tfd->expire_tick = timer_get_ticks() + delta_ticks;
+            uint64_t now_tick = timer_get_ticks();
+            if (delta_ticks == UINT64_MAX ||
+                delta_ticks > UINT64_MAX - now_tick) {
+                spin_unlock(&tfd->lock);
+                vfs_put_file_ref(gfd, vf);
+                return -EINVAL;
+            }
+            new_expire_tick = now_tick + delta_ticks;
+#endif
             if ((flags & 2) && tfd->clockid == 0) {
-                tfd->cancel_on_set = 1;
-                tfd->cancel_gen = timekeeping_realtime_set_generation();
+                new_cancel_on_set = 1;
+                new_cancel_gen = timekeeping_realtime_set_generation();
             }
         } else {
-            tfd->expire_tick = timer_get_ticks() + ticks;
+            uint64_t now_tick = timer_get_ticks();
+            if (ticks > UINT64_MAX - now_tick) {
+                spin_unlock(&tfd->lock);
+                vfs_put_file_ref(gfd, vf);
+                return -EINVAL;
+            }
+            new_expire_tick = now_tick + ticks;
         }
     }
+    tfd->interval_sec = new_value[0];
+    tfd->interval_nsec = new_value[1];
+    tfd->armed = new_armed;
+    tfd->expire_tick = new_expire_tick;
+    tfd->cancel_on_set = new_cancel_on_set;
+    tfd->cancel_gen = new_cancel_gen;
     spin_unlock(&tfd->lock);
     wait_queue_wake_all(&tfd->waiters, 0, PROC_WAKE_EVENT);
     vfs_put_file_ref(gfd, vf);

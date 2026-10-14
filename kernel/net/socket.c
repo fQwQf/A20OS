@@ -1080,9 +1080,10 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
     return (int)total;
 }
 
-int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
-                             void *addr, size_t *addrlen,
-                             net_recv_meta_t *meta) {
+int net_recvfrom_socket_meta_until(net_socket_t *s, void *buf, size_t len,
+                                   int flags, void *addr, size_t *addrlen,
+                                   net_recv_meta_t *meta,
+                                   uint64_t deadline) {
     if (!s)
         return -ENOTSOCK;
     int bad = net_msg_flags_check(flags);
@@ -1103,11 +1104,13 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         int inner = flags & ~MSG_WAITALL;
         size_t got = 0;
         while (got < len) {
-            if (net_socket_wait_expired(s, start, 0))
+            if (deadline ?
+                    (int64_t)(timer_get_ticks() - deadline) >= 0 :
+                    net_socket_wait_expired(s, start, 0))
                 return (int)got;
-            int n = net_recvfrom_socket_meta(s, (char *)buf + got, len - got,
-                                             inner, got ? NULL : addr,
-                                             got ? NULL : addrlen, meta);
+            int n = net_recvfrom_socket_meta_until(
+                s, (char *)buf + got, len - got, inner,
+                got ? NULL : addr, got ? NULL : addrlen, meta, deadline);
             if (n < 0)
                 return got ? (int)got : n;
             if (n == 0)
@@ -1186,7 +1189,9 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                 net_sock_unlock(s, irq);
                 return -ERESTARTSYS;
             }
-            if (net_socket_wait_expired_locked(s, start, 0)) {
+            if (deadline ?
+                    (int64_t)(timer_get_ticks() - deadline) >= 0 :
+                    net_socket_wait_expired_locked(s, start, 0)) {
                 net_sock_unlock(s, irq);
                 return -EAGAIN;
             }
@@ -1195,11 +1200,12 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                 net_sock_unlock(s, irq);
                 return (s->closed || s->peer_closed || s->shut_rd) ? 0 : -EAGAIN;
             }
-            uint64_t deadline = s->recv_timeout_ticks ?
-                                start + s->recv_timeout_ticks : 0;
+            uint64_t wait_deadline = deadline ? deadline :
+                                     (s->recv_timeout_ticks ?
+                                      start + s->recv_timeout_ticks : 0);
             net_sock_unlock(s, irq);
             proc_wait_token_t token =
-                proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+                proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, wait_deadline);
             if (!token.task)
                 return -EAGAIN;
             wait_queue_entry_t entry = {0};
@@ -1311,15 +1317,18 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
             net_sock_unlock(s, irq);
             return -ERESTARTSYS;
         }
-        if (net_socket_wait_expired_locked(s, start, 0)) {
+        if (deadline ?
+                (int64_t)(timer_get_ticks() - deadline) >= 0 :
+                net_socket_wait_expired_locked(s, start, 0)) {
             net_sock_unlock(s, irq);
             return -EAGAIN;
         }
-        uint64_t deadline = s->recv_timeout_ticks ?
-                            start + s->recv_timeout_ticks : 0;
+        uint64_t wait_deadline = deadline ? deadline :
+                                 (s->recv_timeout_ticks ?
+                                  start + s->recv_timeout_ticks : 0);
         net_sock_unlock(s, irq);
         proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, wait_deadline);
         if (!token.task)
             return -EAGAIN;
 
@@ -1354,6 +1363,14 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         if (reason == PROC_WAKE_TIMEOUT)
             return -EAGAIN;
     }
+}
+
+int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
+                             void *addr, size_t *addrlen,
+                             net_recv_meta_t *meta)
+{
+    return net_recvfrom_socket_meta_until(s, buf, len, flags, addr, addrlen,
+                                          meta, 0);
 }
 
 int net_recvfrom_meta(int gfd, void *buf, size_t len, int flags,

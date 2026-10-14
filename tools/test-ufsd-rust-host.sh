@@ -9,3 +9,11 @@ cd "$repo_root"
 rustc --test --edition=2021 user/svc/ufsd_protocol.rs \
     -o "$tmp_dir/ufsd-protocol-tests"
 "$tmp_dir/ufsd-protocol-tests"
+
+rustc --test --edition=2021 user/svc/ufs_lifetime.rs \
+    -o "$tmp_dir/ufsd-lifetime-tests"
+"$tmp_dir/ufsd-lifetime-tests"
+
+rustc --test --edition=2021 user/svc/ext4_orphan.rs \
+    -o "$tmp_dir/ext4-orphan-tests"
+"$tmp_dir/ext4-orphan-tests"

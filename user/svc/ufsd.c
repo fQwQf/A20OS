@@ -150,6 +150,53 @@ uint64_t fsio_capacity_sectors(void)
     return cached;
 }
 
+/* UXFS flush capability uses a v2 request and a fixed-width magic response.
+ * A v1 capacity query can return an arbitrary 64-bit sector count, so it must
+ * never be interpreted as evidence that a durability callback exists. */
+int fsio_flush_supported(void)
+{
+    const uint64_t magic = 0x5546585300000001ull;
+    uint64_t response = 0;
+    if (g_block_index < 0)
+        return 0;
+
+    ufsd_block_io_args_t a;
+    a20_memset(&a, 0, sizeof(a));
+    a.size = sizeof(a);
+    a.version = 2;
+    a.block_index = g_block_index;
+    a.write = 2;
+    a.buf = (uint64_t)(uintptr_t)&response;
+    if (!a20_status_is_ok(a20_syscall6(A20_SYS_fs_block_io,
+                                       (uint64_t)(uintptr_t)&a, 0, 0, 0, 0, 0)))
+        return 0;
+    return response == magic;
+}
+
+int fsio_flush(void)
+{
+    if (g_block_index < 0)
+        return -19; /* ENODEV */
+
+    ufsd_block_io_args_t a;
+    a20_memset(&a, 0, sizeof(a));
+    a.size = sizeof(a);
+    a.version = 1;
+    a.block_index = g_block_index;
+    a.write = 2;
+    a20_status_t status = a20_syscall6(A20_SYS_fs_block_io,
+                                       (uint64_t)(uintptr_t)&a, 0, 0, 0, 0, 0);
+    if (a20_status_is_ok(status))
+        return 0;
+    switch (A20_ABS_ERROR(status)) {
+    case A20_ERR_NOT_SUPPORTED: return -95; /* EOPNOTSUPP */
+    case A20_ERR_INVALID_ARGUMENT: return -22; /* EINVAL */
+    case A20_ERR_BAD_HANDLE: return -19; /* ENODEV */
+    case A20_ERR_FAULT: return -14; /* EFAULT */
+    default: return -5; /* EIO */
+    }
+}
+
 /* ------------------------------------------------------------------ */
 
 static const ufs_backend_t *pick_backend(const char *fstype)

@@ -13,6 +13,7 @@
 #include "liba20rt/crt0_a20.h"
 #include "a20_services_idl.h"
 #include "drivers/driver_descriptor.h"
+#include "drivers/block/virtio_blk_core.h"
 
 /* QEMU virt: virtio-mmio slot 3 = bus.3, IRQ = irq_base(1) + slot = 4
  * (driver-private placement, not service protocol). */
@@ -22,6 +23,8 @@
 
 #define UBD_SECTOR_SIZE   512u
 #define UBD_QUEUE_SIZE    64u
+#define UBD_EPROTO        (-71)
+#define UBD_EIO           (-5)
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
                       A20_DRIVER_TYPE_BLOCK, "virtio-blk-user", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
@@ -89,9 +92,25 @@ typedef struct udisk_ring {
 static volatile uint32_t *g_mmio;
 static udisk_ring_t      *g_ring;
 static uint32_t           g_last_done; /* highest id completed */
+static uint16_t           g_desc_head;
+static uint16_t           g_queue_size;
+static int                g_queue_ready;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+static a20_virtio_blk_queue_state_t g_queue_state;
+#endif
+#ifdef CONFIG_UBD_QUEUE_SELFTEST
+static int g_inject_used_mode;
+#endif
 
 static inline uint32_t mmio_rd(uint32_t off) { return g_mmio[off / 4]; }
 static inline void mmio_wr(uint32_t off, uint32_t v) { g_mmio[off / 4] = v; }
+
+static void zero_queue_page(uint64_t va)
+{
+    volatile uint8_t *p = (volatile uint8_t *)(uintptr_t)va;
+    for (uint32_t i = 0; i < 4096; i++)
+        p[i] = 0;
+}
 
 typedef struct virtq_desc {
     uint64_t addr;
@@ -99,6 +118,18 @@ typedef struct virtq_desc {
     uint16_t flags;
     uint16_t next;
 } virtq_desc_t;
+
+_Static_assert(sizeof(virtq_desc_t) == sizeof(a20_virtio_blk_desc_t),
+               "shared VirtIO descriptor size");
+_Static_assert(__builtin_offsetof(virtq_desc_t, addr) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, addr) &&
+               __builtin_offsetof(virtq_desc_t, len) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, len) &&
+               __builtin_offsetof(virtq_desc_t, flags) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, flags) &&
+               __builtin_offsetof(virtq_desc_t, next) ==
+                   __builtin_offsetof(a20_virtio_blk_desc_t, next),
+               "shared VirtIO descriptor offsets");
 
 typedef struct virtq_avail {
     uint16_t flags;
@@ -173,8 +204,18 @@ static int virtio_init(void)
     mmio_wr(VMMIO_QUEUESEL, 0);
     uint32_t maxq = mmio_rd(VMMIO_QUEUENUMMAX);
     uint32_t qsz = UBD_QUEUE_SIZE < maxq ? UBD_QUEUE_SIZE : maxq;
-    if (qsz == 0)
+    /* Queue size must be a power of two. Select the largest supported size
+     * no larger than our fixed backing arrays. */
+    while (qsz && (qsz & (qsz - 1)) != 0)
+        qsz &= qsz - 1;
+    if (qsz < 4)
         return -1;
+    g_queue_size = (uint16_t)qsz;
+    g_desc_head = 0;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    if (a20_virtio_blk_queue_init(&g_queue_state, g_queue_size, 1) != 0)
+        return -1;
+#endif
     mmio_wr(VMMIO_QUEUENUM, qsz);
 
     if (!alloc_page(&g_desc_va, &g_desc_pa)) return -1;
@@ -196,53 +237,229 @@ static int virtio_init(void)
     mmio_wr(VMMIO_QUEUEREADY, 1);
     mmio_wr(VMMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                           VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+    g_queue_ready = 1;
     return 0;
 }
+
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+static int virtio_reinitialize_queue(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    mmio_wr(VMMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+    mmio_wr(VMMIO_DRVFEATSEL, 0);
+    mmio_wr(VMMIO_DRVFEAT, 0);
+    mmio_wr(VMMIO_DRVFEATSEL, 1);
+    mmio_wr(VMMIO_DRVFEAT, 0);
+    mmio_wr(VMMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+                          VIRTIO_STATUS_FEATURES_OK);
+    mmio_wr(VMMIO_QUEUESEL, 0);
+    mmio_wr(VMMIO_QUEUENUM, g_queue_size);
+    zero_queue_page(g_desc_va);
+    zero_queue_page(g_avail_va);
+    zero_queue_page(g_used_va);
+    mmio_wr(VMMIO_QUEUEDESCLO, (uint32_t)g_desc_pa);
+    mmio_wr(VMMIO_QUEUEDESCHI, (uint32_t)(g_desc_pa >> 32));
+    mmio_wr(VMMIO_QUEUEAVAILLO, (uint32_t)g_avail_pa);
+    mmio_wr(VMMIO_QUEUEAVAILHI, (uint32_t)(g_avail_pa >> 32));
+    mmio_wr(VMMIO_QUEUEUSEDLO, (uint32_t)g_used_pa);
+    mmio_wr(VMMIO_QUEUEUSEDHI, (uint32_t)(g_used_pa >> 32));
+    mmio_wr(VMMIO_QUEUEREADY, 1);
+    mmio_wr(VMMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+                          VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return 0;
+}
+
+static int virtio_recover_queue(uint16_t current_slot)
+{
+    uint16_t slots[1];
+    int failed = a20_virtio_blk_queue_fail_all(&g_queue_state, slots, 1);
+    if (failed < 0)
+        return failed;
+    g_queue_ready = 0;
+    mmio_wr(VMMIO_STATUS, 0);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint32_t spins = 1000000;
+    while (mmio_rd(VMMIO_STATUS) != 0 && --spins)
+        __asm__ volatile("nop");
+    if (!spins)
+        return UBD_EIO;
+    int reset = a20_virtio_blk_queue_reset(&g_queue_state);
+    if (reset != 0)
+        return reset;
+    int ret = virtio_reinitialize_queue();
+    for (int i = 0; i < failed; i++)
+        (void)a20_virtio_blk_queue_release(&g_queue_state, slots[i]);
+    g_queue_ready = ret == 0;
+    (void)current_slot;
+    return ret;
+}
+#endif
 
 /* DMA directly into/from @data_pa (the kernel's buffer), @sectors worth.
  * Builds a descriptor chain: header, one data descriptor per sector
  * (contiguous 512-byte buffers), status. */
 static int blk_rw(uint64_t sector, int write, uint64_t data_pa, uint32_t sectors)
 {
-    if (sectors == 0 || sectors > 8)
+    if (!g_queue_ready)
+        return UBD_EIO;
+    if (g_queue_size < 4 || sectors == 0 || sectors > g_queue_size - 2)
         return -1;
     blk_req_hdr_t *hdr = (blk_req_hdr_t *)g_hdr_va;
     hdr->type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
     hdr->reserved = 0;
     hdr->sector = sector;
-    g_status[0] = 0xff;
+    uint16_t head;
+    int desc_count;
+    uint16_t queue_slot = 0;
+    uint16_t ring_slot = 0;
+    int queue_result = 0;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    uint16_t expected_head = 0;
+    queue_result = a20_virtio_blk_queue_reserve(
+        &g_queue_state, (uint16_t)(sectors + 2),
+        write ? 1U : sectors * UBD_SECTOR_SIZE + 1U,
+        write ? 1U : 0U, &queue_slot, &expected_head);
+    if (queue_result != 0)
+        return queue_result;
+    head = expected_head;
+#endif
 
-    uint16_t head = g_avail->idx & (UBD_QUEUE_SIZE - 1);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    a20_virtio_blk_segment_t segments[UBD_QUEUE_SIZE - 2];
+    for (uint32_t i = 0; i < sectors; i++) {
+        segments[i].addr = data_pa + (uint64_t)i * UBD_SECTOR_SIZE;
+        segments[i].len = UBD_SECTOR_SIZE;
+    }
+    desc_count = a20_virtio_blk_build_chain(
+        (a20_virtio_blk_desc_t *)g_desc, g_queue_size, head,
+        g_hdr_pa, sizeof(*hdr), segments, (uint16_t)sectors,
+        g_status_pa + head,
+        write ? 0 : 1);
+    if (desc_count < 0) {
+        (void)a20_virtio_blk_queue_cancel(&g_queue_state, queue_slot);
+        return desc_count;
+    }
+#else
+    head = g_avail->idx & (g_queue_size - 1);
     uint16_t d = head;
     g_desc[d].addr = g_hdr_pa; g_desc[d].len = sizeof(*hdr);
     g_desc[d].flags = VIRTQ_DESC_F_NEXT;
     for (uint32_t i = 0; i < sectors; i++) {
-        uint16_t nd = (uint16_t)((d + 1) & (UBD_QUEUE_SIZE - 1));
+        uint16_t nd = (uint16_t)((d + 1) & (g_queue_size - 1));
         g_desc[d].next = nd;
         d = nd;
         g_desc[d].addr = data_pa + (uint64_t)i * UBD_SECTOR_SIZE;
         g_desc[d].len = UBD_SECTOR_SIZE;
         g_desc[d].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     }
-    uint16_t sd = (uint16_t)((d + 1) & (UBD_QUEUE_SIZE - 1));
+    uint16_t sd = (uint16_t)((d + 1) & (g_queue_size - 1));
     g_desc[d].next = sd;
     d = sd;
-    g_desc[d].addr = g_status_pa; g_desc[d].len = 1;
+    g_desc[d].addr = g_status_pa + head; g_desc[d].len = 1;
     g_desc[d].flags = VIRTQ_DESC_F_WRITE; g_desc[d].next = 0;
-
-    __atomic_store_n(&g_avail->ring[head], head, __ATOMIC_RELEASE);
+    desc_count = (int)sectors + 2;
+#endif
+    g_status[head] = 0xff;
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    queue_result = a20_virtio_blk_queue_prepare_publish(
+        &g_queue_state, queue_slot, &ring_slot);
+    if (queue_result != 0) {
+        (void)a20_virtio_blk_queue_cancel(&g_queue_state, queue_slot);
+        return queue_result;
+    }
+#endif
+    uint16_t prior_used = g_used->idx;
+    uint16_t avail_slot =
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+        ring_slot;
+#else
+        g_avail->idx & (g_queue_size - 1);
+#endif
+    __atomic_store_n(&g_avail->ring[avail_slot], head, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_RELEASE);
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    uint16_t new_avail = 0;
+    queue_result = a20_virtio_blk_queue_commit_publish(
+        &g_queue_state, queue_slot, &new_avail);
+    if (queue_result != 0) {
+        (void)a20_virtio_blk_queue_cancel(&g_queue_state, queue_slot);
+        return queue_result;
+    }
+    g_avail->idx = new_avail;
+#else
     g_avail->idx = (uint16_t)(g_avail->idx + 1);
+#endif
     __atomic_thread_fence(__ATOMIC_RELEASE);
+#ifdef CONFIG_UBD_QUEUE_SELFTEST
+    if (g_inject_used_mode != 0) {
+        int inject_mode = g_inject_used_mode;
+        g_inject_used_mode = 0;
+        uint16_t corrupt_slot = prior_used & (g_queue_size - 1);
+        if (inject_mode == 1) {
+            /* This aliases a valid 16-bit head if narrowed before checking. */
+            g_used->ring[corrupt_slot].id = (uint32_t)head + 65536U;
+            g_used->ring[corrupt_slot].len = 1;
+        } else {
+            g_status[head] = 1;
+            g_used->ring[corrupt_slot].id = head;
+            g_used->ring[corrupt_slot].len =
+                write ? 1U : sectors * UBD_SECTOR_SIZE + 1U;
+        }
+        __atomic_store_n(&g_used->idx, (uint16_t)(prior_used + 1),
+                         __ATOMIC_RELEASE);
+    } else
+#endif
     mmio_wr(VMMIO_QUEUENOTIFY, 0);
 
     /* Wait for completion (poll the used ring; the irq also arrives). */
-    uint16_t last = (uint16_t)(g_used->idx);
     for (uint64_t spins = 0; spins < 100000000; spins++) {
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        if (g_used->idx != last)
-            return g_status[0] == 0 ? 0 : -1;
+        if (g_used->idx != prior_used) {
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+            uint16_t used_slot = 0, completed_slot = 0;
+            uint16_t device_idx = g_used->idx;
+            uint16_t used_head = 0;
+            uint32_t used_len = 0;
+            if (a20_virtio_blk_queue_used_ring_slot(&g_queue_state, device_idx,
+                                                     &used_slot) != 1) {
+                queue_result = UBD_EPROTO;
+            } else {
+                uint32_t raw_head = g_used->ring[used_slot].id;
+                used_len = g_used->ring[used_slot].len;
+                if (raw_head > UINT16_MAX || raw_head >= g_queue_size) {
+                    queue_result = UBD_EPROTO;
+                } else {
+                    used_head = (uint16_t)raw_head;
+                    if (a20_virtio_blk_queue_validate_head(
+                            &g_queue_state, used_head, &completed_slot) != 0 ||
+                        completed_slot != queue_slot) {
+                        queue_result = UBD_EPROTO;
+                    } else {
+                        int result = -1;
+                        int retired = a20_virtio_blk_queue_complete_used(
+                            &g_queue_state, device_idx, used_head, used_len,
+                            g_status[used_head], &completed_slot, &result);
+                        if (retired == 1)
+                            queue_result = result;
+                        else
+                            queue_result = UBD_EPROTO;
+                    }
+                }
+            }
+            if (queue_result == UBD_EPROTO)
+                (void)virtio_recover_queue(queue_slot);
+            else
+                (void)a20_virtio_blk_queue_release(&g_queue_state, queue_slot);
+            return queue_result;
+#else
+            return g_status[head] == 0 ? 0 : -1;
+#endif
+        }
     }
+#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
+    (void)virtio_recover_queue(queue_slot);
+#endif
     return -1;
 }
 
@@ -251,7 +468,10 @@ static int blk_rw_chunked(uint64_t sector, int write, uint64_t data_pa,
                           uint32_t sectors)
 {
     while (sectors > 0) {
-        uint32_t n = sectors > 32 ? 32 : sectors;
+        /* Each sector occupies one descriptor, in addition to the request
+         * header and status descriptors. Keep every chain within the ring. */
+        uint32_t max_sectors = g_queue_size - 2;
+        uint32_t n = sectors > max_sectors ? max_sectors : sectors;
         if (blk_rw(sector, write, data_pa, n) < 0)
             return -1;
         sector += n;
@@ -260,6 +480,70 @@ static int blk_rw_chunked(uint64_t sector, int write, uint64_t data_pa,
     }
     return 0;
 }
+
+#if defined(CONFIG_UBD_QUEUE_SELFTEST) && defined(CONFIG_VIRTIO_BLK_CORE_RUST)
+static void ubd_queue_test_log(const char *message, uint32_t length)
+{
+    (void)a20_hdl_write_buf(g_out, message, length, (void *)0);
+}
+
+static int ubd_queue_selftest(void)
+{
+    uint64_t test_va = 0, test_pa = 0;
+    if (!alloc_page(&test_va, &test_pa))
+        return 1;
+
+    /* Publish a request but suppress the device kick, then present a
+     * deliberately out-of-range used head. Recovery must reset the hardware
+     * queue and leave the same request slot reusable for the next real read. */
+    g_inject_used_mode = 1;
+    int ret = blk_rw(0, 0, test_pa, 1);
+    if (ret != UBD_EPROTO) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: malformed-head result mismatch\n", 47);
+        return 2;
+    }
+    ret = blk_rw(0, 0, test_pa, 1);
+    if (ret != 0) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: read after reset failed\n", 40);
+        return 3;
+    }
+
+    /* A readonly backend gives a genuine device-completed IOERR and lets
+     * us verify that a subsequent request reuses the queue without reset. */
+#ifdef CONFIG_UBD_QUEUE_REAL_IOERR_TEST
+    ret = blk_rw(1, 1, test_pa, 1);
+    if (ret != UBD_EIO) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: real IOERR result mismatch\n", 43);
+        return 4;
+    }
+    ret = blk_rw(0, 0, test_pa, 1);
+    if (ret != 0) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: read after real IOERR failed\n", 45);
+        return 5;
+    }
+#else
+    /* Synthetic completion intentionally suppresses the device kick, leaving
+     * its avail entry unseen; reset before testing slot reuse afterward. */
+    g_inject_used_mode = 2;
+    ret = blk_rw(1, 1, test_pa, 1);
+    if (ret != UBD_EIO) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: injected IOERR result mismatch\n", 47);
+        return 4;
+    }
+    ret = virtio_recover_queue(0);
+    if (ret != 0) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: reset after IOERR failed\n", 41);
+        return 5;
+    }
+    ret = blk_rw(0, 0, test_pa, 1);
+    if (ret != 0) {
+        ubd_queue_test_log("UBD_QUEUE_TEST: read after IOERR reset failed\n", 46);
+        return 6;
+    }
+#endif
+    return 0;
+}
+#endif
 
 /* Process all newly published ring requests. */
 static int drain_ring(void)
@@ -326,6 +610,18 @@ int main(int argc, char **argv, char **envp)
         UBD_LOG("ubd: virtio init failed\n");
         return 6;
     }
+#if defined(CONFIG_UBD_QUEUE_SELFTEST) && defined(CONFIG_VIRTIO_BLK_CORE_RUST)
+    int queue_test = ubd_queue_selftest();
+    if (queue_test != 0) {
+        UBD_LOG("UBD_QUEUE_TEST: FAIL\n");
+        return 10 + queue_test;
+    }
+#ifdef CONFIG_UBD_QUEUE_REAL_IOERR_TEST
+    UBD_LOG("UBD_QUEUE_TEST: PASS malformed-reset/real-ioerr/reuse\n");
+#else
+    UBD_LOG("UBD_QUEUE_TEST: PASS malformed-reset/synthetic-ioerr/reset\n");
+#endif
+#endif
     uint64_t cap_lo = mmio_rd(VMMIO_CFGCAPACITY);
     uint64_t cap_hi = mmio_rd(VMMIO_CFGCAPACITY + 4);
     uint64_t capacity = cap_lo | (cap_hi << 32);

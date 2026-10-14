@@ -45,6 +45,12 @@
 #ifdef CONFIG_PLATFORM_IRQ_TEST
 #include "drivers/core/platform_irq_test.h"
 #endif
+#ifdef CONFIG_VMO_PAGE_TEST
+extern void vmo_page_selftest_run(void);
+#endif
+#ifdef CONFIG_RUST_RUNTIME_PANIC_TEST
+extern void a20_rust_runtime_panic_test(void);
+#endif
 
 /* Forward declarations */
 void init_kthread(void);
@@ -106,6 +112,9 @@ void kernel_main(void) {
     }
     uart_init();
     printf("[INIT] UART initialized\n");
+#ifdef CONFIG_RUST_RUNTIME_PANIC_TEST
+    a20_rust_runtime_panic_test();
+#endif
     timer_init();
     printf("[INIT] Timer initialized\n");
     timekeeping_init();
@@ -190,6 +199,9 @@ void kernel_main(void) {
 
     proc_init();
     printf("[INIT] Process manager initialized\n");
+#ifdef CONFIG_VMO_PAGE_TEST
+    vmo_page_selftest_run();
+#endif
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     a20_registry_init();
     printf("[INIT] Service registry initialized\n");

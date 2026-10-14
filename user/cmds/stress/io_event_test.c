@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -192,11 +193,77 @@ static int test_epoll_modes(void)
         close(replacement);
     }
     ev.events = EPOLLIN;
+    uint64_t replacement_value = 1;
+    if (write(efd, &replacement_value, sizeof(replacement_value)) !=
+            (ssize_t)sizeof(replacement_value) ||
+        epoll_wait(ep, &out, 1, 0) != 0)
+        return -1;
     if (epoll_ctl(ep, EPOLL_CTL_ADD, efd, &ev) < 0 ||
         epoll_wait(ep, &out, 1, 0) != 1 || !(out.events & EPOLLIN))
         return -1;
     close(ep);
     close(efd);
+    return 0;
+}
+
+static int test_epoll_watch_lifetime(void)
+{
+    int p[2];
+    int ep = epoll_create1(0);
+    if (ep < 0 || pipe(p) < 0)
+        return -1;
+    struct epoll_event ev = { .events = EPOLLIN, .data.u32 = 17 };
+    struct epoll_event out;
+    int duplicate = dup(p[0]);
+    if (duplicate < 0 || epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) < 0)
+        return -1;
+    close(p[0]);
+    if (write(p[1], "d", 1) != 1 || epoll_wait(ep, &out, 1, 500) != 1 ||
+        out.data.u32 != 17)
+        return -1;
+    char byte;
+    if (read(duplicate, &byte, 1) != 1 || byte != 'd')
+        return -1;
+    close(duplicate);
+    close(p[1]);
+    close(ep);
+
+    /* The read end belongs only to the child after fork. Closing the final
+     * writer must still report HUP while the read end is watched; after the
+     * last reader closes, the next wait must retire that registration and
+     * keep the requested timeout semantics. */
+    if (pipe(p) < 0 || (ep = epoll_create1(0)) < 0)
+        return -1;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) < 0)
+        return -1;
+    pid_t child = fork();
+    if (child < 0)
+        return -1;
+    if (child == 0) {
+        close(p[1]);
+        usleep(50000);
+        close(p[0]);
+        _exit(0);
+    }
+    close(p[0]);
+    close(p[1]);
+    int ready = epoll_wait(ep, &out, 1, 1000);
+    int status = 0;
+    int child_ok = waitpid(child, &status, 0) == child &&
+                   WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    struct timespec start, end;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) < 0)
+        return -1;
+    int after_close = epoll_wait(ep, &out, 1, 100);
+    if (clock_gettime(CLOCK_MONOTONIC, &end) < 0)
+        return -1;
+    long elapsed_ms = (end.tv_sec - start.tv_sec) * 1000L +
+                      (end.tv_nsec - start.tv_nsec) / 1000000L;
+    close(ep);
+    if (!child_ok || ready != 1 || !(out.events & EPOLLHUP) ||
+        after_close != 0 || elapsed_ms < 75)
+        return -1;
+    puts("IO_EVENT_TEST: epoll dup, HUP, final-close prune, and fd-reuse PASS");
     return 0;
 }
 
@@ -322,6 +389,10 @@ int main(void)
     }
     if (test_epoll_modes() < 0) {
         printf("IO_EVENT_TEST: FAIL epoll modes errno=%d\n", errno);
+        return 1;
+    }
+    if (test_epoll_watch_lifetime() < 0) {
+        printf("IO_EVENT_TEST: FAIL epoll watch lifetime errno=%d\n", errno);
         return 1;
     }
     if (test_eventfd_waiters() < 0) {

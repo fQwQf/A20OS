@@ -34,6 +34,12 @@ NATIVE_RUST_ECHOD ?= 0
 NATIVE_RUST_SVCMGR ?= 0
 NATIVE_RUST_RTCD ?= 0
 NATIVE_RUST_UFSD ?= 0
+# Keep the recovery record parser independently switchable for paired C/Rust
+# format comparisons while the surrounding UFSD remains Rust-owned.
+NATIVE_RUST_UFSD_JBD2_RECORD ?= 1
+# Test-only: fail the first real block write made while reaping an orphan
+# during final close, then allow the Rust OP_SYNC retry to complete.
+NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE ?= 0
 
 # The isolated IDL service fixture also builds the Rust peer used by its
 # generated-code C/Rust contract checks. Production Rust echod can be selected
@@ -70,6 +76,12 @@ RUST_USER_UFSD_SRC := user/svc/ufsd.rs
 RUST_USER_UFSD_ABI_SRC := user/svc/ufsd_rust_abi.c
 RUST_USER_UFSD_ABI_HDR := user/svc/ufsd_rust_abi.h
 RUST_USER_UFSD_PROTOCOL_SRC := user/svc/ufsd_protocol.rs
+RUST_USER_UFSD_CACHE_SRC := user/svc/fscompat/bcache_user.rs
+RUST_USER_UFSD_CACHE_ABI_SRC := user/svc/fscompat/bcache_user_rust_abi.c
+RUST_USER_UFSD_JBD2_POLICY_SRC := user/svc/jbd2_legacy_policy.rs
+RUST_USER_UFSD_JBD2_TXN_SRC := user/svc/jbd2_txn.rs
+RUST_USER_UFSD_JBD2_RECORD_SRC := user/svc/jbd2_record.rs
+RUST_USER_UFSD_EXT4_ORPHAN_SRC := user/svc/ext4_orphan.rs
 RUST_USER_UFSD_OBJ := $(RUST_USER_OBJ_DIR)/ufsd.o
 RUST_USER_UFSD_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)
 RUST_USER_IDL_RUST := $(RUST_USER_OBJ_DIR)/a20_services_idl.rs
@@ -316,24 +328,27 @@ endif
 ifneq ($(strip $(filter $(USER_OPT),-O1 -O2 -O3 -Os)),$(USER_OPT))
 $(error Rust ufsd requires USER_OPT in -O1 -O2 -O3 -Os)
 endif
+ifeq ($(filter $(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE),0 1),)
+$(error NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE must be 0 or 1)
+endif
 RUST_USER_UFSD_OPT_LEVEL := $(patsubst -O%,%,$(USER_OPT))
-RUST_USER_UFSD_BACKEND_SRCS := $(filter-out user/svc/ufsd.c,$(UFSD_CORE_SRCS)) $(UFSD_VNFS_SRCS)
+RUST_USER_UFSD_BACKEND_SRCS := $(filter-out user/svc/ufsd.c user/svc/fscompat/bcache_user.c,$(UFSD_CORE_SRCS)) $(UFSD_VNFS_SRCS) $(RUST_USER_UFSD_CACHE_ABI_SRC)
 NATIVE_OUTPUTS += $(RUST_USER_UFSD_BIN)
 native-programs: $(RUST_USER_UFSD_BIN)
-$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk
+$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk
 	@mkdir -p $(dir $@)
 	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
 		--target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_UFSD_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL) \
 		$< -o $@
 
-$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) tools/rust-user.mk \
+$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) tools/rust-user.mk \
 		$(RUST_USER_CRT0_SRC) $(RUST_USER_UFSD_ABI_SRC) $(RUST_USER_UFSD_ABI_HDR) \
 		$(RUST_USER_UFSD_BACKEND_SRCS) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) \
 		$(NATIVE_ARCH_SRC) $(NATIVE_LD) $(A20_SERVICES_IDL_HDR) $(NATIVE_SDK_HDRS) user/svc/ufs_backends.h \
 		kernel/include/fs/ufs_proto.h kernel/include/fs/fat32lite.h
 	@mkdir -p $(dir $@)
-	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
+	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -DCONFIG_UFSD_RUST_JBD2_POLICY -DCONFIG_UFSD_RUST_JBD2_TXN -DCONFIG_UFSD_RUST_EXT4_ORPHAN $(if $(filter 1,$(NATIVE_RUST_UFSD_JBD2_RECORD)),-DCONFIG_UFSD_RUST_JBD2_RECORD,) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE,) -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
 		-T$(NATIVE_LD) $(NATIVE_CRT0) $(RUST_USER_CRT0_SRC) $(NATIVE_SDK_SRC) \
 		$(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(RUST_USER_UFSD_ABI_SRC) \
 		$(RUST_USER_UFSD_BACKEND_SRCS) $(RUST_USER_UFSD_OBJ) $(NATIVE_LIBS) -o $@

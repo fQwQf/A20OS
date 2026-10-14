@@ -138,6 +138,8 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
                  int exit_signal, task_t **out_task)
 {
     task_t *parent = proc_current();
+    if (!parent)
+        return -ESRCH;
 #ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone begin: parent=%d flags=0x%lx\n",
           parent ? parent->pid : -1, (unsigned long)flags);
@@ -170,7 +172,18 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         return -EAGAIN;
     }
     int child_pid = t->pid;
-    proc_task_init_common(t, parent, flags);
+    proc_task_init_common_deferred_files(t, parent, flags);
+#ifndef CONFIG_MCU
+    if (parent && (flags & (CLONE_FILES | CLONE_THREAD))) {
+        fdtable_share(t, parent);
+    } else if (parent) {
+        int copy_error = fdtable_copy_checked(t, parent);
+        if (copy_error < 0) {
+            proc_destroy_task(t);
+            return copy_error;
+        }
+    }
+#endif
     t->abi_mode = parent ? parent->abi_mode : 0;
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     /* Adopted native stdio wiring describes the process's fd 0/1/2 and

@@ -108,6 +108,8 @@ int64_t sys_sendmsg(int fd, const void *msg, int flags);
 int64_t sys_recvmsg(int fd, void *msg, int flags);
 int64_t sys_sendmmsg(int fd, void *mmsg, unsigned vlen, int flags);
 int64_t sys_recvmmsg(int fd, void *mmsg, unsigned vlen, int flags, void *timeout);
+int64_t sys_recvmmsg_time64(int fd, void *mmsg, unsigned vlen, int flags,
+                            void *timeout);
 
 int64_t sys_mkdirat(int dirfd, const char *path, int mode);
 int64_t sys_unlinkat(int dirfd, const char *path, int flags);

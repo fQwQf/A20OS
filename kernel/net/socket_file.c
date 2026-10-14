@@ -287,11 +287,10 @@ int net_socket_close_file(vfile_t *vf) {
         drain_peer_write = net_wait_queue_collect_all_locked(
             &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
     }
-    net_msg_t *m = s->rx_head;
 #if CONFIG_DEBUG_NET_TRACE
     int rx_count = s->rx_count;
 #endif
-    s->rx_head = s->rx_tail = NULL;
+    net_msg_t *m = net_rxq_detach_locked(s);
     net_socket_t *accepted = s->accept_head;
 #if CONFIG_DEBUG_NET_TRACE
     int acc_count = s->accept_count;
@@ -815,6 +814,32 @@ net_socket_t *net_socket_from_file(int gfd) {
                       (net_socket_t *)vf->priv : NULL;
     vfs_put_file_ref(gfd, vf);
     return s;
+}
+
+/* Resolve exactly the vfile observed under the current fd table lock, then
+ * pin its socket before allowing the fd-table reference to be dropped. The
+ * caller retains both references until the syscall is entirely finished, so
+ * closing/reusing the numeric descriptor cannot run the socket close callback
+ * while the syscall still uses the object. */
+int net_socket_pin_current_fd(int local_fd, vfile_t **out_vf,
+                              net_socket_t **out_sock)
+{
+    if (!out_vf || !out_sock)
+        return -EINVAL;
+    *out_vf = NULL;
+    *out_sock = NULL;
+    vfile_t *vf = fdtable_get_current_file_ref(local_fd);
+    if (!vf)
+        return -EBADF;
+    net_socket_t *s = net_socket_from_vfile(vf);
+    if (!s) {
+        vfs_put_file(vf);
+        return -ENOTSOCK;
+    }
+    net_socket_ref(s);
+    *out_vf = vf;
+    *out_sock = s;
+    return 0;
 }
 
 int net_socket_install_file(net_socket_t *s, int flags) {

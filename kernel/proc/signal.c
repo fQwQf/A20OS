@@ -403,11 +403,21 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     return 0;
 }
 
+int signal_send_task_info(void *task, int signum, const void *info,
+                          size_t info_size)
+{
+    if (!task)
+        return -ESRCH;
+    if (signum <= 0 || signum >= NSIG)
+        return -EINVAL;
+    return signal_queue_task((task_t *)task, signum, info, info_size, 0);
+}
+
 int signal_send_info(int pid, int signum, const void *info, size_t info_size) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     task_t *t = proc_find_get(pid);
     if (!t) return -ESRCH;
-    int ret = signal_queue_task(t, signum, info, info_size, 0);
+    int ret = signal_send_task_info(t, signum, info, info_size);
     proc_put(t);
     return ret;
 }

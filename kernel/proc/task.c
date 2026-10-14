@@ -48,6 +48,10 @@ static void dump_user_pt_path(pt_root_t *root, vaddr_t va,
 }
 #endif
 
+/* Task objects are freed, while the counter registry keeps pointers forever.
+ * Aggregate park contention into one static sink, including callsite samples. */
+static spinlock_t park_counters = SPINLOCK_INIT;
+
 task_t *proc_task_alloc_storage(void)
 {
     task_t *t = kcalloc(1, sizeof(*t));
@@ -61,12 +65,13 @@ task_t *proc_task_alloc_storage(void)
     t->wait_timer_index = -1;
     t->alarm_timer_index = -1;
     t->owner_cpu = PROC_CPU_NONE;
+    /* proc_alloc_task_slot() publishes this object on the all-task list.
+     * Initialize the lock before that publication so concurrent list walkers
+     * never acquire a zeroed lock that task_init() later resets. */
+    spin_init(&t->park_lock);
+    t->park_lock.counter_sink = &park_counters;
     return t;
 }
-
-/* Task objects are freed, while the counter registry keeps pointers forever.
- * Aggregate park contention into one static sink, including callsite samples. */
-static spinlock_t park_counters = SPINLOCK_INIT;
 
 void proc_task_park_counters_init(void)
 {
@@ -121,10 +126,11 @@ void *proc_scratch_buffer(size_t size)
 }
 
 static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
-                      int detached)
+                      int detached, int defer_files)
 {
     (void)clone_flags;
     (void)detached;
+    (void)defer_files;
     int parent_pgid = parent ? parent->pgid : 0;
     int parent_sid = parent ? parent->sid : 0;
 
@@ -166,8 +172,6 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     t->wait_timer_index = -1;
     t->alarm_timer_index = -1;
     proc_park_wait_state_init(t);
-    spin_init(&t->park_lock);
-    t->park_lock.counter_sink = &park_counters;
     completion_init(&t->vfork_done);
     t->alarm_expire = 0;
     t->itimer_real_interval = 0;
@@ -296,12 +300,14 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
         t->signals = NULL;
         return;
     }
-    if (parent && (clone_flags & (CLONE_FILES | CLONE_THREAD)))
-        fdtable_share(t, parent);
-    else if (parent)
-        fdtable_copy(t, parent);
-    else
-        fdtable_init(t);
+    if (!defer_files) {
+        if (parent && (clone_flags & (CLONE_FILES | CLONE_THREAD)))
+            fdtable_share(t, parent);
+        else if (parent)
+            fdtable_copy(t, parent);
+        else
+            fdtable_init(t);
+    }
 
     t->signals = kmalloc(sizeof(signal_state_t));
     if (t->signals) {
@@ -319,12 +325,18 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
 
 void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
 {
-    task_init(t, parent, clone_flags, 0);
+    task_init(t, parent, clone_flags, 0, 0);
+}
+
+void proc_task_init_common_deferred_files(task_t *t, task_t *parent,
+                                          uint64_t clone_flags)
+{
+    task_init(t, parent, clone_flags, 0, 1);
 }
 
 void proc_task_init_detached(task_t *t)
 {
-    task_init(t, NULL, 0, 1);
+    task_init(t, NULL, 0, 1, 0);
 }
 
 void proc_task_first_entry(void)
