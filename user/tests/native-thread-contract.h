@@ -281,7 +281,12 @@ static int native_thread_contract(void) {
                 status.size == sizeof(status) && status.version == 1 &&
                 status.exit_code == 37,
             17);
-    T_CHECK(native_balance_result(), 36);
+    if (!native_balance_result()) {
+        native_balance_dump_failure(native_thread_shared.parent_cpu,
+                                    native_thread_shared.expected_cpu,
+                                    native_thread_shared.worker_cpu);
+        return 36;
+    }
     T_CHECK(a20_atomic32_load(&native_thread_shared.nested, &ready) == A20_OK &&
                 ready == 19,
             18);

@@ -13,6 +13,7 @@
 struct a20_channel_ep;
 struct task_t;
 struct vnode;
+struct block_dev;
 
 /*
  * uxfs_serve_mount -- mount the user-space file service at @ep onto @path.
@@ -38,7 +39,7 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
 
 /* umount teardown: release the server endpoint reference (called from the
  * FS_TYPE branch of vfs_umount). */
-void uxfs_unmount(struct vnode *root);
+int uxfs_unmount(struct vnode *root);
 
 /*
  * uxfs_block_io -- controlled block IO: permitted only when @task is the
@@ -58,5 +59,9 @@ int uxfs_block_capacity(struct task_t *task, int block_index,
 /* Commit the owned block device's volatile cache, if supported. */
 int uxfs_block_flush(struct task_t *task, int block_index);
 int uxfs_block_flush_supported(struct task_t *task, int block_index);
+
+/* True while a live UXFS service owns this kernel block device. Native ext4
+ * mount admission uses this to prevent a second writable cache/owner. */
+int uxfs_block_device_owned(struct block_dev *dev);
 
 #endif /* FS_UXFS_H */

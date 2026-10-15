@@ -56,6 +56,12 @@ impl Lifetimes {
         self.find(ino).is_some_and(|index| self.slots[index].opens != 0)
     }
 
+    /// A graceful service shutdown may release backend vnode ownership only
+    /// after every negotiated OPEN has a matching CLOSE.
+    pub fn all_closed(&self) -> bool {
+        self.slots.iter().all(|slot| !slot.occupied || slot.opens == 0)
+    }
+
     #[cfg(ufsd_test_close_orphan)]
     pub fn open_count(&self, ino: u64) -> u32 {
         self.find(ino).map_or(0, |index| self.slots[index].opens)

@@ -67,19 +67,19 @@ const _: () = assert!(offset_of!(MsgRecvArgs, data_buf) == 16);
 const _: () = assert!(offset_of!(MsgRecvArgs, out_data_len) == 48);
 const _: () = assert!(offset_of!(MsgRecvArgs, out_rights_buf) == 64);
 
-#[cfg(target_arch = "riscv64")]
-unsafe fn syscall6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64,
-                   a4: u64, a5: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "ecall", in("a7") nr, inlateout("a0") a0 => ret,
-        in("a1") a1, in("a2") a2, in("a3") a3, in("a4") a4, in("a5") a5,
-    );
-    ret
+extern "C" {
+    fn a20_rust_peer_syscall6(nr: u64, a0: u64, a1: u64, a2: u64,
+                              a3: u64, a4: u64, a5: u64) -> i64;
 }
 
-#[cfg(not(target_arch = "riscv64"))]
-compile_error!("Rust IDL service is currently supported only for riscv64");
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64"))]
+unsafe fn syscall6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64,
+                   a4: u64, a5: u64) -> i64 {
+    a20_rust_peer_syscall6(nr, a0, a1, a2, a3, a4, a5)
+}
+
+#[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+compile_error!("Rust IDL service requires a matching Native target");
 
 fn recv(endpoint: u32, bytes: &mut [u8]) -> Result<Option<usize>, i64> {
     let mut args = MsgRecvArgs {

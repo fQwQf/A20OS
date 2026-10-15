@@ -499,6 +499,58 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertIn('--native-rust-echod "$(NATIVE_RUST_ECHOD)"', recipe)
             self.assertIn('--rust-echod-binary "$(RUST_USER_SERVICE_BIN)"', recipe)
 
+    def test_native_rust_echod_x86_64_uses_arch_tagged_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "x86-user"
+            out.mkdir(parents=True)
+            runtime = out / "svc-echod-x86_64"
+            rust = out / "rust-idl-echod-x86_64"
+            c_reference = out / "svc-echod-c-x86_64"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                def value(name):
+                    return next(x.split("=", 1)[1] for x in args
+                                if x.startswith(name + "="))
+                runtime.write_text("C echod")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                if value("NATIVE_RUST_ECHOD") == "1":
+                    rust.write_text("Rust echod")
+                    rust.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="x86-build", stamp=str(stamp), binaries=str(native),
+                    user_build_dir=str(out), arch="x86_64", nommu="0", opt="-O3",
+                    roots="", native_rust_peer="0", native_rust_idl_service="0",
+                    native_rust_echod="0", native_rust_svcmgr="0",
+                    native_rust_rtcd="0", native_rust_ufsd="0",
+                    rust_peer_binary="", rust_service_binary=str(rust),
+                    rust_service_test_binary="", rust_echod_binary=str(rust),
+                    rust_svcmgr_binary="", rust_rtcd_binary="", rust_ufsd_binary="",
+                )
+                for enabled in ("0", "1", "0"):
+                    args.native_rust_echod = enabled
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    if enabled == "1":
+                        self.assertEqual(runtime.read_text(), "Rust echod")
+                        self.assertEqual(c_reference.read_text(), "C echod")
+                    else:
+                        self.assertEqual(runtime.read_text(), "C echod")
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+            self.assertEqual(len(calls), 3)
+
     def test_native_rust_rtcd_runtime_selector_restores_c_and_cleans_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

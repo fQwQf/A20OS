@@ -18,6 +18,8 @@
 #define UFS_PROTO_VERSION 2u
 #define UFS_PROTO_VERSION_LEGACY 1u
 #define UFS_LIFETIME_CAPABILITY 0x5546534c49464532ull /* 'UFSLIFE2' */
+#define UFS_SHUTDOWN_CAPABILITY 0x5546535348555432ull /* 'UFSSHUT2' */
+#define UFS_SHUTDOWN_RETRY_SAFE 0x53414645u /* no irreversible teardown began */
 #define UFS_REQ_MAGIC 0x55465352u /* 'UFSR' */
 #define UFS_RESP_MAGIC 0x55465350u /* 'UFSP' */
 
@@ -39,6 +41,7 @@
 #define UFS_OP_OPEN 15
 #define UFS_OP_CLOSE 16
 #define UFS_OP_LINK 17 /* v2: ino=directory, arg0=existing target inode, name=new name */
+#define UFS_OP_SHUTDOWN 18 /* v2 capability: flush/unmount and ACK before revoke */
 
 /* Node type in a GETATTR/LOOKUP reply (aligned with the low 4 bits of VFS_FT_*) */
 #define UFS_FT_FILE 1

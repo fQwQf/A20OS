@@ -37,16 +37,18 @@ const _: () = assert!(offset_of!(MsgSendArgs, data) == 16);
 const _: () = assert!(size_of::<MsgRecvArgs>() == 72);
 const _: () = assert!(offset_of!(MsgRecvArgs, out_data_len) == 48);
 
-#[cfg(target_arch = "riscv64")]
+extern "C" {
+    fn a20_rust_peer_syscall6(nr: u64, a0: u64, a1: u64, a2: u64,
+                              a3: u64, a4: u64, a5: u64) -> i64;
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64"))]
 unsafe fn syscall6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64,
                    a4: u64, a5: u64) -> i64 {
-    let ret: i64;
-    core::arch::asm!("ecall", in("a7") nr, inlateout("a0") a0 => ret,
-        in("a1") a1, in("a2") a2, in("a3") a3, in("a4") a4, in("a5") a5);
-    ret
+    a20_rust_peer_syscall6(nr, a0, a1, a2, a3, a4, a5)
 }
-#[cfg(not(target_arch = "riscv64"))]
-compile_error!("IDL adversary is currently supported only for riscv64");
+#[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
+compile_error!("IDL adversary requires an installed matching Native target");
 
 fn sleep_1ms() { unsafe { syscall6(SYS_THREAD_SLEEP, 1_000_000, 0, 0, 0, 0, 0); } }
 
@@ -105,6 +107,9 @@ fn response(nonce: u32, client_min: u16, client_max: u16,
         0xa001_0001 => (1, idl::SVCMGR_VERSION_NEGOTIATE_OK as u16, nonce ^ 1),
         0xa002_0002 => (2, idl::SVCMGR_VERSION_NEGOTIATE_OK as u16, nonce),
         0xa005_0005 => (1, idl::SVCMGR_VERSION_NEGOTIATE_NO_COMMON as u16, nonce),
+        // The wire schema defines no reserved/flag bits in this response;
+        // exercise an unknown status value instead of inventing a bitfield.
+        0xa007_0007 => (0, 0x8001, nonce),
         _ => (1, idl::SVCMGR_VERSION_NEGOTIATE_OK as u16, nonce),
     };
     let payload = idl::svcmgr_version_response_encode(&idl::SVCMGR_VERSION_RESPONSE {
@@ -115,9 +120,19 @@ fn response(nonce: u32, client_min: u16, client_max: u16,
     let is_trailing = nonce == 0xa004_0004;
     let frame_len = idl::ENVELOPE_WIRE_SIZE + payload.len();
     let advertised_len = if is_short { frame_len - 1 } else if is_trailing { frame_len + 1 } else { frame_len };
+    let reply_type = if nonce == 0xa008_0008 {
+        0x7b // unknown message type: not a negotiation response
+    } else {
+        idl::SVCMGR_REP_VERSION_NEGOTIATE as u16
+    };
+    let reply_version = if nonce == 0xa009_0009 {
+        2 // unsupported envelope version
+    } else {
+        idl::A20_SERVICES_IDL_VERSION
+    };
     let env = idl::envelope_encode(&idl::ENVELOPE {
-        version: idl::A20_SERVICES_IDL_VERSION,
-        r#type: idl::SVCMGR_REP_VERSION_NEGOTIATE as u16,
+        version: reply_version,
+        r#type: reply_type,
         size: advertised_len as u32,
     });
     out[..env.len()].copy_from_slice(&env);

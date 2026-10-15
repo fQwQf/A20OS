@@ -9,6 +9,9 @@
 
 use core::ffi::c_void;
 
+#[path = "ext4_mount_state.rs"]
+mod mount_state;
+
 const EIO: i32 = -5;
 const EOPNOTSUPP: i32 = -95;
 const EINCONSISTENT: i32 = -117;

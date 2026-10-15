@@ -83,6 +83,7 @@ task_t *proc_task_alloc_storage(void)
      * never reset an observable lock. */
     spin_init(&t->park_lock);
     t->park_lock.counter_sink = &park_counters;
+    spin_init(&t->eevdf_deadline_lock);
     return t;
 }
 
@@ -98,6 +99,7 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu)
         return;
     spin_init(&t->park_lock);
     t->park_lock.counter_sink = &park_counters;
+    spin_init(&t->eevdf_deadline_lock);
     refcount_set(&t->refs, 1);
     proc_lifetime_note_task_init(0);
     t->destroy_started = 0;
@@ -165,8 +167,12 @@ void proc_task_init_base(task_t *t, task_t *parent)
     t->on_cpu    = 0;
     t->owner_cpu = PROC_CPU_NONE;
     t->vfork_waiting = 0;
-    t->rq_next   = NULL;
-    t->rq_prev   = NULL;
+    t->rt_node.next = NULL;
+    t->rt_node.prev = NULL;
+    t->rt_node.queued_slot = -1;
+    t->rt_node.policy = 0;
+    t->rt_rr_remaining = 0;
+    t->rt_rr_last_account = 0;
     t->wait_next = NULL;
     t->exec_start = 0;
     t->ready_since = 0;

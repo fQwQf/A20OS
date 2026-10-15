@@ -17,3 +17,11 @@ rustc --test --edition=2021 user/svc/ufs_lifetime.rs \
 rustc --test --edition=2021 user/svc/ext4_orphan.rs \
     -o "$tmp_dir/ext4-orphan-tests"
 "$tmp_dir/ext4-orphan-tests"
+
+rustc --test --edition=2021 user/svc/ufsd_supervision.rs \
+    -o "$tmp_dir/ufsd-supervision-tests"
+"$tmp_dir/ufsd-supervision-tests"
+
+rustc --test --edition=2021 kernel/fs/diskfs/ext4_mount_state.rs \
+    -o "$tmp_dir/ext4-mount-state-tests"
+"$tmp_dir/ext4-mount-state-tests"
