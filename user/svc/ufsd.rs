@@ -40,6 +40,8 @@ const SERVICE_EVENT_TAG: u64 = 2;
 const BACKEND_FAT: u32 = 1;
 const BACKEND_VNFS: u32 = 2;
 const ERR_NOTSUPP: i64 = -95;
+#[cfg(ufsd_test_close_token_drop_ack_once)]
+const TEST_CLOSE_REPLAY_SENTINEL: u64 = 0x52504c59; /* "RPLY" */
 
 #[repr(C, align(8))]
 struct MessageBuffer([u8; protocol::MAX_MESSAGE]);
@@ -53,6 +55,7 @@ unsafe extern "C" {
                        path_len: u32, flags: u32) -> i64;
     fn a20_ufsd_umount(path: *const c_char, path_len: u32) -> i64;
     fn a20_ufsd_capacity(block_index: i32, sectors: *mut u64) -> i64;
+    fn a20_ufsd_monotonic_ns(out_ns: *mut u64) -> i64;
     fn a20_ufsd_event_queue_create(queue: *mut Handle) -> i64;
     fn a20_ufsd_event_watch(queue: Handle, target: Handle, mask: u64, tag: u64) -> i64;
     fn a20_ufsd_event_wait(queue: Handle) -> i64;
@@ -193,6 +196,40 @@ fn reap_and_drop(backend: u32, ino: u64) -> i64 {
     }
 }
 
+/// Consume one open instance exactly as the pre-token service did.
+/// `accepted_token` (0 = legacy close) is recorded in the recent-closed
+/// table once the open was consumed, even when the orphan reap afterwards
+/// failed: the table records acceptance only, and cleanup retry stays on
+/// the existing SYNC / mount-recovery paths.
+fn close_open_instance(output: Handle, backend: u32,
+                       lifetimes: &mut lifetime::Lifetimes, ino: u64,
+                       accepted_token: u64) -> i64 {
+    match lifetimes.close_with_backend(ino, accepted_token,
+        || unsafe { a20_ufsd_backend_close(backend, ino) }) {
+        Err(error) => error,
+        Ok(lifetime::CloseOutcome::Replayed) => 0,
+        Ok(lifetime::CloseOutcome::Consumed { release_orphan: release }) => {
+            if !release { return 0; }
+            diagnostic_log(output, b"UFSD_RUST_LIFETIME_PENDING: zero-open orphan\n");
+            let rc = reap_and_drop(backend, ino);
+            if rc == 0 {
+                match lifetimes.reaped(ino) {
+                    Ok(()) => {
+                        diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAPED: PASS\n");
+                        0
+                    }
+                    Err(error) => error,
+                }
+            } else {
+                diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_REAP_ERROR: errno=",
+                           rc.unsigned_abs() as u32, b"\n");
+                diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAP_FAILED: pending retained\n");
+                rc
+            }
+        }
+    }
+}
+
 fn sync_and_retry_pending(_output: Handle, backend: u32,
                           lifetimes: &mut lifetime::Lifetimes) -> i64 {
     #[cfg(ufsd_test_close_orphan)]
@@ -251,7 +288,15 @@ fn dispatch_request(
         match request.opcode {
             protocol::OP_INIT => {
                 response.out0 = protocol::ROOT_INO;
-                response.out1 = protocol::lifetime_capability_for(backend);
+                // Close-token negotiation: the client advertises the
+                // capability in request arg0; the server answers with the
+                // token capability in out1 (which implies the v2 lifetime
+                // protocol). Without the advertisement, out1 carries the
+                // plain lifetime capability exactly as before.
+                let tokens = protocol::close_confirm_requested(backend, request.arg0);
+                lifetimes.set_close_tokens_enabled(tokens);
+                response.out1 = if tokens { protocol::CLOSE_CONFIRM_CAPABILITY }
+                                else { protocol::lifetime_capability_for(backend) };
                 response.out2 = protocol::SHUTDOWN_CAPABILITY;
                 if backend == BACKEND_VNFS &&
                    request.version == protocol::LEGACY_PROTO_VERSION {
@@ -317,17 +362,14 @@ fn dispatch_request(
                 let exists = a20_ufsd_backend_has_inode(backend, request.ino);
                 if exists != 0 { exists }
                 else {
-                    let state_rc = lifetimes.opened(request.ino);
-                    if state_rc != 0 { state_rc }
-                    else {
-                        let hold_rc = a20_ufsd_backend_open(backend, request.ino);
-                        if hold_rc != 0 {
-                            let _ = lifetimes.closed(request.ino);
-                            hold_rc
-                        } else {
+                    match lifetimes.open_with_backend(request.ino,
+                        || a20_ufsd_backend_open(backend, request.ino)) {
+                        Err(error) => error,
+                        Ok(token) => {
                             #[cfg(ufsd_test_close_orphan)]
                             diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_OPEN: opens=",
                                        lifetimes.open_count(request.ino), b"\n");
+                            response.out2 = token;
                             0
                         }
                     }
@@ -337,32 +379,16 @@ fn dispatch_request(
                 if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
                     return ERR_NOTSUPP;
                 }
-                if !lifetimes.is_open(request.ino) { -2 }
-                else {
-                let close_rc = a20_ufsd_backend_close(backend, request.ino);
-                if close_rc != 0 { close_rc }
-                else { match lifetimes.closed(request.ino) {
+                close_open_instance(output, backend, lifetimes, request.ino,
+                                    request.arg0)
+            }
+            protocol::OP_CLOSE_CONFIRM => {
+                if request.version != protocol::PROTO_VERSION || backend != BACKEND_VNFS {
+                    return ERR_NOTSUPP;
+                }
+                match lifetimes.confirm_close(request.ino, request.arg0) {
+                    Ok(()) => 0,
                     Err(error) => error,
-                    Ok(true) => {
-                        diagnostic_log(output, b"UFSD_RUST_LIFETIME_PENDING: zero-open orphan\n");
-                        let rc = reap_and_drop(backend, request.ino);
-                        if rc == 0 {
-                            match lifetimes.reaped(request.ino) {
-                                Ok(()) => {
-                                    diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAPED: PASS\n");
-                                    0
-                                }
-                                Err(error) => error,
-                            }
-                        } else {
-                            diagnostic_log_number(output, b"UFSD_RUST_LIFETIME_REAP_ERROR: errno=",
-                                       rc.unsigned_abs() as u32, b"\n");
-                            diagnostic_log(output, b"UFSD_RUST_LIFETIME_REAP_FAILED: pending retained\n");
-                            rc
-                        }
-                    }
-                    Ok(false) => 0,
-                }}
                 }
             }
             protocol::OP_STATFS => { a20_ufsd_backend_statfs(backend, response); 0 }
@@ -408,6 +434,15 @@ fn serve_loop(
     backend: u32,
 ) -> i32 {
     let mut lifetimes = lifetime::Lifetimes::new();
+    // Test-only transport fault: the first successful CLOSE for a live,
+    // nonzero token is consumed normally, but its reply is dropped once.
+    // The per-service-loop state is absent from production builds.
+    #[cfg(ufsd_test_close_token_drop_ack_once)]
+    let mut close_token_drop_ack_pending = true;
+    let mut boot_ns = 0u64;
+    if unsafe { a20_ufsd_monotonic_ns(&mut boot_ns) } == 0 {
+        lifetimes.seed_token_epoch(boot_ns);
+    }
     loop {
         if service_watch {
             loop {
@@ -481,6 +516,14 @@ fn serve_loop(
         let payload_pointer = unsafe { a20_ufsd_payload_buffer() };
         let _capacity = unsafe { a20_ufsd_payload_capacity() };
         let shutdown_request = request.opcode == protocol::OP_SHUTDOWN;
+        #[cfg(ufsd_test_close_token_drop_ack_once)]
+        let close_token_drop_candidate = request.opcode == protocol::OP_CLOSE &&
+            request.arg0 != 0 &&
+            lifetimes.token_lookup(request.ino, request.arg0) == lifetime::TokenLookup::Live;
+        #[cfg(ufsd_test_close_token_drop_ack_once)]
+        let close_token_replay_candidate = request.opcode == protocol::OP_CLOSE &&
+            request.arg0 != 0 &&
+            lifetimes.token_lookup(request.ino, request.arg0) == lifetime::TokenLookup::Replay;
         let result = if shutdown_request {
             if request.version != protocol::PROTO_VERSION || request.ino != protocol::ROOT_INO ||
                request.name_len != 0 || request.payload_len != 0 {
@@ -503,6 +546,25 @@ fn serve_loop(
             response.payload_len = 0;
         }
         let _ = payload_pointer;
+        #[cfg(ufsd_test_close_token_drop_ack_once)]
+        if close_token_drop_ack_pending && close_token_drop_candidate && result == 0 &&
+           lifetimes.token_lookup(request.ino, request.arg0) == lifetime::TokenLookup::Replay {
+            close_token_drop_ack_pending = false;
+            log(output, b"UFSD_CLOSE_TOKEN_DROP_ACK_ONCE: accepted CLOSE reply dropped\n");
+            // Keep the service loop alive so the kernel can retry the same
+            // token and receive the idempotent replay ACK on the next request.
+            continue;
+        }
+        #[cfg(ufsd_test_close_token_drop_ack_once)]
+        if close_token_replay_candidate && result == 0 {
+            // This marker is confined to the explicit test ELF and contains
+            // no token value. The pre-dispatch snapshot proves this request
+            // was already accepted before it entered the dedup path. The
+            // otherwise-unused CLOSE out2 carries a test-only wire sentinel
+            // so kernel-console evidence survives service stdout teardown.
+            response.out2 = TEST_CLOSE_REPLAY_SENTINEL;
+            log(output, b"UFSD_CLOSE_TOKEN_REPLAY_ACK: PASS\n");
+        }
         if unsafe { a20_ufsd_send(filesystem.raw(), &response) } < 0 {
             let mut retry_safe = false;
             let rc = graceful_backend_unmount(output, backend, &mut lifetimes,

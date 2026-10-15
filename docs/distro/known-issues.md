@@ -1838,3 +1838,7 @@ labwc 自己吞键（`root/.config/labwc/rc.xml` 只绑了 `W-Return`/`W-d`/`W-f
 
 顺带纠正一条：先前怀疑的 `input_mux` 伪造 `EVIOCGBIT(EV_KEY)`（`k = 1..0xff`）不是本例的
 原因，同一设备上非 VTE 客户端的 Backspace 正常。该伪造仍不干净，但与本 bug 无关。
+
+## UXFS 同 inode 多 vnode 的 stale size（2026-10-15）
+
+guest r4 已复现：先打开文件两次，经一个 fd 写入并 `fsync` 后，另一个 fd 读取返回 EOF（n=0）。审查定位为独立 vnode 的 size 未同步，page-cache 读路径据此提前返回；这是待修复的 UXFS 一致性问题，和 CLOSE_CONFIRM/lost-ACK 协议分开。保留原 guest 输入与 raw log；复现细节及 source/kernel/client/image 哈希见[专项记录](../rust/uxfs-canonical-vnode-stale-size-r4.md)。

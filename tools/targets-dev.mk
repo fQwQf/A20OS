@@ -39,6 +39,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		--native-rust-ufsd-test-close-orphan-write-fail-once "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)" \
 		--native-rust-ufsd-test-close-orphan-write-fail-after "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)" \
 		--native-rust-ufsd-test-close-orphan-restore-fail "$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)" \
+		--native-rust-ufsd-test-close-token-drop-ack-once "$(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE)" \
 		--user-build-dir "$(USER_BUILD_DIR)" \
 		--rust-peer-binary "$(RUST_USER_PEER_BIN)" \
 		--rust-service-binary "$(RUST_USER_SERVICE_BIN)" \
@@ -47,5 +48,6 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		--rust-svcmgr-binary "$(RUST_USER_SVCMGR_BIN)" \
 		--rust-rtcd-binary "$(RUST_USER_RTCD_BIN)" \
 		--rust-ufsd-binary "$(RUST_USER_UFSD_BIN)" \
+		--rust-ufsd-test-close-token-binary "$(RUST_USER_UFSD_TEST_CLOSE_TOKEN_BIN)" \
 		--binaries "$(NATIVE_BINS)" \
 		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual kernel/include/uapi/a20 tools/targets-native.mk tools/targets-dev.mk tools/rust-user.mk $(if $(filter 1,$(NATIVE_RUST_PEER)),user/svc/rust_idl_peer.rs user/svc/idl_negotiation.rs user/svc/rust_peer_crt0.c user/svc/a20_services.idl tools/a20idl.py) $(if $(filter 1,$(NATIVE_RUST_IDL_SERVICE)),user/svc/rust_idl_echod.rs user/tests/test_native_rust_idl_service.c) $(if $(filter 1,$(NATIVE_RUST_ECHOD)),user/svc/rust_idl_echod.rs user/svc/a20_services.idl tools/a20idl.py) $(if $(filter 1,$(NATIVE_RUST_SVCMGR)),user/svc/svcmgr.rs user/svc/svcmgr_lifecycle.rs user/svc/svcmgr_rust_abi.c user/svc/svcmgr_rust_abi.h user/svc/a20_services.idl tools/a20idl.py) $(if $(filter 1,$(NATIVE_RUST_RTCD)),user/svc/rtcd.rs user/svc/rtcd_rust_abi.c user/svc/rtcd_rust_abi.h user/svc/a20_services.idl tools/a20idl.py) $(if $(filter 1,$(NATIVE_RUST_UFSD)),user/svc/ufsd.rs user/svc/ufsd_protocol.rs user/svc/ufsd_rust_abi.c user/svc/ufsd_rust_abi.h user/svc/ufs_backends.h user/svc/ufs_fat_backend.c user/svc/ufs_vnfs_backend.c user/svc/fscompat kernel/fs/diskfs tools/a20idl.py user/svc/a20_services.idl)"

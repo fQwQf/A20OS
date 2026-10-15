@@ -275,6 +275,21 @@ typedef struct vfile {
      * it follows the open-file object across dup/fork and is never cleared by
      * closing one descriptor alias. */
     uint8_t         envelope_kind;
+    uint8_t         mount_open_counted;
+    uint8_t         shutdown_registered;
+    uint8_t         shutdown_deferred_close;
+    uint8_t         backend_close_done;
+    uint8_t         finalize_started;
+    uint8_t         close_attempt_sent;
+    uint8_t         close_attempt_acked;
+    uint8_t         close_attempt_retry_safe;
+    /* Set only when the peer retains accepted close outcomes until an
+     * explicit CLOSE_CONFIRM. Token-only peers may receive tokenized CLOSE
+     * requests, but cannot safely retry an ambiguous outcome. */
+    uint8_t         close_token_capable;
+    uint32_t        backend_close_state;
+    mutex_t         backend_close_lock;
+    struct vfile   *shutdown_next;
     int             flags;
     size_t          offset;
     mutex_t         offset_lock;
@@ -356,6 +371,9 @@ typedef struct mount {
      * second umount reason: unmounting the filesystem a process is standing
      * in would leave its cwd naming a path that resolves nowhere. */
     int             cwd_users;
+    /* Number of live open-file objects whose vnode belongs to this mount.
+     * Descriptor dup/fork aliases share one vfile and count once. */
+    unsigned int    open_vfiles;
     /* Stable identity within the namespace, reported as the mount id by
      * /proc/self/mountinfo and statmount(2). */
     uint32_t        mnt_id;
@@ -393,6 +411,12 @@ void     vfile_ref_init(vfile_t *vf, int refs);
 void     vfile_get(vfile_t *vf);
 int      vfile_ref_read(vfile_t *vf);
 int      vfile_put_ref_only(vfile_t *vf);
+void     vfile_finalize_done(void);
+int      vfile_shutdown_snapshot_begin(void);
+vfile_t *vfile_shutdown_snapshot_at(int index);
+void     vfile_shutdown_snapshot_end(void);
+int      vfile_shutdown_close_mounted(void);
+int      vfile_backend_close(vfile_t *vf);
 vnode_t *vfs_resolve(const char *path);
 vnode_t *vfs_resolve_at(const char *path, const char *cwd);
 vnode_t *vfs_resolve_no_follow(const char *path);
@@ -446,6 +470,10 @@ int      vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
 int      vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg);
 int      vfs_sync(void);
+/* System restart/poweroff transaction. Unlike vfs_sync(), this closes global
+ * write admission, pins all mount namespaces, persists clean filesystem state
+ * and keeps the system quiesced once its commit phase begins. */
+int      vfs_system_shutdown(void);
 int      vfs_fsync(int fd);
 int      vfs_fsync_vfile(vfile_t *vf);
 int      vfs_fdatasync(int fd);

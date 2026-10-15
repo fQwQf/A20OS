@@ -8,6 +8,7 @@
 #include "mm/fault.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
+#include "mm/shutdown_write.h"
 #include "mm/vm.h"
 #include "proc/proc.h"
 #include "core/cpu.h"
@@ -63,27 +64,46 @@ static inline int process_vm_range_ok(uint64_t va, size_t n)
  */
 static int process_vm_pin_leaf(mm_struct_t *mm, vaddr_t va, int for_write,
                                void **kaddr_out, size_t *avail_out,
-                               pfn_t *pfn_out)
+                               pfn_t *pfn_out, int *write_guard_out)
 {
     *kaddr_out = NULL;
     *avail_out = 0;
     *pfn_out = PFN_NONE;
+    if (write_guard_out)
+        *write_guard_out = 0;
 
+    int write_guard = 0;
+retry:
     uint64_t flags = spin_lock_irqsave(&mm->lock);
+    mm_seg_t *vma = mm_seg_find(mm, va);
+    int needs_gate = for_write && vma &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+            (VM_FILE | VM_SHARED | VM_WRITE);
+    if (needs_gate && !write_guard) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        int admission = mm_shared_write_enter_wait();
+        if (admission < 0)
+            return admission;
+        write_guard = 1;
+        goto retry;
+    }
     int level = 0;
     vaddr_t base = 0;
     size_t size = 0;
     pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U)) {
         spin_unlock_irqrestore(&mm->lock, flags);
+        if (write_guard) mm_shared_write_leave();
         return -EFAULT;
     }
     if (for_write && (*pte & PTE_COW)) {
         spin_unlock_irqrestore(&mm->lock, flags);
+        if (write_guard) mm_shared_write_leave();
         return -EAGAIN;
     }
     if (for_write && !(*pte & PTE_W)) {
         spin_unlock_irqrestore(&mm->lock, flags);
+        if (write_guard) mm_shared_write_leave();
         return -EFAULT;
     }
     /* A level above 0 is a huge leaf: the PTE names the block head, and `va`
@@ -91,12 +111,14 @@ static int process_vm_pin_leaf(mm_struct_t *mm, vaddr_t va, int for_write,
      * taken relative to that head. */
     if (va < base || va - base >= size) {
         spin_unlock_irqrestore(&mm->lock, flags);
+        if (write_guard) mm_shared_write_leave();
         return -EFAULT;
     }
 
     pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
     if (!pfn_valid(pfn)) {
         spin_unlock_irqrestore(&mm->lock, flags);
+        if (write_guard) mm_shared_write_leave();
         return -EFAULT;
     }
     /* Pin before dropping the lock: the reference is what survives a concurrent
@@ -107,6 +129,10 @@ static int process_vm_pin_leaf(mm_struct_t *mm, vaddr_t va, int for_write,
     *pfn_out = pfn;
     *kaddr_out = (char *)pfn_to_virt(pfn) + (va - base);
     *avail_out = size - (va - base);
+    if (write_guard_out)
+        *write_guard_out = write_guard;
+    else if (write_guard)
+        mm_shared_write_leave();
     return 0;
 }
 
@@ -132,11 +158,11 @@ void a20_process_vm_mm_put(mm_struct_t *mm) { mm_destroy(mm); }
 
 int a20_process_vm_pin_leaf(mm_struct_t *mm, uintptr_t address, int for_write,
                             void **kernel_address, size_t *available,
-                            uintptr_t *frame_token)
+                            uintptr_t *frame_token, int *write_guard)
 {
     pfn_t pfn = PFN_NONE;
     int r = process_vm_pin_leaf(mm, (vaddr_t)address, for_write,
-                                kernel_address, available, &pfn);
+                                kernel_address, available, &pfn, write_guard);
     *frame_token = (uintptr_t)pfn;
     return r;
 }
@@ -205,7 +231,7 @@ long process_vm_read_kernel(struct task_t *src_task, const void *src,
         size_t avail;
         pfn_t pfn;
         int r = process_vm_pin_leaf(src_task->mm, va + done, 0, &kaddr,
-                                    &avail, &pfn);
+                                    &avail, &pfn, NULL);
         if (r < 0)
             return done > 0 ? (long)done : -EFAULT;
         if (avail > len - done)
@@ -231,8 +257,9 @@ long process_vm_write_kernel(struct task_t *dst_task, void *dst,
         void *kaddr;
         size_t avail;
         pfn_t pfn;
+        int write_guard = 0;
         int r = process_vm_pin_leaf(dst_task->mm, va + done, 1, &kaddr,
-                                    &avail, &pfn);
+                                    &avail, &pfn, &write_guard);
         if (r == -EAGAIN) {
             /* Promote the private copy through the fault path's own COW helper.
              * It takes mm->lock itself and does the shootdown and the deferred
@@ -255,6 +282,8 @@ long process_vm_write_kernel(struct task_t *dst_task, void *dst,
          * write was already superseded, which is not a transfer failure. */
         (void)mm_mark_leaf_dirty_if_writable(dst_task->mm->pgdir,
                                              va + done);
+        if (write_guard)
+            mm_shared_write_leave();
         done += avail;
     }
     return (long)done;

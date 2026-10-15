@@ -38,7 +38,7 @@ def _parallel_stamp_user(repo: str, log: str, barrier):
         build_id="same-user-build", stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="",
+        roots="", skip="", envelope_acquire_race_test="0",
     )
     barrier.wait()
     raise SystemExit(stamps.cmd_user(args))
@@ -72,7 +72,7 @@ def _different_id_user(repo: str, log: str, build_id: str, ready, release=None):
         build_id=build_id, stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="",
+        roots="", skip="", envelope_acquire_race_test="0",
     )
     if release is None:
         ready.put("second-ready")
@@ -140,7 +140,7 @@ def _parallel_stamp_user_with_barrier(repo: str, log: str, barrier):
         build_id="same-user-build", stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="",
+        roots="", skip="", envelope_acquire_race_test="0",
     )
     raise SystemExit(stamps.cmd_user(args))
 
@@ -243,7 +243,7 @@ class UserBuildLockTests(unittest.TestCase):
                     build_id="isolated-user-build", stamp=str(out / ".build-id"),
                     user_build_dir=str(out), arch="riscv64", nommu="0",
                     user_opt="-O3", profile="full", user_variant="riscv64",
-                    roots="", skip="",
+                    roots="", skip="", envelope_acquire_race_test="1",
                 )
                 self.assertEqual(stamps.cmd_user(args), 0)
             finally:
@@ -252,6 +252,7 @@ class UserBuildLockTests(unittest.TestCase):
             self.assertEqual(calls[0][-1], "clean")
             self.assertNotIn("clean", calls[1])
             self.assertTrue(all(f"BUILD_DIR={out}" in args for args in calls))
+            self.assertTrue(all("ENVELOPE_ACQUIRE_RACE_TEST=1" in args for args in calls))
             self.assertTrue((out / "init").is_file())
             self.assertTrue((out / "mksh").is_file())
             self.assertEqual(marker.read_text(), "untouched")
@@ -823,7 +824,7 @@ class UserBuildLockTests(unittest.TestCase):
                     build_id="new-user-build", stamp="user/build/riscv64/.build-id",
                     user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
                     user_opt="-O3", profile="full", user_variant="riscv64",
-                    roots="", skip="",
+                    roots="", skip="", envelope_acquire_race_test="0",
                 )
                 self.assertEqual(stamps.cmd_user(args), 0)
             finally:
@@ -979,6 +980,86 @@ class NativeRustServiceSelectorTests(unittest.TestCase):
             self.assertIn('--native-rust-svcmgr "$(NATIVE_RUST_SVCMGR)"', recipe)
             self.assertIn('--rust-svcmgr-binary "$(RUST_USER_SVCMGR_BIN)"', recipe)
 
+    def test_svcmgr_selector_uses_architecture_tagged_runtime_aliases(self):
+        for arch, tag in (("riscv32", "rv32"), ("aarch64", "aarch64"),
+                          ("x86_64", "x86_64")):
+            with self.subTest(arch=arch), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                out = repo / "isolated" / f"{arch}-user"
+                out.mkdir(parents=True)
+                runtime = out / f"svcmgr-{tag}"
+                rust = out / f"svcmgr-rust-{tag}"
+                c_reference = out / f"svcmgr-c-{tag}"
+                native = out / "native-tool"
+                stamp = out / ".native-build-id"
+                old_repo, old_submake = stamps.REPO, stamps.submake
+                stamps.REPO = repo
+
+                def fake_submake(args):
+                    runtime.write_text("C svcmgr")
+                    native.write_text("native")
+                    for path in (runtime, native):
+                        path.chmod(0o755)
+                    rust.write_text("Rust svcmgr")
+                    rust.chmod(0o755)
+                    return 0
+
+                stamps.submake = fake_submake
+                try:
+                    args = argparse.Namespace(
+                        build_id=f"same-{arch}", stamp=str(stamp),
+                        binaries=str(native), user_build_dir=str(out),
+                        arch=arch, nommu="0", opt="-O3", roots="",
+                        native_rust_peer="0", native_rust_idl_service="0",
+                        native_rust_echod="0", native_rust_svcmgr="1",
+                        rust_peer_binary="", rust_service_binary="",
+                        rust_service_test_binary="", rust_echod_binary="",
+                        rust_svcmgr_binary=str(rust),
+                    )
+                    self.assertEqual(stamps.cmd_native(args), 0)
+                    self.assertEqual(runtime.read_text(), "Rust svcmgr")
+                    self.assertEqual(c_reference.read_text(), "C svcmgr")
+                finally:
+                    stamps.REPO, stamps.submake = old_repo, old_submake
+
+    def test_rtcd_selector_uses_aarch64_goldfish_runtime_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "aarch64-user"
+            out.mkdir(parents=True)
+            runtime = out / "rtcd-aarch64.a20drv"
+            rust = out / "rtcd-rust-aarch64.a20drv"
+            c_reference = out / "rtcd-c-aarch64.a20drv"
+            native, stamp = out / "native-tool", out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+
+            def fake_submake(args):
+                runtime.write_text("C rtcd")
+                rust.write_text("Rust rtcd")
+                native.write_text("native")
+                for path in (runtime, rust, native):
+                    path.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-aarch64", stamp=str(stamp),
+                    binaries=str(native), user_build_dir=str(out), arch="aarch64",
+                    nommu="0", opt="-O3", roots="", native_rust_peer="0",
+                    native_rust_idl_service="0", native_rust_echod="0",
+                    native_rust_svcmgr="0", native_rust_rtcd="1",
+                    rust_peer_binary="", rust_service_binary="",
+                    rust_service_test_binary="", rust_echod_binary="",
+                    rust_svcmgr_binary="", rust_rtcd_binary=str(rust),
+                )
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(runtime.read_text(), "Rust rtcd")
+                self.assertEqual(c_reference.read_text(), "C rtcd")
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
 
     def test_ufsd_selector_restores_c_and_removes_inactive_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1036,6 +1117,68 @@ class NativeRustServiceSelectorTests(unittest.TestCase):
             recipe = (STAMPS.parent / "targets-dev.mk").read_text()
             self.assertIn('--native-rust-ufsd "$(NATIVE_RUST_UFSD)"', recipe)
             self.assertIn('--rust-ufsd-binary "$(RUST_USER_UFSD_BIN)"', recipe)
+
+    def test_ufsd_close_token_drop_ack_profile_is_stamped_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime = out / "ufsd-rv"
+            production = out / "ufsd-rust-rv-orphan-rust-extent-rust"
+            token_test = out / "ufsd-rust-rv-orphan-rust-extent-rust-test-drop-close-token-ack"
+            c_reference = out / "ufsd-c-rv"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                token_drop = next(x.split("=", 1)[1] for x in args
+                                  if x.startswith("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE="))
+                runtime.write_text("C ufsd")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                selected = token_test if token_drop == "1" else production
+                selected.write_text("Rust test ufsd" if token_drop == "1" else "Rust production ufsd")
+                selected.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp), binaries=str(native),
+                    user_build_dir=str(out), arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0", native_rust_echod="0",
+                    native_rust_svcmgr="0", native_rust_rtcd="0", native_rust_ufsd="1",
+                    native_rust_ufsd_ext4_orphan="1",
+                    native_rust_ufsd_test_close_orphan_write_fail_once="0",
+                    native_rust_ufsd_test_close_orphan_write_fail_after="1",
+                    native_rust_ufsd_test_close_orphan_restore_fail="0",
+                    native_rust_ufsd_test_close_token_drop_ack_once="1",
+                    rust_peer_binary="", rust_service_binary="", rust_service_test_binary="",
+                    rust_echod_binary="", rust_svcmgr_binary="", rust_rtcd_binary="",
+                    rust_ufsd_binary=str(token_test),
+                    rust_ufsd_test_close_token_binary=str(token_test))
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(runtime.read_text(), "Rust test ufsd")
+                self.assertTrue(c_reference.is_file())
+                self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1", stamp.read_text())
+                args.native_rust_ufsd_test_close_token_drop_ack_once = "0"
+                args.rust_ufsd_binary = str(production)
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(runtime.read_text(), "Rust production ufsd")
+                self.assertFalse(token_test.exists())
+                self.assertEqual(c_reference.read_text(), "C ufsd")
+                self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=0", stamp.read_text())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 2)
+            self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1", calls[0])
+            self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=0", calls[1])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,17 @@
 #define UFS_PROTO_VERSION_LEGACY 1u
 #define UFS_LIFETIME_CAPABILITY 0x5546534c49464532ull /* 'UFSLIFE2' */
 #define UFS_SHUTDOWN_CAPABILITY 0x5546535348555432ull /* 'UFSSHUT2' */
+/* 'UFSCTOK1': request close-token support. A new peer answers with
+ * UFS_CLOSE_CONFIRM_CAPABILITY after adding CLOSE_CONFIRM retirement.
+ * The INIT request carries this tag in arg0 when the client supports tokens
+ * (older services ignore arg0). A token-only peer answers with
+ * UFS_CLOSE_TOKEN_CAPABILITY; a peer that retains accepted CLOSE records until
+ * CLOSE_CONFIRM answers with UFS_CLOSE_CONFIRM_CAPABILITY. Either response
+ * implies v2 lifetime OPEN/CLOSE. Only the confirm capability permits
+ * ambiguous retries. OPEN returns its token in out2; CLOSE/CONFIRM carry it
+ * in arg0. */
+#define UFS_CLOSE_TOKEN_CAPABILITY 0x55465343544f4b31ull
+#define UFS_CLOSE_CONFIRM_CAPABILITY 0x55465343464d5231ull /* 'UFSCFMR1' */
 #define UFS_SHUTDOWN_RETRY_SAFE 0x53414645u /* no irreversible teardown began */
 #define UFS_REQ_MAGIC 0x55465352u /* 'UFSR' */
 #define UFS_RESP_MAGIC 0x55465350u /* 'UFSP' */
@@ -39,9 +50,10 @@
 #define UFS_OP_STATFS 13
 #define UFS_OP_RENAME 14
 #define UFS_OP_OPEN 15
-#define UFS_OP_CLOSE 16
+#define UFS_OP_CLOSE 16 /* arg0 = open token (0 = legacy) when close tokens negotiated */
 #define UFS_OP_LINK 17 /* v2: ino=directory, arg0=existing target inode, name=new name */
 #define UFS_OP_SHUTDOWN 18 /* v2 capability: flush/unmount and ACK before revoke */
+#define UFS_OP_CLOSE_CONFIRM 19 /* arg0=open token; retire accepted CLOSE tombstone */
 
 /* Node type in a GETATTR/LOOKUP reply (aligned with the low 4 bits of VFS_FT_*) */
 #define UFS_FT_FILE 1
@@ -83,7 +95,7 @@ typedef struct ufs_resp_hdr {
     int32_t status;   /* 0, or a negative errno */
     uint64_t out0;    /* op-dependent: ino / size / total byte count and so on */
     uint64_t out1;    /* op-dependent: type / remaining amount and so on */
-    uint64_t out2;    /* reserved */
+    uint64_t out2;    /* op-dependent: INIT shutdown capability / OPEN close token; reserved otherwise */
     uint32_t payload_len;
     uint32_t _pad;
 } ufs_resp_hdr_t;

@@ -32,6 +32,7 @@ RUST_RV32_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --s
 RUST_AARCH64_TARGET := aarch64-unknown-none-softfloat
 RUST_AARCH64_CORE_CACHE_ROOT ?= $(HOME)/.cache/a20os/rust-target-core
 RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL))
+RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
 RUST_AARCH64_RUSTSRC_DIR := $(shell $(RUSTC) --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
@@ -139,8 +140,13 @@ RUST_HANDLE_SLOT_OBJECT := $(BUILD_DIR)/rust/handle_slot.o
 RUST_HANDLE_TABLE_STATE_OBJECT := $(BUILD_DIR)/rust/handle_table_state.o
 
 ifeq ($(strip $(RUST_OPT_FLAG)),)
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL)),)
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
+endif
+ifeq ($(filter rust,$(VFS_LIFECYCLE_IMPL)),rust)
+ifeq ($(strip $(RUST_OPT_FLAG)),)
+$(error Rust VFS lifecycle requires OPT to include one of -O0/-O1/-O2/-O3/-Os)
+endif
 endif
 endif
 
@@ -1439,6 +1445,40 @@ $(RUST_TASK_CONSTRUCTION_OBJECT): $(RUST_TASK_CONSTRUCTION_SRC) tools/rust-kerne
 		$< -o $@
 endif
 
+# MM_SHUTDOWN_WRITE owns write-admission/generation decisions. C retains
+# wait-queue parking, MM snapshots, page-table edits, cache dirtying and TLB
+# shootdown operations.
+RUST_MM_SHUTDOWN_WRITE_SRC := kernel/mm/shutdown_write.rs
+RUST_MM_SHUTDOWN_WRITE_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
+RUST_MM_SHUTDOWN_WRITE_OBJECT := $(BUILD_DIR)/rust/mm_shutdown_write.o
+
+ifeq ($(MM_SHUTDOWN_WRITE_IMPL),rust)
+ifeq ($(strip $(RUST_MM_SHUTDOWN_WRITE_TARGET)),)
+$(error MM_SHUTDOWN_WRITE_IMPL=rust has no Rust target for ARCH=$(ARCH))
+endif
+RUST_MM_SHUTDOWN_WRITE_FLAGS_STAMP := $(BUILD_DIR)/rust/.mm-shutdown-write-flags
+.PHONY: FORCE_RUST_MM_SHUTDOWN_WRITE_FLAGS
+FORCE_RUST_MM_SHUTDOWN_WRITE_FLAGS:
+
+$(RUST_MM_SHUTDOWN_WRITE_FLAGS_STAMP): FORCE_RUST_MM_SHUTDOWN_WRITE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MM_SHUTDOWN_WRITE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MM_SHUTDOWN_WRITE_OBJECT): $(RUST_MM_SHUTDOWN_WRITE_SRC) kernel/include/mm/shutdown_write.h tools/rust-kernel.mk $(RUST_MM_SHUTDOWN_WRITE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MM_SHUTDOWN_WRITE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+endif
+
 # RT_SCHED owns bounded priority queues, bandwidth accounting and RR quantum
 # arithmetic; C retains runqueue locking, task lifetime and dispatch mechanics.
 RUST_RT_SCHED_SRC := kernel/proc/rt_sched.rs
@@ -1510,6 +1550,7 @@ endif
 # alloc_lock and the raw bitmap, descriptor, inode-write, and journal calls.
 RUST_EXT4_EXTENT_TXN_SRC := kernel/fs/diskfs/ext4_extent_txn.rs
 RUST_EXT4_MOUNT_STATE_SRC := kernel/fs/diskfs/ext4_mount_state.rs
+RUST_EXT4_SYNC_PLAN_SRC := kernel/fs/diskfs/ext4_sync_plan.rs
 RUST_EXT4_EXTENT_TXN_TARGET_x86_64 := x86_64-unknown-none
 RUST_EXT4_EXTENT_TXN_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
 RUST_EXT4_EXTENT_TXN_TARGET_loongarch64 := loongarch64-unknown-none
@@ -1531,11 +1572,34 @@ $(RUST_EXT4_EXTENT_TXN_FLAGS_STAMP): FORCE_RUST_EXT4_EXTENT_TXN_FLAGS
 	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_EXT4_EXTENT_TXN_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
-$(RUST_EXT4_EXTENT_TXN_OBJECT): $(RUST_EXT4_EXTENT_TXN_SRC) $(RUST_EXT4_MOUNT_STATE_SRC) tools/rust-kernel.mk $(RUST_EXT4_EXTENT_TXN_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+$(RUST_EXT4_EXTENT_TXN_OBJECT): $(RUST_EXT4_EXTENT_TXN_SRC) $(RUST_EXT4_MOUNT_STATE_SRC) $(RUST_EXT4_SYNC_PLAN_SRC) tools/rust-kernel.mk $(RUST_EXT4_EXTENT_TXN_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
 	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
 		--target $(RUST_EXT4_EXTENT_TXN_TARGET) $(RUST_TARGET_OBJECT_FLAGS) \
 		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
 		-C codegen-units=1 -C relocation-model=static $< -o $@
 
+endif
+
+# VFS_LIFECYCLE owns the system-shutdown phase and per-vfile close outcome
+# state; C retains registries, references, locks, RPC facts, and I/O callbacks.
+RUST_VFS_LIFECYCLE_SRC := kernel/fs/vfs/vfs_lifecycle.rs
+RUST_VFS_LIFECYCLE_SHUTDOWN_SRC := kernel/fs/vfs/shutdown_state.rs
+RUST_VFS_LIFECYCLE_VFILE_SRC := kernel/fs/vfs/vfile_lifecycle.rs
+RUST_VFS_LIFECYCLE_TARGET := $(RUST_EXT4_EXTENT_TXN_TARGET)
+RUST_VFS_LIFECYCLE_OBJECT := $(BUILD_DIR)/rust/vfs_lifecycle.o
+ifeq ($(VFS_LIFECYCLE_IMPL),rust)
+ifeq ($(strip $(RUST_VFS_LIFECYCLE_TARGET)),)
+$(error VFS_LIFECYCLE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+RUST_VFS_LIFECYCLE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-lifecycle-flags
+.PHONY: FORCE_RUST_VFS_LIFECYCLE_FLAGS
+FORCE_RUST_VFS_LIFECYCLE_FLAGS:
+$(RUST_VFS_LIFECYCLE_FLAGS_STAMP): FORCE_RUST_VFS_LIFECYCLE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_LIFECYCLE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+$(RUST_VFS_LIFECYCLE_OBJECT): $(RUST_VFS_LIFECYCLE_SRC) $(RUST_VFS_LIFECYCLE_SHUTDOWN_SRC) $(RUST_VFS_LIFECYCLE_VFILE_SRC) kernel/include/fs/vfs/shutdown.h tools/rust-kernel.mk $(RUST_VFS_LIFECYCLE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj --target $(RUST_VFS_LIFECYCLE_TARGET) $(RUST_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $< -o $@
 endif

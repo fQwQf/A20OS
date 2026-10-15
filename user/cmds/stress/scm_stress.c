@@ -1,15 +1,25 @@
+#define _GNU_SOURCE
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <poll.h>
 #include <stddef.h>
 #include <sys/un.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
+#include <sys/eventfd.h>
+#include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/wait.h>
+#include "../core/envelope_abi.h"
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0x40000000
@@ -24,6 +34,16 @@
 #ifndef SO_PEERCRED
 #define SO_PEERCRED 17
 #endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+
+#define SCM_ENV_OBJ_TASK        1
+#define SCM_ENV_OBJ_TIMER       9
+#define SCM_ENV_OBJ_EVENT_QUEUE 8
+#define SCM_ENV_OBJ_SOCKET      5
+#define SCM_ENV_OBJ_FILE        3
+#define SCM_SOURCE_SIGNALFD     32
 
 #ifndef HAVE_STRUCT_UCRED
 #if defined(__GLIBC__) || defined(_GNU_SOURCE)
@@ -187,6 +207,349 @@ static int raw_control_test(int fd) {
     close(pair[1]);
     puts("SCM_STRESS: native-wire-lengths PASS");
     return 0;
+}
+
+static long scm_test_envelope_create(unsigned propagation_types)
+{
+    struct env_policy policy;
+    memset(&policy, 0, sizeof(policy));
+    policy.allowed_types = (1u << SCM_ENV_OBJ_FILE) |
+                           (1u << SCM_ENV_OBJ_SOCKET) |
+                           (1u << SCM_ENV_OBJ_EVENT_QUEUE) |
+                           (1u << SCM_ENV_OBJ_TIMER) |
+                           (1u << SCM_ENV_OBJ_TASK);
+    for (size_t i = 0; i < 32; ++i)
+        policy.rights_by_class[i] = ~0ull;
+    policy.op_budget = 1000000;
+    policy.data_budget = 1u << 20;
+    policy.propagation_types = propagation_types;
+    return syscall(SYS_a20_envelope_create, &policy, 0L);
+}
+
+static int scm_test_object_fd(int kind)
+{
+    switch (kind) {
+    case SCM_ENV_OBJ_FILE:
+        return open("/scm_envelope_source", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    case SCM_ENV_OBJ_SOCKET:
+        return socket(AF_UNIX, SOCK_DGRAM, 0);
+    case SCM_ENV_OBJ_EVENT_QUEUE:
+        return eventfd(0, 0);
+    case SCM_SOURCE_SIGNALFD: {
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGUSR1);
+        return signalfd(-1, &mask, SFD_NONBLOCK);
+    }
+    case SCM_ENV_OBJ_TIMER:
+        return timerfd_create(CLOCK_MONOTONIC, 0);
+    case SCM_ENV_OBJ_TASK: {
+        long fd = syscall(SYS_pidfd_open, (int)getpid(), 0);
+        return fd > INT32_MAX ? -1 : (int)fd;
+    }
+    default:
+        return -1;
+    }
+}
+
+static int scm_envelope_class_case(int kind, unsigned propagation, int allow)
+{
+    long env = scm_test_envelope_create(propagation);
+    if (env < 0)
+        return fail("envelope class create");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("envelope class fork");
+    if (child == 0) {
+        if (syscall(SYS_a20_envelope_enter, env) < 0)
+            _exit(10);
+        int pair[2];
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair) < 0)
+            _exit(11);
+        int source = scm_test_object_fd(kind);
+        if (source < 0)
+            _exit(12);
+        char payload = 'v';
+        errno = 0;
+        int sent = send_fds(pair[0], &source, 1, &payload, 1, 0);
+        if (!allow) {
+            if (sent != -1 || errno != EPERM)
+                _exit(13);
+        } else {
+            int received = -1;
+            char byte = 0;
+            if (sent != 1 || recv_fds(pair[1], &received, 1, &byte, 1,
+                                     0, NULL) != 1 || byte != payload)
+                _exit(14);
+            close(received);
+        }
+        close(source);
+        close(pair[0]);
+        close(pair[1]);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        printf("SCM_STRESS: envelope class=%d allow=%d child-status=%d\n",
+               kind, allow, status);
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct scm_aba_race {
+    int target_fd;
+    int file_fd;
+    int socket_fd;
+    int transport[2];
+    volatile unsigned ready;
+    volatile int go;
+    volatile int stop;
+    volatile int active;
+    volatile int sender_primed;
+    volatile int replacement_started;
+    volatile int leak;
+    volatile int unexpected;
+    volatile unsigned attempts;
+    volatile unsigned active_attempts;
+    volatile unsigned post_replacement_attempts;
+    volatile unsigned replacements;
+    volatile unsigned sent_socket;
+    volatile unsigned denied_file;
+    volatile unsigned identity_mismatch;
+} scm_aba_race_t;
+
+#define SCM_ABA_RACE_ITERATIONS 20000
+
+static void *scm_aba_replacer(void *opaque)
+{
+    scm_aba_race_t *race = opaque;
+    __atomic_fetch_add(&race->ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&race->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    __atomic_store_n(&race->active, 1, __ATOMIC_RELEASE);
+    /* The sender pauses after priming the active phase. Replace the target
+     * once before releasing it, proving subsequent send attempts overlap the
+     * close/reuse churn rather than merely preceding it. */
+    while (!__atomic_load_n(&race->sender_primed, __ATOMIC_ACQUIRE))
+        sched_yield();
+    if (dup2(race->socket_fd, race->target_fd) < 0) {
+        __atomic_store_n(&race->unexpected, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&race->active, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&race->stop, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_fetch_add(&race->replacements, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&race->replacement_started, 1, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < SCM_ABA_RACE_ITERATIONS; ++i) {
+        if (dup2(race->socket_fd, race->target_fd) < 0) {
+            __atomic_store_n(&race->unexpected, 1, __ATOMIC_RELEASE);
+            break;
+        }
+        __atomic_fetch_add(&race->replacements, 1, __ATOMIC_RELAXED);
+        sched_yield();
+        if (dup2(race->file_fd, race->target_fd) < 0) {
+            __atomic_store_n(&race->unexpected, 1, __ATOMIC_RELEASE);
+            break;
+        }
+        __atomic_fetch_add(&race->replacements, 1, __ATOMIC_RELAXED);
+        sched_yield();
+    }
+    __atomic_store_n(&race->active, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&race->stop, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *scm_aba_sender(void *opaque)
+{
+    scm_aba_race_t *race = opaque;
+    __atomic_fetch_add(&race->ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&race->go, __ATOMIC_ACQUIRE))
+        sched_yield();
+    unsigned attempts = 0;
+    while (attempts++ < SCM_ABA_RACE_ITERATIONS) {
+        char payload = 'a';
+        if (__atomic_load_n(&race->active, __ATOMIC_ACQUIRE))
+            __atomic_fetch_add(&race->active_attempts, 1, __ATOMIC_RELAXED);
+        if (attempts == 32) {
+            __atomic_store_n(&race->sender_primed, 1, __ATOMIC_RELEASE);
+            while (!__atomic_load_n(&race->replacement_started,
+                                    __ATOMIC_ACQUIRE))
+                sched_yield();
+        }
+        if (__atomic_load_n(&race->replacement_started, __ATOMIC_ACQUIRE))
+            __atomic_fetch_add(&race->post_replacement_attempts, 1,
+                               __ATOMIC_RELAXED);
+        int sent = send_fds(race->transport[0], &race->target_fd, 1,
+                            &payload, 1, 0);
+        __atomic_fetch_add(&race->attempts, 1, __ATOMIC_RELAXED);
+        if (sent == 1) {
+            int received = -1;
+            char byte = 0;
+            if (recv_fds(race->transport[1], &received, 1, &byte, 1,
+                         0, NULL) != 1 || byte != payload) {
+                __atomic_store_n(&race->unexpected, 1, __ATOMIC_RELEASE);
+                break;
+            }
+            int socket_type = 0;
+            socklen_t socket_type_len = sizeof(socket_type);
+            if (getsockopt(received, SOL_SOCKET, SO_TYPE, &socket_type,
+                           &socket_type_len) < 0 ||
+                socket_type != SOCK_DGRAM)
+                __atomic_store_n(&race->leak, 1, __ATOMIC_RELEASE);
+            close(received);
+            __atomic_fetch_add(&race->sent_socket, 1, __ATOMIC_RELAXED);
+        } else if (errno == EPERM) {
+            __atomic_fetch_add(&race->denied_file, 1, __ATOMIC_RELAXED);
+        } else if (errno == EBADF) {
+            __atomic_fetch_add(&race->identity_mismatch, 1, __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&race->unexpected, 1, __ATOMIC_RELEASE);
+            break;
+        }
+        if ((attempts & 7u) == 0)
+            sched_yield();
+        if (__atomic_load_n(&race->stop, __ATOMIC_ACQUIRE) &&
+            attempts > 1000)
+            break;
+    }
+    return NULL;
+}
+
+static int scm_envelope_close_reuse_race(void)
+{
+    long env = scm_test_envelope_create(1u << SCM_ENV_OBJ_SOCKET);
+    if (env < 0)
+        return fail("envelope ABA create");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("envelope ABA fork");
+    if (child == 0) {
+        if (syscall(SYS_a20_envelope_enter, env) < 0)
+            _exit(20);
+        int transport[2];
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, transport) < 0)
+            _exit(21);
+        int file = open("/scm_aba_secret", O_CREAT | O_TRUNC | O_RDWR, 0600);
+        int socket_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        int target = 64;
+        if (file < 0 || socket_fd < 0 || dup2(file, target) != target)
+            _exit(22);
+        scm_aba_race_t race = {
+            .target_fd = target,
+            .file_fd = file,
+            .socket_fd = socket_fd,
+            .transport = {transport[0], transport[1]},
+            .ready = 0,
+            .go = 0,
+            .stop = 0,
+            .active = 0,
+            .sender_primed = 0,
+            .replacement_started = 0,
+            .leak = 0,
+            .unexpected = 0,
+            .attempts = 0,
+            .active_attempts = 0,
+            .post_replacement_attempts = 0,
+            .replacements = 0,
+            .sent_socket = 0,
+            .denied_file = 0,
+            .identity_mismatch = 0,
+        };
+        /* Establish both policy outcomes before introducing close/reuse
+         * contention, so scheduler timing cannot erase either assertion. */
+        char baseline_payload = 'b';
+        errno = 0;
+        if (send_fds(transport[0], &target, 1, &baseline_payload, 1, 0) != -1 ||
+            errno != EPERM)
+            _exit(25);
+        if (dup2(socket_fd, target) != target ||
+            send_fds(transport[0], &target, 1, &baseline_payload, 1, 0) != 1)
+            _exit(26);
+        int baseline_received = -1;
+        char baseline_byte = 0;
+        if (recv_fds(transport[1], &baseline_received, 1, &baseline_byte, 1,
+                     0, NULL) != 1 || baseline_byte != baseline_payload)
+            _exit(27);
+        int baseline_type = 0;
+        socklen_t baseline_type_len = sizeof(baseline_type);
+        if (getsockopt(baseline_received, SOL_SOCKET, SO_TYPE, &baseline_type,
+                       &baseline_type_len) < 0 || baseline_type != SOCK_DGRAM)
+            _exit(28);
+        close(baseline_received);
+        if (dup2(file, target) != target)
+            _exit(29);
+        pthread_t replacer, sender;
+        if (pthread_create(&replacer, NULL, scm_aba_replacer, &race) ||
+            pthread_create(&sender, NULL, scm_aba_sender, &race))
+            _exit(23);
+        while (__atomic_load_n(&race.ready, __ATOMIC_ACQUIRE) != 2)
+            sched_yield();
+        __atomic_store_n(&race.go, 1, __ATOMIC_RELEASE);
+        pthread_join(replacer, NULL);
+        pthread_join(sender, NULL);
+        if (__atomic_load_n(&race.leak, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&race.unexpected, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&race.attempts, __ATOMIC_ACQUIRE) == 0 ||
+            __atomic_load_n(&race.active_attempts, __ATOMIC_ACQUIRE) == 0 ||
+            __atomic_load_n(&race.post_replacement_attempts,
+                            __ATOMIC_ACQUIRE) == 0 ||
+            __atomic_load_n(&race.replacements, __ATOMIC_ACQUIRE) == 0) {
+            printf("SCM_STRESS: envelope close-reuse details leak=%d unexpected=%d "
+                   "attempts=%u active=%u post-replacement=%u replacements=%u socket=%u "
+                   "file-deny=%u identity-mismatch=%u\n",
+                   __atomic_load_n(&race.leak, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.unexpected, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.attempts, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.active_attempts, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.post_replacement_attempts,
+                                   __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.replacements, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.sent_socket, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.denied_file, __ATOMIC_ACQUIRE),
+                   __atomic_load_n(&race.identity_mismatch, __ATOMIC_ACQUIRE));
+            fflush(stdout);
+            _exit(24);
+        }
+        close(target);
+        close(file);
+        close(socket_fd);
+        close(transport[0]);
+        close(transport[1]);
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        printf("SCM_STRESS: envelope close-reuse status=%d\n", status);
+        return 1;
+    }
+    puts("SCM_STRESS: envelope-pinned-close-reuse PASS");
+    return 0;
+}
+
+static int scm_envelope_class_matrix(void)
+{
+    static const struct {
+        int source;
+        int class;
+    } cases[] = {
+        {SCM_ENV_OBJ_FILE, SCM_ENV_OBJ_FILE},
+        {SCM_ENV_OBJ_SOCKET, SCM_ENV_OBJ_SOCKET},
+        {SCM_ENV_OBJ_EVENT_QUEUE, SCM_ENV_OBJ_EVENT_QUEUE},
+        {SCM_SOURCE_SIGNALFD, SCM_ENV_OBJ_EVENT_QUEUE},
+        {SCM_ENV_OBJ_TIMER, SCM_ENV_OBJ_TIMER},
+        {SCM_ENV_OBJ_TASK, SCM_ENV_OBJ_TASK},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (scm_envelope_class_case(cases[i].source,
+                                    1u << cases[i].class, 1) != 0 ||
+            scm_envelope_class_case(cases[i].source, 0, 0) != 0)
+            return 1;
+    }
+    puts("SCM_STRESS: envelope-vfile-classes PASS");
+    return scm_envelope_close_reuse_race();
 }
 
 /* Firefox's request/reply transport emits SCM_RIGHTS even when no handles
@@ -514,6 +877,9 @@ int main(void) {
 
     if (raw_control_test(f))
         return fail("raw ancillary wire layout");
+
+    if (scm_envelope_class_matrix() != 0)
+        return 1;
 
     close(rfd);
     close(f);

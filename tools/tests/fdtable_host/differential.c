@@ -524,6 +524,44 @@ static void test_unlisted_clone_and_registry_teardown(void)
     puts("FDTABLE_DIFF: registered unpublished clone close race/teardown PASS");
 }
 
+static void test_open_slot_membership_aliases_and_fd_limit(void)
+{
+    task_t src, child;
+    vfile_t vf;
+    init_task(&src, 851);
+    memset(&child, 0, sizeof(child));
+    child.pid = 852;
+    child.limits.nofile = MAX_FILES;
+    spin_init(&child.park_lock);
+    init_vfile(&vf, 8510);
+    current_task = &src;
+    check(fdtable_install_vfile(&src, &vf, 0) == 0,
+          "membership source descriptor installed");
+    check(fdtable_dup(&src, 0, MAX_FILES - 1, 0) == MAX_FILES - 1,
+          "membership duplicate reaches highest valid descriptor");
+    check(fdtable_file_has_open_slot(&vf),
+          "membership finds same vfile through dup alias");
+    check(fdtable_copy_checked(&child, &src) == 0,
+          "membership fork clone succeeds");
+    check(fdtable_close_files((files_struct_t *)src.files, 0, src.pid) == 0 &&
+              fdtable_close_files((files_struct_t *)src.files, MAX_FILES - 1,
+                                  src.pid) == 0 &&
+              fdtable_file_has_open_slot(&vf),
+          "fork aliases keep membership after parent slots close");
+    int final_before = final_slot_hook_calls;
+    check(fdtable_close_files((files_struct_t *)child.files, 0, child.pid) == 0 &&
+              fdtable_file_has_open_slot(&vf),
+          "highest child alias retains membership after first child close");
+    check(fdtable_close_files((files_struct_t *)child.files, MAX_FILES - 1,
+                              child.pid) == 0 &&
+              !fdtable_file_has_open_slot(&vf) &&
+              final_slot_hook_calls == final_before + 1,
+          "last alias close removes membership and notifies final detach");
+    fdtable_release_files(&child);
+    fdtable_release_files(&src);
+    puts("FDTABLE_DIFF: dup/fork aliases, upper fd bound, final detach PASS");
+}
+
 static void test_stdio_slot_ownership(void)
 {
     task_t task;
@@ -885,6 +923,7 @@ int main(void)
     test_unshare_allocation_failure_preserves_shared_table();
     test_share_owner_survives_source_teardown();
     test_unlisted_clone_and_registry_teardown();
+    test_open_slot_membership_aliases_and_fd_limit();
     test_stdio_slot_ownership();
     test_fdtable_init_replaces_registered_tables();
     test_bulk_close_on_exec_allocation_paths();
@@ -923,7 +962,7 @@ int main(void)
         fdtable_release_files(&task);
         current_task = NULL;
     }
-    check(finalized_files == 41, "finalizer called once per owned file");
+    check(finalized_files == 42, "finalizer called once per owned file");
 #ifdef CONFIG_FDTABLE_STATE_RUST
     puts("FDTABLE_DIFF: rust-selected production fdtable.c PASS");
 #else

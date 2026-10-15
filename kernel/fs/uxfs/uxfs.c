@@ -42,6 +42,8 @@ typedef struct uxfs_sb {
     uint32_t               next_req_id;
     uint32_t               lifetime_mode; /* 0 unknown, 1 explicit v1, 2 v2 */
     uint32_t               shutdown_mode; /* 0 unknown/unsupported, 1 acknowledged v2 */
+    uint32_t               close_token_mode; /* 1: OPEN out2/CLOSE arg0 carry open tokens */
+    uint32_t               close_confirm_mode; /* 1: accepted tokens retire via CONFIRM */
     uint32_t               shutdown_started;
     uint64_t               server_generation;
     uint64_t               lifetime_generation;
@@ -57,6 +59,9 @@ typedef struct uxfs_vpriv {
 typedef struct uxfs_fctx {
     uxfs_sb_t *sb;
     uint64_t   ino;
+    uint64_t   close_token; /* open token from the OPEN reply out2; 0 = legacy */
+    uint8_t    close_confirm_mode;
+    uint8_t    close_accepted;
     int        is_dir;
     size_t     off;      /* file offset / directory cookie, in bytes */
 } uxfs_fctx_t;
@@ -69,8 +74,10 @@ static int uxfs_rpc_timeout(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
                     const char *name, const void *payload,
                     ufs_resp_hdr_t *resp, void *resp_payload,
                     uint32_t resp_cap, uint32_t *resp_payload_len,
-                    uint64_t deadline_ns)
+                    uint64_t deadline_ns, int *request_sent)
 {
+    if (request_sent)
+        *request_sent = 0;
     uint32_t total = sizeof(*req) + req->name_len + req->payload_len;
     uint8_t *msg = (uint8_t *)kmalloc(total);
     if (!msg)
@@ -126,6 +133,8 @@ static int uxfs_rpc_timeout(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         mutex_unlock(&sb->req_lock);
         return r == -A20_ERR_TIMED_OUT ? -ETIMEDOUT : -EIO;
     }
+    if (request_sent)
+        *request_sent = 1;
 
     /* Per-call receive buffer.  A shared static here would race across
      * mounts: req_lock serializes one mount's RPC, but concurrent RPCs on
@@ -213,7 +222,7 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
     timekeeping_get_monotonic(ts);
     uint64_t deadline_ns = ts[0] * 1000000000ull + ts[1] + 5000000000ull;
     return uxfs_rpc_timeout(sb, req, name, payload, resp, resp_payload,
-                            resp_cap, resp_payload_len, deadline_ns);
+                            resp_cap, resp_payload_len, deadline_ns, NULL);
 }
 
 static void uxfs_req_init(uxfs_sb_t *sb, ufs_req_hdr_t *req, uint32_t opcode,
@@ -248,6 +257,8 @@ static int uxfs_negotiate_lifetime_until(uxfs_sb_t *sb, uint64_t deadline_ns)
         return 0;
     }
     sb->lifetime_mode = 0;
+    sb->close_token_mode = 0;
+    sb->close_confirm_mode = 0;
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp;
     uxfs_req_init(sb, &req, UFS_OP_INIT, UFS_ROOT_INO, 0, 0, NULL, 0);
@@ -255,14 +266,26 @@ static int uxfs_negotiate_lifetime_until(uxfs_sb_t *sb, uint64_t deadline_ns)
      * v2 would let a legacy server silently ignore the frame and leave this
      * synchronous RPC blocked forever. */
     req.version = UFS_PROTO_VERSION_LEGACY;
+    /* Advertise close-token support; older services ignore arg0 and simply
+     * answer with the plain lifetime capability in out1. */
+    req.arg0 = UFS_CLOSE_CONFIRM_CAPABILITY;
     int rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0, NULL,
-                              deadline_ns);
+                              deadline_ns, NULL);
     if (rc != 0) {
         mutex_unlock(&sb->lifetime_lock);
         return rc;
     }
-    sb->lifetime_mode = resp.out1 == UFS_LIFETIME_CAPABILITY ? 2u : 1u;
+    /* UFS_CLOSE_TOKEN_CAPABILITY implies the v2 lifetime protocol plus open
+     * tokens; UFS_LIFETIME_CAPABILITY alone keeps the legacy no-token path. */
+    sb->lifetime_mode = (resp.out1 == UFS_LIFETIME_CAPABILITY ||
+                         resp.out1 == UFS_CLOSE_TOKEN_CAPABILITY ||
+                         resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY) ? 2u : 1u;
     sb->shutdown_mode = resp.out2 == UFS_SHUTDOWN_CAPABILITY ? 1u : 0u;
+    /* Only the new request/reply capability guarantees confirm-retained
+     * tombstones. A token-only peer still speaks v2 OPEN/CLOSE, but its token
+     * is not safe for ambiguous retry and is deliberately not enabled here. */
+    sb->close_token_mode = resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY ? 1u : 0u;
+    sb->close_confirm_mode = resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY ? 1u : 0u;
     printf("[UXFS] lifetime protocol version=%u server_generation=%u\n",
            sb->lifetime_mode, sb->server_generation);
     sb->lifetime_generation = sb->server_generation;
@@ -296,12 +319,16 @@ static void uxfs_detach_server(uxfs_sb_t *sb)
     sb->lifetime_server = NULL;
     sb->lifetime_mode = 0;
     sb->shutdown_mode = 0;
+    sb->close_token_mode = 0;
+    sb->close_confirm_mode = 0;
     __atomic_store_n(&sb->shutdown_started, 0, __ATOMIC_RELEASE);
 }
 
-static int uxfs_lifetime_op(uxfs_sb_t *sb, uint32_t opcode, uint64_t ino,
-                            uint64_t flags)
+static int uxfs_lifetime_open(uxfs_sb_t *sb, uint64_t ino, uint64_t flags,
+                              uint64_t *close_token)
 {
+    if (close_token)
+        *close_token = 0;
     int rc = uxfs_negotiate_lifetime(sb);
     if (rc != 0)
         return rc;
@@ -311,9 +338,82 @@ static int uxfs_lifetime_op(uxfs_sb_t *sb, uint32_t opcode, uint64_t ino,
     if (sb->lifetime_mode == 1u)
         return 0;
     ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(sb, &req, opcode, ino, flags, 0, NULL, 0);
-    return uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
+    ufs_resp_hdr_t resp = {0};
+    uxfs_req_init(sb, &req, UFS_OP_OPEN, ino, flags, 0, NULL, 0);
+    rc = uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
+    if (rc == 0 && close_token && sb->close_token_mode)
+        *close_token = resp.out2;
+    return rc;
+}
+
+/* CLOSE is not safe to blindly replay: the service can consume the open
+ * reference and then fail while reaping an orphan, or consume it and lose the
+ * reply.  Report separately whether this request received its matching ACK.
+ * Only status 0 is success; any negative ACK is conservatively ambiguous
+ * because backend cleanup may have happened before the error was produced. */
+static int uxfs_lifetime_close(uxfs_sb_t *sb, uint64_t ino, uint64_t token,
+                               int *acked,
+                               int *request_sent)
+{
+    if (acked)
+        *acked = 0;
+    if (request_sent)
+        *request_sent = 0;
+    int rc = uxfs_negotiate_lifetime(sb);
+    if (rc != 0)
+        return rc;
+    if (sb->lifetime_mode == 1u) {
+        if (acked)
+            *acked = 1; /* v1 never took an OPEN reference */
+        return 0;
+    }
+
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp = {0};
+    uxfs_req_init(sb, &req, UFS_OP_CLOSE, ino, 0, 0, NULL, 0);
+    req.arg0 = token;
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    uint64_t deadline = ts[0] * 1000000000ull + ts[1] + 5000000000ull;
+    rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0, NULL,
+                          deadline, request_sent);
+    if (resp.magic == UFS_RESP_MAGIC && resp.req_id == req.req_id &&
+        resp.opcode == UFS_OP_CLOSE && acked)
+        *acked = 1;
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+    kinfo("[UFS-CT-TRACE] rpc CLOSE ino=%lu sent=%d acked=%d status=%d out2=%lu\n",
+          (unsigned long)ino, request_sent ? *request_sent : -1,
+          acked ? *acked : -1, rc, (unsigned long)resp.out2);
+#endif
+    return rc;
+}
+
+/* Retire a server tombstone only after the CLOSE ACK reached this client.
+ * A lost CONFIRM ACK is safe: the server treats an unknown confirmation as
+ * an idempotent success, so the retained fctx can retry this operation. */
+static int uxfs_lifetime_close_confirm(uxfs_sb_t *sb, uint64_t ino,
+                                       uint64_t token, int *acked,
+                                       int *request_sent)
+{
+    if (acked) *acked = 0;
+    if (request_sent) *request_sent = 0;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp = {0};
+    uxfs_req_init(sb, &req, UFS_OP_CLOSE_CONFIRM, ino, token, 0, NULL, 0);
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    uint64_t deadline = ts[0] * 1000000000ull + ts[1] + 5000000000ull;
+    int rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0, NULL,
+                              deadline, request_sent);
+    if (resp.magic == UFS_RESP_MAGIC && resp.req_id == req.req_id &&
+        resp.opcode == UFS_OP_CLOSE_CONFIRM && acked)
+        *acked = 1;
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+    kinfo("[UFS-CT-TRACE] rpc CONFIRM ino=%lu sent=%d acked=%d status=%d\n",
+          (unsigned long)ino, request_sent ? *request_sent : -1,
+          acked ? *acked : -1, rc);
+#endif
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -735,18 +835,71 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 static int uxfs_fclose(vfile_t *vf)
 {
     uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    int close_rc = 0;
-    if (fc) {
-        /* Flush dirty pages while the ufsd channel is guaranteed alive:
-         * user-space FS servers crash/restart routinely, so write-behind
-         * past close would race server death. */
-        if (vf->vnode)
-            page_cache_writeback_vnode(vf->vnode, NULL, NULL);
-        close_rc = uxfs_lifetime_op(fc->sb, UFS_OP_CLOSE, fc->ino, 0);
-        kfree(fc);
-        vf->priv = NULL;
+    if (!fc)
+        return 0;
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+    kinfo("[UFS-CT-TRACE] uxfs_fclose vf=%lu ino=%lu accepted=%u confirm=%u token_cap=%u\n",
+          (unsigned long)vf->identity, (unsigned long)fc->ino,
+          (unsigned)fc->close_accepted,
+          (unsigned)fc->close_confirm_mode,
+          (unsigned)vf->close_token_capable);
+#endif
+    vf->close_attempt_sent = 0;
+    vf->close_attempt_acked = 0;
+    vf->close_attempt_retry_safe = 0;
+
+    /* A failed page writeback is known to precede CLOSE, so retain the
+     * context and allow a later close/shutdown retry without changing the
+     * server's OPEN count. */
+    if (vf->vnode) {
+        int flush_rc = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
+        if (flush_rc < 0) {
+            vf->close_attempt_retry_safe = 1;
+            return flush_rc;
+        }
     }
-    return close_rc;
+
+    int acked = 0;
+    int request_sent = 0;
+    int close_rc = 0;
+    if (!fc->close_accepted) {
+        close_rc = uxfs_lifetime_close(fc->sb, fc->ino, fc->close_token,
+                                       &acked, &request_sent);
+        vf->close_attempt_sent = request_sent != 0;
+        if (close_rc != 0 || !acked) {
+            /* Only token-confirm peers may retry a CLOSE whose ACK was
+             * ambiguous. Token-only peers retain the original sticky state. */
+            vf->close_attempt_retry_safe = !request_sent;
+            return close_rc < 0 ? close_rc : -EIO;
+        }
+        if (fc->close_confirm_mode)
+            fc->close_accepted = 1;
+    }
+    if (fc->close_confirm_mode && fc->close_accepted) {
+        acked = 0;
+        request_sent = 0;
+        close_rc = uxfs_lifetime_close_confirm(fc->sb, fc->ino,
+                                               fc->close_token, &acked,
+                                               &request_sent);
+        vf->close_attempt_sent = request_sent != 0;
+        vf->close_attempt_acked = acked != 0 && close_rc == 0;
+        if (close_rc != 0 || !acked) {
+            vf->close_attempt_retry_safe = !request_sent;
+            return close_rc < 0 ? close_rc : -EIO;
+        }
+    } else {
+        vf->close_attempt_acked = 1;
+    }
+    if (close_rc != 0 || !vf->close_attempt_acked) {
+        /* Rust close lifecycle owns retry/ambiguity policy. This adapter only
+         * reports transport facts; a missing post-send ACK is ambiguous. */
+        if (!request_sent)
+            vf->close_attempt_retry_safe = 1;
+        return close_rc < 0 ? close_rc : -EIO;
+    }
+    kfree(fc);
+    vf->priv = NULL;
+    return 0;
 }
 
 static vfile_ops_t g_uxfs_fops = {
@@ -761,29 +914,37 @@ static vfile_ops_t g_uxfs_fops = {
 static struct vfile *uxfs_open_vnode(vnode_t *vn, int flags)
 {
     uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    if (uxfs_lifetime_op(p->sb, UFS_OP_OPEN, vn->ino,
-                         (uint64_t)(flags & 3)) != 0)
-        return NULL;
+    /* Reserve every local object before OPEN creates a server-side lifetime.
+     * Once the peer accepts OPEN, there must be no allocation-failure path
+     * that loses the only close token needed to compensate that reference. */
     uxfs_fctx_t *fc = (uxfs_fctx_t *)kmalloc(sizeof(uxfs_fctx_t));
-    if (!fc) {
-        (void)uxfs_lifetime_op(p->sb, UFS_OP_CLOSE, vn->ino, 0);
+    if (!fc)
+        return NULL;
+    vfile_t *vf = vfile_alloc();
+    if (!vf) {
+        kfree(fc);
+        return NULL;
+    }
+
+    uint64_t close_token = 0;
+    if (uxfs_lifetime_open(p->sb, vn->ino, (uint64_t)(flags & 3),
+                           &close_token) != 0) {
+        vfile_free(vf);
+        kfree(fc);
         return NULL;
     }
     memset(fc, 0, sizeof(*fc));
     fc->sb     = p->sb;
     fc->ino    = vn->ino;
+    fc->close_token = close_token;
+    fc->close_confirm_mode = close_token != 0 && p->sb->close_confirm_mode;
     fc->is_dir = p->is_dir;
     fc->off    = (flags & 0x400 /* O_APPEND */) ? vn->size : 0;
 
-    vfile_t *vf = vfile_alloc();
-    if (!vf) {
-        kfree(fc);
-        (void)uxfs_lifetime_op(p->sb, UFS_OP_CLOSE, vn->ino, 0);
-        return NULL;
-    }
     vf->vnode = vn;
     vnode_get(vn);
     vf->flags  = flags;
+    vf->close_token_capable = fc->close_confirm_mode;
     vf->offset = fc->off;
     vfile_ref_init(vf, 1);
     vf->ops  = &g_uxfs_fops;
@@ -1015,7 +1176,7 @@ int uxfs_unmount(struct vnode *root)
                           NULL, 0);
             req.version = UFS_PROTO_VERSION;
             rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0,
-                                  NULL, deadline_ns);
+                                  NULL, deadline_ns, NULL);
             if (rc < 0) {
                 if (a20_channel_peer_closed(sb->ep)) {
                     uxfs_detach_server(sb);

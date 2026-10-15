@@ -26,6 +26,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -33,6 +34,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "../core/envelope_abi.h"
 
 #define KEY_SPEC_PROCESS_KEYRING (-2)
 #define KEY_SPEC_SESSION_KEYRING (-3)
@@ -490,6 +492,247 @@ static int test_pidfd(void)
         return fail("pidfd_getfd EMFILE leaked target vfile", write_errno);
     }
     printf("SYSCALL_EXT: pidfd_getfd EMFILE rollback PASS\n");
+    return 0;
+}
+
+static volatile sig_atomic_t pidfd_siginfo_pipe = -1;
+static volatile sig_atomic_t pidfd_siginfo_seen;
+
+static void pidfd_siginfo_handler(int signo, siginfo_t *info, void *context)
+{
+    (void)context;
+    int value = (signo == SIGUSR1 && info) ? info->si_value.sival_int : -1;
+    pidfd_siginfo_seen = 1;
+    int fd = (int)pidfd_siginfo_pipe;
+    if (fd >= 0)
+        (void)write(fd, &value, sizeof(value));
+}
+
+static int test_pidfd_siginfo_identity(void)
+{
+    int ready[2], report[2];
+    if (pipe(ready) < 0 || pipe(report) < 0)
+        return fail("pidfd siginfo pipes", errno);
+    pid_t child = fork();
+    if (child < 0) {
+        close(ready[0]); close(ready[1]);
+        close(report[0]); close(report[1]);
+        return fail("pidfd siginfo fork", errno);
+    }
+    if (child == 0) {
+        close(ready[0]);
+        close(report[0]);
+        pidfd_siginfo_pipe = report[1];
+        pidfd_siginfo_seen = 0;
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_sigaction = pidfd_siginfo_handler;
+        action.sa_flags = SA_SIGINFO;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) < 0)
+            _exit(1);
+        char byte = 'r';
+        if (write(ready[1], &byte, 1) != 1)
+            _exit(2);
+        close(ready[1]);
+        while (!pidfd_siginfo_seen)
+            (void)pause();
+        _exit(0);
+    }
+
+    close(ready[1]);
+    close(report[1]);
+    char ready_byte = 0;
+    if (read(ready[0], &ready_byte, 1) != 1 || ready_byte != 'r') {
+        close(ready[0]); close(report[0]);
+        kill(child, SIGKILL); waitpid(child, NULL, 0);
+        return fail("pidfd siginfo child ready", errno);
+    }
+    close(ready[0]);
+    int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+    if (pidfd < 0) {
+        close(report[0]); kill(child, SIGKILL); waitpid(child, NULL, 0);
+        return fail("pidfd siginfo open", errno);
+    }
+
+    errno = 0;
+    long bad = syscall(SYS_pidfd_send_signal, pidfd, SIGUSR1,
+                       (void *)(uintptr_t)1, 0);
+    int bad_errno = errno;
+    if (bad != -1 || bad_errno != EFAULT) {
+        close(pidfd); close(report[0]);
+        kill(child, SIGKILL); waitpid(child, NULL, 0);
+        return fail("pidfd siginfo invalid usercopy", bad_errno);
+    }
+    printf("SYSCALL_EXT: pidfd siginfo EFAULT PASS\n");
+
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    info.si_signo = SIGUSR1;
+    info.si_code = SI_QUEUE;
+    info.si_value.sival_int = 0x51a7;
+    if (syscall(SYS_pidfd_send_signal, pidfd, SIGUSR1, &info, 0) != 0) {
+        int e = errno;
+        close(pidfd); close(report[0]);
+        kill(child, SIGKILL); waitpid(child, NULL, 0);
+        return fail("pidfd siginfo valid send", e);
+    }
+
+    struct pollfd pfd = { .fd = report[0], .events = POLLIN };
+    int ready_result = poll(&pfd, 1, 3000);
+    int received_value = 0;
+    ssize_t got = ready_result == 1 ?
+        read(report[0], &received_value, sizeof(received_value)) : -1;
+    close(pidfd);
+    close(report[0]);
+    int status = 0;
+    int waited = waitpid(child, &status, 0) == child;
+    if (ready_result != 1 || got != (ssize_t)sizeof(received_value) ||
+        received_value != 0x51a7 || !waited || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return fail("pidfd siginfo task identity", errno);
+    printf("SYSCALL_EXT: pidfd siginfo task identity PASS\n");
+    return 0;
+}
+
+static ssize_t send_one_right(int sock, int fd)
+{
+    char byte = 'p';
+    struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+    union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } control;
+    memset(control.buf, 0, sizeof(control.buf));
+    struct msghdr mh;
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof(control.buf);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type = SCM_RIGHTS;
+    cm->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &fd, sizeof(fd));
+    return sendmsg(sock, &mh, 0);
+}
+
+/* A pidfd denotes a stable task object, so SCM_RIGHTS propagation must see
+ * TASK on the pinned vfile even through dup aliases. The denial happens
+ * before queue insertion; the following ordinary FILE message is the only
+ * control message the receiver may observe. */
+static int test_pidfd_scm_task_class(void)
+{
+    struct env_policy policy;
+    memset(&policy, 0, sizeof(policy));
+    /* The kernel currently defines object classes 0 through 16. */
+    policy.allowed_types = 0x1ffffu;
+    for (size_t i = 0; i < sizeof(policy.rights_by_class) /
+                            sizeof(policy.rights_by_class[0]); i++)
+        policy.rights_by_class[i] = ~0ull;
+    policy.op_budget = 1000000;
+    policy.data_budget = 1 << 20;
+    policy.propagation_types = 1u << ENV_OBJ_FILE;
+    long env_id = syscall(SYS_a20_envelope_create, &policy, 0L);
+    if (env_id < 0)
+        return fail("pidfd task-class envelope", errno);
+
+    int sv[2], probe[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) < 0 || pipe(probe) < 0)
+        return fail("pidfd task-class socketpair", errno);
+    int probe_flags = fcntl(probe[0], F_GETFL);
+    if (probe_flags < 0 || fcntl(probe[0], F_SETFL, probe_flags | O_NONBLOCK) < 0) {
+        close(sv[0]); close(sv[1]); close(probe[0]); close(probe[1]);
+        return fail("pidfd task-class pipe nonblock", errno);
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        close(sv[0]); close(sv[1]); close(probe[0]); close(probe[1]);
+        return fail("pidfd task-class fork", errno);
+    }
+    if (child == 0) {
+        close(sv[0]);
+        close(probe[0]);
+        if (syscall(SYS_a20_envelope_enter, env_id) < 0)
+            _exit(1);
+        int pidfd = (int)syscall(SYS_pidfd_open, (int)getpid(), 0);
+        if (pidfd < 0)
+            _exit(2);
+        int alias = dup(pidfd);
+        if (alias < 0)
+            _exit(3);
+        errno = 0;
+        if (send_one_right(sv[1], alias) != -1 || errno != EPERM)
+            _exit(4);
+        errno = 0;
+        if (send_one_right(sv[1], probe[1]) != -1 || errno != EPERM)
+            _exit(5);
+
+        int file = open("/tmp/pidfd-task-class.txt",
+                        O_CREAT | O_RDWR | O_TRUNC, 0600);
+        if (file < 0)
+            _exit(6);
+        if (write(file, "f", 1) != 1 || lseek(file, 0, SEEK_SET) < 0 ||
+            send_one_right(sv[1], file) != 1)
+            _exit(7);
+        close(file);
+        close(alias);
+        close(pidfd);
+        close(probe[1]);
+        close(sv[1]);
+        _exit(0);
+    }
+
+    close(sv[1]);
+    close(probe[1]);
+    char byte = 0;
+    int received = -1;
+    struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+    union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } control;
+    memset(control.buf, 0, sizeof(control.buf));
+    struct msghdr mh;
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof(control.buf);
+    ssize_t n = recvmsg(sv[0], &mh, 0);
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    int valid = n == 1 && byte == 'p' && cm &&
+                cm->cmsg_level == SOL_SOCKET &&
+                cm->cmsg_type == SCM_RIGHTS &&
+                cm->cmsg_len == CMSG_LEN(sizeof(int));
+    if (valid)
+        memcpy(&received, CMSG_DATA(cm), sizeof(received));
+    char file_byte = 0;
+    if (!valid || read(received, &file_byte, 1) != 1 || file_byte != 'f')
+        valid = 0;
+    if (received >= 0)
+        close(received);
+
+    int status = 0;
+    int child_ok = waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0;
+
+    /* Failed pidfd/pipe propagation must not leave queued control messages.
+     * EOF on the pipe also proves the denied pipe-writer transfer released
+     * its temporary vfile reference after both local writer slots closed. */
+    errno = 0;
+    struct iovec empty_iov = { .iov_base = &byte, .iov_len = 1 };
+    struct msghdr empty_mh;
+    memset(&empty_mh, 0, sizeof(empty_mh));
+    empty_mh.msg_iov = &empty_iov;
+    empty_mh.msg_iovlen = 1;
+    ssize_t extra = recvmsg(sv[0], &empty_mh, MSG_DONTWAIT);
+    int extra_errno = errno;
+    char pipe_byte;
+    ssize_t pipe_read = read(probe[0], &pipe_byte, 1);
+    int pipe_errno = errno;
+    close(sv[0]);
+    close(probe[0]);
+    if (!child_ok || !valid || extra != 0 || pipe_read != 0)
+        return fail("pidfd task-class SCM rollback",
+                    extra < 0 ? extra_errno : pipe_read < 0 ? pipe_errno : 0);
+
+    printf("SYSCALL_EXT: pidfd TASK SCM class and rollback PASS\n");
     return 0;
 }
 
@@ -1671,6 +1914,10 @@ int main(void)
     if (test_fanotify() < 0)
         return 1;
     if (test_pidfd() < 0)
+        return 1;
+    if (test_pidfd_siginfo_identity() < 0)
+        return 1;
+    if (test_pidfd_scm_task_class() < 0)
         return 1;
     if (test_vm_cache_helpers() < 0)
         return 1;

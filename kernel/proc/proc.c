@@ -22,6 +22,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/shutdown_write.h"
 #include "core/cpu.h"
 #include "core/lock_counters.h"
 #include "core/perf.h"
@@ -1014,12 +1015,22 @@ vaddr_t proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
         }
     }
 
+    /* A writable shared file VMA can later install writable cache leaves.
+     * Join shutdown admission before taking mm->lock, where waiting is not
+     * allowed. */
+    int write_guard = file && (flags & MAP_SHARED) && (prot & PROT_WRITE);
+    if (write_guard && mm_shared_write_enter_wait() < 0) {
+        vfs_put_file(file);
+        return (vaddr_t)-EIO;
+    }
+
     mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     vaddr_t ret;
     if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
         spin_unlock_irqrestore(&t->mm->lock, lock_flags);
         mm_tlb_invalidate_finish(t->mm);
+        if (write_guard) mm_shared_write_leave();
         vfs_put_file(file);
         return (vaddr_t)-EINVAL;
     }
@@ -1027,6 +1038,7 @@ vaddr_t proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
                               (uint64_t)off);
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(t->mm);
+    if (write_guard) mm_shared_write_leave();
     if ((long)ret < 0 && (long)ret >= -4095)
         vfs_put_file(file);
     if ((long)ret < 0 && (long)ret >= -4095)
@@ -1055,6 +1067,13 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
             return (vaddr_t)-ENOMEM;
     }
 
+    /* fd-backed MAP_SHARED|PROT_WRITE mappings participate in shutdown
+     * admission. Anonymous and private mappings do not. */
+    int write_guard = !(flags & MAP_ANONYMOUS) && fd >= 0 &&
+                      (flags & MAP_SHARED) && (prot & PROT_WRITE);
+    if (write_guard && mm_shared_write_enter_wait() < 0)
+        return (vaddr_t)-EIO;
+
     mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
     vaddr_t ret;
@@ -1065,6 +1084,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
         if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
             mm_tlb_invalidate_finish(t->mm);
+            if (write_guard) mm_shared_write_leave();
             return (vaddr_t)-EINVAL;
         }
 
@@ -1074,6 +1094,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
         if (!mfile) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
             mm_tlb_invalidate_finish(t->mm);
+            if (write_guard) mm_shared_write_leave();
             return (vaddr_t)-EBADF;
         }
         ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, mfile,
@@ -1081,6 +1102,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(t->mm);
+    if (write_guard) mm_shared_write_leave();
     if (mfile && (long)ret < 0 && (long)ret >= -4095)
         vfs_put_file(mfile);
     /* Test the errno range through a signed type of pointer width: an int64_t

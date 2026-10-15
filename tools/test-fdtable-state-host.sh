@@ -2,7 +2,7 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_root=<build-dir>/secondary-linux-abi-host
+build_root=${FDTABLE_HOST_EVIDENCE_ROOT:-<build-dir>/secondary-linux-abi-host}
 run_dir="$build_root/fdtable-state/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BUILD_DIR="$run_dir/build"
 USER_BUILD_DIR="$run_dir/user"
@@ -10,11 +10,11 @@ mkdir -p "$BUILD_DIR" "$USER_BUILD_DIR"
 common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
 exec 9>"$common/parallel-rewrite/activity.lock"
 flock -s 9
-exec 8>"$common/parallel-rewrite/build-1.lock"
-if ! flock -n 8; then
-    exec 8>"$common/parallel-rewrite/build-2.lock"
-    flock -n 8 || exit 75
-fi
+exec 8>"$common/parallel-rewrite/build-2.lock"
+flock -n 8 || exit 75
+
+mkdir -p "$run_dir/tmp"
+export TMPDIR="$run_dir/tmp"
 df -Pk / "$build_root" >"$run_dir/disk.txt"
 sha256sum "$repo/kernel/fs/fdtable_state.rs" >"$run_dir/source.sha256"
 sha256sum "$repo/tools/test-fdtable-state-host.sh" >"$run_dir/harness.sha256"

@@ -1,0 +1,131 @@
+#include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sched.h>
+
+#define EOPNOTSUPP 95
+#define EBADF 9
+#define EPERM 1
+#define FILE_KIND 3
+#define SOCKET_KIND 5
+
+typedef struct vfile {
+    int kind;
+    atomic_int refs;
+} vfile_t;
+
+static pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
+static vfile_t *slot;
+static int envelope_enabled = 1;
+static int swap_after_pin;
+static vfile_t *swap_to;
+static atomic_int bad_success;
+
+static void vfile_get(vfile_t *vf) { atomic_fetch_add(&vf->refs, 1); }
+static void vfs_put_file(vfile_t *vf) { atomic_fetch_sub(&vf->refs, 1); }
+static vfile_t *fdtable_get_current_file_ref(int fd)
+{
+    (void)fd;
+    pthread_mutex_lock(&table_lock);
+    vfile_t *vf = slot;
+    if (vf) vfile_get(vf);
+    pthread_mutex_unlock(&table_lock);
+    return vf;
+}
+static void *proc_current(void) { return (void *)1; }
+static int env_active(void *task) { (void)task; return envelope_enabled; }
+
+/* Host seam models fdtable_with_current_vfile's locked identity check. The
+ * production provider itself is exercised by paired kernel/QEMU workloads. */
+static int env_mediate_send_vfile(int fd, vfile_t *pinned)
+{
+    (void)fd;
+    pthread_mutex_lock(&table_lock);
+    if (swap_after_pin) {
+        slot = swap_to;
+        swap_after_pin = 0;
+    }
+    int rc = slot != pinned ? -EBADF :
+             pinned->kind == SOCKET_KIND ? 0 : -EPERM;
+    pthread_mutex_unlock(&table_lock);
+    return rc;
+}
+
+/* exact linux_scm_acquire_send_fd() extracted from sys_socket_msg.c */
+/* PRODUCTION_CALLSITE */
+
+static void reset_table(vfile_t *vf)
+{
+    pthread_mutex_lock(&table_lock);
+    slot = vf;
+    pthread_mutex_unlock(&table_lock);
+}
+
+static int call_expect(int expected, int kind, vfile_t *file)
+{
+    reset_table(file);
+    void *out = (void *)(uintptr_t)1;
+    int rc = linux_scm_acquire_send_fd(17, NULL, &out);
+    if (rc != expected || (expected == 0 ? out != file : out != NULL)) {
+        fprintf(stderr, "call mismatch rc=%d expected=%d out=%p\n",
+                rc, expected, out);
+        return 1;
+    }
+    if (expected == 0 && kind != SOCKET_KIND) {
+        atomic_store(&bad_success, 1);
+        return 1;
+    }
+    if (out) vfs_put_file(out);
+    return 0;
+}
+
+static void *replace_loop(void *arg)
+{
+    vfile_t **files = arg;
+    for (int i = 0; i < 100000; ++i) {
+        reset_table(files[i & 1]);
+        sched_yield();
+    }
+    return NULL;
+}
+
+int main(void)
+{
+    vfile_t file = { .kind = FILE_KIND, .refs = ATOMIC_VAR_INIT(1) };
+    vfile_t sock = { .kind = SOCKET_KIND, .refs = ATOMIC_VAR_INIT(1) };
+    void *out = NULL;
+    if (linux_scm_acquire_send_fd(17, NULL, NULL) != -EINVAL) return 1;
+    if (call_expect(0, SOCKET_KIND, &sock) || call_expect(-EPERM, FILE_KIND, &file)) return 2;
+
+    reset_table(&file);
+    swap_to = &sock;
+    swap_after_pin = 1;
+    out = NULL;
+    if (linux_scm_acquire_send_fd(17, NULL, &out) != -EBADF || out != NULL) return 3;
+
+    vfile_t *files[] = { &file, &sock };
+    pthread_t replacer;
+    if (pthread_create(&replacer, NULL, replace_loop, files)) return 4;
+    for (int i = 0; i < 100000; ++i) {
+        out = NULL;
+        int rc = linux_scm_acquire_send_fd(17, NULL, &out);
+        if (rc == 0) {
+            if (out != &sock) atomic_store(&bad_success, 1);
+            vfs_put_file(out);
+        } else if (rc != -EBADF && rc != -EPERM) {
+            atomic_store(&bad_success, 1);
+        }
+    }
+    pthread_join(replacer, NULL);
+    if (atomic_load(&bad_success)) return 5;
+    if (atomic_load(&file.refs) != 1 || atomic_load(&sock.refs) != 1) {
+        fprintf(stderr, "reference imbalance file=%d socket=%d\n",
+                atomic_load(&file.refs), atomic_load(&sock.refs));
+        return 6;
+    }
+    puts("SCM_SEND_HOST: normal permission ABA concurrent-ref-balance PASS");
+    return 0;
+}

@@ -273,6 +273,26 @@ int vfs_mount_cwd_users(mount_t *mnt)
     return mnt ? __atomic_load_n(&mnt->cwd_users, __ATOMIC_RELAXED) : 0;
 }
 
+void vfs_mount_vfile_get(mount_t *mnt)
+{
+    if (!mnt)
+        return;
+    uint64_t flags = mntns_mount_table_lock();
+    if (mnt->open_vfiles != (unsigned int)-1)
+        mnt->open_vfiles++;
+    mntns_mount_table_unlock(flags);
+}
+
+void vfs_mount_vfile_put(mount_t *mnt)
+{
+    if (!mnt)
+        return;
+    uint64_t flags = mntns_mount_table_lock();
+    if (mnt->open_vfiles)
+        mnt->open_vfiles--;
+    mntns_mount_table_unlock(flags);
+}
+
 /*
  * Cut @mnt out of the tree without consulting the busy rules.  This is the
  * pivot_root path, and it is exactly the operation that has to be allowed

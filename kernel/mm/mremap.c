@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/pt.h"
 #include "mm/mremap_dontunmap_txn.h"
+#include "mm/shutdown_write.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
@@ -931,16 +932,62 @@ int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                                  MREMAP_MAYMOVE, hint, out_addr, prot ? prot : -1, 1);
 }
 
+/* Caller holds mm->lock. Re-mapping an anonymous/private range is independent
+ * of the shared-file shutdown barrier. A shared-file range needs admission if
+ * it already has write permission or this Native operation will add it. */
+int mm_mremap_needs_shared_write_locked(mm_struct_t *mm, vaddr_t old_addr,
+                                       size_t old_size, int prot)
+{
+    if (!mm || !old_size || old_addr >= USER_VA_LIMIT ||
+        old_size > USER_VA_LIMIT - old_addr)
+        return 0;
+    vaddr_t end = old_addr + old_size;
+    int adds_write = prot >= 0 && (prot & PROT_WRITE);
+    for (mm_seg_t *v = mm_seg_find(mm, old_addr);
+         v && v->start < end; v = v->next) {
+        if (v->end <= old_addr)
+            continue;
+        if ((v->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
+            ((v->vm_flags & VM_WRITE) || adds_write))
+            return 1;
+    }
+    return 0;
+}
+
 int mm_mremap(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
               size_t new_size, int flags, vaddr_t new_addr,
               vaddr_t *out_addr)
 {
     if (!mm) return -EINVAL;
+    int write_guard = 0;
+retry_mremap:
+    if (!write_guard) {
+        uint64_t check_flags = spin_lock_irqsave(&mm->lock);
+        int needs_gate = mm_mremap_needs_shared_write_locked(mm, old_addr,
+                                                              old_size, -1);
+        spin_unlock_irqrestore(&mm->lock, check_flags);
+        if (needs_gate) {
+            if (mm_shared_write_enter_wait() < 0)
+                return -EIO;
+            write_guard = 1;
+        }
+    }
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
+    if (!write_guard &&
+        mm_mremap_needs_shared_write_locked(mm, old_addr, old_size, -1)) {
+        spin_unlock_irqrestore(&mm->lock, flags_l);
+        mm_tlb_invalidate_finish(mm);
+        if (mm_shared_write_enter_wait() < 0)
+            return -EIO;
+        write_guard = 1;
+        goto retry_mremap;
+    }
     int r = mm_mremap_locked(mm, old_addr, old_size, new_size, flags,
                              new_addr, out_addr);
     spin_unlock_irqrestore(&mm->lock, flags_l);
     mm_tlb_invalidate_finish(mm);
+    if (write_guard)
+        mm_shared_write_leave();
     return r;
 }

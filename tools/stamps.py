@@ -184,11 +184,13 @@ def cmd_native(a) -> int:
     native_rust_svcmgr = str(getattr(a, "native_rust_svcmgr", "0"))
     if native_rust_svcmgr not in ("0", "1"):
         raise SystemExit("error: --native-rust-svcmgr must be 0 or 1")
+    if native_rust_svcmgr == "1" and a.arch not in ("riscv64", "riscv32", "aarch64", "x86_64"):
+        raise SystemExit("error: Rust svcmgr requires ARCH=riscv64, riscv32, aarch64, or x86_64")
     native_rust_rtcd = str(getattr(a, "native_rust_rtcd", "0"))
     if native_rust_rtcd not in ("0", "1"):
         raise SystemExit("error: --native-rust-rtcd must be 0 or 1")
-    if native_rust_rtcd == "1" and a.arch != "riscv64":
-        raise SystemExit("error: Rust rtcd currently requires ARCH=riscv64")
+    if native_rust_rtcd == "1" and a.arch not in ("riscv64", "aarch64"):
+        raise SystemExit("error: Rust rtcd requires ARCH=riscv64 or aarch64 Goldfish RTC")
     native_rust_ufsd = str(getattr(a, "native_rust_ufsd", "0"))
     if native_rust_ufsd not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd must be 0 or 1")
@@ -198,6 +200,7 @@ def cmd_native(a) -> int:
     test_close_orphan = str(getattr(a, "native_rust_ufsd_test_close_orphan_write_fail_once", "0"))
     test_close_orphan_after = str(getattr(a, "native_rust_ufsd_test_close_orphan_write_fail_after", "1"))
     test_close_orphan_restore = str(getattr(a, "native_rust_ufsd_test_close_orphan_restore_fail", "0"))
+    test_close_token_drop_ack = str(getattr(a, "native_rust_ufsd_test_close_token_drop_ack_once", "0"))
     if test_close_orphan not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd-test-close-orphan-write-fail-once must be 0 or 1")
     if test_close_orphan_after not in tuple(str(n) for n in range(1, 17)):
@@ -208,6 +211,12 @@ def cmd_native(a) -> int:
         raise SystemExit("error: restore-failure injection requires close-orphan fail-once")
     if test_close_orphan_restore == "1" and test_close_orphan_after == "16":
         raise SystemExit("error: restore-failure injection needs a write index below 16")
+    if test_close_token_drop_ack not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-test-close-token-drop-ack-once must be 0 or 1")
+    if test_close_token_drop_ack == "1" and native_rust_ufsd != "1":
+        raise SystemExit("error: close-token ACK-drop profile requires --native-rust-ufsd 1")
+    if test_close_token_drop_ack == "1" and test_close_orphan == "1":
+        raise SystemExit("error: close-token ACK-drop and close-orphan profiles are mutually exclusive")
     if native_rust_ufsd == "1" and a.arch != "riscv64":
         raise SystemExit("error: Rust ufsd currently requires ARCH=riscv64")
     user_build_dir = getattr(a, "user_build_dir", str(Path(a.stamp).parent))
@@ -253,6 +262,9 @@ def cmd_native(a) -> int:
         getattr(a, "rust_rtcd_binary", ""), "Rust rtcd")
     rust_ufsd_path = generated_user_binary(
         getattr(a, "rust_ufsd_binary", ""), "Rust ufsd")
+    rust_ufsd_test_close_token_path = generated_user_binary(
+        getattr(a, "rust_ufsd_test_close_token_binary", ""),
+        "Rust ufsd close-token test")
     with user_output_lock(str(resolved_build_dir)):
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +281,7 @@ def cmd_native(a) -> int:
                               f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}"
                               f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}")
         effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}"
+        effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE={test_close_token_drop_ack}"
         old_build_id = stamp_id(stamp)
         old_rust_svcmgr = "NATIVE_RUST_SVCMGR=1" in old_build_id.splitlines()
         old_rust_echod = "NATIVE_RUST_ECHOD=1" in old_build_id.splitlines()
@@ -278,14 +291,14 @@ def cmd_native(a) -> int:
                         if native_tag is not None else None)
         echod_c_reference = (resolved_build_dir / f"svc-echod-c-{native_tag}"
                              if native_tag is not None else None)
-        manager_binary = (resolved_build_dir / "svcmgr-rv"
-                          if a.arch == "riscv64" else None)
-        manager_c_reference = (resolved_build_dir / "svcmgr-c-rv"
-                               if a.arch == "riscv64" else None)
-        rtcd_binary = (resolved_build_dir / "rtcd-rv.a20drv"
-                       if a.arch == "riscv64" else None)
-        rtcd_c_reference = (resolved_build_dir / "rtcd-c-rv.a20drv"
-                            if a.arch == "riscv64" else None)
+        manager_binary = (resolved_build_dir / f"svcmgr-{native_tag}"
+                          if native_tag is not None else None)
+        manager_c_reference = (resolved_build_dir / f"svcmgr-c-{native_tag}"
+                               if native_tag is not None else None)
+        rtcd_binary = (resolved_build_dir / f"rtcd-{native_tag}.a20drv"
+                       if a.arch in ("riscv64", "aarch64") and native_tag is not None else None)
+        rtcd_c_reference = (resolved_build_dir / f"rtcd-c-{native_tag}.a20drv"
+                            if a.arch in ("riscv64", "aarch64") and native_tag is not None else None)
         need_build = False
         if old_build_id != effective_build_id:
             need_build = True
@@ -321,6 +334,13 @@ def cmd_native(a) -> int:
             need_build = True
         elif (native_rust_ufsd == "0" and rust_ufsd_path is not None and
               (rust_ufsd_path.exists() or rust_ufsd_path.is_symlink())):
+            need_build = True
+        elif (test_close_token_drop_ack == "0" and
+              rust_ufsd_test_close_token_path is not None and
+              (rust_ufsd_test_close_token_path.exists() or
+               rust_ufsd_test_close_token_path.is_symlink())):
+            # Do not let a previously built fault-injection service remain in
+            # the next default FAT image as an unselected test executable.
             need_build = True
         elif any_newer(stamp, a.roots.split(), []):
             need_build = True
@@ -373,6 +393,7 @@ def cmd_native(a) -> int:
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}",
+                      f"NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE={test_close_token_drop_ack}",
                       f"USER_BUILD_DIR={resolved_build_dir}",
                       "native-programs"])
         if rc != 0:
@@ -393,6 +414,8 @@ def cmd_native(a) -> int:
             rust_rtcd_path.unlink(missing_ok=True)
         if native_rust_ufsd == "0" and rust_ufsd_path is not None:
             rust_ufsd_path.unlink(missing_ok=True)
+        if test_close_token_drop_ack == "0" and rust_ufsd_test_close_token_path is not None:
+            rust_ufsd_test_close_token_path.unlink(missing_ok=True)
         if manager_binary is not None and manager_c_reference is not None:
             if native_rust_svcmgr == "1":
                 # Keep the C implementation available for behavior comparison,
@@ -575,7 +598,10 @@ def main() -> int:
                            choices=tuple(str(n) for n in range(1, 17)), default="1")
             s.add_argument("--native-rust-ufsd-test-close-orphan-restore-fail",
                            choices=("0", "1"), default="0")
+            s.add_argument("--native-rust-ufsd-test-close-token-drop-ack-once",
+                           choices=("0", "1"), default="0")
             s.add_argument("--rust-ufsd-binary", default="")
+            s.add_argument("--rust-ufsd-test-close-token-binary", default="")
     s = sub.add_parser("clean")
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])

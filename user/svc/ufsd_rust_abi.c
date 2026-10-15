@@ -198,6 +198,23 @@ int64_t a20_ufsd_capacity(int32_t block_index, uint64_t *sectors)
     return A20_OK;
 }
 
+/* Per-boot epoch source for the close-token registry (monotonic ns; 0 when
+ * the clock is unavailable, which degrades token issue to the legacy path). */
+uint64_t fsio_monotonic_ns(void)
+{
+    a20_time_ns_t ns = 0;
+    if (!a20_status_is_ok(a20_clock_get(A20_CLOCK_MONOTONIC, &ns)))
+        return 0;
+    return ns;
+}
+
+int64_t a20_ufsd_monotonic_ns(uint64_t *out_ns)
+{
+    if (!out_ns) return -A20_ERR_INVALID_ARGUMENT;
+    *out_ns = fsio_monotonic_ns();
+    return A20_OK;
+}
+
 int64_t a20_ufsd_event_queue_create(uint32_t *queue)
 { return queue ? a20_event_queue_create(queue) : -A20_ERR_INVALID_ARGUMENT; }
 
@@ -288,10 +305,12 @@ void a20_ufsd_backend_statfs(uint32_t k, ufs_resp_hdr_t *r)
 { const ufs_backend_t *b=backend(k); if (b) b->statfs(r); }
 
 /* Lifecycle callbacks for the Rust-owned bounded inode/open registry.  C
- * supplies only vnode reference operations and the post-unlink nlink query. */
+ * supplies only vnode reference operations and the post-unlink nlink query.
+ * The Rust dispatcher owns close-token state, so the C hooks are invoked in
+ * legacy mode (no token_out, token 0). */
 extern int64_t vnfs_has_inode(uint64_t ino);
-extern int64_t vnfs_inode_open(uint64_t ino);
-extern int64_t vnfs_inode_close(uint64_t ino);
+extern int64_t vnfs_inode_open(uint64_t ino, uint64_t *token_out);
+extern int64_t vnfs_inode_close(uint64_t ino, uint64_t token);
 extern int64_t vnfs_inode_link_count(uint64_t ino, uint64_t *links_out);
 extern int64_t vnfs_inode_reap_unlinked(uint64_t ino);
 extern int64_t vnfs_inode_drop(uint64_t ino);
@@ -299,9 +318,9 @@ extern int64_t vnfs_inode_drop(uint64_t ino);
 int64_t a20_ufsd_backend_has_inode(uint32_t k, uint64_t ino)
 { return k == A20_UFSD_BACKEND_VNFS ? vnfs_has_inode(ino) : -95; }
 int64_t a20_ufsd_backend_open(uint32_t k, uint64_t ino)
-{ return k == A20_UFSD_BACKEND_VNFS ? vnfs_inode_open(ino) : -95; }
+{ return k == A20_UFSD_BACKEND_VNFS ? vnfs_inode_open(ino, 0) : -95; }
 int64_t a20_ufsd_backend_close(uint32_t k, uint64_t ino)
-{ return k == A20_UFSD_BACKEND_VNFS ? vnfs_inode_close(ino) : -95; }
+{ return k == A20_UFSD_BACKEND_VNFS ? vnfs_inode_close(ino, 0) : -95; }
 int64_t a20_ufsd_backend_link_count(uint32_t k, uint64_t ino,
                                     uint64_t *links_out)
 { return k == A20_UFSD_BACKEND_VNFS ? vnfs_inode_link_count(ino, links_out) : -95; }

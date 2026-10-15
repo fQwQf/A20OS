@@ -151,6 +151,16 @@ uint64_t fsio_capacity_sectors(void)
     return cached;
 }
 
+/* Per-boot epoch source for the close-token registry (monotonic ns; 0 when
+ * the clock is unavailable, which degrades token issue to the legacy path). */
+uint64_t fsio_monotonic_ns(void)
+{
+    a20_time_ns_t ns = 0;
+    if (!a20_status_is_ok(a20_clock_get(A20_CLOCK_MONOTONIC, &ns)))
+        return 0;
+    return ns;
+}
+
 /* UXFS flush capability uses a v2 request and a fixed-width magic response.
  * A v1 capacity query can return an arbitrary 64-bit sector count, so it must
  * never be interpreted as evidence that a durability callback exists. */
@@ -210,11 +220,18 @@ static const ufs_backend_t *pick_backend(const char *fstype)
     return 0;
 }
 
-static void serve_init(ufs_resp_hdr_t *r, const ufs_backend_t *be)
+/* Set only when INIT negotiates the CLOSE_CONFIRM protocol; legacy token-only
+ * requests fall back to ordinary v2 lifetime semantics without token issue. */
+static int g_close_tokens_enabled;
+static int g_close_confirm_enabled;
+
+static void serve_init(ufs_resp_hdr_t *r, const ufs_backend_t *be,
+                       const ufs_req_hdr_t *q)
 {
     r->out0 = UFS_ROOT_INO;
-    if (be->open && be->close)
-        r->out1 = UFS_LIFETIME_CAPABILITY;
+    r->out1 = ufs_backend_lifetime_negotiate(be, q->arg0,
+                                               &g_close_tokens_enabled,
+                                               &g_close_confirm_enabled);
     r->out2 = UFS_SHUTDOWN_CAPABILITY;
 }
 
@@ -460,7 +477,7 @@ int main(int argc, char **argv, char **envp)
         int64_t rc = 0;
 
         switch (q->opcode) {
-        case UFS_OP_INIT: serve_init(&r, be); break;
+        case UFS_OP_INIT: serve_init(&r, be, q); break;
         case UFS_OP_SHUTDOWN:
             if (q->version != UFS_PROTO_VERSION || q->ino != UFS_ROOT_INO ||
                 q->name_len != 0 || q->payload_len != 0) {
@@ -497,12 +514,26 @@ int main(int argc, char **argv, char **envp)
             break;
         case UFS_OP_SYNC: rc = be->sync(); break;
         case UFS_OP_OPEN:
-            rc = (q->version == UFS_PROTO_VERSION && be->open)
-                     ? be->open(q->ino) : -U_ENOSYS;
+            if (q->version == UFS_PROTO_VERSION && be->open) {
+                uint64_t token = 0;
+                rc = be->open(q->ino,
+                              g_close_tokens_enabled ? &token : 0);
+                if (rc == 0)
+                    r.out2 = token; /* 0 = legacy open, no token */
+            } else {
+                rc = -U_ENOSYS;
+            }
             break;
         case UFS_OP_CLOSE:
             rc = (q->version == UFS_PROTO_VERSION && be->close)
-                     ? be->close(q->ino) : -U_ENOSYS;
+                     ? ((g_close_tokens_enabled && q->arg0 == 0)
+                         ? -U_ENOENT : be->close(q->ino, q->arg0))
+                     : -U_ENOSYS;
+            break;
+        case UFS_OP_CLOSE_CONFIRM:
+            rc = (q->version == UFS_PROTO_VERSION &&
+                  g_close_confirm_enabled && be->close_confirm)
+                     ? be->close_confirm(q->ino, q->arg0) : -U_ENOSYS;
             break;
         case UFS_OP_STATFS: be->statfs(&r); break;
         default:

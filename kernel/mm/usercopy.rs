@@ -29,6 +29,7 @@ unsafe extern "C" {
         chunk: *mut usize,
         irq_flags: *mut u64,
         preempt_before: *mut u32,
+        shared_write_guard: *mut u32,
     ) -> i32;
     fn a20_usercopy_resolve_fault(
         task: *mut c_void,
@@ -38,7 +39,12 @@ unsafe extern "C" {
         irq_before: u64,
         preempt_before: u32,
     ) -> i32;
-    fn a20_usercopy_page_unlock(mm: *mut c_void, irq_flags: u64, preempt_before: u32);
+    fn a20_usercopy_page_unlock(
+        mm: *mut c_void,
+        irq_flags: u64,
+        preempt_before: u32,
+        shared_write_guard: u32,
+    );
 }
 
 struct CopyContext {
@@ -54,6 +60,7 @@ struct PageAccess<'a> {
     kernel_address: *mut u8,
     chunk: usize,
     preempt_before: u32,
+    shared_write_guard: u32,
     _context: PhantomData<&'a CopyContext>,
 }
 
@@ -62,7 +69,14 @@ impl Drop for PageAccess<'_> {
         // SAFETY: successful page_access transfers its release obligation to
         // this guard (MM unlock on MMU, no-op release on NOMMU); the context
         // borrow keeps its C-pinned mm reference alive.
-        unsafe { a20_usercopy_page_unlock(self.mm, self.irq_flags, self.preempt_before) }
+        unsafe {
+            a20_usercopy_page_unlock(
+                self.mm,
+                self.irq_flags,
+                self.preempt_before,
+                self.shared_write_guard,
+            )
+        }
     }
 }
 
@@ -78,6 +92,7 @@ impl CopyContext {
         let mut chunk = 0usize;
         let mut irq_flags = 0u64;
         let mut preempt_before = 0u32;
+        let mut shared_write_guard = 0u32;
         // SAFETY: task/mm are pinned/borrowed by the C wrapper for this entire
         // call. Output pointers are local and pairwise disjoint. Status 0
         // transfers a release obligation to PageAccess.
@@ -91,6 +106,7 @@ impl CopyContext {
                 &mut chunk,
                 &mut irq_flags,
                 &mut preempt_before,
+                &mut shared_write_guard,
             )
         };
         if status != 0 {
@@ -99,7 +115,14 @@ impl CopyContext {
         if kernel_address.is_null() || chunk == 0 {
             // A successful C result must provide a nonempty page span. Still
             // discharge its release obligation if the ABI contract is broken.
-            unsafe { a20_usercopy_page_unlock(self.mm, irq_flags, preempt_before) };
+            unsafe {
+                a20_usercopy_page_unlock(
+                    self.mm,
+                    irq_flags,
+                    preempt_before,
+                    shared_write_guard,
+                )
+            };
             return Err(AccessError { status: -1, irq_before: irq_flags, preempt_before });
         }
         Ok(PageAccess {
@@ -108,6 +131,7 @@ impl CopyContext {
             kernel_address,
             chunk,
             preempt_before,
+            shared_write_guard,
             _context: PhantomData,
         })
     }

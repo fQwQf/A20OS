@@ -2949,6 +2949,39 @@ int ext4_unmount(vnode_t *root) {
     return 0;
 }
 
+/* Final system shutdown is not a namespace unmount: other tasks may still
+ * hold root/cwd references, so freeing ext4_sb_info_t here would turn those
+ * references into dangling pointers if firmware shutdown is delayed or
+ * refused.  The system-wide VFS/MM gates stay closed after this succeeds.
+ * Commit the journal, flush the cache, and persist VALID_FS, but retain the
+ * live in-memory mount objects until reset. */
+int ext4_shutdown_clean(vnode_t *root)
+{
+    if (!root || !root->fs_data)
+        return 0;
+    ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
+    ext4_sb_info_t *esi = fp->sb;
+    if (!esi || ext4_is_inconsistent(esi))
+        return -117;
+
+    int ret = ext4_journal_close(esi);
+    if (ret < 0)
+        return ret;
+    bcache_t *bc = esi->bc;
+    if (!bc)
+        return -EIO;
+    ret = bcache_sync_checked(bc);
+    if (ret < 0)
+        return ret;
+    if (esi->mount_state_started) {
+        ret = ext4_persist_state_transition(bc, EXT4_STATE_CLEAN);
+        if (ret < 0)
+            return ret;
+        esi->mount_state_started = 0;
+    }
+    return 0;
+}
+
 /* ================================================================
  * VFS open hook: create vfile for an ext4 vnode
  * ================================================================ */

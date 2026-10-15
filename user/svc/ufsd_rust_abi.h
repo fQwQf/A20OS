@@ -14,6 +14,7 @@ int64_t a20_ufsd_serve(uint32_t server_endpoint, int32_t block_index,
                        const char *path, uint32_t path_len, uint32_t flags);
 int64_t a20_ufsd_umount(const char *path, uint32_t path_len);
 int64_t a20_ufsd_capacity(int32_t block_index, uint64_t *sectors);
+int64_t a20_ufsd_monotonic_ns(uint64_t *out_ns);
 int64_t a20_ufsd_event_queue_create(uint32_t *queue);
 int64_t a20_ufsd_event_watch(uint32_t queue, uint32_t target,
                              uint64_t mask, uint64_t tag);

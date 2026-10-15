@@ -9,6 +9,7 @@
 #include "fs/procfs.h"
 #include "fs/vfs/mntns.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs.h"
 #include "fs/vfs/stat_perm.h"
 #include "ipc/kexec.h"
 #include "ipc/seccomp.h"
@@ -18,6 +19,7 @@
 #include "proc/cred.h"
 #include "proc/signal.h"
 #include "mm/pt.h"
+#include "core/panic.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -1140,12 +1142,26 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
           magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
          cmd == LINUX_REBOOT_CMD_RESTART)) {
+        kinfo("[SD] RESTART CLEAN entry\n");
+        int shutdown_ret = vfs_system_shutdown();
+        if (shutdown_ret < 0) {
+            kinfo("[SD] reboot refused: filesystem shutdown failed (%d)\n",
+                  shutdown_ret);
+            return shutdown_ret;
+        }
         firmware_reboot();
+        panic("firmware reboot returned after filesystem shutdown");
     } else if (magic1 == 0 ||
                (magic1 == LINUX_REBOOT_MAGIC1 &&
                 (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
                  magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
                 cmd == LINUX_REBOOT_CMD_POWER_OFF)) {
+        int shutdown_ret = vfs_system_shutdown();
+        if (shutdown_ret < 0) {
+            kinfo("[SD] poweroff refused: filesystem shutdown failed (%d)\n",
+                  shutdown_ret);
+            return shutdown_ret;
+        }
         /* TEMP-DIAG: audit buddy free-list integrity before poweroff, for the
          * shmring poweroff corruption investigation */
         kinfo("[SD] POWER_OFF entry");

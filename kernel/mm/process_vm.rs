@@ -37,8 +37,10 @@ unsafe extern "C" {
         kernel_address: *mut *mut u8,
         available: *mut usize,
         frame_token: *mut usize,
+        write_guard: *mut i32,
     ) -> i32;
     fn a20_process_vm_frame_put(frame_token: usize);
+    fn mm_shared_write_leave();
     fn a20_process_vm_break_cow(task: *mut c_void, mm: *mut c_void, address: usize) -> i32;
     fn a20_process_vm_mark_dirty(mm: *mut c_void, address: usize);
     fn a20_process_vm_target_get(pid: i32, task_out: *mut *mut c_void) -> i32;
@@ -62,6 +64,13 @@ impl Drop for FrameRef {
     }
 }
 
+struct SharedWriteGuard;
+impl Drop for SharedWriteGuard {
+    fn drop(&mut self) {
+        unsafe { mm_shared_write_leave() }
+    }
+}
+
 /// One page-bounded remote mapping. The C callback pins the frame while it
 /// holds the page-table locks; this guard owns that pin across the copy and
 /// releases it before dirty bookkeeping can re-resolve the mapping.
@@ -69,6 +78,7 @@ struct PinnedLeaf {
     kernel_address: *mut u8,
     available: usize,
     _frame: FrameRef,
+    _write_guard: Option<SharedWriteGuard>,
 }
 
 struct Context<'a> {
@@ -86,6 +96,7 @@ unsafe fn pin_leaf(
         let mut kernel_address = ptr::null_mut();
         let mut available = 0usize;
         let mut token = 0usize;
+        let mut write_guard = 0i32;
         let result = unsafe {
             a20_process_vm_pin_leaf(
                 context.mm,
@@ -94,6 +105,7 @@ unsafe fn pin_leaf(
                 &mut kernel_address,
                 &mut available,
                 &mut token,
+                &mut write_guard,
             )
         };
         if result == EAGAIN && for_write {
@@ -117,6 +129,11 @@ unsafe fn pin_leaf(
             kernel_address,
             available,
             _frame: frame,
+            _write_guard: if write_guard != 0 {
+                Some(SharedWriteGuard)
+            } else {
+                None
+            },
         });
     }
 }
@@ -158,10 +175,10 @@ unsafe fn transfer_on_mm(
                 ptr::copy_nonoverlapping(leaf.kernel_address, kernel.add(done), count);
             }
         }
-        drop(leaf);
         if to_user {
             unsafe { a20_process_vm_mark_dirty(context.mm, address) };
         }
+        drop(leaf);
         done += count;
     }
     drop(context);

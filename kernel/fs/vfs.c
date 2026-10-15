@@ -15,6 +15,7 @@
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/file.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mntns.h"
 #include "fs/vfs/path.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
@@ -239,13 +240,14 @@ static int vfs_proc_fd_open(const char *path, int flags)
     }
     strncpy(opened->path, target_path, MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
+    mount_t *counted_mnt = opened->vnode ? opened->vnode->mnt : NULL;
+    if (counted_mnt) {
+        vfs_mount_vfile_get(counted_mnt);
+        opened->mount_open_counted = 1;
+    }
     int opened_fd = fdtable_install_current_vfile(opened, 0);
     if (opened_fd < 0) {
-        vnode_t *opened_vn = opened->vnode;
-        if (opened->ops && opened->ops->close)
-            opened->ops->close(opened);
-        vfile_free(opened);
-        vnode_put(opened_vn);
+        vfs_put_file(opened);
         vnode_put(vn);
         return -EMFILE;
     }
@@ -253,7 +255,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
     return opened_fd;
 }
 
-int vfs_open_vnode(struct vnode *vn, int flags)
+static int vfs_open_vnode_impl(struct vnode *vn, int flags)
 {
     if (!vn || !vn->ops || !vn->ops->open) {
         if (vn) vnode_put(vn);
@@ -266,13 +268,14 @@ int vfs_open_vnode(struct vnode *vn, int flags)
     }
     strncpy(opened->path, "handle", MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
+    mount_t *counted_mnt = opened->vnode ? opened->vnode->mnt : NULL;
+    if (counted_mnt) {
+        vfs_mount_vfile_get(counted_mnt);
+        opened->mount_open_counted = 1;
+    }
     int ofd = fdtable_install_current_vfile(opened, 0);
     if (ofd < 0) {
-        vnode_t *ovn = opened->vnode;
-        if (opened->ops && opened->ops->close)
-            opened->ops->close(opened);
-        vfile_free(opened);
-        vnode_put(ovn);
+        vfs_put_file(opened);
         vnode_put(vn);
         return -EMFILE;
     }
@@ -280,7 +283,19 @@ int vfs_open_vnode(struct vnode *vn, int flags)
     return ofd;
 }
 
-int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
+int vfs_open_vnode(struct vnode *vn, int flags)
+{
+    int ret = mntns_mutation_enter();
+    if (ret < 0) {
+        vnode_put(vn);
+        return ret;
+    }
+    ret = vfs_open_vnode_impl(vn, flags);
+    mntns_mutation_leave();
+    return ret;
+}
+
+static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
     task_t *cur = proc_current();
     if (cur)
         cur->vfs_open_errno = 0;
@@ -432,15 +447,29 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
+    mount_t *counted_mnt = vn->mnt;
+    if (counted_mnt) {
+        vfs_mount_vfile_get(counted_mnt);
+        vf->mount_open_counted = 1;
+    }
     int ofd = fdtable_install_current_vfile(vf, flags & O_CLOEXEC);
     if (ofd < 0) {
         vnode_put(vn);
-        if (vf->ops && vf->ops->close) vf->ops->close(vf);
-        vfile_free(vf);
+        vfs_put_file(vf);
         return -EMFILE;
     }
     vnode_put(vn);
     return ofd;
+}
+
+int vfs_open(const char *path, int flags, int mode)
+{
+    int ret = mntns_mutation_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_open_impl(path, flags, mode);
+    mntns_mutation_leave();
+    return ret;
 }
 
 int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
@@ -643,18 +672,48 @@ int vfs_finalize_closed_vfile(vfile_t *vf)
 {
     if (!vf)
         return 0;
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+    kinfo("[UFS-CT-TRACE] finalize_enter vf=%lu refs=%d mounted=%u deferred=%u token_cap=%u\n",
+          (unsigned long)vf->identity, vfile_ref_read(vf),
+          vf->mount_open_counted, vf->shutdown_deferred_close,
+          vf->close_token_capable);
+#endif
     vnode_t *vn = vf->vnode;
     unsigned long identity = (unsigned long)vf->identity;
     (void)identity; /* ktrace_vfs compiles away in non-trace builds. */
-    a20_eventq_on_vfile_destroy(vf);
-    vfs_release_open_file_locks(vf, 0);
     int close_error = 0;
-    if (vf->ops && vf->ops->close)
-        close_error = vf->ops->close(vf);
+    if (!vf->finalize_started) {
+        vf->finalize_started = 1;
+        a20_eventq_on_vfile_destroy(vf);
+        vfs_release_open_file_locks(vf, 0);
+    }
+    if (!vf->backend_close_done)
+        close_error = vfile_backend_close(vf);
+    if (close_error < 0) {
+        /* fdtable already consumed the descriptor. Retain an internal vfile
+         * reference and its mount ownership so system shutdown can retry a
+         * known pre-CLOSE flush failure or fail closed on an ambiguous RPC. */
+        vf->shutdown_deferred_close = 1;
+        vfile_ref_init(vf, 1);
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+        kinfo("[UFS-CT-TRACE] finalize_deferred vf=%lu err=%d refs=%d mounted=%u state=%u\n",
+              (unsigned long)vf->identity, close_error,
+              vfile_ref_read(vf), vf->mount_open_counted,
+              vf->backend_close_state);
+#endif
+        vfile_finalize_done();
+        return close_error;
+    }
+    vf->backend_close_done = 1;
+    if (vf->mount_open_counted && vn && vn->mnt) {
+        vf->mount_open_counted = 0;
+        vfs_mount_vfile_put(vn->mnt);
+    }
     ktrace_vfs("[VFS] close: file=%p identity=%lu done err=%d\n",
                (void *)vf, identity, close_error);
     vfile_free(vf);
     vnode_put(vn);
+    vfile_finalize_done();
     return close_error;
 }
 

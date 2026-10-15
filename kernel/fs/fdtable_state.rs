@@ -45,6 +45,38 @@ unsafe fn set_occupied(mask: *mut u64, fd: usize, value: bool) {
     unsafe { word.write(if value { bits | bit } else { bits & !bit }) };
 }
 
+/// Check whether an occupied descriptor slot points at `vfile`.
+///
+/// The caller owns the table lock and provides arrays sized for `max_files`.
+/// Only set bits are visited; bits above the descriptor limit in the final
+/// bitmap word are ignored.
+#[no_mangle]
+pub unsafe extern "C" fn a20_fdtable_has_open_slot_rust(
+    slots: *const *mut c_void,
+    mask: *const u64,
+    max_files: usize,
+    vfile: *mut c_void,
+) -> bool {
+    if slots.is_null() || mask.is_null() || vfile.is_null() || max_files == 0 {
+        return false;
+    }
+    let words = max_files / 64 + usize::from(max_files & 63 != 0);
+    for word_index in 0..words {
+        let mut open = unsafe { mask.add(word_index).read() };
+        if word_index + 1 == words && max_files & 63 != 0 {
+            open &= (1u64 << (max_files & 63)) - 1;
+        }
+        while open != 0 {
+            let fd = (word_index << 6) + open.trailing_zeros() as usize;
+            open &= open - 1;
+            if unsafe { slots.add(fd).read() } == vfile {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 unsafe fn find_free(mask: *const u64, max_files: usize, min_fd: usize) -> Option<usize> {
     if min_fd >= max_files {
         return None;
@@ -1273,6 +1305,50 @@ mod tests {
         assert_eq!(unsafe { a20_fdtable_owner_is_shared_rust(owners) }, 0);
         assert_eq!(unsafe { a20_fdtable_owner_release_rust(&mut owners, &mut release_pid, 44) }, EINVAL);
         assert_eq!(refs.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn open_slot_membership_uses_occupied_bits_and_clamps_last_word() {
+        let mut slots = [ptr::null_mut(); 130];
+        let mut mask = [0u64; 3];
+        let target = 0xabcusize as *mut c_void;
+        let other = 0xdefusize as *mut c_void;
+        slots[63] = target;
+        slots[64] = other;
+        slots[129] = target;
+        // Deliberately poison bits beyond max_files in the final word.
+        mask[0] = 1u64 << 63;
+        mask[1] = 1u64 << 0;
+        mask[2] = (1u64 << 1) | (1u64 << 2) | (1u64 << 63);
+        assert!(unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 130, target)
+        });
+        assert!(unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 130, other)
+        });
+        mask[0] = 0;
+        assert!(unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 130, target)
+        });
+        slots[129] = ptr::null_mut();
+        mask[2] &= !(1u64 << 1);
+        // A stale pointer is not a live descriptor without its occupied bit.
+        slots[65] = target;
+        assert!(!unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 130, target)
+        });
+        assert!(!unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 0, target)
+        });
+        assert!(!unsafe {
+            a20_fdtable_has_open_slot_rust(ptr::null(), mask.as_ptr(), 130, target)
+        });
+        assert!(!unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), ptr::null(), 130, target)
+        });
+        assert!(!unsafe {
+            a20_fdtable_has_open_slot_rust(slots.as_ptr(), mask.as_ptr(), 130, ptr::null_mut())
+        });
     }
 
     #[test]

@@ -2,7 +2,7 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-root=<build-dir>/secondary-linux-abi-host
+root=${FDTABLE_HOST_EVIDENCE_ROOT:-<build-dir>/secondary-linux-abi-host}
 run="$root/fdtable-differential/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BUILD_DIR="$run/build"
 USER_BUILD_DIR="$run/user"
@@ -13,11 +13,11 @@ ev="$run/evidence"
 common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
 exec 9>"$common/parallel-rewrite/activity.lock"
 flock -s 9
-exec 8>"$common/parallel-rewrite/build-1.lock"
-if ! flock -n 8; then
-    exec 8>"$common/parallel-rewrite/build-2.lock"
-    flock -n 8 || exit 75
-fi
+exec 8>"$common/parallel-rewrite/build-2.lock"
+flock -n 8 || exit 75
+
+mkdir -p "$run/tmp"
+export TMPDIR="$run/tmp"
 
 df -Pk / "$root" >"$ev/disk.txt"
 write_inputs() {

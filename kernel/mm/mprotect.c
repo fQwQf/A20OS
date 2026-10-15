@@ -1,5 +1,6 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
+#include "mm/shutdown_write.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -18,6 +19,47 @@
 #include "core/errno.h"
 
 /* mprotect: permission changes on an existing address range. */
+
+/* Caller holds mm->lock. Only shared file VMAs can expose a writable
+ * page-cache mapping to shutdown; anonymous/private permission changes do not
+ * need to join that admission transaction. */
+static int mm_mprotect_needs_shared_write_locked(mm_struct_t *mm,
+                                                  vaddr_t addr,
+                                                  size_t len,
+                                                  int prot)
+{
+    if (!(prot & PROT_WRITE) || !len || addr >= USER_VA_LIMIT ||
+        len > UINT64_MAX - (PAGE_SIZE - 1))
+        return 0;
+    len = ROUND_UP(len, PAGE_SIZE);
+    if (len > UINT64_MAX - addr)
+        return 0;
+    vaddr_t end = addr + len;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
+         v = v->next) {
+        if (v->end > addr &&
+            (v->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED))
+            return 1;
+    }
+    return 0;
+}
+
+/* AArch64 aliases the hardware dirty indication with write permission and
+ * ARM32 has no dirty bit. Preserve the cache's dirty state before mprotect
+ * removes the only software-visible evidence from a shared file leaf. */
+#if PTE_D == 0 || PTE_D == PTE_W
+static void mm_mprotect_harvest_shared_write(mm_seg_t *vma, vaddr_t va)
+{
+    if (!vma || !vma->file_vnode)
+        return;
+    uint64_t index = (vma->backing_offset + (va - vma->start)) / PAGE_SIZE;
+    page_cache_page_t *cached = page_cache_get(vma->file_vnode, index, 0);
+    if (cached) {
+        page_cache_mark_dirty(cached);
+        page_cache_put(cached);
+    }
+}
+#endif
 
 int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot) {
@@ -160,6 +202,12 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     continue;
                 }
                 pte_t observed = *pte;
+#if PTE_D == 0 || PTE_D == PTE_W
+                if (!(vm_prot & VM_WRITE) && (v->vm_flags & VM_WRITE) &&
+                    (v->vm_flags & (VM_FILE | VM_SHARED)) ==
+                        (VM_FILE | VM_SHARED) && (observed & PTE_W))
+                    mm_mprotect_harvest_shared_write(v, va);
+#endif
                 uint64_t flags = mm_pte_flags_apply_prot(observed, ptef);
                 if ((ptef & PTE_W) &&
                     (v->vm_flags & VM_FILE) &&
@@ -303,11 +351,37 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot)
 {
     if (!mm) return -EINVAL;
+    int write_guard = 0;
+retry_mprotect:
+    if ((prot & PROT_WRITE) && !write_guard) {
+        uint64_t check_flags = spin_lock_irqsave(&mm->lock);
+        int needs_gate = mm_mprotect_needs_shared_write_locked(mm, addr, len,
+                                                               prot);
+        spin_unlock_irqrestore(&mm->lock, check_flags);
+        if (needs_gate) {
+            int admission = mm_shared_write_enter_wait();
+            if (admission < 0)
+                return admission;
+            write_guard = 1;
+        }
+    }
     mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
+    if (!write_guard &&
+        mm_mprotect_needs_shared_write_locked(mm, addr, len, prot)) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        mm_tlb_invalidate_finish(mm);
+        int admission = mm_shared_write_enter_wait();
+        if (admission < 0)
+            return admission;
+        write_guard = 1;
+        goto retry_mprotect;
+    }
     int r = mm_mprotect_locked(mm, addr, len, prot);
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_tlb_invalidate_finish(mm);
+    if (write_guard)
+        mm_shared_write_leave();
     return r;
 }
 
@@ -318,9 +392,37 @@ int mm_make_page_exec(mm_struct_t *mm, vaddr_t addr)
 {
     if (!mm) return -EINVAL;
     addr &= ~(vaddr_t)(PAGE_SIZE - 1);
+    int write_guard = 0;
+retry_make_exec:
+    if (!write_guard) {
+        uint64_t check_flags = spin_lock_irqsave(&mm->lock);
+        mm_seg_t *check_vma = mm_seg_find(mm, addr);
+        int needs_gate = check_vma && !(check_vma->vm_flags & VM_EXEC) &&
+            (check_vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+                (VM_FILE | VM_SHARED | VM_WRITE);
+        spin_unlock_irqrestore(&mm->lock, check_flags);
+        if (needs_gate) {
+            int admission = mm_shared_write_enter_wait();
+            if (admission < 0)
+                return admission;
+            write_guard = 1;
+        }
+    }
     mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_seg_t *vma = mm_seg_find(mm, addr);
+    int needs_gate = vma && !(vma->vm_flags & VM_EXEC) &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+            (VM_FILE | VM_SHARED | VM_WRITE);
+    if (needs_gate && !write_guard) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        mm_tlb_invalidate_finish(mm);
+        int admission = mm_shared_write_enter_wait();
+        if (admission < 0)
+            return admission;
+        write_guard = 1;
+        goto retry_make_exec;
+    }
     int r = -EFAULT;
     if (vma) {
         r = 0;
@@ -333,5 +435,7 @@ int mm_make_page_exec(mm_struct_t *mm, vaddr_t addr)
     }
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_tlb_invalidate_finish(mm);
+    if (write_guard)
+        mm_shared_write_leave();
     return r;
 }

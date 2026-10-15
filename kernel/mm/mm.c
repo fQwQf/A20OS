@@ -21,6 +21,7 @@
 #include "mm/pt.h"
 #include "mm/fault.h"
 #include "mm/usercopy.h"
+#include "mm/shutdown_write.h"
 #include "core/panic.h"
 #include "core/preempt.h"
 #include "core/stdio.h"
@@ -839,7 +840,8 @@ int user_prepare_write(struct task_t *t, uint64_t va)
  * Limit each locked access to one base page, including huge mappings. */
 #ifndef CONFIG_USER_COPY_RUST
 static int user_access_begin(task_t *t, uint64_t va, int write,
-                             void **kaddr, size_t *chunk, uint64_t *flags)
+                             void **kaddr, size_t *chunk, uint64_t *flags,
+                             int *write_guard_out)
 {
 #ifdef CONFIG_NOMMU
     (void)t;
@@ -847,8 +849,10 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
     *flags = 0;
     *kaddr = (void *)(uintptr_t)va;
     *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
+    if (write_guard_out) *write_guard_out = 0;
     return 0;
 #else
+    int write_guard = 0;
     for (;;) {
         *flags = spin_lock_irqsave(&t->mm->lock);
         pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
@@ -857,7 +861,18 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
         mm_seg_t *vma = mm_seg_find(t->mm, va);
         if (vma && !(vma->vm_flags & (write ? VM_WRITE : VM_READ))) {
             spin_unlock_irqrestore(&t->mm->lock, *flags);
+            if (write_guard) mm_shared_write_leave();
             return -EFAULT;
+        }
+        int needs_gate = write && allowed && vma &&
+            (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+                (VM_FILE | VM_SHARED | VM_WRITE);
+        if (needs_gate && !write_guard) {
+            spin_unlock_irqrestore(&t->mm->lock, *flags);
+            if (mm_shared_write_enter_wait() < 0)
+                return -EFAULT;
+            write_guard = 1;
+            continue;
         }
         if (allowed) {
             vaddr_t base;
@@ -866,9 +881,15 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
             *kaddr = (void *)(uintptr_t)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
             *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
             *pte |= PTE_A | (write ? PTE_D : 0);
+            if (write_guard_out) *write_guard_out = write_guard;
+            else if (write_guard) mm_shared_write_leave();
             return 0;
         }
         spin_unlock_irqrestore(&t->mm->lock, *flags);
+        if (write_guard) {
+            mm_shared_write_leave();
+            write_guard = 0;
+        }
         if (handle_demand_fault_access(t, va, write ? MM_FAULT_ACCESS_WRITE
                                                    : MM_FAULT_ACCESS_READ) < 0)
             return -EFAULT;
@@ -883,10 +904,12 @@ static int user_access_begin(task_t *t, uint64_t va, int write,
  * leaves this exact mm locked; retry requests are always returned unlocked. */
 int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
                              int write, void **kernel_address, size_t *chunk,
-                             uint64_t *irq_flags, unsigned *preempt_before)
+                             uint64_t *irq_flags, unsigned *preempt_before,
+                             unsigned *shared_write_guard_out)
 {
 #ifdef CONFIG_NOMMU
     if (!t || !mm || !kernel_address || !chunk || !irq_flags || !preempt_before ||
+        !shared_write_guard_out ||
         (write != 0 && write != 1))
         return -EFAULT;
     uint64_t user_va = (uint64_t)(vaddr_t)address;
@@ -901,9 +924,11 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     *chunk = page_chunk < user_chunk ? page_chunk : user_chunk;
     *irq_flags = arch_irqs_enabled() ? 1 : 0;
     *preempt_before = preempt_count();
+    *shared_write_guard_out = 0;
     return 0;
 #else
     if (!t || !mm || !kernel_address || !chunk || !irq_flags || !preempt_before ||
+        !shared_write_guard_out ||
         (write != 0 && write != 1))
         return -EFAULT;
     uint64_t user_va = (uint64_t)(vaddr_t)address;
@@ -913,12 +938,17 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     unsigned original_preempt = preempt_count();
     *irq_flags = original_irq;
     *preempt_before = original_preempt;
+    unsigned shared_write_guard = 0;
+    uint64_t task_flags;
 
     /* park_lock owns task->mm. Nest it before the address-space lock, then
      * release it while the exact pinned mm stays locked for the copy. */
-    uint64_t task_flags = spin_lock_irqsave(&t->park_lock);
+retry_access:
+    task_flags = spin_lock_irqsave(&t->park_lock);
     if (t->mm != mm || !mm->pgdir || t->pgdir != mm->pgdir) {
         spin_unlock_irqrestore(&t->park_lock, task_flags);
+        if (shared_write_guard)
+            mm_shared_write_leave();
 #ifdef CONFIG_USER_COPY_TEST
         if (arch_irqs_enabled() != (int)original_irq ||
             preempt_count() != original_preempt)
@@ -940,6 +970,8 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     mm_seg_t *vma = mm_seg_find(mm, va);
     if (vma && !(vma->vm_flags & (write ? VM_WRITE : VM_READ))) {
         spin_unlock_irqrestore(&mm->lock, task_flags);
+        if (shared_write_guard)
+            mm_shared_write_leave();
 #ifdef CONFIG_USER_COPY_TEST
         if (arch_irqs_enabled() != (int)original_irq ||
             preempt_count() != original_preempt)
@@ -947,8 +979,20 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
 #endif
         return -EFAULT;
     }
+    int needs_gate = write && allowed && vma &&
+        (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+            (VM_FILE | VM_SHARED | VM_WRITE);
+    if (needs_gate && !shared_write_guard) {
+        spin_unlock_irqrestore(&mm->lock, task_flags);
+        if (mm_shared_write_enter_wait() < 0)
+            return -EFAULT;
+        shared_write_guard = 1;
+        goto retry_access;
+    }
     if (!allowed) {
         spin_unlock_irqrestore(&mm->lock, task_flags);
+        if (shared_write_guard)
+            mm_shared_write_leave();
 #ifdef CONFIG_USER_COPY_TEST
         if (arch_irqs_enabled() != (int)original_irq ||
             preempt_count() != original_preempt)
@@ -962,6 +1006,8 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     pte = pt_lookup_leaf(mm->pgdir, va, NULL, &base, &mapped_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
         spin_unlock_irqrestore(&mm->lock, task_flags);
+        if (shared_write_guard)
+            mm_shared_write_leave();
 #ifdef CONFIG_USER_COPY_TEST
         if (arch_irqs_enabled() != (int)original_irq ||
             preempt_count() != original_preempt)
@@ -984,6 +1030,7 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     *chunk = page_chunk < user_chunk ? page_chunk : user_chunk;
     *irq_flags = task_flags;
     *pte |= PTE_A | (write ? PTE_D : 0);
+    *shared_write_guard_out = shared_write_guard;
     return 0;
 #endif
 }
@@ -1017,7 +1064,8 @@ int a20_usercopy_resolve_fault(task_t *t, mm_struct_t *mm,
 }
 
 void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq_flags,
-                              unsigned preempt_before)
+                              unsigned preempt_before,
+                              unsigned shared_write_guard)
 {
     (void)preempt_before;
 #ifndef CONFIG_NOMMU
@@ -1030,6 +1078,8 @@ void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq_flags,
         panic("usercopy page guard release state");
 #endif
     spin_unlock_irqrestore(&mm->lock, irq_flags);
+    if (shared_write_guard)
+        mm_shared_write_leave();
 #ifdef CONFIG_USER_COPY_TEST
     if (arch_irqs_enabled() != (int)irq_flags ||
         preempt_count() != preempt_before)
@@ -1037,6 +1087,8 @@ void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq_flags,
 #endif
 #else
     (void)mm; (void)irq_flags; (void)preempt_before;
+    if (shared_write_guard)
+        mm_shared_write_leave();
 #endif
 }
 
@@ -1059,7 +1111,7 @@ static mm_struct_t *usercopy_pin_mm(task_t *t)
 #endif
 
 #ifndef CONFIG_USER_COPY_RUST
-static void user_access_end(task_t *t, uint64_t flags)
+static void user_access_end(task_t *t, uint64_t flags, int write_guard)
 {
 #ifndef CONFIG_NOMMU
     spin_unlock_irqrestore(&t->mm->lock, flags);
@@ -1067,6 +1119,8 @@ static void user_access_end(task_t *t, uint64_t flags)
     (void)t;
     (void)flags;
 #endif
+    if (write_guard)
+        mm_shared_write_leave();
 }
 #endif
 
@@ -1087,12 +1141,12 @@ long copy_from_user(void *dst, const void *src, size_t n) {
         size_t chunk;
         uint64_t flags;
         if (user_access_begin(t, (uint64_t)(uintptr_t)src + copied, 0,
-                               &kaddr, &chunk, &flags) < 0)
+                               &kaddr, &chunk, &flags, NULL) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
         memcpy((char *)dst + copied, kaddr, chunk);
-        user_access_end(t, flags);
+        user_access_end(t, flags, 0);
         copied += chunk;
     }
     return (long)copied;
@@ -1115,13 +1169,14 @@ long copy_to_user(void *dst, const void *src, size_t n) {
         void *kaddr;
         size_t chunk;
         uint64_t flags;
+        int write_guard = 0;
         if (user_access_begin(t, (uint64_t)(uintptr_t)dst + copied, 1,
-                               &kaddr, &chunk, &flags) < 0)
+                               &kaddr, &chunk, &flags, &write_guard) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
         memcpy(kaddr, (const char *)src + copied, chunk);
-        user_access_end(t, flags);
+        user_access_end(t, flags, write_guard);
         copied += chunk;
     }
     return (long)copied;
@@ -1146,18 +1201,18 @@ long user_strncpy(char *dst, const char *src, size_t max) {
         void *kaddr;
         size_t chunk;
         uint64_t flags;
-        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags) < 0)
+        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags, NULL) < 0)
             return -EFAULT;
         if (chunk > max - 1 - i) chunk = max - 1 - i;
         const char *src_page = (const char *)kaddr;
         for (size_t j = 0; j < chunk; j++) {
             dst[i + j] = src_page[j];
             if (src_page[j] == '\0') {
-                user_access_end(t, flags);
+                user_access_end(t, flags, 0);
                 return (long)(i + j);
             }
         }
-        user_access_end(t, flags);
+        user_access_end(t, flags, 0);
         i += chunk;
     }
     dst[i] = '\0';
@@ -1183,17 +1238,17 @@ long user_strnlen(const char *src, size_t max) {
         void *kaddr;
         size_t chunk;
         uint64_t flags;
-        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags) < 0)
+        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags, NULL) < 0)
             return -EFAULT;
         if (chunk > max - i) chunk = max - i;
         const char *page = (const char *)kaddr;
         for (size_t j = 0; j < chunk; j++) {
             if (page[j] == '\0') {
-                user_access_end(t, flags);
+                user_access_end(t, flags, 0);
                 return (long)(i + j);
             }
         }
-        user_access_end(t, flags);
+        user_access_end(t, flags, 0);
         i += chunk;
     }
     return (long)max;

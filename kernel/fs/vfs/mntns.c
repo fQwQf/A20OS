@@ -18,8 +18,151 @@ static spinlock_t       g_mntns_lock = SPINLOCK_INIT;
 static uint64_t         g_next_ino = MNTNS_INIT_INO + 1;
 static uint64_t         g_teardown_pass;
 static int              g_reaper_started;
+/* Shutdown snapshots are deliberately bounded: if the namespace registry
+ * ever exceeds this capacity, shutdown fails before closing admission. */
+#define MNTNS_SHUTDOWN_MAX 256
+static mnt_namespace_t *g_shutdown_namespaces[MNTNS_SHUTDOWN_MAX];
+static int              g_shutdown_namespace_count;
+static int              g_shutdown_active;
+static unsigned int     g_namespace_create_inflight;
+static unsigned int     g_vfs_mutations_inflight;
+static unsigned int     g_vfs_fileops_inflight;
 
 static int mntns_retry_pending_internal(int retry_busy);
+
+int mntns_shutdown_active(void)
+{
+    return __atomic_load_n(&g_shutdown_active, __ATOMIC_ACQUIRE);
+}
+
+int mntns_shutdown_begin(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active || g_namespace_create_inflight ||
+        g_vfs_mutations_inflight || g_vfs_fileops_inflight) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return -EBUSY;
+    }
+    int count = 0;
+    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
+        if (count == MNTNS_SHUTDOWN_MAX || ns->teardown_running ||
+            ns->teardown_pending) {
+            spin_unlock_irqrestore(&g_mntns_lock, flags);
+            return -EBUSY;
+        }
+        for (int i = 0; i < ns->nmounts; i++) {
+            mount_t *mnt = ns->mounts[i];
+            if (mnt && mnt->teardown_running) {
+                spin_unlock_irqrestore(&g_mntns_lock, flags);
+                return -EBUSY;
+            }
+        }
+        count++;
+    }
+    __atomic_store_n(&g_shutdown_namespace_count, 0, __ATOMIC_RELAXED);
+    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
+        refcount_inc(&ns->refs);
+        g_shutdown_namespaces[g_shutdown_namespace_count++] = ns;
+    }
+    /* Publish only after the complete pinned array is ready. */
+    __atomic_store_n(&g_shutdown_active, 1, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return 0;
+}
+
+int mntns_shutdown_namespace_count(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    int count = g_shutdown_active ? g_shutdown_namespace_count : 0;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return count;
+}
+
+mnt_namespace_t *mntns_shutdown_namespace_at(int index)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    mnt_namespace_t *ns = NULL;
+    if (g_shutdown_active && index >= 0 && index < g_shutdown_namespace_count)
+        ns = g_shutdown_namespaces[index];
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return ns;
+}
+
+int mntns_mutation_enter(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return -ESHUTDOWN;
+    }
+    g_vfs_mutations_inflight++;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return 0;
+}
+
+void mntns_mutation_leave(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_vfs_mutations_inflight)
+        g_vfs_mutations_inflight--;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+}
+
+int mntns_fileop_enter(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return -ESHUTDOWN;
+    }
+    g_vfs_fileops_inflight++;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    return 0;
+}
+
+void mntns_fileop_leave(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_vfs_fileops_inflight)
+        g_vfs_fileops_inflight--;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+}
+
+void mntns_shutdown_abort(void)
+{
+    mnt_namespace_t *snapshot[MNTNS_SHUTDOWN_MAX];
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (!g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return;
+    }
+    int count = g_shutdown_namespace_count;
+    for (int i = 0; i < count; i++) {
+        snapshot[i] = g_shutdown_namespaces[i];
+        g_shutdown_namespaces[i] = NULL;
+    }
+    __atomic_store_n(&g_shutdown_namespace_count, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_shutdown_active, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+    /* Release outside the registry lock: a last put can perform filesystem
+     * teardown and sleep. */
+    for (int i = 0; i < count; i++)
+        if (snapshot[i] == &g_init_ns) {
+            uint64_t init_flags = spin_lock_irqsave(&g_mntns_lock);
+            (void)refcount_dec_and_test(&g_init_ns.refs);
+            spin_unlock_irqrestore(&g_mntns_lock, init_flags);
+        } else {
+            mntns_put(snapshot[i]);
+        }
+}
+
+static void mntns_create_done(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_namespace_create_inflight)
+        g_namespace_create_inflight--;
+    spin_unlock_irqrestore(&g_mntns_lock, flags);
+}
 
 static void mntns_free(mnt_namespace_t *ns)
 {
@@ -203,6 +346,12 @@ static mnt_namespace_t *mntns_alloc(void)
     memset(ns, 0, sizeof(*ns));
     refcount_set(&ns->refs, 1);
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        kfree(ns);
+        return NULL;
+    }
+    g_namespace_create_inflight++;
     ns->ino = g_next_ino++;
     ns->next = g_ns_list;
     g_ns_list = ns;
@@ -269,12 +418,19 @@ int mntns_unshare(task_t *t)
                                      : &g_init_ns;
     mnt_namespace_t *ns = mntns_alloc();
     if (!ns)
-        return -ENOMEM;
+        return mntns_shutdown_active() ? -ESHUTDOWN : -ENOMEM;
     mntns_copy_mounts(ns, cur);
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        mntns_create_done();
+        mntns_put(ns);
+        return -ESHUTDOWN;
+    }
     mnt_namespace_t *old = (mnt_namespace_t *)t->mnt_ns;
     t->mnt_ns = ns;  /* takes over the fresh reference */
     spin_unlock_irqrestore(&g_mntns_lock, flags);
+    mntns_create_done();
     if (old)
         mntns_put(old);
     return 0;
@@ -290,16 +446,35 @@ int mntns_fork(task_t *child, task_t *parent, uint64_t clone_flags)
     if (clone_flags & CLONE_NEWNS) {
         mnt_namespace_t *ns = mntns_alloc();
         if (!ns)
-            return -ENOMEM;
+            return mntns_shutdown_active() ? -ESHUTDOWN : -ENOMEM;
         mntns_copy_mounts(ns, pns);
+        uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+        if (g_shutdown_active) {
+            spin_unlock_irqrestore(&g_mntns_lock, flags);
+            mntns_create_done();
+            mntns_put(ns);
+            return -ESHUTDOWN;
+        }
         child->mnt_ns = ns;
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        mntns_create_done();
         return 0;
     }
     if (pns == &g_init_ns) {
+        uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+        if (g_shutdown_active) {
+            spin_unlock_irqrestore(&g_mntns_lock, flags);
+            return -ESHUTDOWN;
+        }
         child->mnt_ns = NULL;  /* initial namespace: no reference needed */
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
         return 0;
     }
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return -ESHUTDOWN;
+    }
     refcount_inc(&pns->refs);
     child->mnt_ns = pns;
     spin_unlock_irqrestore(&g_mntns_lock, flags);
@@ -312,6 +487,10 @@ int mntns_join(task_t *t, mnt_namespace_t *ns)
         return -EINVAL;
     int to_init = (ns == &g_init_ns);
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (g_shutdown_active) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return -ESHUTDOWN;
+    }
     mnt_namespace_t *old = (mnt_namespace_t *)t->mnt_ns;
     /* NULL means the initial namespace; its reference is not tracked. */
     t->mnt_ns = to_init ? NULL : ns;

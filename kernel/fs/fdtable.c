@@ -15,8 +15,8 @@
 
 #define FDTABLE_WORDS ((MAX_FILES + 63) / 64)
 
-static int fdtable_ctz64(uint64_t bits);
 #ifndef CONFIG_FDTABLE_STATE_RUST
+static int fdtable_ctz64(uint64_t bits);
 static inline void fdtable_mask_set(files_struct_t *files, int fd);
 static int fdtable_find_free(files_struct_t *files, int minfd);
 static void fdtable_note_alloc(files_struct_t *files, int fd);
@@ -100,6 +100,9 @@ int a20_fdtable_detach_next_rust(void **slots, uint8_t *cloexec,
                                  size_t start_fd, int *out_fd,
                                  void **out_vfile,
                                  void (*on_detach)(int));
+bool a20_fdtable_has_open_slot_rust(void *const *slots,
+                                    const uint64_t *mask,
+                                    size_t max_files, void *vfile);
 #endif
 
 /* Pinned for the life of the kernel: fd operations with no current task
@@ -583,6 +586,7 @@ static void fdtable_files_put(files_struct_t *files)
     kfree(to_close);
 }
 
+#ifndef CONFIG_FDTABLE_STATE_RUST
 static int fdtable_ctz64(uint64_t bits)
 {
     if (bits == 0) return 64;
@@ -596,7 +600,6 @@ static int fdtable_ctz64(uint64_t bits)
     return n;
 }
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
 static int fdtable_find_free(files_struct_t *files, int minfd)
 {
     if (!files)
@@ -1545,6 +1548,11 @@ bool fdtable_file_has_open_slot(vfile_t *vf)
     for (files_struct_t *files = fdtable_registry; files && !found;
          files = files->registry_next) {
         uint64_t ff = spin_lock_irqsave(&files->lock);
+#ifdef CONFIG_FDTABLE_STATE_RUST
+        found = a20_fdtable_has_open_slot_rust((void *const *)files->fd,
+                                                files->open_mask, MAX_FILES,
+                                                vf);
+#else
         for (int word = 0; word < FDTABLE_WORDS && !found; word++) {
             uint64_t open = files->open_mask[word];
             while (open) {
@@ -1558,6 +1566,7 @@ bool fdtable_file_has_open_slot(vfile_t *vf)
                 }
             }
         }
+#endif
         spin_unlock_irqrestore(&files->lock, ff);
     }
     spin_unlock_irqrestore(&fdtable_registry_lock, flags);

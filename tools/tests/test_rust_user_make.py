@@ -10,7 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_dry_run(*args):
-    return subprocess.run(["make", "-n", *args], cwd=ROOT, text=True,
+    return subprocess.run([str(ROOT / ".git/parallel-rewrite/run-build.sh"),
+                           "build-1", "make", "-n",
+                           "BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/build",
+                           "USER_BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/user",
+                           *args], cwd=ROOT, text=True,
                          capture_output=True)
 
 
@@ -97,6 +101,28 @@ class RustUserMakeTests(unittest.TestCase):
         service = make_dry_run("native-rust-idl-service-rv32")
         self.assertEqual(service.returncode, 0, service.stderr)
         self.assertIn("ARCH=riscv32", service.stdout + service.stderr)
+
+    def test_rust_svcmgr_builds_for_each_installed_native_target(self):
+        for arch, tag in (("riscv64", "rv"), ("riscv32", "rv32"),
+                          ("aarch64", "aarch64"), ("x86_64", "x86_64")):
+            result = make_dry_run(f"ARCH={arch}", "NATIVE_RUST_SVCMGR=1",
+                                  "native-rust-svcmgr")
+            self.assertEqual(result.returncode, 0, (arch, result.stderr))
+            output = result.stdout + result.stderr
+            self.assertIn("user/svc/svcmgr.rs", output)
+            self.assertIn(f"svcmgr-rust-{tag}", output)
+
+    def test_rust_rtcd_is_limited_to_goldfish_targets(self):
+        result = make_dry_run("ARCH=aarch64", "NATIVE_RUST_RTCD=1",
+                              "native-rust-rtcd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rtcd-rust-aarch64.a20drv", result.stdout + result.stderr)
+        for arch in ("x86_64", "riscv32"):
+            rejected = make_dry_run(f"ARCH={arch}", "NATIVE_RUST_RTCD=1",
+                                    "native-rust-rtcd")
+            self.assertNotEqual(rejected.returncode, 0, arch)
+            self.assertIn("requires ARCH=riscv64 or aarch64 Goldfish RTC",
+                          rejected.stderr)
 
     def test_opt_in_peer_rejects_o0_instead_of_silently_mapping_it(self):
         result = make_dry_run("ARCH=riscv64", "NATIVE_RUST_PEER=1",
