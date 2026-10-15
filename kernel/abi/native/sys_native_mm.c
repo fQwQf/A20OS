@@ -19,6 +19,7 @@
 #include "mm/slab.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/shutdown_write.h"
 #include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
@@ -504,8 +505,32 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
         return -A20_ERR_FAULT;
 
     mm_struct_t *mm = cur->mm;
+    int write_guard = 0;
+retry_native_remap:
+    if (!write_guard) {
+        uint64_t check_flags = spin_lock_irqsave(&mm->lock);
+        int needs_gate = mm_mremap_needs_shared_write_locked(
+            mm, (vaddr_t)old_addr, (size_t)old_len,
+            prot ? (int)prot : -1);
+        spin_unlock_irqrestore(&mm->lock, check_flags);
+        if (needs_gate) {
+            if (mm_shared_write_enter_wait() < 0)
+                return -A20_ERR_IO;
+            write_guard = 1;
+        }
+    }
     mm_tlb_invalidate_begin(mm);
     uint64_t flags = spin_lock_irqsave(&mm->lock);
+    if (!write_guard && mm_mremap_needs_shared_write_locked(
+            mm, (vaddr_t)old_addr, (size_t)old_len,
+            prot ? (int)prot : -1)) {
+        spin_unlock_irqrestore(&mm->lock, flags);
+        mm_tlb_invalidate_finish(mm);
+        if (mm_shared_write_enter_wait() < 0)
+            return -A20_ERR_IO;
+        write_guard = 1;
+        goto retry_native_remap;
+    }
     mm_seg_t *source = mm_seg_find(mm, old_addr);
     int r = 0;
     vaddr_t out = 0;
@@ -532,6 +557,8 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
 remap_out:
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_tlb_invalidate_finish(mm);
+    if (write_guard)
+        mm_shared_write_leave();
     if (r < 0) return a20_mm_errno_map(r);
     return (int64_t)out;
 }

@@ -18,6 +18,34 @@ mod idl {
     include!(env!("A20_IDL_RUST_BINDINGS"));
 }
 
+// The supervisor is shared across Native targets. Keep the architecture tag
+// in one compile-time-selected set of image paths so it starts the matching
+// services from the current architecture's user image.
+#[cfg(target_arch = "riscv64")]
+mod service_paths {
+    pub const RTCD: &[u8] = b"/bin/rtcd-rv.a20drv\0";
+    pub const ECHOD: &[u8] = b"/bin/svc-echod-rv\0";
+    pub const UFSD: &[u8] = b"/bin/ufsd-rv\0";
+}
+#[cfg(target_arch = "riscv32")]
+mod service_paths {
+    pub const RTCD: &[u8] = b"/bin/rtcd-rv32.a20drv\0";
+    pub const ECHOD: &[u8] = b"/bin/svc-echod-rv32\0";
+    pub const UFSD: &[u8] = b"/bin/ufsd-rv32\0";
+}
+#[cfg(target_arch = "aarch64")]
+mod service_paths {
+    pub const RTCD: &[u8] = b"/bin/rtcd-aarch64.a20drv\0";
+    pub const ECHOD: &[u8] = b"/bin/svc-echod-aarch64\0";
+    pub const UFSD: &[u8] = b"/bin/ufsd-aarch64\0";
+}
+#[cfg(target_arch = "x86_64")]
+mod service_paths {
+    pub const RTCD: &[u8] = b"/bin/rtcd-x86_64.a20drv\0";
+    pub const ECHOD: &[u8] = b"/bin/svc-echod-x86_64\0";
+    pub const UFSD: &[u8] = b"/bin/ufsd-x86_64\0";
+}
+
 type Handle = u32;
 const A20_OK: i64 = 0;
 const HANDLE_NULL: Handle = u32::MAX;
@@ -1051,19 +1079,19 @@ fn manager_main() -> c_int {
     let definitions = [
         Definition {
             name: b"rtcd\0",
-            path: b"/bin/rtcd-rv.a20drv\0",
+            path: service_paths::RTCD,
             endpoint_slot: idl::A20_RTCD_EP_SLOT as u32,
             ping_kind: 1,
         },
         Definition {
             name: b"echod\0",
-            path: b"/bin/svc-echod-rv\0",
+            path: service_paths::ECHOD,
             endpoint_slot: idl::A20_SVC_ENDPOINT_SLOT as u32,
             ping_kind: 0,
         },
         Definition {
             name: b"ufsd\0",
-            path: b"/bin/ufsd-rv\0",
+            path: service_paths::UFSD,
             endpoint_slot: idl::A20_SVC_ENDPOINT_SLOT as u32,
             ping_kind: 2,
         },
@@ -1238,6 +1266,29 @@ mod manager_tests {
     static REGISTRY_REPLY_STATUS: AtomicI32 = AtomicI32::new(0);
     static REGISTRY_REPLY_LOG: Mutex<std::vec::Vec<i32>> = Mutex::new(std::vec::Vec::new());
     static EXIT_AFTER_SLEEP: AtomicI32 = AtomicI32::new(0);
+
+    #[test]
+    fn service_manifest_paths_follow_native_architecture_tag() {
+        #[cfg(target_arch = "riscv64")]
+        let tag = b"rv" as &[u8];
+        #[cfg(target_arch = "riscv32")]
+        let tag = b"rv32" as &[u8];
+        #[cfg(target_arch = "aarch64")]
+        let tag = b"aarch64" as &[u8];
+        #[cfg(target_arch = "x86_64")]
+        let tag = b"x86_64" as &[u8];
+
+        let expected = |prefix: &[u8], suffix: &[u8]| {
+            let mut result = std::vec::Vec::from(prefix);
+            result.extend_from_slice(tag);
+            result.extend_from_slice(suffix);
+            result.push(0);
+            result
+        };
+        assert_eq!(service_paths::ECHOD, expected(b"/bin/svc-echod-", b""));
+        assert_eq!(service_paths::UFSD, expected(b"/bin/ufsd-", b""));
+        assert_eq!(service_paths::RTCD, expected(b"/bin/rtcd-", b".a20drv"));
+    }
 
     #[test]
     fn ufsd_block_parser_accepts_bounded_values_with_ascii_whitespace() {

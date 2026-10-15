@@ -36,6 +36,8 @@ int      vfs_mount_root_users(mount_t *mnt);
 void     vfs_mount_cwd_get(mount_t *mnt);
 void     vfs_mount_cwd_put(mount_t *mnt);
 int      vfs_mount_cwd_users(mount_t *mnt);
+void     vfs_mount_vfile_get(mount_t *mnt);
+void     vfs_mount_vfile_put(mount_t *mnt);
 /* Cut @mnt out of the tree bypassing the busy rules (pivot_root).  The
  * mount stays listed in mountinfo but no path resolves through it. */
 void     vfs_mount_detach_root(mount_t *mnt);

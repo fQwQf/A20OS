@@ -14,6 +14,7 @@
  */
 #include <stdint.h>
 #include "ufs_backends.h"
+#include "ufs_close_token.h"
 #include "core/types.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -30,6 +31,7 @@ extern int  fsio_write(uint32_t lba, const void *buf, uint32_t count);
 extern int  fsio_flush(void);
 extern int  fsio_flush_supported(void);
 extern uint64_t fsio_capacity_sectors(void);
+extern uint64_t fsio_monotonic_ns(void);
 
 #define VNFS_MAX_NODES 512
 
@@ -51,6 +53,10 @@ static vn_node_t   g_nodes[VNFS_MAX_NODES];
  * lookup map.  Unlink may remove the map entry while descriptors remain open;
  * the retained record is then the only route by which CLOSE can release it. */
 static vn_open_t   g_open_nodes[VNFS_MAX_NODES];
+/* Close-token idempotency registry (used only when the frontend negotiated
+ * UFS_CLOSE_TOKEN_CAPABILITY; lazily initialized with a per-boot monotonic
+ * clock epoch).  See docs/rust/ufs-close-token-design-r1.md. */
+static ufs_close_token_table_t g_close_tokens;
 static int         g_readonly;
 static int         g_ext4_backend;
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
@@ -169,10 +175,20 @@ int64_t vnfs_has_inode(uint64_t ino)
     return vn_map_get(ino) ? 0 : -U_ESTALE;
 }
 
-int64_t vnfs_inode_open(uint64_t ino)
+int64_t vnfs_inode_open(uint64_t ino, uint64_t *token_out)
 {
     vnode_t *vn = vn_map_get(ino);
     if (!vn) return -U_ESTALE;
+    if (token_out) {
+        *token_out = 0;
+        if (!g_close_tokens.epoch)
+            ufs_close_token_init(&g_close_tokens, fsio_monotonic_ns());
+        /* A token-capable client cannot safely fall back to token 0. Reserve
+         * issue capacity before taking a vnode reference or incrementing the
+         * per-inode open count. */
+        if (!ufs_close_token_can_issue(&g_close_tokens))
+            return -U_EAGAIN;
+    }
     for (int i = 0; i < VNFS_MAX_NODES; i++) {
         if (g_open_nodes[i].vn && g_open_nodes[i].ino == ino) {
             /* Keep the exact object opened; map replacement/detach must not
@@ -183,6 +199,14 @@ int64_t vnfs_inode_open(uint64_t ino)
                 return -U_ESTALE;
             vnode_get(g_open_nodes[i].vn);
             g_open_nodes[i].refs++;
+            if (token_out) {
+                *token_out = ufs_close_token_issue(&g_close_tokens, ino);
+                if (!*token_out) {
+                    g_open_nodes[i].refs--;
+                    vnode_put(g_open_nodes[i].vn);
+                    return -U_EAGAIN;
+                }
+            }
             return 0;
         }
     }
@@ -192,27 +216,64 @@ int64_t vnfs_inode_open(uint64_t ino)
             g_open_nodes[i].ino = ino;
             g_open_nodes[i].vn = vn;
             g_open_nodes[i].refs = 1;
+            if (token_out) {
+                *token_out = ufs_close_token_issue(&g_close_tokens, ino);
+                if (!*token_out) {
+                    g_open_nodes[i].vn = 0;
+                    g_open_nodes[i].ino = 0;
+                    g_open_nodes[i].refs = 0;
+                    vnode_put(vn);
+                    return -U_EAGAIN;
+                }
+            }
             return 0;
         }
     }
     return -U_EMFILE;
 }
 
-int64_t vnfs_inode_close(uint64_t ino)
+int64_t vnfs_inode_close(uint64_t ino, uint64_t token)
 {
+    if (token) {
+        switch (ufs_close_token_lookup(&g_close_tokens, ino, token)) {
+        case UFS_CLOSE_TOKEN_ACCEPTED:
+            /* Duplicate of an accepted close: success, no side effects. */
+            return 0;
+        case UFS_CLOSE_TOKEN_LIVE:
+            /* Reserve replay state before consuming the backend reference.
+             * Never accept a close if its outcome could not be retained. */
+            if (!ufs_close_token_can_consume(&g_close_tokens))
+                return -U_EAGAIN;
+            break;
+        default:
+            return -U_ENOENT; /* garbage token: close stays an error */
+        }
+    }
     for (int i = 0; i < VNFS_MAX_NODES; i++) {
         if (g_open_nodes[i].vn && g_open_nodes[i].ino == ino &&
             g_open_nodes[i].refs != 0) {
             vnode_t *vn = g_open_nodes[i].vn;
+            if (token) {
+                int token_rc = ufs_close_token_consume(&g_close_tokens,
+                                                       ino, token);
+                if (token_rc != 0)
+                    return token_rc;
+            }
             if (--g_open_nodes[i].refs == 0) {
                 g_open_nodes[i].vn = 0;
                 g_open_nodes[i].ino = 0;
+                ufs_close_token_forget_ino(&g_close_tokens, ino);
             }
             vnode_put(vn);
             return 0;
         }
     }
     return -U_ESTALE;
+}
+
+int64_t vnfs_inode_close_confirm(uint64_t ino, uint64_t token)
+{
+    return ufs_close_token_confirm(&g_close_tokens, ino, token);
 }
 
 int64_t vnfs_inode_link_count(uint64_t ino, uint64_t *links_out)
@@ -822,5 +883,6 @@ const ufs_backend_t UFS_BACKEND_VNFS = {
     .sync     = vn_sync,
     .open     = vnfs_inode_open,
     .close    = vnfs_inode_close,
+    .close_confirm = vnfs_inode_close_confirm,
     .statfs   = vn_statfs,
 };

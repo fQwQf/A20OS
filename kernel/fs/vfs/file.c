@@ -1,6 +1,9 @@
 #include "fs/vfs/file.h"
 #include "fs/quota.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mntns.h"
+#include "fs/vfs/shutdown.h"
+#include "fs/ext4.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
 #include "fs/pipe.h"
@@ -10,6 +13,8 @@
 #include "fs/inotify.h"
 #include "ipc/ipc.h"
 #include "mm/vm.h"
+#include "proc/proc.h"
+#include "core/timer.h"
 
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
@@ -59,10 +64,12 @@ static int vfs_file_uses_buffered_write(vnode_t *vn)
            vn->ops && vn->ops->readpage && vn->ops->writepage;
 }
 
-int vfs_read_file(vfile_t *vf, char *buf, size_t count)
+static int vfs_read_file_impl(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     if ((vf->vnode || vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf)) &&
         !vfs_should_read(vf->flags))
         return -EBADF;
@@ -100,10 +107,22 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
     return -EBADF;
 }
 
-int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
+int vfs_read_file(vfile_t *vf, char *buf, size_t count)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_read_file_impl(vf, buf, count);
+    mntns_fileop_leave();
+    return ret;
+}
+
+static int vfs_write_file_impl(vfile_t *vf, const char *buf, size_t count)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     if ((vf->vnode || vfs_is_pipe_vfile(vf) || vfs_is_char_device_vfile(vf)) &&
         !vfs_should_write(vf->flags))
         return -EBADF;
@@ -170,6 +189,16 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     return -EBADF;
 }
 
+int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_write_file_impl(vf, buf, count);
+    mntns_fileop_leave();
+    return ret;
+}
+
 int vfs_read(int fd, char *buf, size_t count)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
@@ -221,10 +250,12 @@ int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
     return r;
 }
 
-long vfs_lseek_vfile(vfile_t *vf, long offset, int whence)
+static long vfs_lseek_vfile_impl(vfile_t *vf, long offset, int whence)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
     if (lock_offset)
         mutex_lock(&vf->offset_lock);
@@ -245,6 +276,16 @@ long vfs_lseek_vfile(vfile_t *vf, long offset, int whence)
     return r;
 }
 
+long vfs_lseek_vfile(vfile_t *vf, long offset, int whence)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    long result = vfs_lseek_vfile_impl(vf, offset, whence);
+    mntns_fileop_leave();
+    return result;
+}
+
 long vfs_lseek(int fd, long offset, int whence)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
@@ -253,13 +294,25 @@ long vfs_lseek(int fd, long offset, int whence)
     return r;
 }
 
-int vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count)
+static int vfs_getdents64_vfile_impl(vfile_t *vf, void *dirp, size_t count)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     if (vf->ops && vf->ops->readdir)
         return vf->ops->readdir(vf, dirp, count);
     return -EBADF;
+}
+
+int vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_getdents64_vfile_impl(vf, dirp, count);
+    mntns_fileop_leave();
+    return ret;
 }
 
 int vfs_getdents64(int fd, void *dirp, size_t count)
@@ -270,13 +323,25 @@ int vfs_getdents64(int fd, void *dirp, size_t count)
     return r;
 }
 
-int vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg)
+static int vfs_ioctl_vfile_impl(vfile_t *vf, unsigned long req, void *arg)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     if (vf->ops && vf->ops->ioctl)
         return vf->ops->ioctl(vf, req, arg);
     return -ENOTTY;
+}
+
+int vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_ioctl_vfile_impl(vf, req, arg);
+    mntns_fileop_leave();
+    return ret;
 }
 
 int vfs_ioctl(int fd, unsigned long req, void *arg)
@@ -315,17 +380,243 @@ int vfs_sync(void)
     if (pc_r < 0)
         return pc_r;
     for (int i = 0; i < vfs_mount_count(); i++) {
-        bcache_t *bc = vfs_mount_bcache(vfs_mount_at(i));
-        if (bc)
-            bcache_sync(bc);
+        mount_t *mnt = vfs_mount_at(i);
+        if (!mnt)
+            continue;
+        bcache_t *bc = vfs_mount_bcache(mnt);
+        if (bc) {
+            int ret = bcache_sync_checked(bc);
+            if (ret < 0)
+                return ret;
+        } else if (mnt->type == FS_TYPE_UXFS && mnt->root &&
+                   mnt->root->ops && mnt->root->ops->sync_vnode) {
+            /* UXFS owns its device cache in the service.  Its mount-root
+             * SYNC request is backend-wide and must be part of system sync,
+             * even when no individual file is currently open. */
+            int ret = mnt->root->ops->sync_vnode(mnt->root);
+            if (ret < 0)
+                return ret;
+        }
     }
     return 0;
 }
 
-int vfs_fsync_vfile(vfile_t *vf)
+static uint64_t g_shutdown_mm_generation;
+static int g_shutdown_mm_prepared;
+static int g_shutdown_vfile_snapshot;
+
+extern int mm_shared_write_shutdown_begin(uint64_t *generation);
+extern int mm_shared_write_shutdown_drained(uint64_t generation);
+extern int mm_shared_write_shutdown_revoke(uint64_t generation);
+extern int mm_shared_write_shutdown_abort(uint64_t generation);
+extern int mm_shared_write_shutdown_commit(uint64_t generation);
+
+static int vfs_shutdown_begin_cb(void *context)
+{
+    (void)context;
+    int ret = mntns_shutdown_begin();
+    if (ret < 0)
+        return ret;
+    ret = vfile_shutdown_snapshot_begin();
+    if (ret < 0) {
+        mntns_shutdown_abort();
+        return ret;
+    }
+    g_shutdown_vfile_snapshot = 1;
+    g_shutdown_mm_prepared = 0;
+    g_shutdown_mm_generation = 0;
+    ret = mm_shared_write_shutdown_begin(&g_shutdown_mm_generation);
+    if (ret < 0) {
+        vfile_shutdown_snapshot_end();
+        g_shutdown_vfile_snapshot = 0;
+        mntns_shutdown_abort();
+        return ret;
+    }
+    g_shutdown_mm_prepared = 1;
+    return 0;
+}
+
+static int vfs_shutdown_abort_cb(void *context)
+{
+    (void)context;
+    int ret = 0;
+    if (g_shutdown_mm_prepared) {
+        ret = mm_shared_write_shutdown_abort(g_shutdown_mm_generation);
+        if (ret < 0)
+            return ret;
+        g_shutdown_mm_prepared = 0;
+    }
+    if (g_shutdown_vfile_snapshot) {
+        vfile_shutdown_snapshot_end();
+        g_shutdown_vfile_snapshot = 0;
+    }
+    mntns_shutdown_abort();
+    return 0;
+}
+
+static bcache_t *shutdown_mount_cache(mount_t *mnt)
+{
+    if (!mnt)
+        return NULL;
+    switch (mnt->type) {
+    case FS_TYPE_FAT32:
+    case FS_TYPE_NTFS:
+    case FS_TYPE_EXT4:
+    case FS_TYPE_LITTLEFS:
+    case FS_TYPE_ISOFS:
+        return (bcache_t *)mnt->fs_data;
+    default:
+        return NULL;
+    }
+}
+
+static int vfs_shutdown_sync_cb(void *context)
+{
+    (void)context;
+    uint64_t generation = g_shutdown_mm_generation;
+    int ret;
+    /* This waits only for admitted MM write-grant transactions, not for user
+     * tasks as a class; the UFSD service and ordinary kernel I/O keep running. */
+    uint64_t wait_start = timer_get_ticks();
+    uint64_t wait_budget = 5ULL * TICKS_PER_SEC;
+    uint32_t wait_iterations = 0;
+    do {
+        ret = mm_shared_write_shutdown_drained(generation);
+        if (ret == 0) {
+            if ((uint64_t)(timer_get_ticks() - wait_start) >= wait_budget ||
+                ++wait_iterations >= 1000000U)
+                return -ETIMEDOUT;
+            proc_yield();
+        }
+    } while (ret == 0);
+    if (ret < 0)
+        return ret;
+    ret = mm_shared_write_shutdown_revoke(generation);
+    if (ret < 0)
+        return ret;
+
+    ret = page_cache_writeback_all(NULL, NULL);
+    if (ret < 0)
+        return ret;
+    int ns_count = mntns_shutdown_namespace_count();
+    for (int n = 0; n < ns_count; n++) {
+        mnt_namespace_t *ns = mntns_shutdown_namespace_at(n);
+        if (!ns)
+            return -EIO;
+        for (int i = 0; i < ns->nmounts; i++) {
+            mount_t *mnt = ns->mounts[i];
+            if (!mnt || !mnt->publish_ready || mnt->shared_source ||
+                mnt->ns_users == 0)
+                continue;
+            bcache_t *bc = shutdown_mount_cache(mnt);
+            if (bc) {
+                ret = bcache_sync_checked(bc);
+                if (ret < 0)
+                    return ret;
+            } else if (mnt->type == FS_TYPE_UXFS && mnt->root &&
+                       mnt->root->ops && mnt->root->ops->sync_vnode) {
+                ret = mnt->root->ops->sync_vnode(mnt->root);
+                if (ret < 0)
+                    return ret;
+            }
+        }
+    }
+    return 0;
+}
+
+static int vfs_shutdown_commit_cb(void *context)
+{
+    (void)context;
+    if (!g_shutdown_mm_prepared || !g_shutdown_vfile_snapshot)
+        return -EINVAL;
+    if (g_shutdown_mm_prepared == 1) {
+        int ret = mm_shared_write_shutdown_commit(g_shutdown_mm_generation);
+        if (ret < 0)
+            return ret;
+        /* From this point the VFS/MM write gates are permanent; a later
+         * failure is retried in place and never resumes ordinary operations. */
+        g_shutdown_mm_prepared = 2;
+    }
+    return vfile_shutdown_close_mounted();
+}
+
+static int vfs_shutdown_teardown_cb(void *context)
+{
+    (void)context;
+    if (g_shutdown_mm_prepared != 2)
+        return -EINVAL;
+    /* Backend CLOSE can dirty inode/orphan metadata. Re-run checked writeback
+     * after every close ACK before asking a filesystem to persist CLEAN. */
+    int ret = page_cache_writeback_all(NULL, NULL);
+    if (ret < 0)
+        return ret;
+    int ns_count = mntns_shutdown_namespace_count();
+    for (int n = 0; n < ns_count; n++) {
+        mnt_namespace_t *ns = mntns_shutdown_namespace_at(n);
+        if (!ns)
+            return -EIO;
+        for (int i = 0; i < ns->nmounts; i++) {
+            mount_t *mnt = ns->mounts[i];
+            if (!mnt || !mnt->publish_ready || mnt->shared_source ||
+                mnt->ns_users == 0)
+                continue;
+            bcache_t *bc = shutdown_mount_cache(mnt);
+            if (bc && (ret = bcache_sync_checked(bc)) < 0)
+                return ret;
+            if (mnt->type == FS_TYPE_UXFS && mnt->root && mnt->root->ops &&
+                mnt->root->ops->sync_vnode &&
+                (ret = mnt->root->ops->sync_vnode(mnt->root)) < 0)
+                return ret;
+        }
+    }
+    /* Namespace registry is newest-first, so private clones are visited
+     * before their shared source. This callback commits in-memory instances
+     * without freeing mount/vnode objects that surviving task references may
+     * still name while firmware poweroff is pending. */
+    for (int n = 0; n < ns_count; n++) {
+        mnt_namespace_t *ns = mntns_shutdown_namespace_at(n);
+        if (!ns)
+            return -EIO;
+        for (int i = 0; i < ns->nmounts; i++) {
+            mount_t *mnt = ns->mounts[i];
+            if (!mnt || !mnt->publish_ready || mnt->shared_source ||
+                mnt->ns_users == 0)
+                continue;
+            ret = 0;
+            if (mnt->type == FS_TYPE_EXT4) {
+                ret = ext4_shutdown_clean(mnt->root);
+            } else if (mnt->type == FS_TYPE_UXFS) {
+                extern int uxfs_unmount(struct vnode *root);
+                ret = uxfs_unmount(mnt->root);
+            }
+            if (ret < 0)
+                return ret;
+        }
+    }
+    vfile_shutdown_snapshot_end();
+    g_shutdown_vfile_snapshot = 0;
+    return 0;
+}
+
+int vfs_system_shutdown(void)
+{
+    static const vfs_shutdown_ops_t ops = {
+        .context = NULL,
+        .begin = vfs_shutdown_begin_cb,
+        .sync = vfs_shutdown_sync_cb,
+        .teardown = vfs_shutdown_teardown_cb,
+        .abort = vfs_shutdown_abort_cb,
+        .commit = vfs_shutdown_commit_cb,
+    };
+    return a20_vfs_shutdown_run(&ops);
+}
+
+static int vfs_fsync_vfile_impl(vfile_t *vf)
 {
     if (!vf)
         return -EBADF;
+    if (vf->backend_close_done)
+        return -ESHUTDOWN;
     int r = 0;
     /* Filesystems that commit per open file (littlefs) sync here, before
      * the generic device flush below. */
@@ -353,6 +644,16 @@ int vfs_fsync_vfile(vfile_t *vf)
         }
     }
     return r;
+}
+
+int vfs_fsync_vfile(vfile_t *vf)
+{
+    int ret = mntns_fileop_enter();
+    if (ret < 0)
+        return ret;
+    ret = vfs_fsync_vfile_impl(vf);
+    mntns_fileop_leave();
+    return ret;
 }
 
 int vfs_fsync(int fd)

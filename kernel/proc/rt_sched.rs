@@ -37,6 +37,25 @@ pub struct RtBucket {
     pub tail: *mut RtNode,
 }
 
+/// Per-runqueue RT bandwidth accounting state. C embeds this exact object in
+/// its private runqueue so account and pick cross the ABI with one stable
+/// state pointer rather than four independent scalar pointers.
+#[repr(C, align(8))]
+pub struct RtBandwidthState {
+    pub period_start: u64,
+    pub last_account: u64,
+    pub used: u64,
+    pub initialized: u32,
+}
+const _: () = {
+    assert!(core::mem::offset_of!(RtBandwidthState, period_start) == 0);
+    assert!(core::mem::offset_of!(RtBandwidthState, last_account) == 8);
+    assert!(core::mem::offset_of!(RtBandwidthState, used) == 16);
+    assert!(core::mem::offset_of!(RtBandwidthState, initialized) == 24);
+    assert!(core::mem::size_of::<RtBandwidthState>() == 32);
+    assert!(core::mem::align_of::<RtBandwidthState>() == 8);
+};
+
 const _: () = {
     assert!(core::mem::offset_of!(RtBucket, tail) == core::mem::size_of::<usize>());
     assert!(core::mem::size_of::<RtBucket>() == 2 * core::mem::size_of::<usize>());
@@ -149,79 +168,14 @@ pub unsafe extern "C" fn a20_rt_enqueue(
     1
 }
 
-/// Remove a queued node using its stored slot. Double removal is rejected.
-///
-/// # Safety
-/// `buckets` and `bitmap` must describe the same live runqueue, `node` must
-/// belong to that runqueue or be detached, and all storage must remain valid
-/// under the caller-held runqueue lock. The arrays and node storage must not
-/// alias each other.
-#[no_mangle]
-pub unsafe extern "C" fn a20_rt_dequeue(
-    buckets: *mut RtBucket,
-    bitmap: *mut u32,
-    levels: u32,
-    node: *mut RtNode,
-) -> u32 {
-    if !valid_state(buckets, bitmap, levels) || node.is_null() {
-        return 0;
-    }
-    let n = unsafe { &mut *node };
-    if n.slot < 0 || n.slot as u32 >= levels {
-        return 0;
-    }
-    let slot = n.slot as u32;
-    let bucket = unsafe { &mut *bucket_at(buckets, slot) };
-    // Validate every reciprocal edge and the bucket endpoints before the
-    // first write, so a detected invariant violation cannot half-unlink node.
-    if bucket.head.is_null() != bucket.tail.is_null()
-        || (n.prev.is_null() && bucket.head != node)
-        || (!n.prev.is_null() && unsafe {
-            (*n.prev).slot != slot as i32 || (*n.prev).next != node
-        })
-        || (n.next.is_null() && bucket.tail != node)
-        || (!n.next.is_null() && unsafe {
-            (*n.next).slot != slot as i32 || (*n.next).prev != node
-        })
-    {
-        return 0;
-    }
-    if !n.prev.is_null() {
-        unsafe { (*n.prev).next = n.next };
-    } else {
-        bucket.head = n.next;
-    }
-    if !n.next.is_null() {
-        unsafe { (*n.next).prev = n.prev };
-    } else {
-        bucket.tail = n.prev;
-    }
-    n.next = core::ptr::null_mut();
-    n.prev = core::ptr::null_mut();
-    n.slot = -1;
-    n.policy = 0;
-    if bucket.head.is_null() {
-        unsafe { clear_bit(bitmap, slot) };
-    }
-    1
-}
-
-/// Return the runnable head in the highest priority bucket. FIFO and RR both
-/// remain FIFO at this layer; an expired RR task is appended to the tail by
-/// ordinary enqueue after the C scheduler requests a switch.
-///
-/// # Safety
-/// Arrays must be valid for `levels` buckets and `ceil(levels/32)` bitmap
-/// words, non-aliasing, and protected by the owning runqueue lock.
-#[no_mangle]
-pub unsafe extern "C" fn a20_rt_pick(
+/// Pick the highest non-empty bucket head. The caller has validated the
+/// arrays and holds their runqueue lock.
+#[inline(always)]
+unsafe fn pick_best_unchecked(
     buckets: *mut RtBucket,
     bitmap: *mut u32,
     levels: u32,
 ) -> *mut RtNode {
-    if !valid_state(buckets, bitmap, levels) {
-        return core::ptr::null_mut();
-    }
     let words = (levels + 31) / 32;
     let mut wi = words;
     while wi > 0 {
@@ -240,13 +194,180 @@ pub unsafe extern "C" fn a20_rt_pick(
             if !head.is_null() {
                 return head;
             }
-            // Repair a stale set bit, matching the C reference's defensive
-            // stale-bit repair behavior.
+            /* Repair a stale set bit as the C reference does. */
             bits &= !(1u32 << bit);
             unsafe { *bitmap.add(wi as usize) = bits };
         }
     }
     core::ptr::null_mut()
+}
+
+/// Validate a queued node's complete unlink path before mutating any link.
+/// The caller has validated arrays and holds the owning runqueue lock.
+#[inline(always)]
+unsafe fn dequeue_unchecked(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+    node: *mut RtNode,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    let n = unsafe { &mut *node };
+    if n.slot < 0 || n.slot as u32 >= levels {
+        return false;
+    }
+    let slot = n.slot as u32;
+    let bucket = unsafe { &mut *bucket_at(buckets, slot) };
+    if bucket.head.is_null() != bucket.tail.is_null()
+        || (n.prev.is_null() && bucket.head != node)
+        || (!n.prev.is_null() && unsafe {
+            (*n.prev).slot != slot as i32 || (*n.prev).next != node
+        })
+        || (n.next.is_null() && bucket.tail != node)
+        || (!n.next.is_null() && unsafe {
+            (*n.next).slot != slot as i32 || (*n.next).prev != node
+        })
+    {
+        return false;
+    }
+    if !n.prev.is_null() {
+        unsafe { (*n.prev).next = n.next };
+    } else {
+        bucket.head = n.next;
+    }
+    if !n.next.is_null() {
+        unsafe { (*n.next).prev = n.prev };
+    } else {
+        bucket.tail = n.prev;
+    }
+    n.next = core::ptr::null_mut();
+    n.prev = core::ptr::null_mut();
+    n.slot = -1;
+    n.policy = 0;
+    if bucket.head.is_null() {
+        unsafe { clear_bit(bitmap, slot) };
+    }
+    true
+}
+
+/// Detach the bucket head returned by `pick_best_unchecked`. This path keeps
+/// the full head/neighbor consistency checks but avoids rechecking the
+/// generic node's `prev` membership after the picker has already established
+/// that it is the selected head.
+#[inline(always)]
+unsafe fn dequeue_picked_head_unchecked(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+    node: *mut RtNode,
+) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    let n = unsafe { &mut *node };
+    if n.slot < 0 || n.slot as u32 >= levels || !n.prev.is_null() {
+        return false;
+    }
+    let slot = n.slot as u32;
+    let bucket = unsafe { &mut *bucket_at(buckets, slot) };
+    let next = n.next;
+    if bucket.head != node
+        || bucket.head.is_null() != bucket.tail.is_null()
+        || (next.is_null() && bucket.tail != node)
+        || (!next.is_null() && unsafe {
+            (*next).slot != slot as i32 || (*next).prev != node
+        })
+    {
+        return false;
+    }
+    bucket.head = next;
+    if next.is_null() {
+        bucket.tail = core::ptr::null_mut();
+    } else {
+        unsafe { (*next).prev = core::ptr::null_mut() };
+    }
+    n.next = core::ptr::null_mut();
+    n.prev = core::ptr::null_mut();
+    n.slot = -1;
+    n.policy = 0;
+    if next.is_null() {
+        unsafe { clear_bit(bitmap, slot) };
+    }
+    true
+}
+
+/// Remove a queued node using its stored slot. Double removal is rejected.
+///
+/// # Safety
+/// `buckets` and `bitmap` must describe the same live runqueue, `node` must
+/// belong to that runqueue or be detached, and all storage must remain valid
+/// under the caller-held runqueue lock. The arrays and node storage must not
+/// alias each other.
+#[no_mangle]
+pub unsafe extern "C" fn a20_rt_dequeue(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+    node: *mut RtNode,
+) -> u32 {
+    if !valid_state(buckets, bitmap, levels) {
+        return 0;
+    }
+    unsafe { dequeue_unchecked(buckets, bitmap, levels, node) as u32 }
+}
+
+/// Return the runnable head in the highest priority bucket. FIFO and RR both
+/// remain FIFO at this layer; an expired RR task is appended to the tail by
+/// ordinary enqueue after the C scheduler requests a switch.
+///
+/// # Safety
+/// Arrays must be valid for `levels` buckets and `ceil(levels/32)` bitmap
+/// words, non-aliasing, and protected by the owning runqueue lock.
+#[no_mangle]
+pub unsafe extern "C" fn a20_rt_pick(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+) -> *mut RtNode {
+    if !valid_state(buckets, bitmap, levels) {
+        return core::ptr::null_mut();
+    }
+    unsafe { pick_best_unchecked(buckets, bitmap, levels) }
+}
+
+/// Atomically pick and unlink the highest-priority runnable node while the
+/// caller holds the owning runqueue lock. This single C ABI boundary avoids
+/// separate pick and dequeue crossings on the scheduler hot path.
+///
+/// # Safety
+/// The caller must hold the runqueue lock. `buckets` and `bitmap` must be
+/// valid, non-aliasing storage for `levels` buckets and bitmap words, and each
+/// linked node must remain alive for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn a20_rt_take_best(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+    out_node: *mut *mut RtNode,
+) -> u32 {
+    if out_node.is_null() {
+        return 2;
+    }
+    unsafe { *out_node = core::ptr::null_mut(); }
+    if !valid_state(buckets, bitmap, levels) {
+        return 2;
+    }
+    let node = unsafe { pick_best_unchecked(buckets, bitmap, levels) };
+    if node.is_null() {
+        return 0;
+    }
+    if !unsafe { dequeue_picked_head_unchecked(buckets, bitmap, levels, node) } {
+        return 2;
+    }
+    unsafe { *out_node = node; }
+    1
 }
 
 #[no_mangle]
@@ -268,55 +389,112 @@ pub struct RtBandwidthResult {
     pub throttled: u32,
     pub changed: u32,
 }
+const _: () = {
+    assert!(core::mem::offset_of!(RtBandwidthResult, throttled) == 0);
+    assert!(core::mem::offset_of!(RtBandwidthResult, changed) == 4);
+    assert!(core::mem::size_of::<RtBandwidthResult>() == 8);
+    assert!(core::mem::align_of::<RtBandwidthResult>() == 4);
+};
+
+#[inline(always)]
+unsafe fn account_bandwidth_inner(
+    state: *mut RtBandwidthState,
+    now: u64,
+    ticks_per_sec: u64,
+    current_is_rt: bool,
+) -> RtBandwidthResult {
+    let state = unsafe { &mut *state };
+    let period = ticks_per_sec.max(2);
+    let reserve = (period / 20).max(1);
+    let budget = period - reserve;
+    let was = state.used >= budget;
+    if state.initialized == 0 {
+        state.initialized = 1;
+        state.period_start = now;
+        state.last_account = now;
+    }
+    let elapsed_period = now.wrapping_sub(state.period_start);
+    if elapsed_period >= period {
+        state.period_start = now.wrapping_sub(elapsed_period % period);
+        state.used = 0;
+    }
+    let since = state.last_account.max(state.period_start);
+    if current_is_rt {
+        let elapsed = now.wrapping_sub(since);
+        let prior = state.used.min(budget);
+        state.used = prior.saturating_add(elapsed).min(budget);
+    }
+    state.last_account = now;
+    let throttled = state.used >= budget;
+    RtBandwidthResult {
+        throttled: throttled as u32,
+        changed: (throttled != was) as u32,
+    }
+}
 
 /// Charge the current RT task and roll a fixed period when due. Arithmetic
 /// intentionally uses wrapping timer deltas, then saturates usage at budget.
 #[no_mangle]
 pub unsafe extern "C" fn a20_rt_account(
-    period_start: *mut u64,
-    last_account: *mut u64,
-    used: *mut u64,
-    initialized: *mut u32,
+    state: *mut RtBandwidthState,
     now: u64,
     ticks_per_sec: u64,
     current_is_rt: u32,
 ) -> RtBandwidthResult {
-    if period_start.is_null() || last_account.is_null() || used.is_null() || initialized.is_null() {
+    if state.is_null() {
         return RtBandwidthResult { throttled: 0, changed: 0 };
     }
-    let period = ticks_per_sec.max(2);
-    let reserve = (period / 20).max(1);
-    let budget = period - reserve;
-    let was = unsafe { *used >= budget };
-    if unsafe { *initialized == 0 } {
-        unsafe {
-            *initialized = 1;
-            *period_start = now;
-            *last_account = now;
-        }
+    unsafe { account_bandwidth_inner(state, now, ticks_per_sec, current_is_rt != 0) }
+}
+
+/// Combined RT runqueue controller entry used by local scheduling. Accounts
+/// the per-CPU RT budget and, when the budget permits, removes the best RT
+/// task in the same Rust call. The low bits report throttled/transition/node;
+/// bit 3 is invalid or corrupt queue state and must fail closed in C.
+///
+/// # Safety
+/// Caller holds the runqueue lock and owns valid, non-aliasing queue arrays,
+/// `state`, and output storage for the duration of the call. The C layout of
+/// `state` must match `RtBandwidthState` (32-byte size, 8-byte alignment).
+#[no_mangle]
+pub unsafe extern "C" fn a20_rt_controller_pick(
+    buckets: *mut RtBucket,
+    bitmap: *mut u32,
+    levels: u32,
+    state: *mut RtBandwidthState,
+    now: u64,
+    ticks_per_sec: u64,
+    current_policy: u32,
+    current_valid: u32,
+    out_node: *mut *mut RtNode,
+) -> u32 {
+    if out_node.is_null() {
+        return 8;
     }
-    let elapsed_period = now.wrapping_sub(unsafe { *period_start });
-    if elapsed_period >= period {
-        unsafe {
-            *period_start = now.wrapping_sub(elapsed_period % period);
-            *used = 0;
-        }
+    unsafe { *out_node = core::ptr::null_mut() };
+    if !valid_state(buckets, bitmap, levels) || state.is_null() {
+        return 8;
     }
-    let mut since = unsafe { *last_account };
-    if since < unsafe { *period_start } {
-        since = unsafe { *period_start };
+    let account = unsafe {
+        account_bandwidth_inner(
+            state, now, ticks_per_sec,
+            current_valid != 0 && a20_rt_policy_is_rt(current_policy) != 0,
+        )
+    };
+    let mut flags = account.throttled | (account.changed << 1);
+    if account.throttled != 0 {
+        return flags;
     }
-    if current_is_rt != 0 {
-        let elapsed = now.wrapping_sub(since);
-        let prior = unsafe { *used }.min(budget);
-        unsafe { *used = prior.saturating_add(elapsed).min(budget) };
+    let node = unsafe { pick_best_unchecked(buckets, bitmap, levels) };
+    if node.is_null() {
+        return flags;
     }
-    unsafe { *last_account = now };
-    let throttled = unsafe { *used >= budget };
-    RtBandwidthResult {
-        throttled: throttled as u32,
-        changed: (throttled != was) as u32,
+    if !unsafe { dequeue_picked_head_unchecked(buckets, bitmap, levels, node) } {
+        return flags | 8;
     }
+    unsafe { *out_node = node };
+    flags |= 4;
+    flags
 }
 
 /// Account RR execution since its dispatch. The caller triggers reschedule
@@ -386,6 +564,106 @@ mod tests {
             assert!(a20_rt_pick(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8) == &mut b.links);
             assert_eq!(a20_rt_dequeue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut b.links), 1);
             assert_eq!(a20_rt_is_empty(bits.as_ptr(),8),1);
+        }
+    }
+
+    #[test]
+    fn take_best_detaches_fifo_head_and_clears_last_bucket_bit() {
+        let mut buckets: [RtBucket; 8] = core::array::from_fn(|_| RtBucket { head: core::ptr::null_mut(), tail: core::ptr::null_mut() });
+        let mut bits = [0u32; 1];
+        let mut a = TestNode::new();
+        let mut b = TestNode::new();
+        let mut high = TestNode::new();
+        let mut rem_a = 0;
+        let mut rem_b = 0;
+        let mut rem_high = 0;
+        unsafe {
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut a.links, 4, SCHED_FIFO_VALUE, &mut rem_a, 1), 1);
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut b.links, 4, SCHED_FIFO_VALUE, &mut rem_b, 1), 1);
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut high.links, 7, SCHED_RR_VALUE, &mut rem_high, 1), 1);
+            let mut out = core::ptr::null_mut();
+            assert_eq!(a20_rt_take_best(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut out), 1);
+            assert!(out == &mut high.links);
+            assert_eq!(high.links.slot, -1);
+            assert!(high.links.next.is_null() && high.links.prev.is_null());
+            assert_eq!(bits[0] & (1 << 7), 0);
+            assert_ne!(bits[0] & (1 << 4), 0);
+            assert_eq!(a20_rt_take_best(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut out), 1);
+            assert!(out == &mut a.links);
+            assert_eq!(a20_rt_take_best(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut out), 1);
+            assert!(out == &mut b.links);
+            assert_eq!(bits[0], 0);
+            assert_eq!(a20_rt_take_best(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut out), 0);
+            assert!(out.is_null());
+            assert_eq!(a20_rt_is_empty(bits.as_ptr(), 8), 1);
+        }
+    }
+
+    #[test]
+    fn take_best_rejects_corrupt_head_without_partial_unlink() {
+        let mut buckets: [RtBucket; 8] = core::array::from_fn(|_| RtBucket { head: core::ptr::null_mut(), tail: core::ptr::null_mut() });
+        let mut bits = [0u32; 1];
+        let mut a = TestNode::new();
+        let mut b = TestNode::new();
+        let mut rem_a = 0;
+        let mut rem_b = 0;
+        unsafe {
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut a.links, 4, SCHED_FIFO_VALUE, &mut rem_a, 1), 1);
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut b.links, 4, SCHED_FIFO_VALUE, &mut rem_b, 1), 1);
+            b.links.prev = core::ptr::null_mut();
+            let mut out = core::ptr::null_mut();
+            assert_eq!(a20_rt_take_best(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut out), 2);
+            assert!(out.is_null());
+            assert!(buckets[4].head == &mut a.links && buckets[4].tail == &mut b.links);
+            assert!(a.links.next == &mut b.links && a.links.slot == 4);
+            assert!(b.links.prev.is_null() && b.links.slot == 4);
+            assert_eq!(bits[0] & (1 << 4), 1 << 4);
+        }
+    }
+
+    #[test]
+    fn controller_accounts_budget_and_picks_under_one_entry() {
+        let mut buckets: [RtBucket; 8] = core::array::from_fn(|_| RtBucket { head: core::ptr::null_mut(), tail: core::ptr::null_mut() });
+        let mut bits = [0u32; 1];
+        let mut task = TestNode::new();
+        let mut rem = 0;
+        let mut bandwidth = RtBandwidthState {
+            period_start: 0,
+            last_account: 0,
+            used: 0,
+            initialized: 0,
+        };
+        unsafe {
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut task.links, 6, SCHED_FIFO_VALUE, &mut rem, 1), 1);
+            let mut out = core::ptr::null_mut();
+            let flags = a20_rt_controller_pick(
+                buckets.as_mut_ptr(), bits.as_mut_ptr(), 8,
+                &mut bandwidth,
+                10, 100, SCHED_RR_VALUE, 1, &mut out,
+            );
+            assert_eq!(flags, 4);
+            assert!(out == &mut task.links);
+            assert_eq!(bandwidth.period_start, 10);
+            assert_eq!(bandwidth.last_account, 10);
+            assert_eq!(bandwidth.used, 0);
+
+            // A changed-to-throttled budget suppresses selection and reports
+            // both state bits so C can preserve its accounting side effect.
+            bandwidth.period_start = 10;
+            bandwidth.last_account = 10;
+            bandwidth.used = 94;
+            bandwidth.initialized = 1;
+            assert_eq!(a20_rt_enqueue(buckets.as_mut_ptr(), bits.as_mut_ptr(), 8, &mut task.links, 6, SCHED_FIFO_VALUE, &mut rem, 1), 1);
+            out = core::ptr::null_mut();
+            let flags = a20_rt_controller_pick(
+                buckets.as_mut_ptr(), bits.as_mut_ptr(), 8,
+                &mut bandwidth,
+                11, 100, SCHED_FIFO_VALUE, 1, &mut out,
+            );
+            assert_eq!(flags, 3);
+            assert!(out.is_null());
+            assert_eq!(bandwidth.used, 95);
+            assert_eq!(task.links.slot, 6);
         }
     }
 
@@ -498,14 +776,51 @@ mod tests {
 
     #[test]
     fn bandwidth_rollover_and_budget_clamp() {
-        let mut start=0; let mut last=0; let mut used=0; let mut init=0u32;
+        let mut state=RtBandwidthState { period_start:0, last_account:0, used:0, initialized:0 };
         unsafe {
-            let r=a20_rt_account(&mut start,&mut last,&mut used,&mut init,10,100,1);
+            let r=a20_rt_account(&mut state,10,100,1);
             assert_eq!((r.throttled,r.changed),(0,0));
-            let r=a20_rt_account(&mut start,&mut last,&mut used,&mut init,105,100,1);
-            assert_eq!(used,95); assert_eq!((r.throttled,r.changed),(1,1));
-            let r=a20_rt_account(&mut start,&mut last,&mut used,&mut init,210,100,0);
-            assert_eq!(start,210); assert_eq!(used,0); assert_eq!((r.throttled,r.changed),(0,1));
+            let r=a20_rt_account(&mut state,105,100,1);
+            assert_eq!(state.used,95); assert_eq!((r.throttled,r.changed),(1,1));
+            let r=a20_rt_account(&mut state,210,100,0);
+            assert_eq!(state.period_start,210); assert_eq!(state.used,0); assert_eq!((r.throttled,r.changed),(0,1));
+        }
+    }
+
+    #[test]
+    fn bundled_bandwidth_ffi_keeps_null_and_corrupt_state_guards() {
+        unsafe {
+            let no_state = a20_rt_account(core::ptr::null_mut(), 1, 100, 1);
+            assert_eq!((no_state.throttled, no_state.changed), (0, 0));
+
+            let mut buckets: [RtBucket; 8] = core::array::from_fn(|_| RtBucket {
+                head: core::ptr::null_mut(),
+                tail: core::ptr::null_mut(),
+            });
+            let mut bits = [0u32; 1];
+            let mut state = RtBandwidthState {
+                period_start: 0,
+                last_account: 0,
+                used: 0,
+                initialized: 0,
+            };
+            let mut out = core::ptr::null_mut();
+            assert_eq!(
+                a20_rt_controller_pick(
+                    buckets.as_mut_ptr(), bits.as_mut_ptr(), 8,
+                    core::ptr::null_mut(), 1, 100, SCHED_FIFO_VALUE, 1, &mut out,
+                ),
+                8,
+            );
+            assert!(out.is_null());
+            assert_eq!(
+                a20_rt_controller_pick(
+                    buckets.as_mut_ptr(), bits.as_mut_ptr(), 8,
+                    &mut state, 1, 100, SCHED_FIFO_VALUE, 1,
+                    core::ptr::null_mut(),
+                ),
+                8,
+            );
         }
     }
 
@@ -519,13 +834,13 @@ mod tests {
 
     #[test]
     fn minimum_budget_and_wrapping_period_arithmetic_are_bounded() {
-        let mut start=u64::MAX-2; let mut last=u64::MAX-2; let mut used=0; let mut init=1u32;
+        let mut state=RtBandwidthState { period_start:u64::MAX-2, last_account:u64::MAX-2, used:0, initialized:1 };
         unsafe {
-            let r=a20_rt_account(&mut start,&mut last,&mut used,&mut init,3,2,1);
-            assert_eq!(used,1); // preserved raw comparison can charge wrapped delta
+            let r=a20_rt_account(&mut state,3,2,1);
+            assert_eq!(state.used,1); // preserved raw comparison can charge wrapped delta
             assert_eq!(r.throttled,1);
-            let r=a20_rt_account(&mut start,&mut last,&mut used,&mut init,5,2,0);
-            assert_eq!(used,0); // next complete period replenishes while non-RT runs
+            let r=a20_rt_account(&mut state,5,2,0);
+            assert_eq!(state.used,0); // next complete period replenishes while non-RT runs
             assert_eq!(r.throttled,0);
             assert_eq!(r.changed,1);
         }

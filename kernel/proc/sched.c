@@ -19,6 +19,7 @@
 #include "cg/cgroup.h"
 #include "cg/cgroup_impl.h"
 #include "proc/task_placement.h"
+#include "proc/rt_sched_account.h"
 
 /*
  * RT_PRI_LEVELS: exact per-priority FIFO buckets for SCHED_FIFO/SCHED_RR
@@ -47,6 +48,19 @@ static inline unsigned rt_prio_slot(int prio)
 #endif
 }
 
+typedef struct __attribute__((aligned(8))) proc_rt_bandwidth {
+    uint64_t period_start;
+    uint64_t last_account;
+    uint64_t used;
+    uint32_t initialized;
+} proc_rt_bandwidth_t;
+_Static_assert(offsetof(proc_rt_bandwidth_t, period_start) == 0, "RT budget start offset");
+_Static_assert(offsetof(proc_rt_bandwidth_t, last_account) == 8, "RT budget last offset");
+_Static_assert(offsetof(proc_rt_bandwidth_t, used) == 16, "RT budget used offset");
+_Static_assert(offsetof(proc_rt_bandwidth_t, initialized) == 24, "RT budget init offset");
+_Static_assert(sizeof(proc_rt_bandwidth_t) == 32, "RT budget ABI size");
+_Static_assert(__alignof__(proc_rt_bandwidth_t) == 8, "RT budget ABI alignment");
+
 typedef struct __attribute__((aligned(64))) proc_runq {
     spinlock_t lock;
     /* Level 0: RT — per-priority FIFO lists with an O(1) bitmap pick of the
@@ -55,10 +69,7 @@ typedef struct __attribute__((aligned(64))) proc_runq {
     uint32_t rt_bitmap[RT_BITMAP_WORDS];
     /* Per-CPU RT bandwidth: reserve 5% of every second for normal work.
      * All fields are protected by this runqueue's lock. */
-    uint64_t rt_period_start;
-    uint64_t rt_last_account;
-    uint64_t rt_used;
-    unsigned rt_account_initialized;
+    proc_rt_bandwidth_t rt_bandwidth;
     /* Level 1: EEVDF — randomized BST ordered by earliest virtual deadline,
      * augmented with subtree-min vruntime for eligible-gated O(log n) pick. */
     eevdf_node_t *eevdf_root;
@@ -106,6 +117,10 @@ typedef struct a20_rt_bandwidth_result {
     uint32_t throttled;
     uint32_t changed;
 } a20_rt_bandwidth_result_t;
+_Static_assert(offsetof(a20_rt_bandwidth_result_t, throttled) == 0, "RT result throttled offset");
+_Static_assert(offsetof(a20_rt_bandwidth_result_t, changed) == 4, "RT result changed offset");
+_Static_assert(sizeof(a20_rt_bandwidth_result_t) == 8, "RT result ABI size");
+_Static_assert(__alignof__(a20_rt_bandwidth_result_t) == 4, "RT result ABI alignment");
 extern uint32_t a20_rt_policy_is_rt(uint32_t policy);
 extern uint32_t a20_rt_enqueue(proc_rt_bucket_t *buckets, uint32_t *bitmap,
                                uint32_t levels, proc_rt_node_t *node,
@@ -122,10 +137,17 @@ extern uint32_t a20_rt_dequeue(proc_rt_bucket_t *buckets, uint32_t *bitmap,
                                uint32_t levels, proc_rt_node_t *node);
 extern proc_rt_node_t *a20_rt_pick(proc_rt_bucket_t *buckets,
                                    uint32_t *bitmap, uint32_t levels);
+extern uint32_t a20_rt_take_best(proc_rt_bucket_t *buckets,
+                                  uint32_t *bitmap, uint32_t levels,
+                                  proc_rt_node_t **out_node);
+extern uint32_t a20_rt_controller_pick(
+    proc_rt_bucket_t *buckets, uint32_t *bitmap, uint32_t levels,
+    proc_rt_bandwidth_t *bandwidth, uint64_t now, uint64_t ticks_per_sec,
+    uint32_t current_policy, uint32_t current_valid,
+    proc_rt_node_t **out_node);
 extern uint32_t a20_rt_is_empty(const uint32_t *bitmap, uint32_t levels);
 extern a20_rt_bandwidth_result_t a20_rt_account(
-    uint64_t *period_start, uint64_t *last_account, uint64_t *used,
-    unsigned *initialized, uint64_t now, uint64_t ticks_per_sec,
+    proc_rt_bandwidth_t *bandwidth, uint64_t now, uint64_t ticks_per_sec,
     uint32_t current_is_rt);
 #endif
 
@@ -236,13 +258,10 @@ static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
 #ifdef CONFIG_RT_SCHED_RUST
     task_t *current = proc_current();
     a20_rt_bandwidth_result_t result = a20_rt_account(
-        &rq->rt_period_start, &rq->rt_last_account, &rq->rt_used,
-        &rq->rt_account_initialized, now, (uint64_t)TICKS_PER_SEC,
+        &rq->rt_bandwidth, now, (uint64_t)TICKS_PER_SEC,
         current && current->pid && sched_task_rt(current));
-    if (result.changed) {
-        a20_perf_add(A20_PERF_RT_THROTTLES, 1);
-        proc_sched_request_cpu(cpu_current_id(), 0);
-    }
+    a20_rt_account_effects(result.changed, result.throttled,
+                           cpu_current_id());
     return (int)result.throttled;
 #else
     uint64_t period = TICKS_PER_SEC;
@@ -252,29 +271,30 @@ static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
     if (!reserve)
         reserve = 1;
     uint64_t budget = period - reserve;
-    int was_throttled = rq->rt_used >= budget;
-    if (!rq->rt_account_initialized) {
-        rq->rt_account_initialized = 1;
-        rq->rt_period_start = now;
-        rq->rt_last_account = now;
+    proc_rt_bandwidth_t *bw = &rq->rt_bandwidth;
+    int was_throttled = bw->used >= budget;
+    if (!bw->initialized) {
+        bw->initialized = 1;
+        bw->period_start = now;
+        bw->last_account = now;
     }
-    if (now - rq->rt_period_start >= period) {
-        rq->rt_period_start = now - (now - rq->rt_period_start) % period;
-        rq->rt_used = 0;
+    if (now - bw->period_start >= period) {
+        bw->period_start = now - (now - bw->period_start) % period;
+        bw->used = 0;
     }
-    uint64_t since = rq->rt_last_account;
-    if (since < rq->rt_period_start)
-        since = rq->rt_period_start;
+    uint64_t since = bw->last_account;
+    if (since < bw->period_start)
+        since = bw->period_start;
     task_t *current = proc_current();
     if (current && current->pid && sched_task_rt(current)) {
         uint64_t elapsed = now - since;
-        rq->rt_used = elapsed >= budget - rq->rt_used
-                    ? budget : rq->rt_used + elapsed;
+        bw->used = elapsed >= budget - bw->used
+                 ? budget : bw->used + elapsed;
     }
-    rq->rt_last_account = now;
-    int throttled = rq->rt_used >= budget;
-    if (throttled && !was_throttled)
-        a20_perf_add(A20_PERF_RT_THROTTLES, 1);
+    bw->last_account = now;
+    int throttled = bw->used >= budget;
+    a20_rt_account_effects(throttled != was_throttled, throttled,
+                           cpu_current_id());
     /* Tick while idle also replenishes a throttled queue.  Its runnable RT
      * tasks keep their queue references and become selectable next period. */
     if (throttled != was_throttled)
@@ -282,6 +302,35 @@ static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
     return throttled;
 #endif
 }
+
+#ifdef CONFIG_RT_SCHED_RUST
+/* Rust owns budget accounting and RT head selection behind one hot-path
+ * boundary. C keeps the runqueue lock, perf counter, and reschedule request. */
+static task_t *sched_rt_controller_pick_locked(proc_runq_t *rq, uint64_t now,
+                                               int *throttled_out)
+{
+    task_t *current = proc_current();
+    proc_rt_node_t *node = NULL;
+    uint32_t flags = a20_rt_controller_pick(
+        rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS, &rq->rt_bandwidth,
+        now, (uint64_t)TICKS_PER_SEC,
+        current ? (uint32_t)current->sched_policy : 0,
+        current && current->pid != 0, &node);
+    if (flags & 8u)
+        panic("rt controller rejected queue state cpu=%u flags=%u",
+              arch_current_cpu_id(), flags);
+    if (flags & 2u) {
+        a20_rt_account_effects(1, flags & 1u, cpu_current_id());
+    }
+    *throttled_out = (flags & 1u) != 0;
+    if (!(flags & 4u))
+        return NULL;
+    if (!node)
+        panic("rt controller returned null selected node cpu=%u flags=%u",
+              arch_current_cpu_id(), flags);
+    return rt_node_task(node);
+}
+#endif
 
 static int sched_rt_throttled_local(void)
 {
@@ -589,12 +638,10 @@ static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
  * FIFO and RR both dequeue from the bucket head. RR fairness is driven by
  * elapsed quantum accounting; an expired running task returns at the tail.
  */
-static task_t *rt_pick_best_locked(proc_runq_t *rq)
+#ifndef CONFIG_RT_SCHED_RUST
+/* C reference picker. */
+static task_t *rt_pick_best_c_locked(proc_runq_t *rq)
 {
-#ifdef CONFIG_RT_SCHED_RUST
-    proc_rt_node_t *node = a20_rt_pick(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS);
-    return node ? rt_node_task(node) : NULL;
-#else
     for (int w = RT_BITMAP_WORDS - 1; w >= 0; w--) {
         uint32_t bits = rq->rt_bitmap[w];
         while (bits) {
@@ -611,8 +658,21 @@ static task_t *rt_pick_best_locked(proc_runq_t *rq)
         }
     }
     return NULL;
-#endif
 }
+#endif
+
+/* Select and detach under the same runqueue lock. Rust owns both operations
+ * behind one ABI crossing; the C reference keeps its established picker and
+ * unlink primitives in the same order. */
+#ifndef CONFIG_RT_SCHED_RUST
+static task_t *rt_take_best_locked(proc_runq_t *rq)
+{
+    task_t *t = rt_pick_best_c_locked(rq);
+    if (t)
+        rt_unlink_locked(rq, t);
+    return t;
+}
+#endif
 
 static inline int rt_queues_empty(const proc_runq_t *rq)
 {
@@ -2143,12 +2203,22 @@ task_t *proc_runq_pick_local(void)
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
 
-    int rt_throttled = sched_rt_account_locked(rq, timer_get_ticks());
+    uint64_t rt_now = timer_get_ticks();
+#ifdef CONFIG_RT_SCHED_RUST
+    int rt_throttled = 0;
+#else
+    int rt_throttled = sched_rt_account_locked(rq, rt_now);
+#endif
     for (;;) {
         task_t *t = NULL;
         int q = -1;
 
-        task_t *rt = rt_throttled ? NULL : rt_pick_best_locked(rq);
+#ifdef CONFIG_RT_SCHED_RUST
+        task_t *rt = sched_rt_controller_pick_locked(rq, rt_now,
+                                                     &rt_throttled);
+#else
+        task_t *rt = rt_throttled ? NULL : rt_take_best_locked(rq);
+#endif
         if (rt) {
             t = rt;
             q = 0;
@@ -2164,9 +2234,7 @@ task_t *proc_runq_pick_local(void)
         if (!t)
             break;
 
-        if (q == 0)
-            rt_unlink_locked(rq, t);
-        else {
+        if (q != 0) {
             eevdf_remove_locked(rq, t);
             sched_runq_eevdf_del_weight(rq, t);
         }

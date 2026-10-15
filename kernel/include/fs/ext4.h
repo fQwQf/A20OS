@@ -333,6 +333,9 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags);
 int ext4_vnode_finalize_unlinked(vnode_t *vn);
 int ext4_record_status(ext4_sb_info_t *sb, int status);
 int      ext4_unmount(vnode_t *root);
+/* Persist a clean on-disk state for terminal system shutdown without freeing
+ * the mounted instance; the global VFS shutdown gate remains closed after. */
+int      ext4_shutdown_clean(vnode_t *root);
 void     ext4_vnode_cache_prune_all(void);
 /* Scoped fsync: flush only this vnode's data and allocation metadata. */
 int      ext4_vn_sync(vnode_t *vn);

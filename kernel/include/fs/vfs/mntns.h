@@ -83,4 +83,19 @@ void             mntns_mount_table_unlock(uint64_t flags);
 /* Idempotent task-teardown drop of t->mnt_ns. */
 void             mntns_release_task(struct task_t *t);
 
+/* Orderly system shutdown admission/snapshot. begin pins every registered
+ * namespace while holding the registry lock. The snapshot remains stable
+ * until abort; a successful shutdown intentionally retains the pins. */
+int              mntns_shutdown_begin(void);
+void             mntns_shutdown_abort(void);
+int              mntns_shutdown_active(void);
+int              mntns_shutdown_namespace_count(void);
+mnt_namespace_t *mntns_shutdown_namespace_at(int index);
+/* Enter/leave an in-flight VFS mutation. Shutdown admission atomically
+ * closes this gate and refuses to start while admitted mutations remain. */
+int              mntns_mutation_enter(void);
+void             mntns_mutation_leave(void);
+int              mntns_fileop_enter(void);
+void             mntns_fileop_leave(void);
+
 #endif /* _FS_VFS_MNTNS_H */

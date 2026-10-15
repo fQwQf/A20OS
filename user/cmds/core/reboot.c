@@ -1,11 +1,12 @@
 #include <stdio.h>
-#include <unistd.h>
-#include <sys/syscall.h>
+#include <sys/reboot.h>
 
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     printf("Rebooting system.\n");
-    syscall(SYS_reboot, 0x424F4F54);
+    fflush(stdout);
+    if (reboot(RB_AUTOBOOT) == 0)
+        return 0;
     printf("reboot: failed\n");
     return 1;
 }

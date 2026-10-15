@@ -20,6 +20,7 @@
  */
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
+#include "mm/shutdown_write.h"
 #include "mm/mm.h"
 #include "mm/vdso.h"
 #include "mm/frame.h"
@@ -645,6 +646,43 @@ void mm_destroy(mm_struct_t *mm) {
     mm_seg_index_clear(mm);
     mm_seg_t *vma = mm->mmap;
     while (vma) {
+#if PTE_D == 0 && !defined(CONFIG_NOMMU)
+        /* ARM32 cannot report hardware dirty state. Before final teardown
+         * removes the last evidence of a writable shared-file mapping, mark
+         * its resident cache pages dirty conservatively. */
+        if ((vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+                (VM_FILE | VM_SHARED | VM_WRITE) && vma->file_vnode &&
+            mm->pgdir) {
+            for (vaddr_t va = vma->start; va < vma->end; ) {
+                int level = 0;
+                vaddr_t base = va;
+                size_t size = PAGE_SIZE;
+                pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level,
+                                           &base, &size);
+                vaddr_t next = size && base + size > va
+                                 ? base + size : va + PAGE_SIZE;
+                if (pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
+                    (*pte & PTE_W)) {
+                    vaddr_t start = base > vma->start ? base : vma->start;
+                    uint64_t leaf_end = (uint64_t)base + size;
+                    vaddr_t end = leaf_end < vma->end
+                                    ? (vaddr_t)leaf_end : vma->end;
+                    uint64_t index = (vma->backing_offset +
+                                      start - vma->start) / PAGE_SIZE;
+                    for (vaddr_t page_va = start; page_va < end;
+                         page_va += PAGE_SIZE, index++) {
+                        page_cache_page_t *cached = page_cache_get(
+                            vma->file_vnode, index, 0);
+                        if (cached) {
+                            page_cache_mark_dirty(cached);
+                            page_cache_put(cached);
+                        }
+                    }
+                }
+                va = next > va ? next : va + PAGE_SIZE;
+            }
+        }
+#endif
         free_vma_pages(mm, vma);
         mm_seg_t *next = vma->next;
         vma_put(mm, vma);
@@ -687,7 +725,7 @@ void mm_destroy(mm_struct_t *mm) {
  *   1. in a multithreaded program, another thread of the parent faults at the
  *      same time;
  *   2. under SMP, another CPU is handling a page fault in the parent. */
-mm_struct_t *mm_fork(mm_struct_t *parent) {
+static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
     if (!parent) return NULL;
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
     if (!child) return NULL;
@@ -886,6 +924,15 @@ fail_locked:
     }
     mm_destroy(child);
     return NULL;
+}
+
+mm_struct_t *mm_fork(mm_struct_t *parent)
+{
+    if (mm_shared_write_enter_wait() < 0)
+        return NULL;
+    mm_struct_t *child = mm_fork_impl(parent);
+    mm_shared_write_leave();
+    return child;
 }
 
 #ifdef CONFIG_NOMMU

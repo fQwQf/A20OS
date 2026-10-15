@@ -11,6 +11,8 @@ use core::ffi::c_void;
 
 #[path = "ext4_mount_state.rs"]
 mod mount_state;
+#[path = "ext4_sync_plan.rs"]
+mod sync_plan;
 
 const EIO: i32 = -5;
 const EOPNOTSUPP: i32 = -95;

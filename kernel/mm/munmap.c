@@ -129,6 +129,31 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                     page_cache_put(pcp);
                 }
             }
+#if PTE_D == 0
+            /* ARM32 has no hardware dirty bit. A writable shared mapping
+             * may have changed its cache page even though the leaf carries
+             * no software-visible dirty indication. Harvest before unmap or
+             * MAP_FIXED replacement removes the only mapping evidence. */
+            if (shared_file_vma && vma->file_vnode &&
+                (vma->vm_flags & VM_WRITE) && (*pte & PTE_V) &&
+                arch_pte_is_leaf(*pte)) {
+                vaddr_t dirty_start = base > clip_start ? base : clip_start;
+                uint64_t leaf_end = (uint64_t)base + size;
+                vaddr_t dirty_end = leaf_end < clip_end
+                                      ? (vaddr_t)leaf_end : clip_end;
+                for (vaddr_t dirty_va = dirty_start;
+                     dirty_va < dirty_end; dirty_va += PAGE_SIZE) {
+                    uint64_t idx = vma->backing_offset +
+                                   (dirty_va - vma->start);
+                    page_cache_page_t *pcp = page_cache_get(
+                        vma->file_vnode, idx / PAGE_SIZE, 0);
+                    if (pcp) {
+                        page_cache_mark_dirty(pcp);
+                        page_cache_put(pcp);
+                    }
+                }
+            }
+#endif
             if (level > 0 && (base < clip_start || base + size > clip_end)) {
                 int dr = mm_demote_huge_page(mm, va);
                 if (dr < 0) return dr;

@@ -40,6 +40,9 @@ NATIVE_RUST_UFSD_EXT4_ORPHAN ?= 1
 # Independently select the bounded depth-0 extent-root trim controller.
 # This keeps the Rust UFSD protocol/lifetime constant in C/Rust comparisons.
 NATIVE_RUST_UFSD_EXT4_EXTENT_TXN ?= 1
+# Test-only: drop exactly one ACK after accepting a tokenized CLOSE, so a
+# guest can retry the same token and verify the server's replay response.
+NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE ?= 0
 # Test-only: fail the first real block write made while reaping an orphan
 # during final close, then allow the Rust OP_SYNC retry to complete.
 NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE ?= 0
@@ -100,13 +103,14 @@ RUST_USER_UFSD_JBD2_RECORD_SRC := user/svc/jbd2_record.rs
 RUST_USER_UFSD_EXT4_ORPHAN_SRC := user/svc/ext4_orphan.rs
 RUST_USER_UFSD_EXTENT_TXN_SRC := kernel/fs/diskfs/ext4_extent_txn.rs
 RUST_USER_UFSD_MOUNT_STATE_SRC := kernel/fs/diskfs/ext4_mount_state.rs
-RUST_USER_UFSD_TEST_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),test-close-orphan-restore-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),test-close-orphan-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)),prod)
+RUST_USER_UFSD_TEST_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE)),test-drop-close-token-ack,$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),test-close-orphan-restore-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),test-close-orphan-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)),prod))
 RUST_USER_UFSD_ORPHAN_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),orphan-rust,orphan-c)
 RUST_USER_UFSD_EXTENT_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),extent-rust,extent-c)
 # Keep diagnostic and production objects/binaries separate. Switching the
 # fail-once profile must never reuse an object compiled with a different cfg.
 RUST_USER_UFSD_OBJ := $(RUST_USER_OBJ_DIR)/ufsd-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)-$(RUST_USER_UFSD_TEST_PROFILE).o
-RUST_USER_UFSD_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)$(if $(filter test-close-orphan-%,$(RUST_USER_UFSD_TEST_PROFILE)),-$(RUST_USER_UFSD_TEST_PROFILE),)
+RUST_USER_UFSD_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)$(if $(filter prod,$(RUST_USER_UFSD_TEST_PROFILE)),,-$(RUST_USER_UFSD_TEST_PROFILE))
+RUST_USER_UFSD_TEST_CLOSE_TOKEN_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)-test-drop-close-token-ack
 RUST_USER_IDL_RUST := $(RUST_USER_OBJ_DIR)/a20_services_idl.rs
 
 # Shared build helpers used by both the opt-in peer and the supervisor.
@@ -135,6 +139,9 @@ RUST_USER_TARGET_aarch64 := aarch64-unknown-none
 RUST_USER_TARGET_riscv32 := $(abspath tools/rust-targets/riscv32imafdc-a20.json)
 RUST_USER_TARGET_x86_64 := x86_64-unknown-none
 RUST_USER_TARGET := $(RUST_USER_TARGET_$(ARCH))
+RUST_USER_TARGET_LIBDIR := $(shell $(RUSTC) --print target-libdir --target $(RUST_USER_TARGET) 2>/dev/null)
+RUST_USER_LIBCORE := $(firstword $(wildcard $(RUST_USER_TARGET_LIBDIR)/libcore-*.rlib))
+RUST_USER_LIBCOMPILER_BUILTINS := $(firstword $(wildcard $(RUST_USER_TARGET_LIBDIR)/libcompiler_builtins-*.rlib))
 
 # Match the tree's medany user code model for riscv64.
 RUST_USER_CODE_MODEL_riscv64 := medium
@@ -155,7 +162,7 @@ $(error Rust Native IDL peer requires ARCH=riscv64, riscv32, aarch64, or x86_64 
 endif
 endif
 
-ifneq ($(filter 1,$(NATIVE_RUST_PEER) $(NATIVE_RUST_ECHOD) $(NATIVE_RUST_IDL_SERVICE)),)
+ifneq ($(filter 1,$(NATIVE_RUST_PEER) $(NATIVE_RUST_ECHOD) $(NATIVE_RUST_IDL_SERVICE) $(NATIVE_RUST_SVCMGR)),)
 ifneq ($(filter 1,$(NATIVE_RUST_PEER)),)
 ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
 $(error NATIVE_RUST_PEER=1 requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
@@ -329,8 +336,8 @@ native-rust-echod:
 endif
 
 ifeq ($(NATIVE_RUST_SVCMGR),1)
-ifneq ($(ARCH),riscv64)
-$(error NATIVE_RUST_SVCMGR=1 is currently supported only for ARCH=riscv64 (got $(ARCH)))
+ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
+$(error NATIVE_RUST_SVCMGR=1 requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
 endif
 ifneq ($(strip $(filter $(USER_OPT),-O1 -O2 -O3 -Os)),$(USER_OPT))
 $(error Rust svcmgr requires USER_OPT in -O1 -O2 -O3 -Os (got '$(USER_OPT)'))
@@ -346,10 +353,10 @@ $(RUST_USER_SVCMGR_FLAGS_STAMP): FORCE_RUST_USER_SVCMGR_FLAGS
 	@printf '%s %s\n' '$(RUSTC) --target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_SVCMGR_OPT_LEVEL) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL)' '$(shell $(RUSTC) --version 2>/dev/null)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
-$(RUST_USER_SVCMGR_OBJ): $(RUST_USER_SVCMGR_SRC) $(RUST_USER_SVCMGR_LIFECYCLE_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_SVCMGR_FLAGS_STAMP)
+$(RUST_USER_SVCMGR_OBJ): $(RUST_USER_SVCMGR_SRC) $(RUST_USER_SVCMGR_LIFECYCLE_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_SVCMGR_FLAGS_STAMP) $(if $(filter riscv32,$(ARCH)),$(RUST_USER_RV32_CORE_READY))
 	@mkdir -p $(dir $@)
-	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
-		--target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_SVCMGR_OPT_LEVEL) \
+	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
+		--target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_USER_SVCMGR_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL) \
 		$< -o $@
 
@@ -365,9 +372,16 @@ native-rust-svcmgr: $(RUST_USER_SVCMGR_BIN)
 else
 .PHONY: native-rust-svcmgr
 native-rust-svcmgr:
-	@echo "native-rust-svcmgr requires NATIVE_RUST_SVCMGR=1 and ARCH=riscv64" >&2
+	@echo "native-rust-svcmgr requires NATIVE_RUST_SVCMGR=1 and a supported Native architecture" >&2
 	@exit 2
 endif
+.PHONY: native-rust-svcmgr-rv32 native-rust-svcmgr-aarch64 native-rust-svcmgr-x86_64
+native-rust-svcmgr-rv32:
+	$(MAKE) -j2 ARCH=riscv32 NOMMU=$(NOMMU) NATIVE_RUST_SVCMGR=1 native-rust-svcmgr
+native-rust-svcmgr-aarch64:
+	$(MAKE) -j2 ARCH=aarch64 NOMMU=$(NOMMU) NATIVE_RUST_SVCMGR=1 native-rust-svcmgr
+native-rust-svcmgr-x86_64:
+	$(MAKE) -j2 ARCH=x86_64 NOMMU=$(NOMMU) NATIVE_RUST_SVCMGR=1 native-rust-svcmgr
 
 ifeq ($(NATIVE_RUST_PEER),1)
 # Build and, for the generated-header dependency, make the peer as strict as
@@ -433,8 +447,8 @@ native-rust-idl-service-x86_64:
 # The Rust RTC owns the service protocol and request/alarm state machine;
 # the C translation unit exposes only SDK and Goldfish register primitives.
 ifeq ($(NATIVE_RUST_RTCD),1)
-ifneq ($(ARCH),riscv64)
-$(error NATIVE_RUST_RTCD=1 is currently supported only for ARCH=riscv64)
+ifeq ($(filter $(ARCH),riscv64 aarch64),)
+$(error NATIVE_RUST_RTCD=1 requires ARCH=riscv64 or aarch64 Goldfish RTC (got $(ARCH)))
 endif
 ifneq ($(strip $(filter $(USER_OPT),-O1 -O2 -O3 -Os)),$(USER_OPT))
 $(error Rust rtcd requires USER_OPT in -O1 -O2 -O3 -Os)
@@ -463,9 +477,12 @@ native-rust-rtcd-arch: $(RUST_USER_RTCD_BIN)
 else
 .PHONY: native-rust-rtcd native-rust-rtcd-arch
 native-rust-rtcd native-rust-rtcd-arch:
-	@echo "native-rust-rtcd requires NATIVE_RUST_RTCD=1 and ARCH=riscv64" >&2
+	@echo "native-rust-rtcd requires NATIVE_RUST_RTCD=1 and ARCH=riscv64 or aarch64" >&2
 	@exit 2
 endif
+.PHONY: native-rust-rtcd-aarch64
+native-rust-rtcd-aarch64:
+	$(MAKE) -j2 ARCH=aarch64 NOMMU=$(NOMMU) NATIVE_RUST_RTCD=1 native-rust-rtcd
 
 # Rust owns ufsd startup, mount registration, supervision/EventQ lifecycle,
 # wire validation and opcode dispatch. The existing C backend implementations
@@ -473,6 +490,14 @@ endif
 ifeq ($(NATIVE_RUST_UFSD),1)
 ifneq ($(ARCH),riscv64)
 $(error NATIVE_RUST_UFSD=1 is currently supported only for ARCH=riscv64)
+endif
+ifeq ($(filter $(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE),0 1),)
+$(error NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE must be 0 or 1)
+endif
+ifeq ($(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE),1)
+ifneq ($(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE),0)
+$(error close-token lost-ACK and close-orphan failure profiles are mutually exclusive)
+endif
 endif
 ifneq ($(strip $(filter $(USER_OPT),-O1 -O2 -O3 -Os)),$(USER_OPT))
 $(error Rust ufsd requires USER_OPT in -O1 -O2 -O3 -Os)
@@ -504,15 +529,16 @@ RUST_USER_UFSD_OPT_LEVEL := $(patsubst -O%,%,$(USER_OPT))
 RUST_USER_UFSD_BACKEND_SRCS := $(filter-out user/svc/ufsd.c user/svc/fscompat/bcache_user.c,$(UFSD_CORE_SRCS)) $(UFSD_VNFS_SRCS) $(RUST_USER_UFSD_CACHE_ABI_SRC)
 NATIVE_OUTPUTS += $(RUST_USER_UFSD_BIN)
 native-programs: $(RUST_USER_UFSD_BIN)
-$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) $(RUST_USER_IDL_RUST) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk
+$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) user/svc/ufs_lifetime.rs $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) $(RUST_USER_UFSD_SYNC_PLAN_SRC) $(RUST_USER_IDL_RUST) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk
 	@mkdir -p $(dir $@)
 	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
 		--target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_UFSD_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL) \
 		$(if $(filter test-close-orphan-%,$(RUST_USER_UFSD_TEST_PROFILE)),--cfg ufsd_test_close_orphan,) \
+		$(if $(filter test-drop-close-token-ack,$(RUST_USER_UFSD_TEST_PROFILE)),--cfg ufsd_test_close_token_drop_ack_once,) \
 		$< -o $@
 
-$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk \
+$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) $(RUST_USER_UFSD_SYNC_PLAN_SRC) kernel/fs/diskfs/ext4_inode_free_txn.h user/svc/ufs_close_token.h tools/rust-user.mk \
 		$(RUST_USER_CRT0_SRC) $(RUST_USER_UFSD_ABI_SRC) $(RUST_USER_UFSD_ABI_HDR) \
 		$(RUST_USER_UFSD_BACKEND_SRCS) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) \
 		$(NATIVE_ARCH_SRC) $(NATIVE_LD) $(A20_SERVICES_IDL_HDR) $(NATIVE_SDK_HDRS) user/svc/ufs_backends.h \
@@ -521,7 +547,8 @@ $(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_U
 	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -DCONFIG_UFSD_RUST_JBD2_POLICY -DCONFIG_UFSD_RUST_JBD2_TXN $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),-DCONFIG_UFSD_RUST_EXT4_ORPHAN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),-DCONFIG_EXT4_RUST_EXTENT_TXN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_JBD2_RECORD)),-DCONFIG_UFSD_RUST_JBD2_RECORD,) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE -DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER=$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL,) -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
 		-T$(NATIVE_LD) $(NATIVE_CRT0) $(RUST_USER_CRT0_SRC) $(NATIVE_SDK_SRC) \
 		$(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(RUST_USER_UFSD_ABI_SRC) \
-		$(RUST_USER_UFSD_BACKEND_SRCS) $(RUST_USER_UFSD_OBJ) $(NATIVE_LIBS) -o $@
+		$(RUST_USER_UFSD_BACKEND_SRCS) $(RUST_USER_UFSD_OBJ) \
+		$(RUST_USER_LIBCORE) $(RUST_USER_LIBCOMPILER_BUILTINS) $(NATIVE_LIBS) -o $@
 .PHONY: native-rust-ufsd native-rust-ufsd-arch
 native-rust-ufsd native-rust-ufsd-arch: $(RUST_USER_UFSD_BIN)
 else

@@ -6,6 +6,10 @@ pub const PROTO_VERSION: u32 = 2;
 pub const LEGACY_PROTO_VERSION: u32 = 1;
 pub const LIFETIME_CAPABILITY: u64 = 0x5546_534c_4946_4532;
 pub const SHUTDOWN_CAPABILITY: u64 = 0x5546_5353_4855_5432;
+/// 'UFSCTOK1'; negotiated at INIT via request arg0, answered in reply out1.
+pub const CLOSE_TOKEN_CAPABILITY: u64 = 0x5546_5343_544f_4b31;
+/// Accepted CLOSE tombstones remain until an explicit CLOSE_CONFIRM.
+pub const CLOSE_CONFIRM_CAPABILITY: u64 = 0x5546_5343_464d_5231;
 pub const SHUTDOWN_RETRY_SAFE: u64 = 0x5341_4645;
 pub const BACKEND_FAT: u32 = 1;
 pub const BACKEND_VNFS: u32 = 2;
@@ -28,6 +32,7 @@ pub const OP_OPEN: u32 = 15;
 pub const OP_CLOSE: u32 = 16;
 pub const OP_LINK: u32 = 17;
 pub const OP_SHUTDOWN: u32 = 18;
+pub const OP_CLOSE_CONFIRM: u32 = 19;
 pub const MAX_MESSAGE: usize = 65536;
 pub const MAX_NAME: usize = 511;
 
@@ -117,6 +122,10 @@ pub fn lifetime_capability_for(backend: u32) -> u64 {
     if backend == BACKEND_VNFS { LIFETIME_CAPABILITY } else { 0 }
 }
 
+pub fn close_confirm_requested(backend: u32, capability: u64) -> bool {
+    backend == BACKEND_VNFS && capability == CLOSE_CONFIRM_CAPABILITY
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +171,31 @@ mod tests {
         assert_eq!(lifetime_capability_for(BACKEND_VNFS), LIFETIME_CAPABILITY);
         assert_eq!(lifetime_capability_for(BACKEND_FAT), 0);
         assert_eq!(lifetime_capability_for(99), 0);
+    }
+
+    #[test]
+    fn close_token_capability_and_open_close_fields_roundtrip() {
+        let init = Request { opcode: OP_INIT, arg0: CLOSE_CONFIRM_CAPABILITY,
+                             ..Request::default() };
+        let init_reply = Response { out1: CLOSE_CONFIRM_CAPABILITY,
+                                    ..Response::default() };
+        let open_reply = Response { out2: 0x1234_5678_9abc_def0,
+                                    ..Response::default() };
+        let close = Request { opcode: OP_CLOSE, arg0: open_reply.out2,
+                              ..Request::default() };
+        let confirm = Request { opcode: OP_CLOSE_CONFIRM, arg0: open_reply.out2,
+                                ..Request::default() };
+        assert_eq!(init.arg0, CLOSE_CONFIRM_CAPABILITY);
+        assert_eq!(init_reply.out1, CLOSE_CONFIRM_CAPABILITY);
+        assert_ne!(open_reply.out2, 0);
+        assert_eq!(close.arg0, open_reply.out2);
+        assert_eq!(confirm.arg0, close.arg0);
+    }
+
+    #[test]
+    fn close_confirm_handshake_is_distinct_from_token_only_peers() {
+        assert!(close_confirm_requested(BACKEND_VNFS, CLOSE_CONFIRM_CAPABILITY));
+        assert!(!close_confirm_requested(BACKEND_VNFS, CLOSE_TOKEN_CAPABILITY));
+        assert!(!close_confirm_requested(BACKEND_FAT, CLOSE_CONFIRM_CAPABILITY));
     }
 }

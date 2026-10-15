@@ -594,6 +594,10 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
 int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                      size_t new_size, int flags, vaddr_t new_addr,
                      vaddr_t *out_addr);
+/* Caller holds mm->lock; true if this source range can carry or gain a
+ * writable shared-file mapping during remap. */
+int mm_mremap_needs_shared_write_locked(mm_struct_t *mm, vaddr_t old_addr,
+                                        size_t old_size, int prot);
 /* Native permission changes commit before the source mapping is removed. */
 int mm_mremap_native_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
                      size_t new_size, vaddr_t hint, int prot, vaddr_t *out_addr);

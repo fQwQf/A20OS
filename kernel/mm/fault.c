@@ -1,5 +1,6 @@
 #include "mm/fault.h"
 #include "mm/vm_internal.h"
+#include "mm/shutdown_write.h"
 
 #include "proc/proc.h"
 #include "proc/signal.h"
@@ -1119,7 +1120,7 @@ static uint64_t fault_file_size(vnode_t *vn)
 static int handle_file_fault(task_t *t, uint64_t page_va,
                              uint64_t file_pos, uint64_t vma_end,
                              int shared, int fault_around, int executable,
-                             vfile_t *vf)
+                             int write_grant, vfile_t *vf)
 {
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
@@ -1246,7 +1247,19 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
         return -1;
     }
 
+    int write_guard = 0;
+    if (write_grant) {
+        if (mm_shared_write_enter_wait() < 0) {
+            for (size_t i = 0; i < window_count; i++)
+                page_cache_put(window[i]);
+            vfs_put_file(vf);
+            return -1;
+        }
+        write_guard = 1;
+    }
+
     mm_struct_t *mm = t->mm;
+retry_mapping_validation:
     spin_lock(&mm->lock);
     mm_seg_t *vma = mm_seg_find(mm, page_va);
     vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) && vma->file
@@ -1262,6 +1275,23 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
         vma->backing_offset + (page_va - vma->start) == file_pos;
     if (current_vf)
         vfs_put_file(current_vf);
+
+    /* The initial write_grant decision was made before page-cache I/O.  A
+     * concurrent mprotect may have changed this mapping from read-only to
+     * writable while that I/O slept.  Re-read the current VMA under mm->lock;
+     * if it now grants a shared-file write, leave the lock before waiting for
+     * shutdown admission, then revalidate the mapping from scratch. */
+    if (mapping_valid && shared && (vma->pte_flags & PTE_W) && !write_guard) {
+        spin_unlock(&mm->lock);
+        if (mm_shared_write_enter_wait() < 0) {
+            for (size_t i = 0; i < window_count; i++)
+                page_cache_put(window[i]);
+            vfs_put_file(vf);
+            return -1;
+        }
+        write_guard = 1;
+        goto retry_mapping_validation;
+    }
 
     int result = -1;
     size_t installed = 0;
@@ -1326,6 +1356,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
             arch_tlb_flush_page_local(page_va);
     }
     spin_unlock(&mm->lock);
+    if (write_guard)
+        mm_shared_write_leave();
 
     for (size_t i = 0; i < candidate_count; i++) {
         if (candidates[i] != PFN_NONE && !shared && !direct_private)
@@ -1754,8 +1786,10 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
                 vfs_put_file(vf);
             return -1;
         }
+        int write_grant = shared && (seg_ptef & PTE_W);
         int r = handle_file_fault(t, page_va, file_pos, seg_end,
-                                  shared, fault_around, executable, vf);
+                                  shared, fault_around, executable,
+                                  write_grant, vf);
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
@@ -1788,6 +1822,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
         int fault_around = !shared && !(vma->pte_flags & PTE_W);
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
+        int write_grant = shared && (vma->pte_flags & PTE_W);
         vfile_t *vf = vma->file;
         vfile_get(vf);
         spin_unlock(&mm->lock);
@@ -1797,7 +1832,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
             return -1;
         }
         int r = handle_file_fault(t, page_va, file_pos, vma_end,
-                                  shared, fault_around, executable, vf);
+                                  shared, fault_around, executable,
+                                  write_grant, vf);
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
@@ -1866,6 +1902,66 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
         return -1;
 
     mm_struct_t *mm = t->mm;
+    if (access == MM_FAULT_ACCESS_WRITE) {
+        uint64_t flags = spin_lock_irqsave(&mm->lock);
+        pte_t *leaf = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
+        mm_seg_t *vma = mm_seg_find(mm, stval);
+        int candidate = leaf && (*leaf & PTE_V) && arch_pte_is_leaf(*leaf) &&
+            !(*leaf & (PTE_W | PTE_COW)) && vma &&
+            (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+                (VM_FILE | VM_SHARED | VM_WRITE);
+        spin_unlock_irqrestore(&mm->lock, flags);
+
+        if (candidate) {
+            if (mm_shared_write_enter_wait() < 0)
+                return -1;
+            mm_tlb_invalidate_begin(mm);
+            flags = spin_lock_irqsave(&mm->lock);
+            leaf = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
+            vma = mm_seg_find(mm, stval);
+            int regrant = leaf && (*leaf & PTE_V) &&
+                arch_pte_is_leaf(*leaf) && !(*leaf & PTE_COW) && vma &&
+                (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
+                    (VM_FILE | VM_SHARED | VM_WRITE);
+            if (regrant && !(*leaf & PTE_W)) {
+                int level = 0;
+                (void)pt_lookup_leaf(mm->pgdir, stval, &level, NULL, NULL);
+                pte_t *table = mm_pt_leaf_table(mm->pgdir, stval);
+                if (!table) {
+                    regrant = 0;
+                } else {
+                    mm_pt_node_lock(table);
+                    pte_t old = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+                    for (;;) {
+                        if (!(old & PTE_V) || !arch_pte_is_leaf(old) ||
+                            (old & PTE_COW)) {
+                            regrant = 0;
+                            break;
+                        }
+                        if (old & PTE_W)
+                            break;
+                        pte_t desired = arch_pte_leaf(arch_pte_addr(old),
+                            arch_pte_flags(old) | (pte_t)PTE_W);
+                        if (__atomic_compare_exchange_n(leaf, &old, desired,
+                                0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                            (void)mm_pt_refresh_leaf_prot(table,
+                                arch_pt_vpn(stval, level), desired);
+                            mm_tlb_note_change(mm, stval &
+                                ~(vaddr_t)(PAGE_SIZE - 1), PAGE_SIZE);
+                            break;
+                        }
+                    }
+                    mm_pt_node_unlock(table);
+                }
+            }
+            spin_unlock_irqrestore(&mm->lock, flags);
+            mm_tlb_invalidate_finish(mm);
+            mm_shared_write_leave();
+            if (regrant)
+                return 0;
+        }
+    }
+
     spin_lock(&mm->lock);
     pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, NULL, NULL);
     int allowed = pte && (*pte & PTE_V) && arch_pte_is_leaf(*pte) &&
