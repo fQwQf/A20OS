@@ -40,8 +40,26 @@ static int fail(const char *tag, const char *why)
     return 1;
 }
 
+static int release_boot_ext4_owner(void)
+{
+    static const char *const paths[] = {
+        "/extra/dev/shm", "/extra/dev", "/extra/proc", "/extra/sys",
+        "/extra/run", "/extra"
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (umount2(paths[i], 0) != 0 && errno != EINVAL)
+            return -1;
+    }
+    return 0;
+}
+
 static pid_t spawn_ufsd(const char *mp, const char *idx, const char *fstype)
 {
+    /* Startup may already have mounted the first ext4 block device at
+     * /extra.  Release that native owner before any test registers UXFS for
+     * the same device; never rely on two simultaneous writable mounts. */
+    if (strcmp(fstype, "ext4") == 0 && release_boot_ext4_owner() != 0)
+        return -1;
     pid_t pid = fork();
     if (pid == 0) {
         execl(A20_NATIVE_BIN("ufsd"), "ufsd", mp, idx, fstype, (char *)0);
@@ -542,6 +560,54 @@ static int test_restart(void)
     return 0;
 }
 
+/* Verify the service's explicit graceful close path.  Unlike a kernel
+ * poweroff or SIGKILL, umount2 shuts down the UXFS peer and requires UFSD to
+ * commit its ext4 clean-state transition before the mount is detached. */
+static int test_ext4_mount_state(int verify)
+{
+    const char *tag = verify ? "UXFS_EXT4_STATE_RESTART" : "UXFS_EXT4_STATE_CLEAN";
+    const char *marker = "/uext4/MOUNT.STATE";
+    pid_t service = spawn_ufsd("/uext4", "2", "ext4");
+    if (service < 0 || wait_path("/uext4/hello.txt", 500))
+        return fail(tag, "service mount");
+
+    if (verify) {
+        char bytes[32] = {0};
+        if (read_all(marker, bytes, sizeof(bytes)) != 13 ||
+            strcmp(bytes, "clean-reboot\n") != 0)
+            return fail(tag, "marker missing after cold reboot");
+    } else {
+        int fd = open(marker, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        if (fd < 0 || write(fd, "clean-reboot\n", 13) != 13 ||
+            fsync(fd) != 0 || close(fd) != 0)
+            return fail(tag, "write/fsync marker");
+    }
+
+    /* An open descriptor makes shutdown reject before teardown. The kernel
+     * must restore admission only for this explicit pre-teardown response,
+     * so the descriptor remains usable and can be closed before retry. */
+    int held = open("/uext4/hello.txt", O_RDONLY);
+    if (held < 0)
+        return fail(tag, "open descriptor before shutdown preflight");
+    errno = 0;
+    if (umount2("/uext4", 0) == 0 || errno != EBUSY)
+        return fail(tag, "open descriptor did not make shutdown EBUSY");
+    char hello[64];
+    if (read(held, hello, sizeof(hello)) <= 0)
+        return fail(tag, "preflight EBUSY did not restore file service");
+    if (close(held) != 0)
+        return fail(tag, "close descriptor after preflight EBUSY");
+
+    if (umount2("/uext4", 0) != 0)
+        return fail(tag, "explicit umount2");
+    int status = 0;
+    if (waitpid(service, &status, 0) != service || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        return fail(tag, "UFSD did not exit cleanly after peer shutdown");
+    printf("%s: PASS explicit_umount=ok service_exit=0\n", tag);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2) {
@@ -555,6 +621,10 @@ int main(int argc, char **argv)
             return test_ext4_close_retry(2);
         if (strcmp(argv[1], "ntfs") == 0)
             return test_ntfs();
+        if (strcmp(argv[1], "mount-state-clean") == 0)
+            return test_ext4_mount_state(0);
+        if (strcmp(argv[1], "mount-state-verify") == 0)
+            return test_ext4_mount_state(1);
         g_ext4_stop_stage = argv[1];
         if (strcmp(argv[1], "created") != 0 &&
             strcmp(argv[1], "renamed") != 0 &&

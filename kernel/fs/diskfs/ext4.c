@@ -15,6 +15,14 @@
 #include "core/perf.h"
 #include "core/timekeeping.h"
 
+static int ext4_persist_state_transition(bcache_t *bc, int transition);
+
+enum {
+    EXT4_STATE_BEGIN = 1,
+    EXT4_STATE_CLEAN = 2,
+    EXT4_STATE_ERROR = 3,
+};
+
 /* Every metadata write goes through here.  With a journal mounted the cache
  * write and the transaction record happen under one lock, so new metadata can
  * never reach its home location before the log can reproduce it; without one
@@ -32,7 +40,13 @@ int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
 
 int ext4_record_status(ext4_sb_info_t *sb, int status)
 {
-    if (status == -117) ext4_mark_inconsistent(sb);
+    if (status == -117) {
+        ext4_mark_inconsistent(sb);
+        /* This is deliberately a raw superblock update: ext4_meta_write is
+         * already fail-closed for an inconsistent in-memory mount. */
+        if (!sb->journal && sb->mount_state_started)
+            (void)ext4_persist_state_transition(sb->bc, EXT4_STATE_ERROR);
+    }
     return status;
 }
 
@@ -49,6 +63,114 @@ static void ext4_put_le32(uint8_t *p, uint32_t v)
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
+}
+
+#ifndef CONFIG_EXT4_RUST_EXTENT_TXN
+static uint16_t ext4_state_transition(uint16_t state, int transition)
+{
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    extern uint16_t a20_ext4_mount_state_begin(uint16_t);
+    extern uint16_t a20_ext4_mount_state_clean(uint16_t);
+    extern uint16_t a20_ext4_mount_state_error(uint16_t);
+    if (transition == EXT4_STATE_BEGIN)
+        return a20_ext4_mount_state_begin(state);
+    if (transition == EXT4_STATE_CLEAN)
+        return a20_ext4_mount_state_clean(state);
+    return a20_ext4_mount_state_error(state);
+#else
+    if (transition == EXT4_STATE_BEGIN)
+        return state & (uint16_t)~EXT4_VALID_FS;
+    if (transition == EXT4_STATE_CLEAN) {
+        if (state & EXT4_ERROR_FS) return state & (uint16_t)~EXT4_VALID_FS;
+        return state | EXT4_VALID_FS;
+    }
+    return (state & (uint16_t)~EXT4_VALID_FS) | EXT4_ERROR_FS;
+#endif
+}
+#endif
+
+static int ext4_state_admit(uint16_t state)
+{
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    extern int a20_ext4_mount_state_admit(uint16_t);
+    return a20_ext4_mount_state_admit(state) != 0;
+#else
+    return !(state & EXT4_ERROR_FS) && (state & EXT4_VALID_FS);
+#endif
+}
+
+static int ext4_state_io_read(void *context, uint16_t *state)
+{
+    bcache_t *bc = context;
+    uint8_t raw[EXT4_SB_SIZE];
+    if (!bc || !state || bcache_read_bytes(bc, EXT4_SB_OFFSET, raw,
+                                            sizeof(raw)) < 0)
+        return -EIO;
+    ext4_superblock_t *sb = (ext4_superblock_t *)raw;
+    if (sb->s_magic != EXT4_DISK_MAGIC) return -EIO;
+    *state = sb->s_state;
+    return 0;
+}
+
+static int ext4_state_io_write(void *context, uint16_t state)
+{
+    bcache_t *bc = context;
+    uint8_t raw[EXT4_SB_SIZE];
+    if (!bc || bcache_read_bytes(bc, EXT4_SB_OFFSET, raw, sizeof(raw)) < 0)
+        return -EIO;
+    ext4_superblock_t *sb = (ext4_superblock_t *)raw;
+    if (sb->s_magic != EXT4_DISK_MAGIC) return -EIO;
+    sb->s_state = state;
+    if (sb->s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM) {
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF, 0);
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF,
+                      ext4_crc32c(0xffffffffU, raw, EXT4_SB_CHECKSUM_OFF));
+    }
+#ifdef CONFIG_EXT4_MOUNT_STATE_FAIL_BEGIN_WRITE
+    if (!(state & EXT4_VALID_FS) && !(state & EXT4_ERROR_FS)) return -EIO;
+#endif
+    return bcache_write_bytes(bc, EXT4_SB_OFFSET, raw, sizeof(raw));
+}
+
+static int ext4_state_io_flush(void *context)
+{
+    bcache_t *bc = (bcache_t *)context;
+    /* A NULL device flush callback explicitly carries no stable-media
+     * durability guarantee. A persisted no-journal dirty marker is unsafe
+     * without the existing physical-device barrier. */
+    if (!bc || !bc->dev || !bc->dev->flush) return -95;
+    return bcache_sync_checked(bc);
+}
+
+/* The Rust policy owns read -> transition -> write -> checked-flush ordering
+ * when selected. The C fallback retains equivalent ordering for C-only builds.
+ * Both use only standard ext4 s_state and the existing block-cache IO. */
+static int ext4_persist_state_transition(bcache_t *bc, int transition)
+{
+    if (!bc) return -EINVAL;
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    typedef int (*state_read_fn)(void *, uint16_t *);
+    typedef int (*state_write_fn)(void *, uint16_t);
+    typedef int (*state_flush_fn)(void *);
+    typedef struct { void *context; state_read_fn read_state;
+                     state_write_fn write_state; state_flush_fn flush; } state_ops_t;
+    extern int a20_ext4_mount_state_transition(const state_ops_t *, int);
+    state_ops_t ops = { bc, ext4_state_io_read, ext4_state_io_write,
+                        ext4_state_io_flush };
+    return a20_ext4_mount_state_transition(&ops, transition);
+#else
+    uint16_t state;
+    int ret = ext4_state_io_read(bc, &state);
+    if (ret < 0) return ret;
+    uint16_t next = ext4_state_transition(state, transition);
+    if (transition == EXT4_STATE_CLEAN && (state & EXT4_ERROR_FS))
+        return -117;
+    if (next == state)
+        return transition == EXT4_STATE_CLEAN ? ext4_state_io_flush(bc) : 0;
+    ret = ext4_state_io_write(bc, next);
+    if (ret < 0) return ret;
+    return ext4_state_io_flush(bc);
+#endif
 }
 
 static uint32_t ext4_bg_free_blocks(const ext4_group_desc_t *gd);
@@ -2447,6 +2569,15 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         return NULL;
     }
 
+    /* No-journal ext4 has no replay path. Only a VALID, non-error image may
+     * become writable; the Rust policy is shared with the UFSD build. */
+    if (!(sb.s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) &&
+        !ext4_state_admit(sb.s_state)) {
+        printf("[EXT4] refusing mount: no-journal filesystem state is not clean (0x%x)\n",
+               sb.s_state);
+        return NULL;
+    }
+
     if ((flags & VFS_MOUNT_RDONLY) &&
         (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER)) {
         printf("[EXT4] Read-only mount refused: filesystem needs journal recovery\n");
@@ -2674,6 +2805,22 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     if (esi->journal)
         bcache_set_sync_hook(esi->bc, ext4_journal_sync_hook, esi);
 
+    /* For no-journal filesystems, durably clear VALID_FS before any recovery
+     * mutation or writable vnode escapes. A crash or later metadata failure
+     * then makes the next RW mount fail closed instead of trusting volatile
+     * quarantine state. */
+    if (!esi->journal && !(flags & VFS_MOUNT_RDONLY)) {
+        int state_ret = ext4_persist_state_transition(bc, EXT4_STATE_BEGIN);
+        if (state_ret < 0) {
+            printf("[EXT4] refusing writable mount: could not persist dirty state (%d)\n",
+                   state_ret);
+            kfree(esi->group_descs);
+            kfree(esi);
+            return NULL;
+        }
+        esi->mount_state_started = 1;
+    }
+
     if (ext4_validate_group_counts(esi) < 0) {
         printf("[EXT4] Invalid per-group free counts or bitmap bounds\n");
         kfree(esi->group_descs);
@@ -2780,7 +2927,14 @@ int ext4_unmount(vnode_t *root) {
         return close_ret;
     }
     bcache_set_sync_hook(esi->bc, NULL, NULL);
-    bcache_sync(esi->bc);
+    int sync_ret = bcache_sync_checked(esi->bc);
+    if (sync_ret < 0) return sync_ret;
+    if (esi->mount_state_started) {
+        if (ext4_is_inconsistent(esi)) return -117;
+        int state_ret = ext4_persist_state_transition(esi->bc, EXT4_STATE_CLEAN);
+        if (state_ret < 0) return state_ret;
+        esi->mount_state_started = 0;
+    }
 
     if (root->ops && root->ops->release) root->ops->release(root);
     if (esi->group_descs) {

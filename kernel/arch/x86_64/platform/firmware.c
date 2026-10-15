@@ -395,21 +395,23 @@ int firmware_acpi_pm_get(firmware_acpi_pm_t *out) {
     if (!fadt)
         return -ENOENT;
 
-    /* Offsets are absolute from the start of the table (ACPI 6.4 section 5.2.5).
-     * The two block bases live at 44 and 52; everything else below is the
-     * post-revision-2 restatement of the length fields, read only when the
-     * table is long enough to carry it. */
-    out->pm1a_evt    = (uint16_t)acpi_field(fadt, 44, 4);
-    out->pm1a_cnt    = (uint16_t)acpi_field(fadt, 52, 4);
-    out->pm2_cnt     = (uint16_t)acpi_field(fadt, 60, 4);
-    out->pm1a_evt_len = (uint8_t)acpi_field(fadt, 76, 1);
-    out->pm1a_cnt_len = (uint8_t)acpi_field(fadt, 77, 1);
-    out->pm2_cnt_len  = (uint8_t)acpi_field(fadt, 78, 1);
+    /* Offsets are absolute from the start of the table.  The ACPI table
+     * header occupies bytes 0..35; PM1 blocks follow the four SMI command
+     * bytes at offsets 48..55.  Keep these aligned with struct
+     * acpi_table_fadt rather than treating the SMI fields as block addresses. */
+    out->pm1a_evt     = (uint16_t)acpi_field(fadt, 56, 4);
+    out->pm1a_cnt     = (uint16_t)acpi_field(fadt, 64, 4);
+    out->pm2_cnt      = (uint16_t)acpi_field(fadt, 72, 4);
+    out->pm1a_evt_len = (uint8_t)acpi_field(fadt, 88, 1);
+    out->pm1a_cnt_len = (uint8_t)acpi_field(fadt, 89, 1);
+    out->pm2_cnt_len  = (uint8_t)acpi_field(fadt, 90, 1);
 
     if (fadt->revision >= 2) {
-        out->gpe0_blk    = (uint16_t)acpi_field(fadt, 68, 4);
-        out->gpe1_blk    = (uint16_t)acpi_field(fadt, 72, 4);
-        out->sleep_states = (uint32_t)acpi_field(fadt, 116, 4);
+        out->gpe0_blk = (uint16_t)acpi_field(fadt, 80, 4);
+        out->gpe1_blk = (uint16_t)acpi_field(fadt, 84, 4);
+        /* ACPI sleep-state objects live in the DSDT, not in FADT offset 116
+         * (which is the RESET_REG generic address). */
+        out->sleep_states = 0;
     }
 
     /* A width the spec does not define is a corrupt field, not something to

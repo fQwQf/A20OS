@@ -3,7 +3,7 @@
 #include "../svc/a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
 
-#define RUST_ECHOD_PATH "/bin/rust-idl-echod-rv"
+#define RUST_ECHOD_PATH A20_NATIVE_BIN("rust-idl-echod")
 #define WAIT_TIMEOUT_NS 2000000000ull
 #define TEST_SIGKILL 9u
 
@@ -23,7 +23,7 @@ static void say(const char *s)
 
 static void fail_msg(const char *why)
 {
-    say("NATIVE_RUST_IDL_SERVICE: FAIL ");
+    say("NATIVE_IDL_SERVICE: FAIL ");
     say(why);
     say("\n");
 }
@@ -350,6 +350,6 @@ int main(int argc, char **argv, char **envp)
 
     if (!cleanup())
         return fail("handle cleanup failed");
-    say("NATIVE_RUST_IDL_SERVICE: PASS negotiation=1 echo=1 ping=1 ping-crash=ignored ping-close=alive exit=42\n");
+    say("NATIVE_IDL_SERVICE: PASS client=c negotiation=1 echo=1 ping=1 ping-crash=ignored ping-close=alive exit=42\n");
     return 0;
 }

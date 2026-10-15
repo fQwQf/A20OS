@@ -22,6 +22,8 @@ mod ext4_orphan;
 mod ext4_extent_txn;
 #[path = "ufs_lifetime.rs"]
 mod lifetime;
+#[path = "ufsd_supervision.rs"]
+mod supervision;
 #[allow(dead_code)]
 mod idl { include!(env!("A20_IDL_RUST_BINDINGS")); }
 
@@ -30,6 +32,7 @@ const HANDLE_NULL: Handle = u32::MAX;
 const ERR_WOULD_BLOCK: i64 = -18;
 const ERR_INVALID: i32 = -22;
 const ERR_IO: i32 = -5;
+const ERR_BUSY: i64 = 16;
 const EVENT_MESSAGE_READY: u64 = 1 << 8;
 const EVENT_PEER_CLOSED: u64 = 1 << 9;
 const FS_EVENT_TAG: u64 = 1;
@@ -61,6 +64,7 @@ unsafe extern "C" {
     fn a20_ufsd_log(handle: Handle, bytes: *const u8, length: u32);
     fn a20_ufsd_backend_mount(backend: u32, fstype: *const c_char) -> i64;
     fn a20_ufsd_backend_mount_readonly(backend: u32, fstype: *const c_char) -> i64;
+    fn a20_ufsd_backend_unmount(backend: u32) -> i64;
     fn a20_ufsd_backend_lookup(backend: u32, ino: u64, name: *const c_char,
                                name_len: u32, response: *mut protocol::Response) -> i64;
     fn a20_ufsd_backend_getattr(backend: u32, ino: u64,
@@ -209,6 +213,22 @@ fn sync_and_retry_pending(_output: Handle, backend: u32,
     0
 }
 
+fn graceful_backend_unmount(output: Handle, backend: u32,
+                            lifetimes: &mut lifetime::Lifetimes,
+                            retry_safe: &mut bool) -> i64 {
+    if !lifetimes.all_closed() {
+        *retry_safe = true;
+        return -(ERR_BUSY as i64);
+    }
+    let sync = sync_and_retry_pending(output, backend, lifetimes);
+    if sync != 0 { return sync; }
+    let ret = unsafe { a20_ufsd_backend_unmount(backend) };
+    // VNFS returns EBUSY only from its preflight open-count check, before it
+    // drops registry references or begins ext4 teardown.
+    if ret == -(ERR_BUSY as i64) { *retry_safe = true; }
+    ret
+}
+
 fn dispatch_request(
     output: Handle,
     backend: u32,
@@ -232,6 +252,7 @@ fn dispatch_request(
             protocol::OP_INIT => {
                 response.out0 = protocol::ROOT_INO;
                 response.out1 = protocol::lifetime_capability_for(backend);
+                response.out2 = protocol::SHUTDOWN_CAPABILITY;
                 if backend == BACKEND_VNFS &&
                    request.version == protocol::LEGACY_PROTO_VERSION {
                     diagnostic_log(output, b"UFSD_RUST_LIFETIME_CAPABILITY: v2\n");
@@ -391,8 +412,16 @@ fn serve_loop(
         if service_watch {
             loop {
                 let result = unsafe { pump_supervision(service_endpoint, output) };
-                if result == 2 { return 42; }
-                if result <= 0 { break; }
+                match supervision::action_for_supervision_result(result) {
+                    supervision::WatchAction::CrashExit => {
+                        // Do not call the graceful unmount path: this must
+                        // leave the on-disk no-journal marker dirty.
+                        return supervision::SVCMGR_CRASH_EXIT;
+                    }
+                    supervision::WatchAction::Continue => {
+                        if result <= 0 { break; }
+                    }
+                }
             }
         }
         let mut length = 0u32;
@@ -403,7 +432,15 @@ fn serve_loop(
             if unsafe { a20_ufsd_event_wait(queue.raw()) } < 0 { continue; }
             continue;
         }
-        if status < 0 { return 0; }
+        if status < 0 {
+            /* UXFS peer shutdown is the service's graceful unmount signal.
+             * A task killed by the supervisor never reaches this path and
+             * correctly leaves the on-disk no-journal state dirty. */
+            let mut retry_safe = false;
+            let rc = graceful_backend_unmount(output, backend, &mut lifetimes,
+                                               &mut retry_safe);
+            return if rc == 0 { 0 } else { 1 };
+        }
         let header_len = core::mem::size_of::<protocol::Request>();
         if (length as usize) < header_len { continue; }
         let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<protocol::Request>()) };
@@ -443,8 +480,22 @@ fn serve_loop(
             opcode: request.opcode, req_id: request.req_id, status: 0, ..protocol::Response::default() };
         let payload_pointer = unsafe { a20_ufsd_payload_buffer() };
         let _capacity = unsafe { a20_ufsd_payload_capacity() };
-        let result = dispatch_request(output, backend, &mut lifetimes, &request, name_pointer,
-            payload_bytes.as_ptr(), rename_pointer, &mut response);
+        let shutdown_request = request.opcode == protocol::OP_SHUTDOWN;
+        let result = if shutdown_request {
+            if request.version != protocol::PROTO_VERSION || request.ino != protocol::ROOT_INO ||
+               request.name_len != 0 || request.payload_len != 0 {
+                -(ERR_INVALID as i64)
+            } else {
+                let mut retry_safe = false;
+                let rc = graceful_backend_unmount(output, backend, &mut lifetimes,
+                                                   &mut retry_safe);
+                if retry_safe { response.out1 = protocol::SHUTDOWN_RETRY_SAFE; }
+                rc
+            }
+        } else {
+            dispatch_request(output, backend, &mut lifetimes, &request, name_pointer,
+                payload_bytes.as_ptr(), rename_pointer, &mut response)
+        };
         response.status = result.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let cap = unsafe { a20_ufsd_payload_capacity() } as usize;
         if response.payload_len as usize > cap {
@@ -452,7 +503,15 @@ fn serve_loop(
             response.payload_len = 0;
         }
         let _ = payload_pointer;
-        if unsafe { a20_ufsd_send(filesystem.raw(), &response) } < 0 { return 0; }
+        if unsafe { a20_ufsd_send(filesystem.raw(), &response) } < 0 {
+            let mut retry_safe = false;
+            let rc = graceful_backend_unmount(output, backend, &mut lifetimes,
+                                               &mut retry_safe);
+            return if rc == 0 { 0 } else { 1 };
+        }
+        if shutdown_request && result == 0 {
+            return 0;
+        }
     }
 }
 

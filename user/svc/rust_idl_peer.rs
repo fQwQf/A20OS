@@ -107,13 +107,27 @@ const SVCMGR_REP_VERSION_NEGOTIATE: u16 =
     a20_services_idl::SVCMGR_REP_VERSION_NEGOTIATE as u16;
 const A20_SVC_ENDPOINT_SLOT: Handle = a20_services_idl::A20_SVC_ENDPOINT_SLOT as Handle;
 
-// The service binary this peer spawns.  user/liba20rt/a20_arch.h maps
-// `#if defined(__riscv) && __riscv_xlen == 64` to A20_NATIVE_TAG "rv", and
-// this crate only builds for ARCH=riscv64 (tools/rust-user.mk), so the literal
-// below is exactly A20_NATIVE_BIN("svc-echod").
+// Keep service names aligned with the Native per-architecture image tags.
+#[cfg(target_arch = "riscv64")]
 const ECHOD_PATH: &[u8] = b"/bin/svc-echod-rv";
+#[cfg(target_arch = "riscv32")]
+const ECHOD_PATH: &[u8] = b"/bin/svc-echod-rv32";
+#[cfg(target_arch = "aarch64")]
+const ECHOD_PATH: &[u8] = b"/bin/svc-echod-aarch64";
+#[cfg(target_arch = "x86_64")]
+const ECHOD_PATH: &[u8] = b"/bin/svc-echod-x86_64";
 #[cfg(idl_ack_test)]
+#[cfg(target_arch = "riscv64")]
 const ACK_ADVERSARY_PATH: &[u8] = b"/bin/rust-idl-adversary-rv";
+#[cfg(idl_ack_test)]
+#[cfg(target_arch = "riscv32")]
+const ACK_ADVERSARY_PATH: &[u8] = b"/bin/rust-idl-adversary-rv32";
+#[cfg(idl_ack_test)]
+#[cfg(target_arch = "aarch64")]
+const ACK_ADVERSARY_PATH: &[u8] = b"/bin/rust-idl-adversary-aarch64";
+#[cfg(idl_ack_test)]
+#[cfg(target_arch = "x86_64")]
+const ACK_ADVERSARY_PATH: &[u8] = b"/bin/rust-idl-adversary-x86_64";
 
 // The peer's own exit status.  Nothing here is part of the wire protocol.
 const EXIT_PASS: c_int = 0;
@@ -648,15 +662,14 @@ const _: () = assert!(WIRE_DROP_SHORT_MESSAGE[3] == 0);
 
 mod sys {
     use super::*;
+    extern "C" {
+        fn a20_rust_peer_syscall6(nr: u64, a0: u64, a1: u64, a2: u64,
+                                  a3: u64, a4: u64, a5: u64) -> Status;
+    }
 
-    /// Mirrors user/liba20rt/a20_syscall.h:a20_syscall6() for riscv64: nr in
-    /// a7, a0..a5 in a0..a5, `ecall`, result in a0.
-    ///
-    /// No `options(...)` is passed.  Inline asm without them is treated as
-    /// having full memory effects, which is the conservative and correct
-    /// choice for a trap that reads the argument struct the caller has just
-    /// written through a normal (non-volatile) store.
-    #[cfg(target_arch = "riscv64")]
+    /// Delegate architecture-specific register placement and trap behavior
+    /// to the Native SDK's `a20_syscall6` implementation.
+    #[cfg(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64"))]
     pub unsafe fn syscall6(
         nr: u64,
         a0: u64,
@@ -666,21 +679,10 @@ mod sys {
         a4: u64,
         a5: u64,
     ) -> Status {
-        let ret: Status;
-        core::arch::asm!(
-            "ecall",
-            in("a7") nr,
-            inlateout("a0") a0 => ret,
-            in("a1") a1,
-            in("a2") a2,
-            in("a3") a3,
-            in("a4") a4,
-            in("a5") a5,
-        );
-        ret
+        a20_rust_peer_syscall6(nr, a0, a1, a2, a3, a4, a5)
     }
 
-    #[cfg(not(target_arch = "riscv64"))]
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32", target_arch = "aarch64", target_arch = "x86_64")))]
     pub unsafe fn syscall6(
         _nr: u64,
         _a0: u64,
@@ -691,9 +693,8 @@ mod sys {
         _a5: u64,
     ) -> Status {
         compile_error!(
-            "the Rust Native peer builds for ARCH=riscv64 only; the other \
-             architectures keep the C reference until a freestanding target \
-             whose ABI matches their NATIVE_CFLAGS is installed"
+            "the Rust Native peer supports only installed matching 64-bit \
+             Native targets"
         );
     }
 }
@@ -1431,13 +1432,16 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
 /// business echo cannot be mistaken for a successful negative case.
 #[cfg(idl_ack_test)]
 fn run_adversarial_ack_cases() -> bool {
-    let cases: [(&str, u16, u16, u32); 6] = [
+    let cases: [(&str, u16, u16, u32); 9] = [
         ("wrong_nonce", 1, 3, 0xa001_0001),
         ("selection_outside_overlap", 1, 3, 0xa002_0002),
         ("short_frame", 1, 3, 0xa003_0003),
         ("trailing_frame", 1, 3, 0xa004_0004),
         ("status_selection_conflict", 1, 3, 0xa005_0005),
         ("legacy_echo_excludes_v1", 2, 3, 0xa006_0006),
+        ("unknown_status", 1, 3, 0xa007_0007),
+        ("unknown_reply_type", 1, 3, 0xa008_0008),
+        ("unsupported_envelope_version", 1, 3, 0xa009_0009),
     ];
     for (label, min_version, max_version, nonce) in cases {
         let (ep, task) = match spawn_service(ACK_ADVERSARY_PATH) {
@@ -1478,9 +1482,9 @@ fn run_adversarial_ack_cases() -> bool {
         }
         put_str("IDL_ACK_REJECT: case=");
         put(label.as_bytes());
-        put_line(" PASS rejected-before-fallback response_count=1 cleanup=PASS");
+        put_line(" PASS rejected-before-fallback response_sent=1 cleanup=PASS");
     }
-    put_line("IDL_ACK_ADVERSARIAL: PASS cases=6 cleanup=6");
+    put_line("IDL_ACK_ADVERSARIAL: PASS cases=9 cleanup=9");
     true
 }
 

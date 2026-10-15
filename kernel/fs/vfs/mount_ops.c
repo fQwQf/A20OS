@@ -19,6 +19,7 @@
 #include "fs/lfs_vfs.h"
 #include "fs/ntfs.h"
 #include "fs/isofs.h"
+#include "fs/uxfs.h"
 #include "fs/ramfs.h"
 #include "fs/devfs.h"
 #include "fs/procfs.h"
@@ -286,6 +287,8 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
 
     if (strcmp(fstype, "ext4") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
+        if (uxfs_block_device_owned(bc->dev))
+            return -EBUSY;
 
         mount_t *mnt = vfs_mount_alloc();
         if (!mnt) return -ENOMEM;
@@ -425,8 +428,10 @@ int vfs_mount_fs_teardown(mount_t *mnt) {
     } else if (mnt->type == FS_TYPE_ISOFS) {
         isofs_unmount(root);
     } else if (mnt->type == FS_TYPE_UXFS) {
-        extern void uxfs_unmount(struct vnode *root);
-        uxfs_unmount(root);
+        extern int uxfs_unmount(struct vnode *root);
+        ret = uxfs_unmount(root);
+        if (ret < 0)
+            goto failed;
     } else if (mnt->type == FS_TYPE_LITTLEFS) {
         littlefs_unmount(root);
     }

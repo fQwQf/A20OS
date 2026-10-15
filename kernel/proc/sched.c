@@ -18,6 +18,7 @@
 #include "mm/vm.h"
 #include "cg/cgroup.h"
 #include "cg/cgroup_impl.h"
+#include "proc/task_placement.h"
 
 /*
  * RT_PRI_LEVELS: exact per-priority FIFO buckets for SCHED_FIFO/SCHED_RR
@@ -25,31 +26,32 @@
  * buckets to keep the per-CPU runqueue inside tiny SRAM budgets; hosted
  * targets keep one bucket per RT priority so pick order matches Linux.
  */
-#ifdef CONFIG_MCU
-#define RT_PRI_LEVELS 8
-#else
-#define RT_PRI_LEVELS 100
-#endif
+#define RT_PRI_LEVELS PROC_RT_PRI_LEVELS
 #define RT_BITMAP_WORDS ((RT_PRI_LEVELS + 31) / 32)
+
+#ifdef CONFIG_RT_SCHED_RUST
+extern uint32_t a20_rt_priority_slot(int32_t priority, uint32_t levels);
+#endif
 
 static inline unsigned rt_prio_slot(int prio)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    return a20_rt_priority_slot(prio, RT_PRI_LEVELS);
+#else
     int p = prio;
     if (p < 0)
         p = 0;
     if (p >= (int)RT_PRI_LEVELS)
         p = RT_PRI_LEVELS - 1;
     return (unsigned)p;
+#endif
 }
 
 typedef struct __attribute__((aligned(64))) proc_runq {
     spinlock_t lock;
     /* Level 0: RT — per-priority FIFO lists with an O(1) bitmap pick of the
      * highest non-empty priority, replacing the old full-queue scan. */
-    struct {
-        task_t *head;
-        task_t *tail;
-    } rt_q[RT_PRI_LEVELS];
+    proc_rt_bucket_t rt_q[RT_PRI_LEVELS];
     uint32_t rt_bitmap[RT_BITMAP_WORDS];
     /* Per-CPU RT bandwidth: reserve 5% of every second for normal work.
      * All fields are protected by this runqueue's lock. */
@@ -98,6 +100,34 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
 
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static proc_cpu_sched_t sched_cpu[CONFIG_NR_CPUS];
+
+#ifdef CONFIG_RT_SCHED_RUST
+typedef struct a20_rt_bandwidth_result {
+    uint32_t throttled;
+    uint32_t changed;
+} a20_rt_bandwidth_result_t;
+extern uint32_t a20_rt_policy_is_rt(uint32_t policy);
+extern uint32_t a20_rt_enqueue(proc_rt_bucket_t *buckets, uint32_t *bitmap,
+                               uint32_t levels, proc_rt_node_t *node,
+                               int32_t priority, uint32_t policy,
+                               uint64_t *rr_remaining, uint64_t rr_quantum);
+extern uint32_t a20_rt_rr_account(uint64_t *remaining, uint64_t *last, uint64_t now);
+extern void a20_rt_rr_dispatch(uint64_t *remaining, uint64_t *last,
+                               uint64_t now, uint64_t quantum);
+extern uint32_t a20_rt_strictly_preempts(uint32_t candidate_policy,
+                                         int32_t candidate_priority,
+                                         uint32_t current_policy,
+                                         int32_t current_priority);
+extern uint32_t a20_rt_dequeue(proc_rt_bucket_t *buckets, uint32_t *bitmap,
+                               uint32_t levels, proc_rt_node_t *node);
+extern proc_rt_node_t *a20_rt_pick(proc_rt_bucket_t *buckets,
+                                   uint32_t *bitmap, uint32_t levels);
+extern uint32_t a20_rt_is_empty(const uint32_t *bitmap, uint32_t levels);
+extern a20_rt_bandwidth_result_t a20_rt_account(
+    uint64_t *period_start, uint64_t *last_account, uint64_t *used,
+    unsigned *initialized, uint64_t now, uint64_t ticks_per_sec,
+    uint32_t current_is_rt);
+#endif
 
 /* Picks and empty picks are counted on every local dispatch, by every CPU.
  * As globals they shared one line with the counters below, so each context
@@ -189,11 +219,32 @@ static int sched_level_clamp(int level) {
 
 static int sched_task_rt(task_t *t)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    return t && a20_rt_policy_is_rt((uint32_t)t->sched_policy);
+#else
     return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
+#endif
+}
+
+static task_t *rt_node_task(proc_rt_node_t *node)
+{
+    return (task_t *)((char *)node - offsetof(task_t, rt_node));
 }
 
 static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    task_t *current = proc_current();
+    a20_rt_bandwidth_result_t result = a20_rt_account(
+        &rq->rt_period_start, &rq->rt_last_account, &rq->rt_used,
+        &rq->rt_account_initialized, now, (uint64_t)TICKS_PER_SEC,
+        current && current->pid && sched_task_rt(current));
+    if (result.changed) {
+        a20_perf_add(A20_PERF_RT_THROTTLES, 1);
+        proc_sched_request_cpu(cpu_current_id(), 0);
+    }
+    return (int)result.throttled;
+#else
     uint64_t period = TICKS_PER_SEC;
     if (period < 2)
         period = 2;
@@ -229,6 +280,7 @@ static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
     if (throttled != was_throttled)
         proc_sched_request_cpu(cpu_current_id(), 0);
     return throttled;
+#endif
 }
 
 static int sched_rt_throttled_local(void)
@@ -245,14 +297,42 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
     if (!candidate || !running || candidate == running)
         return 0;
 
+#ifdef CONFIG_TASK_PLACEMENT_RUST
+    a20_task_preemption_snapshot_t snapshot = {0};
+    snapshot.candidate_policy = (uint32_t)candidate->sched_policy;
+    snapshot.candidate_priority = candidate->priority;
+    snapshot.candidate_deadline = proc_sched_deadline_snapshot(candidate);
+    snapshot.current_valid = 1;
+    snapshot.current_idle = running->pid == 0;
+    /* Local keep-current call sites pass the incumbent as `candidate` (it may
+     * already be READY but still own the CPU) and the picked READY task as
+     * `running`. Do not use either state as a gate for this strict key compare;
+     * remote requests use proc_sched_should_preempt_locked() instead. */
+    snapshot.current_running = 1;
+    snapshot.same_task = candidate == running;
+    snapshot.current_policy = (uint32_t)running->sched_policy;
+    snapshot.current_priority = running->priority;
+    snapshot.current_deadline = proc_sched_deadline_snapshot(running);
+    return a20_task_placement_strictly_outranks(&snapshot);
+#else
     int candidate_rt = sched_task_rt(candidate);
     int running_rt = sched_task_rt(running);
     if (candidate_rt != running_rt)
         return candidate_rt;
-    if (candidate_rt)
+    if (candidate_rt) {
+#ifdef CONFIG_RT_SCHED_RUST
+        return a20_rt_strictly_preempts((uint32_t)candidate->sched_policy,
+                                        candidate->priority,
+                                        (uint32_t)running->sched_policy,
+                                        running->priority) != 0;
+#else
         return candidate->priority > running->priority;
+#endif
+    }
     /* EEVDF: an earlier virtual deadline strictly outranks. */
-    return candidate->eevdf_deadline < running->eevdf_deadline;
+    return proc_sched_deadline_snapshot(candidate) <
+           proc_sched_deadline_snapshot(running);
+#endif
 }
 
 /* ================================================================
@@ -282,15 +362,35 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
 #define EEVDF_BASE_SLICE      (TICKS_PER_SEC / 100)   /* 10 ms base slice */
 #define EEVDF_MAX_LAG         (TICKS_PER_SEC / 100)   /* max sleeper bonus */
 
+#ifdef CONFIG_EEVDF_MATH_RUST
+extern uint64_t a20_eevdf_effective_weight(uint32_t base, uint32_t boost);
+extern uint64_t a20_eevdf_virtual_slice(int32_t configured_ms,
+                                        uint64_t ticks_per_sec,
+                                        uint64_t weight);
+extern uint64_t a20_eevdf_advance_vruntime(uint64_t vruntime,
+                                           uint64_t elapsed,
+                                           uint64_t weight);
+extern uint64_t a20_eevdf_deadline(uint64_t vruntime, uint64_t slice);
+extern uint64_t a20_eevdf_advance_vtime(uint64_t vtime, uint64_t elapsed,
+                                        uint64_t total_weight);
+extern uint32_t a20_eevdf_eligible(uint64_t vruntime, uint64_t vtime);
+extern uint64_t a20_eevdf_clamp_sleeper(uint64_t vruntime, uint64_t vtime,
+                                        uint64_t max_lag);
+#endif
+
 /* Schedulable base slice (ms), writable via /proc/a20/sched_base_slice. */
 extern int g_sched_base_slice_ms;
 
 static inline uint64_t eevdf_weight(task_t *t)
 {
     uint32_t w = t->cfs_weight;
-    uint64_t base = w ? (uint64_t)w : EEVDF_NICE0_LOAD;
     uint32_t boost = __atomic_load_n(&t->pi_boost_weight, __ATOMIC_RELAXED);
+#ifdef CONFIG_EEVDF_MATH_RUST
+    return a20_eevdf_effective_weight(w, boost);
+#else
+    uint64_t base = w ? (uint64_t)w : EEVDF_NICE0_LOAD;
     return boost > base ? boost : base;
+#endif
 }
 
 void proc_sched_pi_boost(task_t *owner, task_t *pi_waiter)
@@ -315,27 +415,63 @@ void proc_sched_pi_unboost(task_t *owner)
 
 static inline uint64_t eevdf_vslice(task_t *t)
 {
+#ifdef CONFIG_EEVDF_MATH_RUST
+    return a20_eevdf_virtual_slice(g_sched_base_slice_ms,
+                                   (uint64_t)TICKS_PER_SEC,
+                                   eevdf_weight(t));
+#else
     uint64_t slice = EEVDF_BASE_SLICE;
     int ms = g_sched_base_slice_ms;
     if (ms > 0)
         slice = (uint64_t)ms * (TICKS_PER_SEC / 1000);
     return (slice * EEVDF_NICE0_LOAD) / eevdf_weight(t);
+#endif
 }
 
 static void eevdf_reset_deadline(task_t *t)
 {
+    uint64_t flags = spin_lock_irqsave(&t->eevdf_deadline_lock);
+#ifdef CONFIG_EEVDF_MATH_RUST
+    t->eevdf_deadline = a20_eevdf_deadline(t->eevdf_vruntime,
+                                           eevdf_vslice(t));
+#else
     t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
+#endif
+    spin_unlock_irqrestore(&t->eevdf_deadline_lock, flags);
 }
 
 static void eevdf_account_run(task_t *t, uint64_t dt)
 {
+    uint64_t flags = spin_lock_irqsave(&t->eevdf_deadline_lock);
+#ifdef CONFIG_EEVDF_MATH_RUST
+    t->eevdf_vruntime = a20_eevdf_advance_vruntime(
+        t->eevdf_vruntime, dt, eevdf_weight(t));
+    t->eevdf_deadline = a20_eevdf_deadline(t->eevdf_vruntime,
+                                           eevdf_vslice(t));
+#else
     t->eevdf_vruntime += (dt * EEVDF_NICE0_LOAD) / eevdf_weight(t);
     t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
+#endif
+    spin_unlock_irqrestore(&t->eevdf_deadline_lock, flags);
+}
+
+uint64_t proc_sched_deadline_snapshot(task_t *task)
+{
+    if (!task)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&task->eevdf_deadline_lock);
+    uint64_t deadline = task->eevdf_deadline;
+    spin_unlock_irqrestore(&task->eevdf_deadline_lock, flags);
+    return deadline;
 }
 
 static inline int eevdf_eligible(proc_runq_t *rq, task_t *t)
 {
+#ifdef CONFIG_EEVDF_MATH_RUST
+    return a20_eevdf_eligible(t->eevdf_vruntime, rq->eevdf_vtime);
+#else
     return t->eevdf_vruntime <= rq->eevdf_vtime;
+#endif
 }
 
 /* Charge `now - last_account` of run time to t and advance system vtime. */
@@ -349,61 +485,116 @@ static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
         return;
     eevdf_account_run(t, dt);
     uint64_t total = rq->eevdf_weight;
+#ifdef CONFIG_EEVDF_MATH_RUST
+    rq->eevdf_vtime = a20_eevdf_advance_vtime(rq->eevdf_vtime, dt, total);
+#else
     if (total)
         rq->eevdf_vtime += (dt * EEVDF_NICE0_LOAD) / total;
+#endif
 }
 
 /* ---- Level 0: RT per-priority FIFO queues ---- */
 
+/* RR quantum is 100 ms in the same monotonic tick domain used by EEVDF. */
+#define RT_RR_QUANTUM_TICKS ((TICKS_PER_SEC / 10) ? (TICKS_PER_SEC / 10) : 1)
+
+static int rt_rr_account_task(task_t *t, uint64_t now)
+{
+    if (!t || t->sched_policy != SCHED_RR)
+        return 0;
+#ifdef CONFIG_RT_SCHED_RUST
+    return (int)a20_rt_rr_account(&t->rt_rr_remaining,
+                                  &t->rt_rr_last_account, now);
+#else
+    uint64_t elapsed = now - t->rt_rr_last_account;
+    t->rt_rr_remaining = elapsed >= t->rt_rr_remaining
+                       ? 0 : t->rt_rr_remaining - elapsed;
+    t->rt_rr_last_account = now;
+    return t->rt_rr_remaining == 0;
+#endif
+}
+
+static void rt_rr_dispatch_task(task_t *t, uint64_t now)
+{
+    if (!t || t->sched_policy != SCHED_RR)
+        return;
+#ifdef CONFIG_RT_SCHED_RUST
+    a20_rt_rr_dispatch(&t->rt_rr_remaining, &t->rt_rr_last_account,
+                       now, RT_RR_QUANTUM_TICKS);
+#else
+    if (!t->rt_rr_remaining)
+        t->rt_rr_remaining = RT_RR_QUANTUM_TICKS;
+    t->rt_rr_last_account = now;
+#endif
+}
+
 static void rt_enqueue_locked(proc_runq_t *rq, task_t *t)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    if (!a20_rt_enqueue(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS,
+                        &t->rt_node, t->priority,
+                        (uint32_t)t->sched_policy, &t->rt_rr_remaining,
+                        RT_RR_QUANTUM_TICKS))
+        panic("rt enqueue rejected pid=%d slot=%d", t->pid,
+              t->rt_node.queued_slot);
+#else
     unsigned s = rt_prio_slot(t->priority);
-    t->rq_next = NULL;
-    t->rq_prev = rq->rt_q[s].tail;
+    if (t->rt_node.queued_slot != -1)
+        panic("rt enqueue duplicate pid=%d slot=%d", t->pid,
+              t->rt_node.queued_slot);
+    t->rt_node.next = NULL;
+    t->rt_node.prev = rq->rt_q[s].tail;
+    t->rt_node.queued_slot = (int32_t)s;
+    t->rt_node.policy = (uint32_t)t->sched_policy;
+    if (t->sched_policy == SCHED_RR && !t->rt_rr_remaining)
+        t->rt_rr_remaining = RT_RR_QUANTUM_TICKS;
     if (rq->rt_q[s].tail)
-        rq->rt_q[s].tail->rq_next = t;
+        rq->rt_q[s].tail->next = &t->rt_node;
     else
-        rq->rt_q[s].head = t;
-    rq->rt_q[s].tail = t;
+        rq->rt_q[s].head = &t->rt_node;
+    rq->rt_q[s].tail = &t->rt_node;
     rq->rt_bitmap[s >> 5] |= 1U << (s & 31);
+#endif
 }
 
 static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    if (!a20_rt_dequeue(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS,
+                        &t->rt_node))
+        panic("rt dequeue rejected pid=%d slot=%d", t->pid,
+              t->rt_node.queued_slot);
+#else
     unsigned s = rt_prio_slot(t->priority);
-    if (t->rq_prev)
-        t->rq_prev->rq_next = t->rq_next;
+    if (t->rt_node.queued_slot != (int32_t)s)
+        panic("rt dequeue slot mismatch pid=%d node=%d wanted=%u", t->pid,
+              t->rt_node.queued_slot, s);
+    if (t->rt_node.prev)
+        t->rt_node.prev->next = t->rt_node.next;
     else
-        rq->rt_q[s].head = t->rq_next;
-    if (t->rq_next)
-        t->rq_next->rq_prev = t->rq_prev;
+        rq->rt_q[s].head = t->rt_node.next;
+    if (t->rt_node.next)
+        t->rt_node.next->prev = t->rt_node.prev;
     else
-        rq->rt_q[s].tail = t->rq_prev;
+        rq->rt_q[s].tail = t->rt_node.prev;
     if (!rq->rt_q[s].head)
         rq->rt_bitmap[s >> 5] &= ~(1U << (s & 31));
-    t->rq_next = NULL;
-    t->rq_prev = NULL;
+    t->rt_node.next = NULL;
+    t->rt_node.prev = NULL;
+    t->rt_node.queued_slot = -1;
+#endif
 }
 
-/*
- * Highest-priority non-empty RT queue via bitmap word scan: O(words).
- *
- * SCHED_RR rotates: when the head of a busy queue is a round-robin task it is
- * moved to the tail before being returned, so each pick advances to the next
- * peer.  SCHED_FIFO heads are never rotated, which is what makes FIFO
- * run-to-completion and keeps it ahead of an RR peer at equal priority, as in
- * Linux.
- *
- * A lone RR task is not rotated (the tail is NULL), so it keeps the CPU
- * instead of being penalised for having no competition.
- *
- * Rotation still happens at pick time, so a competing RR peer waits for the
- * running one to reach a reschedule point -- but with kernel preemption that
- * point is now reachable: a task that burns its whole slice in the kernel
- * trips need_resched on the tick and is rotated out at the next IRQ return.
+/* Highest-priority non-empty RT queue via bitmap word scan: O(words).
+ * FIFO and RR both dequeue from the bucket head. RR fairness is driven by
+ * elapsed quantum accounting; an expired running task returns at the tail.
  */
 static task_t *rt_pick_best_locked(proc_runq_t *rq)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    proc_rt_node_t *node = a20_rt_pick(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS);
+    return node ? rt_node_task(node) : NULL;
+#else
     for (int w = RT_BITMAP_WORDS - 1; w >= 0; w--) {
         uint32_t bits = rq->rt_bitmap[w];
         while (bits) {
@@ -411,29 +602,28 @@ static task_t *rt_pick_best_locked(proc_runq_t *rq)
             while (off >= 0 && !(bits & (1U << off)))
                 off--;
             unsigned s = (unsigned)(w << 5) + (unsigned)off;
-            task_t *t = rq->rt_q[s].head;
-            if (t) {
-                if (t->sched_policy == SCHED_RR && t->rq_next) {
-                    rt_unlink_locked(rq, t);
-                    rt_enqueue_locked(rq, t);
-                    t = rq->rt_q[s].head;
-                }
-                return t;
-            }
+            proc_rt_node_t *node = rq->rt_q[s].head;
+            if (node)
+                return rt_node_task(node);
             /* Repair a stale bit whose list drained without bookkeeping. */
             bits &= ~(1U << off);
             rq->rt_bitmap[w] &= ~(1U << off);
         }
     }
     return NULL;
+#endif
 }
 
 static inline int rt_queues_empty(const proc_runq_t *rq)
 {
+#ifdef CONFIG_RT_SCHED_RUST
+    return a20_rt_is_empty(rq->rt_bitmap, RT_PRI_LEVELS) != 0;
+#else
     for (int w = 0; w < RT_BITMAP_WORDS; w++)
         if (rq->rt_bitmap[w])
             return 0;
     return 1;
+#endif
 }
 
 /* ---- Level 1: EEVDF randomized BST keyed by earliest virtual deadline ---- */
@@ -452,6 +642,17 @@ static inline uint32_t eevdf_heap_prio(void)
     return (uint32_t)(x >> 32) | 1u;
 }
 
+#ifdef CONFIG_EEVDF_MATH_RUST
+extern uint32_t a20_eevdf_tree_insert(eevdf_node_t **root, eevdf_node_t *node,
+                                      void *owner, uint64_t deadline,
+                                      uint64_t vruntime, uint32_t heap_prio);
+extern uint32_t a20_eevdf_tree_remove(eevdf_node_t **root, eevdf_node_t *node);
+extern void *a20_eevdf_tree_first(eevdf_node_t *root);
+extern void *a20_eevdf_tree_last(eevdf_node_t *root);
+extern void *a20_eevdf_tree_pick(eevdf_node_t *root, uint64_t vtime);
+extern uint32_t a20_eevdf_tree_contains(eevdf_node_t *root,
+                                       const eevdf_node_t *target);
+#else
 static inline task_t *eevdf_task_of(eevdf_node_t *n)
 {
     return (task_t *)((char *)n - __builtin_offsetof(task_t, eevdf_node));
@@ -476,8 +677,15 @@ static inline void eevdf_augment(eevdf_node_t *n)
     n->min_vruntime = m;
 }
 
-/* y rises above x (x keeps its subtree order); augmentation is local to the
- * rotated pair because rotations preserve each subtree's membership set. */
+static void eevdf_augment_up(eevdf_node_t *n)
+{
+    while (n) {
+        eevdf_augment(n);
+        n = n->parent;
+    }
+}
+
+/* A rotation preserves subtree membership; recompute only the rotated pair. */
 static void eevdf_rot_left(proc_runq_t *rq, eevdf_node_t *x)
 {
     eevdf_node_t *y = x->right;
@@ -525,20 +733,37 @@ static task_t *eevdf_extreme_locked(proc_runq_t *rq, int leftmost)
         n = leftmost ? n->left : n->right;
     return eevdf_task_of(n);
 }
+#endif /* !CONFIG_EEVDF_MATH_RUST */
 
 static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 {
     eevdf_node_t *n = &t->eevdf_node;
 
+#ifdef CONFIG_EEVDF_MATH_RUST
+    if (n->owner || n->left || n->right || n->parent)
+        panic("EEVDF Rust duplicate insert");
+#endif
+
     if (t->eevdf_deadline == 0)
         eevdf_reset_deadline(t);
 
     /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU. */
+#ifdef CONFIG_EEVDF_MATH_RUST
+    if (rq->eevdf_root) {
+        uint64_t clamped = a20_eevdf_clamp_sleeper(
+            t->eevdf_vruntime, rq->eevdf_vtime, EEVDF_MAX_LAG);
+        if (clamped != t->eevdf_vruntime) {
+            t->eevdf_vruntime = clamped;
+            eevdf_reset_deadline(t);
+        }
+    }
+#else
     if (rq->eevdf_root &&
         t->eevdf_vruntime + EEVDF_MAX_LAG < rq->eevdf_vtime) {
         t->eevdf_vruntime = rq->eevdf_vtime - EEVDF_MAX_LAG;
         eevdf_reset_deadline(t);
     }
+#endif
 
     /* First EEVDF task on this CPU defines the system virtual time. */
     if (!rq->eevdf_root)
@@ -546,7 +771,18 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 
     n->left = NULL;
     n->right = NULL;
+#ifdef CONFIG_EEVDF_MATH_RUST
+    n->parent = NULL;
+#endif
     n->heap_prio = eevdf_heap_prio();
+#ifdef CONFIG_EEVDF_MATH_RUST
+    if (!a20_eevdf_tree_insert(&rq->eevdf_root, n, t,
+                               t->eevdf_deadline, t->eevdf_vruntime,
+                               n->heap_prio))
+        panic("EEVDF Rust insert invariant");
+    rq->eevdf_first = (task_t *)a20_eevdf_tree_first(rq->eevdf_root);
+    rq->eevdf_last = (task_t *)a20_eevdf_tree_last(rq->eevdf_root);
+#else
     eevdf_node_t **link = &rq->eevdf_root;
     eevdf_node_t *parent = NULL;
     while (*link) {
@@ -567,10 +803,14 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
             eevdf_rot_left(rq, p);
     }
 
+    /* Insert can lower a subtree minimum all the way to the root. */
+    eevdf_augment_up(n);
+
     if (!rq->eevdf_first || eevdf_key_less(t, rq->eevdf_first))
         rq->eevdf_first = t;
     if (!rq->eevdf_last || eevdf_key_less(rq->eevdf_last, t))
         rq->eevdf_last = t;
+#endif
 
     rq->eevdf_weight += eevdf_weight(t);
 }
@@ -578,6 +818,13 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
 {
     eevdf_node_t *n = &t->eevdf_node;
+#ifdef CONFIG_EEVDF_MATH_RUST
+    if (n->owner != t ||
+        !a20_eevdf_tree_remove(&rq->eevdf_root, n))
+        panic("EEVDF Rust remove invariant");
+    rq->eevdf_first = (task_t *)a20_eevdf_tree_first(rq->eevdf_root);
+    rq->eevdf_last = (task_t *)a20_eevdf_tree_last(rq->eevdf_root);
+#else
     int was_first = (rq->eevdf_first == t);
     int was_last = (rq->eevdf_last == t);
 
@@ -592,6 +839,7 @@ static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
     eevdf_node_t *child = n->left ? n->left : n->right;
     if (child)
         child->parent = n->parent;
+    eevdf_node_t *ancestor = n->parent;
     if (!n->parent)
         rq->eevdf_root = child;
     else if (n->parent->left == n)
@@ -601,12 +849,17 @@ static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
     n->left = NULL;
     n->right = NULL;
     n->parent = NULL;
+    n->owner = NULL;
+
+    /* Removing a low-vruntime leaf can raise every ancestor's minimum. */
+    eevdf_augment_up(ancestor);
 
     /* Ancestors keep their membership sets, so only caches need repair. */
     if (was_first)
         rq->eevdf_first = eevdf_extreme_locked(rq, 1);
     if (was_last)
         rq->eevdf_last = eevdf_extreme_locked(rq, 0);
+#endif
 }
 
 /*
@@ -617,6 +870,9 @@ static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
  */
 static task_t *eevdf_pick_eligible_locked(proc_runq_t *rq)
 {
+#ifdef CONFIG_EEVDF_MATH_RUST
+    return (task_t *)a20_eevdf_tree_pick(rq->eevdf_root, rq->eevdf_vtime);
+#else
     eevdf_node_t *n = rq->eevdf_root;
     if (!n || n->min_vruntime > rq->eevdf_vtime)
         return NULL;
@@ -634,6 +890,7 @@ static task_t *eevdf_pick_eligible_locked(proc_runq_t *rq)
         }
         return NULL;
     }
+#endif
 }
 
 static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t)
@@ -667,17 +924,21 @@ void proc_sched_runq_init(void) {
 
 static uint32_t sched_task_cpu_mask(task_t *t)
 {
-    uint32_t mask = SCHED_CPU_MASK_ALL;
-
-    if (t)
-        mask &= t->cpus_allowed;
+    uint32_t affinity = t ? t->cpus_allowed : SCHED_CPU_MASK_ALL;
+    uint32_t cpuset = SCHED_CPU_MASK_ALL;
 
     if (t && t->cgroup) {
         cg_node_t *node = (cg_node_t *)t->cgroup;
-        mask &= node->res.cpuset.effective_cpus;
+        cpuset = node->res.cpuset.effective_cpus;
     }
 
-    return mask & SCHED_CPU_MASK_ALL & smp_online_cpu_mask();
+#ifdef CONFIG_TASK_PLACEMENT_RUST
+    return a20_task_placement_eligible_mask(affinity, cpuset,
+                                            smp_online_cpu_mask(),
+                                            CONFIG_NR_CPUS);
+#else
+    return SCHED_CPU_MASK_ALL & affinity & cpuset & smp_online_cpu_mask();
+#endif
 }
 
 static int sched_policy_valid(int policy)
@@ -864,6 +1125,25 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     int old_nice = sched_nice_value(t);
     int old_rt = sched_policy_rt_value(t->sched_policy);
     if (config->fields & PROC_SCHED_POLICY) {
+        if (t->sched_policy != policy) {
+            uint64_t policy_now = timer_get_ticks();
+            /* park_lock serializes policy changes with the local tick and
+             * switch-accounting paths. Charge an old RR interval before
+             * leaving RR, and start a fresh quantum when entering RR; never
+             * interpret zero/stale timestamps as elapsed runtime. */
+            if (t->sched_policy == SCHED_RR) {
+                (void)rt_rr_account_task(t, policy_now);
+                t->rt_rr_remaining = 0;
+                t->rt_rr_last_account = policy_now;
+            }
+            if (policy == SCHED_RR) {
+                t->rt_rr_remaining = RT_RR_QUANTUM_TICKS;
+                t->rt_rr_last_account = policy_now;
+            } else if (t->sched_policy != SCHED_RR) {
+                t->rt_rr_remaining = 0;
+                t->rt_rr_last_account = policy_now;
+            }
+        }
         t->sched_policy = policy;
         t->sched_reset_on_fork = config->reset_on_fork;
         if (sched_policy_rt_value(policy))
@@ -935,6 +1215,36 @@ invalid:
 unsigned proc_sched_select_cpu(task_t *t)
 {
     unsigned current = cpu_current_id();
+#ifdef CONFIG_TASK_PLACEMENT_RUST
+    a20_task_placement_snapshot_t snapshot = {0};
+    snapshot.current_cpu = current;
+    snapshot.nr_cpus = CONFIG_NR_CPUS;
+    snapshot.eligible_mask = CONFIG_NR_CPUS <= 1 ? 0 : sched_task_cpu_mask(t);
+    snapshot.prefer_current =
+        t && t == proc_current() && current < 32 &&
+        (snapshot.eligible_mask & (1U << current));
+
+    /* The Rust module decides placement from this bounded value snapshot.
+     * C alone reads task/cgroup/runqueue/current-task structures so the
+     * policy never keeps borrowed kernel-object pointers. */
+    if (snapshot.prefer_current == 0 && snapshot.eligible_mask != 0) {
+        unsigned limit = CONFIG_NR_CPUS < A20_TASK_PLACEMENT_MAX_CPUS
+                             ? CONFIG_NR_CPUS
+                             : A20_TASK_PLACEMENT_MAX_CPUS;
+        for (unsigned cpu = 0; cpu < limit; cpu++) {
+            if (!(snapshot.eligible_mask & (1U << cpu)))
+                continue;
+            unsigned load = __atomic_load_n(&sched_runq[cpu].nr_running,
+                                            __ATOMIC_RELAXED);
+            proc_current_sched_snapshot_t running = {0};
+            proc_current_sched_snapshot(cpu, t, &running);
+            if (running.valid && !running.idle && running.running)
+                load++;
+            snapshot.cpu_load[cpu] = load;
+        }
+    }
+    return a20_task_placement_select(&snapshot);
+#else
     if (CONFIG_NR_CPUS <= 1)
         return current;
 
@@ -952,8 +1262,9 @@ unsigned proc_sched_select_cpu(task_t *t)
             continue;
         unsigned load = __atomic_load_n(&sched_runq[cpu].nr_running,
                                         __ATOMIC_RELAXED);
-        task_t *running = proc_current_on_cpu(cpu);
-        if (running && running->pid != 0 && running->state == PROC_RUNNING)
+        proc_current_sched_snapshot_t running = {0};
+        proc_current_sched_snapshot(cpu, t, &running);
+        if (running.valid && !running.idle && running.running)
             load++;
         if (load < best_load) {
             best = cpu;
@@ -961,6 +1272,7 @@ unsigned proc_sched_select_cpu(task_t *t)
         }
     }
     return best;
+#endif
 }
 
 /* Keep old name as compat wrapper for proc_internal.h callers */
@@ -974,13 +1286,35 @@ int proc_sched_should_preempt_locked(task_t *t, unsigned cpu)
     if (!t || cpu >= CONFIG_NR_CPUS)
         return 0;
 
-    task_t *running = proc_current_on_cpu(cpu);
-    if (!running || running->pid == 0)
-        return 1;
-    if (running == t || running->state != PROC_RUNNING)
-        return 0;
+    proc_current_sched_snapshot_t current = {0};
+    proc_current_sched_snapshot(cpu, t, &current);
 
-    return sched_task_strictly_preempts(t, running);
+    a20_task_preemption_snapshot_t snapshot = {0};
+    snapshot.candidate_policy = (uint32_t)t->sched_policy;
+    snapshot.candidate_priority = t->priority;
+    snapshot.candidate_deadline = proc_sched_deadline_snapshot(t);
+    snapshot.current_valid = current.valid;
+    snapshot.current_idle = current.idle;
+    snapshot.current_running = current.running;
+    snapshot.same_task = current.same_task;
+    snapshot.current_policy = current.policy;
+    snapshot.current_priority = current.priority;
+    snapshot.current_deadline = current.eevdf_deadline;
+#ifdef CONFIG_TASK_PLACEMENT_RUST
+    return a20_task_placement_should_preempt(&snapshot);
+#else
+    if (!snapshot.current_valid || snapshot.current_idle)
+        return 1;
+    if (snapshot.same_task || !snapshot.current_running)
+        return 0;
+    int candidate_rt = sched_policy_rt_value((int)snapshot.candidate_policy);
+    int running_rt = sched_policy_rt_value((int)snapshot.current_policy);
+    if (candidate_rt != running_rt)
+        return candidate_rt;
+    if (candidate_rt)
+        return snapshot.candidate_priority > snapshot.current_priority;
+    return snapshot.candidate_deadline < snapshot.current_deadline;
+#endif
 }
 
 void proc_sched_request_cpu(unsigned cpu, int priority)
@@ -1090,6 +1424,18 @@ void proc_sched_tick(int from_user)
 #endif
     if (cur->pid == 0 || cur->state != PROC_RUNNING)
         return;
+
+    if (sched_task_rt(cur)) {
+        /* RR accounting shares park_lock with remote sched_setscheduler so
+         * its 64-bit timestamps cannot tear on ILP32 and policy transitions
+         * cannot race a tick. */
+        uint64_t flags = spin_lock_irqsave(&cur->park_lock);
+        int rr_expired = rt_rr_account_task(cur, now);
+        spin_unlock_irqrestore(&cur->park_lock, flags);
+        if (rr_expired)
+            proc_sched_request_cpu(cpu_current_id(), 0);
+        return;
+    }
 
     eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
 
@@ -1248,13 +1594,16 @@ void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
 static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
 {
     if (sched_task_rt(t)) {
-        for (task_t *it = rq->rt_q[rt_prio_slot(t->priority)].head; it;
-             it = it->rq_next) {
-            if (it == t)
+        for (proc_rt_node_t *it = rq->rt_q[rt_prio_slot(t->priority)].head;
+             it; it = it->next) {
+            if (it == &t->rt_node)
                 return 1;
         }
         return 0;
     }
+#ifdef CONFIG_EEVDF_MATH_RUST
+    return a20_eevdf_tree_contains(rq->eevdf_root, &t->eevdf_node) != 0;
+#else
     eevdf_node_t *n = rq->eevdf_root;
     while (n) {
         task_t *c = eevdf_task_of(n);
@@ -1263,6 +1612,7 @@ static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
         n = eevdf_key_less(t, c) ? n->left : n->right;
     }
     return 0;
+#endif
 }
 
 /*
@@ -1416,6 +1766,13 @@ void proc_make_ready(task_t *t)
         spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
+    /* A newly published task starts out PROC_BLOCKED, just like a task that
+     * is being woken.  Unlike a normal wake, its inherited cpu_id is only an
+     * initialization hint: choose its first runqueue from the effective CPU
+     * mask and current load when it first becomes runnable.  Capture this
+     * before EVENT_READY advances PUBLISHED to RUNNABLE; later wakeups must
+     * retain their existing CPU-affinity behavior. */
+    int first_ready = t->lifecycle_phase == PROC_TASK_PHASE_PUBLISHED;
     if (proc_task_lifecycle_advance(t, PROC_TASK_EVENT_READY) < 0) {
         spin_unlock_irqrestore(&t->park_lock, flags);
         panic("proc_make_ready: invalid task lifecycle pid=%d phase=%u",
@@ -1450,7 +1807,7 @@ void proc_make_ready(task_t *t)
         t->cpu_id = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
     } else if (!__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
                !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) {
-        if (!was_blocked)
+        if (first_ready || !was_blocked)
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
@@ -1741,8 +2098,6 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         sched_runq_eevdf_del_weight(rrq, t);
         t->on_rq = 0;
         t->ready_since = 0;
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
         if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) > 0)
             __atomic_fetch_sub(&rrq->nr_running, 1, __ATOMIC_RELAXED);
         /* Transfer ownership before releasing the source queue. A waker
@@ -1753,8 +2108,6 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         t->dispatching = 1;
         t->owner_cpu = local;
         spin_unlock_irqrestore(&rrq->lock, rrf);
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
         __atomic_fetch_add(&sched_runqueue_migrations, 1, __ATOMIC_RELAXED);
         return t;
     }
@@ -1817,8 +2170,6 @@ task_t *proc_runq_pick_local(void)
             eevdf_remove_locked(rq, t);
             sched_runq_eevdf_del_weight(rq, t);
         }
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
         t->on_rq = 0;
         t->ready_since = 0;
         if (__atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED) > 0)
@@ -2047,6 +2398,16 @@ static void context_switch_locked(task_t *next) {
     task_t *prev = proc_current();
     unsigned cpu = cpu_current_id();
     (void)sched_rt_throttled_local();
+    if (prev && prev != next) {
+        uint64_t rr_flags = spin_lock_irqsave(&prev->park_lock);
+        (void)rt_rr_account_task(prev, now);
+        spin_unlock_irqrestore(&prev->park_lock, rr_flags);
+    }
+    if (next && next != prev) {
+        uint64_t rr_flags = spin_lock_irqsave(&next->park_lock);
+        rt_rr_dispatch_task(next, now);
+        spin_unlock_irqrestore(&next->park_lock, rr_flags);
+    }
     eevdf_charge(&sched_runq[cpu], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
         /* Both cgroup helpers take the node lock on every context switch, and
@@ -2287,8 +2648,14 @@ void sched(void) {
         }
         spin_unlock_irqrestore(&cur->park_lock, cf);
     }
-    if (keep_current)
+    if (keep_current) {
+        /* An expired lone RR task has no peer to rotate behind. Start its
+         * next quantum here instead of repeatedly requesting an empty pick. */
+        uint64_t rr_flags = spin_lock_irqsave(&cur->park_lock);
+        rt_rr_dispatch_task(cur, timer_get_ticks());
+        spin_unlock_irqrestore(&cur->park_lock, rr_flags);
         goto out;
+    }
 
     task_t *idle = proc_idle_task();
     if (cur != idle) {
@@ -2308,8 +2675,12 @@ void sched(void) {
             }
             spin_unlock_irqrestore(&cur->park_lock, cf);
         }
-        if (late_ready)
+        if (late_ready) {
+            uint64_t rr_flags = spin_lock_irqsave(&cur->park_lock);
+            rt_rr_dispatch_task(cur, timer_get_ticks());
+            spin_unlock_irqrestore(&cur->park_lock, rr_flags);
             goto out;
+        }
         if (cur && cur->pid >= 4)
             ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);
         /* idle never parks and never blocks, so its park_lock has no

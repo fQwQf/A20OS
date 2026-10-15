@@ -38,9 +38,19 @@ typedef struct {
     vnode_t *vn;
 } vn_node_t;
 
+typedef struct {
+    uint64_t ino;
+    vnode_t *vn;
+    uint32_t refs;
+} vn_open_t;
+
 static bcache_t   *g_bc;
 static vnode_t    *g_root;
 static vn_node_t   g_nodes[VNFS_MAX_NODES];
+/* Each successful OPEN RPC owns a vnode reference independently of the inode
+ * lookup map.  Unlink may remove the map entry while descriptors remain open;
+ * the retained record is then the only route by which CLOSE can release it. */
+static vn_open_t   g_open_nodes[VNFS_MAX_NODES];
 static int         g_readonly;
 static int         g_ext4_backend;
 #ifdef CONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE
@@ -115,6 +125,45 @@ static int vn_map_has_room(uint64_t ino)
     return 0;
 }
 
+/* Called only after the UXFS peer has been shut down. Reap registry-owned
+ * vnode references before ext4_unmount so last-close orphan cleanup remains
+ * in scope of the final checked cache flush and s_state transition. */
+int64_t vnfs_shutdown(void)
+{
+    if (!g_root) return 0;
+    for (int i = 0; i < VNFS_MAX_NODES; i++)
+        if (g_open_nodes[i].vn)
+            return -16;
+    if (g_ext4_backend) {
+        for (int i = 0; i < VNFS_MAX_NODES; i++) {
+            vnode_t *vn = g_nodes[i].vn;
+            if (!vn || !vn->fs_data) continue;
+            ext4_vnode_priv_t *priv = (ext4_vnode_priv_t *)vn->fs_data;
+            if (__atomic_load_n(&priv->open_count, __ATOMIC_ACQUIRE) != 0)
+                return -16;
+        }
+        for (int i = 0; i < VNFS_MAX_NODES; i++) {
+            vnode_t *vn = g_nodes[i].vn;
+            if (!vn || vn == g_root) continue;
+            g_nodes[i].vn = 0;
+            g_nodes[i].ino = 0;
+            vnode_put(vn);
+        }
+        int ret = ext4_unmount(g_root);
+        if (ret < 0) return ret;
+        /* ext4_unmount consumes/releases its root vnode on success. */
+        for (int i = 0; i < VNFS_MAX_NODES; i++) {
+            g_nodes[i].vn = 0;
+            g_nodes[i].ino = 0;
+        }
+        g_root = 0;
+        bcache_destroy(g_bc);
+        g_bc = 0;
+        return 0;
+    }
+    return 0;
+}
+
 int64_t vnfs_has_inode(uint64_t ino)
 {
     return vn_map_get(ino) ? 0 : -U_ESTALE;
@@ -122,22 +171,44 @@ int64_t vnfs_has_inode(uint64_t ino)
 
 int64_t vnfs_inode_open(uint64_t ino)
 {
+    vnode_t *vn = vn_map_get(ino);
+    if (!vn) return -U_ESTALE;
     for (int i = 0; i < VNFS_MAX_NODES; i++) {
-        if (g_nodes[i].vn && g_nodes[i].ino == ino) {
-            /* Rust owns the bounded open count. The adapter only supplies one
-             * vnode reference per successful OPEN RPC. */
-            vnode_get(g_nodes[i].vn);
+        if (g_open_nodes[i].vn && g_open_nodes[i].ino == ino) {
+            /* Keep the exact object opened; map replacement/detach must not
+             * redirect a later CLOSE to a different vnode with the same ino. */
+            if (g_open_nodes[i].vn != vn ||
+                g_open_nodes[i].refs == 0 ||
+                g_open_nodes[i].refs == UINT32_MAX)
+                return -U_ESTALE;
+            vnode_get(g_open_nodes[i].vn);
+            g_open_nodes[i].refs++;
             return 0;
         }
     }
-    return -U_ESTALE;
+    for (int i = 0; i < VNFS_MAX_NODES; i++) {
+        if (!g_open_nodes[i].vn) {
+            vnode_get(vn);
+            g_open_nodes[i].ino = ino;
+            g_open_nodes[i].vn = vn;
+            g_open_nodes[i].refs = 1;
+            return 0;
+        }
+    }
+    return -U_EMFILE;
 }
 
 int64_t vnfs_inode_close(uint64_t ino)
 {
     for (int i = 0; i < VNFS_MAX_NODES; i++) {
-        if (g_nodes[i].vn && g_nodes[i].ino == ino) {
-            vnode_put(g_nodes[i].vn);
+        if (g_open_nodes[i].vn && g_open_nodes[i].ino == ino &&
+            g_open_nodes[i].refs != 0) {
+            vnode_t *vn = g_open_nodes[i].vn;
+            if (--g_open_nodes[i].refs == 0) {
+                g_open_nodes[i].vn = 0;
+                g_open_nodes[i].ino = 0;
+            }
+            vnode_put(vn);
             return 0;
         }
     }
@@ -263,12 +334,20 @@ int vnfs_mount_generic(const char *fstype)
     dev.write_sector = dev_write_sector;
     dev.flush = fsio_flush_supported() ? dev_flush : NULL;
     dev.sector_size = 512;
-    dev.capacity = fsio_capacity_sectors() * 512ull;
+    /* block_dev_t.capacity is expressed in sectors throughout the kernel
+     * (uxfs_block_capacity returns it unchanged; ext4 multiplies it by
+     * sector_size when checking the filesystem byte size).  fsio already
+     * returns sectors, so converting here would overstate the device by 512x.
+     */
+    dev.capacity = fsio_capacity_sectors();
     dev.priv = 0;
 
     g_bc = bcache_create(&dev);
-    if (!g_bc)
+    if (!g_bc) {
+        printf("[UFSD] bcache_create failed (capacity_sectors=%llu flush=%d)\n",
+               (unsigned long long)dev.capacity, dev.flush != NULL);
         return -U_EIO;
+    }
 
     if (strcmp(fstype, "ext4") == 0) {
         g_ext4_backend = 1;
@@ -289,8 +368,11 @@ int vnfs_mount_generic(const char *fstype)
     } else {
         return -U_ENOSYS;
     }
-    if (!g_root)
+    if (!g_root) {
+        printf("[UFSD] filesystem mount returned null (type=%s capacity_sectors=%llu flush=%d)\n",
+               fstype, (unsigned long long)dev.capacity, dev.flush != NULL);
         return -U_EINVAL;
+    }
 
     /*
      * Defensive normalization: the root of any filesystem must be a
@@ -725,6 +807,7 @@ static void vn_statfs(ufs_resp_hdr_t *r)
 const ufs_backend_t UFS_BACKEND_VNFS = {
     .name     = "vnfs",
     .mount    = vnfs_mount_generic,
+    .unmount  = vnfs_shutdown,
     .lookup   = vn_lookup,
     .getattr  = vn_getattr,
     .readdir  = vn_readdir,
@@ -737,5 +820,7 @@ const ufs_backend_t UFS_BACKEND_VNFS = {
     .write    = vn_write,
     .rename   = vn_rename,
     .sync     = vn_sync,
+    .open     = vnfs_inode_open,
+    .close    = vnfs_inode_close,
     .statfs   = vn_statfs,
 };

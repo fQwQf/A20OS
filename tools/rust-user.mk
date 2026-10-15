@@ -9,14 +9,11 @@
 # Cargo manifest anywhere in this file, so nothing here depends on rustc's own
 # linker or on a crate registry.
 #
-# Scope: ARCH=riscv64 only, and only because riscv64gc-unknown-none-elf is the
-# one installed target whose ABI matches the Native user ABI that
-# tools/targets-native.mk builds with (`-march=rv64gc -mabi=lp64d
-# -mcmodel=medany`, so code-model=medium).  Every other architecture keeps the
-# C reference until a matching freestanding target is installed — the same
-# policy tools/rust-kernel.mk applies to RV32.  Extending this file is a matter
-# of adding one RUST_USER_TARGET_<arch> line plus its code-model line; nothing
-# in the Rust source changes, because the source speaks the ABI, not a host.
+# The Rust IDL peer, adversary, and service support the installed RV64 and
+# AArch64 freestanding targets.  Their protocol logic is shared; the narrow C
+# syscall shim delegates register placement and trap behavior to the Native
+# SDK for each target.  Other Rust user services keep their own architecture
+# guards until an ABI-matched target and runtime evidence are available.
 #
 # The object lives under $(USER_BUILD_DIR)/rust/ rather than beside the binary:
 # tools/img.py:build_fat32() copies every *file* of $(USER_BUILD_DIR) into the
@@ -91,6 +88,7 @@ RUST_USER_RTCD_ABI_HDR := user/svc/rtcd_rust_abi.h
 RUST_USER_RTCD_OBJ := $(RUST_USER_OBJ_DIR)/rtcd.o
 RUST_USER_RTCD_BIN := $(USER_BUILD_DIR)/rtcd-rust-$(NATIVE_TAG).a20drv
 RUST_USER_UFSD_SRC := user/svc/ufsd.rs
+RUST_USER_UFSD_SUPERVISION_SRC := user/svc/ufsd_supervision.rs
 RUST_USER_UFSD_ABI_SRC := user/svc/ufsd_rust_abi.c
 RUST_USER_UFSD_ABI_HDR := user/svc/ufsd_rust_abi.h
 RUST_USER_UFSD_PROTOCOL_SRC := user/svc/ufsd_protocol.rs
@@ -101,6 +99,7 @@ RUST_USER_UFSD_JBD2_TXN_SRC := user/svc/jbd2_txn.rs
 RUST_USER_UFSD_JBD2_RECORD_SRC := user/svc/jbd2_record.rs
 RUST_USER_UFSD_EXT4_ORPHAN_SRC := user/svc/ext4_orphan.rs
 RUST_USER_UFSD_EXTENT_TXN_SRC := kernel/fs/diskfs/ext4_extent_txn.rs
+RUST_USER_UFSD_MOUNT_STATE_SRC := kernel/fs/diskfs/ext4_mount_state.rs
 RUST_USER_UFSD_TEST_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),test-close-orphan-restore-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),test-close-orphan-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)),prod)
 RUST_USER_UFSD_ORPHAN_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),orphan-rust,orphan-c)
 RUST_USER_UFSD_EXTENT_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),extent-rust,extent-c)
@@ -132,10 +131,16 @@ $(3) -ffreestanding -nostdlib -static \
 endef
 
 RUST_USER_TARGET_riscv64 := riscv64gc-unknown-none-elf
+RUST_USER_TARGET_aarch64 := aarch64-unknown-none
+RUST_USER_TARGET_riscv32 := $(abspath tools/rust-targets/riscv32imafdc-a20.json)
+RUST_USER_TARGET_x86_64 := x86_64-unknown-none
 RUST_USER_TARGET := $(RUST_USER_TARGET_$(ARCH))
 
 # Match the tree's medany user code model for riscv64.
 RUST_USER_CODE_MODEL_riscv64 := medium
+RUST_USER_CODE_MODEL_aarch64 := small
+RUST_USER_CODE_MODEL_riscv32 := medium
+RUST_USER_CODE_MODEL_x86_64 := small
 RUST_USER_CODE_MODEL := $(RUST_USER_CODE_MODEL_$(ARCH))
 
 # This experimental binary is opt-in. Including this fragment must not alter
@@ -145,14 +150,26 @@ ifneq ($(NATIVE_RUST_PEER),1)
 $(error native-rust-idl-peer-arch requires NATIVE_RUST_PEER=1; use native-rust-idl-peer)
 endif
 
-ifneq ($(ARCH),riscv64)
-$(error Rust Native IDL peer is currently supported only for ARCH=riscv64 (got $(ARCH)))
+ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
+$(error Rust Native IDL peer requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
 endif
 endif
 
 ifneq ($(filter 1,$(NATIVE_RUST_PEER) $(NATIVE_RUST_ECHOD) $(NATIVE_RUST_IDL_SERVICE)),)
-ifneq ($(ARCH),riscv64)
-$(error NATIVE_RUST_PEER=1 is currently supported only for ARCH=riscv64 (got $(ARCH)))
+ifneq ($(filter 1,$(NATIVE_RUST_PEER)),)
+ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
+$(error NATIVE_RUST_PEER=1 requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
+endif
+endif
+ifneq ($(filter 1,$(NATIVE_RUST_ECHOD)),)
+ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
+$(error NATIVE_RUST_ECHOD requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
+endif
+endif
+ifneq ($(filter 1,$(NATIVE_RUST_IDL_SERVICE)),)
+ifeq ($(filter $(ARCH),riscv64 riscv32 aarch64 x86_64),)
+$(error NATIVE_RUST_IDL_SERVICE requires ARCH=riscv64, riscv32, aarch64, or x86_64 (got $(ARCH)))
+endif
 endif
 
 # Do not silently turn an unsupported/debug optimization option into a
@@ -171,7 +188,38 @@ NATIVE_OUTPUTS += $(RUST_USER_PEER_BIN)
 native-programs: $(RUST_USER_PEER_BIN)
 endif
 
-RUST_USER_PEER_FLAGS := $(RUSTC) --edition=2021 --target $(RUST_USER_TARGET) \
+# RV32 Native uses ILP32D, while rustc's built-in riscv32 target uses
+# ILP32F. Build a matching core in this private USER_BUILD_DIR before compiling
+# any of the IDL peer/service objects.
+ifeq ($(ARCH),riscv32)
+RUST_USER_RV32_TARGET := $(abspath tools/rust-targets/riscv32imafdc-a20.json)
+RUST_USER_RV32_TARGET_NAME := riscv32imafdc-a20
+RUST_USER_RV32_SYSROOT := $(RUST_USER_OBJ_DIR)/rv32-sysroot
+RUST_USER_RV32_CARGO_TARGET_DIR := $(RUST_USER_OBJ_DIR)/rv32-core-cargo
+RUST_USER_RV32_CORE_LIBDIR := $(RUST_USER_RV32_SYSROOT)/lib/rustlib/$(RUST_USER_RV32_TARGET_NAME)/lib
+RUST_USER_RV32_CORE_FLAGS := $(RUST_USER_OBJ_DIR)/.rv32-core-flags
+RUST_USER_RV32_CORE_READY := $(RUST_USER_OBJ_DIR)/.rv32-core-ready
+RUST_USER_TARGET_BOOTSTRAP := RUSTC_BOOTSTRAP=1
+RUST_USER_TARGET_OBJECT_FLAGS := -Z unstable-options --sysroot $(RUST_USER_RV32_SYSROOT)
+.PHONY: FORCE_RUST_USER_RV32_CORE_FLAGS
+FORCE_RUST_USER_RV32_CORE_FLAGS:
+$(RUST_USER_RV32_CORE_FLAGS): FORCE_RUST_USER_RV32_CORE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'rustc=$(shell $(RUSTC) --version --verbose 2>/dev/null)' 'cargo=$(shell $(CARGO) --version 2>/dev/null)' 'target=$(shell sha256sum $(RUST_USER_RV32_TARGET) 2>/dev/null)' 'rust-src=$(shell sysroot=`$(RUSTC) --print sysroot 2>/dev/null`; find "$$sysroot/lib/rustlib/src/rust/library" -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; rm -f $(RUST_USER_RV32_CORE_READY); else rm -f $@.tmp; fi
+$(RUST_USER_RV32_CORE_READY): $(RUST_USER_RV32_TARGET) tools/rust-target-core/Cargo.toml tools/rust-target-core/Cargo.lock tools/rust-target-core/src/lib.rs $(RUST_USER_RV32_CORE_FLAGS)
+	@mkdir -p $(RUST_USER_RV32_CORE_LIBDIR) $(RUST_USER_RV32_CARGO_TARGET_DIR)
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=1 CARGO_TARGET_DIR=$(RUST_USER_RV32_CARGO_TARGET_DIR) $(CARGO) clean --manifest-path tools/rust-target-core/Cargo.toml --target $(RUST_USER_RV32_TARGET)
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=1 CARGO_TARGET_DIR=$(RUST_USER_RV32_CARGO_TARGET_DIR) $(CARGO) build --manifest-path tools/rust-target-core/Cargo.toml --target $(RUST_USER_RV32_TARGET) -Z json-target-spec -Z build-std=core --release
+	cp $(RUST_USER_RV32_CARGO_TARGET_DIR)/$(RUST_USER_RV32_TARGET_NAME)/release/deps/libcore-*.rlib $(RUST_USER_RV32_CORE_LIBDIR)/libcore.rlib
+	cp $(RUST_USER_RV32_CARGO_TARGET_DIR)/$(RUST_USER_RV32_TARGET_NAME)/release/deps/libcompiler_builtins-*.rlib $(RUST_USER_RV32_CORE_LIBDIR)/libcompiler_builtins.rlib
+	cp $(RUST_USER_RV32_CORE_FLAGS) $(RUST_USER_RV32_CORE_READY)
+else
+RUST_USER_TARGET_BOOTSTRAP :=
+RUST_USER_TARGET_OBJECT_FLAGS :=
+endif
+
+RUST_USER_PEER_FLAGS := $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) \
 	-C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
 	-C codegen-units=1 -C relocation-model=static \
 	-C code-model=$(RUST_USER_CODE_MODEL)
@@ -186,10 +234,10 @@ $(RUST_USER_PEER_FLAGS_STAMP): FORCE_RUST_USER_PEER_FLAGS
 		'$(shell $(RUSTC) --version 2>/dev/null)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
-$(RUST_USER_PEER_OBJ): $(RUST_USER_PEER_SRC) $(RUST_USER_NEGOTIATION_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP)
+$(RUST_USER_PEER_OBJ): $(RUST_USER_PEER_SRC) $(RUST_USER_NEGOTIATION_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP) $(RUST_USER_RV32_CORE_READY)
 	@mkdir -p $(dir $@)
-	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
-		--target $(RUST_USER_TARGET) \
+	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
+		--target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) \
 		-C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static \
 		-C code-model=$(RUST_USER_CODE_MODEL) \
@@ -203,10 +251,10 @@ $(RUST_USER_PEER_BIN): $(RUST_USER_PEER_OBJ) $(RUST_USER_CRT0_SRC) \
 
 # Separate test-profile client: malformed-ACK adversarial cases are never
 # part of the ordinary Native peer smoke binary.
-$(RUST_USER_ACK_TEST_OBJ): $(RUST_USER_PEER_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP)
+$(RUST_USER_ACK_TEST_OBJ): $(RUST_USER_PEER_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP) $(RUST_USER_RV32_CORE_READY)
 	@mkdir -p $(dir $@)
-	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
-		--cfg idl_ack_test --target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
+	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
+		--cfg idl_ack_test --target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL) \
 		$< -o $@
 
@@ -219,10 +267,10 @@ $(RUST_USER_ACK_TEST_BIN): $(RUST_USER_ACK_TEST_OBJ) $(RUST_USER_CRT0_SRC) \
 # Test-only malicious wire peer for the IDL acknowledgment guest matrix.
 # It is built only by the explicit adversarial target and is never added to
 # normal Native outputs or production images.
-$(RUST_USER_ACK_ADVERSARY_OBJ): $(RUST_USER_ACK_ADVERSARY_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP)
+$(RUST_USER_ACK_ADVERSARY_OBJ): $(RUST_USER_ACK_ADVERSARY_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP) $(RUST_USER_RV32_CORE_READY)
 	@mkdir -p $(dir $@)
-	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
-		--target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
+	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
+		--target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_USER_CODE_MODEL) \
 		$< -o $@
 
@@ -232,10 +280,10 @@ $(RUST_USER_ACK_ADVERSARY_BIN): $(RUST_USER_ACK_ADVERSARY_OBJ) $(RUST_USER_CRT0_
 		$(A20_SERVICES_IDL_HDR) $(NATIVE_SDK_HDRS) tools/rust-user.mk
 	$(call RUST_USER_PEER_RECIPE,$@,$(RUST_USER_ACK_ADVERSARY_OBJ),$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$(RUST_USER_CRT0_SRC))
 
-$(RUST_USER_SERVICE_OBJ): $(RUST_USER_SERVICE_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP)
+$(RUST_USER_SERVICE_OBJ): $(RUST_USER_SERVICE_SRC) $(RUST_USER_IDL_RUST) tools/rust-user.mk $(RUST_USER_PEER_FLAGS_STAMP) $(RUST_USER_RV32_CORE_READY)
 	@mkdir -p $(dir $@)
-	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
-		--target $(RUST_USER_TARGET) \
+	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUST_USER_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
+		--target $(RUST_USER_TARGET) $(RUST_USER_TARGET_OBJECT_FLAGS) \
 		-C panic=abort -C opt-level=$(RUST_USER_OPT_LEVEL) \
 		-C codegen-units=1 -C relocation-model=static \
 		-C code-model=$(RUST_USER_CODE_MODEL) \
@@ -264,7 +312,7 @@ native-rust-idl-service: $(RUST_USER_SERVICE_BIN) $(RUST_USER_SERVICE_TEST_BIN)
 else
 .PHONY: native-rust-idl-service
 native-rust-idl-service:
-	@echo "native-rust-idl-service requires NATIVE_RUST_IDL_SERVICE=1 and ARCH=riscv64" >&2
+	@echo "native-rust-idl-service requires NATIVE_RUST_IDL_SERVICE=1 and ARCH=riscv64 or aarch64" >&2
 	@exit 2
 endif
 
@@ -276,7 +324,7 @@ native-rust-echod: $(RUST_USER_SERVICE_BIN)
 else
 .PHONY: native-rust-echod
 native-rust-echod:
-	@echo "native-rust-echod requires NATIVE_RUST_ECHOD=1 and ARCH=riscv64" >&2
+	@echo "native-rust-echod requires NATIVE_RUST_ECHOD=1 and ARCH=riscv64, riscv32, or aarch64" >&2
 	@exit 2
 endif
 
@@ -327,16 +375,22 @@ ifeq ($(NATIVE_RUST_PEER),1)
 native-rust-idl-peer-arch: $(RUST_USER_PEER_BIN)
 else
 native-rust-idl-peer-arch:
-	@echo "native-rust-idl-peer-arch requires NATIVE_RUST_PEER=1 and ARCH=riscv64" >&2
+	@echo "native-rust-idl-peer-arch requires NATIVE_RUST_PEER=1 and an enabled Native architecture" >&2
 	@exit 2
 endif
 
-.PHONY: native-rust-idl-peer native-rust-idl-peer-rv native-rust-idl-peer-arch
+.PHONY: native-rust-idl-peer native-rust-idl-peer-rv native-rust-idl-peer-rv32 native-rust-idl-peer-aarch64 native-rust-idl-peer-x86_64 native-rust-idl-peer-arch
 native-rust-idl-peer:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-peer-arch
 native-rust-idl-peer-rv: native-rust-idl-peer
+native-rust-idl-peer-rv32:
+	$(MAKE) -j2 ARCH=riscv32 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-peer-arch
+native-rust-idl-peer-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-peer-arch
+native-rust-idl-peer-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-peer-arch
 
-.PHONY: native-rust-idl-adversary native-rust-idl-adversary-arch
+.PHONY: native-rust-idl-adversary native-rust-idl-adversary-rv32 native-rust-idl-adversary-x86_64 native-rust-idl-adversary-arch
 ifeq ($(NATIVE_RUST_PEER),1)
 native-rust-idl-adversary-arch: $(RUST_USER_ACK_ADVERSARY_BIN) $(RUST_USER_ACK_TEST_BIN)
 else
@@ -346,13 +400,35 @@ native-rust-idl-adversary-arch:
 endif
 native-rust-idl-adversary:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-adversary-arch
+native-rust-idl-adversary-rv32:
+	$(MAKE) -j2 ARCH=riscv32 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-adversary-arch
+native-rust-idl-adversary-x86_64:
+	$(MAKE) -j2 ARCH=x86_64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 native-rust-idl-adversary-arch
 
 # Build the peer and the test-only malformed-ACK client/server in one
 # recursive make, so the shared IDL output and flags stamp have one owner.
-.PHONY: native-rust-idl-ack-test
+.PHONY: native-rust-idl-ack-test native-rust-idl-ack-test-rv32 native-rust-idl-ack-test-x86_64
 native-rust-idl-ack-test:
 	$(MAKE) -j2 ARCH=riscv64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 \
 		native-rust-idl-peer-arch native-rust-idl-adversary-arch
+native-rust-idl-ack-test-rv32:
+	$(MAKE) -j2 ARCH=riscv32 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 \
+		native-rust-idl-peer-arch native-rust-idl-adversary-arch
+native-rust-idl-ack-test-x86_64:
+	$(MAKE) -j2 ARCH=x86_64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 \
+		native-rust-idl-peer-arch native-rust-idl-adversary-arch
+.PHONY: native-rust-idl-ack-test-aarch64
+native-rust-idl-ack-test-aarch64:
+	$(MAKE) -j2 ARCH=aarch64 NOMMU=$(NOMMU) NATIVE_RUST_PEER=1 \
+		native-rust-idl-peer-arch native-rust-idl-adversary-arch
+
+.PHONY: native-rust-idl-service-aarch64 native-rust-idl-service-rv32 native-rust-idl-service-x86_64
+native-rust-idl-service-rv32:
+	$(MAKE) -j2 ARCH=riscv32 NOMMU=$(NOMMU) NATIVE_RUST_IDL_SERVICE=1 native-rust-idl-service
+native-rust-idl-service-aarch64:
+	$(MAKE) -j2 ARCH=aarch64 NOMMU=$(NOMMU) NATIVE_RUST_IDL_SERVICE=1 native-rust-idl-service
+native-rust-idl-service-x86_64:
+	$(MAKE) -j2 ARCH=x86_64 NOMMU=$(NOMMU) NATIVE_RUST_IDL_SERVICE=1 native-rust-idl-service
 
 # The Rust RTC owns the service protocol and request/alarm state machine;
 # the C translation unit exposes only SDK and Goldfish register primitives.
@@ -428,7 +504,7 @@ RUST_USER_UFSD_OPT_LEVEL := $(patsubst -O%,%,$(USER_OPT))
 RUST_USER_UFSD_BACKEND_SRCS := $(filter-out user/svc/ufsd.c user/svc/fscompat/bcache_user.c,$(UFSD_CORE_SRCS)) $(UFSD_VNFS_SRCS) $(RUST_USER_UFSD_CACHE_ABI_SRC)
 NATIVE_OUTPUTS += $(RUST_USER_UFSD_BIN)
 native-programs: $(RUST_USER_UFSD_BIN)
-$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_IDL_RUST) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk
+$(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) $(RUST_USER_IDL_RUST) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk
 	@mkdir -p $(dir $@)
 	A20_IDL_RUST_BINDINGS='$(abspath $(RUST_USER_IDL_RUST))' $(RUSTC) --edition=2021 --crate-type bin --emit=obj \
 		--target $(RUST_USER_TARGET) -C panic=abort -C opt-level=$(RUST_USER_UFSD_OPT_LEVEL) \
@@ -436,7 +512,7 @@ $(RUST_USER_UFSD_OBJ): $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RU
 		$(if $(filter test-close-orphan-%,$(RUST_USER_UFSD_TEST_PROFILE)),--cfg ufsd_test_close_orphan,) \
 		$< -o $@
 
-$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk \
+$(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_UFSD_SUPERVISION_SRC) $(RUST_USER_UFSD_PROTOCOL_SRC) $(RUST_USER_UFSD_CACHE_SRC) $(RUST_USER_UFSD_JBD2_POLICY_SRC) $(RUST_USER_UFSD_JBD2_TXN_SRC) $(RUST_USER_UFSD_JBD2_RECORD_SRC) $(RUST_USER_UFSD_EXT4_ORPHAN_SRC) $(RUST_USER_UFSD_EXTENT_TXN_SRC) $(RUST_USER_UFSD_MOUNT_STATE_SRC) kernel/fs/diskfs/ext4_inode_free_txn.h tools/rust-user.mk \
 		$(RUST_USER_CRT0_SRC) $(RUST_USER_UFSD_ABI_SRC) $(RUST_USER_UFSD_ABI_HDR) \
 		$(RUST_USER_UFSD_BACKEND_SRCS) $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) \
 		$(NATIVE_ARCH_SRC) $(NATIVE_LD) $(A20_SERVICES_IDL_HDR) $(NATIVE_SDK_HDRS) user/svc/ufs_backends.h \

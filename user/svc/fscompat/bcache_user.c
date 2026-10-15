@@ -40,7 +40,7 @@ static bcache_t g_handles[UBC_MAX_INSTANCES];
 static struct bcache_compat_state *state_of(bcache_t *bc)
 {
     for (int i = 0; i < UBC_MAX_INSTANCES; i++)
-        if (&g_handles[i] == bc)
+        if (&g_handles[i] == bc && g_states[i].dev)
             return &g_states[i];
     return NULL;
 }
@@ -51,6 +51,10 @@ bcache_t *bcache_create(block_dev_t *dev)
         if (!g_states[i].dev) {
             memset(&g_states[i], 0, sizeof(g_states[i]));
             g_states[i].dev = dev;
+            /* Filesystem mount-state and journal code accesses the provider
+             * through the public bcache_t contract as well as through this
+             * adapter's side table. Keep the handle's device pointer in sync. */
+            g_handles[i].dev = dev;
             spin_init(&g_handles[i].lock);
             mutex_init(&g_handles[i].fill_locks[0]);
             rw_mutex_init(&g_handles[i].writeback_lock);
@@ -63,8 +67,11 @@ bcache_t *bcache_create(block_dev_t *dev)
 void bcache_destroy(bcache_t *bc)
 {
     struct bcache_compat_state *st = state_of(bc);
-    if (st)
+    if (st) {
         st->dev = NULL;
+        bc->dev = NULL;
+        bc->sync_hook = NULL;
+    }
 }
 
 static ubc_line_t *line_for(struct bcache_compat_state *st, uint64_t lba)
@@ -161,22 +168,31 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf,
 
 int bcache_sync_checked(bcache_t *bc)
 {
-    (void)bc;
-    return 0; /* write-through: no dirty data pending flush */
+    struct bcache_compat_state *st = state_of(bc);
+    if (!st || !st->dev)
+        return -1;
+    /* Writes are write-through, but a durability barrier is still required
+     * for ext4's clean/dirty state transitions. Preserve the legacy optional
+     * callback behavior; callers requiring durability must reject NULL before
+     * claiming a successful durable transition. */
+    if (!st->dev->flush)
+        return 0;
+    return st->dev->flush(st->dev);
 }
 
 void bcache_sync(bcache_t *bc)
 {
-    (void)bc;
+    (void)bcache_sync_checked(bc);
 }
 
 int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos,
                        size_t count)
 {
-    (void)bc;
     (void)page_nos;
     (void)count;
-    return 0;
+    /* The host adapter is write-through and has no dirty pages to select,
+     * but the scoped sync remains a durability request for the same device. */
+    return bcache_sync_checked(bc);
 }
 
 int bcache_sync_held(bcache_t *bc)

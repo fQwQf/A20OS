@@ -65,6 +65,20 @@ static inline uint32_t sched_weight_for_nice(int nice)
 extern spinlock_t tasklist_lock;
 void proc_sched_note_zombie(void);
 task_t *proc_current_on_cpu(unsigned cpu);
+/* Copy scheduler scalars while the per-CPU current-slot reference is protected.
+ * No task pointer escapes this helper. */
+typedef struct proc_current_sched_snapshot {
+    uint32_t valid;
+    uint32_t idle;
+    uint32_t running;
+    uint32_t same_task;
+    uint32_t policy;
+    int32_t priority;
+    uint64_t eevdf_deadline;
+} proc_current_sched_snapshot_t;
+int proc_current_sched_snapshot(unsigned cpu, const task_t *candidate,
+                                proc_current_sched_snapshot_t *out);
+uint64_t proc_sched_deadline_snapshot(task_t *task);
 int proc_task_is_current_any_cpu(task_t *task);
 int proc_sched_resume_stopped(task_t *task, int report_continued);
 int proc_sched_stop_for_debug(task_t *task, int sig);

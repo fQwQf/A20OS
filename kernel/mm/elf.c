@@ -1083,6 +1083,22 @@ static int elf_phdrs_native(const char *base, uint64_t off,
     return 0;
 }
 
+/* Never enter a Native-marked image with the Linux stack convention. */
+static int elf_native_abi_available(int is_native, const char *path)
+{
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    (void)is_native;
+    (void)path;
+    return 0;
+#else
+    if (!is_native)
+        return 0;
+    kinfo("[ELF] Native ABI image rejected by ABI=linux kernel: %s\n",
+          path ? path : "(unknown)");
+    return -ENOEXEC;
+#endif
+}
+
 /* Decide whether a file that elf_load() already rejected as -ENOEXEC is
  * structurally a foreign-architecture executable, reporting the pair the
  * translation channel is keyed on: its e_machine and its ABI.
@@ -1167,6 +1183,11 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     int r = elf_check_header(eh);
     if (r < 0) return r;
 
+    int is_native = elf_phdrs_native((const char *)buf, eh->e_phoff,
+                                    eh->e_phnum, eh->e_phentsize, len);
+    r = elf_native_abi_available(is_native, "<buffer>");
+    if (r < 0) return r;
+
     pt_root_t *pgdir = pt_create();
     if (!pgdir) return -ENOMEM;
     pt_map_kernel(pgdir);
@@ -1196,11 +1217,6 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     uint64_t dyn_size = 0;
     vaddr_t dyn_va = 0;
-    int is_native = 0;
-
-    is_native = elf_phdrs_native((const char *)buf, eh->e_phoff, eh->e_phnum,
-                                 eh->e_phentsize, len);
-
     for (int i = 0; i < eh->e_phnum; i++) {
         if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
         const Elf64_Phdr *ph = (const Elf64_Phdr *)
@@ -1296,6 +1312,12 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     int r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
     if (r < nph * (int)sizeof(Elf64_Phdr)) return -ENOEXEC;
 
+    int is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
+                                     sizeof(phdrs[0]),
+                                     (uint64_t)nph * sizeof(phdrs[0]));
+    r = elf_native_abi_available(is_native, path);
+    if (r < 0) return r;
+
     pt_root_t *pgdir = pt_create();
     if (!pgdir) return -ENOMEM;
     pt_map_kernel(pgdir);
@@ -1325,12 +1347,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     uint64_t dyn_size = 0;
     vaddr_t dyn_va = 0;
     int has_interp = 0;
-    int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
-
-    is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
-                                 (uint32_t)sizeof(phdrs[0]),
-                                 (uint64_t)nph * sizeof(phdrs[0]));
 
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type == PT_INTERP) {
@@ -1475,12 +1492,17 @@ fail64:
 
 static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
                       elf_load_info_t *info) {
-    (void)path;
     Elf32_Phdr phdrs[MAX_PHDRS];
     int nph = eh->e_phnum < MAX_PHDRS ? eh->e_phnum : MAX_PHDRS;
     vfs_lseek(fd, (long)eh->e_phoff, SEEK_SET);
     int r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf32_Phdr));
     if (r < nph * (int)sizeof(Elf32_Phdr)) return -ENOEXEC;
+
+    int is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
+                                     sizeof(phdrs[0]),
+                                     (uint64_t)nph * sizeof(phdrs[0]));
+    r = elf_native_abi_available(is_native, path);
+    if (r < 0) return r;
 
     pt_root_t *pgdir = pt_create();
     if (!pgdir) return -ENOMEM;
@@ -1510,12 +1532,7 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     uint64_t dyn_size = 0;
     vaddr_t dyn_va = 0;
-    int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
-
-    is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
-                                 (uint32_t)sizeof(phdrs[0]),
-                                 (uint64_t)nph * sizeof(phdrs[0]));
 
     for (int i = 0; i < nph; i++) {
         if (phdrs[i].p_type == PT_INTERP) {

@@ -253,6 +253,9 @@ int64_t a20_ufsd_backend_mount(uint32_t kind, const char *fstype)
 extern int vnfs_mount_generic_readonly(const char *fstype);
 int64_t a20_ufsd_backend_mount_readonly(uint32_t kind, const char *fstype)
 { return kind == A20_UFSD_BACKEND_VNFS ? vnfs_mount_generic_readonly(fstype) : -U_ENOSYS; }
+extern int64_t vnfs_shutdown(void);
+int64_t a20_ufsd_backend_unmount(uint32_t kind)
+{ return kind == A20_UFSD_BACKEND_VNFS ? vnfs_shutdown() : 0; }
 int64_t a20_ufsd_backend_lookup(uint32_t k, uint64_t ino, const char *n, uint32_t nl, ufs_resp_hdr_t *r)
 { const ufs_backend_t *b=backend(k); return b ? b->lookup(ino,n,nl,r) : -U_ENOSYS; }
 int64_t a20_ufsd_backend_getattr(uint32_t k, uint64_t ino, ufs_resp_hdr_t *r)

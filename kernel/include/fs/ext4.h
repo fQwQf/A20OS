@@ -32,6 +32,9 @@
 #define EXT4_FEATURE_COMPAT_EXT_ATTR     0x0008
 #define EXT4_FEATURE_COMPAT_RESIZE_INODE 0x0010
 #define EXT4_FEATURE_COMPAT_DIR_INDEX    0x0020
+/* Standard ext4 superblock s_state bits (include/uapi/linux/ext4.h). */
+#define EXT4_VALID_FS 0x0001
+#define EXT4_ERROR_FS 0x0002
 
 #define EXT4_FEATURE_INCOMPAT_COMPRESSION  0x0001
 #define EXT4_FEATURE_INCOMPAT_FILETYPE     0x0002
@@ -277,6 +280,9 @@ typedef struct ext4_sb_info {
     /* Sticky for this mounted instance after metadata compensation becomes
      * uncertain. Reads remain possible; all later writes fail closed. */
     int inconsistent;
+    /* No-journal RW mounts clear VALID_FS before exposing the filesystem and
+     * set it only after a successful checked flush at unmount. */
+    int mount_state_started;
     bcache_t *bc;
     mutex_t alloc_lock;
     /* Namespace lock: read mode for lookups (concurrent cold lookups through

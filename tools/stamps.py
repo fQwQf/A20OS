@@ -179,8 +179,8 @@ def cmd_native(a) -> int:
     native_rust_echod = str(getattr(a, "native_rust_echod", "0"))
     if native_rust_echod not in ("0", "1"):
         raise SystemExit("error: --native-rust-echod must be 0 or 1")
-    if native_rust_echod == "1" and a.arch != "riscv64":
-        raise SystemExit("error: Rust echod currently requires ARCH=riscv64")
+    if native_rust_echod == "1" and a.arch not in ("riscv64", "riscv32", "aarch64", "x86_64"):
+        raise SystemExit("error: Rust echod requires ARCH=riscv64, riscv32, aarch64, or x86_64")
     native_rust_svcmgr = str(getattr(a, "native_rust_svcmgr", "0"))
     if native_rust_svcmgr not in ("0", "1"):
         raise SystemExit("error: --native-rust-svcmgr must be 0 or 1")
@@ -272,10 +272,12 @@ def cmd_native(a) -> int:
         old_build_id = stamp_id(stamp)
         old_rust_svcmgr = "NATIVE_RUST_SVCMGR=1" in old_build_id.splitlines()
         old_rust_echod = "NATIVE_RUST_ECHOD=1" in old_build_id.splitlines()
-        echod_binary = (resolved_build_dir / "svc-echod-rv"
-                        if a.arch == "riscv64" else None)
-        echod_c_reference = (resolved_build_dir / "svc-echod-c-rv"
-                             if a.arch == "riscv64" else None)
+        native_tag = {"riscv64": "rv", "riscv32": "rv32",
+                      "aarch64": "aarch64", "x86_64": "x86_64"}.get(a.arch)
+        echod_binary = (resolved_build_dir / f"svc-echod-{native_tag}"
+                        if native_tag is not None else None)
+        echod_c_reference = (resolved_build_dir / f"svc-echod-c-{native_tag}"
+                             if native_tag is not None else None)
         manager_binary = (resolved_build_dir / "svcmgr-rv"
                           if a.arch == "riscv64" else None)
         manager_c_reference = (resolved_build_dir / "svcmgr-c-rv"

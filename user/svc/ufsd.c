@@ -51,6 +51,7 @@ typedef struct {
 
 uint8_t ufs_tx[UFSD_MSG_MAX];
 void (*ufs_log_sink)(const char *line);
+extern void (*fscompat_log_sink)(const char *line);
 
 /* ------------------------------------------------------------------ */
 /* Logging                                                             */
@@ -209,9 +210,12 @@ static const ufs_backend_t *pick_backend(const char *fstype)
     return 0;
 }
 
-static void serve_init(ufs_resp_hdr_t *r)
+static void serve_init(ufs_resp_hdr_t *r, const ufs_backend_t *be)
 {
     r->out0 = UFS_ROOT_INO;
+    if (be->open && be->close)
+        r->out1 = UFS_LIFETIME_CAPABILITY;
+    r->out2 = UFS_SHUTDOWN_CAPABILITY;
 }
 
 static int reply(a20_handle_t ep, const ufs_resp_hdr_t *r)
@@ -348,10 +352,19 @@ int main(int argc, char **argv, char **envp)
         a20_task_exit(0);
     }
 
-    if (be->mount(fstype) != 0) {
+    /* Capture filesystem mount diagnostics only during the mount itself.
+     * The C service previously wired only its protocol logger, so messages
+     * emitted through fscompat printf/klog vanished and a NULL root gave no
+     * indication which parser/policy check rejected the image. */
+    fscompat_log_sink = sink_line;
+    int mount_status = be->mount(fstype);
+    fscompat_log_sink = 0;
+    if (mount_status != 0) {
         log_str("UFSD: mount ");
         log_str(fstype);
-        log_str(" failed\n");
+        log_str(" failed status=-");
+        log_dec((uint32_t)(-mount_status));
+        log_str("\n");
         a20_task_exit(1);
     }
 
@@ -395,6 +408,7 @@ int main(int argc, char **argv, char **envp)
     static uint8_t rx[UFSD_MSG_MAX];
     static char name_buf[512];
     static char aux_buf[512];
+    int backend_unmounted = 0;
     for (;;) {
         for (;;) {
             int pr = svc_ep_pump(svc_ep);
@@ -446,7 +460,19 @@ int main(int argc, char **argv, char **envp)
         int64_t rc = 0;
 
         switch (q->opcode) {
-        case UFS_OP_INIT: serve_init(&r); break;
+        case UFS_OP_INIT: serve_init(&r, be); break;
+        case UFS_OP_SHUTDOWN:
+            if (q->version != UFS_PROTO_VERSION || q->ino != UFS_ROOT_INO ||
+                q->name_len != 0 || q->payload_len != 0) {
+                rc = -22;
+            } else {
+                rc = be->unmount ? be->unmount() : 0;
+                if (rc == 0)
+                    backend_unmounted = 1;
+                else if (rc == -16)
+                    r.out1 = UFS_SHUTDOWN_RETRY_SAFE;
+            }
+            break;
         case UFS_OP_LOOKUP:
             rc = be->lookup(q->ino, name, q->name_len, &r);
             break;
@@ -470,6 +496,14 @@ int main(int argc, char **argv, char **envp)
             rc = be->rename(q->ino, name, q->arg0, aux_buf, &r);
             break;
         case UFS_OP_SYNC: rc = be->sync(); break;
+        case UFS_OP_OPEN:
+            rc = (q->version == UFS_PROTO_VERSION && be->open)
+                     ? be->open(q->ino) : -U_ENOSYS;
+            break;
+        case UFS_OP_CLOSE:
+            rc = (q->version == UFS_PROTO_VERSION && be->close)
+                     ? be->close(q->ino) : -U_ENOSYS;
+            break;
         case UFS_OP_STATFS: be->statfs(&r); break;
         default:
             r.status = -38 /* ENOSYS */;
@@ -479,6 +513,10 @@ int main(int argc, char **argv, char **envp)
 
         if (reply(pair.endpoints[0], &r) != 0)
             break;
+        if (q->opcode == UFS_OP_SHUTDOWN && rc == 0)
+            break;
     }
-    a20_task_exit(0);
+    int unmount_rc = backend_unmounted ? 0 :
+                     (be->unmount ? (int)be->unmount() : 0);
+    a20_task_exit(unmount_rc < 0 ? 1 : 0);
 }

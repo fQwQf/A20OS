@@ -29,18 +29,23 @@
  *   task is completed before proc_set_current() replaces the slot, which is
  *   what the old "complete the stale predecessor from inside proc_set_current"
  *   callback used to do under the global proc_lock.
- * - g_cpu_current[] stays a plain acquire/release publication point: only this
- *   CPU writes its own slot.
+ * - g_cpu_current[] remains acquire/release-published by its owning CPU;
+ *   g_cpu_current_lock[] lets remote scheduler snapshots copy scalars before
+ *   the slot-owned reference can be released.
  */
 static task_t *g_cpu_current[CONFIG_NR_CPUS];
 static task_t *g_cpu_switching_out[CONFIG_NR_CPUS];
 static spinlock_t g_cpu_switch_out[CONFIG_NR_CPUS];
+/* Protects current-slot replacement against remote scheduler snapshots. */
+static spinlock_t g_cpu_current_lock[CONFIG_NR_CPUS];
 
 void proc_current_slots_init(void)
 {
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         spin_init(&g_cpu_switch_out[cpu]);
         spin_set_debug(&g_cpu_switch_out[cpu], "switch_out", NULL);
+        spin_init(&g_cpu_current_lock[cpu]);
+        spin_set_debug(&g_cpu_current_lock[cpu], "current_slot", NULL);
         g_cpu_current[cpu] = NULL;
         g_cpu_switching_out[cpu] = NULL;
     }
@@ -201,11 +206,13 @@ task_t *proc_set_current(task_t *next)
      * here would nest a second task lock inside the caller's next->park_lock
      * window with no defined order between the two.
      */
+    uint64_t flags = spin_lock_irqsave(&g_cpu_current_lock[cpu]);
     task_t *old = g_cpu_current[cpu];
     /* Publish the outgoing task before replacing current. Reapers must keep
      * its task storage and kernel stack alive until the switch completes. */
     __atomic_store_n(&g_cpu_switching_out[cpu], old, __ATOMIC_RELEASE);
     __atomic_store_n(&g_cpu_current[cpu], next, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_cpu_current_lock[cpu], flags);
     return old;
 }
 
@@ -235,6 +242,40 @@ task_t *proc_current_on_cpu(unsigned cpu)
     if (cpu >= CONFIG_NR_CPUS)
         return NULL;
     return __atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE);
+}
+
+/*
+ * Copy scheduler scalars while current-slot ownership protects the object.
+ * Remote callers must not dereference proc_current_on_cpu() after the slot can
+ * be replaced: switch completion may release the last task reference. The
+ * slot lock is released before proc_set_current() takes a task park_lock, so
+ * this helper is also safe for callers that hold candidate->park_lock. The
+ * deadline helper serializes its 64-bit value on 32-bit targets; remaining
+ * scheduler fields are best-effort hints rather than a coherent snapshot of
+ * every concurrently mutable task field.
+ */
+int proc_current_sched_snapshot(unsigned cpu, const task_t *candidate,
+                                proc_current_sched_snapshot_t *out)
+{
+    if (!out)
+        return 0;
+    *out = (proc_current_sched_snapshot_t){0};
+    if (cpu >= CONFIG_NR_CPUS)
+        return 0;
+
+    uint64_t flags = spin_lock_irqsave(&g_cpu_current_lock[cpu]);
+    task_t *current = __atomic_load_n(&g_cpu_current[cpu], __ATOMIC_ACQUIRE);
+    if (current) {
+        out->valid = 1;
+        out->idle = current->pid == 0;
+        out->running = current->state == PROC_RUNNING;
+        out->same_task = current == candidate;
+        out->policy = (uint32_t)current->sched_policy;
+        out->priority = current->priority;
+        out->eevdf_deadline = proc_sched_deadline_snapshot(current);
+    }
+    spin_unlock_irqrestore(&g_cpu_current_lock[cpu], flags);
+    return 1;
 }
 
 int proc_task_is_current_any_cpu(task_t *task)

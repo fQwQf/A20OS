@@ -16,6 +16,7 @@
 #include "fs/vfs.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/dcache.h"
+#include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "drivers/block/block_dev.h"
 #include "ipc/ipc.h"
@@ -25,6 +26,8 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/sync.h"
+#include "core/timekeeping.h"
+#include "core/timer.h"
 #include "proc/proc.h"
 
 extern block_dev_t *mount_setup_block_device(int index);
@@ -38,6 +41,8 @@ typedef struct uxfs_sb {
     int                    block_index;
     uint32_t               next_req_id;
     uint32_t               lifetime_mode; /* 0 unknown, 1 explicit v1, 2 v2 */
+    uint32_t               shutdown_mode; /* 0 unknown/unsupported, 1 acknowledged v2 */
+    uint32_t               shutdown_started;
     uint64_t               server_generation;
     uint64_t               lifetime_generation;
     mutex_t                lifetime_lock;
@@ -60,10 +65,11 @@ typedef struct uxfs_fctx {
 /* RPC engine                                                           */
 /* ------------------------------------------------------------------ */
 
-static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
+static int uxfs_rpc_timeout(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
                     const char *name, const void *payload,
                     ufs_resp_hdr_t *resp, void *resp_payload,
-                    uint32_t resp_cap, uint32_t *resp_payload_len)
+                    uint32_t resp_cap, uint32_t *resp_payload_len,
+                    uint64_t deadline_ns)
 {
     uint32_t total = sizeof(*req) + req->name_len + req->payload_len;
     uint8_t *msg = (uint8_t *)kmalloc(total);
@@ -76,14 +82,49 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
     if (req->payload_len)
         memcpy(msg + sizeof(*req) + req->name_len, payload, req->payload_len);
 
-    mutex_lock(&sb->req_lock);
+    while (!mutex_trylock(&sb->req_lock)) {
+        if (deadline_ns) {
+            uint64_t ts[2];
+            timekeeping_get_monotonic(ts);
+            if (ts[0] * 1000000000ull + ts[1] >= deadline_ns) {
+                kfree(msg);
+                return -ETIMEDOUT;
+            }
+        }
+        uint64_t ticks = MS_TO_TICKS(1);
+        proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
+    }
 
-    /* refcount: keeps a concurrent handle_close from freeing ep mid-call */
-    int64_t r = a20_channel_send(sb->ep, msg, total, NULL, 0, NULL, 0);
+    if (__atomic_load_n(&sb->shutdown_started, __ATOMIC_ACQUIRE) &&
+        req->opcode != UFS_OP_INIT && req->opcode != UFS_OP_SHUTDOWN &&
+        req->opcode != UFS_OP_CLOSE) {
+        mutex_unlock(&sb->req_lock);
+        kfree(msg);
+        return -ESHUTDOWN;
+    }
+
+    /* Use nonblocking channel operations and a monotonic deadline for both
+     * queue admission and reply reception.  A full peer queue must not make
+     * INIT/SHUTDOWN wait forever before the receive deadline starts. */
+    int64_t r;
+    for (;;) {
+        r = a20_channel_send(sb->ep, msg, total, NULL, 0, NULL,
+                             deadline_ns ? A20_MSG_NONBLOCK : 0);
+        if (r != -A20_ERR_WOULD_BLOCK || !deadline_ns)
+            break;
+        uint64_t ts[2];
+        timekeeping_get_monotonic(ts);
+        if (ts[0] * 1000000000ull + ts[1] >= deadline_ns) {
+            r = -A20_ERR_TIMED_OUT;
+            break;
+        }
+        uint64_t ticks = MS_TO_TICKS(1);
+        proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
+    }
     kfree(msg);
     if (r < 0) {
         mutex_unlock(&sb->req_lock);
-        return -EIO;
+        return r == -A20_ERR_TIMED_OUT ? -ETIMEDOUT : -EIO;
     }
 
     /* Per-call receive buffer.  A shared static here would race across
@@ -98,7 +139,25 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         uint32_t in_len = A20_CH_MAX_DATA;
         a20_ch_handle_info_t hinfos[1];
         uint32_t nh = 0;
-        r = a20_channel_recv_begin(sb->ep, 0, &in_len, &nh);
+        uint32_t recv_flags = 0;
+        if (deadline_ns) {
+            uint64_t ts[2];
+            timekeeping_get_monotonic(ts);
+            uint64_t now_ns = ts[0] * 1000000000ull + ts[1];
+            if (now_ns >= deadline_ns) {
+                r = -A20_ERR_TIMED_OUT;
+                break;
+            }
+            recv_flags = A20_MSG_NONBLOCK;
+        }
+        r = a20_channel_recv_begin(sb->ep, recv_flags, &in_len, &nh);
+        if (r == -A20_ERR_WOULD_BLOCK && deadline_ns) {
+            uint64_t ticks = MS_TO_TICKS(1);
+            if (!ticks)
+                ticks = 1;
+            proc_sleep_until(timer_get_ticks() + ticks);
+            continue;
+        }
         if (r < 0)
             break;
         if (in_len > A20_CH_MAX_DATA) {
@@ -139,8 +198,22 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         kdebug("[UXFS] rpc op=%u failed: %lld\n", req->opcode, (long long)r);
 #endif
     if (r < 0)
-        return -EIO;
+        return r == -A20_ERR_TIMED_OUT ? -ETIMEDOUT : -EIO;
     return (int)resp->status;
+}
+
+static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
+                    const char *name, const void *payload,
+                    ufs_resp_hdr_t *resp, void *resp_payload,
+                    uint32_t resp_cap, uint32_t *resp_payload_len)
+{
+    /* Bound a lost peer or stale-reply stream so shutdown cannot wait forever
+     * behind an ordinary request holding req_lock. */
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    uint64_t deadline_ns = ts[0] * 1000000000ull + ts[1] + 5000000000ull;
+    return uxfs_rpc_timeout(sb, req, name, payload, resp, resp_payload,
+                            resp_cap, resp_payload_len, deadline_ns);
 }
 
 static void uxfs_req_init(uxfs_sb_t *sb, ufs_req_hdr_t *req, uint32_t opcode,
@@ -159,9 +232,16 @@ static void uxfs_req_init(uxfs_sb_t *sb, ufs_req_hdr_t *req, uint32_t opcode,
     req->payload_len = payload_len;
 }
 
-static int uxfs_negotiate_lifetime(uxfs_sb_t *sb)
+static int uxfs_negotiate_lifetime_until(uxfs_sb_t *sb, uint64_t deadline_ns)
 {
-    mutex_lock(&sb->lifetime_lock);
+    while (!mutex_trylock(&sb->lifetime_lock)) {
+        uint64_t ts[2];
+        timekeeping_get_monotonic(ts);
+        if (ts[0] * 1000000000ull + ts[1] >= deadline_ns)
+            return -ETIMEDOUT;
+        uint64_t ticks = MS_TO_TICKS(1);
+        proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
+    }
     if (sb->lifetime_generation == sb->server_generation &&
         sb->lifetime_server == sb->server && sb->lifetime_mode != 0) {
         mutex_unlock(&sb->lifetime_lock);
@@ -175,18 +255,48 @@ static int uxfs_negotiate_lifetime(uxfs_sb_t *sb)
      * v2 would let a legacy server silently ignore the frame and leave this
      * synchronous RPC blocked forever. */
     req.version = UFS_PROTO_VERSION_LEGACY;
-    int rc = uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
+    int rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0, NULL,
+                              deadline_ns);
     if (rc != 0) {
         mutex_unlock(&sb->lifetime_lock);
         return rc;
     }
     sb->lifetime_mode = resp.out1 == UFS_LIFETIME_CAPABILITY ? 2u : 1u;
+    sb->shutdown_mode = resp.out2 == UFS_SHUTDOWN_CAPABILITY ? 1u : 0u;
     printf("[UXFS] lifetime protocol version=%u server_generation=%u\n",
            sb->lifetime_mode, sb->server_generation);
     sb->lifetime_generation = sb->server_generation;
     sb->lifetime_server = sb->server;
     mutex_unlock(&sb->lifetime_lock);
     return 0;
+}
+
+static int uxfs_negotiate_lifetime(uxfs_sb_t *sb)
+{
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    return uxfs_negotiate_lifetime_until(
+        sb, ts[0] * 1000000000ull + ts[1] + 5000000000ull);
+}
+
+static void uxfs_detach_server(uxfs_sb_t *sb)
+{
+    if (!sb)
+        return;
+    a20_channel_ep_t *ep = sb->ep;
+    sb->ep = NULL; /* withdraw block-I/O authority before releasing refs */
+    if (ep) {
+        a20_channel_ep_peer_shutdown(ep);
+        a20_channel_ep_release(ep);
+    }
+    if (sb->server) {
+        proc_put(sb->server);
+        sb->server = NULL;
+    }
+    sb->lifetime_server = NULL;
+    sb->lifetime_mode = 0;
+    sb->shutdown_mode = 0;
+    __atomic_store_n(&sb->shutdown_started, 0, __ATOMIC_RELEASE);
 }
 
 static int uxfs_lifetime_op(uxfs_sb_t *sb, uint32_t opcode, uint64_t ino,
@@ -706,6 +816,43 @@ static vnode_ops_t g_uxfs_vnops = {
 #define UXFS_MAX_SBS 8
 static uxfs_sb_t g_uxfs_sbs[UXFS_MAX_SBS];
 
+/* Native block-backed mounts consult this before attaching a second cache to
+ * a device already owned by a live UXFS service.  The mount table stores the
+ * bcache in fs_data for each disk filesystem. */
+int uxfs_block_device_owned(block_dev_t *dev)
+{
+    if (!dev) return 0;
+    for (int i = 0; i < UXFS_MAX_SBS; i++) {
+        uxfs_sb_t *sb = &g_uxfs_sbs[i];
+        if (sb->ep && mount_setup_block_device(sb->block_index) == dev)
+            return 1;
+    }
+    return 0;
+}
+
+static int uxfs_device_has_native_mount(block_dev_t *dev)
+{
+    if (!dev) return 0;
+    for (int i = 0; i < vfs_mount_count(); i++) {
+        mount_t *mnt = vfs_mount_at(i);
+        if (!mnt) continue;
+        switch (mnt->type) {
+        case FS_TYPE_FAT32:
+        case FS_TYPE_EXT4:
+        case FS_TYPE_NTFS:
+        case FS_TYPE_ISOFS:
+        case FS_TYPE_LITTLEFS: {
+            bcache_t *bc = (bcache_t *)mnt->fs_data;
+            if (bc && bc->dev == dev) return 1;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
 /* Several mounts of one disk number may coexist (each with its own service
  * instance); only the caller's own registration matches, others are skipped. */
 static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
@@ -734,6 +881,17 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     if (!is_dir)
         return -ENOTDIR;
 
+    block_dev_t *service_dev = mount_setup_block_device(block_index);
+    if (!service_dev)
+        return -ENODEV;
+    if (uxfs_device_has_native_mount(service_dev))
+        return -EBUSY;
+    for (int i = 0; i < UXFS_MAX_SBS; i++) {
+        if (g_uxfs_sbs[i].ep &&
+            mount_setup_block_device(g_uxfs_sbs[i].block_index) == service_dev)
+            return -EBUSY;
+    }
+
     int slot = -1;
     for (int i = 0; i < UXFS_MAX_SBS; i++) {
         if (!g_uxfs_sbs[i].ep) {
@@ -746,11 +904,17 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     uxfs_sb_t *sb = &g_uxfs_sbs[slot];
 
     sb->ep          = ep;
-    sb->server      = server;
+    sb->server      = proc_get(server);
+    if (!sb->server) {
+        sb->ep = NULL;
+        return -ESRCH;
+    }
     sb->lifetime_server = NULL;
     sb->block_index = block_index;
     sb->next_req_id = 0;
     sb->lifetime_mode = 0;
+    sb->shutdown_mode = 0;
+    sb->shutdown_started = 0;
     sb->lifetime_generation = 0;
     sb->server_generation++;
     if (sb->server_generation == 0)
@@ -769,6 +933,8 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
                                     (S_IFDIR | 0755), 0, NULL);
     if (!root) {
         sb->ep = NULL;
+        proc_put(sb->server);
+        sb->server = NULL;
         return -ENOMEM;
     }
 
@@ -776,6 +942,8 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     if (!mnt) {
         vnode_put(root);
         sb->ep = NULL;
+        proc_put(sb->server);
+        sb->server = NULL;
         return -ENOMEM;
     }
     strncpy(mnt->path, path, MAX_PATH_LEN - 1);
@@ -801,22 +969,84 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     return 0;
 }
 
-void uxfs_unmount(struct vnode *root)
+int uxfs_unmount(struct vnode *root)
 {
     if (!root)
-        return;
+        return 0;
     uxfs_vpriv_t *p = (uxfs_vpriv_t *)root->fs_data;
     if (!p)
-        return;
+        return 0;
     uxfs_sb_t *sb = p->sb;
     if (sb && sb->ep) {
-        /* One-way shutdown first, so the service's recv errors and it exits;
-         * release cannot reach the peer ref, so we then free our own. */
-        a20_channel_ep_peer_shutdown(sb->ep);
-        a20_channel_ep_release(sb->ep);
-        sb->ep = NULL;
+        /* Negotiate with the existing v1 INIT frame.  A capable peer performs
+         * backend sync/unmount and ACKs while block IO ownership is still
+         * valid.  Timeout/error leaves the mount and endpoint attached so the
+         * caller can retry; it never revokes a live service mid-flush. */
+        __atomic_store_n(&sb->shutdown_started, 1, __ATOMIC_RELEASE);
+        uint64_t ts[2];
+        timekeeping_get_monotonic(ts);
+        uint64_t deadline_ns = ts[0] * 1000000000ull + ts[1] +
+                               5000000000ull;
+        int rc = uxfs_negotiate_lifetime_until(sb, deadline_ns);
+        if (rc < 0) {
+            if (a20_channel_peer_closed(sb->ep)) {
+                /* No task can issue further block I/O.  Drop the dead peer
+                 * registration, leaving the filesystem's on-disk dirty
+                 * state untouched for recovery on the next mount. */
+                uxfs_detach_server(sb);
+                return 0;
+            }
+            /* INIT did not dismantle the backend, so a failed negotiation
+             * remains retryable. Keep normal RPCs quiesced until retry or
+             * confirmed peer death; a timeout is not proof of no progress. */
+            return rc;
+        }
+        if (a20_channel_peer_closed(sb->ep)) {
+            /* A cached v1/v2 negotiation is not proof that this generation
+             * still has a live service.  Once the endpoint confirms death,
+             * detach it without claiming a clean filesystem shutdown. */
+            uxfs_detach_server(sb);
+            return 0;
+        }
+        if (sb->shutdown_mode) {
+            ufs_req_hdr_t req;
+            ufs_resp_hdr_t resp = {0};
+            uxfs_req_init(sb, &req, UFS_OP_SHUTDOWN, UFS_ROOT_INO, 0, 0,
+                          NULL, 0);
+            req.version = UFS_PROTO_VERSION;
+            rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0,
+                                  NULL, deadline_ns);
+            if (rc < 0) {
+                if (a20_channel_peer_closed(sb->ep)) {
+                    uxfs_detach_server(sb);
+                    return 0;
+                }
+                /* uxfs_rpc_timeout returns a transport error without touching
+                 * resp.  Only a matched, complete EBUSY reply can authorize
+                 * reopening admission after the service's non-destructive
+                 * open-count preflight. */
+                if (rc == -EBUSY && resp.out1 == UFS_SHUTDOWN_RETRY_SAFE)
+                    __atomic_store_n(&sb->shutdown_started, 0,
+                                     __ATOMIC_RELEASE);
+                /* The service may still be partway through backend teardown.
+                 * Preserve quiescence unless the peer explicitly marks a
+                 * pre-teardown EBUSY that left the backend untouched. */
+                return rc;
+            }
+        } else {
+            if (a20_channel_peer_closed(sb->ep)) {
+                uxfs_detach_server(sb);
+                return 0;
+            }
+            /* Captured v1 peers cannot prove their backend is durable before
+             * the kernel revokes block IO.  Keep their mount registered;
+             * compatibility does not silently claim clean shutdown. */
+            __atomic_store_n(&sb->shutdown_started, 0, __ATOMIC_RELEASE);
+            return -EOPNOTSUPP;
+        }
+        uxfs_detach_server(sb);
     }
-    sb->server = NULL;
+    return 0;
 }
 
 int uxfs_block_io(struct task_t *task, int block_index, int write,

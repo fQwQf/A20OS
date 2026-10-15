@@ -52,6 +52,9 @@ typedef struct ufs_backend {
     /* Mount: returns 0 on success, a negative -errno on failure; the INIT
      * handshake is handled by the main loop */
     int (*mount)(const char *fstype);
+    /* Called only on a graceful peer shutdown. A supervisor task kill is a
+     * crash and deliberately does not run filesystem clean-state handling. */
+    int64_t (*unmount)(void);
     int64_t (*lookup)(uint64_t dir_ino, const char *name, uint32_t name_len,
                       ufs_resp_hdr_t *r);
     int64_t (*getattr)(uint64_t ino, ufs_resp_hdr_t *r);
@@ -70,6 +73,10 @@ typedef struct ufs_backend {
                       uint64_t new_dir, const char *new_name,
                       ufs_resp_hdr_t *r);
     int64_t (*sync)(void);
+    /* Optional v2 per-open lifetime hooks.  A backend advertises the v2
+     * lifetime capability only when both callbacks are present. */
+    int64_t (*open)(uint64_t ino);
+    int64_t (*close)(uint64_t ino);
     void (*statfs)(ufs_resp_hdr_t *r);
 } ufs_backend_t;
 

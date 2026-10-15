@@ -24,6 +24,44 @@ typedef struct mm_struct mm_struct_t;
 struct vnode;
 struct mount;
 
+/* Intrusive node and per-priority bucket ABI shared with rt_sched.rs.
+ * The node is manipulated only while its owning runqueue lock is held. */
+struct task_t;
+typedef struct proc_rt_node {
+    struct proc_rt_node *next;
+    struct proc_rt_node *prev;
+    int32_t queued_slot; /* -1 when detached */
+    uint32_t policy;     /* policy snapshot while queued */
+} proc_rt_node_t;
+
+typedef struct proc_rt_bucket {
+    proc_rt_node_t *head;
+    proc_rt_node_t *tail;
+} proc_rt_bucket_t;
+
+#ifdef CONFIG_MCU
+#define PROC_RT_PRI_LEVELS 8
+#else
+#define PROC_RT_PRI_LEVELS 100
+#endif
+#define PROC_RT_BITMAP_WORDS ((PROC_RT_PRI_LEVELS + 31) / 32)
+
+_Static_assert(offsetof(proc_rt_node_t, queued_slot) == 2 * sizeof(void *) &&
+               offsetof(proc_rt_node_t, policy) == 2 * sizeof(void *) + 4,
+               "RT node C/Rust field offsets changed");
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(proc_rt_node_t) == 24 && __alignof__(proc_rt_node_t) == 8,
+               "LP64 RT node ABI must match Rust repr(C)");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(proc_rt_node_t) == 16 && __alignof__(proc_rt_node_t) == 4,
+               "ILP32 RT node ABI must match Rust repr(C)");
+#else
+#error "Unsupported pointer width for RT node ABI"
+#endif
+_Static_assert(offsetof(proc_rt_bucket_t, tail) == sizeof(void *) &&
+               sizeof(proc_rt_bucket_t) == 2 * sizeof(void *),
+               "RT bucket C/Rust ABI changed");
+
 /*
  * Per-process filesystem position.
  *
@@ -189,7 +227,8 @@ typedef struct nommu_vfork_snap_entry {
 #endif
 
 /*
- * Intrusive EEVDF runqueue node (kernel/proc/sched.c owns the tree code).
+ * Intrusive EEVDF runqueue node. C owns its lifetime and lock discipline;
+ * the selected C or Rust EEVDF implementation mutates only these node fields.
  * The per-CPU runqueue keeps normal tasks in a randomized (treap) BST ordered
  * by earliest virtual deadline and augmented with the subtree-minimum
  * vruntime so the eligible-gated pick can prune ineligible subtrees in
@@ -201,7 +240,33 @@ typedef struct eevdf_node {
     struct eevdf_node *parent;
     uint64_t min_vruntime;   /* min eevdf_vruntime within this subtree */
     uint32_t heap_prio;      /* treap heap key (smaller = closer to root) */
+    void *owner;             /* stable task identity while linked */
+    uint64_t deadline_key;   /* immutable BST key while queued */
+    uint64_t vruntime_key;   /* immutable BST/augmentation key while queued */
 } eevdf_node_t;
+
+/* These offsets are shared with kernel/proc/eevdf_math.rs (repr(C)). Keep
+ * the ILP32 alignment explicit: the RV32/ARM Rust targets align u64 to 8. */
+_Static_assert(offsetof(eevdf_node_t, left) == 0, "EEVDF node left offset");
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(offsetof(eevdf_node_t, min_vruntime) == 24 &&
+               offsetof(eevdf_node_t, heap_prio) == 32 &&
+               offsetof(eevdf_node_t, owner) == 40 &&
+               offsetof(eevdf_node_t, deadline_key) == 48 &&
+               offsetof(eevdf_node_t, vruntime_key) == 56 &&
+               sizeof(eevdf_node_t) == 64 && __alignof__(eevdf_node_t) == 8,
+               "LP64 EEVDF node ABI must match Rust repr(C)");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(offsetof(eevdf_node_t, min_vruntime) == 16 &&
+               offsetof(eevdf_node_t, heap_prio) == 24 &&
+               offsetof(eevdf_node_t, owner) == 28 &&
+               offsetof(eevdf_node_t, deadline_key) == 32 &&
+               offsetof(eevdf_node_t, vruntime_key) == 40 &&
+               sizeof(eevdf_node_t) == 48 && __alignof__(eevdf_node_t) == 8,
+               "ILP32 EEVDF node ABI must match Rust repr(C)");
+#else
+#error "Unsupported pointer width for the EEVDF node ABI"
+#endif
 
 typedef struct task_t {
     /*
@@ -266,8 +331,7 @@ typedef struct task_t {
     nommu_vfork_snap_entry_t *nommu_vfork_snaps;
     int nommu_num_vfork_snapshots;
 #endif
-    struct task_t *rq_next;
-    struct task_t *rq_prev;
+    proc_rt_node_t rt_node;
     eevdf_node_t eevdf_node;  /* EEVDF runqueue treap membership (runq lock) */
     struct task_t *wait_next;
     uint64_t total_time;
@@ -525,6 +589,13 @@ typedef struct task_t {
     /* Lifecycle phase is initialized before global-list publication and is
      * changed under tasklist_lock/park_lock at the corresponding boundaries. */
     uint32_t           lifecycle_phase;
+    /* Appended to preserve all existing task_t offsets (including assembly
+     * context fields). Serializes deadline publication/snapshot on 32-bit. */
+    spinlock_t         eevdf_deadline_lock;
+    /* RR elapsed/remaining state is serialized by park_lock across ticks,
+     * context switches, and remote policy changes. */
+    uint64_t           rt_rr_remaining;
+    uint64_t           rt_rr_last_account;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&

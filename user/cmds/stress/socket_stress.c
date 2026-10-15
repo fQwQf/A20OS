@@ -13,6 +13,13 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* RISC-V ILP32 only exposes recvmmsg_time64 in its syscall table. musl's
+ * RV32 time_t/timespec are 64-bit, so this raw fixture can use that entry. */
+#if defined(__riscv) && __riscv_xlen == 32 && \
+    !defined(SYS_recvmmsg) && defined(SYS_recvmmsg_time64)
+#define SYS_recvmmsg SYS_recvmmsg_time64
+#endif
 #include <netinet/in.h>
 
 #define SOCKET_STRESS_PORT  41000

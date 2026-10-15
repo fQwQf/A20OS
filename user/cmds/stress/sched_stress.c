@@ -1,10 +1,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -12,6 +14,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 
 #ifndef SYS_sched_setattr
 #define SYS_sched_setattr 274
@@ -704,6 +707,170 @@ static int cgroup_cpuset_affinity(void)
     return 0;
 }
 
+typedef struct rr_slice_shared {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    unsigned ready;
+    unsigned paused;
+    int go;
+    int resume;
+    uint64_t start_ns[2];
+    uint64_t end_ns[2];
+    unsigned long work[2];
+} rr_slice_shared_t;
+
+typedef struct rr_slice_arg {
+    rr_slice_shared_t *shared;
+    unsigned index;
+} rr_slice_arg_t;
+
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void *rr_slice_worker(void *opaque)
+{
+    rr_slice_arg_t *arg = opaque;
+    rr_slice_shared_t *shared = arg->shared;
+    unsigned index = arg->index;
+    pthread_mutex_lock(&shared->lock);
+    shared->ready++;
+    pthread_cond_broadcast(&shared->cond);
+    while (!shared->go)
+        pthread_cond_wait(&shared->cond, &shared->lock);
+    pthread_mutex_unlock(&shared->lock);
+
+    /* Switch policy from the running task itself. This exercises the policy
+     * transition timestamp/quantum initialization instead of setting RR only
+     * while the task is blocked on the start barrier. */
+    struct sched_param param = {.sched_priority = 40};
+    int rc = pthread_setschedparam(pthread_self(), SCHED_RR, &param);
+    if (rc != 0) {
+        errno = rc;
+        return (void *)(uintptr_t)1;
+    }
+
+    /* Consume part of the first quantum, then block. The blocked interval must
+     * not consume the remaining slice; after wake both peers still make work. */
+    uint64_t partial_start = monotonic_ns();
+    uint64_t partial_now = partial_start;
+    unsigned long partial_work = 0;
+    while (partial_now - partial_start < 30000000ULL) {
+        partial_work++;
+        if ((partial_work & 0x3fffUL) == 0)
+            partial_now = monotonic_ns();
+    }
+    pthread_mutex_lock(&shared->lock);
+    shared->paused++;
+    pthread_cond_broadcast(&shared->cond);
+    while (!shared->resume)
+        pthread_cond_wait(&shared->cond, &shared->lock);
+    pthread_mutex_unlock(&shared->lock);
+
+    uint64_t start = monotonic_ns();
+    shared->start_ns[index] = start;
+    uint64_t now = start;
+    unsigned long work = 0;
+    while (now - start < 700000000ULL) {
+        work++;
+        if ((work & 0x3fffUL) == 0)
+            now = monotonic_ns();
+    }
+    shared->work[index] = work;
+    shared->end_ns[index] = monotonic_ns();
+    return NULL;
+}
+
+/* Two equal-priority CPU-bound RR tasks pinned to one CPU must overlap in
+ * wall-clock execution. The previous pick-time rotation had no tick-driven
+ * reschedule and repeatedly selected the same peer; this test is designed to
+ * fail that behavior without weakening the work or affinity requirements. */
+static int rt_rr_quantum_progress(void)
+{
+    unsigned char original[8] = {0};
+    unsigned cpu = 0;
+    if (syscall(SYS_sched_getaffinity, 0, sizeof(original), original) <= 0 ||
+        syscall(SYS_getcpu, &cpu, NULL, NULL) < 0 ||
+        set_single_cpu_retry(0, cpu) != 0)
+        return fail("rr-affinity");
+
+    rr_slice_shared_t shared = {0};
+    rr_slice_arg_t args[2] = {{&shared, 0}, {&shared, 1}};
+    pthread_t threads[2];
+    int created = 0;
+    if (pthread_mutex_init(&shared.lock, NULL) != 0 ||
+        pthread_cond_init(&shared.cond, NULL) != 0)
+        goto failed;
+    for (; created < 2; created++) {
+        int rc = pthread_create(&threads[created], NULL, rr_slice_worker,
+                                &args[created]);
+        if (rc != 0) {
+            errno = rc;
+            goto release;
+        }
+    }
+    pthread_mutex_lock(&shared.lock);
+    while (shared.ready != 2)
+        pthread_cond_wait(&shared.cond, &shared.lock);
+    pthread_mutex_unlock(&shared.lock);
+
+    pthread_mutex_lock(&shared.lock);
+    shared.go = 1;
+    pthread_cond_broadcast(&shared.cond);
+    while (shared.paused != 2)
+        pthread_cond_wait(&shared.cond, &shared.lock);
+    pthread_mutex_unlock(&shared.lock);
+    /* Deliberately sleep while both RR tasks are blocked with partial slices. */
+    usleep(200000);
+    pthread_mutex_lock(&shared.lock);
+    shared.resume = 1;
+    pthread_cond_broadcast(&shared.cond);
+    pthread_mutex_unlock(&shared.lock);
+    for (unsigned i = 0; i < 2; i++) {
+        if (pthread_join(threads[i], NULL) != 0)
+            goto failed_destroy;
+    }
+    {
+        uint64_t overlap_start = shared.start_ns[0] > shared.start_ns[1]
+                               ? shared.start_ns[0] : shared.start_ns[1];
+        uint64_t overlap_end = shared.end_ns[0] < shared.end_ns[1]
+                             ? shared.end_ns[0] : shared.end_ns[1];
+        uint64_t overlap = overlap_end > overlap_start
+                         ? overlap_end - overlap_start : 0;
+        pthread_cond_destroy(&shared.cond);
+        pthread_mutex_destroy(&shared.lock);
+        if (syscall(SYS_sched_setaffinity, 0, sizeof(original), original) < 0)
+            return fail("rr-restore-affinity");
+        if (!shared.work[0] || !shared.work[1] || overlap < 100000000ULL) {
+            printf("SCHED_STRESS: FAIL rr-quantum work=%lu,%lu overlap_ns=%llu\n",
+                   shared.work[0], shared.work[1],
+                   (unsigned long long)overlap);
+            return 1;
+        }
+        printf("SCHED_STRESS: rt-rr-quantum PASS overlap_ns=%llu work=%lu,%lu blocked_partial_slice=1 self_policy_switch=1\n",
+               (unsigned long long)overlap, shared.work[0], shared.work[1]);
+        return 0;
+    }
+
+release:
+    pthread_mutex_lock(&shared.lock);
+    shared.go = 1;
+    pthread_cond_broadcast(&shared.cond);
+    pthread_mutex_unlock(&shared.lock);
+    for (int i = 0; i < created; i++)
+        (void)pthread_join(threads[i], NULL);
+failed_destroy:
+    pthread_cond_destroy(&shared.cond);
+    pthread_mutex_destroy(&shared.lock);
+failed:
+    (void)syscall(SYS_sched_setaffinity, 0, sizeof(original), original);
+    return fail("rr-setup");
+}
+
 static int rt_bandwidth_progress(void)
 {
     unsigned char original[8] = {0};
@@ -765,6 +932,8 @@ int main(void)
     if (policy_param_roundtrip() != 0)
         return 1;
     if (rt_permission_limits() != 0)
+        return 1;
+    if (rt_rr_quantum_progress() != 0)
         return 1;
     if (affinity_roundtrip() != 0)
         return 1;

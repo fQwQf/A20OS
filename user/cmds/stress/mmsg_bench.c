@@ -8,6 +8,12 @@
 #include <time.h>
 #include <unistd.h>
 
+/* RV32 exposes only the time64 recvmmsg syscall number. This benchmark uses
+ * a NULL timeout, so the time64 entry has the same request semantics. */
+#if !defined(SYS_recvmmsg) && defined(SYS_recvmmsg_time64)
+#define SYS_recvmmsg SYS_recvmmsg_time64
+#endif
+
 #define BATCH_MAX 8
 #define LOOPS 5000
 #define PAYLOAD_BYTES 64

@@ -24,8 +24,8 @@ typedef struct firmware_acpi_pm {
     uint8_t  pm1a_evt_len;
     uint8_t  pm1a_cnt_len;
     uint8_t  pm2_cnt_len;
-    /* A chipset bitmask of the sleep states it implements (ACPI 6.4 FACP
-     * offset 116).  Bit n set means _Sn exists.  Zero when unknown. */
+    /* Reserved compatibility field.  FADT offset 116 is RESET_REG; sleep
+     * state objects are described by the DSDT and are not parsed here. */
     uint32_t sleep_states;
     /* Set when the FADT was found and carries a usable PM1a_CNT block. */
     int      valid;

@@ -1,6 +1,7 @@
 #ifndef A20_NATIVE_BALANCE_CONTRACT_H
 #define A20_NATIVE_BALANCE_CONTRACT_H
 #include "liba20rt/a20_task.h"
+#include "liba20rt/a20_handle.h"
 #include "liba20rt/a20_execution.h"
 #include "liba20rt/a20_work.h"
 #ifdef A20_NATIVE_FILE_TEST
@@ -45,7 +46,102 @@ static int native_balance_prepare(a20_handle_t worker) {
     a20_sched_args_t sched = {.flags = A20_SCHED_AFFINITY,
                               .affinity = domain.online_mask,
                               .affinity_size = sizeof(uint64_t)};
-    return a20_sched_set(worker, &sched) != A20_OK;
+    if (a20_sched_set(worker, &sched) != A20_OK)
+        return 1;
+    return 0;
+}
+
+/* Emit only after a failed balance assertion, so diagnosis does not perturb
+ * the successful work-sharing schedule. */
+typedef struct native_balance_writer {
+    char *buf;
+    size_t capacity;
+    size_t used;
+    int overflow;
+} native_balance_writer_t;
+
+static void native_balance_diag_char(native_balance_writer_t *w, char c)
+{
+    if (w->used < w->capacity)
+        w->buf[w->used++] = c;
+    else
+        w->overflow = 1;
+}
+
+static void native_balance_diag_text(native_balance_writer_t *w,
+                                     const char *text)
+{
+    while (*text)
+        native_balance_diag_char(w, *text++);
+}
+
+static void native_balance_diag_u32(native_balance_writer_t *w,
+                                    uint32_t value)
+{
+    char digits[10];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    while (count)
+        native_balance_diag_char(w, digits[--count]);
+}
+
+static void native_balance_diag_hex(native_balance_writer_t *w,
+                                    uint32_t value)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned shift = 28;; shift -= 4) {
+        native_balance_diag_char(w, hex[(value >> shift) & 15U]);
+        if (shift == 0)
+            break;
+    }
+}
+
+static void native_balance_dump_failure(uint32_t main_cpu,
+                                        uint32_t outer_expected_cpu,
+                                        uint32_t outer_cpu)
+{
+    char line[384];
+    native_balance_writer_t w = {
+        .buf = line, .capacity = sizeof(line) - 1, .used = 0, .overflow = 0};
+#define NBD_TEXT(s)                                                           \
+    native_balance_diag_text(&w, (s))
+#define NBD_U32(label, value)                                                  \
+    do {                                                                       \
+        NBD_TEXT(label);                                                       \
+        native_balance_diag_u32(&w, (value));                                  \
+        NBD_TEXT(" ");                                                        \
+    } while (0)
+#define NBD_HEX(label, value)                                                  \
+    do {                                                                       \
+        NBD_TEXT(label);                                                       \
+        native_balance_diag_hex(&w, (value));                                  \
+        NBD_TEXT(" ");                                                        \
+    } while (0)
+    NBD_TEXT("NATIVE_BALANCE_DIAG: ");
+    NBD_HEX("online=", native_balance_shared.online);
+    NBD_HEX("mask0=", native_balance_shared.mask[0]);
+    NBD_HEX("mask1=", native_balance_shared.mask[1]);
+    NBD_U32("jobs0=", native_balance_shared.jobs[0]);
+    NBD_U32("jobs1=", native_balance_shared.jobs[1]);
+    NBD_U32("sum0=", native_balance_shared.sum[0]);
+    NBD_U32("sum1=", native_balance_shared.sum[1]);
+    NBD_HEX("taken0=", native_balance_shared.taken[0]);
+    NBD_HEX("taken1=", native_balance_shared.taken[1]);
+    NBD_U32("err0=", native_balance_shared.error[0]);
+    NBD_U32("err1=", native_balance_shared.error[1]);
+    NBD_U32("main_cpu=", main_cpu);
+    NBD_U32("outer_expected_cpu=", outer_expected_cpu);
+    NBD_U32("outer_cpu=", outer_cpu);
+    NBD_HEX("outer_affinity_request=", native_balance_shared.online);
+    native_balance_diag_char(&w, '\n');
+    if (!w.overflow)
+        (void)a20_hdl_write_buf(1, line, w.used, 0);
+#undef NBD_HEX
+#undef NBD_U32
+#undef NBD_TEXT
 }
 /* Publish failures too: an exited peer cannot satisfy a success barrier. */
 static int native_balance_wait(unsigned part, uint32_t threshold) {

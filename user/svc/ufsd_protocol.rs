@@ -5,6 +5,8 @@ pub const RESP_MAGIC: u32 = 0x5546_5350;
 pub const PROTO_VERSION: u32 = 2;
 pub const LEGACY_PROTO_VERSION: u32 = 1;
 pub const LIFETIME_CAPABILITY: u64 = 0x5546_534c_4946_4532;
+pub const SHUTDOWN_CAPABILITY: u64 = 0x5546_5353_4855_5432;
+pub const SHUTDOWN_RETRY_SAFE: u64 = 0x5341_4645;
 pub const BACKEND_FAT: u32 = 1;
 pub const BACKEND_VNFS: u32 = 2;
 pub const ROOT_INO: u64 = 1;
@@ -25,6 +27,7 @@ pub const OP_RENAME: u32 = 14;
 pub const OP_OPEN: u32 = 15;
 pub const OP_CLOSE: u32 = 16;
 pub const OP_LINK: u32 = 17;
+pub const OP_SHUTDOWN: u32 = 18;
 pub const MAX_MESSAGE: usize = 65536;
 pub const MAX_NAME: usize = 511;
 

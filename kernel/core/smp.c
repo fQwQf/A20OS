@@ -6,7 +6,12 @@
 #include "drivers/core/driver_core.h"
 #include "proc/proc.h"
 
-#define SMP_START_WAIT_LOOPS 10000000U
+#if defined(CONFIG_RISCV64)
+/* RISC-V time CSR is a continuously advancing hardware counter. */
+#define SMP_START_WAIT_TICKS (5ULL * TICKS_PER_SEC)
+#else
+#define SMP_START_WAIT_FALLBACK_LOOPS 10000000U
+#endif
 
 static smp_cpu_desc_t cpu_descs[CONFIG_NR_CPUS];
 static unsigned present_count = 1;
@@ -181,11 +186,26 @@ void smp_boot_secondaries(void)
                    cpu, (unsigned long)cpu_descs[cpu].hw_id, err);
     }
 
-    for (unsigned wait = 0; wait < SMP_START_WAIT_LOOPS; wait++) {
-        if ((smp_online_cpu_mask() & started_mask) == started_mask)
+#if defined(CONFIG_RISCV64)
+    /* The RV64 time CSR advances independently of timer IRQ delivery. */
+    const uint64_t wait_start = timer_get_ticks();
+    while ((smp_online_cpu_mask() & started_mask) != started_mask) {
+        if (timer_get_ticks() - wait_start >= SMP_START_WAIT_TICKS)
             break;
         cpu_relax();
     }
+    const uint64_t wait_elapsed = timer_get_ticks() - wait_start;
+    const char *wait_unit = "ticks";
+#else
+    /* Other retained ports do not yet have a boot-safe monotonic clock. */
+    unsigned wait_elapsed = 0;
+    while ((smp_online_cpu_mask() & started_mask) != started_mask &&
+           wait_elapsed < SMP_START_WAIT_FALLBACK_LOOPS) {
+        wait_elapsed++;
+        cpu_relax();
+    }
+    const char *wait_unit = "poll iterations";
+#endif
 
     uint32_t timed_out = started_mask & ~smp_online_cpu_mask();
     for (unsigned cpu = 1; cpu < configured_count; cpu++) {
@@ -193,8 +213,9 @@ void smp_boot_secondaries(void)
             printf("[SMP] secondary start timed out: cpu=%u hw=%lu\n",
                    cpu, (unsigned long)cpu_descs[cpu].hw_id);
     }
-    printf("[SMP] %u/%u configured CPUs online\n",
-           smp_online_cpu_count(), configured_count);
+    printf("[SMP] %u/%u configured CPUs online (start wait %llu %s)\n",
+           smp_online_cpu_count(), configured_count,
+           (unsigned long long)wait_elapsed, wait_unit);
 #endif
 }
 
