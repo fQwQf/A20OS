@@ -26,6 +26,11 @@ interface a20_services version 1 {
   }
   const SVCMGR_REQ_ECHO = 0x21;
   const SVCMGR_REQ_CRASH = 0x22;
+  // Supervision self-test, same class as CRASH: the receiving service stops
+  // answering (both its service and health channels) and parks until the
+  // supervisor's health deadline force-exits it.  The v1 envelope is
+  // unchanged; only this request type is new.
+  const SVCMGR_REQ_HANG = 0x25;
   // Negotiation is itself carried in the unchanged v1 envelope. The request
   // and response use distinct message types so a legacy unknown-type echo is
   // never accepted as an acknowledgement. A nonce correlates this exchange;

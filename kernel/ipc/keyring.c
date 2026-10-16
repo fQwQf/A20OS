@@ -8,6 +8,7 @@
 #include "core/timekeeping.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
+#include <limits.h>
 
 /*
  * Kernel keyring subsystem.
@@ -45,6 +46,7 @@ typedef struct task_key_object {
     struct task_key_object **items;
     size_t item_count;
     size_t item_capacity;
+    uint32_t graph_visit;
     int persistent_user;
     uint64_t owner_uid;
 } task_key_object_t;
@@ -56,6 +58,8 @@ static spinlock_t g_keyring_lock = SPINLOCK_INIT;
 static task_key_object_t *g_serial_map;
 static int g_next_serial = 1;
 static int g_object_count;
+static uint32_t g_graph_generation;
+static task_key_object_t *g_graph_stack[KEYRING_MAX_OBJECTS];
 
 static uint64_t keyring_now_ns(void)
 {
@@ -86,22 +90,38 @@ static task_key_object_t *keyring_alloc_object(task_key_object_type_t type,
 
 static void keyring_destroy_locked(task_key_object_t *o);
 static void keyring_put_locked(task_key_object_t *o);
+static void keyring_unlink_from_serial_map_locked(task_key_object_t *o);
+static task_key_object_t *keyring_lookup_locked(key_serial_t serial);
 
 static void keyring_destroy_locked(task_key_object_t *o)
 {
-    if (!o)
-        return;
-    if (o->type == TASK_KEY_OBJECT_KEYRING) {
-        for (size_t i = 0; i < o->item_count; i++)
-            if (o->items[i])
-                keyring_put_locked(o->items[i]);
-        kfree(o->items);
-    } else {
-        kfree(o->payload);
-        kfree(o->key_type);
+    /* `next` is free for an intrusive worklist after map removal. Reclaim
+     * nested graphs iteratively so even a maximum-depth DAG cannot exhaust a
+     * kernel stack from task teardown under irqsave. */
+    task_key_object_t *pending = o;
+    while (pending) {
+        task_key_object_t *current = pending;
+        pending = current->next;
+        current->next = NULL;
+        if (current->type == TASK_KEY_OBJECT_KEYRING) {
+            for (size_t i = 0; i < current->item_count; i++) {
+                task_key_object_t *child = current->items[i];
+                if (!child || child->ref_count <= 0)
+                    continue;
+                if (--child->ref_count == 0) {
+                    keyring_unlink_from_serial_map_locked(child);
+                    child->next = pending;
+                    pending = child;
+                }
+            }
+            kfree(current->items);
+        } else {
+            kfree(current->payload);
+            kfree(current->key_type);
+        }
+        kfree(current->description);
+        kfree(current);
     }
-    kfree(o->description);
-    kfree(o);
 }
 
 static void keyring_unlink_from_serial_map_locked(task_key_object_t *o)
@@ -122,19 +142,59 @@ static void keyring_put_locked(task_key_object_t *o)
 {
     if (!o)
         return;
+    if (o->ref_count <= 0)
+        return;
     if (--o->ref_count > 0)
         return;
     keyring_unlink_from_serial_map_locked(o);
     keyring_destroy_locked(o);
 }
 
+/* The global lock serializes this bounded iterative traversal. Marking nodes
+ * avoids recursion and guarantees a link cannot create a reference cycle. */
+static int keyring_graph_reaches_locked(task_key_object_t *start,
+                                        task_key_object_t *target)
+{
+    if (start == target)
+        return 1;
+    uint32_t generation = ++g_graph_generation;
+    if (generation == 0) {
+        for (task_key_object_t *o = g_serial_map; o; o = o->next)
+            o->graph_visit = 0;
+        generation = ++g_graph_generation;
+    }
+
+    size_t count = 1;
+    start->graph_visit = generation;
+    g_graph_stack[0] = start;
+    while (count > 0) {
+        task_key_object_t *ring = g_graph_stack[--count];
+        for (size_t i = 0; i < ring->item_count; i++) {
+            task_key_object_t *child = ring->items[i];
+            if (!child || child->type != TASK_KEY_OBJECT_KEYRING)
+                continue;
+            if (child == target)
+                return 1;
+            if (child->graph_visit == generation)
+                continue;
+            if (count == KEYRING_MAX_OBJECTS)
+                return 1; /* fail closed if map accounting is corrupt */
+            child->graph_visit = generation;
+            g_graph_stack[count++] = child;
+        }
+    }
+    return 0;
+}
+
 static int keyring_alloc_serial_locked(void)
 {
-    while (g_object_count < KEYRING_MAX_OBJECTS) {
-        int serial = g_next_serial++;
-        if (serial <= 0)
-            g_next_serial = 1;
-        else
+    if (g_object_count >= KEYRING_MAX_OBJECTS)
+        return 0;
+    int attempts = g_object_count + 1;
+    while (attempts-- > 0) {
+        int serial = g_next_serial;
+        g_next_serial = serial == INT_MAX ? 1 : serial + 1;
+        if (serial > 0 && !keyring_lookup_locked(serial))
             return serial;
     }
     return 0;
@@ -151,6 +211,13 @@ static int keyring_link_locked(task_key_object_t *ring,
         if (ring->items[i] == o)
             return 0; /* already linked */
     }
+    if (o->type == TASK_KEY_OBJECT_KEYRING &&
+        keyring_graph_reaches_locked(o, ring))
+        return -EDEADLK;
+    if (o->ref_count < 0)
+        return -EINVAL;
+    if (o->ref_count == INT_MAX)
+        return -ENOSPC;
     if (ring->item_count == ring->item_capacity) {
         size_t cap = ring->item_capacity ? ring->item_capacity
                                          : KEYRING_ITEM_INIT_CAP;
@@ -184,7 +251,7 @@ static int keyring_unlink_locked(task_key_object_t *ring,
         memmove(&ring->items[i], &ring->items[i + 1],
                 (ring->item_count - i - 1) * sizeof(*ring->items));
         ring->item_count--;
-        o->ref_count--;
+        keyring_put_locked(o);
         return 0;
     }
     return -ENOENT;
@@ -477,7 +544,6 @@ key_serial_t keyring_join_session(const char *name)
     task_key_object_t *old = (task_key_object_t *)t->session_keyring;
     t->session_keyring = new_ring;
     if (old) {
-        keyring_unlink_from_serial_map_locked(old);
         /* old had ref_count 1 held by the task slot */
         keyring_put_locked(old);
     }
@@ -544,7 +610,16 @@ int keyring_set_timeout(key_serial_t id, unsigned long secs)
         spin_unlock_irqrestore(&g_keyring_lock, flags);
         return -EPERM;
     }
-    o->expiry_ns = secs == 0 ? 0 : keyring_now_ns() + secs * 1000000000ULL;
+    if (secs == 0) {
+        o->expiry_ns = 0;
+    } else {
+        const uint64_t scale = 1000000000ULL;
+        uint64_t now = keyring_now_ns();
+        const uint64_t max_ns = ~(uint64_t)0;
+        uint64_t delta = (uint64_t)secs > max_ns / scale
+            ? max_ns : (uint64_t)secs * scale;
+        o->expiry_ns = delta > max_ns - now ? max_ns : now + delta;
+    }
     spin_unlock_irqrestore(&g_keyring_lock, flags);
     return 0;
 }
@@ -666,6 +741,10 @@ void keyring_inherit(struct task_t *child, struct task_t *parent)
         return;
     unsigned long flags = spin_lock_irqsave(&g_keyring_lock);
     task_key_object_t *ring = (task_key_object_t *)parent->session_keyring;
+    if (ring->ref_count <= 0 || ring->ref_count == INT_MAX) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return;
+    }
     ring->ref_count++;
     child->session_keyring = ring;
     spin_unlock_irqrestore(&g_keyring_lock, flags);

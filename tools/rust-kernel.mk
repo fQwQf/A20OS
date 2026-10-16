@@ -31,7 +31,7 @@ RUST_RV32_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --s
 # for both the matching core and every kernel Rust object.
 RUST_AARCH64_TARGET := aarch64-unknown-none-softfloat
 RUST_AARCH64_CORE_CACHE_ROOT ?= $(HOME)/.cache/a20os/rust-target-core
-RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL))
+RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL))
 RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
@@ -140,7 +140,7 @@ RUST_HANDLE_SLOT_OBJECT := $(BUILD_DIR)/rust/handle_slot.o
 RUST_HANDLE_TABLE_STATE_OBJECT := $(BUILD_DIR)/rust/handle_table_state.o
 
 ifeq ($(strip $(RUST_OPT_FLAG)),)
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
 ifeq ($(filter rust,$(VFS_LIFECYCLE_IMPL)),rust)
@@ -1144,6 +1144,58 @@ $(RUST_PARK_WAIT_OBJECT): $(RUST_PARK_WAIT_SRC) $(RUST_PARK_WAIT_HDR) tools/rust
 		$< -o $@
 endif
 
+# WAIT4 (wait4 child-wait/reap controller) owns matching, classification,
+# report decisions, status encoding and transaction order; the C adapter in
+# kernel/proc/wait.c retains locks, chain walks, pin/detach/destroy and park.
+RUST_WAIT4_SRC := kernel/proc/wait4_state.rs
+RUST_WAIT4_HDR := kernel/proc/wait4_state.h
+RUST_WAIT4_TARGET_x86_64 := x86_64-unknown-none
+RUST_WAIT4_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_WAIT4_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_WAIT4_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_WAIT4_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_WAIT4_TARGET_arm32 := armv7a-none-eabihf
+RUST_WAIT4_TARGET := $(RUST_WAIT4_TARGET_$(ARCH))
+RUST_WAIT4_OBJECT := $(BUILD_DIR)/rust/wait4_state.o
+
+ifeq ($(WAIT4_IMPL),rust)
+ifeq ($(strip $(RUST_WAIT4_TARGET)),)
+$(error WAIT4_IMPL=rust has no Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_WAIT4_CODE_MODEL_x86_64 := large
+RUST_WAIT4_CODE_MODEL_aarch64 := large
+RUST_WAIT4_CODE_MODEL_loongarch64 := medium
+RUST_WAIT4_CODE_MODEL_riscv64 := medium
+RUST_WAIT4_CODE_MODEL_arm32 := small
+RUST_WAIT4_FEATURES_aarch64 :=
+RUST_WAIT4_FEATURES_arm32 := -neon
+RUST_WAIT4_EXTRA_x86_64 := -C no-redzone=yes
+RUST_WAIT4_CODE_MODEL := $(RUST_WAIT4_CODE_MODEL_$(ARCH))
+RUST_WAIT4_FEATURES := $(RUST_WAIT4_FEATURES_$(ARCH))
+RUST_WAIT4_EXTRA := $(RUST_WAIT4_EXTRA_$(ARCH))
+RUST_WAIT4_FLAGS_STAMP := $(BUILD_DIR)/rust/.wait4-flags
+.PHONY: FORCE_RUST_WAIT4_FLAGS
+FORCE_RUST_WAIT4_FLAGS:
+
+$(RUST_WAIT4_FLAGS_STAMP): FORCE_RUST_WAIT4_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_WAIT4_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_WAIT4_CODE_MODEL) $(RUST_WAIT4_EXTRA) -C target-feature=$(RUST_WAIT4_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_WAIT4_OBJECT): $(RUST_WAIT4_SRC) $(RUST_WAIT4_HDR) tools/rust-kernel.mk $(RUST_WAIT4_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_WAIT4_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_WAIT4_CODE_MODEL),-C code-model=$(RUST_WAIT4_CODE_MODEL)) \
+		$(RUST_WAIT4_EXTRA) \
+		$(if $(RUST_WAIT4_FEATURES),-C target-feature=$(RUST_WAIT4_FEATURES)) \
+		$< -o $@
+endif
+
 # WAIT_TIMER owns deadline heap membership/ref transitions; C retains the
 # IRQ-safe spinlock and park wake callback. Keep this independently selectable.
 RUST_WAIT_TIMER_SRC := kernel/proc/wait_timer.rs
@@ -1579,6 +1631,43 @@ $(RUST_EXT4_EXTENT_TXN_OBJECT): $(RUST_EXT4_EXTENT_TXN_SRC) $(RUST_EXT4_MOUNT_ST
 		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
 		-C codegen-units=1 -C relocation-model=static $< -o $@
 
+endif
+
+# KEYRING owns object-map semantics, refcounted ring membership and searches;
+# the C bridge retains the task/credential, locking and allocator boundary.
+RUST_KEYRING_SRC := kernel/ipc/keyring.rs
+RUST_KEYRING_BRIDGE_SRC := kernel/ipc/keyring_rust_bridge.c
+RUST_KEYRING_TARGET_x86_64 := x86_64-unknown-none
+RUST_KEYRING_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_KEYRING_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_KEYRING_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_KEYRING_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_KEYRING_TARGET_arm32 := armv7a-none-eabihf
+RUST_KEYRING_TARGET_armv7m := thumbv7m-none-eabi
+RUST_KEYRING_TARGET := $(RUST_KEYRING_TARGET_$(ARCH))
+RUST_KEYRING_OBJECT := $(BUILD_DIR)/rust/keyring.o
+ifeq ($(KEYRING_IMPL),rust)
+ifeq ($(strip $(RUST_KEYRING_TARGET)),)
+$(error KEYRING_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifeq ($(filter $(KERNEL_DIR)/ipc/keyring_rust_bridge.c,$(KERNEL_SRC)),)
+$(error KEYRING_IMPL=rust requires the keyring Rust bridge in this profile)
+endif
+RUST_KEYRING_FLAGS_STAMP := $(BUILD_DIR)/rust/.keyring-flags
+.PHONY: FORCE_RUST_KEYRING_FLAGS
+FORCE_RUST_KEYRING_FLAGS:
+
+$(RUST_KEYRING_FLAGS_STAMP): FORCE_RUST_KEYRING_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_KEYRING_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_KEYRING_OBJECT): $(RUST_KEYRING_SRC) kernel/include/ipc/keyring.h tools/rust-kernel.mk $(RUST_KEYRING_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_KEYRING_TARGET) $(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
+		-C codegen-units=1 -C relocation-model=static $< -o $@
 endif
 
 # VFS_LIFECYCLE owns the system-shutdown phase and per-vfile close outcome

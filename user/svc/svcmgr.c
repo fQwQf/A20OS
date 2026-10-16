@@ -387,7 +387,11 @@ static void svc_ping(svc_entry_t *se)
             put_str("SVC_MGR: health ping timeout name=");
             put_str(se->name);
             put("\n", 1);
-            a20_task_kill(se->task, 0);
+            /* SIGKILL (9): sig 0 is a no-op in sys_a20_task_kill, and a
+             * service that stopped answering its health channel can never
+             * resume it.  The forced exit is what makes the EXITED event
+             * drive the restart path. */
+            a20_task_kill(se->task, 9);
             /* EXITED event drives the restart path. */
         }
         return;

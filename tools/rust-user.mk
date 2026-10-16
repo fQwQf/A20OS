@@ -53,6 +53,8 @@ NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER ?= 1
 # Test-only: fail the selected orphan-reap write and the immediately following
 # compensation write, to verify fatal status/quarantine handling.
 NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL ?= 0
+# Test-only: fail the first extent reclaim free during explicit truncation.
+NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE ?= 0
 
 # The isolated IDL service fixture also builds the Rust peer used by its
 # generated-code C/Rust contract checks. Production Rust echod can be selected
@@ -103,7 +105,8 @@ RUST_USER_UFSD_JBD2_RECORD_SRC := user/svc/jbd2_record.rs
 RUST_USER_UFSD_EXT4_ORPHAN_SRC := user/svc/ext4_orphan.rs
 RUST_USER_UFSD_EXTENT_TXN_SRC := kernel/fs/diskfs/ext4_extent_txn.rs
 RUST_USER_UFSD_MOUNT_STATE_SRC := kernel/fs/diskfs/ext4_mount_state.rs
-RUST_USER_UFSD_TEST_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE)),test-drop-close-token-ack,$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),test-close-orphan-restore-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),test-close-orphan-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)),prod))
+RUST_USER_UFSD_SYNC_PLAN_SRC := kernel/fs/diskfs/ext4_sync_plan.rs
+RUST_USER_UFSD_TEST_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE)),test-ext4-trunc-free-fail-once,$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE)),test-drop-close-token-ack,$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),$(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),test-close-orphan-restore-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),test-close-orphan-w$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER)),prod)))
 RUST_USER_UFSD_ORPHAN_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),orphan-rust,orphan-c)
 RUST_USER_UFSD_EXTENT_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),extent-rust,extent-c)
 # Keep diagnostic and production objects/binaries separate. Switching the
@@ -111,6 +114,7 @@ RUST_USER_UFSD_EXTENT_PROFILE := $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_
 RUST_USER_UFSD_OBJ := $(RUST_USER_OBJ_DIR)/ufsd-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)-$(RUST_USER_UFSD_TEST_PROFILE).o
 RUST_USER_UFSD_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)$(if $(filter prod,$(RUST_USER_UFSD_TEST_PROFILE)),,-$(RUST_USER_UFSD_TEST_PROFILE))
 RUST_USER_UFSD_TEST_CLOSE_TOKEN_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)-test-drop-close-token-ack
+RUST_USER_UFSD_TEST_EXT4_TRUNC_FREE_BIN := $(USER_BUILD_DIR)/ufsd-rust-$(NATIVE_TAG)-$(RUST_USER_UFSD_ORPHAN_PROFILE)-$(RUST_USER_UFSD_EXTENT_PROFILE)-test-ext4-trunc-free-fail-once
 RUST_USER_IDL_RUST := $(RUST_USER_OBJ_DIR)/a20_services_idl.rs
 
 # Shared build helpers used by both the opt-in peer and the supervisor.
@@ -498,12 +502,26 @@ ifeq ($(NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE),1)
 ifneq ($(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE),0)
 $(error close-token lost-ACK and close-orphan failure profiles are mutually exclusive)
 endif
+ifneq ($(NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE),0)
+$(error close-token ACK-drop and ext4 truncate-free failure profiles are mutually exclusive)
+endif
 endif
 ifneq ($(strip $(filter $(USER_OPT),-O1 -O2 -O3 -Os)),$(USER_OPT))
 $(error Rust ufsd requires USER_OPT in -O1 -O2 -O3 -Os)
 endif
 ifeq ($(filter $(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE),0 1),)
 $(error NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE must be 0 or 1)
+endif
+ifeq ($(filter $(NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE),0 1),)
+$(error NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE must be 0 or 1)
+endif
+ifeq ($(NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE),1)
+ifneq ($(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN),1)
+$(error ext4 truncate-free failure test requires NATIVE_RUST_UFSD_EXT4_EXTENT_TXN=1)
+endif
+ifneq ($(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE),0)
+$(error ext4 truncate-free and close-orphan failure profiles are mutually exclusive)
+endif
 endif
 ifeq ($(filter $(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL),0 1),)
 $(error NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL must be 0 or 1)
@@ -544,7 +562,7 @@ $(RUST_USER_UFSD_BIN): $(RUST_USER_UFSD_OBJ) $(RUST_USER_UFSD_SRC) $(RUST_USER_U
 		$(NATIVE_ARCH_SRC) $(NATIVE_LD) $(A20_SERVICES_IDL_HDR) $(NATIVE_SDK_HDRS) user/svc/ufs_backends.h \
 		kernel/include/fs/ufs_proto.h kernel/include/fs/fat32lite.h
 	@mkdir -p $(dir $@)
-	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -DCONFIG_UFSD_RUST_JBD2_POLICY -DCONFIG_UFSD_RUST_JBD2_TXN $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),-DCONFIG_UFSD_RUST_EXT4_ORPHAN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),-DCONFIG_EXT4_RUST_EXTENT_TXN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_JBD2_RECORD)),-DCONFIG_UFSD_RUST_JBD2_RECORD,) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE -DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER=$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL,) -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
+	$(NATIVE_CC) -ffreestanding -nostdlib -static $(NATIVE_CFLAGS) -DCONFIG_UFSD_RUST_JBD2_POLICY -DCONFIG_UFSD_RUST_JBD2_TXN $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_ORPHAN)),-DCONFIG_UFSD_RUST_EXT4_ORPHAN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_EXT4_EXTENT_TXN)),-DCONFIG_EXT4_RUST_EXTENT_TXN,) $(if $(filter 1,$(NATIVE_RUST_UFSD_JBD2_RECORD)),-DCONFIG_UFSD_RUST_JBD2_RECORD,) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE -DCONFIG_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER=$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER),) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL)),-DCONFIG_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL,) $(if $(filter 1,$(NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE)),-DCONFIG_EXT4_TEST_TRUNC_FREE_FAIL_ONCE,) -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
 		-T$(NATIVE_LD) $(NATIVE_CRT0) $(RUST_USER_CRT0_SRC) $(NATIVE_SDK_SRC) \
 		$(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(RUST_USER_UFSD_ABI_SRC) \
 		$(RUST_USER_UFSD_BACKEND_SRCS) $(RUST_USER_UFSD_OBJ) \

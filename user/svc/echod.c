@@ -5,7 +5,9 @@
  * (installed at A20_SVC_ENDPOINT_SLOT by svcman's task_spawn):
  * SVCMGR_REQ_ECHO is echoed back verbatim, SVCMGR_REQ_CRASH makes the
  * service exit with A20_SVC_CRASH_CODE so svcman can demonstrate
- * detection + restart (docs/hybrid-kernel/01-roadmap.md phase 2).
+ * detection + restart (docs/hybrid-kernel/01-roadmap.md phase 2), and
+ * SVCMGR_REQ_HANG parks the service until the supervisor's health
+ * deadline force-exits it (supervision self-test, same class as CRASH).
  */
 #include "liba20rt/a20_sdk.h"
 #include "a20_services_idl.h"
@@ -32,6 +34,8 @@ static int pump(a20_handle_t ep, int is_serve)
         return 1; /* protocol mismatch: ignore, do not crash */
     if (env.type == SVCMGR_REQ_CRASH)
         return 42;
+    if (env.type == SVCMGR_REQ_HANG)
+        return 43; /* serve loop parks; the supervisor force-exits it */
     if (env.type == SVCMGR_REQ_VERSION_NEGOTIATE) {
         if (blen != A20_IDL_ENVELOPE_WIRE_SIZE +
                     A20_IDL_SVCMGR_VERSION_REQUEST_WIRE_SIZE)
@@ -104,6 +108,17 @@ int main(int argc, char **argv, char **envp)
             int r = pump(ep, 1);
             if (r == 42)
                 return A20_SVC_CRASH_CODE;
+            if (r == 43) {
+                /* Supervision self-test (SVCMGR_REQ_HANG): stop servicing
+                 * both channels.  The supervisor observes the silent health
+                 * channel and force-exits this task; the sleep loop keeps
+                 * the task off the runqueue and consumes the pending exit
+                 * at the next syscall boundary. */
+                for (;;) {
+                    a20_time_t nap = { .secs = 0, .nsecs = 1000 * 1000 };
+                    a20_thread_sleep(nap);
+                }
+            }
             if (r < 0)
                 return 0; /* peer closed or handle revoked: clean shutdown */
             if (r == 0)

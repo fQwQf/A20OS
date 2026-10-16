@@ -922,19 +922,14 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
     return 0;
 }
 
-uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
-    if (!sb || ext4_is_inconsistent(sb)) return 0;
-    /* Allocate the zeroing buffer before taking the allocator mutex. */
-    char *zero_buf = (char *)kmalloc(sb->block_size);
-    if (zero_buf)
-        memset(zero_buf, 0, sb->block_size);
-
-    mutex_lock(&sb->alloc_lock);
-    if (ext4_is_inconsistent(sb)) {
-        mutex_unlock(&sb->alloc_lock);
-        if (zero_buf) kfree(zero_buf);
-        return 0;
-    }
+/* Locked core of ext4_alloc_block: the caller must hold alloc_lock and must
+ * have rejected an inconsistent mount. The deferred data-block zero write
+ * cannot run while the lock is held, so this core never zeroes the block;
+ * ext4_alloc_block performs the zeroing write after dropping the lock.
+ * Callers that fully overwrite the block themselves (the partial-truncate
+ * staged leaf, written before it can be published) safely skip it.
+ * Returns the allocated physical block, or 0 on failure. */
+static uint64_t ext4_alloc_block_locked(ext4_sb_info_t *sb) {
     uint64_t group_probes = 0;
     for (uint32_t n = 0; n < sb->groups_count; n++) {
         group_probes++;
@@ -954,8 +949,6 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
              * continue probing another group and mutate more allocator state. */
             ext4_mark_inconsistent(sb);
             a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
-            mutex_unlock(&sb->alloc_lock);
-            if (zero_buf) kfree(zero_buf);
             return 0;
         }
         if (bit < 0) continue;
@@ -964,23 +957,37 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         ext4_bg_set_free_blocks(&sb->group_descs[g], free_blocks - 1);
         ext4_writeback_gd(sb, g);
         if (ext4_is_inconsistent(sb)) {
-            mutex_unlock(&sb->alloc_lock);
-            if (zero_buf) kfree(zero_buf);
+            a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
             return 0;
         }
         uint64_t phys = (uint64_t)sb->first_data_block +
                         (uint64_t)g * sb->blocks_per_group + bit;
         a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
-        mutex_unlock(&sb->alloc_lock);
-        if (zero_buf)
-            ext4_meta_write(sb, phys * sb->block_size, zero_buf, sb->block_size);
-        if (zero_buf) kfree(zero_buf);
         return phys;
     }
     a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
-    mutex_unlock(&sb->alloc_lock);
-    if (zero_buf) kfree(zero_buf);
     return 0;
+}
+
+uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
+    if (!sb || ext4_is_inconsistent(sb)) return 0;
+    /* Allocate the zeroing buffer before taking the allocator mutex. */
+    char *zero_buf = (char *)kmalloc(sb->block_size);
+    if (zero_buf)
+        memset(zero_buf, 0, sb->block_size);
+
+    mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        if (zero_buf) kfree(zero_buf);
+        return 0;
+    }
+    uint64_t phys = ext4_alloc_block_locked(sb);
+    mutex_unlock(&sb->alloc_lock);
+    if (phys && zero_buf)
+        ext4_meta_write(sb, phys * sb->block_size, zero_buf, sb->block_size);
+    if (zero_buf) kfree(zero_buf);
+    return phys;
 }
 
 static int ext4_free_block_locked(ext4_sb_info_t *sb, uint64_t phys) {
@@ -2171,6 +2178,11 @@ void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
  * this driver. Unsupported trees fail closed; the caller must keep the inode
  * on the orphan list so a more capable implementation can retry it. */
 #ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+int ext4_extent_partial_truncate_checked(ext4_sb_info_t *sb,
+                                         uint32_t ino,
+                                         ext4_inode_t *inode,
+                                         uint32_t lblk,
+                                         uint64_t new_size);
 typedef struct {
     ext4_sb_info_t *sb;
     uint32_t ino;
@@ -2402,6 +2414,11 @@ int ext4_block_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
     if (!sb || !inode)
         return -EOPNOTSUPP;
     if (ext4_is_inconsistent(sb)) return -117;
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    if (inode->i_flags & EXT4_EXTENTS_FL)
+        return ext4_extent_partial_truncate_checked(
+            sb, ino, inode, 0, ext4_inode_size(inode));
+#endif
     return ext4_record_status(sb,
         ext4_extent_root_trim_checked(sb, ino, inode, 0));
 }
@@ -2412,9 +2429,279 @@ int ext4_block_truncate_at_checked(ext4_sb_info_t *sb, uint32_t ino,
     if (!sb || !inode)
         return -EOPNOTSUPP;
     if (ext4_is_inconsistent(sb)) return -117;
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    if (inode->i_flags & EXT4_EXTENTS_FL)
+        return ext4_extent_partial_truncate_checked(
+            sb, ino, inode, lblk, ext4_inode_size(inode));
+#endif
     return ext4_record_status(sb,
         ext4_extent_root_trim_checked(sb, ino, inode, lblk));
 }
+
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+/* ---- Rust-owned partial truncate (VFS truncate() path) ----
+ *
+ * The legacy C partial truncate in ext4_extent_truncate_at derived its
+ * reclaim ranges from a working copy whose lengths had already been shrunk
+ * for the surviving tree, so the tail of the extent spanning the new EOF
+ * stayed marked allocated with no owner (a silent bitmap space leak), and
+ * it freed data blocks before the replacement tree image was published.
+ * a20_ext4_extent_partial_truncate_txn owns the corrected decision and
+ * side-effect ordering; C keeps only the locked bitmap/descriptor
+ * primitives, the read-only tree flattening, and this dispatch. */
+
+typedef struct {
+    ext4_sb_info_t *sb;
+    uint32_t ino;
+    ext4_inode_t *inode;
+} ext4_partial_txn_context_t;
+
+/* repr(C) mirror of the flat extent input in ext4_extent_txn.rs; layout
+ * matches ext4_flatext_t. */
+typedef struct {
+    uint32_t start;
+    uint32_t len;
+    uint64_t phys;
+} ext4_flat_extent_abi_t;
+
+typedef struct {
+    void *context;
+    uint64_t (*alloc_block)(void *);
+    int (*free_block)(void *, uint64_t);
+    int (*reserve_block)(void *, uint64_t);
+    int (*write_inode)(void *, uint8_t *, uint64_t);
+    int (*write_tree_block)(void *, uint64_t, const uint8_t *);
+    int (*poison_journal)(void *);
+    int32_t journaled;
+    uint64_t first_data_block;
+    uint64_t blocks_count;
+    uint32_t block_size;
+    uint64_t old_size;
+    uint64_t new_size;
+    uint8_t *tree_scratch;
+    uint32_t *keeps_scratch;
+    uint32_t *freed_scratch;
+} ext4_extent_partial_ops_t;
+
+extern int a20_ext4_extent_partial_truncate_txn(
+    uint32_t ino, uint8_t *i_block,
+    const ext4_flat_extent_abi_t *flat, size_t flat_count,
+    const uint64_t *old_leaves, size_t old_leaf_count,
+    uint32_t first_kept_lblk, const ext4_extent_partial_ops_t *ops);
+
+static uint64_t ext4_partial_txn_alloc(void *opaque)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+    if (ext4_is_inconsistent(ctx->sb)) return 0;
+    return ext4_alloc_block_locked(ctx->sb);
+}
+
+static int ext4_partial_txn_free(void *opaque, uint64_t block)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+#ifdef CONFIG_EXT4_TEST_TRUNC_FREE_FAIL_ONCE
+    static int fail_once = 1;
+    if (__atomic_exchange_n(&fail_once, 0, __ATOMIC_ACQ_REL))
+        return -EIO;
+#endif
+    return ext4_free_block_locked(ctx->sb, block);
+}
+
+static int ext4_partial_txn_reserve(void *opaque, uint64_t block)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+    return ext4_reserve_block_locked(ctx->sb, block);
+}
+
+static int ext4_partial_txn_write_inode(void *opaque, uint8_t *i_block,
+                                        uint64_t size)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+    ext4_inode_t candidate = *ctx->inode;
+    memcpy((uint8_t *)&candidate + offsetof(ext4_inode_t, i_block), i_block,
+           sizeof(candidate.i_block));
+    ext4_inode_set_size(&candidate, size);
+    ext4_inode_sync_i_blocks(ctx->sb, &candidate);
+    int ret = ext4_write_inode(ctx->sb, ctx->ino, &candidate);
+    if (ret >= 0) *ctx->inode = candidate;
+    return ret;
+}
+
+static int ext4_partial_txn_write_tree(void *opaque, uint64_t phys,
+                                       const uint8_t *buf)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+    return ext4_extent_block_write(ctx->sb, ctx->ino, ctx->inode, phys,
+                                   (void *)buf);
+}
+
+static int ext4_partial_txn_poison(void *opaque)
+{
+    ext4_partial_txn_context_t *ctx = opaque;
+    return ext4_journal_poison(ctx->sb);
+}
+
+/* Read-only flattening of a depth-0/1 extent tree, failing closed when a
+ * tree block is unreadable or the map exceeds the bounded array, and
+ * reporting the old root's leaf blocks for post-publish reclaim. */
+static int ext4_extent_collect_checked(ext4_sb_info_t *sb,
+                                       const ext4_inode_t *inode,
+                                       ext4_flatext_t *out, int *count,
+                                       uint64_t *leaves, int *leaf_count)
+{
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr;
+    memcpy(&hdr, raw, sizeof(hdr));
+    *count = 0;
+    *leaf_count = 0;
+    if (hdr.eh_magic != EXT4_EXT_MAGIC)
+        return -EIO;
+    if (hdr.eh_entries == 0)
+        return 0;
+    if (hdr.eh_depth > 1)
+        return -EOPNOTSUPP;
+
+    if (hdr.eh_depth == 0) {
+        int n = hdr.eh_entries;
+        if (n > EXT4_EXT_ROOT_MAX) return -EIO;
+        ext4_extent_t *ep = (ext4_extent_t *)(raw + sizeof(hdr));
+        ext4_flatext_t flat[EXT4_EXT_ROOT_MAX];
+        for (int i = 0; i < n; i++) {
+            uint16_t len = ep[i].ee_len;
+            if (len > 0x8000) len -= 0x8000;
+            flat[i].start = ep[i].ee_block;
+            flat[i].len = len;
+            flat[i].phys = (uint64_t)ep[i].ee_start_lo |
+                           ((uint64_t)ep[i].ee_start_hi << 32);
+        }
+        memcpy(out, flat, n * sizeof(flat[0]));
+        *count = n;
+        return 0;
+    }
+
+    int ni = hdr.eh_entries;
+    if (ni > EXT4_EXT_ROOT_MAX) return -EIO;
+    ext4_extent_idx_t idx[EXT4_EXT_ROOT_MAX];
+    memcpy(idx, raw + sizeof(hdr), ni * sizeof(ext4_extent_idx_t));
+    int cnt = 0;
+    uint32_t previous_key = 0;
+    for (int i = 0; i < ni; i++) {
+        uint64_t lb = (uint64_t)idx[i].ei_leaf_lo |
+                      ((uint64_t)idx[i].ei_leaf_hi << 32);
+        if ((i != 0 && idx[i].ei_block <= previous_key) ||
+            lb < sb->first_data_block || lb >= sb->blocks_count ||
+            lb > UINT64_MAX / sb->block_size)
+            return -EIO;
+        previous_key = idx[i].ei_block;
+        char *b = (char *)kmalloc(sb->block_size);
+        if (!b) return -ENOMEM;
+        if (bcache_read_bytes(sb->bc, lb * sb->block_size, b,
+                              sb->block_size) < 0) {
+            kfree(b);
+            return -EIO;
+        }
+        ext4_extent_header_t lh;
+        memcpy(&lh, b, sizeof(lh));
+        if (lh.eh_magic != EXT4_EXT_MAGIC || lh.eh_depth != 0 ||
+            lh.eh_entries == 0 || lh.eh_entries > lh.eh_max ||
+            lh.eh_max != EXT_PER_BLK(sb->block_size)) {
+            kfree(b);
+            return -EIO;
+        }
+        if (cnt + lh.eh_entries > EXT4_MAX_FLATEXT) {
+            kfree(b);
+            return -EOPNOTSUPP;
+        }
+        ext4_extent_t *ep = (ext4_extent_t *)(b + sizeof(lh));
+        if (ep[0].ee_block != idx[i].ei_block) {
+            kfree(b);
+            return -EIO;
+        }
+        for (int j = 0; j < lh.eh_entries; j++) {
+            uint16_t len = ep[j].ee_len;
+            if (len > 0x8000) len -= 0x8000;
+            out[cnt].start = ep[j].ee_block;
+            out[cnt].len = len;
+            out[cnt].phys = (uint64_t)ep[j].ee_start_lo |
+                            ((uint64_t)ep[j].ee_start_hi << 32);
+            cnt++;
+        }
+        kfree(b);
+        leaves[*leaf_count] = lb;
+        (*leaf_count)++;
+    }
+    *count = cnt;
+    return 0;
+}
+
+/* Checked partial truncate for the extent-tree path of truncate(). Holds
+ * alloc_lock across the whole transaction; reclaims nothing when the tree
+ * shape is outside the bounded depth-0/1 plan (blocks stay owned, matching
+ * the previous preserve-don't-corrupt behaviour). */
+int ext4_extent_partial_truncate_checked(ext4_sb_info_t *sb,
+                                         uint32_t ino,
+                                         ext4_inode_t *inode,
+                                         uint32_t lblk,
+                                         uint64_t new_size)
+{
+    if (!sb || !inode) return -EINVAL;
+
+    ext4_flatext_t *all = (ext4_flatext_t *)kmalloc(
+        sizeof(ext4_flatext_t) * EXT4_MAX_FLATEXT);
+    uint64_t *leaves = (uint64_t *)kmalloc(sizeof(uint64_t) * EXT4_EXT_ROOT_MAX);
+    uint8_t *scratch = (uint8_t *)kmalloc(sb->block_size);
+    uint32_t *txn_scratch = (uint32_t *)kmalloc(
+        sizeof(uint32_t) * EXT4_MAX_FLATEXT * 2);
+    if (!all || !leaves || !scratch || !txn_scratch) {
+        if (all) kfree(all);
+        if (leaves) kfree(leaves);
+        if (scratch) kfree(scratch);
+        if (txn_scratch) kfree(txn_scratch);
+        return -ENOMEM;
+    }
+
+    mutex_lock(&sb->alloc_lock);
+    if (ext4_is_inconsistent(sb)) {
+        mutex_unlock(&sb->alloc_lock);
+        kfree(all); kfree(leaves); kfree(scratch); kfree(txn_scratch);
+        return -117;
+    }
+    int count = 0, leaf_count = 0;
+    int cr = ext4_extent_collect_checked(sb, inode, all, &count,
+                                         leaves, &leaf_count);
+    if (cr < 0) {
+        mutex_unlock(&sb->alloc_lock);
+        kfree(all); kfree(leaves); kfree(scratch); kfree(txn_scratch);
+        return cr;
+    }
+    ext4_partial_txn_context_t context = { sb, ino, inode };
+    ext4_extent_partial_ops_t ops = {
+        .context = &context,
+        .alloc_block = ext4_partial_txn_alloc,
+        .free_block = ext4_partial_txn_free,
+        .reserve_block = ext4_partial_txn_reserve,
+        .write_inode = ext4_partial_txn_write_inode,
+        .write_tree_block = ext4_partial_txn_write_tree,
+        .poison_journal = ext4_partial_txn_poison,
+        .journaled = sb->journal != NULL,
+        .first_data_block = sb->first_data_block,
+        .blocks_count = sb->blocks_count,
+        .block_size = sb->block_size,
+        .old_size = ext4_inode_size(inode),
+        .new_size = new_size,
+        .tree_scratch = scratch,
+        .keeps_scratch = txn_scratch,
+        .freed_scratch = txn_scratch + EXT4_MAX_FLATEXT,
+    };
+    int ret = a20_ext4_extent_partial_truncate_txn(
+        ino, (uint8_t *)inode + offsetof(ext4_inode_t, i_block),
+        (const ext4_flat_extent_abi_t *)all, (size_t)count,
+        leaves, (size_t)leaf_count, lblk, &ops);
+    mutex_unlock(&sb->alloc_lock);
+    kfree(all); kfree(leaves); kfree(scratch); kfree(txn_scratch);
+    return ext4_record_status(sb, ret);
+}
+#endif /* CONFIG_EXT4_RUST_EXTENT_TXN */
 
 /* ================================================================
  * Directory helpers

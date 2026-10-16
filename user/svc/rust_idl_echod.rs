@@ -136,7 +136,7 @@ fn sleep_1ms() {
     unsafe { syscall6(SYS_THREAD_SLEEP, 1_000_000, 0, 0, 0, 0, 0); }
 }
 
-enum Action { Continue, Crash }
+enum Action { Continue, Crash, Hang }
 
 fn process(endpoint: u32, request: &[u8], len: usize) -> Result<Action, i64> {
     let Some(frame) = request.get(..len) else { return Ok(Action::Continue); };
@@ -151,6 +151,9 @@ fn process(endpoint: u32, request: &[u8], len: usize) -> Result<Action, i64> {
     }
     if envelope.r#type == idl::SVCMGR_REQ_CRASH as u16 {
         return Ok(Action::Crash);
+    }
+    if envelope.r#type == idl::SVCMGR_REQ_HANG as u16 {
+        return Ok(Action::Hang);
     }
     if envelope.r#type == idl::SVCMGR_REQ_VERSION_NEGOTIATE as u16 {
         let Some(payload) = frame.get(idl::ENVELOPE_WIRE_SIZE..) else {
@@ -221,6 +224,15 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8,
                             return idl::A20_SVC_CRASH_CODE as c_int;
                         }
                         Ok(Action::Crash) => {}
+                        // Supervision self-test: stop servicing both channels
+                        // and park until the supervisor's health deadline
+                        // force-exits the task.  Only the service endpoint can
+                        // arm the hang state; the optional ping pump consumes
+                        // it like CRASH without changing behaviour.
+                        Ok(Action::Hang) if is_service_endpoint => {
+                            loop { sleep_1ms(); }
+                        }
+                        Ok(Action::Hang) => {}
                         // The C ping pump deliberately ignores every channel
                         // error. The main endpoint's closed/revoked state is
                         // a normal clean shutdown; send failures use the same

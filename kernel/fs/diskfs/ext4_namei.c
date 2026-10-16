@@ -18,6 +18,14 @@
 
 /* ext4 namei: directory entries and vnode operations. */
 
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+/* Defined in ext4.c; the Rust-owned partial-truncate transaction behind the
+ * extent-tree path of truncate(). */
+int ext4_extent_partial_truncate_checked(ext4_sb_info_t *sb, uint32_t ino,
+                                         ext4_inode_t *inode, uint32_t lblk,
+                                         uint64_t new_size);
+#endif
+
 int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
                          uint32_t block_size, uint16_t *actual_len)
 {
@@ -1271,19 +1279,60 @@ int ext4_vn_truncate_unlocked(vnode_t *vn, size_t size) {
     if (ext4_read_inode(p->sb, p->inode_num, &inode) < 0) return -EIO;
 
     uint64_t old_size = ext4_inode_size(&inode);
+    int size_committed_by_txn = 0;
     if (size == 0) {
-        ext4_block_truncate(p->sb, p->inode_num, &inode);
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+        int trunc_ret;
+        if (inode.i_flags & EXT4_EXTENTS_FL) {
+            trunc_ret = ext4_extent_partial_truncate_checked(
+                p->sb, p->inode_num, &inode, 0, 0);
+            size_committed_by_txn = trunc_ret >= 0;
+        } else {
+            trunc_ret = ext4_block_truncate_checked(
+                p->sb, p->inode_num, &inode);
+        }
+#else
+        int trunc_ret = ext4_block_truncate_checked(p->sb, p->inode_num, &inode);
+#endif
+        if (trunc_ret < 0)
+            return trunc_ret;
     } else if (size < old_size) {
         /* Reclaim blocks beyond the new EOF instead of leaking them.  The
          * first logical block to drop is the one holding the new EOF. */
         uint32_t bs = p->sb->block_size;
         uint32_t lblk = (uint32_t)((size + bs - 1) / bs);
-        if (lblk < (old_size + bs - 1) / bs)
-            ext4_block_truncate_at(p->sb, p->inode_num, &inode, lblk);
+        if (lblk < (old_size + bs - 1) / bs) {
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+            if (inode.i_flags & EXT4_EXTENTS_FL) {
+                /* Rust owns the reclaim decision and ordering; the C
+                 * reference path below retains the historical behaviour for
+                 * the diagnostic C-selector builds. */
+                int trunc_ret = ext4_extent_partial_truncate_checked(
+                    p->sb, p->inode_num, &inode, lblk, size);
+                if (trunc_ret < 0)
+                    return trunc_ret;
+                size_committed_by_txn = 1;
+            } else {
+                int trunc_ret = ext4_block_truncate_at_checked(
+                    p->sb, p->inode_num, &inode, lblk);
+                if (trunc_ret < 0)
+                    return trunc_ret;
+            }
+#else
+            int trunc_ret = ext4_block_truncate_at_checked(
+                p->sb, p->inode_num, &inode, lblk);
+            if (trunc_ret < 0)
+                return trunc_ret;
+#endif
+        }
     }
 
-    ext4_inode_set_size(&inode, size);
-    ext4_write_inode(p->sb, p->inode_num, &inode);
+    if (!size_committed_by_txn) {
+        ext4_inode_set_size(&inode, size);
+        int write_ret = ext4_write_inode(p->sb, p->inode_num, &inode);
+        if (write_ret < 0)
+            return write_ret;
+    }
     p->file_size = size;
     vn->size = size;
     return 0;
