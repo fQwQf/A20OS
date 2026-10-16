@@ -273,6 +273,364 @@ static int test_wait_zombie_leader_with_live_member(void)
     return 0;
 }
 
+/*
+ * wait4 option/selector matrix.  The C reference engine and the Rust
+ * controller must decide these identically:
+ *  - pid == 0 and pid < -1 select on the child's process group;
+ *  - __WNOTHREAD restricts the scan to the calling thread's own children;
+ *  - stop/continue reports are one-shot flags, observable but not consumed
+ *    under WNOWAIT;
+ *  - a signal delivered while parked must surface as EINTR (no handler
+ *    restart), and the reap must still succeed afterwards.
+ */
+static int test_wait4_pgid_selectors(void)
+{
+    int ready_pipe[2], a_gate[2], b_gate[2];
+    if (pipe(ready_pipe) < 0 || pipe(a_gate) < 0 || pipe(b_gate) < 0)
+        return fail("wait4-pgid-pipe");
+
+    /* Child A moves itself into its own process group; child B stays in
+     * ours.  This makes pid==0 and pid==-pgid select different children. */
+    pid_t a = fork();
+    if (a < 0)
+        return fail("wait4-pgid-fork-a");
+    if (a == 0) {
+        close(ready_pipe[0]);
+        close(b_gate[0]);
+        close(b_gate[1]);
+        close(a_gate[1]);
+        if (setpgid(0, 0) < 0)
+            _exit(60);
+        if (write(ready_pipe[1], "a", 1) != 1)
+            _exit(61);
+        close(ready_pipe[1]);
+        char gate_byte;
+        if (read(a_gate[0], &gate_byte, 1) != 1)
+            _exit(62);
+        _exit(55);
+    }
+    close(ready_pipe[1]);
+
+    pid_t b = fork();
+    if (b < 0)
+        return fail("wait4-pgid-fork-b");
+    if (b == 0) {
+        close(ready_pipe[0]);
+        close(a_gate[0]);
+        close(a_gate[1]);
+        close(b_gate[1]);
+        char gate_byte;
+        if (read(b_gate[0], &gate_byte, 1) != 1)
+            _exit(63);
+        _exit(66);
+    }
+    close(a_gate[0]);
+    close(b_gate[0]);
+
+    char ready_byte;
+    if (read(ready_pipe[0], &ready_byte, 1) != 1) {
+        close(ready_pipe[0]);
+        return fail("wait4-pgid-a-ready");
+    }
+    close(ready_pipe[0]);
+
+    /* pid > 0 on a live child: WNOHANG reports nothing yet. */
+    int status = 0;
+    if (waitpid(b, &status, WNOHANG) != 0)
+        return fail("wait4-pgid-live-nohang");
+
+    if (write(b_gate[1], "x", 1) != 1)
+        return fail("wait4-pgid-release-b");
+    close(b_gate[1]);
+
+    /* pid == 0 selects by our own pgid: B matches, A does not. */
+    if (waitpid(0, &status, 0) != b || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 66)
+        return fail("wait4-pgid-zero-reap");
+
+    if (write(a_gate[1], "x", 1) != 1)
+        return fail("wait4-pgid-release-a");
+    close(a_gate[1]);
+
+    /* Only A is left, and it is in another process group: the group
+     * selector has no eligible child left, so this is ECHILD, not a
+     * live-child zero -- and not an unrelated task. */
+    errno = 0;
+    if (waitpid(0, &status, WNOHANG) != -1 || errno != ECHILD)
+        return fail("wait4-pgid-zero-mismatch");
+
+    errno = 0;
+    if (waitpid(getpid(), &status, WNOHANG) != -1 || errno != ECHILD)
+        return fail("wait4-pgid-nonchild");
+
+    /* pid == -pgid matches A in its new group. */
+    if (waitpid(-a, &status, 0) != a || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 55)
+        return fail("wait4-pgid-negative-reap");
+
+    errno = 0;
+    if (waitpid(-a, NULL, WNOHANG) != -1 || errno != ECHILD)
+        return fail("wait4-pgid-reaped-echild");
+
+    puts("SYSCALL_SMOKE: wait4-pgid-selectors PASS");
+    return 0;
+}
+
+typedef struct {
+    int ready_fd;           /* worker -> main: child pid */
+    int go_fd;              /* main -> worker: start reaping */
+    int done_fd;            /* worker -> main: reap finished */
+    int child_gate_read_fd; /* child reads here to be released */
+    int child_gate_write_fd;/* main writes here to release the child */
+    int child_pid;
+    int reaped_pid;
+    int reaped_status;
+} wnothread_ctx_t;
+
+static void *wnothread_worker(void *arg)
+{
+    wnothread_ctx_t *ctx = arg;
+    pid_t child = fork();
+    if (child < 0) {
+        /* Publish the failure so the main thread's read does not hang. */
+        pid_t failed = -1;
+        (void)write(ctx->ready_fd, &failed, sizeof(failed));
+        return NULL;
+    }
+    if (child == 0) {
+        close(ctx->child_gate_write_fd);
+        char gate_byte;
+        if (read(ctx->child_gate_read_fd, &gate_byte, 1) != 1)
+            _exit(64);
+        _exit(44);
+    }
+    close(ctx->child_gate_read_fd);
+    ctx->child_pid = (int)child;
+    if (write(ctx->ready_fd, &child, sizeof(child)) != (ssize_t)sizeof(child))
+        return NULL;
+    char go_byte;
+    if (read(ctx->go_fd, &go_byte, 1) != 1)
+        return NULL;
+    /* The child was created by this thread: __WNOTHREAD still matches it,
+     * and a still-running child parks this thread until exit. */
+    int status = 0;
+    pid_t reaped = waitpid(child, &status, __WNOTHREAD);
+    ctx->reaped_pid = (int)reaped;
+    ctx->reaped_status = status;
+    char done_byte = 'd';
+    (void)write(ctx->done_fd, &done_byte, 1);
+    return NULL;
+}
+
+static int test_wait4_wnothread_scope(void)
+{
+    int ready_pipe[2], go_pipe[2], done_pipe[2], child_gate[2];
+    if (pipe(ready_pipe) < 0 || pipe(go_pipe) < 0 || pipe(done_pipe) < 0 ||
+        pipe(child_gate) < 0)
+        return fail("wait4-wnothread-pipe");
+
+    wnothread_ctx_t ctx = {
+        .ready_fd = ready_pipe[1],
+        .go_fd = go_pipe[0],
+        .done_fd = done_pipe[1],
+        .child_gate_read_fd = child_gate[0],
+        .child_gate_write_fd = child_gate[1],
+        .child_pid = -1,
+        .reaped_pid = 0,
+        .reaped_status = 0,
+    };
+    pthread_t helper;
+    int err = pthread_create(&helper, NULL, wnothread_worker, &ctx);
+    if (err != 0) {
+        errno = err;
+        return fail("wait4-wnothread-create");
+    }
+
+    pid_t child = -1;
+    if (read(ready_pipe[0], &child, sizeof(child)) != (ssize_t)sizeof(child))
+        return fail("wait4-wnothread-pid");
+    if (child <= 0 || child != ctx.child_pid)
+        return fail("wait4-wnothread-pid-value");
+
+    /* The child belongs to the helper thread, not to this one. */
+    int status = 0;
+    errno = 0;
+    if (waitpid(child, &status, WNOHANG | __WNOTHREAD) != -1 ||
+        errno != ECHILD)
+        return fail("wait4-wnothread-main-echild");
+
+    /* Without __WNOTHREAD the whole thread group sees it: alive, so 0. */
+    if (waitpid(child, &status, WNOHANG) != 0)
+        return fail("wait4-wnothread-group-scope");
+
+    /* Let the helper reap while the child is still in its gate (or right
+     * after it exits), then release the child. */
+    if (write(go_pipe[1], "g", 1) != 1)
+        return fail("wait4-wnothread-go");
+    close(go_pipe[1]);
+    if (write(child_gate[1], "x", 1) != 1)
+        return fail("wait4-wnothread-release");
+    close(child_gate[1]);
+
+    if (pthread_join(helper, NULL) != 0)
+        return fail("wait4-wnothread-join");
+    if (ctx.reaped_pid != child || !WIFEXITED(ctx.reaped_status) ||
+        WEXITSTATUS(ctx.reaped_status) != 44)
+        return fail("wait4-wnothread-reap");
+
+    errno = 0;
+    if (waitpid(child, NULL, WNOHANG) != -1 || errno != ECHILD)
+        return fail("wait4-wnothread-reaped-echild");
+
+    puts("SYSCALL_SMOKE: wait4-wnothread PASS");
+    return 0;
+}
+
+static int test_wait4_stop_continue_matrix(void)
+{
+    int ready_pipe[2];
+    if (pipe(ready_pipe) < 0)
+        return fail("wait4-stop-pipe");
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("wait4-stop-fork");
+    if (pid == 0) {
+        close(ready_pipe[0]);
+        if (write(ready_pipe[1], "r", 1) != 1)
+            _exit(65);
+        close(ready_pipe[1]);
+        for (;;)
+            pause();
+    }
+    close(ready_pipe[1]);
+    char ready_byte;
+    if (read(ready_pipe[0], &ready_byte, 1) != 1) {
+        close(ready_pipe[0]);
+        return fail("wait4-stop-ready");
+    }
+    close(ready_pipe[0]);
+
+    int status = 0;
+    if (waitpid(pid, &status, WUNTRACED | WNOHANG) != 0)
+        return fail("wait4-stop-running-nohang");
+
+    if (kill(pid, SIGSTOP) < 0)
+        return fail("wait4-stop-send");
+
+    /* WNOWAIT observes the stop without consuming the report ... */
+    status = 0;
+    if (waitpid(pid, &status, WUNTRACED | WNOWAIT) != pid ||
+        !WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP)
+        return fail("wait4-stop-wnowait");
+    int first_stop = status;
+
+    /* ... a plain WUNTRACED consumes it, and the report is one-shot. */
+    status = 0;
+    if (waitpid(pid, &status, WUNTRACED) != pid || status != first_stop)
+        return fail("wait4-stop-consume");
+    if (waitpid(pid, &status, WUNTRACED | WNOHANG) != 0)
+        return fail("wait4-stop-one-shot");
+    /* Without WUNTRACED a stopped child reports nothing. */
+    if (waitpid(pid, &status, WNOHANG) != 0)
+        return fail("wait4-stop-not-wuntraced");
+
+    if (kill(pid, SIGCONT) < 0)
+        return fail("wait4-stop-continue-send");
+    status = 0;
+    if (waitpid(pid, &status, WCONTINUED) != pid || !WIFCONTINUED(status))
+        return fail("wait4-stop-continued");
+    if (waitpid(pid, &status, WCONTINUED | WNOHANG) != 0)
+        return fail("wait4-stop-continued-one-shot");
+
+    if (kill(pid, SIGKILL) < 0)
+        return fail("wait4-stop-kill");
+    status = 0;
+    if (waitpid(pid, &status, 0) != pid || !WIFSIGNALED(status) ||
+        WTERMSIG(status) != SIGKILL)
+        return fail("wait4-stop-killed-status");
+
+    puts("SYSCALL_SMOKE: wait4-stop-continue PASS");
+    return 0;
+}
+
+static volatile sig_atomic_t wait4_sigusr1_seen;
+
+static void wait4_sigusr1_handler(int signum)
+{
+    (void)signum;
+    wait4_sigusr1_seen++;
+}
+
+static int test_wait4_eintr(void)
+{
+    struct sigaction action, old_action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = wait4_sigusr1_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0; /* no SA_RESTART: the parked wait must surface EINTR */
+    if (sigaction(SIGUSR1, &action, &old_action) < 0)
+        return fail("wait4-eintr-sigaction");
+    wait4_sigusr1_seen = 0;
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("wait4-eintr-fork");
+    if (pid == 0) {
+        /* Sleep well past the parent's entry into the wait, interrupt it,
+         * then exit so the retry has something to reap. */
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 200000000 };
+        nanosleep(&delay, NULL);
+        kill(getppid(), SIGUSR1);
+        _exit(56);
+    }
+
+    int status = 0;
+    errno = 0;
+    pid_t interrupted = waitpid(pid, &status, 0);
+    int saved_errno = errno;
+    if (interrupted != -1 || saved_errno != EINTR ||
+        wait4_sigusr1_seen != 1)
+        return fail("wait4-eintr-interrupted");
+
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 56)
+        return fail("wait4-eintr-reap");
+    if (wait4_sigusr1_seen != 1)
+        return fail("wait4-eintr-handler-count");
+
+    if (sigaction(SIGUSR1, &old_action, NULL) < 0)
+        return fail("wait4-eintr-restore");
+    puts("SYSCALL_SMOKE: wait4-eintr PASS");
+    return 0;
+}
+
+static int test_wait4_reap_storm(void)
+{
+    enum { ROUNDS = 16 };
+
+    for (int round = 0; round < ROUNDS; round++) {
+        pid_t pid = fork();
+        if (pid < 0)
+            return fail("wait4-storm-fork");
+        if (pid == 0) {
+            if (round & 1)
+                sched_yield();
+            _exit(40 + (round & 7));
+        }
+        int status = 0;
+        if (waitpid(pid, &status, 0) != pid)
+            return fail("wait4-storm-wait");
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 40 + (round & 7))
+            return fail("wait4-storm-status");
+        errno = 0;
+        if (waitpid(pid, NULL, WNOHANG) != -1 || errno != ECHILD)
+            return fail("wait4-storm-echild");
+    }
+
+    printf("SYSCALL_SMOKE: wait4-reap-storm PASS rounds=%d\n", ROUNDS);
+    return 0;
+}
+
 /* Create a process from a non-leader thread, then let that thread exit.  The
  * main thread must still be able to wait for its thread-group child's pidfd. */
 static void *thread_spawn_child(void *unused)
@@ -702,6 +1060,21 @@ int main(int argc, char **argv)
         return 1;
 
     if (test_wait_zombie_leader_with_live_member())
+        return 1;
+
+    if (test_wait4_pgid_selectors())
+        return 1;
+
+    if (test_wait4_wnothread_scope())
+        return 1;
+
+    if (test_wait4_stop_continue_matrix())
+        return 1;
+
+    if (test_wait4_eintr())
+        return 1;
+
+    if (test_wait4_reap_storm())
         return 1;
 
     pid = fork();

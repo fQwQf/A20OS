@@ -194,6 +194,9 @@ def cmd_native(a) -> int:
     native_rust_ufsd = str(getattr(a, "native_rust_ufsd", "0"))
     if native_rust_ufsd not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd must be 0 or 1")
+    native_rust_ufsd_extent_txn = str(getattr(a, "native_rust_ufsd_ext4_extent_txn", "1"))
+    if native_rust_ufsd_extent_txn not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-ext4-extent-txn must be 0 or 1")
     native_rust_ufsd_ext4_orphan = str(getattr(a, "native_rust_ufsd_ext4_orphan", "1"))
     if native_rust_ufsd_ext4_orphan not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd-ext4-orphan must be 0 or 1")
@@ -201,6 +204,7 @@ def cmd_native(a) -> int:
     test_close_orphan_after = str(getattr(a, "native_rust_ufsd_test_close_orphan_write_fail_after", "1"))
     test_close_orphan_restore = str(getattr(a, "native_rust_ufsd_test_close_orphan_restore_fail", "0"))
     test_close_token_drop_ack = str(getattr(a, "native_rust_ufsd_test_close_token_drop_ack_once", "0"))
+    test_ext4_trunc_free = str(getattr(a, "native_rust_ufsd_test_ext4_trunc_free_fail_once", "0"))
     if test_close_orphan not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd-test-close-orphan-write-fail-once must be 0 or 1")
     if test_close_orphan_after not in tuple(str(n) for n in range(1, 17)):
@@ -213,6 +217,14 @@ def cmd_native(a) -> int:
         raise SystemExit("error: restore-failure injection needs a write index below 16")
     if test_close_token_drop_ack not in ("0", "1"):
         raise SystemExit("error: --native-rust-ufsd-test-close-token-drop-ack-once must be 0 or 1")
+    if test_ext4_trunc_free not in ("0", "1"):
+        raise SystemExit("error: --native-rust-ufsd-test-ext4-trunc-free-fail-once must be 0 or 1")
+    if test_ext4_trunc_free == "1" and native_rust_ufsd != "1":
+        raise SystemExit("error: ext4 truncate-free failure profile requires --native-rust-ufsd 1")
+    if test_ext4_trunc_free == "1" and native_rust_ufsd_extent_txn != "1":
+        raise SystemExit("error: ext4 truncate-free failure profile requires Rust extent transaction selection")
+    if test_ext4_trunc_free == "1" and (test_close_orphan == "1" or test_close_token_drop_ack == "1"):
+        raise SystemExit("error: ext4 truncate-free injection is mutually exclusive with close-orphan and close-token profiles")
     if test_close_token_drop_ack == "1" and native_rust_ufsd != "1":
         raise SystemExit("error: close-token ACK-drop profile requires --native-rust-ufsd 1")
     if test_close_token_drop_ack == "1" and test_close_orphan == "1":
@@ -265,6 +277,9 @@ def cmd_native(a) -> int:
     rust_ufsd_test_close_token_path = generated_user_binary(
         getattr(a, "rust_ufsd_test_close_token_binary", ""),
         "Rust ufsd close-token test")
+    rust_ufsd_test_ext4_trunc_path = generated_user_binary(
+        getattr(a, "rust_ufsd_test_ext4_trunc_free_bin", ""),
+        "Rust ufsd ext4 truncate test")
     with user_output_lock(str(resolved_build_dir)):
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -278,10 +293,12 @@ def cmd_native(a) -> int:
                               f"\nNATIVE_RUST_RTCD={native_rust_rtcd}"
                               f"\nNATIVE_RUST_UFSD={native_rust_ufsd}"
                               f"\nNATIVE_RUST_UFSD_EXT4_ORPHAN={native_rust_ufsd_ext4_orphan}"
+                              f"\nNATIVE_RUST_UFSD_EXT4_EXTENT_TXN={native_rust_ufsd_extent_txn}"
                               f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}"
                               f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}")
         effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}"
         effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE={test_close_token_drop_ack}"
+        effective_build_id += f"\nNATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE={test_ext4_trunc_free}"
         old_build_id = stamp_id(stamp)
         old_rust_svcmgr = "NATIVE_RUST_SVCMGR=1" in old_build_id.splitlines()
         old_rust_echod = "NATIVE_RUST_ECHOD=1" in old_build_id.splitlines()
@@ -342,6 +359,12 @@ def cmd_native(a) -> int:
             # Do not let a previously built fault-injection service remain in
             # the next default FAT image as an unselected test executable.
             need_build = True
+        elif (test_ext4_trunc_free == "0" and
+              rust_ufsd_test_ext4_trunc_path is not None and
+              (rust_ufsd_test_ext4_trunc_path.exists() or
+               rust_ufsd_test_ext4_trunc_path.is_symlink())):
+            # Keep an injected UFSD ELF out of a later production image.
+            need_build = True
         elif any_newer(stamp, a.roots.split(), []):
             need_build = True
 
@@ -390,10 +413,12 @@ def cmd_native(a) -> int:
                       f"NATIVE_RUST_RTCD={native_rust_rtcd}",
                       f"NATIVE_RUST_UFSD={native_rust_ufsd}",
                       f"NATIVE_RUST_UFSD_EXT4_ORPHAN={native_rust_ufsd_ext4_orphan}",
+                      f"NATIVE_RUST_UFSD_EXT4_EXTENT_TXN={native_rust_ufsd_extent_txn}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_ONCE={test_close_orphan}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_WRITE_FAIL_AFTER={test_close_orphan_after}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_ORPHAN_RESTORE_FAIL={test_close_orphan_restore}",
                       f"NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE={test_close_token_drop_ack}",
+                      f"NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE={test_ext4_trunc_free}",
                       f"USER_BUILD_DIR={resolved_build_dir}",
                       "native-programs"])
         if rc != 0:
@@ -416,6 +441,8 @@ def cmd_native(a) -> int:
             rust_ufsd_path.unlink(missing_ok=True)
         if test_close_token_drop_ack == "0" and rust_ufsd_test_close_token_path is not None:
             rust_ufsd_test_close_token_path.unlink(missing_ok=True)
+        if test_ext4_trunc_free == "0" and rust_ufsd_test_ext4_trunc_path is not None:
+            rust_ufsd_test_ext4_trunc_path.unlink(missing_ok=True)
         if manager_binary is not None and manager_c_reference is not None:
             if native_rust_svcmgr == "1":
                 # Keep the C implementation available for behavior comparison,
@@ -452,7 +479,10 @@ def cmd_native(a) -> int:
             if native_rust_ufsd == "1":
                 if not ufsd_binary.is_file():
                     raise SystemExit("error: C ufsd build succeeded without its runtime ELF")
-                shutil.copy2(ufsd_binary, ufsd_c_reference)
+                if not old_rust_ufsd:
+                    shutil.copy2(ufsd_binary, ufsd_c_reference)
+                elif not ufsd_c_reference.is_file():
+                    raise SystemExit("error: Rust ufsd selector changed without a preserved C reference ELF")
                 if rust_ufsd_path is None or not rust_ufsd_path.is_file():
                     raise SystemExit("error: Rust ufsd build succeeded without its ELF")
                 shutil.copy2(rust_ufsd_path, ufsd_binary)
@@ -592,6 +622,9 @@ def main() -> int:
             s.add_argument("--rust-rtcd-binary", default="")
             s.add_argument("--native-rust-ufsd", choices=("0", "1"), default="0")
             s.add_argument("--native-rust-ufsd-ext4-orphan", choices=("0", "1"), default="1")
+            s.add_argument("--native-rust-ufsd-ext4-extent-txn", choices=("0", "1"), default="1")
+            s.add_argument("--native-rust-ufsd-test-ext4-trunc-free-fail-once",
+                           choices=("0", "1"), default="0")
             s.add_argument("--native-rust-ufsd-test-close-orphan-write-fail-once",
                            choices=("0", "1"), default="0")
             s.add_argument("--native-rust-ufsd-test-close-orphan-write-fail-after",
@@ -602,6 +635,7 @@ def main() -> int:
                            choices=("0", "1"), default="0")
             s.add_argument("--rust-ufsd-binary", default="")
             s.add_argument("--rust-ufsd-test-close-token-binary", default="")
+            s.add_argument("--rust-ufsd-test-ext4-trunc-free-bin", default="")
     s = sub.add_parser("clean")
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])

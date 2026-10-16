@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise wait4 registration and the real child-wait notifier race windows."""
+"""Exercise wait4 registration and the real child-wait notifier race windows.
+
+The wait4 side extracts the retained C reference engine from
+kernel/proc/wait.c: the WAIT4_C_ENGINE marker region (plus the WAIT4_COMMON
+helpers it calls).  The scenarios and assertions are unchanged from the
+original test; only the extraction follows the wait.c restructure
+(proc_wait4() now forwards to proc_wait4_internal()).
+"""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,6 +31,14 @@ def extract_function(source: str, signature: str) -> str:
     raise ValueError(f"unterminated function: {signature}")
 
 
+def extract_region(source: str, begin: str, end: str) -> str:
+    start = source.index(begin) + len(begin)
+    stop = source.index(end)
+    if stop <= start:
+        raise ValueError(f"empty region {begin}..{end}")
+    return source[start:stop]
+
+
 PRELUDE = r"""
 #include <setjmp.h>
 #include <stdint.h>
@@ -40,13 +55,16 @@ PRELUDE = r"""
 #define ECHILD 10
 #define ERESTARTSYS 512
 #define PROC_UNUSED 0
-#define PROC_RUNNABLE 1
+#define PROC_READY 1
 #define PROC_RUNNING 2
-#define PROC_ZOMBIE 3
+#define PROC_BLOCKED 3
 #define PROC_STOPPED 4
-#define PROC_WAIT_INTERRUPTIBLE 5
-#define PROC_WAKE_SIGNAL 1
-#define PROC_WAKE_TASK 2
+#define PROC_ZOMBIE 5
+#define PROC_WAIT_INTERRUPTIBLE 1
+#define PROC_WAKE_EVENT 1
+#define PROC_WAKE_SIGNAL 4
+#define PROC_WAKE_FATAL_SIGNAL 5
+#define PROC_WAKE_TASK_EXIT 6
 #define SIGTRAP 5
 
 typedef struct spinlock { int id; } spinlock_t;
@@ -115,7 +133,7 @@ static proc_wake_reason_t proc_park_commit(proc_wait_token_t token) {
         parked_without_wake = 1;
         longjmp(parked, 1);
     }
-    return PROC_WAKE_TASK;
+    return PROC_WAKE_EVENT;
 }
 static int proc_wake_reason_is_task_interrupt(proc_wake_reason_t reason) {
     (void)reason; return 0;
@@ -296,7 +314,7 @@ int main(void) {
 
     if (setjmp(parked) == 0) {
         int status = 0;
-        int result = proc_wait4(-1, &status, 0);
+        int result = proc_wait4_internal(-1, NULL, &status, 0);
         if (result != child.pid) {
             fprintf(stderr, "wait4 returned %d, expected child %d\n",
                     result, child.pid);
@@ -321,21 +339,21 @@ int main(void) {
     child = (task_t){.pid=21, .ppid=20, .tgid=21, .pgid=20,
                      .state=PROC_ZOMBIE, .parent=&waiter};
     live_member = (task_t){.pid=22, .ppid=20, .tgid=21, .pgid=20,
-                           .state=PROC_RUNNABLE, .parent=&waiter};
+                           .state=PROC_READY, .parent=&waiter};
     waiter.tg_leader = &waiter;
     waiter.children = &child;
     child.tg_leader = &child;
     child.tg_next = &live_member;
     live_group_test = 1;
     int status = 0;
-    int result = proc_wait4(child.pid, &status, WNOHANG);
+    int result = proc_wait4_internal(child.pid, NULL, &status, WNOHANG);
     if (result != 0) {
         fprintf(stderr, "live zombie leader wait4 returned %d, expected 0\n",
                 result);
         return 5;
     }
     live_member.state = PROC_ZOMBIE;
-    result = proc_wait4(child.pid, &status, WNOHANG);
+    result = proc_wait4_internal(child.pid, NULL, &status, WNOHANG);
     if (result != child.pid) {
         fprintf(stderr, "dead-group wait4 returned %d, expected %d\n",
                 result, child.pid);
@@ -350,15 +368,17 @@ int main(void) {
 def main() -> None:
     source = WAIT_SOURCE.read_text()
     exit_source = EXIT_SOURCE.read_text()
-    helpers = [
-        extract_function(source, "static void wait_accumulate_child_time("),
-        extract_function(source, "static int wait_task_tgid("),
-        extract_function(source, "static int wait_is_direct_child("),
-        extract_function(source, "static int wait_is_child_for_waiter_locked("),
-        extract_function(source, "static task_t *wait_group_start_locked("),
-        extract_function(source, "static int wait_child_matches_locked("),
-    ]
-    wait4 = extract_function(source, "int proc_wait4(")
+    # The retained C reference engine is the WAIT4_C_ENGINE region of wait.c
+    # plus the WAIT4_COMMON helpers it calls; the public proc_wait4() only
+    # forwards to proc_wait4_internal().
+    engine = extract_region(source, "/* WAIT4_COMMON_BEGIN */",
+                            "/* WAIT4_COMMON_END */")
+    engine += extract_region(source, "/* WAIT4_C_ENGINE_BEGIN */",
+                             "/* WAIT4_C_ENGINE_END */")
+    for needle in ("wait_accumulate_child_time", "wait_task_tgid",
+                   "wait_child_matches_locked", "proc_wait4_internal"):
+        if needle not in engine:
+            raise ValueError(f"wait.c line-region extraction lost {needle!r}")
     notifier = extract_function(exit_source, "void proc_wake_child_waiters(")
     legacy_notifier = notifier.replace(
         "void proc_wake_child_waiters(",
@@ -382,7 +402,7 @@ def main() -> None:
         tmp = Path(tmp)
         harness = tmp / "wait_window.c"
         binary = tmp / "wait_window"
-        harness.write_text(PRELUDE + "\n".join(helpers) + "\n" + wait4 + "\n" + HARNESS)
+        harness.write_text(PRELUDE + "\n" + engine + "\n" + HARNESS)
         subprocess.run(["cc", "-std=gnu11", "-O0", "-Wall", "-Wextra",
                         "-Werror", str(harness), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)

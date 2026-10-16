@@ -391,9 +391,16 @@ fn log_status(output: Handle, prefix: &[u8], status: i64) {
     write(output, b"\n");
 }
 
+fn write_name(output: Handle, name: &[u8]) {
+    // `Definition.name` is a NUL-terminated C string for ABI interop; logs
+    // must not leak the terminator (the C manager prints with `%s`).
+    let len = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    write(output, &name[..len]);
+}
+
 fn log_named(output: Handle, prefix: &[u8], service: &Service) {
     write(output, prefix);
-    write(output, service.def.name);
+    write_name(output, service.def.name);
     write(output, b"\n");
 }
 
@@ -936,7 +943,7 @@ fn name_matches(request: &[u8], registered: &[u8]) -> bool {
 fn send_ping(service: &mut Service, now: u64, output: Handle) {
     if service.life.ping_expired(now) {
         write(output, b"SVC_MGR: health ping timeout name=");
-        write(output, service.def.name);
+        write_name(output, service.def.name);
         write(output, b"\n");
         let status = unsafe { a20_svcmgr_task_kill(service.task.raw(), SIGKILL) };
         if status < 0 {
@@ -1005,7 +1012,7 @@ fn apply_exit_decision(
         }
         lifecycle::ExitDecision::Restart => {
             write(output, b"SVC_MGR: crash detected name=");
-            write(output, service.def.name);
+            write_name(output, service.def.name);
             write(output, b" exit_code=");
             write_u64(output, exit_code.unsigned_abs() as u64);
             write(output, b"\n");
@@ -1036,7 +1043,7 @@ fn apply_exit_decision(
             // spawn_one registers both watches before exposing the new UP
             // state. If either watch fails it kills, waits, and closes.
             write(output, b"SVC_MGR: healed name=");
-            write(output, service.def.name);
+            write_name(output, service.def.name);
             write(output, b" restarts=");
             write_u64(output, service.life.restarts as u64);
             write(output, b"\n");

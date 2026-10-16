@@ -3429,3 +3429,67 @@ CASES["smoke-mm-vma-region-split-fail-rust"]["forbid"] += [
     "MM_DONTUNMAP_SPLIT_FAILURE: FAIL",
     "MM_DONTUNMAP_TEST: injected-failure leaves=",
 ]
+
+# Source-matched guest gates for the Rust ext4 truncate transaction. These are
+# deliberately ext4-only: the historical all-filesystems workload is a
+# separate smoke case and currently reaches an unrelated NTFS remount failure
+# before shutdown. Running it here would contaminate the ext4 shutdown gate.
+for _name, _fault in (("smoke-ext4-truncate-rust", False),
+                      ("smoke-ext4-truncate-rollback-rust", True)):
+    CASES[_name] = deepcopy(CASES["smoke-native-fs-all"])
+    _case = CASES[_name]
+    _case["build"]["vars"] = [
+        v for v in _case["build"]["vars"]
+        if not v.startswith(("NR_CPUS=", "EXT4_EXTENT_TXN_IMPL=", "NATIVE_RUST_UFSD=",
+                             "NATIVE_RUST_UFSD_EXT4_EXTENT_TXN=",
+                             "NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE="))
+    ] + ["NR_CPUS=2", "EXT4_EXTENT_TXN_IMPL=rust", "NATIVE_RUST_UFSD=1",
+         "NATIVE_RUST_UFSD_EXT4_EXTENT_TXN=1",
+         f"NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE={int(_fault)}"]
+    _case["gate"]["cpus"] = "2"
+    _case["log"] = f".kernel-build/smoke/{_name}-riscv64.log"
+    _case["stdin"] = {"kind": "pipe", "delay": 8, "lines": [
+        "/bin/svcmgr-rv &", "sleep 2",
+        ("UXFS_EXPECT_TRUNC_FAIL_ONCE=1 " if _fault else "") +
+        "UXFS_TEST_CASE=truncate UXFS_TEST_DIR=/uext4 UXFS_TEST_BLK=2 UXFS_TEST_FS=ext4 /bin/uxfs_reopen_test",
+        "poweroff"]}
+    _case["argv"][_case["argv"].index("-smp") + 1] = "2"
+    _case["timeout"] = "120s"
+    _case["expect"] = ["UXFS_REOPEN: truncate-boundaries=PASS sizes=4097,4096,0",
+                       "UXFS_TEST_CASE: truncate PASS", "[SD] audit errors=0",
+                       "System is going down for power-off NOW"]
+    if _fault:
+        _case["expect"].append("UXFS_REOPEN: truncate-failure-rollback=PASS errno=EIO size=16384")
+    _case["forbid"] = ["UXFS_ALL: FAIL", "UXFS_TEST_CASE: truncate FAIL", "PANIC", "FATAL:"]
+    _case["pass_msg"] = f"{_name}: PASS; log saved to $log"
+
+# Full Linux keyring syscall surface enters the Rust-owned core behind the
+# existing C ABI adapter. The program covers permissions, graph operations,
+# expiry and session inheritance using the exact RV64 Linux selector.
+CASES["smoke-keyring-rust"] = {
+    "gate": {"mem": "1G", "cpus": "2"},
+    "pre": [],
+    "build": {"vars": ["ARCH=riscv64", "ABI=linux", "BRINGUP=0", "NR_CPUS=2",
+                         "KEYRING_IMPL=rust"], "target": "dev-build"},
+    "log": ".kernel-build/smoke/keyring-rust-riscv64.log",
+    "stdin": {"kind": "pipe", "delay": 8,
+              "lines": ["/bin/keyring_rust_test", "poweroff"]},
+    "timeout": "120s",
+    "qemu": "qemu-system-riscv64",
+    "argv": ["qemu-system-riscv64", "-machine", "virt", "-m", "1G", "-nographic",
+             "-smp", "2", "-bios", "default", "-global", "virtio-mmio.force-legacy=false",
+             "-drive", "file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0",
+             "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
+             "-kernel", ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf"],
+    "expect": ["KEYRING_RUST: PASS", "System is going down for power-off NOW"],
+    "forbid": ["KEYRING_RUST: FAIL", "PANIC", "FATAL:"],
+    "timeout_msg": False,
+    "pass_msg": "smoke-keyring-rust: PASS; log saved to $log",
+}
+CASES["smoke-keyring-c"] = deepcopy(CASES["smoke-keyring-rust"])
+CASES["smoke-keyring-c"]["build"]["vars"] = [
+    "KEYRING_IMPL=c" if v == "KEYRING_IMPL=rust" else v
+    for v in CASES["smoke-keyring-c"]["build"]["vars"]
+]
+CASES["smoke-keyring-c"]["log"] = ".kernel-build/smoke/keyring-c-riscv64.log"
+CASES["smoke-keyring-c"]["pass_msg"] = "smoke-keyring-c: PASS; log saved to $log"

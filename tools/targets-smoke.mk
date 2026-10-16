@@ -11,6 +11,23 @@
 smoke-riscv64:
 	tools/a20 test smoke-riscv64
 
+smoke-ext4-truncate-rust:
+	$(PYTHON) tools/smoke.py smoke-ext4-truncate-rust
+
+smoke-ext4-truncate-rollback-rust:
+	$(PYTHON) tools/smoke.py smoke-ext4-truncate-rollback-rust
+
+smoke-keyring-rust:
+	$(PYTHON) tools/smoke.py smoke-keyring-rust
+
+smoke-keyring-c:
+	$(PYTHON) tools/smoke.py smoke-keyring-c
+
+# Optional timing-only experiment; unlike smoke-keyring-*, this is not a
+# correctness gate and requires explicit C/Rust kernel and shared FAT paths.
+bench-keyring-selector:
+	tools/keyring_selector_bench.sh
+
 check-a20-idl: user/svc/a20_services_idl.h
 	@$(PYTHON) tools/gensync.py a20-idl \
 		--idl user/svc/a20_services.idl \
