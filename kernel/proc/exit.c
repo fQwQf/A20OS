@@ -31,9 +31,8 @@ extern void udisk_task_exit(int pid);
 #include "ipc/ipc.h"
 #include "sys/usercopy.h"
 #include "cg/cgroup.h"
-#ifdef CONFIG_TASK_EXIT_RUST
 #include "proc/task_exit.h"
-#endif
+#include "proc/exit_reparent.h"
 
 static int proc_ignores_sigchld(task_t *parent)
 {
@@ -283,155 +282,65 @@ static void proc_release_exiting_mm(task_t *t)
 /* Pick a live thread of *dead*'s group to take over reaping.  Each candidate's
  * ->state is sampled under its own park_lock, one at a time; the caller must
  * not hold a task park_lock (INV-P3). */
-static task_t *proc_find_live_thread_reaper_locked(task_t *dead)
-{
-    int dead_tgid = proc_task_tgid(dead);
-    if (dead_tgid <= 0)
-        return NULL;
+/* ---- reparent adapter ---- */
 
-    task_t *leader = dead->tg_leader ? dead->tg_leader : dead;
-    for (task_t *t = leader; t; t = t->tg_next) {
-        if (t == dead || t == proc_idle_task())
-            continue;
-        int st = proc_task_state_get(t);
-        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
-            continue;
-        if (proc_task_tgid(t) == dead_tgid)
-            return t;
-    }
-    return NULL;
+int a20_ex_exit_code(const task_t *t) { return t->exit_code; }
+int a20_ex_pid(const task_t *t) { return t->pid; }
+int a20_ex_tgid(const task_t *t) { return t->tgid; }
+task_t *a20_ex_tg_leader(const task_t *t) { return t->tg_leader; }
+task_t *a20_ex_tg_next(const task_t *t) { return t->tg_next; }
+int a20_ex_exit_signal(const task_t *t) { return t->exit_signal; }
+uint64_t a20_ex_clone_flags(const task_t *t) { return t->clone_flags; }
+task_t *a20_ex_children(const task_t *t) { return t->children; }
+task_t *a20_ex_sibling_next(const task_t *t) { return t->sibling_next; }
+task_t *a20_ex_idle_task(void) { return proc_idle_task(); }
+int a20_ex_state(task_t *t) { return proc_task_state_get(t); }
+uint64_t a20_ex_park_lock(task_t *t) { return spin_lock_irqsave(&t->park_lock); }
+void a20_ex_park_unlock(task_t *t, uint64_t flags) { spin_unlock_irqrestore(&t->park_lock, flags); }
+int a20_ex_pdeathsig(const task_t *t) { return t->pdeathsig; }
+void a20_ex_set_pdeathsig(task_t *t, int sig) { t->pdeathsig = sig; }
+int a20_ex_tg_group_dead(task_t *t) { return proc_tg_group_dead_locked(t); }
+int a20_ex_native_thread_waitable(task_t *child, task_t *reaper) {
+    return proc_native_thread_waitable(child, reaper);
 }
+int a20_ex_is_current_any_cpu(task_t *t) {
+    return proc_task_is_current_any_cpu(t) ? 1 : 0;
+}
+void a20_ex_reap_detach(task_t *t) { proc_reap_detach_list_locked(t); }
+void a20_ex_note_zombie(void) { proc_sched_note_zombie(); }
+task_t *a20_ex_get(task_t *t) { return proc_get(t); }
 
+/*
+ * Move the children of @dead under a reaper.  The decision (reaper election,
+ * group-dead reaping, pdeathsig claims, force-kill list, reparent target) is
+ * Rust's; this adapter performs the deferred calls after the list lock is
+ * dropped, in the same order the C implementation used.
+ */
 static void proc_reparent_children(task_t *dead, task_t *reaper)
 {
-    if (!dead)
-        return;
+    exit_reparent_lists_t lists;
+    exit_reparent_result_t res;
+    a20_ex_reparent_children(dead, reaper, &lists, &res);
 
-    task_t *to_destroy[64];
-    int destroy_count = 0;
-    int force_kill_children = (dead->exit_code < 0 &&
-        dead->exit_code != -SIGCHLD && dead->exit_code != -SIGSTOP);
+    if (res.wake_for)
+        proc_wake_child_waiters(res.wake_for);
 
-    /* tasklist_lock covers the children chain and every reparent/unlink in this
-     * loop.  Child ->state and ->pdeathsig are park_lock-owned and are read
-     * under the child's own park_lock nested inside it (tasklist_lock ->
-     * park_lock).  The two helpers that sample several tasks' states run with
-     * no task lock held, so no two park_locks are ever nested (INV-P3). */
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    task_t *thread_reaper = proc_find_live_thread_reaper_locked(dead);
-    task_t *actual_reaper = thread_reaper;
-    if (!thread_reaper) {
-        actual_reaper = reaper;
-        if (!actual_reaper || actual_reaper == dead ||
-            proc_task_state_get(actual_reaper) == PROC_UNUSED ||
-            proc_task_state_get(actual_reaper) == PROC_ZOMBIE)
-            actual_reaper = proc_idle_task();
+    for (size_t i = 0; i < res.destroy_count; i++) {
+        proc_destroy_task(lists.to_destroy[i]);
+        proc_put(lists.to_destroy[i]);
     }
 
-    int child_pids[64];
-    int child_pid_count = 0;
-    int pdeathsig_pids[64];
-    int pdeathsig_signals[64];
-    int pdeathsig_count = 0;
-
-    task_t *wake_for = NULL;
-    for (task_t *child = dead->children; child; ) {
-        task_t *next = child->sibling_next;
-        if (child == proc_idle_task()) {
-            child = next;
-            continue;
-        }
-        int cstate = proc_task_state_get(child);
-        if (cstate == PROC_UNUSED) {
-            child = next;
-            continue;
-        }
-
-        /* PR_SET_PDEATHSIG: when the parent dies, the child receives the
-         * recorded signal exactly once (the field is then cleared).  Deliver
-         * it after the lock is dropped, like the force-kill list below.
-         * ->pdeathsig is park_lock-owned, so the claim is a critical section. */
-        uint64_t pf = spin_lock_irqsave(&child->park_lock);
-        int pdeathsig = (cstate != PROC_ZOMBIE) ? child->pdeathsig : 0;
-        if (pdeathsig &&
-            pdeathsig_count < (int)(sizeof(pdeathsig_pids) /
-                                    sizeof(pdeathsig_pids[0]))) {
-            pdeathsig_pids[pdeathsig_count] = child->pid;
-            pdeathsig_signals[pdeathsig_count] = pdeathsig;
-            child->pdeathsig = 0;
-            pdeathsig_count++;
-        }
-        spin_unlock_irqrestore(&child->park_lock, pf);
-
-        int reap_group_dead = 0;
-        if (!thread_reaper)
-            reap_group_dead = proc_tg_group_dead_locked(child);
-        if (reap_group_dead &&
-            (actual_reaper == proc_idle_task() ||
-             child->exit_signal != SIGCHLD ||
-             ((child->clone_flags & CLONE_THREAD) &&
-              !proc_native_thread_waitable(child, actual_reaper))) &&
-            proc_task_state_get(child) == PROC_ZOMBIE &&
-            !proc_task_is_current_any_cpu(child)) {
-            if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
-                task_t *owned = proc_get(child);
-                if (owned) {
-                    proc_reap_detach_list_locked(child);
-                    to_destroy[destroy_count++] = owned;
-                }
-            } else {
-                proc_sched_note_zombie();
-                proc_reparent_task_locked(actual_reaper, child);
-            }
-
-            thread_reaper = proc_find_live_thread_reaper_locked(dead);
-            actual_reaper = thread_reaper;
-            if (!thread_reaper) {
-                actual_reaper = reaper;
-                if (!actual_reaper || actual_reaper == dead ||
-                    proc_task_state_get(actual_reaper) == PROC_UNUSED ||
-                    proc_task_state_get(actual_reaper) == PROC_ZOMBIE)
-                    actual_reaper = proc_idle_task();
-            }
-            if (proc_task_state_get(child) == PROC_UNUSED) {
-                child = next;
-                continue;
-            }
-        }
-
-        cstate = proc_task_state_get(child);
-        if (force_kill_children && cstate != PROC_ZOMBIE) {
-            if (child_pid_count < (int)(sizeof(child_pids) / sizeof(child_pids[0])))
-                child_pids[child_pid_count++] = child->pid;
-        }
-
-        proc_reparent_task_locked(actual_reaper, child);
-        if (cstate == PROC_ZOMBIE && !wake_for)
-            wake_for = actual_reaper;
-        child = next;
-    }
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-
-    /* The waiter scan re-acquires tasklist_lock, so it runs after the loop. */
-    if (wake_for)
-        proc_wake_child_waiters(wake_for);
-
-    for (int i = 0; i < destroy_count; i++) {
-        proc_destroy_task(to_destroy[i]);
-        proc_put(to_destroy[i]);
-    }
-
-    for (int i = 0; i < child_pid_count; i++) {
-        task_t *child = proc_find_get(child_pids[i]);
+    for (size_t i = 0; i < res.force_kill_count; i++) {
+        task_t *child = proc_find_get(lists.force_kill_pids[i]);
         if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
             proc_force_exit(child, dead->exit_code);
         proc_put(child);
     }
 
-    for (int i = 0; i < pdeathsig_count; i++) {
-        task_t *child = proc_find_get(pdeathsig_pids[i]);
+    for (size_t i = 0; i < res.pdeathsig_count; i++) {
+        task_t *child = proc_find_get(lists.pdeathsig_pids[i]);
         if (child && child->state != PROC_UNUSED && child->state != PROC_ZOMBIE)
-            signal_send(child->pid, pdeathsig_signals[i]);
+            signal_send(child->pid, lists.pdeathsig_signals[i]);
         proc_put(child);
     }
 }
@@ -448,7 +357,6 @@ static void proc_clear_child_tid_direct(task_t *t)
     (void)copy_to_user(ctid, &zero, sizeof(zero));
 }
 
-#ifdef CONFIG_TASK_EXIT_RUST
 typedef struct task_exit_context {
     task_t *task;
     int exit_code;
@@ -731,217 +639,14 @@ static void proc_exit_rust(task_t *t, int exit_code)
     a20_task_exit_run(&ops);
     panic("proc_exit: Rust controller returned");
 }
-#endif
 
 void proc_exit(int exit_code)
 {
     task_t *t = proc_current();
     if (!t)
         panic("proc_exit: no current task");
-#ifdef CONFIG_TASK_EXIT_RUST
     proc_exit_rust(t, exit_code);
     panic("proc_exit: returned from Rust path");
-#else
-    t->exit_pending = 0;
-    t->pending_exit_code = exit_code;
-
-    ktrace_exit("[EXIT] proc_exit: pid=%d tgid=%d thread=%d exit_code=%d\n",
-                t->pid, t->tgid,
-                (t->clone_flags & CLONE_THREAD) != 0, exit_code);
-
-    int *ctid_to_wake = t->clear_child_tid;
-    (void)ctid_to_wake; /* futex wake below is Linux-ABI gated */
-    proc_clear_child_tid_direct(t);
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (ctid_to_wake)
-        futex_wake_user(ctid_to_wake, 1);
-#endif
-
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (t->robust_list_head)
-        exit_robust_list(t);
-#endif
-
-    vfs_release_process_locks(t->pid);
-    kep_release_process(t->pid);
-
-    acct_task_exit(t);
-
-    ktrace_exit("[EXIT] pid=%d: closing fds and releasing mm ref\n", t->pid);
-    fdtable_close_all(t);
-    proc_release_exiting_mm(t);
-
-    /*
-     * PT_DEBUG_EXIT_STOP: a traced task with the TRACEEXIT option reports a
-     * PTRACE_EVENT_EXIT stop before becoming a zombie; the tracer reads the
-     * exit code from the event message and resumes the task to complete the
-     * exit.  SIGKILL exits are never stopped (kill -9 must always work).
-     */
-    if (proc_debug_is_traced(t) &&
-        (t->ptrace_flags & PT_DEBUG_FLAG_TRACEEXIT) &&
-        exit_code != -SIGKILL)
-        (void)proc_debug_event_stop(SIGTRAP, PT_DEBUG_EVENT_EXIT,
-                                    (uint64_t)(uintptr_t)exit_code);
-
-    /*
-     * Three phases, each holding at most one lock class at a time:
-     *
-     *  1. tasklist_lock resolves the parent and samples its liveness.  Done
-     *     first, and separately, so the ZOMBIE publication below never nests
-     *     {t, parent} park_locks (INV-P3).  proc_complete_vfork() needs the
-     *     parent too and is called while no lock of ours is held.
-     *  2. t->park_lock publishes ->state / ->exit_code and drops the task from
-     *     the runqueue (park_lock -> runq_lock).
-     *  3. tasklist_lock rewrites the parent/children chains for auto-reap.
-     *
-     * The waiter wake is deferred to phase 3+ because it re-acquires
-     * tasklist_lock on its own.
-     */
-    task_t *parent = NULL;
-    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    parent = proc_get(t->parent);
-    spin_unlock_irqrestore(&tasklist_lock, lf);
-    if (!proc_task_is_live_locked(parent)) {
-        proc_put(parent);
-        parent = NULL;
-    }
-    int auto_reap = proc_child_auto_reaps(t, parent);
-
-    uint64_t cf = 0, pf = 0;
-    proc_lock_two_tasks(t, parent, &cf, &pf);
-    int vfork_completed = proc_complete_vfork_locked(t, parent);
-    proc_unlock_two_tasks(t, parent, cf, pf);
-    if (vfork_completed)
-        complete(&t->vfork_done);
-
-    /* Keep a thread group's leader alive across the zombie publication below.
-     * Once this member becomes zombie, a concurrent waiter may observe the
-     * whole group as dead and reap the leader before we can inspect it again. */
-    task_t *thread_leader = NULL;
-    lf = spin_lock_irqsave(&tasklist_lock);
-    if (t->tg_leader && t->tg_leader != t)
-        thread_leader = proc_get(t->tg_leader);
-    spin_unlock_irqrestore(&tasklist_lock, lf);
-
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    proc_runq_remove_locked(t);
-    t->exit_code = exit_code;
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    t->state = PROC_ZOMBIE;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-
-    /* SIGCHLD describes a waitable thread group, not just a zombie leader.
-     * A shell can consume an early signal, find live siblings with WNOHANG,
-     * and sleep forever in sigsuspend if the last sibling never notifies it.
-     * Claim notification once under tasklist_lock, after the whole group is
-     * dead, and retain both identities across unlocked cleanup and delivery. */
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    struct hyp_bridge_drop hyp_drop = { .count = 0 };
-#endif
-    task_t *completed_parent = NULL;
-#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
-    int completed_signal = 0;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    task_t *notify_leader = NULL;
-#endif
-    lf = spin_lock_irqsave(&tasklist_lock);
-    task_t *group_leader = thread_leader ? thread_leader : t;
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (proc_task_state_get(group_leader) == PROC_ZOMBIE &&
-        proc_tg_group_dead_locked(group_leader) && !group_leader->hyp_cleanup_done) {
-        group_leader->hyp_cleanup_done = 1;
-        hyp_bridge_detach_group(proc_task_tgid(group_leader), &hyp_drop);
-    }
-#endif
-    completed_parent = proc_group_exit_parent_get_locked(
-        group_leader, &completed_signal);
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (completed_parent && completed_signal > 0)
-        notify_leader = proc_get(group_leader);
-#endif
-    spin_unlock_irqrestore(&tasklist_lock, lf);
-#else
-    if (thread_leader) {
-        lf = spin_lock_irqsave(&tasklist_lock);
-        if (proc_task_state_get(thread_leader) == PROC_ZOMBIE &&
-            proc_tg_group_dead_locked(thread_leader) &&
-            thread_leader->parent &&
-            thread_leader->parent != proc_idle_task())
-            completed_parent = proc_get(thread_leader->parent);
-        spin_unlock_irqrestore(&tasklist_lock, lf);
-    }
-#endif
-
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    hyp_bridge_release_group(&hyp_drop);
-#endif
-    ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
-                t->pid, auto_reap, (void *)ctid_to_wake);
-
-    if (auto_reap) {
-        lf = spin_lock_irqsave(&tasklist_lock);
-        proc_sched_note_zombie();
-        t->parent = proc_idle_task();
-        t->ppid = 0;
-        proc_children_unlink_locked(t);
-        spin_unlock_irqrestore(&tasklist_lock, lf);
-    } else {
-        proc_wake_child_waiters(parent);
-    }
-    if (completed_parent)
-        proc_wake_child_waiters(completed_parent);
-#ifndef PROC_GROUP_EXIT_NOTIFY_ENABLED
-    proc_put(completed_parent);
-#endif
-    proc_put(thread_leader);
-    /* Keep the parent pinned through its eventual signal notification. */
-
-    /* Release user-space driver IRQ registrations BEFORE the EXITED
-     * event fires, so a supervisor reacting to that event can immediately
-     * re-register the device (reap-time cleanup would race the respawn). */
-    udriver_task_cleanup(t->pid);
-    udisk_task_exit(t->pid);
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    a20_registry_task_exit(t->pid);
-#endif
-
-#ifdef A20_TASK_OBJECTS_ENABLED
-    a20_task_object_notify(t, A20_EVENT_EXITED, (uint64_t)exit_code, 0, 1);
-#else
-    /* Keep the existing non-Native/tiny path and its generated code. */
-    a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
-                     A20_EVENT_EXITED, (uint64_t)exit_code, 0);
-    a20_eventq_on_object_destroy((void *)(uintptr_t)t->pid, A20_OBJ_TASK);
-#endif
-
-    task_t *init_reaper = auto_reap ? NULL : proc_find_get(1);
-    proc_reparent_children(t, init_reaper);
-    proc_put(init_reaper);
-
-    /* Detach tracees observing the dying task; EXITKILL tracees are
-     * terminated, stopped tracees are resumed. */
-    proc_debug_tracer_exiting(t);
-
-#ifdef PROC_GROUP_EXIT_NOTIFY_ENABLED
-#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
-    if (notify_leader)
-        signal_notify_child_exit(completed_parent, notify_leader);
-    proc_put(notify_leader);
-#else
-    if (completed_parent && completed_signal > 0)
-        signal_send_task(completed_parent, completed_signal);
-#endif
-    proc_put(completed_parent);
-#else
-    if (!auto_reap && parent && t->exit_signal > 0)
-        signal_send_task(parent, t->exit_signal);
-#endif
-    proc_put(parent);
-    parent = NULL;
-
-    sched();
-    panic("proc_exit: sched returned");
-#endif
 }
 
 void proc_force_exit(task_t *t, int exit_code)

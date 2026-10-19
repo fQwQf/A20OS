@@ -190,9 +190,6 @@ typedef struct proc_wait_timer_stats {
     unsigned violations;
 } proc_wait_timer_stats_t;
 void proc_wait_timer_snapshot(proc_wait_timer_stats_t *stats);
-int proc_wait_timer_register_locked(task_t *t, uint64_t deadline,
-                                    uint64_t wait_seq);
-void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
 /* Both entry points acquire the wait-timer heap lock internally. The
  * *_locked forms are called with the target park_lock held, preserving the
  * lock order park_lock -> wait-timer lock. */

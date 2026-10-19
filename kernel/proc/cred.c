@@ -1,9 +1,16 @@
 #include "proc/cred.h"
+#include "proc/cred_state.h"
 #include "core/errno.h"
 #include "mm/vm.h"
 
 /*
  * POSIX credential transition rules — ABI-agnostic process subsystem.
+ *
+ * The transition policy lives in kernel/proc/cred_state.rs: the privilege
+ * tests, the saved-id writes, the uid-transition capability recalculation and
+ * the capset(2) EPERM matrix.  This file only borrows the live credential
+ * fields into a cred_view_t, calls Rust, and performs the one MM side effect
+ * Rust asks for (clearing mm->dumpable).
  *
  * Moved verbatim from abi/linux/{sys_proc,sys_capability}.c: saved-id
  * semantics for the set*uid/set*gid family, the uid-transition capability
@@ -11,167 +18,130 @@
  * through CAP_SETUID/CAP_SETGID via proc_has_cap().
  */
 
-static int cred_is_root(task_t *t) {
-    return proc_has_cap(t, CAP_SETUID);
+static void cred_view_init(cred_view_t *v, proc_cred_t *cred) {
+    v->uid = &cred->uid;
+    v->euid = &cred->euid;
+    v->suid = &cred->suid;
+    v->fsuid = &cred->fsuid;
+    v->gid = &cred->gid;
+    v->egid = &cred->egid;
+    v->sgid = &cred->sgid;
+    v->fsgid = &cred->fsgid;
+    v->cap_effective = &cred->cap_effective;
+    v->cap_permitted = &cred->cap_permitted;
+    v->cap_inheritable = &cred->cap_inheritable;
+    v->cap_bounding = &cred->cap_bounding;
 }
 
-static int cred_can_setgid(task_t *t) {
-    return proc_has_cap(t, CAP_SETGID);
-}
-
-static int uid_is_current(task_t *t, int uid) {
-    return uid == t->cred.uid || uid == t->cred.euid || uid == t->cred.suid;
-}
-
-static int gid_is_current(task_t *t, int gid) {
-    return gid == t->cred.gid || gid == t->cred.egid || gid == t->cred.sgid;
-}
-
-static void cred_update_uid_caps(task_t *t, int old_uid, int old_euid,
-                                 int old_suid) {
-    if (!t) return;
-    int old_had_root = old_uid == 0 || old_euid == 0 || old_suid == 0;
-    int new_has_root = t->cred.uid == 0 || t->cred.euid == 0 || t->cred.suid == 0;
-
-    if (old_had_root && !new_has_root) {
-        t->cred.cap_effective = 0;
-        t->cred.cap_permitted = 0;
-        return;
-    }
-    if (old_euid == 0 && t->cred.euid != 0) {
-        t->cred.cap_effective = 0;
-        return;
-    }
-    if (old_euid != 0 && t->cred.euid == 0)
-        t->cred.cap_effective = t->cred.cap_permitted;
+static void cred_apply_dumpable(task_t *t, uint32_t flags) {
+    if (flags & CRED_FLAG_CLEAR_DUMPABLE)
+        mm_set_dumpable(t->mm, 0);
 }
 
 int cred_setuid(task_t *t, int uid) {
-    if (cred_is_root(t)) {
-        int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-        if (uid != t->cred.euid || uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
-        t->cred.uid = t->cred.euid = t->cred.suid = t->cred.fsuid = uid;
-        cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-        return 0;
-    }
-    if (!uid_is_current(t, uid)) return -EPERM;
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    if (uid != t->cred.euid || uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
-    t->cred.euid = t->cred.fsuid = uid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc = a20_cred_setuid(&v, uid, proc_has_cap(t, CAP_SETUID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setgid(task_t *t, int gid) {
-    if (cred_can_setgid(t)) {
-        if (gid != t->cred.egid || gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
-        t->cred.gid = t->cred.egid = t->cred.sgid = t->cred.fsgid = gid;
-        return 0;
-    }
-    if (!gid_is_current(t, gid)) return -EPERM;
-    if (gid != t->cred.egid || gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
-    t->cred.egid = t->cred.fsgid = gid;
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc = a20_cred_setgid(&v, gid, proc_has_cap(t, CAP_SETGID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setreuid(task_t *t, int ruid, int euid) {
-    if (!cred_is_root(t)) {
-        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
-        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
-    }
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) {
-        if (euid != t->cred.euid || euid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
-        t->cred.euid = t->cred.fsuid = euid;
-    }
-    if (ruid != -1 || euid != -1) t->cred.suid = t->cred.euid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc =
+        a20_cred_setreuid(&v, ruid, euid, proc_has_cap(t, CAP_SETUID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setregid(task_t *t, int rgid, int egid) {
-    if (!cred_can_setgid(t)) {
-        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
-        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
-    }
-    if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) {
-        if (egid != t->cred.egid || egid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
-        t->cred.egid = t->cred.fsgid = egid;
-    }
-    if (rgid != -1 || egid != -1) t->cred.sgid = t->cred.egid;
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc =
+        a20_cred_setregid(&v, rgid, egid, proc_has_cap(t, CAP_SETGID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setresuid(task_t *t, int ruid, int euid, int suid) {
-    if (!cred_is_root(t)) {
-        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
-        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
-        if (suid != -1 && !uid_is_current(t, suid)) return -EPERM;
-    }
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) {
-        if (euid != t->cred.euid || euid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
-        t->cred.euid = t->cred.fsuid = euid;
-    }
-    if (suid != -1) t->cred.suid = suid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc = a20_cred_setresuid(&v, ruid, euid, suid,
+                                proc_has_cap(t, CAP_SETUID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setresgid(task_t *t, int rgid, int egid, int sgid) {
-    if (!cred_can_setgid(t)) {
-        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
-        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
-        if (sgid != -1 && !gid_is_current(t, sgid)) return -EPERM;
-    }
-    if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) {
-        if (egid != t->cred.egid || egid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
-        t->cred.egid = t->cred.fsgid = egid;
-    }
-    if (sgid != -1) t->cred.sgid = sgid;
-    return 0;
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int rc = a20_cred_setresgid(&v, rgid, egid, sgid,
+                                proc_has_cap(t, CAP_SETGID), &flags);
+    if (rc == 0)
+        cred_apply_dumpable(t, flags);
+    return rc;
 }
 
 int cred_setfsuid(task_t *t, int uid) {
-    int old = t->cred.fsuid;
-    if (uid >= 0 && (cred_is_root(t) || uid_is_current(t, uid))) {
-        if (uid != t->cred.fsuid) mm_set_dumpable(t->mm, 0);
-        t->cred.fsuid = uid;
-    }
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int old = a20_cred_setfsuid(&v, uid, proc_has_cap(t, CAP_SETUID), &flags);
+    cred_apply_dumpable(t, flags);
     return old;
 }
 
 int cred_setfsgid(task_t *t, int gid) {
-    int old = t->cred.fsgid;
-    if (gid >= 0 && (cred_can_setgid(t) || gid_is_current(t, gid))) {
-        if (gid != t->cred.fsgid) mm_set_dumpable(t->mm, 0);
-        t->cred.fsgid = gid;
-    }
+    if (!t)
+        return -EINVAL;
+    cred_view_t v;
+    uint32_t flags = 0;
+    cred_view_init(&v, &t->cred);
+    int old = a20_cred_setfsgid(&v, gid, proc_has_cap(t, CAP_SETGID), &flags);
+    cred_apply_dumpable(t, flags);
     return old;
 }
 
 int cred_capset_apply(proc_cred_t *cred, uint64_t new_effective,
                       uint64_t new_permitted, uint64_t new_inheritable) {
-    uint64_t old_effective = cred->cap_effective;
-    uint64_t old_permitted = cred->cap_permitted;
-    uint64_t old_inheritable = cred->cap_inheritable;
-
-    if ((new_effective & ~new_permitted) != 0)
-        return -EPERM;
-    if ((new_permitted & ~old_permitted) != 0)
-        return -EPERM;
-    uint64_t inheritable_allowed = old_inheritable | old_permitted;
-    if (old_effective & (1ULL << CAP_SETPCAP))
-        inheritable_allowed |= cred->cap_bounding;
-    if ((new_inheritable & ~inheritable_allowed) != 0)
-        return -EPERM;
-
-    cred->cap_effective = new_effective;
-    cred->cap_permitted = new_permitted;
-    cred->cap_inheritable = new_inheritable;
-    return 0;
+    if (!cred)
+        return -EINVAL;
+    cred_view_t v;
+    cred_view_init(&v, cred);
+    return a20_cred_capset_apply(&v, new_effective, new_permitted,
+                                 new_inheritable);
 }

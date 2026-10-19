@@ -14,6 +14,8 @@
 
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/tasklist.h"
+#include "proc/proc_accounting.h"
 #include "proc/signal.h"
 #include "mm/elf.h"
 #include "drivers/core/driver_core.h"
@@ -78,156 +80,115 @@ static struct {
 static uint64_t g_idle_kstack[CONFIG_NR_CPUS];
 ARCH_IDLE_CONTEXT_STATIC(arch_idle_context, CONFIG_NR_CPUS);
 
-static void proc_link_task_locked(task_t *t)
-{
-    t->all_prev = task_list_tail;
-    t->all_next = NULL;
-    if (task_list_tail)
-        task_list_tail->all_next = t;
-    else
-        task_list_head = t;
-    task_list_tail = t;
+
+/*
+ * kernel/proc/tasklist.rs owns the membership transitions.  These accessors
+ * hand it the link fields, the list ends, the locks, the task reference and
+ * the lifecycle advance; every entry point below runs with tasklist_lock
+ * already held, except link_newborn.
+ */
+
+task_t *a20_tl_all_prev(const task_t *t) { return t->all_prev; }
+void a20_tl_set_all_prev(task_t *t, task_t *v) { t->all_prev = v; }
+task_t *a20_tl_all_next(const task_t *t) { return t->all_next; }
+void a20_tl_set_all_next(task_t *t, task_t *v) { t->all_next = v; }
+task_t *a20_tl_sibling_next(const task_t *t) { return t->sibling_next; }
+void a20_tl_set_sibling_next(task_t *t, task_t *v) { t->sibling_next = v; }
+task_t **a20_tl_sibling_prev_ptr(const task_t *t) { return t->sibling_prev_ptr; }
+void a20_tl_set_sibling_prev_ptr(task_t *t, task_t **v) { t->sibling_prev_ptr = v; }
+task_t **a20_tl_children_slot(task_t *t) { return &t->children; }
+task_t **a20_tl_sibling_next_slot(task_t *t) { return &t->sibling_next; }
+task_t *a20_tl_tg_next(const task_t *t) { return t->tg_next; }
+void a20_tl_set_tg_next(task_t *t, task_t *v) { t->tg_next = v; }
+task_t **a20_tl_tg_prev_ptr(const task_t *t) { return t->tg_prev_ptr; }
+void a20_tl_set_tg_prev_ptr(task_t *t, task_t **v) { t->tg_prev_ptr = v; }
+task_t **a20_tl_tg_next_slot(task_t *t) { return &t->tg_next; }
+task_t *a20_tl_parent(const task_t *t) { return t->parent; }
+void a20_tl_set_parent(task_t *t, task_t *v) { t->parent = v; }
+void a20_tl_set_ppid(task_t *t, int v) { t->ppid = v; }
+int a20_tl_pid(const task_t *t) { return t->pid; }
+task_t *a20_tl_children(const task_t *t) { return t->children; }
+void a20_tl_set_children(task_t *t, task_t *v) { t->children = v; }
+task_t *a20_tl_tg_leader(const task_t *t) { return t->tg_leader; }
+void a20_tl_set_tg_leader(task_t *t, task_t *v) { t->tg_leader = v; }
+int a20_tl_tg_leader_ref_held(const task_t *t) { return t->tg_leader_ref_held; }
+void a20_tl_set_tg_leader_ref_held(task_t *t, int v) { t->tg_leader_ref_held = v; }
+
+task_t *a20_tl_list_head(void) { return task_list_head; }
+void a20_tl_set_list_head(task_t *v) { task_list_head = v; }
+task_t *a20_tl_list_tail(void) { return task_list_tail; }
+void a20_tl_set_list_tail(task_t *v) { task_list_tail = v; }
+
+uint64_t a20_tl_tasklist_lock(void) { return spin_lock_irqsave(&tasklist_lock); }
+void a20_tl_tasklist_unlock(uint64_t flags) { spin_unlock_irqrestore(&tasklist_lock, flags); }
+uint64_t a20_tl_park_lock(task_t *t) { return spin_lock_irqsave(&t->park_lock); }
+void a20_tl_park_unlock(task_t *t, uint64_t flags) { spin_unlock_irqrestore(&t->park_lock, flags); }
+task_t *a20_tl_task_get(task_t *t) { return proc_get(t); }
+void a20_tl_task_put(task_t *t) { proc_put(t); }
+int a20_tl_lifecycle_advance(task_t *t, uint32_t event) {
+    return proc_task_lifecycle_advance(t, event);
+}
+int a20_tl_is_kernel_ptr(uintptr_t value) {
+    return arch_is_kernel_address((const void *)value) ? 1 : 0;
+}
+void a20_tl_report_corrupt(const task_t *t, const task_t *next) {
+    kerr("proc_next_task_locked: corrupt all_next from pid=%d ptr=%p\n",
+         t ? t->pid : -1, (void *)next);
 }
 
-/* Publish a fully initialized task on the global list. Caller holds
- * tasklist_lock; taking park_lock here follows the established list->park
- * nesting and makes the phase commit atomic with list visibility. */
 int proc_publish_task_slot_locked(task_t *t)
 {
-    if (!t)
-        return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    int rc = proc_task_lifecycle_advance(t, PROC_TASK_EVENT_PUBLISH);
-    if (!rc)
-        proc_link_task_locked(t);
-    spin_unlock_irqrestore(&t->park_lock, flags);
-    return rc;
+    return a20_tasklist_publish_locked(t);
 }
 
-/* Link a freshly created (non-fork) task into the wait4 children-list
- * model: fork() does this inline, but the a20 task_spawn/exec creation
- * paths (proc_alloc, proc_alloc_user_image) historically relied on the
- * old global-list wait4 scan and never linked -- breaking both wait4
- * (-ECHILD on live children) and orphan reparenting under the list
- * model. Takes and releases tasklist_lock internally. */
 int proc_link_newborn(task_t *t)
 {
-    if (!t)
-        return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    if (!t->tg_leader)
-        t->tg_leader = t;
-    int rc = proc_publish_task_slot_locked(t);
-    if (!rc)
-        proc_children_link_locked(t->parent, t);
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-    return rc;
+    return a20_tasklist_link_newborn(t);
 }
 
 void proc_children_link_locked(task_t *parent, task_t *child)
 {
-    if (!parent || !child || child->sibling_prev_ptr)
-        return;
-    child->sibling_next = parent->children;
-    child->sibling_prev_ptr = &parent->children;
-    if (child->sibling_next)
-        child->sibling_next->sibling_prev_ptr = &child->sibling_next;
-    parent->children = child;
+    a20_tasklist_children_link_locked(parent, child);
 }
 
 void proc_children_unlink_locked(task_t *t)
 {
-    if (!t || !t->sibling_prev_ptr)
-        return;
-    *t->sibling_prev_ptr = t->sibling_next;
-    if (t->sibling_next)
-        t->sibling_next->sibling_prev_ptr = t->sibling_prev_ptr;
-    t->sibling_next = NULL;
-    t->sibling_prev_ptr = NULL;
+    a20_tasklist_children_unlink_locked(t);
 }
 
 void proc_reparent_task_locked(task_t *new_parent, task_t *t)
 {
-    if (!t || !new_parent)
-        return;
-    proc_children_unlink_locked(t);
-    t->parent = new_parent;
-    t->ppid = new_parent->pid;
-    proc_children_link_locked(new_parent, t);
+    a20_tasklist_reparent_locked(new_parent, t);
 }
 
 int proc_tg_link_locked(task_t *t)
 {
-    task_t *leader = t->tg_leader ? t->tg_leader : t;
-    if (t == leader || leader == t->tg_next || t->tg_prev_ptr)
-        return 0;
-    if (t->tg_leader_ref_held || !proc_get(leader))
-        return -ESRCH;
-    t->tg_leader_ref_held = 1;
-    t->tg_next = leader->tg_next;
-    t->tg_prev_ptr = &leader->tg_next;
-    if (t->tg_next)
-        t->tg_next->tg_prev_ptr = &t->tg_next;
-    leader->tg_next = t;
-    return 0;
+    return a20_tasklist_tg_link_locked(t);
 }
 
 void proc_tg_unlink_locked(task_t *t)
 {
-    if (!t || !t->tg_prev_ptr)
-        return;
-    *t->tg_prev_ptr = t->tg_next;
-    if (t->tg_next)
-        t->tg_next->tg_prev_ptr = t->tg_prev_ptr;
-    t->tg_next = NULL;
-    t->tg_prev_ptr = NULL;
-    /* The leader pin is intentionally kept until final task release.  Other
-     * task references may still inspect tg_leader after list detachment. */
+    a20_tasklist_tg_unlink_locked(t);
 }
 
 void proc_tg_leader_ref_release(task_t *t)
 {
-    if (!t || !t->tg_leader_ref_held)
-        return;
-    task_t *leader = t->tg_leader;
-    t->tg_leader_ref_held = 0;
-    t->tg_leader = NULL;
-    proc_put(leader);
+    a20_tasklist_tg_leader_ref_release(t);
 }
 
 void proc_unlink_task_locked(task_t *t)
 {
-    if (!t)
-        return;
-    proc_children_unlink_locked(t);
-    proc_tg_unlink_locked(t);
-    if (t->all_prev)
-        t->all_prev->all_next = t->all_next;
-    else if (task_list_head == t)
-        task_list_head = t->all_next;
-    if (t->all_next)
-        t->all_next->all_prev = t->all_prev;
-    else if (task_list_tail == t)
-        task_list_tail = t->all_prev;
-    t->all_next = NULL;
-    t->all_prev = NULL;
+    a20_tasklist_unlink_locked(t);
 }
 
 task_t *proc_first_task_locked(void)
 {
-    return task_list_head;
+    return a20_tasklist_first_locked();
 }
 
 task_t *proc_next_task_locked(task_t *t)
 {
-    task_t *next = t ? t->all_next : NULL;
-    if (next && (((uintptr_t)next & (sizeof(void *) - 1)) ||
-                 !arch_is_kernel_address(next))) {
-        kerr("proc_next_task_locked: corrupt all_next from pid=%d ptr=%p\n",
-             t ? t->pid : -1, (void *)next);
-        return NULL;
-    }
-    return next;
+    return a20_tasklist_next_locked(t);
 }
 
 /*
@@ -330,106 +291,40 @@ int proc_task_state_get(task_t *t)
     return state;
 }
 
-static void proc_count_vma_huge_pages(mm_struct_t *mm, mm_seg_t *vma,
-                                      proc_vm_stats_t *stats)
-{
-    if (!mm || !mm->pgdir || !vma || !stats)
-        return;
+/* ---- accounting adapter ---- */
 
-    for (uint64_t va = vma->start; va < vma->end; ) {
-        mm_leaf_info_t leaf;
-        if (mm_query_leaf(mm->pgdir, va, &leaf)) {
-            if (leaf.level > 0) {
-                size_t pages = leaf.size / PAGE_SIZE;
-                if ((vma->vm_flags & VM_ANON) && (vma->vm_flags & VM_SHARED))
-                    stats->shmem_huge_pages += pages;
-                else if (vma->vm_flags & VM_ANON)
-                    stats->anon_huge_pages += pages;
-                else
-                    stats->file_huge_pages += pages;
-            }
-            va = leaf.base + leaf.size;
-        } else {
-            va += PAGE_SIZE;
-        }
-    }
+int a20_pa_task_state(task_t *t) { return proc_task_state_get(t); }
+int a20_pa_pid_max(void) { return proc_pid_max(); }
+int a20_pa_pid_next(void) { return proc_pid_next_value(); }
+void *a20_pa_task_mm(task_t *t) { return t->mm; }
+void *a20_pa_mm_pgdir(mm_struct_t *mm) { return mm->pgdir; }
+void *a20_pa_first_vma(mm_struct_t *mm) { return mm->mmap; }
+void *a20_pa_next_vma(mm_seg_t *vma) { return vma->next; }
+uint64_t a20_pa_vma_start(mm_seg_t *vma) { return vma->start; }
+uint64_t a20_pa_vma_end(mm_seg_t *vma) { return vma->end; }
+uint64_t a20_pa_vma_flags(mm_seg_t *vma) { return vma->vm_flags; }
+
+int a20_pa_query_leaf(void *pgdir, uint64_t va, a20_leaf_info_t *out)
+{
+    mm_leaf_info_t info;
+    if (!mm_query_leaf(pgdir, (vaddr_t)va, &info))
+        return 0;
+    out->level = info.level;
+    out->base = info.base;
+    out->size = info.size;
+    return 1;
 }
 
 void proc_get_vm_stats(proc_vm_stats_t *stats)
 {
     if (!stats)
         return;
-    memset(stats, 0, sizeof(*stats));
-
-    mm_struct_t *seen_mm[256];
-    int seen_count = 0;
-
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (proc_task_state_get(t) == PROC_UNUSED || !t->mm)
-            continue;
-
-        int duplicate = 0;
-        for (int i = 0; i < seen_count; i++) {
-            if (seen_mm[i] == t->mm) {
-                duplicate = 1;
-                break;
-            }
-        }
-        if (duplicate)
-            continue;
-
-        if (seen_count < (int)(sizeof(seen_mm) / sizeof(seen_mm[0])))
-            seen_mm[seen_count++] = t->mm;
-
-        for (mm_seg_t *v = t->mm->mmap; v; v = v->next)
-            proc_count_vma_huge_pages(t->mm, v, stats);
-    }
-
-    spin_unlock_irqrestore(&tasklist_lock, flags);
+    a20_proc_vm_stats((a20_vm_stats_t *)stats);
 }
 
 size_t proc_format_pidmap(char *buf, size_t bufsz)
 {
-    if (!buf || bufsz == 0)
-        return 0;
-
-    size_t off = 0;
-    /* E1: only list membership is read here, so tasklist_lock suffices.  The
-     * UNUSED test still needs the park-owned state word, hence the per-task
-     * read helper instead of a direct ->state load. */
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    int used = 0;
-
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (proc_task_state_get(t) != PROC_UNUSED)
-            used++;
-    }
-
-    int n = snprintf(buf + off, bufsz - off,
-                     "pid_max: %d\nnext_pid: %d\nused: %d\npids:",
-                     proc_pid_max(), proc_pid_next_value(), used);
-    if (n > 0) {
-        size_t wrote = (size_t)n;
-        off = wrote >= bufsz - off ? bufsz - 1 : off + wrote;
-    }
-
-    for (task_t *t = proc_first_task_locked(); t && off + 16 < bufsz;
-         t = proc_next_task_locked(t)) {
-        if (proc_task_state_get(t) == PROC_UNUSED)
-            continue;
-        n = snprintf(buf + off, bufsz - off, " %d", t->pid);
-        if (n <= 0)
-            break;
-        size_t wrote = (size_t)n;
-        off = wrote >= bufsz - off ? bufsz - 1 : off + wrote;
-    }
-    if (off + 1 < bufsz)
-        buf[off++] = '\n';
-    buf[off < bufsz ? off : bufsz - 1] = '\0';
-
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-    return off;
+    return a20_proc_format_pidmap(buf, bufsz);
 }
 
 void proc_sleep_until(uint64_t wake_time) {
@@ -566,7 +461,9 @@ void proc_init(void) {
     proc_task_park_counters_init();
 
     task_t *idle = &idle_tasks[0];
-    proc_link_task_locked(idle);
+    /* The boot idle task joins the list directly: it is not published through
+     * the lifecycle, so there is no phase commit to take. */
+    a20_tasklist_link_boot_locked(idle);
     idle->pid    = 0;
     idle->ppid   = 0;
     proc_task_init_idle_state(idle, 0);

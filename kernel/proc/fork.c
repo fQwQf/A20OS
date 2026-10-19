@@ -1,6 +1,7 @@
 #include "proc/resource_ns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/clone_txn.h"
 #include "proc/task_construction.h"
 #include "proc/signal.h"
 #include "core/consts.h"
@@ -115,85 +116,93 @@ fail:
 }
 #endif
 
-/* Count live tasks owned by @uid, for RLIMIT_NPROC.  Linux scopes that limit
- * to the caller's real uid rather than per-process, so a fork bomb from one
- * account is capped no matter how many processes it already has. */
-static uint32_t proc_count_tasks_for_uid(int uid)
+/*
+ * kernel/proc/clone_txn.rs owns the fork/clone transaction.  Every adapter
+ * below is a mechanical operation this file already performed; the inheritance
+ * decisions, the publication boundary, the CLONE_VFORK arming and the rollback
+ * order live in Rust.
+ */
+
+void a20_clone_view_fill(task_t *t, clone_view_t *out)
 {
-    uint32_t n = 0;
-    /* E2: tasklist_lock walks the list; each task's ->state is sampled under
-     * its own park_lock, one at a time.  ->cred.uid is fixed at clone time. */
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        int st = proc_task_state_get(t);
-        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
-            continue;
-        if (t->cred.uid == uid)
-            n++;
-    }
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-    return n;
+    out->pid = &t->pid;
+    out->tgid = &t->tgid;
+    out->ppid = &t->ppid;
+    out->parent = (void **)&t->parent;
+    out->tg_leader = (void **)&t->tg_leader;
+    out->abi_mode = &t->abi_mode;
+    out->exit_signal = &t->exit_signal;
+    out->clone_flags = &t->clone_flags;
+    out->clear_child_tid = &t->clear_child_tid;
+    out->sched_policy = &t->sched_policy;
+    out->priority = &t->priority;
+    out->cfs_weight = &t->cfs_weight;
+    out->exec_load_addr = &t->exec_load_addr;
+    out->exec_load_size = &t->exec_load_size;
+    out->name = t->name;
+    out->sched_reset_on_fork = &t->sched_reset_on_fork;
+    out->nproc_limit = &t->limits.nproc;
 }
 
-typedef struct proc_clone_transaction {
-    uint64_t flags;
-    vaddr_t stack;
-    int *ptid;
-    vaddr_t tls;
-    int *ctid;
-    int exit_signal;
-    task_t **out_task;
-    task_t *parent;
-    task_t *task;
-    task_t *vfork_child_ref;
-    int child_pid;
-    int parent_vfork_armed;
-} proc_clone_transaction_t;
-
-static int clone_validate(void *opaque)
+int a20_clone_task_pid(const task_t *t)
 {
-    proc_clone_transaction_t *tx = opaque;
-    tx->parent = proc_current();
-    if (!tx->parent)
-        return -ESRCH;
+    return t->pid;
+}
+
+int a20_clone_task_uid(const task_t *t)
+{
+    return t->cred.uid;
+}
+
+int a20_clone_flags_supported(uint64_t flags)
+{
+#ifdef CONFIG_NOMMU
+    /* A nommu vfork must share the address space; there is no COW copy. */
+    if (!(flags & CLONE_VM))
+        return -EINVAL;
+#else
+    (void)flags;
+#endif
+    return 0;
+}
+
+int a20_clone_has_cap(const task_t *t, int cap)
+{
+    return proc_has_cap(t, cap);
+}
+
+uint32_t a20_clone_weight_for_nice(int nice)
+{
+    return sched_weight_for_nice(nice);
+}
+
+void a20_clone_notify_begin(int parent_pid, uint64_t flags)
+{
 #ifdef CONFIG_COOPERATIVE_BOOT
     kinfo("[PROC] clone begin: parent=%d flags=0x%lx\n",
-          tx->parent->pid, (unsigned long)tx->flags);
+          parent_pid, (unsigned long)flags);
+#else
+    (void)parent_pid;
+    (void)flags;
 #endif
-#ifdef CONFIG_NOMMU
-    if (!(tx->flags & CLONE_VM))
-        return -EINVAL;
-#endif
-    if (tx->parent->limits.nproc &&
-        !proc_has_cap(tx->parent, CAP_SYS_RESOURCE) &&
-        proc_count_tasks_for_uid(tx->parent->cred.uid) >=
-            tx->parent->limits.nproc)
-        return -EAGAIN;
-    if (tx->exit_signal < 0 || tx->exit_signal >= NSIG)
-        return -EINVAL;
-    return 0;
 }
 
-static int clone_allocate(void *opaque)
+void a20_clone_notify_ready(task_t *t, int child_pid, uint64_t flags)
 {
-    proc_clone_transaction_t *tx = opaque;
-    tx->task = proc_alloc_task_slot();
-    if (!tx->task)
-        return -EAGAIN;
-    tx->task->pid = proc_pid_alloc();
-    if (tx->task->pid < 0)
-        return -EAGAIN;
-    tx->child_pid = tx->task->pid;
-    return 0;
+#ifdef CONFIG_COOPERATIVE_BOOT
+    kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
+          child_pid, (unsigned long)t->kstack);
+    if (!(flags & CLONE_VFORK))
+        proc_yield();
+#else
+    (void)t;
+    (void)child_pid;
+    (void)flags;
+#endif
 }
 
-static int clone_base(void *opaque)
+void a20_clone_inherit_stdio(task_t *t, task_t *parent)
 {
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    task_t *parent = tx->parent;
-    proc_task_init_base(t, parent);
-    t->abi_mode = parent ? parent->abi_mode : 0;
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     if (parent && parent->a20_stdio_adopted) {
         t->a20_stdio_adopted = 1;
@@ -203,114 +212,37 @@ static int clone_base(void *opaque)
         t->a20_root_h = parent->a20_root_h;
         t->a20_cwd_h = parent->a20_cwd_h;
     }
-#endif
-    if (parent && parent->sched_reset_on_fork) {
-        if (parent->sched_policy == SCHED_FIFO || parent->sched_policy == SCHED_RR) {
-            t->sched_policy = SCHED_NORMAL;
-            t->priority = 0;
-            t->cfs_weight = sched_weight_for_nice(0);
-        } else if (t->priority < 0) {
-            t->priority = 0;
-            t->cfs_weight = sched_weight_for_nice(0);
-        }
-    }
-    t->exit_signal = (tx->flags & CLONE_THREAD) ? 0 : tx->exit_signal;
-    if ((tx->flags & CLONE_PARENT) && parent && parent->parent) {
-        t->parent = parent->parent;
-        t->ppid = parent->parent->pid;
-    }
-    if (tx->flags & CLONE_THREAD)
-        t->tgid = parent ? parent->tgid : t->pid;
-    t->clone_flags = (int)tx->flags;
-    if (tx->flags & CLONE_CHILD_CLEARTID)
-        t->clear_child_tid = tx->ctid;
-    proc_set_name(t, parent->name);
-    t->exec_load_addr = parent->exec_load_addr;
-    t->exec_load_size = parent->exec_load_size;
-    return 0;
-}
-
-static int clone_seccomp(void *opaque)
-{
-    proc_clone_transaction_t *tx = opaque;
-    proc_task_init_seccomp(tx->task, tx->parent);
-    return 0;
-}
-
-static int clone_fs_cgroup(void *opaque)
-{
-    proc_clone_transaction_t *tx = opaque;
-    proc_task_init_fs_cgroup(tx->task, tx->parent);
-    return 0;
-}
-
-static int clone_files(void *opaque)
-{
-#ifndef CONFIG_MCU
-    proc_clone_transaction_t *tx = opaque;
-    if (!tx->parent)
-        return 0;
-    if (tx->flags & (CLONE_FILES | CLONE_THREAD)) {
-        fdtable_share(tx->task, tx->parent);
-        return 0;
-    }
-    return fdtable_copy_checked(tx->task, tx->parent);
 #else
-    (void)opaque;
-    return 0;
+    (void)t;
+    (void)parent;
 #endif
 }
 
-static int clone_signals(void *opaque)
+void a20_clone_inherit_capabilities(task_t *t, task_t *parent, uint64_t flags)
 {
-    proc_clone_transaction_t *tx = opaque;
-    return proc_task_init_signals(tx->task, tx->parent, 1);
-}
-
-static int clone_namespaces(void *opaque)
-{
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    task_t *parent = tx->parent;
-    int rc = mntns_fork(t, parent, tx->flags);
-    if (rc < 0)
-        return -ENOMEM;
-    rc = pidns_fork(t, parent, tx->flags);
-    if (rc < 0)
-        return rc;
-    rc = userns_fork(t, parent, tx->flags);
-    if (rc < 0)
-        return rc;
-    return resource_ns_fork(t, parent, tx->flags);
-}
-
-static int clone_capabilities(void *opaque)
-{
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    task_t *parent = tx->parent;
     keyring_inherit(t, parent);
     env_inherit_task(t, parent);
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    if ((tx->flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
+    if ((flags & CLONE_THREAD) && parent && parent->abi_mode == 1 &&
         parent->a20_ht) {
         __atomic_store_n(
             &t->a20_ht,
             a20_ht_get_ref((struct a20_ht_internal *)parent->a20_ht),
             __ATOMIC_RELEASE);
     }
+#else
+    (void)flags;
 #endif
-    return 0;
 }
 
-static int clone_mm(void *opaque)
+int a20_clone_init_mm(task_t *t, task_t *parent, uint64_t flags, int child_pid)
 {
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    task_t *parent = tx->parent;
+#ifndef CONFIG_COOPERATIVE_BOOT
+    (void)child_pid; /* only the cooperative-boot log prints it */
+#endif
     if (!parent->pgdir)
         goto stage_complete;
-    if (parent->mm && (tx->flags & CLONE_VM)) {
+    if (parent->mm && (flags & CLONE_VM)) {
         t->mm = parent->mm;
         refcount_inc(&t->mm->refcount);
         t->pgdir = parent->pgdir;
@@ -321,7 +253,7 @@ static int clone_mm(void *opaque)
         t->pgdir = t->mm->pgdir;
 #ifdef CONFIG_COOPERATIVE_BOOT
         kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
-              tx->child_pid, (unsigned long)mm_rss_get(t->mm),
+              child_pid, (unsigned long)mm_rss_get(t->mm),
               (unsigned long)t->mm->total_vm);
 #endif
     } else {
@@ -329,18 +261,16 @@ static int clone_mm(void *opaque)
     }
 stage_complete:
 #ifdef CONFIG_TASK_CONSTRUCTION_TEST
-    return proc_task_construction_test_fail_after(tx->parent,
+    return proc_task_construction_test_fail_after(parent,
                                                    TASK_CONSTRUCTION_STAGE_MM);
 #else
     return 0;
 #endif
 }
 
-static int clone_arch(void *opaque)
+int a20_clone_init_arch(task_t *t, task_t *parent, uint64_t flags, vaddr_t stack,
+                        vaddr_t tls)
 {
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    task_t *parent = tx->parent;
     void *kstack = kmalloc(KERNEL_STACK_SIZE);
     if (!kstack)
         return -ENOMEM;
@@ -357,11 +287,11 @@ static int clone_arch(void *opaque)
         trap->kernel_tp = (uint64_t)(uintptr_t)t;
         arch_trap_ctx_set_kernel_stack(trap, ks_top);
         t->trap_ctx = trap;
-        t->ustack = tx->stack ? tx->stack : parent->ustack;
-        if (tx->stack)
-            TRAP_CTX_SP(trap) = tx->stack;
-        if (tx->flags & CLONE_SETTLS)
-            TRAP_CTX_TP(trap) = tx->tls;
+        t->ustack = stack ? stack : parent->ustack;
+        if (stack)
+            TRAP_CTX_SP(trap) = stack;
+        if (flags & CLONE_SETTLS)
+            TRAP_CTX_TP(trap) = tls;
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         t->first_kernel_entry = (uintptr_t)user_trap_return;
         ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
@@ -384,155 +314,53 @@ static int clone_arch(void *opaque)
     return 0;
 }
 
-static int clone_publish(void *opaque)
+uint64_t a20_clone_tasklist_lock(void)
 {
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
-    int rc = proc_publish_task_slot_locked(t);
-    if (!rc && (tx->flags & CLONE_THREAD)) {
-        if (tx->parent && tx->parent->tg_leader)
-            t->tg_leader = tx->parent->tg_leader;
-        else if (tx->parent)
-            t->tg_leader = tx->parent;
-        else
-            t->tg_leader = t;
-    } else if (!rc) {
-        t->tg_leader = t;
-    }
-    if (!rc && t->tg_leader != t)
-        rc = proc_tg_link_locked(t);
-    if (!rc)
-        proc_children_link_locked(t->parent, t);
-    spin_unlock_irqrestore(&tasklist_lock, list_flags);
-    if (rc < 0)
-        return rc;
-    proc_pid_register(t);
-    return 0;
+    return spin_lock_irqsave(&tasklist_lock);
 }
 
-static int clone_post_publish(void *opaque)
+void a20_clone_tasklist_unlock(uint64_t flags)
 {
-    proc_clone_transaction_t *tx = opaque;
-    task_t *t = tx->task;
-    if ((tx->flags & CLONE_PARENT_SETTID) && tx->ptid) {
-        int tid = t->pid;
-        if (copy_to_user(tx->ptid, &tid, sizeof(tid)) < 0)
-            return -EFAULT;
-    }
-    if ((tx->flags & CLONE_CHILD_SETTID) && tx->ctid) {
-        int tid = t->pid;
-        if (proc_copy_to_task_user(t, tx->ctid, &tid, sizeof(tid)) < 0)
-            return -EFAULT;
-    }
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+}
+
+int a20_clone_vfork_snapshot_create(task_t *parent)
+{
 #ifdef CONFIG_NOMMU
-    if (tx->flags & CLONE_VFORK) {
-        int rc = nommu_vfork_snapshot_create(tx->parent);
-        if (rc < 0)
-            return rc;
-    }
-#endif
-    if (tx->flags & CLONE_VFORK) {
-        uint64_t pf = spin_lock_irqsave(&tx->parent->park_lock);
-        tx->parent->vfork_waiting = 1;
-        spin_unlock_irqrestore(&tx->parent->park_lock, pf);
-        tx->parent_vfork_armed = 1;
-        tx->vfork_child_ref = proc_get(t);
-        if (!tx->vfork_child_ref)
-            return -ESRCH;
-    }
-    if (tx->out_task)
-        *tx->out_task = t;
+    return nommu_vfork_snapshot_create(parent);
+#else
+    (void)parent;
     return 0;
-}
-
-static int clone_ready(void *opaque)
-{
-    proc_clone_transaction_t *tx = opaque;
-    proc_make_ready(tx->task);
-#ifdef CONFIG_COOPERATIVE_BOOT
-    kinfo("[PROC] clone runnable: child=%d kstack=0x%lx\n",
-          tx->child_pid, (unsigned long)tx->task->kstack);
-    if (!(tx->flags & CLONE_VFORK))
-        proc_yield();
 #endif
-    return 0;
 }
 
-static void clone_vfork_wait(void *opaque)
+void a20_clone_vfork_arm(task_t *parent)
 {
-    proc_clone_transaction_t *tx = opaque;
-    if (!(tx->flags & CLONE_VFORK))
-        return;
-    wait_for_completion(&tx->vfork_child_ref->vfork_done);
-    proc_put(tx->vfork_child_ref);
-    tx->vfork_child_ref = NULL;
+    uint64_t pf = spin_lock_irqsave(&parent->park_lock);
+    parent->vfork_waiting = 1;
+    spin_unlock_irqrestore(&parent->park_lock, pf);
 }
 
-static void clone_abort(void *opaque, uint8_t publication_attempted)
+void a20_clone_vfork_disarm(task_t *parent)
 {
-    proc_clone_transaction_t *tx = opaque;
-    (void)publication_attempted;
-    if (!tx->task)
-        return;
-    if (tx->parent_vfork_armed) {
-        uint64_t pf = spin_lock_irqsave(&tx->parent->park_lock);
-        tx->parent->vfork_waiting = 0;
-        spin_unlock_irqrestore(&tx->parent->park_lock, pf);
+    uint64_t pf = spin_lock_irqsave(&parent->park_lock);
+    parent->vfork_waiting = 0;
+    spin_unlock_irqrestore(&parent->park_lock, pf);
 #ifdef CONFIG_NOMMU
-        nommu_vfork_snapshot_discard(tx->parent);
+    nommu_vfork_snapshot_discard(parent);
 #endif
-        tx->parent_vfork_armed = 0;
-    }
-    if (tx->vfork_child_ref) {
-        proc_put(tx->vfork_child_ref);
-        tx->vfork_child_ref = NULL;
-    }
-    proc_destroy_task(tx->task);
-    tx->task = NULL;
 }
 
-static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls,
-                           int *ctid, int exit_signal, task_t **out_task)
+void a20_clone_vfork_wait(task_t *child)
 {
-    proc_clone_transaction_t tx = {
-        .flags = flags,
-        .stack = stack,
-        .ptid = ptid,
-        .tls = tls,
-        .ctid = ctid,
-        .exit_signal = exit_signal,
-        .out_task = out_task,
-    };
-    task_construction_ops_t ops = {
-        .context = &tx,
-        .validate = clone_validate,
-        .allocate = clone_allocate,
-        .base = clone_base,
-        .seccomp = clone_seccomp,
-        .fs_cgroup = clone_fs_cgroup,
-        .files = clone_files,
-        .signals = clone_signals,
-        .namespaces = clone_namespaces,
-        .capabilities = clone_capabilities,
-        .mm = clone_mm,
-        .arch = clone_arch,
-        .publish = clone_publish,
-        .post_publish = clone_post_publish,
-        .ready = clone_ready,
-        .vfork_wait = clone_vfork_wait,
-        .abort = clone_abort,
-        .deferred = out_task != NULL,
-        .vfork = (flags & CLONE_VFORK) != 0,
-    };
-    int rc = proc_task_construction_run(&ops);
-    return rc < 0 ? rc : tx.child_pid;
+    wait_for_completion(&child->vfork_done);
+    proc_put(child);
 }
 
 int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
-                 int exit_signal)
+               int exit_signal)
 {
-    return proc_clone_impl(flags, stack, ptid, tls, ctid, exit_signal, NULL);
+    return a20_proc_clone_impl(flags, stack, ptid, tls, ctid, exit_signal, NULL);
 }
 
 /*
@@ -543,7 +371,7 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
  */
 int proc_clone_deferred(vaddr_t stack, task_t **out_task)
 {
-    return proc_clone_impl(0, stack, NULL, 0, NULL, SIGCHLD, out_task);
+    return a20_proc_clone_impl(0, stack, NULL, 0, NULL, SIGCHLD, out_task);
 }
 
 /*
@@ -561,7 +389,7 @@ int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
     task_t *t = NULL;
     uint64_t flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND |
                      CLONE_THREAD | CLONE_SETTLS;
-    int pid = proc_clone_impl(flags, sp, NULL, tls, NULL, 0, &t);
+    int pid = a20_proc_clone_impl(flags, sp, NULL, tls, NULL, 0, &t);
     if (pid < 0 || !t)
         return pid < 0 ? pid : -ENOMEM;
 

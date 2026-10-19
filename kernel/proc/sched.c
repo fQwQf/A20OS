@@ -30,22 +30,11 @@
 #define RT_PRI_LEVELS PROC_RT_PRI_LEVELS
 #define RT_BITMAP_WORDS ((RT_PRI_LEVELS + 31) / 32)
 
-#ifdef CONFIG_RT_SCHED_RUST
 extern uint32_t a20_rt_priority_slot(int32_t priority, uint32_t levels);
-#endif
 
 static inline unsigned rt_prio_slot(int prio)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     return a20_rt_priority_slot(prio, RT_PRI_LEVELS);
-#else
-    int p = prio;
-    if (p < 0)
-        p = 0;
-    if (p >= (int)RT_PRI_LEVELS)
-        p = RT_PRI_LEVELS - 1;
-    return (unsigned)p;
-#endif
 }
 
 typedef struct __attribute__((aligned(8))) proc_rt_bandwidth {
@@ -112,7 +101,6 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static proc_cpu_sched_t sched_cpu[CONFIG_NR_CPUS];
 
-#ifdef CONFIG_RT_SCHED_RUST
 typedef struct a20_rt_bandwidth_result {
     uint32_t throttled;
     uint32_t changed;
@@ -149,7 +137,6 @@ extern uint32_t a20_rt_is_empty(const uint32_t *bitmap, uint32_t levels);
 extern a20_rt_bandwidth_result_t a20_rt_account(
     proc_rt_bandwidth_t *bandwidth, uint64_t now, uint64_t ticks_per_sec,
     uint32_t current_is_rt);
-#endif
 
 /* Picks and empty picks are counted on every local dispatch, by every CPU.
  * As globals they shared one line with the counters below, so each context
@@ -241,11 +228,7 @@ static int sched_level_clamp(int level) {
 
 static int sched_task_rt(task_t *t)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     return t && a20_rt_policy_is_rt((uint32_t)t->sched_policy);
-#else
-    return t && (t->sched_policy == SCHED_FIFO || t->sched_policy == SCHED_RR);
-#endif
 }
 
 static task_t *rt_node_task(proc_rt_node_t *node)
@@ -255,7 +238,6 @@ static task_t *rt_node_task(proc_rt_node_t *node)
 
 static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     task_t *current = proc_current();
     a20_rt_bandwidth_result_t result = a20_rt_account(
         &rq->rt_bandwidth, now, (uint64_t)TICKS_PER_SEC,
@@ -263,47 +245,8 @@ static int sched_rt_account_locked(proc_runq_t *rq, uint64_t now)
     a20_rt_account_effects(result.changed, result.throttled,
                            cpu_current_id());
     return (int)result.throttled;
-#else
-    uint64_t period = TICKS_PER_SEC;
-    if (period < 2)
-        period = 2;
-    uint64_t reserve = period / 20;
-    if (!reserve)
-        reserve = 1;
-    uint64_t budget = period - reserve;
-    proc_rt_bandwidth_t *bw = &rq->rt_bandwidth;
-    int was_throttled = bw->used >= budget;
-    if (!bw->initialized) {
-        bw->initialized = 1;
-        bw->period_start = now;
-        bw->last_account = now;
-    }
-    if (now - bw->period_start >= period) {
-        bw->period_start = now - (now - bw->period_start) % period;
-        bw->used = 0;
-    }
-    uint64_t since = bw->last_account;
-    if (since < bw->period_start)
-        since = bw->period_start;
-    task_t *current = proc_current();
-    if (current && current->pid && sched_task_rt(current)) {
-        uint64_t elapsed = now - since;
-        bw->used = elapsed >= budget - bw->used
-                 ? budget : bw->used + elapsed;
-    }
-    bw->last_account = now;
-    int throttled = bw->used >= budget;
-    a20_rt_account_effects(throttled != was_throttled, throttled,
-                           cpu_current_id());
-    /* Tick while idle also replenishes a throttled queue.  Its runnable RT
-     * tasks keep their queue references and become selectable next period. */
-    if (throttled != was_throttled)
-        proc_sched_request_cpu(cpu_current_id(), 0);
-    return throttled;
-#endif
 }
 
-#ifdef CONFIG_RT_SCHED_RUST
 /* Rust owns budget accounting and RT head selection behind one hot-path
  * boundary. C keeps the runqueue lock, perf counter, and reschedule request. */
 static task_t *sched_rt_controller_pick_locked(proc_runq_t *rq, uint64_t now,
@@ -330,7 +273,6 @@ static task_t *sched_rt_controller_pick_locked(proc_runq_t *rq, uint64_t now,
               arch_current_cpu_id(), flags);
     return rt_node_task(node);
 }
-#endif
 
 static int sched_rt_throttled_local(void)
 {
@@ -346,7 +288,6 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
     if (!candidate || !running || candidate == running)
         return 0;
 
-#ifdef CONFIG_TASK_PLACEMENT_RUST
     a20_task_preemption_snapshot_t snapshot = {0};
     snapshot.candidate_policy = (uint32_t)candidate->sched_policy;
     snapshot.candidate_priority = candidate->priority;
@@ -363,25 +304,6 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
     snapshot.current_priority = running->priority;
     snapshot.current_deadline = proc_sched_deadline_snapshot(running);
     return a20_task_placement_strictly_outranks(&snapshot);
-#else
-    int candidate_rt = sched_task_rt(candidate);
-    int running_rt = sched_task_rt(running);
-    if (candidate_rt != running_rt)
-        return candidate_rt;
-    if (candidate_rt) {
-#ifdef CONFIG_RT_SCHED_RUST
-        return a20_rt_strictly_preempts((uint32_t)candidate->sched_policy,
-                                        candidate->priority,
-                                        (uint32_t)running->sched_policy,
-                                        running->priority) != 0;
-#else
-        return candidate->priority > running->priority;
-#endif
-    }
-    /* EEVDF: an earlier virtual deadline strictly outranks. */
-    return proc_sched_deadline_snapshot(candidate) <
-           proc_sched_deadline_snapshot(running);
-#endif
 }
 
 /* ================================================================
@@ -411,7 +333,6 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
 #define EEVDF_BASE_SLICE      (TICKS_PER_SEC / 100)   /* 10 ms base slice */
 #define EEVDF_MAX_LAG         (TICKS_PER_SEC / 100)   /* max sleeper bonus */
 
-#ifdef CONFIG_EEVDF_MATH_RUST
 extern uint64_t a20_eevdf_effective_weight(uint32_t base, uint32_t boost);
 extern uint64_t a20_eevdf_virtual_slice(int32_t configured_ms,
                                         uint64_t ticks_per_sec,
@@ -425,7 +346,6 @@ extern uint64_t a20_eevdf_advance_vtime(uint64_t vtime, uint64_t elapsed,
 extern uint32_t a20_eevdf_eligible(uint64_t vruntime, uint64_t vtime);
 extern uint64_t a20_eevdf_clamp_sleeper(uint64_t vruntime, uint64_t vtime,
                                         uint64_t max_lag);
-#endif
 
 /* Schedulable base slice (ms), writable via /proc/a20/sched_base_slice. */
 extern int g_sched_base_slice_ms;
@@ -434,12 +354,7 @@ static inline uint64_t eevdf_weight(task_t *t)
 {
     uint32_t w = t->cfs_weight;
     uint32_t boost = __atomic_load_n(&t->pi_boost_weight, __ATOMIC_RELAXED);
-#ifdef CONFIG_EEVDF_MATH_RUST
     return a20_eevdf_effective_weight(w, boost);
-#else
-    uint64_t base = w ? (uint64_t)w : EEVDF_NICE0_LOAD;
-    return boost > base ? boost : base;
-#endif
 }
 
 void proc_sched_pi_boost(task_t *owner, task_t *pi_waiter)
@@ -464,43 +379,26 @@ void proc_sched_pi_unboost(task_t *owner)
 
 static inline uint64_t eevdf_vslice(task_t *t)
 {
-#ifdef CONFIG_EEVDF_MATH_RUST
     return a20_eevdf_virtual_slice(g_sched_base_slice_ms,
                                    (uint64_t)TICKS_PER_SEC,
                                    eevdf_weight(t));
-#else
-    uint64_t slice = EEVDF_BASE_SLICE;
-    int ms = g_sched_base_slice_ms;
-    if (ms > 0)
-        slice = (uint64_t)ms * (TICKS_PER_SEC / 1000);
-    return (slice * EEVDF_NICE0_LOAD) / eevdf_weight(t);
-#endif
 }
 
 static void eevdf_reset_deadline(task_t *t)
 {
     uint64_t flags = spin_lock_irqsave(&t->eevdf_deadline_lock);
-#ifdef CONFIG_EEVDF_MATH_RUST
     t->eevdf_deadline = a20_eevdf_deadline(t->eevdf_vruntime,
                                            eevdf_vslice(t));
-#else
-    t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
-#endif
     spin_unlock_irqrestore(&t->eevdf_deadline_lock, flags);
 }
 
 static void eevdf_account_run(task_t *t, uint64_t dt)
 {
     uint64_t flags = spin_lock_irqsave(&t->eevdf_deadline_lock);
-#ifdef CONFIG_EEVDF_MATH_RUST
     t->eevdf_vruntime = a20_eevdf_advance_vruntime(
         t->eevdf_vruntime, dt, eevdf_weight(t));
     t->eevdf_deadline = a20_eevdf_deadline(t->eevdf_vruntime,
                                            eevdf_vslice(t));
-#else
-    t->eevdf_vruntime += (dt * EEVDF_NICE0_LOAD) / eevdf_weight(t);
-    t->eevdf_deadline = t->eevdf_vruntime + eevdf_vslice(t);
-#endif
     spin_unlock_irqrestore(&t->eevdf_deadline_lock, flags);
 }
 
@@ -516,11 +414,7 @@ uint64_t proc_sched_deadline_snapshot(task_t *task)
 
 static inline int eevdf_eligible(proc_runq_t *rq, task_t *t)
 {
-#ifdef CONFIG_EEVDF_MATH_RUST
     return a20_eevdf_eligible(t->eevdf_vruntime, rq->eevdf_vtime);
-#else
-    return t->eevdf_vruntime <= rq->eevdf_vtime;
-#endif
 }
 
 /* Charge `now - last_account` of run time to t and advance system vtime. */
@@ -534,12 +428,7 @@ static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
         return;
     eevdf_account_run(t, dt);
     uint64_t total = rq->eevdf_weight;
-#ifdef CONFIG_EEVDF_MATH_RUST
     rq->eevdf_vtime = a20_eevdf_advance_vtime(rq->eevdf_vtime, dt, total);
-#else
-    if (total)
-        rq->eevdf_vtime += (dt * EEVDF_NICE0_LOAD) / total;
-#endif
 }
 
 /* ---- Level 0: RT per-priority FIFO queues ---- */
@@ -551,139 +440,48 @@ static int rt_rr_account_task(task_t *t, uint64_t now)
 {
     if (!t || t->sched_policy != SCHED_RR)
         return 0;
-#ifdef CONFIG_RT_SCHED_RUST
     return (int)a20_rt_rr_account(&t->rt_rr_remaining,
                                   &t->rt_rr_last_account, now);
-#else
-    uint64_t elapsed = now - t->rt_rr_last_account;
-    t->rt_rr_remaining = elapsed >= t->rt_rr_remaining
-                       ? 0 : t->rt_rr_remaining - elapsed;
-    t->rt_rr_last_account = now;
-    return t->rt_rr_remaining == 0;
-#endif
 }
 
 static void rt_rr_dispatch_task(task_t *t, uint64_t now)
 {
     if (!t || t->sched_policy != SCHED_RR)
         return;
-#ifdef CONFIG_RT_SCHED_RUST
     a20_rt_rr_dispatch(&t->rt_rr_remaining, &t->rt_rr_last_account,
                        now, RT_RR_QUANTUM_TICKS);
-#else
-    if (!t->rt_rr_remaining)
-        t->rt_rr_remaining = RT_RR_QUANTUM_TICKS;
-    t->rt_rr_last_account = now;
-#endif
 }
 
 static void rt_enqueue_locked(proc_runq_t *rq, task_t *t)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     if (!a20_rt_enqueue(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS,
                         &t->rt_node, t->priority,
                         (uint32_t)t->sched_policy, &t->rt_rr_remaining,
                         RT_RR_QUANTUM_TICKS))
         panic("rt enqueue rejected pid=%d slot=%d", t->pid,
               t->rt_node.queued_slot);
-#else
-    unsigned s = rt_prio_slot(t->priority);
-    if (t->rt_node.queued_slot != -1)
-        panic("rt enqueue duplicate pid=%d slot=%d", t->pid,
-              t->rt_node.queued_slot);
-    t->rt_node.next = NULL;
-    t->rt_node.prev = rq->rt_q[s].tail;
-    t->rt_node.queued_slot = (int32_t)s;
-    t->rt_node.policy = (uint32_t)t->sched_policy;
-    if (t->sched_policy == SCHED_RR && !t->rt_rr_remaining)
-        t->rt_rr_remaining = RT_RR_QUANTUM_TICKS;
-    if (rq->rt_q[s].tail)
-        rq->rt_q[s].tail->next = &t->rt_node;
-    else
-        rq->rt_q[s].head = &t->rt_node;
-    rq->rt_q[s].tail = &t->rt_node;
-    rq->rt_bitmap[s >> 5] |= 1U << (s & 31);
-#endif
 }
 
 static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     if (!a20_rt_dequeue(rq->rt_q, rq->rt_bitmap, RT_PRI_LEVELS,
                         &t->rt_node))
         panic("rt dequeue rejected pid=%d slot=%d", t->pid,
               t->rt_node.queued_slot);
-#else
-    unsigned s = rt_prio_slot(t->priority);
-    if (t->rt_node.queued_slot != (int32_t)s)
-        panic("rt dequeue slot mismatch pid=%d node=%d wanted=%u", t->pid,
-              t->rt_node.queued_slot, s);
-    if (t->rt_node.prev)
-        t->rt_node.prev->next = t->rt_node.next;
-    else
-        rq->rt_q[s].head = t->rt_node.next;
-    if (t->rt_node.next)
-        t->rt_node.next->prev = t->rt_node.prev;
-    else
-        rq->rt_q[s].tail = t->rt_node.prev;
-    if (!rq->rt_q[s].head)
-        rq->rt_bitmap[s >> 5] &= ~(1U << (s & 31));
-    t->rt_node.next = NULL;
-    t->rt_node.prev = NULL;
-    t->rt_node.queued_slot = -1;
-#endif
 }
 
 /* Highest-priority non-empty RT queue via bitmap word scan: O(words).
  * FIFO and RR both dequeue from the bucket head. RR fairness is driven by
  * elapsed quantum accounting; an expired running task returns at the tail.
  */
-#ifndef CONFIG_RT_SCHED_RUST
-/* C reference picker. */
-static task_t *rt_pick_best_c_locked(proc_runq_t *rq)
-{
-    for (int w = RT_BITMAP_WORDS - 1; w >= 0; w--) {
-        uint32_t bits = rq->rt_bitmap[w];
-        while (bits) {
-            int off = 31;
-            while (off >= 0 && !(bits & (1U << off)))
-                off--;
-            unsigned s = (unsigned)(w << 5) + (unsigned)off;
-            proc_rt_node_t *node = rq->rt_q[s].head;
-            if (node)
-                return rt_node_task(node);
-            /* Repair a stale bit whose list drained without bookkeeping. */
-            bits &= ~(1U << off);
-            rq->rt_bitmap[w] &= ~(1U << off);
-        }
-    }
-    return NULL;
-}
-#endif
 
 /* Select and detach under the same runqueue lock. Rust owns both operations
  * behind one ABI crossing; the C reference keeps its established picker and
  * unlink primitives in the same order. */
-#ifndef CONFIG_RT_SCHED_RUST
-static task_t *rt_take_best_locked(proc_runq_t *rq)
-{
-    task_t *t = rt_pick_best_c_locked(rq);
-    if (t)
-        rt_unlink_locked(rq, t);
-    return t;
-}
-#endif
 
 static inline int rt_queues_empty(const proc_runq_t *rq)
 {
-#ifdef CONFIG_RT_SCHED_RUST
     return a20_rt_is_empty(rq->rt_bitmap, RT_PRI_LEVELS) != 0;
-#else
-    for (int w = 0; w < RT_BITMAP_WORDS; w++)
-        if (rq->rt_bitmap[w])
-            return 0;
-    return 1;
-#endif
 }
 
 /* ---- Level 1: EEVDF randomized BST keyed by earliest virtual deadline ---- */
@@ -702,7 +500,6 @@ static inline uint32_t eevdf_heap_prio(void)
     return (uint32_t)(x >> 32) | 1u;
 }
 
-#ifdef CONFIG_EEVDF_MATH_RUST
 extern uint32_t a20_eevdf_tree_insert(eevdf_node_t **root, eevdf_node_t *node,
                                       void *owner, uint64_t deadline,
                                       uint64_t vruntime, uint32_t heap_prio);
@@ -712,103 +509,18 @@ extern void *a20_eevdf_tree_last(eevdf_node_t *root);
 extern void *a20_eevdf_tree_pick(eevdf_node_t *root, uint64_t vtime);
 extern uint32_t a20_eevdf_tree_contains(eevdf_node_t *root,
                                        const eevdf_node_t *target);
-#else
-static inline task_t *eevdf_task_of(eevdf_node_t *n)
-{
-    return (task_t *)((char *)n - __builtin_offsetof(task_t, eevdf_node));
-}
-
-static inline int eevdf_key_less(task_t *a, task_t *b)
-{
-    if (a->eevdf_deadline != b->eevdf_deadline)
-        return a->eevdf_deadline < b->eevdf_deadline;
-    if (a->eevdf_vruntime != b->eevdf_vruntime)
-        return a->eevdf_vruntime < b->eevdf_vruntime;
-    return (uintptr_t)a < (uintptr_t)b;
-}
-
-static inline void eevdf_augment(eevdf_node_t *n)
-{
-    uint64_t m = eevdf_task_of(n)->eevdf_vruntime;
-    if (n->left && n->left->min_vruntime < m)
-        m = n->left->min_vruntime;
-    if (n->right && n->right->min_vruntime < m)
-        m = n->right->min_vruntime;
-    n->min_vruntime = m;
-}
-
-static void eevdf_augment_up(eevdf_node_t *n)
-{
-    while (n) {
-        eevdf_augment(n);
-        n = n->parent;
-    }
-}
-
-/* A rotation preserves subtree membership; recompute only the rotated pair. */
-static void eevdf_rot_left(proc_runq_t *rq, eevdf_node_t *x)
-{
-    eevdf_node_t *y = x->right;
-    x->right = y->left;
-    if (y->left)
-        y->left->parent = x;
-    y->parent = x->parent;
-    if (!y->parent)
-        rq->eevdf_root = y;
-    else if (y->parent->left == x)
-        y->parent->left = y;
-    else
-        y->parent->right = y;
-    y->left = x;
-    x->parent = y;
-    eevdf_augment(x);
-    eevdf_augment(y);
-}
-
-static void eevdf_rot_right(proc_runq_t *rq, eevdf_node_t *x)
-{
-    eevdf_node_t *y = x->left;
-    x->left = y->right;
-    if (y->right)
-        y->right->parent = x;
-    y->parent = x->parent;
-    if (!y->parent)
-        rq->eevdf_root = y;
-    else if (y->parent->left == x)
-        y->parent->left = y;
-    else
-        y->parent->right = y;
-    y->right = x;
-    x->parent = y;
-    eevdf_augment(x);
-    eevdf_augment(y);
-}
-
-static task_t *eevdf_extreme_locked(proc_runq_t *rq, int leftmost)
-{
-    eevdf_node_t *n = rq->eevdf_root;
-    if (!n)
-        return NULL;
-    while (leftmost ? n->left : n->right)
-        n = leftmost ? n->left : n->right;
-    return eevdf_task_of(n);
-}
-#endif /* !CONFIG_EEVDF_MATH_RUST */
 
 static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 {
     eevdf_node_t *n = &t->eevdf_node;
 
-#ifdef CONFIG_EEVDF_MATH_RUST
     if (n->owner || n->left || n->right || n->parent)
         panic("EEVDF Rust duplicate insert");
-#endif
 
     if (t->eevdf_deadline == 0)
         eevdf_reset_deadline(t);
 
     /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU. */
-#ifdef CONFIG_EEVDF_MATH_RUST
     if (rq->eevdf_root) {
         uint64_t clamped = a20_eevdf_clamp_sleeper(
             t->eevdf_vruntime, rq->eevdf_vtime, EEVDF_MAX_LAG);
@@ -817,13 +529,6 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
             eevdf_reset_deadline(t);
         }
     }
-#else
-    if (rq->eevdf_root &&
-        t->eevdf_vruntime + EEVDF_MAX_LAG < rq->eevdf_vtime) {
-        t->eevdf_vruntime = rq->eevdf_vtime - EEVDF_MAX_LAG;
-        eevdf_reset_deadline(t);
-    }
-#endif
 
     /* First EEVDF task on this CPU defines the system virtual time. */
     if (!rq->eevdf_root)
@@ -831,46 +536,14 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 
     n->left = NULL;
     n->right = NULL;
-#ifdef CONFIG_EEVDF_MATH_RUST
     n->parent = NULL;
-#endif
     n->heap_prio = eevdf_heap_prio();
-#ifdef CONFIG_EEVDF_MATH_RUST
     if (!a20_eevdf_tree_insert(&rq->eevdf_root, n, t,
                                t->eevdf_deadline, t->eevdf_vruntime,
                                n->heap_prio))
         panic("EEVDF Rust insert invariant");
     rq->eevdf_first = (task_t *)a20_eevdf_tree_first(rq->eevdf_root);
     rq->eevdf_last = (task_t *)a20_eevdf_tree_last(rq->eevdf_root);
-#else
-    eevdf_node_t **link = &rq->eevdf_root;
-    eevdf_node_t *parent = NULL;
-    while (*link) {
-        parent = *link;
-        link = eevdf_key_less(t, eevdf_task_of(parent)) ? &parent->left
-                                                        : &parent->right;
-    }
-    n->parent = parent;
-    *link = n;
-    eevdf_augment(n);
-
-    /* Rotate up to restore the treap heap property. */
-    while (n->parent && n->parent->heap_prio > n->heap_prio) {
-        eevdf_node_t *p = n->parent;
-        if (p->left == n)
-            eevdf_rot_right(rq, p);
-        else
-            eevdf_rot_left(rq, p);
-    }
-
-    /* Insert can lower a subtree minimum all the way to the root. */
-    eevdf_augment_up(n);
-
-    if (!rq->eevdf_first || eevdf_key_less(t, rq->eevdf_first))
-        rq->eevdf_first = t;
-    if (!rq->eevdf_last || eevdf_key_less(rq->eevdf_last, t))
-        rq->eevdf_last = t;
-#endif
 
     rq->eevdf_weight += eevdf_weight(t);
 }
@@ -878,48 +551,11 @@ static void eevdf_insert_locked(proc_runq_t *rq, task_t *t)
 static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
 {
     eevdf_node_t *n = &t->eevdf_node;
-#ifdef CONFIG_EEVDF_MATH_RUST
     if (n->owner != t ||
         !a20_eevdf_tree_remove(&rq->eevdf_root, n))
         panic("EEVDF Rust remove invariant");
     rq->eevdf_first = (task_t *)a20_eevdf_tree_first(rq->eevdf_root);
     rq->eevdf_last = (task_t *)a20_eevdf_tree_last(rq->eevdf_root);
-#else
-    int was_first = (rq->eevdf_first == t);
-    int was_last = (rq->eevdf_last == t);
-
-    /* Rotate the target down to a leaf, always lifting its smaller-heap-key
-     * child, then splice it out.  Every rotation preserves BST order. */
-    while (n->left && n->right) {
-        if (n->left->heap_prio < n->right->heap_prio)
-            eevdf_rot_right(rq, n);
-        else
-            eevdf_rot_left(rq, n);
-    }
-    eevdf_node_t *child = n->left ? n->left : n->right;
-    if (child)
-        child->parent = n->parent;
-    eevdf_node_t *ancestor = n->parent;
-    if (!n->parent)
-        rq->eevdf_root = child;
-    else if (n->parent->left == n)
-        n->parent->left = child;
-    else
-        n->parent->right = child;
-    n->left = NULL;
-    n->right = NULL;
-    n->parent = NULL;
-    n->owner = NULL;
-
-    /* Removing a low-vruntime leaf can raise every ancestor's minimum. */
-    eevdf_augment_up(ancestor);
-
-    /* Ancestors keep their membership sets, so only caches need repair. */
-    if (was_first)
-        rq->eevdf_first = eevdf_extreme_locked(rq, 1);
-    if (was_last)
-        rq->eevdf_last = eevdf_extreme_locked(rq, 0);
-#endif
 }
 
 /*
@@ -930,27 +566,7 @@ static void eevdf_remove_locked(proc_runq_t *rq, task_t *t)
  */
 static task_t *eevdf_pick_eligible_locked(proc_runq_t *rq)
 {
-#ifdef CONFIG_EEVDF_MATH_RUST
     return (task_t *)a20_eevdf_tree_pick(rq->eevdf_root, rq->eevdf_vtime);
-#else
-    eevdf_node_t *n = rq->eevdf_root;
-    if (!n || n->min_vruntime > rq->eevdf_vtime)
-        return NULL;
-    for (;;) {
-        if (n->left && n->left->min_vruntime <= rq->eevdf_vtime) {
-            n = n->left;
-            continue;
-        }
-        task_t *t = eevdf_task_of(n);
-        if (eevdf_eligible(rq, t))
-            return t;
-        if (n->right && n->right->min_vruntime <= rq->eevdf_vtime) {
-            n = n->right;
-            continue;
-        }
-        return NULL;
-    }
-#endif
 }
 
 static void sched_runq_eevdf_del_weight(proc_runq_t *rq, task_t *t)
@@ -992,13 +608,9 @@ static uint32_t sched_task_cpu_mask(task_t *t)
         cpuset = node->res.cpuset.effective_cpus;
     }
 
-#ifdef CONFIG_TASK_PLACEMENT_RUST
     return a20_task_placement_eligible_mask(affinity, cpuset,
                                             smp_online_cpu_mask(),
                                             CONFIG_NR_CPUS);
-#else
-    return SCHED_CPU_MASK_ALL & affinity & cpuset & smp_online_cpu_mask();
-#endif
 }
 
 static int sched_policy_valid(int policy)
@@ -1275,7 +887,6 @@ invalid:
 unsigned proc_sched_select_cpu(task_t *t)
 {
     unsigned current = cpu_current_id();
-#ifdef CONFIG_TASK_PLACEMENT_RUST
     a20_task_placement_snapshot_t snapshot = {0};
     snapshot.current_cpu = current;
     snapshot.nr_cpus = CONFIG_NR_CPUS;
@@ -1304,35 +915,6 @@ unsigned proc_sched_select_cpu(task_t *t)
         }
     }
     return a20_task_placement_select(&snapshot);
-#else
-    if (CONFIG_NR_CPUS <= 1)
-        return current;
-
-    uint32_t mask = sched_task_cpu_mask(t);
-    if (!mask)
-        return current;
-
-    if (t && t == proc_current() && current < 32 && (mask & (1U << current)))
-        return current;
-
-    unsigned best = current;
-    unsigned best_load = ~0U;
-    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS && cpu < 32; cpu++) {
-        if (!(mask & (1U << cpu)))
-            continue;
-        unsigned load = __atomic_load_n(&sched_runq[cpu].nr_running,
-                                        __ATOMIC_RELAXED);
-        proc_current_sched_snapshot_t running = {0};
-        proc_current_sched_snapshot(cpu, t, &running);
-        if (running.valid && !running.idle && running.running)
-            load++;
-        if (load < best_load) {
-            best = cpu;
-            best_load = load;
-        }
-    }
-    return best;
-#endif
 }
 
 /* Keep old name as compat wrapper for proc_internal.h callers */
@@ -1360,21 +942,7 @@ int proc_sched_should_preempt_locked(task_t *t, unsigned cpu)
     snapshot.current_policy = current.policy;
     snapshot.current_priority = current.priority;
     snapshot.current_deadline = current.eevdf_deadline;
-#ifdef CONFIG_TASK_PLACEMENT_RUST
     return a20_task_placement_should_preempt(&snapshot);
-#else
-    if (!snapshot.current_valid || snapshot.current_idle)
-        return 1;
-    if (snapshot.same_task || !snapshot.current_running)
-        return 0;
-    int candidate_rt = sched_policy_rt_value((int)snapshot.candidate_policy);
-    int running_rt = sched_policy_rt_value((int)snapshot.current_policy);
-    if (candidate_rt != running_rt)
-        return candidate_rt;
-    if (candidate_rt)
-        return snapshot.candidate_priority > snapshot.current_priority;
-    return snapshot.candidate_deadline < snapshot.current_deadline;
-#endif
 }
 
 void proc_sched_request_cpu(unsigned cpu, int priority)
@@ -1661,18 +1229,7 @@ static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
         }
         return 0;
     }
-#ifdef CONFIG_EEVDF_MATH_RUST
     return a20_eevdf_tree_contains(rq->eevdf_root, &t->eevdf_node) != 0;
-#else
-    eevdf_node_t *n = rq->eevdf_root;
-    while (n) {
-        task_t *c = eevdf_task_of(n);
-        if (c == t)
-            return 1;
-        n = eevdf_key_less(t, c) ? n->left : n->right;
-    }
-    return 0;
-#endif
 }
 
 /*
@@ -2204,21 +1761,13 @@ task_t *proc_runq_pick_local(void)
     proc_runq_t *rq = &sched_runq[cpu];
 
     uint64_t rt_now = timer_get_ticks();
-#ifdef CONFIG_RT_SCHED_RUST
     int rt_throttled = 0;
-#else
-    int rt_throttled = sched_rt_account_locked(rq, rt_now);
-#endif
     for (;;) {
         task_t *t = NULL;
         int q = -1;
 
-#ifdef CONFIG_RT_SCHED_RUST
         task_t *rt = sched_rt_controller_pick_locked(rq, rt_now,
                                                      &rt_throttled);
-#else
-        task_t *rt = rt_throttled ? NULL : rt_take_best_locked(rq);
-#endif
         if (rt) {
             t = rt;
             q = 0;

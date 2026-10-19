@@ -10,6 +10,10 @@
 #[cfg(test)]
 extern crate std;
 
+// The operation table layout is shared with kernel/proc/clone_txn.rs, which
+// builds the table for proc_clone(). One definition on disk, two objects.
+include!("task_construction_ops.rs");
+
 pub const TASK_BUILD_VALIDATE: u32 = 0;
 pub const TASK_BUILD_ALLOCATE: u32 = 1;
 pub const TASK_BUILD_BASE: u32 = 2;
@@ -25,33 +29,6 @@ pub const TASK_BUILD_PUBLISH: u32 = 11;
 pub const TASK_BUILD_POST_PUBLISH: u32 = 12;
 pub const TASK_BUILD_READY: u32 = 13;
 pub const TASK_BUILD_VFORK_WAIT: u32 = 14;
-
-pub type StageFn = unsafe extern "C" fn(*mut core::ffi::c_void) -> i32;
-pub type WaitFn = unsafe extern "C" fn(*mut core::ffi::c_void);
-pub type AbortFn = unsafe extern "C" fn(*mut core::ffi::c_void, u8);
-
-#[repr(C)]
-pub struct TaskConstructionOps {
-    pub context: *mut core::ffi::c_void,
-    pub validate: StageFn,
-    pub allocate: StageFn,
-    pub base: StageFn,
-    pub seccomp: StageFn,
-    pub fs_cgroup: StageFn,
-    pub files: StageFn,
-    pub signals: StageFn,
-    pub namespaces: StageFn,
-    pub capabilities: StageFn,
-    pub mm: StageFn,
-    pub arch: StageFn,
-    pub publish: StageFn,
-    pub post_publish: StageFn,
-    pub ready: StageFn,
-    pub vfork_wait: WaitFn,
-    pub abort: AbortFn,
-    pub deferred: u8,
-    pub vfork: u8,
-}
 
 #[inline]
 fn drive_transaction<F, W, A>(deferred: bool, vfork: bool, mut run: F,

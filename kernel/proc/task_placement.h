@@ -69,7 +69,6 @@ _Static_assert(offsetof(a20_task_preemption_snapshot_t, current_priority) == 36,
 _Static_assert(offsetof(a20_task_preemption_snapshot_t, current_deadline) == 40,
                "task preemption current deadline ABI offset");
 
-#ifdef CONFIG_TASK_PLACEMENT_RUST
 /* # Safety
  * snapshot must point to a live, aligned snapshot whose entire object,
  * including every cpu_load entry, is initialized. */
@@ -83,6 +82,5 @@ uint32_t a20_task_placement_should_preempt(
     const a20_task_preemption_snapshot_t *snapshot);
 uint32_t a20_task_placement_strictly_outranks(
     const a20_task_preemption_snapshot_t *snapshot);
-#endif
 
 #endif

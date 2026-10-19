@@ -1,4 +1,6 @@
 #include "proc/resource_ns.h"
+#include "abi/linux/rlimit_policy.h"
+#include "abi/linux/sys_policy.h"
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "abi/linux/siginfo.h"
@@ -107,25 +109,6 @@ static int linux_clone_newns_perm_check(void) {
     if (!proc_has_cap(t, CAP_SYS_ADMIN) && t->cred.euid != 0)
         return -EPERM;
     return 0;
-}
-
-static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
-    uint64_t limit = cur < max ? cur : max;
-    if (limit > USER_STACK_MAX_SIZE)
-        limit = USER_STACK_MAX_SIZE;
-    return limit;
-}
-
-static uint64_t clamp_nofile_rlimit(uint64_t cur, uint64_t max) {
-    uint64_t limit = cur < max ? cur : max;
-    if (limit > MAX_FILES)
-        limit = MAX_FILES;
-    return limit;
-}
-
-static void set_uniform_rlimit(uint64_t pair[2], uint64_t limit) {
-    pair[0] = limit;
-    pair[1] = limit;
 }
 
 int64_t sys_exit(int code) {
@@ -406,53 +389,40 @@ int64_t sys_setfsgid(int gid) {
 int64_t sys_getpgid(int pid) {
     task_t *self = proc_current();
     task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
-    if (!t) return -ESRCH;
-    int pgid = t->pgid;
+    int64_t r = a20_getid(self != NULL, t != NULL, t ? t->pgid : 0);
     proc_put(t);
-    return pgid;
+    return r;
 }
 
 int64_t sys_setpgid(int pid, int pgid) {
     task_t *self = proc_current();
     task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
-    if (!self || !t) {
-        proc_put(t);
-        return -ESRCH;
-    }
-    if (pgid == 0) pgid = t->pid;
-    if (pgid <= 0) {
-        proc_put(t);
-        return -EINVAL;
-    }
-    if (t != self && t->ppid != self->pid) {
-        proc_put(t);
-        return -ESRCH;
-    }
-    if (t->sid != self->sid) {
-        proc_put(t);
-        return -EPERM;
-    }
-    t->pgid = pgid;
+    int64_t r = a20_setpgid(self != NULL, t != NULL,
+                            t ? t->pid : 0, t ? t->ppid : 0, t ? t->sid : 0,
+                            self ? self->pid : 0, self ? self->sid : 0,
+                            t != NULL && t == self, pgid);
+    if (r >= 0 && t)
+        t->pgid = (int)r;
     proc_put(t);
-    return 0;
+    return r < 0 ? r : 0;
 }
 
 int64_t sys_setsid(void) {
     task_t *t = proc_current();
-    if (!t) return -ESRCH;
-    if (t->pgid == t->pid) return -EPERM;
-    t->sid = t->pid;
-    t->pgid = t->pid;
-    return t->sid;
+    int64_t r = a20_setsid(t != NULL, t ? t->pid : 0, t ? t->pgid : 0);
+    if (r < 0)
+        return r;
+    t->sid = (int)r;
+    t->pgid = (int)r;
+    return r;
 }
 
 int64_t sys_getsid(int pid) {
     task_t *self = proc_current();
     task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
-    if (!t) return -ESRCH;
-    int sid = t->sid;
+    int64_t r = a20_getid(self != NULL, t != NULL, t ? t->sid : 0);
     proc_put(t);
-    return sid;
+    return r;
 }
 
 /* Procfs and uname read the calling task's UTS namespace. */
@@ -463,9 +433,11 @@ const char *linux_kernel_domainname(void) {
     return resource_ns_current(PROCNS_UTS)->domainname;
 }
 static int uts_set_name(const char *buf, size_t len, int domain) {
-    if (!buf || len > 64) return -EINVAL;
+    if (!buf) return -EINVAL;
     resource_namespace_t *ns = resource_ns_current(PROCNS_UTS);
-    if (!userns_capable(proc_current(), ns->owner, CAP_SYS_ADMIN)) return -EPERM;
+    int capable = userns_capable(proc_current(), ns->owner, CAP_SYS_ADMIN) ? 1 : 0;
+    int r = a20_uts_set_check(len, capable);
+    if (r < 0) return r;
     uint64_t irq = spin_lock_irqsave(&ns->lock);
     char *name = domain ? ns->domainname : ns->hostname;
     memcpy(name, buf, len);
@@ -583,29 +555,31 @@ int64_t sys_setns(int fd, int nstype) {
         vfs_put_file(vf);
         return -EINVAL;
     }
-    /* Map the target kind to its CLONE_NEW* bit for the nstype check. */
-    static const int kind_flags[] = {
-        [PROCNS_MNT]    = 0x00020000,  /* CLONE_NEWNS */
-        [PROCNS_PID]    = 0x20000000,  /* CLONE_NEWPID */
-        [PROCNS_UTS]    = 0x04000000,  /* CLONE_NEWUTS */
-        [PROCNS_USER]   = 0x10000000,  /* CLONE_NEWUSER */
-        [PROCNS_IPC]    = 0x08000000,  /* CLONE_NEWIPC */
-        [PROCNS_NET]    = 0x40000000,  /* CLONE_NEWNET */
-        [PROCNS_CGROUP] = 0x02000000,  /* CLONE_NEWCGROUP */
-    };
-    if (nstype != 0 && nstype != kind_flags[kind]) {
+    /* The kind/nstype agreement is decided by the policy owner before any
+     * namespace reference is taken. */
+    int r = a20_setns_nstype_ok(kind, nstype);
+    if (r < 0) {
         vfs_put_file(vf);
-        return -EINVAL;
+        return r;
     }
+
     task_t *cur = proc_current();
     int owner_uid = -1;
-    int r;
-    if (kind == PROCNS_UTS || kind == PROCNS_IPC || kind == PROCNS_NET || kind == PROCNS_CGROUP) {
+
+    if (kind == PROCNS_UTS || kind == PROCNS_IPC || kind == PROCNS_NET ||
+        kind == PROCNS_CGROUP) {
         resource_namespace_t *ns = procfs_ns_file_resource_get(vf);
-        if (!ns) { vfs_put_file(vf); return -EINVAL; }
-        if (!cur || !userns_capable(cur, ns->owner, CAP_SYS_ADMIN) ||
-            !proc_has_cap(cur, CAP_SYS_ADMIN)) r = -EPERM;
-        else r = resource_ns_join(cur, ns);
+        if (!ns) {
+            vfs_put_file(vf);
+            return -EINVAL;
+        }
+        /* A resource namespace is a resource of the user namespace that owns
+         * it, and the caller must also be privileged in its own. */
+        int in_target = (cur && userns_capable(cur, ns->owner, CAP_SYS_ADMIN)) ? 1 : 0;
+        int own = (cur && proc_has_cap(cur, CAP_SYS_ADMIN)) ? 1 : 0;
+        r = a20_setns_authority(kind, in_target, own);
+        if (r == 0)
+            r = resource_ns_join(cur, ns);
         resource_ns_put(ns);
         vfs_put_file(vf);
         return r;
@@ -619,20 +593,17 @@ int64_t sys_setns(int fd, int nstype) {
             return -EINVAL;
         }
         /* Joining a mount namespace means changing what the caller can see, so
-         * the authority required is authority over the USER NAMESPACE THAT
-         * OWNS the target -- CAP_SYS_ADMIN in that namespace or in any
-         * namespace between the caller's own and it.  A bare proc_has_cap()
-         * test would answer "in my own namespace", which is exactly the wrong
-         * scope now that a process can be root inside a container and have no
-         * authority at all outside it. */
-        if (!cur || !owner || !userns_capable(cur, owner, CAP_SYS_ADMIN)) {
-            if (owner) userns_put(owner);
+         * the authority required is authority over the user namespace that
+         * owns the target. */
+        int in_target = (cur && owner &&
+                         userns_capable(cur, owner, CAP_SYS_ADMIN)) ? 1 : 0;
+        r = a20_setns_authority(kind, in_target, 0);
+        if (owner)
+            userns_put(owner);
+        if (r == 0)
+            r = mntns_join(cur, ns); /* consumes the reference */
+        else
             mntns_put(ns);
-            vfs_put_file(vf);
-            return -EPERM;
-        }
-        userns_put(owner);
-        r = mntns_join(cur, ns);  /* consumes the reference */
         vfs_put_file(vf);
         return r;
     }
@@ -646,16 +617,15 @@ int64_t sys_setns(int fd, int nstype) {
         }
         /* Same scoping rule as the mount case: pid namespaces are resources of
          * a user namespace, and joining one re-points where children join. */
-        if (!cur || !owner || !userns_capable(cur, owner, CAP_SYS_ADMIN)) {
-            if (owner) userns_put(owner);
-            pidns_put(pns);
-            vfs_put_file(vf);
-            return -EPERM;
+        int in_target = (cur && owner &&
+                         userns_capable(cur, owner, CAP_SYS_ADMIN)) ? 1 : 0;
+        r = a20_setns_authority(kind, in_target, 0);
+        if (owner)
+            userns_put(owner);
+        if (r == 0) {
+            /* pidns_join() takes its own reference and releases the caller's. */
+            r = pidns_join(cur, pns);
         }
-        userns_put(owner);
-        /* pidns_join() takes its own reference and releases the caller's, so
-         * the reference from procfs_ns_file_pidns_get() is dropped here. */
-        r = pidns_join(cur, pns);
         pidns_put(pns);
         vfs_put_file(vf);
         return r;
@@ -667,17 +637,11 @@ int64_t sys_setns(int fd, int nstype) {
         return -EINVAL;
     }
     /* Joining a user namespace is the one setns case with no euid shortcut:
-     * the whole point of the namespace is that a process may become a
-     * different user inside it, so "already root" would be the wrong test.
-     * What is required is authority OVER the target namespace, which is
-     * CAP_SYS_ADMIN in the target or in any namespace between the caller's
-     * own one and it (userns_capable walks that chain). */
-    if (!cur || !userns_capable(cur, uns, CAP_SYS_ADMIN)) {
-        userns_put(uns);
-        vfs_put_file(vf);
-        return -EPERM;
-    }
-    r = userns_join(cur, uns);
+     * what is required is authority over the target namespace. */
+    int in_target = (cur && userns_capable(cur, uns, CAP_SYS_ADMIN)) ? 1 : 0;
+    r = a20_setns_authority(kind, in_target, 0);
+    if (r == 0)
+        r = userns_join(cur, uns);
     userns_put(uns);
     vfs_put_file(vf);
     return r;
@@ -1262,9 +1226,81 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
     return 0;
 }
 
+/* ---- prctl/setns adapter ---- */
+
+task_t *a20_pp_current(void) { return proc_current(); }
+
+int a20_pp_has_mm(task_t *t) { return t && t->mm ? 1 : 0; }
+
+int a20_pp_mm_dumpable(task_t *t) { return mm_dumpable(t->mm); }
+
+void a20_pp_mm_set_dumpable(task_t *t, int value) { mm_set_dumpable(t->mm, value); }
+
+/* The parent's state is sampled in its own critical section before the
+ * target's lock is taken, so the two park_locks are never nested (INV-P3). */
+int a20_pp_parent_alive(task_t *t)
+{
+    task_t *parent = t->parent;
+    if (!parent)
+        return 0;
+    uint64_t ppf = spin_lock_irqsave(&parent->park_lock);
+    int pstate = parent->state;
+    spin_unlock_irqrestore(&parent->park_lock, ppf);
+    return (pstate == PROC_ZOMBIE || pstate == PROC_UNUSED) ? 0 : 1;
+}
+
+void a20_pp_set_pdeathsig(task_t *t, int sig)
+{
+    uint64_t pf = spin_lock_irqsave(&t->park_lock);
+    t->pdeathsig = sig;
+    spin_unlock_irqrestore(&t->park_lock, pf);
+}
+
+int a20_pp_get_pdeathsig(task_t *t) { return t->pdeathsig; }
+
+int a20_pp_copy_out_sig(uint64_t addr, int sig)
+{
+    if (copy_to_user((void *)(uintptr_t)addr, &sig, sizeof(sig)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int a20_pp_has_cap(task_t *t, int cap) { return proc_has_cap(t, cap) ? 1 : 0; }
+
+uint64_t a20_pp_cap_bounding(task_t *t) { return t->cred.cap_bounding; }
+
+void a20_pp_cap_drop(task_t *t, uint32_t bit)
+{
+    t->cred.cap_bounding &= ~(1ULL << bit);
+}
+
+int a20_pp_nnps(task_t *t) { return t->policy.no_new_privs; }
+
+void a20_pp_set_nnps(task_t *t) { t->policy.no_new_privs = 1; }
+
+int a20_pp_thp(task_t *t) { return t->policy.thp_disabled; }
+
+void a20_pp_set_thp(task_t *t, int value) { t->policy.thp_disabled = value; }
+
+int64_t a20_pp_seccomp_strict(task_t *t) { return seccomp_set_strict(t); }
+
+int64_t a20_pp_seccomp_filter(task_t *t, uint64_t addr)
+{
+    return seccomp_install_filter(t, (const void *)(uintptr_t)addr);
+}
+
+int64_t a20_pp_seccomp_mode(task_t *t) { return seccomp_get_mode(t); }
+
+void a20_pp_set_name(task_t *t, uint64_t addr)
+{
+    char name[64];
+    if (user_strncpy(name, (const char *)(uintptr_t)addr, sizeof(name)) >= 0)
+        proc_set_name(t, name);
+}
+
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
-    task_t *t = proc_current();
 #ifdef CONFIG_ELF_EXEC_TEST
+    task_t *t = proc_current();
     /* Private test-profile operation: fail this task's next exec at a
      * Rust-declared failable commit phase. */
     if ((unsigned)op == 0xA20EU) {
@@ -1276,107 +1312,22 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
 #ifdef CONFIG_TASK_CONSTRUCTION_TEST
     /* Private test-profile operation: fail one clone after MM acquisition. */
     if ((unsigned)op == 0xA20FU) {
+        task_t *t = proc_current();
         if (!t || a2 || a3 || a4)
             return -EINVAL;
         return proc_task_construction_test_arm(t, (unsigned)a1);
     }
 #endif
-    if (op == PR_GET_DUMPABLE)
-        return t && t->mm ? mm_dumpable(t->mm) : -ESRCH;
-    if (op == PR_SET_DUMPABLE) {
-        if (!t || !t->mm) return -ESRCH;
-        if (a1 > 1) return -EINVAL;
-        mm_set_dumpable(t->mm, (int)a1);
-        return 0;
-    }
-    if (op == PR_SET_PDEATHSIG) {
-        /* One-shot signal delivered to the child when its parent dies.  A
-         * signal number >= _NSIG is rejected; a parent that is already gone
-         * is reported with -ESRCH (Linux semantics). */
-        if (!t)
-            return -ESRCH;
-        if (a1 >= 64)
-            return -EINVAL;
-        /* The parent's state is sampled in its own critical section before
-         * the target's lock is taken, so the two park_locks are never nested
-         * (INV-P3).  ->pdeathsig is park_lock-owned and paired with the claim
-         * proc_reparent_children() makes under the same lock. */
-        task_t *parent = t->parent;
-        int parent_dead = 1;
-        if (parent) {
-            uint64_t ppf = spin_lock_irqsave(&parent->park_lock);
-            int pstate = parent->state;
-            spin_unlock_irqrestore(&parent->park_lock, ppf);
-            parent_dead = (pstate == PROC_ZOMBIE || pstate == PROC_UNUSED);
-        }
-        if (parent_dead)
-            return -ESRCH;
-        uint64_t pf = spin_lock_irqsave(&t->park_lock);
-        t->pdeathsig = (int)a1;
-        spin_unlock_irqrestore(&t->park_lock, pf);
-        return 0;
-    }
-    if (op == PR_GET_PDEATHSIG) {
-        if (!t)
-            return -ESRCH;
-        int sig = t->pdeathsig;
-        if (copy_to_user((void *)(uintptr_t)a1, &sig, sizeof(sig)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    if (op == PR_SET_NAME) {
+#ifdef CONFIG_TASK_CONSTRUCTION_TEST
+    /* Private test-profile operation: fail one clone after MM acquisition. */
+    if ((unsigned)op == 0xA20FU) {
         task_t *t = proc_current();
-        if (t) {
-            char name[64];
-            if (user_strncpy(name, (const char *)(uintptr_t)a1, sizeof(name)) >= 0)
-                proc_set_name(t, name);
-        }
-        return 0;
+        if (!t || a2 || a3 || a4)
+            return -EINVAL;
+        return proc_task_construction_test_arm(t, (unsigned)a1);
     }
-    if (op == PR_CAPBSET_READ) {
-        if (!t || a1 >= 64) return -EINVAL;
-        return (t->cred.cap_bounding & (1ULL << a1)) ? 1 : 0;
-    }
-    if (op == PR_CAPBSET_DROP) {
-        if (!t || a1 >= 64) return -EINVAL;
-        if (!proc_has_cap(t, CAP_SETPCAP)) return -EPERM;
-        t->cred.cap_bounding &= ~(1ULL << a1);
-        return 0;
-    }
-    if (op == PR_SET_NO_NEW_PRIVS) {
-        if (!t) return -ESRCH;
-        if (a1 != 1 || a2 || a3 || a4) return -EINVAL;
-        t->policy.no_new_privs = 1;
-        return 0;
-    }
-    if (op == PR_GET_NO_NEW_PRIVS) {
-        if (!t) return -ESRCH;
-        if (a1 || a2 || a3 || a4) return -EINVAL;
-        return t->policy.no_new_privs;
-    }
-    if (op == PR_SET_THP_DISABLE) {
-        if (!t) return -ESRCH;
-        if (a1 > 1 || a2 || a3 || a4) return -EINVAL;
-        t->policy.thp_disabled = (int)a1;
-        return 0;
-    }
-    if (op == PR_GET_THP_DISABLE)
-        return t ? t->policy.thp_disabled : 0;
-    if (op == PR_SET_SECCOMP) {
-        /* a1 = mode, a2 = optional sock_fprog pointer for FILTER mode. */
-        if (!t)
-            return -ESRCH;
-        if (a1 == SECCOMP_MODE_STRICT)
-            return seccomp_set_strict(t);
-        if (a1 == SECCOMP_MODE_FILTER)
-            return seccomp_install_filter(t, (const void *)(uintptr_t)a2);
-        return -EINVAL;
-    }
-    if (op == PR_GET_SECCOMP) {
-        long mode = seccomp_get_mode(t);
-        return mode;
-    }
-    return -EINVAL;
+#endif
+    return a20_prctl((uint64_t)op, a1, a2, a3, a4);
 }
 
 /*
@@ -1384,27 +1335,64 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
  * is the truthful answer: no limit applies.  It is not a claim that a limit
  * exists and happens to be large.
  */
+/* ---- rlimit policy adapter ---- */
+
+int a20_rl_view_fill(const task_t *t, rlimit_view_t *out)
+{
+    if (!t)
+        return 0;
+    out->stack = (uint64_t *)&t->limits.stack;
+    out->nofile = (uint64_t *)&t->limits.nofile;
+    out->aspace = (uint64_t *)&t->limits.as;
+    out->nproc = (uint64_t *)&t->limits.nproc;
+    out->rtprio = (uint64_t *)&t->limits.rtprio;
+    out->rtprio_max = (uint64_t *)&t->limits.rtprio_max;
+    out->uid = &t->cred.uid;
+    return 1;
+}
+
+uint64_t a20_rl_park_lock(task_t *t)
+{
+    return spin_lock_irqsave(&t->park_lock);
+}
+
+void a20_rl_park_unlock(task_t *t, uint64_t flags)
+{
+    spin_unlock_irqrestore(&t->park_lock, flags);
+}
+
+int a20_rl_has_cap(task_t *t, int cap)
+{
+    return proc_has_cap(t, cap) ? 1 : 0;
+}
+
+void a20_rl_core_set(task_t *t, uint64_t limit)
+{
+    signal_task_set_rlim_core(t, limit);
+}
+
+int a20_rl_current_uid(void)
+{
+    task_t *t = proc_current();
+    return t ? t->cred.uid : -1;
+}
+
+task_t *a20_rl_current(void)
+{
+    return proc_current();
+}
+
+/*
+ * Report a task's limit.  An unenforced resource reports RLIM_INFINITY, which
+ * is the truthful answer: no limit applies.
+ */
 static int rlimit_get(task_t *t, int resource, uint64_t pair[2])
 {
-    if (resource == RLIMIT_RTPRIO) {
-        if (!t) return -ESRCH;
-        uint64_t flags = spin_lock_irqsave(&t->park_lock);
-        pair[0] = t->limits.rtprio;
-        pair[1] = t->limits.rtprio_max;
-        spin_unlock_irqrestore(&t->park_lock, flags);
-        return 0;
-    }
-    uint64_t v = 0;
-    switch (resource) {
-    case RLIMIT_STACK: v = t ? t->limits.stack : USER_STACK_MAX_SIZE; break;
-    case RLIMIT_CORE:  v = signal_task_rlim_core(t); break;
-    case RLIMIT_NOFILE: v = t ? t->limits.nofile : MAX_FILES; break;
-    case RLIMIT_AS:    v = t ? t->limits.as : 0; break;
-    case RLIMIT_NPROC: v = t ? t->limits.nproc : 0; break;
-    default: return -ENOSYS;
-    }
-    set_uniform_rlimit(pair, v);
-    return 0;
+    rlimit_view_t view;
+    int valid = a20_rl_view_fill(t, &view);
+    uint64_t core = resource == RLIMIT_CORE ? signal_task_rlim_core(t) : 0;
+    return a20_rlimit_get(valid ? t : NULL, valid ? &view : NULL, resource, core,
+                          pair);
 }
 
 /*
@@ -1414,30 +1402,10 @@ static int rlimit_get(task_t *t, int resource, uint64_t pair[2])
  */
 static int rlimit_set(task_t *t, int resource, uint64_t cur, uint64_t max)
 {
-    if (!t)
-        return -ESRCH;
-    if (resource == RLIMIT_RTPRIO) {
-        if (cur > max) return -EINVAL;
-        uint64_t flags = spin_lock_irqsave(&t->park_lock);
-        if (max > t->limits.rtprio_max &&
-            !proc_has_cap(proc_current(), CAP_SYS_RESOURCE)) {
-            spin_unlock_irqrestore(&t->park_lock, flags);
-            return -EPERM;
-        }
-        t->limits.rtprio = cur;
-        t->limits.rtprio_max = max;
-        spin_unlock_irqrestore(&t->park_lock, flags);
-        return 0;
-    }
-    switch (resource) {
-    case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(cur, max); break;
-    case RLIMIT_CORE:  signal_task_set_rlim_core(t, cur); break;
-    case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(cur, max); break;
-    case RLIMIT_AS:    t->limits.as = cur; break;
-    case RLIMIT_NPROC: t->limits.nproc = cur; break;
-    default: return -EINVAL;
-    }
-    return 0;
+    rlimit_view_t view;
+    int valid = a20_rl_view_fill(t, &view);
+    return a20_rlimit_set(valid ? t : NULL, valid ? &view : NULL, resource, cur,
+                          max);
 }
 
 int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
@@ -1474,10 +1442,13 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
     }
     if (ret == 0 && new_rlim) {
         /* Changing another task's limits is a privilege operation. */
-        if (t != self && !proc_has_cap(self, CAP_SYS_RESOURCE) &&
-            t->cred.uid != self->cred.uid) {
-            ret = -EPERM;
-        } else {
+        if (t != self) {
+            rlimit_view_t view;
+            (void)a20_rl_view_fill(t, &view);
+            ret = a20_prlimit_may_change(&view, 0,
+                                         proc_has_cap(self, CAP_SYS_RESOURCE));
+        }
+        if (ret == 0) {
             uint64_t r[2];
             if (copy_from_user(r, new_rlim, sizeof(r)) < 0)
                 ret = -EFAULT;
