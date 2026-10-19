@@ -846,7 +846,8 @@ void proc_destroy_task(task_t *t)
     spin_unlock_irqrestore(&tasklist_lock, list_flags);
 
 #ifdef CONFIG_ENVELOPE_ACQUIRE_RACE_TEST
-    /* Drop test-only per-task pins if mediation was not reached or collected. */
+    /* Drop test-only per-task pins if the armed receive mediation was never
+     * reached or its result was not collected before task teardown. */
     a20_envelope_race_test_cancel_task(t);
 #endif
 #ifdef CONFIG_TASK_CONSTRUCTION_TEST

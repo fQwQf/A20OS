@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/socket_file_state.h"
 #include "proc/userns.h"
 #include "ipc/ipc.h"
 #include "net/lwip_stack.h"
@@ -21,97 +22,13 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
     net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
     if (!s)
         return -ENOTSOCK;
-    if (s->domain == AF_ALG)
-        return net_alg_socket_recv(s, buf, count);
-    if (s->ch_ep)
-        return net_recvfrom_socket_meta(s, buf, count, 0, NULL, NULL, NULL);
-    uint64_t start = timer_get_ticks();
-    for (;;) {
-        a20_lwip_poll_waiter();
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        uint64_t irq = net_sock_lock(s);
-        int rx_count_before = s->rx_count;
-        int r = net_dequeue_msg_locked(s, buf, count, NULL, NULL);
-        if (r > 0 && s->type == SOCK_STREAM) {
-            size_t total = (size_t)r;
-            while (total < count && s->rx_head) {
-                int nr = net_dequeue_msg_locked(s, buf + total,
-                                                count - total, NULL, NULL);
-                if (nr <= 0)
-                    break;
-                total += (size_t)nr;
-            }
-            r = (int)total;
-        }
-        if (r != -EAGAIN || s->nonblock || s->closed || s->peer_closed || s->shut_rd) {
-            if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
-                r = 0;
-            int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
-            if (r > 0 && s->rx_count < rx_count_before)
-                (void)wait_queue_collect_one(
-                    &s->write_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            if (r > 0 && s->rx_head)
-                (void)wait_queue_collect_one(
-                    &s->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            net_sock_unlock(s, irq);
-            (void)proc_wake_q_flush(&wake_q);
-            if (recved)
-                net_tcp_recved(s, (size_t)recved);
-            return r;
-        }
-        task_t *cur = proc_current();
-        if (!cur) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        if (net_task_has_unblocked_signal(cur)) {
-            net_sock_unlock(s, irq);
-            return -ERESTARTSYS;
-        }
-        if (net_socket_wait_expired_locked(s, start, 0)) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        uint64_t deadline = s->recv_timeout_ticks ?
-                            start + s->recv_timeout_ticks : 0;
-        net_sock_unlock(s, irq);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
-        if (!token.task)
-            return -EAGAIN;
-
-        wait_queue_entry_t entry = {0};
-        irq = net_sock_lock(s);
-        if (s->rx_head || s->nonblock || s->closed || s->peer_closed ||
-            s->shut_rd) {
-            net_sock_unlock(s, irq);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            continue;
-        }
-        if (net_task_has_unblocked_signal(cur)) {
-            net_sock_unlock(s, irq);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            return -ERESTARTSYS;
-        }
-        bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-        net_sock_unlock(s, irq);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&s->read_waitq, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason))
-            return -ERESTARTSYS;
-        if (reason == PROC_WAKE_TIMEOUT)
-            return -EAGAIN;
-    }
+    /* read(2) on a socket is a receive with no flags, no address and no
+     * metadata, which is exactly what the Rust receive transaction already
+     * is: the algorithm dispatch, the channel path and the queue path with
+     * its coalescing, refusal ordering, park and accounting all live there.
+     * Keeping a second copy of that state machine here only risked the two
+     * drifting apart. */
+    return net_recvfrom_socket_meta(s, buf, count, 0, NULL, NULL, NULL);
 }
 
 static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
@@ -233,178 +150,6 @@ static long net_vfile_lseek(vfile_t *vf, long offset, int whence) {
     return -ESPIPE;
 }
 
-int net_socket_close_file(vfile_t *vf) {
-    net_socket_t *s = vf ? (net_socket_t *)vf->priv : NULL;
-    if (!s)
-        return 0;
-    ktrace_net("[NET] close: dom=%d type=%d listen=%d tcp=%p peer=%p closed=%d\n",
-               s->domain, s->type, s->listening, (void *)s->tcp,
-               (void *)s->peer, s->closed);
-    net_inet_socket_destroy(s);
-    if (s->ch_ep) {
-        a20_channel_ep_release(s->ch_ep);
-        s->ch_ep = NULL;
-    }
-    ktrace_net("[NET] close: pcb dropped, unregistering\n");
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-    net_socket_t *peer = NULL;
-    bool drain_accept = false;
-    bool drain_read = false;
-    bool drain_write = false;
-    bool drain_peer_read = false;
-    bool drain_peer_write = false;
-    /* s and its peer: two socket locks, ascending by address.  s->peer is a
-     * plain back-pointer with no reference of its own, so it is sampled under
-     * s's own lock and a reference taken there -- reading it before any lock
-     * could name a socket another CPU has already freed.  That reference is what
-     * pins the peer for the pair below, whether or not it still holds a
-     * registry slot; the old code leaned on the orphan shard for that. */
-    {
-        uint64_t sf = net_sock_lock(s);
-        if (s->peer)
-            peer = net_socket_ref(s->peer);
-        net_sock_unlock(s, sf);
-    }
-    net_sock_pair_t pair = net_sock_lock2(s, peer);
-    /* Marked dead before the slot is released: net_socket_unregister() runs
-     * below with no net lock held, so a table scan landing on s in between
-     * must see it closed. */
-    s->closed = 1;
-    drain_accept = net_wait_queue_collect_all_locked(
-        &s->accept_waitq, PROC_WAKE_EXIT, &wake_q);
-    drain_read = net_wait_queue_collect_all_locked(
-        &s->read_waitq, PROC_WAKE_EXIT, &wake_q);
-    drain_write = net_wait_queue_collect_all_locked(
-        &s->write_waitq, PROC_WAKE_EXIT, &wake_q);
-    if (peer &&
-        (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
-         net_socket_is_live(peer)) && peer->peer == s) {
-        peer->peer = NULL;
-        peer->peer_closed = 1;
-        drain_peer_read = net_wait_queue_collect_all_locked(
-            &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
-        drain_peer_write = net_wait_queue_collect_all_locked(
-            &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
-    }
-#if CONFIG_DEBUG_NET_TRACE
-    int rx_count = s->rx_count;
-#endif
-    net_msg_t *m = net_rxq_detach_locked(s);
-    net_socket_t *accepted = s->accept_head;
-#if CONFIG_DEBUG_NET_TRACE
-    int acc_count = s->accept_count;
-#endif
-    s->accept_head = s->accept_tail = NULL;
-    s->accept_count = 0;
-    net_sock_unlock2(pair);
-    /* The registry slot is released with no net lock held at all:
-     * net_socket_unregister() takes a bucket lock of its own, and a bucket lock
-     * may never be nested under a socket lock.  s->closed is already set. */
-    /* Only if there was a slot to release: `s` may itself be an unregistered
-     * socket -- the AF_UNIX accepted child is exactly that, and this function
-     * runs for it too.  Dropping "the registry reference" unconditionally freed
-     * the socket here, in the middle of its own teardown, and the wake_all()
-     * calls below then read freed memory. */
-    bool had_slot = net_socket_unregister(s);
-    /* Registry reference, dropped outside the lock because it can free. */
-    if (had_slot)
-        net_socket_free(s);
-    (void)proc_wake_q_flush(&wake_q);
-    if (drain_accept)
-        (void)wait_queue_wake_all(
-            &s->accept_waitq, 0, PROC_WAKE_EXIT);
-    if (drain_read)
-        (void)wait_queue_wake_all(
-            &s->read_waitq, 0, PROC_WAKE_EXIT);
-    if (drain_write)
-        (void)wait_queue_wake_all(
-            &s->write_waitq, 0, PROC_WAKE_EXIT);
-    if (drain_peer_read)
-        (void)wait_queue_wake_all(
-            &peer->read_waitq, 0, PROC_WAKE_EVENT);
-    if (drain_peer_write)
-        (void)wait_queue_wake_all(
-            &peer->write_waitq, 0, PROC_WAKE_EVENT);
-    if (peer)
-        net_socket_free(peer);
-    ktrace_net("[NET] close: unregistered, rx=%d accept_q=%d\n", rx_count, acc_count);
-
-    while (m) {
-        net_msg_t *next = m->next;
-        net_msg_free(m);
-        m = next;
-    }
-    while (accepted) {
-        net_socket_t *next = accepted->accept_next;
-        proc_wake_q_init(&wake_q);
-        peer = NULL;
-        drain_read = false;
-        drain_write = false;
-        drain_peer_read = false;
-        drain_peer_write = false;
-        /* Each accepted child is torn down on its own, with its own peer:
-         * two socket locks, ascending by address.  The children's accept list was
-         * detached above, so no lock from the listener's teardown is still held
-         * and the children need not all share a registry bucket.  The child's
-         * peer is sampled and referenced under the child's own lock, for the
-         * same reason as above: the back-pointer carries no reference of its
-         * own. */
-        {
-            uint64_t cf = net_sock_lock(accepted);
-            if (accepted->peer)
-                peer = net_socket_ref(accepted->peer);
-            net_sock_unlock(accepted, cf);
-        }
-        net_sock_pair_t apair = net_sock_lock2(accepted, peer);
-        accepted->closed = 1;
-        if (peer && peer->peer == accepted) {
-            peer->peer = NULL;
-            peer->peer_closed = 1;
-            drain_peer_read = net_wait_queue_collect_all_locked(
-                &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
-            drain_peer_write = net_wait_queue_collect_all_locked(
-                &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
-        }
-        drain_read = net_wait_queue_collect_all_locked(
-            &accepted->read_waitq, PROC_WAKE_EXIT, &wake_q);
-        drain_write = net_wait_queue_collect_all_locked(
-            &accepted->write_waitq, PROC_WAKE_EXIT, &wake_q);
-        net_sock_unlock2(apair);
-        /* Same rule as the listener above: the slot is released with no net
-         * lock held, and accepted->closed is already set. */
-        /* Same rule as the listener above, and it matters here for the same
-         * reason: a queued AF_UNIX child owns no slot and carries one
-         * reference, not two. */
-        bool had_child_slot = net_socket_unregister(accepted);
-        if (had_child_slot)
-            net_socket_free(accepted);
-        (void)proc_wake_q_flush(&wake_q);
-        if (drain_read)
-            (void)wait_queue_wake_all(
-                &accepted->read_waitq, 0, PROC_WAKE_EXIT);
-        if (drain_write)
-            (void)wait_queue_wake_all(
-                &accepted->write_waitq, 0, PROC_WAKE_EXIT);
-        if (drain_peer_read)
-            (void)wait_queue_wake_all(
-                &peer->read_waitq, 0, PROC_WAKE_EVENT);
-        if (drain_peer_write)
-            (void)wait_queue_wake_all(
-                &peer->write_waitq, 0, PROC_WAKE_EVENT);
-        if (peer)
-            net_socket_free(peer);
-        net_inet_socket_destroy(accepted);
-        /* Creator's reference, dropped last; the registry's was dropped above
-         * once the slot was released. */
-        net_socket_free(accepted);
-        accepted = next;
-    }
-    /* Creator's reference for s, likewise. */
-    net_socket_free(s);
-    vf->priv = NULL;
-    return 0;
-}
 
 static size_t net_vfile_poll_sources(vfile_t *vf, short events,
                                      readiness_source_t *sources, size_t max)
@@ -821,48 +566,7 @@ net_socket_t *net_socket_from_file(int gfd) {
  * caller retains both references until the syscall is entirely finished, so
  * closing/reusing the numeric descriptor cannot run the socket close callback
  * while the syscall still uses the object. */
-int net_socket_pin_current_fd(int local_fd, vfile_t **out_vf,
-                              net_socket_t **out_sock)
-{
-    if (!out_vf || !out_sock)
-        return -EINVAL;
-    *out_vf = NULL;
-    *out_sock = NULL;
-    vfile_t *vf = fdtable_get_current_file_ref(local_fd);
-    if (!vf)
-        return -EBADF;
-    net_socket_t *s = net_socket_from_vfile(vf);
-    if (!s) {
-        vfs_put_file(vf);
-        return -ENOTSOCK;
-    }
-    net_socket_ref(s);
-    *out_vf = vf;
-    *out_sock = s;
-    return 0;
-}
 
-int net_socket_install_file(net_socket_t *s, int flags) {
-    vfile_t *vf = vfile_alloc();
-    if (!vf)
-        return -ENOMEM;
-    vf->flags = flags;
-    refcount_set(&vf->ref_count, 1);
-    vf->ops = &g_net_ops;
-    vf->priv = s;
-
-    int gfd = fdtable_install_current_vfile(vf, flags);
-    if (gfd < 0) {
-        net_socket_close_file(vf);
-        vfile_free(vf);
-        return gfd;
-    }
-    /* s->gfd now carries the socket's owning task fd; the socket's EventQ
-     * identity is the vfile pointer itself. */
-    s->gfd = gfd;
-    s->vf = vf;
-    return gfd;
-}
 
 /*
  * Push an event to every event queue watching this socket's global fd
@@ -878,3 +582,215 @@ void net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
     a20_event_notify(s->vf, A20_OBJ_SOCKET, event,
                      data0, data1);
 }
+
+/*
+ * Rust lifecycle.
+ *
+ * What is left here is the primitive half: the view, the socket lock and the
+ * address-ordered pair, the lwIP endpoint destroy, the channel release, the
+ * wait-queue collect/wake/flush, the receive-queue detach, the registry
+ * unregister and the socket free, the vfile allocator and the fd-table install.
+ * Which of those to call, in what order, and which references a teardown owes
+ * are the Rust transaction's decisions.
+ */
+
+void a20_net_close_view_init(void *sp, net_close_view_t *out)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    memset(out, 0, sizeof(*out));
+    if (!s)
+        return;
+    out->s = s;
+    out->closed = &s->closed;
+    out->peer_closed = &s->peer_closed;
+    out->peer = (void **)&s->peer;
+    out->sock_type = &s->type;
+    out->accept_head = (void **)&s->accept_head;
+    out->accept_tail = (void **)&s->accept_tail;
+    out->accept_count = &s->accept_count;
+    out->accept_next = (void **)&s->accept_next;
+    out->refs = &s->refs;
+    out->vf_priv = NULL; /* the caller that owns the vfile fills this in */
+}
+
+void a20_net_close_lock(const net_close_view_t *v, uint64_t *flags)
+{
+    *flags = net_sock_lock((net_socket_t *)v->s);
+}
+
+void a20_net_close_unlock(const net_close_view_t *v, uint64_t flags)
+{
+    net_sock_unlock((net_socket_t *)v->s, flags);
+}
+
+void a20_net_close_lock_pair(const net_close_view_t *a,
+                             const net_close_view_t *b,
+                             const net_close_view_t **lo,
+                             const net_close_view_t **hi, uint64_t *flags)
+{
+    net_socket_t *sa = a ? (net_socket_t *)a->s : NULL;
+    net_socket_t *sb = b ? (net_socket_t *)b->s : NULL;
+    net_sock_pair_t p = net_sock_lock2(sa, sb);
+    *lo = (a && p.lo == sa) ? a : b;
+    *hi = (!p.hi) ? NULL : ((a && p.hi == sa) ? a : b);
+    *flags = p.flags;
+}
+
+void a20_net_close_unlock_pair(const net_close_view_t *lo,
+                               const net_close_view_t *hi, uint64_t flags)
+{
+    net_sock_pair_t p;
+    p.lo = lo ? (net_socket_t *)lo->s : NULL;
+    p.hi = hi ? (net_socket_t *)hi->s : NULL;
+    p.flags = flags;
+    net_sock_unlock2(p);
+}
+
+void a20_net_close_inet_destroy(const net_close_view_t *v)
+{
+    net_inet_socket_destroy((net_socket_t *)v->s);
+}
+
+void a20_net_close_channel_release(const net_close_view_t *v)
+{
+    net_socket_t *s = (net_socket_t *)v->s;
+    if (s->ch_ep) {
+        a20_channel_ep_release(s->ch_ep);
+        s->ch_ep = NULL;
+    }
+}
+
+void *a20_net_close_waitq(const net_close_view_t *v, int which)
+{
+    net_socket_t *s = (net_socket_t *)v->s;
+    switch (which) {
+    case 0: return &s->accept_waitq;
+    case 1: return &s->read_waitq;
+    default: return &s->write_waitq;
+    }
+}
+
+int a20_net_close_collect(void *q, int reason, void *wake_q)
+{
+    return net_wait_queue_collect_all_locked(
+               (wait_queue_t *)q, (proc_wake_reason_t)reason,
+               (proc_wake_q_t *)wake_q) ? 1 : 0;
+}
+
+void a20_net_close_wake(void *q, int reason)
+{
+    (void)wait_queue_wake_all((wait_queue_t *)q, 0,
+                              (proc_wake_reason_t)reason);
+}
+
+void a20_net_close_flush(void *wake_q)
+{
+    (void)proc_wake_q_flush((proc_wake_q_t *)wake_q);
+}
+
+void a20_net_close_wake_q_reinit(void *wake_q)
+{
+    proc_wake_q_init((proc_wake_q_t *)wake_q);
+}
+
+void *a20_net_close_rxq_detach(const net_close_view_t *v)
+{
+    return net_rxq_detach_locked((net_socket_t *)v->s);
+}
+
+void a20_net_close_msg_free_chain(void *m)
+{
+    net_msg_t *msg = (net_msg_t *)m;
+    while (msg) {
+        net_msg_t *next = msg->next;
+        net_msg_free(msg);
+        msg = next;
+    }
+}
+
+int a20_net_close_unregister(const net_close_view_t *v)
+{
+    return net_socket_unregister((net_socket_t *)v->s) ? 1 : 0;
+}
+
+void a20_net_close_socket_free(const net_close_view_t *v)
+{
+    net_socket_free((net_socket_t *)v->s);
+}
+
+void *a20_net_install_prepare(void *sp, int flags)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    vfile_t *vf = vfile_alloc();
+    if (!vf)
+        return NULL;
+    vf->flags = flags;
+    refcount_set(&vf->ref_count, 1);
+    vf->ops = &g_net_ops;
+    vf->priv = s;
+    return vf;
+}
+
+int a20_net_install_fdtable(void *vf, int flags)
+{
+    return fdtable_install_current_vfile((vfile_t *)vf, flags);
+}
+
+void a20_net_install_set_owner(void *sp, int gfd, void *vf)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    s->gfd = gfd;
+    s->vf = (struct vfile *)vf;
+}
+
+void a20_net_install_free(void *vf)
+{
+    vfile_free((vfile_t *)vf);
+}
+
+void *a20_net_fdtable_current_file(int fd)
+{
+    return fdtable_get_current_file_ref(fd);
+}
+
+void *a20_net_vfile_socket(void *vf)
+{
+    return net_socket_from_vfile((vfile_t *)vf);
+}
+
+void a20_net_vfile_put(void *vf)
+{
+    vfs_put_file((vfile_t *)vf);
+}
+
+void a20_net_socket_ref(void *sp)
+{
+    (void)net_socket_ref((net_socket_t *)sp);
+}
+
+int net_socket_close_file(vfile_t *vf)
+{
+    proc_wake_q_t wake_q;
+    net_close_view_t v;
+    if (!vf)
+        return 0;
+    proc_wake_q_init(&wake_q);
+    a20_net_close_view_init(vf->priv, &v);
+    v.vf_priv = &vf->priv;
+    return a20_net_socket_close(&v, &wake_q);
+}
+
+int net_socket_install_file(net_socket_t *s, int flags)
+{
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    return a20_net_socket_install(s, flags, &wake_q);
+}
+
+int net_socket_pin_current_fd(int local_fd, vfile_t **out_vf,
+                              net_socket_t **out_sock)
+{
+    return a20_net_socket_pin_current_fd(local_fd, (void **)out_vf,
+                                         (void **)out_sock);
+}
+

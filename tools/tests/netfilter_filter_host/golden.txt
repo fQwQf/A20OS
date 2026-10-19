@@ -1,0 +1,55 @@
+frame tcp ok=1 src=0a000202 dst=0a00020f sport=40000 dport=80 proto=6 ports=1 ip_off=14 l4_off=34 flags=18 icmp_off=0 type=0 id=0
+frame udp ok=1 src=01020304 dst=05060708 sport=5353 dport=53 proto=17 ports=1 ip_off=14 l4_off=34 flags=0 icmp_off=0 type=0 id=0
+frame icmp-echo ok=1 src=00000001 dst=00000002 sport=65535 dport=65535 proto=1 ports=0 ip_off=14 l4_off=0 flags=0 icmp_off=34 type=8 id=4660
+frame icmp-reply ok=1 src=00000001 dst=00000002 sport=65535 dport=65535 proto=1 ports=0 ip_off=14 l4_off=0 flags=0 icmp_off=34 type=0 id=4660
+frame icmp-unreach ok=1 src=00000001 dst=00000002 sport=65535 dport=65535 proto=1 ports=0 ip_off=14 l4_off=0 flags=0 icmp_off=0 type=0 id=0
+frame vlan ok=1 src=0a000202 dst=0a00020f sport=40000 dport=80 proto=6 ports=1 ip_off=18 l4_off=38 flags=18 icmp_off=0 type=0 id=0
+frame arp ok=0
+frame truncated ok=0
+frame options ok=1 src=0a000202 dst=0a00020f sport=40000 dport=80 proto=6 ports=1 ip_off=14 l4_off=38 flags=18 icmp_off=0 type=0 id=0
+frame fragment ok=1 src=0a000202 dst=0a00020f sport=65535 dport=65535 proto=6 ports=0 ip_off=14 l4_off=0 flags=0 icmp_off=0 type=0 id=0
+frame short-l4 ok=1
+rule 0 rc=0 dir=0 proto=6 action=1 src=ffffffff dst=0a00020f sport=65535 dport=80
+rule 1 rc=0 dir=1 proto=17 action=0 src=0a000202 dst=ffffffff sport=5353 dport=65535
+rule 2 rc=0 dir=0 proto=1 action=1 src=ffffffff dst=ffffffff sport=65535 dport=65535
+rule 3 rc=0 dir=0 proto=47 action=0 src=ffffffff dst=ffffffff sport=65535 dport=65535
+rule 4 rc=-22
+rule 5 rc=-22
+rule 6 rc=-22
+rule 7 rc=-22
+rule 8 rc=-22
+rule 9 rc=-22
+rule 10 rc=0 dir=0 proto=6 action=0 src=ffffffff dst=ffffffff sport=65535 dport=65535
+table: empty count=0
+table: add1=0 count=1
+table: add2=1 count=2
+table: get1 rc=0 dport=22
+table: get_oob rc=-22
+table: get_null rc=-22
+table: del0 rc=0 count=1
+table: after_del rc=0 dport=22
+table: del_oob rc=-22
+table: after_reset count=0
+hook: empty_in verdict=0 tail=1
+hook: stats in_packets=1 in_accepted=1 in_dropped=0
+hook: arp_out verdict=0 tail=0
+hook: drop_in verdict=1 tail=0 dir=0
+hook: accept_in verdict=0 tail=1 src=0a000202 dport=443
+hook: accept_out verdict=0 tail=1
+hook: stats in_packets=3 out_packets=2 in_accepted=2 out_accepted=2 in_dropped=1 out_dropped=0
+hook: rule matched=1 bytes=54
+cap: added=32 last_rc=-28 count=32
+cap: reset count=0
+policy: accept
+in_packets: 3
+out_packets: 2
+in_dropped: 1
+out_dropped: 0
+in_accepted: 2
+out_accepted: 2
+rules: 1
+(filter rules)
+rule 0: in proto=tcp src=any dst=10.0.2.15 sport=any dport=80 action=drop matched=0 bytes=0
+final: in_packets=3 out_packets=2 in_accepted=2 out_accepted=2 in_dropped=1 out_dropped=0
+concurrency: writers=3 iters=400 finished=1 eval_ok=1 count_after_reset=0
+HARNESS OK

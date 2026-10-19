@@ -148,11 +148,14 @@ def build_fat32(a) -> int:
     # the image, so that guest has an init with no block device at all.
     # Shipping only the first is what made "the guest boots" and "the guest is
     # usable" look like the same milestone; they are not.
-    if a.guest_kernel and (REPO / a.guest_kernel).is_file():
+    has_guest_kernel = a.guest_kernel and (REPO / a.guest_kernel).is_file()
+    has_guest_kernel_ramfs = (
+        a.guest_kernel_ramfs and (REPO / a.guest_kernel_ramfs).is_file())
+    if has_guest_kernel or has_guest_kernel_ramfs:
         mdir(str(img), "::/boot")
+    if has_guest_kernel:
         mcopy(str(img), a.guest_kernel, "::/boot/guest-kernel.elf")
-    if a.guest_kernel_ramfs and (REPO / a.guest_kernel_ramfs).is_file():
-        mdir(str(img), "::/boot")
+    if has_guest_kernel_ramfs:
         mcopy(str(img), a.guest_kernel_ramfs, "::/boot/guest-kernel-ramfs.elf")
 
     print(f"img: FAT32 image written: {img}")

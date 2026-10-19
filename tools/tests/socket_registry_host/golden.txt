@@ -1,0 +1,76 @@
+slots: buckets=32 per_bucket=32 words=1
+slots: bitmap_after_init=0
+slots: register0 rc=0 idx=0 in_registry=1 refs=2 slot_ok=1
+slots: register1 rc=0 idx=1 in_registry=1 refs=2 slot_ok=1
+slots: register2 rc=0 idx=2 in_registry=1 refs=2 slot_ok=1
+slots: stale_release=1
+slots: stale_bitmap_untouched=1 table_untouched=1
+slots: stale_fields in_registry=0 reg_idx=-1
+slots: bitmap_after_release=7f287eb310607fbe
+orphan: unregister=0
+orphan: refs=0 magic=0
+slots: full_after=1023 rc=-23
+slots: bitmap_full=a4a133bd1567be00
+slots: bitmap_after_drain=7f287eb310607fbe
+ring: cpu=0 rc=0 bucket=0 expect=0
+ring: cpu=1 rc=0 bucket=1 expect=1
+ring: cpu=2 rc=0 bucket=2 expect=2
+refs: live_after_init=1
+refs: acquire=2
+refs: release_held=0 refs=2
+refs: release_last=1 magic=4e534f4b
+refs: live_after_free=0
+refs: double_release=0
+refs: non_socket_release=0
+refs: lost_ref_release=0
+refs: format_bytes=183
+
+net_sock_ref: live=0 allocs=1035 frees=1035 faults=3
+net_sock_ref_fault0: already-freed: refs was not positive 1
+net_sock_ref_fault1: canary-mismatch: object was not a live socket 2
+bh: any_after_init=0
+bh: mark0 pending=1 count=1
+bh: remark0 pending=1 count=1
+bh: mark1 pending=1 count=2
+bh: remark1 pending=1 count=2
+bh: mark1023 pending=1 count=3
+bh: remark1023 pending=1 count=3
+bh: any_marked=1
+bh: slot_pending0=1
+bh: clear0=1 count=3
+bh: slot_pending1=1
+bh: clear1=1 count=2
+bh: slot_pending1023=1
+bh: clear1023=1 count=1
+bh: any_cleared=0
+bh: mark_oob pending_count=0 clear_oob=0
+bh: slot_pending_oob=0
+table: kind=0 family=0 rc=2 visited=2
+table: kind=0 family=2 rc=1 visited=1
+table: kind=0 family=10 rc=1 visited=1
+table: kind=1 family=0 rc=1 visited=1
+table: kind=1 family=2 rc=1 visited=1
+table: kind=1 family=10 rc=0 visited=0
+table: kind=2 family=0 rc=1 visited=1
+table: kind=2 family=2 rc=0 visited=0
+table: kind=2 family=10 rc=0 visited=0
+table: other_ns_visited=1
+table: closed_visited=1
+table: no_callback_rc=-22
+rxavail: domain=2 rc=0 out=0
+rxavail: domain=10 rc=0 out=0
+rxavail: domain=2 rc=0 out=0
+rxavail: domain=1 rc=0 out=0
+rxavail: domain=17 rc=-95 out=0
+rxavail: null_out=-22
+rxavail: null_socket=-22
+concurrency: workers=4 rounds=400 errors=0
+concurrency: bitmap_restored=1 live_restored=1
+concurrency: ledger_row=net_sock_ref
+
+net_sock_ref: live=0 allocs=2640 frees=2640 faults=3
+net_sock_ref_fault0: already-freed: refs was not positive 1
+net_sock_ref_fault1: canary-mismatch: object was not a live socket 2
+ledger: live=0
+ledger: bitmap=7f287eb310607fbe
+HARNESS OK

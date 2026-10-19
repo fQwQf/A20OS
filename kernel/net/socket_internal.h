@@ -19,6 +19,8 @@ struct tcp_pcb;
 struct pbuf;
 
 #include "net/net_profile.h"
+/* The registry state machine's C ABI; see kernel/net/socket_registry.rs. */
+#include "net/socket_registry_state.h"
 
 #define NET_MAX_SOCKETS NET_PROFILE_MAX_SOCKETS
 #define NET_MAX_STREAM_PAYLOAD 2048
@@ -948,7 +950,7 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
 {
     if (!s)
         return NULL;
-    __atomic_fetch_add(&s->refs, 1, __ATOMIC_ACQ_REL);
+    (void)a20_net_ref_acquire(&s->refs);
     return s;
 }
 
@@ -975,13 +977,32 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
  * /proc/net/status.  CONFIG_NET_REF_ASSERT (net_profile.h) turns a fault from a
  * counter into a panic; the ledger itself is always there.
  */
-extern volatile int g_net_sock_ref_allocs;
-extern volatile int g_net_sock_ref_frees;
-extern volatile int g_net_sock_ref_faults;
 int net_sock_ref_live(void);
 /* One "net_sock_ref:" row plus the per-fault-reason rows; returns the byte
  * count it would have written, like the snprintf it uses. */
 int net_sock_ref_format(char *buf, size_t bufsz);
+
+/*
+ * Reference lifecycle entry points (socket_registry.c).  The state they move is
+ * the socket's own `refs` / `ref_magic` pair, and the transitions over it -- the
+ * acquire, the CAS release loop, the canary check and the free decision --
+ * belong to kernel/net/socket_registry.rs.
+ *
+ * net_sock_ref_release() returns 1 when the caller must destroy the object and 0
+ * when it must not; a ledger fault (a double free or a non-socket pointer) is
+ * counted and reported inside, and never returns 1.
+ */
+void net_sock_ref_init(net_socket_t *s);
+int  net_sock_ref_release(net_socket_t *s);
+
+/*
+ * Bottom-half scheduling reads (socket_registry.c).  Both answer from the same
+ * atomically maintained flag array net_bh_slot_mark()/net_bh_slot_clear() write;
+ * they exist so the read side does not have to know which selector owns the
+ * transition.
+ */
+int  net_bh_any_pending(void);
+int  net_bh_slot_pending(int idx);
 
 /*
  * -ENOTCONN attribution.

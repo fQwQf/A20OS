@@ -26,75 +26,11 @@ static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_
  * socket_internal.h for what each number means and why a leak and a double free
  * need different counters to be visible.
  *
- * The reasons are a small fixed table rather than a format string: the whole
- * point is that a reader of /proc/net/status can tell *which* path dropped one
- * reference too many, and a line of pre-formatted text in a panic would say
- * less than the site that produced it.
+ * The ledger itself now lives with the rest of the reference lifecycle in
+ * kernel/net/socket_registry.c -- Rust-owned under NET_SOCKET_REGISTRY_IMPL=rust
+ * -- because the counters only mean anything next to the transition that moves
+ * them.  What is left here is the socket object itself.
  */
-#define NET_SOCK_REF_FAULT_REASONS 4
-static const char *const g_net_sock_ref_fault_why[NET_SOCK_REF_FAULT_REASONS] = {
-    "already-freed: refs was not positive",
-    "canary-mismatch: object was not a live socket",
-    "reserved",
-    "reserved",
-};
-static volatile int g_net_sock_ref_fault_n[NET_SOCK_REF_FAULT_REASONS];
-
-volatile int g_net_sock_ref_allocs;
-volatile int g_net_sock_ref_frees;
-volatile int g_net_sock_ref_faults;
-
-int net_sock_ref_live(void)
-{
-    return __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED) -
-           __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED);
-}
-
-static void net_sock_ref_fault(int reason, net_socket_t *s)
-{
-    if (reason < 0 || reason >= NET_SOCK_REF_FAULT_REASONS)
-        reason = 0;
-    __atomic_fetch_add(&g_net_sock_ref_faults, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_net_sock_ref_fault_n[reason], 1, __ATOMIC_RELAXED);
-    (void)s; /* only the panic line below reads it */
-#if CONFIG_NET_REF_ASSERT
-    panic("net_socket_free: %s s=%lx refs=%d allocs=%d frees=%d faults=%d",
-          g_net_sock_ref_fault_why[reason], (unsigned long)(uintptr_t)s,
-          __atomic_load_n(&s->refs, __ATOMIC_RELAXED),
-          __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED),
-          __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED),
-          __atomic_load_n(&g_net_sock_ref_faults, __ATOMIC_RELAXED));
-#endif
-}
-
-int net_sock_ref_format(char *buf, size_t bufsz)
-{
-    int off = 0;
-    int n = snprintf(buf, bufsz,
-                     "\nnet_sock_ref: live=%d allocs=%d frees=%d faults=%d\n",
-                     net_sock_ref_live(),
-                     __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED),
-                     __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED),
-                     __atomic_load_n(&g_net_sock_ref_faults, __ATOMIC_RELAXED));
-    if (n < 0)
-        return 0;
-    off = n;
-    if ((size_t)n >= bufsz)
-        return (int)bufsz - 1;
-    for (int i = 0; i < NET_SOCK_REF_FAULT_REASONS; i++) {
-        int c = __atomic_load_n(&g_net_sock_ref_fault_n[i], __ATOMIC_RELAXED);
-        if (!c)
-            continue;
-        n = snprintf(buf + off, bufsz - (size_t)off, "net_sock_ref_fault%d: %s %d\n",
-                     i, g_net_sock_ref_fault_why[i], c);
-        if (n < 0)
-            break;
-        off += n;
-        if ((size_t)off >= bufsz)
-            return (int)bufsz - 1;
-    }
-    return off;
-}
 
 /*
  * -ENOTCONN attribution; see the enum above in socket_internal.h.  The four
@@ -190,9 +126,7 @@ net_socket_t *net_socket_alloc(void) {
         /* The creator's reference.  A socket that also reaches the registry
          * carries a second one, taken by net_register_socket_locked() and
          * dropped by one more net_socket_free() after the slot is released. */
-        __atomic_store_n(&s->refs, 1, __ATOMIC_RELAXED);
-        __atomic_store_n(&s->ref_magic, NET_SOCK_REF_MAGIC, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&g_net_sock_ref_allocs, 1, __ATOMIC_RELAXED);
+        net_sock_ref_init(s);
         /* Provisional only: the authoritative lane comes from the bound address
          * and port, which net_inet_bind_pcb() recomputes. */
         net_socket_lane_store(s, net_lane_of_cpu(cpu_current_id()));
@@ -219,32 +153,22 @@ void net_socket_free(net_socket_t *s) {
     if (!s)
         return;
     /*
-     * A CAS loop rather than the fetch_sub this used to be, and the difference
-     * is the whole point of the change: fetch_sub cannot tell "dropped the last
-     * reference" from "dropped one too many", because both land on the same
-     * atomic.  A path that frees a socket twice therefore used to walk straight
-     * into obj_cache_free() with a negative count and no signal at all.  Here
-     * the second free sees refs == 0, refuses, and counts itself --
-     * impl-notes-net.md §8.3/§8.6 called this the unverified primitive.
+     * The release decides: 1 means this was the last reference and the object
+     * must be destroyed, 0 means another holder remains or the ledger refused
+     * the drop (a double free, or a pointer that is not a live socket -- both
+     * are counted and, under CONFIG_NET_REF_ASSERT, reported from there).
+     *
+     * The decision used to be inline here as a CAS loop over s->refs, because a
+     * fetch_sub cannot tell "dropped the last reference" from "dropped one too
+     * many": both land on the same atomic, and the second free walked straight
+     * into obj_cache_free() with a negative count and no signal at all.
+     * impl-notes-net.md §8.3/§8.6 called this the unverified primitive.  It now
+     * belongs to the Rust registry state machine
+     * (kernel/net/socket_registry.rs); what stays here is the destroy sequence,
+     * which is primitives rather than state.
      */
-    if (__atomic_load_n(&s->ref_magic, __ATOMIC_RELAXED) != NET_SOCK_REF_MAGIC) {
-        net_sock_ref_fault(1, s);
+    if (!net_sock_ref_release(s))
         return;
-    }
-    int old = __atomic_load_n(&s->refs, __ATOMIC_ACQUIRE);
-    for (;;) {
-        if (old <= 0) {
-            net_sock_ref_fault(0, s);
-            return;
-        }
-        if (__atomic_compare_exchange_n(&s->refs, &old, old - 1, 1,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            break;
-    }
-    if (old != 1)
-        return;
-    __atomic_store_n(&s->ref_magic, 0, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_net_sock_ref_frees, 1, __ATOMIC_RELAXED);
     if (s->ch_buf) {
         kfree(s->ch_buf);
         s->ch_buf = NULL;
@@ -912,457 +836,379 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
                            addr, addrlen);
 }
 
-int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
-                    const void *addr, size_t addrlen) {
-    if (!s) return -ENOTSOCK;
-    int bad = net_msg_flags_check(flags);
-    if (bad) return bad;
-    if (len > NET_MAX_PAYLOAD && s->type != SOCK_STREAM) return -EMSGSIZE;
-    int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
-    if (s->domain == AF_ALG)
-        return net_alg_socket_send(s, buf, len);
-    if (s->domain == AF_PACKET)
-        return net_packet_socket_send(s, buf, len, addr, addrlen);
-    if (s->domain == AF_NETLINK) {
-        if (s->protocol == NETLINK_SOCK_DIAG)
-            return net_netlink_diag_request(s, buf, len, addr, addrlen);
-        if (s->protocol == NETLINK_ROUTE)
-            return net_netlink_route_request(s, buf, len, addr, addrlen);
-        if (s->protocol == NETLINK_KOBJECT_UEVENT ||
-            s->protocol == NETLINK_GENERIC)
-            return net_netlink_uevent_send(s, buf, len, addr, addrlen);
-        return -EPROTONOSUPPORT;
-    }
-    if (!resource_ns_is_initial(s->net_ns) && s->type == SOCK_RAW) return -ENETUNREACH;
-    if (s->domain == AF_INET6 && s->type == SOCK_RAW)
-        return net_sendto_raw_ipv6(s, (void *)buf, len, addr, addrlen);
-    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
-        (s->type == SOCK_DGRAM || s->udp || s->raw || s->tcp))
-        return net_inet_sendto(s, buf, len, flags, addr, addrlen);
-    /*
-     * A stream socket with no pcb, in a family the stack owns, is a connection
-     * lwIP tore down rather than a socket that never had one: lwip_tcp_err_cb()
-     * NULLs s->tcp on RST and on every fatal error, so "s->tcp == NULL" is the
-     * normal state of a dead TCP connection.  Dispatching on the presence of a
-     * pcb therefore sent those writes past net_inet_sendto() into the generic
-     * two-socket path below, which reported ENOTSOCK -- a claim that the fd is
-     * not a socket at all, on an fd that is very much one.  send(2) on a
-     * connection the peer reset owes the caller EPIPE, per the same Linux-ABI
-     * rule net_inet_send_tcp() applies on the s->closed path.
-     *
-     * local_tcp is what keeps this off the fast path: a fast-mode socket drops
-     * its pcb by design and is served by the shortcut below, so the exemption
-     * has to be explicit rather than implied.
-     */
-    if (s->type == SOCK_STREAM && !s->local_tcp && !s->tcp &&
-        (s->domain == AF_INET || s->domain == AF_INET6))
-        return s->ever_connected ? -EPIPE
-                                  : net_notconn(NET_NOTCONN_SENDTO_NOT_CONNECTED);
-    if (s->domain == AF_UNIX)
-        return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 
-    /*
-     * Two sockets, taken in ascending address order.  The destination is
-     * resolved first, outside any lock, because it comes from a whole-table
-     * scan that walks the registry a bucket at a time; the scan returns a
-     * reference, which is what lets s's lock be dropped before the pair is
-     * taken and is why this path cannot nest a third socket lock.
-     */
-    net_socket_t *dst = NULL;
-    const void *dst_addr = addr;
-    size_t dst_len = addrlen;
-    uint8_t dst_scratch[NET_SOCKADDR_MAX];
-    uint8_t src_local[NET_SOCKADDR_MAX];
-    size_t src_local_len = 0;
-    bool stream_end = false;
-    bool had_peer = false;
-    uint64_t send_timeout = 0;
-    {
-        uint64_t sf = net_sock_lock(s);
-        if (!net_socket_is_live(s)) {
-            net_sock_unlock(s, sf);
-            return -ENOTSOCK;
-        }
-        if (s->closed || s->shut_wr) {
-            net_sock_unlock(s, sf);
-            return -EPIPE;
-        }
-        if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
-            net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
-        src_local_len = s->local_len;
-        memcpy(src_local, s->local, src_local_len);
-        if (!dst_addr && s->connected) {
-            /* Copied out rather than pointed at: the enqueue below runs after
-             * this lock is dropped, and s->peer_addr is bind-rewritable. */
-            memcpy(dst_scratch, s->peer_addr, s->peer_len);
-            dst_len = s->peer_len;
-            dst_addr = dst_scratch;
-        }
-        /* The peer pointer is sampled under s's lock, which is what keeps it
-         * from being freed between the test and the net_socket_ref() below. */
-        net_socket_t *peer = s->peer;
-        if (peer &&
-            (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
-             net_socket_is_live(peer))) {
-            dst = net_socket_ref(peer);
-        }
-        /* Sampled here because every use of it below is with no lock on s. */
-        stream_end = (s->type == SOCK_STREAM && s->ever_connected);
-        send_timeout = s->send_timeout_ticks;
-        had_peer = (s->peer != NULL);
-        net_sock_unlock(s, sf);
-    }
-    if (!dst && had_peer) {
-        /* The peer is gone (or was never a live socket); drop the stale
-         * back-pointer and fall back to an address lookup. */
-        uint64_t sf = net_sock_lock(s);
-        if (s->peer) s->peer = NULL;
-        net_sock_unlock(s, sf);
-    }
-    if (!dst && dst_addr)
-        dst = net_find_bound_socket(s->net_ns, s->domain, s->type, dst_addr, dst_len);
-    if (!dst) {
-        /* Linux ABI: writes on a once-connected stream whose endpoint vanished
-         * report EPIPE. */
-        if (s->type == SOCK_STREAM && s->ever_connected)
-            return -EPIPE;
-        return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
-    }
+/*
+ * Primitives for the Rust sendto transaction (kernel/net/socket_sendto.rs).
+ * Each one is a step the Rust decision surface cannot perform itself: a
+ * per-family send entry, the netns test, a lock, the liveness test, the
+ * reference and the free, the loopback autobind, the bound-socket scan, the
+ * two enqueues, the read-wake collect or the wake queue.
+ */
+#include "net/socket_sendto_state.h"
 
-    int r;
-    net_sock_pair_t pair = net_sock_lock2(s, dst);
-    /* The search above ran without a lock, so the destination may have been
-     * closed in between; the reference taken on it keeps it from being freed
-     * underneath, so a liveness re-check is all that is left to do. */
-    if (!net_socket_is_live(dst)) {
-        net_sock_unlock2(pair);
-        net_socket_free(dst);
-        return stream_end ? -EPIPE
-                          : (dst_addr ? -ECONNREFUSED : -EDESTADDRREQ);
-    }
-    if (len <= NET_MAX_PAYLOAD) {
-        if (dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
-            net_sock_unlock2(pair);
-            int br = net_enqueue_msg_blocking(s, dst, buf, len, src_local,
-                                              src_local_len, dontwait,
-                                              send_timeout);
-            net_socket_free(dst);
-            return br;
-        }
-        r = net_enqueue_msg_locked(dst, buf, len, src_local, src_local_len);
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        if (r >= 0)
-            (void)wait_queue_collect_one(
-                &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-        net_sock_unlock2(pair);
-        (void)proc_wake_q_flush(&wake_q);
-        net_socket_free(dst);
-        return r;
-    }
-    net_sock_unlock2(pair);
+_Static_assert(sizeof(net_sock_pair_t) <= sizeof(net_sendto_pair_t),
+               "net_sendto_pair_t must mirror net_sock_pair_t");
+_Static_assert(sizeof(proc_wake_q_t) <= 2048,
+               "the Rust sendto frame must hold a proc_wake_q_t");
 
-    size_t total = 0;
-    while (total < len) {
-        size_t chunk = len - total;
-        if (chunk > NET_MAX_PAYLOAD)
-            chunk = NET_MAX_PAYLOAD;
-        int br = net_enqueue_msg_blocking(s, dst, (const uint8_t *)buf + total,
-                                          chunk, src_local, src_local_len,
-                                          dontwait, send_timeout);
-        if (br < 0) {
-            net_socket_free(dst);
-            return total ? (int)total : br;
-        }
-        total += (size_t)br;
-    }
-    net_socket_free(dst);
-    return (int)total;
+void a20_net_sendto_view_init(void *sp, net_sendto_view_t *out) {
+    net_socket_t *s = (net_socket_t *)sp;
+    out->s = s;
+    out->net_ns = (void **)&s->net_ns;
+    out->domain = &s->domain;
+    out->sock_type = &s->type;
+    out->protocol = &s->protocol;
+    out->nonblock = &s->nonblock;
+    out->closed = &s->closed;
+    out->shut_wr = &s->shut_wr;
+    out->bound = &s->bound;
+    out->connected = &s->connected;
+    out->ever_connected = &s->ever_connected;
+    out->local_tcp = &s->local_tcp;
+    out->tcp = (void **)&s->tcp;
+    out->udp = (void **)&s->udp;
+    out->raw = (void **)&s->raw;
+    out->peer = (void **)&s->peer;
+    out->local = s->local;
+    out->local_len = &s->local_len;
+    out->peer_addr = s->peer_addr;
+    out->peer_len = &s->peer_len;
+    out->send_timeout_ticks = &s->send_timeout_ticks;
 }
 
-int net_recvfrom_socket_meta_until(net_socket_t *s, void *buf, size_t len,
-                                   int flags, void *addr, size_t *addrlen,
-                                   net_recv_meta_t *meta,
-                                   uint64_t deadline) {
-    if (!s)
-        return -ENOTSOCK;
-    int bad = net_msg_flags_check(flags);
-    if (bad)
-        return bad;
-    if (s->domain == AF_ALG)
-        return net_alg_socket_recv(s, buf, len);
-    int dontwait = (flags & MSG_DONTWAIT) != 0;
-    uint64_t start = timer_get_ticks();
-    if ((flags & MSG_WAITALL) && s->type == SOCK_STREAM && len > 0) {
-        /* MSG_WAITALL: keep reading until len bytes have arrived, or until the
-         * read is cut short by EOF, the receive timeout, or a signal.  A single
-         * pass below already coalesces everything queued up to len, so this loop
-         * only iterates when the queue runs dry mid-buffer, which is the one
-         * case the flag adds.  WAITALL is stripped from the inner call so the
-         * recursion stays one level deep, and the caller's SO_RCVTIMEO is
-         * honoured against this outer start rather than restarting per read. */
-        int inner = flags & ~MSG_WAITALL;
-        size_t got = 0;
-        while (got < len) {
-            if (deadline ?
-                    (int64_t)(timer_get_ticks() - deadline) >= 0 :
-                    net_socket_wait_expired(s, start, 0))
-                return (int)got;
-            int n = net_recvfrom_socket_meta_until(
-                s, (char *)buf + got, len - got, inner,
-                got ? NULL : addr, got ? NULL : addrlen, meta, deadline);
-            if (n < 0)
-                return got ? (int)got : n;
-            if (n == 0)
-                return (int)got;
-            got += (size_t)n;
-        }
-        return (int)got;
-    }
-    if (s->ch_ep) {
-        /* Channel-backed path: plain data lives on the internal channel,
-         * SCM_RIGHTS messages on the legacy queue.  Drain legacy first so
-         * fd-carrying messages keep their delivery order. */
-        for (;;) {
-            a20_lwip_poll_waiter();
-            int r = -EAGAIN;
-        uint64_t irq = net_sock_lock(s);
-            if (s->rx_head) {
-                if (flags & MSG_PEEK) {
-                    net_msg_t *head = s->rx_head;
-                    size_t avail = head->len - head->off;
-                    size_t n = avail < len ? avail : len;
-                    if (n)
-                        memcpy(buf, net_msg_payload(head) + head->off, n);
-                    r = (int)n;
-                } else {
-                    r = net_dequeue_msg_locked_meta(s, buf, len, addr,
-                                                    addrlen, meta);
-                }
-                /* Stream coalescing: drain further legacy messages in the
-                 * same recv (keeps SCM_RIGHTS fd coalescing semantics). */
-                if (r >= 0 && s->type == SOCK_STREAM &&
-                    !(flags & MSG_PEEK)) {
-                    size_t total = (size_t)r;
-                    while (total < len && s->rx_head) {
-                        int nr = net_dequeue_msg_locked_meta(
-                            s, (char *)buf + total, len - total, NULL, NULL,
-                            meta);
-                        if (nr <= 0)
-                            break;
-                        total += (size_t)nr;
-                    }
-                    r = (int)total;
-                }
-            }
-            if (r == -EAGAIN && s->ch_ep)
-                r = (flags & MSG_PEEK) ? unix_ch_peek(s, buf, len) :
-                                         unix_ch_recv(s, buf, len);
-            if (r >= 0) {
-                /* Channel-backed delivery has no net_msg metadata; supply
-                 * SCM_CREDENTIALS from the latest sender record captured in
-                 * unix_ch_send when the receiver asked for it. */
-                if (meta && s->passcred && !meta->has_cred && s->ch_ep) {
-                    meta->has_cred = 1;
-                    meta->cred_pid = s->ch_cred_pid;
-                    meta->cred_uid = s->ch_cred_uid;
-                    meta->cred_gid = s->ch_cred_gid;
-                }
-                proc_wake_q_t wq;
-                proc_wake_q_init(&wq);
-                (void)wait_queue_collect_one(&s->write_waitq, 0,
-                                             PROC_WAKE_EVENT, &wq);
-                net_sock_unlock(s, irq);
-                (void)proc_wake_q_flush(&wq);
-                return r;
-            }
-            if (r != -EAGAIN) {
-                net_sock_unlock(s, irq);
-                return r;
-            }
-            task_t *cur = proc_current();
-            if (!cur) {
-                net_sock_unlock(s, irq);
-                return -EAGAIN;
-            }
-            if (net_task_has_unblocked_signal(cur)) {
-                net_sock_unlock(s, irq);
-                return -ERESTARTSYS;
-            }
-            if (deadline ?
-                    (int64_t)(timer_get_ticks() - deadline) >= 0 :
-                    net_socket_wait_expired_locked(s, start, 0)) {
-                net_sock_unlock(s, irq);
-                return -EAGAIN;
-            }
-            if (s->nonblock || dontwait || s->closed || s->peer_closed ||
-                s->shut_rd) {
-                net_sock_unlock(s, irq);
-                return (s->closed || s->peer_closed || s->shut_rd) ? 0 : -EAGAIN;
-            }
-            uint64_t wait_deadline = deadline ? deadline :
-                                     (s->recv_timeout_ticks ?
-                                      start + s->recv_timeout_ticks : 0);
-            net_sock_unlock(s, irq);
-            proc_wait_token_t token =
-                proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, wait_deadline);
-            if (!token.task)
-                return -EAGAIN;
-            wait_queue_entry_t entry = {0};
-            irq = net_sock_lock(s);
-            /* Re-check before linking: a send between the empty check and
-             * the park would otherwise wake nobody and we would sleep
-             * forever (classic lost-wakeup; the legacy loop does the same). */
-            if (s->rx_head || a20_channel_readable(s->ch_ep)) {
-                net_sock_unlock(s, irq);
-                (void)proc_park_cancel(token);
-                proc_park_finish(token);
-                continue;
-            }
-            bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-            net_sock_unlock(s, irq);
-            proc_wake_reason_t reason;
-            if (linked)
-                reason = proc_park_commit(token);
-            else {
-                (void)proc_park_cancel(token);
-                reason = PROC_WAKE_CANCEL;
-            }
-            wait_queue_unlink(&s->read_waitq, &entry);
-            proc_park_finish(token);
-            if (proc_wake_reason_is_task_interrupt(reason))
-                return -EINTR;
-        }
-    }
-    for (;;) {
-        a20_lwip_poll_waiter();
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        uint64_t irq = net_sock_lock(s);
-        int rx_count_before = s->rx_count;
-        net_msg_t *head = s->rx_head;
-        size_t datagram_len =
-            (head && s->type != SOCK_STREAM) ? head->len - head->off : 0;
-        int r;
-        if ((flags & MSG_PEEK) && head) {
-            size_t avail = head->len - head->off;
-            size_t n = avail < len ? avail : len;
-            if (n)
-                memcpy(buf, net_msg_payload(head) + head->off, n);
-            if (addr && addrlen && *addrlen > 0) {
-                size_t alen = head->addrlen < *addrlen
-                                  ? head->addrlen : *addrlen;
-                memcpy(addr, head->addr, alen);
-                *addrlen = alen;
-            }
-            if (meta) {
-                meta->has_pktinfo = head->has_pktinfo;
-                meta->has_hoplimit = head->has_hoplimit;
-                meta->has_tclass = head->has_tclass;
-                meta->pktinfo_ifindex = head->pktinfo_ifindex;
-                memcpy(meta->pktinfo_addr, head->pktinfo_addr,
-                       sizeof(meta->pktinfo_addr));
-                meta->hoplimit = head->hoplimit;
-                meta->tclass = head->tclass;
-            }
-            r = ((flags & MSG_TRUNC) && s->type != SOCK_STREAM)
-                    ? (int)avail : (int)n;
-        } else {
-            r = net_dequeue_msg_locked_meta(s, buf, len, addr, addrlen, meta);
-            if (r >= 0 && (flags & MSG_TRUNC) &&
-                s->type != SOCK_STREAM && datagram_len > (size_t)r)
-                r = (int)datagram_len;
-        }
-        /* Stream coalescing: drain further queued messages into the same
-         * buffer.  A peek must not consume anything, so it stops at the head
-         * even when more is queued -- a peek is a read without a dequeue. */
-        if (r > 0 && s->type == SOCK_STREAM && !(flags & MSG_PEEK)) {
-            size_t total = (size_t)r;
-            while (total < len && s->rx_head) {
-                int nr = net_dequeue_msg_locked_meta(s, (char *)buf + total, len - total, NULL, NULL, meta);
-                if (nr <= 0)
-                    break;
-                total += (size_t)nr;
-            }
-            r = (int)total;
-        }
-        if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
-            if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
-                r = 0;
-            /* Accounting is deliberately outside the socket lock: net_tcp_recved()
-             * takes g_lwip_lock, and the two must never nest.  A peeked stream
-             * message is charged too -- the bytes are in the receive queue
-             * either way, and never charging them would stall the window once
-             * the queue filled.  The cost is that repeated peeks of the same
-             * head keep re-charging it. */
-            int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
-            if (r > 0 && s->rx_count < rx_count_before)
-                (void)wait_queue_collect_one(
-                    &s->write_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            if (r > 0 && s->rx_head)
-                (void)wait_queue_collect_one(
-                    &s->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            net_sock_unlock(s, irq);
-            (void)proc_wake_q_flush(&wake_q);
-            if (recved)
-                net_tcp_recved(s, (size_t)recved);
-            return r;
-        }
-        task_t *cur = proc_current();
-        if (!cur) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        if (net_task_has_unblocked_signal(cur)) {
-            net_sock_unlock(s, irq);
-            return -ERESTARTSYS;
-        }
-        if (deadline ?
-                (int64_t)(timer_get_ticks() - deadline) >= 0 :
-                net_socket_wait_expired_locked(s, start, 0)) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        uint64_t wait_deadline = deadline ? deadline :
-                                 (s->recv_timeout_ticks ?
-                                  start + s->recv_timeout_ticks : 0);
-        net_sock_unlock(s, irq);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, wait_deadline);
-        if (!token.task)
-            return -EAGAIN;
+int a20_net_sendto_flags_check(int flags) { return net_msg_flags_check(flags); }
 
-        wait_queue_entry_t entry = {0};
-        irq = net_sock_lock(s);
+int a20_net_sendto_alg(void *sp, const void *buf, size_t len) {
+    return net_alg_socket_send((net_socket_t *)sp, buf, len);
+}
+
+int a20_net_sendto_packet(void *sp, const void *buf, size_t len,
+                          const void *addr, size_t addrlen) {
+    return net_packet_socket_send((net_socket_t *)sp, buf, len, addr, addrlen);
+}
+
+/* The netlink protocol arms are pure dispatch, so they stay here. */
+int a20_net_sendto_netlink(void *sp, const void *buf, size_t len,
+                           const void *addr, size_t addrlen) {
+    net_socket_t *s = (net_socket_t *)sp;
+    if (s->protocol == NETLINK_SOCK_DIAG)
+        return net_netlink_diag_request(s, buf, len, addr, addrlen);
+    if (s->protocol == NETLINK_ROUTE)
+        return net_netlink_route_request(s, buf, len, addr, addrlen);
+    if (s->protocol == NETLINK_KOBJECT_UEVENT || s->protocol == NETLINK_GENERIC)
+        return net_netlink_uevent_send(s, buf, len, addr, addrlen);
+    return -EPROTONOSUPPORT;
+}
+
+int a20_net_sendto_ns_initial(void *sp) {
+    return resource_ns_is_initial(((net_socket_t *)sp)->net_ns) ? 1 : 0;
+}
+
+int a20_net_sendto_raw_ipv6(void *sp, const void *buf, size_t len,
+                            const void *addr, size_t addrlen) {
+    return net_sendto_raw_ipv6((net_socket_t *)sp, (void *)buf, len, addr,
+                               addrlen);
+}
+
+int a20_net_sendto_inet(void *sp, const void *buf, size_t len, int flags,
+                        const void *addr, size_t addrlen) {
+    return net_inet_sendto((net_socket_t *)sp, buf, len, flags, addr, addrlen);
+}
+
+int a20_net_sendto_notconn(void *sp) {
+    (void)sp;
+    return net_notconn(NET_NOTCONN_SENDTO_NOT_CONNECTED);
+}
+
+int a20_net_sendto_unix(void *sp, const void *buf, size_t len, const void *addr,
+                        size_t addrlen) {
+    return net_unix_socket_sendto((net_socket_t *)sp, buf, len, addr, addrlen);
+}
+
+uint64_t a20_net_sendto_lock(void *sp) { return net_sock_lock((net_socket_t *)sp); }
+
+void a20_net_sendto_unlock(void *sp, uint64_t flags) {
+    net_sock_unlock((net_socket_t *)sp, flags);
+}
+
+int a20_net_sendto_is_live(void *sp) {
+    return net_socket_is_live((const net_socket_t *)sp) ? 1 : 0;
+}
+
+void a20_net_sendto_autobind(void *sp) {
+    net_socket_t *s = (net_socket_t *)sp;
+    net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
+}
+
+void *a20_net_sendto_ref(void *sp) { return net_socket_ref((net_socket_t *)sp); }
+
+void a20_net_sendto_free(void *sp) { net_socket_free((net_socket_t *)sp); }
+
+void a20_net_sendto_lock2(void *a, void *b, net_sendto_pair_t *out) {
+    net_sock_pair_t p = net_sock_lock2((net_socket_t *)a, (net_socket_t *)b);
+    out->lo = p.lo;
+    out->hi = p.hi;
+    out->flags = p.flags;
+}
+
+void a20_net_sendto_unlock2(const net_sendto_pair_t *in) {
+    net_sock_pair_t p;
+    p.lo = in->lo;
+    p.hi = in->hi;
+    p.flags = in->flags;
+    net_sock_unlock2(p);
+}
+
+void *a20_net_sendto_find_bound(void *ns, int domain, int sock_type,
+                                const void *addr, size_t addrlen) {
+    return net_find_bound_socket((resource_namespace_t *)ns, domain, sock_type,
+                                 addr, addrlen);
+}
+
+int a20_net_sendto_max_queue(void) { return NET_MAX_QUEUE; }
+
+int a20_net_sendto_dst_rx_count(void *dst) {
+    return ((net_socket_t *)dst)->rx_count;
+}
+
+int a20_net_sendto_enqueue_locked(void *dst, const void *buf, size_t len,
+                                  const void *src, size_t src_len) {
+    return net_enqueue_msg_locked((net_socket_t *)dst, buf, len, src, src_len);
+}
+
+int a20_net_sendto_enqueue_blocking(void *sp, void *dst, const void *buf,
+                                    size_t len, const void *src, size_t src_len,
+                                    int dontwait, uint64_t timeout) {
+    return net_enqueue_msg_blocking((net_socket_t *)sp, (net_socket_t *)dst, buf,
+                                    len, src, src_len, dontwait, timeout);
+}
+
+int a20_net_sendto_collect_read(void *dst, void *wake_q) {
+    return wait_queue_collect_one(&((net_socket_t *)dst)->read_waitq, 0,
+                                  PROC_WAKE_EVENT, (proc_wake_q_t *)wake_q);
+}
+
+void a20_net_sendto_wakeq_init(void *wake_q) {
+    proc_wake_q_init((proc_wake_q_t *)wake_q);
+}
+
+void a20_net_sendto_wakeq_flush(void *wake_q) {
+    (void)proc_wake_q_flush((proc_wake_q_t *)wake_q);
+}
+
+int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
+                    const void *addr, size_t addrlen) {
+    return a20_net_sendto_sock(s, buf, len, flags, addr, addrlen);
+}
+
+
+
+/*
+ * Primitives for the Rust blocking-receive transaction
+ * (kernel/net/socket_recv.rs).  Each one is a single step the Rust decision
+ * surface cannot perform itself: a lock, a copy out of the queue, a clock read,
+ * a signal test, a park, a wake-queue collect or the lwIP receive accounting.
+ * The lock discipline is Rust's -- it holds net_sock_lock across the decisions
+ * and releases it before the wake-queue flush and before net_tcp_recved.
+ */
+#include "net/socket_recv_state.h"
+#include "proc/park.h"
+
+_Static_assert(sizeof(proc_wake_q_t) <= A20_NET_RECV_WAKEQ_BYTES,
+               "A20_NET_RECV_WAKEQ_BYTES must hold a proc_wake_q_t");
+
+void a20_net_recv_view_init(void *sp, net_recv_view_t *out) {
+    net_socket_t *s = (net_socket_t *)sp;
+    out->s = s;
+    out->domain = &s->domain;
+    out->sock_type = &s->type;
+    out->nonblock = &s->nonblock;
+    out->closed = &s->closed;
+    out->peer_closed = &s->peer_closed;
+    out->shut_rd = &s->shut_rd;
+    out->passcred = &s->passcred;
+    out->recv_timeout_ticks = &s->recv_timeout_ticks;
+    out->ch_ep = (void **)&s->ch_ep;
+    out->rx_head = (void **)&s->rx_head;
+    out->rx_count = &s->rx_count;
+}
+
+int a20_net_recv_flags_check(int flags) { return net_msg_flags_check(flags); }
+
+int a20_net_recv_alg(void *sp, void *buf, size_t len) {
+    return net_alg_socket_recv((net_socket_t *)sp, buf, len);
+}
+
+uint64_t a20_net_recv_now(void) { return timer_get_ticks(); }
+
+void a20_net_recv_poll_waiter(void) { a20_lwip_poll_waiter(); }
+
+uint64_t a20_net_recv_lock(void *sp) { return net_sock_lock((net_socket_t *)sp); }
+
+void a20_net_recv_unlock(void *sp, uint64_t flags) {
+    net_sock_unlock((net_socket_t *)sp, flags);
+}
+
+int a20_net_recv_have_task(void) { return proc_current() != NULL; }
+
+int a20_net_recv_has_signal(void) {
+    task_t *cur = proc_current();
+    return cur ? net_task_has_unblocked_signal(cur) : 0;
+}
+
+int a20_net_recv_wait_expired(void *sp, uint64_t start, int for_write) {
+    return net_socket_wait_expired((net_socket_t *)sp, start, for_write);
+}
+
+int a20_net_recv_wait_expired_locked(void *sp, uint64_t start, int for_write) {
+    return net_socket_wait_expired_locked((net_socket_t *)sp, start, for_write);
+}
+
+size_t a20_net_recv_msg_avail(void *head) {
+    net_msg_t *m = (net_msg_t *)head;
+    return m->len - m->off;
+}
+
+int a20_net_recv_dequeue(void *sp, void *buf, size_t len, void *addr,
+                         size_t *addrlen, void *meta) {
+    return net_dequeue_msg_locked_meta((net_socket_t *)sp, buf, len, addr,
+                                       addrlen, meta);
+}
+
+/*
+ * The peek arm: copy the head's payload and, for a datagram, its address and
+ * packet metadata, without unlinking the message.  Reports the message's full
+ * payload length and the number of bytes copied so the caller can answer
+ * MSG_TRUNC and MSG_PEEK without a second traversal.
+ */
+void a20_net_recv_peek_msg(void *head, void *buf, size_t len, void *addr,
+                           size_t *addrlen, void *meta, size_t *out_avail,
+                           size_t *out_n) {
+    net_msg_t *m = (net_msg_t *)head;
+    size_t avail = m->len - m->off;
+    size_t n = avail < len ? avail : len;
+    if (n)
+        memcpy(buf, net_msg_payload(m) + m->off, n);
+    if (addr && addrlen && *addrlen > 0) {
+        size_t alen = m->addrlen < *addrlen ? m->addrlen : *addrlen;
+        memcpy(addr, m->addr, alen);
+        *addrlen = alen;
+    }
+    if (meta) {
+        net_recv_meta_t *rm = (net_recv_meta_t *)meta;
+        rm->has_pktinfo = m->has_pktinfo;
+        rm->has_hoplimit = m->has_hoplimit;
+        rm->has_tclass = m->has_tclass;
+        rm->pktinfo_ifindex = m->pktinfo_ifindex;
+        memcpy(rm->pktinfo_addr, m->pktinfo_addr, sizeof(rm->pktinfo_addr));
+        rm->hoplimit = m->hoplimit;
+        rm->tclass = m->tclass;
+    }
+    *out_avail = avail;
+    *out_n = n;
+}
+
+int a20_net_recv_channel(void *sp, void *buf, size_t len, int peek) {
+    net_socket_t *s = (net_socket_t *)sp;
+    return peek ? unix_ch_peek(s, buf, len) : unix_ch_recv(s, buf, len);
+}
+
+/*
+ * Channel-backed delivery has no net_msg metadata, so the sender's credentials
+ * are stamped from the record unix_ch_send captured, and only when the receiver
+ * asked for SCM_CREDENTIALS and the message did not already carry them.
+ */
+void a20_net_recv_creds(void *sp, void *meta) {
+    net_socket_t *s = (net_socket_t *)sp;
+    net_recv_meta_t *rm = (net_recv_meta_t *)meta;
+    if (!rm || !s->passcred || rm->has_cred || !s->ch_ep)
+        return;
+    rm->has_cred = 1;
+    rm->cred_pid = s->ch_cred_pid;
+    rm->cred_uid = s->ch_cred_uid;
+    rm->cred_gid = s->ch_cred_gid;
+}
+
+int a20_net_recv_collect_write(void *sp, void *wq) {
+    net_socket_t *s = (net_socket_t *)sp;
+    return wait_queue_collect_one(&s->write_waitq, 0, PROC_WAKE_EVENT,
+                                  (proc_wake_q_t *)wq);
+}
+
+int a20_net_recv_collect_read(void *sp, void *wq) {
+    net_socket_t *s = (net_socket_t *)sp;
+    return wait_queue_collect_one(&s->read_waitq, 0, PROC_WAKE_EVENT,
+                                  (proc_wake_q_t *)wq);
+}
+
+void a20_net_recv_wakeq_init(void *wq) { proc_wake_q_init((proc_wake_q_t *)wq); }
+
+void a20_net_recv_wakeq_flush(void *wq) {
+    (void)proc_wake_q_flush((proc_wake_q_t *)wq);
+}
+
+void a20_net_recv_recved(void *sp, size_t len) {
+    net_tcp_recved((net_socket_t *)sp, len);
+}
+
+int a20_net_recv_park(void *sp, uint64_t wait_deadline, int channel,
+                      int dontwait) {
+    net_socket_t *s = (net_socket_t *)sp;
+    proc_wait_token_t token =
+        proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, wait_deadline);
+    if (!token.task)
+        return -EAGAIN;
+    wait_queue_entry_t entry = {0};
+    uint64_t irq = net_sock_lock(s);
+    if (channel) {
+        /* Re-check before linking: a send between the empty check and the park
+         * would otherwise wake nobody and we would sleep forever. */
+        if (s->rx_head || a20_channel_readable(s->ch_ep)) {
+            net_sock_unlock(s, irq);
+            (void)proc_park_cancel(token);
+            proc_park_finish(token);
+            return 0;
+        }
+    } else {
         if (s->rx_head || s->nonblock || dontwait || s->closed ||
             s->peer_closed || s->shut_rd) {
             net_sock_unlock(s, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
-            continue;
+            return 0;
         }
-        if (net_task_has_unblocked_signal(cur)) {
+        if (net_task_has_unblocked_signal(proc_current())) {
             net_sock_unlock(s, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ERESTARTSYS;
         }
-        bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-        net_sock_unlock(s, irq);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&s->read_waitq, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason))
-            return -ERESTARTSYS;
-        if (reason == PROC_WAKE_TIMEOUT)
-            return -EAGAIN;
     }
+    bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
+    net_sock_unlock(s, irq);
+    proc_wake_reason_t reason;
+    if (linked)
+        reason = proc_park_commit(token);
+    else {
+        (void)proc_park_cancel(token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    wait_queue_unlink(&s->read_waitq, &entry);
+    proc_park_finish(token);
+    if (proc_wake_reason_is_task_interrupt(reason))
+        return channel ? -EINTR : -ERESTARTSYS;
+    /* The channel loop re-tests its deadline at the top, so a timeout is just
+     * another retry there; the legacy loop reports it directly. */
+    if (!channel && reason == PROC_WAKE_TIMEOUT)
+        return -EAGAIN;
+    return 0;
+}
+
+int net_recvfrom_socket_meta_until(net_socket_t *s, void *buf, size_t len,
+                                   int flags, void *addr, size_t *addrlen,
+                                   net_recv_meta_t *meta, uint64_t deadline) {
+    return a20_net_recvfrom_socket_meta_until(s, buf, len, flags, addr, addrlen,
+                                              meta, deadline);
 }
 
 int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,

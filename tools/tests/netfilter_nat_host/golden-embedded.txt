@@ -1,0 +1,48 @@
+track: count_after_flush=0
+track: after_new count=1
+track: stats tracked=1 created=1 evicted=0 timeout=0 packets=1 bytes=54
+track: snapshot n=1 state=1 packets=2 last_ms=1200
+track: after_ack state=1 packets=3
+track: gre_ignored count=1
+track: fragment_ignored count=1
+track: disabled_count=1
+track: enabled=0
+nat: add_dnat=0 count=1
+nat: dnat_fwd dst=0a00020f dport=18082
+nat: dnat_reply src=0a00020f sport=18082
+nat: dnat_retrans dst=0a00020f dport=18082
+nat: add_masq=0 count=1
+nat: masq_fwd src=0a00020f sport=5353
+nat: masq_reply dst=0a00020f dport=0
+nat: after_del count=0
+nat: after_del_fwd src=0a00020f sport=5353
+icmp: n=1 proto=1 sport=8 dport=4660 nat=1
+icmp: reply_entries=1
+icmp: reply_state=1 packets=2 nat=1
+cap: capacity=32
+cap: full count=32 created=38 evicted=0
+cap: overflow r=0 count=32 evicted=1 lru_victim=1001
+cap: bad_proto=-22 bad_state=-22
+expire: t=60 freed=1 count=2 timeout=1 sweeps=1
+expire: t=115 freed=1 count=1 timeout=2
+expire: wrap freed=0 count=1 (limit is 50 ticks)
+rules: empty=0
+rules: parse_in=0
+rules: parsed dir=0 proto=6 nat=3 dport=80 nat_addr=0a00020f nat_port=8080
+rules: add1=0 count=1
+rules: udp_no_match dst=05060708 dport=80
+rules: tcp_match dst=0a00020f dport=8080
+rules: out_no_match dst=05060708 dport=80
+rules: add2=1 count=2
+rules: first_match dst=0a00020f
+rules: reject_dnat_out=-22
+rules: reject_snat_no_addr=-22
+rules: reject_masq_addr=-22
+rules: count_after_rejects=2
+rules: add_null=-22
+rules: del0=0
+rules: count_after_del=1
+rules: del_oob=-22
+rules: reset count=0
+final: tracked=4 created=47 evicted=1 timeout=2
+HARNESS OK

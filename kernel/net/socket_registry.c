@@ -4,7 +4,10 @@
 #include "core/cpu.h"
 #include "core/stdio.h"
 #include "core/lock_counters.h"
+#include "core/panic.h"
 #include "core/string.h"
+
+#include "net/socket_registry_state.h"
 
 net_bucket_t g_net_buckets[NET_SOCK_BUCKETS];
 net_socket_t *g_sockets[NET_MAX_SOCKETS];
@@ -15,15 +18,6 @@ volatile int g_net_bh_pending[NET_MAX_SOCKETS];
  * scanning all NET_MAX_SOCKETS slots per context switch. */
 volatile int g_net_bh_pending_count;
 
-/*
- * Debug names for /proc/a20/lock_contention and the [LOCK-STALL] report.
- *
- * These locks were never registered before this sharding, so the whole net
- * data plane was invisible to the contention audit.  Registering all of them
- * costs one lock_counters slot each, which is why LOCK_COUNTERS_MAX in
- * kernel/core/lock_counters.c is worth a second look (see
- * docs/measured/impl-notes-net.md section 8).
- */
 /*
  * Debug names for /proc/a20/lock_contention and the [LOCK-STALL] report.
  *
@@ -41,25 +35,114 @@ volatile int g_net_bh_pending_count;
 #define NET_BUCKET_NAME_MAX 24
 static char g_net_bucket_names[NET_SOCK_BUCKETS][NET_BUCKET_NAME_MAX];
 
+/*
+ * The reference-count ledger is the Rust state machine's, together with the
+ * transitions that move it: a counter is only meaningful next to the transition
+ * it counts.  What is left here is the vocabulary a reader of /proc/net/status
+ * or of a panic line sees, which is why the reason strings stay.
+ */
+static const char *const g_net_sock_ref_fault_why[NET_SOCK_REF_FAULT_REASONS] = {
+    "already-freed: refs was not positive",
+    "canary-mismatch: object was not a live socket",
+    "reserved",
+    "reserved",
+};
+
+int net_sock_ref_live(void)
+{
+    return a20_net_ref_live();
+}
+
+/* The Rust release has already counted the fault; this only renders it. */
+static void net_sock_ref_fault(int reason, net_socket_t *s)
+{
+    if (reason < 0 || reason >= NET_SOCK_REF_FAULT_REASONS)
+        reason = 0;
+    int allocs, frees, faults;
+    a20_net_ref_ledger(&allocs, &frees, &faults, NULL, 0);
+    (void)s; /* only the panic line below reads it */
+#if CONFIG_NET_REF_ASSERT
+    panic("net_socket_free: %s s=%lx refs=%d allocs=%d frees=%d faults=%d",
+          g_net_sock_ref_fault_why[reason], (unsigned long)(uintptr_t)s,
+          __atomic_load_n(&s->refs, __ATOMIC_RELAXED), allocs, frees, faults);
+#endif
+}
+
+int net_sock_ref_format(char *buf, size_t bufsz)
+{
+    int off = 0;
+    int n;
+    int allocs, frees, faults;
+    int fault_n[NET_SOCK_REF_FAULT_REASONS];
+    a20_net_ref_ledger(&allocs, &frees, &faults, fault_n, NET_SOCK_REF_FAULT_REASONS);
+    n = snprintf(buf, bufsz,
+                 "\nnet_sock_ref: live=%d allocs=%d frees=%d faults=%d\n",
+                 a20_net_ref_live(), allocs, frees, faults);
+    if (n < 0)
+        return 0;
+    off = n;
+    if ((size_t)n >= bufsz)
+        return (int)bufsz - 1;
+    for (int i = 0; i < NET_SOCK_REF_FAULT_REASONS; i++) {
+        if (!fault_n[i])
+            continue;
+        n = snprintf(buf + off, bufsz - (size_t)off,
+                     "net_sock_ref_fault%d: %s %d\n",
+                     i, g_net_sock_ref_fault_why[i], fault_n[i]);
+        if (n < 0)
+            break;
+        off += n;
+        if ((size_t)off >= bufsz)
+            return (int)bufsz - 1;
+    }
+    return off;
+}
+
+/*
+ * Reference lifecycle.  The socket's own `refs` / `ref_magic` fields are the
+ * state and the Rust module owns every transition over them: the acquire, the
+ * CAS release loop, the canary check and the free decision.  What stays here is
+ * the destroy sequence, because obj_cache_free()/kfree()/resource_ns_put() are
+ * primitives, not state.
+ */
+void net_sock_ref_init(net_socket_t *s)
+{
+    if (!s)
+        return;
+    (void)a20_net_ref_init(&s->refs, &s->ref_magic);
+}
+
+/* Returns 1 when the caller must destroy the object, 0 when it must not. */
+int net_sock_ref_release(net_socket_t *s)
+{
+    int r = a20_net_ref_release(&s->refs, &s->ref_magic);
+    if (r < 0) {
+        net_sock_ref_fault(-r - 1, s);
+        return 0;
+    }
+    return r;
+}
+
 void net_bh_slot_mark(int idx)
 {
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return;
-    if (__atomic_exchange_n(&g_net_bh_pending[idx], 1,
-                            __ATOMIC_ACQ_REL) == 0)
-        __atomic_fetch_add(&g_net_bh_pending_count, 1, __ATOMIC_ACQ_REL);
+    (void)a20_net_bh_mark(g_net_bh_pending, &g_net_bh_pending_count,
+                          NET_MAX_SOCKETS, idx);
 }
 
 int net_bh_slot_clear(int idx)
 {
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return 0;
-    if (__atomic_exchange_n(&g_net_bh_pending[idx], 0,
-                            __ATOMIC_ACQ_REL) != 0) {
-        __atomic_fetch_sub(&g_net_bh_pending_count, 1, __ATOMIC_ACQ_REL);
-        return 1;
-    }
-    return 0;
+    return a20_net_bh_clear(g_net_bh_pending, &g_net_bh_pending_count,
+                            NET_MAX_SOCKETS, idx);
+}
+
+int net_bh_any_pending(void)
+{
+    return a20_net_bh_any_pending(&g_net_bh_pending_count);
+}
+
+int net_bh_slot_pending(int idx)
+{
+    return a20_net_bh_slot_pending(g_net_bh_pending, NET_MAX_SOCKETS, idx);
 }
 
 void net_socket_registry_init(void) {
@@ -81,21 +164,17 @@ void net_socket_registry_init(void) {
      * stream -- because that state used to be protected by the bucket lock and
      * a socket with no slot has no bucket.  Per-socket state is now protected
      * by a lock inside the socket, so the case needs nothing.
+     *
+     * Bits past the bucket's last slot have to start *occupied*, i.e. set.  A
+     * bucket narrower than one bitmap word (the 8-slot embedded profile has one
+     * slot per bucket) would otherwise hand out a bit offset that belongs to the
+     * next bucket.  That rule is the Rust state machine's.
      */
     for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
         spin_init(&g_net_buckets[b].lock);
-        memset(g_net_buckets[b].free_bits, 0,
-               sizeof(g_net_buckets[b].free_bits));
-        /* Bits past the bucket's last slot have to start *occupied*, i.e. set.
-         * A bucket narrower than one bitmap word (the 8-slot embedded profile
-         * has one slot per bucket) would otherwise hand out a bit offset that
-         * belongs to the next bucket.  slack is in 1..31 because every profile
-         * has at least one slot per bucket, so 32 - slack never hits the
-         * undefined shift-by-width. */
-        int slack = NET_SOCK_BUCKET_WORDS * 32 - NET_SOCK_SLOTS_PER_BUCKET;
-        if (slack)
-            g_net_buckets[b].free_bits[NET_SOCK_BUCKET_WORDS - 1] |=
-                ~0u << (32 - slack);
+        (void)a20_net_bucket_init(g_net_buckets[b].free_bits,
+                                  NET_SOCK_BUCKET_WORDS,
+                                  NET_SOCK_SLOTS_PER_BUCKET);
     }
     #if CONFIG_NET_LOCK_ASSERT
     /* Count the registry size either side of the loop below rather than
@@ -124,25 +203,19 @@ void net_socket_registry_init(void) {
 }
 
 /*
- * Claim a free slot inside one bucket, or -1 if that bucket is full.  Only this
- * bucket's own free_bits are read or written, which is the entire reason the
- * shard is a contiguous run rather than a hash (see socket_internal.h).
+ * The bitmap transactions live in the Rust state machine: claiming a free slot
+ * inside one bucket (or -1 when the bucket is full) and releasing one.  Only
+ * this bucket's own free_bits are read or written, which is the entire reason
+ * the shard is a contiguous run rather than a hash (see socket_internal.h).
  */
 static int net_bucket_claim(net_bucket_t *bk)
 {
-    for (int w = 0; w < NET_SOCK_BUCKET_WORDS; w++) {
-        uint32_t free_bits = ~bk->free_bits[w];
-        if (!free_bits)
-            continue;
-        int bit;
-        for (bit = 0; bit < 32; bit++) {
-            if (free_bits & (1U << bit))
-                break;
-        }
-        bk->free_bits[w] |= (1U << bit);
-        return w * 32 + bit;
-    }
-    return -1;
+    return a20_net_bucket_claim(bk->free_bits, NET_SOCK_BUCKET_WORDS);
+}
+
+static void net_bucket_release(net_bucket_t *bk, int local)
+{
+    (void)a20_net_bucket_release(bk->free_bits, NET_SOCK_BUCKET_WORDS, local);
 }
 
 /*
@@ -173,15 +246,19 @@ int net_register_socket_locked(net_socket_t *s) {
              * socket, so they are written under its lock, which is the order
              * net_bucket_scan() reads them in too. */
             uint64_t sflags = net_sock_lock(s);
-            g_sockets[idx] = s;
-            s->in_registry = 1;
-            s->reg_idx = idx;
+            int r = a20_net_slot_publish((void **)g_sockets, NET_MAX_SOCKETS, idx,
+                                         s, &s->in_registry, &s->reg_idx,
+                                         &s->refs, g_net_bh_pending,
+                                         &g_net_bh_pending_count);
             net_rxq_reset_locked(s);
             net_sock_unlock(s, sflags);
-            net_bh_slot_clear(idx);
-            /* The registry's own reference, handed back by a second
-             * net_socket_free() after net_socket_unregister(). */
-            net_socket_ref(s);
+            if (r != 0) {
+                /* The claim and the table disagreed.  Put the bit back rather
+                 * than leaving a slot that no socket can ever release. */
+                net_bucket_release(&g_net_buckets[b], k);
+                net_bucket_unlock(b, flags);
+                return -ENFILE;
+            }
             net_bucket_unlock(b, flags);
             return 0;
         }
@@ -249,14 +326,13 @@ bool net_socket_unregister(net_socket_t *s) {
      * per-socket state, so it runs under the socket's lock like everything
      * else here. */
     net_packet_bound_release(s);
-    if (g_sockets[i] == s) {
-        g_sockets[i] = NULL;
-        net_bh_slot_clear(i);
-        unsigned local = (unsigned)i % NET_SOCK_SLOTS_PER_BUCKET;
-        g_net_buckets[b].free_bits[local / 32] &= ~(1U << (local % 32));
-    }
-    s->in_registry = 0;
-    s->reg_idx = -1;
+    bool released = a20_net_slot_release((void **)g_sockets, NET_MAX_SOCKETS,
+                                         NET_SOCK_SLOTS_PER_BUCKET, i, s,
+                                         &s->in_registry, &s->reg_idx,
+                                         g_net_buckets[b].free_bits,
+                                         NET_SOCK_BUCKET_WORDS,
+                                         g_net_bh_pending,
+                                         &g_net_bh_pending_count) != 0;
     net_sock_unlock(s, sflags);
     net_bucket_unlock(b, flags);
     /* The registry's own reference is released by the caller with one more
@@ -264,7 +340,7 @@ bool net_socket_unregister(net_socket_t *s) {
      * this function returns and every lock is dropped: it can free the socket,
      * and obj_cache_free() is not something to run with a shard lock held and
      * interrupts disabled. */
-    return true;
+    return released;
 }
 
 /*
