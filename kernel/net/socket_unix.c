@@ -5,535 +5,283 @@
 #include "core/string.h"
 #include "mm/slab.h"
 
-static int unix_path_make_absolute(const char *path, char *out, size_t outsz)
+#include "net/socket_unix_state.h"
+
+/*
+ * The AF_UNIX state machine is Rust (kernel/net/socket_unix.rs).  What is left
+ * here is the primitive set it calls, and the wrappers that keep the C names
+ * the rest of the tree uses.
+ *
+ * Rust owns the address preparation, the bind transaction and its rollback, the
+ * connect transaction that allocates and wires the accepted child, the sendto
+ * transaction with its destination resolution and stream fragmentation, and the
+ * channel-backed data plane.  Everything below is a lock, a scheduler call, an
+ * allocation, a vfs call, a channel call or a whole-table scan: the things that
+ * cannot move without moving the lock discipline or the real I/O with them.
+ *
+ * The lock pair is handed back to Rust as an opaque (lo, hi, flags) triple so
+ * the ascending-address ordering stays in one place -- net_sock_lock2() --
+ * instead of being re-derived on the Rust side.
+ */
+
+void a20_net_unix_view_init(void *sp, net_unix_view_t *out)
 {
-    if (!path || !path[0] || !out || outsz == 0)
-        return -EINVAL;
-    if (path[0] == '/') {
-        strncpy(out, path, outsz - 1);
-    } else {
-        task_t *cur = proc_current();
-        const char *cwd = (cur && cur->fs.cwd[0]) ? cur->fs.cwd : "/";
-        if (strcmp(cwd, "/") == 0)
-            snprintf(out, outsz, "/%s", path);
-        else
-            snprintf(out, outsz, "%s/%s", cwd, path);
-    }
+    net_socket_t *s = (net_socket_t *)sp;
+    out->s = s;
+    out->net_ns = s->net_ns;
+    out->domain = &s->domain;
+    out->sock_type = &s->type;
+    out->protocol = &s->protocol;
+    out->nonblock = &s->nonblock;
+    out->bound = &s->bound;
+    out->connected = &s->connected;
+    out->ever_connected = &s->ever_connected;
+    out->listening = &s->listening;
+    out->accept_count = &s->accept_count;
+    out->passcred = &s->passcred;
+    out->owner_pid = &s->owner_pid;
+    out->owner_uid = &s->owner_uid;
+    out->owner_gid = &s->owner_gid;
+    out->peer_pid = &s->peer_pid;
+    out->peer_uid = &s->peer_uid;
+    out->peer_gid = &s->peer_gid;
+    out->ch_cred_pid = &s->ch_cred_pid;
+    out->ch_cred_uid = &s->ch_cred_uid;
+    out->ch_cred_gid = &s->ch_cred_gid;
+    out->local = s->local;
+    out->local_len = &s->local_len;
+    out->peer_addr = s->peer_addr;
+    out->peer_len = &s->peer_len;
+    out->peer = (void **)&s->peer;
+    out->accept_next = (void **)&s->accept_next;
+    out->ch_ep = (void **)&s->ch_ep;
+    out->ch_buf = &s->ch_buf;
+    out->ch_len = &s->ch_len;
+}
+
+void a20_net_unix_lock(void *s, uint64_t *flags)
+{
+    *flags = net_sock_lock((net_socket_t *)s);
+}
+
+void a20_net_unix_unlock(void *s, uint64_t flags)
+{
+    net_sock_unlock((net_socket_t *)s, flags);
+}
+
+void a20_net_unix_lock2(void *a, void *b, net_unix_pair_t *out)
+{
+    net_sock_pair_t p = net_sock_lock2((net_socket_t *)a, (net_socket_t *)b);
+    out->lo = p.lo;
+    out->hi = p.hi;
+    out->flags = p.flags;
+}
+
+void a20_net_unix_unlock2(net_unix_pair_t *in)
+{
+    net_sock_pair_t p;
+    p.lo = in->lo;
+    p.hi = in->hi;
+    p.flags = in->flags;
+    net_sock_unlock2(p);
+}
+
+int a20_net_unix_is_live(void *s)
+{
+    return net_socket_is_live((const net_socket_t *)s) ? 1 : 0;
+}
+
+void a20_net_unix_ref(void *s)
+{
+    net_socket_ref((net_socket_t *)s);
+}
+
+void a20_net_unix_free(void *s)
+{
+    net_socket_free((net_socket_t *)s);
+}
+
+void *a20_net_unix_alloc(void)
+{
+    return net_socket_alloc();
+}
+
+void *a20_net_unix_find_bound(void *ns, int domain, int sock_type,
+                             const uint8_t *addr, size_t addrlen)
+{
+    return net_find_bound_socket((resource_namespace_t *)ns, domain, sock_type,
+                                 addr, addrlen);
+}
+
+int a20_net_unix_creds(int32_t *pid, int32_t *uid, int32_t *gid)
+{
+    task_t *cur = proc_current();
+    if (!cur)
+        return -1;
+    *pid = cur->tgid;
+    *uid = (int32_t)cur->cred.uid;
+    *gid = (int32_t)cur->cred.gid;
+    return 0;
+}
+
+void a20_net_unix_cwd(char *out, size_t outsz)
+{
+    task_t *cur = proc_current();
+    const char *cwd = (cur && cur->fs.cwd[0]) ? cur->fs.cwd : "/";
+    strncpy(out, cwd, outsz - 1);
     out[outsz - 1] = '\0';
-    return 0;
 }
 
-int net_unix_sockaddr_prepare(const void *addr, size_t addrlen,
-                              uint8_t out[NET_SOCKADDR_MAX], size_t *outlen,
-                              char *path_out, size_t path_outsz)
+int a20_net_unix_path_is_dir(const char *path)
 {
-    if (!addr || !out || !outlen ||
-        addrlen < sizeof(uint16_t) || addrlen > NET_SOCKADDR_MAX)
-        return -EINVAL;
-    memcpy(out, addr, addrlen);
-    *outlen = addrlen;
-    if (*(uint16_t *)out != AF_UNIX)
-        return -EAFNOSUPPORT;
-    if (addrlen <= sizeof(uint16_t))
-        return 0;
-
-    size_t path_len = addrlen - sizeof(uint16_t);
-    char path[MAX_PATH_LEN];
-    size_t n = path_len < sizeof(path) - 1 ? path_len : sizeof(path) - 1;
-    memcpy(path, (const uint8_t *)addr + sizeof(uint16_t), n);
-    path[n] = '\0';
-    if (path[0] == '\0')
-        return 0;
-
-    char full[MAX_PATH_LEN];
-    int r = unix_path_make_absolute(path, full, sizeof(full));
-    if (r < 0)
-        return r;
-    size_t full_len = strlen(full) + 1;
-    if (sizeof(uint16_t) + full_len > NET_SOCKADDR_MAX)
-        return -ENAMETOOLONG;
-    *(uint16_t *)out = AF_UNIX;
-    memcpy(out + sizeof(uint16_t), full, full_len);
-    *outlen = sizeof(uint16_t) + full_len;
-    if (path_out && path_outsz) {
-        strncpy(path_out, full, path_outsz - 1);
-        path_out[path_outsz - 1] = '\0';
-    }
-    return 0;
-}
-
-int net_unix_path_parent_ok(const char *path)
-{
-    if (!path || !path[0])
-        return 0;
-    char parent[MAX_PATH_LEN];
-    int rr = unix_path_make_absolute(path, parent, sizeof(parent));
-    if (rr < 0)
-        return rr;
-    char *slash = strrchr(parent, '/');
-    if (!slash)
-        return 0;
-    if (slash == parent) {
-        parent[1] = '\0';
-    } else {
-        *slash = '\0';
-    }
     kstat_t st;
-    int r = vfs_stat(parent, &st);
+    int r = vfs_stat(path, &st);
     if (r < 0)
         return r;
     return ((st.st_mode & S_IFMT) == S_IFDIR) ? 0 : -ENOTDIR;
 }
 
+int a20_net_unix_path_stat(const char *path)
+{
+    kstat_t st;
+    return vfs_stat(path, &st);
+}
+
+int a20_net_unix_path_create(const char *path)
+{
+    return vfs_open(path, O_CREAT | O_EXCL | O_RDWR, S_IFSOCK | 0777);
+}
+
+void a20_net_unix_path_close(int fd)
+{
+    vfs_close(fd);
+}
+
+int a20_net_unix_accept_push(void *listener, void *child)
+{
+    return net_accept_queue_push_locked((net_socket_t *)listener,
+                                        (net_socket_t *)child);
+}
+
+int a20_net_unix_accept_collect(void *listener, void *wake_q)
+{
+    net_socket_t *l = (net_socket_t *)listener;
+    int r = (int)wait_queue_collect_one(&l->accept_waitq, 0, PROC_WAKE_EVENT,
+                                        (proc_wake_q_t *)wake_q);
+    net_event_notify(l, A20_EVENT_ACCEPT_READY, 0, 0);
+    return r;
+}
+
+int a20_net_unix_read_collect(void *s, void *wake_q)
+{
+    net_socket_t *sk = (net_socket_t *)s;
+    net_event_notify(sk, A20_EVENT_READABLE, 0, 0);
+    return (int)wait_queue_collect_one(&sk->read_waitq, 0, PROC_WAKE_EVENT,
+                                       (proc_wake_q_t *)wake_q);
+}
+
+void a20_net_unix_read_wake_all(void *s)
+{
+    net_socket_t *sk = (net_socket_t *)s;
+    net_event_notify(sk, A20_EVENT_READABLE, 0, 0);
+    wait_queue_wake_all(&sk->read_waitq, 0, PROC_WAKE_EVENT);
+}
+
+void a20_net_unix_channel_release(const net_unix_view_t *v)
+{
+    net_socket_t *s = (net_socket_t *)v->s;
+    if (s->ch_ep) {
+        a20_channel_ep_release(s->ch_ep);
+        s->ch_ep = NULL;
+    }
+}
+
+int64_t a20_net_unix_channel_send(void *ep, const uint8_t *buf, uint32_t len,
+                                  uint32_t flags)
+{
+    return a20_channel_send((a20_channel_ep_t *)ep, buf, len, NULL, 0, NULL,
+                            flags);
+}
+
+int64_t a20_net_unix_channel_recv(void *ep, uint8_t *buf, uint32_t *cap)
+{
+    return a20_channel_recv((a20_channel_ep_t *)ep, buf, cap, NULL, NULL, NULL,
+                            A20_MSG_NONBLOCK);
+}
+
+uint8_t *a20_net_unix_chbuf(const net_unix_view_t *v)
+{
+    net_socket_t *s = (net_socket_t *)v->s;
+    if (!s->ch_buf) {
+        s->ch_buf = kmalloc(A20_CH_MAX_DATA);
+        if (!s->ch_buf)
+            return NULL;
+    }
+    return (uint8_t *)s->ch_buf;
+}
+
+int a20_net_unix_enqueue(void *dst, const uint8_t *buf, size_t len,
+                         const uint8_t *addr, size_t addrlen)
+{
+    return net_enqueue_msg_locked((net_socket_t *)dst, buf, len, addr, addrlen);
+}
+
+int a20_net_unix_enqueue_fds(void *dst, const uint8_t *buf, size_t len,
+                             const uint8_t *addr, size_t addrlen,
+                             void **files, int nfiles)
+{
+    return net_enqueue_msg_locked_fds((net_socket_t *)dst, buf, len, addr,
+                                      addrlen, (vfile_t **)files, nfiles);
+}
+
+void a20_net_unix_wakeq_init(void *wake_q)
+{
+    proc_wake_q_init((proc_wake_q_t *)wake_q);
+}
+
+void a20_net_unix_wakeq_flush(void *wake_q)
+{
+    (void)proc_wake_q_flush((proc_wake_q_t *)wake_q);
+}
+
 int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
 {
-    if (!s)
-        return -ENOTSOCK;
-
-    uint8_t bind_addr[NET_SOCKADDR_MAX];
-    size_t bind_len = addrlen;
-    char unix_path[MAX_PATH_LEN] = "";
-    int unix_pathname = 0;
-    int ur = net_unix_sockaddr_prepare(addr, addrlen, bind_addr, &bind_len,
-                                       unix_path, sizeof(unix_path));
-    if (ur < 0)
-        return ur;
-
-    const char *path = (const char *)bind_addr + sizeof(uint16_t);
-    if (bind_len > sizeof(uint16_t) && path[0] != '\0') {
-        unix_pathname = 1;
-        int pr = net_unix_path_parent_ok(path);
-        if (pr < 0)
-            return pr;
-        kstat_t st;
-        if (vfs_stat(unix_path, &st) == 0)
-            return -EADDRINUSE;
-    }
-
-    task_t *owner = proc_current();
-    /* The EADDRINUSE check is a whole-table scan, so it takes one bucket at a
-     * time and comes back with a reference instead of running inside s's own
-     * critical section.  It never mutates, so publishing s->local afterwards
-     * needs s's bucket alone. */
-    net_socket_t *clash = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, bind_addr,
-                                                bind_len);
-    if (clash) {
-        net_socket_free(clash);
-        return -EADDRINUSE;
-    }
-    uint64_t flags = net_sock_lock(s);
-    if (!net_socket_is_live(s)) {
-        net_sock_unlock(s, flags);
-        return -ENOTSOCK;
-    }
-    memcpy(s->local, bind_addr, bind_len);
-    s->local_len = bind_len;
-    s->bound = 1;
-    if (owner) {
-        s->owner_pid = owner->tgid;
-        s->owner_uid = owner->cred.uid;
-        s->owner_gid = owner->cred.gid;
-    }
-    net_sock_unlock(s, flags);
-
-    if (unix_pathname) {
-        int fd = vfs_open(unix_path, O_CREAT | O_EXCL | O_RDWR,
-                          S_IFSOCK | 0777);
-        if (fd < 0) {
-            uint64_t undo = net_sock_lock(s);
-            s->bound = 0;
-            s->local_len = 0;
-            net_sock_unlock(s, undo);
-            return fd == -EEXIST ? -EADDRINUSE : fd;
-        }
-        vfs_close(fd);
-    }
-    return 0;
+    return a20_net_unix_socket_bind(s, addr, addrlen, MAX_PATH_LEN);
 }
 
 int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
 {
-    if (!s)
-        return -ENOTSOCK;
-
-    uint8_t peer_addr[NET_SOCKADDR_MAX];
-    size_t peer_len = addrlen;
-    int ur = net_unix_sockaddr_prepare(addr, addrlen, peer_addr,
-                                       &peer_len, NULL, 0);
-    if (ur < 0)
-        return ur;
-
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-
-    /*
-     * The listener lookup is a whole-table scan: it walks the shards one at a
-     * time and returns a *reference*, which is what lets s's bucket be dropped
-     * before the two-socket section below takes them together.  Taking s's
-     * bucket first and scanning inside it would nest an arbitrary bucket under
-     * a held one, which is the ABBA the ascending order exists to forbid.
-     */
-    net_socket_t *listener = net_find_bound_socket(s->net_ns, AF_UNIX, s->type,
-                                                  peer_addr, peer_len);
-    if (!listener)
-        return -ECONNREFUSED;
-
-    net_socket_t *child = NULL;
-    int rc = 0;
-    net_sock_pair_t pair = net_sock_lock2(s, listener);
-    if (!net_socket_is_live(s) || !net_socket_is_live(listener)) {
-        rc = -ECONNREFUSED;
-        goto out;
-    }
-    memcpy(s->peer_addr, peer_addr, peer_len);
-    s->peer_len = peer_len;
-    s->connected = 1;
-    s->ever_connected = 1;
-
-    if (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET) {
-        if (!listener->listening || listener->accept_count >= NET_MAX_QUEUE) {
-            s->connected = 0;
-            rc = listener->listening ? -EAGAIN : -ECONNREFUSED;
-            goto out;
-        }
-        /* The child is allocated here, under the same two locks the single
-         * global lock used to cover, and is not published in g_sockets[] until
-         * an accepted socket is registered -- so it owns no slot and therefore
-         * no bucket of its own.  Nothing else can reach it before the accept
-         * queue push below completes, and that push happens under the
-         * listener's bucket, so the private writes need no lock. */
-        child = net_socket_alloc();
-        if (!child) {
-            s->connected = 0;
-            rc = -ENOMEM;
-            goto out;
-        }
-        child->domain = AF_UNIX;
-        child->type = s->type;
-        child->protocol = s->protocol;
-        /* Linux inherits SO_PASSCRED on accepted AF_UNIX sockets.  D-Bus
-         * enables it on the listener and expects the initial NUL byte on the
-         * accepted connection to carry SCM_CREDENTIALS. */
-        child->passcred = listener->passcred;
-        child->bound = 1;
-        child->connected = 1;
-        child->ever_connected = 1;
-        child->peer = s;
-        s->peer = child;
-        memcpy(child->local, listener->local, listener->local_len);
-        child->local_len = listener->local_len;
-        memcpy(child->peer_addr, s->local, s->local_len);
-        child->peer_len = s->local_len;
-        int qr = net_accept_queue_push_locked(listener, child);
-        if (qr < 0) {
-            if (s->ch_ep) { a20_channel_ep_release(s->ch_ep); s->ch_ep = NULL; }
-            if (child->ch_ep) { a20_channel_ep_release(child->ch_ep); child->ch_ep = NULL; }
-            s->connected = 0;
-            s->peer = NULL;
-            rc = qr;
-            goto out;
-        }
-        (void)wait_queue_collect_one(
-            &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-        net_event_notify(listener, A20_EVENT_ACCEPT_READY, 0, 0);
-    } else {
-        s->peer = listener;
-    }
-    /* SO_PEERCRED: the accepted end's peer is the connecting task; the
-     * connecting end's peer is the task that owns the bound socket. */
-    {
-        task_t *cur = proc_current();
-        if (cur) {
-            if (s->peer && s->peer->connected) {
-                s->peer->peer_pid = cur->tgid;
-                s->peer->peer_uid = cur->cred.uid;
-                s->peer->peer_gid = cur->cred.gid;
-            }
-            s->peer_pid = listener->owner_pid;
-            s->peer_uid = listener->owner_uid;
-            s->peer_gid = listener->owner_gid;
-        }
-    }
-out:
-    net_sock_unlock2(pair);
-    /* Our reference from the scan.  s->peer and child->peer are plain
-     * back-pointers with no reference of their own, exactly as before the
-     * table was sharded; this only returns what this function took. */
-    net_socket_free(listener);
-    if (child && rc < 0)
-        net_socket_free(child);
-    (void)proc_wake_q_flush(&wake_q);
-    return rc;
-}
-
-static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
-                                       size_t len, const void *addr,
-                                       size_t addrlen,
-                                       vfile_t **files, int nfiles)
-{
-    if (!s)
-        return -ENOTSOCK;
-
-/*
- * Two sockets, ascending by address.  As in the INET send path the
-     * destination is resolved first, outside any lock: it may come from a
-     * whole-table scan that walks the buckets one at a time, and the reference
-     * that scan hands back is what lets s's lock be dropped before the pair is
-     * taken.
-     */
-    uint64_t src_local_len = 0;
-    uint8_t src_local[NET_SOCKADDR_MAX];
-    net_socket_t *dst = NULL;
-    bool had_peer = false;
-    const void *dst_addr = addr;
-    size_t dst_len = addrlen;
-    uint8_t unix_addr[NET_SOCKADDR_MAX];
-    if (addr) {
-        size_t ulen = addrlen;
-        int ur = net_unix_sockaddr_prepare(addr, addrlen, unix_addr,
-                                           &ulen, NULL, 0);
-        if (ur < 0)
-            return ur;
-        dst_addr = unix_addr;
-        dst_len = ulen;
-    }
-    {
-        uint64_t sf = net_sock_lock(s);
-        if (!net_socket_is_live(s)) {
-            net_sock_unlock(s, sf);
-            return -ENOTSOCK;
-        }
-        if (!dst_addr && s->connected) {
-            /* Copied out rather than pointed at: the search below runs with no
-             * lock held, so s->peer_addr must not be read after this
-             * critical section ends. */
-            dst_len = s->peer_len;
-            memcpy(unix_addr, s->peer_addr, dst_len);
-            dst_addr = unix_addr;
-        }
-        src_local_len = s->local_len;
-        memcpy(src_local, s->local, src_local_len);
-        /* Sampled under s's lock, so it cannot be freed between
-         * the test and the reference below. */
-        net_socket_t *peer = s->peer;
-        if (peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
-                      net_socket_is_live(peer)))
-            dst = net_socket_ref(peer);
-        had_peer = (peer != NULL);
-        net_sock_unlock(s, sf);
-    }
-    if (!dst && had_peer) {
-        /* The back-pointer is stale: drop it and fall back to a lookup. */
-        uint64_t sf = net_sock_lock(s);
-        if (s->peer) s->peer = NULL;
-        net_sock_unlock(s, sf);
-    }
-    if (!dst && dst_addr)
-        dst = net_find_bound_socket(s->net_ns, AF_UNIX, s->type, dst_addr, dst_len);
-    if (!dst)
-        return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
-
-    net_sock_pair_t pair = net_sock_lock2(s, dst);
-    if (!net_socket_is_live(dst)) {
-        net_sock_unlock2(pair);
-        net_socket_free(dst);
-        return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
-    }
-    /* Channel-backed data plane: plain data goes through the internal
-     * channel (the channel has its own locking, so the pair is dropped first).
-     * SCM_RIGHTS messages fall back to the legacy queue below. */
-    if (dst->ch_ep && !(files && nfiles > 0)) {
-        net_sock_unlock2(pair);
-        int cr = unix_ch_send(s, dst, buf, len);
-        if (cr >= 0) {
-            net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
-            wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
-        }
-        net_socket_free(dst);
-        return cr;
-    }
-    /*
-     * On success the enqueued message takes ownership of the fd
-     * references; on failure the caller still owns them.
-     *
-     * A stream socket carries a byte stream, so a write larger than one
-     * queued message is split across several messages (Linux fragments it
-     * into skbs); without this a large request -- e.g. an X11 client writing
-     * a big request to Xwayland -- fails with EMSGSIZE.  The SCM_RIGHTS fds
-     * ride on the final chunk.
-     */
-    int r;
-    if (s->type == SOCK_STREAM && len > NET_MAX_PAYLOAD) {
-        const uint8_t *p = (const uint8_t *)buf;
-        size_t left = len;
-        r = 0;
-        while (left > 0) {
-            size_t n = left > NET_MAX_PAYLOAD ? NET_MAX_PAYLOAD : left;
-            int rc = (left > n)
-                   ? net_enqueue_msg_locked(dst, p, n, src_local, src_local_len)
-                   : net_enqueue_msg_locked_fds(dst, p, n, src_local, src_local_len,
-                                                files, nfiles);
-            if (rc < 0) {
-                if (r == 0)
-                    r = rc;
-                break;
-            }
-            r += rc;
-            p += n;
-            left -= n;
-        }
-    } else {
-        r = net_enqueue_msg_locked_fds(dst, buf, len, src_local, src_local_len,
-                                       files, nfiles);
-    }
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-    if (r >= 0) {
-        net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
-        (void)wait_queue_collect_one(
-            &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-    }
-    net_sock_unlock2(pair);
-    (void)proc_wake_q_flush(&wake_q);
-    net_socket_free(dst);
-    return r;
-}
-
-
-/* ---- Channel-backed data plane (internal IPC bridge) ----
- * Plain data of a channel-backed AF_UNIX socketpair flows through an
- * internal channel; the legacy queue is only used for SCM_RIGHTS
- * messages (which need vfile_t* delivery). */
-
-int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len)
-{
-    /* a20_channel_send(ep) delivers to ep->peer, so the sender must send
-     * on its OWN endpoint: its peer is the receiver's ch_ep.  Only the
-     * receiver's credentials are stamped here, so this is dst's lock alone and
-     * s is not touched. */
-    uint64_t irq = net_sock_lock(dst);
-    task_t *cur = proc_current();
-    if (cur) {
-        dst->ch_cred_pid = cur->tgid;
-        dst->ch_cred_uid = cur->cred.uid;
-        dst->ch_cred_gid = cur->cred.gid;
-    }
-    net_sock_unlock(dst, irq);
-    const uint8_t *p = (const uint8_t *)buf;
-    size_t left = len;
-    size_t sent = 0;
-    uint32_t chflags = s->nonblock ? A20_MSG_NONBLOCK : 0;
-    while (left > 0) {
-        uint32_t n = left > A20_CH_MAX_DATA ? A20_CH_MAX_DATA : (uint32_t)left;
-        int64_t r = a20_channel_send(s->ch_ep, p, n, NULL, 0, NULL, chflags);
-        if (r < 0) {
-            if (r == -A20_ERR_WOULD_BLOCK)
-                return sent ? (int)sent : -EAGAIN;
-            if (r == -A20_ERR_CANCELED)
-                return sent ? (int)sent : -EPIPE;
-            if (r == -A20_ERR_INTERRUPTED)
-                return sent ? (int)sent : -EINTR;
-            return sent ? (int)sent : -EIO;
-        }
-        p += n;
-        left -= n;
-        sent += n;
-        /* Wake the peer as soon as each chunk lands.  The caller only wakes
-         * read_waitq once this whole write returns, so a writer that blocks
-         * part-way (channel full) would leave bytes sitting in the channel
-         * while a reader already parked in poll() waits for them -- and the
-         * space this writer needs can only be freed by that very reader. */
-        net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
-        wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
-    }
-    return (int)sent;
-}
-
-int unix_ch_recv(net_socket_t *s, void *buf, size_t len)
-{
-    size_t total = 0;
-    uint8_t *out = (uint8_t *)buf;
-    while (total < len) {
-        if (s->ch_len > 0) {
-            size_t n = s->ch_len < (len - total) ? s->ch_len : (len - total);
-            memcpy(out + total, s->ch_buf, n);
-            total += n;
-            if (n < s->ch_len)
-                memmove(s->ch_buf, s->ch_buf + n, s->ch_len - n);
-            s->ch_len -= (uint32_t)n;
-            continue;
-        }
-        if (!s->ch_buf) {
-            s->ch_buf = kmalloc(A20_CH_MAX_DATA);
-            if (!s->ch_buf)
-                return total ? (int)total : -ENOMEM;
-        }
-        uint32_t cap = A20_CH_MAX_DATA;
-        int64_t r = a20_channel_recv(s->ch_ep, s->ch_buf, &cap,
-                                     NULL, NULL, NULL, A20_MSG_NONBLOCK);
-        if (r < 0) {
-            if (total > 0)
-                return (int)total;
-            if (r == -A20_ERR_WOULD_BLOCK)
-                return -EAGAIN;
-            if (r == -A20_ERR_CANCELED)
-                return 0; /* EOF: peer endpoint released */
-            if (r == -A20_ERR_INTERRUPTED)
-                return -EINTR;
-            return -EIO;
-        }
-        /* a20_channel_recv returns the status; the byte count is in cap. */
-        s->ch_len = cap;
-    }
-    return (int)total;
-}
-
-int unix_ch_peek(net_socket_t *s, void *buf, size_t len)
-{
-    if (!s || !s->ch_ep || (!buf && len != 0))
-        return -EINVAL;
-    if (len == 0)
-        return 0;
-
-    /* Keep one channel message staged in the socket's stream buffer.  recv
-     * will consume it later; MSG_PEEK must not dequeue it. */
-    if (s->ch_len == 0) {
-        if (!s->ch_buf) {
-            s->ch_buf = kmalloc(A20_CH_MAX_DATA);
-            if (!s->ch_buf)
-                return -ENOMEM;
-        }
-        uint32_t cap = A20_CH_MAX_DATA;
-        int64_t r = a20_channel_recv(s->ch_ep, s->ch_buf, &cap,
-                                     NULL, NULL, NULL, A20_MSG_NONBLOCK);
-        if (r < 0) {
-            if (r == -A20_ERR_WOULD_BLOCK)
-                return -EAGAIN;
-            if (r == -A20_ERR_CANCELED)
-                return 0;
-            if (r == -A20_ERR_INTERRUPTED)
-                return -EINTR;
-            return -EIO;
-        }
-        s->ch_len = cap;
-    }
-
-    size_t n = s->ch_len < len ? s->ch_len : len;
-    memcpy(buf, s->ch_buf, n);
-    return (int)n;
+    return a20_net_unix_socket_connect(s, addr, addrlen, MAX_PATH_LEN,
+                                       NET_MAX_QUEUE);
 }
 
 int net_unix_socket_sendto(net_socket_t *s, const void *buf, size_t len,
                            const void *addr, size_t addrlen)
 {
-    return net_unix_socket_sendto_impl(s, buf, len, addr, addrlen, NULL, 0);
+    return a20_net_unix_socket_sendto(s, buf, len, addr, addrlen, NULL, 0,
+                                      MAX_PATH_LEN);
 }
 
-int net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
-                               size_t len, const void *addr,
-                               size_t addrlen,
+int net_unix_socket_sendto_fds(net_socket_t *s, const void *buf, size_t len,
+                               const void *addr, size_t addrlen,
                                vfile_t **files, int nfiles)
 {
-    return net_unix_socket_sendto_impl(s, buf, len, addr, addrlen,
-                                       files, nfiles);
+    return a20_net_unix_socket_sendto(s, buf, len, addr, addrlen,
+                                      (void **)files, nfiles, MAX_PATH_LEN);
+}
+
+int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf,
+                 size_t len)
+{
+    return a20_net_unix_ch_send(s, dst, buf, len);
+}
+
+int unix_ch_recv(net_socket_t *s, void *buf, size_t len)
+{
+    return a20_net_unix_ch_recv(s, buf, len);
+}
+
+int unix_ch_peek(net_socket_t *s, void *buf, size_t len)
+{
+    return a20_net_unix_ch_peek(s, buf, len);
 }

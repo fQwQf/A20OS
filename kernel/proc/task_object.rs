@@ -132,12 +132,12 @@ pub unsafe extern "C" fn a20_rust_task_object_put(object: *mut c_void) {
     unsafe { object_put(object) }
 }
 
-/// Resolve the weak task binding while the publication/detach lock is held.
+/// Resolve and pin the weak task binding under the publication/detach lock.
 ///
 /// # Safety
 /// `object` must be null or point to a live task identity object held by the
-/// caller. The task-object lock must remain held from reading the weak pointer
-/// through this call so the task cannot be reclaimed before `proc_get`. The
+/// caller for the duration of the call. This function acquires the
+/// task-object lock itself; the caller must not already hold that lock. The
 /// returned task pointer owns a strong reference and must be released by
 /// `proc_put` after leaving this critical section.
 #[unsafe(no_mangle)]

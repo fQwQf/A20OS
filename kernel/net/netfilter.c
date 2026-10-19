@@ -38,6 +38,37 @@
 #include "core/stdio.h"
 #include "core/errno.h"
 
+#include "net/netfilter_filter_state.h"
+
+/*
+ * The Rust mirror of these three structs is field for field, so every offset is
+ * pinned here: a change to net/netfilter.h that moves a field must fail this
+ * build rather than corrupt the matcher on the other side.
+ */
+_Static_assert(__builtin_offsetof(netfilter_rule_t, src_port) == 4 &&
+               __builtin_offsetof(netfilter_rule_t, dst_port) == 6 &&
+               __builtin_offsetof(netfilter_rule_t, src_addr) == 8 &&
+               __builtin_offsetof(netfilter_rule_t, dst_addr) == 12 &&
+               __builtin_offsetof(netfilter_rule_t, matched) == 16 &&
+               __builtin_offsetof(netfilter_rule_t, bytes) == 24 &&
+               sizeof(netfilter_rule_t) == 32,
+               "netfilter_rule_t layout changed: update FilterRule");
+_Static_assert(__builtin_offsetof(netfilter_frame_t, dst_addr) == 4 &&
+               __builtin_offsetof(netfilter_frame_t, src_port) == 8 &&
+               __builtin_offsetof(netfilter_frame_t, dst_port) == 10 &&
+               __builtin_offsetof(netfilter_frame_t, proto) == 12 &&
+               __builtin_offsetof(netfilter_frame_t, has_ports) == 13 &&
+               __builtin_offsetof(netfilter_frame_t, ip_off) == 14 &&
+               __builtin_offsetof(netfilter_frame_t, l4_off) == 16 &&
+               __builtin_offsetof(netfilter_frame_t, tcp_flags) == 18 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_off) == 20 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_type) == 22 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_id) == 24 &&
+               sizeof(netfilter_frame_t) == 28,
+               "netfilter_frame_t layout changed: update Frame");
+_Static_assert(sizeof(netfilter_stats_t) == 48,
+               "netfilter_stats_t layout changed: update FilterStats");
+
 static netfilter_rule_t g_rules[NETFILTER_MAX_RULES];
 static unsigned g_rule_count;
 
@@ -81,10 +112,6 @@ typedef struct {
 
 static netfilter_stats_bank_t g_stats[2];
 
-static netfilter_stats_t *netfilter_stats_dir(netfilter_dir_t dir)
-{
-    return &g_stats[dir == NETFILTER_DIR_IN ? 0 : 1].stats;
-}
 
 int netfilter_ipv4_from_str(const char *s, size_t len, uint32_t *out)
 {
@@ -134,218 +161,7 @@ static const char *proto_name(uint8_t proto)
     }
 }
 
-int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out)
-{
-    if (!line || !out)
-        return -EINVAL;
-    while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-        len--;
 
-    memset(out, 0, sizeof(*out));
-    out->proto = NETFILTER_PROTO_ANY;
-    out->action = NETFILTER_ACCEPT;
-    out->src_addr = NETFILTER_NO_ADDR;
-    out->dst_addr = NETFILTER_NO_ADDR;
-    out->src_port = NETFILTER_NO_PORT;
-    out->dst_port = NETFILTER_NO_PORT;
-
-    if (len == 0)
-        return -EINVAL;
-
-    size_t i = 0;
-    if (len >= 2 && strncmp(line, "in", 2) == 0) {
-        out->dir = NETFILTER_DIR_IN;
-        i = 2;
-    } else if (len >= 3 && strncmp(line, "out", 3) == 0) {
-        out->dir = NETFILTER_DIR_OUT;
-        i = 3;
-    } else {
-        return -EINVAL;
-    }
-    if (i < len && line[i] == ' ')
-        i++;
-
-    while (i < len) {
-        size_t used = 0, klen = 0;
-        while (i + klen < len && line[i + klen] != '=')
-            klen++;
-        if (i + klen >= len)
-            break;
-        const char *key = line + i;
-        const char *val = line + i + klen + 1;
-        size_t vlen = 0;
-        while (i + klen + 1 + vlen < len && line[i + klen + 1 + vlen] != ' ' &&
-               line[i + klen + 1 + vlen] != '\t')
-            vlen++;
-
-        if (klen == 5 && strncmp(key, "proto", 5) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->proto = NETFILTER_PROTO_ANY;
-            } else if (vlen == 4 && strncmp(val, "icmp", 4) == 0) {
-                out->proto = NETFILTER_PROTO_ICMP;
-            } else if (vlen == 3 && strncmp(val, "tcp", 3) == 0) {
-                out->proto = NETFILTER_PROTO_TCP;
-            } else if (vlen == 3 && strncmp(val, "udp", 3) == 0) {
-                out->proto = NETFILTER_PROTO_UDP;
-            } else if (vlen >= 1 && vlen <= 3 && val[0] >= '0' && val[0] <= '9') {
-                uint32_t p = 0;
-                for (size_t k = 0; k < vlen; k++) {
-                    if (val[k] < '0' || val[k] > '9')
-                        return -EINVAL;
-                    p = p * 10 + (uint32_t)(val[k] - '0');
-                }
-                if (p > 255)
-                    return -EINVAL;
-                out->proto = (uint8_t)p;
-            } else {
-                return -EINVAL;
-            }
-        } else if (klen == 3 && strncmp(key, "src", 3) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->src_addr = NETFILTER_NO_ADDR;
-            } else {
-                uint32_t a;
-                if (!netfilter_ipv4_from_str(val, vlen, &a))
-                    return -EINVAL;
-                out->src_addr = a;
-            }
-        } else if (klen == 3 && strncmp(key, "dst", 3) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->dst_addr = NETFILTER_NO_ADDR;
-            } else {
-                uint32_t a;
-                if (!netfilter_ipv4_from_str(val, vlen, &a))
-                    return -EINVAL;
-                out->dst_addr = a;
-            }
-        } else if (klen == 5 && strncmp(key, "sport", 5) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->src_port = NETFILTER_NO_PORT;
-            } else {
-                uint32_t p = 0;
-                for (size_t k = 0; k < vlen; k++) {
-                    if (val[k] < '0' || val[k] > '9')
-                        return -EINVAL;
-                    p = p * 10 + (uint32_t)(val[k] - '0');
-                    if (p > NETFILTER_NO_PORT)
-                        return -EINVAL;
-                }
-                out->src_port = (uint16_t)p;
-            }
-        } else if (klen == 5 && strncmp(key, "dport", 5) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->dst_port = NETFILTER_NO_PORT;
-            } else {
-                uint32_t p = 0;
-                for (size_t k = 0; k < vlen; k++) {
-                    if (val[k] < '0' || val[k] > '9')
-                        return -EINVAL;
-                    p = p * 10 + (uint32_t)(val[k] - '0');
-                    if (p > NETFILTER_NO_PORT)
-                        return -EINVAL;
-                }
-                out->dst_port = (uint16_t)p;
-            }
-        } else if (klen == 6 && strncmp(key, "action", 6) == 0) {
-            if (vlen == 6 && strncmp(val, "accept", 6) == 0) {
-                out->action = NETFILTER_ACCEPT;
-            } else if (vlen == 4 && strncmp(val, "drop", 4) == 0) {
-                out->action = NETFILTER_DROP;
-            } else {
-                return -EINVAL;
-            }
-        } else {
-            return -EINVAL;
-        }
-
-        (void)used;
-        i += klen + 1 + vlen;
-        while (i < len && (line[i] == ' ' || line[i] == '\t'))
-            i++;
-    }
-    return 0;
-}
-
-int netfilter_rule_count(void)
-{
-    /* Acquire: this is a lock-free reader, so it must not observe a
-     * g_rule_count that has been published ahead of the slot it describes. */
-    return (int)__atomic_load_n(&g_rule_count, __ATOMIC_ACQUIRE);
-}
-
-int netfilter_add_rule(const netfilter_rule_t *rule)
-{
-    if (!rule)
-        return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    if (g_rule_count >= NETFILTER_MAX_RULES) {
-        spin_unlock_irqrestore(&g_netfilter_lock, flags);
-        return -ENOSPC;
-    }
-    netfilter_rules_begin();
-    g_rules[g_rule_count] = *rule;
-    g_rule_count++;
-    netfilter_rules_end();
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-    return (int)(g_rule_count - 1);
-}
-
-int netfilter_del_rule(unsigned index)
-{
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    if (index >= g_rule_count) {
-        spin_unlock_irqrestore(&g_netfilter_lock, flags);
-        return -EINVAL;
-    }
-    netfilter_rules_begin();
-    for (unsigned i = index; i + 1 < g_rule_count; i++)
-        g_rules[i] = g_rules[i + 1];
-    g_rule_count--;
-    memset(&g_rules[g_rule_count], 0, sizeof(g_rules[0]));
-    netfilter_rules_end();
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-    return 0;
-}
-
-void netfilter_reset(void)
-{
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    netfilter_rules_begin();
-    memset(g_rules, 0, sizeof(g_rules));
-    g_rule_count = 0;
-    netfilter_rules_end();
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-}
-
-int netfilter_get_rule(unsigned index, netfilter_rule_t *out)
-{
-    if (!out)
-        return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    if (index >= g_rule_count) {
-        spin_unlock_irqrestore(&g_netfilter_lock, flags);
-        return -EINVAL;
-    }
-    *out = g_rules[index];
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-    return 0;
-}
-
-void netfilter_get_stats(netfilter_stats_t *out)
-{
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    for (unsigned d = 0; d < 2; d++) {
-        const netfilter_stats_t *s = &g_stats[d].stats;
-        out->in_packets += __atomic_load_n(&s->in_packets, __ATOMIC_RELAXED);
-        out->in_dropped += __atomic_load_n(&s->in_dropped, __ATOMIC_RELAXED);
-        out->in_accepted += __atomic_load_n(&s->in_accepted, __ATOMIC_RELAXED);
-        out->out_packets += __atomic_load_n(&s->out_packets, __ATOMIC_RELAXED);
-        out->out_dropped += __atomic_load_n(&s->out_dropped, __ATOMIC_RELAXED);
-        out->out_accepted += __atomic_load_n(&s->out_accepted, __ATOMIC_RELAXED);
-    }
-}
 
 /*
  * Extract src/dst address, protocol, ports and header offsets from an
@@ -358,71 +174,6 @@ void netfilter_get_stats(netfilter_stats_t *out)
  * the matcher about where the L4 header starts, and the two would then rewrite
  * different bytes of the same packet.
  */
-int netfilter_parse_frame(const uint8_t *f, size_t len, netfilter_frame_t *out)
-{
-    memset(out, 0, sizeof(*out));
-    size_t off = 14;
-    if (len < off)
-        return 0;
-    uint16_t ethertype = (uint16_t)((f[12] << 8) | f[13]);
-    while (ethertype == 0x8100 || ethertype == 0x88a8) {
-        if (len < off + 4)
-            return 0;
-        ethertype = (uint16_t)((f[off + 2] << 8) | f[off + 3]);
-        off += 4;
-    }
-    if (ethertype != 0x0800)
-        return 0;
-    if (len < off + 20)
-        return 0;
-    const uint8_t *ip = f + off;
-    if (((ip[0] >> 4) & 0xf) != 4)
-        return 0;
-    size_t ihl = (size_t)(ip[0] & 0x0f) * 4;
-    if (ihl < 20 || len < off + ihl)
-        return 0;
-    /* Fragmented non-first fragments carry no usable L4 header. */
-    uint16_t frag = (uint16_t)(((ip[6] << 8) | ip[7]) & 0x1fff);
-    out->proto = ip[9];
-    out->src_addr = ((uint32_t)ip[12] << 24) | ((uint32_t)ip[13] << 16) |
-                    ((uint32_t)ip[14] << 8) | ip[15];
-    out->dst_addr = ((uint32_t)ip[16] << 24) | ((uint32_t)ip[17] << 16) |
-                    ((uint32_t)ip[18] << 8) | ip[19];
-    out->src_port = NETFILTER_NO_PORT;
-    out->dst_port = NETFILTER_NO_PORT;
-    out->ip_off = (uint16_t)off;
-    if (frag != 0)
-        return 1;
-    if ((out->proto == NETFILTER_PROTO_TCP ||
-         out->proto == NETFILTER_PROTO_UDP) &&
-        len >= off + ihl + 4) {
-        const uint8_t *l4 = ip + ihl;
-        out->src_port = (uint16_t)((l4[0] << 8) | l4[1]);
-        out->dst_port = (uint16_t)((l4[2] << 8) | l4[3]);
-        out->l4_off = (uint16_t)(off + ihl);
-        out->has_ports = 1;
-        if (out->proto == NETFILTER_PROTO_TCP && len >= off + ihl + 14)
-            out->tcp_flags = l4[13];
-    } else if (out->proto == NETFILTER_PROTO_ICMP && len >= off + ihl + 4) {
-        /*
-         * Echo only.  Every other ICMP type -- destination unreachable, time
-         * exceeded and the rest -- is parsed past but not tracked, and the
-         * reason is a boundary rather than an omission: pairing those means
-         * inferring a flow from the packet they quote from the original, which
-         * is an ALG.  Echo needs none of that, because the sender's own
-         * identifier already pairs the request with the reply.
-         */
-        const uint8_t *l4 = ip + ihl;
-        uint8_t type = l4[0];
-        if (type == NETFILTER_ICMP_ECHO_REQUEST ||
-            type == NETFILTER_ICMP_ECHO_REPLY) {
-            out->icmp_type = type;
-            out->icmp_id = (uint16_t)((l4[4] << 8) | l4[5]);
-            out->icmp_off = (uint16_t)(off + ihl);
-        }
-    }
-    return 1;
-}
 
 /*
  * True when the table holds at least one rule.  Sampled under the seqlock so
@@ -437,149 +188,6 @@ int netfilter_parse_frame(const uint8_t *f, size_t len, netfilter_frame_t *out)
  * scan.  What it no longer saves is the counters, which are now maintained for
  * every packet; see netfilter_eval.
  */
-static int netfilter_table_populated(void)
-{
-    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
-        unsigned seq0 = seqlock_read_begin(&g_rule_seq);
-        if (seq0 == 0u)
-            continue;               /* writer inside the table; wait for it */
-        unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
-        if (!seqlock_read_retry(&g_rule_seq, seq0))
-            return n != 0;
-    }
-    return 1;
-}
-
-/* Verdict only; `pkt` is NULL when the frame did not parse as IPv4, in which
- * case no rule can match it (a rule's fields are IPv4 fields) and the answer is
- * the default policy. */
-static netfilter_action_t netfilter_eval(size_t len, netfilter_dir_t dir,
-                                         const netfilter_frame_t *pkt)
-{
-    /*
-     * Counters are bumped for every packet that reaches the hook, not only for
-     * packets seen while a rule exists.  They used to be skipped on an empty
-     * table, and that made "did the hook run at all?" unanswerable from
-     * /proc: a wrong wiring and a quiet system looked identical.  Since conntrack
-     * now walks every IPv4 packet anyway, the counter increment is no longer
-     * what makes the path expensive, and making it unconditional turns
-     * in_packets/out_packets into the hook-liveness signal they were being used
-     * as all along.
-     */
-    netfilter_stats_t *st = netfilter_stats_dir(dir);
-    if (dir == NETFILTER_DIR_IN)
-        __atomic_fetch_add(&st->in_packets, 1, __ATOMIC_RELAXED);
-    else
-        __atomic_fetch_add(&st->out_packets, 1, __ATOMIC_RELAXED);
-
-    if (!pkt)
-        goto accept_no_rule;
-
-    /*
-     * Scan under the seqlock.  The table can be mutated concurrently by
-     * netfilter_add_rule/del_rule/reset under g_netfilter_lock, which is not
-     * the lock this path holds, so the scan is bracketed by a generation
-     * sample and retried if it moved.  A retry leaves `hit` unset, which
-     * yields the same default-accept answer an unconfigured filter gives.
-     *
-     * The matched rule's own counters are bumped inside the bracket.  Bumping
-     * them after it would risk charging a packet to whichever rule slid into
-     * that index; on a retry they are simply not charged, which understates a
-     * counter rather than misattributing it.
-     */
-    int hit = -1;
-    netfilter_action_t action = NETFILTER_ACCEPT;
-    if (netfilter_table_populated()) {
-        for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
-            unsigned seq0 = seqlock_read_begin(&g_rule_seq);
-            if (seq0 == 0u)
-                continue;           /* writer inside the table; wait for it */
-            unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
-            int found = -1;
-            netfilter_rule_t *found_rule = NULL;
-            for (unsigned i = 0; i < n; i++) {
-                netfilter_rule_t *r = &g_rules[i];
-                if (r->dir != dir)
-                    continue;
-                if (r->proto != NETFILTER_PROTO_ANY && r->proto != pkt->proto)
-                    continue;
-                if (r->src_addr != NETFILTER_NO_ADDR &&
-                    r->src_addr != pkt->src_addr)
-                    continue;
-                if (r->dst_addr != NETFILTER_NO_ADDR &&
-                    r->dst_addr != pkt->dst_addr)
-                    continue;
-                if (r->src_port != NETFILTER_NO_PORT &&
-                    r->src_port != pkt->src_port)
-                    continue;
-                if (r->dst_port != NETFILTER_NO_PORT &&
-                    r->dst_port != pkt->dst_port)
-                    continue;
-                found = (int)i;
-                found_rule = r;
-                break;
-            }
-            if (seqlock_read_retry(&g_rule_seq, seq0))
-                continue;           /* moved under us; rescan */
-            hit = found;
-            if (hit >= 0) {
-                action = (netfilter_action_t)found_rule->action;
-                __atomic_fetch_add(&found_rule->matched, 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&found_rule->bytes, len, __ATOMIC_RELAXED);
-            }
-            break;
-        }
-    }
-
-    /* No rule matched, the table never settled, or no rule applies: default
-     * policy is accept, so an unconfigured or non-matching system behaves
-     * exactly as it did before this existed. */
-    if (hit >= 0 && action == NETFILTER_DROP) {
-        if (dir == NETFILTER_DIR_IN)
-            __atomic_fetch_add(&st->in_dropped, 1, __ATOMIC_RELAXED);
-        else
-            __atomic_fetch_add(&st->out_dropped, 1, __ATOMIC_RELAXED);
-        return NETFILTER_DROP;
-    }
-
-accept_no_rule:
-    if (dir == NETFILTER_DIR_IN)
-        __atomic_fetch_add(&st->in_accepted, 1, __ATOMIC_RELAXED);
-    else
-        __atomic_fetch_add(&st->out_accepted, 1, __ATOMIC_RELAXED);
-    return NETFILTER_ACCEPT;
-}
-
-/*
- * Filter verdict first, then conntrack and NAT.  A dropped packet must not
- * create flow state or consume a NAT binding, so the order is not negotiable.
- * A frame that did not parse as IPv4 is counted and accepted: conntrack has
- * nothing to key on and NAT nothing to rewrite, both of which are stated
- * limits rather than gaps.
- */
-static netfilter_action_t netfilter_process(uint8_t *frame, size_t len,
-                                            int net_idx, netfilter_dir_t dir)
-{
-    netfilter_frame_t pkt;
-    int parsed = netfilter_parse_frame(frame, len, &pkt);
-
-    netfilter_action_t verdict = netfilter_eval(len, dir, parsed ? &pkt : NULL);
-    if (verdict == NETFILTER_DROP || !parsed)
-        return verdict;
-
-    netfilter_conntrack_process(frame, len, net_idx, dir, &pkt);
-    return NETFILTER_ACCEPT;
-}
-
-netfilter_action_t netfilter_input(uint8_t *frame, size_t len, int net_idx)
-{
-    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_IN);
-}
-
-netfilter_action_t netfilter_output(uint8_t *frame, size_t len, int net_idx)
-{
-    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_OUT);
-}
 
 /*
  * The 4096-byte buffer procfs hands the renderer is not enough for the filter
@@ -659,3 +267,124 @@ void netfilter_format(char *buf, size_t bufsz)
     netfilter_nat_format(buf, bufsz, off);
     a20_lwip_unlock(flags);
 }
+
+
+/*
+ * Rust filter (NETFILTER_FILTER_IMPL=rust).
+ *
+ * What is left here is the storage, the writer lock, the rule seqlock, the
+ * dotted-quad conversions and the renderer.  Which rule matches, what the
+ * parser accepts, the frame walk and the hook ordering are the Rust state
+ * machine's.
+ */
+
+static net_filter_view_t g_filter_view = {
+    .rules = g_rules,
+    .max = NETFILTER_MAX_RULES,
+    .count = &g_rule_count,
+    .stats_in = &g_stats[0].stats,
+    .stats_out = &g_stats[1].stats,
+};
+
+static const net_filter_view_t *net_filter_view(void)
+{
+    return &g_filter_view;
+}
+
+uint32_t a20_netfilter_rule_seq_read_begin(void)
+{
+    return seqlock_read_begin(&g_rule_seq);
+}
+
+int a20_netfilter_rule_seq_read_retry(uint32_t start)
+{
+    return seqlock_read_retry(&g_rule_seq, start) ? 1 : 0;
+}
+
+void a20_netfilter_rule_seq_write_begin(void)
+{
+    netfilter_rules_begin();
+}
+
+void a20_netfilter_rule_seq_write_end(void)
+{
+    netfilter_rules_end();
+}
+
+int a20_netfilter_ipv4_from_str(const uint8_t *s, size_t len, uint32_t *out)
+{
+    return netfilter_ipv4_from_str((const char *)s, len, out);
+}
+
+int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out)
+{
+    return a20_netfilter_parse_rule((const uint8_t *)line, len, out);
+}
+
+int netfilter_rule_count(void)
+{
+    return a20_netfilter_rule_count(net_filter_view());
+}
+
+int netfilter_add_rule(const netfilter_rule_t *rule)
+{
+    if (!rule)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    int r = a20_netfilter_rule_add(net_filter_view(), rule);
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    return r;
+}
+
+int netfilter_del_rule(unsigned index)
+{
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    int r = a20_netfilter_rule_del(net_filter_view(), index);
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    return r;
+}
+
+void netfilter_reset(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    a20_netfilter_rule_reset(net_filter_view());
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+}
+
+int netfilter_get_rule(unsigned index, netfilter_rule_t *out)
+{
+    if (!out)
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    int r = a20_netfilter_rule_get(net_filter_view(), index, out);
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    return r;
+}
+
+void netfilter_get_stats(netfilter_stats_t *out)
+{
+    a20_netfilter_rule_stats(net_filter_view(), out);
+}
+
+int netfilter_parse_frame(const uint8_t *f, size_t len, netfilter_frame_t *out)
+{
+    return a20_netfilter_parse_frame(f, len, out);
+}
+
+static netfilter_action_t netfilter_process(uint8_t *frame, size_t len,
+                                            int net_idx, netfilter_dir_t dir)
+{
+    return (netfilter_action_t)a20_netfilter_process(net_filter_view(), frame,
+                                                     len, net_idx, (uint8_t)dir);
+}
+
+netfilter_action_t netfilter_input(uint8_t *frame, size_t len, int net_idx)
+{
+    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_IN);
+}
+
+netfilter_action_t netfilter_output(uint8_t *frame, size_t len, int net_idx)
+{
+    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_OUT);
+}
+

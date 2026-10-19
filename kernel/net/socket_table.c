@@ -34,23 +34,10 @@
  * net_table_claims() or the row renderer drops it), but a socket whose slot has
  * already been released can never be.
  */
-static int net_table_claims(net_table_kind_t kind, const net_socket_t *s)
-{
-    switch (kind) {
-    case NET_TABLE_TCP:
-        return (s->domain == AF_INET || s->domain == AF_INET6) &&
-               s->type == SOCK_STREAM;
-    case NET_TABLE_UDP:
-        /* net_inet_socket_init gives every AF_INET/AF_INET6 datagram socket
-         * either a udp or a raw pcb and fails the socket() otherwise, so the
-         * pcb test is also how a live socket is told from a torn-down one. */
-        return (s->domain == AF_INET || s->domain == AF_INET6) &&
-               (s->type == SOCK_DGRAM || s->type == SOCK_RAW);
-    case NET_TABLE_UNIX:
-        return s->domain == AF_UNIX;
-    }
-    return 0;
-}
+/* The membership rule is a20_net_table_claims() in kernel/net/socket_registry.rs:
+ * domain and type, not "does this socket still own a pcb".  A loopback connect()
+ * drops both lwIP pcbs while the connection is live, so a pcb test would hide
+ * exactly the connections a loopback-only stack makes. */
 
 typedef struct {
     net_table_kind_t   kind;
@@ -64,10 +51,13 @@ static bool net_walk_slot(net_socket_t *s, int idx, void *arg)
 {
     net_walk_arg_t *w = arg;
     (void)idx;
-    if (s->net_ns != resource_ns_current(PROCNS_NET)) return false;
-    if (s->closed || !net_table_claims(w->kind, s))
-        return false;
-    if (w->family != AF_UNSPEC && s->domain != w->family)
+    /* The namespace comparison stays in C because resource_ns_current() is a
+     * kernel primitive; everything it feeds -- the teardown flag, the
+     * domain/type membership rule and the family narrowing -- is the Rust
+     * predicate's. */
+    int ns_match = s->net_ns == resource_ns_current(PROCNS_NET);
+    if (!a20_net_table_walk_match((int)w->kind, w->family, s->domain, s->type,
+                                  s->closed, ns_match))
         return false;
     w->visited++;
     w->fn(s, w->arg);
@@ -118,11 +108,13 @@ int net_socket_rx_available(net_socket_t *s, size_t *out)
         net_sock_unlock(s, irq);
         return -ENOTSOCK;
     }
-    if (s->domain == AF_PACKET) {
-        /* Captured frames are whole L2 payloads with no stream position, so
-         * there is no byte count this socket can honestly report. */
+    /* AF_PACKET captures whole L2 frames with no stream position, so there is no
+     * byte count this socket can honestly report.  Which domains those are is
+     * the Rust predicate's; the refusal itself is the same errno as before. */
+    int gate = a20_net_rx_available_gate(s->domain);
+    if (gate != 0) {
         net_sock_unlock(s, irq);
-        return -EOPNOTSUPP;
+        return gate;
     }
     total = net_rx_queued_locked(s);
     net_sock_unlock(s, irq);

@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "abi/linux/pidfd.h"
 
 #include "mm/process_vm.h"
 #include "proc/proc.h"
@@ -236,16 +237,15 @@ int64_t sys_process_mrelease(int pidfd, unsigned flags)
         return -EINVAL;
     /* Validate that the descriptor really is a pidfd before reporting the
      * capability as absent, so a wrong fd is still diagnosed as -EBADF. */
-    int64_t pid = linux_pidfd_pid(pidfd);
-    if (pid < 0)
-        return pid;
+    task_t *target = linux_pidfd_get_task_ref(pidfd);
+    if (!target)
+        return -EBADF;
+    proc_put(target);
 
     /* process_mrelease(2) releases the memory of a zombie whose mm the pidfd
      * is keeping alive.  A20OS has no such state to release: a pidfd here
-     * stores a bare pid and holds no task reference (see
-     * kernel/abi/linux/sys_pidfd.c), task_t has no detached mm, and the
-     * address space is already reclaimed when the task exits.  There is
-     * therefore nothing to detach, and reporting success would promise a
-     * memory release that never happened. */
+     * pins a task reference, but task_t has no detached mm and the address
+     * space is already reclaimed when the task exits. There is nothing to
+     * detach; success would promise a memory release that never happened. */
     return -ENOSYS;
 }

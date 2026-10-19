@@ -33,6 +33,57 @@
 #include "core/errno.h"
 #include "core/timer.h"
 
+#include "net/netfilter_nat_state.h"
+
+/*
+ * The Rust mirror of these three structs is field-for-field, so every offset is
+ * pinned here: a change to net/netfilter.h that moves a field must fail this
+ * build rather than corrupt the state machine on the other side.
+ */
+_Static_assert(__builtin_offsetof(net_conntrack_entry_t, dst_addr) == 4 &&
+               __builtin_offsetof(net_conntrack_entry_t, src_port) == 8 &&
+               __builtin_offsetof(net_conntrack_entry_t, dst_port) == 10 &&
+               __builtin_offsetof(net_conntrack_entry_t, proto) == 12 &&
+               __builtin_offsetof(net_conntrack_entry_t, state) == 13 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat) == 14 &&
+               __builtin_offsetof(net_conntrack_entry_t, dir) == 15 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat_src_addr) == 16 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat_dst_addr) == 20 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat_src_port) == 24 &&
+               __builtin_offsetof(net_conntrack_entry_t, nat_dst_port) == 26 &&
+               __builtin_offsetof(net_conntrack_entry_t, last_ms) == 28 &&
+               __builtin_offsetof(net_conntrack_entry_t, packets) == 32 &&
+               __builtin_offsetof(net_conntrack_entry_t, bytes) == 40 &&
+               __builtin_offsetof(net_conntrack_entry_t, hash_next) == 48 &&
+               __builtin_offsetof(net_conntrack_entry_t, rhash_next) == 50 &&
+               sizeof(net_conntrack_entry_t) == 56,
+               "net_conntrack_entry_t layout changed: update CtView in netfilter_nat.rs");
+_Static_assert(__builtin_offsetof(netfilter_frame_t, dst_addr) == 4 &&
+               __builtin_offsetof(netfilter_frame_t, src_port) == 8 &&
+               __builtin_offsetof(netfilter_frame_t, dst_port) == 10 &&
+               __builtin_offsetof(netfilter_frame_t, proto) == 12 &&
+               __builtin_offsetof(netfilter_frame_t, has_ports) == 13 &&
+               __builtin_offsetof(netfilter_frame_t, ip_off) == 14 &&
+               __builtin_offsetof(netfilter_frame_t, l4_off) == 16 &&
+               __builtin_offsetof(netfilter_frame_t, tcp_flags) == 18 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_off) == 20 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_type) == 22 &&
+               __builtin_offsetof(netfilter_frame_t, icmp_id) == 24 &&
+               sizeof(netfilter_frame_t) == 28,
+               "netfilter_frame_t layout changed: update Frame in netfilter_nat.rs");
+_Static_assert(__builtin_offsetof(net_nat_rule_t, src_port) == 4 &&
+               __builtin_offsetof(net_nat_rule_t, dst_port) == 6 &&
+               __builtin_offsetof(net_nat_rule_t, src_addr) == 8 &&
+               __builtin_offsetof(net_nat_rule_t, dst_addr) == 12 &&
+               __builtin_offsetof(net_nat_rule_t, nat_addr) == 16 &&
+               __builtin_offsetof(net_nat_rule_t, nat_port) == 20 &&
+               __builtin_offsetof(net_nat_rule_t, matched) == 24 &&
+               __builtin_offsetof(net_nat_rule_t, bytes) == 32 &&
+               sizeof(net_nat_rule_t) == 40,
+               "net_nat_rule_t layout changed: update NatRule in netfilter_nat.rs");
+_Static_assert(sizeof(net_conntrack_stats_t) == 48,
+               "net_conntrack_stats_t layout changed: update ConntrackStats");
+
 #define NET_CONNTRACK_MAX NET_PROFILE_CONNTRACK_ENTRIES
 #define NET_CONNTRACK_BUCKETS NET_PROFILE_CONNTRACK_BUCKETS
 
@@ -55,6 +106,31 @@ static uint16_t g_ct_rhead[NET_CONNTRACK_BUCKETS]; /* reply-direction chain */
 static unsigned g_ct_used;
 static unsigned g_ct_sweep; /* sweeper resume point */
 static int g_ct_enabled = 1;
+
+/*
+ * NAT table storage.  Shared by both implementations: the Rust state machine
+ * transacts over it through the view, the C reference below transacts over it
+ * directly, and the /proc renderer reads it either way.
+ */
+static net_nat_rule_t g_nat[NETFILTER_MAX_NAT_RULES];
+static unsigned g_nat_count;
+static seqlock_t g_nat_seq = SEQLOCK_INIT;
+
+#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
+/*
+ * The filter tables are unconditional .bss that a target pays for on every
+ * boot whether or not netfilter is ever loaded, so on the tier whose whole
+ * point is a bounded footprint they belong in the budget.  Checked here because
+ * this is the only place both arrays exist.  32 entries x 56 B + 16 rules x
+ * 80 B = 3072 B measured, against a 3328 B ceiling; the two bucket-head arrays
+ * and the counters above are a further 72 B and are not counted, which is the
+ * direction that lets the assert hold rather than the direction that could
+ * hide a regression.
+ */
+_Static_assert(sizeof(g_ct) + sizeof(g_nat) <= NET_PROFILE_FILTER_BUDGET,
+               "the embedded profile's conntrack and NAT tables exceed the "
+               "filter term of its own memory budget");
+#endif
 
 static net_conntrack_stats_t g_ct_lifetime;
 static unsigned g_ct_sweeps;
@@ -88,16 +164,6 @@ static net_conntrack_stats_bank_t g_ct_dir_stats[2];
  * is exactly the sort of "works until it does not" that costs an afternoon, so
  * the heads are initialised explicitly, once, from a20_lwip_init().
  */
-void netfilter_conntrack_init(void) {
-    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
-        g_ct_head[b] = NET_CONNTRACK_NONE;
-    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
-        g_ct_rhead[b] = NET_CONNTRACK_NONE;
-    memset(g_ct, 0, sizeof(g_ct));
-    g_ct_used = 0;
-    g_ct_sweep = 0;
-    g_ct_enabled = 1;
-}
 
 /* ---------------------------------------------------------------------- time */
 
@@ -111,9 +177,7 @@ void netfilter_conntrack_init(void) {
  * constants (netfilter_conntrack_set_timeouts) runs under g_lwip_lock, which
  * every reader here already holds.
  */
-static uint32_t g_to_tcp_new;
-static uint32_t g_to_tcp_established;
-static uint32_t g_to_udp;
+static uint32_t g_to_ticks[3]; /* TCP new, TCP established, UDP */
 static int g_time_ready;
 
 /*
@@ -126,877 +190,6 @@ static int g_time_ready;
  */
 static uint32_t g_to_ms[3];
 
-void netfilter_conntrack_set_timeouts(unsigned tcp_new_ms, unsigned tcp_est_ms,
-                                      unsigned udp_ms) {
-    g_to_ms[0] = tcp_new_ms;
-    g_to_ms[1] = tcp_est_ms;
-    g_to_ms[2] = udp_ms;
-    /* Force the conversion to be redone on the next read.  Doing it here instead
-     * would duplicate it, and the lazy path is the one that is already correct
-     * for a caller that never reaches netfilter_ct_now(). */
-    g_time_ready = 0;
-}
-
-static void netfilter_ct_time_init(void) {
-    uint64_t hz = TICKS_PER_SEC;
-    if (!hz)
-        hz = 1000;
-    uint32_t ms[3];
-    ms[0] = g_to_ms[0] ? g_to_ms[0] : NET_CONNTRACK_TIMEOUT_TCP_NEW_MS;
-    ms[1] = g_to_ms[1] ? g_to_ms[1] : NET_CONNTRACK_TIMEOUT_TCP_ESTABLISHED_MS;
-    ms[2] = g_to_ms[2] ? g_to_ms[2] : NET_CONNTRACK_TIMEOUT_UDP_MS;
-    g_to_tcp_new = (uint32_t)(ms[0] * hz / 1000);
-    g_to_tcp_established = (uint32_t)(ms[1] * hz / 1000);
-    g_to_udp = (uint32_t)(ms[2] * hz / 1000);
-    /* A zero limit would mean "expires instantly" or "never expires"
-     * depending on how the comparison is written; force one tick so that
-     * neither reading is reachable. */
-    if (!g_to_tcp_new)
-        g_to_tcp_new = 1;
-    if (!g_to_tcp_established)
-        g_to_tcp_established = 1;
-    if (!g_to_udp)
-        g_to_udp = 1;
-    g_time_ready = 1;
-}
-
-static uint32_t netfilter_ct_now(void) {
-    if (!g_time_ready)
-        netfilter_ct_time_init();
-    return (uint32_t)timer_get_ticks();
-}
-
-/* --------------------------------------------------------------------- table */
-
-static uint32_t netfilter_ct_hash(uint32_t src, uint32_t dst, uint16_t sport,
-                                  uint16_t dport, uint8_t proto) {
-    /* FNV-1a over the tuple, folded to a bucket.  The order is fixed (src
-     * first) and deliberately *not* symmetric: a tuple and its reverse land in
-     * different buckets, and netfilter_ct_find() compensates by probing both.
-     * Making the hash symmetric instead would cost a swap on every packet to
-     * save one probe on the reply. */
-    uint32_t h = 2166136261u;
-    const uint8_t words[13] = {(uint8_t)(src >> 24),
-                               (uint8_t)(src >> 16),
-                               (uint8_t)(src >> 8),
-                               (uint8_t)src,
-                               (uint8_t)(dst >> 24),
-                               (uint8_t)(dst >> 16),
-                               (uint8_t)(dst >> 8),
-                               (uint8_t)dst,
-                               (uint8_t)(sport >> 8),
-                               (uint8_t)sport,
-                               (uint8_t)(dport >> 8),
-                               (uint8_t)dport,
-                               proto};
-    for (unsigned i = 0; i < sizeof(words); i++) {
-        h ^= words[i];
-        h *= 16777619u;
-    }
-    return h % NET_CONNTRACK_BUCKETS;
-}
-
-/*
- * Does `e` hold this ICMP exchange?
- *
- * ICMP echo does not fit the generic 5-tuple comparison above, and pretending it
- * does is the bug this function exists to avoid.  For TCP and UDP the two
- * directions swap *both* ports; for an echo they swap *neither* field.  The
- * identifier is the same number in the request and in the reply -- that is
- * precisely what makes the two a pair -- and the type is complemented (8 <-> 0).
- * So the reply of (A -> B, id) is (B -> A, id), not (B -> A, swapped id), and a
- * full-swap test can never match it.
- *
- * That is also why the tuple stores the type NORMALISED to the request value in
- * src_port and the identifier in dst_port: with both directions carrying the
- * same pair, the comparison reduces to "addresses swapped, both fields equal",
- * which is what the two comparisons below say.  Normalising is safe precisely
- * because the only two types tracked are complements of each other, so no two
- * distinct exchanges can normalise onto the same tuple.
- */
-static int netfilter_ct_icmp_is(const net_conntrack_entry_t *e,
-                                uint32_t src, uint32_t dst, uint16_t id,
-                                int *is_reverse)
-{
-    if (e->dst_port != id || e->src_port != NETFILTER_ICMP_ECHO_REQUEST)
-        return 0;
-    if (e->src_addr == src && e->dst_addr == dst) {
-        *is_reverse = 0;
-        return 1;
-    }
-    if (e->src_addr == dst && e->dst_addr == src) {
-        *is_reverse = 1;
-        return 1;
-    }
-    return 0;
-}
-
-/* Returns the slot index, or NET_CONNTRACK_NONE.  *is_reverse distinguishes the
- * entry's own direction from the reply half. */
-static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
-                                  uint16_t dport, uint8_t proto,
-                                  int *is_reverse) {
-    unsigned b0 = (unsigned)netfilter_ct_hash(src, dst, sport, dport, proto);
-    unsigned b1 = (unsigned)netfilter_ct_hash(dst, src, dport, sport, proto);
-    for (unsigned pass = 0; pass < 2; pass++) {
-        unsigned b = pass ? b1 : b0;
-        for (unsigned idx = g_ct_head[b]; idx != NET_CONNTRACK_NONE;
-             idx = g_ct[idx].hash_next) {
-            const net_conntrack_entry_t *e = &g_ct[idx];
-            if (e->proto != proto)
-                continue;
-            if (proto == NETFILTER_PROTO_ICMP) {
-                if (netfilter_ct_icmp_is(e, src, dst, dport, is_reverse))
-                    return idx;
-                continue;
-            }
-            if (e->src_addr == src && e->dst_addr == dst &&
-                e->src_port == sport && e->dst_port == dport) {
-                *is_reverse = 0;
-                return idx;
-            }
-            if (e->src_addr == dst && e->dst_addr == src &&
-                e->src_port == dport && e->dst_port == sport) {
-                *is_reverse = 1;
-                return idx;
-            }
-        }
-    }
-
-    /* The reply-direction chain, which is the only place a translated reply can
-     * be found.  One probe: the packet's tuple *is* the reply tuple, so the
-     * swap is not tried here -- an entry whose reply tuple happens to equal the
-     * swapped packet is not a match, and treating it as one would translate a
-     * packet in the wrong direction. */
-    for (unsigned idx = g_ct_rhead[b0]; idx != NET_CONNTRACK_NONE;
-         idx = g_ct[idx].rhash_next) {
-        const net_conntrack_entry_t *e = &g_ct[idx];
-        uint32_t rsrc, rdst;
-        uint16_t rsport, rdport;
-        if (e->proto != proto)
-            continue;
-        if (proto == NETFILTER_PROTO_ICMP) {
-            /* Only the addresses move under translation; the identifier does
-             * not, and the type is normalised on both sides already. */
-            netfilter_ct_reply_tuple(e, &rsrc, &rdst, &rsport, &rdport);
-            if (rsrc == src && rdst == dst && e->dst_port == dport) {
-                *is_reverse = 1;
-                return idx;
-            }
-            continue;
-        }
-        netfilter_ct_reply_tuple(e, &rsrc, &rdst, &rsport, &rdport);
-        if (rsrc == src && rdst == dst && rsport == sport && rdport == dport) {
-            *is_reverse = 1;
-            return idx;
-        }
-    }
-    return NET_CONNTRACK_NONE;
-}
-
-/* Unlink from one chain of `head`, comparing the link field named by `link`. */
-static void netfilter_ct_unlink_from(uint16_t *head, unsigned b, unsigned idx,
-                                     int reply) {
-    unsigned prev = NET_CONNTRACK_NONE;
-    for (unsigned i = head[b]; i != NET_CONNTRACK_NONE;) {
-        uint16_t next = reply ? g_ct[i].rhash_next : g_ct[i].hash_next;
-        if (i != idx) {
-            prev = i;
-            i = next;
-            continue;
-        }
-        if (prev == NET_CONNTRACK_NONE)
-            head[b] = next;
-        else if (reply)
-            g_ct[prev].rhash_next = next;
-        else
-            g_ct[prev].hash_next = next;
-        if (reply)
-            g_ct[i].rhash_next = NET_CONNTRACK_NONE;
-        else
-            g_ct[i].hash_next = NET_CONNTRACK_NONE;
-        return;
-    }
-}
-
-static void netfilter_ct_unlink(unsigned idx) {
-    unsigned bf = (unsigned)netfilter_ct_hash(
-        g_ct[idx].src_addr, g_ct[idx].dst_addr, g_ct[idx].src_port,
-        g_ct[idx].dst_port, g_ct[idx].proto);
-    netfilter_ct_unlink_from(g_ct_head, bf, idx, 0);
-
-    uint32_t rsrc, rdst;
-    uint16_t rsport, rdport;
-    netfilter_ct_reply_tuple(&g_ct[idx], &rsrc, &rdst, &rsport, &rdport);
-    unsigned br = (unsigned)netfilter_ct_hash(rsrc, rdst, rsport, rdport,
-                                              g_ct[idx].proto);
-    netfilter_ct_unlink_from(g_ct_rhead, br, idx, 1);
-}
-
-/* Least recently used: the live entry with the smallest last_ms.  Ties are
- * broken by index, which only matters when two entries were touched in the same
- * tick -- either is then a defensible victim. */
-static unsigned netfilter_ct_lru(void) {
-    unsigned best = NET_CONNTRACK_NONE;
-    uint32_t best_ms = 0;
-    for (unsigned i = 0; i < NET_CONNTRACK_MAX; i++) {
-        if (!netfilter_ct_slot_used(i))
-            continue;
-        if (best == NET_CONNTRACK_NONE || g_ct[i].last_ms < best_ms ||
-            (g_ct[i].last_ms == best_ms && i < best)) {
-            best = i;
-            best_ms = g_ct[i].last_ms;
-        }
-    }
-    return best;
-}
-
-static int netfilter_ct_insert(net_conntrack_entry_t *entry) {
-    if (!entry)
-        return -EINVAL;
-    entry->last_ms = netfilter_ct_now();
-    entry->hash_next = NET_CONNTRACK_NONE;
-
-    unsigned slot;
-    int was_full = g_ct_used >= NET_CONNTRACK_MAX;
-    if (!was_full) {
-        for (slot = 0; slot < NET_CONNTRACK_MAX; slot++)
-            if (!netfilter_ct_slot_used(slot))
-                break;
-        if (slot == NET_CONNTRACK_MAX)
-            return -ENOSPC; /* the counter and the slots disagreed */
-    } else {
-        /* At capacity the table degrades into a bounded LRU cache rather than
-         * a failure: a busy router keeps its newest flows and forgets its
-         * oldest, which is the right trade for a table this small. */
-        slot = netfilter_ct_lru();
-        if (slot == NET_CONNTRACK_NONE)
-            return -ENOSPC;
-        netfilter_ct_unlink(slot);
-        __atomic_fetch_add(&g_ct_lifetime.evicted, 1, __ATOMIC_RELAXED);
-    }
-
-    unsigned b = (unsigned)netfilter_ct_hash(entry->src_addr, entry->dst_addr,
-                                             entry->src_port, entry->dst_port,
-                                             entry->proto);
-    uint32_t rsrc, rdst;
-    uint16_t rsport, rdport;
-    netfilter_ct_reply_tuple(entry, &rsrc, &rdst, &rsport, &rdport);
-    unsigned rb =
-        (unsigned)netfilter_ct_hash(rsrc, rdst, rsport, rdport, entry->proto);
-    g_ct[slot] = *entry;
-    g_ct[slot].hash_next = g_ct_head[b];
-    g_ct_head[b] = (uint16_t)slot;
-    g_ct[slot].rhash_next = g_ct_rhead[rb];
-    g_ct_rhead[rb] = (uint16_t)slot;
-    if (!was_full)
-        g_ct_used++;
-    __atomic_fetch_add(&g_ct_lifetime.created, 1, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_ct_lifetime.tracked, g_ct_used, __ATOMIC_RELAXED);
-    return 0;
-}
-
-int netfilter_conntrack_count(void) {
-    return (int)g_ct_used;
-}
-
-unsigned netfilter_conntrack_sweeps(void) {
-    return __atomic_load_n(&g_ct_sweeps, __ATOMIC_RELAXED);
-}
-
-int netfilter_conntrack_lru_victim(void) {
-    unsigned slot = netfilter_ct_lru();
-    return (slot == NET_CONNTRACK_NONE) ? -1 : (int)g_ct[slot].src_port;
-}
-
-int netfilter_conntrack_inject(uint32_t src, uint32_t dst, uint16_t sport,
-                               uint16_t dport, uint8_t proto, uint8_t state) {
-    /* Only what the packet path would have created: an untracked flow is a UDP
-     * or TCP tuple in one of the two real states.  Anything else would let a
-     * gate assert against a table shape the data plane cannot produce. */
-    if (proto != NETFILTER_PROTO_TCP && proto != NETFILTER_PROTO_UDP)
-        return -EINVAL;
-    if (state != NET_CONNTRACK_NEW && state != NET_CONNTRACK_ESTABLISHED)
-        return -EINVAL;
-    net_conntrack_entry_t e;
-    memset(&e, 0, sizeof(e));
-    e.src_addr = src;
-    e.dst_addr = dst;
-    e.src_port = sport;
-    e.dst_port = dport;
-    e.proto = proto;
-    e.state = state;
-    e.dir = NETFILTER_DIR_OUT;
-    /* Through the real insert: chaining, capacity, LRU victim choice and both
-     * lifetime counters all happen inside it. */
-    return netfilter_ct_insert(&e);
-}
-
-int netfilter_conntrack_snapshot(net_conntrack_entry_t *out, unsigned max) {
-    if (!out || !max)
-        return 0;
-    unsigned n = 0;
-    for (unsigned i = 0; i < NET_CONNTRACK_MAX && n < max; i++)
-        if (netfilter_ct_slot_used(i))
-            out[n++] = g_ct[i];
-    return (int)n;
-}
-
-void netfilter_conntrack_flush(void) {
-    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
-        g_ct_head[b] = NET_CONNTRACK_NONE;
-    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
-        g_ct_rhead[b] = NET_CONNTRACK_NONE;
-    memset(g_ct, 0, sizeof(g_ct));
-    g_ct_used = 0;
-    g_ct_sweep = 0;
-    /*
-     * `tracked` follows the table; the lifetime counters deliberately do not.
-     * Flushing is an operator action, and a test that wants to observe
-     * reclamation has to be able to flush first without erasing the evidence it
-     * came to read.
-     */
-    __atomic_store_n(&g_ct_lifetime.tracked, 0, __ATOMIC_RELAXED);
-}
-
-void netfilter_conntrack_get_stats(net_conntrack_stats_t *out) {
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    for (unsigned d = 0; d < 2; d++) {
-        const net_conntrack_stats_t *s = &g_ct_dir_stats[d].stats;
-        out->packets += __atomic_load_n(&s->packets, __ATOMIC_RELAXED);
-        out->bytes += __atomic_load_n(&s->bytes, __ATOMIC_RELAXED);
-    }
-    out->tracked = g_ct_used;
-    out->created = __atomic_load_n(&g_ct_lifetime.created, __ATOMIC_RELAXED);
-    out->evicted = __atomic_load_n(&g_ct_lifetime.evicted, __ATOMIC_RELAXED);
-    out->timeout = __atomic_load_n(&g_ct_lifetime.timeout, __ATOMIC_RELAXED);
-}
-
-void netfilter_conntrack_set_enabled(int on) {
-    /*
-     * Entries are kept when tracking is switched off.  Deleting them would
-     * silently break every flow currently relying on a NAT binding, and
-     * "stop tracking" is not obviously a request to tear down live state.
-     */
-    g_ct_enabled = on ? 1 : 0;
-}
-
-int netfilter_conntrack_enabled(void) {
-    return g_ct_enabled;
-}
-
-unsigned netfilter_conntrack_expire(unsigned max_scan) {
-    uint32_t now = netfilter_ct_now();
-    unsigned scanned = 0, freed = 0;
-
-    if (!max_scan)
-        max_scan = NET_CONNTRACK_MAX;
-
-    /* How many times the sweep has run at all.  The timeout counter says what
-     * the sweeper reclaimed; this says whether it ran, which is the difference
-     * between "nothing was idle" and "nothing ever looked". */
-    __atomic_fetch_add(&g_ct_sweeps, 1, __ATOMIC_RELAXED);
-
-    /*
-     * Resume where the previous tick stopped rather than restarting at 0: a
-     * full table would otherwise need NET_CONNTRACK_MAX comparisons on every
-     * timer tick to expire nothing, and this runs on the CPU 0 timer interrupt
-     * (kernel_progress_timer_tick -> a20_lwip_poll_timers_locked).
-     */
-    for (unsigned step = 0; step < NET_CONNTRACK_MAX && scanned < max_scan;
-         step++) {
-        unsigned i = (g_ct_sweep + step) % NET_CONNTRACK_MAX;
-        scanned++;
-        if (!netfilter_ct_slot_used(i))
-            continue;
-        uint32_t limit;
-        /* ICMP echo is connectionless like UDP: a request goes out and a reply
-         * comes back on its own schedule, with no handshake to measure a "new"
-         * state from.  Falling through to g_to_tcp_new would age the entry out
-         * on the TCP-connect timeout, which is a statement about a handshake
-         * this protocol does not have. */
-        if (g_ct[i].proto == NETFILTER_PROTO_UDP ||
-            g_ct[i].proto == NETFILTER_PROTO_ICMP)
-            limit = g_to_udp;
-        else if (g_ct[i].state == NET_CONNTRACK_ESTABLISHED)
-            limit = g_to_tcp_established;
-        else
-            limit = g_to_tcp_new;
-        /* Unsigned subtract: correct across the tick counter's wrap, which a
-         * `now > last + limit` comparison gets wrong once every ~49 days on a
-         * 1 kHz tick. */
-        if ((uint32_t)(now - g_ct[i].last_ms) < limit)
-            continue;
-        netfilter_ct_unlink(i);
-        memset(&g_ct[i], 0, sizeof(g_ct[i]));
-        if (g_ct_used)
-            g_ct_used--;
-        freed++;
-        __atomic_fetch_add(&g_ct_lifetime.timeout, 1, __ATOMIC_RELAXED);
-    }
-    g_ct_sweep = (g_ct_sweep + scanned) % NET_CONNTRACK_MAX;
-    __atomic_store_n(&g_ct_lifetime.tracked, g_ct_used, __ATOMIC_RELAXED);
-    return freed;
-}
-
-/* ------------------------------------------------------------------ NAT rules */
-
-static net_nat_rule_t g_nat[NETFILTER_MAX_NAT_RULES];
-static unsigned g_nat_count;
-static seqlock_t g_nat_seq = SEQLOCK_INIT;
-
-#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
-/*
- * The filter tables are unconditional .bss that a target pays for on every
- * boot whether or not netfilter is ever loaded, so on the tier whose whole
- * point is a bounded footprint they belong in the budget.  Checked here because
- * this is the only place both arrays exist.  32 entries x 56 B + 16 rules x
- * 80 B = 3072 B measured, against a 3328 B ceiling; the two bucket-head arrays
- * and the counters above are a further 72 B and are not counted, which is the
- * direction that lets the assert hold rather than the direction that could
- * hide a regression.
- */
-_Static_assert(sizeof(g_ct) + sizeof(g_nat) <= NET_PROFILE_FILTER_BUDGET,
-               "the embedded profile's conntrack and NAT tables exceed the "
-               "filter term of its own memory budget");
-#endif
-
-int netfilter_nat_rule_count(void) {
-    return (int)__atomic_load_n(&g_nat_count, __ATOMIC_ACQUIRE);
-}
-
-/*
- * The NAT table faces the same problem the filter table does -- written from
- * procfs, read from a packet path holding a different lock -- so it reuses the
- * same answer: writers bracket with g_nat_seq under g_netfilter_lock, readers
- * stay wait-free.  It cannot use g_lwip_lock, because these writers are
- * procfs writes that do not hold it.  Two independent seqlocks over two
- * independent tables is the price of not putting a second lock in the packet
- * path.
- */
-int netfilter_nat_add_rule(const net_nat_rule_t *rule) {
-    if (!rule)
-        return -EINVAL;
-    if (rule->nat != NET_NAT_SNAT && rule->nat != NET_NAT_MASQUERADE &&
-        rule->nat != NET_NAT_DNAT)
-        return -EINVAL;
-    if (rule->dir != NETFILTER_DIR_IN && rule->dir != NETFILTER_DIR_OUT)
-        return -EINVAL;
-    /* A masquerade with an explicit address would be ambiguous, and a plain
-     * snat/dnat without one would match packets and then do nothing; both are
-     * rejected here as well as at parse time, because this entry point is
-     * reachable without going through the parser. */
-    if ((rule->nat == NET_NAT_SNAT || rule->nat == NET_NAT_DNAT) &&
-        rule->nat_addr == NETFILTER_NO_ADDR)
-        return -EINVAL;
-    if (rule->nat == NET_NAT_MASQUERADE && rule->nat_addr != NETFILTER_NO_ADDR)
-        return -EINVAL;
-    /* DNAT is an input-hook translation; translating on the way out would be
-     * a different feature that this does not implement. */
-    if (rule->nat == NET_NAT_DNAT && rule->dir != NETFILTER_DIR_IN)
-        return -EINVAL;
-
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    if (g_nat_count >= NETFILTER_MAX_NAT_RULES) {
-        spin_unlock_irqrestore(&g_netfilter_lock, flags);
-        return -ENOSPC;
-    }
-    seqlock_write_begin(&g_nat_seq);
-    g_nat[g_nat_count] = *rule;
-    g_nat_count++;
-    seqlock_write_end(&g_nat_seq);
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-    return (int)(g_nat_count - 1);
-}
-
-int netfilter_nat_del_rule(unsigned index) {
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    if (index >= g_nat_count) {
-        spin_unlock_irqrestore(&g_netfilter_lock, flags);
-        return -EINVAL;
-    }
-    seqlock_write_begin(&g_nat_seq);
-    for (unsigned i = index; i + 1 < g_nat_count; i++)
-        g_nat[i] = g_nat[i + 1];
-    g_nat_count--;
-    memset(&g_nat[g_nat_count], 0, sizeof(g_nat[0]));
-    seqlock_write_end(&g_nat_seq);
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-    return 0;
-}
-
-void netfilter_nat_reset(void) {
-    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
-    seqlock_write_begin(&g_nat_seq);
-    memset(g_nat, 0, sizeof(g_nat));
-    g_nat_count = 0;
-    seqlock_write_end(&g_nat_seq);
-    spin_unlock_irqrestore(&g_netfilter_lock, flags);
-}
-
-int netfilter_nat_parse_rule(const char *line, size_t len,
-                             net_nat_rule_t *out) {
-    if (!line || !out)
-        return -EINVAL;
-    while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-        len--;
-
-    memset(out, 0, sizeof(*out));
-    out->proto = NETFILTER_PROTO_ANY;
-    out->nat = NET_NAT_NONE;
-    out->src_addr = NETFILTER_NO_ADDR;
-    out->dst_addr = NETFILTER_NO_ADDR;
-    out->nat_addr = NETFILTER_NO_ADDR;
-    out->src_port = NETFILTER_NO_PORT;
-    out->dst_port = NETFILTER_NO_PORT;
-
-    if (len == 0)
-        return -EINVAL;
-
-    size_t i = 0;
-    if (len >= 2 && strncmp(line, "in", 2) == 0) {
-        out->dir = NETFILTER_DIR_IN;
-        i = 2;
-    } else if (len >= 3 && strncmp(line, "out", 3) == 0) {
-        out->dir = NETFILTER_DIR_OUT;
-        i = 3;
-    } else {
-        return -EINVAL;
-    }
-    if (i < len && line[i] == ' ')
-        i++;
-
-    while (i < len) {
-        size_t klen = 0;
-        while (i + klen < len && line[i + klen] != '=')
-            klen++;
-        if (i + klen >= len)
-            break; /* trailing garbage, as in the filter */
-        const char *key = line + i;
-        const char *val = line + i + klen + 1;
-        size_t vlen = 0;
-        while (i + klen + 1 + vlen < len && line[i + klen + 1 + vlen] != ' ' &&
-               line[i + klen + 1 + vlen] != '\t')
-            vlen++;
-
-        if (klen == 5 && strncmp(key, "proto", 5) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->proto = NETFILTER_PROTO_ANY;
-            } else if (vlen == 4 && strncmp(val, "icmp", 4) == 0) {
-                out->proto = NETFILTER_PROTO_ICMP;
-            } else if (vlen == 3 && strncmp(val, "tcp", 3) == 0) {
-                out->proto = NETFILTER_PROTO_TCP;
-            } else if (vlen == 3 && strncmp(val, "udp", 3) == 0) {
-                out->proto = NETFILTER_PROTO_UDP;
-            } else if (vlen >= 1 && vlen <= 3 && val[0] >= '0' &&
-                       val[0] <= '9') {
-                uint32_t p = 0;
-                for (size_t k = 0; k < vlen; k++) {
-                    if (val[k] < '0' || val[k] > '9')
-                        return -EINVAL;
-                    p = p * 10 + (uint32_t)(val[k] - '0');
-                }
-                if (p > 255)
-                    return -EINVAL;
-                out->proto = (uint8_t)p;
-            } else {
-                return -EINVAL;
-            }
-        } else if (klen == 3 && strncmp(key, "src", 3) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->src_addr = NETFILTER_NO_ADDR;
-            } else if (!netfilter_ipv4_from_str(val, vlen, &out->src_addr)) {
-                return -EINVAL;
-            }
-        } else if (klen == 3 && strncmp(key, "dst", 3) == 0) {
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                out->dst_addr = NETFILTER_NO_ADDR;
-            } else if (!netfilter_ipv4_from_str(val, vlen, &out->dst_addr)) {
-                return -EINVAL;
-            }
-        } else if ((klen == 5 && strncmp(key, "sport", 5) == 0) ||
-                   (klen == 5 && strncmp(key, "dport", 5) == 0)) {
-            uint16_t *dst = klen == 5 && strncmp(key, "sport", 5) == 0
-                                ? &out->src_port
-                                : &out->dst_port;
-            if (vlen == 3 && strncmp(val, "any", 3) == 0) {
-                *dst = NETFILTER_NO_PORT;
-            } else {
-                uint32_t p = 0;
-                for (size_t k = 0; k < vlen; k++) {
-                    if (val[k] < '0' || val[k] > '9')
-                        return -EINVAL;
-                    p = p * 10 + (uint32_t)(val[k] - '0');
-                    if (p > NETFILTER_NO_PORT)
-                        return -EINVAL;
-                }
-                *dst = (uint16_t)p;
-            }
-        } else if (klen == 6 && strncmp(key, "action", 6) == 0) {
-            if (vlen == 4 && strncmp(val, "snat", 4) == 0) {
-                out->nat = NET_NAT_SNAT;
-            } else if (vlen == 10 && strncmp(val, "masquerade", 10) == 0) {
-                out->nat = NET_NAT_MASQUERADE;
-            } else if (vlen == 4 && strncmp(val, "dnat", 4) == 0) {
-                out->nat = NET_NAT_DNAT;
-            } else {
-                return -EINVAL;
-            }
-        } else if (klen == 2 && strncmp(key, "to", 2) == 0) {
-            if (!netfilter_ipv4_from_str(val, vlen, &out->nat_addr))
-                return -EINVAL;
-        } else if (klen == 6 && strncmp(key, "toport", 6) == 0) {
-            uint32_t p = 0;
-            for (size_t k = 0; k < vlen; k++) {
-                if (val[k] < '0' || val[k] > '9')
-                    return -EINVAL;
-                p = p * 10 + (uint32_t)(val[k] - '0');
-                if (p > NETFILTER_NO_PORT)
-                    return -EINVAL;
-            }
-            out->nat_port = (uint16_t)p;
-        } else {
-            return -EINVAL;
-        }
-
-        i += klen + 1 + vlen;
-        while (i < len && (line[i] == ' ' || line[i] == '\t'))
-            i++;
-    }
-
-    /* Refuse a rule that would match packets and then do nothing, or that names
-     * two conflicting targets.  Rejecting at parse time means the /proc write
-     * fails loudly instead of installing a rule whose only effect is a matched
-     * counter that misleads whoever reads it back. */
-    if (out->nat == NET_NAT_NONE)
-        return -EINVAL;
-    if (out->nat == NET_NAT_DNAT && out->dir != NETFILTER_DIR_IN)
-        return -EINVAL;
-    if (out->nat == NET_NAT_MASQUERADE) {
-        if (out->nat_addr != NETFILTER_NO_ADDR || out->nat_port)
-            return -EINVAL;
-    } else if (out->nat_addr == NETFILTER_NO_ADDR) {
-        return -EINVAL;
-    }
-    return 0;
-}
-
-/* ---------------------------------------------------------------- translation */
-
-static int netfilter_nat_pick(const netfilter_frame_t *pkt, netfilter_dir_t dir,
-                              net_nat_rule_t *out) {
-    /*
-     * First match wins, the same rule the filter uses, so one mental model
-     * covers both tables.  The matched counter is bumped inside the seqlock
-     * bracket for the reason spelled out in netfilter.c: after the bracket a
-     * retry could charge a different rule that slid into the index.
-     */
-    int found = -1;
-    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
-        unsigned seq0 = seqlock_read_begin(&g_nat_seq);
-        if (seq0 == 0u)
-            continue;
-        unsigned n = __atomic_load_n(&g_nat_count, __ATOMIC_RELAXED);
-        int hit = -1;
-        for (unsigned i = 0; i < n; i++) {
-            net_nat_rule_t *r = &g_nat[i];
-            if (r->dir != dir)
-                continue;
-            if (r->proto != NETFILTER_PROTO_ANY && r->proto != pkt->proto)
-                continue;
-            if (r->src_addr != NETFILTER_NO_ADDR &&
-                r->src_addr != pkt->src_addr)
-                continue;
-            if (r->dst_addr != NETFILTER_NO_ADDR &&
-                r->dst_addr != pkt->dst_addr)
-                continue;
-            if (r->src_port != NETFILTER_NO_PORT &&
-                r->src_port != pkt->src_port)
-                continue;
-            if (r->dst_port != NETFILTER_NO_PORT &&
-                r->dst_port != pkt->dst_port)
-                continue;
-            hit = (int)i;
-            break;
-        }
-        if (seqlock_read_retry(&g_nat_seq, seq0))
-            continue;
-        found = hit;
-        if (found >= 0)
-            *out = g_nat[found];
-        break;
-    }
-    return found >= 0;
-}
-
-void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
-                                 netfilter_dir_t dir,
-                                 const netfilter_frame_t *pkt) {
-    if (!frame || !pkt || len < 14)
-        return;
-
-    /*
-     * TCP and UDP are tracked, and so -- minimally -- is ICMP echo.  Every
-     * other protocol and every other ICMP type is passed through untranslated
-     * and untracked, which is stated in the header's HONEST BOUNDARIES rather
-     * than left for a reader to discover.
-     *
-     * Echo is the one ICMP type that needs no inference.  A request and its
-     * reply are paired by an identifier the sender chose and put in both, so
-     * "these two belong to the same exchange" is already on the wire.  Doing
-     * that for destination-unreachable or time-exceeded would mean reading the
-     * packet they quote and matching on that, which is an ALG and is not done
-     * here; see docs/net/conntrack-nat.md.
-     */
-    int icmp_echo = (pkt->proto == NETFILTER_PROTO_ICMP && pkt->icmp_off != 0);
-    if (pkt->proto != NETFILTER_PROTO_TCP && pkt->proto != NETFILTER_PROTO_UDP &&
-        !icmp_echo)
-        return;
-
-    /*
-     * The tuple's two 16-bit fields.  For TCP and UDP they are the ports and
-     * the parser already put them there.  For ICMP echo they carry the type and
-     * the identifier, with the type NORMALISED to the request value on both
-     * sides -- see netfilter_ct_icmp_is() for why that makes the reply match
-     * without a special case anywhere else in the table.
-     */
-    uint16_t t_sport, t_dport;
-    if (icmp_echo) {
-        t_sport = NETFILTER_ICMP_ECHO_REQUEST;
-        t_dport = pkt->icmp_id;
-    } else {
-        t_sport = pkt->src_port;
-        t_dport = pkt->dst_port;
-    }
-
-    /* A non-first fragment carries no ports, so there is no tuple to key on and
-     * no header to rewrite against.  Passing it through untranslated is the
-     * honest choice: the alternative -- track the flow but translate nothing --
-     * would make the entry look stateful while its translation is incomplete.
-     * ICMP echo is already excluded here, because the parser only sets icmp_off
-     * on an unfragmented one. */
-    if (!icmp_echo && (!pkt->has_ports || pkt->l4_off == 0))
-        return;
-
-    net_conntrack_stats_t *st =
-        &g_ct_dir_stats[dir == NETFILTER_DIR_IN ? 0 : 1].stats;
-    __atomic_fetch_add(&st->packets, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&st->bytes, len, __ATOMIC_RELAXED);
-
-    int is_reverse = 0;
-    unsigned idx = netfilter_ct_find(pkt->src_addr, pkt->dst_addr, t_sport,
-                                     t_dport, pkt->proto, &is_reverse);
-
-    if (idx != NET_CONNTRACK_NONE) {
-        net_conntrack_entry_t *e = &g_ct[idx];
-        e->last_ms = netfilter_ct_now();
-        e->packets++;
-        __atomic_fetch_add(&e->bytes, len, __ATOMIC_RELAXED);
-
-        if (is_reverse)
-            e->state = NET_CONNTRACK_ESTABLISHED;
-        else if (pkt->proto == NETFILTER_PROTO_TCP && (pkt->tcp_flags & 0x10) &&
-                 !(pkt->tcp_flags & 0x02))
-            e->state = NET_CONNTRACK_ESTABLISHED;
-
-        /*
-         * Every later packet of the flow is translated from the entry, not from
-         * the rules.  That is the whole reason the translation is recorded: a
-         * NAT rule may have been deleted, reordered or replaced since the flow
-         * was first seen, and re-evaluating it would either break the reply or
-         * silently move a live binding.
-         *
-         * "Later packet" includes the *same direction* as the first one, which
-         * is not a hypothetical: a TCP SYN that is retransmitted arrives as a
-         * conntrack hit travelling the forward way, and translating only the
-         * reverse way leaves that retransmission addressed to the port nothing
-         * is listening on.  lwIP answers it with a RST, and the peer's
-         * connection dies to a packet the peer never got wrong.  That is
-         * exactly what the first end-to-end DNAT run did: the first SYN was
-         * translated, the second arrived untranslated and drew the RST.
-         *
-         * The four rewrites are the inverse of each other, so both directions
-         * come out of the same pair of fields: the entry keeps the tuple as it
-         * appeared before any translation (e->src_addr and friends) plus the
-         * translated values it applied (e->nat_src_addr and friends).
-         */
-        if (e->nat == NET_NAT_SNAT || e->nat == NET_NAT_MASQUERADE) {
-            if (is_reverse) {
-                /* Reply arriving: its destination is the translated source, and
-                 * the original source is where that destination has to go. */
-                netfilter_set_addr(frame, len, pkt, pkt->src_addr, e->src_addr);
-                netfilter_set_port(frame, len, pkt, 0, e->src_port);
-            } else {
-                netfilter_set_addr(frame, len, pkt, e->nat_src_addr,
-                                   pkt->dst_addr);
-                netfilter_set_port(frame, len, pkt, 1, e->nat_src_port);
-            }
-        } else if (e->nat == NET_NAT_DNAT) {
-            if (is_reverse) {
-                /* Reply leaving: its source is the translated destination, and
-                 * the original destination is where that source has to go. */
-                netfilter_set_addr(frame, len, pkt, e->dst_addr, pkt->dst_addr);
-                netfilter_set_port(frame, len, pkt, 1, e->dst_port);
-            } else {
-                netfilter_set_addr(frame, len, pkt, pkt->src_addr,
-                                   e->nat_dst_addr);
-                netfilter_set_port(frame, len, pkt, 0, e->nat_dst_port);
-            }
-        }
-        return;
-    }
-
-    if (!g_ct_enabled)
-        return;
-
-    net_conntrack_entry_t e;
-    memset(&e, 0, sizeof(e));
-    e.src_addr = pkt->src_addr;
-    e.dst_addr = pkt->dst_addr;
-    e.src_port = t_sport;
-    e.dst_port = t_dport;
-    e.proto = pkt->proto;
-    e.dir = (uint8_t)dir;
-    e.state = NET_CONNTRACK_NEW;
-    e.nat = NET_NAT_NONE;
-    e.packets = 1;
-    e.bytes = len;
-
-    net_nat_rule_t rule;
-    if (netfilter_nat_pick(pkt, dir, &rule)) {
-        if (rule.nat == NET_NAT_DNAT && dir == NETFILTER_DIR_IN) {
-            e.nat = NET_NAT_DNAT;
-            e.nat_dst_addr = rule.nat_addr;
-            e.nat_dst_port = rule.nat_port;
-            netfilter_set_addr(frame, len, pkt, pkt->src_addr, rule.nat_addr);
-            netfilter_set_port(frame, len, pkt, 0, rule.nat_port);
-        } else if ((rule.nat == NET_NAT_SNAT ||
-                    rule.nat == NET_NAT_MASQUERADE) &&
-                   dir == NETFILTER_DIR_OUT) {
-            uint32_t target = rule.nat == NET_NAT_MASQUERADE
-                                  ? netfilter_masq_addr(net_idx)
-                                  : rule.nat_addr;
-            if (target) {
-                e.nat = rule.nat;
-                e.nat_src_addr = target;
-                e.nat_src_port = rule.nat_port;
-                netfilter_set_addr(frame, len, pkt, target, pkt->dst_addr);
-                netfilter_set_port(frame, len, pkt, 1, rule.nat_port);
-            }
-        }
-    }
-
-    /*
-     * Tracking is best-effort by design: if the insert fails the packet has
-     * already been translated (or not) and must not be dropped or have its
-     * translation rolled back because the bookkeeping had nowhere to go.  The
-     * only way to reach that branch is a pathological configuration, since a
-     * full table evicts instead of failing.
-     */
-    (void)netfilter_ct_insert(&e);
-}
 
 /* -------------------------------------------------------------------- format */
 
@@ -1109,3 +302,202 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
 }
 
 #undef NETFILTER_EMIT
+
+/*
+ * Rust state machine.
+ *
+ * What is left here is the storage and the primitives: the two static tables
+ * and their counters (the /proc renderer and the C reference read the same
+ * memory), the view that hands them to Rust, the NAT table's seqlock and the
+ * frame-rewrite entry points.  The translations, the chains, the LRU victim,
+ * the idle sweep and every NAT decision are in kernel/net/netfilter_nat.rs.
+ */
+
+static net_ct_view_t g_ct_view = {
+    .entries = g_ct,
+    .max = NET_CONNTRACK_MAX,
+    .buckets = NET_CONNTRACK_BUCKETS,
+    .head = g_ct_head,
+    .rhead = g_ct_rhead,
+    .used = &g_ct_used,
+    .sweep = &g_ct_sweep,
+    .enabled = &g_ct_enabled,
+    .lifetime = &g_ct_lifetime,
+    .dir_stats = { &g_ct_dir_stats[0].stats, &g_ct_dir_stats[1].stats },
+    .nat = g_nat,
+    .nat_max = NETFILTER_MAX_NAT_RULES,
+    .nat_count = &g_nat_count,
+    .to_ms = g_to_ms,
+    .to_ticks = g_to_ticks,
+    .time_ready = &g_time_ready,
+    .sweeps = &g_ct_sweeps,
+    .ticks_per_sec = 0, /* a runtime value on riscv64; filled on first use */
+};
+
+static const net_ct_view_t *net_ct_view(void)
+{
+    if (!g_ct_view.ticks_per_sec)
+        g_ct_view.ticks_per_sec = (uint64_t)TICKS_PER_SEC;
+    return &g_ct_view;
+}
+
+/* The filter half's hook calls this for an accepted packet: conntrack and NAT
+ * run after the verdict, never before it. */
+void a20_netfilter_ct_process_tail(uint8_t *frame, size_t len, int net_idx,
+                                   uint8_t dir, const netfilter_frame_t *pkt)
+{
+    a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, dir, pkt);
+}
+
+uint32_t a20_netfilter_now_ticks(void)
+{
+    return (uint32_t)timer_get_ticks();
+}
+
+uint32_t a20_netfilter_nat_seq_read_begin(void)
+{
+    return seqlock_read_begin(&g_nat_seq);
+}
+
+int a20_netfilter_nat_seq_read_retry(uint32_t start)
+{
+    return seqlock_read_retry(&g_nat_seq, start) ? 1 : 0;
+}
+
+void a20_netfilter_nat_seq_write_begin(void)
+{
+    seqlock_write_begin(&g_nat_seq);
+}
+
+void a20_netfilter_nat_seq_write_end(void)
+{
+    seqlock_write_end(&g_nat_seq);
+}
+
+void a20_netfilter_rewrite_set_addr(uint8_t *frame, size_t len,
+                                    const netfilter_frame_t *pkt,
+                                    uint32_t new_src, uint32_t new_dst)
+{
+    netfilter_set_addr(frame, len, pkt, new_src, new_dst);
+}
+
+void a20_netfilter_rewrite_set_port(uint8_t *frame, size_t len,
+                                    const netfilter_frame_t *pkt, int is_src,
+                                    uint16_t new_port)
+{
+    netfilter_set_port(frame, len, pkt, is_src, new_port);
+}
+
+uint32_t a20_netfilter_masq_addr(int net_idx)
+{
+    return netfilter_masq_addr(net_idx);
+}
+
+void netfilter_conntrack_init(void)
+{
+    a20_netfilter_ct_init(net_ct_view());
+}
+
+void netfilter_conntrack_set_timeouts(unsigned tcp_new_ms, unsigned tcp_est_ms,
+                                      unsigned udp_ms)
+{
+    a20_netfilter_ct_set_timeouts(net_ct_view(), tcp_new_ms, tcp_est_ms, udp_ms);
+}
+
+int netfilter_conntrack_count(void)
+{
+    return a20_netfilter_ct_count(net_ct_view());
+}
+
+unsigned netfilter_conntrack_sweeps(void)
+{
+    return a20_netfilter_ct_sweeps(net_ct_view());
+}
+
+int netfilter_conntrack_lru_victim(void)
+{
+    return a20_netfilter_ct_lru_victim(net_ct_view());
+}
+
+int netfilter_conntrack_inject(uint32_t src, uint32_t dst, uint16_t sport,
+                               uint16_t dport, uint8_t proto, uint8_t state)
+{
+    return a20_netfilter_ct_inject(net_ct_view(), src, dst, sport, dport,
+                                   proto, state);
+}
+
+int netfilter_conntrack_snapshot(net_conntrack_entry_t *out, unsigned max)
+{
+    return a20_netfilter_ct_snapshot(net_ct_view(), out, max);
+}
+
+void netfilter_conntrack_flush(void)
+{
+    a20_netfilter_ct_flush(net_ct_view());
+}
+
+void netfilter_conntrack_get_stats(net_conntrack_stats_t *out)
+{
+    a20_netfilter_ct_get_stats(net_ct_view(), out);
+}
+
+void netfilter_conntrack_set_enabled(int on)
+{
+    a20_netfilter_ct_set_enabled(net_ct_view(), on);
+}
+
+int netfilter_conntrack_enabled(void)
+{
+    return a20_netfilter_ct_enabled(net_ct_view());
+}
+
+unsigned netfilter_conntrack_expire(unsigned max_scan)
+{
+    return a20_netfilter_ct_expire(net_ct_view(), max_scan);
+}
+
+void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
+                                 netfilter_dir_t dir,
+                                 const netfilter_frame_t *pkt)
+{
+    a20_netfilter_ct_process(net_ct_view(), frame, len, net_idx, (uint8_t)dir,
+                             pkt);
+}
+
+int netfilter_nat_rule_count(void)
+{
+    return a20_netfilter_nat_count(net_ct_view());
+}
+
+int netfilter_nat_add_rule(const net_nat_rule_t *rule)
+{
+    if (!rule)
+        return -EINVAL;
+    /* Validation happens inside the Rust transaction, under this lock and the
+     * table's seqlock, so a rule is validated and published as one step. */
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    int r = a20_netfilter_nat_add(net_ct_view(), rule);
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    return r;
+}
+
+int netfilter_nat_del_rule(unsigned index)
+{
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    int r = a20_netfilter_nat_del(net_ct_view(), index);
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+    return r;
+}
+
+void netfilter_nat_reset(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    a20_netfilter_nat_reset(net_ct_view());
+    spin_unlock_irqrestore(&g_netfilter_lock, flags);
+}
+
+int netfilter_nat_parse_rule(const char *line, size_t len,
+                             net_nat_rule_t *out)
+{
+    return a20_netfilter_nat_parse((const uint8_t *)line, len, out);
+}

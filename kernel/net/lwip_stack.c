@@ -253,58 +253,90 @@ static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
  * path is one relaxed load instead of a walk of every device. */
 static volatile uint32_t g_netif_link_pending;
 
+
+#include "net/lwip_stack_state.h"
+
+/* The event the Rust module carries has the same layout as the notify API's. */
+_Static_assert(sizeof(a20_lwip_link_event_t) == sizeof(nlrt_link_event_t) &&
+               offsetof(a20_lwip_link_event_t, index) ==
+                   offsetof(nlrt_link_event_t, index) &&
+               offsetof(a20_lwip_link_event_t, want_up) ==
+                   offsetof(nlrt_link_event_t, want_up),
+               "a20_lwip_link_event_t must mirror nlrt_link_event_t");
+
+/*
+ * The carrier detector and the deferred link-event flush are Rust
+ * (kernel/net/lwip_stack.rs).  What is left here is the device and netif access
+ * they call.
+ */
+
+void a20_lwip_stack_lock(uint64_t *flags)
+{
+    *flags = a20_lwip_lock();
+}
+
+void a20_lwip_stack_unlock(uint64_t flags)
+{
+    a20_lwip_unlock(flags);
+}
+
+int a20_lwip_stack_netif_has_state(void *np)
+{
+    struct netif *n = (struct netif *)np;
+    return (n && n->state) ? 1 : 0;
+}
+
+/* The device's carrier probe, shared by the link detector's primitive and the
+ * netif init callback (which has the state, not the netif). */
 static int a20_lwip_device_link_up(const a20_lwip_netif_state_t *st)
 {
     return !st->ops->link_up || st->ops->link_up(st->dev) > 0;
 }
 
-static void a20_lwip_sync_link_state(struct netif *netif)
+int a20_lwip_stack_device_link_up(void *np)
 {
-    if (!netif || !netif->state)
-        return;
+    struct netif *n = (struct netif *)np;
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    return a20_lwip_device_link_up(st) ? 1 : 0;
+}
 
-    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
-    int link_up = a20_lwip_device_link_up(st);
-    if (link_up && !netif_is_link_up(netif)) {
-        netif_set_link_up(netif);
-    } else if (!link_up && netif_is_link_up(netif)) {
-        netif_set_link_down(netif);
-    } else {
-        return;
-    }
-    /* Only a transition, not every poll: netif_set_link_up() on every pass
-     * would flood RTNLGRP_LINK with a message per poll per device.  The event
-     * is queued here and published by a20_lwip_netlink_flush(), which is
-     * reachable from the same poll path. */
+int a20_lwip_stack_netif_is_link_up(void *np)
+{
+    return netif_is_link_up((struct netif *)np) ? 1 : 0;
+}
+
+void a20_lwip_stack_set_link(void *np, int up)
+{
+    if (up)
+        netif_set_link_up((struct netif *)np);
+    else
+        netif_set_link_down((struct netif *)np);
+}
+
+void a20_lwip_stack_link_pending_mark(void *np)
+{
+    a20_lwip_netif_state_t *st =
+        (a20_lwip_netif_state_t *)((struct netif *)np)->state;
     st->link_pending = 1;
     __atomic_store_n(&g_netif_link_pending, 1, __ATOMIC_RELAXED);
 }
 
-/*
- * Publish link-state changes collected under g_lwip_lock to RTNLGRP_LINK.
- *
- * Called with g_lwip_lock NOT held.  That is the whole reason the change is
- * not broadcast from a20_lwip_sync_link_state() directly: net_netlink_link_notify()
- * walks the socket table under net locks, and the lock contract in
- * docs/net/network-lock-contract.md forbids holding g_lwip_lock together with a
- * net lock.  So the event is recorded under the lwIP lock, collected here,
- * and the lwIP lock is dropped before any bucket is touched.
- *
- * Events are collected under the lock so the netif cannot be freed or re-registered
- * between noticing the change and naming the interface.  Coalescing is by
- * device: two flips between two flushes publish only the settled state, which
- * is what a listener wants and what it would have to do the work of deriving
- * itself.
- */
-static void a20_lwip_netlink_flush(void)
+int a20_lwip_stack_link_pending_any(void)
 {
-    if (!__atomic_load_n(&g_netif_link_pending, __ATOMIC_RELAXED))
-        return;
+    return __atomic_load_n(&g_netif_link_pending, __ATOMIC_RELAXED) ? 1 : 0;
+}
 
-    nlrt_link_event_t events[A20_NET_MAX_DEVS];
+int a20_lwip_stack_max_devs(void)
+{
+    return A20_NET_MAX_DEVS;
+}
+
+int a20_lwip_stack_collect_link_events(void *outp, int max)
+{
+    a20_lwip_link_event_t *events = (a20_lwip_link_event_t *)outp;
     int n = 0;
     uint64_t lf = a20_lwip_lock();
-    for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+    for (int i = 0; i < A20_NET_MAX_DEVS && n < max; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
         if (!st->dev || !st->link_pending)
             continue;
@@ -316,9 +348,22 @@ static void a20_lwip_netlink_flush(void)
     }
     __atomic_store_n(&g_netif_link_pending, 0, __ATOMIC_RELAXED);
     a20_lwip_unlock(lf);
+    return n;
+}
 
-    if (n > 0)
-        net_netlink_link_notify(events, n);
+void a20_lwip_stack_notify_link_events(const void *events, int n)
+{
+    net_netlink_link_notify((const nlrt_link_event_t *)events, n);
+}
+
+static void a20_lwip_sync_link_state(struct netif *netif)
+{
+    a20_lwip_netif_sync_link_state(netif);
+}
+
+static void a20_lwip_netlink_flush(void)
+{
+    a20_lwip_netlink_flush_events();
 }
 
 /*
@@ -2247,7 +2292,17 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
 }
 
 
-static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
+
+#include "net/lwip_stack_state.h"
+
+/*
+ * The netif address/flag/MTU transactions and the AF_PACKET transmit entry are
+ * Rust (kernel/net/lwip_stack.rs).  What is left here is the lwIP netif access
+ * and the device ops they call, and the wrappers that keep the C names the
+ * socket and netlink layers use.
+ */
+
+void *a20_lwip_stack_netif_by_index(unsigned ifindex)
 {
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state && (unsigned)netif_get_index(n) == ifindex)
@@ -2256,281 +2311,124 @@ static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
     return NULL;
 }
 
-int a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8])
+void a20_lwip_stack_netif_hwaddr(void *np, uint8_t out[8])
 {
-    if (!out)
-        return -EINVAL;
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
-    memcpy(out, n->hwaddr, ETH_ALEN);
-    a20_lwip_unlock(flags);
-    return 0;
+    memcpy(out, ((struct netif *)np)->hwaddr, ETH_ALEN);
 }
 
-int a20_lwip_if_up(unsigned ifindex)
+int a20_lwip_stack_netif_is_up(void *np)
 {
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    int up;
-    if (!n)
-        up = -ENODEV;
-    else
-        up = (netif_is_up(n) && netif_is_link_up(n)) ? 1 : 0;
-    a20_lwip_unlock(flags);
-    return up;
+    return netif_is_up((struct netif *)np) ? 1 : 0;
 }
 
-int a20_lwip_if_default_index(void)
+unsigned a20_lwip_stack_netif_index(void *np)
 {
-    uint64_t flags = a20_lwip_lock();
-    int idx = netif_default ? (int)netif_get_index(netif_default) : -ENODEV;
-    a20_lwip_unlock(flags);
-    return idx;
+    return (unsigned)netif_get_index((struct netif *)np);
 }
 
-/* IFF_UP, the single netif flag user space may drive.  The netlink layer uses
- * the same bit value (see NLRT_IF_FLAGS_UP in kernel/net/socket_netlink.c);
- * carrier is not settable because a20_lwip_sync_link_state() re-derives it
- * from the driver on every poll. */
-#define A20_LWIP_IF_F_UP 0x1u
-
-/* These resolve through a20_lwip_netif_by_index(), which matches on device
- * state, so the loopback netif (registered without one) is reported as -ENODEV
- * rather than being reconfigured out from under ARP/loopback. */
-
-/* The single IPv4 slot lwIP keeps per netif (netif.ip_addr).  LWIP_NETIF_API=0
- * means there is no netif_add_ip4_addr(), so a second address is not
- * representable -- but what to do about one is a netlink question, not an lwIP
- * one, so the policy lives with the request that carries it
- * (nlrt_apply_addr(), which sees IFA_LOCAL/IFA_ADDRESS and NLM_F_REPLACE).
- * An all-zero addr clears the slot and takes the netmask and gateway with it:
- * lwIP derives subnet membership from the (addr, netmask) pair, so keeping the
- * netmask would advertise a prefix for an interface that has no address. */
-int a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
-                         const uint8_t mask[4], const uint8_t gw[4])
+int a20_lwip_stack_default_index(void)
 {
-    if (!addr)
-        return -EINVAL;
+    return netif_default ? (int)netif_get_index(netif_default) : -ENODEV;
+}
+
+void a20_lwip_stack_set_ip(void *np, const uint8_t addr[4])
+{
     ip4_addr_t want;
     IP4_ADDR(&want, addr[0], addr[1], addr[2], addr[3]);
-
-    /* What the address event will carry.  Read under the lock, before the
-     * write, so it is the state that was actually in force -- not a re-read
-     * of an interface that has already been cleared.  An all-zero `want` is
-     * a delete, and net_netlink_addr_notify() turns it into RTM_DELADDR. */
-    uint8_t eff_addr[4], eff_mask[4];
-    eff_addr[0] = addr[0]; eff_addr[1] = addr[1];
-    eff_addr[2] = addr[2]; eff_addr[3] = addr[3];
-
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
-    a20_lwip_copy_ip4(eff_mask, netif_ip4_netmask(n));
-    netif_set_ipaddr(n, &want);
-    if (ip4_addr_isany_val(want)) {
-        ip4_addr_t zero;
-        ip4_addr_set_zero(&zero);
-        netif_set_netmask(n, &zero);
-        netif_set_gw(n, &zero);
-        /* The prefix went with the address, so the notification must not carry
-         * the old one: RTM_DELADDR names the address that went away, and a
-         * stale /24 on it would tell a listener to remove the wrong prefix. */
-        memset(eff_mask, 0, sizeof(eff_mask));
-    } else if (mask) {
-        ip4_addr_t m;
-        IP4_ADDR(&m, mask[0], mask[1], mask[2], mask[3]);
-        netif_set_netmask(n, &m);
-        memcpy(eff_mask, mask, sizeof(eff_mask));
-    } else if (gw) {
-        ip4_addr_t g;
-        IP4_ADDR(&g, gw[0], gw[1], gw[2], gw[3]);
-        netif_set_gw(n, &g);
-    }
-    a20_lwip_unlock(flags);
-    /* Outside g_lwip_lock: the notify path takes net locks. */
-    net_netlink_addr_notify(ifindex, eff_addr, eff_mask);
-    return 0;
+    netif_set_ipaddr((struct netif *)np, &want);
 }
 
-int a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
-                         uint8_t gw[4])
+void a20_lwip_stack_set_mask(void *np, const uint8_t mask[4])
 {
-    if (!addr || !mask || !gw)
-        return -EINVAL;
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
-    a20_lwip_copy_ip4(addr, netif_ip4_addr(n));
-    a20_lwip_copy_ip4(mask, netif_ip4_netmask(n));
-    a20_lwip_copy_ip4(gw, netif_ip4_gw(n));
-    a20_lwip_unlock(flags);
-    return 0;
+    ip4_addr_t m;
+    IP4_ADDR(&m, mask[0], mask[1], mask[2], mask[3]);
+    netif_set_netmask((struct netif *)np, &m);
 }
 
-/*
- * Add one IPv6 address to a netif.  This is the kernel write path behind
- * RTM_NEWADDR with ifa_family == AF_INET6, and it exists so RTNLGRP_IPV6_IFADDR
- * has an event source: without it the group could be defined and bound but
- * never fed, which is exactly the "negotiated and unused" state worth avoiding.
- *
- * Add-only, and deliberately so.  lwIP with LWIP_NETIF_API == 0 exposes no
- * netif_remove_ip6_address(); removal goes through nd6.c's internal pool
- * teardown, and reaching into it from here would be a real divergence for a
- * capability nothing in this tree uses yet.  So RTM_DELADDR for AF_INET6 is
- * refused with -EOPNOTSUPP by the caller rather than half-performed.
- *
- * No DAD either.  netif_add_ip6_address() parks the address TENTATIVE and
- * lwIP's ND6 timer would promote it after the probes; this promotes it straight
- * to IP6_ADDR_VALID instead, because the address came from an explicit
- * administrative request rather than from a router advertisement, and the
- * loopback netif already takes the same shortcut (a20_lwip_loopif_init_cb).
- * The boundary is recorded in docs/net/network-config-design.md: a listener
- * must not read this event as "duplicate address detection passed".
- *
- * prefixlen is accepted and validated but not applied: lwIP's IPv6 subnet
- * membership comes from the prefix-length field carried inside the address
- * itself (ip6_addr_t's zone/subnet encoding), not from a separate netmask, and
- * there is no per-address prefixlen in struct netif.  It is validated so a
- * malformed request is still refused, and it is what the notification reports.
- */
-int a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
-                          uint8_t prefixlen)
+void a20_lwip_stack_set_gw(void *np, const uint8_t gw[4])
 {
-    if (!addr)
-        return -EINVAL;
-    if (prefixlen > 128)
-        return -EINVAL;
+    ip4_addr_t g;
+    IP4_ADDR(&g, gw[0], gw[1], gw[2], gw[3]);
+    netif_set_gw((struct netif *)np, &g);
+}
+
+void a20_lwip_stack_get_ip(void *np, uint8_t out[4])
+{
+    a20_lwip_copy_ip4(out, netif_ip4_addr((struct netif *)np));
+}
+
+void a20_lwip_stack_get_mask(void *np, uint8_t out[4])
+{
+    a20_lwip_copy_ip4(out, netif_ip4_netmask((struct netif *)np));
+}
+
+void a20_lwip_stack_get_gw(void *np, uint8_t out[4])
+{
+    a20_lwip_copy_ip4(out, netif_ip4_gw((struct netif *)np));
+}
+
+/* Add one IPv6 address and promote it to VALID: the address came from an
+ * explicit administrative request, not from a router advertisement, so no DAD
+ * runs.  Returns 0 or -ENOSPC (no slot, or every slot taken). */
+int a20_lwip_stack_add_ip6(void *np, const uint8_t addr[16])
+{
     ip6_addr_t want;
-    /* IP6_ADDR_PART() is lwIP's own byte-part-to-u32 setter and applies the
-     * byte-order conversion, so this cannot drift from how the rest of the stack
-     * reads an ip6_addr_t. */
     ip6_addr_set_zero(&want);
     IP6_ADDR_PART(&want, 0, addr[0], addr[1], addr[2], addr[3]);
     IP6_ADDR_PART(&want, 1, addr[4], addr[5], addr[6], addr[7]);
     IP6_ADDR_PART(&want, 2, addr[8], addr[9], addr[10], addr[11]);
     IP6_ADDR_PART(&want, 3, addr[12], addr[13], addr[14], addr[15]);
-    /* An all-zero address is not a state an interface can be put into, and
-     * lwIP treats it as invalid, so it would be stored and then never used.
-     * Refuse it here rather than accept a write that reports success. */
-    int any = 1;
-    for (int i = 0; i < 16; i++)
-        if (addr[i]) { any = 0; break; }
-    if (any)
-        return -EINVAL;
-
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
+    struct netif *n = (struct netif *)np;
     s8_t idx = -1;
-    /* netif_add_ip6_address() returns ERR_OK with chosen_idx set for an address
-     * that is already present, so this is idempotent the same way the IPv4 path
-     * is: re-adding an address already configured is a no-op, not a duplicate
-     * slot. */
     err_t e = netif_add_ip6_address(n, &want, &idx);
-    if (e != ERR_OK || idx < 0) {
-        a20_lwip_unlock(flags);
-        return -ENOSPC;               /* every slot taken, or no slot for this scope */
-    }
+    if (e != ERR_OK || idx < 0)
+        return -ENOSPC;
     netif_ip6_addr_set_state(n, idx, IP6_ADDR_VALID);
-    a20_lwip_unlock(flags);
-    /* Outside g_lwip_lock: the notify path takes net locks. */
-    net_netlink_addr6_notify(ifindex, addr, prefixlen);
     return 0;
 }
 
-int a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu)
+void a20_lwip_stack_set_mtu(void *np, uint16_t mtu)
 {
-    if (mtu < 68)                  /* RFC 791 minimum link MTU */
-        return -EINVAL;
-    /*
-     * An MTU larger than the profile's frame buffer is not a smaller MTU, it is
-     * a broken one: the receive path would truncate every full-size frame to
-     * the scratch buffer (silently, at a20_lwip_process_netif_rx_tx_locked()'s
-     * clamp) and the transmit path would refuse the frame outright with
-     * ERR_BUF.  Bounding it here keeps the invariant the profile asserts --
-     * a frame fits one pbuf-pool element -- reachable from userspace too,
-     * rather than only at netif_add() time.  The default and server rungs are
-     * unaffected: their ceiling is 1536 - ETH_HLEN = 1522, above the historical
-     * 1500.
-     */
-    if (mtu + ETH_HLEN > NET_PROFILE_NETIF_FRAME_SIZE)
-        return -EINVAL;
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
-    n->mtu = mtu;
-    a20_lwip_unlock(flags);
-    return 0;
+    ((struct netif *)np)->mtu = mtu;
 }
 
-int a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask)
+void a20_lwip_stack_set_up(void *np, int up)
 {
-    if (!mask)
-        return -EINVAL;
-    if (mask & ~(unsigned)A20_LWIP_IF_F_UP)
-        return -EOPNOTSUPP;
-    uint64_t lf = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n) {
-        a20_lwip_unlock(lf);
-        return -ENODEV;
-    }
-    uint32_t index;
-    uint8_t up;
-    if (flags & A20_LWIP_IF_F_UP)
-        netif_set_up(n);
+    if (up)
+        netif_set_up((struct netif *)np);
     else
-        netif_set_down(n);
-    index = (uint32_t)netif_get_index(n);
-    up = netif_is_link_up(n) ? 1 : 0;
-    a20_lwip_unlock(lf);
-    /* An admin up/down is a link change the same way a carrier flip is, and a
-     * listener of RTNLGRP_LINK cannot tell the two apart -- neither can the
-     * message format.  Published here rather than through link_pending
-     * because this call is synchronous with a userspace request: the caller
-     * (RTM_NEWLINK) is waiting for a result, and deferring the notification
-     * to the next poll would let it observe the new state from a dump before
-     * the event arrives. */
-    nlrt_link_event_t ev = {
-        .index = index,
-        .want_up = up,
-    };
-    net_netlink_link_notify(&ev, 1);
-    return 0;
+        netif_set_down((struct netif *)np);
 }
 
-int a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len)
+int a20_lwip_stack_frame_size(void)
 {
-    if (!frame || len == 0 || len > 0xffff)
-        return -EINVAL;
-    uint64_t flags = a20_lwip_lock();
-    struct netif *n = a20_lwip_netif_by_index(ifindex);
-    if (!n || !n->state) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
+    return NET_PROFILE_NETIF_FRAME_SIZE;
+}
+
+int a20_lwip_stack_netif_sendable(void *np)
+{
+    struct netif *n = (struct netif *)np;
+    if (!n || !n->state)
+        return 0;
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-    if (!st->dev || !st->ops || !st->ops->send) {
-        a20_lwip_unlock(flags);
-        return -ENODEV;
-    }
-    int r = st->ops->send(st->dev, frame, (int)len);
-    a20_lwip_unlock(flags);
-    return r == (int)len ? (int)len : -EIO;
+    return (st->dev && st->ops && st->ops->send) ? 1 : 0;
+}
+
+int a20_lwip_stack_device_send(void *np, const uint8_t *frame, size_t len)
+{
+    struct netif *n = (struct netif *)np;
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    return st->ops->send(st->dev, frame, (int)len);
+}
+
+void a20_lwip_stack_notify_addr(unsigned ifindex, const uint8_t addr[4],
+                                const uint8_t mask[4])
+{
+    net_netlink_addr_notify(ifindex, addr, mask);
+}
+
+void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
+                                 uint8_t prefixlen)
+{
+    net_netlink_addr6_notify(ifindex, addr, prefixlen);
 }

@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "net/lwip_stack.h"
 #include "net/net_config.h"
+#include "net/socket_options_state.h"
 #include "lwip/tcp.h"
 #include "lwip/igmp.h"
 #include "lwip/netif.h"
@@ -40,69 +41,6 @@ extern int a20_linux_ticks_to_timeval(uint64_t ticks, uint64_t tps,
 #define ENETDOWN 100
 #endif
 
-static int timeval_to_ticks(const void *optval, size_t optlen,
-                            uint64_t *out_ticks)
-{
-    if (!optval || !out_ticks || optlen < sizeof(long) * 2)
-        return -EINVAL;
-    const long *tv = (const long *)optval;
-    if (tv[1] < 0 || tv[1] >= 1000000L)
-        return -EDOM;
-    if (tv[0] < 0) {
-        *out_ticks = 0;
-        return 0;
-    }
-#ifdef CONFIG_LINUX_MMSG_TXN_RUST
-    return a20_linux_timeval_to_ticks((int64_t)tv[0], (int64_t)tv[1],
-                                      TICKS_PER_SEC, out_ticks);
-#else
-    uint64_t tps = TICKS_PER_SEC;
-    uint64_t sec = (uint64_t)tv[0];
-    if (sec && tps > UINT64_MAX / sec)
-        return -EINVAL;
-    uint64_t whole = sec * tps;
-    uint64_t fraction = (uint64_t)tv[1] * tps / 1000000ULL;
-    if (fraction > UINT64_MAX - whole)
-        return -EINVAL;
-    uint64_t ticks = whole + fraction;
-    if (ticks == 0 && (tv[0] != 0 || tv[1] != 0))
-        ticks = 1;
-    *out_ticks = ticks;
-    return 0;
-#endif
-}
-
-static int timeout_ticks_to_timeval(uint64_t ticks, long *sec_out,
-                                    long *usec_out)
-{
-    if (!sec_out || !usec_out || TICKS_PER_SEC == 0)
-        return -EINVAL;
-#ifdef CONFIG_LINUX_MMSG_TXN_RUST
-    int64_t sec = 0, usec = 0;
-    int rc = a20_linux_ticks_to_timeval(ticks, TICKS_PER_SEC, &sec, &usec);
-    if (rc < 0 || sec > LONG_MAX || usec > LONG_MAX)
-        return -EINVAL;
-    *sec_out = (long)sec;
-    *usec_out = (long)usec;
-#else
-    uint64_t sec = ticks / TICKS_PER_SEC;
-    uint64_t usec = ((ticks % TICKS_PER_SEC) * 1000000ULL) / TICKS_PER_SEC;
-    if (sec > LONG_MAX || usec > LONG_MAX)
-        return -EINVAL;
-    *sec_out = (long)sec;
-    *usec_out = (long)usec;
-#endif
-    return 0;
-}
-
-static int net_copyout_int(void *optval, size_t *optlen, int val)
-{
-    if (!optval || !optlen || *optlen < sizeof(int))
-        return -EINVAL;
-    memcpy(optval, &val, sizeof(val));
-    *optlen = sizeof(val);
-    return 0;
-}
 
 typedef struct net_tcp_options_snapshot {
     uint8_t congestion;
@@ -117,10 +55,6 @@ typedef struct net_tcp_options_snapshot {
     uint32_t generation;
 } net_tcp_options_snapshot_t;
 
-static void net_tcp_options_changed_locked(net_socket_t *s)
-{
-    __atomic_add_fetch(&s->tcp_opts_generation, 1, __ATOMIC_RELEASE);
-}
 
 /* Never hold the socket lock with the lwIP control barrier.  If another
  * setter publishes while this snapshot waits for the barrier, discard it and
@@ -244,19 +178,6 @@ typedef struct net_ip_mreqn {
  * still refused, so this widens the accepted set without accepting junk.
  * Returns the value, or a negative errno.
  */
-static int net_ipopt_byte(const void *optval, size_t optlen, int lo, int hi)
-{
-    if (!optval || optlen < sizeof(int))
-        return -EINVAL;
-    int val;
-    memcpy(&val, optval, sizeof(val));
-    if (val < 0 || val > 0xff) {
-        uint32_t raw = (uint32_t)val;
-        val = (int)(((raw & 0xff000000u) >> 24) | ((raw & 0x00ff0000u) >> 8) |
-                    ((raw & 0x0000ff00u) << 8) | ((raw & 0x000000ffu) << 24));
-    }
-    return (val >= lo && val <= hi) ? val : -EINVAL;
-}
 
 /*
  * Resolve the interface a multicast membership change names.  Linux prefers
@@ -412,157 +333,214 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
     return net_accept_sock(net_socket_from_file(gfd), addr, addrlen, flags);
 }
 
+
+/*
+ * Primitives for the Rust accept transaction (kernel/net/socket_accept.rs).
+ * Each one is a step the Rust decision surface cannot perform itself: the
+ * algorithm accept, the queue pop, a lock, the park protocol, a child field
+ * read or write, the install, the registry release, a reference or a free, a
+ * wait-queue drain or wake, and the inet destroy.
+ */
+#include "net/socket_accept_state.h"
+
+_Static_assert(sizeof(net_sock_pair_t) <= sizeof(net_accept_pair_t),
+               "net_accept_pair_t must mirror net_sock_pair_t");
+_Static_assert(sizeof(proc_wake_q_t) <= 2048,
+               "the Rust accept frame must hold a proc_wake_q_t");
+
+void a20_net_accept_txn_view_init(void *sp, net_accept_view_t *out) {
+    net_socket_t *s = (net_socket_t *)sp;
+    out->s = s;
+    out->domain = &s->domain;
+    out->sock_type = &s->type;
+    out->listening = &s->listening;
+    out->nonblock = &s->nonblock;
+    out->closed = &s->closed;
+    out->recv_timeout_ticks = &s->recv_timeout_ticks;
+    out->accept_head = (void **)&s->accept_head;
+}
+
+int a20_net_accept_txn_alg(void *sp, size_t *addrlen, int flags) {
+    return net_alg_socket_accept((net_socket_t *)sp, addrlen, flags);
+}
+
+uint64_t a20_net_accept_txn_lock(void *sp) { return net_sock_lock((net_socket_t *)sp); }
+
+void a20_net_accept_txn_unlock(void *sp, uint64_t flags) {
+    net_sock_unlock((net_socket_t *)sp, flags);
+}
+
+void *a20_net_accept_txn_pop(void *sp) {
+    return net_accept_queue_pop_locked((net_socket_t *)sp);
+}
+
+uint64_t a20_net_accept_txn_now(void) { return timer_get_ticks(); }
+
+int a20_net_accept_txn_have_task(void) { return proc_current() != NULL; }
+
+int a20_net_accept_txn_has_signal(void) {
+    task_t *cur = proc_current();
+    return cur ? net_task_has_unblocked_signal(cur) : 0;
+}
+
+int a20_net_accept_txn_wait_expired_locked(void *sp, uint64_t start) {
+    return net_socket_wait_expired_locked((net_socket_t *)sp, start, 0);
+}
+
+/*
+ * The park for one retry of the accept loop.  The re-check is inside it
+ * because it has to happen between the prepare and the link: an accepted child
+ * arriving in that window would otherwise wake nobody and the accept would
+ * sleep forever.  Returns 0 to retry, -EAGAIN when the wait timed out or no
+ * task could park, or -ERESTARTSYS when the park was interrupted (the legacy
+ * contract also reports a signal seen under the lock as -ERESTARTSYS).
+ */
+int a20_net_accept_txn_park(void *sp, uint64_t deadline) {
+    net_socket_t *s = (net_socket_t *)sp;
+    proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+    if (!token.task)
+        return -EAGAIN;
+    wait_queue_entry_t entry = {0};
+    uint64_t irq = net_sock_lock(s);
+    if (s->closed || s->accept_head) {
+        net_sock_unlock(s, irq);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return 0;
+    }
+    if (net_task_has_unblocked_signal(proc_current())) {
+        net_sock_unlock(s, irq);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return -ERESTARTSYS;
+    }
+    bool linked = wait_queue_link(&s->accept_waitq, &entry, token, 0);
+    net_sock_unlock(s, irq);
+    proc_wake_reason_t reason;
+    if (linked)
+        reason = proc_park_commit(token);
+    else {
+        (void)proc_park_cancel(token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    wait_queue_unlink(&s->accept_waitq, &entry);
+    proc_park_finish(token);
+    if (proc_wake_reason_is_task_interrupt(reason) ||
+        net_task_has_unblocked_signal(proc_current()))
+        return -ERESTARTSYS;
+    if (reason == PROC_WAKE_TIMEOUT)
+        return -EAGAIN;
+    return 0;
+}
+
+void a20_net_accept_txn_child_ready(void *child) {
+    net_inet_accept_child_ready((net_socket_t *)child);
+}
+
+size_t a20_net_accept_txn_child_peer_len(void *child) {
+    return ((net_socket_t *)child)->peer_len;
+}
+
+void a20_net_accept_txn_child_peer_copy(void *child, void *addr, size_t n) {
+    memcpy(addr, ((net_socket_t *)child)->peer_addr, n);
+}
+
+void a20_net_accept_txn_child_set_nonblock(void *child, int nonblock) {
+    ((net_socket_t *)child)->nonblock = nonblock ? 1 : 0;
+}
+
+int a20_net_accept_txn_install(void *child) {
+    net_socket_t *c = (net_socket_t *)child;
+    return net_socket_install_file(c, O_RDWR | (c->nonblock ? O_NONBLOCK : 0));
+}
+
+/*
+ * child->peer is a plain back-pointer with no reference of its own, so it is
+ * sampled and referenced under the child's own lock before the pair is taken.
+ */
+void a20_net_accept_txn_snapshot_peer(void *child, void **out_peer) {
+    net_socket_t *c = (net_socket_t *)child;
+    net_socket_t *peer = NULL;
+    uint64_t cf = net_sock_lock(c);
+    if (c->peer)
+        peer = net_socket_ref(c->peer);
+    net_sock_unlock(c, cf);
+    *out_peer = peer;
+}
+
+void a20_net_accept_txn_lock2(void *a, void *b, net_accept_pair_t *out) {
+    net_sock_pair_t p = net_sock_lock2((net_socket_t *)a, (net_socket_t *)b);
+    out->lo = p.lo;
+    out->hi = p.hi;
+    out->flags = p.flags;
+}
+
+void a20_net_accept_txn_unlock2(const net_accept_pair_t *in) {
+    net_sock_pair_t p;
+    p.lo = in->lo;
+    p.hi = in->hi;
+    p.flags = in->flags;
+    net_sock_unlock2(p);
+}
+
+void a20_net_accept_txn_child_mark_closed(void *child) {
+    ((net_socket_t *)child)->closed = 1;
+}
+
+/* True when the peer's back-pointer named this child, so its readers and
+ * writers now see a peer that is gone and have to be drained and woken. */
+int a20_net_accept_txn_peer_detach(void *peer, void *child) {
+    net_socket_t *p = (net_socket_t *)peer;
+    if (p->peer != (net_socket_t *)child)
+        return 0;
+    p->peer = NULL;
+    p->peer_closed = 1;
+    return 1;
+}
+
+int a20_net_accept_txn_peer_collect_read(void *peer, void *wake_q) {
+    return net_wait_queue_collect_all_locked(&((net_socket_t *)peer)->read_waitq,
+                                             PROC_WAKE_EVENT,
+                                             (proc_wake_q_t *)wake_q);
+}
+
+int a20_net_accept_txn_peer_collect_write(void *peer, void *wake_q) {
+    return net_wait_queue_collect_all_locked(&((net_socket_t *)peer)->write_waitq,
+                                             PROC_WAKE_EVENT,
+                                             (proc_wake_q_t *)wake_q);
+}
+
+int a20_net_accept_txn_unregister(void *child) {
+    return net_socket_unregister((net_socket_t *)child) ? 1 : 0;
+}
+
+void a20_net_accept_txn_free(void *sp) { net_socket_free((net_socket_t *)sp); }
+
+void a20_net_accept_txn_child_destroy(void *child) {
+    net_inet_socket_destroy((net_socket_t *)child);
+}
+
+void a20_net_accept_txn_peer_wake_read(void *peer) {
+    (void)wait_queue_wake_all(&((net_socket_t *)peer)->read_waitq, 0,
+                              PROC_WAKE_EVENT);
+}
+
+void a20_net_accept_txn_peer_wake_write(void *peer) {
+    (void)wait_queue_wake_all(&((net_socket_t *)peer)->write_waitq, 0,
+                              PROC_WAKE_EVENT);
+}
+
+void a20_net_accept_txn_wakeq_init(void *wake_q) {
+    proc_wake_q_init((proc_wake_q_t *)wake_q);
+}
+
+void a20_net_accept_txn_wakeq_flush(void *wake_q) {
+    (void)proc_wake_q_flush((proc_wake_q_t *)wake_q);
+}
+
 int net_accept_sock(net_socket_t *s, void *addr, size_t *addrlen, int flags)
 {
-    if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
-        return -EINVAL;
-    if (!s)
-        return -ENOTSOCK;
-    if (s->domain == AF_ALG)
-        return net_alg_socket_accept(s, addrlen, flags);
-    if ((s->type != SOCK_STREAM && !(s->domain == AF_UNIX && s->type == SOCK_SEQPACKET)) ||
-        (s->domain != AF_INET && s->domain != AF_INET6 && s->domain != AF_UNIX))
-        return -EOPNOTSUPP;
-    if (!s->listening)
-        return -EINVAL;
-
-    net_socket_t *child = NULL;
-    uint64_t start = timer_get_ticks();
-    for (;;) {
-        uint64_t irq = net_sock_lock(s);
-        if (s->closed) {
-            net_sock_unlock(s, irq);
-            return -EINVAL;
-        }
-        child = net_accept_queue_pop_locked(s);
-        if (child) {
-            ktrace_net("[NET] accept: popped child from queue\n");
-            net_sock_unlock(s, irq);
-            break;
-        }
-        if (s->nonblock) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        task_t *cur = proc_current();
-        if (!cur) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        if (net_task_has_unblocked_signal(cur)) {
-            net_sock_unlock(s, irq);
-            return -ERESTARTSYS;
-        }
-        if (net_socket_wait_expired_locked(s, start, 0)) {
-            net_sock_unlock(s, irq);
-            return -EAGAIN;
-        }
-        uint64_t deadline = s->recv_timeout_ticks ?
-                            start + s->recv_timeout_ticks : 0;
-        net_sock_unlock(s, irq);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
-        if (!token.task)
-            return -EAGAIN;
-
-        wait_queue_entry_t entry = {0};
-        irq = net_sock_lock(s);
-        if (s->closed || s->accept_head) {
-            net_sock_unlock(s, irq);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            continue;
-        }
-        if (net_task_has_unblocked_signal(cur)) {
-            net_sock_unlock(s, irq);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            return -ERESTARTSYS;
-        }
-        bool linked =
-            wait_queue_link(&s->accept_waitq, &entry, token, 0);
-        net_sock_unlock(s, irq);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&s->accept_waitq, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason) ||
-            net_task_has_unblocked_signal(cur))
-            return -ERESTARTSYS;
-        if (reason == PROC_WAKE_TIMEOUT)
-            return -EAGAIN;
-    }
-
-    net_inet_accept_child_ready(child);
-
-    if (addr && addrlen && *addrlen > 0) {
-        size_t n = child->peer_len < *addrlen ? child->peer_len : *addrlen;
-        memcpy(addr, child->peer_addr, n);
-        *addrlen = n;
-    }
-
-    child->nonblock = (flags & SOCK_NONBLOCK) ? 1 : s->nonblock;
-    ktrace_net("[NET] accept: done, installing file\n");
-    int newfd = net_socket_install_file(child, O_RDWR | (child->nonblock ? O_NONBLOCK : 0));
-    if (newfd < 0) {
-        proc_wake_q_t wake_q;
-        proc_wake_q_init(&wake_q);
-        net_socket_t *peer = NULL;
-        bool drain_peer_read = false;
-        bool drain_peer_write = false;
-        /* child and its peer, two socket locks, ascending by address.  child is
-         * pinned -- it is the socket accept() just popped off the listener's
-         * queue, carrying its creator's reference -- but child->peer is a plain
-         * back-pointer with no reference of its own, so it is sampled and
-         * referenced under the child's own lock before the pair is taken. */
-        {
-            uint64_t cf = net_sock_lock(child);
-            if (child->peer)
-                peer = net_socket_ref(child->peer);
-            net_sock_unlock(child, cf);
-        }
-        net_sock_pair_t pair = net_sock_lock2(child, peer);
-        child->closed = 1;
-        if (peer && peer->peer == child) {
-            peer->peer = NULL;
-            peer->peer_closed = 1;
-            drain_peer_read = net_wait_queue_collect_all_locked(
-                &peer->read_waitq, PROC_WAKE_EVENT, &wake_q);
-            drain_peer_write = net_wait_queue_collect_all_locked(
-                &peer->write_waitq, PROC_WAKE_EVENT, &wake_q);
-        }
-        net_sock_unlock2(pair);
-        /* The registry slot has to be released with no net lock held at all:
-         * net_socket_unregister() takes a bucket lock of its own, and a bucket
-         * lock may never be nested under a socket lock.  child->closed is
-         * already set, so a table scan that lands on it in between finds it dead
-         * and skips it. */
-        /* Only if there was a slot.  An AF_UNIX child is never registered, so
-         * on that path the registry reference does not exist and dropping it
-         * freed the socket here, before the wake_all() calls below. */
-        bool had_slot = net_socket_unregister(child);
-        /* Registry reference, dropped outside the lock: it can free. */
-        if (had_slot)
-            net_socket_free(child);
-        (void)proc_wake_q_flush(&wake_q);
-        if (drain_peer_read)
-            (void)wait_queue_wake_all(
-                &peer->read_waitq, 0, PROC_WAKE_EVENT);
-        if (drain_peer_write)
-            (void)wait_queue_wake_all(
-                &peer->write_waitq, 0, PROC_WAKE_EVENT);
-        net_inet_socket_destroy(child);
-        net_socket_free(child);
-        if (peer)
-            net_socket_free(peer);
-        return newfd;
-    }
-    return newfd;
+    return a20_net_accept_sock(s, addr, addrlen, flags);
 }
 
 int net_getsockname(int gfd, void *addr, size_t *addrlen)
@@ -613,387 +591,175 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
                                optval, optlen);
 }
 
-int net_setsockopt_sock(net_socket_t *s, int level, int optname,
-                        const void *optval, size_t optlen)
-{
-    if (!s)
-        return -ENOTSOCK;
-    if (s->domain == AF_ALG && level == SOL_ALG && optname == ALG_SET_KEY) {
-        /* No provider, so there is no key schedule to install.  Returning 0
-         * here would let a caller believe a key was accepted; see
-         * kernel/net/socket_alg.c. */
-        return -EOPNOTSUPP;
-    }
-    if (level == IPPROTO_IP) {
-        if (optname == MCAST_JOIN_GROUP || optname == MCAST_LEAVE_GROUP ||
-            optname == IP_ADD_MEMBERSHIP || optname == IP_DROP_MEMBERSHIP) {
-            if (!optval || optlen < sizeof(net_ip_mreqn_t))
-                return -EINVAL;
-            net_ip_mreqn_t mreq;
-            memcpy(&mreq, optval, sizeof(mreq));
-            return net_ip_group_membership(s, &mreq,
-                                          optname == MCAST_JOIN_GROUP ||
-                                          optname == IP_ADD_MEMBERSHIP);
-        }
-        if (optname == A20_IP_MULTICAST_TTL_WIRE ||
-            optname == A20_IP_MULTICAST_LOOP_WIRE) {
-            /* Both only mean something for a pcb that can emit a multicast
-             * datagram, and a stream socket never has one, so storing the
-             * value would be a silent no-op. */
-            if (s->type == SOCK_STREAM)
-                return -EINVAL;
-        }
-        if (optname == A20_IP_MULTICAST_TTL_WIRE) {
-            int val = net_ipopt_byte(optval, optlen, 0, 0xff);
-            if (val < 0)
-                return val;
-            uint64_t sf = net_sock_lock(s);
-            s->mc_ttl = (uint8_t)val;
-            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
-            net_sock_unlock(s, sf);
-            net_inet_ip_opts_apply(s);
-            return 0;
-        }
-        if (optname == A20_IP_MULTICAST_LOOP_WIRE) {
-            int val = net_ipopt_byte(optval, optlen, 0, 1);
-            if (val < 0)
-                return val;
-            uint64_t sf = net_sock_lock(s);
-            s->mc_loop = (uint8_t)val;
-            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
-            net_sock_unlock(s, sf);
-            net_inet_ip_opts_apply(s);
-            return 0;
-        }
-        if (optname == IP_TTL) {
-            int val = net_ipopt_byte(optval, optlen, 1, 0xff);
-            if (val < 0)
-                return val;
-            uint64_t sf = net_sock_lock(s);
-            s->ip_ttl = (uint8_t)val;
-            s->ip_ttl_set = 1;
-            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
-            net_sock_unlock(s, sf);
-            net_inet_ip_opts_apply(s);
-            return 0;
-        }
-        if (optname == IP_TOS) {
-            int val = net_ipopt_byte(optval, optlen, 0, 0xff);
-            if (val < 0)
-                return val;
-            uint64_t sf = net_sock_lock(s);
-            s->ip_tos = (uint8_t)val;
-            s->ip_tos_set = 1;
-            __atomic_add_fetch(&s->ip_opts_generation, 1, __ATOMIC_RELEASE);
-            net_sock_unlock(s, sf);
-            net_inet_ip_opts_apply(s);
-            return 0;
-        }
-        /* IP_OPTIONS is the interesting refusal: honouring it needs a
-         * per-packet option buffer and lwIP's raw/udp/tcp output takes none
-         * (raw_sendto_if, udp_sendto_if_src, tcp_output), so the options
-         * could only be written to the IP header by a second send path.
-         * IP_HDRINCL, IP_TRANSPARENT and the rest are likewise unimplemented.
-         * Policy: a setsockopt a caller cannot honour must fail, never
-         * silently succeed. */
-        return -EOPNOTSUPP;
-    }
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_CHECKSUM) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int offset;
-        memcpy(&offset, optval, sizeof(offset));
-        if (offset >= 0 && (offset & 1))
-            return -EINVAL;
-        s->ipv6_checksum_offset = offset;
-        return 0;
-    }
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_V6ONLY) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        s->ipv6_v6only = val != 0;
-        return 0;
-    }
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
-        (optname == IPV6_RECVPKTINFO || optname == IPV6_RECVTCLASS ||
-         optname == IPV6_RECVHOPLIMIT || optname == IPV6_RECVRTHDR ||
-         optname == IPV6_RECVHOPOPTS || optname == IPV6_RECVDSTOPTS ||
-         optname == IPV6_RECVERR || optname == IPV6_2292PKTINFO ||
-         optname == IPV6_2292HOPLIMIT || optname == IPV6_2292RTHDR ||
-         optname == IPV6_2292HOPOPTS || optname == IPV6_2292DSTOPTS)) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        if (optname == IPV6_RECVPKTINFO)  s->ipv6_recv_pktinfo = val != 0;
-        if (optname == IPV6_RECVTCLASS)   s->ipv6_recv_tclass  = val != 0;
-        if (optname == IPV6_RECVHOPLIMIT) s->ipv6_recv_hoplimit = val != 0;
-        if (optname == IPV6_RECVRTHDR)    s->ipv6_recv_rthdr   = val != 0;
-        if (optname == IPV6_RECVHOPOPTS)  s->ipv6_recv_hopopts = val != 0;
-        if (optname == IPV6_RECVDSTOPTS)  s->ipv6_recv_dstopts = val != 0;
-        if (optname == IPV6_RECVERR)      s->ipv6_recv_err     = val != 0;
-        if (optname == IPV6_2292PKTINFO)  s->ipv6_recv_2292_pktinfo = val != 0;
-        if (optname == IPV6_2292HOPLIMIT) s->ipv6_recv_2292_hoplimit = val != 0;
-        if (optname == IPV6_2292RTHDR)    s->ipv6_recv_2292_rthdr = val != 0;
-        if (optname == IPV6_2292HOPOPTS)  s->ipv6_recv_2292_hopopts = val != 0;
-        if (optname == IPV6_2292DSTOPTS)  s->ipv6_recv_2292_dstopts = val != 0;
-        return 0;
-    }
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
-        (optname == IPV6_UNICAST_IF || optname == IPV6_MULTICAST_IF ||
-         optname == IPV6_MULTICAST_HOPS || optname == IPV6_MULTICAST_LOOP ||
-         optname == IPV6_TCLASS || optname == IPV6_HOPLIMIT ||
-         optname == IPV6_FLOWINFO || optname == IPV6_ROUTER_ALERT))
-        return optlen >= sizeof(int) ? 0 : -EINVAL;
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
-        (optname == IPV6_JOIN_GROUP || optname == IPV6_LEAVE_GROUP))
-        return 0;
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_ADDRFORM) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        if (val != AF_INET)
-            return -EINVAL;
-        if (s->type != SOCK_STREAM || s->connected || s->bound)
-            return -EOPNOTSUPP;
-        s->domain = AF_INET;
-        return 0;
-    }
-    if (s->domain == AF_INET6 && s->type == SOCK_RAW &&
-        level == IPPROTO_ICMPV6 && optname == ICMP6_FILTER) {
-        if (!optval || optlen < sizeof(s->icmp6_filter))
-            return -EINVAL;
-        memcpy(s->icmp6_filter, optval, sizeof(s->icmp6_filter));
-        s->icmp6_filter_set = 1;
-        return 0;
-    }
-    if (level == IPPROTO_TCP) {
-        if (s->type != SOCK_STREAM)
-            return -ENOPROTOOPT;
-        if (optname == TCP_CONGESTION) {
-            /* Validate the name instead of accepting anything.  This used to
-             * `return optval && optlen ? 0 : -EINVAL`, so "bbr", "reno " and
-             * "cubic-but-not-really" all set successfully on a stack that has
-             * exactly one algorithm, and the caller had no way to find out
-             * which one it got.  -ENOPROTOOPT is what Linux returns for an
-             * algorithm it cannot honour, and it is the only answer that tells
-             * the truth: the request was well-formed, this kernel has no such
-             * algorithm.  That includes the EMBEDDED profile, where CUBIC is
-             * compiled out -- "cubic" is a real name this build cannot serve. */
-            char name[16];
-            size_t n;
-            int alg;
-            if (!optval || !optlen)
-                return -EINVAL;
-            /* optlen is the caller's bound; input need not contain a NUL.
-             * Reserve one byte for our terminator so a full-length name is
-             * parsed intact, while longer names cannot match a valid prefix. */
-            n = optlen < sizeof(name) - 1 ? optlen : sizeof(name) - 1;
-            memcpy(name, optval, n);
-            name[n] = '\0';
-            alg = tcp_cong_alg_parse(name);
-            if (alg < 0)
-                return -ENOPROTOOPT;
-            uint64_t sf = net_sock_lock(s);
-            s->tcp_congestion = (uint8_t)alg;
-            net_tcp_options_changed_locked(s);
-            net_sock_unlock(s, sf);
-            /* Apply immediately to a live pcb as well as to future ones, so
-             * the option means what the caller just asked for.  Linux allows
-             * this on an established connection.  Switching does not reset the
-             * window or discard the algorithm's state: RFC 8312 4.8 already
-             * says what a connection entering congestion avoidance without a
-             * congestion event behind it must do, and that is exactly this
-             * case. */
-            net_tcp_options_apply_current(s, NET_TCP_APPLY_CONGESTION);
-            return 0;
-        }
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        switch (optname) {
-        case TCP_NODELAY: {
-            uint64_t sf = net_sock_lock(s);
-            s->tcp_nodelay = val != 0;
-            net_tcp_options_changed_locked(s);
-            net_sock_unlock(s, sf);
-            net_tcp_options_apply_current(s, NET_TCP_APPLY_NODELAY);
-            return 0;
-        }
-        case TCP_CORK:
-        case TCP_MAXSEG:
-        case TCP_SYNCNT:
-        case TCP_LINGER2:
-        case TCP_DEFER_ACCEPT:
-        case TCP_WINDOW_CLAMP:
-        case TCP_QUICKACK:
-        case TCP_USER_TIMEOUT:
-            return 0;
-        case TCP_KEEPIDLE: {
-            if (val <= 0)
-                return -EINVAL;
-            uint64_t sf = net_sock_lock(s);
-            s->keep_idle = val;
-            net_tcp_options_changed_locked(s);
-            net_sock_unlock(s, sf);
-            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_IDLE);
-            return 0;
-        }
-        case TCP_KEEPINTVL: {
-            if (val <= 0)
-                return -EINVAL;
-            uint64_t sf = net_sock_lock(s);
-            s->keep_intvl = val;
-            net_tcp_options_changed_locked(s);
-            net_sock_unlock(s, sf);
-            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_INTVL);
-            return 0;
-        }
-        case TCP_KEEPCNT: {
-            if (val <= 0)
-                return -EINVAL;
-            uint64_t sf = net_sock_lock(s);
-            s->keep_cnt = val;
-            net_tcp_options_changed_locked(s);
-            net_sock_unlock(s, sf);
-            net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEP_CNT);
-            return 0;
-        }
-        default:
-            return -ENOPROTOOPT;
-        }
-    }
-    if (level == SOL_SOCKET && optname == SO_ATTACH_BPF) {
-        /* Socket filters are not wired to a KEP extension point yet; the
-         * net-packet extension point is the planned home for them. */
-        return -EOPNOTSUPP;
-    }
-    if (level == SOL_SOCKET && optname == SO_RCVTIMEO) {
-        if (!optval || optlen < sizeof(long) * 2)
-            return -EINVAL;
-        uint64_t ticks;
-        int rc = timeval_to_ticks(optval, optlen, &ticks);
-        if (rc < 0)
-            return rc;
-        uint64_t sf = net_sock_lock(s);
-        s->recv_timeout_ticks = ticks;
-        net_sock_unlock(s, sf);
-        return 0;
-    }
-    if (level == SOL_SOCKET && optname == SO_SNDTIMEO) {
-        if (!optval || optlen < sizeof(long) * 2)
-            return -EINVAL;
-        uint64_t ticks;
-        int rc = timeval_to_ticks(optval, optlen, &ticks);
-        if (rc < 0)
-            return rc;
-        uint64_t sf = net_sock_lock(s);
-        s->send_timeout_ticks = ticks;
-        net_sock_unlock(s, sf);
-        return 0;
-    }
-    if (level == SOL_SOCKET && optname == SO_REUSEADDR) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        uint64_t sf = net_sock_lock(s);
-        s->reuseaddr = val != 0;
-        net_tcp_options_changed_locked(s);
-        net_sock_unlock(s, sf);
-        /* setsockopt() normally runs between socket() and bind(), and socket()
-         * has already made the pcb, so net_inet_tcp_apply_options() saw the old
-         * value.  Push it across here or bind() would consult a stale
-         * SOF_REUSEADDR. */
-        net_tcp_options_apply_current(s, NET_TCP_APPLY_REUSEADDR);
-        return 0;
-    }
-    if (level == SOL_SOCKET && optname == SO_REUSEPORT) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        uint64_t sf = net_sock_lock(s);
-        s->reuseport = val != 0;
-        net_sock_unlock(s, sf);
-        return 0;
-    }
-    if (level == SOL_SOCKET && optname == SO_KEEPALIVE) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        uint64_t sf = net_sock_lock(s);
-        s->keepalive = val != 0;
-        net_tcp_options_changed_locked(s);
-        net_sock_unlock(s, sf);
-        net_tcp_options_apply_current(s, NET_TCP_APPLY_KEEPALIVE);
-        return 0;
-    }
-    if (level == SOL_SOCKET &&
-        (optname == SO_SNDBUF || optname == SO_RCVBUF)) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        /* Linux clamps a non-positive request up to a minimal buffer rather
-         * than failing; this refuses it instead.  -EINVAL is the honest answer
-         * here because a clamped-to-zero buffer cannot send anything, and
-         * silently accepting one would leave a caller believing it had asked
-         * for a usable size. */
-        if (val <= 0)
-            return -EINVAL;
-        /* Both families and both buffer-bearing types are accepted now.  The
-         * ceilings are completely unrelated between them -- a pcb's capacity
-         * against this layer's staging and queue limits -- so the clamp is
-         * delegated to net_socket_buf_in_force(), which is also what getsockopt
-         * reports and what the datagram send paths compare against, and a
-         * report and an enforcement cannot drift apart.  A domain with neither
-         * buffers nor a clamp that would mean anything (AF_UNIX, AF_NETLINK,
-         * ...) still refuses. */
-        if (s->domain != AF_INET && s->domain != AF_INET6)
-            return -EOPNOTSUPP;
-        uint32_t is_snd = (optname == SO_SNDBUF);
-        uint32_t want = net_socket_buf_ceiling(s, is_snd);
-        if ((uint32_t)val > want)
-            val = (int)want;
-        uint64_t sf = net_sock_lock(s);
-        if (is_snd)
-            s->snd_buf = (uint32_t)val;
-        else
-            s->rcv_buf = (uint32_t)val;
-        net_tcp_options_changed_locked(s);
-        net_sock_unlock(s, sf);
-        /* Apply only this buffer field: snd_buf is available credit, so an
-         * unrelated option must never reset it. */
-        net_tcp_options_apply_current(
-            s, is_snd ? NET_TCP_APPLY_SNDBUF : NET_TCP_APPLY_RCVBUF);
-        return 0;
-    }
-    if (level == SOL_SOCKET && optname == SO_PASSCRED) {
-        if (!optval || optlen < sizeof(int))
-            return -EINVAL;
-        int val;
-        memcpy(&val, optval, sizeof(val));
-        s->passcred = val != 0;
-        return 0;
-    }
-    /* Unhandled SOL_SOCKET options (SO_BINDTODEVICE, SO_DOMAIN,
-     * SO_PROTOCOL, SO_RXQ_OVFL, ...) are not implemented.  Returning 0 here
-     * would report success for a setting that was discarded, which is worse
-     * than refusing: a server that sets SO_BINDTODEVICE for tenant isolation
-     * would believe it isolated and would not be. */
-    return -EOPNOTSUPP;
-}
 
 int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen)
 {
     return net_getsockopt_sock(net_socket_from_file(gfd), level, optname,
                                optval, optlen);
+}
+
+
+
+/*
+ * ------------------------------------------------------------------
+ * Rust option state machine (NET_SOCKET_OPTIONS_IMPL=rust)
+ * ------------------------------------------------------------------
+ *
+ * What stays here is the primitive half: the borrowed view into net_socket_t,
+ * the socket lock and lwIP barrier the Rust module decides *when* to take, the
+ * buffer-ceiling and IGMP lookups (lwIP state), the live-pcb reads and the raw
+ * copyout. What moved to kernel/net/socket_options.rs is every decision: which
+ * option is recognised at which level, its accepted range, the byte-order
+ * re-read, the clamp, which field it lands in, which pcb-apply group it
+ * invalidates, and what getsockopt reports.
+ *
+ * The view is a table of pointers into the caller's socket, so no struct ABI
+ * moves and the C reference above stays byte-comparable with the Rust state
+ * machine (see tools/tests/socket_options_host).
+ */
+
+/* The Rust side indexes the twelve IPv6 RECV flags as one run of int. */
+_Static_assert(__builtin_offsetof(net_socket_t, ipv6_recv_2292_dstopts) -
+                   __builtin_offsetof(net_socket_t, ipv6_recv_pktinfo) ==
+               11 * sizeof(int),
+               "the IPv6 RECV* flags must stay one contiguous run of int: the "
+               "Rust option state machine indexes them as such");
+
+static void net_option_view_init(net_socket_t *s, net_option_view_t *v)
+{
+    memset(v, 0, sizeof(*v));
+    v->s = s;
+    v->domain = &s->domain;
+    v->sock_type = &s->type;
+    v->protocol = &s->protocol;
+    v->connected = &s->connected;
+    v->bound = &s->bound;
+    v->listening = &s->listening;
+    v->ip_ttl = &s->ip_ttl;
+    v->ip_tos = &s->ip_tos;
+    v->ip_ttl_set = &s->ip_ttl_set;
+    v->ip_tos_set = &s->ip_tos_set;
+    v->mc_ttl = &s->mc_ttl;
+    v->mc_loop = &s->mc_loop;
+    v->ip_opts_generation = &s->ip_opts_generation;
+    v->ipv6_checksum_offset = &s->ipv6_checksum_offset;
+    v->ipv6_v6only = &s->ipv6_v6only;
+    v->ipv6_recv_flags = &s->ipv6_recv_pktinfo;
+    v->icmp6_filter = s->icmp6_filter;
+    v->icmp6_filter_set = &s->icmp6_filter_set;
+    v->tcp_congestion = &s->tcp_congestion;
+    v->tcp_nodelay = &s->tcp_nodelay;
+    v->keepalive = &s->keepalive;
+    v->keep_idle = &s->keep_idle;
+    v->keep_intvl = &s->keep_intvl;
+    v->keep_cnt = &s->keep_cnt;
+    v->tcp_opts_generation = &s->tcp_opts_generation;
+    v->snd_buf = &s->snd_buf;
+    v->rcv_buf = &s->rcv_buf;
+    v->reuseaddr = &s->reuseaddr;
+    v->reuseport = &s->reuseport;
+    v->recv_timeout_ticks = &s->recv_timeout_ticks;
+    v->send_timeout_ticks = &s->send_timeout_ticks;
+    v->passcred = &s->passcred;
+    v->peer_pid = &s->peer_pid;
+    v->peer_uid = &s->peer_uid;
+    v->peer_gid = &s->peer_gid;
+    v->long_size = (int)sizeof(long);
+    /* A macro that expands to a function call on riscv64: the Rust side cannot
+     * know it, so it is handed over with the rest of the view. */
+    v->ticks_per_sec = (uint64_t)TICKS_PER_SEC;
+}
+
+void a20_net_option_lock(void *sp, uint64_t *flags)
+{
+    *flags = net_sock_lock((net_socket_t *)sp);
+}
+
+void a20_net_option_unlock(void *sp, uint64_t flags)
+{
+    net_sock_unlock((net_socket_t *)sp, flags);
+}
+
+uint32_t a20_net_option_buf_ceiling(void *sp, int is_snd)
+{
+    return net_socket_buf_ceiling((net_socket_t *)sp, is_snd);
+}
+
+int a20_net_option_group_membership(void *sp, const void *mreq, int join)
+{
+    return net_ip_group_membership((net_socket_t *)sp,
+                                   (const net_ip_mreqn_t *)mreq, join);
+}
+
+int a20_net_option_notconn_pidfd(void)
+{
+    return net_notconn(NET_NOTCONN_PEERPIDFD);
+}
+
+/* Live pcb values, read under the lwIP barrier and never under a socket lock.
+ * `which`: 0 congestion algorithm, 1 keep_idle (s), 2 keep_intvl (s),
+ * 3 keep_cnt.  -1 means "no usable pcb", which is a NULL pcb or LISTEN (whose
+ * pcb only carries the common prefix).  With CUBIC compiled out there is one
+ * algorithm and the congestion case reports it, which is what the old handler
+ * did. */
+int a20_net_option_tcp_live(void *sp, int which)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    if (which == 0) {
+#if LWIP_TCP_CUBIC
+        uint64_t flags = a20_lwip_lock();
+        int alg = (s->tcp && s->tcp->state != LISTEN)
+                      ? (int)s->tcp->cong_alg : -1;
+        a20_lwip_unlock(flags);
+        return alg;
+#else
+        return TCP_CONG_RENO;
+#endif
+    }
+    uint64_t flags = a20_lwip_lock();
+    int v = -1;
+    if (s->tcp && s->tcp->state != LISTEN) {
+        switch (which) {
+        case 1: v = (int)(s->tcp->keep_idle / 1000U); break;
+        case 2: v = (int)(s->tcp->keep_intvl / 1000U); break;
+        case 3: v = (int)s->tcp->keep_cnt; break;
+        default: break;
+        }
+    }
+    a20_lwip_unlock(flags);
+    return v;
+}
+
+/* The TTL/TOS/multicast-TTL a packet would actually carry.  For an option the
+ * caller never set that is the pcb's value, not the stored zero. */
+int a20_net_option_ip_effective(void *sp, int which)
+{
+    uint8_t ttl, tos, mc_ttl;
+    net_inet_ip_effective((net_socket_t *)sp, &ttl, &tos, &mc_ttl);
+    switch (which) {
+    case 0: return ttl;
+    case 1: return tos;
+    default: return mc_ttl;
+    }
+}
+
+extern int linux_pidfd_create(int pid, int flags);
+
+int net_setsockopt_sock(net_socket_t *s, int level, int optname,
+                        const void *optval, size_t optlen)
+{
+    if (!s)
+        return -ENOTSOCK;
+    net_option_view_t v;
+    net_option_view_init(s, &v);
+    int r = a20_net_setsockopt_state(&v, level, optname, optval, optlen);
+    if (r < 0)
+        return r;
+    if (r & NET_OPT_APPLY_IP_OPTS)
+        net_inet_ip_opts_apply(s);
+    if (r & NET_OPT_APPLY_PCB_MASK)
+        net_tcp_options_apply_current(s, (unsigned)(r & NET_OPT_APPLY_PCB_MASK));
+    return 0;
 }
 
 int net_getsockopt_sock(net_socket_t *s, int level, int optname,
@@ -1003,235 +769,53 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         return -ENOTSOCK;
     if (!optval || !optlen)
         return -EINVAL;
-    int val = 0;
-    uint8_t tcp_congestion, tcp_nodelay, keepalive, reuseaddr, reuseport;
-    int keep_idle, keep_intvl, keep_cnt;
-    uint64_t recv_timeout_ticks, send_timeout_ticks;
-    uint64_t sf = net_sock_lock(s);
-    tcp_congestion = s->tcp_congestion;
-    tcp_nodelay = s->tcp_nodelay;
-    keepalive = s->keepalive;
-    reuseaddr = s->reuseaddr;
-    reuseport = s->reuseport;
-    keep_idle = s->keep_idle;
-    keep_intvl = s->keep_intvl;
-    keep_cnt = s->keep_cnt;
-    recv_timeout_ticks = s->recv_timeout_ticks;
-    send_timeout_ticks = s->send_timeout_ticks;
-    net_sock_unlock(s, sf);
-    if (level == SOL_SOCKET && optname == SO_TYPE)
-        val = s->type;
-    else if (level == SOL_SOCKET && optname == SO_ERROR)
-        val = 0;
-    else if (level == SOL_SOCKET && optname == SO_ACCEPTCONN)
-        val = s->listening;
-    else if (level == SOL_SOCKET && optname == SO_DOMAIN)
-        val = s->domain;
-    else if (level == SOL_SOCKET && optname == SO_PROTOCOL)
-        val = s->protocol;
-    else if (level == SOL_SOCKET &&
-             (optname == SO_SNDBUF || optname == SO_RCVBUF))
-        /* The value in force, not a constant and not the request.
-         * net_socket_buf_in_force() is the same clamp setsockopt applied, so a
-         * caller that asked for more than the socket can honour reads back the
-         * reduced ceiling instead of a number the stack ignored -- and on a
-         * datagram socket, where there is no pcb to write the clamp back onto,
-         * it is the only place the clamp exists at all. */
-        val = (int)net_socket_buf_in_force(s, optname == SO_SNDBUF);
-    else if (level == SOL_SOCKET &&
-             (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)) {
-        long tv[2];
-        uint64_t ticks = optname == SO_RCVTIMEO
-            ? recv_timeout_ticks : send_timeout_ticks;
-        int rc = timeout_ticks_to_timeval(ticks, &tv[0], &tv[1]);
-        if (rc < 0)
-            return rc;
-        size_t copy_len = *optlen < sizeof(tv) ? *optlen : sizeof(tv);
-        if (copy_len)
-            memcpy(optval, tv, copy_len);
-        *optlen = copy_len;
+    net_option_view_t v;
+    net_option_view_init(s, &v);
+    net_opt_report_t rep;
+    memset(&rep, 0, sizeof(rep));
+    int r = a20_net_getsockopt_state(&v, level, optname, *optlen, &rep);
+    if (r < 0)
+        return r;
+    switch (rep.kind) {
+    case NET_OPT_REPORT_INT: {
+        int val = (int)rep.val0;
+        memcpy(optval, &val, sizeof(val));
+        *optlen = sizeof(val);
         return 0;
     }
-    else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
-        val = reuseaddr;
-    else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
-        val = reuseport;
-    else if (level == SOL_SOCKET && optname == SO_KEEPALIVE)
-        val = keepalive;
-    else if (level == SOL_SOCKET && optname == SO_PASSCRED)
-        val = s->passcred;
-    else if (level == SOL_SOCKET) {
-        if (optname == SO_PEERCRED) {
-            /* Linux struct ucred: { pid, uid, gid }. */
-            if (*optlen < 3 * sizeof(int32_t))
-                return -EINVAL;
-            int32_t cred[3];
-            cred[0] = s->peer_pid;
-            cred[1] = s->peer_uid;
-            cred[2] = s->peer_gid;
-            memcpy(optval, cred, sizeof(cred));
-            *optlen = sizeof(cred);
-            return 0;
-        }
-        if (optname == SO_PEERPIDFD) {
-            /* Linux 6.5+: pidfd pinning the peer; dbus-daemon uses this for
-             * peer identity when available. */
-            extern int linux_pidfd_create(int pid, int flags);
-            if (s->peer_pid <= 0)
-                return net_notconn(NET_NOTCONN_PEERPIDFD);
-            if (*optlen < sizeof(int32_t))
-                return -EINVAL;
-            int pfd = linux_pidfd_create(s->peer_pid, O_CLOEXEC);
-            if (pfd < 0)
-                return pfd;
-            int32_t out = pfd;
-            memcpy(optval, &out, sizeof(out));
-            *optlen = sizeof(out);
-            return 0;
-        }
-        val = 0;
+    case NET_OPT_REPORT_STRING:
+        if (rep.len)
+            memcpy(optval, rep.text, rep.len);
+        *optlen = rep.len;
+        return 0;
+    case NET_OPT_REPORT_CRED: {
+        int32_t cred[3] = { (int32_t)rep.val0, (int32_t)rep.val1,
+                            (int32_t)rep.val2 };
+        memcpy(optval, cred, sizeof(cred));
+        *optlen = sizeof(cred);
+        return 0;
     }
-    else if (level == IPPROTO_IP) {
-        /* Report the effective value, not the stored field: a caller that never
-         * set an option must see the TTL/TOS its packets actually carry. */
-        uint8_t ttl, tos, mc_ttl;
-        net_inet_ip_effective(s, &ttl, &tos, &mc_ttl);
-        switch (optname) {
-        case IP_TTL:                  val = ttl; break;
-        case IP_TOS:                  val = tos; break;
-        case A20_IP_MULTICAST_TTL_WIRE:  val = mc_ttl; break;
-        case A20_IP_MULTICAST_LOOP_WIRE: {
-            uint64_t irq = net_sock_lock(s);
-            val = s->mc_loop;
-            net_sock_unlock(s, irq);
-            break;
-        }
-        /* -EOPNOTSUPP rather than -ENOPROTOOPT: the option exists in the Linux
-         * ABI, this kernel just cannot honour it (IP_OPTIONS needs a
-         * per-packet option buffer lwIP's output path has no room for). */
-        default: return -EOPNOTSUPP;
-        }
+    case NET_OPT_REPORT_TIMEVAL: {
+        long tv[2] = { (long)rep.val0, (long)rep.val1 };
+        if (rep.len)
+            memcpy(optval, tv, rep.len);
+        *optlen = rep.len;
+        return 0;
     }
-    else if (level == IPPROTO_TCP) {
-        if (s->type != SOCK_STREAM)
-            return -ENOPROTOOPT;
-        if (optname == TCP_CONGESTION) {
-            /* Report the algorithm this connection will actually use, which is
-             * the whole point of the option.  It used to hardcode "reno" (and,
-             * before that, "cubic" when no CUBIC existed at all): the first
-             * made a caller that had set "cubic" unable to tell whether the
-             * request took, the second made monitoring tools believe an
-             * implementation existed that did not.
-             *
-             * A live pcb is authoritative over the stored request, because
-             * setsockopt applies to the pcb as well -- a connection that was
-             * accepted inherits its listener's algorithm, so the socket's own
-             * field is not always the answer. */
-            uint8_t alg = tcp_congestion;
-#if LWIP_TCP_CUBIC
-            uint64_t flags = a20_lwip_lock();
-            if (s->tcp && s->tcp->state != LISTEN)
-                alg = s->tcp->cong_alg;
-            a20_lwip_unlock(flags);
-#else
-            /* Without CUBIC there is only ever one algorithm, whatever the
-             * socket recorded.  Saying otherwise here would put this
-             * getsockopt at odds with the setsockopt above it. */
-            alg = TCP_CONG_RENO;
-#endif
-            const char *name = tcp_cong_alg_name(alg);
-            size_t len = strlen(name) + 1;
-            size_t n = *optlen < len ? *optlen : len;
-            if (n)
-                memcpy(optval, name, n);
-            *optlen = n;
-            return 0;
-        }
-        if (optname == TCP_INFO) {
-            /* No struct tcp_info is modelled.  The old handler wrote a state
-             * byte at offset 0 and zeroed the rest, which callers read as
-             * tcpi_rtt/tcpi_total_retrans being measured-and-zero.  Refuse. */
-            return -EOPNOTSUPP;
-        }
-        switch (optname) {
-        case TCP_NODELAY:
-            val = tcp_nodelay;
-            break;
-        case TCP_MAXSEG:
-            val = 1460;
-            break;
-        case TCP_CORK:
-        case TCP_SYNCNT:
-        case TCP_LINGER2:
-        case TCP_DEFER_ACCEPT:
-        case TCP_WINDOW_CLAMP:
-        case TCP_QUICKACK:
-        case TCP_USER_TIMEOUT:
-            val = 0;
-            break;
-        case TCP_KEEPIDLE:
-            if (keep_idle > 0) {
-                val = keep_idle;
-            } else {
-                uint64_t flags = a20_lwip_lock();
-                val = s->tcp && s->tcp->state != LISTEN
-                    ? (int)(s->tcp->keep_idle / 1000U) : 7200;
-                a20_lwip_unlock(flags);
-            }
-            break;
-        case TCP_KEEPINTVL:
-            if (keep_intvl > 0) {
-                val = keep_intvl;
-            } else {
-                uint64_t flags = a20_lwip_lock();
-                val = s->tcp && s->tcp->state != LISTEN
-                    ? (int)(s->tcp->keep_intvl / 1000U) : 75;
-                a20_lwip_unlock(flags);
-            }
-            break;
-        case TCP_KEEPCNT:
-            if (keep_cnt > 0) {
-                val = keep_cnt;
-            } else {
-                uint64_t flags = a20_lwip_lock();
-                val = s->tcp && s->tcp->state != LISTEN
-                    ? (int)s->tcp->keep_cnt : 9;
-                a20_lwip_unlock(flags);
-            }
-            break;
-        default:
-            return -ENOPROTOOPT;
-        }
+    case NET_OPT_REPORT_PIDFD: {
+        int pfd = linux_pidfd_create((int)rep.val0, O_CLOEXEC);
+        if (pfd < 0)
+            return pfd;
+        int32_t out = pfd;
+        memcpy(optval, &out, sizeof(out));
+        *optlen = sizeof(out);
+        return 0;
     }
-    else if (s->domain == AF_INET6 && level == IPPROTO_IPV6) {
-        switch (optname) {
-        case IPV6_V6ONLY:          val = 0; break;
-        case IPV6_RECVPKTINFO:     val = s->ipv6_recv_pktinfo; break;
-        case IPV6_RECVTCLASS:      val = s->ipv6_recv_tclass; break;
-        case IPV6_RECVHOPLIMIT:    val = s->ipv6_recv_hoplimit; break;
-        case IPV6_RECVRTHDR:       val = s->ipv6_recv_rthdr; break;
-        case IPV6_RECVHOPOPTS:     val = s->ipv6_recv_hopopts; break;
-        case IPV6_RECVDSTOPTS:     val = s->ipv6_recv_dstopts; break;
-        case IPV6_RECVERR:         val = s->ipv6_recv_err; break;
-        case IPV6_2292PKTINFO:     val = s->ipv6_recv_2292_pktinfo; break;
-        case IPV6_2292HOPLIMIT:    val = s->ipv6_recv_2292_hoplimit; break;
-        case IPV6_2292RTHDR:       val = s->ipv6_recv_2292_rthdr; break;
-        case IPV6_2292HOPOPTS:     val = s->ipv6_recv_2292_hopopts; break;
-        case IPV6_2292DSTOPTS:     val = s->ipv6_recv_2292_dstopts; break;
-        case IPV6_UNICAST_IF:      val = 0; break;
-        case IPV6_MULTICAST_IF:    val = 0; break;
-        case IPV6_MULTICAST_HOPS:  val = -1; break;
-        case IPV6_MULTICAST_LOOP:  val = 1; break;
-        case IPV6_TCLASS:          val = 0; break;
-        case IPV6_HOPLIMIT:        val = -1; break;
-        case IPV6_FLOWINFO:        val = 0; break;
-        default: return -ENOPROTOOPT;
-        }
+    default:
+        return -EINVAL;
     }
-    else
-        return -EOPNOTSUPP;
-    return net_copyout_int(optval, optlen, val);
 }
+
 
 int net_shutdown(int gfd, int how)
 {
@@ -1345,62 +929,69 @@ int net_set_nonblock(int gfd, int nonblock)
     return 0;
 }
 
+
+/*
+ * Primitives for the Rust poll readiness computation
+ * (kernel/net/socket_poll.rs).  Each one is a step the Rust decision surface
+ * cannot perform itself: the vfile-to-socket resolution, a lock, the channel
+ * tests, the peer queue depth read and the queue capacity.
+ */
+#include "net/socket_poll_state.h"
+
+void *a20_net_poll_socket_from_vfile(void *vf) {
+    vfile_t *f = (vfile_t *)vf;
+    return (f && net_is_socket_vfile(f)) ? f->priv : NULL;
+}
+
+void a20_net_poll_view_init(void *sp, net_poll_view_t *out) {
+    net_socket_t *s = (net_socket_t *)sp;
+    out->s = s;
+    out->domain = &s->domain;
+    out->sock_type = &s->type;
+    out->closed = &s->closed;
+    out->shut_rd = &s->shut_rd;
+    out->shut_wr = &s->shut_wr;
+    out->peer_closed = &s->peer_closed;
+    out->connected = &s->connected;
+    out->local_tcp = &s->local_tcp;
+    out->tcp_connecting = &s->tcp_connecting;
+    out->rx_count = &s->rx_count;
+    out->ch_ep = (void **)&s->ch_ep;
+    out->ch_len = &s->ch_len;
+    out->rx_head = (void **)&s->rx_head;
+    out->accept_head = (void **)&s->accept_head;
+    out->peer = (void **)&s->peer;
+}
+
+uint64_t a20_net_poll_lock(void *sp) { return net_sock_lock((net_socket_t *)sp); }
+
+void a20_net_poll_unlock(void *sp, uint64_t flags) {
+    net_sock_unlock((net_socket_t *)sp, flags);
+}
+
+int a20_net_poll_channel_readable(void *ch_ep) {
+    return a20_channel_readable((a20_channel_ep_t *)ch_ep) ? 1 : 0;
+}
+
+int a20_net_poll_channel_writable(void *ch_ep) {
+    return a20_channel_writable((a20_channel_ep_t *)ch_ep) ? 1 : 0;
+}
+
+int a20_net_poll_channel_peer_closed(void *ch_ep) {
+    return a20_channel_peer_closed((a20_channel_ep_t *)ch_ep) ? 1 : 0;
+}
+
+/* A weakly consistent read of the peer's queue depth; see the Rust comment for
+ * why poll(2) must not take the peer's lock for it. */
+int a20_net_poll_peer_rx_count(void *peer) {
+    return ((net_socket_t *)peer)->rx_count;
+}
+
+int a20_net_poll_max_queue(void) { return NET_MAX_QUEUE; }
+
 int net_poll_file(vfile_t *vf, short events)
 {
-    net_socket_t *s = vf && net_is_socket_vfile(vf) ? vf->priv : NULL;
-    if (!s)
-        return -ENOTSOCK;
-    short revents = 0;
-    uint64_t irq = net_sock_lock(s);
-    if (s->ch_ep) {
-        int ch_rd = a20_channel_readable(s->ch_ep) || s->ch_len > 0;
-        int ch_wr = a20_channel_writable(s->ch_ep);
-        int ch_pc = a20_channel_peer_closed(s->ch_ep);
-        if (s->peer_closed || ch_pc)
-            revents |= POLLHUP;
-        if ((events & POLLIN) &&
-            (s->rx_head || ch_rd || s->closed || s->peer_closed || ch_pc ||
-             s->shut_rd))
-            revents |= POLLIN;
-        if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
-            if (s->peer_closed || ch_pc)
-                revents |= POLLERR;
-            else if ((s->domain == AF_UNIX || s->local_tcp) &&
-                     s->type == SOCK_STREAM && s->connected && !s->peer)
-                revents |= POLLERR;
-            else if (ch_wr || s->rx_count < NET_MAX_QUEUE)
-                revents |= POLLOUT;
-        }
-        net_sock_unlock(s, irq);
-        return revents;
-    }
-    if (s->peer_closed)
-        revents |= POLLHUP;
-    else if (s->closed || (s->shut_rd && s->shut_wr))
-        revents |= POLLHUP;
-    if ((events & POLLIN) &&
-        (s->rx_head || s->accept_head || s->closed || s->peer_closed || s->shut_rd))
-        revents |= POLLIN;
-    if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
-        if (s->peer_closed)
-            revents |= POLLERR;
-        else if (s->tcp_connecting)
-            revents |= 0;
-        else if ((s->domain == AF_UNIX || s->local_tcp) &&
-                 s->type == SOCK_STREAM && s->connected && !s->peer)
-            revents |= POLLERR;
-        else if (s->peer && s->type == SOCK_STREAM && s->peer->rx_count >= NET_MAX_QUEUE)
-            /* Deliberately a weakly consistent read: the peer may well be in
-             * another bucket, and taking it here would turn poll(2) into a
-             * reader that contends with the peer's data path.  The only
-             * consequence of reading a slightly stale rx_count is one extra or
-             * one missing POLLOUT in this single call. */
-            revents |= 0;
-        else
-            revents |= POLLOUT;
-    }
-    net_sock_unlock(s, irq);
-    return revents;
+    return a20_net_poll_file(vf, events);
 }
 
 int net_poll_events(int gfd, short events)
