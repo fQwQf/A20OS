@@ -183,7 +183,10 @@ void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
                               unsigned long sepc, unsigned long stval);
 
 /* Direct-map freemap — visible to trap entry asm for sp validity checks.
- * Bit set → page is on a buddy free list (not safe to use as stack). */
+ * Bit set → page is on a buddy free list (not safe to use as stack).
+ * direct_map_end is the exclusive upper bound of the direct map; the
+ * riscv64 trap entry rejects an out-of-range stack before saving a frame.
+ * It remains UINT64_MAX (check disabled) until pfa_init sets the bound. */
 extern uint8_t *g_pfa_freemap;
 extern uint64_t g_pfa_direct_map_end;
 extern const pfa_range_t *g_pfa_ranges;

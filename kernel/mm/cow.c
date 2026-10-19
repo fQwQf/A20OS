@@ -129,32 +129,237 @@ int mm_clone_swap_page(mm_struct_t *dst, vaddr_t dst_va,
 }
 #endif
 
+/*
+ * The fork/COW clone transaction lives in kernel/mm/cow_clone.rs.  What is
+ * left here is the page-table walker (below), the leaf probe, the node lock
+ * and status sidecar, the PTE encoders, pt_map/pt_map_huge, the frame
+ * allocator, the page-cache lookup and the swap-entry duplication.
+ */
+extern int a20_fork_clone_page_rust(mm_struct_t *child, mm_struct_t *parent,
+                                    vaddr_t va, int shared);
+extern int a20_cow_clone_leaf_rust(mm_struct_t *child, mm_struct_t *parent,
+                                   vaddr_t va, int level, int shared);
+
+struct a20_cow_src {
+    void     *pcp;
+    uintptr_t pte;
+    uintptr_t base;
+    uintptr_t size;
+    uintptr_t pa;
+    uintptr_t raw_flags;
+    uintptr_t cow_flags;
+    uint32_t  pfn;
+    int32_t   level;
+    int32_t   present;
+    int32_t   swap;
+    int32_t   is_leaf;
+    int32_t   w_or_cow;
+    uint32_t  class;
+    int32_t   kind;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_cow_src) == 88, "Rust/C cow src ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_cow_src) == 60, "Rust/C cow src ABI");
+#endif
+
+uint64_t a20_cow_policy_flags(const void *parent_ptr, uintptr_t va, int *present)
+{
+    const mm_struct_t *parent = parent_ptr;
+    mm_seg_t *policy = mm_seg_find((mm_struct_t *)parent, va);
+    if (!policy || va < policy->start || va >= policy->end) {
+        if (present)
+            *present = 0;
+        return 0;
+    }
+    if (present)
+        *present = 1;
+    return policy->vm_flags;
+}
+
+void a20_cow_probe(const void *parent_ptr, uintptr_t va,
+                   struct a20_cow_src *out)
+{
+    const mm_struct_t *parent = parent_ptr;
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &out->level, &out->base,
+                                &out->size);
+    if (!src)
+        return;
+    out->pte = (uintptr_t)*src;
+    out->present = (*src & PTE_V) != 0;
+#ifdef CONFIG_SWAP
+    out->swap = pte_is_swap(*src);
+#endif
+    out->is_leaf = arch_pte_is_leaf(*src);
+    if (out->present) {
+        out->pa = arch_pte_addr(*src);
+        out->pfn = phys_to_pfn(out->pa);
+    }
+    out->raw_flags = arch_pte_flags(*src);
+    out->cow_flags = mm_cow_flags(*src);
+    out->w_or_cow = ((*src) & (PTE_W | PTE_COW)) != 0;
+}
+
+int a20_cow_dst_present(const void *child_ptr, uintptr_t va)
+{
+    const mm_struct_t *child = child_ptr;
+    pte_t *dst = pt_lookup_leaf(child->pgdir, va, NULL, NULL, NULL);
+    return dst && (*dst & PTE_V);
+}
+
+int a20_cow_clone_swap(void *child, void *parent, uintptr_t va)
+{
+#ifdef CONFIG_SWAP
+    return mm_clone_swap_page(child, va, parent, va);
+#else
+    (void)child;
+    (void)parent;
+    (void)va;
+    return -EAGAIN;
+#endif
+}
+
+void a20_cow_geometry(int level, uintptr_t *size, uintptr_t *pmd_size,
+                      int *pmd_order)
+{
+    if (size)
+        *size = vm_pt_level_size(level);
+    if (pmd_size)
+        *pmd_size = PMD_SIZE;
+    if (pmd_order)
+        *pmd_order = PMD_ORDER;
+}
+
+uint32_t a20_cow_frame_alloc(int order)
+{
+    return pfa_alloc(order);
+}
+
+void a20_cow_frame_free(uint32_t pfn, int order)
+{
+    pfa_free(pfn, order);
+}
+
+void a20_cow_frame_copy(uint32_t dst, uint32_t src, uintptr_t size)
+{
+    memcpy(pfn_to_virt(dst), pfn_to_virt(src), size);
+}
+
+int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
+                      uintptr_t flags, uint32_t class, int level)
+{
+    mm_struct_t *child = child_ptr;
+    paddr_t pa = pfn_to_phys(pfn);
+    if (level > 0)
+        return pt_map_huge(child, va, pa, (pte_t)flags, (uint8_t)class);
+    return pt_map(child->pgdir, va, pa, (pte_t)flags);
+}
+
+/* MM_FORK_SNAPSHOT_PIN: snapshot and pin the source leaf under the parent's
+ * node lock.  The lock is RELEASED by a20_cow_share_unlock() on every success
+ * path; returning 0 leaves no lock held.  Pinning and snapshotting are one step
+ * because a racing COW can otherwise free the frame before it is retained.
+ * The transaction that decides share-vs-copy, downgrades the parent and maps
+ * the child only after this lock is dropped is kernel/mm/cow_clone.rs; the
+ * atomic step itself has to stay here, next to the page-table walk. */
+int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
+                           struct a20_cow_src *out)
+{
+    mm_struct_t *parent = parent_ptr;
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
+    if (!src_pte)
+        return 0;
+    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+    if (stab)
+        mm_pt_node_lock(stab);
+    pte_t source = *src_pte;
+    if (!(source & PTE_V) || !arch_pte_is_leaf(source)) {
+        if (stab)
+            mm_pt_node_unlock(stab);
+        return 0;
+    }
+    mm_seg_t *vma = mm_seg_find(parent, va);
+    int is_vmo = vma && (vma->vm_flags & VM_VMO);
+    pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
+    uint8_t cls = mm_fork_page_class(parent, va);
+    page_cache_page_t *pcp =
+        is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
+    if (!pcp && !is_vmo)
+        frame_get(pfn);
+    out->pte = (uintptr_t)source;
+    out->pa = arch_pte_addr(source);
+    out->pfn = pfn;
+    out->raw_flags = arch_pte_flags(source);
+    out->cow_flags = mm_cow_flags(source);
+    out->w_or_cow = (source & (PTE_W | PTE_COW)) != 0;
+    out->class = cls;
+    out->pcp = pcp;
+    out->kind = pcp ? 2 : (is_vmo ? 0 : 1);
+    out->level = level;
+    return 1;
+}
+
+void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
+                             uintptr_t pa, uintptr_t flags, uint32_t class)
+{
+    mm_struct_t *parent = parent_ptr;
+    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
+    if (!src_pte)
+        return;
+#ifdef ARCH_HAS_PTE_BLOCK
+    size_t leaf_size = vm_pt_level_size(level);
+    *src_pte = (leaf_size >= PMD_SIZE)
+                   ? arch_pte_block((paddr_t)pa, (pte_t)flags)
+                   : arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+#else
+    *src_pte = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+#endif
+    mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+    if (stab)
+        (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
+                                (uint8_t)class);
+}
+
+void a20_cow_share_unlock(void *parent_ptr, uintptr_t va)
+{
+    mm_struct_t *parent = parent_ptr;
+    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+    if (stab)
+        mm_pt_node_unlock(stab);
+}
+
+int a20_cow_requires_private_copy(void)
+{
+    return arch_fork_requires_private_copy();
+}
+
+void a20_cow_rss_add(void *child, uintptr_t pages)
+{
+    mm_rss_add(child, pages);
+}
+
+void a20_cow_release_ref(const struct a20_cow_src *src)
+{
+    if (!src)
+        return;
+    if (src->kind == 2 && src->pcp)
+        page_cache_put(src->pcp);
+    else if (src->kind == 1)
+        frame_put(src->pfn);
+}
+
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                        int shared) {
-    mm_seg_t *policy = mm_seg_find(parent, va);
-    if (policy && va >= policy->start && va < policy->end &&
-        (policy->vm_flags & (VM_DONTFORK | VM_WIPEONFORK)))
-        return 0;
-    int level = 0;
-    vaddr_t base = 0;
-    size_t size = 0;
-    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
-#ifdef CONFIG_SWAP
-    if (src && pte_is_swap(*src)) {
-        int r = mm_clone_swap_page(child, va, parent, va);
-        return r == -EEXIST || r == -EAGAIN ? 0 : r;
-    }
-#endif
-    if (!src || !(*src & PTE_V) || !arch_pte_is_leaf(*src))
-        return 0;
-    if (va != base)
-        return 0;
-
-    pte_t *dst = pt_lookup_leaf(child->pgdir, va, NULL, NULL, NULL);
-    if (dst && (*dst & PTE_V))
-        return 0;
-
-    return mm_fork_clone_leaf(child, parent, src, base, level, shared);
+    return a20_fork_clone_page_rust(child, parent, va, shared);
 }
 
 int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
@@ -172,101 +377,9 @@ int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
 int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
                        pte_t *src_pte, vaddr_t va, int level,
                        int shared) {
-    if (!src_pte || !(*src_pte & PTE_V) ||
-        !arch_pte_is_leaf(*src_pte))
+    if (!src_pte || !(*src_pte & PTE_V) || !arch_pte_is_leaf(*src_pte))
         return 0;
-
-    paddr_t pa = arch_pte_addr(*src_pte);
-    pfn_t pfn = phys_to_pfn(pa);
-    if (!pfn_valid(pfn))
-        return -ENOMEM;
-
-    size_t leaf_size = vm_pt_level_size(level);
-    if (!shared && arch_fork_requires_private_copy()) {
-        int order = (leaf_size == PMD_SIZE) ? PMD_ORDER : 0;
-        if (leaf_size != PAGE_SIZE && leaf_size != PMD_SIZE)
-            return -ENOMEM;
-        pfn_t copy = pfa_alloc(order);
-        if (copy == PFN_NONE)
-            return -ENOMEM;
-        memcpy(pfn_to_virt(copy), pfn_to_virt(pfn), leaf_size);
-        int r = (level > 0) ?
-            pt_map_huge(child, va, pfn_to_phys(copy),
-                        arch_pte_flags(*src_pte),
-                        mm_fork_page_class(parent, va)) :
-            pt_map(child->pgdir, va, pfn_to_phys(copy),
-                   arch_pte_flags(*src_pte));
-        if (r < 0) {
-            pfa_free(copy, order);
-            return r;
-        }
-        mm_rss_add(child, leaf_size / PAGE_SIZE);
-        return 0;
-    }
-
-#if defined(ARCH_HAS_PGTABLE_OPS)
-    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
-    if (stab)
-        mm_pt_node_lock(stab);
-#endif
-    /* MM_FORK_SNAPSHOT_PIN: the frame reference and parent downgrade must
-     * belong to the same locked PTE snapshot.  Locking only for the later
-     * rewrite lets a status-driven COW replace and free the observed frame
-     * before frame_get(), or leaves the child sharing a writable parent. */
-    pte_t source = *src_pte;
-    if (!(source & PTE_V) || !arch_pte_is_leaf(source)) {
-#if defined(ARCH_HAS_PGTABLE_OPS)
-        if (stab)
-            mm_pt_node_unlock(stab);
-#endif
-        return 0;
-    }
-    pa = arch_pte_addr(source);
-    pfn = phys_to_pfn(pa);
-    uint8_t cls = mm_fork_page_class(parent, va);
-    mm_seg_t *vma = mm_seg_find(parent, va);
-    int is_vmo = vma && (vma->vm_flags & VM_VMO);
-    /* This is a non-creating cache lookup: it pins an existing canonical
-     * page without allocation or I/O.  VMO mappings instead retain the VMO. */
-    page_cache_page_t *pcp =
-        is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
-    if (!pcp && !is_vmo)
-        frame_get(pfn);
-
-    pte_t flags = shared ? arch_pte_flags(source) : mm_cow_flags(source);
-    if (!shared && (source & (PTE_W | PTE_COW))) {
-#ifdef ARCH_HAS_PTE_BLOCK
-        *src_pte = (leaf_size >= PMD_SIZE)
-                       ? arch_pte_block(pa, flags)
-                       : arch_pte_leaf(pa, flags);
-#else
-        *src_pte = arch_pte_leaf(pa, flags);
-#endif
-        mm_tlb_note_change(parent, va, leaf_size);
-#if defined(ARCH_HAS_PGTABLE_OPS)
-        if (stab)
-            (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level), cls);
-#endif
-    }
-#if defined(ARCH_HAS_PGTABLE_OPS)
-    if (stab)
-        mm_pt_node_unlock(stab);
-#endif
-    /* Child table allocation runs after releasing the parent node, avoiding
-     * nested node locks and reclaim under the parent's MCS lock.  On failure
-     * the parent may stay COW; its next write safely upgrades or copies it. */
-    int r = (level > 0) ? pt_map_huge(child, va, pa, flags, cls)
-                        : pt_map(child->pgdir, va, pa, flags);
-    if (r < 0) {
-        if (pcp)
-            page_cache_put(pcp);
-        else if (!is_vmo)
-            frame_put(pfn);
-        return r;
-    }
-
-    mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);
-    return 0;
+    return a20_cow_clone_leaf_rust(child, parent, va, level, shared);
 }
 
 int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,

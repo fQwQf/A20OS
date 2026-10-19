@@ -1,91 +1,19 @@
 #include "mm/mempolicy.h"
 
 #include "core/errno.h"
-#include "mm/mm.h"
+#include "core/types.h"
 #include "mm/vm.h"
 #include "proc/proc.h"
 
 /*
- * NUMA memory policy compatibility layer.
+ * NUMA memory policy.
  *
- * A20OS has a single NUMA node (node 0).  Policies are validated against the
- * Linux flag set, stored per task, and reported back through get_mempolicy,
- * but they never move physical pages because there is nowhere to move them.
- * This keeps set_mempolicy/mbind/migrate_pages/move_pages functional for
- * programs that probe or set policies while remaining honest about the
- * single-node topology.
+ * The validation and the state transitions live in
+ * kernel/mm/mempolicy_state.rs: which modes are legal, when a mask is
+ * required, which mask is actually stored, and the mbind range contract.  What
+ * is left here is the task-field access the Rust module cannot name and the
+ * two getters, which are pure field reads.
  */
-
-/* Linux MPOL_* modes. */
-#define MPOL_DEFAULT    0
-#define MPOL_PREFERRED  1
-#define MPOL_BIND       2
-#define MPOL_INTERLEAVE 3
-#define MPOL_LOCAL      4
-#define MPOL_F_MEMALLOW  0x02
-#define MPOL_F_NUMA_BALANCING 0x04
-#define MPOL_F_STATIC_NODES   0x08
-#define MPOL_F_RELATIVE_NODES 0x10
-#define MPOL_MF_STRICT  1
-#define MPOL_MF_MOVE    2
-#define MPOL_MF_MOVE_ALL 4
-
-/* A20OS exposes exactly one NUMA node, so a mask naming any other node can
- * never be honoured.  Rejecting it is what keeps a set/get round trip honest:
- * accepting node 1 and reporting success would promise placement A20OS cannot
- * perform. */
-static uint64_t mempolicy_valid_nodes(void)
-{
-    return 1u; /* node 0 */
-}
-
-int mempolicy_set(struct task_t *t, int mode, uint64_t nmask)
-{
-    if (!t)
-        return -ESRCH;
-    if (mode < MPOL_DEFAULT || mode > MPOL_LOCAL)
-        return -EINVAL;
-    /* MPOL_BIND/INTERLEAVE need at least one node; DEFAULT/LOCAL ignore the
-     * mask.  Node 0 is always valid. */
-    if ((mode == MPOL_BIND || mode == MPOL_INTERLEAVE) && nmask == 0)
-        return -EINVAL;
-    if (nmask & ~mempolicy_valid_nodes())
-        return -EINVAL;
-    t->policy.mempolicy_mode = mode;
-    t->policy.mempolicy_nmask = (mode == MPOL_BIND || mode == MPOL_INTERLEAVE)
-                                    ? nmask
-                                    : 0;
-    return 0;
-}
-
-int mempolicy_mbind(struct task_t *t, uint64_t addr, size_t len, int mode,
-                    uint64_t nmask, unsigned flags)
-{
-    (void)flags;
-    if (!t)
-        return -ESRCH;
-    if (mode < MPOL_DEFAULT || mode > MPOL_LOCAL)
-        return -EINVAL;
-    if ((mode == MPOL_BIND || mode == MPOL_INTERLEAVE) && nmask == 0)
-        return -EINVAL;
-    if (nmask & ~mempolicy_valid_nodes())
-        return -EINVAL;
-    if (addr == 0 || len == 0)
-        return -EINVAL;
-    if ((addr & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1)))
-        return -EINVAL;
-    /* Validate that the whole range lies inside mapped VMAs. */
-    if (t->mm) {
-        uint64_t end = addr + len;
-        if (end < addr || end > USER_VA_LIMIT)
-            return -EINVAL;
-    }
-    t->policy.mempolicy_mode = mode;
-    t->policy.mempolicy_nmask = (mode == MPOL_BIND || mode == MPOL_INTERLEAVE)
-                                    ? nmask
-                                    : 0;
-    return 0;
-}
 
 int mempolicy_get_mode(struct task_t *t)
 {
@@ -100,3 +28,24 @@ uint64_t mempolicy_get_nmask(struct task_t *t)
         return 0;
     return t->policy.mempolicy_nmask;
 }
+
+int a20_mempolicy_has_mm(const void *t)
+{
+    return t && ((const task_t *)t)->mm;
+}
+
+uintptr_t a20_mempolicy_user_va_limit(void)
+{
+    return USER_VA_LIMIT;
+}
+
+int a20_mempolicy_store(void *t, int mode, uint64_t nmask)
+{
+    task_t *task = t;
+    if (!task)
+        return -ESRCH;
+    task->policy.mempolicy_mode = mode;
+    task->policy.mempolicy_nmask = nmask;
+    return 0;
+}
+

@@ -54,238 +54,433 @@ static void mm_munmap_retire_reservation(mm_struct_t *mm, vaddr_t va)
 #endif /* ARCH_HAS_PGTABLE_OPS */
 }
 #endif /* CONFIG_NOMMU */
+/*
+ * The unmap transaction lives in kernel/mm/munmap_txn.rs.  What is left here
+ * is what it cannot name: the mm_seg_t layout and the list surgery, the
+ * page-table walk and leaf teardown, the architecture predicates (presence,
+ * swap, leaf, physical address, dirty bit), and the TLB hold/release
+ * primitives.  Every bridge is one field read, one field write, or one call to
+ * an existing helper -- none of them decides anything.
+ */
+extern int a20_munmap_rust(mm_struct_t *mm, vaddr_t addr, size_t len);
 
-int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
-    if (!mm || !mm->pgdir) return -EINVAL;
-    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0) return 0;
-    vaddr_t end = addr + len;
-    if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
-    mm_seg_index_invalidate(mm);
+struct a20_munmap_vma_info {
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+    uint64_t  backing_offset;
+    void     *file_vnode;
+};
 
+struct a20_munmap_leaf {
+    uintptr_t aux;    /* probe: raw PTE; unmap: the reported physical address */
+    uintptr_t base;
+    uintptr_t size;
+    uint32_t  pfn;
+    int32_t   level;
+    int32_t   present;
+    int32_t   swap;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_munmap_leaf) == 40, "Rust/C unmap leaf ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_munmap_leaf) == 28, "Rust/C unmap leaf ABI");
+#endif
+
+struct a20_munmap_vma_bounds {
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+};
+
+struct a20_munmap_entry {
+    void     *vma;
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+    uint64_t  backing_offset;
+    void     *file_vnode;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_munmap_entry) == 48, "Rust/C unmap entry ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_munmap_entry) == 24, "Rust/C unmap entry ABI");
+#endif
+
+
+int a20_munmap_has_pgdir(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm && mm->pgdir;
+}
+
+uintptr_t a20_munmap_user_va_limit(void)
+{
+    return USER_VA_LIMIT;
+}
+
+void *a20_munmap_vma_first(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm ? mm->mmap : NULL;
+}
+
+void *a20_munmap_vma_next(void *vma_ptr)
+{
+    mm_seg_t *v = vma_ptr;
+    return v ? v->next : NULL;
+}
+
+void a20_munmap_vma_info(void *vma_ptr, struct a20_munmap_vma_info *out)
+{
+    mm_seg_t *v = vma_ptr;
+    if (!v || !out)
+        return;
+    out->start = v->start;
+    out->end = v->end;
+    out->vm_flags = v->vm_flags;
+    out->backing_offset = v->backing_offset;
+    out->file_vnode = v->file_vnode;
+}
+
+int a20_munmap_is_nommu(void)
+{
+#ifdef CONFIG_NOMMU
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/* NOMMU has no leaves: a mapping is one flat allocation this record owns, so
+ * releasing a range means freeing (or untracking) it, and only a whole-record
+ * clip does.  This is the branch the C reference kept on the other side of its
+ * `#ifdef CONFIG_NOMMU`, restored as a bridge. */
+void a20_munmap_release_flat(void *mm_ptr, void *vma_ptr, uintptr_t clip_start,
+                             uintptr_t clip_end)
+{
+#ifdef CONFIG_NOMMU
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!v || v->start != clip_start || v->end != clip_end)
+        return;
+    if (v->nommu_alloc) {
+        kfree(v->nommu_alloc);
+        v->nommu_alloc = NULL;
+    } else {
+        mm_untrack_nommu_alloc(mm, (void *)v->start);
+    }
+#else
+    (void)mm_ptr;
+    (void)vma_ptr;
+    (void)clip_start;
+    (void)clip_end;
+#endif
+}
+
+void a20_munmap_vma_bounds(void *vma_ptr, struct a20_munmap_vma_bounds *out)
+{
+    mm_seg_t *v = vma_ptr;
+    if (!v || !out)
+        return;
+    out->start = v->start;
+    out->end = v->end;
+    out->vm_flags = v->vm_flags;
+}
+
+/* Collect the records the range covers in one walk.  The transaction only
+ * operates on covered records, so walking the (often much longer) prefix in C
+ * keeps a call off every visited record; the Rust side then decides what to do
+ * with the short list.  -ENOSPC means the caller must walk the list itself. */
+int a20_munmap_collect(void *mm_ptr, uintptr_t addr, uintptr_t end,
+                       struct a20_munmap_entry *out, uintptr_t cap)
+{
+    mm_struct_t *mm = mm_ptr;
+    uintptr_t n = 0;
+    if (!mm || !out)
+        return -EINVAL;
     for (mm_seg_t *v = mm->mmap; v; v = v->next) {
         if (v->start >= end)
             break;
         if (v->end <= addr)
             continue;
-        if ((v->vm_flags & VM_SYSV_SHM) &&
-            (addr > v->start || end < v->end))
-            return -EINVAL;
-        /* mseal(2): unmap (including MAP_FIXED overwrite via mm_mmap_locked)
-         * of a sealed VMA is refused before any page is released. */
-        if (v->vm_flags & VM_SEALED)
-            return -EPERM;
+        if (n == cap)
+            return -ENOSPC;
+        struct a20_munmap_entry *e = &out[n++];
+        e->vma = v;
+        e->start = v->start;
+        e->end = v->end;
+        e->vm_flags = v->vm_flags;
+        e->backing_offset = v->backing_offset;
+        e->file_vnode = v->file_vnode;
     }
+    return (int)n;
+}
 
-    mm_seg_t *vma = mm->mmap;
-    while (vma) {
-        mm_seg_t *next = vma->next;
-        if (vma->start >= end || vma->end <= addr) { vma = next; continue; }
+void a20_munmap_account(void *mm_ptr, uintptr_t freed_pages,
+                        uintptr_t locked_bytes)
+{
+    mm_struct_t *mm = mm_ptr;
+    if (!mm)
+        return;
+    mm->total_vm = (mm->total_vm > freed_pages) ? mm->total_vm - freed_pages : 0;
+    if (locked_bytes)
+        mm->locked_vm = (mm->locked_vm >= locked_bytes)
+                            ? mm->locked_vm - locked_bytes
+                            : 0;
+}
 
-        vaddr_t clip_start = vma->start < addr ? addr : vma->start;
-        vaddr_t clip_end   = vma->end > end ? end : vma->end;
+/* Whole record: the range loses its backing object, so its label goes with it.
+ * The per-node collapse in pt_unmap_leaf only runs for tables that held no
+ * leaves, which is exactly not the case for a mapping that was never faulted.
+ * Only this record's own name is dropped: the node entries here are far
+ * coarser than the mapping and may also be naming a live neighbour. */
+void a20_munmap_drop_whole(void *mm_ptr, void *vma_ptr, uintptr_t clip_start,
+                           uintptr_t clip_end)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!mm || !v)
+        return;
+    mm_mmap_seg_retire(mm, v, clip_start, clip_end);
+    if (v->prev) v->prev->next = v->next;
+    else mm->mmap = v->next;
+    if (v->next) v->next->prev = v->prev;
+    mm_vma_defer(mm, v);
+}
 
-        /* Release the physical pages in this range.  A partially covered PMD
-         * leaf is demoted to base pages first. */
-        int shared_file_vma = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
-#ifdef CONFIG_NOMMU
-        (void)shared_file_vma;
-        if (vma->start == clip_start && vma->end == clip_end) {
-            if (vma->nommu_alloc) {
-                kfree(vma->nommu_alloc);
-                vma->nommu_alloc = NULL;
-            } else {
-                mm_untrack_nommu_alloc(mm, (void *)vma->start);
-            }
-        }
-#else
-        for (uint64_t va = clip_start; va < clip_end; ) {
-            int level = 0;
-            vaddr_t base = 0;
-            size_t size = 0;
-            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            if (!pte ||
-                (!(*pte & PTE_V)
-#ifdef CONFIG_SWAP
-                 && !pte_is_swap(*pte)
-#endif
-                )) {
-                if (level == 0)
-                    mm_munmap_retire_reservation(mm, va);
-                /* No leaf table means there can be no per-page reservation
-                 * marks in this subtree.  Faults that build such a path need
-                 * mm->lock; existing level-0 marks are still retired above. */
-                vaddr_t next_va = size ? base + size : va + PAGE_SIZE;
-                va = next_va > va ? next_va : va + PAGE_SIZE;
-                continue;
-            }
-            if (shared_file_vma && vma->file_vnode && (*pte & PTE_D)) {
-                uint64_t idx = vma->backing_offset + (va - vma->start);
-                idx /= PAGE_SIZE;
-                page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
-                if (pcp) {
-                    page_cache_mark_dirty(pcp);
-                    page_cache_put(pcp);
-                }
-            }
-#if PTE_D == 0
-            /* ARM32 has no hardware dirty bit. A writable shared mapping
-             * may have changed its cache page even though the leaf carries
-             * no software-visible dirty indication. Harvest before unmap or
-             * MAP_FIXED replacement removes the only mapping evidence. */
-            if (shared_file_vma && vma->file_vnode &&
-                (vma->vm_flags & VM_WRITE) && (*pte & PTE_V) &&
-                arch_pte_is_leaf(*pte)) {
-                vaddr_t dirty_start = base > clip_start ? base : clip_start;
-                uint64_t leaf_end = (uint64_t)base + size;
-                vaddr_t dirty_end = leaf_end < clip_end
-                                      ? (vaddr_t)leaf_end : clip_end;
-                for (vaddr_t dirty_va = dirty_start;
-                     dirty_va < dirty_end; dirty_va += PAGE_SIZE) {
-                    uint64_t idx = vma->backing_offset +
-                                   (dirty_va - vma->start);
-                    page_cache_page_t *pcp = page_cache_get(
-                        vma->file_vnode, idx / PAGE_SIZE, 0);
-                    if (pcp) {
-                        page_cache_mark_dirty(pcp);
-                        page_cache_put(pcp);
-                    }
-                }
-            }
-#endif
-            if (level > 0 && (base < clip_start || base + size > clip_end)) {
-                int dr = mm_demote_huge_page(mm, va);
-                if (dr < 0) return dr;
-                continue;
-            }
-            page_cache_page_t *held_pcp = NULL;
-            pfn_t held_pfn = PFN_NONE;
-            if (*pte & PTE_V) {
-                held_pfn = phys_to_pfn(arch_pte_addr(*pte));
-                held_pcp = mm_file_cache_mapping_get(vma, va, held_pfn);
-                if (held_pcp) {
-                    if (mm_tlb_hold_page(mm, held_pcp) < 0) {
-                        page_cache_put(held_pcp);
-                        return -ENOMEM;
-                    }
-                } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
-                    if (!pfn_valid(held_pfn) ||
-                        mm_tlb_hold_frame(mm, held_pfn) < 0)
-                        return -ENOMEM;
-                }
-            }
-            paddr_t pa = 0;
-            if (pt_unmap_leaf(mm, va, &pa, &base, &size, &level) == 0) {
-                mm_tlb_note_change(mm, base, size);
-                if (pa) {
-                    pfn_t pfn = phys_to_pfn(pa);
-                    if (held_pcp) {
-                        /* Drop the temporary lookup and the mapping's pin.
-                         * mm_tlb_hold_page() retains the final reference until
-                         * every CPU has invalidated the old PTE. */
-                        page_cache_put(held_pcp);
-                        page_cache_put(held_pcp);
-                    } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
-                        frame_put(pfn);
-                    }
-                    size_t pages = size / PAGE_SIZE;
-                    mm_rss_sub_clamped(mm, pages);
-                }
-                va = base + size;
-            } else {
-                if (held_pcp)
-                    page_cache_put(held_pcp);
-                va += PAGE_SIZE;
-            }
-        }
-#endif
-        size_t freed_pages = (clip_end - clip_start) / PAGE_SIZE;
-        mm->total_vm = (mm->total_vm > freed_pages) ? mm->total_vm - freed_pages : 0;
-        if (vma->vm_flags & VM_LOCKED) {
-            size_t locked_sz = clip_end - clip_start;
-            mm->locked_vm = (mm->locked_vm >= locked_sz) ? mm->locked_vm - locked_sz : 0;
-        }
+/* Head cut: the survivor's offset moves, so the extent it used to name is
+ * retired before the bounds change and the new one is named after. */
+void a20_munmap_cut_head(void *mm_ptr, void *vma_ptr, uintptr_t clip_end)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!mm || !v)
+        return;
+    v->backing_offset += clip_end - v->start;
+    mm_mmap_seg_retire(mm, v, v->start, clip_end);
+    v->start = clip_end;
+    mm_mmap_seg_annotate(mm, v, v->start, v->end);
+}
 
-        if (addr <= vma->start && end >= vma->end) {
-            /* Whole VMA: the range loses its backing object, so its label goes
-             * with it.  The per-node collapse in pt_unmap_leaf only runs for
-             * tables that held no leaves, which is exactly not the case for a
-             * mapping that was never faulted.
-             *
-             * Only this VMA's own name is dropped.  The node entries here are
-             * far coarser than the mapping and may also be naming a neighbour
-             * that is still live and still correct. */
-            mm_mmap_seg_retire(mm, vma, clip_start, clip_end);
-            if (vma->prev) vma->prev->next = vma->next;
-            else mm->mmap = vma->next;
-            if (vma->next) vma->next->prev = vma->prev;
-            mm_vma_defer(mm, vma);
-        } else if (addr <= vma->start) {
-            /* Head cut.  The surviving mapping keeps its offset adjusted, so
-             * what it used to name no longer describes its new range: retire
-             * the old extent and name the new one. */
-            uint64_t new_off = vma->backing_offset + (clip_end - vma->start);
-            vma->backing_offset = new_off;
-            mm_mmap_seg_retire(mm, vma, vma->start, clip_end);
-            vma->start = clip_end;
-            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
-        } else if (end >= vma->end) {
-            /* Tail cut.  The offset still lines up -- only the extent shrank --
-             * BUT the extent is exactly what mm_pt_lookup_seg() uses to decide
-             * whether this address is its own.  Leaving the old name here
-             * therefore works while the cut is smaller than the mapping, and
-             * silently stops working the moment the mapping shrinks below its
-             * own label. */
-            mm_mmap_seg_retire(mm, vma, clip_start, vma->end);
-            vma->end = clip_start;
-            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
-        } else {
-            mm_seg_t *tail = mm_seg_new();
-            if (!tail) return -ENOMEM;
-            *tail = *vma;
-            /* Both halves name themselves, so the old extent stops being named
-             * before either half is narrowed -- otherwise the cut-away middle
-             * would still resolve to this mapping, which is exactly the range
-             * just freed. */
-            mm_mmap_seg_retire(mm, vma, vma->start, vma->end);
-            refcount_set(&tail->refcount, 1);   /* the copy brought its count */
-            tail->start = clip_end;
-            tail->end = vma->end;
-            tail->backing_offset += clip_end - vma->start;
-            int fr = vma_ref_aux(tail);
-            if (fr < 0) {
-                kfree(tail);
-                return fr;
-            }
-            tail->prev = vma;
-            tail->next = vma->next;
-            if (vma->next) vma->next->prev = tail;
-            vma->next = tail;
-            vma->end = clip_start;
-            /* Middle cut: two mappings now describe one old one.  BOTH halves
-             * need to be named afresh, not just the tail: the head's name
-             * described [old_start, old_end) and therefore no longer contains
-             * [old_start, clip_start).  Lookup matches on extent, so the head's
-             * own addresses stopped resolving -- which the shadow measurement
-             * saw directly, as mappings that answered correctly and then
-             * stopped answering after a partial unmap.
-             *
-             * Order matters.  The head is named FIRST, while `tail` is not yet
-             * linked, so the two walks cannot both claim the node entry that
-             * straddles the boundary; the tail then names itself there and the
-             * head's names remain valid for their own side. */
-            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
-            mm_mmap_seg_annotate(mm, tail, tail->start, tail->end);
-        }
-        vma = next;
+/* Tail cut: the offset still lines up -- only the extent shrank.  The extent is
+ * exactly what the segment lookup matches on, so it has to be re-named even
+ * though the record is the same one. */
+void a20_munmap_cut_tail(void *mm_ptr, void *vma_ptr, uintptr_t clip_start)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!mm || !v)
+        return;
+    mm_mmap_seg_retire(mm, v, clip_start, v->end);
+    v->end = clip_start;
+    mm_mmap_seg_annotate(mm, v, v->start, v->end);
+}
+
+/* Middle cut: two records now describe one, and both halves need naming
+ * afresh -- the head's old name described [old_start, old_end), so it no
+ * longer contains [old_start, clip_start).  The head is named FIRST, while the
+ * tail is not yet linked, so the two walks cannot both claim the node entry
+ * that straddles the boundary.
+ *
+ * This is the only fallible step after the leaves are released.  A failure
+ * returns with the freed range still described by one record and the caller
+ * told -ENOMEM, never with two records that overlap. */
+int a20_munmap_cut_middle(void *mm_ptr, void *vma_ptr, uintptr_t clip_start,
+                          uintptr_t clip_end)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!mm || !v)
+        return -EINVAL;
+
+    mm_seg_t *tail = mm_seg_new();
+    if (!tail)
+        return -ENOMEM;
+    *tail = *v;
+    mm_mmap_seg_retire(mm, v, v->start, v->end);
+    refcount_set(&tail->refcount, 1);   /* the copy brought its count along */
+    tail->start = clip_end;
+    tail->end = v->end;
+    tail->backing_offset += clip_end - v->start;
+    int fr = vma_ref_aux(tail);
+    if (fr < 0) {
+        kfree(tail);
+        return fr;
     }
-    /* Drop the cache's references to the old VMA pass now.  Keeping the index
-     * dirty lets the next lookup rebuild it lazily, while vma_put() defers any
-     * last backing-object release until mm_tlb_invalidate_finish() has crossed
-     * the shootdown boundary. */
-    mm_seg_index_clear(mm);
+    tail->prev = v;
+    tail->next = v->next;
+    if (v->next) v->next->prev = tail;
+    v->next = tail;
+    v->end = clip_start;
+    mm_mmap_seg_annotate(mm, v, v->start, v->end);
+    mm_mmap_seg_annotate(mm, tail, tail->start, tail->end);
     return 0;
+}
+
+/* Decode one leaf: the walk, the architecture's presence/swap predicates, and
+ * the physical address of a present leaf.  `aux` carries the raw PTE so the
+ * harvest bridge can read the dirty bit without this file seeing it. */
+void a20_munmap_leaf_probe(void *mm_ptr, uintptr_t va,
+                           struct a20_munmap_leaf *out)
+{
+    mm_struct_t *mm = mm_ptr;
+    if (!out)
+        return;
+    out->aux = 0;
+    out->base = 0;
+    out->size = 0;
+    out->pfn = PFN_NONE;
+    out->level = 0;
+    out->present = 0;
+    out->swap = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
+                                &out->size);
+    if (!pte)
+        return;
+    out->aux = (uintptr_t)*pte;
+    out->present = (*pte & PTE_V) != 0;
+#ifdef CONFIG_SWAP
+    out->swap = pte_is_swap(*pte);
+#endif
+    if (out->present)
+        out->pfn = phys_to_pfn(arch_pte_addr(*pte));
+}
+
+void a20_munmap_retire_reservation(void *mm_ptr, uintptr_t va)
+{
+#ifdef CONFIG_NOMMU
+    /* NOMMU keeps no per-PTE status sidecar, so there is no mark to retire. */
+    (void)mm_ptr;
+    (void)va;
+#else
+    mm_munmap_retire_reservation(mm_ptr, va);
+#endif
+}
+
+int a20_munmap_demote(void *mm_ptr, uintptr_t va)
+{
+    return mm_demote_huge_page(mm_ptr, va);
+}
+
+/* Preserve a shared-file mapping's dirty state before the leaf that carries
+ * the only evidence of it is released.  Two architecture rules: where a
+ * software-visible dirty bit exists, the leaf's own PTE_D is the evidence;
+ * where it does not (ARM32), a writable shared mapping is harvested
+ * conservatively across the whole leaf. */
+void a20_munmap_leaf_harvest(void *mm_ptr, void *vma_ptr, uintptr_t va,
+                             uintptr_t clip_start, uintptr_t clip_end,
+                             const struct a20_munmap_leaf *leaf, int shared_file)
+{
+    (void)mm_ptr;
+    /* Both clip bounds are read only by the ARM32 conservative rule below. */
+    (void)clip_start;
+    (void)clip_end;
+    mm_seg_t *vma = vma_ptr;
+    if (!shared_file || !vma || !vma->file_vnode || !leaf)
+        return;
+
+    if (leaf->aux & PTE_D) {
+        uint64_t idx = (vma->backing_offset + (va - vma->start)) / PAGE_SIZE;
+        page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
+        if (pcp) {
+            page_cache_mark_dirty(pcp);
+            page_cache_put(pcp);
+        }
+    }
+#if PTE_D == 0
+    if ((vma->vm_flags & VM_WRITE) && leaf->present &&
+        arch_pte_is_leaf((pte_t)leaf->aux)) {
+        vaddr_t dirty_start = leaf->base > clip_start ? leaf->base : clip_start;
+        uint64_t leaf_end = (uint64_t)leaf->base + leaf->size;
+        vaddr_t dirty_end = leaf_end < clip_end ? (vaddr_t)leaf_end : clip_end;
+        for (vaddr_t dirty_va = dirty_start; dirty_va < dirty_end;
+             dirty_va += PAGE_SIZE) {
+            uint64_t idx = vma->backing_offset + (dirty_va - vma->start);
+            page_cache_page_t *pcp =
+                page_cache_get(vma->file_vnode, idx / PAGE_SIZE, 0);
+            if (pcp) {
+                page_cache_mark_dirty(pcp);
+                page_cache_put(pcp);
+            }
+        }
+    }
+#endif
+}
+
+/* Pin the leaf's owner before the leaf is unmapped.  A MAP_PRIVATE file leaf
+ * may still BE the canonical page-cache frame, whose reference belongs to the
+ * cache; classifying by the leaf's PFN rather than by a VMA-wide flag is what
+ * keeps a partly-copied private mapping correct. */
+int a20_munmap_leaf_hold(void *mm_ptr, void *vma_ptr, uintptr_t va, uint32_t pfn,
+                         int no_frame_ref, void **out_pcp)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *vma = vma_ptr;
+    page_cache_page_t *pcp = NULL;
+    if (out_pcp)
+        *out_pcp = NULL;
+    if (vma)
+        pcp = mm_file_cache_mapping_get(vma, va, pfn);
+    if (pcp) {
+        if (mm_tlb_hold_page(mm, pcp) < 0) {
+            page_cache_put(pcp);
+            return -ENOMEM;
+        }
+    } else if (!no_frame_ref) {
+        if (!pfn_valid(pfn) || mm_tlb_hold_frame(mm, pfn) < 0)
+            return -ENOMEM;
+    }
+    if (out_pcp)
+        *out_pcp = pcp;
+    return 0;
+}
+
+int a20_munmap_leaf_unmap(void *mm_ptr, uintptr_t va,
+                          struct a20_munmap_leaf *out)
+{
+    paddr_t pa = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    int r = pt_unmap_leaf(mm_ptr, va, &pa, &base, &size, NULL);
+    if (out) {
+        out->aux = pa;
+        out->base = base;
+        out->size = size;
+    }
+    return r;
+}
+
+/* Release exactly one reference to exactly one owner, then account.  The
+ * page-cache branch drops the temporary lookup and the mapping's own pin; the
+ * frame branch is skipped entirely for a leaf this mapping never took a frame
+ * reference to (VMO-owned, PFNMAP, the vDSO). */
+void a20_munmap_leaf_release(void *mm_ptr, int no_frame_ref, uintptr_t pa,
+                             uintptr_t base, uintptr_t size, void *pcp_ptr)
+{
+    mm_struct_t *mm = mm_ptr;
+    page_cache_page_t *pcp = pcp_ptr;
+    mm_tlb_note_change(mm, base, size);
+    if (!pa)
+        return;
+    if (pcp) {
+        page_cache_put(pcp);
+        page_cache_put(pcp);
+    } else if (!no_frame_ref) {
+        frame_put(phys_to_pfn(pa));
+    }
+    mm_rss_sub_clamped(mm, size / PAGE_SIZE);
+}
+
+void a20_munmap_page_put(void *pcp)
+{
+    if (pcp)
+        page_cache_put(pcp);
+}
+
+
+int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
+    return a20_munmap_rust(mm, addr, len);
 }
 
 vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {

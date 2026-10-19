@@ -1,5 +1,7 @@
 #include "mm/shutdown_write.h"
 
+#include <stdint.h>
+
 #include "core/errno.h"
 #include "core/panic.h"
 #include "core/preempt.h"
@@ -18,7 +20,6 @@
  * terminal commit wakes it; no MM/page-cache lock is held while parked. */
 static wait_queue_t mm_shared_write_waiters = WAIT_QUEUE_INIT;
 
-#ifdef CONFIG_MM_SHUTDOWN_WRITE_RUST
 extern int a20_mm_shared_write_enter_rust(void);
 extern int a20_mm_shared_write_leave_rust(void);
 extern int a20_mm_shared_write_is_committed_rust(void);
@@ -27,121 +28,6 @@ extern int a20_mm_shared_write_begin_rust(uint64_t *token_out);
 extern int a20_mm_shared_write_drained_rust(uint64_t token);
 extern int a20_mm_shared_write_abort_rust(uint64_t token);
 extern int a20_mm_shared_write_commit_rust(uint64_t token);
-#else
-#define MM_SW_CLOSED    (1u << 31)
-#define MM_SW_COMMITTED (1u << 30)
-#define MM_SW_COUNT     (MM_SW_COMMITTED - 1)
-static volatile uint32_t mm_sw_c_state;
-static volatile uint32_t mm_sw_c_generation;
-static volatile uint32_t mm_sw_c_control;
-
-static int mm_sw_c_lock(void)
-{
-    uint32_t expected = 0;
-    return __atomic_compare_exchange_n(&mm_sw_c_control, &expected, 1, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
-}
-
-static void mm_sw_c_unlock(void)
-{
-    __atomic_store_n(&mm_sw_c_control, 0, __ATOMIC_RELEASE);
-}
-
-static int mm_sw_c_valid(uint64_t token)
-{
-    return token && token <= UINT32_MAX &&
-        __atomic_load_n(&mm_sw_c_generation, __ATOMIC_ACQUIRE) == token &&
-        (__atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE) & MM_SW_CLOSED);
-}
-
-int a20_mm_shared_write_enter_rust(void)
-{
-    uint32_t old = __atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE);
-    for (;;) {
-        if (old & MM_SW_CLOSED) return 0;
-        if ((old & MM_SW_COUNT) == MM_SW_COUNT) return -EOVERFLOW;
-        if (__atomic_compare_exchange_n(&mm_sw_c_state, &old, old + 1, 1,
-                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            return 1;
-    }
-}
-
-int a20_mm_shared_write_leave_rust(void)
-{
-    uint32_t old = __atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE);
-    for (;;) {
-        if (!(old & MM_SW_COUNT) || (old & MM_SW_COMMITTED)) return -EINVAL;
-        if (__atomic_compare_exchange_n(&mm_sw_c_state, &old, old - 1, 1,
-                                         __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
-            return 0;
-    }
-}
-
-int a20_mm_shared_write_is_committed_rust(void)
-{
-    return !!(__atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE) & MM_SW_COMMITTED);
-}
-int a20_mm_shared_write_is_closed_rust(void)
-{
-    return !!(__atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE) & MM_SW_CLOSED);
-}
-
-int a20_mm_shared_write_begin_rust(uint64_t *token)
-{
-    if (!token) return -EINVAL;
-    if (!mm_sw_c_lock()) return -EBUSY;
-    uint32_t gen = __atomic_load_n(&mm_sw_c_generation, __ATOMIC_RELAXED);
-    if (gen == UINT32_MAX) { mm_sw_c_unlock(); return -EOVERFLOW; }
-    uint32_t old = __atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE);
-    for (;;) {
-        if (old & MM_SW_CLOSED) { mm_sw_c_unlock(); return -EBUSY; }
-        if (__atomic_compare_exchange_n(&mm_sw_c_state, &old, old | MM_SW_CLOSED,
-                                         1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            break;
-    }
-    gen++;
-    __atomic_store_n(&mm_sw_c_generation, gen, __ATOMIC_RELEASE);
-    *token = gen;
-    mm_sw_c_unlock();
-    return 0;
-}
-
-int a20_mm_shared_write_drained_rust(uint64_t token)
-{
-    if (!mm_sw_c_lock()) return 0;
-    int result = !mm_sw_c_valid(token) ? -EINVAL :
-        ((__atomic_load_n(&mm_sw_c_state, __ATOMIC_ACQUIRE) & MM_SW_COUNT) == 0);
-    mm_sw_c_unlock();
-    return result;
-}
-
-int a20_mm_shared_write_abort_rust(uint64_t token)
-{
-    if (!mm_sw_c_lock()) return -EBUSY;
-    int result = -EINVAL;
-    if (mm_sw_c_valid(token)) {
-        uint32_t expected = MM_SW_CLOSED;
-        result = __atomic_compare_exchange_n(&mm_sw_c_state, &expected, 0, 0,
-                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 0 : -EINVAL;
-    }
-    mm_sw_c_unlock();
-    return result;
-}
-
-int a20_mm_shared_write_commit_rust(uint64_t token)
-{
-    if (!mm_sw_c_lock()) return -EBUSY;
-    int result = -EINVAL;
-    if (mm_sw_c_valid(token)) {
-        uint32_t expected = MM_SW_CLOSED;
-        result = __atomic_compare_exchange_n(&mm_sw_c_state, &expected,
-                    MM_SW_CLOSED | MM_SW_COMMITTED, 0,
-                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 0 : -EINVAL;
-    }
-    mm_sw_c_unlock();
-    return result;
-}
-#endif
 
 int mm_shared_write_enter(void)
 {

@@ -467,11 +467,7 @@ typedef struct mm_dontunmap_context {
 } mm_dontunmap_context_t;
 
 #ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
-#ifdef CONFIG_MREMAP_DONTUNMAP_TXN_RUST
 #define DONTUNMAP_TEST_IMPL "rust"
-#else
-#define DONTUNMAP_TEST_IMPL "c"
-#endif
 static void dontunmap_test_txn_marker(const char *phase, int exact, int rc)
 {
     klog_write("MM_DONTUNMAP_TXN_TEST: impl=%s phase=%s exact=%d rc=%d\n",
@@ -641,15 +637,9 @@ static int mm_mremap_dontunmap_transaction(mm_struct_t *mm,
         .reprot = reprot,
     };
     uintptr_t out = 0;
-#ifdef CONFIG_MREMAP_DONTUNMAP_TXN_RUST
     dontunmap_test_txn_marker("enter", -1, 0);
     int r = mm_mremap_dontunmap_txn_rust(&dontunmap_txn_ops, &ctx,
                                          destination, destination_len, &out);
-#else
-    dontunmap_test_txn_marker("enter", -1, 0);
-    int r = mm_mremap_dontunmap_txn_c(&dontunmap_txn_ops, &ctx,
-                                      destination, destination_len, &out);
-#endif
     if (r == 0)
         *out_destination = (vaddr_t)out;
     return r;
