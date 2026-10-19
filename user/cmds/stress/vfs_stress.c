@@ -561,6 +561,18 @@ static int ext4_fs_ioc_flags(const char *dir)
 
 static int ext4_open_unlink(void)
 {
+    /* The boot init mounts this same auxiliary ext4 device at /extra.  A
+     * no-journal filesystem is marked dirty while writable, so release that
+     * owner before testing a second mount of /dev/vdb. */
+    static const char *const boot_mounts[] = {
+        "/extra/dev/shm", "/extra/dev", "/extra/proc", "/extra/sys",
+        "/extra/run", "/extra"
+    };
+    for (size_t i = 0; i < sizeof(boot_mounts) / sizeof(boot_mounts[0]); i++) {
+        if (syscall(SYS_umount2, boot_mounts[i], 0) != 0 && errno != EINVAL)
+            return fail("ext4-release-boot-mount");
+    }
+
     mkdir("/tmp/e4m", 0755);
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0, "");

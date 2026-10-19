@@ -65,6 +65,7 @@ extern int64_t a20_handle_commit_reserved_temporal(
     uint32_t temporal_flags, uint8_t security_label);
 extern int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 
+#ifdef A20_CHANNEL_RECV_TXN_HOST_TEST
 int64_t a20_channel_recv_txn_c(a20_channel_ep_t *ep,
                                struct a20_ht_internal *ht,
                                uint32_t flags, int donate,
@@ -180,3 +181,4 @@ rollback:
     kfree(kdata);
     return r;
 }
+#endif /* A20_CHANNEL_RECV_TXN_HOST_TEST */

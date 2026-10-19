@@ -18,7 +18,6 @@ typedef struct pidfd_file {
     task_t *task;
 } pidfd_file_t;
 
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
 void a20_pidfd_state_init_rust(void **task, void *value);
 void *a20_pidfd_state_task_rust(void *const *task);
 bool a20_pidfd_state_drop_rust(
@@ -26,7 +25,6 @@ bool a20_pidfd_state_drop_rust(
 bool a20_pidfd_group_exited_rust(bool task_found, bool state_unused,
                                  bool state_zombie, bool thread_group_dead);
 int a20_pidfd_poll_events_rust(bool exited, int events);
-#endif
 
 /*
  * Linux pidfd semantics: poll() reports readable only after the referenced
@@ -38,40 +36,21 @@ static int pidfd_poll(vfile_t *vf, short events)
 {
     pidfd_file_t *pf = vf ? (pidfd_file_t *)vf->priv : NULL;
     task_t *target = pf ? pf->task : NULL;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     if (pf)
         target = a20_pidfd_state_task_rust((void *const *)&pf->task);
-#endif
     if (!target)
         return POLLNVAL;
 
     uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     int state = proc_task_state_get(target);
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     int exited = a20_pidfd_group_exited_rust(
         true, state == PROC_UNUSED, state == PROC_ZOMBIE,
         state == PROC_ZOMBIE && proc_tg_group_dead_locked(target));
-#else
-    int exited = state == PROC_UNUSED ||
-                 (state == PROC_ZOMBIE && proc_tg_group_dead_locked(target));
-#endif
     spin_unlock_irqrestore(&tasklist_lock, flags);
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     return a20_pidfd_poll_events_rust(exited != 0, events);
-#else
-    if (!exited)
-        return 0;
-
-    short revents = POLLHUP;
-    if (events & POLLIN)
-        revents |= POLLIN;
-    return revents;
-#endif
 }
 
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
 static void pidfd_release_task_ref(void *value);
-#endif
 
 /* Once the task pin has been stored in pidfd_file_t, release it through the
  * selected state owner on every teardown path, including vfile allocation
@@ -80,14 +59,8 @@ static void pidfd_state_release(pidfd_file_t *pf)
 {
     if (!pf)
         return;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     (void)a20_pidfd_state_drop_rust((void **)&pf->task,
                                     pidfd_release_task_ref);
-#else
-    task_t *target = pf->task;
-    if (target)
-        proc_put(target);
-#endif
 }
 
 static int pidfd_close(vfile_t *vf)
@@ -101,12 +74,10 @@ static int pidfd_close(vfile_t *vf)
     return 0;
 }
 
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
 static void pidfd_release_task_ref(void *value)
 {
     proc_put((task_t *)value);
 }
-#endif
 
 static vfile_ops_t g_pidfd_ops = {
     .poll = pidfd_poll,
@@ -137,9 +108,7 @@ task_t *linux_pidfd_get_task_ref(int pidfd)
     }
     pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
     task_t *target = pf->task;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     target = a20_pidfd_state_task_rust((void *const *)&pf->task);
-#endif
     if (target)
         target = proc_get(target);
     vfs_put_file(vf);
@@ -171,11 +140,7 @@ static int linux_pidfd_create_task(task_t *target, int flags)
         proc_put(target);
         return -ENOMEM;
     }
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     a20_pidfd_state_init_rust((void **)&pf->task, target);
-#else
-    pf->task = target;
-#endif
 
     vfile_t *vf = vfile_alloc();
     if (!vf) {
@@ -239,9 +204,7 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     }
     pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
     task_t *target = pf->task;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     target = a20_pidfd_state_task_rust((void *const *)&pf->task);
-#endif
     if (target)
         target = proc_get(target);
     vfs_put_file(vf);
@@ -335,9 +298,7 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
 
     pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
     task_t *target = pf->task;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     target = a20_pidfd_state_task_rust((void *const *)&pf->task);
-#endif
     if (target)
         target = proc_get(target);
     vfs_put_file(vf);

@@ -324,4 +324,10 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
 uint32_t arch_elf_relative_reltype(uint16_t machine);
 uint32_t arch_elf_absolute_reltype(uint16_t machine, bool elf64);
 
+#ifdef CONFIG_ELF_EXEC_TEST
+/* Test-profile only: arm the current task's next exec to fail at `phase`
+ * (a commit-phase discriminant Rust marks failable). */
+int proc_exec_test_arm(const void *owner, unsigned phase);
+#endif
+
 #endif /* _ELF_H */

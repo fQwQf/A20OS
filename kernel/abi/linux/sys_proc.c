@@ -16,6 +16,9 @@
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
 #include "proc/task_construction.h"
+#ifdef CONFIG_ELF_EXEC_TEST
+#include "mm/elf.h"
+#endif
 #include "proc/cred.h"
 #include "proc/signal.h"
 #include "mm/pt.h"
@@ -1261,6 +1264,15 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
 
 int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     task_t *t = proc_current();
+#ifdef CONFIG_ELF_EXEC_TEST
+    /* Private test-profile operation: fail this task's next exec at a
+     * Rust-declared failable commit phase. */
+    if ((unsigned)op == 0xA20EU) {
+        if (!t || a2 || a3 || a4)
+            return -EINVAL;
+        return proc_exec_test_arm(t, (unsigned)a1);
+    }
+#endif
 #ifdef CONFIG_TASK_CONSTRUCTION_TEST
     /* Private test-profile operation: fail one clone after MM acquisition. */
     if ((unsigned)op == 0xA20FU) {

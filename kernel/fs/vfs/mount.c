@@ -1,4 +1,5 @@
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mount_state.h"
 #include "fs/vfs/mntns.h"
 #include "fs/vfs/dcache.h"
 #include "core/string.h"
@@ -95,20 +96,111 @@ mount_t *vfs_mount_alloc(void)
 /* ---- tree position -------------------------------------------------- */
 
 /* Unlink @mnt from its parent's child list.  Safe to call on a root. */
-static void mount_tree_unlink(mount_t *mnt)
+/* Mechanical bridge for the Rust mount-tree side effects. */
+static void *mt_parent(void *m) { return ((mount_t *)m)->mnt_parent; }
+static void *mt_child(void *m) { return ((mount_t *)m)->mnt_child; }
+static void *mt_sibling(void *m) { return ((mount_t *)m)->mnt_sibling; }
+static void *mt_mp(void *m) { return ((mount_t *)m)->mnt_mp; }
+static void mt_set_parent(void *m, void *v) { ((mount_t *)m)->mnt_parent = (mount_t *)v; }
+static void mt_set_child(void *m, void *v) { ((mount_t *)m)->mnt_child = (mount_t *)v; }
+static void mt_set_sibling(void *m, void *v) { ((mount_t *)m)->mnt_sibling = (mount_t *)v; }
+static void mt_set_mp(void *m, void *v) { ((mount_t *)m)->mnt_mp = (vnode_t *)v; }
+static void mt_set_detached(void *m) { ((mount_t *)m)->flags |= VFS_MOUNT_DETACHED; }
+static void mt_vnode_get(void *v) { vnode_get((vnode_t *)v); }
+static void mt_vnode_put(void *v) { vnode_put((vnode_t *)v); }
+static void vfs_mount_mark_ready(mount_t *mnt);
+static const char *mt_path(void *m) { return ((mount_t *)m)->path; }
+static void *mt_find_mount(const char *path) { return vfs_find_mount(path); }
+static void *mt_resolve(const char *path) { return vfs_resolve(path); }
+static void *mt_vnode_mount(void *v) { return ((vnode_t *)v)->mnt; }
+static uint64_t mt_table_lock(void) { return mntns_mount_table_lock(); }
+static void mt_table_unlock(uint64_t flags) { mntns_mount_table_unlock(flags); }
+static int mt_is_present(void *m)
 {
-    mount_t *parent = mnt->mnt_parent;
-    mnt->mnt_sibling = NULL;
-    if (!parent)
-        return;
-    mount_t **pp = &parent->mnt_child;
-    while (*pp) {
-        if (*pp == mnt) {
-            *pp = NULL;
-            break;
-        }
-        pp = &(*pp)->mnt_sibling;
-    }
+    mount_t *mnt = (mount_t *)m;
+    mnt_namespace_t *ns = mntns_current();
+    for (int i = 0; i < ns->nmounts; i++)
+        if (ns->mounts[i] == mnt) return 1;
+    return 0;
+}
+static int mt_is_teardown(void *m) { return ((mount_t *)m)->teardown_running != 0; }
+static void mt_set_path(void *m, const char *path)
+{
+    mount_t *mnt = (mount_t *)m;
+    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
+}
+static void mt_invalidate_dcache(void) { vfs_dcache_invalidate_all(); }
+static void mt_mark_ready(void *m) { vfs_mount_mark_ready((mount_t *)m); }
+
+static const struct vfs_mount_tree_ops g_vfs_mount_tree_ops = {
+    .parent = mt_parent,
+    .child = mt_child,
+    .sibling = mt_sibling,
+    .mp = mt_mp,
+    .set_parent = mt_set_parent,
+    .set_child = mt_set_child,
+    .set_sibling = mt_set_sibling,
+    .set_mp = mt_set_mp,
+    .set_detached = mt_set_detached,
+    .vnode_get = mt_vnode_get,
+    .vnode_put = mt_vnode_put,
+};
+_Static_assert(sizeof(g_vfs_mount_tree_ops) / sizeof(void *) == 11,
+               "vfs mount tree mirror: ops table field count");
+
+static const struct vfs_mount_link_ops g_vfs_mount_link_ops = {
+    .path = mt_path,
+    .find_mount = mt_find_mount,
+    .resolve = mt_resolve,
+    .vnode_mount = mt_vnode_mount,
+    .mark_ready = mt_mark_ready,
+};
+_Static_assert(sizeof(g_vfs_mount_link_ops) / sizeof(void *) == 5,
+               "vfs mount link mirror: ops table field count");
+
+static const struct vfs_move_mount_ops g_vfs_move_mount_ops = {
+    .lock = mt_table_lock,
+    .unlock = mt_table_unlock,
+    .is_present = mt_is_present,
+    .is_teardown = mt_is_teardown,
+    .set_path = mt_set_path,
+    .invalidate_dcache = mt_invalidate_dcache,
+};
+_Static_assert(sizeof(g_vfs_move_mount_ops) / sizeof(void *) == 6,
+               "vfs move mount mirror: ops table field count");
+
+static int rm_count(void *ns) { return ((mnt_namespace_t *)ns)->nmounts; }
+static void rm_set_count(void *ns, int count) { ((mnt_namespace_t *)ns)->nmounts = count; }
+static void *rm_current_ns(void) { return mntns_current(); }
+static void *rm_at(void *ns, int i) { return ((mnt_namespace_t *)ns)->mounts[i]; }
+static void rm_set_at(void *ns, int i, void *m) { ((mnt_namespace_t *)ns)->mounts[i] = (mount_t *)m; }
+static void *rm_dead_head(void *ns) { return ((mnt_namespace_t *)ns)->dead_mounts; }
+static void rm_set_dead_head(void *ns, void *m) { ((mnt_namespace_t *)ns)->dead_mounts = (mount_t *)m; }
+static void rm_set_dead_next(void *m, void *next) { ((mount_t *)m)->dead_next = (mount_t *)next; }
+static void rm_set_attached(void *m, int attached) { ((mount_t *)m)->attached = attached; }
+static void rm_clear_teardown(void *m) { ((mount_t *)m)->teardown_running = 0; }
+static void *rm_mountpoint(void *m) { return ((mount_t *)m)->mnt_mp; }
+static void rm_clear_mountpoint(void *m) { ((mount_t *)m)->mnt_mp = NULL; }
+static void rm_vnode_put(void *v) { vnode_put((vnode_t *)v); }
+static void rm_root_put(void *m) { vfs_mount_root_put((mount_t *)m); }
+static const struct vfs_mount_remove_ops g_vfs_mount_remove_ops = {
+    .lock = mt_table_lock, .unlock = mt_table_unlock, .count = rm_count,
+    .set_count = rm_set_count,
+    .current_ns = rm_current_ns, .at = rm_at, .set_at = rm_set_at,
+    .dead_head = rm_dead_head, .set_dead_head = rm_set_dead_head,
+    .set_dead_next = rm_set_dead_next, .set_attached = rm_set_attached,
+    .clear_teardown = rm_clear_teardown, .mountpoint = rm_mountpoint,
+    .clear_mountpoint = rm_clear_mountpoint, .vnode_put = rm_vnode_put,
+    .root_put = rm_root_put,
+};
+_Static_assert(sizeof(g_vfs_mount_remove_ops) / sizeof(void *) == 16,
+               "vfs mount remove mirror: ops table field count");
+
+int vfs_mount_execute_umount(const struct vfs_umount_execute_ops *ops,
+                             void *mnt, const struct vfs_umount_plan *plan)
+{
+    return a20_vfs_umount_execute(&g_vfs_mount_tree_ops, ops, mnt, plan);
 }
 
 static void vfs_mount_mark_ready(mount_t *mnt)
@@ -125,20 +217,7 @@ static void vfs_mount_mark_ready(mount_t *mnt)
  */
 int vfs_mount_attach(mount_t *mnt, mount_t *parent, vnode_t *mp)
 {
-    if (!mnt)
-        return -EINVAL;
-    mount_tree_unlink(mnt);
-    if (mnt->mnt_mp)
-        vnode_put(mnt->mnt_mp);
-    mnt->mnt_mp = mp;
-    if (mp)
-        vnode_get(mp);
-    mnt->mnt_parent = parent;
-    if (parent) {
-        mnt->mnt_sibling = parent->mnt_child;
-        parent->mnt_child = mnt;
-    }
-    return 0;
+    return a20_vfs_mount_attach(&g_vfs_mount_tree_ops, mnt, parent, mp);
 }
 
 mount_t *vfs_mount_first_child(mount_t *mnt)
@@ -163,64 +242,8 @@ mount_t *vfs_mount_next_sibling(mount_t *mnt)
  */
 void vfs_mount_link_tree(mount_t *mnt)
 {
-    if (!mnt)
-        return;
-    if (mnt->mnt_parent || mnt->mnt_child) {
-        vfs_mount_mark_ready(mnt);
-        return;                 /* already positioned */
-    }
-
-    const char *path = mnt->path;
-    size_t plen = strlen(path);
-    while (plen > 1 && path[plen - 1] == '/')
-        plen--;
-
-    /* Namespace root: no parent, no mountpoint. */
-    if (plen <= 1) {
-        mnt->mnt_parent = NULL;
-        vfs_mount_mark_ready(mnt);
-        return;
-    }
-
-    char parent_path[MAX_PATH_LEN];
-    if (plen >= sizeof(parent_path)) {
-        vfs_mount_mark_ready(mnt);
-        return;
-    }
-    memcpy(parent_path, path, plen);
-    parent_path[plen] = '\0';
-    char *slash = strrchr(parent_path, '/');
-    if (!slash) {
-        vfs_mount_mark_ready(mnt);
-        return;
-    }
-    if (slash == parent_path)
-        parent_path[1] = '\0';
-    else
-        *slash = '\0';
-
-    mount_t *parent = vfs_find_mount(parent_path);
-    if (!parent) {
-        vfs_mount_mark_ready(mnt);
-        return;                 /* orphan: path resolution still works */
-    }
-
-    /* The mountpoint vnode is the mount point resolved inside the parent,
-     * which is the last component of @path.  It may legitimately fail to
-     * resolve for synthetic filesystems; the mount still works, it just has
-     * no object to hang its position on. */
-    vnode_t *mp = vfs_resolve(path);
-    if (mp && mp->mnt == parent) {
-        vfs_mount_attach(mnt, parent, mp);
-        vnode_put(mp);
-    } else {
-        if (mp)
-            vnode_put(mp);
-        mnt->mnt_parent = parent;
-        mnt->mnt_sibling = parent->mnt_child;
-        parent->mnt_child = mnt;
-    }
-    vfs_mount_mark_ready(mnt);
+    a20_vfs_mount_link_tree(&g_vfs_mount_tree_ops,
+                            &g_vfs_mount_link_ops, mnt);
 }
 
 /* True when @ancestor is @mnt or any of its ancestors. */
@@ -303,83 +326,49 @@ void vfs_mount_vfile_put(mount_t *mnt)
  */
 void vfs_mount_detach_root(mount_t *mnt)
 {
-    if (!mnt)
-        return;
-    mount_tree_unlink(mnt);
-    mnt->mnt_parent = NULL;
-    mnt->flags |= VFS_MOUNT_DETACHED;
+    a20_vfs_mount_detach_root(&g_vfs_mount_tree_ops, mnt);
 }
 
 void vfs_mount_remove(mount_t *mnt)
 {
-    if (!mnt)
-        return;
-    mnt_namespace_t *ns = mntns_current();
-    uint64_t flags = mntns_mount_table_lock();
-    int idx = -1;
-    for (int i = 0; i < ns->nmounts; i++) {
-        if (ns->mounts[i] == mnt) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx < 0) {
-        mntns_mount_table_unlock(flags);
-        return;
-    }
-    /* Detach without freeing: the table previously compacted an inline array
-     * here, which repointed every vnode->mnt, dcache, quota and xattr
-     * reference at the mount that shifted into the slot.  The heap object is
-     * parked on the namespace graveyard instead and freed when the namespace
-     * dies, so stale holders read a frozen, coherent mount instead of
-     * someone else's. */
-    mount_tree_unlink(mnt);
-    mnt->attached = 0;
-    if (mnt->mnt_mp) {
-        vnode_put(mnt->mnt_mp);
-        mnt->mnt_mp = NULL;
-    }
-    mnt->dead_next = ns->dead_mounts;
-    ns->dead_mounts = mnt;
-    for (int i = idx; i < ns->nmounts - 1; i++)
-        ns->mounts[i] = ns->mounts[i + 1];
-    ns->mounts[ns->nmounts - 1] = NULL;
-    ns->nmounts--;
-    mnt->teardown_running = 0;
-    mntns_mount_table_unlock(flags);
-    vfs_mount_root_put(mnt); /* the namespace table's own reference */
+    a20_vfs_mount_remove(&g_vfs_mount_tree_ops, &g_vfs_mount_remove_ops, mnt);
 }
+
+/* Snapshot the visible mounts and let the engine pick the longest matching
+ * prefix; C keeps the table walk and the lock, the visibility/propagation
+ * decision is Rust-owned.  The captured `sel[]` keeps the pointer->object
+ * mapping intact after the lock is dropped. */
+static mount_t *vfs_find_mount_common(const char *path, int include_detached,
+                                      int external_root)
+{
+    mnt_namespace_t *ns = mntns_current();
+    vfs_mount_match_t cands[MNTNS_MAX_MOUNTS];
+    mount_t *sel[MNTNS_MAX_MOUNTS];
+    int n = 0;
+    uint64_t flags = mntns_mount_table_lock();
+    for (int i = 0; i < ns->nmounts && n < MNTNS_MAX_MOUNTS; i++) {
+        mount_t *m = ns->mounts[i];
+        sel[n] = m;
+        cands[n].path = m->path;
+        cands[n].ready = m->publish_ready;
+        cands[n].teardown = m->teardown_running;
+        cands[n].detached = (m->flags & VFS_MOUNT_DETACHED) ? 1u : 0u;
+        n++;
+    }
+    mntns_mount_table_unlock(flags);
+    int idx = a20_vfs_find_mount(path, include_detached, external_root, cands,
+                                 (size_t)n);
+    return idx >= 0 ? sel[idx] : NULL;
+}
+#ifdef CONFIG_EXTERNAL_ROOT
+#define VFS_EXTERNAL_ROOT_TIE 1
+#else
+#define VFS_EXTERNAL_ROOT_TIE 0
+#endif
 
 mount_t *vfs_find_mount(const char *path)
 {
-    mnt_namespace_t *ns = mntns_current();
-    mount_t *best = NULL;
-    size_t best_len = 0;
-    uint64_t flags = mntns_mount_table_lock();
-    for (int i = 0; i < ns->nmounts; i++) {
-        mount_t *m = ns->mounts[i];
-        if (!m->publish_ready || m->teardown_running)
-            continue;
-        /* A detached mount (pivot_root's old root) is unreachable by path. */
-        if (m->flags & VFS_MOUNT_DETACHED)
-            continue;
-        size_t len = strlen(m->path);
-        if (strncmp(path, m->path, len) == 0 &&
-            (len == 1 || path[len] == '\0' || path[len] == '/') &&
-            (len > best_len
-#ifdef CONFIG_EXTERNAL_ROOT
-             /* Only external-root kernels replace the bootstrap ramfs at
-              * /.  Preserve the original first-match behavior for every
-              * other build and for equal-length non-root mount points. */
-             || (len == 1 && best_len == 1)
-#endif
-            )) {
-            best = m;
-            best_len = len;
-        }
-    }
-    mntns_mount_table_unlock(flags);
-    return best;
+    return vfs_find_mount_common(path, 0, VFS_EXTERNAL_ROOT_TIE);
 }
 
 /* Same match as vfs_find_mount() but ignoring VFS_MOUNT_DETACHED, for the
@@ -387,46 +376,26 @@ mount_t *vfs_find_mount(const char *path)
  * loose. */
 mount_t *vfs_find_mount_including_detached(const char *path)
 {
-    mnt_namespace_t *ns = mntns_current();
-    mount_t *best = NULL;
-    size_t best_len = 0;
-    uint64_t flags = mntns_mount_table_lock();
-    for (int i = 0; i < ns->nmounts; i++) {
-        mount_t *m = ns->mounts[i];
-        if (!m->publish_ready || m->teardown_running)
-            continue;
-        size_t len = strlen(m->path);
-        if (strncmp(path, m->path, len) == 0 &&
-            (len == 1 || path[len] == '\0' || path[len] == '/') &&
-            len > best_len) {
-            best = m;
-            best_len = len;
-        }
-    }
-    mntns_mount_table_unlock(flags);
-    return best;
+    return vfs_find_mount_common(path, 1, 0);
 }
 
 int vfs_move_mount(const char *from, const char *to)
 {
-    if (!from || !to || from[0] != '/' || to[0] != '/')
-        return -EINVAL;
-    mount_t *mnt = vfs_find_mount(from);
-    if (!mnt)
-        return -ENOENT;
-    if (mnt->flags & VFS_MOUNT_DETACHED)
-        return -EINVAL;
-    /* Moving a mount re-parents it: the target must not already be covered
-     * by another mount, or the move would silently merge two filesystems
-     * into one path. */
-    if (vfs_find_mount(to))
-        return -EBUSY;
-    if (strcmp(mnt->path, to) == 0)
+    mount_t *mnt = NULL;
+    int covered = 0;
+    if (from && to && from[0] == '/' && to[0] == '/') {
+        mnt = vfs_find_mount(from);
+        covered = vfs_find_mount(to) != NULL;
+    }
+    int noop = 0;
+    int vr = a20_vfs_move_mount_check(from, to, mnt != NULL,
+                                      mnt ? mnt->path : NULL,
+                                      mnt ? ((mnt->flags & VFS_MOUNT_DETACHED) != 0) : 0,
+                                      covered, &noop);
+    if (vr < 0)
+        return vr;
+    if (noop)
         return 0;
-    /* Refuse to move a mount underneath itself. */
-    if (strncmp(to, mnt->path, strlen(mnt->path)) == 0 &&
-        (to[strlen(mnt->path)] == '\0' || to[strlen(mnt->path)] == '/'))
-        return -EINVAL;
 
     /* The new parent is the mount that covers the destination; the new
      * mountpoint is the destination vnode resolved inside it. */
@@ -448,41 +417,18 @@ int vfs_move_mount(const char *from, const char *to)
         return -ENOENT;
     }
 
-    uint64_t flags = mntns_mount_table_lock();
-    int present = 0;
-    mnt_namespace_t *ns = mntns_current();
-    for (int i = 0; i < ns->nmounts; i++) {
-        if (ns->mounts[i] == mnt) {
-            present = 1;
-            break;
-        }
-    }
-    if (!present || mnt->teardown_running) {
-        mntns_mount_table_unlock(flags);
-        if (new_mp)
-            vnode_put(new_mp);
-        return -EBUSY;
-    }
-    strncpy(mnt->path, to, MAX_PATH_LEN - 1);
-    mnt->path[MAX_PATH_LEN - 1] = '\0';
-    vfs_mount_attach(mnt, new_parent == mnt ? NULL : new_parent, new_mp);
-    mntns_mount_table_unlock(flags);
+    int commit = a20_vfs_move_mount_commit(&g_vfs_mount_tree_ops,
+                                           &g_vfs_move_mount_ops, mnt,
+                                           new_parent == mnt ? NULL : new_parent,
+                                           new_mp, to);
     if (new_mp)
         vnode_put(new_mp); /* the mount holds its own reference now */
-    vfs_dcache_invalidate_all();
-    return 0;
+    return commit;
 }
 
 const char *vfs_strip_mount_prefix(const char *path, const mount_t *mnt)
 {
-    size_t len = strlen(mnt->path);
-    if (strncmp(path, mnt->path, len) == 0) {
-        const char *rest = path + len;
-        if (*rest == '/')
-            rest++;
-        return rest;
-    }
-    return path;
+    return path + a20_vfs_strip_prefix(path, mnt->path);
 }
 
 mount_t *vfs_mount_parent(mount_t *mnt)
@@ -496,18 +442,8 @@ mount_t *vfs_mount_parent(mount_t *mnt)
         return NULL;
 
     char parent[MAX_PATH_LEN];
-    strncpy(parent, mnt->path, sizeof(parent) - 1);
-    parent[sizeof(parent) - 1] = '\0';
-    size_t len = strlen(parent);
-    while (len > 1 && parent[len - 1] == '/')
-        parent[--len] = '\0';
-    char *slash = strrchr(parent, '/');
-    if (!slash) return NULL;
-    if (slash == parent) {
-        parent[1] = '\0';
-    } else {
-        *slash = '\0';
-    }
+    if (!a20_vfs_mount_parent_path(mnt->path, parent, sizeof(parent)))
+        return NULL;
     return vfs_find_mount(parent);
 }
 

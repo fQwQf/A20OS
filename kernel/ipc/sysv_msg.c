@@ -125,31 +125,239 @@ typedef struct {
 static sysv_msg_queue_t g_msg[SYSV_MSG_MAX];
 static spinlock_t g_msg_lock = SPINLOCK_INIT;
 
+#ifndef CONFIG_SYSV_MSG_RUST
 static int msg_valid_locked(int msqid)
 {
-    return msqid >= 0 && msqid < SYSV_MSG_MAX && g_msg[msqid].used && g_msg[msqid].namespace_ino == resource_ns_ino(PROCNS_IPC);
+    return msqid >= 0 && msqid < SYSV_MSG_MAX && (g_msg[msqid].used & 3) == 1 && g_msg[msqid].namespace_ino == resource_ns_ino(PROCNS_IPC);
 }
+#endif
 
+#ifndef CONFIG_SYSV_MSG_RUST
 static int msg_calc_qbytes(void)
 {
     return MSG_QBYTES;
 }
+#endif
 
+#ifndef CONFIG_SYSV_MSG_RUST
 static void msg_wake_blocked(sysv_msg_queue_t *q)
 {
     wait_queue_wake_all(&q->recv_wq, 0, PROC_WAKE_EVENT);
     wait_queue_wake_all(&q->send_wq, 0, PROC_WAKE_EVENT);
 }
+#endif
+
+#ifdef CONFIG_SYSV_MSG_RUST
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_node_t, type) == 8, sysv_msg_rust_node_type);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_node_t, size) == 16, sysv_msg_rust_node_size);
+STATIC_ASSERT(sizeof(sysv_msg_node_t) == 24, sysv_msg_rust_node_layout);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, perm) == (sizeof(void *) == 8 ? 24 : 20), sysv_msg_rust_perm);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, stime) == (sizeof(void *) == 8 ? 72 : 64), sysv_msg_rust_stime);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, cbytes) == (sizeof(void *) == 8 ? 96 : 88), sysv_msg_rust_cbytes);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, qnum) == (sizeof(void *) == 8 ? 104 : 92), sysv_msg_rust_qnum);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, qbytes) == (sizeof(void *) == 8 ? 112 : 96), sysv_msg_rust_qbytes);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, lspid) == (sizeof(void *) == 8 ? 120 : 100), sysv_msg_rust_lspid);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, head) == (sizeof(void *) == 8 ? 128 : 108), sysv_msg_rust_head);
+STATIC_ASSERT(__builtin_offsetof(sysv_msg_queue_t, tail) == (sizeof(void *) == 8 ? 136 : 112), sysv_msg_rust_tail);
+STATIC_ASSERT(sizeof(sysv_msg_queue_t) == (sizeof(void *) == 8 ? 336 : 264), sysv_msg_rust_queue_size);
+
+int a20_sysv_msg_send_txn(void *queues, size_t count, void *context, int msqid,
+                          const void *msgp, size_t msgsz, int msgflg);
+int64_t a20_sysv_msg_receive_txn(void *queues, size_t count, void *context,
+                                 int msqid, void *msgp, size_t msgsz,
+                                 int64_t msgtyp, int msgflg);
+void a20_sysv_msg_remove_locked(void *context, void *queue);
+int a20_sysv_msg_get_txn(void *queues, size_t count, void *context, int key, int msgflg);
+int a20_sysv_msg_control_txn(void *queues, size_t count, void *context,
+                             int msqid, int cmd, void *arg);
+
+typedef struct {
+    proc_wait_token_t token;
+    wait_queue_entry_t entry;
+    wait_queue_t *queue;
+} sysv_msg_waiter_t;
+
+uint64_t a20_sysv_msg_txn_lock(void *context)
+{
+    (void)context;
+    return spin_lock_irqsave(&g_msg_lock);
+}
+
+void a20_sysv_msg_txn_unlock(void *context, uint64_t flags)
+{
+    (void)context;
+    spin_unlock_irqrestore(&g_msg_lock, flags);
+}
+
+uint64_t a20_sysv_msg_txn_namespace(void *context)
+{
+    (void)context;
+    return resource_ns_ino(PROCNS_IPC);
+}
+
+int a20_sysv_msg_txn_pid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? task->pid : 0;
+}
+
+unsigned int a20_sysv_msg_txn_uid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? (unsigned int)task->cred.euid : 0;
+}
+
+unsigned int a20_sysv_msg_txn_gid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? (unsigned int)task->cred.egid : 0;
+}
+
+void a20_sysv_msg_queue_init(void *queue_opaque)
+{
+    sysv_msg_queue_t *queue = queue_opaque;
+    memset(queue, 0, sizeof(*queue));
+    wait_queue_init(&queue->recv_wq);
+    wait_queue_init(&queue->send_wq);
+}
+
+int a20_sysv_msg_copy_from_user(void *context, void *dst, const void *src, size_t len)
+{
+    (void)context;
+    return copy_from_user(dst, src, len);
+}
+
+int a20_sysv_msg_copy_to_user(void *context, void *dst, const void *src, size_t len)
+{
+    (void)context;
+    return copy_to_user(dst, src, len);
+}
+
+uint64_t a20_sysv_msg_txn_now(void *context)
+{
+    (void)context;
+    return timer_get_ticks();
+}
+
+int a20_sysv_msg_read_type(void *context, const void *msgp, int64_t *type)
+{
+    (void)context;
+    return copy_from_user(type, msgp, sizeof(*type));
+}
+
+void *a20_sysv_msg_message_alloc(void *context, const void *msgp,
+                                 size_t msgsz, int *status)
+{
+    (void)context;
+    sysv_msg_node_t *node = kmalloc(sizeof(*node) + msgsz);
+    if (!node) {
+        *status = -ENOMEM;
+        return NULL;
+    }
+    if (msgsz > 0 && copy_from_user(node->data,
+                                    (const char *)msgp + sizeof(int64_t),
+                                    msgsz) < 0) {
+        kfree(node);
+        *status = -EFAULT;
+        return NULL;
+    }
+    return node;
+}
+
+void a20_sysv_msg_message_free(void *context, void *opaque)
+{
+    (void)context;
+    kfree(opaque);
+}
+
+int a20_sysv_msg_message_copy_out(void *context, void *opaque, void *msgp,
+                                  size_t len)
+{
+    (void)context;
+    sysv_msg_node_t *node = opaque;
+    int64_t type = node->type;
+    if (copy_to_user(msgp, &type, sizeof(type)) < 0)
+        return -EFAULT;
+    if (len > 0 && copy_to_user((char *)msgp + sizeof(type), node->data, len) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+void *a20_sysv_msg_wait_prepare(void *context)
+{
+    sysv_msg_waiter_t *waiter = context;
+    if (!waiter)
+        return NULL;
+    memset(waiter, 0, sizeof(*waiter));
+    waiter->token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (!waiter->token.task)
+        return NULL;
+    return waiter;
+}
+
+bool a20_sysv_msg_wait_link(void *context, void *opaque, void *queue_opaque,
+                            bool send)
+{
+    (void)context;
+    sysv_msg_waiter_t *waiter = opaque;
+    sysv_msg_queue_t *queue = queue_opaque;
+    wait_queue_t *wq = send ? &queue->send_wq : &queue->recv_wq;
+    bool linked = wait_queue_link(wq, &waiter->entry, waiter->token, 0);
+    waiter->queue = linked ? wq : NULL;
+    return linked;
+}
+
+bool a20_sysv_msg_wait_finish(void *opaque, bool linked, bool commit)
+{
+    sysv_msg_waiter_t *waiter = opaque;
+    proc_wake_reason_t reason;
+    if (commit && linked)
+        reason = proc_park_commit(waiter->token);
+    else {
+        (void)proc_park_cancel(waiter->token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    if (linked && waiter->queue)
+        wait_queue_unlink(waiter->queue, &waiter->entry);
+    proc_park_finish(waiter->token);
+    bool interrupted = proc_wake_reason_is_task_interrupt(reason);
+    return interrupted;
+}
+
+void a20_sysv_msg_wake(void *context, void *queue_opaque, bool send, bool all)
+{
+    (void)context;
+    sysv_msg_queue_t *queue = queue_opaque;
+    wait_queue_t *wq = send ? &queue->send_wq : &queue->recv_wq;
+    if (all)
+        wait_queue_wake_all(wq, 0, PROC_WAKE_EVENT);
+    else
+        wait_queue_wake_one(wq, 0, PROC_WAKE_EVENT);
+}
+
+void a20_sysv_msg_queue_reset(void *context, void *queue_opaque)
+{
+    (void)context;
+    sysv_msg_queue_t *queue = queue_opaque;
+    memset(queue, 0, sizeof(*queue));
+}
+#endif
 
 int sysv_msg_get(int key, int msgflg)
 {
+#ifdef CONFIG_SYSV_MSG_RUST
+    return a20_sysv_msg_get_txn(g_msg, SYSV_MSG_MAX, NULL, key, msgflg);
+#else
     task_t *cur = proc_current();
     unsigned int uid = cur ? (unsigned int)cur->cred.euid : 0;
     unsigned int gid = cur ? (unsigned int)cur->cred.egid : 0;
     uint64_t flags = spin_lock_irqsave(&g_msg_lock);
 
     for (int i = 0; i < SYSV_MSG_MAX; i++) {
-        if (g_msg[i].used && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && g_msg[i].key == key && key != 0) {
+        if ((g_msg[i].used & 3) == 1 && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC) && g_msg[i].key == key && key != 0) {
             if ((msgflg & IPC_CREAT) && (msgflg & IPC_EXCL)) {
                 spin_unlock_irqrestore(&g_msg_lock, flags);
                 return -EEXIST;
@@ -192,8 +400,10 @@ int sysv_msg_get(int key, int msgflg)
     wait_queue_init(&q->send_wq);
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return slot;
+#endif
 }
 
+#ifndef CONFIG_SYSV_MSG_RUST
 int sysv_msg_send(int msqid, const void *msgp, size_t msgsz, int msgflg)
 {
     if (!msgp)
@@ -398,9 +608,28 @@ long sysv_msg_recv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
         flags = spin_lock_irqsave(&g_msg_lock);
     }
 }
+#else
+int sysv_msg_send(int msqid, const void *msgp, size_t msgsz, int msgflg)
+{
+    sysv_msg_waiter_t waiter = {0};
+    return a20_sysv_msg_send_txn(g_msg, SYSV_MSG_MAX, &waiter, msqid, msgp,
+                                 msgsz, msgflg);
+}
+
+long sysv_msg_recv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
+                   int msgflg)
+{
+    sysv_msg_waiter_t waiter = {0};
+    return (long)a20_sysv_msg_receive_txn(g_msg, SYSV_MSG_MAX, &waiter, msqid,
+                                          msgp, msgsz, msgtyp, msgflg);
+}
+#endif
 
 int sysv_msg_control(int msqid, int cmd, void *arg)
 {
+#ifdef CONFIG_SYSV_MSG_RUST
+    return a20_sysv_msg_control_txn(g_msg, SYSV_MSG_MAX, NULL, msqid, cmd, arg);
+#else
     /* shmctl and semctl both strip this.  musl's IPC_CMD() leaves the bit
      * clear on every 64-bit target here (its wrappers pass cmd straight
      * through, which the built libc confirms), so this is currently a no-op --
@@ -418,6 +647,9 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
     int r = 0;
     switch (cmd) {
     case IPC_RMID: {
+#ifdef CONFIG_SYSV_MSG_RUST
+        a20_sysv_msg_remove_locked(NULL, q);
+#else
         /* Drain all messages and mark the queue free. */
         sysv_msg_node_t *n = q->head;
         while (n) {
@@ -427,6 +659,7 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
         }
         msg_wake_blocked(q);
         memset(q, 0, sizeof(*q));
+#endif
         break;
     }
     case IPC_STAT:
@@ -491,6 +724,7 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
     }
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return r;
+#endif
 }
 
 int sysv_msg_count(void)
@@ -498,7 +732,7 @@ int sysv_msg_count(void)
     int n = 0;
     uint64_t flags = spin_lock_irqsave(&g_msg_lock);
     for (int i = 0; i < SYSV_MSG_MAX; i++)
-        if (g_msg[i].used && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC))
+        if ((g_msg[i].used & 3) == 1 && g_msg[i].namespace_ino == resource_ns_ino(PROCNS_IPC))
             n++;
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return n;
@@ -509,11 +743,15 @@ void sysv_msg_namespace_destroy(uint64_t ino)
     uint64_t irq = spin_lock_irqsave(&g_msg_lock);
     for (int i = 0; i < SYSV_MSG_MAX; i++) {
         sysv_msg_queue_t *q = &g_msg[i];
-        if (!q->used || q->namespace_ino != ino) continue;
+        if ((q->used & 3) != 1 || q->namespace_ino != ino) continue;
+#ifdef CONFIG_SYSV_MSG_RUST
+        a20_sysv_msg_remove_locked(NULL, q);
+#else
         sysv_msg_node_t *n = q->head;
         while (n) { sysv_msg_node_t *next = n->next; kfree(n); n = next; }
         msg_wake_blocked(q);
         memset(q, 0, sizeof(*q));
+#endif
     }
     spin_unlock_irqrestore(&g_msg_lock, irq);
 }

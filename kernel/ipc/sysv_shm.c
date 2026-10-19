@@ -64,6 +64,14 @@ typedef struct {
     int nattach;
 } sysv_shm_t;
 
+#ifdef CONFIG_SYSV_SHM_RUST
+STATIC_ASSERT(__builtin_offsetof(sysv_shm_t, namespace_ino) == (sizeof(void *) == 8 ? 8 : 8), sysv_shm_rust_namespace);
+STATIC_ASSERT(__builtin_offsetof(sysv_shm_t, marked_delete) == (sizeof(void *) == 8 ? 16 : 16), sysv_shm_rust_delete);
+STATIC_ASSERT(__builtin_offsetof(sysv_shm_t, size) == (sizeof(void *) == 8 ? 24 : 24), sysv_shm_rust_size);
+STATIC_ASSERT(__builtin_offsetof(sysv_shm_t, pages) == (sizeof(void *) == 8 ? 32 : 28), sysv_shm_rust_pages);
+STATIC_ASSERT(sizeof(sysv_shm_t) == (sizeof(void *) == 8 ? 56 : 40), sysv_shm_rust_layout);
+#endif
+
 /* Reply layout for SHM_INFO, matching musl and glibc `struct shm_info`:
  * int __used_ids, then shm_tot/shm_rss/shm_swp/__swap_attempts/
  * __swap_successes as unsigned long.  A20OS tracks none of these counters,
@@ -85,6 +93,26 @@ STATIC_ASSERT(sizeof(sysv_shminfo_t) == 24, shm_info_matches_libc);
 
 static sysv_shm_t g_shm[SYSV_SHM_MAX];
 static spinlock_t g_shm_lock = SPINLOCK_INIT;
+static void sysv_shm_free_pages(pfn_t *pages, size_t npages);
+static pfn_t *sysv_shm_alloc_pages(size_t npages);
+
+#ifdef CONFIG_SYSV_SHM_RUST
+int a20_sysv_shm_get_txn(void *, void *, int, size_t, int);
+int a20_sysv_shm_control_txn(void *, void *, int, int, void *);
+int a20_sysv_shm_ref_txn(void *, void *, int, int);
+int a20_sysv_shm_attach_txn(void *, void *, int);
+int a20_sysv_shm_size_txn(void *, void *, int, size_t *);
+int a20_sysv_shm_count_txn(void *, void *);
+void a20_sysv_shm_namespace_destroy_txn(void *, void *, uint64_t);
+
+uint64_t a20_sysv_shm_lock(void *ctx) { (void)ctx; return spin_lock_irqsave(&g_shm_lock); }
+void a20_sysv_shm_unlock(void *ctx, uint64_t flags) { (void)ctx; spin_unlock_irqrestore(&g_shm_lock, flags); }
+uint64_t a20_sysv_shm_namespace(void *ctx) { (void)ctx; return resource_ns_ino(PROCNS_IPC); }
+pfn_t *a20_sysv_shm_alloc_pages(void *ctx, size_t npages) { (void)ctx; return sysv_shm_alloc_pages(npages); }
+void a20_sysv_shm_free_pages(void *ctx, pfn_t *pages, size_t npages) { (void)ctx; sysv_shm_free_pages(pages, npages); }
+int a20_sysv_shm_copy_out(void *ctx, void *dst, const void *src, size_t len) { (void)ctx; return copy_to_user(dst, src, len); }
+int a20_sysv_shm_pid(void *ctx) { (void)ctx; task_t *t = proc_current(); return t ? t->pid : 0; }
+#endif
 
 static void sysv_shm_free_pages(pfn_t *pages, size_t npages)
 {
@@ -95,12 +123,14 @@ static void sysv_shm_free_pages(pfn_t *pages, size_t npages)
     kfree(pages);
 }
 
+#ifndef CONFIG_SYSV_SHM_RUST
 static void sysv_shm_free_locked(int shmid, pfn_t **pages, size_t *npages)
 {
     *pages = g_shm[shmid].pages;
     *npages = g_shm[shmid].npages;
     memset(&g_shm[shmid], 0, sizeof(sysv_shm_t));
 }
+#endif
 
 static pfn_t *sysv_shm_alloc_pages(size_t npages)
 {
@@ -149,6 +179,9 @@ static int sysv_shm_range_overlaps(mm_struct_t *mm, uint64_t start, size_t len)
 
 void sysv_shm_unref_attach(int shmid)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    (void)a20_sysv_shm_ref_txn(g_shm, NULL, shmid, -1);
+#else
     pfn_t *free_pages = NULL;
     size_t free_npages = 0;
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
@@ -160,10 +193,14 @@ void sysv_shm_unref_attach(int shmid)
     }
     spin_unlock_irqrestore(&g_shm_lock, flags);
     sysv_shm_free_pages(free_pages, free_npages);
+#endif
 }
 
 int sysv_shm_ref_attach(int shmid)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    return a20_sysv_shm_ref_txn(g_shm, NULL, shmid, 1);
+#else
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX || !g_shm[shmid].used) {
         spin_unlock_irqrestore(&g_shm_lock, flags);
@@ -172,10 +209,14 @@ int sysv_shm_ref_attach(int shmid)
     g_shm[shmid].nattach++;
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return 0;
+#endif
 }
 
 int sysv_shm_get(int key, size_t size, int shmflg)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    return a20_sysv_shm_get_txn(g_shm, NULL, key, size, shmflg);
+#else
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
 
     if (key != 0 && !(shmflg & IPC_CREAT)) {
@@ -273,10 +314,14 @@ int sysv_shm_get(int key, size_t size, int shmflg)
     g_shm[slot].nattach = 0;
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return slot;
+#endif
 }
 
 int sysv_shm_size(int shmid, size_t *size)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    return a20_sysv_shm_size_txn(g_shm, NULL, shmid, size);
+#else
     if (!size) return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX || (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC))) {
@@ -286,6 +331,7 @@ int sysv_shm_size(int shmid, size_t *size)
     *size = g_shm[shmid].size;
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return 0;
+#endif
 }
 
 uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
@@ -295,17 +341,23 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
     task_t *t = proc_current();
     if (!t || !t->mm) return (uint64_t)-EINVAL;
 
+#ifdef CONFIG_SYSV_SHM_RUST
+    if (a20_sysv_shm_attach_txn(g_shm, NULL, shmid) < 0)
+#else
+    if (sysv_shm_ref_attach(shmid) < 0)
+#endif
+        return (uint64_t)-EINVAL;
     uint64_t lk = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX ||
         (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC)) || g_shm[shmid].marked_delete) {
         spin_unlock_irqrestore(&g_shm_lock, lk);
+        sysv_shm_unref_attach(shmid);
         return (uint64_t)-EINVAL;
     }
 
     pfn_t *pages = g_shm[shmid].pages;
     size_t npages = g_shm[shmid].npages;
     size_t shm_size = g_shm[shmid].size;
-    g_shm[shmid].nattach++;
     spin_unlock_irqrestore(&g_shm_lock, lk);
 
     uint64_t vm_flags = VM_SHARED | VM_READ | VM_WRITE | VM_SYSV_SHM;
@@ -380,6 +432,9 @@ int sysv_shm_detach(const void *shmaddr)
 
 int sysv_shm_control(int shmid, int cmd, void *buf)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    return a20_sysv_shm_control_txn(g_shm, NULL, shmid, cmd, buf);
+#else
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX || (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC))) {
         spin_unlock_irqrestore(&g_shm_lock, flags);
@@ -473,10 +528,14 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
 
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return 0;
+#endif
 }
 
 int sysv_shm_count(void)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    return a20_sysv_shm_count_txn(g_shm, NULL);
+#else
     int n = 0;
     uint64_t flags = spin_lock_irqsave(&g_shm_lock);
     for (int i = 0; i < SYSV_SHM_MAX; i++)
@@ -484,10 +543,14 @@ int sysv_shm_count(void)
             n++;
     spin_unlock_irqrestore(&g_shm_lock, flags);
     return n;
+#endif
 }
 
 void sysv_shm_namespace_destroy(uint64_t ino)
 {
+#ifdef CONFIG_SYSV_SHM_RUST
+    a20_sysv_shm_namespace_destroy_txn(g_shm, NULL, ino);
+#else
     for (int i = 0; i < SYSV_SHM_MAX; i++) {
         pfn_t *pages = NULL;
         size_t npages = 0;
@@ -499,4 +562,5 @@ void sysv_shm_namespace_destroy(uint64_t ino)
         spin_unlock_irqrestore(&g_shm_lock, irq);
         sysv_shm_free_pages(pages, npages);
     }
+#endif
 }

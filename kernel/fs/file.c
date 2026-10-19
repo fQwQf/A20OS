@@ -21,80 +21,12 @@
 #include "ipc/envelope.h"
 #endif
 
-#ifdef CONFIG_VFS_RUST_LIFECYCLE
 extern int a20_vfile_close_begin(uint32_t *state);
 extern int a20_vfile_close_begin_token(uint32_t *state, int token_capable);
 extern int a20_vfile_close_finish(uint32_t *state, int status, int sent,
                                   int acked, int retry_safe);
 extern int a20_vfile_close_is_done(const uint32_t *state);
-#else
-#include "fs/vfs/vfile_lifecycle_c.h"
-#define a20_vfile_close_begin a20_vfile_close_begin_c
-#define a20_vfile_close_begin_token a20_vfile_close_begin_token_c
-#define a20_vfile_close_finish a20_vfile_close_finish_c
-#define a20_vfile_close_is_done a20_vfile_close_is_done_c
-#endif
 
-#ifndef CONFIG_VFS_RUST_LIFECYCLE
-/* C reference selector for the system shutdown phase controller. */
-enum { VFS_IDLE, VFS_RUNNING, VFS_RETRY_SYNC, VFS_RETRY_COMMIT,
-       VFS_RETRY_TEARDOWN, VFS_COMPLETE };
-static uint32_t g_vfs_shutdown_phase;
-int a20_vfs_shutdown_run(const vfs_shutdown_ops_t *ops)
-{
-    if (!ops) return -EINVAL;
-    for (;;) {
-        uint32_t old = __atomic_load_n(&g_vfs_shutdown_phase, __ATOMIC_ACQUIRE);
-        if (old == VFS_COMPLETE) return 0;
-        if (old == VFS_RUNNING) return -EBUSY;
-        if (old > VFS_COMPLETE) return -EINVAL;
-        if (!__atomic_compare_exchange_n(&g_vfs_shutdown_phase, &old,
-                VFS_RUNNING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            continue;
-        uint32_t phase = old;
-        if (phase == VFS_IDLE) {
-            int rc = ops->begin ? ops->begin(ops->context) : -EINVAL;
-            if (rc < 0) {
-                __atomic_store_n(&g_vfs_shutdown_phase, VFS_IDLE, __ATOMIC_RELEASE);
-                return rc;
-            }
-            phase = VFS_RETRY_SYNC;
-        }
-        if (phase == VFS_RETRY_SYNC) {
-            int rc = ops->sync ? ops->sync(ops->context) : -EINVAL;
-            if (rc < 0) {
-                int ar = ops->abort ? ops->abort(ops->context) : -EINVAL;
-                __atomic_store_n(&g_vfs_shutdown_phase,
-                    ar == 0 ? VFS_IDLE : VFS_RETRY_SYNC, __ATOMIC_RELEASE);
-                return rc;
-            }
-            phase = VFS_RETRY_COMMIT;
-        }
-        if (phase == VFS_RETRY_COMMIT) {
-            int rc = ops->commit ? ops->commit(ops->context) : -EINVAL;
-            if (rc < 0) {
-                __atomic_store_n(&g_vfs_shutdown_phase, VFS_RETRY_COMMIT,
-                                 __ATOMIC_RELEASE);
-                return rc;
-            }
-            phase = VFS_RETRY_TEARDOWN;
-        }
-        if (phase == VFS_RETRY_TEARDOWN) {
-            int rc = ops->teardown ? ops->teardown(ops->context) : -EINVAL;
-            if (rc < 0) {
-                __atomic_store_n(&g_vfs_shutdown_phase, VFS_RETRY_TEARDOWN,
-                                 __ATOMIC_RELEASE);
-                return rc;
-            }
-            __atomic_store_n(&g_vfs_shutdown_phase, VFS_COMPLETE,
-                             __ATOMIC_RELEASE);
-            return 0;
-        }
-        __atomic_store_n(&g_vfs_shutdown_phase, phase, __ATOMIC_RELEASE);
-        return -EINVAL;
-    }
-}
-#endif
 
 /*
  * The vfile layer owns vfile allocation, identity and refcounting only.

@@ -3,6 +3,37 @@
 #include "core/lock_counters.h"
 #include "core/string.h"
 
+/*
+ * Dentry cache state engine selector.  Rust owns the slot table's state
+ * transitions (name hash, hash-chain link/unlink, LRU, free list, exact-match
+ * search with second chance, eviction policy, bucket drop).  The C adapter
+ * keeps the global/bucket spinlocks, the vnode references and the retire
+ * batch.  The C reference stays for VFS_DCACHE_STATE_IMPL=c.
+ */
+/* Provided by kernel/fs/vfs/dcache_state.rs.  Every entry needs the lock the
+ * C contract names; none takes a lock itself. */
+extern uint32_t a20_dcache_hash_key(uintptr_t mnt, uint64_t ino, const char *name);
+extern void a20_dcache_init(void *entries, size_t n, int *hash, size_t hash_size,
+                            int *free_list, int *free_count, int *lru_head,
+                            int *lru_tail);
+extern void a20_dcache_link_hash(void *entries, int *hash, int slot, uint32_t h);
+extern void a20_dcache_unlink_hash(void *entries, int *hash, int slot, uint32_t h);
+extern void a20_dcache_lru_remove(void *entries, int *lru_head, int *lru_tail, int slot);
+extern void a20_dcache_lru_insert_front(void *entries, int *lru_head, int *lru_tail, int slot);
+extern void a20_dcache_lru_touch(void *entries, int *lru_head, int *lru_tail, int slot);
+extern int a20_dcache_alloc_free(void *entries, size_t n, int *free_list, int *free_count);
+extern void a20_dcache_free_push(void *entries, int *free_list, int *free_count, int slot);
+extern int a20_dcache_match(void *entries, int *hash, uint32_t h, uintptr_t mnt, uint64_t ino,
+                            const char *name);
+extern void a20_dcache_mark_accessed(void *entries, int slot);
+extern int a20_dcache_evict_decide(int used, int accessed);
+extern unsigned a20_dcache_drop_chain(void *entries, int *hash, uint32_t h, uintptr_t *retire,
+                                      unsigned *retire_count, size_t retire_cap);
+
+#if defined(CONFIG_VFS_DCACHE_STATE_RUST) && MAX_NAME_LEN != 256
+#error "VFS_DCACHE_STATE_RUST mirror assumes MAX_NAME_LEN==256 (dcache is not built on the 32-byte profile)"
+#endif
+
 #define VFS_DCACHE_MAX 2048
 #define VFS_DCACHE_HASH_BITS 9
 #define VFS_DCACHE_HASH_SIZE (1U << VFS_DCACHE_HASH_BITS)
@@ -40,10 +71,7 @@ static int g_dcache_initialized;
 
 static uint32_t dcache_hash_key(mount_t *mnt, uint64_t ino, const char *name)
 {
-    uint32_t h = (uint32_t)(uintptr_t)mnt ^ (uint32_t)ino;
-    for (const char *p = name; *p; p++)
-        h = h * 31 + (uint8_t)*p;
-    return h & VFS_DCACHE_HASH_MASK;
+    return a20_dcache_hash_key((uintptr_t)mnt, ino, name);
 }
 
 /* Lock ordering: callers may hold g_dcache_lock and then a bucket lock, but
@@ -63,84 +91,39 @@ static inline void dcache_bucket_unlock_irqrestore(uint32_t h, uint64_t flags)
  * g_dcache_lock for the LRU/free structures. */
 static void dcache_unlink_hash(int slot, uint32_t h)
 {
-    vfs_dcache_entry_t *e = &g_dcache[slot];
-    if (e->hash_prev >= 0)
-        g_dcache[e->hash_prev].hash_next = e->hash_next;
-    else {
-        g_dcache_hash[h] = e->hash_next;
-    }
-    if (e->hash_next >= 0)
-        g_dcache[e->hash_next].hash_prev = e->hash_prev;
-    e->hash_next = -1;
-    e->hash_prev = -1;
+    a20_dcache_unlink_hash(g_dcache, g_dcache_hash, slot, h);
 }
 
 static void dcache_link_hash(int slot, uint32_t h)
 {
-    g_dcache[slot].hash_next = g_dcache_hash[h];
-    g_dcache[slot].hash_prev = -1;
-    if (g_dcache_hash[h] >= 0)
-        g_dcache[g_dcache_hash[h]].hash_prev = slot;
-    g_dcache_hash[h] = slot;
+    a20_dcache_link_hash(g_dcache, g_dcache_hash, slot, h);
 }
 
 static void dcache_init_locked(void)
 {
     if (g_dcache_initialized)
         return;
-    for (int i = 0; i < VFS_DCACHE_MAX; i++) {
-        g_dcache[i].hash_next = -1;
-        g_dcache[i].hash_prev = -1;
-        g_dcache[i].free_next = i + 1;
-        g_dcache[i].lru_next = -1;
-        g_dcache[i].lru_prev = -1;
-        g_dcache[i].used = 0;
-        g_dcache[i].accessed = 0;
-    }
-    g_dcache[VFS_DCACHE_MAX - 1].free_next = -1;
-    for (int i = 0; i < (int)VFS_DCACHE_HASH_SIZE; i++)
-        g_dcache_hash[i] = -1;
-    g_dcache_free_list = 0;
-    g_dcache_free_count = VFS_DCACHE_MAX;
-    g_dcache_lru_head = -1;
-    g_dcache_lru_tail = -1;
+    a20_dcache_init(g_dcache, VFS_DCACHE_MAX, g_dcache_hash,
+                    VFS_DCACHE_HASH_SIZE, &g_dcache_free_list,
+                    &g_dcache_free_count, &g_dcache_lru_head,
+                    &g_dcache_lru_tail);
     g_dcache_initialized = 1;
     lock_counters_register(&g_dcache_lock, "dcache");
 }
 
 static void dcache_lru_remove(int slot)
 {
-    vfs_dcache_entry_t *e = &g_dcache[slot];
-    if (e->lru_prev >= 0)
-        g_dcache[e->lru_prev].lru_next = e->lru_next;
-    else
-        g_dcache_lru_head = e->lru_next;
-    if (e->lru_next >= 0)
-        g_dcache[e->lru_next].lru_prev = e->lru_prev;
-    else
-        g_dcache_lru_tail = e->lru_prev;
-    e->lru_next = -1;
-    e->lru_prev = -1;
+    a20_dcache_lru_remove(g_dcache, &g_dcache_lru_head, &g_dcache_lru_tail, slot);
 }
 
 static void dcache_lru_insert_front(int slot)
 {
-    vfs_dcache_entry_t *e = &g_dcache[slot];
-    e->lru_prev = -1;
-    e->lru_next = g_dcache_lru_head;
-    if (g_dcache_lru_head >= 0)
-        g_dcache[g_dcache_lru_head].lru_prev = slot;
-    else
-        g_dcache_lru_tail = slot;
-    g_dcache_lru_head = slot;
+    a20_dcache_lru_insert_front(g_dcache, &g_dcache_lru_head, &g_dcache_lru_tail, slot);
 }
 
 static void dcache_lru_touch(int slot)
 {
-    if (g_dcache_lru_head == slot)
-        return;
-    dcache_lru_remove(slot);
-    dcache_lru_insert_front(slot);
+    a20_dcache_lru_touch(g_dcache, &g_dcache_lru_head, &g_dcache_lru_tail, slot);
 }
 
 /* Caller holds g_dcache_lock.  Free-list path needs no bucket lock; the
@@ -148,38 +131,34 @@ static void dcache_lru_touch(int slot)
  * vnode_get() in a concurrent lookup is atomic against slot reuse. */
 static int dcache_alloc_slot(vnode_t **old_vn)
 {
-    if (g_dcache_free_count > 0) {
-        int slot = g_dcache_free_list;
-        if (slot < 0 || slot >= VFS_DCACHE_MAX)
-            return -1;
-        g_dcache_free_list = g_dcache[slot].free_next;
-        g_dcache[slot].free_next = -1;
-        g_dcache_free_count--;
+    int slot = a20_dcache_alloc_free(g_dcache, VFS_DCACHE_MAX,
+                                     &g_dcache_free_list, &g_dcache_free_count);
+    if (slot >= 0)
         return slot;
-    }
 
     for (;;) {
-        int slot = g_dcache_lru_tail;
-        if (slot < 0 || slot >= VFS_DCACHE_MAX)
+        int victim = g_dcache_lru_tail;
+        if (victim < 0 || victim >= VFS_DCACHE_MAX)
             return -1;
-        vfs_dcache_entry_t *e = &g_dcache[slot];
+        vfs_dcache_entry_t *e = &g_dcache[victim];
         if (!e->used) {
-            dcache_lru_remove(slot);
-            return slot;
+            dcache_lru_remove(victim);
+            return victim;
         }
         uint32_t h = dcache_hash_key(e->mnt, e->parent_ino, e->name);
         uint64_t bf = dcache_bucket_lock_irqsave(h);
-        if (e->used && e->accessed) {
+        int decision = a20_dcache_evict_decide(e->used, e->accessed);
+        if (decision == 2) { /* second chance */
             e->accessed = 0;
             dcache_bucket_unlock_irqrestore(h, bf);
-            dcache_lru_touch(slot);
+            dcache_lru_touch(victim);
             continue;
         }
         *old_vn = e->vn;
-        dcache_unlink_hash(slot, h);
-        dcache_lru_remove(slot);
+        dcache_unlink_hash(victim, h);
+        dcache_lru_remove(victim);
         dcache_bucket_unlock_irqrestore(h, bf);
-        return slot;
+        return victim;
     }
 }
 
@@ -206,11 +185,12 @@ vnode_t *vfs_dcache_lookup(vnode_t *dir, const char *name)
         spin_unlock_irqrestore(&g_dcache_lock, flags);
         bf = dcache_bucket_lock_irqsave(h);
     }
-    for (int i = g_dcache_hash[h]; i >= 0; i = g_dcache[i].hash_next) {
-        vfs_dcache_entry_t *e = &g_dcache[i];
-        if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
-            strcmp(e->name, name) == 0 && vnode_get_unless_zero(e->vn)) {
-            e->accessed = 1;
+    int slot = a20_dcache_match(g_dcache, g_dcache_hash, h, (uintptr_t)dir->mnt,
+                                dir->ino, name);
+    if (slot >= 0) {
+        vfs_dcache_entry_t *e = &g_dcache[slot];
+        if (vnode_get_unless_zero(e->vn)) {
+            a20_dcache_mark_accessed(g_dcache, slot);
             vnode_t *vn = e->vn;
             dcache_bucket_unlock_irqrestore(h, bf);
             return vn;
@@ -297,9 +277,8 @@ void vfs_dcache_invalidate(vnode_t *dir, const char *name)
             e->hash_prev = -1;
             e->lru_next = -1;
             e->lru_prev = -1;
-            e->free_next = g_dcache_free_list;
-            g_dcache_free_list = i;
-            g_dcache_free_count++;
+            a20_dcache_free_push(g_dcache, &g_dcache_free_list,
+                                 &g_dcache_free_count, i);
             dcache_bucket_unlock_irqrestore(h, bf);
             spin_unlock_irqrestore(&g_dcache_lock, flags);
             if (vn) vnode_put(vn);
@@ -317,7 +296,7 @@ static spinlock_t g_dcache_invalidate_lock = SPINLOCK_INIT;
 static vnode_t *g_dcache_retire[VFS_DCACHE_MAX];
 static unsigned g_dcache_retire_count;
 
-static void dcache_retire_push(vnode_t *vn)
+static void __attribute__((unused)) dcache_retire_push(vnode_t *vn)
 {
     g_dcache_retire[g_dcache_retire_count++] = vn;
 }
@@ -337,21 +316,8 @@ static void dcache_retire_drain(void)
  * table needs no LRU or free-list pass under the global lock. */
 static void dcache_drop_chain(unsigned h)
 {
-    for (int i = g_dcache_hash[h]; i >= 0; ) {
-        vfs_dcache_entry_t *e = &g_dcache[i];
-        int next = e->hash_next;
-        if (e->used) {
-            if (e->vn)
-                dcache_retire_push(e->vn);
-            e->used = 0;
-            e->vn = NULL;
-            e->accessed = 0;
-            e->hash_next = -1;
-            e->hash_prev = -1;
-        }
-        i = next;
-    }
-    g_dcache_hash[h] = -1;
+    a20_dcache_drop_chain(g_dcache, g_dcache_hash, h, (uintptr_t *)g_dcache_retire,
+                          &g_dcache_retire_count, VFS_DCACHE_MAX);
 }
 
 void vfs_dcache_invalidate_all(void)

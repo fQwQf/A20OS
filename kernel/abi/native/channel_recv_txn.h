@@ -41,6 +41,7 @@ typedef int (*a20_channel_recv_publish_fn)(void *context,
                                             uint32_t data_len,
                                             uint32_t handle_count);
 
+#ifdef A20_CHANNEL_RECV_TXN_HOST_TEST
 int64_t a20_channel_recv_txn_c(a20_channel_ep_t *ep,
                                struct a20_ht_internal *ht,
                                uint32_t flags, int donate,
@@ -48,6 +49,7 @@ int64_t a20_channel_recv_txn_c(a20_channel_ep_t *ep,
                                void *user_handles, uint32_t handle_capacity,
                                void *user_rights, void *publish_context,
                                a20_channel_recv_publish_fn publish);
+#endif
 
 #if defined(CONFIG_CHANNEL_RECV_TXN_RUST) || defined(A20_CHANNEL_RECV_TXN_HOST_TEST)
 int64_t a20_rust_channel_recv_txn(a20_channel_ep_t *ep,
@@ -70,17 +72,10 @@ static inline int64_t a20_channel_recv_txn(a20_channel_ep_t *ep,
                                             void *publish_context,
                                             a20_channel_recv_publish_fn publish)
 {
-#ifdef CONFIG_CHANNEL_RECV_TXN_RUST
     return a20_rust_channel_recv_txn(ep, ht, flags, donate, user_data,
                                     data_capacity, user_handles,
                                     handle_capacity, user_rights,
                                     publish_context, publish);
-#else
-    return a20_channel_recv_txn_c(ep, ht, flags, donate, user_data,
-                                  data_capacity, user_handles,
-                                  handle_capacity, user_rights,
-                                  publish_context, publish);
-#endif
 }
 
 #endif

@@ -782,6 +782,18 @@ pub unsafe extern "C" fn a20_fdtable_detach_next_rust(
     0
 }
 
+/// Effective descriptor ceiling: the task's `RLIMIT_NOFILE`, capped at the
+/// table size.  `nofile` <= 0 (no task) falls back to the table size.
+#[no_mangle]
+pub extern "C" fn a20_fdtable_fd_limit(has_task: i32, nofile: u64, max_files: i32) -> i32 {
+    let limit = if has_task == 0 { max_files as u64 } else { nofile };
+    if limit > max_files as u64 {
+        max_files
+    } else {
+        limit as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,4 +1591,13 @@ mod tests {
         let state = table.lock().unwrap();
         assert_eq!(state.2[0].count_ones(), 8);
     }
+    #[test]
+    fn fd_limit_uses_rlimit_capped_at_table() {
+        assert_eq!(a20_fdtable_fd_limit(0, 0, 1024), 1024);   /* no task */
+        assert_eq!(a20_fdtable_fd_limit(1, 256, 1024), 256);
+        assert_eq!(a20_fdtable_fd_limit(1, 4096, 1024), 1024);
+        assert_eq!(a20_fdtable_fd_limit(1, 1024, 1024), 1024);
+        assert_eq!(a20_fdtable_fd_limit(1, 0, 1024), 0);      /* explicit zero */
+    }
+
 }

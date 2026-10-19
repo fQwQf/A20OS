@@ -30,6 +30,20 @@
 #include "core/cpu.h"
 #include "ipc/objstats.h"
 
+extern int64_t a20_rust_channel_recv_finish(a20_channel_ep_t *ep, void *data,
+                                             uint32_t *data_len,
+                                             a20_ch_handle_info_t *handles,
+                                             uint32_t *handle_count);
+extern void a20_rust_channel_recv_abort(a20_channel_ep_t *ep);
+extern int64_t a20_rust_channel_recv_begin(a20_channel_ep_t *ep, uint32_t flags,
+                                            uint32_t *out_msg_data_len,
+                                            uint32_t *out_msg_handles);
+extern int64_t a20_rust_channel_recv_probe_locked(a20_channel_ep_t *ep,
+                                                   uint32_t *out_msg_data_len,
+                                                   uint32_t *out_msg_handles);
+extern void a20_rust_channel_peer_shutdown(a20_channel_ep_t *ep);
+extern void a20_rust_channel_ep_finalize(a20_channel_ep_t *ep);
+
 extern void a20_object_ref(void *object, uint16_t type);
 extern void a20_object_release(void *object, uint16_t type);
 
@@ -151,17 +165,6 @@ static void ch_msg_free(a20_ch_message_t *msg, int release_refs)
  * ch_check_send_types — verify handles are allowed by the channel's
  * send_handle_types bitmask (docs/native-abi/05-ipc.md §2.3).
  */
-static int ch_check_send_types(const a20_channel_type_t *ct,
-                               a20_ch_handle_info_t *handles, uint32_t count)
-{
-    if (!ct) return 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t bit = 1u << handles[i].type;
-        if (!(ct->send_handle_types & bit))
-            return -A20_ERR_TYPE_MISMATCH;
-    }
-    return 0;
-}
 
 /*
  * ch_check_recv_types — verify received handles are allowed by the
@@ -169,17 +172,6 @@ static int ch_check_send_types(const a20_channel_type_t *ct,
  * Without this check a receiver could be forced to accept handle types
  * it did not agree to handle, breaking the typed-channel contract.
  */
-static int ch_check_recv_types(const a20_channel_type_t *ct,
-                               a20_ch_handle_info_t *handles, uint32_t count)
-{
-    if (!ct) return 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t bit = 1u << handles[i].type;
-        if (!(ct->recv_handle_types & bit))
-            return -A20_ERR_TYPE_MISMATCH;
-    }
-    return 0;
-}
 
 a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t *type)
 {
@@ -223,159 +215,131 @@ a20_channel_ep_t *a20_channel_create(uint32_t msg_cap, const a20_channel_type_t 
  * defer_wake skips the RECV wait-queue wake (channel_call donation path);
  * the caller then owns delivering the wake or a direct handoff.
  */
-static int ch_try_enqueue(a20_channel_ep_t *ep, a20_ch_message_t *msg,
-                          int defer_wake)
+
+/* Mechanism bridges for channel_send.rs. */
+void a20_channel_send_limits(a20_channel_ep_t *ep, uint32_t *max_data,
+                             uint32_t *max_handles, uint32_t *send_types,
+                             int *typed)
+{
+    const a20_channel_type_t *ct = ep->chan_type;
+    *typed = ct != NULL;
+    *max_data = ct ? ct->max_data_size : 0;
+    *max_handles = ct ? ct->max_handles : 0;
+    *send_types = ct ? ct->send_handle_types : 0;
+}
+void a20_channel_send_hold(a20_channel_ep_t *ep) { refcount_inc(&ep->refcount); }
+a20_ch_message_t *a20_channel_send_alloc(const void *data, uint32_t data_len,
+                                         const a20_ch_handle_info_t *handles,
+                                         uint32_t handle_count)
+{ return ch_msg_alloc(data, data_len, (a20_ch_handle_info_t *)handles, handle_count); }
+/* Queue locking/ref pins and wake primitives are mechanisms; Rust owns the
+ * capacity decision and FIFO link/count/byte mutations. */
+typedef struct a20_channel_queue_view {
+    a20_ch_message_t **head;
+    a20_ch_message_t **tail;
+    uint32_t *count;
+    const uint32_t *capacity;
+    uint32_t *total_data;
+    const int *peer_closed;
+} a20_channel_queue_view_t;
+
+a20_channel_ep_t *a20_channel_send_lock_peer(a20_channel_ep_t *ep)
 {
     spin_lock(&g_ch_lock);
     a20_channel_ep_t *peer = ep->peer;
-    /* Take a peer reference so a concurrent ep_release() cannot free the
-     * endpoint (and its queue) while we enqueue into it.  The park path in
-     * a20_channel_send_dwc() does the same; without this, enqueue could
-     * write into freed memory after the peer's final release. */
+    if (peer && !refcount_inc_not_zero(&peer->refcount))
+        peer = NULL;
+    if (peer)
+        spin_lock(&peer->lock);
+    spin_unlock(&g_ch_lock);
+    return peer;
+}
+void a20_channel_send_unlock_peer(a20_channel_ep_t *peer)
+{
+    spin_unlock(&peer->lock);
+    a20_channel_ep_release(peer);
+}
+void a20_channel_queue_view(a20_channel_ep_t *ep, a20_channel_queue_view_t *view)
+{
+    view->head = &ep->msg_head;
+    view->tail = &ep->msg_tail;
+    view->count = &ep->msg_count;
+    view->capacity = &ep->msg_cap;
+    view->total_data = &ep->total_data;
+    view->peer_closed = &ep->peer_closed;
+}
+void a20_channel_send_notify(a20_channel_ep_t *peer, int defer_wake)
+{
+    if (!defer_wake)
+        wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV, PROC_WAKE_EVENT);
+    a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
+                     A20_EVENT_MESSAGE_READY, 0, 0);
+}
+void a20_channel_send_free(a20_ch_message_t *msg, int release_refs)
+{ ch_msg_free(msg, release_refs); }
+
+/* Queue-space parking is a wait-queue mechanism; Rust owns the retry and
+ * message/ref rollback policy around its result. */
+int64_t a20_channel_send_wait_space(a20_channel_ep_t *ep)
+{
+    proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (!token.task)
+        return -A20_ERR_WOULD_BLOCK;
+
+    wait_queue_entry_t entry = {0};
+    spin_lock(&g_ch_lock);
+    a20_channel_ep_t *peer = ep->peer;
     if (peer && !refcount_inc_not_zero(&peer->refcount))
         peer = NULL;
     if (peer)
         spin_lock(&peer->lock);
     spin_unlock(&g_ch_lock);
 
-    if (!peer)
-        return -A20_ERR_CANCELED;
-    if (peer->peer_closed) {
-        spin_unlock(&peer->lock);
-        a20_channel_ep_release(peer);
+    if (!peer) {
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
         return -A20_ERR_CANCELED;
     }
-    if (peer->msg_count >= peer->msg_cap) {
+    if (!peer->peer_closed && peer->msg_count >= peer->msg_cap) {
+        bool linked = wait_queue_link(&peer->waiters, &entry, token,
+                                      A20_CH_WAIT_SEND);
         spin_unlock(&peer->lock);
+        proc_wake_reason_t reason;
+        if (linked)
+            reason = proc_park_commit(token);
+        else {
+            (void)proc_park_cancel(token);
+            reason = PROC_WAKE_CANCEL;
+        }
+        wait_queue_unlink(&peer->waiters, &entry);
+        proc_park_finish(token);
         a20_channel_ep_release(peer);
-        return 0;
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -A20_ERR_INTERRUPTED;
+        return A20_OK;
     }
 
-    if (peer->msg_tail)
-        peer->msg_tail->next = msg;
-    else
-        peer->msg_head = msg;
-    peer->msg_tail = msg;
-    peer->msg_count++;
-    peer->total_data += msg->data_len;
-
-    if (!defer_wake)
-        wait_queue_wake_one(&peer->waiters, A20_CH_WAIT_RECV, PROC_WAKE_EVENT);
-    a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
-                     A20_EVENT_MESSAGE_READY, 0, 0);
     spin_unlock(&peer->lock);
     a20_channel_ep_release(peer);
-    return 1;
+    (void)proc_park_cancel(token);
+    proc_park_finish(token);
+    return A20_OK;
 }
 
+extern int64_t a20_rust_channel_send_dwc(a20_channel_ep_t *ep,
+                                         const void *data, uint32_t data_len,
+                                         a20_ch_handle_info_t *handles,
+                                         uint32_t handle_count,
+                                         struct a20_ht_internal *sender_ht,
+                                         uint32_t flags, int defer_wake);
 int64_t a20_channel_send_dwc(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
                              a20_ch_handle_info_t *handles, uint32_t handle_count,
                              struct a20_ht_internal *sender_ht, uint32_t flags,
                              int defer_wake)
 {
-    (void)sender_ht;
-    if (!ep) return -A20_ERR_BAD_HANDLE;
-    if (data_len > A20_CH_MAX_DATA) return -A20_ERR_INVALID_ARGUMENT;
-    if (handle_count > A20_CH_MAX_HANDLES) return -A20_ERR_INVALID_ARGUMENT;
-    if (flags & ~A20_MSG_NONBLOCK) return -A20_ERR_INVALID_ARGUMENT;
-
-    /* Hold an endpoint reference for the syscall duration so a concurrent
-     * handle_close cannot free ep (or its peer via cascade) under us. */
-    refcount_inc(&ep->refcount);
-    int64_t result;
-
-    /* Typed channel enforcement (docs/native-abi/05-ipc.md §2.3) */
-    const a20_channel_type_t *ct = ep->chan_type;
-    if (ct) {
-        if (ct->max_data_size && data_len > ct->max_data_size) {
-            result = -A20_ERR_INVALID_ARGUMENT;
-            goto out;
-        }
-        if (ct->max_handles && handle_count > ct->max_handles) {
-            result = -A20_ERR_INVALID_ARGUMENT;
-            goto out;
-        }
-        if (handles && handle_count > 0) {
-            int r = ch_check_send_types(ct, handles, handle_count);
-            if (r < 0) { result = r; goto out; }
-        }
-    }
-
-    /* Shared transfer semantics (05-ipc.md §2.7): the sender keeps its
-     * handle, the message carries one new reference per handle. */
-    for (uint32_t i = 0; i < handle_count; i++)
-        a20_object_ref(handles[i].object, handles[i].type);
-
-    a20_ch_message_t *msg = ch_msg_alloc(data, data_len, handles, handle_count);
-    if (!msg) {
-        for (uint32_t i = 0; i < handle_count; i++)
-            a20_object_release(handles[i].object, handles[i].type);
-        result = -A20_ERR_NO_MEMORY;
-        goto out;
-    }
-    a20_channel_trace(1, data_len, msg, NULL, handle_count);
-    for (;;) {
-        int r = ch_try_enqueue(ep, msg, defer_wake);
-        if (r > 0) { a20_channel_trace(3, data_len, msg, NULL, r); result = A20_OK; goto out; }
-        if (r < 0) { a20_channel_trace(4, data_len, msg, NULL, (uint32_t)-r); ch_msg_free(msg, 1); result = r; goto out; }
-        if (flags & A20_MSG_NONBLOCK) {
-            ch_msg_free(msg, 1);
-            result = -A20_ERR_WOULD_BLOCK;
-            goto out;
-        }
-
-        /* Queue full: sleep on the peer's wait queue as a sender. */
-        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
-        if (!token.task) { ch_msg_free(msg, 1); result = -A20_ERR_WOULD_BLOCK; goto out; }
-
-        wait_queue_entry_t entry = {0};
-        spin_lock(&g_ch_lock);
-        a20_channel_ep_t *peer = ep->peer;
-        if (peer && !refcount_inc_not_zero(&peer->refcount))
-            peer = NULL;
-        if (peer)
-            spin_lock(&peer->lock);
-        spin_unlock(&g_ch_lock);
-
-        if (!peer) {
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            ch_msg_free(msg, 1);
-            result = -A20_ERR_CANCELED;
-            goto out;
-        }
-        if (!peer->peer_closed && peer->msg_count >= peer->msg_cap) {
-            bool linked = wait_queue_link(&peer->waiters, &entry, token,
-                                          A20_CH_WAIT_SEND);
-            spin_unlock(&peer->lock);
-            proc_wake_reason_t reason;
-            if (linked)
-                reason = proc_park_commit(token);
-            else {
-                (void)proc_park_cancel(token);
-                reason = PROC_WAKE_CANCEL;
-            }
-            wait_queue_unlink(&peer->waiters, &entry);
-            proc_park_finish(token);
-            a20_channel_ep_release(peer);
-            if (proc_wake_reason_is_task_interrupt(reason)) {
-                ch_msg_free(msg, 1);
-                result = -A20_ERR_INTERRUPTED;
-                goto out;
-            }
-            continue;
-        }
-        /* Space appeared or the peer closed while preparing: retry the
-         * fast path, which re-checks both conditions under peer->lock. */
-        spin_unlock(&peer->lock);
-        a20_channel_ep_release(peer);
-        (void)proc_park_cancel(token);
-        proc_park_finish(token);
-    }
-
-out:
-    a20_channel_ep_release(ep);
-    return result;
+    return a20_rust_channel_send_dwc(ep, data, data_len, handles,
+                                     handle_count, sender_ht, flags,
+                                     defer_wake);
 }
 
 int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_len,
@@ -395,95 +359,88 @@ int64_t a20_channel_send(a20_channel_ep_t *ep, const void *data, uint32_t data_l
 int64_t a20_channel_recv_begin(a20_channel_ep_t *ep, uint32_t flags,
                                uint32_t *out_msg_data_len,
                                uint32_t *out_msg_handles)
-{
-    if (!ep) return -A20_ERR_BAD_HANDLE;
-    if (flags & ~A20_MSG_NONBLOCK) return -A20_ERR_INVALID_ARGUMENT;
-
-    /* Reference held until recv_finish/recv_abort (see a20_channel_send). */
-    refcount_inc(&ep->refcount);
-
-    for (;;) {
-        spin_lock(&ep->lock);
-        if (ep->msg_count > 0) {
-            a20_ch_message_t *msg = ep->msg_head;
-            if (msg->handle_count > 0) {
-                a20_ch_handle_info_t *hbuf =
-                    (a20_ch_handle_info_t *)(msg->data + msg->data_len);
-                int tr = ch_check_recv_types(ep->chan_type, hbuf,
-                                             msg->handle_count);
-                if (tr < 0) {
-                    /* A mismatched head message can never become deliverable;
-                     * discard it so the endpoint is not permanently poisoned
-                     * and its handle references are released. */
-                    ep->msg_head = msg->next;
-                    if (!ep->msg_head) ep->msg_tail = NULL;
-                    ep->msg_count--;
-                    ep->total_data -= msg->data_len;
-                    wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND,
-                                        PROC_WAKE_EVENT);
-                    spin_unlock(&ep->lock);
-                    ch_msg_free(msg, 1);
-                    a20_channel_ep_release(ep);
-                    return tr;
-                }
-            }
-            if (out_msg_data_len)
-                *out_msg_data_len = msg->data_len;
-            if (out_msg_handles)
-                *out_msg_handles = msg->handle_count;
-            a20_channel_trace(5, msg->data_len, msg, NULL, ep->msg_count);
-            return A20_OK; /* ep->lock held */
-        }
-        if (ep->peer_closed) {
-            spin_unlock(&ep->lock);
-            a20_channel_ep_release(ep);
-            return -A20_ERR_CANCELED;
-        }
-        if (flags & A20_MSG_NONBLOCK) {
-            spin_unlock(&ep->lock);
-            a20_channel_ep_release(ep);
-            return -A20_ERR_WOULD_BLOCK;
-        }
-        spin_unlock(&ep->lock);
-
-        proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
-        if (!token.task) {
-            a20_channel_ep_release(ep);
-            return -A20_ERR_WOULD_BLOCK;
-        }
-
-        wait_queue_entry_t entry = {0};
-        spin_lock(&ep->lock);
-        if (ep->msg_count == 0 && !ep->peer_closed) {
-            bool linked = wait_queue_link(&ep->waiters, &entry, token,
-                                          A20_CH_WAIT_RECV);
-            spin_unlock(&ep->lock);
-            proc_wake_reason_t reason;
-            if (linked)
-                reason = proc_park_commit(token);
-            else {
-                (void)proc_park_cancel(token);
-                reason = PROC_WAKE_CANCEL;
-            }
-            wait_queue_unlink(&ep->waiters, &entry);
-            proc_park_finish(token);
-            if (proc_wake_reason_is_task_interrupt(reason)) {
-                a20_channel_ep_release(ep);
-                return -A20_ERR_INTERRUPTED;
-            }
-            continue;
-        }
-        spin_unlock(&ep->lock);
-        (void)proc_park_cancel(token);
-        proc_park_finish(token);
-    }
-}
+{ return a20_rust_channel_recv_begin(ep, flags, out_msg_data_len, out_msg_handles); }
 
 void a20_channel_recv_abort(a20_channel_ep_t *ep)
+{ a20_rust_channel_recv_abort(ep); }
+
+/* The same locked view is used by Rust receive dequeue policy. */
+void a20_channel_recv_queue_view(a20_channel_ep_t *ep, a20_channel_queue_view_t *view)
+{ a20_channel_queue_view(ep, view); }
+void a20_channel_recv_lock(a20_channel_ep_t *ep) { spin_lock(&ep->lock); }
+void a20_channel_recv_hold(a20_channel_ep_t *ep) { refcount_inc(&ep->refcount); }
+void a20_channel_recv_free_msg_refs(a20_ch_message_t *msg) { ch_msg_free(msg, 1); }
+void a20_channel_recv_trace_begin(uint32_t len, a20_ch_message_t *msg,
+                                  uint32_t count)
+{ a20_channel_trace(5, len, msg, NULL, count); }
+int64_t a20_channel_recv_wait(a20_channel_ep_t *ep)
 {
+    proc_wait_token_t token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (!token.task) return -A20_ERR_WOULD_BLOCK;
+    wait_queue_entry_t entry = {0};
+    spin_lock(&ep->lock);
+    if (ep->msg_count == 0 && !ep->peer_closed) {
+        bool linked = wait_queue_link(&ep->waiters, &entry, token, A20_CH_WAIT_RECV);
+        spin_unlock(&ep->lock);
+        proc_wake_reason_t reason;
+        if (linked) reason = proc_park_commit(token);
+        else { (void)proc_park_cancel(token); reason = PROC_WAKE_CANCEL; }
+        wait_queue_unlink(&ep->waiters, &entry);
+        proc_park_finish(token);
+        if (proc_wake_reason_is_task_interrupt(reason))
+            return -A20_ERR_INTERRUPTED;
+        return A20_OK;
+    }
     spin_unlock(&ep->lock);
-    a20_channel_ep_release(ep);
+    (void)proc_park_cancel(token);
+    proc_park_finish(token);
+    return A20_OK;
 }
+void a20_channel_recv_contract(a20_channel_ep_t *ep, uint32_t *types, int *typed)
+{
+    *typed = ep->chan_type != NULL;
+    *types = ep->chan_type ? ep->chan_type->recv_handle_types : 0;
+}
+/* The scheduler donation loop probes the queue on every rendezvous. Keep the
+ * common empty/no-handles cases in this C lock context: they need only direct
+ * fields and tracing, while the typed-handle validation and rollback-sensitive
+ * receive policy remain in Rust. */
+int a20_channel_recv_probe_simple_locked(a20_channel_ep_t *ep,
+                                         uint32_t *out_msg_data_len,
+                                         uint32_t *out_msg_handles,
+                                         int64_t *out_probe)
+{
+    if (ep->msg_count == 0) {
+        *out_probe = 1;
+        return 1;
+    }
+    a20_ch_message_t *msg = ep->msg_head;
+    if (msg->handle_count != 0)
+        return 0;
+    if (out_msg_data_len)
+        *out_msg_data_len = msg->data_len;
+    if (out_msg_handles)
+        *out_msg_handles = 0;
+    a20_channel_trace(5, msg->data_len, msg, NULL, ep->msg_count);
+    *out_probe = A20_OK;
+    return 1;
+}
+void a20_channel_recv_copy(a20_ch_message_t *msg, void *data,
+                           a20_ch_handle_info_t *handles)
+{
+    if (msg->data_len) memcpy(data, msg->data, msg->data_len);
+    if (msg->handle_count)
+        memcpy(handles, msg->data + msg->data_len,
+               msg->handle_count * sizeof(a20_ch_handle_info_t));
+}
+void a20_channel_recv_wake_sender(a20_channel_ep_t *ep)
+{ wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND, PROC_WAKE_EVENT); }
+void a20_channel_recv_unlock(a20_channel_ep_t *ep) { spin_unlock(&ep->lock); }
+void a20_channel_recv_release_ep(a20_channel_ep_t *ep) { a20_channel_ep_release(ep); }
+void a20_channel_recv_free_msg(a20_ch_message_t *msg) { ch_msg_free(msg, 0); }
+void a20_channel_recv_trace(uint32_t len, a20_ch_message_t *msg, void *data,
+                            uint32_t handles)
+{ a20_channel_trace(6, len, msg, data, handles); }
 
 #ifdef CONFIG_CHANNEL_DONATE_TEST
 static int g_ch_donate_test_injected;
@@ -612,9 +569,14 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
 
     for (;;) {
         spin_lock(&ep->lock);
-        /* A pre-existing reply can make recv return without parking, but the
-         * just-sent request still owns a deferred peer wake. Drop ep->lock
-         * before resolving it because the wake callback acquires g_ch_lock. */
+        /* Rust inspects/dequeues the head under this lock. The donated wait
+         * path keeps its scheduler handoff policy here. Empty/simple messages
+         * avoid an FFI round trip; handle-bearing messages use Rust's full
+         * validation path. */
+        /* Preserve the C path's queued-reply ordering: wake the parked peer
+         * before probing the queued message. A Rust probe error drops the
+         * lease's endpoint reference, so no fallback callback may use ep
+         * after that probe has returned an error. */
         if (ep->msg_count > 0 && deferred_wake_pending) {
             spin_unlock(&ep->lock);
 #ifdef CONFIG_CHANNEL_DONATE_TEST
@@ -624,31 +586,27 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
             deferred_wake_pending = 0;
             continue;
         }
-        if (ep->msg_count > 0) {
-            a20_ch_message_t *msg = ep->msg_head;
-            if (msg->handle_count > 0) {
-                a20_ch_handle_info_t *hbuf =
-                    (a20_ch_handle_info_t *)(msg->data + msg->data_len);
-                int tr = ch_check_recv_types(ep->chan_type, hbuf,
-                                             msg->handle_count);
-                if (tr < 0) {
-                    ep->msg_head = msg->next;
-                    if (!ep->msg_head) ep->msg_tail = NULL;
-                    ep->msg_count--;
-                    ep->total_data -= msg->data_len;
-                    wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND,
-                                        PROC_WAKE_EVENT);
-                    spin_unlock(&ep->lock);
-                    ch_msg_free(msg, 1);                    a20_channel_ep_release(ep);
-                    return tr;
-                }
+        int64_t probe;
+        if (!a20_channel_recv_probe_simple_locked(
+                ep, out_msg_data_len, out_msg_handles, &probe))
+            probe = a20_rust_channel_recv_probe_locked(
+                ep, out_msg_data_len, out_msg_handles);
+        if (probe == A20_OK) {
+            if (deferred_wake_pending) {
+                spin_unlock(&ep->lock);
+#ifdef CONFIG_CHANNEL_DONATE_TEST
+                (void)ch_donate_test_arm_queued_reply(ep);
+#endif
+                ch_donate_fallback_wake(ep);
+                deferred_wake_pending = 0;
+                continue;
             }
-            if (out_msg_data_len)
-                *out_msg_data_len = msg->data_len;
-            if (out_msg_handles)
-                *out_msg_handles = msg->handle_count;
-            a20_channel_trace(5, msg->data_len, msg, NULL, ep->msg_count);
             return A20_OK; /* ep->lock held */
+        }
+        if (probe < 0) {
+            if (deferred_wake_pending)
+                ch_donate_fallback_wake(ep);
+            return probe;
         }
         if (ep->peer_closed) {
             spin_unlock(&ep->lock);
@@ -777,66 +735,37 @@ int64_t a20_channel_recv_begin_donate(a20_channel_ep_t *ep, uint32_t flags,
  * references move to the receiver; the caller installs them via the
  * reserved handle-table slots.
  */
-int64_t a20_channel_recv_finish(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
-                                a20_ch_handle_info_t *handles, uint32_t *handle_count)
+int64_t a20_channel_recv_finish(a20_channel_ep_t *ep, void *data,
+                                uint32_t *data_len,
+                                a20_ch_handle_info_t *handles,
+                                uint32_t *handle_count)
 {
     a20_ch_message_t *msg = ep->msg_head;
-    if (!msg) {
+    if (msg && msg->handle_count == 0 &&
+        (msg->data_len == 0 ||
+         (data && data_len && *data_len >= msg->data_len))) {
+        uint32_t out_len = msg->data_len;
+        ep->msg_head = msg->next;
+        if (!ep->msg_head) ep->msg_tail = NULL;
+        ep->msg_count--;
+        ep->total_data -= out_len;
+        wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND, PROC_WAKE_EVENT);
         spin_unlock(&ep->lock);
-        a20_channel_ep_release(ep); /* drop the recv_begin reference */
-        return -A20_ERR_WOULD_BLOCK;
-    }
-
-    uint32_t out_len = msg->data_len;
-    if (out_len > 0 && (!data || !data_len || *data_len < out_len)) {
-        spin_unlock(&ep->lock);
+        if (out_len > 0)
+            memcpy(data, msg->data, out_len);
+        if (data_len)
+            *data_len = out_len;
+        if (handle_count)
+            *handle_count = 0;
+        a20_channel_trace(6, out_len, msg, data, 0);
+        ch_msg_free(msg, 0);
         a20_channel_ep_release(ep);
-        return -A20_ERR_NO_SPACE;
+        return A20_OK;
     }
-
-    uint32_t hc = msg->handle_count;
-    if (hc > 0 && (!handles || !handle_count || *handle_count < hc)) {
-        spin_unlock(&ep->lock);
-        a20_channel_ep_release(ep);
-        return -A20_ERR_NO_SPACE;
-    }
-
-    if (hc > 0) {
-        a20_ch_handle_info_t *hbuf =
-            (a20_ch_handle_info_t *)(msg->data + msg->data_len);
-        int tr = ch_check_recv_types(ep->chan_type, hbuf, hc);
-        if (tr < 0) {
-            spin_unlock(&ep->lock);
-            a20_channel_ep_release(ep);
-            return tr;
-        }
-    }
-
-    ep->msg_head = msg->next;
-    if (!ep->msg_head) ep->msg_tail = NULL;
-    ep->msg_count--;
-    ep->total_data -= msg->data_len;
-
-    /* Space freed: wake one sender blocked on this endpoint's queue. */
-    wait_queue_wake_one(&ep->waiters, A20_CH_WAIT_SEND, PROC_WAKE_EVENT);
-    spin_unlock(&ep->lock);
-
-    if (out_len > 0)
-        memcpy(data, msg->data, out_len);
-    if (data_len)
-        *data_len = out_len;
-
-    if (hc > 0) {
-        a20_ch_handle_info_t *hbuf =
-            (a20_ch_handle_info_t *)(msg->data + msg->data_len);
-        memcpy(handles, hbuf, hc * sizeof(a20_ch_handle_info_t));
-    }
-    if (handle_count) *handle_count = hc;
-
-    a20_channel_trace(6, out_len, msg, data, hc);
-    ch_msg_free(msg, 0); /* handle refs transfer to the receiver */
-    a20_channel_ep_release(ep); /* drop the recv_begin reference */
-    return A20_OK;
+    /* Keep empty/NO_SPACE/handle-bearing and all typed/error semantics in the
+     * Rust receive transaction. This direct C path only consumes a simple
+     * message after Rust has already transferred the lock and endpoint pin. */
+    return a20_rust_channel_recv_finish(ep, data, data_len, handles, handle_count);
 }
 
 int64_t a20_channel_recv(a20_channel_ep_t *ep, void *data, uint32_t *data_len,
@@ -941,35 +870,78 @@ void a20_channel_ep_clear_peer_close_hook(a20_channel_ep_t *ep)
     if (ctx_put) ctx_put(ctx);
 }
 
-void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
+typedef struct a20_channel_close_locks {
+    a20_channel_ep_t *ep;
+    a20_channel_ep_t *peer;
+    int peer_locked;
+} a20_channel_close_locks_t;
+typedef struct a20_channel_close_view {
+    a20_channel_ep_t *peer;
+    a20_channel_ep_t **peer_link;
+    a20_channel_ep_t **peer_backlink;
+    int *peer_closed;
+    void (**hook)(void *);
+    void (**ctx_ref)(void *);
+    void (**ctx_put)(void *);
+    void **hook_ctx;
+    a20_ch_message_t **message_head;
+} a20_channel_close_view_t;
+void a20_channel_close_lock(a20_channel_ep_t *ep,
+                            a20_channel_close_locks_t *locks)
 {
-    if (!ep)
-        return;
-    void (*hook)(void *) = NULL;
-    void (*ctx_put)(void *) = NULL;
-    void *hook_ctx = NULL;
     spin_lock(&g_ch_lock);
     spin_lock(&ep->lock);
-    a20_channel_ep_t *peer = ep->peer;
-    if (peer) {
-        spin_lock(&peer->lock);
-        peer->peer_closed = 1;
-        hook = peer->peer_close_hook;
-        ctx_put = peer->peer_close_put;
-        hook_ctx = peer->peer_close_ctx;
-        if (hook && peer->peer_close_ref)
-            peer->peer_close_ref(hook_ctx);
-        spin_unlock(&peer->lock);
-        wait_queue_wake_all(&peer->waiters, 0, PROC_WAKE_EVENT);
-        a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
-                         A20_EVENT_PEER_CLOSED, 0, 0);
+    locks->ep = ep;
+    locks->peer = ep->peer;
+    locks->peer_locked = 0;
+    if (locks->peer) {
+        spin_lock(&locks->peer->lock);
+        locks->peer_locked = 1;
     }
-    spin_unlock(&ep->lock);
+}
+void a20_channel_close_unlock_peer(a20_channel_close_locks_t *locks)
+{
+    if (locks->peer_locked) {
+        spin_unlock(&locks->peer->lock);
+        locks->peer_locked = 0;
+    }
+}
+void a20_channel_close_unlock(a20_channel_close_locks_t *locks)
+{
+    a20_channel_close_unlock_peer(locks);
+    spin_unlock(&locks->ep->lock);
     spin_unlock(&g_ch_lock);
-    if (hook) {
-        hook(hook_ctx);
-        if (ctx_put) ctx_put(hook_ctx);
-    }
+}
+void a20_channel_close_view(a20_channel_close_locks_t *locks,
+                            a20_channel_close_view_t *view)
+{
+    a20_channel_ep_t *ep = locks->ep;
+    a20_channel_ep_t *peer = locks->peer;
+    view->peer = peer;
+    view->peer_link = &ep->peer;
+    view->peer_backlink = peer ? &peer->peer : NULL;
+    view->peer_closed = peer ? &peer->peer_closed : NULL;
+    view->hook = peer ? &peer->peer_close_hook : NULL;
+    view->ctx_ref = peer ? &peer->peer_close_ref : NULL;
+    view->ctx_put = peer ? &peer->peer_close_put : NULL;
+    view->hook_ctx = peer ? &peer->peer_close_ctx : NULL;
+    view->message_head = &ep->msg_head;
+}
+void a20_channel_close_stats_dec(void)
+{ a20_objstat_add(&g_a20_objstats.channel_eps, -1); }
+void a20_channel_close_wake(a20_channel_ep_t *ep)
+{ wait_queue_wake_all(&ep->waiters, 0, PROC_WAKE_EVENT); }
+void a20_channel_close_event(a20_channel_ep_t *ep, uint32_t event)
+{ a20_event_notify(ep, A20_OBJ_CHANNEL_ENDPOINT, event, 0, 0); }
+void a20_channel_close_destroy_watches(a20_channel_ep_t *ep)
+{ a20_eventq_on_object_destroy(ep, A20_OBJ_CHANNEL_ENDPOINT); }
+void a20_channel_close_free_msg(a20_ch_message_t *msg)
+{ ch_msg_free(msg, 1); }
+void a20_channel_close_free_ep(a20_channel_ep_t *ep) { kfree(ep); }
+
+void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
+{
+    a20_rust_channel_peer_shutdown(ep);
 }
 
 /*
@@ -999,51 +971,8 @@ a20_channel_ep_t *a20_channel_ep_peer_ref(a20_channel_ep_t *ep)
 
 void a20_channel_ep_release(a20_channel_ep_t *ep)
 {
-    if (!ep) return;
-    if (!refcount_dec_and_test(&ep->refcount)) return;
-    a20_objstat_add(&g_a20_objstats.channel_eps, -1);
-
-    void (*hook)(void *) = NULL;
-    void (*ctx_put)(void *) = NULL;
-    void *hook_ctx = NULL;
-
-    spin_lock(&g_ch_lock);
-    spin_lock(&ep->lock);
-    a20_channel_ep_t *peer = ep->peer;
-    if (peer) {
-        spin_lock(&peer->lock);
-        peer->peer_closed = 1;
-        hook = peer->peer_close_hook;
-        ctx_put = peer->peer_close_put;
-        hook_ctx = peer->peer_close_ctx;
-        if (hook && peer->peer_close_ref)
-            peer->peer_close_ref(hook_ctx);
-        spin_unlock(&peer->lock);
-        if (peer->peer == ep)
-            peer->peer = NULL;
-        ep->peer = NULL;
-        wait_queue_wake_all(&peer->waiters, 0, PROC_WAKE_EVENT);
-        a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
-                         A20_EVENT_PEER_CLOSED, 0, 0);
-    }
-    /* Watchers of the dying endpoint see one final CLOSED event, then the
-     * watch entries keyed by this pointer are removed. */
-    a20_event_notify(ep, A20_OBJ_CHANNEL_ENDPOINT, A20_EVENT_CLOSED, 0, 0);
-    a20_eventq_on_object_destroy(ep, A20_OBJ_CHANNEL_ENDPOINT);
-    spin_unlock(&ep->lock);
-    spin_unlock(&g_ch_lock);
-
-    if (hook) {
-        hook(hook_ctx);
-        if (ctx_put) ctx_put(hook_ctx);
-    }
-
-    a20_ch_message_t *msg = ep->msg_head;
-    while (msg) {
-        a20_ch_message_t *next = msg->next;
-        ch_msg_free(msg, 1);
-        msg = next;
-    }
-
-    kfree(ep);
+    /* Keep the common non-final decrement in C. Only the last owner enters
+     * Rust's multi-resource endpoint teardown transaction. */
+    if (!ep || !refcount_dec_and_test(&ep->refcount)) return;
+    a20_rust_channel_ep_finalize(ep);
 }

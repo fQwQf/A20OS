@@ -8,6 +8,7 @@
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/mntns.h"
+#include "fs/vfs/mount_state.h"
 #include "fs/vfs/file.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
@@ -37,21 +38,6 @@ extern vnode_t *sysfs_mount(void);
  * VFS Mount
  * ============================================================ */
 
-static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
-    if (strncmp(dev, "/dev/vd", 7) != 0) return -1;
-    const char *p = dev + 7;
-    if (*p < 'a' || *p > 'z') return -1;
-    *out_idx = *p - 'a';
-    p++;
-    *out_part = 0;
-    if (*p >= '1' && *p <= '9') {
-        *out_part = *p - '0';
-        p++;
-    }
-    if (*p != '\0') return -1;
-    return 0;
-}
-
 static int mount_block_dev_idx(int dev_idx, const char *path,
                                const char *fstype, int flags) {
     block_dev_t *bdev = mount_setup_block_device(dev_idx);
@@ -59,166 +45,153 @@ static int mount_block_dev_idx(int dev_idx, const char *path,
     bcache_t *bc = bcache_create(bdev);
     if (!bc) return -ENOMEM;
 
-    int r;
-    if (fstype && fstype[0]) {
-        r = vfs_mount_bc_flags(path, fstype, bc, flags);
-    } else {
-        r = vfs_mount_bc_flags(path, "ext4", bc, flags);
-        if (r < 0) {
-            bcache_destroy(bc);
-            bc = bcache_create(bdev);
-            if (!bc) return -ENOMEM;
-            r = vfs_mount_bc_flags(path, "vfat", bc, flags);
-        }
-    }
+    int r = vfs_mount_bc_flags(path, fstype, bc, flags);
     if (r < 0) bcache_destroy(bc);
     return r;
 }
 
-int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data) {
-    if (!path || !fstype) return -EINVAL;
-    if (strcmp(fstype, "cgroup") == 0 || strcmp(fstype, "cgroup2") == 0) {
-        vnode_t *target = vfs_resolve(path);
-        if (!target) return -ENOENT;
-        int is_dir = target->type == VFS_FT_DIR;
-        vnode_put(target);
-        if (!is_dir) return -ENOTDIR;
+static int mount_target_is_dir(const char *path)
+{
+    vnode_t *target = vfs_resolve(path);
+    if (!target) return -ENOENT;
+    int is_dir = target->type == VFS_FT_DIR;
+    vnode_put(target);
+    return is_dir ? 0 : -ENOTDIR;
+}
 
-        extern vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb);
-        extern void cgroupfs_unmount(vnode_t *root);
-        int is_v2 = (strcmp(fstype, "cgroup2") == 0);
-        const char *opts = (data && *data) ? data : (dev ? dev : "");
-        void *sb_ptr = NULL;
-        vnode_t *root = cgroupfs_mount(is_v2, opts, &sb_ptr);
-        if (!root) return -ENOMEM;
+static int mount_cgroup_backend(const char *dev, const char *path,
+                                const char *fstype, int flags, const char *data)
+{
+    int r = mount_target_is_dir(path);
+    if (r < 0) return r;
+    extern vnode_t *cgroupfs_mount(int is_v2, const char *opts, void **out_sb);
+    extern void cgroupfs_unmount(vnode_t *root);
+    int is_v2 = strcmp(fstype, "cgroup2") == 0;
+    const char *opts = (data && *data) ? data : (dev ? dev : "");
+    void *sb_ptr = NULL;
+    vnode_t *root = cgroupfs_mount(is_v2, opts, &sb_ptr);
+    if (!root) return -ENOMEM;
+    mount_t *mnt = vfs_mount_alloc();
+    if (!mnt) { cgroupfs_unmount(root); return -ENOMEM; }
+    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    mnt->type = FS_TYPE_CGROUP;
+    mnt->flags = flags;
+    mnt->root = root;
+    mnt->root->mnt = mnt;
+    mnt->fs_data = sb_ptr;
+    strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+    mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+    strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+    mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+    if (is_v2)
+        strncpy(mnt->opts, "rw,memory_recursiveprot", sizeof(mnt->opts) - 1);
+    else
+        strncpy(mnt->opts, (data && *data) ? data : "memory,cpuset,cpu,cpuacct", sizeof(mnt->opts) - 1);
+    mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+    vfs_mount_link_tree(mnt);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
 
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) { cgroupfs_unmount(root); return -ENOMEM; }
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type = FS_TYPE_CGROUP;
-        mnt->flags = flags;
-        mnt->root = root;
-        mnt->root->mnt = mnt;
-        mnt->fs_data = sb_ptr;
-        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
-        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
-        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-        if (is_v2) {
-            strncpy(mnt->opts, "rw,memory_recursiveprot", sizeof(mnt->opts) - 1);
-        } else {
-            const char *cg_opts = (data && *data) ? data : "memory,cpuset,cpu,cpuacct";
-            strncpy(mnt->opts, cg_opts, sizeof(mnt->opts) - 1);
-        }
-        mnt->opts[sizeof(mnt->opts) - 1] = '\0';
-        vfs_mount_link_tree(mnt);
-        vfs_dcache_invalidate_all();
-        return 0;
+static int mount_virtual_backend(const char *dev, const char *path,
+                                 const char *fstype, int flags, const char *data)
+{
+    (void)data;
+    int r = mount_target_is_dir(path);
+    if (r < 0) return r;
+    /* devpts is a compatibility mount; slave devices are supplied by devfs. */
+    if (strcmp(fstype, "devpts") == 0) return 0;
+    vnode_t *root = NULL;
+    int type = 0;
+    if (strcmp(fstype, "proc") == 0) {
+        root = procfs_mount(); type = FS_TYPE_PROCFS;
+    } else if (strcmp(fstype, "sysfs") == 0) {
+        root = sysfs_mount(); type = FS_TYPE_SYSFS;
+    } else {
+        root = devfs_mount(); type = FS_TYPE_DEVFS;
     }
+    if (!root) return -ENOMEM;
+    mount_t *mnt = vfs_mount_alloc();
+    if (!mnt) return -ENOMEM;
+    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    mnt->type = type;
+    mnt->flags = flags;
+    mnt->root = root;
+    root->mnt = mnt;
+    strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+    mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+    strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+    mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+    strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
+    mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+    vfs_mount_link_tree(mnt);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
+
+static int mount_ram_backend(const char *dev, const char *path,
+                             const char *fstype, int flags, const char *data)
+{
+    (void)data;
+    int r = mount_target_is_dir(path);
+    if (r < 0) return r;
+    mount_t *mnt = vfs_mount_alloc();
+    if (!mnt) return -ENOMEM;
+    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    mnt->type = FS_TYPE_RAMFS;
+    strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
+    mnt->dev[sizeof(mnt->dev) - 1] = '\0';
+    strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
+    mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
+    strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
+    mnt->flags = flags;
+    mnt->root = ramfs_mount_empty(mnt);
+    if (!mnt->root) {
+        vfs_mount_remove(mnt);
+        return -ENOMEM;
+    }
+    mnt->root->mnt = mnt;
+    vfs_mount_link_tree(mnt);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
+
+static int mount_block_backend(int dev_idx, int part_num, const char *path,
+                               const char *fstype, int flags)
+{
+    (void)part_num;
+    return mount_block_dev_idx(dev_idx, path, fstype, flags);
+}
+
+static int mount_update_existing(const char *path, int flags)
+{
     for (int i = 0; i < vfs_mount_count(); i++) {
         mount_t *existing = vfs_mount_at(i);
         if (existing && strcmp(existing->path, path) == 0) {
             existing->flags = flags;
             vfs_dcache_invalidate_all();
-            return 0;
+            return 1;
         }
     }
-    /*
-     * A release image is used as a chroot rather than replacing A20OS's
-     * bootstrap ramfs.  Allow procfs, sysfs and devfs to be mounted below
-     * that root so absolute paths keep normal Linux rootfs semantics after
-     * chroot(2).
-     */
-    if (strcmp(fstype, "proc") == 0 ||
-        strcmp(fstype, "sysfs") == 0 ||
-        strcmp(fstype, "devtmpfs") == 0 ||
-        strcmp(fstype, "devfs") == 0 ||
-        strcmp(fstype, "devpts") == 0) {
-        vnode_t *target = vfs_resolve(path);
-        if (!target) return -ENOENT;
-        int is_dir = target->type == VFS_FT_DIR;
-        vnode_put(target);
-        if (!is_dir) return -ENOTDIR;
+    return 0;
+}
 
-        vnode_t *root = NULL;
-        int type = 0;
-        if (strcmp(fstype, "devpts") == 0) {
-            /* devpts: pts slave devices are statically provided by devfs.
-             * The mount is a formality for Linux compat; succeed silently. */
-            return 0;
-        } else if (strcmp(fstype, "proc") == 0) {
-            root = procfs_mount();
-            type = FS_TYPE_PROCFS;
-        } else if (strcmp(fstype, "sysfs") == 0) {
-            root = sysfs_mount();
-            type = FS_TYPE_SYSFS;
-        } else {
-            root = devfs_mount();
-            type = FS_TYPE_DEVFS;
-        }
-        if (!root) return -ENOMEM;
+static const struct vfs_mount_dispatch_ops g_vfs_mount_dispatch_ops = {
+    .update_existing = mount_update_existing,
+    .mount_cgroup = mount_cgroup_backend,
+    .mount_virtual = mount_virtual_backend,
+    .mount_ram = mount_ram_backend,
+    .mount_block = mount_block_backend,
+};
+_Static_assert(sizeof(g_vfs_mount_dispatch_ops) / sizeof(void *) == 5,
+               "vfs mount dispatch mirror: ops table field count");
 
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) return -ENOMEM;
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type = type;
-        mnt->flags = flags;
-        mnt->root = root;
-        root->mnt = mnt;
-        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
-        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
-        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
-        mnt->opts[sizeof(mnt->opts) - 1] = '\0';
-        vfs_mount_link_tree(mnt);
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-    if (strcmp(fstype, "tmpfs") == 0 || strcmp(fstype, "ramfs") == 0) {
-        vnode_t *target = vfs_resolve(path);
-        if (!target) return -ENOENT;
-        int is_dir = target->type == VFS_FT_DIR;
-        vnode_put(target);
-        if (!is_dir) return -ENOTDIR;
-
-        mount_t *mnt = vfs_mount_alloc();
-        if (!mnt) return -ENOMEM;
-        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-        mnt->path[MAX_PATH_LEN - 1] = '\0';
-        mnt->type = FS_TYPE_RAMFS;
-        strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
-        mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-        strncpy(mnt->fstype, fstype, sizeof(mnt->fstype) - 1);
-        mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
-        mnt->flags = flags;
-        mnt->root = ramfs_mount_empty(mnt);
-        if (!mnt->root) {
-            vfs_mount_remove(mnt);
-            return -ENOMEM;
-        }
-        mnt->root->mnt = mnt;
-        vfs_mount_link_tree(mnt);
-        vfs_dcache_invalidate_all();
-        return 0;
-    }
-    /* Try block device mount: /dev/vdX[N] */
-    {
-        int dev_idx = 0, part_num = 0;
-        if (parse_block_dev(dev, &dev_idx, &part_num) == 0) {
-            int r = mount_block_dev_idx(dev_idx, path, fstype, flags);
-            if (r < 0 && part_num > 1) {
-                int compat_idx = dev_idx + part_num - 1;
-                if (compat_idx != dev_idx)
-                    r = mount_block_dev_idx(compat_idx, path, fstype, flags);
-            }
-            return r;
-        }
-    }
-    return -EINVAL;
+int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data)
+{
+    return a20_vfs_mount_dispatch(&g_vfs_mount_dispatch_ops, dev, path, fstype, flags, data);
 }
 
 int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
@@ -390,117 +363,128 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
 /* Release one namespace's hold on a mount entry. A copied entry carries an
  * explicit shared_source pointer, so the source mount (and vnode->mnt target)
  * stays alive until every copied table detaches. */
-int vfs_mount_fs_teardown(mount_t *mnt) {
-    if (!mnt) return 0;
-    uint64_t flags = mntns_mount_table_lock();
-    if (mnt->shared_source) {
-        mntns_mount_table_unlock(flags);
-        /* A detached clone entry still pins its source until the entire
-         * namespace is gone: open objects can retain vnode->mnt pointers. */
-        return 0;
-    }
-    int users = __atomic_load_n(&mnt->ns_users, __ATOMIC_ACQUIRE);
-#ifdef CONFIG_MNTNS_TEST
-    int test_shared_path = strcmp(mnt->path, "/tmp/ns_shared") == 0;
-    if (test_shared_path)
-        printf("MNTNS_TEST: FS_TEARDOWN path=%s users=%d\n", mnt->path, users);
-#endif
-    if (users == 0) {
-        mntns_mount_table_unlock(flags);
-        return 0;
-    }
-    if (users > 1 || mnt->teardown_running) {
-        mntns_mount_table_unlock(flags);
-        return -EBUSY; /* retain the source mount until clones detach */
-    }
-    mnt->teardown_running = 1;
-    mntns_mount_table_unlock(flags);
-    vnode_t *root = mnt->root;
-    int ret = 0;
-    if (mnt->type == FS_TYPE_FAT32) {
-        fat32_unmount(root);
-    } else if (mnt->type == FS_TYPE_EXT4) {
-        ret = ext4_unmount(root);
-        if (ret < 0)
-            goto failed;
-    } else if (mnt->type == FS_TYPE_NTFS) {
-        ntfs_unmount(root);
-    } else if (mnt->type == FS_TYPE_ISOFS) {
-        isofs_unmount(root);
-    } else if (mnt->type == FS_TYPE_UXFS) {
-        extern int uxfs_unmount(struct vnode *root);
-        ret = uxfs_unmount(root);
-        if (ret < 0)
-            goto failed;
-    } else if (mnt->type == FS_TYPE_LITTLEFS) {
-        littlefs_unmount(root);
-    }
-    flags = mntns_mount_table_lock();
-    __atomic_store_n(&mnt->ns_users, 0, __ATOMIC_RELEASE);
-    mntns_mount_table_unlock(flags);
-#ifdef CONFIG_MNTNS_TEST
-    if (test_shared_path)
-        printf("MNTNS_TEST: SOURCE_FS_UNMOUNTED users=0\n");
-#endif
-    return 0;
+static void *mt_shared_source(void *p) { return ((mount_t *)p)->shared_source; }
+static int mt_ns_users(void *p) { return __atomic_load_n(&((mount_t *)p)->ns_users, __ATOMIC_ACQUIRE); }
+static int mt_teardown_running(void *p) { return ((mount_t *)p)->teardown_running; }
+static void mt_set_teardown_running(void *p, int value) { ((mount_t *)p)->teardown_running = value; }
+static int mt_mount_kind(void *p) { return ((mount_t *)p)->type; }
+static void *mt_mount_root(void *p) { return ((mount_t *)p)->root; }
+static void mt_set_ns_users_zero(void *p) { __atomic_store_n(&((mount_t *)p)->ns_users, 0, __ATOMIC_RELEASE); }
 
-failed:
-    flags = mntns_mount_table_lock();
-    mnt->teardown_running = 0;
-    mntns_mount_table_unlock(flags);
+static int mt_unmount_backend(int kind, void *root)
+{
+    int ret = 0;
+    if (kind == FS_TYPE_FAT32) {
+        fat32_unmount((vnode_t *)root);
+    } else if (kind == FS_TYPE_EXT4) {
+        ret = ext4_unmount((vnode_t *)root);
+    } else if (kind == FS_TYPE_NTFS) {
+        ntfs_unmount((vnode_t *)root);
+    } else if (kind == FS_TYPE_ISOFS) {
+        isofs_unmount((vnode_t *)root);
+    } else if (kind == FS_TYPE_UXFS) {
+        extern int uxfs_unmount(struct vnode *root);
+        ret = uxfs_unmount((vnode_t *)root);
+    } else if (kind == FS_TYPE_LITTLEFS) {
+        littlefs_unmount((vnode_t *)root);
+    }
     return ret;
+}
+
+static void mt_teardown_trace(void *p, int phase, int users)
+{
+#ifdef CONFIG_MNTNS_TEST
+    mount_t *mnt = (mount_t *)p;
+    if (strcmp(mnt->path, "/tmp/ns_shared") == 0) {
+        if (phase == 0)
+            printf("MNTNS_TEST: FS_TEARDOWN path=%s users=%d\n", mnt->path, users);
+        else
+            printf("MNTNS_TEST: SOURCE_FS_UNMOUNTED users=0\n");
+    }
+#else
+    (void)p; (void)phase; (void)users;
+#endif
+}
+
+static const struct vfs_mount_fs_teardown_ops g_mount_fs_teardown_ops = {
+    .lock = mntns_mount_table_lock,
+    .unlock = mntns_mount_table_unlock,
+    .shared_source = mt_shared_source,
+    .users = mt_ns_users,
+    .is_running = mt_teardown_running,
+    .set_running = mt_set_teardown_running,
+    .kind = mt_mount_kind,
+    .root = mt_mount_root,
+    .unmount_backend = mt_unmount_backend,
+    .set_users_zero = mt_set_ns_users_zero,
+    .trace = mt_teardown_trace,
+};
+_Static_assert(sizeof(g_mount_fs_teardown_ops) / sizeof(void *) == 11,
+               "mount fs teardown mirror: ops table field count");
+
+int vfs_mount_fs_teardown(mount_t *mnt)
+{
+    return a20_vfs_mount_fs_teardown(&g_mount_fs_teardown_ops, mnt);
 }
 
 /* Drop every hold this namespace's table has, so a namespace going away
  * cannot leak a shared filesystem forever.  Copied entries detach without
  * running the destructor; the source entry's ns_users is decremented when its
  * own namespace unmounts or is torn down. */
-static int vfs_mount_drop_shared_source(mount_t *mnt)
+static void ns_source_users_restore(void *p)
 {
-    if (!mnt || !mnt->shared_source)
-        return 0;
-    mount_t *source = mnt->shared_source;
-    int old = __atomic_fetch_sub(&source->ns_users, 1, __ATOMIC_ACQ_REL);
+    mount_t *source = (mount_t *)p;
+    __atomic_add_fetch(&source->ns_users, 1, __ATOMIC_RELAXED);
+}
+static void ns_clear_shared_source(void *p) { ((mount_t *)p)->shared_source = NULL; }
+
+static void *ns_shared_source_get(void *p) { return ((mount_t *)p)->shared_source; }
+
 #ifdef CONFIG_MNTNS_TEST
+static void ns_log_source_drop(int old, mount_t *source)
+{
     if (strcmp(source->path, "/tmp/ns_shared") == 0)
         printf("MNTNS_TEST: DROP_SOURCE_PIN old=%d now=%d\n", old, old - 1);
+}
 #endif
-    if (old <= 1) {
-        __atomic_add_fetch(&source->ns_users, 1, __ATOMIC_RELAXED);
-        return -EINVAL;
-    }
-    mnt->shared_source = NULL;
-    return 0;
+
+static int ns_source_users_dec_logged(void *p)
+{
+    mount_t *source = (mount_t *)p;
+    int old = __atomic_fetch_sub(&source->ns_users, 1, __ATOMIC_ACQ_REL);
+#ifdef CONFIG_MNTNS_TEST
+    ns_log_source_drop(old, source);
+#endif
+    return old;
 }
 
-int vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
-    if (!ns) return 0;
-    /* Complete every filesystem destructor before dropping any clone pins.
-     * A later destructor may fail; in that case this namespace and all source
-     * mount objects it points at must remain alive for the retry. */
-    for (int i = 0; i < ns->nmounts; i++) {
-        mount_t *mnt = ns->mounts[i];
-        if (mnt->shared_source)
-            continue;
-        int ret = vfs_mount_fs_teardown(mnt);
-        if (ret < 0)
-            return ret;
-    }
-    /* All remaining operations are no-fail reference releases. Explicit
-     * umount only removes an entry from the active table, so include both
-     * active and graveyard entries and keep each pin until final namespace
-     * destruction. */
-    for (int i = 0; i < ns->nmounts; i++) {
-        int ret = vfs_mount_drop_shared_source(ns->mounts[i]);
-        if (ret < 0)
-            return ret;
-    }
-    for (mount_t *mnt = ns->dead_mounts; mnt; mnt = mnt->dead_next) {
-        int ret = vfs_mount_drop_shared_source(mnt);
-        if (ret < 0)
-            return ret;
-    }
-    return 0;
+static int ns_mount_count(void *p) { return ((mnt_namespace_t *)p)->nmounts; }
+static void *ns_mount_at(void *p, int i)
+{
+    mnt_namespace_t *ns = (mnt_namespace_t *)p;
+    return i >= 0 && i < ns->nmounts ? ns->mounts[i] : NULL;
+}
+static void *ns_dead_head(void *p) { return ((mnt_namespace_t *)p)->dead_mounts; }
+static void *ns_dead_next(void *p) { return ((mount_t *)p)->dead_next; }
+static int ns_fs_teardown(void *p) { return vfs_mount_fs_teardown((mount_t *)p); }
+
+static const struct vfs_mount_namespace_teardown_ops g_ns_teardown_ops = {
+    .mount_count = ns_mount_count,
+    .mount_at = ns_mount_at,
+    .dead_head = ns_dead_head,
+    .dead_next = ns_dead_next,
+    .shared_source = ns_shared_source_get,
+    .fs_teardown = ns_fs_teardown,
+    .decrement_source_users = ns_source_users_dec_logged,
+    .restore_source_users = ns_source_users_restore,
+    .clear_shared_source = ns_clear_shared_source,
+};
+_Static_assert(sizeof(g_ns_teardown_ops) / sizeof(void *) == 9,
+               "mount namespace teardown mirror: ops table field count");
+
+int vfs_mount_namespace_teardown(mnt_namespace_t *ns)
+{
+    return a20_vfs_mount_namespace_teardown(&g_ns_teardown_ops, ns);
 }
 
 /*
@@ -515,109 +499,77 @@ int vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
  * @flags carries the Linux MNT_* bits; MNT_DETACH waives all three, which is
  * what pivot_root(2) and lazy-unmount callers want.
  */
-static int vfs_mount_busy_reason(mount_t *mnt)
+
+/* Snapshot the visible mounts and let the engine decide which one matches and
+ * whether the umount is admitted.  C keeps the table walk and the per-mount
+ * counters; the matching and the busy-rule order are Rust-owned. */
+static int vfs_umount_plan_build(const char *path, int flags, int check_busy,
+                                 mount_t **out_mnt, vfs_umount_plan_t *out_plan)
 {
-    if (vfs_mount_root_users(mnt) > 1)
-        return -EBUSY;                    /* a process is rooted here */
-    if (vfs_mount_first_child(mnt))
-        return -EBUSY;                    /* something is mounted below it */
-    if (vfs_mount_cwd_users(mnt) > 0)
-        return -EBUSY;                    /* a process is standing in it */
-    /* The namespace root itself is never unmountable: everything else hangs
-     * off it.  Linux reports EINVAL here. */
-    if (!mnt->mnt_parent && strcmp(mnt->path, "/") == 0)
-        return -EINVAL;
+    vfs_mount_cand_t cands[MNTNS_MAX_MOUNTS];
+    mount_t *sel[MNTNS_MAX_MOUNTS];
+    int count = vfs_mount_count();
+    int n = 0;
+    for (int i = 0; i < count && n < MNTNS_MAX_MOUNTS; i++) {
+        mount_t *mnt = vfs_mount_at(i);
+        if (!mnt)
+            continue;
+        sel[n] = mnt;
+        cands[n].path = mnt->path;
+        cands[n].root_users = (uint32_t)vfs_mount_root_users(mnt);
+        cands[n].has_child = vfs_mount_first_child(mnt) ? 1u : 0u;
+        cands[n].cwd_users = (uint32_t)vfs_mount_cwd_users(mnt);
+        cands[n].is_ns_root =
+            (!mnt->mnt_parent && strcmp(mnt->path, "/") == 0) ? 1u : 0u;
+        n++;
+    }
+    int r = a20_vfs_umount_plan(path, flags, check_busy, cands, (size_t)n, out_plan);
+    if (r < 0)
+        return r;
+    *out_mnt = sel[out_plan->index];
     return 0;
+}
+
+static int umount_teardown(void *mnt) { return vfs_mount_fs_teardown((mount_t *)mnt); }
+static void umount_invalidate(void) { vfs_dcache_invalidate_all(); }
+static void umount_drop_time_meta(void *mnt) { vfs_drop_time_meta_mount((mount_t *)mnt); }
+static void umount_remove(void *mnt) { vfs_mount_remove((mount_t *)mnt); }
+static void umount_retry_pending(void) { mntns_retry_pending(); }
+
+static const struct vfs_umount_execute_ops g_vfs_umount_execute_ops = {
+    .teardown = umount_teardown,
+    .invalidate_all = umount_invalidate,
+    .drop_time_meta = umount_drop_time_meta,
+    .remove = umount_remove,
+    .retry_pending = umount_retry_pending,
+};
+_Static_assert(sizeof(g_vfs_umount_execute_ops) / sizeof(void *) == 5,
+               "vfs umount executor mirror: ops table field count");
+
+static int vfs_umount_execute_plan(mount_t *mnt, vfs_umount_plan_t *plan)
+{
+    return vfs_mount_execute_umount(&g_vfs_umount_execute_ops, mnt, plan);
 }
 
 int vfs_umount_flags(const char *path, int flags) {
     if (!path) return -EINVAL;
-    char norm_path[MAX_PATH_LEN];
-    strncpy(norm_path, path, MAX_PATH_LEN - 1);
-    norm_path[MAX_PATH_LEN - 1] = '\0';
-
-    size_t len = strlen(norm_path);
-    while (len > 1 && norm_path[len - 1] == '/') {
-        norm_path[len - 1] = '\0';
-        len--;
-    }
-
-    /* Detached mounts are not reachable by path any more, but umount(2) must
-     * still be able to name them so pivot_root's old root can be collected. */
-    for (int i = 0; i < vfs_mount_count(); i++) {
-        mount_t *mnt = vfs_mount_at(i);
-        if (!mnt) continue;
-
-        char mnt_norm[MAX_PATH_LEN];
-        strncpy(mnt_norm, mnt->path, MAX_PATH_LEN - 1);
-        mnt_norm[MAX_PATH_LEN - 1] = '\0';
-        size_t mnt_len = strlen(mnt_norm);
-        while (mnt_len > 1 && mnt_norm[mnt_len - 1] == '/') {
-            mnt_norm[mnt_len - 1] = '\0';
-            mnt_len--;
-        }
-
-        if (strcmp(mnt_norm, norm_path) != 0)
-            continue;
-
-        if (!(flags & VFS_UMOUNT_DETACH)) {
-            int busy = vfs_mount_busy_reason(mnt);
-            if (busy < 0)
-                return busy;
-        }
-        int teardown = vfs_mount_fs_teardown(mnt);
-        if (teardown < 0)
-            return teardown;
-        if (mnt->mnt_child) {
-            for (mount_t *c = mnt->mnt_child; c; c = c->mnt_sibling)
-                vfs_mount_detach_root(c);
-        }
-        vfs_dcache_invalidate_all();
-        vfs_drop_time_meta_mount(mnt);
-        vfs_mount_remove(mnt);
-        mntns_retry_pending();
-        return 0;
-    }
-    return -EINVAL;
+    mount_t *mnt = NULL;
+    vfs_umount_plan_t plan;
+    int r = vfs_umount_plan_build(path, flags, 1, &mnt, &plan);
+    if (r < 0)
+        return r;
+    return vfs_umount_execute_plan(mnt, &plan);
 }
 
 int vfs_umount(const char *path) {
     if (!path) return -EINVAL;
-    char norm_path[MAX_PATH_LEN];
-    strncpy(norm_path, path, MAX_PATH_LEN - 1);
-    norm_path[MAX_PATH_LEN - 1] = '\0';
-
-    size_t len = strlen(norm_path);
-    while (len > 1 && norm_path[len - 1] == '/') {
-        norm_path[len - 1] = '\0';
-        len--;
-    }
-
-    for (int i = 0; i < vfs_mount_count(); i++) {
-        mount_t *mnt = vfs_mount_at(i);
-        if (!mnt) continue;
-
-        char mnt_norm[MAX_PATH_LEN];
-        strncpy(mnt_norm, mnt->path, MAX_PATH_LEN - 1);
-        mnt_norm[MAX_PATH_LEN - 1] = '\0';
-        size_t mnt_len = strlen(mnt_norm);
-        while (mnt_len > 1 && mnt_norm[mnt_len - 1] == '/') {
-            mnt_norm[mnt_len - 1] = '\0';
-            mnt_len--;
-        }
-
-        if (strcmp(mnt_norm, norm_path) == 0) {
-            int teardown = vfs_mount_fs_teardown(mnt);
-            if (teardown < 0)
-                return teardown;
-            vfs_dcache_invalidate_all();
-            vfs_drop_time_meta_mount(mnt);
-            vfs_mount_remove(mnt);
-            mntns_retry_pending();
-            return 0;
-        }
-    }
-    return -EINVAL;
+    /* The legacy entry point skips the busy rules, exactly as before. */
+    mount_t *mnt = NULL;
+    vfs_umount_plan_t plan;
+    int r = vfs_umount_plan_build(path, 0, 0, &mnt, &plan);
+    if (r < 0)
+        return r;
+    return vfs_umount_execute_plan(mnt, &plan);
 }
 
 /* Truncate */

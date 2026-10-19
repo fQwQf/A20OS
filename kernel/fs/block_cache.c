@@ -8,6 +8,89 @@
 #include "core/lock_counters.h"
 #include "proc/proc.h"
 
+/*
+ * Block cache state engine selector.  Rust owns the cache's structural state
+ * model (hash membership, LRU ordering, entry references, dirty accounting,
+ * journal holds, quarantine, sync selection and the eviction policy).  The C
+ * adapter keeps bc->lock, the bucket locks, the IO, the pools and the writeback
+ * buffers.  The reference implementations below remain for BLOCK_CACHE_STATE_IMPL=c
+ * and back the host differential harness.
+ */
+/* Provided by kernel/fs/block_cache_state.rs.  Every raw-helper entry point
+ * requires the lock named in block_cache_state.rs's module doc. */
+extern int a20_bcache_read_batch_plan(uint64_t byte_off, size_t len,
+                                     uint64_t page_size, uint64_t block_size,
+                                     size_t max_pages, uint64_t *out_first_page,
+                                     size_t *out_page_count, uint64_t *out_lba,
+                                     size_t *out_sectors);
+extern unsigned a20_bcache_hash_key(uint64_t lba);
+extern unsigned a20_pcache_hash_key(uint64_t page_no);
+extern int a20_bcache_ref_read(const int *ref);
+extern void a20_bcache_ref_get(int *ref);
+extern void a20_bcache_ref_put(int *ref);
+extern void a20_bcache_lru_insert_front(bcache_entry_t *head, bcache_entry_t *e);
+extern void a20_bcache_lru_remove(bcache_entry_t *e);
+extern void a20_pcache_lru_insert_front(pcache_entry_t *head, pcache_entry_t *e);
+extern void a20_pcache_lru_remove(pcache_entry_t *e);
+extern void a20_bcache_hash_insert_locked(bcache_entry_t **hash, bcache_entry_t *e);
+extern void a20_bcache_hash_remove_locked(bcache_entry_t **hash, bcache_entry_t *e);
+extern bcache_entry_t *a20_bcache_find_locked(bcache_entry_t **hash, uint64_t lba);
+extern void a20_pcache_hash_remove_locked(pcache_entry_t **hash, pcache_entry_t *e);
+extern pcache_entry_t *a20_pcache_find_locked(pcache_entry_t **hash, uint64_t page_no);
+extern void a20_bcache_set_block_dirty(size_t *dirty_blocks, bcache_entry_t *e, int dirty);
+extern void a20_bcache_set_page_dirty(size_t *dirty_pages, pcache_entry_t *e, int dirty);
+extern int a20_bcache_hold_page(pcache_entry_t *pool, size_t n, uint64_t page_no);
+extern void a20_bcache_release_holds(pcache_entry_t *pool, size_t n);
+extern size_t a20_bcache_held_pages(const pcache_entry_t *pool, size_t n);
+extern int a20_bcache_write_quarantined(const uint64_t *until, uint64_t now);
+extern uint64_t a20_bcache_note_write_error(uint64_t *until, uint64_t now, uint64_t ticks);
+extern int a20_bcache_sync_page_selected(const uint64_t *nos, size_t count, uint64_t page_no);
+extern int a20_bcache_sync_select(int mode, int valid, int dirty, int held,
+                                  const uint64_t *nos, size_t count, uint64_t page_no);
+extern bcache_entry_t *a20_bcache_evict_transaction(
+    bcache_entry_t *, bcache_entry_t *, bcache_entry_t **, void *, int,
+    uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t));
+extern pcache_entry_t *a20_pcache_evict_transaction(
+    pcache_entry_t *, pcache_entry_t *, pcache_entry_t **, void *, int,
+    uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t));
+extern int a20_bcache_sync_transaction(
+    void *, size_t, size_t, const uint64_t *, size_t, int,
+    pcache_entry_t *, bcache_entry_t *, uint64_t (*)(void *),
+    void (*)(void *, uint64_t),
+    void (*)(void *, size_t, uint64_t, uint64_t),
+    void (*)(void *, const size_t *, const uint64_t *, const uint64_t *, size_t),
+    int (*)(void *, uint64_t, const uint8_t *, size_t), int (*)(void *),
+    void (*)(void *), void (*)(void *), void (*)(void *),
+    uint8_t *(*)(size_t), void (*)(uint8_t *));
+extern pcache_entry_t *a20_pcache_get_transaction(
+    void *, pcache_entry_t *, size_t, pcache_entry_t **, pcache_entry_t *,
+    pcache_entry_t *, size_t *, uint64_t, const uint8_t *, int,
+    uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t),
+    uint64_t (*)(void *), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t), void (*)(void *, uint64_t),
+    int (*)(void *, pcache_entry_t *), int (*)(void *, uint64_t, uint8_t *),
+    void (*)(void *, int), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t));
+extern bcache_entry_t *a20_bcache_get_transaction(
+    void *, bcache_entry_t *, size_t, bcache_entry_t **, bcache_entry_t *,
+    bcache_entry_t *, size_t *, uint64_t, int,
+    uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t),
+    uint64_t (*)(void *), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t), void (*)(void *, uint64_t),
+    int (*)(void *, uint64_t, uint8_t *, int), void (*)(void *, uint64_t));
+extern int a20_pcache_flush_transaction(
+    void *, pcache_entry_t *, uint8_t *, size_t *, size_t,
+    pcache_entry_t *(*)(void *, uint64_t), uint64_t (*)(void *),
+    void (*)(void *, uint64_t), int (*)(void *, uint64_t, const uint8_t *, size_t));
+extern int a20_bcache_read_batch_transaction(
+    void *, uint64_t, uint8_t *, size_t, uint64_t, uint64_t, size_t,
+    pcache_entry_t **, pcache_entry_t *, uint64_t (*)(void *),
+    void (*)(void *, uint64_t), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t), pcache_entry_t *(*)(void *, uint64_t),
+    int (*)(void *, uint64_t, uint8_t *, size_t),
+    int (*)(void *, uint64_t, uint8_t *, size_t), void (*)(void *, size_t));
+
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
@@ -32,13 +115,13 @@ static void bcache_account_device_io(block_dev_t *dev, int sectors,
 #define BCACHE_WRITE_QUARANTINE_TICKS (TICKS_PER_SEC * 30)
 
 static int bcache_write_quarantined(bcache_t *bc) {
-    return bc->write_quarantine_until &&
-           timer_get_ticks() < bc->write_quarantine_until;
+    return a20_bcache_write_quarantined(&bc->write_quarantine_until,
+                                        timer_get_ticks());
 }
 
 static void bcache_note_write_error(bcache_t *bc) {
-    bc->write_quarantine_until =
-        timer_get_ticks() + BCACHE_WRITE_QUARANTINE_TICKS;
+    a20_bcache_note_write_error(&bc->write_quarantine_until, timer_get_ticks(),
+                                BCACHE_WRITE_QUARANTINE_TICKS);
 }
 
 /*
@@ -51,51 +134,29 @@ static void bcache_note_write_error(bcache_t *bc) {
  */
 static inline int cache_ref_read(const int *ref)
 {
-    return __atomic_load_n(ref, __ATOMIC_ACQUIRE);
+    return a20_bcache_ref_read(ref);
 }
 
 static inline void cache_ref_get(int *ref)
 {
-    __atomic_fetch_add(ref, 1, __ATOMIC_ACQUIRE);
+    a20_bcache_ref_get(ref);
 }
 
 static inline void cache_ref_put(int *ref)
 {
-    int current = __atomic_load_n(ref, __ATOMIC_ACQUIRE);
-    while (current > 0) {
-        if (__atomic_compare_exchange_n(ref, &current, current - 1, 0,
-                                        __ATOMIC_RELEASE,
-                                        __ATOMIC_ACQUIRE))
-            return;
-    }
-}
-
-static void lru_remove(bcache_entry_t *e) {
-    e->prev->next = e->next;
-    e->next->prev = e->prev;
+    a20_bcache_ref_put(ref);
 }
 
 static void lru_insert_front(bcache_t *bc, bcache_entry_t *e) {
-    e->next             = bc->lru_head.next;
-    e->prev             = &bc->lru_head;
-    bc->lru_head.next->prev = e;
-    bc->lru_head.next      = e;
-}
-
-static void page_lru_remove(pcache_entry_t *e) {
-    e->prev->next = e->next;
-    e->next->prev = e->prev;
+    a20_bcache_lru_insert_front(&bc->lru_head, e);
 }
 
 static void page_lru_insert_front(bcache_t *bc, pcache_entry_t *e) {
-    e->next = bc->page_lru_head.next;
-    e->prev = &bc->page_lru_head;
-    bc->page_lru_head.next->prev = e;
-    bc->page_lru_head.next = e;
+    a20_pcache_lru_insert_front(&bc->page_lru_head, e);
 }
 
 static unsigned bcache_hash_key(uint64_t lba) {
-    return (unsigned)((lba ^ (lba >> 32)) & (BCACHE_HASH_BUCKETS - 1));
+    return a20_bcache_hash_key(lba);
 }
 
 /* Bucket lock helpers.  Ordering rule: a caller may hold bc->lock and then a
@@ -118,42 +179,16 @@ static inline void bcache_bucket_unlock_irqrestore(bcache_t *bc, uint64_t lba,
 }
 
 /* Raw helpers: caller holds the entry's bucket lock. */
-static void bcache_hash_insert_locked(bcache_t *bc, bcache_entry_t *e) {
-    unsigned idx = bcache_hash_key(e->lba);
-    e->hnext = bc->hash[idx];
-    bc->hash[idx] = e;
-}
-
 static void bcache_hash_remove_locked(bcache_t *bc, bcache_entry_t *e) {
-    unsigned idx = bcache_hash_key(e->lba);
-    bcache_entry_t **pp = &bc->hash[idx];
-    while (*pp) {
-        if (*pp == e) {
-            *pp = e->hnext;
-            e->hnext = NULL;
-            return;
-        }
-        pp = &(*pp)->hnext;
-    }
-    e->hnext = NULL;
+    a20_bcache_hash_remove_locked(bc->hash, e);
 }
 
 static bcache_entry_t *bcache_find_locked(bcache_t *bc, uint64_t lba) {
-    for (bcache_entry_t *e = bc->hash[bcache_hash_key(lba)]; e; e = e->hnext) {
-        if (e->valid && e->lba == lba)
-            return e;
-    }
-    return NULL;
+    return a20_bcache_find_locked(bc->hash, lba);
 }
 
 /* Self-locking wrappers for callers that do not already hold the bucket lock
  * (used under bc->lock by paths that are not the warm-hit fast path). */
-static void bcache_hash_insert(bcache_t *bc, bcache_entry_t *e) {
-    uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
-    bcache_hash_insert_locked(bc, e);
-    bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
-}
-
 static void bcache_hash_remove(bcache_t *bc, bcache_entry_t *e) {
     uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
     bcache_hash_remove_locked(bc, e);
@@ -168,7 +203,7 @@ static bcache_entry_t *bcache_find(bcache_t *bc, uint64_t lba) {
 }
 
 static unsigned pcache_hash_key(uint64_t page_no) {
-    return (unsigned)((page_no ^ (page_no >> 32)) & (PCACHE_HASH_BUCKETS - 1));
+    return a20_pcache_hash_key(page_no);
 }
 
 static inline unsigned pcache_bucket_key(uint64_t page_no)
@@ -189,40 +224,15 @@ static inline void pcache_bucket_unlock_irqrestore(bcache_t *bc,
                            flags);
 }
 
-static void pcache_hash_insert_locked(bcache_t *bc, pcache_entry_t *e) {
-    unsigned idx = pcache_hash_key(e->page_no);
-    e->hnext = bc->page_hash[idx];
-    bc->page_hash[idx] = e;
-}
 
 static void pcache_hash_remove_locked(bcache_t *bc, pcache_entry_t *e) {
-    unsigned idx = pcache_hash_key(e->page_no);
-    pcache_entry_t **pp = &bc->page_hash[idx];
-    while (*pp) {
-        if (*pp == e) {
-            *pp = e->hnext;
-            e->hnext = NULL;
-            return;
-        }
-        pp = &(*pp)->hnext;
-    }
-    e->hnext = NULL;
+    a20_pcache_hash_remove_locked(bc->page_hash, e);
 }
 
 static pcache_entry_t *pcache_find_locked(bcache_t *bc, uint64_t page_no) {
-    for (pcache_entry_t *e = bc->page_hash[pcache_hash_key(page_no)];
-         e; e = e->hnext) {
-        if (e->valid && e->page_no == page_no)
-            return e;
-    }
-    return NULL;
+    return a20_pcache_find_locked(bc->page_hash, page_no);
 }
 
-static void pcache_hash_insert(bcache_t *bc, pcache_entry_t *e) {
-    uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
-    pcache_hash_insert_locked(bc, e);
-    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
-}
 
 static pcache_entry_t *pcache_find(bcache_t *bc, uint64_t page_no) {
     uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
@@ -236,16 +246,7 @@ static void bcache_set_block_dirty_locked(bcache_t *bc, bcache_entry_t *e,
 {
     if (!bc || !e)
         return;
-    if (dirty) {
-        e->dirty_gen++;
-        if (!e->dirty)
-            bc->dirty_blocks++;
-        e->dirty = 1;
-    } else if (e->dirty) {
-        e->dirty = 0;
-        if (bc->dirty_blocks > 0)
-            bc->dirty_blocks--;
-    }
+    a20_bcache_set_block_dirty(&bc->dirty_blocks, e, dirty);
 }
 
 static void bcache_set_page_dirty_locked(bcache_t *bc, pcache_entry_t *e,
@@ -253,16 +254,7 @@ static void bcache_set_page_dirty_locked(bcache_t *bc, pcache_entry_t *e,
 {
     if (!bc || !e)
         return;
-    if (dirty) {
-        e->dirty_gen++;
-        if (!e->dirty)
-            bc->dirty_pages++;
-        e->dirty = 1;
-    } else if (e->dirty) {
-        e->dirty = 0;
-        if (bc->dirty_pages > 0)
-            bc->dirty_pages--;
-    }
+    a20_bcache_set_page_dirty(&bc->dirty_pages, e, dirty);
 }
 
 /* ---- journal hold set -------------------------------------------------
@@ -278,13 +270,7 @@ void bcache_hold_page(bcache_t *bc, uint64_t page_no)
     if (!bc)
         return;
     uint64_t flags = spin_lock_irqsave(&bc->lock);
-    for (int i = 0; i < bc->page_pool_size; i++) {
-        pcache_entry_t *e = &bc->page_pool[i];
-        if (e->valid && e->page_no == page_no) {
-            e->held = 1;
-            break;
-        }
-    }
+    a20_bcache_hold_page(bc->page_pool, (size_t)bc->page_pool_size, page_no);
     spin_unlock_irqrestore(&bc->lock, flags);
 }
 
@@ -293,8 +279,7 @@ void bcache_release_holds(bcache_t *bc)
     if (!bc)
         return;
     uint64_t flags = spin_lock_irqsave(&bc->lock);
-    for (int i = 0; i < bc->page_pool_size; i++)
-        bc->page_pool[i].held = 0;
+    a20_bcache_release_holds(bc->page_pool, (size_t)bc->page_pool_size);
     spin_unlock_irqrestore(&bc->lock, flags);
 }
 
@@ -302,11 +287,7 @@ size_t bcache_held_pages(const bcache_t *bc)
 {
     if (!bc)
         return 0;
-    size_t n = 0;
-    for (int i = 0; i < bc->page_pool_size; i++)
-        if (bc->page_pool[i].valid && bc->page_pool[i].held)
-            n++;
-    return n;
+    return a20_bcache_held_pages(bc->page_pool, (size_t)bc->page_pool_size);
 }
 
 void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *), void *owner)
@@ -439,156 +420,47 @@ void bcache_get_stats(bcache_stats_t *stats)
 }
 
 // Evict one block (second-chance LRU: find the least recently used block from the tail; the accessed bit earns a reprieve once)
-static bcache_entry_t *bcache_evict(bcache_t *bc) {
-    int quarantined = bcache_write_quarantined(bc);
-    bcache_entry_t *e = bc->lru_tail.prev;
-    while (e != &bc->lru_head) {
-        if (cache_ref_read(&e->ref) == 0) {
-            /* While the device is known-wedged, prefer clean victims: a dirty
-             * victim would force a flush that can only time out again. */
-            if (quarantined && e->valid && e->dirty) {
-                e = e->prev;
-                continue;
-            }
-            if (e->valid) {
-                uint64_t bf = bcache_bucket_lock_irqsave(bc, e->lba);
-                if (cache_ref_read(&e->ref) == 0 && e->valid &&
-                    !(quarantined && e->dirty)) {
-                    if (e->accessed) {
-                        e->accessed = 0;
-                        bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
-                        e = e->prev;
-                        continue;
-                    }
-                    lru_remove(e);
-                    bcache_hash_remove_locked(bc, e);
-                    e->ref = 1;
-                    bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
-                    return e;
-                }
-                bcache_bucket_unlock_irqrestore(bc, e->lba, bf);
-                e = e->prev;
-                continue;
-            }
-            lru_remove(e);
-            e->ref = 1;
-            return e;
-        }
-        e = e->prev;
-    }
-    return NULL;
+static uint64_t bcache_evict_bucket_lock(void *ctx, uint64_t key) { return bcache_bucket_lock_irqsave(ctx, key); }
+static void bcache_evict_bucket_unlock(void *ctx, uint64_t key, uint64_t flags) { bcache_bucket_unlock_irqrestore(ctx, key, flags); }
+static uint64_t bcache_get_global_lock(void *ctx) { return spin_lock_irqsave(&((bcache_t *)ctx)->lock); }
+static void bcache_get_global_unlock(void *ctx,uint64_t f) { spin_unlock_irqrestore(&((bcache_t *)ctx)->lock,f); }
+static void bcache_get_writeback_lock(void *ctx,uint64_t unused) { (void)unused; rw_mutex_write_lock(&((bcache_t *)ctx)->writeback_lock); }
+static void bcache_get_writeback_unlock(void *ctx,uint64_t unused) { (void)unused; rw_mutex_write_unlock(&((bcache_t *)ctx)->writeback_lock); }
+static int bcache_get_io(void *ctx,uint64_t lba,uint8_t *data,int write)
+{
+    bcache_t *bc=ctx;
+    if(!bc->dev){if(!write)memset(data,0,BCACHE_BLOCK_SIZE);return 0;}
+    int r=write?bc->dev->write_sector(bc->dev,lba,(char *)data,1):bc->dev->read_sector(bc->dev,lba,(char *)data,1);
+    bcache_account_device_io(bc->dev,r,write); return r;
 }
+static void bcache_get_note_error(void *ctx,uint64_t lba) { (void)lba; bcache_note_write_error(ctx); }
 
-bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
-    /* Warm hit fast path: only the bucket lock is taken; the accessed bit
-     * feeds the second-chance evictor instead of a per-hit global LRU move. */
+bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba)
+{
+    if (!bc) return NULL;
+    /* Keep the simple bucket-locked lookup/pin local. The Rust transaction
+     * owns misses, publication and rollback; warm hits need no cross-language
+     * transaction boundary. */
     uint64_t bf = bcache_bucket_lock_irqsave(bc, lba);
-    bcache_entry_t *e = bcache_find_locked(bc, lba);
-    if (e) {
-        cache_ref_get(&e->ref);
-        e->accessed = 1;
+    unsigned idx = (unsigned)((lba ^ (lba >> 32)) &
+                              (BCACHE_HASH_BUCKETS - 1));
+    bcache_entry_t *hit = bc->hash[idx];
+    while (hit && (!hit->valid || hit->lba != lba))
+        hit = hit->hnext;
+    if (hit) {
+        cache_ref_get(&hit->ref);
+        hit->accessed = 1;
         bcache_bucket_unlock_irqrestore(bc, lba, bf);
-        return e;
+        return hit;
     }
     bcache_bucket_unlock_irqrestore(bc, lba, bf);
-
-    uint64_t flags = spin_lock_irqsave(&bc->lock);
-    e = bcache_find(bc, lba);
-    if (e) {
-        cache_ref_get(&e->ref);
-        lru_remove(e);
-        lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        return e;
-    }
-
-    spin_unlock_irqrestore(&bc->lock, flags);
-    rw_mutex_write_lock(&bc->writeback_lock);
-    flags = spin_lock_irqsave(&bc->lock);
-
-    /* A concurrent miss may have populated this LBA while we waited. */
-    e = bcache_find(bc, lba);
-    if (e) {
-        cache_ref_get(&e->ref);
-        lru_remove(e);
-        lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        rw_mutex_write_unlock(&bc->writeback_lock);
-        return e;
-    }
-
-    e = bcache_evict(bc);
-    if (!e) {
-        spin_unlock_irqrestore(&bc->lock, flags);
-        rw_mutex_write_unlock(&bc->writeback_lock);
-        kdebug("[BCACHE] no evictable block lba=%lu\n", (unsigned long)lba);
-        return NULL;
-    }
-    uint64_t old_lba = e->lba;
-    int old_dirty = e->dirty && e->valid;
-    e->valid = 0;
-    spin_unlock_irqrestore(&bc->lock, flags);
-
-    if (old_dirty && bc->dev) {
-        int write_ret = bc->dev->write_sector(bc->dev, old_lba, e->data, 1);
-        if (write_ret < 0) {
-            kdebug("[BCACHE] writeback error lba=%lu\n", (unsigned long)old_lba);
-            bcache_note_write_error(bc);
-            flags = spin_lock_irqsave(&bc->lock);
-            e->ref = 0;
-            bcache_set_block_dirty_locked(bc, e, 1);
-            e->valid = 1;
-            bcache_hash_insert(bc, e);
-            lru_insert_front(bc, e);
-            spin_unlock_irqrestore(&bc->lock, flags);
-            rw_mutex_write_unlock(&bc->writeback_lock);
-            return NULL;
-        }
-    }
-    rw_mutex_write_unlock(&bc->writeback_lock);
-
-    if (bc->dev) {
-        int r = bc->dev->read_sector(bc->dev, lba, e->data, 1);
-        if (r < 0) {
-            kdebug("[BCACHE] read error lba=%lu\n", (unsigned long)lba);
-            flags = spin_lock_irqsave(&bc->lock);
-            e->ref = 0;
-            e->lba = (uint64_t)-1;
-            lru_insert_front(bc, e);
-            spin_unlock_irqrestore(&bc->lock, flags);
-            return NULL;
-        }
-    } else {
-        // no underlying device, zero it (used by the in-memory filesystems)
-        memset(e->data, 0, BCACHE_BLOCK_SIZE);
-    }
-
-    flags = spin_lock_irqsave(&bc->lock);
-    /*
-     * Race fix: another process may have fetched the same LBA while we
-     * were doing I/O without the lock.  If so, discard our entry and
-     * return the existing one to avoid duplicate hash entries.
-     */
-    bcache_entry_t *dup = bcache_find(bc, lba);
-    if (dup) {
-        e->ref = 0;
-        e->lba = (uint64_t)-1;
-        lru_insert_front(bc, e);
-        cache_ref_get(&dup->ref);
-        lru_remove(dup);
-        lru_insert_front(bc, dup);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        return dup;
-    }
-    e->lba = lba;
-    bcache_set_block_dirty_locked(bc, e, 0);
-    e->dirty_gen = 0;
-    e->valid = 1;
-
-    bcache_hash_insert(bc, e);
-    lru_insert_front(bc, e);
-    spin_unlock_irqrestore(&bc->lock, flags);
-    return e;
+    return a20_bcache_get_transaction(
+        bc,bc->pool,(size_t)bc->pool_size,bc->hash,&bc->lru_head,&bc->lru_tail,
+        &bc->dirty_blocks,lba,bcache_write_quarantined(bc),
+        bcache_evict_bucket_lock,bcache_evict_bucket_unlock,
+        bcache_get_global_lock,bcache_get_global_unlock,
+        bcache_get_writeback_lock,bcache_get_writeback_unlock,
+        bcache_get_io,bcache_get_note_error);
 }
 
 void bcache_release(bcache_entry_t *e) {
@@ -608,213 +480,70 @@ void bcache_mark_dirty(bcache_entry_t *e) {
  * timed-out VirtIO request merely because older callers used a void sync
  * interface.
  */
-/* Sorted-array membership for bcache_sync_scoped().  NULL page_nos means
- * "include every page" (full sync). */
-static int bcache_sync_page_selected(const uint64_t *page_nos, size_t count,
-                                     uint64_t page_no)
-{
-    if (!page_nos)
-        return 1;
-    size_t lo = 0, hi = count;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (page_nos[mid] == page_no)
-            return 1;
-        if (page_nos[mid] < page_no)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return 0;
-}
-
-/*
- * Flush every dirty page selected by @page_nos (sorted ascending, or NULL for
- * all) and report whether the storage device accepted all writes.  Journal
- * recovery must not claim success after a timed-out VirtIO request merely
- * because older callers used a void sync interface.
- */
 enum bcache_sync_mode {
     BC_SYNC_ALL,     /* every dirty page except journal-held ones */
     BC_SYNC_SCOPED,  /* the @page_nos selection, minus journal-held ones */
     BC_SYNC_HELD,    /* only journal-held pages (a transaction checkpoint) */
 };
 
+static uint64_t bcache_sync_cache_lock(void *ctx) { return spin_lock_irqsave(&((bcache_t *)ctx)->lock); }
+static void bcache_sync_cache_unlock(void *ctx, uint64_t flags) { spin_unlock_irqrestore(&((bcache_t *)ctx)->lock,flags); }
+static void bcache_sync_clear_pages(void *ctx, const size_t *indices,
+                                    const uint64_t *nos, const uint64_t *gens,
+                                    size_t count)
+{
+    bcache_t *bc=ctx; uint64_t f=spin_lock_irqsave(&bc->lock);
+    for (size_t j=0;j<count;j++) {
+        pcache_entry_t *e=&bc->page_pool[indices[j]];
+        if (e->valid && e->page_no==nos[j] && e->dirty_gen==gens[j])
+            bcache_set_page_dirty_locked(bc,e,0);
+    }
+    spin_unlock_irqrestore(&bc->lock,f);
+}
+static void bcache_sync_clear_block(void *ctx, size_t i, uint64_t lba, uint64_t gen)
+{
+    bcache_t *bc=ctx; uint64_t f=spin_lock_irqsave(&bc->lock); bcache_entry_t *e=&bc->pool[i];
+    if (e->valid && e->lba==lba && e->dirty_gen==gen) bcache_set_block_dirty_locked(bc,e,0);
+    spin_unlock_irqrestore(&bc->lock,f);
+}
+static int bcache_sync_write(void *ctx, uint64_t lba, const uint8_t *data, size_t sectors)
+{
+    bcache_t *bc=ctx; int r=bc->dev->write_sector(bc->dev,lba,(const char *)data,sectors);
+    bcache_account_device_io(bc->dev,r,1);
+    a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
+    a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
+                 sectors/(PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE));
+    return r;
+}
+static int bcache_sync_flush(void *ctx)
+{
+    bcache_t *bc=ctx; if (!bc->dev || !bc->dev->flush) return 0;
+    a20_perf_count(A20_PERF_BLOCK_FLUSHES); return bc->dev->flush(bc->dev);
+}
+static void bcache_sync_lock(void *ctx) { rw_mutex_write_lock(&((bcache_t *)ctx)->writeback_lock); }
+static void bcache_sync_unlock(void *ctx) { rw_mutex_write_unlock(&((bcache_t *)ctx)->writeback_lock); }
+static void bcache_sync_error(void *ctx) { bcache_note_write_error(ctx); }
+static uint8_t *bcache_sync_alloc(size_t n) { return kmalloc(n); }
+static void bcache_sync_free(uint8_t *p) { kfree(p); }
+
 static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
-                              size_t page_count,
-                              enum bcache_sync_mode mode) {
-    if (!bc || !bc->dev)
-        return -EINVAL;
-    /* Commit the filesystem's own log first.  ext4 uses this to write a JBD2
-     * transaction and checkpoint it before any of its metadata pages are
-     * allowed out, which is the whole ordering guarantee the journal buys.
-     * The hook's own internal syncs re-enter here with sync_hook_depth > 0
-     * and are deliberately not hooked, so the commit cannot recurse. */
+                              size_t page_count, enum bcache_sync_mode mode)
+{
+    if (!bc || !bc->dev) return -EINVAL;
     if (bc->sync_hook && bc->sync_hook_depth == 0) {
         bc->sync_hook_depth++;
-        int hook_ret = bc->sync_hook(bc);
+        int r=bc->sync_hook(bc);
         bc->sync_hook_depth--;
-        if (hook_ret < 0)
-            return hook_ret;
+        if (r < 0) return r;
     }
-    /* A recently failed write means the device is still wedged; fail fast
-     * instead of paying another driver-level timeout per dirty entry. */
-    if (bcache_write_quarantined(bc))
-        return -EIO;
-    char tmp[BCACHE_BLOCK_SIZE];
-    char *page_tmp = NULL;
-    int page_indices[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t sync_nos[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t page_gens[BCACHE_SYNC_BATCH_PAGES];
-    int first_error = 0;
-
-    /* Preserve write ordering for mutable metadata pages.  Without this,
-     * concurrent fsync and eviction can write an older bitmap snapshot after
-     * a newer one and make allocated blocks appear free again. */
-    rw_mutex_write_lock(&bc->writeback_lock);
-
-    for (int i = 0; i < bc->page_pool_size; i++) {
-        uint64_t flags = spin_lock_irqsave(&bc->lock);
-        if (bc->dirty_pages == 0) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            break;
-        }
-        pcache_entry_t *cur = &bc->page_pool[i];
-        if (!cur->valid || !cur->dirty ||
-            (mode == BC_SYNC_HELD) != (cur->held != 0) ||
-            (mode == BC_SYNC_SCOPED &&
-             !bcache_sync_page_selected(page_nos, page_count,
-                                        cur->page_no))) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            continue;
-        }
-        if (!page_tmp)
-            page_tmp = (char *)kmalloc(PCACHE_PAGE_SIZE *
-                                       BCACHE_SYNC_BATCH_PAGES);
-        if (!page_tmp) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            first_error = -ENOMEM;
-            break;
-        }
-        page_indices[0] = i;
-        sync_nos[0] = bc->page_pool[i].page_no;
-        page_gens[0] = bc->page_pool[i].dirty_gen;
-        memcpy(page_tmp, bc->page_pool[i].data, PCACHE_PAGE_SIZE);
-        spin_unlock_irqrestore(&bc->lock, flags);
-
-        /* Fresh ext4 blocks and inode-table pages are normally allocated in
-         * ascending physical order, and fresh cache entries follow that same
-         * order in the page pool.  Merge only adjacent pool entries whose
-         * physical page numbers are exactly contiguous and are both selected.
-         * Each page keeps its own dirty generation so a concurrent writer
-         * cannot be cleared by an older batched snapshot. */
-        int batch_pages = 1;
-        while (batch_pages < BCACHE_SYNC_BATCH_PAGES &&
-               i + batch_pages < bc->page_pool_size) {
-            int index = i + batch_pages;
-            flags = spin_lock_irqsave(&bc->lock);
-            pcache_entry_t *candidate = &bc->page_pool[index];
-            if (!candidate->valid || !candidate->dirty ||
-                (mode == BC_SYNC_HELD) != (candidate->held != 0) ||
-                (mode == BC_SYNC_SCOPED &&
-                 !bcache_sync_page_selected(page_nos, page_count,
-                                            candidate->page_no)) ||
-                candidate->page_no != sync_nos[batch_pages - 1] + 1) {
-                spin_unlock_irqrestore(&bc->lock, flags);
-                break;
-            }
-            page_indices[batch_pages] = index;
-            sync_nos[batch_pages] = candidate->page_no;
-            page_gens[batch_pages] = candidate->dirty_gen;
-            memcpy(page_tmp + (size_t)batch_pages * PCACHE_PAGE_SIZE,
-                   candidate->data, PCACHE_PAGE_SIZE);
-            spin_unlock_irqrestore(&bc->lock, flags);
-            batch_pages++;
-        }
-
-        uint64_t lba =
-            (sync_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-        int write_ret = bc->dev->write_sector(
-            bc->dev, lba, page_tmp,
-            (size_t)batch_pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
-        bcache_account_device_io(bc->dev, write_ret, 1);
-        if (write_ret >= 0) {
-            flags = spin_lock_irqsave(&bc->lock);
-            for (int page = 0; page < batch_pages; page++) {
-                pcache_entry_t *entry =
-                    &bc->page_pool[page_indices[page]];
-                if (entry->valid && entry->page_no == sync_nos[page] &&
-                    entry->dirty_gen == page_gens[page])
-                    bcache_set_page_dirty_locked(bc, entry, 0);
-            }
-            spin_unlock_irqrestore(&bc->lock, flags);
-        } else {
-            /* Abort early: the driver already exhausted its retry budget on
-             * this request, so flushing the remaining entries would only
-             * multiply the stall.  They stay dirty for the next sync. */
-            first_error = write_ret;
-            bcache_note_write_error(bc);
-            a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
-            a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
-                         (uint64_t)batch_pages);
-            break;
-        }
-        a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
-        a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
-                     (uint64_t)batch_pages);
-        i += batch_pages - 1;
-    }
-    if (page_tmp)
-        kfree(page_tmp);
-
-    /* Held pages are 4 KiB filesystem blocks; the 512-byte pool holds only
-     * never-journalled entries, so a checkpoint has nothing to do there. */
-    for (int i = 0; mode != BC_SYNC_HELD && !first_error &&
-                i < bc->pool_size; i++) {
-        uint64_t flags = spin_lock_irqsave(&bc->lock);
-        if (bc->dirty_blocks == 0) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            break;
-        }
-        if (!bc->pool[i].valid || !bc->pool[i].dirty) {
-            spin_unlock_irqrestore(&bc->lock, flags);
-            continue;
-        }
-        uint64_t lba = bc->pool[i].lba;
-        uint64_t dirty_gen = bc->pool[i].dirty_gen;
-        memcpy(tmp, bc->pool[i].data, BCACHE_BLOCK_SIZE);
-        spin_unlock_irqrestore(&bc->lock, flags);
-
-        int write_ret = bc->dev->write_sector(bc->dev, lba, tmp, 1);
-        bcache_account_device_io(bc->dev, write_ret, 1);
-        if (write_ret >= 0) {
-            flags = spin_lock_irqsave(&bc->lock);
-            if (bc->pool[i].valid && bc->pool[i].lba == lba &&
-                bc->pool[i].dirty_gen == dirty_gen)
-                bcache_set_block_dirty_locked(bc, &bc->pool[i], 0);
-            spin_unlock_irqrestore(&bc->lock, flags);
-        } else {
-            first_error = write_ret;
-            bcache_note_write_error(bc);
-            break;
-        }
-    }
-    rw_mutex_write_unlock(&bc->writeback_lock);
-
-    /*
-     * Commit the device's volatile write cache.  The writes above returned
-     * once the data reached the device, which a device with a write cache can
-     * still lose on power failure; this is what makes fsync() mean "durable".
-     * Must follow the data and stay outside bc->lock.  A device with no flush
-     * op cannot honour fsync -- see block_dev_t.flush.
-     */
-    if (!first_error && bc->dev && bc->dev->flush) {
-        a20_perf_count(A20_PERF_BLOCK_FLUSHES);
-        int flush_ret = bc->dev->flush(bc->dev);
-        if (flush_ret < 0)
-            first_error = flush_ret;
-    }
-    return first_error;
+    if (bcache_write_quarantined(bc)) return -EIO;
+    return a20_bcache_sync_transaction(
+        bc, (size_t)bc->page_pool_size, (size_t)bc->pool_size,
+        page_nos, page_count, (int)mode, bc->page_pool, bc->pool,
+        bcache_sync_cache_lock, bcache_sync_cache_unlock,
+        bcache_sync_clear_block, bcache_sync_clear_pages, bcache_sync_write,
+        bcache_sync_flush, bcache_sync_lock, bcache_sync_unlock,
+        bcache_sync_error, bcache_sync_alloc, bcache_sync_free);
 }
 
 int bcache_sync_checked(bcache_t *bc) {
@@ -860,291 +589,95 @@ void bcache_invalidate(bcache_t *bc, uint64_t lba) {
     spin_unlock_irqrestore(&bc->lock, flags);
 }
 
+static uint64_t pcache_get_global_lock(void *ctx);
+static void pcache_get_global_unlock(void *ctx, uint64_t flags);
+static pcache_entry_t *pcache_find_adapter(void *ctx, uint64_t page_no)
+{ return pcache_find(ctx, page_no); }
+static int pcache_flush_write(void *ctx, uint64_t lba,
+                              const uint8_t *data, size_t sectors);
+
 static int pcache_flush_run(bcache_t *bc, pcache_entry_t *first)
 {
-    if (!bc->dev || !first || !first->dirty)
-        return 0;
+    if (!bc->dev) return 0;
+    return a20_pcache_flush_transaction(
+        bc, first, (uint8_t *)bc->writeback_buffer, &bc->dirty_pages,
+        BCACHE_SYNC_BATCH_PAGES, pcache_find_adapter,
+        pcache_get_global_lock, pcache_get_global_unlock,
+        pcache_flush_write);
+}
 
-    pcache_entry_t *entries[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t page_nos[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t page_gens[BCACHE_SYNC_BATCH_PAGES];
-    uint64_t flags = spin_lock_irqsave(&bc->lock);
-    if (!first->valid || !first->dirty) {
-        spin_unlock_irqrestore(&bc->lock, flags);
-        return 0;
-    }
 
-    entries[0] = first;
-    page_nos[0] = first->page_no;
-    page_gens[0] = first->dirty_gen;
-    memcpy(bc->writeback_buffer, first->data, PCACHE_PAGE_SIZE);
-    int pages = 1;
-    while (pages < BCACHE_SYNC_BATCH_PAGES) {
-        pcache_entry_t *next = pcache_find(bc, page_nos[pages - 1] + 1);
-        if (!next || !next->valid || !next->dirty)
-            break;
-        entries[pages] = next;
-        page_nos[pages] = next->page_no;
-        page_gens[pages] = next->dirty_gen;
-        memcpy(bc->writeback_buffer + (size_t)pages * PCACHE_PAGE_SIZE,
-               next->data, PCACHE_PAGE_SIZE);
-        pages++;
-    }
-    spin_unlock_irqrestore(&bc->lock, flags);
-
-    uint64_t lba = (page_nos[0] * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-    int r = bc->dev->write_sector(
-        bc->dev, lba, bc->writeback_buffer,
-        (size_t)pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
-    if (r >= 0) {
-        flags = spin_lock_irqsave(&bc->lock);
-        for (int i = 0; i < pages; i++) {
-            pcache_entry_t *entry = entries[i];
-            if (entry->valid && entry->page_no == page_nos[i] &&
-                entry->dirty_gen == page_gens[i])
-                bcache_set_page_dirty_locked(bc, entry, 0);
-        }
-        spin_unlock_irqrestore(&bc->lock, flags);
-    }
+static uint64_t pcache_get_bucket_lock(void *ctx,uint64_t page_no) { return pcache_bucket_lock_irqsave(ctx,page_no); }
+static void pcache_get_bucket_unlock(void *ctx,uint64_t page_no,uint64_t f) { pcache_bucket_unlock_irqrestore(ctx,page_no,f); }
+static uint64_t pcache_get_global_lock(void *ctx) { return spin_lock_irqsave(&((bcache_t *)ctx)->lock); }
+static void pcache_get_global_unlock(void *ctx,uint64_t f) { spin_unlock_irqrestore(&((bcache_t *)ctx)->lock,f); }
+static void pcache_get_fill_lock(void *ctx,uint64_t page_no)
+{
+ bcache_t *bc=ctx; mutex_t *lock=&bc->fill_locks[pcache_hash_key(page_no)&(PCACHE_FILL_LOCKS-1)];
+ if(!mutex_trylock(lock)){a20_perf_count(A20_PERF_PCACHE_FILL_CONTENDED);mutex_lock(lock);}
+}
+static void pcache_get_fill_unlock(void *ctx,uint64_t page_no)
+{bcache_t *bc=ctx;mutex_unlock(&bc->fill_locks[pcache_hash_key(page_no)&(PCACHE_FILL_LOCKS-1)]);}
+static void pcache_get_writeback_lock(void *ctx,uint64_t unused){(void)unused;rw_mutex_write_lock(&((bcache_t *)ctx)->writeback_lock);}
+static void pcache_get_writeback_unlock(void *ctx,uint64_t unused){(void)unused;rw_mutex_write_unlock(&((bcache_t *)ctx)->writeback_lock);}
+static int pcache_get_flush_victim(void *ctx, pcache_entry_t *e) { return pcache_flush_run(ctx,e); }
+static int pcache_get_read(void *ctx, uint64_t page_no, uint8_t *data)
+{
+    bcache_t *bc=ctx;
+    if (!bc->dev) { memset(data,0,PCACHE_PAGE_SIZE); return 0; }
+    uint64_t lba=page_no*PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE;
+    int r=bc->dev->read_sector(bc->dev,lba,(char *)data,PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE);
+    bcache_account_device_io(bc->dev,r,0); return r;
+}
+static void pcache_get_perf(void *ctx, int event) { (void)ctx; if(event==0) a20_perf_count(A20_PERF_PCACHE_FILL_MISSES); else if(event==3) a20_perf_count(A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS); }
+static void pcache_get_diagnostic(void *ctx, uint64_t page_no)
+{
+    bcache_t *bc=ctx; size_t valid=0,dirty=0,referenced=0; uint64_t total_refs=0; int max_refs=0;
+    for(int i=0;i<bc->page_pool_size;i++){ pcache_entry_t *p=&bc->page_pool[i]; int refs=cache_ref_read(&p->ref); if(p->valid) valid++; if(p->valid&&p->dirty) dirty++; if(refs>0){referenced++;total_refs+=(uint64_t)refs;if(refs>max_refs)max_refs=refs;} }
+    printf("[BCACHE] no evictable page page=%lu valid=%lu dirty=%lu referenced=%lu total_refs=%lu max_refs=%d\\n",(unsigned long)page_no,(unsigned long)valid,(unsigned long)dirty,(unsigned long)referenced,(unsigned long)total_refs,max_refs);
+}
+static void pcache_get_note_error(void *ctx, uint64_t unused) { (void)unused; bcache_note_write_error(ctx); }
+static int pcache_flush_write(void *ctx, uint64_t lba,
+                              const uint8_t *data, size_t sectors)
+{
+    bcache_t *bc = ctx;
+    int r = bc->dev->write_sector(bc->dev, lba, (const char *)data, sectors);
+    bcache_account_device_io(bc->dev, r, 1);
     a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
-    a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES, (uint64_t)pages);
+    a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
+                 sectors / (PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE));
     return r;
 }
 
-static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
-    int quarantined = bcache_write_quarantined(bc);
-    /* A single pass can come up empty even with a pool full of unreferenced
-     * valid pages: a valid entry whose `accessed` bit is set is skipped, and
-     * the skip *clears* that bit, so the page only becomes a candidate on a
-     * later pass.  Under memory pressure every mapped page is hot, so one
-     * pass walks the whole LRU clearing `accessed` and then returns NULL --
-     * exactly the "valid=2000 referenced=0 yet no evictable page" report in
-     * docs 10.64, whose diagnostic never counted `accessed`.  Retry while we
-     * are still making that kind of progress; the bound stops a pool whose
-     * pages are continuously re-accessed from spinning here. */
-    for (int pass = 0; pass < 4; pass++) {
-        int cleared_accessed = 0;
-    pcache_entry_t *e = bc->page_lru_tail.prev;
-    while (e != &bc->page_lru_head) {
-        if (cache_ref_read(&e->ref) == 0) {
-            /* Prefer clean victims while the device is known-wedged; a dirty
-             * victim would force a flush that can only time out again. */
-            if (quarantined && e->valid && e->dirty) {
-                e = e->prev;
-                continue;
-            }
-if (e->valid) {
-                uint64_t bf = bcache_bucket_lock_irqsave(bc, e->page_no);
-                if (cache_ref_read(&e->ref) == 0 && e->valid &&
-                    !e->held && !(quarantined && e->dirty)) {
-                    if (e->accessed) {
-                        e->accessed = 0;
-                        cleared_accessed = 1;
-                        pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
-                        e = e->prev;
-                        continue;
-                    }
-                    page_lru_remove(e);
-                    pcache_hash_remove_locked(bc, e);
-                    e->ref = 1;
-                    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
-                    return e;
-                }
-                pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
-                e = e->prev;
-                continue;
-            }
-            page_lru_remove(e);
-            e->ref = 1;
-            return e;
-        }
-        e = e->prev;
-    }
-        /* Nothing evicted, but we did demote hot pages: they are
-         * candidates now, so another pass can succeed. */
-        if (!cleared_accessed)
-            break;
-    }
-    return NULL;
-}
-
 static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
-                                  const void *full_overwrite) {
-    /* Warm hit fast path: bucket lock only. */
+                                  const void *full_overwrite)
+{
+    if (!bc) return NULL;
+    /* As with blocks, keep the simple warm hit local to C. Slow miss,
+     * eviction, duplicate publication and rollback remain Rust-owned. */
     uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
-    pcache_entry_t *e = pcache_find_locked(bc, page_no);
-    if (e) {
-        cache_ref_get(&e->ref);
-        e->accessed = 1;
+    unsigned idx = (unsigned)((page_no ^ (page_no >> 32)) &
+                              (PCACHE_HASH_BUCKETS - 1));
+    pcache_entry_t *hit = bc->page_hash[idx];
+    while (hit && (!hit->valid || hit->page_no != page_no))
+        hit = hit->hnext;
+    if (hit) {
+        cache_ref_get(&hit->ref);
+        hit->accessed = 1;
         pcache_bucket_unlock_irqrestore(bc, page_no, bf);
-        return e;
+        return hit;
     }
     pcache_bucket_unlock_irqrestore(bc, page_no, bf);
-
-    uint64_t flags = spin_lock_irqsave(&bc->lock);
-    e = pcache_find(bc, page_no);
-    if (e) {
-        cache_ref_get(&e->ref);
-        page_lru_remove(e);
-        page_lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        return e;
-    }
-
-    spin_unlock_irqrestore(&bc->lock, flags);
-
-    /* A single filesystem-wide fill lock made every cold page miss wait for
-     * the preceding synchronous disk read.  Hash by page number so only
-     * same-page (or same-shard) fills serialize; writeback_lock still protects
-     * eviction and write ordering. */
-    a20_perf_count(A20_PERF_PCACHE_FILL_MISSES);
-    mutex_t *fill_lock =
-        &bc->fill_locks[pcache_hash_key(page_no) & (PCACHE_FILL_LOCKS - 1)];
-    if (!mutex_trylock(fill_lock)) {
-        a20_perf_count(A20_PERF_PCACHE_FILL_CONTENDED);
-        mutex_lock(fill_lock);
-    }
-    flags = spin_lock_irqsave(&bc->lock);
-
-    /* Another miss may have completed while this one waited for its shard. */
-    e = pcache_find(bc, page_no);
-    if (e) {
-        cache_ref_get(&e->ref);
-        page_lru_remove(e);
-        page_lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(fill_lock);
-        return e;
-    }
-
-    spin_unlock_irqrestore(&bc->lock, flags);
-    rw_mutex_write_lock(&bc->writeback_lock);
-    flags = spin_lock_irqsave(&bc->lock);
-
-    e = pcache_find(bc, page_no);
-    if (e) {
-        cache_ref_get(&e->ref);
-        page_lru_remove(e);
-        page_lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        rw_mutex_write_unlock(&bc->writeback_lock);
-        mutex_unlock(fill_lock);
-        return e;
-    }
-
-    e = pcache_evict_locked(bc);
-    if (!e) {
-        size_t valid = 0;
-        size_t dirty = 0;
-        size_t referenced = 0;
-        uint64_t total_refs = 0;
-        int max_refs = 0;
-        for (int i = 0; i < bc->page_pool_size; i++) {
-            pcache_entry_t *page = &bc->page_pool[i];
-            int refs = cache_ref_read(&page->ref);
-            if (page->valid)
-                valid++;
-            if (page->valid && page->dirty)
-                dirty++;
-            if (refs > 0) {
-                referenced++;
-                total_refs += (uint64_t)refs;
-                if (refs > max_refs)
-                    max_refs = refs;
-            }
-        }
-        spin_unlock_irqrestore(&bc->lock, flags);
-        printf("[BCACHE] no evictable page page=%lu valid=%lu dirty=%lu "
-               "referenced=%lu total_refs=%lu max_refs=%d\n",
-               (unsigned long)page_no, (unsigned long)valid,
-               (unsigned long)dirty, (unsigned long)referenced,
-               (unsigned long)total_refs, max_refs);
-        rw_mutex_write_unlock(&bc->writeback_lock);
-        mutex_unlock(fill_lock);
-        return NULL;
-    }
-
-    uint64_t old_page = e->page_no;
-    int old_dirty = e->dirty && e->valid;
-    spin_unlock_irqrestore(&bc->lock, flags);
-
-    int flush_ret = 0;
-    if (old_dirty)
-        flush_ret = pcache_flush_run(bc, e);
-    if (old_dirty && flush_ret < 0) {
-        bcache_note_write_error(bc);
-        flags = spin_lock_irqsave(&bc->lock);
-        e->page_no = old_page;
-        e->valid = 1;
-        bcache_set_page_dirty_locked(bc, e, 1);
-        e->ref = 0;
-        pcache_hash_insert(bc, e);
-        page_lru_insert_front(bc, e);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        rw_mutex_write_unlock(&bc->writeback_lock);
-        mutex_unlock(fill_lock);
-        return NULL;
-    }
-    flags = spin_lock_irqsave(&bc->lock);
-    e->valid = 0;
-    bcache_set_page_dirty_locked(bc, e, 0);
-    spin_unlock_irqrestore(&bc->lock, flags);
-    rw_mutex_write_unlock(&bc->writeback_lock);
-
-    if (full_overwrite) {
-        /* Initialize the miss before publishing it in the hash table.  This
-         * avoids a redundant device read without allowing a concurrent reader
-         * to observe the evicted page's old contents.  The caller retains the
-         * entry reference until it marks the page dirty. */
-        memcpy(e->data, full_overwrite, PCACHE_PAGE_SIZE);
-        a20_perf_count(A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS);
-    } else if (bc->dev) {
-        uint64_t lba = (page_no * PCACHE_PAGE_SIZE) / BCACHE_BLOCK_SIZE;
-        if (bc->dev->read_sector(bc->dev, lba, e->data,
-                                 PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE) < 0) {
-            flags = spin_lock_irqsave(&bc->lock);
-            e->ref = 0;
-            e->page_no = (uint64_t)-1;
-            page_lru_insert_front(bc, e);
-            spin_unlock_irqrestore(&bc->lock, flags);
-            mutex_unlock(fill_lock);
-            return NULL;
-        }
-    } else {
-        memset(e->data, 0, PCACHE_PAGE_SIZE);
-    }
-
-    flags = spin_lock_irqsave(&bc->lock);
-    /*
-     * Race fix: another process may have fetched the same page while we
-     * were doing I/O without the lock (sched() during virtio wait yields
-     * to other processes).  If so, discard our entry and return the
-     * existing one to avoid duplicate hash entries which corrupt the
-     * hash chain and LRU list under sustained load.
-     */
-    pcache_entry_t *dup = pcache_find(bc, page_no);
-    if (dup) {
-        e->ref = 0;
-        e->page_no = (uint64_t)-1;
-        e->valid = 0;
-        page_lru_insert_front(bc, e);
-        cache_ref_get(&dup->ref);
-        page_lru_remove(dup);
-        page_lru_insert_front(bc, dup);
-        spin_unlock_irqrestore(&bc->lock, flags);
-        mutex_unlock(fill_lock);
-        return dup;
-    }
-
-    e->page_no = page_no;
-    bcache_set_page_dirty_locked(bc, e, 0);
-    e->dirty_gen = 0;
-    e->valid = 1;
-    pcache_hash_insert(bc, e);
-    page_lru_insert_front(bc, e);
-    spin_unlock_irqrestore(&bc->lock, flags);
-    mutex_unlock(fill_lock);
-    return e;
+    return a20_pcache_get_transaction(
+        bc, bc->page_pool, (size_t)bc->page_pool_size, bc->page_hash,
+        &bc->page_lru_head, &bc->page_lru_tail, &bc->dirty_pages, page_no,
+        full_overwrite, bcache_write_quarantined(bc),
+        pcache_get_bucket_lock, pcache_get_bucket_unlock,
+        pcache_get_global_lock, pcache_get_global_unlock,
+        pcache_get_fill_lock, pcache_get_fill_unlock,
+        pcache_get_writeback_lock, pcache_get_writeback_unlock,
+        pcache_get_flush_victim, pcache_get_read, pcache_get_perf,
+        pcache_get_diagnostic, pcache_get_note_error);
 }
 
 static void pcache_release(pcache_entry_t *e) {
@@ -1152,62 +685,40 @@ static void pcache_release(pcache_entry_t *e) {
     cache_ref_put(&e->ref);
 }
 
-/*
- * Read 2..16 aligned file-data pages with one device request.
- *
- * Clean file data already lives in the VFS page cache, so inserting the same
- * bytes into the block cache creates a second 4 KiB copy and another cache
- * lookup for every fault-around page.  Read cold data straight into the
- * caller's linear window instead.  Existing block-cache pages are overlaid
- * afterwards because they may contain a newer dirty version than the disk.
- *
- * The writeback mutex prevents a dirty entry from disappearing between the
- * device read and the coherent overlay.  Writers that update an existing page
- * publish under bc->lock, so the overlay observes either the version before or
- * after a genuinely concurrent write without ever exposing stale disk data in
- * place of a cache version that was already published.
- */
+static void pcache_read_batch_wb_lock(void *ctx, uint64_t unused)
+{ (void)unused; rw_mutex_read_lock(&((bcache_t *)ctx)->writeback_lock); }
+static void pcache_read_batch_wb_unlock(void *ctx, uint64_t unused)
+{ (void)unused; rw_mutex_read_unlock(&((bcache_t *)ctx)->writeback_lock); }
+static pcache_entry_t *pcache_read_batch_find(void *ctx, uint64_t page_no)
+{ return pcache_find(ctx, page_no); }
+static int pcache_read_batch_io(void *ctx, uint64_t lba, uint8_t *buffer,
+                                size_t sectors)
+{
+    bcache_t *bc = ctx;
+    if (!bc->dev) { memset(buffer, 0, sectors * BCACHE_BLOCK_SIZE); return 0; }
+    int r = bc->dev->read_sector(bc->dev, lba, (char *)buffer, sectors);
+    bcache_account_device_io(bc->dev, r, 0);
+    return r;
+}
+static int pcache_read_batch_fallback(void *ctx, uint64_t offset,
+                                      uint8_t *buffer, size_t len)
+{ return bcache_read_bytes(ctx, offset, buffer, len); }
+static void pcache_read_batch_perf(void *ctx, size_t pages)
+{ (void)ctx; a20_perf_add(A20_PERF_PCACHE_FILL_MISSES, pages); }
+
+/* Rust owns batch eligibility and coherent overlay ordering. These callbacks
+ * are the writeback lock, hash lookup, device read, and accounting edges. */
 int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,
                             size_t len) {
     if (!bc || !buf || len == 0)
         return len == 0 ? 0 : -EINVAL;
-    if ((byte_off % PCACHE_PAGE_SIZE) != 0 ||
-        (len % PCACHE_PAGE_SIZE) != 0) {
-        return bcache_read_bytes(bc, byte_off, buf, len);
-    }
-
-    size_t page_count = len / PCACHE_PAGE_SIZE;
-    if (page_count < 2 || page_count > BCACHE_READ_BATCH_MAX_PAGES)
-        return bcache_read_bytes(bc, byte_off, buf, len);
-
-    uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
-    a20_perf_add(A20_PERF_PCACHE_FILL_MISSES, page_count);
-    rw_mutex_read_lock(&bc->writeback_lock);
-    int result = 0;
-    if (bc->dev) {
-        uint64_t lba = byte_off / BCACHE_BLOCK_SIZE;
-        size_t sectors = len / BCACHE_BLOCK_SIZE;
-        result = bc->dev->read_sector(bc->dev, lba, buf, sectors);
-        bcache_account_device_io(bc->dev, result, 0);
-    } else {
-        memset(buf, 0, len);
-    }
-
-    if (result >= 0) {
-        uint64_t flags = spin_lock_irqsave(&bc->lock);
-        for (size_t i = 0; i < page_count; i++) {
-            pcache_entry_t *entry = pcache_find(bc, first_page + i);
-            if (entry) {
-                memcpy((char *)buf + i * PCACHE_PAGE_SIZE, entry->data,
-                       PCACHE_PAGE_SIZE);
-                page_lru_remove(entry);
-                page_lru_insert_front(bc, entry);
-            }
-        }
-        spin_unlock_irqrestore(&bc->lock, flags);
-    }
-    rw_mutex_read_unlock(&bc->writeback_lock);
-    return result < 0 ? result : 0;
+    return a20_bcache_read_batch_transaction(
+        bc, byte_off, buf, len, PCACHE_PAGE_SIZE, BCACHE_BLOCK_SIZE,
+        BCACHE_READ_BATCH_MAX_PAGES, bc->page_hash, &bc->page_lru_head,
+        pcache_get_global_lock, pcache_get_global_unlock,
+        pcache_read_batch_wb_lock, pcache_read_batch_wb_unlock,
+        pcache_read_batch_find, pcache_read_batch_io,
+        pcache_read_batch_fallback, pcache_read_batch_perf);
 }
 
 #define READAHEAD_PAGES 1
@@ -1217,27 +728,22 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
         return 0;
     char *dst = (char *)buf;
     uint64_t first_page = byte_off / PCACHE_PAGE_SIZE;
-    uint64_t last_page  = (byte_off + len - 1) / PCACHE_PAGE_SIZE;
+    uint64_t last_page = (byte_off + len - 1) / PCACHE_PAGE_SIZE;
     int sequential = (last_page - first_page + 1) >= 2;
 
     while (len > 0) {
         uint64_t page_no = byte_off / PCACHE_PAGE_SIZE;
-        size_t   off    = byte_off % PCACHE_PAGE_SIZE;
-        size_t   chunk  = PCACHE_PAGE_SIZE - off;
+        size_t off = byte_off % PCACHE_PAGE_SIZE;
+        size_t chunk = PCACHE_PAGE_SIZE - off;
         if (chunk > len) chunk = len;
-
         pcache_entry_t *e = pcache_get(bc, page_no, NULL);
         if (!e) return -1;
         uint64_t flags = spin_lock_irqsave(&bc->lock);
         memcpy(dst, e->data + off, chunk);
         spin_unlock_irqrestore(&bc->lock, flags);
         pcache_release(e);
-
-        dst      += chunk;
-        byte_off += chunk;
-        len      -= chunk;
+        dst += chunk; byte_off += chunk; len -= chunk;
     }
-
     if (sequential && READAHEAD_PAGES > 0) {
         uint64_t ra_end = last_page + READAHEAD_PAGES;
         for (uint64_t pn = last_page + 1; pn <= ra_end; pn++) {
@@ -1249,17 +755,15 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
 }
 
 int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t len) {
-    if (len == 0)
+    if (!bc || len == 0)
         return 0;
     const char *src = (const char *)buf;
     while (len > 0) {
         uint64_t page_no = byte_off / PCACHE_PAGE_SIZE;
-        size_t   off    = byte_off % PCACHE_PAGE_SIZE;
-        size_t   chunk  = PCACHE_PAGE_SIZE - off;
+        size_t off = byte_off % PCACHE_PAGE_SIZE;
+        size_t chunk = PCACHE_PAGE_SIZE - off;
         if (chunk > len) chunk = len;
-
-        const void *full_overwrite =
-            (off == 0 && chunk == PCACHE_PAGE_SIZE) ? src : NULL;
+        const void *full_overwrite = (off == 0 && chunk == PCACHE_PAGE_SIZE) ? src : NULL;
         pcache_entry_t *e = pcache_get(bc, page_no, full_overwrite);
         if (!e) return -1;
         uint64_t flags = spin_lock_irqsave(&bc->lock);
@@ -1267,10 +771,7 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t 
         bcache_set_page_dirty_locked(bc, e, 1);
         spin_unlock_irqrestore(&bc->lock, flags);
         pcache_release(e);
-
-        src      += chunk;
-        byte_off += chunk;
-        len      -= chunk;
+        src += chunk; byte_off += chunk; len -= chunk;
     }
     return 0;
 }

@@ -31,8 +31,13 @@ RUST_RV32_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --s
 # for both the matching core and every kernel Rust object.
 RUST_AARCH64_TARGET := aarch64-unknown-none-softfloat
 RUST_AARCH64_CORE_CACHE_ROOT ?= $(HOME)/.cache/a20os/rust-target-core
-RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL))
-RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL))
+# Source-bound Rust modules are mandatory where their C adapters are compiled.
+RUST_UXFS_VNODE_IDENTITY_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
+RUST_UXFS_RPC_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
+RUST_UXFS_OPS_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
+RUST_UXFS_LIFETIME_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
+RUST_AARCH64_SELECTED := $(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(CHANNEL_SEND_IMPL))
+RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(RUST_UXFS_VNODE_IDENTITY_ACTIVE) $(RUST_UXFS_RPC_STATE_ACTIVE) $(RUST_UXFS_OPS_STATE_ACTIVE) $(RUST_UXFS_LIFETIME_STATE_ACTIVE))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
 RUST_AARCH64_RUSTSRC_DIR := $(shell $(RUSTC) --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
@@ -111,6 +116,12 @@ RUST_TASK_OBJECT_TARGET_riscv64 := riscv64imac-unknown-none-elf
 RUST_TASK_OBJECT_TARGET_arm32 := armv7a-none-eabihf
 RUST_TASK_OBJECT_TARGET := $(RUST_TASK_OBJECT_TARGET_$(ARCH))
 RUST_TASK_OBJECT := $(BUILD_DIR)/rust/task_object.o
+RUST_CHANNEL_SEND_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_CHANNEL_SEND_TARGET := $(if $(filter riscv32,$(ARCH)),$(RUST_CHANNEL_SEND_TARGET_riscv32),$(RUST_TASK_OBJECT_TARGET))
+RUST_CHANNEL_SEND_OBJECT := $(BUILD_DIR)/rust/channel_send.o
+RUST_EVENT_QUEUE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_EVENT_QUEUE_TARGET := $(if $(filter riscv32,$(ARCH)),$(RUST_EVENT_QUEUE_TARGET_riscv32),$(RUST_CHANNEL_SEND_TARGET))
+RUST_EVENT_QUEUE_OBJECT := $(BUILD_DIR)/rust/event_queue.o
 RUST_CHANNEL_RECV_TXN_SRC := kernel/abi/native/channel_recv_txn.rs
 RUST_CHANNEL_RECV_TARGET_x86_64 := x86_64-unknown-none
 RUST_CHANNEL_RECV_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
@@ -140,7 +151,7 @@ RUST_HANDLE_SLOT_OBJECT := $(BUILD_DIR)/rust/handle_slot.o
 RUST_HANDLE_TABLE_STATE_OBJECT := $(BUILD_DIR)/rust/handle_table_state.o
 
 ifeq ($(strip $(RUST_OPT_FLAG)),)
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
+ifneq ($(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(CHANNEL_SEND_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
 ifeq ($(filter rust,$(VFS_LIFECYCLE_IMPL)),rust)
@@ -271,6 +282,143 @@ RUST_EVENT_DESCRIPTOR_STATE_CODE_MODEL := $(RUST_EVENT_DESCRIPTOR_STATE_CODE_MOD
 RUST_EVENT_DESCRIPTOR_STATE_EXTRA := $(RUST_EVENT_DESCRIPTOR_STATE_EXTRA_$(ARCH))
 RUST_EVENT_DESCRIPTOR_STATE_FEATURES := $(RUST_EVENT_DESCRIPTOR_STATE_FEATURES_$(ARCH))
 
+RUST_SYSV_SEM_SRC := kernel/ipc/sysv_sem.rs
+RUST_SYSV_SEM_TARGET_x86_64 := x86_64-unknown-none
+RUST_SYSV_SEM_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SYSV_SEM_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SYSV_SEM_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SYSV_SEM_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SYSV_SEM_TARGET_arm32 := armv7a-none-eabihf
+RUST_SYSV_SEM_TARGET_armv7m := thumbv7m-none-eabi
+RUST_SYSV_SEM_TARGET := $(RUST_SYSV_SEM_TARGET_$(ARCH))
+RUST_SYSV_SEM_OBJECT := $(BUILD_DIR)/rust/sysv_sem.o
+RUST_SYSV_SEM_CODE_MODEL_x86_64 := large
+RUST_SYSV_SEM_CODE_MODEL_aarch64 := large
+RUST_SYSV_SEM_CODE_MODEL_loongarch64 := medium
+RUST_SYSV_SEM_CODE_MODEL_riscv64 := medium
+RUST_SYSV_SEM_CODE_MODEL_riscv32 := medium
+RUST_SYSV_SEM_CODE_MODEL_arm32 := small
+RUST_SYSV_SEM_CODE_MODEL_armv7m := small
+RUST_SYSV_SEM_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SYSV_SEM_FEATURES_arm32 := -neon
+RUST_SYSV_SEM_CODE_MODEL := $(RUST_SYSV_SEM_CODE_MODEL_$(ARCH))
+RUST_SYSV_SEM_EXTRA := $(RUST_SYSV_SEM_EXTRA_$(ARCH))
+RUST_SYSV_SEM_FEATURES := $(RUST_SYSV_SEM_FEATURES_$(ARCH))
+
+RUST_POSIX_MQ_SRC := kernel/ipc/posix_mq.rs
+RUST_POSIX_MQ_TARGET_x86_64 := x86_64-unknown-none
+RUST_POSIX_MQ_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_POSIX_MQ_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_POSIX_MQ_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_POSIX_MQ_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_POSIX_MQ_TARGET_arm32 := armv7a-none-eabihf
+RUST_POSIX_MQ_TARGET_armv7m := thumbv7m-none-eabi
+RUST_POSIX_MQ_TARGET := $(RUST_POSIX_MQ_TARGET_$(ARCH))
+RUST_POSIX_MQ_OBJECT := $(BUILD_DIR)/rust/posix_mq.o
+RUST_POSIX_MQ_CODE_MODEL_x86_64 := large
+RUST_POSIX_MQ_CODE_MODEL_aarch64 := large
+RUST_POSIX_MQ_CODE_MODEL_loongarch64 := medium
+RUST_POSIX_MQ_CODE_MODEL_riscv64 := medium
+RUST_POSIX_MQ_CODE_MODEL_riscv32 := medium
+RUST_POSIX_MQ_CODE_MODEL_arm32 := small
+RUST_POSIX_MQ_CODE_MODEL_armv7m := small
+RUST_POSIX_MQ_EXTRA_x86_64 := -C no-redzone=yes
+RUST_POSIX_MQ_FEATURES_arm32 := -neon
+RUST_POSIX_MQ_CODE_MODEL := $(RUST_POSIX_MQ_CODE_MODEL_$(ARCH))
+RUST_POSIX_MQ_EXTRA := $(RUST_POSIX_MQ_EXTRA_$(ARCH))
+RUST_POSIX_MQ_FEATURES := $(RUST_POSIX_MQ_FEATURES_$(ARCH))
+
+RUST_SYSV_MSG_SRC := kernel/ipc/sysv_msg.rs
+RUST_SYSV_MSG_TARGET_x86_64 := x86_64-unknown-none
+RUST_SYSV_MSG_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SYSV_MSG_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SYSV_MSG_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SYSV_MSG_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SYSV_MSG_TARGET_arm32 := armv7a-none-eabihf
+RUST_SYSV_MSG_TARGET_armv7m := thumbv7m-none-eabi
+RUST_SYSV_MSG_TARGET := $(RUST_SYSV_MSG_TARGET_$(ARCH))
+RUST_SYSV_MSG_OBJECT := $(BUILD_DIR)/rust/sysv_msg.o
+RUST_SYSV_MSG_CODE_MODEL_x86_64 := large
+RUST_SYSV_MSG_CODE_MODEL_aarch64 := large
+RUST_SYSV_MSG_CODE_MODEL_loongarch64 := medium
+RUST_SYSV_MSG_CODE_MODEL_riscv64 := medium
+RUST_SYSV_MSG_CODE_MODEL_riscv32 := medium
+RUST_SYSV_MSG_CODE_MODEL_arm32 := small
+RUST_SYSV_MSG_CODE_MODEL_armv7m := small
+RUST_SYSV_MSG_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SYSV_MSG_FEATURES_arm32 := -neon
+RUST_SYSV_MSG_CODE_MODEL := $(RUST_SYSV_MSG_CODE_MODEL_$(ARCH))
+RUST_SYSV_MSG_EXTRA := $(RUST_SYSV_MSG_EXTRA_$(ARCH))
+RUST_SYSV_MSG_FEATURES := $(RUST_SYSV_MSG_FEATURES_$(ARCH))
+
+RUST_SYSV_SHM_SRC := kernel/ipc/sysv_shm.rs
+RUST_SYSV_SHM_TARGET_x86_64 := x86_64-unknown-none
+RUST_SYSV_SHM_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SYSV_SHM_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SYSV_SHM_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SYSV_SHM_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SYSV_SHM_TARGET_arm32 := armv7a-none-eabihf
+RUST_SYSV_SHM_TARGET_armv7m := thumbv7m-none-eabi
+RUST_SYSV_SHM_TARGET := $(RUST_SYSV_SHM_TARGET_$(ARCH))
+RUST_SYSV_SHM_OBJECT := $(BUILD_DIR)/rust/sysv_shm.o
+RUST_SYSV_SHM_CODE_MODEL_x86_64 := large
+RUST_SYSV_SHM_CODE_MODEL_aarch64 := large
+RUST_SYSV_SHM_CODE_MODEL_loongarch64 := medium
+RUST_SYSV_SHM_CODE_MODEL_riscv64 := medium
+RUST_SYSV_SHM_CODE_MODEL_riscv32 := medium
+RUST_SYSV_SHM_CODE_MODEL_arm32 := small
+RUST_SYSV_SHM_CODE_MODEL_armv7m := small
+RUST_SYSV_SHM_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SYSV_SHM_FEATURES_arm32 := -neon
+RUST_SYSV_SHM_CODE_MODEL := $(RUST_SYSV_SHM_CODE_MODEL_$(ARCH))
+RUST_SYSV_SHM_EXTRA := $(RUST_SYSV_SHM_EXTRA_$(ARCH))
+RUST_SYSV_SHM_FEATURES := $(RUST_SYSV_SHM_FEATURES_$(ARCH))
+
+RUST_USERFAULTFD_STATE_SRC := kernel/ipc/userfaultfd_state.rs
+RUST_USERFAULTFD_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_USERFAULTFD_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_USERFAULTFD_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_USERFAULTFD_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_USERFAULTFD_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_USERFAULTFD_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_USERFAULTFD_STATE_TARGET_armv7m := thumbv7m-none-eabi
+RUST_USERFAULTFD_STATE_TARGET := $(RUST_USERFAULTFD_STATE_TARGET_$(ARCH))
+RUST_USERFAULTFD_STATE_OBJECT := $(BUILD_DIR)/rust/userfaultfd_state.o
+RUST_USERFAULTFD_STATE_CODE_MODEL_x86_64 := large
+RUST_USERFAULTFD_STATE_CODE_MODEL_aarch64 := large
+RUST_USERFAULTFD_STATE_CODE_MODEL_loongarch64 := medium
+RUST_USERFAULTFD_STATE_CODE_MODEL_riscv64 := medium
+RUST_USERFAULTFD_STATE_CODE_MODEL_riscv32 := medium
+RUST_USERFAULTFD_STATE_CODE_MODEL_arm32 := small
+RUST_USERFAULTFD_STATE_CODE_MODEL_armv7m := small
+RUST_USERFAULTFD_STATE_EXTRA_x86_64 := -C no-redzone=yes
+RUST_USERFAULTFD_STATE_FEATURES_arm32 := -neon
+RUST_USERFAULTFD_STATE_CODE_MODEL := $(RUST_USERFAULTFD_STATE_CODE_MODEL_$(ARCH))
+RUST_USERFAULTFD_STATE_EXTRA := $(RUST_USERFAULTFD_STATE_EXTRA_$(ARCH))
+RUST_USERFAULTFD_STATE_FEATURES := $(RUST_USERFAULTFD_STATE_FEATURES_$(ARCH))
+
+RUST_FUTEX_WAIT_SRC := kernel/ipc/futex_wait.rs
+RUST_FUTEX_WAIT_TARGET_x86_64 := x86_64-unknown-none
+RUST_FUTEX_WAIT_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_FUTEX_WAIT_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_FUTEX_WAIT_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_FUTEX_WAIT_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_FUTEX_WAIT_TARGET_arm32 := armv7a-none-eabihf
+RUST_FUTEX_WAIT_TARGET_armv7m := thumbv7m-none-eabi
+RUST_FUTEX_WAIT_TARGET := $(RUST_FUTEX_WAIT_TARGET_$(ARCH))
+RUST_FUTEX_WAIT_OBJECT := $(BUILD_DIR)/rust/futex_wait.o
+RUST_FUTEX_WAIT_CODE_MODEL_x86_64 := large
+RUST_FUTEX_WAIT_CODE_MODEL_aarch64 := large
+RUST_FUTEX_WAIT_CODE_MODEL_loongarch64 := medium
+RUST_FUTEX_WAIT_CODE_MODEL_riscv64 := medium
+RUST_FUTEX_WAIT_CODE_MODEL_riscv32 := medium
+RUST_FUTEX_WAIT_CODE_MODEL_arm32 := small
+RUST_FUTEX_WAIT_CODE_MODEL_armv7m := small
+RUST_FUTEX_WAIT_EXTRA_x86_64 := -C no-redzone=yes
+RUST_FUTEX_WAIT_FEATURES_arm32 := -neon
+RUST_FUTEX_WAIT_CODE_MODEL := $(RUST_FUTEX_WAIT_CODE_MODEL_$(ARCH))
+RUST_FUTEX_WAIT_EXTRA := $(RUST_FUTEX_WAIT_EXTRA_$(ARCH))
+RUST_FUTEX_WAIT_FEATURES := $(RUST_FUTEX_WAIT_FEATURES_$(ARCH))
 define RUST_FD_ABI_STATE_RULE
 .PHONY: FORCE_$(1)_FLAGS
 FORCE_$(1)_FLAGS:
@@ -288,6 +436,12 @@ $(eval $(call RUST_FD_ABI_STATE_RULE,RUST_EVENTPOLL_STATE))
 $(eval $(call RUST_FD_ABI_STATE_RULE,RUST_LINUX_SCM_RIGHTS))
 $(eval $(call RUST_FD_ABI_STATE_RULE,RUST_LINUX_MMSG_TXN))
 $(eval $(call RUST_FD_ABI_STATE_RULE,RUST_EVENT_DESCRIPTOR_STATE))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_SYSV_SEM))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_POSIX_MQ))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_SYSV_MSG))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_SYSV_SHM))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_USERFAULTFD_STATE))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_FUTEX_WAIT))
 RUST_NET_SOCKET_QUEUE_SRC := kernel/net/socket_queue.rs
 RUST_NET_SOCKET_QUEUE_TARGET_x86_64 := x86_64-unknown-none
 RUST_NET_SOCKET_QUEUE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
@@ -362,6 +516,7 @@ RUST_ENVELOPE_POLICY_TARGET_armv7m := thumbv7m-none-eabi
 RUST_ENVELOPE_POLICY_TARGET := $(RUST_ENVELOPE_POLICY_TARGET_$(ARCH))
 RUST_ENVELOPE_POLICY_OBJECT := $(BUILD_DIR)/rust/envelope_policy.o
 
+ifneq ($(filter $(KERNEL_DIR)/ipc/envelope.c,$(KERNEL_SRC)),)
 ifeq ($(ENVELOPE_POLICY_IMPL),rust)
 ifeq ($(strip $(RUST_ENVELOPE_POLICY_TARGET)),)
 $(error ENVELOPE_POLICY_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
@@ -395,6 +550,7 @@ $(RUST_ENVELOPE_POLICY_OBJECT): $(RUST_ENVELOPE_POLICY_SRC) kernel/include/ipc/e
 		$(RUST_ENVELOPE_POLICY_EXTRA) \
 		$(if $(RUST_ENVELOPE_POLICY_FEATURES),-C target-feature=$(RUST_ENVELOPE_POLICY_FEATURES)) \
 		$< -o $@
+endif
 endif
 
 ifeq ($(DRIVER_REGISTRY_IMPL),rust)
@@ -642,7 +798,7 @@ endif
 
 # Pager VMO association, weak registration, detach, and peer-close cancellation
 # are Rust-owned; C retains channel/refcount/lock/wait-queue primitives.
-RUST_VMO_PAGER_SRC := kernel/ipc/pager_vmo.rs
+RUST_VMO_PAGER_SRC := kernel/ipc/pager_vmo.rs kernel/ipc/pager_supply.rs
 RUST_VMO_PAGER_TARGET_x86_64 := x86_64-unknown-none
 RUST_VMO_PAGER_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
 RUST_VMO_PAGER_TARGET_loongarch64 := loongarch64-unknown-none
@@ -652,6 +808,7 @@ RUST_VMO_PAGER_TARGET_arm32 := armv7a-none-eabihf
 RUST_VMO_PAGER_TARGET := $(RUST_VMO_PAGER_TARGET_$(ARCH))
 RUST_VMO_PAGER_OBJECT := $(BUILD_DIR)/rust/pager_vmo.o
 
+ifneq ($(filter $(KERNEL_DIR)/ipc/a20_pager.c,$(KERNEL_SRC)),)
 ifeq ($(VMO_PAGER_IMPL),rust)
 ifeq ($(strip $(RUST_VMO_PAGER_TARGET)),)
 $(error VMO_PAGER_IMPL=rust has no Rust target for ARCH=$(ARCH))
@@ -688,6 +845,7 @@ $(RUST_VMO_PAGER_OBJECT): $(RUST_VMO_PAGER_SRC) tools/rust-kernel.mk $(RUST_VMO_
 		$(RUST_VMO_PAGER_EXTRA) \
 		$(if $(RUST_VMO_PAGER_FEATURES),-C target-feature=$(RUST_VMO_PAGER_FEATURES)) \
 		$< -o $@
+endif
 endif
 
 # Completion owns its persistent count and wait-token lifecycle in Rust; C
@@ -922,6 +1080,7 @@ $(RUST_NETFILTER_OBJECT): $(RUST_KERNEL_SRC) tools/rust-kernel.mk $(RUST_NETFILT
 		$< -o $@
 endif
 
+ifneq ($(filter $(KERNEL_DIR)/abi/native/sys_native_ipc.c,$(KERNEL_SRC)),)
 ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
 ifeq ($(strip $(RUST_CHANNEL_RECV_TARGET)),)
 $(error CHANNEL_RECV_TXN_IMPL=rust has no target configured for ARCH=$(ARCH); keep the C reference selected)
@@ -959,6 +1118,7 @@ $(RUST_CHANNEL_RECV_TXN_OBJECT): $(RUST_CHANNEL_RECV_TXN_SRC) tools/rust-kernel.
 		$(if $(RUST_CHANNEL_RECV_FEATURES),-C target-feature=$(RUST_CHANNEL_RECV_FEATURES)) \
 		$< -o $@
 endif
+endif
 
 ifeq ($(TASK_OBJECTS_IMPL),rust)
 ifeq ($(strip $(RUST_TASK_OBJECT_TARGET)),)
@@ -995,6 +1155,30 @@ $(RUST_TASK_OBJECT): kernel/proc/task_object.rs tools/rust-kernel.mk $(RUST_TASK
 		$(if $(RUST_TASK_OBJECT_CODE_MODEL),-C code-model=$(RUST_TASK_OBJECT_CODE_MODEL)) \
 		$(RUST_TASK_OBJECT_EXTRA) \
 		$(if $(RUST_TASK_OBJECT_FEATURES),-C target-feature=$(RUST_TASK_OBJECT_FEATURES)) \
+		$< -o $@
+endif
+
+ifeq ($(CHANNEL_SEND_IMPL),rust)
+RUST_CHANNEL_SEND_FLAGS_STAMP := $(BUILD_DIR)/rust/.channel-send-flags
+.PHONY: FORCE_RUST_CHANNEL_SEND_FLAGS
+FORCE_RUST_CHANNEL_SEND_FLAGS:
+$(RUST_CHANNEL_SEND_FLAGS_STAMP): FORCE_RUST_CHANNEL_SEND_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_CHANNEL_SEND_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+$(RUST_CHANNEL_SEND_OBJECT): kernel/ipc/channel_send.rs tools/rust-kernel.mk $(RUST_CHANNEL_SEND_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_CHANNEL_SEND_TARGET) $(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
+		-C codegen-units=1 -C relocation-model=static \
+		$< -o $@
+$(RUST_EVENT_QUEUE_OBJECT): kernel/ipc/event_queue.rs tools/rust-kernel.mk $(RUST_CHANNEL_SEND_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_EVENT_QUEUE_TARGET) $(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) \
+		-C codegen-units=1 -C relocation-model=static \
 		$< -o $@
 endif
 
@@ -1497,6 +1681,41 @@ $(RUST_TASK_CONSTRUCTION_OBJECT): $(RUST_TASK_CONSTRUCTION_SRC) tools/rust-kerne
 		$< -o $@
 endif
 
+# ELF_EXEC owns the ELF-loading and exec-replacement decisions
+# (kernel/mm/elf_core.rs): header/phdr validation, segment planning, W^X,
+# layout/bias, TLS/INTERP/DYNAMIC discovery, native-ABI verdict, stack/auxv
+# planning, creds, reloc policy, kexec bounds and the commit/rollback order.
+# C retains the adapter: file reads, page/frame mapping, direct-map copies,
+# usercopy, locks and the architecture register-state / final machine entry.
+RUST_ELF_CORE_SRC := kernel/mm/elf_core.rs
+RUST_ELF_CORE_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
+RUST_ELF_CORE_OBJECT := $(BUILD_DIR)/rust/elf_core.o
+
+ifeq ($(strip $(RUST_ELF_CORE_TARGET)),)
+$(error kernel/mm/elf_core.rs has no Rust target for ARCH=$(ARCH))
+endif
+RUST_ELF_CORE_FLAGS_STAMP := $(BUILD_DIR)/rust/.elf-core-flags
+.PHONY: FORCE_RUST_ELF_CORE_FLAGS
+FORCE_RUST_ELF_CORE_FLAGS:
+
+$(RUST_ELF_CORE_FLAGS_STAMP): FORCE_RUST_ELF_CORE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_ELF_CORE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL) $(RUST_TASK_LIFECYCLE_EXTRA) -C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_ELF_CORE_OBJECT): $(RUST_ELF_CORE_SRC) kernel/include/mm/elf_rust.h tools/rust-kernel.mk $(RUST_ELF_CORE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_ELF_CORE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_TASK_LIFECYCLE_CODE_MODEL),-C code-model=$(RUST_TASK_LIFECYCLE_CODE_MODEL)) \
+		$(RUST_TASK_LIFECYCLE_EXTRA) \
+		$(if $(RUST_TASK_LIFECYCLE_FEATURES),-C target-feature=$(RUST_TASK_LIFECYCLE_FEATURES)) \
+		$< -o $@
+
 # MM_SHUTDOWN_WRITE owns write-admission/generation decisions. C retains
 # wait-queue parking, MM snapshots, page-table edits, cache dirtying and TLB
 # shootdown operations.
@@ -1677,9 +1896,8 @@ RUST_VFS_LIFECYCLE_SHUTDOWN_SRC := kernel/fs/vfs/shutdown_state.rs
 RUST_VFS_LIFECYCLE_VFILE_SRC := kernel/fs/vfs/vfile_lifecycle.rs
 RUST_VFS_LIFECYCLE_TARGET := $(RUST_EXT4_EXTENT_TXN_TARGET)
 RUST_VFS_LIFECYCLE_OBJECT := $(BUILD_DIR)/rust/vfs_lifecycle.o
-ifeq ($(VFS_LIFECYCLE_IMPL),rust)
 ifeq ($(strip $(RUST_VFS_LIFECYCLE_TARGET)),)
-$(error VFS_LIFECYCLE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH))
 endif
 RUST_VFS_LIFECYCLE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-lifecycle-flags
 .PHONY: FORCE_RUST_VFS_LIFECYCLE_FLAGS
@@ -1691,4 +1909,699 @@ $(RUST_VFS_LIFECYCLE_FLAGS_STAMP): FORCE_RUST_VFS_LIFECYCLE_FLAGS
 $(RUST_VFS_LIFECYCLE_OBJECT): $(RUST_VFS_LIFECYCLE_SRC) $(RUST_VFS_LIFECYCLE_SHUTDOWN_SRC) $(RUST_VFS_LIFECYCLE_VFILE_SRC) kernel/include/fs/vfs/shutdown.h tools/rust-kernel.mk $(RUST_VFS_LIFECYCLE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
 	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj --target $(RUST_VFS_LIFECYCLE_TARGET) $(RUST_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $< -o $@
+
+# UXFS_VNODE_IDENTITY owns the canonical (sb, ino) -> vnode decisions:
+# duplicate resolution, entry removal, per-superblock clearing and the rotating
+# cache-only eviction scan; the C adapter in kernel/fs/uxfs/uxfs.c keeps the
+# IRQ-save spinlock, references and vnode allocation/release.  Selectable, and
+# only linked where uxfs.c is in the profile.
+RUST_UXFS_VNODE_IDENTITY_SRC := kernel/fs/vfs/vnode_identity.rs
+RUST_UXFS_VNODE_IDENTITY_HDR := kernel/include/fs/vfs/vnode_identity.h
+RUST_UXFS_VNODE_IDENTITY_TARGET_x86_64 := x86_64-unknown-none
+RUST_UXFS_VNODE_IDENTITY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_UXFS_VNODE_IDENTITY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_UXFS_VNODE_IDENTITY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_UXFS_VNODE_IDENTITY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_UXFS_VNODE_IDENTITY_TARGET_arm32 := armv7a-none-eabihf
+RUST_UXFS_VNODE_IDENTITY_TARGET := $(RUST_UXFS_VNODE_IDENTITY_TARGET_$(ARCH))
+RUST_UXFS_VNODE_IDENTITY_OBJECT := $(BUILD_DIR)/rust/vnode_identity.o
+
+ifneq ($(RUST_UXFS_VNODE_IDENTITY_ACTIVE),)
+ifeq ($(strip $(RUST_UXFS_VNODE_IDENTITY_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
+RUST_UXFS_VNODE_IDENTITY_FLAGS_STAMP := $(BUILD_DIR)/rust/.uxfs-vnode-identity-flags
+.PHONY: FORCE_RUST_UXFS_VNODE_IDENTITY_FLAGS
+FORCE_RUST_UXFS_VNODE_IDENTITY_FLAGS:
+
+$(RUST_UXFS_VNODE_IDENTITY_FLAGS_STAMP): FORCE_RUST_UXFS_VNODE_IDENTITY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_UXFS_VNODE_IDENTITY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_UXFS_VNODE_IDENTITY_OBJECT): $(RUST_UXFS_VNODE_IDENTITY_SRC) $(RUST_UXFS_VNODE_IDENTITY_HDR) tools/rust-kernel.mk $(RUST_UXFS_VNODE_IDENTITY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_UXFS_VNODE_IDENTITY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+endif
+
+# UXFS_RPC_STATE owns the RPC admission/deadline/retry/stale-reply state
+# machine and its errno mapping; the C adapter in kernel/fs/uxfs/uxfs.c keeps
+# the endpoint, req_lock and the channel/sleep primitives.
+RUST_UXFS_RPC_STATE_SRC := kernel/fs/uxfs/uxfs_state.rs
+RUST_UXFS_RPC_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_UXFS_RPC_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_UXFS_RPC_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_UXFS_RPC_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_UXFS_RPC_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_UXFS_RPC_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_UXFS_RPC_STATE_TARGET := $(RUST_UXFS_RPC_STATE_TARGET_$(ARCH))
+RUST_UXFS_RPC_STATE_OBJECT := $(BUILD_DIR)/rust/uxfs_rpc_state.o
+
+ifneq ($(RUST_UXFS_RPC_STATE_ACTIVE),)
+ifeq ($(strip $(RUST_UXFS_RPC_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_UXFS_RPC_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.uxfs-rpc-state-flags
+.PHONY: FORCE_RUST_UXFS_RPC_STATE_FLAGS
+FORCE_RUST_UXFS_RPC_STATE_FLAGS:
+
+$(RUST_UXFS_RPC_STATE_FLAGS_STAMP): FORCE_RUST_UXFS_RPC_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_UXFS_RPC_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_UXFS_RPC_STATE_OBJECT): $(RUST_UXFS_RPC_STATE_SRC) kernel/include/fs/ufs_proto.h tools/rust-kernel.mk $(RUST_UXFS_RPC_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_UXFS_RPC_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+endif
+# UXFS_OPS_STATE owns the per-operation request construction, response decoding
+# and the canonical-identity / page-cache / size state transitions for the
+# namespace and data plane; the C adapter in kernel/fs/uxfs/uxfs.c keeps the
+# req_init (next req_id), the RPC transport call, vnode accessors, iget /
+# identity-forget / page-cache-truncate and the lifetime gate.
+RUST_UXFS_OPS_STATE_SRC := kernel/fs/uxfs/uxfs_ops_state.rs
+RUST_UXFS_OPS_STATE_HDR := kernel/include/fs/uxfs_ops_state.h
+RUST_UXFS_OPS_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_UXFS_OPS_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_UXFS_OPS_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_UXFS_OPS_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_UXFS_OPS_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_UXFS_OPS_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_UXFS_OPS_STATE_TARGET := $(RUST_UXFS_OPS_STATE_TARGET_$(ARCH))
+RUST_UXFS_OPS_STATE_OBJECT := $(BUILD_DIR)/rust/uxfs_ops_state.o
+
+ifneq ($(RUST_UXFS_OPS_STATE_ACTIVE),)
+ifeq ($(strip $(RUST_UXFS_OPS_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_UXFS_OPS_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.uxfs-ops-state-flags
+.PHONY: FORCE_RUST_UXFS_OPS_STATE_FLAGS
+FORCE_RUST_UXFS_OPS_STATE_FLAGS:
+
+$(RUST_UXFS_OPS_STATE_FLAGS_STAMP): FORCE_RUST_UXFS_OPS_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_UXFS_OPS_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_UXFS_OPS_STATE_OBJECT): $(RUST_UXFS_OPS_STATE_SRC) $(RUST_UXFS_OPS_STATE_HDR) tools/rust-kernel.mk $(RUST_UXFS_OPS_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_UXFS_OPS_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+endif
+# UXFS_LIFETIME_STATE owns the lifetime/close-token negotiation decision table
+# and cached-negotiation validity; uxfs.c embeds the mirrored state struct and
+# performs the lock + RPC orchestration.
+RUST_UXFS_LIFETIME_STATE_SRC := kernel/fs/uxfs/lifetime_state.rs
+RUST_UXFS_LIFETIME_STATE_HDR := kernel/include/fs/uxfs_lifetime_state.h
+RUST_UXFS_LIFETIME_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_UXFS_LIFETIME_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_UXFS_LIFETIME_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_UXFS_LIFETIME_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_UXFS_LIFETIME_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_UXFS_LIFETIME_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_UXFS_LIFETIME_STATE_TARGET := $(RUST_UXFS_LIFETIME_STATE_TARGET_$(ARCH))
+RUST_UXFS_LIFETIME_STATE_OBJECT := $(BUILD_DIR)/rust/uxfs_lifetime_state.o
+
+ifneq ($(RUST_UXFS_LIFETIME_STATE_ACTIVE),)
+ifeq ($(strip $(RUST_UXFS_LIFETIME_STATE_TARGET)),)
+$(error UXFS lifetime state has no kernel Rust target for ARCH=$(ARCH))
+endif
+RUST_UXFS_LIFETIME_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.uxfs-lifetime-state-flags
+.PHONY: FORCE_RUST_UXFS_LIFETIME_STATE_FLAGS
+FORCE_RUST_UXFS_LIFETIME_STATE_FLAGS:
+
+$(RUST_UXFS_LIFETIME_STATE_FLAGS_STAMP): FORCE_RUST_UXFS_LIFETIME_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_UXFS_LIFETIME_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_UXFS_LIFETIME_STATE_OBJECT): $(RUST_UXFS_LIFETIME_STATE_SRC) $(RUST_UXFS_LIFETIME_STATE_HDR) tools/rust-kernel.mk $(RUST_UXFS_LIFETIME_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_UXFS_LIFETIME_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+endif
+
+
+RUST_BLOCK_CACHE_STATE_SRC := kernel/fs/block_cache_state.rs
+RUST_BLOCK_CACHE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_BLOCK_CACHE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_BLOCK_CACHE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_BLOCK_CACHE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_BLOCK_CACHE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_BLOCK_CACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_BLOCK_CACHE_STATE_TARGET := $(RUST_BLOCK_CACHE_STATE_TARGET_$(ARCH))
+RUST_BLOCK_CACHE_STATE_OBJECT := $(BUILD_DIR)/rust/block_cache_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/block_cache.c in this profile)
+endif
+ifeq ($(strip $(RUST_BLOCK_CACHE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_BLOCK_CACHE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.block-cache-state-flags
+.PHONY: FORCE_RUST_BLOCK_CACHE_STATE_FLAGS
+FORCE_RUST_BLOCK_CACHE_STATE_FLAGS:
+
+$(RUST_BLOCK_CACHE_STATE_FLAGS_STAMP): FORCE_RUST_BLOCK_CACHE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_BLOCK_CACHE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_BLOCK_CACHE_STATE_OBJECT): $(RUST_BLOCK_CACHE_STATE_SRC) kernel/include/fs/block_cache.h tools/rust-kernel.mk $(RUST_BLOCK_CACHE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_BLOCK_CACHE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# PAGE_CACHE_STATE owns the page cache's structural state model: hash, global
+# LRU, per-vnode mapping list, dirty lists, free stack, page references and
+# scan accounting, detach and victim selection, and dirty-batch ordering.  The
+# C adapter in kernel/fs/page_cache.c keeps the locks, frame IO and callbacks.
+RUST_PAGE_CACHE_STATE_SRC := kernel/fs/page_cache_state.rs
+RUST_PAGE_CACHE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_PAGE_CACHE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_PAGE_CACHE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_PAGE_CACHE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_PAGE_CACHE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_PAGE_CACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_PAGE_CACHE_STATE_TARGET := $(RUST_PAGE_CACHE_STATE_TARGET_$(ARCH))
+RUST_PAGE_CACHE_STATE_OBJECT := $(BUILD_DIR)/rust/page_cache_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/page_cache.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/page_cache.c in this profile)
+endif
+ifeq ($(strip $(RUST_PAGE_CACHE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_PAGE_CACHE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.page-cache-state-flags
+.PHONY: FORCE_RUST_PAGE_CACHE_STATE_FLAGS
+FORCE_RUST_PAGE_CACHE_STATE_FLAGS:
+
+$(RUST_PAGE_CACHE_STATE_FLAGS_STAMP): FORCE_RUST_PAGE_CACHE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_PAGE_CACHE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_PAGE_CACHE_STATE_OBJECT): $(RUST_PAGE_CACHE_STATE_SRC) kernel/include/fs/page_cache.h tools/rust-kernel.mk $(RUST_PAGE_CACHE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_PAGE_CACHE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_DCACHE_STATE owns the dentry cache slot table's state transitions: the
+# name hash, hash-chain link/unlink, LRU, free list, exact-match search with
+# second chance, eviction policy and bucket drop.  The C adapter in
+# kernel/fs/vfs/dcache.c keeps the global/bucket spinlocks, vnode references
+# and the retire batch.
+RUST_VFS_DCACHE_STATE_SRC := kernel/fs/vfs/dcache_state.rs
+RUST_VFS_DCACHE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_DCACHE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_DCACHE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_DCACHE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_DCACHE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_DCACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_DCACHE_STATE_TARGET := $(RUST_VFS_DCACHE_STATE_TARGET_$(ARCH))
+RUST_VFS_DCACHE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_dcache_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/dcache.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/dcache.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_DCACHE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_DCACHE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-dcache-state-flags
+.PHONY: FORCE_RUST_VFS_DCACHE_STATE_FLAGS
+FORCE_RUST_VFS_DCACHE_STATE_FLAGS:
+
+$(RUST_VFS_DCACHE_STATE_FLAGS_STAMP): FORCE_RUST_VFS_DCACHE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_DCACHE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_DCACHE_STATE_OBJECT): $(RUST_VFS_DCACHE_STATE_SRC) tools/rust-kernel.mk $(RUST_VFS_DCACHE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_DCACHE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# PROCFS_STATE owns the procfs read/seek offset state and the getdents64
+# directory cursor: the dirent layout, the byte budget, the cursor advance and
+# the sparse-key/`.`/`..` seeds.  The C adapter in kernel/fs/procfs/procfs.c
+# keeps the vnode/priv plumbing, the getdents64 buffer and the fdtable/tasklist
+# lookups it calls back into.
+RUST_PROCFS_STATE_SRC := kernel/fs/procfs/procfs_state.rs
+RUST_PROCFS_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_PROCFS_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_PROCFS_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_PROCFS_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_PROCFS_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_PROCFS_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_PROCFS_STATE_TARGET := $(RUST_PROCFS_STATE_TARGET_$(ARCH))
+RUST_PROCFS_STATE_OBJECT := $(BUILD_DIR)/rust/procfs_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/procfs/procfs.c in this profile)
+endif
+ifeq ($(strip $(RUST_PROCFS_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_PROCFS_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.procfs-state-flags
+.PHONY: FORCE_RUST_PROCFS_STATE_FLAGS
+FORCE_RUST_PROCFS_STATE_FLAGS:
+
+$(RUST_PROCFS_STATE_FLAGS_STAMP): FORCE_RUST_PROCFS_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_PROCFS_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_PROCFS_STATE_OBJECT): $(RUST_PROCFS_STATE_SRC) kernel/include/fs/procfs_state.h tools/rust-kernel.mk $(RUST_PROCFS_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_PROCFS_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# PROCFS_NODE_STATE owns the procfs node tables and content plan: the global
+# name table, the parent-scoped node table (with the task/fdtable probes routed
+# back through the adapter), the vnode file-type/mode classification,
+# procfs_root_file_type, resource_kind, and the generator/capacity/length
+# policy.  procfs.c keeps the allocation, the vnode initialisation, the content
+# generators and the probe callbacks.
+RUST_PROCFS_NODE_STATE_SRC := kernel/fs/procfs/procfs_node_state.rs
+RUST_PROCFS_NODE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_PROCFS_NODE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_PROCFS_NODE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_PROCFS_NODE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_PROCFS_NODE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_PROCFS_NODE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_PROCFS_NODE_STATE_TARGET := $(RUST_PROCFS_NODE_STATE_TARGET_$(ARCH))
+RUST_PROCFS_NODE_STATE_OBJECT := $(BUILD_DIR)/rust/procfs_node_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/procfs/procfs.c in this profile)
+endif
+ifeq ($(strip $(RUST_PROCFS_NODE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_PROCFS_NODE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.procfs-node-state-flags
+.PHONY: FORCE_RUST_PROCFS_NODE_STATE_FLAGS
+FORCE_RUST_PROCFS_NODE_STATE_FLAGS:
+
+$(RUST_PROCFS_NODE_STATE_FLAGS_STAMP): FORCE_RUST_PROCFS_NODE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_PROCFS_NODE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_PROCFS_NODE_STATE_OBJECT): $(RUST_PROCFS_NODE_STATE_SRC) kernel/include/fs/procfs_node_state.h tools/rust-kernel.mk $(RUST_PROCFS_NODE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_PROCFS_NODE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_PATH_STATE owns the path-string layer every path-taking syscall funnels
+# through: the "."/".."/"//" collapse with its overflow rule, the same collapse
+# floored at a chroot boundary, the cwd-relative join, the parent/name split,
+# the trailing-slash trim and the BENEATH containment test.  path.c keeps the
+# exported names and the caller's buffers.
+RUST_VFS_PATH_STATE_SRC := kernel/fs/vfs/path_state.rs
+RUST_VFS_PATH_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_PATH_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_PATH_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_PATH_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_PATH_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_PATH_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_PATH_STATE_TARGET := $(RUST_VFS_PATH_STATE_TARGET_$(ARCH))
+RUST_VFS_PATH_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_path_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/path.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/path.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_PATH_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_PATH_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-path-state-flags
+.PHONY: FORCE_RUST_VFS_PATH_STATE_FLAGS
+FORCE_RUST_VFS_PATH_STATE_FLAGS:
+
+$(RUST_VFS_PATH_STATE_FLAGS_STAMP): FORCE_RUST_VFS_PATH_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_PATH_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_PATH_STATE_OBJECT): $(RUST_VFS_PATH_STATE_SRC) kernel/include/fs/vfs/path_state.h tools/rust-kernel.mk $(RUST_VFS_PATH_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_PATH_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_PATH_WALK_STATE owns the path-resolution traversal: component iteration,
+# the `.`/`..` and mount-crossing handling, symlink following with its RESOLVE_*
+# decisions and loop limit, the permission/type checks in their original order,
+# the RESOLVE_NO_XDEV/RESOLVE_BENEATH boundary checks, resolved_out bookkeeping
+# and the errno of every failure.  path_resolution.c keeps the vnode
+# references, the filesystem lookup/readlink calls, the dcache probe/insert,
+# the permission check and the mount-table lookups.
+RUST_VFS_PATH_WALK_STATE_SRC := kernel/fs/vfs/path_walk_state.rs
+RUST_VFS_PATH_WALK_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_PATH_WALK_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_PATH_WALK_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_PATH_WALK_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_PATH_WALK_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_PATH_WALK_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_PATH_WALK_STATE_TARGET := $(RUST_VFS_PATH_WALK_STATE_TARGET_$(ARCH))
+RUST_VFS_PATH_WALK_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_path_walk_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/path_resolution.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/path_resolution.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_PATH_WALK_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_PATH_WALK_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-path-walk-state-flags
+.PHONY: FORCE_RUST_VFS_PATH_WALK_STATE_FLAGS
+FORCE_RUST_VFS_PATH_WALK_STATE_FLAGS:
+
+$(RUST_VFS_PATH_WALK_STATE_FLAGS_STAMP): FORCE_RUST_VFS_PATH_WALK_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_PATH_WALK_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_PATH_WALK_STATE_OBJECT): $(RUST_VFS_PATH_WALK_STATE_SRC) kernel/include/fs/vfs/path_walk_state.h tools/rust-kernel.mk $(RUST_VFS_PATH_WALK_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_PATH_WALK_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_MUTATE_STATE owns the decision order of unlink/rmdir/rename: flag
+# validation, operand resolution through the mount table and the process root,
+# the same-mount rule, the parent type/permission/operation checks, the victim
+# probe with the sticky gate and RENAME_NOREPLACE, and the ordered post-success
+# side effects.  vfs.c keeps the path plumbing, the vnode references, the
+# filesystem calls, the permission/sticky checks and the notify/quota/dcache
+# side effects.
+RUST_VFS_MUTATE_STATE_SRC := kernel/fs/vfs/mutate_state.rs
+RUST_VFS_MUTATE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_MUTATE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_MUTATE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_MUTATE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_MUTATE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_MUTATE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_MUTATE_STATE_TARGET := $(RUST_VFS_MUTATE_STATE_TARGET_$(ARCH))
+RUST_VFS_MUTATE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mutate_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_MUTATE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_MUTATE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-mutate-state-flags
+.PHONY: FORCE_RUST_VFS_MUTATE_STATE_FLAGS
+FORCE_RUST_VFS_MUTATE_STATE_FLAGS:
+
+$(RUST_VFS_MUTATE_STATE_FLAGS_STAMP): FORCE_RUST_VFS_MUTATE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_MUTATE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_MUTATE_STATE_OBJECT): $(RUST_VFS_MUTATE_STATE_SRC) kernel/include/fs/vfs/mutate_state.h tools/rust-kernel.mk $(RUST_VFS_MUTATE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_MUTATE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_MNTNS_STATE owns the mount-namespace lifecycle state: the in-flight
+# admission counters, the shutdown flag, the mutation/fileop admission
+# decisions, the shutdown begin/abort transitions and the teardown-pass policy.
+# mntns.c keeps the spinlock, the namespace list, the shutdown snapshot array
+# and the refcounts.
+RUST_VFS_MNTNS_STATE_SRC := kernel/fs/vfs/mntns_lifecycle.rs
+RUST_VFS_MNTNS_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_MNTNS_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_MNTNS_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_MNTNS_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_MNTNS_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_MNTNS_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_MNTNS_STATE_TARGET := $(RUST_VFS_MNTNS_STATE_TARGET_$(ARCH))
+RUST_VFS_MNTNS_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mntns_lifecycle.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/mntns.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/mntns.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_MNTNS_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_MNTNS_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-mntns-state-flags
+.PHONY: FORCE_RUST_VFS_MNTNS_STATE_FLAGS
+FORCE_RUST_VFS_MNTNS_STATE_FLAGS:
+
+$(RUST_VFS_MNTNS_STATE_FLAGS_STAMP): FORCE_RUST_VFS_MNTNS_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_MNTNS_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_MNTNS_STATE_OBJECT): $(RUST_VFS_MNTNS_STATE_SRC) kernel/include/fs/vfs/mntns_lifecycle.h tools/rust-kernel.mk $(RUST_VFS_MNTNS_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_MNTNS_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# VFS_MOUNT_STATE owns the mount-table orchestration: umount(2) path matching
+# with the busy-rule order and MNT_DETACH waiver, and the move_mount(2)
+# validation sequence.  mount_ops.c/mount.c keep the mount table, the
+# per-mount counters, the filesystem teardown, the re-parenting and the
+# dcache/namespace side effects.
+RUST_VFS_MOUNT_STATE_SRC := kernel/fs/vfs/mount_state.rs
+RUST_VFS_MOUNT_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_VFS_MOUNT_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VFS_MOUNT_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VFS_MOUNT_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VFS_MOUNT_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VFS_MOUNT_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_VFS_MOUNT_STATE_TARGET := $(RUST_VFS_MOUNT_STATE_TARGET_$(ARCH))
+RUST_VFS_MOUNT_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mount_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/mount_ops.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/mount_ops.c in this profile)
+endif
+ifeq ($(strip $(RUST_VFS_MOUNT_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_VFS_MOUNT_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-mount-state-flags
+.PHONY: FORCE_RUST_VFS_MOUNT_STATE_FLAGS
+FORCE_RUST_VFS_MOUNT_STATE_FLAGS:
+
+$(RUST_VFS_MOUNT_STATE_FLAGS_STAMP): FORCE_RUST_VFS_MOUNT_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VFS_MOUNT_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VFS_MOUNT_STATE_OBJECT): $(RUST_VFS_MOUNT_STATE_SRC) kernel/include/fs/vfs/mount_state.h tools/rust-kernel.mk $(RUST_VFS_MOUNT_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VFS_MOUNT_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+# FILE_STATE owns the open-file I/O-path policy (read/write admission, which
+# data path a regular file uses).
+RUST_FILE_STATE_SRC := kernel/fs/vfs/file_state.rs
+RUST_FILE_STATE_HDR := kernel/include/fs/vfs/file_state.h
+RUST_FILE_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_FILE_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_FILE_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_FILE_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_FILE_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_FILE_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_FILE_STATE_TARGET := $(RUST_FILE_STATE_TARGET_$(ARCH))
+RUST_FILE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_file_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/fs/vfs/file.c,$(KERNEL_SRC)),)
+$(error the Rust module requires kernel/fs/vfs/file.c in this profile)
+endif
+ifeq ($(strip $(RUST_FILE_STATE_TARGET)),)
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
+endif
+RUST_FILE_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.vfs-file-state-flags
+.PHONY: FORCE_RUST_FILE_STATE_FLAGS
+FORCE_RUST_FILE_STATE_FLAGS:
+
+$(RUST_FILE_STATE_FLAGS_STAMP): FORCE_RUST_FILE_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_FILE_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_FILE_STATE_OBJECT): $(RUST_FILE_STATE_SRC) $(RUST_FILE_STATE_HDR) tools/rust-kernel.mk $(RUST_FILE_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_FILE_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$< -o $@
+
+
+# The signal decision core (kernel/proc/signal_core.rs) owns the transplantable
+# signal business logic: disposition classification, status encodings, mask
+# transitions/operand policy, deliverability/fatality, queue coalescing,
+# pending-info scope selection, generation rules, delivery selection,
+# restart/lifecycle policy, Linux/Native syscall validation, the Native
+# checkpoint thread transaction, and signalfd readiness. The C adapters keep
+# the IRQ-safe locks, task/signal_state access, usercopy, wait queues and the
+# hardware signal frame. Always linked for the kernel architectures.
+RUST_SIGNAL_CORE_SRC := kernel/proc/signal_core.rs
+RUST_SIGNAL_CORE_HDR := kernel/proc/signal_core.h
+RUST_SIGNAL_CORE_TARGET_x86_64 := x86_64-unknown-none
+RUST_SIGNAL_CORE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SIGNAL_CORE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SIGNAL_CORE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SIGNAL_CORE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SIGNAL_CORE_TARGET_arm32 := armv7a-none-eabihf
+RUST_SIGNAL_CORE_TARGET_armv7m := thumbv7m-none-eabi
+RUST_SIGNAL_CORE_TARGET := $(RUST_SIGNAL_CORE_TARGET_$(ARCH))
+RUST_SIGNAL_CORE_OBJECT := $(BUILD_DIR)/rust/signal_core.o
+
+ifeq ($(strip $(RUST_SIGNAL_CORE_TARGET)),)
+$(error signal core has no kernel Rust target for ARCH=$(ARCH))
+endif
+RUST_SIGNAL_CORE_CODE_MODEL_x86_64 := large
+RUST_SIGNAL_CORE_CODE_MODEL_aarch64 := large
+RUST_SIGNAL_CORE_CODE_MODEL_loongarch64 := medium
+RUST_SIGNAL_CORE_CODE_MODEL_riscv64 := medium
+RUST_SIGNAL_CORE_CODE_MODEL_riscv32 := medium
+RUST_SIGNAL_CORE_CODE_MODEL_arm32 := small
+RUST_SIGNAL_CORE_CODE_MODEL_armv7m := small
+RUST_SIGNAL_CORE_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SIGNAL_CORE_FEATURES_arm32 := -neon
+RUST_SIGNAL_CORE_CODE_MODEL := $(RUST_SIGNAL_CORE_CODE_MODEL_$(ARCH))
+RUST_SIGNAL_CORE_EXTRA := $(RUST_SIGNAL_CORE_EXTRA_$(ARCH))
+RUST_SIGNAL_CORE_FEATURES := $(RUST_SIGNAL_CORE_FEATURES_$(ARCH))
+RUST_SIGNAL_CORE_FLAGS_STAMP := $(BUILD_DIR)/rust/.signal-core-flags
+.PHONY: FORCE_RUST_SIGNAL_CORE_FLAGS
+FORCE_RUST_SIGNAL_CORE_FLAGS:
+
+$(RUST_SIGNAL_CORE_FLAGS_STAMP): FORCE_RUST_SIGNAL_CORE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_SIGNAL_CORE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_SIGNAL_CORE_CODE_MODEL) $(RUST_SIGNAL_CORE_EXTRA) -C target-feature=$(RUST_SIGNAL_CORE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_SIGNAL_CORE_OBJECT): $(RUST_SIGNAL_CORE_SRC) $(RUST_SIGNAL_CORE_HDR) tools/rust-kernel.mk $(RUST_SIGNAL_CORE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_SIGNAL_CORE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_SIGNAL_CORE_CODE_MODEL),-C code-model=$(RUST_SIGNAL_CORE_CODE_MODEL)) \
+		$(RUST_SIGNAL_CORE_EXTRA) \
+		$(if $(RUST_SIGNAL_CORE_FEATURES),-C target-feature=$(RUST_SIGNAL_CORE_FEATURES)) \
+		$< -o $@
+RUST_LANDLOCK_SRC := kernel/ipc/landlock.rs
+RUST_LANDLOCK_TARGET_x86_64 := x86_64-unknown-none
+RUST_LANDLOCK_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_LANDLOCK_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_LANDLOCK_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_LANDLOCK_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_LANDLOCK_TARGET_arm32 := armv7a-none-eabihf
+RUST_LANDLOCK_TARGET_armv7m := thumbv7m-none-eabi
+RUST_LANDLOCK_TARGET := $(RUST_LANDLOCK_TARGET_$(ARCH))
+RUST_LANDLOCK_OBJECT := $(BUILD_DIR)/rust/landlock.o
+RUST_LANDLOCK_CODE_MODEL_x86_64 := large
+RUST_LANDLOCK_CODE_MODEL_aarch64 := large
+RUST_LANDLOCK_CODE_MODEL_loongarch64 := medium
+RUST_LANDLOCK_CODE_MODEL_riscv64 := medium
+RUST_LANDLOCK_CODE_MODEL_riscv32 := medium
+RUST_LANDLOCK_CODE_MODEL_arm32 := small
+RUST_LANDLOCK_CODE_MODEL_armv7m := small
+RUST_LANDLOCK_CODE_MODEL := $(RUST_LANDLOCK_CODE_MODEL_$(ARCH))
+RUST_LANDLOCK_EXTRA_x86_64 := -C no-redzone=yes
+RUST_LANDLOCK_FEATURES_arm32 := -neon
+RUST_LANDLOCK_EXTRA := $(RUST_LANDLOCK_EXTRA_$(ARCH))
+RUST_LANDLOCK_FEATURES := $(RUST_LANDLOCK_FEATURES_$(ARCH))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_LANDLOCK))
+
+RUST_SECCOMP_SRC := kernel/ipc/seccomp.rs
+RUST_SECCOMP_TARGET_x86_64 := x86_64-unknown-none
+RUST_SECCOMP_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SECCOMP_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SECCOMP_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SECCOMP_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SECCOMP_TARGET_arm32 := armv7a-none-eabihf
+RUST_SECCOMP_TARGET_armv7m := thumbv7m-none-eabi
+RUST_SECCOMP_TARGET := $(RUST_SECCOMP_TARGET_$(ARCH))
+RUST_SECCOMP_OBJECT := $(BUILD_DIR)/rust/seccomp.o
+RUST_SECCOMP_CODE_MODEL_x86_64 := large
+RUST_SECCOMP_CODE_MODEL_aarch64 := large
+RUST_SECCOMP_CODE_MODEL_loongarch64 := medium
+RUST_SECCOMP_CODE_MODEL_riscv64 := medium
+RUST_SECCOMP_CODE_MODEL_riscv32 := medium
+RUST_SECCOMP_CODE_MODEL_arm32 := small
+RUST_SECCOMP_CODE_MODEL_armv7m := small
+RUST_SECCOMP_CODE_MODEL := $(RUST_SECCOMP_CODE_MODEL_$(ARCH))
+RUST_SECCOMP_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SECCOMP_FEATURES_arm32 := -neon
+RUST_SECCOMP_EXTRA := $(RUST_SECCOMP_EXTRA_$(ARCH))
+RUST_SECCOMP_FEATURES := $(RUST_SECCOMP_FEATURES_$(ARCH))
+$(eval $(call RUST_FD_ABI_STATE_RULE,RUST_SECCOMP))

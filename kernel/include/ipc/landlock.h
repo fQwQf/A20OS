@@ -13,7 +13,6 @@
  */
 
 #include "core/types.h"
-#include "core/refcount.h"
 
 struct task_t;
 
@@ -55,17 +54,8 @@ struct task_t;
                                 LANDLOCK_ACCESS_FS_TRUNCATE | \
                                 LANDLOCK_ACCESS_FS_IOCTL_DEV)
 
-/* The ruleset object stored in the task. */
-typedef struct landlock_ruleset {
-    refcount_t refs;                    /* fd + restricted-task ownership */
-    struct landlock_ruleset *next; /* process-local list */
-    int fd;                        /* ruleset fd (anonfd) */
-    int used;
-    int restricted;
-    char paths[LANDLOCK_MAX_RULES][LANDLOCK_RULE_MAX_PREFIX];
-    uint64_t access[LANDLOCK_MAX_RULES];
-    int nr_rules;
-} landlock_ruleset_t;
+/* Ruleset state is owned by the Rust IPC engine and stored opaquely in task/vfile. */
+typedef struct landlock_ruleset landlock_ruleset_t;
 
 /* Create a ruleset with @handled_access_fs.  Returns a global VFS fd (a
  * ruleset handle) or a negative errno. */

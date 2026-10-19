@@ -3,6 +3,7 @@
  * See kernel/include/fs/vfs/mntns.h for the reference model.
  */
 #include "fs/vfs/mntns.h"
+#include "fs/vfs/mntns_lifecycle.h"
 #include "fs/vfs/mount.h"
 #include "proc/proc_internal.h"
 #include "core/lock.h"
@@ -16,64 +17,63 @@ static mnt_namespace_t  g_init_ns;
 static mnt_namespace_t *g_ns_list;
 static spinlock_t       g_mntns_lock = SPINLOCK_INIT;
 static uint64_t         g_next_ino = MNTNS_INIT_INO + 1;
-static uint64_t         g_teardown_pass;
 static int              g_reaper_started;
 /* Shutdown snapshots are deliberately bounded: if the namespace registry
  * ever exceeds this capacity, shutdown fails before closing admission. */
 #define MNTNS_SHUTDOWN_MAX 256
 static mnt_namespace_t *g_shutdown_namespaces[MNTNS_SHUTDOWN_MAX];
-static int              g_shutdown_namespace_count;
-static int              g_shutdown_active;
-static unsigned int     g_namespace_create_inflight;
-static unsigned int     g_vfs_mutations_inflight;
-static unsigned int     g_vfs_fileops_inflight;
+/* The counters, the shutdown flag and the teardown-pass cursor are owned by
+ * mntns_lifecycle.rs; this is just the storage C embeds.  The remaining
+ * readers of the flag (unshare/fork/join/put/release) go through the engine
+ * too, so there is exactly one copy of the state. */
+static mntns_lifecycle_t g_mntns_life;
+#define g_shutdown_active (a20_mntns_shutdown_active(&g_mntns_life))
 
 static int mntns_retry_pending_internal(int retry_busy);
 
 int mntns_shutdown_active(void)
 {
-    return __atomic_load_n(&g_shutdown_active, __ATOMIC_ACQUIRE);
+    return a20_mntns_shutdown_active(&g_mntns_life);
+}
+
+/* Walk the registry, refuse a teardown-torn state or a full snapshot array,
+ * then pin every namespace.  Runs under the registry lock, so a 0 return means
+ * the pinned snapshot is complete and the engine may publish the flag. */
+static int mntns_scan_and_pin(void *ctx, uint32_t cap, uint32_t *out_count)
+{
+    (void)ctx;
+    int count = 0;
+    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
+        if (count == (int)cap || ns->teardown_running || ns->teardown_pending)
+            return -EBUSY;
+        for (int i = 0; i < ns->nmounts; i++) {
+            mount_t *mnt = ns->mounts[i];
+            if (mnt && mnt->teardown_running)
+                return -EBUSY;
+        }
+        count++;
+    }
+    int n = 0;
+    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
+        refcount_inc(&ns->refs);
+        g_shutdown_namespaces[n++] = ns;
+    }
+    *out_count = (uint32_t)n;
+    return 0;
 }
 
 int mntns_shutdown_begin(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_shutdown_active || g_namespace_create_inflight ||
-        g_vfs_mutations_inflight || g_vfs_fileops_inflight) {
-        spin_unlock_irqrestore(&g_mntns_lock, flags);
-        return -EBUSY;
-    }
-    int count = 0;
-    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
-        if (count == MNTNS_SHUTDOWN_MAX || ns->teardown_running ||
-            ns->teardown_pending) {
-            spin_unlock_irqrestore(&g_mntns_lock, flags);
-            return -EBUSY;
-        }
-        for (int i = 0; i < ns->nmounts; i++) {
-            mount_t *mnt = ns->mounts[i];
-            if (mnt && mnt->teardown_running) {
-                spin_unlock_irqrestore(&g_mntns_lock, flags);
-                return -EBUSY;
-            }
-        }
-        count++;
-    }
-    __atomic_store_n(&g_shutdown_namespace_count, 0, __ATOMIC_RELAXED);
-    for (mnt_namespace_t *ns = g_ns_list; ns; ns = ns->next) {
-        refcount_inc(&ns->refs);
-        g_shutdown_namespaces[g_shutdown_namespace_count++] = ns;
-    }
-    /* Publish only after the complete pinned array is ready. */
-    __atomic_store_n(&g_shutdown_active, 1, __ATOMIC_RELEASE);
+    int r = a20_mntns_shutdown_begin(&g_mntns_life, NULL, mntns_scan_and_pin);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
-    return 0;
+    return r;
 }
 
 int mntns_shutdown_namespace_count(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    int count = g_shutdown_active ? g_shutdown_namespace_count : 0;
+    int count = a20_mntns_shutdown_count(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
     return count;
 }
@@ -82,7 +82,8 @@ mnt_namespace_t *mntns_shutdown_namespace_at(int index)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
     mnt_namespace_t *ns = NULL;
-    if (g_shutdown_active && index >= 0 && index < g_shutdown_namespace_count)
+    int count = a20_mntns_shutdown_count(&g_mntns_life);
+    if (count > 0 && index >= 0 && index < count)
         ns = g_shutdown_namespaces[index];
     spin_unlock_irqrestore(&g_mntns_lock, flags);
     return ns;
@@ -91,40 +92,30 @@ mnt_namespace_t *mntns_shutdown_namespace_at(int index)
 int mntns_mutation_enter(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_shutdown_active) {
-        spin_unlock_irqrestore(&g_mntns_lock, flags);
-        return -ESHUTDOWN;
-    }
-    g_vfs_mutations_inflight++;
+    int r = a20_mntns_mutation_enter(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
-    return 0;
+    return r;
 }
 
 void mntns_mutation_leave(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_vfs_mutations_inflight)
-        g_vfs_mutations_inflight--;
+    (void)a20_mntns_mutation_leave(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
 }
 
 int mntns_fileop_enter(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_shutdown_active) {
-        spin_unlock_irqrestore(&g_mntns_lock, flags);
-        return -ESHUTDOWN;
-    }
-    g_vfs_fileops_inflight++;
+    int r = a20_mntns_fileop_enter(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
-    return 0;
+    return r;
 }
 
 void mntns_fileop_leave(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_vfs_fileops_inflight)
-        g_vfs_fileops_inflight--;
+    (void)a20_mntns_fileop_leave(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
 }
 
@@ -132,17 +123,17 @@ void mntns_shutdown_abort(void)
 {
     mnt_namespace_t *snapshot[MNTNS_SHUTDOWN_MAX];
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (!g_shutdown_active) {
+    /* The abort transition (clear the flag, hand back the pinned count) is the
+     * engine's; C owns the snapshot array. */
+    int count = a20_mntns_shutdown_abort_plan(&g_mntns_life);
+    if (count < 0) {
         spin_unlock_irqrestore(&g_mntns_lock, flags);
         return;
     }
-    int count = g_shutdown_namespace_count;
     for (int i = 0; i < count; i++) {
         snapshot[i] = g_shutdown_namespaces[i];
         g_shutdown_namespaces[i] = NULL;
     }
-    __atomic_store_n(&g_shutdown_namespace_count, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_shutdown_active, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
     /* Release outside the registry lock: a last put can perform filesystem
      * teardown and sleep. */
@@ -159,8 +150,7 @@ void mntns_shutdown_abort(void)
 static void mntns_create_done(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_namespace_create_inflight)
-        g_namespace_create_inflight--;
+    (void)a20_mntns_create_leave(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
 }
 
@@ -285,6 +275,7 @@ static void mntns_start_reaper(void)
 
 void mntns_early_init(void)
 {
+    a20_mntns_lifecycle_init(&g_mntns_life, MNTNS_SHUTDOWN_MAX);
     memset(&g_init_ns, 0, sizeof(g_init_ns));
     g_init_ns.ino = MNTNS_INIT_INO;
     refcount_set(&g_init_ns.refs, 1);  /* pinned: never freed */
@@ -346,12 +337,11 @@ static mnt_namespace_t *mntns_alloc(void)
     memset(ns, 0, sizeof(*ns));
     refcount_set(&ns->refs, 1);
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    if (g_shutdown_active) {
+    if (a20_mntns_create_enter(&g_mntns_life) < 0) {
         spin_unlock_irqrestore(&g_mntns_lock, flags);
         kfree(ns);
         return NULL;
     }
-    g_namespace_create_inflight++;
     ns->ino = g_next_ino++;
     ns->next = g_ns_list;
     g_ns_list = ns;
@@ -543,29 +533,42 @@ static int mntns_retry_pending_internal(int retry_busy)
     int retry_after_shared_drop = 0;
     int allow_busy_retry = retry_busy;
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
-    uint64_t pass = ++g_teardown_pass;
-    if (pass == 0)
-        pass = ++g_teardown_pass;
+    uint64_t pass = a20_mntns_retry_pass(&g_mntns_life);
     spin_unlock_irqrestore(&g_mntns_lock, flags);
     for (;;) {
         flags = spin_lock_irqsave(&g_mntns_lock);
         mnt_namespace_t *ns = NULL;
         int released_shared_source = 0;
-        for (mnt_namespace_t *it = g_ns_list; it; it = it->next) {
-            if (it != &g_init_ns && it->teardown_pending &&
-                !it->teardown_running &&
-                it->teardown_attempt_pass != pass &&
-                (allow_busy_retry || it->teardown_retryable)) {
-                it->teardown_running = 1;
-                it->teardown_attempt_pass = pass;
-                ns = it;
-                for (int i = 0; i < it->nmounts; i++)
-                    released_shared_source |= it->mounts[i] &&
-                                              it->mounts[i]->shared_source;
-                for (mount_t *mnt = it->dead_mounts; mnt;
-                     mnt = mnt->dead_next)
+        /* Collect the per-namespace teardown state and let the engine pick the
+         * next candidate; C only marks the chosen one. */
+        {
+            /* Plain automatic storage: the kernel has no TLS model, and this
+             * runs under g_mntns_lock so no per-thread copy is needed. */
+            mnt_namespace_t *cand_ns[64];
+            mntns_retry_cand_t cand[64];
+            int ncand = 0;
+            for (mnt_namespace_t *it = g_ns_list; it && ncand < 64; it = it->next) {
+                if (it == &g_init_ns)
+                    continue;
+                cand_ns[ncand] = it;
+                cand[ncand].teardown_pending = it->teardown_pending ? 1u : 0u;
+                cand[ncand].teardown_running = it->teardown_running ? 1u : 0u;
+                cand[ncand].retryable = it->teardown_retryable ? 1u : 0u;
+                cand[ncand]._pad = 0;
+                cand[ncand].attempt_pass = it->teardown_attempt_pass;
+                ncand++;
+            }
+            int sel = a20_mntns_retry_select(cand, (size_t)ncand, pass,
+                                             allow_busy_retry);
+            if (sel >= 0) {
+                ns = cand_ns[sel];
+                ns->teardown_running = 1;
+                ns->teardown_attempt_pass = pass;
+                for (int i = 0; i < ns->nmounts; i++)
+                    released_shared_source |= ns->mounts[i] &&
+                                              ns->mounts[i]->shared_source;
+                for (mount_t *mnt = ns->dead_mounts; mnt; mnt = mnt->dead_next)
                     released_shared_source |= mnt->shared_source != NULL;
-                break;
             }
         }
         spin_unlock_irqrestore(&g_mntns_lock, flags);
@@ -578,9 +581,7 @@ static int mntns_retry_pending_internal(int retry_busy)
             retry_after_shared_drop = 0;
             allow_busy_retry = 1;
             flags = spin_lock_irqsave(&g_mntns_lock);
-            pass = ++g_teardown_pass;
-            if (pass == 0)
-                pass = ++g_teardown_pass;
+            pass = a20_mntns_retry_pass(&g_mntns_life);
             spin_unlock_irqrestore(&g_mntns_lock, flags);
             continue;
         }

@@ -24,6 +24,8 @@
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define CANARY 0xA5
 #define PAD    64
@@ -175,10 +177,69 @@ static int test_sem_stat(void)
     return 0;
 }
 
+static int test_semop_transactions(void)
+{
+    int id = semget(IPC_PRIVATE, 2, IPC_CREAT | 0600);
+    CHK(id >= 0, "semget semop");
+    unsigned short initial[2] = {1, 3};
+    CHK(semctl(id, 0, SETALL, initial) == 0, "semctl SETALL semop");
+
+    struct sembuf atomic_ops[2] = {
+        { .sem_num = 0, .sem_op = -1, .sem_flg = 0 },
+        { .sem_num = 1, .sem_op = 2, .sem_flg = 0 },
+    };
+    CHK(semop(id, atomic_ops, 2) == 0, "semop atomic pair");
+    CHK(semctl(id, 0, GETVAL) == 0, "semop decrement result");
+    CHK(semctl(id, 1, GETVAL) == 5, "semop increment result");
+
+    struct sembuf nowait = { .sem_num = 0, .sem_op = -1, .sem_flg = IPC_NOWAIT };
+    errno = 0;
+    CHK(semop(id, &nowait, 1) == -1 && errno == EAGAIN,
+        "semop NOWAIT keeps value");
+    CHK(semctl(id, 0, GETVAL) == 0, "semop NOWAIT rollback");
+    struct sembuf invalid = { .sem_num = 2, .sem_op = 1, .sem_flg = 0 };
+    errno = 0;
+    CHK(semop(id, &invalid, 1) == -1 && errno == EFBIG,
+        "semop invalid index");
+
+    CHK(semctl(id, 0, SETVAL, 0) == 0, "semctl block setup");
+    struct sembuf down = { .sem_num = 0, .sem_op = -1, .sem_flg = 0 };
+    pid_t child = fork();
+    CHK(child >= 0, "fork semop waiter");
+    if (child == 0) {
+        alarm(2);
+        _exit(semop(id, &down, 1) == 0 ? 0 : 2);
+    }
+    usleep(50000);
+    struct sembuf up = { .sem_num = 0, .sem_op = 1, .sem_flg = 0 };
+    CHK(semop(id, &up, 1) == 0, "semop wake decrement waiter");
+    int status = 0;
+    CHK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0, "semop blocked decrement");
+    CHK(semctl(id, 0, GETVAL) == 0, "semop waiter counter result");
+
+    CHK(semctl(id, 1, SETVAL, 1) == 0, "semctl zero-wait setup");
+    struct sembuf wait_zero = { .sem_num = 1, .sem_op = 0, .sem_flg = 0 };
+    child = fork();
+    CHK(child >= 0, "fork zero waiter");
+    if (child == 0) {
+        alarm(2);
+        _exit(semop(id, &wait_zero, 1) == 0 ? 0 : 3);
+    }
+    usleep(50000);
+    CHK(semctl(id, 1, SETVAL, 0) == 0, "semctl wake zero waiter");
+    status = 0;
+    CHK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0, "semop wait for zero");
+    CHK(semctl(id, 0, IPC_RMID) == 0, "semctl RMID semop");
+    puts("SYSV_IPC_ABI: semop atomic+NOWAIT+wait/wake PASS");
+    return 0;
+}
+
 int main(void)
 {
     if (test_shm_info() || test_shm_stat() || test_msg_stat() ||
-        test_sem_stat()) {
+        test_sem_stat() || test_semop_transactions()) {
         printf("SYSV_IPC_ABI: FAIL\n");
         return 1;
     }

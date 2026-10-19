@@ -21,29 +21,79 @@ typedef struct {
     int           semaphore;
 } eventfd_t;
 
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-bool a20_eventfd_readable_rust(uint64_t counter);
-uint64_t a20_eventfd_read_rust(uint64_t *counter, bool semaphore);
-bool a20_eventfd_can_write_rust(uint64_t counter, uint64_t value);
-bool a20_eventfd_write_rust(uint64_t *counter, uint64_t value);
-#endif
+int a20_eventfd_read_txn(uint64_t *counter, bool semaphore, void *context,
+                         bool nonblock, uint64_t *value_out);
+int a20_eventfd_write_txn(uint64_t *counter, void *context, bool nonblock,
+                          uint64_t value);
+int a20_eventfd_poll_txn(uint64_t *counter, void *context, int events);
 
-static bool eventfd_readable(eventfd_t *efd)
+/* Narrow wait/lock boundary for the Rust-owned eventfd transactions. A waiter
+ * allocation owns one park token and one queue entry until finish, including
+ * cancellation, link failure and interrupted wake paths. */
+typedef struct {
+    proc_wait_token_t token;
+    wait_queue_entry_t entry;
+    wait_queue_t *queue;
+} eventfd_waiter_t;
+
+void a20_eventfd_txn_lock(void *context)
 {
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-    return a20_eventfd_readable_rust(efd->counter);
-#else
-    return efd->counter != 0;
-#endif
+    eventfd_t *efd = context;
+    spin_lock(&efd->lock);
 }
 
-static bool eventfd_write_fits(eventfd_t *efd, uint64_t value)
+void a20_eventfd_txn_unlock(void *context)
 {
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-    return a20_eventfd_can_write_rust(efd->counter, value);
-#else
-    return value <= (~0ULL - 1) - efd->counter;
-#endif
+    eventfd_t *efd = context;
+    spin_unlock(&efd->lock);
+}
+
+void *a20_eventfd_txn_wait_prepare(void *context)
+{
+    (void)context;
+    eventfd_waiter_t *waiter = kmalloc(sizeof(*waiter));
+    if (!waiter)
+        return NULL;
+    memset(waiter, 0, sizeof(*waiter));
+    waiter->token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
+    if (!waiter->token.task) {
+        kfree(waiter);
+        return NULL;
+    }
+    return waiter;
+}
+
+bool a20_eventfd_txn_wait_link(void *context, void *opaque, bool writers)
+{
+    eventfd_t *efd = context;
+    eventfd_waiter_t *waiter = opaque;
+    wait_queue_t *queue = writers ? &efd->writers : &efd->readers;
+    bool linked = wait_queue_link(queue, &waiter->entry, waiter->token, 0);
+    waiter->queue = linked ? queue : NULL;
+    return linked;
+}
+
+int a20_eventfd_txn_wait_finish(void *opaque, bool linked, bool commit)
+{
+    eventfd_waiter_t *waiter = opaque;
+    proc_wake_reason_t reason = PROC_WAKE_CANCEL;
+    if (commit && linked)
+        reason = proc_park_commit(waiter->token);
+    else
+        (void)proc_park_cancel(waiter->token);
+    if (linked && waiter->queue)
+        wait_queue_unlink(waiter->queue, &waiter->entry);
+    proc_park_finish(waiter->token);
+    int interrupted = proc_wake_reason_is_task_interrupt(reason);
+    kfree(waiter);
+    return interrupted ? -ERESTARTSYS : 0;
+}
+
+void a20_eventfd_txn_wake(void *context, bool writers)
+{
+    eventfd_t *efd = context;
+    wait_queue_wake_all(writers ? &efd->writers : &efd->readers,
+                        0, PROC_WAKE_EVENT);
 }
 
 static int eventfd_read(vfile_t *vf, char *buf, size_t count)
@@ -52,53 +102,11 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
     if (!efd) return -EBADF;
     if (count < sizeof(uint64_t)) return -EINVAL;
 
-    spin_lock(&efd->lock);
-    while (!eventfd_readable(efd)) {
-        if (vf->flags & O_NONBLOCK) {
-            spin_unlock(&efd->lock);
-            return -EAGAIN;
-        }
-        spin_unlock(&efd->lock);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
-        if (!token.task)
-            return -EAGAIN;
-
-        wait_queue_entry_t entry = {0};
-        spin_lock(&efd->lock);
-        if (eventfd_readable(efd)) {
-            spin_unlock(&efd->lock);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            spin_lock(&efd->lock);
-            continue;
-        }
-        bool linked = wait_queue_link(&efd->readers, &entry, token, 0);
-        spin_unlock(&efd->lock);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&efd->readers, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason))
-            return -ERESTARTSYS;
-        spin_lock(&efd->lock);
-    }
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-    uint64_t val = a20_eventfd_read_rust(&efd->counter, efd->semaphore != 0);
-#else
-    uint64_t val = efd->semaphore ? 1 : efd->counter;
-    efd->counter -= val;
-#endif
-    spin_unlock(&efd->lock);
-
-    /* Writers may request different increments, and poll observers share
-     * this queue. Every waiter must recheck after space becomes available. */
-    wait_queue_wake_all(&efd->writers, 0, PROC_WAKE_EVENT);
+    uint64_t val;
+    int result = a20_eventfd_read_txn(&efd->counter, efd->semaphore != 0,
+                                      efd, (vf->flags & O_NONBLOCK) != 0, &val);
+    if (result < 0)
+        return result;
     memcpy(buf, &val, sizeof(val));
     return sizeof(val);
 }
@@ -110,57 +118,11 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
     if (count != sizeof(uint64_t)) return -EINVAL;
     uint64_t val;
     memcpy(&val, buf, sizeof(val));
-    if (val == ~0ULL) return -EINVAL;
 
-    spin_lock(&efd->lock);
-    while (!eventfd_write_fits(efd, val)) {
-        if (vf->flags & O_NONBLOCK) {
-            spin_unlock(&efd->lock);
-            return -EAGAIN;
-        }
-        spin_unlock(&efd->lock);
-        proc_wait_token_t token =
-            proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
-        if (!token.task)
-            return -EAGAIN;
-
-        wait_queue_entry_t entry = {0};
-        spin_lock(&efd->lock);
-        if (eventfd_write_fits(efd, val)) {
-            spin_unlock(&efd->lock);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            spin_lock(&efd->lock);
-            continue;
-        }
-        bool linked = wait_queue_link(&efd->writers, &entry, token, 0);
-        spin_unlock(&efd->lock);
-        proc_wake_reason_t reason;
-        if (linked)
-            reason = proc_park_commit(token);
-        else {
-            (void)proc_park_cancel(token);
-            reason = PROC_WAKE_CANCEL;
-        }
-        wait_queue_unlink(&efd->writers, &entry);
-        proc_park_finish(token);
-        if (proc_wake_reason_is_task_interrupt(reason))
-            return -ERESTARTSYS;
-        spin_lock(&efd->lock);
-    }
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-    if (!a20_eventfd_write_rust(&efd->counter, val)) {
-        spin_unlock(&efd->lock);
-        return -EAGAIN;
-    }
-#else
-    efd->counter += val;
-#endif
-    spin_unlock(&efd->lock);
-
-    /* Readiness notifications do not consume the counter. Waking only one
-     * observer strands other poll/epoll users and semaphore readers. */
-    wait_queue_wake_all(&efd->readers, 0, PROC_WAKE_EVENT);
+    int result = a20_eventfd_write_txn(&efd->counter, efd,
+                                       (vf->flags & O_NONBLOCK) != 0, val);
+    if (result < 0)
+        return result;
     return sizeof(val);
 }
 
@@ -169,14 +131,7 @@ static int eventfd_poll(vfile_t *vf, short events)
     eventfd_t *efd = vf ? vf->priv : NULL;
     if (!efd)
         return POLLNVAL;
-    short revents = 0;
-    spin_lock(&efd->lock);
-    if ((events & POLLIN) && eventfd_readable(efd))
-        revents |= POLLIN;
-    if ((events & POLLOUT) && efd->counter < ~0ULL - 1)
-        revents |= POLLOUT;
-    spin_unlock(&efd->lock);
-    return revents;
+    return a20_eventfd_poll_txn(&efd->counter, efd, events);
 }
 
 static size_t eventfd_poll_sources(vfile_t *vf, short events,

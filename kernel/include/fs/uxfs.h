@@ -64,4 +64,9 @@ int uxfs_block_flush_supported(struct task_t *task, int block_index);
  * mount admission uses this to prevent a second writable cache/owner. */
 int uxfs_block_device_owned(struct block_dev *dev);
 
+/* Drop every cache-only canonical UXFS vnode (procfs drop_caches bit 1).
+ * Entries whose vnode is still referenced by an open file, mapping or cached
+ * page stay; this only releases the index-owned reference of idle entries. */
+void uxfs_vnode_cache_prune_all(void);
+
 #endif /* FS_UXFS_H */

@@ -13,6 +13,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
+#include "proc/signal_core.h"
 #include "core/errno.h"
 #include "core/poll.h"
 
@@ -54,40 +55,18 @@ typedef struct {
     uint64_t mask; /* kernel encoding: bit position == signum */
 } signalfd_t;
 
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
 void a20_signalfd_set_mask_rust(uint64_t *mask, uint64_t value);
 uint64_t a20_signalfd_mask_rust(const uint64_t *mask);
-int a20_signalfd_consume_rust(
-    uint64_t pending, uint64_t mask,
-    void (*take)(int, void *), void *context);
 bool a20_signalfd_has_pending_rust(uint64_t pending, uint64_t mask);
-#endif
 
 static int signalfd_is_ops(const vfile_t *vf);
 
-typedef struct {
-    task_t *task;
-    signalfd_siginfo_t *out;
-} signalfd_take_context_t;
-
-/* Called with signal_state.lock held; signal queue ownership stays in C. */
-static void signalfd_take_selected_locked(int sig, void *opaque)
+/* Whether a read of `count` bytes can return at least one record. */
+static int signalfd_read_valid(size_t count, size_t record_size)
 {
-    signalfd_take_context_t *context = opaque;
-    if (!context || !context->task || !context->out)
-        return;
-    signalfd_siginfo_t *out = context->out;
-    memset(out, 0, sizeof(*out));
-    out->ssi_signo = (uint32_t)sig;
-    arch_siginfo_t info;
-    if (signal_take_pending_info_locked(context->task, sig, &info,
-                                        sizeof(info)) == 0) {
-        out->ssi_errno = info.si_errno;
-        out->ssi_code = info.si_code;
-        out->ssi_pid = (uint32_t)info._sifields[0];
-        out->ssi_uid = (uint32_t)info._sifields[1];
-    }
+    return a20_signal_fd_read_valid(count, record_size);
 }
+
 
 /* The vfile reference protects lifetime only; this lock serializes mask
  * updates with read/poll snapshots across duplicated and inherited fds. */
@@ -96,51 +75,17 @@ static uint64_t signalfd_mask_snapshot(signalfd_t *sfd)
     if (!sfd)
         return 0;
     spin_lock(&sfd->lock);
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
     uint64_t mask = a20_signalfd_mask_rust(&sfd->mask);
-#else
-    uint64_t mask = sfd->mask;
-#endif
     spin_unlock(&sfd->lock);
     return mask;
 }
 
-/*
- * Dequeue one pending signal matching mask from the calling task, without
- * running any handler.  Mirrors the selection logic in sys_sigtimedwait().
- * Returns the signal number, or 0 when nothing matches.
- */
-static int signalfd_dequeue(task_t *t, uint64_t mask,
-                            signalfd_siginfo_t *out)
-{
-    signal_state_t *ss = (signal_state_t *)t->signals;
-    uint64_t sflags = spin_lock_irqsave(&ss->lock);
-    uint64_t matching = (ss->pending | t->thread_pending) & mask;
-    signalfd_take_context_t context = { .task = t, .out = out };
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
-    int selected = a20_signalfd_consume_rust(
-        ss->pending | t->thread_pending, mask,
-        signalfd_take_selected_locked, &context);
-    (void)matching;
-#else
-    int selected = 0;
-    for (int sig = 1; sig < NSIG; sig++) {
-        if (!(matching & signal_mask_bit(sig)))
-            continue;
-        selected = sig;
-        signalfd_take_selected_locked(sig, &context);
-        break;
-    }
-#endif
-    spin_unlock_irqrestore(&ss->lock, sflags);
-    return selected;
-}
 
 static int signalfd_read(vfile_t *vf, char *buf, size_t count)
 {
     signalfd_t *sfd = vf ? vf->priv : NULL;
     if (!sfd) return -EBADF;
-    if (count < sizeof(signalfd_siginfo_t)) return -EINVAL;
+    if (!signalfd_read_valid(count, sizeof(signalfd_siginfo_t))) return -EINVAL;
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
@@ -148,14 +93,23 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
     size_t done = 0;
     uint64_t mask = 0;
     for (;;) {
-        signalfd_siginfo_t fdsi;
+        /* Rust owns the whole signalfd select/consume/record transaction:
+         * dequeue up to one batch per locked call, then copy out. */
         mask = signalfd_mask_snapshot(sfd);
-        int sig = signalfd_dequeue(t, mask, &fdsi);
-        if (sig) {
-            memcpy(buf + done, &fdsi, sizeof(fdsi));
-            done += sizeof(fdsi);
-            if (done + sizeof(fdsi) > count)
-                break;
+        signalfd_siginfo_t batch[8];
+        size_t capacity = (count - done) / sizeof(signalfd_siginfo_t);
+        if (capacity > sizeof(batch) / sizeof(batch[0]))
+            capacity = sizeof(batch) / sizeof(batch[0]);
+        uint64_t batch_flags = spin_lock_irqsave(&ss->lock);
+        a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+        int64_t got = a20_signal_fd_read_locked(&st, mask, (uint8_t *)batch,
+                                                capacity,
+                                                sizeof(signalfd_siginfo_t),
+                                                offsetof(arch_siginfo_t, _sifields));
+        spin_unlock_irqrestore(&ss->lock, batch_flags);
+        if (got > 0) {
+            memcpy(buf + done, batch, (size_t)got * sizeof(signalfd_siginfo_t));
+            done += (size_t)got * sizeof(signalfd_siginfo_t);
             continue;
         }
         if (done)
@@ -175,11 +129,7 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
         mask = signalfd_mask_snapshot(sfd);
         uint64_t sflags = spin_lock_irqsave(&ss->lock);
         uint64_t pending = ss->pending | t->thread_pending;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
         bool matching = a20_signalfd_has_pending_rust(pending, mask);
-#else
-        bool matching = (pending & mask) != 0;
-#endif
         if (!matching) {
             t->sigwait_mask = mask;
             t->sigwait_active = 1;
@@ -218,13 +168,8 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
 
         mask = signalfd_mask_snapshot(sfd);
         sflags = spin_lock_irqsave(&ss->lock);
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
         bool ready_now = a20_signalfd_has_pending_rust(
             ss->pending | t->thread_pending, mask);
-#else
-        bool ready_now =
-            ((ss->pending | t->thread_pending) & mask) != 0;
-#endif
         if (ready_now) {
             t->sigwait_active = 0;
             t->sigwait_mask = 0;
@@ -245,12 +190,8 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
         t->sigwait_active = 0;
         t->sigwait_mask = 0;
         int has_matching;
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
         has_matching = a20_signalfd_has_pending_rust(
             ss->pending | t->thread_pending, mask);
-#else
-        has_matching = ((ss->pending | t->thread_pending) & mask) != 0;
-#endif
         spin_unlock_irqrestore(&ss->lock, sflags);
 
         if (proc_wake_reason_is_task_interrupt(reason) &&
@@ -305,7 +246,8 @@ int signalfd_poll_events(vfile_t *vf, short events)
             signal_state_t *ss = (signal_state_t *)t->signals;
             uint64_t sflags = spin_lock_irqsave(&ss->lock);
             uint64_t mask = signalfd_mask_snapshot(sfd);
-            if ((ss->pending | t->thread_pending) & mask)
+            if (a20_signalfd_has_pending_rust(
+                    ss->pending | t->thread_pending, mask))
                 revents |= POLLIN;
             spin_unlock_irqrestore(&ss->lock, sflags);
         }
@@ -330,11 +272,7 @@ int signalfd_create(int ufd, uint64_t kernel_mask, int flags)
         }
         signalfd_t *sfd = vf->priv;
         spin_lock(&sfd->lock);
-#ifdef CONFIG_EVENT_DESCRIPTOR_STATE_RUST
         a20_signalfd_set_mask_rust(&sfd->mask, kernel_mask);
-#else
-        sfd->mask = kernel_mask;
-#endif
         spin_unlock(&sfd->lock);
         task_t *task = proc_current();
         if (task && task->signals) {

@@ -9,13 +9,14 @@
 #include "abi/native/errno.h"
 #include "uapi/a20/task_signal.h"
 #include "sys_validate.h"
+#include "proc/signal_core.h"
 #define A20_ARG(n) (args->arg[(n)])
 
 int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     int32_t sig = (int32_t)A20_ARG(1);
     uint64_t mode = A20_ARG(2);
-    if ((mode & ~A20_SIGNAL_THREAD) || sig < 0 || sig >= NSIG)
+    if (a20_signal_native_kill_valid(mode, sig, NSIG))
         return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
@@ -85,13 +86,20 @@ static int64_t signal_control(a20_signal_control_t *user) {
     if (!(control.flags & A20_SIGNAL_THREAD))
         return -A20_ERR_INVALID_ARGUMENT;
     if (control.operation == A20_SIGNAL_CONTROL_CHECK) {
-        if (control.flags &
-            ~(A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT))
+        if (a20_signal_native_control_valid(
+                control.operation, control.flags, A20_SIGNAL_CONTROL_CHECK,
+                A20_SIGNAL_CONTROL_MASK,
+                A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT,
+                A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
             return -A20_ERR_INVALID_ARGUMENT;
         control.result =
             a20_thread_sig_check(cur, control.flags, control.selected);
     } else if (control.operation == A20_SIGNAL_CONTROL_MASK) {
-        if (control.flags & ~(A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
+        if (a20_signal_native_control_valid(
+                control.operation, control.flags, A20_SIGNAL_CONTROL_CHECK,
+                A20_SIGNAL_CONTROL_MASK,
+                A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT,
+                A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
             return -A20_ERR_INVALID_ARGUMENT;
         control.result = a20_thread_sig_mask(
             cur, control.mask, control.flags & A20_SIGNAL_MASK_QUERY);
@@ -105,8 +113,8 @@ int64_t sys_a20_signal_check(const a20_syscall_args_t *args) {
     uint64_t mode = A20_ARG(0);
     if (mode == A20_SIGNAL_STRUCT)
         return signal_control((void *)(uintptr_t)A20_ARG(1));
-    if ((mode & ~(A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT)) ||
-        (mode && !(mode & A20_SIGNAL_THREAD)))
+    if (a20_signal_native_mode_valid(
+            mode, A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT))
         return -A20_ERR_INVALID_ARGUMENT;
     task_t *cur = proc_current();
     if (mode & A20_SIGNAL_THREAD)
@@ -126,8 +134,8 @@ int64_t sys_a20_signal_mask(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
     uint64_t mode = A20_ARG(2);
-    if ((mode & ~(A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY)) ||
-        (mode && !(mode & A20_SIGNAL_THREAD)))
+    if (a20_signal_native_mode_valid(
+            mode, A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
         return -A20_ERR_INVALID_ARGUMENT;
     uint64_t old =
         (mode & A20_SIGNAL_THREAD)

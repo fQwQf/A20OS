@@ -1,4 +1,5 @@
 #include "fs/vfs/file.h"
+#include "fs/vfs/file_state.h"
 #include "fs/quota.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/mntns.h"
@@ -16,6 +17,12 @@
 #include "proc/proc.h"
 #include "core/timer.h"
 
+_Static_assert(FS_TYPE_RAMFS == 1 && FS_TYPE_EXT4 == 3 && FS_TYPE_PROCFS == 4 &&
+               FS_TYPE_DEVFS == 5 && FS_TYPE_CGROUP == 6 && FS_TYPE_SYSFS == 7 &&
+               FS_TYPE_UXFS == 10 && FS_TYPE_LITTLEFS == 11,
+               "file_state mirror: fs type values");
+_Static_assert(VFS_MOUNT_RDONLY == 0x1, "file_state mirror: mount flags");
+
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
     return pipe_vfile_is(vf);
@@ -28,40 +35,33 @@ int vfs_is_char_device_vfile(vfile_t *vf)
 
 int vfs_should_read(int flags)
 {
-    int acc = flags & O_ACCMODE;
-    return acc == O_RDONLY || acc == O_RDWR;
+    return a20_vfs_should_read(flags);
 }
 
 int vfs_should_write(int flags)
 {
-    int acc = flags & O_ACCMODE;
-    return acc == O_WRONLY || acc == O_RDWR;
+    return a20_vfs_should_write(flags);
 }
 
 static int vfs_file_uses_page_cache(vnode_t *vn)
 {
-    if (!vn || ((vn->mode & S_IFMT) != S_IFREG))
+    if (!vn)
         return 0;
     mount_t *mnt = vn->mnt;
-    if (mnt &&
-        (mnt->type == FS_TYPE_RAMFS ||
-         mnt->type == FS_TYPE_PROCFS ||
-         mnt->type == FS_TYPE_CGROUP ||
-         mnt->type == FS_TYPE_DEVFS ||
-         mnt->type == FS_TYPE_SYSFS ||
-         /* littlefs does direct vfile I/O through lfs_file (its own
-          * metadata pairs + buffering); no readpage/writepage hooks. */
-         mnt->type == FS_TYPE_LITTLEFS))
-        return 0;
-    return 1;
+    return a20_vfs_file_uses_page_cache((vn->mode & S_IFMT) == S_IFREG,
+                                        mnt ? (int)mnt->type : -1);
 }
 
 static int vfs_file_uses_buffered_write(vnode_t *vn)
 {
-    return vfs_file_uses_page_cache(vn) && vn->mnt &&
-           (vn->mnt->type == FS_TYPE_EXT4 || vn->mnt->type == FS_TYPE_UXFS) &&
-           !(vn->mnt->flags & VFS_MOUNT_RDONLY) &&
-           vn->ops && vn->ops->readpage && vn->ops->writepage;
+    if (!vn)
+        return 0;
+    mount_t *mnt = vn->mnt;
+    return a20_vfs_file_uses_buffered_write(
+        (vn->mode & S_IFMT) == S_IFREG, mnt ? (int)mnt->type : -1,
+        mnt ? mnt->flags : 0,
+        (vn->ops && vn->ops->readpage) ? 1 : 0,
+        (vn->ops && vn->ops->writepage) ? 1 : 0);
 }
 
 static int vfs_read_file_impl(vfile_t *vf, char *buf, size_t count)
@@ -572,14 +572,39 @@ static int vfs_shutdown_teardown_cb(void *context)
     /* Namespace registry is newest-first, so private clones are visited
      * before their shared source. This callback commits in-memory instances
      * without freeing mount/vnode objects that surviving task references may
-     * still name while firmware poweroff is pending. */
+     * still name while firmware poweroff is pending.
+     *
+     * Per-mount faults are isolated: one mount's failure must not starve
+     * remaining mounts of their clean-shutdown attempt (a no-journal backend
+     * left dirty by a skipped peer fail-closes its next mount).  The first
+     * error is remembered and returned so the shutdown state machine keeps
+     * its refuse-and-retry contract. */
+    int first_ret = 0;
     for (int n = 0; n < ns_count; n++) {
         mnt_namespace_t *ns = mntns_shutdown_namespace_at(n);
         if (!ns)
             return -EIO;
-        for (int i = 0; i < ns->nmounts; i++) {
-            mount_t *mnt = ns->mounts[i];
-            if (!mnt || !mnt->publish_ready || mnt->shared_source ||
+        /* Snapshot the table before iterating: a concurrent unmount (e.g.
+         * the peer service's exit cleanup running vfs_mount_remove on its
+         * own CPU after acknowledging SHUTDOWN) compacts ns->mounts and
+         * drops ns->nmounts mid-loop, which would silently skip every mount
+         * past the removed slot — a no-journal backend left dirty by a
+         * skipped entry then fail-closes its next mount.  Root references
+         * keep the snapshot entries coherent after removal. */
+        mount_t *snapshot[MNTNS_MAX_MOUNTS];
+        int snap_count = 0;
+        uint64_t snap_flags = mntns_mount_table_lock();
+        for (int i = 0; i < ns->nmounts && snap_count < MNTNS_MAX_MOUNTS;
+             i++) {
+            if (!ns->mounts[i])
+                continue;
+            snapshot[snap_count++] = ns->mounts[i];
+            vfs_mount_root_get(ns->mounts[i]);
+        }
+        mntns_mount_table_unlock(snap_flags);
+        for (int i = 0; i < snap_count; i++) {
+            mount_t *mnt = snapshot[i];
+            if (!mnt->publish_ready || mnt->shared_source ||
                 mnt->ns_users == 0)
                 continue;
             ret = 0;
@@ -589,10 +614,13 @@ static int vfs_shutdown_teardown_cb(void *context)
                 extern int uxfs_unmount(struct vnode *root);
                 ret = uxfs_unmount(mnt->root);
             }
-            if (ret < 0)
-                return ret;
+            if (ret < 0 && first_ret == 0)
+                first_ret = ret;
+            vfs_mount_root_put(mnt);
         }
     }
+    if (first_ret < 0)
+        return first_ret;
     vfile_shutdown_snapshot_end();
     g_shutdown_vfile_snapshot = 0;
     return 0;

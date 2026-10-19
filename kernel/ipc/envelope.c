@@ -33,33 +33,19 @@
 #include "proc/signal.h"
 #include "sys/usercopy.h"
 #include "mm/slab.h"
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
 #include "ipc/envelope_policy.h"
 _Static_assert(A20_RIGHT_READ == 1ull,
                "Rust envelope policy READ bit must match the C ABI");
 _Static_assert(A20_RIGHT_WRITE == 2ull,
                "Rust envelope policy WRITE bit must match the C ABI");
-#endif
 
 #define ENV_NS_PER_SEC 1000000000ull
 
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
 typedef a20_env_shadow_state_t env_shadow_t;
 _Static_assert(sizeof(env_shadow_t) == 24,
                "Rust envelope shadow size must match C");
 _Static_assert(__builtin_offsetof(env_shadow_t, rights) == 16,
                "Rust envelope shadow rights offset must match C");
-#else
-typedef struct env_shadow {
-    uint64_t vfile_identity; /* zero = free; stable through dup/fork aliases */
-    uint8_t  obj_type;
-    uint8_t  reserved[7];
-    uint64_t rights;
-} env_shadow_t;
-_Static_assert(sizeof(env_shadow_t) == 24, "C envelope shadow ABI");
-_Static_assert(__builtin_offsetof(env_shadow_t, rights) == 16,
-               "C envelope shadow rights offset");
-#endif
 
 typedef struct a20_envelope {
     refcount_t      refs;
@@ -83,25 +69,7 @@ typedef struct a20_envelope {
 
 /* ---- Registry ---------------------------------------------------------- */
 
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
 typedef a20_env_registry_slot_t env_registry_slot_t;
-#else
-typedef struct env_registry_slot {
-    a20_envelope_t *ptr;
-    task_t *owner_task;
-    uint32_t generation;
-    int32_t owner_pid;
-    uint8_t owner_live;
-    uint8_t retired;
-    uint16_t reserved;
-} env_registry_slot_t;
-_Static_assert(__builtin_offsetof(env_registry_slot_t, owner_live) ==
-                   2 * sizeof(void *) + 8, "C envelope registry ABI");
-_Static_assert(sizeof(env_registry_slot_t) ==
-                   (((2 * sizeof(void *) + 12 + __alignof__(void *) - 1) /
-                     __alignof__(void *)) * __alignof__(void *)),
-               "C envelope registry slot size");
-#endif
 static env_registry_slot_t env_registry[A20_ENV_MAX_INSTANCES];
 static spinlock_t env_registry_lock = SPINLOCK_INIT;
 
@@ -110,94 +78,34 @@ static spinlock_t env_registry_lock = SPINLOCK_INIT;
  * every registry transition and pins an object before returning it. */
 static int64_t env_registry_insert_locked(a20_envelope_t *e, task_t *owner)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     return a20_envelope_registry_insert(env_registry, A20_ENV_MAX_INSTANCES,
                                         e, owner, owner->pid);
-#else
-    for (uint32_t i = 0; i < A20_ENV_MAX_INSTANCES; i++) {
-        env_registry_slot_t *slot = &env_registry[i];
-        if (!slot->ptr && !slot->retired) {
-            slot->ptr = e;
-            slot->owner_task = owner;
-            slot->owner_pid = owner->pid;
-            slot->owner_live = 1;
-            return (int64_t)((slot->generation << 10) | i);
-        }
-    }
-    return -EBUSY;
-#endif
 }
 
 static a20_envelope_t *env_registry_lookup_locked(int64_t id,
                                                    bool require_owner)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     return a20_envelope_registry_lookup(env_registry, A20_ENV_MAX_INSTANCES,
                                         id, require_owner ? 1 : 0);
-#else
-    if (id < 0 || (uint64_t)id > 0x7fffffffULL)
-        return NULL;
-    uint32_t raw = (uint32_t)id;
-    uint32_t index = raw & (A20_ENV_MAX_INSTANCES - 1);
-    env_registry_slot_t *slot = &env_registry[index];
-    if (!slot->ptr || slot->generation != (raw >> 10) ||
-        (require_owner && !slot->owner_live))
-        return NULL;
-    return slot->ptr;
-#endif
 }
 
 static a20_envelope_t *env_registry_at_locked(uint32_t index)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     return a20_envelope_registry_at(env_registry, A20_ENV_MAX_INSTANCES,
                                     index);
-#else
-    return index < A20_ENV_MAX_INSTANCES ? env_registry[index].ptr : NULL;
-#endif
 }
 
 static a20_envelope_t *env_registry_close_owner_locked(task_t *owner)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     return a20_envelope_registry_close_owner(env_registry,
                                              A20_ENV_MAX_INSTANCES,
                                              owner);
-#else
-    for (uint32_t i = 0; i < A20_ENV_MAX_INSTANCES; i++) {
-        env_registry_slot_t *slot = &env_registry[i];
-        if (slot->ptr && slot->owner_live && slot->owner_task == owner) {
-            slot->owner_live = 0;
-            return slot->ptr;
-        }
-    }
-    return NULL;
-#endif
 }
 
 static int env_registry_remove_locked(a20_envelope_t *e)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     return a20_envelope_registry_remove(env_registry, A20_ENV_MAX_INSTANCES,
                                         e);
-#else
-    for (uint32_t i = 0; i < A20_ENV_MAX_INSTANCES; i++) {
-        env_registry_slot_t *slot = &env_registry[i];
-        if (slot->ptr == e) {
-            if (slot->owner_live)
-                return -EBUSY;
-            slot->ptr = NULL;
-            slot->owner_task = NULL;
-            slot->owner_pid = 0;
-            if (slot->generation == (0x7fffffffU >> 10))
-                slot->retired = 1;
-            else
-                slot->generation++;
-            return 0;
-        }
-    }
-    return -ENOENT;
-#endif
 }
 
 static int env_ns_to_ticks(uint64_t ns)
@@ -209,12 +117,10 @@ static int env_ns_to_ticks(uint64_t ns)
 
 static void env_free(a20_envelope_t *e)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     /* Final-reference teardown is the only safe whole-table deletion point.
      * Per-numeric-fd deletion is ambiguous across shared task tables/aliases. */
     (void)a20_envelope_policy_shadow_clear(e->shadows,
                                            A20_ENV_MAX_SHADOWS);
-#endif
     kfree(e);
 }
 
@@ -310,17 +216,9 @@ static int env_check_expired(a20_envelope_t *e)
 {
     int deny = 0;
     spin_lock(&e->lock);
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     if (a20_envelope_policy_expire(&e->expired, e->expire_tick,
                                    timer_get_ticks()) != 0)
         deny = -EACCES;
-#else
-    if (!e->expired && e->expire_tick != 0 &&
-        timer_get_ticks() >= e->expire_tick)
-        env_mark_expired_locked(e);
-    if (e->expired)
-        deny = -EACCES;
-#endif
     spin_unlock(&e->lock);
 
     if (deny && (e->policy.flags & A20_ENV_F_KILL_ON_EXPIRE)) {
@@ -338,7 +236,6 @@ static int env_acquire_charge_install_locked(a20_envelope_t *e,
                                              uint64_t rights,
                                              uint64_t vfile_identity)
 {
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     int rc = a20_envelope_policy_acquire_shadow(
         &e->remaining_ops, e->shadows, A20_ENV_MAX_SHADOWS,
         vfile_identity,
@@ -348,31 +245,6 @@ static int env_acquire_charge_install_locked(a20_envelope_t *e,
     if (rc == 0)
         e->stats.acquire_ok++;
     return rc;
-#else
-    if (e->remaining_ops == 0) {
-        e->stats.use_deny_ops++;
-        return -EACCES;
-    }
-    e->remaining_ops--;
-
-    int slot = -1;
-    for (int i = 0; i < A20_ENV_MAX_SHADOWS; i++) {
-        if (e->shadows[i].vfile_identity == vfile_identity) {
-            e->stats.acquire_ok++;
-            return 0;
-        }
-        if (slot < 0 && e->shadows[i].vfile_identity == 0)
-            slot = i;
-    }
-    if (slot < 0)
-        return -EMFILE;
-    e->shadows[slot].vfile_identity = vfile_identity;
-    e->shadows[slot].obj_type = obj_type;
-    memset(e->shadows[slot].reserved, 0, sizeof(e->shadows[slot].reserved));
-    e->shadows[slot].rights = rights;
-    e->stats.acquire_ok++;
-    return 0;
-#endif
 }
 
 /* ---- Acquisition mediation --------------------------------------------- */
@@ -395,21 +267,11 @@ static int env_charge_acquire_vfile_locked(vfile_t *vf, void *opaque)
     int rc;
     spin_lock(&e->lock);
 
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     if (a20_envelope_policy_expire(&e->expired, e->expire_tick,
                                    timer_get_ticks()) != 0) {
         rc = -EACCES;
         goto out;
     }
-#else
-    if (!e->expired && e->expire_tick != 0 &&
-        timer_get_ticks() >= e->expire_tick)
-        env_mark_expired_locked(e);
-    if (e->expired) {
-        rc = -EACCES;
-        goto out;
-    }
-#endif
 
     if (!(e->policy.allowed_types & (1u << kind))) {
         e->stats.acquire_deny_type++;
@@ -521,35 +383,11 @@ static int env_charge_send_vfile_locked(vfile_t *vf, void *opaque)
     int rc;
 
     spin_lock(&e->lock);
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     rc = a20_envelope_policy_charge_propagation_at(
         &e->expired, e->expire_tick, timer_get_ticks(),
         e->policy.propagation_types, kind, &e->remaining_ops);
     if (rc != 0 && rc != -EPERM && !e->expired)
         e->stats.use_deny_ops++;
-#else
-    if (!e->expired && e->expire_tick != 0 &&
-        timer_get_ticks() >= e->expire_tick)
-        env_mark_expired_locked(e);
-    if (e->expired) {
-        rc = -EACCES;
-        goto out;
-    }
-    if (!(e->policy.propagation_types & (1u << kind))) {
-        rc = -EPERM;
-        goto out;
-    }
-    if (e->remaining_ops == 0) {
-        e->stats.use_deny_ops++;
-        rc = -EACCES;
-        goto out;
-    }
-    e->remaining_ops--;
-    rc = 0;
-#endif
-#ifndef CONFIG_ENVELOPE_POLICY_RUST
-out:
-#endif
     spin_unlock(&e->lock);
     return rc;
 }
@@ -593,7 +431,6 @@ int env_mediate_send_fd(int gfd)
 
     uint8_t kind = env_kind_of(gfd);
     spin_lock(&e->lock);
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     int charge = a20_envelope_policy_charge_propagation(
         e->policy.propagation_types, kind, &e->remaining_ops);
     if (charge != 0) {
@@ -602,18 +439,6 @@ int env_mediate_send_fd(int gfd)
         spin_unlock(&e->lock);
         return charge;
     }
-#else
-    if (!(e->policy.propagation_types & (1u << kind))) {
-        spin_unlock(&e->lock);
-        return -EPERM;
-    }
-    if (e->remaining_ops == 0) {
-        e->stats.use_deny_ops++;
-        spin_unlock(&e->lock);
-        return -EACCES;
-    }
-    e->remaining_ops--;
-#endif
     spin_unlock(&e->lock);
     return 0;
 }
@@ -663,97 +488,25 @@ static int env_charge_use_vfile_locked(vfile_t *vf, void *opaque)
     int rc = 0;
     spin_lock(&e->lock);
 
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
-    if (a20_envelope_policy_expire(&e->expired, e->expire_tick,
-                                   timer_get_ticks()) != 0) {
-        rc = -EACCES;
-        goto out;
-    }
-#else
-    if (!e->expired && e->expire_tick != 0 &&
-        timer_get_ticks() >= e->expire_tick)
-        env_mark_expired_locked(e);
-    if (e->expired) {
-        rc = -EACCES;
-        goto out;
-    }
-#endif
+    a20_env_use_transaction_t txn = {
+        .expired = &e->expired,
+        .expire_tick = e->expire_tick,
+        .now = timer_get_ticks(),
+        .shadows = e->shadows,
+        .shadow_capacity = A20_ENV_MAX_SHADOWS,
+        .identity = identity,
+        .remaining_ops = &e->remaining_ops,
+        .remaining_data = &e->remaining_data,
+        .want_write = ctx->want_write,
+        .bytes = (uint64_t)ctx->bytes,
+        .use_ok = &e->stats.use_ok,
+        .deny_rights = &e->stats.use_deny_rights,
+        .deny_ops = &e->stats.use_deny_ops,
+        .deny_data = &e->stats.use_deny_data,
+        .bytes_charged = &e->stats.bytes_charged,
+    };
+    rc = a20_envelope_policy_use_transaction(&txn);
 
-    bool tracked = false;
-    uint64_t shadow_rights = 0;
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
-    int32_t rust_tracked = 0;
-    if (a20_envelope_policy_shadow_lookup(e->shadows,
-                                           A20_ENV_MAX_SHADOWS, identity,
-                                           &shadow_rights,
-                                           &rust_tracked) != 0) {
-        rc = -EACCES;
-        goto out;
-    }
-    tracked = rust_tracked != 0;
-#else
-    for (int i = 0; i < A20_ENV_MAX_SHADOWS; i++) {
-        if (e->shadows[i].vfile_identity == identity) {
-            tracked = true;
-            shadow_rights = e->shadows[i].rights;
-            break;
-        }
-    }
-#endif
-
-    /* Grandfathered authorities have no identity row and stay permitted but
-     * budget-accounted. Tracked grants follow the open-file object through
-     * aliases; a different object reusing the same local fd is never tracked. */
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
-    int decision = a20_envelope_policy_charge_use(
-        &e->remaining_ops, &e->remaining_data, shadow_rights,
-        tracked ? 1 : 0, ctx->want_write, (uint64_t)ctx->bytes);
-    if (decision == A20_ENV_POLICY_DENY_RIGHTS) {
-        e->stats.use_deny_rights++;
-        rc = -EACCES;
-        goto out;
-    }
-    if (decision == A20_ENV_POLICY_DENY_OPS) {
-        e->stats.use_deny_ops++;
-        rc = -EACCES;
-        goto out;
-    }
-    if (decision == A20_ENV_POLICY_DENY_DATA) {
-        e->stats.use_deny_data++;
-        rc = -EACCES;
-        goto out;
-    }
-    if (decision != A20_ENV_POLICY_DENY_NONE) {
-        rc = -EACCES;
-        goto out;
-    }
-#else
-    if (tracked && ctx->want_write >= 0) {
-        uint64_t need = ctx->want_write ? A20_RIGHT_WRITE : A20_RIGHT_READ;
-        if (!(shadow_rights & need)) {
-            e->stats.use_deny_rights++;
-            rc = -EACCES;
-            goto out;
-        }
-    }
-    if (e->remaining_ops == 0) {
-        e->stats.use_deny_ops++;
-        rc = -EACCES;
-        goto out;
-    }
-    e->remaining_ops--;
-    if (ctx->bytes > 0) {
-        if (e->remaining_data < ctx->bytes) {
-            e->stats.use_deny_data++;
-            rc = -EACCES;
-            goto out;
-        }
-        e->remaining_data -= ctx->bytes;
-    }
-#endif
-    e->stats.bytes_charged += ctx->bytes;
-    e->stats.use_ok++;
-out:
     spin_unlock(&e->lock);
     return rc;
 }
@@ -804,22 +557,12 @@ uint64_t env_shadow_rights_of_gfd(int gfd, int *tracked)
 
     spin_lock(&e->lock);
     uint64_t rights = 0;
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     int32_t rust_tracked = 0;
     if (a20_envelope_policy_shadow_lookup(e->shadows,
                                            A20_ENV_MAX_SHADOWS,
                                            vf->identity,
                                            &rights, &rust_tracked) == 0)
         *tracked = rust_tracked;
-#else
-    for (int i = 0; i < A20_ENV_MAX_SHADOWS; i++) {
-        if (e->shadows[i].vfile_identity == vf->identity) {
-            *tracked = 1;
-            rights = e->shadows[i].rights;
-            break;
-        }
-    }
-#endif
     spin_unlock(&e->lock);
     vfs_put_file(vf);
     return rights;
@@ -939,20 +682,8 @@ void env_vfile_retire(struct vfile *vf)
         if (!e)
             continue;
         spin_lock(&e->lock);
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
         (void)a20_envelope_policy_shadow_remove(
             e->shadows, A20_ENV_MAX_SHADOWS, identity);
-#else
-        for (uint32_t j = 0; j < A20_ENV_MAX_SHADOWS; j++) {
-            env_shadow_t *shadow = &e->shadows[j];
-            if (shadow->vfile_identity != identity)
-                continue;
-            shadow->vfile_identity = 0;
-            shadow->obj_type = 0;
-            memset(shadow->reserved, 0, sizeof(shadow->reserved));
-            shadow->rights = 0;
-        }
-#endif
         spin_unlock(&e->lock);
     }
     spin_unlock(&env_registry_lock);
@@ -985,16 +716,11 @@ int64_t env_create(const a20_env_policy_t *policy, uint32_t flags)
                          : 0;
     e->remaining_ops = p.op_budget;
     e->remaining_data = p.data_budget;
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     if (a20_envelope_policy_shadow_init(e->shadows,
                                         A20_ENV_MAX_SHADOWS) != 0) {
         kfree(e);
         return -EINVAL;
     }
-#else
-    for (int i = 0; i < A20_ENV_MAX_SHADOWS; i++)
-        e->shadows[i].vfile_identity = 0;
-#endif
     e->owner_task = proc_current();
     e->owner_pid = proc_current()->pid;
     (void)flags;
@@ -1098,17 +824,9 @@ int env_stats(int64_t env_id, a20_env_stats_t *out)
     spin_lock(&e->lock);
     s = e->stats;
     s.expired = e->expired;
-#ifdef CONFIG_ENVELOPE_POLICY_RUST
     int n = a20_envelope_policy_shadow_count(e->shadows,
                                               A20_ENV_MAX_SHADOWS);
     s.n_shadows = n < 0 ? 0 : n;
-#else
-    int n = 0;
-    for (int i = 0; i < A20_ENV_MAX_SHADOWS; i++)
-        if (e->shadows[i].vfile_identity != 0)
-            n++;
-    s.n_shadows = n;
-#endif
     spin_unlock(&e->lock);
 
     env_put_ref(e);

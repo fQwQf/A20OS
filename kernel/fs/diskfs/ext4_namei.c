@@ -606,7 +606,10 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
 
     /* If a vnode is still alive (open fd, dcache, ...), retain its zero-link
      * inode on the on-disk orphan chain. Final close completes the same
-     * journaled cleanup; a crash is recovered before the next mount is used. */
+     * journaled cleanup; a crash is recovered before the next mount is used.
+     * C/R paired runs with identical source, workload and input reported the
+     * same deferred-orphan count, so this backend does not attribute that
+     * observation to a dcache implementation. */
     vnode_t *live = ext4_vnode_cache_remove(sb, ino);
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;

@@ -18,12 +18,14 @@
 #include <mqueue.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -49,6 +51,14 @@ static int fail(const char *what, int e)
 {
     printf("SYSCALL_EXT: FAIL %s errno=%d\n", what, e);
     return -1;
+}
+
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static int test_keyring(void)
@@ -843,22 +853,61 @@ static int test_io_uring_and_landlock(void)
         return fail("io_uring_enter", errno);
     close(iofd);
 
-    /* landlock ruleset: create, add a path rule, restrict self. */
-    unsigned long long handled = 0xffULL; /* subset of FS access bits */
-    int rfd = syscall(SYS_landlock_create_ruleset, &handled, 8, 0);
-    if (rfd < 0)
-        return fail("landlock_create_ruleset", errno);
-    struct {
-        unsigned long long allowed_access;
-        int parent_fd;
-    } rule;
-    rule.allowed_access = 0x8ULL; /* READ_DIR */
-    rule.parent_fd = AT_FDCWD;
-    if (syscall(SYS_landlock_add_rule, rfd, 1 /* PATH_BENEATH */, &rule, 0) != 0)
-        return fail("landlock_add_rule", errno);
-    /* restrict_self would change enforcement for the rest of this process, so
-     * validate only that the fd shape is accepted without restricting. */
-    close(rfd);
+    /* Landlock must require no_new_privs for an unprivileged caller, then
+     * retain the task's rules after the ruleset fd closes and enforce a path
+     * boundary on real opens. */
+    const char *landlock_dir = "/tmp/syscall-ext-landlock";
+    const char *allowed_path = "/tmp/syscall-ext-landlock/allowed";
+    const char *denied_path = "/tmp/syscall-ext-landlock-denied";
+    unlink(allowed_path);
+    unlink(denied_path);
+    rmdir(landlock_dir);
+    if (mkdir(landlock_dir, 0755) != 0)
+        return fail("landlock mkdir", errno);
+    int file = open(allowed_path, O_CREAT | O_TRUNC | O_WRONLY, 0444);
+    if (file < 0 || write(file, "allowed", 7) != 7)
+        return fail("landlock allowed fixture", errno);
+    close(file);
+    file = open(denied_path, O_CREAT | O_TRUNC | O_WRONLY, 0444);
+    if (file < 0 || write(file, "denied", 6) != 6)
+        return fail("landlock denied fixture", errno);
+    close(file);
+    pid_t landlock_child = fork();
+    if (landlock_child < 0)
+        return fail("landlock fork", errno);
+    if (landlock_child == 0) {
+        if (setgid(65534) || setuid(65534)) _exit(10);
+        unsigned long long handled = 0x4ULL; /* READ_FILE */
+        int ruleset = syscall(SYS_landlock_create_ruleset, &handled, 8, 0);
+        if (ruleset < 0) _exit(11);
+        int dirfd = open(landlock_dir, O_RDONLY | O_DIRECTORY);
+        if (dirfd < 0) _exit(12);
+        struct { unsigned long long allowed_access; int parent_fd; } rule = {
+            .allowed_access = 0x4ULL, .parent_fd = dirfd,
+        };
+        if (syscall(SYS_landlock_add_rule, ruleset, 1, &rule, 0) != 0) _exit(13);
+        close(dirfd);
+        errno = 0;
+        if (syscall(SYS_landlock_restrict_self, ruleset, 0) != -1 || errno != EACCES)
+            _exit(14);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) != 0 ||
+            syscall(SYS_landlock_restrict_self, ruleset, 0) != 0) _exit(15);
+        close(ruleset);
+        file = open(allowed_path, O_RDONLY);
+        if (file < 0) _exit(16);
+        close(file);
+        errno = 0;
+        file = open(denied_path, O_RDONLY);
+        if (file >= 0 || errno != EACCES) _exit(17);
+        _exit(0);
+    }
+    int landlock_status = 0;
+    if (waitpid(landlock_child, &landlock_status, 0) != landlock_child ||
+        !WIFEXITED(landlock_status) || WEXITSTATUS(landlock_status) != 0) {
+        unlink(allowed_path); unlink(denied_path); rmdir(landlock_dir);
+        return fail("landlock restriction", WIFEXITED(landlock_status) ? WEXITSTATUS(landlock_status) : -1);
+    }
+    unlink(allowed_path); unlink(denied_path); rmdir(landlock_dir);
 
     /* fsopen + fsconfig + fsmount of a pseudo filesystem at a temp dir. */
     mkdir("/tmp/syscall_ext_mnt", 0700);
@@ -1236,6 +1285,16 @@ static void *uffd_fault_worker(void *arg)
     return NULL;
 }
 
+struct uffd_race_arg { volatile int *ready; volatile unsigned char *page; };
+
+static void *uffd_race_worker(void *opaque)
+{
+    struct uffd_race_arg *race = opaque;
+    __atomic_store_n(race->ready, 1, __ATOMIC_RELEASE);
+        g_uffd_read_byte = *race->page;
+    return NULL;
+}
+
 static int test_userfaultfd(void)
 {
     long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
@@ -1305,6 +1364,80 @@ static int test_userfaultfd(void)
         return fail("uffdio_unregister", errno);
 
     munmap(page, 4096);
+    close(fd);
+    return 0;
+}
+
+/* Unregister may race a fault after its registry lookup but before it links
+ * onto the fd's faulter queue. The fault must fall back to normal MM faulting,
+ * rather than miss the unregister wake and park forever. */
+static int test_uffd_unregister_fault_race(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fd < 0)
+        return fail("uffd race create", (int)fd);
+    struct uffdio_api api = {0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0) {
+        close(fd);
+        return fail("uffd race api", errno);
+    }
+    for (int attempt = 0; attempt < 32; attempt++) {
+        unsigned char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (page == MAP_FAILED) {
+            close(fd);
+            return fail("uffd race mmap", errno);
+        }
+        struct uffdio_register reg = {0};
+        reg.range.start = (uint64_t)(uintptr_t)page;
+        reg.range.len = 4096;
+        reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+        if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0) {
+            int e = errno;
+            munmap(page, 4096);
+            close(fd);
+            return fail("uffd race register", e);
+        }
+
+        g_uffd_read_byte = -1;
+        volatile int ready = 0;
+        struct uffd_race_arg arg = { .ready = &ready, .page = page };
+        pthread_t th;
+        if (pthread_create(&th, NULL, uffd_race_worker, &arg) != 0) {
+            int e = errno;
+            munmap(page, 4096);
+            close(fd);
+            return fail("uffd race thread", e);
+        }
+        while (!__atomic_load_n(&ready, __ATOMIC_ACQUIRE))
+            sched_yield();
+
+        struct uffdio_range ur = {0};
+        ur.start = (uint64_t)(uintptr_t)page;
+        ur.len = 4096;
+        if (ioctl(fd, UFFDIO_UNREGISTER, &ur) != 0) {
+            int e = errno;
+            close(fd);
+            munmap(page, 4096);
+            return fail("uffd race unregister", e);
+        }
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 1;
+        int joined = pthread_timedjoin_np(th, NULL, &deadline);
+        if (joined != 0) {
+            close(fd);
+            munmap(page, 4096);
+            return fail("uffd race join", joined);
+        }
+        if (g_uffd_read_byte != 0) {
+            close(fd);
+            munmap(page, 4096);
+            return fail("uffd race fallback", g_uffd_read_byte);
+        }
+        munmap(page, 4096);
+    }
     close(fd);
     return 0;
 }
@@ -1902,8 +2035,10 @@ static int test_futex_clock_realtime_reject(void)
     return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int skip_uffd_race = argc > 1 &&
+                         !strcmp(argv[1], "--skip-uffd-unregister-race");
     printf("SYSCALL_EXT: start\n");
     if (test_keyring() < 0)
         return 1;
@@ -1929,10 +2064,18 @@ int main(void)
         return 1;
     if (test_file_interfaces() < 0)
         return 1;
+    uint64_t uffd_start_ns = monotonic_ns();
     if (test_uffd_double_registration() < 0)
         return -1;
     if (test_userfaultfd() < 0)
         return 1;
+    if (!skip_uffd_race && test_uffd_unregister_fault_race() < 0)
+        return 1;
+    if (skip_uffd_race)
+        printf("UFFD_RACE_STRESS: SKIP requested\n");
+    uint64_t uffd_end_ns = monotonic_ns();
+    printf("UFFD_STRESS_NS: %llu\n",
+           (unsigned long long)(uffd_end_ns - uffd_start_ns));
     if (test_perf() < 0)
         return 1;
     if (test_timer_sigevent() < 0)

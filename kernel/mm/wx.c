@@ -117,9 +117,17 @@ void mm_wx_policy_init(void)
     kinfo("[WX] 用户态 W^X 策略: %s\n", names[g_wx_policy]);
 }
 
-int mm_wx_filter_prot(int prot, const char *ctx)
+/* Resolved policy value (MM_WX_OFF/STRIP/DENY) as a plain fact, for decision
+ * owners outside this file (the Rust ELF planner takes the policy as input
+ * and owns the filter verdict itself). The exemption flag remains a task
+ * fact read by the caller; nothing here decides. */
+int mm_wx_policy(void)
 {
-    if ((prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC))
+    return g_wx_policy;
+}
+
+int mm_wx_filter_prot(int prot, const char *ctx)
+{    if ((prot & (PROT_WRITE | PROT_EXEC)) != (PROT_WRITE | PROT_EXEC))
         return prot;
 
     task_t *cur = proc_current();
