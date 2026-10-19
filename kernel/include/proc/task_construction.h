@@ -35,10 +35,6 @@ typedef struct task_construction_ops {
     uint8_t vfork;
 } task_construction_ops_t;
 
-/* C retains each resource and architecture primitive. Rust invokes these
- * callbacks in transaction order and owns rollback/publication decisions. */
-int proc_task_construction_run(const task_construction_ops_t *ops);
-
 #ifdef CONFIG_TASK_CONSTRUCTION_TEST
 /* One-shot, current-parent-only failure after a real stage has acquired its
  * resources. Exposed only by the test kernel profile. */

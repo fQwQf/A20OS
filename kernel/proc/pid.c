@@ -7,58 +7,83 @@
 
 #ifdef CONFIG_MCU
 /* STM32 has very limited SRAM; keep the PID namespace small. */
-#define PID_MAX_LIMIT   256
-#define PID_HASH_BITS   4
+#define PID_MAX_LIMIT 256
+#define PID_HASH_BITS 4
 #else
-#define PID_MAX_LIMIT   4194304
-#define PID_HASH_BITS   10
+#define PID_MAX_LIMIT 4194304
+#define PID_HASH_BITS 10
 #endif
 
-#define PID_HASH_SIZE   (1U << PID_HASH_BITS)
+#define PID_HASH_SIZE (1U << PID_HASH_BITS)
+
+/* PID_IMPL=rust moves the id space itself — occupancy bitmap, next-id cursor,
+ * pid_max limit and the free-id search including the wrap — to
+ * kernel/proc/pid_alloc.rs.  C keeps the pid_lock that serializes it, the
+ * task_t hash chain used for lookup, and the lifetime accounting. */
+#ifdef CONFIG_PID_RUST
+_Static_assert(PID_MAX_LIMIT == 4194304,
+               "CONFIG_PID_RUST needs the non-MCU PID_MAX_LIMIT that "
+               "kernel/proc/pid_alloc.rs is sized for");
+extern void a20_pid_alloc_init(void);
+extern int a20_pid_alloc(void);
+extern void a20_pid_release(int pid);
+extern int a20_pid_max(void);
+extern int a20_pid_next_value(void);
+extern int a20_pid_set_max(int value);
+#else
 #define PID_BITMAP_SIZE ((PID_MAX_LIMIT + 63) / 64)
 
-static spinlock_t pid_lock = SPINLOCK_INIT;
 static int next_pid = 1;
 static int pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
-static task_t *pid_hash[PID_HASH_SIZE];
 static uint64_t pid_bitmap[PID_BITMAP_SIZE];
 
-static unsigned pid_hash_index(int pid)
-{
-    return (((unsigned)pid) * 2654435761U) >> (32 - PID_HASH_BITS);
-}
-
-static void pid_bitmap_set(int pid)
-{
-    if (pid < 1 || pid > pid_max) return;
+static void pid_bitmap_set(int pid) {
+    if (pid < 1 || pid > pid_max)
+        return;
     unsigned idx = (unsigned)(pid - 1) / 64;
     unsigned bit = (unsigned)(pid - 1) % 64;
     pid_bitmap[idx] |= (1ULL << bit);
 }
 
-static void pid_bitmap_clear(int pid)
-{
-    if (pid < 1 || pid > PID_MAX_LIMIT) return;
+static void pid_bitmap_clear(int pid) {
+    if (pid < 1 || pid > PID_MAX_LIMIT)
+        return;
     unsigned idx = (unsigned)(pid - 1) / 64;
     unsigned bit = (unsigned)(pid - 1) % 64;
     pid_bitmap[idx] &= ~(1ULL << bit);
 }
 
-static int ctz64(uint64_t v)
-{
-    if (v == 0) return 64;
+static int ctz64(uint64_t v) {
+    if (v == 0)
+        return 64;
     int n = 0;
-    if ((v & 0xFFFFFFFF) == 0) { n += 32; v >>= 32; }
-    if ((v & 0xFFFF) == 0)     { n += 16; v >>= 16; }
-    if ((v & 0xFF) == 0)       { n += 8;  v >>= 8;  }
-    if ((v & 0xF) == 0)        { n += 4;  v >>= 4;  }
-    if ((v & 0x3) == 0)        { n += 2;  v >>= 2;  }
-    if ((v & 0x1) == 0)        { n += 1; }
+    if ((v & 0xFFFFFFFF) == 0) {
+        n += 32;
+        v >>= 32;
+    }
+    if ((v & 0xFFFF) == 0) {
+        n += 16;
+        v >>= 16;
+    }
+    if ((v & 0xFF) == 0) {
+        n += 8;
+        v >>= 8;
+    }
+    if ((v & 0xF) == 0) {
+        n += 4;
+        v >>= 4;
+    }
+    if ((v & 0x3) == 0) {
+        n += 2;
+        v >>= 2;
+    }
+    if ((v & 0x1) == 0) {
+        n += 1;
+    }
     return n;
 }
 
-static int pid_bitmap_find_free(int start)
-{
+static int pid_bitmap_find_free(int start) {
     int limit = pid_max > 0 ? pid_max : 1;
     int word_start = (start - 1) / 64;
 
@@ -84,18 +109,8 @@ static int pid_bitmap_find_free(int start)
     return -1;
 }
 
-void proc_pid_init(void)
-{
-    spin_init(&pid_lock);
-    memset(pid_hash, 0, sizeof(pid_hash));
-    memset(pid_bitmap, 0, sizeof(pid_bitmap));
-    next_pid = 1;
-    pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
-}
-
-int proc_pid_alloc(void)
-{
-    uint64_t flags = spin_lock_irqsave(&pid_lock);
+/* Caller holds pid_lock. */
+static int pid_alloc_locked(void) {
     int limit = pid_max > 0 ? pid_max : 1;
 
     int pid = pid_bitmap_find_free(next_pid);
@@ -109,16 +124,53 @@ int proc_pid_alloc(void)
         next_pid = pid + 1;
         if (next_pid > limit)
             next_pid = 1;
-        spin_unlock_irqrestore(&pid_lock, flags);
         return pid;
     }
 
-    spin_unlock_irqrestore(&pid_lock, flags);
     return -EAGAIN;
 }
+#endif /* CONFIG_PID_RUST */
 
-void proc_pid_register(task_t *t)
-{
+static spinlock_t pid_lock = SPINLOCK_INIT;
+static task_t *pid_hash[PID_HASH_SIZE];
+
+static unsigned pid_hash_index(int pid) {
+    return (((unsigned)pid) * 2654435761U) >> (32 - PID_HASH_BITS);
+}
+
+/* Return one id to the id space.  The caller holds pid_lock. */
+static void proc_pid_release_id(int pid) {
+#ifdef CONFIG_PID_RUST
+    a20_pid_release(pid);
+#else
+    pid_bitmap_clear(pid);
+#endif
+}
+
+void proc_pid_init(void) {
+    spin_init(&pid_lock);
+    memset(pid_hash, 0, sizeof(pid_hash));
+#ifdef CONFIG_PID_RUST
+    a20_pid_alloc_init();
+#else
+    memset(pid_bitmap, 0, sizeof(pid_bitmap));
+    next_pid = 1;
+    pid_max = PID_MAX_LIMIT < 32768 ? PID_MAX_LIMIT : 32768;
+#endif
+}
+
+int proc_pid_alloc(void) {
+    uint64_t flags = spin_lock_irqsave(&pid_lock);
+#ifdef CONFIG_PID_RUST
+    int pid = a20_pid_alloc();
+#else
+    int pid = pid_alloc_locked();
+#endif
+    spin_unlock_irqrestore(&pid_lock, flags);
+    return pid;
+}
+
+void proc_pid_register(task_t *t) {
     if (!t || !proc_get(t))
         return;
 
@@ -130,8 +182,7 @@ void proc_pid_register(task_t *t)
     spin_unlock_irqrestore(&pid_lock, flags);
 }
 
-void proc_pid_unregister(task_t *t)
-{
+void proc_pid_unregister(task_t *t) {
     if (!t)
         return;
 
@@ -150,7 +201,7 @@ void proc_pid_unregister(task_t *t)
     }
 #ifndef A20_TASK_OBJECTS_ENABLED
     if (removed)
-        pid_bitmap_clear(t->pid);
+        proc_pid_release_id(t->pid);
 #endif
     spin_unlock_irqrestore(&pid_lock, flags);
     if (removed) {
@@ -165,13 +216,12 @@ void proc_pid_unregister(task_t *t)
  * Handles retain only the identity object, allowing normal PID recycling. */
 void proc_pid_final_release(task_t *task) {
     uint64_t flags = spin_lock_irqsave(&pid_lock);
-    pid_bitmap_clear(task->pid);
+    proc_pid_release_id(task->pid);
     spin_unlock_irqrestore(&pid_lock, flags);
 }
 #endif
 
-task_t *proc_find_get(int pid)
-{
+task_t *proc_find_get(int pid) {
     uint64_t flags = spin_lock_irqsave(&pid_lock);
     task_t *t = pid_hash[pid_hash_index(pid)];
     while (t) {
@@ -185,25 +235,35 @@ task_t *proc_find_get(int pid)
     return t;
 }
 
-int proc_pid_max(void)
-{
+int proc_pid_max(void) {
+#ifdef CONFIG_PID_RUST
+    return a20_pid_max();
+#else
     return pid_max;
+#endif
 }
 
-int proc_pid_next_value(void)
-{
+int proc_pid_next_value(void) {
+#ifdef CONFIG_PID_RUST
+    return a20_pid_next_value();
+#else
     return next_pid;
+#endif
 }
 
-int proc_set_pid_max(int value)
-{
+int proc_set_pid_max(int value) {
     if (value < 1 || value > PID_MAX_LIMIT)
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&pid_lock);
+#ifdef CONFIG_PID_RUST
+    int rc = a20_pid_set_max(value);
+#else
     pid_max = value;
     if (next_pid < 1 || next_pid > pid_max)
         next_pid = 1;
+    int rc = 0;
+#endif
     spin_unlock_irqrestore(&pid_lock, flags);
-    return 0;
+    return rc;
 }

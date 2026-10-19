@@ -26,6 +26,7 @@
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
+#include "proc/ptrace_state.h"
 #include "core/klog.h"
 #include "core/string.h"
 #include "mm/mm.h"
@@ -36,79 +37,127 @@
                                PT_DEBUG_FLAG_TRACEEXIT | \
                                PT_DEBUG_FLAG_EXITKILL)
 
-static void ptrace_snapshot_siginfo(task_t *t, int sig)
-{
-    t->ptrace_siginfo_valid = 0;
-    memset(t->ptrace_siginfo, 0, sizeof(t->ptrace_siginfo));
-    if (!t || !t->signals)
-        return;
-    if (signal_task_get_pending_info(t, sig, t->ptrace_siginfo,
-                                     sizeof(t->ptrace_siginfo)) == 0)
-        t->ptrace_siginfo_valid = 1;
-}
+/* ---- ptrace state adapter ---- */
 
-static void ptrace_fill_default_siginfo(task_t *t, int sig, int code)
+int a20_pt_view_fill(task_t *t, pt_view_t *out)
 {
-    arch_siginfo_t *si = (arch_siginfo_t *)t->ptrace_siginfo;
-    memset(si, 0, sizeof(*si));
-    si->si_signo = sig;
-    si->si_code = code;
-    si->_sifields[0] = proc_current() ? proc_current()->pid : 0;
-    si->_sifields[1] = proc_current() ? (int)proc_current()->cred.uid : 0;
-    t->ptrace_siginfo_valid = 1;
-}
-
-/*
- * Core stop primitive, executed by the tracee itself.  The STOPPED state
- * transition lives in proc_sched_stop_for_debug() (proc/sched.c, the
- * state-mutation owner) to keep the task-state boundary; this wrapper
- * publishes the observer-visible stop fields and blocks until the observer
- * resumes the task.  Returns 0 after a normal resume, -EINTR if a fatal
- * signal raced the stop (the caller should proceed with normal
- * delivery/exit instead of stopping).
- */
-static int ptrace_stop_enter(int sig, int kind, int event, uint64_t msg)
-{
-    task_t *t = proc_current();
     if (!t)
-        return -EINTR;
-    if (!proc_debug_is_traced(t))
-        return -EINTR;
-    if (sig == SIGKILL)
-        return -EINTR;
+        return 0;
+    out->ptracer = (void **)&t->ptracer;
+    out->flags = &t->ptrace_flags;
+    out->stop_active = &t->ptrace_stop_active;
+    out->stop_kind = &t->ptrace_stop_kind;
+    out->event = &t->ptrace_event;
+    out->event_msg = &t->ptrace_event_msg;
+    out->stop_sig = &t->ptrace_stop_sig;
+    out->siginfo_valid = &t->ptrace_siginfo_valid;
+    out->deliver_sig = &t->ptrace_deliver_sig;
+    out->ctx_valid = &t->ptrace_ctx_valid;
+    out->orig_parent_pid = &t->ptrace_orig_parent_pid;
+    out->stop_report_pending = &t->stop_report_pending;
+    out->continue_report_pending = &t->continue_report_pending;
+    out->state = (int32_t *)&t->state;
+    out->pid = &t->pid;
+    out->ppid = &t->ppid;
+    out->parent = (void **)&t->parent;
+    out->trap_ctx = (void **)&t->trap_ctx;
+    return 1;
+}
 
+task_t *a20_pt_current(void) { return proc_current(); }
+
+task_t *a20_pt_idle_task(void) { return proc_idle_task(); }
+
+int a20_pt_may_access(task_t *a, task_t *b)
+{
+    return proc_task_may_access(a, b) ? 1 : 0;
+}
+
+int a20_pt_is_traced(const task_t *t) { return proc_debug_is_traced(t) ? 1 : 0; }
+
+task_t *a20_pt_get(task_t *t) { return proc_get(t); }
+
+void a20_pt_put(task_t *t) { proc_put(t); }
+
+uint64_t a20_pt_park_lock(task_t *t) { return spin_lock_irqsave(&t->park_lock); }
+
+void a20_pt_park_unlock(task_t *t, uint64_t flags)
+{
+    spin_unlock_irqrestore(&t->park_lock, flags);
+}
+
+/* The parent's state is sampled in its own critical section before the
+ * target's lock is taken, so the two park_locks are never nested (INV-P3). */
+int a20_pt_parent_alive(task_t *t)
+{
+    task_t *parent = t->parent;
+    if (!parent)
+        return 0;
+    uint64_t pf = spin_lock_irqsave(&parent->park_lock);
+    int pstate = parent->state;
+    spin_unlock_irqrestore(&parent->park_lock, pf);
+    return pstate != PROC_UNUSED ? 1 : 0;
+}
+
+void a20_pt_save_ctx(task_t *t)
+{
     if (t->trap_ctx) {
         t->ptrace_saved_ctx = *t->trap_ctx;
         t->ptrace_ctx_valid = 1;
     } else {
         t->ptrace_ctx_valid = 0;
     }
-    t->ptrace_stop_sig = sig;
-    t->ptrace_event = event;
-    t->ptrace_event_msg = msg;
-    t->ptrace_stop_kind = kind;
-    t->ptrace_deliver_sig = 0;
-
-    return proc_sched_stop_for_debug(t, sig);
 }
+
+int a20_pt_stop(task_t *t, int sig) { return proc_sched_stop_for_debug(t, sig); }
+
+void a20_pt_snapshot_siginfo(task_t *t, int sig)
+{
+    if (!t)
+        return;
+    t->ptrace_siginfo_valid = 0;
+    memset(t->ptrace_siginfo, 0, sizeof(t->ptrace_siginfo));
+    if (!t->signals)
+        return;
+    if (signal_task_get_pending_info(t, sig, t->ptrace_siginfo,
+                                     sizeof(t->ptrace_siginfo)) == 0)
+        t->ptrace_siginfo_valid = 1;
+}
+
+void a20_pt_default_siginfo(task_t *t, int sig, int code)
+{
+    arch_siginfo_t *si = (arch_siginfo_t *)t->ptrace_siginfo;
+    memset(si, 0, sizeof(*si));
+    si->si_signo = sig;
+    si->si_code = code;
+    task_t *cur = proc_current();
+    si->_sifields[0] = cur ? cur->pid : 0;
+    si->_sifields[1] = cur ? (int)cur->cred.uid : 0;
+    t->ptrace_siginfo_valid = 1;
+}
+
+void a20_pt_send_stop(task_t *t) { (void)signal_send_task(t, SIGSTOP); }
+
+void a20_pt_fold_ctx(task_t *t, int kind)
+{
+    if (t->ptrace_ctx_valid && t->trap_ctx)
+        *t->trap_ctx = t->ptrace_saved_ctx;
+    if (kind == PT_DEBUG_STOP_SYSCALL_ENTRY && t->trap_ctx)
+        arch_ptrace_rewind_syscall(t->trap_ctx);
+}
+
+int a20_pt_resume_stopped(task_t *t) { return proc_sched_resume_stopped(t, 0); }
+
+int a20_pt_signal_send(int pid, int sig) { return signal_send(pid, sig); }
 
 int proc_debug_signal_stop(int sig)
 {
-    if (sig == SIGKILL)
-        return -EINTR;
-    ptrace_snapshot_siginfo(proc_current(), sig);
-    if (!proc_current()->ptrace_siginfo_valid)
-        ptrace_fill_default_siginfo(proc_current(), sig, 0 /* SI_USER */);
-    return ptrace_stop_enter(sig, PT_DEBUG_STOP_SIGNAL, 0, 0);
+    return a20_pt_signal_stop(proc_current(), sig);
 }
 
 int proc_debug_event_stop(int sig, int event, uint64_t msg)
 {
-    if (event == PT_DEBUG_EVENT_EXEC)
-        ptrace_fill_default_siginfo(proc_current(), SIGTRAP, 1 /* TRAP_BRKPT */);
-    else
-        ptrace_fill_default_siginfo(proc_current(), SIGTRAP, 0);
-    return ptrace_stop_enter(sig, PT_DEBUG_STOP_EVENT, event, msg);
+    return a20_pt_event_stop(proc_current(), sig, event, msg);
 }
 
 /*
@@ -141,19 +190,7 @@ static task_t *ptrace_tracee_get(int pid, int need_stopped)
 
 int proc_debug_traceme(void)
 {
-    task_t *t = proc_current();
-    if (!t || !t->parent)
-        return -EPERM;
-    if (proc_debug_is_traced(t))
-        return -EPERM;
-    /* The observing task is our parent.  The first exec or signal will
-     * produce the initial stop. */
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    t->ptracer = t->parent;
-    t->ptrace_flags |= PT_DEBUG_FLAG_TRACED | PT_DEBUG_FLAG_TRACEME;
-    t->ptrace_orig_parent_pid = t->parent->pid;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-    return 0;
+    return (int)a20_pt_traceme(proc_current());
 }
 
 int proc_debug_attach(int pid)
@@ -163,56 +200,9 @@ int proc_debug_attach(int pid)
     task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
-    if (t == caller || t == proc_idle_task()) {
-        proc_put(t);
-        return -EPERM;
-    }
-
-    if (!proc_task_may_access(caller, t)) {
-        proc_put(t);
-        return -EPERM;
-    }
-
-    /* Two phases, so the tracee's park_lock and its parent's park_lock are
-     * never nested (INV-P3): tasklist_lock owns the parent/children chains and
-     * the reparent, each task's own park_lock owns its state and ptrace
-     * fields. */
-    task_t *orig_parent;
-    int parent_alive = 0;
-    int orig_parent_pid;
-    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    orig_parent = t->parent;
-    if (orig_parent) {
-        uint64_t pf = spin_lock_irqsave(&orig_parent->park_lock);
-        parent_alive = orig_parent->state != PROC_UNUSED;
-        spin_unlock_irqrestore(&orig_parent->park_lock, pf);
-    }
-    orig_parent_pid = orig_parent ? orig_parent->pid : 0;
-
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
-        proc_debug_is_traced(t)) {
-        int zombie = t->state == PROC_ZOMBIE;
-        spin_unlock_irqrestore(&t->park_lock, flags);
-        spin_unlock_irqrestore(&tasklist_lock, lf);
-        proc_put(t);
-        return zombie ? -ESRCH : -EPERM;
-    }
-
-    t->ptracer = caller;
-    t->ptrace_flags |= PT_DEBUG_FLAG_TRACED | PT_DEBUG_FLAG_ATTACHED;
-    t->ptrace_orig_parent_pid = orig_parent_pid;
-    if (parent_alive)
-        t->ppid = caller->pid;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-    proc_reparent_task_locked(caller, t);
-    spin_unlock_irqrestore(&tasklist_lock, lf);
-
-    /* Queue SIGSTOP: the tracee stops at its next signal boundary and the
-     * stop is reported to us as a ptrace stop (sig == SIGSTOP). */
-    (void)signal_send_task(t, SIGSTOP);
+    int64_t r = a20_pt_attach(t, caller, 0);
     proc_put(t);
-    return 0;
+    return (int)r;
 }
 
 int proc_debug_seize(int pid)
@@ -222,53 +212,9 @@ int proc_debug_seize(int pid)
     task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
-    if (t == caller || t == proc_idle_task()) {
-        proc_put(t);
-        return -EPERM;
-    }
-
-    if (!proc_task_may_access(caller, t)) {
-        proc_put(t);
-        return -EPERM;
-    }
-
-    /* Same two-phase shape as proc_debug_attach(); see the comment there for
-     * why the two park_locks must not be nested. */
-    task_t *orig_parent;
-    int parent_alive = 0;
-    int orig_parent_pid;
-    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
-    orig_parent = t->parent;
-    if (orig_parent) {
-        uint64_t pf = spin_lock_irqsave(&orig_parent->park_lock);
-        parent_alive = orig_parent->state != PROC_UNUSED;
-        spin_unlock_irqrestore(&orig_parent->park_lock, pf);
-    }
-    orig_parent_pid = orig_parent ? orig_parent->pid : 0;
-
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE ||
-        proc_debug_is_traced(t)) {
-        int zombie = t->state == PROC_ZOMBIE;
-        spin_unlock_irqrestore(&t->park_lock, flags);
-        spin_unlock_irqrestore(&tasklist_lock, lf);
-        proc_put(t);
-        return zombie ? -ESRCH : -EPERM;
-    }
-
-    /* PTRACE_SEIZE attaches without stopping the tracee first; the first
-     * stop happens at the next signal/syscall boundary. */
-    t->ptracer = caller;
-    t->ptrace_flags |= PT_DEBUG_FLAG_TRACED | PT_DEBUG_FLAG_ATTACHED |
-                       PT_DEBUG_FLAG_SEIZED;
-    t->ptrace_orig_parent_pid = orig_parent_pid;
-    if (parent_alive)
-        t->ppid = caller->pid;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-    proc_reparent_task_locked(caller, t);
-    spin_unlock_irqrestore(&tasklist_lock, lf);
+    int64_t r = a20_pt_attach(t, caller, 1);
     proc_put(t);
-    return 0;
+    return (int)r;
 }
 
 int proc_debug_interrupt(int pid)
@@ -278,20 +224,9 @@ int proc_debug_interrupt(int pid)
     task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
-    if (t->ptracer != caller) {
-        proc_put(t);
-        return -EPERM;
-    }
-    if (t->ptrace_stop_active) {
-        /* Already stopped; nothing to interrupt. */
-        proc_put(t);
-        return 0;
-    }
-    /* Queue a stop at the next boundary; the stop is reported as a ptrace
-     * stop with SIGSTOP. */
-    (void)signal_send_task(t, SIGSTOP);
+    int64_t r = a20_pt_interrupt(t, caller);
     proc_put(t);
-    return 0;
+    return (int)r;
 }
 
 /* orig_pid is task_t::parent->pid as the KERNEL recorded it -- a global id --
@@ -325,36 +260,9 @@ static void ptrace_reparent_to_original(task_t *t, int orig_pid)
     proc_put(reaper);
 }
 
-static int ptrace_detach_internal(task_t *t, int sig)
+void a20_pt_reparent_original(task_t *t, int orig_pid)
 {
-    int resume = 0;
-    int orig_pid = 0;
-
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    if (t->state == PROC_STOPPED && t->ptrace_stop_active) {
-        resume = 1;
-        t->stop_report_pending = 0;
-        t->continue_report_pending = 0;
-        t->ptrace_stop_active = 0;
-        t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
-        t->ptrace_event = 0;
-        if (sig)
-            t->ptrace_deliver_sig = sig;
-    }
-    t->ptracer = NULL;
-    t->ptrace_flags = 0;
-    if (t->parent == proc_current() || t->ptrace_orig_parent_pid > 0)
-        orig_pid = t->ptrace_orig_parent_pid;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-
-    if (orig_pid > 0)
-        ptrace_reparent_to_original(t, orig_pid);
-
-    if (resume)
-        (void)proc_sched_resume_stopped(t, 0);
-    if (resume && sig)
-        (void)signal_send_task(t, sig);
-    return 0;
+    ptrace_reparent_to_original(t, orig_pid);
 }
 
 int proc_debug_detach(int pid, int sig)
@@ -362,53 +270,9 @@ int proc_debug_detach(int pid, int sig)
     task_t *t = ptrace_tracee_get(pid, 0);
     if (!t)
         return -ESRCH;
-    int ret = ptrace_detach_internal(t, sig);
+    int64_t r = a20_pt_detach(t, sig);
     proc_put(t);
-    return ret;
-}
-
-static int ptrace_resume_internal(task_t *t, int sig, int mode, int step)
-{
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    if (t->state != PROC_STOPPED || !t->ptrace_stop_active) {
-        spin_unlock_irqrestore(&t->park_lock, flags);
-        return -ESRCH;
-    }
-
-    /* Fold in register edits made while stopped. */
-    if (t->ptrace_ctx_valid && t->trap_ctx) {
-        *t->trap_ctx = t->ptrace_saved_ctx;
-    }
-
-    if (t->ptrace_stop_kind == PT_DEBUG_STOP_SYSCALL_ENTRY && t->trap_ctx)
-        arch_ptrace_rewind_syscall(t->trap_ctx);
-
-    if (mode == PT_DEBUG_RESUME_SYSCALL)
-        t->ptrace_flags |= PT_DEBUG_FLAG_SYSCALL;
-    else
-        t->ptrace_flags &= ~PT_DEBUG_FLAG_SYSCALL;
-
-    if (step) {
-        t->ptrace_flags |= PT_DEBUG_FLAG_STEP;
-        if (t->trap_ctx)
-            arch_ptrace_set_step(t->trap_ctx);
-    } else {
-        t->ptrace_flags &= ~PT_DEBUG_FLAG_STEP;
-    }
-
-    t->stop_report_pending = 0;
-    t->continue_report_pending = 0;
-    t->ptrace_stop_active = 0;
-    t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
-    t->ptrace_event = 0;
-    if (sig)
-        t->ptrace_deliver_sig = sig;
-    spin_unlock_irqrestore(&t->park_lock, flags);
-
-    int resumed = proc_sched_resume_stopped(t, 0);
-    if (resumed && sig)
-        (void)signal_send_task(t, sig);
-    return 0;
+    return (int)r;
 }
 
 int proc_debug_resume(int pid, int sig, int mode)
@@ -416,26 +280,26 @@ int proc_debug_resume(int pid, int sig, int mode)
     task_t *t = ptrace_tracee_get(pid, 0);
     if (!t)
         return -ESRCH;
-    int ret = ptrace_resume_internal(t, sig, mode, 0);
+    int64_t r = a20_pt_resume(t, sig, mode, 0);
     proc_put(t);
-    return ret;
+    return (int)r;
 }
 
 int proc_debug_singlestep(int pid, int sig)
 {
-    (void)sig;
     task_t *t = ptrace_tracee_get(pid, 0);
     if (!t)
         return -ESRCH;
 #if ARCH_HW_SINGLE_STEP
-    int ret = ptrace_resume_internal(t, sig, PT_DEBUG_RESUME_CONT, 1);
+    int64_t r = a20_pt_singlestep(t, sig);
 #else
-    /* No hardware single-step on this architecture (Linux riscv64 behaves
-     * the same way); gdb falls back to breakpoint stepping. */
-    int ret = -EIO;
+    /* No hardware single-step on this architecture (Linux riscv64 behaves the
+     * same way); gdb falls back to breakpoint stepping. */
+    (void)sig;
+    int64_t r = -EIO;
 #endif
     proc_put(t);
-    return ret;
+    return (int)r;
 }
 
 int proc_debug_kill(int pid)
@@ -443,22 +307,10 @@ int proc_debug_kill(int pid)
     task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
-    if (t->ptracer != proc_current() || !proc_debug_is_traced(t)) {
-        proc_put(t);
-        return -ESRCH;
-    }
-    int ret = 0;
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    if (t->state == PROC_STOPPED && t->ptrace_stop_active) {
-        t->stop_report_pending = 0;
-        t->ptrace_stop_active = 0;
-        t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
-        ret = 1; /* resumed; SIGKILL follows below */
-    }
-    spin_unlock_irqrestore(&t->park_lock, flags);
-    if (ret)
-        (void)proc_sched_resume_stopped(t, 0);
+    int64_t r = a20_pt_kill(t, proc_current());
     proc_put(t);
+    if (r < 0)
+        return (int)r;
     return signal_send(pid, SIGKILL) == 0 ? 0 : -ESRCH;
 }
 
@@ -708,12 +560,9 @@ int proc_debug_setoptions(int pid, unsigned long options)
     task_t *t = ptrace_tracee_get(pid, 1);
     if (!t)
         return -ESRCH;
-    uint64_t flags = spin_lock_irqsave(&t->park_lock);
-    t->ptrace_flags = (t->ptrace_flags & ~PT_DEBUG_OPTION_MASK) |
-                      (options & PT_DEBUG_OPTION_MASK);
-    spin_unlock_irqrestore(&t->park_lock, flags);
+    int64_t r = a20_pt_setoptions(t, (uint64_t)options);
     proc_put(t);
-    return 0;
+    return (int)r;
 }
 
 int proc_debug_geteventmsg(int pid, long *out)
@@ -723,7 +572,7 @@ int proc_debug_geteventmsg(int pid, long *out)
     task_t *t = ptrace_tracee_get(pid, 1);
     if (!t)
         return -ESRCH;
-    *out = (long)t->ptrace_event_msg;
+    *out = (long)a20_pt_geteventmsg(t);
     proc_put(t);
     return 0;
 }
@@ -732,32 +581,14 @@ int proc_debug_geteventmsg(int pid, long *out)
 
 void proc_debug_syscall_entry(trap_context_t *ctx)
 {
-    task_t *t = proc_current();
-    if (!t || !proc_debug_is_traced(t))
-        return;
-    if (!(t->ptrace_flags & PT_DEBUG_FLAG_SYSCALL))
-        return;
-    if (t->ptrace_deliver_sig)
-        return; /* resume-with-signal: deliver first, then syscall runs */
-    if (t->ptrace_stop_active)
-        return;
     (void)ctx;
-    ptrace_fill_default_siginfo(t, SIGTRAP, 4 /* TRAP_SYSCALL */);
-    (void)ptrace_stop_enter(SIGTRAP, PT_DEBUG_STOP_SYSCALL_ENTRY, 0, 0);
+    (void)a20_pt_syscall_stop(proc_current(), 1);
 }
 
 void proc_debug_syscall_exit(trap_context_t *ctx)
 {
-    task_t *t = proc_current();
-    if (!t || !proc_debug_is_traced(t))
-        return;
-    if (!(t->ptrace_flags & PT_DEBUG_FLAG_SYSCALL))
-        return;
-    if (t->ptrace_stop_active)
-        return;
     (void)ctx;
-    ptrace_fill_default_siginfo(t, SIGTRAP, 4 /* TRAP_SYSCALL */);
-    (void)ptrace_stop_enter(SIGTRAP, PT_DEBUG_STOP_SYSCALL_EXIT, 0, 0);
+    (void)a20_pt_syscall_stop(proc_current(), 0);
 }
 
 /* ---- tracer death ---- */
@@ -767,52 +598,13 @@ void proc_debug_tracer_exiting(task_t *tracer)
     if (!tracer)
         return;
 
-    int kill_pids[64];
-    int resume_pids[64];
-    int tracee_pids[64];
-    int kill_count = 0, resume_count = 0, tracee_count = 0;
+    pt_tracer_exit_lists_t lists;
+    a20_pt_tracer_exiting(tracer, &lists);
 
-    /* E2: tasklist_lock walks the global list, each tracee's ->state and ptrace
-     * fields are park_lock-owned and are cleared under its own lock nested
-     * inside (tasklist_lock -> park_lock). */
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t;
-         t = proc_next_task_locked(t)) {
-        if (t == tracer)
-            continue;
-        uint64_t tf = spin_lock_irqsave(&t->park_lock);
-        if (t->state == PROC_UNUSED || t->ptracer != tracer) {
-            spin_unlock_irqrestore(&t->park_lock, tf);
-            continue;
-        }
-
-        if (t->ptrace_flags & PT_DEBUG_FLAG_EXITKILL) {
-            if (kill_count < 64)
-                kill_pids[kill_count++] = t->pid;
-        } else if (t->state == PROC_STOPPED && t->ptrace_stop_active) {
-            if (resume_count < 64)
-                resume_pids[resume_count++] = t->pid;
-        }
-        if (tracee_count < 64)
-            tracee_pids[tracee_count++] = t->pid;
-
-        t->ptracer = NULL;
-        t->ptrace_flags = 0;
-        t->ptrace_deliver_sig = 0;
-        t->ptrace_stop_active = 0;
-        t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
-        t->stop_report_pending = 0;
-        t->continue_report_pending = 0;
-        t->ptrace_event = 0;
-        spin_unlock_irqrestore(&t->park_lock, tf);
-    }
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-
-    /* These three arrays hold global ids the kernel itself recorded earlier
-     * (t->pid), so they are resolved globally rather than in any caller's
-     * namespace. */
-    for (int i = 0; i < tracee_count; i++) {
-        task_t *t = proc_find_get(tracee_pids[i]);
+    /* These arrays hold global ids the kernel itself recorded earlier, so
+     * they are resolved globally rather than in any caller's namespace. */
+    for (size_t i = 0; i < lists.tracee_count; i++) {
+        task_t *t = proc_find_get(lists.tracee_pids[i]);
         if (!t)
             continue;
         if (t->ptrace_orig_parent_pid > 0) {
@@ -826,15 +618,15 @@ void proc_debug_tracer_exiting(task_t *tracer)
         proc_put(t);
     }
 
-    for (int i = 0; i < kill_count; i++) {
-        task_t *t = proc_find_get(kill_pids[i]);
+    for (size_t i = 0; i < lists.kill_count; i++) {
+        task_t *t = proc_find_get(lists.kill_pids[i]);
         if (t) {
             (void)proc_force_exit(t, -SIGKILL);
             proc_put(t);
         }
     }
-    for (int i = 0; i < resume_count; i++) {
-        task_t *t = proc_find_get(resume_pids[i]);
+    for (size_t i = 0; i < lists.resume_count; i++) {
+        task_t *t = proc_find_get(lists.resume_pids[i]);
         if (t) {
             (void)proc_sched_resume_stopped(t, 0);
             proc_put(t);

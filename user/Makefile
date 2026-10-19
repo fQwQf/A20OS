@@ -2,6 +2,7 @@ ARCH ?= riscv64
 OPT ?= -O3
 PROFILE ?= full
 ENVELOPE_ACQUIRE_RACE_TEST ?= 0
+SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST ?= 0
 NPROC ?= $(or $(shell getconf _NPROCESSORS_ONLN 2>/dev/null),$(shell sysctl -n hw.logicalcpu 2>/dev/null),4)
 NOMMU ?= 0
 PYTHON ?= python3
@@ -129,6 +130,12 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdinc -MMD -MP $(MUSL_INC) \
           -Iinit_common -Icmds $(ARCH_CFLAGS)
 ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
 CFLAGS += -DENVELOPE_ACQUIRE_RACE_TEST
+endif
+# Test-profile only: makes syscall_smoke arm the private
+# prctl(0xA20FU) one-shot clone failure so the kernel's fork rollback runs
+# against a real partial publication.
+ifeq ($(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST),1)
+CFLAGS += -DSYSCALL_SMOKE_TASK_CONSTRUCTION_TEST
 endif
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 

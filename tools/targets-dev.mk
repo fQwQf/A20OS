@@ -23,6 +23,7 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 		--user-build-dir "$(USER_BUILD_DIR)" --user-variant "$(USER_VARIANT)" \
 		--user-opt="$(USER_OPT)" --opt="$(OPT)" --profile "$(PROFILE)" \
 		--envelope-acquire-race-test "$(ENVELOPE_ACQUIRE_RACE_TEST)" \
+		--syscall-smoke-task-construction-test "$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)" \
 		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
 		--skip "*/.git user/build user/external/musl/build-*"
 $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build

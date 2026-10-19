@@ -8,15 +8,11 @@
 
 static resource_namespace_t initial[8];
 static spinlock_t ns_lock = SPINLOCK_INIT;
-static uint64_t next_ino = 4026600000ULL;
-static const uint64_t ns_flags[8] = {
-    [PROCNS_UTS] = LINUX_CLONE_NEWUTS,
-    [PROCNS_IPC] = LINUX_CLONE_NEWIPC,
-    [PROCNS_NET] = LINUX_CLONE_NEWNET,
-    [PROCNS_CGROUP] = LINUX_CLONE_NEWCGROUP,
-};
+/* The kind table lives in kernel/proc/resource_ns_state.rs; this predicate
+ * keeps one definition for the accessors below. */
+extern int a20_res_ns_valid_kind(int kind);
 static int valid_kind(int kind) {
-    return kind > 0 && kind < 8 && ns_flags[kind];
+    return a20_res_ns_valid_kind(kind);
 }
 void resource_ns_init(void) {
     static const uint64_t inos[8] = {
@@ -83,12 +79,12 @@ uint64_t resource_ns_task_ino(task_t *t, int kind) {
 uint64_t resource_ns_ino(int kind) {
     return resource_ns_current(kind)->ino;
 }
-static resource_namespace_t *new_ns(task_t *t, int kind) {
+static resource_namespace_t *new_ns(task_t *t, int kind, uint64_t ino) {
     resource_namespace_t *ns = kcalloc(1, sizeof(*ns));
     if (!ns)
         return NULL;
     ns->kind = kind;
-    ns->ino = __atomic_fetch_add(&next_ino, 1, __ATOMIC_RELAXED);
+    ns->ino = ino;
     refcount_set(&ns->refs, 1);
     spin_init(&ns->lock);
     ns->owner = userns_task_get(t);
@@ -109,6 +105,44 @@ static resource_namespace_t *new_ns(task_t *t, int kind) {
     }
     return ns;
 }
+/* ---------------------------------------------------------------------------
+ * User-namespace transaction bridges.
+ *
+ * Rust owns the kind table, the inode sequence and the unshare/fork
+ * transactions with their rollback (kernel/proc/resource_ns_state.rs).  C
+ * keeps the namespace objects: allocation, refcounts, the per-namespace lock,
+ * the task-slot swap, initial pinning and the cgroup path rendering.
+ * ------------------------------------------------------------------------- */
+extern int a20_res_ns_valid_kind(int kind);
+extern int a20_res_ns_unshare(void *t, uint64_t flags);
+extern int a20_res_ns_fork(void *child, void *parent, uint64_t flags);
+
+void *a20_res_ns_new(int kind, void *task, uint64_t ino) {
+    return new_ns((task_t *)task, kind, ino);
+}
+
+void a20_res_ns_put(void *ns) {
+    resource_ns_put((resource_namespace_t *)ns);
+}
+
+int a20_res_ns_join(void *task, void *ns) {
+    return resource_ns_join((task_t *)task, (resource_namespace_t *)ns);
+}
+
+void *a20_res_ns_task_get(void *task, int kind) {
+    return resource_ns_task_get((task_t *)task, kind);
+}
+
+void a20_res_ns_set_task_slot(void *task, int kind, void *ns) {
+    /* The child is private during fork, which is why C wrote the slot
+     * directly here before the transaction moved to Rust. */
+    ((task_t *)task)->resource_ns[kind] = (resource_namespace_t *)ns;
+}
+
+void a20_res_ns_release_task(void *task) {
+    resource_ns_release_task((task_t *)task);
+}
+
 int resource_ns_join(task_t *t, resource_namespace_t *ns) {
     if (!t || !ns || !valid_kind(ns->kind))
         return -EINVAL;
@@ -121,38 +155,13 @@ int resource_ns_join(task_t *t, resource_namespace_t *ns) {
     return 0;
 }
 int resource_ns_unshare(task_t *t, uint64_t flags) {
-    resource_namespace_t *prepared[8] = {0};
-    for (int i = 0; i < 8; i++) {
-        if (!(flags & ns_flags[i]))
-            continue;
-        prepared[i] = new_ns(t, i);
-        if (!prepared[i]) {
-            for (int j = 0; j < 8; j++)
-                resource_ns_put(prepared[j]);
-            return -ENOMEM;
-        }
-    }
-    /* All allocations precede publication: a failed multi-domain request
-     * leaves every membership intact. */
-    for (int i = 0; i < 8; i++) {
-        if (!prepared[i])
-            continue;
-        resource_ns_join(t, prepared[i]);
-        resource_ns_put(prepared[i]);
-    }
-    return 0;
+    return a20_res_ns_unshare(t, flags);
 }
+
 int resource_ns_fork(task_t *child, task_t *parent, uint64_t flags) {
-    for (int i = 0; i < 8; i++) {
-        if (!valid_kind(i))
-            continue;
-        child->resource_ns[i] = resource_ns_task_get(parent, i);
-    }
-    int r = resource_ns_unshare(child, flags);
-    if (r < 0)
-        resource_ns_release_task(child);
-    return r;
+    return a20_res_ns_fork(child, parent, flags);
 }
+
 void resource_ns_release_task(task_t *t) {
     if (!t)
         return;
