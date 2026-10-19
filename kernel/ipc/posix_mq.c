@@ -51,13 +51,12 @@ typedef struct mq_queue {
     mq_message_t *tail;
     int unlinked;
     int refcount;          /* open descriptor count */
-    wait_queue_t send_wq;
-    wait_queue_t recv_wq;
-    spinlock_t lock;
-    /* mq_notify */
     uint64_t notify_sig;
     int notify_pid;
     int notify_pending;
+    wait_queue_t send_wq;
+    wait_queue_t recv_wq;
+    spinlock_t lock;
 } mq_queue_t;
 
 static mq_queue_t g_mq[MQ_MAX_QUEUES];
@@ -66,8 +65,23 @@ static spinlock_t g_mq_lock = SPINLOCK_INIT;
 /* Per-task descriptor table (mqd -> queue pointer). */
 #define MQ_MAX_DESCS 256
 static mq_queue_t *g_mq_desc[MQ_MAX_DESCS];
+static int g_mq_desc_nonblock[MQ_MAX_DESCS];
 static spinlock_t g_mq_desc_lock = SPINLOCK_INIT;
 
+#ifdef CONFIG_POSIX_MQ_RUST
+int a20_posix_mq_notify_txn(void *context, int mqd, const unsigned char *sigevent);
+int a20_posix_mq_open_txn(void *queues, size_t count, void *context,
+                          const char *name, int oflag, const mq_attr_kern_t *attr);
+int a20_posix_mq_unlink_txn(void *queues, size_t count, void *context, const char *name);
+int a20_posix_mq_getsetattr_txn(void *context, int mqd,
+                                const mq_attr_kern_t *newattr,
+                                mq_attr_kern_t *oldattr);
+int a20_posix_mq_close_txn(void *context, int mqd);
+void a20_posix_mq_namespace_destroy_txn(void *queues, size_t count,
+                                        void *context, uint64_t ino);
+#endif
+
+#ifndef CONFIG_POSIX_MQ_RUST
 static mq_queue_t *mq_lookup_locked(const char *name)
 {
     for (int i = 0; i < MQ_MAX_QUEUES; i++)
@@ -105,13 +119,15 @@ static mq_queue_t *mq_alloc_locked(const char *name, const mq_attr_kern_t *attr)
     spin_init(&q->lock);
     return q;
 }
+#endif
 
-static int mq_alloc_descriptor(mq_queue_t *q)
+static int mq_alloc_descriptor(mq_queue_t *q, int nonblock)
 {
     uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
     for (int i = 0; i < MQ_MAX_DESCS; i++) {
         if (!g_mq_desc[i]) {
             g_mq_desc[i] = q;
+            g_mq_desc_nonblock[i] = nonblock;
             spin_unlock_irqrestore(&g_mq_desc_lock, flags);
             return i;
         }
@@ -120,6 +136,74 @@ static int mq_alloc_descriptor(mq_queue_t *q)
     return -EMFILE;
 }
 
+#ifdef CONFIG_POSIX_MQ_RUST
+void a20_posix_mq_queue_reset(void *context, void *queue_opaque)
+{
+    (void)context;
+    mq_queue_t *q = queue_opaque;
+    memset(q, 0, sizeof(*q));
+    wait_queue_init(&q->send_wq);
+    wait_queue_init(&q->recv_wq);
+    spin_init(&q->lock);
+}
+
+int a20_posix_mq_desc_install(void *context, void *queue, int nonblock)
+{
+    (void)context;
+    return mq_alloc_descriptor(queue, nonblock);
+}
+
+void *a20_posix_mq_desc_take(void *context, int mqd)
+{
+    (void)context;
+    if (mqd < 0 || mqd >= MQ_MAX_DESCS) return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
+    mq_queue_t *q = g_mq_desc[mqd];
+    g_mq_desc[mqd] = NULL;
+    g_mq_desc_nonblock[mqd] = 0;
+    spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+    return q;
+}
+
+void *a20_posix_mq_desc_snapshot(void *context, int mqd, int *nonblock)
+{
+    (void)context;
+    if (mqd < 0 || mqd >= MQ_MAX_DESCS) return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
+    mq_queue_t *q = g_mq_desc[mqd];
+    if (nonblock) *nonblock = q ? g_mq_desc_nonblock[mqd] : 0;
+    spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+    return q;
+}
+
+int a20_posix_mq_desc_set_nonblock(void *context, int mqd, void *queue, int value)
+{
+    (void)context;
+    if (mqd < 0 || mqd >= MQ_MAX_DESCS) return -EBADF;
+    uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
+    if (g_mq_desc[mqd] != queue) {
+        spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+        return -EBADF;
+    }
+    g_mq_desc_nonblock[mqd] = value;
+    spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+    return 0;
+}
+
+uint64_t a20_posix_mq_namespace(void *context)
+{
+    (void)context;
+    return resource_ns_ino(PROCNS_IPC);
+}
+
+int a20_posix_mq_pid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? task->pid : 0;
+}
+#endif
+
 static mq_queue_t *mq_desc_get(int mqd)
 {
     if (mqd < 0 || mqd >= MQ_MAX_DESCS)
@@ -127,9 +211,24 @@ static mq_queue_t *mq_desc_get(int mqd)
     return g_mq_desc[mqd];
 }
 
+static int mq_desc_nonblock(int mqd)
+{
+    if (mqd < 0 || mqd >= MQ_MAX_DESCS)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
+    int nonblock = g_mq_desc[mqd] ? g_mq_desc_nonblock[mqd] : 0;
+    spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+    return nonblock;
+}
+
 int posix_mq_open(const char *name, int oflag, int mode,
                   const mq_attr_kern_t *attr)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    (void)mode;
+    return a20_posix_mq_open_txn(g_mq, MQ_MAX_QUEUES, NULL, name, oflag, attr);
+#else
+
     (void)mode;
     if (!name || !name[0])
         return -EINVAL;
@@ -161,7 +260,7 @@ int posix_mq_open(const char *name, int oflag, int mode,
 
     /* Per-process open tracking: keep a refcount and per-task descriptor. */
     q->refcount++;
-    int mqd = mq_alloc_descriptor(q);
+    int mqd = mq_alloc_descriptor(q, (oflag & MQ_O_NONBLOCK) != 0);
     if (mqd < 0) {
         q->refcount--;
         if (q->refcount <= 0 && q->unlinked) {
@@ -173,10 +272,16 @@ int posix_mq_open(const char *name, int oflag, int mode,
     }
     spin_unlock_irqrestore(&g_mq_lock, flags);
     return mqd;
+
+#endif
 }
 
 int posix_mq_unlink(const char *name)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    return a20_posix_mq_unlink_txn(g_mq, MQ_MAX_QUEUES, NULL, name);
+#else
+
     if (!name)
         return -EINVAL;
     if (name[0] == '/')
@@ -196,11 +301,17 @@ int posix_mq_unlink(const char *name)
         memset(q, 0, sizeof(*q));
     spin_unlock_irqrestore(&g_mq_lock, flags);
     return 0;
+
+#endif
 }
 
 int posix_mq_getsetattr(int mqd, const mq_attr_kern_t *newattr,
                         mq_attr_kern_t *oldattr)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    return a20_posix_mq_getsetattr_txn(NULL, mqd, newattr, oldattr);
+#else
+
     mq_queue_t *q = mq_desc_get(mqd);
     if (!q)
         return -EBADF;
@@ -210,26 +321,50 @@ int posix_mq_getsetattr(int mqd, const mq_attr_kern_t *newattr,
         return -EBADF;
     }
     mq_attr_kern_t attr;
-    attr.mq_flags = q->mq_flags;
+    attr.mq_flags = mq_desc_nonblock(mqd) ? MQ_O_NONBLOCK : 0;
     attr.mq_maxmsg = q->mq_maxmsg;
     attr.mq_msgsize = q->mq_msgsize;
     attr.mq_curmsgs = q->mq_curmsgs;
     if (newattr) {
         /* Only mq_flags is modifiable; the rest are fixed by the kernel. */
-        q->mq_flags = newattr->mq_flags & MQ_O_NONBLOCK;
-        attr.mq_flags = q->mq_flags;
+        uint64_t dflags = spin_lock_irqsave(&g_mq_desc_lock);
+        if (g_mq_desc[mqd] != q) {
+            spin_unlock_irqrestore(&g_mq_desc_lock, dflags);
+            spin_unlock_irqrestore(&g_mq_lock, flags);
+            return -EBADF;
+        }
+        g_mq_desc_nonblock[mqd] = (newattr->mq_flags & MQ_O_NONBLOCK) != 0;
+        spin_unlock_irqrestore(&g_mq_desc_lock, dflags);
+        attr.mq_flags = newattr->mq_flags & MQ_O_NONBLOCK;
     }
     spin_unlock_irqrestore(&g_mq_lock, flags);
     if (oldattr)
         *oldattr = attr;
     return 0;
+
+#endif
 }
 
 int posix_mq_notify(int mqd, const void *sigevent)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    unsigned char ev[24];
+    if (sigevent && copy_from_user(ev, sigevent, sizeof(ev)) < 0)
+        return -EFAULT;
+    return a20_posix_mq_notify_txn(NULL, mqd, sigevent ? ev : NULL);
+#else
     mq_queue_t *q = mq_desc_get(mqd);
     if (!q)
         return -EBADF;
+    unsigned char ev[24];
+    int signo = 0;
+    if (sigevent) {
+        if (copy_from_user(ev, sigevent, sizeof(ev)) < 0)
+            return -EFAULT;
+        memcpy(&signo, ev + 8, sizeof(signo));
+        if (signo <= 0 || signo >= 64)
+            return -EINVAL;
+    }
     uint64_t flags = spin_lock_irqsave(&g_mq_lock);
     if (!q->used) {
         spin_unlock_irqrestore(&g_mq_lock, flags);
@@ -241,27 +376,173 @@ int posix_mq_notify(int mqd, const void *sigevent)
         spin_unlock_irqrestore(&g_mq_lock, flags);
         return 0;
     }
-    /* sigevent: {sigev_value(8), sigev_signo(4), sigev_notify(4),
-     * sigev_notify_attributes(8)} = 24 bytes on 64-bit.  We only record the
-     * signo and pid; the signal is delivered on the next message arrival. */
-    unsigned char ev[24];
-    if (copy_from_user(ev, sigevent, sizeof(ev)) < 0) {
+    if (q->notify_pid != 0) {
         spin_unlock_irqrestore(&g_mq_lock, flags);
-        return -EFAULT;
-    }
-    int64_t signo;
-    memcpy(&signo, ev + 8, 4);
-    if (signo <= 0 || signo >= 64) {
-        spin_unlock_irqrestore(&g_mq_lock, flags);
-        return -EINVAL;
+        return -EBUSY;
     }
     q->notify_sig = (uint64_t)(int)signo;
     q->notify_pid = proc_current() ? proc_current()->pid : 0;
     q->notify_pending = 0;
     spin_unlock_irqrestore(&g_mq_lock, flags);
     return 0;
+#endif
 }
 
+#ifdef CONFIG_POSIX_MQ_RUST
+STATIC_ASSERT(__builtin_offsetof(mq_message_t, prio) == (sizeof(void *) == 8 ? 8 : 4), posix_mq_rust_message_prio);
+STATIC_ASSERT(__builtin_offsetof(mq_message_t, size) == (sizeof(void *) == 8 ? 16 : 8), posix_mq_rust_message_size);
+STATIC_ASSERT(sizeof(mq_message_t) == (sizeof(void *) == 8 ? 24 : 12), posix_mq_rust_message_layout);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, mq_flags) == 272, posix_mq_rust_flags);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, head) == 304, posix_mq_rust_head);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, tail) == (sizeof(void *) == 8 ? 312 : 308), posix_mq_rust_tail);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, unlinked) == (sizeof(void *) == 8 ? 320 : 312), posix_mq_rust_unlinked);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, notify_sig) == (sizeof(void *) == 8 ? 328 : 320), posix_mq_rust_notify_sig);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, notify_pid) == (sizeof(void *) == 8 ? 336 : 328), posix_mq_rust_notify_pid);
+STATIC_ASSERT(__builtin_offsetof(mq_queue_t, notify_pending) == (sizeof(void *) == 8 ? 340 : 332), posix_mq_rust_notify_pending);
+STATIC_ASSERT(sizeof(mq_queue_t) == (sizeof(void *) == 8 ? 616 : 536), posix_mq_rust_queue_layout);
+
+int a20_posix_mq_send_txn(void *context, int mqd, const void *msg,
+                          size_t msg_len, unsigned prio, uint64_t deadline);
+int64_t a20_posix_mq_receive_txn(void *context, int mqd, void *msg,
+                                 size_t msg_len, unsigned *prio,
+                                 uint64_t deadline);
+int a20_posix_mq_open_txn(void *queues, size_t count, void *context,
+                          const char *name, int oflag, const mq_attr_kern_t *attr);
+int a20_posix_mq_unlink_txn(void *queues, size_t count, void *context, const char *name);
+int a20_posix_mq_getsetattr_txn(void *context, int mqd,
+                                const mq_attr_kern_t *newattr,
+                                mq_attr_kern_t *oldattr);
+int a20_posix_mq_close_txn(void *context, int mqd);
+int a20_posix_mq_notify_txn(void *context, int mqd, const unsigned char *sigevent);
+void a20_posix_mq_namespace_destroy_txn(void *queues, size_t count,
+                                        void *context, uint64_t ino);
+
+typedef struct {
+    proc_wait_token_t token;
+    wait_queue_entry_t entry;
+    wait_queue_t *queue;
+} posix_mq_waiter_t;
+
+void *a20_posix_mq_desc_get(void *context, int mqd)
+{
+    (void)context;
+    return mq_desc_get(mqd);
+}
+
+int a20_posix_mq_desc_nonblock(void *context, int mqd)
+{
+    (void)context;
+    return mq_desc_nonblock(mqd);
+}
+
+uint64_t a20_posix_mq_txn_lock(void *context)
+{
+    (void)context;
+    return spin_lock_irqsave(&g_mq_lock);
+}
+
+void a20_posix_mq_txn_unlock(void *context, uint64_t flags)
+{
+    (void)context;
+    spin_unlock_irqrestore(&g_mq_lock, flags);
+}
+
+uint64_t a20_posix_mq_txn_now(void *context)
+{
+    (void)context;
+    return timer_get_ticks();
+}
+
+void *a20_posix_mq_message_alloc(void *context, const void *msg,
+                                 size_t msg_len, unsigned prio)
+{
+    (void)context;
+    mq_message_t *node = kmalloc(sizeof(*node) + msg_len);
+    if (!node)
+        return NULL;
+    node->next = NULL;
+    node->prio = prio;
+    node->size = msg_len;
+    if (msg_len > 0)
+        memcpy(node->data, msg, msg_len);
+    return node;
+}
+
+void a20_posix_mq_message_free(void *context, void *opaque)
+{
+    (void)context;
+    kfree(opaque);
+}
+
+void a20_posix_mq_message_copy_out(void *context, void *opaque, void *msg,
+                                   size_t msg_len, unsigned *prio)
+{
+    (void)context;
+    (void)msg_len;
+    mq_message_t *node = opaque;
+    if (node->size > 0)
+        memcpy(msg, node->data, node->size);
+    if (prio)
+        *prio = node->prio;
+}
+
+void *a20_posix_mq_wait_prepare(void *context, uint64_t deadline)
+{
+    posix_mq_waiter_t *waiter = context;
+    if (!waiter)
+        return NULL;
+    memset(waiter, 0, sizeof(*waiter));
+    waiter->token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+    if (!waiter->token.task)
+        return NULL;
+    return waiter;
+}
+
+bool a20_posix_mq_wait_link(void *context, void *opaque, void *queue_opaque,
+                            bool send)
+{
+    (void)context;
+    posix_mq_waiter_t *waiter = opaque;
+    mq_queue_t *queue = queue_opaque;
+    wait_queue_t *wq = send ? &queue->send_wq : &queue->recv_wq;
+    bool linked = wait_queue_link(wq, &waiter->entry, waiter->token, 0);
+    waiter->queue = linked ? wq : NULL;
+    return linked;
+}
+
+bool a20_posix_mq_wait_finish(void *opaque, bool linked, bool commit)
+{
+    posix_mq_waiter_t *waiter = opaque;
+    proc_wake_reason_t reason;
+    if (commit && linked)
+        reason = proc_park_commit(waiter->token);
+    else {
+        (void)proc_park_cancel(waiter->token);
+        reason = PROC_WAKE_CANCEL;
+    }
+    if (linked && waiter->queue)
+        wait_queue_unlink(waiter->queue, &waiter->entry);
+    proc_park_finish(waiter->token);
+    bool interrupted = proc_wake_reason_is_task_interrupt(reason);
+    return interrupted;
+}
+
+void a20_posix_mq_wake(void *context, void *queue_opaque, bool send)
+{
+    (void)context;
+    mq_queue_t *queue = queue_opaque;
+    wait_queue_wake_all(send ? &queue->send_wq : &queue->recv_wq,
+                        0, PROC_WAKE_EVENT);
+}
+
+void a20_posix_mq_signal(void *context, int pid, int signo)
+{
+    (void)context;
+    signal_send(pid, signo);
+}
+#endif
+
+#ifndef CONFIG_POSIX_MQ_RUST
 int posix_mq_timedsend(int mqd, const char *msg, size_t msg_len,
                        unsigned prio, uint64_t deadline)
 {
@@ -293,7 +574,7 @@ int posix_mq_timedsend(int mqd, const char *msg, size_t msg_len,
         }
         if (q->mq_curmsgs < q->mq_maxmsg)
             break;
-        if (q->mq_flags & MQ_O_NONBLOCK) {
+        if (mq_desc_nonblock(mqd)) {
             spin_unlock_irqrestore(&g_mq_lock, flags);
             kfree(node);
             return -EAGAIN;
@@ -353,12 +634,18 @@ int posix_mq_timedsend(int mqd, const char *msg, size_t msg_len,
     *pp = node;
     if (!node->next)
         q->tail = node;
+    bool was_empty = q->mq_curmsgs == 0;
     q->mq_curmsgs++;
 
     int notify_pid = q->notify_pid;
     uint64_t notify_sig = q->notify_sig;
-    if (notify_pid && !q->notify_pending) {
+    if (was_empty && notify_pid && !q->notify_pending) {
         q->notify_pending = 1;
+        q->notify_pid = 0;
+        q->notify_sig = 0;
+    } else {
+        notify_pid = 0;
+        notify_sig = 0;
     }
     wait_queue_wake_all(&q->recv_wq, 0, PROC_WAKE_EVENT);
     spin_unlock_irqrestore(&g_mq_lock, flags);
@@ -404,7 +691,7 @@ long posix_mq_timedreceive(int mqd, char *msg, size_t msg_len,
             kfree(node);
             return (long)n;
         }
-        if (q->mq_flags & MQ_O_NONBLOCK) {
+        if (mq_desc_nonblock(mqd)) {
             spin_unlock_irqrestore(&g_mq_lock, flags);
             return -EAGAIN;
         }
@@ -447,20 +734,45 @@ long posix_mq_timedreceive(int mqd, char *msg, size_t msg_len,
         flags = spin_lock_irqsave(&g_mq_lock);
     }
 }
+#else
+int posix_mq_timedsend(int mqd, const char *msg, size_t msg_len,
+                       unsigned prio, uint64_t deadline)
+{
+    posix_mq_waiter_t waiter = {0};
+    return a20_posix_mq_send_txn(&waiter, mqd, msg, msg_len, prio, deadline);
+}
+
+long posix_mq_timedreceive(int mqd, char *msg, size_t msg_len,
+                           unsigned *prio, uint64_t deadline)
+{
+    posix_mq_waiter_t waiter = {0};
+    return (long)a20_posix_mq_receive_txn(&waiter, mqd, msg, msg_len, prio,
+                                          deadline);
+}
+#endif
 
 int posix_mq_close(int mqd)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    return a20_posix_mq_close_txn(NULL, mqd);
+#else
+
     if (mqd < 0 || mqd >= MQ_MAX_DESCS)
         return -EBADF;
-    mq_queue_t *q = g_mq_desc[mqd];
-    if (!q)
-        return -EBADF;
-
+    /* Match open's g_mq_lock -> descriptor-lock order so slot reuse cannot
+     * race the queue pointer read or refcount update. */
+    uint64_t qflags = spin_lock_irqsave(&g_mq_lock);
     uint64_t flags = spin_lock_irqsave(&g_mq_desc_lock);
+    mq_queue_t *q = g_mq_desc[mqd];
+    if (!q) {
+        spin_unlock_irqrestore(&g_mq_desc_lock, flags);
+        spin_unlock_irqrestore(&g_mq_lock, qflags);
+        return -EBADF;
+    }
     g_mq_desc[mqd] = NULL;
+    g_mq_desc_nonblock[mqd] = 0;
     spin_unlock_irqrestore(&g_mq_desc_lock, flags);
 
-    uint64_t qflags = spin_lock_irqsave(&g_mq_lock);
     if (q->used) {
         q->refcount--;
         if (q->refcount <= 0 && q->unlinked) {
@@ -475,6 +787,8 @@ int posix_mq_close(int mqd)
     }
     spin_unlock_irqrestore(&g_mq_lock, qflags);
     return 0;
+
+#endif
 }
 
 void posix_mq_release_task(struct task_t *t)
@@ -487,6 +801,9 @@ void posix_mq_release_task(struct task_t *t)
 
 void posix_mq_namespace_destroy(uint64_t ino)
 {
+#ifdef CONFIG_POSIX_MQ_RUST
+    a20_posix_mq_namespace_destroy_txn(g_mq, MQ_MAX_QUEUES, NULL, ino);
+#else
     uint64_t irq = spin_lock_irqsave(&g_mq_lock);
     for (int i = 0; i < MQ_MAX_QUEUES; i++) {
         mq_queue_t *q = &g_mq[i];
@@ -499,4 +816,5 @@ void posix_mq_namespace_destroy(uint64_t ino)
         memset(q, 0, sizeof(*q));
     }
     spin_unlock_irqrestore(&g_mq_lock, irq);
+#endif
 }

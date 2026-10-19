@@ -35,6 +35,21 @@ mlibc-threads:
 	@exit 1
 endif
 
+# Full-libc thread signal coordination workload consumed by
+# tools/check-mlibc-signals.py (Signal module C/R pairing evidence).
+MLIBC_SIGNALS_BIN := $(NATIVE_BUILD_DIR)/mlibc-signals-$(NATIVE_TAG)
+.PHONY: mlibc-signals
+ifeq ($(ARCH),riscv64)
+$(MLIBC_SIGNALS_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_signals.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,-O2 user/tests/test_mlibc_signals.c,-lc -lpthread -lm -lrt,$@)
+
+mlibc-signals: $(MLIBC_SIGNALS_BIN)
+else
+mlibc-signals:
+	@echo "mlibc-signals requires the existing riscv64 full-libc port" >&2
+	@exit 1
+endif
+
 define MLIBC_LINK_RECIPE
 @mkdir -p $(dir $(3))
 $(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \

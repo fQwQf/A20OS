@@ -11,6 +11,8 @@
  * req_id; after a link drop requests end -EIO, so remount once ufsd restarts.
  */
 #include "fs/uxfs.h"
+#include "fs/uxfs_lifetime_state.h"
+#include "fs/uxfs_ops_state.h"
 #include "fs/ufs_proto.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
@@ -26,27 +28,44 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/sync.h"
+#include "core/lock.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+#include "fs/vfs/vnode_identity.h"
+
+/*
+ * Canonical (sb, ino) -> vnode identity.  The Rust module owns the lookup /
+ * duplicate / eviction / removal decisions; this adapter owns the IRQ-save
+ * spinlock, the entry references, and vnode allocation / release.  Rust is the
+ * default production path; UXFS_VNODE_IDENTITY_IMPL=c selects the header-only
+ * C reference model (same algorithm) only for the regression image and the
+ * host differential oracle.
+ */
+/* a20_vnode_identity_* is provided by kernel/fs/vfs/vnode_identity.rs */
 
 extern block_dev_t *mount_setup_block_device(int index);
 
 #define UXFS_DBG 0
 
+static spinlock_t g_uxfs_mount_table_lock = SPINLOCK_INIT;
+static spinlock_t g_uxfs_identity_lock = SPINLOCK_INIT;
+
 typedef struct uxfs_sb {
     struct a20_channel_ep *ep;   /* service endpoint; ref owned by this sb */
     struct task_t         *server;
-    struct task_t         *lifetime_server;
     int                    block_index;
     uint32_t               next_req_id;
-    uint32_t               lifetime_mode; /* 0 unknown, 1 explicit v1, 2 v2 */
-    uint32_t               shutdown_mode; /* 0 unknown/unsupported, 1 acknowledged v2 */
-    uint32_t               close_token_mode; /* 1: OPEN out2/CLOSE arg0 carry open tokens */
-    uint32_t               close_confirm_mode; /* 1: accepted tokens retire via CONFIRM */
+    /* Rust-owned lifetime/token negotiation state. */
+    uxfs_lifetime_state_t  lifetime;
     uint32_t               shutdown_started;
+    /* Protected by g_uxfs_mount_table_lock; remains set while a claimed slot
+     * is being initialized or retired outside that short critical section. */
+    uint32_t               slot_reserved;
+    /* Vnodes can outlive the mount endpoint through open files, mappings, and
+     * cached pages. Do not reuse this static sb until all such vnodes die. */
+    uint32_t               live_vnodes;
     uint64_t               server_generation;
-    uint64_t               lifetime_generation;
     mutex_t                lifetime_lock;
     mutex_t                req_lock;
 } uxfs_sb_t;
@@ -66,6 +85,113 @@ typedef struct uxfs_fctx {
     size_t     off;      /* file offset / directory cookie, in bytes */
 } uxfs_fctx_t;
 
+/*
+ * RPC engine selector.  Rust owns the request admission, deadline/retry
+ * sequencing, stale-reply filtering and errno mapping
+ * (kernel/fs/uxfs/uxfs_state.rs).  The C adapter keeps the endpoint, the
+ * req_lock and the channel send/receive/sleep primitives.
+ */
+typedef struct a20_uxfs_rpc_ops {
+    uint64_t (*now_ns)(void);
+    void     (*sleep_tick)(void);
+    int      (*try_lock)(void *ctx);
+    void     (*unlock)(void *ctx);
+    int      (*send)(void *ctx, const uint8_t *msg, uint32_t len,
+                     uint64_t deadline_ns, int nonblock);
+    int      (*recv)(void *ctx, uint8_t *buf, uint32_t cap,
+                     uint64_t deadline_ns, int nonblock, uint32_t *out_len);
+    int      (*has_ep)(void *ctx);
+    int      (*shutdown_started)(void *ctx);
+} a20_uxfs_rpc_ops_t;
+
+extern int a20_uxfs_rpc_run(void *ctx, const a20_uxfs_rpc_ops_t *ops,
+                            const ufs_req_hdr_t *req, const uint8_t *msg,
+                            uint32_t msg_len, uint8_t *rx, uint32_t rx_cap,
+                            ufs_resp_hdr_t *resp, void *resp_payload,
+                            uint32_t resp_cap, uint32_t *resp_payload_len,
+                            uint64_t deadline_ns, int *request_sent);
+_Static_assert(sizeof(ufs_req_hdr_t) == 48, "uxfs rpc mirror: request header");
+_Static_assert(sizeof(ufs_resp_hdr_t) == 48, "uxfs rpc mirror: response header");
+
+/* Canonical vnode identity adapter (implementation follows the vnode
+ * factory below; detach runs before it). */
+static void uxfs_identity_clear_sb(uxfs_sb_t *sb);
+static int uxfs_device_has_native_mount(block_dev_t *dev);
+static const struct a20_uxfs_lifecycle g_uxfs_lifecycle;
+
+static uint64_t a20_uxfs_bridge_now_ns(void)
+{
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    return ts[0] * 1000000000ull + ts[1];
+}
+
+static void a20_uxfs_bridge_sleep_tick(void)
+{
+    uint64_t ticks = MS_TO_TICKS(1);
+    proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
+}
+
+static int a20_uxfs_bridge_try_lock(void *ctx)
+{
+    return mutex_trylock(&((uxfs_sb_t *)ctx)->req_lock);
+}
+
+static void a20_uxfs_bridge_unlock(void *ctx)
+{
+    mutex_unlock(&((uxfs_sb_t *)ctx)->req_lock);
+}
+
+static int a20_uxfs_bridge_send(void *ctx, const uint8_t *msg, uint32_t len,
+                                uint64_t deadline_ns, int nonblock)
+{
+    uxfs_sb_t *sb = (uxfs_sb_t *)ctx;
+    uint32_t flags = (deadline_ns && nonblock) ? A20_MSG_NONBLOCK : 0;
+    int64_t r = a20_channel_send(sb->ep, (void *)msg, len, NULL, 0, NULL, flags);
+    if (r >= 0)
+        return 0; /* SEND_OK */
+    if (r == -A20_ERR_WOULD_BLOCK)
+        return 1; /* SEND_WOULD_BLOCK */
+    return 2;     /* SEND_ERROR */
+}
+
+static int a20_uxfs_bridge_recv(void *ctx, uint8_t *buf, uint32_t cap,
+                                uint64_t deadline_ns, int nonblock,
+                                uint32_t *out_len)
+{
+    uxfs_sb_t *sb = (uxfs_sb_t *)ctx;
+    uint32_t in_len = cap;
+    a20_ch_handle_info_t hinfos[1];
+    uint32_t nh = 0;
+    uint32_t flags = (deadline_ns && nonblock) ? A20_MSG_NONBLOCK : 0;
+    int64_t r = a20_channel_recv_begin(sb->ep, flags, &in_len, &nh);
+    if (r == -A20_ERR_WOULD_BLOCK)
+        return -1; /* RECV_WOULD_BLOCK */
+    if (r < 0)
+        return -2; /* RECV_ERROR */
+    if (in_len > cap) {
+        a20_channel_recv_abort(sb->ep);
+        return -3; /* RECV_INVALID */
+    }
+    uint32_t out = in_len;
+    r = a20_channel_recv_finish(sb->ep, buf, &out, hinfos, &nh);
+    if (r < 0)
+        return -2;
+    *out_len = out;
+    return (int)out;
+}
+
+static int a20_uxfs_bridge_has_ep(void *ctx)
+{
+    return ((uxfs_sb_t *)ctx)->ep != NULL;
+}
+
+static int a20_uxfs_bridge_shutdown_started(void *ctx)
+{
+    return __atomic_load_n(&((uxfs_sb_t *)ctx)->shutdown_started,
+                           __ATOMIC_ACQUIRE) != 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* RPC engine                                                           */
 /* ------------------------------------------------------------------ */
@@ -76,139 +202,47 @@ static int uxfs_rpc_timeout(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
                     uint32_t resp_cap, uint32_t *resp_payload_len,
                     uint64_t deadline_ns, int *request_sent)
 {
+    /* Mechanical bridge table the Rust engine drives.  See
+     * kernel/fs/uxfs/uxfs_state.rs for the state machine. */
+    static const a20_uxfs_rpc_ops_t ops = {
+        .now_ns = a20_uxfs_bridge_now_ns,
+        .sleep_tick = a20_uxfs_bridge_sleep_tick,
+        .try_lock = a20_uxfs_bridge_try_lock,
+        .unlock = a20_uxfs_bridge_unlock,
+        .send = a20_uxfs_bridge_send,
+        .recv = a20_uxfs_bridge_recv,
+        .has_ep = a20_uxfs_bridge_has_ep,
+        .shutdown_started = a20_uxfs_bridge_shutdown_started,
+    };
     if (request_sent)
         *request_sent = 0;
     uint32_t total = sizeof(*req) + req->name_len + req->payload_len;
     uint8_t *msg = (uint8_t *)kmalloc(total);
     if (!msg)
         return -ENOMEM;
-
     memcpy(msg, req, sizeof(*req));
     if (req->name_len)
         memcpy(msg + sizeof(*req), name, req->name_len);
     if (req->payload_len)
         memcpy(msg + sizeof(*req) + req->name_len, payload, req->payload_len);
 
-    while (!mutex_trylock(&sb->req_lock)) {
-        if (deadline_ns) {
-            uint64_t ts[2];
-            timekeeping_get_monotonic(ts);
-            if (ts[0] * 1000000000ull + ts[1] >= deadline_ns) {
-                kfree(msg);
-                return -ETIMEDOUT;
-            }
-        }
-        uint64_t ticks = MS_TO_TICKS(1);
-        proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
-    }
-
-    if (__atomic_load_n(&sb->shutdown_started, __ATOMIC_ACQUIRE) &&
-        req->opcode != UFS_OP_INIT && req->opcode != UFS_OP_SHUTDOWN &&
-        req->opcode != UFS_OP_CLOSE) {
-        mutex_unlock(&sb->req_lock);
-        kfree(msg);
-        return -ESHUTDOWN;
-    }
-
-    /* Use nonblocking channel operations and a monotonic deadline for both
-     * queue admission and reply reception.  A full peer queue must not make
-     * INIT/SHUTDOWN wait forever before the receive deadline starts. */
-    int64_t r;
-    for (;;) {
-        r = a20_channel_send(sb->ep, msg, total, NULL, 0, NULL,
-                             deadline_ns ? A20_MSG_NONBLOCK : 0);
-        if (r != -A20_ERR_WOULD_BLOCK || !deadline_ns)
-            break;
-        uint64_t ts[2];
-        timekeeping_get_monotonic(ts);
-        if (ts[0] * 1000000000ull + ts[1] >= deadline_ns) {
-            r = -A20_ERR_TIMED_OUT;
-            break;
-        }
-        uint64_t ticks = MS_TO_TICKS(1);
-        proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
-    }
-    kfree(msg);
-    if (r < 0) {
-        mutex_unlock(&sb->req_lock);
-        return r == -A20_ERR_TIMED_OUT ? -ETIMEDOUT : -EIO;
-    }
-    if (request_sent)
-        *request_sent = 1;
-
-    /* Per-call receive buffer.  A shared static here would race across
-     * mounts: req_lock serializes one mount's RPC, but concurrent RPCs on
-     * different mounts would tear each other's replies. */
     uint8_t *rx = (uint8_t *)kmalloc(A20_CH_MAX_DATA);
     if (!rx) {
-        mutex_unlock(&sb->req_lock);
+        kfree(msg);
         return -ENOMEM;
     }
-    for (;;) {
-        uint32_t in_len = A20_CH_MAX_DATA;
-        a20_ch_handle_info_t hinfos[1];
-        uint32_t nh = 0;
-        uint32_t recv_flags = 0;
-        if (deadline_ns) {
-            uint64_t ts[2];
-            timekeeping_get_monotonic(ts);
-            uint64_t now_ns = ts[0] * 1000000000ull + ts[1];
-            if (now_ns >= deadline_ns) {
-                r = -A20_ERR_TIMED_OUT;
-                break;
-            }
-            recv_flags = A20_MSG_NONBLOCK;
-        }
-        r = a20_channel_recv_begin(sb->ep, recv_flags, &in_len, &nh);
-        if (r == -A20_ERR_WOULD_BLOCK && deadline_ns) {
-            uint64_t ticks = MS_TO_TICKS(1);
-            if (!ticks)
-                ticks = 1;
-            proc_sleep_until(timer_get_ticks() + ticks);
-            continue;
-        }
-        if (r < 0)
-            break;
-        if (in_len > A20_CH_MAX_DATA) {
-            a20_channel_recv_abort(sb->ep);
-            r = -A20_ERR_INVALID_ARGUMENT;
-            break;
-        }
-        uint32_t out_len = in_len;
-        r = a20_channel_recv_finish(sb->ep, rx, &out_len, hinfos, &nh);
-        if (r < 0)
-            break;
-
-        if (out_len < sizeof(*resp))
-            continue;
-        ufs_resp_hdr_t *cand = (ufs_resp_hdr_t *)rx;
-        if (cand->magic != UFS_RESP_MAGIC || cand->req_id != req->req_id ||
-            cand->opcode != req->opcode)
-            continue; /* stale reply: drop it and keep waiting */
-
-        memcpy(resp, cand, sizeof(*resp));
-        uint32_t plen = resp->payload_len;
-        if (plen > resp_cap || plen > out_len - sizeof(*resp)) {
-            r = -A20_ERR_INVALID_ARGUMENT;
-            break;
-        }
-        if (plen && resp_payload)
-            memcpy(resp_payload, rx + sizeof(*resp), plen);
-        if (resp_payload_len)
-            *resp_payload_len = plen;
-        r = 0;
-        break;
-    }
-
+    uint32_t plen = 0;
+    int sent = 0;
+    int rc = a20_uxfs_rpc_run(sb, &ops, req, msg, total, rx, A20_CH_MAX_DATA,
+                              resp, resp_payload, resp_cap, &plen,
+                              deadline_ns, &sent);
+    if (resp_payload_len)
+        *resp_payload_len = plen;
+    if (request_sent)
+        *request_sent = sent;
     kfree(rx);
-    mutex_unlock(&sb->req_lock);
-#if UXFS_DBG
-    if (r < 0)
-        kdebug("[UXFS] rpc op=%u failed: %lld\n", req->opcode, (long long)r);
-#endif
-    if (r < 0)
-        return r == -A20_ERR_TIMED_OUT ? -ETIMEDOUT : -EIO;
-    return (int)resp->status;
+    kfree(msg);
+    return rc;
 }
 
 static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
@@ -251,14 +285,12 @@ static int uxfs_negotiate_lifetime_until(uxfs_sb_t *sb, uint64_t deadline_ns)
         uint64_t ticks = MS_TO_TICKS(1);
         proc_sleep_until(timer_get_ticks() + (ticks ? ticks : 1));
     }
-    if (sb->lifetime_generation == sb->server_generation &&
-        sb->lifetime_server == sb->server && sb->lifetime_mode != 0) {
+    if (a20_uxfs_lifetime_negotiated(&sb->lifetime, sb->server_generation,
+                                     sb->server)) {
         mutex_unlock(&sb->lifetime_lock);
         return 0;
     }
-    sb->lifetime_mode = 0;
-    sb->close_token_mode = 0;
-    sb->close_confirm_mode = 0;
+    a20_uxfs_lifetime_reset(&sb->lifetime);
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp;
     uxfs_req_init(sb, &req, UFS_OP_INIT, UFS_ROOT_INO, 0, 0, NULL, 0);
@@ -275,21 +307,12 @@ static int uxfs_negotiate_lifetime_until(uxfs_sb_t *sb, uint64_t deadline_ns)
         mutex_unlock(&sb->lifetime_lock);
         return rc;
     }
-    /* UFS_CLOSE_TOKEN_CAPABILITY implies the v2 lifetime protocol plus open
-     * tokens; UFS_LIFETIME_CAPABILITY alone keeps the legacy no-token path. */
-    sb->lifetime_mode = (resp.out1 == UFS_LIFETIME_CAPABILITY ||
-                         resp.out1 == UFS_CLOSE_TOKEN_CAPABILITY ||
-                         resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY) ? 2u : 1u;
-    sb->shutdown_mode = resp.out2 == UFS_SHUTDOWN_CAPABILITY ? 1u : 0u;
-    /* Only the new request/reply capability guarantees confirm-retained
-     * tombstones. A token-only peer still speaks v2 OPEN/CLOSE, but its token
-     * is not safe for ambiguous retry and is deliberately not enabled here. */
-    sb->close_token_mode = resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY ? 1u : 0u;
-    sb->close_confirm_mode = resp.out1 == UFS_CLOSE_CONFIRM_CAPABILITY ? 1u : 0u;
+    /* The capability-to-mode/token/confirm/shutdown decision table lives in
+     * kernel/fs/uxfs/lifetime_state.rs. */
+    a20_uxfs_lifetime_apply_init(&sb->lifetime, resp.out1, resp.out2,
+                                 sb->server_generation, sb->server);
     printf("[UXFS] lifetime protocol version=%u server_generation=%u\n",
-           sb->lifetime_mode, sb->server_generation);
-    sb->lifetime_generation = sb->server_generation;
-    sb->lifetime_server = sb->server;
+           sb->lifetime.mode, sb->server_generation);
     mutex_unlock(&sb->lifetime_lock);
     return 0;
 }
@@ -306,22 +329,35 @@ static void uxfs_detach_server(uxfs_sb_t *sb)
 {
     if (!sb)
         return;
+    /* Fail closed for every old vnode/fctx before withdrawing its endpoint.
+     * Serialize the pointer change with the RPC engine, then keep admission
+     * shut until the static sb slot is reused by a fresh mount. */
+    __atomic_store_n(&sb->shutdown_started, 1, __ATOMIC_RELEASE);
+    mutex_lock(&sb->req_lock);
+    uint64_t mount_flags = spin_lock_irqsave(&g_uxfs_mount_table_lock);
+    uint64_t identity_flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+    sb->slot_reserved = 1;
     a20_channel_ep_t *ep = sb->ep;
     sb->ep = NULL; /* withdraw block-I/O authority before releasing refs */
+    spin_unlock_irqrestore(&g_uxfs_identity_lock, identity_flags);
+    struct task_t *server = sb->server;
+    sb->server = NULL;
+    a20_uxfs_lifetime_reset(&sb->lifetime);
+    spin_unlock_irqrestore(&g_uxfs_mount_table_lock, mount_flags);
+    mutex_unlock(&sb->req_lock);
     if (ep) {
         a20_channel_ep_peer_shutdown(ep);
         a20_channel_ep_release(ep);
     }
-    if (sb->server) {
-        proc_put(sb->server);
-        sb->server = NULL;
-    }
-    sb->lifetime_server = NULL;
-    sb->lifetime_mode = 0;
-    sb->shutdown_mode = 0;
-    sb->close_token_mode = 0;
-    sb->close_confirm_mode = 0;
-    __atomic_store_n(&sb->shutdown_started, 0, __ATOMIC_RELEASE);
+    if (server)
+        proc_put(server);
+    /* The mount is going away: no vnode of this superblock stays canonical.
+     * Old vnodes may outlive the mount, so the slot stays unavailable until
+     * uxfs_release_vn() drops live_vnodes to zero. */
+    uxfs_identity_clear_sb(sb);
+    mount_flags = spin_lock_irqsave(&g_uxfs_mount_table_lock);
+    sb->slot_reserved = 0;
+    spin_unlock_irqrestore(&g_uxfs_mount_table_lock, mount_flags);
 }
 
 static int uxfs_lifetime_open(uxfs_sb_t *sb, uint64_t ino, uint64_t flags,
@@ -335,14 +371,14 @@ static int uxfs_lifetime_open(uxfs_sb_t *sb, uint64_t ino, uint64_t flags,
     /* A v1 peer was explicitly selected by its v1 INIT response.  Preserve
      * its established inode-only RPC contract; OPEN/CLOSE lifetime claims
      * are available only after the v2 capability handshake. */
-    if (sb->lifetime_mode == 1u)
+    if (a20_uxfs_lifetime_is_v1(&sb->lifetime))
         return 0;
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp = {0};
     uxfs_req_init(sb, &req, UFS_OP_OPEN, ino, flags, 0, NULL, 0);
     rc = uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc == 0 && close_token && sb->close_token_mode)
-        *close_token = resp.out2;
+    if (rc == 0 && close_token)
+        *close_token = a20_uxfs_lifetime_open_token(&sb->lifetime, resp.out2);
     return rc;
 }
 
@@ -362,7 +398,7 @@ static int uxfs_lifetime_close(uxfs_sb_t *sb, uint64_t ino, uint64_t token,
     int rc = uxfs_negotiate_lifetime(sb);
     if (rc != 0)
         return rc;
-    if (sb->lifetime_mode == 1u) {
+    if (a20_uxfs_lifetime_close_v1_acked(&sb->lifetime)) {
         if (acked)
             *acked = 1; /* v1 never took an OPEN reference */
         return 0;
@@ -452,15 +488,170 @@ static vnode_t *uxfs_make_vnode(uxfs_sb_t *sb, uint64_t ino, int vfs_type,
     p->sb      = sb;
     p->is_dir  = (vfs_type == VFS_FT_DIR);
     vn->fs_data = p;
+    __atomic_add_fetch(&sb->live_vnodes, 1, __ATOMIC_RELEASE);
     return vn;
 }
 
-static int ufs_ft_to_vfs(uint64_t t)
+
+/* ------------------------------------------------------------------ */
+/* canonical vnode identity                                             */
+/* ------------------------------------------------------------------ */
+
+/* One live vnode per (sb, inode), so every open file, shared mapping and
+ * page-cache read observes one vnode (and its size / page state).  The lock
+ * is a leaf IRQ-save spinlock: inside it, entries are only touched through
+ * vnode_get and handle bookkeeping, while every put that can free a vnode
+ * runs outside. */
+#define UXFS_IDENTITY_PRUNE_BATCH 64
+#define UXFS_IDENTITY_INSERT_ATTEMPTS 4
+static uintptr_t uxfs_identity_ref_peek(uintptr_t vnode)
 {
-    switch (t) {
-    case UFS_FT_DIR: return VFS_FT_DIR;
-    case UFS_FT_SYMLINK: return VFS_FT_SYMLINK;
-    default: return VFS_FT_REGULAR;
+    return (uintptr_t)vnode_ref_read((vnode_t *)vnode);
+}
+
+static void uxfs_identity_register_peek(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+    a20_vnode_identity_set_ref_peek(uxfs_identity_ref_peek);
+    spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+}
+
+/* Canonical lookup-or-create for (sb, ino); returns a vnode carrying the
+ * caller's reference, or NULL when allocation fails.  A hit refreshes the
+ * cached attributes from the reply: the size only grows here (truncate sets
+ * the exact size) and the mode always follows the server.  A missing inode
+ * number or exhausted identity table fails closed; a private vnode would
+ * silently recreate the stale-size bug this index exists to prevent. */
+static vnode_t *uxfs_iget(uxfs_sb_t *sb, uint64_t ino, int vfs_type,
+                          uint32_t mode, size_t size, vnode_t *parent)
+{
+    uint64_t flags;
+    vnode_t *vn;
+
+    /* Directory identity remains path-local: vnode->parent supplies `..`,
+     * and dentry aliases can move. The canonical (sb, ino) cache is for
+     * non-directory file data/page-cache coherence. */
+    if (vfs_type == VFS_FT_DIR)
+        return ino ? uxfs_make_vnode(sb, ino, vfs_type, mode, size, parent)
+                   : NULL;
+
+    flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+    vn = (vnode_t *)a20_vnode_identity_lookup((uintptr_t)sb, ino);
+    if (vn) {
+        vnode_get(vn); /* caller reference */
+        spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+        if (size > vn->size)
+            vn->size = size;
+        vn->mode = mode;
+        return vn;
+    }
+    spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+
+    vn = uxfs_make_vnode(sb, ino, vfs_type, mode, size, parent);
+    if (!vn)
+        return NULL;
+    if (ino == 0) {
+        /* A successful LOOKUP/CREATE without an inode is malformed. */
+        vnode_put(vn);
+        return NULL;
+    }
+
+    for (int attempt = 0; attempt < UXFS_IDENTITY_INSERT_ATTEMPTS; attempt++) {
+        a20_vnode_identity_insert_out_t out;
+        uintptr_t victims[UXFS_IDENTITY_PRUNE_BATCH];
+        size_t n;
+
+        flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+        /* Detach withdraws ep under req_lock before clearing this index.
+         * Check admission while holding the same lock used by that clear: an
+         * in-flight lookup can either insert before detach (and be cleared),
+         * or observe the closed endpoint and fail, but cannot repopulate it. */
+        if (!sb->ep || __atomic_load_n(&sb->shutdown_started,
+                                       __ATOMIC_ACQUIRE)) {
+            spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+            vnode_put(vn);
+            return NULL;
+        }
+        a20_vnode_identity_insert((uintptr_t)sb, ino, (uintptr_t)vn, &out);
+        if (out.status == A20_VNODE_IDENTITY_INSERTED) {
+            vnode_get(vn); /* entry reference */
+            spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+            return vn;
+        }
+        if (out.status == A20_VNODE_IDENTITY_DUPLICATE) {
+            vnode_t *existing = (vnode_t *)out.existing;
+            vnode_get(existing); /* caller reference */
+            spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+            vnode_put(vn); /* dispose the duplicate candidate */
+            if (size > existing->size)
+                existing->size = size;
+            existing->mode = mode;
+            return existing;
+        }
+        /* FULL: evict cache-only entries and retry; their references are
+         * dropped outside the lock because vnode_put can free. */
+        n = a20_vnode_identity_prune_batch(victims, UXFS_IDENTITY_PRUNE_BATCH);
+        spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+        for (size_t i = 0; i < n; i++)
+            vnode_put((vnode_t *)victims[i]);
+        if (n == 0)
+            break;
+    }
+    vnode_put(vn);
+    return NULL;
+}
+
+/* Drop the canonical entry for (sb, ino).  Any open file keeps its vnode
+ * alive through its own reference; the vnode just stops being the shared
+ * instance for the inode.  Used when a name disappears or an inode number
+ * is reused by a fresh create/mkdir. */
+static void uxfs_identity_forget(uxfs_sb_t *sb, uint64_t ino)
+{
+    uint64_t flags;
+    vnode_t *victim;
+
+    if (!ino)
+        return;
+    flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+    victim = (vnode_t *)a20_vnode_identity_remove((uintptr_t)sb, ino);
+    spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+    if (victim)
+        vnode_put(victim);
+}
+
+/* Remove every canonical entry of one superblock (unmount and failed mount).
+ * Old vnode objects may still point at this sb; live_vnodes prevents slot
+ * reuse until their final references are gone. */
+static void uxfs_identity_clear_sb(uxfs_sb_t *sb)
+{
+    for (;;) {
+        uintptr_t victims[32];
+        uint64_t flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+        size_t n = a20_vnode_identity_clear_sb((uintptr_t)sb, victims, 32);
+        spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+        if (!n)
+            break;
+        for (size_t i = 0; i < n; i++)
+            vnode_put((vnode_t *)victims[i]);
+    }
+}
+
+/* Drop every cache-only canonical vnode of every uxfs mount (procfs
+ * drop_caches bit 1).  Entries whose vnode is still referenced by an open
+ * file, mapping or cached page stay. */
+void uxfs_vnode_cache_prune_all(void)
+{
+    for (;;) {
+        uintptr_t victims[UXFS_IDENTITY_PRUNE_BATCH];
+        uint64_t flags = spin_lock_irqsave(&g_uxfs_identity_lock);
+        a20_vnode_identity_set_ref_peek(uxfs_identity_ref_peek);
+        size_t n = a20_vnode_identity_prune_batch(victims,
+                                                  UXFS_IDENTITY_PRUNE_BATCH);
+        spin_unlock_irqrestore(&g_uxfs_identity_lock, flags);
+        if (!n)
+            break;
+        for (size_t i = 0; i < n; i++)
+            vnode_put((vnode_t *)victims[i]);
     }
 }
 
@@ -468,225 +659,185 @@ static int ufs_ft_to_vfs(uint64_t t)
 /* vnode_ops                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Mechanical bridge table the Rust per-operation decision engine drives.  The
+ * engine (kernel/fs/uxfs/uxfs_ops_state.rs) owns request construction,
+ * response decoding and the canonical-identity / page-cache / size state
+ * transitions; this adapter only supplies req_init (which allocates the sb's
+ * next req_id), the RPC transport call, vnode accessors, iget / identity
+ * forget / page-cache-truncate, and the lifetime gate for LINK.
+ */
+static void ops_req_init(void *ctx, struct ufs_req_hdr *req, uint32_t opcode,
+                         uint64_t ino, uint64_t arg0, uint64_t arg1,
+                         const char *name, uint32_t payload_len)
+{
+    uxfs_req_init((uxfs_sb_t *)ctx, (ufs_req_hdr_t *)req, opcode, ino, arg0,
+                  arg1, name, payload_len);
+}
+static int ops_rpc(void *ctx, const struct ufs_req_hdr *req, const char *name,
+                   const void *payload, struct ufs_resp_hdr *resp,
+                   void *resp_payload, uint32_t resp_cap,
+                   uint32_t *resp_payload_len)
+{
+    return uxfs_rpc((uxfs_sb_t *)ctx, (const ufs_req_hdr_t *)req, name, payload,
+                    (ufs_resp_hdr_t *)resp, resp_payload, resp_cap,
+                    resp_payload_len);
+}
+static void *ops_vpriv_sb(void *vnode) { return ((vnode_t *)vnode)->fs_data
+    ? ((uxfs_vpriv_t *)((vnode_t *)vnode)->fs_data)->sb : 0; }
+static uint64_t ops_vn_ino(void *vnode) { return ((vnode_t *)vnode)->ino; }
+static uint64_t ops_vn_size(void *vnode) { return (uint64_t)((vnode_t *)vnode)->size; }
+static void ops_vn_set_size(void *vnode, uint64_t sz) { ((vnode_t *)vnode)->size = (size_t)sz; }
+static void *ops_vn_parent(void *vnode) { return ((vnode_t *)vnode)->parent; }
+static void *ops_iget(void *ctx, uint64_t ino, int vfs_type, uint32_t mode,
+                      uint64_t size, void *parent)
+{
+    return uxfs_iget((uxfs_sb_t *)ctx, ino, vfs_type, mode, (size_t)size,
+                     (vnode_t *)parent);
+}
+static void ops_identity_forget(void *ctx, uint64_t ino)
+{
+    uxfs_identity_forget((uxfs_sb_t *)ctx, ino);
+}
+static void ops_vnode_get(void *vnode) { vnode_get((vnode_t *)vnode); }
+static void ops_page_cache_truncate(void *vnode, uint64_t sz)
+{
+    page_cache_truncate((vnode_t *)vnode, (size_t)sz);
+}
+static int ops_negotiate_lifetime(void *ctx)
+{
+    return uxfs_negotiate_lifetime((uxfs_sb_t *)ctx);
+}
+static int ops_lifetime_is_v2(void *ctx)
+{
+    return a20_uxfs_lifetime_is_v2(&((uxfs_sb_t *)ctx)->lifetime);
+}
+
+static const struct a20_uxfs_ops g_uxfs_ops = {
+    .req_init = ops_req_init,
+    .rpc = ops_rpc,
+    .vpriv_sb = ops_vpriv_sb,
+    .vn_ino = ops_vn_ino,
+    .vn_size = ops_vn_size,
+    .vn_set_size = ops_vn_set_size,
+    .vn_parent = ops_vn_parent,
+    .iget = ops_iget,
+    .identity_forget = ops_identity_forget,
+    .vnode_get = ops_vnode_get,
+    .page_cache_truncate = ops_page_cache_truncate,
+    .negotiate_lifetime = ops_negotiate_lifetime,
+    .lifetime_is_v2 = ops_lifetime_is_v2,
+};
+/* The Rust mirror (kernel/fs/uxfs/uxfs_ops_state.rs) asserts the wire headers;
+ * this pins the bridge-table field count so a C/Rust drift fails the build. */
+_Static_assert(sizeof(g_uxfs_ops) / sizeof(void *) == 13,
+               "uxfs ops mirror: bridge table field count");
+_Static_assert(sizeof(struct ufs_req_hdr) == 48, "uxfs ops mirror: request header");
+_Static_assert(sizeof(struct ufs_resp_hdr) == 48, "uxfs ops mirror: response header");
+
+/* Open-file (fctx/vfile) bridge for the Rust data-plane engine. */
+static void *ops_fc_sb(void *fc) { return ((uxfs_fctx_t *)fc)->sb; }
+static uint64_t ops_fc_ino(const void *fc) { return ((const uxfs_fctx_t *)fc)->ino; }
+static uint64_t ops_fc_off(const void *fc) { return (uint64_t)((const uxfs_fctx_t *)fc)->off; }
+static void ops_fc_set_off(void *fc, uint64_t off) { ((uxfs_fctx_t *)fc)->off = (size_t)off; }
+static int ops_fc_is_dir(const void *fc) { return ((const uxfs_fctx_t *)fc)->is_dir; }
+static void *ops_vf_vnode(void *vf) { return ((vfile_t *)vf)->vnode; }
+static void ops_vf_set_offset(void *vf, uint64_t off) { ((vfile_t *)vf)->offset = (size_t)off; }
+static uint64_t ops_file_vn_size(void *vn) { return (uint64_t)((vnode_t *)vn)->size; }
+static void ops_file_vn_set_size(void *vn, uint64_t sz) { ((vnode_t *)vn)->size = (size_t)sz; }
+
+static const struct a20_uxfs_fops g_uxfs_file_ops = {
+    .req_init = ops_req_init,
+    .rpc = ops_rpc,
+    .fc_sb = ops_fc_sb,
+    .fc_ino = ops_fc_ino,
+    .fc_off = ops_fc_off,
+    .fc_set_off = ops_fc_set_off,
+    .fc_is_dir = ops_fc_is_dir,
+    .vf_vnode = ops_vf_vnode,
+    .vf_set_offset = ops_vf_set_offset,
+    .vn_size = ops_file_vn_size,
+    .vn_set_size = ops_file_vn_set_size,
+};
+_Static_assert(sizeof(g_uxfs_file_ops) / sizeof(void *) == 11,
+               "uxfs file-ops mirror: bridge table field count");
+_Static_assert(sizeof(uxfs_fctx_t) == 40, "uxfs file-ops mirror: fctx layout");
+
 static int uxfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    if (strcmp(name, ".") == 0) { *out = dir; vnode_get(dir); return 0; }
-    if (strcmp(name, "..") == 0) {
-        if (dir->parent) {
-            *out = dir->parent;
-            vnode_get(dir->parent);
-            vnode_get(dir); /* the caller does vnode_put on dir */
-            return 0;
-        }
-        *out = dir;
-        vnode_get(dir);
-        return 0;
-    }
-
-    uxfs_sb_t *sb = p->sb;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(sb, &req, UFS_OP_LOOKUP, dir->ino, 0, 0, name, 0);
-    int rc = uxfs_rpc(sb, &req, name, NULL, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-
-    *out = uxfs_make_vnode(sb, resp.out0, ufs_ft_to_vfs(resp.out1),
-                           (uint32_t)(resp.out2 >> 32),
-                           (size_t)(uint32_t)resp.out2, dir);
-    return *out ? 0 : -ENOMEM;
+    return a20_uxfs_op_lookup(&g_uxfs_ops, dir, name, (void **)out);
 }
 
 static int uxfs_stat(vnode_t *vn, kstat_t *st)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    memset(st, 0, sizeof(*st));
-
-    uxfs_req_init(p->sb, &req, UFS_OP_GETATTR, vn->ino, 0, 0, NULL, 0);
-    int rc = uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-
-    st->st_ino     = vn->ino;
-    st->st_size    = (uint64_t)resp.out0;
-    st->st_mode    = (uint32_t)(resp.out1 >> 32);
-    st->st_nlink   = 1;
-    st->st_blksize = 512;
-    st->st_blocks  = (st->st_size + 511) / 512;
-    /* refresh the cached size so reads on the open fd match the server */
-    vn->size = (size_t)st->st_size;
-    return 0;
+    return a20_uxfs_op_stat(&g_uxfs_ops, vn, st);
 }
 
 static int uxfs_statfs(vnode_t *vn, kstatfs_t *st)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    memset(st, 0, sizeof(*st));
-
-    uxfs_req_init(p->sb, &req, UFS_OP_STATFS, 0, 0, 0, NULL, 0);
-    int rc = uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-
-    st->f_bsize  = 512;
-    st->f_frsize = 512;
-    st->f_blocks = resp.out0 / 512;
-    st->f_bfree  = resp.out1 / 512;
-    st->f_bavail = st->f_bfree;
-    st->f_namelen = 255;
-    st->f_type = 0x55584653u; /* 'UXFS' */
-    return 0;
+    return a20_uxfs_op_statfs(&g_uxfs_ops, vn, st);
 }
 
 static int uxfs_create(vnode_t *dir, const char *name, int mode,
                        vnode_t **out)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_CREATE, dir->ino, (uint64_t)mode, 0,
-                  name, 0);
-    int rc = uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-    if (!out)
-        return 0;
-    *out = uxfs_make_vnode(p->sb, resp.out0, VFS_FT_REGULAR,
-                           (S_IFREG | 0755), 0, dir);
-    return *out ? 0 : -ENOMEM;
+    return a20_uxfs_op_create(&g_uxfs_ops, dir, name, (uint32_t)mode,
+                              (void **)out);
 }
 
 static int uxfs_mkdir(vnode_t *dir, const char *name, int mode)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_MKDIR, dir->ino, (uint64_t)mode, 0,
-                  name, 0);
-    return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_mkdir(&g_uxfs_ops, dir, name, (uint32_t)mode);
 }
 
 static int uxfs_unlink(vnode_t *dir, const char *name)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_UNLINK, dir->ino, 0, 0, name, 0);
-    return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_unlink(&g_uxfs_ops, dir, name);
 }
 
 static int uxfs_link(vnode_t *dir, const char *name, vnode_t *target)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    uxfs_vpriv_t *tp = target ? (uxfs_vpriv_t *)target->fs_data : NULL;
-    if (!p || !tp || p->sb != tp->sb) return -EXDEV;
-    int rc = uxfs_negotiate_lifetime(p->sb);
-    if (rc != 0) return rc;
-    if (p->sb->lifetime_mode != 2u) return -ENOSYS;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_LINK, dir->ino, target->ino, 0,
-                  name, 0);
-    return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_link(&g_uxfs_ops, dir, name, target);
 }
 
 static int uxfs_rmdir(vnode_t *dir, const char *name)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)dir->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_RMDIR, dir->ino, 0, 0, name, 0);
-    return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_rmdir(&g_uxfs_ops, dir, name);
 }
 
 static int uxfs_rename(vnode_t *old_dir, const char *old_name,
                        vnode_t *new_dir, const char *new_name,
                        unsigned int flags)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)old_dir->fs_data;
-    uxfs_sb_t *sb = p->sb;
-    uint32_t new_len = (uint32_t)strlen(new_name);
-
     (void)flags; /* extended semantics like RENAME_EXCHANGE are unsupported */
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(sb, &req, UFS_OP_RENAME, old_dir->ino,
-                  new_dir->ino, new_len, old_name, new_len);
-    return uxfs_rpc(sb, &req, old_name, new_name, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_rename(&g_uxfs_ops, old_dir, old_name, new_dir, new_name);
 }
 
 static int uxfs_truncate(vnode_t *vn, size_t size)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_TRUNCATE, vn->ino, size, 0, NULL, 0);
-    int rc = uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc == 0) {
-        page_cache_truncate(vn, size);
-        vn->size = size;
-    }
-    return rc;
+    return a20_uxfs_op_truncate(&g_uxfs_ops, vn, (uint64_t)size);
 }
 
 static int uxfs_sync_vnode(vnode_t *vn)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(p->sb, &req, UFS_OP_SYNC, vn->ino, 0, 0, NULL, 0);
-    return uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
+    return a20_uxfs_op_sync_vnode(&g_uxfs_ops, vn);
 }
 
 static int uxfs_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uint64_t off = index * 4096ull;
-    uxfs_req_init(p->sb, &req, UFS_OP_READ, vn->ino, off, len, NULL, 0);
-    int rc = uxfs_rpc(p->sb, &req, NULL, NULL, &resp, data, (uint32_t)len,
-                      NULL);
-    if (rc != 0)
-        return rc;
-    /* the last page may read short; zero-fill the rest */
-    if (resp.out0 < len)
-        memset((char *)data + resp.out0, 0, (size_t)(len - resp.out0));
-    return 0;
+    return a20_uxfs_op_readpage(&g_uxfs_ops, vn, index, data, (uint64_t)len);
 }
 
 static int uxfs_writepage(vnode_t *vn, uint64_t index, const void *data,
                           size_t len)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uint64_t off = index * 4096ull;
-    /* Writeback flushes whole pages; only bytes within the file are
-     * authoritative, otherwise ufsd-side size would inflate to the page
-     * boundary on the tail page. */
-    if (off >= vn->size)
-        return 0;
-    if (off + len > vn->size)
-        len = (size_t)(vn->size - off);
-    uxfs_req_init(p->sb, &req, UFS_OP_WRITE, vn->ino, off, len, NULL,
-                  (uint32_t)len);
-    int rc = uxfs_rpc(p->sb, &req, NULL, data, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-    if ((uint64_t)(off + resp.out0) > vn->size)
-        vn->size = (size_t)(off + resp.out0);
-    return 0;
+    return a20_uxfs_op_writepage(&g_uxfs_ops, vn, index, data, (uint64_t)len);
 }
 
 void uxfs_release_vn(vnode_t *vn)
 {
     uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
+    uxfs_sb_t *sb = p ? p->sb : NULL;
     if (p) {
         kfree(p);
         vn->fs_data = NULL;
@@ -694,6 +845,9 @@ void uxfs_release_vn(vnode_t *vn)
     if (vn->parent)
         vnode_put(vn->parent);
     kfree(vn);
+    /* Keep this as the final access: zero permits another mount to reuse sb. */
+    if (sb)
+        __atomic_sub_fetch(&sb->live_vnodes, 1, __ATOMIC_RELEASE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -702,204 +856,37 @@ void uxfs_release_vn(vnode_t *vn)
 
 static int uxfs_fread(vfile_t *vf, char *buf, size_t count)
 {
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    if (fc->is_dir)
-        return -EISDIR;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-
-    if (count > UFS_MAX_PAYLOAD)
-        count = UFS_MAX_PAYLOAD;
-
-    uxfs_req_init(fc->sb, &req, UFS_OP_READ, fc->ino, fc->off, count, NULL, 0);
-    int rc = uxfs_rpc(fc->sb, &req, NULL, NULL, &resp, buf,
-                      (uint32_t)count, NULL);
-    if (rc != 0)
-        return rc;
-
-    size_t got = (size_t)resp.out0;
-    if (got > count)
-        got = count;
-    if (got < count)
-        memset(buf + got, 0, count - got);
-    fc->off += got;
-    vf->offset = fc->off;
-    return (int)got;
+    return a20_uxfs_file_read(&g_uxfs_file_ops, vf->priv, vf, buf, count);
 }
 
 static int uxfs_fwrite(vfile_t *vf, const char *buf, size_t count)
 {
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    if (fc->is_dir)
-        return -EISDIR;
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-
-    if (count > UFS_MAX_PAYLOAD)
-        count = UFS_MAX_PAYLOAD;
-
-    uxfs_req_init(fc->sb, &req, UFS_OP_WRITE, fc->ino, fc->off, count, NULL,
-                  (uint32_t)count);
-    int rc = uxfs_rpc(fc->sb, &req, NULL, buf, &resp, NULL, 0, NULL);
-    if (rc != 0)
-        return rc;
-
-    size_t put = (size_t)resp.out0;
-    if (put > count)
-        put = count;
-    fc->off += put;
-    vf->offset = fc->off;
-    if (vf->vnode && vf->vnode->size < fc->off)
-        vf->vnode->size = fc->off;
-    return (int)put;
+    return a20_uxfs_file_write(&g_uxfs_file_ops, vf->priv, vf, buf, count);
 }
 
 static long uxfs_flseek(vfile_t *vf, long offset, int whence)
 {
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    long target = fc->off;
-    size_t limit = fc->is_dir ? ~0ul : vf->vnode->size;
-
-    switch (whence) {
-    case 0: target = offset; break;             /* SEEK_SET */
-    case 1: target = (long)fc->off + offset; break; /* SEEK_CUR */
-    case 2: target = (long)limit + offset; break;   /* SEEK_END */
-    default: return -EINVAL;
-    }
-    if (target < 0)
-        return -EINVAL;
-    fc->off = (size_t)target;
-    vf->offset = fc->off;
-    return target;
+    return (long)a20_uxfs_file_lseek(&g_uxfs_file_ops, vf->priv, vf,
+                                     (int64_t)offset, whence);
 }
 
 static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 {
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    if (!fc->is_dir)
-        return -ENOTDIR;
-
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    static uint8_t payload[UFS_MAX_PAYLOAD];
-    uint32_t plen = 0;
-
-    /* cookie: entries already consumed; the server skips arg0, continues */
-    uxfs_req_init(fc->sb, &req, UFS_OP_READDIR, fc->ino, fc->off, count,
-                  NULL, 0);
-    int rc = uxfs_rpc(fc->sb, &req, NULL, NULL, &resp, payload,
-                      sizeof(payload), &plen);
-    if (rc != 0)
-        return rc;
-
-    /* Its compact entry sequence becomes the VFS dirent64 stream (8-byte
-     * aligned), matching the output contract of FAT32 readdir. */
-    char *out = (char *)dirp;
-    size_t total = 0;
-    uint32_t i = 0;
-    uint64_t ordinal = fc->off;
-    while (i + 10 <= plen) {
-        uint64_t ino;
-        memcpy(&ino, payload + i, 8);
-        i += 8;
-        uint8_t type = payload[i++];
-        uint8_t nlen = payload[i++];
-        if (i + nlen > plen)
-            break;
-        const char *nm = (const char *)payload + i;
-        i += nlen;
-
-        size_t reclen = sizeof(vfs_dirent64_t) + nlen + 1;
-        reclen = (reclen + 7) & ~(size_t)7;
-        if (total + reclen > count)
-            break;
-
-        vfs_dirent64_t *dent = (vfs_dirent64_t *)(out + total);
-        dent->d_ino    = ino;
-        dent->d_off    = (int64_t)(ordinal + 1); /* consumed = next cookie */
-        dent->d_reclen = (uint16_t)reclen;
-        dent->d_type   = (type == UFS_FT_DIR) ? 4 :
-                         (type == UFS_FT_SYMLINK) ? 10 : 8; /* DT_* */
-        memcpy(dent->d_name, nm, nlen);
-        dent->d_name[nlen] = '\0';
-        total += reclen;
-        ordinal++;
-    }
-
-    if (total > 0)
-        fc->off = ordinal; /* dir done or buffer full: advance to consumed */
-    vf->offset = fc->off;
-    return (int)total;
+    /* Rust decodes the RPC payload after the transport has released its
+     * request lock.  A shared static buffer lets another open directory
+     * overwrite that reply during the decode, including across superblocks. */
+    uint8_t *payload = (uint8_t *)kmalloc(UFS_MAX_PAYLOAD);
+    if (!payload)
+        return -ENOMEM;
+    int rc = a20_uxfs_file_readdir(&g_uxfs_file_ops, vf->priv, vf, dirp, count,
+                                   payload, UFS_MAX_PAYLOAD);
+    kfree(payload);
+    return rc;
 }
 
 static int uxfs_fclose(vfile_t *vf)
 {
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
-    if (!fc)
-        return 0;
-#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
-    kinfo("[UFS-CT-TRACE] uxfs_fclose vf=%lu ino=%lu accepted=%u confirm=%u token_cap=%u\n",
-          (unsigned long)vf->identity, (unsigned long)fc->ino,
-          (unsigned)fc->close_accepted,
-          (unsigned)fc->close_confirm_mode,
-          (unsigned)vf->close_token_capable);
-#endif
-    vf->close_attempt_sent = 0;
-    vf->close_attempt_acked = 0;
-    vf->close_attempt_retry_safe = 0;
-
-    /* A failed page writeback is known to precede CLOSE, so retain the
-     * context and allow a later close/shutdown retry without changing the
-     * server's OPEN count. */
-    if (vf->vnode) {
-        int flush_rc = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
-        if (flush_rc < 0) {
-            vf->close_attempt_retry_safe = 1;
-            return flush_rc;
-        }
-    }
-
-    int acked = 0;
-    int request_sent = 0;
-    int close_rc = 0;
-    if (!fc->close_accepted) {
-        close_rc = uxfs_lifetime_close(fc->sb, fc->ino, fc->close_token,
-                                       &acked, &request_sent);
-        vf->close_attempt_sent = request_sent != 0;
-        if (close_rc != 0 || !acked) {
-            /* Only token-confirm peers may retry a CLOSE whose ACK was
-             * ambiguous. Token-only peers retain the original sticky state. */
-            vf->close_attempt_retry_safe = !request_sent;
-            return close_rc < 0 ? close_rc : -EIO;
-        }
-        if (fc->close_confirm_mode)
-            fc->close_accepted = 1;
-    }
-    if (fc->close_confirm_mode && fc->close_accepted) {
-        acked = 0;
-        request_sent = 0;
-        close_rc = uxfs_lifetime_close_confirm(fc->sb, fc->ino,
-                                               fc->close_token, &acked,
-                                               &request_sent);
-        vf->close_attempt_sent = request_sent != 0;
-        vf->close_attempt_acked = acked != 0 && close_rc == 0;
-        if (close_rc != 0 || !acked) {
-            vf->close_attempt_retry_safe = !request_sent;
-            return close_rc < 0 ? close_rc : -EIO;
-        }
-    } else {
-        vf->close_attempt_acked = 1;
-    }
-    if (close_rc != 0 || !vf->close_attempt_acked) {
-        /* Rust close lifecycle owns retry/ambiguity policy. This adapter only
-         * reports transport facts; a missing post-send ACK is ambiguous. */
-        if (!request_sent)
-            vf->close_attempt_retry_safe = 1;
-        return close_rc < 0 ? close_rc : -EIO;
-    }
-    kfree(fc);
-    vf->priv = NULL;
-    return 0;
+    return a20_uxfs_file_close(&g_uxfs_lifecycle, vf);
 }
 
 static vfile_ops_t g_uxfs_fops = {
@@ -913,43 +900,7 @@ static vfile_ops_t g_uxfs_fops = {
 
 static struct vfile *uxfs_open_vnode(vnode_t *vn, int flags)
 {
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
-    /* Reserve every local object before OPEN creates a server-side lifetime.
-     * Once the peer accepts OPEN, there must be no allocation-failure path
-     * that loses the only close token needed to compensate that reference. */
-    uxfs_fctx_t *fc = (uxfs_fctx_t *)kmalloc(sizeof(uxfs_fctx_t));
-    if (!fc)
-        return NULL;
-    vfile_t *vf = vfile_alloc();
-    if (!vf) {
-        kfree(fc);
-        return NULL;
-    }
-
-    uint64_t close_token = 0;
-    if (uxfs_lifetime_open(p->sb, vn->ino, (uint64_t)(flags & 3),
-                           &close_token) != 0) {
-        vfile_free(vf);
-        kfree(fc);
-        return NULL;
-    }
-    memset(fc, 0, sizeof(*fc));
-    fc->sb     = p->sb;
-    fc->ino    = vn->ino;
-    fc->close_token = close_token;
-    fc->close_confirm_mode = close_token != 0 && p->sb->close_confirm_mode;
-    fc->is_dir = p->is_dir;
-    fc->off    = (flags & 0x400 /* O_APPEND */) ? vn->size : 0;
-
-    vf->vnode = vn;
-    vnode_get(vn);
-    vf->flags  = flags;
-    vf->close_token_capable = fc->close_confirm_mode;
-    vf->offset = fc->off;
-    vfile_ref_init(vf, 1);
-    vf->ops  = &g_uxfs_fops;
-    vf->priv = fc;
-    return vf;
+    return (struct vfile *)a20_uxfs_file_open(&g_uxfs_lifecycle, vn, flags);
 }
 
 static vnode_ops_t g_uxfs_vnops = {
@@ -977,18 +928,258 @@ static vnode_ops_t g_uxfs_vnops = {
 #define UXFS_MAX_SBS 8
 static uxfs_sb_t g_uxfs_sbs[UXFS_MAX_SBS];
 
+/* Mechanical bridge for the Rust namespace engine (mount/serve/unmount and
+ * block-device ownership).  Every function here is a single store, a single
+ * VFS/identity call, or a lock wrapper; all branching lives in
+ * kernel/fs/uxfs/uxfs_ops_state.rs. */
+static void *ops_ns_sb_table(void) { return g_uxfs_sbs; }
+static uint64_t ops_ns_sb_stride(void) { return sizeof(uxfs_sb_t); }
+static int ops_ns_sb_count(void) { return UXFS_MAX_SBS; }
+static uint64_t ops_ns_lock_mounts(void) { return spin_lock_irqsave(&g_uxfs_mount_table_lock); }
+static void ops_ns_unlock_mounts(uint64_t f) { spin_unlock_irqrestore(&g_uxfs_mount_table_lock, f); }
+static void *ops_ns_block_device(int idx) { return mount_setup_block_device(idx); }
+static int ops_ns_device_has_native(void *dev) { return uxfs_device_has_native_mount((block_dev_t *)dev); }
+static int ops_ns_path_is_dir(const char *path)
+{
+    vnode_t *t = vfs_resolve(path);
+    if (!t)
+        return -ENOENT;
+    int is_dir = (t->type == VFS_FT_DIR);
+    vnode_put(t);
+    return is_dir ? 1 : 0;
+}
+static void *ops_ns_iget(void *sb, uint64_t ino, int type, uint32_t mode,
+                         uint64_t size, void *parent)
+{
+    return uxfs_iget((uxfs_sb_t *)sb, ino, type, mode, (size_t)size,
+                     (vnode_t *)parent);
+}
+static void *ops_ns_mount_alloc(void) { return vfs_mount_alloc(); }
+static void ops_ns_mount_init(void *mnt, const char *path, uint32_t flags,
+                              void *root, void *sb)
+{
+    mount_t *m = (mount_t *)mnt;
+    vnode_t *r = (vnode_t *)root;
+    strncpy(m->path, path, MAX_PATH_LEN - 1);
+    m->path[MAX_PATH_LEN - 1] = '\0';
+    m->type = FS_TYPE_UXFS;
+    m->flags = flags;
+    m->root = r;
+    m->fs_data = sb;
+    strncpy(m->dev, "ufsd", sizeof(m->dev) - 1);
+    m->dev[sizeof(m->dev) - 1] = '\0';
+    strncpy(m->fstype, "uxfs", sizeof(m->fstype) - 1);
+    m->fstype[sizeof(m->fstype) - 1] = '\0';
+    strncpy(m->opts, "rw", sizeof(m->opts) - 1);
+    m->opts[sizeof(m->opts) - 1] = '\0';
+    r->mnt = m;
+}
+static void ops_ns_mount_link_tree(void *mnt) { vfs_mount_link_tree((mount_t *)mnt); }
+static void ops_ns_dcache_invalidate_all(void *x) { (void)x; vfs_dcache_invalidate_all(); }
+static void ops_ns_identity_register_peek(void *x) { (void)x; uxfs_identity_register_peek(); }
+static void ops_ns_identity_clear_sb(void *sb) { uxfs_identity_clear_sb((uxfs_sb_t *)sb); }
+static void ops_ns_vnode_get(void *vn) { vnode_get((vnode_t *)vn); }
+static void ops_ns_vnode_put(void *vn) { vnode_put((vnode_t *)vn); }
+static void *ops_ns_vnode_fs_data(void *vn) { return ((vnode_t *)vn)->fs_data; }
+static void ops_ns_lifetime_reset(void *p) { a20_uxfs_lifetime_reset((uxfs_lifetime_state_t *)p); }
+static void *ops_ns_proc_get(void *t) { return proc_get((struct task_t *)t); }
+static void ops_ns_proc_put(void *t) { proc_put((struct task_t *)t); }
+static void ops_ns_slot_init_req_lock(void *sb) { mutex_init(&((uxfs_sb_t *)sb)->req_lock); }
+static void ops_ns_detach_server(void *sb) { uxfs_detach_server((uxfs_sb_t *)sb); }
+static int ops_ns_peer_closed(void *ep) { return a20_channel_peer_closed((struct a20_channel_ep *)ep); }
+static uint64_t ops_ns_now_ns(void)
+{
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    return ts[0] * 1000000000ull + ts[1];
+}
+static int ops_ns_negotiate_until(void *sb, uint64_t dl)
+{
+    return uxfs_negotiate_lifetime_until((uxfs_sb_t *)sb, dl);
+}
+static int ops_ns_shutdown_rpc(void *sb, uint64_t dl, int *retry_safe)
+{
+    uxfs_sb_t *s = (uxfs_sb_t *)sb;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp = {0};
+    uxfs_req_init(s, &req, UFS_OP_SHUTDOWN, UFS_ROOT_INO, 0, 0, NULL, 0);
+    req.version = UFS_PROTO_VERSION;
+    int rc = uxfs_rpc_timeout(s, &req, NULL, NULL, &resp, NULL, 0, NULL, dl, NULL);
+    if (retry_safe)
+        *retry_safe = (rc == -EBUSY && resp.out1 == UFS_SHUTDOWN_RETRY_SAFE) ? 1 : 0;
+    return rc;
+}
+static void ops_ns_mount_log(const char *path, int block_index)
+{
+    kinfo("[UXFS] mounted user filesystem at %s (block=%d)\n", path, block_index);
+}
+
+static const struct a20_uxfs_ns g_uxfs_ns = {
+    .sb_table = ops_ns_sb_table,
+    .sb_stride = ops_ns_sb_stride,
+    .sb_count = ops_ns_sb_count,
+    .lock_mounts = ops_ns_lock_mounts,
+    .unlock_mounts = ops_ns_unlock_mounts,
+    .block_device = ops_ns_block_device,
+    .device_has_native_mount = ops_ns_device_has_native,
+    .path_is_dir = ops_ns_path_is_dir,
+    .iget = ops_ns_iget,
+    .mount_alloc = ops_ns_mount_alloc,
+    .mount_init = ops_ns_mount_init,
+    .mount_link_tree = ops_ns_mount_link_tree,
+    .dcache_invalidate_all = ops_ns_dcache_invalidate_all,
+    .identity_register_peek = ops_ns_identity_register_peek,
+    .identity_clear_sb = ops_ns_identity_clear_sb,
+    .vnode_get = ops_ns_vnode_get,
+    .vnode_put = ops_ns_vnode_put,
+    .vnode_fs_data = ops_ns_vnode_fs_data,
+    .lifetime_reset = ops_ns_lifetime_reset,
+    .proc_get = ops_ns_proc_get,
+    .proc_put = ops_ns_proc_put,
+    .slot_init_req_lock = ops_ns_slot_init_req_lock,
+    .detach_server = ops_ns_detach_server,
+    .peer_closed = ops_ns_peer_closed,
+    .now_ns = ops_ns_now_ns,
+    .negotiate_lifetime_until = ops_ns_negotiate_until,
+    .shutdown_rpc = ops_ns_shutdown_rpc,
+    .mount_log = ops_ns_mount_log,
+};
+_Static_assert(sizeof(g_uxfs_ns) / sizeof(void *) == 28,
+               "uxfs namespace mirror: bridge table field count");
+_Static_assert(__builtin_offsetof(uxfs_sb_t, server_generation) == 72,
+               "uxfs namespace mirror: sb view prefix layout");
+
+/* Mechanical bridge for the Rust open/close lifecycle engine. */
+static void *ops_lc_fc_alloc(void) { return kmalloc(sizeof(uxfs_fctx_t)); }
+static void *ops_lc_vfile_alloc(void) { return vfile_alloc(); }
+static void ops_lc_vfile_free(void *vf) { vfile_free((vfile_t *)vf); }
+static void ops_lc_kfree(void *p) { kfree(p); }
+static void *ops_lc_vn_vpriv(void *vn) { return ((vnode_t *)vn)->fs_data; }
+static void *ops_lc_vpriv_sb(void *p) { return ((uxfs_vpriv_t *)p)->sb; }
+static int ops_lc_vpriv_is_dir(void *p) { return ((uxfs_vpriv_t *)p)->is_dir; }
+static uint64_t ops_lc_vn_ino(const void *vn) { return ((const vnode_t *)vn)->ino; }
+static uint64_t ops_lc_vn_size(const void *vn) { return (uint64_t)((const vnode_t *)vn)->size; }
+static int ops_lc_lifetime_open(void *sb, uint64_t ino, uint64_t flags,
+                                uint64_t *token)
+{
+    return uxfs_lifetime_open((uxfs_sb_t *)sb, ino, flags, token);
+}
+static int ops_lc_lifetime_confirm_mode(void *sb)
+{
+    return ((uxfs_sb_t *)sb)->lifetime.close_confirm_mode != 0;
+}
+static void ops_lc_fc_init(void *fc, void *sb, uint64_t ino, uint64_t token,
+                           int confirm, int is_dir, uint64_t off)
+{
+    uxfs_fctx_t *c = (uxfs_fctx_t *)fc;
+    memset(c, 0, sizeof(*c));
+    c->sb = (uxfs_sb_t *)sb;
+    c->ino = ino;
+    c->close_token = token;
+    c->close_confirm_mode = (uint8_t)confirm;
+    c->is_dir = is_dir;
+    c->off = (size_t)off;
+}
+static void ops_lc_vf_init(void *vf, void *vn, int flags, int capable,
+                           uint64_t off, void *priv)
+{
+    vfile_t *v = (vfile_t *)vf;
+    v->vnode = (vnode_t *)vn;
+    vnode_get((vnode_t *)vn);
+    v->flags = flags;
+    v->close_token_capable = (uint8_t)capable;
+    v->offset = (size_t)off;
+    vfile_ref_init(v, 1);
+    v->ops = &g_uxfs_fops;
+    v->priv = priv;
+}
+static void *ops_lc_fc_sb(void *fc) { return ((uxfs_fctx_t *)fc)->sb; }
+static uint64_t ops_lc_fc_ino(const void *fc) { return ((const uxfs_fctx_t *)fc)->ino; }
+static uint64_t ops_lc_fc_close_token(const void *fc) { return ((const uxfs_fctx_t *)fc)->close_token; }
+static int ops_lc_fc_confirm(const void *fc) { return ((const uxfs_fctx_t *)fc)->close_confirm_mode; }
+static int ops_lc_fc_accepted(const void *fc) { return ((const uxfs_fctx_t *)fc)->close_accepted; }
+static void ops_lc_fc_set_accepted(void *fc, int v) { ((uxfs_fctx_t *)fc)->close_accepted = (uint8_t)v; }
+static void *ops_lc_vf_vnode(void *vf) { return ((vfile_t *)vf)->vnode; }
+static void *ops_lc_vf_priv(void *vf) { return ((vfile_t *)vf)->priv; }
+static void ops_lc_vf_set_close_attempt(void *vf, int sent, int acked, int retry_safe)
+{
+    vfile_t *v = (vfile_t *)vf;
+    v->close_attempt_sent = (uint8_t)sent;
+    v->close_attempt_acked = (uint8_t)acked;
+    v->close_attempt_retry_safe = (uint8_t)retry_safe;
+}
+static void ops_lc_fc_release(void *vf, void *fc)
+{
+    kfree(fc);
+    ((vfile_t *)vf)->priv = NULL;
+}
+static int ops_lc_pc_writeback(void *vn)
+{
+    return page_cache_writeback_vnode((vnode_t *)vn, NULL, NULL);
+}
+static int ops_lc_lifetime_close(void *sb, uint64_t ino, uint64_t token,
+                                 int *acked, int *sent)
+{
+    return uxfs_lifetime_close((uxfs_sb_t *)sb, ino, token, acked, sent);
+}
+static int ops_lc_lifetime_close_confirm(void *sb, uint64_t ino, uint64_t token,
+                                         int *acked, int *sent)
+{
+    return uxfs_lifetime_close_confirm((uxfs_sb_t *)sb, ino, token, acked, sent);
+}
+static void ops_lc_trace(void *vf, void *fc)
+{
+#ifdef CONFIG_UFS_CLOSE_TOKEN_SHUTDOWN_TRACE
+    kinfo("[UFS-CT-TRACE] uxfs_fclose vf=%lu ino=%lu accepted=%u confirm=%u token_cap=%u\n",
+          (unsigned long)((vfile_t *)vf)->identity,
+          (unsigned long)((uxfs_fctx_t *)fc)->ino,
+          (unsigned)((uxfs_fctx_t *)fc)->close_accepted,
+          (unsigned)((uxfs_fctx_t *)fc)->close_confirm_mode,
+          (unsigned)((vfile_t *)vf)->close_token_capable);
+#else
+    (void)vf;
+    (void)fc;
+#endif
+}
+
+static const struct a20_uxfs_lifecycle g_uxfs_lifecycle = {
+    .fc_alloc = ops_lc_fc_alloc,
+    .vfile_alloc = ops_lc_vfile_alloc,
+    .vfile_free = ops_lc_vfile_free,
+    .kfree = ops_lc_kfree,
+    .vn_vpriv = ops_lc_vn_vpriv,
+    .vpriv_sb = ops_lc_vpriv_sb,
+    .vpriv_is_dir = ops_lc_vpriv_is_dir,
+    .vn_ino = ops_lc_vn_ino,
+    .vn_size = ops_lc_vn_size,
+    .lifetime_open = ops_lc_lifetime_open,
+    .lifetime_confirm_mode = ops_lc_lifetime_confirm_mode,
+    .fc_init = ops_lc_fc_init,
+    .vf_init = ops_lc_vf_init,
+    .fc_sb = ops_lc_fc_sb,
+    .fc_ino = ops_lc_fc_ino,
+    .fc_close_token = ops_lc_fc_close_token,
+    .fc_close_confirm_mode = ops_lc_fc_confirm,
+    .fc_close_accepted = ops_lc_fc_accepted,
+    .fc_set_close_accepted = ops_lc_fc_set_accepted,
+    .vf_vnode = ops_lc_vf_vnode,
+    .vf_priv = ops_lc_vf_priv,
+    .vf_set_close_attempt = ops_lc_vf_set_close_attempt,
+    .fc_release = ops_lc_fc_release,
+    .pc_writeback = ops_lc_pc_writeback,
+    .lifetime_close = ops_lc_lifetime_close,
+    .lifetime_close_confirm = ops_lc_lifetime_close_confirm,
+    .trace = ops_lc_trace,
+};
+_Static_assert(sizeof(g_uxfs_lifecycle) / sizeof(void *) == 27,
+               "uxfs lifecycle mirror: bridge table field count");
+
 /* Native block-backed mounts consult this before attaching a second cache to
  * a device already owned by a live UXFS service.  The mount table stores the
  * bcache in fs_data for each disk filesystem. */
 int uxfs_block_device_owned(block_dev_t *dev)
 {
-    if (!dev) return 0;
-    for (int i = 0; i < UXFS_MAX_SBS; i++) {
-        uxfs_sb_t *sb = &g_uxfs_sbs[i];
-        if (sb->ep && mount_setup_block_device(sb->block_index) == dev)
-            return 1;
-    }
-    return 0;
+    return a20_uxfs_ns_device_owned(&g_uxfs_ns, dev);
 }
 
 static int uxfs_device_has_native_mount(block_dev_t *dev)
@@ -1018,196 +1209,20 @@ static int uxfs_device_has_native_mount(block_dev_t *dev)
  * instance); only the caller's own registration matches, others are skipped. */
 static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
 {
-    for (int i = 0; i < UXFS_MAX_SBS; i++) {
-        uxfs_sb_t *sb = &g_uxfs_sbs[i];
-        if (sb->ep && sb->block_index == block_index &&
-            sb->server == task)
-            return mount_setup_block_device(block_index);
-    }
-    return NULL;
+    return (block_dev_t *)a20_uxfs_ns_owned_block_dev(&g_uxfs_ns, task, block_index);
 }
 
 int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
                      struct task_t *server, int block_index,
                      uint32_t serve_flags)
 {
-    if (!path || !ep)
-        return -EINVAL;
-
-    vnode_t *target = vfs_resolve(path);
-    if (!target)
-        return -ENOENT;
-    int is_dir = (target->type == VFS_FT_DIR);
-    vnode_put(target);
-    if (!is_dir)
-        return -ENOTDIR;
-
-    block_dev_t *service_dev = mount_setup_block_device(block_index);
-    if (!service_dev)
-        return -ENODEV;
-    if (uxfs_device_has_native_mount(service_dev))
-        return -EBUSY;
-    for (int i = 0; i < UXFS_MAX_SBS; i++) {
-        if (g_uxfs_sbs[i].ep &&
-            mount_setup_block_device(g_uxfs_sbs[i].block_index) == service_dev)
-            return -EBUSY;
-    }
-
-    int slot = -1;
-    for (int i = 0; i < UXFS_MAX_SBS; i++) {
-        if (!g_uxfs_sbs[i].ep) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0)
-        return -EMFILE;
-    uxfs_sb_t *sb = &g_uxfs_sbs[slot];
-
-    sb->ep          = ep;
-    sb->server      = proc_get(server);
-    if (!sb->server) {
-        sb->ep = NULL;
-        return -ESRCH;
-    }
-    sb->lifetime_server = NULL;
-    sb->block_index = block_index;
-    sb->next_req_id = 0;
-    sb->lifetime_mode = 0;
-    sb->shutdown_mode = 0;
-    sb->shutdown_started = 0;
-    sb->lifetime_generation = 0;
-    sb->server_generation++;
-    if (sb->server_generation == 0)
-        sb->server_generation = 1;
-    mutex_init(&sb->lifetime_lock);
-    mutex_init(&sb->req_lock);
-
-    /*
-     * No synchronous handshake: the caller of fs_serve is the service, so
-     * blocking here for the INIT reply would self-deadlock.  Liveness is
-     * checked by the first real file operation; on death the link drops, -EIO.
-     */
-    uint64_t root_ino = UFS_ROOT_INO;
-
-    vnode_t *root = uxfs_make_vnode(sb, root_ino, VFS_FT_DIR,
-                                    (S_IFDIR | 0755), 0, NULL);
-    if (!root) {
-        sb->ep = NULL;
-        proc_put(sb->server);
-        sb->server = NULL;
-        return -ENOMEM;
-    }
-
-    mount_t *mnt = vfs_mount_alloc();
-    if (!mnt) {
-        vnode_put(root);
-        sb->ep = NULL;
-        proc_put(sb->server);
-        sb->server = NULL;
-        return -ENOMEM;
-    }
-    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-    mnt->path[MAX_PATH_LEN - 1] = '\0';
-    mnt->type  = FS_TYPE_UXFS;
-    /* bit0: read-only backend (iso9660) declared; page-cache writes off. */
-    mnt->flags = (serve_flags & 1u) ? VFS_MOUNT_RDONLY : 0;
-    mnt->root  = root;
-    root->mnt  = mnt;
-    mnt->fs_data = sb;
-    strncpy(mnt->dev, "ufsd", sizeof(mnt->dev) - 1);
-    mnt->dev[sizeof(mnt->dev) - 1] = '\0';
-    strncpy(mnt->fstype, "uxfs", sizeof(mnt->fstype) - 1);
-    mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
-    strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
-    mnt->opts[sizeof(mnt->opts) - 1] = '\0';
-    root->mnt = mnt;
-    vnode_get(root); /* mount holds a persistent ref, like other FS do */
-    vfs_mount_link_tree(mnt);
-    vfs_dcache_invalidate_all();
-    kinfo("[UXFS] mounted user filesystem at %s (block=%d)\n", path,
-          block_index);
-    return 0;
+    return a20_uxfs_ns_serve_mount(&g_uxfs_ns, path, ep, server, block_index,
+                                   serve_flags);
 }
 
 int uxfs_unmount(struct vnode *root)
 {
-    if (!root)
-        return 0;
-    uxfs_vpriv_t *p = (uxfs_vpriv_t *)root->fs_data;
-    if (!p)
-        return 0;
-    uxfs_sb_t *sb = p->sb;
-    if (sb && sb->ep) {
-        /* Negotiate with the existing v1 INIT frame.  A capable peer performs
-         * backend sync/unmount and ACKs while block IO ownership is still
-         * valid.  Timeout/error leaves the mount and endpoint attached so the
-         * caller can retry; it never revokes a live service mid-flush. */
-        __atomic_store_n(&sb->shutdown_started, 1, __ATOMIC_RELEASE);
-        uint64_t ts[2];
-        timekeeping_get_monotonic(ts);
-        uint64_t deadline_ns = ts[0] * 1000000000ull + ts[1] +
-                               5000000000ull;
-        int rc = uxfs_negotiate_lifetime_until(sb, deadline_ns);
-        if (rc < 0) {
-            if (a20_channel_peer_closed(sb->ep)) {
-                /* No task can issue further block I/O.  Drop the dead peer
-                 * registration, leaving the filesystem's on-disk dirty
-                 * state untouched for recovery on the next mount. */
-                uxfs_detach_server(sb);
-                return 0;
-            }
-            /* INIT did not dismantle the backend, so a failed negotiation
-             * remains retryable. Keep normal RPCs quiesced until retry or
-             * confirmed peer death; a timeout is not proof of no progress. */
-            return rc;
-        }
-        if (a20_channel_peer_closed(sb->ep)) {
-            /* A cached v1/v2 negotiation is not proof that this generation
-             * still has a live service.  Once the endpoint confirms death,
-             * detach it without claiming a clean filesystem shutdown. */
-            uxfs_detach_server(sb);
-            return 0;
-        }
-        if (sb->shutdown_mode) {
-            ufs_req_hdr_t req;
-            ufs_resp_hdr_t resp = {0};
-            uxfs_req_init(sb, &req, UFS_OP_SHUTDOWN, UFS_ROOT_INO, 0, 0,
-                          NULL, 0);
-            req.version = UFS_PROTO_VERSION;
-            rc = uxfs_rpc_timeout(sb, &req, NULL, NULL, &resp, NULL, 0,
-                                  NULL, deadline_ns, NULL);
-            if (rc < 0) {
-                if (a20_channel_peer_closed(sb->ep)) {
-                    uxfs_detach_server(sb);
-                    return 0;
-                }
-                /* uxfs_rpc_timeout returns a transport error without touching
-                 * resp.  Only a matched, complete EBUSY reply can authorize
-                 * reopening admission after the service's non-destructive
-                 * open-count preflight. */
-                if (rc == -EBUSY && resp.out1 == UFS_SHUTDOWN_RETRY_SAFE)
-                    __atomic_store_n(&sb->shutdown_started, 0,
-                                     __ATOMIC_RELEASE);
-                /* The service may still be partway through backend teardown.
-                 * Preserve quiescence unless the peer explicitly marks a
-                 * pre-teardown EBUSY that left the backend untouched. */
-                return rc;
-            }
-        } else {
-            if (a20_channel_peer_closed(sb->ep)) {
-                uxfs_detach_server(sb);
-                return 0;
-            }
-            /* Captured v1 peers cannot prove their backend is durable before
-             * the kernel revokes block IO.  Keep their mount registered;
-             * compatibility does not silently claim clean shutdown. */
-            __atomic_store_n(&sb->shutdown_started, 0, __ATOMIC_RELEASE);
-            return -EOPNOTSUPP;
-        }
-        uxfs_detach_server(sb);
-    }
-    return 0;
+    return a20_uxfs_ns_unmount(&g_uxfs_ns, root);
 }
 
 int uxfs_block_io(struct task_t *task, int block_index, int write,

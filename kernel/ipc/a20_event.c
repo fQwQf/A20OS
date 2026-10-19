@@ -13,6 +13,22 @@
 #include "fs/readiness.h"
 #include "core/poll.h"
 
+extern int64_t a20_eventq_cancel_rust(a20_eventq_t *eq,
+                                      a20_handle_t target_h);
+extern void a20_eventq_destroy_object_rust(void *object, uint16_t object_type);
+extern void a20_event_notify_rust(void *object, uint16_t target_type,
+                                  uint32_t event_type, uint64_t data0,
+                                  uint64_t data1);
+extern void a20_event_notify_rust_locked(void *object, uint16_t target_type,
+                                         uint32_t event_type, uint64_t data0,
+                                         uint64_t data1, uint64_t bucket_flags);
+extern void a20_fs_notify_rust(void *vnode, uint32_t event_type,
+                               const char *name, uint64_t data0,
+                               uint64_t data1);
+extern void a20_fs_notify_rust_locked(void *vnode, uint32_t event_type,
+                                      const char *name, uint64_t data0,
+                                      uint64_t data1, uint64_t bucket_flags);
+
 #define A20_EVQ_HASH_BITS  8
 #define A20_EVQ_HASH_SIZE  (1u << A20_EVQ_HASH_BITS)
 #define A20_EVQ_HASH_MASK  (A20_EVQ_HASH_SIZE - 1)
@@ -74,6 +90,77 @@ static bool evq_hash_remove_locked(void *object, a20_watch_entry_t *entry)
     }
     return false;
 }
+
+typedef struct a20_eventq_cancel_view {
+    a20_watch_entry_t **watches;
+    uint32_t *watch_count;
+} a20_eventq_cancel_view_t;
+typedef struct a20_eventq_notify_ring_view {
+    a20_pending_event_t *ring;
+    uint32_t *cap;
+    uint32_t *head;
+    uint32_t *tail;
+    uint32_t *count;
+} a20_eventq_notify_ring_view_t;
+_Static_assert(__builtin_offsetof(a20_watch_entry_t, target_handle) == 0,
+               "Rust event queue watch handle ABI");
+_Static_assert(__builtin_offsetof(a20_watch_entry_t, target_object) ==
+                   ((sizeof(void *) + 3) & ~(sizeof(void *) - 1)),
+               "Rust event queue watch object ABI");
+_Static_assert(__builtin_offsetof(a20_eventq_cancel_view_t, watch_count) ==
+                   sizeof(void *), "Rust event queue cancel view ABI");
+_Static_assert(sizeof(a20_eventq_cancel_view_t) == 2 * sizeof(void *),
+               "Rust event queue cancel view size");
+_Static_assert(__builtin_offsetof(a20_eventq_notify_ring_view_t, count) ==
+                   4 * sizeof(void *), "Rust event queue ring view ABI");
+_Static_assert(sizeof(a20_eventq_notify_ring_view_t) == 5 * sizeof(void *),
+               "Rust event queue ring view size");
+_Static_assert(__builtin_offsetof(a20_pending_event_t, fs_name) == 48,
+               "Rust event queue event payload ABI");
+_Static_assert(sizeof(a20_pending_event_t) == 80,
+               "Rust event queue event size");
+
+uint64_t a20_eventq_cancel_lock_queue(a20_eventq_t *eq)
+{ return spin_lock_irqsave(&eq->lock); }
+void a20_eventq_cancel_unlock_queue(a20_eventq_t *eq, uint64_t flags)
+{ spin_unlock_irqrestore(&eq->lock, flags); }
+void a20_eventq_cancel_view(a20_eventq_t *eq,
+                            a20_eventq_cancel_view_t *view)
+{
+    view->watches = &eq->watches;
+    view->watch_count = &eq->watch_count;
+}
+uint64_t a20_eventq_cancel_lock_bucket(void *object)
+{
+    evq_hash_init();
+    return spin_lock_irqsave(&g_evq_hash_locks[evq_hash_ptr(object)]);
+}
+void a20_eventq_cancel_unlock_bucket(void *object, uint64_t flags)
+{ spin_unlock_irqrestore(&g_evq_hash_locks[evq_hash_ptr(object)], flags); }
+void a20_eventq_cancel_remove_reverse(void *object, a20_watch_entry_t *entry)
+{ (void)evq_hash_remove_locked(object, entry); }
+void a20_eventq_cancel_free(a20_watch_entry_t *entry) { kfree(entry); }
+void a20_eventq_cancel_wake(a20_eventq_t *eq)
+{ wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT); }
+void a20_eventq_notify_bucket_head(void *object, a20_obj_watch_node_t **out)
+{ *out = g_evq_hash[evq_hash_ptr(object)]; }
+void a20_eventq_destroy_bucket_head(void *object, a20_obj_watch_node_t ***out)
+{ *out = &g_evq_hash[evq_hash_ptr(object)]; }
+void a20_eventq_destroy_free_node(a20_obj_watch_node_t *node) { kfree(node); }
+int a20_eventq_destroy_try_ref(a20_eventq_t *eq)
+{ return refcount_inc_not_zero(&eq->refcount); }
+void a20_eventq_destroy_put(a20_eventq_t *eq) { a20_eventq_release(eq); }
+void a20_eventq_notify_ring_view(a20_eventq_t *eq,
+                                a20_eventq_notify_ring_view_t *view)
+{
+    view->ring = eq->ring;
+    view->cap = &eq->ring_cap;
+    view->head = &eq->ring_head;
+    view->tail = &eq->ring_tail;
+    view->count = &eq->ring_count;
+}
+void a20_eventq_notify_wake_one(a20_eventq_t *eq)
+{ wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT); }
 
 a20_eventq_t *a20_eventq_create(uint32_t capacity_hint)
 {
@@ -192,14 +279,6 @@ uint64_t a20_eventq_level_bits(const void *object, uint16_t type)
     return active;
 }
 
-static int evq_ring_put(a20_eventq_t *eq, const a20_pending_event_t *ev)
-{
-    if (eq->ring_count >= eq->ring_cap) return -A20_ERR_NO_SPACE;
-    eq->ring[eq->ring_tail] = *ev;
-    eq->ring_tail = (eq->ring_tail + 1) % eq->ring_cap;
-    eq->ring_count++;
-    return A20_OK;
-}
 
 static uint64_t evq_ns_to_deadline(uint64_t timeout_ns)
 {
@@ -444,47 +523,7 @@ int64_t a20_eventq_wait(a20_eventq_t *eq, a20_pending_event_t *out,
 
 int64_t a20_eventq_cancel(a20_eventq_t *eq, a20_handle_t target_h)
 {
-    if (!eq) return -A20_ERR_BAD_HANDLE;
-
-    evq_hash_init();
-
-    /* Cancel is keyed by handle, so the reverse-index bucket is only known
-     * after finding the watch.  Probe under eq->lock to learn the object,
-     * then redo the lookup under the full bucket -> eq order; a concurrent
-     * cancel or object destroy that wins the race makes the re-search come
-     * up empty, which this reports as NOT_FOUND. */
-    uint64_t probe_flags = spin_lock_irqsave(&eq->lock);
-    void *probe_obj = NULL;
-    for (a20_watch_entry_t *w = eq->watches; w; w = w->next) {
-        if (w->target_handle == target_h) {
-            probe_obj = w->target_object;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&eq->lock, probe_flags);
-    if (!probe_obj) return -A20_ERR_NOT_FOUND;
-
-    uint32_t idx = evq_hash_ptr(probe_obj);
-    uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_locks[idx]);
-    uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
-    a20_watch_entry_t **pp = &eq->watches;
-    while (*pp) {
-        if ((*pp)->target_handle == target_h) {
-            a20_watch_entry_t *del = *pp;
-            *pp = del->next;
-            eq->watch_count--;
-            evq_hash_remove_locked(del->target_object, del);
-            spin_unlock_irqrestore(&eq->lock, eq_flags);
-            spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
-            kfree(del);
-            wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
-            return A20_OK;
-        }
-        pp = &(*pp)->next;
-    }
-    spin_unlock_irqrestore(&eq->lock, eq_flags);
-    spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
-    return -A20_ERR_NOT_FOUND;
+    return a20_eventq_cancel_rust(eq, target_h);
 }
 
 void a20_eventq_release(a20_eventq_t *eq)
@@ -498,11 +537,10 @@ void a20_eventq_release(a20_eventq_t *eq)
     a20_eventq_on_object_destroy(eq, A20_OBJ_EVENT_QUEUE);
 
     /* Steal the queue-owned watch list under eq->lock, then detach each
-     * reverse-index node from its own bucket.  A node's lifetime is protected
-     * by its bucket lock, so the entry is freed exactly once — by whichever
-     * side (release or a20_eventq_on_object_destroy) actually removes the
-     * node under the bucket lock; a removal miss means that side already
-     * freed it.  After the last node is detached no notify path can reach
+     * reverse-index node from its bucket. Release owns entries in this
+     * detached snapshot even when object-destroy already removed a reverse
+     * node; object-destroy leaves an entry absent from eq->watches for this
+     * loop to free. After the last node is detached no notify path can reach
      * this queue, so freeing ring and queue below is safe. */
     evq_hash_init();
     uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
@@ -514,10 +552,13 @@ void a20_eventq_release(a20_eventq_t *eq)
         a20_watch_entry_t *next = w->next;
         uint32_t idx = evq_hash_ptr(w->target_object);
         uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_locks[idx]);
-        bool removed = evq_hash_remove_locked(w->target_object, w);
+        (void)evq_hash_remove_locked(w->target_object, w);
         spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
-        if (removed)
-            kfree(w);
+        /* Once the queue list is detached above, release owns every entry in
+         * that snapshot. Object-destroy may already have removed its reverse
+         * node, but it leaves an entry absent from eq->watches for this owner
+         * to free; always release the detached entry exactly once here. */
+        kfree(w);
         w = next;
     }
     wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
@@ -530,46 +571,15 @@ void a20_event_notify(void *target_object, uint16_t target_type,
 {
     evq_hash_init();
     uint32_t idx = evq_hash_ptr(target_object);
-
     uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_locks[idx]);
-    a20_obj_watch_node_t *node = g_evq_hash[idx];
-    while (node) {
-        if (node->entry->target_object == target_object &&
-            node->entry->target_type == target_type) {
-            a20_watch_entry_t *we = node->entry;
-            if (!(we->event_mask & ((uint64_t)1u << event_type))) {
-                node = node->next;
-                continue;
-            }
-            a20_eventq_t *eq = we->owner_queue;
-            int should_wake = 0;
-            uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
-            if (eq->ring_count < eq->ring_cap) {
-                a20_pending_event_t ev;
-                memset(&ev, 0, sizeof(ev));
-                ev.source = we->target_handle;
-                ev.type = event_type;
-                ev.events = (uint64_t)1u << event_type;
-                ev.user_data = we->user_data;
-                ev.data0 = data0;
-                ev.data1 = data1;
-                evq_ring_put(eq, &ev);
-                should_wake = 1;
-            } else {
-                /* Ring full: wake anyway so waiters re-read; oldest events
-                 * stay queued (wake-then-keep policy). */
-                should_wake = 1;
-            }
-            spin_unlock_irqrestore(&eq->lock, eq_flags);
-            /* Wake while the hash lock still pins the watch/owner queue:
-             * final eventq_release must remove this node under the same lock
-             * before freeing eq, so no refcount resurrection is needed. */
-            if (should_wake)
-                wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
-        }
-        node = node->next;
+    if (!g_evq_hash[idx]) {
+        spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
+        return;
     }
-    spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
+    /* Keep the existing bucket lock across the Rust delivery walk. Empty
+     * buckets stay on this simple C path without an FFI round trip. */
+    a20_event_notify_rust_locked(target_object, target_type, event_type,
+                                 data0, data1, hash_flags);
 }
 
 /*
@@ -583,86 +593,16 @@ void a20_fs_notify(void *vn, uint32_t event_type, const char *name,
 {
     evq_hash_init();
     uint32_t idx = evq_hash_ptr(vn);
-
     uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_locks[idx]);
-    a20_obj_watch_node_t *node = g_evq_hash[idx];
-    while (node) {
-        if (node->entry->target_object == vn &&
-            node->entry->target_type == A20_OBJ_DIRECTORY &&
-            (node->entry->event_mask & ((uint64_t)1u << event_type))) {
-            a20_watch_entry_t *we = node->entry;
-            a20_eventq_t *eq = we->owner_queue;
-            int should_wake = 0;
-            uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
-            /* Match the full producer name before the public 32-byte name
-             * is truncated. Unnamed self-events only match an empty prefix. */
-            if (we->fs_prefix[0] &&
-                (!name || strncmp(name, we->fs_prefix,
-                                  strlen(we->fs_prefix)) != 0)) {
-                spin_unlock_irqrestore(&eq->lock, eq_flags);
-                node = node->next;
-                continue;
-            }
-            if (eq->ring_count < eq->ring_cap) {
-                a20_pending_event_t ev;
-                memset(&ev, 0, sizeof(ev));
-                ev.source = we->target_handle;
-                ev.type = event_type;
-                ev.events = (uint64_t)1u << event_type;
-                ev.user_data = we->user_data;
-                ev.data0 = data0;
-                ev.data1 = data1;
-                if (name) {
-                    size_t n = strlen(name);
-                    if (n >= sizeof(ev.fs_name))
-                        n = sizeof(ev.fs_name) - 1;
-                    memcpy(ev.fs_name, name, n);
-                }
-                evq_ring_put(eq, &ev);
-                should_wake = 1;
-            } else {
-                should_wake = 1;
-            }
-            spin_unlock_irqrestore(&eq->lock, eq_flags);
-            if (should_wake)
-                wait_queue_wake_one(&eq->waiters, 0, PROC_WAKE_EVENT);
-        }
-        node = node->next;
+    if (!g_evq_hash[idx]) {
+        spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
+        return;
     }
-    spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
+    a20_fs_notify_rust_locked(vn, event_type, name, data0, data1,
+                              hash_flags);
 }
 
 void a20_eventq_on_object_destroy(void *object, uint16_t object_type)
 {
-    evq_hash_init();
-    uint32_t idx = evq_hash_ptr(object);
-
-    uint64_t hash_flags = spin_lock_irqsave(&g_evq_hash_locks[idx]);
-    a20_obj_watch_node_t **pp = &g_evq_hash[idx];
-    while (*pp) {
-        a20_obj_watch_node_t *node = *pp;
-        if (node->object == object && node->entry->target_type == object_type) {
-            a20_watch_entry_t *we = node->entry;
-            a20_eventq_t *eq = we->owner_queue;
-            *pp = node->next;
-            kfree(node);
-
-            uint64_t eq_flags = spin_lock_irqsave(&eq->lock);
-            a20_watch_entry_t **wpp = &eq->watches;
-            while (*wpp) {
-                if (*wpp == we) {
-                    *wpp = we->next;
-                    eq->watch_count--;
-                    break;
-                }
-                wpp = &(*wpp)->next;
-            }
-            spin_unlock_irqrestore(&eq->lock, eq_flags);
-            wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
-            kfree(we);
-            continue;
-        }
-        pp = &node->next;
-    }
-    spin_unlock_irqrestore(&g_evq_hash_locks[idx], hash_flags);
+    a20_eventq_destroy_object_rust(object, object_type);
 }

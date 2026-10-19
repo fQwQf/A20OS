@@ -21,6 +21,7 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "sys/usercopy.h"
+#include "proc/signal_core.h"
 
 __attribute__((weak)) void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame,
                                                      vaddr_t tramp_addr,
@@ -83,28 +84,14 @@ __attribute__((weak)) int coredump_on_fatal_signal(int sig,
 }
 
 static int signal_core_dump_default(int sig) {
-    switch (sig) {
-        case SIGQUIT:
-        case SIGILL:
-        case SIGABRT:
-        case SIGBUS:
-        case SIGFPE:
-        case SIGSEGV:
-        case 31: /* SIGSYS */
-            return 1;
-        default:
-            return 0;
-    }
+    return a20_signal_core_dump_default(sig);
 }
 
 /* Linux sets the 0x80 WCOREDUMP bit only when a core file was actually
  * produced, so the caller passes whether coredump_on_fatal_signal() wrote
  * one rather than only whether the signal is core-dump-by-default. */
 static int signal_wait_status_dumped(int sig, int dumped) {
-    int status = sig & 0x7f;
-    if (dumped)
-        status |= 0x80;
-    return status;
+    return a20_signal_wait_status_dumped(sig, dumped);
 }
 
 static int signal_wait_status(int sig) {
@@ -127,45 +114,10 @@ int signal_fatal_exit_code_dumped(int sig, int dumped) {
     return -signal_wait_status_dumped(sig, dumped);
 }
 
-static int signal_default_terminate(int sig) {
-    switch (sig) {
-        case SIGCHLD:
-        case SIGURG:
-        case SIGWINCH:
-        case SIGSTOP:
-        case SIGTSTP:
-        case SIGTTIN:
-        case SIGTTOU:
-        case SIGCONT:
-            return 0;
-        default:
-            return 1;
-    }
-}
+/* signal_default_terminate's only C caller is signal_action_fatal_locked's
+ * C-reference branch below; the Rust-selected path decides fatality in
+ * a20_signal_action_fatal, so the C table is not compiled there. */
 
-static int signal_default_stop(int sig) {
-    switch (sig) {
-        case SIGSTOP:
-        case SIGTSTP:
-        case SIGTTIN:
-        case SIGTTOU:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static int signal_default_ignore(int sig) {
-    switch (sig) {
-        case SIGCHLD:
-        case SIGURG:
-        case SIGWINCH:
-        case SIGCONT:
-            return 1;
-        default:
-            return 0;
-    }
-}
 
 static void build_siginfo_code(arch_siginfo_t *si, int sig, task_t *sender, int code)
 {
@@ -203,92 +155,37 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     spin_unlock_irqrestore(&mutable_src->lock, flags);
 }
 
-static uint64_t signal_deliverable_locked(task_t *t, signal_state_t *ss)
+/* Borrowed-pointer view of the queue state for the Rust transaction core.
+ * The per-thread pending-info object is optional (lazily allocated). */
+a20_signal_queue_state_t signal_queue_state_fill(void *task, signal_state_t *ss)
 {
-    return (ss->pending | t->thread_pending) & ~t->sig_blocked;
+    task_t *t = (task_t *)task;
+    signal_pending_info_t *pending = t->thread_signal_info;
+    return (a20_signal_queue_state_t){
+        .process_pending = &ss->pending,
+        .process_has_info = ss->pending_has_info,
+        .process_info = &ss->pending_info[0][0],
+        .thread_pending = &t->thread_pending,
+        .thread_has_info = pending ? pending->has_info : NULL,
+        .thread_info = pending ? &pending->info[0][0] : NULL,
+    };
 }
 
-static int signal_action_deliverable_locked(task_t *t, signal_state_t *ss,
-                                            int signum)
+static uint64_t signal_deliverable_locked(task_t *t, signal_state_t *ss)
 {
-    if (t->sig_blocked & signal_mask_bit(signum))
-        return 0;
-    sigaction_t *sa = &ss->actions[signum];
-    if (sa->sa_handler == SIG_IGN)
-        return 0;
-    if (sa->sa_handler == SIG_DFL && signal_default_ignore(signum))
-        return 0;
-    return 1;
+    return a20_signal_deliverable_mask(ss->pending, t->thread_pending,
+                                       t->sig_blocked);
 }
+
 
 static int signal_action_fatal_locked(task_t *t, signal_state_t *ss,
                                       int signum)
 {
-    return signal_action_deliverable_locked(t, ss, signum) &&
-           ss->actions[signum].sa_handler == SIG_DFL &&
-           signal_default_terminate(signum);
+    return a20_signal_action_fatal(t->sig_blocked,
+                                   ss->actions[signum].sa_handler,
+                                   signum);
 }
 
-static int signal_peek_pending_info_locked(task_t *t, signal_state_t *ss,
-                                           int sig, void *out, size_t size)
-{
-    const uint8_t *info;
-    if (t->thread_pending & signal_mask_bit(sig)) {
-        signal_pending_info_t *pending = t->thread_signal_info;
-        if (!pending || !pending->has_info[sig]) return -ENOENT;
-        info = pending->info[sig];
-    } else {
-        if (!ss->pending_has_info[sig]) return -ENOENT;
-        info = ss->pending_info[sig];
-    }
-    size_t n = size < SIGNAL_INFO_SIZE ? size : SIGNAL_INFO_SIZE;
-    memcpy(out, info, n);
-    return 0;
-}
-
-static void signal_clear_pending_locked(task_t *t, signal_state_t *ss,
-                                        int signum)
-{
-    uint64_t bit = signal_mask_bit(signum);
-    if (t->thread_pending & bit) {
-        t->thread_pending &= ~bit;
-        signal_pending_info_t *pending = t->thread_signal_info;
-        if (pending) pending->has_info[signum] = 0;
-    } else {
-        ss->pending &= ~bit;
-        ss->pending_has_info[signum] = 0;
-    }
-}
-
-int signal_take_pending_info_locked(void *task, int sig, void *out, size_t size)
-{
-    task_t *t = task;
-    signal_state_t *ss = t->signals;
-    int ret = signal_peek_pending_info_locked(t, ss, sig, out, size);
-    signal_clear_pending_locked(t, ss, sig);
-    return ret;
-}
-
-/* Generation of a stop/continue cancels both scopes for this task. */
-static void signal_cancel_pending_locked(task_t *t, signal_state_t *ss, int sig)
-{
-    signal_clear_pending_locked(t, ss, sig);
-    signal_clear_pending_locked(t, ss, sig);
-}
-
-static void signal_apply_generation_rules_locked(task_t *t,
-                                                 signal_state_t *ss,
-                                                 int signum)
-{
-    if (signum == SIGCONT) {
-        signal_cancel_pending_locked(t, ss, SIGSTOP);
-        signal_cancel_pending_locked(t, ss, SIGTSTP);
-        signal_cancel_pending_locked(t, ss, SIGTTIN);
-        signal_cancel_pending_locked(t, ss, SIGTTOU);
-    } else if (signal_default_stop(signum)) {
-        signal_cancel_pending_locked(t, ss, SIGCONT);
-    }
-}
 
 static int signal_queue_task(task_t *t, int signum, const void *info,
                              size_t info_size, int thread_directed)
@@ -316,7 +213,6 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     int fatal = 0;
     int deliverable = 0;
     int sigwait_match = 0;
-    int immediate_kernel_exit = 0;
 
     signal_pending_info_t *candidate = NULL;
     if (thread_directed && info && info_size &&
@@ -326,62 +222,32 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
         memset(candidate, 0, sizeof(*candidate));
     }
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    signal_apply_generation_rules_locked(t, ss, signum);
-    sigaction_t action = ss->actions[signum];
-
-    /*
-     * SIGCONT always leaves a pending marker until the target reaches a
-     * signal boundary.  proc_sched_stop_current() checks that marker while
-     * holding the task's park_lock, closing SIGCONT-versus-STOPPED publication races.
-     * Other ignored/default-ignored signals can be discarded at generation.
-     */
-    if (signum != SIGCONT &&
-        (action.sa_handler == SIG_IGN ||
-         (action.sa_handler == SIG_DFL && signal_default_ignore(signum)))) {
-        spin_unlock_irqrestore(&ss->lock, flags);
-        kfree(candidate);
-        return 0;
+    /* Rust owns the whole queue transaction: generation-cancel in both
+     * scopes, discard decision, coalescing + siginfo write, pending bit.
+     * The C side contributes only the lock and the lazy object install. */
+    if (thread_directed && !t->thread_signal_info && candidate) {
+        __atomic_store_n(&t->thread_signal_info, candidate, __ATOMIC_RELEASE);
+        candidate = NULL;
     }
-
-    fatal = signal_action_fatal_locked(t, ss, signum);
-    immediate_kernel_exit = !is_user && fatal;
-
-    if (thread_directed) {
-        if (!t->thread_signal_info && candidate) {
-            __atomic_store_n(&t->thread_signal_info, candidate, __ATOMIC_RELEASE);
-            candidate = NULL;
-        }
-        signal_pending_info_t *pending = t->thread_signal_info;
-        /* Standard signals coalesce within a scope; retain the first info. */
-        if (!(t->thread_pending & signal_mask_bit(signum)) && pending) {
-            pending->has_info[signum] = info && info_size;
-            if (info && info_size) {
-                size_t n = info_size < SIGNAL_INFO_SIZE ? info_size : SIGNAL_INFO_SIZE;
-                memcpy(pending->info[signum], info, n);
-                memset(pending->info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
-            }
-        }
-        t->thread_pending |= signal_mask_bit(signum);
-    } else {
-        if (info && info_size) {
-            size_t n = info_size < SIGNAL_INFO_SIZE ? info_size : SIGNAL_INFO_SIZE;
-            memcpy(ss->pending_info[signum], info, n);
-            memset(ss->pending_info[signum] + n, 0, SIGNAL_INFO_SIZE - n);
-            ss->pending_has_info[signum] = 1;
-        } else {
-            ss->pending_has_info[signum] = 0;
-        }
-        ss->pending |= signal_mask_bit(signum);
-    }
-
-    deliverable = signal_action_deliverable_locked(t, ss, signum);
-    sigwait_match = t->sigwait_active &&
-                    (t->sigwait_mask & signal_mask_bit(signum));
+    a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+    a20_signal_queue_result_t result;
+    a20_signal_queue_locked(&st, signum, (const uint8_t *)info, info_size,
+                            ss->actions[signum].sa_handler, t->sig_blocked,
+                            thread_directed, t->sigwait_active, t->sigwait_mask,
+                            &result);
+    fatal = result.fatal;
+    deliverable = result.deliverable;
+    sigwait_match = result.sigwait_match;
+    int discarded = result.discard;
     spin_unlock_irqrestore(&ss->lock, flags);
 
     kfree(candidate);
+    if (discarded)
+        return 0;
+
     wait_queue_wake_all(&ss->readiness_waiters, 0, PROC_WAKE_EVENT);
 
+    int immediate_kernel_exit = !is_user && fatal;
     if (immediate_kernel_exit) {
         proc_force_exit(t, -signal_wait_status_dumped(signum, 0));
         return 0;
@@ -491,7 +357,8 @@ int signal_task_get_pending_info(void *task, int signum, void *out,
         return -EINVAL;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    int ret = signal_peek_pending_info_locked(t, ss, signum, out, size);
+    a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+    int ret = a20_signal_peek_locked(&st, signum, out, size);
     spin_unlock_irqrestore(&ss->lock, flags);
     return ret;
 }
@@ -534,12 +401,10 @@ int signal_task_has_unblocked(void *task) {
         if (!(deliverable & signal_mask_bit(sig)))
             continue;
         sigaction_t *sa = &ss->actions[sig];
-        if (sa->sa_handler == SIG_IGN)
-            continue;
-        if (sa->sa_handler == SIG_DFL && signal_default_ignore(sig))
-            continue;
-        result = 1;
-        break;
+        if (a20_signal_action_deliverable(t->sig_blocked, sa->sa_handler, sig)) {
+            result = 1;
+            break;
+        }
     }
     spin_unlock_irqrestore(&ss->lock, flags);
     return result;
@@ -578,10 +443,9 @@ int signal_task_should_restart(void *task)
         if (!(deliverable & signal_mask_bit(sig)))
             continue;
         sigaction_t *sa = &ss->actions[sig];
-        if (sa->sa_handler == SIG_IGN ||
-            (sa->sa_handler == SIG_DFL && signal_default_ignore(sig)))
+        if (a20_signal_restart_skips(sa->sa_handler, sig))
             continue;
-        if (sa->sa_handler != SIG_DFL && !(sa->sa_flags & SA_RESTART))
+        if (a20_signal_restart_vetoes(sa->sa_handler, sa->sa_flags))
             restart = 0;
     }
     spin_unlock_irqrestore(&ss->lock, flags);
@@ -597,9 +461,8 @@ int signal_task_user_handler_available(void *task, int signum)
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     sigaction_t action = ss->actions[signum];
-    int available = action.sa_handler != SIG_DFL &&
-                    action.sa_handler != SIG_IGN &&
-                    !(t->sig_blocked & signal_mask_bit(signum));
+    int available = a20_signal_action_user_handler_available(
+        action.sa_handler, (t->sig_blocked & signal_mask_bit(signum)) != 0);
     spin_unlock_irqrestore(&ss->lock, flags);
     return available;
 }
@@ -613,8 +476,7 @@ int signal_task_sigchld_auto_reap(void *task)
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     sigaction_t action = ss->actions[SIGCHLD];
     spin_unlock_irqrestore(&ss->lock, flags);
-    return action.sa_handler == SIG_IGN ||
-           (action.sa_flags & SA_NOCLDWAIT);
+    return a20_signal_sigchld_auto_reap(action.sa_handler, action.sa_flags);
 }
 
 int signal_task_sigchld_no_cldstop(void *task)
@@ -624,7 +486,7 @@ int signal_task_sigchld_no_cldstop(void *task)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    int no_cldstop = (ss->actions[SIGCHLD].sa_flags & SA_NOCLDSTOP) != 0;
+    int no_cldstop = a20_signal_sigchld_no_cldstop(ss->actions[SIGCHLD].sa_flags);
     spin_unlock_irqrestore(&ss->lock, flags);
     return no_cldstop;
 }
@@ -636,8 +498,7 @@ int signal_task_continue_pending(void *task)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    int pending = ((ss->pending | t->thread_pending) &
-                   signal_mask_bit(SIGCONT)) != 0;
+    int pending = a20_signal_continue_pending(ss->pending | t->thread_pending);
     spin_unlock_irqrestore(&ss->lock, flags);
     return pending;
 }
@@ -651,8 +512,7 @@ int signal_task_set_temporary_mask(void *task, uint64_t new_mask,
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     *old_mask = t->sig_blocked;
-    t->sig_blocked = new_mask &
-        ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+    t->sig_blocked = a20_signal_temporary_mask(new_mask);
     spin_unlock_irqrestore(&ss->lock, flags);
     return 0;
 }
@@ -687,7 +547,8 @@ void signal_task_restore_sigsuspend(void *task)
         return;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    if (t->sigsuspend_active && !t->sig_handling) {
+    if (a20_signal_sigsuspend_restore_active(t->sigsuspend_active,
+                                             t->sig_handling)) {
         t->sig_blocked = t->sigsuspend_old_blocked;
         t->sigsuspend_active = 0;
     }
@@ -701,23 +562,22 @@ void signal_exec_reset(void *task)
         return;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    for (int sig = 1; sig < NSIG; sig++) {
-        if (ss->actions[sig].sa_handler != SIG_IGN &&
-            ss->actions[sig].sa_handler != SIG_DFL)
-            ss->actions[sig].sa_handler = SIG_DFL;
-        ss->actions[sig].sa_flags = 0;
-        ss->actions[sig].sa_mask = 0;
-    }
-    ss->pending = 0;
-    memset(ss->pending_has_info, 0, sizeof(ss->pending_has_info));
-    memset(ss->pending_info, 0, sizeof(ss->pending_info));
-    t->sig_handling = 0;
-    t->thread_pending = 0;
-    if (t->thread_signal_info)
-        memset(t->thread_signal_info, 0, sizeof(signal_pending_info_t));
-    t->sigsuspend_active = 0;
-    t->sigwait_active = 0;
-    t->sigwait_mask = 0;
+    /* One Rust transaction: disposition reset (SIG_IGN survives, flags and
+     * mask cleared), all pending state from both scopes, task scalars. */
+    a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+    a20_signal_task_slots_t slots = {
+        .sig_handling = &t->sig_handling,
+        .sigsuspend_active = &t->sigsuspend_active,
+        .sigwait_active = &t->sigwait_active,
+        .sigwait_mask = &t->sigwait_mask,
+    };
+    a20_signal_exec_reset_locked(&st, (uint8_t *)ss->actions, NSIG,
+                                 sizeof(ss->actions[0]),
+                                 offsetof(sigaction_t, sa_handler),
+                                 sizeof(ss->actions[0].sa_handler),
+                                 offsetof(sigaction_t, sa_mask),
+                                 offsetof(sigaction_t, sa_flags),
+                                 &slots);
     spin_unlock_irqrestore(&ss->lock, flags);
 }
 
@@ -728,8 +588,9 @@ uint64_t signal_task_pending_blocked(void *task)
         return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    uint64_t pending =
-        (ss->pending | t->thread_pending) & t->sig_blocked;
+    uint64_t pending = a20_signal_pending_blocked(ss->pending,
+                                                  t->thread_pending,
+                                                  t->sig_blocked);
     spin_unlock_irqrestore(&ss->lock, flags);
     return pending;
 }
@@ -767,45 +628,40 @@ void signal_deliver(void) {
     if (is_user)
         return;
 
+    /* Rust owns the whole delivery-selection state transaction; the C side
+     * keeps the scheduling/termination side effects only. */
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&ss->lock);
-        uint64_t deliverable = signal_deliverable_locked(t, ss);
-        int sig = 0;
-        for (int candidate = 1; candidate < NSIG; candidate++) {
-            if (deliverable & signal_mask_bit(candidate)) {
-                sig = candidate;
-                break;
-            }
-        }
-        if (!sig) {
-            spin_unlock_irqrestore(&ss->lock, flags);
-            return;
-        }
-
-        sigaction_t action = ss->actions[sig];
-        if (action.sa_handler == SIG_IGN ||
-            (action.sa_handler == SIG_DFL && signal_default_ignore(sig))) {
-            signal_clear_pending_locked(t, ss, sig);
-            spin_unlock_irqrestore(&ss->lock, flags);
-            continue;
-        }
-
-        signal_clear_pending_locked(t, ss, sig);
+        a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+        a20_signal_delivery_txn_t txn = {
+            .blocked = t->sig_blocked,
+            .user = 0,
+            .traced = 0,
+            .ptrace_deliver_sig = 0,
+        };
+        a20_signal_delivery_select_locked(&st, (const uint8_t *)ss->actions,
+            NSIG, sizeof(ss->actions[0]),
+            offsetof(sigaction_t, sa_handler), sizeof(ss->actions[0].sa_handler),
+            offsetof(sigaction_t, sa_mask), offsetof(sigaction_t, sa_flags),
+            &txn, NULL, 0);
         spin_unlock_irqrestore(&ss->lock, flags);
 
-        if (action.sa_handler == SIG_DFL) {
-            if (signal_default_stop(sig)) {
-                proc_sched_stop_current(sig);
-                continue;
-            }
+        if (txn.outcome == A20_DELIVERY_NONE)
+            return;
+        if (txn.outcome == A20_DELIVERY_DROP_IGNORED)
+            continue;
+        if (txn.outcome == A20_DELIVERY_STOP) {
+            proc_sched_stop_current(txn.sig);
+            continue;
+        }
+        if (txn.outcome == A20_DELIVERY_FATAL) {
             /* Kernel-context delivery cannot produce a core file, so the
              * WCOREDUMP bit must stay clear here. */
-            proc_exit_group(-signal_wait_status_dumped(sig, 0));
+            proc_exit_group(-signal_wait_status_dumped(txn.sig, 0));
         }
 
-        void (*handler)(int) =
-            (void (*)(int))(uintptr_t)action.sa_handler;
-        handler(sig);
+        void (*handler)(int) = (void (*)(int))(uintptr_t)txn.handler;
+        handler(txn.sig);
     }
 }
 
@@ -818,6 +674,84 @@ static void build_ucontext(arch_ucontext_t *uc, trap_context_t *ctx,
     uc->uc_stack.ss_flags = altstack->ss_flags;
     uc->uc_stack.ss_size = altstack->ss_size;
     arch_signal_build_mcontext(&uc->uc_mcontext, ctx);
+}
+
+/* Mechanical handler-frame build shared by both delivery paths: stack /
+ * altstack selection, siginfo + ucontext fill, trampoline publication and
+ * the usercopy of frame + trampoline.  Every policy input arrives as an
+ * argument (Rust transaction outputs on the Rust-selected path). */
+static void signal_build_handler_frame(trap_context_t *ctx, task_t *t, int sig,
+                                       uint64_t handler, int sa_flags,
+                                       uint64_t old_blocked,
+                                       int has_queued_info,
+                                       const arch_siginfo_t *queued_info)
+{
+    uint64_t sp = arch_signal_stack_top(TRAP_CTX_SP(ctx));
+
+    if ((sa_flags & SA_ONSTACK) &&
+        t->sigaltstack.ss_flags == 0 &&
+        t->sigaltstack.ss_sp != 0 &&
+        t->sigaltstack.ss_size >= MINSIGSTKSZ) {
+        sp = (uintptr_t)t->sigaltstack.ss_sp + t->sigaltstack.ss_size;
+    }
+
+    arch_sig_rt_frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    arch_sigframe_flag_set(&frame, 0x77777777ULL);
+    if (has_queued_info)
+        *arch_sigframe_info_ptr(&frame) = *queued_info;
+    else
+        build_siginfo_code(arch_sigframe_info_ptr(&frame), sig, NULL, SI_KERNEL);
+    build_ucontext(arch_sigframe_ucontext_ptr(&frame), ctx, old_blocked, &t->sigaltstack);
+    arch_signal_build_frame_extra(arch_sigframe_extra_ptr(&frame), ctx);
+
+    sp -= arch_sigframe_size();
+    sp &= ~15ULL;
+
+    uint32_t tramp[2];
+    arch_signal_prepare_trampoline(tramp);
+    uint64_t tramp_addr = sp + arch_sigframe_tramp_offset();
+    /* Where the handler actually returns to.  Normally the in-frame slot
+     * above, which is also where the trampoline words below are written;
+     * an architecture that cannot execute the frame in place returns to its
+     * own dedicated page instead, and the frame copy is then ABI state the
+     * user can still read but never fetches from. */
+    uint64_t return_addr = arch_signal_tramp_addr(t->mm, tramp_addr);
+    arch_signal_prepare_frame(&frame, tramp_addr, ctx);
+
+    if (copy_to_user((void *)(uintptr_t)sp, &frame, sizeof(frame)) < 0)
+        proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
+
+    if (copy_to_user((void *)(uintptr_t)tramp_addr, tramp, sizeof(tramp)) < 0)
+        proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
+
+    /* Only the in-frame trampoline needs its page upgraded; a dedicated
+     * trampoline page was already mapped executable at address-space
+     * setup and must stay read-only, or SCTLR_EL1.WXN would make it
+     * execute-never again. */
+    if (return_addr == tramp_addr &&
+        mm_make_page_exec(t->mm, tramp_addr) < 0)
+        proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
+
+    /* x86_64 enters the handler below the 16-aligned frame (see
+     * arch_signal_handler_sp); its return address goes at that entry sp
+     * so the handler's final `ret` reaches the sigreturn trampoline. */
+    uint64_t handler_sp = arch_signal_handler_sp(sp);
+    if (handler_sp != sp) {
+        uint64_t restorer = (uint64_t)arch_sigframe_flag_get(&frame);
+        if (copy_to_user((void *)(uintptr_t)handler_sp, &restorer, sizeof(restorer)) < 0)
+            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
+    }
+
+    TRAP_CTX_SP(ctx) = handler_sp;
+    TRAP_CTX_EPC(ctx) = handler;
+    TRAP_CTX_ARG0(ctx) = sig;
+
+    if (sa_flags & SA_SIGINFO) {
+        TRAP_CTX_ARG1(ctx) = sp + arch_sigframe_info_offset();
+        TRAP_CTX_ARG2(ctx) = sp + arch_sigframe_uc_offset();
+    }
+    TRAP_CTX_RA(ctx) = return_addr;
 }
 
 void signal_deliver_user(trap_context_t *ctx) {
@@ -834,167 +768,69 @@ void signal_deliver_user(trap_context_t *ctx) {
         __atomic_load_n(&ss->pending, __ATOMIC_ACQUIRE);
     uint64_t thread_pending =
         __atomic_load_n(&t->thread_pending, __ATOMIC_ACQUIRE);
-    if (((process_pending | thread_pending) & ~t->sig_blocked) == 0)
+    if (a20_signal_deliverable_mask(process_pending, thread_pending,
+                                    t->sig_blocked) == 0)
         return;
+    /* Rust owns the whole per-iteration delivery state transaction
+     * (selection, ignored-occurrence consumption + sigsuspend restore,
+     * ptrace interception, stop/fatal consumption, handler-path mask
+     * composition and RESETHAND); the C side keeps the trap-context save,
+     * the frame publication and the scheduling/termination effects. */
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&ss->lock);
-        uint64_t deliverable = signal_deliverable_locked(t, ss);
-        int sig = 0;
-        for (int candidate = 1; candidate < NSIG; candidate++) {
-            if (deliverable & signal_mask_bit(candidate)) {
-                sig = candidate;
-                break;
-            }
-        }
-        if (!sig) {
-            spin_unlock_irqrestore(&ss->lock, flags);
-            return;
-        }
-
-        sigaction_t action = ss->actions[sig];
-        if (action.sa_handler == SIG_IGN ||
-            (action.sa_handler == SIG_DFL && signal_default_ignore(sig))) {
-            signal_clear_pending_locked(t, ss, sig);
-            if (t->sigsuspend_active) {
-                t->sig_blocked = t->sigsuspend_old_blocked;
-                t->sigsuspend_active = 0;
-            }
-            spin_unlock_irqrestore(&ss->lock, flags);
-            continue;
-        }
-
-        /*
-         * PTRACE_DELIVERY_BOUNDARY: a traced task intercepts every
-         * deliverable signal (except SIGKILL) as a ptrace signal-stop
-         * instead of delivering it.  The tracer either suppresses it
-         * (resume with sig 0) or re-queues it (resume with sig N); a
-         * resume-with-signal consumes the one-shot ptrace_deliver_sig
-         * marker here so delivery proceeds without a second stop.
-         */
-        if (proc_debug_is_traced(t) && sig != SIGKILL) {
-            if (t->ptrace_deliver_sig == sig) {
-                t->ptrace_deliver_sig = 0;
-            } else {
-                signal_clear_pending_locked(t, ss, sig);
-                spin_unlock_irqrestore(&ss->lock, flags);
-                (void)proc_debug_signal_stop(sig);
-                continue;
-            }
-        }
-
-        if (action.sa_handler == SIG_DFL) {
-            signal_clear_pending_locked(t, ss, sig);
-            if (signal_default_stop(sig)) {
-                t->sig_blocked = t->sigsuspend_active ?
-                              t->sigsuspend_old_blocked : t->sig_blocked;
-                t->sigsuspend_active = 0;
-                spin_unlock_irqrestore(&ss->lock, flags);
-                proc_sched_stop_current(sig);
-                continue;
-            }
-            spin_unlock_irqrestore(&ss->lock, flags);
-            /* CORE_DUMP_HOOK: emit the ELF core dump while the task's mm and
-             * register context are still live, then terminate the group. */
-            int dumped = 0;
-            if (signal_core_dump_default(sig))
-                dumped = coredump_on_fatal_signal(sig, ctx);
-            proc_exit_group(-signal_wait_status_dumped(sig, dumped));
-        }
-
+        a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
         arch_siginfo_t queued_info;
-        int has_queued_info = signal_peek_pending_info_locked(
-            t, ss, sig, &queued_info, sizeof(queued_info)) == 0;
-
-        signal_clear_pending_locked(t, ss, sig);
-
-        if (action.sa_flags & SA_RESETHAND)
-            ss->actions[sig].sa_handler = SIG_DFL;
-
-        ARCH_TRAP_FAST_RETURN_DISARM(ctx);
-        t->sig_saved_ctx = *ctx;
-        uint64_t old_blocked = t->sigsuspend_active ?
-                               t->sigsuspend_old_blocked : t->sig_blocked;
-        t->sig_old_blocked = old_blocked;
-        t->sigsuspend_active = 0;
-
-        /* Block the signal mask BEFORE setting sig_handling so that a
-         * nested signal delivery from a timer interrupt between these
-         * two operations cannot re-enter the handler path and corrupt
-         * sig_saved_ctx.  Once sig_handling is set, the signal must
-         * already be blocked to prevent reentrant delivery. */
-        t->sig_blocked |= action.sa_mask;
-        if (!(action.sa_flags & SA_NODEFER))
-            t->sig_blocked |= signal_mask_bit(sig);
-
-        t->sig_handling = sig;
+        a20_signal_delivery_txn_t txn = {
+            .blocked = t->sig_blocked,
+            .sigsuspend_active = t->sigsuspend_active,
+            .sigsuspend_old_blocked = t->sigsuspend_old_blocked,
+            .user = 1,
+            .traced = proc_debug_is_traced(t),
+            .ptrace_deliver_sig = t->ptrace_deliver_sig,
+        };
+        a20_signal_delivery_select_locked(&st, (const uint8_t *)ss->actions,
+            NSIG, sizeof(ss->actions[0]),
+            offsetof(sigaction_t, sa_handler), sizeof(ss->actions[0].sa_handler),
+            offsetof(sigaction_t, sa_mask), offsetof(sigaction_t, sa_flags),
+            &txn, (uint8_t *)&queued_info, sizeof(queued_info));
+        t->sig_blocked = txn.blocked;
+        t->sigsuspend_active = txn.sigsuspend_active;
+        t->ptrace_deliver_sig = txn.ptrace_deliver_sig;
+        if (txn.outcome == A20_DELIVERY_HANDLER) {
+            ARCH_TRAP_FAST_RETURN_DISARM(ctx);
+            t->sig_saved_ctx = *ctx;
+            t->sig_old_blocked = txn.old_blocked;
+            t->sig_handling = txn.sig_handling;
+            if (txn.reset_handler)
+                ss->actions[txn.sig].sa_handler = SIG_DFL;
+        }
         spin_unlock_irqrestore(&ss->lock, flags);
 
-        uint64_t sp = arch_signal_stack_top(TRAP_CTX_SP(ctx));
-
-        if ((action.sa_flags & SA_ONSTACK) &&
-            t->sigaltstack.ss_flags == 0 &&
-            t->sigaltstack.ss_sp != 0 &&
-            t->sigaltstack.ss_size >= MINSIGSTKSZ) {
-            sp = (uintptr_t)t->sigaltstack.ss_sp + t->sigaltstack.ss_size;
+        if (txn.outcome == A20_DELIVERY_NONE)
+            return;
+        if (txn.outcome == A20_DELIVERY_DROP_IGNORED)
+            continue;
+        if (txn.outcome == A20_DELIVERY_PTRACE_STOP) {
+            (void)proc_debug_signal_stop(txn.sig);
+            continue;
+        }
+        if (txn.outcome == A20_DELIVERY_STOP) {
+            proc_sched_stop_current(txn.sig);
+            continue;
+        }
+        if (txn.outcome == A20_DELIVERY_FATAL) {
+            /* CORE_DUMP_HOOK: emit the ELF core dump while the task's mm
+             * and register context are still live, then terminate the
+             * group. */
+            int dumped = 0;
+            if (signal_core_dump_default(txn.sig))
+                dumped = coredump_on_fatal_signal(txn.sig, ctx);
+            proc_exit_group(-signal_wait_status_dumped(txn.sig, dumped));
         }
 
-        arch_sig_rt_frame_t frame;
-        memset(&frame, 0, sizeof(frame));
-        arch_sigframe_flag_set(&frame, 0x77777777ULL);
-        if (has_queued_info)
-            *arch_sigframe_info_ptr(&frame) = queued_info;
-        else
-            build_siginfo_code(arch_sigframe_info_ptr(&frame), sig, NULL, SI_KERNEL);
-        build_ucontext(arch_sigframe_ucontext_ptr(&frame), ctx, old_blocked, &t->sigaltstack);
-        arch_signal_build_frame_extra(arch_sigframe_extra_ptr(&frame), ctx);
-
-        sp -= arch_sigframe_size();
-        sp &= ~15ULL;
-
-        uint32_t tramp[2];
-        arch_signal_prepare_trampoline(tramp);
-        uint64_t tramp_addr = sp + arch_sigframe_tramp_offset();
-        /* Where the handler actually returns to.  Normally the in-frame slot
-         * above, which is also where the trampoline words below are written;
-         * an architecture that cannot execute the frame in place returns to its
-         * own dedicated page instead, and the frame copy is then ABI state the
-         * user can still read but never fetches from. */
-        uint64_t return_addr = arch_signal_tramp_addr(t->mm, tramp_addr);
-        arch_signal_prepare_frame(&frame, tramp_addr, ctx);
-
-        if (copy_to_user((void *)(uintptr_t)sp, &frame, sizeof(frame)) < 0)
-            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
-
-        if (copy_to_user((void *)(uintptr_t)tramp_addr, tramp, sizeof(tramp)) < 0)
-            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
-
-        /* Only the in-frame trampoline needs its page upgraded; a dedicated
-         * trampoline page was already mapped executable at address-space
-         * setup and must stay read-only, or SCTLR_EL1.WXN would make it
-         * execute-never again. */
-        if (return_addr == tramp_addr &&
-            mm_make_page_exec(t->mm, tramp_addr) < 0)
-            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
-
-        /* x86_64 enters the handler below the 16-aligned frame (see
-         * arch_signal_handler_sp); its return address goes at that entry sp
-         * so the handler's final `ret` reaches the sigreturn trampoline. */
-        uint64_t handler_sp = arch_signal_handler_sp(sp);
-        if (handler_sp != sp) {
-            uint64_t restorer = (uint64_t)arch_sigframe_flag_get(&frame);
-            if (copy_to_user((void *)(uintptr_t)handler_sp, &restorer, sizeof(restorer)) < 0)
-                proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
-        }
-
-        TRAP_CTX_SP(ctx) = handler_sp;
-        TRAP_CTX_EPC(ctx) = action.sa_handler;
-        TRAP_CTX_ARG0(ctx) = sig;
-
-        if (action.sa_flags & SA_SIGINFO) {
-            TRAP_CTX_ARG1(ctx) = sp + arch_sigframe_info_offset();
-            TRAP_CTX_ARG2(ctx) = sp + arch_sigframe_uc_offset();
-        }
-        TRAP_CTX_RA(ctx) = return_addr;
+        signal_build_handler_frame(ctx, t, txn.sig, txn.handler, txn.flags,
+                                   txn.old_blocked, txn.has_info,
+                                   &queued_info);
         return;
     }
 }
@@ -1023,9 +859,8 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
 
 /* Install a signal handler; the implementation of the rt_sigaction syscall. */
 int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize) {
-    if (signum <= 0 || signum >= NSIG) return -EINVAL;
-    if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
-    if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
+    int v = a20_signal_action_valid(signum, sigsetsize, ARCH_SIGSET_SIZE);
+    if (v < 0) return v;
 
     task_t *t = proc_current();
     if (!t || !t->signals) return -EINVAL;
@@ -1078,17 +913,11 @@ int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsi
     if (copy_from_user(&usermask, set, sizeof(usermask)) < 0)
         return -EFAULT;
     uint64_t mask = arch_user_sigset_to_kernel(&usermask);
-    mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
-
+    mask = a20_signal_mask_strip_unblockable(mask);
+    if (a20_signal_procmask_how_valid(how) < 0)
+        return -EINVAL;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
-    switch (how) {
-        case SIG_BLOCK:   t->sig_blocked |=  mask; break;
-        case SIG_UNBLOCK: t->sig_blocked &= ~mask; break;
-        case SIG_SETMASK: t->sig_blocked  =  mask; break;
-        default:
-            spin_unlock_irqrestore(&ss->lock, flags);
-            return -EINVAL;
-    }
+    t->sig_blocked = a20_signal_mask_apply(how, t->sig_blocked, mask);
     spin_unlock_irqrestore(&ss->lock, flags);
     return 0;
 }

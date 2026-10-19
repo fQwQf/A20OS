@@ -34,10 +34,13 @@
 #include "core/string.h"
 #include "core/trap.h"
 #include "sys/usercopy.h"
+#include "mm/elf_rust.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/ipc.h"
 #include "ipc/start_info.h"
 #include "ipc/handle_table.h"
+
+extern a20_channel_ep_t *a20_registry_client_ep(void);
 
 struct a20_ht_internal;
 struct a20_ht_internal *a20_ht_create(void);
@@ -77,44 +80,38 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
     if (!t || !st)
         return;
 
-    /* no_new_privs is sticky across exec: neither set-id mode bits nor
-     * root's capability reconstruction may grant new authority. */
-    if (t->policy.no_new_privs) {
-        t->cred.suid = t->cred.euid;
-        t->cred.sgid = t->cred.egid;
-        return;
-    }
-
-    int old_uid  = t->cred.uid;
-    int old_euid = t->cred.euid;
-    int old_suid = t->cred.suid;
-    int old_egid = t->cred.egid;
-
-    if (st->st_mode & S_ISUID) {
-        t->cred.euid  = (int)st->st_uid;
-        t->cred.suid  = t->cred.euid;
-        t->cred.fsuid = t->cred.euid;
-    }
-    if (st->st_mode & S_ISGID) {
-        t->cred.egid  = (int)st->st_gid;
-        t->cred.sgid  = t->cred.egid;
-        t->cred.fsgid = t->cred.egid;
-    }
-
-    if (old_euid != t->cred.euid || old_egid != t->cred.egid)
+    /* The transition decision (set-id elevation, no_new_privs stickiness,
+     * capability reconstruction, dumpable flip) is Rust-owned; this applies
+     * the planned values to the task credential. */
+    a20_elf_cred_input_t in = {
+        .no_new_privs  = t->policy.no_new_privs ? 1 : 0,
+        .uid           = t->cred.uid,
+        .euid          = t->cred.euid,
+        .suid          = t->cred.suid,
+        .egid          = t->cred.egid,
+        .fsuid         = t->cred.fsuid,
+        .fsgid         = t->cred.fsgid,
+        .sgid          = t->cred.sgid,
+        .st_uid        = (int32_t)st->st_uid,
+        .st_gid        = (int32_t)st->st_gid,
+        .st_mode       = st->st_mode,
+        .cap_bounding  = t->cred.cap_bounding,
+        .cap_permitted = t->cred.cap_permitted,
+        .cap_effective = t->cred.cap_effective,
+    };
+    a20_elf_cred_plan_t p;
+    if (a20_elf_plan_creds(&in, &p) < 0)
+        return; /* the planner cannot fail; defensive only */
+    t->cred.euid          = p.euid;
+    t->cred.suid          = p.suid;
+    t->cred.fsuid         = p.fsuid;
+    t->cred.egid          = p.egid;
+    t->cred.fsgid         = p.fsgid;
+    t->cred.sgid          = p.sgid;
+    t->cred.cap_permitted = p.cap_permitted;
+    t->cred.cap_effective = p.cap_effective;
+    if (p.make_undumpable)
         mm_set_dumpable(t->mm, 0);
-
-    int old_had_root = old_uid == 0 || old_euid == 0 || old_suid == 0;
-    int new_has_root = t->cred.uid == 0 || t->cred.euid == 0 || t->cred.suid == 0;
-    if (old_had_root && !new_has_root) {
-        t->cred.cap_effective = 0;
-        t->cred.cap_permitted = 0;
-    } else if (t->cred.euid == 0) {
-        t->cred.cap_permitted = t->cred.cap_bounding;
-        t->cred.cap_effective = t->cred.cap_permitted;
-    } else if (old_euid == 0) {
-        t->cred.cap_effective = 0;
-    }
 }
 
 /* ================================================================== */
@@ -207,10 +204,13 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
             return -E2BIG;
         }
         size_t len = (size_t)measured + 1;
-        if (*arg_bytes + len > max_bytes ||
-            *arg_bytes + len > (t ? t->limits.stack / 4 : MAX_ARG_BYTES)) {
+        /* Byte-budget decision is Rust-owned (per-string cap + aggregate). */
+        long next = a20_elf_check_arg_bytes(*arg_bytes, len,
+                                            MAX_ARG_STRLEN, max_bytes,
+                                            t ? (uint64_t)(t->limits.stack / 4) : 0);
+        if (next < 0) {
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
-            return -E2BIG;
+            return (int)next;
         }
 
         out[count] = kmalloc(len);
@@ -230,7 +230,7 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
             return -EFAULT;
         }
 
-        *arg_bytes += len;
+        *arg_bytes = (size_t)next;
         count++;
     }
 
@@ -352,39 +352,27 @@ static int exec_try_script(int fd, exec_bprm_t *bprm)
     if (n < 2)
         return -ENOEXEC;
 
-    buf[n] = '\0';
-
-    char *cp = buf + 2;
-    while (*cp == ' ' || *cp == '\t')
-        ++cp;
-    if (*cp == '\0' || *cp == '\n' || *cp == '\r')
+    /* Field extraction (interpreter path, optional argument) and the argv
+     * rewrite shape are Rust-owned; the bprm ownership dance stays here. */
+    a20_elf_shebang_plan_t sbp;
+    if (a20_elf_plan_shebang((const uint8_t *)buf, (size_t)n, &sbp) < 0)
         return -ENOEXEC;
+    if (!sbp.is_script)
+        return 0;   /* not a script, caller should try ELF */
 
-    char *start = cp;
-    while (*cp && *cp != '\n' && *cp != '\r' && *cp != ' ' && *cp != '\t')
-        ++cp;
-    size_t ilen = (size_t)(cp - start);
+    size_t ilen = sbp.interp_len;
     if (ilen == 0 || ilen >= MAX_PATH_LEN)
         return -ENOEXEC;
 
     char interp_path[MAX_PATH_LEN];
-    memcpy(interp_path, start, ilen);
+    memcpy(interp_path, buf + sbp.interp_off, ilen);
     interp_path[ilen] = '\0';
 
-    /* Extract optional single argument */
     char interp_arg[MAX_PATH_LEN];
     interp_arg[0] = '\0';
-    while (*cp == ' ' || *cp == '\t')
-        ++cp;
-    if (*cp && *cp != '\n' && *cp != '\r') {
-        char *arg_start = cp;
-        while (*cp && *cp != '\n' && *cp != '\r')
-            ++cp;
-        size_t alen = (size_t)(cp - arg_start);
-        if (alen > 0 && alen < MAX_PATH_LEN) {
-            memcpy(interp_arg, arg_start, alen);
-            interp_arg[alen] = '\0';
-        }
+    if (sbp.arg_len > 0 && sbp.arg_len < MAX_PATH_LEN) {
+        memcpy(interp_arg, buf + sbp.arg_off, sbp.arg_len);
+        interp_arg[sbp.arg_len] = '\0';
     }
 
     /*
@@ -418,7 +406,13 @@ static int exec_try_script(int fd, exec_bprm_t *bprm)
     new_argc++;
 
     /* original args from index 1 onward (skip argv[0] which was the script) */
-    for (int i = 1; i < bprm->argc && new_argc < MAX_ARG_STRINGS; i++) {
+    /* The rewrite shape is Rust-owned: [interp, (arg), script, argv[1..]]
+     * capped at MAX_ARG_STRINGS total. */
+    a20_elf_shebang_argv_plan_t ap;
+    a20_elf_plan_shebang_argv(interp_arg[0] != '\0', (size_t)bprm->argc,
+                              MAX_ARG_STRINGS, &ap);
+    int new_cap = (int)ap.new_argc;
+    for (int i = 1; i < bprm->argc && new_argc < new_cap; i++) {
         new_args[new_argc++] = bprm->args[i];
         bprm->args[i] = NULL;   /* ownership transferred, don't free */
     }
@@ -589,14 +583,16 @@ static int xlator_inject_env(exec_bprm_t *bprm, const char *spec,
 
     /* Charge the injected strings against the same budget the caller's own
      * argv and envp were charged against, so a configured translator cannot
-     * push the new image's initial stack past the limit. */
+     * push the new image's initial stack past the limit. The budget check
+     * itself is Rust-owned under the Rust selector. */
     size_t added = 0;
     for (int i = 0; i < n; i++)
         added += strlen(entries[i]) + 1;
     size_t budget = t->limits.stack / 4;
-    if (bprm->bytes + added > MAX_ARG_BYTES ||
-        (budget && bprm->bytes + added > budget))
-        return -E2BIG;
+    long charged = a20_elf_check_arg_bytes(bprm->bytes, added, UINT64_MAX,
+                                           MAX_ARG_BYTES, budget);
+    if (charged < 0)
+        return (int)charged;
 
     for (int i = 0; i < n; i++) {
         size_t elen = strlen(entries[i]) + 1;
@@ -613,7 +609,7 @@ static int xlator_inject_env(exec_bprm_t *bprm, const char *spec,
         bprm->envc++;
     }
 
-    bprm->bytes += added;
+    bprm->bytes = (size_t)charged;
     return 0;
 }
 
@@ -718,6 +714,97 @@ fail:
 /* ================================================================== */
 
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+typedef struct {
+    struct a20_ht_internal *table;
+    bool created;
+    a20_handle_t reserved[7];
+    uint32_t reserved_count;
+    uint32_t staged_count;
+    struct {
+        void *object;
+        uint16_t type;
+        a20_rights_t rights;
+    } staged[7];
+} exec_native_handles_t;
+
+static int64_t exec_native_stage(exec_native_handles_t *state, void *object,
+                                uint16_t type, a20_rights_t rights)
+{
+    if (!object || state->staged_count >= state->reserved_count) {
+        return -A20_ERR_NO_SPACE;
+    }
+    uint32_t i = state->staged_count++;
+    state->staged[i].object = object;
+    state->staged[i].type = type;
+    state->staged[i].rights = rights;
+    return (int64_t)state->reserved[i];
+}
+
+static void exec_native_rollback(exec_native_handles_t *state)
+{
+    for (uint32_t i = 0; i < state->staged_count; i++) {
+        if (state->staged[i].object)
+            a20_object_release(state->staged[i].object, state->staged[i].type);
+    }
+    if (state->table && state->reserved_count)
+        a20_handle_abort_reserved(state->table, state->reserved,
+                                  state->reserved_count);
+    if (state->created && state->table)
+        a20_ht_put_ref(state->table);
+    state->table = NULL;
+    state->created = false;
+    state->reserved_count = 0;
+    state->staged_count = 0;
+}
+
+static int64_t exec_native_prepare_task_ref(task_t *task, void **object_out)
+{
+    struct a20_ht_internal *temporary = a20_ht_create();
+    if (!temporary)
+        return -A20_ERR_NO_MEMORY;
+    int64_t handle = a20_handle_install_task(
+        temporary, task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_DUP);
+    if (handle >= 0) {
+        a20_handle_entry_t entry;
+        int64_t result = a20_handle_lookup_ref_internal(
+            temporary, (a20_handle_t)handle, A20_OBJ_TASK, 0, &entry);
+        if (result >= 0) {
+            *object_out = entry.object; /* lookup_ref owns the staged ref */
+            (void)a20_handle_remove(temporary, (a20_handle_t)handle);
+            handle = A20_OK;
+        } else {
+            handle = result;
+        }
+    }
+    a20_ht_put_ref(temporary);
+    return handle;
+}
+
+static void exec_native_publish(task_t *task, exec_native_handles_t *state)
+{
+    for (uint32_t i = 0; i < state->staged_count; i++) {
+        int64_t r = a20_handle_commit_reserved_temporal(
+            state->table, state->reserved[i], state->staged[i].object,
+            state->staged[i].type, state->staged[i].rights, UINT64_MAX, 0, 0, 0);
+        if (r == A20_OK)
+            state->staged[i].object = NULL; /* table owns the reference */
+    }
+    if (state->reserved_count > state->staged_count)
+        a20_handle_abort_reserved(state->table,
+                                  &state->reserved[state->staged_count],
+                                  state->reserved_count - state->staged_count);
+    if (state->created && state->table) {
+        void *old = __atomic_exchange_n(&task->a20_ht, state->table, __ATOMIC_ACQ_REL);
+        if (old && old != state->table)
+            a20_ht_put_ref((struct a20_ht_internal *)old);
+    }
+    state->table = NULL;
+    state->created = false;
+    state->reserved_count = 0;
+    state->staged_count = 0;
+}
+
 /*
  * Set up handle table, console handles, and a20_start_info_t on the
  * stack for a native ABI process.  Returns the new stack pointer, or 0
@@ -727,7 +814,8 @@ static uint64_t exec_setup_native_abi(task_t *t,
                                        const elf_load_info_t *info,
                                        int argc, char *const *k_argv,
                                        char *const *k_envp,
-                                       vaddr_t *start_info_out)
+                                       vaddr_t *start_info_out,
+                                       exec_native_handles_t *state)
 {
     /* A native->native exec preserves the caller's handle table so that
      * fork+exec keeps its stdio (pipes/files the fork child wired up via
@@ -736,11 +824,14 @@ static uint64_t exec_setup_native_abi(task_t *t,
     int preserve = (ht != NULL);
     if (!ht) {
         ht = a20_ht_create();
-        if (ht) {
-            void *old = __atomic_exchange_n(&t->a20_ht, ht, __ATOMIC_ACQ_REL);
-            if (old)
-                a20_ht_put_ref((struct a20_ht_internal *)old);
-        }
+        state->created = ht != NULL;
+    }
+    state->table = ht;
+    if (ht && !(preserve && t->a20_stdio_adopted)) {
+        if (a20_handle_reserve_many(ht, state->reserved,
+                                    sizeof(state->reserved) / sizeof(state->reserved[0])) < 0)
+            return 0;
+        state->reserved_count = sizeof(state->reserved) / sizeof(state->reserved[0]);
     }
 
     uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF, stderr_h = 0xFFFFFFFF;
@@ -779,8 +870,8 @@ static uint64_t exec_setup_native_abi(task_t *t,
                     if (!vf)
                         continue;
                 }
-                int64_t h = a20_handle_install(ht, vf,
-                                               A20_OBJ_FILE, stdio[i].rights);
+                int64_t h = exec_native_stage(state, vf, A20_OBJ_FILE,
+                                              stdio[i].rights);
                 if (h >= 0) {
                     *stdio[i].out = (uint32_t)h;
                 } else {
@@ -795,10 +886,14 @@ static uint64_t exec_setup_native_abi(task_t *t,
         if (preserve && t->a20_stdio_adopted) {
             self_h = t->a20_self_h;
         } else {
-            int64_t h =
-                a20_handle_install_task(ht, t, A20_OBJ_TASK,
-                                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                            A20_RIGHT_STAT | A20_RIGHT_DUP);
+            void *task_object = NULL;
+            int64_t h = exec_native_prepare_task_ref(t, &task_object);
+            if (h >= 0)
+                h = exec_native_stage(state, task_object, A20_OBJ_TASK,
+                                      A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                          A20_RIGHT_STAT | A20_RIGHT_DUP);
+            if (h < 0 && task_object)
+                a20_object_release(task_object, A20_OBJ_TASK);
             if (h >= 0) self_h = (a20_handle_t)h;
         }
     }
@@ -816,17 +911,16 @@ static uint64_t exec_setup_native_abi(task_t *t,
                 if (root_vf) {
                     /* Each installed handle owns one reference: install1
                      * takes over the lookup ref, install2 gets its own. */
-                    int64_t h = a20_handle_install(ht, root_vf,
-                                                   A20_OBJ_DIRECTORY,
-                                                   A20_RIGHT_READ | A20_RIGHT_STAT |
-                                                   A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+                    int64_t h = exec_native_stage(state, root_vf, A20_OBJ_DIRECTORY,
+                                                  A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
                     if (h >= 0) {
                         root_h = (uint32_t)h;
                         vfile_get(root_vf);
-                        int64_t h2 = a20_handle_install(ht, root_vf,
-                                                        A20_OBJ_DIRECTORY,
-                                                        A20_RIGHT_READ | A20_RIGHT_STAT |
-                                                        A20_RIGHT_DUP);
+                        int64_t h2 = exec_native_stage(state, root_vf,
+                                                       A20_OBJ_DIRECTORY,
+                                                       A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                       A20_RIGHT_DUP);
                         if (h2 >= 0) cwd_h = (uint32_t)h2;
                         else vfs_put_file(root_vf);
                         if (!cwd_h) cwd_h = root_h;
@@ -842,8 +936,14 @@ static uint64_t exec_setup_native_abi(task_t *t,
     uint32_t registry_h = 0;
     if (ht) {
         extern int64_t a20_registry_install_client(struct a20_ht_internal *ht);
-        int64_t h = a20_registry_install_client(ht);
-        if (h >= 0) registry_h = (uint32_t)h;
+        a20_channel_ep_t *ep = a20_registry_client_ep();
+        if (ep) {
+            a20_object_ref(ep, A20_OBJ_CHANNEL_ENDPOINT);
+            int64_t h = exec_native_stage(state, ep, A20_OBJ_CHANNEL_ENDPOINT,
+                                          A20_RIGHT_READ | A20_RIGHT_WRITE);
+            if (h >= 0) registry_h = (uint32_t)h;
+            else a20_object_release(ep, A20_OBJ_CHANNEL_ENDPOINT);
+        }
     }
 
     if (info->interp_base) {
@@ -880,220 +980,307 @@ static uint64_t exec_setup_native_abi(task_t *t,
  * @abs_path resolved absolute path for t->exec_path
  * @st      stat result (may be NULL if stat failed)
  */
+#ifdef CONFIG_ELF_EXEC_TEST
+/*
+ * One-shot exec fault injection for the test profile. Arming marks the
+ * current task's next exec to fail at `phase`; only phases Rust marks
+ * failable (a20_elf_phase_failable) may be armed, so the injection cannot
+ * invent a failure stage the production transaction does not have.
+ */
+static struct {
+    void *owner;
+    unsigned phase;
+} g_exec_test_fail;
+
+int proc_exec_test_arm(const void *owner, unsigned phase)
+{
+    if (!owner || !a20_elf_phase_failable(phase))
+        return -EINVAL;
+    __atomic_store_n(&g_exec_test_fail.phase, phase, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_exec_test_fail.owner, (void *)owner, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static int exec_test_should_fail(const void *t, unsigned phase)
+{
+    if (__atomic_load_n(&g_exec_test_fail.owner, __ATOMIC_ACQUIRE) != t)
+        return 0;
+    if (__atomic_load_n(&g_exec_test_fail.phase, __ATOMIC_ACQUIRE) != phase)
+        return 0;
+    __atomic_store_n(&g_exec_test_fail.owner, NULL, __ATOMIC_RELEASE);
+    return 1;
+}
+#endif /* CONFIG_ELF_EXEC_TEST */
+
+typedef struct {
+    task_t *task;
+    const elf_load_info_t *info;
+    const exec_bprm_t *bprm;
+    const char *path;
+    const kstat_t *stat;
+    uint64_t sp;
+    uintptr_t auxv[A20_AUXV_MAX_PAIRS][2];
+    uint32_t auxv_n;
+    vaddr_t ehdr_vdso;
+    vaddr_t native_start_info;
+    mm_struct_t *new_mm;
+    mm_struct_t *old_mm;
+    pt_root_t *old_pgdir;
+    int old_abi;
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    exec_native_handles_t native_handles;
+#endif
+} exec_rust_context_t;
+
+static int32_t exec_cb_linux_stack(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    c->ehdr_vdso = vdso_auxv_ehdr();
+    c->sp = elf_setup_stack(c->info->stack_top, c->bprm->argc,
+        (char *const *)c->bprm->args, (char *const *)c->bprm->envs,
+        c->info, c->ehdr_vdso, c->auxv, &c->auxv_n);
+    return c->sp ? 0 : -ENOMEM;
+}
+
+static int32_t exec_cb_native_stack(void *opaque)
+{
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    exec_rust_context_t *c = opaque;
+    c->sp = exec_setup_native_abi(c->task, c->info, c->bprm->argc,
+        (char *const *)c->bprm->args, (char *const *)c->bprm->envs,
+        &c->native_start_info, &c->native_handles);
+    return c->sp ? 0 : -ENOMEM;
+#else
+    (void)opaque;
+    return -ENOEXEC;
+#endif
+}
+
+static int32_t exec_cb_vdso(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    if (c->info->is_native_abi || !c->sp || !c->ehdr_vdso)
+        return 0;
+    return vdso_map_image(c->info->pgdir, (mm_seg_t **)&c->info->mmap) < 0
+        ? -ENOMEM : 0;
+}
+
+static int32_t exec_cb_get_abi(void *opaque)
+{ return ((exec_rust_context_t *)opaque)->task->abi_mode; }
+
+static void exec_cb_set_abi(void *opaque, int32_t mode)
+{ ((exec_rust_context_t *)opaque)->task->abi_mode = mode; }
+
+static int32_t exec_cb_alloc_mm(void *opaque, uint64_t *out)
+{
+    exec_rust_context_t *c = opaque;
+    mm_struct_t *m = kcalloc(1, sizeof(*m));
+    if (!m) return -ENOMEM;
+    m->pgdir = c->info->pgdir;
+    m->dumpable = 1;
+    m->brk = m->start_brk = c->info->brk;
+    m->mmap_base = mm_aslr_mmap_base();
+    m->stack_top = c->info->stack_top;
+    m->stack_bottom = c->info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    mm_rss_set(m, 0);
+    spin_init(&m->lock); spin_set_debug(&m->lock, "mm", m);
+    mutex_init(&m->tlb_lock); m->tlb_holds = NULL;
+    refcount_set(&m->refcount, 1);
+    m->mmap = c->info->mmap;
+    m->has_vdso = vdso_auxv_ehdr() != 0;
+#ifdef CONFIG_NOMMU
+    m->num_nommu_allocs = c->info->num_nommu_allocs;
+    for (int i = 0; i < c->info->num_nommu_allocs && i < NOMMU_ALLOC_MAX; i++) {
+        m->nommu_allocs[i] = c->info->nommu_allocs[i];
+        m->nommu_alloc_sizes[i] = c->info->nommu_alloc_sizes[i];
+        m->nommu_alloc_types[i] = c->info->nommu_alloc_types[i];
+    }
+#endif
+    arch_setup_signal_trampoline(m);
+    c->new_mm = m;
+    *out = (uint64_t)(uintptr_t)m;
+    return 0;
+}
+
+static void exec_cb_auxv(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    c->new_mm->auxv_n = c->auxv_n;
+    for (uint32_t i = 0; i < c->auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
+        c->new_mm->auxv[i][0] = c->auxv[i][0];
+        c->new_mm->auxv[i][1] = c->auxv[i][1];
+    }
+}
+
+static int32_t exec_cb_unshare(void *opaque)
+{ return fdtable_unshare(((exec_rust_context_t *)opaque)->task); }
+static void exec_cb_siblings(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    /* Once this returns, no sibling can observe staged slots in an existing
+     * shared table. Publication and the remaining exec steps cannot fail. */
+    proc_exec_terminate_siblings(c->task);
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    exec_native_publish(c->task, &c->native_handles);
+#endif
+}
+static void exec_cb_cloexec(void *opaque)
+{ fdtable_close_on_exec(((exec_rust_context_t *)opaque)->task); }
+
+static void exec_cb_trap(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    task_t *t = c->task;
+    const elf_load_info_t *info = c->info;
+    mm_arch_context_init(c->new_mm);
+    uint64_t user_as = mm_address_space_token(c->new_mm);
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    c->old_mm = t->mm; c->old_pgdir = t->pgdir;
+    t->mm = c->new_mm; t->pgdir = info->pgdir;
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    t->entry = info->entry; t->ustack = c->sp;
+    strncpy(t->exec_path, c->path, MAX_PATH_LEN - 1);
+    t->exec_path[MAX_PATH_LEN - 1] = '\0';
+    const char *base = strrchr(t->exec_path, '/');
+    proc_set_name(t, base ? base + 1 : t->exec_path);
+    signal_exec_reset(t);
+    uint64_t ks_top = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;
+    if (!t->trap_ctx) {
+        trap_context_t *trap = (trap_context_t *)(uintptr_t)(ks_top - sizeof(*trap));
+        task_context_t *ctx = arch_task_context_base(t->kstack_base, ks_top, trap);
+        memset(ctx, 0, sizeof(*ctx));
+        t->first_kernel_entry = (uintptr_t)user_trap_return;
+        ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
+        ctx->tp = (uint64_t)(uintptr_t)t;
+        arch_task_context_set_user_tp(ctx, info->tls_tp);
+        TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
+        TASK_CTX_PAGE_TABLE(ctx) = user_as;
+        arch_task_context_set_initial_sp(ctx, trap, ks_top);
+        t->trap_ctx = trap; t->kstack = (uint64_t)(uintptr_t)ctx;
+    }
+    trap_context_t *trap = t->trap_ctx;
+    ks_top = arch_trap_ctx_get_kernel_stack(trap, (uint64_t)(uintptr_t)trap);
+    memset(trap, 0, sizeof(*trap));
+    TRAP_CTX_KScratch0(trap) = user_as;
+    arch_trap_ctx_set_user_entry(trap, info->entry);
+    TRAP_CTX_SP(trap) = c->sp; TRAP_CTX_TP(trap) = info->tls_tp;
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    if (info->is_native_abi)
+        TRAP_CTX_SET_ARG0(trap, c->native_start_info ? c->native_start_info : c->sp);
+#endif
+    trap->kernel_tp = (uint64_t)(uintptr_t)t;
+    arch_trap_ctx_set_kernel_stack(trap, ks_top);
+    TRAP_CTX_STATUS(trap) = arch_user_initial_status();
+}
+
+static void exec_cb_creds(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    c->task->exec_load_addr = c->info->load_addr;
+    c->task->exec_load_size = c->info->load_size;
+    if (c->stat) proc_apply_exec_creds(c->task, c->stat);
+}
+
+static void exec_cb_enter(void *opaque)
+{
+    exec_rust_context_t *c = opaque;
+    task_t *t = c->task;
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    if (c->old_abi == 1) {
+        /* A Native->Native exec reuses the table whose handles were written
+         * into its new start-info. Only Native->Linux retires it here. */
+        if (!c->info->is_native_abi) {
+            void *old = __atomic_exchange_n(&t->a20_ht, NULL, __ATOMIC_ACQ_REL);
+            if (old) a20_ht_put_ref((struct a20_ht_internal *)old);
+        }
+    }
+#endif
+    unsigned cpu = cpu_current_id();
+    uint64_t as = mm_address_space_token(c->new_mm);
+    mm_context_enter(c->new_mm, cpu); arch_switch_addr_space_token(as);
+    if (c->old_mm && c->old_mm != c->new_mm) mm_context_leave(c->old_mm, cpu);
+    if (c->old_mm) mm_destroy(c->old_mm);
+    else if (c->old_pgdir && c->old_pgdir != proc_kernel_pgdir_shared()) pt_destroy_user(c->old_pgdir);
+    proc_complete_vfork(t);
+#ifdef CONFIG_NOMMU
+    arch_flush_icache_range((const void *)c->info->load_addr, c->info->load_size);
+#else
+    arch_fence_i();
+#endif
+}
+
+static void exec_cb_undo(void *opaque, uint32_t kind, uint64_t handle)
+{
+    exec_rust_context_t *c = opaque;
+    if (kind == A20_ELF_RES_NEW_MM) { kfree((void *)(uintptr_t)handle); c->new_mm = NULL; }
+    else if (kind == A20_ELF_RES_ABI_MODE) c->task->abi_mode = (int)handle;
+    else if (kind == A20_ELF_RES_IMAGE) {
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+        exec_native_rollback(&c->native_handles);
+#endif
+        elf_load_info_discard((elf_load_info_t *)handle);
+    }
+}
+
+#ifdef CONFIG_ELF_EXEC_TEST
+static bool exec_cb_inject(void *opaque, uint32_t phase, bool after)
+{
+    /* The high bit denotes an after-effect probe. Existing scripts keep the
+     * historical before-effect encoding. */
+    exec_rust_context_t *c = opaque;
+    return exec_test_should_fail(c->task, phase | (after ? 0x100u : 0));
+}
+#endif
+
+/*
+ * Transaction-driven image replacement.
+ *
+ * The phase order still comes from elf_core (`COMMIT_PHASES`, walked through
+ * a20_elf_txn_begin) because the sequence itself is a decision; the *resource
+ * accounting* now comes from the same Rust transaction object. Every phase
+ * that acquires something the adapter would have to free registers it with
+ * a20_elf_txn_acquire, and a failure releases exactly the live set the
+ * transaction still holds, newest first — not a static "undo these phases"
+ * list. a20_elf_txn_commit refuses to run until every phase has completed, so
+ * the commit point cannot hide a half-run setup.
+ *
+ * Rust starts the irreversible region before sibling termination. No phase
+ * after fdtable unshare can return an error; the remaining callbacks tear down
+ * siblings/descriptors, install the new context and enter the new image.
+ */
 static int exec_install_process(task_t *t,
                                  const elf_load_info_t *info,
                                  const exec_bprm_t *bprm,
                                  const char *abs_path,
                                  const kstat_t *st)
 {
-    /* ---- 1. Build user stack (Linux or Native ABI) ---- */
-    uint64_t sp;
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    vaddr_t native_start_info = 0;
-#endif
-    /* The auxv this image is exec'd with, copied out of the stack the
-     * program owns and published at /proc/<pid>/auxv.  Stays empty for the
-     * native ABI, which builds no auxv. */
-    uintptr_t auxv_pairs[A20_AUXV_MAX_PAIRS][2];
-    uint32_t auxv_n = 0;
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    if (info->is_native_abi) {
-        sp = exec_setup_native_abi(t, info, bprm->argc,
-                                    (char *const *)bprm->args,
-                                    (char *const *)bprm->envs,
-                                    &native_start_info);
-    } else
-#endif
-    {
-        vaddr_t ehdr = vdso_auxv_ehdr();
-        sp = elf_setup_stack(info->stack_top, bprm->argc,
-                              (char *const *)bprm->args,
-                              (char *const *)bprm->envs, info, ehdr,
-                              auxv_pairs, &auxv_n);
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-        /* Exec from a Native program into a Linux ABI program: the old
-         * handle table is process-local and must be released here. */
-        if (t->abi_mode == 1) {
-            void *old = __atomic_exchange_n(&t->a20_ht, NULL,
-                                            __ATOMIC_ACQ_REL);
-            if (old)
-                a20_ht_put_ref((struct a20_ht_internal *)old);
-        }
-#endif
-        /* t->mm still points at the OLD address space here; the new one
-         * exists only as info->pgdir/info->mmap until step 3.  Map the
-         * vDSO into the image being built so AT_SYSINFO_EHDR is backed. */
-        if (sp != 0 && ehdr != 0 &&
-            /* vdso_map_image appends the vDSO VMA to the image being built:
-             * info->mmap is the mutable image list head of a const struct. */
-            vdso_map_image(info->pgdir, (mm_seg_t **)&info->mmap) < 0)
-            return -ENOMEM;
-    }
-    if (sp == 0)
-        return -ENOMEM;
-
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-    t->abi_mode = info->is_native_abi ? 1 : 0;
+    exec_rust_context_t c = {
+        .task = t, .info = info, .bprm = bprm, .path = abs_path,
+        .stat = st, .old_abi = t->abi_mode,
+    };
+    const a20_elf_exec_ops_t ops = {
+        .build_linux_stack = exec_cb_linux_stack,
+        .build_native_stack = exec_cb_native_stack,
+        .map_vdso = exec_cb_vdso,
+        .get_abi_mode = exec_cb_get_abi,
+        .set_abi_mode = exec_cb_set_abi,
+        .allocate_new_mm = exec_cb_alloc_mm,
+        .publish_auxv = exec_cb_auxv,
+        .unshare_fdtable = exec_cb_unshare,
+        .terminate_siblings = exec_cb_siblings,
+        .close_on_exec = exec_cb_cloexec,
+        .install_trap_context = exec_cb_trap,
+        .apply_credentials = exec_cb_creds,
+        .enter_new_mm = exec_cb_enter,
+        .undo_resource = exec_cb_undo,
+#ifdef CONFIG_ELF_EXEC_TEST
+        .inject_failure = exec_cb_inject,
 #else
-    t->abi_mode = 0;
+        .inject_failure = NULL,
 #endif
-
-    /* ---- 2. Create new mm BEFORE detaching old ---- */
-    mm_struct_t *new_mm = kcalloc(1, sizeof(mm_struct_t));
-    if (!new_mm)
-        return -ENOMEM;
-
-    new_mm->pgdir      = info->pgdir;
-    new_mm->dumpable   = 1;
-    new_mm->brk        = info->brk;
-    new_mm->start_brk  = info->brk;
-    /* ASLR: every exec re-randomizes the mmap fallback base (fork inherits it
-     * through *child = *parent) */
-    new_mm->mmap_base  = mm_aslr_mmap_base();
-    new_mm->stack_top  = info->stack_top;
-    new_mm->stack_bottom = info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
-    new_mm->total_vm   = 0;
-    mm_rss_set(new_mm, 0);
-    spin_init(&new_mm->lock);
-    spin_set_debug(&new_mm->lock, "mm", new_mm);
-    mutex_init(&new_mm->tlb_lock);
-    new_mm->tlb_holds = NULL;
-    refcount_set(&new_mm->refcount, 1);
-    new_mm->mmap       = info->mmap;
-    new_mm->has_vdso   = vdso_auxv_ehdr() != 0;
-
-    /* The auxv is a property of this exec, so it lands with the address space
-     * it describes -- new_mm is the one being installed, and /proc/<pid>/auxv
-     * reads it from there. */
-    new_mm->auxv_n = auxv_n;
-    if (auxv_n) {
-        for (uint32_t i = 0; i < auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
-            new_mm->auxv[i][0] = auxv_pairs[i][0];
-            new_mm->auxv[i][1] = auxv_pairs[i][1];
-        }
-    }
-
-#ifdef CONFIG_NOMMU
-    /* Transfer NOMMU segment allocation tracking into the new mm.
-     * elf_load64/32 tracks allocations in a local mm, then moves them into
-     * info->nommu_allocs[] via elf_transfer_nommu_allocs. We must copy them
-     * into new_mm so vfork snapshot/restore knows what memory to save. */
-    new_mm->num_nommu_allocs = info->num_nommu_allocs;
-    for (int i = 0;
-         i < info->num_nommu_allocs && i < NOMMU_ALLOC_MAX; i++) {
-        new_mm->nommu_allocs[i] = info->nommu_allocs[i];
-        new_mm->nommu_alloc_sizes[i] = info->nommu_alloc_sizes[i];
-        new_mm->nommu_alloc_types[i] = info->nommu_alloc_types[i];
-    }
-#endif
-
-    /* Map architecture-specific signal return trampoline page. */
-    arch_setup_signal_trampoline(new_mm);
-
-    /*
-     * Linux exec is a thread-group operation.  A pthread shares its fdtable
-     * with every sibling, so applying FD_CLOEXEC to that table would close
-     * epoll/eventfd descriptors out from under still-running workers.  Make
-     * the caller's table private first, request sibling exit while their old
-     * mm/files references remain valid, and mutate only the private table.
-     */
-    int fd_err = fdtable_unshare(t);
-    if (fd_err < 0) {
-        kfree(new_mm);
-        return fd_err;
-    }
-    proc_exec_terminate_siblings(t);
-    fdtable_close_on_exec(t);
-
-    mm_arch_context_init(new_mm);
-    uint64_t user_as = mm_address_space_token(new_mm);
-
-    /* ---- 3. Atomically swap mm ---- */
-    uint64_t mm_swap_flags = spin_lock_irqsave(&t->park_lock);
-    mm_struct_t *old_mm    = t->mm;
-    pt_root_t   *old_pgdir = t->pgdir;
-    t->mm   = new_mm;
-    t->pgdir = info->pgdir;
-    spin_unlock_irqrestore(&t->park_lock, mm_swap_flags);
-    t->entry = info->entry;
-    t->ustack = sp;
-    strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);
-    t->exec_path[MAX_PATH_LEN - 1] = '\0';
-    const char *base = strrchr(t->exec_path, '/');
-    proc_set_name(t, base ? base + 1 : t->exec_path);
-
-    /* ---- 4. Reset signal handlers (POSIX exec semantics) ---- */
-    signal_exec_reset(t);
-
-    /* ---- 5. Set up trap context for return to user ---- */
-    uint64_t saved_kernel_sp = (uint64_t)(uintptr_t)t->kstack_base + KERNEL_STACK_SIZE;
-
-    if (!t->trap_ctx) {
-        uint64_t ks_top = saved_kernel_sp;
-        trap_context_t *trap = (trap_context_t *)(uintptr_t)(ks_top - sizeof(trap_context_t));
-        /*
-         * Ask the architecture where the initial task_context_t belongs.
-         * x86_64 keeps it at the bottom of the kernel stack; the other arches
-         * keep it just below the trap frame.
-         */
-        task_context_t *new_ctx  = arch_task_context_base(t->kstack_base, ks_top, trap);
-        memset(new_ctx, 0, sizeof(*new_ctx));
-        t->first_kernel_entry = (uintptr_t)user_trap_return;
-        new_ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
-        new_ctx->tp = (uint64_t)(uintptr_t)t;
-        arch_task_context_set_user_tp(new_ctx, info->tls_tp);
-        TASK_CTX_STATUS(new_ctx) = arch_task_user_resume_status();
-        TASK_CTX_PAGE_TABLE(new_ctx) = user_as;
-        arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
-        t->trap_ctx = trap;
-        t->kstack   = (uint64_t)(uintptr_t)new_ctx;
-    }
-
-    {
-        trap_context_t *trap = t->trap_ctx;
-        saved_kernel_sp = arch_trap_ctx_get_kernel_stack(trap, (uint64_t)(uintptr_t)trap);
-        memset(trap, 0, sizeof(*trap));
-        TRAP_CTX_KScratch0(trap) = user_as;
-        arch_trap_ctx_set_user_entry(trap, info->entry);
-        TRAP_CTX_SP(trap)        = sp;
-        TRAP_CTX_TP(trap)        = info->tls_tp;
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
-        if (info->is_native_abi) {
-            TRAP_CTX_SET_ARG0(trap, native_start_info ? native_start_info : sp);
-        }
-#endif
-        trap->kernel_tp = (uint64_t)(uintptr_t)t;
-        arch_trap_ctx_set_kernel_stack(trap, saved_kernel_sp);
-        TRAP_CTX_STATUS(trap) = arch_user_initial_status();
-    }
-
-    /* ---- 6. Apply SUID/SGID credentials ---- */
-    t->exec_load_addr = info->load_addr;
-    t->exec_load_size = info->load_size;
-    if (st)
-        proc_apply_exec_creds(t, st);
-
-    /* ---- 7. Switch page tables, destroy old address space ---- */
-    unsigned cpu = cpu_current_id();
-    mm_context_enter(new_mm, cpu);
-    arch_switch_addr_space_token(user_as);
-    if (old_mm && old_mm != new_mm)
-        mm_context_leave(old_mm, cpu);
-
-    if (old_mm) {
-        mm_destroy(old_mm);
-    } else if (old_pgdir && old_pgdir != proc_kernel_pgdir_shared()) {
-        pt_destroy_user(old_pgdir);
-    }
-
-    proc_complete_vfork(t);
-
-#ifdef CONFIG_NOMMU
-    arch_flush_icache_range((const void *)info->load_addr, info->load_size);
-#else
-    arch_fence_i();
-#endif
-    return 0;
+    };
+    return a20_elf_exec_run((uint64_t)(uintptr_t)info,
+                            info->is_native_abi, &c, &ops);
 }
 
 /* ================================================================== */
@@ -1149,10 +1336,12 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
      */
     if (bprm.argc == 0) {
         size_t len = strlen(bprm.path) + 1;
-        if (arg_bytes + len > MAX_ARG_BYTES ||
-            arg_bytes + len > (t ? t->limits.stack / 4 : MAX_ARG_BYTES)) {
+        long next0 = a20_elf_check_arg_bytes(arg_bytes, len, MAX_ARG_STRLEN,
+                                             MAX_ARG_BYTES,
+                                             t ? (uint64_t)(t->limits.stack / 4) : 0);
+        if (next0 < 0) {
             bprm_free(&bprm);
-            return -E2BIG;
+            return (int)next0;
         }
         bprm.args[0] = kmalloc(len);
         if (!bprm.args[0]) {
@@ -1162,7 +1351,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         memcpy(bprm.args[0], bprm.path, len);
         bprm.args[1] = NULL;
         bprm.argc = 1;
-        arg_bytes += len;
+        arg_bytes = (size_t)next0;
         bprm.bytes = arg_bytes;
     }
 
@@ -1223,7 +1412,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         memset(&info, 0, sizeof(info));
         r = elf_load(fd, abs_path, &info);
 
-        if (r == 0) {
+        int outcome = a20_elf_classify(r);
+        if (outcome == A20_ELF_STEP_INSTALL) {
             /* Keep metadata from the opened ELF. A pathname stat here could
              * select a replacement inode and apply its set-id credentials. */
             vfs_close(fd);
@@ -1238,42 +1428,33 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         }
 
         /* ELF failed — try shebang, then the foreign-arch translator */
-        if (r == -ENOEXEC) {
+        if (outcome == 1) {   /* format mismatch */
             int sr = exec_try_script(fd, &bprm);
-            if (sr == EXEC_RETRY) {
+            switch (a20_elf_step_after_script(sr)) {
+            case A20_ELF_STEP_RETRY:
                 vfs_close(fd);
                 continue;   /* loop with new interpreter */
-            }
-            if (sr < 0) {
+            case A20_ELF_STEP_FAIL:
                 vfs_close(fd);
                 bprm_free(&bprm);
                 return sr;
+            default:   /* CONTINUE: not a script */
+                break;
             }
-
-            /* Not a script.  A structurally valid foreign-architecture ELF
-             * for which a translator is configured is the one remaining case
-             * worth a second chance; anything else -- corrupt file, machine
-             * with no translator, channel disabled -- returns 0 here and
-             * falls through to ENOEXEC exactly as before.
-             *
-             * The whole block disappears from a CONFIG_XLATOR=n build, which
-             * is what makes that knob a real cut-down rather than a runtime
-             * no-op. */
 #ifdef CONFIG_XLATOR
             int xr = exec_try_translator(fd, &bprm, t);
             vfs_close(fd);
-            if (xr == EXEC_RETRY) {
+            switch (a20_elf_step_after_xlator(true, xr)) {
+            case A20_ELF_STEP_RETRY:
                 xlator_note_forward();
                 continue;   /* loop with the translator as the image */
-            }
-            if (xr < 0) {
+            case A20_ELF_STEP_FAIL:
                 bprm_free(&bprm);
                 return xr;
+            default:
+                break;
             }
-#else
-            vfs_close(fd);
 #endif
-
             bprm_free(&bprm);
             return -ENOEXEC;
         }

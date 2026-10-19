@@ -29,6 +29,7 @@
 #include "ipc/objstats.h"
 #include "proc/proc.h"
 #include "handle_table.h"
+#include "proc/signal_core.h"
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
 #include "handle_table_state.h"
 _Static_assert(sizeof(a20_handle_entry_t) == (sizeof(void *) == 8 ? 48 : 40), "handle entry ABI size mismatch");
@@ -1125,7 +1126,7 @@ void a20_ht_sig_pend(struct a20_ht_internal *ht, int sig)
     if (!ht || sig <= 0 || sig >= 64)
         return;
     uint64_t flags = spin_lock_irqsave(&ht->lock);
-    ht->sig_pending |= (1ULL << sig);
+    a20_signal_native_ht_pend_locked(&ht->sig_pending, sig);
     spin_unlock_irqrestore(&ht->lock, flags);
 }
 
@@ -1136,8 +1137,8 @@ uint64_t a20_ht_sig_take(struct a20_ht_internal *ht)
     if (!ht)
         return 0;
     uint64_t flags = spin_lock_irqsave(&ht->lock);
-    uint64_t deliver = ht->sig_pending & ~ht->sig_blocked;
-    ht->sig_pending &= ht->sig_blocked;
+    uint64_t deliver = a20_signal_native_ht_take_locked(&ht->sig_pending,
+                                                        ht->sig_blocked);
     spin_unlock_irqrestore(&ht->lock, flags);
     return deliver;
 }
@@ -1158,7 +1159,7 @@ uint64_t a20_ht_sig_set_blocked(struct a20_ht_internal *ht, uint64_t mask)
         return 0;
     uint64_t flags = spin_lock_irqsave(&ht->lock);
     uint64_t old = ht->sig_blocked;
-    ht->sig_blocked = mask & ~(1ULL << 9);   /* SIGKILL cannot be blocked */
+    ht->sig_blocked = a20_signal_native_ht_mask(mask);
     spin_unlock_irqrestore(&ht->lock, flags);
     return old;
 }
@@ -1174,7 +1175,7 @@ void a20_thread_sig_pend(task_t *task, int sig) {
         return;
     }
     uint64_t flags = spin_lock_irqsave(&ht->lock);
-    task->a20_signal_pending |= 1ULL << sig;
+    a20_signal_native_thread_pend_locked(&task->a20_signal_pending, sig);
     spin_unlock_irqrestore(&ht->lock, flags);
     a20_ht_put_ref(ht);
 }
@@ -1184,21 +1185,11 @@ uint64_t a20_thread_sig_check(task_t *task, uint32_t mode, uint64_t selected) {
     if (!ht)
         return 0;
     uint64_t flags = spin_lock_irqsave(&ht->lock);
-    uint64_t pending = ht->sig_pending | task->a20_signal_pending;
-    uint64_t deliver = pending & ~task->a20_signal_blocked;
-    if (mode & A20_SIGNAL_SELECT) {
-        deliver = pending & selected;
-        /* sigwait consumes one signal, including signals blocked by caller. */
-        if (!(mode & A20_SIGNAL_PEEK))
-            deliver &= 0ULL - deliver;
-    }
-    if (!(mode & A20_SIGNAL_PEEK)) {
-        /* A signal pending in both scopes represents two occurrences. Prefer
-         * the thread occurrence and leave the process occurrence queued. */
-        uint64_t local = deliver & task->a20_signal_pending;
-        task->a20_signal_pending &= ~local;
-        ht->sig_pending &= ~(deliver & ~local);
-    }
+    /* Rust owns the checkpoint select+consume transaction (thread
+     * occurrence preferred, lowest-signum SELECT consume). */
+    uint64_t deliver = a20_signal_native_thread_check_locked(
+        &ht->sig_pending, &task->a20_signal_pending, task->a20_signal_blocked,
+        mode, selected);
     spin_unlock_irqrestore(&ht->lock, flags);
     return deliver;
 }
@@ -1209,8 +1200,9 @@ uint64_t a20_thread_sig_mask(task_t *task, uint64_t mask, int query) {
         return 0;
     uint64_t flags = spin_lock_irqsave(&ht->lock);
     uint64_t old = task->a20_signal_blocked;
-    if (!query)
-        task->a20_signal_blocked = mask & ~((1ULL << 9) | (1ULL << 19) | 1ULL);
+    if (!query) {
+        task->a20_signal_blocked = a20_signal_native_thread_mask(mask);
+    }
     spin_unlock_irqrestore(&ht->lock, flags);
     return old;
 }

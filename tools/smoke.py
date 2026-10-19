@@ -317,6 +317,51 @@ def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
         sock.close()
 
 
+def guest_slot_locks() -> tuple[str, object]:
+    """Acquire the shared guest slots (activity SH, qemu-1 EX).
+
+    Returns ("held", (activity, qemu)) on success, ("absent", None) when the
+    shared lock directory does not use these files, and ("busy", None) when
+    another guest still holds qemu-1 (the caller must not start a VM, so the
+    reported status stays the wrapper's 75).
+    """
+    import fcntl
+    lock_dir = Path(os.environ.get(
+        "A20OS_SIGNAL_RUNNER_LOCK_DIR",
+        "<repo>/.git/parallel-rewrite"))
+    try:
+        activity = (lock_dir / "activity.lock").open("r")
+        qemu = (lock_dir / "qemu-1.lock").open("r")
+    except OSError as exc:
+        if "A20OS_SIGNAL_RUNNER_LOCK_DIR" in os.environ:
+            # An explicitly selected lock dir must work or say so loudly.
+            print(f"smoke: cannot open shared guest locks {lock_dir}: {exc}")
+            return "absent", None
+        return "absent", None
+    fcntl.flock(activity, fcntl.LOCK_SH)
+    try:
+        fcntl.flock(qemu, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fcntl.flock(activity, fcntl.LOCK_UN)
+        activity.close()
+        qemu.close()
+        return "busy", None
+    return "held", (activity, qemu)
+
+
+def _release_guest_slot_locks(handles) -> None:
+    import fcntl
+    activity, qemu = handles
+    try:
+        fcntl.flock(qemu, fcntl.LOCK_UN)
+    finally:
+        try:
+            fcntl.flock(activity, fcntl.LOCK_UN)
+        finally:
+            qemu.close()
+            activity.close()
+
+
 def run_qemu(case: dict) -> int:
     log = Path(case["log"])
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -335,6 +380,25 @@ def run_qemu(case: dict) -> int:
         # Started before QEMU, not after: the pump retries the connect, so it
         # is waiting for the socket to appear while QEMU is still booting.
         pump.start()
+    # Mirror the signal guest runner's shared-slot discipline: one guest at a
+    # time under the repository-wide activity (SH) + qemu-1 (EX) leases.  A
+    # missing lock directory means this workflow does not use the shared
+    # slots; a busy qemu-1 slot is reported as status 75, the same busy-exit
+    # convention as run-build.sh.
+    lock_state, handles = guest_slot_locks()
+    if lock_state == "busy":
+        print(f"smoke: shared QEMU slot busy (qemu-1 EX held); "
+              f"case {case.get('name')} not started")
+        return 75
+    try:
+        return _run_qemu_locked(case, log, argv, stdin, pump)
+    finally:
+        if handles is not None:
+            _release_guest_slot_locks(handles)
+
+
+def _run_qemu_locked(case: dict, log: Path, argv: list[str],
+                     stdin: dict | None, pump: threading.Thread | None) -> int:
     with log.open("wb") as fh:
         if stdin and stdin["kind"] == "pipe":
             payload = "".join(f"{ln}\n" for ln in stdin["lines"]).encode()
@@ -700,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kernel")
     ap.add_argument("--timeout")
     ap.add_argument("--nr-cpus", type=int)
+    ap.add_argument("--bind-dir", help="write commit/input-bound evidence after a successful guest case")
     ap.add_argument("--input-delay", type=float, default=8.0)
     ap.add_argument("--img")
     ap.add_argument("--blk-second", dest="blk_second")
@@ -755,8 +820,22 @@ def main(argv: list[str] | None = None) -> int:
             case = case_for_arch(a.case, case, a.arch)
         except ValueError as exc:
             ap.error(str(exc))
+    if a.nr_cpus is not None:
+        if a.nr_cpus < 1:
+            ap.error("--nr-cpus must be positive")
+        case.setdefault("gate", {})["cpus"] = str(a.nr_cpus)
+        build = case.get("build")
+        if build:
+            build["vars"] = [value for value in build["vars"] if not value.startswith("NR_CPUS=")]
+            build["vars"].append(f"NR_CPUS={a.nr_cpus}")
     case = resolve_case_build_paths(case)
     case.setdefault("name", a.case)
+    if a.nr_cpus is not None:
+        try:
+            smp_index = case["argv"].index("-smp") + 1
+            case["argv"][smp_index] = str(a.nr_cpus)
+        except (KeyError, ValueError, IndexError):
+            ap.error(f"{a.case} does not have a QEMU -smp argument")
     # Keep separately prepared run logs disjoint. This also avoids writing
     # through a broken or user-selected .kernel-build symlink.
     case["log"] = resolve_log_path(case["log"], a.log_dir)
@@ -767,10 +846,94 @@ def main(argv: list[str] | None = None) -> int:
     run_build(case)
     if run_post_build(case):
         return 1
+    bind_inputs = None
+    if a.bind_dir:
+        from signal_perf_bind import commit_of, dirty_diff_sha256, sha256_file, user_program_sha256
+        kernel = Path(case["argv"][case["argv"].index("-kernel") + 1])
+        if not kernel.is_absolute():
+            kernel = REPO / kernel
+        image_arg = next(arg for arg in case["argv"] if arg.startswith("file="))
+        image = Path(image_arg[len("file="):].split(",", 1)[0])
+        if not image.is_absolute():
+            image = REPO / image
+        programs = sorted({Path(line.strip().split()[0]).name
+                           for line in (case.get("stdin") or {}).get("lines", [])
+                           if line.strip().lower() not in ("poweroff", "halt")})
+        users = {program: user_program_sha256(image, program) for program in programs}
+        if any(value is None for value in users.values()):
+            raise RuntimeError(f"could not hash guest programs from {image}: {users}")
+        bind_inputs = {
+            "source": {"commit": commit_of(REPO), "dirty_diff_sha256": dirty_diff_sha256(REPO)},
+            "kernel": sha256_file(kernel), "image": sha256_file(image), "users": users,
+        }
     status = run_qemu(case)
     if run_post(case):
         return 1
-    return report(a.case, case, status)
+    if a.bind_dir and status != 0:
+        print(f"{a.case}: refusing evidence because QEMU exited {status}", file=sys.stderr)
+        return status or 1
+    result = report(a.case, case, status)
+    if result == 0 and a.bind_dir:
+        write_signal_bind_record(a.bind_dir, a.case, case, status, bind_inputs)
+    return result
+
+
+def write_signal_bind_record(bind_dir: str, name: str, case: dict, qemu_status: int, before: dict) -> None:
+    """Bind a successful guest run to its exact boot artifacts and source."""
+    from signal_perf_bind import commit_of, dirty_diff_sha256, sha256_file, user_program_sha256
+
+    kernel = Path(case["argv"][case["argv"].index("-kernel") + 1])
+    if not kernel.is_absolute():
+        kernel = REPO / kernel
+    image_arg = next(arg for arg in case["argv"] if arg.startswith("file="))
+    image = Path(image_arg[len("file="):].split(",", 1)[0])
+    if not image.is_absolute():
+        image = REPO / image
+    log = Path(case["log"])
+    programs = []
+    stdin = case.get("stdin") or {}
+    for command in stdin.get("lines", []):
+        if command.strip().lower() in ("poweroff", "halt"):
+            continue
+        token = command.strip().split()[0]
+        programs.append(Path(token).name)
+    programs = sorted(set(programs))
+    user_hashes = {program: user_program_sha256(image, program) for program in programs}
+    if any(value is None for value in user_hashes.values()):
+        raise RuntimeError(f"could not extract guest programs from {image}: {user_hashes}")
+    log_text = log.read_text(encoding="utf-8", errors="replace")
+    if qemu_status != 0 or "System is going down for power-off NOW" not in log_text:
+        raise RuntimeError(f"guest did not exit naturally and power off cleanly: status={qemu_status}")
+    expected = case.get("expect", [])
+    if any(not grep_matches(pattern, log_text) for pattern in expected):
+        raise RuntimeError("guest log no longer satisfies its case expectations")
+    record = {
+        "case": name,
+        "source": {"commit": commit_of(REPO), "dirty_diff_sha256": dirty_diff_sha256(REPO)},
+        "inputs": {
+            "kernel_sha256": before["kernel"],
+            "image_sha256_at_boot": before["image"],
+            "image_sha256_after_run": sha256_file(image),
+            "user_program_sha256_at_boot": before["users"],
+            "user_program_sha256_after_run": user_hashes,
+        },
+        "log": {"path": str(log), "sha256": sha256_file(log)},
+        "config": {
+            "arch": "riscv64", "cpus": case["gate"]["cpus"],
+            "mem": case["gate"]["mem"],
+            "abi": next((v.split("=", 1)[1] for v in case.get("build", {}).get("vars", [])
+                         if v.startswith("ABI=")), None),
+            "runner": "tools/smoke.py", "argv": qemu_argv(case),
+            "qemu_exit_status": qemu_status,
+        },
+    }
+    if record["source"] != before["source"] or record["inputs"]["kernel_sha256"] != sha256_file(kernel):
+        raise RuntimeError("source or kernel changed during guest run; refusing a false binding")
+    output = Path(bind_dir)
+    if not output.is_absolute():
+        output = REPO / output
+    output.mkdir(parents=True, exist_ok=True)
+    (output / f"{name}.bind.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
 if __name__ == "__main__":

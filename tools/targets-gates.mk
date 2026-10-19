@@ -4,6 +4,23 @@
 HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(filter-out tools/tests/fdt_view.c,$(wildcard tools/tests/*.c))
+# Rust-linked differential harnesses are not self-contained host programs: they
+# need their module's staticlib and are driven by the dedicated tools/test-*.sh
+# scripts (like the wait4/vfile_lifecycle harnesses).  Keep them out of the
+# generic single-file host-tests pattern rule.
+HOST_TESTS_SRC := $(filter-out tools/tests/vnode_identity_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/vnode_identity_bench.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/block_cache_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/page_cache_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/uxfs_rpc_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/uxfs_lifetime_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/procfs_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/path_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/path_walk_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/mutate_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/mntns_lifecycle_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/procfs_node_state_host.c,$(HOST_TESTS_SRC))
+HOST_TESTS_SRC := $(filter-out tools/tests/mount_state_host.c,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
@@ -307,6 +324,7 @@ CHECK_FAST_GATES := \
     check-task-state-boundary \
     check-abi-smoke-gate \
     test-nat-rewrite \
+    test-signal-core \
     check-doc-drift
 
 # Recurse per gate instead of listing them as prerequisites.  A single make
@@ -349,6 +367,17 @@ check:
 test-nat-rewrite:
 	@sh tools/test-nat-rewrite-host.sh $(NETFILTER_REWRITE_IMPL)
 	@echo "test-nat-rewrite ($(NETFILTER_REWRITE_IMPL)): PASS"
+
+# ----------------------------------------------------------------
+# Signal decision-core host tests
+# ----------------------------------------------------------------
+# The signal core is pure decision logic, so its Rust unit/oracle vectors and
+# the C<->Rust differential sweep run on the host in about a second and need no
+# target runtime. Also re-runs the frozen Python/C oracle models.
+.PHONY: test-signal-core
+test-signal-core:
+	@sh tools/test-signal-core-host.sh
+	@echo "test-signal-core: PASS"
 
 # ----------------------------------------------------------------
 # clang-format drift gate (docs/CONTRIBUTING.md 4.2)

@@ -10,8 +10,12 @@
  */
 
 #include "mm/elf.h"
+#ifdef CONFIG_NOMMU
+#include "mm/elf_nommu_allocs.h"
+#endif
 #include "mm/mm.h"
 #include "mm/vm.h"
+#include "vm_internal.h"
 #include "fs/vfs.h"
 #include "fs/pathutil.h"
 #include "core/string.h"
@@ -22,6 +26,8 @@
 #include "core/klog.h"
 #include "core/random.h"
 #include "proc/signal.h"
+#include "proc/proc.h"
+#include "mm/elf_rust.h"
 #include "mm/frame.h"
 #include "mm/pt.h"
 #include "drivers/driver_descriptor.h"
@@ -31,7 +37,6 @@
 #endif
 
 /* musl struct pthread is ~300-400 bytes; 512 gives headroom */
-#define TLS_TCB_SIZE       512
 
 #define ASLR_BITS          11
 #define ASLR_MASK          (((1UL << ASLR_BITS) - 1) << 16)
@@ -41,13 +46,19 @@
 
 #ifdef CONFIG_NOMMU
 static void elf_transfer_nommu_allocs(mm_struct_t *mm, elf_load_info_t *info) {
-    info->num_nommu_allocs = mm->num_nommu_allocs;
-    for (int i = 0; i < mm->num_nommu_allocs && i < NOMMU_ALLOC_MAX; i++) {
-        info->nommu_allocs[i] = mm->nommu_allocs[i];
-        info->nommu_alloc_sizes[i] = mm->nommu_alloc_sizes[i];
-        info->nommu_alloc_types[i] = mm->nommu_alloc_types[i];
-    }
-    mm->num_nommu_allocs = 0;
+    elf_nommu_allocs_transfer(info->nommu_allocs, info->nommu_alloc_sizes,
+                              info->nommu_alloc_types, &info->num_nommu_allocs,
+                              mm->nommu_allocs, mm->nommu_alloc_sizes,
+                              mm->nommu_alloc_types, &mm->num_nommu_allocs,
+                              NOMMU_ALLOC_MAX);
+}
+
+static void elf_release_nommu_alloc(void *ptr) { kfree(ptr); }
+
+static void elf_discard_nommu_allocs(mm_struct_t *mm) {
+    elf_nommu_allocs_release(mm->nommu_allocs, mm->nommu_alloc_sizes,
+                             mm->nommu_alloc_types, &mm->num_nommu_allocs,
+                             NOMMU_ALLOC_MAX, elf_release_nommu_alloc);
 }
 
 static int elf_alloc_nommu_image(mm_struct_t *mm, vaddr_t min_vaddr,
@@ -134,25 +145,6 @@ static int elf_validate_user_driver(int fd, const Elf64_Ehdr *eh)
     return -ENOEXEC;
 }
 
-static int elf_machine_supported(uint16_t machine, int elf_class) {
-    return elf_class == ARCH_ELF_CLASS && machine == ARCH_ELF_MACHINE;
-}
-
-static int seg_prot(uint32_t p_flags) {
-    int prot = 0;
-    if (p_flags & PF_R) prot |= PROT_READ;
-    if (p_flags & PF_W) prot |= PROT_WRITE;
-    if (p_flags & PF_X) prot |= PROT_EXEC;
-    return prot;
-}
-
-/* W^X: the permission combination of a PT_LOAD segment follows the same
- * policy as mmap/mprotect; returns a negative errno (deny) or the filtered
- * prot. */
-static int seg_prot_filtered(uint32_t p_flags) {
-    return mm_wx_filter_prot(seg_prot(p_flags), "elf-load");
-}
-
 #ifndef CONFIG_NOMMU
 static uint64_t pte_to_vm_flags(pte_t pte_flags) {
     return VM_ANON | mm_pte_flags_to_vm_flags(pte_flags);
@@ -194,6 +186,16 @@ static void elf_discard_vmas(mm_struct_t *mm)
     mm_seg_t *vma = mm->mmap;
     while (vma) {
         mm_seg_t *next = vma->next;
+        /*
+         * Release the VMA's mapped pages under the same ownership rule
+         * mm_destroy() uses.  This matters because vdso_map_image() maps the
+         * global vDSO/vvar frames (VM_PFNMAP, shared, never freed) into the
+         * image page table: reaping those leaves with frame_put would drop a
+         * permanently-owned frame onto the buddy list and corrupt it.  A plain
+         * anonymous leaf (segment, stack, TLS) still returns its frame here,
+         * and a file-backed leaf drops its page-cache pin instead.
+         */
+        free_vma_pages(mm, vma);
         if ((vma->vm_flags & VM_FILE) && vma->file) {
             if (vma->file_vnode) {
                 if (vma->vm_flags & VM_SHARED)
@@ -212,8 +214,15 @@ void elf_load_info_discard(elf_load_info_t *info)
 {
     if (!info)
         return;
-    mm_struct_t mm = { .mmap = info->mmap, .pgdir = info->pgdir };
+    mm_struct_t mm;
+    memset(&mm, 0, sizeof(mm));
+    mm.mmap = info->mmap;
+    mm.pgdir = info->pgdir;
+    spin_init(&mm.lock);
     elf_discard_vmas(&mm);
+    /* free_vma_pages() may have retired now-empty table pages; reclaim them
+     * before the root goes away (needs neither mm->lock nor a live mm). */
+    mm_pt_retire_drain(&mm);
     if (info->pgdir)
         pt_destroy_user(info->pgdir);
 #ifdef CONFIG_NOMMU
@@ -277,6 +286,26 @@ static int stack_copy(pt_root_t *pgdir, vaddr_t dst_va, const void *src,
         from += chunk;
         len -= chunk;
     }
+    return 0;
+}
+
+typedef struct {
+    pt_root_t *pgdir;
+    vaddr_t stack_bottom;
+} elf_stack_writer_t;
+
+static int32_t elf_stack_copy_ffi(void *opaque, uint64_t dst_va,
+                                  const uint8_t *src, size_t len)
+{
+    elf_stack_writer_t *writer = opaque;
+    return stack_copy(writer->pgdir, (vaddr_t)dst_va, src, len,
+                      &writer->stack_bottom);
+}
+
+static int32_t elf_stack_random_ffi(void *opaque, uint8_t *dst, size_t len)
+{
+    (void)opaque;
+    random_fill(dst, len);
     return 0;
 }
 
@@ -439,211 +468,32 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
 
 #ifdef CONFIG_NOMMU
 /*
- * The number of symbols .dynsym holds, from whichever hash table the linker
- * emitted.  Neither table carries the count directly, so this is the standard
- * reconstruction: the SysV table states it in its second word, and the GNU
- * table has to be walked from its last bucket to the first non-terminator.
+ * NOMMU static-pie relocation.
+ *
+ * The whole apply loop — the dynamic-tag scan, the hash/symbol bound, the
+ * reltype selection, the weak/undefined policy, the destination-range and
+ * permission checks, and the stores themselves — lives in the Rust core
+ * (a20_elf_apply_relocs). The adapter hands over the flat loaded image and the
+ * plan it executed; it performs no pointer arithmetic on values that come from
+ * the image.
  */
-static uint64_t elf_dynsym_count(uint32_t *sysv, uint32_t *gnu) {
-    if (sysv)
-        return sysv[1];
-    if (!gnu)
-        return 0;
-    uint32_t nbuckets = gnu[0];
-    uint32_t symoffset = gnu[1];
-    uint32_t bloom_words = gnu[2] * (uint32_t)(sizeof(vaddr_t) / 4);
-    uint32_t *buckets = gnu + 4 + bloom_words;
-
-    uint64_t nsym = 0;
-    for (uint32_t i = 0; i < nbuckets; i++)
-        if (buckets[i] > nsym)
-            nsym = buckets[i];
-    if (nsym == 0)
-        return 0;
-    /* The chain for the highest bucket runs to the first symbol whose chain
-     * word has its low bit clear; that symbol is the last one. */
-    uint32_t *chain = buckets + nbuckets + (nsym - symoffset);
-    do {
-        nsym++;
-    } while ((*chain++ & 1U) && nsym < 0x1000000ULL);
-    return nsym;
-}
-
-/*
- * Apply the dynamic relocations of a position-independent image.
- *
- * The NOMMU userland is built static-pie, so every pointer that lives in the
- * image's own data -- and every non-zero initializer in .data, which is itself
- * just a relocation against the linker base -- arrives as an unapplied entry.
- * Without this pass such an image faults the moment it dereferences one of
- * them, typically by jumping through the truncated address an unrelocated
- * pointer still holds, and one that survives to run reaches its parser with
- * the keyword and operator tables still holding link-time addresses.
- *
- * The MMU rootfs ships static ET_EXEC images, which carry no PT_DYNAMIC at
- * all, so this pass has nothing to do there -- and must not run: the MMU
- * loader maps file-backed segments lazily, so reading the dynamic array from
- * kernel context would take a data abort on a not-yet-faulted user page.  An
- * ET_DYN under MMU is a dynamically linked executable whose PT_INTERP hands
- * relocation to ld-musl, which owns the whole job.
- *
- * @dyn_va is the *runtime* address of the dynamic array, which the NOMMU
- * PT_LOAD pass has already copied into the image, so it is read from the image
- * rather than from the file.  @load_bias is added to every link-time address,
- * and it is the only adjustment a RELATIVE entry needs: unlike a pointer
- * stored in the dynamic array itself, an addend is not itself relocated.
- */
-static int elf_apply_relocs(vaddr_t dyn_va, uint64_t dyn_size,
-                            vaddr_t load_bias, uint16_t machine,
-                            bool elf64) {
-    uint32_t want = arch_elf_relative_reltype(machine);
-    uint32_t want_abs = arch_elf_absolute_reltype(machine, elf64);
-    if (dyn_size == 0 || (want == UINT32_MAX && want_abs == UINT32_MAX))
-        return 0;
-
-    uint64_t rela = 0, relasz = 0;
-    uint64_t symtab = 0, hash_sysv = 0, hash_gnu = 0;
-    /* Three distinct strides live here: the dynamic array is an array of
-     * Elf64_Dyn and the relocation table an array of Elf64_Rela, and neither
-     * is the same width as the other.  DT_RELAENT is what states how wide the
-     * relocation entries are. */
-    uint64_t dyn_ent = elf64 ? sizeof(Elf64_Dyn) : sizeof(Elf32_Dyn);
-    uint64_t min_rela = elf64 ? sizeof(Elf64_Rela) : sizeof(Elf32_Rela);
-    uint64_t syment = elf64 ? sizeof(Elf64_Sym) : sizeof(Elf32_Sym);
-    uint64_t ent = min_rela;
-
-    for (uint64_t off = 0; off + dyn_ent <= dyn_size; off += dyn_ent) {
-        uint64_t tag, val;
-        if (elf64) {
-            const Elf64_Dyn *d = (const Elf64_Dyn *)(uintptr_t)(dyn_va + off);
-            tag = (uint64_t)d->d_tag;
-            val = d->d_un;
-        } else {
-            const Elf32_Dyn *d = (const Elf32_Dyn *)(uintptr_t)(dyn_va + off);
-            tag = (uint64_t)(uint32_t)d->d_tag;
-            val = d->d_un;
-        }
-        if (tag == DT_NULL)
-            break;
-        switch (tag) {
-        case DT_RELA:    rela = val;     break;
-        case DT_RELASZ:  relasz = val;   break;
-        case DT_RELAENT: ent = val;      break;
-        case DT_SYMTAB:  symtab = val;   break;
-        case DT_SYMENT:  syment = val;   break;
-        case DT_HASH:    hash_sysv = val; break;
-        case DT_GNU_HASH:hash_gnu = val; break;
-        default: break;
-        }
-    }
-    if (rela == 0 || relasz == 0)
-        return 0;
-    if (ent < min_rela)
-        return -ENOEXEC;
-    if (syment == 0)
-        syment = elf64 ? sizeof(Elf64_Sym) : sizeof(Elf32_Sym);
-
-    uint64_t nsyms = 0;
-    if (symtab && want_abs != UINT32_MAX) {
-        nsyms = elf_dynsym_count(
-            hash_sysv ? (uint32_t *)(uintptr_t)(load_bias + hash_sysv) : NULL,
-            hash_gnu  ? (uint32_t *)(uintptr_t)(load_bias + hash_gnu)  : NULL);
-        /* A count of zero is not by itself an error: it is what a GNU hash
-         * table over an all-local .dynsym looks like, and an image carrying
-         * only RELATIVE entries -- which is most static-pie images -- never
-         * consults the table.  The loop below refuses the image if an ABS64
-         * entry turns out to need a symbol the count cannot vouch for. */
-    }
-    vaddr_t syms = load_bias + (vaddr_t)symtab;
-
-    vaddr_t table = load_bias + (vaddr_t)rela;
-    uint32_t applied = 0;
-    for (uint64_t off = 0; off + ent <= relasz; off += ent) {
-        vaddr_t at = table + (vaddr_t)off;
-        vaddr_t dst;
-        uint32_t type, symidx;
-
-        if (elf64) {
-            const Elf64_Rela *r = (const Elf64_Rela *)(uintptr_t)at;
-            type    = (uint32_t)(r->r_info & 0xffffffffU);
-            symidx  = (uint32_t)(r->r_info >> 32);
-            dst     = load_bias + (vaddr_t)r->r_offset;
-            if (type == want) {
-                *(uint64_t *)(uintptr_t)dst =
-                    (uint64_t)((int64_t)load_bias + r->r_addend);
-            } else if (type != want_abs) {
-                continue;
-            } else {
-                uint64_t s;
-                if (symidx >= nsyms)
-                    return -ENOEXEC; /* an ABS64 entry names a symbol the
-                                      * hash table cannot account for */
-                if (elf64 ? ((const Elf64_Sym *)(uintptr_t)
-                                 (syms + (uint64_t)symidx * syment))->st_shndx == 0
-                          : ((const Elf32_Sym *)(uintptr_t)
-                                 (syms + (uint64_t)symidx * syment))->st_shndx == 0) {
-                    /* Undefined.  A weak reference legitimately resolves to
-                     * nothing; a strong one means the image is not the
-                     * self-contained executable it claims to be. */
-                    uint8_t info = elf64
-                        ? ((const Elf64_Sym *)(uintptr_t)
-                              (syms + (uint64_t)symidx * syment))->st_info
-                        : ((const Elf32_Sym *)(uintptr_t)
-                              (syms + (uint64_t)symidx * syment))->st_info;
-                    if ((info >> 4) != STB_WEAK)
-                        return -ENOEXEC;
-                    s = 0;
-                } else {
-                    s = elf64 ? ((const Elf64_Sym *)(uintptr_t)
-                                     (syms + (uint64_t)symidx * syment))->st_value
-                             : ((const Elf32_Sym *)(uintptr_t)
-                                     (syms + (uint64_t)symidx * syment))->st_value;
-                }
-                *(uint64_t *)(uintptr_t)dst =
-                    (uint64_t)((int64_t)load_bias + (int64_t)s + r->r_addend);
-            }
-        } else {
-            const Elf32_Rela *r = (const Elf32_Rela *)(uintptr_t)at;
-            type    = r->r_info & 0xffU;
-            symidx  = r->r_info >> 8;
-            dst     = load_bias + (vaddr_t)r->r_offset;
-            if (type == want) {
-                *(uint32_t *)(uintptr_t)dst =
-                    (uint32_t)((int64_t)load_bias + (int32_t)r->r_addend);
-            } else if (type != want_abs) {
-                continue;
-            } else {
-                const Elf32_Sym *sy;
-                uint32_t s;
-                if (symidx >= nsyms)
-                    return -ENOEXEC;
-                sy = (const Elf32_Sym *)(uintptr_t)
-                     (syms + (uint64_t)symidx * syment);
-                if (sy->st_shndx == 0) {
-                    if ((sy->st_info >> 4) != STB_WEAK)
-                        return -ENOEXEC;
-                    s = 0;
-                } else {
-                    s = sy->st_value;
-                }
-                *(uint32_t *)(uintptr_t)dst =
-                    (uint32_t)((int64_t)load_bias + (int64_t)s +
-                               (int32_t)r->r_addend);
-            }
-        }
-        applied++;
-    }
+static int elf_apply_relocs(const a20_elf_image_plan_t *plan, uint64_t load_bias,
+                            uint8_t *image, uint64_t image_len, bool elf64) {
+    int64_t applied = a20_elf_apply_relocs(plan, load_bias, image,
+                                           (size_t)image_len, elf64);
+    if (applied < 0)
+        return (int)applied;
     if (applied)
-        ktrace_mm("[ELF] reloc: %u entry(s), %u nsyms, bias 0x%lx\n",
-                  applied, (uint32_t)nsyms, (unsigned long)load_bias);
+        ktrace_mm("[ELF] reloc: %lld entr%s, bias 0x%lx\n",
+                  (long long)applied, applied == 1 ? "y" : "ies",
+                  (unsigned long)load_bias);
     return 0;
 }
+
 #else /* !CONFIG_NOMMU */
-static int elf_apply_relocs(vaddr_t dyn_va, uint64_t dyn_size,
-                            vaddr_t load_bias, uint16_t machine,
-                            bool elf64) {
-    (void)dyn_va; (void)dyn_size; (void)load_bias;
-    (void)machine; (void)elf64;
+static int elf_apply_relocs(const a20_elf_image_plan_t *plan, uint64_t load_bias,
+                            uint8_t *image, uint64_t image_len, bool elf64) {
+    (void)plan; (void)load_bias; (void)image; (void)image_len; (void)elf64;
     return 0;
 }
 #endif /* CONFIG_NOMMU */
@@ -834,15 +684,14 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
 
 static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
                      const void *tls_data, uint64_t tls_filesz,
-                     uint64_t tls_memsz, uint64_t tls_align,
+                     uint64_t tcb_offset, uint64_t total_size,
+                     uint64_t total_pages, uint64_t tcb_size,
                      vaddr_t *tls_va_out, vaddr_t *tls_tp_out) {
-    uint64_t tcb_offset = ROUND_UP(tls_memsz, tls_align);
-    uint64_t total_size = tcb_offset + TLS_TCB_SIZE;
-    uint64_t total_pages = ROUND_UP(total_size, PAGE_SIZE) / PAGE_SIZE;
+    (void)total_size;
     pte_t pte_flags = mm_user_brk_pte_flags();
 
 #ifdef CONFIG_NOMMU
-    (void)pgdir; (void)pte_flags;
+    (void)pgdir; (void)pte_flags; (void)tcb_size;
     void *tls_mem = kmalloc(total_pages * PAGE_SIZE);
     if (!tls_mem) return -ENOMEM;
     mm_track_nommu_alloc(mm, tls_mem, total_pages * PAGE_SIZE, NOMMU_ALLOC_TLS);
@@ -882,7 +731,7 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
 #else
     void *tcb_dst = phys_for_va(pgdir, tcb_va);
     if (!tcb_dst) return -EFAULT;
-    memset(tcb_dst, 0, TLS_TCB_SIZE);
+    memset(tcb_dst, 0, tcb_size);
 #endif
 
     if (sizeof(uintptr_t) == 4) {
@@ -916,139 +765,516 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
  *
  * On success, @resolved is set to the path that worked.
  */
-static int resolve_interp(const char *exec_path, const char *interp_path,
-                          char *resolved, size_t resolved_size) {
-    /* 1. Exact path */
-    int fd = vfs_open(interp_path, O_RDONLY, 0);
-    if (fd >= 0) {
-        strncpy(resolved, interp_path, resolved_size - 1);
-        resolved[resolved_size - 1] = '\0';
-        return fd;
-    }
+/* ------------------------------------------------------------------ */
+/*  Rust-decision loader                                                */
+/*                                                                    */
+/*  The business decisions of elf_load64/32/from_buf live in           */
+/*  kernel/mm/elf_core.rs: header/phdr validation, wrap-safe bounds,   */
+/*  segment permission/W^X/layout planning, load bias, TLS/INTERP/     */
+/*  DYNAMIC discovery, native-ABI verdict, foreign probe and the       */
+/*  initial-stack plan. This file keeps only the adapter: reading the  */
+/*  bytes, mapping the planned segments, and the NOMMU relocation      */
+/*  memory writes. Nothing here re-derives a decision the plan made.   */
+/* ------------------------------------------------------------------ */
 
-    /* 2. Mount-relative path.  A20OS commonly mounts a userspace image at
-     * /bin, so /bin/libexec/tool must resolve /lib/ld.so as /bin/lib/ld.so,
-     * just like /bin/tool does. */
-    if (exec_path && path_build_mount_relative(exec_path, interp_path,
-                                                resolved, resolved_size) == 0) {
-        fd = vfs_open(resolved, O_RDONLY, 0);
-        if (fd >= 0) return fd;
-    }
+#define A20_ELF_EHDR32_SIZE ((size_t)sizeof(Elf32_Ehdr))
 
-    /* 3. Sibling of executable */
-    if (exec_path && path_build_sibling(exec_path, interp_path,
-                                        resolved, resolved_size) == 0) {
-        fd = vfs_open(resolved, O_RDONLY, 0);
-        if (fd >= 0) return fd;
-    }
+static int elf_native_abi_available(int is_native, const char *path);
 
-    /* 4. Sibling libc.so (musl: libc.so doubles as ldso) */
-    if (exec_path && path_build_sibling(exec_path, "/lib/libc.so",
-                                        resolved, resolved_size) == 0) {
-        fd = vfs_open(resolved, O_RDONLY, 0);
-        if (fd >= 0) return fd;
-    }
+typedef struct {
+    int         fd;        /* fd source, or -1 */
+    const void *buf;       /* buffer source, or NULL */
+    size_t      buf_len;
+} elf_rust_src_t;
 
-    /* 5. Arch-specific fallbacks */
-    char alt[MAX_PATH_LEN];
-    if (arch_resolve_interp_fallback(exec_path, interp_path,
-                                     alt, sizeof(alt)) == 0) {
-        fd = vfs_open(alt, O_RDONLY, 0);
-        if (fd >= 0) {
-            strncpy(resolved, alt, resolved_size - 1);
-            resolved[resolved_size - 1] = '\0';
-            return fd;
-        }
+/* Copy exactly len bytes at file offset @off. Buffer sources must contain
+ * the whole extent; short inputs fail with -ENOEXEC instead of copying bytes
+ * beyond the supplied buffer. The parser fixture set documents this boundary. */
+static int elf_rust_pread(const elf_rust_src_t *src, void *dst, size_t len,
+                          uint64_t off)
+{
+    if (src->buf) {
+        if (off > src->buf_len || len > src->buf_len - (size_t)off)
+            return -ENOEXEC;
+        memcpy(dst, (const char *)src->buf + (size_t)off, len);
+        return 0;
     }
-
-    return -ENOENT;
+    int r = vfs_pread(src->fd, dst, len, (long)off);
+    if (r < 0)
+        return r;
+    return (size_t)r == len ? 0 : -ENOEXEC;
 }
 
-/*
- * Load the dynamic linker from an already-opened fd.
- * The caller is responsible for closing @fd on failure.
- */
-static int elf_load_interp_from_fd(mm_struct_t *mm, pt_root_t *pgdir,
-                                    int fd,
-                                    vaddr_t *entry_out, vaddr_t *base_out) {
-    Elf64_Ehdr eh;
-    if (vfs_lseek(fd, 0, SEEK_SET) < 0 ||
-        vfs_read(fd, (char *)&eh, sizeof(eh)) < (int)sizeof(eh))
-        return -ENOEXEC;
-
-    int r = elf_check_header(&eh);
-    if (r < 0) return r;
-
-    Elf64_Phdr phdrs[MAX_PHDRS];
-    int nph = eh.e_phnum < MAX_PHDRS ? eh.e_phnum : MAX_PHDRS;
-    vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET);
-    r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
-    if (r < nph * (int)sizeof(Elf64_Phdr)) return -ENOEXEC;
-
-#ifdef CONFIG_NOMMU
-    vaddr_t min_vaddr = (vaddr_t)-1;
-    vaddr_t max_vaddr = 0;
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type != PT_LOAD) continue;
-        vaddr_t s = phdrs[i].p_vaddr & ~(vaddr_t)(PAGE_SIZE - 1);
-        vaddr_t e = ROUND_UP(phdrs[i].p_vaddr + phdrs[i].p_memsz, PAGE_SIZE);
-        if (s < min_vaddr) min_vaddr = s;
-        if (e > max_vaddr) max_vaddr = e;
+/* Read up to @want bytes at file offset @off; *got receives the byte
+ * count. The buffer source is pre-sliced by the caller, so @off applies to
+ * fd sources only. */
+static int elf_rust_read_up_to(const elf_rust_src_t *src, void *dst,
+                               size_t want, uint64_t off, size_t *got)
+{
+    if (src->buf) {
+        size_t n = want < src->buf_len ? want : src->buf_len;
+        memcpy(dst, src->buf, n);
+        *got = n;
+        return 0;
     }
-    vaddr_t load_bias = 0;
-    r = elf_alloc_nommu_image(mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) return r;
-#else
-    vaddr_t load_bias = INTERP_BASE_ADDR + elf_aslr_bias();
-#endif
-    vaddr_t base = 0, max_va = 0;
-
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type != PT_LOAD) continue;
-
-        vaddr_t seg_va = phdrs[i].p_vaddr + load_bias;
-        seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
-        int sprot = seg_prot_filtered(phdrs[i].p_flags);
-        if (sprot < 0) return sprot;
-        r = map_segment(mm, pgdir, seg_va, phdrs[i].p_memsz,
-                        &src, phdrs[i].p_filesz,
-                        mm_prot_to_pte_flags(sprot));
-        if (r < 0) return r;
-
-        vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
-#ifdef CONFIG_NOMMU
-        if (base == 0) base = load_bias + min_vaddr;
-#else
-        vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
-        if (base == 0) base = seg_start;
-#endif
-        if (seg_end > max_va) max_va = seg_end;
-    }
-
-#ifdef CONFIG_NOMMU
-    if (max_va > base) {
-        elf_add_vma(mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
-    }
-#endif
-
-    *entry_out = eh.e_entry + load_bias;
-    *base_out  = base;
+    int r = vfs_pread(src->fd, dst, want, (long)off);
+    if (r < 0)
+        return r;
+    *got = (size_t)r;
     return 0;
 }
+
+/* The one adapter-supplied W^X fact: the per-process translator exemption.
+ * The policy value itself comes from mm_wx_policy(); both are inputs to the
+ * Rust filter, which owns the verdict. */
+static bool elf_rust_xlator_host(void)
+{
+#ifdef CONFIG_XLATOR
+    task_t *cur = proc_current();
+    return cur && cur->xlator_host;
+#else
+    return false;
+#endif
+}
+
+typedef struct {
+    const elf_rust_src_t *src;
+    mm_struct_t *mm;
+    pt_root_t *pgdir;
+} elf_segment_map_context_t;
+
+typedef struct {
+    const elf_rust_src_t *src;
+    const char *path;
+    elf_load_info_t *info;
+    const a20_elf_image_plan_t *plan;
+    mm_struct_t mm;
+    elf_segment_map_context_t map;
+    a20_elf_layout_t layout;
+    uint64_t span_min, span_max;
+    a20_elf_load_resources_t resources;
+} elf_load_transaction_t;
+
+static int32_t elf_rust_map_segment_ffi(
+    void *opaque, const a20_elf_segment_plan_t *segment, uint64_t load_bias);
+
+static int32_t elf_load_tx_begin(void *opaque, uint64_t min, uint64_t max,
+                                 uint64_t *bias_out)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!tx || !bias_out || max <= min) return -EINVAL;
+    tx->span_min = min;
+    tx->span_max = max;
+    pt_root_t *pgdir = pt_create();
+    if (!pgdir) return -ENOMEM;
+    pt_map_kernel(pgdir);
+    tx->mm = (mm_struct_t){ .pgdir = pgdir, .mmap_base = MMAP_BASE_ADDR };
+#ifdef CONFIG_NOMMU
+    vaddr_t alloc_bias = 0;
+    int rc = elf_alloc_nommu_image(&tx->mm, (vaddr_t)min, (vaddr_t)max,
+                                   &alloc_bias);
+    if (rc < 0) {
+        elf_discard_nommu_allocs(&tx->mm);
+        pt_destroy_user(pgdir); tx->mm.pgdir = NULL;
+        return rc;
+    }
+    *bias_out = alloc_bias;
+#else
+    *bias_out = a20_elf_plan_load_bias(tx->plan->is_dyn, USER_DYN_BASE,
+                                       elf_aslr_bias());
+#endif
+    tx->resources.pgdir = (uint64_t)(uintptr_t)pgdir;
+    tx->resources.mm = (uint64_t)(uintptr_t)&tx->mm;
+    tx->map = (elf_segment_map_context_t){ tx->src, &tx->mm, pgdir };
+    return 0;
+}
+
+static int32_t elf_load_tx_map(void *opaque, uint64_t bias)
+{
+    elf_load_transaction_t *tx = opaque;
+    return a20_elf_map_planned_segments(tx->plan, bias, &tx->map,
+                                        elf_rust_map_segment_ffi);
+}
+
+static int32_t elf_load_tx_stage_tls(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    a20_elf_load_resources_t *res = &tx->resources;
+    if (!res->tls_filesz) return 0;
+    void *buffer = kmalloc((size_t)res->tls_filesz);
+    if (!buffer) return -ENOMEM;
+    res->tls_buffer = (uint64_t)(uintptr_t)buffer;
+    return elf_rust_pread(tx->src, buffer, (size_t)res->tls_filesz,
+                          res->tls_offset);
+}
+
+static int32_t elf_load_tx_relocate(void *opaque, uint64_t bias, uint64_t span)
+{
+    elf_load_transaction_t *tx = opaque;
+    return elf_apply_relocs(tx->plan, bias,
+                            (uint8_t *)(uintptr_t)(bias + tx->span_min),
+                            span, tx->plan->ehdr.class == ELFCLASS64);
+}
+
+static int32_t elf_load_tx_finish_layout(void *opaque, const a20_elf_layout_t *layout)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!layout) return -EINVAL;
+    tx->layout = *layout;
+    tx->resources.mmap = (uint64_t)(uintptr_t)tx->mm.mmap;
+#ifdef CONFIG_NOMMU
+    if (tx->layout.max_va > tx->layout.base) {
+        int rc = elf_add_vma(&tx->mm, (vaddr_t)tx->layout.base,
+                             (vaddr_t)tx->layout.max_va,
+                             VM_ANON | VM_READ | VM_WRITE | VM_EXEC,
+                             mm_user_brk_pte_flags(), true);
+        if (rc < 0) return rc;
+    }
+#endif
+    return 0;
+}
+
+static int32_t elf_load_tx_read_interpreter(void *opaque, uint64_t offset,
+                                             uint8_t *dst, size_t len)
+{
+    elf_load_transaction_t *tx = opaque;
+    return elf_rust_pread(tx->src, dst, len, offset);
+}
+
+static int32_t elf_load_tx_open_interpreter(void *opaque, const uint8_t *path,
+                                              size_t len, int32_t *fd_out)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!path || !fd_out || len >= MAX_PATH_LEN) return -EINVAL;
+    int fd = vfs_open((const char *)path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+    tx->resources.interp_fd = fd;
+    *fd_out = fd;
+    return 0;
+}
+
+static int32_t elf_load_tx_read_interp_image(void *opaque, uint64_t off,
+                                              uint8_t *dst, size_t want,
+                                              size_t *got)
+{
+    elf_load_transaction_t *tx = opaque;
+    elf_rust_src_t src = { .fd = tx->resources.interp_fd, .buf = NULL, .buf_len = 0 };
+    return elf_rust_read_up_to(&src, dst, want, off, got);
+}
+
+static int32_t elf_load_tx_interpreter_bias(void *opaque, uint64_t min,
+                                             uint64_t max, uint64_t *out)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!out || max <= min) return -EINVAL;
+#ifdef CONFIG_NOMMU
+    return elf_alloc_nommu_image(&tx->mm, (vaddr_t)min, (vaddr_t)max,
+                                 (vaddr_t *)out);
+#else
+    (void)tx;
+    *out = INTERP_BASE_ADDR + elf_aslr_bias();
+    return 0;
+#endif
+}
+
+static int32_t elf_load_tx_map_interp_segment(void *opaque,
+                                               const a20_elf_segment_plan_t *seg,
+                                               uint64_t bias)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!seg) return -EINVAL;
+    seg_src_t src = seg_from_fd(tx->resources.interp_fd, (long)seg->offset);
+    return map_segment(&tx->mm, (pt_root_t *)(uintptr_t)tx->resources.pgdir,
+                       (vaddr_t)(seg->va + bias), seg->memsz,
+                       &src, seg->filesz, mm_prot_to_pte_flags(seg->prot));
+}
+
+static int32_t elf_load_tx_finish_interp(void *opaque,
+                                           const a20_elf_layout_t *layout)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!layout) return -EINVAL;
+#ifdef CONFIG_NOMMU
+    if (layout->max_va > layout->base)
+        return elf_add_vma(&tx->mm, (vaddr_t)layout->base,
+                           (vaddr_t)layout->max_va,
+                           VM_ANON | VM_READ | VM_WRITE | VM_EXEC,
+                           mm_user_brk_pte_flags(), true);
+#else
+    (void)tx;
+#endif
+    return 0;
+}
+
+static int32_t elf_load_tx_build_interp_path(void *opaque, uint32_t kind,
+                                             const uint8_t *interp,
+                                             uint8_t *out, size_t cap)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!tx || !interp || !out || cap == 0) return -EINVAL;
+    switch (kind) {
+    case 1: return path_build_mount_relative(tx->path, (const char *)interp, (char *)out, cap);
+    case 2: return path_build_sibling(tx->path, (const char *)interp, (char *)out, cap);
+    case 3: return path_build_sibling(tx->path, "/lib/libc.so", (char *)out, cap);
+    default: return -EINVAL;
+    }
+}
+
+static int32_t elf_load_tx_arch_interp_path(void *opaque, const uint8_t *interp,
+                                             uint8_t *out, size_t cap)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!tx || !interp || !out || cap == 0) return -EINVAL;
+    return arch_resolve_interp_fallback(tx->path, (const char *)interp,
+                                        (char *)out, cap);
+}
+
+static int32_t elf_load_tx_interpreter(void *opaque, uint64_t bias)
+{
+    elf_load_transaction_t *tx = opaque;
+    (void)bias;
+    a20_elf_interpreter_ops_t ops = {
+        .context = tx,
+        .read = elf_load_tx_read_interp_image,
+        .choose_bias = elf_load_tx_interpreter_bias,
+        .map_segment = elf_load_tx_map_interp_segment,
+        .finish = elf_load_tx_finish_interp,
+        .expect_class = ARCH_ELF_CLASS,
+        .wx_xlator_host = elf_rust_xlator_host(),
+        .expect_machine = ARCH_ELF_MACHINE,
+        .wx_policy = mm_wx_policy(),
+#ifdef CONFIG_NOMMU
+        .nommu = 1,
+#endif
+        ._pad1 = {0},
+    };
+    return a20_elf_load_interpreter(&ops, &tx->resources.interp_entry,
+                                    &tx->resources.interp_base);
+}
+
+static void elf_load_tx_close_interpreter(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (tx->resources.interp_fd >= 0) vfs_close(tx->resources.interp_fd);
+}
+
+static int32_t elf_load_tx_stack(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    return map_stack(&tx->mm, (pt_root_t *)(uintptr_t)tx->resources.pgdir,
+                     (vaddr_t *)&tx->resources.stack_top);
+}
+
+static int32_t elf_load_tx_install_tls(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    int rc = setup_tls(&tx->mm, (pt_root_t *)(uintptr_t)tx->resources.pgdir,
+                       (void *)(uintptr_t)tx->resources.tls_buffer,
+                       tx->resources.tls_filesz, tx->resources.tls_tcb_offset,
+                       tx->resources.tls_total_size, tx->resources.tls_pages,
+                       tx->resources.tls_tcb_size,
+                       (vaddr_t *)&tx->resources.tls_va,
+                       (vaddr_t *)&tx->resources.tls_tp);
+    return rc;
+}
+
+static void elf_load_tx_free_tls(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    kfree((void *)(uintptr_t)tx->resources.tls_buffer);
+}
+
+static void elf_load_tx_discard_vmas(void *opaque)
+{ elf_discard_vmas(&((elf_load_transaction_t *)opaque)->mm); }
+static void elf_load_tx_discard_nommu(void *opaque)
+{
+#ifdef CONFIG_NOMMU
+    elf_discard_nommu_allocs(&((elf_load_transaction_t *)opaque)->mm);
+#else
+    (void)opaque;
+#endif
+}
+static void elf_load_tx_destroy_pgdir(void *opaque)
+{
+    elf_load_transaction_t *tx = opaque;
+    pt_destroy_user((pt_root_t *)(uintptr_t)tx->resources.pgdir);
+}
+
+static int32_t elf_load_tx_brk_offset(void *opaque, uint64_t base, uint64_t *out)
+{
+    (void)opaque;
+    if (!out) return -EINVAL;
+    *out = mm_aslr_brk_offset((vaddr_t)base);
+    return 0;
+}
+
+static int32_t elf_load_tx_commit(void *opaque, const a20_elf_load_result_t *r)
+{
+    elf_load_transaction_t *tx = opaque;
+    if (!r) return -EINVAL;
+    *tx->info = (elf_load_info_t){
+        .entry = (uintptr_t)r->entry, .exec_entry = (uintptr_t)r->exec_entry,
+        .base = (vaddr_t)r->base, .end_va = (vaddr_t)r->end_va,
+        .brk = (vaddr_t)r->brk, .phdr_va = (vaddr_t)r->phdr_va,
+        .phnum = r->phnum, .phentsize = r->phentsize,
+        .load_addr = (vaddr_t)r->load_addr, .load_size = (size_t)r->load_size,
+        .pgdir = (pt_root_t *)(uintptr_t)r->pgdir, .stack_top = (vaddr_t)r->stack_top,
+        .tls_va = (vaddr_t)r->tls_va, .tls_size = r->tls_size,
+        .tls_tp = (vaddr_t)r->tls_tp, .interp_base = (vaddr_t)r->interp_base,
+        .mmap = (struct mm_seg *)(uintptr_t)r->mmap,
+        .is_native_abi = r->is_native_abi,
+    };
+#ifdef CONFIG_NOMMU
+    elf_transfer_nommu_allocs(&tx->mm, tx->info);
+#endif
+    return 0;
+}
+
+/* Mechanism for one already-validated PT_LOAD plan entry. Rust chooses the
+ * iteration order and stops at the first failed segment; C performs only the
+ * source-specific page mapping. */
+static int32_t elf_rust_map_segment_ffi(
+    void *opaque, const a20_elf_segment_plan_t *segment, uint64_t load_bias)
+{
+    elf_segment_map_context_t *ctx = opaque;
+    if (!ctx || !ctx->src || !segment)
+        return -EFAULT;
+    vaddr_t seg_va = (vaddr_t)(segment->va + load_bias);
+    pte_t flags = mm_prot_to_pte_flags(segment->prot);
+    if (ctx->src->buf) {
+        if (segment->offset > ctx->src->buf_len ||
+            segment->filesz > ctx->src->buf_len - (size_t)segment->offset)
+            return -ENOEXEC;
+        seg_src_t ss = seg_from_buf((const char *)ctx->src->buf + segment->offset);
+        return map_segment(ctx->mm, ctx->pgdir, seg_va, segment->memsz,
+                           &ss, segment->filesz, flags);
+    }
+    seg_src_t ss = seg_from_fd(ctx->src->fd, (long)segment->offset);
+    return map_segment(ctx->mm, ctx->pgdir, seg_va, segment->memsz,
+                       &ss, segment->filesz, flags);
+}
+
+/* Plan an image out of the ehdr/phdr bytes and execute the plan: map every
+ * PT_LOAD through the adapter, set up TLS, run the NOMMU static-pie
+ * relocations, and (when PT_INTERP is present) resolve and load the
+ * interpreter. Fills *info like elf_load64/32 did. */
+#if defined(__GNUC__) && !defined(__clang__)
+/* GCC's -fsanitize=undefined instrumentation makes -Wmaybe-uninitialized
+ * fire a false positive on the tls_data ownership web below (it is nulled
+ * before every failure path). Silence just this function. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+static int elf_rust_load_planned(const elf_rust_src_t *src, const char *path,
+                                 elf_load_info_t *info)
+{
+    unsigned char ehdr_buf[sizeof(Elf64_Ehdr)];
+    size_t ehdr_got = 0;
+    int r = elf_rust_read_up_to(src, ehdr_buf, sizeof(ehdr_buf), 0, &ehdr_got);
+    if (r < 0)
+        return r;
+    /* Mirror the C gate: fewer bytes than a 32-bit header is not an image.
+     * A 52..63-byte tail is rejected deterministically where the C path
+     * read an uninitialised stack tail (fixture f10, OBSERVE row). */
+    if (ehdr_got < A20_ELF_EHDR32_SIZE)
+        return -ENOEXEC;
+    if (*(uint32_t *)ehdr_buf != ELF_MAGIC)
+        return -ENOEXEC;
+    uint8_t class = ehdr_buf[4];
+    if (class != ELFCLASS32 && class != ELFCLASS64)
+        return -ENOEXEC;
+
+    a20_elf_ehdr_t eh;
+    r = a20_elf_parse_header(ehdr_buf, ehdr_got, &eh);
+    if (r < 0)
+        return r;
+
+    /* Read the program-header table. The plan re-validates count and entry
+     * size; the read is capped at MAX_PHDRS entries so a hostile count
+     * cannot drive a giant allocation (f15/f17). */
+    size_t nph = eh.e_phnum < MAX_PHDRS ? eh.e_phnum : MAX_PHDRS;
+    size_t table_len = (size_t)nph * eh.e_phentsize;
+    uint8_t *phdr_buf = kmalloc(table_len ? table_len : 1);
+    if (!phdr_buf)
+        return -ENOMEM;
+    size_t phdr_got = 0;
+    r = table_len ? elf_rust_read_up_to(&(elf_rust_src_t){
+            .fd = src->fd, .buf = src->buf ? (const char *)src->buf + eh.e_phoff : NULL,
+            .buf_len = src->buf && eh.e_phoff < src->buf_len
+                       ? src->buf_len - (size_t)eh.e_phoff : 0 },
+            phdr_buf, table_len, eh.e_phoff, &phdr_got) : 0;
+    if (r < 0 || phdr_got < table_len) {
+        kfree(phdr_buf);
+        return r < 0 ? r : -ENOEXEC;
+    }
+
+    a20_elf_image_plan_t *plan = kmalloc(sizeof(*plan));
+    if (!plan) {
+        kfree(phdr_buf);
+        return -ENOMEM;
+    }
+    r = a20_elf_plan_image(ehdr_buf, ehdr_got, phdr_buf, phdr_got,
+                           ARCH_ELF_CLASS, ARCH_ELF_MACHINE,
+                           mm_wx_policy(), elf_rust_xlator_host(), plan);
+    kfree(phdr_buf);
+    if (r < 0) {
+        kfree(plan);
+        return r;
+    }
+
+    r = elf_native_abi_available(plan->is_native_abi, path);
+    if (r < 0) {
+        kfree(plan);
+        return r;
+    }
+
+    elf_load_transaction_t tx = {
+        .src = src, .path = path, .info = info, .plan = plan,
+        .resources = { .interp_fd = -1, .tls_align = 1 },
+    };
+    a20_elf_load_transaction_ops_t ops = {
+        .context = &tx,
+        .resources = &tx.resources,
+        .begin = elf_load_tx_begin,
+        .map_segments = elf_load_tx_map,
+        .stage_tls = elf_load_tx_stage_tls,
+        .relocate = elf_load_tx_relocate,
+        .finish_layout = elf_load_tx_finish_layout,
+        .read_interpreter = elf_load_tx_read_interpreter,
+        .open_interpreter = elf_load_tx_open_interpreter,
+        .build_interpreter_path = elf_load_tx_build_interp_path,
+        .arch_interpreter_path = elf_load_tx_arch_interp_path,
+        .path_capacity = MAX_PATH_LEN,
+#ifdef CONFIG_NOMMU
+        .nommu = 1,
+#endif
+        .load_interpreter = elf_load_tx_interpreter,
+        .close_interpreter = elf_load_tx_close_interpreter,
+        .map_stack = elf_load_tx_stack,
+        .install_tls = elf_load_tx_install_tls,
+        .brk_offset = elf_load_tx_brk_offset,
+        .commit = elf_load_tx_commit,
+        .free_tls = elf_load_tx_free_tls,
+        .discard_vmas = elf_load_tx_discard_vmas,
+        .discard_nommu = elf_load_tx_discard_nommu,
+        .destroy_pgdir = elf_load_tx_destroy_pgdir,
+    };
+    uint64_t load_bias = 0;
+    r = a20_elf_load_transaction(plan, &ops, &load_bias);
+    kfree(plan);
+    return r;
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 
 int elf_check_header(const Elf64_Ehdr *eh) {
-    if (*(uint32_t *)eh->e_ident != ELF_MAGIC) return -ENOEXEC;
-    if (eh->e_ident[4] != ELFCLASS64)           return -ENOEXEC;
-    if (eh->e_ident[5] != ELFDATA2LSB)          return -ENOEXEC;
-    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) return -ENOEXEC;
-    if (!elf_machine_supported(eh->e_machine, ELFCLASS64)) return -ENOEXEC;
-    if (eh->e_phentsize < sizeof(Elf64_Phdr))   return -ENOEXEC;
-    if (eh->e_phnum == 0 || eh->e_phnum > MAX_PHDRS) return -ENOEXEC;
-    return 0;
+    return a20_elf_validate_header((const uint8_t *)eh, sizeof(*eh),
+                                   ARCH_ELF_CLASS, ARCH_ELF_MACHINE);
 }
 
 /* The one definition of "this image speaks the A20 native ABI".
@@ -1067,21 +1293,6 @@ int elf_check_header(const Elf64_Ehdr *eh) {
  * already claimed a program header table the file does not have, which is
  * the elf_check_header() rejection the caller reaches anyway, and returning
  * that verdict from here would duplicate it somewhere that does not own it. */
-static int elf_phdrs_native(const char *base, uint64_t off,
-                            uint32_t n, uint32_t entsize, uint64_t avail)
-{
-    for (uint32_t i = 0; i < n; i++) {
-        /* Stop before the arithmetic wraps rather than indexing with an
-         * offset derived from a header we do not trust.  Out-of-range is
-         * monotonic in i, so stopping here and skipping are the same scan. */
-        uint64_t at = off + (uint64_t)i * entsize;
-        if (at < off || at + entsize < at || at + entsize > avail)
-            break;
-        if (((const Elf64_Phdr *)(base + at))->p_type == PT_A20_START_INFO)
-            return 1;
-    }
-    return 0;
-}
 
 /* Never enter a Native-marked image with the Linux stack convention. */
 static int elf_native_abi_available(int is_native, const char *path)
@@ -1125,575 +1336,73 @@ static int elf_native_abi_available(int is_native, const char *path)
  * the registry rather than a new branch in the loader. */
 int elf_probe_foreign(int fd, elf_guest_key_t *out)
 {
+    /* The structural verdict (magic/class/endianness/type/phdr-table gate,
+     * native-machine exclusion, PT_A20_START_INFO ABI scan) is Rust-owned;
+     * this body only supplies the bytes, exactly like the C reference. */
     if (vfs_lseek(fd, 0, SEEK_SET) < 0)
         return -ENOEXEC;
 
-    Elf64_Ehdr eh;
-    int n = vfs_read(fd, (char *)&eh, sizeof(eh));
-    if (n < 0)
-        return -ENOEXEC;
-    if (n != (int)sizeof(eh))
+    uint8_t ehbuf[sizeof(Elf64_Ehdr)];
+    int n = vfs_read(fd, (char *)ehbuf, sizeof(ehbuf));
+    if (n != (int)sizeof(ehbuf))
         return -ENOEXEC;
 
-    if (*(uint32_t *)eh.e_ident != ELF_MAGIC) return -ENOEXEC;
-    if (eh.e_ident[4] != ELFCLASS64)           return -ENOEXEC;
-    if (eh.e_ident[5] != ELFDATA2LSB)          return -ENOEXEC;
-    if (eh.e_type != ET_EXEC && eh.e_type != ET_DYN) return -ENOEXEC;
-    if (eh.e_phentsize < sizeof(Elf64_Phdr))   return -ENOEXEC;
-    if (eh.e_phnum == 0 || eh.e_phnum > MAX_PHDRS) return -ENOEXEC;
+    a20_elf_ehdr_t eh;
+    if (a20_elf_parse_header(ehbuf, sizeof(ehbuf), &eh) < 0)
+        return -ENOEXEC;
 
-    if (elf_machine_supported(eh.e_machine, ELFCLASS64))
-        return -ENOEXEC;   /* native: it already loaded, or failed for another reason */
+    size_t nph = eh.e_phnum < MAX_PHDRS ? eh.e_phnum : MAX_PHDRS;
+    size_t want = (size_t)nph * eh.e_phentsize;
+    void *tab = want ? kmalloc(want) : NULL;
+    int got = 0;
+    if (tab && vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET) >= 0)
+        got = vfs_read(fd, (char *)tab, want);
+    if (!tab)
+        got = 0;
+
+    a20_elf_foreign_key_t key;
+    int r = a20_elf_probe_foreign(ehbuf, sizeof(ehbuf), tab,
+                                  got > 0 ? (size_t)got : 0,
+                                  ARCH_ELF_CLASS, ARCH_ELF_MACHINE, &key);
+    kfree(tab);
+    if (r < 0)
+        return r;
 
     if (out) {
-        out->machine = eh.e_machine;
-        out->abi     = ELF_ABI_LINUX;
-    }
-
-    /* The ABI is decided by elf_phdrs_native(), the same function the
-     * loaders use, so the forwarding decision and the load decision can never
-     * describe the same image two different ways.  The table is read in one
-     * go rather than a seek and a 56-byte read per header: this runs on the
-     * exec path for every foreign image the channel declines to forward, and
-     * MAX_PHDRS is 64. */
-    if (eh.e_phoff) {
-        uint64_t tablen = (uint64_t)eh.e_phnum * eh.e_phentsize;
-        if (tablen && tablen / eh.e_phentsize == eh.e_phnum) {
-            void *tab = kmalloc((size_t)tablen);
-            if (tab) {
-                if (vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET) >= 0) {
-                    int got = vfs_read(fd, (char *)tab, (size_t)tablen);
-                    if (got > 0 &&
-                        elf_phdrs_native((const char *)tab, 0, eh.e_phnum,
-                                         eh.e_phentsize, (uint64_t)got) &&
-                        out)
-                        out->abi = ELF_ABI_NATIVE;
-                }
-                kfree(tab);
-            }
-        }
+        out->machine = key.machine;
+        out->abi = key.abi ? ELF_ABI_NATIVE : ELF_ABI_LINUX;
     }
     return 0;
 }
+
 
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
-    if (len < sizeof(Elf64_Ehdr)) return -ENOEXEC;
-    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;
-
-    int r = elf_check_header(eh);
-    if (r < 0) return r;
-
-    int is_native = elf_phdrs_native((const char *)buf, eh->e_phoff,
-                                    eh->e_phnum, eh->e_phentsize, len);
-    r = elf_native_abi_available(is_native, "<buffer>");
-    if (r < 0) return r;
-
-    pt_root_t *pgdir = pt_create();
-    if (!pgdir) return -ENOMEM;
-    pt_map_kernel(pgdir);
-
-    mm_struct_t mm = { .pgdir = pgdir, .mmap_base = MMAP_BASE_ADDR };
-
-#ifdef CONFIG_NOMMU
-    vaddr_t min_vaddr = (vaddr_t)-1;
-    vaddr_t max_vaddr = 0;
-    for (int i = 0; i < eh->e_phnum; i++) {
-        if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
-        const Elf64_Phdr *ph = (const Elf64_Phdr *)((const char *)buf + eh->e_phoff + i * eh->e_phentsize);
-        if (ph->p_type != PT_LOAD) continue;
-        vaddr_t s = ph->p_vaddr & ~(vaddr_t)(PAGE_SIZE - 1);
-        vaddr_t e = ROUND_UP(ph->p_vaddr + ph->p_memsz, PAGE_SIZE);
-        if (s < min_vaddr) min_vaddr = s;
-        if (e > max_vaddr) max_vaddr = e;
-    }
-    vaddr_t load_bias = 0;
-    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-#else
-    vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-#endif
-    vaddr_t base = 0, max_va = 0, brk_va = 0;
-    const void *tls_data = NULL;
-    uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
-    uint64_t dyn_size = 0;
-    vaddr_t dyn_va = 0;
-    for (int i = 0; i < eh->e_phnum; i++) {
-        if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
-        const Elf64_Phdr *ph = (const Elf64_Phdr *)
-            ((const char *)buf + eh->e_phoff + i * eh->e_phentsize);
-
-        if (ph->p_type == PT_TLS) {
-            tls_data   = (const char *)buf + ph->p_offset;
-            tls_filesz = ph->p_filesz;
-            tls_memsz  = ph->p_memsz;
-            tls_align  = ph->p_align < 1 ? 1 : ph->p_align;
-            continue;
-        }
-        if (ph->p_type == PT_DYNAMIC) {
-            dyn_va   = ph->p_vaddr + load_bias;
-            dyn_size = ph->p_memsz;
-            continue;
-        }
-        if (ph->p_type != PT_LOAD) continue;
-
-        vaddr_t seg_va = ph->p_vaddr + load_bias;
-        seg_src_t src = seg_from_buf((const char *)buf + ph->p_offset);
-        int sprot = seg_prot_filtered(ph->p_flags);
-        if (sprot < 0) { pt_destroy_user(pgdir); return sprot; }
-        r = map_segment(&mm, pgdir, seg_va, ph->p_memsz,
-                        &src, ph->p_filesz, mm_prot_to_pte_flags(sprot));
-        if (r < 0) { pt_destroy_user(pgdir); return r; }
-
-        vaddr_t seg_end   = ROUND_UP(seg_va + ph->p_memsz, PAGE_SIZE);
-#ifdef CONFIG_NOMMU
-        if (base == 0) base = load_bias + min_vaddr;
-#else
-        vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
-        if (base == 0) base = seg_start;
-#endif
-        if (seg_end > max_va) max_va = seg_end;
-        if ((ph->p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
-    }
-
-    /* Relocate before anything can dereference the image's own data. */
-    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, true);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-
-#ifdef CONFIG_NOMMU
-    if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
-    }
-#endif
-
-    vaddr_t stack_top;
-    r = map_stack(&mm, pgdir, &stack_top);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-
-    vaddr_t tls_va = 0, tls_tp = 0;
-    r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
-                  &tls_va, &tls_tp);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-
-    /* ASLR: the brk start is the end of the image plus a random offset, the
-     * cap being bounded by USER_TLS_BASE */
-    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
-
-    *info = (elf_load_info_t){
-        .entry       = eh->e_entry + load_bias,
-        .exec_entry  = eh->e_entry + load_bias,
-        .base        = base,
-        .end_va      = max_va,
-        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
-        .phdr_va     = base + eh->e_phoff,
-        .phnum       = eh->e_phnum,
-        .phentsize   = eh->e_phentsize,
-        .load_addr   = base,
-        .load_size   = (size_t)(max_va - base),
-        .pgdir       = pgdir,
-        .stack_top   = stack_top,
-        .tls_va      = tls_va,
-        .tls_size    = tls_memsz,
-        .tls_tp      = tls_tp,
-        .interp_base = 0,
-        .mmap        = mm.mmap,
-        .is_native_abi = is_native,
-    };
-#ifdef CONFIG_NOMMU
-    elf_transfer_nommu_allocs(&mm, info);
-#endif
-    return 0;
+    elf_rust_src_t src = { .fd = -1, .buf = buf, .buf_len = len };
+    return elf_rust_load_planned(&src, "<buffer>", info);
 }
 
-static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
-                      elf_load_info_t *info) {
-    Elf64_Phdr phdrs[MAX_PHDRS];
-    int nph = eh->e_phnum < MAX_PHDRS ? eh->e_phnum : MAX_PHDRS;
-    vfs_lseek(fd, (long)eh->e_phoff, SEEK_SET);
-    int r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf64_Phdr));
-    if (r < nph * (int)sizeof(Elf64_Phdr)) return -ENOEXEC;
 
-    int is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
-                                     sizeof(phdrs[0]),
-                                     (uint64_t)nph * sizeof(phdrs[0]));
-    r = elf_native_abi_available(is_native, path);
-    if (r < 0) return r;
-
-    pt_root_t *pgdir = pt_create();
-    if (!pgdir) return -ENOMEM;
-    pt_map_kernel(pgdir);
-
-    mm_struct_t mm = { .pgdir = pgdir, .mmap_base = MMAP_BASE_ADDR };
-
-#ifdef CONFIG_NOMMU
-    vaddr_t min_vaddr = (vaddr_t)-1;
-    vaddr_t max_vaddr = 0;
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type != PT_LOAD) continue;
-        vaddr_t s = phdrs[i].p_vaddr & ~(vaddr_t)(PAGE_SIZE - 1);
-        vaddr_t e = ROUND_UP(phdrs[i].p_vaddr + phdrs[i].p_memsz, PAGE_SIZE);
-        if (s < min_vaddr) min_vaddr = s;
-        if (e > max_vaddr) max_vaddr = e;
-    }
-    vaddr_t load_bias = 0;
-    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-#else
-    vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-#endif
-    vaddr_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
-    uint64_t hdr_map_va = 0;
-    void *tls_data = NULL;
-    uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
-    uint64_t dyn_size = 0;
-    vaddr_t dyn_va = 0;
-    int has_interp = 0;
-    char interp_path[MAX_PATH_LEN] = {0};
-
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type == PT_INTERP) {
-            has_interp = 1;
-            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-            int ilen = phdrs[i].p_filesz < MAX_PATH_LEN
-                       ? (int)phdrs[i].p_filesz : MAX_PATH_LEN - 1;
-            vfs_read(fd, interp_path, (size_t)ilen);
-            interp_path[ilen] = '\0';
-            continue;
-        }
-        if (phdrs[i].p_type == PT_TLS) {
-            tls_filesz = phdrs[i].p_filesz;
-            tls_memsz  = phdrs[i].p_memsz;
-            tls_align  = phdrs[i].p_align < 1 ? 1 : phdrs[i].p_align;
-            if (tls_filesz > 0) {
-                tls_data = kmalloc((size_t)tls_filesz);
-                if (!tls_data) goto fail64;
-                vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-                int nr = vfs_read(fd, (char *)tls_data, (size_t)tls_filesz);
-                if (nr < 0) { kfree(tls_data); tls_data = NULL; goto fail64; }
-            }
-            continue;
-        }
-        if (phdrs[i].p_type == PT_DYNAMIC) {
-            dyn_va   = (vaddr_t)phdrs[i].p_vaddr + load_bias;
-            dyn_size = phdrs[i].p_memsz;
-            continue;
-        }
-        if (phdrs[i].p_type != PT_LOAD) continue;
-
-        if (!hdr_map_va)
-            hdr_map_va = (uint64_t)phdrs[i].p_vaddr +
-                         (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
-        vaddr_t seg_va = phdrs[i].p_vaddr + load_bias;
-        seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
-        int sprot = seg_prot_filtered(phdrs[i].p_flags);
-        if (sprot < 0) { r = sprot; goto fail64; }
-        r = map_segment(&mm, pgdir, seg_va, phdrs[i].p_memsz,
-                        &src, phdrs[i].p_filesz,
-                        mm_prot_to_pte_flags(sprot));
-        if (r < 0) goto fail64;
-
-        vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
-        if (phdrs[i].p_offset == 0) head_va = seg_va;
-#ifdef CONFIG_NOMMU
-        if (base == 0) base = load_bias + min_vaddr;
-#else
-        vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
-        if (base == 0) base = seg_start;
-#endif
-        if (seg_end > max_va) max_va = seg_end;
-        if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
-    }
-
-    /* Relocate before anything can dereference the image's own data. */
-    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, true);
-    if (r < 0) goto fail64;
-
-#ifdef CONFIG_NOMMU
-    if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
-    }
-#endif
-
-    vaddr_t interp_entry = 0, interp_base = 0;
-    if (has_interp) {
-        char resolved[MAX_PATH_LEN];
-        int interp_fd = resolve_interp(path, interp_path,
-                                       resolved, sizeof(resolved));
-        ktrace_mm("[ELF] interp: exec='%s' pt_interp='%s' resolved='%s' fd=%d\n",
-                  path ? path : "(null)", interp_path, resolved, interp_fd);
-        if (interp_fd < 0) {
-            printf("[ELF] INTERP NOT FOUND for '%s' wanted '%s'\n",
-                  path ? path : "(null)", interp_path);
-            r = interp_fd;
-            goto fail64;
-        }
-        r = elf_load_interp_from_fd(&mm, pgdir, interp_fd,
-                                    &interp_entry, &interp_base);
-        vfs_close(interp_fd);
-        if (r < 0) goto fail64;
-    }
-
-
-    vaddr_t stack_top;
-    r = map_stack(&mm, pgdir, &stack_top);
-    if (r < 0) goto fail64;
-
-    vaddr_t tls_va = 0, tls_tp = 0;
-    /*
-     * Keep an initial TLS mapping for the main image, including dynamic
-     * executables, but do not publish its A20 bootstrap TCB to a PT_INTERP
-     * program.  musl's loader owns the dynamic TLS/DTV layout and installs
-     * its own thread pointer before running the executable.
-     */
-    r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
-                  &tls_va, &tls_tp);
-    if (r < 0)
-        goto fail64;
-    if (has_interp)
-        tls_tp = 0;
-
-    /* ASLR: the brk start is the end of the image plus a random offset, the
-     * cap being bounded by USER_TLS_BASE */
-    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
-
-    *info = (elf_load_info_t){
-        .entry       = has_interp ? interp_entry : (eh->e_entry + load_bias),
-        .exec_entry  = eh->e_entry + load_bias,
-        .base        = base,
-        .end_va      = max_va,
-        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
-        .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
-                     : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
-        .phnum       = (uint32_t)nph,
-        .phentsize   = eh->e_phentsize,
-        .load_addr   = base,
-        .load_size   = (size_t)(max_va - base),
-        .pgdir       = pgdir,
-        .stack_top   = stack_top,
-        .tls_va      = tls_va,
-        .tls_size    = tls_memsz,
-        .tls_tp      = tls_tp,
-        .interp_base = interp_base,
-        .mmap        = mm.mmap,
-        .is_native_abi = is_native,
-    };
-#ifdef CONFIG_NOMMU
-    elf_transfer_nommu_allocs(&mm, info);
-#endif
-
-    kfree(tls_data);
-    return 0;
-
-fail64:
-    kfree(tls_data);
-    elf_discard_vmas(&mm);
-    pt_destroy_user(pgdir);
-    return r;
-}
-
-static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
-                      elf_load_info_t *info) {
-    Elf32_Phdr phdrs[MAX_PHDRS];
-    int nph = eh->e_phnum < MAX_PHDRS ? eh->e_phnum : MAX_PHDRS;
-    vfs_lseek(fd, (long)eh->e_phoff, SEEK_SET);
-    int r = vfs_read(fd, (char *)phdrs, nph * sizeof(Elf32_Phdr));
-    if (r < nph * (int)sizeof(Elf32_Phdr)) return -ENOEXEC;
-
-    int is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
-                                     sizeof(phdrs[0]),
-                                     (uint64_t)nph * sizeof(phdrs[0]));
-    r = elf_native_abi_available(is_native, path);
-    if (r < 0) return r;
-
-    pt_root_t *pgdir = pt_create();
-    if (!pgdir) return -ENOMEM;
-    pt_map_kernel(pgdir);
-
-    mm_struct_t mm = { .pgdir = pgdir, .mmap_base = MMAP_BASE_ADDR };
-
-#ifdef CONFIG_NOMMU
-    vaddr_t min_vaddr = (vaddr_t)-1;
-    vaddr_t max_vaddr = 0;
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type != PT_LOAD) continue;
-        vaddr_t s = (vaddr_t)phdrs[i].p_vaddr & ~(vaddr_t)(PAGE_SIZE - 1);
-        vaddr_t e = ROUND_UP((vaddr_t)phdrs[i].p_vaddr + (uint64_t)phdrs[i].p_memsz, PAGE_SIZE);
-        if (s < min_vaddr) min_vaddr = s;
-        if (e > max_vaddr) max_vaddr = e;
-    }
-    vaddr_t load_bias = 0;
-    r = elf_alloc_nommu_image(&mm, min_vaddr, max_vaddr, &load_bias);
-    if (r < 0) { pt_destroy_user(pgdir); return r; }
-#else
-    vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
-#endif
-    vaddr_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
-    uint64_t hdr_map_va = 0;
-    void *tls_data = NULL;
-    uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
-    uint64_t dyn_size = 0;
-    vaddr_t dyn_va = 0;
-    char interp_path[MAX_PATH_LEN] = {0};
-
-    for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type == PT_INTERP) {
-            int ilen = phdrs[i].p_filesz < MAX_PATH_LEN
-                       ? (int)phdrs[i].p_filesz : MAX_PATH_LEN - 1;
-            vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-            vfs_read(fd, interp_path, (size_t)ilen);
-            interp_path[ilen] = '\0';
-            continue;
-        }
-        if (phdrs[i].p_type == PT_TLS) {
-            tls_filesz = phdrs[i].p_filesz;
-            tls_memsz  = phdrs[i].p_memsz;
-            tls_align  = phdrs[i].p_align < 1 ? 1 : phdrs[i].p_align;
-            if (tls_filesz > 0) {
-                tls_data = kmalloc((size_t)tls_filesz);
-                if (!tls_data) goto fail32;
-                vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
-                int nr = vfs_read(fd, (char *)tls_data, (size_t)tls_filesz);
-                if (nr < 0) { kfree(tls_data); tls_data = NULL; goto fail32; }
-            }
-            continue;
-        }
-        if (phdrs[i].p_type == PT_DYNAMIC) {
-            dyn_va   = (vaddr_t)phdrs[i].p_vaddr + load_bias;
-            dyn_size = phdrs[i].p_memsz;
-            continue;
-        }
-        if (phdrs[i].p_type != PT_LOAD) continue;
-
-        if (!hdr_map_va)
-            hdr_map_va = (uint64_t)phdrs[i].p_vaddr +
-                         (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
-        vaddr_t seg_va = (vaddr_t)phdrs[i].p_vaddr + load_bias;
-        seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
-        int sprot = seg_prot_filtered(phdrs[i].p_flags);
-        if (sprot < 0) { r = sprot; goto fail32; }
-        r = map_segment(&mm, pgdir, seg_va, (uint64_t)phdrs[i].p_memsz,
-                        &src, (uint64_t)phdrs[i].p_filesz,
-                        mm_prot_to_pte_flags(sprot));
-        if (r < 0) goto fail32;
-
-        vaddr_t seg_end   = ROUND_UP(seg_va + (uint64_t)phdrs[i].p_memsz, PAGE_SIZE);
-        if (phdrs[i].p_offset == 0) head_va = seg_va;
-#ifdef CONFIG_NOMMU
-        if (base == 0) base = load_bias + min_vaddr;
-#else
-        vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
-        if (base == 0) base = seg_start;
-#endif
-        if (seg_end > max_va) max_va = seg_end;
-        if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
-    }
-
-    if (interp_path[0]) {
-        r = -ENOEXEC;
-        goto fail32;
-    }
-
-    /* Relocate before anything can dereference the image's own data. */
-    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, false);
-    if (r < 0) goto fail32;
-
-#ifdef CONFIG_NOMMU
-    if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
-    }
-#endif
-
-    vaddr_t stack_top;
-    r = map_stack(&mm, pgdir, &stack_top);
-    if (r < 0) goto fail32;
-
-    vaddr_t tls_va = 0, tls_tp = 0;
-    r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
-                  &tls_va, &tls_tp);
-    if (r < 0)
-        goto fail32;
-
-    /* ASLR: the brk start is the end of the image plus a random offset, the
-     * cap being bounded by USER_TLS_BASE */
-    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
-
-    *info = (elf_load_info_t){
-        .entry       = (vaddr_t)eh->e_entry + load_bias,
-        .exec_entry  = (vaddr_t)eh->e_entry + load_bias,
-        .base        = base,
-        .end_va      = max_va,
-        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
-        .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
-                     : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
-        .phnum       = (uint32_t)nph,
-        .phentsize   = eh->e_phentsize,
-        .load_addr   = base,
-        .load_size   = (size_t)(max_va - base),
-        .pgdir       = pgdir,
-        .stack_top   = stack_top,
-        .tls_va      = tls_va,
-        .tls_size    = tls_memsz,
-        .tls_tp      = tls_tp,
-        .interp_base = 0,
-        .mmap        = mm.mmap,
-        .is_native_abi = is_native,
-    };
-#ifdef CONFIG_NOMMU
-    elf_transfer_nommu_allocs(&mm, info);
-#endif
-
-    kfree(tls_data);
-    return 0;
-
-fail32:
-    kfree(tls_data);
-    elf_discard_vmas(&mm);
-    pt_destroy_user(pgdir);
-    return r;
-}
 
 int elf_load(int fd, const char *path, elf_load_info_t *info) {
+    /* Driver-registry gate stays with the C reference (out of this module's
+     * scope); every other decision is inside elf_rust_load_planned(). */
     unsigned char buf[sizeof(Elf64_Ehdr)];
     if (vfs_lseek(fd, 0, SEEK_SET) < 0) return -EIO;
     int r = vfs_read(fd, (char *)buf, sizeof(buf));
-    if (r < (int)sizeof(Elf32_Ehdr)) {
-        kinfo("[ELF] read header failed: r=%d need=%zu path='%s'\n",
-              r, sizeof(Elf32_Ehdr), path ? path : "(null)");
+    if (r < (int)sizeof(Elf32_Ehdr))
         return -ENOEXEC;
-    }
-
-    if (*(uint32_t *)buf != ELF_MAGIC) return -ENOEXEC;
-    int is32 = buf[4] == ELFCLASS32;
-    int is64 = buf[4] == ELFCLASS64;
-    if (!is32 && !is64) {
-        printf("[ELF] unsupported ELF class=%d path='%s'\n", buf[4],
-               path ? path : "(null)");
+    if (*(uint32_t *)buf != ELF_MAGIC)
         return -ENOEXEC;
-    }
-
-    if (is64) {
-        const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;
-        r = elf_check_header(eh);
-        if (r < 0) {
-            printf("[ELF] header check failed: r=%d class=%d data=%d type=%d\n",
-                   r, eh->e_ident[4], eh->e_ident[5], eh->e_type);
+    if (buf[4] != ELFCLASS32 && buf[4] != ELFCLASS64)
+        return -ENOEXEC;
+    if (buf[4] == ELFCLASS64 && elf_path_has_driver_suffix(path)) {
+        r = elf_validate_user_driver(fd, (const Elf64_Ehdr *)buf);
+        if (r < 0)
             return r;
-        }
-        if (elf_path_has_driver_suffix(path)) {
-            r = elf_validate_user_driver(fd, eh);
-            if (r < 0)
-                return r;
-        }
-        return elf_load64(fd, eh, path, info);
     }
+    elf_rust_src_t src = { .fd = fd, .buf = NULL, .buf_len = 0 };
+    return elf_rust_load_planned(&src, path, info);
 
-    const Elf32_Ehdr *eh = (const Elf32_Ehdr *)buf;
-    if (eh->e_ident[5] != ELFDATA2LSB ||
-        (eh->e_type != ET_EXEC && eh->e_type != ET_DYN) ||
-        !elf_machine_supported(eh->e_machine, ELFCLASS32) ||
-        eh->e_phentsize < sizeof(Elf32_Phdr) ||
-        eh->e_phnum == 0 || eh->e_phnum > MAX_PHDRS)
-        return -ENOEXEC;
-    return elf_load32(fd, eh, path, info);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1720,6 +1429,12 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
 #define AT_HWCAP2   26
 #define AT_SYSINFO_EHDR 33
 
+/*
+ * Linux-ABI initial stack, Rust layout/writer + C page-copy mechanisms.
+ *
+ * elf_core owns placement, vector order, auxv, and final SP. These callbacks
+ * keep only mapped-page copies and random-byte acquisition in C.
+ */
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                         char *const envp[], const elf_load_info_t *info,
                         vaddr_t vdso_ehdr,
@@ -1729,131 +1444,61 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
         return 0;
 
     pt_root_t *pgdir = info->pgdir;
-    vaddr_t sp_va  = stack_top;
-    vaddr_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    vaddr_t stack_bottom = stack_top -
+        (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
+    const uint8_t *argv_ptrs[MAX_ARG_STRINGS];
+    size_t argv_lens[MAX_ARG_STRINGS];
+    const uint8_t *envp_ptrs[MAX_ARG_STRINGS];
+    size_t envp_lens[MAX_ARG_STRINGS];
     int envc = 0;
-    uintptr_t env_ptrs[MAX_ARG_STRINGS + 1];
     if (envp) {
         while (envc < MAX_ARG_STRINGS && envp[envc]) {
-            int len = (int)strlen(envp[envc]) + 1;
-            sp_va -= len;
-            if (stack_copy(pgdir, sp_va, envp[envc], (size_t)len,
-                           &stack_bottom) < 0)
-                return 0;
-            env_ptrs[envc] = (uintptr_t)sp_va;
+            envp_ptrs[envc] = (const uint8_t *)envp[envc];
+            envp_lens[envc] = strlen(envp[envc]);
             envc++;
         }
     }
-    env_ptrs[envc] = 0;
-
-    uintptr_t arg_ptrs[MAX_ARG_STRINGS + 1];
-    for (int i = argc - 1; i >= 0; i--) {
-        int len = (int)strlen(argv[i]) + 1;
-        sp_va -= len;
-        if (stack_copy(pgdir, sp_va, argv[i], (size_t)len,
-                       &stack_bottom) < 0)
-            return 0;
-        arg_ptrs[i] = (uintptr_t)sp_va;
+    for (int i = 0; i < argc; i++) {
+        argv_ptrs[i] = (const uint8_t *)argv[i];
+        argv_lens[i] = argv[i] ? strlen(argv[i]) : 0;
     }
-    arg_ptrs[argc] = 0;
-
-    sp_va &= ~15UL;
 
     const char *platform = ARCH_NAME;
-    int plat_len = (int)strlen(platform) + 1;
-
-    sp_va -= plat_len;
-    vaddr_t platform_va = sp_va;
-    if (stack_copy(pgdir, sp_va, platform, (size_t)plat_len,
-                   &stack_bottom) < 0)
-        return 0;
-
-    sp_va -= 16;
-    vaddr_t random_va = sp_va;
-    {
-        unsigned char random_bytes[16];
-        random_fill(random_bytes, sizeof(random_bytes));
-        if (stack_copy(pgdir, sp_va, random_bytes, sizeof(random_bytes),
-                       &stack_bottom) < 0)
-            return 0;
-    }
-
-    uintptr_t auxv[][2] = {
-        { AT_PHDR,   (uintptr_t)info->phdr_va  },
-        { AT_PHENT,  (uintptr_t)info->phentsize },
-        { AT_PHNUM,  (uintptr_t)info->phnum     },
-        { AT_PAGESZ, (uintptr_t)PAGE_SIZE       },
-        { AT_BASE,   (uintptr_t)info->interp_base },
-        { AT_FLAGS,  0               },
-        { AT_ENTRY,  (uintptr_t)info->exec_entry },
-        { AT_UID,    0               },
-        { AT_EUID,   0               },
-        { AT_GID,    0               },
-        { AT_EGID,   0               },
-        { AT_PLATFORM, (uintptr_t)platform_va   },
-        { AT_HWCAP,  (uintptr_t)ARCH_ELF_HWCAP() },
-        { AT_CLKTCK, 100             },
-        { AT_SECURE, 0               },
-        { AT_RANDOM, (uintptr_t)random_va       },
-        { AT_HWCAP2, 0               },
-        { AT_SYSINFO_EHDR, (uintptr_t)vdso_ehdr },
-        { AT_NULL,   0               },
+    a20_elf_auxv_input_t aux = {
+        .phdr_va     = (uint64_t)info->phdr_va,
+        .phentsize   = info->phentsize,
+        .phnum       = info->phnum,
+        .page_size   = PAGE_SIZE,
+        .interp_base = (uint64_t)info->interp_base,
+        .exec_entry  = (uint64_t)info->exec_entry,
+        .hwcap       = (uint64_t)ARCH_ELF_HWCAP(),
+        .hwcap2      = 0,
+        .vdso_ehdr   = (uint64_t)vdso_ehdr,
+        .clktck      = 100,
+        .secure      = 0,
     };
-    int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
 
-    /* Publish the vector for /proc/<pid>/auxv.  Copied here rather than read
-     * back from the stack at read time, because the stack belongs to the
-     * program: by the time anything asks, it may hold different bytes. */
-    if (naux > A20_AUXV_MAX_PAIRS)
-        return 0;   /* refuse rather than record a truncated vector */
-    if (out_auxv) {
-        for (int i = 0; i < naux; i++) {
-            out_auxv[i][0] = auxv[i][0];
-            out_auxv[i][1] = auxv[i][1];
-        }
-        *out_auxv_n = (uint32_t)naux;
-    }
-
-    /* Keep the entry SP aligned without inserting padding between argc and
-     * argv.  The auxv byte count is not 16-byte aligned on 32-bit targets. */
-    size_t vector_bytes = (size_t)naux * 2 * sizeof(uintptr_t) +
-                          (size_t)(envc + 1) * sizeof(uintptr_t) +
-                          (size_t)(argc + 1) * sizeof(uintptr_t) +
-                          sizeof(uintptr_t);
-    sp_va -= (sp_va - vector_bytes) & 15UL;
-
-    sp_va -= naux * 2 * sizeof(uintptr_t);
-    if (stack_copy(pgdir, sp_va, auxv,
-                   (size_t)naux * 2 * sizeof(uintptr_t),
-                   &stack_bottom) < 0)
-        return 0;
-
-    sp_va -= (envc + 1) * sizeof(uintptr_t);
-    if (stack_copy(pgdir, sp_va, env_ptrs,
-                   (size_t)(envc + 1) * sizeof(uintptr_t),
-                   &stack_bottom) < 0)
-        return 0;
-
-    sp_va -= (argc + 1) * sizeof(uintptr_t);
-    if (stack_copy(pgdir, sp_va, arg_ptrs,
-                   (size_t)(argc + 1) * sizeof(uintptr_t),
-                   &stack_bottom) < 0)
-        return 0;
-
-    /* argc is immediately followed by argv at the aligned program entry SP. */
-    sp_va -= sizeof(uintptr_t);
-    {
-        uintptr_t argc_value = (uintptr_t)argc;
-        if (stack_copy(pgdir, sp_va, &argc_value, sizeof(argc_value),
-                       &stack_bottom) < 0)
-            return 0;
-    }
-
-    return sp_va;
+    elf_stack_writer_t writer = {
+        .pgdir = pgdir,
+        .stack_bottom = stack_bottom,
+    };
+    uint64_t sp = 0;
+    int32_t r = a20_elf_write_linux_stack(
+        stack_top, sizeof(uintptr_t), argv_ptrs, argv_lens, (size_t)argc,
+        envp_ptrs, envp_lens, (size_t)envc,
+        (const uint8_t *)platform, strlen(platform), &aux,
+        &writer, elf_stack_copy_ffi, elf_stack_random_ffi,
+        out_auxv ? (uintptr_t *)out_auxv : NULL, out_auxv_n, &sp);
+    return r < 0 ? 0 : (vaddr_t)sp;
 }
 
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+/*
+ * Native-ABI initial stack. Rust owns the layout and writes strings, pointer
+ * arrays, and descriptor fields; C supplies the mapped-page copy mechanism.
+ * elf_setup_stack_a20_dynamic() below composes the Linux and native layouts.
+ */
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             char *const envp[], const elf_load_info_t *info,
                             uint32_t stdin_h, uint32_t stdout_h,
@@ -1866,76 +1511,50 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
         return 0;
 
     pt_root_t *pgdir = info->pgdir;
-    vaddr_t sp_va = stack_top;
-    vaddr_t stack_bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    vaddr_t stack_bottom = stack_top -
+        (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
+    const uint8_t *argv_ptrs[MAX_ARG_STRINGS];
+    size_t argv_lens[MAX_ARG_STRINGS];
+    const uint8_t *envp_ptrs[MAX_ARG_STRINGS];
+    size_t envp_lens[MAX_ARG_STRINGS];
     int envc = 0;
-    vaddr_t env_ptrs[MAX_ARG_STRINGS + 1];
     if (envp) {
         while (envc < MAX_ARG_STRINGS && envp[envc]) {
-            int len = (int)strlen(envp[envc]) + 1;
-            sp_va -= len;
-            if (stack_copy(pgdir, sp_va, envp[envc], (size_t)len,
-                           &stack_bottom) < 0)
-                return 0;
-            env_ptrs[envc] = sp_va;
+            envp_ptrs[envc] = (const uint8_t *)envp[envc];
+            envp_lens[envc] = strlen(envp[envc]);
             envc++;
         }
     }
-    env_ptrs[envc] = 0;
-
-    vaddr_t arg_ptrs[MAX_ARG_STRINGS + 1];
-    for (int i = argc - 1; i >= 0; i--) {
-        int len = (int)strlen(argv[i]) + 1;
-        sp_va -= len;
-        if (stack_copy(pgdir, sp_va, argv[i], (size_t)len,
-                       &stack_bottom) < 0)
-            return 0;
-        arg_ptrs[i] = sp_va;
-    }
-    arg_ptrs[argc] = 0;
-
-    sp_va &= ~15UL;
-
-    sp_va -= (envc + 1) * sizeof(vaddr_t);
-    if (stack_copy(pgdir, sp_va, env_ptrs,
-                   (size_t)(envc + 1) * sizeof(vaddr_t),
-                   &stack_bottom) < 0)
-        return 0;
-    vaddr_t envp_va = sp_va;
-
-    sp_va -= (argc + 1) * sizeof(vaddr_t);
-    if (stack_copy(pgdir, sp_va, arg_ptrs,
-                   (size_t)(argc + 1) * sizeof(vaddr_t),
-                   &stack_bottom) < 0)
-        return 0;
-    vaddr_t argv_va = sp_va;
-
-    sp_va -= sizeof(a20_start_info_t);
-    sp_va &= ~15UL;
-    {
-        a20_start_info_t si;
-        memset(&si, 0, sizeof(si));
-        si.size = sizeof(a20_start_info_t);
-        si.version = 1;
-        si.argc = (uint32_t)argc;
-        si.envc = (uint32_t)envc;
-        si.reserved0 = inherited_fd_limit;
-        si.argv = argv_va;
-        si.envp = envp_va;
-        si.stdin_handle = stdin_h;
-        si.stdout_handle = stdout_h;
-        si.stderr_handle = stderr_h;
-        si.self_task = self_task_h;
-        si.root_dir = root_h;
-        si.cwd_dir = cwd_h;
-        si.service_registry = registry_h;
-        si.page_size = PAGE_SIZE;
-        if (stack_copy(pgdir, sp_va, &si, sizeof(si), &stack_bottom) < 0)
-            return 0;
+    for (int i = 0; i < argc; i++) {
+        argv_ptrs[i] = (const uint8_t *)argv[i];
+        argv_lens[i] = argv[i] ? strlen(argv[i]) : 0;
     }
 
-    return sp_va;
+    a20_start_info_t si;
+    memset(&si, 0, sizeof(si));
+    si.size = sizeof(si);
+    si.version = 1;
+    si.reserved0 = inherited_fd_limit;
+    si.root_dir = root_h;
+    si.cwd_dir = cwd_h;
+    si.stdin_handle = stdin_h;
+    si.stdout_handle = stdout_h;
+    si.stderr_handle = stderr_h;
+    si.self_task = self_task_h;
+    si.page_size = PAGE_SIZE;
+    si.service_registry = registry_h;
+
+    elf_stack_writer_t writer = {
+        .pgdir = pgdir,
+        .stack_bottom = stack_bottom,
+    };
+    uint64_t sp = 0;
+    int32_t r = a20_elf_write_native_stack(
+        stack_top, sizeof(uintptr_t), argv_ptrs, argv_lens, (size_t)argc,
+        envp_ptrs, envp_lens, (size_t)envc,
+        (const uint8_t *)&si, sizeof(si), &writer, elf_stack_copy_ffi, &sp);
+    return r < 0 ? 0 : (vaddr_t)sp;
 }
 
 /*

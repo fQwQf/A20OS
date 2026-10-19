@@ -4,6 +4,8 @@
 //! The pager lock precedes the VMO lock whenever both are held. C callbacks
 //! expose only locks, fields, allocation, references, and wake primitives.
 
+mod pager_supply;
+
 use core::ffi::c_void;
 
 const INVALID_ARGUMENT: i32 = -12;

@@ -22,24 +22,24 @@ class SmokeBuildPathTests(unittest.TestCase):
     def test_make_resolves_default_preempt_smp_embedded_and_overrides(self):
         common = ("ARCH=riscv64", "ABI=linux")
         default = self.resolve_dir(*common)
-        self.assertTrue(default.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt"),
+        self.assertTrue(default.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt-signal-rust"),
                         default)
 
         preempt_off = self.resolve_dir(*common, "CONFIG_KERNEL_PREEMPT=0")
-        self.assertTrue(preempt_off.endswith("riscv64-qemu-virt-riscv64-linux-dev"),
+        self.assertTrue(preempt_off.endswith("riscv64-qemu-virt-riscv64-linux-dev-signal-rust"),
                         preempt_off)
 
         smp = self.resolve_dir(*common, "NR_CPUS=2", "ALLOW_UNVERIFIED_SMP=1")
-        self.assertTrue(smp.endswith("riscv64-qemu-virt-riscv64-linux-dev-smp2-preempt"),
+        self.assertTrue(smp.endswith("riscv64-qemu-virt-riscv64-linux-dev-smp2-preempt-signal-rust"),
                         smp)
 
         embedded = self.resolve_dir("ARCH=aarch64", "ABI=linux",
                                     "DRIVER_DEPLOYMENT=embedded")
-        self.assertTrue(embedded.endswith("aarch64-qemu-virt-aarch64-linux-dev-embedded-preempt"),
+        self.assertTrue(embedded.endswith("aarch64-qemu-virt-aarch64-linux-dev-embedded-preempt-signal-rust"),
                         embedded)
 
         override = self.resolve_dir(*common, "CONFIG_SLAB_DEBUG=1")
-        self.assertTrue(override.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt-slabdbg"),
+        self.assertTrue(override.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt-slabdbg-signal-rust"),
                         override)
 
     def test_rebases_kernel_and_sibling_images_but_keeps_other_builds(self):
@@ -101,9 +101,10 @@ class SmokeBuildPathTests(unittest.TestCase):
         self.assertEqual(ramfs_dir, expected)
 
     def test_ramfs_companion_is_distinct_for_default_and_custom_build_dirs(self):
-        base = ("ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=linux", "BRINGUP=0")
+        base = ("ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=linux", "BRINGUP=0",
+                "CONFIG_KERNEL_PREEMPT=0")
         cases = [
-            (base, ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-preempt"),
+            (base, ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-signal-rust"),
             (base + ("BUILD_DIR=/tmp/a20-custom-build",), "/tmp/a20-custom-build"),
         ]
         for variables, build_dir in cases:

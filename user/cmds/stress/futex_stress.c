@@ -56,6 +56,14 @@ static int fail(const char *what)
     return 1;
 }
 
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 static int wait_exit(pid_t pid, int expected, const char *what)
 {
     int status = 0;
@@ -180,6 +188,54 @@ static int requeue_timeout_cleanup(void)
                           NULL, NULL, 0) != 0)
         r = fail("requeue-timeout-stale-wake");
     munmap(words, 2 * sizeof(int));
+    return r;
+}
+
+static void ignore_futex_signal(int signo)
+{
+    (void)signo;
+}
+
+/* A nonfatal signal must interrupt an interruptible wait even after requeue,
+ * and the waiter must unlink from the destination bucket before its stack
+ * record goes away. */
+static int requeue_signal_cleanup(void)
+{
+    int *words = shared_words(3);
+    if (!words)
+        return fail("requeue-signal-mmap");
+    words[0] = 17;
+    words[1] = 0;
+    words[2] = 0;
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("requeue-signal-fork");
+    if (pid == 0) {
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = ignore_futex_signal;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) != 0)
+            _exit(7);
+        __atomic_store_n(&words[2], 1, __ATOMIC_RELEASE);
+        errno = 0;
+        long r = syscall(SYS_futex, &words[0], FUTEX_WAIT, 17,
+                         NULL, NULL, 0);
+        _exit(r == -1 && errno == EINTR ? 0 : 8);
+    }
+    while (!__atomic_load_n(&words[2], __ATOMIC_ACQUIRE))
+        usleep(1000);
+    usleep(20000);
+    if (syscall(SYS_futex, &words[0], FUTEX_CMP_REQUEUE, 0, (void *)1,
+                &words[1], 17) != 1)
+        return fail("requeue-signal-move");
+    if (kill(pid, SIGUSR1) != 0)
+        return fail("requeue-signal-send");
+    int r = wait_exit(pid, 0, "requeue-signal-child");
+    if (r == 0 && syscall(SYS_futex, &words[1], FUTEX_WAKE, 1,
+                          NULL, NULL, 0) != 0)
+        r = fail("requeue-signal-stale-wake");
+    munmap(words, 3 * sizeof(int));
     return r;
 }
 
@@ -692,6 +748,7 @@ static int robust_list_case(void)
 
 int main(void)
 {
+    uint64_t start_ns = monotonic_ns();
     printf("FUTEX_STRESS: start\n");
     if (wait_wake_shared() != 0)
         return 1;
@@ -700,6 +757,8 @@ int main(void)
     if (requeue_cases() != 0)
         return 1;
     if (requeue_timeout_cleanup() != 0)
+        return 1;
+    if (requeue_signal_cleanup() != 0)
         return 1;
     printf("FUTEX_STRESS: requeue-timeout-cleanup PASS\n");
     if (private_shared_boundary() != 0)
@@ -722,6 +781,8 @@ int main(void)
         return 1;
     if (robust_list_case() != 0)
         return 1;
+    printf("FUTEX_STRESS_NS: %llu\n",
+           (unsigned long long)(monotonic_ns() - start_ns));
     printf("FUTEX_STRESS: PASS\n");
     return 0;
 }

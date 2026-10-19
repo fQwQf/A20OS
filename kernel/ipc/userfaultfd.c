@@ -21,6 +21,7 @@
 #include "sys/usercopy.h"
 #include "cg/cgroup.h"
 
+
 /*
  * USERFAULTFD_MISSING_PROTOCOL:
  * - A registered MISSING range is an anonymous private mapping whose faults
@@ -38,16 +39,6 @@
  *   dropped when the range is unregistered or the fd closes.
  */
 
-typedef struct userfaultfd_range {
-    struct mm_struct *mm;
-    vaddr_t start;
-    vaddr_t end;
-    uint64_t flags;
-    struct userfaultfd *owner;
-    struct userfaultfd_range *next;
-    struct userfaultfd_range *gnext;
-} userfaultfd_range_t;
-
 #define UFFD_EVENT_CAPACITY 256
 
 typedef struct userfaultfd {
@@ -57,7 +48,6 @@ typedef struct userfaultfd {
     uint32_t api_version;
     wait_queue_t readers;
     wait_queue_t faulters;
-    userfaultfd_range_t *ranges;
     uffd_msg_t *events;
     size_t event_cap;
     size_t event_head;
@@ -65,10 +55,29 @@ typedef struct userfaultfd {
     size_t event_count;
 } userfaultfd_t;
 
-/* Global registry of every registered range (fault path lookup by mm). */
+/* The global lock protects the range registry owned by userfaultfd_state.rs. */
 static spinlock_t g_uffd_lock = SPINLOCK_INIT;
-static userfaultfd_range_t *g_uffd_ranges;
-static int g_uffd_range_count;
+
+extern int a20_uffd_range_register(void *owner, void *mm, uintptr_t start,
+                                   uintptr_t end, uint64_t flags);
+extern int a20_uffd_range_with(
+    void *owner, uint64_t start, uint64_t len,
+    int (*callback)(void *mm, void *context), void *context);
+extern void *a20_uffd_range_lookup_owner(void *mm, uintptr_t page);
+extern int a20_uffd_range_present(void *mm, uintptr_t page);
+extern size_t a20_uffd_range_unregister(void *owner, uintptr_t start,
+                                        uintptr_t end);
+extern size_t a20_uffd_range_release_owner(void *owner);
+
+uint64_t a20_uffd_registry_lock(void)
+{
+    return spin_lock_irqsave(&g_uffd_lock);
+}
+
+void a20_uffd_registry_unlock(uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_uffd_lock, flags);
+}
 
 static userfaultfd_t *userfaultfd_get(userfaultfd_t *uffd)
 {
@@ -92,90 +101,40 @@ static void userfaultfd_put(userfaultfd_t *uffd)
         userfaultfd_free(uffd);
 }
 
-static void userfaultfd_drop_range(userfaultfd_range_t *range)
+bool a20_uffd_owner_get(void *owner)
 {
-    if (!range)
-        return;
-    if (range->mm)
-        mm_destroy(range->mm);
-    kfree(range);
+    return userfaultfd_get(owner) != NULL;
 }
 
-/* Remove a single range from its owner list and the global registry.
- * Caller holds g_uffd_lock. */
-static void userfaultfd_range_unlink(userfaultfd_range_t *range)
+void a20_uffd_owner_put(void *owner)
 {
-    userfaultfd_t *uffd = range->owner;
-    userfaultfd_range_t **pp = &uffd->ranges;
-    while (*pp && *pp != range)
-        pp = &(*pp)->next;
-    if (*pp)
-        *pp = range->next;
-
-    userfaultfd_range_t **gp = &g_uffd_ranges;
-    while (*gp && *gp != range)
-        gp = &(*gp)->gnext;
-    if (*gp)
-        *gp = range->gnext;
-
-    range->next = NULL;
-    range->gnext = NULL;
-    g_uffd_range_count--;
+    userfaultfd_put(owner);
 }
 
-static void userfaultfd_release_all_ranges(userfaultfd_t *uffd)
+/* The range registry calls this after unlinking, without holding its lock.
+ * MM lock -> registry lock matches the demand-fault query order. */
+void a20_uffd_clear_marks(void *opaque_mm, uintptr_t start, uintptr_t end)
 {
-    uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
-    userfaultfd_range_t *range = uffd->ranges;
-    while (range) {
-        userfaultfd_range_t *next = range->next;
-        userfaultfd_range_unlink(range);
-        userfaultfd_drop_range(range);
-        range = next;
-    }
-    spin_unlock_irqrestore(&g_uffd_lock, flags);
-}
-
-/* Find a MISSING-mode range of @mm covering @page_va and return a referenced
- * uffd, or NULL. */
-static userfaultfd_t *userfaultfd_range_lookup(struct mm_struct *mm,
-                                               uint64_t page_va)
-{
+    mm_struct_t *mm = opaque_mm;
     if (!mm)
-        return NULL;
-    uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
-    for (userfaultfd_range_t *r = g_uffd_ranges; r; r = r->gnext) {
-        if (r->mm == mm && (r->flags & UFFDIO_REGISTER_MODE_MISSING) &&
-            page_va >= (uint64_t)r->start && page_va < (uint64_t)r->end) {
-            userfaultfd_t *uffd = userfaultfd_get(r->owner);
-            spin_unlock_irqrestore(&g_uffd_lock, flags);
-            return uffd;
-        }
+        return;
+    spin_lock(&mm->lock);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    for (vaddr_t page = (vaddr_t)start; page < (vaddr_t)end;
+         page += PAGE_SIZE) {
+        if (!a20_uffd_range_present(mm, page))
+            (void)mm_pt_safe_clear_page(mm, page, MM_SAFE_UFFD);
     }
-    spin_unlock_irqrestore(&g_uffd_lock, flags);
-    return NULL;
-}
-
-/* Caller holds g_uffd_lock.  Split out so a caller clearing a whole range can
- * hold the lock once instead of re-taking it per page. */
-static int uffd_range_present_locked(struct mm_struct *mm, uint64_t page_va)
-{
-    for (userfaultfd_range_t *r = g_uffd_ranges; r; r = r->gnext) {
-        if (r->mm == mm && (r->flags & UFFDIO_REGISTER_MODE_MISSING) &&
-            page_va >= (uint64_t)r->start && page_va < (uint64_t)r->end)
-            return 1;
-    }
-    return 0;
+#else
+    (void)start;
+    (void)end;
+#endif
+    spin_unlock(&mm->lock);
 }
 
 int userfaultfd_range_present(struct mm_struct *mm, uint64_t page_va)
 {
-    if (!mm || g_uffd_range_count == 0)
-        return 0;
-    uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
-    int present = uffd_range_present_locked(mm, page_va);
-    spin_unlock_irqrestore(&g_uffd_lock, flags);
-    return present;
+    return a20_uffd_range_present(mm, (uintptr_t)page_va);
 }
 
 static void userfaultfd_enqueue_event_locked(userfaultfd_t *uffd,
@@ -219,7 +178,7 @@ int userfaultfd_handle_fault(struct task_t *t, struct mm_struct *mm,
         if (present)
             return 0;
 
-        userfaultfd_t *uffd = userfaultfd_range_lookup(mm, page_va);
+        userfaultfd_t *uffd = a20_uffd_range_lookup_owner(mm, (uintptr_t)page_va);
         if (!uffd)
             return 0; /* range unregistered: caller runs the normal fault */
 
@@ -249,17 +208,21 @@ int userfaultfd_handle_fault(struct task_t *t, struct mm_struct *mm,
         bool resolved = pte2 && (*pte2 & PTE_V);
         spin_unlock(&mm->lock);
 
-        proc_wake_reason_t reason;
-        if (resolved) {
+        /* UNREGISTER may detach the range after lookup but before this waiter
+         * linked. Checking again after link closes the lost-wakeup window:
+         * a later unregister sees the linked token, an earlier one is seen
+         * here and the fault falls back to the ordinary MM path. */
+        bool registered = a20_uffd_range_present(mm, (uintptr_t)page_va);
+
+        if (resolved || !registered) {
             if (linked) {
                 (void)proc_park_cancel(token);
-                reason = PROC_WAKE_CANCEL;
-            } else {
-                reason = PROC_WAKE_CANCEL;
             }
             proc_park_finish(token);
             wait_queue_unlink(&uffd->faulters, &entry);
             userfaultfd_put(uffd);
+            if (!registered && !resolved)
+                return 0;
             continue;
         }
         if (!linked) {
@@ -267,6 +230,7 @@ int userfaultfd_handle_fault(struct task_t *t, struct mm_struct *mm,
             userfaultfd_put(uffd);
             continue;
         }
+        proc_wake_reason_t reason;
         reason = proc_park_commit(token);
         proc_park_finish(token);
         wait_queue_unlink(&uffd->faulters, &entry);
@@ -360,7 +324,7 @@ static int userfaultfd_close(vfile_t *vf)
     userfaultfd_t *uffd = vf ? vf->priv : NULL;
     if (uffd) {
         vf->priv = NULL;
-        userfaultfd_release_all_ranges(uffd);
+        (void)a20_uffd_range_release_owner(uffd);
         wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
         userfaultfd_put(uffd);
     }
@@ -442,31 +406,10 @@ static int uffd_io_register(userfaultfd_t *uffd, void *arg)
     if (covered < reg.range.len)
         return -EINVAL;
 
-    uint64_t gflags = spin_lock_irqsave(&g_uffd_lock);
-    /* Reject overlap with an existing registration of the same uffd. */
-    for (userfaultfd_range_t *r = uffd->ranges; r; r = r->next) {
-        if ((uint64_t)r->start < end && (uint64_t)r->end > start) {
-            spin_unlock_irqrestore(&g_uffd_lock, gflags);
-            return -EEXIST;
-        }
-    }
-    userfaultfd_range_t *range = kmalloc(sizeof(*range));
-    if (!range) {
-        spin_unlock_irqrestore(&g_uffd_lock, gflags);
-        return -ENOMEM;
-    }
-    memset(range, 0, sizeof(*range));
-    range->mm = mm_get(mm);
-    range->start = (vaddr_t)start;
-    range->end = (vaddr_t)end;
-    range->flags = reg.mode;
-    range->owner = userfaultfd_get(uffd);
-    range->next = uffd->ranges;
-    uffd->ranges = range;
-    range->gnext = g_uffd_ranges;
-    g_uffd_ranges = range;
-    g_uffd_range_count++;
-    spin_unlock_irqrestore(&g_uffd_lock, gflags);
+    int add = a20_uffd_range_register(uffd, mm, (uintptr_t)start,
+                                      (uintptr_t)end, reg.mode);
+    if (add < 0)
+        return add == -EEXIST ? -EEXIST : add;
 
     /* The range is live now, so record it per entry: a fault in here must be
      * parked for the handler rather than satisfied by fabricating a zero page.
@@ -478,8 +421,12 @@ static int uffd_io_register(userfaultfd_t *uffd, void *arg)
 
     reg.ioctls = (1ULL << 0x01) | (1ULL << 0x02) |
                  (1ULL << 0x03) | (1ULL << 0x04);
-    if (copy_to_user(arg, &reg, sizeof(reg)) < 0)
+    if (copy_to_user(arg, &reg, sizeof(reg)) < 0) {
+        (void)a20_uffd_range_unregister(uffd, (uintptr_t)start,
+                                        (uintptr_t)end);
+        wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
         return -EFAULT;
+    }
     return 0;
 }
 
@@ -499,58 +446,9 @@ static int uffd_io_unregister(userfaultfd_t *uffd, void *arg)
     if (end < start)
         return -EINVAL;
 
-    uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
-    int removed = 0;
-    vaddr_t rlo = 0, rhi = 0;   /* union of the ranges actually removed */
-    userfaultfd_range_t *r = uffd->ranges;
-    while (r) {
-        userfaultfd_range_t *next = r->next;
-        if ((uint64_t)r->start < end && (uint64_t)r->end > start) {
-            if (!removed) {
-                rlo = r->start;
-                rhi = r->end;
-            } else {
-                if (r->start < rlo) rlo = r->start;
-                if (r->end > rhi)   rhi = r->end;
-            }
-            userfaultfd_range_unlink(r);
-            userfaultfd_drop_range(r);
-            removed++;
-        }
-        r = next;
-    }
-    spin_unlock_irqrestore(&g_uffd_lock, flags);
-
+    size_t removed = a20_uffd_range_unregister(uffd, (uintptr_t)start,
+                                                (uintptr_t)end);
     if (removed) {
-        /* Drop the per-entry UFFD marks for what we just unregistered.
-         *
-         * Cleared PER PAGE, re-testing presence each time.  A page can still
-         * be covered by a *different* uffd registration, and the status
-         * fault path trusts this mark rather than re-deriving it from the
-         * range list, so a range-wide clear would let a still-registered page
-         * be satisfied without ever being parked for its handler.  That was
-         * harmless only while the status path was inert; it is live now
-         * (docs 10.59/10.60).
-         *
-         * userfaultfd_range_present() walks the range list and takes
-         * g_uffd_lock.  fault.c already calls it while holding mm->lock, so
-         * mm->lock -> g_uffd_lock is the established order and this adds no
-         * new nesting.  Here the lock is taken once for the whole span: a
-         * per-page call made a 256 MiB unregister 65536 acquisitions of the
-         * one global lock and 65536 walks of the range list. */
-        task_t *t = proc_current();
-        if (t && t->mm) {
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-            uint64_t present_flags = spin_lock_irqsave(&g_uffd_lock);
-            spin_lock(&t->mm->lock);
-            for (vaddr_t p = rlo; p < rhi; p += PAGE_SIZE) {
-                if (!uffd_range_present_locked(t->mm, p))
-                    (void)mm_pt_safe_clear_page(t->mm, p, MM_SAFE_UFFD);
-            }
-            spin_unlock(&t->mm->lock);
-            spin_unlock_irqrestore(&g_uffd_lock, present_flags);
-#endif
-        }
         wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
     }
     return removed ? 0 : -ENOENT;
@@ -572,69 +470,36 @@ static int uffd_io_wake(userfaultfd_t *uffd, void *arg)
     return 0;
 }
 
-static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
+typedef struct uffd_copy_context {
+    userfaultfd_t *uffd;
+    uffdio_copy_t *copy;
+} uffd_copy_context_t;
+
+static int uffd_copy_into_mm(void *opaque_mm, void *opaque_ctx)
 {
-    if (!arg)
-        return -EFAULT;
-    uffdio_copy_t c;
-    if (copy_from_user(&c, arg, sizeof(c)) < 0)
-        return -EFAULT;
-
-    if (c.len == 0 || (c.dst & (PAGE_SIZE - 1)) ||
-        (c.len & (PAGE_SIZE - 1)))
-        return -EINVAL;
-    if (c.mode & ~UFFDIO_COPY_MODE_DONTWAKE)
-        return -EINVAL;
-
-    /* src is copied per page through copy_from_user; Linux does not require
-     * it to be page aligned. */
-
-    /* Locate the registered range for dst; COPY applies to the registering mm. */
-    uint64_t gflags = spin_lock_irqsave(&g_uffd_lock);
-    userfaultfd_range_t *r = NULL;
-    for (r = uffd->ranges; r; r = r->next) {
-        if ((uint64_t)r->start <= c.dst && (uint64_t)r->end >= c.dst + c.len &&
-            (r->flags & UFFDIO_REGISTER_MODE_MISSING))
-            break;
-    }
-    userfaultfd_t *ref = NULL;
-    mm_struct_t *mm = NULL;
-    if (r) {
-        ref = userfaultfd_get(uffd);
-        mm = r->mm;
-    }
-    spin_unlock_irqrestore(&g_uffd_lock, gflags);
-    if (!r || !mm || !ref)
-        return -ENOENT;
-
+    mm_struct_t *mm = opaque_mm;
+    uffd_copy_context_t *ctx = opaque_ctx;
+    uffdio_copy_t *c = ctx->copy;
     task_t *t = proc_current();
     int ret = 0;
-    for (uint64_t off = 0; off < c.len; off += PAGE_SIZE) {
-        uint64_t dst = c.dst + off;
-
+    for (uint64_t off = 0; off < c->len; off += PAGE_SIZE) {
+        uint64_t dst = c->dst + off;
         spin_lock(&mm->lock);
         pte_t *pte = pt_lookup_leaf(mm->pgdir, dst, NULL, NULL, NULL);
         bool present = pte && (*pte & PTE_V);
         spin_unlock(&mm->lock);
-        if (present) {
-            ret = -EEXIST;
-            break;
-        }
+        if (present) { ret = -EEXIST; break; }
 
         pfn_t pfn = pfa_alloc_page();
-        if (pfn == PFN_NONE) {
-            ret = -ENOMEM;
-            break;
-        }
+        if (pfn == PFN_NONE) { ret = -ENOMEM; break; }
         if (t && cg_mem_charge(t->cgroup, 1) != 0) {
             frame_put(pfn);
             ret = -ENOMEM;
             break;
         }
         if (copy_from_user(pfn_to_virt(pfn),
-                           (void *)(uintptr_t)(c.src + off), PAGE_SIZE) < 0) {
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+                           (void *)(uintptr_t)(c->src + off), PAGE_SIZE) < 0) {
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -EFAULT;
             break;
@@ -644,8 +509,7 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         pte_t *pte2 = pt_lookup_leaf(mm->pgdir, dst, NULL, NULL, NULL);
         if (pte2 && (*pte2 & PTE_V)) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -EEXIST;
             break;
@@ -653,8 +517,7 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         mm_seg_t *vma = mm_seg_find(mm, dst);
         if (!vma) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -ENOENT;
             break;
@@ -662,8 +525,7 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         int mr = pt_map(mm->pgdir, dst, pfn_to_phys(pfn), vma->pte_flags);
         if (mr < 0) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -EAGAIN;
             break;
@@ -671,64 +533,51 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         mm_rss_add(mm, 1);
         spin_unlock(&mm->lock);
         arch_tlb_flush_page_local(dst);
-        c.copy += (int64_t)PAGE_SIZE;
-
-        if (!(c.mode & UFFDIO_COPY_MODE_DONTWAKE))
-            wait_queue_wake_all(&uffd->faulters, dst, PROC_WAKE_EVENT);
+        c->copy += (int64_t)PAGE_SIZE;
+        if (!(c->mode & UFFDIO_COPY_MODE_DONTWAKE))
+            wait_queue_wake_all(&ctx->uffd->faulters, dst, PROC_WAKE_EVENT);
     }
-    userfaultfd_put(ref);
-
-    if (copy_to_user(arg, &c, sizeof(c)) < 0)
-        return -EFAULT;
     return ret;
 }
 
-static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
+static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
 {
-    if (!arg)
-        return -EFAULT;
-    uffdio_zeropage_t z;
-    if (copy_from_user(&z, arg, sizeof(z)) < 0)
-        return -EFAULT;
+    if (!arg) return -EFAULT;
+    uffdio_copy_t c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0) return -EFAULT;
+    if (c.len == 0 || (c.dst & (PAGE_SIZE - 1)) ||
+        (c.len & (PAGE_SIZE - 1))) return -EINVAL;
+    if (c.mode & ~UFFDIO_COPY_MODE_DONTWAKE) return -EINVAL;
 
-    if (z.range.len == 0 || (z.range.start & (PAGE_SIZE - 1)) ||
-        (z.range.len & (PAGE_SIZE - 1)))
-        return -EINVAL;
-    if (z.mode & ~UFFDIO_ZEROPAGE_MODE_DONTWAKE)
-        return -EINVAL;
+    uffd_copy_context_t ctx = { .uffd = uffd, .copy = &c };
+    int ret = a20_uffd_range_with(uffd, c.dst, c.len,
+                                 uffd_copy_into_mm, &ctx);
+    if (copy_to_user(arg, &c, sizeof(c)) < 0) return -EFAULT;
+    return ret;
+}
 
-    uint64_t gflags = spin_lock_irqsave(&g_uffd_lock);
-    userfaultfd_range_t *r = NULL;
-    for (r = uffd->ranges; r; r = r->next) {
-        if ((uint64_t)r->start <= z.range.start &&
-            (uint64_t)r->end >= z.range.start + z.range.len &&
-            (r->flags & UFFDIO_REGISTER_MODE_MISSING))
-            break;
-    }
-    mm_struct_t *mm = r ? r->mm : NULL;
-    spin_unlock_irqrestore(&g_uffd_lock, gflags);
-    if (!r || !mm)
-        return -ENOENT;
+typedef struct uffd_zero_context {
+    userfaultfd_t *uffd;
+    uffdio_zeropage_t *zero;
+} uffd_zero_context_t;
 
+static int uffd_zero_into_mm(void *opaque_mm, void *opaque_ctx)
+{
+    mm_struct_t *mm = opaque_mm;
+    uffd_zero_context_t *ctx = opaque_ctx;
+    uffdio_zeropage_t *z = ctx->zero;
     task_t *t = proc_current();
     int ret = 0;
-    for (uint64_t off = 0; off < z.range.len; off += PAGE_SIZE) {
-        uint64_t dst = z.range.start + off;
-
+    for (uint64_t off = 0; off < z->range.len; off += PAGE_SIZE) {
+        uint64_t dst = z->range.start + off;
         spin_lock(&mm->lock);
         pte_t *pte = pt_lookup_leaf(mm->pgdir, dst, NULL, NULL, NULL);
         bool present = pte && (*pte & PTE_V);
         spin_unlock(&mm->lock);
-        if (present) {
-            ret = -EEXIST;
-            break;
-        }
+        if (present) { ret = -EEXIST; break; }
 
         pfn_t pfn = pfa_alloc_page();
-        if (pfn == PFN_NONE) {
-            ret = -ENOMEM;
-            break;
-        }
+        if (pfn == PFN_NONE) { ret = -ENOMEM; break; }
         if (t && cg_mem_charge(t->cgroup, 1) != 0) {
             frame_put(pfn);
             ret = -ENOMEM;
@@ -740,8 +589,7 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
         pte_t *pte2 = pt_lookup_leaf(mm->pgdir, dst, NULL, NULL, NULL);
         if (pte2 && (*pte2 & PTE_V)) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -EEXIST;
             break;
@@ -749,8 +597,7 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
         mm_seg_t *vma = mm_seg_find(mm, dst);
         if (!vma) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -ENOENT;
             break;
@@ -758,8 +605,7 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
         int mr = pt_map(mm->pgdir, dst, pfn_to_phys(pfn), vma->pte_flags);
         if (mr < 0) {
             spin_unlock(&mm->lock);
-            if (t)
-                cg_mem_uncharge(t->cgroup, 1);
+            if (t) cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
             ret = -EAGAIN;
             break;
@@ -767,14 +613,26 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
         mm_rss_add(mm, 1);
         spin_unlock(&mm->lock);
         arch_tlb_flush_page_local(dst);
-        z.zeropage += (int64_t)PAGE_SIZE;
-
-        if (!(z.mode & UFFDIO_ZEROPAGE_MODE_DONTWAKE))
-            wait_queue_wake_all(&uffd->faulters, dst, PROC_WAKE_EVENT);
+        z->zeropage += (int64_t)PAGE_SIZE;
+        if (!(z->mode & UFFDIO_ZEROPAGE_MODE_DONTWAKE))
+            wait_queue_wake_all(&ctx->uffd->faulters, dst, PROC_WAKE_EVENT);
     }
+    return ret;
+}
 
-    if (copy_to_user(arg, &z, sizeof(z)) < 0)
-        return -EFAULT;
+static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
+{
+    if (!arg) return -EFAULT;
+    uffdio_zeropage_t z;
+    if (copy_from_user(&z, arg, sizeof(z)) < 0) return -EFAULT;
+    if (z.range.len == 0 || (z.range.start & (PAGE_SIZE - 1)) ||
+        (z.range.len & (PAGE_SIZE - 1))) return -EINVAL;
+    if (z.mode & ~UFFDIO_ZEROPAGE_MODE_DONTWAKE) return -EINVAL;
+
+    uffd_zero_context_t ctx = { .uffd = uffd, .zero = &z };
+    int ret = a20_uffd_range_with(uffd, z.range.start, z.range.len,
+                                 uffd_zero_into_mm, &ctx);
+    if (copy_to_user(arg, &z, sizeof(z)) < 0) return -EFAULT;
     return ret;
 }
 

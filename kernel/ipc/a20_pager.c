@@ -28,13 +28,19 @@
 #include "ipc/ipc.h"
 #include "ipc/objstats.h"
 
+extern int64_t a20_pager_supply_pages_rust(a20_pager_t *pager,
+                                            struct vmo *vmo,
+                                            struct vmo *src,
+                                            uint64_t vmo_offset,
+                                            uint64_t src_offset,
+                                            uint64_t len);
+
 typedef struct a20_page_req {
     uint32_t kind;      /* A20_PAGE_REQ_READ / A20_PAGE_REQ_WRITE */
     uint32_t reserved;
     uint64_t offset;    /* vmo byte offset of the missing page */
 } a20_page_req_t;
 
-#ifdef CONFIG_VMO_PAGER_RUST
 typedef struct a20_pager_close_watch {
     refcount_t refs;
     spinlock_t lock;
@@ -67,7 +73,6 @@ static void pager_watch_peer_closed(void *ctx)
         a20_pager_put(pager);
     }
 }
-#endif
 
 /* The security label of the faulting task lives in the Native handle table,
  * which is not linked in Linux-only kernels.  Weak defaults keep the request
@@ -87,7 +92,6 @@ a20_pager_t *a20_pager_create(a20_channel_ep_t *requests)
     refcount_set(&p->refcount, 1);
     spin_init(&p->lock);
     p->requests = requests;   /* takes ownership of this endpoint reference */
-#ifdef CONFIG_VMO_PAGER_RUST
     a20_pager_close_watch_t *watch = kmalloc(sizeof(*watch));
     if (!watch) {
         kfree(p);
@@ -108,11 +112,9 @@ a20_pager_t *a20_pager_create(a20_channel_ep_t *requests)
         kfree(p);
         return NULL;
     }
-#endif
     return p;
 }
 
-#ifdef CONFIG_VMO_PAGER_RUST
 int a20_pager_vmo_lock_pager(a20_pager_t *pager, uint64_t *flags)
 {
     if (!pager || !flags) return -A20_ERR_INVALID_ARGUMENT;
@@ -177,12 +179,44 @@ void a20_pager_vmo_wake(struct vmo *vmo)
     (void)woke;
 #endif
 }
-#endif
+
+void a20_pager_supply_meta(struct vmo *vmo, uint32_t *type, uint64_t *size)
+{
+    *type = vmo->type;
+    *size = vmo->size;
+}
+int a20_pager_supply_lock(struct vmo *vmo, uint64_t *flags)
+{
+    if (!vmo || !flags) return -A20_ERR_INVALID_ARGUMENT;
+    *flags = spin_lock_irqsave(&vmo->lock);
+    return 0;
+}
+void a20_pager_supply_unlock(struct vmo *vmo, uint64_t flags)
+{ spin_unlock_irqrestore(&vmo->lock, flags); }
+a20_pager_t *a20_pager_supply_pager_locked(struct vmo *vmo)
+{ return vmo->pager; }
+uint64_t a20_pager_supply_dst_page(struct vmo *vmo, uint32_t index)
+{ return vmo->pages[index]; }
+uint64_t a20_pager_supply_src_page(struct vmo *vmo, uint32_t index)
+{ return vmo_peek_page(vmo, index); }
+uint64_t a20_pager_supply_alloc_page(void)
+{ return pfa_alloc_page(); }
+void a20_pager_supply_copy_install(struct vmo *vmo, uint32_t index,
+                                   uint32_t src, uint32_t dst)
+{
+    memcpy(pfn_to_virt(dst), pfn_to_virt(src), PAGE_SIZE);
+    vmo->pages[index] = dst;
+    vmo->phys_size += PAGE_SIZE;
+    a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
+}
+void a20_pager_supply_wake(struct vmo *vmo, uint64_t first_page, int keyed)
+{
+    wait_queue_wake_all(&vmo->faulters, keyed ? first_page : 0, PROC_WAKE_EVENT);
+}
 
 static void a20_pager_free(a20_pager_t *p)
 {
     if (!p) return;
-#ifdef CONFIG_VMO_PAGER_RUST
     a20_pager_close_watch_t *watch = p->close_watch;
     if (p->requests)
         a20_channel_ep_clear_peer_close_hook(p->requests);
@@ -192,7 +226,6 @@ static void a20_pager_free(a20_pager_t *p)
         spin_unlock(&watch->lock);
         pager_watch_put(watch);
     }
-#endif
     /* Rust pager associations keep this weak registry compact while live;
      * the allocation outlives the last attached VMO until this final put. */
     if (p->vmos)
@@ -217,44 +250,14 @@ void a20_pager_put(a20_pager_t *p)
  * dropped by a20_pager_detach_vmo() on VMO destruction. */
 int a20_pager_attach_vmo(a20_pager_t *pager, struct vmo *vmo)
 {
-#ifdef CONFIG_VMO_PAGER_RUST
     return a20_pager_attach_vmo_rust(pager, vmo);
-#else
-    if (!pager || !vmo || vmo->type != VMO_PAGED)
-        return -A20_ERR_INVALID_ARGUMENT;
-
-    spin_lock(&vmo->lock);
-    if (vmo->pager) {
-        spin_unlock(&vmo->lock);
-        return -A20_ERR_BUSY;
-    }
-    a20_pager_ref(pager);
-    vmo->pager = pager;
-    spin_unlock(&vmo->lock);
-    return A20_OK;
-#endif
 }
 
 /* Detach @vmo from its pager; wakes all faulters (they fall back to the
  * zero-fill path via the no-pager branch). */
 void a20_pager_detach_vmo(struct vmo *vmo)
 {
-#ifdef CONFIG_VMO_PAGER_RUST
     a20_pager_detach_vmo_rust(vmo);
-#else
-    if (!vmo) return;
-    a20_pager_t *pager = NULL;
-    spin_lock(&vmo->lock);
-    if (vmo->pager) {
-        pager = vmo->pager;
-        vmo->pager = NULL;
-    }
-    spin_unlock(&vmo->lock);
-    if (pager) {
-        wait_queue_wake_all(&vmo->faulters, 0, PROC_WAKE_EVENT);
-        a20_pager_put(pager);
-    }
-#endif
 }
 
 /*
@@ -283,9 +286,7 @@ int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
     a20_pager_ref(pager);
     spin_unlock(&vmo->lock);
     if (a20_channel_peer_closed(pager->requests)) {
-#ifdef CONFIG_VMO_PAGER_RUST
         a20_pager_peer_closed_rust(pager);
-#endif
         a20_pager_put(pager);
         return -A20_ERR_CANCELED;
     }
@@ -309,10 +310,8 @@ int a20_pager_request_page(struct vmo *vmo, uint32_t index, int write_access)
 
     int rc = a20_channel_send_dwc(pager->requests, &req, sizeof(req), &hinfo, 1,
                                   NULL, A20_MSG_NONBLOCK, 0);
-#ifdef CONFIG_VMO_PAGER_RUST
     if (rc == -A20_ERR_CANCELED)
         a20_pager_peer_closed_rust(pager);
-#endif
     a20_pager_put(pager);
     return rc;
 }
@@ -326,56 +325,6 @@ int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
                                struct vmo *src, uint64_t vmo_offset,
                                uint64_t src_offset, uint64_t len)
 {
-    if (!pager || !vmo || !src)
-        return -A20_ERR_INVALID_ARGUMENT;
-    if (vmo->type != VMO_PAGED)
-        return -A20_ERR_TYPE_MISMATCH;
-    if ((vmo_offset & (PAGE_SIZE - 1)) || (src_offset & (PAGE_SIZE - 1)) ||
-        (len & (PAGE_SIZE - 1)) || len == 0)
-        return -A20_ERR_INVALID_ARGUMENT;
-    if (vmo_offset >= vmo->size || len > vmo->size - vmo_offset)
-        return -A20_ERR_RANGE;
-    if (src_offset >= src->size || len > src->size - src_offset)
-        return -A20_ERR_RANGE;
-
-    spin_lock(&vmo->lock);
-    if (vmo->pager != pager) {
-        spin_unlock(&vmo->lock);
-        return -A20_ERR_BAD_HANDLE;
-    }
-    uint64_t supplied = 0;
-    for (uint64_t off = 0; off < len; off += PAGE_SIZE) {
-        uint32_t dst_idx = (uint32_t)((vmo_offset + off) / PAGE_SIZE);
-        uint32_t src_idx = (uint32_t)((src_offset + off) / PAGE_SIZE);
-        if (vmo->pages[dst_idx] != PFN_NONE) {
-            supplied += PAGE_SIZE;
-            continue;
-        }
-        pfn_t spfn = vmo_peek_page(src, src_idx);
-        if (spfn == PFN_NONE)
-            break;   /* source page not materialized: fail the range */
-        pfn_t dpfn = pfa_alloc_page();
-        if (dpfn == PFN_NONE)
-            break;
-        memcpy(pfn_to_virt(dpfn), pfn_to_virt(spfn), PAGE_SIZE);
-        vmo->pages[dst_idx] = dpfn;
-        vmo->phys_size += PAGE_SIZE;
-        a20_objstat_add(&g_a20_objstats.vmo_pages, 1);
-        supplied += PAGE_SIZE;
-    }
-    spin_unlock(&vmo->lock);
-
-    if (supplied > 0) {
-        /* One supply of several pages took the faulters lock once per page,
-         * re-walking the whole waiter list each time; the pages supplied are
-         * contiguous, so they are released in a single pass.  A one-page
-         * supply keeps the keyed wake, which is the common case and does not
-         * need to disturb faulters parked on other offsets. */
-        uint64_t first = vmo_offset / PAGE_SIZE;
-        if (supplied == PAGE_SIZE)
-            wait_queue_wake_all(&vmo->faulters, first, PROC_WAKE_EVENT);
-        else
-            wait_queue_wake_all(&vmo->faulters, 0, PROC_WAKE_EVENT);
-    }
-    return (int64_t)supplied;
+    return a20_pager_supply_pages_rust(pager, vmo, src, vmo_offset,
+                                       src_offset, len);
 }

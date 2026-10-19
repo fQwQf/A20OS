@@ -1,12 +1,13 @@
 #include "syscall_impl.h"
 #include "proc/proc_internal.h"
+#include "proc/signal_core.h"
 
 static int signal_send_permission(task_t *self, task_t *target) {
-    if (proc_has_cap(self, CAP_KILL)) return 0;
-    if (self->cred.uid == target->cred.uid || self->cred.uid == target->cred.suid ||
-        self->cred.euid == target->cred.uid || self->cred.euid == target->cred.suid)
-        return 0;
-    return -EPERM;
+    return a20_signal_kill_permission(proc_has_cap(self, CAP_KILL),
+                                      (uint32_t)self->cred.uid,
+                                      (uint32_t)self->cred.euid,
+                                      (uint32_t)target->cred.uid,
+                                      (uint32_t)target->cred.suid);
 }
 
 int64_t sys_kill(int pid, int sig) {
@@ -135,7 +136,7 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
 
     /* Can't block SIGKILL or SIGSTOP */
     uint64_t new_mask = arch_user_sigset_to_kernel(&user_mask);
-    new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
+    new_mask = a20_signal_temporary_mask(new_mask);
 
     /*
      * SIGNAL_MASK_PARK_PROTOCOL: park_lock excludes the sender's wake half
@@ -189,8 +190,11 @@ int64_t sys_sigaltstack(void *ss, void *old_ss) {
         arch_sigaltstack_t new_ss;
         if (copy_from_user(&new_ss, ss, sizeof(new_ss)) < 0)
             return -EFAULT;
-        if (new_ss.ss_flags & ~SS_DISABLE)
-            return -EINVAL;
+        int altstack_err =
+            a20_signal_sigaltstack_valid(new_ss.ss_flags, new_ss.ss_size,
+                                         MINSIGSTKSZ);
+        if (altstack_err < 0)
+            return altstack_err;
         uint64_t flags = spin_lock_irqsave(&signal_state->lock);
         if (new_ss.ss_flags & SS_DISABLE) {
             t->sigaltstack.ss_sp    = 0;
@@ -248,17 +252,16 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
          * the park protocol. */
         uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
         uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
-        uint64_t matching = (ss->pending | t->thread_pending) & mask;
-        if (matching) {
-            for (int sig = 1; sig < NSIG; sig++) {
-                if (!(matching & signal_mask_bit(sig)))
-                    continue;
-                selected = sig;
-                if (signal_take_pending_info_locked(t, sig, infobuf,
-                                                    sizeof(infobuf)) < 0)
-                    *(int *)infobuf = sig;
-                break;
-            }
+        /* Rust owns the select+consume transaction (lowest matching,
+         * thread occurrence preferred, blocked signals included). */
+        if (a20_signal_pending_union(ss->pending, t->thread_pending) & mask) {
+            a20_signal_queue_state_t st = signal_queue_state_fill(t, ss);
+            int has_info = 0;
+            selected = a20_signal_take_matching_locked(&st, mask, infobuf,
+                                                       sizeof(infobuf),
+                                                       &has_info);
+            if (selected && !has_info)
+                *(int *)infobuf = selected;
         } else if (!poll_only) {
             t->sigwait_mask = mask;
             t->sigwait_active = 1;
@@ -290,7 +293,7 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
         t->sigwait_active = 0;
         t->sigwait_mask = 0;
         int has_matching =
-            ((ss->pending | t->thread_pending) & mask) != 0;
+            (a20_signal_pending_union(ss->pending, t->thread_pending) & mask) != 0;
         spin_unlock_irqrestore(&ss->lock, signal_flags);
 
         if (reason == PROC_WAKE_TIMEOUT)

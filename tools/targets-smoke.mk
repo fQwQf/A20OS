@@ -324,6 +324,22 @@ smoke-mm-usercopy-contract-rust:
 smoke-mm-process-vm-exec-cow-rust:
 	$(PYTHON) tools/smoke.py smoke-mm-process-vm-exec-cow-rust
 
+# ELF loader/exec gates under the Rust decision core: dynamic exec, nested
+# shell exec, auxv audit, and the W^X-deny workload.
+smoke-elf-exec-rust:
+	$(PYTHON) tools/smoke.py smoke-elf-exec-rust
+
+smoke-elf-exec-wx-rust:
+	$(PYTHON) tools/smoke.py smoke-elf-exec-wx-rust
+
+# kexec_load staging/validation on the real guest call path.
+smoke-elf-kexec-rust:
+	$(PYTHON) tools/smoke.py smoke-elf-kexec-rust
+
+# Per-phase exec-replacement rollback (test profile with fault injection).
+smoke-elf-exec-fault:
+	$(PYTHON) tools/smoke.py smoke-elf-exec-fault
+
 # Focused real page-table/fault/accounting contract for MREMAP_DONTUNMAP.
 smoke-mm-dontunmap:
 	$(PYTHON) tools/smoke.py smoke-mm-dontunmap

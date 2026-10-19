@@ -9,6 +9,8 @@
 #include "core/trap.h"
 #include <signal_abi.h>
 
+#include "proc/signal_core.h"
+
 /* ============================================================
  * POSIX Signal Handling
  * ============================================================ */
@@ -90,6 +92,10 @@ static inline uint64_t signal_mask_to_user(uint64_t kernel_mask) {
 
 /* Initialize signal state for a new process */
 void signal_init(signal_state_t *ss);
+
+/* Defined in kernel/proc/signal.c: borrowed-pointer view of the queue state
+ * for the Rust transaction core. */
+a20_signal_queue_state_t signal_queue_state_fill(void *task, signal_state_t *ss);
 
 /* Copy signal state on fork */
 void signal_copy(const signal_state_t *src, signal_state_t *dst);

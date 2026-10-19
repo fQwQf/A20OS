@@ -8,6 +8,191 @@
 #include "core/string.h"
 #include "core/lock_counters.h"
 
+/*
+ * Page-cache state transactions. Rust owns miss publication and duplicate
+ * resolution, reference/pin cleanup, eviction and reclaim outcomes, dirty-
+ * generation confirmation, writeback success/failure transitions, and
+ * invalidate/truncate decisions. C keeps the simple warm-hit path, byte-copy
+ * loops and read-ahead arithmetic, plus locks, frame allocation, vnode refs,
+ * and filesystem I/O callbacks. The historical C state engine is retained in
+ * host differential tests; production uses the Rust transaction path.
+ */
+extern unsigned a20_pagecache_hash_key(vnode_t *vn, uint64_t index);
+extern void a20_pagecache_lru_remove(page_cache_page_t *page);
+extern void a20_pagecache_lru_insert_front(page_cache_page_t *head, page_cache_page_t *page);
+extern void a20_pagecache_lru_insert_tail(page_cache_page_t *tail, page_cache_page_t *page);
+extern void a20_pagecache_free_insert(page_cache_page_t **free_head, page_cache_page_t *page);
+extern page_cache_page_t *a20_pagecache_free_take(page_cache_page_t **free_head,
+                                                  page_cache_page_t *lru_head);
+extern void a20_pagecache_hash_insert(page_cache_page_t **hash, page_cache_page_t *page);
+extern void a20_pagecache_hash_remove(page_cache_page_t **hash, page_cache_page_t *page,
+                                      void (*account)(size_t));
+extern page_cache_page_t *a20_pagecache_find(page_cache_page_t **hash, vnode_t *vn,
+                                             uint64_t index, void (*account)(size_t));
+extern void a20_pagecache_mapping_insert(page_cache_page_t *page);
+extern void a20_pagecache_mapping_remove(page_cache_page_t *page);
+extern void a20_pagecache_dirty_insert(page_cache_page_t *page,
+                                       page_cache_page_t **global_dirty_head,
+                                       size_t *global_dirty_count);
+extern void a20_pagecache_dirty_remove(page_cache_page_t *page,
+                                       page_cache_page_t **global_dirty_head,
+                                       size_t *global_dirty_count);
+extern vnode_t *a20_pagecache_detach(page_cache_page_t *page,
+                                     page_cache_page_t **global_dirty_head,
+                                     size_t *global_dirty_count,
+                                     page_cache_page_t **hash, size_t *valid_pages,
+                                     void (*account)(size_t));
+extern void a20_pagecache_pin(page_cache_page_t *page, size_t *bucket_pinned);
+extern void a20_pagecache_account_pin(page_cache_page_t *page, size_t *bucket_pinned);
+extern int a20_pagecache_put(page_cache_page_t *page, size_t *bucket_pinned);
+extern size_t a20_pagecache_pinned_total(const size_t *bucket_pinned);
+extern page_cache_page_t *a20_pagecache_get_transaction(
+    void *, vnode_t *, uint64_t, int, page_cache_page_t **,
+    page_cache_page_t *, page_cache_page_t *, page_cache_page_t **,
+    page_cache_page_t **, size_t *, size_t *, size_t *,
+    size_t,
+    uint64_t (*)(void *), void (*)(void *, uint64_t),
+    uint64_t (*)(void *, uint32_t), void (*)(void *, uint32_t, uint64_t),
+    int (*)(void *, int), page_cache_page_t *(*)(void *, vnode_t **),
+    int (*)(void *, size_t), void (*)(void *, page_cache_page_t *),
+    void (*)(void *, void *), void (*)(void *, void *),
+    int (*)(uint32_t), void (*)(size_t));
+extern long a20_pagecache_read_transaction(
+    void *, size_t, size_t, uint8_t *, size_t,
+    page_cache_page_t *(*)(void *, uint64_t, int),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *, size_t),
+    int (*)(void *, uint64_t), void (*)(void *, uint64_t),
+    void (*)(void *, page_cache_page_t *), void (*)(void *, uint64_t));
+extern long a20_pagecache_write_transaction(
+    void *, size_t, size_t, const uint8_t *, size_t,
+    page_cache_page_t *(*)(void *, uint64_t, int),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    void (*)(void *, page_cache_page_t *), void (*)(void *, uint64_t),
+    void (*)(void *, uint64_t), void (*)(void *, size_t));
+extern void a20_pagecache_update_after_write(
+    void *, uint64_t, uint64_t, const uint8_t *, size_t,
+    page_cache_page_t *(*)(void *, uint64_t, int),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *),
+    void (*)(void *, page_cache_page_t *), void (*)(void *, size_t));
+extern page_cache_page_t *a20_pagecache_evict_scan(
+    page_cache_page_t *lru_head, page_cache_page_t *lru_tail, size_t budget,
+    int (*pfn_reclaimable)(uint32_t), uint64_t (*lock_bucket)(uint32_t),
+    void (*unlock_bucket)(uint32_t, uint64_t), page_cache_page_t **hash,
+    page_cache_page_t **global_dirty_head, size_t *global_dirty_count,
+    size_t *valid_pages, void (*account)(size_t), vnode_t **out_vnode);
+extern size_t a20_pagecache_collect_dirty(vnode_t *vn, page_cache_page_t *global_dirty_head,
+                                          size_t max_pages, page_cache_page_t **out,
+                                          size_t *bucket_pinned, void (*account)(size_t));
+extern size_t a20_pagecache_writeback_confirm(page_cache_page_t **pages, size_t count,
+                                              vnode_t *batch_vn, uint64_t index,
+                                              const uint64_t *gens,
+                                              page_cache_page_t **global_dirty_head,
+                                              size_t *global_dirty_count);
+extern size_t a20_pagecache_detach_unpinned_range(
+    vnode_t *vn, uint64_t first, uint64_t last, int require_clean,
+    uint64_t (*lock_bucket)(uint32_t),
+    void (*unlock_bucket)(uint32_t, uint64_t), page_cache_page_t **hash,
+    page_cache_page_t **global_dirty_head, size_t *global_dirty_count,
+    size_t *valid_pages, void (*account)(size_t), size_t *out_discarded_dirty);
+extern size_t a20_pagecache_truncate(
+    vnode_t *vn, uint64_t new_size, uint64_t (*lock_bucket)(uint32_t),
+    void (*unlock_bucket)(uint32_t, uint64_t), page_cache_page_t **hash,
+    page_cache_page_t **global_dirty_head, size_t *global_dirty_count,
+    size_t *valid_pages, void (*account)(size_t));
+extern int a20_pagecache_readahead_plan(int is_regular, uint64_t file_size,
+                                       uint64_t start, size_t count,
+                                       size_t *out_count);
+extern int a20_pagecache_write_plan(uint64_t file_size, uint64_t start,
+                                    size_t done, size_t count, uint64_t *out_index,
+                                    size_t *out_page_off, size_t *out_chunk,
+                                    int *out_may_fill);
+extern int a20_pagecache_writeback_transaction(
+    vnode_t *vn, page_cache_writepage_t writepage, void *ctx,
+    size_t max_pages, size_t *written_pages,
+    size_t (*collect)(vnode_t *, page_cache_page_t **, size_t),
+    void (*lock_pages)(page_cache_page_t **, size_t),
+    void (*unlock_pages)(page_cache_page_t **, size_t),
+    int (*batch_allowed)(vnode_t *, size_t),
+    int (*write)(vnode_t *, uint64_t, page_cache_page_t **, size_t,
+                 page_cache_writepage_t, void *, void *),
+    void *(*alloc_buffer)(size_t), void (*free_buffer)(void *),
+    void (*confirm)(page_cache_page_t **, size_t, vnode_t *, uint64_t,
+                    const uint64_t *),
+    void (*put)(page_cache_page_t *),
+    void (*serial_lock)(vnode_t *), void (*serial_unlock)(vnode_t *),
+    void (*perf)(size_t));
+extern int a20_pagecache_fill_one_transaction(
+    void *, page_cache_page_t *, void (*)(void *, page_cache_page_t *),
+    void (*)(void *, page_cache_page_t *), int (*)(void *, page_cache_page_t *),
+    uint64_t (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *, uint64_t),
+    int (*)(void *, page_cache_page_t *, uint8_t *));
+extern int a20_pagecache_fill_many_transaction(
+    void *, page_cache_page_t **, size_t, size_t,
+    void (*)(void *, page_cache_page_t *), void (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *), uint64_t (*)(void *, page_cache_page_t *),
+    int (*)(void *, page_cache_page_t *, uint64_t),
+    int (*)(void *, page_cache_page_t *, uint8_t *),
+    int (*)(void *, uint64_t, uint8_t *, size_t),
+    uint8_t *(*)(void *, size_t), void (*)(void *, uint8_t *));
+extern int a20_pagecache_readahead_transaction(
+    void *, page_cache_page_t *, size_t, size_t,
+    page_cache_page_t *(*)(void *, uint64_t, int),
+    int (*)(void *, page_cache_page_t **, size_t),
+    void (*)(void *, page_cache_page_t *), void (*)(void *, size_t));
+extern vnode_t *a20_pagecache_reclaim_clean(
+    page_cache_page_t *page, uint64_t (*lock_bucket)(uint32_t),
+    void (*unlock_bucket)(uint32_t, uint64_t), int (*pfn_reclaimable)(uint32_t),
+    page_cache_page_t **hash, page_cache_page_t **global_dirty_head,
+    size_t *global_dirty_count, size_t *valid_pages, page_cache_page_t **free_head,
+    void (*account)(size_t));
+
+/* The Rust engine mirrors the descriptor prefix through global_dirty_next and
+ * the leading vnode cache fields; these asserts fail the build on drift. */
+_Static_assert(__builtin_offsetof(page_cache_page_t, index) == 8,
+               "page cache state mirror: index offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, ref_count) == 16,
+               "page cache state mirror: ref_count offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, dirty_gen) == 32,
+               "page cache state mirror: dirty_gen offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, uptodate) == 48,
+               "page cache state mirror: uptodate offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, accessed) == 52,
+               "page cache state mirror: accessed offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, prev) > 52,
+               "page cache state mirror: links follow the scalar prefix");
+_Static_assert(__builtin_offsetof(vnode_t, ino) == 0,
+               "page cache state mirror: vnode.ino offset");
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(__builtin_offsetof(vnode_t, mnt) == 48,
+               "page cache state mirror: vnode.mnt offset (LP64)");
+_Static_assert(__builtin_offsetof(vnode_t, cache_pages) == 72,
+               "page cache state mirror: vnode.cache_pages offset (LP64)");
+_Static_assert(__builtin_offsetof(page_cache_page_t, accessed) == 52,
+               "page cache state mirror: accessed offset (LP64)");
+_Static_assert(__builtin_offsetof(page_cache_page_t, pfn) == 56,
+               "page cache state mirror: pfn offset (LP64)");
+_Static_assert(__builtin_offsetof(page_cache_page_t, prev) == 72,
+               "page cache state mirror: prev offset (LP64)");
+#else
+_Static_assert(__builtin_offsetof(vnode_t, mnt) == 36,
+               "page cache state mirror: vnode.mnt offset (ILP32)");
+_Static_assert(__builtin_offsetof(vnode_t, cache_pages) == 48,
+               "page cache state mirror: vnode.cache_pages offset (ILP32)");
+#endif
+
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
 static spinlock_t g_page_cache_bucket_locks[PAGE_CACHE_BUCKET_LOCKS];
 static mutex_t g_page_cache_grow_lock;
@@ -80,6 +265,10 @@ static int g_initialized;
 #define PAGE_CACHE_PRESSURE_WRITEBACK_PAGES 1024U
 
 static int page_cache_writeback_some(size_t max_pages);
+static page_cache_page_t *page_cache_file_get(void *, uint64_t, int);
+static void page_cache_file_put(void *, page_cache_page_t *);
+static int page_cache_fill_window(void *, page_cache_page_t **, size_t);
+static void page_cache_readahead_perf(void *, size_t);
 
 static inline void page_cache_account_scan(size_t entries)
 {
@@ -87,80 +276,42 @@ static inline void page_cache_account_scan(size_t entries)
     a20_perf_add(A20_PERF_PAGE_CACHE_SCAN_ENTRIES, entries);
 }
 
-static unsigned page_cache_hash_key(vnode_t *vn, uint64_t index)
+_Static_assert(sizeof(struct page_cache_pin_counter) == 64,
+               "page cache state mirror: pin counter stride");
+_Static_assert(__builtin_offsetof(struct page_cache_pin_counter, pinned) == 0,
+               "page cache state mirror: pin counter lead field");
+
+/* Narrow mechanical bridges the Rust engine calls back into: telemetry,
+ * reclaimability of a frame, and the bucket spinlock pair. */
+static void page_cache_state_scan_bridge(size_t entries)
 {
-    uintptr_t v = vn && vn->mnt
-        ? (uintptr_t)vn->mnt ^ (uintptr_t)vn->ino
-        : (uintptr_t)vn;
-    return (unsigned)((v >> 4) ^ index ^ (index >> 32)) &
-           (PAGE_CACHE_HASH_BUCKETS - 1);
+    page_cache_account_scan(entries);
 }
+
+static int page_cache_state_pfn_reclaimable(uint32_t pfn)
+{
+    return pfn_valid(pfn) && pfa.meta[pfn].refcount <= 1;
+}
+
+static uint64_t page_cache_state_bucket_lock(uint32_t blk)
+{
+    return spin_lock_irqsave(&g_page_cache_bucket_locks[blk]);
+}
+
+static void page_cache_state_bucket_unlock(uint32_t blk, uint64_t flags)
+{
+    spin_unlock_irqrestore(&g_page_cache_bucket_locks[blk], flags);
+}
+
+/* Dedicated wrappers keep the Rust ABI free of inline-lock expansions and
+ * give one place to add a lockdep annotation if the lock order changes. */
 
 /* Lock ordering: a caller may hold g_page_cache_lock and then acquire a bucket
  * lock, but must never acquire g_page_cache_lock while holding a bucket lock.
  * The warm hit path acquires only the bucket lock. */
-static inline unsigned page_cache_bucket(unsigned hash_idx)
-{
-    return hash_idx & (PAGE_CACHE_BUCKET_LOCKS - 1);
-}
-
-static inline uint64_t page_cache_bucket_lock_irqsave(unsigned hash_idx)
-{
-    return spin_lock_irqsave(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)]);
-}
-
-static inline void page_cache_bucket_unlock_irqrestore(unsigned hash_idx,
-                                                       uint64_t flags)
-{
-    spin_unlock_irqrestore(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)],
-                           flags);
-}
-
-/* A pin is any refcount the cache cannot reclaim under.  Accounting only the
- * 0->1 and 1->0 refcount edges keeps the reported pinned count equal to the
- * number of pages with refcount > 0 without re-reading every descriptor. */
-static inline void page_cache_account_pin(page_cache_page_t *page)
-{
-    unsigned idx = page_cache_hash_key(page->vnode, page->index);
-    __atomic_fetch_add(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
-                       __ATOMIC_RELAXED);
-}
-
-static inline void page_cache_account_unpin(page_cache_page_t *page)
-{
-    unsigned idx = page_cache_hash_key(page->vnode, page->index);
-    __atomic_fetch_sub(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
-                       __ATOMIC_RELAXED);
-}
-
-static inline void page_cache_pin(page_cache_page_t *page)
-{
-    if (__atomic_fetch_add(&page->ref_count.value, 1, __ATOMIC_RELAXED) == 0)
-        page_cache_account_pin(page);
-}
-
-static void lru_remove(page_cache_page_t *page)
-{
-    page->prev->next = page->next;
-    page->next->prev = page->prev;
-    page->prev = NULL;
-    page->next = NULL;
-}
-
-static void lru_insert_front(page_cache_page_t *page)
-{
-    page->next = g_lru_head.next;
-    page->prev = &g_lru_head;
-    g_lru_head.next->prev = page;
-    g_lru_head.next = page;
-}
-
 static void lru_insert_tail(page_cache_page_t *page)
 {
-    page->prev = g_lru_tail.prev;
-    page->next = &g_lru_tail;
-    g_lru_tail.prev->next = page;
-    g_lru_tail.prev = page;
+    a20_pagecache_lru_insert_tail(&g_lru_tail, page);
 }
 
 static page_cache_page_t *page_cache_page_at(size_t index)
@@ -173,187 +324,23 @@ static page_cache_page_t *page_cache_page_at(size_t index)
 
 static void free_insert_locked(page_cache_page_t *page)
 {
-    page->hnext = g_free_pages;
-    g_free_pages = page;
-}
-
-static page_cache_page_t *free_take_locked(void)
-{
-    page_cache_page_t *page = g_free_pages;
-    if (!page)
-        return NULL;
-    g_free_pages = page->hnext;
-    page->hnext = NULL;
-    refcount_set(&page->ref_count, 1);
-    lru_remove(page);
-    lru_insert_front(page);
-    return page;
-}
-
-/* The following hash helpers require the page's bucket lock to be held by the
- * caller (the same lock that guards the bucket chain and the refcount/valid
- * transition for a page found in it). */
-static void hash_insert_locked(page_cache_page_t *page)
-{
-    unsigned idx = page_cache_hash_key(page->vnode, page->index);
-    page->hnext = g_hash[idx];
-    g_hash[idx] = page;
-}
-
-static void hash_remove_locked(page_cache_page_t *page)
-{
-    unsigned idx = page_cache_hash_key(page->vnode, page->index);
-    page_cache_page_t **pp = &g_hash[idx];
-    size_t visited = 0;
-    while (*pp) {
-        visited++;
-        if (*pp == page) {
-            *pp = page->hnext;
-            page->hnext = NULL;
-            page_cache_account_scan(visited);
-            return;
-        }
-        pp = &(*pp)->hnext;
-    }
-    page_cache_account_scan(visited);
-    page->hnext = NULL;
-}
-
-static page_cache_page_t *find_locked(vnode_t *vn, uint64_t index)
-{
-    size_t visited = 0;
-    unsigned idx = page_cache_hash_key(vn, index);
-    for (page_cache_page_t *p = g_hash[idx];
-         p; p = p->hnext) {
-        visited++;
-        if (p->valid && p->vnode == vn && p->index == index) {
-            page_cache_account_scan(visited);
-            return p;
-        }
-    }
-    page_cache_account_scan(visited);
-    return NULL;
-}
-
-static void mapping_insert_locked(page_cache_page_t *page)
-{
-    vnode_t *vn = page->vnode;
-    page->mapping_prev = NULL;
-    page->mapping_next = vn->cache_pages;
-    if (vn->cache_pages)
-        vn->cache_pages->mapping_prev = page;
-    vn->cache_pages = page;
-}
-
-static void mapping_remove_locked(page_cache_page_t *page)
-{
-    vnode_t *vn = page->vnode;
-    if (page->mapping_prev)
-        page->mapping_prev->mapping_next = page->mapping_next;
-    else if (vn)
-        vn->cache_pages = page->mapping_next;
-    if (page->mapping_next)
-        page->mapping_next->mapping_prev = page->mapping_prev;
-    page->mapping_prev = NULL;
-    page->mapping_next = NULL;
+    a20_pagecache_free_insert(&g_free_pages, page);
 }
 
 static void dirty_insert_locked(page_cache_page_t *page)
 {
-    if (page->dirty || !page->vnode)
-        return;
-    vnode_t *vn = page->vnode;
-    /* Keep the per-vnode list in descending page-index order.  Sequential
-     * append inserts at the head in O(1), while writeback consumes the tail
-     * (lowest offset) so extent allocation sees monotonically increasing
-     * logical blocks. */
-    page_cache_page_t *head = vn->cache_dirty_pages;
-    page_cache_page_t *tail = vn->cache_dirty_tail;
-    if (!head) {
-        page->dirty_prev = NULL;
-        page->dirty_next = NULL;
-        vn->cache_dirty_pages = page;
-        vn->cache_dirty_tail = page;
-    } else if (page->index >= head->index) {
-        page->dirty_prev = NULL;
-        page->dirty_next = head;
-        head->dirty_prev = page;
-        vn->cache_dirty_pages = page;
-    } else if (page->index <= tail->index) {
-        page->dirty_prev = tail;
-        page->dirty_next = NULL;
-        tail->dirty_next = page;
-        vn->cache_dirty_tail = page;
-    } else {
-        page_cache_page_t *at = head;
-        while (at->dirty_next && at->dirty_next->index > page->index)
-            at = at->dirty_next;
-        page->dirty_prev = at;
-        page->dirty_next = at->dirty_next;
-        at->dirty_next->dirty_prev = page;
-        at->dirty_next = page;
-    }
-
-    page->global_dirty_prev = NULL;
-    page->global_dirty_next = g_dirty_pages;
-    if (g_dirty_pages)
-        g_dirty_pages->global_dirty_prev = page;
-    g_dirty_pages = page;
-    page->dirty = 1;
-    g_dirty_page_count++;
+    a20_pagecache_dirty_insert(page, &g_dirty_pages, &g_dirty_page_count);
 }
 
 static void dirty_remove_locked(page_cache_page_t *page)
 {
-    if (!page->dirty)
-        return;
-    vnode_t *vn = page->vnode;
-    if (page->dirty_prev)
-        page->dirty_prev->dirty_next = page->dirty_next;
-    else if (vn)
-        vn->cache_dirty_pages = page->dirty_next;
-    if (page->dirty_next)
-        page->dirty_next->dirty_prev = page->dirty_prev;
-    else if (vn)
-        vn->cache_dirty_tail = page->dirty_prev;
-
-    if (page->global_dirty_prev)
-        page->global_dirty_prev->global_dirty_next = page->global_dirty_next;
-    else
-        g_dirty_pages = page->global_dirty_next;
-    if (page->global_dirty_next)
-        page->global_dirty_next->global_dirty_prev = page->global_dirty_prev;
-
-    page->dirty_prev = NULL;
-    page->dirty_next = NULL;
-    page->global_dirty_prev = NULL;
-    page->global_dirty_next = NULL;
-    page->dirty = 0;
-    g_dirty_page_count--;
+    a20_pagecache_dirty_remove(page, &g_dirty_pages, &g_dirty_page_count);
 }
 
 /* Caller holds g_page_cache_lock AND the page's bucket lock.  Removing the
  * mapping pins and unlinks the page from hash, per-vnode mapping and dirty
  * lists in one critical section so a concurrent bucket-lock hit can neither
  * observe a half-detached page nor pin a page we are about to reclaim. */
-static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
-{
-    if (!page->valid)
-        return NULL;
-    dirty_remove_locked(page);
-    mapping_remove_locked(page);
-    hash_remove_locked(page);
-    vnode_t *vn = page->vnode;
-    page->vnode = NULL;
-    page->index = 0;
-    page->valid = 0;
-    page->dirty = 0;
-    page->dirty_gen = 0;
-    page->invalidate_gen++;
-    page->uptodate = 0;
-    g_valid_pages--;
-    return vn;
-}
 
 /*
  * Caller holds g_page_cache_lock.  Second-chance eviction: the global LRU
@@ -377,51 +364,15 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
 
 static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
-    page_cache_page_t *page = g_lru_tail.prev;
-    size_t visited = 0;
-    while (page != &g_lru_head && visited < PAGE_CACHE_EVICT_SCAN_BUDGET) {
-        visited++;
-        if (refcount_read(&page->ref_count) == 0 && !page->dirty &&
-            pfn_valid(page->pfn) && pfa.meta[page->pfn].refcount <= 1) {
-            if (page->valid) {
-                unsigned idx = page_cache_hash_key(page->vnode, page->index);
-                unsigned blk = page_cache_bucket(idx);
-                uint64_t bflags = spin_lock_irqsave(&g_page_cache_bucket_locks[blk]);
-                /* Re-check under the bucket lock: a warm hit may have pinned
-                 * this page between the outer scan and here. */
-                if (page->valid &&
-                    refcount_read(&page->ref_count) == 0 && !page->dirty) {
-                    if (page->accessed) {
-                        page->accessed = 0;
-                        page = page->prev;
-                        spin_unlock_irqrestore(&g_page_cache_bucket_locks[blk], bflags);
-                        continue;
-                    }
-                    *deferred_put = detach_mapping_deferred_locked(page);
-                }
-                spin_unlock_irqrestore(&g_page_cache_bucket_locks[blk], bflags);
-                if (!page->valid) {
-                    refcount_set(&page->ref_count, 1);
-                    lru_remove(page);
-                    lru_insert_front(page);
-                    page_cache_account_scan(visited);
-                    return page;
-                }
-                page = page->prev;
-                continue;
-            }
-            /* A free descriptor: not in any hash chain, no bucket lock needed.
-             * (When the free stack is empty no such page is on the LRU.) */
-            refcount_set(&page->ref_count, 1);
-            lru_remove(page);
-            lru_insert_front(page);
-            page_cache_account_scan(visited);
-            return page;
-        }
-        page = page->prev;
-    }
-    page_cache_account_scan(visited);
-    return NULL;
+    vnode_t *deferred = NULL;
+    page_cache_page_t *page = a20_pagecache_evict_scan(
+        &g_lru_head, &g_lru_tail, PAGE_CACHE_EVICT_SCAN_BUDGET,
+        page_cache_state_pfn_reclaimable, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge,
+        &deferred);
+    *deferred_put = deferred;
+    return page;
 }
 
 /* Allocate descriptors and frames in bounded chunks.  The old fixed cache
@@ -528,167 +479,47 @@ int page_cache_init(void)
     return 0;
 }
 
+static uint64_t page_cache_get_global_lock(void *ctx)
+{ (void)ctx; return spin_lock_irqsave(&g_page_cache_lock); }
+static void page_cache_get_global_unlock(void *ctx, uint64_t flags)
+{ (void)ctx; spin_unlock_irqrestore(&g_page_cache_lock, flags); }
+static uint64_t page_cache_get_bucket_lock(void *ctx, uint32_t bucket)
+{ (void)ctx; return page_cache_state_bucket_lock(bucket); }
+static void page_cache_get_bucket_unlock(void *ctx, uint32_t bucket, uint64_t flags)
+{ (void)ctx; page_cache_state_bucket_unlock(bucket, flags); }
+static int page_cache_get_grow(void *ctx, int force)
+{ (void)ctx; return page_cache_grow_internal(force); }
+static page_cache_page_t *page_cache_get_evict(void *ctx, vnode_t **deferred)
+{ (void)ctx; return evict_locked(deferred); }
+static int page_cache_get_pressure_writeback(void *ctx, size_t count)
+{ (void)ctx; return page_cache_writeback_some(count); }
+static void page_cache_get_zero(void *ctx, page_cache_page_t *page)
+{ (void)ctx; memset(page->data, 0, PAGE_SIZE); }
+static void page_cache_get_vnode_get(void *ctx, void *vn)
+{ (void)ctx; vnode_get(vn); }
+static void page_cache_get_vnode_put(void *ctx, void *vn)
+{ (void)ctx; vnode_put(vn); }
+
 page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
 {
     if (!g_initialized || !vn)
         return NULL;
-
-    unsigned idx = page_cache_hash_key(vn, index);
-
-    /* Warm hit fast path: only the bucket lock is taken.  No global LRU
-     * mutation; the accessed bit feeds the second-chance evictor. */
-    uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-    page_cache_page_t *page = find_locked(vn, index);
-    if (page) {
-        page_cache_pin(page);
-        page->accessed = 1;
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-        return page;
-    }
-    page_cache_bucket_unlock_irqrestore(idx, bflags);
-
-    if (!create)
-        return NULL;
-
-    unsigned sweeps = 0;
-
-retry:
-    bflags = page_cache_bucket_lock_irqsave(idx);
-    page = find_locked(vn, index);
-    if (page) {
-        page_cache_pin(page);
-        page->accessed = 1;
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-        return page;
-    }
-    page_cache_bucket_unlock_irqrestore(idx, bflags);
-
-    vnode_t *deferred_put = NULL;
-    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-
-    /* Serialize the miss-to-create transition.  A mapping may have been
-     * published after the optimistic bucket lookup but before this creator
-     * acquired the global allocation lock. */
-    bflags = page_cache_bucket_lock_irqsave(idx);
-    page = find_locked(vn, index);
-    if (page) {
-        page_cache_pin(page);
-        page->accessed = 1;
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-        return page;
-    }
-    page_cache_bucket_unlock_irqrestore(idx, bflags);
-
-    /* Retry the whole allocation attempt: the free stack may have been
-     * refilled, and evict_locked() gets another bounded sweep. */
-evict:
-    page = free_take_locked();
-    if (!page && g_allocated_pages < g_page_limit) {
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-        if (page_cache_grow() == 0)
-            goto retry;
-        flags = spin_lock_irqsave(&g_page_cache_lock);
-        bflags = page_cache_bucket_lock_irqsave(idx);
-        page = find_locked(vn, index);
-        if (page) {
-            page_cache_pin(page);
-            page->accessed = 1;
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
-            spin_unlock_irqrestore(&g_page_cache_lock, flags);
-            return page;
-        }
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-    }
-    if (!page)
-        page = evict_locked(&deferred_put);
-    if (!page) {
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-        /* The budgeted sweep gives up on a run of recently-used candidates
-         * whose second chance it has just spent.  Another bounded sweep finds
-         * them, so escalate through a few before touching anything else: the
-         * whole-cache reclaim that used to sit here discards every clean page
-         * including the ones the second chance exists to keep, which turns
-         * cache pressure into an eviction storm. */
-        if (sweeps++ < PAGE_CACHE_EVICT_SWEEPS) {
-            flags = spin_lock_irqsave(&g_page_cache_lock);
-            goto evict;
-        }
-        /* Buffered writers are allowed to retain dirty data across close(),
-         * so a large build can eventually consume every cache descriptor.
-         * Make bounded forward progress under pressure: write a small batch,
-         * then retry so evict_locked() can reclaim one of the newly clean
-         * mappings.  fsync/sync remain the only explicit durability barriers;
-         * this path is purely cache-pressure writeback. */
-        int written = page_cache_writeback_some(
-            PAGE_CACHE_PRESSURE_WRITEBACK_PAGES);
-        if (written > 0)
-            goto retry;
-        /* Nothing evictable remains: the cache holds mostly pages pinned by
-         * live MAP_SHARED mappings (wl_shm pools etc.).  A user demand fault
-         * must not SIGSEGV because the cache refuses to grow past its soft
-         * working-set limit while plenty of RAM is free, so exceed the soft
-         * limit up to the hard array bound and retry once. */
-        if (page_cache_grow_internal(1) == 0)
-            goto retry;
-        return NULL;
-    }
-
-    /* The descriptor is off the free stack and held by its own reference, so
-     * no other thread can reach the frame or fill it before publication.
-     * Clearing the previous tenant's bytes therefore belongs outside the
-     * allocation critical section rather than in it. */
-    spin_unlock_irqrestore(&g_page_cache_lock, flags);
-    memset(page->data, 0, PAGE_SIZE);
-    flags = spin_lock_irqsave(&g_page_cache_lock);
-
-    /* Publication is a separate critical section, so the index may have been
-     * created while the frame was being cleared. */
-    bflags = page_cache_bucket_lock_irqsave(idx);
-    page_cache_page_t *racer = find_locked(vn, index);
-    if (racer) {
-        page_cache_pin(racer);
-        racer->accessed = 1;
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-        free_insert_locked(page);
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-        if (deferred_put)
-            vnode_put(deferred_put);
-        return racer;
-    }
-    page_cache_bucket_unlock_irqrestore(idx, bflags);
-
-    page->vnode = vn;
-    page->index = index;
-    page->valid = 1;
-    page->dirty = 0;
-    page->dirty_gen = 0;
-    page->invalidate_gen++;
-    page->uptodate = 0;
-    page->accessed = 0;
-    vnode_get(vn);
-    /* Global lock held: publish the mapping and the hash entry under the
-     * bucket lock so warm hits observe fully-initialised fields. */
-    bflags = page_cache_bucket_lock_irqsave(idx);
-    hash_insert_locked(page);
-    mapping_insert_locked(page);
-    g_valid_pages++;
-    /* The descriptor came back from the free stack already pinned. */
-    page_cache_account_pin(page);
-    page_cache_bucket_unlock_irqrestore(idx, bflags);
-    spin_unlock_irqrestore(&g_page_cache_lock, flags);
-    if (deferred_put)
-        vnode_put(deferred_put);
-    return page;
+    return a20_pagecache_get_transaction(
+        &g_page_cache_lock, vn, index, create, g_hash, &g_lru_head, &g_lru_tail,
+        &g_free_pages, &g_dirty_pages, &g_dirty_page_count, &g_valid_pages,
+        (size_t *)g_bucket_pinned, PAGE_CACHE_PRESSURE_WRITEBACK_PAGES,
+        page_cache_get_global_lock,
+        page_cache_get_global_unlock, page_cache_get_bucket_lock,
+        page_cache_get_bucket_unlock, page_cache_get_grow,
+        page_cache_get_evict, page_cache_get_pressure_writeback,
+        page_cache_get_zero, page_cache_get_vnode_get,
+        page_cache_get_vnode_put, page_cache_state_pfn_reclaimable,
+        page_cache_state_scan_bridge);
 }
 
 void page_cache_put(page_cache_page_t *page)
 {
-    if (!page)
-        return;
-    if (refcount_read(&page->ref_count) > 0 &&
-        refcount_dec_and_test(&page->ref_count))
-        page_cache_account_unpin(page);
+    (void)a20_pagecache_put(page, (size_t *)g_bucket_pinned);
 }
 
 void *page_cache_data(page_cache_page_t *page)
@@ -750,69 +581,55 @@ static uint64_t snapshot_invalidate_gen(page_cache_page_t *page)
     return invalidate_gen;
 }
 
-int page_cache_fill_vfile_page(vfile_t *vf, page_cache_page_t *page)
+static void page_cache_fill_lock(void *ctx, page_cache_page_t *page)
+{ (void)ctx; mutex_lock(&page->fill_lock); }
+
+static void page_cache_fill_unlock(void *ctx, page_cache_page_t *page)
+{ (void)ctx; mutex_unlock(&page->fill_lock); }
+
+static int page_cache_fill_ready(void *ctx, page_cache_page_t *page)
+{ (void)ctx; return page_cache_is_uptodate(page); }
+
+static uint64_t page_cache_fill_generation(void *ctx, page_cache_page_t *page)
+{ (void)ctx; return snapshot_invalidate_gen(page); }
+
+static int page_cache_fill_publish(void *ctx, page_cache_page_t *page,
+                                   uint64_t generation)
+{ (void)ctx; return publish_uptodate(page, generation); }
+
+static int page_cache_fill_read_one(void *ctx, page_cache_page_t *page,
+                                    uint8_t *data)
 {
-    if (!vf || !vf->ops || !vf->ops->read || !vf->ops->lseek)
-        return -EINVAL;
-
-    mutex_lock(&page->fill_lock);
-    if (page_cache_is_uptodate(page)) {
-        mutex_unlock(&page->fill_lock);
-        return 0;
-    }
-
-    uint64_t page_base = page->index * PAGE_SIZE;
-    void *data = page_cache_data(page);
-    if (!data) {
-        mutex_unlock(&page->fill_lock);
-        return -ENOMEM;
-    }
-
-    uint64_t invalidate_gen;
-retry:
-    invalidate_gen = snapshot_invalidate_gen(page);
-    if (vf->vnode->ops && vf->vnode->ops->readpage) {
-        int r = vf->vnode->ops->readpage(vf->vnode, page->index,
-                                         data, PAGE_SIZE);
-        if (r < 0) {
-            mutex_unlock(&page->fill_lock);
-            return r;
-        }
-        if (!publish_uptodate(page, invalidate_gen))
-            goto retry;
-        mutex_unlock(&page->fill_lock);
-        return r;
-    }
+    vfile_t *vf = ctx;
+    if (vf->vnode->ops && vf->vnode->ops->readpage)
+        return vf->vnode->ops->readpage(vf->vnode, page->index,
+                                        data, PAGE_SIZE);
 
     mutex_t *fill_offset_lock =
         &g_page_cache_fill_locks[((uintptr_t)vf >> 4) & (PAGE_CACHE_FILL_LOCKS - 1)];
     mutex_lock(fill_offset_lock);
-
     size_t saved = vf->offset;
-
-    long seek_r = vf->ops->lseek(vf, (long)page_base, SEEK_SET);
+    long seek_r = vf->ops->lseek(vf, (long)(page->index * PAGE_SIZE), SEEK_SET);
     if (seek_r < 0) {
         mutex_unlock(fill_offset_lock);
-        mutex_unlock(&page->fill_lock);
         return (int)seek_r;
     }
-
-    int r = vf->ops->read(vf, (char *)data, PAGE_SIZE);
-    int restore_r = vf->ops->lseek(vf, (long)saved, SEEK_SET);
+    int result = vf->ops->read(vf, (char *)data, PAGE_SIZE);
+    long restore_r = vf->ops->lseek(vf, (long)saved, SEEK_SET);
     mutex_unlock(fill_offset_lock);
-    if (restore_r < 0 && r >= 0)
-        r = restore_r;
-    if (r < 0) {
-        mutex_unlock(&page->fill_lock);
-        return r;
-    }
+    if (restore_r < 0 && result >= 0)
+        result = (int)restore_r;
+    return result;
+}
 
-    if ((size_t)r < PAGE_SIZE)
-        memset((char *)data + r, 0, PAGE_SIZE - (size_t)r);
-    if (!publish_uptodate(page, invalidate_gen))
-        goto retry;
-    mutex_unlock(&page->fill_lock);
-    return r;
+int page_cache_fill_vfile_page(vfile_t *vf, page_cache_page_t *page)
+{
+    if (!vf || !vf->ops || !vf->ops->read || !vf->ops->lseek)
+        return -EINVAL;
+    return a20_pagecache_fill_one_transaction(
+        vf, page, page_cache_fill_lock, page_cache_fill_unlock,
+        page_cache_fill_ready, page_cache_fill_generation,
+        page_cache_fill_publish, page_cache_fill_read_one);
 }
 
 /* Fill an ascending, contiguous private-file fault window.  Filesystems with
@@ -847,89 +664,36 @@ static void readahead_buffer_return(void *buffer)
     kfree(buffer);
 }
 
+static int page_cache_fill_read_many(void *ctx, uint64_t first_index,
+                                     uint8_t *buffer, size_t bytes)
+{
+    vfile_t *vf = ctx;
+    return vf->vnode->ops->readpages(vf->vnode, first_index, buffer, bytes);
+}
+
+static uint8_t *page_cache_fill_take_buffer(void *ctx, size_t bytes)
+{ (void)ctx; return readahead_buffer_take(bytes); }
+
+static void page_cache_fill_return_buffer(void *ctx, uint8_t *buffer)
+{ (void)ctx; readahead_buffer_return(buffer); }
+
 int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                                 size_t count)
 {
-    if (!vf || !vf->vnode || !pages || count == 0 ||
-        count > PAGE_CACHE_READAHEAD_PAGES)
+    if (!vf || !vf->vnode || !pages || count == 0)
         return -EINVAL;
-    for (size_t i = 0; i < count; i++) {
-        if (!pages[i] || pages[i]->vnode != vf->vnode ||
-            (i > 0 && pages[i]->index != pages[i - 1]->index + 1))
+    if (!vf->vnode->ops || !vf->vnode->ops->readpages) {
+        if (!vf->ops || !vf->ops->read || !vf->ops->lseek)
             return -EINVAL;
     }
-
-    if (!vf->vnode->ops || !vf->vnode->ops->readpages) {
-        for (size_t i = 0; i < count; i++) {
-            if (!page_cache_is_uptodate(pages[i])) {
-                int r = page_cache_fill_vfile_page(vf, pages[i]);
-                if (r < 0)
-                    return r;
-            }
-        }
-        return 0;
-    }
-
-    char *buffer = (char *)readahead_buffer_take(
-        PAGE_CACHE_READAHEAD_PAGES * PAGE_SIZE);
-    if (!buffer) {
-        /* Allocation pressure must not turn readahead into a fault failure. */
-        return page_cache_fill_vfile_page(vf, pages[0]);
-    }
-
-    /* All callers build windows in increasing page-index order.  Taking the
-     * per-page locks in that order prevents overlap deadlocks. */
-    for (size_t i = 0; i < count; i++)
-        mutex_lock(&pages[i]->fill_lock);
-
-    int result = 0;
-    for (;;) {
-        int retry = 0;
-        size_t cursor = 0;
-        while (cursor < count) {
-            while (cursor < count && page_cache_is_uptodate(pages[cursor]))
-                cursor++;
-            if (cursor == count)
-                break;
-
-            size_t start = cursor;
-            while (cursor < count &&
-                   !page_cache_is_uptodate(pages[cursor]))
-                cursor++;
-            size_t run = cursor - start;
-            uint64_t generations[PAGE_CACHE_READAHEAD_PAGES];
-            for (size_t i = 0; i < run; i++)
-                generations[i] = snapshot_invalidate_gen(pages[start + i]);
-
-            size_t bytes = run * PAGE_SIZE;
-            /* readpages() reports how much of the window it stored and the
-             * shortfall is zeroed below, so pre-clearing the buffer would only
-             * add a second pass over the same bytes. */
-            int r = vf->vnode->ops->readpages(
-                vf->vnode, pages[start]->index, buffer, bytes);
-            if (r < 0) {
-                result = r;
-                goto out;
-            }
-            if ((size_t)r < bytes)
-                memset(buffer + r, 0, bytes - (size_t)r);
-
-            for (size_t i = 0; i < run; i++) {
-                memcpy(page_cache_data(pages[start + i]),
-                       buffer + i * PAGE_SIZE, PAGE_SIZE);
-                if (!publish_uptodate(pages[start + i], generations[i]))
-                    retry = 1;
-            }
-        }
-        if (!retry)
-            break;
-    }
-
-out:
-    for (size_t i = count; i > 0; i--)
-        mutex_unlock(&pages[i - 1]->fill_lock);
-    readahead_buffer_return(buffer);
-    return result;
+    return a20_pagecache_fill_many_transaction(
+        vf, pages, count, PAGE_CACHE_READAHEAD_PAGES,
+        page_cache_fill_lock, page_cache_fill_unlock, page_cache_fill_ready,
+        page_cache_fill_generation, page_cache_fill_publish,
+        page_cache_fill_read_one,
+        vf->vnode->ops && vf->vnode->ops->readpages ?
+            page_cache_fill_read_many : NULL,
+        page_cache_fill_take_buffer, page_cache_fill_return_buffer);
 }
 
 /*
@@ -945,26 +709,10 @@ static int page_cache_readahead_vfile(vfile_t *vf,
                                       page_cache_page_t *first,
                                       size_t file_size)
 {
-    page_cache_page_t *pages[PAGE_CACHE_READAHEAD_PAGES];
-    uint64_t file_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    size_t count = 1;
-
-    pages[0] = first;
-    while (count < PAGE_CACHE_READAHEAD_PAGES &&
-           first->index + count < file_pages) {
-        pages[count] = page_cache_get(vf->vnode, first->index + count, 1);
-        if (!pages[count])
-            break;
-        count++;
-    }
-
-    a20_perf_count(A20_PERF_PAGE_CACHE_READAHEAD_CALLS);
-    a20_perf_add(A20_PERF_PAGE_CACHE_READAHEAD_PAGES, count);
-    int result = page_cache_fill_vfile_pages(vf, pages, count);
-
-    while (count > 1)
-        page_cache_put(pages[--count]);
-    return result;
+    return a20_pagecache_readahead_transaction(
+        vf, first, file_size, PAGE_CACHE_READAHEAD_PAGES,
+        page_cache_file_get, page_cache_fill_window, page_cache_file_put,
+        page_cache_readahead_perf);
 }
 
 /* Where the previous read(2) on this open file stopped, striped by vfile
@@ -1001,6 +749,56 @@ pfn_t page_cache_pfn(page_cache_page_t *page)
     return page ? page->pfn : PFN_NONE;
 }
 
+static page_cache_page_t *page_cache_file_get(void *ctx, uint64_t index, int create)
+{ vfile_t *vf=ctx; return page_cache_get(vf->vnode,index,create); }
+static int page_cache_fill_window(void *ctx, page_cache_page_t **pages,
+                                  size_t count)
+{ return page_cache_fill_vfile_pages(ctx, pages, count); }
+static void page_cache_readahead_perf(void *ctx, size_t count)
+{
+    (void)ctx;
+    a20_perf_count(A20_PERF_PAGE_CACHE_READAHEAD_CALLS);
+    a20_perf_add(A20_PERF_PAGE_CACHE_READAHEAD_PAGES, count);
+}
+static page_cache_page_t *page_cache_update_get(void *ctx, uint64_t index, int create)
+{ return page_cache_get(ctx,index,create); }
+static int page_cache_file_ready(void *ctx, page_cache_page_t *page)
+{ (void)ctx; return page_cache_is_uptodate(page); }
+static int page_cache_file_fill(void *ctx, page_cache_page_t *page)
+{ return page_cache_fill_vfile_page(ctx,page); }
+static int page_cache_file_readahead(void *ctx, page_cache_page_t *page, size_t size)
+{ return page_cache_readahead_vfile(ctx,page,size); }
+static int page_cache_file_resumes(void *ctx, uint64_t index)
+{ vfile_t *vf=ctx; return vf->vnode->ops && vf->vnode->ops->readpages && page_cache_read_resumes(vf,index); }
+static void page_cache_file_record_end(void *ctx, uint64_t index)
+{ page_cache_record_read_end(ctx,index); }
+static void page_cache_file_put(void *ctx, page_cache_page_t *page)
+{ (void)ctx; page_cache_put(page); }
+static void page_cache_file_seek(void *ctx, uint64_t offset)
+{
+    vfile_t *vf=ctx;
+    if (vf->ops->lseek(vf,(long)offset,SEEK_SET)<0) vf->offset=offset;
+}
+static int page_cache_file_lock_page(void *ctx, page_cache_page_t *page)
+{ (void)ctx; mutex_lock(&page->fill_lock); return 0; }
+static int page_cache_file_unlock_page(void *ctx, page_cache_page_t *page)
+{ (void)ctx; mutex_unlock(&page->fill_lock); return 0; }
+static int page_cache_file_mark_dirty(void *ctx, page_cache_page_t *page)
+{ (void)ctx; page_cache_mark_dirty(page); return 0; }
+static int page_cache_file_mark_clean(void *ctx, page_cache_page_t *page)
+{ (void)ctx; page_cache_mark_clean(page); return 0; }
+static int page_cache_file_zero(void *ctx, page_cache_page_t *page)
+{ (void)ctx; memset(page->data,0,PAGE_SIZE); return 0; }
+static int page_cache_file_mark_uptodate(void *ctx, page_cache_page_t *page)
+{ (void)ctx; page_cache_mark_uptodate(page); return 0; }
+static void page_cache_file_write_commit(void *ctx, uint64_t end)
+{ vfile_t *vf=ctx; if(end>vf->vnode->size) vf->vnode->size=end; }
+static void page_cache_file_write_perf(void *ctx, size_t updated)
+{
+    (void)ctx; a20_perf_count(A20_PERF_PCACHE_WRITE_UPDATES);
+    a20_perf_add(A20_PERF_PCACHE_WRITE_UPDATE_PAGES,updated);
+}
+
 int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
 {
     if (!vf || !vf->vnode || !buf)
@@ -1012,58 +810,11 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
     if (count == 0)
         return 0;
 
-    /*
-     * Use the cached vnode->size directly.  File size is already updated by
-     * write/truncate paths, so the expensive stat() call on every read was
-     * a severe performance bottleneck for sequential I/O workloads.
-     */
-    size_t file_size = vf->vnode->size;
-    size_t start = vf->offset;
-    if (start >= file_size)
-        return 0;
-    if (count > file_size - start)
-        count = file_size - start;
-
-    size_t done = 0;
-    while (done < count) {
-        uint64_t pos = start + done;
-        uint64_t index = pos / PAGE_SIZE;
-        size_t page_off = (size_t)(pos % PAGE_SIZE);
-        size_t chunk = PAGE_SIZE - page_off;
-        if (chunk > count - done)
-            chunk = count - done;
-
-        page_cache_page_t *page = page_cache_get(vf->vnode, index, 1);
-        if (!page)
-            break;
-
-        if (!page_cache_is_uptodate(page)) {
-            int r;
-            if (vf->vnode->ops && vf->vnode->ops->readpages &&
-                page_cache_read_resumes(vf, index))
-                r = page_cache_readahead_vfile(vf, page, file_size);
-            else
-                r = page_cache_fill_vfile_page(vf, page);
-            if (r < 0) {
-                page_cache_put(page);
-                if (done == 0)
-                    return r;
-                break;
-            }
-        }
-
-        page_cache_record_read_end(vf, index);
-        memcpy(buf + done, (char *)page_cache_data(page) + page_off, chunk);
-        page_cache_put(page);
-        done += chunk;
-    }
-
-    if (done > 0) {
-        long seek_r = vf->ops->lseek(vf, (long)(start + done), SEEK_SET);
-        if (seek_r < 0)
-            vf->offset = start + done;
-    }
-    return (int)done;
+    return (int)a20_pagecache_read_transaction(
+        vf,vf->vnode->size,vf->offset,(uint8_t *)buf,count,
+        page_cache_file_get,page_cache_file_ready,page_cache_file_fill,
+        page_cache_file_readahead,page_cache_file_resumes,
+        page_cache_file_record_end,page_cache_file_put,page_cache_file_seek);
 }
 
 int page_cache_write_vfile(vfile_t *vf, const char *buf, size_t count)
@@ -1078,91 +829,120 @@ int page_cache_write_vfile(vfile_t *vf, const char *buf, size_t count)
     if (count == 0)
         return 0;
 
-    size_t start = vf->offset;
-    size_t old_size = vf->vnode->size;
-    size_t done = 0;
-    size_t updated = 0;
-    while (done < count) {
-        uint64_t pos = start + done;
-        uint64_t index = pos / PAGE_SIZE;
-        uint64_t page_start = index * PAGE_SIZE;
-        size_t page_off = (size_t)(pos - page_start);
-        size_t chunk = PAGE_SIZE - page_off;
-        if (chunk > count - done)
-            chunk = count - done;
-
-        page_cache_page_t *page = page_cache_get(vf->vnode, index, 1);
-        if (!page)
-            break;
-        if (!page_cache_is_uptodate(page) &&
-            page_start < old_size &&
-            !(page_off == 0 && chunk == PAGE_SIZE)) {
-            int r = page_cache_fill_vfile_page(vf, page);
-            if (r < 0) {
-                page_cache_put(page);
-                if (done == 0)
-                    return r;
-                break;
-            }
-        }
-
-        mutex_lock(&page->fill_lock);
-        if (!page_cache_is_uptodate(page)) {
-            memset(page_cache_data(page), 0, PAGE_SIZE);
-            page_cache_mark_uptodate(page);
-        }
-        memcpy((char *)page_cache_data(page) + page_off,
-               buf + done, chunk);
-        page_cache_mark_dirty(page);
-        mutex_unlock(&page->fill_lock);
-        page_cache_put(page);
-        done += chunk;
-        updated++;
-    }
-
-    if (done != 0) {
-        size_t end = start + done;
-        if (end > vf->vnode->size)
-            vf->vnode->size = end;
-        long seek_r = vf->ops->lseek(vf, (long)end, SEEK_SET);
-        if (seek_r < 0)
-            vf->offset = end;
-    }
-    a20_perf_count(A20_PERF_PCACHE_WRITE_UPDATES);
-    a20_perf_add(A20_PERF_PCACHE_WRITE_UPDATE_PAGES, updated);
-    return (int)done;
+    return (int)a20_pagecache_write_transaction(
+        vf,vf->vnode->size,vf->offset,(const uint8_t *)buf,count,
+        page_cache_file_get,page_cache_file_ready,page_cache_file_fill,
+        page_cache_file_lock_page,page_cache_file_unlock_page,
+        page_cache_file_mark_dirty,page_cache_file_zero,
+        page_cache_file_mark_uptodate,page_cache_file_put,
+        page_cache_file_seek,page_cache_file_write_commit,page_cache_file_write_perf);
 }
 
 static size_t collect_dirty_batch_locked(vnode_t *vn,
                                          page_cache_page_t **pages,
                                          size_t max_pages)
 {
-    page_cache_page_t *page = NULL;
-    if (vn) {
-        page = vn->cache_dirty_tail;
-    } else if (g_dirty_pages && g_dirty_pages->vnode) {
-        /* The global list is ordered by dirtied time, not file offset.  Pick
-         * its vnode, then consume that vnode from the lowest dirty offset so
-         * ext4 sees monotonically increasing logical blocks. */
-        page = g_dirty_pages->vnode->cache_dirty_tail;
-    }
-    page_cache_account_scan(page ? 1 : 0);
-    if (!page || max_pages == 0)
-        return 0;
+    return a20_pagecache_collect_dirty(vn, g_dirty_pages, max_pages, pages,
+                                       (size_t *)g_bucket_pinned,
+                                       page_cache_state_scan_bridge);
+}
 
-    vnode_t *batch_vn = page->vnode;
-    uint64_t next_index = page->index;
-    size_t count = 0;
-    while (page && count < max_pages && page->vnode == batch_vn &&
-           page->index == next_index) {
-        page_cache_pin(page);
-        pages[count++] = page;
-        next_index++;
-        /* Per-vnode dirty pages are descending from head to tail, so the
-         * predecessor of the tail is the next higher file offset. */
-        page = page->dirty_prev;
-    }
+static size_t page_cache_writeback_collect(vnode_t *vn,
+                                           page_cache_page_t **pages,
+                                           size_t max_pages)
+{
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    size_t count = collect_dirty_batch_locked(vn, pages, max_pages);
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
     return count;
+}
+
+static void page_cache_writeback_lock_pages(page_cache_page_t **pages,
+                                            size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        mutex_lock(&pages[i]->fill_lock);
+}
+
+static void page_cache_writeback_unlock_pages(page_cache_page_t **pages,
+                                              size_t count)
+{
+    while (count > 0)
+        mutex_unlock(&pages[--count]->fill_lock);
+}
+
+static int page_cache_writeback_batch_allowed(vnode_t *vn, size_t count)
+{
+    return vn && vn->ops && vn->ops->writepages && count > 1;
+}
+
+static int page_cache_writeback_write(vnode_t *vn, uint64_t index,
+                                      page_cache_page_t **pages, size_t count,
+                                      page_cache_writepage_t writepage,
+                                      void *linear, void *ctx)
+{
+    if (writepage)
+        return writepage(vn, index, pages[0]->data, PAGE_SIZE, ctx);
+    if (vn && vn->ops && vn->ops->writepages && count > 1) {
+        if (!linear)
+            return -ENOMEM;
+        for (size_t i = 0; i < count; i++)
+            memcpy((char *)linear + i * PAGE_SIZE, pages[i]->data, PAGE_SIZE);
+        return vn->ops->writepages(vn, index, linear, count * PAGE_SIZE);
+    }
+    if (vn && vn->ops && vn->ops->writepage)
+        return vn->ops->writepage(vn, index, pages[0]->data, PAGE_SIZE);
+    (void)ctx;
+    return -ENOSYS;
+}
+
+static void *page_cache_writeback_alloc(size_t size)
+{
+    return kmalloc(size);
+}
+
+static void page_cache_writeback_free(void *ptr)
+{
+    kfree(ptr);
+}
+
+static void page_cache_writeback_confirm(page_cache_page_t **pages,
+                                         size_t count, vnode_t *vn,
+                                         uint64_t index, const uint64_t *gens)
+{
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    a20_pagecache_writeback_confirm(pages, count, vn, index, gens,
+                                   &g_dirty_pages, &g_dirty_page_count);
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
+
+static void page_cache_writeback_put(page_cache_page_t *page)
+{
+    page_cache_put(page);
+}
+
+static void page_cache_writeback_serial_lock(vnode_t *vn)
+{
+    mutex_t *lock = &g_page_cache_writeback_lock;
+    if (vn)
+        lock = &g_page_cache_writeback_locks[
+            ((uintptr_t)vn >> 4) & (PAGE_CACHE_WRITEBACK_LOCKS - 1)];
+    mutex_lock(lock);
+}
+
+static void page_cache_writeback_serial_unlock(vnode_t *vn)
+{
+    mutex_t *lock = &g_page_cache_writeback_lock;
+    if (vn)
+        lock = &g_page_cache_writeback_locks[
+            ((uintptr_t)vn >> 4) & (PAGE_CACHE_WRITEBACK_LOCKS - 1)];
+    mutex_unlock(lock);
+}
+
+static void page_cache_writeback_perf(size_t count)
+{
+    a20_perf_count(A20_PERF_PAGE_CACHE_WRITEBACK_BATCHES);
+    a20_perf_add(A20_PERF_PAGE_CACHE_WRITEBACK_PAGES, count);
 }
 
 static int page_cache_writeback_common(vnode_t *vn,
@@ -1172,105 +952,14 @@ static int page_cache_writeback_common(vnode_t *vn,
 {
     if (!g_initialized)
         return 0;
-
-    page_cache_page_t *pages[PAGE_CACHE_WRITEBACK_BATCH_PAGES];
-    uint64_t dirty_gens[PAGE_CACHE_WRITEBACK_BATCH_PAGES];
-    void *linear = NULL;
-    size_t written = 0;
-    int result = 0;
-    mutex_t *wb_lock = &g_page_cache_writeback_lock;
-    if (vn)
-        wb_lock = &g_page_cache_writeback_locks[
-            ((uintptr_t)vn >> 4) & (PAGE_CACHE_WRITEBACK_LOCKS - 1)];
-    mutex_lock(wb_lock);
-    for (;;) {
-        size_t batch_limit = PAGE_CACHE_WRITEBACK_BATCH_PAGES;
-        if (max_pages != 0 && max_pages - written < batch_limit)
-            batch_limit = max_pages - written;
-        uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-        size_t count = collect_dirty_batch_locked(vn, pages, batch_limit);
-        if (count == 0) {
-            spin_unlock_irqrestore(&g_page_cache_lock, flags);
-            break;
-        }
-
-        vnode_t *page_vn = pages[0]->vnode;
-        uint64_t index = pages[0]->index;
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-
-        /* A caller-supplied legacy callback describes one page only.  Native
-         * vnode writepages may consume the whole bounded contiguous batch. */
-        int use_batch = writepage == NULL && page_vn && page_vn->ops &&
-                        page_vn->ops->writepages && count > 1;
-        if (!use_batch) {
-            for (size_t i = 1; i < count; i++)
-                page_cache_put(pages[i]);
-            count = 1;
-        }
-
-        for (size_t i = 0; i < count; i++)
-            mutex_lock(&pages[i]->fill_lock);
-        for (size_t i = 0; i < count; i++)
-            dirty_gens[i] = __atomic_load_n(&pages[i]->dirty_gen,
-                                             __ATOMIC_ACQUIRE);
-
-        int r = 0;
-        if (use_batch) {
-            if (!linear)
-                linear = kmalloc(PAGE_CACHE_WRITEBACK_BATCH_PAGES * PAGE_SIZE);
-            if (!linear) {
-                r = -ENOMEM;
-            } else {
-                for (size_t i = 0; i < count; i++)
-                    memcpy((char *)linear + i * PAGE_SIZE,
-                           pages[i]->data, PAGE_SIZE);
-                r = page_vn->ops->writepages(page_vn, index, linear,
-                                              count * PAGE_SIZE);
-            }
-        } else if (writepage) {
-            r = writepage(page_vn, index, pages[0]->data, PAGE_SIZE, ctx);
-        } else if (page_vn && page_vn->ops && page_vn->ops->writepage) {
-            (void)ctx;
-            r = page_vn->ops->writepage(page_vn, index, pages[0]->data,
-                                         PAGE_SIZE);
-        } else {
-            r = -ENOSYS;
-        }
-
-        flags = spin_lock_irqsave(&g_page_cache_lock);
-        /* Only clear dirty pages whose exact snapshot reached storage. */
-        if (r >= 0) {
-            for (size_t i = 0; i < count; i++) {
-                page_cache_page_t *page = pages[i];
-                if (page->valid && page->vnode == page_vn &&
-                    page->index == index + i &&
-                    __atomic_load_n(&page->dirty_gen, __ATOMIC_ACQUIRE) ==
-                        dirty_gens[i])
-                    dirty_remove_locked(page);
-            }
-        }
-        spin_unlock_irqrestore(&g_page_cache_lock, flags);
-
-        for (size_t i = count; i > 0; i--)
-            mutex_unlock(&pages[i - 1]->fill_lock);
-        for (size_t i = 0; i < count; i++)
-            page_cache_put(pages[i]);
-        if (r < 0) {
-            result = r;
-            break;
-        }
-        written += count;
-        a20_perf_count(A20_PERF_PAGE_CACHE_WRITEBACK_BATCHES);
-        a20_perf_add(A20_PERF_PAGE_CACHE_WRITEBACK_PAGES, count);
-        if (written_pages)
-            *written_pages = written;
-        if (max_pages != 0 && written >= max_pages)
-            break;
-    }
-    if (linear)
-        kfree(linear);
-    mutex_unlock(wb_lock);
-    return result;
+    return a20_pagecache_writeback_transaction(
+        vn, writepage, ctx, max_pages, written_pages,
+        page_cache_writeback_collect, page_cache_writeback_lock_pages,
+        page_cache_writeback_unlock_pages, page_cache_writeback_batch_allowed,
+        page_cache_writeback_write, page_cache_writeback_alloc,
+        page_cache_writeback_free, page_cache_writeback_confirm,
+        page_cache_writeback_put, page_cache_writeback_serial_lock,
+        page_cache_writeback_serial_unlock, page_cache_writeback_perf);
 }
 
 int page_cache_writeback_vnode(vnode_t *vn, page_cache_writepage_t writepage,
@@ -1310,43 +999,12 @@ void page_cache_update_after_write(vnode_t *vn, uint64_t start,
 {
     if (!g_initialized || !vn || !data || len == 0)
         return;
-
-    const char *src = (const char *)data;
-    size_t done = 0;
-    size_t updated = 0;
-    while (done < len) {
-        uint64_t pos = start + done;
-        uint64_t index = pos / PAGE_SIZE;
-        uint64_t page_start = index * PAGE_SIZE;
-        size_t page_off = (size_t)(pos - page_start);
-        size_t chunk = PAGE_SIZE - page_off;
-        if (chunk > len - done)
-            chunk = len - done;
-        int full_page = page_off == 0 && chunk == PAGE_SIZE;
-        int beyond_old_eof = page_start >= old_size;
-
-        page_cache_page_t *page = page_cache_get(vn, index, 0);
-        if (!page && (full_page || beyond_old_eof))
-            page = page_cache_get(vn, index, 1);
-        if (page) {
-            mutex_lock(&page->fill_lock);
-            int authoritative = page_cache_is_uptodate(page);
-            if (full_page || beyond_old_eof || authoritative) {
-                if (!authoritative && !full_page)
-                    memset(page_cache_data(page), 0, PAGE_SIZE);
-                memcpy((char *)page_cache_data(page) + page_off,
-                       src + done, chunk);
-                page_cache_mark_uptodate(page);
-                page_cache_mark_clean(page);
-                updated++;
-            }
-            mutex_unlock(&page->fill_lock);
-            page_cache_put(page);
-        }
-        done += chunk;
-    }
-    a20_perf_count(A20_PERF_PCACHE_WRITE_UPDATES);
-    a20_perf_add(A20_PERF_PCACHE_WRITE_UPDATE_PAGES, updated);
+    a20_pagecache_update_after_write(
+        vn,start,old_size,data,len,page_cache_update_get,
+        page_cache_file_ready,page_cache_file_lock_page,
+        page_cache_file_unlock_page,page_cache_file_mark_uptodate,
+        page_cache_file_mark_clean,page_cache_file_put,
+        page_cache_file_write_perf);
 }
 
 void page_cache_invalidate(vnode_t *vn)
@@ -1354,24 +1012,10 @@ void page_cache_invalidate(vnode_t *vn)
     if (!g_initialized || !vn)
         return;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    size_t detached = 0;
-    size_t visited = 0;
-    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
-        visited++;
-        next = page->mapping_next;
-        if (refcount_read(&page->ref_count) == 0 && !page->dirty) {
-            unsigned idx = page_cache_hash_key(page->vnode, page->index);
-            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-            if (page->valid && page->vnode == vn &&
-                refcount_read(&page->ref_count) == 0 && !page->dirty) {
-                detach_mapping_deferred_locked(page);
-                free_insert_locked(page);
-                detached++;
-            }
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
-        }
-    }
-    page_cache_account_scan(visited);
+    size_t detached = a20_pagecache_detach_unpinned_range(
+        vn, 0, ~(uint64_t)0, 1, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge, NULL);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     for (size_t i = 0; i < detached; i++)
         vnode_put(vn);
@@ -1382,27 +1026,13 @@ void page_cache_discard_unlinked(vnode_t *vn)
     if (!g_initialized || !vn)
         return;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    size_t detached = 0;
+    size_t detached;
     size_t discarded_dirty = 0;
-    size_t visited = 0;
-    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
-        visited++;
-        next = page->mapping_next;
-        if (refcount_read(&page->ref_count) != 0)
-            continue;
-        if (page->dirty)
-            discarded_dirty++;
-        unsigned idx = page_cache_hash_key(page->vnode, page->index);
-        uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-        if (page->valid && page->vnode == vn &&
-            refcount_read(&page->ref_count) == 0) {
-            detach_mapping_deferred_locked(page);
-            free_insert_locked(page);
-            detached++;
-        }
-        page_cache_bucket_unlock_irqrestore(idx, bflags);
-    }
-    page_cache_account_scan(visited);
+    detached = a20_pagecache_detach_unpinned_range(
+        vn, 0, ~(uint64_t)0, 0, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge,
+        &discarded_dirty);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     a20_perf_add(A20_PERF_PAGE_CACHE_DISCARDED_DIRTY, discarded_dirty);
     /* The unlink path retains the transferred ext4 vnode-cache reference
@@ -1420,27 +1050,10 @@ void page_cache_invalidate_range(vnode_t *vn, uint64_t start_byte,
     uint64_t first_idx = start_byte / PAGE_SIZE;
     uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    size_t detached = 0;
-    size_t visited = 0;
-    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
-        visited++;
-        next = page->mapping_next;
-        if (page->index < first_idx || page->index > last_idx)
-            continue;
-        if (refcount_read(&page->ref_count) == 0) {
-            unsigned idx = page_cache_hash_key(page->vnode, page->index);
-            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-            if (page->valid && page->vnode == vn &&
-                page->index >= first_idx && page->index <= last_idx &&
-                refcount_read(&page->ref_count) == 0) {
-                detach_mapping_deferred_locked(page);
-                free_insert_locked(page);
-                detached++;
-            }
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
-        }
-    }
-    page_cache_account_scan(visited);
+    size_t detached = a20_pagecache_detach_unpinned_range(
+        vn, first_idx, last_idx, 0, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge, NULL);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     for (size_t i = 0; i < detached; i++)
         vnode_put(vn);
@@ -1454,27 +1067,10 @@ void page_cache_invalidate_uptodate_range(vnode_t *vn, uint64_t start_byte,
     uint64_t first_idx = start_byte / PAGE_SIZE;
     uint64_t last_idx  = (end_byte - 1) / PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    size_t detached = 0;
-    size_t visited = 0;
-    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
-        visited++;
-        next = page->mapping_next;
-        if (page->index < first_idx || page->index > last_idx)
-            continue;
-        if (refcount_read(&page->ref_count) == 0) {
-            unsigned idx = page_cache_hash_key(page->vnode, page->index);
-            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-            if (page->valid && page->vnode == vn &&
-                page->index >= first_idx && page->index <= last_idx &&
-                refcount_read(&page->ref_count) == 0) {
-                detach_mapping_deferred_locked(page);
-                free_insert_locked(page);
-                detached++;
-            }
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
-        }
-    }
-    page_cache_account_scan(visited);
+    size_t detached = a20_pagecache_detach_unpinned_range(
+        vn, first_idx, last_idx, 0, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge, NULL);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     for (size_t i = 0; i < detached; i++)
         vnode_put(vn);
@@ -1484,59 +1080,11 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
 {
     if (!g_initialized || !vn)
         return;
-    uint64_t eof_index = new_size / PAGE_SIZE;
-    size_t eof_offset = new_size % PAGE_SIZE;
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    size_t detached = 0;
-    size_t visited = 0;
-    for (page_cache_page_t *page = vn->cache_pages, *next; page; page = next) {
-        visited++;
-        next = page->mapping_next;
-        if (page->index < eof_index)
-            continue;
-        int partial_eof_page = eof_offset && page->index == eof_index;
-        /* For a file mapping this pin is permanent: the VMA holds the
-         * page-cache reference for its whole lifetime, so ref_count != 0 means
-         * some user mapping is still reading these bytes right now. */
-        int pinned = refcount_read(&page->ref_count) != 0;
-        if (partial_eof_page &&
-            (page->dirty || page_cache_is_uptodate(page))) {
-            /* Buffered writes may be newer than storage.  Retain the prefix
-             * of the partial EOF page and discard only bytes beyond the new
-             * size; detaching an unpinned dirty page here would lose data that
-             * remains inside the truncated file.  A pinned page must not be
-             * overwritten at all -- zeroing under a live mapping corrupts it,
-             * mapped executable code included -- so it is only marked. */
-            if (!pinned)
-                memset((char *)page->data + eof_offset, 0,
-                       PAGE_SIZE - eof_offset);
-            page->invalidate_gen++;
-            if (page->dirty)
-                __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
-        } else if (!pinned) {
-            unsigned idx = page_cache_hash_key(page->vnode, page->index);
-            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-            if (page->valid && page->vnode == vn &&
-                page->index >= eof_index &&
-                refcount_read(&page->ref_count) == 0) {
-                detach_mapping_deferred_locked(page);
-                free_insert_locked(page);
-                detached++;
-            }
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
-        } else {
-            /* Page is pinned by a live user mapping or a concurrent
-             * reader/writer.  We cannot detach it, but we MUST invalidate it
-             * so that if the file is later extended, the stale old data is
-             * never returned.  Invalidating is enough: the next fault or read
-             * refills from storage.  Zeroing it here would corrupt memory the
-             * mapping is still using, so the contents are left alone. */
-            page->invalidate_gen++;
-            __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
-            dirty_remove_locked(page);
-        }
-    }
-    page_cache_account_scan(visited);
+    size_t detached = a20_pagecache_truncate(
+        vn, new_size, page_cache_state_bucket_lock,
+        page_cache_state_bucket_unlock, g_hash, &g_dirty_pages,
+        &g_dirty_page_count, &g_valid_pages, page_cache_state_scan_bridge);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     for (size_t i = 0; i < detached; i++)
         vnode_put(vn);
@@ -1557,25 +1105,15 @@ size_t page_cache_drop_clean(void)
         while ((size_t)cursor < g_allocated_pages && held_count < 64) {
             page_cache_page_t *page = page_cache_page_at((size_t)cursor++);
             visited++;
-            if (!page->valid || page->dirty ||
-                refcount_read(&page->ref_count) != 0 ||
-                !pfn_valid(page->pfn) ||
-                pfa.meta[page->pfn].refcount > 1)
-                continue;
-            unsigned idx = page_cache_hash_key(page->vnode, page->index);
-            uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
-            if (page->valid && !page->dirty &&
-                refcount_read(&page->ref_count) == 0 &&
-                pfn_valid(page->pfn) &&
-                pfa.meta[page->pfn].refcount <= 1) {
-                vnode_t *vn = detach_mapping_deferred_locked(page);
-                if (vn) {
-                    free_insert_locked(page);
-                    held[held_count++] = vn;
-                }
+            vnode_t *vn = a20_pagecache_reclaim_clean(
+                page, page_cache_state_bucket_lock, page_cache_state_bucket_unlock,
+                page_cache_state_pfn_reclaimable, g_hash, &g_dirty_pages,
+                &g_dirty_page_count, &g_valid_pages, &g_free_pages,
+                page_cache_state_scan_bridge);
+            if (vn) {
+                held[held_count++] = vn;
                 dropped++;
             }
-            page_cache_bucket_unlock_irqrestore(idx, bflags);
         }
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
 
@@ -1604,9 +1142,7 @@ void page_cache_get_stats(page_cache_stats_t *stats)
     stats->valid = g_valid_pages;
     stats->dirty = g_dirty_page_count;
     size_t pinned = 0;
-    for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
-        pinned += __atomic_load_n(&g_bucket_pinned[i].pinned,
-                                  __ATOMIC_RELAXED);
+    pinned = a20_pagecache_pinned_total((const size_t *)g_bucket_pinned);
     stats->pinned = pinned;
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
@@ -1615,16 +1151,15 @@ int page_cache_readahead(vfile_t *vf, uint64_t start_byte, size_t count)
 {
     if (!vf || !vf->vnode)
         return -EINVAL;
-    if (vf->vnode->type != VFS_FT_REGULAR)
-        return 0;
-    if (count == 0)
-        return 0;
-
-    size_t file_size = vf->vnode->size;
-    if (start_byte >= file_size)
-        return 0;
-    if (count > file_size - start_byte)
-        count = file_size - start_byte;
+    /* The admission rules and the EOF clamp are Rust-owned. */
+    {
+        size_t plan_count = 0;
+        if (!a20_pagecache_readahead_plan(vf->vnode->type == VFS_FT_REGULAR,
+                                          vf->vnode->size, start_byte, count,
+                                          &plan_count))
+            return 0;
+        count = plan_count;
+    }
 
     size_t done = 0;
     while (done < count) {

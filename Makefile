@@ -509,9 +509,13 @@ TASK_OBJECTS_IMPL ?= c
 ifeq ($(filter $(TASK_OBJECTS_IMPL),c rust),)
 $(error TASK_OBJECTS_IMPL must be c or rust)
 endif
-CHANNEL_RECV_TXN_IMPL ?= c
-ifeq ($(filter $(CHANNEL_RECV_TXN_IMPL),c rust),)
-$(error CHANNEL_RECV_TXN_IMPL must be c or rust)
+CHANNEL_SEND_IMPL ?= rust
+ifneq ($(CHANNEL_SEND_IMPL),rust)
+$(error CHANNEL_SEND_IMPL is fixed to rust; the C transaction fallback has been retired)
+endif
+CHANNEL_RECV_TXN_IMPL ?= rust
+ifneq ($(CHANNEL_RECV_TXN_IMPL),rust)
+$(error CHANNEL_RECV_TXN_IMPL is fixed to rust; the C transaction fallback has been retired)
 endif
 DONTUNMAP_TXN_IMPL ?= c
 ifeq ($(filter $(DONTUNMAP_TXN_IMPL),c rust),)
@@ -601,6 +605,10 @@ TASK_CONSTRUCTION_TEST ?= 0
 ifeq ($(filter $(TASK_CONSTRUCTION_TEST),0 1),)
 $(error TASK_CONSTRUCTION_TEST must be 0 or 1)
 endif
+ELF_EXEC_TEST ?= 0
+ifeq ($(filter $(ELF_EXEC_TEST),0 1),)
+$(error ELF_EXEC_TEST must be 0 or 1)
+endif
 VMA_IMPL ?= c
 ifeq ($(filter $(VMA_IMPL),c rust),)
 $(error VMA_IMPL must be c or rust)
@@ -613,9 +621,9 @@ VMO_LIFECYCLE_IMPL ?= c
 ifeq ($(filter $(VMO_LIFECYCLE_IMPL),c rust),)
 $(error VMO_LIFECYCLE_IMPL must be c or rust)
 endif
-VMO_PAGER_IMPL ?= c
-ifeq ($(filter $(VMO_PAGER_IMPL),c rust),)
-$(error VMO_PAGER_IMPL must be c or rust)
+VMO_PAGER_IMPL ?= rust
+ifneq ($(VMO_PAGER_IMPL),rust)
+$(error VMO_PAGER_IMPL is fixed to rust; the C transaction fallback has been retired)
 endif
 DRIVER_REGISTRY_IMPL ?= c
 ifeq ($(filter $(DRIVER_REGISTRY_IMPL),c rust),)
@@ -625,7 +633,10 @@ VIRTIO_BLK_CORE_IMPL ?= c
 ifeq ($(filter $(VIRTIO_BLK_CORE_IMPL),c rust),)
 $(error VIRTIO_BLK_CORE_IMPL must be c or rust)
 endif
-ENVELOPE_POLICY_IMPL ?= c
+ENVELOPE_POLICY_IMPL ?= rust
+ifneq ($(ENVELOPE_POLICY_IMPL),rust)
+$(error ENVELOPE_POLICY_IMPL is fixed to rust; the C transaction fallback has been retired)
+endif
 ENVELOPE_ACQUIRE_RACE_TEST ?= 0
 ifeq ($(filter $(ENVELOPE_ACQUIRE_RACE_TEST),0 1),)
 $(error ENVELOPE_ACQUIRE_RACE_TEST must be 0 or 1)
@@ -635,9 +646,6 @@ ifeq ($(filter $(ABI),linux both),)
 $(error ENVELOPE_ACQUIRE_RACE_TEST requires ABI=linux or ABI=both)
 endif
 endif
-ifeq ($(filter $(ENVELOPE_POLICY_IMPL),c rust),)
-$(error ENVELOPE_POLICY_IMPL must be c or rust)
-endif
 FDTABLE_STATE_IMPL ?= c
 ifeq ($(filter $(FDTABLE_STATE_IMPL),c rust),)
 $(error FDTABLE_STATE_IMPL must be c or rust)
@@ -646,9 +654,33 @@ EVENTPOLL_STATE_IMPL ?= c
 ifeq ($(filter $(EVENTPOLL_STATE_IMPL),c rust),)
 $(error EVENTPOLL_STATE_IMPL must be c or rust)
 endif
-EVENT_DESCRIPTOR_STATE_IMPL ?= c
-ifeq ($(filter $(EVENT_DESCRIPTOR_STATE_IMPL),c rust),)
-$(error EVENT_DESCRIPTOR_STATE_IMPL must be c or rust)
+EVENT_DESCRIPTOR_STATE_IMPL ?= rust
+ifneq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
+$(error EVENT_DESCRIPTOR_STATE_IMPL is fixed to rust; the C transaction fallback has been retired)
+endif
+SYSV_SEM_IMPL ?= rust
+ifneq ($(SYSV_SEM_IMPL),rust)
+$(error SYSV_SEM_IMPL is fixed to rust)
+endif
+POSIX_MQ_IMPL ?= rust
+ifneq ($(POSIX_MQ_IMPL),rust)
+$(error POSIX_MQ_IMPL is fixed to rust)
+endif
+SYSV_MSG_IMPL ?= rust
+ifneq ($(SYSV_MSG_IMPL),rust)
+$(error SYSV_MSG_IMPL is fixed to rust)
+endif
+SYSV_SHM_IMPL ?= rust
+ifneq ($(SYSV_SHM_IMPL),rust)
+$(error SYSV_SHM_IMPL is fixed to rust)
+endif
+USERFAULTFD_STATE_IMPL ?= rust
+ifneq ($(USERFAULTFD_STATE_IMPL),rust)
+$(error USERFAULTFD_STATE_IMPL is fixed to rust)
+endif
+FUTEX_WAIT_IMPL ?= rust
+ifneq ($(FUTEX_WAIT_IMPL),rust)
+$(error FUTEX_WAIT_IMPL is fixed to rust)
 endif
 LINUX_SCM_RIGHTS_IMPL ?= c
 ifeq ($(filter $(LINUX_SCM_RIGHTS_IMPL),c rust),)
@@ -670,10 +702,80 @@ KEYRING_IMPL ?= c
 ifeq ($(filter $(KEYRING_IMPL),c rust),)
 $(error KEYRING_IMPL must be c or rust)
 endif
-VFS_LIFECYCLE_IMPL ?= c
-ifeq ($(filter $(VFS_LIFECYCLE_IMPL),c rust),)
-$(error VFS_LIFECYCLE_IMPL must be c or rust)
+VFS_LIFECYCLE_IMPL ?= rust
+ifneq ($(VFS_LIFECYCLE_IMPL),rust)
+$(error VFS_LIFECYCLE_IMPL is fixed to rust for the selected VFS lifecycle implementation)
 endif
+# The signal core (kernel/proc/signal_core.rs) is always the Rust
+# implementation; the C files are mechanical bridges (locks, usercopy, wait
+# queues, the hardware signal frame).
+ifeq ($(SYSV_SHM_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error SYSV_SHM_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/sysv_shm.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_SYSV_SHM_OBJECT)
+endif
+endif
+ifeq ($(USERFAULTFD_STATE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error USERFAULTFD_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/userfaultfd.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_USERFAULTFD_STATE_OBJECT)
+endif
+endif
+ifeq ($(FUTEX_WAIT_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error FUTEX_WAIT_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/futex.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_FUTEX_WAIT_OBJECT)
+endif
+endif
+
+# Canonical (sb, ino) -> vnode identity index.  rust selects
+# kernel/fs/vfs/vnode_identity.rs as the production path; c selects the
+# header-only reference model (vnode_identity_c.h), which is retained solely as
+# the host differential harness oracle and an explicit C-side regression image.
+# The selector only matters where kernel/fs/uxfs/uxfs.c is in the profile; the
+# MCU trim excludes it and stays Rust-free.
+# UXFS RPC engine (admission, deadline/retry sequencing, stale-reply filtering,
+# errno mapping).  rust is the production path; c keeps the reference loop in
+# uxfs.c for the baseline image and the host harness.
+# UXFS per-operation decision engine (request construction, response decoding,
+# canonical-identity/page-cache/size transitions for the namespace and data
+# plane).  rust is the production path; c keeps the inline op layer in uxfs.c
+# for the baseline image and the host harness.
+# Block cache structural state (hash/LRU/refs/dirty/holds/quarantine/eviction
+# policy).  rust is the production path; c keeps the reference model in
+# block_cache.c for the baseline image and the host differential harness.
+# Page cache structural state (hash/LRU/mapping/dirty lists/free stack/
+# refcount+pin accounting/detach/eviction/dirty-batch ordering).  rust is the
+# production path; c keeps the reference model in page_cache.c for the baseline
+# image and the host differential harness.
+# VFS dentry cache state (hash chains, LRU, free list, match + second chance,
+# eviction policy, bucket drop).
+# procfs read/seek offset state and directory-cursor state (dirent layout,
+# budget, cursor advance).  rust is the production path; c keeps the reference
+# loops in procfs.c for the baseline image and the host differential harness.
+# procfs node table, node classification and content plan (name table,
+# parent-scoped node table, file type/mode, generator and capacity policy).
+# VFS path/name state (join, split, normalise with and without a chroot floor,
+# containment test, trailing-slash trim).  rust is the production path; c keeps
+# the reference bodies in path.c for the baseline image and the host harness.
+# VFS path-resolution walk (component iteration, symlink following with its
+# RESOLVE_* decisions and loop limit, mount crossing, boundary checks, errno
+# mapping).  rust is the production path; c keeps the reference walk in
+# path_resolution.c for the baseline image and the host harness.
+# VFS directory-mutation orchestration (unlink/rmdir/rename decision order,
+# flag validation, sticky gate, ordered side effects).
+# Mount-namespace lifecycle (in-flight admission counters, shutdown begin/abort,
+# teardown-pass policy).
+# Mount-table orchestration (umount path matching + busy rules, move_mount
+# validation order).
+# Open-file I/O-path policy (read/write admission, page-cache vs buffered vs
+# direct data path).
 ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
 ifeq ($(filter $(ABI),linux both),)
 $(error LINUX_SCM_RIGHTS_IMPL=rust requires ABI=linux or ABI=both)
@@ -689,14 +791,11 @@ ifeq ($(filter $(ABI),linux both),)
 $(error KEYRING_IMPL=rust requires ABI=linux or ABI=both)
 endif
 endif
+RUST_FS_STATE_ACTIVE = $(if $(filter $(KERNEL_DIR)/fs/%,$(KERNEL_SRC)),rust,)
+RUST_SIGNAL_CORE_ACTIVE = $(if $(filter $(KERNEL_DIR)/proc/signal.c,$(KERNEL_SRC)),rust,)
 RUST_RUNTIME_TEST ?= 0
 ifeq ($(filter $(RUST_RUNTIME_TEST),0 1),)
 $(error RUST_RUNTIME_TEST must be 0 or 1)
-endif
-ifeq ($(RUST_RUNTIME_TEST),1)
-ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
-$(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
-endif
 endif
 VMO_PAGER_TEST ?= 0
 ifeq ($(filter $(VMO_PAGER_TEST),0 1),)
@@ -764,12 +863,6 @@ ifeq ($(NOMMU),1)
 $(error DONTUNMAP_TXN_IMPL=rust requires an MMU profile)
 endif
 endif
-CHANNEL_RECV_TXN_ACTIVE := $(if $(filter $(ABI),native both),1,)
-ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
-ifeq ($(CHANNEL_RECV_TXN_ACTIVE),)
-$(error CHANNEL_RECV_TXN_IMPL=rust requires ABI=native or ABI=both)
-endif
-endif
 TASK_OBJECTS_ACTIVE := $(if $(filter $(ABI),native both),1,)
 ifeq ($(ARCH),armv7m)
 ifneq ($(MCU_NATIVE_PROGRAM),1)
@@ -791,8 +884,15 @@ $(error TASK_OBJECTS_IMPL=rust requires an active Native task-object profile (AB
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)-taskrust
 endif
+ifeq ($(CHANNEL_SEND_IMPL),rust)
+ifneq ($(filter $(KERNEL_DIR)/ipc/a20_channel.c,$(KERNEL_SRC)),)
+BUILD_VARIANT := $(BUILD_VARIANT)-channelsendrust
+endif
+endif
 ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+ifneq ($(filter $(KERNEL_DIR)/abi/native/sys_native_ipc.c,$(KERNEL_SRC)),)
 BUILD_VARIANT := $(BUILD_VARIANT)-recvtxnrust
+endif
 endif
 ifeq ($(DONTUNMAP_TXN_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-mremaprust
@@ -851,6 +951,9 @@ endif
 ifeq ($(TASK_CONSTRUCTION_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-test
 endif
+ifeq ($(ELF_EXEC_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-elfexectest
+endif
 ifeq ($(VMA_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-vmarust
 endif
@@ -872,14 +975,24 @@ endif
 ifeq ($(ENVELOPE_POLICY_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-envelope-policy-rust
 endif
-ifeq ($(FDTABLE_STATE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-fdtable-rust
-endif
 ifeq ($(EVENTPOLL_STATE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-eventpoll-rust
 endif
 ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-event-desc-rust
+endif
+ifeq ($(SYSV_SEM_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-sysv-sem-rust
+endif
+ifeq ($(POSIX_MQ_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-posix-mq-rust
+endif
+ifeq ($(SYSV_MSG_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-sysv-msg-rust
+endif
+ifeq ($(SYSV_SHM_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-sysv-shm-rust
 endif
 ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-envelope-acquire-race-test
@@ -893,9 +1006,26 @@ endif
 ifeq ($(NET_SOCKET_QUEUE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-net-socket-queue-rust
 endif
+# Keep the C reference model only for the explicit regression/oracle selector;
+# the Rust index is the default production path.
+BUILD_VARIANT := $(BUILD_VARIANT)-uxfs-vnident-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-uxfs-rpc-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-uxfs-ops-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-blockcache-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-pagecache-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-dcache-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-procfs-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-procfsnode-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfspath-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfswalk-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfsmutate-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfsmntns-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfsmount-rust
+BUILD_VARIANT := $(BUILD_VARIANT)-vfsfile-rust
 ifeq ($(KEYRING_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-keyring-rust
 endif
+BUILD_VARIANT := $(BUILD_VARIANT)-signal-rust
 ifeq ($(VMO_PAGER_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-vmo-pager-test
 endif
@@ -1555,6 +1685,9 @@ endif
 ifeq ($(TASK_OBJECTS_IMPL),rust)
 CFLAGS += -DCONFIG_TASK_OBJECT_RUST
 endif
+ifeq ($(CHANNEL_SEND_IMPL),rust)
+CFLAGS += -DCONFIG_A20_CHANNEL_SEND_RUST
+endif
 ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
 CFLAGS += -DCONFIG_CHANNEL_RECV_TXN_RUST
 endif
@@ -1615,6 +1748,9 @@ endif
 ifeq ($(TASK_CONSTRUCTION_TEST),1)
 CFLAGS += -DCONFIG_TASK_CONSTRUCTION_TEST
 endif
+ifeq ($(ELF_EXEC_TEST),1)
+CFLAGS += -DCONFIG_ELF_EXEC_TEST
+endif
 ifeq ($(VMA_IMPL),rust)
 CFLAGS += -DCONFIG_VMA_REGION_RUST
 endif
@@ -1639,14 +1775,22 @@ endif
 ifeq ($(ENVELOPE_ACQUIRE_RACE_TEST),1)
 CFLAGS += -DCONFIG_ENVELOPE_ACQUIRE_RACE_TEST
 endif
-ifeq ($(FDTABLE_STATE_IMPL),rust)
 CFLAGS += -DCONFIG_FDTABLE_STATE_RUST
-endif
 ifeq ($(EVENTPOLL_STATE_IMPL),rust)
 CFLAGS += -DCONFIG_EVENTPOLL_STATE_RUST
 endif
 ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
 CFLAGS += -DCONFIG_EVENT_DESCRIPTOR_STATE_RUST
+endif
+CFLAGS += -DCONFIG_SYSV_SEM_RUST
+CFLAGS += -DCONFIG_POSIX_MQ_RUST
+CFLAGS += -DCONFIG_SYSV_MSG_RUST
+CFLAGS += -DCONFIG_SYSV_SHM_RUST
+ifeq ($(USERFAULTFD_STATE_IMPL),rust)
+CFLAGS += -DCONFIG_USERFAULTFD_STATE_RUST
+endif
+ifeq ($(FUTEX_WAIT_IMPL),rust)
+CFLAGS += -DCONFIG_FUTEX_WAIT_RUST
 endif
 ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
 CFLAGS += -DCONFIG_LINUX_SCM_RIGHTS_RUST
@@ -1693,12 +1837,24 @@ CFLAGS += -DCONFIG_CLUSTER_UART_COM2
 endif
 EXTRA_CFLAGS ?=
 CFLAGS += $(EXTRA_CFLAGS)
-ifeq ($(VFS_LIFECYCLE_IMPL),rust)
 CFLAGS += -DCONFIG_VFS_RUST_LIFECYCLE
-endif
 ifeq ($(EXT4_EXTENT_TXN_IMPL),rust)
 CFLAGS += -DCONFIG_EXT4_RUST_EXTENT_TXN
 endif
+CFLAGS += -DCONFIG_UXFS_VNODE_IDENTITY_RUST
+CFLAGS += -DCONFIG_UXFS_RPC_STATE_RUST
+CFLAGS += -DCONFIG_UXFS_OPS_STATE_RUST
+CFLAGS += -DCONFIG_BLOCK_CACHE_STATE_RUST
+CFLAGS += -DCONFIG_PAGE_CACHE_STATE_RUST
+CFLAGS += -DCONFIG_VFS_DCACHE_STATE_RUST
+CFLAGS += -DCONFIG_PROCFS_STATE_RUST
+CFLAGS += -DCONFIG_PROCFS_NODE_STATE_RUST
+CFLAGS += -DCONFIG_VFS_PATH_STATE_RUST
+CFLAGS += -DCONFIG_VFS_PATH_WALK_STATE_RUST
+CFLAGS += -DCONFIG_VFS_MUTATE_STATE_RUST
+CFLAGS += -DCONFIG_VFS_MNTNS_STATE_RUST
+CFLAGS += -DCONFIG_VFS_MOUNT_STATE_RUST
+CFLAGS += -DCONFIG_FILE_STATE_RUST
 ifeq ($(QEMU_SHARED_SMP),1)
 ifneq ($(BOARD),qemu-virt-x86_64)
 $(error QEMU_SHARED_SMP requires BOARD=qemu-virt-x86_64)
@@ -2124,10 +2280,18 @@ include tools/driver-modules.mk
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
 LFS_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/littlefs/%.c,$(KERNEL_SRC))
+# KERNEL_SRC is complete here, so source-bound Rust modules count as active
+# runtime-test selectors for the profile actually being built.
+ifeq ($(RUST_RUNTIME_TEST),1)
+ifeq ($(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_SEND_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE)),)
+$(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
+endif
+endif
 include tools/rust-kernel.mk
 KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
               $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
+KERNEL_OBJ += $(RUST_LANDLOCK_OBJECT) $(RUST_SECCOMP_OBJECT)
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/net/netfilter_rewrite.c,$(KERNEL_SRC)),)
@@ -2141,11 +2305,16 @@ $(error TASK_OBJECTS_IMPL=rust requires kernel/proc/task_object.c in this profil
 endif
 KERNEL_OBJ += $(RUST_TASK_OBJECT)
 endif
-ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/abi/native/sys_native_ipc.c,$(KERNEL_SRC)),)
-$(error CHANNEL_RECV_TXN_IMPL=rust requires the Native IPC syscall source in this profile)
+ifeq ($(CHANNEL_SEND_IMPL),rust)
+ifneq ($(filter $(KERNEL_DIR)/ipc/a20_channel.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_CHANNEL_SEND_OBJECT)
+KERNEL_OBJ += $(RUST_EVENT_QUEUE_OBJECT)
 endif
+endif
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+ifneq ($(filter $(KERNEL_DIR)/abi/native/sys_native_ipc.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_CHANNEL_RECV_TXN_OBJECT)
+endif
 endif
 ifeq ($(DONTUNMAP_TXN_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/mm/mremap.c,$(KERNEL_SRC)),)
@@ -2250,6 +2419,7 @@ $(error MM_SHUTDOWN_WRITE_IMPL=rust requires kernel/mm/shutdown_write.c in this 
 endif
 KERNEL_OBJ += $(RUST_MM_SHUTDOWN_WRITE_OBJECT)
 endif
+KERNEL_OBJ += $(RUST_ELF_CORE_OBJECT)
 ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/proc/task_construction.c,$(KERNEL_SRC)),)
 $(error TASK_CONSTRUCTION_IMPL=rust requires kernel/proc/task_construction.c in this profile)
@@ -2275,10 +2445,9 @@ endif
 KERNEL_OBJ += $(RUST_VMO_LIFECYCLE_OBJECT)
 endif
 ifeq ($(VMO_PAGER_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/ipc/a20_pager.c,$(KERNEL_SRC)),)
-$(error VMO_PAGER_IMPL=rust requires kernel/ipc/a20_pager.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/a20_pager.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_VMO_PAGER_OBJECT)
+endif
 endif
 ifeq ($(DRIVER_REGISTRY_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/drivers/core/driver_core.c,$(KERNEL_SRC)),)
@@ -2295,18 +2464,15 @@ KERNEL_OBJ += $(RUST_VIRTIO_BLK_CORE_OBJECT)
 endif
 endif
 ifeq ($(ENVELOPE_POLICY_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/ipc/envelope.c,$(KERNEL_SRC)),)
-$(error ENVELOPE_POLICY_IMPL=rust requires kernel/ipc/envelope.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/envelope.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_ENVELOPE_POLICY_OBJECT)
 endif
-ifeq ($(FDTABLE_STATE_IMPL),rust)
+endif
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
-$(error FDTABLE_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+$(error the Rust module has no kernel Rust target for ARCH=$(ARCH))
 endif
 ifneq ($(filter $(KERNEL_DIR)/fs/fdtable.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_FDTABLE_STATE_OBJECT)
-endif
 endif
 ifeq ($(EVENTPOLL_STATE_IMPL),rust)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
@@ -2317,10 +2483,60 @@ KERNEL_OBJ += $(RUST_EVENTPOLL_STATE_OBJECT)
 endif
 endif
 ifeq ($(EVENT_DESCRIPTOR_STATE_IMPL),rust)
+ifneq ($(filter $(KERNEL_DIR)/ipc/eventfd.c $(KERNEL_DIR)/ipc/timerfd.c,$(KERNEL_SRC)),)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
 $(error EVENT_DESCRIPTOR_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
 endif
 KERNEL_OBJ += $(RUST_EVENT_DESCRIPTOR_STATE_OBJECT)
+endif
+endif
+ifeq ($(SYSV_SEM_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error SYSV_SEM_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/sysv_sem.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_SYSV_SEM_OBJECT)
+endif
+endif
+ifeq ($(POSIX_MQ_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error POSIX_MQ_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/posix_mq.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_POSIX_MQ_OBJECT)
+endif
+endif
+ifeq ($(SYSV_MSG_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error SYSV_MSG_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/sysv_msg.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_SYSV_MSG_OBJECT)
+endif
+endif
+ifeq ($(SYSV_SHM_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error SYSV_SHM_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/sysv_shm.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_SYSV_SHM_OBJECT)
+endif
+endif
+ifeq ($(USERFAULTFD_STATE_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error USERFAULTFD_STATE_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/userfaultfd.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_USERFAULTFD_STATE_OBJECT)
+endif
+endif
+ifeq ($(FUTEX_WAIT_IMPL),rust)
+ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
+$(error FUTEX_WAIT_IMPL=rust has no kernel Rust target for ARCH=$(ARCH))
+endif
+ifneq ($(filter $(KERNEL_DIR)/ipc/futex.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_FUTEX_WAIT_OBJECT)
+endif
 endif
 ifeq ($(LINUX_SCM_RIGHTS_IMPL),rust)
 ifeq ($(filter $(ARCH),x86_64 aarch64 loongarch64 riscv64 riscv32 arm32 armv7m),)
@@ -2356,11 +2572,86 @@ endif
 KERNEL_OBJ += $(RUST_KEYRING_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
+ifeq ($(filter $(KERNEL_DIR)/proc/signal.c,$(KERNEL_SRC)),)
+$(error signal core requires kernel/proc/signal.c in this profile)
+endif
+KERNEL_OBJ += $(RUST_SIGNAL_CORE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 ifeq ($(VFS_LIFECYCLE_IMPL),rust)
 KERNEL_OBJ += $(RUST_VFS_LIFECYCLE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
-ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
+# Block/page cache state engines exist only where their C adapters are in the
+# profile; the MCU trim has no block cache and stays Rust-free for them.
+ifneq ($(filter $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_BLOCK_CACHE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/page_cache.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_PAGE_CACHE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/dcache.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_DCACHE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+# procfs cursor/offset state exists only where its C adapter is in the profile;
+# the MCU trim has no procfs and stays Rust-free for it.
+ifneq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_PROCFS_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_PROCFS_NODE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/path.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_PATH_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/path_resolution.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_PATH_WALK_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_MUTATE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/mntns.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_MNTNS_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/mount_ops.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VFS_MOUNT_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/file.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_FILE_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+# The identity index object exists only where its C adapter (uxfs.c) is part of
+# the profile; the MCU trim excludes uxfs.c and needs no Rust target even though
+# the selector defaults to c.
+ifneq ($(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_UXFS_VNODE_IDENTITY_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+# The RPC engine object lives beside the adapter it drives.
+ifneq ($(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_UXFS_RPC_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_UXFS_OPS_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+# Lifetime/token negotiation is unconditionally Rust-owned; the state struct
+# and all transitions live in kernel/fs/uxfs/lifetime_state.rs.
+ifneq ($(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_UXFS_LIFETIME_STATE_OBJECT)
+RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
+endif
+ifneq ($(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_SEND_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(CHANNEL_SEND_IMPL)),)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 

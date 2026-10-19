@@ -53,6 +53,25 @@ pub struct A20EnvRegistrySlot {
     pub reserved: u16,
 }
 
+#[repr(C)]
+pub struct A20EnvUseTransaction {
+    pub expired: *mut i32,
+    pub expire_tick: u64,
+    pub now: u64,
+    pub shadows: *mut A20EnvShadowState,
+    pub shadow_capacity: u32,
+    pub identity: u64,
+    pub remaining_ops: *mut u64,
+    pub remaining_data: *mut u64,
+    pub want_write: i32,
+    pub bytes: u64,
+    pub use_ok: *mut u64,
+    pub deny_rights: *mut u64,
+    pub deny_ops: *mut u64,
+    pub deny_data: *mut u64,
+    pub bytes_charged: *mut u64,
+}
+
 const _: [(); ((2 * core::mem::size_of::<usize>() + 12 + core::mem::align_of::<usize>() - 1)
     / core::mem::align_of::<usize>()) * core::mem::align_of::<usize>()] =
     [(); core::mem::size_of::<A20EnvRegistrySlot>()];
@@ -259,6 +278,46 @@ pub unsafe extern "C" fn a20_envelope_policy_charge_use(
     DENY_NONE
 }
 
+/// Own the locked use-charge transaction: expiry, vfile-identity rights,
+/// operation/data budget ordering, and exactly one matching result counter.
+#[no_mangle]
+pub unsafe extern "C" fn a20_envelope_policy_use_transaction(
+    txn: *mut A20EnvUseTransaction,
+) -> i32 {
+    if txn.is_null() { return EINVAL; }
+    let txn = unsafe { &mut *txn };
+    if txn.expired.is_null() || txn.shadows.is_null()
+        || txn.remaining_ops.is_null() || txn.remaining_data.is_null()
+        || txn.use_ok.is_null() || txn.deny_rights.is_null()
+        || txn.deny_ops.is_null() || txn.deny_data.is_null()
+        || txn.bytes_charged.is_null()
+    { return EINVAL; }
+
+    if unsafe { a20_envelope_policy_expire(txn.expired, txn.expire_tick, txn.now) } != 0 {
+        return EACCES;
+    }
+    let mut rights = 0u64;
+    let mut tracked = 0i32;
+    if unsafe { a20_envelope_policy_shadow_lookup(txn.shadows, txn.shadow_capacity,
+                                                   txn.identity, &mut rights, &mut tracked) } != 0 {
+        return EACCES;
+    }
+    let decision = unsafe { a20_envelope_policy_charge_use(
+        txn.remaining_ops, txn.remaining_data, rights, tracked, txn.want_write, txn.bytes,
+    ) };
+    match decision {
+        DENY_RIGHTS => unsafe { *txn.deny_rights = (*txn.deny_rights).wrapping_add(1); },
+        DENY_OPS => unsafe { *txn.deny_ops = (*txn.deny_ops).wrapping_add(1); },
+        DENY_DATA => unsafe { *txn.deny_data = (*txn.deny_data).wrapping_add(1); },
+        DENY_NONE => unsafe {
+            *txn.bytes_charged = (*txn.bytes_charged).wrapping_add(txn.bytes);
+            *txn.use_ok = (*txn.use_ok).wrapping_add(1);
+        },
+        _ => return EACCES,
+    }
+    if decision == DENY_NONE { 0 } else { EACCES }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn a20_envelope_policy_shadow_init(
     entries: *mut A20EnvShadowState,
@@ -444,6 +503,38 @@ mod tests {
         assert_eq!((ops, data), (1, 3));
         assert_eq!(unsafe { a20_envelope_policy_charge_use(&mut ops, &mut data, 2, 1, 1, 4) }, DENY_DATA);
         assert_eq!((ops, data), (0, 3));
+    }
+
+    #[test]
+    fn use_transaction_commits_one_result_and_keeps_failure_order() {
+        let mut shadows = [A20EnvShadowState::default(); 2];
+        shadows[0] = A20EnvShadowState { vfile_identity: 7, obj_type: 4, reserved: [0; 7], rights: 1 };
+        let (mut expired, mut ops, mut data) = (0, 2, 3);
+        let (mut use_ok, mut deny_rights, mut deny_ops, mut deny_data, mut charged) = (0, 0, 0, 0, 0);
+        let mut txn = A20EnvUseTransaction {
+            expired: &mut expired, expire_tick: 0, now: 0, shadows: shadows.as_mut_ptr(),
+            shadow_capacity: 2, identity: 7, remaining_ops: &mut ops, remaining_data: &mut data,
+            want_write: 1, bytes: 2, use_ok: &mut use_ok, deny_rights: &mut deny_rights,
+            deny_ops: &mut deny_ops, deny_data: &mut deny_data, bytes_charged: &mut charged,
+        };
+        assert_eq!(unsafe { a20_envelope_policy_use_transaction(&mut txn) }, EACCES);
+        assert_eq!((ops, data, deny_rights, deny_ops, deny_data, use_ok, charged), (2, 3, 1, 0, 0, 0, 0));
+
+        txn.want_write = 0;
+        txn.bytes = 4;
+        assert_eq!(unsafe { a20_envelope_policy_use_transaction(&mut txn) }, EACCES);
+        assert_eq!((ops, data, deny_rights, deny_ops, deny_data, use_ok, charged), (1, 3, 1, 0, 1, 0, 0));
+
+        txn.identity = 9; // untracked/grandfathered authorities remain usable
+        txn.bytes = 2;
+        assert_eq!(unsafe { a20_envelope_policy_use_transaction(&mut txn) }, 0);
+        assert_eq!((ops, data, deny_rights, deny_ops, deny_data, use_ok, charged), (0, 1, 1, 0, 1, 1, 2));
+
+        ops = 1;
+        txn.expire_tick = 5;
+        txn.now = 5;
+        assert_eq!(unsafe { a20_envelope_policy_use_transaction(&mut txn) }, EACCES);
+        assert_eq!((expired, ops, data, deny_rights, deny_ops, deny_data, use_ok, charged), (1, 1, 1, 1, 0, 1, 1, 2));
     }
 
     #[test]

@@ -106,6 +106,119 @@ static int read_all(const char *path, char *buf, size_t cap)
     return (int)n;
 }
 
+static int scan_dir_repeatedly(const char *pair, const char *path,
+                               const char *wanted, const char *forbidden)
+{
+    for (int pass = 0; pass < 128; pass++) {
+        DIR *d = opendir(path);
+        if (!d) {
+            printf("UXFS_READDIR: FAIL pair=%s path=%s pass=%d opendir errno=%d\n",
+                   pair, path, pass, errno);
+            fflush(stdout);
+            return 1;
+        }
+        int saw_wanted = 0, saw_forbidden = 0;
+        unsigned entries = 0;
+        struct dirent *ent;
+        errno = 0;
+        while ((ent = readdir(d)) != NULL) {
+            entries++;
+            if (strcmp(ent->d_name, wanted) == 0)
+                saw_wanted = 1;
+            if (strcmp(ent->d_name, forbidden) == 0)
+                saw_forbidden = 1;
+        }
+        int read_errno = errno;
+        int close_rc = closedir(d);
+        if (close_rc != 0 || !saw_wanted || saw_forbidden) {
+            printf("UXFS_READDIR: FAIL pair=%s path=%s pass=%d entries=%u wanted=%d forbidden=%d close=%d read_errno=%d\n",
+                   pair, path, pass, entries, saw_wanted, saw_forbidden,
+                   close_rc, read_errno);
+            fflush(stdout);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int run_concurrent_readdir_pair(const char *tag, const char *path_a,
+                                       const char *path_b)
+{
+    static const char *const want[] = { "ONLY_A", "ONLY_B" };
+    static const char *const reject[] = { "ONLY_B", "ONLY_A" };
+    const char *const path[] = { path_a, path_b };
+    for (int i = 0; i < 2; i++) {
+        if (mkdir(path[i], 0755) != 0) {
+            printf("UXFS_READDIR: FAIL pair=%s mkdir path=%s errno=%d\n",
+                   tag, path[i], errno);
+            return -1;
+        }
+        char marker[64];
+        snprintf(marker, sizeof(marker), "%s/%s", path[i], want[i]);
+        int fd = open(marker, O_CREAT | O_WRONLY, 0644);
+        if (fd < 0 || close(fd) != 0) {
+            printf("UXFS_READDIR: FAIL pair=%s create path=%s errno=%d\n",
+                   tag, marker, errno);
+            return -1;
+        }
+    }
+    pid_t child[2];
+    for (int i = 0; i < 2; i++) {
+        child[i] = fork();
+        if (child[i] < 0)
+            return -1;
+        if (child[i] == 0)
+            _exit(scan_dir_repeatedly(tag, path[i], want[i], reject[i]));
+    }
+    int failed = 0;
+    for (int i = 0; i < 2; i++) {
+        int status = 0;
+        if (waitpid(child[i], &status, 0) != child[i] ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            printf("UXFS_READDIR: FAIL pair=%s child=%d status=0x%x\n",
+                   tag, i, status);
+            failed = 1;
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        char marker[64];
+        snprintf(marker, sizeof(marker), "%s/%s", path[i], want[i]);
+        if (unlink(marker) != 0 || rmdir(path[i]) != 0) {
+            printf("UXFS_READDIR: FAIL pair=%s cleanup path=%s errno=%d\n",
+                   tag, path[i], errno);
+            failed = 1;
+        }
+    }
+    return failed ? -1 : 0;
+}
+
+/* Exercise simultaneous RPC reply decoding both within one mounted volume
+ * and across independent superblocks, where request locks cannot serialize. */
+static int test_concurrent_readdir(void)
+{
+    if (run_concurrent_readdir_pair("same-sb", "/untfs/ra", "/untfs/rb") != 0)
+        return -1;
+    printf("UXFS_READDIR: same-sb PASS\n");
+    if (run_concurrent_readdir_pair("cross-sb", "/untfs/rc", "/uext4/rd") != 0)
+        return -1;
+    printf("UXFS_READDIR: cross-sb PASS\n");
+    return 0;
+}
+
+static int test_readdir_only(void)
+{
+    if (spawn_ufsd("/uext4", "2", "ext4") < 0 ||
+        wait_path("/uext4/hello.txt", 500))
+        return fail("UXFS_READDIR", "ext4 service mount");
+    if (spawn_ufsd("/untfs", "4", "ntfs") < 0 ||
+        wait_path("/untfs", 500))
+        return fail("UXFS_READDIR", "ntfs service mount");
+    if (test_concurrent_readdir() != 0)
+        return fail("UXFS_READDIR", "concurrent readdir");
+    printf("UXFS_READDIR: PASS\n");
+    return 0;
+}
+
 static unsigned char pattern[8192];
 
 static int roundtrip(const char *tag, const char *dir, const char *name)
@@ -621,6 +734,8 @@ int main(int argc, char **argv)
             return test_ext4_close_retry(2);
         if (strcmp(argv[1], "ntfs") == 0)
             return test_ntfs();
+        if (strcmp(argv[1], "readdir") == 0)
+            return test_readdir_only();
         if (strcmp(argv[1], "mount-state-clean") == 0)
             return test_ext4_mount_state(0);
         if (strcmp(argv[1], "mount-state-verify") == 0)

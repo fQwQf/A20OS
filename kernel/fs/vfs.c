@@ -18,6 +18,7 @@
 #include "fs/vfs/mntns.h"
 #include "fs/vfs/path.h"
 #include "fs/vfs/stat_perm.h"
+#include "fs/vfs/mutate_state.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "ipc/signalfd.h"
@@ -815,205 +816,138 @@ int vfs_mkdir(const char *path, int mode) {
     return r;
 }
 
+/* ---------------------------------------------------------------------------
+ * Rust-owned directory-mutation orchestration (VFS_MUTATE_IMPL=rust)
+ *
+ * The engine owns the decision order of unlink/rmdir/rename; these callbacks
+ * are the mechanical half -- the path plumbing (the Rust-owned string layer
+ * plus the mount table), the vnode references, the filesystem
+ * lookup/unlink/rmdir/rename calls, the permission and sticky checks, and the
+ * notification/quota/dcache side effects.
+ * ------------------------------------------------------------------------- */
+
+static int mut_join(const char *cwd, const char *path, char *out, size_t outsz)
+{
+    return vfs_path_join(cwd, path, out, outsz);
+}
+static int mut_split(const char *path, char *parent, size_t psz, char *name,
+                     size_t nsz, size_t max_path_len)
+{
+    (void)max_path_len; /* path.c bounds with its own MAX_PATH_LEN */
+    return vfs_path_split_parent_name(path, parent, psz, name, nsz);
+}
+static int mut_norm(char *path, const char *root, size_t max_path_len)
+{
+    (void)max_path_len;
+    return vfs_path_normalize_absolute_with_root(path, root);
+}
+static int mut_beneath(const char *s, const char *r) { return path_is_beneath(s, r); }
+static void *mut_find_mount(const char *p) { return vfs_find_mount(p); }
+static const char *mut_strip(const char *p, const void *m)
+{
+    return vfs_strip_mount_prefix(p, (const mount_t *)m);
+}
+static void *mut_mnt_root(const void *m) { return ((const mount_t *)m)->root; }
+static int mut_mnt_type(const void *m) { return ((const mount_t *)m)->type; }
+static void *mut_lookup_path(void *m, const char *r)
+{
+    return vnode_lookup_path((mount_t *)m, r);
+}
+static int mut_errno(void) { return vfs_lookup_errno(); }
+static void mut_put(void *v) { vnode_put((vnode_t *)v); }
+static int mut_type(const void *v) { return ((const vnode_t *)v)->type; }
+static uint64_t mut_ino(const void *v) { return ((const vnode_t *)v)->ino; }
+static size_t mut_size(const void *v) { return ((const vnode_t *)v)->size; }
+static void *mut_mnt(const void *v) { return ((const vnode_t *)v)->mnt; }
+static int mut_has_lookup(const void *d)
+{
+    const vnode_t *v = (const vnode_t *)d;
+    return v->ops && v->ops->lookup ? 1 : 0;
+}
+static int mut_lookup(void *d, const char *n, void **o)
+{
+    vnode_t *dir = (vnode_t *)d;
+    vnode_t *v = NULL;
+    int r = dir->ops->lookup(dir, n, &v);
+    *o = v;
+    return r;
+}
+static int mut_has_unlink(const void *d)
+{
+    const vnode_t *v = (const vnode_t *)d;
+    return v->ops && v->ops->unlink ? 1 : 0;
+}
+static int mut_has_rmdir(const void *d)
+{
+    const vnode_t *v = (const vnode_t *)d;
+    return v->ops && v->ops->rmdir ? 1 : 0;
+}
+static int mut_has_rename(const void *d)
+{
+    const vnode_t *v = (const vnode_t *)d;
+    return v->ops && v->ops->rename ? 1 : 0;
+}
+static int mut_do_unlink(void *d, const char *n)
+{
+    return ((vnode_t *)d)->ops->unlink((vnode_t *)d, n);
+}
+static int mut_do_rmdir(void *d, const char *n)
+{
+    return ((vnode_t *)d)->ops->rmdir((vnode_t *)d, n);
+}
+static int mut_do_rename(void *od, const char *on, void *nd, const char *nn, uint32_t f)
+{
+    return ((vnode_t *)od)->ops->rename((vnode_t *)od, on, (vnode_t *)nd, nn, f);
+}
+static int mut_perm(void *v, int mask) { return vfs_vnode_permission((vnode_t *)v, mask); }
+static int mut_sticky(void *d, void *victim)
+{
+    return vfs_sticky_may_remove((vnode_t *)d, (vnode_t *)victim);
+}
+static void mut_notify_delete(void *d, const char *n, int is_dir)
+{
+    inotify_vnode_event((vnode_t *)d, n, is_dir ? (IN_DELETE | IN_ISDIR) : IN_DELETE);
+    a20_fs_notify(d, A20_EVENT_FS_DELETE, n, 0, 0);
+}
+static void mut_notify_rename(void *od, const char *on, void *nd, const char *nn)
+{
+    inotify_vnode_event((vnode_t *)od, on, IN_MOVED_FROM);
+    a20_fs_notify(od, A20_EVENT_FS_RENAME, on, 0, 0);
+    inotify_vnode_event((vnode_t *)nd, nn, IN_MOVED_TO);
+    a20_fs_notify(nd, A20_EVENT_FS_RENAME, nn, 0, 0);
+}
+static void mut_notify_self(void *v) { inotify_vnode_event((vnode_t *)v, NULL, IN_DELETE_SELF); }
+static void mut_quota(void *v, size_t sz) { quota_account_inode_remove((vnode_t *)v, sz); }
+static void mut_dc_inv(void *d, const char *n) { vfs_dcache_invalidate((vnode_t *)d, n); }
+static void mut_dc_inv_all(void) { vfs_dcache_invalidate_all(); }
+
+static const struct vfs_mutate_ops g_mutate_ops = {
+    .join = mut_join, .split_parent_name = mut_split, .normalize_with_root = mut_norm,
+    .is_beneath = mut_beneath, .find_mount = mut_find_mount, .strip_mount_prefix = mut_strip,
+    .mnt_root = mut_mnt_root, .mnt_type = mut_mnt_type, .lookup_path = mut_lookup_path,
+    .lookup_errno = mut_errno, .vnode_put = mut_put, .vn_type = mut_type, .vn_ino = mut_ino,
+    .vn_size = mut_size, .vn_mnt = mut_mnt, .has_lookup = mut_has_lookup, .lookup = mut_lookup,
+    .has_unlink = mut_has_unlink, .has_rmdir = mut_has_rmdir, .has_rename = mut_has_rename,
+    .do_unlink = mut_do_unlink, .do_rmdir = mut_do_rmdir, .do_rename = mut_do_rename,
+    .permission = mut_perm, .sticky_may_remove = mut_sticky, .notify_delete = mut_notify_delete,
+    .notify_rename = mut_notify_rename, .notify_self_delete = mut_notify_self,
+    .quota_remove = mut_quota, .dcache_invalidate = mut_dc_inv,
+    .dcache_invalidate_all = mut_dc_inv_all,
+    .max_path_len = MAX_PATH_LEN, .max_name_len = MAX_NAME_LEN,
+};
+
+
 int vfs_unlink(const char *path) {
-    char resolved[MAX_PATH_LEN];
     task_t *cur = proc_current();
     const char *cwd = cur ? cur->fs.cwd : "/";
-    int pr = vfs_path_join(cwd, path, resolved, sizeof(resolved));
-    if (pr < 0)
-        return pr;
-
-    mount_t *mnt = vfs_find_mount(resolved);
-    if (!mnt || !mnt->root) return -ENOENT;
-
-    const char *rel = vfs_strip_mount_prefix(resolved, mnt);
-    char parent_path[MAX_PATH_LEN];
-    char name[MAX_NAME_LEN];
-    int sr = vfs_path_split_parent_name(rel, parent_path, sizeof(parent_path),
-                                        name, sizeof(name));
-    if (sr < 0)
-        return sr;
-
-    vnode_t *parent = vnode_lookup_path(mnt, parent_path);
-    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
-    if (parent->type != VFS_FT_DIR) {
-        vnode_put(parent);
-        return -ENOTDIR;
-    }
-    if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
-        vnode_put(parent);
-        return -EACCES;
-    }
-    if (!parent->ops || !parent->ops->unlink) {
-        vnode_put(parent);
-        return -ENOTDIR;
-    }
-
-    vnode_t *victim = NULL;
-    if (parent->ops->lookup && parent->ops->lookup(parent, name, &victim) == 0 && victim) {
-        int sr = vfs_sticky_may_remove(parent, victim);
-        if (sr < 0) {
-            vnode_put(victim);
-            vnode_put(parent);
-            return sr;
-        }
-    }
-
-    int r = parent->ops->unlink(parent, name);
-    if (r == 0) {
-        inotify_vnode_event(parent, name, IN_DELETE);
-        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
-        if (victim)
-            quota_account_inode_remove(victim, victim->size);
-        if (victim)
-            inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
-        vfs_dcache_invalidate(parent, name);
-    }
-    vnode_put(victim);
-    vnode_put(parent);
-    return r;
+    return a20_vfs_unlink(&g_mutate_ops, cwd, path);
 }
 
 int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
-    if (!old || !newpath) return -EINVAL;
-    if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))
-        return -EINVAL;
-    if ((flags & RENAME_NOREPLACE) && (flags & RENAME_EXCHANGE))
-        return -EINVAL;
-
     task_t *cur = proc_current();
     const char *cwd = cur ? cur->fs.cwd : "/";
     const char *root = cur && cur->fs.root_path[0] ? cur->fs.root_path : "/";
-
-    char old_resolved[MAX_PATH_LEN];
-    char new_resolved[MAX_PATH_LEN];
-    int pr = vfs_path_join(cwd, old, old_resolved, sizeof(old_resolved));
-    if (pr < 0)
-        return pr;
-    pr = vfs_path_join(cwd, newpath, new_resolved, sizeof(new_resolved));
-    if (pr < 0)
-        return pr;
-
-    if (strcmp(root, "/") != 0 && !path_is_beneath(root, old_resolved)) {
-        char rooted[MAX_PATH_LEN];
-        if (strcmp(old_resolved, "/") == 0)
-            snprintf(rooted, sizeof(rooted), "%s", root);
-        else
-            snprintf(rooted, sizeof(rooted), "%s%s", root, old_resolved);
-        vfs_path_normalize_absolute_with_root(rooted, root);
-        strncpy(old_resolved, rooted, sizeof(old_resolved) - 1);
-        old_resolved[sizeof(old_resolved) - 1] = '\0';
-    } else {
-        if (vfs_path_normalize_absolute_with_root(old_resolved, root) < 0)
-            return -ENAMETOOLONG;
-    }
-    if (strcmp(root, "/") != 0 && !path_is_beneath(root, new_resolved)) {
-        char rooted[MAX_PATH_LEN];
-        if (strcmp(new_resolved, "/") == 0)
-            snprintf(rooted, sizeof(rooted), "%s", root);
-        else
-            snprintf(rooted, sizeof(rooted), "%s%s", root, new_resolved);
-        vfs_path_normalize_absolute_with_root(rooted, root);
-        strncpy(new_resolved, rooted, sizeof(new_resolved) - 1);
-        new_resolved[sizeof(new_resolved) - 1] = '\0';
-    } else {
-        if (vfs_path_normalize_absolute_with_root(new_resolved, root) < 0)
-            return -ENAMETOOLONG;
-    }
-
-    char old_parent[MAX_PATH_LEN], old_name[MAX_NAME_LEN];
-    char new_parent[MAX_PATH_LEN], new_name[MAX_NAME_LEN];
-    int sr = vfs_path_split_parent_name(old_resolved, old_parent, sizeof(old_parent),
-                                        old_name, sizeof(old_name));
-    if (sr < 0)
-        return sr;
-    sr = vfs_path_split_parent_name(new_resolved, new_parent, sizeof(new_parent),
-                                    new_name, sizeof(new_name));
-    if (sr < 0)
-        return sr;
-
-    mount_t *old_mnt = vfs_find_mount(old_parent);
-    mount_t *new_mnt = vfs_find_mount(new_parent);
-    if (!old_mnt || !new_mnt) return -ENOENT;
-    if (old_mnt != new_mnt) return -EXDEV;
-
-    vnode_t *old_dir = vnode_lookup_path(old_mnt, vfs_strip_mount_prefix(old_parent, old_mnt));
-    vnode_t *new_dir = vnode_lookup_path(new_mnt, vfs_strip_mount_prefix(new_parent, new_mnt));
-    if (!old_dir || !new_dir) {
-        vnode_put(old_dir);
-        vnode_put(new_dir);
-        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
-    }
-    if (old_dir->type != VFS_FT_DIR || new_dir->type != VFS_FT_DIR) {
-        vnode_put(old_dir);
-        vnode_put(new_dir);
-        return -ENOTDIR;
-    }
-    if (vfs_vnode_permission(old_dir, W_OK | X_OK) < 0 ||
-        vfs_vnode_permission(new_dir, W_OK | X_OK) < 0) {
-        vnode_put(old_dir);
-        vnode_put(new_dir);
-        return -EACCES;
-    }
-    if (!old_dir->ops || !old_dir->ops->rename) {
-        vnode_put(old_dir);
-        vnode_put(new_dir);
-        return -ENOSYS;
-    }
-
-    vnode_t *old_victim = NULL;
-    int old_is_dir = 0;
-    if (old_dir->ops->lookup && old_dir->ops->lookup(old_dir, old_name, &old_victim) == 0 && old_victim) {
-        old_is_dir = old_victim->type == VFS_FT_DIR;
-        int sr = vfs_sticky_may_remove(old_dir, old_victim);
-        vnode_put(old_victim);
-        if (sr < 0) {
-            vnode_put(old_dir);
-            vnode_put(new_dir);
-            return sr;
-        }
-    }
-
-    vnode_t *new_victim = NULL;
-    if (new_dir->ops->lookup && new_dir->ops->lookup(new_dir, new_name, &new_victim) == 0 && new_victim) {
-        if (flags & RENAME_NOREPLACE) {
-            vnode_put(new_victim);
-            vnode_put(old_dir);
-            vnode_put(new_dir);
-            return -EEXIST;
-        }
-        int sr = vfs_sticky_may_remove(new_dir, new_victim);
-        if (sr < 0) {
-            vnode_put(new_victim);
-            vnode_put(old_dir);
-            vnode_put(new_dir);
-            return sr;
-        }
-    }
-
-    int r = old_dir->ops->rename(old_dir, old_name, new_dir, new_name, flags);
-    if (r == 0) {
-        inotify_vnode_event(old_dir, old_name, IN_MOVED_FROM);
-        a20_fs_notify(old_dir, A20_EVENT_FS_RENAME, old_name, 0, 0);
-        inotify_vnode_event(new_dir, new_name, IN_MOVED_TO);
-        a20_fs_notify(new_dir, A20_EVENT_FS_RENAME, new_name, 0, 0);
-        int ramfs_dir_reparent = old_dir->mnt &&
-            old_dir->mnt->type == FS_TYPE_RAMFS &&
-            old_dir->ino != new_dir->ino &&
-            (old_is_dir || ((flags & RENAME_EXCHANGE) && new_victim &&
-                            new_victim->type == VFS_FT_DIR));
-        if (ramfs_dir_reparent) {
-            /* Descendant RAMFS vnodes retain parent pointers used by '..'. */
-            vfs_dcache_invalidate_all();
-        } else {
-            vfs_dcache_invalidate(old_dir, old_name);
-            vfs_dcache_invalidate(new_dir, new_name);
-        }
-    }
-    vnode_put(new_victim);
-    vnode_put(old_dir);
-    vnode_put(new_dir);
-    return r;
+    return a20_vfs_rename_flags(&g_mutate_ops, cwd, root, old, newpath, flags);
 }
 
 int vfs_rename(const char *old, const char *newpath) {
@@ -1021,60 +955,9 @@ int vfs_rename(const char *old, const char *newpath) {
 }
 
 int vfs_rmdir(const char *path) {
-    if (!path) return -EINVAL;
-
     task_t *cur = proc_current();
     const char *cwd = cur ? cur->fs.cwd : "/";
-
-    char resolved[MAX_PATH_LEN];
-    int pr = vfs_path_join(cwd, path, resolved, sizeof(resolved));
-    if (pr < 0) return pr;
-
-    char parent_path[MAX_PATH_LEN];
-    char name[MAX_NAME_LEN];
-    int sr = vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path),
-                                        name, sizeof(name));
-    if (sr < 0) return sr;
-
-    mount_t *mnt = vfs_find_mount(parent_path);
-    if (!mnt || !mnt->root) return -ENOENT;
-
-    vnode_t *parent = vnode_lookup_path(mnt, vfs_strip_mount_prefix(parent_path, mnt));
-    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
-    if (parent->type != VFS_FT_DIR) {
-        vnode_put(parent);
-        return -ENOTDIR;
-    }
-    if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
-        vnode_put(parent);
-        return -EACCES;
-    }
-    if (!parent->ops || !parent->ops->rmdir) {
-        vnode_put(parent);
-        return -ENOSYS;
-    }
-
-    vnode_t *victim = NULL;
-    if (parent->ops->lookup && parent->ops->lookup(parent, name, &victim) == 0 && victim) {
-        int sr = vfs_sticky_may_remove(parent, victim);
-        if (sr < 0) {
-            vnode_put(victim);
-            vnode_put(parent);
-            return sr;
-        }
-    }
-
-    int r = parent->ops->rmdir(parent, name);
-    if (r == 0) {
-        inotify_vnode_event(parent, name, IN_DELETE | IN_ISDIR);
-        a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
-        if (victim)
-            inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
-        vfs_dcache_invalidate(parent, name);
-    }
-    vnode_put(victim);
-    vnode_put(parent);
-    return r;
+    return a20_vfs_rmdir(&g_mutate_ops, cwd, path);
 }
 
 vnode_t *vfs_resolve_no_follow_final(const char *path) {

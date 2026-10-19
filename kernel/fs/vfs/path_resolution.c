@@ -8,6 +8,7 @@
 #include "fs/vfs/path.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/path_walk_state.h"
 #include "fs/file.h"
 #include "proc/proc.h"
 #include "core/string.h"
@@ -22,25 +23,108 @@
 
 
 
-static int vnode_is_mount_root(vnode_t *vn)
+
+/* ---------------------------------------------------------------------------
+ * Rust-owned walk (VFS_PATH_WALK_IMPL=rust)
+ *
+ * The engine owns the traversal and every decision in it; these callbacks are
+ * the mechanical half -- vnode references, the filesystem lookup/readlink
+ * calls, the dcache probe/insert, the permission check and the mount-table
+ * lookups.  The string layer the walk consumes is the Rust-owned one in
+ * path.c, so the walk and the layer it reads share an implementation.
+ * ------------------------------------------------------------------------- */
+
+static void walk_vnode_get(void *vn) { vnode_get((vnode_t *)vn); }
+static void walk_vnode_put(void *vn) { vnode_put((vnode_t *)vn); }
+static int walk_vn_type(const void *vn) { return ((const vnode_t *)vn)->type; }
+static uint64_t walk_vn_ino(const void *vn) { return ((const vnode_t *)vn)->ino; }
+static uint32_t walk_vn_link_flags(const void *vn) { return ((const vnode_t *)vn)->link_flags; }
+static void *walk_vn_parent(const void *vn) { return ((const vnode_t *)vn)->parent; }
+static void *walk_vn_mnt(const void *vn) { return ((const vnode_t *)vn)->mnt; }
+static int walk_has_lookup(const void *dir)
 {
-    return vn && vn->mnt && vn->mnt->root &&
-           vn->type == VFS_FT_DIR &&
-           vn->ino == vn->mnt->root->ino;
+    const vnode_t *d = (const vnode_t *)dir;
+    return d->ops && d->ops->lookup ? 1 : 0;
+}
+static int walk_lookup(void *dir, const char *name, void **out)
+{
+    vnode_t *d = (vnode_t *)dir;
+    vnode_t *n = NULL;
+    int r = d->ops->lookup(d, name, &n);
+    *out = n;
+    return r;
+}
+static int walk_has_readlink(const void *vn)
+{
+    const vnode_t *v = (const vnode_t *)vn;
+    return v->ops && v->ops->readlink ? 1 : 0;
+}
+static int walk_readlink(void *vn, char *buf, size_t sz)
+{
+    vnode_t *v = (vnode_t *)vn;
+    return v->ops->readlink(v, buf, sz);
+}
+static int walk_permission(void *vn, int mask) { return vfs_vnode_permission((vnode_t *)vn, mask); }
+static void *walk_dcache_lookup(void *dir, const char *name)
+{
+    return vfs_dcache_lookup((vnode_t *)dir, name);
+}
+static void walk_dcache_insert(void *dir, const char *name, void *vn)
+{
+    vfs_dcache_insert((vnode_t *)dir, name, (vnode_t *)vn);
+}
+static void *walk_find_mount(const char *path) { return vfs_find_mount(path); }
+static void *walk_mount_parent(void *mnt) { return vfs_mount_parent((mount_t *)mnt); }
+static const char *walk_strip_mount_prefix(const char *path, const void *mnt)
+{
+    return vfs_strip_mount_prefix(path, (const mount_t *)mnt);
+}
+static void *walk_mnt_root(const void *mnt) { return ((const mount_t *)mnt)->root; }
+static const char *walk_mnt_path(const void *mnt) { return ((const mount_t *)mnt)->path; }
+static void *walk_lookup_path(void *mnt, const char *rel)
+{
+    return vnode_lookup_path((mount_t *)mnt, rel);
+}
+static int walk_lookup_errno(void) { return vfs_lookup_errno(); }
+static int walk_normalize_with_root(char *path, const char *root, size_t max_path_len)
+{
+    (void)max_path_len; /* path.c bounds with its own MAX_PATH_LEN */
+    return vfs_path_normalize_absolute_with_root(path, root);
+}
+static int walk_is_beneath(const char *start, const char *resolved)
+{
+    return path_is_beneath(start, resolved);
 }
 
-static int count_path_components(const char *path)
-{
-    int n = 0;
-    const char *p = path;
-    while (*p == '/') p++;
-    while (*p) {
-        n++;
-        while (*p && *p != '/') p++;
-        while (*p == '/') p++;
-    }
-    return n;
-}
+static const struct vfs_walk_ops g_walk_ops = {
+    .vnode_get = walk_vnode_get,
+    .vnode_put = walk_vnode_put,
+    .vn_type = walk_vn_type,
+    .vn_ino = walk_vn_ino,
+    .vn_link_flags = walk_vn_link_flags,
+    .vn_parent = walk_vn_parent,
+    .vn_mnt = walk_vn_mnt,
+    .has_lookup = walk_has_lookup,
+    .lookup = walk_lookup,
+    .has_readlink = walk_has_readlink,
+    .readlink = walk_readlink,
+    .permission = walk_permission,
+    .dcache_lookup = walk_dcache_lookup,
+    .dcache_insert = walk_dcache_insert,
+    .find_mount = walk_find_mount,
+    .mount_parent = walk_mount_parent,
+    .strip_mount_prefix = walk_strip_mount_prefix,
+    .mnt_root = walk_mnt_root,
+    .mnt_path = walk_mnt_path,
+    .lookup_path = walk_lookup_path,
+    .lookup_errno = walk_lookup_errno,
+    .normalize_with_root = walk_normalize_with_root,
+    .is_beneath = walk_is_beneath,
+    .max_path_len = MAX_PATH_LEN,
+    .max_name_len = MAX_NAME_LEN,
+    .max_symlinks = MAX_SYMLINKS,
+};
+
 
 /* Resolve an absolute path within a vnode tree, honouring openat2 resolve
  * flags.  On success returns a referenced vnode and writes the fully-resolved
@@ -53,314 +137,8 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                                    char *resolved_out,
                                    size_t resolved_out_sz,
                                    int *lookup_err) {
-    if (!path || !start || !root_path || !resolved_out || resolved_out_sz == 0 || !lookup_err) {
-        if (lookup_err) *lookup_err = -EINVAL;
-        return NULL;
-    }
-
-    *lookup_err = 0;
-    strncpy(resolved_out, path, resolved_out_sz - 1);
-    resolved_out[resolved_out_sz - 1] = '\0';
-
-    if (vfs_path_normalize_absolute_with_root(resolved_out, root_path) < 0) {
-        *lookup_err = -ENAMETOOLONG;
-        return NULL;
-    }
-
-    mount_t *start_mnt = vfs_find_mount(start);
-    if (!start_mnt) start_mnt = vfs_find_mount("/");
-
-    mount_t *mnt = vfs_find_mount(resolved_out);
-    if (!mnt || !mnt->root) {
-        *lookup_err = -ENOENT;
-        return NULL;
-    }
-
-    if ((resolve & RESOLVE_NO_XDEV) && mnt != start_mnt) {
-        *lookup_err = -EXDEV;
-        return NULL;
-    }
-
-    if ((resolve & RESOLVE_BENEATH) && !path_is_beneath(start, resolved_out)) {
-        *lookup_err = -EXDEV;
-        return NULL;
-    }
-
-    vnode_t *cur = mnt->root;
-    vnode_get(cur);
-
-    if (strcmp(resolved_out, "/") == 0) {
-        return cur;
-    }
-
-    char buf[MAX_PATH_LEN];
-    char link_target[MAX_PATH_LEN];
-    char cur_abs_path[MAX_PATH_LEN];
-    int symlink_depth = 0;
-
-    /* Traversal starts at the selected mount root, not at the caller's cwd.
-     * Relative symlinks must be joined against the directory actually walked. */
-    strncpy(cur_abs_path, mnt->path, sizeof(cur_abs_path) - 1);
-    cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
-    vfs_path_trim_trailing_slashes(cur_abs_path);
-    if (cur_abs_path[0] == '\0') {
-        cur_abs_path[0] = '/';
-        cur_abs_path[1] = '\0';
-    }
-
-    const char *rel = vfs_strip_mount_prefix(resolved_out, mnt);
-    strncpy(buf, rel, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    char *p = buf;
-    while (*p == '/') p++;
-
-    int depth = 0;
-
-    while (*p) {
-        char *sep = strchr(p, '/');
-        if (sep) *sep = '\0';
-
-        if (*p == '\0') {
-        } else if (strcmp(p, ".") == 0) {
-        } else if (strcmp(p, "..") == 0) {
-            if (depth > 0 && cur->parent && cur->parent != cur) {
-                vnode_t *parent = cur->parent;
-                vnode_get(parent);
-                vnode_put(cur);
-                cur = parent;
-                depth--;
-                char *last = strrchr(cur_abs_path, '/');
-                if (last) {
-                    if (last == cur_abs_path)
-                        cur_abs_path[1] = '\0';
-                    else
-                        *last = '\0';
-                }
-            } else if (vnode_is_mount_root(cur)) {
-                mount_t *parent_mnt = vfs_mount_parent(cur->mnt);
-                if (parent_mnt) {
-                    char new_path[MAX_PATH_LEN];
-                    char parent_rel[MAX_PATH_LEN];
-                    const char *mp_rel = vfs_strip_mount_prefix(cur->mnt->path, parent_mnt);
-                    if (strcmp(mp_rel, "") == 0 || strcmp(mp_rel, "/") == 0) {
-                        parent_rel[0] = '\0';
-                    } else {
-                        strncpy(parent_rel, mp_rel, sizeof(parent_rel) - 1);
-                        parent_rel[sizeof(parent_rel) - 1] = '\0';
-                        char *s = strrchr(parent_rel, '/');
-                        if (s) {
-                            if (s == parent_rel)
-                                parent_rel[1] = '\0';
-                            else
-                                *s = '\0';
-                        } else {
-                            parent_rel[0] = '\0';
-                        }
-                    }
-                    vfs_path_join(parent_mnt->path, parent_rel, new_path, sizeof(new_path));
-                    if (vfs_path_normalize_absolute_with_root(new_path, root_path) < 0) {
-                        vnode_put(cur);
-                        *lookup_err = -ENAMETOOLONG;
-                        return NULL;
-                    }
-                    if ((resolve & RESOLVE_BENEATH) && !path_is_beneath(start, new_path)) {
-                        vnode_put(cur);
-                        *lookup_err = -EXDEV;
-                        return NULL;
-                    }
-                    if ((resolve & RESOLVE_NO_XDEV) && parent_mnt != start_mnt) {
-                        vnode_put(cur);
-                        *lookup_err = -EXDEV;
-                        return NULL;
-                    }
-                    vnode_put(cur);
-                    cur = vnode_lookup_path(parent_mnt, parent_rel);
-                    if (!cur) {
-                        *lookup_err = vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
-                        return NULL;
-                    }
-                    depth = count_path_components(parent_rel);
-                    strncpy(cur_abs_path, new_path, sizeof(cur_abs_path) - 1);
-                    cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
-                }
-            }
-        } else {
-            if (strlen(p) >= MAX_NAME_LEN) {
-                vnode_put(cur);
-                *lookup_err = -ENAMETOOLONG;
-                return NULL;
-            }
-            if (cur->type != VFS_FT_DIR || !cur->ops || !cur->ops->lookup) {
-                vnode_put(cur);
-                *lookup_err = -ENOTDIR;
-                return NULL;
-            }
-            if (vfs_vnode_permission(cur, X_OK) < 0) {
-                vnode_put(cur);
-                *lookup_err = -EACCES;
-                return NULL;
-            }
-
-            vnode_t *next = vfs_dcache_lookup(cur, p);
-            if (!next) {
-                if (resolve & RESOLVE_CACHED) {
-                    /* RESOLVE_CACHED: only succeed when every component is
-                     * already in the dentry cache; otherwise fail so the
-                     * caller can retry without the flag. */
-                    vnode_put(cur);
-                    *lookup_err = -EAGAIN;
-                    return NULL;
-                }
-                int r = cur->ops->lookup(cur, p, &next);
-                if (r < 0 || !next) {
-                    vnode_put(cur);
-                    *lookup_err = r < 0 ? r : -ENOENT;
-                    return NULL;
-                }
-                vfs_dcache_insert(cur, p, next);
-            }
-
-            vnode_t *parent = cur;
-            cur = next;
-
-            if (cur->type == VFS_FT_SYMLINK) {
-                int follow = 1;
-                if (resolve & RESOLVE_NO_SYMLINKS) follow = 0;
-                if ((resolve & RESOLVE_NO_MAGICLINKS) &&
-                    (cur->link_flags & VNODE_MAGICLINK))
-                    follow = 0;
-
-                if (!follow) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    *lookup_err = -ELOOP;
-                    return NULL;
-                }
-
-                if (++symlink_depth > MAX_SYMLINKS) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    *lookup_err = -ELOOP;
-                    return NULL;
-                }
-
-                if (!cur->ops || !cur->ops->readlink) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    *lookup_err = -ENOSYS;
-                    return NULL;
-                }
-
-                int len = cur->ops->readlink(cur, link_target, sizeof(link_target) - 1);
-                if (len < 0 || (size_t)len >= sizeof(link_target) - 1) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    *lookup_err = len < 0 ? len : -ENAMETOOLONG;
-                    return NULL;
-                }
-                link_target[len] = '\0';
-                if (!len || ((resolve & RESOLVE_BENEATH) && link_target[0] == '/')) {
-                    vnode_put(parent);
-                    vnode_put(cur);
-                    *lookup_err = !len ? -ENOENT : -EXDEV;
-                    return NULL;
-                }
-
-                vnode_t *old = cur;
-                char rest[MAX_PATH_LEN];
-                int path_len;
-                if (sep) {
-                    path_len = snprintf(rest, sizeof(rest), "%s/%s", link_target, sep + 1);
-                } else {
-                    path_len = snprintf(rest, sizeof(rest), "%s", link_target);
-                }
-
-                char new_path[MAX_PATH_LEN];
-                if (path_len < 0 || (size_t)path_len >= sizeof(rest)) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -ENAMETOOLONG;
-                    return NULL;
-                }
-                if (rest[0] == '/') {
-                    const char *floor = (resolve & RESOLVE_IN_ROOT) ? start : root_path;
-                    path_len = snprintf(new_path, sizeof(new_path), "%s%s",
-                                         strcmp(floor, "/") == 0 ? "" : floor, rest);
-                } else {
-                    path_len = snprintf(new_path, sizeof(new_path), "%s/%s", cur_abs_path, rest);
-                }
-                if (path_len < 0 || (size_t)path_len >= sizeof(new_path)) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -ENAMETOOLONG;
-                    return NULL;
-                }
-
-                const char *floor = (resolve & RESOLVE_IN_ROOT) ? start : root_path;
-                if (vfs_path_normalize_absolute_with_root(new_path, floor) < 0) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -ENAMETOOLONG;
-                    return NULL;
-                }
-                if ((resolve & RESOLVE_BENEATH) && !path_is_beneath(start, new_path)) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -EXDEV;
-                    return NULL;
-                }
-                mount_t *new_mnt = vfs_find_mount(new_path);
-                if (!new_mnt || !new_mnt->root) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -ENOENT;
-                    return NULL;
-                }
-                if ((resolve & RESOLVE_NO_XDEV) && new_mnt != start_mnt) {
-                    vnode_put(old);
-                    vnode_put(parent);
-                    *lookup_err = -EXDEV;
-                    return NULL;
-                }
-                cur = new_mnt->root;
-                vnode_get(cur);
-                depth = 0;
-                strncpy(cur_abs_path, new_mnt->path, sizeof(cur_abs_path) - 1);
-                cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
-                vfs_path_trim_trailing_slashes(cur_abs_path);
-                if (cur_abs_path[0] == '\0') {
-                    cur_abs_path[0] = '/';
-                    cur_abs_path[1] = '\0';
-                }
-                strncpy(resolved_out, new_path, resolved_out_sz - 1);
-                resolved_out[resolved_out_sz - 1] = '\0';
-                const char *new_rel = vfs_strip_mount_prefix(new_path, new_mnt);
-                strncpy(buf, new_rel, sizeof(buf) - 1);
-                buf[sizeof(buf) - 1] = '\0';
-
-                vnode_put(old);
-                vnode_put(parent);
-                p = buf;
-                while (*p == '/') p++;
-                continue;
-            }
-
-            if (cur->type == VFS_FT_DIR) {
-                depth++;
-                char tmp[MAX_PATH_LEN];
-                vfs_path_join(cur_abs_path, p, tmp, sizeof(tmp));
-                strncpy(cur_abs_path, tmp, sizeof(cur_abs_path) - 1);
-                cur_abs_path[sizeof(cur_abs_path) - 1] = '\0';
-            }
-            vnode_put(parent);
-        }
-
-        if (sep) p = sep + 1;
-        else break;
-    }
-
-    return cur;
+    return (vnode_t *)a20_vfs_walk_path(&g_walk_ops, path, start, root_path, resolve,
+                                        resolved_out, resolved_out_sz, lookup_err);
 }
 
 /* Resolve an absolute path within a vnode tree */

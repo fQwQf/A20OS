@@ -15,21 +15,12 @@
 
 #define FDTABLE_WORDS ((MAX_FILES + 63) / 64)
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static int fdtable_ctz64(uint64_t bits);
-static inline void fdtable_mask_set(files_struct_t *files, int fd);
-static int fdtable_find_free(files_struct_t *files, int minfd);
-static void fdtable_note_alloc(files_struct_t *files, int fd);
-#endif
 static int fdtable_stdio_install_locked(files_struct_t *files, int fd,
                                         vfile_t *vf);
 static files_struct_t *fdtable_pin_task_files(const task_t *task);
 static void fdtable_files_put(files_struct_t *files);
 static files_struct_t *fdtable_publish_private(task_t *task,
                                                files_struct_t *replacement);
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static void fdtable_note_free(files_struct_t *files, int fd);
-#endif
 
 /* fd slots reference vfiles directly.  Closing a slot drops that reference;
  * when it is the last one the finalizer (ops->close + vfile_free +
@@ -41,7 +32,6 @@ int vfs_finalize_closed_vfile(vfile_t *vf);
 int eventpoll_file_has_watch(vfile_t *vf);
 void eventpoll_file_final_slot_closed(vfile_t *vf);
 
-#ifdef CONFIG_FDTABLE_STATE_RUST
 int a20_fdtable_find_free_rust(const uint64_t *mask, size_t max_files,
                                int min_fd);
 int a20_fdtable_mark_alloc_rust(uint64_t *mask, int *next_fd,
@@ -100,10 +90,10 @@ int a20_fdtable_detach_next_rust(void **slots, uint8_t *cloexec,
                                  size_t start_fd, int *out_fd,
                                  void **out_vfile,
                                  void (*on_detach)(int));
+int a20_fdtable_fd_limit(int has_task, uint64_t nofile, int max_files);
 bool a20_fdtable_has_open_slot_rust(void *const *slots,
                                     const uint64_t *mask,
                                     size_t max_files, void *vfile);
-#endif
 
 /* Pinned for the life of the kernel: fd operations with no current task
  * resolve here.  It never takes part in the refcount and is never torn
@@ -242,19 +232,7 @@ static files_struct_t *fdtable_active_files(task_t *task)
     return fdtable_boot();
 }
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static inline void fdtable_mask_set(files_struct_t *files, int fd)
-{
-    files->open_mask[fd >> 6] |= 1ULL << (fd & 63);
-}
-#endif
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static inline void fdtable_mask_clear(files_struct_t *files, int fd)
-{
-    files->open_mask[fd >> 6] &= ~(1ULL << (fd & 63));
-}
-#endif
 
 /* Drop one fd-slot reference and run the finalizer when it was the last. */
 static int fdtable_slot_put(vfile_t *vf)
@@ -277,7 +255,6 @@ static int fdtable_try_get_ref(vfile_t *vf)
 #endif
 }
 
-#ifdef CONFIG_FDTABLE_STATE_RUST
 static void fdtable_rust_get_ref(void *opaque)
 {
     vfile_get((vfile_t *)opaque);
@@ -303,76 +280,35 @@ static void fdtable_rust_get_table_ref(void *opaque)
 {
     refcount_inc(&((files_struct_t *)opaque)->refcount);
 }
-#endif
 
 /* Caller holds files->lock. Rust owns owner-count transitions while C keeps
  * the atomic refcount primitive and releases table refs after unlocking. */
 static int fdtable_owner_acquire_locked(files_struct_t *files)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_owner_acquire_rust(
         &files->owners, files, fdtable_rust_get_table_ref);
-#else
-    if (files->owners <= 0 || files->owners == 0x7fffffff)
-        return -EINVAL;
-    refcount_inc(&files->refcount);
-    files->owners++;
-    return 0;
-#endif
 }
 
 /* Caller holds files->lock. The caller drops the table ref after unlocking. */
 static int fdtable_owner_release_locked(files_struct_t *files, int pid)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_owner_release_rust(&files->owners,
                                           &files->release_owner_pid, pid);
-#else
-    if (files->owners <= 0)
-        return -EINVAL;
-    files->owners--;
-    if (files->owners == 0)
-        files->release_owner_pid = pid;
-    return files->owners;
-#endif
 }
 
 static bool fdtable_owner_is_shared_locked(files_struct_t *files)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_owner_is_shared_rust(files->owners) != 0;
-#else
-    return files->owners > 1;
-#endif
 }
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-/* Validate the complete representation before bulk close decisions. Keeping
- * this check in the C selector gives both implementations the same corruption
- * behavior: no slot/reference is changed before an inconsistent table panics. */
-static int fdtable_validate_c(files_struct_t *files)
-{
-    for (int fd = 0; fd < MAX_FILES; fd++) {
-        bool occupied = (files->open_mask[fd >> 6] & (1ULL << (fd & 63))) != 0;
-        bool has_vfile = files->fd[fd] != NULL;
-        if (occupied != has_vfile || (!has_vfile && files->cloexec[fd] != 0))
-            return -EBADF;
-    }
-    return 0;
-}
-#endif
 
 /* Called with files->lock held. A full validation pass always precedes these
  * bulk transitions, so the C cursor cannot partially mutate a malformed
  * table before discovering corruption later in the scan. */
 static int fdtable_validate_locked(files_struct_t *files)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_validate_rust((void **)files->fd, files->cloexec,
                                      files->open_mask, MAX_FILES);
-#else
-    return fdtable_validate_c(files);
-#endif
 }
 
 /* Source table lock is held and destination is private/unpublished. This
@@ -385,130 +321,38 @@ static int fdtable_clone_locked(files_struct_t *src, files_struct_t *dst)
      * and starts with the empty-table search hint. */
     if (dst->next_fd != 0)
         return -EINVAL;
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_clone_checked_rust(
         (void **)src->fd, src->cloexec, src->open_mask, src->next_fd,
         (void **)dst->fd, dst->cloexec, dst->open_mask, &dst->next_fd,
         MAX_FILES, fdtable_rust_try_get_ref, fdtable_rust_put_ref);
-#else
-    int valid = fdtable_validate_locked(src);
-    if (valid < 0)
-        return valid;
-    for (int fd = 0; fd < MAX_FILES; fd++) {
-        if (dst->fd[fd] ||
-            (dst->open_mask[fd >> 6] & (1ULL << (fd & 63))) ||
-            dst->cloexec[fd])
-            return -EINVAL;
-    }
-    for (int fd = 0; fd < MAX_FILES; fd++) {
-        if (!(src->open_mask[fd >> 6] & (1ULL << (fd & 63))))
-            continue;
-        vfile_t *vf = src->fd[fd];
-        int ret = fdtable_try_get_ref(vf);
-        if (ret < 0) {
-            for (int rollback = 0; rollback < fd; rollback++) {
-                if (!dst->fd[rollback])
-                    continue;
-                if (vfile_put_ref_only(dst->fd[rollback]))
-                    panic("fdtable clone rollback lost source slot pin");
-                dst->fd[rollback] = NULL;
-                dst->cloexec[rollback] = 0;
-                dst->open_mask[rollback >> 6] &=
-                    ~(1ULL << (rollback & 63));
-            }
-            dst->next_fd = 0;
-            return ret;
-        }
-        dst->fd[fd] = vf;
-        dst->cloexec[fd] = src->cloexec[fd];
-        dst->open_mask[fd >> 6] |= 1ULL << (fd & 63);
-    }
-    dst->next_fd = src->next_fd;
-    return 0;
-#endif
 }
 
 static int fdtable_stdio_install_locked(files_struct_t *files, int fd,
                                         vfile_t *vf)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_stdio_install_rust(
         (void **)files->fd, files->cloexec, files->open_mask,
         &files->next_fd, MAX_FILES, (size_t)fd, vf, fdtable_rust_get_ref);
-#else
-    bool open = (files->open_mask[fd >> 6] & (1ULL << (fd & 63))) != 0;
-    if (open != (files->fd[fd] != NULL))
-        return -EBADF;
-    if (open)
-        return 1;
-    vfile_get(vf);
-    files->fd[fd] = vf;
-    files->cloexec[fd] = 0;
-    fdtable_note_alloc(files, fd);
-    return 0;
-#endif
 }
 
 static int fdtable_detach_next_locked(files_struct_t *files,
                                       bool cloexec_only, size_t start_fd,
                                       int *out_fd, vfile_t **out_vfile)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_detach_next_rust(
         (void **)files->fd, files->cloexec, files->open_mask,
         &files->next_fd, MAX_FILES, cloexec_only, start_fd, out_fd,
         (void **)out_vfile, fdtable_rust_unregister_fd);
-#else
-    for (size_t fd = start_fd < MAX_FILES ? start_fd : MAX_FILES;
-         fd < MAX_FILES; fd++) {
-        bool open = (files->open_mask[fd >> 6] & (1ULL << (fd & 63))) != 0;
-        vfile_t *vf = files->fd[fd];
-        if (open != (vf != NULL) || (!vf && files->cloexec[fd] != 0))
-            return -EBADF;
-        if (!open || (cloexec_only && !files->cloexec[fd]))
-            continue;
-        files->fd[fd] = NULL;
-        files->cloexec[fd] = 0;
-        fdtable_note_free(files, (int)fd);
-        env_kind_unregister((int)fd);
-        *out_fd = (int)fd;
-        *out_vfile = vf;
-        return 1;
-    }
-    return 0;
-#endif
 }
 
 static int fdtable_detach_bulk_locked(files_struct_t *files,
                                       bool cloexec_only, vfile_t **out,
                                       size_t capacity)
 {
-#ifdef CONFIG_FDTABLE_STATE_RUST
     return a20_fdtable_detach_bulk_rust(
         (void **)files->fd, files->cloexec, files->open_mask,
         &files->next_fd, MAX_FILES, cloexec_only, (void **)out, capacity,
         fdtable_rust_unregister_fd);
-#else
-    if (fdtable_validate_c(files) < 0)
-        return -EBADF;
-    int count = 0;
-    for (int fd = 0; fd < MAX_FILES; fd++)
-        if (files->fd[fd] && (!cloexec_only || files->cloexec[fd]))
-            count++;
-    if ((size_t)count > capacity || (count != 0 && !out))
-        return -EINVAL;
-    count = 0;
-    for (int fd = 0; fd < MAX_FILES; fd++) {
-        if (!files->fd[fd] || (cloexec_only && !files->cloexec[fd]))
-            continue;
-        out[count++] = files->fd[fd];
-        files->fd[fd] = NULL;
-        files->cloexec[fd] = 0;
-        fdtable_note_free(files, fd);
-        env_kind_unregister(fd);
-    }
-    return count;
-#endif
 }
 
 static void fdtable_files_put(files_struct_t *files)
@@ -586,80 +430,15 @@ static void fdtable_files_put(files_struct_t *files)
     kfree(to_close);
 }
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static int fdtable_ctz64(uint64_t bits)
-{
-    if (bits == 0) return 64;
-    int n = 0;
-    if ((bits & 0xFFFFFFFF) == 0) { n += 32; bits >>= 32; }
-    if ((bits & 0xFFFF) == 0)     { n += 16; bits >>= 16; }
-    if ((bits & 0xFF) == 0)       { n += 8;  bits >>= 8;  }
-    if ((bits & 0xF) == 0)        { n += 4;  bits >>= 4;  }
-    if ((bits & 0x3) == 0)        { n += 2;  bits >>= 2;  }
-    if ((bits & 0x1) == 0)        { n += 1; }
-    return n;
-}
-
-static int fdtable_find_free(files_struct_t *files, int minfd)
-{
-    if (!files)
-        return -1;
-    if (minfd < 0)
-        minfd = 0;
-    if (minfd >= MAX_FILES)
-        return -1;
-
-    for (int word = minfd >> 6; word < FDTABLE_WORDS; word++) {
-        uint64_t used = files->open_mask[word];
-        uint64_t free_bits = ~used;
-        if (word == (minfd >> 6))
-            free_bits &= ~0ULL << (minfd & 63);
-        if (word == FDTABLE_WORDS - 1 && (MAX_FILES & 63))
-            free_bits &= (1ULL << (MAX_FILES & 63)) - 1;
-        if (free_bits)
-            return (word << 6) + fdtable_ctz64(free_bits);
-    }
-    return -1;
-}
-#endif
 
 static int fdtable_fd_limit(task_t *task)
 {
-    uint64_t limit = task ? task->limits.nofile : MAX_FILES;
-    if (limit > MAX_FILES)
-        limit = MAX_FILES;
-    return (int)limit;
+    return a20_fdtable_fd_limit(task ? 1 : 0, task ? task->limits.nofile : 0,
+                                MAX_FILES);
 }
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static int fdtable_find_free_below(files_struct_t *files, int minfd, int limit)
-{
-    int fd = fdtable_find_free(files, minfd);
-    return (fd >= 0 && fd < limit) ? fd : -1;
-}
-#endif
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static void fdtable_note_alloc(files_struct_t *files, int fd)
-{
-    if (!files)
-        return;
-    fdtable_mask_set(files, fd);
-    if (fd >= files->next_fd)
-        files->next_fd = fdtable_find_free(files, fd + 1);
-}
-#endif
 
-#ifndef CONFIG_FDTABLE_STATE_RUST
-static void fdtable_note_free(files_struct_t *files, int fd)
-{
-    if (!files || fd < 0 || fd >= MAX_FILES)
-        return;
-    fdtable_mask_clear(files, fd);
-    if (files->next_fd < 0 || fd < files->next_fd)
-        files->next_fd = fd;
-}
-#endif
 
 void fdtable_init(task_t *task)
 {
@@ -1188,21 +967,10 @@ int fdtable_install_vfile(task_t *task, vfile_t *vf, int flags)
         return -ESRCH;
     uint64_t lock_flags = spin_lock_irqsave(&files->lock);
     int limit = fdtable_fd_limit(task);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     int fd = a20_fdtable_install_rust((void **)files->fd, files->cloexec,
                                       files->open_mask, &files->next_fd,
                                       MAX_FILES, (size_t)limit, vf,
                                       (flags & O_CLOEXEC) != 0);
-#else
-    int fd = fdtable_find_free_below(files, files->next_fd, limit);
-    if (fd < 0)
-        fd = fdtable_find_free_below(files, 0, limit);
-    if (fd >= 0) {
-        files->fd[fd] = vf;
-        files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
-        fdtable_note_alloc(files, fd);
-    }
-#endif
     if (fd >= 0) {
         /* Reference semantics: the slot TAKES OVER the caller's reference.
          * On failure the caller keeps it.  A close then drops exactly one
@@ -1245,7 +1013,6 @@ int fdtable_close_files_if_file(files_struct_t *files, int fd, int pid,
     if (!files || fd < 0 || fd >= MAX_FILES)
         return -EBADF;
     uint64_t flags = spin_lock_irqsave(&files->lock);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     vfile_t *vf = NULL;
     int detach_result = expected_vf ?
         a20_fdtable_detach_if_rust((void **)files->fd, files->cloexec,
@@ -1258,20 +1025,6 @@ int fdtable_close_files_if_file(files_struct_t *files, int fd, int pid,
         spin_unlock_irqrestore(&files->lock, flags);
         return detach_result;
     }
-#else
-    vfile_t *vf = files->fd[fd];
-    if (expected_vf && vf != expected_vf) {
-        spin_unlock_irqrestore(&files->lock, flags);
-        return -EBADF;
-    }
-    if (!vf) {
-        spin_unlock_irqrestore(&files->lock, flags);
-        return -EBADF;
-    }
-    files->fd[fd] = NULL;
-    files->cloexec[fd] = 0;
-    fdtable_note_free(files, fd);
-#endif
     spin_unlock_irqrestore(&files->lock, flags);
     /* Drop the envelope class registry entry for this slot before it can be
      * handed to a new descriptor.  env_kind_of() keys on the fd NUMBER, so a
@@ -1364,7 +1117,6 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
         minfd = 0;
     uint64_t lock_flags = spin_lock_irqsave(&files->lock);
     int limit = fdtable_fd_limit(task);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     int fd = a20_fdtable_dup_rust((void **)files->fd, files->cloexec,
                                   files->open_mask, &files->next_fd,
                                   MAX_FILES, (size_t)limit, oldfd, minfd,
@@ -1374,31 +1126,6 @@ int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)
     if (fd >= 0)
         wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     return fd;
-#else
-    if (minfd >= limit) {
-        spin_unlock_irqrestore(&files->lock, lock_flags);
-        return -EMFILE;
-    }
-
-    vfile_t *vf = files->fd[oldfd];
-    if (!vf) {
-        spin_unlock_irqrestore(&files->lock, lock_flags);
-        return -EBADF;
-    }
-
-    int fd = fdtable_find_free_below(files, minfd, limit);
-    if (fd >= 0) {
-        files->fd[fd] = vf;
-        files->cloexec[fd] = (flags & O_CLOEXEC) ? 1 : 0;
-        fdtable_note_alloc(files, fd);
-        vfile_get(vf);
-        spin_unlock_irqrestore(&files->lock, lock_flags);
-        wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
-        return fd;
-    }
-    spin_unlock_irqrestore(&files->lock, lock_flags);
-    return -EMFILE;
-#endif
 }
 
 int fdtable_dup_current(int oldfd, int minfd, int flags)
@@ -1423,7 +1150,6 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
         return -EINVAL;
 
     uint64_t lock_flags = spin_lock_irqsave(&files->lock);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     vfile_t *old_new_vf = NULL;
     int rust_result = a20_fdtable_dup_to_rust(
         (void **)files->fd, files->cloexec, files->open_mask,
@@ -1441,33 +1167,6 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
         fdtable_slot_put(old_new_vf);
     }
     return rust_result;
-#else
-    vfile_t *vf = files->fd[oldfd];
-    if (!vf) {
-        spin_unlock_irqrestore(&files->lock, lock_flags);
-        return -EBADF;
-    }
-
-    vfile_t *old_new_vf = files->fd[newfd];
-    files->fd[newfd] = NULL;
-    files->cloexec[newfd] = 0;
-    fdtable_note_free(files, newfd);
-    files->fd[newfd] = vf;
-    files->cloexec[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
-    fdtable_note_alloc(files, newfd);
-    vfile_get(vf);
-    spin_unlock_irqrestore(&files->lock, lock_flags);
-    wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
-    if (old_new_vf) {
-        /* dup2 onto an occupied slot: the displaced descriptor's class entry
-         * is stale the moment the slot changes hands. */
-        env_kind_unregister(newfd);
-        fdtable_wake_if_last_slot(old_new_vf);
-        vfs_release_process_file_locks(old_new_vf, task->pid);
-        fdtable_slot_put(old_new_vf);
-    }
-    return newfd;
-#endif
 }
 
 int fdtable_get_cloexec(task_t *task, int fd)
@@ -1476,12 +1175,8 @@ int fdtable_get_cloexec(task_t *task, int fd)
         return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
     uint64_t flags = spin_lock_irqsave(&files->lock);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     int ret = a20_fdtable_cloexec_rust((void **)files->fd, files->cloexec,
                                        MAX_FILES, fd, -1);
-#else
-    int ret = files->fd[fd] ? (files->cloexec[fd] ? FD_CLOEXEC : 0) : -EBADF;
-#endif
     spin_unlock_irqrestore(&files->lock, flags);
     return ret;
 }
@@ -1492,22 +1187,10 @@ int fdtable_set_cloexec(task_t *task, int fd, int cloexec)
         return -EBADF;
     files_struct_t *files = (files_struct_t *)task->files;
     uint64_t flags = spin_lock_irqsave(&files->lock);
-#ifdef CONFIG_FDTABLE_STATE_RUST
     int ret = a20_fdtable_cloexec_rust((void **)files->fd, files->cloexec,
                                        MAX_FILES, fd, cloexec != 0);
-#else
-    if (!files->fd[fd]) {
-        spin_unlock_irqrestore(&files->lock, flags);
-        return -EBADF;
-    }
-    files->cloexec[fd] = cloexec ? 1 : 0;
-    spin_unlock_irqrestore(&files->lock, flags);
-    return 0;
-#endif
-#ifdef CONFIG_FDTABLE_STATE_RUST
     spin_unlock_irqrestore(&files->lock, flags);
     return ret;
-#endif
 }
 
 size_t fdtable_open_fd_count(void)
@@ -1548,25 +1231,9 @@ bool fdtable_file_has_open_slot(vfile_t *vf)
     for (files_struct_t *files = fdtable_registry; files && !found;
          files = files->registry_next) {
         uint64_t ff = spin_lock_irqsave(&files->lock);
-#ifdef CONFIG_FDTABLE_STATE_RUST
         found = a20_fdtable_has_open_slot_rust((void *const *)files->fd,
                                                 files->open_mask, MAX_FILES,
                                                 vf);
-#else
-        for (int word = 0; word < FDTABLE_WORDS && !found; word++) {
-            uint64_t open = files->open_mask[word];
-            while (open) {
-                int fd = (word << 6) + fdtable_ctz64(open);
-                open &= open - 1;
-                if (fd >= MAX_FILES)
-                    break;
-                if (files->fd[fd] == vf) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-#endif
         spin_unlock_irqrestore(&files->lock, ff);
     }
     spin_unlock_irqrestore(&fdtable_registry_lock, flags);

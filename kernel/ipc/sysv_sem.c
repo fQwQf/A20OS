@@ -6,6 +6,7 @@
 #include "core/string.h"
 #include "core/sync.h"
 #include "core/timer.h"
+#include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
 #include "sys/usercopy.h"
@@ -74,9 +75,13 @@ typedef struct {
     int semaem;
 } sysv_seminfo_t;
 
+#ifndef CONFIG_SYSV_SEM_RUST
+typedef unsigned short sem_val_stage_t[SYSV_SEM_PER_SET];
+#endif
+
 typedef struct {
-    int used;
     uint64_t namespace_ino;
+    int used;
     int key;
     int nsems;
     unsigned int uid;
@@ -94,13 +99,156 @@ typedef struct {
 static sysv_sem_set_t g_sem[SYSV_SEM_MAX];
 static spinlock_t g_sem_lock = SPINLOCK_INIT;
 
+#ifdef CONFIG_SYSV_SEM_RUST
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, used) == 8, sysv_sem_rust_used);
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, mode) == 36, sysv_sem_rust_mode);
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, val) == 40, sysv_sem_rust_val);
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, ncnt) == 168, sysv_sem_rust_ncnt);
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, zcnt) == 296, sysv_sem_rust_zcnt);
+STATIC_ASSERT(__builtin_offsetof(sysv_sem_set_t, last_pid) == 424, sysv_sem_rust_last_pid);
+STATIC_ASSERT(sizeof(sysv_sem_set_t) == (sizeof(void *) == 8 ? 528 : 504), sysv_sem_rust_set_size);
+
+int a20_sysv_sem_timedop_txn(void *sets, size_t set_count, void *context,
+                             int semid, const void *sops, size_t nsops,
+                             uint64_t deadline);
+int a20_sysv_sem_get_txn(void *sets, size_t set_count, void *context,
+                         int key, int nsems, int semflg);
+int a20_sysv_sem_control_txn(void *sets, size_t set_count, void *context,
+                             int semid, int semnum, int cmd, void *arg);
+
+typedef struct {
+    proc_wait_token_t token;
+    wait_queue_entry_t entry;
+    wait_queue_t *queue;
+} sysv_sem_waiter_t;
+
+uint64_t a20_sysv_sem_txn_lock(void *context)
+{
+    (void)context;
+    return spin_lock_irqsave(&g_sem_lock);
+}
+
+void a20_sysv_sem_txn_unlock(void *context, uint64_t flags)
+{
+    (void)context;
+    spin_unlock_irqrestore(&g_sem_lock, flags);
+}
+
+uint64_t a20_sysv_sem_txn_namespace(void *context)
+{
+    (void)context;
+    return resource_ns_ino(PROCNS_IPC);
+}
+
+int a20_sysv_sem_txn_pid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? task->pid : 0;
+}
+
+unsigned int a20_sysv_sem_txn_uid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? (unsigned int)task->cred.euid : 0;
+}
+
+unsigned int a20_sysv_sem_txn_gid(void *context)
+{
+    (void)context;
+    task_t *task = proc_current();
+    return task ? (unsigned int)task->cred.egid : 0;
+}
+
+void a20_sysv_sem_txn_waitq_init(void *set)
+{
+    sysv_sem_set_t *entry = set;
+    wait_queue_init(&entry->waiters);
+}
+
+bool a20_sysv_sem_txn_signal_pending(void *context)
+{
+    (void)context;
+    return signal_task_has_unblocked(proc_current());
+}
+
+uint64_t a20_sysv_sem_txn_now(void *context)
+{
+    (void)context;
+    return timer_get_ticks();
+}
+
+int a20_sysv_sem_txn_copy_from_user(void *context, void *dst,
+                                    const void *src, size_t len)
+{
+    (void)context;
+    return copy_from_user(dst, src, len);
+}
+
+int a20_sysv_sem_txn_copy_to_user(void *context, void *dst,
+                                  const void *src, size_t len)
+{
+    (void)context;
+    return copy_to_user(dst, src, len);
+}
+
+void *a20_sysv_sem_txn_wait_prepare(void *context, uint64_t deadline)
+{
+    sysv_sem_waiter_t *waiter = context;
+    if (!waiter)
+        return NULL;
+    memset(waiter, 0, sizeof(*waiter));
+    waiter->token = proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
+    if (!waiter->token.task)
+        return NULL;
+    return waiter;
+}
+
+bool a20_sysv_sem_txn_wait_link(void *context, void *opaque, void *set_opaque)
+{
+    (void)context;
+    sysv_sem_waiter_t *waiter = opaque;
+    sysv_sem_set_t *set = set_opaque;
+    bool linked = wait_queue_link(&set->waiters, &waiter->entry,
+                                  waiter->token, 0);
+    waiter->queue = linked ? &set->waiters : NULL;
+    return linked;
+}
+
+void a20_sysv_sem_txn_wait_finish(void *opaque, bool linked, bool commit)
+{
+    sysv_sem_waiter_t *waiter = opaque;
+    if (commit && linked)
+        (void)proc_park_commit(waiter->token);
+    else
+        (void)proc_park_cancel(waiter->token);
+    if (linked && waiter->queue)
+        wait_queue_unlink(waiter->queue, &waiter->entry);
+    proc_park_finish(waiter->token);
+}
+
+void a20_sysv_sem_txn_wake(void *context, void *set_opaque)
+{
+    (void)context;
+    sysv_sem_set_t *set = set_opaque;
+    wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
+}
+#endif
+
+#ifndef CONFIG_SYSV_SEM_RUST
 static int sem_valid_locked(int semid)
 {
     return semid >= 0 && semid < SYSV_SEM_MAX && g_sem[semid].used && g_sem[semid].namespace_ino == resource_ns_ino(PROCNS_IPC);
 }
+#endif
 
 int sysv_sem_get(int key, int nsems, int semflg)
 {
+#ifdef CONFIG_SYSV_SEM_RUST
+    return a20_sysv_sem_get_txn(g_sem, SYSV_SEM_MAX, NULL, key, nsems, semflg);
+#else
+
     if (nsems < 0 || nsems > SYSV_SEM_PER_SET)
         return -EINVAL;
 
@@ -152,19 +300,16 @@ int sysv_sem_get(int key, int nsems, int semflg)
 
     spin_unlock_irqrestore(&g_sem_lock, flags);
     return -ENOSPC;
-}
 
-/*
- * GETALL/SETALL stage the whole value array through this file's own buffer.
- * copy_{to,from}_user can fault and page-walk, and g_sem_lock is the single
- * lock guarding every set, so the user access must happen with the lock
- * dropped. The stage is sized by SYSV_SEM_PER_SET, the bound semop()/semget()
- * already enforce on set->nsems.
- */
-typedef unsigned short sem_val_stage_t[SYSV_SEM_PER_SET];
+#endif
+}
 
 int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
 {
+#ifdef CONFIG_SYSV_SEM_RUST
+    return a20_sysv_sem_control_txn(g_sem, SYSV_SEM_MAX, NULL, semid, semnum, cmd, arg);
+#else
+
     cmd &= ~IPC_64_BIT;
 
     uint64_t flags = spin_lock_irqsave(&g_sem_lock);
@@ -318,8 +463,10 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
         spin_unlock_irqrestore(&g_sem_lock, flags);
         return -EINVAL;
     }
-}
 
+#endif
+}
+#ifndef CONFIG_SYSV_SEM_RUST
 static int sem_ops_can_apply(sysv_sem_set_t *set, const sysv_sembuf_t *ops,
                              size_t nsops, unsigned *wait_sem, int *wait_zero)
 {
@@ -465,6 +612,14 @@ int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadlin
         spin_unlock_irqrestore(&g_sem_lock, flags);
     }
 }
+#else
+int sysv_sem_timedop(int semid, const void *sops, size_t nsops, uint64_t deadline)
+{
+    sysv_sem_waiter_t waiter = {0};
+    return a20_sysv_sem_timedop_txn(g_sem, SYSV_SEM_MAX, &waiter, semid,
+                                    sops, nsops, deadline);
+}
+#endif
 
 int sysv_sem_op(int semid, const void *sops, size_t nsops)
 {

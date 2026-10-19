@@ -7,6 +7,8 @@
  */
 
 #include "fs/procfs.h"
+#include "fs/procfs_state.h"
+#include "fs/procfs_node_state.h"
 #include "fs/ext4_journal.h"
 #include "net/netfilter.h"
 #include "net/net_config.h"
@@ -23,6 +25,7 @@
 #include "fs/block_cache.h"
 #include "fs/page_cache.h"
 #include "fs/ext4.h"
+#include "fs/uxfs.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mntns.h"
 #include "proc/pidns.h"
@@ -45,6 +48,138 @@
 #include "core/version.h"
 #include "net/socket.h"
 #include "net/net_config.h"
+
+/* The mirrored pf_type numbering must match the real enum.  That enum is
+ * flat (no member is behind a conditional), so these hold for every
+ * profile that builds procfs.c. */
+_Static_assert(PF_ROOT == A20_PF_ROOT, "pf_type mirror drifted: PF_ROOT");
+_Static_assert(PF_MEMINFO == A20_PF_MEMINFO, "pf_type mirror drifted: PF_MEMINFO");
+_Static_assert(PF_STAT == A20_PF_STAT, "pf_type mirror drifted: PF_STAT");
+_Static_assert(PF_VERSION == A20_PF_VERSION, "pf_type mirror drifted: PF_VERSION");
+_Static_assert(PF_UPTIME == A20_PF_UPTIME, "pf_type mirror drifted: PF_UPTIME");
+_Static_assert(PF_CMDLINE == A20_PF_CMDLINE, "pf_type mirror drifted: PF_CMDLINE");
+_Static_assert(PF_CPUINFO == A20_PF_CPUINFO, "pf_type mirror drifted: PF_CPUINFO");
+_Static_assert(PF_MOUNTS == A20_PF_MOUNTS, "pf_type mirror drifted: PF_MOUNTS");
+_Static_assert(PF_LOADAVG == A20_PF_LOADAVG, "pf_type mirror drifted: PF_LOADAVG");
+_Static_assert(PF_NET == A20_PF_NET, "pf_type mirror drifted: PF_NET");
+_Static_assert(PF_NET_STATUS == A20_PF_NET_STATUS, "pf_type mirror drifted: PF_NET_STATUS");
+_Static_assert(PF_NET_CONFIG == A20_PF_NET_CONFIG, "pf_type mirror drifted: PF_NET_CONFIG");
+_Static_assert(PF_NET_DEV == A20_PF_NET_DEV, "pf_type mirror drifted: PF_NET_DEV");
+_Static_assert(PF_NET_TCP == A20_PF_NET_TCP, "pf_type mirror drifted: PF_NET_TCP");
+_Static_assert(PF_NET_UDP == A20_PF_NET_UDP, "pf_type mirror drifted: PF_NET_UDP");
+_Static_assert(PF_NET_TCP6 == A20_PF_NET_TCP6, "pf_type mirror drifted: PF_NET_TCP6");
+_Static_assert(PF_NET_UDP6 == A20_PF_NET_UDP6, "pf_type mirror drifted: PF_NET_UDP6");
+_Static_assert(PF_NET_UNIX == A20_PF_NET_UNIX, "pf_type mirror drifted: PF_NET_UNIX");
+_Static_assert(PF_CONFIG_GZ == A20_PF_CONFIG_GZ, "pf_type mirror drifted: PF_CONFIG_GZ");
+_Static_assert(PF_PID_STAT == A20_PF_PID_STAT, "pf_type mirror drifted: PF_PID_STAT");
+_Static_assert(PF_PID_STATUS == A20_PF_PID_STATUS, "pf_type mirror drifted: PF_PID_STATUS");
+_Static_assert(PF_PID_STATM == A20_PF_PID_STATM, "pf_type mirror drifted: PF_PID_STATM");
+_Static_assert(PF_PID_MAPS == A20_PF_PID_MAPS, "pf_type mirror drifted: PF_PID_MAPS");
+_Static_assert(PF_PID_SMAPS == A20_PF_PID_SMAPS, "pf_type mirror drifted: PF_PID_SMAPS");
+_Static_assert(PF_PID_OOM_SCORE_ADJ == A20_PF_PID_OOM_SCORE_ADJ, "pf_type mirror drifted: PF_PID_OOM_SCORE_ADJ");
+_Static_assert(PF_PID_OOM_SCORE == A20_PF_PID_OOM_SCORE, "pf_type mirror drifted: PF_PID_OOM_SCORE");
+_Static_assert(PF_PID_CGROUP == A20_PF_PID_CGROUP, "pf_type mirror drifted: PF_PID_CGROUP");
+_Static_assert(PF_PID_CMDLINE == A20_PF_PID_CMDLINE, "pf_type mirror drifted: PF_PID_CMDLINE");
+_Static_assert(PF_PID_COMM == A20_PF_PID_COMM, "pf_type mirror drifted: PF_PID_COMM");
+_Static_assert(PF_PID_EXE == A20_PF_PID_EXE, "pf_type mirror drifted: PF_PID_EXE");
+_Static_assert(PF_PID_CWD == A20_PF_PID_CWD, "pf_type mirror drifted: PF_PID_CWD");
+_Static_assert(PF_PID_FD == A20_PF_PID_FD, "pf_type mirror drifted: PF_PID_FD");
+_Static_assert(PF_PID_ENVIRON == A20_PF_PID_ENVIRON, "pf_type mirror drifted: PF_PID_ENVIRON");
+_Static_assert(PF_PID_AUXV == A20_PF_PID_AUXV, "pf_type mirror drifted: PF_PID_AUXV");
+_Static_assert(PF_PID_IO == A20_PF_PID_IO, "pf_type mirror drifted: PF_PID_IO");
+_Static_assert(PF_PID_LOGINUID == A20_PF_PID_LOGINUID, "pf_type mirror drifted: PF_PID_LOGINUID");
+_Static_assert(PF_PID_SESSIONID == A20_PF_PID_SESSIONID, "pf_type mirror drifted: PF_PID_SESSIONID");
+_Static_assert(PF_PID_TASK == A20_PF_PID_TASK, "pf_type mirror drifted: PF_PID_TASK");
+_Static_assert(PF_PID_NS == A20_PF_PID_NS, "pf_type mirror drifted: PF_PID_NS");
+_Static_assert(PF_PID_NS_PID == A20_PF_PID_NS_PID, "pf_type mirror drifted: PF_PID_NS_PID");
+_Static_assert(PF_PID_NS_PID_FOR_CHILDREN == A20_PF_PID_NS_PID_FOR_CHILDREN, "pf_type mirror drifted: PF_PID_NS_PID_FOR_CHILDREN");
+_Static_assert(PF_PID_NS_UTS == A20_PF_PID_NS_UTS, "pf_type mirror drifted: PF_PID_NS_UTS");
+_Static_assert(PF_PID_NS_USER == A20_PF_PID_NS_USER, "pf_type mirror drifted: PF_PID_NS_USER");
+_Static_assert(PF_PID_NS_IPC == A20_PF_PID_NS_IPC, "pf_type mirror drifted: PF_PID_NS_IPC");
+_Static_assert(PF_PID_NS_MNT == A20_PF_PID_NS_MNT, "pf_type mirror drifted: PF_PID_NS_MNT");
+_Static_assert(PF_PID_NS_NET == A20_PF_PID_NS_NET, "pf_type mirror drifted: PF_PID_NS_NET");
+_Static_assert(PF_PID_NS_CGROUP == A20_PF_PID_NS_CGROUP, "pf_type mirror drifted: PF_PID_NS_CGROUP");
+_Static_assert(PF_PID_FDINFO == A20_PF_PID_FDINFO, "pf_type mirror drifted: PF_PID_FDINFO");
+_Static_assert(PF_PID_FDINFO_ENTRY == A20_PF_PID_FDINFO_ENTRY, "pf_type mirror drifted: PF_PID_FDINFO_ENTRY");
+_Static_assert(PF_PID_MOUNTINFO == A20_PF_PID_MOUNTINFO, "pf_type mirror drifted: PF_PID_MOUNTINFO");
+_Static_assert(PF_PID_PAGEMAP == A20_PF_PID_PAGEMAP, "pf_type mirror drifted: PF_PID_PAGEMAP");
+_Static_assert(PF_SYS == A20_PF_SYS, "pf_type mirror drifted: PF_SYS");
+_Static_assert(PF_SYS_FS == A20_PF_SYS_FS, "pf_type mirror drifted: PF_SYS_FS");
+_Static_assert(PF_SYS_FS_PIPE_MAX_SIZE == A20_PF_SYS_FS_PIPE_MAX_SIZE, "pf_type mirror drifted: PF_SYS_FS_PIPE_MAX_SIZE");
+_Static_assert(PF_SYS_FS_LEASE_BREAK_TIME == A20_PF_SYS_FS_LEASE_BREAK_TIME, "pf_type mirror drifted: PF_SYS_FS_LEASE_BREAK_TIME");
+_Static_assert(PF_SYS_KERNEL == A20_PF_SYS_KERNEL, "pf_type mirror drifted: PF_SYS_KERNEL");
+_Static_assert(PF_SYS_KERNEL_OSRELEASE == A20_PF_SYS_KERNEL_OSRELEASE, "pf_type mirror drifted: PF_SYS_KERNEL_OSRELEASE");
+_Static_assert(PF_SYS_KERNEL_PID_MAX == A20_PF_SYS_KERNEL_PID_MAX, "pf_type mirror drifted: PF_SYS_KERNEL_PID_MAX");
+_Static_assert(PF_SYS_KERNEL_PIDMAP == A20_PF_SYS_KERNEL_PIDMAP, "pf_type mirror drifted: PF_SYS_KERNEL_PIDMAP");
+_Static_assert(PF_SYS_KERNEL_TAINTED == A20_PF_SYS_KERNEL_TAINTED, "pf_type mirror drifted: PF_SYS_KERNEL_TAINTED");
+_Static_assert(PF_SYS_KERNEL_SCHED_AUTOGROUP == A20_PF_SYS_KERNEL_SCHED_AUTOGROUP, "pf_type mirror drifted: PF_SYS_KERNEL_SCHED_AUTOGROUP");
+_Static_assert(PF_SYS_KERNEL_CORE_PATTERN == A20_PF_SYS_KERNEL_CORE_PATTERN, "pf_type mirror drifted: PF_SYS_KERNEL_CORE_PATTERN");
+_Static_assert(PF_SYS_KERNEL_IO_URING_DISABLED == A20_PF_SYS_KERNEL_IO_URING_DISABLED, "pf_type mirror drifted: PF_SYS_KERNEL_IO_URING_DISABLED");
+_Static_assert(PF_SYS_KERNEL_HOSTNAME == A20_PF_SYS_KERNEL_HOSTNAME, "pf_type mirror drifted: PF_SYS_KERNEL_HOSTNAME");
+_Static_assert(PF_SYS_KERNEL_DOMAINNAME == A20_PF_SYS_KERNEL_DOMAINNAME, "pf_type mirror drifted: PF_SYS_KERNEL_DOMAINNAME");
+_Static_assert(PF_SYS_KERNEL_OVERFLOW_UID == A20_PF_SYS_KERNEL_OVERFLOW_UID, "pf_type mirror drifted: PF_SYS_KERNEL_OVERFLOW_UID");
+_Static_assert(PF_SYS_KERNEL_OVERFLOW_GID == A20_PF_SYS_KERNEL_OVERFLOW_GID, "pf_type mirror drifted: PF_SYS_KERNEL_OVERFLOW_GID");
+_Static_assert(PF_BOOT_ID == A20_PF_BOOT_ID, "pf_type mirror drifted: PF_BOOT_ID");
+_Static_assert(PF_CAP_LAST_CAP == A20_PF_CAP_LAST_CAP, "pf_type mirror drifted: PF_CAP_LAST_CAP");
+_Static_assert(PF_NR_OPEN == A20_PF_NR_OPEN, "pf_type mirror drifted: PF_NR_OPEN");
+_Static_assert(PF_PRESSURE == A20_PF_PRESSURE, "pf_type mirror drifted: PF_PRESSURE");
+_Static_assert(PF_PRESSURE_CPU == A20_PF_PRESSURE_CPU, "pf_type mirror drifted: PF_PRESSURE_CPU");
+_Static_assert(PF_PRESSURE_MEM == A20_PF_PRESSURE_MEM, "pf_type mirror drifted: PF_PRESSURE_MEM");
+_Static_assert(PF_PRESSURE_IO == A20_PF_PRESSURE_IO, "pf_type mirror drifted: PF_PRESSURE_IO");
+_Static_assert(PF_UID_MAP == A20_PF_UID_MAP, "pf_type mirror drifted: PF_UID_MAP");
+_Static_assert(PF_GID_MAP == A20_PF_GID_MAP, "pf_type mirror drifted: PF_GID_MAP");
+_Static_assert(PF_SETGROUPS == A20_PF_SETGROUPS, "pf_type mirror drifted: PF_SETGROUPS");
+_Static_assert(PF_SYSVIPC == A20_PF_SYSVIPC, "pf_type mirror drifted: PF_SYSVIPC");
+_Static_assert(PF_DEVICES == A20_PF_DEVICES, "pf_type mirror drifted: PF_DEVICES");
+_Static_assert(PF_PARTITIONS == A20_PF_PARTITIONS, "pf_type mirror drifted: PF_PARTITIONS");
+_Static_assert(PF_DISKSTATS == A20_PF_DISKSTATS, "pf_type mirror drifted: PF_DISKSTATS");
+_Static_assert(PF_MODULES == A20_PF_MODULES, "pf_type mirror drifted: PF_MODULES");
+_Static_assert(PF_MISC == A20_PF_MISC, "pf_type mirror drifted: PF_MISC");
+_Static_assert(PF_IOMEM == A20_PF_IOMEM, "pf_type mirror drifted: PF_IOMEM");
+_Static_assert(PF_IOPORTS == A20_PF_IOPORTS, "pf_type mirror drifted: PF_IOPORTS");
+_Static_assert(PF_SOFTIRQS == A20_PF_SOFTIRQS, "pf_type mirror drifted: PF_SOFTIRQS");
+_Static_assert(PF_ROUTE == A20_PF_ROUTE, "pf_type mirror drifted: PF_ROUTE");
+_Static_assert(PF_ARP == A20_PF_ARP, "pf_type mirror drifted: PF_ARP");
+_Static_assert(PF_TTY == A20_PF_TTY, "pf_type mirror drifted: PF_TTY");
+_Static_assert(PF_LDISCS == A20_PF_LDISCS, "pf_type mirror drifted: PF_LDISCS");
+_Static_assert(PF_DRIVERS == A20_PF_DRIVERS, "pf_type mirror drifted: PF_DRIVERS");
+_Static_assert(PF_PID_LIMITS == A20_PF_PID_LIMITS, "pf_type mirror drifted: PF_PID_LIMITS");
+_Static_assert(PF_PID_WCHAN == A20_PF_PID_WCHAN, "pf_type mirror drifted: PF_PID_WCHAN");
+_Static_assert(PF_PID_STACK == A20_PF_PID_STACK, "pf_type mirror drifted: PF_PID_STACK");
+_Static_assert(PF_THREAD_SELF == A20_PF_THREAD_SELF, "pf_type mirror drifted: PF_THREAD_SELF");
+_Static_assert(PF_SYS_VM == A20_PF_SYS_VM, "pf_type mirror drifted: PF_SYS_VM");
+_Static_assert(PF_SYS_VM_DROP_CACHES == A20_PF_SYS_VM_DROP_CACHES, "pf_type mirror drifted: PF_SYS_VM_DROP_CACHES");
+_Static_assert(PF_SYS_FS_INOTIFY == A20_PF_SYS_FS_INOTIFY, "pf_type mirror drifted: PF_SYS_FS_INOTIFY");
+_Static_assert(PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS == A20_PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS, "pf_type mirror drifted: PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS");
+_Static_assert(PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES == A20_PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES, "pf_type mirror drifted: PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES");
+_Static_assert(PF_SYS_NET == A20_PF_SYS_NET, "pf_type mirror drifted: PF_SYS_NET");
+_Static_assert(PF_INTERRUPTS == A20_PF_INTERRUPTS, "pf_type mirror drifted: PF_INTERRUPTS");
+_Static_assert(PF_A20 == A20_PF_A20, "pf_type mirror drifted: PF_A20");
+_Static_assert(PF_A20_BCACHE == A20_PF_A20_BCACHE, "pf_type mirror drifted: PF_A20_BCACHE");
+_Static_assert(PF_A20_PAGE_CACHE == A20_PF_A20_PAGE_CACHE, "pf_type mirror drifted: PF_A20_PAGE_CACHE");
+_Static_assert(PF_A20_OOM == A20_PF_A20_OOM, "pf_type mirror drifted: PF_A20_OOM");
+_Static_assert(PF_A20_TASK_LIFETIME == A20_PF_A20_TASK_LIFETIME, "pf_type mirror drifted: PF_A20_TASK_LIFETIME");
+_Static_assert(PF_A20_PERF == A20_PF_A20_PERF, "pf_type mirror drifted: PF_A20_PERF");
+_Static_assert(PF_A20_ANONPROV == A20_PF_A20_ANONPROV, "pf_type mirror drifted: PF_A20_ANONPROV");
+_Static_assert(PF_A20_HYP_SELFTEST == A20_PF_A20_HYP_SELFTEST, "pf_type mirror drifted: PF_A20_HYP_SELFTEST");
+_Static_assert(PF_A20_LOCK_CONTENTION == A20_PF_A20_LOCK_CONTENTION, "pf_type mirror drifted: PF_A20_LOCK_CONTENTION");
+_Static_assert(PF_A20_DRIVER_LIFECYCLE == A20_PF_A20_DRIVER_LIFECYCLE, "pf_type mirror drifted: PF_A20_DRIVER_LIFECYCLE");
+_Static_assert(PF_A20_SCHED_BASE_SLICE == A20_PF_A20_SCHED_BASE_SLICE, "pf_type mirror drifted: PF_A20_SCHED_BASE_SLICE");
+_Static_assert(PF_A20_XLATOR == A20_PF_A20_XLATOR, "pf_type mirror drifted: PF_A20_XLATOR");
+_Static_assert(PF_A20_OBJECTS == A20_PF_A20_OBJECTS, "pf_type mirror drifted: PF_A20_OBJECTS");
+_Static_assert(PF_A20_IOMMU == A20_PF_A20_IOMMU, "pf_type mirror drifted: PF_A20_IOMMU");
+_Static_assert(PF_A20_NETFILTER == A20_PF_A20_NETFILTER, "pf_type mirror drifted: PF_A20_NETFILTER");
+_Static_assert(PF_A20_NETMEM == A20_PF_A20_NETMEM, "pf_type mirror drifted: PF_A20_NETMEM");
+_Static_assert(PF_A20_JOURNAL == A20_PF_A20_JOURNAL, "pf_type mirror drifted: PF_A20_JOURNAL");
+_Static_assert(PF_A20_IRQ_AFFINITY == A20_PF_A20_IRQ_AFFINITY, "pf_type mirror drifted: PF_A20_IRQ_AFFINITY");
+_Static_assert(PF_CGROUPS == A20_PF_CGROUPS, "pf_type mirror drifted: PF_CGROUPS");
+_Static_assert(PF_SELF == A20_PF_SELF, "pf_type mirror drifted: PF_SELF");
+_Static_assert(PF_FSTYPE == A20_PF_FSTYPE, "pf_type mirror drifted: PF_FSTYPE");
+_Static_assert(PF_SWAPS == A20_PF_SWAPS, "pf_type mirror drifted: PF_SWAPS");
+_Static_assert(PF_SYSRQ_TRIGGER == A20_PF_SYSRQ_TRIGGER, "pf_type mirror drifted: PF_SYSRQ_TRIGGER");
+_Static_assert(A20_PF_TYPE_COUNT == PF_SYSRQ_TRIGGER + 1, "pf_type count drifted");
+_Static_assert(S_IFLNK == 0120000 && S_IFDIR == 0040000 && S_IFREG == 0100000,
+               "mode-bit mirror drifted");
 
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
 #include "drivers/core/driver_lifecycle_test.h"
@@ -101,148 +236,16 @@ static int parse_fd_name(const char *name, int *fd)
 
 
 static pf_type_t name_to_type(const char *name, int *out_pid) {
-    *out_pid = 0;
-    if (strcmp(name, "meminfo") == 0) return PF_MEMINFO;
-    if (strcmp(name, "version") == 0) return PF_VERSION;
-    if (strcmp(name, "uptime") == 0) return PF_UPTIME;
-    if (strcmp(name, "cpuinfo") == 0) return PF_CPUINFO;
-    if (strcmp(name, "mounts") == 0) return PF_MOUNTS;
-    if (strcmp(name, "self") == 0) return PF_SELF;
-    if (strcmp(name, "loadavg") == 0) return PF_LOADAVG;
-    if (strcmp(name, "net") == 0) return PF_NET;
-    if (strcmp(name, "config.gz") == 0) return PF_CONFIG_GZ;
-    if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
-    if (strcmp(name, "cgroups") == 0) return PF_CGROUPS;
-    if (strcmp(name, "swaps") == 0) return PF_SWAPS;
-    if (strcmp(name, "sysrq-trigger") == 0) return PF_SYSRQ_TRIGGER;
-    if (strcmp(name, "interrupts") == 0) return PF_INTERRUPTS;
-    if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
-    if (strcmp(name, "a20") == 0) return PF_A20;
-    if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
-    if (strcmp(name, "anonprov") == 0) return PF_A20_ANONPROV;
-    if (strcmp(name, "hyp_selftest") == 0) return PF_A20_HYP_SELFTEST;
-    if (strcmp(name, "sched_base_slice") == 0) return PF_A20_SCHED_BASE_SLICE;
+    /* The ordered /proc name table is owned by procfs_node_state.rs. */
+    return (pf_type_t)a20_procfs_name_type(name, out_pid,
 #ifdef CONFIG_XLATOR
-    if (strcmp(name, "xlator") == 0) return PF_A20_XLATOR;
+                                           1
+#else
+                                           0
 #endif
-    if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
-    if (strcmp(name, "oom") == 0) return PF_A20_OOM;
-    if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
-    if (strcmp(name, "perf") == 0) return PF_A20_PERF;
-    if (strcmp(name, "lock_contention") == 0) return PF_A20_LOCK_CONTENTION;
-    if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
-    if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
-    if (strcmp(name, "iommu") == 0) return PF_A20_IOMMU;
-    if (strcmp(name, "irq_affinity") == 0) return PF_A20_IRQ_AFFINITY;
-    if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
-    if (is_pid_str(name)) {
-        *out_pid = atoi(name);
-        return PF_ROOT;
-    }
-    if (strcmp(name, "stat") == 0) return PF_PID_STAT;
-    if (strcmp(name, "status") == 0) return PF_PID_STATUS;
-    if (strcmp(name, "statm") == 0) return PF_PID_STATM;
-    if (strcmp(name, "maps") == 0) return PF_PID_MAPS;
-    if (strcmp(name, "smaps") == 0) return PF_PID_SMAPS;
-    if (strcmp(name, "oom_score_adj") == 0) return PF_PID_OOM_SCORE_ADJ;
-    if (strcmp(name, "oom_score") == 0) return PF_PID_OOM_SCORE;
-    if (strcmp(name, "cgroup") == 0) return PF_PID_CGROUP;
-    if (strcmp(name, "cmdline") == 0) return PF_PID_CMDLINE;
-    if (strcmp(name, "comm") == 0) return PF_PID_COMM;
-    if (strcmp(name, "exe") == 0) return PF_PID_EXE;
-    if (strcmp(name, "cwd") == 0) return PF_PID_CWD;
-    if (strcmp(name, "fd") == 0) return PF_PID_FD;
-    if (strcmp(name, "environ") == 0) return PF_PID_ENVIRON;
-    if (strcmp(name, "auxv") == 0) return PF_PID_AUXV;
-    if (strcmp(name, "io") == 0) return PF_PID_IO;
-    if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
-    if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
-    if (strcmp(name, "task") == 0) return PF_PID_TASK;
-    if (strcmp(name, "ns") == 0) return PF_PID_NS;
-    if (strcmp(name, "pid") == 0) return PF_PID_NS_PID;
-    if (strcmp(name, "pid_for_children") == 0) return PF_PID_NS_PID_FOR_CHILDREN;
-    if (strcmp(name, "uts") == 0) return PF_PID_NS_UTS;
-    if (strcmp(name, "user") == 0) return PF_PID_NS_USER;
-    if (strcmp(name, "ipc") == 0) return PF_PID_NS_IPC;
-    if (strcmp(name, "mnt") == 0) return PF_PID_NS_MNT;
-    if (strcmp(name, "net") == 0) return PF_PID_NS_NET;
-    if (strcmp(name, "cgroup") == 0) return PF_PID_NS_CGROUP;
-    if (strcmp(name, "fdinfo") == 0) return PF_PID_FDINFO;
-    if (strcmp(name, "mountinfo") == 0) return PF_PID_MOUNTINFO;
-    if (strcmp(name, "pagemap") == 0) return PF_PID_PAGEMAP;
-    if (strcmp(name, "boot_id") == 0) return PF_BOOT_ID;
-    if (strcmp(name, "cap_last_cap") == 0) return PF_CAP_LAST_CAP;
-    if (strcmp(name, "nr_open") == 0) return PF_NR_OPEN;
-    if (strcmp(name, "pressure") == 0) return PF_PRESSURE;
-    if (strcmp(name, "uid_map") == 0) return PF_UID_MAP;
-    if (strcmp(name, "gid_map") == 0) return PF_GID_MAP;
-    if (strcmp(name, "setgroups") == 0) return PF_SETGROUPS;
-    if (strcmp(name, "sysvipc") == 0) return PF_SYSVIPC;
-    if (strcmp(name, "devices") == 0) return PF_DEVICES;
-    if (strcmp(name, "partitions") == 0) return PF_PARTITIONS;
-    if (strcmp(name, "diskstats") == 0) return PF_DISKSTATS;
-    if (strcmp(name, "modules") == 0) return PF_MODULES;
-    if (strcmp(name, "misc") == 0) return PF_MISC;
-    if (strcmp(name, "iomem") == 0) return PF_IOMEM;
-    if (strcmp(name, "ioports") == 0) return PF_IOPORTS;
-    if (strcmp(name, "softirqs") == 0) return PF_SOFTIRQS;
-    if (strcmp(name, "route") == 0) return PF_ROUTE;
-    if (strcmp(name, "arp") == 0) return PF_ARP;
-    if (strcmp(name, "tty") == 0) return PF_TTY;
-    if (strcmp(name, "ldiscs") == 0) return PF_LDISCS;
-    if (strcmp(name, "drivers") == 0) return PF_DRIVERS;
-    if (strcmp(name, "thread-self") == 0) return PF_THREAD_SELF;
-    if (strcmp(name, "limits") == 0) return PF_PID_LIMITS;
-    if (strcmp(name, "wchan") == 0) return PF_PID_WCHAN;
-    if (strcmp(name, "stack") == 0) return PF_PID_STACK;
-    return PF_ROOT;
+    );
 }
 
-static int procfs_root_file_type(pf_type_t type)
-{
-    switch (type) {
-    case PF_MEMINFO:
-    case PF_STAT:
-    case PF_VERSION:
-    case PF_UPTIME:
-    case PF_CMDLINE:
-    case PF_CPUINFO:
-    case PF_MOUNTS:
-    case PF_LOADAVG:
-    case PF_NET:
-    case PF_CONFIG_GZ:
-    case PF_FSTYPE:
-    case PF_CGROUPS:
-    case PF_SWAPS:
-    case PF_INTERRUPTS:
-    case PF_SYS_KERNEL_PIDMAP:
-    case PF_BOOT_ID:
-    case PF_CAP_LAST_CAP:
-    case PF_NR_OPEN:
-    case PF_PRESSURE:
-    case PF_UID_MAP:
-    case PF_GID_MAP:
-    case PF_SETGROUPS:
-    case PF_SYSVIPC:
-    case PF_DEVICES:
-    case PF_PARTITIONS:
-    case PF_DISKSTATS:
-    case PF_MODULES:
-    case PF_MISC:
-    case PF_IOMEM:
-    case PF_IOPORTS:
-    case PF_SOFTIRQS:
-    case PF_ROUTE:
-    case PF_ARP:
-    case PF_TTY:
-    case PF_LDISCS:
-    case PF_DRIVERS:
-    case PF_SYSRQ_TRIGGER:
-        return 1;
-    default:
-        return 0;
-    }
-}
 
 // Lightweight metadata stored in vnode->fs_data (no content buffer)
 typedef struct {
@@ -284,26 +287,24 @@ static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
         task_t *cur = proc_current();
         real_pid = cur ? cur->pid : 0;
     }
-    if (type == PF_CPUINFO || type == PF_PID_PAGEMAP || type == PF_PID_MAPS ||
-        type == PF_PID_SMAPS || type == PF_PID_FDINFO_ENTRY) {
-        m->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
-        if (type != PF_PID_PAGEMAP)
+    /* The length/capacity policy is owned by procfs_node_state.rs. */
+    {
+        procfs_content_plan_t plan;
+        a20_procfs_content_plan((int)type, CONFIG_NR_CPUS, PAGE_SIZE, &plan);
+        if (plan.generator == A20_PROCFS_GEN_PAGEMAP_LEN) {
+            m->content_len = (size_t)plan.fixed_len;
+        } else if (plan.meta_len_zero) {
             m->content_len = 0;
-    } else {
-        char tmp[4096];
-        m->content_len = (size_t)generate_content(type, real_pid, tmp, sizeof(tmp));
+        } else {
+            char tmp[4096];
+            m->content_len = (size_t)generate_content(type, real_pid, tmp, sizeof(tmp));
+        }
     }
     return m;
 }
 
 static int resource_kind(pf_type_t type) {
-    switch (type) {
-    case PF_PID_NS_UTS: return PROCNS_UTS;
-    case PF_PID_NS_IPC: return PROCNS_IPC;
-    case PF_PID_NS_NET: return PROCNS_NET;
-    case PF_PID_NS_CGROUP: return PROCNS_CGROUP;
-    default: return 0;
-    }
+    return a20_procfs_resource_kind((int)type);
 }
 
 static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
@@ -317,36 +318,38 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         real_pid = cur ? cur->pid : 0;
     }
     p->pid = real_pid;
-    if (type == PF_PID_PAGEMAP) {
-        p->content_len = (256ULL * 1024 * 1024 * 1024 / PAGE_SIZE) * 8;
-    } else if (type == PF_PID_MAPS || type == PF_PID_SMAPS) {
-        int ret = generate_pid_maps_alloc(real_pid, type == PF_PID_SMAPS,
-                                          &p->content, &p->content_len);
-        if (ret < 0) {
-            task_t *cur = proc_current();
-            if (cur)
-                cur->vfs_open_errno = ret;
-            kfree(p);
-            return NULL;
+    {
+        procfs_content_plan_t plan;
+        a20_procfs_content_plan((int)type, CONFIG_NR_CPUS, PAGE_SIZE, &plan);
+        if (plan.generator == A20_PROCFS_GEN_PAGEMAP_LEN) {
+            p->content_len = (size_t)plan.fixed_len;
+        } else if (plan.generator == A20_PROCFS_GEN_MAPS_ALLOC) {
+            int ret = generate_pid_maps_alloc(real_pid, type == PF_PID_SMAPS,
+                                              &p->content, &p->content_len);
+            if (ret < 0) {
+                task_t *cur = proc_current();
+                if (cur)
+                    cur->vfs_open_errno = ret;
+                kfree(p);
+                return NULL;
+            }
+        } else {
+            size_t capacity = plan.capacity;
+            p->content = kmalloc(capacity);
+            if (!p->content) {
+                kfree(p);
+                return NULL;
+            }
+            int len = plan.generator == A20_PROCFS_GEN_FDINFO ?
+                generate_pid_fdinfo(real_pid, fd, p->content, capacity) :
+                generate_content(type, real_pid, p->content, capacity);
+            if (len < 0) {
+                kfree(p->content);
+                kfree(p);
+                return NULL;
+            }
+            p->content_len = (size_t)len;
         }
-    } else {
-        /* CPU records scale with the configured SMP capacity. */
-        size_t capacity = type == PF_CPUINFO ?
-                          512 * CONFIG_NR_CPUS + 1 : 4096;
-        p->content = kmalloc(capacity);
-        if (!p->content) {
-            kfree(p);
-            return NULL;
-        }
-        int len = type == PF_PID_FDINFO_ENTRY ?
-            generate_pid_fdinfo(real_pid, fd, p->content, capacity) :
-            generate_content(type, real_pid, p->content, capacity);
-        if (len < 0) {
-            kfree(p->content);
-            kfree(p);
-            return NULL;
-        }
-        p->content_len = (size_t)len;
     }
     if (type == PF_PID_NS_MNT || type == PF_PID_NS_PID ||
         type == PF_PID_NS_PID_FOR_CHILDREN || type == PF_PID_NS_USER || resource_kind(type)) {
@@ -378,6 +381,60 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
     return p;
 }
 
+/* Answer the node table's task/fdtable questions.  The table itself, and the
+ * order in which these are asked, live in procfs_node_state.rs; this is the
+ * mechanical lookup half. */
+static int procfs_node_probe(void *ctx, uint32_t which, int64_t arg, int64_t *out)
+{
+    vnode_t *dir = (vnode_t *)ctx;
+    procfs_meta_t *dp = (procfs_meta_t *)dir->fs_data;
+    if (!dp)
+        return -ENOENT;
+    *out = 0;
+    if (which == A20_PROCFS_PROBE_FD_EXISTS) {
+        int real_pid = dp->pid;
+        if (real_pid == -1) {
+            task_t *cur = proc_current();
+            real_pid = cur ? cur->pid : 0;
+        }
+        task_t *task = proc_find_get(real_pid);
+        if (task && !proc_task_may_access(proc_current(), task)) {
+            proc_put(task);
+            return -EACCES;
+        }
+        vfile_t *target = task ? fdtable_get_file_ref(task, (int)arg, NULL) : NULL;
+        proc_put(task);
+        if (!target)
+            return 0;
+        vfs_put_file(target);
+        *out = 1;
+        return 0;
+    }
+    if (which == A20_PROCFS_PROBE_PID_GLOBAL) {
+        task_t *task = proc_find_get_user((int)arg);
+        if (!task)
+            return 0;
+        *out = task->pid;
+        proc_put(task);
+        return 0;
+    }
+    if (which == A20_PROCFS_PROBE_THREAD_OF_OWNER) {
+        int owner_pid = dp->pid == -1 ? proc_current()->pid : dp->pid;
+        task_t *owner = proc_find_get(owner_pid);
+        task_t *thread = proc_find_get_user((int)arg);
+        if (!owner || !thread || owner->tgid != thread->tgid) {
+            proc_put(owner);
+            proc_put(thread);
+            return 0;
+        }
+        *out = thread->pid;
+        proc_put(owner);
+        proc_put(thread);
+        return 0;
+    }
+    return 0;
+}
+
 static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!name || !*name) return -ENOENT;
 
@@ -388,311 +445,28 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     pf_entry_t *child = NULL;
     int fd_entry = -1;
     int fd_symlink = 0;
-    if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "stat") == 0) {
-        child = new_entry(name, PF_STAT, 0);
-        type = PF_STAT;
-    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
-        child = new_entry(name, PF_SYS, 0);
-        type = PF_SYS;
-    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "cpu") == 0) {
-        child = new_entry(name, PF_PRESSURE_CPU, 0);
-        type = PF_PRESSURE_CPU;
-    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "memory") == 0) {
-        child = new_entry(name, PF_PRESSURE_MEM, 0);
-        type = PF_PRESSURE_MEM;
-    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "io") == 0) {
-        child = new_entry(name, PF_PRESSURE_IO, 0);
-        type = PF_PRESSURE_IO;
-    } else if (dp && dp->type == PF_SYS && strcmp(name, "fs") == 0) {
-        child = new_entry(name, PF_SYS_FS, 0);
-        type = PF_SYS_FS;
-    } else if (dp && dp->type == PF_SYS_FS && strcmp(name, "pipe-max-size") == 0) {
-        child = new_entry(name, PF_SYS_FS_PIPE_MAX_SIZE, 0);
-        type = PF_SYS_FS_PIPE_MAX_SIZE;
-    } else if (dp && dp->type == PF_SYS_FS && strcmp(name, "lease-break-time") == 0) {
-        child = new_entry(name, PF_SYS_FS_LEASE_BREAK_TIME, 0);
-        type = PF_SYS_FS_LEASE_BREAK_TIME;
-    } else if (dp && dp->type == PF_SYS && strcmp(name, "kernel") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL, 0);
-        type = PF_SYS_KERNEL;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "osrelease") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_OSRELEASE, 0);
-        type = PF_SYS_KERNEL_OSRELEASE;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "pid_max") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_PID_MAX, 0);
-        type = PF_SYS_KERNEL_PID_MAX;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "pidmap") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_PIDMAP, 0);
-        type = PF_SYS_KERNEL_PIDMAP;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "tainted") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_TAINTED, 0);
-        type = PF_SYS_KERNEL_TAINTED;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "sched_autogroup_enabled") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_SCHED_AUTOGROUP, 0);
-        type = PF_SYS_KERNEL_SCHED_AUTOGROUP;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "core_pattern") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_CORE_PATTERN, 0);
-        type = PF_SYS_KERNEL_CORE_PATTERN;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "hostname") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_HOSTNAME, 0);
-        type = PF_SYS_KERNEL_HOSTNAME;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "domainname") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_DOMAINNAME, 0);
-        type = PF_SYS_KERNEL_DOMAINNAME;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "overflowuid") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_OVERFLOW_UID, 0);
-        type = PF_SYS_KERNEL_OVERFLOW_UID;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "overflowgid") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_OVERFLOW_GID, 0);
-        type = PF_SYS_KERNEL_OVERFLOW_GID;
-    } else if (dp && dp->type == PF_SYS_KERNEL && strcmp(name, "io_uring_disabled") == 0) {
-        child = new_entry(name, PF_SYS_KERNEL_IO_URING_DISABLED, 0);
-        type = PF_SYS_KERNEL_IO_URING_DISABLED;
-    } else if (dp && dp->type == PF_SYS && strcmp(name, "vm") == 0) {
-        child = new_entry(name, PF_SYS_VM, 0);
-        type = PF_SYS_VM;
-    } else if (dp && dp->type == PF_SYS_VM && strcmp(name, "drop_caches") == 0) {
-        child = new_entry(name, PF_SYS_VM_DROP_CACHES, 0);
-        type = PF_SYS_VM_DROP_CACHES;
-    } else if (dp && dp->type == PF_SYS_FS && strcmp(name, "inotify") == 0) {
-        child = new_entry(name, PF_SYS_FS_INOTIFY, 0);
-        type = PF_SYS_FS_INOTIFY;
-    } else if (dp && dp->type == PF_SYS_FS_INOTIFY && strcmp(name, "max_queued_events") == 0) {
-        child = new_entry(name, PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS, 0);
-        type = PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS;
-    } else if (dp && dp->type == PF_SYS_FS_INOTIFY && strcmp(name, "max_user_instances") == 0) {
-        child = new_entry(name, PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES, 0);
-        type = PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES;
-    } else if (dp && dp->type == PF_SYS && strcmp(name, "net") == 0) {
-        child = new_entry(name, PF_SYS_NET, 0);
-        type = PF_SYS_NET;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "status") == 0) {
-        child = new_entry(name, PF_NET_STATUS, 0);
-        type = PF_NET_STATUS;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "config") == 0) {
-        child = new_entry(name, PF_NET_CONFIG, 0);
-        type = PF_NET_CONFIG;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "route") == 0) {
-        child = new_entry(name, PF_ROUTE, 0);
-        type = PF_ROUTE;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "arp") == 0) {
-        child = new_entry(name, PF_ARP, 0);
-        type = PF_ARP;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "dev") == 0) {
-        child = new_entry(name, PF_NET_DEV, 0);
-        type = PF_NET_DEV;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "tcp") == 0) {
-        child = new_entry(name, PF_NET_TCP, 0);
-        type = PF_NET_TCP;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "udp") == 0) {
-        child = new_entry(name, PF_NET_UDP, 0);
-        type = PF_NET_UDP;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "tcp6") == 0) {
-        child = new_entry(name, PF_NET_TCP6, 0);
-        type = PF_NET_TCP6;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "udp6") == 0) {
-        child = new_entry(name, PF_NET_UDP6, 0);
-        type = PF_NET_UDP6;
-    } else if (dp && dp->type == PF_NET && strcmp(name, "unix") == 0) {
-        child = new_entry(name, PF_NET_UNIX, 0);
-        type = PF_NET_UNIX;
-    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "a20") == 0) {
-        child = new_entry(name, PF_A20, 0);
-        type = PF_A20;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "bcache") == 0) {
-        child = new_entry(name, PF_A20_BCACHE, 0);
-        type = PF_A20_BCACHE;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "page_cache") == 0) {
-        child = new_entry(name, PF_A20_PAGE_CACHE, 0);
-        type = PF_A20_PAGE_CACHE;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "oom") == 0) {
-        child = new_entry(name, PF_A20_OOM, 0);
-        type = PF_A20_OOM;
-    } else if (dp && dp->type == PF_A20 &&
-               strcmp(name, "task_lifetime") == 0) {
-        child = new_entry(name, PF_A20_TASK_LIFETIME, 0);
-        type = PF_A20_TASK_LIFETIME;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "perf") == 0) {
-        child = new_entry(name, PF_A20_PERF, 0);
-        type = PF_A20_PERF;
-    } else if (dp && dp->type == PF_A20 &&
-               strcmp(name, "lock_contention") == 0) {
-        child = new_entry(name, PF_A20_LOCK_CONTENTION, 0);
-        type = PF_A20_LOCK_CONTENTION;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "driver_lifecycle") == 0) {
-        child = new_entry(name, PF_A20_DRIVER_LIFECYCLE, 0);
-        type = PF_A20_DRIVER_LIFECYCLE;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "objects") == 0) {
-        child = new_entry(name, PF_A20_OBJECTS, 0);
-        type = PF_A20_OBJECTS;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
-        child = new_entry(name, PF_A20_IOMMU, 0);
-        type = PF_A20_IOMMU;
-    } else if (dp && dp->type == PF_A20 &&
-               strcmp(name, "irq_affinity") == 0) {
-        child = new_entry(name, PF_A20_IRQ_AFFINITY, 0);
-        type = PF_A20_IRQ_AFFINITY;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "netfilter") == 0) {
-        child = new_entry(name, PF_A20_NETFILTER, 0);
-        type = PF_A20_NETFILTER;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "netmem") == 0) {
-        child = new_entry(name, PF_A20_NETMEM, 0);
-        type = PF_A20_NETMEM;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "journal") == 0) {
-        child = new_entry(name, PF_A20_JOURNAL, 0);
-        type = PF_A20_JOURNAL;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "anonprov") == 0) {
-        child = new_entry(name, PF_A20_ANONPROV, 0);
-        type = PF_A20_ANONPROV;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "hyp_selftest") == 0) {
-        child = new_entry(name, PF_A20_HYP_SELFTEST, 0);
-        type = PF_A20_HYP_SELFTEST;
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
-        child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
-        type = PF_A20_SCHED_BASE_SLICE;
+    pf_type_t class_type = type;
+    {
+        procfs_child_node_t node;
+        int pr = a20_procfs_child_node(dp ? (int)dp->type : -1,
+                                       dp ? dp->pid : 0, name,
+                                       (int)type, pid,
 #ifdef CONFIG_XLATOR
-    } else if (dp && dp->type == PF_A20 && strcmp(name, "xlator") == 0) {
-        child = new_entry(name, PF_A20_XLATOR, 0);
-        type = PF_A20_XLATOR;
+                                       1,
+#else
+                                       0,
 #endif
-    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
-        child = new_entry(name, PF_INTERRUPTS, 0);
-        type = PF_INTERRUPTS;
-    } else if (dp && dp->type == PF_PID_FD) {
-        if (parse_fd_name(name, &fd_entry) < 0)
-            return -ENOENT;
-        int real_pid = dp->pid;
-        if (real_pid == -1) {
-            task_t *cur = proc_current();
-            real_pid = cur ? cur->pid : 0;
-        }
-        task_t *task = proc_find_get(real_pid);
-        if (task && !proc_task_may_access(proc_current(), task)) {
-            proc_put(task);
-            return -EACCES;
-        }
-        vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
-        proc_put(task);
-        if (!target)
-            return -ENOENT;
-        vfs_put_file(target);
-        child = new_entry(name, PF_PID_FD, dp->pid);
-        type = PF_PID_FD;
-        fd_symlink = 1;
-    } else if (dp && dp->type == PF_PID_FDINFO) {
-        if (parse_fd_name(name, &fd_entry) < 0)
-            return -ENOENT;
-        int real_pid = dp->pid;
-        if (real_pid == -1) {
-            task_t *cur = proc_current();
-            real_pid = cur ? cur->pid : 0;
-        }
-        task_t *task = proc_find_get(real_pid);
-        if (task && !proc_task_may_access(proc_current(), task)) {
-            proc_put(task);
-            return -EACCES;
-        }
-        vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
-        proc_put(task);
-        if (!target)
-            return -ENOENT;
-        vfs_put_file(target);
-        child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
-        type = PF_PID_FDINFO_ENTRY;
-    } else if (dp && dp->type == PF_PID_TASK) {
-        if (!is_pid_str(name))
-            return -ENOENT;
-        int owner_pid = dp->pid == -1 ? proc_current()->pid : dp->pid;
-        task_t *owner = proc_find_get(owner_pid);
-        task_t *thread = proc_find_get_user(pid);
-        if (!owner || !thread || owner->tgid != thread->tgid) {
-            proc_put(owner);
-            proc_put(thread);
-            return -ENOENT;
-        }
-        type = PF_ROOT;
-        child = new_entry(name, type, thread->pid);
-        proc_put(owner);
-        proc_put(thread);
-    } else if (dp && dp->type == PF_PID_NS) {
-        if (strcmp(name, "pid") == 0)
-            type = PF_PID_NS_PID;
-        else if (strcmp(name, "pid_for_children") == 0)
-            type = PF_PID_NS_PID_FOR_CHILDREN;
-        else if (strcmp(name, "user") == 0)
-            type = PF_PID_NS_USER;
-        else if (strcmp(name, "mnt") == 0)
-            type = PF_PID_NS_MNT;
-        else if (strcmp(name, "uts") == 0) type = PF_PID_NS_UTS;
-        else if (strcmp(name, "ipc") == 0) type = PF_PID_NS_IPC;
-        else if (strcmp(name, "net") == 0) type = PF_PID_NS_NET;
-        else if (strcmp(name, "cgroup") == 0) type = PF_PID_NS_CGROUP;
-        else
-            return -ENOENT;
-        child = new_entry(name, type, dp->pid);
-    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
-               (type == PF_SELF || type == PF_THREAD_SELF)) {
-        child = new_entry(name, PF_ROOT, -1);
-    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
-               is_pid_str(name)) {
-        /* `name` is a path component, so it is an id in the *reader's*
-         * namespace.  Resolve it there, then store the resolved task's
-         * global id: every pf_entry consumer downstream (render, fd
-         * symlinks, ns pinning) looks tasks up by the global id, and the
-         * entry was already namespace-checked here. */
-        task_t *task = proc_find_get_user(pid);
-        if (!task)
-            return -ENOENT;
-        int global_pid = task->pid;
-        proc_put(task);
-        child = new_entry(name, PF_ROOT, global_pid);
-    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
-               strcmp(name, "cmdline") == 0) {
-        child = new_entry(name, PF_PID_CMDLINE, dp->pid);
-    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
-               strcmp(name, "mounts") == 0) {
-        /* /proc/<pid>/mounts — same as /proc/mounts */
-        child = new_entry(name, PF_MOUNTS, 0);
-    } else if (dp && dp->type == PF_ROOT &&
-               (dp->pid > 0 || dp->pid == -1) &&
-               strcmp(name, "cgroup") == 0) {
-        type = PF_PID_CGROUP;
-        child = new_entry(name, type, dp->pid);
-    } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1)) {
-        if (type == PF_PID_STAT || type == PF_PID_STATUS ||
-            type == PF_PID_STATM || type == PF_PID_MAPS ||
-            type == PF_PID_SMAPS || type == PF_PID_OOM_SCORE_ADJ ||
-            type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
-            type == PF_PID_COMM || type == PF_PID_EXE ||
-            type == PF_PID_CWD || type == PF_PID_FD ||
-            type == PF_PID_ENVIRON || type == PF_PID_AUXV ||
-            type == PF_PID_IO ||
-            type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
-            type == PF_PID_TASK || type == PF_PID_NS || type == PF_PID_FDINFO ||
-            type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
-            type == PF_PID_LIMITS || type == PF_PID_WCHAN ||
-            type == PF_PID_STACK ||
-            /* /proc/<pid>/{uid,gid}_map and setgroups: name_to_type() already
-             * maps these three names, and the render/write paths below take
-             * their target from the entry's pid, so the same pf_types serve
-             * both /proc/ and /proc/<pid>/.  The one thing that differs is
-             * mode: these are the only procfs files the caller ever opens
-             * O_WRONLY, and the permission to write is decided in
-             * userns_write_map() rather than here. */
-            type == PF_UID_MAP || type == PF_GID_MAP ||
-            type == PF_SETGROUPS) {
-            child = new_entry(name, type, dp->pid);
-        } else {
-            return -ENOENT;
-        }
-    } else {
-        if (!dp || dp->type != PF_ROOT || dp->pid != 0)
-            return -ENOENT;
-        if (!procfs_root_file_type(type))
-            return -ENOENT;
-        child = new_entry(name, type, 0);
+                                       dir, procfs_node_probe, &node);
+        if (pr < 0)
+            return pr;
+        type = (pf_type_t)node.ty;
+        class_type = (pf_type_t)node.class_type;
+        pid = node.pid;
+        fd_symlink = (int)node.is_symlink;
+        if (dp && (dp->type == PF_PID_FD || dp->type == PF_PID_FDINFO) &&
+            parse_fd_name(name, &fd_entry) < 0)
+            fd_entry = -1;
+        child = new_entry(name, type, pid);
     }
     if (!child) return -ENOMEM;
 
@@ -700,20 +474,17 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!vn) { kfree(child); return -ENOMEM; }
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)child;
-    int magic_symlink = fd_symlink || type == PF_PID_EXE ||
-                        type == PF_PID_CWD;
-    vn->type = magic_symlink ? VFS_FT_SYMLINK :
-               ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
-                type == PF_THREAD_SELF ||
-                type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
-                type == PF_SYS_NET || type == PF_SYS_VM ||
-                type == PF_SYS_FS_INOTIFY || type == PF_NET ||
-                type == PF_A20 || type == PF_PID_FD ||
-                type == PF_PID_TASK || type == PF_PID_NS || type == PF_PID_FDINFO ||
-                type == PF_PRESSURE) ?
-               VFS_FT_DIR : VFS_FT_REGULAR;
-    if (magic_symlink)
-        vn->link_flags |= VNODE_MAGICLINK;
+    /* The file-type, magic-link and mode decisions are owned by
+     * procfs_node_state.rs. */
+    {
+        int vtype = 0;
+        int vmode = 0;
+        uint32_t link_flags = a20_procfs_node_class((int)class_type, is_pid_str(name),
+                                                    fd_symlink, &vtype, &vmode);
+        vn->type = vtype;
+        vn->link_flags |= link_flags;
+        vn->mode = vmode;
+    }
     vn->mode = vn->type == VFS_FT_SYMLINK ? (S_IFLNK | 0777) :
                (vn->type == VFS_FT_DIR ? (S_IFDIR | 0555) : (S_IFREG | 0444));
     if (type == PF_A20_DRIVER_LIFECYCLE || type == PF_SYSRQ_TRIGGER)
@@ -904,11 +675,13 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
         proc_put(t);
         return (int)read_bytes;
     }
-    if (vf->offset >= p->content_len) return 0;
-    size_t avail = p->content_len - vf->offset;
-    size_t n = count < avail ? count : avail;
-    memcpy(buf, p->content + vf->offset, n);
-    vf->offset += n;
+    /* The offset advance and short-read/EOF decision are owned by
+     * procfs_state.rs; the copy stays here. */
+    uint64_t new_off = vf->offset;
+    int64_t n = a20_procfs_read_plan(p->content_len, vf->offset, count, &new_off);
+    if (n > 0)
+        memcpy(buf, p->content + vf->offset, (size_t)n);
+    vf->offset = (size_t)new_off;
     return (int)n;
 }
 
@@ -1429,6 +1202,7 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (value & 2) {
             vfs_dcache_invalidate_all();
             ext4_vnode_cache_prune_all();
+            uxfs_vnode_cache_prune_all();
         }
         return (int)count;
     }
@@ -1484,16 +1258,35 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
 static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
-    long new_off;
-    switch (whence) {
-        case SEEK_SET: new_off = offset; break;
-        case SEEK_CUR: new_off = (long)vf->offset + offset; break;
-        case SEEK_END: new_off = (long)p->content_len + offset; break;
-        default: return -EINVAL;
-    }
-    if (new_off < 0) new_off = 0;
+    /* The offset arithmetic is owned by procfs_state.rs. */
+    int64_t new_off = a20_procfs_seek_plan(p->content_len, vf->offset, offset,
+                                           whence);
+    if (new_off < 0) return (long)new_off;
     vf->offset = (size_t)new_off;
-    return new_off;
+    return (long)new_off;
+}
+
+/* procfs_state.rs asks the adapter for the entry at a cursor.  The fdtable walk
+ * below is the only mechanical part of an fd getdents64 batch that stays in C. */
+static int procfs_dir_next_fd(void *ctx, uint64_t cursor, procfs_dir_entry_t *out)
+{
+    task_t *task = (task_t *)ctx;
+    int fd = (int)cursor - 2;
+    while (fd < MAX_FILES) {
+        vfile_t *target = fdtable_get_file_ref(task, fd, NULL);
+        if (target) {
+            vfs_put_file(target);
+            break;
+        }
+        fd++;
+    }
+    if (fd >= MAX_FILES)
+        return 0;
+    out->key = (uint64_t)fd;
+    out->shown = (int64_t)fd;
+    out->name = NULL;
+    out->type_hint = 0;
+    return 1;
 }
 
 static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
@@ -1507,63 +1300,53 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
         return -EACCES;
     }
 
-    int cursor = (int)vf->offset;
-    size_t total = 0;
-    char *out = (char *)dirp;
-
-    while (total < count) {
-        const char *name;
-        char fd_name[16];
-        int fd = -1;
-        int next_cursor;
-
-        if (cursor == 0) {
-            name = ".";
-            next_cursor = 1;
-        } else if (cursor == 1) {
-            name = "..";
-            next_cursor = 2;
-        } else {
-            fd = cursor - 2;
-            while (fd < MAX_FILES) {
-                vfile_t *target = fdtable_get_file_ref(task, fd, NULL);
-                if (target) {
-                    vfs_put_file(target);
-                    break;
-                }
-                fd++;
-            }
-            if (fd >= MAX_FILES)
-                break;
-            snprintf(fd_name, sizeof(fd_name), "%d", fd);
-            name = fd_name;
-            next_cursor = fd + 3;
-        }
-
-        size_t namelen = strlen(name);
-        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
-        if (total + reclen > count)
-            break;
-
-        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
-        d->d_ino = fd >= 0 ? (uint64_t)fd + 1 : (uint64_t)cursor + 1;
-        d->d_off = next_cursor;
-        d->d_reclen = (uint16_t)reclen;
-        d->d_type = fd < 0 ? 4 : (p->type == PF_PID_FD ? 10 : 8);
-        memcpy(d->d_name, name, namelen + 1);
-
-        total += reclen;
-        cursor = next_cursor;
-    }
-
+    /* The cursor state machine and the dirent layout are owned by
+     * procfs_state.rs; the fdtable walk is the lookup it calls back into. */
+    uint64_t cursor = vf->offset;
+    int64_t total = a20_procfs_readdir_plan(
+        p->type == PF_PID_FD ? PROCFS_DIR_FD : PROCFS_DIR_FDINFO,
+        vf->offset, count, task, procfs_dir_next_fd, dirp, &cursor);
     vf->offset = (size_t)cursor;
     proc_put(task);
     return (int)total;
 }
 
+typedef struct {
+    int tgid;
+} procfs_task_dir_ctx_t;
+
 /* Thread ids are rendered in the reader's pid namespace, just like the
  * process directories.  Keep the task-list lock only while selecting an id;
  * no allocation or file operations run under it. */
+static int procfs_dir_next_task(void *ctx, uint64_t cursor, procfs_dir_entry_t *out)
+{
+    procfs_task_dir_ctx_t *c = (procfs_task_dir_ctx_t *)ctx;
+    uint64_t from = cursor - 2;
+    int best = 0;
+    int tid = 0;
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
+    pid_namespace_t *ns = pidns_current();
+    for (task_t *t = proc_first_task_locked(); t;
+         t = proc_next_task_locked(t)) {
+        if (proc_task_state_get(t) == PROC_UNUSED || t->tgid != c->tgid ||
+            !pidns_visible(ns, t) || t->pid <= 0 ||
+            (uint64_t)t->pid < from)
+            continue;
+        if (!best || t->pid < best) {
+            best = t->pid;
+            tid = task_pid_nr_ns(t, ns);
+        }
+    }
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+    if (!best)
+        return 0;
+    out->key = (uint64_t)best;
+    out->shown = (int64_t)tid;
+    out->name = NULL;
+    out->type_hint = 0;
+    return 1;
+}
+
 static int procfs_task_readdir(vfile_t *vf, procfs_priv_t *p,
                                void *dirp, size_t count)
 {
@@ -1572,52 +1355,86 @@ static int procfs_task_readdir(vfile_t *vf, procfs_priv_t *p,
         return -ENOENT;
     int tgid = owner->tgid;
     proc_put(owner);
-    size_t cursor = vf->offset;
-    size_t total = 0;
-    while (total < count) {
-        const char *name;
-        char tid_name[16];
-        size_t next_cursor = cursor + 1;
-        int tid = 0;
-        if (cursor < 2) {
-            name = cursor == 0 ? "." : "..";
+    procfs_task_dir_ctx_t ctx = { tgid };
+    uint64_t cursor = vf->offset;
+    int64_t total = a20_procfs_readdir_plan(PROCFS_DIR_TASK, vf->offset, count,
+                                            &ctx, procfs_dir_next_task,
+                                            dirp, &cursor);
+    vf->offset = (size_t)cursor;
+    return (int)total;
+}
+
+typedef struct {
+    const char **entries;
+    int is_root;
+    int static_count;
+    pf_type_t type;
+    char pidbuf[16];
+} procfs_static_dir_ctx_t;
+
+/* Answer "what entry is at index `cursor`" for a fixed-name or /proc root
+ * directory.  The root interleaves its literal names with the visible pids,
+ * which is why the name for a dynamic entry is rendered into the ctx buffer. */
+static int procfs_dir_next_static(void *ctx, uint64_t cursor, procfs_dir_entry_t *out)
+{
+    procfs_static_dir_ctx_t *c = (procfs_static_dir_ctx_t *)ctx;
+    uint64_t idx = cursor;
+    const char *name = NULL;
+    out->key = 0;
+    out->shown = 0;
+    out->name = NULL;
+    out->type_hint = 0;
+
+    if (c->is_root) {
+        if (idx < (uint64_t)c->static_count) {
+            name = c->entries[idx];
         } else {
-            int best = 0;
+            uint64_t pid_idx = idx - (uint64_t)c->static_count;
+            /* Only tasks visible from the reader's own pid namespace are
+             * listed, and each is listed under the id that reader would use to
+             * address it. */
             uint64_t flags = spin_lock_irqsave(&tasklist_lock);
             pid_namespace_t *ns = pidns_current();
-            for (task_t *t = proc_first_task_locked(); t;
-                 t = proc_next_task_locked(t)) {
-                if (proc_task_state_get(t) == PROC_UNUSED || t->tgid != tgid ||
-                    !pidns_visible(ns, t) || t->pid <= 0 ||
-                    (size_t)t->pid + 2 < cursor)
+            uint64_t cur_idx = 0;
+            task_t *t = NULL;
+            for (task_t *it = proc_first_task_locked(); it;
+                 it = proc_next_task_locked(it)) {
+                if (proc_task_state_get(it) == PROC_UNUSED || it->pid <= 0)
                     continue;
-                if (!best || t->pid < best) {
-                    best = t->pid;
-                    tid = task_pid_nr_ns(t, ns);
-                }
+                if (!pidns_visible(ns, it))
+                    continue;
+                if (cur_idx == pid_idx) { t = it; break; }
+                cur_idx++;
+            }
+            if (t) {
+                snprintf(c->pidbuf, sizeof(c->pidbuf), "%d",
+                         task_pid_nr_ns(t, ns));
+                name = c->pidbuf;
             }
             spin_unlock_irqrestore(&tasklist_lock, flags);
-            if (!best)
-                break;
-            next_cursor = (size_t)best + 3;
-            snprintf(tid_name, sizeof(tid_name), "%d", tid);
-            name = tid_name;
         }
-        size_t namelen = strlen(name);
-        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
-        if (total + reclen > count)
-            break;
-        vfs_dirent64_t *d = (vfs_dirent64_t *)((char *)dirp + total);
-        d->d_ino = tid ? (uint64_t)tid : cursor + 1;
-        d->d_off = next_cursor;
-        d->d_reclen = (uint16_t)reclen;
-        d->d_type = 4; /* DT_DIR */
-        memcpy(d->d_name, name, namelen + 1);
-        total += reclen;
-        cursor = next_cursor;
+    } else {
+        name = c->entries[idx];
     }
-    vf->offset = cursor;
-    return (int)total;
+    if (!name)
+        return 0;
+
+    int is_dir = (idx <= 1);
+    if (c->is_root && is_pid_str(name))
+        is_dir = 1;
+    if (!c->is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
+                        strcmp(name, "fdinfo") == 0 || strcmp(name, "task") == 0))
+        is_dir = 1;
+    if (c->type == PF_SYS && (strcmp(name, "fs") == 0 ||
+                              strcmp(name, "kernel") == 0 ||
+                              strcmp(name, "vm") == 0 ||
+                              strcmp(name, "net") == 0))
+        is_dir = 1;
+    if (c->type == PF_SYS_FS && strcmp(name, "inotify") == 0)
+        is_dir = 1;
+    out->name = name;
+    out->type_hint = is_dir ? 4 : 8; /* DT_DIR=4, DT_REG=8 per Linux getdents64 */
+    return 1;
 }
 
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
@@ -1710,80 +1527,25 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     size_t total = 0;
     char *out = (char *)dirp;
 
-    while (total < count) {
-        const char *name = NULL;
-        char pidbuf[16];
-
-        if (is_root) {
-            int static_count = 0;
-            for (int i = 0; root_entries[i]; i++) static_count = i + 1;
-            if (idx < static_count) {
-                name = root_entries[idx];
-            } else {
-                int pid_idx = idx - static_count;
-                /* Only tasks visible from the reader's own pid namespace are
-                 * listed, and each is listed under the id that reader would
-                 * use to address it.  Listing global ids here would both
-                 * expose the host's numbering to a container and make the
-                 * directory entries unusable: /proc/<listed-id> has to
-                 * resolve to the same task, which means it has to be the
-                 * namespace-local one. */
-                uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-                pid_namespace_t *ns = pidns_current();
-                int cur_idx = 0;
-                task_t *t = NULL;
-                for (task_t *it = proc_first_task_locked(); it;
-                     it = proc_next_task_locked(it)) {
-                    if (proc_task_state_get(it) == PROC_UNUSED || it->pid <= 0)
-                        continue;
-                    if (!pidns_visible(ns, it))
-                        continue;
-                    if (cur_idx == pid_idx) { t = it; break; }
-                    cur_idx++;
-                }
-                if (t) {
-                    int shown = task_pid_nr_ns(t, ns);
-                    snprintf(pidbuf, sizeof(pidbuf), "%d", shown);
-                    name = pidbuf;
-                }
-                spin_unlock_irqrestore(&tasklist_lock, flags);
-            }
-        } else {
-            name = entries[idx];
-        }
-
-        if (!name) break;
-        size_t namelen = strlen(name);
-        size_t reclen = (sizeof(vfs_dirent64_t) + namelen + 1 + 7) & ~7UL;
-        if (total + reclen > count) break;
-
-        vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
-        d->d_ino = (uint64_t)idx;
-        d->d_off = (int64_t)(total + reclen);
-        d->d_reclen = (uint16_t)reclen;
-        int is_dir = (idx <= 1);
-        if (is_root && is_pid_str(name))
-            is_dir = 1;
-        if (!is_root && (strcmp(name, "fd") == 0 || strcmp(name, "ns") == 0 ||
-                         strcmp(name, "fdinfo") == 0 || strcmp(name, "task") == 0))
-            is_dir = 1;
-        if (p && p->type == PF_SYS && strcmp(name, "fs") == 0)
-            is_dir = 1;
-        if (p && p->type == PF_SYS && strcmp(name, "kernel") == 0)
-            is_dir = 1;
-        if (p && p->type == PF_SYS && strcmp(name, "vm") == 0)
-            is_dir = 1;
-        if (p && p->type == PF_SYS && strcmp(name, "net") == 0)
-            is_dir = 1;
-        if (p && p->type == PF_SYS_FS && strcmp(name, "inotify") == 0)
-            is_dir = 1;
-        d->d_type = is_dir ? 4 : 8; /* DT_DIR=4, DT_REG=8 per Linux getdents64 */
-        memcpy(d->d_name, name, namelen + 1);
-        total += reclen;
-        idx++;
+    /* The index cursor, the byte-offset d_off and the dirent layout are owned
+     * by procfs_state.rs; this only answers what sits at an index. */
+    (void)idx;
+    (void)total;
+    (void)out;
+    {
+        int static_count = 0;
+        for (int i = 0; entries[i]; i++) static_count = i + 1;
+        procfs_static_dir_ctx_t ctx = {
+            entries, is_root, static_count,
+            p ? p->type : (pf_type_t)0, {0}
+        };
+        uint64_t cursor = vf->offset;
+        int64_t n = a20_procfs_readdir_plan(PROCFS_DIR_STATIC, vf->offset, count,
+                                            &ctx, procfs_dir_next_static,
+                                            dirp, &cursor);
+        vf->offset = (size_t)cursor;
+        return (int)n;
     }
-    vf->offset = (size_t)idx;
-    return (int)total;
 }
 
 static int procfs_fclose(vfile_t *vf) {

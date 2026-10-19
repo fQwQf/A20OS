@@ -30,6 +30,27 @@ typedef struct a20_env_registry_slot {
     uint16_t reserved;
 } a20_env_registry_slot_t;
 
+/* One locked file-use transaction. Rust resolves the identity shadow, applies
+ * expiry/rights/op/data ordering, and commits matching denial/success stats;
+ * the caller retains e->lock for the duration. */
+typedef struct a20_env_use_transaction {
+    int *expired;
+    uint64_t expire_tick;
+    uint64_t now;
+    a20_env_shadow_state_t *shadows;
+    uint32_t shadow_capacity;
+    uint64_t identity;
+    uint64_t *remaining_ops;
+    uint64_t *remaining_data;
+    int want_write;
+    uint64_t bytes;
+    uint64_t *use_ok;
+    uint64_t *deny_rights;
+    uint64_t *deny_ops;
+    uint64_t *deny_data;
+    uint64_t *bytes_charged;
+} a20_env_use_transaction_t;
+
 _Static_assert(sizeof(a20_env_shadow_state_t) == 24,
                "Rust envelope shadow ABI");
 _Static_assert(__builtin_offsetof(a20_env_shadow_state_t, rights) == 16,
@@ -65,6 +86,7 @@ int a20_envelope_policy_charge_use(uint64_t *remaining_ops,
                                    uint64_t *remaining_data,
                                    uint64_t shadow_rights, int tracked,
                                    int want_write, uint64_t bytes);
+int a20_envelope_policy_use_transaction(a20_env_use_transaction_t *txn);
 int a20_envelope_policy_shadow_init(a20_env_shadow_state_t *entries,
                                     uint32_t capacity);
 int a20_envelope_policy_shadow_upsert(a20_env_shadow_state_t *entries,

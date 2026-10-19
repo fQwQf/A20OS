@@ -660,6 +660,7 @@ pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags);
 /* User-space W^X policy (mm/wx.c): parses the a20.wx= cmdline and filters
  * W|X protection bits out of a requested prot. */
 void mm_wx_policy_init(void);
+int  mm_wx_policy(void);
 int  mm_wx_filter_prot(int prot, const char *ctx);
 
 /* User-space ASLR (mm/aslr.c): per-process random layout offsets applied at

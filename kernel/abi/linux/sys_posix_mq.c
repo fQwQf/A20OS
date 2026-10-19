@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 
 #include "core/timer.h"
+#include "core/timekeeping.h"
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
@@ -36,7 +37,7 @@ static vfile_ops_t g_mq_fd_ops = {
     .close = mq_fd_close,
 };
 
-static int mq_fd_from_gfd(int gfd, int *mqd, int *nonblock)
+static int mq_fd_from_gfd(int gfd, int *mqd, int *nonblock, vfile_t **held)
 {
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
@@ -48,9 +49,14 @@ static int mq_fd_from_gfd(int gfd, int *mqd, int *nonblock)
     mq_fd_t *mf = vf->priv;
     *mqd = mf->mqd;
     *nonblock = mf->nonblock;
-    vfs_put_file_ref(gfd, vf);
+    *held = vf;
     return 0;
 }
+
+#define MQ_FD_RETURN(gfd, vf, result) do { \
+    vfs_put_file_ref((gfd), (vf));          \
+    return (result);                        \
+} while (0)
 
 int64_t sys_mq_open(const char *name, int oflag, int mode, const void *attr)
 {
@@ -104,7 +110,8 @@ int64_t sys_mq_getsetattr(int mqdes, const void *newattr, void *oldattr)
     if (gfd < 0)
         return -EBADF;
     int mqd, nb;
-    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb);
+    vfile_t *held;
+    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb, &held);
     if (r < 0)
         return r;
 
@@ -112,16 +119,16 @@ int64_t sys_mq_getsetattr(int mqdes, const void *newattr, void *oldattr)
     mq_attr_kern_t *knewp = NULL;
     if (newattr) {
         if (copy_from_user(&knew, newattr, sizeof(knew)) < 0)
-            return -EFAULT;
+            MQ_FD_RETURN((int)gfd, held, -EFAULT);
         knewp = &knew;
     }
     mq_attr_kern_t kold;
     r = posix_mq_getsetattr(mqd, knewp, oldattr ? &kold : NULL);
     if (r < 0)
-        return r;
+        MQ_FD_RETURN((int)gfd, held, r);
     if (oldattr && copy_to_user(oldattr, &kold, sizeof(kold)) < 0)
-        return -EFAULT;
-    return r;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
+    MQ_FD_RETURN((int)gfd, held, r);
 }
 
 int64_t sys_mq_notify(int mqdes, const void *notification)
@@ -130,10 +137,12 @@ int64_t sys_mq_notify(int mqdes, const void *notification)
     if (gfd < 0)
         return -EBADF;
     int mqd, nb;
-    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb);
+    vfile_t *held;
+    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb, &held);
     if (r < 0)
         return r;
-    return posix_mq_notify(mqd, notification);
+    r = posix_mq_notify(mqd, notification);
+    MQ_FD_RETURN((int)gfd, held, r);
 }
 
 struct linux_timespec_mq {
@@ -150,11 +159,30 @@ static uint64_t mq_timeout_deadline(const void *timeout)
         return (uint64_t)-1;
     if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
         return (uint64_t)-2;
-    uint64_t ticks = (uint64_t)ts.tv_sec * TICKS_PER_SEC +
-                     (uint64_t)ts.tv_nsec * TICKS_PER_SEC / 1000000000ULL;
-    if ((ts.tv_sec || ts.tv_nsec) && ticks == 0)
+    uint64_t now_rt[2];
+    timekeeping_get_realtime(now_rt);
+    uint64_t now_ticks = timer_get_ticks();
+    if ((uint64_t)ts.tv_sec < now_rt[0] ||
+        ((uint64_t)ts.tv_sec == now_rt[0] &&
+         (uint64_t)ts.tv_nsec <= now_rt[1]))
+        return now_ticks;
+
+    uint64_t sec = (uint64_t)ts.tv_sec - now_rt[0];
+    int64_t nsec = ts.tv_nsec - (int64_t)now_rt[1];
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000LL;
+    }
+    if (sec > (UINT64_MAX - now_ticks) / TICKS_PER_SEC)
+        return UINT64_MAX - 2;
+    uint64_t ticks = sec * TICKS_PER_SEC +
+                     ((uint64_t)nsec * TICKS_PER_SEC + 999999999ULL) /
+                     1000000000ULL;
+    if (ticks == 0)
         ticks = 1;
-    return timer_get_ticks() + ticks;
+    if (ticks > UINT64_MAX - 2 - now_ticks)
+        return UINT64_MAX - 2;
+    return now_ticks + ticks;
 }
 
 int64_t sys_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len,
@@ -164,26 +192,29 @@ int64_t sys_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len,
     if (gfd < 0)
         return -EBADF;
     int mqd, nb;
-    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb);
+    vfile_t *held;
+    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb, &held);
     if (r < 0)
         return r;
     uint64_t deadline = mq_timeout_deadline(abs_timeout);
     if (deadline == (uint64_t)-1)
-        return -EFAULT;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
     if (deadline == (uint64_t)-2)
-        return -EINVAL;
+        MQ_FD_RETURN((int)gfd, held, -EINVAL);
 
     if (msg_len > 0) {
         if (!msg_ptr)
-            return -EFAULT;
+            MQ_FD_RETURN((int)gfd, held, -EFAULT);
         char *kbuf = proc_scratch_buffer(msg_len);
         if (!kbuf)
-            return -ENOMEM;
+            MQ_FD_RETURN((int)gfd, held, -ENOMEM);
         if (copy_from_user(kbuf, msg_ptr, msg_len) < 0)
-            return -EFAULT;
-        return posix_mq_timedsend(mqd, kbuf, msg_len, msg_prio, deadline);
+            MQ_FD_RETURN((int)gfd, held, -EFAULT);
+        r = posix_mq_timedsend(mqd, kbuf, msg_len, msg_prio, deadline);
+        MQ_FD_RETURN((int)gfd, held, r);
     }
-    return posix_mq_timedsend(mqd, NULL, 0, msg_prio, deadline);
+    r = posix_mq_timedsend(mqd, NULL, 0, msg_prio, deadline);
+    MQ_FD_RETURN((int)gfd, held, r);
 }
 
 int64_t sys_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len,
@@ -193,28 +224,29 @@ int64_t sys_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len,
     if (gfd < 0)
         return -EBADF;
     int mqd, nb;
-    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb);
+    vfile_t *held;
+    int r = mq_fd_from_gfd((int)gfd, &mqd, &nb, &held);
     if (r < 0)
         return r;
     uint64_t deadline = mq_timeout_deadline(abs_timeout);
     if (deadline == (uint64_t)-1)
-        return -EFAULT;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
     if (deadline == (uint64_t)-2)
-        return -EINVAL;
+        MQ_FD_RETURN((int)gfd, held, -EINVAL);
 
     if (msg_len > 0 && !msg_ptr)
-        return -EFAULT;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
     char *kbuf = proc_scratch_buffer(msg_len ? msg_len : 1);
     if (!kbuf)
-        return -ENOMEM;
+        MQ_FD_RETURN((int)gfd, held, -ENOMEM);
     unsigned prio = 0;
     long got = posix_mq_timedreceive(mqd, kbuf, msg_len, &prio, deadline);
     if (got < 0)
-        return got;
+        MQ_FD_RETURN((int)gfd, held, got);
     if (msg_len > 0 && got > 0 &&
         copy_to_user(msg_ptr, kbuf, (size_t)got) < 0)
-        return -EFAULT;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
     if (msg_prio && copy_to_user(msg_prio, &prio, sizeof(prio)) < 0)
-        return -EFAULT;
-    return got;
+        MQ_FD_RETURN((int)gfd, held, -EFAULT);
+    MQ_FD_RETURN((int)gfd, held, got);
 }
