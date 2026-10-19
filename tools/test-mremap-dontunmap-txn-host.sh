@@ -11,6 +11,5 @@ rustc --edition=2021 --crate-type lib --emit=obj --target x86_64-unknown-linux-g
     "$repo/kernel/mm/mremap_dontunmap_txn.rs" -o "$tmp/mremap_dontunmap_txn.o"
 cc -std=c11 -Wall -Wextra -Werror -I"$repo/kernel/include" \
     "$repo/tools/tests/test_mremap_dontunmap_txn.c" \
-    "$repo/kernel/mm/mremap_dontunmap_txn.c" \
     "$tmp/mremap_dontunmap_txn.o" -o "$tmp/test-mremap-dontunmap-txn"
 "$tmp/test-mremap-dontunmap-txn"

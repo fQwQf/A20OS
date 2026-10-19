@@ -213,11 +213,8 @@ int main(void)
     extern int mm_mremap_dontunmap_txn_rust(const mm_dontunmap_txn_ops_t *,
                                             void *, uintptr_t, size_t,
                                             uintptr_t *);
-    int bad = run_suite(mm_mremap_dontunmap_txn_c, "DONTUNMAP_C_ORACLE");
-    bad += run_suite(mm_mremap_dontunmap_txn_rust, "DONTUNMAP_RUST");
-    bad += test_invalid_ops(mm_mremap_dontunmap_txn_c, "DONTUNMAP_C_ORACLE");
+    int bad = run_suite(mm_mremap_dontunmap_txn_rust, "DONTUNMAP_RUST");
     bad += test_invalid_ops(mm_mremap_dontunmap_txn_rust, "DONTUNMAP_RUST");
-    bad += test_zero_destination(mm_mremap_dontunmap_txn_c, "DONTUNMAP_C_ORACLE");
     bad += test_zero_destination(mm_mremap_dontunmap_txn_rust, "DONTUNMAP_RUST");
     return bad ? 1 : 0;
 }

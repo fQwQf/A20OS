@@ -22,48 +22,9 @@ extern size_t slab_reclaim_spare(void);
 #define OOM_COOLDOWN_TICKS MS_TO_TICKS(2000)
 #define OOM_MIN_FREE_PAGES 256
 #define MAX_SWAP_RECLAIM 8
+#define KSWAPD_INTERVAL_TICKS MS_TO_TICKS(1000)
+#define KSWAPD_SWAP_BATCH 64
 
-static volatile int oom_in_progress;
-static uint64_t oom_last_kill_tick;
-static unsigned long oom_kill_count;
-static int oom_last_victim_pid;
-static int oom_last_victim_score;
-static unsigned long oom_free_pages_at_kill;
-
-static int oom_pick_victim_pid(void)
-{
-    int victim_pid = -1;
-    int best_score = -1;
-
-    /* E2: tasklist_lock walks the global list; every field read below is
-     * park_lock-owned and is sampled under that task's own park_lock, one task
-     * at a time.  Reading ->state without the lock would be unsynchronised
-     * against the park state machine (INV-P1). */
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t == proc_idle_task())
-            continue;
-        uint64_t tf = spin_lock_irqsave(&t->park_lock);
-        int st = t->state;
-        int score = t->policy.oom_score_adj;
-        int has_mm = t->mm != NULL;
-        int tpid = t->pid;
-        spin_unlock_irqrestore(&t->park_lock, tf);
-        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
-            continue;
-        if (tpid <= 2)
-            continue;
-        if (!has_mm)
-            score -= 100;
-        if (score > best_score ||
-            (score == best_score && tpid > victim_pid)) {
-            best_score = score;
-            victim_pid = tpid;
-        }
-    }
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-    return victim_pid;
-}
 
 #ifdef CONFIG_SWAP
 static int vma_is_swappable(const mm_seg_t *vma)
@@ -202,148 +163,127 @@ static int swap_out_task_pages(task_t *victim, int target_pages,
     mm_destroy(mm);
     return reclaimed;
 }
-static int swap_out_victim_pages(int target_pages)
-{
-    int pid = oom_pick_victim_pid();
-    task_t *victim = pid > 0 ? proc_find_get(pid) : NULL;
-    if (!victim) return 0;
-    int r = swap_out_task_pages(victim, target_pages, 0, USER_VA_LIMIT, 0);
-    proc_put(victim);
-    return r;
-}
+#endif /* CONFIG_SWAP */
 
-int oom_swap_reclaim_range(task_t *t, vaddr_t start, size_t len)
-{
-    if (!t || !len || (start & (PAGE_SIZE - 1)) ||
-        (len & (PAGE_SIZE - 1)) || start >= USER_VA_LIMIT || len > USER_VA_LIMIT - start)
-        return -EINVAL;
-    size_t pages = len / PAGE_SIZE;
-    int limit = pages > 2147483647U ? 2147483647 : (int)pages;
-    return swap_out_task_pages(t, limit, start, start + len, 1);
-}
-#else
-int oom_swap_reclaim_range(task_t *t, vaddr_t start, size_t len)
-{
-    (void)t; (void)start; (void)len;
-    return 0; /* no swap backing: PAGEOUT remains a best-effort hint */
-}
-static int swap_out_victim_pages(int target_pages)
-{
-    (void)target_pages;
-    return 0;
-}
+/*
+ * Victim selection, the reclaim escalation and the background reclaimer policy
+ * live in kernel/mm/oom_policy.rs.  What is left here is the swap-out page
+ * walk (above), the task-list walk, the levers and the kill.
+ */
+extern int oom_try_reclaim(void);
+extern int oom_swap_reclaim_pages(int target_pages);
+extern int oom_swap_reclaim_range(struct task_t *t, vaddr_t start, size_t len);
+extern void oom_kswapd_thread(void);
+extern void oom_get_stats(oom_stats_t *out);
+
+struct a20_oom_task_snap {
+    int32_t pid;
+    int32_t state;
+    int32_t score;
+    int32_t has_mm;
+    int32_t is_idle;
+};
+struct a20_oom_params {
+    uintptr_t min_free_pages;
+    int32_t   max_swap_reclaim;
+    uint64_t  cooldown_ticks;
+    uint64_t  kswapd_interval_ticks;
+    int32_t   proc_unused;
+    int32_t   proc_zombie;
+    int32_t   kswapd_swap_batch;
+    int32_t   reserved;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_oom_task_snap) == 20, "Rust/C oom snap ABI");
+_Static_assert(sizeof(struct a20_oom_params) == 48, "Rust/C oom params ABI");
 #endif
 
-int oom_try_reclaim(void)
-{
-    if (__atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED))
-        return 0;
-
-    size_t free = pfa_free_count();
-    if (free >= OOM_MIN_FREE_PAGES)
-        return 0;
-
-    uint64_t now = timer_get_ticks();
-    if (now - oom_last_kill_tick < OOM_COOLDOWN_TICKS)
-        return 0;
-
-    __atomic_store_n(&oom_in_progress, 1, __ATOMIC_RELAXED);
-
-    if (swap_out_victim_pages(MAX_SWAP_RECLAIM) > 0 &&
-        pfa_free_count() >= OOM_MIN_FREE_PAGES) {
-        __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
-        return 1;
-    }
-
-    int victim_pid = oom_pick_victim_pid();
-    if (victim_pid <= 0) {
-        __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
-        return 0;
-    }
-
-    task_t *victim = proc_find_get(victim_pid);
-    if (!victim) {
-        __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
-        return 0;
-    }
-
-    oom_last_kill_tick = now;
-    oom_kill_count++;
-    oom_last_victim_pid = victim->pid;
-    oom_last_victim_score = victim->policy.oom_score_adj;
-    oom_free_pages_at_kill = pfa_free_count();
-    kerr("[OOM] Killing pid=%d name=%s oom_score_adj=%d free_frames=%lu\n",
-         victim->pid, victim->name, victim->policy.oom_score_adj,
-         (unsigned long)pfa_free_count());
-
-    proc_force_exit(victim, -9);
-    proc_put(victim);
-
-    __atomic_store_n(&oom_in_progress, 0, __ATOMIC_RELAXED);
-    return 1;
-}
-
-int oom_swap_reclaim_pages(int target_pages)
-{
-#ifdef CONFIG_SWAP
-    if (__atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED))
-        return 0;
-    return swap_out_victim_pages(target_pages);
-#else
-    (void)target_pages;
-    return 0;
-#endif
-}
-
-/* Background reclaimer (kswapd role).  All memory reclamation used to run
- * synchronously in the allocation path: an allocation that hit the watermark
- * paid slab shrink + page-cache drop + swap I/O before it could proceed, and
- * nothing reclaimed while the system was otherwise idle.  This thread scans
- * once a second and pulls the three existing levers in escalating order —
- * spare slab pages, clean page cache, anonymous swap-out — so allocations
- * mostly find water above the mark instead of having to dig for it. */
-#define KSWAPD_INTERVAL_TICKS MS_TO_TICKS(1000)
-static unsigned long kswapd_passes;
-static unsigned long kswapd_pages_freed;
-static unsigned long kswapd_last_pass_tick;
-
-void oom_kswapd_thread(void)
-{
-    klog(KLOG_INFO, "[KSWAPD] background reclaimer started\n");
-    for (;;) {
-        uint64_t now = timer_get_ticks();
-        if (pfa_free_count() >= OOM_MIN_FREE_PAGES) {
-            proc_sleep_until(now + KSWAPD_INTERVAL_TICKS);
-            continue;
-        }
-        kswapd_passes++;
-        kswapd_last_pass_tick = now;
-        size_t freed = slab_reclaim_spare() / PAGE_SIZE;
-        freed += page_cache_drop_clean();
-        if (pfa_free_count() < OOM_MIN_FREE_PAGES)
-            freed += (size_t)oom_swap_reclaim_pages(64);
-        kswapd_pages_freed += freed;
-        /* Yield to let consumers catch up, but if nothing was freed, stop
-         * spinning: back off a full interval before trying again. */
-        if (freed == 0)
-            proc_sleep_until(now + KSWAPD_INTERVAL_TICKS);
-        else
-            proc_yield();
-    }
-}
-
-void oom_get_stats(oom_stats_t *out)
+void a20_oom_params(struct a20_oom_params *out)
 {
     if (!out)
         return;
-    out->kills = oom_kill_count;
-    out->last_kill_tick = oom_last_kill_tick;
-    out->last_victim_pid = oom_last_victim_pid;
-    out->last_victim_score = oom_last_victim_score;
-    out->free_pages_at_kill = oom_free_pages_at_kill;
-    out->free_pages_now = pfa_free_count();
-    out->in_progress = __atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED);
-    out->kswapd_passes = kswapd_passes;
-    out->kswapd_pages_freed = kswapd_pages_freed;
-    out->kswapd_last_pass_tick = kswapd_last_pass_tick;
+    out->min_free_pages = OOM_MIN_FREE_PAGES;
+    out->max_swap_reclaim = MAX_SWAP_RECLAIM;
+    out->cooldown_ticks = OOM_COOLDOWN_TICKS;
+    out->kswapd_interval_ticks = KSWAPD_INTERVAL_TICKS;
+    out->proc_unused = PROC_UNUSED;
+    out->proc_zombie = PROC_ZOMBIE;
+    out->kswapd_swap_batch = KSWAPD_SWAP_BATCH;
+    out->reserved = 0;
+}
+
+void *a20_oom_task_first(void) { return proc_first_task_locked(); }
+void *a20_oom_task_next(void *t) { return proc_next_task_locked(t); }
+
+/* One task sample, taken under that task's park_lock so the park state machine
+ * cannot move underneath the scorer. */
+int a20_oom_task_snapshot(void *t_ptr, struct a20_oom_task_snap *out)
+{
+    task_t *t = t_ptr;
+    if (!t || !out)
+        return -1;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    out->pid = t->pid;
+    out->state = t->state;
+    out->score = t->policy.oom_score_adj;
+    out->has_mm = t->mm != NULL;
+    out->is_idle = (t == proc_idle_task());
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    return 0;
+}
+
+uintptr_t a20_oom_free_pages(void) { return pfa_free_count(); }
+uint64_t a20_oom_now(void) { return timer_get_ticks(); }
+uintptr_t a20_oom_user_va_limit(void) { return USER_VA_LIMIT; }
+
+/* Swap out one victim's anonymous pages, chosen by the Rust policy. */
+int a20_oom_swap_victim_by_pid(int pid, int target_pages)
+{
+#ifdef CONFIG_SWAP
+    task_t *victim = pid > 0 ? proc_find_get(pid) : NULL;
+    if (!victim)
+        return 0;
+    int r = swap_out_task_pages(victim, target_pages, 0, USER_VA_LIMIT, 0);
+    proc_put(victim);
+    return r;
+#else
+    (void)pid;
+    (void)target_pages;
+    return 0;
+#endif
+}
+
+/* PAGEOUT over an explicit range: no victim selection, no threshold. */
+int a20_oom_swap_task(void *t, int limit, uintptr_t start, uintptr_t end)
+{
+#ifdef CONFIG_SWAP
+    return swap_out_task_pages(t, limit, start, end, 1);
+#else
+    (void)t;
+    (void)limit;
+    (void)start;
+    (void)end;
+    return 0;
+#endif
+}
+
+void *a20_oom_find_get(int pid) { return proc_find_get(pid); }
+void a20_oom_put(void *t) { proc_put(t); }
+
+void a20_oom_kill(void *t_ptr)
+{
+    task_t *victim = t_ptr;
+    if (!victim)
+        return;
+    kerr("[OOM] Killing pid=%d name=%s oom_score_adj=%d free_frames=%lu\n",
+         victim->pid, victim->name, victim->policy.oom_score_adj,
+         (unsigned long)pfa_free_count());
+    proc_force_exit(victim, -9);
+}
+
+void a20_oom_sleep_until(uint64_t tick) { proc_sleep_until(tick); }
+void a20_oom_yield(void) { proc_yield(); }
+void a20_oom_kswapd_started(void)
+{
+    klog(KLOG_INFO, "[KSWAPD] background reclaimer started\n");
 }

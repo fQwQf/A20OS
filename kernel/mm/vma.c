@@ -18,7 +18,6 @@
 static int mm_dontunmap_split_failure_consumed;
 #endif
 
-#ifdef CONFIG_VMA_REGION_RUST
 /* The list/backing pointers stay C-owned; Rust consumes only stable snapshots
  * while the caller holds mm->lock. Keep these adapters narrow and side-effect
  * free so interval and coalescing policy has one implementation. */
@@ -240,7 +239,6 @@ void a20_vma_split_annotate(void *mm_ptr, void *head_ptr, void *tail_ptr)
     (void)tail_ptr;
 #endif
 }
-#endif
 
 /*
  * VMA list management: sorted non-overlapping mm_seg_t chain plus the backing
@@ -272,32 +270,6 @@ void a20_vma_split_annotate(void *mm_ptr, void *head_ptr, void *tail_ptr)
  *
  * A false negative only costs a VMA, so the checks err toward refusing.
  */
-#ifndef CONFIG_VMA_REGION_RUST
-static int vma_can_merge(mm_seg_t *a, mm_seg_t *b)
-{
-    if (!a || !b || a->end != b->start)
-        return 0;
-    if ((a->vm_flags | b->vm_flags) & VM_SYSV_SHM)
-        return 0;
-    if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
-        return 0;
-    if (a->vmar_cap != b->vmar_cap || a->vmar_owner != b->vmar_owner)
-        return 0;
-    if ((a->vm_flags | b->vm_flags) & VM_FILE) {
-        if (a->file != b->file)
-            return 0;
-        return a->backing_offset + (a->end - a->start) == b->backing_offset;
-    }
-    if ((a->vm_flags | b->vm_flags) & VM_VMO) {
-        if (!(a->vm_flags & VM_VMO) || !(b->vm_flags & VM_VMO))
-            return 0;
-        if (a->vmo != b->vmo)
-            return 0;
-        return a->backing_offset + (a->end - a->start) == b->backing_offset;
-    }
-    return 1;
-}
-#endif
 
 /* Create a mapping record.  Every creator goes through here so the two fields
  * that must never start out wrong -- magic (the use-after-free check in
@@ -609,34 +581,13 @@ page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *vma, vaddr_t va,
 }
 
 vaddr_t mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len) {
-#ifdef CONFIG_VMA_REGION_RUST
     return (vaddr_t)a20_vma_find_gap_rust(mm ? mm->mmap : NULL, hint, len);
-#else
-    vaddr_t prev_end = hint;
-    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
-        if (v->start >= prev_end && v->start - prev_end >= len) return prev_end;
-        if (v->end > prev_end) prev_end = v->end;
-    }
-    return prev_end;
-#endif
 }
 
 int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
                       mm_seg_t *ignore) {
-#ifdef CONFIG_VMA_REGION_RUST
     return a20_vma_range_overlaps_rust(mm ? mm->mmap : NULL, start, len,
                                        ignore);
-#else
-    vaddr_t end = start + len;
-    if (end < start) return 1;
-    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
-        if (v == ignore) continue;
-        if (v->start < end && v->end > start)
-            return 1;
-        if (v->start >= end) break;
-    }
-    return 0;
-#endif
 }
 
 /*
@@ -790,39 +741,7 @@ void mm_insert_vma(mm_struct_t *mm, mm_seg_t *newv) {
     /* Whichever mapping survives the merges below; see the re-annotate below. */
     mm_seg_t *survivor = newv;
 
-#ifdef CONFIG_VMA_REGION_RUST
     survivor = a20_vma_merge_transaction_rust(mm, newv, 0);
-#else
-    if (vma_can_merge(newv, newv->next)) {
-        mm_seg_t *nxt = newv->next;
-        /* Stop naming nxt's extent before the survivor grows over it.  These
-         * two merges were the only mutators that dropped a mapping from the
-         * list without retiring its annotation first: every unmap, split and
-         * protect path does, and without it the shared entry keeps naming the
-         * absorbed record for good.  A node entry is much coarser than a
-         * mapping (2 MiB on x86_64), so ld.so mapping consecutive segments of
-         * one shared object routinely leaves one entry naming both the survivor
-         * and the mapping it just absorbed -- and a fault into the absorbed
-         * half then resolved two live records and declined to guess.
-         *
-         * Retire BEFORE the extent grows, so the range passed is nxt's own and
-         * not the survivor's. */
-        mm_mmap_seg_retire(mm, nxt, nxt->start, nxt->end);
-        newv->end = nxt->end;
-        newv->next = nxt->next;
-        if (nxt->next) nxt->next->prev = newv;
-        mm_vma_defer(mm, nxt);
-    }
-    if (vma_can_merge(newv->prev, newv)) {
-        mm_seg_t *prv = newv->prev;
-        mm_mmap_seg_retire(mm, newv, newv->start, newv->end);
-        prv->end = newv->end;
-        prv->next = newv->next;
-        if (newv->next) newv->next->prev = prv;
-        mm_vma_defer(mm, newv);
-        survivor = prv;
-    }
-#endif
 
     /* Build this mapping's segment HERE rather than at each of the nine
      * mm_insert_vma() call sites.  Six of them created anonymous mappings and
@@ -867,62 +786,12 @@ static int mm_split_vma_at_impl(mm_struct_t *mm, vaddr_t addr,
     /* Deterministic fault injection at the real VMA-tail allocation site.
      * Return the same -ENOMEM that mm_seg_new() would return if its allocator
      * failed, but only after proving this call would actually split a live VMA. */
-#ifndef CONFIG_VMA_REGION_RUST
-    int expected_unconsumed = 0;
-    if (test_split == CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT &&
-        __atomic_compare_exchange_n(&mm_dontunmap_split_failure_consumed,
-                                    &expected_unconsumed, 1, 0,
-                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        klog_write("MM_DONTUNMAP_TEST: injected-vma-allocation-failure split=%u\n",
-                   test_split);
-        return -ENOMEM;
-    }
-#endif
 #else
     (void)test_split;
 #endif
 
-#ifdef CONFIG_VMA_REGION_RUST
     void *tail = NULL;
     return a20_vma_split_transaction_rust(mm, v, addr, test_split, &tail);
-#else
-
-    mm_seg_t *tail = mm_seg_new();
-    if (!tail)
-        return -ENOMEM;
-
-    *tail = *v;
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-    /* Stop naming the pre-split extent before either half is narrowed: the
-     * cut-away tail is exactly the range being detached, and an entry still
-     * naming it would resolve for the next mapping to land there. */
-    mm_mmap_seg_retire(mm, v, v->start, v->end);
-#endif
-    refcount_set(&tail->refcount, 1);   /* the copy brought its count along */
-    tail->start = addr;
-    tail->backing_offset += addr - v->start;
-    int fr = vma_ref_aux(tail);
-    if (fr < 0) {
-        kfree(tail);
-        return fr;
-    }
-    mm_seg_index_invalidate(mm);
-    tail->prev = v;
-    tail->next = v->next;
-    if (tail->next)
-        tail->next->prev = tail;
-
-    v->end = addr;
-    v->next = tail;
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-    /* Name the head first, then the tail, for the same ordering reason the
-     * munmap middle cut uses: the two walks must not both claim the node entry
-     * that straddles the boundary. */
-    mm_mmap_seg_annotate(mm, v, v->start, v->end);
-    mm_mmap_seg_annotate(mm, tail, tail->start, tail->end);
-#endif
-    return 0;
-#endif
 }
 
 int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr)
@@ -964,61 +833,16 @@ mm_seg_t *vma_split(mm_struct_t *mm, mm_seg_t *vma, vaddr_t split) {
     if (!vma) return NULL;
     if (split <= vma->start || split >= vma->end) return vma;
 
-#ifdef CONFIG_VMA_REGION_RUST
     void *tail = NULL;
     if (a20_vma_split_transaction_rust(mm, vma, split, 0, &tail) != 0)
         return NULL;
     return tail;
-#else
-
-    mm_seg_t *tail = mm_seg_new();
-    if (!tail) return NULL;
-
-    *tail = *vma;
-    refcount_set(&tail->refcount, 1);   /* the copy brought its count along */
-    tail->start = split;
-    tail->backing_offset += split - vma->start;
-    if (vma_ref_aux(tail) < 0) {
-        kfree(tail);
-        return NULL;
-    }
-    mm_seg_index_invalidate(mm);
-    tail->prev = vma;
-    tail->next = vma->next;
-    if (tail->next) tail->next->prev = tail;
-
-    vma->end = split;
-    vma->next = tail;
-    return tail;
-#endif
 }
 
 mm_seg_t *vma_try_merge(mm_struct_t *mm, mm_seg_t *vma) {
     if (!vma) return NULL;
 
-#ifdef CONFIG_VMA_REGION_RUST
     return a20_vma_merge_transaction_rust(mm, vma, 1);
-#else
-    mm_seg_index_invalidate(mm);
-
-    if (vma_can_merge(vma->prev, vma)) {
-        mm_seg_t *prev = vma->prev;
-        prev->end = vma->end;
-        prev->next = vma->next;
-        if (vma->next) vma->next->prev = prev;
-        mm_vma_defer(mm, vma);
-        vma = prev;
-    }
-
-    if (vma_can_merge(vma, vma->next)) {
-        mm_seg_t *next = vma->next;
-        vma->end = next->end;
-        vma->next = next->next;
-        if (next->next) next->next->prev = vma;
-        mm_vma_defer(mm, next);
-    }
-    return vma;
-#endif
 }
 
 void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)

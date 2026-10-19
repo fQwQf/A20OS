@@ -838,67 +838,7 @@ int user_prepare_write(struct task_t *t, uint64_t va)
  * otherwise replace it after lookup and before memcpy. Fault resolution can
  * sleep, so it runs outside the lock and the next iteration re-reads the PTE.
  * Limit each locked access to one base page, including huge mappings. */
-#ifndef CONFIG_USER_COPY_RUST
-static int user_access_begin(task_t *t, uint64_t va, int write,
-                             void **kaddr, size_t *chunk, uint64_t *flags,
-                             int *write_guard_out)
-{
-#ifdef CONFIG_NOMMU
-    (void)t;
-    (void)write;
-    *flags = 0;
-    *kaddr = (void *)(uintptr_t)va;
-    *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
-    if (write_guard_out) *write_guard_out = 0;
-    return 0;
-#else
-    int write_guard = 0;
-    for (;;) {
-        *flags = spin_lock_irqsave(&t->mm->lock);
-        pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
-        int allowed = pte && (write ? pte_user_writable(*pte)
-                                    : pte_user_readable(*pte));
-        mm_seg_t *vma = mm_seg_find(t->mm, va);
-        if (vma && !(vma->vm_flags & (write ? VM_WRITE : VM_READ))) {
-            spin_unlock_irqrestore(&t->mm->lock, *flags);
-            if (write_guard) mm_shared_write_leave();
-            return -EFAULT;
-        }
-        int needs_gate = write && allowed && vma &&
-            (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
-                (VM_FILE | VM_SHARED | VM_WRITE);
-        if (needs_gate && !write_guard) {
-            spin_unlock_irqrestore(&t->mm->lock, *flags);
-            if (mm_shared_write_enter_wait() < 0)
-                return -EFAULT;
-            write_guard = 1;
-            continue;
-        }
-        if (allowed) {
-            vaddr_t base;
-            size_t size;
-            pte = pt_lookup_leaf(t->pgdir, va, NULL, &base, &size);
-            *kaddr = (void *)(uintptr_t)(arch_pte_addr(*pte) + PAGE_OFFSET + va - base);
-            *chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
-            *pte |= PTE_A | (write ? PTE_D : 0);
-            if (write_guard_out) *write_guard_out = write_guard;
-            else if (write_guard) mm_shared_write_leave();
-            return 0;
-        }
-        spin_unlock_irqrestore(&t->mm->lock, *flags);
-        if (write_guard) {
-            mm_shared_write_leave();
-            write_guard = 0;
-        }
-        if (handle_demand_fault_access(t, va, write ? MM_FAULT_ACCESS_WRITE
-                                                   : MM_FAULT_ACCESS_READ) < 0)
-            return -EFAULT;
-    }
-#endif
-}
-#endif
 
-#ifdef CONFIG_USER_COPY_RUST
 /* Rust owns the page-at-a-time copy loop. These narrow C operations retain
  * page-table/VMA policy and the existing fault resolver. A successful access
  * leaves this exact mm locked; retry requests are always returned unlocked. */
@@ -1108,149 +1048,46 @@ static mm_struct_t *usercopy_pin_mm(task_t *t)
     spin_unlock_irqrestore(&t->park_lock, flags);
     return mm;
 }
-#endif
 
-#ifndef CONFIG_USER_COPY_RUST
-static void user_access_end(task_t *t, uint64_t flags, int write_guard)
-{
-#ifndef CONFIG_NOMMU
-    spin_unlock_irqrestore(&t->mm->lock, flags);
-#else
-    (void)t;
-    (void)flags;
-#endif
-    if (write_guard)
-        mm_shared_write_leave();
-}
-#endif
 
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
     if (!user_range_ok((uint64_t)(uintptr_t)src, n)) return -EFAULT;
-#ifdef CONFIG_USER_COPY_RUST
     mm_struct_t *mm = usercopy_pin_mm(t);
     if (!mm) return -EFAULT;
     long result = a20_usercopy_copy_from_rust(t, mm, dst, src, n);
     mm_destroy(mm);
     return result;
-#else
-    size_t copied = 0;
-    while (copied < n) {
-        void *kaddr;
-        size_t chunk;
-        uint64_t flags;
-        if (user_access_begin(t, (uint64_t)(uintptr_t)src + copied, 0,
-                               &kaddr, &chunk, &flags, NULL) < 0)
-            return -EFAULT;
-        if (chunk > n - copied)
-            chunk = n - copied;
-        memcpy((char *)dst + copied, kaddr, chunk);
-        user_access_end(t, flags, 0);
-        copied += chunk;
-    }
-    return (long)copied;
-#endif
 }
 
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
     if (!user_range_ok((uint64_t)(uintptr_t)dst, n)) return -EFAULT;
-#ifdef CONFIG_USER_COPY_RUST
     mm_struct_t *mm = usercopy_pin_mm(t);
     if (!mm) return -EFAULT;
     long result = a20_usercopy_copy_to_rust(t, mm, dst, src, n);
     mm_destroy(mm);
     return result;
-#else
-    size_t copied = 0;
-    while (copied < n) {
-        void *kaddr;
-        size_t chunk;
-        uint64_t flags;
-        int write_guard = 0;
-        if (user_access_begin(t, (uint64_t)(uintptr_t)dst + copied, 1,
-                               &kaddr, &chunk, &flags, &write_guard) < 0)
-            return -EFAULT;
-        if (chunk > n - copied)
-            chunk = n - copied;
-        memcpy(kaddr, (const char *)src + copied, chunk);
-        user_access_end(t, flags, write_guard);
-        copied += chunk;
-    }
-    return (long)copied;
-#endif
 }
 
 long user_strncpy(char *dst, const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
-#ifdef CONFIG_USER_COPY_RUST
     mm_struct_t *mm = usercopy_pin_mm(t);
     if (!mm) return -EFAULT;
     long result = a20_user_strncpy_rust(t, mm, dst, src, max);
     mm_destroy(mm);
     return result;
-#else
-    if (max == 0) return -EINVAL;
-    size_t i = 0;
-    while (i < max - 1) {
-        uint64_t va = (uint64_t)(uintptr_t)(src + i);
-        if (!user_range_ok(va, 1)) return -EFAULT;
-        void *kaddr;
-        size_t chunk;
-        uint64_t flags;
-        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags, NULL) < 0)
-            return -EFAULT;
-        if (chunk > max - 1 - i) chunk = max - 1 - i;
-        const char *src_page = (const char *)kaddr;
-        for (size_t j = 0; j < chunk; j++) {
-            dst[i + j] = src_page[j];
-            if (src_page[j] == '\0') {
-                user_access_end(t, flags, 0);
-                return (long)(i + j);
-            }
-        }
-        user_access_end(t, flags, 0);
-        i += chunk;
-    }
-    dst[i] = '\0';
-    return (long)i;
-#endif
 }
 
 long user_strnlen(const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
-#ifdef CONFIG_USER_COPY_RUST
     mm_struct_t *mm = usercopy_pin_mm(t);
     if (!mm) return -EFAULT;
     long result = a20_user_strnlen_rust(t, mm, src, max);
     mm_destroy(mm);
     return result;
-#else
-    if (max == 0) return 0;
-    size_t i = 0;
-    while (i < max) {
-        uint64_t va = (uint64_t)(uintptr_t)(src + i);
-        if (!user_range_ok(va, 1)) return -EFAULT;
-        void *kaddr;
-        size_t chunk;
-        uint64_t flags;
-        if (user_access_begin(t, va, 0, &kaddr, &chunk, &flags, NULL) < 0)
-            return -EFAULT;
-        if (chunk > max - i) chunk = max - i;
-        const char *page = (const char *)kaddr;
-        for (size_t j = 0; j < chunk; j++) {
-            if (page[j] == '\0') {
-                user_access_end(t, flags, 0);
-                return (long)(i + j);
-            }
-        }
-        user_access_end(t, flags, 0);
-        i += chunk;
-    }
-    return (long)max;
-#endif
 }

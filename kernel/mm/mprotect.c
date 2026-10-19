@@ -61,291 +61,274 @@ static void mm_mprotect_harvest_shared_write(mm_seg_t *vma, vaddr_t va)
 }
 #endif
 
+/*
+ * The protection-change transaction lives in kernel/mm/mprotect_txn.rs.  What
+ * is left here is what it cannot name: the mm_seg_t field access, the split
+ * primitive, the architecture's PTE bit definitions and encoders, the page
+ * table walk and leaf install with its owning node lock, the physical-frame
+ * reference peek, the instruction-cache flush and the page-cache lookup.
+ */
+extern int a20_mprotect_locked_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                    int prot);
+
+struct a20_mprotect_rec {
+    void     *vma;
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+    uintptr_t pte_flags;
+    uint32_t  vmar_cap;
+    uint32_t  reserved;
+};
+struct a20_mprotect_leaf {
+    uintptr_t pte;
+    uintptr_t base;
+    uintptr_t size;
+    uintptr_t pa;
+    uint32_t  pfn;
+    int32_t   level;
+    int32_t   present;
+    int32_t   reserved;
+};
+struct a20_mprotect_bits {
+    uintptr_t w;
+    uintptr_t d;
+    uintptr_t x;
+    uintptr_t cow;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_mprotect_rec) == 48, "Rust/C mprotect rec ABI");
+_Static_assert(sizeof(struct a20_mprotect_leaf) == 48, "Rust/C mprotect leaf ABI");
+_Static_assert(sizeof(struct a20_mprotect_bits) == 32, "Rust/C mprotect bits ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_mprotect_rec) == 28, "Rust/C mprotect rec ABI");
+_Static_assert(sizeof(struct a20_mprotect_leaf) == 28, "Rust/C mprotect leaf ABI");
+_Static_assert(sizeof(struct a20_mprotect_bits) == 16, "Rust/C mprotect bits ABI");
+#endif
+
+int a20_mprotect_has_pgdir(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm && mm->pgdir;
+}
+
+uintptr_t a20_mprotect_user_va_limit(void)
+{
+    return USER_VA_LIMIT;
+}
+
+int a20_mprotect_is_nommu(void)
+{
+#ifdef CONFIG_NOMMU
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int a20_mprotect_record_from(const void *mm_ptr, uintptr_t va,
+                             struct a20_mprotect_rec *out)
+{
+    const mm_struct_t *mm = mm_ptr;
+    if (!mm || !out)
+        return 0;
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
+        if (v->end <= va)
+            continue;
+        out->vma = v;
+        out->start = v->start;
+        out->end = v->end;
+        out->vm_flags = v->vm_flags;
+        out->pte_flags = v->pte_flags;
+        out->vmar_cap = v->vmar_cap;
+        return 1;
+    }
+    return 0;
+}
+
+int a20_mprotect_split_at(void *mm_ptr, uintptr_t addr)
+{
+    return mm_split_vma_at(mm_ptr, addr);
+}
+
+void a20_mprotect_set_vma(void *vma_ptr, uintptr_t pte_flags, uint64_t vm_flags)
+{
+    mm_seg_t *v = vma_ptr;
+    if (!v)
+        return;
+    v->pte_flags = (pte_t)pte_flags;
+    v->vm_flags = vm_flags;
+}
+
+void *a20_mprotect_merge(void *mm_ptr, void *vma_ptr, uintptr_t *next_va)
+{
+    mm_seg_t *v = vma_try_merge(mm_ptr, vma_ptr);
+    if (next_va)
+        *next_va = v ? v->end : 0;
+    return v;
+}
+
+void a20_mprotect_bits(struct a20_mprotect_bits *out)
+{
+    if (!out)
+        return;
+    out->w = PTE_W;
+    out->d = PTE_D;
+    out->x = PTE_X;
+    out->cow = PTE_COW;
+}
+
+#ifndef CONFIG_NOMMU
+void a20_mprotect_probe(const void *mm_ptr, uintptr_t va,
+                        struct a20_mprotect_leaf *out)
+{
+    const mm_struct_t *mm = mm_ptr;
+    if (!out)
+        return;
+    out->pte = 0;
+    out->base = 0;
+    out->size = 0;
+    out->pa = 0;
+    out->pfn = PFN_NONE;
+    out->level = 0;
+    out->present = 0;
+    out->reserved = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
+                                &out->size);
+    if (!pte)
+        return;
+    out->pte = (uintptr_t)*pte;
+    out->present = (*pte & PTE_V) != 0;
+    if (out->present) {
+        out->pa = arch_pte_addr(*pte);
+        out->pfn = phys_to_pfn(out->pa);
+    }
+}
+
+/* Install one leaf.  The owning node lock makes the snapshot check and the
+ * store one step: a status-driven COW that replaced the leaf between the
+ * probe and here is reported as 0 so the transaction recomputes for the same
+ * address.  The status sidecar is refreshed under the same lock, because that
+ * is the byte the lockless fault paths read. */
+int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
+                         uintptr_t pa, uintptr_t flags)
+{
+    mm_struct_t *mm = mm_ptr;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    if (!pte)
+        return 0;
+    pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+    if (ltab)
+        mm_pt_node_lock(ltab);
+    if (*pte != (pte_t)observed) {
+        if (ltab)
+            mm_pt_node_unlock(ltab);
+        return 0;
+    }
+    pte_t replacement = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+    if (replacement != (pte_t)observed) {
+        *pte = replacement;
+        mm_tlb_note_change(mm, va, PAGE_SIZE);
+    }
+    if (ltab)
+        (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), (pte_t)flags);
+    if (ltab)
+        mm_pt_node_unlock(ltab);
+    return 1;
+}
+
+/* A leaf that was reserved but never faulted has no PTE to carry the new
+ * permissions; the per-PTE status is what a later fault installs.  The status
+ * lives in the table's metadata, so the refresh takes that table's node lock
+ * like every other reader and writer of the byte. */
+void a20_mprotect_refresh_absent(void *mm_ptr, uintptr_t va, uintptr_t ptef)
+{
+    mm_struct_t *mm = mm_ptr;
+    pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+    if (ltab)
+        mm_pt_node_lock(ltab);
+    if (ltab)
+        (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), (pte_t)ptef);
+    if (ltab)
+        mm_pt_node_unlock(ltab);
+}
+#else
+/* NOMMU has no page tables: the transaction takes its flat branch and never
+ * reaches these, but the symbols still have to exist. */
+void a20_mprotect_probe(const void *mm_ptr, uintptr_t va,
+                        struct a20_mprotect_leaf *out)
+{
+    (void)mm_ptr;
+    (void)va;
+    if (out)
+        memset(out, 0, sizeof(*out));
+}
+
+int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
+                         uintptr_t pa, uintptr_t flags)
+{
+    (void)mm_ptr;
+    (void)va;
+    (void)observed;
+    (void)pa;
+    (void)flags;
+    return 0;
+}
+
+void a20_mprotect_refresh_absent(void *mm_ptr, uintptr_t va, uintptr_t ptef)
+{
+    (void)mm_ptr;
+    (void)va;
+    (void)ptef;
+}
+#endif /* CONFIG_NOMMU */
+
+/* Preserve the cache's dirty state before a shared file leaf loses the only
+ * software-visible evidence of it.  Where the architecture has no dirty bit
+ * the whole rule is compiled out. */
+void a20_mprotect_harvest(void *mm_ptr, void *vma_ptr, uintptr_t va,
+                          uintptr_t observed, int removing_write)
+{
+    (void)mm_ptr;
+#if PTE_D == 0 || PTE_D == PTE_W
+    mm_seg_t *vma = vma_ptr;
+    if (!removing_write || !vma)
+        return;
+    if (!(vma->vm_flags & VM_WRITE))
+        return;
+    if ((vma->vm_flags & (VM_FILE | VM_SHARED)) != (VM_FILE | VM_SHARED))
+        return;
+    if (!((pte_t)observed & PTE_W))
+        return;
+    mm_mprotect_harvest_shared_write(vma, va);
+#else
+    (void)vma_ptr;
+    (void)va;
+    (void)observed;
+    (void)removing_write;
+#endif
+}
+
+uint32_t a20_mprotect_frame_refs(uint32_t pfn)
+{
+    if (!pfn_valid(pfn))
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    uint32_t refs = pfa.meta[pfn].refcount;
+    spin_unlock_irqrestore(&pfa.lock, flags);
+    return refs;
+}
+
+void a20_mprotect_flush_icache(uint32_t pfn)
+{
+    if (!pfn_valid(pfn))
+        return;
+    arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+}
+
 int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot) {
-    if (!mm || !mm->pgdir) return -EINVAL;
-    if (prot & ~PROT_KNOWN_MASK) return -EINVAL;
-    /* A pointer-signature hint is not an access bit.  Drop it here, before the
-     * W^X policy and the page table both re-read prot through
-     * PROT_READ/WRITE/EXEC, so that neither can read it as a permission. */
-    prot &= ~PROT_HINT_MASK;
-    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0) return 0;
-
-    /* W^X: raising an existing mapping to W|X is bound by the same policy as
-     * a new mapping */
-    prot = mm_wx_filter_prot(prot, "mprotect");
-    if (prot < 0) return prot;
-
-    pte_t ptef = mm_prot_to_pte_flags(prot);
-    uint64_t vm_prot = 0;
-    if (prot & 1) vm_prot |= VM_READ;
-    if (prot & 2) vm_prot |= VM_WRITE;
-    if (prot & 4) vm_prot |= VM_EXEC;
-    vaddr_t end = addr + len;
-    if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
-    mm_seg_index_invalidate(mm);
-#ifndef CONFIG_NOMMU
-    int touched = 0;
-#endif
-
-    vaddr_t covered = addr;
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && covered < end; v = v->next) {
-        if (v->start > covered)
-            break;
-        if (v->end > covered)
-            covered = v->end;
-    }
-    if (covered < end)
-        return -ENOMEM;
-
-    /* A Native handle's map ceiling survives Linux mprotect as well as
-     * vm_protect. Check before splitting VMAs or changing any PTE. */
-    for (mm_seg_t *v = mm_seg_find(mm, addr);
-         v && v->start < end; v = v->next) {
-        if ((v->vm_flags & VM_NATIVE_CAP) &&
-            ((uint32_t)prot & ~v->vmar_cap))
-            return -EACCES;
-    }
-
-    /* mseal(2): mprotect over a sealed VMA is refused. */
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; v = v->next) {
-        if (v->start >= end || v->end <= addr)
-            continue;
-        if (v->vm_flags & VM_SEALED)
-            return -EPERM;
-    }
-
-#ifdef CONFIG_NOMMU
-    /* NOMMU has no page tables. We only update the VMA permission bits without splitting. */
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
-        mm_seg_t *next = v->next;
-        v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
-        v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
-                       vm_prot;
-        v = next;
-    }
-    return 0;
-#else
-    int     r = mm_split_vma_at(mm, addr);
-    if (r < 0) return r;
-    r = mm_split_vma_at(mm, end);
-    if (r < 0) return r;
-
-    /* Finish every fallible huge-leaf demotion before changing any access
-     * bits. An allocation failure may change table shape, never permissions
-     * on only the first part of the requested range. */
-    for (vaddr_t va = addr; va < end; ) {
-        int level = 0;
-        vaddr_t base = 0;
-        size_t size = 0;
-        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-        if (pte && (*pte & PTE_V) && level > 0) {
-            int dr = mm_demote_huge_page(mm, va);
-            if (dr < 0) return dr;
-            continue;
-        }
-        va += PAGE_SIZE;
-    }
-
-
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
-        mm_seg_t *next = v->next;
-        uint64_t s = v->start < addr ? addr : v->start;
-        uint64_t e = v->end > end ? end : v->end;
-
-        /* A split renames both halves, and stops naming what was cut away.
-         * vma_split() narrows the head in place and hands back the tail, so
-         * the pre-split extent has to be retired BEFORE the call: afterwards
-         * the head no longer knows what it used to cover.  Leaving it named
-         * makes lookup match on a stale extent, which is how a mprotect split
-         * left a neighbouring mapping resolving to the wrong segment --
-         * measured as seg_diff on the real-software gate. */
-        if (s > v->start) {
-            mm_seg_t *head = v;
-            mm_mmap_seg_retire(mm, v, v->start, v->end);
-            v = vma_split(mm, v, s);
-            if (!v) return -ENOMEM;
-            next = v->next;
-            mm_mmap_seg_annotate(mm, head, head->start, head->end);
-            mm_mmap_seg_annotate(mm, v, v->start, v->end);
-        }
-        if (e < v->end) {
-            mm_seg_t *head = v;
-            mm_mmap_seg_retire(mm, v, v->start, v->end);
-            if (!vma_split(mm, v, e)) return -ENOMEM;
-            next = v->next;
-            mm_mmap_seg_annotate(mm, head, head->start, head->end);
-            mm_mmap_seg_annotate(mm, next, next->start, next->end);
-        }
-
-        for (uint64_t va = v->start; va < v->end; ) {
-            int level = 0;
-            vaddr_t base = 0;
-            size_t size = 0;
-            pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
-            if (pte && (*pte & PTE_V)) {
-                /* Demote any large leaf, not just one that straddles a VMA
-                 * edge.  The loop body below rewrites exactly one leaf entry
-                 * and then advances `va = base + size`, i.e. it skips the
-                 * rest of the leaf.  That is only sound once `size` is a
-                 * single page, so a level>0 leaf must be split first even when
-                 * it sits entirely inside this VMA.  Skipping the demotion
-                 * left every entry after the first at its old permissions
-                 * while v->pte_flags below was rewritten for the whole VMA --
-                 * which is how a read-only PTE ended up under a writable VMA
-                 * and took a write fault (docs 10.39). */
-                if (level > 0) {
-                    int dr = mm_demote_huge_page(mm, va);
-                    if (dr < 0) return dr;
-                    continue;
-                }
-                pte_t observed = *pte;
-#if PTE_D == 0 || PTE_D == PTE_W
-                if (!(vm_prot & VM_WRITE) && (v->vm_flags & VM_WRITE) &&
-                    (v->vm_flags & (VM_FILE | VM_SHARED)) ==
-                        (VM_FILE | VM_SHARED) && (observed & PTE_W))
-                    mm_mprotect_harvest_shared_write(v, va);
-#endif
-                uint64_t flags = mm_pte_flags_apply_prot(observed, ptef);
-                if ((ptef & PTE_W) &&
-                    (v->vm_flags & VM_FILE) &&
-                    !(v->vm_flags & VM_SHARED)) {
-                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
-                    page_cache_page_t *page =
-                        mm_file_cache_mapping_get(v, va, pfn);
-                    if (page) {
-                        /* Keep the canonical cache page read-only.  The first
-                         * store will copy it in handle_cow_fault(). */
-                        flags &= ~(uint64_t)(PTE_W | PTE_D);
-                        flags |= PTE_COW;
-                        page_cache_put(page);
-                    }
-                }
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-                pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
-                if (ltab)
-                    mm_pt_node_lock(ltab);
-                /* MM_MPROTECT_RETRY: recompute for the same VA if a COW
-                 * fault changed the snapshot used for cache classification.
-                 * Skipping this VA would update policy but miss its new PTE. */
-                if (*pte != observed) {
-                    if (ltab)
-                        mm_pt_node_unlock(ltab);
-                    continue;
-                }
-#endif
-                /* Raising W on a private anonymous page still shared after
-                 * fork must preserve COW, including after a read-only interval
-                 * cleared its old COW bit.  Temporary pins may cause a spare
-                 * copy, which is safe; granting W to a shared frame is not. */
-                if ((ptef & PTE_W) &&
-                    !(v->vm_flags & (VM_SHARED | VM_VMO))) {
-                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
-                    if (pfn_valid(pfn)) {
-                        uint64_t pf = spin_lock_irqsave(&pfa.lock);
-                        if (pfa.meta[pfn].refcount > 1) {
-                            flags &= ~(uint64_t)(PTE_W | PTE_D);
-                            flags |= PTE_COW;
-                        }
-                        spin_unlock_irqrestore(&pfa.lock, pf);
-                    }
-                }
-                if ((flags & PTE_X) && !(observed & PTE_X)) {
-                    pfn_t pfn = phys_to_pfn(arch_pte_addr(observed));
-                    if (pfn_valid(pfn))
-                        arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
-                }
-                pte_t replacement = arch_pte_leaf(arch_pte_addr(observed),
-                                                  flags);
-                if (replacement != observed) {
-                    *pte = replacement;
-                    mm_tlb_note_change(mm, base, size);
-                }
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-                    /* The status byte is what a later status-driven fault
-                     * installs and what mm_pt_audit_all() compares, so it
-                     * has to follow the PTE here as well -- not only on the
-                     * never-faulted branch below.  Leaving it stale is what
-                     * produced prot_mismatch=5 on a real workload.
-                     *
-                     * Take the table from mm_pt_leaf_table() rather than
-                     * deriving it as `pte - vpn`: that is pointer arithmetic
-                     * on a pointer whose provenance is a lookup, and the
-                     * same trap is documented on the absent branch below. */
-                    if (ltab)
-                        (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
-                                                      flags);
-                if (ltab)
-                    mm_pt_node_unlock(ltab);
-#endif /* ARCH_HAS_PGTABLE_OPS */
-                va = base + size;
-            } else {
-                /* Reserved by mmap but never faulted: there is no PTE to carry
-                 * the new permissions, and the per-PTE status is what a later
-                 * fault will install.  Refresh it here, or mprotect is silently
-                 * ignored for this page.
-                 *
-                 * `pte` may be NULL, not merely non-present: this branch also
-                 * catches addresses with no leaf table at all.  The per-PTE
-                 * status lives in that table's metadata, so when there is no
-                 * table there is no status to refresh.  Computing `pte - idx`
-                 * from NULL is pointer arithmetic on a null pointer (UBSAN
-                 * flagged it on every such page) and handed
-                 * mm_pt_refresh_leaf_prot() a wild pointer, so the refresh
-                 * silently did nothing: the status kept its OLD permissions,
-                 * v->pte_flags below was updated anyway, and a later
-                 * status-driven fault installed the stale permissions --
-                 * leaving a PTE that disagreed with its own VMA. */
-                /* Ask for the table that owns this leaf slot, NOT for a PTE
-                 * inside it.  pt_lookup_leaf() stops at the first non-present
-                 * entry, which is very often the level-0 entry of a table
-                 * that does exist -- so its NULL said nothing about whether a
-                 * per-PTE status was waiting to be installed.  Gating the
-                 * refresh on that NULL skipped it for exactly the pages that
-                 * were about to fault from the status, leaving a stale
-                 * ANON_VIRT prot behind; a later status fault then installed
-                 * it verbatim, putting a read-only PTE under a writable VMA
-                 * and killing the first store (docs 10.39-10.56).
-                 *
-                 * If there is no table at all there is nothing to refresh
-                 * either: the table a future fault creates has its metadata
-                 * memset to zero by mm_pt_node_init(), i.e. all
-                 * MM_ST_INVALID, so the status path cannot match
-                 * MM_ST_ANON_VIRT and cannot act on a stale prot. */
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-                pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
-                /* The status byte here is the same one the lockless fault
-                 * paths read and write under this table's node lock, so the
-                 * refresh takes that lock too: an unlocked RMW here can
-                 * interleave with mm_fault_from_status()'s install and the
-                 * later map then reinstalls the stale permissions. */
-                if (ltab)
-                    mm_pt_node_lock(ltab);
-                if (ltab)
-                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
-                                                    ptef);
-                if (ltab)
-                    mm_pt_node_unlock(ltab);
-#else
-                /* No status sidecar on this backend: with no PTE there is
-                 * nothing at all for mprotect to have done to this page. */
-#endif /* ARCH_HAS_PGTABLE_OPS */
-                va += PAGE_SIZE;
-            }
-        }
-        v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
-        v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
-                       vm_prot;
-        v = vma_try_merge(mm, v);
-        touched = 1;
-        v = v ? v->next : next;
-    }
-
-    (void)touched;
-#endif
-    return 0;
+    return a20_mprotect_locked_rust(mm, addr, len, prot);
 }
 
 int mm_mprotect(mm_struct_t *mm, vaddr_t addr, size_t len, int prot)

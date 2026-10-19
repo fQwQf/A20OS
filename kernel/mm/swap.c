@@ -52,73 +52,9 @@ static inline void swap_bit_set(uint64_t *bits, uint64_t i)
     bits[i >> 6] |= (uint64_t)1 << (i & 63);
 }
 
-static inline void swap_bit_clear(uint64_t *bits, uint64_t i)
-{
-    bits[i >> 6] &= ~((uint64_t)1 << (i & 63));
-}
-
 static size_t swap_bitmap_words(uint64_t pages)
 {
     return (size_t)((pages + 63) / 64);
-}
-
-/*
- * Index of the highest set bit, without __builtin_clzll: that expands to a
- * libgcc call (__clzdi2) which this freestanding link does not pull in.
- */
-static inline uint64_t swap_highest_bit(uint64_t word)
-{
-    uint64_t bit = 0;
-    if (word & 0xFFFFFFFF00000000ull) { word >>= 32; bit += 32; }
-    if (word & 0x00000000FFFF0000ull) { word >>= 16; bit += 16; }
-    if (word & 0x000000000000FF00ull) { word >>= 8;  bit += 8; }
-    if (word & 0x00000000000000F0ull) { word >>= 4;  bit += 4; }
-    if (word & 0x000000000000000Cull) { word >>= 2;  bit += 2; }
-    if (word & 0x0000000000000002ull) { bit += 1; }
-    return bit;
-}
-
-/*
- * Find a free slot at or after `hint`, wrapping to the start of the area once
- * the tail is exhausted.  Scanning whole words is what keeps this cheap; the
- * hint keeps it from re-walking the allocated prefix on every call.
- */
-static int swap_bitmap_find_free(swap_info_struct *si, int type,
-                                 uint64_t *out)
-{
-    uint64_t *bits = swap_free_bits[type];
-    uint64_t pages = si->pages;
-    uint64_t hint = swap_alloc_hint[type];
-
-    /* Slot 0 is the header and is never allocatable. */
-    if (hint < 1) hint = 1;
-    if (hint >= pages) hint = 1;
-
-    for (int pass = 0; pass < 2; pass++) {
-        uint64_t start = pass == 0 ? hint : 1;
-        uint64_t end   = pass == 0 ? pages : hint;
-        uint64_t first_w = start >> 6;
-        uint64_t last_w  = (end + 63) >> 6;
-        for (uint64_t w = first_w; w < last_w; w++) {
-            uint64_t word = bits[w];
-            if (!word)
-                continue;
-            /* Drop the bits before `start` in the word `start` lands in. */
-            if (w == first_w && (start & 63))
-                word &= ~(((uint64_t)1 << (start & 63)) - 1);
-            if ((end & 63) && w == (end >> 6))
-                word &= ((uint64_t)1 << (end & 63)) - 1;
-            if (!word)
-                continue;
-            uint64_t bit = swap_highest_bit(word);
-            uint64_t idx = (w << 6) + bit;
-            if (idx < start || idx >= end || idx >= pages || idx == 0)
-                continue;
-            *out = idx;
-            return 1;
-        }
-    }
-    return 0;
 }
 
 static int swap_device_valid(block_dev_t *bdev)
@@ -456,90 +392,83 @@ int swap_list_area(int type, swap_listing_t *out) {
     return rc;
 }
 
-swap_entry_t get_swap_page_owned(struct cg_node *owner) {
-    if (cg_mem_swap_charge_node(owner, 1) < 0) return 0;
-    for (unsigned int type = 0; type < MAX_SWAPFILES; type++) {
-        swap_info_struct *si = &swap_info[type];
-        uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
-        if (si->active) {
-            uint64_t offset;
-            if (swap_bitmap_find_free(si, (int)type, &offset)) {
-                /* Clear the bit before publishing the map entry, so a
-                 * concurrent swap_free() for this slot cannot see it free. */
-                swap_bit_clear(swap_free_bits[type], offset);
-                si->swap_map[offset] = 1;
-                cg_group_pin(owner);
-                swap_owners[type][offset] = owner;
-                /* Resume the search past this slot next time. */
-                swap_alloc_hint[type] = offset + 1;
-                uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
-                nr_swap_pages--;
-                si->inuse_pages++;
-                spin_unlock_irqrestore(&swap_stats_lock, stats_flags);
-                spin_unlock_irqrestore(&swap_locks[type], flags);
-                return swp_entry(type, offset);
-            }
-        }
-        spin_unlock_irqrestore(&swap_locks[type], flags);
-    }
-    cg_mem_swap_uncharge_node(owner, 1);
-    return 0;
+/*
+ * Slot allocation, its reference counting and the release path live in
+ * kernel/mm/swap_slots.rs.  What is left here is the area lock, the area and
+ * registry state, the counter lock, the I/O path and the cgroup charge/pin.
+ */
+extern swap_entry_t get_swap_page_owned(struct cg_node *owner);
+extern swap_entry_t get_swap_page(void);
+extern int swap_duplicate(swap_entry_t entry);
+extern void swap_free(swap_entry_t entry);
+
+struct a20_swap_area {
+    void     *map;   /* uint32_t *swap_map */
+    void     *bits;  /* uint64_t *swap_free_bits */
+    uint64_t  pages;
+    uint64_t  hint;
+    int32_t   active;
+    int32_t   reserved;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_swap_area) == 40, "Rust/C swap area ABI");
+#endif
+
+uint64_t a20_swap_lock(unsigned int type)
+{
+    return spin_lock_irqsave(&swap_locks[type]);
 }
 
-swap_entry_t get_swap_page(void)
+void a20_swap_unlock(unsigned int type, uint64_t flags)
 {
-    return get_swap_page_owned(NULL);
-}
-
-int swap_duplicate(swap_entry_t entry)
-{
-    unsigned type = swp_type(entry);
-    uint64_t offset = swp_offset(entry);
-    if (type >= MAX_SWAPFILES) return -EINVAL;
-    swap_info_struct *si = &swap_info[type];
-    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
-    int r = -EINVAL;
-    if (si->active && offset && offset < si->pages) {
-        uint32_t refs = si->swap_map[offset];
-        if (refs && refs != SWAP_MAP_BAD) {
-            if (refs == SWAP_MAP_BAD - 1) r = -EOVERFLOW;
-            else { si->swap_map[offset] = refs + 1; r = 0; }
-        }
-    }
     spin_unlock_irqrestore(&swap_locks[type], flags);
-    return r;
 }
 
-void swap_free(swap_entry_t entry) {
-    unsigned int type = swp_type(entry);
-    uint64_t offset = swp_offset(entry);
-    if (type >= MAX_SWAPFILES)
+void a20_swap_area(unsigned int type, struct a20_swap_area *out)
+{
+    swap_info_struct *si = &swap_info[type];
+    if (!out)
         return;
+    out->map = si->swap_map;
+    out->bits = swap_free_bits[type];
+    out->pages = si->pages;
+    out->hint = swap_alloc_hint[type];
+    out->active = si->active;
+    out->reserved = 0;
+}
 
-    swap_info_struct *si = &swap_info[type];
-    struct cg_node *owner = NULL;
-    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
-    if (si->active && offset > 0 && offset < si->pages &&
-        si->swap_map[offset] && si->swap_map[offset] != SWAP_MAP_BAD) {
-        if (--si->swap_map[offset]) {
-            spin_unlock_irqrestore(&swap_locks[type], flags);
-            return;
-        }
-        owner = swap_owners[type][offset];
-        swap_owners[type][offset] = NULL;
-        /* Rewind the hint so this slot is reachable again without a full wrap
-         * when the area is nearly full. */
-        if (swap_alloc_hint[type] > offset)
-            swap_alloc_hint[type] = offset;
-        swap_bit_set(swap_free_bits[type], offset);
-        uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
-        si->inuse_pages--;
+void a20_swap_set_hint(unsigned int type, uint64_t hint)
+{
+    swap_alloc_hint[type] = hint;
+}
+
+void *a20_swap_owner(unsigned int type, uint64_t offset)
+{
+    if (!swap_owners[type] || offset >= swap_info[type].pages)
+        return NULL;
+    return swap_owners[type][offset];
+}
+
+void a20_swap_set_owner(unsigned int type, uint64_t offset, void *owner)
+{
+    if (!swap_owners[type] || offset >= swap_info[type].pages)
+        return;
+    swap_owners[type][offset] = owner;
+}
+
+/* The two counters move together under their own lock, so a concurrent
+ * swapoff sees either both or neither. */
+void a20_swap_account(unsigned int type, int alloc)
+{
+    uint64_t flags = spin_lock_irqsave(&swap_stats_lock);
+    if (alloc) {
+        nr_swap_pages--;
+        swap_info[type].inuse_pages++;
+    } else {
+        swap_info[type].inuse_pages--;
         nr_swap_pages++;
-        spin_unlock_irqrestore(&swap_stats_lock, stats_flags);
     }
-    spin_unlock_irqrestore(&swap_locks[type], flags);
-    cg_mem_swap_uncharge_node(owner, 1);
-    cg_group_unpin(owner);
+    spin_unlock_irqrestore(&swap_stats_lock, flags);
 }
 
 static int swap_page_io(swap_entry_t entry, void *page, int write) {

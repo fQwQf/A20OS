@@ -28,6 +28,13 @@ smoke-keyring-c:
 bench-keyring-selector:
 	tools/keyring_selector_bench.sh
 
+# Optional timing-only experiment for mapping creation.  Boots the retained
+# C-reference kernel and the Rust kernel under the perf lease (activity
+# exclusive + qemu-1 exclusive) in the interleaved order C, R, R, C; not a
+# correctness gate and requires both build directories to exist.
+bench-mmap-selector:
+	$(PYTHON) tools/bench-mmap-selector.py
+
 check-a20-idl: user/svc/a20_services_idl.h
 	@$(PYTHON) tools/gensync.py a20-idl \
 		--idl user/svc/a20_services.idl \

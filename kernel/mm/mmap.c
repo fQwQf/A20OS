@@ -19,21 +19,166 @@
 #include "core/klog.h"
 #include "core/errno.h"
 
-/* Mapping creation: mmap/mmap_file/mmap_vmo plus the shared
- * file-mapping dirty sync used by writeback paths. */
+/* Mapping creation: mmap/mmap_file/mmap_vmo plus the shared file-mapping
+ * dirty sync used by writeback paths.
+ *
+ * The creation transaction itself -- validation, W^X, the Linux fixed/hint
+ * address contracts, address selection, the vm_flags/pte_flags/capability
+ * policy, mlock admission, and the ordering and rollback of every fallible
+ * step -- lives in kernel/mm/mmap_policy.rs.  What remains here is the
+ * mm_seg_t layout (one repr(C) spec), the flat NOMMU allocation, the
+ * mm/task/vfile/vmo field access the Rust module cannot name, the arch
+ * constants that live in headers it cannot include, the page-table segment
+ * annotation helpers, and the file-mapping dirty sync. */
 
-#ifdef CONFIG_NOMMU
-static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
+extern vaddr_t a20_mmap_anon_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                  int prot, int flags, int native_cap);
+extern vaddr_t a20_mmap_file_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                  int prot, int flags, struct vfile *file,
+                                  uint64_t file_offset, int native_cap,
+                                  struct vmar *owner);
+extern vaddr_t a20_mmap_vmo_rust(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                 int prot, int flags, struct vmo *vmo,
+                                 uint64_t vmo_offset, int native_cap,
+                                 struct vmar *owner);
+
+struct a20_mmap_seg_spec {
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+    uintptr_t pte_flags;
+    uint32_t  vmar_cap;
+    uint32_t  reserved;
+    void     *file;
+    uint64_t  backing_offset;
+    void     *file_vnode;
+    void     *vmo;
+    void     *vmar_owner;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_mmap_seg_spec) == 80,
+               "Rust/C mmap seg spec ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_mmap_seg_spec) == 48,
+               "Rust/C mmap seg spec ABI");
+#endif
+
+/* Copy the transaction's decisions into the record.  `nommu_raw` is the flat
+ * allocation the mapping owns on NOMMU and NULL everywhere else; it is kept out
+ * of the spec so the Rust/C spec ABI does not change with CONFIG_NOMMU. */
+void a20_mmap_seg_fill(void *vma_ptr, const struct a20_mmap_seg_spec *spec,
+                       void *nommu_raw)
 {
-    size_t alloc_len = len + PAGE_SIZE - 1;
-    void *raw = kmalloc(alloc_len);
-    if (!raw)
-        return NULL;
-    vaddr_t addr = ROUND_UP((vaddr_t)raw, PAGE_SIZE);
-    memset((void *)addr, 0, len);
-    if (addr_out)
-        *addr_out = addr;
-    return raw;
+    mm_seg_t *vma = vma_ptr;
+    if (!vma || !spec)
+        return;
+    vma->start = spec->start;
+    vma->end = spec->end;
+    vma->vm_flags = spec->vm_flags;
+    vma->pte_flags = spec->pte_flags;
+    vma->vmar_cap = spec->vmar_cap;
+    vma->file = spec->file;
+    vma->backing_offset = spec->backing_offset;
+    vma->file_vnode = spec->file_vnode;
+    vma->vmo = spec->vmo;
+    vma->vmar_owner = spec->vmar_owner;
+#ifdef CONFIG_NOMMU
+    vma->nommu_alloc = nommu_raw;
+#else
+    (void)nommu_raw;
+#endif
+}
+
+uintptr_t a20_mmap_mmap_base(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm ? (uintptr_t)mm->mmap_base : 0;
+}
+
+int a20_mmap_def_locked(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm && (mm->def_flags & VM_LOCKED);
+}
+
+uintptr_t a20_mmap_locked_vm(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm ? (uintptr_t)mm->locked_vm : 0;
+}
+
+void a20_mmap_locked_vm_add(void *mm_ptr, uintptr_t len)
+{
+    mm_struct_t *mm = mm_ptr;
+    if (mm)
+        mm->locked_vm += len;
+}
+
+void a20_mmap_total_vm_add(void *mm_ptr, uintptr_t pages)
+{
+    mm_struct_t *mm = mm_ptr;
+    if (mm)
+        mm->total_vm += pages;
+}
+
+uint64_t a20_mmap_memlock_limit(void)
+{
+    task_t *cur = proc_current();
+    return cur ? cur->limits.memlock : 0;
+}
+
+int a20_mmap_has_cap_admin(void)
+{
+    return proc_has_cap(proc_current(), CAP_SYS_ADMIN);
+}
+
+void *a20_mmap_file_vnode(void *file_ptr)
+{
+    struct vfile *file = file_ptr;
+    return file ? file->vnode : NULL;
+}
+
+uint64_t a20_mmap_vmo_size(void *vmo_ptr)
+{
+    struct vmo *vmo = vmo_ptr;
+    return vmo ? vmo->size : 0;
+}
+
+void a20_mmap_vnode_shared_map_inc(void *vn_ptr)
+{
+    vnode_shared_map_inc(vn_ptr);
+}
+
+void a20_mmap_provision_anon(void *mm_ptr, uintptr_t start, uintptr_t end,
+                             uintptr_t ptef)
+{
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    (void)mm_pt_provision_anon(mm_ptr, start, end, (pte_t)ptef);
+#else
+    (void)mm_ptr;
+    (void)start;
+    (void)end;
+    (void)ptef;
+#endif
+}
+
+uintptr_t a20_mmap_user_va_limit(void)
+{
+    return USER_VA_LIMIT;
+}
+
+uintptr_t a20_mmap_base_addr(void)
+{
+    return MMAP_BASE_ADDR;
+}
+
+int a20_mmap_is_nommu(void)
+{
+#ifdef CONFIG_NOMMU
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 /*
@@ -50,19 +195,29 @@ static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
  * exec that MAP_FIXEDs over its own image is how a process ends up jumping to
  * a freshly zeroed page and dying on SIGILL.
  *
- * So the hint is dropped unconditionally -- MAP_FIXED included.  It cannot be
- * honoured here, because satisfying it would mean taking memory away from
- * whoever really owns it rather than reserving anything new.  Every mapping
- * gets freshly allocated memory instead.
+ * The transaction therefore drops the hint unconditionally -- MAP_FIXED
+ * included -- and every mapping gets freshly allocated memory instead.  The
+ * returned pointer is the raw allocation the record owns; the caller frees it
+ * with kfree() if the mapping is refused before publication.
  */
-static void *nommu_pick_region(int flags, size_t len, vaddr_t addr,
-                               vaddr_t *addr_out)
+void *a20_mmap_nommu_alloc(uintptr_t len, uintptr_t *addr_out)
 {
-    (void)flags;
-    (void)addr;
-    return nommu_alloc_aligned(len, addr_out);
+#ifdef CONFIG_NOMMU
+    size_t alloc_len = len + PAGE_SIZE - 1;
+    void *raw = kmalloc(alloc_len);
+    if (!raw)
+        return NULL;
+    uintptr_t addr = ROUND_UP((uintptr_t)raw, PAGE_SIZE);
+    memset((void *)addr, 0, len);
+    if (addr_out)
+        *addr_out = addr;
+    return raw;
+#else
+    (void)len;
+    (void)addr_out;
+    return NULL;
+#endif
 }
-#endif /* CONFIG_NOMMU */
 
 /* ------------------------------------------------------------------ *
  * Backing-object segments  (P6, docs/roadmap/single-level-mm-model.md 12.6)
@@ -225,117 +380,7 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
 
 static vaddr_t mm_mmap_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                                    int prot, int flags, int native_cap) {
-    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (vaddr_t)-EINVAL;
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0) return (vaddr_t)-EINVAL;
-    if (len > USER_VA_LIMIT) return (vaddr_t)-ENOMEM;
-
-    /* W^X: a MAP_FIXED overwrite of an existing VMA also lands here and is
-     * bound by the same policy */
-    prot = mm_wx_filter_prot(prot, "mmap");
-    if (prot < 0) return (vaddr_t)prot;
-
-    pte_t ptef = mm_prot_to_pte_flags(prot);
-    uint64_t vmf = VM_ANON;
-    if (prot & 1) vmf |= VM_READ;
-    if (prot & 2) vmf |= VM_WRITE;
-    if (prot & 4) vmf |= VM_EXEC;
-    if (flags & MAP_SHARED) vmf |= VM_SHARED;
-    if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
-    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
-
-    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        if (mm_range_overlaps(mm, addr, len, NULL))
-            return (vaddr_t)-EEXIST;
-        flags |= MAP_FIXED;
-    }
-
-    if ((flags & MAP_FIXED) && addr != 0) {
-        int mr = mm_munmap_locked(mm, addr, len);
-        if (mr < 0)
-            return (vaddr_t)mr;
-    } else if (addr != 0) {
-        /* Linux hint semantics: a hint outside the user VA range (or
-         * whose whole range collides with an existing VMA) is ignored,
-         * never fatal -- V8's GetRandomMmapAddr generates hints up to
-         * 2^46 and relies on the kernel falling back to a legal address.
-         * Only MAP_FIXED above may fail for an out-of-range address.
-         * The check must cover the entire [addr, addr+len) range: looking
-         * only at the VMA containing `addr` misses a hint that starts in a
-         * gap but runs into the following VMA, which would otherwise insert
-         * an overlapping VMA and corrupt the address space. */
-        if (addr + len < addr || addr + len > USER_VA_LIMIT ||
-            mm_range_overlaps(mm, addr, len, NULL)) {
-            addr = 0;
-        }
-    }
-
-#ifdef CONFIG_NOMMU
-    void *nommu_raw = nommu_pick_region(flags, len, addr, &addr);
-    if (!nommu_raw) return (vaddr_t)-ENOMEM;
-#else
-    if (addr == 0)
-        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
-
-    if (addr == 0) return (vaddr_t)-ENOMEM;
-    if (addr + len < addr || addr + len > USER_VA_LIMIT)
-        return (vaddr_t)-ENOMEM;
-#endif
-
-    mm_seg_t *vma = mm_seg_new();
-    if (!vma) {
-#ifdef CONFIG_NOMMU
-        kfree(nommu_raw);
-#endif
-        return (vaddr_t)-ENOMEM;
-    }
-    vma->start     = addr;
-    vma->end       = addr + len;
-    vma->vm_flags  = vmf;
-    vma->pte_flags = ptef;
-    vma->vmar_cap  = native_cap >= 0 ? (uint32_t)native_cap :
-                    (uint32_t)mm_pte_flags_to_prot(ptef);
-    vma->file      = NULL;
-#ifdef CONFIG_NOMMU
-    vma->nommu_alloc = nommu_raw;
-#endif
-
-    if (mm->def_flags & VM_LOCKED) {
-        task_t *cur = proc_current();
-        if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
-            kfree(vma);
-            return (vaddr_t)-ENOMEM;
-        }
-        vma->vm_flags |= VM_LOCKED;
-        mm->locked_vm += len;
-    }
-
-    mm_insert_vma(mm, vma);
-    mm->total_vm += len / PAGE_SIZE;
-    /* No mm_mmap_seg_annotate() here: mm_insert_vma() builds the segment for
-     * whichever mapping survives its merges, which is the only one whose
-     * extent is final.  Annotating `vma` at this point could name a mapping
-     * that the insert just merged away. */
-
-    /*
-     * CortenMM on-demand paging (paper SS4.3): record the reservation per PTE
-     * so a later fault on this range can be served from per-PTE status alone,
-     * with its permissions, instead of re-deriving them from the VMA.  The
-     * paper pays page-table pages up front here, which is why its mmap is
-     * slightly slower than Linux's while mmap-PF is faster (SS6.2).
-     *
-     * Provisioning is best effort: a range too large to provision eagerly just
-     * keeps the VMA-based fault path, which remains correct.  It runs under
-     * mm->lock, so the order mm->lock -> page-table lock is the same one the
-     * fault path already uses.
-     */
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-    if ((vmf & VM_ANON) && !(vmf & VM_SHARED))
-        (void)mm_pt_provision_anon(mm, addr, addr + len, ptef);
-#endif
-
-    return addr;
+    return a20_mmap_anon_rust(mm, addr, len, prot, flags, native_cap);
 }
 
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
@@ -354,115 +399,11 @@ static vaddr_t mm_mmap_file_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t le
                             int prot, int flags, struct vfile *file,
                             uint64_t file_offset, int native_cap, struct vmar *owner)
 {
-    /* @file arrives referenced. On success the VMA takes ownership; on
+    /* @file arrives referenced. On success the record takes ownership; on
      * failure ownership stays with the caller so it can release the reference
      * after dropping mm->lock. */
-    if (!file || (file_offset & (PAGE_SIZE - 1))) {
-        return (vaddr_t)-EINVAL;
-    }
-    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (vaddr_t)-EINVAL;
-
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0)
-        return (vaddr_t)-EINVAL;
-    if (len > USER_VA_LIMIT)
-        return (vaddr_t)-ENOMEM;
-
-    /* Apply W^X policy before allocating the VMA or retaining its vnode. */
-    prot = mm_wx_filter_prot(prot, "mmap_file");
-    if (prot < 0)
-        return (vaddr_t)prot;
-
-    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        if (mm_range_overlaps(mm, addr, len, NULL))
-            return (vaddr_t)-EEXIST;
-        flags |= MAP_FIXED;
-    }
-
-    if ((flags & MAP_FIXED) && addr != 0) {
-        int mr = mm_munmap_locked(mm, addr, len);
-        if (mr < 0)
-            return (vaddr_t)mr;
-    } else if (addr != 0) {
-        /* Same hint semantics as the anonymous path: out-of-range or
-         * colliding hints fall back to the gap search.  Check the whole
-         * [addr, addr+len) range, not just the VMA containing `addr`. */
-        if (addr + len < addr || addr + len > USER_VA_LIMIT ||
-            mm_range_overlaps(mm, addr, len, NULL)) {
-            addr = 0;
-        }
-    }
-
-#ifdef CONFIG_NOMMU
-    void *nommu_raw = nommu_pick_region(flags, len, addr, &addr);
-    if (!nommu_raw)
-        return (vaddr_t)-ENOMEM;
-#else
-    if (addr == 0)
-        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
-
-    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
-        return (vaddr_t)-ENOMEM;
-    }
-#endif
-
-    uint64_t vmf = VM_FILE;
-    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
-    if (prot & 1) vmf |= VM_READ;
-    if (prot & 2) vmf |= VM_WRITE;
-    if (prot & 4) vmf |= VM_EXEC;
-    if (flags & MAP_SHARED) vmf |= VM_SHARED;
-    if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
-
-    mm_seg_t *vma = mm_seg_new();
-    if (!vma) {
-#ifdef CONFIG_NOMMU
-        kfree(nommu_raw);
-#endif
-        return (vaddr_t)-ENOMEM;
-    }
-    vma->start       = addr;
-    vma->end         = addr + len;
-    vma->vm_flags    = vmf;
-    vma->pte_flags   = mm_prot_to_pte_flags(prot);
-    vma->vmar_cap    = native_cap >= 0 ? (uint32_t)native_cap : (uint32_t)prot;
-    vma->file        = file;   /* the record takes over the caller's reference */
-    vma->backing_offset = file_offset;
-#ifdef CONFIG_NOMMU
-    vma->nommu_alloc = nommu_raw;
-#endif
-
-    /* Every file VMA retains its vnode.  MAP_SHARED needs it for dirty-page
-     * writeback; read-only MAP_PRIVATE additionally uses it to distinguish a
-     * direct page-cache leaf from an anonymous COW leaf during teardown. */
-    if (file->vnode) {
-        vnode_get(file->vnode);
-        vma->file_vnode = file->vnode;
-    }
-
-    if (mm->def_flags & VM_LOCKED) {
-        task_t *cur = proc_current();
-        if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
-            if (vma->file_vnode) {
-                vnode_put(vma->file_vnode);
-                vma->file_vnode = NULL;
-            }
-            kfree(vma);
-            return (vaddr_t)-ENOMEM;
-        }
-        vma->vm_flags |= VM_LOCKED;
-        mm->locked_vm += len;
-    }
-
-    if ((vma->vm_flags & VM_SHARED) && vma->file_vnode)
-        vnode_shared_map_inc(vma->file_vnode);
-
-    vma->vmar_owner = owner;
-    if (owner) vmar_acquire(owner);
-    mm_insert_vma(mm, vma);
-    mm->total_vm += len / PAGE_SIZE;
-    return addr;
+    return a20_mmap_file_rust(mm, addr, len, prot, flags, file, file_offset,
+                              native_cap, owner);
 }
 
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
@@ -483,78 +424,8 @@ static vaddr_t mm_mmap_vmo_impl_locked(mm_struct_t *mm, vaddr_t addr, size_t len
                               int prot, int flags, struct vmo *vmo,
                               uint64_t vmo_offset, int native_cap, struct vmar *owner)
 {
-    if (!mm || !vmo)
-        return (vaddr_t)-EINVAL;
-    if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (vaddr_t)-EINVAL;
-
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0)
-        return (vaddr_t)-EINVAL;
-    if (len > USER_VA_LIMIT)
-        return (vaddr_t)-ENOMEM;
-    if (vmo_offset >= vmo->size || len > vmo->size - vmo_offset)
-        return (vaddr_t)-EINVAL;
-    if (vmo_offset & (PAGE_SIZE - 1))
-        return (vaddr_t)-EINVAL;
-
-    /* W^X: a Native VMO mapping follows the same policy as Linux mmap */
-    prot = mm_wx_filter_prot(prot, "mmap_vmo");
-    if (prot < 0)
-        return (vaddr_t)prot;
-
-    if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        if (mm_range_overlaps(mm, addr, len, NULL))
-            return (vaddr_t)-EEXIST;
-        flags |= MAP_FIXED;
-    }
-
-    if ((flags & MAP_FIXED) && addr != 0) {
-        int mr = mm_munmap_locked(mm, addr, len);
-        if (mr < 0)
-            return (vaddr_t)mr;
-    } else if (addr != 0) {
-        if (addr + len < addr || addr + len > USER_VA_LIMIT ||
-            mm_range_overlaps(mm, addr, len, NULL))
-            addr = 0;
-    }
-
-#ifdef CONFIG_NOMMU
-    (void)vmo_offset;
-    return (vaddr_t)-EOPNOTSUPP;
-#else
-    if (addr == 0)
-        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
-
-    if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT)
-        return (vaddr_t)-ENOMEM;
-#endif
-
-    uint64_t vmf = VM_VMO;
-    if (native_cap >= 0) vmf |= VM_NATIVE_CAP;
-    if (prot & 1) vmf |= VM_READ;
-    if (prot & 2) vmf |= VM_WRITE;
-    if (prot & 4) vmf |= VM_EXEC;
-    if (flags & MAP_SHARED) vmf |= VM_SHARED;
-
-    mm_seg_t *vma = mm_seg_new();
-    if (!vma)
-        return (vaddr_t)-ENOMEM;
-    vma->start       = addr;
-    vma->end         = addr + len;
-    vma->vm_flags    = vmf;
-    vma->pte_flags   = mm_prot_to_pte_flags(prot);
-    vma->vmar_cap    = native_cap >= 0 ? (uint32_t)native_cap : (uint32_t)prot;
-    vma->file        = NULL;
-    vma->vmo         = vmo;
-    vma->backing_offset  = vmo_offset;
-    vmo_ref(vmo);
-
-    vma->vmar_owner = owner;
-    if (owner) vmar_acquire(owner);
-    mm_insert_vma(mm, vma);
-    mm->total_vm += len / PAGE_SIZE;
-    return addr;
+    return a20_mmap_vmo_rust(mm, addr, len, prot, flags, vmo, vmo_offset,
+                             native_cap, owner);
 }
 
 vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,

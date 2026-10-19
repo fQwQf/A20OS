@@ -21,6 +21,41 @@ HOST_TESTS_SRC := $(filter-out tools/tests/mutate_state_host.c,$(HOST_TESTS_SRC)
 HOST_TESTS_SRC := $(filter-out tools/tests/mntns_lifecycle_host.c,$(HOST_TESTS_SRC))
 HOST_TESTS_SRC := $(filter-out tools/tests/procfs_node_state_host.c,$(HOST_TESTS_SRC))
 HOST_TESTS_SRC := $(filter-out tools/tests/mount_state_host.c,$(HOST_TESTS_SRC))
+# Harnesses that call Rust kernel entry points cannot be linked by the pattern
+# rule below: each one needs its own Rust object, and each is built and run by
+# its own tools/test-*-host.sh script.  Left in the wildcard they fail the whole
+# target with undefined references to the Rust symbols, which is what happened
+# here before this list existed.  They are named explicitly rather than by glob
+# so a new self-contained harness is still discovered automatically; the four
+# *_host.c entries are another module's and need their own rules before they
+# can move out of this list.
+RUST_LINKED_HOST_TESTS := \
+    tools/tests/vnode_identity_host.c \
+    tools/tests/vnode_identity_bench.c \
+    tools/tests/block_cache_state_host.c \
+    tools/tests/page_cache_state_host.c \
+    tools/tests/uxfs_rpc_state_host.c \
+    tools/tests/uxfs_lifetime_state_host.c \
+    tools/tests/procfs_state_host.c \
+    tools/tests/path_state_host.c \
+    tools/tests/path_walk_state_host.c \
+    tools/tests/mutate_state_host.c \
+    tools/tests/mntns_lifecycle_host.c \
+    tools/tests/procfs_node_state_host.c \
+    tools/tests/mount_state_host.c \
+    tools/tests/completion_state_host.c \
+    tools/tests/rw_mutex_state_host.c \
+    tools/tests/wait_queue_state_host.c \
+    tools/tests/wait_timer_host.c \
+    tools/tests/test_cow_clone.c \
+    tools/tests/test_cow_fault.c \
+    tools/tests/test_madvise_policy.c \
+    tools/tests/test_mmap_policy.c \
+    tools/tests/test_mprotect_txn.c \
+    tools/tests/test_munmap_txn.c \
+    tools/tests/test_swap_slots.c \
+    tools/tests/test_vmar_policy.c
+HOST_TESTS_SRC := $(filter-out tools/tests/fdt_view.c $(RUST_LINKED_HOST_TESTS),$(wildcard tools/tests/*.c))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
@@ -143,9 +178,15 @@ $(TMPDIR)/a20-host-test_a20_idl_wire: tools/tests/test_a20_idl_wire.c user/svc/a
 $(TMPDIR)/a20-host-test_a20_idl_mixed: tools/tests/test_a20_idl_mixed.c $(TMPDIR)/a20-idl-mixed.h
 	$(HOST_CC) $(HOST_CFLAGS) -Iuser/liba20rt -I$(TMPDIR) $< -o $@
 
-$(TMPDIR)/a20-host-test_flat_user: tools/tests/test_flat_user.c kernel/mm/flat_user.c tools/tests/flat_user_shim.h
+# The flat-space policy is Rust, so this harness links the Rust object; the C
+# file provides only the bridges.  During the takeover the same harness was also
+# compiled against the C implementation and both sides passed
+# (tools/test-flat-policy-host.sh, .kernel-build/evidence/fl-slice-evidence.txt).
+$(TMPDIR)/a20-host-test_flat_user: tools/tests/test_flat_user.c kernel/mm/flat_user.c tools/tests/flat_user_shim.h kernel/mm/flat_policy.rs
+	rustc --edition=2021 --crate-type lib --emit=obj --target x86_64-unknown-linux-gnu \
+		-C panic=abort -C opt-level=1 kernel/mm/flat_policy.rs -o $(TMPDIR)/flat_policy_host.o
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -DA20_FLAT_HOST_TEST -Ikernel/include \
-		-include tools/tests/flat_user_shim.h $(filter %.c,$^) -o $@
+		-include tools/tests/flat_user_shim.h $(filter %.c,$^) $(TMPDIR)/flat_policy_host.o -o $@
 
 $(TMPDIR)/a20-host-test_native_runtime: tools/tests/test_native_runtime.c kernel/core/runtime.c kernel/abi/native/sys_runtime.c tools/tests/native_runtime_shim.h tools/tests/native_task_object_shim.h
 	$(HOST_CC) $(HOST_CFLAGS) -pthread -Ikernel/include -Ikernel \

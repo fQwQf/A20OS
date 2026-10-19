@@ -1,0 +1,412 @@
+/*
+ * Host differential harness for kernel/mm/cow_clone.rs.
+ *
+ * The production Rust fork/COW clone transaction is linked against a model of
+ * the mm contract.  Every assertion is about a decision the Rust module owns:
+ * the DONTFORK/WIPEONFORK skip, the swap duplicate, the base-only rule, the
+ * destination-already-present rule, the share-versus-private choice, the COW
+ * flags and parent downgrade, and the rollback of each failure path.
+ *
+ * Guest coverage is separate: mm_stress's fork/COW phases run on real tables.
+ */
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define PAGE_SIZE 4096UL
+#define PMD_SIZE 0x200000UL
+#define PMD_ORDER 9
+
+#define VM_DONTFORK (1UL << 9)
+#define VM_WIPEONFORK (1UL << 10)
+
+#define PFN_NONE 0xFFFFFFFFu
+
+static int failures;
+static int checks;
+
+static void check(int cond, const char *what)
+{
+    checks++;
+    if (!cond) {
+        failures++;
+        printf("FAIL: %s\n", what);
+    }
+}
+
+struct a20_cow_src {
+    void *pcp;
+    uintptr_t pte, base, size, pa;
+    uintptr_t raw_flags, cow_flags;
+    uint32_t pfn;
+    int32_t level, present, swap, is_leaf, w_or_cow;
+    uint32_t class;
+    int32_t kind;
+};
+
+/* ------------------------------------------------------------- the model */
+
+static int g_policy_present;
+static uint64_t g_policy_flags;
+static int g_probe_present, g_probe_leaf, g_probe_swap, g_probe_level;
+static uintptr_t g_probe_base, g_probe_size;
+static uintptr_t g_probe_raw, g_probe_cow;
+static int g_probe_w_or_cow;
+static uint32_t g_probe_pfn;
+static int g_dst_present;
+static int g_swap_rc;
+static int g_requires_copy;
+static uint32_t g_alloc_pfn;
+static int g_map_rc;
+static int g_snapshot_ok;
+static int32_t g_snap_kind;
+
+static int probe_calls, clone_swap_calls, dst_calls, alloc_calls, free_calls;
+static int copy_calls, map_calls, downgrade_calls, unlock_calls;
+static int release_calls, release_kind, rss_calls, rss_pages;
+static int merge_guard; /* unused; keeps the layout obvious */
+static uintptr_t last_map_pfn;
+static uintptr_t last_map_flags;
+static int last_map_level;
+
+static void reset(void)
+{
+    g_policy_present = 1;
+    g_policy_flags = 0;
+    g_probe_present = 1;
+    g_probe_leaf = 1;
+    g_probe_swap = 0;
+    g_probe_level = 0;
+    g_probe_base = 0x1000;
+    g_probe_size = PAGE_SIZE;
+    g_probe_raw = 0x20;
+    g_probe_cow = 0x120;
+    g_probe_w_or_cow = 1;
+    g_probe_pfn = 7;
+    g_dst_present = 0;
+    g_swap_rc = 0;
+    g_requires_copy = 0;
+    g_alloc_pfn = 42;
+    g_map_rc = 0;
+    g_snapshot_ok = 1;
+    g_snap_kind = 1;
+    probe_calls = clone_swap_calls = dst_calls = alloc_calls = free_calls = 0;
+    copy_calls = map_calls = downgrade_calls = unlock_calls = 0;
+    release_calls = rss_calls = 0;
+    release_kind = -1;
+    rss_pages = 0;
+    last_map_pfn = 0;
+    last_map_flags = 0;
+    last_map_level = -1;
+    (void)merge_guard;
+}
+
+uint64_t a20_cow_policy_flags(const void *parent, uintptr_t va, int *present)
+{
+    (void)parent;
+    (void)va;
+    *present = g_policy_present;
+    return g_policy_flags;
+}
+
+void a20_cow_probe(const void *parent, uintptr_t va, struct a20_cow_src *out)
+{
+    (void)parent;
+    (void)va;
+    probe_calls++;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+    out->present = g_probe_present;
+    out->is_leaf = g_probe_leaf;
+    out->swap = g_probe_swap;
+    out->level = g_probe_level;
+    out->base = g_probe_base;
+    out->size = g_probe_size;
+    out->raw_flags = g_probe_raw;
+    out->cow_flags = g_probe_cow;
+    out->w_or_cow = g_probe_w_or_cow;
+    out->pfn = g_probe_pfn;
+}
+
+int a20_cow_dst_present(const void *child, uintptr_t va)
+{
+    (void)child;
+    (void)va;
+    dst_calls++;
+    return g_dst_present;
+}
+
+int a20_cow_clone_swap(void *child, void *parent, uintptr_t va)
+{
+    (void)child;
+    (void)parent;
+    (void)va;
+    clone_swap_calls++;
+    return g_swap_rc;
+}
+
+void a20_cow_geometry(int level, uintptr_t *size, uintptr_t *pmd_size, int *pmd_order)
+{
+    if (size)
+        *size = (level > 0) ? PMD_SIZE : PAGE_SIZE;
+    if (pmd_size)
+        *pmd_size = PMD_SIZE;
+    if (pmd_order)
+        *pmd_order = PMD_ORDER;
+}
+
+int a20_cow_requires_private_copy(void) { return g_requires_copy; }
+
+uint32_t a20_cow_frame_alloc(int order)
+{
+    (void)order;
+    alloc_calls++;
+    return g_alloc_pfn;
+}
+
+void a20_cow_frame_free(uint32_t pfn, int order)
+{
+    (void)pfn;
+    (void)order;
+    free_calls++;
+}
+
+void a20_cow_frame_copy(uint32_t dst, uint32_t src, uintptr_t size)
+{
+    (void)dst;
+    (void)src;
+    (void)size;
+    copy_calls++;
+}
+
+int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
+                      uint32_t class, int level)
+{
+    (void)child;
+    (void)va;
+    (void)class;
+    map_calls++;
+    last_map_pfn = pfn;
+    last_map_flags = flags;
+    last_map_level = level;
+    return g_map_rc;
+}
+
+int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
+                           struct a20_cow_src *out)
+{
+    (void)parent;
+    (void)va;
+    (void)level;
+    if (!g_snapshot_ok)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    out->pfn = g_probe_pfn;
+    out->pa = 0x9000;
+    out->raw_flags = g_probe_raw;
+    out->cow_flags = g_probe_cow;
+    out->w_or_cow = g_probe_w_or_cow;
+    out->class = 3;
+    out->kind = g_snap_kind;
+    out->pcp = (g_snap_kind == 2) ? (void *)(uintptr_t)0xC0FFEE : NULL;
+    return 1;
+}
+
+void a20_cow_share_downgrade(void *parent, uintptr_t va, int level,
+                             uintptr_t pa, uintptr_t flags, uint32_t class)
+{
+    (void)parent;
+    (void)va;
+    (void)level;
+    (void)pa;
+    (void)flags;
+    (void)class;
+    downgrade_calls++;
+}
+
+void a20_cow_share_unlock(void *parent, uintptr_t va)
+{
+    (void)parent;
+    (void)va;
+    unlock_calls++;
+}
+
+void a20_cow_release_ref(const struct a20_cow_src *src)
+{
+    release_calls++;
+    release_kind = src ? src->kind : -1;
+}
+
+void a20_cow_rss_add(void *child, uintptr_t pages)
+{
+    (void)child;
+    rss_calls++;
+    rss_pages = (int)pages;
+}
+
+extern int a20_fork_clone_page_rust(void *child, void *parent, uintptr_t va,
+                                    int shared);
+
+/* -------------------------------------------------------------- scenarios */
+
+static void skip_and_dispatch(void)
+{
+    static int child, parent, mm;
+    reset();
+    g_policy_flags = VM_DONTFORK;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "dontfork: the page is skipped");
+    check(probe_calls == 0, "dontfork: nothing is probed");
+    g_policy_flags = VM_WIPEONFORK;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "wipeonfork: the page is skipped");
+
+    reset();
+    g_probe_present = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "absent: nothing to clone");
+    check(map_calls == 0, "absent: nothing is mapped");
+
+    reset();
+    g_probe_leaf = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "not a leaf: nothing to clone");
+
+    reset();
+    g_probe_base = 0x800;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "non-base: a huge leaf is cloned only at its base");
+
+    reset();
+    g_dst_present = 1;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "dst present: the child leaf is left alone");
+    check(map_calls == 0, "dst present: nothing is mapped");
+
+    reset();
+    g_probe_swap = 1;
+    g_swap_rc = -17; /* EEXIST */
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "swap: EEXIST is tolerated");
+    g_swap_rc = -11; /* EAGAIN */
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "swap: EAGAIN is tolerated");
+    g_swap_rc = -12;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
+          "swap: a real error is propagated");
+    check(clone_swap_calls == 3, "swap: the swap path is taken every time");
+    (void)mm;
+}
+
+static void private_copy(void)
+{
+    static int child, parent;
+    reset();
+    g_requires_copy = 1;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "private: the copy path succeeds");
+    check(alloc_calls == 1 && copy_calls == 1 && map_calls == 1,
+          "private: allocate, copy, map");
+    check(last_map_pfn == 42, "private: the child maps the fresh frame");
+    check(last_map_flags == g_probe_raw, "private: the child keeps the raw arch flags");
+    check(rss_calls == 1 && rss_pages == 1, "private: rss is charged");
+    check(downgrade_calls == 0, "private: the parent is not downgraded");
+
+    /* A huge leaf copies with the PMD order. */
+    reset();
+    g_requires_copy = 1;
+    g_probe_level = 1;
+    g_probe_base = 0x1000;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "private huge: succeeds");
+    check(last_map_level == 1, "private huge: the child map is huge");
+    check(rss_calls == 1 && rss_pages == (int)(PMD_SIZE / PAGE_SIZE),
+          "private huge: rss counts the whole leaf");
+
+    /* A failed child map frees the copy. */
+    reset();
+    g_requires_copy = 1;
+    g_map_rc = -12;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
+          "private: a failed map is propagated");
+    check(free_calls == 1, "private: the copied frame is freed");
+    check(rss_calls == 0, "private: a failed copy charges no rss");
+
+    /* A failed frame allocation maps nothing. */
+    reset();
+    g_requires_copy = 1;
+    g_alloc_pfn = PFN_NONE;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
+          "private: an allocation failure is ENOMEM");
+    check(copy_calls == 0 && map_calls == 0, "private: nothing is copied or mapped");
+}
+
+static void share_and_cow(void)
+{
+    static int child, parent;
+    /* Private: share, downgrade the parent, map the child with COW flags. */
+    reset();
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "share: succeeds");
+    check(downgrade_calls == 1, "share: the writable parent is downgraded");
+    check(unlock_calls == 1, "share: the node lock is released");
+    check(last_map_flags == g_probe_cow, "share: the child gets the COW flags");
+    check(last_map_pfn == g_probe_pfn, "share: the child maps the same frame");
+    check(release_calls == 0, "share: no reference is dropped on success");
+
+    /* A read-only leaf needs no downgrade but is still shared. */
+    reset();
+    g_probe_w_or_cow = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "share ro: succeeds");
+    check(downgrade_calls == 0, "share ro: no downgrade is needed");
+    check(map_calls == 1, "share ro: the child is still mapped");
+
+    /* MAP_SHARED keeps the raw arch flags. */
+    reset();
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 1) == 0,
+          "shared: succeeds");
+    check(downgrade_calls == 0, "shared: the parent is never downgraded");
+    check(last_map_flags == g_probe_raw, "shared: the child gets the raw flags");
+
+    /* A failed child map gives back exactly the reference that was taken. */
+    reset();
+    g_map_rc = -12;
+    g_snap_kind = 1;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
+          "share fail: the error is propagated");
+    check(release_calls == 1 && release_kind == 1,
+          "share fail: the frame reference is dropped");
+
+    reset();
+    g_map_rc = -12;
+    g_snap_kind = 2;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == -12,
+          "share fail cache: the error is propagated");
+    check(release_calls == 1 && release_kind == 2,
+          "share fail cache: the page-cache reference is dropped");
+
+    /* A leaf that vanished under the lock is not an error. */
+    reset();
+    g_snapshot_ok = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "vanished: the leaf disappearing under the lock is not an error");
+    check(map_calls == 0 && unlock_calls == 0,
+          "vanished: nothing is mapped and no lock is held");
+}
+
+int main(void)
+{
+    skip_and_dispatch();
+    private_copy();
+    share_and_cow();
+    reset();
+
+    if (failures) {
+        printf("COW_CLONE_HOST: FAIL %d/%d checks\n", failures, checks);
+        return 1;
+    }
+    printf("COW_CLONE_HOST: PASS %d checks\n", checks);
+    return 0;
+}

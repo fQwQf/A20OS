@@ -517,17 +517,9 @@ CHANNEL_RECV_TXN_IMPL ?= rust
 ifneq ($(CHANNEL_RECV_TXN_IMPL),rust)
 $(error CHANNEL_RECV_TXN_IMPL is fixed to rust; the C transaction fallback has been retired)
 endif
-DONTUNMAP_TXN_IMPL ?= c
-ifeq ($(filter $(DONTUNMAP_TXN_IMPL),c rust),)
-$(error DONTUNMAP_TXN_IMPL must be c or rust)
-endif
 HANDLE_SLOT_TRANSITIONS_IMPL ?= c
 ifeq ($(filter $(HANDLE_SLOT_TRANSITIONS_IMPL),c rust),)
 $(error HANDLE_SLOT_TRANSITIONS_IMPL must be c or rust)
-endif
-USER_COPY_IMPL ?= c
-ifeq ($(filter $(USER_COPY_IMPL),c rust),)
-$(error USER_COPY_IMPL must be c or rust)
 endif
 PROCESS_VM_IMPL ?= c
 ifeq ($(filter $(PROCESS_VM_IMPL),c rust),)
@@ -568,6 +560,34 @@ endif
 MM_SHUTDOWN_WRITE_IMPL ?= c
 ifeq ($(filter $(MM_SHUTDOWN_WRITE_IMPL),c rust),)
 $(error MM_SHUTDOWN_WRITE_IMPL must be c or rust)
+endif
+TASK_LIFECYCLE_IMPL ?= c
+ifeq ($(filter $(TASK_LIFECYCLE_IMPL),c rust),)
+$(error TASK_LIFECYCLE_IMPL must be c or rust)
+endif
+TASK_EXIT_IMPL ?= c
+ifeq ($(filter $(TASK_EXIT_IMPL),c rust),)
+$(error TASK_EXIT_IMPL must be c or rust)
+endif
+WAIT4_IMPL ?= c
+ifeq ($(filter $(WAIT4_IMPL),c rust),)
+$(error WAIT4_IMPL must be c or rust)
+endif
+TASK_PLACEMENT_IMPL ?= c
+ifeq ($(filter $(TASK_PLACEMENT_IMPL),c rust),)
+$(error TASK_PLACEMENT_IMPL must be c or rust)
+endif
+EEVDF_MATH_IMPL ?= c
+ifeq ($(filter $(EEVDF_MATH_IMPL),c rust),)
+$(error EEVDF_MATH_IMPL must be c or rust)
+endif
+RT_SCHED_IMPL ?= c
+ifeq ($(filter $(RT_SCHED_IMPL),c rust),)
+$(error RT_SCHED_IMPL must be c or rust)
+endif
+TASK_CONSTRUCTION_IMPL ?= c
+ifeq ($(filter $(TASK_CONSTRUCTION_IMPL),c rust),)
+$(error TASK_CONSTRUCTION_IMPL must be c or rust)
 endif
 TASK_CONSTRUCTION_TEST ?= 0
 ifeq ($(filter $(TASK_CONSTRUCTION_TEST),0 1),)
@@ -782,6 +802,8 @@ $(error RUST_RUNTIME_TEST must be 0 or 1)
 endif
 ifeq ($(RUST_RUNTIME_TEST),1)
 ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(PID_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
+endif
+ifeq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL)),)
 $(error RUST_RUNTIME_TEST=1 requires at least one Rust kernel selector)
 endif
 endif
@@ -797,19 +819,11 @@ ifeq ($(NOMMU),1)
 $(error VMO_PAGER_TEST=1 requires an MMU profile)
 endif
 endif
-ifeq ($(VMO_LIFECYCLE_IMPL),rust)
-ifneq ($(VMO_PAGE_IMPL),rust)
-$(error VMO_LIFECYCLE_IMPL=rust requires VMO_PAGE_IMPL=rust)
-endif
-endif
 VMO_PAGE_TEST ?= 0
 ifeq ($(filter $(VMO_PAGE_TEST),0 1),)
 $(error VMO_PAGE_TEST must be 0 or 1)
 endif
 ifeq ($(VMO_PAGE_TEST),1)
-ifneq ($(VMO_PAGE_IMPL),rust)
-$(error VMO_PAGE_TEST=1 requires VMO_PAGE_IMPL=rust)
-endif
 ifeq ($(NOMMU),1)
 $(error VMO_PAGE_TEST=1 requires an MMU profile)
 endif
@@ -851,6 +865,12 @@ ifeq ($(NOMMU),1)
 $(error DONTUNMAP_TXN_IMPL=rust requires an MMU profile)
 endif
 endif
+CHANNEL_RECV_TXN_ACTIVE := $(if $(filter $(ABI),native both),1,)
+ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
+ifeq ($(CHANNEL_RECV_TXN_ACTIVE),)
+$(error CHANNEL_RECV_TXN_IMPL=rust requires ABI=native or ABI=both)
+endif
+endif
 TASK_OBJECTS_ACTIVE := $(if $(filter $(ABI),native both),1,)
 ifeq ($(ARCH),armv7m)
 ifneq ($(MCU_NATIVE_PROGRAM),1)
@@ -888,9 +908,6 @@ endif
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-handleslotrust
 endif
-ifeq ($(USER_COPY_IMPL),rust)
-BUILD_VARIANT := $(BUILD_VARIANT)-usercopyrust
-endif
 ifeq ($(PROCESS_VM_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-processvmrust
 endif
@@ -911,6 +928,27 @@ BUILD_VARIANT := $(BUILD_VARIANT)-completionrust
 endif
 ifeq ($(MM_SHUTDOWN_WRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-mm-shutdown-write-rust
+endif
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-tasklifecycle-rust
+endif
+ifeq ($(TASK_EXIT_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskexit-rust
+endif
+ifeq ($(WAIT4_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-wait4-rust
+endif
+ifeq ($(TASK_PLACEMENT_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskplacement-rust
+endif
+ifeq ($(EEVDF_MATH_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-eevdfmath-rust
+endif
+ifeq ($(RT_SCHED_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-rt-sched-rust
+endif
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-rust
 endif
 ifeq ($(TASK_CONSTRUCTION_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-test
@@ -1658,14 +1696,8 @@ endif
 ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
 CFLAGS += -DCONFIG_CHANNEL_RECV_TXN_RUST
 endif
-ifeq ($(DONTUNMAP_TXN_IMPL),rust)
-CFLAGS += -DCONFIG_MREMAP_DONTUNMAP_TXN_RUST
-endif
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 CFLAGS += -DCONFIG_HANDLE_SLOT_TRANSITIONS_RUST
-endif
-ifeq ($(USER_COPY_IMPL),rust)
-CFLAGS += -DCONFIG_USER_COPY_RUST
 endif
 ifeq ($(PROCESS_VM_IMPL),rust)
 CFLAGS += -DCONFIG_PROCESS_VM_RUST
@@ -1687,6 +1719,27 @@ CFLAGS += -DCONFIG_COMPLETION_RUST
 endif
 ifeq ($(MM_SHUTDOWN_WRITE_IMPL),rust)
 CFLAGS += -DCONFIG_MM_SHUTDOWN_WRITE_RUST
+endif
+ifeq ($(TASK_LIFECYCLE_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_LIFECYCLE_RUST
+endif
+ifeq ($(TASK_EXIT_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_EXIT_RUST
+endif
+ifeq ($(WAIT4_IMPL),rust)
+CFLAGS += -DCONFIG_WAIT4_RUST
+endif
+ifeq ($(TASK_PLACEMENT_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_PLACEMENT_RUST
+endif
+ifeq ($(EEVDF_MATH_IMPL),rust)
+CFLAGS += -DCONFIG_EEVDF_MATH_RUST
+endif
+ifeq ($(RT_SCHED_IMPL),rust)
+CFLAGS += -DCONFIG_RT_SCHED_RUST
+endif
+ifeq ($(TASK_CONSTRUCTION_IMPL),rust)
+CFLAGS += -DCONFIG_TASK_CONSTRUCTION_RUST
 endif
 ifeq ($(TASK_CONSTRUCTION_TEST),1)
 CFLAGS += -DCONFIG_TASK_CONSTRUCTION_TEST
@@ -2047,6 +2100,7 @@ CFLAGS += -DCONFIG_NOMMU
 # Flat user ownership is a memory-model capability. Tiny firmware without
 # userspace retains its original task layout and memory budget.
 ifneq ($(filter-out mcu,$(PROFILE))$(filter 1,$(MCU_NATIVE_PROGRAM)),)
+CONFIG_FLAT_USER_MEMORY := 1
 CFLAGS += -DCONFIG_FLAT_USER_MEMORY
 endif
 endif
@@ -2269,7 +2323,13 @@ ifeq ($(DONTUNMAP_TXN_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/mm/mremap.c,$(KERNEL_SRC)),)
 $(error DONTUNMAP_TXN_IMPL=rust requires kernel/mm/mremap.c in this profile)
 endif
+# The dontunmap transaction is Rust on every MMU profile that builds
+# mm/mremap.c.  The transaction itself is under #ifndef CONFIG_NOMMU there, so
+# NOMMU neither compiles it nor links the object.
+ifneq ($(filter $(KERNEL_DIR)/mm/mremap.c,$(KERNEL_SRC)),)
+ifneq ($(NOMMU),1)
 KERNEL_OBJ += $(RUST_DONTUNMAP_TXN_OBJECT)
+endif
 endif
 ifeq ($(HANDLE_SLOT_TRANSITIONS_IMPL),rust)
 ifeq ($(filter $(KERNEL_DIR)/abi/native/handle_table.c,$(KERNEL_SRC)),)
@@ -2278,10 +2338,8 @@ endif
 KERNEL_OBJ += $(RUST_HANDLE_SLOT_OBJECT)
 KERNEL_OBJ += $(RUST_HANDLE_TABLE_STATE_OBJECT)
 endif
-ifeq ($(USER_COPY_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/mm/mm.c,$(KERNEL_SRC)),)
-$(error USER_COPY_IMPL=rust requires kernel/mm/mm.c in this profile)
-endif
+# The user copy primitives are Rust on every profile that builds mm/mm.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/mm.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_USERCOPY_OBJECT)
 endif
 ifeq ($(PROCESS_VM_IMPL),rust)
@@ -2417,6 +2475,7 @@ ifneq ($(PROFILE),mcu)
 ifneq ($(filter $(KERNEL_DIR)/proc/timer_heap.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_ALARM_TIMER_OBJECT)
 endif
+endif
 ifneq ($(filter $(KERNEL_DIR)/proc/timer_heap.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_WAIT_TIMER_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
@@ -2431,6 +2490,11 @@ ifneq ($(filter $(KERNEL_DIR)/proc/task_lifecycle.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_TASK_LIFECYCLE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
+# The shared-write admission state machine is Rust on every profile that builds
+# mm/shutdown_write.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/shutdown_write.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MM_SHUTDOWN_WRITE_OBJECT)
+endif
 ifneq ($(filter $(KERNEL_DIR)/proc/exit.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_EXIT_REPARENT_OBJECT)
 endif
@@ -2443,22 +2507,96 @@ KERNEL_OBJ += $(RUST_TASK_EXIT_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 endif
-ifeq ($(VMA_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/mm/vma.c,$(KERNEL_SRC)),)
-$(error VMA_IMPL=rust requires kernel/mm/vma.c in this profile)
-endif
+# The VMA interval tree and split/merge transaction are Rust on every profile
+# that builds mm/vma.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/vma.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_VMA_REGION_OBJECT)
 endif
-ifeq ($(VMO_PAGE_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),)
-$(error VMO_PAGE_IMPL=rust requires kernel/mm/vmo.c in this profile)
+# Mapping creation is Rust on every profile that builds mm/mmap.c.  The MCU
+# trim does not include it, and armv7m has no Rust kernel target, so the guard
+# is on the source rather than on an architecture list.
+ifneq ($(filter $(KERNEL_DIR)/mm/mmap.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MMAP_POLICY_OBJECT)
 endif
+# The swap slot lifecycle is Rust on every profile that builds mm/swap.c with
+# swap support.  mm/swap.c compiles to nothing when CONFIG_SWAP=0, so its
+# bridges would not exist and the object must not be linked either.
+ifneq ($(filter $(KERNEL_DIR)/mm/swap.c,$(KERNEL_SRC)),)
+ifneq ($(filter y,$(CONFIG_SWAP)),)
+KERNEL_OBJ += $(RUST_SWAP_SLOTS_OBJECT)
+endif
+endif
+# The OOM victim/reclaim policy is Rust on every profile that builds mm/oom.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/oom.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_OOM_POLICY_OBJECT)
+endif
+# The COW write-isolation transaction is Rust on every MMU profile that builds
+# mm/fault.c; NOMMU has no COW path, so the object is not linked there.
+ifneq ($(filter $(KERNEL_DIR)/mm/fault.c,$(KERNEL_SRC)),)
+ifneq ($(NOMMU),1)
+KERNEL_OBJ += $(RUST_COW_FAULT_OBJECT)
+KERNEL_OBJ += $(RUST_COW_STATUS_OBJECT)
+KERNEL_OBJ += $(RUST_FAULT_STATUS_OBJECT)
+endif
+endif
+# The flat-space policy is Rust wherever the flat user memory model is compiled
+# in, which is the NOMMU non-mcu profiles.  mm/flat_user.c is in KERNEL_SRC on
+# every profile but compiles to nothing without that capability, so the object
+# must follow the capability rather than the source list.
+ifeq ($(CONFIG_FLAT_USER_MEMORY),1)
+KERNEL_OBJ += $(RUST_FLAT_POLICY_OBJECT)
+endif
+# The fork/COW clone transaction is Rust on every MMU profile that builds
+# mm/cow.c.  NOMMU has no page tables to clone: cow.c's C stubs are that
+# profile's whole implementation, so the Rust object (and the bridges it needs)
+# is not linked there.
+ifneq ($(filter $(KERNEL_DIR)/mm/cow.c,$(KERNEL_SRC)),)
+ifneq ($(NOMMU),1)
+KERNEL_OBJ += $(RUST_COW_CLONE_OBJECT)
+endif
+endif
+# The reservation engine is Rust on every profile that builds mm/vmar.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/vmar.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_VMAR_POLICY_OBJECT)
+endif
+# The protection-change transaction is Rust on every profile that builds
+# mm/mprotect.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/mprotect.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MPROTECT_TXN_OBJECT)
+endif
+# The advice policy and its two mapping transactions are Rust on every profile
+# that builds mm/madvise.c, NOMMU included: that profile's bridges are stubs,
+# so the object links wherever madvise.c does.
+ifneq ($(filter $(KERNEL_DIR)/mm/madvise.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MADVISE_POLICY_OBJECT)
+endif
+# The sealing transaction is Rust on every profile that builds mm/mseal.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/mseal.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MSEAL_POLICY_OBJECT)
+endif
+# The NUMA policy state is Rust on every profile that builds mm/mempolicy.c.
+ifneq ($(filter $(KERNEL_DIR)/mm/mempolicy.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MEMPOLICY_STATE_OBJECT)
+endif
+# The unmap transaction is Rust on every profile that builds mm/munmap.c; the
+# MCU trim excludes kernel/mm entirely, so the guard is on the source.
+ifneq ($(filter $(KERNEL_DIR)/mm/munmap.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_MUNMAP_TXN_OBJECT)
+endif
+
+# The layout-randomisation and W^X policies are Rust on every profile that
+# builds their files; the MCU trim excludes both, so the guard is on the source.
+ifneq ($(filter $(KERNEL_DIR)/mm/aslr.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_ASLR_POLICY_OBJECT)
+endif
+ifneq ($(filter $(KERNEL_DIR)/mm/wx.c,$(KERNEL_SRC)),)
+KERNEL_OBJ += $(RUST_WX_POLICY_OBJECT)
+endif
+# The VMO page and lifecycle state machines are Rust on every profile that
+# builds mm/vmo.c; the pager keeps its own selector, because its Rust source and
+# its C half live in ipc/ (another module's files).
+ifneq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),)
 KERNEL_OBJ += $(RUST_VMO_PAGE_OBJECT)
-endif
-ifeq ($(VMO_LIFECYCLE_IMPL),rust)
-ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),)
-$(error VMO_LIFECYCLE_IMPL=rust requires kernel/mm/vmo.c in this profile)
-endif
 KERNEL_OBJ += $(RUST_VMO_LIFECYCLE_OBJECT)
 endif
 ifeq ($(VMO_PAGER_IMPL),rust)
@@ -2669,6 +2807,8 @@ KERNEL_OBJ += $(RUST_UXFS_LIFETIME_STATE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 ifneq ($(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_SEND_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(PID_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE)),)
+endif
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL)),)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
 

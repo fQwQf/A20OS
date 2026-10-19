@@ -372,6 +372,206 @@ static pte_t cow_replacement_leaf(paddr_t pa, pte_t flags, size_t leaf_size)
 }
 #endif
 
+#ifndef CONFIG_NOMMU
+/*
+ * The COW write-isolation transaction lives in kernel/mm/cow_fault.rs.  What
+ * is left here is the architecture and allocator surface: the leaf probe and
+ * its predicates, the PTE encoders and flag subsets, the status sidecar, the
+ * frame allocator's lock, the copy, the diagnostic hooks and the local TLB
+ * flush.
+ */
+extern int a20_cow_fault_locked_rust(task_t *t, mm_struct_t *mm, uint64_t stval,
+                                     pfn_t *old_pfn_out,
+                                     page_cache_page_t **old_page_out);
+
+struct a20_cowf_probe {
+    void     *slot;
+    uintptr_t pte;
+    uintptr_t base;
+    uintptr_t size;
+    uintptr_t pa;
+    uint32_t  pfn;
+    int32_t   present;
+    int32_t   is_leaf;
+    int32_t   user;
+    int32_t   cow;
+    int32_t   wr;
+    int32_t   pfn_valid;
+    int32_t   order;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_cowf_probe) == 72, "Rust/C cowf probe ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_cowf_probe) == 48, "Rust/C cowf probe ABI");
+#endif
+
+int a20_cowf_has_pgdir(const void *mm_ptr)
+{
+    const mm_struct_t *mm = mm_ptr;
+    return mm && mm->pgdir;
+}
+
+void a20_cowf_probe(const void *mm_ptr, uintptr_t stval,
+                    struct a20_cowf_probe *out)
+{
+    const mm_struct_t *mm = mm_ptr;
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &out->base,
+                                &out->size);
+    if (!pte)
+        return;
+    out->slot = pte;
+    out->pte = (uintptr_t)*pte;
+    out->present = (*pte & PTE_V) != 0;
+    out->is_leaf = arch_pte_is_leaf(*pte);
+    out->user = (*pte & PTE_U) != 0;
+    out->cow = (*pte & PTE_COW) != 0;
+    out->wr = (*pte & PTE_W) != 0;
+    if (out->present) {
+        out->pa = arch_pte_addr(*pte);
+        out->pfn = phys_to_pfn(out->pa);
+        out->pfn_valid = pfn_valid(out->pfn);
+    }
+    out->order = (out->size >= PMD_SIZE) ? PMD_ORDER : 0;
+}
+
+void *a20_cowf_vma(void *mm_ptr, uintptr_t va, uint64_t *vm_flags,
+                   int *present)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = mm_seg_find(mm, va);
+    if (vm_flags)
+        *vm_flags = v ? v->vm_flags : 0;
+    if (present)
+        *present = v ? 1 : 0;
+    return v;
+}
+
+int a20_cowf_diag_begin(task_t *t, mm_struct_t *mm, uintptr_t stval,
+                        uintptr_t base, uintptr_t size, uintptr_t snapshot_pte)
+{
+    /* The transaction already snapshotted the leaf; the hook is a diagnostic,
+     * so it gets that value instead of paying another page-table walk on the
+     * COW hot path. */
+    pte_t snapshot = (pte_t)snapshot_pte;
+    return aarch64_cow_tlbi_diag_begin(t, mm, stval, base, size, &snapshot);
+}
+
+uint32_t a20_cowf_alloc_page(void)
+{
+    return pfa_alloc_page();
+}
+
+uint32_t a20_cowf_alloc_order(int order)
+{
+    return pfa_alloc(order);
+}
+
+void a20_cowf_copy(uint32_t dst, uint32_t src, uintptr_t size)
+{
+    memcpy(pfn_to_virt(dst), pfn_to_virt(src), size);
+}
+
+uint64_t a20_cowf_pfa_lock(void)
+{
+    return spin_lock_irqsave(&pfa.lock);
+}
+
+uint32_t a20_cowf_pfa_refs(uint32_t pfn)
+{
+    return pfa.meta[pfn].refcount;
+}
+
+void a20_cowf_pfa_unlock(uint64_t flags)
+{
+    spin_unlock_irqrestore(&pfa.lock, flags);
+}
+
+void a20_cowf_zero_ref(task_t *t, uintptr_t stval, uint32_t pfn, int order)
+{
+    printf("[COW ZERO-REF] pid=%d va=0x%lx pfn=%lu order=%d\n",
+           t ? t->pid : -1, (unsigned long)stval, (unsigned long)pfn, order);
+    panic("COW leaf references a free frame");
+}
+
+/* The two flag subsets a COW break applies: a fresh copy keeps the RWX and
+ * attribute bits and gains write+dirty, while the plain-write branch keeps the
+ * existing bits and adds the dirty bit. */
+static pte_t a20_cowf_break_flags(pte_t pte, int kind)
+{
+    if (kind == 1)
+        return (pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_G | PTE_A |
+                       PTE_MAT1 | PTE_LEAF | PTE_COW)) | PTE_D;
+    return (pte & (PTE_R | PTE_X | PTE_U | PTE_A | PTE_G | PTE_MAT1 |
+                   PTE_LEAF)) | PTE_W | PTE_D;
+}
+
+static void a20_cowf_diag_after(int diag, task_t *t, mm_struct_t *mm,
+                                uintptr_t stval, pte_t *pte, int tag)
+{
+    static const char *const tags[] = { "cache-copy", "copy", "reuse" };
+    const char *branch = (tag >= 0 && tag < 3) ? tags[tag] : "?";
+    aarch64_cow_tlbi_diag_after(diag, t, mm, stval, pte, branch);
+}
+
+/* Rewrite the leaf, bring the per-PTE status in step, run the arch diagnostic
+ * and drop the local translation.  `kind` selects the flag subset; the
+ * snapshot PTE is the one the transaction decided on. */
+void a20_cowf_install(void *mm_ptr, uintptr_t stval, uint32_t new_pfn,
+                      uintptr_t snapshot_pte, uintptr_t base, uintptr_t size,
+                      void *vma_ptr, void *slot, void *t_ptr, int diag, int tag,
+                      int kind)
+{
+    mm_struct_t *mm = mm_ptr;
+    pte_t *pte = slot;
+    if (!pte)
+        return;
+    pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, kind);
+    *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags, size);
+    cow_sync_status(mm, base, vma_ptr);
+    a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, tag);
+    arch_tlb_flush_page_local(stval);
+}
+
+/* The in-place upgrade: rewrites under the allocator lock the caller still
+ * holds, then unlocks and flushes -- the order the rc==1 branch needs so a
+ * timer interrupt cannot release the frame between decision and write. */
+void a20_cowf_reuse_install(void *mm_ptr, uintptr_t stval, uintptr_t old_pa,
+                            uintptr_t snapshot_pte, uintptr_t base,
+                            uintptr_t size, void *vma_ptr, void *slot,
+                            void *t_ptr, int diag, uint64_t pfa_flags)
+{
+    mm_struct_t *mm = mm_ptr;
+    pte_t *pte = slot;
+    if (pte) {
+        pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 0);
+        *pte = cow_replacement_leaf((paddr_t)old_pa, flags, size);
+        cow_sync_status(mm, base, vma_ptr);
+        a20_cowf_diag_after(diag, t_ptr, mm, stval, pte, 2);
+    }
+    spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+    arch_tlb_flush_page_local(stval);
+}
+
+void a20_cowf_write_d(void *mm_ptr, uintptr_t stval, uintptr_t snapshot_pte,
+                      uintptr_t base, uintptr_t size, void *vma_ptr,
+                      void *slot)
+{
+    mm_struct_t *mm = mm_ptr;
+    pte_t *pte = slot;
+    if (!pte)
+        return;
+    pte_t flags = a20_cowf_break_flags((pte_t)snapshot_pte, 1);
+    *pte = cow_replacement_leaf(arch_pte_addr((pte_t)snapshot_pte), flags,
+                                size);
+    cow_sync_status(mm, base, vma_ptr);
+    arch_tlb_flush_page_local(stval);
+}
+#endif /* !CONFIG_NOMMU */
+
 static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
                                    pfn_t *old_pfn_out,
                                    page_cache_page_t **old_page_out) {
@@ -383,140 +583,7 @@ static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
     (void)old_page_out;
     return -1;
 #else
-    if (old_pfn_out)
-        *old_pfn_out = PFN_NONE;
-    if (old_page_out)
-        *old_page_out = NULL;
-    if (!mm || !mm->pgdir) return -1;
-
-    vaddr_t leaf_base = 0;
-    size_t leaf_size = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &leaf_base, &leaf_size);
-    if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
-        return -1;
-    int cow_diag = aarch64_cow_tlbi_diag_begin(t, mm, stval, leaf_base,
-                                                leaf_size, pte);
-
-    if (*pte & PTE_COW) {
-        paddr_t old_pa = arch_pte_addr(*pte);
-        pfn_t old_pfn = phys_to_pfn(old_pa);
-        if (!pfn_valid(old_pfn)) return -1;
-        int order = (leaf_size >= PMD_SIZE) ? PMD_ORDER : 0;
-
-        pfn_t new_pfn = PFN_NONE;
-
-        /* Do the refcount work and the reuse decision inside pfa.lock.  In
-         * the reuse (exclusive page) case the PTE is updated before the lock is
-         * dropped: otherwise a timer interrupt can schedule another task which
-         * frame_put()s the same page, buddy recycles it, and it is handed out as
-         * user data -- the root cause of the 0x63636363 corruption. */
-        uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
-                                  PTE_G | PTE_MAT1 | PTE_LEAF)) |
-                         PTE_W | PTE_D;
-
-        /* A private file page may still be the canonical page-cache frame.
-         * Its allocator refcount describes cache ownership, not the number of
-         * user mappings, so rc==1 must never make it writable in place. */
-        mm_seg_t *vma = mm_seg_find(mm, leaf_base);
-        page_cache_page_t *cache_page =
-            leaf_size == PAGE_SIZE
-                ? mm_file_cache_mapping_get(vma, leaf_base, old_pfn)
-                : NULL;
-        /* The VM_SHARED test is NOT a denial of MAP_SHARED page-cache
-         * coherence.  It only gates the private-leaf COW copy below: a
-         * read-only MAP_PRIVATE fault-around leaf maps the canonical cache
-         * frame (see direct_private in handle_file_fault()), so this store
-         * must break that aliasing by cloning.  A MAP_SHARED leaf is writable
-         * in place by contract and must not be cloned.  Shared leaves skip the
-         * cache-page branch entirely and fall through to the refcount path
-         * below, which leaves an rc>1 frame shared and makes rc==1 writable
-         * without copying -- both correct for MAP_SHARED, because the frame
-         * belongs to the page cache and its writes are the file's data. */
-        if (cache_page && !(vma->vm_flags & VM_SHARED)) {
-            new_pfn = pfa_alloc_page();
-            if (new_pfn == PFN_NONE) {
-                page_cache_put(cache_page);
-                return -1;
-            }
-            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
-            *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
-                                        leaf_size);
-            cow_sync_status(mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
-                                         "cache-copy");
-            arch_tlb_flush_page_local(stval);
-            if (old_page_out)
-                *old_page_out = cache_page;
-            else
-                page_cache_put(cache_page);
-            return 0;
-        }
-        if (cache_page)
-            page_cache_put(cache_page);
-
-        uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
-        uint16_t rc = pfa.meta[old_pfn].refcount;
-        if (rc == 0) {
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            printf("[COW ZERO-REF] pid=%d va=0x%lx pfn=%lu order=%d\n",
-                   t->pid, (unsigned long)stval, (unsigned long)old_pfn,
-                   order);
-            panic("COW leaf references a free frame");
-        }
-        if (rc > 1) {
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-
-            new_pfn = pfa_alloc(order);
-            if (new_pfn == PFN_NONE)
-                return -1;
-
-            memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
-
-            /* Update the PTE before frame_put(), against this race: two tasks
-             * take a COW fault on the same physical page, both read rc>1, and
-             * both drop the lock.  If frame_put ran first, the second one could
-             * take the refcount to zero and free the page while the PTE still
-             * points at it.  Once buddy recycles that frame it may go straight
-             * to slab or to user data -- the 0x63636363 corruption -- and a TLB
-             * fill walking the stale PTE reads the corrupted contents.  Updating
-             * the PTE first means the page is released only after nothing
-             * references it any more. */
-            *pte = cow_replacement_leaf(pfn_to_phys(new_pfn), flags,
-                                        leaf_size);
-            cow_sync_status(mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
-                                         "copy");
-            arch_tlb_flush_page_local(stval);
-
-            /* Release only after the wrapper has completed the remote TLB
-             * shootdown.  Otherwise a stale translation can write into this
-             * frame after the buddy has already reused it. */
-            if (old_pfn_out)
-                *old_pfn_out = old_pfn;
-            return 0;
-        } else {
-            *pte = cow_replacement_leaf(old_pa, flags, leaf_size);
-            cow_sync_status(mm, leaf_base, vma);
-            aarch64_cow_tlbi_diag_after(cow_diag, t, mm, stval, pte,
-                                         "reuse");
-            spin_unlock_irqrestore(&pfa.lock, pfa_flags);
-            arch_tlb_flush_page_local(stval);
-            return 0;
-        }
-        return 0;
-    }
-
-    if (*pte & PTE_W) {
-        uint64_t flags = (*pte & (PTE_R | PTE_W | PTE_X | PTE_U |
-                                  PTE_G | PTE_A | PTE_MAT1 |
-                                  PTE_LEAF | PTE_COW)) | PTE_D;
-        *pte = cow_replacement_leaf(arch_pte_addr(*pte), flags, leaf_size);
-        cow_sync_status(mm, leaf_base, mm_seg_find(mm, leaf_base));
-        arch_tlb_flush_page_local(stval);
-        return 0;
-    }
-
-    return -1;
+    return a20_cow_fault_locked_rust(t, mm, stval, old_pfn_out, old_page_out);
 #endif
 }
 
@@ -1396,80 +1463,120 @@ retry_mapping_validation:
  * or upgrades under its own exclusion.
  */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-static int mm_cow_from_status(task_t *t, mm_struct_t *mm,
-                              uint64_t page_va,
-                              pfn_t *retired_pfn)
-{
-    *retired_pfn = PFN_NONE;
+/*
+ * The status-led COW break lives in kernel/mm/cow_status.rs.  What is left here
+ * is the address-space cursor and the primitives the break needs: the leaf
+ * probe and pin, the compare-and-replace, the non-reclaiming frame allocator,
+ * the cgroup charge and the counters.  The cursor stays C-owned, so Rust holds
+ * it in an opaque buffer whose size is asserted below rather than mirroring
+ * mm_cursor_t.
+ */
+struct a20_fault_status_ctx {
     mm_cursor_t cur;
-    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur) != 0)
+};
+
+_Static_assert(sizeof(struct a20_fault_status_ctx) <= 16 * sizeof(uint64_t),
+               "Rust/C status-COW cursor buffer");
+_Static_assert(_Alignof(struct a20_fault_status_ctx) <= _Alignof(uint64_t),
+               "Rust/C status-COW cursor alignment");
+
+extern int a20_cow_from_status_rust(task_t *t, mm_struct_t *mm,
+                                    uint64_t page_va, pfn_t *retired_pfn);
+
+/* Open the cursor over the page and pin the leaf's frame.  Returns 1 with the
+ * facts filled and the cursor open (the caller must close it), or 0 when the
+ * leaf is not there to break -- in which case the cursor has already been
+ * released and no lock is held. */
+int a20_cowf_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
+                         uint8_t *cls_out, uintptr_t *pa_out, int *uffd_out)
+{
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
+    *cls_out = 0;
+    *pa_out = 0;
+    *uffd_out = 0;
+    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &ctx->cur) != 0)
         return 0;
-
-    uint8_t cls_byte = 0;
     paddr_t old_pa = 0;
-    int pinned = mm_cursor_cow_snapshot_pin(&cur, page_va, &cls_byte,
-                                             &old_pa);
-    if (pinned != 1 || !(cls_byte & MM_ST_COW_BIT) ||
-        mm_cursor_safe_test(&cur, page_va, MM_SAFE_UFFD))
-        goto decline_pinned;
-
-    pfn_t old_pfn = phys_to_pfn(old_pa);
-    if (!pfn_valid(old_pfn))
-        goto decline_pinned;
-
-    /* The cursor helper took the leaf lock, verified the PTE/class, and pinned
-     * this frame under pfa.lock before releasing the leaf lock. */
-
-    /* can_reclaim = 0, for the same reason the anon fast path insists on
-     * it: a reclaiming allocation reaches oom_try_reclaim(), whose victim
-     * teardown wants the page-table node locks this path holds. */
-    pfn_t new_pfn = pfa_alloc_flags(0, 0);
-    if (new_pfn == PFN_NONE) {
-        frame_put(old_pfn);
-        goto decline;
+    int pinned = mm_cursor_cow_snapshot_pin(&ctx->cur, page_va, cls_out, &old_pa);
+    if (pinned != 1) {
+        mm_cursor_unlock(&ctx->cur);
+        return 0;
     }
-    if (cg_mem_charge(t->cgroup, 1) != 0) {
-        frame_put(new_pfn);
-        frame_put(old_pfn);
-        goto decline;
-    }
-    memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
+    /* A userfaultfd-marked page is left to the uffd path.  The mark is read
+     * here because the cursor is the only holder of the leaf lock. */
+    *uffd_out = mm_cursor_safe_test(&ctx->cur, page_va, MM_SAFE_UFFD);
+    *pa_out = old_pa;
+    return 1;
+}
 
+int a20_cowf_status_replace(void *ctx_ptr, uint64_t page_va, uintptr_t expect_pa,
+                            uintptr_t new_pa, uint8_t cls, uintptr_t *replaced_out)
+{
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
     paddr_t replaced = 0;
-    int r = mm_cursor_replace_if_cow(&cur, page_va, old_pa,
-                                     pfn_to_phys(new_pfn), MM_ST_ANON_MAPPED,
+    int r = mm_cursor_replace_if_cow(&ctx->cur, page_va, expect_pa, new_pa, cls,
                                      &replaced);
-    mm_cursor_unlock(&cur);
-    if (r != 0) {
-        /* State moved underneath us (fork rewrote it, another thread of
-         * this mm broke the COW first, or the page was unmapped).  The
-         * pinned frame is spare and so is the copy; the fault is resolved
-         * either way -- the retried store either succeeds on the new state
-         * or re-faults into the mm->lock path. */
-        cg_mem_uncharge(t->cgroup, 1);
-        frame_put(new_pfn);
-        frame_put(old_pfn);
-        return 1;
-    }
+    if (replaced_out)
+        *replaced_out = replaced;
+    return r;
+}
 
-    /* Defer the shootdown and both puts to the wrapper: remote IPIs must not
-     * run while mm->lock is held.  The two references are the mapping and the
-     * temporary snapshot pin. */
-    *retired_pfn = old_pfn;
+void a20_cowf_status_close(void *ctx_ptr)
+{
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
+    mm_cursor_unlock(&ctx->cur);
+}
 
+/* Non-reclaiming: a reclaiming allocation reaches oom_try_reclaim(), whose
+ * victim teardown wants the page-table node locks this path holds. */
+uint32_t a20_fault_status_alloc(void)
+{
+    return pfa_alloc_flags(0, 0);
+}
+
+uint32_t a20_cowf_status_pfn_of(uintptr_t pa)
+{
+    return phys_to_pfn(pa);
+}
+
+int a20_cowf_status_pfn_valid(uint32_t pfn)
+{
+    return pfn_valid(pfn) ? 1 : 0;
+}
+
+uintptr_t a20_fault_status_phys(uint32_t pfn)
+{
+    return pfn_to_phys(pfn);
+}
+
+int a20_fault_status_charge(task_t *t)
+{
+    return cg_mem_charge(t->cgroup, 1);
+}
+
+void a20_fault_status_uncharge(task_t *t)
+{
+    cg_mem_uncharge(t->cgroup, 1);
+}
+
+void a20_cowf_status_copy(uint32_t dst, uint32_t src)
+{
+    memcpy(pfn_to_virt(dst), pfn_to_virt(src), PAGE_SIZE);
+}
+
+void a20_cowf_status_bump(task_t *t)
+{
     a20_perf_count(A20_PERF_MM_COW_FAULTS);
     a20_perf_count(A20_PERF_MM_COW_FROM_STATUS);
-    mm_cow_from_status_count++;    __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+    mm_cow_from_status_count++;
+    __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
-    return 1;
+}
 
-decline:
-    mm_cursor_unlock(&cur);
-    return 0;
-decline_pinned:
-    if (pinned == 1)
-        frame_put(phys_to_pfn(old_pa));
-    goto decline;
+static int mm_cow_from_status(task_t *t, mm_struct_t *mm, uint64_t page_va,
+                              pfn_t *retired_pfn)
+{
+    return a20_cow_from_status_rust(t, mm, page_va, retired_pfn);
 }
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
@@ -1566,58 +1673,58 @@ int handle_demand_fault(task_t *t, uint64_t stval)
  * sleeping is legal.
  *
  * Returns 1 if it served the fault, 0 if the caller must take the VMA path. */
-static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
-                                uint64_t page_va, uint64_t stval,
-                                enum mm_fault_access access)
+/*
+ * The status-led demand fault lives in kernel/mm/fault_status.rs.  The cursor
+ * context and the four primitives both status-led paths share are declared with
+ * the COW break above; what is added here is the query, the absent-only
+ * install, the zeroing, the accounting and the local flush.
+ */
+extern int a20_fault_from_status_rust(task_t *t, mm_struct_t *mm,
+                                      uint64_t page_va, uint64_t stval,
+                                      int access);
+
+/* Open the cursor over the page and report the entry's facts.  Returns 1 with
+ * the cursor open -- the caller decides and closes it -- or 0 with no lock held
+ * when there is no page table to walk. */
+int a20_fault_status_open(void *ctx_ptr, mm_struct_t *mm, uint64_t page_va,
+                          uint8_t *cls_out, int *already_out, int *uffd_out)
 {
-    mm_cursor_t qcur;
-    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur) != 0)
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
+    *cls_out = 0;
+    *already_out = 0;
+    *uffd_out = 0;
+    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &ctx->cur) != 0)
         return 0;
+    *already_out = mm_cursor_query(&ctx->cur, page_va, cls_out, NULL);
+    *uffd_out = mm_cursor_safe_test(&ctx->cur, page_va, MM_SAFE_UFFD);
+    return 1;
+}
 
-    uint8_t cls_byte = 0;
-    int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
-    /* A userfaultfd registration over this entry must win: the fault has to be
-     * parked for the handler, not satisfied here.  The mark is per entry
-     * precisely so this decision needs no VMA. */
-    if (already || MM_ST_GET_CLASS(cls_byte) != MM_ST_ANON_VIRT ||
-        mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD))
-        goto decline;
+int a20_fault_status_map_if_absent(void *ctx_ptr, uint64_t page_va,
+                                   uintptr_t pa, uintptr_t allow, uint8_t cls)
+{
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
+    return mm_cursor_map_if_absent(&ctx->cur, page_va, pa, allow, cls);
+}
 
-    /* Round-trip the recorded prot bits back to PTE flags: they were produced by
-     * mm_pt_prot_bits() from the same encoding, so the access check matches the
-     * VMA path exactly. */
-    int prot = 0;
-    if (cls_byte & MM_ST_PROT_R) prot |= 1;
-    if (cls_byte & MM_ST_PROT_W) prot |= 2;
-    if (cls_byte & MM_ST_PROT_X) prot |= 4;
-    /* Ask the architecture for the flag set rather than assembling PTE bits
-     * here: riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and an
-     * explicit NX, and the helper encodes the W=>R dependency. */
-    pte_t allow = mm_prot_to_pte_flags(prot);
-    uint64_t vm_flags = 0;
-    if (prot & PROT_READ) vm_flags |= VM_READ;
-    if (prot & PROT_WRITE) vm_flags |= VM_WRITE;
-    if (prot & PROT_EXEC) vm_flags |= VM_EXEC;
-    if (!fault_access_allowed(vm_flags, access))
-        goto decline;
+void a20_fault_status_close(void *ctx_ptr)
+{
+    struct a20_fault_status_ctx *ctx = ctx_ptr;
+    mm_cursor_unlock(&ctx->cur);
+}
 
-    pfn_t np = pfa_alloc_flags(0, 0);
-    if (np == PFN_NONE)
-        goto decline;
-    if (cg_mem_charge(t->cgroup, 1) != 0) {
-        frame_put(np);
-        goto decline;
-    }
-    memset(pfn_to_virt(np), 0, PAGE_SIZE);
-    if (mm_cursor_map_if_absent(&qcur, page_va, pfn_to_phys(np), allow,
-                      MM_ST_ANON_MAPPED) != 0) {
-        cg_mem_uncharge(t->cgroup, 1);
-        frame_put(np);
-        goto decline;
-    }
+void a20_fault_status_zero(uint32_t pfn)
+{
+    memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
+}
 
-    mm_cursor_unlock(&qcur);
+void a20_fault_status_rss_add(mm_struct_t *mm)
+{
     mm_rss_add(mm, 1);
+}
+
+void a20_fault_status_bump(task_t *t)
+{
     a20_perf_count(A20_PERF_MM_ANON_FAULTS);
     a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
     a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
@@ -1628,12 +1735,17 @@ static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
     __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
-    arch_tlb_flush_page_local(stval);
-    return 1;
+}
 
-decline:
-    mm_cursor_unlock(&qcur);
-    return 0;
+void a20_fault_status_flush_local(uint64_t stval)
+{
+    arch_tlb_flush_page_local(stval);
+}
+
+static int mm_fault_from_status(task_t *t, mm_struct_t *mm, uint64_t page_va,
+                                uint64_t stval, enum mm_fault_access access)
+{
+    return a20_fault_from_status_rust(t, mm, page_va, stval, (int)access);
 }
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 

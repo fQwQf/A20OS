@@ -25,26 +25,82 @@
  *     a sealed VMA: refused with -EPERM.
  *   - fork COW: VM_SEALED is copied with the VMA, so children inherit seals.
  *
+ * The sealing transaction and the sealed-range query live in
+ * kernel/mm/mseal_policy.rs.  What is left here is the mm_seg_t field access,
+ * the split primitive, the per-PTE safe-range sidecar, and the two lock
+ * wrappers.
+ *
  * Not implemented (documented gaps): sealing of mremap-with-move into a
  * sealed target, userfaultfd interplay, and per-VMA seal counters for
  * /proc/PID/smaps "Sealed:" reporting.
  */
 
-/* Returns 1 if any VMA overlapping [addr, addr+len) is sealed, 0 otherwise.
- * Caller must hold mm->lock. */
-static int mm_range_has_sealed_locked(mm_struct_t *mm, vaddr_t addr,
-                                      size_t len)
+extern int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len);
+extern int mm_mseal_range_is_sealed_locked(mm_struct_t *mm, vaddr_t addr,
+                                           size_t len);
+
+struct a20_mseal_rec {
+    void     *vma;
+    uintptr_t start;
+    uintptr_t end;
+    uint64_t  vm_flags;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_mseal_rec) == 32, "Rust/C mseal rec ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_mseal_rec) == 16, "Rust/C mseal rec ABI");
+#endif
+
+int a20_mseal_has_pgdir(const void *mm_ptr)
 {
-    vaddr_t end = addr + len;
-    for (mm_seg_t *v = mm->mmap; v && v->start < end; v = v->next) {
-        if (v->end <= addr)
+    const mm_struct_t *mm = mm_ptr;
+    return mm && mm->pgdir;
+}
+
+uintptr_t a20_mseal_user_va_limit(void)
+{
+    return USER_VA_LIMIT;
+}
+
+/* The first record that ends after @va.  It skips holes on purpose: the
+ * coverage check has to be able to see that a hole *is* a hole rather than
+ * stop at it. */
+int a20_mseal_record_from(const void *mm_ptr, uintptr_t va,
+                          struct a20_mseal_rec *out)
+{
+    const mm_struct_t *mm = mm_ptr;
+    if (!mm || !out)
+        return 0;
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
+        if (v->end <= va)
             continue;
-        if (v->vm_flags & VM_SEALED)
-            return 1;
-        if (v->start >= end)
-            break;
+        out->vma = v;
+        out->start = v->start;
+        out->end = v->end;
+        out->vm_flags = v->vm_flags;
+        return 1;
     }
     return 0;
+}
+
+int a20_mseal_split_at(void *mm_ptr, uintptr_t addr)
+{
+    return mm_split_vma_at(mm_ptr, addr);
+}
+
+/* Mark [a, b) of one record: the one-way VM_SEALED bit, and the per-entry
+ * MM_SAFE_NO_FA mark so a status-driven fault cannot install speculative
+ * neighbours the seal exists to freeze. */
+void a20_mseal_mark(void *mm_ptr, void *vma_ptr, uintptr_t a, uintptr_t b)
+{
+    mm_struct_t *mm = mm_ptr;
+    mm_seg_t *v = vma_ptr;
+    if (!v)
+        return;
+    v->vm_flags |= VM_SEALED;
+    mm_pt_set_safe_range(mm, a & ~(uintptr_t)(PAGE_SIZE - 1),
+                         (b + PAGE_SIZE - 1) & ~(uintptr_t)(PAGE_SIZE - 1),
+                         MM_SAFE_NO_FA, 1);
 }
 
 /* Public helper used by the ABI layer to reject a full-range operation whose
@@ -54,80 +110,9 @@ int mm_mseal_range_is_sealed(mm_struct_t *mm, vaddr_t addr, size_t len)
     if (!mm)
         return 0;
     uint64_t flags = spin_lock_irqsave(&mm->lock);
-    int r = mm_range_has_sealed_locked(mm, addr, len);
+    int r = mm_mseal_range_is_sealed_locked(mm, addr, len);
     spin_unlock_irqrestore(&mm->lock, flags);
     return r;
-}
-
-/* Locked variant: caller must already hold mm->lock (e.g. a madvise path
- * that keeps the lock across its whole range walk). */
-int mm_mseal_range_is_sealed_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
-{
-    if (!mm)
-        return 0;
-    return mm_range_has_sealed_locked(mm, addr, len);
-}
-
-int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
-{
-    if (!mm || !mm->pgdir)
-        return -EINVAL;
-    if (addr & (PAGE_SIZE - 1))
-        return -EINVAL;
-    if (len == 0)
-        return 0;
-    len = ROUND_UP(len, PAGE_SIZE);
-    vaddr_t end = addr + len;
-    if (end < addr || end > USER_VA_LIMIT)
-        return -ENOMEM;
-
-    /* Validate full coverage before mutating any VMA: Linux requires the
-     * whole range to be mapped, otherwise -ENOMEM and no sealing. */
-    {
-        vaddr_t covered = addr;
-        for (mm_seg_t *v = mm_seg_find(mm, covered); v && covered < end;
-             v = v->next) {
-            if (v->start > covered)
-                return -ENOMEM;
-            if (v->end > covered)
-                covered = v->end;
-        }
-        if (covered < end)
-            return -ENOMEM;
-    }
-
-    /* Refuse to seal special regions whose lifetime is kernel-owned. */
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
-         v = v->next) {
-        if (v->start >= end || v->end <= addr)
-            continue;
-        if (v->vm_flags & (VM_SYSV_SHM | VM_PFNMAP | VM_VMO))
-            return -EPERM;
-    }
-
-    /* Split the covered VMAs at the range edges so the seal applies to the
-     * exact range and leaves neighbours fully mutable (Linux semantics). */
-    if (mm_split_vma_at(mm, addr) < 0)
-        return -ENOMEM;
-    if (mm_split_vma_at(mm, end) < 0)
-        return -ENOMEM;
-
-    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
-         v = v->next) {
-        if (v->start >= end || v->end <= addr)
-            continue;
-        v->vm_flags |= VM_SEALED;
-        /* A sealed range must not be pulled into a multi-page fault-around:
-         * speculatively installing frames for neighbours would change state
-         * the seal exists to freeze.  Record it per entry so a status-driven
-         * fault can honour the seal without re-deriving it from the VMA. */
-        vaddr_t a = (vaddr_t)v->start > addr ? (vaddr_t)v->start : addr;
-        vaddr_t b = (vaddr_t)v->end < end ? (vaddr_t)v->end : end;
-        mm_pt_set_safe_range(mm, a & ~(vaddr_t)(PAGE_SIZE - 1),
-                             (b + PAGE_SIZE - 1) & ~(vaddr_t)(PAGE_SIZE - 1),
-                             MM_SAFE_NO_FA, 1);
-    }
-    return 0;
 }
 
 int mm_mseal(mm_struct_t *mm, vaddr_t addr, size_t len)

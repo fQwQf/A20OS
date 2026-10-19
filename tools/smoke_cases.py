@@ -3460,51 +3460,51 @@ for _split_call in range(1, 7):
     ]
     if _split_call in (1, 2):
         CASES[_name]["expect"] += [
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
-            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error exact=0 rc=-12",
-            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin exact=0 rc=0",
-            f"MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end exact=0 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-enter exact=0 rc=0",
+            f"MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-error exact=0 rc=-12",
+            f"MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-begin exact=0 rc=0",
+            f"MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-end exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
         ]
         CASES[_name]["ordered_expect"] = [
             rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=1",
             f"MM_DONTUNMAP_TEST: injected-vma-allocation-failure split={_split_call}",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error exact=0 rc=-12",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin exact=0 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-error exact=0 rc=-12",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-begin exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-end exact=0 rc=0",
             "MM_DONTUNMAP_SPLIT_RETRY: begin",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
             f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call}",
         ]
     elif _split_call in (3, 4):
         CASES[_name]["expect"] += [
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-enter exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
         ]
         CASES[_name]["ordered_expect"] = [
             rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
             f"MM_DONTUNMAP_SPLIT_NOOP: PASS split={_split_call}",
         ]
     else:
         CASES[_name]["expect"] += [
             f"MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split={_split_call} rc=-12",
             f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call} source_preserved=1 destination_cleared=1 retry=1",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-enter exact=0 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-enter exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
         ]
         CASES[_name]["ordered_expect"] = [
             rf"MM_DONTUNMAP_TEST: split-boundary call={_split_call} .* would_allocate=1",
             f"MM_DONTUNMAP_TEST: injected-vma-allocation-failure split={_split_call}",
             f"MM_DONTUNMAP_TXN_TEST: phase=source-presplit-error split={_split_call} rc=-12",
             "MM_DONTUNMAP_SPLIT_RETRY: begin",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=enter exact=-1 rc=0",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-ready exact=0 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=enter exact=-1 rc=0",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-ready exact=0 rc=0",
             f"MM_DONTUNMAP_SPLIT_FAILURE: PASS split={_split_call}",
         ]
         CASES[_name]["ordered_forbid_before"] = [{
@@ -3512,9 +3512,9 @@ for _split_call in range(1, 7):
             "forbid": r"MM_DONTUNMAP_TXN_TEST: impl=(c|rust) phase=",
         }]
         CASES[_name]["forbid"] += [
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=prepare-error",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-begin",
-            "MM_DONTUNMAP_TXN_TEST: impl=c phase=rollback-end",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=prepare-error",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-begin",
+            "MM_DONTUNMAP_TXN_TEST: impl=rust phase=rollback-end",
         ]
     if _split_call in (3, 4):
         CASES[_name]["forbid"].append(
@@ -3651,3 +3651,4 @@ CASES["smoke-keyring-c"]["build"]["vars"] = [
 ]
 CASES["smoke-keyring-c"]["log"] = ".kernel-build/smoke/keyring-c-riscv64.log"
 CASES["smoke-keyring-c"]["pass_msg"] = "smoke-keyring-c: PASS; log saved to $log"
+

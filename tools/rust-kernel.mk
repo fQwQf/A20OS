@@ -38,6 +38,8 @@ RUST_UXFS_OPS_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNE
 RUST_UXFS_LIFETIME_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
 RUST_AARCH64_SELECTED := $(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(PID_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(CHANNEL_SEND_IMPL))
 RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(RUST_UXFS_VNODE_IDENTITY_ACTIVE) $(RUST_UXFS_RPC_STATE_ACTIVE) $(RUST_UXFS_OPS_STATE_ACTIVE) $(RUST_UXFS_LIFETIME_STATE_ACTIVE))
+RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL))
+RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
 RUST_AARCH64_RUSTSRC_DIR := $(shell $(RUSTC) --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
@@ -152,6 +154,8 @@ RUST_HANDLE_TABLE_STATE_OBJECT := $(BUILD_DIR)/rust/handle_table_state.o
 
 ifeq ($(strip $(RUST_OPT_FLAG)),)
 ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(PID_IMPL) $(PID_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(MM_SHUTDOWN_WRITE_IMPL)),)
+endif
+ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
 ifeq ($(filter rust,$(VFS_LIFECYCLE_IMPL)),rust)
@@ -707,9 +711,9 @@ RUST_VMO_PAGE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VMO_PAGE_TARGET := $(RUST_VMO_PAGE_TARGET_$(ARCH))
 RUST_VMO_PAGE_OBJECT := $(BUILD_DIR)/rust/vmo_page.o
 
-ifeq ($(VMO_PAGE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/vmo.c)
 ifeq ($(strip $(RUST_VMO_PAGE_TARGET)),)
-$(error VMO_PAGE_IMPL=rust has no Rust target for ARCH=$(ARCH))
+$(error mm/vmo.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_VMO_PAGE_CODE_MODEL_x86_64 := large
 RUST_VMO_PAGE_CODE_MODEL_aarch64 := large
@@ -757,9 +761,9 @@ RUST_VMO_LIFECYCLE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VMO_LIFECYCLE_TARGET := $(RUST_VMO_LIFECYCLE_TARGET_$(ARCH))
 RUST_VMO_LIFECYCLE_OBJECT := $(BUILD_DIR)/rust/vmo_lifecycle.o
 
-ifeq ($(VMO_LIFECYCLE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vmo.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/vmo.c)
 ifeq ($(strip $(RUST_VMO_LIFECYCLE_TARGET)),)
-$(error VMO_LIFECYCLE_IMPL=rust has no Rust target for ARCH=$(ARCH))
+$(error mm/vmo.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_VMO_LIFECYCLE_CODE_MODEL_x86_64 := large
 RUST_VMO_LIFECYCLE_CODE_MODEL_aarch64 := large
@@ -911,9 +915,9 @@ RUST_VMA_REGION_TARGET_arm32 := armv7a-none-eabihf
 RUST_VMA_REGION_TARGET := $(RUST_VMA_REGION_TARGET_$(ARCH))
 RUST_VMA_REGION_OBJECT := $(BUILD_DIR)/rust/vma_region.o
 
-ifeq ($(VMA_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/vma.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/vma.c)
 ifeq ($(strip $(RUST_VMA_REGION_TARGET)),)
-$(error VMA_IMPL=rust has no Rust target for ARCH=$(ARCH))
+$(error mm/vma.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_VMA_REGION_CODE_MODEL_x86_64 := large
 RUST_VMA_REGION_CODE_MODEL_aarch64 := large
@@ -946,6 +950,780 @@ $(RUST_VMA_REGION_OBJECT): $(RUST_VMA_REGION_SRC) tools/rust-kernel.mk $(RUST_VM
 		$(if $(RUST_VMA_REGION_CODE_MODEL),-C code-model=$(RUST_VMA_REGION_CODE_MODEL)) \
 		$(RUST_VMA_REGION_EXTRA) \
 		$(if $(RUST_VMA_REGION_FEATURES),-C target-feature=$(RUST_VMA_REGION_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_MMAP_POLICY_SRC := kernel/mm/mmap_policy.rs
+RUST_MMAP_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_MMAP_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MMAP_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MMAP_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MMAP_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MMAP_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_MMAP_POLICY_TARGET := $(RUST_MMAP_POLICY_TARGET_$(ARCH))
+RUST_MMAP_POLICY_OBJECT := $(BUILD_DIR)/rust/mmap_policy.o
+
+# Only profiles that actually build mm/mmap.c need the object, so the MCU trim
+# (which excludes it) and armv7m (which has no Rust target) are not affected.
+ifeq ($(filter $(KERNEL_DIR)/mm/mmap.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mmap.c)
+ifeq ($(strip $(RUST_MMAP_POLICY_TARGET)),)
+$(error mm/mmap.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MMAP_POLICY_CODE_MODEL_x86_64 := large
+RUST_MMAP_POLICY_CODE_MODEL_aarch64 := large
+RUST_MMAP_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_MMAP_POLICY_CODE_MODEL_riscv64 := medium
+RUST_MMAP_POLICY_CODE_MODEL_arm32 := small
+RUST_MMAP_POLICY_FEATURES_aarch64 :=
+RUST_MMAP_POLICY_FEATURES_arm32 := -neon
+RUST_MMAP_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MMAP_POLICY_CODE_MODEL := $(RUST_MMAP_POLICY_CODE_MODEL_$(ARCH))
+RUST_MMAP_POLICY_FEATURES := $(RUST_MMAP_POLICY_FEATURES_$(ARCH))
+RUST_MMAP_POLICY_EXTRA := $(RUST_MMAP_POLICY_EXTRA_$(ARCH))
+RUST_MMAP_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.mmap-policy-flags
+.PHONY: FORCE_RUST_MMAP_POLICY_FLAGS
+FORCE_RUST_MMAP_POLICY_FLAGS:
+
+$(RUST_MMAP_POLICY_FLAGS_STAMP): FORCE_RUST_MMAP_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MMAP_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MMAP_POLICY_CODE_MODEL) $(RUST_MMAP_POLICY_EXTRA) -C target-feature=$(RUST_MMAP_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MMAP_POLICY_OBJECT): $(RUST_MMAP_POLICY_SRC) tools/rust-kernel.mk $(RUST_MMAP_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MMAP_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MMAP_POLICY_CODE_MODEL),-C code-model=$(RUST_MMAP_POLICY_CODE_MODEL)) \
+		$(RUST_MMAP_POLICY_EXTRA) \
+		$(if $(RUST_MMAP_POLICY_FEATURES),-C target-feature=$(RUST_MMAP_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_SWAP_SLOTS_SRC := kernel/mm/swap_slots.rs
+RUST_SWAP_SLOTS_TARGET_x86_64 := x86_64-unknown-none
+RUST_SWAP_SLOTS_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_SWAP_SLOTS_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_SWAP_SLOTS_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_SWAP_SLOTS_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_SWAP_SLOTS_TARGET_arm32 := armv7a-none-eabihf
+RUST_SWAP_SLOTS_TARGET := $(RUST_SWAP_SLOTS_TARGET_$(ARCH))
+RUST_SWAP_SLOTS_OBJECT := $(BUILD_DIR)/rust/swap_slots.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/swap.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/swap.c)
+ifneq ($(filter y,$(CONFIG_SWAP)),)
+ifeq ($(strip $(RUST_SWAP_SLOTS_TARGET)),)
+$(error mm/swap.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_SWAP_SLOTS_CODE_MODEL_x86_64 := large
+RUST_SWAP_SLOTS_CODE_MODEL_aarch64 := large
+RUST_SWAP_SLOTS_CODE_MODEL_loongarch64 := medium
+RUST_SWAP_SLOTS_CODE_MODEL_riscv64 := medium
+RUST_SWAP_SLOTS_CODE_MODEL_arm32 := small
+RUST_SWAP_SLOTS_FEATURES_aarch64 :=
+RUST_SWAP_SLOTS_FEATURES_arm32 := -neon
+RUST_SWAP_SLOTS_EXTRA_x86_64 := -C no-redzone=yes
+RUST_SWAP_SLOTS_CODE_MODEL := $(RUST_SWAP_SLOTS_CODE_MODEL_$(ARCH))
+RUST_SWAP_SLOTS_FEATURES := $(RUST_SWAP_SLOTS_FEATURES_$(ARCH))
+RUST_SWAP_SLOTS_EXTRA := $(RUST_SWAP_SLOTS_EXTRA_$(ARCH))
+RUST_SWAP_SLOTS_FLAGS_STAMP := $(BUILD_DIR)/rust/.swap-slots-flags
+.PHONY: FORCE_RUST_SWAP_SLOTS_FLAGS
+FORCE_RUST_SWAP_SLOTS_FLAGS:
+
+$(RUST_SWAP_SLOTS_FLAGS_STAMP): FORCE_RUST_SWAP_SLOTS_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_SWAP_SLOTS_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_SWAP_SLOTS_CODE_MODEL) $(RUST_SWAP_SLOTS_EXTRA) -C target-feature=$(RUST_SWAP_SLOTS_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_SWAP_SLOTS_OBJECT): $(RUST_SWAP_SLOTS_SRC) tools/rust-kernel.mk $(RUST_SWAP_SLOTS_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_SWAP_SLOTS_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_SWAP_SLOTS_CODE_MODEL),-C code-model=$(RUST_SWAP_SLOTS_CODE_MODEL)) \
+		$(RUST_SWAP_SLOTS_EXTRA) \
+		$(if $(RUST_SWAP_SLOTS_FEATURES),-C target-feature=$(RUST_SWAP_SLOTS_FEATURES)) \
+		$< -o $@
+endif
+endif
+
+RUST_OOM_POLICY_SRC := kernel/mm/oom_policy.rs
+RUST_OOM_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_OOM_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_OOM_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_OOM_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_OOM_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_OOM_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_OOM_POLICY_TARGET := $(RUST_OOM_POLICY_TARGET_$(ARCH))
+RUST_OOM_POLICY_OBJECT := $(BUILD_DIR)/rust/oom_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/oom.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/oom.c)
+ifeq ($(strip $(RUST_OOM_POLICY_TARGET)),)
+$(error mm/oom.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_OOM_POLICY_CODE_MODEL_x86_64 := large
+RUST_OOM_POLICY_CODE_MODEL_aarch64 := large
+RUST_OOM_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_OOM_POLICY_CODE_MODEL_riscv64 := medium
+RUST_OOM_POLICY_CODE_MODEL_arm32 := small
+RUST_OOM_POLICY_FEATURES_aarch64 :=
+RUST_OOM_POLICY_FEATURES_arm32 := -neon
+RUST_OOM_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_OOM_POLICY_CODE_MODEL := $(RUST_OOM_POLICY_CODE_MODEL_$(ARCH))
+RUST_OOM_POLICY_FEATURES := $(RUST_OOM_POLICY_FEATURES_$(ARCH))
+RUST_OOM_POLICY_EXTRA := $(RUST_OOM_POLICY_EXTRA_$(ARCH))
+RUST_OOM_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.oom-policy-flags
+.PHONY: FORCE_RUST_OOM_POLICY_FLAGS
+FORCE_RUST_OOM_POLICY_FLAGS:
+
+$(RUST_OOM_POLICY_FLAGS_STAMP): FORCE_RUST_OOM_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_OOM_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_OOM_POLICY_CODE_MODEL) $(RUST_OOM_POLICY_EXTRA) -C target-feature=$(RUST_OOM_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_OOM_POLICY_OBJECT): $(RUST_OOM_POLICY_SRC) tools/rust-kernel.mk $(RUST_OOM_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_OOM_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_OOM_POLICY_CODE_MODEL),-C code-model=$(RUST_OOM_POLICY_CODE_MODEL)) \
+		$(RUST_OOM_POLICY_EXTRA) \
+		$(if $(RUST_OOM_POLICY_FEATURES),-C target-feature=$(RUST_OOM_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_FLAT_POLICY_SRC := kernel/mm/flat_policy.rs
+RUST_FLAT_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_FLAT_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_FLAT_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_FLAT_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_FLAT_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_FLAT_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_FLAT_POLICY_TARGET := $(RUST_FLAT_POLICY_TARGET_$(ARCH))
+RUST_FLAT_POLICY_OBJECT := $(BUILD_DIR)/rust/flat_policy.o
+
+ifeq ($(CONFIG_FLAT_USER_MEMORY),1)
+ifeq ($(strip $(RUST_FLAT_POLICY_TARGET)),)
+$(error the flat user memory model is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_FLAT_POLICY_CODE_MODEL_x86_64 := large
+RUST_FLAT_POLICY_CODE_MODEL_aarch64 := large
+RUST_FLAT_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_FLAT_POLICY_CODE_MODEL_riscv64 := medium
+RUST_FLAT_POLICY_CODE_MODEL_arm32 := small
+RUST_FLAT_POLICY_FEATURES_aarch64 :=
+RUST_FLAT_POLICY_FEATURES_arm32 := -neon
+RUST_FLAT_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_FLAT_POLICY_CODE_MODEL := $(RUST_FLAT_POLICY_CODE_MODEL_$(ARCH))
+RUST_FLAT_POLICY_FEATURES := $(RUST_FLAT_POLICY_FEATURES_$(ARCH))
+RUST_FLAT_POLICY_EXTRA := $(RUST_FLAT_POLICY_EXTRA_$(ARCH))
+RUST_FLAT_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.flat-policy-flags
+.PHONY: FORCE_RUST_FLAT_POLICY_FLAGS
+FORCE_RUST_FLAT_POLICY_FLAGS:
+
+$(RUST_FLAT_POLICY_FLAGS_STAMP): FORCE_RUST_FLAT_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_FLAT_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_FLAT_POLICY_CODE_MODEL) $(RUST_FLAT_POLICY_EXTRA) -C target-feature=$(RUST_FLAT_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_FLAT_POLICY_OBJECT): $(RUST_FLAT_POLICY_SRC) tools/rust-kernel.mk $(RUST_FLAT_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_FLAT_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_FLAT_POLICY_CODE_MODEL),-C code-model=$(RUST_FLAT_POLICY_CODE_MODEL)) \
+		$(RUST_FLAT_POLICY_EXTRA) \
+		$(if $(RUST_FLAT_POLICY_FEATURES),-C target-feature=$(RUST_FLAT_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_FAULT_STATUS_SRC := kernel/mm/fault_status.rs
+RUST_FAULT_STATUS_TARGET_x86_64 := x86_64-unknown-none
+RUST_FAULT_STATUS_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_FAULT_STATUS_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_FAULT_STATUS_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_FAULT_STATUS_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_FAULT_STATUS_TARGET_arm32 := armv7a-none-eabihf
+RUST_FAULT_STATUS_TARGET := $(RUST_FAULT_STATUS_TARGET_$(ARCH))
+RUST_FAULT_STATUS_OBJECT := $(BUILD_DIR)/rust/fault_status.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/fault.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/fault.c)
+ifeq ($(strip $(RUST_FAULT_STATUS_TARGET)),)
+$(error mm/fault.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_FAULT_STATUS_CODE_MODEL_x86_64 := large
+RUST_FAULT_STATUS_CODE_MODEL_aarch64 := large
+RUST_FAULT_STATUS_CODE_MODEL_loongarch64 := medium
+RUST_FAULT_STATUS_CODE_MODEL_riscv64 := medium
+RUST_FAULT_STATUS_CODE_MODEL_arm32 := small
+RUST_FAULT_STATUS_FEATURES_aarch64 :=
+RUST_FAULT_STATUS_FEATURES_arm32 := -neon
+RUST_FAULT_STATUS_EXTRA_x86_64 := -C no-redzone=yes
+RUST_FAULT_STATUS_CODE_MODEL := $(RUST_FAULT_STATUS_CODE_MODEL_$(ARCH))
+RUST_FAULT_STATUS_FEATURES := $(RUST_FAULT_STATUS_FEATURES_$(ARCH))
+RUST_FAULT_STATUS_EXTRA := $(RUST_FAULT_STATUS_EXTRA_$(ARCH))
+RUST_FAULT_STATUS_FLAGS_STAMP := $(BUILD_DIR)/rust/.fault-status-flags
+.PHONY: FORCE_RUST_FAULT_STATUS_FLAGS
+FORCE_RUST_FAULT_STATUS_FLAGS:
+
+$(RUST_FAULT_STATUS_FLAGS_STAMP): FORCE_RUST_FAULT_STATUS_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_FAULT_STATUS_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_FAULT_STATUS_CODE_MODEL) $(RUST_FAULT_STATUS_EXTRA) -C target-feature=$(RUST_FAULT_STATUS_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_FAULT_STATUS_OBJECT): $(RUST_FAULT_STATUS_SRC) tools/rust-kernel.mk $(RUST_FAULT_STATUS_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_FAULT_STATUS_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_FAULT_STATUS_CODE_MODEL),-C code-model=$(RUST_FAULT_STATUS_CODE_MODEL)) \
+		$(RUST_FAULT_STATUS_EXTRA) \
+		$(if $(RUST_FAULT_STATUS_FEATURES),-C target-feature=$(RUST_FAULT_STATUS_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_COW_FAULT_SRC := kernel/mm/cow_fault.rs
+RUST_COW_FAULT_TARGET_x86_64 := x86_64-unknown-none
+RUST_COW_FAULT_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_COW_FAULT_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_COW_FAULT_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_COW_FAULT_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_COW_FAULT_TARGET_arm32 := armv7a-none-eabihf
+RUST_COW_FAULT_TARGET := $(RUST_COW_FAULT_TARGET_$(ARCH))
+RUST_COW_FAULT_OBJECT := $(BUILD_DIR)/rust/cow_fault.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/fault.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/fault.c)
+ifeq ($(strip $(RUST_COW_FAULT_TARGET)),)
+$(error mm/fault.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_COW_FAULT_CODE_MODEL_x86_64 := large
+RUST_COW_FAULT_CODE_MODEL_aarch64 := large
+RUST_COW_FAULT_CODE_MODEL_loongarch64 := medium
+RUST_COW_FAULT_CODE_MODEL_riscv64 := medium
+RUST_COW_FAULT_CODE_MODEL_arm32 := small
+RUST_COW_FAULT_FEATURES_aarch64 :=
+RUST_COW_FAULT_FEATURES_arm32 := -neon
+RUST_COW_FAULT_EXTRA_x86_64 := -C no-redzone=yes
+RUST_COW_FAULT_CODE_MODEL := $(RUST_COW_FAULT_CODE_MODEL_$(ARCH))
+RUST_COW_FAULT_FEATURES := $(RUST_COW_FAULT_FEATURES_$(ARCH))
+RUST_COW_FAULT_EXTRA := $(RUST_COW_FAULT_EXTRA_$(ARCH))
+RUST_COW_FAULT_FLAGS_STAMP := $(BUILD_DIR)/rust/.cow-fault-flags
+.PHONY: FORCE_RUST_COW_FAULT_FLAGS
+FORCE_RUST_COW_FAULT_FLAGS:
+
+$(RUST_COW_FAULT_FLAGS_STAMP): FORCE_RUST_COW_FAULT_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_COW_FAULT_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_COW_FAULT_CODE_MODEL) $(RUST_COW_FAULT_EXTRA) -C target-feature=$(RUST_COW_FAULT_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_COW_FAULT_OBJECT): $(RUST_COW_FAULT_SRC) tools/rust-kernel.mk $(RUST_COW_FAULT_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_COW_FAULT_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_COW_FAULT_CODE_MODEL),-C code-model=$(RUST_COW_FAULT_CODE_MODEL)) \
+		$(RUST_COW_FAULT_EXTRA) \
+		$(if $(RUST_COW_FAULT_FEATURES),-C target-feature=$(RUST_COW_FAULT_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_COW_STATUS_SRC := kernel/mm/cow_status.rs
+RUST_COW_STATUS_TARGET_x86_64 := x86_64-unknown-none
+RUST_COW_STATUS_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_COW_STATUS_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_COW_STATUS_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_COW_STATUS_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_COW_STATUS_TARGET_arm32 := armv7a-none-eabihf
+RUST_COW_STATUS_TARGET := $(RUST_COW_STATUS_TARGET_$(ARCH))
+RUST_COW_STATUS_OBJECT := $(BUILD_DIR)/rust/cow_status.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/fault.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/fault.c)
+ifeq ($(strip $(RUST_COW_STATUS_TARGET)),)
+$(error mm/fault.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_COW_STATUS_CODE_MODEL_x86_64 := large
+RUST_COW_STATUS_CODE_MODEL_aarch64 := large
+RUST_COW_STATUS_CODE_MODEL_loongarch64 := medium
+RUST_COW_STATUS_CODE_MODEL_riscv64 := medium
+RUST_COW_STATUS_CODE_MODEL_arm32 := small
+RUST_COW_STATUS_FEATURES_aarch64 :=
+RUST_COW_STATUS_FEATURES_arm32 := -neon
+RUST_COW_STATUS_EXTRA_x86_64 := -C no-redzone=yes
+RUST_COW_STATUS_CODE_MODEL := $(RUST_COW_STATUS_CODE_MODEL_$(ARCH))
+RUST_COW_STATUS_FEATURES := $(RUST_COW_STATUS_FEATURES_$(ARCH))
+RUST_COW_STATUS_EXTRA := $(RUST_COW_STATUS_EXTRA_$(ARCH))
+RUST_COW_STATUS_FLAGS_STAMP := $(BUILD_DIR)/rust/.cow-status-flags
+.PHONY: FORCE_RUST_COW_STATUS_FLAGS
+FORCE_RUST_COW_STATUS_FLAGS:
+
+$(RUST_COW_STATUS_FLAGS_STAMP): FORCE_RUST_COW_STATUS_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_COW_STATUS_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_COW_STATUS_CODE_MODEL) $(RUST_COW_STATUS_EXTRA) -C target-feature=$(RUST_COW_STATUS_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_COW_STATUS_OBJECT): $(RUST_COW_STATUS_SRC) tools/rust-kernel.mk $(RUST_COW_STATUS_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_COW_STATUS_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_COW_STATUS_CODE_MODEL),-C code-model=$(RUST_COW_STATUS_CODE_MODEL)) \
+		$(RUST_COW_STATUS_EXTRA) \
+		$(if $(RUST_COW_STATUS_FEATURES),-C target-feature=$(RUST_COW_STATUS_FEATURES)) \
+		$< -o $@
+endif
+
+
+RUST_COW_CLONE_SRC := kernel/mm/cow_clone.rs
+RUST_COW_CLONE_TARGET_x86_64 := x86_64-unknown-none
+RUST_COW_CLONE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_COW_CLONE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_COW_CLONE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_COW_CLONE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_COW_CLONE_TARGET_arm32 := armv7a-none-eabihf
+RUST_COW_CLONE_TARGET := $(RUST_COW_CLONE_TARGET_$(ARCH))
+RUST_COW_CLONE_OBJECT := $(BUILD_DIR)/rust/cow_clone.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/cow.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/cow.c)
+ifeq ($(strip $(RUST_COW_CLONE_TARGET)),)
+$(error mm/cow.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_COW_CLONE_CODE_MODEL_x86_64 := large
+RUST_COW_CLONE_CODE_MODEL_aarch64 := large
+RUST_COW_CLONE_CODE_MODEL_loongarch64 := medium
+RUST_COW_CLONE_CODE_MODEL_riscv64 := medium
+RUST_COW_CLONE_CODE_MODEL_arm32 := small
+RUST_COW_CLONE_FEATURES_aarch64 :=
+RUST_COW_CLONE_FEATURES_arm32 := -neon
+RUST_COW_CLONE_EXTRA_x86_64 := -C no-redzone=yes
+RUST_COW_CLONE_CODE_MODEL := $(RUST_COW_CLONE_CODE_MODEL_$(ARCH))
+RUST_COW_CLONE_FEATURES := $(RUST_COW_CLONE_FEATURES_$(ARCH))
+RUST_COW_CLONE_EXTRA := $(RUST_COW_CLONE_EXTRA_$(ARCH))
+RUST_COW_CLONE_FLAGS_STAMP := $(BUILD_DIR)/rust/.cow-clone-flags
+.PHONY: FORCE_RUST_COW_CLONE_FLAGS
+FORCE_RUST_COW_CLONE_FLAGS:
+
+$(RUST_COW_CLONE_FLAGS_STAMP): FORCE_RUST_COW_CLONE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_COW_CLONE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_COW_CLONE_CODE_MODEL) $(RUST_COW_CLONE_EXTRA) -C target-feature=$(RUST_COW_CLONE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_COW_CLONE_OBJECT): $(RUST_COW_CLONE_SRC) tools/rust-kernel.mk $(RUST_COW_CLONE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_COW_CLONE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_COW_CLONE_CODE_MODEL),-C code-model=$(RUST_COW_CLONE_CODE_MODEL)) \
+		$(RUST_COW_CLONE_EXTRA) \
+		$(if $(RUST_COW_CLONE_FEATURES),-C target-feature=$(RUST_COW_CLONE_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_VMAR_POLICY_SRC := kernel/mm/vmar_policy.rs
+RUST_VMAR_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_VMAR_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_VMAR_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_VMAR_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_VMAR_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_VMAR_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_VMAR_POLICY_TARGET := $(RUST_VMAR_POLICY_TARGET_$(ARCH))
+RUST_VMAR_POLICY_OBJECT := $(BUILD_DIR)/rust/vmar_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/vmar.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/vmar.c)
+ifeq ($(strip $(RUST_VMAR_POLICY_TARGET)),)
+$(error mm/vmar.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_VMAR_POLICY_CODE_MODEL_x86_64 := large
+RUST_VMAR_POLICY_CODE_MODEL_aarch64 := large
+RUST_VMAR_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_VMAR_POLICY_CODE_MODEL_riscv64 := medium
+RUST_VMAR_POLICY_CODE_MODEL_arm32 := small
+RUST_VMAR_POLICY_FEATURES_aarch64 :=
+RUST_VMAR_POLICY_FEATURES_arm32 := -neon
+RUST_VMAR_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_VMAR_POLICY_CODE_MODEL := $(RUST_VMAR_POLICY_CODE_MODEL_$(ARCH))
+RUST_VMAR_POLICY_FEATURES := $(RUST_VMAR_POLICY_FEATURES_$(ARCH))
+RUST_VMAR_POLICY_EXTRA := $(RUST_VMAR_POLICY_EXTRA_$(ARCH))
+RUST_VMAR_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.vmar-policy-flags
+.PHONY: FORCE_RUST_VMAR_POLICY_FLAGS
+FORCE_RUST_VMAR_POLICY_FLAGS:
+
+$(RUST_VMAR_POLICY_FLAGS_STAMP): FORCE_RUST_VMAR_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_VMAR_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_VMAR_POLICY_CODE_MODEL) $(RUST_VMAR_POLICY_EXTRA) -C target-feature=$(RUST_VMAR_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_VMAR_POLICY_OBJECT): $(RUST_VMAR_POLICY_SRC) tools/rust-kernel.mk $(RUST_VMAR_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_VMAR_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_VMAR_POLICY_CODE_MODEL),-C code-model=$(RUST_VMAR_POLICY_CODE_MODEL)) \
+		$(RUST_VMAR_POLICY_EXTRA) \
+		$(if $(RUST_VMAR_POLICY_FEATURES),-C target-feature=$(RUST_VMAR_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_MPROTECT_TXN_SRC := kernel/mm/mprotect_txn.rs
+RUST_MPROTECT_TXN_TARGET_x86_64 := x86_64-unknown-none
+RUST_MPROTECT_TXN_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MPROTECT_TXN_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MPROTECT_TXN_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MPROTECT_TXN_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MPROTECT_TXN_TARGET_arm32 := armv7a-none-eabihf
+RUST_MPROTECT_TXN_TARGET := $(RUST_MPROTECT_TXN_TARGET_$(ARCH))
+RUST_MPROTECT_TXN_OBJECT := $(BUILD_DIR)/rust/mprotect_txn.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/mprotect.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mprotect.c)
+ifeq ($(strip $(RUST_MPROTECT_TXN_TARGET)),)
+$(error mm/mprotect.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MPROTECT_TXN_CODE_MODEL_x86_64 := large
+RUST_MPROTECT_TXN_CODE_MODEL_aarch64 := large
+RUST_MPROTECT_TXN_CODE_MODEL_loongarch64 := medium
+RUST_MPROTECT_TXN_CODE_MODEL_riscv64 := medium
+RUST_MPROTECT_TXN_CODE_MODEL_arm32 := small
+RUST_MPROTECT_TXN_FEATURES_aarch64 :=
+RUST_MPROTECT_TXN_FEATURES_arm32 := -neon
+RUST_MPROTECT_TXN_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MPROTECT_TXN_CODE_MODEL := $(RUST_MPROTECT_TXN_CODE_MODEL_$(ARCH))
+RUST_MPROTECT_TXN_FEATURES := $(RUST_MPROTECT_TXN_FEATURES_$(ARCH))
+RUST_MPROTECT_TXN_EXTRA := $(RUST_MPROTECT_TXN_EXTRA_$(ARCH))
+RUST_MPROTECT_TXN_FLAGS_STAMP := $(BUILD_DIR)/rust/.mprotect-txn-flags
+.PHONY: FORCE_RUST_MPROTECT_TXN_FLAGS
+FORCE_RUST_MPROTECT_TXN_FLAGS:
+
+$(RUST_MPROTECT_TXN_FLAGS_STAMP): FORCE_RUST_MPROTECT_TXN_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MPROTECT_TXN_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MPROTECT_TXN_CODE_MODEL) $(RUST_MPROTECT_TXN_EXTRA) -C target-feature=$(RUST_MPROTECT_TXN_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MPROTECT_TXN_OBJECT): $(RUST_MPROTECT_TXN_SRC) tools/rust-kernel.mk $(RUST_MPROTECT_TXN_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MPROTECT_TXN_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MPROTECT_TXN_CODE_MODEL),-C code-model=$(RUST_MPROTECT_TXN_CODE_MODEL)) \
+		$(RUST_MPROTECT_TXN_EXTRA) \
+		$(if $(RUST_MPROTECT_TXN_FEATURES),-C target-feature=$(RUST_MPROTECT_TXN_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_MADVISE_POLICY_SRC := kernel/mm/madvise_policy.rs
+RUST_MADVISE_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_MADVISE_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MADVISE_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MADVISE_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MADVISE_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MADVISE_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_MADVISE_POLICY_TARGET := $(RUST_MADVISE_POLICY_TARGET_$(ARCH))
+RUST_MADVISE_POLICY_OBJECT := $(BUILD_DIR)/rust/madvise_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/madvise.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/madvise.c)
+ifeq ($(strip $(RUST_MADVISE_POLICY_TARGET)),)
+$(error mm/madvise.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MADVISE_POLICY_CODE_MODEL_x86_64 := large
+RUST_MADVISE_POLICY_CODE_MODEL_aarch64 := large
+RUST_MADVISE_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_MADVISE_POLICY_CODE_MODEL_riscv64 := medium
+RUST_MADVISE_POLICY_CODE_MODEL_arm32 := small
+RUST_MADVISE_POLICY_FEATURES_aarch64 :=
+RUST_MADVISE_POLICY_FEATURES_arm32 := -neon
+RUST_MADVISE_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MADVISE_POLICY_CODE_MODEL := $(RUST_MADVISE_POLICY_CODE_MODEL_$(ARCH))
+RUST_MADVISE_POLICY_FEATURES := $(RUST_MADVISE_POLICY_FEATURES_$(ARCH))
+RUST_MADVISE_POLICY_EXTRA := $(RUST_MADVISE_POLICY_EXTRA_$(ARCH))
+RUST_MADVISE_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.madvise-policy-flags
+.PHONY: FORCE_RUST_MADVISE_POLICY_FLAGS
+FORCE_RUST_MADVISE_POLICY_FLAGS:
+
+$(RUST_MADVISE_POLICY_FLAGS_STAMP): FORCE_RUST_MADVISE_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MADVISE_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MADVISE_POLICY_CODE_MODEL) $(RUST_MADVISE_POLICY_EXTRA) -C target-feature=$(RUST_MADVISE_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MADVISE_POLICY_OBJECT): $(RUST_MADVISE_POLICY_SRC) tools/rust-kernel.mk $(RUST_MADVISE_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MADVISE_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MADVISE_POLICY_CODE_MODEL),-C code-model=$(RUST_MADVISE_POLICY_CODE_MODEL)) \
+		$(RUST_MADVISE_POLICY_EXTRA) \
+		$(if $(RUST_MADVISE_POLICY_FEATURES),-C target-feature=$(RUST_MADVISE_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+
+RUST_MSEAL_POLICY_SRC := kernel/mm/mseal_policy.rs
+RUST_MSEAL_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_MSEAL_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MSEAL_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MSEAL_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MSEAL_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MSEAL_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_MSEAL_POLICY_TARGET := $(RUST_MSEAL_POLICY_TARGET_$(ARCH))
+RUST_MSEAL_POLICY_OBJECT := $(BUILD_DIR)/rust/mseal_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/mseal.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mseal.c)
+ifeq ($(strip $(RUST_MSEAL_POLICY_TARGET)),)
+$(error mm/mseal.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MSEAL_POLICY_CODE_MODEL_x86_64 := large
+RUST_MSEAL_POLICY_CODE_MODEL_aarch64 := large
+RUST_MSEAL_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_MSEAL_POLICY_CODE_MODEL_riscv64 := medium
+RUST_MSEAL_POLICY_CODE_MODEL_arm32 := small
+RUST_MSEAL_POLICY_FEATURES_aarch64 :=
+RUST_MSEAL_POLICY_FEATURES_arm32 := -neon
+RUST_MSEAL_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MSEAL_POLICY_CODE_MODEL := $(RUST_MSEAL_POLICY_CODE_MODEL_$(ARCH))
+RUST_MSEAL_POLICY_FEATURES := $(RUST_MSEAL_POLICY_FEATURES_$(ARCH))
+RUST_MSEAL_POLICY_EXTRA := $(RUST_MSEAL_POLICY_EXTRA_$(ARCH))
+RUST_MSEAL_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.mseal-policy-flags
+.PHONY: FORCE_RUST_MSEAL_POLICY_FLAGS
+FORCE_RUST_MSEAL_POLICY_FLAGS:
+
+$(RUST_MSEAL_POLICY_FLAGS_STAMP): FORCE_RUST_MSEAL_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MSEAL_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MSEAL_POLICY_CODE_MODEL) $(RUST_MSEAL_POLICY_EXTRA) -C target-feature=$(RUST_MSEAL_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MSEAL_POLICY_OBJECT): $(RUST_MSEAL_POLICY_SRC) tools/rust-kernel.mk $(RUST_MSEAL_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MSEAL_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MSEAL_POLICY_CODE_MODEL),-C code-model=$(RUST_MSEAL_POLICY_CODE_MODEL)) \
+		$(RUST_MSEAL_POLICY_EXTRA) \
+		$(if $(RUST_MSEAL_POLICY_FEATURES),-C target-feature=$(RUST_MSEAL_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_MEMPOLICY_STATE_SRC := kernel/mm/mempolicy_state.rs
+RUST_MEMPOLICY_STATE_TARGET_x86_64 := x86_64-unknown-none
+RUST_MEMPOLICY_STATE_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MEMPOLICY_STATE_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MEMPOLICY_STATE_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MEMPOLICY_STATE_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MEMPOLICY_STATE_TARGET_arm32 := armv7a-none-eabihf
+RUST_MEMPOLICY_STATE_TARGET := $(RUST_MEMPOLICY_STATE_TARGET_$(ARCH))
+RUST_MEMPOLICY_STATE_OBJECT := $(BUILD_DIR)/rust/mempolicy_state.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/mempolicy.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mempolicy.c)
+ifeq ($(strip $(RUST_MEMPOLICY_STATE_TARGET)),)
+$(error mm/mempolicy.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MEMPOLICY_STATE_CODE_MODEL_x86_64 := large
+RUST_MEMPOLICY_STATE_CODE_MODEL_aarch64 := large
+RUST_MEMPOLICY_STATE_CODE_MODEL_loongarch64 := medium
+RUST_MEMPOLICY_STATE_CODE_MODEL_riscv64 := medium
+RUST_MEMPOLICY_STATE_CODE_MODEL_arm32 := small
+RUST_MEMPOLICY_STATE_FEATURES_aarch64 :=
+RUST_MEMPOLICY_STATE_FEATURES_arm32 := -neon
+RUST_MEMPOLICY_STATE_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MEMPOLICY_STATE_CODE_MODEL := $(RUST_MEMPOLICY_STATE_CODE_MODEL_$(ARCH))
+RUST_MEMPOLICY_STATE_FEATURES := $(RUST_MEMPOLICY_STATE_FEATURES_$(ARCH))
+RUST_MEMPOLICY_STATE_EXTRA := $(RUST_MEMPOLICY_STATE_EXTRA_$(ARCH))
+RUST_MEMPOLICY_STATE_FLAGS_STAMP := $(BUILD_DIR)/rust/.mempolicy-state-flags
+.PHONY: FORCE_RUST_MEMPOLICY_STATE_FLAGS
+FORCE_RUST_MEMPOLICY_STATE_FLAGS:
+
+$(RUST_MEMPOLICY_STATE_FLAGS_STAMP): FORCE_RUST_MEMPOLICY_STATE_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MEMPOLICY_STATE_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MEMPOLICY_STATE_CODE_MODEL) $(RUST_MEMPOLICY_STATE_EXTRA) -C target-feature=$(RUST_MEMPOLICY_STATE_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MEMPOLICY_STATE_OBJECT): $(RUST_MEMPOLICY_STATE_SRC) tools/rust-kernel.mk $(RUST_MEMPOLICY_STATE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MEMPOLICY_STATE_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MEMPOLICY_STATE_CODE_MODEL),-C code-model=$(RUST_MEMPOLICY_STATE_CODE_MODEL)) \
+		$(RUST_MEMPOLICY_STATE_EXTRA) \
+		$(if $(RUST_MEMPOLICY_STATE_FEATURES),-C target-feature=$(RUST_MEMPOLICY_STATE_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_MUNMAP_TXN_SRC := kernel/mm/munmap_txn.rs
+RUST_MUNMAP_TXN_TARGET_x86_64 := x86_64-unknown-none
+RUST_MUNMAP_TXN_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_MUNMAP_TXN_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_MUNMAP_TXN_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_MUNMAP_TXN_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_MUNMAP_TXN_TARGET_arm32 := armv7a-none-eabihf
+RUST_MUNMAP_TXN_TARGET := $(RUST_MUNMAP_TXN_TARGET_$(ARCH))
+RUST_MUNMAP_TXN_OBJECT := $(BUILD_DIR)/rust/munmap_txn.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/munmap.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/munmap.c)
+ifeq ($(strip $(RUST_MUNMAP_TXN_TARGET)),)
+$(error mm/munmap.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_MUNMAP_TXN_CODE_MODEL_x86_64 := large
+RUST_MUNMAP_TXN_CODE_MODEL_aarch64 := large
+RUST_MUNMAP_TXN_CODE_MODEL_loongarch64 := medium
+RUST_MUNMAP_TXN_CODE_MODEL_riscv64 := medium
+RUST_MUNMAP_TXN_CODE_MODEL_arm32 := small
+RUST_MUNMAP_TXN_FEATURES_aarch64 :=
+RUST_MUNMAP_TXN_FEATURES_arm32 := -neon
+RUST_MUNMAP_TXN_EXTRA_x86_64 := -C no-redzone=yes
+RUST_MUNMAP_TXN_CODE_MODEL := $(RUST_MUNMAP_TXN_CODE_MODEL_$(ARCH))
+RUST_MUNMAP_TXN_FEATURES := $(RUST_MUNMAP_TXN_FEATURES_$(ARCH))
+RUST_MUNMAP_TXN_EXTRA := $(RUST_MUNMAP_TXN_EXTRA_$(ARCH))
+RUST_MUNMAP_TXN_FLAGS_STAMP := $(BUILD_DIR)/rust/.munmap-txn-flags
+.PHONY: FORCE_RUST_MUNMAP_TXN_FLAGS
+FORCE_RUST_MUNMAP_TXN_FLAGS:
+
+$(RUST_MUNMAP_TXN_FLAGS_STAMP): FORCE_RUST_MUNMAP_TXN_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_MUNMAP_TXN_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_MUNMAP_TXN_CODE_MODEL) $(RUST_MUNMAP_TXN_EXTRA) -C target-feature=$(RUST_MUNMAP_TXN_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_MUNMAP_TXN_OBJECT): $(RUST_MUNMAP_TXN_SRC) tools/rust-kernel.mk $(RUST_MUNMAP_TXN_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_MUNMAP_TXN_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_MUNMAP_TXN_CODE_MODEL),-C code-model=$(RUST_MUNMAP_TXN_CODE_MODEL)) \
+		$(RUST_MUNMAP_TXN_EXTRA) \
+		$(if $(RUST_MUNMAP_TXN_FEATURES),-C target-feature=$(RUST_MUNMAP_TXN_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_ASLR_POLICY_SRC := kernel/mm/aslr_policy.rs
+RUST_ASLR_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_ASLR_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_ASLR_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_ASLR_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_ASLR_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_ASLR_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_ASLR_POLICY_TARGET := $(RUST_ASLR_POLICY_TARGET_$(ARCH))
+RUST_ASLR_POLICY_OBJECT := $(BUILD_DIR)/rust/aslr_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/aslr.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/aslr.c)
+ifeq ($(strip $(RUST_ASLR_POLICY_TARGET)),)
+$(error kernel/mm/aslr.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_ASLR_POLICY_CODE_MODEL_x86_64 := large
+RUST_ASLR_POLICY_CODE_MODEL_aarch64 := large
+RUST_ASLR_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_ASLR_POLICY_CODE_MODEL_riscv64 := medium
+RUST_ASLR_POLICY_CODE_MODEL_arm32 := small
+RUST_ASLR_POLICY_FEATURES_aarch64 :=
+RUST_ASLR_POLICY_FEATURES_arm32 := -neon
+RUST_ASLR_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_ASLR_POLICY_CODE_MODEL := $(RUST_ASLR_POLICY_CODE_MODEL_$(ARCH))
+RUST_ASLR_POLICY_FEATURES := $(RUST_ASLR_POLICY_FEATURES_$(ARCH))
+RUST_ASLR_POLICY_EXTRA := $(RUST_ASLR_POLICY_EXTRA_$(ARCH))
+RUST_ASLR_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.aslr_policy-flags
+.PHONY: FORCE_RUST_ASLR_POLICY_FLAGS
+FORCE_RUST_ASLR_POLICY_FLAGS:
+
+$(RUST_ASLR_POLICY_FLAGS_STAMP): FORCE_RUST_ASLR_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_ASLR_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_ASLR_POLICY_CODE_MODEL) $(RUST_ASLR_POLICY_EXTRA) -C target-feature=$(RUST_ASLR_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_ASLR_POLICY_OBJECT): $(RUST_ASLR_POLICY_SRC) tools/rust-kernel.mk $(RUST_ASLR_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_ASLR_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_ASLR_POLICY_CODE_MODEL),-C code-model=$(RUST_ASLR_POLICY_CODE_MODEL)) \
+		$(RUST_ASLR_POLICY_EXTRA) \
+		$(if $(RUST_ASLR_POLICY_FEATURES),-C target-feature=$(RUST_ASLR_POLICY_FEATURES)) \
+		$< -o $@
+endif
+
+RUST_WX_POLICY_SRC := kernel/mm/wx_policy.rs
+RUST_WX_POLICY_TARGET_x86_64 := x86_64-unknown-none
+RUST_WX_POLICY_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
+RUST_WX_POLICY_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_WX_POLICY_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_WX_POLICY_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_WX_POLICY_TARGET_arm32 := armv7a-none-eabihf
+RUST_WX_POLICY_TARGET := $(RUST_WX_POLICY_TARGET_$(ARCH))
+RUST_WX_POLICY_OBJECT := $(BUILD_DIR)/rust/wx_policy.o
+
+ifeq ($(filter $(KERNEL_DIR)/mm/wx.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/wx.c)
+ifeq ($(strip $(RUST_WX_POLICY_TARGET)),)
+$(error kernel/mm/wx.c is in this profile but there is no Rust target for ARCH=$(ARCH))
+endif
+RUST_WX_POLICY_CODE_MODEL_x86_64 := large
+RUST_WX_POLICY_CODE_MODEL_aarch64 := large
+RUST_WX_POLICY_CODE_MODEL_loongarch64 := medium
+RUST_WX_POLICY_CODE_MODEL_riscv64 := medium
+RUST_WX_POLICY_CODE_MODEL_arm32 := small
+RUST_WX_POLICY_FEATURES_aarch64 :=
+RUST_WX_POLICY_FEATURES_arm32 := -neon
+RUST_WX_POLICY_EXTRA_x86_64 := -C no-redzone=yes
+RUST_WX_POLICY_CODE_MODEL := $(RUST_WX_POLICY_CODE_MODEL_$(ARCH))
+RUST_WX_POLICY_FEATURES := $(RUST_WX_POLICY_FEATURES_$(ARCH))
+RUST_WX_POLICY_EXTRA := $(RUST_WX_POLICY_EXTRA_$(ARCH))
+RUST_WX_POLICY_FLAGS_STAMP := $(BUILD_DIR)/rust/.wx_policy-flags
+.PHONY: FORCE_RUST_WX_POLICY_FLAGS
+FORCE_RUST_WX_POLICY_FLAGS:
+
+$(RUST_WX_POLICY_FLAGS_STAMP): FORCE_RUST_WX_POLICY_FLAGS
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_WX_POLICY_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_WX_POLICY_CODE_MODEL) $(RUST_WX_POLICY_EXTRA) -C target-feature=$(RUST_WX_POLICY_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(RUST_WX_POLICY_OBJECT): $(RUST_WX_POLICY_SRC) tools/rust-kernel.mk $(RUST_WX_POLICY_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
+	@mkdir -p $(dir $@)
+	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+		--target $(RUST_WX_POLICY_TARGET) \
+		$(RUST_TARGET_OBJECT_FLAGS) \
+		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
+		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
+		-C relocation-model=static \
+		$(if $(RUST_WX_POLICY_CODE_MODEL),-C code-model=$(RUST_WX_POLICY_CODE_MODEL)) \
+		$(RUST_WX_POLICY_EXTRA) \
+		$(if $(RUST_WX_POLICY_FEATURES),-C target-feature=$(RUST_WX_POLICY_FEATURES)) \
 		$< -o $@
 endif
 
@@ -1000,9 +1778,10 @@ $(RUST_HANDLE_TABLE_STATE_OBJECT): $(RUST_HANDLE_TABLE_STATE_SRC) $(RUST_HANDLE_
 		$< -o $@
 endif
 
-ifeq ($(DONTUNMAP_TXN_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/mremap.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mremap.c)
+ifneq ($(NOMMU),1)
 ifeq ($(strip $(RUST_DONTUNMAP_TARGET)),)
-$(error DONTUNMAP_TXN_IMPL=rust has no matching Rust target for ARCH=$(ARCH); keep the C reference selected)
+$(error mm/mremap.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_DONTUNMAP_CODE_MODEL_x86_64 := large
 RUST_DONTUNMAP_CODE_MODEL_aarch64 := large
@@ -1033,6 +1812,7 @@ $(RUST_DONTUNMAP_TXN_OBJECT): $(RUST_DONTUNMAP_TXN_SRC) tools/rust-kernel.mk $(R
 		$(RUST_DONTUNMAP_EXTRA) \
 		$(if $(RUST_DONTUNMAP_FEATURES),-C target-feature=$(RUST_DONTUNMAP_FEATURES)) \
 		$< -o $@
+endif
 endif
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
@@ -1183,6 +1963,8 @@ $(RUST_EVENT_QUEUE_OBJECT): kernel/ipc/event_queue.rs tools/rust-kernel.mk $(RUS
 endif
 
 ifeq ($(USER_COPY_IMPL),rust)
+endif
+ifeq ($(filter $(KERNEL_DIR)/mm/mm.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/mm.c)
 RUST_USERCOPY_SRC := kernel/mm/usercopy.rs
 RUST_USERCOPY_SUBMODULES := kernel/mm/usercopy_strings.rs
 RUST_USERCOPY_TARGET_x86_64 := x86_64-unknown-none
@@ -1193,7 +1975,7 @@ RUST_USERCOPY_TARGET_riscv32 := $(RUST_RV32_TARGET)
 RUST_USERCOPY_TARGET_arm32 := armv7a-none-eabihf
 RUST_USERCOPY_TARGET := $(RUST_USERCOPY_TARGET_$(ARCH))
 ifeq ($(strip $(RUST_USERCOPY_TARGET)),)
-$(error USER_COPY_IMPL=rust has no Rust target for ARCH=$(ARCH); keep the C implementation selected)
+$(error mm/mm.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_USERCOPY_OBJECT := $(BUILD_DIR)/rust/usercopy.o
 RUST_USERCOPY_CODE_MODEL_x86_64 := large
@@ -1277,8 +2059,8 @@ $(RUST_PROCESS_VM_OBJECT): $(RUST_PROCESS_VM_SRC) tools/rust-kernel.mk $(RUST_PR
 		$< -o $@
 endif
 
-# PARK_WAIT is independent of USER_COPY. Keep its target/object variables
-# outside the USER_COPY_IMPL block so either Rust slice can be selected alone.
+# PARK_WAIT is independent of the user copy slice; its target/object variables
+# live outside that block.
 RUST_PARK_WAIT_SRC := kernel/proc/park_wait_state.rs
 RUST_PARK_WAIT_HDR := kernel/proc/park_wait_state.h
 RUST_PARK_WAIT_TARGET_x86_64 := x86_64-unknown-none
@@ -2507,9 +3289,9 @@ RUST_MM_SHUTDOWN_WRITE_SRC := kernel/mm/shutdown_write.rs
 RUST_MM_SHUTDOWN_WRITE_TARGET := $(RUST_TASK_LIFECYCLE_TARGET)
 RUST_MM_SHUTDOWN_WRITE_OBJECT := $(BUILD_DIR)/rust/mm_shutdown_write.o
 
-ifeq ($(MM_SHUTDOWN_WRITE_IMPL),rust)
+ifeq ($(filter $(KERNEL_DIR)/mm/shutdown_write.c,$(KERNEL_SRC)),$(KERNEL_DIR)/mm/shutdown_write.c)
 ifeq ($(strip $(RUST_MM_SHUTDOWN_WRITE_TARGET)),)
-$(error MM_SHUTDOWN_WRITE_IMPL=rust has no Rust target for ARCH=$(ARCH))
+$(error mm/shutdown_write.c is in this profile but there is no Rust target for ARCH=$(ARCH))
 endif
 RUST_MM_SHUTDOWN_WRITE_FLAGS_STAMP := $(BUILD_DIR)/rust/.mm-shutdown-write-flags
 .PHONY: FORCE_RUST_MM_SHUTDOWN_WRITE_FLAGS
