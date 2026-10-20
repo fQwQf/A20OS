@@ -15,8 +15,8 @@ LoongArch32/PPC64LE 已退出 1.0；其源码、实例、构建和 CI 清理归�
 
 2026-10-13 已转入完整构建、宿主测试和 QEMU 实际验证。已通过的工程项删除，
 未覆盖条件继续保留；命令、配置与结果见
-[验证记录](../status/history/validation-docs-completion-2026-10-13.md)，编码历史见
-[阶段记录](../status/history/development-docs-completion-2026-10-13.md)。
+验证记录，编码历史见
+阶段记录。
 
 面向服务器部署的当前能力边界与阻塞项排序见
 [../status/current/server-readiness.md](../status/current/server-readiness.md)。
@@ -42,7 +42,7 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期
 和 `remap-owner-rollback PASS`，通过结果与配置见
-[本轮验证](../status/history/validation-docs-completion-2026-10-13.md)。相关本地复验项已移除。
+本轮验证。相关本地复验项已移除。
 
 - [ ] 在云端复验 Native CI 与发布前置门禁
   - `.github/workflows/native.yml` 已接线；本轮只验证本地配方，未触发云端 CI 或发布。
@@ -89,7 +89,7 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 ## P0：并发与 SMP 就绪
 
 FUTEX_WAKE_OP 的双架构单核/四核运行已有
-[分支记录](../status/history/validation-docs-completion-2026-10-13.md) 和
+分支记录 和
 main 集成记录（该轮记录已删除），移除“仅编译、尚未运行”的旧条目。
 相关原子性、COW 与批次唤醒断言继续作为 Rust 迁移及 1.0 候选回归，不由此宣称所有 futex 交错已证明。
 
@@ -123,13 +123,13 @@ main 集成记录（该轮记录已删除），移除“仅编译、尚未运行
 
 - [ ] 完善 `MREMAP_DONTUNMAP` 的源端再次缺页语义
   - 常驻页移动与已换出 PTE 的 fork/remap 引用保留已实现；真实换出、数据读回与槽回收
-    已通过 RISC-V/AArch64 单核及四核门禁，见 [本轮验证](../status/history/validation-docs-completion-2026-10-13.md)。
+    已通过 RISC-V/AArch64 单核及四核门禁，见 本轮验证。
   - DONTUNMAP 仍需独立实现与运行验收，不能用普通 remap 的通过结果替代。
 - driver/device/bus registry 容量耗尽的 RV64 QEMU 验收已完成：注入 backing-array
   `krealloc` 失败后，三种注册均保留旧项、返回 `-ENOMEM`，记录结构化日志，并在重试后
   成功；移除测试项后数量回到基线。证据仅覆盖本轮 RV64 单核 QEMU，不代表其他架构或
   实机验收；registry backing array 按设计保留增长后的容量。详见
-  [注册表容量验证记录](../status/history/validation-driver-registry-capacity-2026-10-13.md)。
+  注册表容量验证记录。
 
 ## P2：仓库卫生与依赖边界
 

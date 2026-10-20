@@ -56,8 +56,7 @@ Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子
 [实现证据](docs/status/current/cluster-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)、
 [服务开发教程](docs/cluster/11-api-tutorial.md)
 、[性能测量口径](docs/cluster/21-performance.md)
-、[统一单向 SEND](docs/cluster/22-oneway.md)
-与[四节点负载实测](docs/status/history/four-node-load.md)。
+、[统一单向 SEND](docs/cluster/22-oneway.md)。
 
 ## Linux ABI 兼容性
 

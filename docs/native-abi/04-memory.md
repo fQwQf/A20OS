@@ -1,7 +1,7 @@
 # A20OS Native ABI：内存子系统设计
 
 > 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
-> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 [验证记录](../status/history/validation-docs-completion-2026-10-13.md)。
+> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 验证记录。
 >
 > **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
 > `docs/status/history/mm-single-level-migration-log.md` §13.18）。原先并存的两种映射记录

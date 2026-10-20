@@ -120,7 +120,7 @@ RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在
 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数
 （需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。
 `sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；
-配置和日志见 [本轮验证](../status/history/validation-docs-completion-2026-10-13.md)，不覆盖长 syscall 有界延迟。
+配置和日志见 本轮验证，不覆盖长 syscall 有界延迟。
 
 本地选择分两段：
 

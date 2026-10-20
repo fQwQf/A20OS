@@ -15,7 +15,7 @@
  *
  * If one of these asserts fires after touching either the codec or the
  * reference, the two disagree and the disagreement is a bug until the
- * specs say otherwise (impl-prompts.md 故障处置表: the prose wins).
+ * specs say otherwise (the prose wins).
  */
 #include <assert.h>
 #include <stdint.h>

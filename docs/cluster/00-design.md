@@ -100,7 +100,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 - [29-native-sync.md](29-native-sync.md)：公共用户原子操作、futex、MMU/flat 地址适配与验收边界。
 
-历史轨道文件 `../status/history/impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。
+原实施轨道记录已删除；当前进展以 08 文档为准。
 
 统一运行实例与当前原生执行域状态接口见 [31-runtime-instance.md](31-runtime-instance.md)。
 
