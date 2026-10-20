@@ -12,36 +12,36 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Policy snapshot + shadow handle table | ✅ implemented | Keyed by global fd |
-| Acquisition mediation (A1–A3) | ✅ hooked | openat/socket/pipe/memfd/eventfd/timerfd/signalfd |
-| Class-only mediation (A5) | ✅ hooked | shmat MEMORY class check |
-| Transfer clamp (A6/A7) | ✅ hooked | SCM_RIGHTS recv/send + pidfd_getfd |
-| Direction enforcement | ✅ proved | Per-field Bool AND semantics |
-| io_uring execution-point + REGISTER_FILES fail-closed (A9/A10) | ✅ hooked | SQE execution-point charge |
-| Lazy expiry sweep + KILL_ON_EXPIRE | ✅ implemented | One-way latch |
-| Active revocation | ✅ implemented | Owner/root gated |
-| Control-plane syscalls 902–906 | ✅ wired | create/enter/revoke/stats/audit |
-| USE-side hooks: bind/connect/listen | ✅ added | Ops charge |
-| readv/writev byte-granularity charging | ✅ fixed | Direction-aware pre-charge |
+| Policy snapshot + shadow handle table | implemented | Keyed by global fd |
+| Acquisition mediation (A1–A3) | hooked | openat/socket/pipe/memfd/eventfd/timerfd/signalfd |
+| Class-only mediation (A5) | hooked | shmat MEMORY class check |
+| Transfer clamp (A6/A7) | hooked | SCM_RIGHTS recv/send + pidfd_getfd |
+| Direction enforcement | proved | Per-field Bool AND semantics |
+| io_uring execution-point + REGISTER_FILES fail-closed (A9/A10) | hooked | SQE execution-point charge |
+| Lazy expiry sweep + KILL_ON_EXPIRE | implemented | One-way latch |
+| Active revocation | implemented | Owner/root gated |
+| Control-plane syscalls 902–906 | wired | create/enter/revoke/stats/audit |
+| USE-side hooks: bind/connect/listen | added | Ops charge |
+| readv/writev byte-granularity charging | fixed | Direction-aware pre-charge |
 
 ### 1.2 Attack Suite (`user/cmds/core/envelope_smoke.c`, QEMU verified)
 
 | Scenario | Result |
 |----------|--------|
-| Functional (benign file ops inside envelope) | ✅ PASS |
-| Type denial (socket outside allowed\_types → EPERM) | ✅ PASS |
-| Rights denial (O\_WRONLY vs RO cap → EACCES) | ✅ PASS |
-| Op-budget exhaustion (third op after budget=2) | ✅ PASS |
-| Data-budget pre-charge (over-budget write denied) | ✅ PASS |
-| Temporal expiry (post-deadline read denied) | ✅ PASS |
-| Revoke+kill (active revocation → SIGKILL worker) | ✅ PASS |
-| Reopen upgrade (/proc/self/fd write-after-RO) | ✅ PASS |
-| SCM receive (in-fd mediated; out-of-class dropped) | ✅ PASS |
-| SCM receive deny (class outside allowed → no cmsg) | ✅ PASS |
-| SCM send propagation (propagation\_types gate) | ✅ PASS |
-| pidfd-getfd (cross-task theft per class) | ✅ PASS |
-| shmat class (MEMORY outside allowed → EPERM) | ✅ PASS |
-| Runtime audit (zero violations post-exercise) | ✅ PASS |
+| Functional (benign file ops inside envelope) | PASS |
+| Type denial (socket outside allowed\_types → EPERM) | PASS |
+| Rights denial (O\_WRONLY vs RO cap → EACCES) | PASS |
+| Op-budget exhaustion (third op after budget=2) | PASS |
+| Data-budget pre-charge (over-budget write denied) | PASS |
+| Temporal expiry (post-deadline read denied) | PASS |
+| Revoke+kill (active revocation → SIGKILL worker) | PASS |
+| Reopen upgrade (/proc/self/fd write-after-RO) | PASS |
+| SCM receive (in-fd mediated; out-of-class dropped) | PASS |
+| SCM receive deny (class outside allowed → no cmsg) | PASS |
+| SCM send propagation (propagation\_types gate) | PASS |
+| pidfd-getfd (cross-task theft per class) | PASS |
+| shmat class (MEMORY outside allowed → EPERM) | PASS |
+| Runtime audit (zero violations post-exercise) | PASS |
 
 Gate: `make smoke-envelope`
 
@@ -90,15 +90,15 @@ Gate: `make smoke-envelope-bench`
 
 | Invariant / Property | Result |
 |---------------------|--------|
-| TypeAllowed | ✅ holds |
-| RightsSubCap | ✅ holds |
-| OpsNonNeg / DataNonNeg | ✅ holds |
-| ClockBounded | ✅ holds |
-| DenyAfterExpiry（过期 ⇒ 全部受介操作禁用） | ✅ holds |
-| NoResurrect (temporal) | ✅ holds |
-| KillOnce (temporal) | ✅ holds |
-| ExpiryLiveness `<>expired` (fairness-liveness) | ✅ holds |
-| KillLiveness `expired ~> killSent` (fairness-liveness) | ✅ holds |
+| TypeAllowed | holds |
+| RightsSubCap | holds |
+| OpsNonNeg / DataNonNeg | holds |
+| ClockBounded | holds |
+| DenyAfterExpiry（过期 ⇒ 全部受介操作禁用） | holds |
+| NoResurrect (temporal) | holds |
+| KillOnce (temporal) | holds |
+| ExpiryLiveness `<>expired` (fairness-liveness) | holds |
+| KillLiveness `expired ~> killSent` (fairness-liveness) | holds |
 
 Fairness assumptions: WF_vars(Tick) ∧ WF_vars(LazyExpire) ∧ WF_vars(Kill)
 ——对应内核 sweeper 行为（syscall 入口惰性清扫 + 时钟推进 + KILL_ON_EXPIRE）。
@@ -110,29 +110,29 @@ Reproduce: `java -cp tla2tools.jar tlc2.TLC -cleanup Envelope.tla`
 
 | Theorem | Source | Status |
 |---------|--------|--------|
-| deduct_le | 03 Thm 3.1 monotone decay | ✅ proved |
-| deduct_strict | 03 Thm 3.2 strict decay | ✅ proved |
-| decay_transitive | 03 §3.2 chained spending | ✅ proved |
-| latch_true | 05 §2.5.2 one-way latch | ✅ proved |
-| and_field_le_cap | A7 clamp ≤ policy cap（不超出 cap） | ✅ proved |
-| and_field_preserves | A7 clamp preserves legit authority | ✅ proved |
-| and_field_idem | A6/A7 clamp idempotence | ✅ proved |
-| xferred_wr_needs_both | A6 write dual-grant requirement | ✅ proved |
-| xferred_rd_needs_both | A6 read dual-grant requirement | ✅ proved |
+| deduct_le | 03 Thm 3.1 monotone decay | proved |
+| deduct_strict | 03 Thm 3.2 strict decay | proved |
+| decay_transitive | 03 §3.2 chained spending | proved |
+| latch_true | 05 §2.5.2 one-way latch | proved |
+| and_field_le_cap | A7 clamp ≤ policy cap（不超出 cap） | proved |
+| and_field_preserves | A7 clamp preserves legit authority | proved |
+| and_field_idem | A6/A7 clamp idempotence | proved |
+| xferred_wr_needs_both | A6 write dual-grant requirement | proved |
+| xferred_rd_needs_both | A6 read dual-grant requirement | proved |
 
 Delegation bounding（委托无升级，03 §3.2 rights monotone decrease）：
 
 | Theorem | Source | Status |
 |---------|--------|--------|
-| del_wr_needs_both | 委托权行使 ⇒ 委托方授权 ∧ 接收方 cap 双真 | ✅ proved |
-| del_rd_needs_both | 读方向 analogue | ✅ proved |
+| del_wr_needs_both | 委托权行使 ⇒ 委托方授权 ∧ 接收方 cap 双真 | proved |
+| del_rd_needs_both | 读方向 analogue | proved |
 
 Cross-envelope budget refinement（跨信封预算细化，05 §2.5.4）：
 
 | Theorem | Source | Status |
 |---------|--------|--------|
-| scm_recv_le_receiver | 接收计费 ≤ 接收方剩余（安全规格界；v1 构造性满足：接收仅扣自身 1 op） | ✅ proved |
-| scm_recv_le_sender | 接收计费 ≤ 发送方侧金额（v1 无发送方耦合扣费，平凡满足） | ✅ proved |
+| scm_recv_le_receiver | 接收计费 ≤ 接收方剩余（安全规格界；v1 构造性满足：接收仅扣自身 1 op） | proved |
+| scm_recv_le_sender | 接收计费 ≤ 发送方侧金额（v1 无发送方耦合扣费，平凡满足） | proved |
 
 Reproduce: `lean BudgetLattice.lean` (Lean v4.33.1 core, no Mathlib)
 

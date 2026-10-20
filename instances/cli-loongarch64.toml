@@ -1,0 +1,14 @@
+# 纯命令行工作站（apk world 'cli'）。说明见 cli-riscv64.toml。
+#
+#   tools/a20 run cli-loongarch64
+name = "cli-loongarch64"
+description = "Command-line workstation via apk world 'cli' (zsh, GNU coreutils, git/vim/tmux/curl/python3)"
+arch = "loongarch64"
+
+[machine]
+memory = "2G"
+smp = 2
+
+[rootfs]
+world = "cli"
+world_size_mb = 1024

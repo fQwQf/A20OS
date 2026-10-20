@@ -8,13 +8,13 @@ A20OS 的输入路径分成三层：设备驱动（drvmod 模块，发布 input 
 virtio-input 设备 (MMIO slot / PCI 1af4:1052)
         │  vinput.a20drv（drvmod 模块，四架构）
         │  状态迁移 + 事件 virtqueue + IRQ + input class 设备
-        ▼
+        ↓
 input class 设备（DEV_CLASS_INPUT，统一核心发布）
         │  input_read_class_devices() 经 input_dev_ops.read 消费
-        ▼
+        ↓
 /dev/event0 mux（kernel/drivers/input/input_mux.c）
         │  EVIOCG* ioctl + evdev 状态跟踪（键/ABS）
-        ▼
+        ↓
 用户空间（evdev_stress、shell、桌面会话）
 ```
 

@@ -86,7 +86,7 @@ $$AS(S) = \sum_{p \in P} \sum_{h \in HT_p} |\rho_{eff}(h, t)| \times \frac{1}{1 
 | P2 | 超 max_data_size / max_handles | 拒绝 |
 | P3 | recv 端类型不符 | TYPE_MISMATCH |
 | P4 | 经用户态修改类型字段绕过 | 无效（内核端点只读拷贝，04 §2.2） |
-| P5 | confused deputy：入通道类型 ∩ 出通道类型 ≠ ∅ 时尝试传 handle | 依赖配置；验证 04 定理 8.3 判定规则 |
+| P5 | confused deputy：入通道类型 ∩ 出通道类型 ≠ {} 时尝试传 handle | 依赖配置；验证 04 定理 8.3 判定规则 |
 
 ### 4.4 跨 ABI 攻击（D 系列）
 

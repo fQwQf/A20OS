@@ -27,21 +27,21 @@
 
 | 能力 | 状态 | 依据 / 缺口 |
 |---|---|---|
-| virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
-| virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
-| QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
-| 3D 传输通路端到端 | ✅ **本轮已在三种架构上双向验证** | `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。三条门禁的像素回读都得到同一组颜色值，所以"渲染器产出与 guest 架构无关"这一点现在也是被测的，而不只被假设。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
-| 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
-| 命令流提交 | ✅ **本轮已验证到像素** | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并**回读像素**：两遍颜色都中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。此前"编码正确但像素未验证"的状态是三个缺陷叠加的结果——SUBMIT_3D 命令头多带一个 mem_entry 导致命令体被宿主按固定 32 字节偏移截断、从未下发 `CTX_ATTACH_RESOURCE`、`TRANSFER_FROM_HOST` 是空实现；见 §0.5 |
-| 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
-| `GET_CAPS` 在本机可用 | ✅ **本轮已实测可用** | guest 日志 `GET_CAPS returned a 308 byte capset`。此前记为"宿主限制"是错的：那次失败是**我们**把 capset *index* 当 *id* 发了（提交 `68b54d32`），修掉后同一台宿主正常返回。**`capset size=308` 也不是「renderer 老」的判据**：GET_CAPSET_INFO 按索引查，index 0 就是 capset 1，而 capset 1 本就小（见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md)） |
-| stock Mesa 实际挂载 | ✅ **已挂载 virgl** | `smoke-mesa-attach` 报 `attached: yes`，renderer 为 `virgl (…radeonsi…)`。根因是我们内核把 `VIRTGPU_GETPARAM` 的 `value` 当成 in/out 标量，而它其实是用户态指针：Mesa 传 `&value` 再读自己的本地变量，于是每个 param 读回 0，`virgl_drm_winsys_create()` 在建 context 前就放弃。改为写穿指针后 `CONTEXT_INIT`/`EXECBUFFER` 随之出现。另需 `version_major=0`（Mesa 的 `virgl_drm_get_version()` 对 major!=0 返回 -EINVAL，实测确认）。详见 §0.8 |
-| guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
-| DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念，见 §8.1 |
-| KMS 对象模型 | ✅ **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
-| 真 dma-buf（PRIME） | ❌ 未实现 | 仍然是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见。A20OS 无跨进程 VMO 共享、无 mmap-offset 协议，所以这是从零做而不是打补丁。**本轮修掉的是导出/导入本身的正确性**：映射表原先按 fd *编号* 记录且从不删除，用户态一 close，内核就把该编号复用给别的文件，于是 `PRIME_FD_TO_HANDLE` 会把旧 GEM handle 发给一个不相干的 fd——而 handle 是能经 `drm_linux_mmap()` mmap 的。现在按 `vfile.identity`（单调递增的 per-open id）记录，用户已关闭的条目会被回收，写不进表的 fd 不再发出去。真正共享内存仍然没有 |
-| 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
-| Mesa/virgl 用户态客户端 | ❌ 未挂载验证 | UAPI 已就绪；A20OS 不自建 DRI 驱动，由 stock Mesa 提供（见上一行） |
+| virtio-gpu 2D scanout、modeset、page-flip | 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
+| virtio-gpu 3D 协议结构体与命令封装 | 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
+| QEMU 侧提供 virgl 设备 | **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
+| 3D 传输通路端到端 | **本轮已在三种架构上双向验证** | `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。三条门禁的像素回读都得到同一组颜色值，所以"渲染器产出与 guest 架构无关"这一点现在也是被测的，而不只被假设。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
+| 3D 资源挂载 backing | **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
+| 命令流提交 | **本轮已验证到像素** | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并**回读像素**：两遍颜色都中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。此前"编码正确但像素未验证"的状态是三个缺陷叠加的结果——SUBMIT_3D 命令头多带一个 mem_entry 导致命令体被宿主按固定 32 字节偏移截断、从未下发 `CTX_ATTACH_RESOURCE`、`TRANSFER_FROM_HOST` 是空实现；见 §0.5 |
+| 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
+| `GET_CAPS` 在本机可用 | **本轮已实测可用** | guest 日志 `GET_CAPS returned a 308 byte capset`。此前记为"宿主限制"是错的：那次失败是**我们**把 capset *index* 当 *id* 发了（提交 `68b54d32`），修掉后同一台宿主正常返回。**`capset size=308` 也不是「renderer 老」的判据**：GET_CAPSET_INFO 按索引查，index 0 就是 capset 1，而 capset 1 本就小（见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md)） |
+| stock Mesa 实际挂载 | **已挂载 virgl** | `smoke-mesa-attach` 报 `attached: yes`，renderer 为 `virgl (…radeonsi…)`。根因是我们内核把 `VIRTGPU_GETPARAM` 的 `value` 当成 in/out 标量，而它其实是用户态指针：Mesa 传 `&value` 再读自己的本地变量，于是每个 param 读回 0，`virgl_drm_winsys_create()` 在建 context 前就放弃。改为写穿指针后 `CONTEXT_INIT`/`EXECBUFFER` 随之出现。另需 `version_major=0`（Mesa 的 `virgl_drm_get_version()` 对 major!=0 返回 -EINVAL，实测确认）。详见 §0.8 |
+| guest 里的 GL/GLES 客户端 | **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
+| DRM GEM 对象模型 | **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念，见 §8.1 |
+| KMS 对象模型 | **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
+| 真 dma-buf（PRIME） | 未实现 | 仍然是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见。A20OS 无跨进程 VMO 共享、无 mmap-offset 协议，所以这是从零做而不是打补丁。**本轮修掉的是导出/导入本身的正确性**：映射表原先按 fd *编号* 记录且从不删除，用户态一 close，内核就把该编号复用给别的文件，于是 `PRIME_FD_TO_HANDLE` 会把旧 GEM handle 发给一个不相干的 fd——而 handle 是能经 `drm_linux_mmap()` mmap 的。现在按 `vfile.identity`（单调递增的 per-open id）记录，用户已关闭的条目会被回收，写不进表的 fd 不再发出去。真正共享内存仍然没有 |
+| 合成器 GL 渲染器 | 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
+| Mesa/virgl 用户态客户端 | 未挂载验证 | UAPI 已就绪；A20OS 不自建 DRI 驱动，由 stock Mesa 提供（见上一行） |
 
 ## 0.5 本轮（`feat/graphics-hardening`，续）：像素回读通了，根因不是命令长度
 
@@ -313,8 +313,8 @@ Mesa，装进 guest 后行为与发行版版**逐字节一致**——发行版�
 
 | 模式 | 命令 | 作用 | A20 状态 |
 |---|---|---|---|
-| 2D | `RESOURCE_CREATE_2D` / `TRANSFER_TO_HOST_2D` / `FLUSH` | 把像素块 blit 到 scanout | ✅ 现有 fbdev 路径 |
-| 3D (virgl) | `CTX_CREATE` / `RESOURCE_CREATE_3D` / `SUBMIT_3D` / `TRANSFER_TO_HOST_3D` / BLOB | host 端 GL 上下文 + 命令流 | ⚠️ 命令封装已实现，但无 backing、无用户态客户端（见 §0） |
+| 2D | `RESOURCE_CREATE_2D` / `TRANSFER_TO_HOST_2D` / `FLUSH` | 把像素块 blit 到 scanout | 现有 fbdev 路径 |
+| 3D (virgl) | `CTX_CREATE` / `RESOURCE_CREATE_3D` / `SUBMIT_3D` / `TRANSFER_TO_HOST_3D` / BLOB | host 端 GL 上下文 + 命令流 | 命令封装已实现，但无 backing、无用户态客户端（见 §0） |
 
 设备 feature 位：`VIRTIO_GPU_F_VIRGL (bit 0)` 表示 host 支持 3D；`VIRTIO_GPU_F_CONTEXT_INIT (bit 4)` 表示 context 初始化协议。
 
@@ -369,18 +369,18 @@ Mesa，装进 guest 后行为与发行版版**逐字节一致**——发行版�
 ```
 用户态 (Mesa virtio_gpu_dri.so / gpu3d_test)
    │ ioctl(/dev/dri/card0, DRM_IOCTL_VIRTGPU_*)
-   ▼
+   ↓
 kernel/fs/devfs/devfs.c   DEVFS_DRM open → drm_create_vfile()
-   ▼
+   ↓
 kernel/drivers/gpu/drm.c drm_ioctl() → drm_virtgpu_*
    │  解析 GEM handle、attach backing、copy 命令流（内核不解码 virgl 字节）
-   ▼
+   ↓
 kernel/drivers/gpu/virtio_gpu.c 的 gpu_dev_ops_t 3D ops
    │  ctx_create / resource_create_3d / resource_attach_backing / submit_3d
-   ▼
+   ↓
 virtio_gpu_send_cmd() / virtio_gpu_send_cmd_big() / virtio_gpu_submit_3d()
    │  controlq 描述符链 + MMIO notify
-   ▼
+   ↓
 QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 ```
 
@@ -467,7 +467,7 @@ PASS 那行现在是**有像素证据**的：两遍颜色都由 host 渲染出�
 
 但**这仍然是手写命令流的证据，不是 Mesa 的**。`gpu3d_test` 自己发
 `DRM_IOCTL_VIRTGPU_*`，所以它不经过 DRI 驱动；stock Mesa 能否用上这条通路是另一个
-命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#80-本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
+命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 
@@ -862,10 +862,10 @@ BDF 用哪个都行，只要 realpath 与 `/sys/bus/pci/devices/<bdf>` 自洽，
 （该节点当前是个没人读的空目录），指向 `/sys/devices/pci0000:00/0000:00:01.0/virtio0`：
 
 - `drmGetNodeType()`：解析 `/sys/dev/char/226:0/device` → `/sys/devices/pci0000:00/0000:00:01.0/virtio0`
-  → 同时命中 `/pci` 与 `/virtio` → 判定为 PCI ✓
+  → 同时命中 `/pci` 与 `/virtio` → 判定为 PCI
 - `drmGetDeviceName()`：realpath 同上，按 `/virtio` 截断 → `/sys/devices/pci0000:00/0000:00:01.0`
-  → 从那里读 5 个属性 ✓
-- `stat("/sys/dev/char/226:0/device/drm")` → `.../0000:00:01.0/virtio0/drm` 存在 ✓
+  → 从那里读 5 个属性
+- `stat("/sys/dev/char/226:0/device/drm")` → `.../0000:00:01.0/virtio0/drm` 存在
 - 注意要只对 DRM 226:0 特判：`SF_DEV_CHAR_ENTRY` 的 `device` 子节点是输入设备共用的，
   全局改成软链会牵动 evdev 一侧。
 
@@ -1287,7 +1287,7 @@ Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
 ```
 
 最后几行网络错误正是标题界面会做的事（拉 Realms 通知与用户资料），并且全程没有任何
-`CXA_THROW` / `terminate called` ⇒ MC 走到了主菜单 ✓。
+`CXA_THROW` / `terminate called` ⇒ MC 走到了主菜单。
 
 机制：LWJGL 自带的 `libopenal.so` 是 glibc 构建，在这个 musl 客体里经 gcompat 运行，
 在声音引擎初始化时抛未捕获的 C++ 异常（先看到 `std::system_error`；沿这条线改到走 fallback 后，
@@ -1314,7 +1314,7 @@ Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
 - ⇒ 整段时间里桌面上从未出现过 MC 的窗口（3 次尝试都没有）。
 
 因此目前只能说 MC 到达了客户端内部逻辑层面的主菜单；
-要「能玩」，还差让它的窗口真正被合成器映射/呈现出来 ✗。这与第 8 节早先记过的
+要「能玩」，还差让它的窗口真正被合成器映射/呈现出来 （错误）。这与第 8 节早先记过的
 「窗口建出来之后又消失」是同一族问题。
 
 ⇒ 下一步方向：查 MC 的 `wl_surface` 生命周期，即窗口创建后是否 `commit`/被映射、labwc 是否收下、
@@ -1336,11 +1336,11 @@ Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
   / `ZINK: vkCreateInstance failed` / `egl: failed to create dri2 screen`，但它们是非致命的，齿轮照跑。）
 - 截屏画像把两者分得很清楚：
   ```
-  ct2/ct3/ct4（es2gears 那段）: blue=84% dark=10%   ← 多出一块暗色区域 = 它的窗口 ✓
+  ct2/ct3/ct4（es2gears 那段）: blue=84% dark=10%   ← 多出一块暗色区域 = 它的窗口
   ct5..ct12（MC 那段及之后） : blue=95% dark= 2%   ← 与纯桌面一致，没有 MC 窗口
   ```
 
-⇒ 合成器完全能呈现一个真实的 Wayland GL 客户端窗口 ✓；不出现的是 MC 自己的窗口 ✗。
+⇒ 合成器完全能呈现一个真实的 Wayland GL 客户端窗口；不出现的是 MC 自己的窗口 （错误）。
 
 结论（病灶收窄）：窗口呈现问题不在合成器、也不在 EGL/Wayland 链（对照客户端一切正常），
 而在 MC / GLFW 这条自身路径上（窗口是否创建、`wl_surface` 是否 `attach`/`commit`、是否被过早销毁）。
@@ -1361,7 +1361,7 @@ WL_ATTACH=0   WL_COMMIT=0   WL_DAMAGE=0
 ```
 
 连对照客户端 es2gears 也是 0，而它明明在渲染（日志里稳定 280~306 FPS），
-所以不是「没人调用」，而是「拦错了符号」 ✗。
+所以不是「没人调用」，而是「拦错了符号」 （错误）。
 
 原因：在 wayland-client 的头文件里，`wl_surface_attach` / `wl_surface_commit` /
 `wl_surface_damage` / `wl_surface_damage_buffer` 全都是 `static inline` 包装，
@@ -1374,13 +1374,13 @@ WL_ATTACH=0   WL_COMMIT=0   WL_DAMAGE=0
 （`wl_surface` 的 opcode：destroy=0, attach=1, damage=2, frame=3, …, commit=6）。
 
 本轮顺手拿到的另一条信息：这一轮里 MC（用 9.17 那套 env）又走通了
-`Using optional rendering extensions` → `Sound engine started` ✓，
+`Using optional rendering extensions` → `Sound engine started`，
 说明 OpenAL 那套配置是稳定可用的（客户端逻辑层一路到声音引擎），
 问题依旧集中在窗口不呈现这一件事上。
 
 ### 9.21 修好的探针 + 依赖证据：MC 走的是 X11 后端（XWayland），不是 Wayland 直接呈现
 
-9.20 的修正是对的：改拦 `wl_proxy_marshal_array_flags` 之后，同一套负载立刻抓到 322 条 marshal ✓
+9.20 的修正是对的：改拦 `wl_proxy_marshal_array_flags` 之后，同一套负载立刻抓到 322 条 marshal
 （拦静态内联那版是 0）。
 
 按接口名统计（整份日志）：
@@ -1405,8 +1405,8 @@ WL_ATTACH=0   WL_COMMIT=0   WL_DAMAGE=0
 `libXinerama.so.1`、`libX11-xcb.so.1`、`libXrender.so.1`、`libXext.so.6`、`libGLX.so.0`、`libGL.so.1`。
 这正是 GLFW 的 X11 后端依赖集（GLFW 3.3 的后端是编译期选定的，LWJGL 带的就是 X11 版）。
 
-⇒ MC 的窗口是 X11 窗口，靠 XWayland 映射进 Wayland 合成器 ✓。因此：
-- 它本来就不会创建 `wl_surface`（那 322 条里的 Wayland 流量基本属于 es2gears）✓；
+⇒ MC 的窗口是 X11 窗口，靠 XWayland 映射进 Wayland 合成器。因此：
+- 它本来就不会创建 `wl_surface`（那 322 条里的 Wayland 流量基本属于 es2gears）；
 - 「窗口不出」的病灶在 XWayland / labwc 的 xwm 一侧，不在 Wayland 客户端的窗口路径上。
 
 日志里已经有 XWayland 的报错（前面几轮多次出现）：
@@ -1433,12 +1433,12 @@ glfwGetWaylandWindow
 ```
 
 ⇒ 这个 GLFW 编译了 Wayland 支持（双后端），后端是运行期选的；而双后端构建也会链接 libX11
-（GLFW 的 Wayland 路径仍会用到 X11 的一些设施），所以「日志里有 libX11」并不能证明它选了 X11 ✗。
+（GLFW 的 Wayland 路径仍会用到 X11 的一些设施），所以「日志里有 libX11」并不能证明它选了 X11 （错误）。
 
 由此得到一个便宜的判别手段：会话里 `DISPLAY=:0`（XWayland）是设着的；若 GLFW 因此选了 X11，
-那么把 `DISPLAY` unset 就可能把它逼上 Wayland，而「Wayland 原生呈现」已被 9.22 的对照证明是通的 ✓。
+那么把 `DISPLAY` unset 就可能把它逼上 Wayland，而「Wayland 原生呈现」已被 9.22 的对照证明是通的。
 
-**本轮实验（MC 的 `DISPLAY` unset）没能给出结论** ✗：这一轮 MC 又停在
+**本轮实验（MC 的 `DISPLAY` unset）没能给出结论** ×：这一轮 MC 又停在
 `Backend library: LWJGL version 3.3.3+5` 之后（就是那个间歇性停点），根本没走到 GLFW 建窗口那一步：
 
 ```
@@ -1465,25 +1465,25 @@ W21 env WAYLAND_DISPLAY=wayland-0 DISPLAY=[unset]
 
 ⇒ 结论一（9.21 的推断其实是对的）：会话默认（`DISPLAY=:0` 已设）时，MC 的进程只加载 X11 那一套，
 完全不加载 `libwayland-client` / `libxkbcommon` ⇒ GLFW 选的就是 X11 后端，
-MC 的窗口是 XWayland 的 X11 窗口 ✓。
+MC 的窗口是 XWayland 的 X11 窗口。
 （9.23 说「它也可能选 Wayland」在机制上成立：它确实编译了 Wayland 支持；但实测没有选。）
 
 ⇒ 结论二（`unset DISPLAY` 这个杠杆确实有效）：unset 之后 MC 改加载 Wayland 那一套
 （`libwayland-client` / `libwayland-cursor` / `libwayland-egl` + `libxkbcommon`）
-⇒ 后端被成功切到 Wayland ✓。
+⇒ 后端被成功切到 Wayland。
 
 ⇒ 结论三（但两条路现在都走不到「窗口出现」）：
 - X11 路（默认）：MC 约 1/3 的尝试能走到主菜单逻辑，但 X11 窗口根本不会被呈现。
-  9.22 已用 `glxgears` 证明任何 X11 客户端都不出现 ⇒ 这条路上 MC 不可能有窗口 ✗；
+  9.22 已用 `glxgears` 证明任何 X11 客户端都不出现 ⇒ 这条路上 MC 不可能有窗口 ×；
 - Wayland 路（unset `DISPLAY`）：3/3 全部停在 `Backend library: LWJGL version 3.3.3+5` 之后
-  （比默认的 ~1/3 更差）⇒ 这条路上 MC 走不到建窗 ✗。
+  （比默认的 ~1/3 更差）⇒ 这条路上 MC 走不到建窗 （错误）。
 
 所以「窗口不出现」至此被拆成两条独立的工作线：
 
 1. 修 XWayland / labwc-xwm 的 X11 窗口呈现（入口就是 9.21/9.22 里的
    `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`），修好后 MC 走默认的 X11 路就能出窗；
 2. 修「Wayland 路在 renderer 之后停住」，修好后用 `unset DISPLAY` 把 MC 切到 Wayland 即可出窗
-   （而「Wayland 原生呈现」已被 `es2gears_wayland` 证明是通的 ✓）。
+   （而「Wayland 原生呈现」已被 `es2gears_wayland` 证明是通的）。
 
 ### 9.25 MC 的进程从不调用 `XMapWindow` —— 哪怕是走到 `Sound engine started` 的那一轮
 
@@ -1507,15 +1507,15 @@ XMAPWINDOW=0   XMAPRAISED=0   XMAPSUBWINDOWS=0
 
 同轮的 dlopen 再次确认后端（只加载 libX11 一族，没有 libwayland / libxkbcommon）。
 
-这说明：即便这一轮 MC 走到了声音引擎，**它也没有 map 出任何 X 窗口** ✗。
+这说明：即便这一轮 MC 走到了声音引擎，**它也没有 map 出任何 X 窗口** （错误）。
 
 一个很可能的解释（下一步该先验证）：原版 MC 的窗口是「先隐藏创建、到主菜单才显示」。
 GLFW 先 `XCreateWindow`（不 map），真要显示时才由 `glfwShowWindow` 调 `XMapWindow`。
-也就是说「窗口不出现」可能不是呈现问题，而是 MC 根本没走到「显示窗口」那一步 ✗，
+也就是说「窗口不出现」可能不是呈现问题，而是 MC 根本没走到「显示窗口」那一步 ×，
 那就应当把重心移回停点（工作线 B），而不是合成器。
 
 但另一边的问题依然独立存在：`glxgears`（一个会 map 自己窗口的普通 X11 客户端，见 9.22）
-同样不出现在屏上 ✗ ⇒ X11 窗口的呈现确实也坏着 ✓（工作线 A 仍然成立）。
+同样不出现在屏上 × ⇒ X11 窗口的呈现确实也坏着（工作线 A 仍然成立）。
 
 ⇒ 两条工作线都还在，但优先级应当调整：先修停点（B），
 因为 MC 连「显示窗口」那一步都还没走到，先修呈现（A）也看不出结果。
@@ -1530,23 +1530,23 @@ GLFW 先 `XCreateWindow`（不 map），真要显示时才由 `glfwShowWindow` �
 
 ```
 XK1 glxgears start（行 308） … XK2 glxgears end（行 1096）
-行 352: XCREATEWINDOW  a=0x12c0000012c b=0x1     ← 落在 glxgears 相内 ✓
-行 386: XMAPWINDOW     a=0x1 b=0x400002          ← 落在 glxgears 相内 ✓
+行 352: XCREATEWINDOW  a=0x12c0000012c b=0x1     ← 落在 glxgears 相内
+行 386: XMAPWINDOW     a=0x1 b=0x400002          ← 落在 glxgears 相内
 counts: create=1  map=1（全部落在 glxgears 相）
 ```
 
 （glxgears 也确实在渲染：`3624 frames in 5.0 seconds = 724.628 FPS`。）
-而 MC 相（行 1099..2153）里这两个计数都是 0 ✓。
+而 MC 相（行 1099..2153）里这两个计数都是 0。
 
 ⇒ 两个结论，现在都建立在经过验证的仪器上：
 
-1. MC 真的从不创建、也不 map 任何 X 窗口 ✓（不是探针失灵），即使它走到
-   `Sound engine started`（9.25 那一轮）也没有 ✗。
+1. MC 真的从不创建、也不 map 任何 X 窗口（不是探针失灵），即使它走到
+   `Sound engine started`（9.25 那一轮）也没有 （错误）。
    也就是说 MC 的 GL 链路是在没有窗口的情况下走完的（很可能是 headless /
    `EGL_PLATFORM=surfaceless` 那类路径；而 render node `renderD128` 恰好是后来才加上的，见早先记录）。
    这条要么查「MC/GLFW 的窗口创建为什么失败」，要么查「它为什么被绕过」。
-2. X11 窗口确实被创建/map 了，但不会被呈现 ✓：`glxgears` 明明建了窗也 map 了（上面两行），
-   而 9.22 的截屏证明它不出现在屏上 ⇒ XWayland / wlroots-xwm 没有把它合成出来 ✓
+2. X11 窗口确实被创建/map 了，但不会被呈现：`glxgears` 明明建了窗也 map 了（上面两行），
+   而 9.22 的截屏证明它不出现在屏上 ⇒ XWayland / wlroots-xwm 没有把它合成出来
    （入口仍是 `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`）。
 
 因此最终把两件事分清：
@@ -1563,7 +1563,7 @@ counts: create=1  map=1（全部落在 glxgears 相）
 
 结果：
 
-- XWayland 本身是活的：`/tmp/.X11-unix/X0` 存在 ✓；`xprop -root` 有响应 ✓，
+- XWayland 本身是活的：`/tmp/.X11-unix/X0` 存在；`xprop -root` 有响应，
   且其启动横幅如实打印了已知问题：
   ```
   Xwayland glamor: GBM Wayland interfaces not available
@@ -1572,15 +1572,15 @@ counts: create=1  map=1（全部落在 glxgears 相）
   Errors from xkbcomp are not fatal to the X server
   ```
 - 但 X11 客户端的窗口同样不出现：6 张截屏里 xt2..xt6 全是 `blue=95% dark=3%`（纯桌面），
-  与 MC 那几轮一模一样 ✗。
+  与 MC 那几轮一模一样 （错误）。
 
 三个对照放在一起，结论唯一：
 
 | 客户端 | 类型 | 窗口是否出现 |
 |---|---|---|
-| `es2gears_wayland` | Wayland 原生 GL | ✅ 出现（画像 `blue=84% dark=10%`） |
-| `glxgears`（经 XWayland） | X11 | ❌ 不出现 |
-| Minecraft（GLFW 的 X11 后端，经 XWayland） | X11 | ❌ 不出现 |
+| `es2gears_wayland` | Wayland 原生 GL | 出现（画像 `blue=84% dark=10%`） |
+| `glxgears`（经 XWayland） | X11 | 不出现 |
+| Minecraft（GLFW 的 X11 后端，经 XWayland） | X11 | 不出现 |
 
 ⇒ **这台桌面上「X11（XWayland）的窗口不会被呈现」**；Wayland 原生窗口则一切正常。
 MC 恰好是 X11 客户端（见 9.21：LWJGL 带的 GLFW 是 X11 构建），所以它必然是受害者。
@@ -1589,7 +1589,7 @@ MC 恰好是 X11 客户端（见 9.21：LWJGL 带的 GLFW 是 X11 构建），�
 两个可行动方向：
 
 1. 让 MC 走 Wayland（最干净）：给它一个 Wayland 构建的 GLFW（LWJGL 现带的是 X11 版），
-   于是它不再经过 XWayland，而「Wayland 原生呈现」这条路已被对照证明是通的 ✓；
+   于是它不再经过 XWayland，而「Wayland 原生呈现」这条路已被对照证明是通的；
 2. 修 XWayland / labwc-xwm：查清为什么 X11 窗口不被呈现（9.21 里 labwc 已在报
    `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`）。这条更深，但能根治所有 X11 应用。
 

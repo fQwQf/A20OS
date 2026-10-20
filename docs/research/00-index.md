@@ -31,7 +31,7 @@
 | 迁移终点（叙事） | 单调采用梯子：Linux ABI（无纪律）→ 信封（预算）→ Native ABI（完整能力） | 没有目的地，"能力系统的渐进采用"故事不成立，信封退化为"更花哨的沙箱" |
 | 架构层（职责分工） | Native ABI = 可信组件的架构（显式最小权限、typed IPC、委托）；信封 = 不可信组件的防御（强制预算） | 防御只约束"扩散"，架构才实现"精确"，两者互补 |
 
-已识别的弱点与对策：Native ABI 生态薄弱，审稿人可称其为"没人用的平行 API"。进展：mksh 已移植到 Native ABI（`smoke-mlibc-mksh`，内建 + 顺序外部命令经能力安全 `task_clone` 续体 + 检查点 SIGCHLD 完整可用），证明 Native ABI 不是只能跑 demo。对策：① 论文坚持"Native ABI 非独立贡献，而是基座+目的地"（贡献表已是如此）；② 评估中演示一个信封做不到、Native 才能做的场景（如跨信任域多方委托 + typed IPC，见 10 §E6 扩展），让 Native ABI 挣得存在理由。
+已识别的弱点与对策：Native ABI 生态薄弱，审稿人可称其为"没人用的平行 API"。进展：mksh 已移植到 Native ABI（`smoke-mlibc-mksh`，内建 + 顺序外部命令经能力安全 `task_clone` 续体 + 检查点 SIGCHLD 完整可用），证明 Native ABI 不是只能跑 demo。对策：(1) 论文坚持"Native ABI 非独立贡献，而是基座+目的地"（贡献表已是如此）；(2) 评估中演示一个信封做不到、Native 才能做的场景（如跨信任域多方委托 + typed IPC，见 10 §E6 扩展），让 Native ABI 挣得存在理由。
 
 ---
 

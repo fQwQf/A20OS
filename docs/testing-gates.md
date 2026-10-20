@@ -227,7 +227,7 @@ MMTEST_RESULT: PASS
 >   （八个层级里的 3..7 此前被静默丢掉），读数形如
 >   `full at level 1: 749` / `full at level 2: 3169`。
 >
->   ⚠️ 这一行曾经被读错过，roadmap §13.21 更正并留了痕：`ARCH_PT_ROOT_LEVEL` 在
+>   这一行曾经被读错过，roadmap §13.21 更正并留了痕：`ARCH_PT_ROOT_LEVEL` 在
 >   riscv64 上**就是 2**，所以"根层一次都没有"是错的——**3169 次全在根层**，
 >   即 1 GiB 分辨率。教训是读这个直方图必须先确认根层是第几层，
 >   否则会把 1 GiB 的问题当成 2 MiB 的问题去修。

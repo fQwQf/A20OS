@@ -143,7 +143,7 @@ TLC 结果（OpsMax=3, DataMax=4, ExpireAt=3, MaxTick=6，3 任务 × 2 gfd × 2
 - 当前实现 126+ syscall，新增入口尚未逐项加入 SOS 规则与 error-path 精化矩阵。
 - 06 的并发精化映射与 C 内存模型论证依赖 spinlock 原子性假设，未机器检验。
 
-行动计划：① TLA+ 四模块完成（§2；模块 4 核心状态机已于 2026-08 建成并全绿——见 §2.4 进展块，剩余为咽喉覆盖矩阵联动；公平性 liveness 已于 2026-08 增补并全绿：Fairness=WF(Tick/LazyExpire/Kill) 下 ExpiryLiveness/KillLiveness/DenyAfterExpiry 通过）；② Lean 核心定理（§3，13 定理零 sorry 完成）；③ 收口矩阵逐行填实（§4）；④ 运行时不变式检查器（10 §E8）。
+行动计划：(1) TLA+ 四模块完成（§2；模块 4 核心状态机已于 2026-08 建成并全绿——见 §2.4 进展块，剩余为咽喉覆盖矩阵联动；公平性 liveness 已于 2026-08 增补并全绿：Fairness=WF(Tick/LazyExpire/Kill) 下 ExpiryLiveness/KillLiveness/DenyAfterExpiry 通过）；(2) Lean 核心定理（§3，13 定理零 sorry 完成）；(3) 收口矩阵逐行填实（§4）；(4) 运行时不变式检查器（10 §E8）。
 
 ---
 

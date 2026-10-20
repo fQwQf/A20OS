@@ -26,12 +26,12 @@ contention at zero.
 
 | Invariant / Property | Meaning | Result |
 |---|---|---|
-| `TypeOK` | `lock`/`state`/`succ` well-typed | ✅ holds |
-| `MutualExclusion` | ≤ 1 CPU in the critical section per node | ✅ holds |
-| `WaiterLinked` | every waiter is some CPU's successor | ✅ holds |
-| `FreedHasNoWaiter` | a freed node has nobody waiting on it | ✅ holds |
-| `SuccIsWaiter` | successor edges are never stale | ✅ holds |
-| `WaiterProgress` (liveness) | a waiter is eventually handed the lock | ✅ holds |
+| `TypeOK` | `lock`/`state`/`succ` well-typed | holds |
+| `MutualExclusion` | ≤ 1 CPU in the critical section per node | holds |
+| `WaiterLinked` | every waiter is some CPU's successor | holds |
+| `FreedHasNoWaiter` | a freed node has nobody waiting on it | holds |
+| `SuccIsWaiter` | successor edges are never stale | holds |
+| `WaiterProgress` (liveness) | a waiter is eventually handed the lock | holds |
 
 Fairness: `WF_vars(Enter(c))` ∧ `WF_vars(Exit(c))` for all `c` — a scheduler
 that eventually runs every runnable CPU.
@@ -45,8 +45,8 @@ Both bugs were reintroduced as single-conjunct mutants and TLC run again:
 
 | Mutant | Change | Expected failure | Result |
 |---|---|---|---|
-| Bug 1 | drop `succ' = [succ EXCEPT ![lock] = c]` from contended `Enter` | `WaiterLinked` | ✅ **violated** (5 states) |
-| Bug 2 | `Exit` always frees the lock, dropping any successor | `FreedHasNoWaiter` | ✅ **violated** (16 states) |
+| Bug 1 | drop `succ' = [succ EXCEPT ![lock] = c]` from contended `Enter` | `WaiterLinked` | **violated** (5 states) |
+| Bug 2 | `Exit` always frees the lock, dropping any successor | `FreedHasNoWaiter` | **violated** (16 states) |
 
 A third mutant was tried and **discarded as invalid**: making `Exit`'s tail
 branch `UNCHANGED succ` instead of `succ' = succ` is a no-op, because that branch

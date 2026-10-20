@@ -34,12 +34,12 @@
 - **【已落地】"设备模型这一段通了"之外，"真 A20OS guest 能进 shell 并交互"也通了。**
   端到端载体是 `smoke-hyp-shell`（真 `RAMFS_USER=1` guest）。此前两轮的红是两个不同的
   根因，本轮都修了：
-  ① **`kfree(magic=0x0)`**：合成 FDT 的 4 字节对齐 padding 用 `blob_u32()` 写 4 字节，
+  (1) **`kfree(magic=0x0)`**：合成 FDT 的 4 字节对齐 padding 用 `blob_u32()` 写 4 字节，
   `len & 3` 永不归零（写 4 不改变对 4 的余数），结构块失步、guest 解析器在 0x44 处
   脱同步 → 解析失败回退板级 16 GiB 窗口 → guest 越窗分配 → stage-2 兜底 RAZ 喂零 →
   `kfree` 读到 `magic=0x0`。修 `user/cmds/core/hyp/hyp_guest.c`：`blob_name`/`blob_value`
   改逐字节补零，另修 `st.p[0]` → `sr.p[0]` 笔误（strings 块偏移 0 就是空串）。
-  ② **内核栈页 use-after-free / `corrupted kernel sp`**（修掉①之后暴露）：guest 入口帧把
+  (2) **内核栈页 use-after-free / `corrupted kernel sp`**（修掉(1)之后暴露）：guest 入口帧把
   `sstatus` 置 `SPP|SPIE|SIE` 含 **FS=Off**（`kernel/arch/riscv64/hyp/hyp_vcpu_asm.S`），
   这是宿主级 `mstatus.FS` 闸门；VS 模式下 guest 自己的 `csrs sstatus` 只写 `vsstatus`，
   于是它的非法指令处理程序连保存 FP 帧的 `fsd` 都开不出来，QEMU `-d int` 实测同一点
@@ -108,8 +108,8 @@ v2 已定义的委托/设备/引导面
         │
         └─ §5 x4 根表 / §6 真机验证：与上面正交，可在任意时点插入
 
-     §2 的中断注入 ──✗─→ §4：两者无依赖（virtio-blk 有 poll-only 完成路径）
-     §4.1 的 RAMFS_USER=1 guest ──✗→ §4：那条 guest 根本不需要块设备
+     §2 的中断注入 ──×─→ §4：两者无依赖（virtio-blk 有 poll-only 完成路径）
+     §4.1 的 RAMFS_USER=1 guest ──×→ §4：那条 guest 根本不需要块设备
 ```
 
 ---

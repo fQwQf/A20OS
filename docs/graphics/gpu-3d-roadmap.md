@@ -263,7 +263,7 @@ GPU3D_TEST: PASS (UAPI surface works; rendering still unproven)
 
 > 这是**上一轮**的历史输出，保留作对照。那条 16 字节占位流正是本轮要纠正的
 > 缺陷：它报 PASS 时并没有渲染任何东西。当前门禁提交真实 `VIRGL_CCMD_CLEAR`
-> （76 字节）并逐像素回读，见 [§7.2](#72-命令流编码与像素回读本轮落地且证明了一件事)。
+> （76 字节）并逐像素回读，见 [§7.2](#命令流编码与像素回读本轮落地且证明了一件事)。
 > 上面最后两行**不再是**现在的输出。
 
 反向用例（`GPU_3D=0`）门禁确实 **FAIL**（点名五条缺失 pattern），
@@ -343,7 +343,7 @@ direct rendering Yes）：
 |---|---|
 | `egl-headless`（本项目此前默认） | QEMU 静默降级 → guest `2D only (no VIRGL feature)` |
 | `gtk` | `The display backend does not have OpenGL support enabled`，设备起不来 |
-| `gtk,gl=on` | ✅ guest 报 `virtio-gpu 3D (virgl)`，`VIRTGPU_PARAM_3D_FEATURES=1` |
+| `gtk,gl=on` | guest 报 `virtio-gpu 3D (virgl)`，`VIRTGPU_PARAM_3D_FEATURES=1` |
 
 `instances/smoke-gpu3d-riscv64.toml` 已改用 `gtk,gl=on`。代价：门禁因此需要
 一个 X display（`gtk,gl=on` 要 X），这对 CI 是真实成本，已写在实例注释里。
@@ -497,16 +497,16 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。症状指向
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| stock Mesa `virtio_gpu_dri.so` 实际 attach | ❌ 未验证 | VIRTGPU UAPI 已就绪，但宿主 renderer 太老（§5）。不得暗示已验证 |
-| 命令流语义 | ❌ 未验证 | `EXECBUFFER` 往返只证明字节到了 host，不证明渲染了任何东西。内核按设计不解析命令流。没有像素回读 |
-| 像素回读比对 | ⚠️ **回读已实现；本机无法判定** | 编码与回读都已落地（§7.1）。`gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR` 并 mmap 该 GEM 逐像素比对两轮颜色。但本机 host renderer 建不出离屏 GL context，vrend 的 context 出生即 `in_error`，两轮都是 4096/4096 未变，因此"CLEAR 是否生效"在本机既不能证实也不能证伪 |
-| `GBM` | ❌ 未通 | `gbm_create_device()` 返回 NULL，钉在 Mesa 的 DRI screen 创建（KMS 路径）。已排除十条假设。对 Wayland 客户端不是阻塞项。最有效的下一步是 guest 里 strace，不是再来一轮假设 |
-| 真 DMA-BUF | ❌ 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO 快照进 memfd，导出后再写入不可见。但基座是现成的，比"从零做"的说法轻：memfd 持有一个 `pfn_t *pages` 物理页数组，mmap 直接把这些 PFN 映射进 VMA，所以它本身已经是可跨进程共享的物理内存对象。真正缺的是一个由 GEM 的 VMO 支撑的 fd：DRM 自己的 mmap 是把 handle 编进 offset 后直接 `mm_mmap_vmo`，PRIME 需要的是一个 mmap op 映射 VMO 的新 vfile 类型，外加 fd 生命周期与引用计数接线。跨文件改动，涉及 `fs/vfs` 与 `mm`，仍然单独立项。不要假装做了 |
-| `VIRTGPU_RESOURCE_CREATE_BLOB` | ✅ 报 0 是正确答案，不是缺口 | 见下方专条 |
-| 窗口化/局部 present | ✅ 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
-| 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | ✅ 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留；为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
-| 硬件视频解码 | ❌ 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/status/current/known-issues.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
-| `A20_RENDERER=gl`（合成器 GL 渲染器） | ❌ 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
+| stock Mesa `virtio_gpu_dri.so` 实际 attach | 未验证 | VIRTGPU UAPI 已就绪，但宿主 renderer 太老（§5）。不得暗示已验证 |
+| 命令流语义 | 未验证 | `EXECBUFFER` 往返只证明字节到了 host，不证明渲染了任何东西。内核按设计不解析命令流。没有像素回读 |
+| 像素回读比对 | **回读已实现；本机无法判定** | 编码与回读都已落地（§7.1）。`gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR` 并 mmap 该 GEM 逐像素比对两轮颜色。但本机 host renderer 建不出离屏 GL context，vrend 的 context 出生即 `in_error`，两轮都是 4096/4096 未变，因此"CLEAR 是否生效"在本机既不能证实也不能证伪 |
+| `GBM` | 未通 | `gbm_create_device()` 返回 NULL，钉在 Mesa 的 DRI screen 创建（KMS 路径）。已排除十条假设。对 Wayland 客户端不是阻塞项。最有效的下一步是 guest 里 strace，不是再来一轮假设 |
+| 真 DMA-BUF | 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO 快照进 memfd，导出后再写入不可见。但基座是现成的，比"从零做"的说法轻：memfd 持有一个 `pfn_t *pages` 物理页数组，mmap 直接把这些 PFN 映射进 VMA，所以它本身已经是可跨进程共享的物理内存对象。真正缺的是一个由 GEM 的 VMO 支撑的 fd：DRM 自己的 mmap 是把 handle 编进 offset 后直接 `mm_mmap_vmo`，PRIME 需要的是一个 mmap op 映射 VMO 的新 vfile 类型，外加 fd 生命周期与引用计数接线。跨文件改动，涉及 `fs/vfs` 与 `mm`，仍然单独立项。不要假装做了 |
+| `VIRTGPU_RESOURCE_CREATE_BLOB` | 报 0 是正确答案，不是缺口 | 见下方专条 |
+| 窗口化/局部 present | 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
+| 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留；为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
+| 硬件视频解码 | 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/status/current/known-issues.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
+| `A20_RENDERER=gl`（合成器 GL 渲染器） | 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
 
 ---
 
@@ -556,7 +556,7 @@ OpenGL 4.6，以及解锁 Venus/Vulkan。这是一条需要单独决策的宿主
 | `PIPE_CLEAR_COLOR0 = 1<<2 = 0x4` | `p_defines.h:217` |
 | CLEAR 的颜色是 **4 个 float** 的位模式（`memcpy(colorf, color->f, ...)`），不是 uint32 | `vrend_renderer.c:4849` |
 
-⚠️ 凭记忆一定会错的两处，正是上面最后两条：头里还有一个**容易整个忘掉的
+凭记忆一定会错的两处，正是上面最后两条：头里还有一个**容易整个忘掉的
 object type 字段**（8 位），长度是 **16 位 dword** 而不是我记忆里的 24 位；
 颜色是 float 位模式，写成 `0x00ff00ff` 这种 uint32 会被 `glClearColor` 读成
 NaN。
@@ -648,7 +648,7 @@ GPU3D_TEST: SKIP host cannot render (no capset), so the pixel mismatch (4096/409
 即：**3D 传输通路 + VIRTGPU UAPI 表面（含 backing attach）已验证**，且这个
 验证会失败；反向用例确认了门禁不是空转的。
 
-> ⚠️ 上表是**上一轮**的证据，其中的 `EXECBUFFER accepted a 16 byte stream` 属于
+> 上表是**上一轮**的证据，其中的 `EXECBUFFER accepted a 16 byte stream` 属于
 > 已被本轮替换掉的占位流。当前门禁提交 76 字节的真实 `VIRGL_CCMD_CLEAR` 并要求
 > `pixel readback ok`，`expect[]` 也随之加严；本轮的正反双向实测见 §7.2。
 
@@ -781,7 +781,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，建议单独立项排�
    不受 A20OS 侧任何限制影响。
 10. 合成器呈现（里程碑 B，`WLR_RENDERER` / 窗口化 present）。本机可做，
     解锁所有 GL 客户端，比继续啃 GPU 性价比高。
-11. ✅ 命令流语义验证 + 像素回读（§7.2）——**编码与回读已落地**（真实
+11. 命令流语义验证 + 像素回读（§7.2）——**编码与回读已落地**（真实
     `VIRGL_CCMD_CLEAR` + mmap 逐像素比对），且已证明"host 收下字节"不等于
     "渲染成功"。**剩下的判定卡在宿主**：本机 renderer 建不出离屏 GL
     context，vrend 的 context 出生即 `in_error`，像素一个都不变。要把这一项

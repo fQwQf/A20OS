@@ -1,0 +1,21 @@
+# 纯命令行工作站（apk world 'cli'，distro 模式）。Alpine 上游包的 zsh +
+# GNU coreutils/findutils/grep/sed/gawk + git/vim/tmux/htop/curl/python3 等，
+# 由 mkrootfs 组进 build/images/cli-riscv64.img；内核把它挂到 /extra，A20OS
+# 的 init 检测到 /etc/a20-distro 后 chroot 进去 exec /sbin/init。
+# 首次组装需要从 Alpine 镜像站拉取上游包，之后走 build/cache/apk 缓存。
+#
+#   tools/a20 run cli-riscv64
+#
+# 与 server-riscv64 的区别只在 world 内容：那个是"最小服务器形态"
+# （busybox ash + dropbear + chrony），这个是给人用的命令行环境。
+name = "cli-riscv64"
+description = "Command-line workstation via apk world 'cli' (zsh, GNU coreutils, git/vim/tmux/curl/python3)"
+arch = "riscv64"
+
+[machine]
+memory = "2G"
+smp = 2
+
+[rootfs]
+world = "cli"
+world_size_mb = 1024
