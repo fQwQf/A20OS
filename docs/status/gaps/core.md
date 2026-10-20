@@ -42,4 +42,11 @@
 - 现状：prepare 后 fork/COW 窗口已补持锁可写复查与解锁重试，`pi-cow-isolation` 在双架构单核/四核通过。
 - 缺口：确定性窄窗口故障注入仍缺失，无法证明该窗口被覆盖。
 - 关闭条件：注入在 COW 后、解锁重试路径上命中并验证不丢唤醒；负控失败。
-- 来源：[current/known-issues.md](../current/known-issues.md) 当前工程队列。
+- 来源：原 `known-issues.md` 当前工程队列。
+
+### CORE-07 arm32 的 FP 上下文
+
+- 现状：riscv32 与 ppc64le 已补 trap 帧的 FP 保存（ppc64le 仅编译验证）；arm32 未修。
+- 缺口：arm32 用户态启用 VFP（`-mfpu=vfpv3-d16 -mfloat-abi=hard`），trap 帧与 `trap.S` 用逐字段断言强绑定，改动未验证；本机无 arm 工具链。
+- 关闭条件：arm32 上 FP 上下文切换用例通过；或明确降级为不支持并写入平台契约。
+- 诊断：[notes/core-arm32-fp.md](notes/core-arm32-fp.md)。

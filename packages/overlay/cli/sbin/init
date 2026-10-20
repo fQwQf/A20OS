@@ -36,10 +36,27 @@ mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 
+# The console tty reports a hardcoded 24x80, and the host terminal's real size
+# never reaches the guest.  zsh's line editor redraws against that 80, which is
+# what makes typing and history recall garble the screen on a wider terminal.
+# console-size asks the terminal itself (DSR) and prints COLUMNS/LINES; zsh's
+# ZLE honours $COLUMNS, so exporting it here is what fixes the redraw.  It
+# times out harmlessly when the console is not a real terminal.  See
+# /usr/lib/a20/console-size and /usr/local/bin/resize-console.
+if [ -x /usr/lib/a20/console-size ]; then
+    size=$(/usr/lib/a20/console-size)
+    if [ -n "$size" ]; then
+        eval "$size"
+        export COLUMNS LINES
+    fi
+fi
+
 echo
 echo "A20OS command-line workstation ($(uname -m), Alpine userland)"
 echo "  zsh $(zsh --version 2>/dev/null | awk '{print $2}')   " \
      "coreutils $(ls --version 2>/dev/null | head -1 | awk '{print $NF}')"
+echo "  console ${COLUMNS:-?}x${LINES:-?}" \
+     "(run resize-console after resizing the window)"
 echo "  type 'help' for the A20OS builtins, 'poweroff' to leave."
 echo
 

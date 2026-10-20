@@ -1,0 +1,24 @@
+# 缺口诊断笔记
+
+这里保存 **仍未关闭** 的缺口对应的排查记录：复现条件、已排除的假设、当前怀疑点、下一步观测手段。
+台账条目只写"现状/缺口/关闭条件"，细节在这里。
+
+规则：
+
+- 一个缺口一份笔记，文件名以台账条目为主题；条目删除后，对应笔记一并删除。
+- 笔记只记录仍然有效的诊断。已被推翻的中间结论要标注"已推翻"，不要静默删掉——它解释了为什么排除了某个方向。
+- 笔记不是运行日志：不贴完整日志、不记 commit SHA。
+
+| 笔记 | 台账条目 | 主题 |
+| --- | --- | --- |
+| [desktop-x86-sigsegv.md](desktop-x86-sigsegv.md) | DESKTOP-08 | x86_64 桌面组件随机 SIGSEGV（fix8–fix11） |
+| [desktop-jvm-mpv-exit.md](desktop-jvm-mpv-exit.md) | DESKTOP-03 | java 退出码 255 / mpv 偶发崩溃 |
+| [desktop-wallpaper.md](desktop-wallpaper.md) | DESKTOP-09 | 壁纸不渲染 |
+| [desktop-panel-menu.md](desktop-panel-menu.md) | DESKTOP-10 | 面板下拉菜单项不启动应用 |
+| [desktop-backspace.md](desktop-backspace.md) | DESKTOP-11 | Backspace 失效 |
+| [desktop-dbus-credentials.md](desktop-dbus-credentials.md) | DESKTOP-12 | dbus NoReply / SCM_CREDENTIALS pid=-1 |
+| [desktop-crtc-enoent.md](desktop-crtc-enoent.md) | DESKTOP-13 | 间歇性 Failed to set CRTC |
+| [core-arm32-fp.md](core-arm32-fp.md) | CORE-07 | arm32 FP 上下文 |
+| [net-ipv6-pbuf.md](net-ipv6-pbuf.md) | NET-09 | IPv6 收包 pbuf 引用计数破坏 |
+| [fs-ext4-bitmap.md](fs-ext4-bitmap.md) | FS-09 | guest 写盘后位图校验和不一致 |
+| [fs-ext4-orphan.md](fs-ext4-orphan.md) | FS-01 | unlink 后孤儿 inode 回收 |

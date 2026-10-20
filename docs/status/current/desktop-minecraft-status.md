@@ -36,3 +36,9 @@
 详见 [GPU 共享与同步](../../graphics/virtgpu-sharing-and-sync.md)、
 [GPU 发现](../../graphics/drm-sysfs-discovery.md) 与
 [网卡枚举](../../kernel/linux-abi/interface-enumeration.md)。
+
+## 已采用的规避
+
+- **视频默认处理器是 `ffplay`**：mpv 在 A20OS 上每线程状态不可靠，overlay 里放 `ffplay.desktop`
+  接管视频 MIME；这是当前行为，不是临时手段。
+- **JVM 走 `/usr/bin/java` 封装**：`exec_path` 不解析符号链接，且 JDK 需要堆参数，封装脚本补上这两点。

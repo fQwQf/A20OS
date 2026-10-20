@@ -72,7 +72,7 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 
 `tools/a20 run xfce-{riscv64,x86_64,aarch64,loongarch64}` 是交互式桌面实例
 （aarch64 因 SMP 竞态暂以单 CPU 运行，见
-[发行版排查笔记](status/current/known-issues.md)），不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
+[缺口诊断笔记](status/gaps/notes/README.md)），不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
 `labwc` / `xfce4-panel` 进程出现，都不能单独证明桌面可用。3D 门禁的像素回读
 也不能证明 XFCE 面板、dock 与窗口交互正确。
 
@@ -89,7 +89,7 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 无本地显示器时可以使用 QEMU 的 VNC 显示与 QMP `screendump`、输入事件，显示
 后端变化需要写入验收记录。不要通过删网卡、减少 CPU 数或替换桌面组件来宣称原实例
 通过。已知故障、修复依据与实际验收记录见
-[发行版排查笔记](status/current/known-issues.md)。x86_64 的缺页/futex/PTY 回归与浏览器交互由对应 smoke 与
+[缺口诊断笔记](status/gaps/notes/README.md)。x86_64 的缺页/futex/PTY 回归与浏览器交互由对应 smoke 与
 `tools/tests/xfce-web-smoke.sh` 覆盖。
 
 Minecraft 桌面在 x86_64、aarch64、riscv64 上用
@@ -1213,3 +1213,20 @@ microbenchmark is not by itself a validated baseline or whole-OS result. The
 runner's hermetic negative-control tests are `python3 -m unittest
 tools.tests.test_v1_compare`; the command is not yet part of Make or CI, and no
 production comparison has been accepted.
+
+## 测试环境注意事项
+
+- 测试前先 `e2fsck -fn` 校验镜像，损坏的 rootfs 会伪造出内核 bug。实测一个报
+  `Block bitmap checksum does not match`、`Entry 'sys' ... unused inodes area` 的镜像，
+  会让 6 个 udev worker 全部 `timeout; kill it`；换干净镜像后为 0。损坏镜像还会造成
+  `failed to create cairo scaled font`、应用起不来等假象。新 `image-world` 产物
+  `e2fsck -fn` 是干净的（5 个 pass 全过），说明损坏不是构建期引入、而是之后发生，
+  具体来源未定位。
+- rootfs 构建：直接 `apk add` 走官方 CDN 会慢到像卡死；用预置的 `a20rootfs-builder`
+  docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。详见 [`build.md`](../../distro/build.md)。
+- 改 overlay 必须重建镜像：debugfs 对 8GiB 的 metadata_csum ext4 打不开 rw。
+- QEMU 串口日志在后台跑时的坑：镜像被 QEMU 以 RW 打开，重复启动前要清掉占用进程；
+  判断占用者看 `/proc/*/fd`，不要用 `pgrep -f`。
+- GUI 设备的 QEMU 参数：桌面 boot 需带 virtio keyboard/mouse/gpu 设备，否则没有
+  input/gpu class device。
+- 宿主噪音：宿主 systemd-udevd 偶发刷 `/sys/.../uevent: Permission denied`，与 A20OS 无关。

@@ -14,7 +14,7 @@
 - 现状：exec 会保留部分 fd 与线程语义；继承矩阵不完整。
 - 缺口：fd、线程、信号处置、`$ORIGIN`/符号链接路径在 exec 后的行为未逐项验收。
 - 关闭条件：每个继承项都有 guest 用例，成功与拒绝路径都明确。
-- 来源：[current/known-issues.md](../current/known-issues.md) 当前工程队列。
+- 来源：原 `known-issues.md` 当前工程队列。
 
 ### RUNTIME-03 Java 工作负载
 

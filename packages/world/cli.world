@@ -151,4 +151,40 @@ man-pages
 #   `ip`（netlink）失败在 `SO_SNDBUF: Not supported`；`nslookup`/`dig`（自己发
 #   UDP DNS）失败在 `address family not supported`。TCP 路径不受影响（curl
 #   返回 200 就是证据：musl 解析器在 UDP 失败后回退到 TCP DNS）。
+#
+# **四、控制台尺寸（内核侧缺口，已在本 world 内规避）**
+#
+#   A20OS 的控制台 tty 把窗口尺寸写死成 24x80（kernel/fs/devfs/tty.c:235），
+#   而 QEMU 的 `-serial stdio` 没有任何通道把宿主终端的真实尺寸带进 guest。
+#   zsh 的行编辑器按它以为的宽度折行和重绘，于是在宽度不是 80 的终端上：
+#
+#     * 输入超过第 80 列后光标位置就错了（"输入重叠"）；
+#     * 按上键调历史时按同一个错误宽度重定位光标，重绘会盖住之前的输出。
+#
+#   实测两个杠杆都能用：ZLE 认 $COLUMNS（把 COLUMNS 设成 120，它的擦除行长度
+#   立刻从 79 变成 119），tty 认 TIOCSWINSZ（`stty cols 120` 后 `stty size`
+#   报 40 120）。但 ZLE 不会主动重读 tty —— A20OS 不发 SIGWINCH —— 所以真正
+#   起作用的是 $COLUMNS；`stty` 一并设上是为了让 vim/tmux/htop 也一致。
+#
+#   尺寸由 packages/overlay/cli/usr/lib/a20/console-size 用 resize(1) 的办法问
+#   出来：存光标、移到右下角、发 DSR（ESC[6n）、读回 ESC[<row>;<col>R。stage-2
+#   init 在 exec zsh 之前调它并导出 COLUMNS/LINES。实测：
+#
+#     * 终端 120x40 → banner 报 `console 120x40`，ZLE 擦除行 119；
+#     * 终端 200x50 → banner 报 `console 200x50`，`stty size` 报 `50 200`，
+#       `COLUMNS/LINES` = 200/50，ZLE 擦除行 199；
+#     * 终端不回答（管道 / CI 日志 / `-serial file:`）→ 查询 1 秒超时，什么
+#       也不设，启动照常完成，ZLE 退回 80（不比改动前差）。
+#
+#   注意查询与应答必须走终端本身，不能走 stdout：调用方是用命令替换捕获
+#   console-size 的输出的，把查询写到 stdout 会交给 shell 而不是终端（这个
+#   错误产生过 `/sbin/init: eval: line 49: ^[[9999C^[[6n: not found`）。所以
+#   脚本里用 /dev/tty，stdout 只留给赋值。
+#
+#   另外只往右移（ESC[9999C）不够：那样读回的 row 是光标当时所在的行，高度
+#   永远是错的。必须移到右下角（ESC[9999;9999H）才能同时拿到宽和高。
+#
+#   改了终端窗口大小之后没有 SIGWINCH，shell 自己不会察觉；用
+#   `/usr/local/bin/resize-console` 手动重问一次（实测输出 `console is now
+#   200x50`）。
 

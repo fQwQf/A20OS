@@ -1,0 +1,17 @@
+#!/bin/sh
+# resize-console — re-ask the terminal how big it is.
+#
+# Run this after resizing your terminal window: A20OS does not deliver SIGWINCH
+# to the guest, so the shell cannot notice on its own.  See
+# /usr/lib/a20/console-size for why the size has to be asked for at all.
+
+assign=$(/usr/lib/a20/console-size) || exit 1
+if [ -z "$assign" ]; then
+    echo "resize-console: the terminal did not answer the size query" >&2
+    echo "  (expected when this is not run on a real terminal; set" >&2
+    echo "   A20_CONSOLE_COLS/A20_CONSOLE_ROWS to force a size)" >&2
+    exit 1
+fi
+eval "$assign"
+export COLUMNS LINES
+echo "console is now ${COLUMNS}x${LINES} (COLUMNS/LINES exported; tty updated)"

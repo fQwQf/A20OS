@@ -215,7 +215,6 @@ nav:
   - 状态与进度:
       - 状态目录说明: status/README.md
       - 模块状态: status/current/module-status-2026-10-19.md
-      - 已知问题: status/current/known-issues.md
       - 服务器就绪度: status/current/server-readiness.md
       - 1.0 进度台账: status/current/v1.0-progress.md
       - 1.0 缺口台账:
@@ -234,6 +233,19 @@ nav:
           - 安全: status/gaps/security.md
           - 文档与门禁: status/gaps/docs.md
           - 2026-10-14 triage 明细: status/gaps/requirements-2026-10-14.md
+          - 诊断笔记:
+              - 索引: status/gaps/notes/README.md
+              - x86_64 SIGSEGV: status/gaps/notes/desktop-x86-sigsegv.md
+              - JVM/mpv 退出: status/gaps/notes/desktop-jvm-mpv-exit.md
+              - 壁纸不渲染: status/gaps/notes/desktop-wallpaper.md
+              - 面板菜单: status/gaps/notes/desktop-panel-menu.md
+              - Backspace: status/gaps/notes/desktop-backspace.md
+              - dbus 凭据: status/gaps/notes/desktop-dbus-credentials.md
+              - CRTC ENOENT: status/gaps/notes/desktop-crtc-enoent.md
+              - arm32 FP: status/gaps/notes/core-arm32-fp.md
+              - IPv6 pbuf: status/gaps/notes/net-ipv6-pbuf.md
+              - ext4 位图: status/gaps/notes/fs-ext4-bitmap.md
+              - ext4 孤儿: status/gaps/notes/fs-ext4-orphan.md
       - 各子系统实现状态:
           - 集群与服务: status/current/cluster-implementation-status.md
           - 驱动: status/current/drivers-implementation-status.md
