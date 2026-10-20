@@ -63,7 +63,7 @@ LWJGL native .so。
 
 对应实例 `instances/minecraft-{aarch64,riscv64}.toml` 与 x86_64 相同：
 4 GiB 内存、4 GiB XFCE world、virgl GPU；aarch64 因 SMP 竞态固定单 CPU
-（见[已知问题](../status/current/known-issues.md)），riscv64 为 4 CPU。启动时把对应客户端
+（见[桌面当前状态](../status/current/desktop-minecraft-status.md)），riscv64 为 4 CPU。启动时把对应客户端
 目录传给 `GUI_MEDIA`：
 
 ```sh
