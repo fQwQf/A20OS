@@ -2,9 +2,7 @@
 
 The fixed C0/Cn/Rust candidate host comparison is registered in
 [`../../tools/tests/nat-host-comparison.toml`](../../tools/tests/nat-host-comparison.toml). It compiles the shared
-host oracle against the C source at commit
-`9526af438a73eb834169d002536f8e57e21f24a8`, the current C reference, and the
-Rust selector. The C0 adapter extracts only that source file into each fresh
+host oracle against the C reference source tree and the Rust selector. The C0 adapter extracts only that source file into each fresh
 runner directory; it does not checkout a revision or write source into the
 worktree. Before compiling, it asks the selected compiler for the actual
 project-header dependency closure and rejects any header whose bytes differ

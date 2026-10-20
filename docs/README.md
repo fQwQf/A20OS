@@ -13,7 +13,7 @@
 
 - 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- 状态与进度文档：`status/` 是进度台账、已知问题、子系统实现状态、验证记录、测量数据与运行证据的唯一存放处。`status/current/` 描述当前状态，`status/history/` 保留已被取代的旧记录，`status/measurements/` 放测量基线与协议，`status/evidence/` 放逐次运行的原始证据。这些内容不定义接口契约，引用前须按产生它的提交判断时效。
+- 状态与进度文档：`status/` 是进度、已知问题、子系统实现状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
 - 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
@@ -25,7 +25,7 @@
 
 - 文档描述的是**接口与设计契约**，以 HEAD 源码为最终依据；发现文档与源码不一致时，以源码为准，并欢迎直接修正文档。
 - 单篇文档头部的"最后核实"日期表示内容在该时点与源码核对过；日期久远不等于内容失效。
-- 运行类结论（PASS、耗时、性能数字）只在附上产生它的命令、配置和提交时有效。引用任何测试结论前，按 [testing-gates.md](testing-gates.md) 的入口在当前提交上重新运行；历史运行记录见 [archive/](archive/) 与 [status/evidence/](status/evidence/)。
+- 运行类结论不写入文档，运行产物也不随仓库保存。任何结论在作为当前事实引用前，必须按 [testing-gates.md](testing-gates.md) 的入口在**当前提交**上实际重跑；已冻结的里程碑审计快照见 [archive/](archive/)。
 
 刚接触项目的话，下面几条路径可能用得上。
 
@@ -40,7 +40,7 @@
 - [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、实现选择与接口冻结
 - [releases/v1.0-validation.md](releases/v1.0-validation.md)：可重建参照、行为验收、性能测量与发布阻塞
 - [releases/v1.0-comparison.md](releases/v1.0-comparison.md)：成对比较 runner 的 JSON 协议、统计方法和证据规则
-- [status/](status/README.md)：状态、已知问题、验证记录、测量数据与运行证据的统一入口
+- [status/](status/README.md)：状态、已知问题与测量协议的统一入口
 - [releases/v0.17.md](releases/v0.17.md)：v0.17 候选版本范围、构建修正与发布检查
 - [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及代码与注释规范（语言、格式、何时该写注释、锁序与 ABI 注释约定）
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式

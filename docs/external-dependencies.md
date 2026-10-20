@@ -38,6 +38,17 @@
 - 生效配置通过只读 `/proc/net/config` 暴露，格式为 `ip=`、`netmask=`、`gateway=`、`dns0=`、`dhcp=` 和 `hostname=` 行。
 - 部分 QEMU run/smoke 目标通过 `-append` 注入 NAT 参数；这只对实际导入 bootargs 的架构生效，不能覆盖当前 QEMU AArch64 的板级编译字符串。
 
+## 外部 QEMU 源码定位
+
+驱动与网络文档引用的 `qemu-10.0.13+ds/...` 路径**不属于本仓库**：它们指向 Debian 源码包 `qemu` 版本 `1:10.0.13+ds-0+deb13u1` 的解包目录。把 `.dsc` 与两个 tar 包下载到仓库外同一目录，再执行 `dpkg-source -x qemu_10.0.13+ds-0+deb13u1.dsc`；引用中的路径相对于该解包目录，不是 A20OS checkout 内的文件。
+
+以下 SHA-256 用于固定所引用的外部源码版本（未重新下载或核验 Debian 签名）：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `qemu_10.0.13+ds.orig.tar.xz` | `6a0888e806c2ffc0c5f0733e974f9aea55491950d3c47c98669c8b236dde59ae` |
+| `qemu_10.0.13+ds-0+deb13u1.debian.tar.xz` | `da73c092f5684c551b0334d675eb16a3dec91e1edea94759cfb1102fa4a0364e` |
+
 ## 用户态导入项
 
 - `EXTERNAL_USERLAND_UPGRADE_CHECKLIST`：修改 musl、sbase 或 mksh 源码/构建规则后，接受升级前必须运行 Linux 门禁组：`make check-upgrade-userland-smokes` 聚合 `smoke-abi-linux`（syscall）、`smoke-mlibc-mksh`（shell）、`smoke-mlibc-sbase`（coreutils）；lwIP 另见网络节，TLSe/wget 见各自集成说明。

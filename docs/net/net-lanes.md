@@ -1113,18 +1113,14 @@ worktree**。机制很确定：`smoke-network-suite` 走 `targets-smoke.mk:276` 
 | 修复轮 1 | `kernel/core/trap.c:19` 冲突标记、`kernel/include/mm/pt.h` `pt_meta_t` | 21:09:47 查：工作树 0 标记，index 仍 `UU` |
 | 修复轮 2 | `kernel/mm/cow.c:234/244/260/265/270` 冲突标记 | 21:01:45 查：**4 处标记俱在**，与日志完全对得上；对方 21:02:03 写盘清掉，21:09:47 查已是 0 标记，但 index 仍 `UU` |
 
-主工作区 `HEAD` 是 `4504c1223`（merge wt3/lockshard），但 `git ls-files -u` 在 21:09:47
+主工作区 `HEAD` 是一次 `wt3/lockshard` 的 merge，但 `git ls-files -u` 在 21:09:47
 **仍列着四路未合**：`kernel/core/trap.c`、`kernel/include/mm/pt.h`、`kernel/mm/cow.c`、
 `kernel/mm/pt.c`——**标记清了不等于合并完成，index 里 1/2/3 三个 stage 还在**。
 **冲突与本分支无关**，一条条核过：
 
-| 事实 | 值 |
-|---|---|
-| `kernel/mm/cow.c` 在我分支基线 `b21565373` 的 blob | `f454bab60a6e0c12407367f6decf5032a1f11c7c` |
-| 同一 blob 在主工作区 merge 的 stage 2（ours） | `f454bab60a6e0c12407367f6decf5032a1f11c7c`（**相同**） |
-| stage 3（theirs = `feat/virt-foundation`）的 blob | `984ebeedf5309fd9f875ac88ff4fe9540edbe157`（不同） |
-| `git diff b21565373 4504c1223^1 --name-only -- kernel/mm/cow.c` | 空，**本分支对 cow.c 贡献 0 字节** |
-| 主工作区 `kernel/mm/cow.c` 的 mtime | 21:02:03（我在 21:01:45 查时是 21:00:34，**两次相隔 69 秒，对方在持续写**） |
+逐条核对的结果：`kernel/mm/cow.c` 在本分支基线与主工作区 merge 的 stage 2（ours）blob 相同，
+stage 3（theirs = `feat/virt-foundation`）不同；本分支对该文件贡献 0 字节；主工作区那份文件在我
+查证期间被另一个会话持续写入。
 
 标记从 `trap.c`/`pt.h` 迁到 `cow.c`、又在查证期间被清掉，是**另一个会话正在逐个解
 `feat/virt-foundation` 的 merge**，不是本阶段的改动。按约定（"构建报错若落在那些文件上，
@@ -1143,7 +1139,7 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 **没有通过的一项（如实交代）：`network_suite` 在 `NET_LANES=4` 下挂死。**
 在 `NR_CPUS=1 NET_LANES=4` 的镜像上敲 `network_suite`，guest 卡在
 `[LOCK-STALL] … name=lwip waiter=7 owner=-1` 直到超时。**这不是本阶段引入的**：
-同一条命令行在基线 `b21565373` 的 N=4 镜像上**同样挂死**，同样的锁、同样的
+同一条命令行在基线的 N=4 镜像上**同样挂死**，同样的锁、同样的
 `waiter_ra=0xffffffc08038ea2e`、同样停在第 231 行 `# network_suite`。既然基线同样红，
 本阶段没有去动它，也**没有**把它算成通过的门禁。现有门禁里 `smoke-network-suite`
 只在默认 N=1 下跑 `network_suite`（N=1 通过），没有任何一条门禁在 N=4 下跑它，

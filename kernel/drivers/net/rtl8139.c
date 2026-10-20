@@ -16,7 +16,7 @@
  *
  * The register map below was checked against the external Debian QEMU
  * 10.0.13+ds source tree (hw/net/rtl8139.c). Source provenance and the
- * external-unpack locator are in docs/history/2026-10-08/migration.md:
+ * external-unpack locator are in docs/external-dependencies.md:
  *   - register file            hw/net/rtl8139.c:96-140
  *   - ISR/IMR bit names        hw/net/rtl8139.c:161-172
  *   - TX status bit names      hw/net/rtl8139.c:174-181
