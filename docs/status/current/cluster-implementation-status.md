@@ -2,7 +2,7 @@
 
 开始日期：2026-10-11。独立 worktree：`unified-cluster`，分支：
 `codex/unified-cluster`。原工作目录的未提交改动没有复制或修改。
-目标和验收要求见 [07-unified-runtime.md](07-unified-runtime.md)。
+目标和验收要求见 [07-unified-runtime.md](../../cluster/07-unified-runtime.md)。
 
 ## 1. 基线与本轮实现
 
@@ -52,7 +52,7 @@ ARM 固件构建使用隔离提取的 Debian `gcc-arm-none-eabi` 与 `binutils-a
 
 最新 UDP 故障日志可由 `make check-cluster-reliable` 重建到
 `.kernel-build/cluster/reliable/`。检查器只拥有和清理自己的 QEMU 进程/socket。
-详细场景见 [02-udp-demo.md](02-udp-demo.md)。
+详细场景见 [02-udp-demo.md](../../cluster/02-udp-demo.md)。
 
 ## 3. 验收进度：还没有完成全部设计
 
@@ -84,9 +84,9 @@ CPU 数配置失败，`check-doc-drift` 因上述越界引用失败。已复用�
 `make check-doc-test-gates` 最终通过，包含实际 SMP、阻塞/退出、进程生命周期、
 MM、VFS 与驱动运行检查；日志为 `.kernel-build/cluster/final-doc-test-gates.log`。
 
-统一服务格式、资源限制、进程取消和目录枚举详见 [09-work-agent.md](09-work-agent.md)。
+统一服务格式、资源限制、进程取消和目录枚举详见 [09-work-agent.md](../../cluster/09-work-agent.md)。
 
-控制面与作业的实际格式、状态机及边界见 [10-control-plane.md](10-control-plane.md)、[11-jobs.md](11-jobs.md)。
+控制面与作业的实际格式、状态机及边界见 [10-control-plane.md](../../cluster/10-control-plane.md)、[11-jobs.md](../../cluster/11-jobs.md)。
 
 三节点日志位于 `.kernel-build/cluster/mesh/`，`events.json` 记录一次运行的实际
 注入：6 个 A→B 目录请求被阻断、2 次关联的 C 间接探测成功、3 个执行后作业回复
@@ -94,7 +94,7 @@ MM、VFS 与驱动运行检查；日志为 `.kernel-build/cluster/final-doc-test
 
 UART 双向 challenge、双方重启后的旧 HELLO/ACK 重放及缓存保持已通过；两页
 journal 通过 1000 次启动、216 个掉电点和已提交记录损坏拒绝。STM32 生产 main
-接入持久身份，详细配置与维护边界见 [12-mcu-identity.md](12-mcu-identity.md)。
+接入持久身份，详细配置与维护边界见 [12-mcu-identity.md](../../cluster/12-mcu-identity.md)。
 
 专用 MCU 配置 `STM32_CLUSTER_PORT=2/3` 与原外设配置输出目录隔离。
 原配置禁用 leaf，集群配置使用独立 1 ms 泵和原始字节 I/O，USART1 仅控制台。
@@ -106,7 +106,7 @@ x86 COM2 实际绑定已通过 `make check-cluster-uart`：完整 x86 TCG 内核
 Native 客户端经 emulated 16550 串口调用独立进程中运行的生产 leaf，96 次
 可靠 DOT、丢请求/丢回复及去重、固定目录、clusterd any、7 任务主叶混合树通过。
 日志及源码 SHA256、环境、时间记录在 `.kernel-build/cluster/uart/`。
-部署方法和证据含义见 [13-uart-head.md](13-uart-head.md)。
+部署方法和证据含义见 [13-uart-head.md](../../cluster/13-uart-head.md)。
 
 COM2 连续负载门禁还发现并修复 RX 时钟下溢误断链、Native 父进程持有内部
 工作线程 zombie 两个问题。新增 detached 内核线程路径不继承用户资源，
@@ -116,13 +116,13 @@ COM2 连续负载门禁还发现并修复 RX 时钟下溢误断链、Native 父�
 协商 UDP 分片已接入默认/服务器资源档：完整 64 KiB 请求与回复、乱序/重复/
 丢片、首片期限、槽位及字节额度、OOM、会话拒绝和回收均有回归。服务器与
 默认档混用时按较小预算发送。Native kind=4 查询重组资源；详细格式、测试
-与本轮发现的 lwIP 发送 pbuf 泄漏修复见 [14-fragmentation.md](14-fragmentation.md)。
+与本轮发现的 lwIP 发送 pbuf 泄漏修复见 [14-fragmentation.md](../../cluster/14-fragmentation.md)。
 
 端到端 CS/1 会话、租约刷新、路径 MTU 与 leaf 固定来源窗口已接入，
 `make check-cluster-gateway` 的独立 RISC-V 客户端经 UDP→x86 COM2 网关→
 生产 leaf 完成可靠调用、双向 CS 丢包、leaf 重启、旧回复/调用重放、any 及
 混合树。网关重启不能清除 MCU 原调用者去重窗口。格式、配置顺序及边界见
-[15-routed-sessions.md](15-routed-sessions.md)。
+[15-routed-sessions.md](../../cluster/15-routed-sessions.md)。
 
 
 ## 10. 有界 gossip 与路由租约
@@ -137,7 +137,7 @@ DOT 事务对应 97 次实际执行；调用前后任务数 9→9、僵尸 0、�
 upsert、用户替换后旧清理不能误删。共享传播策略测试覆盖表满、跳数、优先级、
 split horizon 和租约。Native 外层增量构建原来漏跟踪 UAPI 头文件，现已补齐，
 头文件单独更新触发重编译的回归通过。详见
-[16-gossip-routes.md](16-gossip-routes.md)。
+[16-gossip-routes.md](../../cluster/16-gossip-routes.md)。
 
 
 ## 11. 持久配置与服务监管
@@ -146,7 +146,7 @@ split horizon 和租约。Native 外层增量构建原来漏跟踪 UAPI 头文�
 Native 磁盘配置 smoke 实际启动 agent/clusterd/jobd 并完成 DOT 调用，覆盖崩溃
 重启、配置恢复、正常停止和强杀恢复。共享解析器 10 万次变异通过 ASan/UBSan。
 Native spawn 可执行文件重复释放引用的缺陷一并修复。协议和部署契约见
-[17-deployment-supervision.md](17-deployment-supervision.md)。外层启动/监管者重启
+[17-deployment-supervision.md](../../cluster/17-deployment-supervision.md)。外层启动/监管者重启
 由系统 init 或操作者负责；不声称已自动修改各平台启动策略。
 
 
@@ -161,7 +161,7 @@ CJ WORDCOUNT，文件 CLI 已纳入构建和真实 Native smoke。
 词频树，同时使用主机与 UART leaf，并丢弃首个 MAP 回复：MAP 实际执行 1 次，
 独立事务 1 个，最终结果与整体参考逐字节一致。STM32 64 KiB Flash/20 KiB RAM
 USART2 固件链接成功，text=47496 B、data=0、bss=8992 B；这不是全部 RAM 用量，
-线程栈/堆与持久 Flash 区另有链接预算。详见 [18-wordcount.md](18-wordcount.md)。
+线程栈/堆与持久 Flash 区另有链接预算。详见 [18-wordcount.md](../../cluster/18-wordcount.md)。
 
 
 ## 13. 放弃调用的缓存回收
@@ -190,7 +190,7 @@ CS/1 传播最小 MTU 与只能缩减的分片资格；完整 UDP 路径按端�
 回显上限 4042 B。所有配置大消息前后网络堆为 736→736 B，重组结束 0 个/0 B。
 日志在 `.kernel-build/cluster/routed-default/`、`routed-server/`、`routed-mixed/`。
 共享默认/服务器会话单测验证路径降级与限额，ASan/UBSan 通过；详情见
-[19-routed-fragmentation.md](19-routed-fragmentation.md)。
+[19-routed-fragmentation.md](../../cluster/19-routed-fragmentation.md)。
 
 
 ## 15. 16 片、8 节点词频演示
@@ -211,7 +211,7 @@ RISC-V、2 套 x86 COM2 网关和 2 个生产 MCU leaf 主机进程。固定文�
 主机控制面的来源会话。单回复缓存和单在途不变，不逐出去重窗口；满表仍拒绝。
 共享构图器支持 1024 B、16 片/31 节点，Native 驱动支持共享图最多 64 节点。
 1025 种文本长度及精确 16 片树通过单测和 ASan/UBSan；原 DOT 接口保留。
-数据集、命令和资源边界见 [18-wordcount.md](18-wordcount.md)。该验收仍是
+数据集、命令和资源边界见 [18-wordcount.md](../../cluster/18-wordcount.md)。该验收仍是
 QEMU 与主机 leaf 的证据，不含物理 STM32 板运行。
 
 ## 16. 故障硬化、诊断与最终构建
@@ -225,7 +225,7 @@ QEMU 与主机 leaf 的证据，不含物理 STM32 板运行。
 新增 Native snapshot kind=5，以原 192 B 信封读取聚合链路桶、收发、策略
 丢弃、malformed、重传及桶数上限。损坏帧测试要求接收内核 malformed 增长，
 不只依据宿主的“已注入”事件。完整语义与证据边界见
-[20-hardening.md](20-hardening.md)。
+[20-hardening.md](../../cluster/20-hardening.md)。
 公共链路状态也同步 UDP/UART 的 SUSPECT；分区测试实际观察到 SUSPECT 后
 调用结束，恢复后 UP。UDP→x86 COM2→leaf 的 gossip/丢尽回复/重启回归仍通过。
 
@@ -263,7 +263,7 @@ ring 下标进行第二次映射，TX 回收错误槽位，RX 也做了相同转
 基线与候选各五次独立启动、每次 10 万次本机调用，观察均值变化 −4.875%，
 置换检验 p=0.00794；95% 区间 [−7.114%, −2.914%]。这不是 ±3% 严格等价证明，
 也不归因于没有修改的本机 IPC 路径。数值、方法和瓶颈见
-[21-performance.md](21-performance.md)。
+[21-performance.md](../../cluster/21-performance.md)。
 
 修复后直连 UDP 的故障/重启、服务器档及混合档三节点路由、COM2 静态 leaf
 网关回归全部通过；完整文档测试门禁在性能测量结束后独立运行通过。
@@ -274,7 +274,7 @@ ring 下标进行第二次映射，TX 回收错误槽位，RX 也做了相同转
 新增可选 ONEWAY 能力、只写 Native 连接和独立单向导出；MCU 可在握手前注册
 一个无堆静态 sink。两端共用 epoch、序号窗口、空完成回执、退休收据、背压
 与分片，CALL 的业务 FIFO 不接收 SEND。默认能力不变，升级约束见
-[22-oneway.md](22-oneway.md)。
+[22-oneway.md](../../cluster/22-oneway.md)。
 
 `make check-cluster-send` 已通过服务器档持续 10% 丢帧和三内核混合档路由，
 两端各接纳 264 个 SEND，重复业务接收为零，另有各 96 个并发 CALL。
@@ -335,7 +335,7 @@ RX 入队直接唤醒有界队列的消费者；UDP adapter poll owner 等待 so
 完整性能测量通过：本机/loopback 各 10 万次，UDP 64 B 一万次、64 KiB 一千
 次。loopback 均值 0.860 ms，UDP 64 B p50 6.484 ms；分别仍超过三倍本机与
 5 ms 目标。64 KiB 顺序 CALL 双向有效负载 1.747 MB/s。数值和原始日志位置
-见 [21-performance.md](21-performance.md)，四节点与长时验收仍未完成。
+见 [21-performance.md](../../cluster/21-performance.md)，四节点与长时验收仍未完成。
 
 ## 21. 单网络通道的 SMP 内存保护
 
@@ -367,7 +367,7 @@ Ethernet 帧，性能达标布尔值与业务正确性通过分别报告。
 成功提交消息最终送达，重复为零；明显未达 >10000 条/秒目标。初次忙循环
 让出 CPU 的客户端曾发生链路超时，已保留失败现场；使用正常阻塞背压后
 通过，但该进展故障尚未完成定位。程序完成七架构链接，CI 手动扩展任务
-已接入。方法、原始日志与剩余验收见 [23-four-node-load.md](23-four-node-load.md)。
+已接入。方法、原始日志与剩余验收见 [23-four-node-load.md](../history/four-node-load.md)。
 
 
 ## 23. RX 空间背压与 slab CPU-array 窗口
@@ -393,7 +393,7 @@ warmup-query 失败仍未定位，不能据后续通过结案。
 通过；七架构 hosted 构建和 Native 负载程序链接通过，STM32 USART2/3 固件
 仍成功链接。隔离本机十万次 CALL 均值 69.864 µs，单次测量不作统计等价
 结论。失败现场、指标成本、精确测量范围见
-[23-four-node-load.md](23-four-node-load.md)。
+[23-four-node-load.md](../history/four-node-load.md)。
 
 ## 24. UDP 邻接表的稀疏轮询
 
@@ -409,7 +409,7 @@ warmup-query 失败仍未定位，不能据后续通过结案。
 四节点各 60 秒无主动丢帧及持续 10% 丢帧均通过精确交付与资源核对，前者
 216.333–239.950 SEND/秒，后者 67.017–83.250；ring 满与分配失败为零。
 性能和长期验收目标仍未达到，旧查询失败继续保持未定位。方法与完整数字见
-[23-four-node-load.md](23-four-node-load.md)，这不是多 MCU 单系统能力的运行证据。
+[23-four-node-load.md](../history/four-node-load.md)，这不是多 MCU 单系统能力的运行证据。
 
 本轮 24 项宿主门禁和七架构 hosted 矩阵通过，实际 UDP 翻译单元在七架构
 均重新编译并链接；双 CPU 持续 10% 丢帧场景通过 96 CALL/8 分片大消息及
@@ -417,7 +417,7 @@ warmup-query 失败仍未定位，不能据后续通过结案。
 UDP 64 B 一万次 CALL 的 p50 为 3.136 ms，本次低于 5 ms；64 KiB 一千次
 顺序 CALL 为 1.575 MB/s，低于上一历史测量，原因未定位，不能声称普遍提速。
 两阶段业务总执行 11200 次且回复逐字节一致。完整数字见
-[21-performance.md](21-performance.md)。
+[21-performance.md](../../cluster/21-performance.md)。
 
 ## 25. 多物理 MCU 原生共享内存内核原型
 
@@ -462,10 +462,10 @@ SMP 边界和 11 项新配置拒绝检查通过。全仓格式门禁仍有 114 �
 `.kernel-build/cluster/shared-kernel/`；提交对应的固件、报告和日志归档在
 `.kernel-build/cluster/evidence/native-shared-<commit>/`。
 完整硬件契约、构建方法与限制见
-[25-native-shared-kernel.md](25-native-shared-kernel.md)。
+[25-native-shared-kernel.md](../../cluster/25-native-shared-kernel.md)。
 后续仍需真实多 MCU 验收、用户程序执行、设备/IRQ 所有权、JVM 和图形输入
 栈；当前没有启动真实 Minecraft Java 客户端，目标尚未完成，应用验收见
-[24-single-system-minecraft.md](24-single-system-minecraft.md)。
+[24-single-system-minecraft.md](../../cluster/24-single-system-minecraft.md)。
 
 ## 26. FSMC 桥、推导 RAM 与完整固件联合仿真
 
@@ -503,8 +503,8 @@ Make 入口复现；禁用高字节 RAM 写入的 RTL 副本令完整固件失�
 和真实板验证。推导 RAM 不等于已交付外部 SRAM/SDRAM 控制器；默认 1 MiB
 参数也不证明某块 FPGA 容量足够。用户态、JVM、图形输入和真实 Minecraft
 客户端仍未实现，整体目标保持未完成。接口与复现见
-[25-native-shared-kernel.md](25-native-shared-kernel.md) 和
-[hardware/shared-mcu/README.md](../../hardware/shared-mcu/README.md)。
+[25-native-shared-kernel.md](../../cluster/25-native-shared-kernel.md) 和
+[hardware/shared-mcu/README.md](../../../hardware/shared-mcu/README.md)。
 
 ## 27. 原生应用、阻塞 SVC 与公共 fabric 抽取
 
@@ -541,8 +541,8 @@ JVM 或 Minecraft。ARM32 参数仍为单寄存器宽度。树莓派专用板级
 RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺失。
 报告在 `.kernel-build/cluster/shared-program/` 与 `fabric-portability/`，
 本阶段提交对应归档为 `evidence/portable-domain-<commit>/`。
-细节见 [26-native-programs.md](26-native-programs.md) 和
-[27-portable-domains.md](27-portable-domains.md)。整体目标保持未完成。
+细节见 [26-native-programs.md](../../cluster/26-native-programs.md) 和
+[27-portable-domains.md](../../cluster/27-portable-domains.md)。整体目标保持未完成。
 
 ## 28. 四 ISA 共用硬件门原子运行库
 
@@ -592,8 +592,8 @@ Pi poweroff/reboot 仍为 halt，
 这里只完成树莓派的原生启动/SMP 功能端口。没有 Pi 物理验证、网络与存储、
 完整用户态、远端 TLB shootdown 或跨板共享 RAM；非 ARM MCU fabric 适配、
 应用线程同步、完整 Native ABI/JVM/图形输入和 Minecraft Java 客户端仍待实现。
-源码和启动契约见 [树莓派端口](../platforms/raspberrypi4.md)；公共机制边界见
-[27-portable-domains.md](27-portable-domains.md)。整体目标保持未完成。
+源码和启动契约见 [树莓派端口](../../platforms/raspberrypi4.md)；公共机制边界见
+[27-portable-domains.md](../../cluster/27-portable-domains.md)。整体目标保持未完成。
 
 本阶段回归：既有多 MCU Native 应用/RTL 联合测试通过，固件 ELF 仍为
 `8fdfd50a4cc133c7fda7c790db4dc7179caca8752327842ac528376514277c19`；
@@ -609,7 +609,7 @@ trim registry 与九项 SMP 平台边界检查通过。全仓格式门禁仍有 
 查询事实后发布；旧 agent 未提供描述时返回 UNSUPPORTED，旧 CW QUERY 不变。
 修复既有 abi_info 的指针宽度写死 64。公共匹配器检查镜像清单要求，但还没有
 完整镜像清单工具、远程 ELF 传送或自动派发；PROCESS 仍为预装 manifest。
-测试与剩余范围见 [28-execution-capabilities.md](28-execution-capabilities.md)。
+测试与剩余范围见 [28-execution-capabilities.md](../../cluster/28-execution-capabilities.md)。
 
 本阶段验证：真实 RISC-V Native 用户态/agent 查询及原有集群作业 smoke、MCU
 原生应用/RTL、三种服务器 ISA 公共 SMP 和树莓派十类启动配置均通过。
@@ -626,7 +626,7 @@ ABI 边界、文档漂移/引用和裁剪注册表门禁通过，证据归档为
 MCU Native 程序与服务器复用 `sys_native_sync.c` 和 `ipc/futex.c`，新增
 0x0B02 atomic32 公共接口，解决非特权应用无法直接使用特权 fabric 原子库的
 缺口。执行能力新增 ATOMIC32 位；MCU 同时公布真实接通的 FUTEX。默认 MCU
-配置仍裁剪相关代码。详细契约、测试入口与限制见 [29-native-sync.md](29-native-sync.md)。
+配置仍裁剪相关代码。详细契约、测试入口与限制见 [29-native-sync.md](../../cluster/29-native-sync.md)。
 完整跨板硬件矩阵、Native 运行时和 Minecraft Java 客户端仍未完成。
 
 实际验收：RV64、AArch64、x86-64 双核内核运行同一 Native 同步测试均通过，
@@ -644,7 +644,7 @@ flat ISA 适配仅准备上下文与共享资源引用，通用生命周期位�
 同一应用测试覆盖嵌套创建、共享堆/futex、跨 CPU 亲和性、join 与关闭；MCU
 额外覆盖活跃栈不能 unmap，以及主线程先退出后子线程继续使用映像和初始参数。
 执行能力新增 THREAD_CREATE=128，MCU 仍不公布完整 HANDLES。完整接口、
-验证和未完成项见 [32-native-threads.md](32-native-threads.md)。
+验证和未完成项见 [32-native-threads.md](../../cluster/32-native-threads.md)。
 
 本阶段实际验证：三种服务器 ISA 双核的父/子线程均报告 CPU1→CPU0，RV64
 单核路径报告 CPU0→CPU0；MCU
@@ -665,7 +665,7 @@ TASK/THREAD/DEBUG 从 PID 值改为独立引用对象。任务回收先解除弱
 不会解析到新任务。对象不强引用任务，避免自身句柄环与地址空间长期占用。
 等待、调度、资源、调试、内存、namespace 与事件键复用同一公共身份路径。
 这补齐执行域内部生命周期，不等于全局对象目录或跨重启身份。
-设计、复现命令和证据边界见 [33-task-object-lifetime.md](33-task-object-lifetime.md)。
+设计、复现命令和证据边界见 [33-task-object-lifetime.md](../../cluster/33-task-object-lifetime.md)。
 
 ## 公共实例命名空间（2026-10-12）
 
@@ -673,7 +673,7 @@ TASK/THREAD/DEBUG 从 PID 值改为独立引用对象。任务回收先解除弱
 instance/domain/boot_epoch，绑定在本内核启动内不可变，控制服务重启只重读该
 状态。任务对象增加独立序号；dup、join 后句柄和 PID 复用不混淆对象名。
 固定结构与显式小端编解码适用于 32/64 位平台。配置可选 instance+epoch，旧
-配置保持可用。细节与验证入口见 [34](34-runtime-namespace.md)。
+配置保持可用。细节与验证入口见 [34](../../cluster/34-runtime-namespace.md)。
 
 BOUND 仅是命名空间配置状态；持久代次分配、全局对象目录与
 Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经实现。
@@ -682,7 +682,7 @@ Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经�
 交错、supervisor 身份冲突和重启均通过。新测试修复 ARMv7-M 迁移任务与 idle
 栈被异常处理覆盖的问题；异常处理改用独立 CPU 私有栈。默认精简 MCU 固件
 及 RV64 Linux-only 原始内核二进制与上一提交完全一致。详细证据及性能边界见
-[34](34-runtime-namespace.md)。
+[34](../../cluster/34-runtime-namespace.md)。
 
 ## 运行实例成员准入（2026-10-12）
 
@@ -690,7 +690,7 @@ Minecraft 仍未完成，不将这些接口描述为完整单系统映像已经�
 间接发现，不接纳错误实例、未绑定节点或与保留记录矛盾的启动代次。首次绑定
 清空旧服务视图，控制进程重启重读内核绑定。旧 CD/1、CM/1 和普通 any 接口
 保留。MCU leaf 和服务器共用协议，具体状态、成本、持久历史限制与实际验收
-入口见 [35](35-instance-membership.md)。完整全局运行状态和 Minecraft 未完成。
+入口见 [35](../../cluster/35-instance-membership.md)。完整全局运行状态和 Minecraft 未完成。
 
 
 实际 RV64/AArch64/x86 混合实例流程两次通过，覆盖跨 ISA 工作调用、首次绑定、
@@ -700,7 +700,7 @@ IRQ 竞争已修复，双核 Native 同步/线程/分配器及 AArch64 Linux fut
 通过；旧三节点集群和普通
 Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进制保持
 不变，实际 UART leaf 固件编译链接通过。物理板运行、完整全局对象/应用状态
-与 Minecraft 客户端继续保留为未完成；原始证据及成本见 [35](35-instance-membership.md)。
+与 Minecraft 客户端继续保留为未完成；原始证据及成本见 [35](../../cluster/35-instance-membership.md)。
 
 ## 全局任务对象目录（2026-10-12）
 
@@ -710,7 +710,7 @@ Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进�
 撤回、断开清理与重新发布序号。旧通道、旧 publication 和旧内核对象名分别
 隔离目录重启、重发布和域重启。普通应用与内核热路径没有自动目录工作。
 这是对象元数据查询，跨域原生任务操作和统一应用生命周期仍待实现。
-协议、部署、MCU 适配及实际验收见 [36](36-object-directory.md)。
+协议、部署、MCU 适配及实际验收见 [36](../../cluster/36-object-directory.md)。
 
 ## 实际应用启动与负载分配（2026-10-12）
 
@@ -718,15 +718,15 @@ Native IPC/signal、Linux proc/futex 等回归通过。默认精简 MCU 二进�
 变体，经真实 task_spawn/wait/kill 管理；按活动程序数选择兼容执行域，启动时
 复核采样负载。重复请求和终态保留避免重复执行，未知结果只查询原 owner。
 三种服务器 ISA 联合运行实际程序；MCU 测试引导使用同一 owner 调用真实装载器。
-接口、复现命令与按程序数量均衡的准确边界见 [37](37-application-execution.md)。
+接口、复现命令与按程序数量均衡的准确边界见 [37](../../cluster/37-application-execution.md)。
 物理多板、MCU 常规网络启动服务、完整应用资源代理和 Minecraft 仍待实现。
 
 普通应用部署补充了带 argv/envp 的清单文件和实际 `appctl-run` 命令，复用
-原应用 owner 与按活动数分配接口，见 [38](38-application-launch-inputs.md)。
+原应用 owner 与按活动数分配接口，见 [38](../../cluster/38-application-launch-inputs.md)。
 
 CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察退出后
 回收记录，固定表可持续执行，运行任务和原 CA/1 记录保持。机制与验收见
-[39](39-application-recycling.md)。
+[39](../../cluster/39-application-recycling.md)。
 首次双入口真实运行暴露了一次 AArch64 init 引用下溢；后续重跑通过但根因
 尚未定位，仍保留为长期稳定性验收的未解决项，不能据重跑通过视为修复。
 
@@ -736,7 +736,7 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 空间中由工作线程竞争领取索引，不预先分配固定份额或目的 CPU。单个 Native
 应用的两个真实线程共同处理 32 项计算，检查没有重复和遗漏、结果与实际 CPU。
 统一用户态代码用于共享 MCU、RV64、AArch64、x86，接口与验收见
-[40](40-native-application-balance.md)。跨网络域的实际应用启动仍按活动程序数
+[40](../../cluster/40-native-application-balance.md)。跨网络域的实际应用启动仍按活动程序数
 分配，不据此宣称已经按 CPU 利用率均衡。AArch64 引用下溢补充失败现场输出，
 尚未定位根因；物理多 MCU 与 Minecraft 继续保留未完成。
 
@@ -746,99 +746,99 @@ CA/2 增加 owner-issued slot token 与显式终态回收；新版 CLI 在观察
 系统调用验证、生产 vfile 引用和句柄接口。公共用户程序在两个工作线程中实际
 读取文件，再共同领取计算任务。服务器 Native open 的临时 fd 泄漏已修复，
 新增 4100 次打开关闭回归并用父提交内核观察到失败。构建与证据见
-[41](41-native-files.md)。文件支持不等于 JVM、物理 SD、多板或 Minecraft
+[41](../../cluster/41-native-files.md)。文件支持不等于 JVM、物理 SD、多板或 Minecraft
 已经运行；执行能力发现的文件支持位和 AArch64 偶发引用下溢仍待处理。
 
 ## 从文件启动 Native 子进程（2026-10-13）
 
 共享 flat 内核接入既有 task_spawn v1/v2，程序可打开 ELF 文件、传参并等待
 独立子进程退出。标准 CRT、参数/环境快照、Native ELF 标记和发布前回滚
-边界见 [42](42-native-file-spawn.md)。普通 full VFS 装载路径保留，JVM、
+边界见 [42](../../cluster/42-native-file-spawn.md)。普通 full VFS 装载路径保留，JVM、
 物理多 MCU、Minecraft 与 AArch64 偶发引用问题尚未完成。
 
 实际 Native 任务的公共停止、信号检查点及资源回收见
-[43-native-task-control.md](43-native-task-control.md)。
+[43-native-task-control.md](../../cluster/43-native-task-control.md)。
 
 持续纯计算 Native 线程的用户态时间片、停止与实际执行检查见
-[44-native-user-preemption.md](44-native-user-preemption.md)。
+[44-native-user-preemption.md](../../cluster/44-native-user-preemption.md)。
 
 真实程序的调度记账、并发句柄所有权、就绪与等待中断修复见
-[45-native-execution-reliability.md](45-native-execution-reliability.md)。
+[45-native-execution-reliability.md](../../cluster/45-native-execution-reliability.md)。
 
 无 CPU 绑定的真实 pthread 执行、空闲 CPU 接取和线程组终结通知见
-[46-unbound-program-execution.md](46-unbound-program-execution.md)。
+[46-unbound-program-execution.md](../../cluster/46-unbound-program-execution.md)。
 
 真实 JamVM Native 启动、完整类库构建和文件映射修复见
-[47-jamvm-native-bootstrap.md](47-jamvm-native-bootstrap.md)。
+[47-jamvm-native-bootstrap.md](../../cluster/47-jamvm-native-bootstrap.md)。
 
 真实 pthread 定向通知、每线程 mask、信号等待及多架构执行回归见
-[48-native-thread-signals.md](48-native-thread-signals.md)。
+[48-native-thread-signals.md](../../cluster/48-native-thread-signals.md)。
 
 真实 Java 多线程计算、Native JNI 文件操作和单核/双核自动执行验证见
-[49-native-java-execution.md](49-native-java-execution.md)。Java 应用阶段已通过；
+[49-native-java-execution.md](../../cluster/49-native-java-execution.md)。Java 应用阶段已通过；
 GC、物理 MCU Java 运行时与 Minecraft 客户端仍待继续实现。
 
 原生 Java 的并发回收、栈根保存和实际对象移动已在 RV64 Native 单核/双核
-验证，见 [50-native-java-gc.md](50-native-java-gc.md)。物理多 MCU、其他架构
+验证，见 [50-native-java-gc.md](../../cluster/50-native-java-gc.md)。物理多 MCU、其他架构
 完整 VM 和真实 Minecraft 客户端仍未验收。
 
 完整 Native Java 运行时已继续接入 AArch64，并通过同字节码的单核/双核
 计算与 GC 压缩，RV64 回归同时通过；实际次数、JNI 修复和剩余范围见
-[51-native-java-portable.md](51-native-java-portable.md)。物理多 MCU 和
+[51-native-java-portable.md](../../cluster/51-native-java-portable.md)。物理多 MCU 和
 Minecraft Java 客户端仍待实现与验收。
 
 main 的真实 Minecraft 客户端依赖已合入；本 worktree 的 x86 A20OS 内核
 实际显示 1.21.11 主菜单，键盘交互及正常退出通过，Native/MCU 回归与准确
-边界见 [52-main-minecraft-integration.md](52-main-minecraft-integration.md)。
+边界见 [52-main-minecraft-integration.md](../../cluster/52-main-minecraft-integration.md)。
 物理多 MCU 客户端仍未完成。
 
 统一 appd/appctl 入口现已覆盖 Linux ABI 程序，并验证三架构真实程序 2/2/2
 分配及完整 Minecraft 客户端菜单、输入、退出；能力、部署与验收边界见
-[53-linux-application-execution.md](53-linux-application-execution.md)。
+[53-linux-application-execution.md](../../cluster/53-linux-application-execution.md)。
 
 系统自带 QEMU 的双进程共享内核已取得同 PID/栈/堆跨实例迁移和资源回收证据。
 可复现脚本、默认构建隔离、限制及 Minecraft 尚未覆盖的部分见
-[54-stock-qemu-shared-kernel.md](54-stock-qemu-shared-kernel.md)。
+[54-stock-qemu-shared-kernel.md](../../cluster/54-stock-qemu-shared-kernel.md)。
 
 双 QEMU 共享内核进一步通过真实 Native 用户程序验收：32 个计算片段动态领取，
 总和 4359168、执行掩码 3，用户线程、共享地址空间、文件并发读取、子程序启动与
 回收均使用已有接口。已修复独立 KVM 时钟 epoch 导致的跨 CPU 时间倒序；完整
-命令和失败/修复证据见 [54](54-stock-qemu-shared-kernel.md)。Minecraft 跨实例
+命令和失败/修复证据见 [54](../../cluster/54-stock-qemu-shared-kernel.md)。Minecraft 跨实例
 和统一设备访问仍未完成。
 
 通用调度器现支持可调度上下文中的当前线程亲和性迁移。双 QEMU 的普通 Linux
 pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护异常及恢复、
 1024 片动态计算和条件变量超时。原 Native 程序回归通过；命令、失败/修复记录
-及尚未完成的设备/JVM 部分见 [55-linux-threads-shared-kernel.md](55-linux-threads-shared-kernel.md)。
+及尚未完成的设备/JVM 部分见 [55-linux-threads-shared-kernel.md](../../cluster/55-linux-threads-shared-kernel.md)。
 
 共享内核新增通用设备 owner 调用入口；次 QEMU 不创建串口时，CPU 1 上的普通
 Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x86_64/AArch64/RV64
 四端点并发用例中各通过 80000 次调用。机制、进度约束和未完成的磁盘/图形/JVM
-部分见 [56-shared-device-owner.md](56-shared-device-owner.md)。
+部分见 [56-shared-device-owner.md](../../cluster/56-shared-device-owner.md)。
 
 共享设备机制已接入通用驱动 MMIO。只有主实例挂载磁盘的双 QEMU 中，CPU 1
 内核线程及 Linux 用户程序已完成真实 virtio-blk 读写、flush 和回读；宿主在
 进程结束后验证整块镜像。已修复可加载驱动锁等待未处理 owner 请求造成的
 死锁，并隔离共享/普通驱动构建。接口、复现、边界见
-[57-shared-disk-execution.md](57-shared-disk-execution.md)。
+[57-shared-disk-execution.md](../../cluster/57-shared-disk-execution.md)。
 
 已进一步验证 CPU 1 挂载主实例磁盘上的 ext4 并 exec 磁盘程序，真实文件与
 目录 fsync、重命名、回读、卸载及宿主独立检查通过。测试发现并修复了既有
 ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收漏洞。三种
-文件系统格式和普通 SMP 对照见 [58](58-shared-filesystem-execution.md)。
+文件系统格式和普通 SMP 对照见 [58](../../cluster/58-shared-filesystem-execution.md)。
 
 现已在双 QEMU 共享内核中启动真实 OpenJDK 21，并运行同一 JVM 的两个 Java
 线程：16 次亲和性检查、512 个动态领取任务、实际 CPU 掩码 3，总和一致，
 正常退出和回收。普通 SMP 对照通过，原 Minecraft 镜像哈希未变。复现与
-尚未完成的客户端图形/输入目标见 [59](59-shared-jvm-execution.md)。
+尚未完成的客户端图形/输入目标见 [59](../../cluster/59-shared-jvm-execution.md)。
 
 双实例共享内核已验证 CPU 1 通过主实例唯一 GPU 完成真实像素回读、DMA-BUF
 与 fence 操作，并通过唯一键盘鼠标接收实际设备事件；普通 SMP 对照通过，
-见 [60](60-shared-graphics-input.md)。Minecraft 已知可运行平台仅为 x86_64，
+见 [60](../../cluster/60-shared-graphics-input.md)。Minecraft 已知可运行平台仅为 x86_64，
 跨实例客户端尚未验收；其他 ISA 的运行时与本地库可能需要额外移植。
 
 单个真实 Minecraft Java 1.21.11 客户端现已在 x86_64 双 QEMU 共享内核中显示
 欢迎页、主菜单和 Options，实际键盘导航与 Quit Game 退出 0 通过；同一 JVM
 的渲染、编译和 GC 线程均观察到 CPU 0/1 调度赋值。普通 SMP 对照通过，原始
 磁盘哈希未变，临时 RAM 已清理。证据和完整边界见
-[61](61-shared-minecraft-client.md)。物理多 MCU 和其他 ISA 客户端仍未验收。
+[61](../../cluster/61-shared-minecraft-client.md)。物理多 MCU 和其他 ISA 客户端仍未验收。

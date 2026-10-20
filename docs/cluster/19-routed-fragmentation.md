@@ -53,7 +53,7 @@ python3 tools/check-cluster-udp.py --routed --faults --profile 3 --peer-profile 
 源端初始 TTL=8。服务实际执行次数和重复计数由目标内核返回。
 
 日志、源文件哈希、配置档、实际注入次数与线帧轨迹保存到指定目录。
-运行证据见 [08-implementation-status.md](08-implementation-status.md)；本节列出
+运行证据见 [../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)；本节列出
 方法，不把尚未通过的命令视为验收结果。UDP→UART 网关的单帧限制回归另见
 [15-routed-sessions.md](15-routed-sessions.md) 与 [18-wordcount.md](18-wordcount.md)。
 

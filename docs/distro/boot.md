@@ -30,7 +30,7 @@
 3. dbus。`dbus-uuidgen --ensure` 之后 `dbus-daemon --system --fork`。系统总线是一切服务的基础，后面 elogind/polkit 都靠它。
 4. elogind。XFCE 的 session manager 和 polkit 要跟它上面的 org.freedesktop.login1 接口说话。elogind 想挂 cgroup（/sys/fs/cgroup），A20OS 现在没有 cgroup 子树，这一步会报失败，但当前不致命，桌面试过能继续走。
 5. seatd。`SEATD_VTBOUND=0 seatd &`，然后等 `/run/seatd.sock` 出现。libseat 是 labwc/wlroots 拿 session 的入口。
-6. udevd。`udevd &` → 等 `/run/udev/control` → `udevadm trigger --action=add` → `timeout 5 udevadm settle`。udev 在 A20OS 上属于"能用但不完整"：netlink uevent 已经打通（见 kernel-requirements.md），但规则引擎的运行期处理还有问题（见 known-issues.md）。所以脚本里所有等 udev 的地方都带超时，绝不让一个卡住的 udevd 挡住桌面会话。
+6. udevd。`udevd &` → 等 `/run/udev/control` → `udevadm trigger --action=add` → `timeout 5 udevadm settle`。udev 在 A20OS 上属于"能用但不完整"：netlink uevent 已经打通（见 kernel-requirements.md），但规则引擎的运行期处理还有问题（见 ../status/current/known-issues.md）。所以脚本里所有等 udev 的地方都带超时，绝不让一个卡住的 udevd 挡住桌面会话。
 7. polkitd。`/usr/lib/polkit-1/polkitd &`，给 XFCE 的一些辅助程序做授权。
 8. 最后 `exec runuser -l root -c /usr/lib/a20/start-xfce4-session` 交到会话。
 
@@ -46,4 +46,4 @@
 
 ## 实测走到哪一步
 
-riscv64 QEMU 下（已提交状态）整条链路是通的：合成器不崩溃、DRM 后端创建成功、`Virtual-1` modeset 到 1024x768、`WAYLAND_DISPLAY=wayland-0` 起来、autostart 把 XFCE 组件拉起来，`wlr_surface` 陆续映射，`[DRM] present` 持续出帧。输入也已打通：eudev 把 `ID_INPUT_*` 写进数据库，libinput 枚举到 event0/event1，labwc 把它们配置成键盘鼠标。剩下的已知小问题（dbus 同步调用偶发超时）见 known-issues.md。
+riscv64 QEMU 下（已提交状态）整条链路是通的：合成器不崩溃、DRM 后端创建成功、`Virtual-1` modeset 到 1024x768、`WAYLAND_DISPLAY=wayland-0` 起来、autostart 把 XFCE 组件拉起来，`wlr_surface` 陆续映射，`[DRM] present` 持续出帧。输入也已打通：eudev 把 `ID_INPUT_*` 写进数据库，libinput 枚举到 event0/event1，labwc 把它们配置成键盘鼠标。剩下的已知小问题（dbus 同步调用偶发超时）见 ../status/current/known-issues.md。

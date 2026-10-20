@@ -1767,7 +1767,7 @@ peer_addr）则在锁内拷到栈上，因为真正入队发生在解锁之后�
 
 **验证缺口仍在。** 合并后没有跑全量回归，ASAN + SMP 压测未做。`2f17a5ba8` 的提交
 说明自陈的三项运行期验证缺口——引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、
-`-ENOTCONN` 窗口——**仍然开放**，清单在 `docs/measured/impl-notes-net.md`。
+`-ENOTCONN` 窗口——**仍然开放**，清单在 `docs/status/history/impl-notes-net.md`。
 阶段 C/D/E 自身只做了各自的编译期与逐字节等价自检；按本轮 lane 阶段的指令，
 `smoke-*` 门禁没有跑。
 
@@ -1804,7 +1804,7 @@ lanes: count=4 sockets=8 occupancy: 3 2 2 1
 ## 验证
 
 **不要用吞吐数字做门禁。** QEMU TCG 下同一负载的 `lwip` 自旋数在 0–920024 之间跳
-（见 `docs/server-readiness.md`），任何幅度阈值都是 flaky 的。lane 的门禁必须是
+（见 `docs/status/current/server-readiness.md`），任何幅度阈值都是 flaky 的。lane 的门禁必须是
 结构性的：
 
 | 门禁 | 断言 |

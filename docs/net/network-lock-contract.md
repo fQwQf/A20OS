@@ -559,7 +559,7 @@ lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需
 
 ## 收包载荷的内存所有权
 
-收包路径曾经让每个 1460 字节的段付出约 136 KiB 的 memset 加三次拷贝，其中绝大部分在 `g_lwip_lock` 内完成。这是 `docs/server-readiness.md` 记录的单次 acquire 自旋尖峰（`max=472365`）的来源，也是"去掉读路径轮询后自旋量没降"的真正原因——持锁时长从来不在读路径上。
+收包路径曾经让每个 1460 字节的段付出约 136 KiB 的 memset 加三次拷贝，其中绝大部分在 `g_lwip_lock` 内完成。这是 `docs/status/current/server-readiness.md` 记录的单次 acquire 自旋尖峰（`max=472365`）的来源，也是"去掉读路径轮询后自旋量没降"的真正原因——持锁时长从来不在读路径上。
 
 两级暂存现在都改成小内联缓冲 + 溢出慢路径：
 
@@ -702,7 +702,7 @@ payload 两个因子。改造出路与代价见 [net-lanes.md](net-lanes.md) 的
 就是 256；ring 深度 2 也是地板而非任意值，ring 满时
 `net_inet_tcp_stage_payload()` 返回 false、lwIP callback 回 `ERR_MEM`、pbuf 进
 `refused_data` 重试——**背压而非丢段**。代价（突发吸收深度、每 socket 缓冲上限）写在
-[server-readiness.md](../server-readiness.md) 的"嵌入式档的账全部进了 profile"一节。
+[server-readiness.md](../status/current/server-readiness.md) 的"嵌入式档的账全部进了 profile"一节。
 DEFAULT/SERVER 两档的这两个数字未动。
 
 ### 允许的 callback 工作
@@ -811,7 +811,7 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 ## 已知未完成
 
 以下属于后续工作。每一项的**前置条件与阻塞原因**记录在
-`docs/server-readiness.md` 的"剩余工作与各自的阻塞原因"一节，不要只按本节
+`docs/status/current/server-readiness.md` 的"剩余工作与各自的阻塞原因"一节，不要只按本节
 的字面顺序动手：
 
 - ~~`g_net_lock` 仍是全局的，1024 个 socket 在 recv/send/accept/close 上互相串行~~
@@ -821,7 +821,7 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
   剩余的真问题不是串行度而是**验证缺口**：`2f17a5ba8` 的提交说明自己写明，
   引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口三项
   **运行期验证未做**，ASAN + SMP 压测也未做。待验证清单在
-  `docs/measured/impl-notes-net.md`。
+  `docs/status/history/impl-notes-net.md`。
 - `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行，且每包仍
   遍历 lwIP 的全局 PCB 链表。分片的前置条件记录在 `net-lanes.md`：
   **memp 与 lane 上下文的前提没定之前不要动 memp**。

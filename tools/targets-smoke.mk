@@ -853,7 +853,7 @@ smoke-virtio-scsi-irq:
 # behaviour on boards that report a narrow range -- qemu-virt-riscv64 passes
 # (0, 1) and virtualbox-aarch64 passes firmware-allocated ranges -- and this
 # QEMU build cannot exercise either, so the coverage gap is deliberate and
-# recorded in docs/server-readiness.md rather than papered over.
+# recorded in docs/status/current/server-readiness.md rather than papered over.
 smoke-pci-bridge: NET_HOSTFWD=
 smoke-pci-bridge:
 	$(MAKE) ARCH=x86_64 dev-build
@@ -1010,7 +1010,7 @@ smoke-virtio-console:
 # Scope: the err==0 assertion is real, and it is the signal that would catch a
 # pool sized too small for a given workload.  It does NOT justify the current
 # pool size: peak max on a loopback-backed suite is tiny, so this gate says
-# nothing about high-BDP sizing.  See docs/server-readiness.md.
+# nothing about high-BDP sizing.  See docs/status/current/server-readiness.md.
 NET_MEMP_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
 smoke-lwip-memp: NET_HOSTFWD=
 smoke-lwip-memp:
@@ -1152,7 +1152,7 @@ smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 #
 # Deliberately NOT asserted: any throughput, spin count or timing number.
 # Under QEMU TCG the same workload's lwip spin count has spanned 0..920024
-# across runs (docs/server-readiness.md), so a magnitude threshold would be
+# across runs (docs/status/current/server-readiness.md), so a magnitude threshold would be
 # flaky.  See docs/net/net-lanes.md.
 #
 # The leading newline matters: QEMU's serial input can lose the first byte if it
@@ -1884,7 +1884,7 @@ smoke-net-rtl8139:
 #
 # The guest runs a background flood loop (--load) and -smp 4, the amplifier
 # that reproduced the fault on the unfixed tree: two of three baseline runs
-# corrupted command 43/44 (docs/measured/serial-fidelity.md).  Deliberately
+# corrupted command 43/44 (docs/status/history/serial-fidelity.md).  Deliberately
 # NOT asserted: interleaved_tokens.  A kernel print spliced into an echo line
 # corrupts the *log*, not the receive path, and counting it here would make
 # this gate fail on console traffic that the driver delivered correctly.

@@ -37,7 +37,7 @@ A20OS 在运行空间上更像宏内核：
 
 为什么这样组合？内核内部路径因为函数调用而保持快速，而 Native 用户可见对象仍受 capability 检查约束。这样兼顾了宏内核的性能和微内核的对象纪律。
 
-混合内核的设计形态与演进目标（用户态服务化、驱动外迁、`channel_call` RPC、svcmgr 恢复）见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)，机制语义和当前边界见 [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md) 与 [hybrid-kernel/STATUS.md](hybrid-kernel/STATUS.md)。设计文档中的目标能力只有在源码和运行门禁均已接通后才属于当前事实。
+混合内核的设计形态与演进目标（用户态服务化、驱动外迁、`channel_call` RPC、svcmgr 恢复）见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)，机制语义和当前边界见 [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md) 与 [status/current/hybrid-kernel-status.md](status/current/hybrid-kernel-status.md)。设计文档中的目标能力只有在源码和运行门禁均已接通后才属于当前事实。
 
 ---
 
@@ -48,7 +48,7 @@ A20OS 在运行空间上更像宏内核：
 | Linux ABI | 366 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
 | Native ABI | 142 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
-两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](hybrid-kernel/STATUS.md)。
+两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](status/current/hybrid-kernel-status.md)。
 
 ### 分层原则（内部实现 ↔ ABI 薄包装）
 

@@ -64,7 +64,7 @@ struct pbuf;
  * Both stages below used to embed data[NET_MAX_PAYLOAD] (65535 bytes).  A
  * 1460-byte segment therefore cost ~136 KiB of memset plus three copies, and
  * the memsets ran inside the lwIP critical section -- the source of the
- * single-acquire spin spikes recorded in docs/server-readiness.md, and the
+ * single-acquire spin spikes recorded in docs/status/current/server-readiness.md, and the
  * reason removing read-path polling did not lower the spin total.  net_msg_t
  * was additionally oversize past SLAB_MAX_OBJ, so mm/slab.c rounded every
  * message up to whole pages: a 100-byte datagram cost 68 KiB.
@@ -504,7 +504,7 @@ _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
  * array of exactly NET_PROFILE_MEM_SIZE bytes in memp/mem.c.  What only this
  * file can check is the socket table, and it was the one term that overran the
  * part: eight net_socket_t at the old ring-4 / payload-320 geometry were 29120 B
- * against a 20 KiB device, which is the number docs/server-readiness.md kept
+ * against a 20 KiB device, which is the number docs/status/current/server-readiness.md kept
  * quoting as the reason the tier could not fit.
  *
  * With the per-tier ring depth and inline payload the socket table is
@@ -957,7 +957,7 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
 /*
  * Reference-count ledger.
  *
- * docs/measured/impl-notes-net.md §8.3 and §8.6 recorded the reference count as
+ * docs/status/history/impl-notes-net.md §8.3 and §8.6 recorded the reference count as
  * a primitive that had been walked by hand over 54 sites and never once run.
  * These four counters are that run, made visible:
  *

@@ -41,4 +41,4 @@ python3 tools/check-cluster-udp.py --faults --restart
 连通排查，但它的互 ping 结果不能替代本验收。
 
 当前自动 fixture 在内核线程中运行服务，尚不替代后续 clusterd/jobd 与 Native
-用户态 agent 的实际运行验收。完整剩余内容见 [08-implementation-status.md](08-implementation-status.md)。
+用户态 agent 的实际运行验收。完整剩余内容见 [../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。

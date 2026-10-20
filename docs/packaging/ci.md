@@ -179,8 +179,8 @@ bring-up 门禁，与 `check-kernel-build-all` 迭代的是同一个 `check-<arc
 通过，包括十项实际 QEMU runtime smoke。修复了嵌套聚合未被顶层
 `.NOTPARALLEL` 约束的共享 FAT 镜像竞争，以及诊断快照字段被所有权门禁误识别的问题。
 此前记录的 10 月 7 日失败不能用于描述当前本地树；远端 CI 状态仍需推送后观察。
-最终构建、ABI、串口等验收和限制统一见
-[开发恢复报告](../development-recovery-2026-10-08.md)。
+最终构建、ABI、串口等验收和限制统一见开发恢复报告（该轮一次性记录已删除，
+结论已并入 [模块状态](../status/current/module-status-2026-10-19.md)）。
 
 `smoke-devtools` 是唯一需要外网的 CI 步骤（从 Alpine 镜像站拉包；本地有
 `build/cache/apk` 缓存）。它是 trap.S 内核栈守卫修复的回归门禁。

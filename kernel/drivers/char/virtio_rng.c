@@ -40,7 +40,7 @@
  * arch_entropy_sample(), so calling it from the ISR would sample scheduler
  * state from interrupt context.  A guest that never opens /dev/hwrng
  * therefore does not harvest the device at all; that boundary is recorded in
- * docs/drivers/meta/implementation-status.md.
+ * docs/status/current/drivers-implementation-status.md.
  */
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/virtio_transport.h"

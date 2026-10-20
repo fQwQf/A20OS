@@ -13,6 +13,7 @@
 
 - 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
+- 状态与进度文档：`status/` 是进度台账、已知问题、子系统实现状态、验证记录、测量数据与运行证据的唯一存放处。`status/current/` 描述当前状态，`status/history/` 保留已被取代的旧记录，`status/measurements/` 放测量基线与协议，`status/evidence/` 放逐次运行的原始证据。这些内容不定义接口契约，引用前须按产生它的提交判断时效。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
 - 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
@@ -24,7 +25,7 @@
 
 - 文档描述的是**接口与设计契约**，以 HEAD 源码为最终依据；发现文档与源码不一致时，以源码为准，并欢迎直接修正文档。
 - 单篇文档头部的"最后核实"日期表示内容在该时点与源码核对过；日期久远不等于内容失效。
-- 运行类结论（PASS、耗时、性能数字）只在附上产生它的命令、配置和提交时有效。引用任何测试结论前，按 [testing-gates.md](testing-gates.md) 的入口在当前提交上重新运行；历史运行记录见 [archive/](archive/)。
+- 运行类结论（PASS、耗时、性能数字）只在附上产生它的命令、配置和提交时有效。引用任何测试结论前，按 [testing-gates.md](testing-gates.md) 的入口在当前提交上重新运行；历史运行记录见 [archive/](archive/) 与 [status/evidence/](status/evidence/)。
 
 刚接触项目的话，下面几条路径可能用得上。
 
@@ -39,15 +40,12 @@
 - [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、实现选择与接口冻结
 - [releases/v1.0-validation.md](releases/v1.0-validation.md)：可重建参照、行为验收、性能测量与发布阻塞
 - [releases/v1.0-comparison.md](releases/v1.0-comparison.md)：成对比较 runner 的 JSON 协议、统计方法和证据规则
-- [releases/v1.0-progress.md](releases/v1.0-progress.md)：12 个 V1 工作包的首波状态与下一步验证交付（非完整 TODO 台账）
-- [validation-main-integration-2026-10-13.md](validation-main-integration-2026-10-13.md)：main 集成修复与实际运行范围
-- [validation-docs-completion-2026-10-13.md](validation-docs-completion-2026-10-13.md)：当前文档完善分支的实际构建与运行结果
-- [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮开发中断恢复、分支集成、验证结果与剩余边界
+- [status/](status/README.md)：状态、已知问题、验证记录、测量数据与运行证据的统一入口
 - [releases/v0.17.md](releases/v0.17.md)：v0.17 候选版本范围、构建修正与发布检查
 - [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及代码与注释规范（语言、格式、何时该写注释、锁序与 ABI 注释约定）
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
-- [server-readiness.md](server-readiness.md)：把系统当服务器用之前，先读这篇（它直说了还差什么）
+- [status/current/server-readiness.md](status/current/server-readiness.md)：把系统当服务器用之前，先读这篇（它直说了还差什么）
 
 ## 驱动开发
 
@@ -92,7 +90,7 @@
 - [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md)：混合内核核心机制语义与契约（channel_call、svcmgr、共享环、用户态驱动、文件系统协议、vDSO）
 - [hybrid-kernel/02-mainstream-plan.md](hybrid-kernel/02-mainstream-plan.md)：与主流混合内核的差距与演进方向
 - [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)：用户态文件系统宿主（uxfs 代理 + ufsd 多后端：fat/ext4/iso9660/ntfs-ro）
-- [hybrid-kernel/STATUS.md](hybrid-kernel/STATUS.md)：能力与边界清单
+- [status/current/hybrid-kernel-status.md](status/current/hybrid-kernel-status.md)：能力与边界清单
 - [process-scheduler.md](process-scheduler.md)：进程生命周期、per-CPU runqueue、持久抢占和阻塞协议
 - [native-abi/00-overview.md](native-abi/00-overview.md)：Native ABI 设计概览
 - [native-abi/01-types.md](native-abi/01-types.md)：基础类型与 syscall 参数结构
@@ -128,7 +126,7 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
 - [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——CPU H 扩展前提、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
 - [hypervisor/04-platform-design.md](hypervisor/04-platform-design.md)：总体设计提案（未实现）——多架构后端、多 VM/vCPU、`tools/a20` 交互实例、用户态设备模型与 QEMU/KVM 兼容路线，以及分阶段验收标准
-- [hypervisor/05-implementation-status.md](hypervisor/05-implementation-status.md)：当前代码、静态验证证据和未完成项
+- [status/current/hypervisor-implementation-status.md](status/current/hypervisor-implementation-status.md)：当前代码、静态验证证据和未完成项
 - [hypervisor/06-host-runtime.md](hypervisor/06-host-runtime.md)：命名 QEMU 宿主实例、磁盘隔离和交互控制台（待运行验证）
 - [hypervisor/07-guest-supervisor.md](hypervisor/07-guest-supervisor.md)：双 guest 管理、控制协议、重连和待运行门禁
 
@@ -136,11 +134,10 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 
 当前实现要求 CPU 支持 RISC-V H 和 Sstc，且 firmware 允许虚拟 timer 的 STCE。以下 smoke 记录属于此前实现，本轮静态修改尚未重跑。当前 `hyp_probe()` 在执行 H CSR 探测前先查询启动阶段缓存的 FDT ISA 声明；FDT 如实声明 `h=false` 时，内核会拒绝虚拟化并安全跳过，`smoke-hyp-no-h` 覆盖此路径。固件若错误地声明 H 存在，内核仍无法仅凭 CSR 可读性安全识别不支持 H 的 CPU，后续 H 指令可能触发宿主异常。已记录的 QEMU 10.0.13 实测中，默认 `rv64`（以及省略 `-cpu`）也暴露 H，正向门禁可运行；显式 `-cpu rv64,h=true` 用于表达测试前提，不是运行时能力判据。QEMU 版本、命令和输出见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
 
-## 当前契约与恢复记录
+## 当前契约与边界记录
 
 - [mm-fork-mprotect-cow.md](mm-fork-mprotect-cow.md)：fork、COW 与 `mprotect` 的当前锁和帧引用契约，以及隔离回归范围。
 - [aarch64-fex-preconditions.md](aarch64-fex-preconditions.md)：AArch64 auxv 与保护提示的接口审计范围；明确哪些证据尚不能推出 FEX 支持。
-- [development-recovery-2026-10-08.md](development-recovery-2026-10-08.md)：本轮中断开发恢复的工作树、提交、门禁与验证记录。
 
 ## 研究与项目背景
 
@@ -148,7 +145,8 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 
 - [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
-- [server-readiness.md](server-readiness.md)：面向服务器部署的当前能力边界、结构性限制与阻塞项排序
+- [status/README.md](status/README.md)：状态、进度、已知问题、验证记录、测量数据与运行证据的收录规则与索引
+- [status/current/server-readiness.md](status/current/server-readiness.md)：面向服务器部署的当前能力边界、结构性限制与阻塞项排序
 - [security/hardening.md](security/hardening.md)：安全加固状态，含「诚实性原则（fail-closed）」
 - [external-dependencies.md](external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明

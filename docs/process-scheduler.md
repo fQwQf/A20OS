@@ -120,7 +120,7 @@ RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在
 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数
 （需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。
 `sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；
-配置和日志见 [本轮验证](validation-docs-completion-2026-10-13.md)，不覆盖长 syscall 有界延迟。
+配置和日志见 [本轮验证](status/history/validation-docs-completion-2026-10-13.md)，不覆盖长 syscall 有界延迟。
 
 本地选择分两段：
 
@@ -193,7 +193,7 @@ cursor 批量解锁先在保护下计算需要弹出的节点数；最后一次�
 
 效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
 A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
-见 `docs/measured/impl-notes-preempt.md`——x86_64 最大唤醒 557ms→21ms（smp=1）、
+见 `docs/status/history/impl-notes-preempt.md`——x86_64 最大唤醒 557ms→21ms（smp=1）、
 →1ms（smp=2），riscv64 427ms→31ms（smp=1）、→10ms（smp=2）。SCHED_RR 死循环任务
 跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的
 "只在 pick 时轮转"限制随之消失。

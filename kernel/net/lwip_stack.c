@@ -142,7 +142,7 @@ static unsigned g_lwip_lock_nsites;
  * is a bounded loop over this ceiling, and a20_lwip_register_netifs() breaks at
  * the first index the device class does not have, so a smaller ceiling means
  * "only that many NICs are ever registered", never an overrun.  See
- * docs/server-readiness.md.
+ * docs/status/current/server-readiness.md.
  */
 #define A20_NET_MAX_DEVS NET_PROFILE_NETIF_MAX_DEVS
 

@@ -1,7 +1,7 @@
 # A20OS Native ABI：内存子系统设计
 
 > 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
-> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 [验证记录](../validation-docs-completion-2026-10-13.md)。
+> `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 [验证记录](../status/history/validation-docs-completion-2026-10-13.md)。
 >
 > **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
 > `docs/roadmap/single-level-mm-model.md` §13.18）。原先并存的两种映射记录
@@ -306,5 +306,5 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 预留，会增加大范围稀疏移动的临时内存需求，后续应在保持回滚保证的前提下优化。
 
 已换出 PTE 的 fork/remap 克隆已补槽引用，真实换出和读回通过双架构单核/四核
-Linux 门禁，见 [验证记录](../validation-docs-completion-2026-10-13.md)。
+Linux 门禁，见 [验证记录](../status/history/validation-docs-completion-2026-10-13.md)。
 `MREMAP_DONTUNMAP` 源端再次缺页语义仍需完善，普通 remap 通过不覆盖该行为。

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Guest-side test, launched inside the XFCE D-Bus/Wayland session.
-# See docs/distro/xfce-x86_64-validation.md for image injection and screenshots.
+# See docs/status/history/xfce-x86_64-validation.md for image injection and screenshots.
 set -eu
 trap 'status=$?; if [ "$status" -ne 0 ]; then cat /tmp/xfce-firefox.log 2>/dev/null || :; echo "XFCE_WEB: FAIL status=$status"; fi' 0
 sleep 30

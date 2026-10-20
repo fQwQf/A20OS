@@ -200,7 +200,7 @@ CONFIG_NVME_SMOKE_TEST ?= 0
 # build (its own BUILD_VARIANT component) rather than a default -- but it is
 # the only detector that can see a slab page being scribbled on while it is
 # still live, which is the shape of the multi-threaded corruption reports in
-# docs/distro/known-issues.md.
+# docs/status/current/known-issues.md.
 CONFIG_SLAB_DEBUG ?= 0
 
 # Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in

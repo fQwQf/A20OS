@@ -36,7 +36,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [驱动实现符合性与限制](meta/implementation-status.md) | 当前实现矩阵：已迁移模块、不可迁移边界、驱动类状态 |
+| [驱动实现符合性与限制](../status/current/drivers-implementation-status.md) | 当前实现矩阵：已迁移模块、不可迁移边界、驱动类状态 |
 | [构建、测试与提交](meta/testing-and-submission.md) | 编译矩阵、失败清理和提交证据 |
 
 ### 四、平台与混合内核参考

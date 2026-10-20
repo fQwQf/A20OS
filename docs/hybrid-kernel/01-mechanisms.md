@@ -1,6 +1,6 @@
 # 混合内核核心机制参考
 
-内容已按 2026-08 源码核对；平台证据边界见 [STATUS.md](STATUS.md)。
+内容已按 2026-08 源码核对；平台证据边界见 [../status/current/hybrid-kernel-status.md](../status/current/hybrid-kernel-status.md)。
 
 ## IPC：`channel_call` 融合 RPC
 

@@ -18,7 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "tools/check-native-sync.py"
-PROTOCOL = ROOT / "docs/measured/native-task-object-performance-protocol.md"
+PROTOCOL = ROOT / "docs/status/measurements/native-task-object-performance-protocol.md"
 
 
 def sha(path):

@@ -188,7 +188,7 @@ size_t lock_counters_format(char *buf, size_t bufsz)
  * Zero every registered lock's counters, keeping the registrations themselves.
  *
  * The counters are cumulative since boot with no way to narrow the window, so a
- * stress spike cannot be told apart from boot-time traffic.  docs/server-readiness.md
+ * stress spike cannot be told apart from boot-time traffic.  docs/status/current/server-readiness.md
  * records a wrong conclusion drawn from exactly that: an extreme per-acquire
  * spin count was first attributed to the stress window and had to be retracted
  * after the boot window was measured separately.  A gate can work around this by

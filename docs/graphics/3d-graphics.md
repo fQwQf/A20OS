@@ -1408,7 +1408,7 @@ rc=0
 
 承接 9.14/9.15 那条「LWJGL 的 native 是 glibc 构建」的线：MC 的死因最后落在
 `natives/libopenal.so`（glibc）抛出的未捕获 `std::system_error`（稳定抛点
-`libopenal.so + 0xf168`，详见 `docs/distro/known-issues.md`）。而镜像里其实已经有 musl 版的 OpenAL
+`libopenal.so + 0xf168`，详见 `docs/status/current/known-issues.md`）。而镜像里其实已经有 musl 版的 OpenAL
 （Alpine `openal-soft`：`/usr/lib/libopenal.so.1 -> libopenal.so.1.24.3`）。
 
 修法（本次已落地）：给 launcher 的 java 命令行加一行

@@ -53,11 +53,11 @@ A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid
 Native channel，STM32 叶子通过专用 UART 和静态缓冲执行相同算子，网关可跨 UDP/UART
 转发。独立内核及生产叶子代码的混合仿真已验证可靠调用、成员恢复和 16 片/8 节点词频
 作业；物理板联调仍待验证。参见[统一设计](docs/cluster/07-unified-runtime.md)、
-[实现证据](docs/cluster/08-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)、
+[实现证据](docs/status/current/cluster-implementation-status.md)、[部署手册](docs/cluster/10-operator-guide.md)、
 [服务开发教程](docs/cluster/11-api-tutorial.md)
 、[性能测量口径](docs/cluster/21-performance.md)
 、[统一单向 SEND](docs/cluster/22-oneway.md)
-与[四节点负载实测](docs/cluster/23-four-node-load.md)。
+与[四节点负载实测](docs/status/history/four-node-load.md)。
 
 ## Linux ABI 兼容性
 
@@ -85,7 +85,7 @@ A20OS 的硬件抽象层已接入以下平台，运行、构建与真机验证�
   * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
   * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）—— **ACPI 路径已按规范实现（FADT/MADT/`_PRT`/S5），但解释器从未在真实固件上跑过，实机中断投递未验证**
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
-  * **不含网络**：`PROFILE=mcu` 走 [components/trim.toml](components/trim.toml) `[profile.mcu].sources` 的独立源文件清单，其中既没有 `kernel/net/*.c` 也没有 lwIP，所以 socket 层与协议栈在这个目标上**从未被编译**，`NET_PROFILE` 对它完全无效。网络对 STM32F103 的支持需要先把网络栈纳入 MCU trim（并按 20 KiB SRAM 重新定档），那是尚未做的产品决定，不是打开某个开关即可。详见 [docs/server-readiness.md](docs/server-readiness.md) §二。
+  * **不含网络**：`PROFILE=mcu` 走 [components/trim.toml](components/trim.toml) `[profile.mcu].sources` 的独立源文件清单，其中既没有 `kernel/net/*.c` 也没有 lwIP，所以 socket 层与协议栈在这个目标上**从未被编译**，`NET_PROFILE` 对它完全无效。网络对 STM32F103 的支持需要先把网络栈纳入 MCU trim（并按 20 KiB SRAM 重新定档），那是尚未做的产品决定，不是打开某个开关即可。详见 [docs/status/current/server-readiness.md](docs/status/current/server-readiness.md) §二。
 
 ### 关于 NOMMU
 
@@ -137,7 +137,7 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 
 逐条见 [docs/net/network-config-design.md](docs/net/network-config-design.md)、
 [docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 与
-[docs/server-readiness.md](docs/server-readiness.md) §二。
+[docs/status/current/server-readiness.md](docs/status/current/server-readiness.md) §二。
 
 ## 构建与运行
 

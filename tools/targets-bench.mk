@@ -3,13 +3,13 @@
 # ================================================================
 # Owned by the baseline agent per that roadmap's §4 file-ownership table:
 # tools/lock_bench.py, this file, the single include line in the Makefile,
-# and docs/measured/.  It touches no kernel/ file.
+# and docs/status/measurements/.  It touches no kernel/ file.
 #
 # The benchmark boots one workload per guest on a real multi-vCPU QEMU, with
 # /proc/a20/lock_contention and /proc/a20/perf reset immediately before the
 # workload and read immediately after, so the measured window belongs to the
 # workload alone.  See docs/roadmap/lock-serialization-split.md §5 for the
-# protocol and the noise discipline; the raw data lands in docs/measured/.
+# protocol and the noise discipline; the raw data lands in docs/status/measurements/.
 #
 # Everything is an environment variable so the post-modification re-run is a
 # zero-edit re-invocation:

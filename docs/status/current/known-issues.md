@@ -1,7 +1,7 @@
 # 已知问题与排查笔记
 
 本页记录桌面故障的根因与对应验证条件。当前提交的桌面可用性应按
-[XFCE 桌面验收](../testing-gates.md#xfce-桌面验收) 重新检查；历史启动日志、
+[XFCE 桌面验收](../../testing-gates.md#xfce-桌面验收) 重新检查；历史启动日志、
 Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口交互的验收。
 
 ## 当前工程队列（2026-10-13 运行复核）
@@ -15,7 +15,7 @@ Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口
 | mpv/LuaJIT、tumblerd 与 JVM 退出异常 | 既有 COW、FP、TLS 修复不能证明这些症状全部消失，仍需干净镜像复现 |
 | futex PI 的 prepare 后 fork/COW 窗口 | 编码已补持锁可写复查、解锁重试，并在 COW 后选择桶；双架构单核/四核 `pi-cow-isolation` 已通过；确定性窄窗口故障注入仍待补充 |
 | JVM 经符号链接启动时的 `$ORIGIN` | exec 已从打开文件记录最终路径，并为基线解析补入长度/IN_ROOT 边界检查；`exec-symlink-origin` 已通过；JVM 端到端仍待验收 |
-| Native 服务监督的强制终止语义 | AArch64 文件系统门禁虽通过，但日志仍有 ufsd 健康探测超时；源码中 svcmgr 超时调用 `task_kill(..., 0)`，而 `sys_a20_task_kill` 的 sig=9 分支退出当前调用者。该恢复路径仍需修正与独立验收；RTC 服务本身也不支持此板级设备。 |
+| Native 服务监督的强制终止语义 | 两处缺陷已修复并在 RV64 dev 镜像独立验收：`36295a70` 之后 `sys_a20_task_kill` 对 pid 目标的 sig=9 走 `proc_force_exit(target, 128+9)`（原 sig=9 分支会退出调用者）；C 管理器健康超时原调用 `task_kill(..., 0)`（sig=0 为 no-op，目标不会被停）也已改为 9（`user/svc/svcmgr.c`）。C 与 Rust 两个管理器各经 HANG 注入（`SVCMGR_REQ_HANG=0x25` 测试钩子）验收：健康超时 → 强制停止 → `crash detected name=echod exit_code=137` → `healed name=echod restarts=1` → 新端点 echo 通过；负控（非属主句柄 kill 被拒且服务存活）与 `[SD] audit errors=0` 同步通过。本结论仅覆盖 RV64 dev 镜像；AArch64 桌面门禁未复跑，其历史 ufsd 健康探测超时与 RTC 板级支持不在本轮证据内。 |
 | dbus NoReply、SCM_CREDENTIALS pid=-1、udev worker 等待 | 接收 socket 的 PASSCRED 继承已在基线；当前凭据捕获/送达链已复核，尚无能解释 pid=-1 的新证据 |
 | 菜单、Backspace 与部分客户端呈现的历史兼容性问题 | 先按下述 x86_64 最新验证记录确认覆盖范围；未覆盖的交互仍需证据，不能用进程存活替代 |
 | guest 写盘后的 ext4 位图一致性 | 仍需按本页历史触发场景复验；journal 窄门禁不覆盖所有桌面写负载 |
@@ -24,9 +24,36 @@ Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口
 
 已移除通过双架构单核/四核门禁的 WAKE_OP 丢更新条目；其他未覆盖条件继续保留。
 本轮已实际构建和运行 QEMU，命令、配置与结果见
-[验证记录](../validation-docs-completion-2026-10-13.md)，编码历史见
-[阶段记录](../development-docs-completion-2026-10-13.md)。
+[验证记录](../history/validation-docs-completion-2026-10-13.md)，编码历史见
+[阶段记录](../history/development-docs-completion-2026-10-13.md)。
 
+## 最新多架构桌面状态（2026-10-12）
+
+riscv64 与 loongarch64 桌面已在无头 EGL + QMP 截图条件下完成长时验收：
+`xfce-riscv64` 连续运行 33 分钟、`xfce-loongarch64` 连续运行 60 分钟，
+零 KERNEL TRAP / PANIC，顶栏面板行（y=0–24，底色 53,53,53）占比
+0.78–0.92，证据为 `build/tmp/run-xfce-riscv64.log`、
+`build/tmp/run-xfce-riscv64-final.png`、
+`build/tmp/run-xfce-loongarch64-fix2.log` 与
+`build/tmp/run-xfce-loongarch64-fix2-final.png`。
+
+loongarch64 此前的假中断 panic（cause=0 在 ESTAT 去断言窗口被二次读取、
+当成新中断继续分发）已在 trap 桥与两个通用 trap handler 以
+`ARCH_TRAP_CAUSE_IS_SPURIOUS` 守卫修复，60 分钟验收即该修复的回归证据。
+
+aarch64 桌面在 smp=4 下出现两种不同的 SMP 竞态崩溃，当前以单 CPU 运行：
+
+1. IPI 风暴后 trap frame 损坏：fpsr-restore 处 `Kernel Address Error
+   code=38`，ELR 被 GICD_SGIR 地址（0x8008000f00）覆盖。membarrier 超时
+   路径此前会把借来的 IRQ 状态泄漏给调用者，已在 `kernel/core/smp.c`
+   修复（超时返回前恢复 IRQ 状态）。
+2. SIGSEGV 投递期间的跨任务寄存器转储：pid 189 与 pid 198 的现场交错，
+   内核随后在用户地址 0x5f6a04000 上取页错误并 panic；该次日志中
+   membarrier 超时计数为 0，说明是另一处竞态，尚未定位。
+
+因此 `instances/xfce-aarch64.toml` 与 `instances/minecraft-aarch64.toml`
+固定 `smp = 1`；多核 aarch64 桌面在竞态定位前不放开。smp=4 崩溃日志见
+`build/tmp/run-xfce-aarch64.log`，smp=1 验收见文末记录。
 
 ## 最新 x86_64 修复状态（2026-10-11）
 
@@ -37,7 +64,7 @@ NetSurf/curl；HTTP、带证书验证的 HTTPS 和实际网页渲染通过。
 
 最终 4 CPU / 4 GiB x86_64 配置重复冷启动，终端真实键盘命令、Thunar 与浏览器
 窗口交互、顶栏/dock 通过五分钟观察，无 FATAL/PANIC。修复依据、负控、重跑
-命令及尚存兼容性问题见 [本轮验证记录](xfce-x86_64-validation.md)。
+命令及尚存兼容性问题见 [本轮验证记录](../history/xfce-x86_64-validation.md)。
 此结论不扩展到 RISC-V 桌面或复杂网站。以下 10-08/10-09 内容保留为历史排查
 记录，其中重启缓解和“当前未解决”的描述不代表本轮最终实现。
 
@@ -1169,7 +1196,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   `XIO: fatal IO error 90 (Message too large)`，根因是 A20OS 的 AF_UNIX 旧队列路径把单条消息卡在
   `NET_MAX_PAYLOAD`(64KiB)，**已修（`4e2aeb9f`）**：STREAM 大写按 64KiB 分片。现在卡在 DNS
   （`UnknownHostException: api.minecraftservices.com`，客体未配 resolver）。
-  完整过程与证据见 [minecraft.md](minecraft.md)。
+  完整过程与证据见 [minecraft.md](../../distro/minecraft.md)。
 
 ### x86_64 可用 RAM 曾硬编码成 1 GiB（已修复：改从 multiboot 内存图取）
 
@@ -1730,7 +1757,7 @@ wlroots legacy 后端反复报
   Linux syscall ABI 上），其 `drm_mode_crtc` 就是 Linux UAPI 的那一份。
   结论侥幸成立，但依据已更正；现在这条 ABI 一致性由
   `tools/check-drm-abi.sh` 门禁按结构体布局逐字段核对，见
-  [graphics/3d-graphics.md §8.1](graphics/3d-graphics.md)。
+  [graphics/3d-graphics.md §8.1](../../graphics/3d-graphics.md)。
 
 影响面：这条同时卡住 XWayland 呈现验证与 x86_64 `smp>1` 挂起调查，两者都需要
 一块真正能出画面的显示器。
@@ -1781,7 +1808,7 @@ init 阶段直接放弃这个 output。不能只在 `destroy_dumb` 上打补丁�
   `e2fsck -fn` 是干净的（5 个 pass 全过），说明损坏不是构建期引入、而是之后发生，
   具体来源未定位。
 - rootfs 构建：直接 `apk add` 走官方 CDN 会慢到像卡死；用预置的 `a20rootfs-builder`
-  docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。详见 [`build.md`](build.md)。
+  docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。详见 [`build.md`](../../distro/build.md)。
 - 改 overlay 必须重建镜像：debugfs 对 8GiB 的 metadata_csum ext4 打不开 rw。
 - QEMU 串口日志在后台跑时的坑：镜像被 QEMU 以 RW 打开，重复启动前要清掉占用进程；
   判断占用者看 `/proc/*/fd`，不要用 `pgrep -f`。
@@ -1839,6 +1866,18 @@ labwc 自己吞键（`root/.config/labwc/rc.xml` 只绑了 `W-Return`/`W-d`/`W-f
 顺带纠正一条：先前怀疑的 `input_mux` 伪造 `EVIOCGBIT(EV_KEY)`（`k = 1..0xff`）不是本例的
 原因，同一设备上非 VTE 客户端的 Backspace 正常。该伪造仍不干净，但与本 bug 无关。
 
+## 2026-10-12 多架构桌面验收记录
+
+- `xfce-aarch64`（smp=1）：无头 EGL + QMP 截图条件下自 21:22 起连续运行 46
+  分钟以上（21:32 桌面就绪，22:07 末次截图仍是完整桌面），其间每 5 分钟一次
+  截图（`build/tmp/aarch64-smp1-watch.txt`，distinct 色数 174 稳定），顶栏
+  面板行（y=0–24，底色 53,53,53）占比 0.864，日志零 KERNEL TRAP / PANIC /
+  Address Error / membarrier 超时。证据：
+  `build/tmp/run-xfce-aarch64-smp1.log` 与
+  `build/tmp/run-xfce-aarch64-smp1-final.png`。
+- `xfce-riscv64`（smp=4，33 分钟）与 `xfce-loongarch64`（smp=4，60 分钟）
+  的验收证据见本页「最新多架构桌面状态（2026-10-12）」一节。
+
 ## UXFS 同 inode 多 vnode 的 stale size（2026-10-15）
 
-guest r4 曾复现：同一 inode 的两次 lookup 得到不同 vnode，导致第二个 fd 在另一个 fd 写入并 `fsync` 后仍看到 EOF。当前 canonical `(superblock, inode)` vnode identity 路径已修复这一缺陷；该修复与 CLOSE_CONFIRM/lost-ACK 协议独立。原 r4 日志和哈希是历史失败证据，不代表当前回归失败；当前行为由 `uxfs_reopen_test` 覆盖，关闭协议见[UFSD close-token 契约](../fs/ufs-close-token.md)。
+guest r4 曾复现：同一 inode 的两次 lookup 得到不同 vnode，导致第二个 fd 在另一个 fd 写入并 `fsync` 后仍看到 EOF。当前 canonical `(superblock, inode)` vnode identity 路径已修复这一缺陷；该修复与 CLOSE_CONFIRM/lost-ACK 协议独立。原 r4 日志和哈希是历史失败证据，不代表当前回归失败；当前行为由 `uxfs_reopen_test` 覆盖，关闭协议见[UFSD close-token 契约](../../fs/ufs-close-token.md)。

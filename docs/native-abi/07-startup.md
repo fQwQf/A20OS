@@ -1030,7 +1030,7 @@ int main(int argc, char *argv[]) {
 
 目标：能让 busybox 或 dropbear 等真实程序运行。
 
-工作项（全部位于 `user/archive/`，不参与当前构建；详见 [08-runtime-status.md](08-runtime-status.md) §3）：
+工作项（全部位于 `user/archive/`，不参与当前构建；详见 [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md) §3）：
 - [x] `arch/a20/` 全套（atomic.h, reloc.h, config.a20, syscall.h）
 - [x] syscall 映射层（`a20_syscallops.c`，336 行）
 - [x] pthread → A20 thread 适配（`a20_pthread.c`，283 行）

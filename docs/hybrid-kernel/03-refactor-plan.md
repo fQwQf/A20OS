@@ -71,7 +71,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 ### 阶段二：Native ABI SMP 正确性收口
 
-`native-shmring` 在 SMP=2/8 下约 30% 概率的内存破坏（见 [STATUS.md](STATUS.md) 已知边界）从“低优先级”升级为**阻塞项**：Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着后续一切结论无效。
+`native-shmring` 在 SMP=2/8 下约 30% 概率的内存破坏（见 [../status/current/hybrid-kernel-status.md](../status/current/hybrid-kernel-status.md) 已知边界）从“低优先级”升级为**阻塞项**：Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着后续一切结论无效。
 
 范围：共享 VMO + channel 批量句柄/大块传输在 SMP 下的页表/帧引用交互（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、`[LOCK-STALL]`）。
 
@@ -110,4 +110,4 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 - 每阶段的验收必须来自仓库内可复现的 make 目标，不接受手工结论；
 - 性能结论标注中位数与异常值，注明 TCG/真实硬件来源；
 - 任何阶段不得为了让测试通过而修改测试本身、预触页、固定睡眠或关闭 SMP；
-- 实施推进时同步更新各阶段验收状态与 [STATUS.md](STATUS.md) 的能力清单。
+- 实施推进时同步更新各阶段验收状态与 [../status/current/hybrid-kernel-status.md](../status/current/hybrid-kernel-status.md) 的能力清单。

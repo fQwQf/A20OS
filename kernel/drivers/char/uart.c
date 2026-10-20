@@ -25,7 +25,7 @@
  * which is bound to ~11.5 kB/s by having to echo every byte back out the same
  * 115200-baud UART -- could not keep up, so uart_rx_push() silently discarded
  * 15130 of the 18909 bytes it was handed in one measured run (see
- * docs/measured/serial-fidelity.md).  A silent drop turns into a merged
+ * docs/status/history/serial-fidelity.md).  A silent drop turns into a merged
  * command line on the console: the shell keeps the partial line, the next
  * command's bytes land in it, and mksh executes garbage
  * (`echecho FID000009...: inaccessible or not found`).

@@ -4,7 +4,7 @@
 # are live here.  Starts the minimum server daemons (all busybox/dropbear/
 # chrony from Alpine upstream) and then opens a root console shell —
 # deliberately minimal until A20OS grows an authenticated login path
-# (no getty/PAM yet, see docs/server-readiness.md §五).
+# (no getty/PAM yet, see docs/status/current/server-readiness.md §五).
 
 export HOME=/root
 export SHELL=/bin/sh
@@ -17,7 +17,7 @@ mount -t devpts devpts /dev/pts 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 
 # Kernel timestamps start at the build constant and there is no RTC driver
-# yet (docs/server-readiness.md §七); chrony -q steps the clock once from
+# yet (docs/status/current/server-readiness.md §七); chrony -q steps the clock once from
 # the configured NTP source so logs/ certificates get sane times.  Failure
 # (no network / no server reachable) must not block boot.
 chronyd -f -q 2>/dev/null &

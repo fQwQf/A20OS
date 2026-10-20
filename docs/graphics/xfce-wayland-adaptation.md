@@ -146,4 +146,4 @@ make distro-run ARCH=x86_64 QEMU_GUI_DISPLAY=none
 
 修复后发行版路径实测（riscv64 QEMU）：合成器不再崩溃，DRM 后端创建成功，`Virtual-1` modeset 1024x768，`WAYLAND_DISPLAY=wayland-0` 起来，labwc autostart 拉起 XFCE 会话（Xfconf/xfsettingsd 激活，窗口 `wlr_surface` 陆续映射）。输入已打通：eudev 把 `ID_INPUT_*` 写进数据库，libinput 枚举到 event0/event1 并配置成键盘鼠标。
 
-发行版路径的已知问题与排查笔记（含已解决的输入 ABI 缺口与读路径自死锁的根因、遗留的 dbus 偶发超时、测试环境注意点）统一维护在 [`docs/distro/known-issues.md`](../distro/known-issues.md)。
+发行版路径的已知问题与排查笔记（含已解决的输入 ABI 缺口与读路径自死锁的根因、遗留的 dbus 偶发超时、测试环境注意点）统一维护在 [`docs/status/current/known-issues.md`](../status/current/known-issues.md)。

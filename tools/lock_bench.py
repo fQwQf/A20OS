@@ -7,7 +7,7 @@ table) and /proc/a20/perf, then reduces repeated runs to median / min / max.
 
 Why the window is reset rather than subtracted: the lock counters are
 cumulative since boot with no way to narrow the window, and
-docs/server-readiness.md records a wrong conclusion drawn from exactly that
+docs/status/current/server-readiness.md records a wrong conclusion drawn from exactly that
 (a stress spike read as boot traffic and vice versa).  The kernel exposes
 `echo reset > /proc/a20/lock_contention` and the same for perf
 (kernel/fs/procfs/procfs.c), so each run brackets its own workload with a
@@ -19,7 +19,7 @@ after the proc/net/slab splits can re-run this file with zero edits:
   RUNS=5          repetitions per workload (median/min/max over these)
   SMP=8           -smp value passed to QEMU (host fallback is automatic)
   WORKLOADS=...   comma separated subset, default all four
-  OUT_DIR=...     JSON + markdown destination, default docs/measured
+  OUT_DIR=...     JSON + markdown destination, default docs/status/measurements
   PHASE=baseline  output stem; baseline | after
   KERNEL_ELF, FAT32_IMG, BUILD_DIR, SKIP_BUILD=1
                   point the benchmark at an already-built image
@@ -635,7 +635,7 @@ def render_markdown(result: dict, path: Path) -> None:
       "after the fact. `Control-window` is the same counters between the "
       "reset and the first read -- the floor the workload numbers sit on.")
     A("")
-    A("**Noise discipline.** `docs/server-readiness.md` records repeated runs "
+    A("**Noise discipline.** `docs/status/current/server-readiness.md` records repeated runs "
       "of one 4-core workload spanning 0 to ~920024 spins, and this table's "
       "own max-min spread is the honest resolution limit for every cell "
       "below. A post-change median that differs from the baseline median by "
@@ -776,7 +776,7 @@ def render_markdown(result: dict, path: Path) -> None:
     A("```")
     A("")
     A("The post-modification round is the same command with "
-      "`--phase after` and `OUT_DIR=docs/measured`, so no file in this "
+      "`--phase after` and `OUT_DIR=docs/status/measurements`, so no file in this "
       "directory needs editing to re-measure. Per-run console logs land in "
       "`.kernel-build/bench-logs/<phase>/<workload>/run<N>/console.log` and "
       "are not committed; the JSON carries the parsed snapshots.")
@@ -794,7 +794,7 @@ def main() -> int:
     ap.add_argument("--workloads", default=os.environ.get(
         "WORKLOADS", ",".join(DEFAULT_WORKLOADS)))
     ap.add_argument("--out-dir", default=os.environ.get(
-        "OUT_DIR", str(REPO / "docs" / "measured")))
+        "OUT_DIR", str(REPO / "docs" / "status" / "measurements")))
     ap.add_argument("--timeout", type=int, default=env_int("TIMEOUT", 600))
     ap.add_argument("--input-delay", type=float,
                     default=float(os.environ.get("INPUT_DELAY", "10")))

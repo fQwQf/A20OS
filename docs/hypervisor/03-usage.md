@@ -1,6 +1,6 @@
 # Hypervisor 使用指南
 
-当前入口是 RISC-V H/Sstc 宿主上的 `hypvm` 和 `a20-vmd`。Native 与 Linux 扩展 ABI 包装同一个 VM 核心。其它架构后端、A20 `/dev/kvm` 和 QEMU 作为 A20 内部 VMM 的兼容层尚未实现。实测能力和限制见 [实现状态](05-implementation-status.md)。
+当前入口是 RISC-V H/Sstc 宿主上的 `hypvm` 和 `a20-vmd`。Native 与 Linux 扩展 ABI 包装同一个 VM 核心。其它架构后端、A20 `/dev/kvm` 和 QEMU 作为 A20 内部 VMM 的兼容层尚未实现。实测能力和限制见 [实现状态](../status/current/hypervisor-implementation-status.md)。
 
 ## 构建和启动宿主
 
@@ -63,7 +63,7 @@ hypvm --help
 
 直接运行时 stdin/stdout 属于当前终端；同时运行多个进程应提供独立管道或 PTY。管理器已经代办这些隔离。
 
-仓库保留 `hyp-host-riscv64-smp2` 宿主和 `a20-ramfs-riscv64-smp2` guest profile。必须先构建对应 SMP 宿主，使打包的 RAMFS 内核也支持 2 CPU，再使用对应 profile；`vcpus` 参数本身不能把单 CPU 内核变成 SMP 内核。SMP 的验收状态以 [实现状态](05-implementation-status.md) 为准。
+仓库保留 `hyp-host-riscv64-smp2` 宿主和 `a20-ramfs-riscv64-smp2` guest profile。必须先构建对应 SMP 宿主，使打包的 RAMFS 内核也支持 2 CPU，再使用对应 profile；`vcpus` 参数本身不能把单 CPU 内核变成 SMP 内核。SMP 的验收状态以 [实现状态](../status/current/hypervisor-implementation-status.md) 为准。
 
 ## 排查
 

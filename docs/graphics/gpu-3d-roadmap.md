@@ -190,7 +190,7 @@ guest 里的 GL/GLES 客户端已经在 llvmpipe 上拿到 GLES 3.2 并持续渲
 - `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` **不在 A20OS 构建路径里**。
   A20OS 用 `tools/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，而
   `sysdeps/a20` 不含任何 DRM 代码。任何把它当"用户态 DRM 定义来源"的引用
-  都是无效的（例如 `docs/distro/known-issues.md` 曾用它来否证 ABI 不一致假设；
+  都是无效的（例如 `docs/status/current/known-issues.md` 曾用它来否证 ABI 不一致假设；
   结论侥幸成立，因为真正的用户态是 Alpine 的 libdrm，但依据是错的，已更正）。
 - `user/cmds/core/egl_test.c`（已删除）曾被 `user/Makefile` 从
   `LOCAL_CMD_SRCS` 里 filter 掉，**不参与构建，是死代码**。不要把它读成
@@ -535,7 +535,7 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。症状指向
 | `VIRTGPU_RESOURCE_CREATE_BLOB` | ✅ 报 0 是正确答案，不是缺口 | 见下方专条 |
 | 窗口化/局部 present | ✅ 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
 | 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | ✅ 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留；为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
-| 硬件视频解码 | ❌ 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/distro/mpv-luajit-crash.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
+| 硬件视频解码 | ❌ 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/status/current/known-issues.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
 | `A20_RENDERER=gl`（合成器 GL 渲染器） | ❌ 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
 
 ---
@@ -797,7 +797,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，建议单独立项排�
 4. `virtio_gpu.c`：`CONTEXT_INIT` 真正协商、`GET_DISPLAY_INFO` 真正查询（§4.2）
 5. UAPI ABI 缺陷修复 + `tools/check-drm-abi.sh` 门禁（§6）
 6. lwIP raw RX 路径双重释放修复（`kernel/net/socket_inet.c`，见
-   [../distro/known-issues.md](../distro/known-issues.md)）
+   [../status/current/known-issues.md](../status/current/known-issues.md)）
 7. Minecraft 切到 Wayland 后端（§9.1）
 8. `tools/build-virglrenderer.sh` 与宿主资源预检落地（§5.1 / §10；预检现居 `tools/a20_resource.py`）
 

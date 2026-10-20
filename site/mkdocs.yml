@@ -124,7 +124,6 @@ nav:
           - 双重放置策略: hybrid-kernel/04-dual-placement.md
           - IDL 与 Personality: hybrid-kernel/05-idl-and-personality.md
           - 用户态文件系统: hybrid-kernel/06-user-fs.md
-          - 实施状态: hybrid-kernel/STATUS.md
   - 原生 ABI:
       - 总览: native-abi/00-overview.md
       - 类型系统: native-abi/01-types.md
@@ -134,7 +133,6 @@ nav:
       - IPC 通信: native-abi/05-ipc.md
       - 安全模型: native-abi/06-security.md
       - 启动流程: native-abi/07-startup.md
-      - 运行时状态: native-abi/08-runtime-status.md
       - ABI 深化: native-abi/09-native-abi-deepening.md
   - 内核子系统:
       - EEVDF 调度器: eevdf-scheduler.md
@@ -170,7 +168,6 @@ nav:
           - USB 设计: drivers/classes/usb-design.md
           - 用户态与 devfs: drivers/classes/userspace-and-devfs.md
       - 工程实践:
-          - 实现状态: drivers/meta/implementation-status.md
           - 测试与提交: drivers/meta/testing-and-submission.md
   - 平台移植:
       - 移植指南: platforms/porting-guide.md
@@ -201,11 +198,31 @@ nav:
       - 发行版 rootfs:
           - 总览: distro/README.md
           - 引导: distro/boot.md
-          - 引导差距分析: distro/boot-gap-analysis.md
           - 构建: distro/build.md
           - 内核要求: distro/kernel-requirements.md
           - 源码软件移植: distro/source-software-porting.md
-          - 已知问题: distro/known-issues.md
+  - 状态与进度:
+      - 状态目录说明: status/README.md
+      - 模块状态: status/current/module-status-2026-10-19.md
+      - 已知问题: status/current/known-issues.md
+      - 服务器就绪度: status/current/server-readiness.md
+      - 1.0 进度台账: status/current/v1.0-progress.md
+      - 1.0 待办队列: status/current/v1.0-next-20.md
+      - 各子系统实现状态:
+          - 集群与服务: status/current/cluster-implementation-status.md
+          - 驱动: status/current/drivers-implementation-status.md
+          - Hypervisor: status/current/hypervisor-implementation-status.md
+          - 混合内核: status/current/hybrid-kernel-status.md
+          - Native ABI 运行时: status/current/native-abi-runtime-status.md
+      - 历史验证记录:
+          - 文档完善分支验证: status/history/validation-docs-completion-2026-10-13.md
+          - 第一阶段验证: status/history/validation-v1-first-wave-2026-10-13.md
+          - 驱动注册表容量: status/history/validation-driver-registry-capacity-2026-10-13.md
+          - 工程阶段记录: status/history/development-docs-completion-2026-10-13.md
+      - 测量与协议:
+          - 锁竞争基线: status/measurements/lock-baseline.md
+          - 锁竞争改造后: status/measurements/lock-after.md
+          - Native task object 协议: status/measurements/native-task-object-performance-protocol.md
   - 路线图:
       - 工程改进 TODO: roadmap/a20os-improvement-todo.md
       - 性能大修: roadmap/perf-overhaul.md

@@ -54,6 +54,6 @@ cat /proc/a20/xlator                                  # 期望：enabled: 1，�
 ## 相关入口
 
 - 运行验证与门禁：[../testing-gates.md](../testing-gates.md)（`smoke-exec-xlator`、`smoke-exec-xlator-shim`、`smoke-exec-xlator-off`、`smoke-exec-xlator-la64`、`check-xlator-guests`）
-- 能力表条目：[../hybrid-kernel/STATUS.md](../hybrid-kernel/STATUS.md)
+- 能力表条目：[../status/current/hybrid-kernel-status.md](../status/current/hybrid-kernel-status.md)
 - 与 Linux 人格层（阶段五）的分工：[../hybrid-kernel/05-idl-and-personality.md](../hybrid-kernel/05-idl-and-personality.md)
 - 代码位置速查：[03-internals.md](03-internals.md#1-代码地图)

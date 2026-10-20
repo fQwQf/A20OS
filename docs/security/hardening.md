@@ -86,10 +86,10 @@
 实跑 PASS（日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`，`FSYNC_TEST: PASS`
 且 `ahci_irq_completions > 0`）。**真实 SATA PHY 上的中断送达仍无任何证据**，
 AHCI 也仍只走 INTx、没有 MSI-X 路径（详见
-[server-readiness.md](../server-readiness.md) 第一节「仍缺」）。ext4 已有可写
+[server-readiness.md](../status/current/server-readiness.md) 第一节「仍缺」）。ext4 已有可写
 JBD2 ordered journal 并通过 `make smoke-ext4-journal` 的崩溃注入门禁；仍未覆盖
 的是文件数据块本身的校验和（`crc32c` 只覆盖 JBD2 日志与 ext4 元数据），见
-[server-readiness.md](../server-readiness.md)。
+[server-readiness.md](../status/current/server-readiness.md)。
 
 ## 已评估、暂缓或进行中的项
 

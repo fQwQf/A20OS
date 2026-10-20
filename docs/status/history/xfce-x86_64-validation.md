@@ -68,11 +68,11 @@ Bing 空白问题。现在 XFCE world 加入 Firefox，HTML/HTTP/HTTPS 默认使
 Firefox 的 forkserver 会为没有文件描述符的回复附带空 SCM_RIGHTS 头。
 此前内核错误地以 EINVAL 拒绝，导致 `failed to send a reply message` 断言；
 修复接受空列表，继续解析后续控制消息，详见
-[Linux Unix ancillary ABI](../linux-unix-ancillary.md)。MM 的 fork shootdown、
+[Linux Unix ancillary ABI](../../linux-unix-ancillary.md)。MM 的 fork shootdown、
 用户复制生命周期和回收提示数据保留修复另见
-[MM 并发约束](../mm-fork-mprotect-cow.md)。另修复工作线程的 Unix 凭据、
+[MM 并发约束](../../mm-fork-mprotect-cow.md)。另修复工作线程的 Unix 凭据、
 SO_PEERPIDFD 选项号和 CLOEXEC，以及
-[线程组结束时的 SIGCHLD 通知](../linux-child-exit-notification.md)；后者修复
+[线程组结束时的 SIGCHLD 通知](../../linux-child-exit-notification.md)；后者修复
 已退出的 xfconf-query 仍让 shell 等待的问题。所有修复都使用通用接口。
 
 ### 重跑 fixture
@@ -138,7 +138,7 @@ Firefox ESR 140 的 musl 堆断言在内存修复后仍可复现；它不作为�
 HTTP/3 的 neqo 套接字选项仍报告 EOPNOTSUPP，浏览器使用 TCP/TLS 回退；
 这不构成 QUIC 支持验收。仍可见 xfdesktop 文件图标断言、elogind 和 udev
 ethtool 的兼容性缺口。本记录只覆盖 QEMU x86_64 桌面，不代表真实硬件、
-其他架构桌面、音频或 Firefox WebGL 的验收。Minecraft 的 virgl 验证见 [Minecraft](minecraft.md)。
+其他架构桌面、音频或 Firefox WebGL 的验收。Minecraft 的 virgl 验证见 [Minecraft](../../distro/minecraft.md)。
 
 
 ### 图形修复后的 Firefox 回归
@@ -153,10 +153,10 @@ GPU 资源、PRIME 共享和 fence 修复后，再用生产镜像副本各完成
 对应画面为同目录 `firefox-updated-{2d,3d}-bing.png`。
 此处内核 SHA-256 为
 `965962d4520347257f4ab19da083fabbb9e36613c1d0a2c5ecbe6149a81a67a4`。
-随后另修复 [SIOCGIFCONF](../linux-interface-enumeration.md) 的输出语义，
+随后另修复 [SIOCGIFCONF](../../linux-interface-enumeration.md) 的输出语义，
 该修复通过 x86_64/RISC-V 原生回归；它不改变浏览器套接字的数据传输路径。
 
 会话通过 `VIRTGPU_GETPARAM(3D_FEATURES)` 选择渲染器，不判断架构或应用名；
 `A20_RENDERER` 可显式覆盖。用户默认的普通 XFCE 实例仍能使用 2D GPU，
 Minecraft 专用实例开启 virgl。详见
-[GPU 共享与同步](../graphics/virtgpu-sharing-and-sync.md)。
+[GPU 共享与同步](../../graphics/virtgpu-sharing-and-sync.md)。

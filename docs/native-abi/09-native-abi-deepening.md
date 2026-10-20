@@ -181,7 +181,7 @@ typedef struct a20_task_mem_args {
 
 ## 5. 深化：EventQ 文件/网络事件源接线
 
-现状：`a20_event_notify()` 只有 channel/timer/task-exit/udriver 调用；event_watch 对 FILE/SOCKET/DEVICE 目标永不触发（[08-runtime-status.md §7]）。`handle_poll` 只是电平快照。
+现状：`a20_event_notify()` 只有 channel/timer/task-exit/udriver 调用；event_watch 对 FILE/SOCKET/DEVICE 目标永不触发（[../status/current/native-abi-runtime-status.md §7]）。`handle_poll` 只是电平快照。
 
 设计：在核心就绪状态变化点调用 `a20_event_notify`。对象键与现有 watch 一致，FILE/SOCKET 的 object 是全局 fd（`(void*)(uintptr_t)gfd`）。
 
@@ -265,7 +265,7 @@ typedef struct a20_task_mem_args {
 
 ## 10. 参考
 
-- [08-runtime-status.md §7](08-runtime-status.md)（现差距清单）
+- [../status/current/native-abi-runtime-status.md §7](../status/current/native-abi-runtime-status.md)（现差距清单）
 - [03-handle.md](03-handle.md)（对象模型）、[04-memory.md](04-memory.md)（VMO/VMAR）
 - [05-ipc.md](05-ipc.md)（EventQ/channel）
 - `kernel/ipc/userfaultfd.c`、`kernel/net/socket_inet.c`、 `kernel/fs/pipe.c`、`kernel/abi/linux/sys_perf.c`、`kernel/mm/process_vm.c`

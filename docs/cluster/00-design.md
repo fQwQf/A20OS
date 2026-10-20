@@ -4,7 +4,7 @@
 同一套身份、寻址、调用、服务、作业与原生执行域接口。
 资源档决定容量，节点能力决定可以执行什么。完整设计及验收约束见
 [07-unified-runtime.md](07-unified-runtime.md)，实际证据见
-[08-implementation-status.md](08-implementation-status.md)。
+[../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。
 
 当前已实现独立内核 UDP、UART 主/叶、端到端会话、可靠调用与多跳 UDP 分片，
 共用算子/能力协议，动态成员、服务目录、租约路由，持久部署配置与 Native
@@ -100,7 +100,7 @@ CRC 是损坏检测，地址绑定不是密码学认证。当前部署范围为�
 
 - [29-native-sync.md](29-native-sync.md)：公共用户原子操作、futex、MMU/flat 地址适配与验收边界。
 
-历史轨道文件 `impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。
+历史轨道文件 `../status/history/impl-prompts.md` 保留实施背景；当前进展以 08 文档为准。
 
 统一运行实例与当前原生执行域状态接口见 [31-runtime-instance.md](31-runtime-instance.md)。
 

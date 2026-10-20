@@ -175,4 +175,4 @@
 5. 信封调解器未实现：当前只有 Native 侧预算机制，Linux ABI 进程尚未接入能力纪律。
 6. 类型化通道静态分析工具未实现：推论 2.2.1 只有语义、无分析器（04 §4）。
 7. **信封不是完整沙箱**：附加能力预算，不解决被攻破进程内部行为（11 §1）。
-8. Native ABI 管道数据流待解：mksh 多进程管道（`a | b`）作业等待已不挂起（waitpid 任意子进程扫描 + 检查点 SIGCHLD + native exec 保留 ht），但 dup2+exec 后的管道句柄映射仍有异常；内建与顺序外部命令均正常。`task_clone`（能力安全续体）已实现：无隐式能力继承、COW 内存续体、显式能力清单（`docs/native-abi/08-runtime-status.md §5d`）。
+8. Native ABI 管道数据流待解：mksh 多进程管道（`a | b`）作业等待已不挂起（waitpid 任意子进程扫描 + 检查点 SIGCHLD + native exec 保留 ht），但 dup2+exec 后的管道句柄映射仍有异常；内建与顺序外部命令均正常。`task_clone`（能力安全续体）已实现：无隐式能力继承、COW 内存续体、显式能力清单（`docs/status/current/native-abi-runtime-status.md §5d`）。
