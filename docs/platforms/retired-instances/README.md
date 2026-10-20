@@ -1,5 +1,7 @@
-# Retired PPC64LE instance snapshots
+# 已退役的 PPC64LE 实例快照
 
-These TOML manifests were active under `instances/` at the `v0.18` baseline. They are kept as historical configuration evidence, but the current `tools/a20` registry does not scan or execute this directory. `make ARCH=ppc64le ...` is explicitly rejected.
+这些 TOML 清单在 `v0.18` 基线时位于 `instances/`。它们作为历史配置事实保留，但当前 `tools/a20` 注册表
+不扫描也不执行本目录；`make ARCH=ppc64le ...` 会被显式拒绝。
 
-For reproduction, use a clean checkout of the annotated `v0.18` tag, where these files are at their original paths under `instances/`. The current checkout may contain local edits; preserve them before switching revisions.
+复现时请用带注释的 `v0.18` 标签的干净 checkout，那里这些文件仍在 `instances/` 下的原始路径。当前 checkout
+可能带有本地改动，切换版本前先自行保存。

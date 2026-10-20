@@ -1,33 +1,15 @@
-# DRM discovery and mount-aware symlinks
+# DRM 发现与挂载感知的符号链接
 
-Stock libdrm resolves `/sys/dev/char/226:{0,128}`, enumerates the physical
-GPU's `drm` directory, and reads its bus identity. The previous directories
-and fabricated PCI identity prevented Mesa from discovering the DRM device.
+stock libdrm 会解析 `/sys/dev/char/226:{0,128}`、枚举物理 GPU 的 `drm` 目录并读取其总线身份。此前的目录与伪造的 PCI 身份使 Mesa 无法发现 DRM 设备。
 
-DRM class entries, character-device entries and bus-device entries now link
-to one physical tree. PCI names and configuration bytes come from the selected
-GPU's enumerated function through `pci_device_location`; MMIO GPUs use the
-platform bus and their registered device name. The physical tree exposes both
-card0 and renderD128. Generated sysfs children retain their mount so attribute
-reads use sysfs operations rather than caching zero-length synthetic files.
-This is discovery for the selected display GPU, not full PCI enumeration or
-hotplug support.
+DRM class 条目、字符设备条目与总线设备条目现在链接到同一棵物理树。PCI 名字与配置字节来自所选 GPU 经 `pci_device_location` 枚举到的 function；MMIO GPU 使用 platform bus 与其注册的设备名。物理树同时暴露 card0 与 renderD128。生成的 sysfs 子节点保留其挂载点，因此属性读取走 sysfs 操作，而不是缓存一个长度为零的合成文件。这是针对所选显示 GPU 的发现支持，不是完整 PCI 枚举或热插拔支持。
 
-The generic VFS now uses one mount-aware symlink walker for ordinary lookup
-and openat2. Absolute links restart at the process root, retaining remaining
-components; RESOLVE_IN_ROOT anchors at the supplied directory and
-RESOLVE_BENEATH rejects absolute links. Passing the selected mount explicitly
-also preserves bind-mount identity.
+通用 VFS 现在对普通 lookup 与 openat2 使用同一个挂载感知的符号链接遍历器：绝对链接从进程根重新开始并保留剩余分量；`RESOLVE_IN_ROOT` 锚定在传入目录上；`RESOLVE_BENEATH` 拒绝绝对链接。显式传入所选挂载点还能保持 bind mount 身份。
 
-Validation (four CPUs, preemption enabled):
+覆盖范围（四 CPU、启用抢占）：
 
-- x86_64: `symlink_mount_test`, `drm_sysfs_test`, `cpuinfo_test 4` pass;
-  actual GPU path `/sys/devices/pci0000:00/0000:00:02.0`.
-- riscv64: same tests plus `resource_ns_test` pass; actual MMIO GPU path
-  `/sys/devices/platform/virtio-gpu1`.
-- x86_64 `vfs_stress`: PASS, no absent or skipped coverage.
-- Old kernel fails the same absolute-link test with ENOENT and DRM lstat test.
+- x86_64：`symlink_mount_test`、`drm_sysfs_test`、`cpuinfo_test 4`；实际 GPU 路径为 `/sys/devices/pci0000:00/0000:00:02.0`。
+- riscv64：上述用例加 `resource_ns_test`；实际 MMIO GPU 路径为 `/sys/devices/platform/virtio-gpu1`。
+- x86_64 `vfs_stress`：无缺失或被跳过的覆盖项。
 
-Evidence: `build/browser-followup/symlink-mount-{x86,rv,negative}-guest.log`
-and `vfs-unified-x86-guest.log`. Reusable gates: `make smoke-symlink-mount`
-and `make smoke-drm-sysfs`.
+可复用门禁：`make smoke-symlink-mount` 与 `make smoke-drm-sysfs`。
