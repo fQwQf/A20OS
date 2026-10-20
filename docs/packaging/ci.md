@@ -99,6 +99,7 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
         smoke-abi-linux         # syscall_smoke
         smoke-syscall-ext       # keyring/AIO/io_uring/landlock 等扩展 syscall
         smoke-sched-stress / smoke-proc-stress / smoke-futex-stress
+        smoke-sched-stress-smp2 / smoke-proc-stress-smp2  # 2 核 SMP 变体；单核 target 保留
         smoke-mm-stress / smoke-vfs-stress   # FAT/ext4/ISO9660 压力
         smoke-smp-bringup       # 2 核 SMP bring-up
         smoke-native-contract   # 唯一的 Native 运行时门禁（riscv64；见 docs/testing-gates.md

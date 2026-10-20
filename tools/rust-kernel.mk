@@ -150,6 +150,7 @@ RUST_DONTUNMAP_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
 RUST_DONTUNMAP_TARGET_riscv64 := riscv64imac-unknown-none-elf
 RUST_DONTUNMAP_TARGET_riscv32 := $(RUST_RV32_TARGET)
 RUST_DONTUNMAP_TARGET_loongarch64 := loongarch64-unknown-none
+RUST_DONTUNMAP_TARGET_arm32 := armv7a-none-eabihf
 RUST_DONTUNMAP_TARGET := $(RUST_DONTUNMAP_TARGET_$(ARCH))
 RUST_DONTUNMAP_TXN_OBJECT := $(BUILD_DIR)/rust/mremap_dontunmap_txn.o
 RUST_HANDLE_SLOT_SRC := kernel/abi/native/handle_slot.rs
@@ -2287,6 +2288,10 @@ RUST_DONTUNMAP_CODE_MODEL_riscv64 := medium
 # corresponds to.  Same reasoning as RUST_NETFILTER_CODE_MODEL_* above.
 RUST_DONTUNMAP_CODE_MODEL_riscv32 := medium
 RUST_DONTUNMAP_CODE_MODEL_loongarch64 := medium
+RUST_DONTUNMAP_CODE_MODEL_arm32 := small
+# Same rule as RUST_NETFILTER_TARGET_FEATURES_arm32: the kernel must not start
+# using NEON.  arm32's C ABI is hard-float VFP, which -neon leaves alone.
+RUST_DONTUNMAP_FEATURES_arm32 := -neon
 RUST_DONTUNMAP_FEATURES_aarch64 :=
 RUST_DONTUNMAP_EXTRA_x86_64 := -C no-redzone=yes
 RUST_DONTUNMAP_CODE_MODEL := $(RUST_DONTUNMAP_CODE_MODEL_$(ARCH))
