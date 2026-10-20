@@ -4,7 +4,7 @@
 /*
  * Cluster UART transport -- shared wire codec and head-node link API.
  *
- * Ownership: WC1 track (docs/status/history/impl-prompts.md 文件所有权表: WC owns
+ * Ownership: WC1 track (WC owns
  * kernel/cluster/uart.c and kernel/mcu/).  This header is the one shared
  * seam between the two halves of that ownership: the head-node transport in
  * kernel/cluster/uart.c and the MCU leaf protocol face in kernel/mcu/leaf.c
@@ -30,8 +30,7 @@
  * The SLIP golden vectors from WB1 (tools/cluster-ref/) were still being
  * produced when this file was written (2026-10); the codec implements the
  * 04-§4 prose exactly and cites the section per rule.  The vector cross-check
- * happens at the integration step; where the two disagree, the prose wins
- * (impl-prompts.md 故障处置表).
+ * happens at the integration step; where the two disagree, the prose wins.
  */
 
 #include "core/types.h"

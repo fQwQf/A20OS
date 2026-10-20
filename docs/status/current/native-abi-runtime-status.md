@@ -1,6 +1,6 @@
 # A20OS Native ABI 运行时状态
 
-最后核实：2026-10-13。共享 Native runtime smoke 已支持 RISC-V64/AArch64；实际运行与硬件专属跳过项见 [本轮验证](../history/validation-docs-completion-2026-10-13.md)。本页是对 [00-overview.md](../../native-abi/00-overview.md) 中实现状态的补充。
+最后核实：2026-10-13。共享 Native runtime smoke 已支持 RISC-V64/AArch64；实际运行与硬件专属跳过项见 本轮验证。本页是对 [00-overview.md](../../native-abi/00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
 
@@ -143,7 +143,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 拒绝 NUL 和 `/`；空前缀监听全部名称。匹配使用生产点的完整名称，再截断输出的
 `fs_name[32]`。替换 watch 同步替换前缀。它不递归监听子目录；没有名称的事件仅匹配
 空前缀，现有 `FS_MODIFY` 生产点仍不提供名称。回归入口为 `smoke-native-deepen`，
-本轮已进入双架构实际运行；结果见 [验证记录](../history/validation-docs-completion-2026-10-13.md)。
+本轮已进入双架构实际运行；结果见 验证记录。
 
 
 > 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。

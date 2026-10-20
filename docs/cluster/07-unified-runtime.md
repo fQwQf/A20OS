@@ -1,7 +1,6 @@
 # MCU 与服务器统一集群机制
 
-本文是 2026-10-11 开始的实现依据。原有 `../status/history/impl-prompts.md` 是历史实施轨道，
-其中暂停等待人工仲裁的流程由本轮已授权的设计完善与连续实现替代。
+本文是 2026-10-11 开始的实现依据。原实施轨道记录已删除；其中暂停等待人工仲裁的流程由本轮已授权的设计完善与连续实现替代。
 实现状态及运行证据集中记录在 `../status/current/cluster-implementation-status.md`。
 
 ## 1. 统一的含义
@@ -91,7 +90,7 @@ MCU 最小预算允许单在途、单回复缓存、单帧消息；服务器通�
 每个 adapter 连续 100 ms 未轮询时获得一次有界轮询机会，避免拥塞无限
 推迟控制 I/O，正常空闲等待仍最多 1 ms。这是调度机会的预算，不是心跳
 帧送达的硬实时保证；adapter 自身仍须遵守字节/帧工作预算。具体实现和
-负载证据见 [04-transports.md](04-transports.md)、[../status/history/four-node-load.md](../status/history/four-node-load.md)。
+负载证据见 [04-transports.md](04-transports.md)。
 
 静态 leaf 用固定缓冲、单事务缓存和周期泵表达相同的有界接纳合同。业务
 回调必须有界且不能重入协议泵；资源满时返回明确拒绝，重试保留原事务键。

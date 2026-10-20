@@ -1115,7 +1115,7 @@ swapoff、活动设备 mkswap 均返回 EBUSY，非管理员管理调用返回 E
 
 失败时查看 `.kernel-build/smoke/swap-<arch>[-smp4].log` 中首个 `SWAP_TEST: FAIL`，
 对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c`、`kernel/mm/oom.c` 与缺页路径。
-上述四组已在本轮实际通过，见 [验证记录](status/history/validation-docs-completion-2026-10-13.md)。
+上述四组已在本轮实际通过，见 验证记录。
 边界：门禁通过范围换出，不证明低内存 OOM 策略或 swapoff 排空活跃页；当前忙设备
 拒绝关闭。`CONFIG_SWAP` 在 riscv32/loongarch32 与 NOMMU 上仍由构建入口关闭。
 

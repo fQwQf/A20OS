@@ -24,8 +24,8 @@ Wayland socket 或组件进程存在，不能代替面板、dock 与真实窗口
 
 已移除通过双架构单核/四核门禁的 WAKE_OP 丢更新条目；其他未覆盖条件继续保留。
 本轮已实际构建和运行 QEMU，命令、配置与结果见
-[验证记录](../history/validation-docs-completion-2026-10-13.md)，编码历史见
-[阶段记录](../history/development-docs-completion-2026-10-13.md)。
+验证记录，编码历史见
+阶段记录。
 
 ## 最新多架构桌面状态（2026-10-12）
 
