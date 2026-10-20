@@ -129,34 +129,3 @@ AArch64 采用同一构建的 kernel.bin 启动，使 QEMU 的 DTB/x0 交接传�
 它不是物理板证据。Minecraft 验收仍遵循 [24](24-single-system-minecraft.md)：
 还需要应用归属与全局对象代理、文件/显示/输入设施、Java 运行时，以及实际
 多 MCU 板级共享内存验证。本阶段不以成员准入测试代替客户端启动。
-
-
-## 本阶段实际结果（2026-10-12）
-
-三种 ISA 混合流程已通过两次，最终一次的 `events.json` 为 `passed: true`：
-实际转发观察到 CD/1 245 帧、CD/2 331 帧、CM/1 2 帧和 CM/2 2 帧。它们是这次
-运行的协议帧计数，包含重试/回复，不能用作调用数或性能指标。三套独立内核
-完成同实例工作调用、其他实例与未绑定域排除、重启代次复用拒绝、全新代次
-恢复及 owner 重启。所有控制服务都使用相同的 timing-scale=10。
-
-旧三节点 mesh 的间接探测、丢回复恢复、死亡/重启与控制服务恢复通过；普通
-Native cluster/supervisor/IPC/signal 和 Linux proc/futex 压力回归通过。监管者
-测试实际读取 timing-scale=10 配置并启动控制服务，另一路旧配置保留默认值。
-AArch64 双核 Native domain/thread/runtime/allocator/atomic32/futex 回归通过，
-父子线程分别运行在 CPU1/CPU0。普通 AArch64 Linux futex 压力也完整通过并
-正常关机；原固定 8 s 输入/20 s 总期限的配方未见 PASS，改为等待实际 shell
-提示符再发送同一压力命令，明确总期限为 60 s，压力断言保留。USART2 的 64 KiB Flash/20 KiB RAM leaf 固件
-编译链接通过，精简 MCU 原始二进制哈希保持不变。
-
-协议/成员/叶节点单测、三 ISA 生产 runtime 与 task object 宿主测试及其
-ASan/UBSan 检查通过；ABI 配置、Native 覆盖、trim、模块边界、任务生命周期、
-线程组生命周期及文档检查通过。全库格式检查仍是相同的 114 个既有失败，
-未扩大豁免。旧阶段已复现的 Native handle transfer 和 debug 失败仍保留在
-[34](34-runtime-namespace.md) 的边界中，本阶段没有宣称修复它们。
-
-本阶段提交的日志、命令、帧追踪、内核/应用 ELF 与 SHA256 清单保存在
-`.kernel-build/cluster/evidence/instance-membership-<commit>/`；构建镜像记录
-SHA256，避免把后续构建的镜像错认成本次运行证据。
-
-对象目录已继续接入：按所属域解析全局对象名、租约发布和实际能力生命周期，
-当前接口与验证边界见 [36-object-directory.md](36-object-directory.md)。

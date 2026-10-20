@@ -61,7 +61,6 @@
 - [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂上、把像素送上屏的路线图（VIRTGPU UAPI、ABI 门禁、排序论证、非目标）
 - [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_resource.py`（启动前资源门禁）
 - [graphics/real-hardware-gpu.md](graphics/real-hardware-gpu.md)：真机 GPU 的现实边界：scanout（2–4 周）与 3D 加速（不可行）是两件事，附实测驱动规模与逐 SoC 结论
-- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：**已完全退役**（描述已删除的 `user/wayland/` 栈），仅供追溯
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
@@ -72,7 +71,6 @@
 - [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
-- [platforms/loongarch32.md](platforms/loongarch32.md)、[platforms/ppc64le.md](platforms/ppc64le.md)：已退出 1.0 支持的历史移植资料
 - [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
 - [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈
 
@@ -81,7 +79,6 @@
 - [packaging/overview.md](packaging/overview.md)：包管理与镜像分发体系（apk 打包、world 组装、仓库签名、CI/CD）
 - [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
 - [distro/source-software-porting.md](distro/source-software-porting.md)：把新软件接进 A20OS（Alpine 上游包写进 world 清单；仍需从源码构建的只有 `user/cmds/` 与 fastfetch）与运行时验证
-- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：已退役的 XFCE Wayland 适配记录（仅供追溯，勿据此判断现状）
 
 ## Native ABI 与子系统细节
 

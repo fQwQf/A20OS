@@ -124,3 +124,12 @@ QEMU RISC-V64 board 已提供 ECAM、PCI MMIO BAR 窗口和实际 HDA PCM DMA；
 - riscv64 `mm_stress` 在 evict 子测试挂起：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。
 
 两者均为页缓存/写回或 exec 释放路径的既有缺陷，独立于 generic/embedded 驱动部署重构。修复时不得把这两个现象当作驱动部署的回归证据。
+
+<!-- 以下内容从 docs/drivers/classes/audio.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 当前限制
+
+- 每个 controller 只有一个全局 playback stream；尚未提供多客户端混音或 per-open session。
+- 不支持 capture、音量控制、mixer、动态采样率或除 S16_LE stereo 之外的格式。
+- HDA ring 和 virtio-sound completion 目前均由 write/drain 路径轮询。HDA 尚未启用 period IRQ；若生产者停止时间超过整个 ring，硬件可能在下一次 refresh 前重放旧数据。
+- QEMU RISC-V64 使用 coherent DMA 假设；移植到非一致性缓存硬件前必须实现真实的 `dma_sync_for_device()`。

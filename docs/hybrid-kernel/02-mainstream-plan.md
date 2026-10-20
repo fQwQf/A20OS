@@ -77,29 +77,6 @@ RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆�
 - **捐赠仅限 UP**：SMP 捐赠需要跨核唤醒/IPI 簿记的完整实现（`PER_CPU_CURRENT_VALIDATION`），在完成前不开放。
 - **外来架构二进制走 execve 就地 re-exec，不走人格服务**：`execve` 的语义要求调用者变成目标进程，转发给常驻服务就必须写一层 syscall 代理人格（starnix 式，量级完全不同），且请求响应要穿过 `kernel/ipc/channel_fd.c:68-72` 丢弃消息携带句柄的缺口。改为在 `exec.c` 的 `ENOEXEC` 回退循环里把 `bprm` 改写成宿主 qemu-user 并重来，guest 对内核完全是一个原生进程。W^X 只对被内核标记的那一个 task 放行，不动全局策略。可翻译的架构集合由 `kernel/proc/xlator_guests.def` 一处注册、由 `check-xlator-guests` 门禁保证与交叉编译器表一致，而不是编译期写死的白名单——加一个外来架构要改两行、不改内核逻辑。控制面分三层且互不依赖：编译期 `CONFIG_XLATOR`（可整块裁掉，`CONFIG_XLATOR=0` 时该文件不参与构建、符号表里搜不到 `xlator_*`）、启动时 `a20.xlator=*`、运行期 `/proc/a20/xlator`。分界与代价见 [../exec-xlator/03-internals.md](../exec-xlator/03-internals.md)。
 
-
-## 放置策略审计（2026-08）
-
-对照主流操作系统的实际形态逐项核对当前内核态/用户态划分（"现状"以源码构建产物为准）：
-
-| 组件 | A20OS 现状 | Fuchsia/Zircon | XNU / NT | Linux | 评估 |
-|------|-----------|----------------|----------|-------|------|
-| 调度 / MM / IPC 底座 | 内核 | 内核 | 内核 | 内核 | 一致 |
-| VFS 核心 + 页缓存 | 内核 | 内核极简，FS 自带缓存 | 内核 | 内核 | 一致 |
-| 块设备数据面 | 主存储内核（polling virtio-blk）；scratch 盘用户态（ubd 经共享环零拷贝 DMA） | 用户态 | 内核 | 内核 | 主流混合谱系的折中：性能关键面在内核，可恢复路径外迁 |
-| 文件系统实现 | 双态：内核副本（引导/发行版）+ ufsd 宿主（fat/ext4 读写、iso9660/ntfs 只读） | 全部用户态 | 以内核为主，辅以用户态 FS（如 SMB/网络重定向） | 内核 + FUSE 扩展 | 与 XNU/NT 同型，并具备 FUSE 式扩展通道 |
-| TCP/IP 协议栈 | 内核 lwIP | 用户态 netstack | 内核 | 内核 | 与多数主流一致；Fuchsia 属少数派。此前 netd 外迁尝试已记录放弃（02 决策），重启该方向需先补 IPC 数据面成本依据 |
-| 服务监管 / 按名发现 | 用户态 svcmgr + 注册表（崩溃重启、健康探针） | 用户态 appmgr/组件框架 | 内核/混合（SCM、服务控制管理器为用户态） | 无原生等价物 | Zircon 风格能力，超出 XNU/Linux 常规 |
-| 低速设备驱动（RTC/input） | 用户态 rtcd/uinputd（MMIO 授权 + IRQ→EventQ） | 用户态 driver host | 内核 | 内核（部分 FUSE/CUSE 化） | 较主流桌面更接近微内核 |
-
-结论：当前形态落在主流混合内核谱系（XNU/NT 型）的工程保守面上，同时具备 Zircon 式的可崩溃服务层与能力化扩展通道，与定位一致。
-
-按"业界主流混合内核而非完全微内核"的定位复核，原列三项差距重新定性：
-
-1. 主存储块数据面与 TCP/IP 留内核，**定位一致的最终形态，非待办**。XNU/NT/Linux 同样将其置于内核态；外迁属微内核方向。性能数据（时间片捐赠 SMP 化后的有效样本）仍值得积累，但只影响调优，不影响架构结论；
-2. 内核侧文件系统副本，定位一致的最终形态，非待办。主流混合内核普遍自带内核 FS 驱动（NT 的 fastfat/cdfs、XNU 的 HFS+）。ext4/isofs/ntfs 与用户态共享同一份源码（fscompat 编译），无实现漂移；唯一双实现是 FAT（内核完整版 vs fat32lite），已在 06-user-fs 标注。引导期 `/bin` 挂载依赖内核副本是客观约束，也是主流做法；
-3. ufsd 纳入 svcmgr 清单托管，**已完成**。清单支持 argv，ufsd 接入 echo 健康探针，缺盘时干净退出（exit 0 不计重启预算）；SIGKILL→umount2→重启→数据持久的恢复契约在 `smoke-native-fs-all` 的 UXFS_RESTART 段实测通过。
-
 ## 能力边界与不承诺项
 
 - 网络协议栈保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；

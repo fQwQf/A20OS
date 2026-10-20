@@ -103,7 +103,7 @@ p50/p95 记录。它不等于 [06-production.md](06-production.md) 的四节点
 本机 IPC 对照、物理 STM32 掉电恢复和物理混合集群仍须单独执行。
 
 全库快速门禁最初有两个独立失败：宿主 lwIP 并发测试缺少 CPU 适配头与
-CPU 数配置，以及既有 `docs/roadmap/single-level-mm-model.md` 引用越界行号。
+CPU 数配置，以及既有 `docs/status/history/mm-single-level-migration-log.md` 引用越界行号。
 已修复构建接线并更新到实际函数，保留四 lane、真实分配器和 8 线程各
 20000 次操作；最终 `make check` 的 21 项宿主门禁全部通过。证据位于
 `.kernel-build/cluster/final-host-gates.log`。全库格式门禁仍有 114 个既有

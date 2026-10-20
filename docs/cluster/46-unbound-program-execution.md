@@ -84,18 +84,6 @@ full mlibc 现有完整构建端口为 RV64，新增 `make ARCH=riscv64 mlibc-th
 `.kernel-build/cluster/evidence/unbound-programs-<commit>/manifest.json`。
 失败、诊断、中间版本与最终验收分别列明。
 
-## 当前边界
-
-这个工作负载证明程序实际执行、自动利用空闲 CPU 和正常退出，没有证明
-最优均衡或整机性能。原 Native 多架构与 MCU 回归还包含显式 affinity 迁移
-检查；不能把其 CPU mask 3 单独当作未绑定线程初始分配的证据。
-
-JVM、Java 字节码、物理 MCU 和 Minecraft Java 客户端仍未执行。本阶段清除
-真实 libc 多线程运行的阻塞点，下一步仍需接入完整解释器、类库、JNI 与客户端
-所需显示/输入依赖，最终物理验收保持 [24](24-single-system-minecraft.md)。
-mlibc 通用线程层的 TCB 释放、Native 线程句柄回收和 GC 所需的线程定向暂停
-仍需继续实现；本测试不将它们判为已完成。
-
 ## 最终验证
 
 | 环境 | 结果 |

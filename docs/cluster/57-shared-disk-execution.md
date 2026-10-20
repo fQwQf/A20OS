@@ -34,22 +34,6 @@ CPU 本地 LAPIC、定时器不走这一驱动 HAL，仍在各自实例操作。
 主实例设备向共享 RAM DMA，并在 CPU 0 触发 MSI-X。CPU 1 使用正常驱动完成
 路径继续执行。并未把整个驱动或任意阻塞函数塞进 owner 回调。
 
-## 实测发现与修复
-
-初次磁盘运行出现了真实死锁：CPU 1 持有 virtio 驱动锁并等待 owner 写寄存器，
-CPU 0 的设备中断处理同时等待该锁。内核编译的 cpu_relax 已能处理 owner
-请求，但独立编译的驱动模块遗漏了 `CONFIG_SHARED_DEVICE_CALL`，其锁等待
-只执行 pause，无法完成远端请求。
-
-修复使共享构建的可加载驱动同时启用调用处理钩子和 MMIO 路由，并从驱动框架
-导出 shared_device_poll/shared_mmio_read/shared_mmio_write。owner 即使在
-驱动锁等待中，也能处理不获取该锁的寄存器叶操作，然后让原持锁者前进。
-
-驱动包含内联 CPU/MMIO 代码，不能与普通内核混用输出。因此共享配置使用
-`user/build/x86_64-shared-qemu`，普通配置仍用 `user/build/x86_64`。
-用户 ELF 本身没有新增集群 ABI；musl 仍使用原 ISA 构建目录。
-普通配置不定义这些宏，HAL 仍为原始内联访问，共享实现编译为空。
-
 ## 验收与复现
 
 输出目录必须未存在。每次运行保存源码哈希、diff、冻结的内核 ELF、启动 ROM、
@@ -104,21 +88,3 @@ Linux 程序使用 open/lseek/read/write/close 和已有块设备 ioctl。原始
 `disk-owner-evidence.json` 汇总 11 次运行，并重新核对报告、冻结 ELF、日志和
 磁盘哈希。普通内核符号表、普通 virtio-blk 模块未包含共享设备符号；共享模块
 包含所需的三个导入。`make check-doc-drift` 通过。失败运行仍保留，未计为通过。
-
-## 当前边界与下一步
-
-BRINGUP 门槛仍保留。下阶段需要实际挂载文件系统、从磁盘加载 JVM/类库，
-再验证图形、输入及一个真实 Minecraft 客户端的菜单与输入。GPU/framebuffer
-直接映射、端口 I/O、PCI 配置空间动态操作及绕过 HAL 的原始寄存器访问，
-不能由本次 MMIO 接入自动保证。owner 目前固定为 0，设备分散到多个 owner
-仍需平台资源映射与生命周期管理。
-
-公共指针调用只适用于相同 ISA/内核映像/指针 ABI 的共享执行域，不是混合
-ISA 的消息协议。跨 ISA 集群继续使用既有程序格式、能力匹配和传输接口；
-物理多 MCU 共享域还需要真实共享 RAM、原子操作/仲裁和缓存维护后端。
-owner 失效后的请求取消、fencing 和设备恢复也未完成。当前不能宣称多 MCU
-Minecraft 已经可用，亦没有普通模式性能基准来支持整体零性能损失的结论。
-
-后续文件系统挂载、从磁盘 exec 和真实文件 fsync 已推进至
-[58](58-shared-filesystem-execution.md)。JVM、图形和 Minecraft 跨实例验收
-尚未完成。

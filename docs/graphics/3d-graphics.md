@@ -43,174 +43,6 @@
 | 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
 | Mesa/virgl 用户态客户端 | ❌ 未挂载验证 | UAPI 已就绪；A20OS 不自建 DRI 驱动，由 stock Mesa 提供（见上一行） |
 
-### 本轮（`feat/graphics-hardening`）：存储层的正确性，而不是新能力
-
-上一轮把 3D 通路打通之后，留在树里的问题已经不是"还差什么功能"，而是
-"已经声称做到的事情里，哪些是真的"。逐条核对源码后修掉的都是这一类，
-判据仍然是"能不能指向一个会失败的门禁"。
-
-**一处此前完全不存在的锁。**GEM 表、framebuffer 表、CRTC 绑定、GEM name 表、
-PRIME 表、virgl id 计数器、EDID 缓存——全部是 device-global，且按设计就是
-全局的（一个 open 建的 buffer 必须对另一个 open 可见），而**此前没有任何互斥**，
-只有 vblank 那个槽加了锁。这不是理论竞态：桌面天生两个进程并发驱动它
-（wlroots allocator 在一个 fd 上建 buffer，backend 在另一个 fd 上用）。
-两个 ioctl 可以发出同一个 handle、在另一个 CPU 遍历时删掉表项，或者把第三个
-ioctl 正在读的 VMO 释放掉。现在有 `g_drm_store.lock`，但它**只保护表**：凡是
-可能睡眠、分配、进 VFS 或下发 virtio 命令的操作都在放下锁之后做，跨越这段的
-对象由 pin 兜底，所以 teardown 拆成两段（锁内 `drm_gem_detach_locked()`、
-锁外 `drm_gem_drop_storage()`）。契约记在
-[lock-order.md](../drivers/guide/lock-order.md#drmkmsvirtio-gpu-3d)。
-
-**一处 use-after-free，在 3D 传输层。**`virtio_gpu_resource_attach_backing()`
-在**完全没有持锁**的情况下 resize / `kfree` / `memset` / `memcpy` 共享的
-`inst->big_req`，之后才去拿 `inst->command_lock`。而同一块 buffer 也被
-`send_cmd_big` 与 `submit_3d` 在同一把锁下增长和重填；DRM 每次 EXECBUFFER
-都会为每个 buffer 调一次 ATTACH_BACKING。两个客户端就会互相把对方的请求体
-写坏，其中一个还会 `kfree` 掉另一个正在写的内存。
-
-**一处静默画错。**`RESOURCE_ATTACH_BACKING` 的 page 列表原先是"跳过分不到的、
-把剩下的压紧"。宿主按 `entries[n]` 放在 `n * PAGE_SIZE`，所以 8 页里第 3 页
-失败时，entry 3 变成第 4 页的物理帧，渲染器画进一个从未拿到过的 buffer，
-而整条路径报的是成功。现在部分页集直接算失败。
-
-**host 侧资源泄漏两处。**同一个 buffer 被二次提升为 3D resource 时，
-`virgl_res_id` 被直接覆盖，旧 resource 永远不 unref；`drm_close()` 一边要求
-`ops->ctx_destroy` 存在、一边从不调用它，于是每个碰过 3D 的 `renderD128`
-open 都在 host 上漏一个 context，直到 guest 结束。
-
-**尺寸算术。**CREATE_DUMB 的 pitch 是 `((width * bpp + 7) / 8 + 63) & ~63u`，
-`width * bpp` 是 32 位乘法。实测旧算法下 `65536 x 65536 x 32` 得到
-`size = 17179869184`（16 GiB），CREATE_DUMB 照单全收，PRIME 导出再
-`kmalloc(b->size)` 快照一份——两个 ioctl 向内核要 16 GiB VMO 加 16 GiB 堆。
-算术已移到 `kernel/include/drivers/gpu/drm_geom.h` 的 `drm_dumb_layout()`，
-全 64 位，并以 `DRM_MAX_BUFFER_BYTES` 封顶；这个上限不是凑的 256 MiB，
-它正好等于 3D 传输层本来就会拒绝的上限（`attach_backing` 超过 65536 页即拒），
-于是 VMO 与导出快照共用同一个界。
-
-**五处"声称做到但没做到"。**`GETPROPBLOB` 在 `b.data` 为空或偏短时**不拷贝却
-返回成功**，把调用方未初始化的栈当 EDID 交出去（应 `-ENOSPC` 并回填所需长度）；
-`SET_CLIENT_CAP` 接受 `DRM_CLIENT_CAP_ATOMIC` 而 `MODE_ATOMIC` 对一切非
-TEST_ONLY 提交返回 `-EINVAL`——桌面只是靠会话里 `WLR_DRM_NO_ATOMIC=1` 才没炸；
-`GEM_FLINK` 名字表满时吞掉失败仍返回成功；`ADDFB`/`ADDFB2`/`RESOURCE_CREATE`
-在 copy-out 之前就占了表项或 host 资源，copy 失败即永久泄漏（RESOURCE_CREATE
-还会留下一个谁也不知道 id 的 virgl resource）；`RMFB` 把仍绑在 CRTC 上的
-framebuffer 销毁掉，`GETCRTC`/`GETPLANE` 于是继续报告一个 `GETFB` 已经
-`-ENOENT` 的 fb_id。
-
-**一处越权。**render node 此前只拒绝 `SET_MASTER`，其余 KMS ioctl 从
-`/dev/dri/renderD128` 一律可达，于是 GBM/EGL 进程可以 `MODE_SETCRTC` 把屏幕
-抢过去；而 `is_master` 从未被任何 KMS handler 查询过，所以 master 标志本身
-也从来不是保护。[3d-graphics.md §6](3d-graphics.md) 早就写着 render-only
-"KMS ioctl 本就需要 master"——现在它真的如此。**注意这是本轮唯一一处会影响
-既有桌面的行为改动**，上线前需要跑一次 `GPU_3D=0` 的 xfce smoke。Linux 同样
-在 render node 上拒绝 `CREATE_DUMB`，所以 GBM 本来就用 primary node 建 dumb
-buffer，没有依赖旧行为的东西。
-
-> **该 smoke 已跑，结果见 §0.6**：2D-only（`virtio-gpu 2D only (no VIRGL
-> feature)`）实例 xfce-x86_64 正常起来并反复呈现（`[DRM] present handle=N
-> 1024x768`），labwc 认出 `Found config * for output Virtual-1`，全程没有一行
-> master/render-node 错误。这条阻塞解除。
-
-**一处会静默掐死整条 3D 路。**`gpu_device_register()` 是 first-wins，而
-`vmsvga` 的 ops 表 3D 部分全是 NULL。若它先 probe，所有 `DRM_IOCTL_VIRTGPU_*`
-返回 `-ENODEV`，而 `DRM_CAP_PRIME`/`GETPARAM` 照旧声称有能力，日志里没有一行
-说 DRM 到底绑了谁。现在按"3D 可用者优先、且同级不互相顶替"选择，两条路径都打日志。
-
-**门禁。**`tools/tests/drm_geom_test.c` 直接驱动 `drm_dumb_layout()`（由既有
-`make host-tests` 的通配自动纳入）；`make check-drm-store-locking` 断言锁契约，
-并对 `drm_lock()`/`drm_unlock()` 的出现次数设下限——只断言"符号出现过"在删掉
-某处锁之后仍然全绿，那样的门禁会放过自己存在的目的。两道门禁都实测过会失败：
-把旧算术放回 `drm_dumb_layout()` 测试退出 134；删掉 15 对 lock/unlock 计数转红。
-
-**本轮没做的事，明确记下。**`virtio_gpu_remove()` 与 `init_transport` 的
-`fail:` 路径原先直接 `memset` 整个 instance（含 `command_lock` 与 waiters）而不持锁，
-会把别人阻塞其中的 mutex 和已挂链的 waiter 一起清掉。**本轮已把这两处换成
-`virtio_gpu_release_buffers()`**：释放堆缓冲、清零标量状态，但**不再碰
-`command_lock` 与 waiters**（instance 在静态存储里，保留已初始化的锁本身就是对的）。
-
-
-**曾经记为未解决、现已查清并撤回的一条**：上面这个 helper 的注释曾写"仍在命令
-路径里的调用者会继续跑在已 reset 的 transport 上，因此需要设备级 teardown 锁或
-in-flight 引用计数"。**这条判断是错的**，查证后撤回，理由是它要防的那件事不会发生：
-
-- instance 是文件静态的 `g_gpu_inst`，其存储寿命长于任何调用者，所以"跑在已
-  reset 的 transport 上"不构成 use-after-free；
-- 每个命令入口都重新读 `dev->drv_priv`，而 `remove()` 会把它清空，wrapper 在
-  NULL 时回 `-ENODEV`；
-- ops 表是 `static const`，竞态调用者已经取到的函数指针始终有效；
-- 能走到驱动的前提是该设备是当前默认设备，而 `gpu_device_unregister()` 先清空
-  槽位，于是 `drm_gpu_ops()` 返回 NULL，ioctl 在碰到 instance 之前就回 `-ENODEV`。
-
-真正让这个顺序安全的是：`unregister()`（清槽位）→ `unpublish()`（排空
-`class_device_call_begin` 使用者）→ `release_buffers()`。**若将来有改动在一次
-ioctl 期间缓存 `dev` 或 `ops`，或绕过默认设备槽位直接调驱动，这个结论就失效，
-那时才真的需要引用计数。**
-`gpu_device_unregister()` 的"清空槽位后不重选"本轮也修掉了，见 [§0.6](#06-本轮合并前阻塞项已解除设备重选已修)。
-
-### 本轮（`feat/graphics-hardening`，续）：宿主阻塞解除后的实测结论
-
-前面把 GET_CAPS 归因于"宿主 renderer 建不出离屏 GL context"。**这个结论是错的。**
-在一台裸机宿主（AMD + NVIDIA 双 GPU、无 X、无头显）上实测，宿主完全能给出
-OpenGL 4.6 context；错的是我们自己把 capset **index** 当成 capset **id** 发给了
-GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
-`GET_CAPS returned a 308 byte capset`，此前是 0x1205。
-
-顺带更正一条本文档 §0 里的判断：`capset size=308` 既不能证明 renderer 老，也不能
-证明 renderer 新。GET_CAPSET_INFO 按**索引**查，index 0 就是 capset 1，而 capset 1
-本来就是小的那一个（几千字节的是 capset 2）。`tools/build-virglrenderer.sh` 里用
-`STALE_CAPSET_BYTES=1024` 判断新旧量的是 capset 1，这个判据不成立。
-
-宿主侧要拿到 context，需要三件事同时成立，缺一件都是**静默降级成 2D-only**：
-
-1. EGL vendor 必须是 Mesa。双 GPU 宿主上 glvnd 默认选私有驱动，而它的 EGL 没有
-   virgl 能用的 device/surfaceless 平台。
-2. 必须把私有 GPU 的 `/dev/dri` 节点藏起来。Mesa 会枚举**所有** DRM 节点，私有 GPU
-   的节点在 Mesa 下 `eglInitialize` 失败（`gbm device using incorrect/incompatible
-   backend`），而 QEMU **不会**跳过它继续试后面的节点。
-3. `egl-headless` 必须显式带 `gl=on`，否则 QEMU 直接拒绝创建设备。
-
-这三条由 `tools/with-virgl-display.sh` 封好（用非特权 user+mount namespace，
-不需要 root）。在这台宿主上用它跑 `tools/a20 test smoke-gpu3d-riscv64`，可以稳定
-走到 `GET_CAPS returned a 308 byte capset`。
-
-**XFCE GUI 实例（xfce-x86_64）实测**：会话能起来，`labwc` 认到
-`Found config * for output Virtual-1`，并通过我们的 DRM/KMS 路径反复呈现
-（`[DRM] present handle=N 1024x768`）。过程中修掉三处：
-
-- `QEMU_GUI_DEVICES_x86_64` 没有键盘鼠标。wlroots 的 multi backend 先试 libinput，
-  找不到输入设备就**放弃整个 session**（不会退回 DRM），而
-  `start-xfce4-session` 不设 `WLR_LIBINPUT_NO_DEVICES`。
-- `tools/a20 test` 对任何没写 `[machine]. memory` 的实例都 `NameError`
-  （`d52c8ccb` 把三个常量挪进 `a20_resource.py` 却没加进 import）。
-- PRIME 导出返回 fd 号所在namespace搞错，`-EIO`，wlroots 的
-  `render/allocator/drm_dumb.c` 因此 "Failed to allocate buffer"。这是
-  `e8149cad` 引入的回归，由 guest 日志逮到。
-
-**还没有做到的，以及已知的下一步**（按当前证据排序，不猜）：
-
-1. ~~`gpu3d_test` 的像素回读 4096/4096 全错~~ **已解决，见下面一节。**
-2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
-   崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
-   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件。**本轮查过并排除了"ioctl 缺口"
-   这条主要猜测**：驱动定义的 48 个 ioctl 里有 47 个真的被分发，唯一没分发的
-   `VIRTGPU_RESOURCE_CREATE_BLOB` 早就通过 `VIRTGPU_PARAM_RESOURCE_BLOB = 0`
-   声明为不可用，所以 Mesa 不会去调它；`GET_CAP` 广告的三个能力
-   （`DUMB_BUFFER`/`PRIME`/时间戳）对应的 ioctl 也都在。而落到 `default:`
-   的 ioctl 返回的是错误，不是 NULL 函数指针，因此这条路径产生不了 `ra=0x400`。
-   **仍未定位**，见 §0.7。
-3. 因此**还不能说"Mesa 已经挂上 virtio_gpu_dri"**。已有的是强旁证：强制
-   `A20_RENDERER=gl`（wlroots 在 renderer 创建失败时是直接放弃而非退回）后 session
-   仍然起来并呈现，且此前失败日志里的 `render/allocator/drm_dumb.c` +
-   `render/swapchain.c` 正是 wlroots GL renderer 的代码路径。但这是推断，不是直接
-   观测——`MESA_DEBUG=1` 没有输出，`egl-headless` 又不支持 `screendump`
-   （它按设计就没有 display surface），所以还没有一张桌面截图作为直接证据。
-
-A20OS 不自研着色器编译器，也不自研 DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，
-SPIR-V→host GPU 由 virglrenderer 完成；A20OS 要做的是把中间的运输层补齐
-（GEM 对象模型 + 上游 virgl UAPI），让 stock Mesa 能挂上来。这是后续所有工作的出发点。
-
----
-
 ## 0.5 本轮（`feat/graphics-hardening`，续）：像素回读通了，根因不是命令长度
 
 上面那条"`gpu3d_test` 像素回读全错、首像素是哨兵"现在**通过了**：
@@ -365,7 +197,6 @@ GPU` → `unable to create backend`）。已回退为 1。
 `make host-tests`，无需新增构建接线。门禁**实测会红**：把扫描改回"永不改进"、
 拒绝填空槽、或让后探测者无论能力都获胜，三种改法分别退出 134。
 
-
 ---
 
 ## 0.8 stock Mesa 已挂上 virgl：真正的阻塞点是 GETPARAM 的指针语义
@@ -471,7 +302,6 @@ Mesa，装进 guest 后行为与发行版版**逐字节一致**——发行版�
 `OpenGL renderer string:`——用后者会一条都匹配不到，并让门禁在 virgl 正常工作
 时误报"未 attach"。
 
-
 ## 1. 背景与原理
 
 ### 1.1 为什么需要 3D
@@ -555,7 +385,6 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 ```
 
 ---
-
 
 ## 3. 内核驱动实现
 

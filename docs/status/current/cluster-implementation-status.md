@@ -75,7 +75,7 @@ STM32 专用集群 main 已使用 UID、两页 epoch journal 和独立 USART2/3�
 
 全库格式门禁存在本轮以外的不合规文件；本轮修改的集群 C/头文件独立格式化，
 不扩大格式豁免名单。文档引用检查曾发现已有的
-`docs/roadmap/single-level-mm-model.md` 对 drvmod loader 的越界行号引用。
+`docs/status/history/mm-single-level-migration-log.md` 对 drvmod loader 的越界行号引用。
 初次 `make check` 的 `host-tests` 因 lwIP 并发 harness 缺少 CPU 适配头与
 CPU 数配置失败，`check-doc-drift` 因上述越界引用失败。已复用宿主 CPU shim、
 保留四 lane 配置及真实分配器测试，并将引用更新到实际函数。最终 21 项
@@ -465,7 +465,7 @@ SMP 边界和 11 项新配置拒绝检查通过。全仓格式门禁仍有 114 �
 [25-native-shared-kernel.md](../../cluster/25-native-shared-kernel.md)。
 后续仍需真实多 MCU 验收、用户程序执行、设备/IRQ 所有权、JVM 和图形输入
 栈；当前没有启动真实 Minecraft Java 客户端，目标尚未完成，应用验收见
-[24-single-system-minecraft.md](../../cluster/24-single-system-minecraft.md)。
+[../../cluster/24-single-system-minecraft.md](../../cluster/../../cluster/24-single-system-minecraft.md)。
 
 ## 26. FSMC 桥、推导 RAM 与完整固件联合仿真
 
@@ -814,7 +814,7 @@ pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护
 共享内核新增通用设备 owner 调用入口；次 QEMU 不创建串口时，CPU 1 上的普通
 Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x86_64/AArch64/RV64
 四端点并发用例中各通过 80000 次调用。机制、进度约束和未完成的磁盘/图形/JVM
-部分见 [56-shared-device-owner.md](../../cluster/56-shared-device-owner.md)。
+部分见 [../../cluster/56-shared-device-owner.md](../../cluster/../../cluster/56-shared-device-owner.md)。
 
 共享设备机制已接入通用驱动 MMIO。只有主实例挂载磁盘的双 QEMU 中，CPU 1
 内核线程及 Linux 用户程序已完成真实 virtio-blk 读写、flush 和回读；宿主在
@@ -825,7 +825,7 @@ Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x
 已进一步验证 CPU 1 挂载主实例磁盘上的 ext4 并 exec 磁盘程序，真实文件与
 目录 fsync、重命名、回读、卸载及宿主独立检查通过。测试发现并修复了既有
 ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收漏洞。三种
-文件系统格式和普通 SMP 对照见 [58](../../cluster/58-shared-filesystem-execution.md)。
+文件系统格式和普通 SMP 对照见 [58](../../cluster/../../cluster/58-shared-filesystem-execution.md)。
 
 现已在双 QEMU 共享内核中启动真实 OpenJDK 21，并运行同一 JVM 的两个 Java
 线程：16 次亲和性检查、512 个动态领取任务、实际 CPU 掩码 3，总和一致，
@@ -842,3 +842,75 @@ ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收
 的渲染、编译和 GC 线程均观察到 CPU 0/1 调度赋值。普通 SMP 对照通过，原始
 磁盘哈希未变，临时 RAM 已清理。证据和完整边界见
 [61](../../cluster/61-shared-minecraft-client.md)。物理多 MCU 和其他 ISA 客户端仍未验收。
+
+<!-- 以下内容从 docs/cluster/46-unbound-program-execution.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 当前边界
+
+这个工作负载证明程序实际执行、自动利用空闲 CPU 和正常退出，没有证明
+最优均衡或整机性能。原 Native 多架构与 MCU 回归还包含显式 affinity 迁移
+检查；不能把其 CPU mask 3 单独当作未绑定线程初始分配的证据。
+
+JVM、Java 字节码、物理 MCU 和 Minecraft Java 客户端仍未执行。本阶段清除
+真实 libc 多线程运行的阻塞点，下一步仍需接入完整解释器、类库、JNI 与客户端
+所需显示/输入依赖，最终物理验收保持 [24](../../cluster/24-single-system-minecraft.md)。
+mlibc 通用线程层的 TCB 释放、Native 线程句柄回收和 GC 所需的线程定向暂停
+仍需继续实现；本测试不将它们判为已完成。
+
+<!-- 以下内容从 docs/cluster/55-linux-threads-shared-kernel.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 运行记录和边界
+
+证据目录为 `.kernel-build/cluster/multi-qemu/`，输出目录不可重复使用：
+
+- `linux-01`：原调度器以 affinity EINVAL 失败。
+- `linux-02`、`linux-baseline-01`：首次允许请求后，“保留当前任务”路径导致
+  返回时 CPU 错误；记录保留，未当作成功。
+- `linux-03`、`linux-baseline-02`：修复上述路径后通过迁移、共享页和动态分配。
+- `linux-final-01`：加强 volatile TLS 和实际迁移统计后通过；实际迁移 126 次，
+  工作分配 636/388。`linux-baseline-final-01` 为普通 SMP 对照通过。
+- `linux-faults-01`：进一步加入真正的只读写入异常恢复后通过；实际迁移 127 次，
+  SIGSEGV 128 次，工作分配 369/655，总和 4332748800。两 QEMU PID 为
+  334364 / 334362，均已结束。各次 report 保留 vCPU、KVM、共享 RAM inode、
+  源码和启动 ELF/ROM 哈希、日志哈希及退出方式。
+- `linux-faults-baseline-01`：相同保护异常用例在普通 SMP 中通过，实际迁移
+  127 次、保护异常 128 次、工作分配 512/512；该比例是本次观测，不是均分保证。
+- `native-after-linux-01`：原 Native 用户程序、文件、子程序、取消和动态分配回归通过。
+- RISC-V64、AArch64 的两个变更调度单元已交叉编译通过，属于编译证据；本次
+  新的 Linux 运行证据为 x86_64，没有据此宣称所有架构或物理 MCU 已运行。
+
+进程等待窗口和线程组生命周期检查，以及独立 idle-surplus、yield-accounting
+调度检查通过。完整 `make host-tests` 未通过：现有通配规则把需要生产源文件及
+DTB 参数的 `fdt_view.c` 当作单文件无参数测试；试接专用检查器后还遇到
+`test_flat_user.c` 缺少其专用架构 shim。没有保留临时门禁规则改动或将此门禁
+报告为通过；相关日志保留为 `host-tests-linux-01/02.log`。
+
+这一步验证的是普通 Linux 用户线程、TLS、信号与内存权限机制，**不是 JVM 或
+Minecraft 已跨实例运行**。块设备、图形设备和完整设备所有权/远程访问尚未
+统一；当前 RAMFS 用例避开了它们。下一步应接入设备 owner 执行路径，再用
+真实 JVM 和客户端资源继续验收。MCU 的 Java 运行时、内存容量和物理后端仍需
+各自的实际证据，不能用本次 x86_64 测试替代。
+
+设备后续进展见 [../../cluster/56-shared-device-owner.md](../../cluster/56-shared-device-owner.md)。最新 Linux
+运行检查增加 `--console` 阶段，固定在 CPU 1 从主实例串口收发，次实例不再
+创建 UART。原线程/内存测试仍完整执行，单独运行程序不带此参数时保留原用例。
+
+<!-- 以下内容从 docs/cluster/57-shared-disk-execution.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 当前边界与下一步
+
+BRINGUP 门槛仍保留。下阶段需要实际挂载文件系统、从磁盘加载 JVM/类库，
+再验证图形、输入及一个真实 Minecraft 客户端的菜单与输入。GPU/framebuffer
+直接映射、端口 I/O、PCI 配置空间动态操作及绕过 HAL 的原始寄存器访问，
+不能由本次 MMIO 接入自动保证。owner 目前固定为 0，设备分散到多个 owner
+仍需平台资源映射与生命周期管理。
+
+公共指针调用只适用于相同 ISA/内核映像/指针 ABI 的共享执行域，不是混合
+ISA 的消息协议。跨 ISA 集群继续使用既有程序格式、能力匹配和传输接口；
+物理多 MCU 共享域还需要真实共享 RAM、原子操作/仲裁和缓存维护后端。
+owner 失效后的请求取消、fencing 和设备恢复也未完成。当前不能宣称多 MCU
+Minecraft 已经可用，亦没有普通模式性能基准来支持整体零性能损失的结论。
+
+后续文件系统挂载、从磁盘 exec 和真实文件 fsync 已推进至
+[58](../../cluster/58-shared-filesystem-execution.md)。JVM、图形和 Minecraft 跨实例验收
+尚未完成。

@@ -185,3 +185,35 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - `liba20c` 已使用版本化 ABI 结构体；这是当前代码事实，不再是待办。
 - 用户已确认：`user/archive/` 曾作为历史参考保留、不参与当前构建，该目录已于 2026-10 从仓库删除。
 - 用户已确认：Debug handle 保持受限调试接口（不盲目扩展为完整 ptrace）。当前 Debug 分区已实现完整停止/恢复语义（见能力清单），watchpoint 与 TRACEFORK/CLONE 事件不在扩展范围内。
+
+<!-- 以下内容从 docs/native-abi/00-overview.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 实现状态
+
+当前状态以 `abi/linux` 为主用户态接口。`abi/native` 内核侧已登记全部表项，但部分入口语义受限；用户态 SDK 由 `liba20rt` 和 `liba20c` 组成。`liba20c` 已按 ABI 约定填充 `size` 和 `version` 字段，使用版本化参数结构的入口由 `kernel/abi/native/sys_validate.h` 统一校验，不匹配时返回 `A20_ERR_INVALID_ARGUMENT`。
+
+| 组件 | 文件 | 状态 | 说明 |
+|------|------|------|------|
+| Linux ABI | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口 |
+| Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | Phase 1 核心 syscall |
+| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c`、`sys_native_*.c` | 已登记 | 160 个入口覆盖各分区；`event_watch_fs`、VMAR 层级、部分 EventQ 事件源等仍是有限实现，登记数不表示完整语义 |
+| Handle table | `kernel/abi/native/handle_table.c` | 已实现 | handle 状态机 + 查找/安装/移除 |
+| 启动协议 | `kernel/abi/native/startup.c` | 已实现 | 用户态 Native 启动 |
+| Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
+| Event Queue | `kernel/ipc/a20_event.c` | 已实现 | 事件等待与通知 |
+| Native SDK | `user/liba20rt/` | 活跃 | syscall wrapper、启动代码、handle I/O |
+| 最小原生 C 库 | `user/liba20c/` | 活跃 | malloc/stdio/unistd 等已迁移到版本化 ABI 结构体（见 [native-abi-runtime-status.md](native-abi-runtime-status.md) §1） |
+| mlibc Native sysdeps | `user/external/mlibc/sysdeps/a20/` | 活跃（RISC-V64） | 当前完整 libc 路线；`make mlibc-sysroot`、`make smoke-mlibc` |
+| 历史参考 | `user/archive/` | 不参与构建 | 旧版 musl 移植、coreutils、build_sysroot.sh 等 |
+
+<!-- 以下内容从 docs/native-abi/00-overview.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 当前状态与路线
+
+已完成的阶段：
+
+Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 syscall 编号、多架构 crt0 和 hello world 测试。Phase 1 的 `liba20c` 最小 C 库覆盖 malloc、fd↔handle 映射、FILE*、errno，以及基础 POSIX open/read/write/close 包装。Phase 2 把内核侧 syscall 扩展到 142 个，落到 task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等入口。mlibc Phase 1-2 打通 `sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
+
+剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [native-abi-runtime-status.md](native-abi-runtime-status.md) §8a。
+
+详细运行时状态与后续路线图见 [native-abi-runtime-status.md](native-abi-runtime-status.md)。

@@ -641,7 +641,7 @@ static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
 static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
                                        enum mm_fault_access access);
 #endif
-/* ---- P6 shadow check (see docs/roadmap/single-level-mm-model.md 12.6) ----
+/* ---- P6 shadow check (see docs/status/history/mm-single-level-migration-log.md 12.6) ----
  *
  * Asks the page-table segment table what it would have said about this fault,
  * and counts how often that matches what the mapping list said.  Changes

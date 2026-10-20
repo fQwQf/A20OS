@@ -120,10 +120,6 @@ Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_pt
 
 `kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c` 的 weak 定义保证内核仍可链接，回溯退化为裸地址。
 
-## 历史兼容 workaround（不是 HEAD 验证结论）
-
-`user/cmds/core/ptrace_smoke.c` 仍在 poke 与恢复之间保留一个短 busy delay，注释把它归因于较早基线中的 page-cache/allocator 稳定窗口。这是测试源码中保留的历史 workaround，不代表当前源码仍存在同一缺陷；引用为当前 bug 前必须在 HEAD 上重新复现并归档日志。
-
 ## Native ABI 调试接口（Debug 0x0900）
 
 Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机，syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在 `user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
