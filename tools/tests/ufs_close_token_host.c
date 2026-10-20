@@ -1,7 +1,7 @@
 /*
  * Host unit test for the UFSD close-token registry shared by the vnfs
  * backend (user/svc/ufs_close_token.h).  Covers the protocol contract of
- * docs/rust/ufs-close-token-design-r1.md: issue at OPEN, exactly-once
+ * docs/fs/ufs-close-token.md: issue at OPEN, exactly-once
  * consume at CLOSE, idempotent replay, unknown-token rejection, and the
  * bounded recent-closed LRU.
  */

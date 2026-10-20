@@ -45,7 +45,7 @@ impl RecentToken {
 }
 
 /// Verdict for a CLOSE carrying a token
-/// (docs/rust/ufs-close-token-design-r1.md).
+/// (docs/fs/ufs-close-token.md).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TokenLookup {
     /// Garbage close: the dispatcher answers ENOENT.

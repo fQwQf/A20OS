@@ -1,0 +1,31 @@
+id	category	c-baseline	rust-plan	plan_visible
+f00-pos-exec-rv64	3.x positive	ok	ok	yes
+f01-pos-dyn-rv64	3.x positive	ok	ok	yes
+f13b-pos-arm32-exec	3.x positive	ok (ARCH=arm32)	ok (ARCH=arm32)	yes
+f05-type-rel	2.x header	-ENOEXEC	-ENOEXEC	yes
+f10-trunc-ehdr-63b	2.x truncated	OBSERVE	-ENOEXEC	yes
+f11-trunc-ehdr-40b	2.x truncated	-ENOEXEC	-ENOEXEC	yes
+f12-magic-corrupt	2.x header	-ENOEXEC	-ENOEXEC	yes
+f13-class32-on-rv64	2.x header	-ENOEXEC	-ENOEXEC	yes
+f14-foreign-loong64	2.x probe	-ENOEXEC (or EXEC_RETRY with xlator row)	-ENOEXEC	yes
+f15-phnum-65	2.x header	-ENOEXEC	-ENOEXEC	yes
+f16-phnum-0	2.x header	-ENOEXEC	-ENOEXEC	yes
+f17-phoff-past-eof	2.x truncated	-ENOEXEC	-ENOEXEC	yes
+f18-phnum-64-no-load	2.x header	OBSERVE	-ENOEXEC	yes
+f19-phentsize-small	2.x header	-ENOEXEC	-ENOEXEC	yes
+f20-filesz-gt-memsz	3.x overflow	-ENOEXEC (lazy) | OBSERVE (eager: silent)	-ENOEXEC	yes
+f21-congruence-mismatch	3.x layout	OBSERVE (eager fallback)	-EINVAL	yes
+f22-vaddr-memsz-wrap	3.x overflow	OBSERVE (ghost VMA)	-ENOEXEC	yes
+f23-offset-filesz-wrap	3.x overflow	OBSERVE (past-EOF mmap)	-ENOEXEC	yes
+f24-seg-overlap	3.x overlap	-EINVAL (lazy) | OBSERVE (eager fallback: overlay + double VMA)	-EINVAL	yes
+f25-bss-tail-zeros	3.x positive	ok	ok	yes
+f26-interp-missing	3.x interp	-ENOENT	-ENOENT	yes
+f27-interp-no-nul	3.x interp	-ENOENT|-ENAMETOOLONG	-ENOENT|-ENAMETOOLONG	yes
+f30-rwx-load	3.x permission	off: ok | strip: ok (W stripped) | deny: -EACCES	off: ok | strip: ok (W stripped) | deny: -EACCES	yes
+f32-flags-zero	3.x permission	ok (silent)	ok	yes
+f31-tls-oversize	3.x overflow/rollback	expect -ENOMEM; OBSERVE if the allocator satisfies it	same	yes
+f41-tls-filesz-gt-memsz	3.x overflow/divergence	ok (no TLS size check)	-ENOEXEC	yes
+f40-native-marker	6.x native	ABI=both: is_native_abi=1 | ABI=linux: -ENOEXEC	ABI=both: is_native_abi=1 | ABI=linux: -ENOEXEC	yes
+f33-phentsize-57	2.x header	OBSERVE (drops entry B)	-ENOEXEC	yes
+f28-a20drv-badshentsize	2.x driver	-ENOEXEC	n/a (driver-registry adapter)	no
+f29-a20drv-shnum0	2.x driver	-ENOEXEC	n/a (driver-registry adapter)	no

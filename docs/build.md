@@ -1,7 +1,6 @@
 # 构建与运行指南
 
-本文记录当前 C 构建入口；Rust 已开始一个可选的 NAT 内核调用切片，C 仍是默认实现，
-完整内核重写和所有保留架构的 Rust 验证尚未完成，详见 [first Rust kernel slice](rust/first-core-slice.md)。
+本文记录当前混合 C/Rust 构建入口。各子系统按真实状态选择 C 或 Rust；Rust 已接管若干复杂对象生命周期、并发状态与回滚职责，简单 dispatch、glue、byte-copy 和成熟热点原语可保留在 C。1.0 的目标是完成已承诺功能并验证稳定性，不以 Rust 比例或删减 C 行数作为门槛。当前批次实现与验证概况见 [模块状态](releases/module-status-2026-10-19.md)，完整发布条件见 [1.0 计划](releases/v1.0.md)。
 [1.0 平台范围](releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、
 实例、CI 和测试矩阵已停止列入这两个历史目标；默认构建会明确拒绝它们。历史源码与
 实例保留供追溯。需要复现时，在干净 checkout 中切到 `v0.18`，再按各平台文档操作；

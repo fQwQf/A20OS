@@ -1,6 +1,6 @@
 /*
  * uxfs_reopen_test — same-inode vnode identity / visibility regression on a
- * UXFS mount (docs/rust/uxfs-canonical-vnode-stale-size-r4.md).
+ * UXFS mount (docs/fs/fs-consistency-model.md).
  *
  * The r4 defect: a second fd opened before the first fd's write held an
  * independent vnode whose size stayed 0, so its read returned EOF even after

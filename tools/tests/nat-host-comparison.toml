@@ -1,0 +1,52 @@
+schema_version = 1
+
+[comparison]
+id = "A20OS-1.0-NAT-host-oracle"
+requirement_id = "V1-NET"
+protocol_id = "nat-rewrite-host-oracle-v1"
+inputs_sha256 = "78de59281f0bc56222ffc2b75858500c418cc8e867342600ad507a09c7d1b0ae"
+order_seed = 20261013
+environment = { host = "Linux x86_64", cc = "cc (Debian 14.2.0-19)", rustc = "rustc 1.96.0 (ac68faa20 2026-05-25)", execution = "host functional oracle only; no kernel or guest timing" }
+
+[versions.c0]
+id = "v0.18-netfilter-rewrite-c"
+revision = "9526af438a73eb834169d002536f8e57e21f24a8"
+validated = false
+evidence = "C source is extracted from the fixed v0.18 commit for each isolated run; full V1 C0 matrix remains pending"
+
+[versions.cn]
+id = "working-tree-netfilter-rewrite-c"
+revision = "working-tree: kernel/net/netfilter_rewrite.c C reference branch"
+validated = false
+evidence = "host oracle results are collected below; no complete Cn functional/performance acceptance record yet"
+
+[versions.candidate]
+id = "working-tree-netfilter-rewrite-rust"
+revision = "working-tree: kernel/net/netfilter_rewrite.rs via NETFILTER_REWRITE_IMPL=rust"
+validated = false
+evidence = "candidate under host functional comparison; this case does not validate guest behavior or performance"
+
+[[cases]]
+id = "nat-rewrite/host-oracle-v1"
+kind = "functional"
+repetitions = 1
+timeout_seconds = 30
+expected_contract = { checks = 44, failures = 0, check_names_fnv1a32 = 3915109928 }
+
+[cases.commands.c0]
+argv = ["python3", "tools/v1_nat_host.py", "--revision", "9526af438a73eb834169d002536f8e57e21f24a8"]
+artifact_paths = ["{run_dir}/test-nat-rewrite-c0", "{run_dir}/fixed-c0-source/netfilter_rewrite.c", "{run_dir}/manifest.json", "tools/v1_nat_host.py", "tools/test-nat-rewrite-host.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+cwd = "."
+env = { CC = "cc" }
+
+[cases.commands.cn]
+argv = ["tools/test-nat-rewrite-host.sh", "c"]
+artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/netfilter_rewrite.c", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+cwd = "."
+env = { CC = "cc" }
+
+[cases.commands.candidate]
+argv = ["tools/test-nat-rewrite-host.sh", "rust"]
+artifact_paths = ["tools/test-nat-rewrite-host.sh", "tools/test-nat-rewrite-host.c", "kernel/net/netfilter_rewrite.c", "kernel/net/netfilter_rewrite.rs", "kernel/include/net/netfilter.h", "kernel/include/net/netfilter_rewrite.h"]
+cwd = "."
+env = { CC = "cc", RUSTC = "rustc" }
