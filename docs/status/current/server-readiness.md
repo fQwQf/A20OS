@@ -1,5 +1,7 @@
 # A20OS 服务器就绪度评估
 
+> 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
+
 最后核实：2026-10（`feat/net-strengthening`）。§二 的网络小节与 §八 的阻塞项排序表
 已按本轮实际提交逐条重写：入站 TCP / 回环传输 / IPv6 入站 / SACK 与时间戳 /
 CUBIC / SO_SNDBUF·RCVBUF / RTNETLINK 通知 / 驱动 SG 与能力位 / conntrack+NAT /

@@ -1,5 +1,7 @@
 # A20OS Native ABI 运行时状态
 
+> 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
+
 最后核实：2026-10-13。共享 Native runtime smoke 已支持 RISC-V64/AArch64；实际运行与硬件专属跳过项见 本轮验证。本页是对 [00-overview.md](../../native-abi/00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
