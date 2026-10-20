@@ -27,8 +27,7 @@ marks the argument unused in that configuration. The exact QEMU argv is
 retained by the runner and `tools/smoke_cases.py`. QEMU does not establish physical MMIO, IRQ, DMA, bus
 coherency, or timing behavior.
 
-The test source was built from checkout `20193475564536521e4ee6d53081238cd4de6558`
-plus the working-tree changes. At the end of the runs, the tracked test inputs
+The test source was built from a checkout of the tree plus the working-tree changes. At the end of the runs, the tracked test inputs
 had these SHA-256 values: `kernel/mm/mremap.c`
 `9b2b1413c3bb7d887ec0da090a35009fb4b97bd4aa34ef72541e6e62da1fda37`,
 `user/cmds/stress/mm_stress.c`
