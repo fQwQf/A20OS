@@ -36,6 +36,7 @@
 - [module-status-2026-10-19.md](current/module-status-2026-10-19.md)：已集成模块的实际行为与未决边界
 - [gaps/notes/](gaps/notes/README.md)：仍未关闭的缺口对应的诊断笔记
 - [server-readiness.md](current/server-readiness.md)：作为服务器部署时的能力边界与阻塞项排序
+- [delivery-baseline.md](current/delivery-baseline.md)：1.0 交付基线、干净候选、保留平台矩阵、SMP 门禁与 CI 逐 job 状态
 - [v1.0-progress.md](current/v1.0-progress.md)：12 个 V1 工作包的状态
 - [gaps/](gaps/README.md)：1.0 缺口台账，按 12 个工作包分文件；完成一项删一项
 - [v1.0-requirements.json](current/v1.0-requirements.json)：机器生成的源码条目候选清单

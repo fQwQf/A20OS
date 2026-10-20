@@ -4448,7 +4448,7 @@ for (size_t p = 0; p < mmap_pages; p++) {
 ### 10.64 `no evictable page` 的诊断数据自相矛盾：2000 个 valid 页，引用计数**全是 0**
 
 §10.63 定下的第 2 步（查 `valid=2000` 却判定无可回收）已经有了决定性的数据。
-`kernel/fs/block_cache.c:1036-1061` 那段诊断在 `pcache_evict_locked()` 返回 NULL 之后，
+`kernel/fs/block_cache.c`（该段此后已迁移到 `kernel/fs/block_cache_state.rs`）里的诊断在 `pcache_evict_locked()` 返回 NULL 之后，
 遍历整个 page pool 统计：
 
 ```
@@ -4476,7 +4476,7 @@ for (size_t p = 0; p < mmap_pages; p++) {
 1. 脏页为主 + 回写失败/被跳过。`dirty=1879 / valid=2000`，即 94% 是脏页。
    若 `pcache_evict_locked()` 对脏页要求先成功回写，而此路径下回写失败或被跳过
    （注意调用链上游刚拿过 `bc->writeback_lock` 并做过一次 fill 尝试，
-   `block_cache.c:1032` 处 `return e`），则所有脏页都会被判为不可回收，
+   `block_cache.c`（已迁移到 `kernel/fs/block_cache_state.rs`）处 `return e`），则所有脏页都会被判为不可回收，
    剩下 121 个干净页又因别的原因落选，最终返回 NULL。
 2. 存在 `valid` 但被 pin / 正在被填充（inflight）的页，淘汰扫描显式跳过它们。
 3. 扫描范围与诊断范围不同：淘汰可能只扫 `page_no` 附近的一个窗口/时钟环
@@ -4503,13 +4503,13 @@ for (size_t p = 0; p < mmap_pages; p++) {
 (a) 它扫描的范围是全池还是某个页号窗口；(b) 对 `dirty` 页是否要求回写成功才可淘汰；
 (c) 是否有 pin/inflight 跳过条件。三者任一即可解释「2000 个未引用页却零候选」。
 
-同时值得单独确认：`block_cache.c:1032` 那个 `return e` 分支，上游 fill 失败后是否
+同时值得单独确认：`block_cache.c`（已迁移到 Rust）那个 `return e` 分支，上游 fill 失败后是否
 也直接返回 NULL 而根本没有尝试淘汰。若是，则「无可回收」的诊断信息会误导：
 真正的失败原因是**回写/填充出错**，而不是「找不到可淘汰的页」。
 
 ### 10.65 根因与修复：`pcache_evict_locked()` 单趟扫描，热的页被跳过后就再也不被看
 
-读了 `pcache_evict_locked()`（`kernel/fs/block_cache.c:914`），§10.64 的矛盾有了解释：
+读了 `pcache_evict_locked()`（`kernel/fs/block_cache.c`，该函数此后已迁移到 `kernel/fs/block_cache_state.rs`；本行引用的是当时的位置，原文写作第 914 行），§10.64 的矛盾有了解释：
 
 ```c
 pcache_entry_t *e = bc->page_lru_tail.prev;
@@ -5448,7 +5448,7 @@ if (base + span >= end)
                  -> 受害者 VMA 拆解 -> 拿 mm->lock
    ```
 
-   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:505）。
+   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:445）。
    实际路径**不经过**它——`proc_mmap` 自己取锁（proc.c:821）并直接调
    `mm_mmap_locked`。`mm_mmap` 是另一个同样纪律的包装，不在本路径上。
    取锁点是 `proc.c:821`，已核对。）

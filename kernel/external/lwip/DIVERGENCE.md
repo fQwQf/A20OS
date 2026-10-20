@@ -473,7 +473,7 @@ ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建�
 | 逐帧的校验和已验证通道（RX） | `src/include/lwip/pbuf.h` 的 `PBUF_FLAG_*` | lwIP 现有的 `chksum_flags` 是**每 netif 一个位**，而"这一帧验没验"必须逐帧；`PBUF_FLAG_NOCHECKSUM` 这类位在 2.2.2 已不存在（`CHECKSUM_BY_HARDWARE` 整棵树无引用） |
 
 **风险（按严重度）：** 协商而不逐帧传递结果 ⇒ lwIP 去验设备没算的校验和 ⇒ 每一个包
-都被丢、静默损坏；NAT 的 L4 校验和增量修正（`kernel/net/netfilter_nat.c:754-892`）
+都被丢、静默损坏；NAT 的 L4 校验和增量修正（`kernel/net/netfilter_rewrite.c:115`）
 与"校验和字段是部分和"互斥；`NETIF_CHECKSUM_CHECK_IP` 关掉后 IPv4 头校验和不再
 过滤。
 

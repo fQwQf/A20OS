@@ -51,3 +51,17 @@
 - 缺口：线程组、vfork、parent-death 与 `CLONE_PARENT` 的组合没有完整矩阵。
 - 关闭条件：每种组合都有 guest 用例，退出与回收恰好一次。
 - 来源：[kernel/linux-abi/child-exit-notification.md](../../kernel/linux-abi/child-exit-notification.md)。
+
+### ABI-08 `a20_envelope_acquire_race_test` 未登记
+
+- 现状：`check-abi-boundary` 报 `missing annotations: a20_envelope_acquire_race_test`；`check-envelope-coverage` 的生成器以 `unclassified syscall: a20_envelope_acquire_race_test` 退出。该符号是随 Rust 信封工作一起进来的测试钩子（`stamps.py`、`ENVELOPE_ACQUIRE_RACE_TEST`、`BUILD_VARIANT` 都有它的位置）。
+- 缺口：新增的调用/测试钩子没有进 ABI 注解表与信封覆盖分类，两条 CI 宿主侧门禁为红。
+- 关闭条件：该符号被登记并分类后两条门禁通过。
+- 来源：DELIVERY 的 CI `toolchain-gates` job 本地复现（[current/delivery-baseline.md](../current/delivery-baseline.md) §6）。
+
+### ABI-09 IPC 通道重现被禁止的 task 指针模式
+
+- 现状：`check-task-state-boundary` 报 `task_t *waiter` 出现在 `kernel/ipc/a20_channel.c:491`，而该模式被门禁明确禁止（11 条断言中 1 条失败）。
+- 缺口：task 状态的持有方式偏离既定边界，门禁为红。
+- 关闭条件：断言在候选上通过，或按当前契约改写断言并有依据。
+- 来源：同上。

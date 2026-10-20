@@ -377,7 +377,7 @@ rg -n 'posix_timer_tick|posix_itimer_cpu_tick' kernel/mcu/mcu_stubs.c kernel/pro
 这一段记的是把 POSIX 定时器守卫从裸 `#ifdef CONFIG_ABI_LINUX` 改成 `defined(...) || defined(CONFIG_ABI_BOTH)` 之后、默认 ABI=both 下的现状。三条都不是这次改动的缺陷，但都由这次改动第一次在默认发布配置里变成活代码，读 `kernel/proc/timer_posix.c` 前先知道：
 
 - **SMP 下的无锁表。** `g_posix_timers`（`kernel/proc/timer_posix.c:56`）与 `g_cpu_itimers`（`:67`）是无锁静态表。`ABI=linux` 下它们已经同时被定时器中断路径（`proc_sched_scan_signal_timers` → `posix_timer_tick()`）与 syscall 上下文（`posix_timer_set_time()`）并发改写，不是新引入的；但 `instances/qemu-riscv64-smp4.toml` 设 `smp = 4` 且不覆盖 `abi`（继承 `Makefile` 的 `both`），即 4 个 CPU 都会走到 `posix_itimer_cpu_tick()`。默认 `NR_CPUS=1`（`Makefile`），常规门禁不会暴露它，所以别按“both 与 linux 走同一段代码、风险相同”来读。
-- **错误码面变宽。** `posix_itimer_set()` 在 `kernel/proc/timer_posix.c:346` 于 `proc_get()` 失败时返回 `-EAGAIN`，经 `kernel/abi/linux/sys_timer_posix.c` 的 `sys_setitimer()` 透出成用户可见的 `setitimer` 返回值；`proc_get()` 走的是引用计数，对一个仍存活的 `cur` 失败属于异常路径。Linux 语义里 `setitimer` 不会因表满或引用失败返回 `EAGAIN`。改动前这段在 both 构建里是死代码。
+- **错误码面变宽。** `posix_itimer_set()`（C 包装在 `kernel/proc/timer_posix.c:118`）转到 Rust 实现 `a20_posix_itimer_set()`（`kernel/proc/posix_timer_state.rs:490`），在为新 itimer 克隆任务引用失败、或表里没有空槽（`:498`）时返回 `-EAGAIN`，经 `kernel/abi/linux/sys_timer_posix.c` 的 `sys_setitimer()` 透出成用户可见的 `setitimer` 返回值。Linux 语义里 `setitimer` 不会因表满或引用失败返回 `EAGAIN`。改动前这段在 both 构建里是死代码。
 - **顺带修掉的一个既有缺陷。** `sched_set_posix_deadline()`（`kernel/proc/timer_heap.c:449`）唯一的调用方是 `kernel/proc/timer_posix.c:99`，而后者此前在 both 构建里根本没被编进去——`next_posix_scan` 写进去就没人清。改动前只要用户在 both 构建里 arm 过一个 POSIX 定时器，`proc_next_timer_interval()`（`:213`）就会因 `posix <= now` 一直返回 `SCHED_MIN_TIMER_INTERVAL`（`:205`，`TICKS_PER_SEC/10000`，即 100 µs）并被 `sched_rearm_timer()` 反复重装，定时器中断永久停在 100 µs 下限。恢复 `posix_timer_tick()` 等于恢复了清理方。
 
 ### 驱动核心
