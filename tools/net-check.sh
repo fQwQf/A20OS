@@ -11,6 +11,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 status=0
+# The generated headers live under the build directory, whose name the Makefile
+# hashes once BUILD_VARIANT gets long; ask it rather than spell the path out.
+build_dir=$(make -s --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
 for src in "$@"; do
     [ -f "$src" ] || { echo "MISSING: $src"; status=1; continue; }
     if out=$(/usr/bin/ccache riscv64-unknown-elf-gcc \
@@ -19,7 +22,7 @@ for src in "$@"; do
             -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel \
             -Ikernel/net/lwip_port -Ikernel/external/lwip/src/include \
             -Ikernel/platform/qemu-virt-riscv64 \
-            -I.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/generated \
+            -I"$build_dir/generated" \
             -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany \
             -DRISCV64 -DCONFIG_RISCV64 -DCONFIG_ABI_LINUX -DCONFIG_NR_CPUS=1 \
             -DCONFIG_BOARD_QEMU_VIRT_RISCV64 -Werror \

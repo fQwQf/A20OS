@@ -148,6 +148,8 @@ RUST_DONTUNMAP_TXN_SRC := kernel/mm/mremap_dontunmap_txn.rs
 RUST_DONTUNMAP_TARGET_x86_64 := x86_64-unknown-none
 RUST_DONTUNMAP_TARGET_aarch64 := $(RUST_AARCH64_TARGET)
 RUST_DONTUNMAP_TARGET_riscv64 := riscv64imac-unknown-none-elf
+RUST_DONTUNMAP_TARGET_riscv32 := $(RUST_RV32_TARGET)
+RUST_DONTUNMAP_TARGET_loongarch64 := loongarch64-unknown-none
 RUST_DONTUNMAP_TARGET := $(RUST_DONTUNMAP_TARGET_$(ARCH))
 RUST_DONTUNMAP_TXN_OBJECT := $(BUILD_DIR)/rust/mremap_dontunmap_txn.o
 RUST_HANDLE_SLOT_SRC := kernel/abi/native/handle_slot.rs
@@ -2280,6 +2282,11 @@ endif
 RUST_DONTUNMAP_CODE_MODEL_x86_64 := large
 RUST_DONTUNMAP_CODE_MODEL_aarch64 := large
 RUST_DONTUNMAP_CODE_MODEL_riscv64 := medium
+# Match the C code model each of these is linked against: riscv32 builds with
+# -mcmodel=medany, loongarch64 with -mcmodel=normal, which rustc's "medium"
+# corresponds to.  Same reasoning as RUST_NETFILTER_CODE_MODEL_* above.
+RUST_DONTUNMAP_CODE_MODEL_riscv32 := medium
+RUST_DONTUNMAP_CODE_MODEL_loongarch64 := medium
 RUST_DONTUNMAP_FEATURES_aarch64 :=
 RUST_DONTUNMAP_EXTRA_x86_64 := -C no-redzone=yes
 RUST_DONTUNMAP_CODE_MODEL := $(RUST_DONTUNMAP_CODE_MODEL_$(ARCH))

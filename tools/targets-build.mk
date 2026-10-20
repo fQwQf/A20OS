@@ -62,7 +62,11 @@ check-x86_64-pc-build:
 # vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
 # (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
 .PHONY: vf2-firmware vf2-extra-sources vf2-image vf2-world-image
-VF2_IMAGE_BUILD_DIR := .kernel-build/riscv64-visionfive2-linux-dev-embedded-nommu
+# Ask the Makefile for the directory this configuration uses rather than
+# spelling it out: a fully integrated Rust profile makes BUILD_VARIANT long
+# enough that the Makefile hashes it (see BUILD_VARIANT_FULL there), so a
+# hardcoded descriptive path silently names a directory no build ever creates.
+VF2_IMAGE_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 DRIVER_DEPLOYMENT=embedded KERNEL_WERROR=0 LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld print-build-dir)
 # The board's /extra partition is filled by an apk world image rather than by
 # compiling software out of user/external/.  mkrootfs.py already emits a
 # partitionless raw ext4, which is exactly what make-boot-image.sh expects for
@@ -128,7 +132,6 @@ VF2_MMU ?= 1
 ifeq ($(VF2_MMU),1)
 VF2_ABI             := both
 VF2_NOMMU           := 0
-VF2_BUILD_DIR       := .kernel-build/riscv64-visionfive2-both-dev-embedded
 VF2_LDSCRIPT        :=
 VF2_USER_BUILD_DIR  := user/build/riscv64
 # The MMU (dev) kernel compiles warning-clean; keep -Werror as-is.
@@ -136,13 +139,15 @@ VF2_KERNEL_WERROR   :=
 else
 VF2_ABI             := linux
 VF2_NOMMU           := 1
-VF2_BUILD_DIR       := .kernel-build/riscv64-visionfive2-linux-dev-embedded-nommu
 VF2_LDSCRIPT        := LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld
 VF2_USER_BUILD_DIR  := user/build/riscv64-nommu
 # NOMMU leaves MMU-only code (elf seg_start, pte_to_vm_flags, aslr) unused;
 # the validated VF2 build already relaxes -Werror for the same reason.
 VF2_KERNEL_WERROR   := KERNEL_WERROR=0
 endif
+# Same reason as VF2_IMAGE_BUILD_DIR above: the recipes below hand this path to a
+# sub-make as a goal, so it has to be the directory that sub-make actually uses.
+VF2_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded $(VF2_LDSCRIPT) $(VF2_KERNEL_WERROR) print-build-dir)
 # Prefer a caller-supplied partition image (a prebuilt sdcard-rv.img dropped in
 # the repo root, or an explicit VF2_EXTRA_IMAGE=).  Otherwise assemble the apk
 # world for the slot.  A command-line VF2_EXTRA_IMAGE means the caller brought
