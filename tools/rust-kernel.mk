@@ -55,7 +55,18 @@ RUST_AARCH64_CORE_LIBDIR := $(RUST_AARCH64_SYSROOT)/lib/rustlib/$(RUST_AARCH64_T
 RUST_AARCH64_CORE_FLAGS := $(RUST_AARCH64_CORE_CACHE)/core-flags.txt
 RUST_AARCH64_CORE_READY := $(RUST_AARCH64_CORE_CACHE)/core-ready
 RUST_TARGET_BOOTSTRAP := $(if $(filter riscv32 aarch64,$(ARCH)),RUSTC_BOOTSTRAP=1,)
-RUST_TARGET_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --sysroot $(RUST_RV32_SYSROOT),$(if $(filter aarch64,$(ARCH)),-Z unstable-options --sysroot $(RUST_AARCH64_SYSROOT),))
+# Every kernel Rust object must use the code model the C objects for the same
+# architecture were built with. x86_64-unknown-none defaults to LLVM's
+# "kernel" model, which assumes code and data both live in the top 2 GiB of
+# the address space; A20OS links at VIRT_BASE 0xFFFF800000200000
+# (kernel/arch/x86_64/boot/ldscript.ld), outside that window, so an object
+# built with the default model emits absolute 32-bit relocations against
+# .rodata that the linker rejects ("relocation truncated to fit:
+# R_X86_64_32S"). Use the same "large" model as the C objects, which are
+# built with -mcmodel=large. Modules that declare their own
+# <MODULE>_CODE_MODEL pass it later on the command line, so that still wins.
+RUST_TARGET_CODE_MODEL_FLAGS := $(if $(filter x86_64,$(ARCH)),-C code-model=large,)
+RUST_TARGET_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --sysroot $(RUST_RV32_SYSROOT),$(if $(filter aarch64,$(ARCH)),-Z unstable-options --sysroot $(RUST_AARCH64_SYSROOT),))$(RUST_TARGET_CODE_MODEL_FLAGS)
 RUST_TARGET_CORE_READY := $(if $(filter riscv32,$(ARCH)),$(RUST_RV32_CORE_READY),$(if $(filter aarch64,$(ARCH)),$(RUST_AARCH64_CORE_READY),))
 RUST_TARGET_BUILD_ID = arch=$(ARCH),target-flags=$(RUST_TARGET_OBJECT_FLAGS),core=$(if $(filter aarch64,$(ARCH)),$(RUST_AARCH64_CORE_ID),$(if $(filter riscv32,$(ARCH)),$(RUST_RV32_TARGET)-$(shell sha256sum $(RUST_RV32_TARGET) 2>/dev/null | cut -c1-16)-release-core,builtin-sysroot)),opt=$(RUST_OPT_LEVEL),debuginfo=$(RUST_DEBUG_INFO),bootstrap=$(RUST_TARGET_BOOTSTRAP)
 
