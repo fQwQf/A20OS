@@ -667,6 +667,19 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
 {
     req = arch_linux_ioctl_request(req & 0xffffffffUL);
 
+    if (req == TIOCGPGRP || req == TIOCSPGRP) {
+        /* Let the tty behind this fd answer for itself first: a pty pair keeps
+         * its own foreground process group (kernel/drivers/char/pty.c), and
+         * routing every TIOCSPGRP to the console's group is what left that
+         * field permanently zero -- and Ctrl-C dead inside the desktop's
+         * terminals.  Only a tty that does not implement the request falls
+         * through to the console logic below, which is what this path has
+         * always done (the console tty answers -ENOTTY here, as do filesystems
+         * for an ioctl they do not know). */
+        int64_t own = vfs_ioctl((int)gfd, req, arg);
+        if (own != -ENOTTY)
+            return own;
+    }
     if (req == TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
         /* Nobody claims the foreground group placeholder: if the group has no

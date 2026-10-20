@@ -2,11 +2,11 @@
 
 对应 V1-DELIVERY。现状见 [current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
 
-### DELIVERY-01 需求清单未完成 triage
+### DELIVERY-01 扫描候选与台账的关系
 
-- 现状：`tools/v1_requirements.py` 扫描出约 2,500 条候选，只有 11 条人工映射。
-- 缺口：其余活动候选仍是 `needs_triage`，没有逐条判定是否属于 1.0 范围。
-- 关闭条件：每个 `active` 候选都有明确归属（进本台账 / 判为设计边界 / 判为历史），清单可重复生成且不再有未归类项。
+- 现状：`tools/v1_requirements.py` 扫描出约 2,500 条候选（源码注释、TODO 字样等），其中 11 条人工映射；真正的待办来源已经是 `docs/status/gaps/`。
+- 缺口：候选清单没有逐条归类。但**这不是 1.0 缺口**——扫描器按关键词抓取，不等于未完成需求；逐条 triage 是记账工作，不改善系统。
+- 关闭条件：不要求清空候选。只需保证：(a) `gaps/` 是唯一待办来源；(b) 扫描器不把台账本身当候选（已按 `gap_ledger` 分类）；(c) 需要新增缺口时从候选里人工挑选并写明依据。其余候选保持 `needs_triage`，不阻塞发布。
 - 来源：`v1.0-requirements.json`、[requirements-2026-10-14.md](requirements-2026-10-14.md)。
 
 ### DELIVERY-02 没有可复现的干净候选
@@ -44,9 +44,9 @@
 - 关闭条件：在干净提交上跑一次并记录分类（既有/新引入/环境）；之后每轮只比较增量。
 - 来源：[current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
 
-### DELIVERY-07 服务端运维能力缺失
+### DELIVERY-07 服务端运维项的范围决策
 
-- 现状：没有 kdump 后端，panic 不会自动重启；无硬件 watchdog、A/B 分区、dm-verity；无硬件 PMU/ftrace；无 virtio-fs/DAX；无真 RTC/paravirt clock；无 NUMA/热管理/C-states。
-- 缺口：这些是服务器就绪度的 P1–P3 项，均未实现。
-- 关闭条件：按 [current/server-readiness.md](../current/server-readiness.md) §八逐项实现并给出对应门禁；或者显式移出 1.0 承诺。
+- 现状：没有 kdump 后端、硬件 watchdog、A/B 分区、dm-verity、硬件 PMU/ftrace、virtio-fs/DAX、真 RTC/paravirt clock、NUMA/热管理/C-states。
+- 缺口：这些来自服务器就绪度评估的 P1–P3 排序，**不自动属于 1.0 承诺**。
+- 关闭条件：先做范围决策——纳入的项拆成可实现、可门禁的条目并保留在本台账；不纳入的项从台账删除并写入 [releases/v1.0.md](../../releases/v1.0.md) 的范围说明。不允许既不实现也不表态。
 - 来源：[current/server-readiness.md](../current/server-readiness.md) §八。

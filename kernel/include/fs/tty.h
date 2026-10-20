@@ -33,6 +33,22 @@ int  tty_console_write(struct vfile *vf, const char *buf, size_t count);
 int  tty_console_ioctl(unsigned long req, void *arg);
 
 /*
+ * ISIG, applied on the receive path.
+ *
+ * The serial driver calls tty_console_isig_signal() for every byte it takes off
+ * the wire, before queueing it, and raises whatever it returns once it has
+ * dropped its RX lock.  A line discipline decides what a byte means as it
+ * arrives -- that is what lets Ctrl-C stop a foreground child that never reads
+ * the console, and it is why this cannot live in tty_console_read(): a reader
+ * that is not reading is exactly the case ISIG exists for.
+ *
+ * tty_console_isig_signal() takes no locks (the driver holds its RX lock when
+ * it asks); tty_console_isig_raise() does, so it must be called unlocked.
+ */
+int  tty_console_isig_signal(char c);
+void tty_console_isig_raise(int sig);
+
+/*
  * xterm mouse protocol support.
  *
  * When a user-space program enables mouse tracking (by writing

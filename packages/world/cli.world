@@ -187,4 +187,23 @@ man-pages
 #   改了终端窗口大小之后没有 SIGWINCH，shell 自己不会察觉；用
 #   `/usr/local/bin/resize-console` 手动重问一次（实测输出 `console is now
 #   200x50`）。
+#
+# **五、Ctrl-C（已在内核修好，本 world 不再需要任何规避）**
+#
+#   原先 UART 驱动直接吞掉 `0x03` 并从 RX 路径发 SIGINT，行规（ISIG）没有
+#   实现位置，而且阻塞在控制台读上的任务不响应信号（实测 `timeout 1 dd
+#   if=/dev/tty` 要 11.98 秒才被 SIGTERM 杀掉）。现在：
+#
+#     * ISIG 由 tty 行规在**接收路径**上处理（`tty_console_isig_signal()` /
+#       `tty_console_isig_raise()`，见 kernel/fs/devfs/tty.c 与
+#       kernel/include/fs/tty.h），pty 侧同样（kernel/drivers/char/pty.c）；
+#     * 驱动不再看控制字节，`0x03` 作为普通数据到达行规；
+#     * 控制台读在有待处理信号时返回 `-ERESTARTSYS`，所以阻塞读可被中断。
+#
+#   实测（riscv64，cli world / zsh）：行内按 ^C 会放弃当前输入行（连
+#   `echo PARTIAL $((111` 这种续行提示也一并放弃）；前台 `sleep 20` 在 **3.3 秒**
+#   被 ^C 打断，不是等满 20 秒；shell 本身存活。
+#
+#   这也是 `tools/a20 test smoke-riscv64` 仍然 PASS 的前提（测试harness 通过
+#   控制台注入命令）。
 

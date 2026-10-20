@@ -7,11 +7,16 @@
 #include "core/stdio.h"
 #include "core/sync.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 #include "sys/usercopy.h"
 #include "core/ioctl.h"
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
+/* The console's foreground process group; the discipline needs it to know who
+ * an ISIG signal is for.  Same accessor the TIOCSPGRP/TIOCGPGRP path uses
+ * (kernel/abi/linux/sys_fs.c). */
+extern int  uart_get_foreground_pgid(void);
 /* Owned by kernel/core/klog.c and kernel/core/printf.c: the one lock every
  * console byte passes under.  Declared extern the same way printf.c:9 does. */
 extern spinlock_t klog_console_lock;
@@ -206,6 +211,46 @@ void tty_push_mouse_event(uint16_t type, uint16_t code, int32_t value)
     }
 }
 
+/* termios lflag bits (Linux values) used by the console discipline. */
+#define DEVFS_ISIG   0x00000001U
+#define DEVFS_ECHO   0x00000008U
+
+/* c_cc[] indices, Linux numbering; the same layout fill_default_termios()
+ * populates below. */
+#define DEVFS_VINTR  0
+#define DEVFS_VQUIT  1
+#define DEVFS_VSUSP  10
+
+/* The signal an ISIG control character stands for, or 0 if this byte is data.
+ * Only the three characters that have a standard signal are mapped; anything
+ * else falls through to the reader as an ordinary byte.
+ *
+ * Called on the receive path, so it takes no locks: a line discipline decides
+ * what a byte means as it arrives, not when someone gets around to reading it.
+ * That is the whole reason the check cannot live in tty_console_read() -- a
+ * foreground child that never reads the console (sleep, a compute loop) would
+ * then never see the key, and Ctrl-C would not stop it. */
+int tty_console_isig_signal(char c)
+{
+    const ktty_termios_t *tio = &g_dev_tty.termios;
+    if (!(tio->c_lflag & DEVFS_ISIG))
+        return 0;
+    if (c == (char)tio->c_cc[DEVFS_VINTR]) return SIGINT;
+    if (c == (char)tio->c_cc[DEVFS_VQUIT]) return SIGQUIT;
+    if (c == (char)tio->c_cc[DEVFS_VSUSP]) return SIGTSTP;
+    return 0;
+}
+
+/* Deliver an ISIG signal to the console's foreground process group.  Separate
+ * from the decision above because this takes the UART's rx_lock (through
+ * uart_get_foreground_pgid), so callers must be outside that lock. */
+void tty_console_isig_raise(int sig)
+{
+    int pgid = uart_get_foreground_pgid();
+    if (pgid > 0)
+        (void)proc_kill_pgid(pgid, sig, 0);
+}
+
 static void fill_default_termios(ktty_termios_t *tio) {
     memset(tio, 0, sizeof(*tio));
     tio->c_iflag = 0x500;
@@ -256,16 +301,22 @@ int tty_console_read(vfile_t *vf, char *buf, size_t count) {
         return (int)i;
     }
 
-    int c = uart_getc();
-    if (c < 0) return 0;
-    if (c == '\r') c = '\n';
-    if (g_dev_tty.termios.c_lflag & 0x00000008U) {
-        uint64_t kf = spin_lock_irqsave(&klog_console_lock);
-        uart_putc((char)c);
-        spin_unlock_irqrestore(&klog_console_lock, kf);
+    for (;;) {
+        int c = uart_getc();
+        /* -ERESTARTSYS from an interrupted wait: hand it to the caller so the
+         * syscall can be restarted or reported as EINTR, the way pty reads
+         * already do (kernel/drivers/char/pty.c).  ISIG control characters
+         * never reach here: the receive path consumes them. */
+        if (c < 0) return c;
+        if (c == '\r') c = '\n';
+        if (g_dev_tty.termios.c_lflag & DEVFS_ECHO) {
+            uint64_t kf = spin_lock_irqsave(&klog_console_lock);
+            uart_putc((char)c);
+            spin_unlock_irqrestore(&klog_console_lock, kf);
+        }
+        buf[0] = (char)c;
+        return 1;
     }
-    buf[0] = (char)c;
-    return 1;
 }
 
 static tty_line_buffer_t *tty_line_buffer_for(int pid) {

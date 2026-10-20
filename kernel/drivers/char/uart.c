@@ -13,6 +13,10 @@
 #include "core/timer.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/signal.h"
+/* The console line discipline: the driver asks it what a received byte means
+ * (ISIG) rather than deciding for itself. */
+#include "fs/tty.h"
 
 #ifndef UART_POLL_INTERVAL_TICKS
 #define UART_POLL_INTERVAL_TICKS (TICKS_PER_SEC / 20)
@@ -82,184 +86,17 @@ static uint32_t rx_fidelity_last_irq;
 static unsigned rx_fidelity_reported;
 /* Bytes between periodic probe lines; see uart_rx_fidelity_report(). */
 #define RX_FIDELITY_STRIDE 4096
-/* Set by the Ctrl-C top half, consumed by the console reader in task context. */
-static int g_ctrlc_pending;
-static int g_ctrlc_signalled;
-
-static int uart_task_should_spare(task_t *t)
-{
-    if (!t || t->pid <= 1)
-        return 1;
-    return strcmp(t->name, "sh") == 0 || strcmp(t->name, "busybox") == 0 ||
-           strstr(t->exec_path, "/busybox") != NULL;
-}
-
-static int uart_signal_user_pgid(int pgid, int signum)
-{
-    int count = 0;
-    if (pgid <= 0)
-        return 0;
-    int max_pid = proc_pid_max();
-    for (int pid = 1; pid <= max_pid; pid++) {
-        task_t *t = proc_find_get(pid);
-        if (!t)
-            continue;
-        if (t->pid > 1 && t->pgdir && t->pgid == pgid) {
-            proc_kill(t->pid, signum);
-            count++;
-        }
-        proc_put(t);
-    }
-    return count;
-}
-
-static int uart_signal_all_user(int signum, int spare_shells)
-{
-    int count = 0;
-    int max_pid = proc_pid_max();
-    for (int pid = 1; pid <= max_pid; pid++) {
-        task_t *t = proc_find_get(pid);
-        if (t && t->pid > 1 && t->pgdir &&
-            (!spare_shells || !uart_task_should_spare(t))) {
-            proc_kill(t->pid, signum);
-            count++;
-        }
-        proc_put(t);
-    }
-    return count;
-}
-
 /*
- * Snapshot-then-print, deliberately (design E3).  Holding a global lock across
- * one kdebug line per task is what makes this dump unsafe from the top half:
- * see the CTRL_C_CONTEXT_SPLIT note below.  So the lock is taken only to copy
- * the fields out, and every kdebug happens after the release.
- *
- * The snapshot is a file-scope array rather than a stack array because this
- * runs on the uart reader task, whose kernel stack is 512-2048 bytes on the
- * MCU profiles and the entries are far larger than that.  Two CPUs can
- * interleave into it if they dump at the same time; that is acceptable for a
- * hang diagnostic and is not worth a second global lock.
+ * This driver deliberately does not look at control bytes.  Ctrl-C used to be
+ * swallowed here (0x03 never reached the RX ring) and turned into SIGINT from
+ * the RX path, with a task dump as a side effect.  That bypass kept the byte
+ * from ever reaching the tty line discipline, so ISIG could not be implemented
+ * where termios says it belongs, `stty -isig` had nothing to turn off, and a
+ * guest of the hypervisor could not be interrupted at all (see the note in
+ * kernel/hyp/hyp_dev.c).  Control characters are now ordinary data all the way
+ * to the discipline, which raises the signals: kernel/fs/devfs/tty.c for the
+ * console and kernel/drivers/char/pty.c for pty pairs.
  */
-enum { UART_DUMP_SNAP_MAX = 32 };
-struct uart_dump_snap {
-    int pid, ppid, pgid, sid;
-    int state;
-    unsigned long wake_time;
-    int task_on_rq;
-    char name[16];
-};
-static struct uart_dump_snap g_uart_dump_snap[UART_DUMP_SNAP_MAX];
-
-static void uart_dump_tasks(void)
-{
-    /* LOCK_ORDER: tasklist_lock acquired while not holding rx_lock (task dump
-     * helper); it is released before any kdebug. */
-    int n = 0;
-    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        uint64_t tf = spin_lock_irqsave(&t->park_lock);
-        int state = t->state;
-        if (state == PROC_UNUSED) {
-            spin_unlock_irqrestore(&t->park_lock, tf);
-            continue;
-        }
-        if (n < UART_DUMP_SNAP_MAX) {
-            /* Fill the array element in place rather than through a
-             * 'struct uart_dump_snap *e'.  Same stores, but the left-hand side
-             * is then a '.' member of the snapshot array instead of '->': the
-             * gate check-task-state-boundary forbids '->(on_rq|...) =' outside
-             * the park-lock owning files because that shape is what a lockless
-             * task-field write looks like, and a copy out of a task into a
-             * non-task struct must not be able to be read as one.  Keeping the
-             * array as the destination also keeps the zero-stack discipline
-             * this dump was written for (see the file-scope note above). */
-            g_uart_dump_snap[n].pid = t->pid;
-            g_uart_dump_snap[n].ppid = t->ppid;
-            g_uart_dump_snap[n].pgid = t->pgid;
-            g_uart_dump_snap[n].sid = t->sid;
-            g_uart_dump_snap[n].state = state;
-            g_uart_dump_snap[n].wake_time = (unsigned long)t->wake_time;
-            g_uart_dump_snap[n].task_on_rq = __atomic_load_n(
-                &t->on_rq, __ATOMIC_RELAXED);
-            strncpy(g_uart_dump_snap[n].name, t->name,
-                    sizeof(g_uart_dump_snap[n].name) - 1);
-            g_uart_dump_snap[n].name[sizeof(g_uart_dump_snap[n].name) - 1] =
-                '\0';
-            n++;
-        }
-        spin_unlock_irqrestore(&t->park_lock, tf);
-    }
-    spin_unlock_irqrestore(&tasklist_lock, flags);
-
-    kdebug("[TTYDBG] task dump begin\n");
-    for (int i = 0; i < n; i++) {
-        const struct uart_dump_snap *e = &g_uart_dump_snap[i];
-        const char *state = "?";
-        switch (e->state) {
-        case PROC_READY:   state = "READY"; break;
-        case PROC_RUNNING: state = "RUN"; break;
-        case PROC_BLOCKED: state = "BLOCK"; break;
-        case PROC_ZOMBIE:  state = "ZOMB"; break;
-        case PROC_STOPPED: state = "STOP"; break;
-        default: break;
-        }
-        kdebug("[TTYDBG] pid=%d ppid=%d pgid=%d sid=%d state=%s wake=%lu onrq=%d name=%s\n",
-               e->pid, e->ppid, e->pgid, e->sid, state,
-               e->wake_time, e->task_on_rq, e->name);
-    }
-    if (n == UART_DUMP_SNAP_MAX)
-        kdebug("[TTYDBG] task dump truncated at %d entries\n",
-               UART_DUMP_SNAP_MAX);
-    kdebug("[TTYDBG] task dump end\n");
-}
-
-/*
- * CTRL_C_CONTEXT_SPLIT: the two signal walks stay in the top half, because the
- * foreground process group has to learn about the key while the shell is busy
- * running a command and therefore nowhere near a console read -- deferring them
- * would stop Ctrl-C from killing anything.  proc_find_get() takes only pid_lock
- * and signal delivery from an interrupt is what that path is for.
- *
- * The task-table dump is the part that cannot happen here.  uart_dump_tasks()
- * holds tasklist_lock with interrupts disabled while it copies the task table
- * out, then writes one kdebug line per entry out of the same UART whose
- * interrupt is running, so a dump started from the top half re-enters the
- * console under its own IRQ.  The snapshot-then-print shape is what keeps the
- * console writes off the lock: no kdebug happens while tasklist_lock is held.  The top half only raises the
- * flag and wakes the reader; uart_getc() is this driver's only task-context
- * entry point and does the dump there.
- */
-static void uart_signal_ctrlc(void)
-{
-    __atomic_store_n(&g_ctrlc_pending, 1, __ATOMIC_RELEASE);
-
-    /* Waking before signalling, not after: where no foreground process group
-     * has been established the walks below SIGINT every user task, init
-     * included, so a reader woken only afterwards has already been killed and
-     * the deferred dump would never run.  Waking first gives the reader a
-     * chance to observe the flag while it is still alive to do so. */
-    proc_wake_q_t wake_q;
-    proc_wake_q_init(&wake_q);
-    uint64_t flags = spin_lock_irqsave(&rx_lock);
-    (void)wait_queue_collect_one(&rx_waiters, 0, PROC_WAKE_EVENT, &wake_q);
-    spin_unlock_irqrestore(&rx_lock, flags);
-    (void)proc_wake_q_flush(&wake_q);
-
-    int pgid = uart_get_foreground_pgid();
-    int hit = uart_signal_user_pgid(pgid, SIGINT);
-    int rest = uart_signal_all_user(SIGINT, hit > 0);
-    __atomic_store_n(&g_ctrlc_signalled, hit + rest, __ATOMIC_RELAXED);
-}
-
-static void uart_service_ctrlc(void)
-{
-    if (!__atomic_exchange_n(&g_ctrlc_pending, 0, __ATOMIC_ACQ_REL))
-        return;
-    int signalled = __atomic_exchange_n(&g_ctrlc_signalled, 0, __ATOMIC_RELAXED);
-    uart_dump_tasks();
-    kdebug("[TTYDBG] Ctrl-C signalled %d task(s)\n", signalled);
-}
 
 /*
  * RX_LOCK_INVARIANT: every byte reaches the ring through a path that holds
@@ -269,18 +106,19 @@ static void uart_service_ctrlc(void)
  *
  * uart_rx_push_locked() is the half that must run under the lock: it appends
  * and collects the wake, it never releases anything.  The wrappers around it
- * drop the lock first and only then flush the wake list or run the Ctrl-C
- * side effects -- LOCK_ORDER above forbids taking another lock while rx_lock
- * is held, and uart_signal_ctrlc() takes rx_lock itself, so a control byte is
- * handed back to the caller as 0 instead of being processed in place.
+ * drop the lock first and only then flush the wake list.
  *
- * Returns 1 for "the byte is consumed (enqueued or dropped)", 0 for "this was
- * a control byte, process it after you drop the lock".
+ * Returns the signal the console line discipline wants raised for this byte, or
+ * 0 when the byte was queued as data.  The caller must raise it after dropping
+ * rx_lock: tty_console_isig_raise() takes rx_lock itself (through
+ * uart_get_foreground_pgid), and LOCK_ORDER forbids taking another lock while
+ * rx_lock is held.  Control bytes are consumed here rather than queued, which
+ * is what a line discipline does with them.
  */
 static int uart_rx_push_locked(char c, proc_wake_q_t *wake_q) {
-    if (c == 0x03) {  // Ctrl-C
-        return 0;
-    }
+    int sig = tty_console_isig_signal(c);
+    if (sig)
+        return sig;
     uint32_t next = (rx_head + 1) % RX_BUF_SIZE;
     if (next != rx_tail) {
         rx_buffer[rx_head] = c;
@@ -289,7 +127,7 @@ static int uart_rx_push_locked(char c, proc_wake_q_t *wake_q) {
     } else {
         rx_dropped++;
     }
-    return 1;
+    return 0;
 }
 
 /* One byte, in and out of the lock: the shape used by paths that are handed a
@@ -299,11 +137,11 @@ static void uart_rx_push(char c) {
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&rx_lock);
-    int consumed = uart_rx_push_locked(c, &wake_q);
+    int sig = uart_rx_push_locked(c, &wake_q);
     spin_unlock_irqrestore(&rx_lock, flags);
     (void)proc_wake_q_flush(&wake_q);
-    if (!consumed)
-        uart_signal_ctrlc();
+    if (sig)
+        tty_console_isig_raise(sig);
 }
 
 /* RX_FIDELITY probe: publish the counters into the console log as the run
@@ -354,8 +192,16 @@ void uart_putc(char c) {
 // blocking read of one character (yields the CPU if there is no data)
 int uart_getc(void) {
     for (;;) {
-        /* The Ctrl-C dump the top half could not do; see CTRL_C_CONTEXT_SPLIT. */
-        uart_service_ctrlc();
+        /* Standard blocking-read semantics: a pending unblocked signal ends the
+         * wait instead of parking forever.  Without this a reader blocked on
+         * the console ignored SIGTERM/SIGINT outright -- measured before the
+         * fix: `timeout 1 dd if=/dev/tty` took 11.98s to die and only did so
+         * when the signal happened to be noticed at a later wakeup.  That is
+         * also what made any program waiting on console input unkillable, and
+         * what the ISIG path in the tty layer needs in order to end a read. */
+        task_t *reader = proc_current();
+        if (reader && signal_task_has_unblocked(reader))
+            return -ERESTARTSYS;
         /* RX_FIDELITY: emit the console-integrity counters from task context. */
         uart_rx_fidelity_report();
         uint64_t flags = spin_lock_irqsave(&rx_lock);
@@ -378,11 +224,11 @@ int uart_getc(void) {
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
             rx_polls_rx_bytes++;
-            int consumed = uart_rx_push_locked((char)c, &wake_q);
+            int sig = uart_rx_push_locked((char)c, &wake_q);
             spin_unlock_irqrestore(&rx_lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            if (!consumed)
-                uart_signal_ctrlc();
+            if (sig)
+                tty_console_isig_raise(sig);
             continue;
         }
         spin_unlock_irqrestore(&rx_lock, flags);
@@ -408,11 +254,11 @@ int uart_getc(void) {
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
             rx_polls_rx_bytes++;
-            int consumed = uart_rx_push_locked((char)c, &wake_q);
+            int sig = uart_rx_push_locked((char)c, &wake_q);
             spin_unlock_irqrestore(&rx_lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            if (!consumed)
-                uart_signal_ctrlc();
+            if (sig)
+                tty_console_isig_raise(sig);
             continue;
         }
         uint64_t deadline = timer_get_ticks() + UART_POLL_INTERVAL_TICKS;
@@ -429,11 +275,11 @@ int uart_getc(void) {
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
             rx_polls_rx_bytes++;
-            int consumed = uart_rx_push_locked((char)c, &wake_q);
+            int sig = uart_rx_push_locked((char)c, &wake_q);
             spin_unlock_irqrestore(&rx_lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            if (!consumed)
-                uart_signal_ctrlc();
+            if (sig)
+                tty_console_isig_raise(sig);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             continue;
@@ -468,11 +314,6 @@ int uart_try_getc(void) {
 }
 
 int uart_has_input(void) {
-    /* Poll() runs in task context too, so it is the second chance to service a
-     * Ctrl-C the reader was not parked for -- a foreground process that never
-     * reads stdin still polls. */
-    uart_service_ctrlc();
-    int ctrlc = 0;
     if (current_board && current_board->uart_rx_is_polled) {
         /* Polled boards have no top half, but the read and the store still go
          * in one rx_lock section so a concurrent reader cannot push a later
@@ -481,13 +322,14 @@ int uart_has_input(void) {
         proc_wake_q_init(&wake_q);
         uint64_t pflags = spin_lock_irqsave(&rx_lock);
         int polled = arch_uart_poll_getc();
+        int sig = 0;
         if (polled >= 0)
-            ctrlc = !uart_rx_push_locked((char)polled, &wake_q);
+            sig = uart_rx_push_locked((char)polled, &wake_q);
         spin_unlock_irqrestore(&rx_lock, pflags);
         (void)proc_wake_q_flush(&wake_q);
+        if (sig)
+            tty_console_isig_raise(sig);
     }
-    if (ctrlc)
-        uart_signal_ctrlc();
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int has = rx_head != rx_tail;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -531,19 +373,20 @@ void uart_handle_irq(void) {
      * locks is legal. */
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
-    int ctrlc = 0;
+    int sig = 0;
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int c;
     while ((c = arch_uart_poll_getc()) >= 0) {
         rx_irq_bytes++;
-        if (!uart_rx_push_locked((char)c, &wake_q))
-            ctrlc = 1;
+        int s = uart_rx_push_locked((char)c, &wake_q);
+        if (s)
+            sig = s;
     }
     spin_unlock_irqrestore(&rx_lock, flags);
     (void)proc_wake_q_flush(&wake_q);
     arch_uart_ack_irq();
-    if (ctrlc)
-        uart_signal_ctrlc();
+    if (sig)
+        tty_console_isig_raise(sig);
 }
 
 static int uart_irq_wrapper(int irq, void *priv) {

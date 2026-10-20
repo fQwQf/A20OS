@@ -20,15 +20,9 @@ journal poison 那一步被跳过，所以当场没有别的报错 —— 但**�
 平时不易察觉是因为 `a20 run` 每次都会重建 world 镜像（`image-world` 是 phony），
 缺口被「重建」掩盖；`a20 run --no-build`、或手工用同一张镜像连续启动两次才会踩到。
 
-还有第二条路径，与 shell 无关：**QEMU 被直接 kill（而不是 guest 自己 `poweroff` 走完）
-时，镜像同样可能变成无法挂载**，而且这种情况下串口上一条 `unlink orphan` 都不会出现
-（实测：同一次实验里 4 个 boot 的 orphan 计数全是 0，第 5 次却 `refusing mount`）。
-所以「镜像脏了」有两个来源 —— 写盘期间被 kill，以及上面那条 orphan 回收缺口 ——
-排查时不要只盯 orphan 日志。world 镜像本来就无日志，这也是 `a20 run` 干脆每次重建的原因。
-
 ## 另一条路径：QEMU 被直接 kill
 
-还有第二条路径，与 shell 无关：**QEMU 被直接 kill（而不是 guest 自己 `poweroff` 走完）
+与 shell 无关：**QEMU 被直接 kill（而不是 guest 自己 `poweroff` 走完）
 时，镜像同样可能变成无法挂载**，而且这种情况下串口上一条 `unlink orphan` 都不会出现
 （实测：同一次实验里 4 个 boot 的 orphan 计数全是 0，第 5 次却 `refusing mount`）。
 所以「镜像脏了」有两个来源 —— 写盘期间被 kill，以及上面那条 orphan 回收缺口 ——

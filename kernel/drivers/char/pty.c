@@ -37,12 +37,16 @@
 #define PTY_ONLCR      0x4
 #define PTY_ICRNL      0x100
 #define PTY_ICANON     0x2
+#define PTY_ISIG       0x1
 #define PTY_ECHO       0x8
 #define PTY_ECHOE      0x10
 #define PTY_ECHOK      0x20
+#define PTY_CC_VINTR   0
+#define PTY_CC_VQUIT   1
 #define PTY_CC_VERASE  2
 #define PTY_CC_VKILL   3
 #define PTY_CC_VEOF    4
+#define PTY_CC_VSUSP   10
 
 /* Console and PTYs share the kernel termios representation and arch codec. */
 typedef ktty_termios_t pty_termios_t;
@@ -248,6 +252,21 @@ static void pty_echo_byte_locked(pty_pair_t *pty, char ch) {
  * otherwise it lands in the raw m2s ring.  Caller holds the per-pair lock. */
 static void pty_input_byte_locked(pty_pair_t *pty, char ch) {
     pty_termios_t *tio = &pty->termios;
+    /* ISIG applies in both modes: with it set, the interrupt/quit/suspend
+     * characters signal the foreground process group instead of reaching the
+     * reader (termios(3)).  Delivering them as data is what left Ctrl-C dead
+     * inside the desktop's terminals. */
+    if (tio->c_lflag & PTY_ISIG) {
+        int sig = 0;
+        if (ch == (char)tio->c_cc[PTY_CC_VINTR])      sig = SIGINT;
+        else if (ch == (char)tio->c_cc[PTY_CC_VQUIT]) sig = SIGQUIT;
+        else if (ch == (char)tio->c_cc[PTY_CC_VSUSP]) sig = SIGTSTP;
+        if (sig) {
+            if (pty->pgrp > 0)
+                (void)proc_kill_pgid(pty->pgrp, sig, 0);
+            return;
+        }
+    }
     if (tio->c_lflag & PTY_ICANON) {
         if (ch == '\r' && (tio->c_iflag & PTY_ICRNL))
             ch = '\n';

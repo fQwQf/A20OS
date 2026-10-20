@@ -98,7 +98,7 @@ socket-table bucket 锁嵌套，回调通过延后工作进入 socket 状态；�
 
 - 普通 RX 处理只在 `rx_lock` 下触碰环形缓冲区和前台 PGID。
 - RX 唤醒在 `rx_lock` 下 collect wait entry，释放锁后 flush wake queue。
-- Ctrl-C 路径不持有 `rx_lock`；task dump、带引用 PID 查询和信号发送各自在驱动锁外获取所需的进程锁。
+- ISIG 控制字符在 `rx_lock` 内只做判定（`tty_console_isig_signal()` 不取锁），信号发送放在解锁之后（`tty_console_isig_raise()` 经 `uart_get_foreground_pgid()` 取 `rx_lock`），因此驱动在任何持锁区间都不获取额外锁。
 
 因此所有 UART 路径在持有 `rx_lock` 时都不得获取额外锁。`uart_getc()` 使用 prepare → 锁内重查/link → unlock → commit 的 Park/Wake 协议，并在阻塞当前任务前释放 `rx_lock`。
 
@@ -371,7 +371,7 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 - `kernel/drivers/net/virtio_net.c`：`net->lock` 与 `g_lwip_lock` 交互。
 - `kernel/drivers/net/e1000.c`：`nic->lock`，中断排空与发送路径共用。
 - `kernel/drivers/net/rtl8139.c`：`nic->lock`，中断处理函数与 send/recv/poll 共用。
-- `kernel/drivers/char/uart.c`：`rx_lock` 和 Ctrl-C signal 路径。
+- `kernel/drivers/char/uart.c`：`rx_lock`（接收环形缓冲区、前台 PGID，以及接收路径上的 ISIG 判定）。
 - `kernel/drivers/char/virtio_console.c`：`g_vport.lock`，锁外 notify、锁外控制台镜像与锁外的同步发送等待。
 - `kernel/drivers/char/pty.c`：`g_pty_alloc_lock` 和 per-pair `lock`。
 - `kernel/drivers/block/loop.c`：per-device loop lock。
