@@ -65,3 +65,17 @@
 - 缺口：根因未定位；规避不等于修复。
 - 关闭条件：IPv6 收包长跑无引用计数下溢或 panic；或以明确的 IPv6 分片契约限制范围并有对应测试。
 - 诊断：[notes/net-ipv6-pbuf.md](notes/net-ipv6-pbuf.md)。
+
+### NET-10 lwIP accept 阶段的接线断言为红
+
+- 现状：`make check-honesty-policy` 的 `lwip-concurrency-wiring` 报 `accept stage is missing listener guard, head publication, unlock, or BH schedule`。
+- 缺口：这是一条 fail-closed 的反回归断言，它现在为红，意味着 accept 阶段的接线完整性无法被证明仍然成立；在候选上该 job 直接失败。
+- 关闭条件：断言在候选上通过。
+- 来源：DELIVERY 的 CI `toolchain-gates` job 本地复现（[current/delivery-baseline.md](../current/delivery-baseline.md) §6）。
+
+### NET-11 TCP 发送背压用例与源码脱节
+
+- 现状：`check-a20-tests` 的 `test_tcp_send_backpressure.test_accepted_bytes_and_retry` 在源码里找不到自己绑定的标记，直接 `ValueError: substring not found`。
+- 缺口：TCP 发送背压的宿主侧行为断言当前无法区分"实现回退"与"夹具漂移"。
+- 关闭条件：该用例在候选上通过，或按当前契约改写（保留行为断言与负控）后通过。
+- 来源：DELIVERY 的 `check-a20-tests` 基线（[current/delivery-baseline.md](../current/delivery-baseline.md) §5）。

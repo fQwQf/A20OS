@@ -150,7 +150,7 @@ shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip
 | `NET_PROFILE_NETIF_MAX_DEVS` / `_FRAME_SIZE` / `_MTU` | 1 / 512 / 498 | 4 / 1536 / 1500 | 每 netif 的 `rx_frame` / `tx_frame` 与 MTU |
 | `NET_PROFILE_SOCKET_BUDGET` | 20 KiB | **未定义** | `NET_MAX_SOCKETS × sizeof(net_socket_t)` 的上界。只有 EMBEDDED 档定义它 |
 | `NET_PROFILE_TOTAL_BUDGET` | 44 KiB | **未定义** | socket 表 + 帧数组 + filter 表 + lwIP 堆的四项求和上界 |
-| `NET_PROFILE_FILTER_BUDGET` | 3,328 | **未定义** | `sizeof(g_ct) + sizeof(g_nat)`，由 `netfilter_nat.c:561` 的断言钉住。EMBEDDED 档现在**正好占满**：条目在 `810e9e431` 后由 56 B 涨到 64 B，32×64 + 16×80 = 3,328 |
+| `NET_PROFILE_FILTER_BUDGET` | 3,328 | **未定义** | `sizeof(g_ct) + sizeof(g_nat)`，由 `netfilter_nat.c:130` 的断言钉住。EMBEDDED 档现在**正好占满**：条目在 `810e9e431` 后由 56 B 涨到 64 B，32×64 + 16×80 = 3,328 |
 | `NET_PROFILE_STATIC_BUDGET` | 20 KiB | 64 KiB / 128 KiB | 上面那些静态数组的 `.bss` 上界，由断言钉住 |
 
 **"未定义"不是 0，也不是"无限"。** `NET_PROFILE_SOCKET_BUDGET`、

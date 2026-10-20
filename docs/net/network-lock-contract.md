@@ -482,7 +482,7 @@ conntrack 的每个包都要写（`e->packets++`、`e->last_ms`），所以 seql
 **/proc 侧自己取锁**，因为 procfs 访问是系统调用，不在 `g_lwip_lock` 下：
 
 - 写动词 `ctflush` 在 `kernel/fs/procfs/procfs.c:1047-1051` 显式取放；
-- 读渲染由 `netfilter_format()` 在 `kernel/net/netfilter.c:658-660` 取一次
+- 读渲染由 `netfilter_format()` 在 `kernel/net/netfilter.c:208` 取一次
   `a20_lwip_lock` 后调用 `netfilter_nat_format()`。**渲染路径不得再取第二次**：
   `spin_lock_irqsave()` 不可重入，二次获取是自死锁。它表现得像锁竞争而不是自死锁——
   单 CPU 构建上是 `netfilter_nat_format` 里的 `[LOCK-STALL]`，`owner=-1`，因为

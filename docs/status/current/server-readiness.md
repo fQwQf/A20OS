@@ -323,7 +323,7 @@ workload, upper limits left as configured
 |---|---|---|
 | socket 表 `8 × sizeof(net_socket_t)` | **19,520** | `kernel/net/socket_internal.h:457`，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB（余 960 B） |
 | 帧数组（netif 状态 + AF_PACKET 环） | 4,100 | `kernel/net/socket_packet.c` 与 `kernel/net/lwip_stack.c` 各自的 `sizeof()` |
-| filter 表（conntrack + NAT 规则） | 3,328 | `kernel/net/netfilter_nat.c:561` 的 `sizeof()` 断言，**正好等于** `NET_PROFILE_FILTER_BUDGET` = 3,328 B，余量归零（条目在 `810e9e431` 后由 56 B 涨到 64 B；`netfilter_nat.c:554-556` 的注释仍写旧的 3,072 B，已过期） |
+| filter 表（conntrack + NAT 规则） | 3,328 | `kernel/net/netfilter_nat.c:130` 的 `sizeof()` 断言，**正好等于** `NET_PROFILE_FILTER_BUDGET` = 3,328 B，余量归零（条目在 `810e9e431` 后由 56 B 涨到 64 B；`netfilter_nat.c:118-131` 的注释仍写旧的 3,072 B，已过期） |
 | lwIP 堆 `MEM_SIZE` | 16,384 | `memp/mem.c` 里就是这么大一个静态数组 |
 | 合计 | **43,332 B（约 42.3 KiB）** | 上限 `NET_PROFILE_TOTAL_BUDGET` = 44 KiB（`kernel/net/socket_internal.h:510` 的四项求和断言）。上表的 42.6 KiB 是 filter 项按旧 3,072 B 算出来的，现已修正 |
 
@@ -1173,7 +1173,7 @@ CONFIG 卫语句，默认构建一直在编；arm/删除一侧也是活的——
 `posix_timer_update_deadline()`（`:89`）调 `sched_set_posix_deadline()`
 （`kernel/proc/timer_heap.c:449`；它唯一的调用方是 `timer_posix.c:99`），所以
 `next_posix_scan`（`timer_heap.c:158`）**写得进去**。死的是过期一侧：
-`posix_timer_tick()`（`timer_posix.c:228`，末尾 `:293` 重算 deadline）此前唯一的
+`posix_timer_tick()`（`timer_posix.c:114`；重算 deadline 现由 Rust 的 `a20_posix_timer_tick()` 承担）此前唯一的
 调用点（`timer_heap.c:570-571`）被恒假卫语句挡住，于是过期没人扫描——信号不发、
 `expire_tick` 不推进、`next_posix_scan` 不重算。一旦 arm 过的 deadline 过去，
 `proc_next_timer_interval()`（`timer_heap.c:213`）每次重装都命中
@@ -1189,8 +1189,9 @@ CONFIG 卫语句，默认构建一直在编；arm/删除一侧也是活的——
 无锁静态表；`ABI=linux` 下它们已经同时被定时器中断路径与 syscall 上下文改写，
 **不是新引入的**。但 `ABI=both` 此前根本编不进去，现在编进去了，默认 `NR_CPUS=1`
 的门禁不会暴露它，而 `instances/qemu-riscv64-smp4.toml` 设 `smp = 4` 且不覆盖
-`abi`（继承 `both`）。同时 `posix_itimer_set()` 在
-`kernel/proc/timer_posix.c:346` 于 `proc_get()` 失败时返回 `-EAGAIN`，经
+`abi`（继承 `both`）。同时 `posix_itimer_set()`（Rust 实现
+`a20_posix_itimer_set()`，`kernel/proc/posix_timer_state.rs:490`）在为新 itimer
+克隆任务引用失败、或表里没有空槽时返回 `-EAGAIN`，经
 `sys_setitimer()` 透出——Linux 语义里 `setitimer` 不会因表满或引用失败返回
 `EAGAIN`。这一条本次**未核实**它在真实 SMP4 运行下是否会触发，只核实了代码路径。
 

@@ -15,10 +15,10 @@
 | Process | Rust 拥有部分 task construction、有序 exit、wait/timer 与调度决策；task 存储、PID 分配以及部分 final release 仍为 C/可配置。 | 主机与 SMP2 覆盖是针对性集合。`TASK_OBJECTS_IMPL` 与 `TASK_EXIT_IMPL` 默认 C；有序 exit 控制器另行接线。见 [进程生命周期与调度](../../kernel/process-scheduler.md)。 |
 | Network | Rust 拥有部分 socket 队列与连接状态事务。 | 一次 RV64 SMP2 运行完成了 4 路并行传输 × 4 轮 × 1 MiB 并以 0 退出。该证据来自混合构建，不关闭完整 `network_suite`、外部对端/NAT 或性能验收。 |
 
-`tools/a20 run qemu-riscv64` 的普通 shell 门禁能进入 shell 并自然关机，但当时使用的工作树带有未提交改动，
-因此不是干净的发布候选结果。相关的 `check-a20-tests` 在 476 个测试中报告 failures/errors/skip，且没有
-在干净基线上重跑；那些结果属于未解决项，不能当作已知的既存失败。见 [状态目录说明](../README.md) 与
-[测试门禁](../../testing-gates.md)。
+`tools/a20 run qemu-riscv64` 的普通 shell 门禁能进入 shell 并自然关机。此后交付工作包已在**干净树**
+上重跑这条门禁并重建了内核与用户态镜像，同时建立了 `check-a20-tests` 的基线并逐条分类，另跑了保留平台
+构建矩阵与 CI 逐 job 复现；结论、分类与仍然为红的门禁见 [交付基线](delivery-baseline.md)。
+[测试门禁](../../testing-gates.md) 与 [状态目录说明](../README.md) 仍是入口索引。
 
 1.0 的目标是稳定、可用地完成已承诺的功能。在共享可变状态、争用、所有权、取消、回滚或并发不变量能从更
 清晰的控制中受益时，Rust 是合适的；简单的 C dispatch、glue、byte-copy 与成熟热点原语可以继续保留。
