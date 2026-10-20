@@ -63,8 +63,7 @@ futex 的 fork/COW 丢唤醒，以及 PTY termios wire 越界。浏览器镜像�
 NetSurf/curl；HTTP、带证书验证的 HTTPS 和实际网页渲染通过。
 
 最终 4 CPU / 4 GiB x86_64 配置重复冷启动，终端真实键盘命令、Thunar 与浏览器
-窗口交互、顶栏/dock 通过五分钟观察，无 FATAL/PANIC。修复依据、负控、重跑
-命令及尚存兼容性问题见 [本轮验证记录](../history/xfce-x86_64-validation.md)。
+窗口交互、顶栏/dock 通过五分钟观察，无 FATAL/PANIC。修复依据与尚存兼容性问题见本页后续条目。
 此结论不扩展到 RISC-V 桌面或复杂网站。以下 10-08/10-09 内容保留为历史排查
 记录，其中重启缓解和“当前未解决”的描述不代表本轮最终实现。
 

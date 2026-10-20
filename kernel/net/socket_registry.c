@@ -24,8 +24,7 @@ volatile int g_net_bh_pending_count;
  * These locks were never registered before this sharding, so the whole net data
  * plane was invisible to the contention audit.  Registering all of them costs
  * one lock_counters slot each, which is why LOCK_COUNTERS_MAX in
- * kernel/core/lock_counters.c is worth a second look (see
- * docs/status/history/impl-notes-net.md section 8).
+ * kernel/core/lock_counters.c is worth a second look.
  *
  * The names are formatted at init rather than spelled out in a table: the table
  * would have to name every bucket of the *largest* profile, and the server
@@ -178,8 +177,8 @@ void net_socket_registry_init(void) {
     }
     #if CONFIG_NET_LOCK_ASSERT
     /* Count the registry size either side of the loop below rather than
-     * trusting that every register() landed.  impl-notes-net.md §8.2/§8.7 left
-     * LOCK_COUNTERS_MAX=192 as an open budget question with the server profile's
+     * trusting that every register() landed.  LOCK_COUNTERS_MAX=192 was left as
+     * an open budget question with the server profile's
      * 128 bucket locks eating two thirds of it, and a register() past the
      * ceiling used to be dropped without a word -- the locks work, they just
      * stop being audited, and /proc/a20/lock_contention then reports a clean run
@@ -289,9 +288,8 @@ int net_register_socket_locked(net_socket_t *s) {
  * changed is that it is now visible: net_socket_free()'s CAS loop refuses a
  * non-positive count and the ref_magic canary rejects a socket that is not live,
  * so CONFIG_NET_REF_ASSERT=1 turns this into a panic on the first AF_UNIX close.
- * The ledger is what found it; see docs/status/history/impl-notes-net.md §8.3/§8.6,
- * which recorded the reference count as walked by hand over 54 sites and never
- * once run.
+ * The ledger is what found it: the reference count had been walked by hand over
+ * 54 sites and never once run.
  *
  * Returning "was there a slot" makes the coupling impossible to get wrong
  * again: the function that knows whether the reference exists is the one that

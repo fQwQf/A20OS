@@ -89,8 +89,8 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 无本地显示器时可以使用 QEMU 的 VNC 显示与 QMP `screendump`、输入事件，显示
 后端变化需要写入验收记录。不要通过删网卡、减少 CPU 数或替换桌面组件来宣称原实例
 通过。已知故障、修复依据与实际验收记录见
-[发行版排查笔记](status/current/known-issues.md)。x86_64 的缺页/futex/PTY 回归与
-浏览器测试步骤见 [XFCE x86_64 验证记录](status/history/xfce-x86_64-validation.md)。
+[发行版排查笔记](status/current/known-issues.md)。x86_64 的缺页/futex/PTY 回归与浏览器交互由对应 smoke 与
+`tools/tests/xfce-web-smoke.sh` 覆盖。
 
 Minecraft 桌面在 x86_64、aarch64、riscv64 上用
 `tools/a20 run minecraft-<arch> -- GUI_MEDIA=build/minecraft/1.21.11-<arch>`

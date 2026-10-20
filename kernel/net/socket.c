@@ -34,7 +34,7 @@ static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_
 
 /*
  * -ENOTCONN attribution; see the enum above in socket_internal.h.  The four
- * reasons in the first group are the impl-notes-net.md §8.5 window and the rest
+ * reasons in the first group belong to the -ENOTCONN window and the rest
  * are ordinary "no connection" errors, and keeping the two apart in one number
  * is the entire reason this table exists.
  */
@@ -162,7 +162,7 @@ void net_socket_free(net_socket_t *s) {
      * fetch_sub cannot tell "dropped the last reference" from "dropped one too
      * many": both land on the same atomic, and the second free walked straight
      * into obj_cache_free() with a negative count and no signal at all.
-     * impl-notes-net.md §8.3/§8.6 called this the unverified primitive.  It now
+     * This was the unverified primitive.  It now
      * belongs to the Rust registry state machine
      * (kernel/net/socket_registry.rs); what stays here is the destroy sequence,
      * which is primitives rather than state.

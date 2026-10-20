@@ -33,8 +33,7 @@ make smoke-sigchld-group
 - `sigchld-group-x86-guest.log`：四核抢占 x86_64 上新测试、signalfd、SCM、
   VM_FAULT 全部通过。
 - `sigchld-group-rv-guest.log`：四核抢占 RISC-V 上新测试、signalfd、SCM 通过。
-- `firefox-final-1.log`：XFCE 配置写入、读回和删除通过；网页完整验收另见
-  [XFCE 验证记录](../../status/history/xfce-x86_64-validation.md)。
+- XFCE 配置写入、读回和删除通过。
 
 RISC-V 首次并行构建碰到共享 drvmod 文件被另一递归构建截断的既有竞态，
 重跑构建后通过；上述 guest 结果来自重跑成功的构建。

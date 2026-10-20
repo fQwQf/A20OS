@@ -423,8 +423,7 @@ SERVER 档这两个值就是原来的 1536 与 1500，行为不变。同时补�
 所以 lane 分得再细也没用。阶段 E 之后只剩真正共享同一对象的那一对。
 
 `2f17a5ba8` 的提交说明自陈三项运行期验证**当时**未做——引用计数不漏不重、
-`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口，清单在 `docs/status/history/impl-notes-net.md`
-§8。**这三项现在都跑起来了**：前两项在 4 CPU + 4 lane 下 20 次引导全部干净，读数见
+`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口。**这三项现在都跑起来了**：前两项在 4 CPU + 4 lane 下 20 次引导全部干净，读数见
 §八对应行；第三项做成了**可观测而非可判定**——13 处 `-ENOTCONN` 各自带 reason，
 其中 4 个属于 §8.5 那个窗口，`/proc/net/status` 分开打 `total=` 与 `window=`
 （`socket.c:105-120`、`:147-166`）。20 次引导读数是 `total=0 window=0`：**没命中过，

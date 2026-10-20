@@ -820,8 +820,7 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
   取代了原先隐含在全局锁里的 single-consumer 保证。
   剩余的真问题不是串行度而是**验证缺口**：`2f17a5ba8` 的提交说明自己写明，
   引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口三项
-  **运行期验证未做**，ASAN + SMP 压测也未做。待验证清单在
-  `docs/status/history/impl-notes-net.md`。
+  **运行期验证未做**，ASAN + SMP 压测也未做。待验证清单见下文。
 - `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行，且每包仍
   遍历 lwIP 的全局 PCB 链表。分片的前置条件记录在 `net-lanes.md`：
   **memp 与 lane 上下文的前提没定之前不要动 memp**。
@@ -895,13 +894,12 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
       `net_lock: armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0`
       （见 `net-lanes.md`「放大实验第二轮」）。**两组故意注入**的对照只证明其中两个
       分支（桶锁在 socket 锁之下 / 地址乱序），第三把 socket 锁、第二把桶锁、重复取锁
-      三支没有单独注入过——详见上方「net 锁一侧的探针」末段与 `impl-notes-net.md` §11.3。
+      三支没有单独注入过——详见上方「net 锁一侧的探针」末段。
 - `net_socket_unregister()` 的返回值把"槽位释放了没有"告诉了调用方
       （`2dd28758c`），但这是**引用计数**的对账，不是锁的断言：探针看不见
-      "某条路径多释放了一次引用"。那件事由 `net_sock_ref:` 账本负责，见
-      `impl-notes-net.md` §11。**该账本本轮有新的多核数据**：20 次 4 CPU + 4 lane
+      "某条路径多释放了一次引用"。那件事由 `net_sock_ref:` 账本负责。**该账本有多核数据**：20 次 4 CPU + 4 lane
       引导全部 `live=1 faults=0`，`allocs` 落在 159–167、`frees` 恒等于 `allocs-1`
-      （单 CPU 那个读数只有三个自带用例的量级，见 `impl-notes-net.md` §11.4 补记）。
+      （单 CPU 那个读数只有三个自带用例的量级）。
 - [ ] **本轮未做**：ASAN 压力测试与全量回归（`smoke-network-suite`、
       `smoke-smp-lock-contention` 等）没有跑——按分工由编排层在合并后统一执行。
       上面那些 `violations=0` 的读数因此只覆盖到各自那一组负载，**不构成"探针在

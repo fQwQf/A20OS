@@ -1,7 +1,6 @@
 # 锁串行化拆分设计（feat/lock-serialization-split）
 
-状态：设计定稿，实施中。本文档是本轮锁拆分的权威设计；实施细节以各实现笔记
-（`docs/status/history/impl-notes-*.md`）和最终 diff 为准。测量协议见 §5。
+状态：设计定稿，实施中。本文档是本轮锁拆分的权威设计；实施细节以最终 diff 为准。测量协议见 §5。
 
 > 修订记录（2026-10-05，design review round 1）：本版逐条落实复核提出的 17 条结论。
 > 每条在文末 §8「复核结论落点表」里给出落点，便于反查。被推翻的复核结论写明理由。
@@ -21,7 +20,7 @@
 **明确不做**（本轮范围外，理由如实记录）：
 - `g_lwip_lock` 本体分片：需要先对 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs`
   做桶化，触及 vendored 代码（`kernel/external/lwip/`，有 DIVERGENCE.md 治理）。
-  本轮在 `impl-notes-net.md` 里记录普查结论，留给下一轮。
+  本轮在 `docs/net/network-lock-contract.md` 里记录普查结论，留给下一轮。
 - 内核抢占 / RT throttling：与锁拆分正交，另立项。
 
 成功标准（三者同时满足才算完成）：
@@ -121,7 +120,7 @@
 
 ### 1.3 转换规则（按类）
 
-对 265 处引用先做**普查分类**（结果写入 `impl-notes-proc.md` 的普查表）。
+对 265 处引用先做**普查分类**（结果写入 `docs/kernel/process-scheduler.md` 的普查表）。
 分类判据是「这个 callsite 保护的是哪一组字段」，按 §1.2 的字段归属表（INV-P1 /
 INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 
@@ -165,7 +164,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 - 这是仓库文档明确警告过的"高风险核心协议重写"（`docs/kernel/eevdf-scheduler.md`）。
   因此**逐类提交**：每完成一类，跑 §7 对应冒烟再进行下一类。
 - **降级许可**：某一类若被证明转换不安全（找不到闭合竞争窗口的方案），允许该类
-  保留 `proc_lock`，但必须在 `impl-notes-proc.md` 记录论证过程；INV-P4a 的 gate
+  保留 `proc_lock`，但必须在 `docs/kernel/process-scheduler.md` 记录论证过程；INV-P4a 的 gate
   断言范围只覆盖切换路径（A / A'），不因降级而放宽或删除。**降级不得发生在
   A / A' 类**——这两类是 P0 目标本身，降级即目标未达成，直接停在那里如实记录。
 - tokenized Park/Wake 的语义（`wait_seq`/`park_state` 状态机、donate 变体）**逐位保留**，
@@ -183,7 +182,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 |---|---|---|
 | :717-719 `PROCESS_LOCK_SPLIT_AUDIT` | 文档锚点 | **保留**；`docs/archive/process-lock-split-audit.md` 追加本轮记录 |
 | :721-723 `SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN` | 标记存在（`sched.c:1596`） | **保留**，标记范围 `sched.c:1596-1676` 不变 |
-| **:725-728** `task_t \*next = proc_runq_pick_local\(\);[\s\S]{0,2048}uint64_t flags = spin_lock_irqsave\(&proc_lock\)` | **正向**断言：A 类转换后必然失败（`sched.c:1924` 之后不再出现 `spin_lock_irqsave(&proc_lock)`） | **必须演进**，否则 §0 的"禁止删 gate"会把 A 类逼成违规。语义等价替换为「pick 之后 2048 字符内必须出现对 `next` 的 per-task 锁获取，且该获取被 `if (next)` 保护」：`…proc_runq_pick_local\(\);[\s\S]{0,2048}if \(next\)[\s\S]{0,256}spin_lock_irqsave\(&next->park_lock\)`。演进理由写进 `impl-notes-proc.md` |
+| **:725-728** `task_t \*next = proc_runq_pick_local\(\);[\s\S]{0,2048}uint64_t flags = spin_lock_irqsave\(&proc_lock\)` | **正向**断言：A 类转换后必然失败（`sched.c:1924` 之后不再出现 `spin_lock_irqsave(&proc_lock)`） | **必须演进**，否则 §0 的"禁止删 gate"会把 A 类逼成违规。语义等价替换为「pick 之后 2048 字符内必须出现对 `next` 的 per-task 锁获取，且该获取被 `if (next)` 保护」：`…proc_runq_pick_local\(\);[\s\S]{0,2048}if \(next\)[\s\S]{0,256}spin_lock_irqsave\(&next->park_lock\)`。演进理由写进 `docs/kernel/process-scheduler.md` |
 | :730-734 `negate`：`SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN…END` 之间不得出现 `spin_lock_irqsave(&proc_lock)` | 已满足 | **保留**；按 INV-P4b 追加一条同形态的负向断言：标记区间内也不得出现 `spin_lock_irqsave(&…->park_lock)`，把"pick 侧不取 park_lock"钉死 |
 | :736-742 `negate`：`proc_runq_pick_locked` 不得回潮 | 已满足 | **保留** |
 | :744-749 `runqueue_parallel_pick_peak` | 并行 pick 峰值埋点 | **保留**；INV-P1/INV-P2 拆分后该埋点的读侧不改 |
@@ -270,7 +269,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 
 - **per-socket 字段**：仅被单 socket 读写的状态（队列入队/出队、状态字）
   改为 per-socket 锁或原子变量；普查后按实际热度和共享面决定，
-  结论写 `impl-notes-net.md`。
+  结论写 `docs/net/network-lock-contract.md`。
 - **全局计数器**（perf/统计类）：改原子变量，读侧聚合。
 - **读多写少的 lookup**：直接用分桶锁（TCG 环境下 RCU 收益存疑，先不过度工程；
   若普查显示 lookup 是压倒性读路径且分桶锁已把争用归零，则记录结论即可）。
@@ -365,7 +364,7 @@ interrupted context was holding"），并且 dcache 的解法是**一次一把**
 处置：
 
 - **net agent 不得直接编辑 `kernel/include/core/lock.h`**；它在
-  `impl-notes-net.md` 里提交一个「锁序条目请求」（形如
+  `docs/net/network-lock-contract.md` 里提交一个「锁序条目请求」（形如
   `g_lwip_lock -> net_bucket[*]`、`net_bucket[i] -> net_bucket[j]`（i<j）），
   并附上它对 `kernel/net/` 内的具体嵌套点清单。
 - **proc agent 是 `lock.h` 的唯一写者**，在集成轮（§6 第 3 步）按该请求补写网络段。
@@ -461,7 +460,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
 1. 在 `kernel/net/socket.c` 注册 `lock_counters_register(&g_net_lock, "net")`；
    分片后改为注册每个 `net_bucket[i]`（名字 `net_bucket0..127`，或注册一把
    `net_bucket_registry` 汇总锁并让每把桶锁在 acquire 失败时把计数累加过去——
-   二选一，写进 `impl-notes-net.md`）。
+   二选一，写进 `docs/net/network-lock-contract.md`）。
 2. 在 `kernel/mm/slab.c` 注册 7 个 `caches[i].lock`（名字 `slab0..slab6`），
    使 `"slab"` 这个名字真实存在。
 3. 把 `tools/lock_bench.py` 的 `TRACKED_LOCKS` 改成实际注册的名字集合，并新增
@@ -471,7 +470,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
    `tools/lock_bench.py` 从 "baseline 禁入 `kernel/` 全部"里**开一个具名例外**
    （§4 表已按此改写），并把基线采集拆成两段：
    - **B0（真基线）**：未打补丁的树，`lock_contention` 里没有 `net`/`slab` 行——
-     这一段的 net 证据只能来自 `impl-notes-net.md` 的静态普查，明确记为"无计数通道"；
+     这一段的 net 证据只能来自 `docs/net/network-lock-contract.md` 的静态普查，明确记为"无计数通道"；
    - **B1（可测性补丁后的基线）**：注册调用点合入、**分片/拆分尚未开始**，
      采集含 `net`/`slab` 的完整基线。
    - `lock-after.md` 与 **B1** 对比（协议、镜像、QEMU 命令行一致），B0 仅作交叉参考。
@@ -520,7 +519,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
 ## 6. 实施顺序
 
 1. baseline（串行，先于一切分片/拆分修改）：B0 → 注册调用点（§5.1）→ B1。
-2. 两路并行实现（§4 边界内），各写 `impl-notes-proc.md`、`impl-notes-net.md`。
+2. 两路并行实现（§4 边界内），各写 `docs/kernel/process-scheduler.md`、`docs/net/network-lock-contract.md`。
    §4.2 的 21 个跨边界文件在 proc agent 的范围内，proc agent 自行排期；
    §4.1 的 `lock.h` 网络段在集成轮写。
 3. 串行构建修复循环（≤3 轮）：一次性构建含两路修改的内核，修复集成期编译错误；
@@ -544,8 +543,8 @@ make smoke-network-suite
 make smoke-smp-lock-contention
 ```
 
-任何一个 FAIL 都阻塞收尾；修复属于对应所有者文件的，在 impl-notes 里登记后由
-verifier 修复循环处理，修不动的如实记录 FAIL 状态并停在那里，不许放宽断言。
+任何一个 FAIL 都阻塞收尾；修复属于对应所有者文件的，由 verifier 修复循环处理，
+修不动的如实记录 FAIL 状态并停在那里，不许放宽断言。
 
 开工前实测基线：`make check-process-lock-split-boundary` →
 `check-process-lock-split-boundary: 7 assertions PASS` / `PASS`（本轮开工时跑通）。

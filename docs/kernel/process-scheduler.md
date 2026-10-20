@@ -192,9 +192,8 @@ cursor 批量解锁先在保护下计算需要弹出的节点数；最后一次�
 复用节点池，换回旧循环会失败。
 
 效果与实测：SCHED_FIFO/RT 唤醒延迟的上界从"一个最长 syscall 的时长"降到 tick 量级；
-A/B 探针数据（`user/cmds/core/preempt_lat.c`，256MB page-cache read 作为长 syscall）
-见 `docs/status/history/impl-notes-preempt.md`——x86_64 最大唤醒 557ms→21ms（smp=1）、
-→1ms（smp=2），riscv64 427ms→31ms（smp=1）、→10ms（smp=2）。SCHED_RR 死循环任务
+A/B 探针为 `user/cmds/core/preempt_lat.c`（256MB page-cache read 作为长 syscall）。
+SCHED_RR 死循环任务
 跑满 slice 后也会被 tick→need_resched→本节判定点轮转，`rt_pick_best_locked()` 的
 "只在 pick 时轮转"限制随之消失。
 
