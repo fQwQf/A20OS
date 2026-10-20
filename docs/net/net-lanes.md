@@ -1324,6 +1324,9 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 在此之前阶段 C 的 per-lane 计时器分片可以保留（它本身已验证正确且受
 `sys_check_timeouts()` 的间隔门控），但**不要**再去动分派。
 
+800 条控制台命令里观察到的三处字符错位：
+
+```
 # tcp_accept_test 12407   ->  # tcp_aceptc_test 12407
 E: mksh: tcp_aceptc_test: inaccessible or not found
 # tcp_accept_test 12402   ->  # tpc_accept_test 12402
