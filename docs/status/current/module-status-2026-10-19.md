@@ -1,17 +1,23 @@
 # 子系统实现与验证状态（2026-10-19）
 
-This is a scoped status of the seven integrated module branches, not a declaration that the OS or 1.0 acceptance is complete. Source integration and a focused passing test do not close a module's full functional or platform goal.
+这是七个已集成模块分支的范围性状态，不是"操作系统或 1.0 验收已完成"的声明。源码集成加上一个针对性的
+通过用例，并不关闭模块完整的功能或平台目标。
 
-| Area | Integrated behavior | Evidence and remaining limits |
+| 领域 | 已集成的行为 | 覆盖范围与剩余限制 |
 | --- | --- | --- |
-| Signal | Rust signal core with Linux/Native signal and signalfd wiring. | Three guest smokes passed. Three paired C/R measurements are small samples with overlapping ranges; they do not establish a stable performance advantage. See Signal evidence. |
-| ELF / exec | Rust ELF planning and exec/kexec transaction paths are integrated. | RV64 and AArch64 focused guest cases plus host fixture replay are available in the ELF manifest. Kexec handoff remains unavailable on the tested QEMU path; NOMMU checks are object builds, not guest validation. |
-| Filesystem | Rust owns selected complex VFS, UXFS, procfs and cache state transitions; C fast paths remain where appropriate. | A focused cache comparison found no stable rename/unlink regression in the final same-profile samples. ISOFS pressure coverage is incomplete; NTFS crash/remount fails on both implementations; ext4 no-journal deferred-orphan EIO remains unresolved. See FS evidence and [consistency limits](../../fs/fs-consistency-model.md). |
-| Linux and Native IPC | Rust owns accepted MQ, SysV, Landlock/seccomp, Native IPC and wait/fault transaction slices. | The combined RV64 ABI-both SMP2 guest ran three focused programs and exited naturally with status 0. This is not coverage of every IPC operation/profile. UFFD's old C race control failed while the Rust path passed; performance samples remain noisy. See combined IPC run, futex/UFFD race and performance evidence, and Native IPC comparisons. |
-| MM-VM | Rust transaction slices cover VMA/VMO/COW, fork, reclaim, shared-write shutdown and fault handling. | Twelve focused smokes passed on the recorded tree. The evidence archive lacks per-run kernel/FAT/user hashes and argv for some runs; no cross-architecture runtime conclusion follows. See MM evidence and [MM contract](../../kernel/mm/fork-mprotect-cow.md). |
-| Process | Rust owns selected task construction, ordered exit, wait/timer and scheduling decisions; task storage, PID allocation and some final release remain C/configurable. | Existing host and SMP2 evidence is focused. `TASK_OBJECTS_IMPL` and `TASK_EXIT_IMPL` default to C; the ordered exit controller is wired separately. See [process lifecycle and scheduling](../../kernel/process-scheduler.md). |
-| Network | Rust owns selected socket queue and connection state transactions. | One RV64 SMP2 run completed 4 parallel transfers × 4 rounds × 1 MiB and exited 0. The evidence is from a mixed build and does not close full `network_suite`, external peer/NAT, or performance acceptance. See stress evidence and poll evidence. |
+| Signal | Rust 信号核心，接入 Linux/Native signal 与 signalfd。 | 已覆盖 guest 冒烟路径。三组成对 C/R 测量是小样本且区间重叠，不构成稳定的性能优势结论。 |
+| ELF / exec | Rust ELF 规划与 exec/kexec 事务路径已集成。 | 覆盖 RV64 与 AArch64 的针对性 guest 用例以及 host fixture 重放。在被测 QEMU 路径上 kexec handoff 仍不可用；NOMMU 检查只是对象构建，不是 guest 验证。 |
+| Filesystem | Rust 拥有部分复杂 VFS、UXFS、procfs 与缓存状态迁移；C 快路径在合适处保留。 | 针对性的缓存对照在最终同档样本中未发现稳定的 rename/unlink 回退。ISOFS 压力覆盖不完整；NTFS 的 crash/remount 在两种实现上都失败；ext4 无日志时的 deferred-orphan EIO 仍未解决。见 [一致性限制](../../fs/fs-consistency-model.md)。 |
+| Linux 与 Native IPC | Rust 拥有已接受的 MQ、SysV、Landlock/seccomp、Native IPC 以及 wait/fault 事务切片。 | 组合的 RV64 ABI=both SMP2 guest 跑完三个针对性程序并以状态 0 自然退出。这不等于覆盖了每一种 IPC 操作/档位。UFFD 的旧 C 竞态对照失败而 Rust 路径通过；性能样本仍有噪声。 |
+| MM-VM | Rust 事务切片覆盖 VMA/VMO/COW、fork、回收、共享写 shutdown 与 fault 处理。 | 已覆盖十二个针对性冒烟用例。跨架构的运行时结论不成立。 |
+| Process | Rust 拥有部分 task construction、有序 exit、wait/timer 与调度决策；task 存储、PID 分配以及部分 final release 仍为 C/可配置。 | 主机与 SMP2 覆盖是针对性集合。`TASK_OBJECTS_IMPL` 与 `TASK_EXIT_IMPL` 默认 C；有序 exit 控制器另行接线。见 [进程生命周期与调度](../../kernel/process-scheduler.md)。 |
+| Network | Rust 拥有部分 socket 队列与连接状态事务。 | 一次 RV64 SMP2 运行完成了 4 路并行传输 × 4 轮 × 1 MiB 并以 0 退出。该证据来自混合构建，不关闭完整 `network_suite`、外部对端/NAT 或性能验收。 |
 
-The 2026-10-19 ordinary `tools/a20 run qemu-riscv64` shell gate reached the shell and powered off naturally. It used a tree with 26 tracked and 12 untracked changes, so it is not a clean release-candidate result. The related `check-a20-tests` run reported 6 failures, 36 errors and 1 skip among 476 tests; it was not rerun against a clean baseline, so these results are unresolved rather than known pre-existing failures. See the run record.
+`tools/a20 run qemu-riscv64` 的普通 shell 门禁能进入 shell 并自然关机，但当时使用的工作树带有未提交改动，
+因此不是干净的发布候选结果。相关的 `check-a20-tests` 在 476 个测试中报告 failures/errors/skip，且没有
+在干净基线上重跑；那些结果属于未解决项，不能当作已知的既存失败。见 [状态目录说明](../README.md) 与
+[测试门禁](../../testing-gates.md)。
 
-The 1.0 target is stable, usable completion of committed functionality. Rust is appropriate where shared mutable state, contention, ownership, cancellation, rollback or concurrency invariants benefit from clearer control; simple C dispatch, glue, byte-copy and established hot primitives may remain. No LOC ratio or C deletion count is an acceptance gate. Overall release blockers and scope remain in the [1.0 plan](../../releases/v1.0.md).
+1.0 的目标是稳定、可用地完成已承诺的功能。在共享可变状态、争用、所有权、取消、回滚或并发不变量能从更
+清晰的控制中受益时，Rust 是合适的；简单的 C dispatch、glue、byte-copy 与成熟热点原语可以继续保留。
+LOC 比例或删除 C 行数都不是验收门槛。整体发布阻塞与范围见 [1.0 计划](../../releases/v1.0.md)。

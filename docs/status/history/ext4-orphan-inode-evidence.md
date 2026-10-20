@@ -1,15 +1,30 @@
-# Ext4 unlinked inode integrity gap
+# Ext4 已 unlink inode 的完整性缺口
 
-The four-filesystem guest previously passed its service-level assertions, but post-run `e2fsck -fn` returned 4 for both C and Rust UFSD profiles. This is a real ext4 integrity defect, not a service-language difference.
+四文件系统 guest 的服务级断言曾通过，但运行后的 `e2fsck -fn` 在 C 与 Rust 两个 UFSD 档位上都不通过。
+这是真实的 ext4 完整性缺陷，不是服务语言差异。
 
-A stage-isolated reproducer on the same clean ext4 seed identifies the first failing operation. The guest creates and reads back `EXT4BIN.BIN` (8 KiB), renames it to `RENAMED.BIN`, then unlinks it. The `created` and `renamed` images pass `e2fsck -fn`; the `unlinked` image fails with `Unattached inode 13`. The C and Rust UFSD runs produced byte-identical unlinked ext4 images (SHA-256 `9cafaf8b4bf7a62f4b10fc16134fe568ac5ca7075dfcfbe844bd57d5b8b5fdde`). Each guest exited 0 and printed all three stage markers. The defect is present immediately at unlink, before service death, remount, or backend teardown.
+在同一份干净 ext4 种子上做阶段隔离复现，可以定位第一个失败操作：guest 创建并读回 `EXT4BIN.BIN`
+（8 KiB），重命名为 `RENAMED.BIN`，然后 unlink。`created` 与 `renamed` 两个阶段的镜像都能过 `e2fsck -fn`；
+`unlinked` 阶段的镜像报 `Unattached inode 13`。C 与 Rust UFSD 运行产生的 unlinked ext4 镜像逐字节相同。
+每个 guest 都以 0 退出并打印了三个阶段标记。缺陷在 unlink 当下就存在，早于服务死亡、重挂载或后端拆除。
 
-The orphan inode has mode `0100644`, link count 1, size 8192, block count 16 sectors, extent flag `0x80000`, and data blocks 2201–2208. The root directory contains only `hello.txt` and `lost+found`; inode 13 has no directory entry. Its generation/version and timestamps are zero, as is deletion time. `e2fsck` calls it unattached and offers to connect it to `lost+found`. The clean seed has no inode 13. These fields and each stage's filesystem check are preserved in `<home>/a20os-jbd2-txn-build/evidence/ext4-orphan-stages/` (`*.inode13.log`, `*.e2fsck.log`, `*.sha256`, and guest logs).
+该孤儿 inode 的 mode 为 `0100644`、链接计数 1、大小 8192、块计数 16 扇区、extent 标志 `0x80000`，
+数据块 2201–2208。根目录里只有 `hello.txt` 与 `lost+found`；inode 13 没有任何目录项。它的
+generation/version 与时间戳都是零，删除时间也是零。`e2fsck` 判定它未被挂接，并提议把它连接到
+`lost+found`。干净种子里没有 inode 13。
 
-The source path is `kernel/fs/diskfs/ext4_namei.c`: `ext4_inode_remove()` removes the directory entry and, when a cached vnode exists, marks it unlinked and returns without decrementing the on-disk `i_links_count` or recording the inode in ext4's orphan chain. Actual truncation and freeing is deferred to `ext4_release_vn()`. Vnode references can outlive the unlink, so that deferred cleanup is not a durable substitute for orphan tracking. The next implementation must preserve POSIX unlink-while-open semantics and make a crash/restart reclaim or recover the inode; do not repair test images with `e2fsck -fy` and count that as a pass.
+源码路径是 `kernel/fs/diskfs/ext4_namei.c`：`ext4_inode_remove()` 移除目录项，并在存在缓存 vnode 时把它
+标为 unlinked 后直接返回，既不减磁盘上的 `i_links_count`，也不把该 inode 记入 ext4 的 orphan 链。真正的
+截断与释放被推迟到 `ext4_release_vn()`。vnode 引用可以比 unlink 活得更久，因此这种延迟清理不能替代
+orphan 跟踪。下一版实现必须保留 POSIX 的 unlink-while-open 语义，并让崩溃/重启后能回收或恢复该 inode；
+不要用 `e2fsck -fy` 修好测试镜像然后算作通过。
 
-Inputs and source identities for the staged runs are recorded in `source-and-inputs.sha256` and `runtime-users.sha256` in the evidence directory. The latter records the extracted C and Rust service executables and the common guest client. Kernel SHA-256 is `d184898c60cd6c9f930413f66a24c3aa6e2d1f3b22ca854a16adb4599a8a5535`, clean ext4 seed SHA-256 is `a6cf026491543f96ec9071de2a6f0e4df8a4468435e7aeeef50d064980b4b2d3`, and the stage-capable guest client SHA-256 is `913b45a22822aedc91ce1fcec52c259bee0fff30c3dae7335d749139b484450f`.
+这是已确认、仍然开放的 v1.0 文件系统完整性要求。本记录证明缺陷及其触发方式，不宣称 orphan 恢复或清理
+已经实现。
 
-This is a confirmed open v1.0 filesystem integrity requirement. The evidence demonstrates the defect and its trigger; it does not claim orphan recovery or cleanup is implemented.
-
-The current mount guard handles the legacy `s_last_orphan`/`i_dtime` chain. Modern ext4 `orphan_file` is not that format: `EXT4_FEATURE_COMPAT_ORPHAN_FILE` is compat bit `0x1000`, and `EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT` is ro-compat bit `0x10000`. The latter must not be interpreted as incompat bit `0x10000` (which is encryption). A clean filesystem may retain the compatible `ORPHAN_FILE` feature while clearing `ORPHAN_PRESENT`; that state remains mountable. Until modern orphan-file replay is implemented, the driver rejects only `ORPHAN_PRESENT` in its proper superblock field. This is a safety boundary, not modern orphan-file support. No external-format fixture has yet been run against these corrected constants.
+当前挂载守卫处理的是遗留的 `s_last_orphan`/`i_dtime` 链。现代 ext4 的 `orphan_file` 不是这个格式：
+`EXT4_FEATURE_COMPAT_ORPHAN_FILE` 是 compat 位 `0x1000`，`EXT4_FEATURE_RO_COMPAT_ORPHAN_PRESENT` 是
+ro-compat 位 `0x10000`。后者绝不能被当作 incompat 位 `0x10000`（那是加密）。干净文件系统可以在清除
+`ORPHAN_PRESENT` 的同时保留兼容的 `ORPHAN_FILE` 特性，该状态仍可挂载。在现代 orphan-file 重放实现之前，
+驱动只在其正确的 superblock 字段里拒绝 `ORPHAN_PRESENT`。这是安全边界，不是现代 orphan-file 支持。
+目前还没有针对这些修正后常量的外部格式 fixture 运行过。
