@@ -76,7 +76,7 @@ EQ-WATCH / EQ-WAIT：watch 注册对象事件；wait 返回 pending 列表或阻
 
 ## 4. 活性（精简）
 
-定理 4.1（Event Wait 终止性） watch 活跃事件源 + 有限超时 → event_wait 有限时间返回。 定理 4.2（Channel 无死锁条件） 容量 > 0 且不同向操作同一端点 → 通信必然完成。 定理 4.3（无引用泄漏） 正常关闭 + endpoint 清理 → 无"无所有者孤儿对象"。 定理 4.4（公平性前提） 活性性质依赖公平调度假设（per-CPU EEVDF，见 `docs/eevdf-scheduler.md`）。 L1-L4（LTL 框架）：统一活性性质的形式化模板（07 §4.4）。
+定理 4.1（Event Wait 终止性） watch 活跃事件源 + 有限超时 → event_wait 有限时间返回。 定理 4.2（Channel 无死锁条件） 容量 > 0 且不同向操作同一端点 → 通信必然完成。 定理 4.3（无引用泄漏） 正常关闭 + endpoint 清理 → 无"无所有者孤儿对象"。 定理 4.4（公平性前提） 活性性质依赖公平调度假设（per-CPU EEVDF，见 `docs/kernel/eevdf-scheduler.md`）。 L1-L4（LTL 框架）：统一活性性质的形式化模板（07 §4.4）。
 
 ---
 

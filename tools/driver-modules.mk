@@ -80,7 +80,7 @@ EARLY_DRIVER_BLOBS := $(addprefix $(BUILD_DIR)/rootfs-drivers/,$(EARLY_DRVMOD_MO
 RUNTIME_DRVMOD_MODULES := $(filter-out $(EARLY_DRVMOD_MODULES),$(DRVMOD_MODULES))
 
 # Optional instance-driven runtime driver selection (tools/a20
-# [rootfs].drivers; see docs/instances.md).  Restricts which packages land in
+# [rootfs].drivers; see docs/dev/instances.md).  Restricts which packages land in
 # /lib/drivers; early DriverStore members are always built and embedded.
 # a20 validates the names against components/drivers.toml before make runs.
 ifneq ($(strip $(DRIVER_SELECTION)),)

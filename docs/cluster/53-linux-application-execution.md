@@ -117,9 +117,9 @@ freestanding 编译通过。重复运行测试会选择新的证据目录，保�
 - 准备后 world：`60d70873db5effc138ead43d2e9bf9bde7692f7c8c25e031d01a492b96c372f4`
 - 客户端内核：`6678d9c941ddb57fc7f943696b1f4b2607908918e558753463de245b587a8a7b`
 
-基础 world 已归档在 `evidence/minecraft-main-0aea57f5/source-world.tar.gz`，
+基础 world 已归档在 已删除的运行证据，
 补丁重建哈希验证通过，不再保存另一份完整 world。阶段源码、结果和文件哈希
-归档在 `evidence/application-exec-<commit>/manifest.json`。
+归档在 已删除的运行证据。
 
 物理多 MCU 的最终目标仍见 [24](24-single-system-minecraft.md)。本次交付统一
 应用管理入口的真实 Linux 程序执行和主机客户端证据；MCU 上的完整 Java 客户端

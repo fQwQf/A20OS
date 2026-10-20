@@ -79,7 +79,7 @@ NetSurf/curl；HTTP、带证书验证的 HTTPS 和实际网页渲染通过。
 - 构建流程：`a20 run` 本身就做完整构建与打包，**不需要先跑 `a20 build`**。
   过去「必须先 build」的真因是 `run` 会先 fsck 上一轮的无 journal world 镜像，
   而 `run-world-gui` 反正会重打包它；现在 world 实例启动前跳过 fsck（`tools/a20`
-  的 `_gate_qemu(check_image=...)`），`docs/instances.md` 有说明。world 镜像每次
+  的 `_gate_qemu(check_image=...)`），`docs/dev/instances.md` 有说明。world 镜像每次
   run 都从 522 个 apk 全量重装，所以 run 之后镜像「变脏」不会带到下一轮。
 - 「桌面只能加载鼠标」= `udevd` 在 bring-up 阶段 SIGSEGV → 没有 `ID_INPUT_*` →
   wlroots/libinput 拿不到输入设备直接退，只剩黑屏和光标。已加有界重启，修后

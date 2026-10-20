@@ -76,7 +76,7 @@ proc: 33335 16191822
 ```
 
 - 竞争高度集中于**互斥量争用时的 park/wake 协议**（`proc_park_prepare/commit/finish` 与 `proc_try_wake` 各自单独持 `proc_lock`）和**每次上下文切换的发布路径**（`sched()` 内联进 `idle_loop` 的 `spin_lock(&proc_lock)`）。
-- 结论：要消除 `proc_lock` 竞争，需要把 tokenized Park/Wake 状态机从单一全局锁改为按等待对象（wait queue / mutex / futex）分锁，并合并切换路径里 `sched()`/`context_switch` 的两次获取。这属于 `docs/eevdf-scheduler.md` 与既往性能审计明确警告的"无完整并行编译负载验证前不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式基准复测前可先量化收益，而不是靠猜测。
+- 结论：要消除 `proc_lock` 竞争，需要把 tokenized Park/Wake 状态机从单一全局锁改为按等待对象（wait queue / mutex / futex）分锁，并合并切换路径里 `sched()`/`context_switch` 的两次获取。这属于 `docs/kernel/eevdf-scheduler.md` 与既往性能审计明确警告的"无完整并行编译负载验证前不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式基准复测前可先量化收益，而不是靠猜测。
 
 ### 3.1 后续回合：切换路径两次 proc_lock 获取合并（已在 `fqwqf/performance-overhaul` 实现）
 

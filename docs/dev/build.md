@@ -1,20 +1,20 @@
 # 构建与运行指南
 
-本文记录当前混合 C/Rust 构建入口。各子系统按真实状态选择 C 或 Rust；Rust 已接管若干复杂对象生命周期、并发状态与回滚职责，简单 dispatch、glue、byte-copy 和成熟热点原语可保留在 C。1.0 的目标是完成已承诺功能并验证稳定性，不以 Rust 比例或删减 C 行数作为门槛。当前批次实现与验证概况见 [模块状态](status/current/module-status-2026-10-19.md)，完整发布条件见 [1.0 计划](releases/v1.0.md)。
-[1.0 平台范围](releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、
+本文记录当前混合 C/Rust 构建入口。各子系统按真实状态选择 C 或 Rust；Rust 已接管若干复杂对象生命周期、并发状态与回滚职责，简单 dispatch、glue、byte-copy 和成熟热点原语可保留在 C。1.0 的目标是完成已承诺功能并验证稳定性，不以 Rust 比例或删减 C 行数作为门槛。当前批次实现与验证概况见 [模块状态](../status/current/module-status-2026-10-19.md)，完整发布条件见 [1.0 计划](../releases/v1.0.md)。
+[1.0 平台范围](../releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、
 实例、CI 和测试矩阵已停止列入这两个历史目标；默认构建会明确拒绝它们。历史源码与
 实例保留供追溯。需要复现时，在干净 checkout 中切到 `v0.18`，再按各平台文档操作；
 不要把历史构建记录解读为当前支持承诺。
 
-A20OS 最常用的构建和运行命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](OS-Design.md)。
+A20OS 最常用的构建和运行命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](../OS-Design.md)。
 
 > 构建/运行/冒烟配置也可以用 `instances/` 下的 TOML 实例文件声明，
 > 通过 `tools/a20 run|build|debug|test <实例>` 驱动；逐架构的 `run-*`/`debug-*`/`smoke-*`
 > make 目标已是它的薄包装。字段参考、组件注册表与门禁说明见 [instances.md](instances.md)。
 
 > 把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见
-> [packaging/overview.md](packaging/overview.md)；CI 容器（可复现构建环境）见
-> [packaging/ci.md](packaging/ci.md)。
+> [packaging/overview.md](../packaging/overview.md)；CI 容器（可复现构建环境）见
+> [packaging/ci.md](../packaging/ci.md)。
 
 ## 环境准备
 
@@ -35,7 +35,7 @@ sudo apt-get install -y \
 注意两点：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
-- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出。历史复现说明见 [LoongArch32](platforms/loongarch32.md) 与 [PPC64LE](platforms/ppc64le.md)，须使用 `v0.18` 的干净 checkout。
+- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出。历史复现说明见 [LoongArch32](../platforms/loongarch32.md) 与 [PPC64LE](../platforms/ppc64le.md)，须使用 `v0.18` 的干净 checkout。
 - arm32：需要 `gcc-arm-linux-gnueabihf` 与 `linux-libc-dev-armhf-cross`（Debian/Ubuntu 有）；`tools/ci/Dockerfile` 会装交叉编译器。后者为 fastfetch 提供 ARM Linux UAPI 头文件。若只把交叉工具链解包到临时目录，可将 `FF_LINUX_UAPI_ROOT` 指向包含 `<triple>/include` 的根目录，例如 `make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`。ARMv7-M 另走 STM32 目标，工具链不同。
 - ARM32 musl 的 `time_t` 是 64 位，直接 syscall 回归 `timer_edge` 因此使用 `timer_settime64` / `timer_gettime64` 编号和同宽的 `itimerspec` 布局；不要把 32 位 `timer_*32` 编号与 64 位结构体混用。
 - Python：Makefile 默认调用 `python3`（Python 3.11 或更新版本，仅需标准库）。不需要 Conda，也不会因机器安装了 Conda 而自动切换解释器。可通过 `make PYTHON=/path/to/python3 ...` 显式指定其他解释器。
@@ -64,7 +64,7 @@ sudo apt-get install -y \
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为六架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译六个 hosted 架构的内核 bring-up 和用户态 | 完整活跃架构构建检查 |
 
-STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](../platforms/stm32f103-port.md)。
 
 ## 声明式构建配置（instances/ 与 components/trim.toml）
 
@@ -87,7 +87,7 @@ Makefile 之外的构建配置有两个声明式入口，日常应优先使用�
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
 - `NR_CPUS`: 默认 `1`；只有 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 的同名 QEMU virt 板列入已验证 SMP 白名单（出处：`components/trim.toml` 的 `smp-verified-qemu` 矩阵）。
-- `CONFIG_KERNEL_PREEMPT`: 默认 `1`（hosted 架构内核态抢占，机制见 `docs/process-scheduler.md` §4.1）；MCU profile（armv7m）固定关闭。设为 `0` 回到协作式内核。该开关参与 `BUILD_VARIANT`（构建目录带 `-preempt` 后缀），因此翻转它不会复用旧构建目录里的陈旧目标文件。
+- `CONFIG_KERNEL_PREEMPT`: 默认 `1`（hosted 架构内核态抢占，机制见 `docs/kernel/process-scheduler.md` §4.1）；MCU profile（armv7m）固定关闭。设为 `0` 回到协作式内核。该开关参与 `BUILD_VARIANT`（构建目录带 `-preempt` 后缀），因此翻转它不会复用旧构建目录里的陈旧目标文件。
 - `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`（出处：`components/trim.toml` 的 `nommu` 矩阵）。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
 - `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。

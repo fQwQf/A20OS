@@ -184,7 +184,7 @@ make ARCH=riscv64 ABI=linux run \
   EXTRA_QEMU="-append 'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'"
 ```
 
-实例清单里对应 `machine.extra_qemu`，见 [../instances.md](../instances.md)。
+实例清单里对应 `machine.extra_qemu`，见 [../dev/instances.md](../dev/instances.md)。
 
 **启动时不校验翻译器文件是否真的存在。** `xlator_config_init()` 跑在根文件系统挂载之前，无从校验；而挪到 exec 时校验等于把路径解析放回热路径。路径写错的表现是 exec 转发到翻译器时翻译器自己 `ENOEXEC`。
 

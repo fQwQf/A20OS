@@ -1,7 +1,7 @@
 # Development launch, VirtualBox image, and GDB entry points.
 #
 # The per-arch run/debug targets are thin compatibility wrappers around the
-# declarative instances in instances/*.toml (see docs/instances.md).  New
+# declarative instances in instances/*.toml (see docs/dev/instances.md).  New
 # configurations should be added as instance files and launched with
 # `tools/a20 run <instance>`; the generic variable-driven `run` target and
 # the *_impl targets below remain the execution engine shared by

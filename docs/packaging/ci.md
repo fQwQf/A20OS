@@ -25,7 +25,7 @@ workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner�
 - QEMU（riscv64/x86/arm）、镜像工具（mtools / dosfstools / e2fsprogs）、
   `fakeroot`、`ccache`、`openssl`、Python 3。
 
-依赖清单刻意与 [../build.md](../build.md) 的"环境准备"一节一一对应；
+依赖清单刻意与 [../dev/build.md](../dev/build.md) 的"环境准备"一节一一对应；
 **改动一边时必须同步另一边**。
 
 CI 的构建和 QEMU job 通过 `container:` 运行在这个镜像里；源码契约门禁和
@@ -234,7 +234,7 @@ Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages
 | `no such package` 且仓库明明有 | 索引签名不被信任会**静默丢弃整个仓库**。检查 keys-dir 是否传了**绝对路径**（apk 对相对 keys-dir 会因内部 chdir 而失效，mkrootfs 已代为绝对化，手工调用 apk 时注意） |
 | `unexpected end of file`（读包时） | 包不是 mka20pkg 产物：apk v2 的分段 tar 格式约束见 [apk-format.md](apk-format.md) |
 | 容器里 `git` 报 dubious ownership | 加 `git config --global --add safe.directory "$GITHUB_WORKSPACE"`（workflow 已含） |
-| loongarch64 工具链缺失 | 容器默认装 `gcc-loongarch64-linux-gnu`（Debian cross-ports）；个别快照期缺失时按 docs/build.md 用 Loongson 官方工具链 |
+| loongarch64 工具链缺失 | 容器默认装 `gcc-loongarch64-linux-gnu`（Debian cross-ports）；个别快照期缺失时按 docs/dev/build.md 用 Loongson 官方工具链 |
 
 ## 2026-10-08 远端 CI / Release 失败核对
 

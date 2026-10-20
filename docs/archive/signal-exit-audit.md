@@ -1,6 +1,6 @@
 # 信号、停止与退出协议审计
 
-> **冻结档案（历史里程碑）**：本文是信号/退出协议收口时的证明结构和回归项目快照，已归档不再随 HEAD 更新。文中的验收措辞只描述该里程碑；当前信号与退出协议以 [../process-scheduler.md](../process-scheduler.md) 和 `kernel/include/proc/` 头文件为准。使用约定见 [README.md](README.md)。
+> **冻结档案（历史里程碑）**：本文是信号/退出协议收口时的证明结构和回归项目快照，已归档不再随 HEAD 更新。文中的验收措辞只描述该里程碑；当前信号与退出协议以 [../kernel/process-scheduler.md](../kernel/process-scheduler.md) 和 `kernel/include/proc/` 头文件为准。使用约定见 [README.md](README.md)。
 
 `SIGNAL_EXIT_PROTOCOL_AUDIT`
 

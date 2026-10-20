@@ -1,7 +1,7 @@
 # impl-notes-preempt：内核抢占（CONFIG_KERNEL_PREEMPT）落地与实测
 
 实施：主会话规格定稿 + space-bunny 子代理分阶段实施（核心层 / 逐架构钩子 / 集成），
-主会话复核并修正三处（见 §5）。机制设计论证：`docs/process-scheduler.md` §4.1；
+主会话复核并修正三处（见 §5）。机制设计论证：`docs/kernel/process-scheduler.md` §4.1；
 锁语义叠加：`docs/roadmap/lock-serialization-split.md` §9。
 落地提交：`0d05c0726 feat: kernel preemption`、`b2d2dc8f3 fix: guard the JVM
 SIGSEGV register/object dumps behind __x86_64__`（合并进 main 于 `d1aa68c3c`）。

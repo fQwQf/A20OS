@@ -142,7 +142,7 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 ## 构建与运行
 
 ### 1. 环境准备
-需要本机安装活跃架构的交叉工具链（RISC-V/LoongArch64/AArch64/x86_64/ARM；LoongArch32 与 PPC64LE 已退出 1.0）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/build.md](docs/build.md) 的"环境准备"一节。
+需要本机安装活跃架构的交叉工具链（RISC-V/LoongArch64/AArch64/x86_64/ARM；LoongArch32 与 PPC64LE 已退出 1.0）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/dev/build.md](docs/dev/build.md) 的"环境准备"一节。
 
 ### 2. 编译内核
 
@@ -162,7 +162,7 @@ tools/a20 run xfce-x86_64          # 图形桌面实例
 tools/a20 debug qemu-riscv64       # GDB 调试实例
 tools/a20 test smoke-riscv64       # 冒烟测试实例
 ```
-实例字段参考、组件注册表与门禁详见 [docs/instances.md](docs/instances.md)。
+实例字段参考、组件注册表与门禁详见 [docs/dev/instances.md](docs/dev/instances.md)。
 
 其他架构：
 ```bash

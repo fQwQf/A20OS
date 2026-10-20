@@ -246,7 +246,7 @@ check-abi-smoke-gate:
 
 # EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
 # before an upgraded musl/sbase/mksh (or other imported userland) is
-# accepted -- see docs/external-dependencies.md.
+# accepted -- see docs/dev/external-dependencies.md.
 .PHONY: check-upgrade-userland-smokes
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
 

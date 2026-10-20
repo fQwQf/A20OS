@@ -82,7 +82,7 @@ RISC-V 等目标需要 `-bios default` 和 `-global virtio-mmio.force-legacy=fal
 
 `run-stm32f103-qemu` 和 `flash-stm32f103-xuanwu` 仍引用加入 `BOARD` 前的旧产物目录，与实际 `BUILD_DIR` 不一致。安装 QEMU/OpenOCD 或重新连接 CMSIS-DAP 不能修复这个 launcher 问题。
 
-先只使用 `make stm32f103-bringup` 或 `make stm32f103-xuanwu` 构建固件，并按 [STM32F103 移植说明](platforms/stm32f103-port.md) 核对实际产物。修复 Makefile recipe 前，不要把自动运行或烧录目标作为通过证据。
+先只使用 `make stm32f103-bringup` 或 `make stm32f103-xuanwu` 构建固件，并按 [STM32F103 移植说明](../platforms/stm32f103-port.md) 核对实际产物。修复 Makefile recipe 前，不要把自动运行或烧录目标作为通过证据。
 
 ### 5. 用户态编译失败
 
@@ -134,7 +134,7 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 - `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
 - native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
 
-权限（[Native ABI 安全模型](native-abi/06-security.md) §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
+权限（[Native ABI 安全模型](../native-abi/06-security.md) §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
 
 验证：`smoke-native-debug`（riscv64 QEMU，`/bin/native-debug-rv`）。
 

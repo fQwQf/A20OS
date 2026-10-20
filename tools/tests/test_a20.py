@@ -1,7 +1,7 @@
 """Regression tests for the a20 instance toolchain.
 
 Stdlib unittest on purpose: `tools/a20` declares zero third-party dependencies
-(PEP 723 `dependencies = []`) and docs/instances.md promises stdlib only, so a
+(PEP 723 `dependencies = []`) and docs/dev/instances.md promises stdlib only, so a
 pytest requirement would quietly break that promise for every contributor.
 
 Most tests are hermetic -- they write a manifest into a temp dir and assert the
@@ -160,7 +160,7 @@ class TestRetiredArchitectures(unittest.TestCase):
 
 
 class TestDeriveMakeVars(unittest.TestCase):
-    """The field -> make-variable contract documented in docs/instances.md.
+    """The field -> make-variable contract documented in docs/dev/instances.md.
 
     Each case pins one documented mapping.  A silent rename here is invisible
     otherwise: the instance still validates, the variable just stops being set,
@@ -200,7 +200,7 @@ class TestDeriveMakeVars(unittest.TestCase):
     def test_bool_kernel_flags(self) -> None:
         """CONFIG_SWAP is Kconfig-style y/n; the make-style flags are 1/0.
 
-        The split is deliberate and documented (docs/instances.md notes swap as
+        The split is deliberate and documented (docs/dev/instances.md notes swap as
         y/n), so it is pinned here rather than normalised -- changing one
         spelling silently disables the feature.
         """
@@ -381,7 +381,7 @@ class TestParseInstance(unittest.TestCase):
         self.assertIn("bogus", str(cm.exception))
 
     def test_unknown_section_key_is_rejected(self) -> None:
-        """docs/instances.md documented gui.frame_window and rootfs.gui_size_mb,
+        """docs/dev/instances.md documented gui.frame_window and rootfs.gui_size_mb,
         which the parser rejected as unknown keys.  Rejecting unknown keys is
         the behaviour we want; this test pins that a *new* key is caught too."""
         with self.assertRaises(InstanceError) as cm:

@@ -481,15 +481,15 @@ help:
 	  '    tools/a20 debug <instance>     boot an instance with a GDB server' \
 	  '    tools/a20 test <instance>      run an instance smoke' \
 	  '    tools/a20 check                validate instances/, arch matrix, registries' \
-	  '    docs/instances.md              instance fields and the component registry' \
+	  '    docs/dev/instances.md              instance fields and the component registry' \
 	  '' \
 	  '  Boards and MCU' \
 	  '    make BRINGUP=1 run-<arch>      kernel-only bring-up variant' \
 	  '    make vf2-sdcard                VisionFive 2 SD card' \
 	  '    make stm32f103-bringup         STM32F103 firmware (64 KiB flash)' \
 	  '' \
-	  'Docs: docs/build.md (build), docs/testing-gates.md (gates),' \
-	  '      docs/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
+	  'Docs: docs/dev/build.md (build), docs/testing-gates.md (gates),' \
+	  '      docs/dev/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
 
 # ================================================================
 # Build paths and userspace artifacts

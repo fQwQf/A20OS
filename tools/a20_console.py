@@ -7,7 +7,7 @@ expected output.  `a20 deploy` does that after programming the board.
 Two design points worth stating.
 
 The serial port is spoken with termios/fcntl/select from the standard library.
-`tools/a20` declares zero third-party dependencies and docs/instances.md
+`tools/a20` declares zero third-party dependencies and docs/dev/instances.md
 promises stdlib only, so pulling in pyserial to set six flags would have been
 the wrong trade for a tool every contributor runs.
 

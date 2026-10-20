@@ -151,7 +151,7 @@ extern int proc_task_pid(const void *task);
  *   __switch.  context_switch_locked() panics on a nonzero count, so a switch
  *   under a held lock fails loudly instead of corrupting the counter.  Waiting
  *   for a lock does NOT raise the counter -- a spinner stays a legal
- *   switch-out target.  See docs/process-scheduler.md §4.1.
+ *   switch-out target.  See docs/kernel/process-scheduler.md §4.1.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in

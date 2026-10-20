@@ -20,7 +20,7 @@ git checkout -b fix/<简短描述>
 
 ## 2. 本地构建
 
-先确认能编译并运行。详细命令见 [docs/build.md](build.md)。
+先确认能编译并运行。详细命令见 [docs/dev/build.md](dev/build.md)。
 
 ```bash
 make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
@@ -194,10 +194,10 @@ CI 通过后，维护者会进行代码审查。请根据评论修改，并确�
 
 ## 7. 提问
 
-有问题请先查看 [docs/testing-gates.md](testing-gates.md) 和 [docs/build.md](build.md)。若仍未解决，请创建 GitHub Issue，标签选 `question`，并附上相关命令和日志。
+有问题请先查看 [docs/testing-gates.md](testing-gates.md) 和 [docs/dev/build.md](dev/build.md)。若仍未解决，请创建 GitHub Issue，标签选 `question`，并附上相关命令和日志。
 
 ## 注意
 
-- 不要直接修改 `docs/testing-gates.md` 或 `docs/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
+- 不要直接修改 `docs/testing-gates.md` 或 `docs/dev/external-dependencies.md` 中的契约字符串，除非你的改动确实触及这些契约。
 - 不要把 `ALLOW_UNVERIFIED_SMP=1` 作为默认门禁参数。只有 RISC-V64、AArch64、LoongArch64 和 x86_64 的同名 QEMU virt 板在 `Makefile` 的 SMP 白名单中；其他平台仅可在专门处理 SMP bring-up 的变更中使用该开关。
 - 提交前请执行 `make clean` 再运行一次关键门禁，避免旧产物造成误判。

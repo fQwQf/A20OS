@@ -11,7 +11,8 @@
 
 ## 文档范围与权威性
 
-- 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[dev/build.md](dev/build.md)、[dev/instances.md](dev/instances.md)、[kernel/process-scheduler.md](kernel/process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- 目录分工：根目录只放入口文档（本页、贡献指南、架构总览、测试门禁与致谢/许可声明）；`dev/` 放构建、运行、调试与外部依赖；`kernel/` 放核心内核参考（调度、内存管理、Linux ABI 细节、架构特性）；其余按子系统分目录（`drivers/`、`fs/`、`net/`、`graphics/`、`native-abi/`、`cluster/`、`hypervisor/`、`platforms/` 等）。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
 - 状态与进度文档：`status/` 是进度、已知问题、子系统实现状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
@@ -34,8 +35,8 @@
 如果你准备第一次看代码、改 bug 或者提交补丁：
 
 - [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
-- [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
-- [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
+- [dev/instances.md](dev/instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
+- [kernel/process-scheduler.md](kernel/process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
 - [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、实现选择与接口冻结
 - [releases/v1.0-validation.md](releases/v1.0-validation.md)：可重建参照、行为验收、性能测量与发布阻塞
@@ -91,7 +92,7 @@
 - [hybrid-kernel/02-mainstream-plan.md](hybrid-kernel/02-mainstream-plan.md)：与主流混合内核的差距与演进方向
 - [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)：用户态文件系统宿主（uxfs 代理 + ufsd 多后端：fat/ext4/iso9660/ntfs-ro）
 - [status/current/hybrid-kernel-status.md](status/current/hybrid-kernel-status.md)：能力与边界清单
-- [process-scheduler.md](process-scheduler.md)：进程生命周期、per-CPU runqueue、持久抢占和阻塞协议
+- [kernel/process-scheduler.md](kernel/process-scheduler.md)：进程生命周期、per-CPU runqueue、持久抢占和阻塞协议
 - [native-abi/00-overview.md](native-abi/00-overview.md)：Native ABI 设计概览
 - [native-abi/01-types.md](native-abi/01-types.md)：基础类型与 syscall 参数结构
 - [native-abi/03-handle.md](native-abi/03-handle.md)：句柄模型与对象类型
@@ -136,8 +137,8 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 
 ## 当前契约与边界记录
 
-- [mm-fork-mprotect-cow.md](mm-fork-mprotect-cow.md)：fork、COW 与 `mprotect` 的当前锁和帧引用契约，以及隔离回归范围。
-- [aarch64-fex-preconditions.md](aarch64-fex-preconditions.md)：AArch64 auxv 与保护提示的接口审计范围；明确哪些证据尚不能推出 FEX 支持。
+- [kernel/mm/fork-mprotect-cow.md](kernel/mm/fork-mprotect-cow.md)：fork、COW 与 `mprotect` 的当前锁和帧引用契约，以及隔离回归范围。
+- [kernel/arch/aarch64-fex-preconditions.md](kernel/arch/aarch64-fex-preconditions.md)：AArch64 auxv 与保护提示的接口审计范围；明确哪些证据尚不能推出 FEX 支持。
 
 ## 研究与项目背景
 
@@ -148,7 +149,7 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 - [status/README.md](status/README.md)：状态、进度、已知问题、验证记录、测量数据与运行证据的收录规则与索引
 - [status/current/server-readiness.md](status/current/server-readiness.md)：面向服务器部署的当前能力边界、结构性限制与阻塞项排序
 - [security/hardening.md](security/hardening.md)：安全加固状态，含「诚实性原则（fail-closed）」
-- [external-dependencies.md](external-dependencies.md)：外部依赖与协议说明
+- [dev/external-dependencies.md](dev/external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：第三方组件许可证集中声明
 - [archive/](archive/)：历史里程碑的审计快照（冻结档案）

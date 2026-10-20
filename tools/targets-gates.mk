@@ -73,7 +73,7 @@ check-shared-fabric-portability:
         check-a20-tests check-pt-mcs-preempt-window check-proc-wait-window \
         check-tg-leader-lifetime
 
-# Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
+# Instance/manifest gates (docs/dev/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
 # at least one valid instance, so the matrix and instances/ cannot drift.
 check-instances:

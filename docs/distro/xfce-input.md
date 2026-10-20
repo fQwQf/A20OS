@@ -54,7 +54,7 @@ QEMU GTK、4 CPU/4 GiB、virtio-gpu/virgl，使用生产 XFCE 镜像快照：
 `input-production-filemanager.png`、`input-drag-confirmed-{start,end}.png`、
 `input-repeat-shortcut.png`，以及 `input-repeat-{x86,rv}.log`、
 `input-usb-final.log`、`input-user-driver-auto.log`、`fatdir-smoke.log`。
-启动性能的实现与系统调用基准见 `docs/x86_64-cpu-id.md`。
+启动性能的实现与系统调用基准见 `docs/kernel/arch/x86_64-cpu-id.md`。
 
 ## ext4 配置与存档完整性
 
