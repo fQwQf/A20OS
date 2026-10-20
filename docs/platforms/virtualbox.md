@@ -74,11 +74,3 @@ tools/a20 package vbox-iso-x86_64
 统一形态的 UEFI 直接启动磁盘见 [VirtualBox x86_64 运行与验收手册](virtualbox-x86_64.md#直接启动磁盘镜像)，该形态目前停在 `System ready`。
 
 硬件日志至少应包含 ACPI MCFG/ECAM、目标 PCI ID、BAR、driver ready、对应类消费者（mount/lwIP/framebuffer/input）的成功信息。不能只以桌面出现或 shell 启动作为驱动成功证据，因为兼容设备或恢复路径可能掩盖目标驱动未绑定。
-
-## 已知限制
-
-- ARM64 只支持 ACPI segment 0 的首个、低于 4 GiB 且已映射 ECAM allocation。
-- PCI interrupt routing/MSI 尚未完整，多个设备使用轮询。
-- class remove 已有下线与在途调用排空；模块签名、运行时 unload 和完整热拔插流程尚未完成。
-- VirtIO-SCSI、E1000、VMSVGA、xHCI 当前各使用静态单实例或有限实例存储。
-- default display 移除后不会自动提升备用 GPU；input devfs 是聚合节点。

@@ -180,7 +180,7 @@ syspath 不一致（devfs + sysfs）。
 
 修法是把「最后一个 put」从临界区里摘出来：`mm_seg_put()` 不再就地释放，只入全局队列
 `mm_seg_release_defer()`，由 `mm_vma_flush_deferred()` 末尾统一排空（它的所有调用点都在可睡眠
-上下文，也正是 `docs/roadmap/single-level-mm-model.md` 里「绝不跨 `vma_release()`」那条既有契约）。
+上下文，也正是 `docs/status/history/mm-single-level-migration-log.md` 里「绝不跨 `vma_release()`」那条既有契约）。
 修后同一批验收连跑 8–13 分钟，0 PANIC / 0 `[YIELD-BUG]`，修前稳定在 ~11 秒。
 
 ### x86_64 桌面组件随机 SIGSEGV

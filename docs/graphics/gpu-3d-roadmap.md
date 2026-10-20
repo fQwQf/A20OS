@@ -245,36 +245,6 @@ id 固定。3 个 property、2 个 blob。GEM 对象上限 64，framebuffer 上�
   永远广告一个 1024x768，与宿主窗口无关；现在去查询，零值/无头回报
   时才回落到旧值。
 
-#### 本轮（`feat/graphics-3d-completion`）追加
-
-- **capset 路径有一个内核堆泄露，且顺带截断一切超过 4 KiB 的 capset。**
-  `virtio_gpu.c` 的 `virtio_gpu_get_capset()` 曾用固定 4096 字节的栈缓冲做
-  DMA 接收，并 `if (rsz > sizeof(resp)) rsz = sizeof(resp);` **静默夹断**；
-  真正拷进调用者缓冲的只有 `rsz - sizeof(hdr)` 字节。但 `drm.c` 的
-  `drm_virtgpu_get_caps()` 允许用户态要 1 MiB，用 **`kmalloc`（不清零）**
-  分配，然后 **`copy_to_user(c.addr, blob, c.size)` 把整个请求长度拷出去**。
-  两者相乘就是：用户态传 `c.size = 1 MiB` 能读回约 1 MiB **未初始化的内核
-  堆**。已改为——先问 `GET_CAPSET_INFO` 拿到 host 真实的 capset 大小，据此
-  决定传输长度（不再有夹断，也不再有写进 4 KiB 的常量）；`get_capset` 增加
-  `out_len` 回报实际写出的字节数；`drm.c` 改用 **`kcalloc`**，且只 `copy_to_user`
-  那 `out_len` 个字节，并把真实大小写回 `c.size`。
-  顺带：`drm.c` 那一层的上限 1 MiB 现在也有驱动侧
-  `VIRTIO_GPU_MAX_CAPSET_BYTES` 兜底，坏的 host 回答不能把一次能力查询变成
-  无上限 `kmalloc`。
-- **`CONTEXT_INIT` 此前把参数丢掉了。** `ctx_set_params` 是 `num_params` 个
-  条目的**数组**，旧代码只读了一个 `struct drm_virtgpu_context_set_param`
-  然后 `(void)p` 丢掉。于是 Mesa 选 capset 2 却拿到 capset 1 的协议，且**没有
-  任何报错**。现在按 `num_params` 读整个数组，认下
-  `VIRGLPARAM_CAPSET_ID` / `VIRGLPARAM_CAPSET_VERSION`。
-  另外 host 是按 **index** 寻址 capset 而 `CONTEXT_INIT` 给的是 **id**
-  （index 0 是 capset 1，index 1 是 capset 2），所以 `GET_CAPS` 现在用
-  `GET_CAPSET_INFO` 表把 id 反解回 index；直接假设 `index == id` 会安静地
-  返回一个与请求不同的协议。
-- **`MODE_GETGAMMA` 此前 `return 0` 而完全不写出参。** `drm_crtc_gamma` 是
-  出参，不写就等于把用户栈上残留的内容交给调用方（wlroots 会读它）。现在回
-  一个平坦 ramp。（顺带 `-Werror` 抓到我自己先写成 `0x10000`——gamma 是 16 位，
-  正确值是 `0xffff`。）
-
 ### 4.3 VIRTGPU 传输层已可双向验证
 
 `tools/a20 test smoke-gpu3d-riscv64` 的实测输出：
@@ -862,26 +832,6 @@ renderer 前置条件已清除，但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_V
 （NVIDIA EGL 下静默降级为 2D；强制 Mesa EGL 则 `eglInitialize failed`）。
 完整判据表与下一步见 §5.1。
 
-### 本轮（`feat/graphics-3d-completion`）的验证记录
-
-宿主：`libvirglrenderer1 1.1.0-2`（发行版包），`DISPLAY=:0`，X11 + DRI 可用，
-QEMU 带 virgl 编译。工作目录：`.worktrees/graphics-3d`。
-
-| 结论 | 命令 | 结果 |
-|---|---|---|
-| 3D 门禁**不再假绿** | `tools/a20 test smoke-gpu3d-riscv64` | **FAIL（预期）**。真实 CLEAR 流被 host 接受，但 4096/4096 像素未变 → SKIP；`expect[]` 现在要求 `pixel readback ok`，因此红。旧占位流在这里报的是 PASS |
-| 反向用例仍能失败 | 同上 + `gpu_3d = false` 的实例副本 | FAIL（exit 1）：`virtio-gpu 2D only (no VIRGL feature)` → `SKIP 2D-only device` → 7/7 标记缺失 |
-| 编码被 host 接受 | 同上，guest 日志 | `EXECBUFFER accepted a 76 byte clear stream` |
-| 无内核回归 | `tools/a20 test smoke-riscv64` / `smoke-abi-linux` | 均 PASS（`SYSCALL_SMOKE: PASS`） |
-| DRM UAPI 门禁未回归 | `make check-drm-abi` | 48 个 ioctl 号匹配、6 个结构体布局匹配 |
-| 四架构可编译 | `make ARCH={riscv64,x86_64,loongarch64,aarch64} kernel-only` | 四个主线架构均 OK |
-| drvmod 变体可编译 | `... DRIVER_DEPLOYMENT=generic` | OK |
-| capset 泄露已修 | 代码审阅 + `check-drm-abi` | 见 §4.2 新增条目 |
-
-**本轮没有拿到的东西**（不要在别处声称）：像素一致性在本机**无法判定**，
-因为 host renderer 建不出离屏 GL context（§7.2 有源码级因果链）。
-
-
 ## guest 实测：llvmpipe 可用，virgl attach 失败（已验证）
 
 在 xfce guest 内（virtio-gpu-gl + `gtk,gl=on`，不挂网卡以避开 pbuf panic）运行
@@ -917,7 +867,6 @@ OpenGL core profile version: 4.5 (Core Profile) Mesa 25.2.7
 - 默认 EGL 驱动是 ZINK（Vulkan），在本 guest 里
   `vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`，导致 dri2 screen
   创建失败、回落 surfaceless。llvmpipe 仍然可用，但这是绕路而非正常路径。
-
 
 ## 更正：compositor 其实是正常的（此前结论是我的测量事故）
 

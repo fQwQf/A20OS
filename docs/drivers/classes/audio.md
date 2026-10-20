@@ -56,13 +56,6 @@ virtio-sound 匹配协议 device ID 25，同时支持 VirtIO-MMIO、modern PCI `
 
 controlq 串行执行 SET_PARAMS、PREPARE、START、STOP 和 RELEASE。txq 使用八个驱动自有的 4 KiB DMA period；每个请求由只读 stream header、只读 interleaved PCM 和可写 status 组成。用户缓冲区和内核栈都不会直接暴露给设备。驱动先预缓冲两个 period 再 START；DRAIN 提交最后一个短 period、等待所有 TX completion，然后 STOP/RELEASE，使下一次 write 从干净状态重新 PREPARE。STOP 在取得 mutex 前递增 generation，正在等待空闲 descriptor 的 write 会返回 `EINTR`。
 
-## 当前限制
-
-- 每个 controller 只有一个全局 playback stream；尚未提供多客户端混音或 per-open session。
-- 不支持 capture、音量控制、mixer、动态采样率或除 S16_LE stereo 之外的格式。
-- HDA ring 和 virtio-sound completion 目前均由 write/drain 路径轮询。HDA 尚未启用 period IRQ；若生产者停止时间超过整个 ring，硬件可能在下一次 refresh 前重放旧数据。
-- QEMU RISC-V64 使用 coherent DMA 假设；移植到非一致性缓存硬件前必须实现真实的 `dma_sync_for_device()`。
-
 ## 平台与 QEMU
 
 `make run-world-gui PKG_WORLD=xfce` 默认挂载 QEMU `intel-hda` 与 `hda-duplex`。设置 `QEMU_GUI_AUDIO_DEVICE=virtio` 后，RISC-V64 改用 MMIO `virtio-sound-device`，x86_64 和 LoongArch64 改用 `virtio-sound-pci`。宿主 backend 由 `QEMU_GUI_AUDIO_DRIVER` 选择，Linux 默认 `pa`，也可使用 `pipewire`、`alsa`、`sdl` 或 `none`。

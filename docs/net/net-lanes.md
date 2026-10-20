@@ -23,43 +23,6 @@
 > 全部实现的回归结果。下方只记录本轮明确执行的 host-forward 并发门禁；它不代表
 > 其他网络 smoke 或整体验收通过。
 
-### 当前并发切片的外部收包验证（2026-10-08）
-
-首轮 N=4 外部 host-forward 收包曾暴露端口字节序不一致：sockaddr 与 raw wire 端口是
-network byte order，lane hash 需要 host-order 端口；旧路径把 network-order 值直接用于
-hash，可能将 socket/PCB 与入站流分派到不同 lane。修复将 sockaddr 和 raw wire 端口转为
-host order 后再计算 lane；PCB 中的端口本来就是 host order。该失败样本作为 N=4 路由回归
-证据保留，不应只看最终摘要。
-
-`smoke-net-lanes-hostfwd` 最终运行通过：日志分别为
-`.kernel-build/smoke/net-lanes-hostfwd-n1-riscv64.log` 与
-`.kernel-build/smoke/net-lanes-hostfwd-n4-riscv64.log`，最终门禁汇总见
-`/tmp/a20-recovery-logs/lwip-hostfwd-final.log`。两档各跑四条外部 TCP 流，
-逐流 digest 均为 `0b824eec9801a325`，host 汇总为 `2e093bb260068c94`。N=4 报告
-`core_parallel peak_active_lanes=2 probe_hits=406 inputs=107,102,92,105 timers=89,89,89,89`，
-说明该探针观测到两个 lane 同时活跃；四条流分别分配到 lane `2,3,0,1`，但这个样本
-没有要求四个 lane 同时活跃。它不是吞吐或加速比指标。probe 为 opt-in，抽样前 64 个热
-TCP 调用并以 20 ms 为并行等待上限，默认关闭。此验证只覆盖该 host-forward 测试与该
-并发探针，不代表其他网络门禁均通过。
-
-最后核实：阶段 A–E **均已落地**（按落地顺序）：
-阶段 A（`kernel/include/net/net_lane.h`、`kernel/net/net_lane.c`、`net_socket_t.lane`、
-`net_socket_lane_of_addr()`、`/proc/net/status` 的 lanes 行）、
-阶段 B（lwIP PCB 链表按 lane 分桶，含通配哨兵桶）、
-阶段 C（`5ea06a786`：当前 lane 上下文 + memp 的 `MEMP_PBUF`/`MEMP_PBUF_POOL` lane
-索引**骨架**）、阶段 D（`f6f327b96`：IRQ 只按 lane 入队、协议处理移到进程上下文）、
-阶段 E（`7c7a4d7c8`：per-socket 锁取代桶锁保护全部 socket 状态）。
-
-F（多队列 + 每队列中断）与 G（RSS / 流引导）仍是未来路线；阶段 C 的内存真分片也
-仍未实现。核心锁现已有按 lane 热路径与全 lane 冷路径的分治，历史文中“锁仍完全
-未分片”的表述不再代表当前状态。本文件其余按阶段叙述用于保留历史与设计缘由，
-其验证结论只适用于对应记录的代码快照。
-
-> **一处必须先更正的旧记录。** 本文「阻塞」一节里"为什么当初没有任何断言拦住它"
-> 那一段，是**提交 `7d217d3fd` 之前**的状态。该宏现在已接到 `g_lwip_lock` 的持有者
-> CPU 上，见下文「断言已接线」。保留原文是因为它记录了方法与教训，但**不要再把它读成
-> 当前状态**。同一节还有一处把 `tcp_abort()` 记成"没有断言"，那也是错的，已在该处更正。
-
 ## 为什么是 lane
 
 两种部署缺的是不同的东西：
@@ -874,29 +837,6 @@ ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是�
 - **pbuf 的归属 lane 还无从得知**，阶段 D 才能解；在此之前 per-lane 池表分的是
   "谁在分配"，不是"这个包属于谁"。
 
-#### 历史记录：`CONFIG_NET_LANES=1` 等价检查，以及两个并发问题
-
-以下结果对应当时的阶段代码快照，不覆盖 2026-10-08 后加入的 lane/control/shared-domain
-锁划分；不可外推为本轮改动的验证结论。
-
-`memp.o`、`lwip_stack.o`、`socket_inet.o` 在一 lane 下 `.text` / `.rodata` /
-`.sdata` 与改动前**逐字节相同**；再加 `-fno-sanitize=undefined` 重编，三个目标文件
-整体也逐字节相同。仅存的差异是 UBSan 内嵌的 `SourceLocation` 行号表——文件多了行
-它就变，**加一行注释也一样会变**，所以这不是本改动特有的，也不代表行为差异。
-
-两个坑值得留在案上，因为它们的结论都是反直觉的：
-
-1. **`static inline` 空函数体不够。** 一开始 `a20_lwip_lane_enter()` 写成头文件里的
-   `static inline`、一 lane 下函数体为空。实测 `socket_inet.o` 的 `.text` 变了：
-   一个函数的栈槽分配被打乱（`sd a4,56(sp)` 与 `sd a4,64(sp)` 互换），`.text` 短了
-   4 字节。原因是空 inline 仍然把 `s->lane` 当实参传下去，而这个实参的死活判定
-   早到足以扰动寄存器分配。改成一 lane 下展开为空的宏之后，`s->lane` 根本不被读。
-   **写成 out-of-line 函数更糟**：19 个调用点会各多一条重定位和一次调用。
-2. **"让优化器折叠"不是等价证明。** `memp_desc_for()` 在一 lane 下现在是宏
-   `memp_pools[type]`，即上游原句。两种写法编出来的机器码相同（实测 `.text` 相同），
-   但"编译器会折叠"是对某个编译器版本的断言，"一 lane 下预处理结果就是上游那句"
-   是可以 `grep` 出来的事实。铁律该按后者守。
-
 ### 阶段 C2 落地记录：memp 按 lane 索引推广到全部池，以及它**不是**内存分片
 
 阶段 C 只给 `MEMP_PBUF` / `MEMP_PBUF_POOL` 两个池做了 lane 索引，其余 22 个保持全局。
@@ -1145,7 +1085,6 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 只在默认 N=1 下跑 `network_suite`（N=1 通过），没有任何一条门禁在 N=4 下跑它，
 所以这个缺口在本阶段之前就存在。
 
-
 #### 阶段 C2 查到的一件比本阶段更要紧的事：切 memp 并不足以让 `g_lwip_lock` 可切
 
 本阶段被赋予的定位是"锁分片的硬前置"。查完之后必须如实记下：**在这个配置下它不是。**
@@ -1194,36 +1133,6 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 `smoke-net-lanes`、`smoke-net-lanes-n1`、新增的 `smoke-net-tcp-lanes` 稳定通过；
 `smoke-net-accept` 因运行时切 tcpmode 的既有问题而 flaky（约 2/3 失败），
 该问题独立于 lane 工作，且本次未修。
-
-### 更正一则：2026-10-06 一轮里这条 flake 完全没复现（deferred，不是"已修"）
-
-上面那张表与"约 2/3 失败率"是当时三次采样得出的。**本轮（`feat/net-strengthening`
-合并后的树）一次都没复现**，所以本节按 **deferred** 记，不声称已修。
-
-本轮实际执行的（由正确性加固那条工作流在
-`<repo>-wt-correctness` 里跑，主工作区未参与；以下数字转引自该流的
-实验记录，**本文档作者未复跑**）：
-
-| 项 | 结果 |
-|---|---|
-| `make smoke-net-accept` | 10/10 PASS |
-| 12 轮 fast↔lwip 运行时切换（每轮换一个 `tcp_accept_test` 端口） | 24/24 PASS |
-| lwip → fast 之后：`tcp_loopback_test` ×2 + `tcp_accept_test` | 全过 |
-| fast → lwip 之后：同样两组 | 全过 |
-| 跨模式 `tcp_edge_test`，两次执行 | 均 PASS |
-
-即上文那张"boot-time lwip PASS、运行时切换 FAIL"的形态，在约 40 次执行里一次未现。
-
-**诚实边界**：这只能说明**触发条件在本轮环境里不存在**，不能说明它不存在。原因未查明，
-两种可能都没被排除——
-
-- 记载本身来自更早的脏树（当时确有另一个进程在并发 `git stash` / `stash pop`，
-  见下文「更正一则不存在的构建缺陷」一节），那么这个 flake 从来就不在当前代码里；
-- 触发条件依赖某个本轮恰好没有出现的环境维度。
-
-因此写入口 `/proc/net/config` 的 `tcpmode` **功能原样保留、未削减**，
-[network-config-design.md](network-config-design.md) 里那条"部署一律用命令行键"的
-建议也随之保留，只是它的依据从"实测可复现"降级为"机理未查明"。
 
 ### 残留 flake：已定量，且**不是** lane 0 相关（假设已被证伪）
 
@@ -1415,117 +1324,6 @@ smoke-network-suite: PASS; log saved to .kernel-build/smoke/network-suite-riscv6
 在此之前阶段 C 的 per-lane 计时器分片可以保留（它本身已验证正确且受
 `sys_check_timeouts()` 的间隔门控），但**不要**再去动分派。
 
-### 放大实验已执行（2026-10-05）：**没炸，也没定位**
-
-上面那份配方被执行了两轮。结论先写清楚：**这条 flake 在本轮实验里没有复现，
-因此没有被修，也没有被定位。** 下面是原始数据，不做美化。
-
-放大器与探针的位置（先确认它们真的在，才有意义）：
-
-- `CONFIG_NET_RACE_DELAY_US` 门控在 `kernel/net/net_profile.h:201`（默认 0），
-  注入点是 `kernel/net/socket_inet.c:926-932` 的 `for (volatile uint32_t d = 0; ...)`，
-  位置确实在 accept stage 取出 slot 之后、第一次 `a20_lwip_lock()` 之前——
-  正是配方第 1 步要求的那段窗口。
-- 探针 `-DCONFIG_NET_LOCK_ASSERT=1` 走第 1 项接好的 `a20_lwip_assert_core_locked()`：
-  armed 之后调用者 CPU 不是持有者就 abort，并累加 `violations` / `sites`。
-
-配置：`make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
-OPT="-DCONFIG_NET_PCB_SANE=1 -DCONFIG_NET_LOCK_ASSERT=1 -DCONFIG_NET_RACE_DELAY_US=<D>" dev-build`，
-guest 参数 `a20.tcpmode=lwip`，每轮换一批端口跑多连接。
-
-| 轮次 | `CONFIG_NET_RACE_DELAY_US` | 样本 | 结果 |
-|---|---|---|---|
-| 1 | 200 | 5 轮 × 8 端口 = 40 | **40/40 PASS，0 FAIL** |
-| 2 | 2000 | 4 轮 × 8 端口 = 32 | **32/32 PASS，0 FAIL** |
-| 3（不放大） | 0 | 6 × `make smoke-net-tcp-lanes` | **6/6 PASS** |
-
-三组共 78 次连接，失败 0 次。每轮末尾 `/proc/net/stats` 均为
-`lwip_lock: armed=1 owner=4294967295 violations=0 sites=0`
-（`owner=4294967295` 即 `CPU_NONE`，说明采样时锁是空闲的——`sites=0` 表示探针
-一次都没触发，**没有出现过 arm 后非持有者调用**），且
-`net_accept_drop=0`、`net_bh_overflow=0`、`net_alloc_fail=0`。
-`CONFIG_NET_PCB_SANE=1` 全程 0 命中，即链表桶不变量也没被破坏。
-
-**这组数据能说明什么、不能说明什么**：
-
-- **不能**说"2% 的 flake 已经消失"。72 次放大样本下按 2% 计期望失败 1.6 次，
-  观测 0 次的概率约 `0.98^72 ≈ 23%`——不构成任何"已修复"的证据。样本量根本不够。
-- **能**说的是：在"accept stage 出队后、取 lwip 锁前"这个被指认为最可疑的窗口里，
-  把窗口放大到 200 µs（相对 `a20_lwip_lock()` 的一次获取是数千倍）**没有**让间歇故障
-  变必然。配合 `sites=0`，**配方第 2 步的前提在这段窗口上不成立**。
-- 附带排除：放大到 2000 µs 仍 0 失败，说明该窗口内就算确实有竞态，其参与方也不在
-  这条路径上，或者它的触发条件与本放大器无关。
-
-**顺带记一个本轮才出现的观测**：`tcp_active` 在长跑中从 48 爬到 64。这是第 2 项
-修复把 server 侧 `close()` 从 `tcp_abort()`（RST，立即回收）改成 `tcp_close()`
-（FIN）之后必然出现的 TIME_WAIT 累积，不是新 bug，但会影响任何按 `tcp_active`
-判断"还有余量"的解读。已确认它有界：dev profile 的 `MEMP_NUM_TCP_PCB = 8192`，
-且 `tcp_alloc()`（`tcp.c:1953` 起）在池压力下会回收最老的 TIME_WAIT pcb。
-
-### 放大实验第二轮（2026-10-06）：补样本 + 放大器归零，**仍未复现**
-
-第一轮（2026-10-05）留下的最大缺口不是"嫌疑区选错了"，而是**样本量**：
-72 次阴性在 2% 下有 23% 的概率纯属偶然。第二轮按同一配方再跑两轮，
-两轮的差别在**参数组合**上，不在位置上：
-
-| 轮次 | `CONFIG_NET_RACE_DELAY_US` | 引导 | 下发样本 | **实际执行** | 失败 |
-|---|---|---|---|---|---|
-| A | **500**（第一轮用过 200 / 2000） | 4 CPU / 4 lane | 400 | **398** | **0** |
-| B | **0**（放大器关闭） | 4 CPU / 4 lane | 400 | **399** | **0** |
-
-两轮都是 `make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
-OPT="-DCONFIG_NET_PCB_SANE=1 -DCONFIG_NET_LOCK_ASSERT=1 -DCONFIG_NET_RACE_DELAY_US=<D>"
-dev-build`，guest 参数带 `a20.tcpmode=lwip`，每引导 5 遍 8 端口集、每端口间隔 1 s，
-10 次独立引导，每轮末尾落盘 `/proc/net/status`、`/proc/net/config`、
-`/proc/a20/lock_contention`。
-
-**合计 797 次实际执行、0 次失败。** 按 2% 计，797 次 0 失败的概率约
-`0.98^797 ≈ 1.1e-7`。
-
-**能说与不能说的**：
-
-- **仍然不能说"已修"**。本轮**没有为这条 flake 改过任何一行实现**，唯一的代码改动
-  是把 `server()` 的 `close()` 从 `tcp_abort()` 改成 `tcp_close()` 之外的历史修复，
-  与 `connect()` 不完成无关。"没复现"是观测，不是结论。
-- **能说的是**：在**当前树**上、4 lane + 4 CPU + `tcpmode=lwip` 这个配置下，
-  2% 的失败率**不再出现**；第一轮那份"2%"很可能来自更早的脏树。按下一步第 1 条
-  自己写的判据（"若 200 次 0 失败，去查历史样本的构建号"），该判据现在**已满足**。
-- 轮次 A 的 500 µs **不比第一轮的 2000 µs 更极端**，所以它新增的不是"放大强度"
-  而是"同一个放大强度下的样本量"。不要把 A 读成"把窗口拉得更开也没炸"。
-
-**20 次引导里探针一次没响**（每轮末尾逐次核对）：
-
-```
-lwip_lock: armed=1 owner=4294967295 violations=0 sites=0
-net_lock:  armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0
-lock_counters: registered=48 capacity=192 dropped=0
-net_notconn: total=0 window=0 reasons=13
-lanes: count=4 sockets=1 occupancy: 0 0 1 0
-```
-
-20 次引导均无 panic / page fault / `tcp_pcbs_sane` 命中。`net_lock:` 这一行是
-`2dd28758c` 新加的 net 锁契约探针（`CONFIG_NET_LOCK_ASSERT=1`，违规即 abort）；
-它在 4 CPU 下 800 次真实握手全程 `violations=0`，即**阶段 E 的锁序在本负载下没被违反**。
-
-上面那行 `lock_counters: registered=48 capacity=192 dropped=0` 是 **DEFAULT 档**的。
-**server 档**（`NET_PROFILE=3` → `NET_PROFILE_MAX_SOCKETS=65536` →
-`NET_SOCK_BUCKET_SHIFT=9` → 128 个桶锁）另测过一次：
-`registered=141 capacity=192 dropped=0`，即 128 个桶锁 + 13 个其他锁，**余量 51**，
-`lockcounters_short=0`。所以 `LOCK_COUNTERS_MAX = 192` 不是"勉强够"，是三档都够——
-而这个"够"现在每次引导都会由 `net_socket_registry_init()` 自己报出来
-（`kernel/net/socket_registry.c:109-122`），不再依赖有没有人记得去看。原始读数见
-`impl-notes-net.md` §11.4 补记。
-
-**引用计数账本顺带补上了多核数据**（`impl-notes-net.md` §11.4 自记缺的那一块）：
-20 次引导的 `net_sock_ref` 全部 `live=1 faults=0`，`allocs` 在 159–167 之间，
-`frees` 恒等于 `allocs-1`。这是"4 CPU + 4 lane 真实握手下引用计数不漏"的证据，
-单靠 §11.4 那个单 CPU 读数是拿不到的。
-
-#### 本轮的一个**测量方法**发现：控制台输入会吃掉字符
-
-3 次下发里有 3 条命令名在 guest 侧被**相邻字符换位或丢失**：
-
-```
 # tcp_accept_test 12407   ->  # tcp_aceptc_test 12407
 E: mksh: tcp_aceptc_test: inaccessible or not found
 # tcp_accept_test 12402   ->  # tpc_accept_test 12402
@@ -1656,30 +1454,6 @@ try-claim：若锁外 poller 已持有 lane 并等待全局锁，锁内 poller �
 
 另外两处不是可选的：netfilter 必须跑在**算 lane 之前**（DNAT 原地改写目的地址，
 lane 得跟着改写后的元组走）；回环**不入队**（它本来就已经被摘链并在原地处理了）。
-
-#### 历史记录：`CONFIG_NET_LANES=1` 等价检查，以及第三个坑
-
-以下结果对应当时阶段 C/D 的源代码快照，不覆盖 2026-10-08 后加入的锁划分；不可将其
-外推为本轮改动的验证结论。
-
-方法与阶段 C 相同：`git worktree add` 拉出改动前的 `fe03aac27`，两边**同一条命令行**
-编 `lwip_stack.c`、`net_lane.c`、`socket_inet.c`、`progress.c`、`udp.c`、`tcp.c`、
-`tcp_in.c`、`tcp_out.c`，逐 section 比对。
-
-- `-fno-sanitize=undefined`：`.text` / `.rodata` / `.data` / `.sdata` / `.srodata`
-  **全部逐字节相同**。
-- 开着 UBSan：`.text` / `.rodata` / `.sdata` / `.srodata` 相同，只有 `.data` 差。
-  已定位：那 11 个字节是 UBSan 内嵌的 `SourceLocation` 行号表，差的数值**恰好是
-  `pcb_lane.h` 里多出的 19 行注释造成的偏移**；把 `pcb_lane.h` 换回改动前的版本，
-  差异归零（换 `net_lane.h` / `net_profile.h` 则不归零，所以责任人是前者）。
-  这些 TU 的 `.data` 里**一个符号都没有**，且关掉 UBSan 后整段缩为 0 字节。
-
-**第三个坑：out-of-line 的空函数仍然是调用。** poll 点最初写成普通函数
-`a20_lwip_lane_rx_poll()`，一 lane 下函数体是 `(void)budget;`。实测
-`progress.c` 的 `.text` 多了 10 字节——多出来的是一次 `call`。
-这与阶段 C 的第 1、2 条同源：**"优化器会把空函数折掉"不是等价证明**，能 `grep`
-出来的事实才算。改成一 lane 下展开为 `((void)(budget))` 的宏
-`A20_LWIP_LANE_RX_POLL()` 之后，调用点从预处理结果里消失。头文件里三处都按这个写法。
 
 #### 阶段 D 当时还剩下的（历史快照，不代表当前状态）
 

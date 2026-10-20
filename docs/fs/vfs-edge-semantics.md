@@ -216,10 +216,6 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 ## 9.4 pivot_root 与 mount 引用模型
 
-### 状态
-
-已实现。此前 `sys_pivot_root` 恒返回 `-EPERM`，因为进程 root 只是 `cur->fs.root_path` 这个字符串前缀，无法回答"谁还挂在这个 mount 上"。
-
 ### 模型
 
 mount 现在同时以两种方式表达，二者一起维护、不会对同一个存活 mount 产生分歧：

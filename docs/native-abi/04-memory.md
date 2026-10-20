@@ -4,7 +4,7 @@
 > `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 [验证记录](../status/history/validation-docs-completion-2026-10-13.md)。
 >
 > **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
-> `docs/roadmap/single-level-mm-model.md` §13.18）。原先并存的两种映射记录
+> `docs/status/history/mm-single-level-migration-log.md` §13.18）。原先并存的两种映射记录
 > ——地址空间区间 `vm_area_t` 与页表节点条目命名的 `mm_seg_t`——已合并为**一条**
 > `struct mm_seg`。本文先前引用的 `vm_area_t`、`file_offset`/`vmo_offset` 两个字段、
 > `base_va`/`len` 拼写均已不存在，下文按现状重写。
@@ -287,24 +287,3 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 保护位在映射时由以下因素共同决定：
 
 请求保护位必须符合 VMAR 的能力天花板，再与 source handle 的 READ/WRITE/EXEC rights 求交。有效保护位在映射插入及合并前登记为 `vmar_cap`；`VM_NATIVE_CAP` 区分零权限与未设置上限。后续 protect 不能超出这个创建时上限；W^X 仍由核心 MM 独立执行。VMAR 的区间约束用于 map 的选址准入，映射在插入/合并前持有 `vmar_owner`，fork、拆分和 remap 复制引用；不同节点的映射不合并。核心 remap 的原地扩展、目标空隙与显式固定移动都受原节点区间约束，关闭 handle 不撤销约束。
-
-
-### 2026-10-13 remap 增量
-
-常驻页移动先在目标完整建立映射并应用 Native 保护，成功后才撤源；源叶的状态、
-权限和 frame/page-cache pin 来自同一节点锁内快照。预留 TLB 延迟释放记录覆盖
-源提交或目标回滚，未使用的记录在事务结束释放；fork 不继承临时记录。
-
-等长 Native reprotect 在原地址完成，mprotect 先完成全部可能分配的 huge-leaf
-降级，再写权限，避免中途失败只改变前半段权限。remap 的 RLIMIT_AS 与锁页预算
-按净增量检查；临时目标继承源锁页策略，RSS 对复制和撤旧分别记账。
-
-`test_native_mm` 新增关闭所属 VMAR/VMO handle 后的区域约束、失败后数据和可写性
-保留、等长原地保护、被 blocker 阻挡后的区域内增长移动及再次越界增长拒绝。
-双架构运行已出现 `NATIVE_MM: remap-owner-rollback PASS`，见验证记录；
-尚待并发、分配失败注入与对象计数验收。TLB 记录当前按两个虚拟跨度的页数上界
-预留，会增加大范围稀疏移动的临时内存需求，后续应在保持回滚保证的前提下优化。
-
-已换出 PTE 的 fork/remap 克隆已补槽引用，真实换出和读回通过双架构单核/四核
-Linux 门禁，见 [验证记录](../status/history/validation-docs-completion-2026-10-13.md)。
-`MREMAP_DONTUNMAP` 源端再次缺页语义仍需完善，普通 remap 通过不覆盖该行为。

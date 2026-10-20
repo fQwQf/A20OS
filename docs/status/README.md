@@ -41,7 +41,11 @@
   [驱动](current/drivers-implementation-status.md)、
   [Hypervisor](current/hypervisor-implementation-status.md)、
   [混合内核](current/hybrid-kernel-status.md)、
-  [Native ABI 运行时](current/native-abi-runtime-status.md)
+  [Native ABI 运行时](current/native-abi-runtime-status.md)、
+  [图形](current/graphics-status.md)、[网络](current/net-status.md)、
+  [文件系统](current/fs-status.md)、[平台](current/platforms-status.md)、
+  [发行版与引导](current/distro-status.md)、
+  [桌面与 Minecraft](current/desktop-minecraft-status.md)
 - [validation-dontunmap.md](current/validation-dontunmap.md)：`MREMAP_DONTUNMAP` 仍待闭合的范围
 
 发布要求与验收规范不在这里，见 [releases/](../releases/)；面向未来的计划见 [roadmap/](../roadmap/)。

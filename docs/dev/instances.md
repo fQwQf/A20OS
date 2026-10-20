@@ -2,7 +2,7 @@
 
 1.0 的 [平台决策](../releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。
 当前 `instances/` 只登记活跃目标；旧 PPC64LE 清单归档在
-[`platforms/retired-instances/`](../platforms/retired-instances)，LoongArch32 的历史运行
+已退役平台的实例清单与文档已删除，LoongArch32 的历史运行
 记录见平台文档。Makefile 和 `tools/a20` 都会拒绝这两个目标，并指向干净的 `v0.18`
 checkout 作为历史复现基线。功能与性能实例的证据要求见
 [1.0 验收](../releases/v1.0-validation.md)。

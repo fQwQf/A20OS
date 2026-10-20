@@ -160,7 +160,6 @@ nav:
           - 网络锁契约: net/network-lock-contract.md
       - 图形:
           - 3D 图形栈: graphics/3d-graphics.md
-          - XFCE Wayland 适配: graphics/xfce-wayland-adaptation.md
   - 驱动开发:
       - 驱动文档总览: drivers/README.md
       - 开发指南:
@@ -186,8 +185,6 @@ nav:
       - 移植指南: platforms/porting-guide.md
       - VisionFive 2 启动: platforms/visionfive2-boot.md
       - LS2K1000: platforms/2k1000.md
-      - PPC64LE: platforms/ppc64le.md
-      - LoongArch32 (LA32R): platforms/loongarch32.md
       - STM32F103 移植: platforms/stm32f103-port.md
       - 物理开发板: platforms/physical-boards.md
       - VirtualBox: platforms/virtualbox.md

@@ -906,14 +906,3 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
       `smoke-smp-lock-contention` 等）没有跑——按分工由编排层在合并后统一执行。
       上面那些 `violations=0` 的读数因此只覆盖到各自那一组负载，**不构成"探针在
       全量回归下也干净"的证据**。
-
-### 2026-10-13 编码增量（未运行）
-
-`net_lock_probe_held(lock, kind)` 提供当前 CPU 的正向持锁查询，返回 1/0；探针
-未开启或未 armed 时返回 -1，不能把缺席解释为未持锁，也不能据此省略必要的取锁。
-查询临时屏蔽 IRQ 以稳定 CPU-local 集合，返回时恢复原状态。
-
-RX consumer claim 记录任务身份，允许持有者被抢占后迁移；`net_lane_rx_is_held()`
-可以核对当前消费者。peek、consume 与 release 检查所有权，consume 还检查队列非空。
-这不是 core lane 锁的替代：核心锁已有 `a20_lwip_lane_is_held()` 与
-`a20_lwip_control_is_held()`。上述改动已做单文件编译检查，尚无故障注入或运行结果。

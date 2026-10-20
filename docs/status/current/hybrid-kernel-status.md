@@ -110,3 +110,23 @@ make check-xlator-guests       # 外来架构注册表与交叉编译器表一�
 make smoke-mm-stress smoke-vfs-stress   # Linux ABI 回归
 # 驱动崩溃恢复（手动）：QEMU 加 bus.3 scratch 盘，运行 /bin/ubd_recover
 ```
+
+<!-- 以下内容从 docs/hybrid-kernel/04-dual-placement.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+
+## 当前实现状态（2026-08 源码）
+
+- `kernel/include/drivers/dual/drv_env.h`：环境层定义三个后端（KERNEL/USER/DRVMOD）。ops 集为 MMIO 映射、8/32 位寄存器读写与 DMA 缓冲分配；当前样板源码使用 USER/DRVMOD，KERNEL 后端只有头文件实现；
+- `kernel/include/drivers/dual/goldfish_rtc.h`：USER rtcd 使用的共享寄存器协议头；目标是成为唯一来源，但当前 DRVMOD probe 尚未消费它；
+- `kernel/include/drivers/dual/virtio_mmio.h` + `kernel/include/drivers/dual/virtio_input.h`：DRVMOD 只读 probe 与 USER uinputd 共享的配置协议；完整 DRVMOD driver 另用 `drivers/input/virtio_input.h`；
+- `kernel/include/drivers/dual/virtq.h`：共享 split-virtqueue 层（单所有者破坏性初始化；全部环结构置于一个 DMA 页内）。注意两处 spec 细节：`QUEUE_READY` 偏移为 0x044（非 0x03c）；DRIVER_OK 必须在队列建立之后（协议层拆分为 `vinput_dev_init` + `vinput_driver_ok`）。
+- 内核壳 `kernel/drvmod/examples/goldfish_rtc.c`（rtc.a20drv）：只读 boot probe，但它不 include `drivers/dual/goldfish_rtc.h` 或 `drv_env.h`，而是本地重复 base/register 常量并调用 drvmod API；不能作为 goldfish 完整同源双态证据；
+- 内核壳 `kernel/drvmod/examples/vinput_probe.c`（vinput-probe.a20drv）：统一 `driver_t` 模块的 boot 只读 probe（无设备时静默），日志 `[UINPUT] kernel-placement probe:`；原内建 `kernel/drivers/input/virtio_input_kprobe.c` 已随 drvmod 迁移删除；
+- 内核完整驱动 `kernel/drvmod/examples/vinput.c`：状态迁移、事件 virtqueue 与 IRQ 以模块形式实现并发布 input class 设备，但使用 `drivers/input/virtio_input.h` 和独立 virtqueue 实现，不与 uinputd 共享完整协议/数据面源码；它绑定非 user-owned 设备，不能与 slot 5 的 USER 驱动做同设备完整 A/B；
+- 用户壳 `user/svc/rtcd.c`：产物为 `rtcd-<arch>.a20drv`，已重构到共享协议层；`make smoke-native-rtcd` 是 RISC-V64 验证入口，本次未运行；
+- 用户壳 `user/svc/ubd.c`：产物为 `ubd-<arch>.a20drv`，作为 virtio-blk 用户态驱动运行；
+- 用户壳 `user/svc/uinputd.c`：产物为 `uinputd-<arch>.a20drv`，是可初始化设备、建立 virtqueue 并处理 IRQ 的功能驱动，不只是 probe；
+- 共享协议 probe：`make smoke-dual-input` 的设计是在 slot 5 上由 DRVMOD 只读 probe 与 USER 驱动通过 `drivers/dual/virtio_input.h` 读出相同身份；这是配置读取一致性，不是完整双态驱动功能一致性；
+- 功能态用户驱动入口：uinputd 实现设备全权初始化、drv_dma 事件 virtqueue 和 IRQ→EventQ；`smoke-dual-input` 会经 QEMU monitor `sendkey` 注入按键并要求解码 `EV_KEY/KEY_A/press`，但本次未重跑；
+- DMA 契约修正：`vmo_phys` 非物化（peek 语义，未触页报 pa=0），drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），该契约已写入 drv_env.h 注释，否则驱动会把物理页 0 交给设备；
+- 构建依赖：native 构建 stamp 的依赖清单包含 `user/svc` 与共享头目录（svc/共享头修改会触发镜像内二进制重建）；
+- 构建配方支持 riscv64/loongarch64 内核和相应 Native 用户壳；构建结果需在当前提交复验。rtcd/uinputd 以 `-Ikernel/include` 引入共享头。

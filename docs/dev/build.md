@@ -35,7 +35,7 @@ sudo apt-get install -y \
 注意两点：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
-- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出。历史复现说明见 [LoongArch32](../platforms/loongarch32.md) 与 [PPC64LE](../platforms/ppc64le.md)，须使用 `v0.18` 的干净 checkout。
+- LoongArch32（LA32R）和 PPC64LE 已从当前构建环境清单退出，相关文档与实例已删除；如确需复现，使用 `v0.18` 的干净 checkout。
 - arm32：需要 `gcc-arm-linux-gnueabihf` 与 `linux-libc-dev-armhf-cross`（Debian/Ubuntu 有）；`tools/ci/Dockerfile` 会装交叉编译器。后者为 fastfetch 提供 ARM Linux UAPI 头文件。若只把交叉工具链解包到临时目录，可将 `FF_LINUX_UAPI_ROOT` 指向包含 `<triple>/include` 的根目录，例如 `make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`。ARMv7-M 另走 STM32 目标，工具链不同。
 - ARM32 musl 的 `time_t` 是 64 位，直接 syscall 回归 `timer_edge` 因此使用 `timer_settime64` / `timer_gettime64` 编号和同宽的 `itimerspec` 布局；不要把 32 位 `timer_*32` 编号与 64 位结构体混用。
 - Python：Makefile 默认调用 `python3`（Python 3.11 或更新版本，仅需标准库）。不需要 Conda，也不会因机器安装了 Conda 而自动切换解释器。可通过 `make PYTHON=/path/to/python3 ...` 显式指定其他解释器。

@@ -279,74 +279,6 @@ MMTEST_RESULT: PASS
 `overlap=0 dead=0 ok=entries` 意味着任何一次 `mm_seg_find()` 二分查找都只会返回
 一个答案。
 
-### `seg index overflow`：唯一一个"读 0 不代表通过"的字段（2026-10-04，`feat/mm-mmap-retire`）
-
-有序索引有容量上限 `MM_SEG_INDEX_CAPACITY = 1024`。超过它的地址空间
-`mm_seg_find()` 改为走链表。`[MM-ASM]` 里新增一行：
-
-```
-[MM-ASM]   seg index overflow: 2791
-```
-
-**这一行的门槛与其他所有字段相反：它必须非 0，而且非 0 是"这条路径被执行过"，
-不是"出了问题"。** 原因在门禁的设计里，不在计数本身：
-`smoke-mm-seg-index-overflow` 若只断言 `MM_SEG_INDEX_OVERFLOW: PASS`，
-那么即使映射全部合并成个位数记录、溢出分支一次都没跑，它照样 PASS——
-因为"没跑到"和"跑到了并且正确"在只断言 PASS 的门禁里是同一件事。
-其余门禁（包括 `smoke-mm-software`）这一行读 0，那才是正常的：
-它们的进程只有十几条映射。
-
-这个字段是补出来的，因为该分支里确实藏着一个真缺陷。
-`mm_seg_find()` 的重建条件写的是 `seg_index_state != 1`，
-把状态 2（"已超容量"）也当成"脏"，于是超容量的地址空间里
-**每一次查找**都会重跑完整 rebuild（取满 1024 个引用、发现仍超容量、
-全部放回），然后才去走那条本该被替代的链表遍历。
-改成 `== 0` 之后同一份负载的计数从 **10407 降到 2791**
-（残留部分是 invalidate 带来的、应该存在的开销）。详见 roadmap §13.22。
-
-这条经验比这个字段本身更值得记：**一个断言非零的门禁，仍然可能因为别的原因非零。**
-非 0 只证明"某处发生过"，不证明"这里发生过"。
-所以该门禁除这一行外**还断言 `[MM-ASM]` 审计全 0**——
-溢出回退必须同时与页表对每一条映射都一致，
-否则"它返回了某个东西"就是唯一的结论了。
-该用例自己在这个意义上错了两次（映射被 `vma_can_merge()` 合并、
-建映射时就把页全 fault 完了），两次都记在 roadmap §13.22.4。
-
-这三个数**由门禁强制**，不是印出来给人看的：`tools/mmtest_gate.py` 用 `MAPLIST_RE`
-解析这一行，`overlap`/`dead` 非 0 或 `ok != entries` 直接 FAIL，**整行缺失也 FAIL**
-（与 `[MM-ASM]` 主行缺失同一条理由：审计没跑过就不等于通过）。这是补上的——合并
-刚做完时内核已经在算这三个数，但门禁脚本只解析主行，于是它们一度只是装饰。
-现在验证过四种坏输入（`overlap=2` / `dead=1` / `ok<entries` / 整行缺失）全部 FAIL，
-干净日志 PASS。
-
-这条审计的形态是被真实故障换来的。地址空间曾经同时有 `vm_area_t` 与 `mm_seg_t`
-两套记录，所以这一行当时是 `seg extent: vmas=… noseg=… mismatch=… pte_disagree=…`
-加上 `idx_agree/idx_diff`（逐页比较 `mm_find_vma()` 与 `mm_seg_find()` 给的是不是
-同一个段）。合并之后那三个计数器**测的东西不存在了**：没有第二个表示，也就没有
-"只改了一种、忘了另一种"可查。因此它们被换成对链表本身的不变量检查——不是把门禁
-删掉，而是把门禁指向仍然会崩的那个不变量上。
-
-`seg extent` 那一行曾经把一个静默的洞量了出来：门禁自己的进程里 14 个映射有 **10 个
-没有段**（堆、栈、brk、SysV shm、io_uring、两条 framebuffer 路径都不建段）。根因是
-`mm_mmap_seg_annotate()` 开头一个 `VM_VMO|VM_FILE` 守卫把**建记录**和**标注**
-一起挡掉了，而它们本该是两个决定。合并后守卫自然消失，见 roadmap §13.16、§13.18。
-
-`seg_miss` 的成因由 `miss why` 一行给出，`seg_*` 答不出的地址主要落在 `extent`：
-条目**有**名字，但没有哪个名字的区间覆盖该地址。这不是没记上，而是记不下——
-见下面的「覆盖缺口：容量已经让位，剩下的才是分辨率」。`annot lost` 一行给出反向的证据：
-`table_full=0` 说明每个节点页的共享段数组再没满过，`nibbles_full` 说明一段时间里
-真正顶住上界的是**每个条目能记几个名字**。
-
-这两个计数器是常驻的，不是临时诊断。它们推翻过两次错误诊断：残余 `seg_miss`
-曾被归因为「条目名字不够」，而 `nibbles_full` 实测是 **0**，`table_full` 却是
-**7132**——顶住上界的是被 512 个条目共享的那个段数组；后来同一个 `nibbles_full`
-又被当成了"几何挡着、调不动"，而它其实只是量一个**没人选过的**页帧余数
-（roadmap §13.20）。两次都是同一类错误：**拿一个布局常量当策略上限**。
-现在每次调容量都照着这两个数字，且必须同时看 `full at level` 的**层级分布**——
-只知道"名字不够"而不知道"在哪一层不够"，仍然分不清是根表拥挤还是 2 MiB 条目拥挤——
-而且必须先确认根层是第几层（riscv64 上 `ARCH_PT_ROOT_LEVEL=2`），
-否则会把根层的问题误读成下一层的问题（roadmap §13.21）。
-
 ### 覆盖缺口：容量已经让位，剩下的才是分辨率
 
 Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上是**以 2 MiB 分辨率**
@@ -374,8 +306,8 @@ Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上
 `seg_dispatch` 也在断言行里。`seg_dispatch` 与 `seg_ok`/`seg_miss` 应当两两相等：
 相等才说明"段能回答就照段的做，答不出就走回退"。
 
-详见 [roadmap/single-level-mm-model.md §12](roadmap/single-level-mm-model.md) 与
-[§13](roadmap/single-level-mm-model.md)。
+详见 [roadmap/single-level-mm-model.md §12](status/history/mm-single-level-migration-log.md) 与
+[§13](status/history/mm-single-level-migration-log.md)。
 
 ### I/O 进展
 
@@ -702,46 +634,6 @@ a20.xlator.aarch64=/bin/xlate_shim
 `make native-handle-test` 与 `make native-libc` 只构建对应原生程序，检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 
 失败时检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误，确认 `native-handle-rv` 已生成并放入 fat32 镜像，并查看 `.kernel-build/smoke/native-handle-riscv64.log`。
-
-#### Native 门禁的架构覆盖（2026-10-13 编码阶段）
-
-`make ARCH=riscv64 smoke-native-suite` 枚举 22 条 Native 用例；
-`make ARCH=aarch64 smoke-native-suite` 复用同一份命令流和断言，经
-`tools/smoke_platforms.py` 变换平台参数。单条目标也接受 `ARCH=aarch64`。
-RTC、registry RTC 重启和 UBD 三条依赖 RISC-V 私有 MMIO/IRQ，在 AArch64 明确
-报告 SKIP，单独请求不支持的平台会失败；其余 19 条共享断言。mlibc Native sysdeps
-仍只有 RISC-V，不能由本矩阵推断其多架构可用。
-
-`.github/workflows/native.yml` 为 CI 与 release 共用的 RISC-V/AArch64 矩阵：
-先构建 `native-programs`，再运行套件并保存日志，发布创建依赖整个矩阵成功。
-这些配方已进入实际运行，逐项结果与跳过项见
-[本轮验证](status/history/validation-docs-completion-2026-10-13.md)。Native 程序及自启动服务路径由
-`user/liba20rt/a20_arch.h` 生成，不再假定 `-rv`；fakeld 探针包含四个已实现入口的
-64 位架构。
-
-新增 `smoke-pty-stress-aarch64`、`smoke-timeout-test-aarch64` 复用既有断言，
-接入 AArch64 job。UFS/UBD 用例的 build 额外目标生成其附加 scratch 镜像，
-QEMU 路径仍经 Make 的构建目录解析器适配 preempt/SMP 变体。
-共享 Native 门禁等待 shell 提示符后发送命令，短用例最少 60 秒；AArch64 使用
-raw `kernel.bin` 以按启动协议传递 DTB/命令行，全文件系统与重启用例限时 300 秒。
-
-本轮新增的运行断言：`native-mm` 的 PROT_NONE 上限、越界
-MAP_FIXED 不破坏既有页、反复 open/close 不占满 fd 表、关闭 owner handle 后
-区域约束与失败回滚（`remap-owner-rollback PASS`）；`native-deepen` 的名称
-前缀替换与过滤；`sched_stress` 的 RT 零上限拒绝、软上限放行、硬上限提权拒绝，
-以及同 CPU FIFO 任务的普通进展和预算恢复；`futex_stress` 的 PI 私有页 COW 隔离、
-WAKE_OP 原子累加/参数/COW 与同桶 70 等待者批次唤醒；
-`vfs_stress` 的目录与最终文件多层符号链接 exec 后 `/proc/self/exe` 路径。
-`/proc/a20/lock_contention` 的 `park_lock` 是所有任务锁的静态汇总，任务退出
-不移除历史计数；`/proc/a20/perf` 的 `kernel_preempts` / `trap_storms` / `rt_throttles` 按 CPU 报告。
-
-历史 `native-mm` 的 FILE 失败与 VMO 索引引用问题修复仍需在本次提交重验；
-`check-native-abi-coverage`、`check-abi-config-guard` 是源码契约，不能代替运行。
-`ABI=linux` 与 `ABI=both` 的同语义结果交叉比较仍未接线。
-
-Futex 新增 `smoke-futex-stress-smp4` 与 `smoke-futex-stress-aarch64-smp4`，
-两者都显式构建 `NR_CPUS=4`、启动 4 vCPU，并要求 `wake-op-atomicity PASS`。
-它们与原单核用例共享断言，已接入 CI；双架构单核/四核本地运行均已通过。
 
 ### 用户态文件系统宿主（uxfs + ufsd）
 

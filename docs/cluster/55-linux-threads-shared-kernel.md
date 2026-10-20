@@ -60,39 +60,3 @@ python3 tools/check-multi-qemu-kernel.py --workload linux --mode smp \
 
 检查器保存分别来自两实例的原始串口日志，再汇总检查标志；目前仍不把两路
 串口当作统一终端。页保护异常由 A20OS 正常异常和信号路径处理，不由宿主模拟。
-
-## 运行记录和边界
-
-证据目录为 `.kernel-build/cluster/multi-qemu/`，输出目录不可重复使用：
-
-- `linux-01`：原调度器以 affinity EINVAL 失败。
-- `linux-02`、`linux-baseline-01`：首次允许请求后，“保留当前任务”路径导致
-  返回时 CPU 错误；记录保留，未当作成功。
-- `linux-03`、`linux-baseline-02`：修复上述路径后通过迁移、共享页和动态分配。
-- `linux-final-01`：加强 volatile TLS 和实际迁移统计后通过；实际迁移 126 次，
-  工作分配 636/388。`linux-baseline-final-01` 为普通 SMP 对照通过。
-- `linux-faults-01`：进一步加入真正的只读写入异常恢复后通过；实际迁移 127 次，
-  SIGSEGV 128 次，工作分配 369/655，总和 4332748800。两 QEMU PID 为
-  334364 / 334362，均已结束。各次 report 保留 vCPU、KVM、共享 RAM inode、
-  源码和启动 ELF/ROM 哈希、日志哈希及退出方式。
-- `linux-faults-baseline-01`：相同保护异常用例在普通 SMP 中通过，实际迁移
-  127 次、保护异常 128 次、工作分配 512/512；该比例是本次观测，不是均分保证。
-- `native-after-linux-01`：原 Native 用户程序、文件、子程序、取消和动态分配回归通过。
-- RISC-V64、AArch64 的两个变更调度单元已交叉编译通过，属于编译证据；本次
-  新的 Linux 运行证据为 x86_64，没有据此宣称所有架构或物理 MCU 已运行。
-
-进程等待窗口和线程组生命周期检查，以及独立 idle-surplus、yield-accounting
-调度检查通过。完整 `make host-tests` 未通过：现有通配规则把需要生产源文件及
-DTB 参数的 `fdt_view.c` 当作单文件无参数测试；试接专用检查器后还遇到
-`test_flat_user.c` 缺少其专用架构 shim。没有保留临时门禁规则改动或将此门禁
-报告为通过；相关日志保留为 `host-tests-linux-01/02.log`。
-
-这一步验证的是普通 Linux 用户线程、TLS、信号与内存权限机制，**不是 JVM 或
-Minecraft 已跨实例运行**。块设备、图形设备和完整设备所有权/远程访问尚未
-统一；当前 RAMFS 用例避开了它们。下一步应接入设备 owner 执行路径，再用
-真实 JVM 和客户端资源继续验收。MCU 的 Java 运行时、内存容量和物理后端仍需
-各自的实际证据，不能用本次 x86_64 测试替代。
-
-设备后续进展见 [56-shared-device-owner.md](56-shared-device-owner.md)。最新 Linux
-运行检查增加 `--console` 阶段，固定在 CPU 1 从主实例串口收发，次实例不再
-创建 UART。原线程/内存测试仍完整执行，单独运行程序不带此参数时保留原用例。

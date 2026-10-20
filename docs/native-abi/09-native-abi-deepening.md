@@ -47,24 +47,6 @@
 
 ptrace ↔ debug handle（同一 proc_debug 状态机）；bpf ↔ ext_prog (KEP)； futex ↔ futex_wait/wake；channel IPC ↔ channel_*（已桥接）；定时器/时钟 ↔ timer_*； 网络 ↔ net_*；AIO 与 io_uring 同上（异步 I/O 走 channel_call + EventQ，见 §5）。
 
-### 1.4 补判（2026-10）
-
-上表的原始盘点停在 2026-08，namespace、mseal、pkeys、capabilities、socket option 五项都没有判定。只有 mount/pid/user namespace 的落地（2026-09-26、2026-10-03）确定晚于盘点；mseal 与 pkeys 落地于 2026-08 内（08-14、08-10），capabilities 与 socket option 早于盘点——无论先后，原表都没给判定，属漏判而非有意拒绝。判定按各自落地日期补做：
-
-| 机制 | 落地 | 判定 |
-|------|------|------|
-| mount namespace | 2026-09-26（`kernel/fs/vfs/mntns.c`，`unshare`/`setns` 随之实现） | 应包装（§1.1） |
-| PID / user namespace | 2026-10-03（`kernel/proc/pidns.c`、`kernel/proc/userns.c`） | 应包装（§1.1） |
-| mseal | 2026-08-14（`kernel/mm/mseal.c`） | 应包装（§1.1） |
-| pkeys | 2026-08-10（`kernel/proc/sched_compat.c`） | 应拒绝（§1.2），内核侧为存根，无可包装之物 |
-| capabilities | 早于盘点（`kernel/abi/linux/sys_capability.c`，2026-04-29；POSIX 凭据 2026-08-26 才下沉为 `kernel/proc/cred.c`） | 应拒绝（§1.2） |
-| socket option | 早于盘点（2026-04-29，`kernel/net/socket_control.c`） | 应包装（§1.1） |
-
-两处需要留意的既有表述：
-
-- 「capability」在 §1.2 出现两处，含义不同，不要互推：keyring 行的「密钥即能力」说的是把密钥当作可传递的对象来授权（落成 handle rights）；capabilities 行拒绝的是 capget/capset 那种挂在进程身份上的能力位，Native ABI 没有这个面（`a20_security_context_t.cap_effective` 无生产者，见该行）。
-- §8 的 `namespace 强制` 行描述的 `ns_apply` 行为属实且未变：三个 namespace 对象虽已在核心存在，`ns_apply` 仍只接受 `A20_NS_FILESYSTEM`。补判改变的是该不该包装，不改变它今天的行为。
-
 ## 2. 新增：Pager（0x0D00）
 
 用户态驱动的按需分页。PAGED VMO 的缺页不静默填零，而是把页请求作为 channel 消息交给 pager 线程；pager 用 `pager_supply_pages` 回填后唤醒 faulting 线程。对齐 Zircon `zx_pager_*`，语义更简单：VMO 直接关联请求端点，无 ZX_WAIT/TIME 等额外对象。

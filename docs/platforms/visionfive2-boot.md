@@ -336,11 +336,6 @@ a20.gateway=192.168.50.1 a20.dns=1.1.1.1 a20.hostname=a20os
 
 更换软件或增加新命令的源码适配流程见 [从源码适配新软件](../distro/source-software-porting.md)。
 
-## 当前状态
-
-- 启动链固件、FIT、四分区 SD 镜像及 FAT32/extra userspace 已完成源码构建；之前的板上镜像已经从 TF 卡启动并进入串口 mksh。每次修改网络驱动后仍需用新镜像重复串口启动记录，不能拿旧镜像日志替代当前提交。
-- GMAC1 IRQ 线号 78、DTB 中的 YT8531 PHY 地址 0 和 RGMII RX 300 ps 延迟已由随镜像构建的 VF2 DTB 核对；当前驱动采用轮询数据面。PHY link-up、DMA 收发、`ping` 和公网 `git clone` 必须在接入网线的目标板上按本页 6.8 节逐项确认。
-
 ## FIT 签名：当前工具链做不到（已核实）
 
 `a20os.itb` 目前**没有签名**，`tools/vf2/build-firmware.sh` 构建出来的那份 `mkimage` 也产不出签名。实测结论：
