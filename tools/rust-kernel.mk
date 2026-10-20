@@ -2627,6 +2627,7 @@ RUST_WAIT4_TARGET_loongarch64 := loongarch64-unknown-none
 RUST_WAIT4_TARGET_riscv64 := riscv64imac-unknown-none-elf
 RUST_WAIT4_TARGET_riscv32 := $(RUST_RV32_TARGET)
 RUST_WAIT4_TARGET_arm32 := armv7a-none-eabihf
+RUST_WAIT4_TARGET_armv7m := thumbv7m-none-eabi
 RUST_WAIT4_TARGET := $(RUST_WAIT4_TARGET_$(ARCH))
 RUST_WAIT4_OBJECT := $(BUILD_DIR)/rust/wait4_state.o
 
@@ -2638,6 +2639,7 @@ RUST_WAIT4_CODE_MODEL_aarch64 := large
 RUST_WAIT4_CODE_MODEL_loongarch64 := medium
 RUST_WAIT4_CODE_MODEL_riscv64 := medium
 RUST_WAIT4_CODE_MODEL_arm32 := small
+RUST_WAIT4_CODE_MODEL_armv7m := small
 RUST_WAIT4_FEATURES_aarch64 :=
 RUST_WAIT4_FEATURES_arm32 := -neon
 RUST_WAIT4_EXTRA_x86_64 := -C no-redzone=yes
