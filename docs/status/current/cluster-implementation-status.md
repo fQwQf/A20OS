@@ -1,5 +1,7 @@
 # 统一集群实现与验证记录
 
+> 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
+
 开始日期：2026-10-11。独立 worktree：`unified-cluster`，分支：
 `codex/unified-cluster`。原工作目录的未提交改动没有复制或修改。
 目标和验收要求见 [07-unified-runtime.md](../../cluster/07-unified-runtime.md)。

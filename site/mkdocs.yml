@@ -218,18 +218,40 @@ nav:
       - 已知问题: status/current/known-issues.md
       - 服务器就绪度: status/current/server-readiness.md
       - 1.0 进度台账: status/current/v1.0-progress.md
-      - 1.0 待办队列: status/current/v1.0-next-20.md
+      - 1.0 缺口台账:
+          - 说明与用法: status/gaps/README.md
+          - 交付: status/gaps/delivery.md
+          - 核心与调度: status/gaps/core.md
+          - 内存管理: status/gaps/mm.md
+          - 文件系统: status/gaps/fs.md
+          - ABI/IPC/信号: status/gaps/abi-ipc.md
+          - 网络: status/gaps/net.md
+          - 驱动: status/gaps/drivers.md
+          - 运行时: status/gaps/runtime.md
+          - 集群: status/gaps/cluster.md
+          - 虚拟化: status/gaps/hyp.md
+          - 桌面: status/gaps/desktop.md
+          - 安全: status/gaps/security.md
+          - 文档与门禁: status/gaps/docs.md
+          - 2026-10-14 triage 明细: status/gaps/requirements-2026-10-14.md
       - 各子系统实现状态:
           - 集群与服务: status/current/cluster-implementation-status.md
           - 驱动: status/current/drivers-implementation-status.md
           - Hypervisor: status/current/hypervisor-implementation-status.md
           - 混合内核: status/current/hybrid-kernel-status.md
           - Native ABI 运行时: status/current/native-abi-runtime-status.md
-      - 历史验证记录:
-          - 文档完善分支验证: status/history/validation-docs-completion-2026-10-13.md
-          - 第一阶段验证: status/history/validation-v1-first-wave-2026-10-13.md
-          - 驱动注册表容量: status/history/validation-driver-registry-capacity-2026-10-13.md
-          - 工程阶段记录: status/history/development-docs-completion-2026-10-13.md
+          - 图形: status/current/graphics-status.md
+          - 网络: status/current/net-status.md
+          - 文件系统: status/current/fs-status.md
+          - 平台: status/current/platforms-status.md
+          - 发行版与引导: status/current/distro-status.md
+          - 桌面与 Minecraft: status/current/desktop-minecraft-status.md
+          - Ext4 孤儿 inode: status/current/ext4-orphan-gap.md
+          - DONTUNMAP 验证范围: status/current/validation-dontunmap.md
+      - 历史记录:
+          - 单级内存模型迁移: status/history/mm-single-level-migration-log.md
+          - 串口保真度: status/history/serial-fidelity.md
+          - XFCE x86_64 验证: status/history/xfce-x86_64-validation.md
       - 测量与协议:
           - 锁竞争基线: status/measurements/lock-baseline.md
           - 锁竞争改造后: status/measurements/lock-after.md

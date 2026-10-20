@@ -13,7 +13,8 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `current/` | 当前状态：模块状态、已知问题、就绪度、各子系统实现状态、1.0 进度与待办 |
+| `current/` | 当前状态：模块状态、已知问题、就绪度、各子系统实现状态、1.0 进度 |
+| `gaps/` | **1.0 缺口台账**：所有尚未完成、属于承诺范围的事项；完成一项删一项 |
 | `history/` | 已被取代的旧状态与验证叙述，仅保留结论性文字 |
 | `measurements/` | 测量基线与测量协议 |
 
@@ -28,6 +29,7 @@
   [testing-gates.md](../testing-gates.md) 的入口在**当前提交**上实际重跑。跑完的结论写进状态文档，
   运行产物本身不入库。
 - 被新结论取代的旧文档移入 `history/` 并保留结论性文字，不保留运行细节。
+- **待办只写在 `gaps/`**：现状页描述现在是什么，不列缺口；一条缺口完成就从台账里删掉，`gaps/` 清空即表示已承诺范围完成。
 
 ## 当前状态索引
 
@@ -35,7 +37,7 @@
 - [known-issues.md](current/known-issues.md)：已知问题队列
 - [server-readiness.md](current/server-readiness.md)：作为服务器部署时的能力边界与阻塞项排序
 - [v1.0-progress.md](current/v1.0-progress.md)：12 个 V1 工作包的状态
-- [v1.0-next-20.md](current/v1.0-next-20.md)：人工 triage 的 20 项待办需求（N01–N21）
+- [gaps/](gaps/README.md)：1.0 缺口台账，按 12 个工作包分文件；完成一项删一项
 - [v1.0-requirements.json](current/v1.0-requirements.json)：机器生成的源码条目候选清单
 - 各子系统实现状态：[集群](current/cluster-implementation-status.md)、
   [驱动](current/drivers-implementation-status.md)、

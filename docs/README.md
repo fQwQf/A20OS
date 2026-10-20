@@ -14,7 +14,7 @@
 - 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[dev/build.md](dev/build.md)、[dev/instances.md](dev/instances.md)、[kernel/process-scheduler.md](kernel/process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - 目录分工：根目录只放入口文档（本页、贡献指南、架构总览、测试门禁与致谢/许可声明）；`dev/` 放构建、运行、调试与外部依赖；`kernel/` 放核心内核参考（调度、内存管理、Linux ABI 细节、架构特性）；其余按子系统分目录（`drivers/`、`fs/`、`net/`、`graphics/`、`native-abi/`、`cluster/`、`hypervisor/`、`platforms/` 等）。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- 状态与进度文档：`status/` 是进度、已知问题、子系统实现状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
+- 状态与进度文档：`status/` 是进度、已知问题、模块状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/gaps/` 是**唯一的待办与缺口台账**（完成一项删一项，清空即表示承诺范围完成），`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
 - 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
@@ -143,7 +143,7 @@ riscv64 H 扩展下的 stage-2、vcpu 与 guest 启动路径已合入。用户�
 
 - [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
-- [status/README.md](status/README.md)：状态、进度、已知问题、验证记录、测量数据与运行证据的收录规则与索引
+- [status/README.md](status/README.md)：状态、缺口台账、历史记录与测量协议的收录规则与索引
 - [status/current/server-readiness.md](status/current/server-readiness.md)：面向服务器部署的当前能力边界、结构性限制与阻塞项排序
 - [security/hardening.md](security/hardening.md)：安全加固状态，含「诚实性原则（fail-closed）」
 - [dev/external-dependencies.md](dev/external-dependencies.md)：外部依赖与协议说明
