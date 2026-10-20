@@ -4,7 +4,7 @@
   "schema": "a20os.v1-requirements-inventory",
   "schema_version": 1,
   "generated_on": "2026-10-20",
-  "head": "41c849963fb417f3bf8db3c9abdf238704a92227",
+  "head": "6d76e880caf8bc89e9aae3a1f2fded9b810cbcff",
   "scope": {
     "roots": [
       ".github/",
@@ -17,7 +17,7 @@
       "instances/"
     ],
     "source_files_count": 7623,
-    "source_entry_candidates_count": 2556,
+    "source_entry_candidates_count": 2554,
     "manual_requirements_count": 11,
     "automated_scan_is_not_triage": true,
     "content_hashes_are_snapshot_evidence_not_a_global_freshness_gate": true,
@@ -38224,7 +38224,7 @@
     },
     {
       "path": "docs/README.md",
-      "sha256": "b21fbd9b3469ddb8a21e24810d202dbc8e78998deafcac204fc22755b796788c"
+      "sha256": "714abac09e57a712303827c7e831dfdb28046393054acca2e082640ff4ae0ba7"
     },
     {
       "path": "docs/THIRD_PARTY_NOTICES.md",
@@ -39100,7 +39100,7 @@
     },
     {
       "path": "docs/releases/evidence/kernel-integration/futex-uffd-2026-10-19.md",
-      "sha256": "cc9aea111f693720352eaecee268a6a33eed8fb6ae8245318834171ddbda5659"
+      "sha256": "0d4c77317e5602e9409a546140b9eb4366cd68318ed11fc7202bc4e8e4da9dc4"
     },
     {
       "path": "docs/releases/evidence/kernel-integration/ipc-combined-2026-10-19/README.md",
@@ -39124,7 +39124,7 @@
     },
     {
       "path": "docs/releases/evidence/kernel-integration/mm-final-2026-10-19/README.md",
-      "sha256": "a01c127ef84ae7123c88e41afa0354225064dda5f2b83409bdb880aac09e5f25"
+      "sha256": "b244789352eab05153ec6cfe12bf694475996a365267a2e09dbab2db1eaef3b1"
     },
     {
       "path": "docs/releases/evidence/kernel-integration/mm-final-2026-10-19/raw/final-tree-verification.txt",
@@ -39184,7 +39184,7 @@
     },
     {
       "path": "docs/releases/evidence/native-ipc/README.md",
-      "sha256": "607724ada75b8eafd12a8702cea0ec6567923e5936204862ca30ecbc2bef7ed5"
+      "sha256": "5cd53cbad8e2b037a884f20b5329ec5f3ad6a5a0a7e3aec2410aa6ae680a967a"
     },
     {
       "path": "docs/releases/evidence/native-ipc/controlled-5540e735/c1.argv.txt",
@@ -39296,15 +39296,15 @@
     },
     {
       "path": "docs/releases/v1.0-progress.md",
-      "sha256": "7086fc7b24f95ebbeb220be7c0d55e5775bb634b7354dbf56f82fff9305c4cb3"
+      "sha256": "339da372f56ea28b75325819359ba74075c1f9062735c4746d1de8f3a7fc7220"
     },
     {
       "path": "docs/releases/v1.0-validation.md",
-      "sha256": "1b5c4ca4859def089d5a48c34ebdbb3f595de092a4da3a7661625f822938f4a7"
+      "sha256": "337dd6b9bf1a1132f9ebcd46fa886ae065fbba17fdc0cd8a6600d9a12b63bc71"
     },
     {
       "path": "docs/releases/v1.0.md",
-      "sha256": "1a695859acc082a2b09bc809a312b548ec3b02fcd07f8b1cd99efe750c09b514"
+      "sha256": "64aac4597ebc98ce319658f85807a5b6b6804689cd6761f10f491b865cd6156f"
     },
     {
       "path": "docs/research/00-index.md",
@@ -46396,7 +46396,7 @@
     },
     {
       "path": "tools/tests/elf-fixtures/README.md",
-      "sha256": "34db9557a94daaa05e62e6db902bdfb3054f9d1579f1839115205aba5d19ff95"
+      "sha256": "ed919608d445182ef43186f268fa5ffe22f08c6ed6a06ebc9dca76856cb81bc5"
     },
     {
       "path": "tools/tests/elf-fixtures/generate_fixtures.py",
@@ -49064,9 +49064,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-a9c4ed45b853f5ef",
+      "id": "SE-9b69538bee6ce5d0",
       "path": "docs/README.md",
-      "line": 43,
+      "line": 42,
       "kinds": [
         "task_marker"
       ],
@@ -49075,9 +49075,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-6f7bdeb7f1abe35d",
+      "id": "SE-122be645b63abb2e",
       "path": "docs/README.md",
-      "line": 50,
+      "line": 49,
       "kinds": [
         "task_marker"
       ],
@@ -49086,9 +49086,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-4dd85d5caa16becf",
+      "id": "SE-ee5473b4bbfe517b",
       "path": "docs/README.md",
-      "line": 64,
+      "line": 63,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49097,9 +49097,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-610cbfaf7f0bea06",
+      "id": "SE-739b4170bbc39553",
       "path": "docs/README.md",
-      "line": 72,
+      "line": 71,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49108,9 +49108,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-a84cd3e3ef375b7a",
+      "id": "SE-87ab2662eddf7347",
       "path": "docs/README.md",
-      "line": 85,
+      "line": 84,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49119,9 +49119,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-f13816fcc087518d",
+      "id": "SE-2a2e4fa1ea431ecc",
       "path": "docs/README.md",
-      "line": 131,
+      "line": 130,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49130,9 +49130,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-8f68cfe110c9e47d",
+      "id": "SE-e2416f8fe90f7c00",
       "path": "docs/README.md",
-      "line": 132,
+      "line": 131,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49141,9 +49141,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-5fe62e838fb45580",
+      "id": "SE-1c75d6b84d0154b8",
       "path": "docs/README.md",
-      "line": 138,
+      "line": 137,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -49152,9 +49152,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-f075b56589d84005",
+      "id": "SE-9fc79723f6983e1d",
       "path": "docs/README.md",
-      "line": 151,
+      "line": 150,
       "kinds": [
         "task_marker"
       ],
@@ -55443,42 +55443,20 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-6499e1c1d5a9080c",
+      "id": "SE-1b29b4152a3447f7",
       "path": "docs/releases/v1.0-progress.md",
-      "line": 42,
+      "line": 66,
       "kinds": [
         "status_or_known_issue"
       ],
-      "excerpt": "| 2 | CORE task identity and lifetime | Identity slice is in progress; C remains the default. The F:xfer and debug-attach lock stalls in `cluster/33` are historical failures reproduced at `cd2bb0a0`; current-candidate rerun is pending, so neither is called a current failure or a fix. Paired Native ABI=both SMP2 function checks completed 10,000 calls in C and Rust on x86_64, AArch64, and RV64 with matching per-ISA app/contract hashes. A separate x86_64 100,000-call fixture supplied six-pair C/C diagnostic calibration and six-pair C/Rust candidate data; the latter remains evidence-insufficient, not a performance pass. | Finish the full C/Rust host fixture and broader Native ABI=both SMP semant",
+      "excerpt": "| V1-CORE | Open. Task identity remains opt-in and C-default. The Rust wait-queue state fix (`28304b3a`) preserves caller `priv` on insert and clears it on detach; that fixed the frozen 13-selector SMP2 stall, with the diagnostic and original ELF each passing 3/3 strict poweroff runs. Mutex owner/depth transitions (`1e3fa4be`) passed host and paired QEMU checks in the special capacity-one timer profile; this is not the normal production profile. The 17-selector RV64 ABI=both SMP2 C/Rust normal-profile matrix now passes 3/3 per side; exact selector values and artifacts are recorded in the [selector matrix](module-status-2026-10-19.md). Selectors remain C-default pending debug/runtime and reta",
       "disposition": "needs_triage",
       "requirement_ids": []
     },
     {
-      "id": "SE-b84dbba88e16c296",
+      "id": "SE-543b6a1110d3120f",
       "path": "docs/releases/v1.0-progress.md",
-      "line": 59,
-      "kinds": [
-        "status_or_known_issue"
-      ],
-      "excerpt": "| V1-CORE | Open. Task identity remains opt-in and C-default; paired function checks and strict smoke results are recorded above. The Rust wait-queue entry-state slice (`28304b3a`) preserves opaque futex payload through insertion and clears it on detach; this fixed the frozen 13-selector all-Rust SMP2 `mm_stress --usercopy-contract` stall, with diagnostic and original ELF each passing 3/3 strict poweroff runs. Rust mutex owner/depth transitions (`1e3fa4be`) also pass host 2/2 and paired ABI=both SMP2 QEMU C/Rust runs in the special `WAIT_TIMER_HEAP_MAX=1` profile; logs show recursive depth=2, CPU1 waiter wake, surrounding park/wait/fairness tests, cleanup and exit 0. C remains the default fo",
-      "disposition": "needs_triage",
-      "requirement_ids": []
-    },
-    {
-      "id": "SE-c8979f529f5443ee",
-      "path": "docs/releases/v1.0-progress.md",
-      "line": 61,
-      "kinds": [
-        "status_or_known_issue"
-      ],
-      "excerpt": "| V1-MM | Open. Existing DONTUNMAP source-refault/fork-COW and real split-failure rollback evidence is recorded in [the transaction record](../validation-dontunmap.md). Three additional opt-in Rust slices are now committed with C defaults: VMO page materialization/resize/destroy (`e08f119a`), VMO reference/peek (`d49911e5`), and pager association/close sweep (`e7ffb9cd`). Their host oracles pass 13/13, 3/3, and 3/3; RV64 ABI=both SMP2 production/test guest links pass, including real cgroup charge-failure and resize/destroy accounting plus a real pending pager fault awakened by peer close. A retained ARM32 ABI=linux NOMMU Rust profile with USER_COPY, PROCESS_VM, VMA_REGION, VMO_PAGE, VMO_LIFE",
-      "disposition": "needs_triage",
-      "requirement_ids": []
-    },
-    {
-      "id": "SE-508edcc4729c1fa1",
-      "path": "docs/releases/v1.0-progress.md",
-      "line": 63,
+      "line": 70,
       "kinds": [
         "task_marker"
       ],
@@ -55487,9 +55465,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-d6f8fd6f0e327be2",
+      "id": "SE-4fc758b0ae7ac92f",
       "path": "docs/releases/v1.0-progress.md",
-      "line": 70,
+      "line": 77,
       "kinds": [
         "task_marker"
       ],
@@ -55498,9 +55476,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-5102b77199d63827",
+      "id": "SE-0a8e218c83da8f28",
       "path": "docs/releases/v1.0-validation.md",
-      "line": 17,
+      "line": 13,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -55509,9 +55487,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-fa3a7f5e5ffa9f09",
+      "id": "SE-488416e36ad87d87",
       "path": "docs/releases/v1.0-validation.md",
-      "line": 64,
+      "line": 58,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -55520,9 +55498,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-1a8b5f6e6028c4c3",
+      "id": "SE-a461c92de09a7c94",
       "path": "docs/releases/v1.0-validation.md",
-      "line": 103,
+      "line": 97,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -55531,9 +55509,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-8935db68172f05c0",
+      "id": "SE-84b98a39600042ba",
       "path": "docs/releases/v1.0-validation.md",
-      "line": 109,
+      "line": 103,
       "kinds": [
         "task_marker"
       ],
@@ -55542,9 +55520,9 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-8a65726257ee582e",
+      "id": "SE-7348d37282b5bf8c",
       "path": "docs/releases/v1.0-validation.md",
-      "line": 110,
+      "line": 104,
       "kinds": [
         "status_or_known_issue"
       ],
@@ -55740,13 +55718,13 @@
       "requirement_ids": []
     },
     {
-      "id": "SE-0cde419996775dec",
+      "id": "SE-60ac55df30d0490c",
       "path": "docs/releases/v1.0.md",
       "line": 106,
       "kinds": [
         "task_marker"
       ],
-      "excerpt": "| G0 范围与基线 | 需求台账、平台/工作负载矩阵、固定 C 基线、性能协议 | 每项有效 TODO 有归属；基线能重建，已知失败单列；比较指标及测量分辨率预先登记 |",
+      "excerpt": "| G0 范围与参照 | 需求台账、平台/工作负载矩阵、可重建的已验收行为/性能参照、适用测量协议 | 每项有效 TODO 有归属；参照与已知失败可追溯；受影响指标及测量分辨率预先登记 |",
       "disposition": "needs_triage",
       "requirement_ids": []
     },
