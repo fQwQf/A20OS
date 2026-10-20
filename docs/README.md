@@ -1,7 +1,6 @@
 # A20OS 文档首页
 
-1.0 开发与范围决策以 [1.0 计划](releases/v1.0.md) 为入口：Rust 主导核心重写、现有
-开发中子系统完成、LoongArch32/PPC64LE 退出支持，以及 [功能与性能验收](releases/v1.0-validation.md)。
+1.0 开发与范围决策以 [1.0 计划](releases/v1.0.md) 为入口：完成已承诺的子系统功能并验证稳定性；在共享状态、争用和复杂生命周期等确有收益的职责中使用 Rust，保留合理的 C 与硬件机制边界；LoongArch32/PPC64LE 退出支持。功能与性能验收要求见 [验收计划](releases/v1.0-validation.md)。
 这些是发布要求，不能引用为当前已实现能力；早期阶段边界不豁免 1.0 验收。
 
 五分钟上手：先读 [OS-Design.md](OS-Design.md) 把握整体架构，再跑 `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` 把开发镜像在 QEMU 里启动起来。根目录 `make all` 是双架构发布构建，不是这个开发流程的缩写。
@@ -37,8 +36,8 @@
 - [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
-- [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、Rust 重写与接口冻结
-- [releases/v1.0-validation.md](releases/v1.0-validation.md)：固定 C 基线、行为对照、性能不回退与发布阻塞
+- [releases/v1.0.md](releases/v1.0.md)：稳定版范围、子系统完成清单、实现选择与接口冻结
+- [releases/v1.0-validation.md](releases/v1.0-validation.md)：可重建参照、行为验收、性能测量与发布阻塞
 - [releases/v1.0-comparison.md](releases/v1.0-comparison.md)：成对比较 runner 的 JSON 协议、统计方法和证据规则
 - [releases/v1.0-progress.md](releases/v1.0-progress.md)：12 个 V1 工作包的首波状态与下一步验证交付（非完整 TODO 台账）
 - [validation-main-integration-2026-10-13.md](validation-main-integration-2026-10-13.md)：main 集成修复与实际运行范围
