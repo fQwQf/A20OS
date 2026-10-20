@@ -55,7 +55,7 @@ static vn_node_t   g_nodes[VNFS_MAX_NODES];
 static vn_open_t   g_open_nodes[VNFS_MAX_NODES];
 /* Close-token idempotency registry (used only when the frontend negotiated
  * UFS_CLOSE_TOKEN_CAPABILITY; lazily initialized with a per-boot monotonic
- * clock epoch).  See docs/rust/ufs-close-token-design-r1.md. */
+ * clock epoch).  See docs/fs/ufs-close-token.md. */
 static ufs_close_token_table_t g_close_tokens;
 static int         g_readonly;
 static int         g_ext4_backend;

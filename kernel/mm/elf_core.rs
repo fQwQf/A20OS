@@ -7,12 +7,9 @@
 //! marker test, initial-stack and auxiliary-vector construction, and the
 //! setuid/setgid/capability transition.
 //!
-//! The C side keeps only the reviewed low-level adapter primitives listed in
-//! `docs/rust/elf-exec-function-map-2026-10-16.md` §8: file reads
-//! (`vfs_read`/`vfs_pread`/`vfs_lseek`), page/frame allocation (`frame_alloc`,
-//! `pt_map`), direct-map copies, locks, usercopy, path helpers, `random_u64`,
-//! and the architecture register-state / final machine entry. No business
-//! decision remains in C behind a thin dispatch wrapper.
+//! The C side keeps low-level file-read, page/frame allocation, direct-map,
+//! lock, usercopy, path, randomness, and architecture-entry primitives. It
+//! does not duplicate ELF planning or exec policy decisions.
 //!
 //! The parsing functions work on caller-supplied byte slices, so they are
 //! exercised directly by the host `--test` build with malformed, truncated and
@@ -27,7 +24,7 @@ use core::mem::size_of;
 // Convention: every fallible function in this module returns a *negative*
 // errno (`Err(-ENOEXEC)`), and every `#[no_mangle]` FFI entry returns either
 // zero/success-data or a negative errno. One convention, both sides of the
-// C bridge (see docs/rust/free-elf-fixtures-2026-10-16/README.md §3).
+// C bridge (see tools/tests/elf-fixtures/README.md, “Boundary contract”).
 pub const EPERM: i32 = 1;
 pub const ENOENT: i32 = 2;
 pub const EIO: i32 = 5;

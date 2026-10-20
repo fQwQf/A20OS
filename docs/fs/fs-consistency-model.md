@@ -2,6 +2,12 @@
 
 “支持”表示当前代码路径存在，**不等于每个后端、架构和崩溃场景都已有运行时测试**。矩阵内容已按 2026-08 的 `kernel/fs/` 与 VFS wrapper 做过源码核对；当前提交没有匹配的完整干净双架构平台复验。
 
+当前候选的持久化限制和失败必须与下方实现矩阵分开阅读：ext4 no-journal deferred-orphan 的
+EIO 根因仍未定位；NTFS crash/remount 目前在 C/R 两侧均失败，不能记作已修或由双侧同错豁免。
+共享写 shutdown 的已修 RV64 数据完整性场景见 [MM/COW 契约](../mm-fork-mprotect-cow.md)，
+但 Linux RESTART 只做 checked sync，不等同全局 CLEAN。UFSD 的 CLOSE 确认协议及重启边界见
+[close-token 契约](ufs-close-token.md)。ISOFS pressure 测试若以 `-ENODEV` 退出也不构成通过。
+
 ## 1. 范围
 
 覆盖的后端：

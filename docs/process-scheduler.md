@@ -13,6 +13,19 @@
 - `kernel/proc/current.c`：current slot 与切换完成；
 - `kernel/proc/lifetime.c`：运行时不变量和统计。
 
+Task object identity 是独立于 task 存储和 PID 分配的引用对象。TASK/THREAD/DEBUG
+handles 与在途传递持有 identity 引用；identity 对 task 的反向关联是弱引用，pin 时必须在
+`task_object_lock` 下先核对 destroy 状态并取得 task 引用。detach 只清弱关联；task 最后引用
+释放后才释放 identity。退出通知先 pin，再在锁外调用 watcher，避免回调重入锁。对应的
+Rust 状态域由 `TASK_OBJECTS_IMPL=rust` 选择，Makefile 当前默认 `c`；这不改变 C task 存储、
+PID allocator 或 handle table 的所有权。
+
+退出路径采用 `exit.c` 中的有序退出控制器；它按阶段处理子进程重挂、资源解绑、通知和
+最终引用释放。`TASK_EXIT_IMPL` 在 Makefile 中仍默认为 `c` 并保留分支，`task.c` 的最终
+task-object release 也仍受条件配置控制；因此文档不把整个 task exit 或 final release
+描述为 Rust-only。正常改动应保持 `proc_put` 的最后引用只在对象已脱离调度、父子关系和
+弱 identity 反向链接后释放。
+
 ## 1. 三个相互独立的状态维度
 
 ### 1.1 进程语义状态

@@ -78,7 +78,7 @@ where
 /// the declared C ABI, and remain executable for the complete call; the C
 /// adapter validates this before entering Rust.
 /// Callbacks run synchronously and must obey the lock/lifetime contract in
-/// `docs/rust/task-construction.md`. `abort` must tolerate failure before
+/// `docs/process-scheduler.md`. `abort` must tolerate failure before
 /// allocation and must be idempotent for a task already detached by a failed
 /// publication operation.
 #[unsafe(no_mangle)]

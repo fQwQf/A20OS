@@ -1,5 +1,13 @@
 # Fork 与 mprotect 的 COW 并发约束
 
+共享文件映射还必须保留 dirty-state 跨权限变化和 shutdown 的语义：已写入的共享页在
+`mprotect(PROT_READ)`、unmap 或关闭映射时不能因 dirty bit 丢失而漏写。RV64 曾出现
+“共享写入 → 只读保护 → clean shutdown → coldboot 读回全零”的数据丢失；已修复路径通过
+字节精确冷启动读回与 `e2fsck` 验证。该记录是 RV64 特定场景证据，不代表所有架构都已
+运行验证。Linux RESTART 的 checked `vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新
+fault 的 guest 覆盖及 ARM32 `PTE_D=0` 编译仍是证据缺口。实现和验收边界见
+[`fs-consistency-model.md`](fs/fs-consistency-model.md)。
+
 fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子映射所需的帧引用和父 PTE 的 COW 降权。子页表映射在释放父叶节点锁后完成，避免在节点锁内分配页表；若子映射失败，父映射保留 COW 仍可安全写入。
 
 `mprotect` 在写入权限前重新核对它先前观察到的 PTE。若并发 COW 已替换该项，它会重试同一虚拟地址。对 fork 后仍有多个引用的私有匿名页恢复写权限时，PTE 保留 COW，第一次写入仍会复制页面。

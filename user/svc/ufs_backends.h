@@ -76,7 +76,7 @@ typedef struct ufs_backend {
     int64_t (*sync)(void);
     /* Optional v2 per-open lifetime hooks. A backend advertises lifetime
      * tokens only when OPEN, CLOSE, and CLOSE_CONFIRM callbacks are present.
-     * Close-token extension (docs/rust/ufs-close-token-design-r1.md): open
+     * Close-token extension (docs/fs/ufs-close-token.md): open
      * receives a non-NULL token_out only when the client negotiated
      * UFS_CLOSE_TOKEN_CAPABILITY; it may then store a nonzero open token
      * (token 0 keeps that open on the legacy path).  close receives the
