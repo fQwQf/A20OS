@@ -1,7 +1,7 @@
 # Minecraft Java 客户端
 
-A20OS 的 XFCE 镜像可运行 Minecraft Java 1.21.11，使用 OpenJDK 21、原生
-Wayland 窗口和 virgl OpenGL。默认桌面入口启动官方 demo，便于在没有登录会话
+A20OS 的 XFCE 镜像可在 x86_64、aarch64 与 riscv64 上运行 Minecraft Java
+1.21.11，使用 OpenJDK 21、原生 Wayland 窗口和 virgl OpenGL。默认桌面入口启动官方 demo，便于在没有登录会话
 的测试镜像中验证世界生成和交互。账号登录、Realms 和联机尚未验收。
 
 ## 构建和启动
@@ -35,6 +35,43 @@ Custom、4 区块视距、5 区块模拟距离、关闭云和 mipmap。已有玩
 Java wrapper 只定位真实 JVM，不再全局注入堆上限或关闭隐式空指针检查；
 Minecraft 的堆设置局限于自身启动器。
 
+## 多架构客户端（aarch64 / riscv64）
+
+Minecraft Java 1.21.11 固定使用 LWJGL 3.3.3；Mojang 只发布 x86_64 的
+Linux native，因此其他架构按下表选择 LWJGL 来源。loongarch64 目前在任何
+发行渠道都没有 LWJGL native，下载脚本会直接报错退出，不会产出不完整的
+客户端目录。
+
+| 架构 | LWJGL 版本 | 来源 | 说明 |
+| ---- | ---------- | ---- | ---- |
+| x86_64 | 3.3.3 | Mojang 版本清单 | 原有路径，模块 jar 与 native 均随清单下载 |
+| aarch64 | 3.3.3 | Maven Central | `natives-linux-arm64`，与 Mojang 固定版本一致 |
+| riscv64 | 3.3.6 | Maven Central | riscv64 native 自 3.3.6 起发布；8 个模块必须整套同版本，加载器在装载时强制一致 |
+
+```sh
+tools/fetch-minecraft.sh 1.21.11 build/minecraft/1.21.11-x86_64  x86_64
+tools/fetch-minecraft.sh 1.21.11 build/minecraft/1.21.11-aarch64 aarch64
+tools/fetch-minecraft.sh 1.21.11 build/minecraft/1.21.11-riscv64 riscv64
+```
+
+Maven 路径会跳过版本清单中的全部 org/lwjgl 条目（普通 jar 与 native jar
+都由 Maven 版本取代），下载后校验 SHA1，解包 native 时校验 ELF magic 与
+e_machine（aarch64=183，riscv64=243），避免混入宿主或错误架构的 .so。
+client.jar、其余 library 与 4591 个 asset 对象三架构一致；aarch64 /
+riscv64 的 classpath 为 67 个 jar（51 个原版 + 16 个 LWJGL），解包 8 个
+LWJGL native .so。
+
+对应实例 `instances/minecraft-{aarch64,riscv64}.toml` 与 x86_64 相同：
+4 GiB 内存、4 GiB XFCE world、virgl GPU；aarch64 因 SMP 竞态固定单 CPU
+（见[已知问题](../status/current/known-issues.md)），riscv64 为 4 CPU。启动时把对应客户端
+目录传给 `GUI_MEDIA`：
+
+```sh
+tools/a20 check minecraft-aarch64
+tools/a20 run minecraft-aarch64 -- GUI_MEDIA=build/minecraft/1.21.11-aarch64
+tools/a20 run minecraft-riscv64  -- GUI_MEDIA=build/minecraft/1.21.11-riscv64
+```
+
 ## 本轮实现
 
 这些内核修复通过通用接口提供，未按 Minecraft 进程名或 ISA 名特判：
@@ -52,7 +89,7 @@ Minecraft 的堆设置局限于自身启动器。
 
 详见 [GPU 共享与同步](../graphics/virtgpu-sharing-and-sync.md)、
 [GPU 发现](../graphics/drm-sysfs-discovery.md) 和
-[网卡枚举](../linux-interface-enumeration.md)。
+[网卡枚举](../kernel/linux-abi/interface-enumeration.md)。
 会话根据 GPU 协商得到的 3D_FEATURES 自动选择 GLES 或 pixman，可通过
 `A20_RENDERER` 覆盖，不用架构判断。
 
@@ -71,7 +108,8 @@ labwc autostart，不进入生产自启动。默认使用独立的 `/root/.minec
 原生 GPU 测试在 x86_64 与 RISC-V 四核抢占 guest 上通过：
 `drm_prime_test`、`gpu3d_test`；2D fallback 也通过。对应门禁为
 `make smoke-drm-prime`。ARM32 和 AArch64 的通用 GPU/文件操作改动已交叉构建。
-这些测试不等于其他架构已运行 Minecraft 桌面。
+这些测试本身不等于其他架构已运行 Minecraft 桌面；aarch64 与 riscv64 的
+桌面启动验收见「多架构客户端」一节与文末验收记录。
 
 ## 当前边界
 
@@ -89,7 +127,7 @@ labwc autostart，不进入生产自启动。默认使用独立的 `/root/.minec
   不是异步 GPU scheduler；DMA-BUF CPU 同步目前覆盖线性 level-0 纹理。
 
 [组件状态](minecraft-components.md) 记录 JVM、native 和音频的具体范围。
-[Firefox 验证](xfce-x86_64-validation.md) 单独记录 Bing 联网结果。
+[Firefox 验证](../status/history/xfce-x86_64-validation.md) 单独记录 Bing 联网结果。
 
 
 ## 2026-10-12 最终镜像记录

@@ -1,65 +1,29 @@
-# Virtgpu transfers, scanout and shared buffers
+# Virtgpu 传输、scanout 与共享缓冲
 
-The native virtgpu transfer path now sends the fixed virtio wire payload in
-both directions. RESOURCE_ATTACH_BACKING supplies guest pages; transfer commands
-do not carry another entry list. DMA cache maintenance covers the attached VMO.
-Zero stride/layer-stride is used for ordinary resources, as required by the
-non-blob protocol. The host validates format-dependent boxes and offsets.
+native virtgpu 传输路径现在双向都发送固定的 virtio 线格式负载。`RESOURCE_ATTACH_BACKING` 提供 guest 页；传输命令不再携带另一份 entry 列表。DMA cache 维护覆盖已挂载的 VMO。普通资源使用零 stride/layer-stride，这是非 blob 协议的要求。host 侧校验与格式相关的 box 与偏移。
 
-Host-rendered framebuffers are presented with SET_SCANOUT and RESOURCE_FLUSH.
-The CPU framebuffer path restores its own scanout resource before flushing.
-This avoids displaying unchanged guest backing after rendering to a host texture.
+由 host 渲染的 framebuffer 通过 `SET_SCANOUT` 与 `RESOURCE_FLUSH` 呈现。CPU framebuffer 路径在 flush 之前恢复它自己的 scanout 资源，从而避免在渲染到 host texture 之后仍然显示未更新的 guest 后端。
 
-SUBMIT_3D requests a host GPU fence and waits for its response. The synchronous
-backend exports a real completed sync_file only after that completion. Input
-sync_files, poll, FILE_INFO (including details), MERGE and deadline hints are
-implemented for completed fences. There is no asynchronous fence producer yet.
-A device mutex orders submissions, CPU synchronization and fence export; waiters
-are notified when an operation finishes.
+`SUBMIT_3D` 请求一个 host GPU fence 并等待其响应。同步后端只在该 fence 真正完成之后导出已完成的 `sync_file`。对已完成的 fence，实现了输入 `sync_file`、poll、`FILE_INFO`（含 details）、`MERGE` 与 deadline 提示。目前还没有异步 fence 生产者。一个设备互斥量对提交、CPU 同步与 fence 导出排序；操作完成时唤醒等待者。
 
-PRIME exports hold the live GEM object and map the same VMO, replacing memfd
-snapshots and the 64-entry descriptor table. dup and SCM_RIGHTS retain that file
-and its object pin. Imported buffers survive the exporter's GEM_CLOSE and fd
-close. Mappings retain the VMO after the final descriptor closes. Export flags
-use Linux DRM_CLOEXEC=O_CLOEXEC and DRM_RDWR=O_RDWR.
+PRIME 导出持有活跃的 GEM 对象并映射同一个 VMO，取代了 memfd 快照与 64 项描述符表。`dup` 与 `SCM_RIGHTS` 保留该文件及其对象 pin。导入的缓冲在导出方 `GEM_CLOSE` 与 fd close 之后仍然存活。最后一个描述符关闭之后映射仍保留 VMO。导出标志使用 Linux 的 `DRM_CLOEXEC=O_CLOEXEC` 与 `DRM_RDWR=O_RDWR`。
 
-DMA_BUF_IOCTL_SYNC downloads host data on START READ and uploads CPU data on
-END WRITE. Sync-file export/import and poll are supported with this synchronous
-backend. CPU synchronization currently covers linear level-zero resources;
-compressed formats, mip chains and array layouts need further layout tracking.
-GEM handles are still device-wide: per-open ownership and namespace accounting
-remain separate work. No arbitrary external DMA-BUF exporter is imported.
+`DMA_BUF_IOCTL_SYNC` 在 START READ 时下载 host 数据，在 END WRITE 时上传 CPU 数据。该同步后端支持 sync-file 的导出/导入与 poll。CPU 同步目前覆盖线性的 level-zero 资源；压缩格式、mip 链与数组布局需要进一步的布局跟踪。GEM 句柄仍是设备级：per-open 归属与命名空间记账属于另外的工作。不导入任意外部 DMA-BUF exporter。
 
-Device mmap dispatch uses vfile_ops_t.mmap, shared by DRM and DMA-BUF files;
-the syscall layer no longer identifies DRM files. Driver ABI 3 rejects modules
-built for the old GPU and file operation tables. Rebuild modules with the kernel.
+设备 mmap 分派使用 `vfile_ops_t.mmap`，由 DRM 与 DMA-BUF 文件共用；syscall 层不再识别 DRM 文件。驱动 ABI 3 拒绝为旧 GPU 与文件操作表构建的模块，需用当前内核重新构建模块。
 
-## Verification
+## 覆盖范围
 
-Four-CPU preemptive x86_64 and riscv64 guests with host virgl passed:
+四 CPU 抢占式 x86_64 与 riscv64 guest 配合 host virgl 覆盖：
 
-- native resource allocation and 96 simultaneous objects;
-- nonuniform upload, erase guest backing, download and compare;
-- real host-rendered red and blue pixels;
-- DMA-BUF CPU upload and download against the host resource;
-- native fence export, dependency import, poll and FILE_INFO;
-- shared mmap writes in both directions, 80 simultaneous exports, SCM_RIGHTS
-  across fork, exporter teardown before import, and mappings after fd close;
-- sync-file merge, details, deadline hints and invalid argument rejection.
+- native 资源分配与 96 个并发对象；
+- 非均匀上传、擦除 guest 后端、下载并比对；
+- 真实由 host 渲染的红、蓝像素；
+- 针对 host 资源的 DMA-BUF CPU 上传与下载；
+- native fence 导出、依赖导入、poll 与 `FILE_INFO`；
+- 双向共享 mmap 写入、80 个并发导出、跨 fork 的 `SCM_RIGHTS`、导入方先于导出方拆除、fd 关闭后映射仍可用；
+- sync-file merge、details、deadline 提示与非法参数拒绝。
 
-Logs: `build/browser-followup/drm-live-prime-{x86,rv}-guest.log`.
-`make smoke-drm-prime` is the durable non-virgl sharing regression.
-The old kernel fails the new test when writes to the original mapping do not
-appear in the exported mapping; native rendering readback also
-rejects a valid zero-stride transfer with EINVAL. Separate matching old modules
-were used for those negative checks.
-ARM32 and AArch64 kernel builds and the seven architecture boundary assertions
-also pass. These are interface tests; Minecraft gameplay is validated separately.
+`make smoke-drm-prime` 是可复用的非 virgl 共享回归门禁。ARM32 与 AArch64 内核构建以及七项架构边界断言也在覆盖范围内。这些是接口测试；Minecraft 的实际可玩性另行验证。
 
-Large requests, backing attachment and fenced submissions now use the same
-interrupt-first wait policy as short commands. They recheck the used index after
-subscribing, retaining bounded poll/yield for boot or failed IRQ registration.
-This removes the fixed 65,536 cache-synchronized polling iterations before a
-runtime task can sleep. Native rendering, sharing and synchronization tests pass
-on four-CPU preemptive x86_64 and riscv64:
-`build/browser-followup/virtgpu-irq-wait-{x86,rv}-guest.log`.
+大请求、后端挂载与 fenced 提交现在使用与短命令相同的「中断优先」等待策略：订阅之后重新检查 used index，为启动阶段或 IRQ 注册失败保留有界的 poll/yield。这消除了运行时任务进入睡眠之前固定的 65,536 次 cache 同步轮询。
