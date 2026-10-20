@@ -6,7 +6,7 @@
 字节精确冷启动读回与 `e2fsck` 验证。该记录是 RV64 特定场景证据，不代表所有架构都已
 运行验证。Linux RESTART 的 checked `vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新
 fault 的 guest 覆盖及 ARM32 `PTE_D=0` 编译仍是证据缺口。实现和验收边界见
-[`fs-consistency-model.md`](fs/fs-consistency-model.md)。
+[`fs-consistency-model.md`](../../fs/fs-consistency-model.md)。
 
 fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子映射所需的帧引用和父 PTE 的 COW 降权。子页表映射在释放父叶节点锁后完成，避免在节点锁内分配页表；若子映射失败，父映射保留 COW 仍可安全写入。
 

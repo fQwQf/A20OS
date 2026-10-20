@@ -4,7 +4,7 @@
 
 当前候选的持久化限制和失败必须与下方实现矩阵分开阅读：ext4 no-journal deferred-orphan 的
 EIO 根因仍未定位；NTFS crash/remount 目前在 C/R 两侧均失败，不能记作已修或由双侧同错豁免。
-共享写 shutdown 的已修 RV64 数据完整性场景见 [MM/COW 契约](../mm-fork-mprotect-cow.md)，
+共享写 shutdown 的已修 RV64 数据完整性场景见 [MM/COW 契约](../kernel/mm/fork-mprotect-cow.md)，
 但 Linux RESTART 只做 checked sync，不等同全局 CLEAN。UFSD 的 CLOSE 确认协议及重启边界见
 [close-token 契约](ufs-close-token.md)。ISOFS pressure 测试若以 `-ENODEV` 退出也不构成通过。
 

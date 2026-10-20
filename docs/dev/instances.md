@@ -1,11 +1,11 @@
 # 实例化构建与运行（instances/ 与 tools/a20）
 
-1.0 的 [平台决策](releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。
+1.0 的 [平台决策](../releases/v1.0.md#2-平台范围) 已将 LoongArch32/PPC64LE 退出支持。
 当前 `instances/` 只登记活跃目标；旧 PPC64LE 清单归档在
-[`platforms/retired-instances/`](platforms/retired-instances/)，LoongArch32 的历史运行
+[`platforms/retired-instances/`](../platforms/retired-instances)，LoongArch32 的历史运行
 记录见平台文档。Makefile 和 `tools/a20` 都会拒绝这两个目标，并指向干净的 `v0.18`
 checkout 作为历史复现基线。功能与性能实例的证据要求见
-[1.0 验收](releases/v1.0-validation.md)。
+[1.0 验收](../releases/v1.0-validation.md)。
 
 A20OS 的构建、运行与冒烟测试配置统一由实例清单声明：`instances/` 目录下的每个 TOML 文件描述一个完整的、可构建、可运行、可测试的系统实例（架构、板卡、ABI、内核选项、机器配置、根文件系统、网络、GUI、测试期望）。`tools/a20` 读取实例、做完整校验、推导出对应的 Makefile 变量，再调用 make 执行。Makefile 仍是唯一的构建引擎，实例层只负责"配置声明 + 变量推导"，两者通过 `make -n` 输出的 QEMU 命令行保持一致。
 
@@ -225,7 +225,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `deploy` | 需要 `[target]`，并且**有东西可以放到板子上**：要么 `boot_media` + `media_device` 配对，要么 `[handoff].commands`（无块驱动的板走这条路）。有 `[flash]` 则先烧录，然后写启动介质或打印 handoff 命令，最后同 `console` 验证 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（无块驱动的板，产出 handoff 目录而非可写镜像） |
 
-VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
+VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](../platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
 ### 校验规则（选摘）
 
@@ -621,7 +621,7 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 
 ## 宿主侧门禁（不启动 guest）
 
-这几条不是 make 目标，但同样是"不能失败的检查不构成验证"这条规则的执行者。用法与边界见 [graphics/host-tools.md](graphics/host-tools.md)。
+这几条不是 make 目标，但同样是"不能失败的检查不构成验证"这条规则的执行者。用法与边界见 [graphics/host-tools.md](../graphics/host-tools.md)。
 
 | 脚本 | 作用 | 需要 root |
 |---|---|---|
@@ -634,7 +634,7 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 
 ## apk world 镜像实例（用包管理组装用户态）
 
-`[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见 [packaging/overview.md](packaging/overview.md)）：`build` 等价于 `make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于 `run-world` / `run-world-gui`，world 镜像作为第二块盘挂载，含 `/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
+`[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见 [packaging/overview.md](../packaging/overview.md)）：`build` 等价于 `make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于 `run-world` / `run-world-gui`，world 镜像作为第二块盘挂载，含 `/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
 
 例如用 apk 安装完整 XFCE 桌面的实例（`instances/xfce-riscv64.toml`）：
 

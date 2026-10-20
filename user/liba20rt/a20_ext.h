@@ -9,7 +9,7 @@
  * program bytes load through the Native ABI and the Linux bpf(2) wrapper.
  * The KEP verifier is stricter than Linux eBPF: jumps must be strictly
  * forward (no loops) and memory access is limited to the extension-point
- * context window reached through R1 (see docs/extensions.md).
+ * context window reached through R1 (see docs/kernel/extensions.md).
  */
 
 #include "a20_types.h"

@@ -1,6 +1,6 @@
 # 阻塞点协议审计
 
-> **冻结档案（历史里程碑）**：本文是阻塞族逐项审计收口时的快照，已归档不再随 HEAD 更新。文中的回归覆盖与验收结论只属于该历史时点；当前阻塞协议以 [../process-scheduler.md](../process-scheduler.md) 和 `kernel/include/proc/park.h` 为准。使用约定见 [README.md](README.md)。
+> **冻结档案（历史里程碑）**：本文是阻塞族逐项审计收口时的快照，已归档不再随 HEAD 更新。文中的回归覆盖与验收结论只属于该历史时点；当前阻塞协议以 [../kernel/process-scheduler.md](../kernel/process-scheduler.md) 和 `kernel/include/proc/park.h` 为准。使用约定见 [README.md](README.md)。
 
 `BLOCKING_POINT_PROTOCOL_AUDIT`
 

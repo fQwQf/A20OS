@@ -144,7 +144,7 @@ on_rq -> dispatching -> on_cpu -> unowned
 
 本地 picker 只持有本 CPU 的 runqueue 锁，原子完成 `on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取 EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免 8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU编号升序。
 
-远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不在中断处理中途切换；请求在 trap/syscall/timer 返回、显式调度安全点，以及（`CONFIG_KERNEL_PREEMPT`，hosted 默认开）内核态硬件中断处理完毕的返回点消费——内核里跑长 syscall 的任务会在 tick/IPI 到来时被切走，恢复经由既有栈切换路径，无需新汇编（机制与不变量见 `docs/process-scheduler.md` §4.1）。
+远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不在中断处理中途切换；请求在 trap/syscall/timer 返回、显式调度安全点，以及（`CONFIG_KERNEL_PREEMPT`，hosted 默认开）内核态硬件中断处理完毕的返回点消费——内核里跑长 syscall 的任务会在 tick/IPI 到来时被切走，恢复经由既有栈切换路径，无需新汇编（机制与不变量见 `docs/kernel/process-scheduler.md` §4.1）。
 
 所有对象等待使用 tokenized Park/Wake。waiter 先生成 `(task, wait_seq)`token，在对象锁内重查条件并 link，释放对象锁后才 commit；waker 在对象锁内只把 task 引用和 token 转移到 wake queue，释放对象锁后再进入 scheduler。因此提前到达的事件、旧 timeout 和重复 wake 都不能唤醒后续等待。
 
@@ -173,7 +173,7 @@ evq bucket lock -> owner eq->lock
 
 Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait 入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序使用 `event_wait` 替代。
 
-完整状态机、所有权表和验证入口见 [进程、调度与阻塞协议](process-scheduler.md)；公平/延迟选择策略、资格门控、空闲窃取和虚拟 slice 旋钮见 [EEVDF 调度器设计](eevdf-scheduler.md)。
+完整状态机、所有权表和验证入口见 [进程、调度与阻塞协议](kernel/process-scheduler.md)；公平/延迟选择策略、资格门控、空闲窃取和虚拟 slice 旋钮见 [EEVDF 调度器设计](kernel/eevdf-scheduler.md)。
 
 ### 文件系统与 VFS（`kernel/fs/`）
 
@@ -281,7 +281,7 @@ Native ABI 完整规范在哪里？见 [docs/native-abi/00-overview.md](native-a
 ## 接下来看什么
 
 * Native ABI 完整规范：[docs/native-abi/00-overview.md](native-abi/00-overview.md)
-* 进程、调度与阻塞协议：[docs/process-scheduler.md](process-scheduler.md)
+* 进程、调度与阻塞协议：[docs/kernel/process-scheduler.md](kernel/process-scheduler.md)
 * 驱动锁顺序：[drivers/guide/lock-order.md](drivers/guide/lock-order.md)
 * 构建与运行：[README.md](../README.md)
 * 当前问题与路线图：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)

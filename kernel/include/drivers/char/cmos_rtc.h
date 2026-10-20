@@ -21,7 +21,7 @@
  * 0x0a..0x0d and the century byte at 0x32; Linux (include/linux/mc146818rtc.h)
  * and QEMU's mc146818 model use the same indices.  So register A does *not*
  * alias the month, and the date can be read without decoding away mode bits.
- * Source provenance: docs/external-dependencies.md.
+ * Source provenance: docs/dev/external-dependencies.md.
  */
 #define CMOS_RTC_SEC          0x00
 #define CMOS_RTC_MIN          0x02

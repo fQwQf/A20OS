@@ -162,7 +162,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 
 ### 1.4 风险与降级路径
 
-- 这是仓库文档明确警告过的"高风险核心协议重写"（`docs/eevdf-scheduler.md`）。
+- 这是仓库文档明确警告过的"高风险核心协议重写"（`docs/kernel/eevdf-scheduler.md`）。
   因此**逐类提交**：每完成一类，跑 §7 对应冒烟再进行下一类。
 - **降级许可**：某一类若被证明转换不安全（找不到闭合竞争窗口的方案），允许该类
   保留 `proc_lock`，但必须在 `impl-notes-proc.md` 记录论证过程；INV-P4a 的 gate
@@ -612,5 +612,5 @@ verifier 修复循环处理，修不动的如实记录 FAIL 状态并停在那�
   `__switch` 本就按任务保存/恢复 flags，各任务在自己的 `out:` 处恢复，因此
   INV-P1/P4b 的论证不受影响，只是多了一层"窗口内根本没有中断"的保险。
 
-机制、架构钩子与实测数据见 `docs/process-scheduler.md` §4.1 与
+机制、架构钩子与实测数据见 `docs/kernel/process-scheduler.md` §4.1 与
 `docs/status/history/impl-notes-preempt.md`。

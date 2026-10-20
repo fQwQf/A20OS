@@ -68,11 +68,11 @@ Bing 空白问题。现在 XFCE world 加入 Firefox，HTML/HTTP/HTTPS 默认使
 Firefox 的 forkserver 会为没有文件描述符的回复附带空 SCM_RIGHTS 头。
 此前内核错误地以 EINVAL 拒绝，导致 `failed to send a reply message` 断言；
 修复接受空列表，继续解析后续控制消息，详见
-[Linux Unix ancillary ABI](../../linux-unix-ancillary.md)。MM 的 fork shootdown、
+[Linux Unix ancillary ABI](../../kernel/linux-abi/unix-ancillary.md)。MM 的 fork shootdown、
 用户复制生命周期和回收提示数据保留修复另见
-[MM 并发约束](../../mm-fork-mprotect-cow.md)。另修复工作线程的 Unix 凭据、
+[MM 并发约束](../../kernel/mm/fork-mprotect-cow.md)。另修复工作线程的 Unix 凭据、
 SO_PEERPIDFD 选项号和 CLOEXEC，以及
-[线程组结束时的 SIGCHLD 通知](../../linux-child-exit-notification.md)；后者修复
+[线程组结束时的 SIGCHLD 通知](../../kernel/linux-abi/child-exit-notification.md)；后者修复
 已退出的 xfconf-query 仍让 shell 等待的问题。所有修复都使用通用接口。
 
 ### 重跑 fixture
@@ -153,7 +153,7 @@ GPU 资源、PRIME 共享和 fence 修复后，再用生产镜像副本各完成
 对应画面为同目录 `firefox-updated-{2d,3d}-bing.png`。
 此处内核 SHA-256 为
 `965962d4520347257f4ab19da083fabbb9e36613c1d0a2c5ecbe6149a81a67a4`。
-随后另修复 [SIOCGIFCONF](../../linux-interface-enumeration.md) 的输出语义，
+随后另修复 [SIOCGIFCONF](../../kernel/linux-abi/interface-enumeration.md) 的输出语义，
 该修复通过 x86_64/RISC-V 原生回归；它不改变浏览器套接字的数据传输路径。
 
 会话通过 `VIRTGPU_GETPARAM(3D_FEATURES)` 选择渲染器，不判断架构或应用名；

@@ -135,9 +135,22 @@ nav:
       - 启动流程: native-abi/07-startup.md
       - ABI 深化: native-abi/09-native-abi-deepening.md
   - 内核子系统:
-      - EEVDF 调度器: eevdf-scheduler.md
-      - 进程调度: process-scheduler.md
-      - 内核扩展: extensions.md
+      - 调度:
+          - EEVDF 调度器: kernel/eevdf-scheduler.md
+          - 进程调度: kernel/process-scheduler.md
+      - 内存管理:
+          - Fork 与 COW 并发约束: kernel/mm/fork-mprotect-cow.md
+          - Slab CPU 缓存归属: kernel/mm/slab-cpu-cache.md
+      - Linux ABI 兼容细节:
+          - 在线 CPU 上报: kernel/linux-abi/cpuinfo.md
+          - 接口枚举语义: kernel/linux-abi/interface-enumeration.md
+          - Unix 附属数据: kernel/linux-abi/unix-ancillary.md
+          - 子进程退出通知: kernel/linux-abi/child-exit-notification.md
+      - 资源命名空间: kernel/resource-namespaces.md
+      - 内核扩展: kernel/extensions.md
+      - 架构特性:
+          - AArch64 FEX 前置条件: kernel/arch/aarch64-fex-preconditions.md
+          - x86_64 CPU ID: kernel/arch/x86_64-cpu-id.md
       - 文件系统:
           - VFS 边界语义: fs/vfs-edge-semantics.md
           - 一致性模型: fs/fs-consistency-model.md
@@ -181,10 +194,11 @@ nav:
       - VirtualBox x86_64: platforms/virtualbox-x86_64.md
       - VirtualBox AArch64: platforms/virtualbox-aarch64.md
   - 构建与测试:
-      - 构建指南: build.md
+      - 构建指南: dev/build.md
       - 测试门禁: testing-gates.md
-      - 调试指南: debug.md
-      - 外部依赖: external-dependencies.md
+      - 调试指南: dev/debug.md
+      - 实例化构建与运行: dev/instances.md
+      - 外部依赖: dev/external-dependencies.md
   - 打包与发行:
       - 包管理与镜像分发: packaging/README.md
       - 体系总览: packaging/overview.md

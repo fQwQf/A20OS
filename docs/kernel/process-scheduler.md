@@ -120,7 +120,7 @@ RT 队列按 CPU 共用一秒周期、95% 运行预算，tick 与切换路径在
 允许等待 timer 唤醒。`/proc/a20/perf` 的 `rt_throttles` 记录进入限流的次数
 （需开启 perf 采样）。预算目前固定，不提供 `sched_rt_runtime_us` sysctl。
 `sched_stress` 的同 CPU 普通进展与 RT 恢复断言已实际通过；
-配置和日志见 [本轮验证](status/history/validation-docs-completion-2026-10-13.md)，不覆盖长 syscall 有界延迟。
+配置和日志见 [本轮验证](../status/history/validation-docs-completion-2026-10-13.md)，不覆盖长 syscall 有界延迟。
 
 本地选择分两段：
 
@@ -307,7 +307,7 @@ make check-proc-step8-local
 make check-proc-step8
 ```
 
-`check-proc-step8-local` 定义双架构 debug 单核/release 八核累计压力矩阵；`check-proc-step8` 是其聚合别名。目标定义不等于 HEAD 已通过；当前结果必须查看与同一提交匹配的日志。单项契约和故障定位见 [testing-gates.md](testing-gates.md)，`archive/*-audit.md` 是历史阶段证明快照。
+`check-proc-step8-local` 定义双架构 debug 单核/release 八核累计压力矩阵；`check-proc-step8` 是其聚合别名。目标定义不等于 HEAD 已通过；当前结果必须查看与同一提交匹配的日志。单项契约和故障定位见 [testing-gates.md](../testing-gates.md)，`archive/*-audit.md` 是历史阶段证明快照。
 
 `check-doc-test-gates` 是包含构建和多个 QEMU runtime smoke 的广泛聚合目标，可能耗时较长；它不是单纯的文档静态检查。
 

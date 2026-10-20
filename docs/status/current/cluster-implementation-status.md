@@ -540,7 +540,7 @@ idle probe，其固件与此前归档逐字节相同。旧共享内核线程测�
 JVM 或 Minecraft。ARM32 参数仍为单寄存器宽度。树莓派专用板级入口、
 RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺失。
 报告在 `.kernel-build/cluster/shared-program/` 与 `fabric-portability/`，
-本阶段提交对应归档为 `evidence/portable-domain-<commit>/`。
+本阶段提交对应归档为 已删除的运行证据。
 细节见 [26-native-programs.md](../../cluster/26-native-programs.md) 和
 [27-portable-domains.md](../../cluster/27-portable-domains.md)。整体目标保持未完成。
 
@@ -560,7 +560,7 @@ RISC-V MCU 多芯片适配、各平台物理验证及执行能力匹配也仍缺
 实际 ARM 应用与 RTL 迁移测试、旧双 CPU 内核线程及三 CPU 指令回归通过；
 默认 STM32 QEMU 固件仍与归档逐字节一致，RV64 双 CPU 内核再次构建通过。
 报告仍使用 `fabric-portability/`、`shared-program/` 与 `shared-kernel/`。
-本阶段证据单独归档为 `evidence/portable-atomics-<commit>/`。
+本阶段证据单独归档为 已删除的运行证据。
 RV32 的 Linux syscall shim 只是测试工具，不是一个新 MCU 板级端口。
 树莓派、非 ARM 多芯片板级适配、应用同步、JVM/客户端和物理验证仍待完成。
 
@@ -584,7 +584,7 @@ IPI 应答与 worker/controller 退出回收；不是性能或模拟任务状态
 新增 `raspberrypi4[-qemu]` 实例、`check-raspberrypi4`、`check-smp-native` 与
 `check-fdt-view`。FDT reader 的宿主 ASan/UBSan 边界测试覆盖 926 个截断、
 926 个字节变异及七个无效 header。报告在 `raspberrypi4/`、`smp-native/`、
-`fdt-view/`；提交对应证据在 `evidence/raspberrypi4-<commit>/`。
+`fdt-view/`；提交对应证据在 已删除的运行证据。
 AArch64/RV64 新功能测试为 QEMU 自然退出，x86 在关机输出后由夹具停止。
 Pi poweroff/reboot 仍为 halt，
 测试在终态输出后停止模拟器，不声明其电源关闭通过。
@@ -617,7 +617,7 @@ trim registry 与九项 SMP 平台边界检查通过。全仓格式门禁仍有 
 ASan/UBSan 通过；这些宿主测试不替代内核或物理板验证。默认 STM32
 固件 SHA256 仍为 `c6f1737ce1523db0c20caeb2334815fa624377f65530a6fe176b48a92914b21d`。
 ABI 边界、文档漂移/引用和裁剪注册表门禁通过，证据归档为
-`evidence/execution-<commit>/`。完整目标保持未完成。
+已删除的运行证据。完整目标保持未完成。
 
 全仓格式门禁仍为 114 个既有漂移，本次没有增加失败，也未修改格式豁免基线。
 
@@ -633,7 +633,7 @@ MCU Native 程序与服务器复用 `sys_native_sync.c` 和 `ipc/futex.c`，新�
 MCU 原生应用及 RTL 联合验证通过，原有集群作业和 Linux futex 压力回归通过。
 x86 测试暴露的 C 线程入口栈偏移已放入架构适配，Linux clone 不走该路径；
 RV32 Native 同步程序编译链接通过，尚未声明其用户态开机验收。证据随提交
-保存在 `evidence/native-sync-<commit>/`，格式门禁的既有 114 项失败未增加。
+保存在 已删除的运行证据，格式门禁的既有 114 项失败未增加。
 
 ## 统一 Native 用户线程（2026-10-12）
 

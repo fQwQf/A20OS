@@ -164,7 +164,7 @@ SD 分区和板级驱动的验收。
 板上编译不再是常规路径：`gcc` 作为 apk 包从 Alpine 上游取得（`devtools` world），
 板上没有自举的交叉工具链。因此文档里曾描述的"先构建 musl-cross-make 再自举
 GCC"的流程与 `MUSL_CROSS_ROOT` 已随源码树一起删除；宿主侧要编译 C/C++/Rust
-目标程序时，用发行版自己的交叉工具链（见 [build.md](../build.md) 的环境准备），
+目标程序时，用发行版自己的交叉工具链（见 [build.md](../dev/build.md) 的环境准备），
 产物再按第 6 节检查后放进 world 或 `user/cmds/`。
 
 大型 C++ 工程会消耗大量内存，`-j$(nproc)` 只适合编译器支持并行的阶段；上游

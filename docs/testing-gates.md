@@ -152,7 +152,7 @@ CPU 的 tick 交错扫描，x86_64 实测 ≤1ms）；无抢占对照（CONFIG_K
 
 `make check-mm-lock-model` 覆盖 MM/VMA/页表这一组静态契约：`MM_LOCK_MODEL`、`MM_VMA_PTE_AUDIT`、`COW/DEMAND_FAULT_TLB_CONTRACT`、`MM_FORK_COW_REGRESSION_GUARD`、`FILE_MMAP_PAGE_CACHE_CONTRACT`、`OOM_RECLAIM_LIFETIME_CONTRACT`、`mm_seg_index_overflow` 等；并确认 `smoke-mm-stress` 与 `MM_STRESS: PASS` 存在。它现在还跑 `smoke-mm-seg-index-overflow`——那条链路的容量溢出分支是整棵树里唯一能被触达的地方，只挂在单跑用例上等于没人验证（见下文「`seg index overflow`」一节）。
 
-RV64 内核 trap 帧的 `t0` 保存回归单独由 `make smoke-rv64-trap-t0` 覆盖。它在单 hart guest 中用启动参数触发汇编哨兵，并等待本 CPU 的 supervisor timer IRQ；没有真实 IRQ 或 `t0` 在返回后变化都会失败。根因、负控结果和寄存器契约见 [mm-fork-mprotect-cow.md](mm-fork-mprotect-cow.md#rv64-内核-trap-的寄存器保存)。
+RV64 内核 trap 帧的 `t0` 保存回归单独由 `make smoke-rv64-trap-t0` 覆盖。它在单 hart guest 中用启动参数触发汇编哨兵，并等待本 CPU 的 supervisor timer IRQ；没有真实 IRQ 或 `t0` 在返回后变化都会失败。根因、负控结果和寄存器契约见 [kernel/mm/fork-mprotect-cow.md](kernel/mm/fork-mprotect-cow.md#rv64-内核-trap-的寄存器保存)。
 
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
 
@@ -456,9 +456,9 @@ rg -n 'posix_timer_tick|posix_itimer_cpu_tick' kernel/mcu/mcu_stubs.c kernel/pro
 
 ### 外部依赖边界
 
-`make check-external-dependency-boundary` 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中，`docs/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等，并确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
+`make check-external-dependency-boundary` 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中，`docs/dev/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等，并确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
 
-失败时查 `Makefile` 的 lwIP 包含语句，补充或恢复 `docs/external-dependencies.md` 中的对应契约标题，并确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
+失败时查 `Makefile` 的 lwIP 包含语句，补充或恢复 `docs/dev/external-dependencies.md` 中的对应契约标题，并确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
 
 vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第一方质量声明与测试。所有 `kernel` 目录级 `rg` 扫描必须携带 `--glob '!kernel/external/**'` 排除；`user/` 侧检查只允许对具名第一方文件做 marker 断言，禁止目录级扫描。新增检查目标必须遵守同一规则；唯一的例外是明确标注为集成测试的目标（如 `check-external-dependency-boundary` 本身）。
 
@@ -1045,7 +1045,7 @@ Realtek ID，所以 `-nic user,model=rtl8139` 起来的那个 PCI function 没�
 **门禁覆盖不到的部分**：一台 RTL8139、QEMU user-mode 网络后端、TCG、单核、
 INTx（这个型号没有 MSI-X）。寄存器图和 RX ring 几何是照着外部 Debian QEMU 10.0.13+ds 源树
 `qemu-10.0.13+ds/hw/net/rtl8139.c` 写的，**没有在真实硅片上跑过**；来源与解包定位见
-[外部 QEMU 源码定位](external-dependencies.md)。同一个
+[外部 QEMU 源码定位](dev/external-dependencies.md)。同一个
 `RCR[12:11]` 字段在 RTL8139C datasheet 上写的是「8K + 16K」，驱动按 QEMU 的语义
 编程成 64 KiB，硅片上是否一致**未验证**。`TxPoll` 也有同样的分歧：datasheet 是
 bit 5，QEMU 是 bit 6，驱动写 `0x60` 两边都满足，并在代码里写明了这个妥协。不覆盖：

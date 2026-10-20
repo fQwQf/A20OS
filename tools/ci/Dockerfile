@@ -10,7 +10,7 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 与 docs/build.md 的“环境准备”一节保持一致；新增依赖时两边同步。
+# 与 docs/dev/build.md 的“环境准备”一节保持一致；新增依赖时两边同步。
 # 注意：ccache 必装（CI 缓存依赖它），fakeroot 供 mkrootfs --usermode 使用。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl git ca-certificates xz-utils file \
@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # LoongArch64 交叉工具链在 Debian 主源的 cross-ports 里；个别版本缺失时
-# 按 docs/build.md 的说明改用 Loongson 官方工具链。
+# 按 docs/dev/build.md 的说明改用 Loongson 官方工具链。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc-loongarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/* \

@@ -654,7 +654,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 ### Kernel extension (0x0E00)
 
-扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/extensions.md：加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
+扩展程序对象（`A20_OBJ_EXT_PROG`），设计见 docs/kernel/extensions.md：加载经过线性扫描验证的受限字节码程序并附着到内核扩展点。
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|

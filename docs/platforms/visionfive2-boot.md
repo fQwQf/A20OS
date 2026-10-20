@@ -81,7 +81,7 @@ make vf2-extra-sources
 
 `/extra` 里的 gcc、git、vim 等现在都是 Alpine 上游 apk 包,由 world 清单解析,
 不再自举 musl-cross-make 交叉工具链;`MUSL_CROSS_ROOT` 随之删除。宿主侧要编译
-目标程序时用发行版自己的 RISC-V 交叉工具链(见 [build.md](../build.md))。
+目标程序时用发行版自己的 RISC-V 交叉工具链(见 [build.md](../dev/build.md))。
 
 产物（`build/vf2-firmware/`，不入库）：
 
