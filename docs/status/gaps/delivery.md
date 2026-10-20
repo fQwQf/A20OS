@@ -2,13 +2,6 @@
 
 对应 V1-DELIVERY。现状见 [current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
 
-### DELIVERY-01 扫描候选与台账的关系
-
-- 现状：`tools/v1_requirements.py` 扫描出约 2,500 条候选（源码注释、TODO 字样等），其中 11 条人工映射；真正的待办来源已经是 `docs/status/gaps/`。
-- 缺口：候选清单没有逐条归类。但**这不是 1.0 缺口**——扫描器按关键词抓取，不等于未完成需求；逐条 triage 是记账工作，不改善系统。
-- 关闭条件：不要求清空候选。只需保证：(a) `gaps/` 是唯一待办来源；(b) 扫描器不把台账本身当候选（已按 `gap_ledger` 分类）；(c) 需要新增缺口时从候选里人工挑选并写明依据。其余候选保持 `needs_triage`，不阻塞发布。
-- 来源：`v1.0-requirements.json`、[requirements-2026-10-14.md](requirements-2026-10-14.md)。
-
 ### DELIVERY-02 没有可复现的干净候选
 
 - 现状：`tools/a20 run qemu-riscv64` 的 shell 门禁在带未提交改动的工作树上通过；没有干净候选。
