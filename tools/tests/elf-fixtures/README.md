@@ -5,7 +5,7 @@ This directory contains a deterministic generator, oracle driver, TSV expectatio
 Run the full host check from the repository root:
 
 ```sh
-<repo>/.git/parallel-rewrite/run-build.sh build-2 sh tools/test-elf-exec-host.sh
+sh tools/test-elf-exec-host.sh
 ```
 
 Or generate inputs for inspection:
