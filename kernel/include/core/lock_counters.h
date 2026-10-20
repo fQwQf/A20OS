@@ -24,7 +24,7 @@ void lock_counters_init(void);
  * How many locks the fixed registry currently holds, and how many
  * lock_counters_register() calls it had to refuse because it was full.
  *
- * impl-notes-net.md §8.2 and §8.7 recorded the budget question -- the server
+ * The budget question: the server
  * profile registers 128 socket-table bucket locks plus proc, runq, lwip, the
  * three fs locks and the slab cache, against LOCK_COUNTERS_MAX of 192 -- and
  * noted that a registration past the ceiling was *silently* dropped.  A silent

@@ -17,7 +17,6 @@
   不是异步 GPU scheduler；DMA-BUF CPU 同步目前覆盖线性 level-0 纹理。
 
 [组件状态](../../distro/minecraft-components.md) 记录 JVM、native 和音频的具体范围。
-[Firefox 验证](../history/xfce-x86_64-validation.md) 单独记录 Bing 联网结果。
 
 ## 实现范围
 

@@ -1884,7 +1884,7 @@ smoke-net-rtl8139:
 #
 # The guest runs a background flood loop (--load) and -smp 4, the amplifier
 # that reproduced the fault on the unfixed tree: two of three baseline runs
-# corrupted command 43/44 (docs/status/history/serial-fidelity.md).  Deliberately
+# corrupted command 43/44 on the unfixed tree.  Deliberately
 # NOT asserted: interleaved_tokens.  A kernel print spliced into an echo line
 # corrupts the *log*, not the receive path, and counting it here would make
 # this gate fail on console traffic that the driver delivered correctly.

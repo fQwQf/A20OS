@@ -957,8 +957,7 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
 /*
  * Reference-count ledger.
  *
- * docs/status/history/impl-notes-net.md §8.3 and §8.6 recorded the reference count as
- * a primitive that had been walked by hand over 54 sites and never once run.
+ * The reference count had been walked by hand over 54 sites and never once run.
  * These four counters are that run, made visible:
  *
  *   allocs   sockets handed out by net_socket_alloc()
@@ -1007,7 +1006,7 @@ int  net_bh_slot_pending(int idx);
 /*
  * -ENOTCONN attribution.
  *
- * impl-notes-net.md §8.5 left one question open: the peer is resolved with no
+ * One question was left open: the peer is resolved with no
  * lock held and re-checked after the ordered pair is taken, so a concurrent
  * close() in that window turns a send into an error.  The mitigation (re-check
  * and fail) was in place; what was missing was any way to tell "the window

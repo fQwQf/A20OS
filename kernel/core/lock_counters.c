@@ -28,8 +28,8 @@ static int g_lock_counters_initialized;
  * The refusal used to be completely silent, which is the worst possible
  * behaviour for this subsystem: the lock keeps working, it just stops being
  * counted, and /proc/a20/lock_contention then reports a clean run for a lock
- * that was never observed.  impl-notes-net.md §8.2/§8.7 flagged exactly this
- * for the socket-table bucket locks (128 of them on the server profile against
+ * that was never observed.  This flag applied exactly to the socket-table
+ * bucket locks (128 of them on the server profile against
  * a ceiling of 192), so the drop is now counted and rendered on the same
  * report that would otherwise have lied.
  */
