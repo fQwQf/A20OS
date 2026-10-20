@@ -3386,7 +3386,9 @@ for _base in ("smoke-sched-stress", "smoke-proc-stress"):
     _argv[_argv.index("-smp") + 1] = "2"
     CASES[_alias]["log"] = CASES[_base]["log"].replace(".log", "-smp2.log")
     CASES[_alias]["expect"] = list(CASES[_alias]["expect"]) + [
-        "[SMP] 2/2 configured CPUs online",
+        # Brackets are regex classes to the log matcher and are not escaped by
+        # bre(), so they have to be escaped here like every other "[TAG] marker.
+        "\\[SMP\\] 2/2 configured CPUs online",
     ]
     # Two CPUs make the same workload slower under TCG; the single-CPU budget
     # would turn a slower-but-healthy run into a timeout.
