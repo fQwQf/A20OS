@@ -7,6 +7,7 @@
 - 现状：`ext4_inode_remove()` 在存在缓存 vnode 时只标 unlinked，不减磁盘链接计数、不记 orphan 链；缺陷在 unlink 当下就存在。
 - 缺口：POSIX unlink-while-open 语义保留了，但崩溃/重启后无法回收或恢复该 inode。
 - 关闭条件：open-unlink 后崩溃/重启，inode 要么被回收、要么被恢复到 `lost+found`，且 `e2fsck -fn` 干净；不许用 `e2fsck -fy` 修镜像算通过。
+- 诊断：[notes/fs-ext4-orphan.md](notes/fs-ext4-orphan.md)。
 - 来源：[current/ext4-orphan-gap.md](../current/ext4-orphan-gap.md)、requirements N21。
 
 ### FS-02 JBD2 特性语义
@@ -57,3 +58,10 @@
 - 缺口：CONFIRM-ACK 丢失与额外 RPC 性能代价未覆盖；UXFS 崩溃一致性与更广后端生命周期仍开放。
 - 关闭条件：CONFIRM-ACK 丢失场景通过；重启后 token 语义有明确契约；崩溃一致性用例通过。
 - 来源：[fs/ufs-close-token.md](../../fs/ufs-close-token.md)、[current/v1.0-progress.md](../current/v1.0-progress.md)。
+
+### FS-09 guest 写盘后 ext4 位图校验和不一致
+
+- 现状：`image-world` 产物 `e2fsck -fn` 干净；guest 写入一次后，从宿主机看（qcow2 overlay 或 kill 后的镜像）出现 `Block bitmap checksum does not match bitmap`，`debugfs` 打不开。
+- 缺口：怀疑写入路径没有同步 `metadata_csum` 的位图校验和（无日志时没有重放兜底）。
+- 关闭条件：guest 写盘后 `e2fsck -fn` 干净；损坏来源有明确解释。
+- 诊断：[notes/fs-ext4-bitmap.md](notes/fs-ext4-bitmap.md)。

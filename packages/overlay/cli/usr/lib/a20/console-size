@@ -1,0 +1,74 @@
+#!/bin/sh
+# console-size — ask the terminal how wide it is, and print the answer as shell
+# assignments ("COLUMNS=<n>; LINES=<n>") for the caller to eval.
+#
+# Why this exists.  A20OS' console tty reports a hardcoded 24x80
+# (kernel/fs/devfs/tty.c), and QEMU's `-serial stdio` has no channel that
+# carries the host terminal's real size into the guest.  zsh's line editor
+# wraps and redraws against whatever it believes the width is, so on a terminal
+# that is not 80 columns wide:
+#
+#   * typing past column 80 leaves the cursor in the wrong place (the classic
+#     "input overlaps itself"), and
+#   * recalling history repositions the cursor against the same wrong width, so
+#     the redraw lands on top of earlier output.
+#
+# Both levers to fix it work: ZLE honours $COLUMNS (measured: setting
+# COLUMNS=120 changes its erase run from 79 to 119 immediately), and the tty
+# honours TIOCSWINSZ (`stty cols 120` makes `stty size` report 40 120).  ZLE
+# does *not* re-read the tty without SIGWINCH, which A20OS does not send, so
+# $COLUMNS is the one that matters for zsh; `stty` is set too so that vim,
+# tmux, htop and friends agree.
+#
+# The size is discovered the way resize(1) does it: save the cursor, move it to
+# the bottom right, ask the terminal for the cursor position (DSR, ESC[6n), and
+# read back ESC[<row>;<col>R — the terminal clamps the position to its real
+# extent, so the reply is its height and width.  A real terminal emulator
+# answers; anything else — a pipe, a CI log, `-serial file:` — simply times out,
+# in which case nothing is printed and the caller leaves the console alone.
+# (Moving right only, `ESC[9999C`, is not enough: it reports the row the cursor
+# happens to be on, so the height would always come back wrong.)
+#
+# The query and the reply must travel over the terminal itself, never over
+# stdout: callers use command substitution to capture this script's output, so
+# writing the query to stdout would hand it to the shell instead of the
+# terminal (that bug produced `/sbin/init: eval: line 49: ^[[9999C^[[6n: not
+# found`).  Hence /dev/tty below, and stdout is reserved for the assignments.
+#
+# Overrides: A20_CONSOLE_COLS / A20_CONSOLE_ROWS skip the query entirely, for
+# hosts where the terminal cannot answer.
+
+set -u
+
+TTY=
+for cand in /dev/tty /dev/console; do
+    if [ -r "$cand" ] && [ -w "$cand" ]; then TTY=$cand; break; fi
+done
+[ -n "$TTY" ] || exit 0
+
+cols=${A20_CONSOLE_COLS:-}
+rows=${A20_CONSOLE_ROWS:-}
+
+if [ -z "$cols" ]; then
+    saved=$(stty -g < "$TTY" 2>/dev/null) || saved=
+    if stty raw -echo < "$TTY" 2>/dev/null; then
+        # ESC 7 = save cursor, ESC 8 = restore it.
+        printf '\0337\033[9999;9999H\033[6n' > "$TTY"
+        # The reply has no newline, so read a bounded number of bytes and let
+        # the timeout close it.  A terminal that does not answer costs ~1s.
+        reply=$(timeout 1 dd if="$TTY" bs=1 count=24 2>/dev/null | tr -d '\033\r\n')
+        printf '\0338' > "$TTY"
+        [ -n "$saved" ] && stty "$saved" < "$TTY" 2>/dev/null
+        cols=$(printf '%s' "$reply" | sed -n 's/.*\[[0-9][0-9]*;\([0-9][0-9]*\)R.*/\1/p')
+        rows=$(printf '%s' "$reply" | sed -n 's/.*\[\([0-9][0-9]*\);[0-9][0-9]*R.*/\1/p')
+    fi
+fi
+
+# Sanity: a bogus or absent reply must not be acted on.
+case ${cols:-} in ''|*[!0-9]*) exit 0 ;; esac
+[ "$cols" -ge 20 ] 2>/dev/null || exit 0
+case ${rows:-} in ''|*[!0-9]*) rows=24 ;; esac
+[ "$rows" -ge 5 ] 2>/dev/null || rows=24
+
+stty rows "$rows" cols "$cols" < "$TTY" 2>/dev/null || true
+printf 'COLUMNS=%s; LINES=%s\n' "$cols" "$rows"

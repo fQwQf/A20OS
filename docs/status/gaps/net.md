@@ -58,3 +58,10 @@
 - 缺口：双向 TCP/UDP、NAT 回程、外部 hostfwd 对端与耗尽/关闭竞态没有完整矩阵。
 - 关闭条件：真实接口上的双向数据与外部 peer 用例通过，保留自然退出与结论。
 - 来源：[current/v1.0-progress.md](../current/v1.0-progress.md) 优先级表。
+
+### NET-09 IPv6 收包路径的 pbuf 引用计数破坏
+
+- 现状：x86_64 桌面上 lwIP IPv6 收包会破坏 pbuf 引用计数；`LWIP_IPV6_FRAG=0` 方向的规避有实测依据，原先的"篡改规模"假设已被推翻。
+- 缺口：根因未定位；规避不等于修复。
+- 关闭条件：IPv6 收包长跑无引用计数下溢或 panic；或以明确的 IPv6 分片契约限制范围并有对应测试。
+- 诊断：[notes/net-ipv6-pbuf.md](notes/net-ipv6-pbuf.md)。

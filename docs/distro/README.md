@@ -37,13 +37,13 @@ make run-gui-riscv64 GUI_MEDIA=~/Videos/demo.mp4       # 其他架构同理
 启动），只构建镜像用 `make ARCH=<arch> image-world PKG_WORLD=xfce
 GUI_MEDIA=...`。
 
-镜像内自带的播放器有 ffplay（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、parole（GStreamer 后端）、mpv（命令行）。**mpv 目前约 1/10 次崩溃**：它每个内建 Lua 脚本跑在自己的线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [../status/current/known-issues.md](../status/current/known-issues.md)）；用 ffplay 或重试即可。命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
+镜像内自带的播放器有 ffplay（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、parole（GStreamer 后端）、mpv（命令行）。**mpv 目前约 1/10 次崩溃**：它每个内建 Lua 脚本跑在自己的线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [mpv 退出诊断](../status/gaps/notes/desktop-jvm-mpv-exit.md)）；用 ffplay 或重试即可。命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
 
 ### 桌面里的 JVM 与图形栈
 
 - **JVM**：world 装了 `openjdk21-jre`。`/usr/bin/java` 是 overlay 提供的
   薄封装（直接 exec 真实路径 + 给一组默认堆参数），原因见
-  [../status/current/known-issues.md](../status/current/known-issues.md) 的 JVM 条目。`java -version` 可用。
+  [JVM 退出诊断](../status/gaps/notes/desktop-jvm-mpv-exit.md)。`java -version` 可用。
 - **图形 API**：world 装了 Mesa（`mesa`/`mesa-dri-gallium`/`mesa-gl`/
   `mesa-gles`/`mesa-egl`/`mesa-gbm` + `mesa-utils`/`mesa-demos`）与
   `virglrenderer`，镜像里有 `swrast`/`kms_swrast`/`virtio_gpu`/`zink` DRI
@@ -57,4 +57,4 @@ GUI_MEDIA=...`。
 - [`build.md`](build.md)：rootfs 是怎么构建出来的，以及构建环境里踩过的坑。
 - [`boot.md`](boot.md)：从 A20OS init 到 XFCE 桌面的一整条启动链路。
 - [`kernel-requirements.md`](kernel-requirements.md)：发行版对内核提出了哪些要求、内核分别在哪里满足。
-- [`../status/current/known-issues.md`](../status/current/known-issues.md)：已解决的问题（输入、读路径自死锁）的根因与修法，以及遗留的 dbus 偶发超时怎么排查。
+- [`../status/current/desktop-minecraft-status.md`](../status/current/desktop-minecraft-status.md)：桌面与 Minecraft 的当前边界；[缺口诊断](../status/gaps/notes/README.md) 记录仍未关闭问题的排查。

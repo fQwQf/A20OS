@@ -25,10 +25,15 @@ setopt AUTO_CD NO_BEEP INTERACTIVE_COMMENTS
 autoload -Uz colors && colors
 autoload -Uz compinit && compinit -u 2>/dev/null
 
-# Green user@host, blue cwd; the right prompt only appears when the last
-# command failed, so a clean shell has no trailing noise.
+# Green user@host, blue cwd.  No RPROMPT: a right prompt forces ZLE to position
+# the cursor absolutely and erase the right-hand side on every redraw, which is
+# the first thing to look wrong when the console width is off.  $? is still
+# there if you want it, and `resize-console` fixes the width itself.
+#
+# The width comes from $COLUMNS, which the stage-2 init sets by asking the
+# terminal (see /usr/lib/a20/console-size).  Without it zsh would wrap against
+# the console tty's hardcoded 80 columns and garble anything longer.
 PROMPT='%F{green}%n@%m%f %F{blue}%~%f %# '
-RPROMPT='%(?..%F{red}[%?]%f)'
 
 # GNU tools live in /usr/bin, busybox applets in /bin; this ordering is what
 # makes the GNU versions win (see packages/world/cli.world).
