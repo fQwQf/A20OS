@@ -9,8 +9,24 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def run_build_script() -> Path:
+    """The shared build-lock wrapper, located through git.
+
+    In a linked worktree ROOT/.git is a file, so the wrapper cannot be found by
+    path arithmetic; ask git for the common dir, which is what the wrapper
+    itself does for the lock files.  Without this the whole module errored out
+    in every worktree -- the normal way this repository is worked on -- with a
+    NotADirectoryError that looks nothing like a make-rule regression.
+    """
+    common = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
+         "--git-common-dir"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    return Path(common) / "parallel-rewrite" / "run-build.sh"
+
+
 def make_dry_run(*args):
-    return subprocess.run([str(ROOT / ".git/parallel-rewrite/run-build.sh"),
+    return subprocess.run([str(run_build_script()),
                            "build-1", "make", "-n",
                            "BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/build",
                            "USER_BUILD_DIR=<build-dir>/isolated/rust-user-make-tests/user",

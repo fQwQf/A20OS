@@ -1622,8 +1622,16 @@ class TestMakeQuery(unittest.TestCase):
 
     def test_derived_instance_variables_reach_make(self) -> None:
         from a20_make import query_make
-        got = query_make(load_instance("qemu-riscv64-smp4"), ["BUILD_DIR"])
-        self.assertIn("-smp4", got["BUILD_DIR"])
+        got = query_make(load_instance("qemu-riscv64-smp4"),
+                         ["BUILD_DIR", "NR_CPUS"])
+        self.assertEqual(got["NR_CPUS"], "4")
+        # The directory name is not asserted: a fully integrated Rust profile
+        # makes BUILD_VARIANT long enough that the Makefile hashes it, so the
+        # "-smp4" spelling is gone.  What must hold is that the instance's SMP
+        # setting reaches make and selects a different output directory than the
+        # single-CPU instance -- otherwise the two would share build objects.
+        plain = query_make(load_instance("qemu-riscv64"), ["BUILD_DIR"])
+        self.assertNotEqual(got["BUILD_DIR"], plain["BUILD_DIR"])
 
     def test_no_names_is_a_no_op(self) -> None:
         from a20_make import query_make

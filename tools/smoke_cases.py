@@ -3365,6 +3365,33 @@ CASES["smoke-sched-stress"]["expect"].extend([
     "SCHED_STRESS: rt permission/limits ok",
     "SCHED_STRESS: rt-bandwidth-progress PASS",
 ])
+# Scheduler and process-lifecycle concurrency had no SMP gate at all: the SMP
+# variants that existed covered vfs/futex/swap, while the two gates that drive
+# runqueue placement, cross-CPU wakeups and thread-group exit ran NR_CPUS=1
+# only, where none of that code executes.  Both single-CPU targets keep their
+# own semantics and their own log; these are additional targets whose result is
+# kept separately.
+#
+# The "[SMP] 2/2 configured CPUs online" expectation is what makes the variant
+# mean something: without it a mis-wired alias would boot the single-CPU image
+# under -smp 2 and still print its PASS marker.
+for _base in ("smoke-sched-stress", "smoke-proc-stress"):
+    _alias = _base + "-smp2"
+    CASES[_alias] = deepcopy(CASES[_base])
+    CASES[_alias]["build"]["vars"] = [
+        v for v in CASES[_alias]["build"]["vars"] if not v.startswith("NR_CPUS=")
+    ] + ["NR_CPUS=2"]
+    CASES[_alias]["gate"]["cpus"] = "2"
+    _argv = CASES[_alias]["argv"]
+    _argv[_argv.index("-smp") + 1] = "2"
+    CASES[_alias]["log"] = CASES[_base]["log"].replace(".log", "-smp2.log")
+    CASES[_alias]["expect"] = list(CASES[_alias]["expect"]) + [
+        "[SMP] 2/2 configured CPUs online",
+    ]
+    # Two CPUs make the same workload slower under TCG; the single-CPU budget
+    # would turn a slower-but-healthy run into a timeout.
+    CASES[_alias]["timeout"] = "60s"
+    CASES[_alias]["pass_msg"] = f"{_alias}: PASS; log saved to $log"
 CASES["smoke-vfs-stress"]["expect"].append("VFS_STRESS: exec-symlink-origin PASS")
 CASES["smoke-native-ufs"]["build"]["extra-targets"] = ["native-ufs-image"]
 CASES["smoke-native-fs-all"]["build"]["extra-targets"] = ["native-ufs-images"]

@@ -7,6 +7,15 @@
 # has fixed 20 KiB of SRAM and no -m/-smp to read, so there is nothing for a
 # host-side gate to protect.
 
+# A fully integrated Rust profile makes BUILD_VARIANT long enough that the
+# Makefile hashes it (see the BUILD_VARIANT_FULL comment there), so the
+# descriptive directory names the handwritten recipes below used to spell out no
+# longer exist and pointed QEMU at a missing image.  Ask the Makefile for the
+# directory the configuration actually uses -- that is what print-build-dir
+# exists for -- with the same variables the recipe's own build step passes.
+RV64_LINUX_DEV_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
+RV64_LINUX_DEV_SMP4_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 print-build-dir)
+
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
 smoke-riscv64:
 	tools/a20 test smoke-riscv64
@@ -117,10 +126,10 @@ smoke-netfilter:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-kernel $(RV64_LINUX_DEV_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'NETFILTER_TEST: PASS' "$$log"; then \
@@ -261,10 +270,10 @@ smoke-ct-capacity:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-kernel $(RV64_LINUX_DEV_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'CTCAP_TEST: PASS' "$$log"; then \
@@ -308,6 +317,12 @@ smoke-proc-a20:
 smoke-proc-stress:
 	$(PYTHON) tools/smoke.py smoke-proc-stress
 
+# Same workload as smoke-proc-stress on two CPUs, with its own log.  Process
+# exit, wait and thread-group teardown take cross-CPU paths that NR_CPUS=1
+# never reaches; the single-CPU target above keeps its own semantics.
+smoke-proc-stress-smp2:
+	$(PYTHON) tools/smoke.py smoke-proc-stress-smp2
+
 smoke-procfs-stress:
 	$(PYTHON) tools/smoke.py smoke-procfs-stress
 
@@ -335,6 +350,12 @@ smoke-mm-process-vm-exec-cow-rust:
 # shell exec, auxv audit, and the W^X-deny workload.
 smoke-elf-exec-rust:
 	$(PYTHON) tools/smoke.py smoke-elf-exec-rust
+
+# The AArch64 half of the same gate.  The case has been in the table all along;
+# without this target check-smoke-cases reported it as unreachable, so nothing
+# ran it and the AArch64 exec path had no gate at all.
+smoke-elf-exec-aarch64:
+	$(PYTHON) tools/smoke.py smoke-elf-exec-aarch64
 
 smoke-elf-exec-wx-rust:
 	$(PYTHON) tools/smoke.py smoke-elf-exec-wx-rust
@@ -530,7 +551,7 @@ smoke-vfs-stress-smp8:
 
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/fsync-durability-riscv64.log"; \
@@ -540,12 +561,12 @@ smoke-fsync-durability:
 		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/ext4.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+			-kernel $(RV64_LINUX_DEV_DIR)/kernel.elf \
 			> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'FSYNC_TEST: PASS' "$$log"; then \
 		echo "smoke-fsync-durability: PASS; log saved to $$log"; \
@@ -675,7 +696,7 @@ smoke-ahci-ich9:
 
 smoke-sysv-ipc-abi:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sysv-ipc-abi-riscv64.log"; \
@@ -685,12 +706,12 @@ smoke-sysv-ipc-abi:
 		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-drive file=$(RV64_LINUX_DEV_DIR)/ext4.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+			-kernel $(RV64_LINUX_DEV_DIR)/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SYSV_IPC_ABI: PASS' "$$log"; then \
 		echo "smoke-sysv-ipc-abi: PASS; log saved to $$log"; \
@@ -711,6 +732,12 @@ smoke-syscall-ext:
 
 smoke-sched-stress:
 	$(PYTHON) tools/smoke.py smoke-sched-stress
+
+# Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
+# placement, migration and cross-CPU wakeups only run with more than one CPU;
+# the single-CPU target above keeps its own semantics.
+smoke-sched-stress-smp2:
+	$(PYTHON) tools/smoke.py smoke-sched-stress-smp2
 
 smoke-futex-stress:
 	$(PYTHON) tools/smoke.py smoke-futex-stress
@@ -1080,10 +1107,10 @@ smoke-smp-lock-contention:
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_SMP4_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-kernel $(RV64_LINUX_DEV_SMP4_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	tasklist_split=$$(awk '/^tasklist: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
@@ -1521,10 +1548,10 @@ smoke-net-ipv6:
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-drive file=$(RV64_LINUX_DEV_SMP4_DIR)/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-kernel $(RV64_LINUX_DEV_SMP4_DIR)/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 || status=$$?; \
 	passes=$$(grep -c 'IPV6_LOOPBACK_TEST: PASS' "$$log" || true); \

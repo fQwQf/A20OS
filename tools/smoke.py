@@ -588,12 +588,14 @@ def matrix_case(a: argparse.Namespace, arch: str, nommu: int) -> dict:
         build += "-embedded"
     if nommu:
         build += "-nommu"
-    return {
+    case = {
         "log": f".kernel-build/smoke/{variant}-shell.log",
         "stdin": {"kind": "pipe", "delay": a.input_delay,
                   "lines": [f"echo A20_MATRIX_{variant}_OK",
                             "/bin/echo A20_EXTERNAL_OK", "poweroff"]},
         "timeout": a.timeout,
+        "build": {"vars": [f"ARCH={arch}", "ABI=both", "BRINGUP=0",
+                           f"NOMMU={nommu}"], "target": "dev-build"},
         "argv": [qemu, *base, "-m", "1G", "-nographic", "-smp", "1",
                  "-drive", f"file={build}/fat32.img,if=none,format=raw,id=x0",
                  "-device", "virtio-blk-device,bus=virtio-mmio-bus.0,drive=x0",
@@ -601,6 +603,11 @@ def matrix_case(a: argparse.Namespace, arch: str, nommu: int) -> dict:
                  "-device", "virtio-net-device,bus=virtio-mmio-bus.4,netdev=net",
                  "-kernel", f"{build}/kernel.elf"],
     }
+    # The descriptive directory above is only a shape; the Makefile hashes long
+    # variants, so resolve the one this configuration really uses before QEMU is
+    # pointed at it.  Without this the gate fails with a missing fat32.img, which
+    # looks nothing like the shell behavior it exists to check.
+    return resolve_case_build_paths(case)
 
 
 def matrix_main(a: argparse.Namespace) -> int:

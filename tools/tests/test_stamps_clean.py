@@ -38,7 +38,7 @@ def _parallel_stamp_user(repo: str, log: str, barrier):
         build_id="same-user-build", stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="", envelope_acquire_race_test="0",
+        roots="", skip="", syscall_smoke_task_construction_test="0", envelope_acquire_race_test="0",
     )
     barrier.wait()
     raise SystemExit(stamps.cmd_user(args))
@@ -72,7 +72,7 @@ def _different_id_user(repo: str, log: str, build_id: str, ready, release=None):
         build_id=build_id, stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="", envelope_acquire_race_test="0",
+        roots="", skip="", syscall_smoke_task_construction_test="0", envelope_acquire_race_test="0",
     )
     if release is None:
         ready.put("second-ready")
@@ -140,7 +140,7 @@ def _parallel_stamp_user_with_barrier(repo: str, log: str, barrier):
         build_id="same-user-build", stamp="user/build/riscv64/.build-id",
         user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
         user_opt="-O3", profile="full", user_variant="riscv64",
-        roots="", skip="", envelope_acquire_race_test="0",
+        roots="", skip="", syscall_smoke_task_construction_test="0", envelope_acquire_race_test="0",
     )
     raise SystemExit(stamps.cmd_user(args))
 
@@ -243,7 +243,7 @@ class UserBuildLockTests(unittest.TestCase):
                     build_id="isolated-user-build", stamp=str(out / ".build-id"),
                     user_build_dir=str(out), arch="riscv64", nommu="0",
                     user_opt="-O3", profile="full", user_variant="riscv64",
-                    roots="", skip="", envelope_acquire_race_test="1",
+                    roots="", skip="", syscall_smoke_task_construction_test="0", envelope_acquire_race_test="1",
                 )
                 self.assertEqual(stamps.cmd_user(args), 0)
             finally:
@@ -824,7 +824,7 @@ class UserBuildLockTests(unittest.TestCase):
                     build_id="new-user-build", stamp="user/build/riscv64/.build-id",
                     user_build_dir="user/build/riscv64", arch="riscv64", nommu="0",
                     user_opt="-O3", profile="full", user_variant="riscv64",
-                    roots="", skip="", envelope_acquire_race_test="0",
+                    roots="", skip="", syscall_smoke_task_construction_test="0", envelope_acquire_race_test="0",
                 )
                 self.assertEqual(stamps.cmd_user(args), 0)
             finally:

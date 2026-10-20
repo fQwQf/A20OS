@@ -20,27 +20,33 @@ class SmokeBuildPathTests(unittest.TestCase):
         })
 
     def test_make_resolves_default_preempt_smp_embedded_and_overrides(self):
+        """Every override must reach make and select a distinct output directory.
+
+        The directory *name* is not asserted.  A fully integrated Rust profile
+        makes BUILD_VARIANT long enough that the Makefile hashes it (see the
+        BUILD_VARIANT_FULL comment there), so the descriptive spelling is no
+        longer a contract.  Distinctness is the contract that matters: an
+        override that stops being forwarded collapses two configurations onto
+        one directory and silently reuses the other one's objects.
+        """
         common = ("ARCH=riscv64", "ABI=linux")
-        default = self.resolve_dir(*common)
-        self.assertTrue(default.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt-signal-rust"),
-                        default)
-
-        preempt_off = self.resolve_dir(*common, "CONFIG_KERNEL_PREEMPT=0")
-        self.assertTrue(preempt_off.endswith("riscv64-qemu-virt-riscv64-linux-dev-signal-rust"),
-                        preempt_off)
-
-        smp = self.resolve_dir(*common, "NR_CPUS=2", "ALLOW_UNVERIFIED_SMP=1")
-        self.assertTrue(smp.endswith("riscv64-qemu-virt-riscv64-linux-dev-smp2-preempt-signal-rust"),
-                        smp)
-
-        embedded = self.resolve_dir("ARCH=aarch64", "ABI=linux",
-                                    "DRIVER_DEPLOYMENT=embedded")
-        self.assertTrue(embedded.endswith("aarch64-qemu-virt-aarch64-linux-dev-embedded-preempt-signal-rust"),
-                        embedded)
-
-        override = self.resolve_dir(*common, "CONFIG_SLAB_DEBUG=1")
-        self.assertTrue(override.endswith("riscv64-qemu-virt-riscv64-linux-dev-preempt-slabdbg-signal-rust"),
-                        override)
+        variants = {
+            "default": self.resolve_dir(*common),
+            "preempt_off": self.resolve_dir(*common, "CONFIG_KERNEL_PREEMPT=0"),
+            "smp2": self.resolve_dir(*common, "NR_CPUS=2", "ALLOW_UNVERIFIED_SMP=1"),
+            "embedded": self.resolve_dir("ARCH=aarch64", "ABI=linux",
+                                         "DRIVER_DEPLOYMENT=embedded"),
+            "slabdbg": self.resolve_dir(*common, "CONFIG_SLAB_DEBUG=1"),
+        }
+        self.assertTrue(variants["default"].startswith(
+            ".kernel-build/riscv64-qemu-virt-riscv64-"), variants["default"])
+        self.assertTrue(variants["embedded"].startswith(
+            ".kernel-build/aarch64-qemu-virt-aarch64-"), variants["embedded"])
+        seen: dict[str, str] = {}
+        for name, path in variants.items():
+            self.assertNotIn(path, seen,
+                             f"{name} resolves to the same directory as {seen.get(path)}")
+            seen[path] = name
 
     def test_rebases_kernel_and_sibling_images_but_keeps_other_builds(self):
         old = ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev"
@@ -103,10 +109,15 @@ class SmokeBuildPathTests(unittest.TestCase):
     def test_ramfs_companion_is_distinct_for_default_and_custom_build_dirs(self):
         base = ("ARCH=riscv64", "BOARD=qemu-virt-riscv64", "ABI=linux", "BRINGUP=0",
                 "CONFIG_KERNEL_PREEMPT=0")
+        # Ask the Makefile for the default directory; the descriptive spelling
+        # is not stable once BUILD_VARIANT is long enough to be hashed.
+        default = smoke.resolve_build_dir(
+            {"name": "ramfs-companion", "build": {"vars": list(base)}})
         cases = [
-            (base, ".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-signal-rust"),
+            (base, default),
             (base + ("BUILD_DIR=/tmp/a20-custom-build",), "/tmp/a20-custom-build"),
         ]
+        resolved = []
         for variables, build_dir in cases:
             with self.subTest(build_dir=build_dir):
                 ramfs_dir = build_dir + "-ramfs-user"
@@ -118,6 +129,9 @@ class SmokeBuildPathTests(unittest.TestCase):
                 self.assertIn(
                     f"RAMFS_USER=1 BUILD_DIR={ramfs_dir} kernel-only", output
                 )
+                resolved.append(ramfs_dir)
+        self.assertNotEqual(resolved[0], resolved[1],
+                            "the default and custom build dirs share a ramfs companion")
 
     def test_netopt_lwip_uses_resolved_smp4_lane4_image_and_real_lwip_mode(self):
         case = smoke.CASES["smoke-netopt-lwip"]
