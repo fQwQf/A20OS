@@ -657,6 +657,8 @@ world_size_mb = 4096
 
 `run` 本身就做全量构建（内核、软件包、world 镜像），所以**不需要**先跑 `tools/a20 build`；`build` 只是"只构建不启动"的快捷方式。world 镜像是无日志 ext4，而 QEMU 结束时是被直接杀掉的，所以下一次看镜像永远是"脏"的——这是预期状态，不是上一轮的遗产：`mkrootfs.py` 每轮都会从 `packages/world/xfce.world` 重新铺满整块盘（实测 522 个 apk 全部 Installing），前一轮写进去的数据不会带进下一轮。也正因如此，`a20 run` 对 world 实例**跳过启动前的 fsck**（`_gate_qemu(..., check_image=inst.rootfs.world is None)`）：既查不出真问题，失败信息又会让人误以为得先 `build`。
 
+纯命令行（无 `[gui]`）的同类实例见 `instances/cli-<arch>.toml`：world 为 `cli`（Alpine 上游 zsh + GNU coreutils/findutils/grep/sed/gawk + git/vim/tmux/htop/curl/python3），overlay 的 stage-2 init 直接把串口交给 zsh，是 QEMU 上的日常命令行环境。注意 `server` world 并不是同一回事——它是刻意的"最小服务器形态"（busybox ash + dropbear + chrony），不以交互体验为目标。
+
 ## 与旧 make 目标的对照
 
 旧的逐架构目标全部保留为薄包装，行为不变：

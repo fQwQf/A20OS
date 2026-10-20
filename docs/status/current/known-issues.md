@@ -529,12 +529,12 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   打印原始 status。客体 3/3 次结果完全一致，与宿主参考对比：
   | 变体 | 含义 | 宿主 | 客体 |
   |---|---|---|---|
-  | v0 | `exit_group(0)` | code=0 | code=0 ✅ |
-  | v1 | `exit_group(42)` | code=42 | code=42 ✅ |
-  | v2 | 3 个自旋线程 + 主线程 `exit_group(0)`（JVM 的退出模式） | code=0 | code=0 ✅ |
-  | v3 | 3 个自旋线程 + 非 leader 工作线程 `exit_group(42)` | code=42 | **status=0xb、sig=11(SIGSEGV)、exited=0** ❌ |
-  | v4 | `exit_group(255)` | code=255 | code=255 ✅ |
-  | v5 | `exit_group(-1)` | code=255 | **status=0x1、sig=1** ❌ |
+  | v0 | `exit_group(0)` | code=0 | code=0 |
+  | v1 | `exit_group(42)` | code=42 | code=42 |
+  | v2 | 3 个自旋线程 + 主线程 `exit_group(0)`（JVM 的退出模式） | code=0 | code=0 |
+  | v3 | 3 个自旋线程 + 非 leader 工作线程 `exit_group(42)` | code=42 | **status=0xb、sig=11(SIGSEGV)、exited=0** |
+  | v4 | `exit_group(255)` | code=255 | code=255 |
+  | v5 | `exit_group(-1)` | code=255 | **status=0x1、sig=1** |
 - v3 一度被记成本轮抓到的可复现内核 bug：从非 leader 线程调用 `exit_group` 时，进程被上报为「被
   SIGSEGV 杀死」而不是带着退出码正常退出。这很可能就是 `mpv` 那条「Lua 线程里 SIGSEGV」症状的来源
   （每个 Lua 脚本线程自己退出/收尾），当时认为值得优先修（`proc_exit_group()` 对 leader 的
@@ -639,7 +639,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
 
   结果两边都很有信息量：
 
-  - ✅ 负载确实复现了目标 bug，签名与上面记的逐字节一致：
+  - 负载确实复现了目标 bug，签名与上面记的逐字节一致：
     ```
     SIGSEGV: pid=631 code=13 sepc=0x638a6320 stval=0x8 abi=0
     FATAL:   pid=631 signal=11 abi=0 pc=0x638a6320 sp=0x77a3eb70 comm=lua/osc path=/extra/usr/bin/mpv
@@ -651,7 +651,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
     （该地址连页表项都没有）又是一次「读一个近 NULL 指针的小偏移」，与 `ld-musl+0x4602b` 那次的
     `stval=0x10` 是同一个形状。
 
-  - ❌ slab 检测器全程没有命中（80 次迭代，无 `[SLAB BUG]`、无 `slab_validate_sp` panic）。这类损坏
+  - slab 检测器全程没有命中（80 次迭代，无 `[SLAB BUG]`、无 `slab_validate_sp` panic）。这类损坏
     不是内核 slab 的 free-list 损坏。这和两个已知实例都是用户态结构这一点吻合：LuaJIT 的 `G`
     （`*(G+0x130)`）与 musl ld.so 的那张链表头，都在进程自己的地址空间里，内核的 slab 校验器根本
     看不到它们。检测方向应从「内核 slab」转到「多线程进程的匿名内存被写坏」，正好回到第 152 行
@@ -852,7 +852,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   ```
 
   - `test` 轮（目标页与父进程 COW 共享）：客体 20/20 全部被写成 0，宿主 5/5 完好。
-  - `control` 轮（子进程先写该页、真正破坏 COW 变成私有）：客体也是 clean ✓
+  - `control` 轮（子进程先写该页、真正破坏 COW 变成私有）：客体也是 clean
     ⇒ 这证明失效点精确地是「没有做 COW 破坏」这一环，而不是别的东西。
   - 复现率 20/20（确定性）、宿主全对 ⇒ 这是 A20OS 的 bug，不是探针问题。
   - 复现器：`/tmp/opencode/ctidtest.c`，构建
@@ -933,9 +933,9 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
     ```
     与 cleartid 那条完全同类：若目标页此刻与别的任务 COW 共享，这一写会把对方那份也改成 0。
   - 已核对为「正确」的一处是 `exit_robust_list()`（680-713 行），它用的是 `copy_from_user()` /
-    `copy_to_user()` ✓，说明核心里正确写法是有的，出问题的两处（cleartid 与这里）都是自己手写。
+    `copy_to_user()`，说明核心里正确写法是有的，出问题的两处（cleartid 与这里）都是自己手写。
   - 也顺带澄清语义边界：对 MAP_SHARED 页裸写帧是对的（大家都映射同一帧，本就该一起改），
-    错的只是 COW-private 的情况；`user_resolve_leaf()` 两种情形都能正确处理 ✓。
+    错的只是 COW-private 的情况；`user_resolve_leaf()` 两种情形都能正确处理。
 
   这次记录为待修、而不当场改，有两个原因：
 
@@ -990,7 +990,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   ```
 
   - `bad=1` 正是「word 不再是 0」这一项坏掉（图案本身完好）⇒ 父进程的 futex word 被跨进程改写；
-  - `pi-control` 轮（子进程先脏了该页、COW 已由子进程自己破坏）客体也是 clean ✓
+  - `pi-control` 轮（子进程先脏了该页、COW 已由子进程自己破坏）客体也是 clean
     ⇒ 与 cleartid 一样，失效点精确地是「内核没有为这次写破坏 COW」；
   - 复现率 20/20（确定性）、宿主全对 ⇒ 第二个真实的跨进程内存损坏 bug，已证实。
   - 复现器：`/tmp/opencode/pitest.c`（静态、无 libc、宿主客体都能跑）。
@@ -1011,7 +1011,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   - 验证方式是同一个 `pitest` 复现器：修复后客体应当变成 `pi 00000000 clean`，与宿主一致
     （就像 cleartid 那次 `20/20 POLLUTED → 20/20 clean` 一样）。
 
-  **✅ 已按上述方案修复并验证**：
+  **已按上述方案修复并验证**：
 
   - 实现是在 `kernel/mm/mm.c` 新增可导出的 `user_prepare_write(task_t*, uint64_t)`，把
     `user_resolve_leaf()` 里那段「叶子不存在 → `handle_demand_fault()`；存在但不可写 →
@@ -1035,9 +1035,9 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   - `kernel/proc/signal.c` 的 `signal_make_page_exec()`（28-54 行；唯一调用点 926 行）是
     信号投递路径：为了让栈上的 sigreturn trampoline 可执行，它 `pt_translate` 取出物理帧，
     然后 `pt_unmap()` + `pt_map(同一个 pa, ...writable_dirty_exec...)`，即把同一个帧重新映射成
-    可写可执行。要注意信号帧本身是用 `copy_to_user()` 写的（915/918 行）✓，所以帧写是安全的；
+    可写可执行。要注意信号帧本身是用 `copy_to_user()` 写的（915/918 行），所以帧写是安全的；
     危险的是这个重映射：若该页此刻仍与另一个任务 COW 共享，这一步会让本任务拿到
-    共享帧的可写别名，此后本任务的任何写入都会改到对方那一份 ✗。
+    共享帧的可写别名，此后本任务的任何写入都会改到对方那一份 （错误）。
   - `kernel/abi/linux/sys_missing.c:563-571`（CET 影子栈 token）：`handle_demand_fault` 之后
     `pt_translate` + `pfn_to_virt` 直接 `*tok = ...`，同样是裸帧写（影子栈少见，但同类）。
 
@@ -1051,7 +1051,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   `user_prepare_write(t, page)`，先确保该页是本任务私有（必要时破坏 COW），
   之后的 unmap/map 操作的是私有帧，不会再产生共享别名。与 cleartid / futex 两处同一修法。
 
-  **⚠️ 更正（同一轮验证的结果）**：修好之后，用同一套症状负载（60× `java -version` +
+  **更正（同一轮验证的结果）**：修好之后，用同一套症状负载（60× `java -version` +
   120× `mpv --vo=null`）在修复后的内核上再跑一遍，症状依旧复现：
 
   ```
@@ -1063,7 +1063,7 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
   （已修），但它不是那些偶发崩溃的原因。
 
   - 同一轮的回归探针全部干净：`ctidtest` 5/5、`cowtest` 5/5、`pitest` 5/5，
-    说明这一轮内核改动没有破坏 COW / cleartid / futex 这几条路径 ✓。
+    说明这一轮内核改动没有破坏 COW / cleartid / futex 这几条路径。
   - 至此同类缺陷共找到 3 处、修了 3 处（cleartid、futex PI、signal），
     但 mpv / LuaJIT / tumblerd 那几条症状仍未解释。
 
@@ -1160,8 +1160,8 @@ brk 区里一块**真实的** meta（`meta+0x10 = 0x15e809fb0`，正好等于 `r
     libdl.so.2  libstdc++.so.6  libm.so.6  libgcc_s.so.1  libpthread.so.0  libc.so.6
     ld-linux-x86-64.so.2
     ```
-    这是一个 glibc 构建的库（`ld-linux-x86-64.so.2` / `libc.so.6`），不是 musl 的 ✗；
-    而 `libstdc++.so.6` 出现在 `NEEDED` 里 ⇒ 抛 `std::system_error` 的 C++ 代码就在这个库内部 ✓。
+    这是一个 glibc 构建的库（`ld-linux-x86-64.so.2` / `libc.so.6`），不是 musl 的 ×；
+    而 `libstdc++.so.6` 出现在 `NEEDED` 里 ⇒ 抛 `std::system_error` 的 C++ 代码就在这个库内部。
   - 它能被加载起来，是因为客体装了 Alpine 的 gcompat（`/lib/libgcompat.so.0`，以及
     `/lib/ld-linux-x86-64.so.2`、`libc.so.6`、`libpthread.so.0`、`libdl.so.2`、`libm.so.6` 这些
     glibc ABI 的桩）；这个库一共从 glibc ABI 导入 283 个符号。
@@ -1355,6 +1355,25 @@ overlay，或 kill 后的镜像）会出现 `Block bitmap checksum does not matc
 
 怀疑 A20OS 的 ext4 写入路径没有同步 `metadata_csum` 的位图校验和（`^has_journal` 下没有日志回放来兜底）。
 需要在内核 ext4 写路径上核对 group descriptor/bitmap 的 checksum 更新。
+
+### guest 写盘后 ext4 orphan 回收失败，同一张镜像再挂载会被拒
+
+`ext4_release_vn()`（`kernel/fs/diskfs/ext4_namei.c:717`）在一个「被引用期间被 unlink」的 inode 上调
+`ext4_orphan_reap()`，后者返回 `-95`（EOPNOTSUPP），于是打印
+`[EXT4] unlink orphan ... deferred orphan cleanup failed ...; orphan retained for recovery`，
+inode 留在 orphan 链里。world 镜像无日志（`^has_journal`），`sb->journal` 为 NULL，
+journal poison 那一步被跳过，所以当场没有别的报错 —— 但**下一次挂载这张镜像会直接失败**：
+`[EXT4] refusing mount: orphan recovery failed (-95)`，镜像被拒，启动退回 FAT32 根，
+表现为「world 没生效」。同一张镜像连续启动两次即可复现。
+
+触发面比预期大：zsh 打开 `SHARE_HISTORY` / `INC_APPEND_HISTORY` 时每条命令都会重写历史文件，
+实测**每条命令**留一个 orphan（连 `echo` 都算；同一张镜像上 busybox ash 跑同样命令是 0 条）。
+关掉这两个选项后 orphan 计数归零，镜像连续两次启动都正常 —— 规避写在
+`packages/overlay/cli/root/.zshrc`（HISTFILE 放 /dev/shm，不设那两个选项）与
+`packages/world/cli.world`。
+
+平时不易察觉是因为 `a20 run` 每次都会重建 world 镜像（`image-world` 是 phony），
+缺口被「重建」掩盖；`a20 run --no-build`、或手工用同一张镜像连续启动两次才会踩到。
 
 ### 面板下拉菜单项不启动应用
 

@@ -112,13 +112,13 @@ for each (task, seq):
 
 ## 6. 需要关闭的竞态（逐条对应）
 
-1. 唤醒恰在 commit 读状态前发生。commit 在 `park_lock` 内读到 WOKEN → 不睡眠。✓（同一把锁）
-2. 唤醒恰在 commit 释放后、sched() 前发生。唤醒把任务置 READY 并入队（目标仍在 on_cpu，`proc_runq_enqueue_locked` 的 on_cpu 检查使其不真正入队，只发布 READY）；commit 随后 `sched()`，`sched()` 的 current==next 分支或切换完成发布一次。✓（不变量 4 沿用现有语义）
-3. signal 唤醒与超时唤醒并发。二者都先做 `park_lock` 状态迁移，先到者置 WOKEN，后者读到的 park_state 非 PREPARING/PARKED → no-op；timer 由先到者取消，后到者的取消幂等。✓
-4. 超时摘除后、唤醒前的窗口。`sched_scan_timers` 释放 `timer_lock` 后才取 `park_lock`；若期间 signal 唤醒已置 WOKEN，则超时唤醒 no-op（不变量 2/3）。✓
-5. 陈旧唤醒（旧 seq）。seq 校验在 `park_lock` 内完成。✓
+1. 唤醒恰在 commit 读状态前发生。commit 在 `park_lock` 内读到 WOKEN → 不睡眠。（同一把锁）
+2. 唤醒恰在 commit 释放后、sched() 前发生。唤醒把任务置 READY 并入队（目标仍在 on_cpu，`proc_runq_enqueue_locked` 的 on_cpu 检查使其不真正入队，只发布 READY）；commit 随后 `sched()`，`sched()` 的 current==next 分支或切换完成发布一次。（不变量 4 沿用现有语义）
+3. signal 唤醒与超时唤醒并发。二者都先做 `park_lock` 状态迁移，先到者置 WOKEN，后者读到的 park_state 非 PREPARING/PARKED → no-op；timer 由先到者取消，后到者的取消幂等。
+4. 超时摘除后、唤醒前的窗口。`sched_scan_timers` 释放 `timer_lock` 后才取 `park_lock`；若期间 signal 唤醒已置 WOKEN，则超时唤醒 no-op（不变量 2/3）。
+5. 陈旧唤醒（旧 seq）。seq 校验在 `park_lock` 内完成。
 6. `proc_make_ready` 与 park 状态机。`proc_make_ready` 不走 park 状态机（针对 IDLE 状态任务，如 fork 新任务），仍用 `proc_lock`；与 park 状态机的并发通过"任务要么在 park 状态机里、要么不在"的生命周期划分隔离（prepare 前必须 IDLE，finish 复位为 IDLE）。
-7. task 生命周期（释放）。wake_q 在 collect 时对 task 取引用（`proc_get`），唤醒持引用期间 task 不会释放；`park_lock` 不参与释放。✓
+7. task 生命周期（释放）。wake_q 在 collect 时对 task 取引用（`proc_get`），唤醒持引用期间 task 不会释放；`park_lock` 不参与释放。
 
 ## 7. 验证结果与风险
 

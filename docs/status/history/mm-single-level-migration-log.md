@@ -48,14 +48,14 @@ on-demand paging 这类高级语义，且与具体 MMU 无关；代价是必须�
 
 ```
                  ┌─────────────────────────────────────────┐
-   映射状态 ────▶ │ per-PTE 元数据数组（权威）              │
+   映射状态 ────→ │ per-PTE 元数据数组（权威）              │
    (唯一真相)     │ 挂在覆盖该页的页表页描述符 pt_meta_t 上   │
                  └─────────────────────────────────────────┘
-                              ▲
-   事务式接口 ────▶ mm_addrspace_lock(range) → mm_cursor_t
+                              ↑
+   事务式接口 ────→ mm_addrspace_lock(range) → mm_cursor_t
                      query / map / mark / unmap（原子应用，析构时逆序解锁）
-                              ▲
-   写者互斥 ────▶ 页表页锁（MCS 队列锁），不相交区间不串行
+                              ↑
+   写者互斥 ────→ 页表页锁（MCS 队列锁），不相交区间不串行
 ```
 
 一个状态字节：
@@ -140,12 +140,12 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 
 | # | 交付物 | 结束时成立的不变式 | 验证门 |
 |---|---|---|---|
-| P0 ✅ | `pt_meta_t` 并入 `frame_meta_t`；`mm_pt_meta()`；`FRAME_F_PT` 审计 | 零可观测变化；`sizeof(frame_meta_t) == 16` | 7 个架构/NOMMU 构建；`pfa_audit_lists()` |
-| P1 ✅ | 按页表页分配 `cls`/`cow`；`kernel/mm/mm.c` 每个页表写点同步元数据；独立遍历页表与元数据并逐一比对的审计器，挂在关机审计点 | *元数据 ≡ 页表状态，始终成立且机器可证* | `smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux`、`check-mm-lock-model`；实测审计全 0 |
+| P0 | `pt_meta_t` 并入 `frame_meta_t`；`mm_pt_meta()`；`FRAME_F_PT` 审计 | 零可观测变化；`sizeof(frame_meta_t) == 16` | 7 个架构/NOMMU 构建；`pfa_audit_lists()` |
+| P1 | 按页表页分配 `cls`/`cow`；`kernel/mm/mm.c` 每个页表写点同步元数据；独立遍历页表与元数据并逐一比对的审计器，挂在关机审计点 | *元数据 ≡ 页表状态，始终成立且机器可证* | `smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux`、`check-mm-lock-model`；实测审计全 0 |
 | P2 | 让 fault 路径经由 cursor 写 PTE（仍在 `mm->lock` 之下） | 所有 PTE 写入只有一条代码路径 | 上述三个 smoke + `smoke-vfs-stress` |
 | P3 | covering node 之上 DFS 预序锁全部后代；逆序释放 | 每次 cursor 都按预序加锁、逆序解锁 | 新 `check-mm-pt-lock-order`（释放序断言 + 计数器）；`smoke-mm-stress` @ `NR_CPUS=4` |
 | P4 | `core/rcu.c`；`stale` + 重试；`pt_unmap` / `pt_unmap_leaf` / `pt_destroy_*` 中的 `frame_free(child)` 改为延迟释放 | 任何遍历都到不了的页表页不会被回收 | 新 `smoke-mm-pt-race`：N 线程大范围 unmap 同时 N 线程 fault |
-| P5 ✅ | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
+| P5 | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
 | P6 | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
 
 > **P6 的可实现范围（2026-10-02 核对代码后收窄）**：原表述"page fault 分派读不到
@@ -216,7 +216,7 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > > > `MM_ST_INVALID`。因此 `fault.c:589` 那处**已有**可查询的状态；
 > > > 「P6 没有可实现子集」不再由「brk 缺生产者」支撑，这条候选需要按当前
 > > > 状态语义重新评估。
-| P7 ⚠ | **2026-10-02 决定：`PTE_SWAP` 正式接受为唯一被容忍的例外，不删除。**原目标"无 PTE 位被重载"收窄为"仅 `PTE_SWAP` 一个，且逐架构显式声明"（见下方决定记录与 `kernel/include/mm/pt.h`） | `PTE_SWAP` 是唯一重载位 | 已达成：逐架构断言 `PTE_SWAP` 有定义（27 条）+ `{arch: PTE_SWAP} == SWAP_SUPPORTED_ARCHES`；`CONFIG_SWAP=y` 构建（默认即开）+ `smoke-swap` PASS。**但 swap-in 未被覆盖**，见下 |
+| P7 | **2026-10-02 决定：`PTE_SWAP` 正式接受为唯一被容忍的例外，不删除。**原目标"无 PTE 位被重载"收窄为"仅 `PTE_SWAP` 一个，且逐架构显式声明"（见下方决定记录与 `kernel/include/mm/pt.h`） | `PTE_SWAP` 是唯一重载位 | 已达成：逐架构断言 `PTE_SWAP` 有定义（27 条）+ `{arch: PTE_SWAP} == SWAP_SUPPORTED_ARCHES`；`CONFIG_SWAP=y` 构建（默认即开）+ `smoke-swap` PASS。**但 swap-in 未被覆盖**，见下 |
 
 > **P7 的阻塞点是硬件约束，且仓库里已写明**（`kernel/include/mm/pt.h:86-97`）：
 > 「Storing this in the PTE's software-usable bits is not an option on A20OS:
@@ -356,14 +356,14 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > 所以 `MM_LOCK_MODEL` 156 行那条「demand fault installs 必须持 `mm->lock`」现在
 > **只对非状态路径成立**，需要的是加一条例外说明，而不是把整节改名或删除。
 >
-> P8 剩下的实际工作因此是：①为状态快段在 `MM_LOCK_MODEL` 里补一条明确例外；
-> ②补双向一致性检查器；③同提交更新门禁与 `docs/testing-gates.md`。
+> P8 剩下的实际工作因此是：(1)为状态快段在 `MM_LOCK_MODEL` 里补一条明确例外；
+> (2)补双向一致性检查器；(3)同提交更新门禁与 `docs/testing-gates.md`。
 
-> **①已完成**：`vm.h` 的 `MM_LOCK_MODEL` 已补上状态快段的明确例外（并写明它依赖的是
+> **(1)已完成**：`vm.h` 的 `MM_LOCK_MODEL` 已补上状态快段的明确例外（并写明它依赖的是
 > `mm_pt_node_lock` 的按地址互斥，而不是"没有 `mm->lock`"）。`MM_LOCK_MODEL` 字面量
 > 保留——`check-mm-lock-model` 与 `check-final-definition` 两条门禁都断言它存在于该文件。
 >
-> **②的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:2495）只走**一个
+> **(2)的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:2495）只走**一个
 > 方向**：自 PTE 树下降，逐条比对"元数据是否与该 PTE 一致"（class / prot / cow）。反向
 > ——"元数据声称的每一页，PTE 是否同意"——**不存在**。
 >
@@ -512,12 +512,12 @@ smp4 QEMU 实测。
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
-| P0 描述符 | ✅ | `pt_meta_t` 并入 `frame_meta_t` 联合体，16 字节零开销（`_Static_assert` 钉住） |
-| P1 per-PTE 状态 | ✅ | 关机审计：7 架构构建 OK，`missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0` |
-| P2 fault 走 cursor | ✅ | 缓存下降路径；6 个构建 + `mm_stress`(smp1/smp4) + `mm-fork-exec-race`(smp8) + `smoke-abi-linux` + `check-mm-lock-model` 全 PASS |
-| P3 页表页锁为互斥单元 | ✅ | covering-node MCS；修掉 depth 双减自死锁 |
-| P4 延迟回收机制 | ✅ | 读侧计数 + `tlb_holds`  graveyard + stale；已就位待 P5 接线 |
-| 度量基准 | ✅ | `user/cmds/stress/mm_pt_scale.c`（已删除，git 历史可考），把并行主张变成可证伪验收门 |
+| P0 描述符 | | `pt_meta_t` 并入 `frame_meta_t` 联合体，16 字节零开销（`_Static_assert` 钉住） |
+| P1 per-PTE 状态 | | 关机审计：7 架构构建 OK，`missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0` |
+| P2 fault 走 cursor | | 缓存下降路径；6 个构建 + `mm_stress`(smp1/smp4) + `mm-fork-exec-race`(smp8) + `smoke-abi-linux` + `check-mm-lock-model` 全 PASS |
+| P3 页表页锁为互斥单元 | | covering-node MCS；修掉 depth 双减自死锁 |
+| P4 延迟回收机制 | | 读侧计数 + `tlb_holds`  graveyard + stale；已就位待 P5 接线 |
+| 度量基准 | | `user/cmds/stress/mm_pt_scale.c`（已删除，git 历史可考），把并行主张变成可证伪验收门 |
 
 期间修掉两个真实缺陷：fault-around 曾把 PFN 当物理地址传给 `mm_cursor_map`
 （装入无效物理地址，表现为访问故障而非缺页，C 无法发现类型不匹配）；MCS
@@ -555,7 +555,7 @@ smp4 QEMU 实测。
 ### 8.2b 成本归因：并行度到底损失在哪（mm_fault_cost，x86_64/KVM smp4）
 
 新增 `user/cmds/stress/mm_fault_cost.c`（该文件已删除）：同一线程数、同一共享地址空间、同一不相交
-区间，把三���成本分开单独测。
+区间，把三项成本分开单独测。
 
 | 相位 | 隔离的是什么 | 1T | 2T | scale |
 |---|---|---|---|---|
@@ -1461,7 +1461,7 @@ userfaultfd 注册每一次都同步更新它。本实现的状态字节只有 c
 | unmap-virt high | 69.0 µs | 69.1 µs | 0% |
 | unmap low | 185.0 µs | 162.5 µs | −12%（更快） |
 
-§10.1 的归因到此推翻。关掉预标记后 mmap 没有变快，两��相差 2–3%，远在噪声内。
+§10.1 的归因到此推翻。关掉预标记后 mmap 没有变快，两者相差 2–3%，远在噪声内。
 所以「预标记导致 mmap 慢 1.5×」这个归因是错的，§10.1 与据此展开的 §10.3 两轮优化
 都建立在错误前提上。真实原因尚未定位，最可能是 §9.3 那条基线与当前树之间还有别的
 未识别差异（基线取自加预标记之前，其间 §10 之后我又动过 `munmap.c`/`elf.c` 的调用点
@@ -1697,7 +1697,7 @@ riscv64/TCG + `taskset -c 12-15`）。每对的 ON 与 OFF 在时间上紧邻，
    交错之后效应清晰可见。
 
 净结论：预标记当前让 mmap 慢约 14%，而它服务的消费者（按状态缺页路径）仍是死代码
-（§10.6，`mm_fault_from_status` 恒为 0）。也就是��付出 14% 的 mmap 成本，换来零收益，
+（§10.6，`mm_fault_from_status` 恒为 0）。也就是白白付出 14% 的 mmap 成本，换来零收益，
 因为唯一能消费这些状态标记的 fault 路径从未执行过（§10.7 还说明即便修好查询，
 它的位置也绕过了 userfaultfd/共享/fault-around）。
 
@@ -1768,7 +1768,7 @@ cursor 可能在帧被 buddy 回收后继续读它。`mm_pt_defer_free()` /
 而 PT 页回收的语义是「这个节点已不可达，等读侧退出再释放」，两者本来不该耦合。把它
 塞进 TLB 事务导致每个拆表调用点都必须开事务，这是不必要的耦合，也是本次修复差点
 不安全的根因。独立队列只需 `mm->lock` 保护链表 + 一个可在任意上下文
-调用��排空点。
+调用与排空点。
 
 ### 10.17 修好 PT 页 UAF：回收与 TLB 事务解耦
 
@@ -1908,7 +1908,7 @@ seal 就失效了；反过来标了却没 seal，则是无谓地关掉了 fault-
 `missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 safe=0 anon_virt=0`。
 
 `MM_SAFE_UFFD` 故意不查：UFFDIO_UNREGISTER 清的是「实际移除的 range 的并集」，
-一个仍被另一个 uffd 注册覆盖的页面会丢掉标记，于是「UFFD 位 ⟺ 被注册」今天根本不是
+一个仍被另一个 uffd 注册覆盖的页面会丢掉标记，于是「UFFD 位 当且仅当 被注册」今天根本不是
 不变量，拿它做检查必然报假错。权威判定始终是 VMA 缺页路径上的
 `userfaultfd_range_present()`（本次未动）。等状态缺页路径真要启用、且 unregister 改成
 逐页复查 presence 之后再清（§10.19 已标注），才把 UFFD 位纳入审计。

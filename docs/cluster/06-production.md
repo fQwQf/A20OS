@@ -53,13 +53,13 @@
 
 ### P-模糊
 
-帧解码器与 HELLO 协商逻辑：对 `frame.c` 解码入口做语料驱动模糊（种子=02-§9 金样，变异=bit 翻转/截断/长度字段篡改），≥10⁶ 用例或 2 小时，零崩溃零断言。MCU 叶子解码路径同测（host 侧 harness 编译同一 `frame.c`）。
+帧解码器与 HELLO 协商逻辑：对 `frame.c` 解码入口做语料驱动模糊（种子=02-§9 金样，变异=bit 翻转/截断/长度字段篡改），≥10^6 用例或 2 小时，零崩溃零断言。MCU 叶子解码路径同测（host 侧 harness 编译同一 `frame.c`）。
 
 ## 2. 性能目标（测量脚本进 `tools/`，可复现）
 
 | 指标 | 目标 | 测量方法 |
 |---|---|---|
-| 本机 channel_call 回归 | 与改造前均值差 <3%（统计显著性 p<0.05） | 现有 channel 微基准（找仓库既有基准或写最小 ping-pong），各 10⁵ 次 |
+| 本机 channel_call 回归 | 与改造前均值差 <3%（统计显著性 p<0.05） | 现有 channel 微基准（找仓库既有基准或写最小 ping-pong），各 10^5 次 |
 | loopback 远程 CALL RTT | < 3× 本机 channel_call | 同上经虚拟节点 |
 | 双 QEMU UDP CALL RTT（64B） | p50 < 5ms | demo-echo 改测量模式 |
 | SERVER 档小消息吞吐 | > 10k msg/s/节点 | 4 节点互打 64B SEND，60s 计数 |

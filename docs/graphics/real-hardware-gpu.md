@@ -68,13 +68,13 @@ PowerVR 的 `imagination` 相对小，但 3.4 万行仍然远超 scanout 那一�
 
 | SoC / 板 | 3D GPU | 主线驱动 | scanout | A20OS 结论 |
 |---|---|---|---|---|
-| StarFive VisionFive 2（JH7110） | 有：Imagination BXE-4-32 | ❌ 不在主线 `img,powervr-rogue.yaml` 绑定里；该绑定列的是 `gx6250`/`ge7800`/`axe-1-16m`/`bxm-4-64`/`bxs-4-64`。StarFive 自己的替代 blob 不可再分发 | ✅ DC8200，`drivers/gpu/drm/verisilicon` 已在主线 | HDMI 输出可行，3D 是死路（见 §3.1） |
-| T-HEAD TH1520（Lichee Pi 4A） | IMG BXM-4-64 | ✅ 在主线绑定内；TH1520 已有主线跑 Zink（OpenGL-on-Vulkan）的演示 | 有 | 现实可行的 RISC-V 3D 目标，预算按一个季度（§3.2） |
-| SpacemiT K3（SG2044） | IMG BXM-4-64 | ✅ 在主线绑定内 | 有 | 同上，同一档 GPU |
-| Loongson LS2K1000 | 无 GPU | — | ✅ `drivers/gpu/drm/loongson`，已工作 | 只有 scanout |
+| StarFive VisionFive 2（JH7110） | 有：Imagination BXE-4-32 | 不在主线 `img,powervr-rogue.yaml` 绑定里；该绑定列的是 `gx6250`/`ge7800`/`axe-1-16m`/`bxm-4-64`/`bxs-4-64`。StarFive 自己的替代 blob 不可再分发 | DC8200，`drivers/gpu/drm/verisilicon` 已在主线 | HDMI 输出可行，3D 是死路（见 §3.1） |
+| T-HEAD TH1520（Lichee Pi 4A） | IMG BXM-4-64 | 在主线绑定内；TH1520 已有主线跑 Zink（OpenGL-on-Vulkan）的演示 | 有 | 现实可行的 RISC-V 3D 目标，预算按一个季度（§3.2） |
+| SpacemiT K3（SG2044） | IMG BXM-4-64 | 在主线绑定内 | 有 | 同上，同一档 GPU |
+| Loongson LS2K1000 | 无 GPU | — | `drivers/gpu/drm/loongson`，已工作 | 只有 scanout |
 | Milk-V Duo（CV1800B / SG2002） | 无 3D GPU | — | 有（平桥类控制器） | 只能 scanout |
 | K230 | 无 3D GPU（只有 2.5D VGLite 向量引擎） | — | 有 | VGLite 不是 3D 加速 |
-| EIC7700 / 7700X | IMG A 系列 3D GPU | ❌ 无主线驱动，且 A 系列早于 `drm/imagination` 支持的范围 | 有 | 3D 短期无解 |
+| EIC7700 / 7700X | IMG A 系列 3D GPU | 无主线驱动，且 A 系列早于 `drm/imagination` 支持的范围 | 有 | 3D 短期无解 |
 
 ### 3.1 不可再分发性是一条硬约束，不只是技术问题
 

@@ -59,7 +59,7 @@ apk 安装时逐文件校验。GNU tar 能读但会警告 "unknown keyword"，�
 `-----BEGIN RSA PUBLIC KEY-----`。生成方式：
 
 ```bash
-openssl rsa -in key.rsa -pubout -out key.rsa.pub    # SPKI ✓
+openssl rsa -in key.rsa -pubout -out key.rsa.pub    # SPKI
 ```
 
 ### 规则 6：仓库路径的架构目录由 apk 自己追加

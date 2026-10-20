@@ -18,7 +18,7 @@
 
 定义 1.5（引用计数） $refcount(o, \sigma) = |\{(p,n) \mid HT_p(n)=(o,\rho)\}| + |\{(c,m,i) \mid m \in Queued(c,\sigma) \cup Pending(c,\sigma) \land m.handles_i.object=o\}|$——HT 条目与排队/投递中消息引用共同计入。
 
-操作-类型-权限兼容矩阵（`compat: OpName → 2^𝒯`，每操作所需权限位）：handle_read/write/stat/control、task_wait、event_wait、msg_send/recv、vm_map、net_connect/accept 等（完整矩阵见 07 §7）。
+操作-类型-权限兼容矩阵（`compat: OpName → 2^T`，每操作所需权限位）：handle_read/write/stat/control、task_wait、event_wait、msg_send/recv、vm_map、net_connect/accept 等（完整矩阵见 07 §7）。
 
 ---
 
@@ -125,7 +125,7 @@ VM-SHARE：`vm_share(addr,len,ρ_grant)` 创建 SHM 对象，backing 指向源�
 
 约束 C1（模块依赖图）：`abi_linux → core`、`abi_native → core`；两 ABI 互不依赖；core 不反向依赖任何 ABI。
 
-定理 9.1（ABI 隔离） 一个 ABI 的 bug 不影响另一个的正确性（依赖约束 C1 ⇒ 影响仅经 core 契约）。 定理 9.2（状态空间不相交） `State_linux ∩ State_native = ∅`（fd 表/信号表/pid 与 handle 表/eventq 独立；共享 task 为 core 层）。
+定理 9.1（ABI 隔离） 一个 ABI 的 bug 不影响另一个的正确性（依赖约束 C1 ⇒ 影响仅经 core 契约）。 定理 9.2（状态空间不相交） `State_linux ∩ State_native = {}`（fd 表/信号表/pid 与 handle 表/eventq 独立；共享 task 为 core 层）。
 
 > 语义级边界（更强）：即使共享 VFS，Linux 进程也无法推断 Native handle 权限状态，见 05 §5（定理 1.1-1.4，含 $BridgeFree$ 条件）。该边界在 05 中升级为信封的逃逸防线 #2，此处不再重复。
 

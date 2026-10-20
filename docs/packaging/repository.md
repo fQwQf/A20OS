@@ -31,7 +31,7 @@ make pkg-repo ARCH=riscv64
 ```
 发布私钥（CI secret A20_REPO_SIGNING_KEY）
    │  签名
-   ▼
+   ↓
 每个 .apk 包                APKINDEX.tar.gz（仓库索引）
    │                            │
    └── 消费侧用公钥验证 ──────────┘

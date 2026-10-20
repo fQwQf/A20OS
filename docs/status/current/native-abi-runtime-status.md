@@ -109,11 +109,11 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 | 工作项 | 内容 | 状态（2026-08） |
 |--------|------|------|
-| 内核：native 二进制 PT_INTERP | `elf_setup_stack_a20_dynamic()` + 解释器加载/入口切换 | ✅ 已验证：`smoke-native-dynlink`（fakeld 探针经 PT_INTERP 加载、校验 auxv 后回跳应用） |
-| 启动协议：auxv | conventional stack/auxv（AT_BASE/AT_ENTRY/AT_PHDR…），start_info 经 a0 传递给解释器并由其转发 | ✅ 已验证（同上）；AT_PHDR 计算修正为「首 LOAD 的 vaddr−offset+e_phoff」 |
-| 文件映射窗口 | demand fault 对文件 VMA 的填充 | ✅ 已验证：test_native_mm 分区 7（path_open→vm_map FILE→按需调页校验 ELF magic） |
-| 头部页背书（联调中发现并修复） | 首 LOAD 头部半页此前零填充，ELF 头/phdr 表不落内存，AT_PHDR 悬空 | ✅ 已修复：lazy 与 eager 两条加载路径均回填前置文件字节 |
-| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so`（PT_DYNAMIC、GOT/PLT） | ⬜ 未执行（估列小；所需内核原语均已验证） |
+| 内核：native 二进制 PT_INTERP | `elf_setup_stack_a20_dynamic()` + 解释器加载/入口切换 | 已验证：`smoke-native-dynlink`（fakeld 探针经 PT_INTERP 加载、校验 auxv 后回跳应用） |
+| 启动协议：auxv | conventional stack/auxv（AT_BASE/AT_ENTRY/AT_PHDR…），start_info 经 a0 传递给解释器并由其转发 | 已验证（同上）；AT_PHDR 计算修正为「首 LOAD 的 vaddr−offset+e_phoff」 |
+| 文件映射窗口 | demand fault 对文件 VMA 的填充 | 已验证：test_native_mm 分区 7（path_open→vm_map FILE→按需调页校验 ELF magic） |
+| 头部页背书（联调中发现并修复） | 首 LOAD 头部半页此前零填充，ELF 头/phdr 表不落内存，AT_PHDR 悬空 | 已修复：lazy 与 eager 两条加载路径均回填前置文件字节 |
+| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so`（PT_DYNAMIC、GOT/PLT） | 未执行（估列小；所需内核原语均已验证） |
 | TLS 动态模型 / dlopen | rtld 全部现成，sysdeps 只需 vm_map/vm_protect/文件读取 | 小-中（估列） |
 | 总计 | 内核侧已就绪并通过探针冒烟；剩余为 mlibc rtld 制品与应用级联调 | 可据此启动 rtld 联调排期 |
 

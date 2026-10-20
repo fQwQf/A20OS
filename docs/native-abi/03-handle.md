@@ -269,14 +269,14 @@ Handle 在其生命周期中经历以下状态：
                          │  bitmap bit = 1
                          v
     ┌─────────────────────────────────┐
-    │          Active                 │  entry.object != NULL, ρ_eff ≠ ∅, 正常使用
+    │          Active                 │  entry.object != NULL, ρ_eff ≠ {}, 正常使用
     └─────────────────────────────────┘
           │            │            │            │
           │ dup        │ transfer   │ replace    │ temporal expiry
           v            v            v            v
     ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐
     │Duplicated│ │Transient │ │Replacing │ │Expired (惰性化)   │
-    │ (新槽位) │ │ (传递中) │ │ (替换中) │ │ ρ_eff = ∅         │
+    │ (新槽位) │ │ (传递中) │ │ (替换中) │ │ ρ_eff = {}         │
     └──────────┘ └──────────┘ └──────────┘ │ 但 entry 仍在      │
           │            │            │      └───────────────────┘
           │            v            │            │

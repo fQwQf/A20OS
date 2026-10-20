@@ -1,0 +1,154 @@
+# cli profile —— 纯命令行 Alpine 工作站（无桌面）
+#
+# 目的：给 QEMU 上的 A20OS 一个**能用**的交互式命令行环境。既有的
+# server world 是刻意的"最小服务器形态"（busybox ash + dropbear + chrony），
+# 交互体验上等于没有工具链；devtools / devel world 是编译器验证用的，
+# 也不以日常使用为目标。这里按"一台正常的 Linux 命令行机器"来配。
+#
+#   tools/a20 run cli-riscv64
+#
+# 配套 packages/overlay/cli/（a20-distro 标记 + stage-2 init + 账号文件），
+# 内核把镜像挂到 /extra，A20OS 的 init 检测到标记后 chroot 进去 exec
+# /sbin/init，由它接管并开出 zsh 登录 shell（与 server / xfce world 同一模式）。
+#
+# 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
+# 缓存。上游是 Alpine v3.23 的 main（见 tools/mkrootfs.py 的
+# DEFAULT_ALPINE_VERSION / DEFAULT_ALPINE_MIRROR），镜像源可用
+# ALPINE_MIRROR_ROOT 覆盖；tools/pkg.py 的 image-world 目前不透传该开关，
+# 需要换源时直接调 tools/mkrootfs.py --alpine-mirror。
+#
+# 全部包都在 Alpine main 里，四个 hosted 架构（riscv64/aarch64/x86_64/
+# loongarch64）都有——刻意不碰 community，避免某个架构缺包时整个镜像组不出来。
+
+# Alpine 基础。musl 是运行时，busybox 提供 /bin/sh 与一批内建命令，
+# ca-certificates 是 curl/wget/git 走 HTTPS 的前提。
+musl
+busybox
+ca-certificates
+
+# shell：zsh 是交互 shell（overlay 的 /sbin/init 直接 exec 它），
+# bash 留给脚本与习惯用 bash 的场景。
+zsh
+bash
+
+# GNU 工具链。busybox 自带的同名命令参数子集不全（例如 find 的
+# -printf、grep 的 -P、sed 的 -i 细节），装了这几个之后 PATH 里
+# /usr/bin 的 GNU 版本会盖过 busybox 的内建命令。
+coreutils
+findutils
+grep
+sed
+gawk
+diffutils
+which
+file
+tree
+less
+
+# 进程与系统观察。
+procps
+util-linux
+psmisc
+lsof
+strace
+htop
+tmux
+
+# 编辑器。
+vim
+nano
+
+# 归档与压缩。
+tar
+gzip
+bzip2
+xz
+zstd
+zip
+unzip
+
+# 文本/数据。
+jq
+
+# 网络。curl/wget 走 slirp 出网；openssh-client 是 ssh/scp/sftp；
+# iproute2 + iputils 给 ip/ping/ss，bind-tools 给 dig/nslookup。
+# 出网实测可用（curl 取到 200），但 `ip` 与 `nslookup` 目前受内核缺口影响，
+# 见文末"三、网络工具的两个缺口"。
+curl
+wget
+openssh-client
+iproute2
+iputils
+bind-tools
+rsync
+socat
+
+# 终端能力库：zsh 的补全、vim 的配色、tmux 的 TERM 都要 terminfo，
+# 缺了表现为"终端一片黑白 + 方向键打出转义序列"。
+ncurses-terminfo-base
+ncurses-terminfo
+
+# 存储工具：guest 里能自己 fsck / 打盘，调试第二块盘时用得上。
+e2fsprogs
+dosfstools
+
+# 语言与时间。
+python3
+py3-pip
+tzdata
+
+# 版本控制。
+git
+
+# 手册：man 本体（mandoc）+ 页面内容。
+mandoc
+man-pages
+
+# ---------------------------------------------------------------------------
+# 验证记录与已知内核问题（riscv64，2026-10）
+# ---------------------------------------------------------------------------
+#
+# 启动链路已验证：内核把 build/images/cli-riscv64.img 挂到 /extra，A20OS 的
+# init 检测到 /etc/a20-distro 后 chroot 进去 exec /sbin/init，落在 zsh 上。
+# guest 内实测通过：zsh 5.9、coreutils 9.8、findutils 4.10、grep 3.12、
+# sed 4.9、git 2.52、Python 3.12.15、tmux 3.6、vim 9.2、htop 3.4.1、
+# tree/jq/less/mandoc 均在；tmux 能起 session；python3 的 ssl/json/sqlite3
+# 可导入；`curl https://dl-cdn.alpinelinux.org/...` 返回 200；`poweroff` 走
+# [SD] POWER_OFF 正常关机。同一张镜像连续启动两次，第二次仍能正常挂载。
+#
+# **一、ext4 orphan 回收缺口（内核侧；本 world 会稳定触发，已规避）**
+#
+#   kernel/fs/diskfs/ext4_namei.c:717 ext4_release_vn() 在一个"被引用期间被
+#   unlink"的 inode 上调用 ext4_orphan_reap()，后者返回 -95（EOPNOTSUPP），
+#   于是打印 "[EXT4] unlink orphan ... deferred orphan cleanup failed ...;
+#   orphan retained for recovery"，inode 留在 orphan 链里。world 镜像是无日志
+#   ext4（mkrootfs 的 EXT4_MKFS_ARGS 带 ^has_journal），journal poison 那一步被
+#   跳过，所以当场没有别的报错——但**下一次挂载这张镜像会失败**：
+#   "[EXT4] refusing mount: orphan recovery failed (-95)"，镜像被拒，启动退回到
+#   FAT32 根（A20OS 原生用户态），表现为"world 没生效"。
+#
+#   触发条件是 zsh 的历史文件：`.zshrc` 里开 SHARE_HISTORY / INC_APPEND_HISTORY
+#   时，zsh 每条命令都重写历史文件，于是每条命令留一个 orphan（实测：连
+#   `echo` 都留；同一镜像上 busybox ash 跑同样命令是 0 条）。关掉这两个选项后
+#   orphan 计数归零，镜像连续两次启动都正常。所以
+#   packages/overlay/cli/root/.zshrc 刻意不设它们，并把 HISTFILE 指向 /dev/shm
+#   （内核已挂的 tmpfs），避免历史写到 ext4 上。
+#
+#   日常 `tools/a20 run cli-<arch>` 每次都会重建镜像（image-world 是 phony），
+#   所以这个缺口平时被"重建"掩盖；真正会踩到的是 `a20 run --no-build`，或手工
+#   用同一张镜像连续启动两次。根因在内核的 ext4 orphan 回收路径，值得单独修。
+#
+# **二、guest 内 `mount` 不生效（内核侧）**
+#
+#   `mount -t tmpfs tmpfs /tmp`、`mount -t tmpfs -o size=64m tmpfs /var/tmp`
+#   在 guest 内都返回 32，事后 /proc/mounts 里既没有 /tmp 也没有 /dev/pts。
+#   内核只在自己挂载（chroot 前挂在 /extra 下），/extra/dev/shm 与 /extra/run
+#   的 tmpfs 就是这么来的。所以 overlay init 里那几个 mount 目前是 no-op；
+#   pty 走 /dev/ptmx 仍然可用（tmux 实测能起 session），本 world 不依赖它们。
+#
+# **三、网络工具的两个缺口（内核侧）**
+#
+#   `ip`（netlink）失败在 `SO_SNDBUF: Not supported`；`nslookup`/`dig`（自己发
+#   UDP DNS）失败在 `address family not supported`。TCP 路径不受影响（curl
+#   返回 200 就是证据：musl 解析器在 UDP 失败后回退到 TCP DNS）。
+
