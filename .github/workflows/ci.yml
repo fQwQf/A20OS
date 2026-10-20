@@ -396,6 +396,13 @@ jobs:
           make smoke-mm-stress
           make smoke-vfs-stress
           make smoke-vfs-stress-smp2
+          # Scheduler and process-lifecycle concurrency: NR_CPUS=1 never reaches
+          # runqueue migration or cross-CPU wakeup, and until these existed only
+          # vfs/futex/swap had an SMP gate.  Each asserts the boot log reports
+          # both CPUs online, so a mis-wired alias cannot pass by booting the
+          # single-CPU image.  The single-CPU targets above keep running too.
+          make smoke-sched-stress-smp2
+          make smoke-proc-stress-smp2
           make smoke-smp-bringup
           # Native coverage runs in the separate shared two-architecture job.
         timeout-minutes: 60
