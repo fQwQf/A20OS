@@ -881,12 +881,14 @@ ifeq ($(NOMMU),1)
 $(error DONTUNMAP_TXN_IMPL=rust requires an MMU profile)
 endif
 endif
-CHANNEL_RECV_TXN_ACTIVE := $(if $(filter $(ABI),native both),1,)
-ifeq ($(CHANNEL_RECV_TXN_IMPL),rust)
-ifeq ($(CHANNEL_RECV_TXN_ACTIVE),)
-$(error CHANNEL_RECV_TXN_IMPL=rust requires ABI=native or ABI=both)
-endif
-endif
+# CHANNEL_RECV_TXN_IMPL is fixed to rust for every profile, but the module only
+# exists where the native ABI does: ABI_SRCS above pulls abi/native/ in for
+# ABI=native|both only, and both the Rust rule and its KERNEL_OBJ edge are
+# gated on kernel/abi/native/sys_native_ipc.c being in KERNEL_SRC.  Under
+# ABI=linux the module is therefore absent rather than misconfigured, so there
+# is deliberately no "requires ABI=native or ABI=both" guard here; one used to
+# reject every ABI=linux instance (22 manifests, make smoke-abi-linux among
+# them) for a module those profiles never build.
 TASK_OBJECTS_ACTIVE := $(if $(filter $(ABI),native both),1,)
 ifeq ($(ARCH),armv7m)
 ifneq ($(MCU_NATIVE_PROGRAM),1)
