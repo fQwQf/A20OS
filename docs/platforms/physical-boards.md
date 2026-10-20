@@ -51,7 +51,7 @@ PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏�
 - `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len；RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化 send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
 - PHY：扫描 MDIO 0..31 定位（VF2 板载 Motorcomm YT8531），复位 + 自协商。
 - DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁（`mutex` 串行化传输，`irq_lock` 保护中断 latch）。有 IRQ 资源时命令/数据完成走中断（bounded pre-poll 后 park 到 `wait_queue_t`），无 IRQ 资源时全同步轮询；IRQ 模式首次超时会释放线号并永久降级为轮询。卡枚举全程轮询（probe 上下文不能 park）。
-- 已知边界：GMAC 数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。DW-SDIO 中断路径真机未验证。
+- 已知边界：GMAC 数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/status/current/drivers-implementation-status.md`）。DW-SDIO 中断路径真机未验证。
 - 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确），`timer_set_interval` 与全部 tick↔时间换算随之按板校准。
 - 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号（`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级 `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash 烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
 
@@ -194,4 +194,4 @@ CI 目标：`check-visionfive2-build`、`check-ls2k1000-build`（见 `tools/targ
 2. 打印 `[FDT] RAM range ...` 或 board 窗口回退，核对实际内存。
 3. `[StarFive-GMAC]/[LS2K-GMAC] PHY link up`；`ping`/`sockets` 数据面。
 4. VF2：`NR_CPUS=2` secondary online、reschedule/TLB IPI。
-5. 记录结论而不是字节：把**能力级的已验证/未验证状态**回填到本文的验收表与 `docs/drivers/meta/implementation-status.md`；镜像的字节数、SHA-256、build 目录由 `tools/a20 ledger <instance>` 现算，启动日志由 `tools/a20 console` 落盘。不要把哈希和日期抄进文档：抄进去的数字没人会再去核对。
+5. 记录结论而不是字节：把**能力级的已验证/未验证状态**回填到本文的验收表与 `docs/status/current/drivers-implementation-status.md`；镜像的字节数、SHA-256、build 目录由 `tools/a20 ledger <instance>` 现算，启动日志由 `tools/a20 console` 落盘。不要把哈希和日期抄进文档：抄进去的数字没人会再去核对。

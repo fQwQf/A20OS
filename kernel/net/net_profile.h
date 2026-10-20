@@ -130,7 +130,7 @@
  * ring is full, which makes the lwIP callback answer ERR_MEM and lwIP parks the
  * pbuf in refused_data for a later retry.  A full ring backpressures, it does
  * not lose the segment.  What depth 2 costs is burst absorption -- see
- * docs/server-readiness.md, "嵌入式档能力边界".
+ * docs/status/current/server-readiness.md, "嵌入式档能力边界".
  */
 #define NET_PROFILE_BH_RING_SIZE     2
 #define NET_PROFILE_INLINE_PAYLOAD   256
@@ -169,7 +169,7 @@
  * ceiling is asserted against the real sizeof() in netfilter_nat.c.
  * Halved from the 64 the tier was launched with.  A conntrack entry is tracked
  * only when netfilter is loaded, and this tier's honest answer to "how many
- * simultaneous flows will it track" is a small one -- see docs/server-readiness.md
+ * simultaneous flows will it track" is a small one -- see docs/status/current/server-readiness.md
  * for what the reduction costs.  The table is paid for on every boot whether or
  * not netfilter ever runs, so its ceiling belongs in the tier's memory budget
  * rather than in a feature nobody enabled.
@@ -202,7 +202,7 @@
  * profile that needs about 42 KiB and is asserted not to need more than 44 KiB.
  * 20 KiB was never achievable for a socket-capable lwIP -- the eight sockets
  * alone are 19520 B -- and the way that used to be expressed was a ceiling that
- * the code violated.  docs/server-readiness.md carries the numbers.
+ * the code violated.  docs/status/current/server-readiness.md carries the numbers.
  */
 #define NET_PROFILE_FILTER_BUDGET    (32 * 64 + 1280)
 #define NET_PROFILE_TOTAL_BUDGET     (44 * 1024)
@@ -335,7 +335,7 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
  * (components/trim.toml [profile.mcu].sources) that contains neither the
  * kernel/net sources nor lwIP, so NET_PROFILE has no effect on that target.
  * This profile targets a part with roughly 64 KiB of RAM, not a 20 KiB one.
- * See README.md and docs/server-readiness.md.
+ * See README.md and docs/status/current/server-readiness.md.
  */
 
 #elif CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_SERVER
@@ -527,7 +527,7 @@ _Static_assert(NET_PROFILE_PACKET_FRAME_SIZE <= NET_PROFILE_NETIF_FRAME_SIZE,
  * The total this profile costs in unconditional .bss.  These two arrays were
  * the reason "embedded" could not mean small: they were compiled outside the
  * profile's scope at 37312 B on every rung, which is 1.8x a 20 KiB part on its
- * own.  docs/server-readiness.md records the measurement; this assert is what
+ * own.  docs/status/current/server-readiness.md records the measurement; this assert is what
  * keeps a future hardcoded constant from quietly reinstating it.
  */
 _Static_assert(NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +

@@ -215,7 +215,7 @@ Welcome to A20OS!
 
 1. 先确认协议是否已有通用 PCI/VirtIO 驱动。
 2. 功能驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_AARCH64` 或本平台的 GIC/PL011/ECAM 常量；这些事实属于 `kernel/platform/virtualbox-aarch64/`。
-3. 当前 PCI 中断路由不完整，暂时使用轮询的驱动必须有单次预算和双重超时，并在 [实现状态](../drivers/meta/implementation-status.md) 记录解除轮询的条件。
+3. 当前 PCI 中断路由不完整，暂时使用轮询的驱动必须有单次预算和双重超时，并在 [实现状态](../status/current/drivers-implementation-status.md) 记录解除轮询的条件。
 
 ## 常见故障
 

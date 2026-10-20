@@ -15,11 +15,11 @@ LoongArch32/PPC64LE 已退出 1.0；其源码、实例、构建和 CI 清理归�
 
 2026-10-13 已转入完整构建、宿主测试和 QEMU 实际验证。已通过的工程项删除，
 未覆盖条件继续保留；命令、配置与结果见
-[验证记录](../validation-docs-completion-2026-10-13.md)，编码历史见
-[阶段记录](../development-docs-completion-2026-10-13.md)。
+[验证记录](../status/history/validation-docs-completion-2026-10-13.md)，编码历史见
+[阶段记录](../status/history/development-docs-completion-2026-10-13.md)。
 
 面向服务器部署的当前能力边界与阻塞项排序见
-[../server-readiness.md](../server-readiness.md)。
+[../status/current/server-readiness.md](../status/current/server-readiness.md)。
 
 checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；带日期的验证记录如何引用
 见文末"验证环境说明"。
@@ -30,7 +30,7 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 权限与周期预算已通过 `sched_stress` 的同 CPU 普通进展与 RT 恢复验收；
 长 syscall 和真机边界仍需下述工作。
-当前边界见 [../server-readiness.md](../server-readiness.md) §四。
+当前边界见 [../status/current/server-readiness.md](../status/current/server-readiness.md) §四。
 
 - [ ] IRQ 线程化与长内核路径的抢占运行验收
   - `CONFIG_KERNEL_PREEMPT` 已在基线实现；IRQ 返回路径通过
@@ -42,7 +42,7 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 
 已运行的 handle、MM、deepen、contract 用例覆盖权限上限、区域约束、对象生命周期
 和 `remap-owner-rollback PASS`，通过结果与配置见
-[本轮验证](../validation-docs-completion-2026-10-13.md)。相关本地复验项已移除。
+[本轮验证](../status/history/validation-docs-completion-2026-10-13.md)。相关本地复验项已移除。
 
 - [ ] 在云端复验 Native CI 与发布前置门禁
   - `.github/workflows/native.yml` 已接线；本轮只验证本地配方，未触发云端 CI 或发布。
@@ -89,8 +89,8 @@ checkbox 表示实现里程碑，不表示运行结果已在当前提交复验�
 ## P0：并发与 SMP 就绪
 
 FUTEX_WAKE_OP 的双架构单核/四核运行已有
-[分支记录](../validation-docs-completion-2026-10-13.md) 和
-[main 集成记录](../validation-main-integration-2026-10-13.md)，移除“仅编译、尚未运行”的旧条目。
+[分支记录](../status/history/validation-docs-completion-2026-10-13.md) 和
+main 集成记录（该轮记录已删除），移除“仅编译、尚未运行”的旧条目。
 相关原子性、COW 与批次唤醒断言继续作为 Rust 迁移及 1.0 候选回归，不由此宣称所有 futex 交错已证明。
 
 - [ ] 补锁拆分的 B1 基线与竞争复测
@@ -99,7 +99,7 @@ FUTEX_WAKE_OP 的双架构单核/四核运行已有
   - 仍需 roadmap §5.1 的 B1（仅注册、不改锁）历史基线，以及足够 RUNS 的同负载
     前后采样。当前编码阶段没有新增测量结果，不能回答锁拆分后的性能收益。
   - 工具与历史数据见 [perf-overhaul.md](perf-overhaul.md) 与
-    [../measured/lock-after.md](../measured/lock-after.md)。
+    [../status/measurements/lock-after.md](../status/measurements/lock-after.md)。
 
 ## P0：Linux ABI 正确性
 
@@ -123,20 +123,20 @@ FUTEX_WAKE_OP 的双架构单核/四核运行已有
 
 - [ ] 完善 `MREMAP_DONTUNMAP` 的源端再次缺页语义
   - 常驻页移动与已换出 PTE 的 fork/remap 引用保留已实现；真实换出、数据读回与槽回收
-    已通过 RISC-V/AArch64 单核及四核门禁，见 [本轮验证](../validation-docs-completion-2026-10-13.md)。
+    已通过 RISC-V/AArch64 单核及四核门禁，见 [本轮验证](../status/history/validation-docs-completion-2026-10-13.md)。
   - DONTUNMAP 仍需独立实现与运行验收，不能用普通 remap 的通过结果替代。
 - driver/device/bus registry 容量耗尽的 RV64 QEMU 验收已完成：注入 backing-array
   `krealloc` 失败后，三种注册均保留旧项、返回 `-ENOMEM`，记录结构化日志，并在重试后
   成功；移除测试项后数量回到基线。证据仅覆盖本轮 RV64 单核 QEMU，不代表其他架构或
   实机验收；registry backing array 按设计保留增长后的容量。详见
-  [注册表容量验证记录](../validation-driver-registry-capacity-2026-10-13.md)。
+  [注册表容量验证记录](../status/history/validation-driver-registry-capacity-2026-10-13.md)。
 ## P1：内核核心锁收敛的后续（2026-10 feat/kernel-core-scalability 分支）
 
 已落地：EventQ 反向索引 256 桶分锁、per-vnode 缓冲写锁、mount 表稳定
 堆指针（umount 搬移指错 `vnode->mnt` 的正确性 bug）、vfile 表 128 桶分锁
 （原 `g_file_lock` 单锁）、路径查找 errno per-task、slab per-CPU 对象数组、
 timekeeping 读路径 seqlock、kswapd 式后台回收（`/proc/a20/oom` 的
-`kswapd_*`）。设计文档锁序表与 [../server-readiness.md](../server-readiness.md)
+`kswapd_*`）。设计文档锁序表与 [../status/current/server-readiness.md](../status/current/server-readiness.md)
 §七点五已同步。实测（4 核 `smoke-smp-lock-contention`，net_stress 负载）：
 `vfile_bucket` 全部桶合计 2 次争用 / 0 自旋，`proc: 4498 次 / 973 万自旋`
 仍是压倒性热点。
@@ -204,7 +204,7 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
       net_stress；分桶写锁、per-vnode 写锁、mount 表在多核文件负载下的
       竞争数字没有门禁形态（需要并发 open/write/unmount 的 smp 变体）。
 - [ ] 其余 smoke 门禁仍是 NR_CPUS=1（vfs-stress 已有 smp2/smp8 变体，
-      见 [../server-readiness.md](../server-readiness.md) §四）。
+      见 [../status/current/server-readiness.md](../status/current/server-readiness.md) §四）。
 
 ## P1：跨架构正确性（2026-10 feat/kernel-core-scalability 分支）
 
@@ -218,7 +218,7 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
 ## P2：仓库卫生与依赖边界
 
 - [ ] 保留平台的发布配置与工具链复核
-  - [main 集成记录](../validation-main-integration-2026-10-13.md) 已记录 x86_64、LoongArch64、
+  - main 集成记录（该轮记录已删除）已记录 x86_64、LoongArch64、
     RISC-V32 等内核构建；这些是指定工作区的构建证据，不是完整运行或所有板级零警告证明。
   - 在候选工具链上复核四条 64 位主线及保留的 ARM32/RISC-V32/ARMv7-M 范围，记录
     配置、警告策略和产物；缺工具链或实板仍列待验收。

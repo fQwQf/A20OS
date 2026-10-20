@@ -276,7 +276,7 @@ typedef struct a20_eventq {
 | 9 | `A20_EVENT_PEER_CLOSED` | channel | 对端关闭 | 已接入 |
 | 10 | `A20_EVENT_SIGNALED` | device/task/thread | 用户态驱动 IRQ 已屏蔽并待确认；signal delivery 复用同一事件，signo 走 `data0`，TASK/THREAD 两类 watch 都通知 | 已接入 |
 
-事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。索引 16..19 的 `A20_EVENT_FS_*`（CREATE/DELETE/MODIFY/RENAME）不走本表：它们由 `event_watch_fs` 按 vnode 键投递，变更名放在事件的 `fs_name` 字段（`char[32]`，超长截断；`FS_MODIFY` 的生产点不传名字，该字段为空），见 [09-native-abi-deepening.md](09-native-abi-deepening.md) 与 [08-runtime-status.md](08-runtime-status.md)。普通 file fd 的 READABLE/WRITABLE 目前没有生产者，vfs 只发 FS 类事件。
+事件掩码使用 `A20_EVENT_MASK(index) = 1ull << index`。索引 16..19 的 `A20_EVENT_FS_*`（CREATE/DELETE/MODIFY/RENAME）不走本表：它们由 `event_watch_fs` 按 vnode 键投递，变更名放在事件的 `fs_name` 字段（`char[32]`，超长截断；`FS_MODIFY` 的生产点不传名字，该字段为空），见 [09-native-abi-deepening.md](09-native-abi-deepening.md) 与 [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md)。普通 file fd 的 READABLE/WRITABLE 目前没有生产者，vfs 只发 FS 类事件。
 
 ### 3.4 操作
 

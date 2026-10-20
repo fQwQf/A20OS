@@ -1,14 +1,14 @@
 # 锁串行化拆分设计（feat/lock-serialization-split）
 
 状态：设计定稿，实施中。本文档是本轮锁拆分的权威设计；实施细节以各实现笔记
-（`docs/measured/impl-notes-*.md`）和最终 diff 为准。测量协议见 §5。
+（`docs/status/history/impl-notes-*.md`）和最终 diff 为准。测量协议见 §5。
 
 > 修订记录（2026-10-05，design review round 1）：本版逐条落实复核提出的 17 条结论。
 > 每条在文末 §8「复核结论落点表」里给出落点，便于反查。被推翻的复核结论写明理由。
 
 ## 0. 范围
 
-本轮解决两个已实测确认的锁串行化瓶颈（基线证据见 `docs/measured/lock-baseline.md`）：
+本轮解决两个已实测确认的锁串行化瓶颈（基线证据见 `docs/status/measurements/lock-baseline.md`）：
 
 1. **`proc_lock` 残留在上下文切换发布路径上**（P0，`server-readiness.md` §八）。
 2. **`g_net_lock` 单锁覆盖整个 socket 表**（P0，同上）。
@@ -28,7 +28,7 @@
 - §7 门禁清单全绿；
 - 新的静态 gate 钉住新不变量（切换路径无 `proc_lock`），旧 gate 演进而非删除
   （逐条对照 §1.5 的「保留 / 演进」表，不允许出现未列出的 gate 变更）；
-- `docs/measured/lock-after.md` 与基线同协议对比，结论不超出 TCG 噪声分辨率。
+- `docs/status/measurements/lock-after.md` 与基线同协议对比，结论不超出 TCG 噪声分辨率。
 
 ## 1. proc_lock：切换发布路径去全局化
 
@@ -351,7 +351,7 @@ interrupted context was holding"），并且 dcache 的解法是**一次一把**
 |---|---|---|
 | proc | `kernel/proc/`、`kernel/core/sync.c`、`kernel/core/lock_counters.c`、`kernel/include/proc/`、`kernel/include/core/lock.h`、`kernel/include/core/sync.h`、`tools/gates.toml` 中 proc 相关 gate、`docs/archive/process-lock-split-audit.md`（追加）、**§4.2 表中 21 个跨边界文件**（含 `kernel/mm/`、`kernel/fs/`、`kernel/ipc/`、`kernel/abi/`、`kernel/include/mm/`、`kernel/include/cg/` 中被点名的那几个） | `kernel/net/`、`kernel/mm/slab.c`、`Makefile`、`tools/lock_bench.py` |
 | net | `kernel/net/`、`kernel/include/net/`、`kernel/drivers/net/`（如需） | `kernel/proc/`、`kernel/core/`、`kernel/mm/slab.c`、`kernel/include/core/lock.h`（走 §4.1 单向授权，不直接编辑） |
-| baseline（先于上两者串行完成） | `tools/lock_bench.py`、`Makefile`（仅追加 `include tools/targets-bench.mk`）、`tools/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/measured/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
+| baseline（先于上两者串行完成） | `tools/lock_bench.py`、`Makefile`（仅追加 `include tools/targets-bench.mk`）、`tools/targets-bench.mk`、`user/cmds/`（如需负载程序）、`docs/status/measurements/`，**外加 §5.1 点名的三个 `lock_counters_register` 调用点**（`kernel/net/socket.c`、`kernel/mm/slab.c`，分片/拆分开始**之前**打） | `kernel/` 其余全部 |
 
 （slab agent 一行已删除：见 §3。`tools/targets-bench.mk` 与 `Makefile` 的 include 行
 已经由 baseline agent 建好，本轮起点上它们是已存在的未跟踪文件
@@ -514,7 +514,7 @@ mm_struct.lock 那一环，`ipc/envelope.c` 是 a20_handle_table.lock 那一环�
   3. before/after 差异小于上面第 2 条得到的带宽的项一律写"不可分辨"，禁止声称；
   4. 旧文档的 0–920024 只作为"TCG 下自旋计数不可作门禁"的定性依据引用，
      不用作数字阈值。
-- **产物**：`docs/measured/lock-baseline.md`（B0 + B1）、`docs/measured/lock-after.md`
+- **产物**：`docs/status/measurements/lock-baseline.md`（B0 + B1）、`docs/status/measurements/lock-after.md`
   （与 B1 同协议）、同目录 JSON 原始数据；记录 QEMU 命令行、镜像哈希、宿主元数据。
 
 ## 6. 实施顺序
@@ -613,4 +613,4 @@ verifier 修复循环处理，修不动的如实记录 FAIL 状态并停在那�
   INV-P1/P4b 的论证不受影响，只是多了一层"窗口内根本没有中断"的保险。
 
 机制、架构钩子与实测数据见 `docs/process-scheduler.md` §4.1 与
-`docs/measured/impl-notes-preempt.md`。
+`docs/status/history/impl-notes-preempt.md`。

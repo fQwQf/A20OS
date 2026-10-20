@@ -4,7 +4,7 @@
 资源预算一致。完整主机以普通 Native 进程运行服务，MCU 在周期泵中调用静态
 agent；两者都执行 CW/1。构建：`make ARCH=riscv64 native-cluster-agent`，
 其他主机架构替换 ARCH；固件构建和各验收证据见
-[08-implementation-status.md](08-implementation-status.md)。
+[../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。
 
 | 组件 | 实际职责 | 详细契约 |
 |---|---|---|

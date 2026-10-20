@@ -131,7 +131,7 @@ Native ABI syscall 编号按子系统分区：
 | [ipc.md](05-ipc.md) | Channel IPC 协议、Event Queue 机制、partial delivery 状态机 |
 | [security.md](06-security.md) | Rights 代数、handle transfer 语义、安全标签格、capability 安全模型 |
 | [startup.md](07-startup.md) | 用户态启动协议、start_info 结构、初始 handle、libc 分层设计 |
-| [08-runtime-status.md](08-runtime-status.md) | 当前用户态运行时状态、已知偏差与路线图 |
+| [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md) | 当前用户态运行时状态、已知偏差与路线图 |
 
 ## 与 Linux ABI 的关系
 
@@ -205,7 +205,7 @@ Native ABI 一旦稳定，需要遵守：
 | Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
 | Event Queue | `kernel/ipc/a20_event.c` | 已实现 | 事件等待与通知 |
 | Native SDK | `user/liba20rt/` | 活跃 | syscall wrapper、启动代码、handle I/O |
-| 最小原生 C 库 | `user/liba20c/` | 活跃 | malloc/stdio/unistd 等已迁移到版本化 ABI 结构体（见 [08-runtime-status.md](08-runtime-status.md) §1） |
+| 最小原生 C 库 | `user/liba20c/` | 活跃 | malloc/stdio/unistd 等已迁移到版本化 ABI 结构体（见 [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md) §1） |
 | mlibc Native sysdeps | `user/external/mlibc/sysdeps/a20/` | 活跃（RISC-V64） | 当前完整 libc 路线；`make mlibc-sysroot`、`make smoke-mlibc` |
 | 历史参考 | `user/archive/` | 不参与构建 | 旧版 musl 移植、coreutils、build_sysroot.sh 等 |
 
@@ -285,6 +285,6 @@ Native ABI 当前登记 160 个 syscall，Linux ABI 表登记 366 个。这个�
 
 Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 syscall 编号、多架构 crt0 和 hello world 测试。Phase 1 的 `liba20c` 最小 C 库覆盖 malloc、fd↔handle 映射、FILE*、errno，以及基础 POSIX open/read/write/close 包装。Phase 2 把内核侧 syscall 扩展到 142 个，落到 task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等入口。mlibc Phase 1-2 打通 `sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
 
-剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [08-runtime-status.md](08-runtime-status.md) §8a。
+剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md) §8a。
 
-详细运行时状态与后续路线图见 [08-runtime-status.md](08-runtime-status.md)。
+详细运行时状态与后续路线图见 [../status/current/native-abi-runtime-status.md](../status/current/native-abi-runtime-status.md)。

@@ -12,7 +12,7 @@
 4. 至少一个真实吞吐设备的驱动在用户态运行且系统可恢复；
 5. 双架构（riscv64 + loongarch64）运行时验证。
 
-各方向的当前达成度见 [STATUS.md](STATUS.md)。
+各方向的当前达成度见 [../status/current/hybrid-kernel-status.md](../status/current/hybrid-kernel-status.md)。
 
 ## 设计方向
 

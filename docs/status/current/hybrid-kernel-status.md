@@ -1,10 +1,10 @@
 # 混合内核：能力与边界清单
 
-1.0 的整体完成条件见 [发布计划](../releases/v1.0.md) 的 V1-ABI/V1-DRIVER/V1-MM。
+1.0 的整体完成条件见 [发布计划](../../releases/v1.0.md) 的 V1-ABI/V1-DRIVER/V1-MM。
 本页阶段性“已实现”不等于子系统完成；同源双态、完整人格层、协议协商以及功能/性能对照
 仍需逐项收口。2026-10-13 另核对并更正了下述 driver_manager 头文件依赖。
 
-最后核实：2026-08。运行类结论需在文末复现入口给出的命令上重新执行，历史里程碑记录见 [../archive/](../archive/)。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
+最后核实：2026-08。运行类结论需在文末复现入口给出的命令上重新执行，历史里程碑记录见 [../archive/](../../archive)。设计总览见 [00-design.md](../../hybrid-kernel/00-design.md)，机制语义见 [01-mechanisms.md](../../hybrid-kernel/01-mechanisms.md)，演进路线见 [03-refactor-plan.md](../../hybrid-kernel/03-refactor-plan.md)。
 
 ## 核心架构原则与核对范围
 
@@ -54,7 +54,7 @@
 | 统一驱动框架（`driver_t`/class 设备/DriverStore） | 已实现 | `kernel/drivers/core/driver_core.c` + `driver_manager.c`，`smoke-drvmod`、`smoke-evdev-stress` |
 | drvmod 内核模块装载 | 已实现 | `kernel/drvmod/loader.c` ET_REL + `.a20drv` 描述段 + veneer/GOT，`smoke-drvmod-*` |
 | fd-IPC 后端（channel_fd/eventfd/signalfd/timerfd/SysV shm/sem） | 已实现 | `kernel/ipc/*.c` 是 ABI 无关 vfile 后端，Linux `eventfd2/signalfd4/timerfd_*/sem*/shm*` 建立其上 |
-| 外来架构二进制 execve 透明转发（qemu-user 宿主） | 已实现（编译期 `CONFIG_XLATOR` + cmdline + `/proc/a20/xlator` 三层开关，默认全部关闭；`CONFIG_XLATOR=0` 可彻底裁掉） | `smoke-exec-xlator`：`execve` 一个 x86_64 ELF 被改写为 `/bin/qemu-x86_64` 就地 re-exec，guest 的标记串/argv/退出码正确；损坏文件、已注册但未配置的架构、shebang 三类语义不变；运行期开关在同一个进程里跑完 on→off→on 闭环。`smoke-exec-xlator-off`：`CONFIG_XLATOR=0` 构建下外来探针 `ENOEXEC`、无 `[XLATOR]` 行、开关节点不存在。`smoke-exec-xlator-shim`：把两个形状不同的 guest 同时指向一个只打印 argv 的宿主程序，断言 `@P,@*`（路径即 argv[0]、无选项的 Rosetta 形状）与默认 `-0 @A @P @*`（含调用者 argv[0]）各自展开成正确的 argv，且 `.env` 注入生效——不下载任何东西、不需要交叉编译器。`check-xlator-guests`：注册表与交叉编译器表两个方向一致，且默认 argv 模板只含内核认识的记号并出现 `@P`。加一个 guest = `.def` 一行 + CC 表一行；换一个**翻译器** = 零处代码改动（`.argv` / `.env` 两个启动键）；设计与取舍见 [../exec-xlator/03-internals.md](../exec-xlator/03-internals.md)，AOT 型翻译器（Prism 一类）为何尚不支持见 [../exec-xlator/02-integration.md](../exec-xlator/02-integration.md)；使用与配置见 [../exec-xlator/01-usage.md](../exec-xlator/01-usage.md) |
+| 外来架构二进制 execve 透明转发（qemu-user 宿主） | 已实现（编译期 `CONFIG_XLATOR` + cmdline + `/proc/a20/xlator` 三层开关，默认全部关闭；`CONFIG_XLATOR=0` 可彻底裁掉） | `smoke-exec-xlator`：`execve` 一个 x86_64 ELF 被改写为 `/bin/qemu-x86_64` 就地 re-exec，guest 的标记串/argv/退出码正确；损坏文件、已注册但未配置的架构、shebang 三类语义不变；运行期开关在同一个进程里跑完 on→off→on 闭环。`smoke-exec-xlator-off`：`CONFIG_XLATOR=0` 构建下外来探针 `ENOEXEC`、无 `[XLATOR]` 行、开关节点不存在。`smoke-exec-xlator-shim`：把两个形状不同的 guest 同时指向一个只打印 argv 的宿主程序，断言 `@P,@*`（路径即 argv[0]、无选项的 Rosetta 形状）与默认 `-0 @A @P @*`（含调用者 argv[0]）各自展开成正确的 argv，且 `.env` 注入生效——不下载任何东西、不需要交叉编译器。`check-xlator-guests`：注册表与交叉编译器表两个方向一致，且默认 argv 模板只含内核认识的记号并出现 `@P`。加一个 guest = `.def` 一行 + CC 表一行；换一个**翻译器** = 零处代码改动（`.argv` / `.env` 两个启动键）；设计与取舍见 [../exec-xlator/03-internals.md](../../exec-xlator/03-internals.md)，AOT 型翻译器（Prism 一类）为何尚不支持见 [../exec-xlator/02-integration.md](../../exec-xlator/02-integration.md)；使用与配置见 [../exec-xlator/01-usage.md](../../exec-xlator/01-usage.md) |
 
 ## 正确性状态（SMP）
 

@@ -4,7 +4,7 @@
 /*
  * Cluster UART transport -- shared wire codec and head-node link API.
  *
- * Ownership: WC1 track (docs/cluster/impl-prompts.md 文件所有权表: WC owns
+ * Ownership: WC1 track (docs/status/history/impl-prompts.md 文件所有权表: WC owns
  * kernel/cluster/uart.c and kernel/mcu/).  This header is the one shared
  * seam between the two halves of that ownership: the head-node transport in
  * kernel/cluster/uart.c and the MCU leaf protocol face in kernel/mcu/leaf.c

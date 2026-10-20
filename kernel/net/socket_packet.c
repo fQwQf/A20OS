@@ -20,7 +20,7 @@
  * Both the depth and the slot size follow the profile.  This array is
  * unconditional .bss: 16 slots of 1540 B was 24640 B on every rung, more than
  * a 20 KiB MCU part's entire SRAM, and no runtime counter reports it.  See
- * docs/server-readiness.md and the budget assert in net_profile.h.
+ * docs/status/current/server-readiness.md and the budget assert in net_profile.h.
  */
 #define NET_PACKET_RX_RING   NET_PROFILE_PACKET_RING_SLOTS
 #define NET_PACKET_MAX_FRAME NET_PROFILE_PACKET_FRAME_SIZE

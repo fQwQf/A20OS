@@ -1,6 +1,6 @@
 # 命名宿主实例与交互控制台
 
-已进行完整构建和 QEMU 实测；具体通过项和未通过项见 [实现状态](05-implementation-status.md)。推荐从 [使用指南](03-usage.md) 开始。
+已进行完整构建和 QEMU 实测；具体通过项和未通过项见 [实现状态](../status/current/hypervisor-implementation-status.md)。推荐从 [使用指南](03-usage.md) 开始。
 
 ## 创建与连接
 
@@ -40,4 +40,4 @@ pause/resume/stop 通过私有 QMP socket 操作对应 QEMU，stop 是退出 QEM
 
 ## 加速器
 
-`[machine] accel = "tcg"` 或 `"kvm"` 会派生明确的 `QEMU_ACCEL`。选择 kvm 不配置 TCG fallback；这指开发机上的外层 QEMU 加速器，不表示 A20 已实现 `/dev/kvm`。A20 内核 KVM 兼容层状态见 [05-implementation-status.md](05-implementation-status.md)。
+`[machine] accel = "tcg"` 或 `"kvm"` 会派生明确的 `QEMU_ACCEL`。选择 kvm 不配置 TCG fallback；这指开发机上的外层 QEMU 加速器，不表示 A20 已实现 `/dev/kvm`。A20 内核 KVM 兼容层状态见 [../status/current/hypervisor-implementation-status.md](../status/current/hypervisor-implementation-status.md)。

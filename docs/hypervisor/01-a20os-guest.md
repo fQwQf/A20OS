@@ -1,7 +1,7 @@
 # v2：A20OS 作为 guest
 
 > 历史设计记录：下文的“当前”“未提交”和单 vCPU 等状态描述属于 v2 设计阶段。
-> 现行实现与实际验证边界以 [实现状态](05-implementation-status.md) 和
+> 现行实现与实际验证边界以 [实现状态](../status/current/hypervisor-implementation-status.md) 和
 > [guest supervisor](07-guest-supervisor.md) 为准。2026-10-13 已更新拆分后的源码引用；
 > 新的运行入口使用每 CPU 活跃槽，旧的全局单槽描述不再代表当前实现。
 

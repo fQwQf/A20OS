@@ -167,7 +167,7 @@ PS/2 键盘鼠标用于确认 VM 基础交互，但不能证明目标 input clas
 3. 将功能驱动放在通用 class 目录，使用 `pci_bus` 和 ID 表，不增加 VirtualBox 板名条件。
 4. 先构建 `kernel-only`，再制作 ISO；每次确认 VM 挂载的是新 ISO/磁盘。
 5. 分别保留“设备不存在”“设备存在但 ID 不匹配”“成功 probe”“成功 I/O”的日志。
-6. 更新 [VirtualBox 驱动栈](virtualbox.md) 的矩阵和 [实现状态](../drivers/meta/implementation-status.md) 中的限制。
+6. 更新 [VirtualBox 驱动栈](virtualbox.md) 的矩阵和 [实现状态](../status/current/drivers-implementation-status.md) 中的限制。
 
 ## 常见故障
 

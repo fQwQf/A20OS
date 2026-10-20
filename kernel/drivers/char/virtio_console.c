@@ -17,7 +17,7 @@
  * one port at id 0, serves it from q0/q1 with no control-virtq handshake, and
  * QEMU marks it guest_connected as soon as the driver sets DRIVER_OK.  That is
  * what lets this driver carry a console port on two virtqueues.  The limits
- * that follow are recorded in docs/drivers/meta/implementation-status.md: no
+ * that follow are recorded in docs/status/current/drivers-implementation-status.md: no
  * port above 0, no multiport control protocol.
  *
  * Receive is interrupt driven: the ISR drains the used ring into a byte ring

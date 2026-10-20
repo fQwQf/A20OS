@@ -132,6 +132,6 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 - [ ] 多实例状态不错误地放在单全局对象；若暂限单实例已记录。
 - [ ] 新锁已加入 `lock-order.md`。
 - [ ] 用户 ABI 由通用适配层实现并有边界检查。
-- [ ] 文档、[实现状态](implementation-status.md)、构建和目标硬件日志一同更新。
+- [ ] 文档、[实现状态](../../status/current/drivers-implementation-status.md)、构建和目标硬件日志一同更新。
 
 提交前按上面的命令矩阵跑完相关门禁，并把日志贴到 PR 描述或提交说明里。

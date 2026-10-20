@@ -145,7 +145,7 @@ loopback 同次运行均值比为 30.286，超过目标 3；UDP 64B 的 p50 为 
 ## 尚不能替代的验收
 
 普通远端业务已同时提供 CALL 与可靠单向 SEND，后者见 22 文档。当前基准
-自身不覆盖四节点 60 秒 SEND 吞吐（另见 [23-four-node-load.md](23-four-node-load.md)），也不满足四节点、混合 SEND/CALL、
+自身不覆盖四节点 60 秒 SEND 吞吐（另见 [../status/history/four-node-load.md](../status/history/four-node-load.md)），也不满足四节点、混合 SEND/CALL、
 10% 丢帧、8 小时 soak。资源漂移、首尾 p99 漂移和物理 MCU 性能必须另行实测。
 这些差距继续保留在生产验收清单中。
 
@@ -223,7 +223,7 @@ lwIP 内存保护问题，修复后的版本须重新测量：
 该检查器同时记录生产 `kernel/mm/slab.c` 摘要。它是一次独立启动的复核，
 不替代前述五次启动比较，也不宣称已满足 ±3% 的统计等价要求。
 四节点、故障条件、原因计数与未解决的控制查询失败见
-[23-four-node-load.md](23-four-node-load.md)。
+[../status/history/four-node-load.md](../status/history/four-node-load.md)。
 
 ## UDP 占用槽轮询后的 CALL 复核（2026-10-12）
 

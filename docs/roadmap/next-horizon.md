@@ -23,7 +23,7 @@
   走 socket 层短路直接入队到 peer 队列），16 MiB / 4 核下 pbuf、bottom-half 与驱动
   计数器全部恰好为 0。凡是把 lwIP 锁竞争归因于它的结论测的是 socket 队列。评价数据面
   必须用走真实 netif 的负载。
-- 详细事实见 [../server-readiness.md](../server-readiness.md) 第二节。
+- 详细事实见 [../status/current/server-readiness.md](../status/current/server-readiness.md) 第二节。
 
 ## 1. netfilter / 防火墙（第一切片已落地）
 
@@ -48,7 +48,7 @@
 ## 2. Native 完整 libc 与动态链接
 
 Linux ABI 下 Alpine 动态程序和 Native 完整 libc 是不同验收范围。Native 的动态链接、
-线程、信号与 exec 继承按 [运行时状态](../native-abi/08-runtime-status.md) 和
+线程、信号与 exec 继承按 [运行时状态](../status/current/native-abi-runtime-status.md) 和
 [启动协议](../native-abi/07-startup.md) 收口，纳入 V1-RUNTIME。最小 hello 只证明加载链路，
 不能代替完整运行时和真实应用；迁移期间同步验证既有 musl 生态不回退。
 

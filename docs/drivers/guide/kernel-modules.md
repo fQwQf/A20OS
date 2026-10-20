@@ -182,7 +182,7 @@ make smoke-net-rtl8139                               # rtl8139.a20drv + hostfwd 
 |---|---|---|---|---|
 | goldfish RTC | `kernel/drivers/char/goldfish_rtc_kdrv.c`（已删除）| `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
 | PC speaker | `kernel/drivers/audio/pc_speaker.c`（已删除）| `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
-| CMOS RTC (MC146818) | 无内建位置（新增）| `kernel/drvmod/examples/cmos_rtc.c` | x86_64（Early）| 新增；x86_64 墙钟来源，绑定两块 x86_64 板级声明的 platform 设备；限制见 [实现状态](../meta/implementation-status.md) |
+| CMOS RTC (MC146818) | 无内建位置（新增）| `kernel/drvmod/examples/cmos_rtc.c` | x86_64（Early）| 新增；x86_64 墙钟来源，绑定两块 x86_64 板级声明的 platform 设备；限制见 [实现状态](../../status/current/drivers-implementation-status.md) |
 | virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整驱动 | `kernel/drivers/input/virtio_input.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
 | PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |

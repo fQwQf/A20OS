@@ -4,7 +4,7 @@
  * detected PT_INTERP, loaded the interpreter, switched entry to it,
  * built conventional auxv (AT_BASE/AT_ENTRY/AT_PHDR), and fakeld
  * forwarded control back into this image via AT_ENTRY
- * (docs/native-abi/08-runtime-status.md §8a).
+ * (docs/status/current/native-abi-runtime-status.md §8a).
  */
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"

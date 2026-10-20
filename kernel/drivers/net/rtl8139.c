@@ -126,7 +126,7 @@
  * (hw/net/rtl8139.c:745-777), while every smaller size is only taken when the
  * RXCFGWRAP bit is clear.  Real silicon documents 0b11 as the "8K + 16K" mode,
  * whose ring geometry this driver has NOT verified -- see risks in the commit
- * message and docs/drivers/meta/implementation-status.md. */
+ * message and docs/status/current/drivers-implementation-status.md. */
 #define RTL8139_RCR_RING_64K  0x1800U
 
 /*

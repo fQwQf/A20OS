@@ -17,7 +17,7 @@
 
 1. 先在目标平台或 QEMU 或 VirtualBox 上复现实验，记录 commit、构建命令和日志。
 2. 如果是新增行，说明里写清平台、版本、观察到的运行边界和失败行为。
-3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [构建、测试与提交](testing-and-submission.md) 中的测试矩阵。
+3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [构建、测试与提交](../../drivers/meta/testing-and-submission.md) 中的测试矩阵。
 4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
 
 from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/legacy-desktop`），其 `smoke-qemu-gui-*` 冒烟目标与 `tools/smoke_qemu_gui.py` 一并移除。当前 GUI 桌面由 Alpine `xfce` world 提供，验证走 `make run-world-gui PKG_WORLD=xfce`。门禁入口见 [testing-gates.md](../../testing-gates.md)。
@@ -59,7 +59,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | TPM 2.0 | 已迁移 | `tpm.a20drv`（x86_64）：`firmware_acpi_tpm2` 导出 + TIS FIFO，无设备优雅失败 |
 | GMAC、SDIO | 板级 platform | StarFive/LS2K GMAC 与 DW SDIO 通过 `platform_bus` + `hardware_id` 注册绑定。板级 IRQ 资源经 `platform_device_irq()` 读取：发布了就用中断，没发布就轮询。DW SDIO 有 riscv64 generic Early 模块；两个 GMAC 当前只在 embedded 的显式静态账本中，没有 generic 包。板级 bring-up 细节（时钟、地址、IRQ、缺项）见 [物理开发板移植](../../platforms/physical-boards.md) |
 
-迁移细节与顺序见 [kernel-modules.md](../guide/kernel-modules.md)。
+迁移细节与顺序见 [kernel-modules.md](../../drivers/guide/kernel-modules.md)。
 
 ## 设备驱动
 

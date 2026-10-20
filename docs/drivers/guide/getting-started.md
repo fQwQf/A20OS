@@ -119,7 +119,7 @@ typedef struct {
 } acme_priv_t;
 ```
 
-所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](../meta/implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。
+所有会因设备实例不同而变化的状态都放在 `drv_priv` 指向的对象中。禁止用一组无保护的全局 queue index 支撑多个设备。若当前内存限制只能支持一个静态实例，probe 必须拒绝第二个实例，并在 [实现状态](../../status/current/drivers-implementation-status.md) 记录限制；优先使用 `kcalloc(1, sizeof(*p))` 创建实例。
 
 寄存器 helper 明确使用 MMIO API：
 

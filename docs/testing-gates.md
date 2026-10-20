@@ -19,7 +19,7 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
 
-门禁存在不等于门禁已通过：任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。门禁目录（目标名、契约说明及实现路径）最后复核：2026-10-08；本轮具体运行结果见[开发中断恢复与集成验收](development-recovery-2026-10-08.md)。
+门禁存在不等于门禁已通过：任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。门禁目录（目标名、契约说明及实现路径）最后复核：2026-10-08；本轮具体运行结果见[模块状态](status/current/module-status-2026-10-19.md)。
 
 | 领域 | 门禁 |
 | --- | --- |
@@ -72,7 +72,7 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 
 `tools/a20 run xfce-{riscv64,x86_64,aarch64,loongarch64}` 是交互式桌面实例
 （aarch64 因 SMP 竞态暂以单 CPU 运行，见
-[发行版排查笔记](distro/known-issues.md)），不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
+[发行版排查笔记](status/current/known-issues.md)），不是现有串口 smoke 的别名。内核启动、shell 命令成功、Wayland socket 存在，或
 `labwc` / `xfce4-panel` 进程出现，都不能单独证明桌面可用。3D 门禁的像素回读
 也不能证明 XFCE 面板、dock 与窗口交互正确。
 
@@ -89,8 +89,8 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 无本地显示器时可以使用 QEMU 的 VNC 显示与 QMP `screendump`、输入事件，显示
 后端变化需要写入验收记录。不要通过删网卡、减少 CPU 数或替换桌面组件来宣称原实例
 通过。已知故障、修复依据与实际验收记录见
-[发行版排查笔记](distro/known-issues.md)。x86_64 的缺页/futex/PTY 回归与
-浏览器测试步骤见 [XFCE x86_64 验证记录](distro/xfce-x86_64-validation.md)。
+[发行版排查笔记](status/current/known-issues.md)。x86_64 的缺页/futex/PTY 回归与
+浏览器测试步骤见 [XFCE x86_64 验证记录](status/history/xfce-x86_64-validation.md)。
 
 Minecraft 桌面在 x86_64、aarch64、riscv64 上用
 `tools/a20 run minecraft-<arch> -- GUI_MEDIA=build/minecraft/1.21.11-<arch>`
@@ -715,7 +715,7 @@ RTC、registry RTC 重启和 UBD 三条依赖 RISC-V 私有 MMIO/IRQ，在 AArch
 `.github/workflows/native.yml` 为 CI 与 release 共用的 RISC-V/AArch64 矩阵：
 先构建 `native-programs`，再运行套件并保存日志，发布创建依赖整个矩阵成功。
 这些配方已进入实际运行，逐项结果与跳过项见
-[本轮验证](validation-docs-completion-2026-10-13.md)。Native 程序及自启动服务路径由
+[本轮验证](status/history/validation-docs-completion-2026-10-13.md)。Native 程序及自启动服务路径由
 `user/liba20rt/a20_arch.h` 生成，不再假定 `-rv`；fakeld 探针包含四个已实现入口的
 64 位架构。
 
@@ -1223,7 +1223,7 @@ swapoff、活动设备 mkswap 均返回 EBUSY，非管理员管理调用返回 E
 
 失败时查看 `.kernel-build/smoke/swap-<arch>[-smp4].log` 中首个 `SWAP_TEST: FAIL`，
 对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c`、`kernel/mm/oom.c` 与缺页路径。
-上述四组已在本轮实际通过，见 [验证记录](validation-docs-completion-2026-10-13.md)。
+上述四组已在本轮实际通过，见 [验证记录](status/history/validation-docs-completion-2026-10-13.md)。
 边界：门禁通过范围换出，不证明低内存 OOM 策略或 swapoff 排空活跃页；当前忙设备
 拒绝关闭。`CONFIG_SWAP` 在 riscv32/loongarch32 与 NOMMU 上仍由构建入口关闭。
 

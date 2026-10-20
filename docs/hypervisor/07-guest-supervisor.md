@@ -1,6 +1,6 @@
 # Guest supervisor 与双 guest 管理
 
-已完成构建并实际运行双 guest 场景；单次完整流程通过，重复运行和 SMP 仍有失败。当前为实验功能，详见 [实现状态](05-implementation-status.md)。
+已完成构建并实际运行双 guest 场景；单次完整流程通过，重复运行和 SMP 仍有失败。当前为实验功能，详见 [实现状态](../status/current/hypervisor-implementation-status.md)。
 
 ```sh
 tools/a20 run hyp-host-riscv64 --name lab --detach
@@ -51,6 +51,6 @@ manager 缓存最近 32 个请求的完整原文与响应，丢失回复的同�
 python3 tools/hyp_pair_probe.py --host lab --report /tmp/a20-pair/report.json
 ```
 
-脚本会实际创建两台 guest，等待各自 shell，用输入回显中不存在的拼接 token 检查命令执行，检测串线，检查重连和暂停隔离，再等待正常关机与输出排空、销毁记录，并检查 VM/vCPU/mapping/table 计数回到静止基线。失败日志与 JSON 证据保留。该脚本已实际运行，结果及边界见 [实现状态](05-implementation-status.md)。
+脚本会实际创建两台 guest，等待各自 shell，用输入回显中不存在的拼接 token 检查命令执行，检测串线，检查重连和暂停隔离，再等待正常关机与输出排空、销毁记录，并检查 VM/vCPU/mapping/table 计数回到静止基线。失败日志与 JSON 证据保留。该脚本已实际运行，结果及边界见 [实现状态](../status/current/hypervisor-implementation-status.md)。
 
 RISC-V trap 控制中的 VS fence、hvip 和保留位依据[官方 Hypervisor 规范](https://docs.riscv.org/reference/isa/priv/hypervisor)及[Sstc 规范](https://docs.riscv.org/reference/isa/v20250508/priv/sstc.html)：VS-stage 更新使用 HFENCE.VVMA；hvip 的软件注入与 vstimecmp 产生的 timer 信号相互独立。定时器、SMP 和远程控制的实测范围以实现状态页为准；尚无完整外部中断注入和真机验收。

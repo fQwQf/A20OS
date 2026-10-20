@@ -96,5 +96,5 @@ Native 观察 128 次接纳后再等待在途/重试字节归零。检查器只�
 出现及 MCU NO_SPACE 背压，再验证后续 SEND 和 CALL 恢复。
 
 四节点 60 秒 SEND 已测量，业务核对通过但吞吐未达标，见
-[23-four-node-load.md](23-four-node-load.md)。尚未完成物理板与 8 小时混合
+[../status/history/four-node-load.md](../status/history/four-node-load.md)。尚未完成物理板与 8 小时混合
 soak；静态 UART 配对及短时网关验证不能替代这些证据。

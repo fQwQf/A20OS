@@ -25,7 +25,7 @@ volatile int g_net_bh_pending_count;
  * plane was invisible to the contention audit.  Registering all of them costs
  * one lock_counters slot each, which is why LOCK_COUNTERS_MAX in
  * kernel/core/lock_counters.c is worth a second look (see
- * docs/measured/impl-notes-net.md section 8).
+ * docs/status/history/impl-notes-net.md section 8).
  *
  * The names are formatted at init rather than spelled out in a table: the table
  * would have to name every bucket of the *largest* profile, and the server
@@ -289,7 +289,7 @@ int net_register_socket_locked(net_socket_t *s) {
  * changed is that it is now visible: net_socket_free()'s CAS loop refuses a
  * non-positive count and the ref_magic canary rejects a socket that is not live,
  * so CONFIG_NET_REF_ASSERT=1 turns this into a panic on the first AF_UNIX close.
- * The ledger is what found it; see docs/measured/impl-notes-net.md §8.3/§8.6,
+ * The ledger is what found it; see docs/status/history/impl-notes-net.md §8.3/§8.6,
  * which recorded the reference count as walked by hand over 54 sites and never
  * once run.
  *

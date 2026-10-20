@@ -119,7 +119,7 @@ make smoke-native-cluster
 python3 tools/check-cluster-udp.py --faults --restart
 ```
 
-验收状态、物理硬件边界和剩余功能见 [08-implementation-status.md](08-implementation-status.md)。
+验收状态、物理硬件边界和剩余功能见 [../status/current/cluster-implementation-status.md](../status/current/cluster-implementation-status.md)。
 
 `cluster_snapshot` 的只读枚举与恢复契约见 [09-work-agent.md](09-work-agent.md)。
 kind=3/4/5 分别提供运行资源、重组资源与聚合链路计数，仍使用同一 192 B

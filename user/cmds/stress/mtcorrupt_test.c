@@ -1,7 +1,7 @@
 /*
  * mtcorrupt_test — reproducer gate for the "multi-threaded processes
  * occasionally have their anonymous memory scribbled on" reports recorded in
- * docs/distro/known-issues.md.
+ * docs/status/current/known-issues.md.
  *
  * The reports are two unrelated programs (LuaJIT's GC list head, musl's
  * ld.so self-pointer check) failing with the same shape: a doubly-linked
