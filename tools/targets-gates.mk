@@ -135,7 +135,16 @@ check-manifests: check-instances check-instance-matrix check-component-registry 
 # Unit tests for the a20 toolchain itself (tools/tests/test_a20.py).  Stdlib
 # unittest, matching the tool's zero-dependency promise.  Runs from a checkout
 # with no submodules, same as the manifest gates.
-check-a20-tests:
+#
+# user/svc/a20_services_idl.h is a prerequisite, not an accident: the header is
+# generated and gitignored, and test_a20idl.py compiles probes that include it.
+# Without the prerequisite the gate only passed on a tree where some earlier
+# target had happened to generate it, so it failed on every clean checkout --
+# including CI's toolchain-gates job, which runs nothing else that would create
+# it.  The literal path (not $(A20_SERVICES_IDL_HDR)) is deliberate for the same
+# reason as the IDL wire rule below: this file is included before
+# tools/targets-native.mk defines that variable.
+check-a20-tests: user/svc/a20_services_idl.h
 	@$(PYTHON) -m unittest discover --start-directory tools/tests --pattern 'test_*.py'
 	@echo "check-a20-tests: PASS"
 # DRM ioctl numbers and wire struct layouts vs the Linux UAPI.  A wrong number
