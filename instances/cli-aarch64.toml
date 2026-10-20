@@ -9,9 +9,9 @@ arch = "aarch64"
 memory = "2G"
 # aarch64 SMP is unstable: two distinct kernel races were observed at smp=4
 # under desktop load and the tree pins desktop aarch64 to one CPU until they
-# are found (docs/status/current/known-issues.md).  That investigation was
-# driven by GUI load, not by this world, so keep it single-CPU rather than
-# shipping an untested multi-core aarch64 default here.
+# are found (docs/status/current/desktop-minecraft-status.md).  That
+# investigation was driven by GUI load, not by this world, so keep it
+# single-CPU rather than shipping an untested multi-core aarch64 default here.
 smp = 1
 
 [rootfs]

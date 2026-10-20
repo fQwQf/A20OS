@@ -134,7 +134,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 | D' 改调度属性并跨 runq | `proc_sched_set()`（`sched.c:748-850`）、`proc_sched_get()`（`sched.c:728`）、`sched_runq_requeue_locked()`（`sched.c:665-711`，双 runq 锁按 CPU 号升序） | `proc_sched_set` 改目标 `park_lock`；`sched_runq_requeue_locked` 在其之下按 `first/second` 顺序取两把 runq_lock（`sched.c:675-680` 已是升序），读写 `on_rq/cpu_id/dispatching/on_cpu`。这一类今天完全没有 A–F 条目，漏掉它就等于 `sched_setaffinity` 路径在 proc_lock 撤掉后无人负责 |
 | E1 只读列表的低频迭代 | `loadavg.c:86`、`pidns.c:244/:276/:300`、`proc.c:201`/`:234` | 纯 `tasklist_lock` |
 | E2 迭代中读调度状态 | OOM 扫描（`kernel/mm/oom.c:37`）、`/proc` 聚合、`debug.c:737` | `tasklist_lock` 取任务指针，再逐个在该任务 `park_lock` 下读 `state`/计数；**不得只持 `tasklist_lock` 就读 `t->state`**，否则与 park_lock 保护的 `state` 毫无同步关系（今天 oom.c:40 读 `t->state` 是靠 proc_lock 兜底的，改后会静默失效） |
-| E3 console dump | `uart_dump_tasks()`（`kernel/drivers/char/uart.c:80`，取锁在 `:83`） | **不映射到 `tasklist_lock`**。`uart.c:111-116` 的注释记录了原因：这个 dump 在关中断态持全局锁逐 task 打 kdebug 到同一 UART，从顶半路径触发就会在自己的 IRQ 下重入 console 并 livelock 在它正在打印的那把锁后面——这正是 `CTRL_C_CONTEXT_SPLIT` 把 task 表 dump 从顶半路径踢到 `uart_getc()` 任务上下文的原因。改法是**快照后打印**：`tasklist_lock` 下把 pid/ppid/pgid/sid/state/name 复制进固定栈上缓冲（条数上限写进实现笔记），释放后再 `kdebug`。`uart.c:82` 的 `LOCK_ORDER` 注释同步改写 |
+| E3 console dump | ~~`uart_dump_tasks()`（`kernel/drivers/char/uart.c:80`）~~ | **已随 Ctrl-C 旁路一起删除，不再需要映射**。这个 dump 只由 UART 驱动吞掉 `0x03` 后触发；那条路径已移除（ISIG 现在由 tty 行规在接收路径上处理，见 [drivers/guide/lock-order.md](../drivers/guide/lock-order.md)），驱动里不再有「顶半路径触发 console 重入」的入口，快照后打印的设计也随之作废 |
 | F 其他子系统借 proc_lock 做跨任务状态转移 | cgroup 节流（`sched.c:1798-1820`，在 `context_switch_locked` 内）、`debug.c` | cgroup 那段在 `next->park_lock` 已持有时执行，不再单独加锁；`debug.c` 按 E1/E2 归类 |
 
 #### 切换路径上的两个 late-wake 窗口（必须显式规定）
