@@ -32,7 +32,7 @@
 
 ### MM-05 32 位架构的内核 MM 编译不过
 
-- 现状：**arm32 内核现在能编过**（`a20os-buildenv:multi` 容器里 `make ARCH=arm32 ABI=linux BRINGUP=0 dev-build` 完成，产出 kernel.bin/fat32/ext4/isofs），但在 QEMU 里启动时在 `memset` 写 `0xff800000` 处缺页 panic，还没有能启动的 arm32 镜像。**riscv32** 还差一截：现在停在 `kernel/net/netfilter.c:284` 的 `uint32_t *` / `unsigned *` 类型名不匹配（ilp32d 下 `int32_t` 是 `long`）。
+- 现状：**arm32 现在能编过、也能启动**（容器里 `make ARCH=arm32 ABI=linux BRINGUP=0 dev-build` 完成；QEMU virt/cortex-a15 启动到 shell、执行命令、干净关机）。启动失败的两个根因都已修：`PHYS_MEMORY_END` 按 1 GiB 写死而 QEMU 只给了 512M（启动参数取 1G 即可），以及 `a20_elf_load_transaction_ops_t` 里 `uint8_t _pad0[7]` 是 LP64 尺寸，ILP32 上把其后每个回调指针错开 4 字节，Rust 读到空 Option 后对每个镜像返回 `-EINVAL`。riscv32 仍差一截：停在 `net/netfilter.c:284` 的 `uint32_t *`/`unsigned *` 类型名不匹配。**riscv32** 还差一截：现在停在 `kernel/net/netfilter.c:284` 的 `uint32_t *` / `unsigned *` 类型名不匹配（ilp32d 下 `int32_t` 是 `long`）。
 - 已修的具体项：`pt_lookup_leaf()` 的四个调用点经 `vaddr_t`/`size_t` 局部变量中转；`a20_cowf_probe`、`a20_mprotect_rec/leaf`、`a20_munmap_entry`、`a20_mseal_rec`、`a20_mmap_seg_spec`（Rust `SegSpec`）、`DcacheEntry`、`uxfs_sb_t.server_generation` 偏移的 32 位值按实测改正（原来是按 LP64 猜的，多数不可达）；`a20_elf_interpreter_ops_t` 按指针宽度取值；`mprotect.c` 的溢出检查改成先在 64 位里界定；`cow.c`/`fault.c`/`mprotect.c` 里 per-PTE status sidecar 的操作改为 `ARCH_HAS_PGTABLE_OPS` 内，arm32 走 PTE 级回退；`cow_status`/`fault_status` 两个 Rust 对象在 arm32 上不链接（其 C 对应物本来就被编掉）。连带修掉 `proc/{ptrace_state.h,wait.c,exec.c,debug.c}`、`fs/procfs/procfs_render.c`、`fs/vfs/dcache_state.rs` 的同类宽度问题。
 - 缺口：riscv32 与 arm32 的内核 bring-up 构建不通过，32 位档的 MM 没有可运行证据。
 - 关闭条件：`check-riscv32-bringup` 与 `check-arm32-bringup` 编译通过，并在 QEMU 里完成 bring-up 与自然关机。

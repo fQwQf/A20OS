@@ -228,8 +228,13 @@ static inline int arch_unwind_frames(uint64_t fp, struct backtrace_frame *frames
         uint32_t *frame = (uint32_t *)(uintptr_t)fp;
         if (!arch_is_kernel_address(frame))
             break;
+        /* AAPCS frame with -fno-omit-frame-pointer: `push {r7, lr}` followed
+         * by `add r7, sp, #0`, so the frame pointer addresses the saved r7 and
+         * the saved lr sits one word above it.  (This used to read frame[-1],
+         * the RISC-V satp-frame layout, which made every arm32 backtrace print
+         * whatever happened to be on the stack below the frame.) */
         uint32_t next_fp = frame[0];
-        uint32_t lr = frame[-1];
+        uint32_t lr = frame[1];
         if (!lr)
             break;
         frames[n++].pc = lr;
