@@ -2,6 +2,7 @@
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
 #include "mm/pt.h"
+#include "mm/failinject.h"
 #include "mm/mremap_dontunmap_txn.h"
 #include "mm/shutdown_write.h"
 #include "mm/frame.h"
@@ -545,8 +546,15 @@ static int dontunmap_copy_backing(void *opaque)
 static int dontunmap_move_pages(void *opaque)
 {
     mm_dontunmap_context_t *ctx = opaque;
-    return mm_move_mapping_pages(ctx->mm, ctx->source, ctx->destination,
-                                 ctx->source_len, 1);
+    /* MM-04 stage 1 scope: the destination leaves below allocate intermediate
+     * page-table nodes, but so does boot and every ordinary fault, so the
+     * injection only arms for this DONTUNMAP destination map.  The ordinary
+     * MAYMOVE path shares the loop and must not consume it. */
+    mm_fail_inject_enter();
+    int rc = mm_move_mapping_pages(ctx->mm, ctx->source, ctx->destination,
+                                   ctx->source_len, 1);
+    mm_fail_inject_leave();
+    return rc;
 }
 
 static int dontunmap_reprotect(void *opaque)

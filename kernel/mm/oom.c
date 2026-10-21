@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "mm/swap.h"
+#include "mm/failinject.h"
 #include "mm/pt.h"
 #include "cg/cgroup.h"
 #include "proc/proc.h"
@@ -86,7 +87,12 @@ static int swap_out_task_pages(task_t *victim, int target_pages,
                     spin_unlock_irqrestore(&pfa.lock, pf);
                 }
                 if (eligible) {
-                    entry = get_swap_page_owned(owner);
+                    /* MM-04 stage 3: fail the slot allocation the way an
+                     * exhausted swap area would, so the caller takes its real
+                     * "no slot" branch instead of mapping the page. */
+                    entry = mm_fail_inject(MM_FAIL_STAGE_SWAP_SLOT)
+                                ? 0
+                                : get_swap_page_owned(owner);
                     if (entry) {
                         pfn = candidate;
                         frame_get(pfn); /* immutable I/O snapshot pin */
