@@ -54,6 +54,40 @@
 #define AT_EMPTY_PATH 0x1000
 #endif
 
+/* New mount API: fsopen(2) -> fsconfig(2) -> fsmount(2) -> move_mount(2). */
+#ifndef SYS_move_mount
+#define SYS_move_mount 429
+#endif
+#ifndef SYS_fsopen
+#define SYS_fsopen 430
+#endif
+#ifndef SYS_fsconfig
+#define SYS_fsconfig 431
+#endif
+#ifndef SYS_fsmount
+#define SYS_fsmount 432
+#endif
+/* Linux numbers these from zero: SET_FLAG 0, SET_STRING 1, SET_BINARY 2,
+ * SET_PATH 3, SET_PATH_EMPTY 4, SET_FD 5, CMD_CREATE 6, CMD_RECONFIGURE 7.
+ * libmount sends SET_STRING, so that is the one worth exercising. */
+#ifndef FSCONFIG_SET_STRING
+#define FSCONFIG_SET_STRING 1
+#endif
+#ifndef MOVE_MOUNT_F_EMPTY_PATH
+#define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
+#endif
+/* libmount passes these two unconditionally; a kernel that rejects them
+ * fails util-linux's mount(8) for every filesystem. */
+#ifndef FSOPEN_CLOEXEC
+#define FSOPEN_CLOEXEC 0x00000001
+#endif
+#ifndef FSMOUNT_CLOEXEC
+#define FSMOUNT_CLOEXEC 0x00000001
+#endif
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
+
 struct open_how {
     uint64_t flags;
     uint64_t mode;
@@ -1006,11 +1040,146 @@ static int umount_edge_cases(void)
     return 0;
 }
 
+/*
+ * The new mount API as libmount drives it: fsmount(2) with no target must
+ * produce a *detached* mount that nothing resolves through, and move_mount(2)
+ * with MOVE_MOUNT_F_EMPTY_PATH must attach that fd at the target.  A fresh
+ * tmpfs hides the directory's previous contents, which is what makes the
+ * attach observable instead of merely "some mount call returned 0".
+ */
+static int mount_api_detached(void)
+{
+    const char *mp = "/tmp/vfs_edge_mountapi";
+    const char *shadowed = "/tmp/vfs_edge_mountapi/shadowed";
+    const char *marker = "/tmp/vfs_edge_mountapi/.mounted";
+
+    unlink(shadowed);
+    syscall(SYS_umount2, mp, 0);
+    rmdir(mp);
+    if (mkdir(mp, 0755) < 0)
+        return fail("mountapi-mkdir");
+
+    int fd = open(shadowed, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        rmdir(mp);
+        return fail("mountapi-shadow-create");
+    }
+    close(fd);
+
+    int fsfd = syscall(SYS_fsopen, "tmpfs", FSOPEN_CLOEXEC);
+    if (fsfd < 0) {
+        /* A kernel without the new mount API is not this test's business, but
+         * say so out loud: a silent skip here would read as coverage. */
+        if (errno != ENOSYS && errno != EPERM && errno != EINVAL) {
+            unlink(shadowed);
+            rmdir(mp);
+            return fail("mountapi-fsopen");
+        }
+        printf("VFS_EDGE: mount-api SKIP fsopen errno=%d\n", errno);
+        unlink(shadowed);
+        rmdir(mp);
+        return 0;
+    }
+    /* A filesystem context is not readable.  Returning EOF here made libmount
+     * spin on read(2) after fsopen(2). */
+    errno = 0;
+    char scratch[8];
+    if (syscall(SYS_read, fsfd, scratch, sizeof(scratch)) != -1 || errno != EINVAL) {
+        close(fsfd); unlink(shadowed); rmdir(mp);
+        return fail("mountapi-context-read");
+    }
+    if (syscall(SYS_fsconfig, fsfd, FSCONFIG_SET_STRING, "source", "tmpfs", 0) < 0) {
+        close(fsfd);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-fsconfig");
+    }
+    int mfd = syscall(SYS_fsmount, fsfd, FSMOUNT_CLOEXEC, 0);
+    if (mfd < 0) {
+        close(fsfd);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-fsmount");
+    }
+    close(fsfd);
+
+    /* Detached means the target is untouched: the old file is still there. */
+    fd = open(shadowed, O_RDONLY);
+    if (fd < 0) {
+        close(mfd);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-attached-early");
+    }
+    close(fd);
+
+    if (syscall(SYS_move_mount, mfd, "", AT_FDCWD, mp, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
+        close(mfd);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-move-mount");
+    }
+    close(mfd);
+
+    errno = 0;
+    fd = open(shadowed, O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        syscall(SYS_umount2, mp, 0);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-not-attached");
+    }
+    if (errno != ENOENT) {
+        syscall(SYS_umount2, mp, 0);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-hidden-errno");
+    }
+
+    fd = open(marker, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        syscall(SYS_umount2, mp, 0);
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-marker");
+    }
+    close(fd);
+
+    /* A detached mount that is closed instead of attached must leave the
+     * target alone and must not leak its mount-table slot. */
+    int fsfd2 = syscall(SYS_fsopen, "tmpfs", 0);
+    if (fsfd2 >= 0) {
+        int mfd2 = syscall(SYS_fsmount, fsfd2, 0, 0);
+        if (mfd2 >= 0)
+            close(mfd2);
+        close(fsfd2);
+    }
+
+    if (syscall(SYS_umount2, mp, 0) < 0) {
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-umount");
+    }
+
+    /* Unmounting restores the underlying directory's contents. */
+    fd = open(shadowed, O_RDONLY);
+    if (fd < 0) {
+        unlink(shadowed);
+        rmdir(mp);
+        return fail("mountapi-unmount-restore");
+    }
+    close(fd);
+    unlink(shadowed);
+    rmdir(mp);
+    printf("VFS_EDGE: mount-api detached fsmount + move_mount PASS\n");
+    return 0;
+}
+
 int main(void)
 {
     printf("VFS_EDGE: start\n");
-    mkdir("/tmp", 0755);
-    if (tty0_console_ioctls() != 0)
+    mkdir("/tmp", 0755);    if (tty0_console_ioctls() != 0)
         return 1;
     if (openat2_beneath() != 0)
         return 1;
@@ -1039,6 +1208,8 @@ int main(void)
     if (chmod_chown_edges() != 0)
         return 1;
     if (umount_edge_cases() != 0)
+        return 1;
+    if (mount_api_detached() != 0)
         return 1;
     printf("VFS_EDGE: PASS\n");
     return 0;
