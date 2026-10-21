@@ -66,7 +66,7 @@
 | x86_64 | 通过 | 未验证 | 构建通过；桌面实例的运行证据属 DESKTOP |
 | loongarch64 | 通过 | 未验证 | 构建通过；本机无实板 |
 | riscv32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过；剩余失败在 proc/net/fs，见 [MM-05](../gaps/mm.md)、[CORE-11](../gaps/core.md)、[NET-12](../gaps/net.md)、[FS-10](../gaps/fs.md) |
-| arm32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过（`elf_rust ABI drift` 断言已补宽度分支）；剩余失败在 fs/proc，且镜像本身缺 `libc6-dev-armhf-cross` 与 rustc，见 [MM-05](../gaps/mm.md)、[FS-10](../gaps/fs.md)、[CORE-11](../gaps/core.md)、[DELIVERY-05](../gaps/delivery.md) |
+| arm32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过（`elf_rust ABI drift` 断言已补宽度分支）；剩余失败在 fs/proc；构建镜像已在 `tools/ci/Dockerfile` 里补上 `libc6-dev-armhf-cross` 与 Rust（待重新发布），见 [MM-05](../gaps/mm.md)、[FS-10](../gaps/fs.md)、[CORE-11](../gaps/core.md)、[DELIVERY-05](../gaps/delivery.md) |
 | armv7m (STM32F103) | 失败 | N/A | `make stm32f103-bringup` 在 `tools/rust-kernel.mk` 的解析期断言处停下；`check-stm32f103` 另报硬编码 MMIO 地址。见 [DRIVER-09/10](../gaps/drivers.md) |
 
 构建矩阵此前会在**任何**架构上直接失败：`mm/mremap.c` 在 profile 里而 `RUST_DONTUNMAP_TARGET`
