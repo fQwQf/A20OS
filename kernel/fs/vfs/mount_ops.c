@@ -95,14 +95,23 @@ static int mount_cgroup_backend(const char *dev, const char *path,
     return 0;
 }
 
-static int mount_virtual_backend(const char *dev, const char *path,
-                                 const char *fstype, int flags, const char *data)
+/* @out_mnt non-NULL selects the detached form used by fsmount(2): there is no
+ * target path yet, so the mount is built but neither given a path nor linked
+ * into the tree, which leaves it invisible to lookup until move_mount(2)
+ * attaches it. */
+static int mount_virtual_backend_common(const char *dev, const char *path,
+                                        const char *fstype, int flags,
+                                        const char *data, mount_t **out_mnt)
 {
     (void)data;
-    int r = mount_target_is_dir(path);
-    if (r < 0) return r;
+    int detached = out_mnt != NULL;
+    if (!detached) {
+        int r = mount_target_is_dir(path);
+        if (r < 0) return r;
+    }
     /* devpts is a compatibility mount; slave devices are supplied by devfs. */
-    if (strcmp(fstype, "devpts") == 0) return 0;
+    if (strcmp(fstype, "devpts") == 0)
+        return detached ? -EINVAL : 0;
     vnode_t *root = NULL;
     int type = 0;
     if (strcmp(fstype, "proc") == 0) {
@@ -115,8 +124,10 @@ static int mount_virtual_backend(const char *dev, const char *path,
     if (!root) return -ENOMEM;
     mount_t *mnt = vfs_mount_alloc();
     if (!mnt) return -ENOMEM;
-    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    if (path) {
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+    }
     mnt->type = type;
     mnt->flags = flags;
     mnt->root = root;
@@ -127,21 +138,37 @@ static int mount_virtual_backend(const char *dev, const char *path,
     mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
     strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
     mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+    if (detached) {
+        *out_mnt = mnt;
+        return 0;
+    }
     vfs_mount_link_tree(mnt);
     vfs_dcache_invalidate_all();
     return 0;
 }
 
-static int mount_ram_backend(const char *dev, const char *path,
-                             const char *fstype, int flags, const char *data)
+static int mount_virtual_backend(const char *dev, const char *path,
+                                 const char *fstype, int flags, const char *data)
+{
+    return mount_virtual_backend_common(dev, path, fstype, flags, data, NULL);
+}
+
+static int mount_ram_backend_common(const char *dev, const char *path,
+                                    const char *fstype, int flags,
+                                    const char *data, mount_t **out_mnt)
 {
     (void)data;
-    int r = mount_target_is_dir(path);
-    if (r < 0) return r;
+    int detached = out_mnt != NULL;
+    if (!detached) {
+        int r = mount_target_is_dir(path);
+        if (r < 0) return r;
+    }
     mount_t *mnt = vfs_mount_alloc();
     if (!mnt) return -ENOMEM;
-    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
-    mnt->path[MAX_PATH_LEN - 1] = '\0';
+    if (path) {
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+    }
     mnt->type = FS_TYPE_RAMFS;
     strncpy(mnt->dev, dev ? dev : "none", sizeof(mnt->dev) - 1);
     mnt->dev[sizeof(mnt->dev) - 1] = '\0';
@@ -155,6 +182,47 @@ static int mount_ram_backend(const char *dev, const char *path,
         return -ENOMEM;
     }
     mnt->root->mnt = mnt;
+    if (detached) {
+        *out_mnt = mnt;
+        return 0;
+    }
+    vfs_mount_link_tree(mnt);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
+
+static int mount_ram_backend(const char *dev, const char *path,
+                             const char *fstype, int flags, const char *data)
+{
+    return mount_ram_backend_common(dev, path, fstype, flags, data, NULL);
+}
+
+int vfs_mount_detached(const char *dev, const char *fstype, int flags,
+                       const char *data, mount_t **out_mnt)
+{
+    if (!fstype || !fstype[0] || !out_mnt)
+        return -EINVAL;
+    *out_mnt = NULL;
+    if (strcmp(fstype, "tmpfs") == 0 || strcmp(fstype, "ramfs") == 0)
+        return mount_ram_backend_common(dev, NULL, fstype, flags, data, out_mnt);
+    if (strcmp(fstype, "proc") == 0 || strcmp(fstype, "sysfs") == 0 ||
+        strcmp(fstype, "devtmpfs") == 0 || strcmp(fstype, "devfs") == 0)
+        return mount_virtual_backend_common(dev, NULL, fstype, flags, data,
+                                            out_mnt);
+    return -EINVAL;
+}
+
+int vfs_mount_attach_path(mount_t *mnt, const char *path)
+{
+    if (!mnt || !path || path[0] != '/')
+        return -EINVAL;
+    if (mnt->publish_ready)
+        return -EBUSY;
+    int r = mount_target_is_dir(path);
+    if (r < 0)
+        return r;
+    strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+    mnt->path[MAX_PATH_LEN - 1] = '\0';
     vfs_mount_link_tree(mnt);
     vfs_dcache_invalidate_all();
     return 0;
