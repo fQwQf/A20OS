@@ -42,6 +42,7 @@ static uint64_t user_limit;
 static unsigned unlock_calls;
 static int arch_irqs_enabled(void) { return 1; }
 static unsigned preempt_count(void) { return 0; }
+static void mm_shared_write_leave(void) {}
 static int user_range_ok(uint64_t va, size_t n);
 """
 
@@ -58,15 +59,18 @@ int main(void) {
     memset(arena, 'n', sizeof(arena));
     user_limit = (uintptr_t)arena + PAGE_SIZE + 3;
     void *kaddr = NULL; size_t chunk = 0; uint64_t irq = 0; unsigned preempt = 99;
+    unsigned shared_write_guard = 7;
     int access = a20_usercopy_page_access(&task, &mm, (uintptr_t)arena + PAGE_SIZE - 2,
-                                          0, &kaddr, &chunk, &irq, &preempt);
-    if (access != 0 || kaddr != arena + PAGE_SIZE - 2 || chunk != 2 || irq != 1 || preempt != 0) {
-        fprintf(stderr, "access=%d kaddr=%p expected=%p chunk=%zu irq=%llu preempt=%u limit=%llu\\n",
+                                          0, &kaddr, &chunk, &irq, &preempt,
+                                          &shared_write_guard);
+    if (access != 0 || kaddr != arena + PAGE_SIZE - 2 || chunk != 2 || irq != 1 ||
+        preempt != 0 || shared_write_guard != 0) {
+        fprintf(stderr, "access=%d kaddr=%p expected=%p chunk=%zu irq=%llu preempt=%u guard=%u limit=%llu\\n",
                 access, kaddr, arena + PAGE_SIZE - 2, chunk, (unsigned long long)irq,
-                preempt, (unsigned long long)user_limit);
+                preempt, shared_write_guard, (unsigned long long)user_limit);
         return 1;
     }
-    a20_usercopy_page_unlock(&mm, irq, preempt);
+    a20_usercopy_page_unlock(&mm, irq, preempt, shared_write_guard);
     memset(out, 0x55, sizeof(out));
     if (a20_usercopy_copy_from_rust(&task, &mm, out, arena + PAGE_SIZE - 2, 6) != -EFAULT ||
         memcmp(out, "nnnnn", 5) != 0 || out[5] != 0x55)

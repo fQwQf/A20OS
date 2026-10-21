@@ -64,7 +64,7 @@ int main(void) {
 
     def test_cow_waits_for_fork_write_protection(self):
         text = (ROOT / 'kernel/mm/fault.c').read_text()
-        start = text.index('int handle_cow_fault(task_t *t,')
+        start = text.index('int handle_cow_fault_mm(task_t *t,')
         end = text.index('\n}', start) + 2
         body = text[start:end]
         run(r'''
@@ -94,8 +94,9 @@ static int mm_cow_from_status(task_t *t, mm_struct_t *m, uint64_t va, pfn_t *old
     if (mode) return 0;
     copied=old_value; *old=1; return 1;
 }
-static int handle_cow_fault_locked(task_t *t,uint64_t va,pfn_t *old,page_cache_page_t **page) {
-    (void)va; (void)old; (void)page; assert(t->mm->tlb_lock && !pending);
+static int handle_cow_fault_locked(task_t *t,mm_struct_t *m,uint64_t va,
+                                   pfn_t *old,page_cache_page_t **page) {
+    (void)t; (void)va; (void)old; (void)page; assert(m->tlb_lock && m->lock && !pending);
     copied=old_value; return 0;
 }
 static void mm_tlb_shootdown_page(mm_struct_t *m,uint64_t va) {
@@ -108,7 +109,7 @@ int main(void) {
     mm_struct_t mm={0}; task_t t={.mm=&mm};
     for (mode=0;mode<2;mode++) {
         pending=1; old_value=4; copied=flushed=0;
-        assert(handle_cow_fault(&t,4096)==0);
+        assert(handle_cow_fault_mm(&t,&mm,4096)==0);
         assert(copied==5 && flushed && !mm.lock && !mm.tlb_lock);
     }
     return 0;
@@ -124,6 +125,8 @@ int main(void) {
 #include <stdint.h>
 #include <stddef.h>
 typedef unsigned long pte_t;
+typedef unsigned long vaddr_t;
+#define PAGE_SIZE 4096
 #define PTE_V 1
 #define PTE_U 2
 #define PTE_W 4
@@ -131,6 +134,11 @@ typedef unsigned long pte_t;
 #define PTE_X 16
 #define PTE_A 32
 #define PTE_COW 64
+/* Distinct high bits so the shared-write gate in the fault path never matches
+ * this test's anonymous VMA. */
+#define VM_SHARED (1u << 4)
+#define VM_WRITE (1u << 5)
+#define VM_FILE (1u << 13)
 enum mm_fault_access { MM_FAULT_ACCESS_READ, MM_FAULT_ACCESS_WRITE, MM_FAULT_ACCESS_EXEC };
 typedef struct { unsigned vm_flags; } mm_seg_t;
 typedef struct { int lock; pte_t *pgdir; } mm_struct_t;
@@ -139,14 +147,24 @@ static mm_seg_t vma={PTE_W|PTE_R};
 static unsigned copies;
 static void spin_lock(int *p) { assert(!*p); *p=1; }
 static void spin_unlock(int *p) { assert(*p); *p=0; }
+static uint64_t spin_lock_irqsave(int *p) { assert(!*p); *p=1; return 0; }
+static void spin_unlock_irqrestore(int *p,uint64_t f) { (void)f; assert(*p); *p=0; }
 static pte_t *pt_lookup_leaf(pte_t *p,uint64_t va,void *a,void *b,void *c) {
     (void)va; (void)a; (void)b; (void)c; return p;
 }
 static int arch_pte_is_leaf(pte_t p) { return (p&PTE_V)!=0; }
+static uintptr_t arch_pte_addr(pte_t p) { return p & ~(uintptr_t)(4096-1); }
+static pte_t arch_pte_flags(pte_t p) { return p & (4096-1); }
+static pte_t arch_pte_leaf(uintptr_t addr,pte_t flags) { return addr | flags; }
 static mm_seg_t *mm_seg_find(mm_struct_t *m,uint64_t va) { (void)m; (void)va; return &vma; }
 static int fault_access_allowed(unsigned flags,enum mm_fault_access access) {
     return (flags & (access==MM_FAULT_ACCESS_WRITE?PTE_W:PTE_R))!=0;
 }
+static int mm_shared_write_enter_wait(void) { return 0; }
+static void mm_shared_write_leave(void) {}
+static void mm_tlb_invalidate_begin(mm_struct_t *m) { (void)m; }
+static void mm_tlb_invalidate_finish(mm_struct_t *m) { (void)m; }
+static void mm_tlb_note_change(mm_struct_t *m,uint64_t va,uint64_t sz) { (void)m;(void)va;(void)sz; }
 static void arch_tlb_flush_page_local(uint64_t va) { (void)va; }
 static int handle_cow_fault(task_t *t,uint64_t va) {
     (void)va; assert(!t->mm->lock); copies++; return 0;

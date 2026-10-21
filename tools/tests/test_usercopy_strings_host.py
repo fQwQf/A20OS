@@ -56,40 +56,29 @@ static int test_fault_fail;
 static unsigned test_fault_calls;
 
 static task_t *proc_current(void) { return &test_task; }
-static int user_access_begin(task_t *t, uint64_t va, int write,
-                             void **kaddr, size_t *chunk, uint64_t *flags) {
-    test_accesses++;
-    if (!t || !t->mm || write || !user_range_ok(va, 1)) return -EFAULT;
-    uintptr_t base = (uintptr_t)test_arena;
-    if (va < base || va - base >= 4u * PAGE_SIZE) return -EFAULT;
-    unsigned page = (unsigned)((va - base) / PAGE_SIZE);
-    if (!test_mapped[page]) {
-        if ((int)page != test_fault_page) return -EFAULT;
-        test_fault_calls++;
-        if (test_held != 0) test_lock_error = 1;
-        if (test_fault_fail) return -EFAULT;
-        test_mapped[page] = 1;
-    }
-    test_grants++;
-    if (test_held != 0) test_lock_error = 1;
-    test_held++;
-    *kaddr = (void *)(uintptr_t)va;
-    size_t page_left = PAGE_SIZE - (va & (PAGE_SIZE - 1));
-    size_t user_left = (size_t)(USER_VA_LIMIT - va);
-    *chunk = page_left < user_left ? page_left : user_left;
-    *flags = 0;
-    return 0;
+/* The C wrappers pin one mm reference for the whole call and drop it after;
+ * model that contract so a missing drop is observable at the end of main. */
+static unsigned test_mm_pins;
+static unsigned test_mm_drops;
+static mm_struct_t *usercopy_pin_mm(task_t *t) {
+    if (!t || !t->mm) return NULL;
+    test_mm_pins++;
+    return t->mm;
 }
-static void user_access_end(task_t *t, uint64_t flags) {
-    (void)t; (void)flags;
-    test_unlocks++;
-    if (test_held != 1) test_lock_error = 1;
-    else test_held--;
+static void mm_destroy(mm_struct_t *mm) {
+    (void)mm;
+    test_mm_drops++;
+    if (test_mm_drops > test_mm_pins) test_lock_error = 1; /* drop without pin */
 }
+
+/* The extracted C wrappers delegate to these Rust entry points. */
+long a20_user_strncpy_rust(task_t *, mm_struct_t *, char *, const char *, size_t);
+long a20_user_strnlen_rust(task_t *, mm_struct_t *, const char *, size_t);
 
 int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
                              int write, void **kaddr, size_t *chunk,
-                             uint64_t *irq, unsigned *preempt) {
+                             uint64_t *irq, unsigned *preempt,
+                             unsigned *shared_write_guard) {
     test_accesses++;
     if (!t || !mm || t->mm != mm || write || !user_range_ok(address, 1))
         return -EFAULT;
@@ -105,7 +94,7 @@ int a20_usercopy_page_access(task_t *t, mm_struct_t *mm, uintptr_t address,
     size_t page_left = PAGE_SIZE - (address & (PAGE_SIZE - 1));
     size_t user_left = (size_t)(USER_VA_LIMIT - address);
     *chunk = page_left < user_left ? page_left : user_left;
-    *irq = 0; *preempt = 0;
+    *irq = 0; *preempt = 0; *shared_write_guard = 0;
     return 0;
 }
 int a20_usercopy_resolve_fault(task_t *t, mm_struct_t *mm, uintptr_t address,
@@ -120,8 +109,9 @@ int a20_usercopy_resolve_fault(task_t *t, mm_struct_t *mm, uintptr_t address,
     test_mapped[page] = 1;
     return 0;
 }
-void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq, unsigned preempt) {
-    (void)mm; (void)irq; (void)preempt;
+void a20_usercopy_page_unlock(mm_struct_t *mm, uint64_t irq, unsigned preempt,
+                              unsigned shared_write_guard) {
+    (void)mm; (void)irq; (void)preempt; (void)shared_write_guard;
     test_unlocks++;
     if (test_held != 1) test_lock_error = 1;
     else test_held--;
@@ -284,7 +274,10 @@ int main(void) {
     unsigned demand_r_calls = test_accesses, demand_r_grants = test_grants;
     unsigned demand_r_unlocks = test_unlocks;
     unsigned demand_r_faults = test_fault_calls;
-    if (demand_c != 1 || demand_r != 1 || demand_c_calls != 2 ||
+    /* The C wrapper now pins the mm and delegates to the same Rust loop, so
+       both paths probe identically: one fault-retry access pair plus the
+       successful retry. */
+    if (demand_c != 1 || demand_r != 1 || demand_c_calls != 3 ||
         demand_r_calls != 3 || demand_c_grants != 2 || demand_r_grants != 2 ||
         demand_c_unlocks != demand_c_grants || demand_r_unlocks != demand_r_grants ||
         demand_c_faults != 1 || demand_r_faults != 1 || demand_c_lock_error ||
@@ -326,7 +319,7 @@ int main(void) {
     unsigned limit_r_calls = test_accesses, limit_r_grants = test_grants;
     unsigned limit_r_unlocks = test_unlocks;
     int limit_r_lock_error = test_lock_error || test_held != 0;
-    if (limit_c != -EFAULT || limit_r != -EFAULT || limit_c_calls != 1 ||
+    if (limit_c != -EFAULT || limit_r != -EFAULT || limit_c_calls != 2 ||
         limit_r_calls != 2 || limit_c_grants != 1 || limit_r_grants != 1 ||
         limit_c_unlocks != limit_c_grants || limit_r_unlocks != limit_r_grants ||
         limit_c_lock_error || limit_r_lock_error)
@@ -334,7 +327,7 @@ int main(void) {
                        "range rejection or page-access grant count mismatch");
     failed |= pair_copy("partial-copy-limit-error-no-terminator",
                         (char *)test_arena + PAGE_SIZE - 2, 4,
-                        (uintptr_t)test_arena + PAGE_SIZE - 1, 1, -EFAULT, 1, 0, 1, 2);
+                        (uintptr_t)test_arena + PAGE_SIZE - 1, 1, -EFAULT, 1, 0, 2, 2);
 
     /* C/Rust agree on a missing second page, and the successful first-page
        writes remain visible while no synthetic NUL is promised on error. */
@@ -344,6 +337,9 @@ int main(void) {
     failed |= pair_copy("partial-copy-before-unmapped-page", (char *)test_arena,
                         PAGE_SIZE + 2, (uintptr_t)test_arena + 4u * PAGE_SIZE,
                         1, -EFAULT, PAGE_SIZE, 0, 2, 2);
+
+    if (test_mm_pins == 0 || test_mm_pins != test_mm_drops)
+        failed |= fail("mm-pin-balance", "pin/destroy reference counts differ");
 
     free(test_arena);
     if (failed) return 1;
