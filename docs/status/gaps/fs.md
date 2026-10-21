@@ -66,14 +66,16 @@
 - 关闭条件：guest 写盘后 `e2fsck -fn` 干净；损坏来源有明确解释。
 - 诊断：[notes/fs-ext4-bitmap.md](notes/fs-ext4-bitmap.md)。
 
-### FS-10 `smoke-vfs-stress` 的 ISOFS 读用例失败
+### FS-10 新挂载 API 没有 detached mount，util-linux 的 mount 因此不可用
 
-- 现状：`make smoke-vfs-stress` 在当前提交上以
-  `VFS_STRESS: FAIL isofs-read-hello errno=0` 与 `VFS_STRESS: FAIL isofs-read-nested errno=0`
-  结束（rc=2）；同一日志里 ISOFS 已 `Mounted: block_size=2048 vol_blocks=22
-  root_extent=18 root_size=146`。把 CORE 包对 `kernel/fs/vfs/{dcache.c,mount_state.rs}`
-  的改动 stash 掉后结果不变，所以与那次改动无关。
-- 缺口：ISOFS 挂载成功但按名读取失败，errno 为 0（即失败不是来自被检查的 errno 路径）；
-  `smoke-vfs-stress` 因此整体为红，iso 相关的读路径没有可用门禁。
+- 现状：`mount(2)` 与 `busybox mount` 可用——在 guest 内直接调 `mount("tmpfs","/tmp","tmpfs",0,NULL)` 返回 0。util-linux 的 `mount` 走 libmount 的新 API（`fsopen`→`fsconfig`→`fsmount`→`move_mount`），而 `sys_fsmount` 以 `target=NULL` 调 `fscontext_fsmount()`，后者在 `!target` 时直接 `-EINVAL`，于是 util-linux 对任何文件系统都失败（"wrong fs type, bad option, bad superblock …"，退出码 32，见 `kernel/fs/fscontext.c`、`kernel/abi/linux/sys_mount_api.c`）。
+- 缺口：没有 detached mount。Linux 的 `fsmount(2)` 返回一个未挂接的挂载 fd，由 `move_mount(2)` 带 `MOVE_MOUNT_F_EMPTY_PATH` 挂到目标；A20OS 的各个后端（ram/virtual/cgroup/block）都在挂载时定下 path 并立刻 `vfs_mount_link_tree()`，没有"先建、后接"的路径，`sys_move_mount` 也只能在两个路径之间搬。
+- 关闭条件：`fsopen`+`fsmount` 返回 detached mount fd；`move_mount(mfd, "", AT_FDCWD, dir, MOVE_MOUNT_F_EMPTY_PATH)` 成功挂接；guest 内 util-linux 的 `mount -t tmpfs tmpfs <dir>` 与 `umount <dir>` 可用；`smoke-vfs-*` 门禁保持通过。
+- 来源：`kernel/fs/fscontext.c`、`kernel/fs/vfs/mount_ops.c`、`kernel/abi/linux/sys_mount_api.c`。
+
+### FS-11 `smoke-vfs-stress` 的 ISOFS 读用例失败
+
+- 现状：`make smoke-vfs-stress` 在当前提交上以 `VFS_STRESS: FAIL isofs-read-hello errno=0` 与 `VFS_STRESS: FAIL isofs-read-nested errno=0` 结束（rc=2）；同一日志里 ISOFS 已 `Mounted: block_size=2048 vol_blocks=22 root_extent=18 root_size=146`。把对 `kernel/fs/vfs/{dcache.c,mount_state.rs}` 的并发修复 stash 掉后结果不变，所以与该修复无关。
+- 缺口：ISOFS 挂载成功但按名读取失败，errno 为 0（即失败不来自被检查的 errno 路径）；`smoke-vfs-stress` 因此整体为红。
 - 关闭条件：两条 isofs 读用例在候选上通过，或失败有明确原因并给出对应门禁。
-- 来源：CORE 包在 CORE-05 的并发 VFS 负载回归里首次跑到该目标而暴露。
+- 来源：并发 VFS 负载回归时首次跑到该目标而暴露。
