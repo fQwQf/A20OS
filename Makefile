@@ -2594,8 +2594,15 @@ endif
 ifneq ($(filter $(KERNEL_DIR)/mm/fault.c,$(KERNEL_SRC)),)
 ifneq ($(NOMMU),1)
 KERNEL_OBJ += $(RUST_COW_FAULT_OBJECT)
+# The status-led COW break and fault engine need the per-PTE status sidecar;
+# arm32's short-descriptor backend has none, and fault.c compiles their C
+# counterparts out for that arch, so linking the objects would leave every one
+# of their entry points undefined.  The plain COW fault path (cow_fault.rs)
+# does work there and stays linked.
+ifneq ($(ARCH),arm32)
 KERNEL_OBJ += $(RUST_COW_STATUS_OBJECT)
 KERNEL_OBJ += $(RUST_FAULT_STATUS_OBJECT)
+endif
 endif
 endif
 # The flat-space policy is Rust wherever the flat user memory model is compiled

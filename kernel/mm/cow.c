@@ -288,13 +288,21 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
     if (!src_pte)
         return 0;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    /* The node lock narrows the window on the per-PTE status sidecar.  An
+     * architecture without that sidecar (arm32's short-descriptor backend)
+     * has no table to lock or sync: its fork path runs under mm->lock, which
+     * is the exclusion this snapshot relies on there. */
     pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         mm_pt_node_lock(stab);
+#endif
     pte_t source = *src_pte;
     if (!(source & PTE_V) || !arch_pte_is_leaf(source)) {
+#if defined(ARCH_HAS_PGTABLE_OPS)
         if (stab)
             mm_pt_node_unlock(stab);
+#endif
         return 0;
     }
     mm_seg_t *vma = mm_seg_find(parent, va);
@@ -334,18 +342,27 @@ void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
     *src_pte = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
 #endif
     mm_tlb_note_change(parent, va, vm_pt_level_size(level));
+#if defined(ARCH_HAS_PGTABLE_OPS)
     pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
                                 (uint8_t)class);
+#else
+    (void)class;
+#endif
 }
 
 void a20_cow_share_unlock(void *parent_ptr, uintptr_t va)
 {
+#if defined(ARCH_HAS_PGTABLE_OPS)
     mm_struct_t *parent = parent_ptr;
     pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         mm_pt_node_unlock(stab);
+#else
+    (void)parent_ptr;
+    (void)va;
+#endif
 }
 
 int a20_cow_requires_private_copy(void)

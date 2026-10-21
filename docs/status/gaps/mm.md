@@ -32,8 +32,9 @@
 
 ### MM-05 32 位架构的内核 MM 编译不过
 
-- 现状：MM 侧的 32 位类型错误已修，并在 riscv32 上推进到 `kernel/fs/ids/uxfs`。已修的具体项：`cow.c`/`fault.c`/`madvise.c`/`mmap.c`/`mprotect.c`/`munmap.c` 的 `pt_lookup_leaf()` 参数改为经 `vaddr_t`/`size_t` 局部变量中转（结构体里仍是 pointer-width 字段，以保住 Rust `#[repr(C)]` 镜像的布局）；`a20_cowf_probe`、`a20_mprotect_rec/leaf`、`a20_munmap_entry`、`a20_mseal_rec` 的 32 位尺寸断言原来写成 48/28/24/16，与字段表不符，实测应为 52/40-32/40/24；`elf_rust.h` 的 `a20_elf_interpreter_ops_t` 与 Rust 侧同步改成按指针宽度取值；`mprotect.c` 的溢出检查改为先在 64 位里界定再比较。连带修掉同类 32 位问题：`proc/ptrace_state.h` 的 `int32_t *` 改为 `int *`（ilp32d 下 `int32_t` 是 `long`）、`proc/wait.c` 的 `report_take` 形参、`proc/exec.c` 的资源句柄转换、`procfs_render.c` 的 loadavg 指针类型。**仍未通过**：riscv32 现在停在 `kernel/fs/uxfs/uxfs.c` 的 `uxfs namespace mirror: sb view prefix layout`（`offsetof(uxfs_sb_t, server_generation) == 72` 是 LP64 值）；arm32 仍无法在本机验证（无 arm 工具链）。
-- 缺口：riscv32 与 arm32 的内核 bring-up 构建不通过，32 位档的 MM 没有可运行证据。两个架构的用户态构建是通过的。
+- 现状：**arm32 内核现在能编过**（`a20os-buildenv:multi` 容器里 `make ARCH=arm32 ABI=linux BRINGUP=0 dev-build` 完成，产出 kernel.bin/fat32/ext4/isofs），但在 QEMU 里启动时在 `memset` 写 `0xff800000` 处缺页 panic，还没有能启动的 arm32 镜像。**riscv32** 还差一截：现在停在 `kernel/net/netfilter.c:284` 的 `uint32_t *` / `unsigned *` 类型名不匹配（ilp32d 下 `int32_t` 是 `long`）。
+- 已修的具体项：`pt_lookup_leaf()` 的四个调用点经 `vaddr_t`/`size_t` 局部变量中转；`a20_cowf_probe`、`a20_mprotect_rec/leaf`、`a20_munmap_entry`、`a20_mseal_rec`、`a20_mmap_seg_spec`（Rust `SegSpec`）、`DcacheEntry`、`uxfs_sb_t.server_generation` 偏移的 32 位值按实测改正（原来是按 LP64 猜的，多数不可达）；`a20_elf_interpreter_ops_t` 按指针宽度取值；`mprotect.c` 的溢出检查改成先在 64 位里界定；`cow.c`/`fault.c`/`mprotect.c` 里 per-PTE status sidecar 的操作改为 `ARCH_HAS_PGTABLE_OPS` 内，arm32 走 PTE 级回退；`cow_status`/`fault_status` 两个 Rust 对象在 arm32 上不链接（其 C 对应物本来就被编掉）。连带修掉 `proc/{ptrace_state.h,wait.c,exec.c,debug.c}`、`fs/procfs/procfs_render.c`、`fs/vfs/dcache_state.rs` 的同类宽度问题。
+- 缺口：riscv32 与 arm32 的内核 bring-up 构建不通过，32 位档的 MM 没有可运行证据。
 - 关闭条件：`check-riscv32-bringup` 与 `check-arm32-bringup` 编译通过，并在 QEMU 里完成 bring-up 与自然关机。
 - 来源：DELIVERY 的保留平台构建矩阵（[current/delivery-baseline.md](../current/delivery-baseline.md) §3）；本条现状由 CORE 包在 CORE-07 取证时推进并更新。
 

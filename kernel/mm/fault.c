@@ -2043,6 +2043,12 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
                 (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
                     (VM_FILE | VM_SHARED | VM_WRITE);
             if (regrant && !(*leaf & PTE_W)) {
+#if !defined(ARCH_HAS_PGTABLE_OPS)
+                /* Publishing the regranted protection goes through the per-PTE
+                 * status sidecar, which this architecture does not have; fall
+                 * through to the ordinary fault path below instead. */
+                regrant = 0;
+#else
                 int level = 0;
                 (void)pt_lookup_leaf(mm->pgdir, stval, &level, NULL, NULL);
                 pte_t *table = mm_pt_leaf_table(mm->pgdir, stval);
@@ -2072,6 +2078,7 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
                     }
                     mm_pt_node_unlock(table);
                 }
+#endif /* ARCH_HAS_PGTABLE_OPS */
             }
             spin_unlock_irqrestore(&mm->lock, flags);
             mm_tlb_invalidate_finish(mm);

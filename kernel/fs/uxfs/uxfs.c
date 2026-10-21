@@ -1046,7 +1046,12 @@ static const struct a20_uxfs_ns g_uxfs_ns = {
 };
 _Static_assert(sizeof(g_uxfs_ns) / sizeof(void *) == 28,
                "uxfs namespace mirror: bridge table field count");
-_Static_assert(__builtin_offsetof(uxfs_sb_t, server_generation) == 72,
+/* 72 on LP64, 64 on ILP32: the four pointer-width/int fields before the
+ * 8-byte-aligned lifetime view, plus one 4-byte field per u32 after it.  The
+ * Rust view (uxfs_ops_state.rs) guards its own checks on the pointer width and
+ * says the C adapter is the authority for the kernel layout. */
+_Static_assert(__builtin_offsetof(uxfs_sb_t, server_generation) ==
+                   (sizeof(void *) == 8 ? 72 : 64),
                "uxfs namespace mirror: sb view prefix layout");
 
 /* Mechanical bridge for the Rust open/close lifecycle engine. */
