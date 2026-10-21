@@ -142,6 +142,9 @@ endif
 ifeq ($(TRAP_STORM_TEST),1)
 CFLAGS += -DCONFIG_TRAP_STORM_TEST
 endif
+ifeq ($(FUTEX_COW_WINDOW_TEST),1)
+CFLAGS += -DCONFIG_FUTEX_COW_WINDOW_TEST
+endif
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
 ifeq ($(NOMMU),1)
@@ -770,6 +773,7 @@ $(OBJ_DIR)/cmds/core/audioplay.o: ../kernel/include/uapi/a20/audio.h
 # include the same uapi header rather than repeating the constant.
 $(OBJ_DIR)/cmds/core/trap_storm_test.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/trap_storm_test.o: ../kernel/include/uapi/a20/trap_storm.h
+
 
 $(OBJ_DIR)/cmds/stress/cluster_threads.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/stress/cluster_threads.o: ../kernel/include/uapi/a20/block.h

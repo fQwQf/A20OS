@@ -2402,6 +2402,33 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-vfs-concurrency-smp4: PASS; log saved to $log',
     },
+    # Futex word COW window: the FUTEX_COW_WINDOW_TEST build skips one COW
+    # resolution so the locked re-validation must reject and retry.  The
+    # kernel's inject line proves the window was hit; the guest proves the
+    # store did not leak into the frame a forked child shares.
+    'smoke-futex-cow-window': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0',
+                           'FUTEX_COW_WINDOW_TEST=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/futex-cow-window.log',
+        'stdin': {'kind': 'pipe', 'delay': 8,
+                  'lines': ['futex_cow_window_test --inject', 'poweroff']},
+        'timeout': '40s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['\\[FUTEX-COW-WINDOW\\] pid=[0-9]+ inject va=0x22000000',
+                   'FUTEX_COW_WINDOW: acquire-owns-word PASS',
+                   'FUTEX_COW_WINDOW: cow-isolated PASS',
+                   'FUTEX_COW_WINDOW: release-clears-word PASS',
+                   'FUTEX_COW_WINDOW: reacquire PASS',
+                   'FUTEX_COW_WINDOW: PASS',
+                   'System is going down for power-off NOW'],
+        'forbid': ['PANIC|Kernel panic|LOCK-STALL|Kernel BUG', 'FUTEX_COW_WINDOW: FAIL'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-futex-cow-window: PASS; log saved to $log',
+    },
     'smoke-scm-stress': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

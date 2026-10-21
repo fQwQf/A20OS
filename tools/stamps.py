@@ -156,6 +156,8 @@ def cmd_user(a) -> int:
                   f"SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST="
                   f"{a.syscall_smoke_task_construction_test}",
                   f"TRAP_STORM_TEST={getattr(a, 'trap_storm_test', '0')}",
+                  f"FUTEX_COW_WINDOW_TEST="
+                  f"{getattr(a, 'futex_cow_window_test', '0')}",
                   f"BUILD_DIR={user_build_dir}"]
         if need_clean:
             rc = submake(["-C", "user", *common, "clean"])
@@ -611,6 +613,8 @@ def main() -> int:
             s.add_argument("--syscall-smoke-task-construction-test",
                            choices=("0", "1"), default="0")
             s.add_argument("--trap-storm-test",
+                           choices=("0", "1"), default="0")
+            s.add_argument("--futex-cow-window-test",
                            choices=("0", "1"), default="0")
             s.add_argument("--user-variant", required=True)
         else:

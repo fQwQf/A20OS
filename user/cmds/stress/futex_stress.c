@@ -96,7 +96,17 @@ static int wait_wake_shared(void)
     }
     usleep(20000);
     *word = 1;
-    if (syscall(SYS_futex, word, FUTEX_WAKE, 1, NULL, NULL, 0) != 1)
+    /* The child's parking is asynchronous: a single wake 20 ms after the fork
+     * can arrive before it has registered, and then returns 0.  Retry the way
+     * the wake-op cases do.  This does not mask a wrong shared key: a waiter
+     * registered under a different key never wakes, so the loop still fails. */
+    long woke = 0;
+    for (int i = 0; i < 1000 && !woke; ++i) {
+        woke = syscall(SYS_futex, word, FUTEX_WAKE, 1, NULL, NULL, 0);
+        if (!woke)
+            usleep(1000);
+    }
+    if (woke != 1)
         return fail("shared-wake");
     int r = wait_exit(pid, 0, "shared-wait-child");
     munmap(word, sizeof(int));

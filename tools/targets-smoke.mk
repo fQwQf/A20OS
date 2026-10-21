@@ -751,6 +751,12 @@ smoke-proc-lifecycle-smp2:
 smoke-vfs-concurrency-smp4:
 	$(PYTHON) tools/smoke.py smoke-vfs-concurrency-smp4
 
+# Futex word COW window: the test build skips one COW resolution so the locked
+# re-validation must reject and retry; the guest checks the write stayed out of
+# the frame a forked child shares.
+smoke-futex-cow-window:
+	$(PYTHON) tools/smoke.py smoke-futex-cow-window
+
 # Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
 # placement, migration and cross-CPU wakeups only run with more than one CPU;
 # the single-CPU target above keeps its own semantics.

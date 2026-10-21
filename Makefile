@@ -620,6 +620,12 @@ TRAP_STORM_TEST ?= 0
 ifeq ($(filter $(TRAP_STORM_TEST),0 1),)
 $(error TRAP_STORM_TEST must be 0 or 1)
 endif
+# Test-profile only: lets the futex COW-window probe skip one COW resolution so
+# the locked re-validation is forced to reject and retry.
+FUTEX_COW_WINDOW_TEST ?= 0
+ifeq ($(filter $(FUTEX_COW_WINDOW_TEST),0 1),)
+$(error FUTEX_COW_WINDOW_TEST must be 0 or 1)
+endif
 # Test-profile only: builds the guest syscall_smoke so it arms the private
 # one-shot clone failure and checks the fork rollback path.
 SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST ?= 0
@@ -984,6 +990,9 @@ endif
 ifeq ($(TRAP_STORM_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-trapstorm-test
 endif
+ifeq ($(FUTEX_COW_WINDOW_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-futexcow-test
+endif
 ifeq ($(PID_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-pid-rust
 endif
@@ -1146,7 +1155,7 @@ EXT4_IMAGE_MB ?= 128
 # and an apk world image fills it -- see VF2_WORLD in tools/targets-build.mk.
 # RISCV_GNU_CC stays: the vDSO is built with it, not with an extra package.
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)$(if $(filter 1,$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)),:SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST=1,)$(if $(filter 1,$(TRAP_STORM_TEST)),:TRAP_STORM_TEST=1,)
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):ENVELOPE_ACQUIRE_RACE_TEST=$(ENVELOPE_ACQUIRE_RACE_TEST)$(if $(filter 1,$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)),:SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST=1,)$(if $(filter 1,$(TRAP_STORM_TEST)),:TRAP_STORM_TEST=1,)$(if $(filter 1,$(FUTEX_COW_WINDOW_TEST)),:FUTEX_COW_WINDOW_TEST=1,)
 # $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
@@ -1785,6 +1794,9 @@ CFLAGS += -DCONFIG_ELF_EXEC_TEST
 endif
 ifeq ($(TRAP_STORM_TEST),1)
 CFLAGS += -DCONFIG_TRAP_STORM_TEST
+endif
+ifeq ($(FUTEX_COW_WINDOW_TEST),1)
+CFLAGS += -DCONFIG_FUTEX_COW_WINDOW_TEST
 endif
 ifeq ($(PID_IMPL),rust)
 CFLAGS += -DCONFIG_PID_RUST
