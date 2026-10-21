@@ -22,3 +22,18 @@
 | `check-arch-boundary` | CORE / MM / ABI | [core.md](core.md) |
 | `check-stm32f103`（硬编码 MMIO 地址） | DRIVER / 平台 | [drivers.md](drivers.md) |
 | `check-doc-drift` 的剩余引用、`check-stm32f103` 缺 `rg` | 文档与门禁自身 | [docs.md](docs.md) DOCS-04/05 |
+
+## DELIVERY-05 构建容器缺 armhf 开发头与 rustc
+
+- 现状：`ghcr.io/fqwqf/a20os-buildenv:latest` 里 `libc6-dev-armhf-cross` 没有安装
+  （`tools/ci/Dockerfile` 用 `--no-install-recommends`，而该包只是
+  `gcc-arm-linux-gnueabihf` 的 Recommends），所以任何 `#include <limits.h>` 的 arm32 内核
+  文件都以 `bits/libc-header-start.h: No such file or directory` 失败；镜像里也没有 `rustc`，
+  所有 arm32 内核 Rust 对象直接以 `rustc: No such file or directory`（Error 127）失败。
+  本轮是在本地从该镜像派生一层补上 `libc6-dev-armhf-cross`、并把宿主 rustup 工具链挂进容器
+  之后，才第一次拿到 arm32 的真实编译错误清单（见 [mm.md](mm.md) MM-05）。
+- 缺口：文档里“在固定 CI 容器里复现”的用法在该镜像上跑不到编译阶段；不加补丁拿到的
+  arm32 结论会把“镜像缺依赖”误读成“源码编译不过”。
+- 关闭条件：`tools/ci/Dockerfile` 显式安装 `libc6-dev-armhf-cross`（并在文档写明 Rust 工具链
+  的获取方式），重建后的镜像能直接跑出 arm32 的内核编译错误清单。
+- 来源：MM-05 的 arm32 复现（[mm.md](mm.md)）。

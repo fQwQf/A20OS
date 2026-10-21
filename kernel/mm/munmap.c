@@ -104,7 +104,7 @@ struct a20_munmap_entry {
 #if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(struct a20_munmap_entry) == 48, "Rust/C unmap entry ABI");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_munmap_entry) == 24, "Rust/C unmap entry ABI");
+_Static_assert(sizeof(struct a20_munmap_entry) == 40, "Rust/C unmap entry ABI");
 #endif
 
 
@@ -334,8 +334,14 @@ void a20_munmap_leaf_probe(void *mm_ptr, uintptr_t va,
     out->level = 0;
     out->present = 0;
     out->swap = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    /* Bridge the width-fixed Rust ABI struct (int32_t/uintptr_t) to
+     * pt_lookup_leaf()'s native int/vaddr_t: same width, different C type on
+     * a 32-bit target. */
+    int level = 0;
+    vaddr_t base = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &out->size);
+    out->level = level;
+    out->base = base;
     if (!pte)
         return;
     out->aux = (uintptr_t)*pte;

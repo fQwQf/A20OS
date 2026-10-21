@@ -71,3 +71,17 @@
 - 缺口：该行为断言失败，当前无法区分夹具漂移与真实缺陷。
 - 关闭条件：探针在候选上通过，或断言按当前契约改写并有行为依据。
 - 来源：DELIVERY 的 `check-a20-tests` 基线（[current/delivery-baseline.md](../current/delivery-baseline.md) §5）。
+
+### CORE-11 proc 的 32 位内核构建不通过
+
+- 现状：`make -k check-riscv32-bringup` 在 `kernel/proc/debug.c`（12 处 `int32_t *` 与 `int *`
+  类型不匹配）、`kernel/proc/wait.c:273`（`int (*)(void *, void *, int)` 与 `int32_t` 版本
+  不匹配）、`kernel/proc/exec.c:1221`（`int-to-pointer-cast`）、
+  `kernel/proc/resource_ns_state.rs:21`（32 位目标没有 `core::sync::atomic::AtomicU64`）报错；
+  arm32 侧 `kernel/proc/exec.c:1221` 同样报错。
+- 缺口：proc 的 32 位内核构建不通过，riscv32/arm32 的 bring-up 因此停在 proc 之前。
+  32 位下 `int32_t` 不一定是 `int`（riscv32-elf 上是 `long`），`AtomicU64` 在
+  `max-atomic-width=32` 的目标上不存在。
+- 关闭条件：这两个架构的内核构建不再有 `kernel/proc/` 条目。
+- 来源：MM-05 的 32 位复现（[mm.md](mm.md)），本轮 `make -k check-riscv32-bringup` /
+  容器内 `make -k check-arm32-bringup` 输出。

@@ -48,7 +48,7 @@ struct a20_mseal_rec {
 #if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(struct a20_mseal_rec) == 32, "Rust/C mseal rec ABI");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_mseal_rec) == 16, "Rust/C mseal rec ABI");
+_Static_assert(sizeof(struct a20_mseal_rec) == 24, "Rust/C mseal rec ABI");
 #endif
 
 int a20_mseal_has_pgdir(const void *mm_ptr)

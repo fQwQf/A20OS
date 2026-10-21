@@ -40,7 +40,7 @@ struct Rec {
 #[cfg(target_pointer_width = "64")]
 const _: [(); 32] = [(); core::mem::size_of::<Rec>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 16] = [(); core::mem::size_of::<Rec>()];
+const _: [(); 24] = [(); core::mem::size_of::<Rec>()];
 
 unsafe extern "C" {
     fn a20_mseal_has_pgdir(mm: *const c_void) -> i32;
