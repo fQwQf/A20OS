@@ -544,7 +544,7 @@ vnode_t *littlefs_mount(struct bcache *bc);
 void     littlefs_unmount(vnode_t *root);
 
 int      vfs_mount_bc_flags(const char *path, const char *fstype,
-                            struct bcache *bc, int flags);
+                            struct bcache *bc, int flags, const char *data);
 int      vfs_umount(const char *path);
 
 /* Pipe */

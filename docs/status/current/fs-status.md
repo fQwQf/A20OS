@@ -43,6 +43,11 @@ inode 已被回收、两次 `e2fsck -fn` 都干净）。仍然拒绝的是 `ERRO
 需要日志级崩溃原子性（提交点前后哪些写在崩溃后存活）时用带日志的 `ext4-journal.img`，由
 `smoke-ext4-journal` 覆盖（4 个注入点的崩溃 + 恢复后 `e2fsck` 干净）。
 
+日志模式只有 **ordered 元数据日志**一种（revoke 记录已实现并在重放时生效）。改变日志语义的挂载选项
+——`data=journal`、`data=writeback`、`journal_async_commit`、`journal_checksum`、`barrier=0`、
+`nobarrier`、`fast_commit`、`journal_dev`——会被 `ext4_validate_mount_options()` 显式拒绝
+（`-EOPNOTSUPP`），不会静默降级成 ordered；日志 superblock 侧也只接受 `REVOKE|64BIT|CSUM_V3`。
+
 带日志镜像的日志必须是 v3 校验和格式（mke2fs 默认）。旧式 v1/v2 日志不支持重放或写入：干净的
 v1/v2 镜像可以**只读**挂载（显式降级），日志非空的旧式镜像连只读都拒绝，可写挂载一律拒绝。
 `smoke-ext4-legacy-journal` 覆盖这三种情形，并在宿主机上对干净镜像跑 `e2fsck -fn`。

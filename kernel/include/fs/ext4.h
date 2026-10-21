@@ -341,6 +341,8 @@ typedef struct ext4_fctx {
 vnode_t *ext4_mount(bcache_t *bc);
 vnode_t *ext4_mount_flags(bcache_t *bc, int flags);
 int ext4_vnode_finalize_unlinked(vnode_t *vn);
+/* Refuse mount options that would change journaling semantics (see ext4.c). */
+int ext4_validate_mount_options(const char *opts);
 int ext4_record_status(ext4_sb_info_t *sb, int status);
 int      ext4_unmount(vnode_t *root);
 /* Persist a clean on-disk state for terminal system shutdown without freeing

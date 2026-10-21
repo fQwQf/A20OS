@@ -39,13 +39,14 @@ extern vnode_t *sysfs_mount(void);
  * ============================================================ */
 
 static int mount_block_dev_idx(int dev_idx, const char *path,
-                               const char *fstype, int flags) {
+                               const char *fstype, int flags,
+                               const char *data) {
     block_dev_t *bdev = mount_setup_block_device(dev_idx);
     if (!bdev) return -ENODEV;
     bcache_t *bc = bcache_create(bdev);
     if (!bc) return -ENOMEM;
 
-    int r = vfs_mount_bc_flags(path, fstype, bc, flags);
+    int r = vfs_mount_bc_flags(path, fstype, bc, flags, data);
     if (r < 0) bcache_destroy(bc);
     return r;
 }
@@ -160,10 +161,11 @@ static int mount_ram_backend(const char *dev, const char *path,
 }
 
 static int mount_block_backend(int dev_idx, int part_num, const char *path,
-                               const char *fstype, int flags)
+                               const char *fstype, int flags,
+                               const char *data)
 {
     (void)part_num;
-    return mount_block_dev_idx(dev_idx, path, fstype, flags);
+    return mount_block_dev_idx(dev_idx, path, fstype, flags, data);
 }
 
 static int mount_update_existing(const char *path, int flags)
@@ -195,7 +197,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
 }
 
 int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
-                       int flags) {
+                       int flags, const char *data) {
     if (strcmp(fstype, "fat32") == 0 || strcmp(fstype, "vfat") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
 
@@ -260,6 +262,9 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
 
     if (strcmp(fstype, "ext4") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for ext4 mount\n"); return -ENODEV; }
+        int opt_ret = ext4_validate_mount_options(data);
+        if (opt_ret < 0)
+            return opt_ret;
         if (uxfs_block_device_owned(bc->dev))
             return -EBUSY;
 
@@ -357,7 +362,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
 }
 
 int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
-    return vfs_mount_bc_flags(path, fstype, bc, 0);
+    return vfs_mount_bc_flags(path, fstype, bc, 0, NULL);
 }
 
 /* Release one namespace's hold on a mount entry. A copied entry carries an
