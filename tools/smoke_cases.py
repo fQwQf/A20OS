@@ -2429,6 +2429,62 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-futex-cow-window: PASS; log saved to $log',
     },
+    # Bounded progress for an ordinary task: while one child sits in a 256 MiB
+    # page-cache read (one long syscall, no internal reschedule point) and
+    # another runs a 10 kHz interval-timer interrupt storm, a normal-priority
+    # task must still wake within LATE_BOUND_NS of its deadline.  The probe
+    # prints every sample so the distribution, not just a pass/fail, is in the
+    # log.
+    'smoke-bounded-progress': {
+        'gate': {'mem': '3G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/bounded-progress.log',
+        'stdin': {'kind': 'pipe', 'delay': 8,
+                  'lines': ['bounded_progress 20 -1', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '3G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['BOUNDED_PROGRESS: start iterations=20 cpu=-1',
+                   'BOUNDED_PROGRESS: hog reads=[0-9]+ max_read_ms=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: storm expiries=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: probe samples_ms=',
+                   'BOUNDED_PROGRESS: probe max_late_ms=[0-9]+ mean_late_ms=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: PASS',
+                   'System is going down for power-off NOW'],
+        'forbid': ['PANIC|Kernel panic|LOCK-STALL|Kernel BUG', 'BOUNDED_PROGRESS: FAIL'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-bounded-progress: PASS; log saved to $log',
+    },
+    # Same workload on two CPUs with hog, storm and probe pinned to CPU0: an
+    # unpinned probe would run on the idle CPU and the number would say nothing
+    # about preemption.
+    'smoke-bounded-progress-smp2': {
+        'gate': {'mem': '3G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0',
+                           'NR_CPUS=2'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/bounded-progress-smp2.log',
+        'stdin': {'kind': 'pipe', 'delay': 8,
+                  'lines': ['bounded_progress 20 0', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '3G', '-nographic', '-smp', '2', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/kernel.elf'],
+        'expect': ['\\[SMP\\] 2/2 configured CPUs online',
+                   'BOUNDED_PROGRESS: start iterations=20 cpu=0',
+                   'BOUNDED_PROGRESS: hog reads=[0-9]+ max_read_ms=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: storm expiries=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: probe samples_ms=',
+                   'BOUNDED_PROGRESS: probe max_late_ms=[0-9]+ mean_late_ms=[0-9]+ PASS',
+                   'BOUNDED_PROGRESS: PASS',
+                   'System is going down for power-off NOW'],
+        'forbid': ['PANIC|Kernel panic|LOCK-STALL|Kernel BUG', 'BOUNDED_PROGRESS: FAIL'],
+        'require_exit_zero': True,
+        'timeout_msg': False,
+        'pass_msg': 'smoke-bounded-progress-smp2: PASS; log saved to $log',
+    },
     'smoke-scm-stress': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

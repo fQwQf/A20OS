@@ -132,6 +132,25 @@ CPU 的 tick 交错扫描，x86_64 实测 ≤1ms）；无抢占对照（CONFIG_K
 失败时先核对 `PREEMPT_LAT: rt ... policy=1`（FIFO 是否生效）与 `pin_rc`（SMP 钉扎
 是否生效），再查 `kernel/proc/sched.c` 的 `kernel_preempt_at_irq_return()` 条件链。
 
+### 普通任务的有界进展
+
+`make smoke-bounded-progress`（单核）与 `make smoke-bounded-progress-smp2`（双核，三个
+子进程钉在同一 CPU）断言的是抢占存在的理由：**普通优先级**任务在另一个任务处于长内核
+syscall、同时 CPU 在承受中断风暴时，仍然必须在有界时间内拿到 CPU。
+
+`user/cmds/core/bounded_progress.c` 同时制造三个条件：hog 子进程循环 `read()` 一个
+256MB 的 page-cache 热文件（单次 `read()` 在 TCG 下单核实测 4.3s、双核 0.6s，页间无
+重调度点）；storm 子进程用 100µs 间隔的 `ITIMER_REAL` 制造真实定时器中断风暴（实测
+8k–14k 次到期），并回报到期次数，否则"没起风暴"会和"通过"长得一样；probe 子进程以
+普通优先级睡 20ms 共 20 次，逐次报告迟到量。
+
+判读：`late_bound_ms=150`。实测单核最大迟到 1ms、双核 0ms。反控是把
+`CONFIG_KERNEL_PREEMPT=0` 编进去，同一负载下 probe 的最后两次样本迟到 1242ms 与
+1784ms，门禁直接失败——所以这个断言量的是抢占，不是调度器噪声。
+
+风暴是硬中断级的（定时器 IRQ 在中断上下文里直接处理）。这是对进展最不利的形态；
+把处理程序线程化只会让普通任务更容易拿到 CPU，不改变本条断言的结论。
+
 ### Task 引用与异步所有权
 
 主入口是 `make check-task-lifetime-boundary`，双架构累计运行使用 `make check-proc-step35-local`。

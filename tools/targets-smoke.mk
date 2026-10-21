@@ -757,6 +757,14 @@ smoke-vfs-concurrency-smp4:
 smoke-futex-cow-window:
 	$(PYTHON) tools/smoke.py smoke-futex-cow-window
 
+# Ordinary-task bounded progress: a 256 MiB page-cache read as the long kernel
+# path, a 10 kHz interval timer as the interrupt storm, and a normal-priority
+# task whose wakeup lateness is asserted and printed as a distribution.
+smoke-bounded-progress:
+	$(PYTHON) tools/smoke.py smoke-bounded-progress
+smoke-bounded-progress-smp2:
+	$(PYTHON) tools/smoke.py smoke-bounded-progress-smp2
+
 # Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
 # placement, migration and cross-CPU wakeups only run with more than one CPU;
 # the single-CPU target above keeps its own semantics.
