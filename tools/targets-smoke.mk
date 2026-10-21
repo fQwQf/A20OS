@@ -587,6 +587,9 @@ smoke-ext4-recovery:
 		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 
+# Lost-ACK drill for the UFSD close token: the service is built with the
+# test fault that drops the first accepted CLOSE and CONFIRM replies, so a
+# plain open/write/close exercises both retry paths end to end.
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
