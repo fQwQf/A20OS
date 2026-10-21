@@ -66,7 +66,7 @@
 - 关闭条件：guest 写盘后 `e2fsck -fn` 干净；损坏来源有明确解释。
 - 诊断：[notes/fs-ext4-bitmap.md](notes/fs-ext4-bitmap.md)。
 
-### FS-10 fs 的 32 位内核构建不通过
+### FS-11 fs 的 32 位内核构建不通过
 
 - 现状：`make -k check-riscv32-bringup` 在 `kernel/fs/uxfs/uxfs.c:1049`
   （`uxfs namespace mirror: sb view prefix layout` 静态断言）、
