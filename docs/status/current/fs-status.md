@@ -30,6 +30,10 @@
   最后一个引用消失时截断并释放 inode —— 缓存的 vnode 不再会让目录 inode 永远留在盘上；
 - `metadata_csum`（superblock/group descriptor/bitmap 的校验和）在写入路径同步，`e2fsck` 不报
   校验和错误。
+- xattr：`user.*` 与两个 POSIX ACL 属性名持久化在 inode 尾部（合计约 90 字节/inode，超出返回
+  `ENOSPC` 且不改动已有属性；没有外部 EA 块）。`trusted.*`/`security.*` 仍只在易失表里。ACL 只
+  存储与读回，不做权限判定。门禁 `smoke-ext4-xattr`：写入 → fsync → 关机 → 宿主 `debugfs ea_list`
+  看到属性且 `e2fsck -fn` 干净 → 重启后读回一致，并验证替换与 `ENOSPC` 路径。
 
 正常关机后宿主 `e2fsck -fn` 干净，并且这条性质有门禁：`smoke-vfs-stress` 在 guest 跑完
 （含 create/unlink/rmdir）之后会对同一张镜像跑一次 `e2fsck -fn`。
