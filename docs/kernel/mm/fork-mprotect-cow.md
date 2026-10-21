@@ -3,10 +3,13 @@
 共享文件映射还必须保留 dirty-state 跨权限变化和 shutdown 的语义：已写入的共享页在
 `mprotect(PROT_READ)`、unmap 或关闭映射时不能因 dirty bit 丢失而漏写。RV64 曾出现
 “共享写入 → 只读保护 → clean shutdown → coldboot 读回全零”的数据丢失；已修复路径通过
-字节精确冷启动读回与 `e2fsck` 验证。该记录是 RV64 特定场景证据，不代表所有架构都已
-运行验证。Linux RESTART 的 checked `vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新
-fault 的 guest 覆盖及 ARM32 `PTE_D=0` 编译仍是证据缺口。实现和验收边界见
-[`fs-consistency-model.md`](../../fs/fs-consistency-model.md)。
+字节精确冷启动读回与 `e2fsck` 验证。该结论现在是可复跑门禁而不是一次性记录：
+`make smoke-mm-shared-write-coldboot` 对同一张 ext4 镜像启动两次，第一次覆盖
+“写后 `mprotect(PROT_READ)`”“写后 `munmap`”“映射在关机时仍然活着”三种形态并 `poweroff`，
+宿主机对镜像跑 `e2fsck -fn`，第二次冷启动逐字节读回比对；写入路径不调用 `msync`，要证明的正是
+shutdown 路径自己保留了 dirty 状态。riscv64 与 aarch64 都通过。Linux RESTART 的 checked
+`vfs_sync` 不是完整 CLEAN shutdown；失败恢复后重新 fault 的 guest 覆盖仍是证据缺口。实现和验收
+边界见 [`fs-consistency-model.md`](../../fs/fs-consistency-model.md)。
 
 fork 复制私有映射时，父页表的叶节点锁保护源 PTE 快照、子映射所需的帧引用和父 PTE 的 COW 降权。子页表映射在释放父叶节点锁后完成，避免在节点锁内分配页表；若子映射失败，父映射保留 COW 仍可安全写入。
 
@@ -47,6 +50,13 @@ python3 tools/tests/test_tlb_transaction_races.py
 
 本机原始日志保存在 `build/browser-followup/cow-race-negative-guest.log` 与
 `cow2-full-guest.log`，不纳入源码提交。
+
+活 PTE 的拆除在 guest 侧由 `make smoke-mm-tlb-teardown` 把守：8 核 guest 上 3 个读者线程反复读
+主线程正在 `munmap` 的同一批页，读者只在“已填充”窗口内被放行；`munmap` 之后主线程立刻把刚释放
+的帧回收进另一个保留区间并写满毒值，因此“帧在 shootdown 完成前被释放并复用”会让还在使用旧 TLB
+项的读者读到毒值而不是该页的填充值。该门禁还要求读者确实发生过缺页竞争、`MAP_FIXED_NOREPLACE`
+探针证明释放后不再映射、RSS 不增长，所以绿灯不可能来自线程从未相撞。负控已实测：去掉
+`mm_tlb_invalidate_finish()` 的远端 shootdown 后，读者观测到 573 次毒值，门禁转红。
 
 ## Reclaim hints retain live contents
 

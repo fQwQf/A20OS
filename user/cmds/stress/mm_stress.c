@@ -3,6 +3,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2085,6 +2087,565 @@ static int private_anon_mremap_dontunmap_rollback(void)
            rss_before);
     return 0;
 }
+/* Shared-file `MREMAP_DONTUNMAP` with an injected mid-move failure.
+ *
+ * The shared-file path takes a page-cache reference per leaf and harvests the
+ * dirty bit at commit, so a failure after the destination is partly populated
+ * has to give those references back as well as clear the destination.  The
+ * workload is built for CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT, so its
+ * first DONTUNMAP call fails right after the first destination leaf. */
+static int shared_file_mremap_dontunmap_rollback(void)
+{
+    const char *path = "/tmp/mm_stress_shared_rollback";
+    const size_t len = 2 * 4096;
+    unsigned long base_pins = read_page_cache_pinned();
+    if ((long)base_pins < 0)
+        return fail("dontunmap-shared-rollback-pins-before");
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0)
+        return fail("dontunmap-shared-rollback-open");
+
+    char buf[8192];
+    for (size_t i = 0; i < sizeof(buf); i++)
+        buf[i] = (char)('a' + (i % 26));
+    if (write(fd, buf, sizeof(buf)) != (ssize_t)sizeof(buf)) {
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-write");
+    }
+
+    char *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mem == MAP_FAILED) {
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-mmap");
+    }
+    /* Fault both pages in: the move walks present leaves, which is where the
+     * injection hook counts, and the dirty harvest needs a live PTE. */
+    for (size_t i = 0; i < len; i++)
+        mem[i] = (char)('0' + (i % 10));
+
+    void *target = mmap(NULL, len, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-target");
+    }
+    if (munmap(target, len) < 0) {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-target-release");
+    }
+
+    errno = 0;
+    void *result = mremap(mem, len, len,
+                          MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+                          target);
+    if (result != MAP_FAILED || errno != ENOMEM) {
+        if (result != MAP_FAILED)
+            munmap(result, len);
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-injected-error");
+    }
+
+    if (memcmp(mem, "0123456789", 10) != 0 ||
+        memcmp(mem + 4096, "6789012345", 10) != 0) {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-source-preserved");
+    }
+    mem[0] = 'Z'; /* the source must keep its writable shared permission */
+
+    void *probe = mmap(target, len, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+    if (probe != target) {
+        if (probe != MAP_FAILED)
+            munmap(probe, len);
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-destination-cleared");
+    }
+    munmap(probe, len);
+
+    if (msync(mem, len, MS_SYNC) < 0) {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-msync");
+    }
+    if (pread(fd, buf, 1, 0) != 1 || buf[0] != 'Z') {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-file-coherence");
+    }
+
+    /* Retry: the same process must complete the move, and the destination has
+     * to carry the dirty byte that the source wrote before the retry. */
+    char *moved = mremap(mem, len, len,
+                         MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+                         target);
+    if (moved != target) {
+        munmap(mem, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-retry");
+    }
+    if (moved[0] != 'Z' || memcmp(moved + 4096, "6789012345", 10) != 0) {
+        munmap(mem, len);
+        munmap(moved, len);
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-retry-data");
+    }
+    if (munmap(mem, len) < 0 || munmap(moved, len) < 0) {
+        close(fd);
+        unlink(path);
+        return fail("dontunmap-shared-rollback-unmap");
+    }
+    close(fd);
+    unlink(path);
+    if (read_page_cache_pinned() != base_pins)
+        return fail("dontunmap-shared-rollback-pinned-leak");
+    printf("MM_DONTUNMAP_SHARED_ROLLBACK: PASS source_preserved=1 "
+           "destination_cleared=1 retry=1 pins=%lu\n", base_pins);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------
+ * MM-02: TLB teardown of live PTEs under concurrent access.
+ *
+ * The readers hammer the very pages the main thread is unmapping, so the
+ * teardown has to finish before those frames can be handed out again.  A
+ * reader either wins the race -- and must then see the byte this range was
+ * filled with -- or loses it and takes a fault on the hole.  A frame released
+ * before the shootdown would instead be recycled into the poison range the
+ * main thread maps right after each unmap, and the reader would see the poison
+ * byte at an address that must no longer be mapped at all.  Every round also
+ * probes the range to prove "released" really means "not mapped".
+ */
+#define TLB_TD_PAGES   8
+#define TLB_TD_READERS 3
+#define TLB_TD_ROUNDS  256
+#define TLB_TD_POISON  0xEE
+
+static volatile int tlb_td_ready;
+static volatile int tlb_td_start;
+static volatile int tlb_td_stop;
+static volatile int tlb_td_armed;
+static volatile unsigned long tlb_td_reads;
+static volatile unsigned long tlb_td_bad;
+static volatile unsigned long tlb_td_faults;
+static volatile unsigned tlb_td_bad_byte;
+static unsigned char *tlb_td_region;
+static unsigned char *tlb_td_poison;
+static __thread int tlb_td_id;
+static sigjmp_buf tlb_td_jmp[TLB_TD_READERS];
+
+static void tlb_td_segv(int sig, siginfo_t *info, void *uc)
+{
+    (void)sig;
+    (void)info;
+    (void)uc;
+    /* The unmapper won the race for this page.  That is the contract working,
+     * not an error: resume at the top of the loop. */
+    __atomic_add_fetch(&tlb_td_faults, 1, __ATOMIC_RELAXED);
+    siglongjmp(tlb_td_jmp[tlb_td_id], 1);
+}
+
+static void *tlb_td_reader(void *arg)
+{
+    tlb_td_id = (int)(intptr_t)arg;
+    __atomic_add_fetch(&tlb_td_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&tlb_td_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    while (!__atomic_load_n(&tlb_td_stop, __ATOMIC_ACQUIRE)) {
+        /* Only read while the round is armed.  The main thread arms AFTER the
+         * fill and disarms BEFORE the unmap, so a reader that sees the flag
+         * has already observed the filled bytes; without this the reader would
+         * regularly read a freshly mapped, not-yet-filled page and report the
+         * zero page as corruption. */
+        if (!__atomic_load_n(&tlb_td_armed, __ATOMIC_ACQUIRE)) {
+            sched_yield();
+            continue;
+        }
+        if (sigsetjmp(tlb_td_jmp[tlb_td_id], 1) != 0)
+            continue;
+        for (int i = 0; i < TLB_TD_PAGES; i++) {
+            unsigned char got = tlb_td_region[(size_t)i * 4096];
+            if (got != (unsigned char)(0x40 + i)) {
+                __atomic_store_n(&tlb_td_bad_byte, (unsigned)(unsigned char)got,
+                                 __ATOMIC_RELAXED);
+                __atomic_add_fetch(&tlb_td_bad, 1, __ATOMIC_RELAXED);
+                break;
+            }
+        }
+        __atomic_add_fetch(&tlb_td_reads, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static int concurrent_tlb_teardown(void)
+{
+    const size_t len = (size_t)TLB_TD_PAGES * 4096;
+    struct sigaction sa, old_sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = tlb_td_segv;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &old_sa) != 0)
+        return fail("tlb-teardown-sigaction");
+
+    /* Two distinct reserved ranges: the range under test, and a second one the
+     * poison pass is forced onto.  Without a reserved address the allocator
+     * could hand the poison map back at the very address the readers are
+     * probing, which would look exactly like the corruption under test. */
+    tlb_td_region = mmap(NULL, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+    if (tlb_td_region == MAP_FAILED) {
+        sigaction(SIGSEGV, &old_sa, NULL);
+        return fail("tlb-teardown-region-reserve");
+    }
+    tlb_td_poison = mmap(NULL, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+    if (tlb_td_poison == MAP_FAILED) {
+        munmap(tlb_td_region, len);
+        sigaction(SIGSEGV, &old_sa, NULL);
+        return fail("tlb-teardown-poison-reserve");
+    }
+    munmap(tlb_td_region, len);
+    munmap(tlb_td_poison, len);
+
+    tlb_td_ready = 0;
+    tlb_td_start = 0;
+    tlb_td_stop = 0;
+    tlb_td_armed = 0;
+    tlb_td_reads = 0;
+    tlb_td_bad = 0;
+    tlb_td_faults = 0;
+    tlb_td_bad_byte = 0;
+
+    pthread_t workers[TLB_TD_READERS];
+    int created = 0;
+    int rc = 0;
+    for (; created < TLB_TD_READERS; created++) {
+        if (pthread_create(&workers[created], NULL, tlb_td_reader,
+                           (void *)(intptr_t)created) != 0) {
+            rc = fail("tlb-teardown-pthread-create");
+            break;
+        }
+    }
+    if (rc == 0) {
+        while (__atomic_load_n(&tlb_td_ready, __ATOMIC_ACQUIRE) !=
+               TLB_TD_READERS)
+            sched_yield();
+        __atomic_store_n(&tlb_td_start, 1, __ATOMIC_RELEASE);
+    }
+
+    /* Warm the readers' stacks and the map/unmap paths, then take the RSS
+     * baseline the teardown has to come back to. */
+    int rounds_done = 0;
+    long rss_before = -1;
+    for (int round = 0; rc == 0 && round < TLB_TD_ROUNDS; round++) {
+        unsigned char *live = mmap(tlb_td_region, len, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                                   -1, 0);
+        if (live != tlb_td_region) {
+            rc = fail("tlb-teardown-map");
+            break;
+        }
+        for (int i = 0; i < TLB_TD_PAGES; i++)
+            memset(live + (size_t)i * 4096, 0x40 + i, 4096);
+        __atomic_store_n(&tlb_td_armed, 1, __ATOMIC_RELEASE);
+
+        /* Let the readers get onto these PTEs before they are torn down. */
+        for (volatile int spin = 0; spin < 4000; spin++)
+            ;
+
+        __atomic_store_n(&tlb_td_armed, 0, __ATOMIC_RELEASE);
+        if (munmap(live, len) < 0) {
+            rc = fail("tlb-teardown-unmap");
+            break;
+        }
+
+        unsigned char *poison = mmap(tlb_td_poison, len, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                                     -1, 0);
+        if (poison != tlb_td_poison) {
+            rc = fail("tlb-teardown-poison-map");
+            break;
+        }
+        memset(poison, TLB_TD_POISON, len);
+        if (munmap(poison, len) < 0) {
+            rc = fail("tlb-teardown-poison-unmap");
+            break;
+        }
+
+        void *probe = mmap(tlb_td_region, len, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                           -1, 0);
+        if (probe != tlb_td_region) {
+            if (probe != MAP_FAILED)
+                munmap(probe, len);
+            rc = fail("tlb-teardown-range-not-free");
+            break;
+        }
+        munmap(probe, len);
+
+        rounds_done++;
+        if (round == 8)
+            rss_before = self_rss_pages();
+    }
+
+    __atomic_store_n(&tlb_td_stop, 1, __ATOMIC_RELEASE);
+    for (int i = 0; i < created; i++)
+        pthread_join(workers[i], NULL);
+    sigaction(SIGSEGV, &old_sa, NULL);
+
+    unsigned long reads = __atomic_load_n(&tlb_td_reads, __ATOMIC_RELAXED);
+    unsigned long faults = __atomic_load_n(&tlb_td_faults, __ATOMIC_RELAXED);
+    if (rc == 0 && __atomic_load_n(&tlb_td_bad, __ATOMIC_RELAXED) != 0) {
+        printf("MM_TLB_TEARDOWN: bad=%lu first_byte=0x%02x\n",
+               __atomic_load_n(&tlb_td_bad, __ATOMIC_RELAXED),
+               __atomic_load_n(&tlb_td_bad_byte, __ATOMIC_RELAXED));
+        rc = fail("tlb-teardown-stale-frame-visible");
+    }
+    /* Non-vacuity: a run where no reader ever landed in a hole proves the
+     * readers never actually raced the teardown, and a run where no reader
+     * ever completed a pass proves the same from the other side. */
+    if (rc == 0 && faults == 0)
+        rc = fail("tlb-teardown-no-reader-raced");
+    if (rc == 0 && reads == 0)
+        rc = fail("tlb-teardown-no-reader-succeeded");
+    if (rc == 0 && rss_before > 0) {
+        long rss_after = self_rss_pages();
+        /* Growth is the leak signal; a smaller RSS is not a failure. */
+        if (rss_after < 0 || rss_after > rss_before) {
+            printf("MM_TLB_TEARDOWN: rss_before=%ld rss_after=%ld\n",
+                   rss_before, rss_after);
+            rc = fail("tlb-teardown-rss-growth");
+        }
+    }
+    if (rc == 0)
+        printf("MM_TLB_TEARDOWN: PASS rounds=%d reads=%lu faults=%lu\n",
+               rounds_done, reads, faults);
+    return rc;
+}
+
+/* ------------------------------------------------------------------------
+ * MM-01 concurrent-change case: DONTUNMAP with live readers.
+ *
+ * The readers hammer the range that is currently mapped while the main thread
+ * ping-pongs it between two reserved addresses with MREMAP_DONTUNMAP.  A
+ * reader is only ever armed while the range is fully populated, so every byte
+ * it observes must be the one the fill wrote; when the next move runs there
+ * are live translations for the pages it is about to carry away, which is the
+ * change the destination must not lose.  The main thread additionally checks
+ * that the moved bytes arrive intact and that the emptied source refaults as
+ * zero rather than resurrecting them.
+ */
+#define DM_RACE_PAGES   8
+#define DM_RACE_READERS 3
+#define DM_RACE_ROUNDS  128
+
+static volatile int dm_race_armed;
+static volatile int dm_race_ready;
+static volatile int dm_race_start;
+static volatile int dm_race_stop;
+static volatile unsigned long dm_race_reads;
+static volatile unsigned long dm_race_bad;
+static unsigned char *dm_race_cur;
+static unsigned char *dm_race_a;
+static unsigned char *dm_race_b;
+static __thread int dm_race_id;
+static sigjmp_buf dm_race_jmp[DM_RACE_READERS];
+
+static void dm_race_segv(int sig, siginfo_t *info, void *uc)
+{
+    (void)sig;
+    (void)info;
+    (void)uc;
+    siglongjmp(dm_race_jmp[dm_race_id], 1);
+}
+
+static void *dm_race_reader(void *arg)
+{
+    dm_race_id = (int)(intptr_t)arg;
+    __atomic_add_fetch(&dm_race_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&dm_race_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    while (!__atomic_load_n(&dm_race_stop, __ATOMIC_ACQUIRE)) {
+        /* The main thread fills the replacement range, publishes it, and only
+         * then arms; it disarms before the next move.  A read that starts and
+         * ends inside one armed window therefore saw a range that was fully
+         * populated and not being moved -- anything else is discarded as
+         * straddling a round boundary rather than reported as corruption. */
+        if (!__atomic_load_n(&dm_race_armed, __ATOMIC_ACQUIRE)) {
+            sched_yield();
+            continue;
+        }
+        unsigned char *base = dm_race_cur;
+        int mismatch = 0;
+        if (sigsetjmp(dm_race_jmp[dm_race_id], 1) == 0) {
+            for (int i = 0; i < DM_RACE_PAGES; i++) {
+                if (base[(size_t)i * 4096] != (unsigned char)(0x50 + i)) {
+                    mismatch = 1;
+                    break;
+                }
+            }
+        }
+        if (!__atomic_load_n(&dm_race_armed, __ATOMIC_ACQUIRE) ||
+            dm_race_cur != base)
+            continue;
+        if (mismatch)
+            __atomic_add_fetch(&dm_race_bad, 1, __ATOMIC_RELAXED);
+        else
+            __atomic_add_fetch(&dm_race_reads, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+static int concurrent_dontunmap_live(void)
+{
+    const size_t len = (size_t)DM_RACE_PAGES * 4096;
+    struct sigaction sa, old_sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = dm_race_segv;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &old_sa) != 0)
+        return fail("dontunmap-race-sigaction");
+
+    dm_race_a = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (dm_race_a == MAP_FAILED) {
+        sigaction(SIGSEGV, &old_sa, NULL);
+        return fail("dontunmap-race-source-mmap");
+    }
+    dm_race_b = mmap(NULL, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (dm_race_b == MAP_FAILED) {
+        munmap(dm_race_a, len);
+        sigaction(SIGSEGV, &old_sa, NULL);
+        return fail("dontunmap-race-target-reserve");
+    }
+    if (munmap(dm_race_b, len) < 0) {
+        munmap(dm_race_a, len);
+        sigaction(SIGSEGV, &old_sa, NULL);
+        return fail("dontunmap-race-target-release");
+    }
+    for (int i = 0; i < DM_RACE_PAGES; i++)
+        memset(dm_race_a + (size_t)i * 4096, 0x50 + i, 4096);
+
+    dm_race_ready = 0;
+    dm_race_start = 0;
+    dm_race_stop = 0;
+    /* The first range is already populated, so the readers may observe it
+     * before the first move as well. */
+    dm_race_armed = 1;
+    dm_race_reads = 0;
+    dm_race_bad = 0;
+    dm_race_cur = dm_race_a;
+    pthread_t workers[DM_RACE_READERS];
+    int created = 0;
+    int rc = 0;
+    for (; created < DM_RACE_READERS; created++) {
+        if (pthread_create(&workers[created], NULL, dm_race_reader,
+                           (void *)(intptr_t)created) != 0) {
+            rc = fail("dontunmap-race-pthread-create");
+            break;
+        }
+    }
+    if (rc == 0) {
+        while (__atomic_load_n(&dm_race_ready, __ATOMIC_ACQUIRE) !=
+               DM_RACE_READERS)
+            sched_yield();
+        __atomic_store_n(&dm_race_start, 1, __ATOMIC_RELEASE);
+    }
+
+    int rounds_done = 0;
+    long rss_before = -1;
+    for (int round = 0; rc == 0 && round < DM_RACE_ROUNDS; round++) {
+        unsigned char *src = dm_race_cur;
+        unsigned char *dst = (src == dm_race_a) ? dm_race_b : dm_race_a;
+
+        __atomic_store_n(&dm_race_armed, 0, __ATOMIC_RELEASE);
+
+        unsigned char *moved = mremap(src, len, len,
+                                      MREMAP_MAYMOVE | MREMAP_FIXED |
+                                          MREMAP_DONTUNMAP,
+                                      dst);
+        if (moved != dst) {
+            rc = fail("dontunmap-race-move");
+            break;
+        }
+        for (int i = 0; i < DM_RACE_PAGES; i++) {
+            if (moved[(size_t)i * 4096] != (unsigned char)(0x50 + i)) {
+                rc = fail("dontunmap-race-destination-lost-bytes");
+                break;
+            }
+        }
+        if (rc != 0)
+            break;
+        /* The source keeps its VMA but not its pages: refaulting it must give
+         * a fresh zero page, never the bytes the move carried away. */
+        for (int i = 0; i < DM_RACE_PAGES; i++) {
+            if (src[(size_t)i * 4096] != 0) {
+                rc = fail("dontunmap-race-source-resurrected");
+                break;
+            }
+        }
+        if (rc != 0)
+            break;
+
+        for (int i = 0; i < DM_RACE_PAGES; i++)
+            memset(dst + (size_t)i * 4096, 0x50 + i, 4096);
+        dm_race_cur = dst;
+        __atomic_store_n(&dm_race_armed, 1, __ATOMIC_RELEASE);
+        for (volatile int spin = 0; spin < 2000; spin++)
+            ;
+        rounds_done++;
+        if (round == 8)
+            rss_before = self_rss_pages();
+    }
+
+    __atomic_store_n(&dm_race_stop, 1, __ATOMIC_RELEASE);
+    for (int i = 0; i < created; i++)
+        pthread_join(workers[i], NULL);
+    sigaction(SIGSEGV, &old_sa, NULL);
+
+    if (rc == 0 && __atomic_load_n(&dm_race_bad, __ATOMIC_RELAXED) != 0)
+        rc = fail("dontunmap-race-reader-saw-wrong-byte");
+    /* Non-vacuity: the readers must have completed passes while the range was
+     * hot, or the move was never racing anything. */
+    if (rc == 0 && __atomic_load_n(&dm_race_reads, __ATOMIC_RELAXED) == 0)
+        rc = fail("dontunmap-race-no-reader-pass");
+    if (rc == 0 && rss_before > 0) {
+        long rss_after = self_rss_pages();
+        if (rss_after < 0 || rss_after > rss_before) {
+            printf("MM_DONTUNMAP_RACE: rss_before=%ld rss_after=%ld\n",
+                   rss_before, rss_after);
+            rc = fail("dontunmap-race-rss-growth");
+        }
+    }
+    if (rc == 0)
+        printf("MM_DONTUNMAP_RACE: PASS rounds=%d reads=%lu\n", rounds_done,
+               __atomic_load_n(&dm_race_reads, __ATOMIC_RELAXED));
+    return rc;
+}
+
 static int shared_file_mremap_merge_guard(void)
 {
     /* Regression: mm_mmap(MAP_ANONYMOUS) may merge the mremap destination with
@@ -2985,6 +3546,12 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "--dontunmap-rollback-only") == 0)
         return private_anon_mremap_dontunmap_rollback() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--dontunmap-shared-rollback-only") == 0)
+        return shared_file_mremap_dontunmap_rollback() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--tlb-teardown-only") == 0)
+        return concurrent_tlb_teardown() == 0 ? 0 : 1;
+    if (argc == 2 && strcmp(argv[1], "--dontunmap-race-only") == 0)
+        return concurrent_dontunmap_live() == 0 ? 0 : 1;
     if (argc == 2 && strcmp(argv[1], "--usercopy-contract") == 0)
         return usercopy_partial_contract() == 0 && process_vm_contract() == 0 ? 0 : 1;
     if (argc == 3 && strcmp(argv[1], "--dontunmap-split-failure") == 0) {

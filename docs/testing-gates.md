@@ -1101,6 +1101,34 @@ CMOS 不可信就把机器卡在 probe 里。
 
 失败时查看 `.kernel-build/smoke/coredump-riscv64.log` 中首个 `COREDUMP_TEST: FAIL`；宿主侧可用 `readelf -a` 检查 `.kernel-build` 之外的 core 产物。已知边界：仅 64 位、不发 NT_FILE、非驻留页写零、VMA 快照上限 1024、`|pipe` 不支持。
 
+### MM 事务、TLB 拆除与分配失败回滚
+
+`make smoke-mm-tlb-teardown`（8 核）：3 个读者线程反复读主线程正在 `munmap` 的同一批页，
+读者只在“已填充”窗口内被放行；`munmap` 之后主线程立刻把刚释放的帧回收进另一个保留区间并
+写满毒值 `0xEE`。读者赢了竞争就必须读到填充字节，输了就落在空洞上缺页（计数），而“帧在
+shootdown 完成前被释放并复用”会让仍在使用旧 TLB 项的读者读到毒值。每轮还用
+`MAP_FIXED_NOREPLACE` 证明“已释放即不再映射”，并要求读者确实发生过缺页竞争、RSS 不增长。
+负控实测：去掉 `mm_tlb_invalidate_finish()` 的远端 shootdown 后读者读到 573 次毒值、门禁转红。
+
+`make smoke-mm-dontunmap-race`（8 核）：3 个读者线程读主线程正用 `MREMAP_DONTUNMAP` 在两个
+保留地址之间搬运的区间。读者的一次观测只有在“已填充”窗口开始与结束都成立、且区间指针未变时
+才计入。断言搬移字节完整、被清空的源按零页 refault、读者观测到的每个字节都来自填充、读者
+通过次数非零、RSS 不增长。
+
+`make smoke-mm-dontunmap-shared-rollback`：同一套注入
+（`CONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT=1`）跑在 `MAP_SHARED` 文件映射上，断言源字节
+与写权限保留、宿主机侧文件内容一致、目标被清除、同进程重试成功、页缓存 pin 回到基线。
+
+`make smoke-mm-alloc-fail`：`CONFIG_MM_FAIL_STAGE=<n>` 每个镜像只让一个分配阶段失败一次
+（页表中间节点 / 大页 demote 逐页帧 / swap 槽），注入返回该分配器本来会返回的失败值。每个
+阶段断言操作以预期 errno 失败、free 回到基线（允许 order-0 每 CPU 批量的 1 页偏差）、RSS
+精确回到基线、关机 `[MM-ASM]` 审计全零。三个阶段的注入点与断言不同，因此是三次独立构建 + 启动。
+
+`make smoke-mm-shared-write-coldboot`：对同一张 ext4 镜像启动两次，第一次覆盖
+“写后 `mprotect(PROT_READ)`”“写后 `munmap`”“映射在关机时仍然活着”三种形态后 `poweroff`，
+宿主机跑 `e2fsck -fn`，第二次冷启动逐字节读回。写入路径不调用 `msync`——要证明的是 shutdown
+路径自己保留了 dirty 状态。riscv64 与 aarch64 都通过。
+
 ### swap
 
 `make smoke-swap` 让 `swap_test.c` 在 ramfs 上造 backing 文件，经 loop-control `LOOP_CTL_GET_FREE` + `LOOP_SET_FD` 绑定，再 `mkswap` → `swapon` → 断言 `sysinfo` totalswap>0 与 `/proc/swaps` 条目；重复 swapon 返回 EBUSY；触访匿名内存；`swapoff` 后 totalswap 归零。
@@ -1109,9 +1137,14 @@ CMOS 不可信就把机器卡在 probe 里。
 四页已非驻留；fork 子进程读回并修改私有数据，父进程仍持原槽；固定 remap 移动
 已换出的四页并扩展，校验旧数据与新尾部零填充，最后槽用量回到基线。忙设备
 swapoff、活动设备 mkswap 均返回 EBUSY，非管理员管理调用返回 EPERM。
-必须出现 `SWAP_TEST: pageout-fork-remap PASS`、`SWAP_TEST: admin-permissions PASS`
+必须出现 `SWAP_TEST: pageout-fork-remap PASS`、`SWAP_TEST: dontunmap-over-swapped-source PASS`、`SWAP_TEST: admin-permissions PASS`
 和总 PASS。双架构单核/四核入口为 `smoke-swap`、`smoke-swap-smp4`、
 `smoke-swap-aarch64`、`smoke-swap-aarch64-smp4`。
+
+`dontunmap-over-swapped-source` 把 `MREMAP_DONTUNMAP` 放在**已换出的源**上：换出后
+in-use 恰好增加 4 页，搬移后 in-use 不变（目标保留一份引用、源释放一份），读源得到零页
+且 in-use 不变，读目标逐字节一致且 in-use 回到换出前，unmap 后仍等于基线。它断言的是
+槽的归属与引用计数，不是概率性压力。
 
 失败时查看 `.kernel-build/smoke/swap-<arch>[-smp4].log` 中首个 `SWAP_TEST: FAIL`，
 对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c`、`kernel/mm/oom.c` 与缺页路径。

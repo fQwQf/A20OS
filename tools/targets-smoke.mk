@@ -389,6 +389,21 @@ smoke-mm-dontunmap-rollback-leaf1:
 smoke-mm-dontunmap-rollback-leaf2:
 	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf2
 
+# Same injected failure over a MAP_SHARED file mapping, where rollback also
+# has to return the destination's page-cache references.
+smoke-mm-dontunmap-shared-rollback:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-shared-rollback
+
+# MM-02: concurrent readers racing munmap of the very pages they touch, on an
+# 8-CPU guest, so the TLB teardown and the frame release are actually contended.
+smoke-mm-tlb-teardown:
+	$(PYTHON) tools/smoke.py smoke-mm-tlb-teardown
+
+# MM-01: the DONTUNMAP transaction racing readers that hold live translations
+# on the range it is moving.
+smoke-mm-dontunmap-race:
+	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-race
+
 # Rust ownership/drop path after a destination leaf has been copied.
 smoke-mm-dontunmap-rollback-leaf1-rust:
 	$(PYTHON) tools/smoke.py smoke-mm-dontunmap-rollback-leaf1-rust
@@ -1181,6 +1196,21 @@ smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 smoke-mm-shared-write-coldboot: dev-build $(EXT4_IMG)
 	$(PYTHON) tools/mm-shared-write-gate.py --arch "$(ARCH)" \
 		--build-dir "$(BUILD_DIR)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
+# ================================================================
+# Allocation-failure rollback matrix (MM-04)
+# ================================================================
+# Builds one image per allocation stage with CONFIG_MM_FAIL_STAGE=<n> armed,
+# boots it, and runs mm_alloc_fail_test <n>, which drives the operation that
+# reaches that stage and asserts the operation reports the failure and gives
+# every frame, page-table page and swap slot back.  The gate owns the build
+# (the stage is a compile-time macro, so each stage is its own image) and the
+# boot; it lives in tools/mm-alloc-fail-gate.py.  The build directory is
+# discovered from the Makefile because EXTRA_CFLAGS is not part of BUILD_DIR.
+smoke-mm-alloc-fail:
+	$(PYTHON) tools/mm-alloc-fail-gate.py --arch "$(ARCH)" \
 		--log-dir "$(SMOKE_LOG_DIR)" \
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 # Network-lane observability smoke (stage A)

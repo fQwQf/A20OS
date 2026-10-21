@@ -855,6 +855,91 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-dontunmap-rollback-leaf1: PASS (failure after first destination leaf); log saved to $log',
     },
+    # The shared-file half of the DONTUNMAP rollback contract: the same
+    # injected mid-move failure, but over a MAP_SHARED file mapping, where the
+    # destination also holds page-cache references that the rollback must give
+    # back.  The pinned-page assertion is the point of the case.
+    'smoke-mm-dontunmap-shared-rollback': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=2',
+                           'BUILD_DIR=.kernel-build/mm-dontunmap-shared-rollback-candidate-01',
+                           'EXTRA_CFLAGS=-DCONFIG_MM_DONTUNMAP_TEST_FAIL_AFTER_MAP_COUNT=1'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/evidence/mm-dontunmap/shared-rollback-candidate-01/guest.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --dontunmap-shared-rollback-only', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '2', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': [
+            'MM_DONTUNMAP_TEST: injected-failure leaves=1',
+            'MM_DONTUNMAP_SHARED_ROLLBACK: PASS source_preserved=1 destination_cleared=1',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_DONTUNMAP_SHARED_ROLLBACK: FAIL', 'MM_DONTUNMAP_TEST: injected-failure leaves=2', 'PANIC|Kernel panic|LOCK-STALL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-dontunmap-shared-rollback: PASS (shared-file failure after first destination leaf); log saved to $log',
+    },
+    # MM-02: TLB teardown of live PTEs.  Three reader threads hammer the exact
+    # pages the main thread unmaps, so the shootdown has to complete before
+    # those frames can be recycled; right after each unmap a second range is
+    # filled with a poison byte, so a frame released early shows up as a wrong
+    # byte at an address that must no longer be mapped at all.  The workload
+    # also asserts the readers really did race into the hole and that RSS did
+    # not grow, so a green line cannot mean "the threads never collided".
+    'smoke-mm-tlb-teardown': {
+        'gate': {'mem': '1G', 'cpus': '8'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=8'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-tlb-teardown-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --tlb-teardown-only', 'poweroff']},
+        'timeout': '240s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '8', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf'],
+        'expect': [
+            'MM_TLB_TEARDOWN: PASS',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_STRESS: FAIL', 'MM_TLB_TEARDOWN: FAIL',
+                   'PANIC|Kernel panic|LOCK-STALL', 'MCS DEADLOCK',
+                   'already_holding'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-tlb-teardown: PASS (SMP8 concurrent access racing unmap of live PTEs); log saved to $log',
+    },
+    # MM-01 concurrent-change case: the DONTUNMAP transaction itself runs while
+    # readers hold live translations on the range it is moving, on an 8-CPU
+    # guest.  The main thread asserts the moved bytes arrive and the emptied
+    # source refaults as zero; the readers assert no byte they saw came from
+    # anywhere but the fill, and their pass count is asserted non-zero so a
+    # green line cannot mean "the threads never overlapped the move".
+    'smoke-mm-dontunmap-race': {
+        'gate': {'mem': '1G', 'cpus': '8'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=8',
+                           'BUILD_DIR=.kernel-build/mm-dontunmap-race-candidate-01'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/evidence/mm-dontunmap/race-candidate-01/guest.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --dontunmap-race-only', 'poweroff']},
+        'timeout': '180s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '8', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=@BUILD_DIR@/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '@BUILD_DIR@/kernel.elf'],
+        'expect': [
+            'MM_DONTUNMAP_RACE: PASS',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': ['MM_DONTUNMAP_RACE: FAIL', 'MM_STRESS: FAIL',
+                   'PANIC|Kernel panic|LOCK-STALL', 'MCS DEADLOCK',
+                   'already_holding'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-dontunmap-race: PASS (SMP8 DONTUNMAP racing live readers); log saved to $log',
+    },
     'smoke-hyp-selftest': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -3329,6 +3414,9 @@ CASES: dict[str, dict] = {
 CASES["smoke-native-mm"]["expect"].append("NATIVE_MM: remap-owner-rollback PASS")
 CASES["smoke-swap"]["expect"].extend([
     "SWAP_TEST: pageout-fork-remap PASS",
+    # Non-vacuity for the DONTUNMAP-over-swapped-source case: the final PASS
+    # would still print if that phase were skipped or reordered.
+    "SWAP_TEST: dontunmap-over-swapped-source PASS",
     "SWAP_TEST: admin-permissions PASS",
 ])
 CASES["smoke-swap-aarch64"] = case_for_arch("smoke-swap", CASES["smoke-swap"], "aarch64")

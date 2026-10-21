@@ -179,6 +179,77 @@ static int real_pageout_fork_remap(const char *path)
     return 0;
 }
 
+/* `MREMAP_DONTUNMAP` over a source whose PTEs are already swap entries.
+ *
+ * The move has to duplicate the slot into the destination and release the
+ * source's reference exactly once, and the source must refault as a fresh
+ * zero page instead of resurrecting the swapped bytes.  Every step is checked
+ * against /proc/swaps, so a leaked or double-freed slot shows up as an
+ * accounting mismatch rather than as silent corruption. */
+static int dontunmap_over_swapped_source(const char *path)
+{
+    enum { PAGE = 4096, PAGES = 4 };
+    size_t len = PAGE * PAGES;
+    unsigned char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return fail("dontunmap-swap-map");
+    for (size_t i = 0; i < len; i++) p[i] = (unsigned char)(i * 7 + 1);
+
+    long before = used_swap_kb(path);
+    if (before < 0) return fail("dontunmap-swap-used-before");
+    if (madvise(p, len, MADV_PAGEOUT) < 0)
+        return fail("dontunmap-swap-pageout");
+    unsigned char resident[PAGES];
+    if (mincore(p, len, resident) < 0) return fail("dontunmap-swap-mincore");
+    for (int i = 0; i < PAGES; i++)
+        if (resident[i] & 1) return fail("dontunmap-swap-still-resident");
+    if (used_swap_kb(path) != before + PAGES * (PAGE / 1024))
+        return fail("dontunmap-swap-slots-after-pageout");
+
+    void *target = mmap(NULL, len, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (target == MAP_FAILED) return fail("dontunmap-swap-target");
+    if (munmap(target, len) < 0)
+        return fail("dontunmap-swap-target-release");
+
+    unsigned char *moved = mremap(p, len, len,
+                                  MREMAP_MAYMOVE | MREMAP_FIXED |
+                                      MREMAP_DONTUNMAP,
+                                  target);
+    if (moved != target) return fail("dontunmap-swap-move");
+
+    /* The destination holds the only slot reference now: the duplicate the
+     * move took and the reference the source released cancel out, so the
+     * in-use count is unchanged and the source owns nothing. */
+    if (used_swap_kb(path) != before + PAGES * (PAGE / 1024))
+        return fail("dontunmap-swap-slot-accounting");
+    if (mincore(moved, len, resident) < 0)
+        return fail("dontunmap-swap-dst-mincore");
+    for (int i = 0; i < PAGES; i++)
+        if (resident[i] & 1)
+            return fail("dontunmap-swap-dst-swapped-in-early");
+
+    /* Source refault: zero pages, and no slot comes back to life. */
+    for (size_t i = 0; i < len; i++)
+        if (p[i] != 0) return fail("dontunmap-swap-source-resurrected");
+    if (used_swap_kb(path) != before + PAGES * (PAGE / 1024))
+        return fail("dontunmap-swap-source-refault-slot");
+
+    /* Destination swap-in returns the exact bytes and releases every slot. */
+    for (size_t i = 0; i < len; i++)
+        if (moved[i] != (unsigned char)(i * 7 + 1))
+            return fail("dontunmap-swap-dst-data");
+    if (used_swap_kb(path) != before)
+        return fail("dontunmap-swap-slot-leak");
+
+    if (munmap(p, len) < 0) return fail("dontunmap-swap-unmap-source");
+    if (munmap(moved, len) < 0) return fail("dontunmap-swap-unmap-dst");
+    if (used_swap_kb(path) != before)
+        return fail("dontunmap-swap-final-slots");
+    puts("SWAP_TEST: dontunmap-over-swapped-source PASS");
+    return 0;
+}
+
 int main(void)
 {
     if (totalswap() != 0)
@@ -223,6 +294,7 @@ int main(void)
     if (syscall(SYS_mkswap, loop_path, 0) != -1 || errno != EBUSY)
         return fail("mkswap-active-not-EBUSY");
     if (real_pageout_fork_remap(loop_path)) return 1;
+    if (dontunmap_over_swapped_source(loop_path)) return 1;
     pid_t unprivileged = fork();
     if (unprivileged < 0) return fail("swap-admin-fork");
     if (!unprivileged) {
