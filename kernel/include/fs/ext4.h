@@ -309,6 +309,11 @@ typedef struct ext4_vnode_priv {
     uint64_t        file_size;
     int             type;
     int             unlinked;   /* dirent removed; free blocks+inode on release */
+    /* The orphan-chain "next" this vnode's unlink wrote into the inode's
+     * i_dtime.  The deferred reap only acts when the inode still carries this
+     * exact value: once the entry is gone, or the inode number has been
+     * reused, this vnode no longer owns a chain entry. */
+    uint32_t        orphan_next;
     /* rmdir'd while this vnode was still cached.  Unlike an unlinked file a
      * removed directory has no orphan-chain entry -- its last two links go
      * away with it -- so the free cannot be deferred to a mount-time

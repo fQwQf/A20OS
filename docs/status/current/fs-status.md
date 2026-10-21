@@ -24,7 +24,8 @@
 有日志与无日志（`^has_journal`）两种镜像都支持完整的 create/write/unlink/rmdir 回收：
 
 - unlink 把零链接 inode 挂到孤儿链（`s_last_orphan`，`i_dtime` 作 next），崩溃后由挂载时的
-  recovery 处理；
+  recovery 处理；延迟回收（最后一个 vnode 引用消失时）会先核对 inode 上那条链是否仍是本 vnode
+  写下的那一条，所以 inode 号被复用后不会再对别的文件误 reap、也不会因此 poison 日志；
 - rmdir 的目录没有孤儿链条目（它自己的两个链接随它一起消失），所以待释放状态记在 vnode 上，
   最后一个引用消失时截断并释放 inode —— 缓存的 vnode 不再会让目录 inode 永远留在盘上；
 - `metadata_csum`（superblock/group descriptor/bitmap 的校验和）在写入路径同步，`e2fsck` 不报
