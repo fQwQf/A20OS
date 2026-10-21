@@ -42,9 +42,19 @@
 
 ### FS-04 JBD2 校验和 v1/v2 降级策略
 
-- 现状：v1/v2 日志失败关闭（拒绝挂载），没有显式降级策略。
+- 现状（2026-10-21 实测）：降级策略**已经存在**，这条的 现状 描述过时了。只读挂载尝试会走显式降级：
+  `ext4_journal_pending()` 在 `jbd2_load_superblock()` 返回 `-EOPNOTSUPP` 且 `read_only` 时调用
+  `a20_jbd2_allow_clean_legacy_readonly()`（`user/svc/jbd2_legacy_policy.rs`，由
+  `tools/test-jbd2-legacy-policy-host.sh` 的 4 个用例门禁），干净旧日志得到
+  `EXT4_JOURNAL_READONLY_LEGACY` 并打印 `clean legacy checksum journal; explicit read-only downgrade`。
+  可写挂载不走降级：实测把 `ext4-journal.img` 的日志校验和三字段清掉（即 mke2fs 原始形态）后，
+  引导时的可写挂载是 `[EXT4/JBD2] recovery failed: -95` → `Refusing mount after journal recovery
+  failure`，即写路径对旧格式保持失败关闭。
 - 缺口：旧格式要么支持只读降级，要么明确列为不支持；当前既未支持也未形成契约。
 - 关闭条件：干净 v1/v2 镜像可只读挂载；脏或校验和损坏的镜像被拒绝；无遗留重放/写支持的声明准确。
+- 未完成的验证：只读降级这一半我只有代码与宿主用例，还没有端到端证据——树里没有任何门禁会生成
+  v1/v2 镜像（`img.py ext4-journal` 一律做 csum_v3 手术），guest 的 `/extra` 又总是可写挂载，
+  所以要走 RO 路径得先让门禁能产出旧格式镜像并在 guest 内只读挂载它。
 - 来源：requirements N15。
 
 ### FS-05 NTFS 崩溃与重挂载
