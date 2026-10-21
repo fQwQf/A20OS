@@ -3,67 +3,78 @@
 # format regressions are caught without booting the kernel.
 HOST_CC ?= gcc
 HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
-HOST_TESTS_SRC := $(filter-out tools/tests/fdt_view.c,$(wildcard tools/tests/*.c))
-# Rust-linked differential harnesses are not self-contained host programs: they
-# need their module's staticlib and are driven by the dedicated tools/test-*.sh
-# scripts (like the wait4/vfile_lifecycle harnesses).  Keep them out of the
-# generic single-file host-tests pattern rule.
-HOST_TESTS_SRC := $(filter-out tools/tests/vnode_identity_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/vnode_identity_bench.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/block_cache_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/page_cache_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/uxfs_rpc_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/uxfs_lifetime_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/procfs_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/path_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/path_walk_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/mutate_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/mntns_lifecycle_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/procfs_node_state_host.c,$(HOST_TESTS_SRC))
-HOST_TESTS_SRC := $(filter-out tools/tests/mount_state_host.c,$(HOST_TESTS_SRC))
-# Harnesses that call Rust kernel entry points cannot be linked by the pattern
-# rule below: each one needs its own Rust object, and each is built and run by
-# its own tools/test-*-host.sh script.  Left in the wildcard they fail the whole
-# target with undefined references to the Rust symbols, which is what happened
-# here before this list existed.  They are named explicitly rather than by glob
-# so a new self-contained harness is still discovered automatically; the four
-# *_host.c entries are another module's and need their own rules before they
-# can move out of this list.
-RUST_LINKED_HOST_TESTS := \
-    tools/tests/vnode_identity_host.c \
-    tools/tests/vnode_identity_bench.c \
-    tools/tests/block_cache_state_host.c \
-    tools/tests/page_cache_state_host.c \
-    tools/tests/uxfs_rpc_state_host.c \
-    tools/tests/uxfs_lifetime_state_host.c \
-    tools/tests/procfs_state_host.c \
-    tools/tests/path_state_host.c \
-    tools/tests/path_walk_state_host.c \
-    tools/tests/mutate_state_host.c \
-    tools/tests/mntns_lifecycle_host.c \
-    tools/tests/procfs_node_state_host.c \
-    tools/tests/mount_state_host.c \
-    tools/tests/completion_state_host.c \
-    tools/tests/rw_mutex_state_host.c \
-    tools/tests/wait_queue_state_host.c \
-    tools/tests/wait_timer_host.c \
-    tools/tests/wait4_host.c \
-    tools/tests/test_cow_clone.c \
-    tools/tests/test_cow_fault.c \
-    tools/tests/test_madvise_policy.c \
-    tools/tests/test_mmap_policy.c \
-    tools/tests/test_mprotect_txn.c \
-    tools/tests/test_munmap_txn.c \
-    tools/tests/test_swap_slots.c \
-    tools/tests/test_vmar_policy.c
-# Compile-only probes with no main() and no generic include path: fdt_view.c is
-# a library for check-fdt-view.py, eevdf_node_layout_probe.c exposes
-# sizeof/offsetof through nm and needs a per-arch include path.  Neither is a
-# runnable single-file host test, so neither belongs in HOST_TESTS_BIN.
+
+# Every tools/tests/*.c falls into exactly one of three sets, and only the
+# first goes through the generic single-file pattern rule below:
+#
+#   runnable   -- self-contained, builds with $(HOST_CC) $(HOST_CFLAGS)
+#                 -Ikernel/include -Ikernel and has a main().  Default.
+#   PROBES     -- no main(); compiled only to expose sizeof/offsetof through
+#                 nm, or cross-compiled for another ABI.
+#   SCRIPTED   -- needs something the pattern rule cannot supply: a module's
+#                 Rust object, a per-arch include path, or a generated header.
+#                 Each is built and run by the tools/test-*-host.sh script
+#                 named beside it, and check-host-scripts runs all of them.
+#
+# The SCRIPTED list is explicit rather than a glob so a new self-contained
+# harness is still discovered automatically.  Leaving a harness out of either
+# list does not silently drop it from the gate: it lands in "runnable" and
+# fails the build, which is how these lists were found to be incomplete.
 HOST_TESTS_PROBES := \
     tools/tests/fdt_view.c \
-    tools/tests/eevdf_node_layout_probe.c
-HOST_TESTS_SRC := $(filter-out $(HOST_TESTS_PROBES) $(RUST_LINKED_HOST_TESTS),$(wildcard tools/tests/*.c))
+    tools/tests/eevdf_node_layout_probe.c \
+    tools/tests/rust_rv32_ilp32d_abi.c \
+    tools/tests/rust_rv32_sync_abi.c \
+    tools/tests/vfs_shutdown_layout.c
+
+# SCRIPTED, grouped by the driver script that runs them.
+HOST_TESTS_SCRIPTED := \
+    tools/tests/block_cache_state_host.c \
+    tools/tests/completion_state_host.c \
+    tools/tests/envelope_policy_host.c \
+    tools/tests/ext4_sync_c_scope_host.c \
+    tools/tests/ext4_sync_callback_host.c \
+    tools/tests/mntns_lifecycle_host.c \
+    tools/tests/mount_state_host.c \
+    tools/tests/mutate_state_host.c \
+    tools/tests/page_cache_state_host.c \
+    tools/tests/path_state_host.c \
+    tools/tests/path_walk_state_host.c \
+    tools/tests/procfs_node_state_host.c \
+    tools/tests/procfs_state_host.c \
+    tools/tests/rt_throttle_accounting.c \
+    tools/tests/rw_mutex_state_host.c \
+    tools/tests/test_bcache_flush_adapter.c \
+    tools/tests/test_bcache_user_flush.c \
+    tools/tests/test_cow_clone.c \
+    tools/tests/test_cow_fault.c \
+    tools/tests/test_cow_status.c \
+    tools/tests/test_fault_status.c \
+    tools/tests/test_madvise_policy.c \
+    tools/tests/test_mempolicy_state.c \
+    tools/tests/test_mmap_policy.c \
+    tools/tests/test_mprotect_txn.c \
+    tools/tests/test_mremap_dontunmap_txn.c \
+    tools/tests/test_mseal_policy.c \
+    tools/tests/test_munmap_txn.c \
+    tools/tests/test_oom_policy.c \
+    tools/tests/test_swap_slots.c \
+    tools/tests/test_uxfs_flush_client.c \
+    tools/tests/test_vmar_policy.c \
+    tools/tests/test_wx_aslr_policy.c \
+    tools/tests/ufs_close_token_host.c \
+    tools/tests/uxfs_lifetime_state_host.c \
+    tools/tests/uxfs_rpc_state_host.c \
+    tools/tests/vfile_lifecycle_host.c \
+    tools/tests/vfs_shutdown_abi_host.c \
+    tools/tests/vnode_identity_bench.c \
+    tools/tests/vnode_identity_host.c \
+    tools/tests/wait4_host.c \
+    tools/tests/wait_queue_state_host.c \
+    tools/tests/wait_timer_host.c
+
+HOST_TESTS_SRC := $(filter-out $(HOST_TESTS_PROBES) $(HOST_TESTS_SCRIPTED),\
+                               $(wildcard tools/tests/*.c))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
@@ -166,8 +177,14 @@ check-drm-abi:
 
 host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
             check-wait4-controller check-tg-leader-lifetime check-fdt-view \
-            $(HOST_TESTS_BIN)
+            check-host-scripts $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
+
+# The harnesses in HOST_TESTS_SCRIPTED are not built by the pattern rule; run
+# their driver scripts so being outside HOST_TESTS_BIN does not mean being
+# outside the gate.
+check-host-scripts:
+	@tools/run-host-scripts.sh
 
 $(TMPDIR)/a20-host-%: tools/tests/%.c
 	$(HOST_CC) $(HOST_CFLAGS) -Ikernel/include -Ikernel $< -o $@
@@ -187,13 +204,13 @@ $(TMPDIR)/a20-host-%: tools/tests/%.c
 # that quietly defers to host struct layout -- and, before this existed, the
 # only way to notice a u8 field that emitted non-C.  tools/tests/idl_mixed.idl
 # has a .idl suffix so the wildcard above does not try to compile it as a test.
-$(TMPDIR)/a20-idl-mixed.h: tools/tests/idl_mixed.idl tools/a20idl.py
+$(TMPDIR)/a20idl_mixed.h: tools/tests/idl_mixed.idl tools/a20idl.py
 	$(PYTHON) tools/a20idl.py tools/tests/idl_mixed.idl $@
 
 $(TMPDIR)/a20-host-test_a20_idl_wire: tools/tests/test_a20_idl_wire.c user/svc/a20_services_idl.h user/svc/a20_services.idl tools/a20idl.py
 	$(HOST_CC) $(HOST_CFLAGS) -Iuser/liba20rt -Iuser/svc $< -o $@
 
-$(TMPDIR)/a20-host-test_a20_idl_mixed: tools/tests/test_a20_idl_mixed.c $(TMPDIR)/a20-idl-mixed.h
+$(TMPDIR)/a20-host-test_a20_idl_mixed: tools/tests/test_a20_idl_mixed.c $(TMPDIR)/a20idl_mixed.h
 	$(HOST_CC) $(HOST_CFLAGS) -Iuser/liba20rt -I$(TMPDIR) $< -o $@
 
 # The flat-space policy is Rust, so this harness links the Rust object; the C

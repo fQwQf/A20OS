@@ -2,7 +2,9 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_root=${FDTABLE_HOST_EVIDENCE_ROOT:-<build-dir>/secondary-linux-abi-host}
+# Evidence must land in a path the caller can keep; the default is the
+# gitignored build tree so a bare run works on any host.
+build_root=${FDTABLE_HOST_EVIDENCE_ROOT:-"$repo/.kernel-build/host-evidence/fdtable-state"}
 run_dir="$build_root/fdtable-state/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BUILD_DIR="$run_dir/build"
 USER_BUILD_DIR="$run_dir/user"

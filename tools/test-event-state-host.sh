@@ -2,7 +2,9 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-root=<build-dir>/secondary-linux-abi-host/event-state
+# Evidence must land in a path the caller can keep; the default is the
+# gitignored build tree so a bare run works on any host.
+root=${EVENT_STATE_EVIDENCE_ROOT:-"$repo/.kernel-build/host-evidence/event-state"}
 run="$root/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BUILD_DIR="$run/build"
 USER_BUILD_DIR="$run/user"

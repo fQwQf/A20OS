@@ -1,8 +1,17 @@
 #!/bin/sh
+# Host harness for kernel/fs/fdtable.c against the Rust fdtable state object.
+#
+# This used to build each mode twice ("c" and "rust") and compare.  The C
+# implementation was deleted when the state moved to fdtable_state.rs, so the
+# "c" variant no longer links: kernel/fs/fdtable.c now references the
+# a20_fdtable_*_rust entry points unconditionally.  Only the production
+# configuration is built here.
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-root=${FDTABLE_HOST_EVIDENCE_ROOT:-<build-dir>/secondary-linux-abi-host}
+# Evidence must land in a path the caller can keep; the default is the
+# gitignored build tree so a bare run works on any host.
+root=${FDTABLE_HOST_EVIDENCE_ROOT:-"$repo/.kernel-build/host-evidence/fdtable-differential"}
 run="$root/fdtable-differential/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BUILD_DIR="$run/build"
 USER_BUILD_DIR="$run/user"
@@ -32,7 +41,7 @@ gcc --version >"$ev/gcc-version.txt" 2>&1
 rustc --version --verbose >"$ev/rustc-version.txt" 2>&1
 
 status=0
-for mode in c rust; do
+for mode in rust; do
     variant="$BUILD_DIR/$mode"
     mkdir -p "$variant"
     ev_mode="$ev/$mode"
@@ -97,7 +106,7 @@ else
 fi
 cat "$ev/inputs.before.sha256" "$ev/inputs.after.sha256" \
     "$ev/source-drift.exit" "$ev/gcc-version.txt" "$ev/rustc-version.txt"
-for mode in c rust; do
+for mode in rust; do
     test ! -f "$ev/$mode/argv.txt" || cat "$ev/$mode/argv.txt"
     test ! -f "$ev/$mode/compile.log" || cat "$ev/$mode/compile.log"
     test ! -f "$ev/$mode/compile.exit" || cat "$ev/$mode/compile.exit"

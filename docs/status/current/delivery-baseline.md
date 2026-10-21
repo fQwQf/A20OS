@@ -123,7 +123,7 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 
 CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重排锚点随 `sched_runq_steal_locked`
 改写而失效，导致双重解锁），并新增 `check-wait4-controller` 把只被 `tools/tests/` 通配捡起、
-却从无人运行的 `test_wait4_host.py` 接进 `host-tests`；见 [CORE-11](../gaps/core.md)。
+却从无人运行的 `test_wait4_host.py` 接进 `host-tests`。
 
 环境类：1 个 skip（缺可选宿主依赖）。另有一类只在非 C locale 下出现的失败——宿主 `make`
 输出中文报错文本时，断言英文 `No rule to make target` 的用例会失败；这类失败与源码状态无关，
@@ -140,7 +140,7 @@ CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重�
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`、`check-task-lifetime-boundary` 与 `host-tests` 的 proc 成员后，仍为红的是：`check-a20-tests`（§5，剩余 8 个用例属 MM/NET/PROC）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`host-tests`（约二十个 harness 需要各自的 Rust 对象或 per-arch include，见 [CORE-11](../gaps/core.md)）、`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，见 [ABI-09](../gaps/abi-ipc.md)）、`check-task-state-boundary`（见 [ABI-10](../gaps/abi-ipc.md)）、`check-doc-drift`（`v1.0-requirements.json` 需重新生成；同目标的 `tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`、`check-task-lifetime-boundary` 与 `host-tests` 的 proc 成员后，仍为红的是：`check-a20-tests`（§5，剩余 8 个用例属 MM/NET/PROC；`host-tests` 已转绿）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，见 [ABI-09](../gaps/abi-ipc.md)）、`check-task-state-boundary`（见 [ABI-10](../gaps/abi-ipc.md)）、`check-doc-drift`（`v1.0-requirements.json` 需重新生成；同目标的 `tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |
