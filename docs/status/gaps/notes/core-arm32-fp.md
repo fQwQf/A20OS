@@ -28,5 +28,13 @@ ppc64le（`MSR_FP`）都启用；loongarch32/armv7m 无 FPU，不受影响。
 ## 用例
 
 `user/cmds/core/fork_fpu_probe.c` 的 arm32 分支：父进程装 sentinel → 子进程装另一组 → 父进程读回自己的
-`d0/d15`，不保存就必然读到子进程的值。子进程用自旋而不是 `usleep`，因为 **arm32 的 `sleep`/`nanosleep`
-不唤醒**（`sleep 1` 永不返回，本机实测）——那是同一个移植面上的独立缺陷，尚未记账。
+`d0/d15`。当前内核上的实测结果就是缺陷本身：
+
+```
+FORK_FPU: arm32-child-registers PASS
+FORK_FPU: FAIL parent d0=0x2222222222222222 want 0x1111111111111111
+```
+
+父进程读到的是子进程的 sentinel——两个任务共用一份物理 FP 寄存器文件。子进程用的是自旋而不是 `usleep`，
+因为 **arm32 的 `sleep`/`nanosleep` 不唤醒**（`sleep 1` 永不返回，本机实测）——那是同一个移植面上的
+独立缺陷，尚未记账。
