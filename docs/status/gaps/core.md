@@ -2,13 +2,6 @@
 
 对应 V1-CORE。现状见 [current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
 
-### CORE-01 长内核路径上的有界进展
-
-- 现状：RT/调度预算与抢占已有实现；长 syscall 期间普通任务的有界进展没有断言。
-- 缺口：线程化 IRQ 与长内核路径的有界延迟未完成，也没有风暴/故障用例。
-- 关闭条件：普通任务进展断言在单核与 SMP 上通过，长 syscall 与 IRQ 风暴下不误触；延迟分布可复现。
-- 来源：requirements N01。
-
 ### CORE-04 锁拆分后的竞争未复测
 
 - 现状：`proc_lock` 已删除，调度状态归 per-task `park_lock`，低频残余归 `tasklist_lock`；`g_net_lock` 已分片。拆分后的采样已经做了：[measurements/smp-lock-contention-now.md](../measurements/smp-lock-contention-now.md) 记录 4 vCPU 下 `mm_stress` 的争用主体落在 `park_lock`（2270 次获取）而 `tasklist` 只剩 7 次，以及 `futex_stress` 仍把 `tasklist` 打到 430 次获取 / 550 万次自旋。
