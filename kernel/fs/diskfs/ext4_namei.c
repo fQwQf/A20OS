@@ -714,6 +714,24 @@ int ext4_stat(vnode_t *vn, kstat_t *st) {
 }
 
 
+/*
+ * Finish a rmdir whose directory inode could not be freed at the time: the
+ * caller has already removed the dirent and dropped the parent's link, so all
+ * that is left is to truncate the directory, mark its inode deleted and free
+ * it.  Shared by the immediate rmdir path and by the deferred path taken when
+ * the child vnode was still cached.
+ */
+static int ext4_reclaim_removed_directory(ext4_sb_info_t *sb, uint32_t ino)
+{
+    ext4_inode_t cdi;
+    if (ext4_read_inode(sb, ino, &cdi) < 0) return -EIO;
+    ext4_block_truncate(sb, ino, &cdi);
+    ext4_inode_mark_deleted(&cdi);
+    if (ext4_write_inode(sb, ino, &cdi) < 0) return -EIO;
+    return ext4_free_inode(sb, ino);
+}
+
+
 void ext4_release_vn(vnode_t *vn) {
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
     if (p && p->unlinked) {
@@ -731,6 +749,19 @@ void ext4_release_vn(vnode_t *vn) {
             vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
         }
         rw_mutex_write_unlock(&sb->metadata_lock);
+    } else if (p && __atomic_load_n(&p->dir_removed, __ATOMIC_ACQUIRE)) {
+        /* A directory removed while this vnode was cached.  No orphan entry
+         * exists to recover it later, so the free happens here. */
+        ext4_sb_info_t *sb = p->sb;
+        __atomic_store_n(&p->dir_removed, 0, __ATOMIC_RELEASE);
+        rw_mutex_write_lock(&sb->metadata_lock);
+        int ret = ext4_reclaim_removed_directory(sb, p->inode_num);
+        rw_mutex_write_unlock(&sb->metadata_lock);
+        if (ret < 0)
+            printf("[EXT4] deferred directory cleanup failed ino=%u err=%d; "
+                   "inode left allocated\n", p->inode_num, ret);
+        else
+            vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
     }
     if (vn->fs_data) { kfree(vn->fs_data); vn->fs_data = NULL; }
     if (vn->parent && vn->parent != vn) vnode_put(vn->parent);
@@ -746,6 +777,18 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
 {
     if (!vn || !vn->fs_data) return -EINVAL;
     ext4_vnode_priv_t *p = (ext4_vnode_priv_t *)vn->fs_data;
+    if (__atomic_load_n(&p->dir_removed, __ATOMIC_ACQUIRE)) {
+        ext4_sb_info_t *dir_sb = p->sb;
+        if (!dir_sb) return -EIO;
+        rw_mutex_write_lock(&dir_sb->metadata_lock);
+        int dir_ret = ext4_reclaim_removed_directory(dir_sb, p->inode_num);
+        rw_mutex_write_unlock(&dir_sb->metadata_lock);
+        if (dir_ret == 0) {
+            __atomic_store_n(&p->dir_removed, 0, __ATOMIC_RELEASE);
+            vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
+        }
+        return dir_ret;
+    }
     if (!__atomic_load_n(&p->unlinked, __ATOMIC_ACQUIRE)) return 0;
     ext4_sb_info_t *sb = p->sb;
     if (!sb) return -EIO;
@@ -1087,19 +1130,19 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     vnode_t *live = ext4_vnode_cache_remove(p->sb, child_ino);
     if (live) {
         ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
-        if (vp) __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        /* The directory's own two links went away with it, so unlike an
+         * unlinked file there is no orphan entry a later mount could recover
+         * from: record the pending free on the vnode and let
+         * ext4_release_vn() finish it. */
+        if (vp)
+            __atomic_store_n(&vp->dir_removed, 1, __ATOMIC_RELEASE);
         if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
             page_cache_discard_unlinked(live);
         if (deferred_put) *deferred_put = live;
         return 0;
     }
 
-    ext4_block_truncate(p->sb, child_ino, &cdi);
-    ext4_inode_mark_deleted(&cdi);
-    if (ext4_write_inode(p->sb, child_ino, &cdi) < 0) return -EIO;
-    vfs_drop_time_meta_identity(dir->mnt, child_ino);
-    ext4_free_inode(p->sb, child_ino);
-    return 0;
+    return ext4_reclaim_removed_directory(p->sb, child_ino);
 }
 
 

@@ -536,6 +536,13 @@ smoke-mm-software:
 
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
+	@# The guest creates, unlinks and rmdirs on this ext4 image, which has no
+	@# journal: nothing replays for it, so the driver's own reclamation is all
+	@# there is.  A rmdir whose directory inode is never freed leaves an
+	@# unconnected inode behind and e2fsck rejects the image.
+	@e2fsck -fn $(RV64_LINUX_DEV_DIR)/ext4.img >/dev/null 2>&1 || { \
+		echo "smoke-vfs-stress: e2fsck rejected the ext4 image the guest wrote"; \
+		e2fsck -fn $(RV64_LINUX_DEV_DIR)/ext4.img; exit 1; }
 
 smoke-lfs:
 	$(PYTHON) tools/smoke.py smoke-lfs
