@@ -19,6 +19,24 @@
 
 文件读取走页缓存；`readpage` 的返回值是页内有效字节数，页缓存会把该值之后的部分清零。
 
+## ext4
+
+有日志与无日志（`^has_journal`）两种镜像都支持完整的 create/write/unlink/rmdir 回收：
+
+- unlink 把零链接 inode 挂到孤儿链（`s_last_orphan`，`i_dtime` 作 next），崩溃后由挂载时的
+  recovery 处理；
+- rmdir 的目录没有孤儿链条目（它自己的两个链接随它一起消失），所以待释放状态记在 vnode 上，
+  最后一个引用消失时截断并释放 inode —— 缓存的 vnode 不再会让目录 inode 永远留在盘上；
+- `metadata_csum`（superblock/group descriptor/bitmap 的校验和）在写入路径同步，`e2fsck` 不报
+  校验和错误。
+
+正常关机后宿主 `e2fsck -fn` 干净，并且这条性质有门禁：`smoke-vfs-stress` 在 guest 跑完
+（含 create/unlink/rmdir）之后会对同一张镜像跑一次 `e2fsck -fn`。
+
+无日志镜像被**直接 kill**（不是正常关机）时仍可能留下不一致——这张盘没有重放机制，这是无日志
+格式的固有限制，不是回收缺口。需要崩溃一致性时用带日志的 `ext4-journal.img`，由
+`smoke-ext4-journal` 覆盖（4 个注入点的崩溃 + 恢复后 `e2fsck` 干净）。
+
 ## NTFS 限制
 
 - 不支持 `$ATTRIBUTE_LIST` 跨记录属性（大文件/碎片文件可能拒绝读取）。
