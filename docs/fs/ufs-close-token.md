@@ -22,4 +22,6 @@ tools/test-ufs-close-token-host.sh
 
 可用 `NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1`（`test-drop-close-token-ack`）启用「丢失 CLOSE-ACK」故障档的 guest。guest 必须观察到响应被丢弃、用同一 token 重试、收到重放成功、确认、重启，并核对数据可读回。该档位测的是重试契约，不是生产档服务。
 
-当前限制：OPEN 的请求/响应丢失不幂等；token 不能跨服务或挂载通道重启存续；CONFIRM-ACK 丢失以及该次额外 RPC 的性能代价都没有被覆盖。默认 `VFS_LIFECYCLE_IMPL=c` 不变。另有独立的 UXFS vnode 身份修复，保证同一 inode 的重复查找共享规范的大小状态；该修复与 close-token 重放无关。
+客户端在结果不明确时（请求发出但没收到应答）**自动重试一次**：CLOSE 用同一 token 重放，CONFIRM 重发同一条确认（未知确认幂等成功），所以丢失的 ACK 不会暴露给调用者，`close(2)` 仍然成功。`make smoke-ufs-confirm-ack` 用一个会丢弃首条 CLOSE 与 CONFIRM 应答的测试用 ufsd 把这两条都跑一遍（vnfs/ext4 挂载——close-token 能力只在该后端协商）。
+
+当前限制：OPEN 的请求/响应丢失不幂等；token 不能跨服务或挂载通道重启存续（重启后旧 token 一律视为未知，CONFIRM 幂等成功、CLOSE 返回 `ENOENT`）；额外那次 RPC 的性能代价没有测量。默认 `VFS_LIFECYCLE_IMPL=c` 不变。另有独立的 UXFS vnode 身份修复，保证同一 inode 的重复查找共享规范的大小状态；该修复与 close-token 重放无关。

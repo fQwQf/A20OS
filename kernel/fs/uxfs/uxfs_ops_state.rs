@@ -2045,6 +2045,14 @@ pub unsafe extern "C" fn a20_uxfs_file_close(
     let final_acked;
     if (l.fc_close_accepted)(fc) == 0 {
         close_rc = (l.lifetime_close)(sb, ino, token, &mut acked, &mut sent);
+        if (close_rc != 0 || acked == 0) && sent != 0 && token != 0 {
+            /* Ambiguous, not refused: the service keeps an accepted outcome
+             * replayable under the same token, so one retry resolves it and
+             * the caller never sees a lost ACK. */
+            acked = 0;
+            sent = 0;
+            close_rc = (l.lifetime_close)(sb, ino, token, &mut acked, &mut sent);
+        }
         (l.vf_set_close_attempt)(vf, if sent != 0 { 1 } else { 0 }, 0, 0);
         if close_rc != 0 || acked == 0 {
             (l.vf_set_close_attempt)(vf, if sent != 0 { 1 } else { 0 }, 0, if sent == 0 { 1 } else { 0 });
@@ -2058,6 +2066,13 @@ pub unsafe extern "C" fn a20_uxfs_file_close(
         acked = 0;
         sent = 0;
         close_rc = (l.lifetime_close_confirm)(sb, ino, token, &mut acked, &mut sent);
+        if (close_rc != 0 || acked == 0) && sent != 0 && token != 0 {
+            /* An unknown confirmation is success, so a lost CONFIRM reply is
+             * resolved by repeating exactly that request -- never the CLOSE. */
+            acked = 0;
+            sent = 0;
+            close_rc = (l.lifetime_close_confirm)(sb, ino, token, &mut acked, &mut sent);
+        }
         (l.vf_set_close_attempt)(
             vf,
             if sent != 0 { 1 } else { 0 },
