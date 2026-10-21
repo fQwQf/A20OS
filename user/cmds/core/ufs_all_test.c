@@ -76,9 +76,17 @@ static int kill_and_remount_ufsd(pid_t victim, const char *mp,
 {
     kill(victim, SIGKILL);
     waitpid(victim, NULL, 0);
-    if (umount2(mp, 0) != 0)
+    errno = 0;
+    if (umount2(mp, 0) != 0) {
+        printf("UXFS_CRASH: umount %s after SIGKILL failed errno=%d\n",
+               mp, errno);
         return -1;
-    spawn_ufsd(mp, idx, fstype);
+    }
+    pid_t next = spawn_ufsd(mp, idx, fstype);
+    if (next < 0) {
+        printf("UXFS_CRASH: respawn %s failed\n", mp);
+        return -1;
+    }
     return 0;
 }
 
@@ -640,6 +648,13 @@ static int test_restart(void)
     const char *tag = "UXFS_RESTART";
     const char *mrk = "/ufs2/RESTART.MRK";
 
+    /* test_fat leaves this same block device mounted at /ufs, and a block
+     * device has one writable owner.  Release that mount before registering a
+     * second one, otherwise the spawn fails and /ufs2 is just a directory. */
+    if (umount2("/ufs", 0) != 0 && errno != EINVAL) {
+        printf("%s: cannot release /ufs errno=%d\n", tag, errno);
+        return fail(tag, "release /ufs");
+    }
     pid_t a = spawn_ufsd("/ufs2", "1", "fat");
     if (wait_path(mrk ? "/ufs2" : mrk, 500))
         return fail(tag, "/ufs2 first instance not visible");

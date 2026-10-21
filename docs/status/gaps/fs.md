@@ -2,20 +2,6 @@
 
 对应 V1-FS。现状见 [current/fs-status.md](../current/fs-status.md)。
 
-### FS-03 文件数据块完整性校验
-
-- 现状：元数据与 JBD2 有校验和；文件内容损坏不可检测。
-- 缺口：没有兼容磁盘格式的 data-block 校验和。
-- 关闭条件：定义兼容的校验和元数据，读取时能检测损坏块，重挂载与日志重放后行为一致。
-- 来源：requirements N16。
-
-### FS-05 NTFS 崩溃与重挂载
-
-- 现状：NTFS 的 crash/remount 在 C 与 Rust 两种实现上都失败。
-- 缺口：崩溃后的 NTFS 卷无法正确恢复或拒绝。
-- 关闭条件：崩溃注入后重挂载要么恢复一致，要么以明确错误拒绝；两种实现行为一致。
-- 来源：[current/fs-status.md](../current/fs-status.md)、[current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
-
 ### FS-07 xattr/ACL 持久化与重启
 
 - 现状：后端 xattr/ACL 持久化没有显式重启测试。

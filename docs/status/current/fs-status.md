@@ -58,4 +58,10 @@ v1/v2 镜像可以**只读**挂载（显式降级），日志非空的旧式镜�
 - 创建的文件分配在 MFT 空闲记录（首适应，从记录 12 起扫），不维护 `$MFT` 位图。
 - 时间戳未按 FILETIME 格式转换（写 0，读时忽略）。
 - 不支持 hard link、symbolic link、`$LogFile` replay 或 `$MFTMirr` 恢复；崩溃一致性不等同 Windows NTFS。
+- 服务崩溃后的重挂载是可用的：`UXFS_NTFS` 用 SIGKILL 杀掉 ufsd 实例、卸载、重启同一卷，断言内容
+  （8 KB 非驻留文件、嵌套目录、重启标记）仍在。让这一步成立的是 UXFS 卸载路径：服务被 kill 后它
+  再也不会碰通道，`peer_closed` 因此一直是 0，卸载会等满 5 s 超时并返回 `ETIMEDOUT`；现在卸载在
+  超时后用服务任务是否存活再判一次，确认已退出才撤销注册。
+- 这里保证的是**服务级**崩溃（进程死掉）后的重挂载；机器掉电不会重放 `$LogFile`，那种情况下卷可能
+  需要 Windows 的 chkdsk，本驱动不声称能修复。
 - VFS xattr 仅使用易失的全局 RAM 表，没有 NTFS attribute 持久化后端。
