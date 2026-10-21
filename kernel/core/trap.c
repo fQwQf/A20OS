@@ -18,6 +18,9 @@
 #include "core/kallsyms.h"
 #include "core/preempt.h"
 #include "core/perf.h"
+#ifdef CONFIG_TRAP_STORM_TEST
+#include "uapi/a20/trap_storm.h"
+#endif
 
 __attribute__((weak)) int arch_hyp_guest_trap(trap_context_t *ctx)
 {
@@ -371,6 +374,16 @@ static void user_trap_handler(trap_context_t *ctx) {
         } else if (cur) {
             cur->fault_storm_count = 0;
         }
+#ifdef CONFIG_TRAP_STORM_TEST
+        /* Test injection: report a fault at the designated address as repaired
+         * without changing its mapping, so the instruction refaults with no
+         * signal and no syscall in between.  That is the shape the detector
+         * above exists to catch, and it cannot be produced from userspace --
+         * every signal-delivery round trip is an rt_sigreturn ecall, which
+         * resets the streak.  Compiled in only for the TRAP_STORM_TEST build. */
+        if (cur && page_fault && stval == A20_TRAP_STORM_TEST_VA)
+            return;
+#endif
 #ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
         TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
 #endif

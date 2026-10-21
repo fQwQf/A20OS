@@ -19,16 +19,11 @@ extern void a20_object_release(void *object, uint16_t type);
 _Static_assert(sizeof(a20_ch_handle_info_t) ==
                (sizeof(void *) == 8 ? 48 : 40),
                "C/Rust channel handle-info size mismatch");
-#if defined(__arm__) || (defined(__riscv) && __riscv_xlen == 32)
-/* AAPCS32 gives uint64_t eight-byte aggregate alignment even though pointers
- * are four bytes. RV32 ILP32D also aligns these uint64_t fields to eight;
- * keep both distinct from 32-bit ABIs that align them to four. */
-#define A20_CH_HANDLE_INFO_ALIGN 8
-#else
-#define A20_CH_HANDLE_INFO_ALIGN (sizeof(void *) == 8 ? 8 : 4)
-#endif
-_Static_assert(__alignof__(a20_ch_handle_info_t) ==
-               A20_CH_HANDLE_INFO_ALIGN,
+/* The C and Rust views must agree on the ABI's 64-bit aggregate alignment:
+ * AAPCS32 and RV32-ILP32D align these uint64_t fields to eight, ILP32 ABIs
+ * that pack them to four do not.  __alignof__(uint64_t) is exactly that
+ * property, so this needs no architecture test. */
+_Static_assert(__alignof__(a20_ch_handle_info_t) == __alignof__(uint64_t),
                "C/Rust channel handle-info alignment mismatch");
 _Static_assert(__builtin_offsetof(a20_ch_handle_info_t, object) == 0,
                "C/Rust handle-info object offset mismatch");

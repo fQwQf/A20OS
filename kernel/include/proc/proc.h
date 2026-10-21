@@ -620,10 +620,11 @@ _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
                "task_t.kstack_base must remain at assembly ABI offset 8/4");
 _Static_assert(offsetof(task_t, trap_guard_scratch) == 2 * sizeof(uintptr_t),
                "task_t.trap_guard_scratch must remain at assembly ABI offset 16/8");
-#ifdef CONFIG_ARM32
-_Static_assert(offsetof(task_t, trap_ctx) == 68,
-               "ARM32 trap.S TASK_TRAP_CTX offset must match task_t");
-#endif
+/* ARCH_TASK_TRAP_CTX_OFFSET is 0 on architectures whose trap entry does not
+ * hard-code this offset; where it does, the two must agree. */
+_Static_assert(ARCH_TASK_TRAP_CTX_OFFSET == 0 ||
+               offsetof(task_t, trap_ctx) == ARCH_TASK_TRAP_CTX_OFFSET,
+               "task_t.trap_ctx must match the arch trap entry offset");
 
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)

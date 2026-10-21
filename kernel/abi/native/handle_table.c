@@ -33,11 +33,11 @@
 #ifdef CONFIG_HANDLE_SLOT_TRANSITIONS_RUST
 #include "handle_table_state.h"
 _Static_assert(sizeof(a20_handle_entry_t) == (sizeof(void *) == 8 ? 48 : 40), "handle entry ABI size mismatch");
-#if defined(__arm__)
-_Static_assert(__alignof__(a20_handle_entry_t) == 8, "handle entry ABI alignment mismatch");
-#else
-_Static_assert(__alignof__(a20_handle_entry_t) == (sizeof(void *) == 8 ? 8 : 4), "handle entry ABI alignment mismatch");
-#endif
+/* AAPCS32 and RV32-ILP32D align the uint64_t members to eight while pointers
+ * stay four bytes wide; __alignof__(uint64_t) is the ABI property that
+ * distinguishes them from ILP32 ABIs packing 64-bit aggregates to four, so
+ * the C and Rust views can be compared without naming an architecture. */
+_Static_assert(__alignof__(a20_handle_entry_t) == __alignof__(uint64_t), "handle entry ABI alignment mismatch");
 _Static_assert(__builtin_offsetof(a20_handle_entry_t, type) == sizeof(void *), "handle entry type offset mismatch");
 _Static_assert(__builtin_offsetof(a20_handle_entry_t, rights) == (sizeof(void *) == 8 ? 16 : 8), "handle entry rights offset mismatch");
 _Static_assert(__builtin_offsetof(a20_handle_entry_t, expiry_tick) == (sizeof(void *) == 8 ? 24 : 16), "handle entry expiry offset mismatch");

@@ -12,4 +12,8 @@
 
 #define ARCH_CACHE_LINE 64U
 
+/* Offset trap.S stores the trap frame at inside task_t; proc.h asserts that
+ * task_t.trap_ctx still lands there. */
+#define ARCH_TASK_TRAP_CTX_OFFSET 68
+
 #endif
