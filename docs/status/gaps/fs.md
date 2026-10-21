@@ -4,9 +4,25 @@
 
 ### FS-01 ext4 无日志时的孤儿 inode（N21）
 
-- 现状：`ext4_inode_remove()` 在存在缓存 vnode 时只标 unlinked，不减磁盘链接计数、不记 orphan 链；缺陷在 unlink 当下就存在。
+- 现状（2026-10-21 实测更正）：unlink 当下**是**正确的——`ext4_inode_remove()` 会先把零链接 inode
+  挂上孤儿链（`ext4_orphan_add_last_link()`，`s_last_orphan` + `i_dtime` 作 next），日志里能看到
+  `[EXT4] unlink orphan ino=... refs=... vfile_opens=...`；崩溃后 `e2fsck -fn` 也**干净**。
+  真正的阻塞在**下一次挂载**：`ext4_mount_flags()` 对无日志镜像执行
+  `!ext4_state_admit(sb.s_state)` 就整体拒绝挂载（`refusing mount: no-journal filesystem state
+  is not clean (0x0)`），于是 recovery 根本没有机会跑；实测「open+unlink 后 kill QEMU，再启同一张
+  镜像」就是这个结果，`/extra` 没挂上，孤儿 inode 既未回收也未进 `lost+found`。
+  另一条路径（world 镜像，状态位为 VALID 时）走到 recovery 并报
+  `refusing mount: orphan recovery failed (-95)`，说明恢复路径本身也需要能处理该 inode 形状。
 - 缺口：POSIX unlink-while-open 语义保留了，但崩溃/重启后无法回收或恢复该 inode。
 - 关闭条件：open-unlink 后崩溃/重启，inode 要么被回收、要么被恢复到 `lost+found`，且 `e2fsck -fn` 干净；不许用 `e2fsck -fy` 修镜像算通过。
+- 未决点（需要决定，不适合单方面改）：无日志镜像是否允许在「状态位非 VALID」时挂载并跑 recovery。
+  现在的拒绝是刻意 fail-closed（`ext4.c` 注释：崩溃或元数据失败后让下一次 RW 挂载失败关闭，
+  而不是信任易失的隔离状态）；放行它等于接受「崩溃后可能带着未校验的元数据继续写」，是可用性与
+  安全性的取舍。
+- 另一处已确认缺陷（同一域）：`ext4_release_vn()` 对「inode 号已被复用」的滞留 vnode 仍按 inode 号
+  触发一次 reap，该 inode 早已不在链上，于是打出误导性的
+  `deferred orphan cleanup failed ... orphan retained for recovery`（实测 err=-5）；缓存 vnode 存活
+  期间 inode 号复用本身也可能让滞留 vnode 误回收别的文件。
 - 诊断：[notes/fs-ext4-orphan.md](notes/fs-ext4-orphan.md)。
 - 来源：[current/ext4-orphan-gap.md](../current/ext4-orphan-gap.md)、requirements N21。
 

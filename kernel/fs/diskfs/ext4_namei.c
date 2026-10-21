@@ -616,8 +616,16 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
         printf("[EXT4] unlink orphan ino=%u refs=%d vfile_opens=%u\n", ino,
                vnode_ref_read(live), vp ?
                __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) : 0);
-        if (vp)
+        if (vp) {
+            /* Remember which chain link this vnode owns, so the deferred reap
+             * can tell "still mine" from "already reaped" or "this inode
+             * number now belongs to another file". */
+            ext4_inode_t cur;
+            if (ext4_read_inode(sb, ino, &cur) == 0)
+                __atomic_store_n(&vp->orphan_next, cur.i_dtime,
+                                 __ATOMIC_RELEASE);
             __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        }
         /* The final link is gone, but open descriptors must retain dirty data
          * until their last close.  With no open descriptor, discard unpinned
          * pages so deleted temporary files do not consume writeback bandwidth;
@@ -740,7 +748,16 @@ void ext4_release_vn(vnode_t *vn) {
         ext4_sb_info_t *sb = p->sb;
         p->unlinked = 0;
         rw_mutex_write_lock(&sb->metadata_lock);
-        int ret = ext4_orphan_reap(sb, p->inode_num);
+        ext4_inode_t cur;
+        int read_ok = ext4_read_inode(sb, p->inode_num, &cur) == 0;
+        /* Reaping by inode number alone is wrong once the entry is gone or the
+         * number has been reused: the reap would fail noisily (and poison a
+         * healthy journal) or free another file's inode. */
+        int owned = read_ok && cur.i_links_count == 0 &&
+                    cur.i_dtime == __atomic_load_n(&p->orphan_next,
+                                                   __ATOMIC_ACQUIRE);
+        int ret = !read_ok ? -EIO : (owned ? ext4_orphan_reap(sb, p->inode_num)
+                                           : 0);
         if (ret < 0) {
             if (sb->journal) (void)ext4_journal_poison(sb);
             printf("[EXT4] deferred orphan cleanup failed ino=%u err=%d; "
@@ -797,7 +814,19 @@ int ext4_vnode_finalize_unlinked(vnode_t *vn)
         rw_mutex_write_unlock(&sb->metadata_lock);
         return 0;
     }
-    int ret = ext4_orphan_reap(sb, p->inode_num);
+    int ret;
+    ext4_inode_t cur;
+    int read_ok = ext4_read_inode(sb, p->inode_num, &cur) == 0;
+    int owned = read_ok && cur.i_links_count == 0 &&
+                cur.i_dtime == __atomic_load_n(&p->orphan_next,
+                                               __ATOMIC_ACQUIRE);
+    if (!read_ok) {
+        ret = -EIO;
+    } else if (!owned) {
+        ret = 0;   /* entry already consumed, or the number was reused */
+    } else {
+        ret = ext4_orphan_reap(sb, p->inode_num);
+    }
     if (ret < 0) {
         if (sb->journal) (void)ext4_journal_poison(sb);
     } else {
