@@ -14,6 +14,7 @@
 # directory the configuration actually uses -- that is what print-build-dir
 # exists for -- with the same variables the recipe's own build step passes.
 RV64_LINUX_DEV_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
+RV64_BOTH_DEV_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=both BRINGUP=0 print-build-dir)
 RV64_LINUX_DEV_SMP4_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 print-build-dir)
 
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
@@ -590,6 +591,43 @@ smoke-ext4-recovery:
 # Lost-ACK drill for the UFSD close token: the service is built with the
 # test fault that drops the first accepted CLOSE and CONFIRM replies, so a
 # plain open/write/close exercises both retry paths end to end.
+# Lost-ACK drill for the UFSD close token.  The service is built with the test
+# fault that drops the first accepted CLOSE and CONFIRM replies; the client
+# test spawns it on a vnfs (ext4) mount -- the close-token capability is only
+# negotiated there -- and must come through the close unchanged.
+smoke-ufs-confirm-ack:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=both BRINGUP=0 $(RV64_BOTH_DEV_DIR)/ufs-ext4.img
+	$(MAKE) -s ARCH=riscv64 ABI=both BRINGUP=0 NATIVE_RUST_UFSD=1 \
+		NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1 native-rust-ufsd
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	bin=$$(ls $(USER_BUILD_DIR)/ufsd-rust-*-test-drop-close-token-ack 2>/dev/null | head -1); \
+	log="$(SMOKE_LOG_DIR)/ufs-confirm-ack-riscv64.log"; \
+	test -x "$$bin" || { echo "smoke-ufs-confirm-ack: missing $$bin"; exit 1; }; \
+	cp "$$bin" "$$bin.strip"; \
+	riscv64-linux-gnu-strip "$$bin.strip" 2>/dev/null || true; \
+	mcopy -o -i $(RV64_BOTH_DEV_DIR)/fat32.img "$$bin.strip" ::/ufsd-rv; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' --send-line 'ufs_confirm_ack_test' \
+		--send-line 'poweroff' $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(RV64_BOTH_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=$(RV64_BOTH_DEV_DIR)/ufs-ext4.img,if=none,format=raw,id=x2 \
+		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.4 \
+		-kernel $(RV64_BOTH_DEV_DIR)/kernel.elf \
+			> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'CONFIRM_ACK: PASS' "$$log" && \
+	   grep -q 'UFSD_CONFIRM_DROP_ACK_ONCE' "$$log" && \
+	   grep -q 'UFSD_CLOSE_TOKEN_REPLAY_ACK: PASS' "$$log"; then \
+		echo "smoke-ufs-confirm-ack: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-ufs-confirm-ack: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
+	fi
+
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img

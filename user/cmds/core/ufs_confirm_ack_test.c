@@ -18,10 +18,16 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MP "/ufs"
+#define SERVICE "/bin/ufsd-rv"
+#define DEV_INDEX "1"
+#define FSTYPE "ext4"
 #define PATH MP "/ACK.TXT"
 
 static const char payload[] = "confirm-ack\n";
@@ -36,15 +42,41 @@ static int wait_mount(void)
 {
     struct stat st;
     for (int i = 0; i < 500; i++) {
-        if (stat(MP "/HELLO.TXT", &st) == 0)
+        /* The FAT fixture uses HELLO.TXT, the ext4 one hello.txt. */
+        if (stat(MP "/HELLO.TXT", &st) == 0 || stat(MP "/hello.txt", &st) == 0)
             return 0;
         usleep(20000);
     }
     return -1;
 }
 
+/* The boot init mounts the auxiliary ext4 device at /extra, and a block
+ * device has one writable owner, so release it before the service claims it. */
+static void release_boot_mounts(void)
+{
+    static const char *const boot[] = {
+        "/extra/dev/shm", "/extra/dev", "/extra/proc", "/extra/sys",
+        "/extra/run", "/extra",
+    };
+    for (size_t i = 0; i < sizeof(boot) / sizeof(boot[0]); i++)
+        (void)umount2(boot[i], 0);
+}
+
+static int start_service(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(SERVICE, "ufsd-rv", MP, DEV_INDEX, FSTYPE, (char *)0);
+        _exit(90);
+    }
+    return pid < 0 ? -1 : 0;
+}
+
 int main(void)
 {
+    release_boot_mounts();
+    if (start_service() != 0)
+        return fail("spawn service");
     if (wait_mount() != 0)
         return fail("service mount");
 
