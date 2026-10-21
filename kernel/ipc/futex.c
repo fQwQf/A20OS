@@ -19,6 +19,9 @@
 #include <stdint.h>
 #include "mm/slab.h"
 #include "sys/usercopy.h"
+#ifdef CONFIG_FUTEX_COW_WINDOW_TEST
+#include "uapi/a20/futex_cow_window.h"
+#endif
 
 /*
  * A20OS user futex engine (ABI-agnostic core module).
@@ -594,6 +597,12 @@ static int futex_wake_op_new_value(int oldval, int op, int oparg, int *out)
 /* Preparation may fault/COW; mapping and the atomic store share mm->lock. */
 static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
                                uintptr_t *pkey_out);
+/* Preparation may fault/COW; mapping and the atomic store share mm->lock.
+ * See FUTEX_WRITABLE_WORD_WINDOW for the retry contract. */
+static int futex_writable_word_locked(task_t *t, int *uaddr,
+                                      volatile int **word_out,
+                                      uintptr_t *pkey_out,
+                                      uint64_t *mm_flags);
 
 static unsigned futex_count_locked(wait_queue_t *q, futex_wake_arg_t *arg,
                                     unsigned limit)
@@ -649,16 +658,13 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
          * dereference uaddr1, matching the wake side's virtual-key contract. */
         if (!private && copy_from_user(&dummy, uaddr, sizeof(dummy)) < 0)
             return -EFAULT;
-        int r = user_prepare_write(cur, (uint64_t)vkey2);
-        if (r < 0) return r;
-        uint64_t mf = spin_lock_irqsave(&mm->lock);
+        uint64_t mf = 0;
         volatile int *word = NULL;
         uintptr_t phys1 = 0, phys2 = 0;
-        r = futex_user_word_map(cur, uaddr2, &word, &phys2);
-        if (r < 0 || (!private &&
-                      !futex_user_word_locked(cur, uaddr, &phys1))) {
+        int r = futex_writable_word_locked(cur, uaddr2, &word, &phys2, &mf);
+        if (r < 0) return r;
+        if (!private && !futex_user_word_locked(cur, uaddr, &phys1)) {
             spin_unlock_irqrestore(&mm->lock, mf);
-            if (r < 0 && r != -EAGAIN) return r;
             continue;
         }
         if (private) phys2 = 0;
@@ -762,6 +768,86 @@ static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
     return 0;
 }
 
+/*
+ * FUTEX_WRITABLE_WORD_WINDOW
+ *
+ * A futex word must be both resolved writable and have its translation pinned
+ * before the atomic store, and those two steps cannot share one lock
+ * acquisition: user_prepare_write() breaks COW and must run without
+ * mm->lock, while every read-modify-write of the word runs under it.  In
+ * between, a concurrent fork can write-protect the leaf again, so the
+ * translation must be re-validated under mm->lock and the whole preparation
+ * retried -- never store into a frame that a fork just made COW-shared with a
+ * child, or the store is invisible to (or worse, shared with) that child.
+ *
+ * Three call sites need exactly this protocol, so it lives here once instead
+ * of being hand-rolled at each: futex_pi_acquire(), futex_pi_release() and
+ * futex_wake_op().  They had drifted -- two retried with `continue`, one with
+ * `goto retry` -- and a single owner of the decision also gives the COW-window
+ * test one place to inject.
+ *
+ * On success returns 0 with mm->lock held and *mm_flags set; the caller
+ * releases it with spin_unlock_irqrestore(&t->mm->lock, *mm_flags) once its
+ * atomic store is done.  On failure returns a negative errno with no lock
+ * held.  -EAGAIN never escapes: hitting the window is retried here, because
+ * every caller had to do the same thing with it.
+ */
+#ifdef CONFIG_FUTEX_COW_WINDOW_TEST
+/* Test injection, see kernel/include/uapi/a20/futex_cow_window.h: leave the
+ * leaf in the write-protected state a concurrent fork would have produced
+ * after user_prepare_write() resolved COW, once per task. */
+static int futex_cow_window_skip_prepare(task_t *t, int *uaddr)
+{
+    /* One-shot per task, held outside task_t so the test build keeps the same
+     * struct layout as production: only the single-threaded probe in
+     * user/cmds/core/futex_cow_window_test.c ever addresses this page. */
+    static int injected_pid;  /* pid_t is not a kernel type */
+    uintptr_t va = (uintptr_t)uaddr & ~(uintptr_t)(PAGE_SIZE - 1);
+    if (va != A20_FUTEX_COW_TEST_VA || injected_pid == t->pid)
+        return 0;
+    injected_pid = t->pid;
+    kerr("[FUTEX-COW-WINDOW] pid=%d inject va=0x%lx\n", t->pid,
+         (unsigned long)va);
+    return 1;
+}
+#else
+static inline int futex_cow_window_skip_prepare(task_t *t, int *uaddr)
+{
+    (void)t;
+    (void)uaddr;
+    return 0;
+}
+#endif
+
+static int futex_writable_word_locked(task_t *t, int *uaddr,
+                                      volatile int **word_out,
+                                      uintptr_t *pkey_out,
+                                      uint64_t *mm_flags)
+{
+    for (;;) {
+        if (!futex_cow_window_skip_prepare(t, uaddr)) {
+            int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
+            if (pr < 0)
+                return pr;
+        }
+
+        uint64_t flags = spin_lock_irqsave(&t->mm->lock);
+        volatile int *word = NULL;
+        uintptr_t pkey = 0;
+        int mr = futex_user_word_map(t, uaddr, &word, &pkey);
+        if (mr == 0) {
+            *word_out = word;
+            if (pkey_out)
+                *pkey_out = pkey;
+            *mm_flags = flags;
+            return 0;
+        }
+        spin_unlock_irqrestore(&t->mm->lock, flags);
+        if (mr != -EAGAIN)
+            return mr;
+    }
+}
+
 int futex_pi_acquire(int *uaddr, int try_only)
 {
     if ((uintptr_t)uaddr & (sizeof(int) - 1))
@@ -773,20 +859,13 @@ int futex_pi_acquire(int *uaddr, int try_only)
     uintptr_t vkey = (uintptr_t)uaddr;
 
     for (;;) {
-        int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
-        if (pr < 0)
-            return pr;
-
-        uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+        uint64_t mm_flags = 0;
         volatile int *word = NULL;
         uintptr_t pkey = 0;
-        int mr = futex_user_word_map(t, uaddr, &word, &pkey);
-        if (mr < 0) {
-            spin_unlock_irqrestore(&t->mm->lock, mm_flags);
-            if (mr == -EAGAIN)
-                continue;
+        int mr = futex_writable_word_locked(t, uaddr, &word, &pkey,
+                                            &mm_flags);
+        if (mr < 0)
             return mr;
-        }
         /* COW may change the physical key.  Derive the bucket only after the
          * writable translation has been validated under mm->lock. */
         wait_queue_t *q = &g_futex_buckets[
@@ -856,21 +935,12 @@ int futex_pi_release(int *uaddr)
         return -ESRCH;
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
-retry:
-    int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
-    if (pr < 0)
-        return pr;
-
-    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    uint64_t mm_flags = 0;
     volatile int *word = NULL;
     uintptr_t pkey = 0;
-    int mr = futex_user_word_map(t, uaddr, &word, &pkey);
-    if (mr < 0) {
-        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
-        if (mr == -EAGAIN)
-            goto retry;
+    int mr = futex_writable_word_locked(t, uaddr, &word, &pkey, &mm_flags);
+    if (mr < 0)
         return mr;
-    }
     wait_queue_t *q = &g_futex_buckets[
         a20_futex_bucket_index(vkey, pkey)];
     uint64_t q_flags = spin_lock_irqsave(&q->lock);

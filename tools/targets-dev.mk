@@ -25,6 +25,7 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 		--envelope-acquire-race-test "$(ENVELOPE_ACQUIRE_RACE_TEST)" \
 		--syscall-smoke-task-construction-test "$(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST)" \
 		--trap-storm-test "$(TRAP_STORM_TEST)" \
+		--futex-cow-window-test "$(FUTEX_COW_WINDOW_TEST)" \
 		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
 		--skip "*/.git user/build user/external/musl/build-*"
 $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build

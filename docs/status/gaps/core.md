@@ -16,13 +16,6 @@
 - 关闭条件：采集 B1 基线，按同一协议复测拆分后的竞争并给出可分辨结论；`-ENOTCONN` 窗口要么命中并修复，要么给出排除依据。
 - 来源：[current/server-readiness.md](../current/server-readiness.md) §八、[measurements/lock-after.md](../measurements/lock-after.md)。
 
-### CORE-06 futex PI 的窄窗口
-
-- 现状：prepare 后 fork/COW 窗口已补持锁可写复查与解锁重试，`pi-cow-isolation` 在双架构单核/四核通过。
-- 缺口：确定性窄窗口故障注入仍缺失，无法证明该窗口被覆盖。
-- 关闭条件：注入在 COW 后、解锁重试路径上命中并验证不丢唤醒；负控失败。
-- 来源：原 `known-issues.md` 当前工程队列。
-
 ### CORE-07 arm32 的 FP 上下文
 
 - 现状：riscv32 与 ppc64le 已补 trap 帧的 FP 保存（ppc64le 仅编译验证）；arm32 未修。
