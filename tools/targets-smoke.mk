@@ -556,6 +556,17 @@ smoke-vfs-stress-smp2:
 smoke-vfs-stress-smp8:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp8
 
+# No-journal ext4 crash recovery: open+unlink, kill the machine, reboot the
+# same image.  The remount must admit the unclean image, finish the unlink, and
+# leave a filesystem e2fsck still accepts with the orphan inode actually freed.
+smoke-ext4-recovery:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	$(PYTHON) tools/ext4_unjournaled_recovery_gate.py \
+		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
