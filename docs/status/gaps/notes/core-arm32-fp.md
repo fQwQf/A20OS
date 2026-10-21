@@ -23,7 +23,10 @@ ppc64le（`MSR_FP`）都启用；loongarch32/armv7m 无 FPU，不受影响。
 `ldmia/stmia` 改成 7 轮 8 字，两侧返回路径各加 `vldmia`/`vmsr`），内核能编过，但**第一次用户态 syscall
 之后整机挂死**（`undef_vector: b .` 的形态：无输出、无 panic）。已排除的：IRQ 上下文里的 `vstmia` 正常
 （每次 tick 都走，启动能过）；单独禁用用户返回路径的恢复仍挂；帧尺寸/银行栈保留（240 < 4096）与
-`task_context_t` 偏移都没变。未定位，改动已撤回，没有留在树里。
+`task_context_t` 偏移都没变。未定位，改动已撤回，没有留在树里。用 `gdb-multiarch` 连 QEMU 桩看过挂死现场：CPU 停在
+`arm32_vector_table+12`（prefetch abort 槽）且 `CPSR` 模式位是 ABT(0x17)、I/F 都屏蔽，即向量表本身
+在当时的翻译机制下取指失败，向量页不可达 → 反复 abort 自旋；既没有 panic 也没有输出，与观察一致。
+下一步应从"陷阱入口/返回在 ABT 模式下把 TTBR0 留在了哪张页表"入手，而不是继续猜 FP 指令。
 
 ## 用例
 
