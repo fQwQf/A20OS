@@ -80,7 +80,8 @@ struct SegSpec {
 #[cfg(target_pointer_width = "64")]
 const _: [(); 80] = [(); core::mem::size_of::<SegSpec>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 48] = [(); core::mem::size_of::<SegSpec>()];
+// 56, not 48: the two u64 fields keep 8-byte alignment under ilp32d.
+const _: [(); 56] = [(); core::mem::size_of::<SegSpec>()];
 
 unsafe extern "C" {
     // Existing MM primitives: interval search, list insert, page-table

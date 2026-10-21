@@ -37,7 +37,13 @@ pub struct DcacheEntry {
     pub accessed: u8,
 }
 
-const _: [(); 6 * 4 + 8 + 8 + DCACHE_NAME_LEN + 8 + 1 + 7] =
+// The name starts at 40 on both widths because parent_ino is 8-byte aligned
+// (pinned by the offset_of! check below), so the size is that prefix plus the
+// name, a pointer-width vn, and `accessed`, rounded up to the struct's
+// 8-byte alignment.  Spelling the pointer widths as size_of::<usize>() is what
+// makes the ILP32 case 304 instead of the LP64 312.
+const _: [(); (40 + DCACHE_NAME_LEN + core::mem::size_of::<usize>() + 1 + 7)
+              / 8 * 8] =
     [(); core::mem::size_of::<DcacheEntry>()];
 const _: [(); 24] = [(); core::mem::offset_of!(DcacheEntry, mnt)];
 const _: [(); 40] = [(); core::mem::offset_of!(DcacheEntry, name)];
