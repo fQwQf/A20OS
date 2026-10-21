@@ -137,7 +137,7 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。通过 15 项；失败 9 项：`check-a20-tests`（§5）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`host-tests`（`check-proc-wait-window` 找不到 `WAIT4_C_ENGINE_BEGIN` 标记）、`check-task-lifetime-boundary`、`check-abi-boundary`、`check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记）、`check-task-state-boundary`、`check-arch-boundary`、`check-doc-drift`（8 条 gates.py 断言已通过；同目标的 `tools/check_doc_citations.py` 仍报 12 条越界引用，集中在 `docs/net/**` 与 `docs/roadmap/**`，另有 `gen_linux_syscall_coverage.py --check` 因 ABI-08 失败，见 [DOCS-01](../gaps/docs.md)） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。通过 15 项；失败 9 项：`check-a20-tests`（§5）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`host-tests`（`check-proc-wait-window` 找不到 `WAIT4_C_ENGINE_BEGIN` 标记）、`check-task-lifetime-boundary`、`check-abi-boundary`、`check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记）、`check-task-state-boundary`、`check-arch-boundary`、`check-doc-drift`（8 条 gates.py 断言已通过；同目标的 `tools/check_doc_citations.py` 仍报 12 条越界引用，集中在 `docs/net/**` 与 `docs/roadmap/**`，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-08 失败，见 [ABI-08](../gaps/abi-ipc.md)） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |

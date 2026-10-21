@@ -21,4 +21,4 @@
 | `check-abi-boundary`、`check-envelope-coverage`、`check-task-state-boundary` | ABI / IPC | [abi-ipc.md](abi-ipc.md) |
 | `check-arch-boundary` | CORE / MM / ABI | [core.md](core.md) |
 | `check-stm32f103`（硬编码 MMIO 地址） | DRIVER / 平台 | [drivers.md](drivers.md) |
-| `check-doc-drift` 的剩余引用、`check-stm32f103` 缺 `rg` | 文档与门禁自身 | [docs.md](docs.md) |
+| `check-doc-drift` 的剩余引用、`check-stm32f103` 缺 `rg` | 文档与门禁自身 | [docs.md](docs.md) DOCS-04/05 |
