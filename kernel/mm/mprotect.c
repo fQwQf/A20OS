@@ -28,11 +28,18 @@ static int mm_mprotect_needs_shared_write_locked(mm_struct_t *mm,
                                                   size_t len,
                                                   int prot)
 {
-    if (!(prot & PROT_WRITE) || !len || addr >= USER_VA_LIMIT ||
-        len > UINT64_MAX - (PAGE_SIZE - 1))
+    if (!(prot & PROT_WRITE) || !len || addr >= USER_VA_LIMIT)
+        return 0;
+    /* Bound the round-up and the end computation by the native address width
+     * rather than by UINT64_MAX: on a 32-bit build a len/addr pair that wraps
+     * the address width has to be rejected here, or the scan below stops at
+     * the wrapped end and skips the shared-file mappings past it -- which is
+     * exactly the range that must join the shutdown admission transaction. */
+    vaddr_t limit = (vaddr_t)-1;
+    if (len > limit - (PAGE_SIZE - 1))
         return 0;
     len = ROUND_UP(len, PAGE_SIZE);
-    if (len > UINT64_MAX - addr)
+    if ((vaddr_t)len > limit - addr)
         return 0;
     vaddr_t end = addr + len;
     for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
@@ -101,8 +108,8 @@ _Static_assert(sizeof(struct a20_mprotect_rec) == 48, "Rust/C mprotect rec ABI")
 _Static_assert(sizeof(struct a20_mprotect_leaf) == 48, "Rust/C mprotect leaf ABI");
 _Static_assert(sizeof(struct a20_mprotect_bits) == 32, "Rust/C mprotect bits ABI");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_mprotect_rec) == 28, "Rust/C mprotect rec ABI");
-_Static_assert(sizeof(struct a20_mprotect_leaf) == 28, "Rust/C mprotect leaf ABI");
+_Static_assert(sizeof(struct a20_mprotect_rec) == 40, "Rust/C mprotect rec ABI");
+_Static_assert(sizeof(struct a20_mprotect_leaf) == 32, "Rust/C mprotect leaf ABI");
 _Static_assert(sizeof(struct a20_mprotect_bits) == 16, "Rust/C mprotect bits ABI");
 #endif
 
@@ -193,8 +200,14 @@ void a20_mprotect_probe(const void *mm_ptr, uintptr_t va,
     out->level = 0;
     out->present = 0;
     out->reserved = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    /* Bridge the width-fixed Rust ABI struct (int32_t/uintptr_t) to
+     * pt_lookup_leaf()'s native int/vaddr_t: same width, different C type on
+     * a 32-bit target. */
+    int level = 0;
+    vaddr_t base = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &out->size);
+    out->level = level;
+    out->base = base;
     if (!pte)
         return;
     out->pte = (uintptr_t)*pte;
@@ -217,12 +230,16 @@ int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
     pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
     if (!pte)
         return 0;
+#if defined(ARCH_HAS_PGTABLE_OPS)
     pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
     if (ltab)
         mm_pt_node_lock(ltab);
+#endif
     if (*pte != (pte_t)observed) {
+#if defined(ARCH_HAS_PGTABLE_OPS)
         if (ltab)
             mm_pt_node_unlock(ltab);
+#endif
         return 0;
     }
     pte_t replacement = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
@@ -230,10 +247,12 @@ int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
         *pte = replacement;
         mm_tlb_note_change(mm, va, PAGE_SIZE);
     }
+#if defined(ARCH_HAS_PGTABLE_OPS)
     if (ltab)
         (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), (pte_t)flags);
     if (ltab)
         mm_pt_node_unlock(ltab);
+#endif
     return 1;
 }
 
@@ -243,6 +262,7 @@ int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
  * like every other reader and writer of the byte. */
 void a20_mprotect_refresh_absent(void *mm_ptr, uintptr_t va, uintptr_t ptef)
 {
+#if defined(ARCH_HAS_PGTABLE_OPS)
     mm_struct_t *mm = mm_ptr;
     pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
     if (ltab)
@@ -251,6 +271,14 @@ void a20_mprotect_refresh_absent(void *mm_ptr, uintptr_t va, uintptr_t ptef)
         (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), (pte_t)ptef);
     if (ltab)
         mm_pt_node_unlock(ltab);
+#else
+    /* arm32's short-descriptor backend keeps no per-PTE status sidecar, so a
+     * never-faulted reservation has no status byte to carry the new
+     * permissions; the PTE a later fault installs takes them from the VMA. */
+    (void)mm_ptr;
+    (void)va;
+    (void)ptef;
+#endif
 }
 #else
 /* NOMMU has no page tables: the transaction takes its flat branch and never

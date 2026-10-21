@@ -55,6 +55,8 @@ struct Probe {
 
 #[cfg(target_pointer_width = "64")]
 const _: [(); 72] = [(); core::mem::size_of::<Probe>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 52] = [(); core::mem::size_of::<Probe>()];
 
 /// The COW-break flag subset.
 const KIND_COW: i32 = 0;

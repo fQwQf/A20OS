@@ -381,7 +381,15 @@ _Static_assert(sizeof(a20_elf_image_plan_t) ==
 _Static_assert(sizeof(a20_elf_layout_t) == 72, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_load_resources_t) == 144, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_load_result_t) == 136, "elf_rust ABI drift");
+/* interpreter_ops is the one struct here whose size follows the pointer
+ * width: its five function pointers are followed by a u8/u16/i32 tail whose
+ * padding depends on where that tail starts.  Every other struct is built
+ * from uint64_t members with explicit padding and is width-independent. */
+#if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(a20_elf_interpreter_ops_t) == 64, "elf_rust ABI drift");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(a20_elf_interpreter_ops_t) == 40, "elf_rust ABI drift");
+#endif
 _Static_assert(sizeof(a20_elf_auxv_pair_t) == 16, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_auxv_input_t) == 88, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_stack_plan_t) ==

@@ -59,7 +59,7 @@ struct a20_mmap_seg_spec {
 _Static_assert(sizeof(struct a20_mmap_seg_spec) == 80,
                "Rust/C mmap seg spec ABI");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_mmap_seg_spec) == 48,
+_Static_assert(sizeof(struct a20_mmap_seg_spec) == 56,
                "Rust/C mmap seg spec ABI");
 #endif
 

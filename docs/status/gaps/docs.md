@@ -31,3 +31,16 @@
 - 缺口：这两处文档的行号引用指向的位置不成立，读者按图索骥会落空；它们属于 NET 与路线图文档。
 - 关闭条件：这 12 条引用重指到符号当前位置，或对引用而非引文的场合去掉行号，`check_doc_citations.py` 通过。
 - 来源：`make check-doc-drift` 输出。
+
+### DOCS-06 v1.0-requirements.json 的 source-entry 扫描对行号敏感
+
+- 现状：`check-a20-tests` 的 `test_v1_requirements.test_generated_inventory_is_current` 比较
+  `docs/status/current/v1.0-requirements.json` 与 `tools/v1_requirements.py` 的实时扫描结果，
+  而扫描出的候选带行号、且把标识符 `pending` 当作“未完成”关键字。任何包只要动到被扫描文件
+  （例如测试夹具里的一个 C 变量名），条目集合就会不同，用例转红；本轮 MM-06 修好宿主夹具后
+  就撞上了这条，只把 `source_entries` 重算、保留 `source_hashes` 快照才恢复。
+- 缺口：这条用例把“清单随源码漂移”与“实现回退”混在一起，且一次重算会产生 2.6 MB 的
+  含哈希清单 diff；在多个包并行改源码的窗口里它必然为红。
+- 关闭条件：`pending` 之类的普通标识符不再命中关键字规则，或清单改为按内容而非行号标识候选，
+  使该用例只在语义变化时转红。
+- 来源：MM-06 的 `check-a20-tests` 复现（[mm.md](mm.md)）。

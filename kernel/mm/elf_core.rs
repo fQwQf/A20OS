@@ -4061,7 +4061,14 @@ const _: () = {
     assert!(size_of::<Layout>() == 72);
     assert!(size_of::<LoadResources>() == 144);
     assert!(size_of::<LoadResult>() == 136);
+    // InterpreterOps is the one struct here whose size follows the pointer
+    // width: five function pointers followed by a u8/u16/i32 tail whose
+    // padding depends on where that tail starts.  Every other struct above is
+    // built from u64 members with explicit padding and is width-independent.
+    #[cfg(target_pointer_width = "64")]
     assert!(size_of::<InterpreterOps>() == 64);
+    #[cfg(target_pointer_width = "32")]
+    assert!(size_of::<InterpreterOps>() == 40);
     assert!(size_of::<AuxvInput>() == 88);
     assert!(size_of::<StartInfoPlan>() == 48 + 2 * MAX_ARG_STRINGS * 8);
     assert!(size_of::<KexecSegmentWire>() == 32);
