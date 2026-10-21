@@ -89,6 +89,47 @@ static uint16_t ext4_state_transition(uint16_t state, int transition)
 }
 #endif
 
+/*
+ * Options that would change how the journal behaves.  This driver commits
+ * metadata in ordered mode with csum_v3 and has no data journal, no
+ * async-commit and no fast-commit path, so accepting these would advertise a
+ * mode the filesystem does not implement.  Everything else is passed through
+ * as before: unknown options are ignored, which is what the callers in this
+ * tree rely on.
+ */
+int ext4_validate_mount_options(const char *opts)
+{
+    static const char *const rejected[] = {
+        "data=journal", "data=writeback", "journal_async_commit",
+        "journal_checksum", "barrier=0", "nobarrier", "fast_commit",
+        "journal_dev",
+    };
+    if (!opts)
+        return 0;
+    for (const char *p = opts; *p; ) {
+        while (*p == ',')
+            p++;
+        const char *end = p;
+        while (*end && *end != ',')
+            end++;
+        size_t len = (size_t)(end - p);
+        for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+            if (strlen(rejected[i]) == len &&
+                strncmp(p, rejected[i], len) == 0) {
+                /* The kernel printf has no "%.*s": copy the name out. */
+                char name[32];
+                size_t n = len < sizeof(name) - 1 ? len : sizeof(name) - 1;
+                memcpy(name, p, n);
+                name[n] = '\0';
+                printf("[EXT4] refusing mount: unsupported option %s\n", name);
+                return -EOPNOTSUPP;
+            }
+        }
+        p = end;
+    }
+    return 0;
+}
+
 static int ext4_state_admit(uint16_t state)
 {
 #ifdef CONFIG_EXT4_RUST_EXTENT_TXN

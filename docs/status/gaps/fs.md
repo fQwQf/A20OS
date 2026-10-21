@@ -2,13 +2,6 @@
 
 对应 V1-FS。现状见 [current/fs-status.md](../current/fs-status.md)。
 
-### FS-02 JBD2 特性语义
-
-- 现状：运行期元数据走 JBD2 ordered commit；校验和记在 descriptor tag 内。
-- 缺口：barrier/async-commit 广告、ordered 与 journal-data 两种模式、fast commit、revoke 记录的延迟回滚用途均未完整实现。
-- 关闭条件：已广告的每种模式都真实实现并有崩溃注入用例；不支持的明确标注为未完成契约，不能只改文档删需求。
-- 来源：requirements N14。
-
 ### FS-03 文件数据块完整性校验
 
 - 现状：元数据与 JBD2 有校验和；文件内容损坏不可检测。

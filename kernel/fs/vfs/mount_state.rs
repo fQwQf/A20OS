@@ -580,7 +580,8 @@ pub struct VfsMountDispatchOps {
     pub mount_cgroup: Option<extern "C" fn(*const u8, *const u8, *const u8, c_int, *const u8) -> c_int>,
     pub mount_virtual: Option<extern "C" fn(*const u8, *const u8, *const u8, c_int, *const u8) -> c_int>,
     pub mount_ram: Option<extern "C" fn(*const u8, *const u8, *const u8, c_int, *const u8) -> c_int>,
-    pub mount_block: Option<extern "C" fn(c_int, c_int, *const u8, *const u8, c_int) -> c_int>,
+    /// (dev index, partition, target path, fstype, flags, option string)
+    pub mount_block: Option<extern "C" fn(c_int, c_int, *const u8, *const u8, c_int, *const u8) -> c_int>,
 }
 
 unsafe fn cstr_eq(a: *const u8, b: &[u8]) -> bool {
@@ -636,10 +637,10 @@ pub unsafe extern "C" fn a20_vfs_mount_dispatch(
     let auto=unsafe { *fstype == 0 };
     let attempt = |index:c_int| {
         if auto {
-            let mut rc=try_one(index,part,path,b"ext4\0".as_ptr(),flags);
-            if rc < 0 { rc=try_one(index,part,path,b"vfat\0".as_ptr(),flags); }
+            let mut rc=try_one(index,part,path,b"ext4\0".as_ptr(),flags,data);
+            if rc < 0 { rc=try_one(index,part,path,b"vfat\0".as_ptr(),flags,data); }
             rc
-        } else { try_one(index,part,path,fstype,flags) }
+        } else { try_one(index,part,path,fstype,flags,data) }
     };
     let mut rc=attempt(primary);
     if rc < 0 && part > 1 {
@@ -1383,7 +1384,7 @@ fn tget32<F: Fn(&Tree)->u32>(f: F) -> u32 { TREE.with(|t| f(&t.borrow())) }
     extern "C" fn md_cgroup(_: *const u8, _: *const u8, _: *const u8, _: c_int, _: *const u8) -> c_int { MOUNT_ROUTE.with(|s| s.borrow_mut().1.push((1,0,0))); 11 }
     extern "C" fn md_virtual(_: *const u8, _: *const u8, _: *const u8, _: c_int, _: *const u8) -> c_int { MOUNT_ROUTE.with(|s| s.borrow_mut().1.push((2,0,0))); 12 }
     extern "C" fn md_ram(_: *const u8, _: *const u8, _: *const u8, _: c_int, _: *const u8) -> c_int { MOUNT_ROUTE.with(|s| s.borrow_mut().1.push((3,0,0))); 13 }
-    extern "C" fn md_block(d:c_int,p:c_int,_:*const u8,fs:*const u8,_:c_int) -> c_int {
+    extern "C" fn md_block(d:c_int,p:c_int,_:*const u8,fs:*const u8,_:c_int,_:*const u8) -> c_int {
         let first=unsafe { *fs };
         let route=if first==b'e' {40} else if first==b'v' {41} else {4};
         let fail= MOUNT_ROUTE.with(|s| { let mut s=s.borrow_mut(); s.1.push((route,d,p)); route==40 && p==0 });

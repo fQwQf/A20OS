@@ -574,6 +574,15 @@ static int ext4_open_unlink(void)
     }
 
     mkdir("/tmp/e4m", 0755);
+    /* Options that would change journaling semantics must be refused rather
+     * than silently ignored: this driver only commits metadata in ordered
+     * mode, so accepting data=journal would advertise a mode it lacks. */
+    errno = 0;
+    if (syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0,
+                "data=journal") != -1 || errno != EOPNOTSUPP) {
+        rmdir("/tmp/e4m");
+        return fail("ext4-reject-data-journal");
+    }
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0, "");
     if (r < 0) {

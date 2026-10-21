@@ -179,7 +179,7 @@ struct vfs_mount_dispatch_ops {
     int (*mount_ram)(const char *dev, const char *path, const char *fstype,
                      int flags, const char *data);
     int (*mount_block)(int dev_idx, int part_num, const char *path,
-                       const char *fstype, int flags);
+                       const char *fstype, int flags, const char *data);
 };
 int a20_vfs_mount_dispatch(const struct vfs_mount_dispatch_ops *ops,
                            const char *dev, const char *path,

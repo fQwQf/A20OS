@@ -122,6 +122,14 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 - 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些更新全部落在同一个 journal 事务里，因此断电原子性等同 Linux ext4 的 ordered 模式。
 - `vfs_fsync` 会先同步共享脏映射和 vnode page cache；ext4 的 `sync_vnode` 随后用 `bcache_sync_scoped` 刷出文件数据、inode table、bitmap、group descriptor 和 superblock 页，深层 extent 或定点数组不足时回退为整个 mount sync（`kernel/fs/vfs/file.c`、`kernel/fs/diskfs/ext4_sync.c`）。
 
+日志模式契约（`ext4_journal.c`）：
+
+- 实现的只有 **ordered 元数据日志**：数据块在 descriptor 之前落盘，元数据经 journal 提交。可写挂载下没有第二种数据模式。
+- revoke 记录**已实现**：descriptor 里的 `JBD2_REVOKE_BLOCK` 记录按 sequence 收集，重放时跳过被撤销的块（否则重放会把已释放的块写回去）。
+- 明确**不支持**并在挂载时拒绝的选项：`data=journal`、`data=writeback`、`journal_async_commit`、`journal_checksum`（v2）、`barrier=0`、`nobarrier`、`fast_commit`、`journal_dev`。这些选项改变的是日志语义本身，静默忽略等于对外宣称实现了没有实现的模式；`ext4_validate_mount_options()` 在设备打开后、任何写入前返回 `-EOPNOTSUPP`。
+- 日志 superblock 侧同样只接受 `REVOKE | 64BIT | CSUM_V3` + crc32c；`async_commit`(0x4) 与 `fast_commit`(0x20) 的镜像在 `jbd2_load_superblock()` 就被拒绝，不会进入重放。
+- 崩溃注入覆盖的就是这个已实现的模式：`make smoke-ext4-journal` 在 recover-flag / journal / commit / checkpoint 四个点各崩溃一次，断言承诺过的写入存活、未承诺的不出现、恢复前后 `e2fsck -fn` 都干净。`data=journal` 之类的模式不在契约内，因此没有、也不声称有对应用例。
+
 ext4 相对 Linux ABI 的缺口：
 
 - 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c`）。
