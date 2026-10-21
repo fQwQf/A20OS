@@ -1,13 +1,126 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if !defined(__x86_64__)
+#if defined(__arm__)
+/*
+ * arm32: the kernel and this program are both built hard-float, so d0-d15 are
+ * live across every syscall and every preemption.  A trap frame that does not
+ * carry them lets two tasks share one physical register file: whichever ran
+ * last wins.
+ *
+ * The protocol is deterministic rather than statistical.  The parent loads its
+ * own sentinels, hands the CPU to a child that loads different ones, and only
+ * then reads its registers back.  With per-trap save/restore the parent reads
+ * its own values; without it, it reads the child's.
+ */
+typedef struct {
+    uint64_t d[16];
+    uint32_t fpscr;
+} arm_fp_t;
+
+static void arm_fp_load(const uint64_t d[16])
+{
+    __asm__ volatile("vldmia %0, {d0-d15}" ::"r"(d)
+                     : "memory", "d0", "d1", "d2", "d3", "d4", "d5", "d6",
+                       "d7", "d8", "d9", "d10", "d11", "d12", "d13", "d14",
+                       "d15");
+}
+
+static void arm_fp_save(uint64_t d[16], uint32_t *fpscr)
+{
+    __asm__ volatile("vstmia %0, {d0-d15}" ::"r"(d) : "memory");
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(*fpscr));
+}
+
+static void arm_fill(uint64_t d[16], uint64_t seed)
+{
+    for (int i = 0; i < 16; i++)
+        d[i] = seed + (uint64_t)i * UINT64_C(0x0123456789abcdef);
+}
+
 int main(void)
 {
-    puts("FORK_FPU: SKIP (requires x86_64)");
+    int go[2], done[2];
+    if (pipe(go) != 0 || pipe(done) != 0) {
+        puts("FORK_FPU: FAIL pipe");
+        return 1;
+    }
+    uint64_t mine[16];
+    arm_fill(mine, UINT64_C(0x1111111111111111));
+
+    pid_t child = fork();
+    if (child < 0) {
+        puts("FORK_FPU: FAIL fork");
+        return 1;
+    }
+    if (child == 0) {
+        close(go[1]);
+        close(done[0]);
+        char byte;
+        if (read(go[0], &byte, 1) != 1)
+            _exit(2);
+        uint64_t theirs[16];
+        arm_fill(theirs, UINT64_C(0x2222222222222222));
+        arm_fp_load(theirs);
+        /* Stay on the FPU last so an unsaved switch is unambiguous.  A spin,
+         * not usleep: arm32's nanosleep does not wake yet, and the probe must
+         * measure the FP context, not that bug. */
+        for (volatile int spin = 0; spin < 2000000; spin++)
+            ;
+        uint64_t after[16];
+        uint32_t fpscr;
+        arm_fp_save(after, &fpscr);
+        int ok = memcmp(after, theirs, sizeof(after)) == 0;
+        if (write(done[1], &ok, sizeof(ok)) != sizeof(ok))
+            _exit(3);
+        _exit(ok ? 0 : 4);
+    }
+    close(go[0]);
+    close(done[1]);
+
+    arm_fp_load(mine);
+    if (write(go[1], "x", 1) != 1) {
+        puts("FORK_FPU: FAIL go");
+        return 1;
+    }
+    /* The syscall and the child's run both happen before this read. */
+    int child_ok = 0;
+    if (read(done[0], &child_ok, sizeof(child_ok)) != sizeof(child_ok)) {
+        puts("FORK_FPU: FAIL done");
+        return 1;
+    }
+    uint64_t after[16];
+    uint32_t fpscr;
+    arm_fp_save(after, &fpscr);
+
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        printf("FORK_FPU: FAIL child status=%d\n", status);
+        return 1;
+    }
+    if (!child_ok) {
+        puts("FORK_FPU: FAIL child registers changed under it");
+        return 1;
+    }
+    puts("FORK_FPU: arm32-child-registers PASS");
+    if (memcmp(after, mine, sizeof(after)) != 0) {
+        printf("FORK_FPU: FAIL parent d0=0x%llx want 0x%llx\n",
+               (unsigned long long)after[0], (unsigned long long)mine[0]);
+        return 1;
+    }
+    puts("FORK_FPU: arm32-parent-registers PASS");
+    puts("FORK_FPU: PASS");
+    return 0;
+}
+#elif !defined(__x86_64__)
+int main(void)
+{
+    puts("FORK_FPU: SKIP (requires x86_64 or arm32)");
     return 0;
 }
 #else

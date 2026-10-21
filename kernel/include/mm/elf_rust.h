@@ -183,7 +183,12 @@ typedef struct {
     int32_t (*open_interpreter)(void *, const uint8_t *, size_t, int32_t *);
     size_t path_capacity;
     uint8_t nommu;
-    uint8_t _pad0[7];
+    /* Pad to the next pointer field.  A literal 7 is the LP64 size: on ILP32
+     * the pointer needs only 4-byte alignment, so an explicit 7 bytes pushed
+     * every callback that follows four bytes past where the Rust mirror puts
+     * it, and the transaction read garbage Option pointers and refused every
+     * image with -EINVAL. */
+    uint8_t _pad0[sizeof(void *) - sizeof(uint8_t)];
     int32_t (*load_interpreter)(void *, uint64_t);
     void (*close_interpreter)(void *);
     int32_t (*map_stack)(void *);
@@ -197,6 +202,14 @@ typedef struct {
     void (*discard_nommu)(void *);
     void (*destroy_pgdir)(void *);
 } a20_elf_load_transaction_ops_t;
+
+/* The first callback after the two non-pointer fields; pinned because a pad
+ * sized for the wrong pointer width shifts every later entry and the Rust side
+ * sees NULLs where callbacks should be. */
+_Static_assert(__builtin_offsetof(a20_elf_load_transaction_ops_t,
+                                  load_interpreter) ==
+                   (sizeof(void *) == 8 ? 88 : 44),
+               "elf_rust load-transaction ops layout");
 
 typedef struct {
     void *context;
