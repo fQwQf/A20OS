@@ -95,7 +95,7 @@ struct Entry {
 #[cfg(target_pointer_width = "64")]
 const _: [(); 48] = [(); core::mem::size_of::<Entry>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 24] = [(); core::mem::size_of::<Entry>()];
+const _: [(); 40] = [(); core::mem::size_of::<Entry>()];
 
 const ENTRIES: usize = 32;
 

@@ -4061,7 +4061,9 @@ const _: () = {
     assert!(size_of::<Layout>() == 72);
     assert!(size_of::<LoadResources>() == 144);
     assert!(size_of::<LoadResult>() == 136);
-    assert!(size_of::<InterpreterOps>() == 64);
+    // 5 pointers + 18 bytes of flags: 64 on LP64, 40 on ILP32, matching the
+    // same pair in kernel/include/mm/elf_rust.h.
+    assert!(size_of::<InterpreterOps>() == if size_of::<usize>() == 8 { 64 } else { 40 });
     assert!(size_of::<AuxvInput>() == 88);
     assert!(size_of::<StartInfoPlan>() == 48 + 2 * MAX_ARG_STRINGS * 8);
     assert!(size_of::<KexecSegmentWire>() == 32);

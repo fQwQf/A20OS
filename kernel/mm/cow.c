@@ -185,10 +185,21 @@ void a20_cow_probe(const void *parent_ptr, uintptr_t va,
         return;
     memset(out, 0, sizeof(*out));
     out->pfn = PFN_NONE;
-    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    /* pt_lookup_leaf() wants vaddr_t/size_t; the struct stores pointer-width
+     * fields so its Rust mirror (kernel/mm/cow_clone.rs, a #[repr(C)] Src with
+     * usize base/size) keeps the same layout on ILP32.  Converting through
+     * locals keeps both true -- passing the uintptr_t fields directly is an
+     * incompatible-pointer-type error wherever uintptr_t is narrower than
+     * vaddr_t, which is every 32-bit port. */
+    int level = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
     if (!src)
         return;
+    out->level = level;
+    out->base = (uintptr_t)base;
+    out->size = (uintptr_t)size;
     out->pte = (uintptr_t)*src;
     out->present = (*src & PTE_V) != 0;
 #ifdef CONFIG_SWAP

@@ -181,7 +181,7 @@ static void wait4_adapter_reap_release(void *context, void *child)
 /* Runs under the child's park_lock while the Rust report decision is taken;
  * applies the returned clear bits (never requested under WNOWAIT). */
 static int wait4_adapter_report_take(void *context, void *child_ptr,
-                                     int32_t state)
+                                     int state)
 {
     wait4_adapter_t *a = context;
     task_t *child = child_ptr;

@@ -28,12 +28,20 @@ static int mm_mprotect_needs_shared_write_locked(mm_struct_t *mm,
                                                   size_t len,
                                                   int prot)
 {
-    if (!(prot & PROT_WRITE) || !len || addr >= USER_VA_LIMIT ||
-        len > UINT64_MAX - (PAGE_SIZE - 1))
+    /* Bound the range in 64 bits before rounding and adding: doing it in the
+     * native width makes the comparison a compile-time constant on a 32-bit
+     * port (where len and addr cannot exceed a 64-bit limit), which is both a
+     * warning and the wrong guard -- what can wrap there is the round-up and
+     * the end address, not the limit comparison. */
+    uint64_t u_len = (uint64_t)len;
+    uint64_t u_addr = (uint64_t)addr;
+    if (!(prot & PROT_WRITE) || !u_len)
         return 0;
-    len = ROUND_UP(len, PAGE_SIZE);
-    if (len > UINT64_MAX - addr)
+    uint64_t rounded = ROUND_UP(u_len, PAGE_SIZE);
+    if (rounded > (uint64_t)USER_VA_LIMIT ||
+        u_addr > (uint64_t)USER_VA_LIMIT - rounded)
         return 0;
+    len = (size_t)rounded;
     vaddr_t end = addr + len;
     for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
          v = v->next) {
@@ -96,15 +104,20 @@ struct a20_mprotect_bits {
     uintptr_t x;
     uintptr_t cow;
 };
-#if __SIZEOF_POINTER__ == 8
-_Static_assert(sizeof(struct a20_mprotect_rec) == 48, "Rust/C mprotect rec ABI");
-_Static_assert(sizeof(struct a20_mprotect_leaf) == 48, "Rust/C mprotect leaf ABI");
-_Static_assert(sizeof(struct a20_mprotect_bits) == 32, "Rust/C mprotect bits ABI");
-#elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_mprotect_rec) == 28, "Rust/C mprotect rec ABI");
-_Static_assert(sizeof(struct a20_mprotect_leaf) == 28, "Rust/C mprotect leaf ABI");
-_Static_assert(sizeof(struct a20_mprotect_bits) == 16, "Rust/C mprotect bits ABI");
-#endif
+/* Measured for both widths, not scaled from the LP64 numbers: rec has a u64
+ * between pointer-width fields, so ILP32 is 40 (not 28); leaf is four
+ * pointer-width words plus four 32-bit scalars, 32 (not 28); bits is four
+ * pointer-width words, 16.  The Rust mirrors in mprotect_txn.rs pin the same
+ * pair. */
+_Static_assert(sizeof(struct a20_mprotect_rec) ==
+                   (sizeof(void *) == 8 ? 48 : 40),
+               "Rust/C mprotect rec ABI");
+_Static_assert(sizeof(struct a20_mprotect_leaf) ==
+                   (sizeof(void *) == 8 ? 48 : 32),
+               "Rust/C mprotect leaf ABI");
+_Static_assert(sizeof(struct a20_mprotect_bits) ==
+                   (sizeof(void *) == 8 ? 32 : 16),
+               "Rust/C mprotect bits ABI");
 
 int a20_mprotect_has_pgdir(const void *mm_ptr)
 {
@@ -193,10 +206,15 @@ void a20_mprotect_probe(const void *mm_ptr, uintptr_t va,
     out->level = 0;
     out->present = 0;
     out->reserved = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    int level = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
     if (!pte)
         return;
+    out->level = level;
+    out->base = (uintptr_t)base;
+    out->size = (uintptr_t)size;
     out->pte = (uintptr_t)*pte;
     out->present = (*pte & PTE_V) != 0;
     if (out->present) {

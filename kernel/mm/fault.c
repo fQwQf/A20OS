@@ -399,11 +399,13 @@ struct a20_cowf_probe {
     int32_t   pfn_valid;
     int32_t   order;
 };
-#if __SIZEOF_POINTER__ == 8
-_Static_assert(sizeof(struct a20_cowf_probe) == 72, "Rust/C cowf probe ABI");
-#elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_cowf_probe) == 48, "Rust/C cowf probe ABI");
-#endif
+/* 4 pointer-width words plus 4 + 28 bytes of scalars: 72 on LP64, 52 on
+ * ILP32.  (The previous 48 for ILP32 was never reachable -- it does not match
+ * the field list -- so a 32-bit build could not compile at all.)  The Rust
+ * mirror in kernel/mm/cow_fault.rs pins the same pair. */
+_Static_assert(sizeof(struct a20_cowf_probe) ==
+                   (sizeof(void *) == 8 ? 72 : 52),
+               "Rust/C cowf probe ABI");
 
 int a20_cowf_has_pgdir(const void *mm_ptr)
 {
@@ -419,10 +421,15 @@ void a20_cowf_probe(const void *mm_ptr, uintptr_t stval,
         return;
     memset(out, 0, sizeof(*out));
     out->pfn = PFN_NONE;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &out->base,
-                                &out->size);
+    /* See a20_cow_probe() in cow.c: the struct keeps pointer-width fields to
+     * match the Rust mirror, so the vaddr_t/size_t outputs go through locals. */
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &base, &size);
     if (!pte)
         return;
+    out->base = (uintptr_t)base;
+    out->size = (uintptr_t)size;
     out->slot = pte;
     out->pte = (uintptr_t)*pte;
     out->present = (*pte & PTE_V) != 0;

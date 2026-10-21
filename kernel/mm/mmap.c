@@ -55,13 +55,13 @@ struct a20_mmap_seg_spec {
     void     *vmo;
     void     *vmar_owner;
 };
-#if __SIZEOF_POINTER__ == 8
-_Static_assert(sizeof(struct a20_mmap_seg_spec) == 80,
+/* Measured, not derived: 11 fields whose layout alternates between 4- and
+ * 8-byte alignment, so 80 on LP64 and 56 on ILP32 (uint64_t keeps 8-byte
+ * alignment under ilp32d).  The old 48 for ILP32 did not match the field list
+ * and made every 32-bit build fail here. */
+_Static_assert(sizeof(struct a20_mmap_seg_spec) ==
+                   (sizeof(void *) == 8 ? 80 : 56),
                "Rust/C mmap seg spec ABI");
-#elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_mmap_seg_spec) == 48,
-               "Rust/C mmap seg spec ABI");
-#endif
 
 /* Copy the transaction's decisions into the record.  `nommu_raw` is the flat
  * allocation the mapping owns on NOMMU and NULL everywhere else; it is kept out

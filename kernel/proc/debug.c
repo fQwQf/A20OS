@@ -56,7 +56,10 @@ int a20_pt_view_fill(task_t *t, pt_view_t *out)
     out->orig_parent_pid = &t->ptrace_orig_parent_pid;
     out->stop_report_pending = &t->stop_report_pending;
     out->continue_report_pending = &t->continue_report_pending;
-    out->state = (int32_t *)&t->state;
+    /* t->state is proc_state_t (an int-sized enum); the view exposes it as
+     * an int* so the Rust side reads it as *mut i32.  The cast is the
+     * conversion between the two named types, not a width change. */
+    out->state = (int *)&t->state;
     out->pid = &t->pid;
     out->ppid = &t->ppid;
     out->parent = (void **)&t->parent;

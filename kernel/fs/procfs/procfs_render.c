@@ -422,7 +422,7 @@ static uint64_t gen_ticks(void) { return timer_get_ticks(); }
 static uint64_t gen_ticks_per_sec(void) { return TICKS_PER_SEC; }
 static const char *gen_bootargs(void) { return bootargs_get() ? bootargs_get() : ""; }
 static void gen_loadavg(uint64_t *a1, uint64_t *a5, uint64_t *a15,
-                        uint32_t *running, uint32_t *total, int *max_pid)
+                        unsigned *running, unsigned *total, int *max_pid)
 {
     proc_loadavg_snapshot(a1, a5, a15, running, total, max_pid);
 }

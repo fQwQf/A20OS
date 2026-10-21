@@ -210,10 +210,19 @@ void a20_madvise_leaf_probe(void *mm_ptr, uintptr_t va,
     out->size = 0;
     out->pfn = PFN_NONE;
     out->pad = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    /* The struct keeps pointer-width fields to match the Rust Leaf mirror
+     * (kernel/mm/madvise_policy.rs), so the vaddr_t/size_t outputs go through
+     * locals; passing them directly is an incompatible-pointer-type error on
+     * every 32-bit port. */
+    int level = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
     if (!pte)
         return;
+    out->level = level;
+    out->base = (uintptr_t)base;
+    out->size = (uintptr_t)size;
     out->present = (*pte & PTE_V) != 0;
     if (out->present)
         out->pfn = phys_to_pfn(arch_pte_addr(*pte));

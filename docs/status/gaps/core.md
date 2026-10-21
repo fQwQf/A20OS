@@ -12,6 +12,6 @@
 ### CORE-07 arm32 的 FP 上下文
 
 - 现状：riscv32 与 ppc64le 已补 trap 帧的 FP 保存（ppc64le 仅编译验证）；arm32 未修。
-- 缺口：arm32 用户态启用 VFP（`-mfpu=vfpv3-d16 -mfloat-abi=hard`），trap 帧与 `trap.S` 用逐字段断言强绑定，改动未验证；本机无 arm 工具链。
+- 缺口：arm32 用户态启用 VFP（`-mfpu=vfpv3-d16 -mfloat-abi=hard`），trap 帧与 `trap.S` 用逐字段断言强绑定，改动未验证。本机既无 `arm-linux-gnueabihf-gcc`、`arm-none-eabi-gcc` 也无 clang，且 sudo 被 `no_new_privs` 挡住，装不了工具链——所以"写 FP 保存/恢复"与"降级为 soft-float 契约"两条路都无法编译验证，而 arm32 内核本身也还编不过（见 [mm.md](mm.md) MM-05）。
 - 关闭条件：arm32 上 FP 上下文切换用例通过；或明确降级为不支持并写入平台契约。
 - 诊断：[notes/core-arm32-fp.md](notes/core-arm32-fp.md)。
