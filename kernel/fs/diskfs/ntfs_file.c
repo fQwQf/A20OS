@@ -22,6 +22,7 @@ int ntfs_vn_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
     memset(data, 0, len);
     ntfs_lock(fp->sb);
     int r = 0;
+    size_t got = 0;
     if (ntfs_resolve_data(fp) < 0) {
         r = -EIO;
     } else if (fp->data_resident) {
@@ -31,10 +32,12 @@ int ntfs_vn_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
                 n = len;
             uint8_t *rec = kmalloc(fp->sb->mft_record_size);
             if (rec) {
-                if (ntfs_read_record(fp->sb, fp->mft_index, rec) == 0)
+                if (ntfs_read_record(fp->sb, fp->mft_index, rec) == 0) {
                     memcpy(data, rec + fp->data_res_off + off, n);
-                else
+                    got = n;
+                } else {
                     r = -EIO;
+                }
                 kfree(rec);
             } else {
                 r = -ENOMEM;
@@ -48,10 +51,15 @@ int ntfs_vn_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
             if (ntfs_stream_read(fp->sb, fp->runs, fp->run_count,
                                  fp->data_size, off, data, n) < 0)
                 r = -EIO;
+            else
+                got = n;
         }
     }
     ntfs_unlock(fp->sb);
-    return r;
+    /* readpage's return value is the number of valid bytes: the page-cache
+     * fill transaction zeroes everything past it, so returning the status here
+     * discarded every page this function had just filled. */
+    return r < 0 ? r : (int)got;
 }
 
 

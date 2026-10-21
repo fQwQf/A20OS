@@ -1282,7 +1282,10 @@ pub unsafe extern "C" fn a20_uxfs_op_readpage(
             ptr::write_bytes((data as *mut u8).add(got as usize), 0, (len - got) as usize);
         }
     }
-    0
+    // readpage's return value is the number of valid bytes: the page-cache fill
+    // transaction zeroes everything past it, so returning 0 here discards the
+    // page the service just filled.
+    got as c_int
 }
 
 /// WRITEPAGE: writeback flushes whole pages, but only bytes within the file are
@@ -1438,6 +1441,7 @@ pub type NowNsFn = extern "C" fn() -> u64;
 pub type NegotiateUntilFn = extern "C" fn(*mut c_void, u64) -> c_int;
 pub type ShutdownRpcFn = extern "C" fn(*mut c_void, u64, *mut c_int) -> c_int;
 pub type MountLogFn = extern "C" fn(*const c_char, c_int);
+pub type ServerAliveFn = extern "C" fn(*mut c_void) -> c_int;
 
 /// Narrow mechanical bridge for the UXFS namespace plane.  Field order mirrors
 /// `struct a20_uxfs_ns` in `fs/uxfs_ops_state.h`.
@@ -1471,6 +1475,7 @@ pub struct A20UxfsNs {
     pub negotiate_lifetime_until: Option<NegotiateUntilFn>,
     pub shutdown_rpc: Option<ShutdownRpcFn>,
     pub mount_log: Option<MountLogFn>,
+    pub server_alive: Option<ServerAliveFn>,
 }
 
 struct Ns<'a> {
@@ -1502,6 +1507,7 @@ struct Ns<'a> {
     negotiate_lifetime_until: &'a NegotiateUntilFn,
     shutdown_rpc: &'a ShutdownRpcFn,
     mount_log: &'a MountLogFn,
+    server_alive: &'a ServerAliveFn,
 }
 
 impl<'a> Ns<'a> {
@@ -1540,6 +1546,7 @@ impl<'a> Ns<'a> {
             negotiate_lifetime_until: t.negotiate_lifetime_until.as_ref()?,
             shutdown_rpc: t.shutdown_rpc.as_ref()?,
             mount_log: t.mount_log.as_ref()?,
+            server_alive: t.server_alive.as_ref()?,
         })
     }
 
@@ -1773,9 +1780,12 @@ pub unsafe extern "C" fn a20_uxfs_ns_unmount(ns: *const A20UxfsNs, root: *mut c_
      * mid-flush. */
     let rc = (n.negotiate_lifetime_until)(sb as *mut c_void, deadline_ns);
     if rc < 0 {
-        if (n.peer_closed)(unsafe { (*sb).ep }) != 0 {
-            /* No task can issue further block I/O: drop the dead peer
-             * registration, leaving on-disk dirty state for recovery. */
+        if (n.peer_closed)(unsafe { (*sb).ep }) != 0 ||
+            (n.server_alive)(sb as *mut c_void) == 0 {
+            /* No task can issue further block I/O: either the channel saw the
+             * peer close, or the serving task is gone and will never touch the
+             * channel again.  Drop the dead peer registration, leaving on-disk
+             * dirty state for recovery. */
             (n.detach_server)(sb as *mut c_void);
             return 0;
         }
@@ -1786,7 +1796,8 @@ pub unsafe extern "C" fn a20_uxfs_ns_unmount(ns: *const A20UxfsNs, root: *mut c_
         let mut retry_safe: c_int = 0;
         let rc2 = (n.shutdown_rpc)(sb as *mut c_void, deadline_ns, &mut retry_safe);
         if rc2 < 0 {
-            if (n.peer_closed)(unsafe { (*sb).ep }) != 0 {
+            if (n.peer_closed)(unsafe { (*sb).ep }) != 0 ||
+                (n.server_alive)(sb as *mut c_void) == 0 {
                 (n.detach_server)(sb as *mut c_void);
                 return 0;
             }

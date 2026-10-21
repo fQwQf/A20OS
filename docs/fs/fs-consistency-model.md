@@ -130,6 +130,13 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 - 日志 superblock 侧同样只接受 `REVOKE | 64BIT | CSUM_V3` + crc32c；`async_commit`(0x4) 与 `fast_commit`(0x20) 的镜像在 `jbd2_load_superblock()` 就被拒绝，不会进入重放。
 - 崩溃注入覆盖的就是这个已实现的模式：`make smoke-ext4-journal` 在 recover-flag / journal / commit / checkpoint 四个点各崩溃一次，断言承诺过的写入存活、未承诺的不出现、恢复前后 `e2fsck -fn` 都干净。`data=journal` 之类的模式不在契约内，因此没有、也不声称有对应用例。
 
+完整性边界（有意的，不是待办）：ext4 的 on-disk 格式没有 per-file 数据块校验和，Linux 的 ext4 也没有。
+本驱动校验的是**元数据**（`metadata_csum`：superblock、group descriptor、bitmap、inode）和**日志记录**
+（JBD2 csum_v3），文件内容本身不做校验。要检测静默数据损坏需要另一种兼容机制（例如 fs-verity 的
+Merkle 树，一种只读文件的独立特性），或换用支持数据校验和的文件系统；为了"有数据校验和"而往 ext4
+镜像里塞私有字段会造出 e2fsprogs 读不了的格式，因此不做。`e2fsck -fn` 能发现元数据不一致，但发现
+不了文件内容里被翻转的字节。
+
 ext4 相对 Linux ABI 的缺口：
 
 - 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c`）。

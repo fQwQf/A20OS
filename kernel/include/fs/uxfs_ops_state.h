@@ -165,6 +165,10 @@ struct a20_uxfs_ns {
     int      (*negotiate_lifetime_until)(void *sb, uint64_t deadline_ns);
     int      (*shutdown_rpc)(void *sb, uint64_t deadline_ns, int *retry_safe);
     void     (*mount_log)(const char *path, int block_index);
+    /* Whether the serving task that owns this mount is still alive.  A killed
+     * service never touches the channel again, so its peer_closed flag stays
+     * clear and unmount would otherwise wait out the whole deadline. */
+    int      (*server_alive)(void *sb);
 };
 
 int  a20_uxfs_ns_device_owned(const struct a20_uxfs_ns *ns, void *dev);
