@@ -38,13 +38,6 @@
 - 关闭条件：崩溃注入后重挂载要么恢复一致，要么以明确错误拒绝；两种实现行为一致。
 - 来源：[current/fs-status.md](../current/fs-status.md)、[current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
 
-### FS-06 ISOFS 压力覆盖
-
-- 现状：ISOFS 压力覆盖不完整；曾有 `errno 19` 被 skip 却记 PASS 的问题。
-- 缺口：ISOFS 在大目录/长名/边界输入下的行为没有完整门禁。
-- 关闭条件：ISOFS 压力用例实际执行（不 skip）并通过，失败有明确原因。
-- 来源：[current/module-status-2026-10-19.md](../current/module-status-2026-10-19.md)。
-
 ### FS-07 xattr/ACL 持久化与重启
 
 - 现状：后端 xattr/ACL 持久化没有显式重启测试。
