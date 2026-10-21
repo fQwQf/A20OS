@@ -20,7 +20,7 @@
   `socket_control.c`、`netfilter_filter.rs`、`netfilter_nat.rs`、`socket_netlink.rs`）、
   fs（`fs/uxfs/uxfs.c`、`fs/procfs/procfs_render.c`、`fs/vfs/dcache_state.rs`）。
   这些已按领域追加到 [core.md](core.md)（CORE-11）、[net.md](net.md)（NET-12）、
-  [fs.md](fs.md)（FS-10）。arm32 侧另外暴露了构建容器本身的缺口，见
+  [fs.md](fs.md)（FS-11）。arm32 侧另外暴露了构建容器本身的缺口，见
   [delivery.md](delivery.md)（DELIVERY-05）。
 - 关闭条件：上述跨领域条目关闭后，`check-riscv32-bringup` 与 `check-arm32-bringup` 编译通过，
   并在 QEMU 里完成 bring-up 与自然关机。
