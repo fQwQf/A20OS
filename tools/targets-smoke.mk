@@ -1164,6 +1164,25 @@ smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 		--build-dir "$(BUILD_DIR)" \
 		--log-dir "$(SMOKE_LOG_DIR)" \
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
+# ================================================================
+# MAP_SHARED dirty-state two-boot smoke (MM-03)
+# ================================================================
+# Writes a file through a MAP_SHARED mapping in three shapes (mprotect
+# downgrade, munmap, mapping still live), powers the guest off cleanly, then
+# cold-boots the same ext4 image and compares every byte.  The guest never
+# msyncs: the shutdown path's sync() is the flush under test, so a dirty state
+# dropped by the mapping operation shows up as stale or zero bytes here.  The
+# gate lives in tools/mm-shared-write-gate.py because it is four boots plus two
+# host-side fsck runs.
+#
+# ARCH selects the build directory as well as the QEMU machine, so this gate
+# exercises each architecture listed by tools/mm-shared-write-gate.py.
+smoke-mm-shared-write-coldboot: dev-build $(EXT4_IMG)
+	$(PYTHON) tools/mm-shared-write-gate.py --arch "$(ARCH)" \
+		--build-dir "$(BUILD_DIR)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 # Network-lane observability smoke (stage A)
 # ================================================================
 # Boots a NR_CPUS=4 NET_LANES=4 build, runs net_stress_test, and reads
