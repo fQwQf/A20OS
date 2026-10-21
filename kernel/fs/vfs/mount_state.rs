@@ -728,7 +728,12 @@ pub unsafe extern "C" fn a20_vfs_mount_remove(
     set_attached(mnt, 0);
     let mp = mountpoint(mnt);
     if !mp.is_null() {
-        vnode_put(mp);
+        /* Clear the field under the mount lock, drop the reference after it:
+         * vnode_put can run a filesystem release that takes a sleeping lock
+         * (ramfs takes a mutex there), and the switch path asserts on a switch
+         * with preemption disabled -- which is exactly what holding this
+         * spinlock across that release produces.  root_put below is already
+         * ordered the same way. */
         clear_mountpoint(mnt);
     }
     set_dead_next(mnt, dead_head(ns));
@@ -738,6 +743,9 @@ pub unsafe extern "C" fn a20_vfs_mount_remove(
     set_count(ns, n - 1);
     clear_teardown(mnt);
     unlock(flags);
+    if !mp.is_null() {
+        vnode_put(mp);
+    }
     root_put(mnt);
 }
 

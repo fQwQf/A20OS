@@ -155,6 +155,7 @@ def cmd_user(a) -> int:
                   f"ENVELOPE_ACQUIRE_RACE_TEST={a.envelope_acquire_race_test}",
                   f"SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST="
                   f"{a.syscall_smoke_task_construction_test}",
+                  f"TRAP_STORM_TEST={getattr(a, 'trap_storm_test', '0')}",
                   f"BUILD_DIR={user_build_dir}"]
         if need_clean:
             rc = submake(["-C", "user", *common, "clean"])
@@ -608,6 +609,8 @@ def main() -> int:
             s.add_argument("--profile", default="")
             s.add_argument("--envelope-acquire-race-test", choices=("0", "1"), default="0")
             s.add_argument("--syscall-smoke-task-construction-test",
+                           choices=("0", "1"), default="0")
+            s.add_argument("--trap-storm-test",
                            choices=("0", "1"), default="0")
             s.add_argument("--user-variant", required=True)
         else:

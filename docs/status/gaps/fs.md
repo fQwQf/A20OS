@@ -65,3 +65,15 @@
 - 缺口：怀疑写入路径没有同步 `metadata_csum` 的位图校验和（无日志时没有重放兜底）。
 - 关闭条件：guest 写盘后 `e2fsck -fn` 干净；损坏来源有明确解释。
 - 诊断：[notes/fs-ext4-bitmap.md](notes/fs-ext4-bitmap.md)。
+
+### FS-10 `smoke-vfs-stress` 的 ISOFS 读用例失败
+
+- 现状：`make smoke-vfs-stress` 在当前提交上以
+  `VFS_STRESS: FAIL isofs-read-hello errno=0` 与 `VFS_STRESS: FAIL isofs-read-nested errno=0`
+  结束（rc=2）；同一日志里 ISOFS 已 `Mounted: block_size=2048 vol_blocks=22
+  root_extent=18 root_size=146`。把 CORE 包对 `kernel/fs/vfs/{dcache.c,mount_state.rs}`
+  的改动 stash 掉后结果不变，所以与那次改动无关。
+- 缺口：ISOFS 挂载成功但按名读取失败，errno 为 0（即失败不是来自被检查的 errno 路径）；
+  `smoke-vfs-stress` 因此整体为红，iso 相关的读路径没有可用门禁。
+- 关闭条件：两条 isofs 读用例在候选上通过，或失败有明确原因并给出对应门禁。
+- 来源：CORE 包在 CORE-05 的并发 VFS 负载回归里首次跑到该目标而暴露。
