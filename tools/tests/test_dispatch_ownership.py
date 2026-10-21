@@ -130,11 +130,24 @@ int main(void) {
     return 0;
 }
 '''
-        # Negative control reproduces the old publication gap in the same body.
-        old = steal.replace('        spin_unlock_irqrestore(&rrq->lock, rrf);\n        t->rq_next',
-                            '        t->rq_next')
-        old = old.replace('        t->cpu_id = local;',
-                          '        spin_unlock_irqrestore(&rrq->lock, rrf);\n        t->cpu_id = local;')
+        # Negative control reproduces the old publication gap in the same body:
+        # release the source queue before the dispatch owner is published, so
+        # the stub unlock observes an unqueued, unowned task and lets the
+        # simulated waker claim a second queue reference.
+        migrations = ('        __atomic_fetch_add(&sched_runqueue_migrations, '
+                      '1, __ATOMIC_RELAXED);\n')
+        unlock = '        spin_unlock_irqrestore(&rrq->lock, rrf);\n'
+        publish = '        t->cpu_id = local;\n'
+        release_after_remove = unlock + migrations
+        if steal.count(release_after_remove) != 1 or steal.count(publish) != 1:
+            raise ValueError(
+                'steal body no longer has exactly one ownership publication '
+                'and one trailing source-queue release; the negative control '
+                'cannot be derived from the current body')
+        old = steal.replace(release_after_remove, migrations)
+        old = old.replace(publish, unlock + publish)
+        if old.count(unlock) != steal.count(unlock):
+            raise ValueError('negative control changed the unlock count')
         with tempfile.TemporaryDirectory(dir=ROOT / 'build/tmp') as tmp:
             src, exe = Path(tmp) / 'probe.c', Path(tmp) / 'probe'
             for body, duplicate in [(steal, 0), (old, 1)]:

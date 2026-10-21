@@ -733,6 +733,12 @@ smoke-syscall-ext:
 smoke-sched-stress:
 	$(PYTHON) tools/smoke.py smoke-sched-stress
 
+# Trap-storm diagnostic: the TRAP_STORM_TEST build injects a repaired-but-
+# re-trapping page fault so the detector must record it and SIGKILL the task
+# without disturbing an unrelated worker or ordinary demand/COW traffic.
+smoke-trap-storm:
+	$(PYTHON) tools/smoke.py smoke-trap-storm
+
 # Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
 # placement, migration and cross-CPU wakeups only run with more than one CPU;
 # the single-CPU target above keeps its own semantics.

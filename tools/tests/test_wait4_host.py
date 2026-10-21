@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Host differential for the WAIT4_IMPL slice (C reference vs Rust controller).
+"""Host test for the WAIT4_IMPL slice (the production Rust controller).
 
-Builds two binaries from the same harness (tools/tests/wait4_host.c):
+Builds one binary from the harness (tools/tests/wait4_host.c): the WAIT4
+adapter extracted textually from kernel/proc/wait.c (WAIT4_COMMON +
+WAIT4_ADAPTER regions), linked against the production Rust controller object
+built from kernel/proc/wait4_state.rs.  The C reference engine this used to
+run a differential against was deleted when the controller moved to Rust.
 
-  - variant "c":    the retained C reference engine extracted textually from
-                    kernel/proc/wait.c (WAIT4_COMMON + WAIT4_C_ENGINE regions);
-  - variant "rust": the WAIT4_RUST adapter extracted from the same file,
-                    linked against the production Rust controller object
-                    built from kernel/proc/wait4_state.rs.
-
-Both variants run the identical generated scenario table against the same
-deterministic stub world (locks, chain/field sampling, pin/detach/destroy/put,
-group/current predicates, park protocol, yield).  The driver requires
-byte-identical stdout (results, status, ordered stub-call traces, final world
-digests) and checks the expected result of every scripted run.
+The harness runs the generated scenario table against a deterministic stub
+world (locks, chain/field sampling, pin/detach/destroy/put, group/current
+predicates, park protocol, yield) and checks the expected result of every
+scripted run, including the ordered stub-call traces and final world digests.
 """
-import difflib
 import pathlib
 import re
 import subprocess
@@ -485,20 +481,16 @@ def main() -> None:
                     "/* WAIT4_COMMON_END */")
     adapter = region(source, "/* WAIT4_ADAPTER_BEGIN */",
                      "/* WAIT4_ADAPTER_END */")
-    c_engine = region(source, "/* WAIT4_C_ENGINE_BEGIN */",
-                      "/* WAIT4_C_ENGINE_END */")
     for text, needle in ((common, "wait_accumulate_child_time"),
                          (common, "wait_task_tgid"),
                          (adapter, "wait4_adapter_child_view"),
                          (adapter, "a20_wait4_run"),
-                         (c_engine, "proc_wait4_internal"),
-                         (c_engine, "wait_child_matches_locked")):
+                         (adapter, "proc_wait4_internal")):
         if needle not in text:
             raise ValueError(f"extraction lost {needle!r}")
 
     with tempfile.TemporaryDirectory(prefix="a20-wait4-host-") as tmp:
         tmp = pathlib.Path(tmp)
-        (tmp / "engine_c.inc").write_text(common + c_engine)
         (tmp / "engine_rust.inc").write_text(common + adapter)
         (tmp / "scenario.inc").write_text(emit_scenarios(SCENARIOS))
 
@@ -518,7 +510,7 @@ def main() -> None:
             str(ROOT / "tools/tests/wait4_host.c"),
         ]
         outputs = {}
-        for variant in ("c", "rust"):
+        for variant in ("rust",):
             binary = tmp / f"wait4_host_{variant}"
             cmd = base_cc + [
                 f'-DWAIT4_ENGINE_INC="engine_{variant}.inc"',
@@ -533,21 +525,14 @@ def main() -> None:
                                     capture_output=True)
             outputs[variant] = result.stdout
 
-        if outputs["c"] != outputs["rust"]:
-            diff = list(difflib.unified_diff(
-                outputs["c"].splitlines(), outputs["rust"].splitlines(),
-                "variant-c", "variant-rust", lineterm=""))
-            raise AssertionError(
-                "C/Rust traces differ:\n" + "\n".join(diff[:80]))
-
-        runs = parse_runs(outputs["c"])
+        runs = parse_runs(outputs["rust"])
         errors = check_expectations(runs, SCENARIOS)
         if errors:
             raise AssertionError("expectation failures:\n" + "\n".join(errors))
 
         total = sum(len(sc["runs"]) for sc in SCENARIOS)
         print(f"WAIT4_HOST: PASS ({len(SCENARIOS)} scenarios, {total} runs, "
-              f"identical C/Rust traces, expectations held)")
+              f"expectations held)")
 
 
 if __name__ == "__main__":

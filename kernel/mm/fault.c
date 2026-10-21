@@ -64,7 +64,7 @@
 uint64_t mm_cow_from_status_count;
 
 #ifndef CONFIG_NOMMU
-#if defined(CONFIG_AARCH64) && defined(CONFIG_MM_COW_TLBI_DIAG)
+#if ARCH_COW_TLBI_DIAG
 static volatile uint32_t aarch64_cow_tlbi_diag_seen;
 
 static int aarch64_cow_tlbi_diag_begin(task_t *t, mm_struct_t *mm, vaddr_t va,
@@ -96,7 +96,7 @@ static void aarch64_cow_tlbi_diag_after(int enabled, task_t *t, mm_struct_t *mm,
     if (!enabled)
         return;
     uint64_t tlbi_xt;
-#ifdef CONFIG_AARCH64_TLBI_DIAG_RAW_OPERAND
+#ifdef ARCH_COW_TLBI_DIAG_RAW_OPERAND
     tlbi_xt = va;
 #else
     tlbi_xt = (va >> 12) & 0x00000FFFFFFFFFFFULL;

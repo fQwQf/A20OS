@@ -137,6 +137,11 @@ endif
 ifeq ($(SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST),1)
 CFLAGS += -DSYSCALL_SMOKE_TASK_CONSTRUCTION_TEST
 endif
+# Test-profile only: tells trap_storm_test which address the kernel's injected
+# "repaired but re-trapping" fault is keyed on.
+ifeq ($(TRAP_STORM_TEST),1)
+CFLAGS += -DCONFIG_TRAP_STORM_TEST
+endif
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
 ifeq ($(NOMMU),1)
@@ -760,6 +765,11 @@ $(OBJ_DIR)/cmds/%.o: cmds/%.c Makefile | build_dir musl_prepare
 
 $(OBJ_DIR)/cmds/core/audioplay.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/core/audioplay.o: ../kernel/include/uapi/a20/audio.h
+
+# The injected fault address is a kernel/userspace contract, so both sides
+# include the same uapi header rather than repeating the constant.
+$(OBJ_DIR)/cmds/core/trap_storm_test.o: CFLAGS += -I../kernel/include
+$(OBJ_DIR)/cmds/core/trap_storm_test.o: ../kernel/include/uapi/a20/trap_storm.h
 
 $(OBJ_DIR)/cmds/stress/cluster_threads.o: CFLAGS += -I../kernel/include
 $(OBJ_DIR)/cmds/stress/cluster_threads.o: ../kernel/include/uapi/a20/block.h

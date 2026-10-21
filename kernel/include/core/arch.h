@@ -299,6 +299,37 @@ static inline int arch_syscall_resched_allowed(void)
 #endif
 
 /*
+ * Does timer_get_ticks() advance independently of interrupt delivery, so that
+ * early boot -- before secondary CPUs and their timers are up -- can bound a
+ * wait by real time instead of a platform-dependent poll count?  False by
+ * default; the architectures whose counter is a hardware register override it
+ * in their own arch.h.
+ */
+#ifndef ARCH_TIMER_BOOT_MONOTONIC
+# define ARCH_TIMER_BOOT_MONOTONIC 0
+#endif
+
+/*
+ * Opt-in translation diagnostic for the COW leaf rewrite (mm/fault.c).  Only
+ * architectures that can describe the translation state around the rewrite
+ * enable it; with it off the generic diagnostic bodies compile to no-ops.
+ * ARCH_COW_TLBI_DIAG_RAW_OPERAND selects the raw faulting VA as the TLBI
+ * operand instead of the shifted address field, for comparing encodings.
+ */
+#ifndef ARCH_COW_TLBI_DIAG
+# define ARCH_COW_TLBI_DIAG 0
+#endif
+
+/*
+ * task_t.trap_ctx offset the arch trap entry hard-codes in assembly, when it
+ * has one.  0 means "no assembly constant to keep in step", so the generic
+ * assertion in proc.h degenerates to a tautology there.
+ */
+#ifndef ARCH_TASK_TRAP_CTX_OFFSET
+# define ARCH_TASK_TRAP_CTX_OFFSET 0
+#endif
+
+/*
  * Was local interrupt delivery enabled in the context the trap interrupted?
  * The kernel preemption decision point (core/trap.c) only switches out when
  * this is true.  There is deliberately NO weak default here: a default of

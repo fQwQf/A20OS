@@ -6,8 +6,8 @@
 #include "drivers/core/driver_core.h"
 #include "proc/proc.h"
 
-#if defined(CONFIG_RISCV64)
-/* RISC-V time CSR is a continuously advancing hardware counter. */
+#if ARCH_TIMER_BOOT_MONOTONIC
+/* The arch counter advances independently of interrupt delivery. */
 #define SMP_START_WAIT_TICKS (5ULL * TICKS_PER_SEC)
 #else
 #define SMP_START_WAIT_FALLBACK_LOOPS 10000000U
@@ -186,8 +186,9 @@ void smp_boot_secondaries(void)
                    cpu, (unsigned long)cpu_descs[cpu].hw_id, err);
     }
 
-#if defined(CONFIG_RISCV64)
-    /* The RV64 time CSR advances independently of timer IRQ delivery. */
+#if ARCH_TIMER_BOOT_MONOTONIC
+    /* The counter advances independently of timer IRQ delivery, so this is a
+     * real bounded deadline even before secondary CPUs come online. */
     const uint64_t wait_start = timer_get_ticks();
     while ((smp_online_cpu_mask() & started_mask) != started_mask) {
         if (timer_get_ticks() - wait_start >= SMP_START_WAIT_TICKS)

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Exercise the production thread-group link against leader reclamation.
 
-The actual proc_tg_link_locked/proc_tg_unlink_locked bodies are extracted from
-proc.c.  The host mock gives each task an allocation ref and models the new
-member-owned leader anchor; ASan's negative control disables that increment and
-must catch unlink writing through the leader's freed tg_next field.
+The thread-group membership bodies now live in Rust
+(kernel/proc/tasklist.rs); kernel/proc/proc.c keeps only the three forwarding
+entry points, which this harness still extracts and compiles.  The extracted
+forwarders are linked against the production Rust object, so the tested code is
+the same object the kernel links, and the C accessor stubs stand in for the
+task-field accessors that object takes from the C side.
+
+The host mock gives each task an allocation ref and models the member-owned
+leader anchor.  ASan cannot instrument the Rust body, so the negative control
+does not rely on it: the mock's proc_put overwrites a task block with a canary
+instead of releasing it, and the control asserts that dropping the anchor makes
+the unlink write through that overwritten block.
 """
 from pathlib import Path
 import os
@@ -14,6 +22,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PROC_SOURCE = ROOT / "kernel/proc/proc.c"
+TASKLIST_RUST = ROOT / "kernel/proc/tasklist.rs"
 
 
 def extract_function(source: str, signature: str) -> str:
@@ -34,8 +43,10 @@ PRELUDE = r"""
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define ESRCH 3
+
 typedef struct task_t {
     struct task_t *tg_leader;
     struct task_t *tg_next;
@@ -44,7 +55,47 @@ typedef struct task_t {
     int refs;
 } task_t;
 
+/* The production thread-group bodies are Rust (kernel/proc/tasklist.rs); these
+ * are the entry points the extracted proc.c forwarders call. */
+int a20_tasklist_tg_link_locked(task_t *t);
+void a20_tasklist_tg_unlink_locked(task_t *t);
+void a20_tasklist_tg_leader_ref_release(task_t *t);
+
 static int broken_ref;
+
+/* A released task block is overwritten, not returned to the allocator: the
+ * negative control reads it back to prove the unlink wrote through it, and
+ * ASan cannot see the write itself (it happens in uninstrumented Rust). */
+#define TASK_CANARY 0xA5
+static task_t *freed_blocks[64];
+static int freed_count;
+
+static void proc_put(task_t *t) {
+    assert(t && t->refs > 0);
+    if (--t->refs == 0) {
+        assert(freed_count < (int)(sizeof(freed_blocks) / sizeof(*freed_blocks)));
+        freed_blocks[freed_count++] = t;
+        memset(t, TASK_CANARY, sizeof(*t));
+    }
+}
+
+#ifdef TEST_BROKEN_REF
+static int task_was_released(const task_t *t) {
+    for (int i = 0; i < freed_count; i++)
+        if (freed_blocks[i] == t)
+            return 1;
+    return 0;
+}
+
+static int task_canary_intact(const task_t *t) {
+    const unsigned char *bytes = (const unsigned char *)t;
+    for (size_t i = 0; i < sizeof(*t); i++)
+        if (bytes[i] != TASK_CANARY)
+            return 0;
+    return 1;
+}
+#endif
+
 static task_t *proc_get(task_t *t) {
     if (!t || t->refs <= 0)
         return NULL;
@@ -52,10 +103,40 @@ static task_t *proc_get(task_t *t) {
         t->refs++;
     return t;
 }
-static void proc_put(task_t *t) {
-    assert(t && t->refs > 0);
-    if (--t->refs == 0)
-        free(t);
+
+/* Task-field accessors the Rust membership object imports from the C side. */
+task_t *a20_tl_tg_leader(const void *p) {
+    return ((const task_t *)p)->tg_leader;
+}
+task_t *a20_tl_tg_next(const void *p) {
+    return ((const task_t *)p)->tg_next;
+}
+task_t **a20_tl_tg_prev_ptr(const void *p) {
+    return ((const task_t *)p)->tg_prev_ptr;
+}
+int a20_tl_tg_leader_ref_held(const void *p) {
+    return ((const task_t *)p)->tg_leader_ref_held;
+}
+void a20_tl_set_tg_leader(void *p, void *x) {
+    ((task_t *)p)->tg_leader = x;
+}
+void a20_tl_set_tg_next(void *p, void *x) {
+    ((task_t *)p)->tg_next = x;
+}
+void a20_tl_set_tg_prev_ptr(void *p, void **x) {
+    ((task_t *)p)->tg_prev_ptr = (task_t **)x;
+}
+void a20_tl_set_tg_leader_ref_held(void *p, int x) {
+    ((task_t *)p)->tg_leader_ref_held = x;
+}
+void **a20_tl_tg_next_slot(void *p) {
+    return (void **)&((task_t *)p)->tg_next;
+}
+void *a20_tl_task_get(void *x) {
+    return proc_get(x);
+}
+void a20_tl_task_put(void *x) {
+    proc_put(x);
 }
 """
 
@@ -79,8 +160,15 @@ int main(void) {
 #endif
     proc_put(leader);              /* waiter reaps the zombie leader */
     proc_tg_unlink_locked(member); /* final member detach writes leader->tg_next */
-
-#ifndef TEST_BROKEN_REF
+#ifdef TEST_BROKEN_REF
+    /* Without the member anchor the leader was released above, so this detach
+     * must have written through the overwritten block. */
+    if (!task_was_released(leader))
+        return 0;                  /* anchor still held: nothing to reproduce */
+    if (task_canary_intact(leader))
+        return 0;                  /* released but never written: control lost */
+    return 3;
+#else
     assert(leader->refs == 1);     /* member anchor kept embedded link alive */
     proc_tg_leader_ref_release(member); /* production final-release helper */
     proc_put(member);
@@ -143,38 +231,60 @@ int main(void) {
     proc_tg_leader_ref_release(member);
     proc_put(member);
     free(leader);
-#endif
     return 0;
+#endif
 }
 """
 
 
-def main() -> None:
+def build(tmp: Path, cc: list[str], extra: list[str], name: str) -> Path:
     source = PROC_SOURCE.read_text()
     link = extract_function(source, "int proc_tg_link_locked(task_t *t)")
     unlink = extract_function(source, "void proc_tg_unlink_locked(task_t *t)")
-    release = extract_function(source, "void proc_tg_leader_ref_release(task_t *t)")
+    release = extract_function(source,
+                               "void proc_tg_leader_ref_release(task_t *t)")
+    for text, needle in ((link, "a20_tasklist_tg_link_locked"),
+                         (unlink, "a20_tasklist_tg_unlink_locked"),
+                         (release, "a20_tasklist_tg_leader_ref_release")):
+        if needle not in text:
+            raise ValueError(f"proc.c forwarder lost {needle!r}")
+
+    unit = tmp / "tg-lifetime.c"
+    unit.write_text(PRELUDE + link + "\n" + unlink + "\n" + release + "\n"
+                    + HARNESS)
+    binary = tmp / name
+    subprocess.run(cc + extra + [str(unit), str(tmp / "tasklist_host.o"),
+                                 "-o", str(binary)], check=True)
+    return binary
+
+
+def main() -> None:
     with tempfile.TemporaryDirectory(prefix="a20-tg-anchor-") as tmp:
         tmp = Path(tmp)
-        cc = ["cc", "-std=gnu11", "-O0", "-g", "-Wall", "-Wextra",
-              "-Werror", "-fsanitize=address"]
-        unit = tmp / "tg-lifetime.c"
-        unit.write_text(PRELUDE + link + "\n" + unlink + "\n" + release +
-                        "\n" + HARNESS)
-        good = tmp / "tg-lifetime"
-        subprocess.run(cc + [str(unit), "-o", str(good)], check=True)
-        subprocess.run([str(good)], check=True,
-                       env={**os.environ, "ASAN_OPTIONS": "detect_leaks=0"})
+        # The production membership object, built for the host.
+        subprocess.run([
+            "rustc", "--edition=2021", "--crate-type", "lib", "--emit=obj",
+            "--target", "x86_64-unknown-linux-gnu",
+            "-C", "panic=abort", "-C", "opt-level=2", "-C", "codegen-units=1",
+            str(TASKLIST_RUST), "-o", str(tmp / "tasklist_host.o"),
+        ], check=True, cwd=ROOT)
 
-        broken = tmp / "tg-lifetime-broken"
-        subprocess.run(cc + ["-DTEST_BROKEN_REF", str(unit), "-o", str(broken)],
-                       check=True)
-        result = subprocess.run(
-            [str(broken)], check=False, capture_output=True, text=True,
-            env={**os.environ, "ASAN_OPTIONS": "detect_leaks=0"})
-        if result.returncode == 0 or "heap-use-after-free" not in result.stderr:
-            raise SystemExit("missing leader anchor did not trigger ASan UAF")
-    print("test-tg-leader-lifetime: PASS (production link/unlink + ASan negative control)")
+        cc = ["cc", "-std=gnu11", "-O0", "-g", "-Wall", "-Wextra",
+              "-Werror", "-fsanitize=address", "-Wl,--gc-sections"]
+        asan_env = {**os.environ, "ASAN_OPTIONS": "detect_leaks=0"}
+
+        good = build(tmp, cc, [], "tg-lifetime")
+        subprocess.run([str(good)], check=True, env=asan_env)
+
+        broken = build(tmp, cc, ["-DTEST_BROKEN_REF"], "tg-lifetime-broken")
+        result = subprocess.run([str(broken)], check=False, capture_output=True,
+                                text=True, env=asan_env)
+        if result.returncode != 3:
+            raise SystemExit(
+                "missing leader anchor was not detected (status "
+                f"{result.returncode})\n{result.stderr}")
+    print("test-tg-leader-lifetime: PASS (production link/unlink + "
+          "overwritten-block negative control)")
 
 
 if __name__ == "__main__":

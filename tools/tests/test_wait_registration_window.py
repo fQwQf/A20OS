@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Exercise wait4 registration and the real child-wait notifier race windows.
 
-The wait4 side extracts the retained C reference engine from
-kernel/proc/wait.c: the WAIT4_C_ENGINE marker region (plus the WAIT4_COMMON
-helpers it calls).  The scenarios and assertions are unchanged from the
-original test; only the extraction follows the wait.c restructure
-(proc_wait4() now forwards to proc_wait4_internal()).
+The wait4 side extracts the production adapter from kernel/proc/wait.c (the
+WAIT4_ADAPTER marker region plus the WAIT4_COMMON helpers it calls) and links
+it against the production Rust controller built from
+kernel/proc/wait4_state.rs -- the same object the kernel links.  The
+scenarios and assertions are unchanged from the original test; only the
+extraction follows the wait4 migration off the deleted C engine.
 """
 from pathlib import Path
 import subprocess
@@ -15,6 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 WAIT_SOURCE = ROOT / "kernel/proc/wait.c"
 EXIT_SOURCE = ROOT / "kernel/proc/exit.c"
+WAIT4_RUST = ROOT / "kernel/proc/wait4_state.rs"
 
 
 def extract_function(source: str, signature: str) -> str:
@@ -44,6 +46,8 @@ PRELUDE = r"""
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "proc/wait4_state.h"
 
 #define WNOHANG 1
 #define WUNTRACED 2
@@ -78,7 +82,13 @@ struct task {
     task_t *parent, *tg_leader, *tg_next, *children, *sibling_next;
     spinlock_t park_lock;
 };
-typedef struct { unsigned seq; } proc_wait_token_t;
+/* Mirrors kernel/include/proc/park.h; the adapter stores and passes it by
+ * value and the park stubs below must agree on the layout. */
+typedef struct proc_wait_token {
+    task_t *task;
+    uint64_t seq;
+    int prepare_error;
+} proc_wait_token_t;
 typedef int proc_wake_reason_t;
 
 static spinlock_t tasklist_lock = {1};
@@ -134,9 +144,6 @@ static proc_wake_reason_t proc_park_commit(proc_wait_token_t token) {
         longjmp(parked, 1);
     }
     return PROC_WAKE_EVENT;
-}
-static int proc_wake_reason_is_task_interrupt(proc_wake_reason_t reason) {
-    (void)reason; return 0;
 }
 static void proc_yield(void) { }
 """
@@ -368,15 +375,16 @@ int main(void) {
 def main() -> None:
     source = WAIT_SOURCE.read_text()
     exit_source = EXIT_SOURCE.read_text()
-    # The retained C reference engine is the WAIT4_C_ENGINE region of wait.c
-    # plus the WAIT4_COMMON helpers it calls; the public proc_wait4() only
-    # forwards to proc_wait4_internal().
+    # The production path is the WAIT4_ADAPTER region of wait.c plus the
+    # WAIT4_COMMON helpers it calls, linked against the Rust controller object
+    # built below; proc_wait4() only forwards to proc_wait4_internal().
     engine = extract_region(source, "/* WAIT4_COMMON_BEGIN */",
                             "/* WAIT4_COMMON_END */")
-    engine += extract_region(source, "/* WAIT4_C_ENGINE_BEGIN */",
-                             "/* WAIT4_C_ENGINE_END */")
+    engine += extract_region(source, "/* WAIT4_ADAPTER_BEGIN */",
+                             "/* WAIT4_ADAPTER_END */")
     for needle in ("wait_accumulate_child_time", "wait_task_tgid",
-                   "wait_child_matches_locked", "proc_wait4_internal"):
+                   "wait4_adapter_child_view", "a20_wait4_run",
+                   "proc_wait4_internal"):
         if needle not in engine:
             raise ValueError(f"wait.c line-region extraction lost {needle!r}")
     notifier = extract_function(exit_source, "void proc_wake_child_waiters(")
@@ -402,9 +410,20 @@ def main() -> None:
         tmp = Path(tmp)
         harness = tmp / "wait_window.c"
         binary = tmp / "wait_window"
+        rust_obj = tmp / "wait4_state_host.o"
         harness.write_text(PRELUDE + "\n" + engine + "\n" + HARNESS)
+        # The controller is the production object the kernel links, built here
+        # for the host so the extracted adapter runs against real decisions.
+        subprocess.run([
+            "rustc", "--edition=2021", "--crate-type", "lib", "--emit=obj",
+            "--target", "x86_64-unknown-linux-gnu",
+            "-C", "panic=abort", "-C", "opt-level=2",
+            "-C", "codegen-units=1",
+            str(WAIT4_RUST), "-o", str(rust_obj),
+        ], check=True, cwd=ROOT)
         subprocess.run(["cc", "-std=gnu11", "-O0", "-Wall", "-Wextra",
-                        "-Werror", str(harness), "-o", str(binary)], check=True)
+                        "-Werror", f"-I{ROOT / 'kernel'}", str(harness),
+                        str(rust_obj), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
         notifier_source = tmp / "wait_notifier_window.c"

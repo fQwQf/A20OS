@@ -55,7 +55,14 @@ RUST_LINKED_HOST_TESTS := \
     tools/tests/test_munmap_txn.c \
     tools/tests/test_swap_slots.c \
     tools/tests/test_vmar_policy.c
-HOST_TESTS_SRC := $(filter-out tools/tests/fdt_view.c $(RUST_LINKED_HOST_TESTS),$(wildcard tools/tests/*.c))
+# Compile-only probes with no main() and no generic include path: fdt_view.c is
+# a library for check-fdt-view.py, eevdf_node_layout_probe.c exposes
+# sizeof/offsetof through nm and needs a per-arch include path.  Neither is a
+# runnable single-file host test, so neither belongs in HOST_TESTS_BIN.
+HOST_TESTS_PROBES := \
+    tools/tests/fdt_view.c \
+    tools/tests/eevdf_node_layout_probe.c
+HOST_TESTS_SRC := $(filter-out $(HOST_TESTS_PROBES) $(RUST_LINKED_HOST_TESTS),$(wildcard tools/tests/*.c))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
 
@@ -157,7 +164,8 @@ check-drm-abi:
 	@tools/check-drm-abi.sh
 
 host-tests: check-pt-mcs-preempt-window check-proc-wait-window \
-            check-tg-leader-lifetime check-fdt-view $(HOST_TESTS_BIN)
+            check-wait4-controller check-tg-leader-lifetime check-fdt-view \
+            $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"
 
 $(TMPDIR)/a20-host-%: tools/tests/%.c
@@ -290,6 +298,12 @@ check-pt-mcs-preempt-window:
 # semantics without booting a guest.
 check-proc-wait-window:
 	$(PYTHON) tools/tests/test_wait_registration_window.py
+
+# Run the wait4 decision scenario table (matching, reap/report classification,
+# status encoding, transaction order) against the production Rust controller
+# linked into the extracted C adapter.
+check-wait4-controller:
+	$(PYTHON) tools/tests/test_wait4_host.py
 
 # Prove the task-group leader remains alive while linked members can still
 # update its embedded tg_next chain, using the production link/unlink bodies.

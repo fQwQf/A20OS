@@ -613,6 +613,13 @@ ELF_EXEC_TEST ?= 0
 ifeq ($(filter $(ELF_EXEC_TEST),0 1),)
 $(error ELF_EXEC_TEST must be 0 or 1)
 endif
+# Test-profile only: makes one designated user address report a repaired page
+# fault without changing the mapping, so the trap-storm detector's test can
+# inject the "repaired yet re-trapping" shape deterministically.
+TRAP_STORM_TEST ?= 0
+ifeq ($(filter $(TRAP_STORM_TEST),0 1),)
+$(error TRAP_STORM_TEST must be 0 or 1)
+endif
 # Test-profile only: builds the guest syscall_smoke so it arms the private
 # one-shot clone failure and checks the fork rollback path.
 SYSCALL_SMOKE_TASK_CONSTRUCTION_TEST ?= 0
@@ -973,6 +980,9 @@ BUILD_VARIANT := $(BUILD_VARIANT)-taskconstruction-test
 endif
 ifeq ($(ELF_EXEC_TEST),1)
 BUILD_VARIANT := $(BUILD_VARIANT)-elfexectest
+endif
+ifeq ($(TRAP_STORM_TEST),1)
+BUILD_VARIANT := $(BUILD_VARIANT)-trapstorm-test
 endif
 ifeq ($(PID_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-pid-rust
@@ -1772,6 +1782,9 @@ CFLAGS += -DCONFIG_TASK_CONSTRUCTION_TEST
 endif
 ifeq ($(ELF_EXEC_TEST),1)
 CFLAGS += -DCONFIG_ELF_EXEC_TEST
+endif
+ifeq ($(TRAP_STORM_TEST),1)
+CFLAGS += -DCONFIG_TRAP_STORM_TEST
 endif
 ifeq ($(PID_IMPL),rust)
 CFLAGS += -DCONFIG_PID_RUST
