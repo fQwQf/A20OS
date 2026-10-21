@@ -506,7 +506,9 @@ int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
      * creates, and a freshly allocated slot is all zeroes, so the driver has to
      * stamp it as well. */
     if (inode_size > EXT4_INODE_SIZE_STATIC) {
-        uint16_t extra = (uint16_t)(inode_size - EXT4_INODE_SIZE_STATIC);
+        uint16_t extra = EXT4_INODE_EXTRA_ISIZE;
+        if ((size_t)EXT4_INODE_SIZE_STATIC + extra + 4 > inode_size)
+            extra = (uint16_t)(inode_size - EXT4_INODE_SIZE_STATIC);
         size_t eo = offsetof(ext4_inode_t, i_extra_isize);
         raw[eo] = (uint8_t)extra;
         raw[eo + 1] = (uint8_t)(extra >> 8);
@@ -2818,6 +2820,10 @@ vnode_ops_t g_ext4_vnode_ops = {
     .writepage = ext4_vn_writepage,
     .writepages = ext4_vn_writepages,
     .sync_vnode = ext4_vn_sync,
+    .xattr_get = ext4_xattr_get,
+    .xattr_set = ext4_xattr_set,
+    .xattr_list = ext4_xattr_list,
+    .xattr_remove = ext4_xattr_remove,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
     .open     = ext4_open_vnode,

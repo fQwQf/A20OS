@@ -177,6 +177,11 @@ typedef struct __attribute__((packed)) ext4_group_desc {
 } ext4_group_desc_t;
 
 #define EXT4_INODE_SIZE_STATIC 128
+/* Extra (beyond the 128-byte base) inode bytes to declare in i_extra_isize.
+ * mke2fs stamps 32, which leaves the rest of a 256-byte inode available for
+ * in-inode extended attributes; declaring the whole tail, as this driver used
+ * to, leaves no attribute space at all. */
+#define EXT4_INODE_EXTRA_ISIZE 32
 
 typedef struct __attribute__((packed)) ext4_inode {
     uint16_t i_mode;
@@ -343,6 +348,15 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags);
 int ext4_vnode_finalize_unlinked(vnode_t *vn);
 /* Refuse mount options that would change journaling semantics (see ext4.c). */
 int ext4_validate_mount_options(const char *opts);
+
+/* In-inode extended attributes (ext4_xattr.c).  @name is the VFS spelling
+ * ("user.foo"); names this driver cannot store durably return -EOPNOTSUPP so
+ * the VFS keeps them in its volatile table. */
+int ext4_xattr_get(struct vnode *vn, const char *name, void *value, size_t size);
+int ext4_xattr_set(struct vnode *vn, const char *name, const void *value,
+                   size_t size, int flags);
+int ext4_xattr_list(struct vnode *vn, char *list, size_t size);
+int ext4_xattr_remove(struct vnode *vn, const char *name);
 int ext4_record_status(ext4_sb_info_t *sb, int status);
 int      ext4_unmount(vnode_t *root);
 /* Persist a clean on-disk state for terminal system shutdown without freeing

@@ -566,6 +566,16 @@ smoke-ext4-legacy-journal:
 		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 
+# ext4 extended attributes: write user.* + a POSIX ACL blob on one boot,
+# verify them through debugfs on the image and again after a reboot.
+smoke-ext4-xattr:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	$(PYTHON) tools/ext4_xattr_gate.py \
+		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
 # No-journal ext4 crash recovery: open+unlink, kill the machine, reboot the
 # same image.  The remount must admit the unclean image, finish the unlink, and
 # leave a filesystem e2fsck still accepts with the orphan inode actually freed.

@@ -145,7 +145,12 @@ ext4 相对 Linux ABI 的缺口：
 - 支持的 JBD2 校验和格式是 v3 + `INCOMPAT_64BIT`（与 mke2fs 默认一致）。更旧的 v1/v2 日志**不支持重放或写入**：干净的 v1/v2 镜像可以被**只读**挂载，走的是一条显式降级路径（日志打印 `clean legacy checksum journal; explicit read-only downgrade`），日志非空的旧格式镜像连只读挂载都拒绝。判定逻辑在 `user/svc/jbd2_legacy_policy.rs`；内核构建不链接该 crate，因此 `kernel/fs/diskfs/ext4_journal.c` 里有一份等价实现，两边的条件必须同步。门禁是 `make smoke-ext4-legacy-journal`。
 - 无日志镜像（`^has_journal`）没有重放路径，但崩溃后仍然可以挂载：`s_state` 缺 `VALID_FS` 且没有 `ERROR_FS` 时，挂载先跑孤儿 recovery 把被打断的 unlink 做完再发布。带 `ERROR_FS` 的镜像仍然拒绝——那表示驱动在上一会话里发现过不可信元数据，挂载期恢复修不了。门禁是 `make smoke-ext4-recovery`（open+unlink → kill → 重启同一张镜像 → inode 被回收、`e2fsck -fn` 干净）。
 - 崩溃一致性由 `make smoke-ext4-journal` 把守：四个注入点各做一次崩溃—重启往返，断言承诺过的写入没丢、没承诺的写入没回来，并在宿主机上用 `e2fsck -fn` 检查崩溃后的镜像和恢复后的镜像都干净。
-- 没有 xattr。
+- xattr 持久化只做 in-inode：`user.*`、`system.posix_acl_access`、`system.posix_acl_default` 存放在
+  256 字节 inode 的尾部（`i_extra_isize` 取 mke2fs 的 32，magic 在 `128+extra` 处），布局与 e2fsprogs
+  一致，`debugfs ea_list` 和 `e2fsck -fn` 都接受。一个 inode 的属性区约 90 字节；放不下时 `setxattr`
+  返回 `ENOSPC`，且不改动已有属性（每次修改都在内存里重建整块属性区再一次性写回，失败不留半写）。
+  **没有外部 EA 块**（`i_file_acl`），所以属性总量超过 inode 尾部空间的文件会失败，而不是换块存储。
+  `trusted.*` / `security.*` 仍走 VFS 的易失表。ACL 只做存储与读回，不做权限判定。
 - mount 时做 fail-closed feature 检查：不支持的 incompat 特性（meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 
 ### 3.3 NTFS（`kernel/fs/diskfs/ntfs.c`）
