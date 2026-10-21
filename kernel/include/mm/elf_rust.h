@@ -381,7 +381,12 @@ _Static_assert(sizeof(a20_elf_image_plan_t) ==
 _Static_assert(sizeof(a20_elf_layout_t) == 72, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_load_resources_t) == 144, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_load_result_t) == 136, "elf_rust ABI drift");
-_Static_assert(sizeof(a20_elf_interpreter_ops_t) == 64, "elf_rust ABI drift");
+/* Five function pointers plus 18 bytes of flags: 64 on LP64, 40 on ILP32
+ * (the trailing bytes pad to the pointer alignment).  The Rust mirror
+ * asserts the same pair from its own target pointer width. */
+_Static_assert(sizeof(a20_elf_interpreter_ops_t) ==
+                   (sizeof(void *) == 8 ? 64 : 40),
+               "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_auxv_pair_t) == 16, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_auxv_input_t) == 88, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_stack_plan_t) ==

@@ -392,8 +392,11 @@ struct a20_procfs_gen {
     uint64_t (*ticks)(void);
     uint64_t (*ticks_per_sec)(void);
     const char *(*bootargs)(void);
+    /* unsigned, not uint32_t: the pointees are proc_loadavg_snapshot()'s
+     * `unsigned *` parameters, and on ilp32d uint32_t is `unsigned long` while
+     * unsigned is `unsigned int` -- same width, different type. */
     void (*loadavg)(uint64_t *a1, uint64_t *a5, uint64_t *a15,
-                    uint32_t *running, uint32_t *total, int *max_pid);
+                    unsigned *running, unsigned *total, int *max_pid);
     uint32_t (*anonprov_max)(void);
     int (*sched_base_slice)(void);
     int (*pid_max)(void);

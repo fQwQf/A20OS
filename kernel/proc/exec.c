@@ -1218,7 +1218,10 @@ static void exec_cb_undo(void *opaque, uint32_t kind, uint64_t handle)
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
         exec_native_rollback(&c->native_handles);
 #endif
-        elf_load_info_discard((elf_load_info_t *)handle);
+        /* handle is the 64-bit resource slot; go through uintptr_t so a
+         * 32-bit port truncates to the pointer width instead of failing the
+         * int-to-pointer-cast check. */
+        elf_load_info_discard((elf_load_info_t *)(uintptr_t)handle);
     }
 }
 

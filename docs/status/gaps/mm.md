@@ -32,10 +32,10 @@
 
 ### MM-05 32 位架构的内核 MM 编译不过
 
-- 现状：`check-riscv32-bringup` 在 `kernel/mm/cow.c`、`kernel/mm/fault.c`、`kernel/mm/madvise.c` 上编译失败：`pt_lookup_leaf()` 的参数是 `int *` / `vaddr_t *`（64 位 `long`），调用方传的是 `int32_t *` / `uintptr_t *`；`kernel/mm/fault.c:405` 的 `"Rust/C cowf probe ABI"` 静态断言在 riscv32 上失败。arm32 在内核构建里报同样的 `cow.c` 指针宽度问题，另有 `mm_pt_sync_status` 隐式声明，以及 `kernel/include/mm/elf_rust.h:384` 的 `"elf_rust ABI drift"` 静态断言。两处都在固定 CI 容器里用 `arm-linux-gnueabihf-gcc` 复现。
-- 缺口：riscv32 与 arm32 的内核 bring-up 构建不通过，32 位档的 MM 没有任何可运行证据；这两个架构的用户态构建是通过的，所以问题集中在 MM 的 32 位类型宽度。
+- 现状：MM 侧的 32 位类型错误已修，并在 riscv32 上推进到 `kernel/fs/ids/uxfs`。已修的具体项：`cow.c`/`fault.c`/`madvise.c`/`mmap.c`/`mprotect.c`/`munmap.c` 的 `pt_lookup_leaf()` 参数改为经 `vaddr_t`/`size_t` 局部变量中转（结构体里仍是 pointer-width 字段，以保住 Rust `#[repr(C)]` 镜像的布局）；`a20_cowf_probe`、`a20_mprotect_rec/leaf`、`a20_munmap_entry`、`a20_mseal_rec` 的 32 位尺寸断言原来写成 48/28/24/16，与字段表不符，实测应为 52/40-32/40/24；`elf_rust.h` 的 `a20_elf_interpreter_ops_t` 与 Rust 侧同步改成按指针宽度取值；`mprotect.c` 的溢出检查改为先在 64 位里界定再比较。连带修掉同类 32 位问题：`proc/ptrace_state.h` 的 `int32_t *` 改为 `int *`（ilp32d 下 `int32_t` 是 `long`）、`proc/wait.c` 的 `report_take` 形参、`proc/exec.c` 的资源句柄转换、`procfs_render.c` 的 loadavg 指针类型。**仍未通过**：riscv32 现在停在 `kernel/fs/uxfs/uxfs.c` 的 `uxfs namespace mirror: sb view prefix layout`（`offsetof(uxfs_sb_t, server_generation) == 72` 是 LP64 值）；arm32 仍无法在本机验证（无 arm 工具链）。
+- 缺口：riscv32 与 arm32 的内核 bring-up 构建不通过，32 位档的 MM 没有可运行证据。两个架构的用户态构建是通过的。
 - 关闭条件：`check-riscv32-bringup` 与 `check-arm32-bringup` 编译通过，并在 QEMU 里完成 bring-up 与自然关机。
-- 来源：DELIVERY 的保留平台构建矩阵（[current/delivery-baseline.md](../current/delivery-baseline.md) §3）。
+- 来源：DELIVERY 的保留平台构建矩阵（[current/delivery-baseline.md](../current/delivery-baseline.md) §3）；本条现状由 CORE 包在 CORE-07 取证时推进并更新。
 
 ### MM-06 宿主侧 MM 用例与当前源码脱节
 

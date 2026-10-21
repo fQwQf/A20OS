@@ -104,7 +104,9 @@ struct a20_munmap_entry {
 #if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(struct a20_munmap_entry) == 48, "Rust/C unmap entry ABI");
 #elif __SIZEOF_POINTER__ == 4
-_Static_assert(sizeof(struct a20_munmap_entry) == 24, "Rust/C unmap entry ABI");
+/* 40, not 24: the two u64 fields keep 8-byte alignment under ilp32d, so the
+ * record is wider than a naive pointer-width scaling suggests. */
+_Static_assert(sizeof(struct a20_munmap_entry) == 40, "Rust/C unmap entry ABI");
 #endif
 
 
@@ -334,10 +336,15 @@ void a20_munmap_leaf_probe(void *mm_ptr, uintptr_t va,
     out->level = 0;
     out->present = 0;
     out->swap = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &out->level, &out->base,
-                                &out->size);
+    int level = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
     if (!pte)
         return;
+    out->level = level;
+    out->base = (uintptr_t)base;
+    out->size = (uintptr_t)size;
     out->aux = (uintptr_t)*pte;
     out->present = (*pte & PTE_V) != 0;
 #ifdef CONFIG_SWAP
