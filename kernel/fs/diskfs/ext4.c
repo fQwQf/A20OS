@@ -99,6 +99,19 @@ static int ext4_state_admit(uint16_t state)
 #endif
 }
 
+/* Dirty because the last session did not finish, as opposed to dirty because
+ * this driver caught metadata it could not trust.  Only the former is what a
+ * mount-time orphan recovery can resolve. */
+static int ext4_state_recoverable(uint16_t state)
+{
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    extern int a20_ext4_mount_state_recoverable(uint16_t);
+    return a20_ext4_mount_state_recoverable(state) != 0;
+#else
+    return !(state & EXT4_ERROR_FS) && !(state & EXT4_VALID_FS);
+#endif
+}
+
 static int ext4_state_io_read(void *context, uint16_t *state)
 {
     bcache_t *bc = context;
@@ -2858,13 +2871,24 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         return NULL;
     }
 
-    /* No-journal ext4 has no replay path. Only a VALID, non-error image may
-     * become writable; the Rust policy is shared with the UFSD build. */
-    if (!(sb.s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) &&
-        !ext4_state_admit(sb.s_state)) {
-        printf("[EXT4] refusing mount: no-journal filesystem state is not clean (0x%x)\n",
+    /* No-journal ext4 has no replay path.  A clean image is admitted as
+     * before.  An image that was merely not shut down cleanly is admitted too,
+     * because the legacy orphan chain is exactly the work the interrupted
+     * session left and the recovery below finishes it -- refusing instead
+     * makes every crash leave the image permanently unmountable.  An image
+     * this driver already flagged with ERROR_FS stays refused: no mount-time
+     * recovery can repair that. */
+    int no_journal =
+        !(sb.s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL);
+    if (no_journal && !ext4_state_admit(sb.s_state)) {
+        if (!ext4_state_recoverable(sb.s_state) ||
+            (flags & VFS_MOUNT_RDONLY)) {
+            printf("[EXT4] refusing mount: no-journal filesystem state is not clean (0x%x)\n",
+                   sb.s_state);
+            return NULL;
+        }
+        printf("[EXT4] unclean no-journal image (state=0x%x); recovering orphans\n",
                sb.s_state);
-        return NULL;
     }
 
     if ((flags & VFS_MOUNT_RDONLY) &&

@@ -34,8 +34,13 @@
 正常关机后宿主 `e2fsck -fn` 干净，并且这条性质有门禁：`smoke-vfs-stress` 在 guest 跑完
 （含 create/unlink/rmdir）之后会对同一张镜像跑一次 `e2fsck -fn`。
 
-无日志镜像被**直接 kill**（不是正常关机）时仍可能留下不一致——这张盘没有重放机制，这是无日志
-格式的固有限制，不是回收缺口。需要崩溃一致性时用带日志的 `ext4-journal.img`，由
+无日志镜像被**直接 kill**（不是正常关机）后，下一次挂载会认出 `s_state` 的脏标记并跑孤儿
+recovery 再挂载，不拒绝：孤儿 inode 在 recovery 里被截断并释放，恢复后 `e2fsck -fn` 干净。
+`smoke-ext4-recovery` 就是这个场景的门禁（open+unlink → kill → 重启同一张镜像 → 检查挂载成功、
+inode 已被回收、两次 `e2fsck -fn` 都干净）。仍然拒绝的是 `ERROR_FS`：那表示驱动自己在上一会话里
+发现过不可信元数据，挂载期 recovery 修不了它。
+
+需要日志级崩溃原子性（提交点前后哪些写在崩溃后存活）时用带日志的 `ext4-journal.img`，由
 `smoke-ext4-journal` 覆盖（4 个注入点的崩溃 + 恢复后 `e2fsck` 干净）。
 
 ## NTFS 限制
