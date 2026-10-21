@@ -7,6 +7,7 @@
 #include "fs/vfs/mount.h"
 #include "proc/proc_internal.h"
 #include "core/lock.h"
+#include "core/lock_counters.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/timer.h"
@@ -275,6 +276,10 @@ static void mntns_start_reaper(void)
 
 void mntns_early_init(void)
 {
+    /* Registered so the mount-table contention a concurrent mount/umount
+     * workload produces is visible in /proc/a20/lock_contention; every other
+     * table lock in the VFS already reports there. */
+    lock_counters_register(&g_mntns_lock, "mntns");
     a20_mntns_lifecycle_init(&g_mntns_life, MNTNS_SHUTDOWN_MAX);
     memset(&g_init_ns, 0, sizeof(g_init_ns));
     g_init_ns.ino = MNTNS_INIT_INO;

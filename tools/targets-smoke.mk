@@ -739,6 +739,18 @@ smoke-sched-stress:
 smoke-trap-storm:
 	$(PYTHON) tools/smoke.py smoke-trap-storm
 
+# Task identity and lifecycle on two CPUs: fork/vfork, clone/settid and
+# thread-group exit, wait/stop, partial clone-publication rollback, and PID
+# reuse/reclaim, all with their own log.
+smoke-proc-lifecycle-smp2:
+	$(PYTHON) tools/smoke.py smoke-proc-lifecycle-smp2
+
+# Concurrent VFS workload on four CPUs: same-directory create/write/rename/
+# unlink plus a private ramfs mount cycle per worker, with a seeded schedule
+# the parent replays to check the workers' reported counts.
+smoke-vfs-concurrency-smp4:
+	$(PYTHON) tools/smoke.py smoke-vfs-concurrency-smp4
+
 # Same workload as smoke-sched-stress on two CPUs, with its own log.  Runqueue
 # placement, migration and cross-CPU wakeups only run with more than one CPU;
 # the single-CPU target above keeps its own semantics.

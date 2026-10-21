@@ -47,6 +47,7 @@ RUST_LINKED_HOST_TESTS := \
     tools/tests/rw_mutex_state_host.c \
     tools/tests/wait_queue_state_host.c \
     tools/tests/wait_timer_host.c \
+    tools/tests/wait4_host.c \
     tools/tests/test_cow_clone.c \
     tools/tests/test_cow_fault.c \
     tools/tests/test_madvise_policy.c \

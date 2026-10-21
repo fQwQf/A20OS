@@ -2,6 +2,7 @@
 #include "core/lock.h"
 #include "core/lock_counters.h"
 #include "core/string.h"
+#include "core/sync.h"
 
 /*
  * Dentry cache state engine selector.  Rust owns the slot table's state
@@ -291,8 +292,16 @@ void vfs_dcache_invalidate(vnode_t *dir, const char *name)
 
 /* Serialises invalidate_all() against itself and holds the batch of retired
  * vnode references, which is too large for the kernel stack.  Nothing on any
- * lookup path takes it, so it can never be part of a cycle. */
-static spinlock_t g_dcache_invalidate_lock = SPINLOCK_INIT;
+ * lookup path takes it, so it can never be part of a cycle.
+ *
+ * It is a mutex, not a spinlock, because the batch drain calls vnode_put(),
+ * which reaches filesystem release paths that take sleeping locks (ramfs takes
+ * a mutex there).  Held as a spinlock, the drain ran with preemption disabled
+ * and the park inside that mutex hit the switch-path assert -- reproducible by
+ * mounting and unmounting ramfs from several CPUs at once.  The property the
+ * lock provides is "one invalidator at a time", which a sleepable lock gives
+ * just as well; the per-bucket spinlocks below still bound the masked regions. */
+static mutex_t g_dcache_invalidate_lock = MUTEX_INIT;
 static vnode_t *g_dcache_retire[VFS_DCACHE_MAX];
 static unsigned g_dcache_retire_count;
 
@@ -332,7 +341,7 @@ void vfs_dcache_invalidate_all(void)
      * after its bucket has been emptied is a cache entry created during the
      * invalidation, which is exactly as valid as one that survived it.
      */
-    uint64_t inv = spin_lock_irqsave(&g_dcache_invalidate_lock);
+    mutex_lock(&g_dcache_invalidate_lock);
     for (unsigned b = 0; b < VFS_DCACHE_BUCKET_LOCKS; b++) {
         uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
         dcache_init_locked();
@@ -346,8 +355,9 @@ void vfs_dcache_invalidate_all(void)
 
         /* vnode_put() must not run under the cache locks, and both are
          * released above, so this is the one point where a reference can be
-         * dropped with interrupts back on. */
+         * dropped with interrupts back on -- and with the invalidate lock
+         * sleepable, so a release path that blocks is legal here. */
         dcache_retire_drain();
     }
-    spin_unlock_irqrestore(&g_dcache_invalidate_lock, inv);
+    mutex_unlock(&g_dcache_invalidate_lock);
 }

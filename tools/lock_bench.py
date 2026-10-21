@@ -75,11 +75,20 @@ WORKLOADS = {
         "pass_marker": "FUTEX_STRESS: PASS",
         "desc": "futex_stress, PI / requeue / timeout cleanup cases",
     },
+    "vfs_concurrency": {
+        "cmd": "vfs_concurrency",
+        "pass_marker": "VFS_CONC: PASS",
+        "desc": "vfs_concurrency, 4 workers over one directory plus a private "
+                "ramfs mount cycle each (dcache / page_cache / block_cache / "
+                "mount table)",
+    },
 }
-DEFAULT_WORKLOADS = ["mm_stress", "net_stress", "sched_stress", "futex_stress"]
+DEFAULT_WORKLOADS = ["mm_stress", "net_stress", "sched_stress", "futex_stress",
+                     "vfs_concurrency"]
 
 # Locks the roadmap cares about; the raw JSON keeps every registered lock.
-TRACKED_LOCKS = ["tasklist", "lwip", "slab", "runq"]  # proc_lock eliminated; its global residue is tasklist_lock
+TRACKED_LOCKS = ["tasklist", "lwip", "slab", "runq", "dcache", "page_cache",
+                 "block_cache", "mntns"]  # proc_lock eliminated; its global residue is tasklist_lock
 
 # Sentinels delimit the console regions so a dropped or interleaved command
 # is visible in the JSON instead of silently shifting every later block.
