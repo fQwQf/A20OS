@@ -8,6 +8,9 @@
 #include "hyp/hyp.h"
 #include "fs/vfs/mntns.h"
 #include "proc/pidns.h"
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+#include "abi/linux/pidfd.h"
+#endif
 #include "core/bootargs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -1092,7 +1095,13 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
         open_flags |= O_CLOEXEC;
     unsigned long ino = target->vnode ?
         (unsigned long)target->vnode->ino : 0;
-    int len = a20_procfs_render_fdinfo(pos, open_flags, ino, buf, bufsz);
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    int pid_target = linux_pidfd_vfile_pid(target);
+#else
+    int pid_target = -1;
+#endif
+    int len = a20_procfs_render_fdinfo(pos, open_flags, ino, pid_target, buf,
+                                       bufsz);
     vfs_put_file(target);
     return len < 0 ? 0 : len;
 }

@@ -480,7 +480,7 @@ struct a20_procfs_map_record {
 int a20_procfs_render_maps(const struct a20_procfs_map_record *records,
                            size_t count, int smaps, char *buf, size_t bufsz);
 int a20_procfs_render_fdinfo(size_t pos, unsigned int flags, unsigned long ino,
-                             char *buf, size_t bufsz);
+                             int pid, char *buf, size_t bufsz);
 int a20_procfs_render_net_snapshot(int kind,
                                    const struct a20_procfs_net_row *rows,
                                    size_t count, char *buf, size_t bufsz);
