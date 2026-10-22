@@ -29,9 +29,11 @@ static inline void syscall_profile_record(uint64_t num, uint64_t start, uint64_t
 {
     if (!__atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED))
         return;
-    if (num >= SYSCALL_PROFILE_MAX)
+    if (num >= SYSCALL_PROFILE_MAX || start == 0)
         return;
 
+    /* A diagnostic read can enable collection inside this syscall. Its zero
+     * entry timestamp is the disabled sentinel, not the start of boot time. */
     uint64_t elapsed = (end >= start) ? (end - start) : 0;
     syscall_prof_t *prof = &sys_prof[num];
     __atomic_fetch_add(&prof->count, 1, __ATOMIC_RELAXED);

@@ -19,6 +19,7 @@
 #include "core/klog.h"
 #include "core/panic.h"
 #include "core/perf.h"
+#include "core/fcntl.h"
 #include "core/lock_counters.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -307,7 +308,40 @@ static int resource_kind(pf_type_t type) {
     return a20_procfs_resource_kind((int)type);
 }
 
-static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
+/* perf and lock formatters saturate at capacity-1. A successful open must
+ * contain a whole snapshot, not a plausible-looking truncated tail. Grow only
+ * these diagnostic files, keep allocation off the kernel stack, and report a
+ * bounded failure rather than return partial data at the safety limit. */
+#define PROCFS_DIAG_MAX_CONTENT (1024u * 1024u)
+static int procfs_diag_content_alloc(pf_type_t type, int pid, size_t capacity,
+                                     char **out, size_t *out_len) {
+    *out = NULL;
+    *out_len = 0;
+    if (capacity < 2 || capacity > PROCFS_DIAG_MAX_CONTENT)
+        return -EINVAL;
+    for (;;) {
+        char *buf = kmalloc(capacity);
+        if (!buf)
+            return -ENOMEM;
+        int len = generate_content(type, pid, buf, capacity);
+        if (len < 0) {
+            kfree(buf);
+            return len;
+        }
+        if ((size_t)len < capacity - 1) {
+            *out = buf;
+            *out_len = (size_t)len;
+            return 0;
+        }
+        kfree(buf);
+        if (capacity == PROCFS_DIAG_MAX_CONTENT)
+            return -EOVERFLOW;
+        capacity = capacity > PROCFS_DIAG_MAX_CONTENT / 2
+                       ? PROCFS_DIAG_MAX_CONTENT : capacity * 2;
+    }
+}
+
+static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd, int flags) {
     procfs_priv_t *p = (procfs_priv_t *)kmalloc(sizeof(*p));
     if (!p) return NULL;
     memset(p, 0, sizeof(*p));
@@ -318,7 +352,9 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         real_pid = cur ? cur->pid : 0;
     }
     p->pid = real_pid;
-    {
+    int write_only_diag = (flags & O_ACCMODE) == O_WRONLY &&
+                          (type == PF_A20_PERF || type == PF_A20_LOCK_CONTENTION);
+    if (!write_only_diag) {
         procfs_content_plan_t plan;
         a20_procfs_content_plan((int)type, CONFIG_NR_CPUS, PAGE_SIZE, &plan);
         if (plan.generator == A20_PROCFS_GEN_PAGEMAP_LEN) {
@@ -326,6 +362,16 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         } else if (plan.generator == A20_PROCFS_GEN_MAPS_ALLOC) {
             int ret = generate_pid_maps_alloc(real_pid, type == PF_PID_SMAPS,
                                               &p->content, &p->content_len);
+            if (ret < 0) {
+                task_t *cur = proc_current();
+                if (cur)
+                    cur->vfs_open_errno = ret;
+                kfree(p);
+                return NULL;
+            }
+        } else if (plan.generator == A20_PROCFS_GEN_GROW_CONTENT) {
+            int ret = procfs_diag_content_alloc(type, real_pid, plan.capacity,
+                                                &p->content, &p->content_len);
             if (ret < 0) {
                 task_t *cur = proc_current();
                 if (cur)
@@ -1699,7 +1745,7 @@ static vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
     procfs_priv_t *priv = procfs_priv_create(meta ? meta->type : PF_ROOT,
                                               meta ? meta->pid : 0,
-                                              meta ? meta->fd : -1);
+                                              meta ? meta->fd : -1, flags);
     if (!priv) { vfile_free(vf); return NULL; }
     vnode_get(vn);
     vf->priv = priv;

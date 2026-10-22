@@ -893,6 +893,8 @@ pub const GEN_FDINFO: u32 = 1;
 pub const GEN_MAPS_ALLOC: u32 = 2;
 /// No buffer: the node's length is the fixed `pagemap` size.
 pub const GEN_PAGEMAP_LEN: u32 = 3;
+/// Diagnostic snapshot: retry with a larger buffer on formatter saturation.
+pub const GEN_GROW_CONTENT: u32 = 4;
 
 /// The `(256 GiB / PAGE_SIZE) * 8` pagemap length from the pre-migration code.
 /// `page_size` is a parameter so the engine follows the profile's page size.
@@ -946,6 +948,15 @@ pub unsafe extern "C" fn a20_procfs_content_plan(
     } else if ty == PF_PID_FDINFO_ENTRY {
         ProcfsContentPlan {
             generator: GEN_FDINFO,
+            capacity: 4096,
+            fixed_len: 0,
+            meta_len_zero: 1,
+        }
+    } else if ty == PF_A20_PERF || ty == PF_A20_LOCK_CONTENTION {
+        // stat/lookup must neither arm collection nor take a partial snapshot.
+        // Open starts small; the C adapter grows only if the formatter fills it.
+        ProcfsContentPlan {
+            generator: GEN_GROW_CONTENT,
             capacity: 4096,
             fixed_len: 0,
             meta_len_zero: 1,
@@ -3041,6 +3052,11 @@ mod tests {
         assert_eq!((p.generator, p.capacity), (GEN_FDINFO, 4096));
         unsafe { a20_procfs_content_plan(PF_CPUINFO, 4, 4096, &mut p) };
         assert_eq!((p.generator, p.capacity), (GEN_CONTENT, 512 * 4 + 1));
+        for ty in [PF_A20_PERF, PF_A20_LOCK_CONTENTION] {
+            unsafe { a20_procfs_content_plan(ty, 8, 4096, &mut p) };
+            assert_eq!((p.generator, p.capacity, p.meta_len_zero),
+                       (GEN_GROW_CONTENT, 4096, 1));
+        }
         unsafe { a20_procfs_content_plan(PF_MEMINFO, 8, 4096, &mut p) };
         assert_eq!((p.generator, p.capacity, p.meta_len_zero), (GEN_CONTENT, 4096, 0));
     }

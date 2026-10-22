@@ -46,7 +46,11 @@ def main():
     ap.add_argument("--kernel", type=Path)
     ap.add_argument("--install", action="append", default=[], help="hostfile:/guest/path")
     ap.add_argument("--no-counters", action="store_true")
+    ap.add_argument("--preserve-counter-state", action="store_true",
+                    help="with --no-counters, leave state untouched for lifecycle diagnostics")
     args = ap.parse_args()
+    if args.preserve_counter_state and not args.no_counters:
+        ap.error("--preserve-counter-state requires --no-counters")
     config = json.loads(args.config.read_text())
     source = json.loads(args.baseline.read_text())
     args.out.mkdir(parents=True, exist_ok=False)
@@ -61,7 +65,10 @@ def main():
     manifest = {"created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "baseline": str(args.baseline),
                 "config": config, "runner_sha256": bench.sha(__file__), "samples": [], "boots": [],
                 "kernel_sha256": bench.sha(qemu[qemu.index("-kernel") + 1]), "base_image_sha256": bench.sha(base),
-                "counters_enabled": not args.no_counters}
+                "counters_enabled": not args.no_counters,
+                "counter_policy": ("preserve" if args.preserve_counter_state else
+                                   "disable_before_each_case_and_audit_after" if args.no_counters else
+                                   "diagnostic_snapshots")}
     (out / "runner.py.txt").write_text(Path(__file__).read_text())
 
     def save():
@@ -92,12 +99,16 @@ def main():
                     script += ["echo 1 > /proc/a20/perf", "echo reset > /proc/a20/lock_contention",
                                f"echo DIAG_PRE_{token}", "cat /proc/a20/perf", "cat /proc/stat",
                                f"echo DIAG_PRE_END_{token}"]
+                elif not args.preserve_counter_state:
+                    script += [bench.COUNTERS_OFF]
                 script += [f"echo APK_BENCH_BEGIN_{token}", shlex.join(case["argv"]),
                            f"r=$?; echo APK_BENCH_END_{token} $r"]
                 if not args.no_counters:
                     script += [f"echo DIAG_POST_{token}", "cat /proc/a20/perf", "cat /proc/stat",
                                f"echo DIAG_LOCKS_{token}", "cat /proc/a20/lock_contention",
                                "echo 0 > /proc/a20/perf", f"echo DIAG_POST_END_{token}"]
+                elif not args.preserve_counter_state:
+                    script += bench.counter_audit_script(token)
             script += ["echo DIAG_SUITE_DONE"]
             script_path = out / f"guest-{run}.sh"
             script_path.write_text("\n".join(script) + "\n")
@@ -132,6 +143,8 @@ def main():
                         row.update(perf_before=before, perf_after=after,
                                    perf_delta={k: v - before.get(k, 0) for k, v in after.items()},
                                    locks=locks(post), pre_output=pre, post_output=post)
+                    elif not args.preserve_counter_state:
+                        row.update(bench.read_counter_audit(guest, token))
                     (out / f"{run}-a20-{case['name']}.log").write_text(output)
                     manifest["samples"].append(row)
                     save()

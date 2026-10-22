@@ -132,9 +132,18 @@ size_t a20_perf_format(char *buf, size_t bufsz)
 {
     size_t off = 0;
 
-    /* Collection is dormant during formal timed builds. The first diagnostic
-     * read enables cumulative accounting before taking its initial snapshot. */
-    __atomic_store_n(&g_a20_perf_enabled, 1, __ATOMIC_RELEASE);
+    /* Collection starts dormant. Report its state before this snapshot; the
+     * first complete read arms cumulative accounting at the end below. */
+    uint32_t was_enabled = __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    if (bufsz) {
+        int n = snprintf(buf, bufsz, "collection_enabled_before_snapshot: %u\n",
+                         was_enabled != 0);
+        if (n < 0)
+            return 0;
+        if ((size_t)n >= bufsz)
+            return bufsz - 1;
+        off = (size_t)n;
+    }
 
     for (unsigned counter = 0; counter < A20_PERF_COUNTER_COUNT; counter++) {
         uint64_t total = 0;
@@ -173,5 +182,10 @@ size_t a20_perf_format(char *buf, size_t bufsz)
         }
         off += (size_t)n;
     }
+    /* A grow/retry attempt must not arm counters until the complete initial
+     * snapshot is available. This also preserves the pre-read state in its
+     * header across allocation retries. Existing live collection stays live. */
+    if (bufsz && off < bufsz - 1)
+        __atomic_store_n(&g_a20_perf_enabled, 1, __ATOMIC_RELEASE);
     return off;
 }
