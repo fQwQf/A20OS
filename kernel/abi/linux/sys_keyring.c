@@ -146,9 +146,10 @@ int64_t sys_keyctl(int cmd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
     }
 
     case KEYCTL_CLEAR:
+        return (int64_t)keyring_clear((key_serial_t)a2);
+
     case KEYCTL_INVALIDATE:
-        /* keyctl(KEYCTL_CLEAR/INVALIDATE): empty or invalidate the keyring. */
-        return -EOPNOTSUPP;
+        return (int64_t)keyring_invalidate((key_serial_t)a2);
 
     default:
         return -EOPNOTSUPP;

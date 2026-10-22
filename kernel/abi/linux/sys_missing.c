@@ -386,7 +386,9 @@ int64_t sys_pkey_mprotect(uint64_t addr, size_t len, int prot, int pkey)
     task_t *t = proc_current();
     if (!t)
         return -ESRCH;
-    if (!pkey_valid(t, pkey))
+    /* Linux treats pkey == -1 as "no protection key" and falls back to
+     * mprotect; only a non-negative key must be allocated to this task. */
+    if (pkey != -1 && !pkey_valid(t, pkey))
         return -EINVAL;
     return sys_mprotect(addr, len, prot);
 }

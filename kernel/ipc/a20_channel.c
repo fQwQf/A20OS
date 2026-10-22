@@ -449,6 +449,19 @@ static int g_ch_donate_test_queued_reply_armed;
 #define CH_DONATE_TEST_MAGIC UINT64_C(0x31454b41574f4e44) /* "DNOWAKE1" */
 #define CH_DONATE_TEST_QUEUED_REPLY_MAGIC UINT64_C(0x3130594c50455251) /* "QREPLY01" */
 
+/* Is a receiver parked on @peer?  wait_queue_peek_key() hands back a
+ * referenced task which stays valid without the queue lock; this check only
+ * needs the answer, so it drops that reference immediately instead of keeping
+ * a task pointer alive across the rest of the fixture. */
+static bool ch_peer_has_receiver(a20_channel_ep_t *peer)
+{
+    task_t *task = wait_queue_peek_key(&peer->waiters, A20_CH_WAIT_RECV);
+    if (!task)
+        return false;
+    proc_put(task);
+    return true;
+}
+
 static int ch_donate_test_request_matches(a20_channel_ep_t *ep)
 {
     int matches = 0;
@@ -487,13 +500,8 @@ static int ch_donate_test_arm_queued_reply(a20_channel_ep_t *ep)
             matches = magic == CH_DONATE_TEST_QUEUED_REPLY_MAGIC;
         }
         spin_unlock(&peer->lock);
-        if (matches) {
-            task_t *waiter = wait_queue_peek_key(&peer->waiters,
-                                                 A20_CH_WAIT_RECV);
-            has_waiter = waiter != NULL;
-            if (waiter)
-                proc_put(waiter);
-        }
+        if (matches)
+            has_waiter = ch_peer_has_receiver(peer);
     }
     spin_unlock(&g_ch_lock);
     if (matches && !has_waiter)

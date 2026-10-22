@@ -85,7 +85,23 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 ### 1.5 版本化规则
 
 - 接口版本 `N` 增加表示 wire 语义变化；接收端用 `A20_SERVICES_IDL_VERSION` 与信封 `version` 比对；
-- 当前只做“严格相等校验 + 拒绝”：版本不匹配即拒绝该消息（不实现动态协商）；
+- 数据面（echod/rtcd/ufsd）只做严格相等校验：`version != 1` 或 `size != 收到长度` 即丢弃，
+  不解析负载、不回复；
+- `SVCMGR_VERSION_NEGOTIATE`/`REP_VERSION_NEGOTIATE` 是控制面的动态协商：客户端发送自己支持的
+  `[min,max]` 区间，服务端在交集里选取并回 ACK；没有交集时回 `NO_COMMON`，区间非法时回
+  `INVALID_RANGE`。ACK 必须精确匹配 nonce、类型、信封版本、长度和状态；任何不一致（包括未知
+  status、未知 reply type、尾随字节、legacy echo 不覆盖 v1）都拒绝，绝不回退到 legacy；
+- legacy 回退只在服务端把请求原样回显、且客户端自己也支持 v1 时成立；
+- 各消息族的未知值契约是明确的，不靠相邻分支推断：
+
+| 消息族 | 未知 version | 未知 type | 未知 status/opcode |
+| --- | --- | --- | --- |
+| 控制面协商 ACK | 拒绝 | 拒绝 | 拒绝（`InvalidStatus`/类型不符），不回退 |
+| SVCMGR (`echod`) | 丢弃、不回复 | 原样回显 | — |
+| RTCD | 丢弃、不回复 | 消费但不回复 | — |
+| UFSD 二进制协议 | 丢弃、不回复 | 回复 `-ENOSYS` | 回复 `-ENOSYS` |
+| UFSD 新协议信封 | 丢弃、不回复 | 按 opcode 分派；未知 opcode `-ENOSYS` | — |
+
 - 协议演进（新增消息/字段）应先 bump 版本，再同步服务端与生成头，避免运行期错配。
 
 ### 1.6 扩展流程（新增一个服务协议）

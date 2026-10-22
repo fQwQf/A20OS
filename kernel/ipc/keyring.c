@@ -356,7 +356,61 @@ static int keyring_is_expired(task_key_object_t *o, uint64_t now_ns)
     return o && o->expiry_ns != 0 && now_ns >= o->expiry_ns;
 }
 
-static task_key_object_t *keyring_find_locked(task_key_object_t *ring,
+/* Permission needs, in Linux's key_need_perm order. */
+enum {
+    KEY_NEED_VIEW = 1 << 0,
+    KEY_NEED_READ = 1 << 1,
+    KEY_NEED_WRITE = 1 << 2,
+    KEY_NEED_SEARCH = 1 << 3,
+    KEY_NEED_LINK = 1 << 4,
+    KEY_NEED_SETATTR = 1 << 5,
+};
+
+/* The bits an operation needs, expressed at KEY_POS_* positions; group and
+ * other classes shift the same pattern down by 16 and 24 bits. */
+static uint32_t keyring_need_pos_bits(int need)
+{
+    uint32_t bits = 0;
+    if (need & (KEY_NEED_VIEW | KEY_NEED_READ | KEY_NEED_WRITE |
+                KEY_NEED_SEARCH | KEY_NEED_LINK))
+        bits |= KEY_POS_VIEW;
+    if (need & KEY_NEED_READ)
+        bits |= KEY_POS_READ;
+    if (need & KEY_NEED_WRITE)
+        bits |= KEY_POS_WRITE;
+    if (need & KEY_NEED_SEARCH)
+        bits |= KEY_POS_SEARCH;
+    if (need & KEY_NEED_LINK)
+        bits |= KEY_POS_LINK;
+    if (need & KEY_NEED_SETATTR)
+        bits |= KEY_POS_SETATTR;
+    return bits;
+}
+
+/* Class is the effective owner/group/other triple.  Supplementary groups are
+ * not part of this kernel's credential view, so only egid can match. */
+static int keyring_permitted(task_t *t, task_key_object_t *o, int need)
+{
+    if (!t || !o)
+        return 0;
+    uint32_t class_mask;
+    int shift;
+    if (o->uid == t->cred.euid) {
+        class_mask = KEY_POS_ALL;
+        shift = 0;
+    } else if (o->gid == t->cred.egid) {
+        class_mask = KEY_GRP_ALL;
+        shift = 16;
+    } else {
+        class_mask = KEY_OTH_ALL;
+        shift = 24;
+    }
+    uint32_t needed = keyring_need_pos_bits(need) >> shift;
+    return (o->perm & class_mask & needed) == needed;
+}
+
+static task_key_object_t *keyring_find_locked(task_t *t,
+                                              task_key_object_t *ring,
                                               const char *type,
                                               const char *desc,
                                               int direct_only, int depth,
@@ -364,19 +418,24 @@ static task_key_object_t *keyring_find_locked(task_key_object_t *ring,
 {
     if (!ring || !type || !desc || depth < 0)
         return NULL;
+    /* Searching a ring requires SEARCH on that ring.  add_key's duplicate
+     * probe is authorised by the ring's WRITE permission instead. */
+    if (!direct_only && !keyring_permitted(t, ring, KEY_NEED_SEARCH))
+        return NULL;
     for (size_t i = 0; i < ring->item_count; i++) {
         task_key_object_t *o = ring->items[i];
         if (!o || keyring_is_expired(o, now_ns))
             continue;
         if (o->type == TASK_KEY_OBJECT_KEY) {
             if (strcmp(o->key_type, type) == 0 &&
-                strcmp(o->description, desc) == 0)
+                strcmp(o->description, desc) == 0 &&
+                (direct_only || keyring_permitted(t, o, KEY_NEED_SEARCH)))
                 return o;
             continue;
         }
         if (!direct_only && depth > 0) {
             task_key_object_t *nested =
-                keyring_find_locked(o, type, desc, 0, depth - 1, now_ns);
+                keyring_find_locked(t, o, type, desc, 0, depth - 1, now_ns);
             if (nested)
                 return nested;
         }
@@ -425,8 +484,14 @@ key_serial_t keyring_add_key(const char *type, const char *desc,
         return -ENOKEY;
     }
 
+    if (!keyring_permitted(t, ring, KEY_NEED_WRITE)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        keyring_destroy_locked(new_key);
+        return -EACCES;
+    }
+
     task_key_object_t *existing =
-        keyring_find_locked(ring, type, desc, 1, 0, now);
+        keyring_find_locked(t, ring, type, desc, 1, 0, now);
     if (existing) {
         kfree(existing->payload);
         existing->payload = new_key->payload;
@@ -480,14 +545,14 @@ key_serial_t keyring_request_key(const char *type, const char *desc,
     task_key_object_t *session =
         keyring_resolve_locked(t, KEY_SPEC_SESSION_KEYRING, 0);
     task_key_object_t *key =
-        session ? keyring_find_locked(session, type, desc, 0,
+        session ? keyring_find_locked(t, session, type, desc, 0,
                                       KEYRING_SEARCH_DEPTH, now)
                 : NULL;
     if (!key) {
         task_key_object_t *user =
             keyring_resolve_locked(t, KEY_SPEC_USER_KEYRING, 0);
         if (user)
-            key = keyring_find_locked(user, type, desc, 0, 1, now);
+            key = keyring_find_locked(t, user, type, desc, 0, 1, now);
     }
     if (!key) {
         spin_unlock_irqrestore(&g_keyring_lock, flags);
@@ -636,6 +701,11 @@ int keyring_link(key_serial_t id, key_serial_t ringid)
         spin_unlock_irqrestore(&g_keyring_lock, flags);
         return -ENOKEY;
     }
+    if (!keyring_permitted(t, o, KEY_NEED_LINK) ||
+        !keyring_permitted(t, ring, KEY_NEED_WRITE)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EACCES;
+    }
     int ret = keyring_link_locked(ring, o);
     spin_unlock_irqrestore(&g_keyring_lock, flags);
     return ret;
@@ -653,6 +723,10 @@ int keyring_unlink(key_serial_t id, key_serial_t ringid)
         spin_unlock_irqrestore(&g_keyring_lock, flags);
         return -ENOKEY;
     }
+    if (!keyring_permitted(t, ring, KEY_NEED_WRITE)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EACCES;
+    }
     int ret = keyring_unlink_locked(ring, o);
     spin_unlock_irqrestore(&g_keyring_lock, flags);
     return ret;
@@ -668,7 +742,7 @@ key_serial_t keyring_search(key_serial_t ringid, const char *type,
     unsigned long flags = spin_lock_irqsave(&g_keyring_lock);
     task_key_object_t *ring = keyring_resolve_locked(t, ringid, 0);
     task_key_object_t *key =
-        ring ? keyring_find_locked(ring, type, desc, 0,
+        ring ? keyring_find_locked(t, ring, type, desc, 0,
                                    KEYRING_SEARCH_DEPTH, now)
              : NULL;
     key_serial_t ret = key ? key->serial : -ENOKEY;
@@ -686,6 +760,10 @@ long keyring_describe(key_serial_t id, char *buf, size_t bufsz)
     if (!o) {
         spin_unlock_irqrestore(&g_keyring_lock, flags);
         return -ENOKEY;
+    }
+    if (!keyring_permitted(t, o, KEY_NEED_VIEW)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EACCES;
     }
     const char *type_name =
         o->type == TASK_KEY_OBJECT_KEY ? o->key_type : "keyring";
@@ -715,6 +793,10 @@ long keyring_read(key_serial_t id, void *buf, size_t bufsz)
         spin_unlock_irqrestore(&g_keyring_lock, flags);
         return o ? -EKEYEXPIRED : -ENOKEY;
     }
+    if (!keyring_permitted(t, o, KEY_NEED_READ)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EACCES;
+    }
 
     long ret;
     if (o->type == TASK_KEY_OBJECT_KEY) {
@@ -733,6 +815,83 @@ long keyring_read(key_serial_t id, void *buf, size_t bufsz)
     }
     spin_unlock_irqrestore(&g_keyring_lock, flags);
     return ret;
+}
+
+int keyring_clear(key_serial_t id)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    unsigned long flags = spin_lock_irqsave(&g_keyring_lock);
+    task_key_object_t *ring = keyring_resolve_locked(t, id, 0);
+    if (!ring) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -ENOKEY;
+    }
+    if (!keyring_permitted(t, ring, KEY_NEED_WRITE)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EACCES;
+    }
+    while (ring->item_count > 0) {
+        task_key_object_t *o = ring->items[0];
+        int ret = keyring_unlink_locked(ring, o);
+        if (ret < 0) {
+            spin_unlock_irqrestore(&g_keyring_lock, flags);
+            return ret;
+        }
+    }
+    spin_unlock_irqrestore(&g_keyring_lock, flags);
+    return 0;
+}
+
+static int keyring_ring_contains(task_key_object_t *ring,
+                                 task_key_object_t *o)
+{
+    for (size_t i = 0; i < ring->item_count; i++)
+        if (ring->items[i] == o)
+            return 1;
+    return 0;
+}
+
+int keyring_invalidate(key_serial_t id)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    unsigned long flags = spin_lock_irqsave(&g_keyring_lock);
+    task_key_object_t *o = keyring_object_resolve_locked(t, id, 0);
+    if (!o) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -ENOKEY;
+    }
+    if (o->type != TASK_KEY_OBJECT_KEY) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EINVAL;
+    }
+    if (!keyring_permitted(t, o, KEY_NEED_WRITE)) {
+        spin_unlock_irqrestore(&g_keyring_lock, flags);
+        return -EPERM;
+    }
+    /* Expire before detaching so concurrent lookups stop matching; the final
+     * unlink drops the last ring reference and reclaims the serial entry. */
+    o->expiry_ns = 1;
+    for (;;) {
+        task_key_object_t *found = NULL;
+        for (task_key_object_t *cursor = g_serial_map; cursor;
+             cursor = cursor->next) {
+            if (cursor->type == TASK_KEY_OBJECT_KEYRING && cursor != o &&
+                keyring_ring_contains(cursor, o)) {
+                found = cursor;
+                break;
+            }
+        }
+        if (!found)
+            break;
+        if (keyring_unlink_locked(found, o) < 0)
+            break;
+    }
+    spin_unlock_irqrestore(&g_keyring_lock, flags);
+    return 0;
 }
 
 void keyring_inherit(struct task_t *child, struct task_t *parent)

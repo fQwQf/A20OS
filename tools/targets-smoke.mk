@@ -934,6 +934,9 @@ smoke-io-event:
 smoke-syscall-ext:
 	$(PYTHON) tools/smoke.py smoke-syscall-ext
 
+smoke-syscall-ext-smp2:
+	$(PYTHON) tools/smoke.py smoke-syscall-ext-smp2
+
 smoke-sched-stress:
 	$(PYTHON) tools/smoke.py smoke-sched-stress
 
@@ -1005,6 +1008,9 @@ smoke-cpuinfo:
 .PHONY: smoke-sigchld-group
 smoke-sigchld-group:
 	$(PYTHON) tools/smoke.py smoke-sigchld-group
+
+smoke-child-exit-matrix:
+	$(PYTHON) tools/smoke.py smoke-child-exit-matrix
 
 smoke-scm-stress:
 	$(PYTHON) tools/smoke.py smoke-scm-stress
