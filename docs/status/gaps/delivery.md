@@ -41,3 +41,16 @@
   ghcr 上的 8 个 tag，然后在一个容器 job 里确认 `check-<arch>-bringup` 不再报工具链缺失
   （源码本身的失败另计）。
 - 来源：32 位 bring-up 的 arm32/riscv32 复现。
+
+## DELIVERY-06 armv7m flat-user 缺少 Rust target
+
+- 现状：`make check-mcu-program-rtl` 的 Verilator 构建完成后，ARMv7-M 固件
+  配置在 `tools/rust-kernel.mk:1613` 失败：`CONFIG_FLAT_USER_MEMORY=1` 时
+  没有 `RUST_FLAT_POLICY_TARGET_armv7m`，构建直接 `$(error ...)`。
+- 缺口：MCU 原生应用/RTL 联合验收因此无法在当前树构建；这不是 cluster
+  源码或测试断言失败，而是全局构建规则缺少 ARMv7-M 的 Rust flat 内存策略
+  目标。
+- 关闭条件：为 `ARCH=armv7m` 提供可链接的 flat-policy Rust target（或在该
+  配置下明确排除 Rust flat 策略并由 owner 记录等价保证），然后重新运行
+  `make check-mcu-program-rtl` 并保存实际 guest/RTL 结果。
+- 来源：CLUSTER 1.0 验收尝试；本包不修改全局构建规则。

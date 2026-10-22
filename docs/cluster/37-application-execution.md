@@ -67,7 +67,9 @@ clusterd 成员表生成。每次候选查询检查 CD/2 实例身份、传输�
 内核 boot_epoch。请求键对应固定 manifest，重复 START 返回同一根任务/结果，
 改用另一 manifest 则冲突。CA/1 每个 owner 最多保留 8 次启动，包括终态。
 新增 CA/2 的显式回收和持续执行见 [39](39-application-recycling.md)，原 CA/1
-记录不会被隐式淘汰。跨重启持久记录仍未实现。
+记录不会被隐式淘汰。跨重启持久记录按
+[62-release-scope.md](62-release-scope.md) 的决定不属于 1.0；重启后旧 ticket
+失败关闭为 `EXPIRED`，不重放也不推断执行结果。
 
 | 状态 | 实际含义 |
 |---|---|
