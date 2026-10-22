@@ -486,6 +486,31 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-iommu-udriver-isolation: PASS; log saved to $log',
     },
+    # DRIVER-06: two EDU functions, each with its own translation domain.  The
+    # user driver claims both, proves both translate, faults device 0, and
+    # re-runs device 1's round trip while device 0 is blocked and still held.
+    # The fault queue is shared hardware state, so this is also the check that
+    # one device's drain does not steal the other device's records.
+    'smoke-iommu-multidevice': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', 'PROFILE=benchmark'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/iommu-multidevice-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['cat /proc/a20/iommu', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-device', 'riscv-iommu-pci,bus=pcie.0,addr=1.0', '-device', 'edu,bus=pcie.0,addr=2.0,dma_mask=0xffffffffffffffff', '-device', 'edu,bus=pcie.0,addr=3.0,dma_mask=0xffffffffffffffff', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['UEDUD: two domains claimed',
+                   'UEDUD: dev0 faulted',
+                   'UEDUD: dev1 unaffected',
+                   'UEDUD: domains released',
+                   'UEDUD: PASS',
+                   'enabled: 1',
+                   'System is going down for power-off'],
+        'forbid': ['UEDUD: dev1 affected'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-iommu-multidevice: PASS; log saved to $log',
+    },
     'smoke-mlibc': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

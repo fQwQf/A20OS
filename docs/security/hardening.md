@@ -55,7 +55,7 @@
 | 权限门：reboot/poweroff | `sys_reboot` 的每个出口都会终止机器，而 magic 是公开 ABI 常量而非密钥 | 要求 `CAP_SYS_BOOT` 或 `euid==0`，与 `sys_missing.c` 的 kexec 入口同一约定 |
 | 资源限制 | `RLIMIT_STACK`/`CORE`/`NOFILE` 可设可强制；`RLIMIT_AS`（`proc_mmap` 前置检查）与 `RLIMIT_NPROC`（按 real uid 计数，`CAP_SYS_RESOURCE` 豁免）已实现并强制；`prlimit64` 现支持跨进程 | `smoke-proc-stress` |
 | 诚实性门禁 | `make check-honesty-policy`：以否定断言锁定「未实现即报告不存在」，防止上述反模式回归 | 门禁自身经「故意引入回归」验证会失败并非零退出 |
-| IOMMU/DMA 隔离 | RISC-V IOMMU per-device domain 动态 claim/map/unmap + fault queue 消费（fail-closed），`/proc/a20/iommu` 计数器 | `smoke-iommu-udriver-isolation`（授权内成功/窗口外 fault 被消费并阻断） |
+| IOMMU/DMA 隔离 | RISC-V IOMMU per-device domain 动态 claim/map/unmap + fault queue 按 devid 归属（fail-closed），每 domain 唯一 PSCID 防止 IOTLB 跨设备别名，`/proc/a20/iommu` 计数器 | `smoke-iommu-udriver-isolation`（授权内成功/窗口外 fault 被消费并阻断）、`smoke-iommu-multidevice`（两设备各自域，一个 fault 不影响另一个） |
 | UBSan | 开发 profile 默认 `-fsanitize=undefined`（bringup/benchmark 关闭） | 全部 smoke |
 
 ## 存储持久性

@@ -59,6 +59,9 @@ smoke-iommu-discovery:
 smoke-iommu-udriver-isolation:
 	$(PYTHON) tools/smoke.py smoke-iommu-udriver-isolation
 
+smoke-iommu-multidevice:
+	$(PYTHON) tools/smoke.py smoke-iommu-multidevice
+
 # Thin wrapper: the smoke definition lives in instances/smoke-loongarch64.toml.
 smoke-loongarch64:
 	tools/a20 test smoke-loongarch64
