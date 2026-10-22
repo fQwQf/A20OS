@@ -1466,6 +1466,65 @@ void ext4_journal_report(ext4_sb_info_t *fs)
  * leave a non-empty log without it.  Reading the journal superblock is the
  * authoritative answer, and the cost is one block read on a path that already
  * reads it during recovery. */
+/*
+ * Explicit read-only downgrade for a legacy (v1/v2) journal.
+ *
+ * The same decision is owned by user/svc/jbd2_legacy_policy.rs for the
+ * user-space filesystem service.  The kernel build does not link that crate,
+ * so keep an equivalent fallback here: without it the downgrade is compiled
+ * out and a clean legacy image is refused in the kernel while the user-space
+ * backend accepts it.  A legacy journal is never replayed -- a non-empty log
+ * stays an explicit mount error.
+ */
+#ifndef CONFIG_UFSD_RUST_JBD2_POLICY
+#define JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT 0x4U
+#define JBD2_FEATURE_INCOMPAT_FAST_COMMIT  0x20U
+static int jbd2_legacy_readonly_allowed_c(
+    int read_only, uint32_t compat, uint32_t incompat, uint32_t ro_compat,
+    uint32_t checksum_type, uint32_t block_size, uint32_t maxlen,
+    uint32_t first, uint32_t start, uint32_t fs_block_size,
+    uint64_t inode_blocks)
+{
+    const uint32_t known_base = JBD2_FEATURE_INCOMPAT_REVOKE |
+                                JBD2_FEATURE_INCOMPAT_64BIT;
+    if (!read_only || ro_compat != 0 || block_size != fs_block_size ||
+        block_size != 4096U || maxlen < 2U || maxlen > 65536U ||
+        (uint64_t)maxlen > inode_blocks || first < 1U || first >= maxlen ||
+        start != 0 ||
+        (incompat & (JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT |
+                     JBD2_FEATURE_INCOMPAT_FAST_COMMIT)) != 0 ||
+        (incompat & ~(known_base | JBD2_FEATURE_INCOMPAT_CSUM_V2 |
+                      JBD2_FEATURE_INCOMPAT_CSUM_V3)) != 0)
+        return 0;
+
+    int v1 = compat == JBD2_FEATURE_COMPAT_CHECKSUM &&
+             (incompat & (JBD2_FEATURE_INCOMPAT_CSUM_V2 |
+                          JBD2_FEATURE_INCOMPAT_CSUM_V3)) == 0;
+    int v2 = compat == 0 && (incompat & JBD2_FEATURE_INCOMPAT_CSUM_V2) != 0 &&
+             (incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) == 0 &&
+             checksum_type == JBD2_CRC32C_CHKSUM;
+    return v1 || v2;
+}
+#endif
+
+static int jbd2_legacy_readonly_allowed(
+    int read_only, uint32_t compat, uint32_t incompat, uint32_t ro_compat,
+    uint32_t checksum_type, uint32_t block_size, uint32_t maxlen,
+    uint32_t first, uint32_t start, uint32_t fs_block_size,
+    uint64_t inode_blocks)
+{
+#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
+    return a20_jbd2_allow_clean_legacy_readonly(
+               read_only, compat, incompat, ro_compat, checksum_type,
+               block_size, maxlen, first, start, fs_block_size,
+               inode_blocks) == 1;
+#else
+    return jbd2_legacy_readonly_allowed_c(
+        read_only, compat, incompat, ro_compat, checksum_type, block_size,
+        maxlen, first, start, fs_block_size, inode_blocks);
+#endif
+}
+
 int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
                              int read_only)
 {
@@ -1494,7 +1553,6 @@ int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
      * recovery attempt produce the diagnostic. */
     ret = jbd2_load_superblock(&j);
     if (ret == -EOPNOTSUPP && read_only) {
-#ifdef CONFIG_UFSD_RUST_JBD2_POLICY
         uint32_t compat = get_be32(j.meta + 36);
         uint32_t incompat = get_be32(j.meta + 40);
         uint32_t ro_compat = get_be32(j.meta + 44);
@@ -1507,14 +1565,13 @@ int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb,
         int checksum_ok = !(incompat & (JBD2_FEATURE_INCOMPAT_CSUM_V2 |
                                         JBD2_FEATURE_INCOMPAT_CSUM_V3)) ||
                           jbd2_superblock_checksum_ok(j.meta);
-        if (checksum_ok && a20_jbd2_allow_clean_legacy_readonly(
+        if (checksum_ok && jbd2_legacy_readonly_allowed(
                 1, compat, incompat, ro_compat, j.meta[80], block_size,
-                maxlen, first, start, fs->block_size, inode_blocks) == 1) {
+                maxlen, first, start, fs->block_size, inode_blocks)) {
             printf("[EXT4/JBD2] clean legacy checksum journal; explicit read-only downgrade\n");
             kfree(j.meta);
             return EXT4_JOURNAL_READONLY_LEGACY;
         }
-#endif
         kfree(j.meta);
         return -EOPNOTSUPP;
     }

@@ -6,14 +6,17 @@
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+#include "fs/vfs/mount.h"
 #include "mm/slab.h"
 
 /*
  * Filesystem context (new mount API).
  *
- * A context file accumulates {source, fstype, options}; fsmount() resolves
- * the target path and calls the existing vfs_mount().  mount_setattr and
- * move_mount operate on the mount table directly.
+ * A context file accumulates {source, fstype, options}; fsmount() with a
+ * target resolves the path and calls the existing vfs_mount().  Without a
+ * target it builds a detached mount and returns a mount fd instead, which
+ * move_mount(2) later attaches.  mount_setattr and move_mount operate on the
+ * mount table directly.
  */
 
 typedef struct fscontext_file {
@@ -23,12 +26,18 @@ typedef struct fscontext_file {
     int  flags;
 } fscontext_file_t;
 
+/* fsmount(2) mount attributes (the ms_flags argument). */
+#define MOUNT_ATTR_RDONLY 0x00000001
+
 static int fscontext_read(vfile_t *vf, char *buf, size_t count)
 {
     (void)vf;
     (void)buf;
     (void)count;
-    return 0; /* context files have no read content */
+    /* A filesystem context is not readable.  Linux's fscontext_fops has no
+     * read op, so read(2) reports EINVAL; returning EOF instead made libmount
+     * retry the read in a loop after fsopen(2). */
+    return -EINVAL;
 }
 
 static int fscontext_write(vfile_t *vf, const char *buf, size_t count)
@@ -54,6 +63,86 @@ static vfile_ops_t g_fscontext_ops = {
     .write = fscontext_write,
     .close = fscontext_close,
 };
+
+/*
+ * Mount fd: the handle fsmount(2) returns for a detached mount.  It carries
+ * no I/O of its own; move_mount(2) looks the mount up through it, and closing
+ * it before that happens tears the detached mount down again.
+ */
+typedef struct mountfd_file {
+    mount_t *mnt;
+} mountfd_file_t;
+
+static int mountfd_read(vfile_t *vf, char *buf, size_t count)
+{
+    (void)vf;
+    (void)buf;
+    (void)count;
+    return -EINVAL; /* a mount fd is not readable either */
+}
+
+static int mountfd_write(vfile_t *vf, const char *buf, size_t count)
+{
+    (void)vf;
+    (void)buf;
+    (void)count;
+    return (int)count;
+}
+
+static int mountfd_close(vfile_t *vf)
+{
+    mountfd_file_t *mf = vf ? vf->priv : NULL;
+    if (mf) {
+        /* publish_ready means move_mount(2) already gave the mount a place in
+         * the tree; from then on it belongs to the namespace, not to this
+         * descriptor. */
+        if (mf->mnt && !mf->mnt->publish_ready) {
+            vfs_mount_fs_teardown(mf->mnt);
+            vfs_mount_remove(mf->mnt);
+        }
+        kfree(mf);
+        vf->priv = NULL;
+    }
+    return 0;
+}
+
+static vfile_ops_t g_mountfd_ops = {
+    .read = mountfd_read,
+    .write = mountfd_write,
+    .close = mountfd_close,
+};
+
+static int mountfd_install(mount_t *mnt)
+{
+    mountfd_file_t *mf = kcalloc(1, sizeof(*mf));
+    vfile_t *vf = vfile_alloc();
+    if (!mf || !vf) {
+        if (mf) kfree(mf);
+        if (vf) vfile_free(vf);
+        return -ENOMEM;
+    }
+    mf->mnt = mnt;
+    vf->flags = O_RDWR;
+    vfile_ref_init(vf, 1);
+    vf->ops = &g_mountfd_ops;
+    vf->priv = mf;
+    return anonfd_install_vfile(vf, O_CLOEXEC);
+}
+
+mount_t *fscontext_mountfd_get(int gfd)
+{
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return NULL;
+    mount_t *mnt = NULL;
+    if (vf->ops == &g_mountfd_ops && vf->priv)
+        mnt = ((mountfd_file_t *)vf->priv)->mnt;
+    vfs_put_file_ref(gfd, vf);
+    return mnt;
+}
+
+static int fscontext_fsmount_detached(const char *source, const char *fstype,
+                                      int flags, const char *options);
 
 int fscontext_create(const char *fstype)
 {
@@ -141,7 +230,10 @@ int fscontext_config(int gfd, const char *key, const char *value)
 
 int fscontext_fsmount(int gfd, int flags, int mnt_flags, const char *target)
 {
-    (void)mnt_flags;
+    /* @flags is FSMOUNT_CLOEXEC, which says nothing about the filesystem: it
+     * must not reach mount_t.flags, where bit 0 means read-only.  The mount
+     * attributes that do matter arrive in @mnt_flags. */
+    (void)flags;
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
         return -EBADF;
@@ -162,9 +254,13 @@ int fscontext_fsmount(int gfd, int flags, int mnt_flags, const char *target)
     int cflags = fc->flags;
     vfs_put_file_ref(gfd, vf);
 
+    if (mnt_flags & MOUNT_ATTR_RDONLY)
+        cflags |= VFS_MOUNT_RDONLY;
+
     if (!target)
-        return -EINVAL;
-    int r = vfs_mount(source[0] ? source : "none", target, fstype, cflags | flags,
+        return fscontext_fsmount_detached(source, fstype, cflags, options);
+
+    int r = vfs_mount(source[0] ? source : "none", target, fstype, cflags,
                       options[0] ? options : NULL);
     if (r < 0)
         return r;
@@ -176,6 +272,28 @@ int fscontext_fsmount(int gfd, int flags, int mnt_flags, const char *target)
     int gfd2 = fscontext_open_tree_fd(vn);
     vnode_put(vn);
     return gfd2;
+}
+
+/*
+ * fsmount(2) without a target: the filesystem is created but not placed in
+ * the tree, and the returned fd is the only handle on it.  Closing that fd
+ * before move_mount(2) attaches it destroys the mount again, which is what
+ * keeps an abandoned fsmount from leaking a table slot.
+ */
+static int fscontext_fsmount_detached(const char *source, const char *fstype,
+                                      int flags, const char *options)
+{
+    mount_t *mnt = NULL;
+    int r = vfs_mount_detached(source[0] ? source : "none", fstype, flags,
+                               options[0] ? options : NULL, &mnt);
+    if (r < 0)
+        return r;
+    int mfd = mountfd_install(mnt);
+    if (mfd < 0) {
+        vfs_mount_fs_teardown(mnt);
+        vfs_mount_remove(mnt);
+    }
+    return mfd;
 }
 
 int fscontext_open_tree_fd(struct vnode *vn)
