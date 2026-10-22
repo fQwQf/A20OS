@@ -108,3 +108,12 @@
 - cap128最终kernel三项SCHED/FUTEX/GS通过（70 waiter能容纳）；cap64最终版（含栈批次缩减）SCHED/GS通过，task_lifetime实测capacity64、full_failures0、heap_violations0、state_violations0。仅完整futex70waiter负载因容量64明确失败，未改配置掩盖。
 - 还需最终默认内核重建+hash核对（预期仍与yield-keep f82e...一致）；然后提交容量修复。
 - 当前所有对象构建和guest已结束。准备下一段stock/yield-keep SysV+fork短负载4轮AB/BA/AB/BA交替，避免因全套两批顺序结果忽略7% SysV疑问。之后按数据结构筛查计划测dirty索引。用户最新思路与测试架构偏好在本日志顶部已固化。
+
+## 2026-10-22 20:39 北京时间：恢复工作入口
+
+- 容量修复已提交 `e1fea20a`；默认最终内核重建哈希与yield-keep完全相同 `f82e173...`（完整hash见前文），不存在标准版代码/镜像变化。工作树代码已提交。
+- **当前正在运行** exec session **94980（若会话号不可用，以ps/log为准）**：四轮 stock/yield-keep AB/BA/AB/BA，配置 `build/performance/stock-yield-focus.json`（getpid200k控制、SysV switch5秒、fork5秒），关闭计数器，同APK/镜像，Linux/A20串行。日志 **`build/performance/stock-yield-focus.log`**，证据 **`build/evidence/perf-stock-yield-focus-{1,2,3,4}-{stock,yield-keep}`**，目标48样本。完成前不要编译/并行性能任务。
+- 首先检查上述进程和manifest是否齐全，完成后解释前述7% SysV疑问并归档结果；`stock.elf` 为原cab388内核只读副本，yield-keep为f82默认新内核。
+- 后续进入用户数据结构建议：测 `page_cache_state.rs` 中 per-vnode dirty有序双链表**中间插入**。头尾已有O(1)，所以必须区分定序/逆序/随机，不把所有链表都改树。建议先预读取驻留同规模普通文件页，再计时每页首次pwrite1字节，随机种子固定，以1024/4096/16384页等规模比较；时钟只放循环两端，同静态musl ELF在host/guest运行，文件放host工作目录/guest /root而非可能tmpfs的/tmp；必须包括清理。该文件模块在MCU裁剪，所以无需为其加入MCU双实现。先测得规模热点再改为平衡树/索引。
+- 若需编译静态musl辅助：原 checkout user/build/x86_64/.musl/*/lib/libc.a 有已建musl1.2.6；可用cc -nostdinc -I该目录obj/include -I user/external/musl/include -I...arch/x86_64 -I...arch/generic 编对象，cc -static -nostdlib -no-pie +crt1.o/crti.o/对象/libc.a/-lgcc/crtn.o。旧micro-v2保持不变；新数据结构fixture另命名ELF，不能污染前轮哈希。
+- 仍可考虑修复诊断perf缓冲截断，或真正COW批量克隆，但以新数据结构测量为下一优先。直到北京时间午夜持续推进，不push/merge/deploy，不再要求用户重复授权。
