@@ -1,0 +1,111 @@
+diff --git a/kernel/mm/cow.c b/kernel/mm/cow.c
+index 72db789c..d5223ffe 100644
+--- a/kernel/mm/cow.c
++++ b/kernel/mm/cow.c
+@@ -306,12 +306,16 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
+         return 0;
+     memset(out, 0, sizeof(*out));
+     out->pfn = PFN_NONE;
+-    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
++    int source_level = 0;
++    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, &source_level, NULL, NULL);
+     if (!src_pte)
+         return 0;
+     pte_t *stab = NULL;
+ #if defined(ARCH_HAS_PGTABLE_OPS)
+-    stab = mm_pt_leaf_table(parent->pgdir, va);
++    /* The walker returned &table[vpn(va, source_level)]. Recover that exact
++     * table by array subtraction, including huge leaves, instead of walking
++     * from the root again. No table-size/alignment assumption is required. */
++    stab = src_pte - arch_pt_vpn(va, source_level);
+     if (stab)
+         mm_pt_node_lock(stab);
+ #endif
+diff --git a/tools/tests/cow_snapshot_token_host.c b/tools/tests/cow_snapshot_token_host.c
+index 9df224b3..8d48f562 100644
+--- a/tools/tests/cow_snapshot_token_host.c
++++ b/tools/tests/cow_snapshot_token_host.c
+@@ -28,12 +28,14 @@ static int active,locked=-1,leaf_walks,node_walks,locks,unlocks;
+ static int frame_gets,frame_puts,cache_puts,cache_mode,present_vma=1,statuses,changes;
+ static size_t changed_size;
+ static unsigned char stored_class, expected_class;
+-static int status_reads, vma_lookups, expected_level=-1, expected_index;
++static int status_reads, vma_lookups, expected_level=-1, expected_index, walk_level;
++static int arch_pt_vpn(uintptr_t va,int level);
+ static pte_t *pt_lookup_leaf(pte_t *pgdir,uintptr_t va,void *l,void *b,void *sz) {
+-    (void)pgdir;(void)va;(void)l;(void)b;(void)sz;leaf_walks++;
+-    return &tables[active][0];
++    (void)pgdir;(void)b;(void)sz;leaf_walks++;
++    if(l)*(int *)l=walk_level;
++    return &tables[active][arch_pt_vpn(va,walk_level)];
+ }
+-static pte_t *mm_pt_leaf_table(pte_t *pgdir,uintptr_t va) {
++static __attribute__((unused)) pte_t *mm_pt_leaf_table(pte_t *pgdir,uintptr_t va) {
+     (void)pgdir;(void)va;node_walks++;return tables[active];
+ }
+ static void mm_pt_node_lock(pte_t *table) {
+@@ -84,17 +86,17 @@ static void reset(void) {
+     active=leaf_walks=node_walks=locks=unlocks=frame_gets=frame_puts=cache_puts=statuses=changes=0;
+     cache_mode=0;cache.pin=0;vma.vm_flags=0;present_vma=1;
+     stored_class=expected_class=MM_ST_FILE_PRIVATE;status_reads=vma_lookups=0;
+-    expected_level=-1;expected_index=0;
++    expected_level=-1;expected_index=walk_level=0;
+ }
+ int main(void) {
+     mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
+     for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
+-        reset();if(kind==1)cache_mode=1;if(kind==2)vma.vm_flags=VM_VMO;
++        reset();walk_level=level;if(kind==1)cache_mode=1;if(kind==2)vma.vm_flags=VM_VMO;
+         assert(a20_cow_share_snapshot(&parent,0,level,&snap)==1);
+         assert(snap.slot==&tables[0][0]&&snap.node==tables[0]&&snap.pfn==9);
+         assert(locked==0&&snap.kind==(kind==1?2:kind==2?0:1));
+         assert(frame_gets==(kind==0)&&cache.pin==(kind==1));
+-        assert(leaf_walks==1&&node_walks==1);
++        assert(leaf_walks==1&&node_walks==0);
+         /* Even if a fresh root lookup now sees another node, the held token
+          * names the original lock and slot. No helper may re-walk it. */
+         active=1;
+@@ -102,7 +104,7 @@ int main(void) {
+         assert((tables[0][0]&PTE_COW)&&!(tables[0][0]&PTE_W));
+         assert(tables[1][0]==0&&changes==1&&changed_size==vm_pt_level_size(level)&&statuses==1);
+         a20_cow_share_unlock(&snap);
+-        assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==1&&node_walks==1);
++        assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==1&&node_walks==0);
+         a20_cow_release_ref(&snap);
+         assert(frame_puts==(kind==0)&&cache_puts==(kind==1)&&cache.pin==0);
+     }
+@@ -122,14 +124,14 @@ int main(void) {
+         {MM_ST_INVALID,0,0,MM_ST_ANON_MAPPED},
+     };
+     for(int level=0;level<2;level++)for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) {
+-        reset();stored_class=cases[i].stored;expected_class=cases[i].expected;
++        reset();walk_level=level;stored_class=cases[i].stored;expected_class=cases[i].expected;
+         vma.vm_flags=cases[i].flags;present_vma=cases[i].present;
+         assert(a20_cow_share_snapshot(&parent,0,level,&snap)==1);
+         assert(snap.class==expected_class&&status_reads==1&&vma_lookups==1);
+         active=1;
+         a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
+         a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
+-        assert(leaf_walks==1&&node_walks==1&&status_reads==1&&vma_lookups==1);
++        assert(leaf_walks==1&&node_walks==0&&status_reads==1&&vma_lookups==1);
+     }
+     reset();
+     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1);
+@@ -138,6 +140,17 @@ int main(void) {
+     expected_level=1;expected_index=1;stored_class=MM_ST_FILE_SHARED;
+     assert(mm_fork_page_class(tables[0],1,0x206000,&vma)==MM_ST_FILE_SHARED);
+     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
++    /* Exact owning table at nonzero indices; the actual walker level must
++     * be used for ordinary and huge leaves. No fresh root walk is allowed. */
++    for(int level=0;level<2;level++) {
++        reset();walk_level=expected_level=level;
++        uintptr_t va=0x206000;expected_index=arch_pt_vpn(va,level);
++        tables[0][expected_index]=tables[0][0];
++        assert(a20_cow_share_snapshot(&parent,va,level,&snap)==1);
++        assert(snap.slot==&tables[0][expected_index]&&snap.node==tables[0]);
++        assert(leaf_walks==1&&node_walks==0&&locked==0);
++        a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
++    }
+     reset();present_vma=0;
+     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&frame_gets==1);
+     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);assert(frame_puts==1);
