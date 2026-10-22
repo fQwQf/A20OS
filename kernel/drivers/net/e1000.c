@@ -1,4 +1,5 @@
 #include "drivers/bus/pci_msix.h"
+#include "drivers/bus/pci_msi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
@@ -48,6 +49,19 @@
 #define E1000_TDT    0x3818U
 #define E1000_RAL0   0x5400U
 #define E1000_RAH0   0x5404U
+/* IVAR maps interrupt causes onto MSI-X table entries.  It exists only on the
+ * e1000e generation (82574L); the 8254x parts have no MSI-X capability and
+ * therefore never reach the code that writes it.
+ *
+ * Each nibble is one entry: bit 3 valid, bits 2:0 the table index.  QEMU's
+ * e1000e model uses the same layout (hw/net/e1000_regs.h IVAR parsing), and
+ * without it every MSI-X cause is reported as invalid and dropped. */
+#define E1000_IVAR             0x00E4U
+#define E1000_IVAR_RXQ0_SHIFT  0U
+#define E1000_IVAR_TXQ0_SHIFT  8U
+#define E1000_IVAR_OTHER_SHIFT 16U
+#define E1000_IVAR_ENTRY_VALID (1U << 3)
+#define E1000_IVAR_ENTRY_VEC   0x7U
 /* JUMBO[13:0] is the number of bytes of maximum frame beyond a plain 1514 B
  * Ethernet frame; the receiver drops anything longer when RCTL[5] LPE is clear
  * (hw/net/e1000x_common.c:141-161). */
@@ -118,11 +132,26 @@
 
 /* ICR mirrors the IMS bit positions, so the handler classifies a read value
  * with the same defines rather than a second set that could drift from them.
- * The RX causes it looks at are RXT0 (timer expired, i.e. packets were
- * written) and RXO (overrun); the TX cause is TXDW (descriptor write-back,
- * i.e. descriptors this driver can hand back). */
-#define E1000_ICR_RX_CAUSES  (E1000_IMS_RXT0 | E1000_IMS_RXO)
-#define E1000_ICR_TX_CAUSES  (E1000_IMS_TXDW)
+ *
+ * The queue bits below are the *MSI-X* form of the same events.  An e1000e
+ * with MSI-X enabled does not raise RXT0/TXDW at all: the receive descriptor
+ * write-back becomes RXQ0 and the transmit write-back becomes TXQ0, with link
+ * status and error causes folded into ICR[OTHER]
+ * (hw/net/e1000e_core.c e1000e_rx_wb_interrupt_cause /
+ * e1000e_tx_wb_interrupt_cause).  Classifying only the legacy bits would read
+ * a valid ICR, count nothing, and let the stack's poll hook hide the fact that
+ * the vectors never carried a packet. */
+#define E1000_ICR_RXQ0       (1U << 20)
+#define E1000_ICR_TXQ0       (1U << 22)
+#define E1000_ICR_OTHER      (1U << 24)
+#define E1000_ICR_RX_CAUSES  (E1000_IMS_RXT0 | E1000_IMS_RXO | E1000_ICR_RXQ0)
+#define E1000_ICR_TX_CAUSES  (E1000_IMS_TXDW | E1000_ICR_TXQ0)
+
+/* Causes enabled in IMS while MSI-X owns the data plane.  The legacy RXT0/TXDW
+ * bits are deliberately absent: QEMU only produces the queue forms in this
+ * mode, and enabling unrelated bits would make the handler's empty-share
+ * accounting describe causes the device never sends. */
+#define E1000_IMS_MSIX       (E1000_ICR_RXQ0 | E1000_ICR_TXQ0 | E1000_ICR_OTHER)
 
 /* a20.e1000.poll=1 forces the polling data plane: no line is claimed, IMS
  * stays fully masked, and the class .poll hook is the only progress path.
@@ -237,6 +266,7 @@ typedef struct {
     int poll_only;        /* a20.e1000.poll=1, or no line could be claimed */
     int msix_base;        /* first reserved vector, -1 when unused */
     int msix_vectors;     /* reserved table entries in use */
+    int msi;              /* the registered line is a single MSI message */
     /* Driver-owned interrupt accounting, mirrored into the perf counters the
      * handler bumps so /proc/a20/perf can be read without a second path.  A
      * weak-symbol /proc hook would be absent for the .a20drv build this driver
@@ -248,6 +278,13 @@ typedef struct {
     uint64_t irq_empty;
     uint64_t tx_reclaimed;
     uint64_t rx_drained;
+    /* Per-vector interrupt entries, so "the table is armed" and "the table
+     * carries traffic" are separate observations.  Vector 0 is the RXQ0/OTHER
+     * entry and vector 1 the TXQ0 entry (see e1000_msix_program_ivar());
+     * counters that stayed at zero would mean the IVAR mapping or the IMS
+     * cause bits were wrong even though e1000_irq_calls grew. */
+    uint64_t irq_vec[2];
+    int irq_vec_reported;
     e1000_rx_desc_t *rx;
     e1000_tx_desc_t *tx;
     uint8_t (*rx_buf)[E1000_BUF_SIZE];
@@ -403,13 +440,17 @@ static unsigned e1000_reclaim_tx_locked(e1000_device_t *nic)
  *   or with a20.e1000.poll=1, the device keeps its causes masked and the class
  *   .poll hook remains the only progress path. */
 static int e1000_irq_handler(int irq, void *priv) {
-    (void)irq;
     device_t *dev = (device_t *)priv;
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
     if (!nic)
         return 0;
     nic->irq_calls++;
     a20_perf_count(A20_PERF_E1000_IRQ_CALLS);
+    if (nic->msix_vectors > 0) {
+        int vec = irq - nic->msix_base;
+        if (vec >= 0 && vec < 2)
+            nic->irq_vec[vec]++;
+    }
     uint32_t icr = e1000_read(nic, E1000_ICR);
     if (!icr) {
         /* Someone else on a shared line, or a cause that arrived and was
@@ -476,6 +517,18 @@ static void e1000_poll(device_t *dev)
     (void)e1000_read(nic, E1000_ICR);
     e1000_reclaim_tx_locked(nic);
     spin_unlock_irqrestore(&nic->lock, flags);
+
+    /* Process context, so this is the one place per-vector delivery may be
+     * printed.  Reporting only once both entries have fired keeps the line
+     * meaningful: it is the evidence that the IVAR mapping sends RX and TX
+     * down different table entries, not just that one vector is alive. */
+    if (nic->msix_vectors > 0 && !nic->irq_vec_reported &&
+        nic->irq_vec[0] && nic->irq_vec[1]) {
+        nic->irq_vec_reported = 1;
+        kinfo("[E1000] MSI-X vectors carried traffic: v%d=%llu v%d=%llu\n",
+              nic->msix_base, (unsigned long long)nic->irq_vec[0],
+              nic->msix_base + 1, (unsigned long long)nic->irq_vec[1]);
+    }
 }
 
 /* Report whether receive is genuinely interrupt-driven, so a blocked reader
@@ -668,13 +721,14 @@ static const uint8_t *e1000_mac(device_t *dev)
 
 /* Message-signalled interrupts for the NIC's transmit and receive queues.
  *
- * Reserve two vectors: the first carries everything the ICR masks, the second
- * the receive-side causes.  Both start masked, and un-masking either is what
- * request_irq() does once a handler is really installed on the line.  Where the
- * table lives is the function's capability to say, so nothing here encodes a
- * BAR index: the 8254x family puts the table at the base of BAR3, but that is
- * this part's layout rather than a fact about MSI-X, and a driver that assumed
- * it would program the wrong window on any implementation that differs. */
+ * Reserve two vectors: the first carries receive queue 0 (and every non-queue
+ * cause, so link changes still arrive), the second transmit queue 0.  Both
+ * start masked, and un-masking either is what request_irq() does once a handler
+ * is really installed on the line.  Where the table lives is the function's
+ * capability to say, so nothing here encodes a BAR index: the 8254x family puts
+ * the table at the base of BAR3, but that is this part's layout rather than a
+ * fact about MSI-X, and a driver that assumed it would program the wrong window
+ * on any implementation that differs. */
 static int e1000_msix_setup(device_t *dev, e1000_device_t *nic)
 {
     pci_msix_info_t info;
@@ -692,9 +746,8 @@ static int e1000_msix_setup(device_t *dev, e1000_device_t *nic)
         pci_msix_disable(dev);
         return base;
     }
-    /* Vector 0 carries everything the ICR masks, vector 1 the receive-side
-     * causes; both start masked, and un-masking either is what request_irq()
-     * does once a handler is actually installed on the line. */
+    /* Both entries start masked; unmasking is request_irq()'s job once a
+     * handler is actually installed on the line. */
     for (unsigned i = 0; i < 2; i++) {
         r = pci_msix_program_vector(dev, i, (uint32_t)(base + (int)i));
         if (r) {
@@ -706,6 +759,22 @@ static int e1000_msix_setup(device_t *dev, e1000_device_t *nic)
     nic->msix_base = base;
     nic->msix_vectors = 2;
     return 0;
+}
+
+/* Point each MSI-X cause at the table entry that carries it.  Without this an
+ * e1000e drops every queue interrupt as "invalid vector" even though the table
+ * is programmed and enabled; that failure is invisible to the stack because its
+ * poll hook still moves packets, which is exactly why the counter evidence
+ * exists (see irq_vec[]). */
+static void e1000_msix_program_ivar(e1000_device_t *nic)
+{
+    uint32_t ivar =
+        ((E1000_IVAR_ENTRY_VALID | 0U) << E1000_IVAR_RXQ0_SHIFT) |
+        ((E1000_IVAR_ENTRY_VALID | 1U) << E1000_IVAR_TXQ0_SHIFT) |
+        ((E1000_IVAR_ENTRY_VALID | 0U) << E1000_IVAR_OTHER_SHIFT);
+    e1000_write(nic, E1000_IVAR, ivar);
+    kinfo("[E1000] MSI-X IVAR: rxq0->v%d txq0->v%d other->v%d\n",
+          nic->msix_base, nic->msix_base + 1, nic->msix_base);
 }
 
 /* Unmask both table entries.  Called from request_irq()'s success path, which
@@ -756,8 +825,8 @@ static void e1000_msix_teardown(device_t *dev, e1000_device_t *nic)
 
 static void e1000_itr_init(device_t *dev, e1000_device_t *nic)
 {
-    uint32_t id = pci_device_id(dev);
-    if (id != E1000_DEVICE_82574L) {
+    /* pci_device_id() returns vendor<<16 | device, not the device number. */
+    if ((pci_device_id(dev) & 0xffffU) != E1000_DEVICE_82574L) {
         nic->itr_us = 0;
         return;
     }
@@ -915,6 +984,10 @@ static int e1000_probe(device_t *dev)
      * one that does but whose vectors cannot be reserved also falls back. */
     int msix = e1000_force_poll ? -1 : e1000_msix_setup(dev, nic);
     if (msix == 0) {
+        /* The cause-to-entry mapping must exist before the function is enabled;
+         * the entries themselves stay masked until the handlers below are in
+         * place. */
+        e1000_msix_program_ivar(nic);
         for (int i = 0; i < nic->msix_vectors; i++) {
             uint32_t line = (uint32_t)(nic->msix_base + i);
             if (request_irq(line, e1000_irq_handler, 0, dev) != 0) {
@@ -933,7 +1006,28 @@ static int e1000_probe(device_t *dev)
             nic->irq_registered = 1;
         }
     }
+    /* MSI is the next step down from MSI-X, not a replacement for it: one
+     * message cannot separate RX from TX, so it is only used when the table
+     * could not be armed or one of its handlers could not be registered. */
     if (msix != 0) {
+        int vec = irq_alloc_vectors(1);
+        if (vec >= 0) {
+            if (pci_msi_enable(dev, (uint32_t)vec) == 0) {
+                if (request_irq((uint32_t)vec, e1000_irq_handler, 0,
+                                dev) == 0) {
+                    nic->irq = vec;
+                    nic->irq_registered = 1;
+                    nic->msi = 1;
+                } else {
+                    pci_msi_disable(dev);
+                    irq_free_vectors((uint32_t)vec, 1);
+                }
+            } else {
+                irq_free_vectors((uint32_t)vec, 1);
+            }
+        }
+    }
+    if (msix != 0 && !nic->irq_registered) {
         int irq = pci_intx_irq(dev);
         if (irq >= 0) {
             if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
@@ -952,13 +1046,14 @@ static int e1000_probe(device_t *dev)
      * ever enabled. */
     nic->poll_only = e1000_force_poll || !nic->irq_registered;
     if (!nic->poll_only)
-        e1000_write(nic, E1000_IMS, E1000_IMS_USED);
+        e1000_write(nic, E1000_IMS,
+                    nic->msix_vectors > 0 ? E1000_IMS_MSIX : E1000_IMS_USED);
     /* STATUS[1] is the read-only link status: 1 = link up. */
     kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d%s%s ring=%u itr=%uus\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
           nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",
           nic->irq_registered ? nic->irq : -1,
-          nic->msix_vectors > 0 ? " (msix)" : "",
+          nic->msix_vectors > 0 ? " (msix)" : (nic->msi ? " (msi)" : ""),
           nic->poll_only ? " dataplane=polling" : "",
           (unsigned)E1000_RING_SIZE, (unsigned)nic->itr_us);
     return 0;
@@ -980,6 +1075,10 @@ static int e1000_remove(device_t *dev)
         e1000_msix_teardown(dev, nic);
     } else if (nic->irq_registered) {
         free_irq((uint32_t)nic->irq, dev);
+        if (nic->msi) {
+            pci_msi_disable(dev);
+            irq_free_vectors((uint32_t)nic->irq, 1);
+        }
     }
     e1000_write(nic, E1000_RCTL, 0);
     e1000_write(nic, E1000_TCTL, 0);

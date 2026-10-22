@@ -73,6 +73,11 @@
 #define DC_TC_V             (1ull << 0)
 #define DC_FSC_MODE_SV39    8ull
 #define DC_FSC_MODE_SHIFT   60ull
+/* TA.PSCID tags translation-cache entries.  With a bare G-stage the cache key
+ * is (tag, GSCID, PSCID, IOVA); leaving PSCID zero for every device makes two
+ * domains that map the same IOVA share each other's cached translation.  Each
+ * claimed device therefore gets its own PSCID (1..IOMMU_USER_DOMAINS). */
+#define DC_TA_PSCID_SHIFT   12ull
 
 /* SV39 page-table entry bits. */
 #define IOMMU_PTE_V         (1ull << 0)
@@ -131,8 +136,39 @@ typedef struct iommu_user_domain {
     uint64_t last_iova;
 } iommu_user_domain_t;
 
-static iommu_user_domain_t g_user_domain;
+/* One translation domain per claimed device.  A domain is owned by the
+ * (devid, pid) pair that claimed it; different devices may be owned by
+ * different processes at the same time, and each has its own page table, so
+ * their IOVA spaces are independent.  The table is small and fixed: a user
+ * driver claims a device, not an unbounded number of them. */
+#define IOMMU_USER_DOMAINS 8
+
+static iommu_user_domain_t g_user_domains[IOMMU_USER_DOMAINS];
 static riscv_iommu_stats_t g_iommu_stats;
+
+/* Caller holds g_iommu_domain_lock. */
+static iommu_user_domain_t *iommu_domain_for(uint16_t devid, int owner_pid)
+{
+    for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+        iommu_user_domain_t *d = &g_user_domains[i];
+        if (d->active == 1 && d->devid == devid && d->owner_pid == owner_pid)
+            return d;
+    }
+    return NULL;
+}
+
+/* Every live domain for a device, regardless of owner.  The fault queue is a
+ * single hardware queue shared by all devices, so a drain started by one
+ * owner still has to attribute records belonging to another. */
+static iommu_user_domain_t *iommu_domain_by_devid(uint16_t devid)
+{
+    for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+        iommu_user_domain_t *d = &g_user_domains[i];
+        if (d->active == 1 && d->devid == devid)
+            return d;
+    }
+    return NULL;
+}
 
 void riscv_iommu_get_stats(riscv_iommu_stats_t *out)
 {
@@ -231,13 +267,14 @@ static int iommu_context_block(uint16_t devid)
     return iommu_sync_context(devid);
 }
 
-static int iommu_context_translate(uint16_t devid, uint64_t root_phys)
+static int iommu_context_translate(uint16_t devid, uint64_t root_phys,
+                                   uint32_t pscid)
 {
     uint64_t *dc = iommu_dc(devid);
-    if (!dc || iommu_context_block(devid) < 0)
+    if (!dc || !pscid || iommu_context_block(devid) < 0)
         return -1;
     dc[1] = 0; /* iohgatp: BARE */
-    dc[2] = 0; /* ta */
+    dc[2] = (uint64_t)pscid << DC_TA_PSCID_SHIFT;
     dc[3] = (DC_FSC_MODE_SV39 << DC_FSC_MODE_SHIFT) | (root_phys >> 12);
     if (g_iommu_dc_stride == 64)
         memset(&dc[4], 0, 4 * sizeof(uint64_t));
@@ -294,7 +331,7 @@ static int riscv_iommu_verify_translation(void)
           (unsigned long)(l0[0] >> 32), (unsigned long)(uint32_t)l0[0]);
 
     /* Translating device context for devid 0 (SV39, no process context). */
-    if (iommu_context_translate(0, root_phys) < 0)
+    if (iommu_context_translate(0, root_phys, IOMMU_USER_DOMAINS + 1) < 0)
         return -1;
 
     /* TR_REQ: mapped IOVA must translate to data_phys (RO request). */
@@ -481,6 +518,33 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
     if (!g_iommu_ready || owner_pid <= 0 || !iommu_dc(devid))
         return -1;
 
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    if (iommu_domain_for(devid, owner_pid)) {
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+        return 0;                       /* idempotent for the owner */
+    }
+    for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+        if (g_user_domains[i].active != 0 && g_user_domains[i].devid == devid) {
+            spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+            return -1;                  /* already owned by someone else */
+        }
+    }
+    iommu_user_domain_t *d = NULL;
+    for (unsigned i = 0; i < IOMMU_USER_DOMAINS; i++) {
+        if (g_user_domains[i].active == 0) {
+            d = &g_user_domains[i];
+            break;
+        }
+    }
+    if (!d) {
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+        return -1;
+    }
+    d->active = -1;                     /* reserved; not usable until DC is live */
+    d->devid = devid;
+    d->owner_pid = owner_pid;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+
     pfn_t root_pfn = pfa_alloc_page();
     pfn_t l1_pfn = pfa_alloc_page();
     pfn_t l0_pfn = pfa_alloc_page();
@@ -488,24 +552,11 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
         if (root_pfn != PFN_NONE) pfa_free_page(root_pfn);
         if (l1_pfn != PFN_NONE) pfa_free_page(l1_pfn);
         if (l0_pfn != PFN_NONE) pfa_free_page(l0_pfn);
+        flags = spin_lock_irqsave(&g_iommu_domain_lock);
+        memset(d, 0, sizeof(*d));
+        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
-
-    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    if (g_user_domain.active) {
-        int same = g_user_domain.active == 1 && !g_user_domain.blocked &&
-                   g_user_domain.devid == devid &&
-                   g_user_domain.owner_pid == owner_pid;
-        spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
-        pfa_free_page(root_pfn);
-        pfa_free_page(l1_pfn);
-        pfa_free_page(l0_pfn);
-        return same ? 0 : -1;
-    }
-    g_user_domain.active = -1; /* reserved; not usable until DC is live */
-    g_user_domain.devid = devid;
-    g_user_domain.owner_pid = owner_pid;
-    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
     uint64_t *root = pfn_to_virt(root_pfn);
     uint64_t *l1 = pfn_to_virt(l1_pfn);
@@ -521,9 +572,10 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
                << IOMMU_PTE_PPN_SHIFT | IOMMU_PTE_V;
     wmb();
 
-    if (iommu_context_translate(devid, pfn_to_phys(root_pfn)) < 0) {
+    uint32_t pscid = (uint32_t)(d - g_user_domains) + 1U;
+    if (iommu_context_translate(devid, pfn_to_phys(root_pfn), pscid) < 0) {
         flags = spin_lock_irqsave(&g_iommu_domain_lock);
-        memset(&g_user_domain, 0, sizeof(g_user_domain));
+        memset(d, 0, sizeof(*d));
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         pfa_free_page(root_pfn);
         pfa_free_page(l1_pfn);
@@ -532,16 +584,16 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
     }
 
     flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    g_user_domain.root_pfn = root_pfn;
-    g_user_domain.l1_pfn = l1_pfn;
-    g_user_domain.l0_pfn = l0_pfn;
-    g_user_domain.l0 = l0;
-    g_user_domain.mapped_pages = 0;
-    g_user_domain.fault_count = 0;
-    g_user_domain.last_cause = 0;
-    g_user_domain.last_iova = 0;
-    g_user_domain.blocked = 0;
-    g_user_domain.active = 1;
+    d->root_pfn = root_pfn;
+    d->l1_pfn = l1_pfn;
+    d->l0_pfn = l0_pfn;
+    d->l0 = l0;
+    d->mapped_pages = 0;
+    d->fault_count = 0;
+    d->last_cause = 0;
+    d->last_iova = 0;
+    d->blocked = 0;
+    d->active = 1;
     g_iommu_stats.domains_claimed++;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     kinfo("[IOMMU] user domain attached did=%u owner=%d\n",
@@ -556,9 +608,8 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         (phys & (PAGE_SIZE - 1)))
         return -1;
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    iommu_user_domain_t *d = &g_user_domain;
-    if (d->active != 1 || d->blocked || d->devid != devid ||
-        d->owner_pid != owner_pid) {
+    iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
+    if (!d || d->blocked) {
         g_iommu_stats.map_failures++;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
@@ -603,11 +654,10 @@ int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
         return -1;
     uint32_t first = (uint32_t)((iova - IOMMU_USER_IOVA) / PAGE_SIZE);
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    iommu_user_domain_t *d = &g_user_domain;
+    iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
     uint64_t run = npages == 64 ? ~0ull : (1ull << npages) - 1;
     uint64_t mask = first < IOMMU_USER_MAX_PAGES ? run << first : 0;
-    if (d->active != 1 || d->devid != devid || d->owner_pid != owner_pid ||
-        first + npages > IOMMU_USER_MAX_PAGES ||
+    if (!d || first + npages > IOMMU_USER_MAX_PAGES ||
         (d->mapped_pages & mask) != mask) {
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
@@ -626,67 +676,78 @@ int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
     return r;
 }
 
+/* Drain the shared fault queue and attribute each record to the domain that
+ * owns its device.  A drain is triggered by one owner's get_info(), but the
+ * records are not filtered by that owner: the queue is per IOMMU, so a record
+ * for device B can be at the head when owner A polls.  Attributing it to A (or
+ * discarding it) would leave B running with a stale translation and no report,
+ * which is the opposite of fail-closed. */
 int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
                             uint64_t *count, uint32_t *cause,
                             uint64_t *iova, int *blocked)
 {
+    struct {
+        uint16_t devid;
+        uint32_t cause;
+        uint64_t iova;
+    } events[IOMMU_USER_DOMAINS];
+    unsigned n_events = 0;
+
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    iommu_user_domain_t *d = &g_user_domain;
-    if (d->active != 1 || d->devid != devid || d->owner_pid != owner_pid) {
+    iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
+    if (!d) {
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
 
     uint32_t head = iommu_read32(IOMMU_REG_FQH) & IOMMU_FQ_MASK;
     uint32_t tail = iommu_read32(IOMMU_REG_FQT) & IOMMU_FQ_MASK;
-    int new_fault = 0;
     while (head != tail) {
         rmb();
         uint64_t *record = &g_iommu_fq[head * 4];
         uint64_t hdr = record[0];
         uint16_t record_devid = (uint16_t)(hdr >> 40);
         g_iommu_stats.fault_records++;
-        if (record_devid == devid) {
-            d->fault_count++;
-            d->last_cause = (uint32_t)(hdr & 0xfff);
-            d->last_iova = record[2];
+        iommu_user_domain_t *owner = iommu_domain_by_devid(record_devid);
+        if (owner) {
+            owner->fault_count++;
+            owner->last_cause = (uint32_t)(hdr & 0xfff);
+            owner->last_iova = record[2];
             g_iommu_stats.faults++;
             g_iommu_stats.last_fault_devid = record_devid;
-            g_iommu_stats.last_fault_cause = d->last_cause;
-            g_iommu_stats.last_fault_iova = d->last_iova;
-            g_iommu_stats.last_fault_owner = owner_pid;
-            new_fault = 1;
+            g_iommu_stats.last_fault_cause = owner->last_cause;
+            g_iommu_stats.last_fault_iova = owner->last_iova;
+            g_iommu_stats.last_fault_owner = owner->owner_pid;
+            if (!owner->blocked) {
+                owner->blocked = 1;
+                g_iommu_stats.blocked_events++;
+                if (n_events < IOMMU_USER_DOMAINS) {
+                    events[n_events].devid = record_devid;
+                    events[n_events].cause = owner->last_cause;
+                    events[n_events].iova = owner->last_iova;
+                    n_events++;
+                }
+            }
         }
         head = (head + 1) & IOMMU_FQ_MASK;
     }
     iommu_write32(IOMMU_REG_FQH, head);
-    if (new_fault) {
-        d->blocked = 1;
-        g_iommu_stats.blocked_events++;
-    }
-    uint32_t report_cause = d->last_cause;
-    uint64_t report_iova = d->last_iova;
     if (count) *count = d->fault_count;
     if (cause) *cause = d->last_cause;
     if (iova) *iova = d->last_iova;
     if (blocked) *blocked = d->blocked;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
-    if (new_fault) {
-        /* Block the device at fault time, not on the caller's next poll:
-         * invalidating the device context alone still leaves bus mastering
-         * enabled, so the device could keep issuing DMA. */
+    /* Block the device at fault time, not on the caller's next poll:
+     * invalidating the device context alone still leaves bus mastering
+     * enabled, so the device could keep issuing DMA. */
+    for (unsigned i = 0; i < n_events; i++) {
         extern int pci_user_device_bus_master(uint16_t devid, int enable);
-        pci_user_device_bus_master(devid, 0);
-        if (iommu_context_block(devid) < 0) {
-            /* The context is already invalid (fail-closed); the fault report
-             * was filled above, so do not discard it on this path. */
-            kinfo("[IOMMU] DMA fault blocked did=%u cause=%u iova=0x%lx\n",
-                  devid, report_cause, (unsigned long)report_iova);
-            return 0;
-        }
+        pci_user_device_bus_master(events[i].devid, 0);
+        (void)iommu_context_block(events[i].devid);
         kinfo("[IOMMU] DMA fault blocked did=%u cause=%u iova=0x%lx\n",
-              devid, report_cause, (unsigned long)report_iova);
+              events[i].devid, events[i].cause,
+              (unsigned long)events[i].iova);
     }
     return 0;
 }
@@ -694,8 +755,8 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
 int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
 {
     uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
-    iommu_user_domain_t *d = &g_user_domain;
-    if (d->active != 1 || d->devid != devid || d->owner_pid != owner_pid) {
+    iommu_user_domain_t *d = iommu_domain_for(devid, owner_pid);
+    if (!d) {
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
@@ -703,6 +764,7 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
     pfn_t root_pfn = d->root_pfn;
     pfn_t l1_pfn = d->l1_pfn;
     pfn_t l0_pfn = d->l0_pfn;
+    uint64_t mapped = d->mapped_pages;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
     if (iommu_context_block(devid) < 0) {
@@ -717,7 +779,8 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
     pfa_free_page(l0_pfn);
     flags = spin_lock_irqsave(&g_iommu_domain_lock);
     g_iommu_stats.domains_released++;
-    g_iommu_stats.mapped_pages = 0;
+    g_iommu_stats.mapped_pages = g_iommu_stats.mapped_pages >= mapped
+                                 ? g_iommu_stats.mapped_pages - mapped : 0;
     memset(d, 0, sizeof(*d));
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     kinfo("[IOMMU] user domain released did=%u owner=%d\n",

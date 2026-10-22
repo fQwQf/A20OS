@@ -200,7 +200,7 @@ Phase 3（未来计划，未实现）：hub 与其它 HCD。
 
 - xHCI 规范复杂：槽/端点上下文与 TRB 状态机。从 xhci_hid 重构时必须保持传输语义不变，否则键盘立即失效；重构后跑 `smoke-*` 兜底。
 - 热插拔竞态：设备移除与 URB 提交并发时，URB 队列与 class_device 生命周期需严格配对（沿用 class_device `online` 标记）。
-- 当前锁缺口：xHCI controller lock 未实际获取；HID completion 可由全局 poll 或其他 xHCI wait 在未持有 HID lock 时调用；USB storage 又跨同步 bulk wait 持有 spinlock。详见[锁顺序契约](../guide/lock-order.md)。这些是现状限制，不是未来并发设计。
+- 锁现状：`xhci->lock` 由 HCD 的 ops 与 IRQ handler 实际获取，同步传输由 `xfer_busy` 串行化；HID completion 自己取 `h->lock`，HCD 只在锁外回调；USB storage 的每实例锁已是 sleepable mutex，跨同步 bulk wait 持有它是合规的。拔出时 `abort_slot()` 先 `Disable Slot` 再释放端点 ring，`smoke-usb-hotplug-x86_64` 验证地址/slot 归还与重插。详见[锁顺序契约](../guide/lock-order.md)。
 - 硬件覆盖有限：当前按 PCI xHCI class `0x0c0330` 匹配，并在 QEMU/VirtualBox 模拟控制器上验证；真实控制器的固件、IOMMU、cache coherency 和错误恢复仍需单独验证。
 - BOT 错误恢复尚不完整：xHCI 的同步 transfer wait 有有界超时，storage 失败后会发送 class reset，但没有完整的 endpoint halt 清理、REQUEST SENSE 或重试状态机。
 

@@ -169,6 +169,10 @@ void kernel_main(void) {
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
 #endif
+#if defined(CONFIG_PCI_PIRQ_TEST) && defined(CONFIG_X86_64)
+    extern void x86_64_pci_pirq_selftest(void);
+    x86_64_pci_pirq_selftest();
+#endif
     /* Runs after driver_probe_all() so the IRQ registry already holds whatever
      * the board claimed, and before vfs_init(): this only touches the driver
      * core and the IRQ table. */
