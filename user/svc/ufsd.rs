@@ -439,6 +439,12 @@ fn serve_loop(
     // The per-service-loop state is absent from production builds.
     #[cfg(ufsd_test_close_token_drop_ack_once)]
     let mut close_token_drop_ack_pending = true;
+    // Same test-only transport fault for the confirmation: the first accepted
+    // CONFIRM is processed but its reply is dropped once, so the client sees
+    // an ambiguous confirmation and has to retry it (or leave the bounded
+    // tombstone entry in place) without the close being redone.
+    #[cfg(ufsd_test_close_token_drop_ack_once)]
+    let mut confirm_drop_ack_pending = true;
     let mut boot_ns = 0u64;
     if unsafe { a20_ufsd_monotonic_ns(&mut boot_ns) } == 0 {
         lifetimes.seed_token_epoch(boot_ns);
@@ -546,6 +552,13 @@ fn serve_loop(
             response.payload_len = 0;
         }
         let _ = payload_pointer;
+        #[cfg(ufsd_test_close_token_drop_ack_once)]
+        if confirm_drop_ack_pending && request.opcode == protocol::OP_CLOSE_CONFIRM &&
+           result == 0 && request.arg0 != 0 {
+            confirm_drop_ack_pending = false;
+            log(output, b"UFSD_CONFIRM_DROP_ACK_ONCE: accepted CONFIRM reply dropped\n");
+            continue;
+        }
         #[cfg(ufsd_test_close_token_drop_ack_once)]
         if close_token_drop_ack_pending && close_token_drop_candidate && result == 0 &&
            lifetimes.token_lookup(request.ino, request.arg0) == lifetime::TokenLookup::Replay {

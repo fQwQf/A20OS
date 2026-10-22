@@ -43,6 +43,31 @@
         add     sp, sp, #16
     .endm
 
+    /*
+     * No kernel-sp guard at vector entry, unlike riscv64's
+     * __trap_from_kernel.  The riscv guard is register-clean by
+     * construction: tp already holds the current task (no CSR read), and
+     * RISC-V encodes `sd sp, N(tp)` because SP is a legal store source.
+     * On aarch64 neither holds: tpidr_el1 must be read into a GPR, which
+     * destroys that register's interrupted value, and STR/STP cannot take
+     * SP as the store source at all.  Stashing the interrupted registers
+     * around the check therefore needs one free register plus memory, and
+     * the only memory whose validity is not yet established is the sp
+     * under test -- touching it first recreates the exact recursion the
+     * guard exists to break (bad sp -> store faults -> vector re-entry
+     * -> ...), while the register-first variant returns a kernel pointer
+     * to userspace on every trap: observed in practice, musl's dynamic
+     * linker died storing through the poisoned x9 right after its first
+     * brk returned.
+     *
+     * A task resumed with a garbage kernel sp is instead stopped at the
+     * source by the switch-path range check in context_switch_locked()
+     * (kernel/proc/sched.c), which panics by pid and value while the
+     * task struct is still intact -- strictly more diagnostic than the
+     * riscv trap-time report, and it cannot corrupt a live register file
+     * because it never runs at vector entry.
+     */
+
     .section .text
     .align 11
     .global aarch64_vector_table
@@ -85,8 +110,6 @@ aarch64_irq_el0:
     b       __trap_from_user
 
 aarch64_sync_el1:
-    /* Apply the same rule to EL1 exceptions so an interrupted kernel frame
-     * is restored exactly as it was before the vector entry. */
     SET_TRAP_FLAGS 0
     b       __trap_from_kernel
 
@@ -414,3 +437,4 @@ user_trap_return:
     ldr     x4,  [x2, #X_OFF(4)]
     ldr     x2,  [x2, #X_OFF(2)]
     eret
+

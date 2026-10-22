@@ -114,6 +114,14 @@ extern void trap_handler_la64(trap_context_t *ctx);
  * is what lets the preemption decision point in core/trap.c switch out here. */
 #define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->prmd & SSTATUS_SPIE) != 0)
 
+/* Ecode 0 with no ECFG-enabled IS bit pending is a spurious interrupt: the
+ * exception was recognized, but by the time ESTAT was read (here or in the
+ * generic handler's second read) the source was already gone.  Neither
+ * generic trap handler has a cause-0 case — user_trap_handler would kill the
+ * task, kernel_trap_handler would panic "Unhandled kernel trap" — so both
+ * dispatch sites drop it and resume the interrupted context. */
+#define ARCH_TRAP_CAUSE_IS_SPURIOUS(cause) ((cause) == 0)
+
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->pgdl)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->prmd)
 

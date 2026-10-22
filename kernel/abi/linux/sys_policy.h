@@ -40,6 +40,8 @@ int      a20_pp_copy_out_sig(uint64_t addr, int sig);
 int      a20_pp_has_cap(struct task_t *t, int cap);
 uint64_t a20_pp_cap_bounding(struct task_t *t);
 void     a20_pp_cap_drop(struct task_t *t, uint32_t bit);
+uint32_t a20_pp_get_securebits(struct task_t *t);
+void     a20_pp_set_securebits(struct task_t *t, uint32_t bits);
 int      a20_pp_nnps(struct task_t *t);
 void     a20_pp_set_nnps(struct task_t *t);
 int      a20_pp_thp(struct task_t *t);

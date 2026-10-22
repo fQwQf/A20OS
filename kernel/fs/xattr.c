@@ -117,6 +117,15 @@ int xattr_check_namespace(const char *name, int *needs_cap)
     return -EINVAL;
 }
 
+/* A filesystem that persists attributes answers for the names it can store
+ * durably and returns -EOPNOTSUPP for the rest; anything it refuses stays in
+ * the volatile table below, so the two layers never hold the same name. */
+static int xattr_backend_available(vnode_t *vn)
+{
+    return vn->ops && vn->ops->xattr_get && vn->ops->xattr_set &&
+           vn->ops->xattr_list && vn->ops->xattr_remove;
+}
+
 int64_t xattr_set_vnode(vnode_t *vn, const char *name,
                         const void *value, size_t size, int flags)
 {
@@ -129,6 +138,12 @@ int64_t xattr_set_vnode(vnode_t *vn, const char *name,
         return -EPERM;
     if (size > XATTR_VALUE_MAX_LOCAL) return -ENOSPC;
     if (size && !value) return -EINVAL;
+
+    if (xattr_backend_available(vn)) {
+        int r = vn->ops->xattr_set(vn, name, value, size, flags);
+        if (r != -EOPNOTSUPP)
+            return r;
+    }
 
     void *mnt;
     uint64_t ino;
@@ -160,6 +175,11 @@ int64_t xattr_get_vnode(vnode_t *vn, const char *name,
     if (!vn) return -ENOENT;
     int nr = xattr_check_namespace(name, NULL);
     if (nr < 0) return nr;
+    if (xattr_backend_available(vn)) {
+        int r = vn->ops->xattr_get(vn, name, value, size);
+        if (r != -EOPNOTSUPP)
+            return r;
+    }
     void *mnt;
     uint64_t ino;
     xattr_vnode_key(vn, &mnt, &ino);
@@ -178,17 +198,43 @@ int64_t xattr_get_vnode(vnode_t *vn, const char *name,
 int64_t xattr_list_vnode(vnode_t *vn, char *list, size_t size)
 {
     if (!vn) return -ENOENT;
+
+    /* The filesystem's durable names come first, then whatever stayed in the
+     * volatile table.  A name only ever lives in one of the two layers. */
+    int64_t be = -EOPNOTSUPP;
+    if (xattr_backend_available(vn))
+        be = vn->ops->xattr_list(vn, NULL, 0);
+
     void *mnt;
     uint64_t ino;
     xattr_vnode_key(vn, &mnt, &ino);
     spin_lock(&g_xattr_lock);
-    size_t total = 0;
+    size_t ram_total = 0;
     for (int link = g_xattr_heads[xattr_bucket(mnt, ino)]; link > 0;
          link = g_xattrs[link - 1].next)
-        total += strlen(g_xattrs[link - 1].name) + 1;
-    if (!list || size == 0) { spin_unlock(&g_xattr_lock); return (int64_t)total; }
-    if (size < total) { spin_unlock(&g_xattr_lock); return -ERANGE; }
-    size_t off = 0;
+        ram_total += strlen(g_xattrs[link - 1].name) + 1;
+
+    size_t be_total = be > 0 ? (size_t)be : 0;
+    if (!list || size == 0) {
+        spin_unlock(&g_xattr_lock);
+        return (int64_t)(be_total + ram_total);
+    }
+    if (size < be_total + ram_total) {
+        spin_unlock(&g_xattr_lock);
+        return -ERANGE;
+    }
+    spin_unlock(&g_xattr_lock);
+
+    if (be_total) {
+        int r = vn->ops->xattr_list(vn, list, be_total);
+        if (r < 0)
+            return r;
+        if ((size_t)r != be_total)
+            return -EIO;
+    }
+
+    spin_lock(&g_xattr_lock);
+    size_t off = be_total;
     for (int link = g_xattr_heads[xattr_bucket(mnt, ino)]; link > 0;
          link = g_xattrs[link - 1].next) {
         size_t len = strlen(g_xattrs[link - 1].name) + 1;
@@ -196,7 +242,7 @@ int64_t xattr_list_vnode(vnode_t *vn, char *list, size_t size)
         off += len;
     }
     spin_unlock(&g_xattr_lock);
-    return (int64_t)total;
+    return (int64_t)off;
 }
 
 int64_t xattr_remove_vnode(vnode_t *vn, const char *name)
@@ -207,6 +253,11 @@ int64_t xattr_remove_vnode(vnode_t *vn, const char *name)
     if (nr < 0) return nr;
     if (needs_cap && (!proc_current() || !proc_has_cap(proc_current(), CAP_SYS_ADMIN)))
         return -EPERM;
+    if (xattr_backend_available(vn)) {
+        int r = vn->ops->xattr_remove(vn, name);
+        if (r != -EOPNOTSUPP)
+            return r;
+    }
     void *mnt;
     uint64_t ino;
     xattr_vnode_key(vn, &mnt, &ino);

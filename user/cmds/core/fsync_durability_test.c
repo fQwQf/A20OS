@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <unistd.h>
 
 #define CHK(cond, msg)                                                        \
@@ -69,6 +70,59 @@ static int read_small(const char *path, char *buf, size_t bufsz)
     return (int)n;
 }
 
+static int verify_persisted_payload(const char *path)
+{
+    const size_t len = 256 * 1024;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("FSYNC_COLD_VERIFY: FAIL open errno=%d\n", errno);
+        return 1;
+    }
+    char buf[4096];
+    size_t offset = 0;
+    while (offset < len) {
+        size_t want = len - offset;
+        if (want > sizeof(buf))
+            want = sizeof(buf);
+        ssize_t n = read(fd, buf, want);
+        if (n <= 0) {
+            printf("FSYNC_COLD_VERIFY: FAIL short read offset=%zu errno=%d\n",
+                   offset, errno);
+            close(fd);
+            return 1;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            unsigned char expected = (unsigned char)((offset + (size_t)i) * 7 + 13);
+            if ((unsigned char)buf[i] != expected) {
+                printf("FSYNC_COLD_VERIFY: FAIL mismatch offset=%zu\n",
+                       offset + (size_t)i);
+                close(fd);
+                return 1;
+            }
+        }
+        offset += (size_t)n;
+    }
+    char extra;
+    if (read(fd, &extra, 1) != 0) {
+        printf("FSYNC_COLD_VERIFY: FAIL unexpected tail\n");
+        close(fd);
+        return 1;
+    }
+    close(fd);
+    if (getenv("FSYNC_TEST_UNMOUNT")) {
+        const char *dir = getenv("FSYNC_TEST_DIR");
+        if (!dir || !dir[0])
+            dir = "/extra";
+        if (umount2(dir, 0) != 0) {
+            printf("FSYNC_COLD_VERIFY: FAIL umount errno=%d\n", errno);
+            return 1;
+        }
+        printf("FSYNC_COLD_VERIFY: UNMOUNT PASS path=%s\n", dir);
+    }
+    printf("FSYNC_COLD_VERIFY: PASS bytes=%zu\n", len);
+    return 0;
+}
+
 int main(void)
 {
     /* Must be a block-backed mount: the bootstrap root is ramfs, which has no
@@ -79,6 +133,8 @@ int main(void)
         dir = "/extra";
     char path[256];
     snprintf(path, sizeof(path), "%s/fsync_durability_test.bin", dir);
+    if (getenv("FSYNC_TEST_VERIFY"))
+        return verify_persisted_payload(path);
     unlink(path);
 
     int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -172,7 +228,21 @@ int main(void)
     free(buf);
 
     close(fd);
-    unlink(path);
+    if (getenv("FSYNC_TEST_KEEP")) {
+        int dirfd = open(dir, O_RDONLY);
+        CHK(dirfd >= 0, "open parent directory for persistent test entry");
+        CHK(fsync(dirfd) == 0, "fsync parent directory for persistent test entry");
+        close(dirfd);
+    } else {
+        unlink(path);
+    }
+    if (getenv("FSYNC_TEST_UNMOUNT")) {
+        if (umount2(dir, 0) != 0) {
+            printf("FSYNC_TEST: FAIL umount path=%s errno=%d\n", dir, errno);
+            return 1;
+        }
+        printf("FSYNC_TEST: UNMOUNT PASS path=%s\n", dir);
+    }
 
     /* /proc/loadavg must be a real measurement in the documented format,
      * not the old "0.00 0.00 0.00 1/64 1" placeholder. */

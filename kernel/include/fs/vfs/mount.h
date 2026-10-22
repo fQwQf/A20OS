@@ -50,6 +50,18 @@ uint32_t vfs_mount_parent_id(mount_t *mnt);
  * the mount covering @to.  Returns 0 on success or a negative errno. */
 int      vfs_move_mount(const char *from, const char *to);
 
+/* fsmount(2) without a target: build the filesystem but leave it out of the
+ * tree, so no path resolves through it until vfs_mount_attach_path() gives it
+ * a place.  A detached mount is invisible to path lookup and to mountinfo.
+ * On success *out_mnt is the caller's reference; the caller must either
+ * attach it or destroy it with vfs_mount_fs_teardown()+vfs_mount_remove(). */
+int      vfs_mount_detached(const char *dev, const char *fstype, int flags,
+                            const char *data, mount_t **out_mnt);
+
+/* Attach a mount created by vfs_mount_detached() at the absolute @path.  The
+ * mount must still be detached.  Returns 0 or a negative errno. */
+int      vfs_mount_attach_path(mount_t *mnt, const char *path);
+
 /* umount2(2) flags.  The values are the Linux MNT_* bits so the syscall can
  * forward its argument unchanged. */
 #define VFS_UMOUNT_FORCE  0x1

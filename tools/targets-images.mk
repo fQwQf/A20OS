@@ -135,6 +135,20 @@ $(BUILD_DIR)/ext4-journal.img: $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 		--protocols "$(PROTOCOLS_LINES)" \
 		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
 
+# Legacy-journal variant: same staging, but the journal keeps mke2fs's v1/v2
+# superblock (no descriptor/commit/data checksums).  The read-only downgrade
+# policy is tested against it; a writable mount of it must be refused.
+$(BUILD_DIR)/ext4-journal-legacy.img: $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
+	@echo "Building legacy-journal ext4 image..."
+	@$(PYTHON) tools/img.py ext4-journal-legacy \
+		--ext4-img "$(BUILD_DIR)/ext4-journal-legacy.img" \
+		--ext4-mb "$(EXT4_IMAGE_MB)" \
+		--ext4-staging-dir "$(EXT4_STAGING_DIR)" \
+		--mkfs-ext4 "$(MKFS_EXT4)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
+
 # littlefs gate image: formatted by the host mkfs_lfs tool (links the
 # vendored littlefs), carrying the fixed payload user/cmds/fs/lfs_test.c
 # verifies byte-for-byte.

@@ -141,6 +141,8 @@ static inline uint64_t arch_read_ra(void) {
 /* CSR 0x5 = ESTAT. Returns synthetic cause value compatible with trap_handler:
  *   Interrupt: (1UL << 63) | irq_number   (highest pending IS bit)
  *   Exception: Ecode from ESTAT[21:16]
+ *   0: interrupt-class trap with no ECFG-enabled IS bit — spurious;
+ *      trap_bridge.c resumes the interrupted context instead of dispatching.
  */
 static inline uint64_t arch_read_cause(void) {
     uint64_t estat, ecfg;

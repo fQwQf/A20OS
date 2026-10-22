@@ -1,0 +1,20 @@
+# XFCE 桌面（Wayland/labwc）的 LoongArch64 版本，经 apk 从 xfce world 安装。
+# 细节见 xfce-riscv64.toml 的注释；Alpine v3.23 的 loongarch64 端口提供
+# world 里全部上游包，a20-base/a20-drivers 由本地仓库按 ARCH=loongarch64 构建。
+#
+#   tools/a20 run xfce-loongarch64
+name = "xfce-loongarch64"
+description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream packages)"
+arch = "loongarch64"
+
+[machine]
+# loongarch64 在 components/trim.toml 的 smp-verified-qemu 名单内。
+smp = 4
+memory = "2G"
+
+[gui]
+enabled = true
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096

@@ -262,7 +262,7 @@ static int try_mount_read_only(block_dev_t *dev, const char *mnt,
         bcache_destroy(bc);
         return mkret;
     }
-    int ret = vfs_mount_bc_flags(mnt, fstype, bc, VFS_MOUNT_RDONLY);
+    int ret = vfs_mount_bc_flags(mnt, fstype, bc, VFS_MOUNT_RDONLY, NULL);
     if (ret < 0) {
         bcache_destroy(bc);
         return ret;
