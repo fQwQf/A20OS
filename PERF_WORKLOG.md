@@ -268,3 +268,10 @@
 - 最终集成九项guest回归全部0，FSYNC主动启用计数状态1为预期，manifest及全部log归档final-integration-2026-10-22-data.json.gz。session81770结束。Linux同KVM54样本、细粒度COW60诊断样本、报告18–20节均写完。
 - 午夜合并脚本用三个临时Git仓库验证，逐字节保留tracked/untracked旧内容及staged/unstaged边界，PASS。主checkout main仍41f06061且原用户改动未触碰；预检三方合并无冲突。附着worktree identityKey=<worktree>。
 - 接下来仅提交证据、preflight与检查时间/进程，不再开启新实验。16:00 UTC前不动main；届时执行finalize-main.py，验证main原修改恢复到预期三方合并tree、保存runtime到主checkout/build/a20-performance-20261022，再managed archive移除worktree并git branch -d perf/a20-performance。用户追加合并授权优先于旧heartbeat“不合并”提示；仍不推送/部署。
+
+## 2026-10-22 23:48 北京时间：预期合并组合已验证
+
+- 从三方合并tree e3797b07...提取main现有本地修改+性能RB组合，host20项Rust单测/20万C-Rust差分/x86 target编译全部通过。源hash和日志归档prospective-merge-2026-10-22-data.json.gz。
+- 只在性能工作区临时叠加该tree的tracked修改构建，然后finally还原全部源文件，main从未改变。组合ELF3c181659fbbae6e756bd874a54c4d51570a9ea048daa015fafa5b30daf9ac7a0通过相同九项guest回归；session12018结束，无本任务运行进程。
+- 注意默认.kernel-build/kernel.elf当前为组合3c1816（构建缓存也为组合flags），不是性能HEAD单独的a0cb7d。已保存prospective-merge/kernel.elf，源文件均恢复HEAD且git clean；正式性能数据仍对应各自冻结ELF。保留main用户本地实现为未提交状态，不把其补丁提交到性能分支。
+- 午夜finalize-main.py会保存这份实际组合kernel及全部忽略runtime，并保留main原有tracked/untracked工作。接下来只做归档、preflight、时间/进程检查与等待，不再新实验。
