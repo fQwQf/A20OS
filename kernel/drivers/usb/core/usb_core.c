@@ -113,6 +113,8 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
      * dangling pointer to read through.  No class remove touches an endpoint or
      * issues a transfer -- they only drop their own drv_priv -- so the order
      * swap costs them nothing. */
+    uint8_t address = udev->address;
+    uint8_t slot = udev->slot;
     if (hcd->ops && hcd->ops->abort_slot)
         hcd->ops->abort_slot(hcd, udev->slot);
 
@@ -131,7 +133,13 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
     kfree(udev);
     hcd->port_devices[port - 1] = NULL;
     hcd->port_state[port - 1] = 0;
-    kinfo("[USB] port %u disconnected\n", port);
+    /* Every address an HCD echoes came out of this pool and stays allocated
+     * until here; without the release a repeatedly replugged device walks the
+     * 1..127 range down and the next enumeration fails with -ENOMEM.  Devices
+     * that are addressed implicitly report 0, which the pool rejects. */
+    usb_core_free_address(address);
+    kinfo("[USB] port %u disconnected: address=%u reclaimed, slot=%u released\n",
+          port, address, slot);
 }
 
 /* ------------------------------------------------------------------ */
@@ -238,6 +246,10 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     if (slot.address != (uint8_t)address)
         usb_core_free_address((uint8_t)address);
     slot.port = (uint8_t)port;
+    /* Reported here rather than after descriptors are read: address reuse is a
+     * property of the pool and the controller's slot, and a later failure must
+     * still leave the assignment visible in the log. */
+    kinfo("[USB] port %u slot=%u address=%u\n", port, slot.hcd, slot.address);
     mdelay(5);
 
     uint8_t buf[USB_CTRL_BUF_SZ];
@@ -339,6 +351,9 @@ fail:
     /* Give the controller context back: leaving it allocated would leak a
      * slot, and the next hotplug on this port could not be enumerated. */
     ops->abort_slot(hcd, slot.hcd);
+    /* The address the controller echoes back is ours until released; a probe
+     * that failed after SET_ADDRESS would otherwise strand it. */
+    usb_core_free_address(slot.address);
     return r;
 }
 
