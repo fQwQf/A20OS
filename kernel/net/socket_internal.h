@@ -338,6 +338,11 @@ typedef struct net_socket {
      * why net_socket_alloc() fills in the stack defaults. */
     uint32_t snd_buf;
     uint32_t rcv_buf;
+    /* Demand-driven growth toward the protocol ceiling.  An explicit
+     * setsockopt(SO_SNDBUF/SO_RCVBUF) clears the matching flag: the caller has
+     * stated a value and autotuning must not quietly exceed it. */
+    uint8_t snd_autotune;
+    uint8_t rcv_autotune;
     int reuseaddr;
     int reuseport;
     int ipv6_v6only;
@@ -511,34 +516,27 @@ _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
  * 8 x 2448 = 19584 B, inside NET_PROFILE_SOCKET_BUDGET (20 KiB) with 896 B to
  * spare.
  *
- * Stage C2 re-measured all five terms on riscv64 LP64 at this tier by sizing a
- * char[] probe of the assert's own expression, rather than adding to the
- * numbers written here.  Three of them were stale:
+ * Re-measured by sizing a char[] probe of this assert's own expression rather
+ * than trusting the numbers written here.  The terms at one lane:
  *
- *   socket table    19584   (the comment said 8 x 2440 = 19520; net_socket_t
- *                            grew by 8 B and the 960 B of slack was 896 B)
- *   frame arrays     2064   4 slots x (4 + 1536), exact
+ *   socket table    19584   LP64 8 x 2448 (17152 on ILP32)
+ *   frame arrays     2580   (4 ring slots + 1 drain slot) x (4 + 1536)
  *   netif state      1152   1 dev x (2 x 512 + 128)
+ *   netif structs     768   g_netifs + g_loopif, 384 B budget each
  *   filter tables    3328   32 x 64 + 1280
  *   lwIP heap       16384   NET_PROFILE_MEM_SIZE, a static array in mem.c
  *                    -----
- *                    42512   at one lane, against a 45056 ceiling
+ *                    43796   LP64 at one lane, against a 45056 ceiling
  *
- * So the four terms are 42512, not the 42644 this comment claimed, and the
- * "the macro undercounts by 516 B" note was itself stale: socket_packet.c has
- * exactly NET_PROFILE_PACKET_RING_SLOTS slots in g_pkt_ring and the only other
- * frame-sized buffer is a stack local in the AF_PACKET send path
- * (socket_packet.c:314), so the frame term is exact and there is no undercount
- * to allow for.  Both corrections run the same way -- the real number is below
- * what the comment promised -- so nothing here got tighter than it looked.
+ * The frame term now includes the AF_PACKET drain slot (socket_packet.c has
+ * RING_SLOTS ring entries plus g_pkt_drain); the netif structs are the two
+ * struct netif arrays in lwip_stack.c, which the earlier accounting omitted.
+ * Both additions still leave about 1.2 KiB inside the 44 KiB ceiling.
  *
- * The fifth term, the per-lane memp tables, is stage C2's.  It is 0 at
- * CONFIG_NET_LANES == 1, which is how the embedded tier ships, so no shipping
- * configuration moved: the assert evaluates to exactly the same 42512 it did
- * before this change.  At four lanes it is 44416, inside 45056 by 640 B.  That
- * is the whole reason the ceiling carries 2.5 KiB of headroom rather than being
- * rounded down to the last byte: an embedded build that also wants four lanes is
- * a legitimate thing to compile, and it still fits.
+ * The per-lane memp tables are 0 at CONFIG_NET_LANES == 1, which is how the
+ * embedded tier ships.  At four lanes they add 1904 B, leaving about 380 B of
+ * headroom on LP64: an embedded build that also wants four lanes is a
+ * legitimate thing to compile, and it still fits.
  */
 _Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) <= NET_PROFILE_SOCKET_BUDGET,
                "the embedded profile's whole socket table does not fit the "
@@ -546,8 +544,9 @@ _Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) <= NET_PROFILE_SOCKET_BUDG
                "depth or the inline payload rather than raising the ceiling");
 
 _Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) +
-                   NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
+                   (NET_PROFILE_PACKET_RING_SLOTS + 1) * NET_PROFILE_PACKET_SLOT_BYTES +
                    NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES +
+                   NET_PROFILE_NETIF_STRUCT_BUDGET +
                    NET_PROFILE_FILTER_BUDGET +
                    NET_PROFILE_MEM_SIZE +
                    NET_PROFILE_MEMP_LANE_TABLE_BYTES
@@ -1276,11 +1275,11 @@ void     net_netlink_link_notify(const nlrt_link_event_t *events, int n);
 void     net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
                                  const uint8_t mask[4]);
 /* The AF_INET6 counterpart, broadcast to RTNLGRP_IPV6_IFADDR.  Emitted by
- * a20_lwip_if_set_addr6() -- the only writer of an IPv6 address in this tree
- * besides the loopback netif's own ::1 -- so the group has a real event source
- * rather than being a defined number nothing can feed. */
+ * a20_lwip_if_set_addr6()/del_addr6() -- the only writers of an IPv6 address in
+ * this tree besides the loopback netif's own ::1 -- so the group has a real
+ * event source rather than being a defined number nothing can feed. */
 void     net_netlink_addr6_notify(unsigned ifindex, const uint8_t addr[16],
-                                  uint8_t prefixlen);
+                                  uint8_t prefixlen, uint16_t msg_type);
 
 /* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
  * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held

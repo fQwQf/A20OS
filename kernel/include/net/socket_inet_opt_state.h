@@ -67,6 +67,8 @@ void a20_net_inet_opt_set_snd_buf(void *pcb, uint32_t v);
 void a20_net_inet_opt_set_wnd_limit(void *pcb, uint32_t v);
 uint32_t a20_net_inet_opt_get_rcv_wnd(void *pcb);
 void a20_net_inet_opt_set_rcv_wnd(void *pcb, uint32_t v);
+void a20_net_inet_opt_set_rcv_ann_wnd(void *pcb, uint32_t v);
+int  a20_net_inet_opt_pcb_established(void *pcb);
 uint32_t a20_net_inet_opt_get_rcv_ann_wnd(void *pcb);
 void a20_net_inet_opt_recved0(void *pcb);
 void a20_net_inet_opt_nagle_disable(void *pcb);

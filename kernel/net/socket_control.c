@@ -755,6 +755,12 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
     int r = a20_net_setsockopt_state(&v, level, optname, optval, optlen);
     if (r < 0)
         return r;
+    /* An explicit request is final for that direction; the growth policy is
+     * only for callers that never expressed a preference. */
+    if (level == SOL_SOCKET && optname == SO_SNDBUF)
+        s->snd_autotune = 0;
+    else if (level == SOL_SOCKET && optname == SO_RCVBUF)
+        s->rcv_autotune = 0;
     if (r & NET_OPT_APPLY_IP_OPTS)
         net_inet_ip_opts_apply(s);
     if (r & NET_OPT_APPLY_PCB_MASK)

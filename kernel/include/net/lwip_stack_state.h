@@ -56,7 +56,7 @@ void a20_lwip_stack_notify_link_events(const void *events, int n);
 void a20_lwip_stack_notify_addr(unsigned ifindex, const uint8_t addr[4],
                                 const uint8_t mask[4]);
 void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
-                                 uint8_t prefixlen);
+                                uint8_t prefixlen, uint16_t msg_type);
 int  a20_lwip_stack_netif_sendable(void *n);
 int  a20_lwip_stack_device_send(void *n, const uint8_t *frame, size_t len);
 
@@ -72,6 +72,7 @@ int  a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
                           uint8_t gw[4]);
 int  a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
                            uint8_t prefixlen);
+int  a20_lwip_if_del_addr6(unsigned ifindex, const uint8_t addr[16]);
 int  a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu);
 int  a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask);
 int  a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len);

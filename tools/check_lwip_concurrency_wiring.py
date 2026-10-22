@@ -66,6 +66,62 @@ def _body(path: str, name: str) -> str:
     raise ContractError(f"unclosed function body for {name} in {path}")
 
 
+def _rust_body(path: str, name: str) -> str:
+    """Extract an `fn name(...) { ... }` body from a Rust source file."""
+    source = (ROOT / path).read_text(encoding="utf-8")
+    match = re.search(rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?"
+                      rf"(?:extern\s+\"C\"\s+)?fn\s+{re.escape(name)}\s*\(", source)
+    if not match:
+        raise ContractError(f"function {name} not found in {path}")
+    start = source.find("{", match.end())
+    if start < 0:
+        raise ContractError(f"function {name} has no body in {path}")
+    depth = 0
+    i = start
+    state = "code"
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                state = "line-comment"
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                state = "block-comment"
+                i += 2
+                continue
+            if ch == '"':
+                state = "string"
+            elif ch == "'":
+                # Lifetimes (`'static`) and char literals both start with a
+                # quote; only treat it as a char if it closes on the next byte.
+                if i + 2 < len(source) and source[i + 2] == "'":
+                    state = "char"
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start + 1:i]
+        elif state == "block-comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                i += 2
+                continue
+        elif state == "line-comment":
+            if ch == "\n":
+                state = "code"
+        elif state in ("string", "char"):
+            if ch == "\\":
+                i += 2
+                continue
+            if (state == "string" and ch == '"') or (state == "char" and ch == "'"):
+                state = "code"
+        i += 1
+    raise ContractError(f"unclosed function body for {name} in {path}")
+
+
 def _ordered(body: str, description: str, *needles: str) -> None:
     positions = []
     for needle in needles:
@@ -125,23 +181,37 @@ def check() -> None:
              "net_lane_ctx_pop(prev)", "a20_lwip_lane_unlock(flags)",
              "net_lane_rx_consume(lane)")
 
+    # The callback is now a C wrapper around the Rust publication transaction.
+    # Follow the delegation: assert the wrapper's contract, then the real
+    # ordering inside a20_net_accept_publish().
     accept = _body("kernel/net/socket_inet.c", "lwip_tcp_accept_cb")
-    lock = accept.find("a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, listener_key)")
-    head_read = accept.find("__atomic_load_n(&st->head, __ATOMIC_RELAXED)")
-    publish = accept.find("__atomic_store_n(&st->head, head + 1, __ATOMIC_RELAXED)")
-    schedule = accept.find("net_inet_bh_schedule(s)")
-    success_unlocks = list(re.finditer(
-        r"a20_lwip_shared_unlock\(\s*A20_LWIP_SHARED_LISTENER\s*,\s*"
-        r"listener_key\s*,\s*listener_flags\s*\)", accept))
-    success_unlock = next((m.start() for m in reversed(success_unlocks)
-                           if schedule >= 0 and m.start() < schedule), -1)
-    if min(lock, head_read, publish, success_unlock, schedule) < 0:
-        raise ContractError("accept stage is missing listener guard, head publication, unlock, or BH schedule")
-    if not (accept.find("const void *listener_key = s->tcp;") < lock < head_read < publish <
-            success_unlock < schedule):
-        raise ContractError("accept stage must lock stable listener PCB, publish head, unlock, then schedule BH")
+    if "a20_net_accept_publish(s, newpcb, NET_ACCEPT_STAGE_SIZE)" not in accept:
+        raise ContractError("accept callback no longer delegates publication to the stage transaction")
     if "tcp_abort(" in accept:
         raise ContractError("accept callback must return ERR_MEM and leave child aborting to TCP core")
+
+    publish_body = _rust_body("kernel/net/socket_inet_accept.rs", "a20_net_accept_publish")
+    lock = publish_body.find("a20_net_accept_stage_lock(listener)")
+    head_read = publish_body.find("(*(v.head as *const AtomicU32)).load(Ordering::Relaxed)")
+    arm = publish_body.find("a20_net_accept_slot_arm(slot")
+    fence = publish_body.find("fence(Ordering::Release)")
+    publish = publish_body.find("store(head.wrapping_add(1), Ordering::Relaxed)")
+    success_unlock = publish_body.rfind("a20_net_accept_stage_unlock(listener, sf)")
+    schedule = publish_body.find("a20_net_accept_bh_schedule(listener)")
+    if min(lock, head_read, arm, fence, publish, success_unlock, schedule) < 0:
+        raise ContractError("accept stage is missing listener guard, head publication, unlock, or BH schedule")
+    if not (lock < head_read < arm < fence < publish < success_unlock < schedule):
+        raise ContractError("accept stage must lock stable PCB, arm the slot, publish head, unlock, then schedule BH")
+
+    stage_lock = _body("kernel/net/socket_inet.c", "a20_net_accept_stage_lock")
+    if "a20_lwip_shared_lock(A20_LWIP_SHARED_LISTENER, s->tcp)" not in stage_lock:
+        raise ContractError("accept stage lock no longer binds the stable listener PCB")
+    stage_unlock = _body("kernel/net/socket_inet.c", "a20_net_accept_stage_unlock")
+    if "a20_lwip_shared_unlock(A20_LWIP_SHARED_LISTENER, s->tcp, flags)" not in stage_unlock:
+        raise ContractError("accept stage unlock no longer releases the listener guard")
+    bh_schedule = _body("kernel/net/socket_inet.c", "a20_net_accept_bh_schedule")
+    if "net_inet_bh_schedule" not in bh_schedule:
+        raise ContractError("accept schedule no longer enters the bottom half")
 
     listen = _body("kernel/external/lwip/src/core/tcp_in.c", "tcp_listen_input")
     alloc = listen.find("npcb = tcp_alloc(pcb->prio)")

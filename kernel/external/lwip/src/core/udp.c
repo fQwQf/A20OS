@@ -355,6 +355,25 @@ udp_input(struct pbuf *p, struct netif *inp)
   for (lane = 0; lane < search_buckets; lane++) {
     const u8_t bucket = search_lane[lane];
     for (pcb = udp_pcbs[bucket]; pcb != NULL; pcb = pcb->next) {
+#if CONFIG_NET_PCB_SANE
+    /* The UDP counterpart of tcp_pcbs_sane's per-entry checks.  A pcb is
+     * reachable only from the bucket its own local address and port hash to,
+     * so a stale ->lane or a wildcard pcb in a hashed bucket is a silent
+     * lookup failure, not a wrong answer: assert it at the point of use. */
+    LWIP_ASSERT("udp_input: pcb in the bucket its lane names",
+                pcb->lane == bucket);
+    LWIP_ASSERT("udp_input: pcb->lane in range",
+                pcb->lane <= (u8_t)NET_PCB_LANE_ANY);
+    if (bucket == (u8_t)NET_PCB_LANE_ANY) {
+      LWIP_ASSERT("udp_input: any bucket holds only catch-all pcbs",
+                  NET_PCB_IS_ANY_LOCAL_IP(&pcb->local_ip));
+    } else {
+      LWIP_ASSERT("udp_input: catch-all pcb only in the any bucket",
+                  !NET_PCB_IS_ANY_LOCAL_IP(&pcb->local_ip));
+      LWIP_ASSERT("udp_input: pcb->lane matches local addr/port",
+                  pcb->lane == NET_PCB_LANE_OF_PCB(pcb));
+    }
+#endif /* CONFIG_NET_PCB_SANE */
 #if defined(LWIP_CORE_LANE) && (LWIP_CORE_LANE_COUNT > 1)
     uint64_t pcb_flags = a20_lwip_shared_lock(A20_LWIP_SHARED_UDP, pcb);
 #endif

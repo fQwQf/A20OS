@@ -69,6 +69,7 @@ int  a20_net_netlink_if_set_addr(uint32_t ifindex, const uint8_t *ip,
                                  const uint8_t *mask, const uint8_t *gw);
 int  a20_net_netlink_if_set_addr6(uint32_t ifindex, const uint8_t *addr,
                                   uint8_t prefixlen);
+int  a20_net_netlink_if_del_addr6(uint32_t ifindex, const uint8_t *addr);
 uint32_t a20_net_netlink_loopback_mtu(void *ns, uint32_t value, int set);
 uint32_t a20_net_netlink_loopback_up(void *ns, uint32_t value, int set);
 void a20_net_netlink_klog_uevent(const char *action, const char *subsystem,
@@ -90,6 +91,6 @@ void a20_net_netlink_link_notify(const void *events, int n);
 void a20_net_netlink_addr_notify(uint32_t ifindex, const uint8_t addr[4],
                                  const uint8_t mask[4]);
 void a20_net_netlink_addr6_notify(uint32_t ifindex, const uint8_t addr[16],
-                                  uint8_t prefixlen);
+                                  uint8_t prefixlen, uint16_t msg_type);
 
 #endif /* _NET_SOCKET_NETLINK_STATE_H */

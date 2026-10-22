@@ -17,7 +17,7 @@
  * The previous single hardcoded set was a server-sized configuration used for
  * every target, including the 20 KiB SRAM STM32F103 profile the README
  * advertises.  It could not fit: PBUF_POOL alone was 256 * 1536 = 384 KiB of
- * static pool, and MEMP_MEM_MALLOC was left at 0 so MEM_SIZE was unused.
+ * pool, and MEMP_MEM_MALLOC was left at 0 so MEM_SIZE was unused.
  */
 
 #ifndef CONFIG_NET_PROFILE
@@ -91,6 +91,7 @@
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (16 * 1024)
+#define NET_PROFILE_TCP_BUF_INIT     (1024)
 #define NET_PROFILE_PBUF_BUFSIZE     512
 #define NET_PROFILE_PBUF_POOL_SIZE   10
 #define NET_PROFILE_TCP_MSS          256
@@ -181,106 +182,32 @@
  * The whole of this tier's networking RAM, in one number, as the sum of four
  * terms that are each asserted somewhere real:
  *
- *   socket table   NET_PROFILE_MAX_SOCKETS x sizeof(net_socket_t)
- *                  -- assert in socket_internal.h (real sizeof), 19520 B
- *   frame arrays   NET_PROFILE_PACKET_RING_SLOTS x slot + netif states
- *                  -- macro bound here, real sizeof in socket_packet.c and
- *                     lwip_stack.c, 3732 B measured
+ *   socket table   NET_MAX_SOCKETS x sizeof(net_socket_t)
+ *                  -- assert in socket_internal.h (real sizeof):
+ *                     19584 B on LP64, 17152 B on ILP32
+ *   frame arrays   (ring slots + 1 drain slot) x slot + per-device netif state
+ *                  -- assert in socket_packet.c and lwip_stack.c:
+ *                     2580 + 1152 = 3732 B measured
+ *   netif structs  g_netifs + g_loopif -- assert in lwip_stack.c, 768 B budget
  *   filter tables  conntrack + NAT rule tables
- *                  -- assert in netfilter_nat.c (real sizeof), 3072 B
- *   lwIP heap      NET_PROFILE_MEM_SIZE
- *                  -- a static array in memp/mem.c, 16384 B
+ *                  -- assert in netfilter_nat.c (real sizeof), 3328 B
+ *   lwIP heap      NET_PROFILE_MEM_SIZE -- a static array in memp/mem.c, 16384 B
  *
- * 42644 B measured.  The ceiling is 44 KiB, which leaves roughly 2.4 KiB of
- * slack for the structs this file cannot see (the obj_cache descriptors, the
- * per-lane and per-bucket bookkeeping, and any growth in the three terms
- * above).
+ * 43796 B measured on LP64, 41364 B on ILP32.  The ceiling is 44 KiB, which
+ * leaves about 1.2 KiB of slack for structs this file cannot see (the object
+ * cache descriptors and per-bucket bookkeeping).
  *
  * This replaces the old framing, and the change is a real capability statement
  * rather than bookkeeping: the tier was previously described as a 20 KiB
  * profile whose largest single term overran 20 KiB.  It is now described as a
- * profile that needs about 42 KiB and is asserted not to need more than 44 KiB.
- * 20 KiB was never achievable for a socket-capable lwIP -- the eight sockets
- * alone are 19520 B -- and the way that used to be expressed was a ceiling that
- * the code violated.  docs/status/current/server-readiness.md carries the numbers.
+ * profile that needs about 42-43 KiB and is asserted not to need more than
+ * 44 KiB.  20 KiB was never achievable for a socket-capable lwIP -- the eight
+ * sockets alone exceed it on LP64 -- and the way that used to be expressed was
+ * a ceiling that the code violated.  docs/status/current/server-readiness.md
+ * carries the numbers.
  */
 #define NET_PROFILE_FILTER_BUDGET    (32 * 64 + 1280)
 #define NET_PROFILE_TOTAL_BUDGET     (44 * 1024)
-
-/*
- * What this tier's pool ceilings add up to against its own heap.
- *
- * With MEMP_MEM_MALLOC=1 the pools are not static arrays -- memp.c's
- * do_memp_malloc_pool() is mem_malloc(desc->size), so a pool's ceiling is a
- * claim on MEM_SIZE and not an independent reservation.  That makes the two
- * numbers directly comparable, and it makes the sum below a real question: a
- * set of ceilings that adds up to more than the heap is a set of ceilings that
- * cannot all be reached, and MEMP_STATS reports the shortfall as err > 0 on
- * whichever pool loses the race.
- *
- * Measured on riscv64 LP64 (14 pools compile in), the element sizes at this
- * tier's geometry: PBUF_POOL 536, TCP_PCB 296, TCP_PCB_LISTEN 104,
- * UDP_PCB 96, RAW_PCB 96, ND6_QUEUE 88, REASSDATA 40, FRAG_PBUF 40,
- * MLD6_GROUP 32, TCP_SEG 32, ARP_QUEUE 24, PBUF 24, SYS_TIMEOUT 16.  Each is
- * rounded up to the next multiple of 8 below, which is the direction that can
- * only make this assert fire early.
- */
-#define NET_PROFILE_MEMP_PBUF_POOL_ELEM      544
-#define NET_PROFILE_MEMP_PBUF_ELEM           32
-#define NET_PROFILE_MEMP_TCP_PCB_ELEM        304
-#define NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM 112
-#define NET_PROFILE_MEMP_UDP_PCB_ELEM        104
-#define NET_PROFILE_MEMP_RAW_PCB_ELEM        104
-#define NET_PROFILE_MEMP_TCP_SEG_ELEM        40
-#define NET_PROFILE_MEMP_REASSDATA_ELEM      48
-#define NET_PROFILE_MEMP_FRAG_PBUF_ELEM      48
-#define NET_PROFILE_MEMP_ARP_QUEUE_ELEM      32
-#define NET_PROFILE_MEMP_ND6_QUEUE_ELEM      96
-#define NET_PROFILE_MEMP_MLD6_GROUP_ELEM     40
-#define NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM    24
-
-/* lwIP's own opt.h defaults for the two IPv6 multicast/neighbour pools are 20
- * and 4.  Both are per-part permanent heap claims on a tier whose heap is four
- * times smaller than the default tier's, and neither is reachable without an
- * IPv6 multicast group join or a neighbour solicitation, so they are scaled
- * here rather than left at a default that was chosen for a different part. */
-#define NET_PROFILE_ND6_QUEUE         6
-#define NET_PROFILE_MLD6_GROUP        2
-
-#define NET_PROFILE_MEMP_CLAIM_BYTES \
-    (NET_PROFILE_PBUF_POOL_SIZE * NET_PROFILE_MEMP_PBUF_POOL_ELEM + \
-     (NET_PROFILE_PBUF_POOL_SIZE / 2) * NET_PROFILE_MEMP_PBUF_ELEM + \
-     NET_PROFILE_TCP_PCB * NET_PROFILE_MEMP_TCP_PCB_ELEM + \
-     NET_PROFILE_TCP_PCB_LISTEN * NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM + \
-     NET_PROFILE_UDP_PCB * NET_PROFILE_MEMP_UDP_PCB_ELEM + \
-     NET_PROFILE_RAW_PCB * NET_PROFILE_MEMP_RAW_PCB_ELEM + \
-     (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT) * \
-         NET_PROFILE_MEMP_TCP_SEG_ELEM + \
-     NET_PROFILE_REASSDATA * 2 * NET_PROFILE_MEMP_REASSDATA_ELEM + \
-     NET_PROFILE_FRAG_PBUF * NET_PROFILE_MEMP_FRAG_PBUF_ELEM + \
-     NET_PROFILE_ARP_QUEUE * NET_PROFILE_MEMP_ARP_QUEUE_ELEM + \
-     NET_PROFILE_ND6_QUEUE * NET_PROFILE_MEMP_ND6_QUEUE_ELEM + \
-     NET_PROFILE_MLD6_GROUP * NET_PROFILE_MEMP_MLD6_GROUP_ELEM + \
-     NET_PROFILE_SYS_TIMEOUT * NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM)
-
-/*
- * The reconciliation this file's own comment used to say was needed: the sum of
- * this tier's pool ceilings has to fit the heap those same pools draw from.
- *
- * Before this change the sum was 22880 B against a 16384 B heap, so the tier
- * declared ceilings it could never reach -- which under MEMP_MEM_MALLOC=1 is
- * not a harmless overstatement, because memp has no per-pool cap: the pools
- * simply compete, and whichever loses reports err > 0 on /proc/a20/netmem as an
- * unexplained receive drop.  Now 13332 B of claims against 16384 B, with 3052 B
- * left for everything memp does not serve (pbuf_custom chains, netconn, DNS
- * tables and lwIP's own allocations).
- */
-_Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
-               "this profile's pool ceilings add up to more than its own "
-               "MEM_SIZE; with MEMP_MEM_MALLOC=1 every pool draws from that one "
-               "heap, so the tier is declaring capacity it cannot allocate and "
-               "the shortfall will surface as memp err > 0, not as a clean "
-               "allocation failure");
 
 /*
  * A bottom-half ring of one slot is not a small ring, it is a broken one: the
@@ -356,6 +283,7 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (16 * 1024 * 1024)
+#define NET_PROFILE_TCP_BUF_INIT     (32 * 1024)
 #define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   4096
 #define NET_PROFILE_TCP_MSS          1460
@@ -416,7 +344,8 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
 #define NET_PROFILE_MAX_QUEUE        128
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
-#define NET_PROFILE_MEM_SIZE         (512 * 1024)
+#define NET_PROFILE_MEM_SIZE         (1024 * 1024)
+#define NET_PROFILE_TCP_BUF_INIT     (32 * 1024)
 #define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   256
 #define NET_PROFILE_TCP_MSS          1460
@@ -456,6 +385,92 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
 #define NET_PROFILE_CONNTRACK_BUCKETS 32
 
 #endif /* CONFIG_NET_PROFILE */
+
+/* Pools lwIP's opt.h sizes with its own defaults; the tiers may scale them. */
+#ifndef NET_PROFILE_REASSDATA
+#define NET_PROFILE_REASSDATA 16
+#endif
+#ifndef NET_PROFILE_FRAG_PBUF
+#define NET_PROFILE_FRAG_PBUF 32
+#endif
+
+/*
+ * What a tier's pool ceilings add up to against its own heap.  This is checked
+ * on every tier, not just the embedded one: MEMP_MEM_MALLOC=1 makes every pool
+ * element a claim on MEM_SIZE, so a set of ceilings that sums past the heap is
+ * a set of ceilings that cannot all be reached.  The shortfall shows up later
+ * as MEMP_STATS err > 0 on whichever pool loses, which is easy to misread as a
+ * receive drop.
+ *
+ * Element sizes are measured on riscv64 LP64 at the tier's geometry:
+ * PBUF_POOL is align(sizeof(struct pbuf)) + align(PBUF_POOL_BUFSIZE), and each
+ * allocation additionally carries mem.c's SIZEOF_STRUCT_MEM (24 B on LP64).
+ * Rounding up is deliberate; it can only make the assertion fire early.
+ */
+#define NET_PROFILE_MEMP_PBUF_OVERHEAD       24
+#define NET_PROFILE_MEMP_ALLOC_OVERHEAD      24
+#define NET_PROFILE_MEMP_PBUF_POOL_ELEM \
+    (NET_PROFILE_MEMP_PBUF_OVERHEAD + \
+     ((NET_PROFILE_PBUF_BUFSIZE + 7) & ~7))
+#define NET_PROFILE_MEMP_PBUF_ELEM           32
+#define NET_PROFILE_MEMP_TCP_PCB_ELEM        304
+#define NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM 112
+#define NET_PROFILE_MEMP_UDP_PCB_ELEM        104
+#define NET_PROFILE_MEMP_RAW_PCB_ELEM        104
+#define NET_PROFILE_MEMP_TCP_SEG_ELEM        40
+#define NET_PROFILE_MEMP_REASSDATA_ELEM      48
+#define NET_PROFILE_MEMP_FRAG_PBUF_ELEM      48
+#define NET_PROFILE_MEMP_ARP_QUEUE_ELEM      32
+#define NET_PROFILE_MEMP_ND6_QUEUE_ELEM      96
+#define NET_PROFILE_MEMP_MLD6_GROUP_ELEM     40
+#define NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM    24
+
+/* lwIP's own opt.h defaults for the two IPv6 multicast/neighbour pools are 20
+ * and 4.  Both are per-part heap claims on a tier whose heap is small, and
+ * neither is reachable without an IPv6 multicast join or a neighbour
+ * solicitation, so the embedded tier scales them; the larger tiers keep the
+ * upstream defaults. */
+#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
+#define NET_PROFILE_ND6_QUEUE         6
+#define NET_PROFILE_MLD6_GROUP        2
+#else
+#define NET_PROFILE_ND6_QUEUE         20
+#define NET_PROFILE_MLD6_GROUP        4
+#endif
+
+#define NET_PROFILE_MEMP_ELEM_COUNT \
+    (NET_PROFILE_PBUF_POOL_SIZE + \
+     (NET_PROFILE_PBUF_POOL_SIZE / 2) + \
+     NET_PROFILE_TCP_PCB + NET_PROFILE_TCP_PCB_LISTEN + \
+     NET_PROFILE_UDP_PCB + NET_PROFILE_RAW_PCB + \
+     (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT) + \
+     (NET_PROFILE_REASSDATA * 2) + NET_PROFILE_FRAG_PBUF + \
+     NET_PROFILE_ARP_QUEUE + NET_PROFILE_ND6_QUEUE + \
+     NET_PROFILE_MLD6_GROUP + NET_PROFILE_SYS_TIMEOUT)
+
+#define NET_PROFILE_MEMP_CLAIM_BYTES \
+    (NET_PROFILE_PBUF_POOL_SIZE * NET_PROFILE_MEMP_PBUF_POOL_ELEM + \
+     (NET_PROFILE_PBUF_POOL_SIZE / 2) * NET_PROFILE_MEMP_PBUF_ELEM + \
+     NET_PROFILE_TCP_PCB * NET_PROFILE_MEMP_TCP_PCB_ELEM + \
+     NET_PROFILE_TCP_PCB_LISTEN * NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM + \
+     NET_PROFILE_UDP_PCB * NET_PROFILE_MEMP_UDP_PCB_ELEM + \
+     NET_PROFILE_RAW_PCB * NET_PROFILE_MEMP_RAW_PCB_ELEM + \
+     (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT) * \
+         NET_PROFILE_MEMP_TCP_SEG_ELEM + \
+     NET_PROFILE_REASSDATA * 2 * NET_PROFILE_MEMP_REASSDATA_ELEM + \
+     NET_PROFILE_FRAG_PBUF * NET_PROFILE_MEMP_FRAG_PBUF_ELEM + \
+     NET_PROFILE_ARP_QUEUE * NET_PROFILE_MEMP_ARP_QUEUE_ELEM + \
+     NET_PROFILE_ND6_QUEUE * NET_PROFILE_MEMP_ND6_QUEUE_ELEM + \
+     NET_PROFILE_MLD6_GROUP * NET_PROFILE_MEMP_MLD6_GROUP_ELEM + \
+     NET_PROFILE_SYS_TIMEOUT * NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM + \
+     NET_PROFILE_MEMP_ELEM_COUNT * NET_PROFILE_MEMP_ALLOC_OVERHEAD + \
+     NET_PROFILE_MEMP_ALLOC_OVERHEAD /* the heap's free-list terminator */)
+
+_Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
+               "this profile's pool ceilings add up to more than its own "
+               "MEM_SIZE; with MEMP_MEM_MALLOC=1 every pool draws from that one "
+               "heap, so the tier cannot allocate the capacity it declares");
+
 
 /*
  * Geometry the profile above has to satisfy, checked on all three rungs
@@ -505,6 +520,12 @@ _Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
 #endif
 #define NET_PROFILE_NETIF_STATE_BYTES \
     (2 * NET_PROFILE_NETIF_FRAME_SIZE + NET_PROFILE_NETIF_STATE_OVERHEAD)
+/* struct netif itself, which lwip_stack.c owns once per device plus the
+ * loopback interface.  Measured at 368 B on riscv64 LP64; 384 leaves room for
+ * alignment growth and is checked against the real sizeof in lwip_stack.c. */
+#define NET_PROFILE_NETIF_STRUCT_BYTES 384
+#define NET_PROFILE_NETIF_STRUCT_BUDGET \
+    ((NET_PROFILE_NETIF_MAX_DEVS + 1) * NET_PROFILE_NETIF_STRUCT_BYTES)
 
 /* A max-size frame is one Ethernet header plus the MTU, and it has to fit both
  * the device scratch buffer and a single pbuf-pool element -- otherwise the

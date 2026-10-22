@@ -121,8 +121,11 @@ net_socket_t *net_socket_alloc(void) {
          * than being inferred from zero later.  These are the stack's own
          * compile-time limits, which is the honest default: a caller that never
          * asks gets exactly the window lwIP would have given it anyway. */
-        s->snd_buf = TCP_SND_BUF;
+        s->snd_buf = NET_PROFILE_TCP_BUF_INIT < TCP_SND_BUF
+                         ? NET_PROFILE_TCP_BUF_INIT : TCP_SND_BUF;
         s->rcv_buf = TCP_WND;
+        s->snd_autotune = 1;
+        s->rcv_autotune = 1;
         /* The creator's reference.  A socket that also reaches the registry
          * carries a second one, taken by net_register_socket_locked() and
          * dropped by one more net_socket_free() after the slot is released. */
@@ -520,8 +523,11 @@ int net_socket_create(int domain, int type, int protocol) {
      * no-op against the message-count cap that already exists.
      */
     if (base_type == SOCK_STREAM || base_type == SOCK_SEQPACKET) {
-        s->snd_buf = TCP_SND_BUF;
+        s->snd_buf = NET_PROFILE_TCP_BUF_INIT < TCP_SND_BUF
+                         ? NET_PROFILE_TCP_BUF_INIT : TCP_SND_BUF;
         s->rcv_buf = TCP_WND;
+        s->snd_autotune = 1;
+        s->rcv_autotune = 1;
     } else {
         s->snd_buf = NET_DGRAM_SND_BUF_DEFAULT;
         s->rcv_buf = NET_DGRAM_RCV_BUF_DEFAULT;

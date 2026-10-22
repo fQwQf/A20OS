@@ -317,7 +317,14 @@ lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_
   缩放之前等于 `TCPWND16(TCP_WND)`，而 `pcb->rcv_scale` 在第一条窗口更新选项发出去
   之前还是 0。拿 pcb 状态去夹，会让每个刚 `socket()` 出来的 socket 被永久钉死在
   64 KiB。
-- 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
+- **上限只阻止窗口继续增长，不缩小已通告窗口。** `tcp_recved()` 取
+  `max(wnd_limit, pcb->rcv_wnd)` 作为本次上限：如果当前窗口已经大于新上限，它保持不变。
+  直接把它写成较小值会丢掉对端已经获准发送的数据（实测：IPv6 回环 4000 B 传输在
+  上限 32768 时只到达 2856 B）。新连接在握手前由 socket 层把 `rcv_wnd`/`rcv_ann_wnd`
+  直接写成上限，因此上限对"创建时设置"的 socket 仍然完整生效；对已经活跃的连接，
+  它是软上限，窗口会在数据被消费、窗口自然回落到上限以下后受约束。
+- 下调在建立前（SYN_SENT/SYN_RCVD）立即生效（同时写 `rcv_wnd` 与 `rcv_ann_wnd`，
+  不调用 `tcp_output`）；在 ESTABLISHED 上只写 `wnd_limit`，不重写公告逻辑。上调也要写，因为 lwIP 没有
   "还回去" 的机制。
 
 ### 2.9 `LWIP_MEMP_LANE()`：memp 按当前 lane 索引（本树独有）
