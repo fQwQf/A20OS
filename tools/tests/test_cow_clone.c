@@ -45,6 +45,17 @@ struct a20_cow_src {
     int32_t kind;
 };
 
+struct a20_cow_shared_snapshot {
+    void *pcp, *slot, *node;
+    uintptr_t pa, raw_flags, cow_flags;
+    uint32_t pfn;
+    int32_t w_or_cow;
+    uint32_t class;
+    int32_t kind;
+};
+_Static_assert(sizeof(struct a20_cow_shared_snapshot) == 64, "host snapshot ABI");
+static int snapshot_slot, snapshot_node, snapshot_locked;
+
 /* ------------------------------------------------------------- the model */
 
 static int g_policy_present;
@@ -72,6 +83,7 @@ static int last_map_level;
 
 static void reset(void)
 {
+    check(!snapshot_locked, "previous transaction released its node lock");
     g_policy_present = 1;
     g_policy_flags = 0;
     g_probe_present = 1;
@@ -186,6 +198,7 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
     (void)child;
     (void)va;
     (void)class;
+    check(!snapshot_locked, "map child only after unlocking snapshot node");
     map_calls++;
     last_map_pfn = pfn;
     last_map_flags = flags;
@@ -194,7 +207,7 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
 }
 
 int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
-                           struct a20_cow_src *out)
+                           struct a20_cow_shared_snapshot *out)
 {
     (void)parent;
     (void)va;
@@ -202,6 +215,9 @@ int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
     if (!g_snapshot_ok)
         return 0;
     memset(out, 0, sizeof(*out));
+    out->slot = &snapshot_slot;
+    out->node = &snapshot_node;
+    snapshot_locked = 1;
     out->pfn = g_probe_pfn;
     out->pa = 0x9000;
     out->raw_flags = g_probe_raw;
@@ -214,26 +230,28 @@ int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
 }
 
 void a20_cow_share_downgrade(void *parent, uintptr_t va, int level,
-                             uintptr_t pa, uintptr_t flags, uint32_t class)
+                             const struct a20_cow_shared_snapshot *snapshot,
+                             uintptr_t flags)
 {
-    (void)parent;
-    (void)va;
-    (void)level;
-    (void)pa;
-    (void)flags;
-    (void)class;
+    (void)parent; (void)va; (void)level;
+    check(snapshot_locked && snapshot->slot == &snapshot_slot &&
+          snapshot->node == &snapshot_node, "downgrade uses the pinned slot/node");
+    check(snapshot->pa == 0x9000 && flags == g_probe_cow && snapshot->class == 3,
+          "downgrade preserves snapshot physical address, flags and class");
     downgrade_calls++;
 }
 
-void a20_cow_share_unlock(void *parent, uintptr_t va)
+void a20_cow_share_unlock(const struct a20_cow_shared_snapshot *snapshot)
 {
-    (void)parent;
-    (void)va;
+    check(snapshot_locked && snapshot->node == &snapshot_node,
+          "unlock releases the exact snapshot node once");
+    snapshot_locked = 0;
     unlock_calls++;
 }
 
-void a20_cow_release_ref(const struct a20_cow_src *src)
+void a20_cow_release_ref(const struct a20_cow_shared_snapshot *src)
 {
+    check(!snapshot_locked, "failed child map releases reference after node unlock");
     release_calls++;
     release_kind = src ? src->kind : -1;
 }
