@@ -8,10 +8,11 @@ ppc64le（`MSR_FP`）都启用；loongarch32/armv7m 无 FPU，不受影响。
 
 ## 现在的状态（2026-10，本轮实测）
 
-- arm32 现在能编过也能启动：`a20os-buildenv` 容器里 `make ARCH=arm32 ABI=linux BRINGUP=0 dev-build`，
-  QEMU `-machine virt -cpu cortex-a15 -m 1G` 启动到 shell、执行命令、`poweroff` 后 `audit errors=0`。
+- arm32 现在能编过也能启动：容器里 `make ARCH=arm32 ABI=linux BRINGUP=1 dev-build`，
+  QEMU `-machine virt -cpu cortex-a15 -m 1G` 跑到 `part ok` 并自然关机。`ABI=both` 的用户态镜像
+  能起 shell，但 fork 出的命令返回后 mksh 崩溃，见 [ABI-11](../abi-ipc.md)。
   启动路上修掉的两项（`PHYS_MEMORY_END` 与 1 GiB 启动参数、`a20_elf_load_transaction_ops_t` 的
-  ILP32 padding）见 [mm.md](../mm.md) MM-05 与 CORE-07 的提交说明。
+  ILP32 padding）记录在 CORE-07 与 MM 的 32 位 bring-up 工作里。
 - EL0 的 VFP 本身可用：`user/cmds/core/fp_touch.c` 在 arm32 上 `FP_TOUCH: PASS`（CPACR cp10/cp11 与
   FPEXC.EN 在 `kernel/arch/arm32/boot/entry.S` 已开）。kernel 与 userland 都是 hard-float。
 - **trap 帧没有 FP 状态**：`trap_context_t` 目前 84 字节（GPR 部分），没有 `d0-d15`/FPSCR，所以两个任务

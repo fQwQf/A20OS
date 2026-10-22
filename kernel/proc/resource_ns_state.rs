@@ -18,7 +18,9 @@ extern crate std;
 
 use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::AtomicU64;
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
@@ -41,7 +43,13 @@ const CLONE_NEWNET: u64 = 0x4000_0000;
 /// their own fixed inodes below this.
 const FIRST_INO: u64 = 4_026_600_000;
 
+/* riscv32/arm32 have no 64-bit atomics.  Those profiles count the offset from
+ * FIRST_INO in 32 bits, which wraps only after four billion namespace
+ * creations; the sequence is an opaque identity, not a capacity. */
+#[cfg(target_has_atomic = "64")]
 static NEXT_INO: AtomicU64 = AtomicU64::new(FIRST_INO);
+#[cfg(not(target_has_atomic = "64"))]
+static NEXT_INO: AtomicU32 = AtomicU32::new(0);
 
 fn kind_flag(kind: i32) -> u64 {
     match kind {
@@ -58,7 +66,14 @@ fn valid_kind(kind: i32) -> bool {
 }
 
 fn next_ino() -> u64 {
-    NEXT_INO.fetch_add(1, Ordering::Relaxed)
+    #[cfg(target_has_atomic = "64")]
+    {
+        NEXT_INO.fetch_add(1, Ordering::Relaxed)
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        FIRST_INO + NEXT_INO.fetch_add(1, Ordering::Relaxed) as u64
+    }
 }
 
 unsafe extern "C" {

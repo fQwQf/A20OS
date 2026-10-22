@@ -2626,7 +2626,9 @@ mod tests {
         let rc = unsafe {
             a20_uxfs_op_readpage(&t, VN, 0, data.as_mut_ptr() as *mut c_void, 8)
         };
-        assert_eq!(rc, 0);
+        /* The byte count is the return value: the page-cache fill transaction
+         * uses it to zero the tail it did not receive. */
+        assert_eq!(rc, 2);
         assert_eq!(data[0], 7);
         assert_eq!(data[1], 7);
         for i in 2..8 {
@@ -3097,6 +3099,11 @@ mod tests {
     extern "C" fn ns_peer_closed(_ep: *mut c_void) -> c_int {
         NW.with(|w| w.borrow().peer_closed)
     }
+    /* The serving task stays alive throughout these unit tests; the detach
+     * decision they exercise is the peer-close one. */
+    extern "C" fn ns_server_alive(_sb: *mut c_void) -> c_int {
+        1
+    }
     extern "C" fn ns_now() -> u64 {
         1000
     }
@@ -3142,6 +3149,7 @@ mod tests {
             slot_init_req_lock: Some(ns_init_req_lock),
             detach_server: Some(ns_detach),
             peer_closed: Some(ns_peer_closed),
+            server_alive: Some(ns_server_alive),
             now_ns: Some(ns_now),
             negotiate_lifetime_until: Some(ns_negotiate),
             shutdown_rpc: Some(ns_shutdown_rpc),

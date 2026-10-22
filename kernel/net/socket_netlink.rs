@@ -580,8 +580,25 @@ unsafe fn rv_peer(v: &NetlinkView) -> *const u8 {
 pub(crate) static DIAG_SKIP: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
+/* riscv32/arm32 have no 64-bit atomics; the sequence only has to differ
+ * between datagrams, so those profiles count it in 32 bits. */
+#[cfg(target_has_atomic = "64")]
 static UEVENT_SEQ: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(target_has_atomic = "64"))]
+static UEVENT_SEQ: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+fn next_uevent_seq() -> u64 {
+    #[cfg(target_has_atomic = "64")]
+    {
+        UEVENT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        UEVENT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as u64 + 1
+    }
+}
 
 /// A bounded byte buffer for the uevent datagram and the rtnetlink replies.
 struct Buf {
@@ -643,7 +660,7 @@ const UEVENT_BUF: usize = UEVENT_MSG_MAX;
 /// the exact separators the C snprintf produced.
 unsafe fn uevent_broadcast(action: &[u8], subsystem: &[u8], name: &[u8],
                            devt: u64) -> i32 {
-    let seq = UEVENT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let seq = next_uevent_seq();
     let major = ((devt >> 8) & 0xff) as u32;
     let minor = (devt & 0xff) as u32;
     let mut m = Buf { b: [0u8; UEVENT_BUF], n: 0 };

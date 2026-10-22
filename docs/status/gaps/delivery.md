@@ -31,7 +31,8 @@
   Rust（`rustc`/`cargo`/`rust-src`/宿主 std，以及各架构的 no_std target）。
   本地 8 个 target 全部构建并通过 `tools/ci/image-selftest.sh`；用新的 `arm32`/`riscv`
   镜像、不挂宿主工具链，已经复现出 `check-arm32-bringup` 与
-  `check-riscv32-bringup` 的真实错误清单（见 [mm.md](mm.md) MM-05）。
+  `check-riscv32-bringup` 与 `check-arm32-bringup`（当时它们的真实错误清单在 MM/net/fs
+  的 32 位条目里，这些条目在本轮已关闭）。
   **但 ghcr 上的 `:latest` 仍是旧内容**——推送要靠 `buildenv.yml`，本轮没有执行。
 - 缺口：在重新发布之前，CI 里任何容器内内核构建仍会因缺 `rustc` 直接失败（Error 127），
   而 arm32 仍会停在 `bits/libc-header-start.h`；也就是说“镜像齐全”目前只是仓库内的
@@ -39,4 +40,4 @@
 - 关闭条件：跑一次 `buildenv.yml`（或用 `tools/ci/build-image.sh` 构建后推送）刷新
   ghcr 上的 8 个 tag，然后在一个容器 job 里确认 `check-<arch>-bringup` 不再报工具链缺失
   （源码本身的失败另计）。
-- 来源：MM-05 的 arm32/riscv32 复现（[mm.md](mm.md)）。
+- 来源：32 位 bring-up 的 arm32/riscv32 复现。

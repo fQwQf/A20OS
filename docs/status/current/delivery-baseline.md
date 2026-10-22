@@ -65,8 +65,8 @@
 | aarch64 | 通过 | 未验证 | 构建通过；桌面实例的运行证据属 DESKTOP |
 | x86_64 | 通过 | 未验证 | 构建通过；桌面实例的运行证据属 DESKTOP |
 | loongarch64 | 通过 | 未验证 | 构建通过；本机无实板 |
-| riscv32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/cow.c`、`fault.c`、`madvise.c` 在 32 位下指针宽度不匹配，`check-riscv32-bringup` 编译失败；见 [MM-05](../gaps/mm.md) |
-| arm32 | 失败（内核）/ 通过（用户态） | N/A | 容器内 `check-arm32-bringup` 报同一类 32 位 MM 问题与 `elf_rust ABI drift` 静态断言；见 [MM-05](../gaps/mm.md) |
+| riscv32 | 通过 | 通过 | `check-riscv32-bringup` 通过；`smoke-riscv32` 启动到 `part ok` 并自然关机 |
+| arm32 | 通过（固定 CI 容器） | 通过（内核镜像） | 容器内 `check-arm32-bringup` 通过；`smoke-arm32` 启动到 `part ok` 并自关机。`ABI=both` 用户态镜像能起 shell 并跑内建命令，但 fork 出的命令返回后 mksh 崩溃，见 [ABI-11](../gaps/abi-ipc.md) |
 | armv7m (STM32F103) | 失败 | N/A | `make stm32f103-bringup` 在 `tools/rust-kernel.mk` 的解析期断言处停下；`check-stm32f103` 另报硬编码 MMIO 地址。见 [DRIVER-09/10](../gaps/drivers.md) |
 
 构建矩阵此前会在**任何**架构上直接失败：`mm/mremap.c` 在 profile 里而 `RUST_DONTUNMAP_TARGET`
@@ -112,14 +112,15 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 - `tools/tests/test_stamps_clean.py` 构造的 Namespace 缺 `syscall_smoke_task_construction_test`，
   `tools/stamps.py` 已经要读它，5 个用例直接 `AttributeError`。
 
-既有失败（在本轮基线提交上就存在；当前 8 个 error + 1 个 skip）：
+当前状态（`LC_ALL=C`，477 个用例）：**1 个 error + 1 个 skip**。
 
 | 用例 | 根因 | 归属 |
 | --- | --- | --- |
-| `test_vma_region_host`、`test_rust_merge_policy_against_actual_c_function` | 在源码里找不到自己绑定的标记，`ValueError: substring not found` | MM |
-| `test_tcp_send_backpressure` | 同上 | NET |
-| `test_usercopy_strings_host`、`test_usercopy_nommu_host`、`test_tlb_transaction_races`（2 个）、`test_process_vm_host` | 把内核 C 抽出来用宿主 gcc 编译，但抽取窗口不含新增的 `extern` 声明/Rust 桥接原型，或 C/Rust 接口签名已变 | MM |
-| `test_production_module_partial_results_and_references` | 同上（抽取/链接） | PROC |
+| `test_tcp_send_backpressure.test_accepted_bytes_and_retry` | 发送循环已迁到 `kernel/net/socket_inet_send_tcp.rs`，用例仍从 `socket_inet.c` 里找 `size_t sent = 0;` | NET，见 [NET-11](../gaps/net.md) |
+
+本表此前记录的 8 个 error（MM 的 usercopy/tlb/process_vm 抽取、NET 的背压、PROC 的 partial-results）
+在 main 的 MM/FS 包并入后都已通过。非 C locale 下另有 6 个 `test_removed_arch_targets_*` 失败，
+原因是宿主 `make` 输出中文报错、用例断言英文 `No rule to make target`，与源码状态无关。
 
 CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重排锚点随 `sched_runq_steal_locked`
 改写而失效，导致双重解锁），并新增 `check-wait4-controller` 把只被 `tools/tests/` 通配捡起、
@@ -140,7 +141,7 @@ CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重�
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`、`check-task-lifetime-boundary` 与 `host-tests` 的 proc 成员后，仍为红的是：`check-a20-tests`（§5，剩余 8 个用例属 MM/NET/PROC；`host-tests` 已转绿）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，见 [ABI-09](../gaps/abi-ipc.md)）、`check-task-state-boundary`（见 [ABI-10](../gaps/abi-ipc.md)）、`check-doc-drift`（`v1.0-requirements.json` 需重新生成；同目标的 `tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`（断言 6/6 通过；目标的 arm32 依赖需固定容器）、`check-task-lifetime-boundary`、`host-tests`、`check-host-scripts`（76 个脚本全过）后，仍为红的是：`check-a20-tests`（§5，1 个 NET 用例）、`check-honesty-policy`（lwIP accept 阶段接线断言，NET-10）、`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，ABI-09）、`check-task-state-boundary`（ABI-10）、`check-doc-drift`（8 条 gates 断言通过；`tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |
