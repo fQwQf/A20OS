@@ -12,12 +12,30 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr;
 
-// The maximum supported kernel timer profile is 8192 entries. Smaller
-// profiles are enforced by the C capacity callback without changing this
-// fixed backing array's ABI or requiring cfg plumbing through every build.
-const STORAGE_CAPACITY: usize = 8192;
+// The build passes the effective C capacity, including the small MCU profile.
+// Standalone host builds keep the normal default. This is entirely evaluated
+// at compile time: smaller profiles shrink the actual BSS array, not just the
+// registration limit reported by the C callback.
+const fn storage_capacity() -> usize {
+    let Some(value) = option_env!("A20_WAIT_TIMER_STORAGE_CAPACITY") else {
+        return 8192;
+    };
+    let bytes = value.as_bytes();
+    let mut capacity = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(bytes[i] >= b'0' && bytes[i] <= b'9', "invalid wait timer capacity");
+        capacity = capacity * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    assert!(capacity > 0 && capacity <= 8192, "wait timer capacity must be 1..8192");
+    capacity
+}
+const STORAGE_CAPACITY: usize = storage_capacity();
 
-const MAX_EXPIRE_BATCH: usize = 128;
+// A batch can never contain more entries than this heap. In particular the
+// constrained four-entry profile must not reserve 128 expiry records on stack.
+const MAX_EXPIRE_BATCH: usize = if STORAGE_CAPACITY < 128 { STORAGE_CAPACITY } else { 128 };
 const SCHED_NO_DEADLINE: u64 = u64::MAX;
 const PREPARE_INVALID: i32 = -1;
 const PREPARE_CAPACITY: i32 = -2;

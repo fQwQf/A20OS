@@ -90,3 +90,21 @@
 - 用户的小内存建议已落到下一项候选：`wait_timer.rs` 编译期读取容量env（合法1..8192，默认8192），Make从最终CFLAGS派生实际容量并写入Rust flags stamp，避免MCU运行limit小却保留8192数组。未改算法。新host tests在4/64/8192容量运行相同ownership/取消/过期/竞态回归，并以nm验证真实BSS缩小；非法0/8193/nondecimal拒绝，2项测试通过。
 - **当前构建** exec session **68128**，输出 `build/performance/timer-capacity-build.log`：同一x86_64 BUILD_DIR依次cap4/64/8192构建Rust对象，记录nm、stamp和mtime到 `timer-capacity-sizes.json`，检查增量重建。旧8192对象保存 `build/performance/wait-timer-before.o`。此构建尚未最终审查，容量候选未提交。
 - 下一步核对容量对象实际BSS、与旧对象默认导出代码一致性；默认x86_64内核构建/guest计时回归；配置选择只用一架构多容量，不展开架构矩阵。之后原内核/yield-keep 做SysV定向对照并处理dirty索引测量。
+
+## 2026-10-22 20:32 北京时间
+
+- yield优化已提交 `87081c92`（含主机回归修复、72样本、原七项的84样本当时段对照报告）。
+- Waitheap构建容量4/64/8192对象的HEAP实测128/1568/196640B，stamp包含容量，4→64→8192均重编，重复8192无重编。旧与新默认8192五个导出函数.ltext字节完全一致，记录 `timer-default-code-check.json`。
+- 默认新x86 kernel `timer-default.elf` guest三项sched/futex/GS全部通过。
+- cap64完整kernel `timer-small64.elf` guest sched/GS通过；futex失败 `wake-op-batch-incomplete errno=11`，源测试固定70个带超时waiter，超出64真实限制。**不能把此case标绿**；是配置容量语义，源码与host fixture证明limit在pin之前检查；不为测试扩大64容量。原始失败证据保留 `perf-timer-small64-regression`。
+- 新加小配置过期临时数组也按 `min(storage_capacity,128)` 缩小：原4项profile仍分配128个Expired（x86对象expire栈扣0x828），没有必要。默认8192仍128不变。
+- **当前正在执行**：host容量v2回归→同x86 cap128 full kernel构建→三项guest回归，输出 `timer-small128-build.log` / `timer-small128-guest.log`，证据 `perf-timer-small128-regression`。capacity source尚未提交。等结束后重跑4/64/128/8192对象记录BSS/栈与默认代码一致性，整理报告后提交。
+- 下一项仍是原内核/yield版的SysV定向对照，以及用户建议的dirty有序索引规模测试。截止北京时间午夜不变。
+
+## 2026-10-22 20:37 北京时间
+
+- 容量候选最终对象v2 cap1/4/64/128/8192：HEAP56/128/1568/3104/196640B，expiry局部栈24/104/1064/2088/2088B。实测JSON和完整证据（含64容量不足失败）已归档timer-capacity-2026-10-22*、报告第6节。
+- host最终fixture在1/4/64/8192检查单项和满4项批次、引用/取消/过期竞态等，通过；非法容量拒绝编译。默认五个函数代码字节与旧对象一致。
+- cap128最终kernel三项SCHED/FUTEX/GS通过（70 waiter能容纳）；cap64最终版（含栈批次缩减）SCHED/GS通过，task_lifetime实测capacity64、full_failures0、heap_violations0、state_violations0。仅完整futex70waiter负载因容量64明确失败，未改配置掩盖。
+- 还需最终默认内核重建+hash核对（预期仍与yield-keep f82e...一致）；然后提交容量修复。
+- 当前所有对象构建和guest已结束。准备下一段stock/yield-keep SysV+fork短负载4轮AB/BA/AB/BA交替，避免因全套两批顺序结果忽略7% SysV疑问。之后按数据结构筛查计划测dirty索引。用户最新思路与测试架构偏好在本日志顶部已固化。

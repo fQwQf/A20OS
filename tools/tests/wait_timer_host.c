@@ -139,6 +139,19 @@ int main(void)
     check(a.refs == 1 && a.index == -1 && a.wake_time == 0,
           "cancel clears metadata and releases timer reference");
 
+#ifdef WAIT_TIMER_SINGLE_ONLY
+    a.deadline = 40;
+    a.seq = 6;
+    fire_result = 1;
+    check(a20_wait_timer_register_rust(&a, 40, 6) == 0,
+          "single-slot expiration registration");
+    a20_wait_timer_expire_rust(40);
+    check(fired_count == 1 && a.refs == 1 && a.index == -1,
+          "single-slot batch expires and releases its reference");
+    puts("WAIT_TIMER_HOST: PASS single-slot capacity cancel expiration");
+    return 0;
+#endif
+
     heap_capacity = 4;
     a20_wait_timer_init_rust();
     a.deadline = 30;
@@ -178,6 +191,25 @@ int main(void)
     check(stats.entries == 0 && stats.stale_expirations == 1 &&
           a.refs == 1 && a.index == -1,
           "stale expiry is counted and still releases its batch reference");
+    /* A compact four-entry build fills an entire expiration batch.  Every
+     * entry must be delivered and released once, including the last slot. */
+    fake_task_t batch[4];
+    fired_count = 0;
+    fire_result = 1;
+    for (int i = 0; i < 4; i++) {
+        batch[i] = (fake_task_t){.refs = 1, .index = -1,
+                                .deadline = 50, .seq = (uint64_t)(100 + i)};
+        check(a20_wait_timer_register_rust(&batch[i], 50, batch[i].seq) == 0,
+              "full expiration batch registration");
+    }
+    a20_wait_timer_expire_rust(50);
+    check(fired_count == 4, "every full-batch entry expires");
+    for (int i = 0; i < 4; i++)
+        check(batch[i].refs == 1 && batch[i].index == -1,
+              "full-batch reference released exactly once");
+    a20_wait_timer_stats_rust(&stats);
+    check(stats.entries == 0 && stats.violations == 0,
+          "full expiration batch leaves a valid empty heap");
     puts("WAIT_TIMER_HOST: PASS capacity rollback duplicate stale cancel ordering batch-reference audit");
     return 0;
 }

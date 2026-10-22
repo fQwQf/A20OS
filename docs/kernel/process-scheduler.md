@@ -257,6 +257,10 @@ Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，
 - alarm/itimer 使用独立字段，不占用 Park timeout 项。
 
 `CONFIG_WAIT_TIMER_HEAP_MAX` 是实际容量边界，不允许为了测试静默扩容。
+通过 `make WAIT_TIMER_HEAP_MAX=N` 选择 1–8192 项；默认 hosted 配置为
+8192，MCU 为 64，受限 STM32 QEMU 配置为 4。构建会把 C 侧最终有效容量
+传给 Rust，使等待 heap 的实际静态数组也缩小，容量进入 Rust 增量构建指纹。
+算法仍为同一个最小堆，无额外运行时分派。MCU 的 alarm heap 继续使用已有的小容量 C 实现。
 
 ## 8. 信号、STOPPED 与远程退出
 
