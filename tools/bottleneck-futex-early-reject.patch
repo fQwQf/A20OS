@@ -1,0 +1,15 @@
+diff --git a/kernel/ipc/futex_wait.rs b/kernel/ipc/futex_wait.rs
+index 5a6ad18a..079e4368 100644
+--- a/kernel/ipc/futex_wait.rs
++++ b/kernel/ipc/futex_wait.rs
+@@ -307,6 +307,10 @@ pub unsafe extern "C" fn a20_futex_wait_ticks_rust(
+     if preflight < 0 {
+         return preflight;
+     }
++    // Diagnostic counterfactual: reject a mismatching value before park setup.
++    if probe != expected {
++        return -EAGAIN;
++    }
+ 
+     let now = unsafe { timer_get_ticks() };
+     let until = if ticks == 0 {

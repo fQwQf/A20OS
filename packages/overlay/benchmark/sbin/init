@@ -1,0 +1,12 @@
+#!/bin/sh
+export HOME=/root SHELL=/bin/sh TERM=vt100
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p /run /tmp
+echo A20_BENCH_READY
+# The host runner injects this script into a private copy of the image.
+# Boot execution also works when the serial console cannot receive input.
+if [ -f /etc/a20-benchmark.sh ]; then
+    /bin/sh /etc/a20-benchmark.sh
+    poweroff -f
+fi
+exec /bin/sh

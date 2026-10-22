@@ -634,6 +634,10 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 
 ## apk world 镜像实例（用包管理组装用户态）
 
+与宿主 Linux 做性能对比可用 `benchmark-x86_64`：其 `benchmark` world 通过 apk 安装
+sysbench、stress-ng 和 OpenSSL。相同二进制的 KVM / Linux 对照运行方法与实际结果见
+[2026-10-22 benchmark 基线](../status/measurements/apk-linux-2026-10-22.md)。
+
 `[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见 [packaging/overview.md](../packaging/overview.md)）：`build` 等价于 `make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于 `run-world` / `run-world-gui`，world 镜像作为第二块盘挂载，含 `/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
 
 例如用 apk 安装完整 XFCE 桌面的实例（`instances/xfce-riscv64.toml`）：
