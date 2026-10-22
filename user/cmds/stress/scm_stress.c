@@ -599,6 +599,26 @@ static int empty_rights_test(int fd) {
 }
 
 
+/* dbus resolves its own credentials through the pidfd it took for itself, by
+ * reading "Pid:" out of /proc/self/fdinfo/<fd>.  Without that line it logs
+ * pid=18446744073709551615 even though SO_PEERCRED and SCM_CREDENTIALS are
+ * correct, so assert the whole chain here. */
+static int pidfd_fdinfo_names(int fd, pid_t want)
+{
+    char path[64], expect[32], buf[512];
+    snprintf(path, sizeof(path), "/proc/self/fdinfo/%d", fd);
+    int f = open(path, O_RDONLY);
+    if (f < 0)
+        return -1;
+    ssize_t n = read(f, buf, sizeof(buf) - 1);
+    close(f);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    snprintf(expect, sizeof(expect), "Pid:\t%ld\n", (long)want);
+    return strstr(buf, expect) ? 0 : -1;
+}
+
 /* Connections and queued credentials belong to a process even when its
  * worker thread creates/sends through the socket and then exits. */
 struct threaded_credentials {
@@ -685,9 +705,17 @@ static int threaded_credentials_test(void) {
                 if (pidfd <= 2 || !(fcntl(pidfd, F_GETFD) & FD_CLOEXEC) ||
                     poll(&pollfd, 1, 0) != 0)
                     return fail("worker peer pidfd must remain alive");
+                if (pidfd_fdinfo_names(pidfd, getpid()))
+                    return fail("peer pidfd fdinfo must name process");
                 close(pidfd);
             } else if (errno != ENOPROTOOPT) {
                 return fail("worker peer pidfd");
+            }
+            int self_pidfd = (int)syscall(SYS_pidfd_open, (int)getpid(), 0);
+            if (self_pidfd >= 0) {
+                if (pidfd_fdinfo_names(self_pidfd, getpid()))
+                    return fail("pidfd_open fdinfo must name process");
+                close(self_pidfd);
             }
             close(test.sv[0]);
             close(test.sv[1]);
