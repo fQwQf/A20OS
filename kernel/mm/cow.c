@@ -393,16 +393,21 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
     return a20_fork_clone_page_rust(child, parent, va, shared);
 }
 
+static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
+                                pte_t *table, int level, vaddr_t base,
+                                vaddr_t start, vaddr_t end, int shared,
+                                int checked);
+
 int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
                         vaddr_t start, vaddr_t end, int shared) {
     start = ROUND_DOWN(start, PAGE_SIZE);
     end = ROUND_UP(end, PAGE_SIZE);
-    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-        int r = mm_fork_clone_page(child, parent, va, shared);
-        if (r < 0)
-            return r;
-    }
-    return 0;
+    /* brk/stack may contain enormous untouched holes, and can overlap the
+     * VMA clone above. Visit only existing leaves, but keep the per-address
+     * policy/base/destination checks rather than cloning them a second time.
+     * The caller holds parent->lock, as for the existing VMA walker. */
+    return mm_fork_clone_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
+                              0, start, end, shared, 1);
 }
 
 int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
@@ -413,9 +418,10 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     return a20_cow_clone_leaf_rust(child, parent, va, level, shared);
 }
 
-int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
+static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
                                 pte_t *table, int level, vaddr_t base,
-                                vaddr_t start, vaddr_t end, int shared) {
+                                vaddr_t start, vaddr_t end, int shared,
+                                int checked) {
     if (!table || start >= end)
         return 0;
 
@@ -432,8 +438,11 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
         pte_t *pte = &table[i];
 #ifdef CONFIG_SWAP
         if (level == 0 && pte_is_swap(*pte)) {
-            int r = mm_clone_swap_page(child, entry_base, parent, entry_base);
-            if (r < 0 && r != -EEXIST && r != -EAGAIN) return r;
+            int r = checked
+                        ? mm_fork_clone_page(child, parent, entry_base, shared)
+                        : mm_clone_swap_page(child, entry_base, parent, entry_base);
+            if (r < 0 && (checked || (r != -EEXIST && r != -EAGAIN)))
+                return r;
             continue;
         }
 #endif
@@ -441,21 +450,35 @@ int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
             continue;
 
         if (arch_pte_is_leaf(*pte)) {
-            int r = mm_fork_clone_leaf(child, parent, pte, entry_base, level, shared);
+            /* The old address loop only cloned a huge leaf at its base;
+             * starting in its middle must not acquire an extra reference. */
+            if (checked && entry_base < start)
+                continue;
+            int r = checked
+                        ? mm_fork_clone_page(child, parent, entry_base, shared)
+                        : mm_fork_clone_leaf(child, parent, pte, entry_base, level,
+                                             shared);
             if (r < 0)
                 return r;
             continue;
         }
 
         if (level > 0) {
-            int r = mm_fork_clone_present_level(child, parent, arch_pte_to_ptr(*pte),
-                                                level - 1, entry_base,
-                                                start, end, shared);
+            int r = mm_fork_clone_level(child, parent, arch_pte_to_ptr(*pte),
+                                       level - 1, entry_base, start, end, shared,
+                                       checked);
             if (r < 0)
                 return r;
         }
     }
     return 0;
+}
+
+int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
+                                pte_t *table, int level, vaddr_t base,
+                                vaddr_t start, vaddr_t end, int shared) {
+    return mm_fork_clone_level(child, parent, table, level, base, start, end,
+                              shared, 0);
 }
 
 int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
