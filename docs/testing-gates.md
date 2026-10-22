@@ -836,7 +836,22 @@ domain 分配唯一 TA.PSCID。单设备门禁 `smoke-iommu-udriver-isolation` �
 传统位的驱动会"表已武装但一个包中断也收不到"，而协议栈的 poll 仍能让 ping 通，
 所以门禁必须同时看 IVAR、按向量计数和按原因计数。
 
+### i440fx PIRQ 与 legacy INTx
+
+`make smoke-pirq-i440fx` 用 `-machine pc` 启动带 `CONFIG_PCI_PIRQ_TEST` 的
+bringup 内核。内核在 `trap_init` 之后保存 PIIX3（00:01.0）0x60..0x63，逐条写入
+PIRQA..D、读回校验，再把固件原值写回；断言 `PCI_PIRQ_TEST: PASS`。这条门禁只证明
+寄存器可编程，不证明任何设备的中断真的送达。
+
+`make smoke-net-e1000-i440fx-intx` 在同一个机器上挂 e1000 + hostfwd。e1000 没有
+MSI/MSI-X 能力，走 INTx：内核读 PIIX3 的 PIRQ 路由（`(pin0 + slot - 1) & 3`，
+与 q35 的公式差一位），按 ISA level/high 编程 IOAPIC 表项，然后断言
+`[PCI] INTx ... (i440fx PIRQ)`、hostfwd 回环 PASS、`e1000_irq_calls/_rx/_tx > 0`。
+这条门禁第一次跑就证明了两件事：PIRQ 索引错一位会把中断路由到相邻 link 而完全
+静默，以及 IOAPIC 表项对 PIIX3 输出必须用 ISA 触发/极性而不是 PCI 的 level/low。
+
 ### 注册表增长失败的多架构覆盖
+
 
 `smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}` 与
 `smoke-driver-lifecycle` 用同一份 `driver_registry_test.c`：注入 driver/device/bus
