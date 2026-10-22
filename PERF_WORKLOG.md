@@ -200,3 +200,18 @@
 - 相同PTE写/免TLB-note实验180样本全0且正确性过，但性能方向混合（mmap16中位+0.43%、64中位-2.18%却前三对微退化、brk空堆+8.62%）；已保存tools/bottleneck-cow-identical-pte.patch及cow-same-pte-2026-10-22*证据，生产cow.c/fixture恢复HEAD cd49ffff。默认build ELF尚是被拒实验，后续make需重建；显式frozen cow-token.elf adbc才是当前已保留实现。
 - sysbench fileio初测已完成perf-fileio-initial，2case×Linux/A20均成功：1线程、64MiB、4KiB随机写、validate、fsync频率100/16384、5秒，prepare后busybox sync指定文件、测后16384次seqrd覆盖完整64MiB校验并清理；f_type ef53。A20约19.49/56.24MiB/s，Linux162.39/201.96，guest计数审计0。此时尚未隔离RB算法增益。
 - 后续计划只临时替换page_cache_state.rs中dirty_insert/remove为a9b7d468旧链表函数，保留当前所有新C/RS descriptor字段/ABI和其它修复，构建linear-control；还原源码后重建index-current，核对还原ELF一致。这样隔离算法，避免拿旧内核隐式profiling/旧MM等混杂影响fileio比较。保留源备份/patch/sha，控制版不提交或发布。随后三对同参数fileio并全数据校验，raw out按perf-fileio-paired-*保存。当前所有本任务perf进程已结束，fileio初探session73076完成。
+
+## 2026-10-22 22:28 北京时间：fileio算法隔离对照正在运行
+
+- 回退后的默认内核已重新构建为已保留cow-token adbc...；控制只替换page_cache_state.rs的dirty_insert/remove为a9b7d468旧函数，所有descriptor/vnode字段和其它修复保留，因此不是memory版。脚本build/performance/build-fileio-control.py已在finally还原源码，前后ELF逐字节相同；manifest和两份冻结rs位于build/performance/fileio-control。
+- linear ELF46bceb43e0e9a8acefe0ed0587eac9b0b1e826eaca1f29486bd8d5f55e07816d，index ELFadbc...。默认源无生产未提交修改，linear控制版不提交/发布。
+- **当前exec session21032**，日志fileio-paired-campaign.log：先linear控制MM/swap回归，再两种freq100/16384的APK sysbench fileio AB/BA/AB三对24样本；out perf-fileio-linear-regression和perf-fileio-paired-*。16个APK/库+busybox hash已核对baseline，并要求前后不变；每次64MiB、4KiB buffered rndwr、1t、5s、seed271828，prepare后sync指定文件，run后完整64MiB seqrd+validate校验和目录清理。guest计数要求测后0。
+- 当前期间不要编译或并行性能测量。等完成解析FILEIO_RUN_BEGIN/END之间的吞吐（不要误用后面verify阶段的seqrd速率），核对每段CRC完整校验与cleanup。准备归档控制源码/patch/哈希、24样本与报告第13节，并提交已预验证wrapper工具。
+- 中间有机会用已有诊断接口独立测量freq100低吞吐的flush/writeback/设备轮询计数，诊断吞吐不与正式吞吐混算。截止UTC16:00前继续推进，届时不再开始新实验。
+
+## 2026-10-22 22:43 北京时间：fileio完成并归档
+
+- fileio三对24样本全部成功+CRC完整校验/清理/guest状态0，16个APK库及busybox前后hash一致。linear控制源码只换旧dirtyinsert/remove、ABI/layout与index一致，测试后默认ELF仍adbc，与最初还原前相同。
+- freq100 linear20.34→index19.93MiB/s(-2.02%)；freq16384 44.71→55.51(+24.16%)但逐对-19.24/+27.60/+33.28%，不当成一致应用改善。Linux freq100控制也-28%，硬盘/宿主其它独立TCG任务影响明显。完整fileio-2026-10-22*和报告第13节已写。
+- 独立diag完成perf-fileio-diagnostic：两个窗口分别260/8次fsync，经过时间4.721/4.777秒（包含等待、非CPU占比），约25.8k块写回IO，42k/68k页，usedchecks/completion约6，bouncebytes0。窗口包含prepare/verify，不能全部归给RUN；暂未证实cache扫描而非同步小IO主导。源码blockcachepool实际2000页，位图等变化需先有阶段证据，暂不贸然改。
+- 当前本任务所有构建/性能进程结束。下一项可低风险缓存COW class：snapshot已有锁定table/level及VMA，而mm_fork_page_class还rootwalk且fallback再次VMA查找。需真实class/backing/huge测试后单项同参对照。UTC16:00截止，之后不开始新实验。
