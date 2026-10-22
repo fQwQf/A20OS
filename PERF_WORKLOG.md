@@ -252,3 +252,19 @@
 
 - 用户明确要求：到午夜完成后合并性能worktree到main，然后删除worktree和branch。这覆盖之前“不得自行合并”的限制；仍不推送/部署。须先保存证据并正确处理main的现有用户改动。
 - 当前main位于原checkout且有大量未提交修改/未跟踪基线文件，若干与性能分支重叠（Makefile/pagecache/syscall等）。不能覆盖或顺手提交这些无关工作。截止前先完成可审阅成果，截止后采用可恢复方式整合，保留原改动。
+
+## 2026-10-22 23:32 北京时间：最后一个COW候选
+
+- main已提交内容干净合入性能分支6dfdd39f，x86集成构建完成df4bce2a...。Linux/A20同KVM、同镜像/设备三轮54样本全部有效，A20 27测项状态0、输入不变，linux-kvm-2026-10-22*归档。初探Linux串口CRCRLF导致ready解析失败，保留日志，修正只涉及runner解析；正式三轮无失败。
+- 每127次调用采样一次的COW诊断60样本全部成功、三次完整MM通过；snapshot均值约324ns（dense64M），其它probe/downgrade/map约74/74/110ns，含计时开销且非CPU占比。cow-sampled-2026-10-22*已归档。
+- 最后小C候选：pt_lookup_leaf返回实际level，由slot - arch_pt_vpn(va,source_level)恢复确切所属table，省第二次root walk，保留node锁、锁内重读和pin。不是之前被拒的省probe试验。真实C测试含普通/huge非零索引和原node身份，ASan/UBSan、Rust83、checked walker双20万通过。
+- 当前exec session44768：先四项guest，再before/candidate AB/BA/AB三对108样本，输出perf-cow-node-regression及perf-cow-node-paired-*，无并行构建。冻结before ELF a0cb7d...，候选cow-node.elf。结束后按逐对方向决定保留，不扩展下一项；截止后不再新实验。
+- 午夜合并准备脚本build/performance/finalize-main.py已写，显式UTC16:00时间闸：备份主工作区tracked/untracked与149MiB ignored运行物，stash保存原工作，fast-forward main，tracked-only stash恢复避免旧未跟踪baseline覆盖新工具，恢复其它untracked，并用临时index三方合并tree精确校验恢复内容。主工作区未改动；仅到时执行，之后用managed archive工具移除worktree，再删已合并branch。
+
+## 2026-10-22 23:41 北京时间：所有实验结束，准备午夜合并
+
+- 最后slot推导node候选不保留：四项guest中process-vm/exec-COW一次失败，性能三对根本未启动。before五次独立boot均过，但普通测试缺少确定的exec与pin先后约束，首次输出也缺n/errno，未能排除窗口未命中/真实回归，不能为了截止强行保留。补丁和失败raw已归档cow-node-rejected-2026-10-22-data.json.gz。
+- 两个生产文件已按HEAD恢复，重建ELF与cow-node-before.elf逐字节同为a0cb7d...；不存在残留诊断或未验证生产改动。
+- 最终集成九项guest回归全部0，FSYNC主动启用计数状态1为预期，manifest及全部log归档final-integration-2026-10-22-data.json.gz。session81770结束。Linux同KVM54样本、细粒度COW60诊断样本、报告18–20节均写完。
+- 午夜合并脚本用三个临时Git仓库验证，逐字节保留tracked/untracked旧内容及staged/unstaged边界，PASS。主checkout main仍41f06061且原用户改动未触碰；预检三方合并无冲突。附着worktree identityKey=<worktree>。
+- 接下来仅提交证据、preflight与检查时间/进程，不再开启新实验。16:00 UTC前不动main；届时执行finalize-main.py，验证main原修改恢复到预期三方合并tree、保存runtime到主checkout/build/a20-performance-20261022，再managed archive移除worktree并git branch -d perf/a20-performance。用户追加合并授权优先于旧heartbeat“不合并”提示；仍不推送/部署。
