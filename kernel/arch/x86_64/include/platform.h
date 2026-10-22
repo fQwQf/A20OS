@@ -61,6 +61,7 @@ void x86_64_shared_qemu_poll(void);
 #endif
 
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
+void x86_64_route_isa_irq(uint32_t gsi, uint8_t vector);
 /* The I/O APIC windows, as learned from the MADT.  Count is 0 when firmware
  * published none, in which case every accessor falls back to a single
  * controller at IOAPIC_FALLBACK_BASE -- the arrangement QEMU's legacy path uses.
@@ -90,6 +91,11 @@ uint64_t  x86_64_pci_gsi_firq_count(uint32_t gsi);
  * @pin is 1..4 (A..D).  Returns PCI_PRT_GSI_NONE when firmware says nothing
  * usable. */
 uint32_t  arch_pci_prt_gsi(int bus, int dev, int pin);
+/* i440fx PIRQ links: PIIX3 config 0x60..0x63 route PIRQA..PIRQD to ISA IRQs.
+ * read returns 0..15, or -1 when the machine is not i440fx; program writes
+ * @irq and verifies the readback (the chipset latches the byte). */
+int  arch_pci_pirq_read(int pirq);
+int  arch_pci_pirq_program(int pirq, int irq);
 /* Mask/unmask the interrupt source behind a driver IRQ line id: the IOAPIC
  * entry for a routed PCI vector (0x40+gsi) or the local APIC LVT for a
  * message-signalled one.  Anything else is ignored. */

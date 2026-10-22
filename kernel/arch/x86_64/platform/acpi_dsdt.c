@@ -29,6 +29,7 @@
 #include "core/types.h"
 #include "firmware.h"
 #include "platform.h"
+#include "drivers/bus/pci_hal.h"
 #include "core/string.h"
 #include "core/klog.h"
 
@@ -505,8 +506,13 @@ static int aml_walk(const uint8_t *p, const uint8_t *end, const char *prefix,
                     aml_scope_t *own)
 {
     while (p < end) {
-        if (*p == AML_SCOPE) {
-            const uint8_t *q = p + 1;
+        /* Device is an extended opcode with the same shape as Scope
+         * (PkgLength NameString TermList), and firmware puts every PCI bridge
+         * scope inside one.  Without this the walk stops at the first Device
+         * and no _PRT anywhere in a real DSDT is ever recorded. */
+        int device_op = (p + 1 < end && p[0] == AML_EXTPREFIX && p[1] == 0x82);
+        if (device_op || *p == AML_SCOPE) {
+            const uint8_t *q = device_op ? p + 2 : p + 1;
             uint32_t len;
             if (aml_pkg_length(&q, end, &len) != 0)
                 return -1;
@@ -703,27 +709,105 @@ static uint32_t aml_prt_lookup(const aml_scope_t *s, int dev, int pin) {
 /*
  * Which scope describes @bus.
  *
- * Only the root bus is answered.  A secondary bus is named by the _ADR of the
- * bridge that leads to it, so reaching one means descending the bridge tree and
- * tracking which bus each level is on -- a walk this subset does not perform.
- * Claiming a scope whose _ADR happens to look like a bridge address would route
- * every bridge in the machine to every bus behind it, so anything but bus 0
- * returns no answer and the device keeps its polling fallback.
+ * Bus 0 is the root bridge's scope.  A secondary bus is named by a bridge
+ * device: the bridge's ACPI scope carries the _PRT for the devices on the bus
+ * behind it, and that scope is identified by the bridge's _ADR
+ * ((device << 16) | function) under the scope of the bus the bridge itself
+ * sits on.  The parent chain is read from live PCI config space (Primary /
+ * Secondary / Subordinate Bus Number at 0x18), not guessed from names, so a
+ * scope whose _ADR happens to look like a bridge cannot capture an unrelated
+ * bus.
+ *
+ * Failure is fail-closed: a bus with no resolvable bridge chain, or a bridge
+ * with no _PRT, returns NULL and the caller keeps its polling fallback.
  */
-static const aml_scope_t *dsdt_scope_for_bus(int bus) {
-    if (bus != 0)
-        return NULL;
+static uint8_t pci_cfg_byte(int bus, int dev, int func, uint32_t off)
+{
+    uint32_t v = arch_pci_config_read32(bus, dev, func, off & ~3U);
+    return (uint8_t)(v >> ((off & 3U) * 8U));
+}
+
+/* A scope is a direct child of @parent when its path extends @parent by exactly
+ * one dot-separated segment. */
+static int scope_is_direct_child(const char *parent, const char *child)
+{
+    size_t n = strlen(parent);
+    if (strncmp(parent, child, n) != 0 || child[n] != '.')
+        return 0;
+    return strchr(child + n + 1, '.') == NULL;
+}
+
+static const aml_scope_t *scope_child_with_adr(const aml_scope_t *parent,
+                                               uint32_t adr)
+{
     for (unsigned i = 0; i < g_scope_count; i++) {
-        if (g_scope[i].has_adr && g_scope[i].adr == 0 && g_scope[i].prt_obj)
-            return &g_scope[i];
-    }
-    /* A scope with a _PRT but no _ADR is still bus 0 on a firmware that leans
-     * on the scope name rather than the address. */
-    for (unsigned i = 0; i < g_scope_count; i++) {
-        if (g_scope[i].prt_obj && strcmp(g_scope[i].path, "\\PCI0") == 0)
-            return &g_scope[i];
+        const aml_scope_t *s = &g_scope[i];
+        if (s->has_adr && s->adr == adr &&
+            scope_is_direct_child(parent->path, s->path))
+            return s;
     }
     return NULL;
+}
+
+static const aml_scope_t *dsdt_scope_for_bus_depth(int bus, int depth)
+{
+    if (bus < 0 || bus > 255 || depth > 8)
+        return NULL;
+
+    if (bus == 0) {
+        for (unsigned i = 0; i < g_scope_count; i++) {
+            if (g_scope[i].has_adr && g_scope[i].adr == 0 &&
+                g_scope[i].prt_obj)
+                return &g_scope[i];
+        }
+        /* A scope with a _PRT but no _ADR is still bus 0 on a firmware that
+         * leans on the scope name rather than the address. */
+        for (unsigned i = 0; i < g_scope_count; i++) {
+            if (g_scope[i].prt_obj &&
+                strcmp(g_scope[i].path, "\\PCI0") == 0)
+                return &g_scope[i];
+        }
+        return NULL;
+    }
+
+    /* Find the bridge whose secondary bus is @bus.  Scanning every parent bus
+     * is bounded (256 * 32 * 8 config reads), happens once per device probe,
+     * and avoids keeping a second copy of the PCI topology here. */
+    for (int parent = 0; parent <= 255; parent++) {
+        for (int dev = 0; dev < 32; dev++) {
+            for (int func = 0; func < 8; func++) {
+                uint32_t id = arch_pci_config_read32(parent, dev, func, 0x00);
+                if ((id & 0xffffU) == 0xffffU)
+                    continue;
+                uint8_t header = pci_cfg_byte(parent, dev, func, 0x0e);
+                if ((header & 0x7fU) != 0x01U)
+                    continue;                  /* not a PCI bridge */
+                uint32_t buses = arch_pci_config_read32(parent, dev, func,
+                                                        0x18);
+                uint8_t secondary = (uint8_t)((buses >> 8) & 0xffU);
+                uint8_t subordinate = (uint8_t)((buses >> 16) & 0xffU);
+                if (secondary != bus &&
+                    !(bus > secondary && bus <= subordinate))
+                    continue;
+                const aml_scope_t *parent_scope =
+                    dsdt_scope_for_bus_depth(parent, depth + 1);
+                if (!parent_scope)
+                    continue;
+                const aml_scope_t *bridge =
+                    scope_child_with_adr(parent_scope,
+                                         ((uint32_t)dev << 16) |
+                                         (uint32_t)func);
+                if (bridge && bridge->prt_obj)
+                    return bridge;
+            }
+        }
+    }
+    return NULL;
+}
+
+static const aml_scope_t *dsdt_scope_for_bus(int bus)
+{
+    return dsdt_scope_for_bus_depth(bus, 0);
 }
 
 uint32_t arch_pci_prt_gsi(int bus, int dev, int pin) {

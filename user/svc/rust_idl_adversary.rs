@@ -90,7 +90,7 @@ fn response(nonce: u32, client_min: u16, client_max: u16,
     let request = idl::SVCMGR_VERSION_REQUEST {
         min_version: client_min, max_version: client_max, nonce,
     };
-    let legacy = nonce == 0xa006_0006;
+    let legacy = nonce == 0xa006_0006 || nonce == 0xa00a_000a;
     if legacy {
         let env = idl::envelope_encode(&idl::ENVELOPE {
             version: idl::A20_SERVICES_IDL_VERSION,
@@ -169,6 +169,26 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8,
     let mut reply = [0u8; 21];
     let reply_len = response(req.nonce, req.min_version, req.max_version, &mut reply);
     if send(endpoint, &reply[..reply_len]) < 0 { return 87; }
+
+    // A legacy service does not speak the new protocol: it echoes whatever it
+    // receives.  Keep doing that until the client's liveness challenge has
+    // been answered, so the positive legacy-acceptance case exercises the
+    // real fallback path and not just a single crafted reply.
+    if req.nonce == 0xa006_0006 || req.nonce == 0xa00a_000a {
+        loop {
+            match now_ns() {
+                Ok(now) if now >= deadline => break,
+                _ => {}
+            }
+            match recv(endpoint, &mut request_buf) {
+                Ok(Some(n)) => {
+                    if send(endpoint, &request_buf[..n]) < 0 { return 87; }
+                }
+                Ok(None) => sleep_1ms(),
+                Err(_) => break,
+            }
+        }
+    }
     0
 }
 

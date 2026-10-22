@@ -44,6 +44,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_msix.h"
+#include "drivers/bus/pci_msi.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
@@ -389,6 +390,9 @@ const struct drv_export drv_export_table[] = {
     { "pci_cfg_write32",     (void *)pci_cfg_write32 },
     /* message-signalled interrupts: capability parse, table programming and
      * the vector allocator the table entries name */
+    { "pci_msi_capability",  (void *)pci_msi_capability },
+    { "pci_msi_enable",      (void *)pci_msi_enable },
+    { "pci_msi_disable",     (void *)pci_msi_disable },
     { "pci_msix_capability", (void *)pci_msix_capability },
     { "pci_msix_enable",     (void *)pci_msix_enable },
     { "pci_msix_program_vector", (void *)pci_msix_program_vector },

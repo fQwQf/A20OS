@@ -28,7 +28,7 @@
 | virtio-rng | `kernel/drivers/char/virtio_rng.c`（generic 模块 `virtio-rng.a20drv`，锁在模块内） | `g_vrng.lock`：字节环、每槽 posted 标志、last_used 游标与计数器；无局部顺序（熵池投递与有界等待都在锁外） |
 | xHCI | `kernel/drivers/usb/host/xhci.c`（generic 模块 `xhci.a20drv`） | `xhci->lock`：HCD 全部 ops 与 IRQ handler 都取它；**锁下不得等待硬件**，同步传输靠 `xfer_busy` 所有权标志串行化 |
 | USB HID | `kernel/drivers/usb/class/usb_hid.c` | 每接口 `h->lock`；局部顺序 `h->lock -> xhci->lock`（单向） |
-| USB storage | `kernel/drivers/usb/class/usb_storage.c` | 每实例 `st->lock`；局部顺序 `st->lock -> xhci->lock`（单向）；`msc_command()` 仍跨同步 bulk wait 持有 `st->lock`，是现存违规 |
+| USB storage | `kernel/drivers/usb/class/usb_storage.c` | 每实例 `st->lock` 是 sleepable `mutex_t`；局部顺序 `st->lock -> xhci->lock`（单向）；`msc_command()` 跨同步 bulk wait 持有它是允许的，因为等待方不持 spinlock |
 
 ## 全局顺序摘要
 
@@ -326,7 +326,7 @@ wake queue 的 flush 在释放锁之后。
 
 规范上「spinlock 下不得等待硬件」不能因为缺锁而绕开，所以等待被移出锁外，用一个所有权标志串行化：
 
-- `xhci_xfer_acquire()` 在锁下自旋取 `xfer_busy`；**持有者取到标志时同时发布 `xfer_deadline`（`XHCI_XFER_HOLD_BUDGET_MS`），自旋方读这个 tick 截止时间而不是数自己的轮数**，过期返回 `-EBUSY`。这是拒绝而不是排队：USB storage 的 `msc_command()` 从 class lock 下调用进来，不能在这里睡眠；而一轮自旋的耗时随机器而变，固定轮数等于在别人的临界区里给出无界时间。两侧共用同一个预算是结构性的：自旋方读到的截止时间不可能早于持有者手上的那个。
+- `xhci_xfer_acquire()` 在锁下自旋取 `xfer_busy`；**持有者取到标志时同时发布 `xfer_deadline`（`XHCI_XFER_HOLD_BUDGET_MS`），自旋方读这个 tick 截止时间而不是数自己的轮数**，过期返回 `-EBUSY`。这是拒绝而不是排队：controller 同时被中断路径和多个 class 驱动使用，而一轮自旋的耗时随机器而变，固定轮数等于在别人的临界区里给出无界时间。两侧共用同一个预算是结构性的：自旋方读到的截止时间不可能早于持有者手上的那个。USB storage 现在用 sleepable mutex 串行自己的 BOT 交换，但 xHCI 这一层仍是自旋语义，因为它的另一个使用方是中断上下文。
 - `xhci_drain_events()`/`xhci_wait_event()` 只在锁下取 TRB、分类，更新 `ERDP`；**completion 回调成批在锁外执行**（`xhci_run_completions()` 用同一个 `*flags` 释放再取回），因为 HID completion 会重提 URB，重提直接回到本函数的同一个非递归锁，锁内回调即死锁。
 - `xhci_wait_event()` **每轮尝试各取一次锁，取到 TRB 或确认 ring 为空后立刻释放**，锁（含本地中断）绝不跨等待持有：整个 `XHCI_WAIT_LOOPS` 预算一直持锁会让本 CPU 丢掉定时器 tick、其它设备中断和 IPI 服务，`-smp 1` 下就是整机。
 - `xhci_irq_handler()` 在 `xfer_busy` 置位时**只 ack `INTR0.IP` 不消费 ring**：只有同步传输的持有者能把自己的 TRB 匹配回请求，抢走它会让控制传输拿到错误的完成；同时电平触发的 INTx 在有界忙等期间会反复重入，只 ack 是让它退化的唯一办法。
@@ -350,9 +350,9 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 
 ### USB storage
 
-每实例 `usb_storage_dev_t.lock` 保护 BOT tag、CBW/CSW 和共享 4 KiB data buffer。局部顺序 **`st->lock -> xhci->lock`（单向）**。
+每实例 `usb_storage_dev_t.lock` 是 sleepable `mutex_t`，保护 BOT tag、CBW/CSW 和共享 4 KiB data buffer。局部顺序 **`st->lock -> xhci->lock`（单向）**。
 
-已知违规未变：`msc_command()` 从 CBW、data 到 CSW 全程持有 `spin_lock_irqsave`，而 xHCI bulk submit 会同步忙等 transfer event。这个实现与本文“spinlock 下不得等待硬件完成”的规范相冲突，是现存限制，不是批准的新例外。xHCI 侧的 `xfer_busy` 有界自旋把「两个同步传输同时抢一个 controller」从静默数据竞争降级为一次 `-EBUSY`，但没有让 storage 本身合规。并发或超时路径修改前应改为 sleepable mutex，或只在 spinlock 下发布/回收并在锁外等待；在此之前不要把 USB storage 当作锁设计范例。
+`msc_command()` 从 CBW、data 到 CSW 全程持有这把 mutex，而 xHCI bulk submit 会同步等待 transfer event。这在 mutex 下是允许的：等待期间可以让出 CPU，也不会在别人持 spinlock 时把中断关掉数秒。块层从进程上下文调用，因此这里不存在“在原子上下文睡眠”的问题；同一实例的第二条命令会阻塞在 mutex 上，而不是并发改写 CBW/CSW。xHCI 侧的 `xfer_busy` 仍用有界自旋，因为 controller 可能被中断上下文的路径访问；它把「两个同步传输同时抢一个 controller」降级为一次 `-EBUSY`，与 storage 的 mutex 是两个层次。
 
 ## 跨驱动规则
 

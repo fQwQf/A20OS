@@ -39,6 +39,7 @@ type Serial = i32;
 
 const ENOMEM: i32 = 12;
 const EPERM: i32 = 1;
+const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
 const ENOKEY: i32 = 126;
 const EKEYEXPIRED: i32 = 127;
@@ -55,6 +56,21 @@ const KEY_SPEC_USER_KEYRING: Serial = -4;
 const KEY_SPEC_USER_SESSION_KEYRING: Serial = -5;
 const KEY_POS_ALL: u32 = 0x3f00_0000;
 const KEY_USR_ALL: u32 = 0x003f_0000;
+const KEY_GRP_ALL: u32 = 0x0000_3f00;
+const KEY_OTH_ALL: u32 = 0x0000_003f;
+const KEY_POS_VIEW: u32 = 0x0100_0000;
+const KEY_POS_READ: u32 = 0x0200_0000;
+const KEY_POS_WRITE: u32 = 0x0400_0000;
+const KEY_POS_SEARCH: u32 = 0x0800_0000;
+const KEY_POS_LINK: u32 = 0x1000_0000;
+const KEY_POS_SETATTR: u32 = 0x2000_0000;
+
+const KEY_NEED_VIEW: u32 = 1 << 0;
+const KEY_NEED_READ: u32 = 1 << 1;
+const KEY_NEED_WRITE: u32 = 1 << 2;
+const KEY_NEED_SEARCH: u32 = 1 << 3;
+const KEY_NEED_LINK: u32 = 1 << 4;
+const KEY_NEED_SETATTR: u32 = 1 << 5;
 const KEYRING_MAX_OBJECTS: i32 = 4096;
 const KEYRING_ITEM_CACHE_MAX: usize = 8;
 const KEYRING_SEARCH_DEPTH: i32 = 4;
@@ -102,6 +118,7 @@ unsafe extern "C" {
     fn a20_keyring_task_uid(task: *mut c_void) -> i64;
     fn a20_keyring_task_euid(task: *mut c_void) -> i64;
     fn a20_keyring_task_gid(task: *mut c_void) -> i64;
+    fn a20_keyring_task_egid(task: *mut c_void) -> i64;
     fn a20_keyring_task_has_cap(task: *mut c_void, cap: i32) -> i32;
     fn a20_keyring_session_get(task: *mut c_void) -> *mut c_void;
     fn a20_keyring_session_set(task: *mut c_void, ring: *mut c_void);
@@ -679,7 +696,45 @@ unsafe fn is_expired(o: *mut Object, now: u64) -> bool {
     !o.is_null() && unsafe { (*o).expiry_ns != 0 && now >= (*o).expiry_ns }
 }
 
+/// Linux's `key_need_perm_mask()`: the permission bits an operation needs,
+/// expressed in the `KEY_POS_*` position.  The owner class checks them there;
+/// group and other classes shift the same pattern down by 16 and 24 bits.
+fn need_pos_bits(need: u32) -> u32 {
+    let mut bits = 0;
+    if need & (KEY_NEED_VIEW | KEY_NEED_READ | KEY_NEED_WRITE | KEY_NEED_SEARCH |
+               KEY_NEED_LINK) != 0 {
+        bits |= KEY_POS_VIEW;
+    }
+    if need & KEY_NEED_READ != 0 { bits |= KEY_POS_READ; }
+    if need & KEY_NEED_WRITE != 0 { bits |= KEY_POS_WRITE; }
+    if need & KEY_NEED_SEARCH != 0 { bits |= KEY_POS_SEARCH; }
+    if need & KEY_NEED_LINK != 0 { bits |= KEY_POS_LINK; }
+    if need & KEY_NEED_SETATTR != 0 { bits |= KEY_POS_SETATTR; }
+    bits
+}
+
+/// Permission decision for read/search/link/write.  The class is chosen from
+/// the effective uid/gid (supplementary groups are not modelled), which is the
+/// subset this kernel's credential view exposes.
+unsafe fn key_permitted(task: *mut c_void, o: *mut Object, need: u32) -> bool {
+    if o.is_null() {
+        return false;
+    }
+    let euid = unsafe { a20_keyring_task_euid(task) };
+    let egid = unsafe { a20_keyring_task_egid(task) };
+    let (class_mask, shift) = if unsafe { (*o).uid } == euid {
+        (KEY_POS_ALL, 0)
+    } else if unsafe { (*o).gid } == egid {
+        (KEY_GRP_ALL, 16)
+    } else {
+        (KEY_OTH_ALL, 24)
+    };
+    let needed = need_pos_bits(need) >> shift;
+    (unsafe { (*o).perm } & class_mask & needed) == needed
+}
+
 unsafe fn find(
+    task: *mut c_void,
     ring: *mut Object,
     ty: *const c_char,
     desc: *const c_char,
@@ -690,16 +745,31 @@ unsafe fn find(
     if ring.is_null() || ty.is_null() || desc.is_null() || depth < 0 {
         return ptr::null_mut();
     }
+    /* Searching a ring requires SEARCH permission on it, not on the keys it
+     * contains.  add_key's duplicate probe passes direct_only because the
+     * caller is authorised by the ring's WRITE permission instead. */
+    if !direct_only && !unsafe { key_permitted(task, ring, KEY_NEED_SEARCH) } {
+        return ptr::null_mut();
+    }
     let mut item = unsafe { (*ring).first_item };
     while !item.is_null() {
         let o = unsafe { (*item).object };
         if !o.is_null() && !unsafe { is_expired(o, now) } {
             if unsafe { (*o).kind } == OBJECT_KEY {
                 if unsafe { c_eq((*o).key_type, ty) && c_eq((*o).description, desc) } {
-                    return o;
+                    /* A key without SEARCH permission is invisible to search,
+                     * but the scan continues so a visible namesake can be
+                     * returned.  add_key's direct replace probe is authorised
+                     * by the ring's WRITE permission instead. */
+                    if direct_only ||
+                        unsafe { key_permitted(task, o, KEY_NEED_SEARCH) } {
+                        return o;
+                    }
                 }
             } else if !direct_only && depth > 0 {
-                let nested = unsafe { find(o, ty, desc, false, depth - 1, now) };
+                let nested = unsafe {
+                    find(task, o, ty, desc, false, depth - 1, now)
+                };
                 if !nested.is_null() {
                     return nested;
                 }
@@ -777,7 +847,11 @@ pub unsafe extern "C" fn a20_rust_keyring_add_key(
         unsafe { object_destroy(key) };
         return -ENOKEY;
     }
-    let existing = unsafe { find(ring, ty, desc, true, 0, now) };
+    if !unsafe { key_permitted(task, ring, KEY_NEED_WRITE) } {
+        unsafe { object_destroy(key) };
+        return -EACCES;
+    }
+    let existing = unsafe { find(task, ring, ty, desc, true, 0, now) };
     if !existing.is_null() {
         unsafe {
             free((*existing).payload);
@@ -825,12 +899,12 @@ pub unsafe extern "C" fn a20_rust_keyring_request_key(
     let mut key = if session.is_null() {
         ptr::null_mut()
     } else {
-        unsafe { find(session, ty, desc, false, KEYRING_SEARCH_DEPTH, now) }
+        unsafe { find(task, session, ty, desc, false, KEYRING_SEARCH_DEPTH, now) }
     };
     if key.is_null() {
         let user = unsafe { resolve_ring(task, KEY_SPEC_USER_KEYRING, false) };
         if !user.is_null() {
-            key = unsafe { find(user, ty, desc, false, 1, now) };
+            key = unsafe { find(task, user, ty, desc, false, 1, now) };
         }
     }
     if key.is_null() {
@@ -955,6 +1029,10 @@ pub unsafe extern "C" fn a20_rust_keyring_link(id: Serial, ringid: Serial) -> i3
     let o = unsafe { resolve_object(task, id, true) };
     let ring = unsafe { resolve_ring(task, ringid, true) };
     if o.is_null() || ring.is_null() { return -ENOKEY; }
+    if !unsafe { key_permitted(task, o, KEY_NEED_LINK) } ||
+        !unsafe { key_permitted(task, ring, KEY_NEED_WRITE) } {
+        return -EACCES;
+    }
     unsafe { ring_link(ring, o) }
 }
 
@@ -967,6 +1045,9 @@ pub unsafe extern "C" fn a20_rust_keyring_unlink(id: Serial, ringid: Serial) -> 
     let o = unsafe { resolve_object(task, id, true) };
     let ring = unsafe { resolve_ring(task, ringid, true) };
     if o.is_null() || ring.is_null() { return -ENOKEY; }
+    if !unsafe { key_permitted(task, ring, KEY_NEED_WRITE) } {
+        return -EACCES;
+    }
     unsafe { ring_unlink(ring, o) }
 }
 
@@ -982,7 +1063,7 @@ pub unsafe extern "C" fn a20_rust_keyring_search(
     };
     let now = unsafe { a20_keyring_now_ns() };
     let ring = unsafe { resolve_ring(task, ringid, false) };
-    let key = unsafe { find(ring, ty, desc, false, KEYRING_SEARCH_DEPTH, now) };
+    let key = unsafe { find(task, ring, ty, desc, false, KEYRING_SEARCH_DEPTH, now) };
     if key.is_null() { -ENOKEY } else { unsafe { (*key).serial } }
 }
 
@@ -1041,6 +1122,9 @@ pub unsafe extern "C" fn a20_rust_keyring_describe(
     };
     let o = unsafe { resolve_object(task, id, false) };
     if o.is_null() { return -(ENOKEY as isize); }
+    if !unsafe { key_permitted(task, o, KEY_NEED_VIEW) } {
+        return -(EACCES as isize);
+    }
     let kind = if unsafe { (*o).kind } == OBJECT_KEY { unsafe { (*o).key_type } } else { b"keyring\0".as_ptr() };
     if buf.is_null() || bufsz == 0 {
         // Preserve the C helper's historical length-query behavior.  The
@@ -1078,6 +1162,9 @@ pub unsafe extern "C" fn a20_rust_keyring_read(id: Serial, buf: *mut c_void, buf
     let o = unsafe { resolve_object(task, id, false) };
     if o.is_null() { return -(ENOKEY as isize); }
     if unsafe { is_expired(o, now) } { return -(EKEYEXPIRED as isize); }
+    if !unsafe { key_permitted(task, o, KEY_NEED_READ) } {
+        return -(EACCES as isize);
+    }
     if unsafe { (*o).kind } == OBJECT_KEY {
         let len = unsafe { (*o).payload_len };
         if !buf.is_null() && bufsz >= len && len > 0 {
@@ -1098,6 +1185,96 @@ pub unsafe extern "C" fn a20_rust_keyring_read(id: Serial, buf: *mut c_void, buf
         }
     }
     len as isize
+}
+
+unsafe fn ring_contains(ring: *mut Object, o: *mut Object) -> bool {
+    let mut item = unsafe { (*ring).first_item };
+    while !item.is_null() {
+        if unsafe { (*item).object } == o {
+            return true;
+        }
+        item = unsafe { (*item).next };
+    }
+    false
+}
+
+/* Detach @o from every ring that lists it.  Keys are only owned through ring
+ * items, so the final unlink drops the last reference and reclaims the
+ * serial-map entry.  Restarting the scan after each mutation keeps this safe
+ * when earlier unlinks free other objects. */
+unsafe fn unlink_everywhere(o: *mut Object) {
+    loop {
+        let mut found: *mut Object = ptr::null_mut();
+        let mut cursor = unsafe { SERIAL_MAP };
+        while !cursor.is_null() {
+            if unsafe { (*cursor).kind } == OBJECT_KEYRING && cursor != o &&
+                unsafe { ring_contains(cursor, o) } {
+                found = cursor;
+                break;
+            }
+            cursor = unsafe { (*cursor).next };
+        }
+        if found.is_null() {
+            return;
+        }
+        if unsafe { ring_unlink(found, o) } < 0 {
+            return;
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_rust_keyring_clear(id: Serial) -> i32 {
+    let (task, _guard) = match unsafe { LockGuard::acquire_current() } {
+        Some(state) => state,
+        None => return -ESRCH,
+    };
+    let ring = unsafe { resolve_ring(task, id, false) };
+    if ring.is_null() {
+        return -ENOKEY;
+    }
+    if !unsafe { key_permitted(task, ring, KEY_NEED_WRITE) } {
+        return -EACCES;
+    }
+    loop {
+        let first = unsafe { (*ring).first_item };
+        if first.is_null() {
+            return 0;
+        }
+        let o = unsafe { (*first).object };
+        let rc = unsafe { ring_unlink(ring, o) };
+        if rc < 0 {
+            return rc;
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn a20_rust_keyring_invalidate(id: Serial) -> i32 {
+    let (task, _guard) = match unsafe { LockGuard::acquire_current() } {
+        Some(state) => state,
+        None => return -ESRCH,
+    };
+    let o = unsafe { resolve_object(task, id, false) };
+    if o.is_null() {
+        return -ENOKEY;
+    }
+    /* Linux invalidates keys, not keyrings; a keyring's ownership graph is
+     * torn down through unlink/clear instead. */
+    if unsafe { (*o).kind } != OBJECT_KEY {
+        return -EINVAL;
+    }
+    if !unsafe { key_permitted(task, o, KEY_NEED_WRITE) } {
+        return -EPERM;
+    }
+    /* Mark it expired before detaching so a concurrent read/search that still
+     * holds the object stops matching; unlink_everywhere then drops the last
+     * ring reference and reclaims the serial. */
+    unsafe {
+        (*o).expiry_ns = 1;
+        unlink_everywhere(o);
+    }
+    0
 }
 
 #[no_mangle]
@@ -1191,6 +1368,8 @@ mod tests {
     #[no_mangle]
     unsafe extern "C" fn a20_keyring_task_gid(t: *mut c_void) -> i64 { unsafe { (*(t.cast::<FakeTask>())).gid } }
     #[no_mangle]
+    unsafe extern "C" fn a20_keyring_task_egid(t: *mut c_void) -> i64 { unsafe { (*(t.cast::<FakeTask>())).egid } }
+    #[no_mangle]
     unsafe extern "C" fn a20_keyring_task_has_cap(t: *mut c_void, _: i32) -> i32 { unsafe { (*(t.cast::<FakeTask>())).admin } }
     #[no_mangle]
     unsafe extern "C" fn a20_keyring_session_get(t: *mut c_void) -> *mut c_void { unsafe { (*(t.cast::<FakeTask>())).session } }
@@ -1282,6 +1461,10 @@ mod tests {
         let payload = b"abc";
         let key = unsafe { a20_rust_keyring_add_key(b"user\0".as_ptr().cast(), b"alpha\0".as_ptr().cast(), payload.as_ptr().cast(), 3, ring) };
         assert!(key > 0);
+        /* The fixture switches the task's uid in place; grant the ring other-
+         * class access so the subsequent add/search exercise the replace path
+         * rather than the (now correct) permission denial. */
+        assert_eq!(unsafe { a20_rust_keyring_setperm(ring, KEY_POS_ALL | KEY_OTH_ALL) }, 0);
         unsafe {
             (*ptr::addr_of_mut!(TASK)).euid = 1201;
             (*ptr::addr_of_mut!(TASK)).egid = 1302;
@@ -1306,6 +1489,9 @@ mod tests {
         unsafe { (*ptr::addr_of_mut!(TASK)).admin = 1; }
         assert_eq!(unsafe { a20_rust_keyring_chown(key, 2000, -1) }, 0);
         unsafe { (*ptr::addr_of_mut!(TASK)).admin = 0; (*ptr::addr_of_mut!(TASK)).euid = 2000; }
+        /* 0x1234 grants the owner no POS_* bits; restore them so the timeout
+         * block below exercises expiry arithmetic, not the permission gate. */
+        assert_eq!(unsafe { a20_rust_keyring_setperm(key, KEY_POS_ALL | KEY_USR_ALL) }, 0);
         // Timeout arithmetic saturates instead of wrapping into an already-
         // expired timestamp. Exercise multiplication and addition overflow,
         // and preserve the Linux zero-means-clear behavior.
@@ -1322,6 +1508,14 @@ mod tests {
         assert_eq!(unsafe { a20_rust_keyring_set_timeout(key, 0) }, 0);
         assert_eq!(unsafe { (*lookup(key)).expiry_ns }, 0);
         NOW.store(1_000_000_000, Ordering::Relaxed);
+        /* Give the fixture its original identity back: the user keyring and
+         * the key must share an owner for the link/refcount checks below. */
+        assert_eq!(unsafe { a20_rust_keyring_setperm(key, KEY_POS_ALL | KEY_USR_ALL) }, 0);
+        assert_eq!(unsafe { a20_rust_keyring_chown(key, 1000, -1) }, 0);
+        unsafe {
+            (*ptr::addr_of_mut!(TASK)).euid = 1000;
+            (*ptr::addr_of_mut!(TASK)).egid = 1000;
+        }
         let dest = unsafe { a20_rust_keyring_get_keyring_id(KEY_SPEC_USER_KEYRING, 1) };
         assert!(dest > 0);
         let key_obj = unsafe { lookup(key) };

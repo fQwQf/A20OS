@@ -18,6 +18,7 @@
 
 #include "core/klog.h"
 #include "core/lock.h"
+#include "core/sync.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "drivers/core/driver_class.h"
@@ -69,7 +70,12 @@ typedef struct {
     usb_endpoint_t  *bulk_in;
     usb_device_t    *dev;
 
-    spinlock_t lock;
+    /* Serializes whole BOT exchanges.  A mutex, not a spinlock: one command
+     * spans several synchronous bulk transfers and can spend seconds waiting
+     * for the device, and the old code held a raw spinlock (with interrupts
+     * off) across all of it.  The block layer calls here from process context,
+     * so sleeping is allowed. */
+    mutex_t lock;
     block_dev_t block;
     uint32_t tag;
     uint64_t capacity;
@@ -122,7 +128,7 @@ static void msc_reset(usb_storage_dev_t *st) {
 static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
                        uint8_t cdblen, void *data, uint32_t datalen,
                        int data_in) {
-    uint64_t flags = spin_lock_irqsave(&st->lock);
+    mutex_lock(&st->lock);
 
     uint32_t tag = ++st->tag;
     memset(&st->cbw, 0, sizeof(st->cbw));
@@ -136,7 +142,7 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
 
     /* 1. CBW on bulk-OUT. */
     if (msc_bulk(st, st->bulk_out, &st->cbw, USB_MSC_CBW_SIZE) < 0) {
-        spin_unlock_irqrestore(&st->lock, flags);
+        mutex_unlock(&st->lock);
         msc_reset(st);
         return -EIO;
     }
@@ -152,7 +158,7 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
             memcpy(st->data, (uint8_t *)data + transferred, chunk);
             int r = msc_bulk(st, dep, st->data, chunk);
             if (r < 0) {
-                spin_unlock_irqrestore(&st->lock, flags);
+                mutex_unlock(&st->lock);
                 msc_reset(st);
                 return -EIO;
             }
@@ -165,7 +171,7 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     /* 3. CSW on bulk-IN. */
     memset(&st->csw, 0, sizeof(st->csw));
     if (msc_bulk(st, st->bulk_in, &st->csw, USB_MSC_CSW_SIZE) < 0) {
-        spin_unlock_irqrestore(&st->lock, flags);
+        mutex_unlock(&st->lock);
         msc_reset(st);
         return -EIO;
     }
@@ -177,7 +183,7 @@ static int msc_command(usb_storage_dev_t *st, const uint8_t *cdb,
     else if (st->csw.status == 1)
         result = -EIO;          /* command failed (see REQUEST SENSE) */
 
-    spin_unlock_irqrestore(&st->lock, flags);
+    mutex_unlock(&st->lock);
     return result;
 }
 
@@ -281,7 +287,7 @@ static int usb_storage_probe(device_t *dev) {
         return -ENOMEM;
     usb_storage_dev_t *st = &g_storage[g_storage_count];
     memset(st, 0, sizeof(*st));
-    spin_init(&st->lock);
+    st->lock = (mutex_t)MUTEX_INIT;
     st->iface = iface;
     st->dev = udev;
     st->bulk_out = bulk_out;
@@ -296,7 +302,6 @@ static int usb_storage_probe(device_t *dev) {
                                                USB_XFER_BULK,
                                                bulk_out->max_packet, 0);
     if (r) {
-        kfree(st);
         memset(st, 0, sizeof(*st));
         return r;
     }
@@ -304,7 +309,6 @@ static int usb_storage_probe(device_t *dev) {
                                            USB_XFER_BULK,
                                            bulk_in->max_packet, 0);
     if (r) {
-        kfree(st);
         memset(st, 0, sizeof(*st));
         return r;
     }
@@ -322,7 +326,6 @@ static int usb_storage_probe(device_t *dev) {
     uint8_t rccdb[10] = { SCSI_CMD_READ_CAPACITY10 };
     if (msc_command(st, rccdb, 10, cap, 8, 1) < 0) {
         kinfo("[USB-STORAGE] READ CAPACITY failed; no disk\n");
-        kfree(st);
         memset(st, 0, sizeof(*st));
         return -ENODEV;
     }
@@ -330,7 +333,6 @@ static int usb_storage_probe(device_t *dev) {
     uint32_t blk_size = msc_be32(cap + 4);
     if (blk_size < 512 || blk_size > 65536 || (blk_size & (blk_size - 1))) {
         kinfo("[USB-STORAGE] unsupported sector size %u\n", blk_size);
-        kfree(st);
         memset(st, 0, sizeof(*st));
         return -ENODEV;
     }

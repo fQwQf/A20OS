@@ -8,6 +8,7 @@
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_msix.h"
+#include "drivers/bus/pci_hal.h"
 #include "core/progress.h"
 #include "platform.h"
 #include "firmware.h"
@@ -395,6 +396,24 @@ void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
                                    (1U << 16));
 }
 
+/* Route an ISA IRQ that a PIIX3 PIRQ link feeds into the IOAPIC.  Unlike a
+ * direct PCI INTx (level, active-low at the IOAPIC), the PIIX3 converts the
+ * PCI line to an ISA-style edge/active-high input before the IOAPIC sees it;
+ * programming the entry as level/low leaves the interrupt undelivered. */
+void x86_64_route_isa_irq(uint32_t gsi, uint8_t vector)
+{
+    unsigned idx;
+    uint32_t entry;
+    if (arch_ioapic_gsi_lookup(gsi, &idx, &entry) != 0) {
+        kinfo("[IOAPIC] isa irq %u is in no published range; not routed\n", gsi);
+        return;
+    }
+    uintptr_t base = arch_ioapic_base(idx);
+    uint32_t low_reg = 0x10U + entry * 2U;
+    ioapic_write_at(base, low_reg + 1U, arch_ioapic_dest_id(idx));
+    ioapic_write_at(base, low_reg, (uint32_t)vector | (1U << 15) | (1U << 16));
+}
+
 /* X86_64_PCI_INTX_MODEL:
  * - Where a device's INTx line lands is a firmware decision, published in the
  *   ACPI DSDT as a per-bus _PRT routing table and, on i440fx, programmed into
@@ -418,6 +437,82 @@ void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
  * machine whose INTx wiring is known without asking firmware. */
 #define X86_64_Q35_BRIDGE_ID   0x29c08086U
 
+/* i440fx PIRQ links.  The PIIX3 owns PIRQA..PIRQD at config 0x60..0x63 of
+ * 00:1f.0; each byte is the ISA IRQ the link is routed to, with 0x80 meaning
+ * "not routed".  Firmware normally programs these, and this kernel used to
+ * read them without ever writing.  arch_pci_pirq_program() is the write side:
+ * it is deliberately explicit (caller names the link and IRQ) because the
+ * ACPI _PRT link object (_SRS) is a method call this AML subset does not
+ * evaluate.  A machine that is not i440fx refuses instead of touching an
+ * unrelated device's config space. */
+#define I440FX_HOST_ID 0x12378086U
+
+static int pirq_is_i440fx(void)
+{
+    return arch_pci_config_read32(0, 0, 0, 0) == I440FX_HOST_ID;
+}
+
+int arch_pci_pirq_read(int pirq)
+{
+    if (pirq < 0 || pirq > 3 || !pirq_is_i440fx())
+        return -1;
+    uint32_t routes = arch_pci_config_read32(0, 0x01, 0, 0x60);
+    uint8_t line = (uint8_t)(routes >> (pirq * 8));
+    if (line == 0x80U)
+        return -1;                 /* link disabled by firmware */
+    return line;
+}
+
+int arch_pci_pirq_program(int pirq, int irq)
+{
+    if (pirq < 0 || pirq > 3 || irq < 0 || irq > 15 ||
+        !pirq_is_i440fx())
+        return -1;
+    uint32_t routes = arch_pci_config_read32(0, 0x01, 0, 0x60);
+    uint32_t shift = (uint32_t)pirq * 8U;
+    routes = (routes & ~(0xffU << shift)) | ((uint32_t)irq << shift);
+    arch_pci_config_write32(0, 0x01, 0, 0x60, routes);
+    uint32_t readback = arch_pci_config_read32(0, 0x01, 0, 0x60);
+    if (readback != routes) {
+        kerr("[PIRQ] link %c readback 0x%x != 0x%x\n",
+             (char)('A' + pirq), readback, routes);
+        return -EIO;
+    }
+    kinfo("[PIRQ] link %c -> irq %d (PIIX3 0x%02x)\n",
+          (char)('A' + pirq), irq, 0x60 + pirq);
+    return 0;
+}
+
+#ifdef CONFIG_PCI_PIRQ_TEST
+/* Boot-time proof that the PIIX3 route registers are writable on this
+ * machine.  Saves and restores every link, so a PASS leaves firmware's
+ * routing exactly as it was. */
+void x86_64_pci_pirq_selftest(void)
+{
+    if (!pirq_is_i440fx()) {
+        kinfo("PCI_PIRQ_TEST: SKIP (not i440fx)\n");
+        return;
+    }
+    uint32_t saved = arch_pci_config_read32(0, 0x01, 0, 0x60);
+    int ok = 1;
+    for (int pirq = 0; pirq < 4; pirq++) {
+        int original = (saved >> (pirq * 8)) & 0xff;
+        int target = 9 + pirq;
+        if (arch_pci_pirq_program(pirq, target) != 0 ||
+            arch_pci_pirq_read(pirq) != target)
+            ok = 0;
+        if (arch_pci_pirq_program(pirq, original) != 0)
+            ok = 0;
+    }
+    if (ok) {
+        kinfo("PCI_PIRQ_TEST: PASS (PIRQA..D written and read back, "
+              "firmware routing restored)\n");
+    } else {
+        kerr("PCI_PIRQ_TEST: FAIL\n");
+    }
+}
+#endif
+
 int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
     (void)func;
     if (pin < 1 || pin > 4)
@@ -427,8 +522,22 @@ int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
      * it is the only one that holds for a device behind a bridge. */
     uint32_t gsi = arch_pci_prt_gsi(bus, dev, pin);
     int from_prt = gsi != PCI_PRT_GSI_NONE;
+    int from_pirq = 0;
 
-    if (!from_prt) {
+    if (!from_prt && bus == 0) {
+        /* i440fx: the chipset already owns the routing decision.  Reading the
+         * PIRQ link is what makes INTx work there without an evaluable _PRT;
+         * a disabled or nonsensical link stays on polling. */
+        /* QEMU's i440fx map: (pin0 + slot - 1) & 3, with pin0 = pin-1. */
+        int pirq = (dev + pin - 2) & 3;
+        int line = arch_pci_pirq_read(pirq);
+        if (line >= 3 && line <= 15) {
+            gsi = (uint32_t)line;
+            from_pirq = 1;
+        }
+    }
+
+    if (!from_prt && !from_pirq) {
         if (bus != 0)
             return -1;
         static int host_bridge_ok = -1;
@@ -444,11 +553,14 @@ int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
     }
 
     uint8_t vector = (uint8_t)(X86_64_PCI_VECTOR_BASE + gsi);
-    x86_64_route_pci_irq(gsi, vector);
+    if (from_pirq)
+        x86_64_route_isa_irq(gsi, vector);
+    else
+        x86_64_route_pci_irq(gsi, vector);
     kinfo("[PCI] INTx %02u:%02u.%u pin %c -> gsi %u vector 0x%02x (%s)\n",
           (unsigned)bus, (unsigned)dev, (unsigned)func,
           (char)('A' + pin - 1), gsi, vector,
-          from_prt ? "ACPI _PRT" : "q35 swizzle");
+          from_prt ? "ACPI _PRT" : from_pirq ? "i440fx PIRQ" : "q35 swizzle");
     return (int)vector;
 }
 

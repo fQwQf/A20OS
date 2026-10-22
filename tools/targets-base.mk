@@ -11,7 +11,7 @@
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-x86-fp-preserve smoke-arm32 smoke-riscv32 smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-network-suite-smp2 smoke-network-suite-aarch64 smoke-ipv6-rx-soak smoke-net-udp-hostfwd smoke-netfilter-snat smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-mm-fork-exec-race smoke-oom-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-futex-stress-aarch64 smoke-socket-stress smoke-driver-lifecycle smoke-platform-irq-fallback smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-rtc-cmos smoke-rtc-cmos-fallback smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-unix-ch smoke-bpf smoke-wx-aslr smoke-exec-xlator smoke-exec-xlator-off smoke-exec-xlator-shim smoke-exec-xlator-la64 		smoke-native-handle smoke-native-libc smoke-native-futex smoke-native-deepen smoke-native-pager-rust smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress smoke-syscall-ext \
+smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-x86-fp-preserve smoke-arm32 smoke-riscv32 smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-network-suite-smp2 smoke-network-suite-aarch64 smoke-ipv6-rx-soak smoke-net-udp-hostfwd smoke-netfilter-snat smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-mm-fork-exec-race smoke-oom-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-futex-stress-aarch64 smoke-socket-stress smoke-driver-lifecycle smoke-platform-irq-fallback smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-rtc-cmos smoke-rtc-cmos-fallback smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-unix-ch smoke-bpf smoke-wx-aslr smoke-exec-xlator smoke-exec-xlator-off smoke-exec-xlator-shim smoke-exec-xlator-la64 smoke-native-handle smoke-native-libc smoke-native-futex smoke-native-deepen smoke-native-pager-rust smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress smoke-syscall-ext \ smoke-pirq-i440fx smoke-driver-lifecycle-x86_64 smoke-driver-lifecycle-aarch64 smoke-driver-lifecycle-loongarch64 smoke-driver-lifecycle-smp2 \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay check-rootfs-overlay-generator \
 		kernel-only dev-build \
@@ -24,9 +24,11 @@
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
 		native-uedud-arch native-uedud-rv smoke-iommu-udriver-isolation \
 		native-personality-arch native-personality-rv smoke-native-personality \
+		native-abi-behavior-arch native-abi-behavior-rv smoke-abi-behavior-both smoke-abi-behavior-linux \
+		smoke-idl-ack-aarch64 \
 		native-linux-arch native-linux-rv smoke-native-linux \
 		check-a20-idl \
-		smoke-iommu-discovery \
+		smoke-iommu-discovery smoke-iommu-multidevice \
 		native-svc-arch native-svc-rv smoke-native-svc \
 		native-rust-idl-peer-arch native-rust-idl-peer-rv native-rust-idl-peer smoke-native-rust-peer \
 		native-shmring-arch native-shmring-rv smoke-native-shmring \

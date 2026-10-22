@@ -26,6 +26,8 @@ extern int a20_rust_keyring_setperm(key_serial_t, uint32_t);
 extern int a20_rust_keyring_set_timeout(key_serial_t, unsigned long);
 extern int a20_rust_keyring_link(key_serial_t, key_serial_t);
 extern int a20_rust_keyring_unlink(key_serial_t, key_serial_t);
+extern int a20_rust_keyring_clear(key_serial_t);
+extern int a20_rust_keyring_invalidate(key_serial_t);
 extern key_serial_t a20_rust_keyring_search(key_serial_t, const char *,
                                             const char *);
 extern long a20_rust_keyring_describe(key_serial_t, char *, size_t);
@@ -182,6 +184,16 @@ int keyring_link(key_serial_t id, key_serial_t ringid)
 int keyring_unlink(key_serial_t id, key_serial_t ringid)
 {
     return a20_rust_keyring_unlink(id, ringid);
+}
+
+int keyring_clear(key_serial_t id)
+{
+    return a20_rust_keyring_clear(id);
+}
+
+int keyring_invalidate(key_serial_t id)
+{
+    return a20_rust_keyring_invalidate(id);
 }
 
 key_serial_t keyring_search(key_serial_t ringid, const char *type,
