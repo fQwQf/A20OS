@@ -1770,6 +1770,90 @@ smoke-net-e1000-irq:
 	fi
 
 # ---------------------------------------------------------------------------
+# smoke-net-e1000e-msix -- packet traffic carried on the MSI-X vectors
+# ---------------------------------------------------------------------------
+# The e1000 gate above runs QEMU's 82540EM, which has no MSI-X capability, so it
+# only ever proves the legacy cause bits.  The 82574L ("e1000e") is the part that
+# has MSI-X, and with MSI-X enabled its receive/transmit write-backs are reported
+# as RXQ0/TXQ0 rather than RXT0/TXDW.  A driver that announces MSI-X but enables
+# only the legacy bits receives nothing and lets the stack's poll hook hide it.
+#
+# This gate therefore asserts three independent facts: the IVAR mapping was
+# programmed, both table entries fired (RX on one, TX on the other), and the
+# existing per-cause counters grew.  Traffic shape and host probe are the e1000
+# gate's; only the model and port differ.
+smoke-net-e1000e-msix:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	build_dir=$$($(MAKE) --no-print-directory ARCH=x86_64 print-build-dir); \
+	log="$(SMOKE_LOG_DIR)/net-e1000e-msix-x86_64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_E1000); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18093 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_E1000) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$$build_dir/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18093-10.0.2.15:18093 \
+		-device e1000e,netdev=net \
+		-kernel $$build_dir/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/e1000_host_probe.py 18093 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter e1000_irq_calls); \
+	irq_rx=$$(last_counter e1000_irq_rx); \
+	irq_tx=$$(last_counter e1000_irq_tx); \
+	tx_reclaimed=$$(last_counter e1000_tx_reclaimed); \
+	rx_drained=$$(last_counter e1000_rx_drained); \
+	ready_line=$$(grep -m1 '\[E1000\] ready:' "$$log" || true); \
+	ivar_line=$$(grep -m1 '\[E1000\] MSI-X IVAR:' "$$log" || true); \
+	vec_line=$$(grep -m1 '\[E1000\] MSI-X vectors carried traffic:' "$$log" || true); \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the host never completed the port forward"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || true; \
+		echo "  log saved to $$log"; exit 1; \
+	elif ! printf '%s' "$$ready_line" | grep -q '(msix)'; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the driver did not arm MSI-X"; \
+		echo "    $${ready_line:-<absent>}"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif printf '%s' "$$ready_line" | grep -q 'dataplane=polling'; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the driver fell back to polling"; \
+		echo "    $$ready_line"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif [ -z "$$ivar_line" ] || [ -z "$$vec_line" ]; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the vector table was armed but did not carry traffic"; \
+		echo "  IVAR: $${ivar_line:-<absent>}"; \
+		echo "  vectors: $${vec_line:-<absent: no per-vector counts>}"; \
+		echo "  counters: irq_calls=$$irq_calls irq_rx=$$irq_rx irq_tx=$$irq_tx"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" && \
+	     [ "$$irq_rx" -gt 0 ] && [ "$$irq_tx" -gt 0 ] && \
+	     [ "$$tx_reclaimed" -gt 0 ] && [ "$$rx_drained" -gt 0 ] && \
+	     ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-e1000e-msix: PASS (hostfwd round trip 18093 through the 82574L;" \
+			 "$$irq_rx RX-cause and $$irq_tx TX-cause interrupts, $$rx_drained descriptors drained," \
+			 "$$tx_reclaimed released); log saved to $$log"; \
+		echo "    $$ready_line"; \
+		echo "    $$ivar_line"; \
+		echo "    $$vec_line"; \
+	else \
+		echo "smoke-net-e1000e-msix: FAIL (status=$$status probe=$$probe irq_rx=$$irq_rx irq_tx=$$irq_tx" \
+			 "tx_reclaimed=$$tx_reclaimed rx_drained=$$rx_drained)"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (no TCP_ACCEPT_TEST line)"; \
+		echo "  log saved to $$log; tail:"; tail -n 60 "$$log"; exit 1; \
+	fi
+
+# ---------------------------------------------------------------------------
 # smoke-net-rtl8139 -- end-to-end round trip through the Realtek RTL8139
 # ---------------------------------------------------------------------------
 # Why this gate exists: the only NIC this tree carried for the x86_64 QEMU target

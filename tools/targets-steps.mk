@@ -217,6 +217,20 @@ smoke-socket-stress:
 smoke-driver-lifecycle:
 	$(PYTHON) tools/smoke.py smoke-driver-lifecycle
 
+# DRIVER-02: same injected growth-failure paths on every architecture that has
+# a runnable bringup kernel here, and with two CPUs online.
+smoke-driver-lifecycle-x86_64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-x86_64
+
+smoke-driver-lifecycle-aarch64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-aarch64
+
+smoke-driver-lifecycle-loongarch64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-loongarch64
+
+smoke-driver-lifecycle-smp2:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-smp2
+
 # Platform-bus IRQ resource channel: a synthetic platform device that published a
 # RES_IRQ is claimed, served by a simulated dispatch and released, and one that
 # published none falls back to polling.  No dw-mshc model exists in QEMU, so
