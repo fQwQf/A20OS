@@ -1,0 +1,8 @@
+# Alpine v3.23 main + community; same binaries are used for the Linux baseline.
+musl
+busybox
+apk-tools
+ca-certificates
+sysbench
+stress-ng
+openssl

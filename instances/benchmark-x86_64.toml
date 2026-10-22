@@ -1,0 +1,16 @@
+name = "benchmark-x86_64"
+description = "Alpine apk benchmarks: sysbench, stress-ng and OpenSSL on QEMU/KVM"
+arch = "x86_64"
+
+[kernel]
+opt = "-O3"
+ubsan = false
+
+[machine]
+smp = 2
+memory = "2G"
+extra_qemu = ["-cpu", "host"]
+
+[rootfs]
+world = "benchmark"
+world_size_mb = 512
