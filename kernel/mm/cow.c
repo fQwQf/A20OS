@@ -185,21 +185,17 @@ void a20_cow_probe(const void *parent_ptr, uintptr_t va,
         return;
     memset(out, 0, sizeof(*out));
     out->pfn = PFN_NONE;
-    /* pt_lookup_leaf() wants vaddr_t/size_t; the struct stores pointer-width
-     * fields so its Rust mirror (kernel/mm/cow_clone.rs, a #[repr(C)] Src with
-     * usize base/size) keeps the same layout on ILP32.  Converting through
-     * locals keeps both true -- passing the uintptr_t fields directly is an
-     * incompatible-pointer-type error wherever uintptr_t is narrower than
-     * vaddr_t, which is every 32-bit port. */
+    /* The struct fields are the width-fixed Rust ABI (int32_t/uintptr_t);
+     * pt_lookup_leaf() takes the kernel's native int/vaddr_t.  Those are the
+     * same width but not the same C type on a 32-bit target, so the call goes
+     * through locals rather than taking the struct members' addresses. */
     int level = 0;
     vaddr_t base = 0;
-    size_t size = 0;
-    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &size);
+    pte_t *src = pt_lookup_leaf(parent->pgdir, va, &level, &base, &out->size);
+    out->level = level;
+    out->base = base;
     if (!src)
         return;
-    out->level = level;
-    out->base = (uintptr_t)base;
-    out->size = (uintptr_t)size;
     out->pte = (uintptr_t)*src;
     out->present = (*src & PTE_V) != 0;
 #ifdef CONFIG_SWAP
@@ -276,7 +272,12 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
  * because a racing COW can otherwise free the frame before it is retained.
  * The transaction that decides share-vs-copy, downgrades the parent and maps
  * the child only after this lock is dropped is kernel/mm/cow_clone.rs; the
- * atomic step itself has to stay here, next to the page-table walk. */
+ * atomic step itself has to stay here, next to the page-table walk.
+ *
+ * The node lock and the per-PTE status sidecar exist only on the
+ * ARCH_HAS_PGTABLE_OPS backends.  arm32's short-descriptor page tables have
+ * neither: there is no separate node lock to take (the whole clone runs under
+ * parent->lock, see mm_fork()) and no status byte to keep in step. */
 int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
                            struct a20_cow_src *out)
 {
@@ -289,10 +290,6 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     if (!src_pte)
         return 0;
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    /* The node lock narrows the window on the per-PTE status sidecar.  An
-     * architecture without that sidecar (arm32's short-descriptor backend)
-     * has no table to lock or sync: its fork path runs under mm->lock, which
-     * is the exclusion this snapshot relies on there. */
     pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         mm_pt_node_lock(stab);
@@ -348,6 +345,9 @@ void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
         (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
                                 (uint8_t)class);
 #else
+    /* No status sidecar to bring in step: the PTE rewrite above is the whole
+     * of the parent-side downgrade on the arm32 short-descriptor backend. */
+    (void)level;
     (void)class;
 #endif
 }
@@ -360,6 +360,9 @@ void a20_cow_share_unlock(void *parent_ptr, uintptr_t va)
     if (stab)
         mm_pt_node_unlock(stab);
 #else
+    /* a20_cow_share_snapshot() took no lock on this backend, so there is
+     * nothing to release; the Rust clone transaction still calls this on
+     * every success path. */
     (void)parent_ptr;
     (void)va;
 #endif

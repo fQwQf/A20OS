@@ -23,7 +23,7 @@
 //! scheduler calls.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -79,14 +79,18 @@ const _: [(); 20] = [(); core::mem::size_of::<TaskSnap>()];
 const _: [(); 48] = [(); core::mem::size_of::<Params>()];
 
 static IN_PROGRESS: AtomicI32 = AtomicI32::new(0);
-static LAST_KILL_TICK: AtomicU64 = AtomicU64::new(0);
+// Ticks come from a 64-bit counter, but a 32-bit target has no 64-bit atomics.
+// Only wrapping tick *differences* are ever computed from these, so storing the
+// native word and comparing truncated values is correct as long as the cooldown
+// and the kswapd interval stay far below the wrap period.
+static LAST_KILL_TICK: AtomicUsize = AtomicUsize::new(0);
 static KILLS: AtomicUsize = AtomicUsize::new(0);
 static LAST_VICTIM_PID: AtomicI32 = AtomicI32::new(0);
 static LAST_VICTIM_SCORE: AtomicI32 = AtomicI32::new(0);
 static FREE_AT_KILL: AtomicUsize = AtomicUsize::new(0);
 static KSWAPD_PASSES: AtomicUsize = AtomicUsize::new(0);
 static KSWAPD_FREED: AtomicUsize = AtomicUsize::new(0);
-static KSWAPD_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+static KSWAPD_LAST_TICK: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" {
     fn a20_oom_params(out: *mut Params);
@@ -148,7 +152,9 @@ pub unsafe extern "C" fn oom_try_reclaim() -> i32 {
         return 0;
     }
     let now = unsafe { a20_oom_now() };
-    if now.wrapping_sub(LAST_KILL_TICK.load(Ordering::Relaxed)) < p.cooldown_ticks {
+    if (now as usize).wrapping_sub(LAST_KILL_TICK.load(Ordering::Relaxed))
+        < p.cooldown_ticks as usize
+    {
         return 0;
     }
 
@@ -175,7 +181,7 @@ pub unsafe extern "C" fn oom_try_reclaim() -> i32 {
 
     let mut s = TaskSnap::default();
     unsafe { a20_oom_task_snapshot(victim, &mut s) };
-    LAST_KILL_TICK.store(now, Ordering::Relaxed);
+    LAST_KILL_TICK.store(now as usize, Ordering::Relaxed);
     KILLS.fetch_add(1, Ordering::Relaxed);
     LAST_VICTIM_PID.store(s.pid, Ordering::Relaxed);
     LAST_VICTIM_SCORE.store(s.score, Ordering::Relaxed);
@@ -232,7 +238,7 @@ pub unsafe extern "C" fn oom_kswapd_thread() -> ! {
             continue;
         }
         KSWAPD_PASSES.fetch_add(1, Ordering::Relaxed);
-        KSWAPD_LAST_TICK.store(now, Ordering::Relaxed);
+        KSWAPD_LAST_TICK.store(now as usize, Ordering::Relaxed);
         // Escalating levers: spare slab pages, clean page cache, then paced
         // swap.  Each is cheaper than the next.
         let mut freed = unsafe { slab_reclaim_spare() } / PAGE_SIZE;
@@ -262,7 +268,7 @@ pub unsafe extern "C" fn oom_get_stats(out: *mut Stats) {
     unsafe {
         *out = Stats {
             kills: KILLS.load(Ordering::Relaxed),
-            last_kill_tick: LAST_KILL_TICK.load(Ordering::Relaxed) as usize,
+            last_kill_tick: LAST_KILL_TICK.load(Ordering::Relaxed),
             last_victim_pid: LAST_VICTIM_PID.load(Ordering::Relaxed),
             last_victim_score: LAST_VICTIM_SCORE.load(Ordering::Relaxed),
             free_pages_at_kill: FREE_AT_KILL.load(Ordering::Relaxed),
@@ -271,7 +277,7 @@ pub unsafe extern "C" fn oom_get_stats(out: *mut Stats) {
             reserved: 0,
             kswapd_passes: KSWAPD_PASSES.load(Ordering::Relaxed),
             kswapd_pages_freed: KSWAPD_FREED.load(Ordering::Relaxed),
-            kswapd_last_pass_tick: KSWAPD_LAST_TICK.load(Ordering::Relaxed) as usize,
+            kswapd_last_pass_tick: KSWAPD_LAST_TICK.load(Ordering::Relaxed),
         }
     };
 }

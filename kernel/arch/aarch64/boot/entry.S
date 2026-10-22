@@ -242,12 +242,24 @@ _start:
     bic     x2, x2, #(1 << 25)  /* EE: little-endian EL1 */
     bic     x2, x2, #(1 << 24)  /* E0E: little-endian EL0 */
     bic     x2, x2, #(1 << 19)  /* WXN */
+    /* EL0 system-register access controls.  These SCTLR_EL1 bits DISABLE
+     * traps when set, and QEMU resets them clear: SCTLR_DZE (bit 14), UCT
+     * (bit 15), UCI (bit 26).  Left clear, an EL0 `mrs CTR_EL0` — every
+     * JVM executes one while probing the CPU — a DC CVAU from a JIT, or a
+     * DC ZVA from glibc/libjvm memcpy traps as EC 0x18, which
+     * aarch64_decode_sync_cause maps to CAUSE_ILLEGAL_INSN -> SIGILL,
+     * killing the process (seen as SIGILL: sepc=<libjvm> insn=0xd53b0020
+     * on the minecraft-aarch64 image).  The C-side SCTLR writers only ever
+     * OR single feature bits in, so this is the single place to set them. */
+    orr     x2, x2, #(1 << 14)  /* DZE: allow EL0 DC ZVA */
+    orr     x2, x2, #(1 << 15)  /* UCT: allow EL0 CTR_EL0 reads */
+    orr     x2, x2, #(1 << 26)  /* UCI: allow EL0 cache maintenance */
 #ifdef CONFIG_NOMMU
     bic     x2, x2, #(1 << 3)   /* SA: kernel stack alignment check */
     bic     x2, x2, #(1 << 4)   /* SA0: EL0 stack alignment check */
     bic     x2, x2, #(1 << 5)   /* CP15BEN: avoid legacy EL0 controls */
-    bic     x2, x2, #(1 << 22)  /* UCI: trap EL0 cache maintenance */
-    bic     x2, x2, #(1 << 23)  /* nTWE */
+    bic     x2, x2, #(1 << 22)  /* PAN: NOMMU has no EL0/EL1 separation */
+    bic     x2, x2, #(1 << 23)  /* SPAN: keep PAN clear on ERET too */
 #endif
     orr     x2, x2, #(1 << 0)   /* M */
     orr     x2, x2, #(1 << 2)   /* C */
@@ -342,6 +354,12 @@ aarch64_secondary_start:
 #else
     bic     x2, x2, #(1 << 19)
 #endif
+    /* Same EL0 access-control setup as the primary: these bits disable traps
+     * (set=allow), so a secondary must OR them in too or EL0 CTR_EL0 reads,
+     * DC CVAU and DC ZVA trap as EC 0x18 -> SIGILL on its CPUs. */
+    orr     x2, x2, #(1 << 14)  /* DZE: allow EL0 DC ZVA */
+    orr     x2, x2, #(1 << 15)  /* UCT: allow EL0 CTR_EL0 reads */
+    orr     x2, x2, #(1 << 26)  /* UCI: allow EL0 cache maintenance */
     orr     x2, x2, #(1 << 0)
     orr     x2, x2, #(1 << 2)
     orr     x2, x2, #(1 << 12)

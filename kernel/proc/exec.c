@@ -110,6 +110,12 @@ static void proc_apply_exec_creds(task_t *t, const kstat_t *st)
     t->cred.sgid          = p.sgid;
     t->cred.cap_permitted = p.cap_permitted;
     t->cred.cap_effective = p.cap_effective;
+    /* SECBIT_KEEP_CAPS is documented as "cleared on execve()" (securebits.h):
+     * it exists so a program can prctl it on, change uid and drop caps inside
+     * one process, not so it survives into the next program.  A locked bit
+     * stays, the same way the *_LOCKED bits freeze the rest of the policy. */
+    if (!(t->cred.securebits & (SECBIT_KEEP_CAPS << 1)))
+        t->cred.securebits &= ~SECBIT_KEEP_CAPS;
     if (p.make_undumpable)
         mm_set_dumpable(t->mm, 0);
 }

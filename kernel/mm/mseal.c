@@ -48,8 +48,6 @@ struct a20_mseal_rec {
 #if __SIZEOF_POINTER__ == 8
 _Static_assert(sizeof(struct a20_mseal_rec) == 32, "Rust/C mseal rec ABI");
 #elif __SIZEOF_POINTER__ == 4
-/* 24: three pointer-width words, then vm_flags padded to its 8-byte
- * alignment under ilp32d. */
 _Static_assert(sizeof(struct a20_mseal_rec) == 24, "Rust/C mseal rec ABI");
 #endif
 

@@ -25,6 +25,7 @@
 #include "mm/vdso.h"
 #include "mm/frame.h"
 #include "mm/pt.h"
+#include "mm/failinject.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
 #include "mm/fault.h"
@@ -481,7 +482,14 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
         pages[i] = PFN_NONE;
 
     for (size_t i = 0; i < PMD_PAGE_COUNT; i++) {
-        pages[i] = pfa_alloc_page();
+        /* MM-04 stage 2: arm the injection half way through the copy.  Failing
+         * the first allocation would leave nothing to roll back, and a one-page
+         * leak is smaller than the per-CPU frame batch's own accounting skew;
+         * a 256-page partial free is unambiguous either way. */
+        pages[i] = (i == PMD_PAGE_COUNT / 2 &&
+                    mm_fail_inject(MM_FAIL_STAGE_HUGE_DEMOTE))
+                       ? PFN_NONE
+                       : pfa_alloc_page();
         if (pages[i] == PFN_NONE) {
             for (size_t j = 0; j < i; j++)
                 frame_put(pages[j]);

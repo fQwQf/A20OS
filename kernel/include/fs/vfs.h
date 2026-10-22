@@ -163,6 +163,17 @@ typedef struct vnode_ops {
     int     (*sync_vnode)(struct vnode *vn);
     int     (*chmod)(struct vnode *vn, int mode);
     int     (*chown)(struct vnode *vn, int uid, int gid);
+    /* Optional on-disk extended attributes.  A filesystem that provides these
+     * only needs to handle the names it can store durably; returning
+     * -EOPNOTSUPP makes the VFS fall back to its volatile table for that name,
+     * which is how e.g. trusted.* keeps working on a filesystem that only
+     * persists user.* and POSIX ACLs.  @name is the full "user.foo" spelling. */
+    int     (*xattr_get)(struct vnode *vn, const char *name,
+                         void *value, size_t size);
+    int     (*xattr_set)(struct vnode *vn, const char *name,
+                         const void *value, size_t size, int flags);
+    int     (*xattr_list)(struct vnode *vn, char *list, size_t size);
+    int     (*xattr_remove)(struct vnode *vn, const char *name);
     struct vfile *(*open)(struct vnode *vn, int flags);
     void    (*release)(struct vnode *vn);
 } vnode_ops_t;
@@ -544,7 +555,7 @@ vnode_t *littlefs_mount(struct bcache *bc);
 void     littlefs_unmount(vnode_t *root);
 
 int      vfs_mount_bc_flags(const char *path, const char *fstype,
-                            struct bcache *bc, int flags);
+                            struct bcache *bc, int flags, const char *data);
 int      vfs_umount(const char *path);
 
 /* Pipe */

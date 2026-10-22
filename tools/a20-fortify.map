@@ -1,0 +1,13 @@
+/* Export the fortify stand-ins under the version tag the riscv64 JNA build
+ * imports them with.  Loaders that ignore symbol versions (musl) match the
+ * plain name anyway; loaders that honour versym (gcompat) match the tag. */
+GLIBC_2.27 {
+    global:
+        __snprintf_chk;
+        __sprintf_chk;
+        __fprintf_chk;
+        __memcpy_chk;
+        __longjmp_chk;
+    local:
+        *;
+};

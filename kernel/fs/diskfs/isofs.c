@@ -438,7 +438,12 @@ static int isofs_vn_readpage(vnode_t *vn, uint64_t index,
     if (n > len)
         n = len;
     uint64_t byte_off = (uint64_t)fp->extent * fp->sb->block_size + off;
-    return bcache_read_bytes(fp->sb->bc, byte_off, data, n) < 0 ? -EIO : 0;
+    if (bcache_read_bytes(fp->sb->bc, byte_off, data, n) < 0)
+        return -EIO;
+    /* readpage's return value is the number of valid bytes in the page: the
+     * page-cache fill transaction zeroes everything past it.  Returning 0
+     * here (as an "ok" status) discards the whole page it just read. */
+    return (int)n;
 }
 
 static vnode_ops_t g_isofs_vnode_ops = {

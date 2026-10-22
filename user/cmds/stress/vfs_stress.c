@@ -574,6 +574,15 @@ static int ext4_open_unlink(void)
     }
 
     mkdir("/tmp/e4m", 0755);
+    /* Options that would change journaling semantics must be refused rather
+     * than silently ignored: this driver only commits metadata in ordered
+     * mode, so accepting data=journal would advertise a mode it lacks. */
+    errno = 0;
+    if (syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0,
+                "data=journal") != -1 || errno != EOPNOTSUPP) {
+        rmdir("/tmp/e4m");
+        return fail("ext4-reject-data-journal");
+    }
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0, "");
     if (r < 0) {
@@ -1537,7 +1546,139 @@ static int symlink_relative_target(void)
 }
 
 /* isofs_read: mount the ISO9660 disk at /dev/vdc (the smoke-vfs-stress
- * harness attaches a third virtio-blk drive) and read a known file. */
+ * harness attaches a third virtio-blk drive) and exercise the shapes the
+ * layout actually holds: a root directory spanning several 2048-byte blocks,
+ * a name at the driver's ISOFS_MAX_NAME limit, a zero-length file, a file of
+ * exactly one block, a multi-block file, and reads at and past EOF.  The
+ * fixture is tools/mkisofs_test.c; the two must agree on the names and
+ * contents below. */
+#define ISO_LONG_NAME_LEN 200
+#define ISO_BIG_SIZE      9000u
+#define ISO_BLOCK_BYTES   2048u
+#define ISO_FILLER_COUNT  150
+
+/* The generator writes "LONGNAME_...L.TXT"; the driver lowercases names. */
+static void isofs_long_name(char *out, size_t out_sz) {
+    if (out_sz < ISO_LONG_NAME_LEN + 1) {
+        out[0] = '\0';
+        return;
+    }
+    memset(out, 'l', ISO_LONG_NAME_LEN);
+    memcpy(out, "longname_", 9);
+    memcpy(out + ISO_LONG_NAME_LEN - 4, ".txt", 4);
+    out[ISO_LONG_NAME_LEN] = '\0';
+}
+
+/* Read exactly @len bytes and compare them with @expect, then require the next
+ * read to report end-of-file rather than an error. */
+static int isofs_expect_bytes(const char *path, const char *expect, size_t len,
+                              const char *what) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return fail(what);
+    char buf[512];
+    size_t total = 0;
+    while (total < len) {
+        size_t want = len - total;
+        if (want > sizeof(buf))
+            want = sizeof(buf);
+        ssize_t n = read(fd, buf, want);
+        if (n <= 0 || memcmp(buf, expect + total, (size_t)n) != 0) {
+            close(fd);
+            return fail(what);
+        }
+        total += (size_t)n;
+    }
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n != 0)
+        return fail(what);
+    return 0;
+}
+
+/* Read @len bytes and check the deterministic 'A'+i%26 pattern.  Bytes past
+ * the first block come from a second and third extent run, so a driver that
+ * only maps the first block fails here. */
+static int isofs_expect_pattern(const char *path, size_t len, const char *what) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return fail(what);
+    char buf[512];
+    size_t total = 0;
+    int rc = 0;
+    while (total < len) {
+        size_t want = len - total;
+        if (want > sizeof(buf))
+            want = sizeof(buf);
+        ssize_t n = read(fd, buf, want);
+        if (n <= 0) {
+            rc = fail(what);
+            break;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] != (char)('A' + ((total + (size_t)i) % 26))) {
+                rc = fail(what);
+                break;
+            }
+        }
+        if (rc)
+            break;
+        total += (size_t)n;
+    }
+    close(fd);
+    return rc;
+}
+
+/* One logical block of the deterministic (i % 251) byte pattern. */
+static int isofs_expect_block(const char *path, const char *what) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return fail(what);
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size != (off_t)ISO_BLOCK_BYTES) {
+        close(fd);
+        return fail(what);
+    }
+    char buf[512];
+    size_t total = 0;
+    int rc = 0;
+    while (total < ISO_BLOCK_BYTES) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) {
+            rc = fail(what);
+            break;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            if ((unsigned char)buf[i] != (unsigned char)((total + (size_t)i) % 251)) {
+                rc = fail(what);
+                break;
+            }
+        }
+        if (rc)
+            break;
+        total += (size_t)n;
+    }
+    close(fd);
+    return rc;
+}
+
+static int isofs_expect_empty(const char *path, const char *what) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return fail(what);
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size != 0) {
+        close(fd);
+        return fail(what);
+    }
+    char buf[8];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n != 0)
+        return fail(what);
+    return 0;
+}
+
 static int isofs_read(void)
 {
     mkdir("/tmp/isom", 0755);
@@ -1551,32 +1692,82 @@ static int isofs_read(void)
 
     int rc = 0;
     /* ISO names are translated to lowercase by the driver. */
-    int fd = open("/tmp/isom/hello.txt", O_RDONLY);
-    if (fd < 0)
-        rc = fail("isofs-open-hello");
-    else {
-        char buf[64] = {0};
-        int n = read(fd, buf, sizeof(buf) - 1);
-        if (n < 0 || strncmp(buf, "hello iso9660", 13) != 0)
-            rc = fail("isofs-read-hello");
-        close(fd);
+    if (isofs_expect_bytes("/tmp/isom/hello.txt", "hello iso9660 world\n", 20,
+                           "isofs-read-hello") != 0)
+        rc = 1;
+    else if (isofs_expect_bytes("/tmp/isom/sub/nested.txt",
+                                "nested file content\n", 20,
+                                "isofs-read-nested") != 0)
+        rc = 1;
+    else if (isofs_expect_empty("/tmp/isom/zero.bin", "isofs-read-zero") != 0)
+        rc = 1;
+    /* Exactly one logical block (2048 bytes): the boundary between a partial
+     * and a full page, and the largest file with no second extent. */
+    else if (isofs_expect_block("/tmp/isom/block.bin", "isofs-read-block") != 0)
+        rc = 1;
+    else if (isofs_expect_pattern("/tmp/isom/big.bin", ISO_BIG_SIZE,
+                                  "isofs-read-big") != 0)
+        rc = 1;
+
+    if (rc == 0) {
+        char long_name[ISO_LONG_NAME_LEN + 1];
+        char long_path[ISO_LONG_NAME_LEN + 32];
+        isofs_long_name(long_name, sizeof(long_name));
+        snprintf(long_path, sizeof(long_path), "/tmp/isom/%s", long_name);
+        if (isofs_expect_bytes(long_path, "long-name payload\n", 18,
+                               "isofs-read-longname") != 0)
+            rc = 1;
     }
 
-    /* Nested directory + file. */
-    fd = open("/tmp/isom/sub/nested.txt", O_RDONLY);
-    if (fd < 0)
-        rc = fail("isofs-open-nested");
-    else {
-        char buf[64] = {0};
-        int n = read(fd, buf, sizeof(buf) - 1);
-        if (n < 0 || strncmp(buf, "nested file", 11) != 0)
-            rc = fail("isofs-read-nested");
-        close(fd);
+    /* The root directory spans four blocks; F000 sits in the first and F149
+     * in the last, so both ends of the block-boundary walk are covered. */
+    if (rc == 0) {
+        char p[64], expect[16];
+        for (int i = 0; i < ISO_FILLER_COUNT; i += ISO_FILLER_COUNT - 1) {
+            snprintf(p, sizeof(p), "/tmp/isom/f%03d.txt", i);
+            snprintf(expect, sizeof(expect), "filler-%03d\n", i);
+            if (isofs_expect_bytes(p, expect, strlen(expect),
+                                   "isofs-read-filler") != 0) {
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (rc == 0) {
+        /* Reading at EOF and past EOF must report end-of-file, and seeking
+         * past the end must not turn a later read into data. */
+        int fd = open("/tmp/isom/hello.txt", O_RDONLY);
+        char buf[32];
+        if (fd < 0)
+            rc = fail("isofs-eof-open");
+        else {
+            if (lseek(fd, 20, SEEK_SET) != 20)
+                rc = fail("isofs-eof-seek");
+            else if (read(fd, buf, sizeof(buf)) != 0)
+                rc = fail("isofs-eof-read");
+            else if (lseek(fd, 4096, SEEK_SET) != 4096)
+                rc = fail("isofs-past-eof-seek");
+            else if (read(fd, buf, sizeof(buf)) != 0)
+                rc = fail("isofs-past-eof-read");
+            close(fd);
+        }
+    }
+
+    if (rc == 0) {
+        errno = 0;
+        int fd = open("/tmp/isom/absent.txt", O_RDONLY);
+        if (fd >= 0) {
+            close(fd);
+            rc = fail("isofs-absent-should-fail");
+        } else if (errno != ENOENT) {
+            rc = fail("isofs-absent-errno");
+        }
     }
 
     /* ISO is read-only: writes must fail. */
     errno = 0;
-    fd = open("/tmp/isom/hello.txt", O_WRONLY);
+    int fd = open("/tmp/isom/hello.txt", O_WRONLY);
     if (fd >= 0) {
         close(fd);
         rc = fail("isofs-should-be-ro");

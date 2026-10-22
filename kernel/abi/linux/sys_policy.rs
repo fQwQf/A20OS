@@ -21,15 +21,32 @@ pub const PR_SET_PDEATHSIG: i32 = 1;
 pub const PR_GET_PDEATHSIG: i32 = 2;
 pub const PR_GET_DUMPABLE: i32 = 3;
 pub const PR_SET_DUMPABLE: i32 = 4;
+pub const PR_SET_KEEPCAPS: i32 = 8;
 pub const PR_SET_NAME: i32 = 15;
 pub const PR_GET_SECCOMP: i32 = 21;
 pub const PR_SET_SECCOMP: i32 = 22;
 pub const PR_CAPBSET_READ: i32 = 23;
 pub const PR_CAPBSET_DROP: i32 = 24;
+pub const PR_GET_SECUREBITS: i32 = 27;
+pub const PR_SET_SECUREBITS: i32 = 28;
 pub const PR_SET_NO_NEW_PRIVS: i32 = 38;
 pub const PR_GET_NO_NEW_PRIVS: i32 = 39;
 pub const PR_SET_THP_DISABLE: i32 = 41;
 pub const PR_GET_THP_DISABLE: i32 = 42;
+
+/// Linux securebits, in the order they are defined in
+/// `include/uapi/linux/securebits.h`.  Each `*_LOCKED` bit is the bit
+/// immediately above the policy bit it freezes, which is what makes the
+/// `bits << 1` test in `securebits_frozen()` work for all of them.
+pub const SECBIT_NOROOT: u32 = 0x01;
+pub const SECBIT_NOROOT_LOCKED: u32 = 0x02;
+pub const SECBIT_NO_SETUID_FIXUP: u32 = 0x04;
+pub const SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 0x08;
+pub const SECBIT_KEEP_CAPS: u32 = 0x10;
+pub const SECBIT_KEEP_CAPS_LOCKED: u32 = 0x20;
+pub const SECBIT_NO_CAP_AMBIENT_RAISE: u32 = 0x40;
+pub const SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED: u32 = 0x80;
+pub const SECUREBITS_ALL: u32 = 0xff;
 
 pub const SECCOMP_MODE_STRICT: u64 = 1;
 pub const SECCOMP_MODE_FILTER: u64 = 2;
@@ -70,6 +87,8 @@ extern "C" {
     fn a20_pp_has_cap(t: *mut core::ffi::c_void, cap: i32) -> i32;
     fn a20_pp_cap_bounding(t: *mut core::ffi::c_void) -> u64;
     fn a20_pp_cap_drop(t: *mut core::ffi::c_void, bit: u32);
+    fn a20_pp_get_securebits(t: *mut core::ffi::c_void) -> u32;
+    fn a20_pp_set_securebits(t: *mut core::ffi::c_void, bits: u32);
     fn a20_pp_nnps(t: *mut core::ffi::c_void) -> i32;
     fn a20_pp_set_nnps(t: *mut core::ffi::c_void);
     fn a20_pp_thp(t: *mut core::ffi::c_void) -> i32;
@@ -82,6 +101,15 @@ extern "C" {
 
 /// Run one `prctl(2)` request.  Returns the syscall result.
 ///
+/// The set of policy bits that are frozen by a `*_LOCKED` bit in `securebits`.
+///
+/// Linux numbers each `SECBIT_*_LOCKED` immediately above the bit it freezes,
+/// so the frozen mask is `securebits & (policy_bits << 1)`, narrowed back down
+/// to the policy bits themselves.
+fn securebits_frozen(securebits: u32) -> u32 {
+    (securebits >> 1) & SECUREBITS_ALL
+}
+
 /// # Safety
 /// `op`/`a1..a4` are the raw syscall arguments; only the operations that need
 /// a user pointer dereference it, through the C bridges.
@@ -149,6 +177,53 @@ pub unsafe extern "C" fn a20_prctl(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) 
                 return EPERM;
             }
             unsafe { a20_pp_cap_drop(t, a1 as u32) };
+            0
+        }
+        PR_GET_SECUREBITS => {
+            if t.is_null() {
+                return ESRCH;
+            }
+            unsafe { a20_pp_get_securebits(t) as i64 }
+        }
+        PR_SET_SECUREBITS => {
+            if t.is_null() {
+                return ESRCH;
+            }
+            let bits = a1 as u32;
+            if bits & !SECUREBITS_ALL != 0 {
+                return EINVAL;
+            }
+            if unsafe { a20_pp_has_cap(t, CAP_SETPCAP) } == 0 {
+                return EPERM;
+            }
+            let cur = unsafe { a20_pp_get_securebits(t) };
+            /* Setting a frozen bit is refused; clearing is always allowed. */
+            if bits & securebits_frozen(cur) != 0 {
+                return EPERM;
+            }
+            unsafe { a20_pp_set_securebits(t, cur | bits) };
+            0
+        }
+        PR_SET_KEEPCAPS => {
+            /* Linux accepts only 0/1 here and ignores the remaining arguments,
+             * so this arm does not impose the stricter arity check the ops
+             * above use.  io_uring and the capability-aware tools (iputils'
+             * ping is one) call this before dropping uid and again after. */
+            if t.is_null() {
+                return ESRCH;
+            }
+            if a1 > 1 {
+                return EINVAL;
+            }
+            let cur = unsafe { a20_pp_get_securebits(t) };
+            if a1 == 1 {
+                if SECBIT_KEEP_CAPS & securebits_frozen(cur) != 0 {
+                    return EPERM;
+                }
+                unsafe { a20_pp_set_securebits(t, cur | SECBIT_KEEP_CAPS) };
+            } else {
+                unsafe { a20_pp_set_securebits(t, cur & !SECBIT_KEEP_CAPS) };
+            }
             0
         }
         PR_SET_NO_NEW_PRIVS => {
@@ -333,6 +408,7 @@ mod tests {
         last_sig: i32,
         has_cap: i32,
         bounding: u64,
+        securebits: u32,
         nnps: i32,
         thp: i32,
         seccomp_mode: i64,
@@ -344,8 +420,9 @@ mod tests {
 
     static mut F: Fake = Fake {
         has_mm: 1, dumpable: 0, parent_alive: 1, pdeathsig: 0, copy_rc: 0,
-        last_sig: 0, has_cap: 0, bounding: 0, nnps: 0, thp: 0, seccomp_mode: 0,
-        seccomp_strict_calls: 0, seccomp_filter_addr: 0, name_addr: 0, name_calls: 0,
+        last_sig: 0, has_cap: 0, bounding: 0, securebits: 0, nnps: 0, thp: 0,
+        seccomp_mode: 0, seccomp_strict_calls: 0, seccomp_filter_addr: 0,
+        name_addr: 0, name_calls: 0,
     };
 
     fn fix() -> &'static mut Fake { unsafe { &mut *core::ptr::addr_of_mut!(F) } }
@@ -354,8 +431,9 @@ mod tests {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         *fix() = Fake {
             has_mm: 1, dumpable: 0, parent_alive: 1, pdeathsig: 0, copy_rc: 0,
-            last_sig: 0, has_cap: 0, bounding: 0, nnps: 0, thp: 0, seccomp_mode: 0,
-            seccomp_strict_calls: 0, seccomp_filter_addr: 0, name_addr: 0, name_calls: 0,
+            last_sig: 0, has_cap: 0, bounding: 0, securebits: 0, nnps: 0, thp: 0,
+            seccomp_mode: 0, seccomp_strict_calls: 0, seccomp_filter_addr: 0,
+            name_addr: 0, name_calls: 0,
         };
         guard
     }
@@ -381,6 +459,12 @@ mod tests {
     #[no_mangle] unsafe extern "C" fn a20_pp_cap_bounding(_t: *mut core::ffi::c_void) -> u64 { fix().bounding }
     #[no_mangle] unsafe extern "C" fn a20_pp_cap_drop(_t: *mut core::ffi::c_void, bit: u32) {
         fix().bounding &= !(1u64 << bit);
+    }
+    #[no_mangle] unsafe extern "C" fn a20_pp_get_securebits(_t: *mut core::ffi::c_void) -> u32 {
+        fix().securebits
+    }
+    #[no_mangle] unsafe extern "C" fn a20_pp_set_securebits(_t: *mut core::ffi::c_void, bits: u32) {
+        fix().securebits = bits;
     }
     #[no_mangle] unsafe extern "C" fn a20_pp_nnps(_t: *mut core::ffi::c_void) -> i32 { fix().nnps }
     #[no_mangle] unsafe extern "C" fn a20_pp_set_nnps(_t: *mut core::ffi::c_void) { fix().nnps = 1 }
@@ -532,6 +616,35 @@ mod tests {
         assert_eq!(a20_setsid(1, 300, 300), EPERM);
         assert_eq!(a20_setsid(1, 300, 200), 300);
         assert_eq!(a20_setsid(0, 300, 200), ESRCH);
+    }
+
+    #[test]
+    fn keepcaps_sets_and_clears_the_bit() {
+        let _g = reset();
+        assert_eq!(unsafe { a20_prctl(PR_SET_KEEPCAPS as u64, 1, 0, 0, 0) }, 0);
+        assert_eq!(fix().securebits, SECBIT_KEEP_CAPS);
+        assert_eq!(unsafe { a20_prctl(PR_GET_SECUREBITS as u64, 0, 0, 0, 0) },
+                   SECBIT_KEEP_CAPS as i64);
+        assert_eq!(unsafe { a20_prctl(PR_SET_KEEPCAPS as u64, 0, 0, 0, 0) }, 0);
+        assert_eq!(fix().securebits, 0);
+        /* Linux accepts only 0/1 here. */
+        assert_eq!(unsafe { a20_prctl(PR_SET_KEEPCAPS as u64, 2, 0, 0, 0) }, EINVAL);
+    }
+
+    #[test]
+    fn a_locked_bit_cannot_be_set_again() {
+        let _g = reset();
+        /* PR_SET_SECUREBITS needs CAP_SETPCAP, which the fake lacks by default. */
+        assert_eq!(unsafe { a20_prctl(PR_SET_SECUREBITS as u64,
+                                      SECBIT_KEEP_CAPS_LOCKED as u64, 0, 0, 0) }, EPERM);
+        fix().has_cap = 1;
+        assert_eq!(unsafe { a20_prctl(PR_SET_SECUREBITS as u64,
+                                      SECBIT_KEEP_CAPS_LOCKED as u64, 0, 0, 0) }, 0);
+        /* KEEP_CAPS is now frozen: setting it is EPERM, clearing it is not. */
+        assert_eq!(unsafe { a20_prctl(PR_SET_KEEPCAPS as u64, 1, 0, 0, 0) }, EPERM);
+        assert_eq!(unsafe { a20_prctl(PR_SET_KEEPCAPS as u64, 0, 0, 0, 0) }, 0);
+        /* Bits outside the interface are rejected. */
+        assert_eq!(unsafe { a20_prctl(PR_SET_SECUREBITS as u64, 0x1_00, 0, 0, 0) }, EINVAL);
     }
 
     #[test]

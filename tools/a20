@@ -8,7 +8,7 @@
 Reads an instance manifest (TOML under instances/), validates it, derives
 the corresponding Makefile variables, and delegates execution to make. The
 Makefile remains the build engine; this tool owns configuration derivation.
-See docs/instances.md for the manifest reference.
+See docs/dev/instances.md for the manifest reference.
 
 # ─── How to run ───
 #   tools/a20 check                        validate every instances/*.toml
@@ -177,7 +177,7 @@ def _check_runnable(inst: Instance, action: str) -> None:
         raise A20Error(
             f"'{action}' has no generic QEMU path for {inst.arch}",
             hint="armv7m runs through tools/stm32.mk ([stm32] qemu = true); "
-                 "loongarch32 runs on the cemu simulator, not QEMU")
+                 "LoongArch32 and PPC64LE are retired; use a clean v0.18 checkout for historical reproduction")
 
 
 def _gate_resources(inst, args, *, guest: bool = True) -> None:
@@ -201,8 +201,18 @@ def _gate_resources(inst, args, *, guest: bool = True) -> None:
                         policy.max_concurrent, args.wait_timeout)
     preflight(inst, policy, REPO_ROOT, wait=not getattr(args, "no_wait", False),
               echo=_echo, guest=guest)
-def _gate_qemu(inst: Instance, action: str) -> None:
-    """Block until the host can host this instance; see tools/a20_resource.gate_qemu."""
+def _gate_qemu(inst: Instance, action: str, *, check_image: bool = True,
+               dry_run: bool = False) -> None:
+    """Block until the host can host this instance; see tools/a20_resource.gate_qemu.
+
+    `check_image=False` is for the callers whose make target runs `image-world`
+    before QEMU: the bytes on disk now are not the bytes that get booted, so
+    fscking them only reports the damage the *previous* run left behind.  A dry
+    run boots nothing at all and must not be refused either -- the same rule
+    `_gate_resources` already follows for waiting.
+    """
+    if dry_run:
+        return
     m = inst.machine
     memory = m.memory
     if memory is None:
@@ -212,7 +222,7 @@ def _gate_qemu(inst: Instance, action: str) -> None:
     # filesystem problem.  Its absence is not an error here: cmd_run builds
     # the image itself, so on a first run there is nothing to check yet.
     image = None
-    if inst.rootfs.world is not None:
+    if check_image and inst.rootfs.world is not None:
         image = REPO_ROOT / "build" / "images" / f"{inst.rootfs.world}-{inst.arch}.img"
     gate_qemu(memory=memory, vcpus=m.smp or DEFAULT_VCPUS,
               disk_path=str(REPO_ROOT), image=image,
@@ -275,7 +285,13 @@ def cmd_run(args: argparse.Namespace) -> None:
     _check_runnable(inst, "run")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
-    _gate_qemu(inst, "run")
+    # run-world and run-world-gui both run `image-world` before QEMU, so for a
+    # world instance the file on disk is a leftover from the previous run, not
+    # what gets booted.  fscking it here is what used to force a separate
+    # `a20 build` between two `a20 run`s: the journal-less ext4 is dirty after
+    # every run, because the guest is killed rather than shut down.
+    _gate_qemu(inst, "run", check_image=inst.rootfs.world is None,
+               dry_run=getattr(args, "dry_run", False))
     if inst.rootfs.world is not None:
         # apk world images boot as the second disk; init chroots into them.
         target = "run-world-gui" if inst.gui.enabled else "run-world"
@@ -289,7 +305,7 @@ def cmd_debug(args: argparse.Namespace) -> None:
     _check_runnable(inst, "debug")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
-    _gate_qemu(inst, "debug")
+    _gate_qemu(inst, "debug", dry_run=getattr(args, "dry_run", False))
     return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
 
 
@@ -298,7 +314,7 @@ def cmd_test(args: argparse.Namespace) -> int:
     _check_runnable(inst, "test")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
-    _gate_qemu(inst, "test")
+    _gate_qemu(inst, "test", dry_run=getattr(args, "dry_run", False))
     return run_test(inst, list(args.make_args), args.dry_run)
 
 
@@ -878,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     a20_complete) can introspect the real parser instead of a copy of it."""
     parser = argparse.ArgumentParser(
         prog="a20",
-        description="Declarative instance runner for A20OS (see docs/instances.md).",
+        description="Declarative instance runner for A20OS (see docs/dev/instances.md).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1004,14 +1020,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
 
+    # Everything after an explicit "--" is make's.  argparse swallows the first
+    # bare "--" as its own option terminator and never returns it in the extras,
+    # so `a20 run xfce-x86_64 -- VAR=1` used to reach the check below as an
+    # unrecognized argument while `a20 run xfce-x86_64 --dry-run -- -j8` worked
+    # (there the "--" survived, because it followed a flag argparse had already
+    # consumed differently).  Split on the raw words instead, where the
+    # separator is unambiguous.  `complete` keeps its separator: its `words`
+    # argument is a REMAINDER and the shell may hand it a literal "--" as the
+    # word being completed.
     raw = list(sys.argv[1:] if argv is None else argv)
-    split = raw.index("--") if "--" in raw else len(raw)
-    ns, unknown = parser.parse_known_args(raw[:split])
-    if unknown:
-        parser.error(f"unrecognized argument(s): {' '.join(unknown)}\n"
-                     "make arguments go after '--', e.g. `a20 build <instance> -- -j8`")
-    ns.make_args = raw[split + 1:] if split < len(raw) else []
-    if ns.make_args and ns.command not in {"build", "run", "debug", "test", "flash", "package", "deploy"}:
+    make_args: list[str] = []
+    command = next((w for w in raw if not w.startswith("-")), None)
+    if "--" in raw and command != "complete":
+        cut = raw.index("--")
+        raw, make_args = raw[:cut], raw[cut + 1:]
+
+    # Anything still unknown outside that separator is a typo, and forwarding it
+    # would hand it to make as a variable override or goal -- so `--dry-rnu` has
+    # to be an error, not a silently-ignored flag that changes what gets built.
+    ns, passthrough = parser.parse_known_args(raw)
+    if passthrough:
+        parser.error(f"unrecognized argument(s): {' '.join(passthrough)}\n"
+                     "a20 flags must be spelled correctly; make arguments go after '--', "
+                     "e.g. `a20 build <instance> -- -j8`")
+    ns.make_args = make_args
+    if make_args and ns.command not in {"build", "run", "debug", "test", "flash", "package", "deploy"}:
         parser.error(f"{ns.command} does not accept make arguments")
 
     rc = _dispatch(ns)

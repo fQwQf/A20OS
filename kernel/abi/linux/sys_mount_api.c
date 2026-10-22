@@ -26,9 +26,15 @@ static int fs_mount_priv_check(void)
     return 0;
 }
 
+/* fsopen(2) flags.  Only FSOPEN_CLOEXEC is defined, and libmount always
+ * passes it -- rejecting every non-zero flag here is what made util-linux's
+ * mount(8) report "wrong fs type, bad option, bad superblock" for every
+ * filesystem, before fsmount(2) was even reached. */
+#define FSOPEN_CLOEXEC 0x00000001
+
 int64_t sys_fsopen(const char *fsname, unsigned flags)
 {
-    if (flags)
+    if (flags & ~FSOPEN_CLOEXEC)
         return -EINVAL;
     if (!fsname)
         return -EFAULT;
@@ -53,15 +59,36 @@ int64_t sys_fsconfig(int fs_fd, unsigned cmd, const char *key,
     char kbuf[128];
     char vbuf[512];
     const char *kp = NULL, *vp = NULL;
-    if (cmd != 0 && key) { /* FSCONFIG_SET_FLAG(1)/SET_STRING(2)/SET_PATH(3) use key */
-        if (user_strncpy(kbuf, key, sizeof(kbuf)) < 0)
-            return -EFAULT;
-        kp = kbuf;
-    }
-    if (value && cmd != 0 && cmd != 1) {
-        if (user_strncpy(vbuf, (const char *)value, sizeof(vbuf)) < 0)
-            return -EFAULT;
-        vp = vbuf;
+    /* Linux's fsconfig commands.  Getting this mapping wrong is not cosmetic:
+     * libmount sends FSCONFIG_SET_STRING, and an off-by-one here dropped the
+     * value, so setting "source" failed with EINVAL and every util-linux mount
+     * reported "wrong fs type, bad option, bad superblock".
+     *   0 SET_FLAG   1 SET_STRING   2 SET_BINARY   3 SET_PATH
+     *   4 SET_PATH_EMPTY   5 SET_FD   6 CMD_CREATE   7 CMD_RECONFIGURE */
+    switch (cmd) {
+    case 2:  /* binary values have no representation in this context */
+    case 5:  /* fd-valued options are not supported */
+        return -EOPNOTSUPP;
+    case 0:
+    case 1:
+    case 3:
+    case 4:
+        if (key) {
+            if (user_strncpy(kbuf, key, sizeof(kbuf)) < 0)
+                return -EFAULT;
+            kp = kbuf;
+        }
+        if (cmd != 0 && value) {
+            if (user_strncpy(vbuf, (const char *)value, sizeof(vbuf)) < 0)
+                return -EFAULT;
+            vp = vbuf;
+        }
+        break;
+    case 6:
+    case 7:
+        break;   /* create/reconfigure: fsmount(2) does the work here */
+    default:
+        return -EINVAL;
     }
     return fscontext_config((int)gfd, kp, vp);
 }
@@ -126,25 +153,55 @@ int64_t sys_open_tree(int dirfd, const char *path, unsigned flags)
     return gfd; /* fscontext_open_tree_fd() already installed O_PATH */
 }
 
+/* move_mount(2) flags we act on.  F_EMPTY_PATH makes from_path name an fd
+ * returned by fsmount(2) rather than a path, which is the route libmount
+ * takes: fsopen -> fsconfig -> fsmount -> move_mount. */
+#define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
+
 int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
                        const char *to_path, unsigned flags)
 {
-    (void)flags;
     int priv = fs_mount_priv_check();
     if (priv < 0)
         return priv;
-    if (!from_path || !to_path)
+    if (!to_path)
         return -EFAULT;
 
-    char fbuf[MAX_PATH_LEN], tbuf[MAX_PATH_LEN];
-    long pr0;
-    if ((pr0 = user_path_strncpy(fbuf, from_path, sizeof(fbuf))) < 0 ||
-        (pr0 = user_path_strncpy(tbuf, to_path, sizeof(tbuf))) < 0)
-        return pr0;
-    char full_f[MAX_PATH_LEN], full_t[MAX_PATH_LEN];
-    if (syscall_path_at(from_dfd, fbuf, full_f, sizeof(full_f)) < 0)
+    char tbuf[MAX_PATH_LEN], full_t[MAX_PATH_LEN];
+    if (user_path_strncpy(tbuf, to_path, sizeof(tbuf)) < 0)
         return -EFAULT;
     if (syscall_path_at(to_dfd, tbuf, full_t, sizeof(full_t)) < 0)
+        return -EFAULT;
+
+    if (flags & MOVE_MOUNT_F_EMPTY_PATH) {
+        /* The source is a detached mount fd, so there is no path to resolve;
+         * the fd must still be empty, as Linux requires. */
+        if (from_path) {
+            char fbuf[MAX_PATH_LEN];
+            if (user_path_strncpy(fbuf, from_path, sizeof(fbuf)) < 0)
+                return -EFAULT;
+            if (fbuf[0] != '\0')
+                return -EINVAL;
+        }
+        /* fsmount() handed out a process fd; the context helpers work in
+         * global-fd space, exactly as sys_fsconfig does for its context. */
+        int64_t mfd = fdtable_get_current(from_dfd);
+        if (mfd < 0)
+            return -EBADF;
+        struct mount *mnt = fscontext_mountfd_get((int)mfd);
+        if (!mnt)
+            return -EINVAL;
+        return vfs_mount_attach_path(mnt, full_t);
+    }
+
+    if (!from_path)
+        return -EFAULT;
+    char fbuf[MAX_PATH_LEN];
+    long pr0 = user_path_strncpy(fbuf, from_path, sizeof(fbuf));
+    if (pr0 < 0)
+        return pr0;
+    char full_f[MAX_PATH_LEN];
+    if (syscall_path_at(from_dfd, fbuf, full_f, sizeof(full_f)) < 0)
         return -EFAULT;
 
     /* A20OS mounts are bound to their path in the mount table; "moving" is

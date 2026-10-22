@@ -54,6 +54,35 @@ def _media_ignore(src: Path, arch: str, dropped: list[str]):
     return ignore
 
 
+_FORTIFY_CC = {
+    "x86_64": "x86_64-linux-gnu-gcc",
+    "aarch64": "aarch64-linux-gnu-gcc",
+    "riscv64": "riscv64-linux-gnu-gcc",
+    "loongarch64": "loongarch64-linux-gnu-gcc",
+}
+
+
+def _stage_fortify_shim(ov: Path, arch: str) -> None:
+    """Build the glibc-fortify compat shim for this arch into the overlay.
+
+    Only riscv64's libjnidispatch.so (JNA 5.17.0) imports __*_chk
+    @GLIBC_2.27, which musl does not export; the first fortified call then
+    jumps into the PLT lazy-binding stub and dies.  See tools/a20-fortify.c.
+    The overlay copy is per-arch ELF, so it is compiled here rather than
+    committed under packages/overlay/ (mkrootfs refuses a mismatched
+    e_machine).
+    """
+    cc = _FORTIFY_CC.get(arch)
+    if cc is None:
+        return
+    dst = ov / "usr" / "lib" / "a20"
+    dst.mkdir(parents=True, exist_ok=True)
+    out = dst / "liba20-fortify.so"
+    run([cc, "-shared", "-fPIC", "-O2",
+         "-Wl,--version-script=tools/a20-fortify.map",
+         "-o", str(out), "tools/a20-fortify.c"])
+
+
 def run(cmd: list[str], **kw) -> None:
     print(f"+ {shlex.join(cmd)}", flush=True)
     r = subprocess.run(cmd, cwd=REPO, check=False, **kw)
@@ -161,6 +190,7 @@ def cmd_media_overlay(a) -> int:
     if link.is_symlink() or link.exists():
         link.unlink()
     link.symlink_to(a.media_dir)
+    _stage_fortify_shim(ov, a.arch)
     return 0
 
 

@@ -12,7 +12,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 366 dispatch entries, including seven A20OS extensions (`a20_channel_pair`/`a20_registry_client`/`a20_envelope_create`/`a20_envelope_enter`/`a20_envelope_revoke`/`a20_envelope_stats`/`a20_envelope_audit`) and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler, and no entry is a fixed `-ENOSYS` placeholder. `-ENOSYS` is returned in two kinds of situation: the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86), and a small number of entries whose capability A20OS genuinely lacks and therefore refuses to fake — `vhangup` (no tty layer, so there is no controlling terminal to revoke) and `process_mrelease` (a pidfd holds no task reference, so there is no detached mm to release). Each of the latter says so in its own row; they are honest refusals, not dispatch gaps. Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 366 dispatch entries, including seven A20OS extensions (`a20_channel_pair`/`a20_registry_client`/`a20_envelope_create`/`a20_envelope_enter`/`a20_envelope_revoke`/`a20_envelope_stats`/`a20_envelope_audit`) and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler, and no entry is a fixed `-ENOSYS` placeholder. `-ENOSYS` is returned in two kinds of situation: the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86), and a small number of entries whose capability A20OS genuinely lacks and therefore refuses to fake — `vhangup` (there is no controlling-terminal model, so there is no terminal to revoke; the line discipline itself now exists -- see [drivers/guide/lock-order.md](../../docs/drivers/guide/lock-order.md)) and `process_mrelease` (a pidfd holds no task reference, so there is no detached mm to release). Each of the latter says so in its own row; they are honest refusals, not dispatch gaps. Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Smoke gates (last known status) | Notes |
 | --- | --- | --- | --- |
@@ -41,7 +41,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | cross-process memory | partial | smoke-syscall-ext, smoke-ptrace (PASS 2026-08-26) | process_vm_readv/writev, process_madvise, process_mrelease over the target page table. |
 | mempolicy/NUMA | partial | smoke-mm-stress (PASS 2026-08-26) | single-node policy validation/storage; no physical NUMA migration. |
  | file handles | full | smoke-vfs-stress (PASS 2026-08-26) | name_to_handle_at/open_by_handle_at over a kernel-side handle registry with opaque handle minting. |
-| new mount API | partial | smoke-vfs-stress (PASS 2026-08-26) | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
+| new mount API | partial | smoke-vfs-edge (libmount sequence), smoke-vfs-stress | `fsopen` -> `fsconfig` -> `fsmount` returns a **detached** mount fd, and `move_mount(mfd, "", AT_FDCWD, dir, MOVE_MOUNT_F_EMPTY_PATH)` attaches it; `fsconfig` follows Linux's command numbering; util-linux `mount`/`umount` work in a world guest. `fspick`/`open_tree`/`mount_setattr` stay on the existing table. |
 | io_uring | partial | smoke-syscall-ext | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
  | landlock | full | smoke-syscall-ext | fd-backed rulesets with path-beneath rules enforced at vfs_open; ABI v1 with supported access rights. |
  | rseq | full | smoke-proc-stress (PASS 2026-08-26) | per-thread rseq registration/unregistration with signature validation; CPU migration abort is out of scope (registration-only). |
@@ -398,12 +398,12 @@ strength of a boilerplate note.
 | `set_mempolicy_home_node` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
 | `name_to_handle_at` | path/fs | `full` | `smoke-vfs-stress` | kernel-side opaque handle registry (kernel/fs/file_handle.c) |
 | `open_by_handle_at` | path/fs | `full` | `smoke-vfs-stress` | reopens a handle's vnode through the registry |
-| `fsopen` | path/fs | `partial` | `smoke-vfs-stress` | creates a filesystem context fd |
-| `fsconfig` | path/fs | `partial` | `smoke-vfs-stress` | configures source/type/options on a context fd |
-| `fsmount` | path/fs | `partial` | `smoke-vfs-stress` | realizes the context as a mount through vfs_mount |
+| `fsopen` | path/fs | `partial` | `smoke-vfs-edge` | creates a filesystem context fd; accepts `FSOPEN_CLOEXEC` and, like Linux, is not readable (`read(2)` returns `EINVAL`) |
+| `fsconfig` | path/fs | `partial` | `smoke-vfs-edge` | Linux command numbering: 0 flag, 1 string, 3 path, 6 create; 2/5 return `EOPNOTSUPP` |
+| `fsmount` | path/fs | `partial` | `smoke-vfs-edge` | returns a detached mount fd (`vfs_mount_detached`); closing it before attach destroys the mount |
 | `fspick` | path/fs | `partial` | `smoke-vfs-stress` | returns a context fd bound to an existing mount |
 | `open_tree` | path/fs | `partial` | `smoke-vfs-stress` | returns an O_PATH-style fd for a vnode tree |
-| `move_mount` | path/fs | `partial` | `smoke-vfs-stress` | repoints a mount table entry to a new path |
+| `move_mount` | path/fs | `partial` | `smoke-vfs-edge` | `MOVE_MOUNT_F_EMPTY_PATH` attaches a detached mount fd at the target; the path form repoints a table entry |
 | `mount_setattr` | path/fs | `partial` | `smoke-vfs-stress` | validates the path; per-mount attribute changes not supported |
 | `io_uring_setup` | aio | `partial` | `smoke-syscall-ext` | kernel-memory SQ/CQ rings mapped into the caller (kernel/fs/io_uring.c) |
 | `io_uring_enter` | aio | `partial` | `smoke-syscall-ext` | executes SQEs synchronously through the VFS (NOP/READ/WRITE/FSYNC/CLOSE) |

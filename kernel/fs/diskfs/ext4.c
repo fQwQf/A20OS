@@ -89,6 +89,47 @@ static uint16_t ext4_state_transition(uint16_t state, int transition)
 }
 #endif
 
+/*
+ * Options that would change how the journal behaves.  This driver commits
+ * metadata in ordered mode with csum_v3 and has no data journal, no
+ * async-commit and no fast-commit path, so accepting these would advertise a
+ * mode the filesystem does not implement.  Everything else is passed through
+ * as before: unknown options are ignored, which is what the callers in this
+ * tree rely on.
+ */
+int ext4_validate_mount_options(const char *opts)
+{
+    static const char *const rejected[] = {
+        "data=journal", "data=writeback", "journal_async_commit",
+        "journal_checksum", "barrier=0", "nobarrier", "fast_commit",
+        "journal_dev",
+    };
+    if (!opts)
+        return 0;
+    for (const char *p = opts; *p; ) {
+        while (*p == ',')
+            p++;
+        const char *end = p;
+        while (*end && *end != ',')
+            end++;
+        size_t len = (size_t)(end - p);
+        for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+            if (strlen(rejected[i]) == len &&
+                strncmp(p, rejected[i], len) == 0) {
+                /* The kernel printf has no "%.*s": copy the name out. */
+                char name[32];
+                size_t n = len < sizeof(name) - 1 ? len : sizeof(name) - 1;
+                memcpy(name, p, n);
+                name[n] = '\0';
+                printf("[EXT4] refusing mount: unsupported option %s\n", name);
+                return -EOPNOTSUPP;
+            }
+        }
+        p = end;
+    }
+    return 0;
+}
+
 static int ext4_state_admit(uint16_t state)
 {
 #ifdef CONFIG_EXT4_RUST_EXTENT_TXN
@@ -96,6 +137,19 @@ static int ext4_state_admit(uint16_t state)
     return a20_ext4_mount_state_admit(state) != 0;
 #else
     return !(state & EXT4_ERROR_FS) && (state & EXT4_VALID_FS);
+#endif
+}
+
+/* Dirty because the last session did not finish, as opposed to dirty because
+ * this driver caught metadata it could not trust.  Only the former is what a
+ * mount-time orphan recovery can resolve. */
+static int ext4_state_recoverable(uint16_t state)
+{
+#ifdef CONFIG_EXT4_RUST_EXTENT_TXN
+    extern int a20_ext4_mount_state_recoverable(uint16_t);
+    return a20_ext4_mount_state_recoverable(state) != 0;
+#else
+    return !(state & EXT4_ERROR_FS) && !(state & EXT4_VALID_FS);
 #endif
 }
 
@@ -452,7 +506,9 @@ int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
      * creates, and a freshly allocated slot is all zeroes, so the driver has to
      * stamp it as well. */
     if (inode_size > EXT4_INODE_SIZE_STATIC) {
-        uint16_t extra = (uint16_t)(inode_size - EXT4_INODE_SIZE_STATIC);
+        uint16_t extra = EXT4_INODE_EXTRA_ISIZE;
+        if ((size_t)EXT4_INODE_SIZE_STATIC + extra + 4 > inode_size)
+            extra = (uint16_t)(inode_size - EXT4_INODE_SIZE_STATIC);
         size_t eo = offsetof(ext4_inode_t, i_extra_isize);
         raw[eo] = (uint8_t)extra;
         raw[eo + 1] = (uint8_t)(extra >> 8);
@@ -2764,6 +2820,10 @@ vnode_ops_t g_ext4_vnode_ops = {
     .writepage = ext4_vn_writepage,
     .writepages = ext4_vn_writepages,
     .sync_vnode = ext4_vn_sync,
+    .xattr_get = ext4_xattr_get,
+    .xattr_set = ext4_xattr_set,
+    .xattr_list = ext4_xattr_list,
+    .xattr_remove = ext4_xattr_remove,
     .chmod    = ext4_vn_chmod,
     .chown    = ext4_vn_chown,
     .open     = ext4_open_vnode,
@@ -2833,6 +2893,8 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
     fp->file_size = sz;
     fp->type      = type;
     fp->unlinked  = 0;
+    fp->orphan_next = 0;
+    fp->dir_removed = 0;
     fp->open_count = 0;
     vn->fs_data   = fp;
 
@@ -2856,13 +2918,24 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         return NULL;
     }
 
-    /* No-journal ext4 has no replay path. Only a VALID, non-error image may
-     * become writable; the Rust policy is shared with the UFSD build. */
-    if (!(sb.s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) &&
-        !ext4_state_admit(sb.s_state)) {
-        printf("[EXT4] refusing mount: no-journal filesystem state is not clean (0x%x)\n",
+    /* No-journal ext4 has no replay path.  A clean image is admitted as
+     * before.  An image that was merely not shut down cleanly is admitted too,
+     * because the legacy orphan chain is exactly the work the interrupted
+     * session left and the recovery below finishes it -- refusing instead
+     * makes every crash leave the image permanently unmountable.  An image
+     * this driver already flagged with ERROR_FS stays refused: no mount-time
+     * recovery can repair that. */
+    int no_journal =
+        !(sb.s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL);
+    if (no_journal && !ext4_state_admit(sb.s_state)) {
+        if (!ext4_state_recoverable(sb.s_state) ||
+            (flags & VFS_MOUNT_RDONLY)) {
+            printf("[EXT4] refusing mount: no-journal filesystem state is not clean (0x%x)\n",
+                   sb.s_state);
+            return NULL;
+        }
+        printf("[EXT4] unclean no-journal image (state=0x%x); recovering orphans\n",
                sb.s_state);
-        return NULL;
     }
 
     if ((flags & VFS_MOUNT_RDONLY) &&

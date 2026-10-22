@@ -6,7 +6,7 @@
 
 | 文件 | 触发 | 职责 |
 |------|------|------|
-| `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 构建构建容器镜像，推 `ghcr.io/<owner小写>/a20os-buildenv` |
+| `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 按架构构建构建容器镜像并自检，推 `ghcr.io/<owner小写>/a20os-buildenv:<target>`，`multi` 另发 `:latest` |
 | `ci.yml` | PR / push main / 手动 | 宿主侧源码契约门禁（快速）→ 逐架构内核 bring-up 构建矩阵 → 四架构打包建库 + 组 base 镜像 → 独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
 | `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release（附件 = 各架构镜像） |
 
@@ -18,24 +18,80 @@ workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner�
 
 ## 构建容器（环境可复现的关键）
 
-`tools/ci/Dockerfile` 基于 `debian:trixie-slim`，固化：
+镜像分两层：一个与架构无关的 `base`，和每个架构一个 target。`base` 装
+`debian:trixie-slim` + 镜像工具（mtools / dosfstools / e2fsprogs）、
+`fakeroot`、`ccache`、`openssl`、Python 3、宿主 gcc，以及 **Rust**（`rustc`
++ `cargo` + `rust-src` + 宿主 std）。每个架构 target 只加自己的交叉 gcc、
+它的 `libc6-dev-*-cross`、对应的 QEMU 和它自己的 no_std Rust target。
 
-- 活跃架构交叉工具链（riscv64 / aarch64 / x86_64 / loongarch64 /
-  arm32，含 `riscv64-unknown-elf` 与 riscv32 multilib 裸机工具链）；
-- QEMU（riscv64/x86/arm）、镜像工具（mtools / dosfstools / e2fsprogs）、
-  `fakeroot`、`ccache`、`openssl`、Python 3。
+| target | 额外内容 | 约 |
+|---|---|---|
+| `base` | — | 1.7 GB |
+| `riscv` | `riscv64-unknown-elf`（含 rv32 multilib）、`riscv64-linux-gnu`、`qemu-system-riscv*`、rust `riscv64imac/riscv64gc-unknown-none-elf` | 2.7 GB |
+| `aarch64` | `aarch64-linux-gnu`、`qemu-system-arm`、rust `aarch64-unknown-none` | 2.0 GB |
+| `x86_64` | `qemu-system-x86`、rust `x86_64-unknown-none`（gcc 用 base 的宿主） | 1.9 GB |
+| `loongarch64` | `loongarch64-linux-gnu`、`qemu-system-misc`、rust `loongarch64-unknown-none` | 2.3 GB |
+| `arm32` | `arm-linux-gnueabihf`、`qemu-system-arm`、rust `armv7a-none-eabihf` | 2.0 GB |
+| `armv7m` | `arm-none-eabi`、`qemu-system-arm`、rust `thumbv7m-none-eabi` | 2.4 GB |
+| `multi` | 以上全部；发布为 `:latest` | 4.5 GB |
 
-依赖清单刻意与 [../dev/build.md](../dev/build.md) 的"环境准备"一节一一对应；
-**改动一边时必须同步另一边**。
+（体积是本机实测的安装体积，随 Debian 快照浮动。`multi` 比旧的单镜像 3.4 GB
+更大，因为它补进了原先完全缺失的 Rust；单架构镜像因此比 `multi` 小 1.8–2.6 GB，
+这才是按架构拉取省下的量。）
 
-CI 的构建和 QEMU job 通过 `container:` 运行在这个镜像里；源码契约门禁和
-矩阵/镜像名解析 job 使用裸 runner。构建或运行失败时可在同一镜像复现：
+为什么要拆：单镜像要求每个 job 拉下**所有**架构的工具链；更糟的是缺包是隐形的，
+只有真去编那个架构才暴露。这个镜像正是这样同时缺过两样东西——每个容器内内核
+构建都要的 Rust 一点没有，armhf 的 libc 开发头也没有（交叉 gcc 只把
+`libc6-dev-*-cross` 列为 **Recommends**，而 Dockerfile 用
+`--no-install-recommends`，于是编译器在、`#include <limits.h>` 就死）。两处都
+记账：前者让 `kernel-build-*` 永远绿不了，后者是 arm32 报
+`bits/libc-header-start.h` 的直接原因。
+
+`riscv64` 与 `riscv32` 共用一个 `riscv` 镜像：rv32 内核就是同一个
+`riscv64-unknown-elf` 的 rv32 multilib，rv32 的 Rust core 由
+`-Z build-std=core` 从 `rust-src` 现场编，所以没有对应的 rustup target。
+
+### 每个 target 都要自检
+
+`tools/ci/image-selftest.sh <target>` 只回答一个问题：**这个镜像声称的工具链
+在不在**。它为每个 target 编一个 freestanding 对象、预处理一次 libc 头、为每个
+声明的 Rust target 编一个 no_std crate（`riscv` 还会真的跑一次
+`-Z build-std=core`，因为那是最容易静默坏掉的一步），并检查每个 QEMU 能起来。
+
+它**刻意不跑** `check-<arch>-bringup`。那条门禁回答的是"这棵树能不能编"，是
+源码问题；把两者混在一起，镜像缺件会被误读成源码坏了，源码坏了又会让镜像看
+起来缺件。
+
+### 本地构建镜像
+
+Docker 只是辅助——用宿主自己的工具链（[../dev/build.md](../dev/build.md)）
+不需要它。要复现 CI 环境或改镜像时：
 
 ```bash
-docker run --rm -it -v "$PWD:/src" -w /src \
-    ghcr.io/<owner>/a20os-buildenv:latest bash
+tools/ci/build-image.sh riscv        # 构建 + 自检一个 target
+tools/ci/build-image.sh all          # 全部，multi 在最后
+```
+
+也可以在同一个镜像里手工复现：
+
+```bash
+docker run --rm -it -v "$PWD:/src" -w /src a20os-buildenv:riscv bash
 # 容器内：make ARCH=riscv64 dev-build
 ```
+
+### CI 里怎么用
+
+`buildenv.yml` 对每个 target 构建、推送、再把**发布出去的镜像**拉回来跑自检，
+所以绿的断言覆盖的是别人实际拉到的东西。`:latest` 仍指向 `multi`，`ci.yml`
+里未改动的 job 照旧工作。
+
+按架构切换容器是**可选的后续项**，需要先跑过一次 `buildenv.yml` 让各 tag
+存在。改法只有两处：在 `ci.yml` 的 `buildenv-image` resolver 里多输出
+`image_riscv`/`image_aarch64`/…（`riscv32` 映射到 `riscv`），再把
+`kernel-build` matrix job 的 `container.image` 指向对应 arch 的 tag。其余
+job（打包、smoke、cluster）保留 `:latest`：`check-kernel-build-all`、
+`check-user-build-all` 与 `tools/check-cluster-instance.py --arches
+riscv64,aarch64,x86_64` 本来就需要多架构同时在手。
 
 ### 首次启用 / 更新镜像
 
