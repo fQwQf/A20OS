@@ -315,6 +315,21 @@ static void test_malformed_handling(void) {
     CHECK(pump_accepts(frame, 11) == PUMP_IDLE,
           "11 of 12 bytes: size claims 12, only 11 arrived");
 
+    /* Unknown SVCMGR type: echod echoes every well-formed v1 frame verbatim
+     * (user/svc/echod.c's default arm), so 0x7b is handled, not dropped. */
+    {
+        a20_idl_envelope_t env;
+        uint8_t unknown[12];
+        env.version = A20_SERVICES_IDL_VERSION;
+        env.type = 0x7b;
+        env.size = 12;
+        a20_idl_envelope_encode(unknown, &env);
+        a20_idl_svcmgr_echo_encode(unknown + A20_IDL_ENVELOPE_WIRE_SIZE,
+                                   &(a20_idl_svcmgr_echo_t){0});
+        CHECK(pump_accepts(unknown, 12) == PUMP_HANDLED,
+              "unknown SVCMGR type is echoed verbatim");
+    }
+
     /* The crash type is only honoured after the checks above, so a
      * malformed crash request is ignored rather than fatal. */
     {
@@ -337,6 +352,72 @@ static void test_malformed_handling(void) {
         CHECK(pump_accepts(crash, 8) == PUMP_IDLE,
               "crash type with a bad size is ignored, not fatal");
     }
+}
+
+/* RTCD's dispatch policy, transcribed from user/svc/rtcd.c: a wrong version
+ * or size is dropped; an unknown type is consumed but produces no reply; a
+ * short alarm payload is dropped even though the type is known. */
+enum { RTCD_DROP = 1, RTCD_TIME = 2, RTCD_ALARM = 3, RTCD_CRASH = 4 };
+
+static int rtcd_consume(const uint8_t *buf, uint32_t blen) {
+    a20_idl_envelope_t env;
+    if (blen < A20_IDL_ENVELOPE_WIRE_SIZE)
+        return RTCD_DROP;
+    a20_idl_envelope_decode(&env, buf);
+    if (env.version != A20_SERVICES_IDL_VERSION || env.size != blen)
+        return RTCD_DROP;
+    switch (env.type) {
+    case RTCD_REQ_TIME:
+        return RTCD_TIME;
+    case RTCD_REQ_ALARM:
+        if (blen != A20_IDL_ENVELOPE_WIRE_SIZE +
+                       A20_IDL_RTCD_ALARM_REQUEST_WIRE_SIZE)
+            return RTCD_DROP;
+        return RTCD_ALARM;
+    case RTCD_REQ_CRASH:
+        return RTCD_CRASH;
+    default:
+        return RTCD_DROP; /* consumed, no reply (the default arm) */
+    }
+}
+
+static void test_rtcd_unknown_values(void) {
+    uint8_t frame[16];
+    a20_idl_envelope_t env;
+
+    /* Well-formed time request. */
+    env.version = A20_SERVICES_IDL_VERSION;
+    env.type = RTCD_REQ_TIME;
+    env.size = A20_IDL_ENVELOPE_WIRE_SIZE;
+    a20_idl_envelope_encode(frame, &env);
+    CHECK(rtcd_consume(frame, A20_IDL_ENVELOPE_WIRE_SIZE) == RTCD_TIME,
+          "RTCD time request is handled");
+
+    /* Unknown type: consumed silently, never a reply. */
+    env.type = 0x7b;
+    a20_idl_envelope_encode(frame, &env);
+    CHECK(rtcd_consume(frame, A20_IDL_ENVELOPE_WIRE_SIZE) == RTCD_DROP,
+          "unknown RTCD type is consumed without a reply");
+
+    /* Unknown envelope version is dropped before dispatch. */
+    env.version = 2;
+    a20_idl_envelope_encode(frame, &env);
+    CHECK(rtcd_consume(frame, A20_IDL_ENVELOPE_WIRE_SIZE) == RTCD_DROP,
+          "unknown RTCD version is dropped");
+
+    /* Alarm with a missing payload is dropped even though the type matches. */
+    env.version = A20_SERVICES_IDL_VERSION;
+    env.type = RTCD_REQ_ALARM;
+    env.size = A20_IDL_ENVELOPE_WIRE_SIZE;
+    a20_idl_envelope_encode(frame, &env);
+    CHECK(rtcd_consume(frame, A20_IDL_ENVELOPE_WIRE_SIZE) == RTCD_DROP,
+          "short RTCD alarm payload is dropped");
+
+    /* Crash keeps its terminal meaning. */
+    env.type = RTCD_REQ_CRASH;
+    a20_idl_envelope_encode(frame, &env);
+    CHECK(rtcd_consume(frame, A20_IDL_ENVELOPE_WIRE_SIZE) == RTCD_CRASH,
+          "RTCD crash is terminal");
 }
 
 /* An echoed reply is the request bytes unchanged: echod forwards buf, blen. */
@@ -384,6 +465,7 @@ int main(void) {
     test_crash_frame();
     test_rtcd_payloads();
     test_malformed_handling();
+    test_rtcd_unknown_values();
     test_echo_is_verbatim();
 
     if (failures) {

@@ -1,0 +1,14 @@
+# Independent expectation for the normalized ABI behaviour fixture.
+#
+# One line per operation, in fixture order.  Written by hand from the
+# contracts in docs/native-abi/ (fd table, memory, sockets, event readiness)
+# -- not generated from either implementation, so a change in either
+# personality must be justified here first.  Nondeterministic values
+# (descriptor numbers, addresses, pids) are deliberately absent.
+pipe partial=6 rest=5 joined=hello world
+fd_table write=6 seek=0 read=6 dup_shared_offset=ok close_then_read=bad_handle
+mmap write_read=ok protect_readonly=ok
+socketpair send=4 recv=4 data=ping
+readiness level=ok drained=ok
+errors bad_descriptor=bad_handle zero_length=invalid
+PASS

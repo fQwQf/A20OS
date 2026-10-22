@@ -434,9 +434,13 @@ def run_post_build(case: dict) -> int:
 
 
 def run_post(case: dict) -> int:
-    """Post-run host-side checks; a nonzero exit fails the case outright."""
+    """Post-run host-side checks; a nonzero exit fails the case outright.
+
+    The case log path is exported as $LOG so a check can read the guest log it
+    is validating without hard-coding the resolved build directory."""
     for cmd in case.get("post") or []:
-        if sh(["bash", "-c", cmd]).returncode != 0:
+        if sh(["bash", "-c", cmd],
+              env={**os.environ, "LOG": str(case["log"])}).returncode != 0:
             print(f"post-run check failed: {cmd}")
             return 1
     return 0
