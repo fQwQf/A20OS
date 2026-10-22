@@ -2,23 +2,100 @@
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
 
-来源：原 `docs/distro/minecraft.md` 的「当前边界」一节，以及同一轮实现记录的结论。迁移时删除了
+来源：原 `docs/distro/minecraft.md` 的「当前边界」一节，以及后续实现记录的结论。迁移时删除了
 日期、镜像哈希与逐次运行日志，只保留仍然成立的边界。
 
 - 854×480、4 区块视距实测可以移动和操作背包；观察到约 8–18 FPS，菜单约
   20 FPS。这是功能验证中的现场读数，仍需性能优化，未达到稳定 30/60 FPS。
 - OpenAL 使用 musl 系统库，sound engine 能启动；当前配置的设备是 No Output，
   尚未验收有声播放。原始 glibc C++ OpenAL 的异常路径不再进入 JVM。
+  内核 PCM 已通过 `smoke-audio-userspace` 门禁（440 Hz 注入 QEMU 的 wav 后端），
+  但桌面里的 ALSA 客户端还打不开它：`/proc/asound/cards` 不存在，alsa-lib 无法
+  解析 `hw:0`；见下方“音频”。
 - LWJGL C native 仍经 gcompat；启动器选择系统 allocator。没有宣称完整 glibc
   ABI 兼容，也没有为 jemalloc 注入补丁。
 - Wayland 不支持绝对设置鼠标位置的 GLFW 提示仍可见；键盘移动与背包已经实测，
-  鼠标转向和跳跃也已实测；全屏及真实硬件输入尚未系统验收。
+  鼠标转向和跳跃也已实测；全屏及真实硬件输入尚未系统验收。QEMU 的
+  `virtio-tablet` 会被 libinput 以“missing tablet capabilities: resolution”忽略，
+  所以绝对指针设备在本平台上尚未验收。
 - 默认 token 为 0，服务端会返回真实的 401；不把它误报为 DNS/TLS 故障。
   当前没有集成 Microsoft 账号登录，不宣称 Realms 或多人服务器可用。
 - GEM 句柄命名空间仍是设备级，尚未实现 per-open 隔离；fence 当前同步完成，
   不是异步 GPU scheduler；DMA-BUF CPU 同步目前覆盖线性 level-0 纹理。
 
 [组件状态](../../distro/minecraft-components.md) 记录 JVM、native 和音频的具体范围。
+
+## 桌面会话
+
+`instances/xfce-*.toml` 启动的是 labwc + XFCE 组件的 Wayland 会话，不是
+xfce4-session 的 X11 会话：
+
+- `start-xfce4-session` 建立 dbus 会话总线，`session-start` 先发布
+  `org.xfce.SessionManager`，再把会话交给 labwc。面板的 actions 插件通过这个
+  名字查询 `CanShutdown`/`CanRestart` 并执行动作；没有它时插件会退回到
+  `shutdown --poweroff`，而镜像里没有该命令，电源菜单因此什么也不做。
+- `session-power.py` 提供该接口：`Shutdown`/`Restart` 走内核 `reboot(2)` 路径
+  （先 `vfs_system_shutdown` 刷盘/卸载，再关机或重启），`Log Out` 结束合成器。
+- `start-desktop-components.sh` 把 actions 插件的菜单项发布为
+  `Log Out / Restart / Shut Down`：默认列表隐藏 Restart，并列出本会话无法执行的
+  Suspend、Switch User、Lock Screen。
+- `/sbin/init` 在会话退出后重启它（最多 3 次，间隔 2 s）；第 3 次仍退出则
+  `poweroff`，避免留下没有用户态系统的 kiosk。
+- 壁纸由 `swaybg` 在 xfdesktop 的桌面表面之后创建 background 层表面；
+  xfdesktop 自己仍不绘制 backdrop，但桌面图标和面板不受影响。
+- 面板下拉菜单项（如 Terminal Emulator）能启动应用并关闭菜单；终端里的
+  Backspace 正常删除字符。
+- 冷启动日志里不再出现 `Failed to set CRTC`；帧缓冲对象持有 GEM 引用，
+  dumb buffer 的销毁不再把正在 scanout 的 handle 释放。
+- x86_64（KVM，4 vCPU）和 riscv64（TCG，4 vCPU）都完成过同一组交互：面板
+  Applications 菜单启动 Terminal、终端里输入命令与 Backspace、启动 Thunar
+  浏览 `/root`，最后从电源菜单正常关机（`[SD] POWER_OFF entry`，x86_64 与
+  riscv64 各一次）。riscv64 上第一次关机曾因为文件操作在途被
+  `mntns_shutdown_begin()` 以 `-EBUSY` 拒绝，`session-power.py` 现在按内核的
+  RETRY_* 契约做有界重试。
+- aarch64（TCG，4 vCPU、`smp = 4`）冷启动到完整桌面，`[SMP] 4/4 configured
+  CPUs online`，运行 10 分钟以上无 panic；该轮 eudev 的 input worker 超时被杀，
+  libinput 没有接管键盘，所以键盘/按钮输入未能在 AArch64 上验收（相对指针移动
+  仍可见）。同一镜像在 x86_64 与 riscv64 上输入正常。
+- AArch64 SMP4 的共享状态负载：`sched_stress`、`proc_stress`、`futex_stress`、
+  `mm_stress`、`scm_stress` 在 `NR_CPUS=4` 构建以 `-smp 4` 全部 PASS，约
+  30 分钟无 KERNEL TRAP/PANIC，调度器违规为 0。
+
+## 音频
+
+- 内核把 HDA/virtio-snd 暴露成 ALSA PCM：`/dev/snd/controlC0`、
+  `pcmC0D0p`、`pcmC0D0c`。原生 `audioplay` 与 `smoke-audio-userspace` 门禁
+  都在这条路径上验证过。
+- 桌面里的 ALSA 客户端目前打不开设备。x86_64 实测：三个 snd 节点的裸
+  `open(2)` 都成功，但 libasound 的 `snd_pcm_open("hw:0,0")` 返回 `-ENOENT`，
+  `"default"` 返回 `-EPROTO`（Sound protocol is not compatible），
+  `snd_card_load(0)` 返回 0。内核 `SNDRV_PCM_IOCTL_INFO` 的 ioctl 号是
+  `0x81204101`（结构体 0x120 字节），Linux UAPI 是 `0x81104101`（0x110 字节），
+  已记为 [DRIVER-11](../../gaps/drivers.md)。
+- `alsoft.conf` 因此仍选择 `drivers = null`（No Output）。验收“有声播放”需要
+  先修好 ALSA 打开路径，再让 OpenAL 选择 ALSA 后端并核对 QEMU 录音后端里的
+  非静音采样。
+
+## JVM 与调试信息
+
+- `/usr/bin/java` 是固定 `JAVA_HOME` 的封装；经符号链接启动 JVM 也能工作，
+  因为 exec 从打开文件记录最终路径，`$ORIGIN` 解析到真实 `bin` 目录。
+  实测 `/root/java-link -version` 与经该链接运行的 Java 程序都正常。
+- `/proc/<pid>/fdinfo/<fd>` 对 pidfd 输出 `Pid:`/`NSpid:`。dbus 用它解析自己的
+  凭据；没有这两行时日志里的 `pid=` 是 `18446744073709551615`。SCM_CREDENTIALS
+  与 SO_PEERCRED 的 pid 由 `scm_stress` 的 listen/accept 用例覆盖。
+
+## 进程与内存稳定性
+
+- 匿名 fault-around 窗口在 VMA 被并发合并后把良性身份变化判成失败，是
+  mpv/LuaJIT、tumblerd、JVM 那条“指针字段变 NULL”的根因；现在窗口重试并按当前
+  VMA 夹紧，`smoke-mtcorrupt` 在 `NR_CPUS=4` 上守住它。
+- 三处“自己翻译物理帧再直接写”的路径（clear_child_tid、PI futex、信号栈
+  exec 重映射）改为先做受检查的用户写/COW 破坏。
+- 实测：20 次 `mpv --vo=null --load-scripts=yes` 无崩溃；`java -version` 20/20
+  退出码 0；tumblerd 处理缩略图请求后正常退出；40 次 `mpv --vo=null` 的
+  进程创建/销毁 churn 后桌面组件仍在。
+- mpv 的 Lua 脚本工作已解除：`mpv.conf` 不再设置 `load-scripts=no`。
 
 ## 实现范围
 
@@ -39,6 +116,7 @@
 
 ## 已采用的规避
 
-- **视频默认处理器是 `ffplay`**：mpv 在 A20OS 上每线程状态不可靠，overlay 里放 `ffplay.desktop`
-  接管视频 MIME；这是当前行为，不是临时手段。
-- **JVM 走 `/usr/bin/java` 封装**：`exec_path` 不解析符号链接，且 JDK 需要堆参数，封装脚本补上这两点。
+- **视频默认处理器是 `ffplay`**：这是当前行为，不是临时手段；mpv 现在可以正常
+  运行，但默认 MIME 处理器仍是 ffplay。
+- **JVM 走 `/usr/bin/java` 封装**：JDK 需要堆参数，封装脚本补上；`$ORIGIN`
+  已由 exec 的最终路径保证，不再依赖包装脚本的路径。

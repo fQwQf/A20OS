@@ -3,39 +3,19 @@
 对应 V1-DESKTOP。现状见 [current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)；
 仍未关闭问题的诊断见 [notes/](notes/README.md)。
 
-### DESKTOP-01 AArch64 SMP4 竞态
-
-- 现状：观察到两种不同的 SMP 竞态（IPI 风暴后 trap frame 损坏；SIGSEGV 投递期跨任务寄存器交错），当前以 `smp=1` 运行。
-- 缺口：竞态未定位，SMP1 不是修复；AArch64 桌面没有多核验收。
-- 关闭条件：SMP4 下长时运行无 KERNEL TRAP/PANIC，且用例实际命中共享状态；SMP1 降级不再需要。
-- 来源：原 `known-issues.md`、[instances/xfce-aarch64.toml](../../../instances/xfce-aarch64.toml)。
-
-### DESKTOP-02 RISC-V 桌面交互
-
-- 现状：RISC-V 桌面可启动；MCS 持锁调度、`pgrep` 崩溃与交互复验缺失。
-- 缺口：x86_64 的交互验收不覆盖 RISC-V。
-- 关闭条件：RISC-V 上完成真实输入/窗口/终端/文件管理器负载并自然关机。
-- 来源：原 `known-issues.md` 当前工程队列。
-
-### DESKTOP-03 应用退出异常
-
-- 现状：COW、FP、TLS 的既有修复不能证明症状消失。
-- 缺口：mpv/LuaJIT、tumblerd 与 JVM 的退出异常仍需在干净镜像上复现并定位。
-- 关闭条件：三者各自能稳定启动、退出并回收资源；或给出明确的既有缺陷归属。
-- 诊断：见 [notes/desktop-jvm-mpv-exit.md](notes/desktop-jvm-mpv-exit.md)。
-- 来源：原 `known-issues.md` 当前工程队列。
-
-### DESKTOP-04 JVM `$ORIGIN` 端到端
-
-- 现状：exec 已从打开文件记录最终路径，`exec-symlink-origin` 通过。
-- 缺口：JVM 经符号链接启动的端到端验收缺失。
-- 关闭条件：JVM 经符号链接启动并正常工作，路径解析无回归。
-- 来源：原 `known-issues.md` 当前工程队列。
-
 ### DESKTOP-05 输入与显示范围
 
-- 现状：键盘移动与背包已实测；鼠标转向、跳跃有实测记录。
-- 缺口：全屏、真实硬件输入、绝对鼠标位置提示未系统验收；音频当前是 No Output。
+- 现状：键盘移动、背包、鼠标转向与跳跃已实测；全屏与真实硬件输入未系统验收。
+  QEMU 的 `virtio-tablet` 被 libinput 以缺少 resolution 为由忽略，绝对指针不可用。
+  AArch64 TCG 桌面上 eudev 的 input worker 超时被杀，libinput 没有接收键盘，
+  QMP/HMP 注入的按键与按钮都不产生 evdev 事件（相对移动可见）；同一镜像在
+  x86_64 KVM 与 riscv64 TCG 上键盘正常。
+  音频是 No Output：内核 PCM 与 `smoke-audio-userspace` 通过；x86_64 桌面里
+  `/dev/snd/controlC0`、`pcmC0D0p/c` 的裸 open 成功，但 libasound 的
+  `hw:0,0` 返回 `-ENOENT`、`default` 返回 `-EPROTO`，`alsoft.conf` 仍选择
+  `drivers = null`。内核 `SNDRV_PCM_IOCTL_INFO` 的结构体尺寸/ioctl 号与
+  Linux UAPI 不一致，已记为 [DRIVER-11](drivers.md)。
+- 缺口：全屏、真实硬件输入、绝对鼠标位置提示未系统验收；有声播放不可验收。
 - 关闭条件：每项在承诺平台上给出真实输入与输出证据；音频有声播放可验收。
 - 来源：[current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)。
 
@@ -48,52 +28,15 @@
 
 ### DESKTOP-07 桌面扩展写盘一致性
 
-- 现状：journal 窄门禁不覆盖所有桌面写负载。
-- 缺口：guest 写盘后的 ext4 位图一致性仍需按历史触发场景复验。
-- 关闭条件：桌面写负载后关机再 `e2fsck` 干净；与 FS-01/FS-02 联动。
-- 来源：原 `known-issues.md` 当前工程队列。
-
-### DESKTOP-08 x86_64 桌面组件随机 SIGSEGV
-
-- 现状：xfdesktop/panel/thunar/gst/udevd/dbus-daemon 随机野指针崩溃，只在 x86_64 出现；fix8–fix11 已把崩溃点定位到 musl 自己的 `hlt` 断言，且崩溃后 panel 主进程仍存活。
-- 缺口：根因未定位；崩溃间歇，无法稳定复现。
-- 关闭条件：长时桌面运行不再出现 SIGSEGV；或定位到具体缺陷并修复，负控能复现旧行为。
-- 诊断：[notes/desktop-x86-sigsegv.md](notes/desktop-x86-sigsegv.md)。
-
-### DESKTOP-09 桌面壁纸不渲染
-
-- 现状：xfdesktop 在跑、桌面图标正常，但背景纯黑（1024×768 下 94% 像素为 `(0,0,0)`）。
-- 缺口：backdrop 渲染路径未通。
-- 关闭条件：冷启动后壁纸实际显示（像素检查），且不靠循环重启掩盖。
-- 诊断：[notes/desktop-wallpaper.md](notes/desktop-wallpaper.md)。
-
-### DESKTOP-10 面板下拉菜单项不启动应用
-
-- 现状：面板按钮能开菜单，点下拉条目既不启动应用也不关菜单；内核输入通路已排除。
-- 缺口：命中节点与客户端 `wl_pointer.button` 的链路未定位。
-- 关闭条件：点击菜单项启动应用并关闭菜单；判定以 labwc action 日志为准，不用截图推断。
-- 诊断：[notes/desktop-panel-menu.md](notes/desktop-panel-menu.md)。
-
-### DESKTOP-11 Backspace 失效
-
-- 现状：`xfce4-terminal` 里 Backspace 无任何字符；内核 evdev 流已验证 `KEY_BACKSPACE` 正确送达。
-- 缺口：故障在合成器/终端一层，未定位。
-- 关闭条件：终端里 Backspace 正常删除，不需要改内核。
-- 诊断：[notes/desktop-backspace.md](notes/desktop-backspace.md)。
-
-### DESKTOP-12 dbus NoReply 与 `SCM_CREDENTIALS` pid=-1
-
-- 现状：`SO_PEERCRED` 路径已修；dbus 日志里的 `pid=18446744073709551615` 仍来自 `SO_PASSCRED`/`SCM_CREDENTIALS`；会话同步调用 `NoReply`。
-- 缺口：AF_UNIX 首包的 `SCM_CREDENTIALS` 为何是 -1 未定位（`SO_PEERPIDFD` 已拿到 pidfd，说明不是取不到 pid）。
-- 关闭条件：dbus 日志 pid 正确，同步调用不再超时降级。
-- 诊断：[notes/desktop-dbus-credentials.md](notes/desktop-dbus-credentials.md)。
-
-### DESKTOP-13 间歇性 `Failed to set CRTC`（ENOENT）
-
-- 现状：wlroots legacy 后端反复报错，显示起不来；间歇出现。
-- 缺口：根因未定位。
-- 关闭条件：多次冷启动都能成功设置 CRTC 并出画面。
-- 诊断：[notes/desktop-crtc-enoent.md](notes/desktop-crtc-enoent.md)。
+- 现状：x86_64 桌面上完成一轮写负载（300 个文件、缩略图缓存、xfconf 改写、
+  JVM/mpv 状态）并正常关机后，宿主独立 `e2fsck -fn` 仍报两个 inode 在 orphan
+  链上、块/inode 位图差异；日志有 `deferred orphan cleanup failed ... err=-95`。
+  根因是 ext4 orphan reap 不接受 depth-1 extent 树，桌面 unlink 的大文件无法回收，
+  已记为 [FS-03](fs.md)，不在本包修复范围。
+- 缺口：guest 写盘后的 ext4 位图一致性仍需按历史触发场景复验；孤儿回收失败的
+  归属在 FS-03。
+- 关闭条件：桌面写负载后关机再 `e2fsck` 干净；与 FS-01/FS-02/FS-03 联动。
+- 来源：原 `known-issues.md` 当前工程队列；本轮 `world-work.img` 复验。
 
 ### DESKTOP-14 `svcmgr` 强制终止在 AArch64 的验收
 

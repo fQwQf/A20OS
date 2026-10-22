@@ -21,3 +21,17 @@
 - 缺口：ARMv7-M 的内核固件无法构建，MCU 档没有构建证据；需要区分"MCU profile 真的要用这个 Rust 模块"（补 armv7m 目标）与"这个模块不在 MCU profile 里"（把断言按 `KERNEL_SRC` 加条件）。
 - 关闭条件：`make stm32f103-bringup` 与 `make stm32f103-xuanwu` 编译通过，且 `check-stm32f103` 通过。
 - 来源：同上。
+### DRIVER-11 ALSA PCM_INFO 的 ioctl 尺寸与 Linux UAPI 不一致
+
+- 现状：`kernel/include/drivers/audio/alsa.h` 的 `SNDRV_PCM_IOCTL_INFO` 是
+  `0x81204101`（结构体 0x120 字节），对应 `struct snd_pcm_info` 里多出的
+  `pad1[16]`；Linux UAPI 的同一结构体是 0x110 字节，ioctl 号是 `0x81104101`。
+  alsa-lib 发的是 Linux 号码，内核 switch 落到 `default` 返回 `-EINVAL`。
+- 缺口：ALSA 用户态在 `snd_pcm_hw_open_fd` 打开 PCM 后必须执行的
+  `SNDRV_PCM_IOCTL_INFO` 因此失败。同轮观察到的桌面 ALSA 症状是
+  `hw:0,0` → `-ENOENT`、`default` → `-EPROTO`，而 `/dev/snd/controlC0` 与
+  `pcmC0D0p` 的裸 open 都成功；INFO 失配是否也解释打开阶段的 `-ENOENT`
+  尚未定位（详细观测见 [DESKTOP-05](desktop.md)）。
+- 关闭条件：内核结构与 ioctl 号对齐 Linux UAPI，alsa-lib 能完成 PCM_INFO 并
+  打开 `hw:0,0`；由 DESKTOP-05 的有声播放验收复验。
+- 来源：DESKTOP 本轮在 x86_64 桌面里用 libasound 直接调用 `snd_pcm_open` 的观测。
