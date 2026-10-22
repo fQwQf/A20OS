@@ -194,3 +194,9 @@
 
 - COW token完整180样本完成，90guest状态全0、base unchanged。64MiB总16.1586→15.8014ms(-2.21%)五对同向；父fork阶段9.3265→8.6593ms(-7.15%)五对同向，wait+6.62%抵消部分。stress fork605.21→644.21(+6.44%)五对同向。首末getpid控制-3.45%/+3.18%，保留对收益精度的限制，详见报告第11节。
 - cow-token-2026-10-22*已归档，准备提交节点复用作为独立回退点。接下来单独试验downgrade仅在编码后PTE不同才写并note TLB，状态sync始终保留，不能直接按COW位跳过，因为mm_cow_flags会清D。该实验尚未写代码，先保留当前snapshot/锁顺序。
+
+## 2026-10-22 22:24 北京时间：PTE实验已回退；fileio初测完成
+
+- 相同PTE写/免TLB-note实验180样本全0且正确性过，但性能方向混合（mmap16中位+0.43%、64中位-2.18%却前三对微退化、brk空堆+8.62%）；已保存tools/bottleneck-cow-identical-pte.patch及cow-same-pte-2026-10-22*证据，生产cow.c/fixture恢复HEAD cd49ffff。默认build ELF尚是被拒实验，后续make需重建；显式frozen cow-token.elf adbc才是当前已保留实现。
+- sysbench fileio初测已完成perf-fileio-initial，2case×Linux/A20均成功：1线程、64MiB、4KiB随机写、validate、fsync频率100/16384、5秒，prepare后busybox sync指定文件、测后16384次seqrd覆盖完整64MiB校验并清理；f_type ef53。A20约19.49/56.24MiB/s，Linux162.39/201.96，guest计数审计0。此时尚未隔离RB算法增益。
+- 后续计划只临时替换page_cache_state.rs中dirty_insert/remove为a9b7d468旧链表函数，保留当前所有新C/RS descriptor字段/ABI和其它修复，构建linear-control；还原源码后重建index-current，核对还原ELF一致。这样隔离算法，避免拿旧内核隐式profiling/旧MM等混杂影响fileio比较。保留源备份/patch/sha，控制版不提交或发布。随后三对同参数fileio并全数据校验，raw out按perf-fileio-paired-*保存。当前所有本任务perf进程已结束，fileio初探session73076完成。

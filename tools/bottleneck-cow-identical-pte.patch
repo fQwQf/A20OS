@@ -1,0 +1,75 @@
+diff --git a/kernel/mm/cow.c b/kernel/mm/cow.c
+index 6c197eea..5762137b 100644
+--- a/kernel/mm/cow.c
++++ b/kernel/mm/cow.c
+@@ -354,13 +354,20 @@ void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
+     uintptr_t pa = snapshot->pa;
+ #ifdef ARCH_HAS_PTE_BLOCK
+     size_t leaf_size = vm_pt_level_size(level);
+-    *src_pte = (leaf_size >= PMD_SIZE)
+-                   ? arch_pte_block((paddr_t)pa, (pte_t)flags)
+-                   : arch_pte_leaf((paddr_t)pa, (pte_t)flags);
++    pte_t replacement = (leaf_size >= PMD_SIZE)
++                            ? arch_pte_block((paddr_t)pa, (pte_t)flags)
++                            : arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+ #else
+-    *src_pte = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
++    pte_t replacement = arch_pte_leaf((paddr_t)pa, (pte_t)flags);
+ #endif
+-    mm_tlb_note_change(parent, va, vm_pt_level_size(level));
++    /* Repeated forks commonly find an already-COW leaf. Compare the encoded
++     * entry, not just its COW bit: flags such as D may still require clearing.
++     * An unchanged entry needs neither a store nor another TLB invalidation;
++     * metadata refresh below remains necessary even on this path. */
++    if (*src_pte != replacement) {
++        *src_pte = replacement;
++        mm_tlb_note_change(parent, va, vm_pt_level_size(level));
++    }
+ #if defined(ARCH_HAS_PGTABLE_OPS)
+     if (snapshot->node)
+         (void)mm_pt_sync_status(snapshot->node, level, arch_pt_vpn(va, level),
+diff --git a/tools/tests/cow_snapshot_token_host.c b/tools/tests/cow_snapshot_token_host.c
+index cbcd40d7..cff0efec 100644
+--- a/tools/tests/cow_snapshot_token_host.c
++++ b/tools/tests/cow_snapshot_token_host.c
+@@ -11,6 +11,7 @@
+ #define PTE_W 2UL
+ #define PTE_COW 4UL
+ #define PTE_LEAF 8UL
++#define PTE_D 16UL
+ typedef uintptr_t pte_t;
+ typedef uintptr_t paddr_t;
+ typedef uint32_t pfn_t;
+@@ -39,7 +40,7 @@ static void mm_pt_node_unlock(pte_t *table) {
+ static int arch_pte_is_leaf(pte_t e) {return (e&PTE_LEAF)!=0;}
+ static uintptr_t arch_pte_addr(pte_t e) {return e&~4095UL;}
+ static pte_t arch_pte_flags(pte_t e) {return e&4095;}
+-static pte_t mm_cow_flags(pte_t e) {return (arch_pte_flags(e)&~PTE_W)|PTE_COW;}
++static pte_t mm_cow_flags(pte_t e) {return (arch_pte_flags(e)&~(PTE_W|PTE_D))|PTE_COW;}
+ static pfn_t phys_to_pfn(uintptr_t pa) {return pa/4096;}
+ static mm_seg_t *mm_seg_find(mm_struct_t *mm,uintptr_t va) {
+     (void)mm;(void)va;return present_vma?&vma:NULL;
+@@ -89,6 +90,11 @@ int main(void) {
+         a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
+         assert((tables[0][0]&PTE_COW)&&!(tables[0][0]&PTE_W));
+         assert(tables[1][0]==0&&changes==1&&changed_size==vm_pt_level_size(level)&&statuses==1);
++        a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
++        assert(changes==1&&statuses==2); /* Same PTE still refreshes metadata. */
++        tables[0][0]|=PTE_D;
++        a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
++        assert(changes==2&&statuses==3&&!(tables[0][0]&PTE_D));
+         a20_cow_share_unlock(&snap);
+         assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==1&&node_walks==1);
+         a20_cow_release_ref(&snap);
+@@ -100,6 +106,11 @@ int main(void) {
+         assert(locked==-1&&locks==1&&unlocks==1&&frame_gets==0&&cache.pin==0);
+         assert(snap.slot==NULL&&snap.node==NULL);
+     }
++    reset();tables[0][0]=arch_pte_leaf(0x9000,PTE_V|PTE_COW);
++    assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&snap.w_or_cow);
++    a20_cow_share_downgrade(&parent,0,0,&snap,snap.cow_flags);
++    assert(changes==0&&statuses==1); /* Already COW at snapshot time. */
++    a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
+     reset();present_vma=0;
+     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&frame_gets==1);
+     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);assert(frame_puts==1);
