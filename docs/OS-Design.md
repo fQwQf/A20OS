@@ -94,9 +94,11 @@ A20OS 当前六个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-
 
 另有五块板只有**构建验证**，从未上电，因此它们的门禁只断言"能编译"，不断言"能启动"
 （`check-lao64-board-builds` / `check-arm-board-builds` / `check-x86_64-pc-build`）：
-龙芯 LicheeRV Nano、龙芯 Milk-V Duo（NOMMU）、Rockchip RK3328、全志 H616、
-x86_64 PC（实体瘦客户机）。另有 Kendryte K230 与全志 D1s/F133 两个目标**刻意未移植**，
-阻塞原因见 [platforms/not-yet-ported.md](platforms/not-yet-ported.md)。
+LicheeRV Nano、Milk-V Duo（NOMMU）、Rockchip RK3328、全志 H616、
+x86_64 PC（实体瘦客户机）。其中前四块于 2026-10-22 移出 1.0 运行矩阵（无板卡，
+SD/eMMC 与 GMAC 无法验证），源码与构建目标保留。另有 Kendryte K230 与全志
+D1s/F133 两个目标**刻意未移植**，阻塞原因见
+[platforms/not-yet-ported.md](platforms/not-yet-ported.md)。
 
 PPC64LE 是保留源码的历史移植，不属于当前构建矩阵；Makefile 会在解析阶段拒绝它。构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他活跃组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。
 

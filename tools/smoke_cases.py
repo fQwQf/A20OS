@@ -103,6 +103,22 @@ CASES: dict[str, dict] = {
     # itself is arch-independent; these cases prove the registry's backing
     # array growth, failure rollback and count restoration are reached with
     # each arch's allocator and with more than one CPU online.
+    # DRIVER-07: PIIX3 PIRQA..D route registers are writable and read back on
+    # i440fx.  The self-test saves and restores firmware's routing.
+    'smoke-pirq-i440fx': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_PCI_PIRQ_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/pirq-i440fx.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'pc', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-bringup-pirq-test/kernel.elf'],
+        'expect': ['PCI_PIRQ_TEST: PASS', 'System is going down for power-off NOW'],
+        'forbid': ['PCI_PIRQ_TEST: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-pirq-i440fx: PASS; log saved to $log',
+    },
     'smoke-driver-lifecycle-x86_64': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

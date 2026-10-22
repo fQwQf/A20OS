@@ -1858,6 +1858,62 @@ smoke-net-e1000e-msix:
 	fi
 
 # ---------------------------------------------------------------------------
+# smoke-net-e1000-i440fx-intx -- legacy INTx through the PIIX3 PIRQ links
+# ---------------------------------------------------------------------------
+# The q35 gate above routes INTx straight into the IOAPIC (level/low).  i440fx
+# goes through the PIIX3 PIRQ links instead: firmware picks a link for the
+# slot, QEMU forwards its level to an ISA IRQ, and the kernel has to read the
+# link route and program the IOAPIC entry with ISA trigger/polarity.  This gate
+# proves the whole path delivers packets; without it "PIRQ programmable" would
+# only mean the config byte reads back.
+smoke-net-e1000-i440fx-intx:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	build_dir=$$($(MAKE) --no-print-directory ARCH=x86_64 print-build-dir); \
+	log="$(SMOKE_LOG_DIR)/net-e1000-i440fx-intx.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_E1000); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18100 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_E1000) qemu-system-x86_64 \
+		-machine pc -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$$build_dir/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18100-10.0.2.15:18100 \
+		-device e1000,netdev=net \
+		-kernel $$build_dir/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/e1000_host_probe.py 18100 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter e1000_irq_calls); \
+	irq_rx=$$(last_counter e1000_irq_rx); \
+	irq_tx=$$(last_counter e1000_irq_tx); \
+	ready_line=$$(grep -m1 '\[E1000\] ready:' "$$log" || true); \
+	intx_line=$$(grep -m1 '\[PCI\] INTx .*i440fx PIRQ' "$$log" || true); \
+	if [ "$$probe" -ne 0 ] || [ -z "$$intx_line" ] || \
+	   ! grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" || \
+	   [ "$$irq_calls" -le 0 ] || [ "$$irq_rx" -le 0 ] || [ "$$irq_tx" -le 0 ] || \
+	   grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-e1000-i440fx-intx: FAIL (status=$$status probe=$$probe irq_calls=$$irq_calls irq_rx=$$irq_rx irq_tx=$$irq_tx)"; \
+		grep -E '\[PCI\] INTx|\[E1000\]|TCP_ACCEPT' "$$log" || true; \
+		echo "  log saved to $$log; tail:"; tail -n 40 "$$log"; exit 1; \
+	else \
+		echo "smoke-net-e1000-i440fx-intx: PASS (hostfwd round trip through i440fx PIRQ INTx;" \
+			 "$$irq_calls interrupts, $$irq_rx RX and $$irq_tx TX causes); log saved to $$log"; \
+		echo "    $$intx_line"; \
+		echo "    $$ready_line"; \
+	fi
+
+# ---------------------------------------------------------------------------
 # smoke-net-rtl8139 -- end-to-end round trip through the Realtek RTL8139
 # ---------------------------------------------------------------------------
 # Why this gate exists: the only NIC this tree carried for the x86_64 QEMU target

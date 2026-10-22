@@ -217,6 +217,9 @@ smoke-socket-stress:
 smoke-driver-lifecycle:
 	$(PYTHON) tools/smoke.py smoke-driver-lifecycle
 
+smoke-pirq-i440fx:
+	$(PYTHON) tools/smoke.py smoke-pirq-i440fx
+
 # DRIVER-02: same injected growth-failure paths on every architecture that has
 # a runnable bringup kernel here, and with two CPUs online.
 smoke-driver-lifecycle-x86_64:

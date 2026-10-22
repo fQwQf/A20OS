@@ -2,35 +2,11 @@
 
 对应 V1-DRIVER。现状见 [current/drivers-implementation-status.md](../current/drivers-implementation-status.md)。
 
-### DRIVER-01 同源驱动的 kernel/user 双态
-
-- 现状：完整 kernel 驱动与 user 驱动仍是两套实现。
-- 缺口：没有一份生产驱动源码在两种部署模式下提供相同契约。
-- 关闭条件：选一个完整驱动，probe/data/IRQ/DMA/removal 在两种模式下逐项一致，含越权 DMA 拒绝与清理。
-- 来源：requirements N05。
-
-### DRIVER-07 ACPI `_PRT` 的剩余三项
-
-- 现状：DSDT 求值器失败即关闭，绝不猜 GSI；QEMU 的 q35 走 swizzle。
-- 缺口：桥后总线的 `_PRT` 下钻未实现（桥后设备留轮询）；i440fx PIRQ link 只读不写；解释器在真实固件上从未执行。
-- 关闭条件：桥后设备能定位 GSI；PIRQ 可编程；至少一台真机完成 INTx 投递验证。
-- 来源：[current/server-readiness.md](../current/server-readiness.md) §八 P1、[kernel/arch/x86_64-cpu-id.md](../../kernel/arch/x86_64-cpu-id.md)。
-
-### DRIVER-08 板级存储/网卡驱动缺失
-
-- 现状：LicheeRV Nano、Milk-V Duo、H616、RK3328 只到 build-verified；SD/eMMC 与 GMAC 均无可用驱动。
-- 缺口：这些板子无法越过仅 RAM 启动；`dw_sdio.c` 覆盖的是更老的 DesignWare 布局。
-- 关闭条件：至少一块板有可用的块驱动，能从卡启动并自然关机；或者明确移出 1.0 平台范围。
-- 来源：[platforms/licheerv-nano.md](../../platforms/licheerv-nano.md)、
-  [platforms/milk-v-duo.md](../../platforms/milk-v-duo.md)、
-  [platforms/sun50i-h616.md](../../platforms/sun50i-h616.md)、
-  [platforms/rk3328.md](../../platforms/rk3328.md)。
-
 ### DRIVER-09 STM32F103 平台文件含硬编码 MMIO 地址
 
-- 现状：`make check-stm32f103` 报 `hardcoded STM32 MMIO address found`，逐条列出 `kernel/platform/stm32f103/shared_bus.c:9` 起的 20 余处 `MMIO32(0x40…)` 常量，门禁因此在候选上为红（在固定 CI 容器里复现，宿主无 `arm-none-eabi-gcc`）。
-- 缺口：该板的平台文件绕过 MMIO 抽象直接写物理地址；这条门禁本就是为拦住它而存在的，所以门禁为红是真实违规而不是夹具问题。
-- 关闭条件：这些访问改走平台的 MMIO 抽象后 `check-stm32f103` 通过。
+- 现状：`shared_bus.c` 的 20 余处 `MMIO32(0x40…)` 已改为 `board_config.h` 里的命名寄存器宏（地址集中在该板的 memory map，平台 C 源不再含硬编码地址），`rg` 静态断言已通过，`shared_bus.c` 用本地解包的 `arm-none-eabi-gcc 14.2` 能为 `thumbv7m-none-eabi` 编译。`make check-stm32f103` 仍为红，但现在停在 `tools/rust-kernel.mk:3971` 的 ARMv7-M Rust 目标断言（DRIVER-10，delivery-owned），而不是本条的地址违规。
+- 缺口：门禁要等 DRIVER-10 修复后才能跑完整构建；本机没有系统级 `arm-none-eabi-gcc`，CI 容器才有完整工具链。
+- 关闭条件：DRIVER-10 修复后 `check-stm32f103` 通过。
 - 来源：DELIVERY 的保留平台构建矩阵（[current/delivery-baseline.md](../current/delivery-baseline.md) §3）。
 
 ### DRIVER-10 ARMv7-M 档的内核 Rust 目标不完整
