@@ -14,6 +14,15 @@ class SnapshotToken(unittest.TestCase):
         functions = text[text.index("int a20_cow_share_snapshot("):text.index("int a20_cow_requires_private_copy(")]
         release = text[text.index("void a20_cow_release_ref("):text.index("int mm_fork_clone_page(")]
         fixture = (ROOT / "tools/tests/cow_snapshot_token_host.c").read_text()
+        class_start = text.index("#if defined(ARCH_HAS_PGTABLE_OPS)\nstatic uint8_t mm_fork_page_class")
+        class_end = text.index("#ifdef CONFIG_SWAP\nint mm_clone_swap_page", class_start)
+        header = (ROOT / "kernel/include/mm/pt.h").read_text().splitlines()
+        names = ["MM_ST_INVALID", "MM_ST_PT_NODE", "MM_ST_ANON_MAPPED", "MM_ST_VMO",
+                 "MM_ST_FILE_SHARED", "MM_ST_FILE_PRIVATE", "MM_ST_CLS_BYTE", "MM_ST_GET_CLASS"]
+        defines = "\n".join(next(line for line in header if line.startswith("#define " + name + " ") or
+                                    line.startswith("#define " + name + "(")) for name in names)
+        fixture = fixture.replace("/* CLASS_HELPER */", text[class_start:class_end])
+        fixture = fixture.replace("/* CLASS_DEFINITIONS */", defines)
         fixture = fixture.replace("/* SNAPSHOT_STRUCT */", struct).replace("/* SNAPSHOT_FUNCTIONS */", functions).replace("/* RELEASE_FUNCTION */", release)
         with tempfile.TemporaryDirectory() as tmp:
             src, exe = Path(tmp) / "token.c", Path(tmp) / "token"

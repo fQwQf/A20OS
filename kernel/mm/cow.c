@@ -51,17 +51,19 @@ static uint64_t mm_cow_flags(uint64_t pte) {
  * keeps the PTE-level COW and only skips the status bookkeeping.
  */
 #if defined(ARCH_HAS_PGTABLE_OPS)
-static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
+static uint8_t mm_fork_page_class(pte_t *table, int level, vaddr_t va,
+                                 const mm_seg_t *v)
 {
-    /* Level-aware read: a huge leaf's status slot lives at its own level,
-     * so a level-0 peek would read whatever neighbouring entry owns that
-     * level-0 index and hand back the wrong backing. */
-    uint8_t cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, va));
+    /* The snapshot already holds this leaf's node lock. Use its exact level
+     * (huge leaves have their own status slot), not another root descent. */
+    uint8_t cls = table
+                      ? MM_ST_GET_CLASS(mm_pt_peek(table, level,
+                                                   arch_pt_vpn(va, level)))
+                      : MM_ST_INVALID;
     if (cls != MM_ST_INVALID && cls != MM_ST_PT_NODE)
         return cls;
-    /* No status to preserve.  Recover the backing from the VMA so a page that
-     * predates the cursor still gets a coherent class rather than a guess. */
-    mm_seg_t *v = mm_seg_find(mm, va);
+    /* Recover missing backing metadata from the VMA the same snapshot has
+     * already resolved under parent->lock; no second VMA lookup is needed. */
     if (!v)
         return MM_ST_ANON_MAPPED;
     if (v->vm_flags & VM_VMO)
@@ -72,14 +74,14 @@ static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
     return MM_ST_ANON_MAPPED;
 }
 #else
-/* arm32 (MMU, but no pgtable ops) still calls this to hand a class to
- * pt_map_huge(); its short-descriptor backend ignores the argument because
- * there is no status sidecar to write.  The real class recovery above needs
- * mm_pt_status_at(), which pt.h only declares under the pgtable-ops guard. */
-static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
+/* The short-descriptor backend has no status sidecar, as before. */
+static uint8_t mm_fork_page_class(pte_t *table, int level, vaddr_t va,
+                                 const mm_seg_t *v)
 {
-    (void)mm;
+    (void)table;
+    (void)level;
     (void)va;
+    (void)v;
     return MM_ST_ANON_MAPPED;
 }
 #endif /* ARCH_HAS_PGTABLE_OPS */
@@ -324,7 +326,7 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     mm_seg_t *vma = mm_seg_find(parent, va);
     int is_vmo = vma && (vma->vm_flags & VM_VMO);
     pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
-    uint8_t cls = mm_fork_page_class(parent, va);
+    uint8_t cls = mm_fork_page_class(stab, level, va, vma);
     page_cache_page_t *pcp =
         is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
@@ -339,7 +341,6 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     out->class = cls;
     out->pcp = pcp;
     out->kind = pcp ? 2 : (is_vmo ? 0 : 1);
-    (void)level;
     return 1;
 }
 

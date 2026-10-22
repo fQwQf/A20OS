@@ -7,12 +7,16 @@
 #define PMD_SIZE (2UL*1024*1024)
 #define PFN_NONE UINT32_MAX
 #define VM_VMO 16
+#define VM_FILE 32
+#define VM_SHARED 64
+/* CLASS_DEFINITIONS */
 #define PTE_V 1UL
 #define PTE_W 2UL
 #define PTE_COW 4UL
 #define PTE_LEAF 8UL
 typedef uintptr_t pte_t;
 typedef uintptr_t paddr_t;
+typedef uintptr_t vaddr_t;
 typedef uint32_t pfn_t;
 typedef struct { pte_t *pgdir; } mm_struct_t;
 typedef struct { unsigned vm_flags; } mm_seg_t;
@@ -23,6 +27,8 @@ static page_cache_page_t cache;
 static int active,locked=-1,leaf_walks,node_walks,locks,unlocks;
 static int frame_gets,frame_puts,cache_puts,cache_mode,present_vma=1,statuses,changes;
 static size_t changed_size;
+static unsigned char stored_class, expected_class;
+static int status_reads, vma_lookups, expected_level=-1, expected_index;
 static pte_t *pt_lookup_leaf(pte_t *pgdir,uintptr_t va,void *l,void *b,void *sz) {
     (void)pgdir;(void)va;(void)l;(void)b;(void)sz;leaf_walks++;
     return &tables[active][0];
@@ -42,11 +48,15 @@ static pte_t arch_pte_flags(pte_t e) {return e&4095;}
 static pte_t mm_cow_flags(pte_t e) {return (arch_pte_flags(e)&~PTE_W)|PTE_COW;}
 static pfn_t phys_to_pfn(uintptr_t pa) {return pa/4096;}
 static mm_seg_t *mm_seg_find(mm_struct_t *mm,uintptr_t va) {
-    (void)mm;(void)va;return present_vma?&vma:NULL;
+    (void)mm;(void)va;vma_lookups++;return present_vma?&vma:NULL;
 }
-static unsigned char mm_fork_page_class(mm_struct_t *mm,uintptr_t va) {
-    (void)mm;(void)va;return 7;
+static int arch_pt_vpn(uintptr_t va,int level);
+static uint8_t mm_pt_peek(pte_t *table,int level,int idx) {
+    assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==expected_index);
+    if(expected_level>=0)assert(level==expected_level);
+    status_reads++;return MM_ST_CLS_BYTE(stored_class)|7;
 }
+/* CLASS_HELPER */
 static page_cache_page_t *mm_file_cache_mapping_get(mm_seg_t *v,uintptr_t va,pfn_t pfn) {
     (void)v;(void)va;assert(locked==0&&pfn==9);
     if(cache_mode){cache.pin++;return &cache;}return NULL;
@@ -60,9 +70,9 @@ static pte_t arch_pte_block(paddr_t pa,pte_t flags) {return pa|flags|PTE_LEAF|0x
 static void mm_tlb_note_change(mm_struct_t *mm,uintptr_t va,size_t size) {
     (void)mm;assert(locked==0&&va==0);changes++;changed_size=size;
 }
-static int arch_pt_vpn(uintptr_t va,int level) {(void)va;(void)level;return 0;}
+static int arch_pt_vpn(uintptr_t va,int level) {return (va>>(12+9*level))&511;}
 static int mm_pt_sync_status(pte_t *table,int level,int idx,unsigned char cls) {
-    assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==0&&cls==7);
+    assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==0&&cls==expected_class);
     statuses++;return 0;
 }
 /* SNAPSHOT_STRUCT */
@@ -73,6 +83,8 @@ static void reset(void) {
     tables[0][0]=0x9000|PTE_V|PTE_W|PTE_LEAF;
     active=leaf_walks=node_walks=locks=unlocks=frame_gets=frame_puts=cache_puts=statuses=changes=0;
     cache_mode=0;cache.pin=0;vma.vm_flags=0;present_vma=1;
+    stored_class=expected_class=MM_ST_FILE_PRIVATE;status_reads=vma_lookups=0;
+    expected_level=-1;expected_index=0;
 }
 int main(void) {
     mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
@@ -100,6 +112,32 @@ int main(void) {
         assert(locked==-1&&locks==1&&unlocks==1&&frame_gets==0&&cache.pin==0);
         assert(snap.slot==NULL&&snap.node==NULL);
     }
+    struct ClassCase { unsigned char stored;unsigned flags;int present;unsigned char expected; };
+    const struct ClassCase cases[]={
+        {MM_ST_FILE_SHARED,VM_FILE|VM_SHARED,1,MM_ST_FILE_SHARED},
+        {MM_ST_FILE_PRIVATE,VM_VMO,1,MM_ST_FILE_PRIVATE},
+        {MM_ST_INVALID,VM_VMO,1,MM_ST_VMO},
+        {MM_ST_PT_NODE,VM_FILE|VM_SHARED,1,MM_ST_FILE_SHARED},
+        {MM_ST_INVALID,VM_FILE,1,MM_ST_FILE_PRIVATE},
+        {MM_ST_INVALID,0,0,MM_ST_ANON_MAPPED},
+    };
+    for(int level=0;level<2;level++)for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);i++) {
+        reset();stored_class=cases[i].stored;expected_class=cases[i].expected;
+        vma.vm_flags=cases[i].flags;present_vma=cases[i].present;
+        assert(a20_cow_share_snapshot(&parent,0,level,&snap)==1);
+        assert(snap.class==expected_class&&status_reads==1&&vma_lookups==1);
+        active=1;
+        a20_cow_share_downgrade(&parent,0,level,&snap,snap.cow_flags);
+        a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
+        assert(leaf_walks==1&&node_walks==1&&status_reads==1&&vma_lookups==1);
+    }
+    reset();
+    assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1);
+    expected_level=0;expected_index=6;stored_class=MM_ST_FILE_PRIVATE;
+    assert(mm_fork_page_class(tables[0],0,0x206000,&vma)==MM_ST_FILE_PRIVATE);
+    expected_level=1;expected_index=1;stored_class=MM_ST_FILE_SHARED;
+    assert(mm_fork_page_class(tables[0],1,0x206000,&vma)==MM_ST_FILE_SHARED);
+    a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);
     reset();present_vma=0;
     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&frame_gets==1);
     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);assert(frame_puts==1);
