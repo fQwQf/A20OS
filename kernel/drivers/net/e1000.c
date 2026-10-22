@@ -1,4 +1,5 @@
 #include "drivers/bus/pci_msix.h"
+#include "drivers/bus/pci_msi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
@@ -265,6 +266,7 @@ typedef struct {
     int poll_only;        /* a20.e1000.poll=1, or no line could be claimed */
     int msix_base;        /* first reserved vector, -1 when unused */
     int msix_vectors;     /* reserved table entries in use */
+    int msi;              /* the registered line is a single MSI message */
     /* Driver-owned interrupt accounting, mirrored into the perf counters the
      * handler bumps so /proc/a20/perf can be read without a second path.  A
      * weak-symbol /proc hook would be absent for the .a20drv build this driver
@@ -1004,7 +1006,28 @@ static int e1000_probe(device_t *dev)
             nic->irq_registered = 1;
         }
     }
+    /* MSI is the next step down from MSI-X, not a replacement for it: one
+     * message cannot separate RX from TX, so it is only used when the table
+     * could not be armed or one of its handlers could not be registered. */
     if (msix != 0) {
+        int vec = irq_alloc_vectors(1);
+        if (vec >= 0) {
+            if (pci_msi_enable(dev, (uint32_t)vec) == 0) {
+                if (request_irq((uint32_t)vec, e1000_irq_handler, 0,
+                                dev) == 0) {
+                    nic->irq = vec;
+                    nic->irq_registered = 1;
+                    nic->msi = 1;
+                } else {
+                    pci_msi_disable(dev);
+                    irq_free_vectors((uint32_t)vec, 1);
+                }
+            } else {
+                irq_free_vectors((uint32_t)vec, 1);
+            }
+        }
+    }
+    if (msix != 0 && !nic->irq_registered) {
         int irq = pci_intx_irq(dev);
         if (irq >= 0) {
             if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
@@ -1030,7 +1053,7 @@ static int e1000_probe(device_t *dev)
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
           nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",
           nic->irq_registered ? nic->irq : -1,
-          nic->msix_vectors > 0 ? " (msix)" : "",
+          nic->msix_vectors > 0 ? " (msix)" : (nic->msi ? " (msi)" : ""),
           nic->poll_only ? " dataplane=polling" : "",
           (unsigned)E1000_RING_SIZE, (unsigned)nic->itr_us);
     return 0;
@@ -1052,6 +1075,10 @@ static int e1000_remove(device_t *dev)
         e1000_msix_teardown(dev, nic);
     } else if (nic->irq_registered) {
         free_irq((uint32_t)nic->irq, dev);
+        if (nic->msi) {
+            pci_msi_disable(dev);
+            irq_free_vectors((uint32_t)nic->irq, 1);
+        }
     }
     e1000_write(nic, E1000_RCTL, 0);
     e1000_write(nic, E1000_TCTL, 0);

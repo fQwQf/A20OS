@@ -1014,10 +1014,13 @@ top-half 跑过 —— 而 AHCI 原先是纯轮询的，正因为轮询也能把
 看不出区别。
 
 断言：`[AHCI] device on port` 恰好出现 1 次（挂两个就说明匹配过宽）、日志里有
-`completion=irq`、`FSYNC_TEST: PASS`、`ahci_irq_completions > 0`、
-`ahci_commands > 0`，**并且 `ahci_poll_completions == 0`**。最后这条是整条门禁的
-关键：它要求每一条完成都经过中断 top-half，只要有一条走了轮询就失败。这正是把
-两条路径分开计数的意义 —— 否则"盘能用"这个观察对中断路径是否工作不提供任何信息。
+`[MSI] ... enabled vector` 与 `completion=irq(msi)`、`FSYNC_TEST: PASS`、
+`ahci_irq_completions > 0`、`ahci_commands > 0`，**并且
+`ahci_poll_completions == 0`**。最后这条是整条门禁的关键：它要求每一条完成都经过
+中断 top-half，只要有一条走了轮询就失败。MSI 断言则区分"中断送达"与"通过 MSI
+送达"：ich9-ahci 没有 MSI-X 能力，所以这里同时覆盖了 MSI 数据面与 MSI → INTx →
+轮询降级链的第一级。这正是把两条路径分开计数的意义 —— 否则"盘能用"这个观察对
+中断路径是否工作不提供任何信息。
 
 `ahci_irq_wakeups`、`ahci_park_rounds`、`ahci_errors` 只记录不断言，因为它们在
 本机 QEMU 上没有稳定的期望值。

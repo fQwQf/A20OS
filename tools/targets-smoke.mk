@@ -694,13 +694,14 @@ smoke-ahci-ich9:
 	errs=$$(last_counter ahci_errors); \
 	bound=$$(grep -c '\[AHCI\] device on port' "$$log" || true); \
 	if grep -q 'FSYNC_TEST: PASS' "$$log" && \
-	   grep -q 'completion=irq' "$$log" && \
+	   grep -q '\[MSI\].*enabled vector' "$$log" && \
+	   grep -q 'completion=irq(msi)' "$$log" && \
 	   [ "$$bound" -eq 1 ] && \
 	   [ "$$irq" -gt 0 ] && \
 	   [ "$$poll" -eq 0 ] && \
 	   [ "$$cmds" -gt 0 ] && \
 	   ! grep -qiE 'panic|assertion failed' "$$log"; then \
-		echo "smoke-ahci-ich9: PASS (one ich9-ahci port bound on the interrupt path;" \
+		echo "smoke-ahci-ich9: PASS (one ich9-ahci port bound on the MSI path;" \
 			 "$$cmds commands, $$irq of them completed through the IRQ top-half, $$poll via polling); log saved to $$log"; \
 		echo "  recorded, not asserted: ahci_irq_wakeups=$$wake ahci_park_rounds=$$park ahci_errors=$$errs"; \
 		grep -E '^\[AHCI\]' "$$log" || true; \
