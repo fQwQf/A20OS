@@ -46,7 +46,7 @@
 	step7-rv-release-8c step7-la-release-8c \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c _step35_smoke
-.PHONY: _release_build _release_disk smoke-usb-x86_64
+.PHONY: _release_build _release_disk smoke-usb-x86_64 smoke-usb-hotplug-x86_64
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -265,6 +265,9 @@ smoke-audio-userspace:
 
 smoke-usb-x86_64:
 	$(PYTHON) tools/smoke.py smoke-usb-x86_64
+
+smoke-usb-hotplug-x86_64:
+	$(PYTHON) tools/smoke.py smoke-usb-hotplug-x86_64
 
 smoke-virtio-sound:
 	$(PYTHON) tools/smoke.py smoke-virtio-sound

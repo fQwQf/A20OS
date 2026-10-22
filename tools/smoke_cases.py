@@ -2691,6 +2691,35 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-x86_64: PASS; log saved to $log',
     },
+    # USB hot-unplug and replug on an xHCI root port.  QMP device_del makes the
+    # guest's port poll see a real disconnect, which is the only way to exercise
+    # abort_slot (Disable Slot + endpoint teardown) and the bus-address reclaim
+    # without physical hardware.  device_add must then hand the new device the
+    # same address, and both enumerations must reach the HID class driver.
+    'smoke-usb-hotplug-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/usb-hotplug-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 30, 'lines': ['poweroff']},
+        'timeout': '40s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,id=kbd0', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'qmp_actions': [
+            {'after': 14, 'execute': 'device_del', 'arguments': {'id': 'kbd0'}},
+            {'after': 20, 'execute': 'device_add',
+             'arguments': {'driver': 'usb-kbd', 'id': 'kbd1', 'bus': 'xhci.0'}},
+        ],
+        'expect': ['\\[USB-HID\\] keyboard ready',
+                   '\\[USB\\] port [0-9]+ slot=[0-9]+ address=1',
+                   '\\[USB\\] port [0-9]+ disconnected: address=1 reclaimed, slot=[0-9]+ released',
+                   'System is going down for power-off NOW'],
+        'forbid': ['\\[USB\\] port.*enumeration failed', '\\[XHCI\\].*Disable Slot failed',
+                   '\\[XHCI\\] slot.*transfer owner did not clear',
+                   'PANIC', 'KERNEL PAGE FAULT'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-usb-hotplug-x86_64: PASS; log saved to $log',
+    },
     # A USB hub on the xHCI root bus.  The hub is a genuine class-9 device,
     # so this proves the class driver binds, reads the hub descriptor with
     # the class request code it really uses (0xA0, not the standard

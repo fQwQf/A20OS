@@ -111,6 +111,7 @@
 #define XHCI_TRB_STATUS               4U
 #define XHCI_TRB_LINK                 6U
 #define XHCI_TRB_ENABLE_SLOT          9U
+#define XHCI_TRB_DISABLE_SLOT         10U
 #define XHCI_TRB_ADDRESS_DEVICE       11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT   12U
 #define XHCI_TRB_EVALUATE_CONTEXT     13U
@@ -381,11 +382,11 @@ static void xhci_run_completions(usb_urb_t **ready, unsigned count,
 /* Serialise one synchronous transfer.  The flag is polled under the controller
  * lock rather than slept on, and the poll is bounded by the deadline the
  * holder published instead of by an iteration count of our own: callers reach
- * here from paths that may already hold a spinlock of their own (usb-storage's
- * msc_command holds st->lock across the whole BOT exchange), and the cost of one
- * iteration is machine-dependent, so an unbounded count is an unbounded time in
- * someone else's critical section.  Refusing with -EBUSY is a refusal, not a
- * queue. */
+ * here from paths that may already hold a lock of their own (usb-storage's
+ * msc_command holds its per-device mutex across the whole BOT exchange), and
+ * the cost of one iteration is machine-dependent, so an unbounded count is an
+ * unbounded time in someone else's critical section.  Refusing with -EBUSY is
+ * a refusal, not a queue. */
 static int xhci_xfer_acquire(xhci_controller_t *xhci) {
     uint64_t deadline = timer_get_ticks() + MS_TO_TICKS(XHCI_XFER_HOLD_BUDGET_MS);
     for (uint32_t i = 0;; i++) {
@@ -1017,10 +1018,57 @@ out:
     return result;
 }
 
+/* Tear a slot down on removal.
+ *
+ * The controller has to stop using the slot before its rings are freed, or it
+ * can keep DMAing through a request that is already in flight while the memory
+ * behind it is returned to the allocator.  Two steps do that: wait for the
+ * synchronous-transfer owner (xfer_busy), then issue Disable Slot, which halts
+ * every endpoint of the slot.  Only after the command completes may the DCBAA
+ * entry be cleared and the endpoint allocations freed.
+ *
+ * xfer_busy is held for the whole wait of a transfer, not just its submission,
+ * so a transfer that is still waiting for a completion event has to finish or
+ * time out first.  The acquire is retried a few times because the holder's own
+ * budget is 500 ms and a removal thread must not permanently give up after one
+ * of those; if it never clears, the rings stay allocated (a leak, but not a
+ * use-after-free) and the slot is reported unreleased. */
 static int xhci_op_abort_slot(usb_hcd_t *hcd, uint8_t slot) {
     xhci_controller_t *xhci = hcd->priv;
-    xhci_ep_t *dead = NULL;
+    if (!slot || slot > xhci->max_slots)
+        return -EINVAL;
+
+    int held = -EBUSY;
+    for (int attempt = 0; attempt < 8 && held < 0; attempt++) {
+        held = xhci_xfer_acquire(xhci);
+        if (held < 0)
+            mdelay(10);
+    }
+    if (held < 0) {
+        kerr("[XHCI] slot %u: transfer owner did not clear; context left allocated\n",
+             slot);
+        return held;
+    }
+
+    int r = xhci_command_locked(xhci, 0, 0,
+                                XHCI_TRB_TYPE(XHCI_TRB_DISABLE_SLOT) |
+                                ((uint32_t)slot << 24), NULL);
     uint64_t flags = spin_lock_irqsave(&xhci->lock);
+    /* A Disable Slot that failed leaves the device context in place; clearing
+     * DCBAA anyway would let the controller fetch a zeroed context. */
+    if (r == 0) {
+        xhci->dcbaa[slot] = 0;
+        arch_dma_sync_for_device(xhci->dcbaa, sizeof(xhci->dcbaa));
+    }
+    spin_unlock_irqrestore(&xhci->lock, flags);
+    xhci_xfer_release(xhci);
+    if (r < 0) {
+        kerr("[XHCI] slot %u: Disable Slot failed: %d\n", slot, r);
+        return r;
+    }
+
+    xhci_ep_t *dead = NULL;
+    flags = spin_lock_irqsave(&xhci->lock);
     xhci_ep_t **pp = &xhci->eps;
     while (*pp) {
         xhci_ep_t *e = *pp;

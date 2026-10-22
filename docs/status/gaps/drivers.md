@@ -16,14 +16,6 @@
 - 关闭条件：MSI 路径可用并按 MSI → MSI-X → INTx → 轮询降级；非 x86 有实现或明确的每设备类回退。
 - 来源：requirements N10–N12、[current/server-readiness.md](../current/server-readiness.md) §八。
 
-### DRIVER-05 USB 生命周期
-
-- 现状：hub/HCD 有实现；拔出时 endpoint URB 中止与地址归还未验证。
-- 缺口：热拔可能留下陈旧完成或泄漏槽位；xHCI controller lock 未实际获取、HID completion 可在未持锁时调用、USB storage 跨同步 bulk wait 持 spinlock。
-- 关闭条件：热拔用例断言请求被中止、地址复用、零泄漏；三处锁缺口有修复与说明。
-- 来源：requirements N13、[drivers/classes/usb-design.md](../../drivers/classes/usb-design.md)、
-  [drivers/guide/lock-order.md](../../drivers/guide/lock-order.md)。
-
 ### DRIVER-06 IOMMU 多设备归属与故障恢复
 
 - 现状：IOMMU 发现与用户态驱动隔离有门禁。
