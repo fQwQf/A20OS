@@ -65,6 +65,12 @@ MC_MAX_HEAP=${MC_MAX_HEAP:-1536m}
 XDG_SESSION_TYPE=wayland
 export XDG_SESSION_TYPE
 unset DISPLAY
+# JNA's riscv64 libjnidispatch.so imports glibc's fortified __*_chk entry
+# points, which musl does not export; without these stand-ins in the global
+# namespace the first fortified call jumps into the PLT lazy-binding stub and
+# dies (SIGSEGV at a bare .plt address).  See tools/a20-fortify.c.
+FORTIFY_SHIM=/usr/lib/a20/liba20-fortify.so
+[ -f "$FORTIFY_SHIM" ] && export LD_PRELOAD="$FORTIFY_SHIM${LD_PRELOAD:+:$LD_PRELOAD}"
 exec java \
     -Xms"$MC_MIN_HEAP" -Xmx"$MC_MAX_HEAP" \
     -Dos.name=Linux \

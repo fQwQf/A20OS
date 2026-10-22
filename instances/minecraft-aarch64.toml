@@ -1,0 +1,20 @@
+# Java Edition desktop on the shared XFCE image. Fetch client files first;
+# see docs/distro/minecraft.md. The host display must support virgl/OpenGL.
+name = "minecraft-aarch64"
+description = "Minecraft Java desktop with host virgl rendering"
+arch = "aarch64"
+abi = "both"
+
+[machine]
+# Single-CPU like xfce-aarch64: aarch64 SMP panics under GUI load.
+smp = 1
+memory = "4G"
+gpu_3d = true
+
+[gui]
+enabled = true
+display = "gtk,gl=on"
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096

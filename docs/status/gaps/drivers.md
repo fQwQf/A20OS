@@ -52,16 +52,12 @@
 - 关闭条件：桥后设备能定位 GSI；PIRQ 可编程；至少一台真机完成 INTx 投递验证。
 - 来源：[current/server-readiness.md](../current/server-readiness.md) §八 P1、[kernel/arch/x86_64-cpu-id.md](../../kernel/arch/x86_64-cpu-id.md)。
 
-### DRIVER-08 板级存储/网卡驱动缺失
+### DRIVER-08 控制台 UART 的接收不是真正中断驱动
 
-- 现状：LicheeRV Nano、Milk-V Duo、H616、RK3328 只到 build-verified；SD/eMMC 与 GMAC 均无可用驱动。
-- 缺口：这些板子无法越过仅 RAM 启动；`dw_sdio.c` 覆盖的是更老的 DesignWare 布局。
-- 关闭条件：至少一块板有可用的块驱动，能从卡启动并自然关机；或者明确移出 1.0 平台范围。
-- 来源：[platforms/licheerv-nano.md](../../platforms/licheerv-nano.md)、
-  [platforms/milk-v-duo.md](../../platforms/milk-v-duo.md)、
-  [platforms/sun50i-h616.md](../../platforms/sun50i-h616.md)、
-  [platforms/rk3328.md](../../platforms/rk3328.md)。
-
+- 现状：8250 在 `arch_uart_init()`（`kernel/arch/riscv64/include/console.h`）里写了 `IER = 0x01`（RX 中断使能），`uart_init()` 对 `UART0_IRQ`（QEMU virt 为 10）注册了 `uart_irq_wrapper`，`kernel/arch/riscv64/trap/irqchip.c` 也在 PLIC 里按 hart enable 了该源。但实测行为是「只有读者轮询才取字节」：前台跑 `ping`（不读终端）时按 ^C，收端行规一次 ISIG 都没有触发；等 `ping` 结束、shell 重新读终端时那个 `0x03` 才被取走。也就是说接收实际靠 `uart_getc()` 里的 `arch_uart_poll_getc()` 推进，RX 中断没有在起作用（是 `uart_handle_irq` 未被调用，还是 trap 分发没有把外部中断转进来，尚未定位）。
+- 缺口：控制台输入在「没人读」的时候不被处理，于是 echo/ISIG 这类收端行规事件只能发生在有读者的瞬间——提示符上按 ^C 有效，前台作业不读终端时按 ^C 无效。这与 [drivers/guide/device-classes.md](../../drivers/guide/device-classes.md) 写明的契约（"UART 硬件驱动只负责收发和中断"）不符，属于驱动未完成项，而不是 tty 层的缺陷。
+- 关闭条件：在没有任务读控制台的情况下，RX 字节仍进入环形缓冲区且 `rx_irq_bytes` 在没有 poll 的情况下增长；由此前台不读终端的作业也能被 ^C 打断（SIGINT 投递到该终端的前台进程组）；有一条门禁覆盖（例如前台跑 `ping`/`sleep` 时注入 ^C，断言作业在 2 秒内结束），并在 QEMU 与至少一块真机上通过。
+- 来源：2026-10 实测（阻塞点记录见 [abi-ipc.md](abi-ipc.md) ABI-08）、[drivers/guide/device-classes.md](../../drivers/guide/device-classes.md)、`kernel/arch/riscv64/include/console.h`、`kernel/arch/riscv64/trap/irqchip.c`、`kernel/drivers/char/uart.c`。
 ### DRIVER-09 STM32F103 平台文件含硬编码 MMIO 地址
 
 - 现状：`make check-stm32f103` 报 `hardcoded STM32 MMIO address found`，逐条列出 `kernel/platform/stm32f103/shared_bus.c:9` 起的 20 余处 `MMIO32(0x40…)` 常量，门禁因此在候选上为红（在固定 CI 容器里复现，宿主无 `arm-none-eabi-gcc`）。
