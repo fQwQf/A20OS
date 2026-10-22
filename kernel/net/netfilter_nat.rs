@@ -60,7 +60,6 @@ fn add_stat(p: *mut u64, by: u64) {
 }
 
 /* ------------------------------------------------------------- constants */
-
 const NONE: u16 = 0xFFFF;
 const NO_ADDR: u32 = 0xFFFF_FFFF;
 const NO_PORT: u16 = 0xFFFF;
@@ -1155,8 +1154,13 @@ pub unsafe extern "C" fn a20_netfilter_nat_add(v: *const CtView,
     if r.nat == NAT_MASQUERADE && r.nat_addr != NO_ADDR {
         return -EINVAL;
     }
-    /* DNAT is an input-hook translation. */
+    /* DNAT is an input-hook translation and SNAT/MASQUERADE are output-hook
+     * translations: the packet path only applies them in that direction, so a
+     * rule installed on the wrong hook would match and then do nothing. */
     if r.nat == NAT_DNAT && r.dir != DIR_IN {
+        return -EINVAL;
+    }
+    if (r.nat == NAT_SNAT || r.nat == NAT_MASQUERADE) && r.dir != DIR_OUT {
         return -EINVAL;
     }
 

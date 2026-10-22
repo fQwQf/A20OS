@@ -70,7 +70,7 @@ _Static_assert(sizeof(netfilter_stats_t) == 48,
                "netfilter_stats_t layout changed: update FilterStats");
 
 static netfilter_rule_t g_rules[NETFILTER_MAX_RULES];
-static unsigned g_rule_count;
+static uint32_t g_rule_count;
 
 /*
  * Seqlock over the rule table.  Even means the table is stable, odd means a
@@ -226,7 +226,7 @@ void netfilter_format(char *buf, size_t bufsz)
         (unsigned long long)s.in_packets, (unsigned long long)s.out_packets,
         (unsigned long long)s.in_dropped, (unsigned long long)s.out_dropped,
         (unsigned long long)s.in_accepted, (unsigned long long)s.out_accepted,
-        g_rule_count);
+        (unsigned)g_rule_count);
     off = netfilter_append(buf, bufsz, off, line);
     if (off < bufsz && g_rule_count) {
         off = netfilter_append(buf, bufsz, off, "(filter rules)\n");

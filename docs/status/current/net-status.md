@@ -1,13 +1,99 @@
 # 网络当前状态
 
 > 仍未完成的事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前状态。
+> 锁契约与并发边界见 [net/network-lock-contract.md](../../net/network-lock-contract.md)，
+> 配置面见 [net/network-config-design.md](../../net/network-config-design.md)，
+> NAT 形态见 [net/conntrack-nat.md](../../net/conntrack-nat.md)。
 
-网络栈与 NAT 对照工具的当前范围。
+## 锁与 lane
 
-<!-- 以下内容从 docs/net/nat-host-oracle.md 迁入；只保留当前状态，历史运行记录已删除。 -->
+- 普通单播 IPv4/IPv6 TCP/UDP 热路径只取所属 lane 锁；`g_lwip_lock` 仅作为设备
+  ingress/staging 门和 control barrier 的外层门，出现在冷路径、中断入口和配置事务。
+- TCP 的 `tcp_active_pcbs` / `tcp_bound_pcbs` / `tcp_listen_pcbs` / `tcp_tw_pcbs` 按 lane
+  分桶；`CONFIG_NET_PCB_SANE=1` 时 `tcp_pcbs_sane()` 检查 bucket、`lane` 与 addr/port
+  一致性。UDP 没有独立 sane 函数，等价断言在 `udp_input()` 的每个 pcb 上就地执行。
+- 运行时 panic 边界：lane→control 升级、lane 递归、非 owner 释放、lane 队列误用、
+  shared guard 误释放。静态门禁 `tools/check_lwip_concurrency_wiring.py`
+  （`make check-honesty-policy` 的 `lwip-concurrency-wiring`）检查 filter 顺序、IRQ
+  staging、owner-lane drain 和 accept 发布顺序（C 包装 → Rust `a20_net_accept_publish`）。
+- 有意保留的全局面：ARP/ND6 cache、conntrack 表、UDP autobind、TCP ISS 共用一个
+  `NULL`-key shared shard；loopback 在 control barrier 下交付；e1000/rtl8139 的 IRQ
+  仍取完整 barrier（驱动 owned，已报告给 drivers），virtio 走 ingress lock。
 
-## 当前状态
+## 套接字缓冲
 
-功能契约（44 项检查、摘要 `3915109928`）可以作为该用例的通过条件；聚合状态因 C0/Cn 未验证而保持
-`EVIDENCE_INSUFFICIENT`。本条目不记录 guest NAT 测试、Rust 性能主张或 C0 验证结论。输出目录与哈希
-不进入仓库：运行产物留在仓库外的临时目录中，仓库只保留结论。
+- `SO_SNDBUF` / `SO_RCVBUF` 真正约束 pcb 发送队列与接收窗口，`getsockopt` 回读生效值。
+- 发送侧有界自动调优：DEFAULT/SERVER 初始 32 KiB，窗口耗尽时倍增到 `TCP_SND_BUF`
+  （`pcb->snd_buf` 可用空间），显式 `setsockopt` 关闭该方向。
+- 接收侧默认就是协议上限 `TCP_WND`，因此没有可增长空间；`wnd_limit` 仍是显式
+  `SO_RCVBUF` 的软上限：`tcp_recved()` 不会把已经通告的窗口缩小（避免丢掉对端已获准
+  发送的数据），握手前则直接把 `rcv_wnd`/`rcv_ann_wnd` 写成请求值。
+- 窗口缩放 `LWIP_WND_SCALE=1`、`TCP_RCV_SCALE=3` 已开启；协议上限不再是 64 KiB。
+
+## IPv6
+
+- `RTM_NEWADDR` / `RTM_DELADDR` + `AF_INET6` 都实现；删除走
+  `netif_ip6_addr_set_state(..., IP6_ADDR_INVALID)`，不存在的地址返回
+  `-EADDRNOTAVAIL`。事件发到 `RTNLGRP_IPV6_IFADDR`（NEWADDR / DELADDR）。
+- DAD 契约：管理写入直接置 `IP6_ADDR_VALID`，事件不表示"DAD 通过"，也不补发
+  DAD 完成事件；链路本地/SLAAC 仍由 `nd6_tmr()` 做 DAD。
+- `ifa_prefixlen` 只校验、不落地；DELADDR 事件回报 0（与 IPv4 删除一致）。
+- ND6 从 RA 学到的地址以及生命周期转换**不发通知**：`LWIP_NETIF_EXT_STATUS_CALLBACK`
+  在本树是 0，已知边界。管理路径是唯一事件源。
+
+## pbuf 与分档预算
+
+| 档位 | `MEM_SIZE` | pbuf 池 | 池上限断言 |
+|---|---|---|---|
+| EMBEDDED | 16 KiB | 10 × 512 B | 16,224 B 池声明 ≤ 16,384 B |
+| DEFAULT | 1 MiB | 256 × 1600 B | 771,192 B ≤ 1,048,576 B |
+| SERVER | 16 MiB | 4096 × 1600 B | 12,510,840 B ≤ 16,777,216 B |
+
+- 三个档位都有 `NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE`
+  （含每元素 24 B 堆头和空闲链终止符），由 `net_profile.h` 的 `_Static_assert` 检查。
+- DEFAULT 的 `MEM_SIZE` 从 512 KiB 调整到 1 MiB：按真实元素尺寸，原值装不下自己声明的
+  池上限（约 771 KiB）。
+- EMBEDDED 的 44 KiB 总预算按实测项重新对账：socket 表、ring + drain slot、netif state、
+  两个 `struct netif`、filter 表、heap；LP64 约 43,796 B，ILP32 约 41,364 B。
+- `/proc/a20/netmem` 打印池的 `elem/used/max/err`、pbuf 池上限和 heap
+  `size/used/avail/err`，用于区分"池受限"与"堆受限"。
+- 零拷贝收包是设计边界：设备 recv op 只提供"拷进调用者缓冲"，真正零拷贝需要改
+  `kernel/drivers` 的接口；lane ring 槽位复用，包装成 custom pbuf 会在下一帧到达时
+  踩到仍被 lwIP 持有的 pbuf。
+
+## conntrack / NAT
+
+- 五元组 FNV-1a 表（32/256/1024 条）、NEW/ESTABLISHED、按状态超时、满表 LRU、
+  SNAT/MASQUERADE（output）与 DNAT（input）、RFC 1624 增量校验和、ICMP echo 跟踪。
+- 规则方向与 hook 匹配：`dnat` 只能 `in`，`snat`/`masquerade` 只能 `out`，否则 `-EINVAL`。
+- 设计边界：无 ALG；不跟踪 ICMP 差错报文（vendored lwIP 的 `icmp_input()` 也丢弃入站
+  差错，PMTU 因此不可用）；分片只翻译首片、非首片放行；无 IPv6 NAT；无动态端口分配。
+- 端到端门禁：`smoke-netfilter-nat`（DNAT/TCP，hostfwd）与
+  `smoke-netfilter-snat`（出站 SNAT/TCP，宿主回显 + 返回路径 + 删规则阴性对照）。
+
+## 真实 netif 与外部对端
+
+- `smoke-net-lanes-hostfwd`：4 lane、4 条并行 64 KiB TCP 流，双向 digest，宿主探针
+  校验返回字节；`smoke-net-tcp-lanes`：8 个真实 LISTEN pcb，`CONFIG_NET_PCB_SANE=1`。
+- `smoke-net-udp-hostfwd`：宿主经 QEMU `hostfwd=udp` 发送 16 个带序号的 512 B 数据报，
+  guest 校验后异或回显，宿主逐字节验证；覆盖真实 virtio-net 的双向 UDP。
+- `smoke-network-suite`（单 CPU 与 `-smp2`）与 `smoke-netopt-lwip` 覆盖本地 fast path、
+  套接字选项和 bottom-half；它们**不是**外部数据面。
+- `smoke-ipv6-rx-soak`：`CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 下 4,000 轮 UDP6
+  （64 B ~ 16 KB，跨越单 pbuf 边界），用于 NET-09 的池引用/越界回归。
+- 未覆盖：IPv6 外部 peer、ICMP 差错/PMTU、e1000/rtl8139 的多 lane 并发。
+
+## 常用命令
+
+```sh
+make smoke-network-suite
+make smoke-network-suite-smp2
+make smoke-netopt-lwip
+make smoke-net-tcp-lanes
+make smoke-net-lanes-hostfwd
+make smoke-net-udp-hostfwd
+make smoke-netfilter-nat
+make smoke-netfilter-snat
+make smoke-ipv6-rx-soak
+make check-honesty-policy        # lwip-concurrency-wiring 静态门禁
+```

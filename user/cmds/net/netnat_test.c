@@ -177,6 +177,10 @@ int main(void) {
         "masquerade with to= is rejected: the interface supplies the address");
     CHK(nf_write("natadd out proto=tcp dport=1 action=dnat to=10.0.2.15") < 0,
         "dnat on the output hook is rejected");
+    CHK(nf_write("natadd in proto=tcp dport=1 action=snat to=10.0.2.15 toport=99") < 0,
+        "snat on the input hook is rejected");
+    CHK(nf_write("natadd in proto=tcp dport=1 action=masquerade") < 0,
+        "masquerade on the input hook is rejected");
     CHK(nf_write("natadd in proto=udp dport=1 action=masquerade toport=99") < 0,
         "masquerade with toport= is rejected");
     CHK(nf_write("natadd in action=drop to=10.0.2.15") < 0,

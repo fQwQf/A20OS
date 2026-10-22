@@ -23,6 +23,23 @@
 > 全部实现的回归结果。下方只记录本轮明确执行的 host-forward 并发门禁；它不代表
 > 其他网络 smoke 或整体验收通过。
 
+### 本轮收尾状态（2026-10）
+
+- 热路径最终形态：普通单播 TCP/UDP 只取 lane 锁；`g_lwip_lock` 仅剩 ingress/staging
+  门与 control barrier 外层门。全局 shared-domain（ARP、conntrack、UDP autobind、
+  TCP ISS）共用一个 `NULL`-key 分片，是有意边界。
+- PCB 归属断言：TCP 由 `tcp_pcbs_sane()`，UDP 在 `udp_input()` 每个被访问 pcb 上就地
+  检查（bucket/`lane`/wildcard/addr-port 一致性）；静态门禁
+  `tools/check_lwip_concurrency_wiring.py` 跟随 accept 发布已迁移到 Rust 的事实。
+- **历史 2% connect flake**：失败样本的构建号无法从树内记录恢复；该样本使用的
+  "IRQ 中在单一 `g_lwip_lock` 下调 `n->input()`" 执行路径在多 lane 构建中已被
+  `a20_lwip_lane_drain()` 取代（单 lane 路径保留）。当前 `smoke-net-tcp-lanes` 增加
+  了 issued/executed/echoed 计数（8 条命令必须产生 8 条 PASS/FAIL 且无
+  "inaccessible or not found"），4-lane 构建在 `CONFIG_NET_PCB_SANE=1` 下通过。
+  这证明当前树的门禁没有样本损坏，不声称复现并修复了历史样本。
+- 驱动边界：virtio 中断走 ingress lock；e1000 / rtl8139 的中断入口仍取完整 control
+  barrier，属于 `kernel/drivers` 的 owned 范围，已报告给 drivers，不在本包修改。
+
 ## 为什么是 lane
 
 两种部署缺的是不同的东西：

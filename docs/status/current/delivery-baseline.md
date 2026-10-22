@@ -113,14 +113,14 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 - `tools/tests/test_stamps_clean.py` 构造的 Namespace 缺 `syscall_smoke_task_construction_test`，
   `tools/stamps.py` 已经要读它，5 个用例直接 `AttributeError`。
 
-当前状态（`LC_ALL=C`，477 个用例）：**1 个 error + 1 个 skip**。
+当前状态（`LC_ALL=C`，477 个用例）：**0 个 error + 1 个 skip**。
 
 | 用例 | 根因 | 归属 |
 | --- | --- | --- |
-| `test_tcp_send_backpressure.test_accepted_bytes_and_retry` | 发送循环已迁到 `kernel/net/socket_inet_send_tcp.rs`，用例仍从 `socket_inet.c` 里找 `size_t sent = 0;` | NET，见 [NET-11](../gaps/net.md) |
+| ~~`test_tcp_send_backpressure.test_accepted_bytes_and_retry`~~ | 已修复：`tools/tests/test_tcp_send_backpressure.py` 改为编译并运行 `kernel/net/socket_inet_send_tcp.rs` 的宿主 Rust 测试，不再抓 C 源码窗口；保留逐次 `tcp_write` 脚本、部分接受和全部负控 | NET（已修） |
 
-本表此前记录的 8 个 error（MM 的 usercopy/tlb/process_vm 抽取、NET 的背压、PROC 的 partial-results）
-在 main 的 MM/FS 包并入后都已通过。非 C locale 下另有 6 个 `test_removed_arch_targets_*` 失败，
+本表此前记录的 9 个 error（MM 的 usercopy/tlb/process_vm 抽取、NET 的背压、PROC 的 partial-results）
+在 main 的 MM/FS 包并入以及 NET-11 夹具改写后都已通过。非 C locale 下另有 6 个 `test_removed_arch_targets_*` 失败，
 原因是宿主 `make` 输出中文报错、用例断言英文 `No rule to make target`，与源码状态无关。
 
 CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重排锚点随 `sched_runq_steal_locked`
@@ -142,7 +142,7 @@ CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重�
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`（断言 6/6 通过；目标的 arm32 依赖需固定容器）、`check-task-lifetime-boundary`、`host-tests`、`check-host-scripts`（76 个脚本全过）后，仍为红的是：`check-a20-tests`（§5，1 个 NET 用例）、`check-honesty-policy`（lwIP accept 阶段接线断言，NET-10）、`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，ABI-09）、`check-task-state-boundary`（ABI-10）、`check-doc-drift`（8 条 gates 断言通过；`tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`（断言 6/6 通过；目标的 arm32 依赖需固定容器）、`check-task-lifetime-boundary`、`host-tests`、`check-host-scripts`（76 个脚本全过）后，`check-a20-tests`（§5）与 `check-honesty-policy` 的 lwIP accept 接线断言（NET-10）已修复并通过；仍为红的是：`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，ABI-09）、`check-task-state-boundary`（ABI-10）、`check-doc-drift`（8 条 gates 断言通过；`tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |

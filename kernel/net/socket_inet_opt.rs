@@ -79,8 +79,9 @@ unsafe extern "C" {
     fn a20_net_inet_opt_set_wnd_limit(pcb: *mut c_void, v: u32);
     fn a20_net_inet_opt_get_rcv_wnd(pcb: *mut c_void) -> u32;
     fn a20_net_inet_opt_set_rcv_wnd(pcb: *mut c_void, v: u32);
+    fn a20_net_inet_opt_set_rcv_ann_wnd(pcb: *mut c_void, v: u32);
+    fn a20_net_inet_opt_pcb_established(pcb: *mut c_void) -> i32;
     fn a20_net_inet_opt_get_rcv_ann_wnd(pcb: *mut c_void) -> u32;
-    fn a20_net_inet_opt_recved0(pcb: *mut c_void);
     fn a20_net_inet_opt_nagle_disable(pcb: *mut c_void);
     fn a20_net_inet_opt_cong_get(pcb: *mut c_void) -> i32;
     fn a20_net_inet_opt_cong_set(pcb: *mut c_void, alg: i32);
@@ -220,14 +221,21 @@ pub unsafe extern "C" fn a20_net_inet_tcp_buf_apply(snd_buf: u32, rcv_buf: u32,
         let scale = 0xffffu32 << a20_net_inet_opt_tcp_rcv_scale();
         let ceiling = if scale < wnd { scale } else { wnd };
         let rcv = if rcv_buf > ceiling { ceiling } else { rcv_buf };
-        a20_net_inet_opt_set_wnd_limit(pcb, rcv);
-        /* Only a shrink needs announcing, and only when a window has been
-         * announced: tcp_recved() on a pcb that has not completed a handshake
-         * emits a bare ACK for a connection that does not exist. */
-        if a20_net_inet_opt_get_rcv_wnd(pcb) > rcv {
+        /* At the configured ceiling there is nothing to cap: leaving
+         * wnd_limit at 0 keeps tcp_recved() on the upstream path exactly. */
+        if rcv < ceiling {
+            a20_net_inet_opt_set_wnd_limit(pcb, rcv);
+        }
+        if a20_net_inet_opt_get_rcv_wnd(pcb) > rcv &&
+            a20_net_inet_opt_pcb_established(pcb) == 0 {
+            /* Before the handshake there is no data and no announcement in
+             * flight, so the SYN can carry the ceiling directly.  On a live
+             * connection wnd_limit is a soft ceiling: tcp_recved() stops
+             * reopening above it but never shrinks an already-larger window,
+             * because that would drop data the peer was told it could send. */
             a20_net_inet_opt_set_rcv_wnd(pcb, rcv);
             if a20_net_inet_opt_get_rcv_ann_wnd(pcb) != 0 {
-                a20_net_inet_opt_recved0(pcb);
+                a20_net_inet_opt_set_rcv_ann_wnd(pcb, rcv);
             }
         }
     }
@@ -453,6 +461,7 @@ mod tests {
     static mut T_WND_LIMIT: u32 = 0;
     static mut T_RCV_WND: u32 = 0;
     static mut T_RCV_ANN: u32 = 0;
+    static mut T_ESTABLISHED: i32 = 1;
     static mut T_RECVED: i32 = 0;
     static mut T_NAGLE: i32 = 0;
     static mut T_CONG: i32 = 0;
@@ -504,6 +513,7 @@ mod tests {
         T_WND_LIMIT = 0;
         T_RCV_WND = 0;
         T_RCV_ANN = 0;
+        T_ESTABLISHED = 1;
         T_RECVED = 0;
         T_NAGLE = 0;
         T_CONG = 0;
@@ -636,8 +646,12 @@ mod tests {
         T_RCV_ANN
     }
     #[no_mangle]
-    unsafe extern "C" fn a20_net_inet_opt_recved0(_p: *mut c_void) {
-        T_RECVED += 1;
+    unsafe extern "C" fn a20_net_inet_opt_set_rcv_ann_wnd(_p: *mut c_void, v: u32) {
+        T_RCV_ANN = v;
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_inet_opt_pcb_established(_p: *mut c_void) -> i32 {
+        T_ESTABLISHED
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_inet_opt_nagle_disable(_p: *mut c_void) {
@@ -777,27 +791,32 @@ mod tests {
             a20_net_inet_tcp_buf_apply(1000000, 0, 8usize as *mut c_void);
             assert_eq!(T_SND, 93440);
 
-            /* A receive ceiling writes wnd_limit. */
+            /* A request clamped to the configured ceiling needs no cap. */
             reset();
             a20_net_inet_tcp_buf_apply(0, 1000000, 8usize as *mut c_void);
-            assert_eq!(T_WND_LIMIT, 65535);
+            assert_eq!(T_WND_LIMIT, 0);
             /* Raising rcv_wnd above the ceiling does not announce. */
             T_RCV_WND = 100;
             a20_net_inet_tcp_buf_apply(0, 1000, 8usize as *mut c_void);
             assert_eq!((T_RCV_WND, T_RECVED), (100, 0));
 
-            /* A shrink below the current window announces when one is out. */
+            /* A live connection keeps its already-advertised window: only
+             * wnd_limit moves, and tcp_recved() caps it as data is consumed. */
             reset();
             T_RCV_WND = 60000;
             T_RCV_ANN = 30000;
             a20_net_inet_tcp_buf_apply(0, 1000, 8usize as *mut c_void);
-            assert_eq!((T_RCV_WND, T_RECVED), (1000, 1));
-            /* ...but not when no window has been announced. */
+            assert_eq!((T_RCV_WND, T_RCV_ANN), (60000, 30000));
+            assert_eq!(T_WND_LIMIT, 1000);
+
+            /* A pre-handshake pcb gets the value written, not announced: no
+             * tcp_output() on SYN_SENT. */
             reset();
             T_RCV_WND = 60000;
-            T_RCV_ANN = 0;
+            T_RCV_ANN = 60000;
+            T_ESTABLISHED = 0;
             a20_net_inet_tcp_buf_apply(0, 1000, 8usize as *mut c_void);
-            assert_eq!((T_RCV_WND, T_RECVED), (1000, 0));
+            assert_eq!((T_RCV_WND, T_RCV_ANN), (1000, 1000));
         }
     }
 

@@ -204,6 +204,14 @@ static void a20_lwip_clear_rx_pending(void)
 static struct netif g_netifs[A20_NET_MAX_DEVS];
 static struct netif g_loopif;
 
+/* The tier budget in net_profile.h is a ceiling; this is the measurement it
+ * stands for.  Both arrays are unconditional .bss, so drift here is a silent
+ * cost on every boot unless it is a compile-time failure. */
+_Static_assert(sizeof(g_netifs) + sizeof(g_loopif) <=
+                   NET_PROFILE_NETIF_STRUCT_BUDGET,
+               "struct netif grew past the per-tier budget; update "
+               "NET_PROFILE_NETIF_STRUCT_BYTES and the embedded total");
+
 typedef struct {
     int idx;
     device_t *dev;
@@ -2107,6 +2115,25 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off, row);
     }
 
+    /* The two numbers that decide what limits receive throughput.  With
+     * MEMP_MEM_MALLOC=1 the pool's element count is a claim on the heap, so
+     * "pool-limited" means PBUF_POOL max reached its ceiling with err == 0,
+     * while "memory-limited" means heap avail fell to 0 or mem err rose first.
+     * Printing both makes /proc/a20/netmem answer that without a rebuild. */
+    snprintf(row, sizeof(row),
+             "pbuf pool: elements=%lu bufsize=%lu bytes=%lu\n",
+             (unsigned long)PBUF_POOL_SIZE,
+             (unsigned long)PBUF_POOL_BUFSIZE,
+             (unsigned long)PBUF_POOL_SIZE * (unsigned long)PBUF_POOL_BUFSIZE);
+    a20_lwip_append(buf, bufsz, &off, row);
+    snprintf(row, sizeof(row),
+             "heap: size=%lu used=%lu avail=%lu err=%lu\n",
+             (unsigned long)MEM_SIZE,
+             (unsigned long)lwip_stats.mem.used,
+             (unsigned long)lwip_stats.mem.avail,
+             (unsigned long)lwip_stats.mem.err);
+    a20_lwip_append(buf, bufsz, &off, row);
+
 #if CONFIG_NET_LANES > 1
     /*
      * Per-lane pool accounting, printed after everything above so no gate
@@ -2387,6 +2414,26 @@ int a20_lwip_stack_add_ip6(void *np, const uint8_t addr[16])
     return 0;
 }
 
+/* Remove one administratively added IPv6 address.  lwIP has no
+ * netif_remove_ip6_addr(); setting the slot INVALID is the supported
+ * primitive: netif_ip6_addr_set_state() drops the MLD membership, aborts
+ * TCP/UDP/RAW PCBs bound to the address, and makes the slot reusable. */
+int a20_lwip_stack_del_ip6(void *np, const uint8_t addr[16])
+{
+    ip6_addr_t want;
+    ip6_addr_set_zero(&want);
+    IP6_ADDR_PART(&want, 0, addr[0], addr[1], addr[2], addr[3]);
+    IP6_ADDR_PART(&want, 1, addr[4], addr[5], addr[6], addr[7]);
+    IP6_ADDR_PART(&want, 2, addr[8], addr[9], addr[10], addr[11]);
+    IP6_ADDR_PART(&want, 3, addr[12], addr[13], addr[14], addr[15]);
+    struct netif *n = (struct netif *)np;
+    s8_t idx = netif_get_ip6_addr_match(n, &want);
+    if (idx < 0)
+        return -EADDRNOTAVAIL;
+    netif_ip6_addr_set_state(n, idx, IP6_ADDR_INVALID);
+    return 0;
+}
+
 void a20_lwip_stack_set_mtu(void *np, uint16_t mtu)
 {
     ((struct netif *)np)->mtu = mtu;
@@ -2428,7 +2475,7 @@ void a20_lwip_stack_notify_addr(unsigned ifindex, const uint8_t addr[4],
 }
 
 void a20_lwip_stack_notify_addr6(unsigned ifindex, const uint8_t addr[16],
-                                 uint8_t prefixlen)
+                                 uint8_t prefixlen, uint16_t msg_type)
 {
-    net_netlink_addr6_notify(ifindex, addr, prefixlen);
+    net_netlink_addr6_notify(ifindex, addr, prefixlen, msg_type);
 }
