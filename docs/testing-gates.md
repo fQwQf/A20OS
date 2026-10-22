@@ -798,6 +798,52 @@ PS/2，证明不了任何 USB 的事。
 的回退路径本门禁没跑（需要另一个 case 或手动加 cmdline）；真机 xHCI 的 MSI/MSI-X
 也没覆盖（本驱动只用 INTx）。
 
+### USB 热拔与地址回收
+
+`make smoke-usb-hotplug-x86_64` 在 qemu-xhci 根口上挂一个 `usb-kbd,id=kbd0`，
+`tools/smoke.py:qmp_action_pump()` 在启动后 14 s 发 `device_del`、20 s 发
+`device_add`（`usb-kbd` 回到 `xhci.0`），30 s 送 `poweroff`。
+
+断言：一次 `[USB] port N slot=S address=1`、一次
+`[USB] port N disconnected: address=1 reclaimed, slot=S released`、第二次 HID
+`keyboard ready` 与自然关机；禁止 `enumeration failed`、`Disable Slot failed`、
+`transfer owner did not clear` 与 page fault。地址 1 在重插后再次被分配，证明
+`abort_slot()` 的 Disable Slot/端点释放与 `usb_core_free_address()` 都执行了；
+重复热拔不会再耗尽 1..127 的地址池。
+
+### IOMMU 多设备矩阵
+
+`make smoke-iommu-multidevice` 在 riscv64 virt 上挂 `riscv-iommu-pci` 与两个
+`edu` 函数。`uedud` 依次 claim 两个设备（各得一个 IOMMU domain），两边各做一次
+DMA 往返；随后对 device 0 发起未映射 IOVA 的 DMA，读取 fault 报告，确认
+device 0 被阻断后**再次**让 device 1 完成往返；最后分别释放两个 domain，并在
+device 0 释放后第三次验证 device 1 的翻译仍有效。
+
+断言 `two domains claimed`、`dev0 faulted`、`dev1 unaffected`、
+`domains released`、`PASS`，禁止 `dev1 affected`。这条门禁第一次跑就抓到了
+IOTLB 跨设备别名：两个域都用 PSCID=0 时，device 1 的翻译缓存会被 device 0
+命中（QEMU `riscv_iommu_dma` trace 显示 02.0 拿到 03.0 的物理页），修复是给每个
+domain 分配唯一 TA.PSCID。单设备门禁 `smoke-iommu-udriver-isolation` 与
+`smoke-iommu-discovery` 仍保留。
+
+### e1000e MSI-X 数据面
+
+`make smoke-net-e1000e-msix` 用 `-device e1000e`（82574L）+ hostfwd 回环。
+断言 `[E1000] MSI-X IVAR: rxq0->vX txq0->vY other->vX`、两个向量都实际
+计数（`MSI-X vectors carried traffic: vX=… vY=…`）、
+`e1000_irq_rx/_tx/_tx_reclaimed/_rx_drained` 均增长，且 ready 行没有
+`dataplane=polling`。82574L 在 MSI-X 模式用 RXQ0/TXQ0 而不是 RXT0/TXDW；只启用
+传统位的驱动会"表已武装但一个包中断也收不到"，而协议栈的 poll 仍能让 ping 通，
+所以门禁必须同时看 IVAR、按向量计数和按原因计数。
+
+### 注册表增长失败的多架构覆盖
+
+`smoke-driver-lifecycle-{x86_64,aarch64,loongarch64,smp2}` 与
+`smoke-driver-lifecycle` 用同一份 `driver_registry_test.c`：注入 driver/device/bus
+三条 backing-array 增长失败，要求旧条目保留、失败返回 `-ENOMEM`、重试成功、
+计数恢复，capacity 只翻倍一次。smp2 用 `NR_CPUS=2` + `-smp 2` 构建和启动，
+证明 SMP 内核上三条路径都仍成立。
+
 ### MSI-X 消息中断
 
 `make smoke-msix-x86_64` 在 q35 上同时挂一个 `virtio-blk-pci` 和一块
