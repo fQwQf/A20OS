@@ -117,3 +117,13 @@
 - 后续进入用户数据结构建议：测 `page_cache_state.rs` 中 per-vnode dirty有序双链表**中间插入**。头尾已有O(1)，所以必须区分定序/逆序/随机，不把所有链表都改树。建议先预读取驻留同规模普通文件页，再计时每页首次pwrite1字节，随机种子固定，以1024/4096/16384页等规模比较；时钟只放循环两端，同静态musl ELF在host/guest运行，文件放host工作目录/guest /root而非可能tmpfs的/tmp；必须包括清理。该文件模块在MCU裁剪，所以无需为其加入MCU双实现。先测得规模热点再改为平衡树/索引。
 - 若需编译静态musl辅助：原 checkout user/build/x86_64/.musl/*/lib/libc.a 有已建musl1.2.6；可用cc -nostdinc -I该目录obj/include -I user/external/musl/include -I...arch/x86_64 -I...arch/generic 编对象，cc -static -nostdlib -no-pie +crt1.o/crti.o/对象/libc.a/-lgcc/crtn.o。旧micro-v2保持不变；新数据结构fixture另命名ELF，不能污染前轮哈希。
 - 仍可考虑修复诊断perf缓冲截断，或真正COW批量克隆，但以新数据结构测量为下一优先。直到北京时间午夜持续推进，不push/merge/deploy，不再要求用户重复授权。
+
+## 2026-10-22 20:53 北京时间：恢复入口
+
+- stock/yield 四对定向复查完成48/48：SysV223496→264394 ops/s，中位+18.30%，四对同向；fork382.76→586.18但范围大，不能推广精确收益。报告第7节和完整gzip/CSV/JSON已保存，尚未提交。
+- dirty首次试验因/root目录不存在失败（原证据保留）；配置v2用/var/a20-dirty-index.data，初探及正式3轮54样本成功，fs_type=ext4、verified=1、base_unchanged。三轮A20随机每页1024约5.2us、4096约9.6us、16384约34.8us，顺/逆序约4.2–4.9us；符合链表中间插入线性扫描。Linux第三轮出现明显系统干扰（13–27us），保留而非删除。原checkout独立GTK QEMU和其它worktree测试进程属于用户其它工作，不杀进程，复测采用交替内核并记录。
+- 已写候选：保留有序dirty链表和global列表，新增intrusive RB索引仅替换中间查找，避免回写迭代语义变化。每page额外24B（LP64），每vnode8B；pagecache在MCU整体裁剪，不增加双实现。Rust现有page_cache_state本来拥有结构状态，不是为简单逻辑另行重写。
+- host v1通过18 Rust tests（含16384正/逆/交错插入、3万次随机增删、blackheight/红边/parent/有序链表成员检查）和20万次旧C链表/Rust对照；回写、truncate、pin/refcount语义等通过。输出build/evidence/dirty-rb-host-v1。只编x86目标。候选未提交。
+- **当前正在构建** dirty-rb内核，日志build/performance/dirty-rb-build.log；等完成复制到build/performance/dirty-rb.elf，再先运行fs/pagecache/mmap相关guest回归，之后yield-keep/dirty-rb AB/BA/AB三轮同dirty-config-v2对照。构建与性能实验不得重叠。
+
+- 20:55补充：dirty-rb构建完成，ELF4742cf56f4e055ffa1e75850fe6f5a87f61221bfa8566275541a7dfe400ba14b，保存在build/performance/dirty-rb.elf。**当前exec session82260**正在跑mm_stress、vfs_concurrency、FSYNC_TEST_DIR=/var的fsync_durability_test，证据perf-dirty-rb-regression，日志dirty-rb-regression.log。回归未完成前不启动同参数对照，候选仍未提交。
