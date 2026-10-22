@@ -14,6 +14,7 @@
 # directory the configuration actually uses -- that is what print-build-dir
 # exists for -- with the same variables the recipe's own build step passes.
 RV64_LINUX_DEV_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 print-build-dir)
+RV64_BOTH_DEV_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=both BRINGUP=0 print-build-dir)
 RV64_LINUX_DEV_SMP4_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 print-build-dir)
 
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
@@ -551,6 +552,13 @@ smoke-mm-software:
 
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
+	@# The guest creates, unlinks and rmdirs on this ext4 image, which has no
+	@# journal: nothing replays for it, so the driver's own reclamation is all
+	@# there is.  A rmdir whose directory inode is never freed leaves an
+	@# unconnected inode behind and e2fsck rejects the image.
+	@e2fsck -fn $(RV64_LINUX_DEV_DIR)/ext4.img >/dev/null 2>&1 || { \
+		echo "smoke-vfs-stress: e2fsck rejected the ext4 image the guest wrote"; \
+		e2fsck -fn $(RV64_LINUX_DEV_DIR)/ext4.img; exit 1; }
 
 smoke-lfs:
 	$(PYTHON) tools/smoke.py smoke-lfs
@@ -563,6 +571,77 @@ smoke-vfs-stress-smp2:
 
 smoke-vfs-stress-smp8:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp8
+
+# Legacy (v1/v2) JBD2 journal: a clean image may be mounted read-only through
+# the explicit downgrade, a writable mount must be refused, and writes through
+# the read-only mount must fail with EROFS.
+smoke-ext4-legacy-journal:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build $(RV64_LINUX_DEV_DIR)/ext4-journal-legacy.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	$(PYTHON) tools/ext4_legacy_journal_gate.py \
+		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
+# ext4 extended attributes: write user.* + a POSIX ACL blob on one boot,
+# verify them through debugfs on the image and again after a reboot.
+smoke-ext4-xattr:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	$(PYTHON) tools/ext4_xattr_gate.py \
+		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
+# No-journal ext4 crash recovery: open+unlink, kill the machine, reboot the
+# same image.  The remount must admit the unclean image, finish the unlink, and
+# leave a filesystem e2fsck still accepts with the orphan inode actually freed.
+smoke-ext4-recovery:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 $(RV64_LINUX_DEV_DIR)/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	$(PYTHON) tools/ext4_unjournaled_recovery_gate.py \
+		--build-dir "$(RV64_LINUX_DEV_DIR)" --log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
+
+# Lost-ACK drill for the UFSD close token: the service is built with the
+# test fault that drops the first accepted CLOSE and CONFIRM replies, so a
+# plain open/write/close exercises both retry paths end to end.
+# Lost-ACK drill for the UFSD close token.  The service is built with the test
+# fault that drops the first accepted CLOSE and CONFIRM replies; the client
+# test spawns it on a vnfs (ext4) mount -- the close-token capability is only
+# negotiated there -- and must come through the close unchanged.
+smoke-ufs-confirm-ack:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=both BRINGUP=0 $(RV64_BOTH_DEV_DIR)/ufs-ext4.img
+	$(MAKE) -s ARCH=riscv64 ABI=both BRINGUP=0 NATIVE_RUST_UFSD=1 \
+		NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1 native-rust-ufsd
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	bin=$$(ls $(USER_BUILD_DIR)/ufsd-rust-*-test-drop-close-token-ack 2>/dev/null | head -1); \
+	log="$(SMOKE_LOG_DIR)/ufs-confirm-ack-riscv64.log"; \
+	test -x "$$bin" || { echo "smoke-ufs-confirm-ack: missing $$bin"; exit 1; }; \
+	cp "$$bin" "$$bin.strip"; \
+	riscv64-linux-gnu-strip "$$bin.strip" 2>/dev/null || true; \
+	mcopy -o -i $(RV64_BOTH_DEV_DIR)/fat32.img "$$bin.strip" ::/ufsd-rv; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' --send-line 'ufs_confirm_ack_test' \
+		--send-line 'poweroff' $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(RV64_BOTH_DEV_DIR)/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=$(RV64_BOTH_DEV_DIR)/ufs-ext4.img,if=none,format=raw,id=x2 \
+		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.4 \
+		-kernel $(RV64_BOTH_DEV_DIR)/kernel.elf \
+			> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'CONFIRM_ACK: PASS' "$$log" && \
+	   grep -q 'UFSD_CONFIRM_DROP_ACK_ONCE' "$$log" && \
+	   grep -q 'UFSD_CLOSE_TOKEN_REPLAY_ACK: PASS' "$$log"; then \
+		echo "smoke-ufs-confirm-ack: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-ufs-confirm-ack: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; exit 1; \
+	fi
 
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build

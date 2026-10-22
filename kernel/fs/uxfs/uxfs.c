@@ -987,6 +987,16 @@ static void ops_ns_proc_put(void *t) { proc_put((struct task_t *)t); }
 static void ops_ns_slot_init_req_lock(void *sb) { mutex_init(&((uxfs_sb_t *)sb)->req_lock); }
 static void ops_ns_detach_server(void *sb) { uxfs_detach_server((uxfs_sb_t *)sb); }
 static int ops_ns_peer_closed(void *ep) { return a20_channel_peer_closed((struct a20_channel_ep *)ep); }
+/* The sb holds a proc reference on the serving task while the mount exists, so
+ * reading its state here is safe.  A task that already exited will never send
+ * anything on the channel, which is why peer_closed alone is not enough. */
+static int ops_ns_server_alive(void *sb)
+{
+    uxfs_sb_t *s = (uxfs_sb_t *)sb;
+    if (!s || !s->server) return 0;
+    int state = s->server->state;
+    return (state != PROC_UNUSED && state != PROC_ZOMBIE) ? 1 : 0;
+}
 static uint64_t ops_ns_now_ns(void)
 {
     uint64_t ts[2];
@@ -1043,8 +1053,9 @@ static const struct a20_uxfs_ns g_uxfs_ns = {
     .negotiate_lifetime_until = ops_ns_negotiate_until,
     .shutdown_rpc = ops_ns_shutdown_rpc,
     .mount_log = ops_ns_mount_log,
+    .server_alive = ops_ns_server_alive,
 };
-_Static_assert(sizeof(g_uxfs_ns) / sizeof(void *) == 28,
+_Static_assert(sizeof(g_uxfs_ns) / sizeof(void *) == 29,
                "uxfs namespace mirror: bridge table field count");
 _Static_assert(__builtin_offsetof(uxfs_sb_t, server_generation) == 72,
                "uxfs namespace mirror: sb view prefix layout");
