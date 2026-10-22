@@ -117,15 +117,14 @@ AHCI（`FLUSH CACHE EXT`）。
 
 - AHCI 中断路径已在 QEMU 上验证：`make smoke-ahci-ich9` 实跑 PASS
   （日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`），一个 ich9-ahci port
-  绑在中断路径上，12 条命令全部完成，`/proc/a20/perf` 的
+  绑在 MSI 路径上（`[MSI] ... enabled vector 89`、`completion=irq(msi)`），
+  17 条命令全部经中断完成、0 条轮询，`/proc/a20/perf` 的
   `ahci_irq_completions > 0`。用的命令行是
-  `-machine q35 -device ich9-ahci,id=ahci -device ide-hd,drive=xa,bus=ahci.0`
-  （该函数落在 00:02.0，q35 芯片组自带的 AHCI 在 00:1f.2），q35 root bus 的
-  INTx swizzle 由 `arch_pci_intx_irq()` 覆盖（dev 2 pin A → GSI 22 →
-  vector 0x56）。**这仍只是 QEMU 证据**，下面的边界没有因此改变。
-- AHCI 仍是单 controller / 单 port / 单 command slot，只走 INTx，没有 MSI-X
-  路径；**classic MSI（能力 0x05）也未实现**（见 §八 P1「MSI（PCI 能力
-  0x05）支持」），真实 SATA PHY 上的行为没有任何证据。
+  `-machine q35 -device ich9-ahci,id=ahci -device ide-hd,drive=xa,bus=ahci.0`。
+  **这仍只是 QEMU 证据**，下面的边界没有因此改变。
+- AHCI 仍是单 controller / 单 port / 单 command slot；完成路径现为 MSI（能力
+  0x05）优先，失败回退 INTx，再回退轮询（`completion=irq(msi)`，见
+  §八 P1）。没有 MSI-X 路径；真实 SATA PHY 上的行为没有任何证据。
 - 无 RAID、无数据校验和、无快照/CoW、无 fs-verity。
   文件数据块本身仍无校验和；`crc32c` 覆盖 JBD2 日志与 ext4 元数据
   （`metadata_csum`），不覆盖常规文件数据内容。
@@ -1391,7 +1390,6 @@ CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过�
 | P1 | 嵌入式档仍装不进 20 KiB | **账已全部纳入 profile 并按真实元素尺寸对账**：EMBEDDED 的 44 KiB 总预算由 socket 表、ring + drain、netif state、两个 `struct netif`、filter 表和 heap 求和断言；三个档位的池上限都对 `MEM_SIZE` 有求和断言（EMBEDDED 16,224/16,384，DEFAULT 771,192/1,048,576，SERVER 12,510,840/16,777,216）。DEFAULT 的 `MEM_SIZE` 因此从 512 KiB 调到 1 MiB。20 KiB 仍不足以容纳 8 个 socket + lwIP，嵌入式档诚实地声明 44 KiB |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | DEFAULT 池上限 256 × 1600 B（约 406 KiB），SERVER 4096 × 1600 B（约 6.34 MiB）；`/proc/a20/netmem` 同时打印池上限与 heap `used/avail/err`，可区分池受限与堆受限。**零拷贝收包是设计边界**：设备 recv op 只支持拷入调用者缓冲，lane ring 槽位复用也不能安全包装成 custom pbuf；真正零拷贝需要改 `kernel/drivers` 接口 |
 | P1 | ACPI `_PRT`（解释器已落，但只答 bus 0、且从未真正执行） | `acpi_dsdt.c` 已在 main（`7f38f2227`），失败即关闭、绝不猜 GSI；**残留三项**：次级总线的 bridge 树下钻未实现（桥后设备留轮询）、i440fx PIRQ link 只读不写、求值器在 QEMU 极简 DSDT 上走不到、真机固件上一次未跑。真机服务器的准入条件 |
-| P1 | MSI（PCI 能力 0x05）支持 | `PCI_CAP_ID_MSI` 在 `pci_msix.h` 已定义但**全树无一处使用**：MSI-X（能力 0x11）已实现并实测，但只带 MSI-X 的中断窗口；AHCI、NVMe、xHCI、rtl8139 这类常见设备多数只提供 classic MSI，当前它们的路径是 INTx（有 `_PRT`/swizzle 时）或轮询。需要复用 MSI-X 的向量分配与 LVT 编程，驱动侧按 MSI → MSI-X → INTx → 轮询降级 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |

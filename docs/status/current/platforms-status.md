@@ -37,7 +37,8 @@
 | 经 MCFG 的 PCI 枚举 | QEMU 下已验证 | `smoke-pci-bridge` |
 | 无 ECAM 时的 PCI 枚举 | QEMU 下已验证 | `smoke-pci-i440fx` |
 | ACPI S5 关机 | 仅 QEMU 下验证 | QEMU 的 PM1a 处理与硅片不同，见上 |
-| INTx `_PRT` 求值 | **从未执行** | QEMU 的 DSDT 极简且拒绝它；q35 走 swizzle |
+| INTx `_PRT` 求值（含桥后总线） | **已实现，QEMU 下仍从未执行** | `-kernel`/multiboot 不提供 ACPI 表；真实固件未跑 |
+| i440fx PIRQ 读写与 INTx 投递 | QEMU 下已验证 | `smoke-pirq-i440fx`、`smoke-net-e1000-i440fx-intx` |
 | 真实硅片上的 INTx 投递 | **未测试** | 没有真机 |
 | 多处理器 bring-up | **未测试** | 没有真机 |
 

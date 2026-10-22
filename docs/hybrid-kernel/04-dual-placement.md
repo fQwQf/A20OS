@@ -1,4 +1,11 @@
-# 双态部署驱动框架（dual-placement drivers）
+# 双态部署驱动框架（dual-placement drivers，非 1.0 目标）
+
+> **范围决定（2026-10-22，项目负责人）**：同源双态驱动不属于 1.0 发布承诺。理由：
+> 没有生产设备需要同一份源码分别部署到内核态与用户态；唯一能验证完整
+> probe/data/IRQ/DMA/removal + 越权 DMA 拒绝的设备是 QEMU `edu`，而它在
+> riscv64 才有 IOMMU、在 riscv64 又没有 PCI INTx 路由，两种契约无法在同一平台
+> 同时演示；内核驱动本来就有完整 DMA 权限，“内核态也拒绝越权 DMA”在语义上不成立。
+> 本页保留为研究骨架与接口说明，不作为缺口或发布门槛。
 
 “同一源码、双态部署”驱动框架目前只有骨架：当前代码尚未满足“完整驱动同一源码双态运行”的阶段验收。已按 2026-08 的共享头、drvmod 样板与用户服务核对。
 
@@ -39,6 +46,6 @@
 
 - 内核壳接入 timekeeping/alarm 子系统是后续工作；接入前必须先解决设备所有权（udriver 窗口当前默认 user-owned，见 `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。约定：白名单 `user_owned=1` 的设备内核侧只做只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态 `device_claim/release` 已实现，`smoke-dual-input` 源码会用两次启动检查自动释放，但本次未运行；user-owned 窗口的 MMIO 映射现在强制要求当前任务先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- IOMMU 动态隔离：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，devid 0 静态 SV39 domain 的 TR_REQ 映射/拒绝探测之上，已实现 per-device domain 的动态 claim/map/unmap/release、fault queue 消费（归属 owner、fail-closed 阻断）与 `/proc/a20/iommu` 计数器；`drv_dma` 对 edu PCI 样板的 VMO 翻译已接到 domain（`user/svc/uedud.c` 端到端验证授权内 DMA 成功、窗口外 fault、release 后恢复），门禁 `smoke-iommu-udriver-isolation`（2026-09-24 PASS）。后续：fault 消费中断化、多设备并发 domain、virtio-mmio 设备接入；
+- IOMMU 动态隔离：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，devid 0 静态 SV39 domain 的 TR_REQ 映射/拒绝探测之上，已实现 per-device domain 的动态 claim/map/unmap/release、fault queue 消费与 fail-closed 阻断、`/proc/a20/iommu` 计数器。**多设备**：每个 claimed device 一个 domain，DDT 条目各占一个 devid；IOTLB 以 `(tag, GSCID, PSCID, IOVA)` 为键，所以每个 domain 分配唯一 TA.PSCID，否则两个设备对同一 IOVA 会互相命中缓存（实测：不设 PSCID 时 02.0 的 DMA 拿到 03.0 的物理页）。fault queue 是共享硬件队列，drain 时按记录里的 devid 归属到对应 domain，一个设备 fault 只阻断它自己。门禁 `smoke-iommu-udriver-isolation`（单设备 fault/recover）与 `smoke-iommu-multidevice`（两个 edu、两个 domain、dev0 fault 期间 dev1 继续 DMA、各自 release）均已 PASS。后续：fault 消费中断化、virtio-mmio 设备接入；
 - virtio-input 事件面有 USER uinputd 路径和独立 DRVMOD 完整驱动路径；尚缺同一设备、同一完整协议源码、同一契约套件的双态 A/B；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。

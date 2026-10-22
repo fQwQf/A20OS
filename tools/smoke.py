@@ -211,7 +211,7 @@ def qemu_argv(case: dict) -> list[str]:
             argv += ["--expect-line", marker, line]
     argv.append(case["timeout"])
     argv += case["argv"]
-    if case.get("qmp"):
+    if case.get("qmp") or case.get("qmp_actions"):
         # Private monitor socket, not the muxed stdio one: the pump needs to
         # speak QMP and the serial line is carrying the guest log.
         argv += ["-qmp", f"unix:{qmp_socket_path(case)},server=on,wait=off"]
@@ -246,6 +246,90 @@ def split_command(cmd: str) -> list[str]:
     quotes have to survive. Harmless when QEMU is a bare program name.
     """
     return shlex.split(cmd)
+
+
+def qmp_connect(sock_path: str, deadline_s: float = 20.0):
+    """Connect to a per-case QMP socket and negotiate capabilities.
+
+    Retries until the socket appears; returns (socket, file) or (None, None)
+    when the guest exited first.
+    """
+    deadline = time.time() + deadline_s
+    sock = None
+    while time.time() < deadline:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(sock_path)
+            break
+        except OSError:
+            sock = None
+            time.sleep(0.2)
+    if sock is None:
+        return None, None
+    rx = sock.makefile("rwb")
+
+    def cmd(obj: dict) -> dict:
+        rx.write((json.dumps(obj) + "\r\n").encode())
+        rx.flush()
+        while True:
+            line = rx.readline()
+            if not line:
+                return {}
+            reply = json.loads(line.decode())
+            if "event" not in reply:
+                return reply
+
+    try:
+        cmd({"execute": "qmp_capabilities"})
+    except (BrokenPipeError, ConnectionResetError):
+        rx.close()
+        sock.close()
+        return None, None
+    return sock, rx
+
+
+def qmp_action_pump(sock_path: str, actions: list[dict]) -> None:
+    """Execute QMP commands at the given offsets from QEMU start.
+
+    Each action is {"after": seconds, "execute": name, "arguments": {...}}.
+    The offsets are relative to the pump's start (immediately before QEMU is
+    spawned), so a hotplug sequence can be written as "keyboard has enumerated
+    by 8 s; unplug; wait; replug" without a second timing model.
+
+    Used for USB hotplug: device_del/device_add on a qemu-xhci root port makes
+    the guest's port poll observe a real connect change, which is the only way
+    to exercise abort_slot and address reclaim without physical hardware.
+    """
+    start = time.time()
+    sock, rx = qmp_connect(sock_path)
+    if sock is None:
+        print(f"qmp: no connection to {sock_path}; hotplug actions not sent")
+        return
+    try:
+        for action in actions:
+            delay = start + float(action.get("after", 0)) - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            req = {"execute": action["execute"]}
+            if action.get("arguments"):
+                req["arguments"] = action["arguments"]
+            rx.write((json.dumps(req) + "\r\n").encode())
+            rx.flush()
+            while True:
+                line = rx.readline()
+                if not line:
+                    break
+                reply = json.loads(line.decode())
+                if "event" not in reply:
+                    if "error" in reply:
+                        print(f"qmp: {action.get('execute')} failed: {reply['error']}")
+                    break
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        rx.close()
+        sock.close()
 
 
 def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
@@ -367,7 +451,7 @@ def run_qemu(case: dict) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = qemu_argv(case)
     stdin = case.get("stdin")
-    pump = None
+    pumps: list[threading.Thread] = []
     if case.get("qmp"):
         sock_path = qmp_socket_path(case)
         if os.path.exists(sock_path):
@@ -380,6 +464,14 @@ def run_qemu(case: dict) -> int:
         # Started before QEMU, not after: the pump retries the connect, so it
         # is waiting for the socket to appear while QEMU is still booting.
         pump.start()
+        pumps.append(pump)
+    if case.get("qmp_actions"):
+        sock_path = qmp_socket_path(case)
+        pump = threading.Thread(target=qmp_action_pump,
+                                args=(sock_path, case["qmp_actions"]),
+                                daemon=True)
+        pump.start()
+        pumps.append(pump)
     # Mirror the signal guest runner's shared-slot discipline: one guest at a
     # time under the repository-wide activity (SH) + qemu-1 (EX) leases.  A
     # missing lock directory means this workflow does not use the shared
@@ -391,14 +483,15 @@ def run_qemu(case: dict) -> int:
               f"case {case.get('name')} not started")
         return 75
     try:
-        return _run_qemu_locked(case, log, argv, stdin, pump)
+        return _run_qemu_locked(case, log, argv, stdin, pumps)
     finally:
         if handles is not None:
             _release_guest_slot_locks(handles)
 
 
 def _run_qemu_locked(case: dict, log: Path, argv: list[str],
-                     stdin: dict | None, pump: threading.Thread | None) -> int:
+                     stdin: dict | None,
+                     pumps: list[threading.Thread]) -> int:
     with log.open("wb") as fh:
         if stdin and stdin["kind"] == "pipe":
             payload = "".join(f"{ln}\n" for ln in stdin["lines"]).encode()
@@ -414,12 +507,12 @@ def _run_qemu_locked(case: dict, log: Path, argv: list[str],
             status = proc.wait()
         else:
             status = sh(argv, stdout=fh, stderr=subprocess.STDOUT).returncode
-    if pump:
+    for pump in pumps:
         # Bounded, because the thread's deadline starts before its connect-retry
         # loop and only the per-iteration work can overshoot it: one hold+gap
         # cycle plus at most one 5 s socket timeout.  An unbounded join would
         # let a gate's wall clock exceed its QEMU timeout by `duration`.
-        pump.join(case["qmp"]["duration"] + 60)
+        pump.join(case.get("qmp", {}).get("duration", 0) + 60)
     return status
 
 

@@ -98,6 +98,99 @@ CASES: dict[str, dict] = {
         'timeout_msg': True,
         'pass_msg': 'smoke-driver-lifecycle: PASS; log saved to $log',
     },
+    # DRIVER-02: the same three injected growth failures on every architecture
+    # whose bringup kernel boots in QEMU here, and on an SMP kernel.  The test
+    # itself is arch-independent; these cases prove the registry's backing
+    # array growth, failure rollback and count restoration are reached with
+    # each arch's allocator and with more than one CPU online.
+    # DRIVER-07: PIIX3 PIRQA..D route registers are writable and read back on
+    # i440fx.  The self-test saves and restores firmware's routing.
+    'smoke-pirq-i440fx': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_PCI_PIRQ_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/pirq-i440fx.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'pc', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-bringup-pirq-test/kernel.elf'],
+        'expect': ['PCI_PIRQ_TEST: PASS', 'System is going down for power-off NOW'],
+        'forbid': ['PCI_PIRQ_TEST: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-pirq-i440fx: PASS; log saved to $log',
+    },
+    'smoke-driver-lifecycle-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_DRIVER_LIFECYCLE_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/driver-lifecycle-x86_64.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-bringup-driver-lifecycle/kernel.elf'],
+        'expect': ['DRIVER_LIFECYCLE: PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=driver PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=device PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=bus PASS',
+                   'DRIVER_REGISTRY_CAPACITY: PASS'],
+        'forbid': ['DRIVER_REGISTRY_CAPACITY: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-driver-lifecycle-x86_64: PASS; log saved to $log',
+    },
+    'smoke-driver-lifecycle-aarch64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=aarch64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_DRIVER_LIFECYCLE_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/driver-lifecycle-aarch64.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-aarch64',
+        'argv': ['qemu-system-aarch64', '-machine', 'virt', '-cpu', 'cortex-a57', '-m', '1G', '-nographic', '-smp', '1', '-global', 'virtio-mmio.force-legacy=false', '-kernel', '.kernel-build/aarch64-qemu-virt-aarch64-linux-bringup-driver-lifecycle/kernel.elf'],
+        'expect': ['DRIVER_LIFECYCLE: PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=driver PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=device PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=bus PASS',
+                   'DRIVER_REGISTRY_CAPACITY: PASS'],
+        'forbid': ['DRIVER_REGISTRY_CAPACITY: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-driver-lifecycle-aarch64: PASS; log saved to $log',
+    },
+    'smoke-driver-lifecycle-loongarch64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=loongarch64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_DRIVER_LIFECYCLE_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/driver-lifecycle-loongarch64.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-loongarch64',
+        'argv': ['qemu-system-loongarch64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-global', 'virtio-mmio.force-legacy=false', '-kernel', '.kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup-driver-lifecycle/kernel.elf'],
+        'expect': ['DRIVER_LIFECYCLE: PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=driver PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=device PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=bus PASS',
+                   'DRIVER_REGISTRY_CAPACITY: PASS'],
+        'forbid': ['DRIVER_REGISTRY_CAPACITY: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-driver-lifecycle-loongarch64: PASS; log saved to $log',
+    },
+    'smoke-driver-lifecycle-smp2': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=1', 'NR_CPUS=2', 'ALLOW_UNVERIFIED_SMP=1', 'CONFIG_DRIVER_LIFECYCLE_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/driver-lifecycle-smp2.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '2', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-driver-lifecycle-smp2/kernel.elf'],
+        'expect': ['DRIVER_LIFECYCLE: PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=driver PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=device PASS',
+                   'DRIVER_REGISTRY_CAPACITY kind=bus PASS',
+                   'DRIVER_REGISTRY_CAPACITY: PASS'],
+        'forbid': ['DRIVER_REGISTRY_CAPACITY: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-driver-lifecycle-smp2: PASS; log saved to $log',
+    },
     # Platform-bus IRQ resource channel.  QEMU has no dw-mshc model, so this
     # covers the half that is pure kernel code -- resource -> platform device
     # -> request_irq -> simulated dispatch -> free_irq, plus the -ENODEV
@@ -408,6 +501,31 @@ CASES: dict[str, dict] = {
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-iommu-udriver-isolation: PASS; log saved to $log',
+    },
+    # DRIVER-06: two EDU functions, each with its own translation domain.  The
+    # user driver claims both, proves both translate, faults device 0, and
+    # re-runs device 1's round trip while device 0 is blocked and still held.
+    # The fault queue is shared hardware state, so this is also the check that
+    # one device's drain does not steal the other device's records.
+    'smoke-iommu-multidevice': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0', 'PROFILE=benchmark'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/iommu-multidevice-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['cat /proc/a20/iommu', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-device', 'riscv-iommu-pci,bus=pcie.0,addr=1.0', '-device', 'edu,bus=pcie.0,addr=2.0,dma_mask=0xffffffffffffffff', '-device', 'edu,bus=pcie.0,addr=3.0,dma_mask=0xffffffffffffffff', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['UEDUD: two domains claimed',
+                   'UEDUD: dev0 faulted',
+                   'UEDUD: dev1 unaffected',
+                   'UEDUD: domains released',
+                   'UEDUD: PASS',
+                   'enabled: 1',
+                   'System is going down for power-off'],
+        'forbid': ['UEDUD: dev1 affected'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-iommu-multidevice: PASS; log saved to $log',
     },
     'smoke-mlibc': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -2883,6 +3001,35 @@ CASES: dict[str, dict] = {
                    '\\[XHCI\\] controller ready: .*completion=polling'],
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-x86_64: PASS; log saved to $log',
+    },
+    # USB hot-unplug and replug on an xHCI root port.  QMP device_del makes the
+    # guest's port poll see a real disconnect, which is the only way to exercise
+    # abort_slot (Disable Slot + endpoint teardown) and the bus-address reclaim
+    # without physical hardware.  device_add must then hand the new device the
+    # same address, and both enumerations must reach the HID class driver.
+    'smoke-usb-hotplug-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/usb-hotplug-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 30, 'lines': ['poweroff']},
+        'timeout': '40s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,id=kbd0', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'qmp_actions': [
+            {'after': 14, 'execute': 'device_del', 'arguments': {'id': 'kbd0'}},
+            {'after': 20, 'execute': 'device_add',
+             'arguments': {'driver': 'usb-kbd', 'id': 'kbd1', 'bus': 'xhci.0'}},
+        ],
+        'expect': ['\\[USB-HID\\] keyboard ready',
+                   '\\[USB\\] port [0-9]+ slot=[0-9]+ address=1',
+                   '\\[USB\\] port [0-9]+ disconnected: address=1 reclaimed, slot=[0-9]+ released',
+                   'System is going down for power-off NOW'],
+        'forbid': ['\\[USB\\] port.*enumeration failed', '\\[XHCI\\].*Disable Slot failed',
+                   '\\[XHCI\\] slot.*transfer owner did not clear',
+                   'PANIC', 'KERNEL PAGE FAULT'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-usb-hotplug-x86_64: PASS; log saved to $log',
     },
     # A USB hub on the xHCI root bus.  The hub is a genuine class-9 device,
     # so this proves the class driver binds, reads the hub descriptor with
