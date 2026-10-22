@@ -86,6 +86,7 @@ def main():
             start(i, 0)
         (directory / "commands.json").write_text(json.dumps(commands, indent=2)+"\n")
         bound = False
+        partition_until = 0.0
         begin = time.monotonic()
         while time.monotonic()-begin < args.timeout:
             readers, _, _ = select.select(lanes, [], [], 0.02)
@@ -102,6 +103,8 @@ def main():
                             if proto in cl[32:60]:
                                 events[proto[:2].decode().lower()+str(proto[2])] += 1
                 targets = [macs.index(packet[:6])] if packet[:6] in macs else range(3)
+                if time.monotonic() < partition_until and (source == 2 or 2 in targets):
+                    continue
                 for target in targets:
                     if target != source:
                         lanes[target].sendto(packet, ("127.0.0.1", ports[target]))
@@ -115,11 +118,17 @@ def main():
             for i, path in enumerate(outputs):
                 if path and "OBJECTS: FAIL" in path.read_text(errors="replace"):
                     raise RuntimeError(f"guest {i} failed; see {path}")
+            if not partition_until and "OBJECTS: partition-ready" in out:
+                partition_until = time.monotonic() + 4.0
             if "OBJECTS: reboot-ready" in out and not bound:
                 start(1, 1); bound = True
             if "OBJECTS: PASS" in out:
                 if not (bound and all(events[k] for k in ("cd1", "cd2", "co1"))):
                     raise RuntimeError(f"missing exercised phases: {events}")
+                for needed in ("OBJECTS: service-death-pass", "OBJECTS: partition-pass",
+                               "OBJECTS: recovered-pass"):
+                    if needed not in out:
+                        raise RuntimeError(f"missing {needed!r}: {events}")
                 events["passed"] = True
                 print(f"check-cluster-objects: PASS ({','.join(arches)}, global lookup, retired/revoke/lease, daemon restart and kernel reboot)")
                 return

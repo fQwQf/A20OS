@@ -68,7 +68,7 @@ def main():
         reserve.append(a); lanes.append(b); ports.append(a.getsockname()[1])
     processes, logs, commands, outputs, pending = [None]*3, [], [], [None]*3, {}
     trace = []
-    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "ca2": 0, "dropped_release_replies": 0, "dropped_reusable_start_replies": 0, "recycle_domains": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "reboots": []}
+    events = {"passed": False, "arches": arches, "cd2": 0, "cm2": 0, "cd1": 0, "cm1": 0, "ca1": 0, "ca2": 0, "dropped_release_replies": 0, "dropped_reusable_start_replies": 0, "recycle_domains": 0, "real_workloads": [], "real_argument_workloads": [], "cli_exits": 0, "cli_cancel_exits": 0, "dropped_stop_requests": 0, "dropped_stop_replies": 0, "dropped_start_replies": 0, "dropped_service_death_replies": 0, "reboots": []}
     events["inputs"] = inputs
     macs = [bytes.fromhex(f"52540012340{i+1}") for i in range(3)]
 
@@ -108,9 +108,14 @@ def main():
         (directory / "commands.json").write_text(json.dumps(commands, indent=2)+"\n")
         bound = False
         begin = time.monotonic()
+        partition_until = 0.0
+        member_stop_at = 0.0
+        member_down = member_restarted = False
         while time.monotonic()-begin < args.timeout:
             readers, _, _ = select.select(lanes, [], [], 0.02)
-            drop = "APPS: timeout-pass" not in outputs[0].read_text(errors="replace")
+            out_now = outputs[0].read_text(errors="replace")
+            drop = "APPS: timeout-pass" not in out_now
+            service_death = "APPS: service-death-pass" not in out_now
             for sock in readers:
                 packet, _ = sock.recvfrom(65536)
                 source = lanes.index(sock)
@@ -124,8 +129,11 @@ def main():
                             if proto in cl[32:60]:
                                 events[proto[:2].decode().lower()+str(proto[2])] += 1
                 ca = cl.find(b"CA\x01\x02",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
-                if source==1 and drop and ca>=0 and int.from_bytes(cl[ca+16:ca+24],"little")==99 and len(cl)>=ca+192:
+                n = int.from_bytes(cl[ca+16:ca+24],"little") if ca>=0 and len(cl)>=ca+24 else 0
+                if source==1 and ca>=0 and len(cl)>=ca+192 and ((n==99 and drop) or (n==102 and service_death)):
                     events["dropped_start_replies"] += 1
+                    if n==102:
+                        events["dropped_service_death_replies"] += 1
                     continue
                 reusable_ca = cl.find(b"CA\x02\x02",32,60) if len(packet)>=42 and packet[12:14]==b"\x08\x00" and packet[23]==17 else -1
                 if source==1 and reusable_ca>=0 and len(cl)>=reusable_ca+192 and int.from_bytes(cl[reusable_ca+16:reusable_ca+24],"little")==1300 and "APPS: reusable-start-timeout-pass" not in outputs[0].read_text(errors="replace"):
@@ -144,6 +152,8 @@ def main():
                     events["dropped_release_replies"]+=1
                     continue
                 targets = [macs.index(packet[:6])] if packet[:6] in macs else range(3)
+                if time.monotonic() < partition_until and (source == 1 or 1 in targets):
+                    continue
                 for target in targets:
                     if target != source:
                         lanes[target].sendto(packet, ("127.0.0.1", ports[target]))
@@ -159,11 +169,26 @@ def main():
                     guest = path.read_text(errors="replace")
                     if "KERNEL PANIC" in guest or "APPS: FAIL" in guest:
                         raise RuntimeError(f"guest {i} failed; see {path}")
+            if not partition_until and "APPS: partition-ready" in out:
+                partition_until = time.monotonic() + 4.0
+            if not member_stop_at and "APPS: member-fail-ready" in out:
+                member_stop_at = time.monotonic() + 0.8
+            if member_stop_at and not member_down and time.monotonic() >= member_stop_at:
+                stop(2); member_down = True
+            if member_down and not member_restarted and time.monotonic() >= member_stop_at + 10.0:
+                start(2, 0); member_restarted = True
             if "APPS: reboot-ready" in out and not bound:
                 start(1, 1); bound = True
             if "APPS: PASS" in out:
-                if not (bound and events["dropped_start_replies"] and all(events[k] for k in ("cd1", "cd2", "ca1"))):
+                if not (bound and events["dropped_start_replies"] and events["dropped_service_death_replies"] and all(events[k] for k in ("cd1", "cd2", "ca1"))):
                     raise RuntimeError(f"missing exercised phases: {events}")
+                for needed in ("APPS: service-death-pass", "APPS: partition-pass",
+                               "APPS: member-fail-pass", "APPS: recovered-pass",
+                               "APPS: reboot-ready"):
+                    if needed not in out:
+                        raise RuntimeError(f"missing {needed!r}: {events}")
+                if not member_restarted:
+                    raise RuntimeError(f"member failure did not restart node 2: {events}")
                 events["real_workloads"]=[(directory / f"node-{i}-mode-0.log").read_text(errors="replace").count("APP-WORK: PASS sum=500500") for i in range(3)]
                 if "APPS: balance-pass real-programs=6 active=2,2,2" not in out or any(n<4 for n in events["real_workloads"]):
                     raise RuntimeError(f"missing actual balanced workloads: {events}")
@@ -186,7 +211,7 @@ def main():
                 print(f"check-cluster-apps: PASS ({','.join(arches)}, variant launch, dedup/lost reply, exit/stop, daemon restart and kernel reboot)")
                 return
             for i, p in enumerate(processes):
-                if p.poll() is not None :
+                if p.poll() is not None and not (i == 2 and member_down and not member_restarted):
                     raise RuntimeError(f"QEMU {i} exited unexpectedly")
         raise TimeoutError(f"application test timeout; logs: {directory}")
     except Exception as error:
