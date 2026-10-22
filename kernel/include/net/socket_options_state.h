@@ -91,9 +91,9 @@ typedef struct net_option_view {
     uint64_t   *recv_timeout_ticks;
     uint64_t   *send_timeout_ticks;
     int        *passcred;
-    const int  *peer_pid;
-    const int  *peer_uid;
-    const int  *peer_gid;
+    const int32_t *peer_pid;
+    const int32_t *peer_uid;
+    const int32_t *peer_gid;
     int         long_size;
     /* TICKS_PER_SEC as the compiled target defines it.  On riscv64 that is a
      * runtime function of the timebase, so it cannot be a Rust constant. */

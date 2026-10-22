@@ -96,6 +96,8 @@ unsafe extern "C" {
     fn a20_net_inet_send_tcp_poll_locked();
     fn a20_net_inet_send_tcp_snd_buf_max() -> u32;
     fn a20_net_inet_send_tcp_snd_queuelen_max() -> u32;
+    fn a20_net_inet_send_tcp_autotune_grow(s: *mut c_void, tcp: *mut c_void) -> u32;
+    fn a20_net_inet_send_tcp_autotune_store(s: *mut c_void, value: u32);
     fn a20_net_inet_send_tcp_pcb_snd_buf(tcp: *mut c_void) -> u32;
     fn a20_net_inet_send_tcp_pcb_snd_queuelen(tcp: *mut c_void) -> u32;
     fn a20_net_inet_send_tcp_write(tcp: *mut c_void, buf: *const u8, len: usize) -> i32;
@@ -270,6 +272,17 @@ pub unsafe extern "C" fn a20_net_inet_send_tcp(s: *mut c_void, buf: *const c_voi
             allocation_blocked = true;
             room = 0;
         }
+        if room == 0 && alive {
+            /* The pcb window, not the pbuf pool: the helper refuses when
+             * available space is non-zero, so a queue-length cap or an
+             * allocation failure does not mint more send buffer. */
+            let grew = a20_net_inet_send_tcp_autotune_grow(s, tcp);
+            if grew != 0 {
+                a20_net_inet_send_tcp_lane_unlock(lwip_flags);
+                a20_net_inet_send_tcp_autotune_store(s, grew);
+                continue;
+            }
+        }
         if room == 0 {
             a20_net_inet_send_tcp_lane_unlock(lwip_flags);
             if sent > 0 || *v.nonblock != 0 {
@@ -346,8 +359,12 @@ mod tests {
     static mut T_SND_BUF_MAX: u32 = 93440;
     static mut T_QUEUELEN_MAX: u32 = 128;
     static mut T_WRITE_CALLS: i32 = 0;
-    static mut T_WRITE_LENS: [usize; 8] = [0; 8];
+    static mut T_WRITE_LENS: [usize; 16] = [0; 16];
     static mut T_WRITE_RC: i32 = 0;
+    /* Per-call results for tests that need partial acceptance across several
+     * tcp_write attempts; the single-value T_WRITE_RC stays the default. */
+    static mut T_WRITE_RC_SCRIPT: [i32; 16] = [0; 16];
+    static mut T_WRITE_RC_N: i32 = 0;
     static mut T_OUTPUT_CALLS: i32 = 0;
     static mut T_OUTPUT_RC: i32 = 0;
     static mut T_TRACE: i32 = 0;
@@ -358,6 +375,9 @@ mod tests {
     static mut T_BH_PKT: i32 = 0;
     static mut T_NOW: u64 = 100;
     static mut T_LANE_UNLOCK: i32 = 0;
+    static mut T_GROW: u32 = 0;
+    static mut T_GROW_CALLS: i32 = 0;
+    static mut T_AUTOTUNE_STORE: u32 = 0;
 
     static T_SERIAL: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
@@ -395,8 +415,10 @@ mod tests {
         T_SND_BUF_MAX = 93440;
         T_QUEUELEN_MAX = 128;
         T_WRITE_CALLS = 0;
-        T_WRITE_LENS = [0; 8];
+        T_WRITE_LENS = [0; 16];
         T_WRITE_RC = 0;
+        T_WRITE_RC_SCRIPT = [0; 16];
+        T_WRITE_RC_N = 0;
         T_OUTPUT_CALLS = 0;
         T_OUTPUT_RC = 0;
         T_TRACE = 0;
@@ -407,6 +429,9 @@ mod tests {
         T_BH_PKT = 0;
         T_NOW = 100;
         T_LANE_UNLOCK = 0;
+        T_GROW = 0;
+        T_GROW_CALLS = 0;
+        T_AUTOTUNE_STORE = 0;
     }
 
     unsafe fn sock() -> *mut c_void {
@@ -521,14 +546,33 @@ mod tests {
         T_QUEUELEN
     }
     #[no_mangle]
+    unsafe extern "C" fn a20_net_inet_send_tcp_autotune_grow(_s: *mut c_void,
+                                                             _t: *mut c_void) -> u32 {
+        T_GROW_CALLS += 1;
+        if T_GROW != 0 {
+            T_SND_BUF = T_GROW;
+        }
+        T_GROW
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_inet_send_tcp_autotune_store(_s: *mut c_void,
+                                                              value: u32) {
+        T_AUTOTUNE_STORE = value;
+    }
+    #[no_mangle]
     unsafe extern "C" fn a20_net_inet_send_tcp_write(_t: *mut c_void, _b: *const u8,
                                                      len: usize) -> i32 {
         let at = T_WRITE_CALLS as usize;
-        if at < 8 {
+        if at < T_WRITE_LENS.len() {
             T_WRITE_LENS[at] = len;
         }
+        let rc = if at < T_WRITE_RC_N as usize {
+            T_WRITE_RC_SCRIPT[at]
+        } else {
+            T_WRITE_RC
+        };
         T_WRITE_CALLS += 1;
-        T_WRITE_RC
+        rc
     }
     #[no_mangle]
     unsafe extern "C" fn a20_net_inet_send_tcp_output(_t: *mut c_void) -> i32 {
@@ -755,4 +799,49 @@ mod tests {
             assert_eq!(T_LANE_UNLOCK, 1);
         }
     }
+    /// The historical C fixture's positive control: a write larger than the
+    /// pcb will take is halved until it fits, the accepted bytes are reported,
+    /// and output is called after each accepted prefix.
+    #[test]
+    fn test_accepted_bytes_and_retry() {
+        unsafe {
+            let _serial = serial();
+            reset();
+            /* len > 2 refuses; 8 -> 4 -> 2 accepts on the third attempt. */
+            T_WRITE_RC_SCRIPT = [ERR_MEM, ERR_MEM, ERR_OK, ERR_MEM, ERR_MEM,
+                                 ERR_OK, ERR_MEM, ERR_OK, ERR_MEM, ERR_OK,
+                                 ERR_OK, 0, 0, 0, 0, 0];
+            T_WRITE_RC_N = 11;
+            let buf = [7u8; 8];
+            assert_eq!(a20_net_inet_send_tcp(sock(), buf.as_ptr() as *const c_void,
+                                             8), 8);
+            assert_eq!(T_WRITE_CALLS, 11);
+            assert_eq!(&T_WRITE_LENS[..11],
+                       &[8, 4, 2, 6, 3, 1, 5, 2, 3, 1, 2]);
+            assert_eq!(T_OUTPUT_CALLS, 5);
+            /* One unlock per iteration that accepted a prefix. */
+            assert_eq!(T_LANE_UNLOCK, 5);
+        }
+    }
+
+    #[test]
+    fn window_exhaustion_grows_once_and_retries() {
+        unsafe {
+            let _serial = serial();
+            reset();
+            /* No room, then the growth policy grants 8 bytes: the loop retries
+             * immediately instead of reporting EAGAIN or parking. */
+            T_SND_BUF = 0;
+            T_GROW = 8;
+            (*sock().cast::<Sock>()).nonblock = 1;
+            let buf = [7u8; 4];
+            assert_eq!(a20_net_inet_send_tcp(sock(), buf.as_ptr() as *const c_void,
+                                             4), 4);
+            assert_eq!(T_GROW_CALLS, 1);
+            assert_eq!(T_AUTOTUNE_STORE, 8);
+            assert_eq!(T_WRITE_CALLS, 1);
+            assert_eq!(T_WAIT_CALLS, 0);
+        }
+    }
+
 }

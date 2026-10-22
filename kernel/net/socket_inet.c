@@ -1653,6 +1653,19 @@ void a20_net_inet_opt_set_rcv_wnd(void *pcb, uint32_t v)
     ((struct tcp_pcb *)pcb)->rcv_wnd = (tcpwnd_size_t)v;
 }
 
+void a20_net_inet_opt_set_rcv_ann_wnd(void *pcb, uint32_t v)
+{
+    ((struct tcp_pcb *)pcb)->rcv_ann_wnd = (tcpwnd_size_t)v;
+}
+
+int a20_net_inet_opt_pcb_established(void *pcb)
+{
+    u8_t st = ((struct tcp_pcb *)pcb)->state;
+    return st == ESTABLISHED || st == CLOSE_WAIT || st == LAST_ACK ||
+           st == FIN_WAIT_1 || st == FIN_WAIT_2 || st == CLOSING ||
+           st == TIME_WAIT;
+}
+
 uint32_t a20_net_inet_opt_get_rcv_ann_wnd(void *pcb)
 {
     return (uint32_t)((struct tcp_pcb *)pcb)->rcv_ann_wnd;
@@ -1778,6 +1791,89 @@ uint32_t net_socket_buf_ceiling(net_socket_t *s, int is_snd)
 uint32_t net_socket_buf_in_force(net_socket_t *s, int is_snd)
 {
     return a20_net_socket_buf_in_force(s, is_snd);
+}
+
+/*
+ * Buffer autotuning.
+ *
+ * The per-tier initial value (NET_PROFILE_TCP_BUF_INIT) is deliberately below
+ * the protocol ceiling so a caller that never sets SO_SNDBUF/SO_RCVBUF has
+ * somewhere to grow.  Growth is doubling on observed demand, bounded by the
+ * same ceiling getsockopt reports and by window scaling on the receive side:
+ *
+ *   receive  a read of at least half the current ceiling doubles it, applied to
+ *            the live pcb's wnd_limit under the lane lock;
+ *   send     a write that runs out of pcb->snd_buf doubles the socket's ceiling
+ *            and grants the difference as new queue room.
+ *
+ * Never shrinks: reclaiming a live window would need an announce and buys
+ * nothing here.  An explicit setsockopt clears the direction's flag, so the
+ * caller's value is final.
+ */
+static uint32_t net_buf_grow(uint32_t current, uint32_t ceiling)
+{
+    if (ceiling == 0 || current >= ceiling)
+        return 0;
+    uint32_t next = current ? current : 1;
+    while (next < ceiling) {
+        uint32_t doubled = next * 2;
+        if (doubled <= next || doubled >= ceiling) {
+            next = ceiling;
+            break;
+        }
+        next = doubled;
+    }
+    return next > current ? next : 0;
+}
+
+/* Called with the lane lock held; the pcb is the live window. */
+static uint32_t net_tcp_rcv_autotune(net_socket_t *s, struct tcp_pcb *pcb,
+                                     size_t consumed)
+{
+    if (!s->rcv_autotune || !pcb)
+        return 0;
+    uint32_t threshold = s->rcv_buf / 2;
+    if (consumed < threshold)
+        return 0;
+    uint32_t next = net_buf_grow(pcb->wnd_limit,
+                                 net_socket_buf_ceiling(s, 0));
+    if (next) {
+        pcb->wnd_limit = (tcpwnd_size_t)next;
+        return next;
+    }
+    return 0;
+}
+
+/* Called with the lane lock held.  Returns the new socket ceiling, or 0. */
+uint32_t a20_net_inet_send_tcp_autotune_grow(void *sp, void *tp)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    struct tcp_pcb *pcb = (struct tcp_pcb *)tp;
+    if (!s || !pcb || !s->snd_autotune)
+        return 0;
+    uint32_t next = net_buf_grow(s->snd_buf, net_socket_buf_ceiling(s, 1));
+    if (!next)
+        return 0;
+    /* pcb->snd_buf is available space; queued bytes are (old - available).
+     * Only call this when available is exhausted, so the delta is exactly the
+     * new capacity. */
+    if (pcb->snd_buf != 0)
+        return 0;
+    pcb->snd_buf = (tcpwnd_size_t)(next - s->snd_buf);
+    return next;
+}
+
+/* Called after the lane lock is released: the socket record is protected by
+ * the socket lock, and the two locks are never held together. */
+void a20_net_inet_send_tcp_autotune_store(void *sp, uint32_t value)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    if (!s || value == 0)
+        return;
+    uint64_t flags = net_sock_lock(s);
+    if (s->snd_autotune)
+        s->snd_buf = value;
+    net_sock_unlock(s, flags);
 }
 
 /*
@@ -3062,12 +3158,22 @@ void net_inet_accept_child_ready(net_socket_t *s)
 
 void net_tcp_recved(net_socket_t *s, size_t len) {
     if (s && len > 0) {
+        size_t consumed = len;
+        uint32_t grown = 0;
         uint64_t flags = net_inet_socket_lane_lock(s);
         while (s->tcp && len > 0) {
             uint16_t n = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
             tcp_recved(s->tcp, n);
             len -= n;
         }
+        if (s->tcp)
+            grown = net_tcp_rcv_autotune(s, s->tcp, consumed);
         a20_lwip_lane_unlock(flags);
+        if (grown) {
+            uint64_t sf = net_sock_lock(s);
+            if (s->rcv_autotune)
+                s->rcv_buf = grown;
+            net_sock_unlock(s, sf);
+        }
     }
 }

@@ -63,6 +63,8 @@ int  a20_net_inet_send_is_live(void *s);
 void a20_net_inet_send_ref(void *s);
 void a20_net_inet_send_free(void *s);
 uint32_t a20_net_inet_send_buf_in_force(void *s);
+uint32_t a20_net_inet_send_tcp_autotune_grow(void *s, void *tcp);
+void     a20_net_inet_send_tcp_autotune_store(void *s, uint32_t value);
 uint16_t a20_net_inet_send_ephemeral_port(void);
 void a20_net_inet_send_bind_v6(void *s, uint16_t port);
 void a20_net_inet_send_bind_v4(void *s, uint16_t port);

@@ -30,9 +30,30 @@
 //! the rule table, including same-direction retransmissions.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::AtomicU64;
 
 /* ------------------------------------------------------------- constants */
+/* 32-bit targets have no 64-bit atomics; the callers hold g_lwip_lock, so the
+ * non-atomic fallback is safe there and keeps the counters identical. */
+#[inline]
+fn load_u64(counter: *const u64) -> u64 {
+    #[cfg(target_has_atomic = "64")]
+    unsafe { AtomicU64::from_ptr(counter as *mut u64).load(Ordering::Relaxed) }
+    #[cfg(not(target_has_atomic = "64"))]
+    unsafe { *counter }
+}
+
+#[inline]
+fn add_u64(counter: *mut u64, by: u64) {
+    #[cfg(target_has_atomic = "64")]
+    unsafe { AtomicU64::from_ptr(counter).fetch_add(by, Ordering::Relaxed) };
+    #[cfg(not(target_has_atomic = "64"))]
+    unsafe { *counter = (*counter).wrapping_add(by) };
+}
+
+
 
 const NONE: u16 = 0xFFFF;
 const NO_ADDR: u32 = 0xFFFF_FFFF;
@@ -641,10 +662,8 @@ pub unsafe extern "C" fn a20_netfilter_ct_get_stats(v: *const CtView,
         if s.is_null() {
             continue;
         }
-        stats.packets += unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*s).packets))
-            .load(Ordering::Relaxed) };
-        stats.bytes += unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*s).bytes))
-            .load(Ordering::Relaxed) };
+        stats.packets += load_u64(ptr::addr_of_mut!((*s).packets));
+        stats.bytes += load_u64(ptr::addr_of_mut!((*s).bytes));
     }
     let lifetime = unsafe { &*v.0.lifetime };
     stats.tracked = unsafe { *v.0.used as u64 };
@@ -781,10 +800,8 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(v: *const CtView,
     let st = v.0.dir_stats[if dir == DIR_IN { 0 } else { 1 }];
     if !st.is_null() {
         unsafe {
-            AtomicU64::from_ptr(ptr::addr_of_mut!((*st).packets))
-                .fetch_add(1, Ordering::Relaxed);
-            AtomicU64::from_ptr(ptr::addr_of_mut!((*st).bytes))
-                .fetch_add(len as u64, Ordering::Relaxed);
+            add_u64(ptr::addr_of_mut!((*st).packets), 1);
+            add_u64(ptr::addr_of_mut!((*st).bytes), len as u64);
         }
     }
 
@@ -796,8 +813,7 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(v: *const CtView,
         e.last_ms = unsafe { ct_now(&v) };
         e.packets = e.packets.wrapping_add(1);
         unsafe {
-            AtomicU64::from_ptr(ptr::addr_of_mut!(e.bytes))
-                .fetch_add(len as u64, Ordering::Relaxed);
+            add_u64(ptr::addr_of_mut!(e.bytes), len as u64);
         }
         if is_reverse {
             e.state = CT_ESTABLISHED;
@@ -1137,8 +1153,13 @@ pub unsafe extern "C" fn a20_netfilter_nat_add(v: *const CtView,
     if r.nat == NAT_MASQUERADE && r.nat_addr != NO_ADDR {
         return -EINVAL;
     }
-    /* DNAT is an input-hook translation. */
+    /* DNAT is an input-hook translation and SNAT/MASQUERADE are output-hook
+     * translations: the packet path only applies them in that direction, so a
+     * rule installed on the wrong hook would match and then do nothing. */
     if r.nat == NAT_DNAT && r.dir != DIR_IN {
+        return -EINVAL;
+    }
+    if (r.nat == NAT_SNAT || r.nat == NAT_MASQUERADE) && r.dir != DIR_OUT {
         return -EINVAL;
     }
 
