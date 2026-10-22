@@ -2695,18 +2695,22 @@ RUST_WAIT_TIMER_EXTRA_x86_64 := -C no-redzone=yes
 RUST_WAIT_TIMER_CODE_MODEL := $(RUST_WAIT_TIMER_CODE_MODEL_$(ARCH))
 RUST_WAIT_TIMER_FEATURES := $(RUST_WAIT_TIMER_FEATURES_$(ARCH))
 RUST_WAIT_TIMER_EXTRA := $(RUST_WAIT_TIMER_EXTRA_$(ARCH))
+# Resolve from the final C flags, including profile and board overrides. Keep
+# this recursive: CFLAGS must be complete when the stamp/recipe is expanded.
+RUST_WAIT_TIMER_C_CAPACITY = $(patsubst -DCONFIG_WAIT_TIMER_HEAP_MAX=%,%,$(lastword $(filter -DCONFIG_WAIT_TIMER_HEAP_MAX=%,$(CFLAGS))))
+RUST_WAIT_TIMER_CAPACITY = $(if $(RUST_WAIT_TIMER_C_CAPACITY),$(RUST_WAIT_TIMER_C_CAPACITY),$(if $(filter -DCONFIG_MCU,$(CFLAGS)),64,8192))
 RUST_WAIT_TIMER_FLAGS_STAMP := $(BUILD_DIR)/rust/.wait-timer-flags
 .PHONY: FORCE_RUST_WAIT_TIMER_FLAGS
 FORCE_RUST_WAIT_TIMER_FLAGS:
 
 $(RUST_WAIT_TIMER_FLAGS_STAMP): FORCE_RUST_WAIT_TIMER_FLAGS
 	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_WAIT_TIMER_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_WAIT_TIMER_CODE_MODEL) $(RUST_WAIT_TIMER_EXTRA) -C target-feature=$(RUST_WAIT_TIMER_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
+	@printf '%s\n' 'capacity=$(RUST_WAIT_TIMER_CAPACITY) $(RUSTC) $(shell $(RUSTC) --version --verbose 2>/dev/null) --target $(RUST_WAIT_TIMER_TARGET) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static -C code-model=$(RUST_WAIT_TIMER_CODE_MODEL) $(RUST_WAIT_TIMER_EXTRA) -C target-feature=$(RUST_WAIT_TIMER_FEATURES) $(RUST_TARGET_BUILD_ID)' > $@.tmp
 	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
 $(RUST_WAIT_TIMER_OBJECT): $(RUST_WAIT_TIMER_SRC) tools/rust-kernel.mk $(RUST_WAIT_TIMER_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
-	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
+	A20_WAIT_TIMER_STORAGE_CAPACITY=$(RUST_WAIT_TIMER_CAPACITY) $(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj \
 		--target $(RUST_WAIT_TIMER_TARGET) \
 		$(RUST_TARGET_OBJECT_FLAGS) \
 		-C panic=abort -C opt-level=$(RUST_OPT_LEVEL) \
