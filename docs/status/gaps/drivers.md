@@ -9,13 +9,6 @@
 - 关闭条件：选一个完整驱动，probe/data/IRQ/DMA/removal 在两种模式下逐项一致，含越权 DMA 拒绝与清理。
 - 来源：requirements N05。
 
-### DRIVER-03 MSI / MSI-X 的剩余能力
-
-- 现状：x86_64 的 MSI-X 能力解析、LAPIC 编程与 virtio/e1000e 接入已有；MSI（能力 0x05）全树未使用。
-- 缺口：只带 MSI 的设备（AHCI/NVMe/xHCI/rtl8139）只能走 INTx 或轮询；非 x86 的 MSI-X 与 per-queue 亲和性未实现。
-- 关闭条件：MSI 路径可用并按 MSI → MSI-X → INTx → 轮询降级；非 x86 有实现或明确的每设备类回退。
-- 来源：requirements N10–N12、[current/server-readiness.md](../current/server-readiness.md) §八。
-
 ### DRIVER-07 ACPI `_PRT` 的剩余三项
 
 - 现状：DSDT 求值器失败即关闭，绝不猜 GSI；QEMU 的 q35 走 swizzle。
