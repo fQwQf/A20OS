@@ -451,15 +451,18 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar) {
     return &dev->res[resource];
 }
 
-int pci_user_device_find(uint16_t vendor, uint16_t device,
-                         pci_user_device_info_t *out)
+int pci_user_device_find_index(uint16_t vendor, uint16_t device,
+                               unsigned index, pci_user_device_info_t *out)
 {
     if (!out)
         return -1;
+    unsigned seen = 0;
     for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++) {
         pci_dev_info_t *info = &g_pci_infos[i];
         if (!g_pci_in_use[i] || info->vendor != vendor ||
             info->device != device)
+            continue;
+        if (seen++ != index)
             continue;
         if (pci_assign_bars(&g_pci_devs[i], 0) != 0 ||
             !info->bar[0] || !info->bar_size[0])
@@ -475,6 +478,12 @@ int pci_user_device_find(uint16_t vendor, uint16_t device,
         return 0;
     }
     return -1;
+}
+
+int pci_user_device_find(uint16_t vendor, uint16_t device,
+                         pci_user_device_info_t *out)
+{
+    return pci_user_device_find_index(vendor, device, 0, out);
 }
 
 int pci_user_device_bus_master(uint16_t devid, int enable)

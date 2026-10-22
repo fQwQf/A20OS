@@ -16,13 +16,6 @@
 - 关闭条件：MSI 路径可用并按 MSI → MSI-X → INTx → 轮询降级；非 x86 有实现或明确的每设备类回退。
 - 来源：requirements N10–N12、[current/server-readiness.md](../current/server-readiness.md) §八。
 
-### DRIVER-06 IOMMU 多设备归属与故障恢复
-
-- 现状：IOMMU 发现与用户态驱动隔离有门禁。
-- 缺口：多设备 DMA/IOMMU 归属、fault handling、撤销与回收没有作为一张矩阵验证。
-- 关闭条件：多设备场景下越权 DMA 被拒、fault 后资源回收、设备移除后域释放。
-- 来源：[current/v1.0-progress.md](../current/v1.0-progress.md) V1-DRIVER 行。
-
 ### DRIVER-07 ACPI `_PRT` 的剩余三项
 
 - 现状：DSDT 求值器失败即关闭，绝不猜 GSI；QEMU 的 q35 走 swizzle。
