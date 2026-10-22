@@ -141,3 +141,18 @@
 - dirty RB v2正式三对108样本完成并归档 dirty-index-2026-10-22*：随机1024/4096/16384页延迟-16.33%/-47.88%/-84.51%，三对均同向；大规模顺/逆序约持平。小规模逆序+4.25%/+6.08%已明确报告。
 - 额外fsync三对108样本全部成功，归档dirty-flush-2026-10-22*。随机16384页的fsync本身+7.01%，但写+fsync两段计时之和649.993→231.798ms(-64.34%)，三对均下降；4096随机合计-24.61%；顺/逆序合计-1.49%～+2.12%。校验、准备、close/unlink不在这两段内，不冒称端到端。
 - 18项host/20万差分及3项guest正确性已完成，候选准备提交。所有性能/构建进程已结束。下一项考虑brk/stack克隆range逐页扫描：mmap已经present walker，但mm_fork_clone_range仍逐地址；需保持DONTFORK/WIPEONFORK、dst already present和huge base语义。先新micro测untouched brk规模，不复用已冻结旧micro。
+
+## 2026-10-22 21:10 北京时间：brk/stack 稀疏克隆候选
+
+- dirty RB 已提交e31aa45c，回退点和负面小规模/回写代价均在报告第8节。
+- 新brk micro先grow原始brk、可选每页触碰，计时100次fork/wait；touched子进程写第一页并检查父COW隔离，最后核对所有父页和恢复brk。同静态ELF初探8/8通过；原64MiB untouched约1.080ms/fork、256MiB3.742ms、空堆0.160ms。
+- C候选复用present页表walker给brk/stack range，checked模式保留原Rust per-address政策、huge base、child-present、swap和失败语义；mmap原unchecked模式不改。无Rust重写、无ABI更改。
+- 新真实C walker fixture：20万随机range×swap开关，比较旧逐地址循环；同时比较原present walker语义。涵盖holes、policy、dst present、huge部分边界、swap EEXIST/EAGAIN、失败与部分进度。UBSan主机通过，原Rust COW clone45checks通过。构建x86_64完成，ELF f3896df26b08ecf2152f7623ef0a7736f2ddf18ec4635fd9f3642eea23c82b01 保存brk-range.elf。
+- **当前exec session9947**，日志build/performance/brk-range-campaign.log：先guest mm_stress、process-vm-exec-cow、TLB teardown、swap_test；mm_stress正确安装/bin/mm_stress以满足self-exec。成功后自动dirty-rb-v2/brk-range AB/BA/AB三对，4个brk规模+原fork/touched/stress+getpid控制，共96性能样本，关闭计数器。输出perf-brk-range-regression及perf-brk-paired-*。期间不编译或并行性能实验。
+- 候选和brk工具/fixture尚未提交，等同参数复测和dense/no-brk控制结果。
+
+## 2026-10-22 21:17 北京时间
+
+- brk候选全部完成：4 guest回归通过，96性能样本成功。sparse64/256MiB brk中位1.0646→0.1626ms /3.7943→0.1645ms，-84.73%/-95.67%，各三对一致；已触碰16MiB brk+0.53%。其它fork负载方向混合，已报告而不推广。完整brk-range-2026-10-22*已归档。注意stress-ng行解析应取倒数第二列real ops/s，非倒数第三列sys time，最终已核对修正为274.27→289.18ops/s，但三对不一致。
+- 测量协议新发现：同内核getpid控制在stress之前618.79ns，之后1303.49，写perf0后946.86；原始目录perf-counter-lifecycle-initial已保留。源码确认procfs_meta_create对perf用4096栈buffer生成内容，可能在stat/lookup启用收集；--no-counters只是runner不主动采样，不能保证全程disabled。下一项修正诊断快照截断/metadata副作用与runner明确disable，并用before/after小fixture核对。
+- 当前所有本任务构建/性能进程已结束，brk候选准备提交。不得推送/合并/部署；截止午夜仍有效。
