@@ -867,6 +867,15 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
         vaddr_t base = 0;
         size_t size = 0;
         pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        if (!pte) {
+            /* An absent parent entry has no resident or swapped leaves to
+             * release.  The lookup reports its whole subtree, including a
+             * partial subtree at either VMA boundary.  Swap entries are
+             * returned as leaves and still go through pt_unmap_leaf(). */
+            uint64_t next = (uint64_t)base + size;
+            va = size && next > va ? next : va + PAGE_SIZE;
+            continue;
+        }
         if (pte && (*pte & PTE_V) && level > 0 &&
             (base < vma->start || base + size > vma->end)) {
             mm_demote_huge_page(mm, va);
