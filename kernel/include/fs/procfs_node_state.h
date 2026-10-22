@@ -158,6 +158,7 @@
 #define A20_PROCFS_GEN_FDINFO 1u
 #define A20_PROCFS_GEN_MAPS_ALLOC 2u
 #define A20_PROCFS_GEN_PAGEMAP_LEN 3u
+#define A20_PROCFS_GEN_GROW_CONTENT 4u
 
 typedef struct procfs_child_node {
     int ty;

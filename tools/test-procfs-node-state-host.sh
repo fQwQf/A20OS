@@ -26,8 +26,7 @@ rustc --edition=2021 --crate-name a20_procfs_node_state --crate-type staticlib \
     -o "$out/liba20_procfs_node_state.a"
 printf 'void rust_eh_personality(void) {}\n' > "$out/host-stub.c"
 
-for target in riscv64imac-unknown-none-elf riscv32imafc-unknown-none-elf \
-              x86_64-unknown-none aarch64-unknown-none; do
+for target in ${RUST_TEST_TARGETS:-riscv64imac-unknown-none-elf riscv32imafc-unknown-none-elf x86_64-unknown-none aarch64-unknown-none}; do
     case "$target" in
         riscv32*) [ -n "${RUST_RV32_TARGET:-}" ] || continue ;;
     esac

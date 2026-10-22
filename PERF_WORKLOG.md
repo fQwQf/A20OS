@@ -156,3 +156,27 @@
 - brk候选全部完成：4 guest回归通过，96性能样本成功。sparse64/256MiB brk中位1.0646→0.1626ms /3.7943→0.1645ms，-84.73%/-95.67%，各三对一致；已触碰16MiB brk+0.53%。其它fork负载方向混合，已报告而不推广。完整brk-range-2026-10-22*已归档。注意stress-ng行解析应取倒数第二列real ops/s，非倒数第三列sys time，最终已核对修正为274.27→289.18ops/s，但三对不一致。
 - 测量协议新发现：同内核getpid控制在stress之前618.79ns，之后1303.49，写perf0后946.86；原始目录perf-counter-lifecycle-initial已保留。源码确认procfs_meta_create对perf用4096栈buffer生成内容，可能在stat/lookup启用收集；--no-counters只是runner不主动采样，不能保证全程disabled。下一项修正诊断快照截断/metadata副作用与runner明确disable，并用before/after小fixture核对。
 - 当前所有本任务构建/性能进程已结束，brk候选准备提交。不得推送/合并/部署；截止午夜仍有效。
+
+## 2026-10-22 21:27 北京时间：诊断快照候选
+
+- 新候选未提交：perf/lock content plan使用按需grow generator，4KiB起、饱和则倍增到最多1MiB，无法完整输出时返回错误而不交付截断；metadata stat长度0且不调用formatter；write-only打开不生成快照。
+- perf格式首行新增collection_enabled_before_snapshot，首次完整快照结束才arm，扩容重试不提前arm；原已启用状态不变。顺带修正syscall start=0（关闭时入口）却在本次调用内enable后，把boot uptime算作该syscall elapsed的错误。
+- host真实C代码ASan/UBSan：全部1024个sysprof+所有kernelcounter=UINT64_MAX时完整85,826字节，峰值分配128KiB、6次尝试；饱和边界、1MiB限额、每轮ENOMEM/format error清理、zero-start profile guard均通过。Rust procfs完整单测及20万Cdiff通过，只编x86。构建完成procfs-diag.elf af9789c1929074aacb73743e833c95b287508901bed408ced1e7d44d9970f163。
+- 两个runner已改：正式测项前明确echo0关闭、测后取状态首行并关闭；老内核无状态首行记录None。analyzer新增--preserve-counter-state仅供生命周期负控制，manifest明确policy，不再把no-counters等同所有程序全程未启用。尚未提交、待guest真实验证。
+- **当前exec session85503**，日志procfs-diag-campaign.log：同ELF独立新boot，对旧brk-range用--observe记录负控制，对新内核严格断言。fixture stat/getpid、37字节分块读/seek稳定、950..1023明确未注册调用ENOSYS计数尾部、write-only不arm、lockfooter；使用preserve模式避免runner自动状态干预。结果目录perf-diag-probe-old/new。完成前不要重启同实验；之后检查输出再跑有guard的getpid/stress生命周期和guest回归/正式APK复测。
+
+## 2026-10-22 21:43 北京时间：诊断候选最终复测正在进行
+
+- 初探修正：950..1023并非全空，1000+存在兼容别名；初始两次fixture错误已保留，不算成功。最终仅调用源码核实为空的950..999，全部ENOSYS。perf的syscall IDs是canonical generic，x86 getpid39映射172，fixture也已修正。
+- 另发现真实生产路径：sys_fstatat/statx对无执行位普通文件调用shebang检测，会open/read /proc/a20/perf，即使metadata长度0仍arm。新增安全短路st_size<2（不可能是shebang）；真实C helper ASan/UBSan测试保证两字节#!仍获原兼容执行位、短读/失败/已有执行位/非regular不变。
+- 最终新kernel procfs-diag-v2.elf c4e77647183d4891c0bb5b533a368967a7edfcb273f8f59842b060be260e8825。独立fresh guest v4负控制旧版stat后getpid1000次被计数、快照4095截断；新版stat_size0、initial_state0/getpid0、4515字节快照含950..999全部计数、writeonly不arm、37字节分块/seek稳定、lockfooter完整。严格PASS。
+- 新runner实际生命周期guard已验证：每测项前disable，后审计再disable；getpid三段后状态都0，stress-fork后也0。但getpid仍616.73→1002.34→827.62ns，说明剩余时段/工作负载后效不能全归因于perf开关，不能宣称已经消除所有抖动。
+- 新内核六项guest回归MM/SCHED/FUTEX/GS/VFS_CONC/FSYNC全部0；FSYNC自身明确开启计数，审计标1，其余按真实状态记录。
+- **当前exec session23476**，日志build/performance/procfs-diag-final-campaign.log：旧brk-range/新procfs-diag-v2 七项完整APK按AB/BA/AB，共84样本，5秒同参数，使用新runner明确关闭和测后审计。输出perf-apk-diag-paired-{1,2,3}-{old,new}。不要编译或并行测性能。配置/buildinput ELF symlink已冻结。等完成检查84样本+审计+哈希、归档诊断/全套对照并提交此候选。
+- 下一个潜在方向是dense COW重复root walk；先结束当前候选、保存回退点再改。另核查core/perf固定32CPU数组：MCU trim实际不含该模块，按用户要求不为此引入无用MCU双实现。
+
+## 2026-10-22 21:50 北京时间
+
+- 诊断候选最终全套APK对照84/84完成；新版21个guest测项计数审计全0，全部输入hash未变。原始/失败初探/host/六项guest及全套APK归档procfs-diag-2026-10-22*，报告第10节完整。
+- 当前新内核对Linux中位：CPU1/2t约1.006/1.007、memory-write0.867、共享锁0.297、fork0.151、SHA0.890。SysV1.068但时钟/调度语义及范围影响仍需保留，不能称全系统领先。前后CPU控制也有7%-9%逐对差异，宿主其它独立KVM/TCG实验仍存在，不把内存/密码学的宽范围吞吐差异归因于本补丁。
+- 诊断候选准备提交；所有本任务性能/构建进程已结束。下一步沿当前c4e776...内核作为冻结baseline，检查dense COW share snapshot/downgrade/unlock重复PT root walks。若尝试，保持父锁/引用固定/锁token一致、失败回滚及同参数实测，不复活先前无一致收益的probe-only试验。

@@ -132,6 +132,10 @@ static void kstat_apply_script_exec(const char *path, kstat_t *kst)
         return;
     if ((kst->st_mode & S_IFMT) != S_IFREG)
         return;
+    /* Empty/one-byte files cannot contain a shebang. In particular, dynamic
+     * procfs diagnostics report size zero: stat must not read and arm them. */
+    if (kst->st_size < 2)
+        return;
     if (kst->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
         return;
     if (path_is_shebang_script(path))

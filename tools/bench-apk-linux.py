@@ -120,6 +120,25 @@ def metric(name, output, seconds):
     return float(m[1]) if m else None
 
 
+COUNTERS_OFF = "echo 0 > /proc/a20/perf || exit 1"
+
+
+def counter_audit_script(token):
+    # Outside the workload's timing window. The first header records state
+    # before the read arms diagnostics; old kernels have no such header.
+    return [f"echo APK_COUNTER_STATE_{token}",
+            "/bin/busybox head -n 1 /proc/a20/perf || exit 1", COUNTERS_OFF,
+            f"echo APK_COUNTER_STATE_END_{token}"]
+
+
+def read_counter_audit(guest, token):
+    data, _ = guest.until(rb"(?:^|\n)APK_COUNTER_STATE_END_" + token.encode() + rb"\r?\n", 15)
+    output = data.decode(errors="replace")
+    found = re.search(r"^collection_enabled_before_snapshot: ([01])\s*$", output, re.M)
+    return {"collection_enabled_after_case": int(found[1]) if found else None,
+            "counter_audit_output": output}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, required=True, help="new evidence directory")
@@ -169,6 +188,7 @@ def main():
         "openssl_ia32cap": "0", "binary_sha256": hashes,
         "input_sha256": {str(p): sha(p) for p in (kernel, fat, image)},
         "runner_sha256": sha(__file__), "cases": chosen, "samples": [], "order": [],
+        "counter_policy": "disable_before_each_case_and_audit_after",
     }
 
     def save():
@@ -186,7 +206,9 @@ def main():
                  "uname -a", "sha256sum " + " ".join(hashes), "echo APK_BENCH_INFO_DONE"]
         for offset, (case, (argv, _)) in enumerate(list(chosen.items())[index:], index):
             token = f"r{run}_{offset}"
-            lines += [f"echo APK_BENCH_BEGIN_{token}", shlex.join(argv), f"r=$?; echo APK_BENCH_END_{token} $r"]
+            lines += [COUNTERS_OFF, f"echo APK_BENCH_BEGIN_{token}", shlex.join(argv),
+                      f"r=$?; echo APK_BENCH_END_{token} $r"]
+            lines += counter_audit_script(token)
         lines += ["echo APK_BENCH_SUITE_DONE"]
         script = out / f"guest-{guest_boot}.sh"
         script.write_text("\n".join(lines) + "\n")
@@ -231,6 +253,7 @@ def main():
                             if guest is None:
                                 guest = boot_guest(run, index)
                             output, rc, wall = guest.result(token, args.timeout)
+                            row.update(read_counter_audit(guest, token))
                         logfile.write_text(output)
                         value = metric(name, output, args.seconds)
                         row.update(exit_code=rc, wall_seconds=wall, value=value,
