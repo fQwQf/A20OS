@@ -3463,7 +3463,8 @@ CASES["smoke-sched-stress"]["expect"].extend([
 # The "[SMP] 2/2 configured CPUs online" expectation is what makes the variant
 # mean something: without it a mis-wired alias would boot the single-CPU image
 # under -smp 2 and still print its PASS marker.
-for _base in ("smoke-sched-stress", "smoke-proc-stress"):
+for _base in ("smoke-sched-stress", "smoke-proc-stress",
+              "smoke-network-suite"):
     _alias = _base + "-smp2"
     CASES[_alias] = deepcopy(CASES[_base])
     CASES[_alias]["build"]["vars"] = [

@@ -247,6 +247,42 @@ smoke-netfilter-nat:
 	echo "smoke-netfilter-nat: PASS dnat 18081 -> 10.0.2.15:18082"; \
 	echo "  log saved to $$log"
 
+# Outbound SNAT on a real netif.  The guest initiates to QEMU's host alias and
+# tools/netnat_snat_probe.py echoes from the host loopback; no hostfwd is used,
+# so the flow is only reachable because the guest's own output path works.
+NET_SNAT_TRANSACTIONS := 17
+ifneq ($(NET_SNAT_TRANSACTIONS),17)
+$(error smoke-netfilter-snat fixture is fixed at 17 transactions)
+endif
+smoke-netfilter-snat:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NETFILTER_REWRITE_IMPL=$(NETFILTER_REWRITE_IMPL) dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/netfilter-snat-riscv64-$(NETFILTER_REWRITE_IMPL).log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'netnat_snat_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_NAT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(NET_NAT_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel $(NET_NAT_BUILD_DIR)/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/netnat_snat_probe.py 18083 $(NET_SNAT_TRANSACTIONS) || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	grep -q 'NETNAT_SNAT_TEST: PASS' "$$log" || status=1; \
+	if [ "$$status" -ne 0 ] || [ "$$probe" -ne 0 ]; then \
+		echo "smoke-netfilter-snat: FAIL (qemu=$$status probe=$$probe); evidence log: $$log"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi; \
+	echo "smoke-netfilter-snat: PASS out 18083 -> 10.0.2.15:18084, return path verified"; \
+	echo "  log saved to $$log"
+
 # conntrack capacity (LRU eviction) and idle-timeout reclamation.
 #
 # Both limits had /proc counters (ct_evicted / ct_timeout) and no gate that ever
@@ -260,6 +296,73 @@ smoke-netfilter-nat:
 #
 # No host port forward: nothing here puts a packet on the wire, so the case runs
 # on the same image as smoke-netfilter and needs no listener model.
+# External UDP on a real netif.  QEMU forwards the host's UDP port to the
+# guest, the guest verifies 16 sequenced payloads and echoes them with a
+# one-byte transform, and the host verifies the returned bytes.  Together with
+# smoke-net-lanes-hostfwd (TCP) this covers both transports over virtio-net.
+smoke-net-udp-hostfwd:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NET_HOSTFWD='hostfwd=udp:127.0.0.1:18085-10.0.2.15:18085' dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/udp-hostfwd-riscv64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'udp_hostfwd_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_NAT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp $(NR_CPUS) -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(NET_NAT_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel $(NET_NAT_BUILD_DIR)/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.hostname=a20os' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/net_udp_host_probe.py 18085 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	grep -q 'UDP_HOSTFWD_TEST: PASS' "$$log" || status=1; \
+	if [ "$$status" -ne 0 ] || [ "$$probe" -ne 0 ]; then \
+		echo "smoke-net-udp-hostfwd: FAIL (qemu=$$status probe=$$probe); evidence log: $$log"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi; \
+	echo "smoke-net-udp-hostfwd: PASS (16 external UDP datagrams verified in both directions)"; \
+	echo "  log saved to $$log"
+
+# IPv6 receive soak with the pbuf pool canary enabled.
+#
+# NET-09's historical failure was pool corruption on the IPv6 receive path.  The
+# canary is off by default because it costs a comparison per pool operation;
+# this target is the one place it is turned on over a long, deterministic
+# workload (loopback UDP6, sizes crossing the single-pbuf boundary).  A canary
+# hit or a refcount assert fails the gate; a clean run is evidence that the
+# current tree does not reproduce the imbalance on this path.
+IPV6_SOAK_BUILD_DIR := $(CURDIR)/.kernel-build/net-ipv6-soak
+smoke-ipv6-rx-soak:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=2 OPT="-O3 -DCONFIG_LWIP_MEMP_OVERFLOW_CHECK=1" BUILD_DIR=$(IPV6_SOAK_BUILD_DIR) dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/ipv6-rx-soak-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'ipv6_rx_soak\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 2 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=$(IPV6_SOAK_BUILD_DIR)/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-kernel $(IPV6_SOAK_BUILD_DIR)/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.tcpmode=lwip' \
+		> "$$log" 2>&1 || status=$$?; \
+	if [ "$$status" -eq 0 ] && grep -q 'IPV6_RX_SOAK: PASS' "$$log" && \
+	   ! grep -qiE 'PANIC|lwIP assertion|pbuf_free|detected mem (under|over)flow' "$$log"; then \
+		echo "smoke-ipv6-rx-soak: PASS (canary enabled, no pool underflow or refcount assert)"; \
+		echo "  log saved to $$log"; \
+	else \
+		echo "smoke-ipv6-rx-soak: FAIL (status=$$status); evidence log: $$log"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-ct-capacity:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -296,6 +399,13 @@ smoke-ct-capacity:
 
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
+
+# The same suite on two CPUs.  It is still a loopback suite; the real-netif
+# coverage is smoke-net-tcp-lanes / smoke-net-lanes-hostfwd and the NAT gates.
+# This variant exists so the socket, timer and bottom-half paths execute with
+# concurrent CPUs and the SMP marker is asserted, not assumed.
+smoke-network-suite-smp2:
+	$(PYTHON) tools/smoke.py smoke-network-suite-smp2
 
 # Exercises TCP options on a real lwIP LISTEN pcb (fast mode uses a different
 # socket implementation and cannot validate the listener's compact layout).
@@ -1543,15 +1653,18 @@ smoke-net-tcp-lanes:
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
 		> "$$log" 2>&1 || status=$$?; \
 	passes=$$(grep -c 'TCP_ACCEPT_TEST: PASS' "$$log" || true); \
+	fails=$$(grep -c 'TCP_ACCEPT_TEST: FAIL' "$$log" || true); \
+	corrupt=$$(grep -c 'inaccessible or not found' "$$log" || true); \
 	lanes_line=$$(awk '/^lanes: count=4 /{line=$$0} END{print line}' "$$log"); \
-	if [ "$$passes" -eq 8 ] && \
+	if [ "$$passes" -eq 8 ] && [ $$((passes + fails)) -eq 8 ] && \
+	   [ "$$corrupt" -eq 0 ] && \
 	   [ -n "$$lanes_line" ] && \
 	   ! grep -q 'tcp_pcbs_sane' "$$log" && \
 	   ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
 		echo "smoke-net-tcp-lanes: PASS (8 real LISTEN pcbs created, matched and closed, one per lane; PCB list checker compiled in and silent); log saved to $$log"; \
 		echo "  $$lanes_line"; \
 	else \
-		echo "smoke-net-tcp-lanes: failed with status $$status (passes=$$passes of 8; list-checker hits=$$(grep -c 'tcp_pcbs_sane' "$$log" || true))"; \
+		echo "smoke-net-tcp-lanes: failed with status $$status (passes=$$passes of 8, verdicts=$$((passes + fails)), damaged-input-lines=$$corrupt; list-checker hits=$$(grep -c 'tcp_pcbs_sane' "$$log" || true))"; \
 		grep -E 'TCP_ACCEPT_TEST: FAIL' "$$log" || echo "  (no per-port FAIL line; see log tail)"; \
 		tail -n 60 "$$log"; \
 		exit 1; \

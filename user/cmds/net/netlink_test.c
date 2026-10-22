@@ -434,12 +434,11 @@ static void test_addr6(int fd, int ifindex)
                   zero, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
        "an all-zero IPv6 address is refused with EINVAL");
 
-    /* Delete is not implemented, and saying so is better than accepting it:
-     * lwIP with LWIP_NETIF_API=0 has no netif_remove_ip6_address(). */
+    /* Deleting an address that was never added is not a silent success. */
     errno = 0;
     ok(send_addr6(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, 64,
-                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EOPNOTSUPP,
-       "RTM_DELADDR for AF_INET6 is refused with EOPNOTSUPP, not faked");
+                  doc2, IFA_LOCAL, NULL, 0) < 0 && errno == EADDRNOTAVAIL,
+       "RTM_DELADDR for an absent AF_INET6 address reports EADDRNOTAVAIL");
 
     /* An IPv6 request whose attribute is 4 bytes wide must be refused on its
      * length -- this is why send_addr6() exists separately from send_addr(). */
@@ -469,6 +468,16 @@ static void test_addr6(int fd, int ifindex)
     ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
                   doc, IFA_LOCAL, NULL, 0) >= 0,
        "re-adding the same IPv6 address is accepted (idempotent)");
+
+    /* Delete is real now: the slot is invalidated and the same request twice
+     * is no longer idempotent. */
+    ok(send_addr6(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) >= 0,
+       "RTM_DELADDR removes the IPv6 address");
+    errno = 0;
+    ok(send_addr6(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EADDRNOTAVAIL,
+       "deleting the same IPv6 address twice reports EADDRNOTAVAIL");
 }
 
 static void test_envelope_refusals(int fd, int ifindex)
