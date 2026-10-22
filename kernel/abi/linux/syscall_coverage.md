@@ -12,7 +12,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 366 dispatch entries, including seven A20OS extensions (`a20_channel_pair`/`a20_registry_client`/`a20_envelope_create`/`a20_envelope_enter`/`a20_envelope_revoke`/`a20_envelope_stats`/`a20_envelope_audit`) and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler, and no entry is a fixed `-ENOSYS` placeholder. `-ENOSYS` is returned in two kinds of situation: the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86), and a small number of entries whose capability A20OS genuinely lacks and therefore refuses to fake — `vhangup` (no tty layer, so there is no controlling terminal to revoke) and `process_mrelease` (a pidfd holds no task reference, so there is no detached mm to release). Each of the latter says so in its own row; they are honest refusals, not dispatch gaps. Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 382 dispatch entries, including seven production A20OS extensions (`a20_channel_pair`/`a20_registry_client`/`a20_envelope_create`/`a20_envelope_enter`/`a20_envelope_revoke`/`a20_envelope_stats`/`a20_envelope_audit`), one test-only envelope race hook compiled only under `CONFIG_ENVELOPE_ACQUIRE_RACE_TEST`, fifteen `hyp_*` hypervisor bridge entries, and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler, and no entry is a fixed `-ENOSYS` placeholder. `-ENOSYS` is returned in two kinds of situation: the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86), and a small number of entries whose capability A20OS genuinely lacks and therefore refuses to fake — `vhangup` (no tty layer, so there is no controlling terminal to revoke) and `process_mrelease` (a pidfd holds no task reference, so there is no detached mm to release). Each of the latter says so in its own row; they are honest refusals, not dispatch gaps. Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Smoke gates (last known status) | Notes |
 | --- | --- | --- | --- |
@@ -32,7 +32,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | capabilities | partial | smoke-userns (PASS 2026-10-03), smoke-abi-linux (PASS 2026-08-26) | capget/capset map to A20 task credentials with Linux capability-set rules, and capids are now reported relative to the caller's user namespace. The defined set is still 15 capabilities (no CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG), and the per-namespace capability sets Linux keeps per cred are collapsed into one effective bitmask -- `userns_capable()` enforces the scoping rule rather than the storage. |
 | file advice/copy helpers | partial | smoke-vfs-stress (PASS 2026-08-26) | implemented for common paths, many flags are approximations. |
 | SysV/POSIX shm and memfd | partial | smoke-abi-linux (PASS 2026-08-26) | useful shared-memory objects exist; full Linux accounting/security is incomplete. |
-| keyring | partial | smoke-syscall-ext; `docs/native-abi/keyring.md` | Rust-owned core and C reference provide the documented add/request/keyctl subset, session/user rings, payload read/write/describe, and tested lifetime behavior. Permission masks are not enforced as full Linux KEYCTL permissions; request callout data is ignored, describe length query retains a compatibility quirk, and several commands are unsupported. |
+| keyring | partial | `smoke-keyring-rust`, `smoke-keyring-c`; `docs/native-abi/keyring.md` | Rust-owned core and C reference provide add/request/keyctl with session/user rings, payload read/write/describe, CLEAR/INVALIDATE, and tested lifetime behavior. Stored permission masks gate read/search/link/describe and ring write; the remaining unsupported commands are an explicit `-EOPNOTSUPP` contract, request callout data is ignored, and no key-type instantiators or keyring namespaces are provided. |
 | fanotify | partial | smoke-syscall-ext | FAN_CLASS_NOTIF + FID on the shared notify backend; content/pre-content classes not supported. |
 | process accounting | full | smoke-syscall-ext | Linux v3 acct records written on process exit; acct Enable/disable via acct(2). |
 | Linux AIO | partial | smoke-syscall-ext | aio contexts with synchronous VFS execution of pread/pwrite/fsync/fdatasync. |
@@ -109,9 +109,9 @@ strength of a boilerplate note.
 | `fallocate` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `fadvise64` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `copy_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `splice` | fd I/O | `partial` | `smoke-syscall-ext` | real pipe/file engine (kernel/fs/splice.c): file-to-pipe, pipe-to-file, pipe-to-pipe with SPLICE_F_MOVE/NONBLOCK/MORE validation, -ESPIPE on pipe offsets, -EINVAL without a pipe endpoint; copy-based like Linux non-page-aligned paths |
-| `vmsplice` | fd I/O | `partial` | `smoke-syscall-ext` | requires a pipe (else -EINVAL); copies user iov into the pipe, SPLICE_F_GIFT/NONBLOCK validated |
-| `tee` | fd I/O | `partial` | `smoke-syscall-ext` | pipe-to-pipe duplicate without consuming the source; SPLICE_F_NONBLOCK/MORE validated |
+| `splice` | fd I/O | `partial` | `smoke-syscall-ext`, `smoke-syscall-ext-smp2` | real pipe/file engine (kernel/fs/splice.c): file-to-pipe, pipe-to-file, pipe-to-pipe, zero-length returns 0 before descriptor/flag validation, SPLICE_F_MOVE/NONBLOCK/MORE validated, -ESPIPE on pipe offsets, -EINVAL without a pipe endpoint, -EFAULT on bad offset pointers, -EAGAIN on an empty nonblocking pipe; copy-based like Linux non-page-aligned paths |
+| `vmsplice` | fd I/O | `partial` | `smoke-syscall-ext`, `smoke-syscall-ext-smp2` | requires a pipe (else -EINVAL); copies user iov into the pipe, SPLICE_F_GIFT/NONBLOCK validated, nr_segs > 1024 (including 2^32+1) rejected without int truncation, zero segments are a no-op, bad iov/base pointers give -EFAULT |
+| `tee` | fd I/O | `partial` | `smoke-syscall-ext`, `smoke-syscall-ext-smp2` | pipe-to-pipe duplicate without consuming the source; zero length returns 0, SPLICE_F_NONBLOCK/MORE validated (GIFT rejected), non-pipe endpoint -EINVAL, empty nonblocking source -EAGAIN |
 | `close_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendfile` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `select` | poll | `full` | `smoke-poll-edge` | wait-queue readiness engine; result-set pruning and negative-time EINVAL covered by smoke-poll-edge (PASS 2026-09-26) |
@@ -355,13 +355,13 @@ strength of a boilerplate note.
 | `inotify_add_watch` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `inotify_rm_watch` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `syncfs` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `fanotify_init` | path/fs | `partial` | `smoke-syscall-ext` | FAN_CLASS_NOTIF + FID reporting on the shared notify backend; content/pre-content classes and per-event fds not supported |
-| `fanotify_mark` | path/fs | `partial` | `smoke-syscall-ext` | ADD/REMOVE/DONT_FOLLOW/ONLYDIR marks on the shared notify backend; full Linux mark flags not supported |
+| `fanotify_init` | path/fs | `partial` | `smoke-syscall-ext` | FAN_CLASS_NOTIF + FID reporting on the shared notify backend; content/pre-content classes (-EINVAL) and unknown flag bits (-EINVAL) refused; per-event fds not supported |
+| `fanotify_mark` | path/fs | `partial` | `smoke-syscall-ext` | ADD/REMOVE/DONT_FOLLOW/ONLYDIR marks on the shared notify backend; validated: bad fd -EBADF, NULL path -EFAULT, ADD+REMOVE/none/unknown flags/zero or unknown mask -EINVAL, missing path -ENOENT, ONLYDIR on a regular file -ENOTDIR, remove-unmarked -ENOENT; full Linux mark flags not supported |
 | `signalfd4` | signals | `partial` | `smoke-signalfd-stress` | implemented subset; create/mask-update/read/poll/epoll; Linux edge semantics remain documented gaps |
 | `acct` | system | `full` | `smoke-syscall-ext` | writes Linux v3 acct records on process exit; disabled by acct(NULL) |
-| `add_key` | keyring | `partial` | `smoke-syscall-ext`; `docs/native-abi/keyring.md` | add/update/link/search/read subset; no key type instantiators or full Linux permission-mask enforcement |
-| `request_key` | keyring | `partial` | `smoke-syscall-ext`; `docs/native-abi/keyring.md` | searches session then user keyrings; callout_info ignored |
-| `keyctl` | keyring | `partial` | `smoke-syscall-ext`; `docs/native-abi/keyring.md` | GET_KEYRING_ID/JOIN/CHOWN/SETPERM/SET_TIMEOUT/LINK/UNLINK/SEARCH/DESCRIBE/READ; stored permission masks are not enforced as Linux access checks; describe length query retains a compatibility quirk; remaining commands return -EOPNOTSUPP |
+| `add_key` | keyring | `partial` | `smoke-keyring-rust`, `smoke-keyring-c`; `docs/native-abi/keyring.md` | add/update/link/search/read; owner, group and other permission classes gate the operation; no key type instantiators |
+| `request_key` | keyring | `partial` | `smoke-keyring-rust`, `smoke-keyring-c`; `docs/native-abi/keyring.md` | searches session then user keyrings under SEARCH permission; callout_info ignored |
+| `keyctl` | keyring | `partial` | `smoke-keyring-rust`, `smoke-keyring-c`; `docs/native-abi/keyring.md` | GET_KEYRING_ID/JOIN/CHOWN/SETPERM/SET_TIMEOUT/LINK/UNLINK/SEARCH/DESCRIBE/READ/CLEAR/INVALIDATE; permission masks gate read/search/link/describe and ring write; describe length query retains a compatibility quirk; remaining commands return -EOPNOTSUPP |
 | `io_setup` | aio | `partial` | `smoke-syscall-ext` | kernel AIO contexts (kernel/fs/aio.c); synchronous pread/pwrite/fsync/fdatasync execution with completion queue |
 | `io_destroy` | aio | `partial` | `smoke-syscall-ext` | context teardown; reaped automatically on mm destroy |
 | `io_submit` | aio | `partial` | `smoke-syscall-ext` | PREAD/PWRITE/FSYNC/FDSYNC executed synchronously through VFS; POLL/NOOP and other opcodes -EINVAL |
@@ -384,13 +384,13 @@ strength of a boilerplate note.
 | `quotactl_fd` | system | `partial` | `smoke-abi-linux` | same command set addressed through the fd's own mount |
 | `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | rebinds a shared file-mapping window to pgoff via munmap+MAP_FIXED re-entry under seal checks; restores original contents on remap failure |
 | `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | secret memfd: mmap and pidfd_getfd restricted to the creator euid (-EACCES otherwise) |
-| `rseq` | process | `full` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery is out of scope |
+| `rseq` | process | `full` | `smoke-syscall-ext`, `smoke-syscall-ext-smp2` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; flags outside 1/2/4, rseq_len < 32 and a NULL area are rejected without publishing; preemption sequence-abort delivery is out of scope |
 | `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |
 | `process_mrelease` | process | `partial` | `smoke-syscall-ext` | reports -ENOSYS: NOT implemented. A pidfd here stores a bare pid and holds no task reference, so there is no detached mm to release — the mm is already reaped at exit. A wrong descriptor is still diagnosed (-EBADF) before the -ENOSYS |
-| `futex_waitv` | futex | `full` | `smoke-proc-stress` | waits on an array of futexes; per-entry bitset flags supported |
-| `futex_requeue` | futex | `full` | `smoke-proc-stress` | standalone FUTEX_REQUEUE-equivalent syscall |
+| `futex_waitv` | futex | `partial` | `smoke-futex-stress` | waits on an array of futexes with per-entry bitset flags; entry implemented and shares the futex core, but the array/bitset boundary cases have no dedicated guest test yet |
+| `futex_requeue` | futex | `partial` | `smoke-futex-stress` | standalone FUTEX_REQUEUE-equivalent syscall over the shared futex core; no dedicated guest test yet |
 | `set_mempolicy` | memory | `partial` | `smoke-mm-stress` | single-NUMA-node policy storage; no physical NUMA migration |
 | `mbind` | memory | `partial` | `smoke-mm-stress` | validates and stores policy for a range; single-node no-op |
 | `migrate_pages` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
@@ -415,7 +415,7 @@ strength of a boilerplate note.
 | `ioprio_get` | scheduler | `full` | `smoke-syscall-ext` | returns the task I/O priority |
 | `pkey_alloc` | memory | `full` | `smoke-mm-stress` | allocates a protection key slot per task |
 | `pkey_free` | memory | `full` | `smoke-mm-stress` | frees a protection key slot |
-| `pkey_mprotect` | memory | `full` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
+| `pkey_mprotect` | memory | `full` | `smoke-syscall-ext`, `smoke-syscall-ext-smp2` | mprotect with an allocated pkey; pkey == -1 is the documented mprotect fallback; an unallocated non-negative key is -EINVAL |
 | `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
 | `mseal` | memory | `partial` | `smoke-mm-stress` | real VMA seal semantics: core MM enforces VM_SEALED against mmap-FIXED overwrite, mprotect, munmap, mremap, brk shrink and madvise DONTNEED/FREE/REMOVE with -EPERM; inherited by fork; no /proc/smaps Sealed reporting or userfaultfd interplay |
 | `seccomp` | system | `partial` | `smoke-abi-linux` | classic-BPF engine (verifier+interpreter), STRICT whitelist, filter chains inherited at fork, KILL/TRAP(SIGSYS)/ERRNO/LOG at dispatch; TSYNC/LOG flags and USER_NOTIF refused at install |
@@ -448,6 +448,7 @@ strength of a boilerplate note.
 | `a20_envelope_revoke` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: revoke an envelope, with optional KILL_ON_EXPIRE of the hosted process |
 | `a20_envelope_stats` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: query envelope budget and usage counters |
 | `a20_envelope_audit` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: run the runtime invariant audit over envelope state (E8) |
+| `a20_envelope_acquire_race_test` | a20-envelope | `full` | `envelope_smoke` built with `ENVELOPE_ACQUIRE_RACE_TEST=1` | Test-only build variant (`CONFIG_ENVELOPE_ACQUIRE_RACE_TEST`): arm/cancel/result injection at the descriptor-install mediation boundary; no production dispatch entry |
 | `hyp_vm_create` | hypervisor | `full` | `smoke-hyp-selftest` | A20OS extension: create a stage-2 address space; -EOPNOTSUPP when the CPU has no H extension |
 | `hyp_vm_load` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: copy bytes into guest RAM, one host page per stage-2 mapping |
 | `hyp_vcpu_create` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: create a vcpu pinned to an entry GPA |
