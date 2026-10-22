@@ -21,11 +21,16 @@
 #define KEYCTL_CHOWN 4
 #define KEYCTL_SETPERM 5
 #define KEYCTL_DESCRIBE 6
+#define KEYCTL_CLEAR 7
 #define KEYCTL_LINK 8
 #define KEYCTL_UNLINK 9
 #define KEYCTL_SEARCH 10
 #define KEYCTL_READ 11
 #define KEYCTL_SET_TIMEOUT 15
+#define KEYCTL_INVALIDATE 20
+
+#define KEY_POS_ALL 0x3f000000U
+#define KEY_USR_ALL 0x003f0000U
 
 #define CHECK(cond, label) do { \
     if (!(cond)) { \
@@ -105,6 +110,46 @@ int main(void)
     int status = 0;
     CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
           WEXITSTATUS(status) == 0, "owner permission denied");
+
+    /* The stored permission mask constrains read/search/link.  The owner can
+     * still change the mask (SETPERM needs ownership, not the bits it is
+     * replacing), which is what lets this block restore them. */
+    long perm_key = syscall(SYS_add_key, "user", "p3-perm-key", "secret",
+                            (size_t)6, session);
+    CHECK(perm_key > 0, "add permission key");
+    CHECK(syscall(SYS_keyctl, KEYCTL_SETPERM, perm_key, 0L, 0L, 0L) == 0,
+          "clear key permissions");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_READ, perm_key, value, sizeof(value), 0L) == -1 &&
+          errno == EACCES, "read denied by permission mask");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_DESCRIBE, perm_key, desc, sizeof(desc), 0L) == -1 &&
+          errno == EACCES, "describe denied by permission mask");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_SEARCH, session, "user", "p3-perm-key", 0L) == -1 &&
+          errno == ENOKEY, "search skips unsearchable key");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_LINK, perm_key, user_ring, 0L, 0L) == -1 &&
+          errno == EACCES, "link denied by permission mask");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_INVALIDATE, perm_key, 0L, 0L, 0L) == -1 &&
+          errno == EPERM, "invalidate denied by permission mask");
+    CHECK(syscall(SYS_keyctl, KEYCTL_SETPERM, perm_key,
+                  KEY_POS_ALL | KEY_USR_ALL, 0L, 0L) == 0,
+          "restore key permissions");
+    CHECK(syscall(SYS_keyctl, KEYCTL_READ, perm_key, value, sizeof(value), 0L) == 6 &&
+          memcmp(value, "secret", 6) == 0, "read after permission restore");
+
+    /* INVALIDATE expires and detaches the key from every ring, so both the
+     * serial and the name stop resolving. */
+    CHECK(syscall(SYS_keyctl, KEYCTL_INVALIDATE, perm_key, 0L, 0L, 0L) == 0,
+          "invalidate key");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_READ, perm_key, value, sizeof(value), 0L) == -1 &&
+          errno == ENOKEY, "invalidated serial is gone");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_SEARCH, session, "user", "p3-perm-key", 0L) == -1 &&
+          errno == ENOKEY, "invalidated key is unsearchable");
 
     CHECK(syscall(SYS_keyctl, KEYCTL_SET_TIMEOUT, key, 1L, 0L, 0L) == 0,
           "set timeout");
@@ -234,6 +279,31 @@ int main(void)
     CHECK(syscall(SYS_keyctl, KEYCTL_GET_KEYRING_ID, inherited,
                   0L, 0L, 0L) == -1 && errno == ENOKEY,
           "final child release removes old serial");
+
+    /* CLEAR empties one ring and needs WRITE on it.  This is the last case:
+     * joining another session ring replaces the task's current slot. */
+    long clear_ring = syscall(SYS_keyctl, KEYCTL_JOIN_SESSION_KEYRING,
+                              "p3-clear-ring", 0L, 0L, 0L);
+    CHECK(clear_ring > 0, "create clear ring");
+    CHECK(syscall(SYS_add_key, "user", "p3-clear-a", "a", (size_t)1,
+                  clear_ring) > 0, "add clear key a");
+    CHECK(syscall(SYS_add_key, "user", "p3-clear-b", "b", (size_t)1,
+                  clear_ring) > 0, "add clear key b");
+    CHECK(syscall(SYS_keyctl, KEYCTL_SETPERM, clear_ring, 0L, 0L, 0L) == 0,
+          "clear ring loses write");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_CLEAR, clear_ring, 0L, 0L, 0L) == -1 &&
+          errno == EACCES, "clear denied by permission mask");
+    CHECK(syscall(SYS_keyctl, KEYCTL_SETPERM, clear_ring,
+                  KEY_POS_ALL | KEY_USR_ALL, 0L, 0L) == 0,
+          "restore clear ring permissions");
+    CHECK(syscall(SYS_keyctl, KEYCTL_CLEAR, clear_ring, 0L, 0L, 0L) == 0,
+          "clear ring");
+    CHECK(syscall(SYS_keyctl, KEYCTL_READ, clear_ring, value, sizeof(value), 0L) == 0,
+          "cleared ring is empty");
+    errno = 0;
+    CHECK(syscall(SYS_keyctl, KEYCTL_SEARCH, clear_ring, "user", "p3-clear-a",
+                  0L) == -1 && errno == ENOKEY, "cleared key is gone");
 
     printf("KEYRING_RUST: PASS session=%ld key=%ld desc=%ld query=%ld\n",
            session, key, desc_size, desc_need);

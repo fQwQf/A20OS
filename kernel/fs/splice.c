@@ -196,10 +196,15 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
         vfs_put_file_ref(fd_out, out_vf);
         return -EINVAL;
     }
+    int in_nb = in_vf->flags & O_NONBLOCK;
     int out_nb = out_vf->flags & O_NONBLOCK;
+    /* SPLICE_F_NONBLOCK governs both pipe sides; pipe_peek() decides
+     * EAGAIN-vs-block from the source vfile's flag. */
+    splice_pipe_set_nonblock(in_vf, nonblock);
 
     char *buf = proc_scratch_buffer(SPLICE_CHUNK_SIZE);
     if (!buf) {
+        splice_pipe_restore_nonblock(in_vf, in_nb);
         vfs_put_file_ref(fd_in, in_vf);
         vfs_put_file_ref(fd_out, out_vf);
         return -ENOMEM;
@@ -216,8 +221,8 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
             break;
         splice_pipe_set_nonblock(out_vf, nonblock);
         int w = vfs_write_file(out_vf, buf, (size_t)r);
-        if (w < 0) {
-            r = w;
+        if (w <= 0) {
+            r = w < 0 ? w : (total > 0 ? (int)total : -EAGAIN);
             break;
         }
         total += (size_t)w;
@@ -225,6 +230,7 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
             break;
     }
 
+    splice_pipe_restore_nonblock(in_vf, in_nb);
     splice_pipe_restore_nonblock(out_vf, out_nb);
     vfs_put_file_ref(fd_in, in_vf);
     vfs_put_file_ref(fd_out, out_vf);
@@ -235,9 +241,9 @@ int tee_do(int fd_in, int fd_out, size_t len, int nonblock)
 /* vmsplice(2) core: copy the user iov segments into the pipe fd.  A20OS
  * pipes are plain ring buffers, so GIFT is accepted as a hint and the bytes
  * are copied, which is always safe for the caller. */
-int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
+int vmsplice_do(int fd, const void *iov, unsigned long nr_segs, int nonblock)
 {
-    if (nr_segs < 0 || nr_segs > 1024)
+    if (nr_segs > 1024)
         return -EINVAL;
 
     vfile_t *vf = vfs_get_file_ref(fd);
@@ -268,15 +274,15 @@ int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
 
     size_t total = 0;
     int r = 0;
-    for (int i = 0; i < nr_segs; i++) {
+    for (unsigned long i = 0; i < nr_segs; i++) {
         struct splice_iov v;
         if (copy_from_user(&v, (const char *)iov +
-                                 (size_t)i * sizeof(struct splice_iov),
+                                 i * sizeof(struct splice_iov),
                            sizeof(v)) < 0) {
             r = total > 0 ? (int)total : -EFAULT;
             break;
         }
-        if (!v.base || v.len == 0)
+        if (v.len == 0)
             continue;
         size_t done = 0;
         while (done < v.len) {
@@ -294,15 +300,17 @@ int vmsplice_do(int fd, const void *iov, int nr_segs, int nonblock)
             }
             int w = vfs_write_file(wf, kbuf, chunk);
             vfs_put_file_ref(fd, wf);
-            if (w < 0) {
-                r = total > 0 ? (int)total : w;
+            if (w <= 0) {
+                /* A short write is retried; a zero-length result without an
+                 * error would otherwise spin forever. */
+                r = total > 0 ? (int)total : (w < 0 ? w : -EIO);
                 break;
             }
             done += (size_t)w;
+            total += (size_t)w;
         }
         if (r != 0)
             break;
-        total += v.len;
     }
 
     vfile_t *rf = vfs_get_file_ref(fd);

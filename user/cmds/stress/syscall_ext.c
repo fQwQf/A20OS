@@ -228,6 +228,69 @@ static int test_fanotify(void)
         return fail("fanotify_mark", errno);
     }
 
+    /* Invalid class/flag combinations are refused before an instance exists. */
+    errno = 0;
+    if (syscall(SYS_fanotify_init, 0x4 /* FAN_CLASS_CONTENT */, 0) >= 0 ||
+        errno != EINVAL)
+        return fail("fanotify class content", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_init, 0x80000000u, 0) >= 0 || errno != EINVAL)
+        return fail("fanotify init flag", errno);
+
+    /* Mark validation: fd, path, flag exclusivity, mask and path type. */
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, -1, 1, 0x2, AT_FDCWD, dir) >= 0 ||
+        errno != EBADF)
+        return fail("fanotify mark bad fd", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 1, 0x2, AT_FDCWD, NULL) >= 0 ||
+        errno != EFAULT)
+        return fail("fanotify mark null path", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 3 /* ADD|REMOVE */, 0x2,
+                AT_FDCWD, dir) >= 0 || errno != EINVAL)
+        return fail("fanotify add+remove", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 0, 0x2, AT_FDCWD, dir) >= 0 ||
+        errno != EINVAL)
+        return fail("fanotify neither", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 0x10, 0x2, AT_FDCWD, dir) >= 0 ||
+        errno != EINVAL)
+        return fail("fanotify unknown flag", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 1, 0, AT_FDCWD, dir) >= 0 ||
+        errno != EINVAL)
+        return fail("fanotify zero mask", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 1, 1ULL << 63, AT_FDCWD, dir) >= 0 ||
+        errno != EINVAL)
+        return fail("fanotify unknown mask", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 1, 0x2, AT_FDCWD,
+                "/tmp/no-such-fanotify") >= 0 || errno != ENOENT)
+        return fail("fanotify missing path", errno);
+
+    int reg = open("/tmp/fanotify-file", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (reg < 0)
+        return fail("fanotify regular file", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 1 | 0x8 /* ONLYDIR */, 0x2,
+                AT_FDCWD, "/tmp/fanotify-file") >= 0 || errno != ENOTDIR)
+        return fail("fanotify onlydir on file", errno);
+    errno = 0;
+    if (syscall(SYS_fanotify_mark, ffd, 2 /* REMOVE */, 0x2, AT_FDCWD,
+                "/tmp/fanotify-file") >= 0 || errno != ENOENT)
+        return fail("fanotify remove unmarked", errno);
+    if (syscall(SYS_fanotify_mark, ffd, 1, 0x2, AT_FDCWD,
+                "/tmp/fanotify-file") != 0)
+        return fail("fanotify mark file", errno);
+    if (syscall(SYS_fanotify_mark, ffd, 2, 0x2, AT_FDCWD,
+                "/tmp/fanotify-file") != 0)
+        return fail("fanotify unmark file", errno);
+    close(reg);
+    unlink("/tmp/fanotify-file");
+
     close(ffd);
     printf("SYSCALL_EXT: fanotify ok\n");
     return 0;
@@ -823,8 +886,19 @@ static int test_policy_and_misc(void)
         return fail("open_by_handle_at", errno);
     close(ofd);
 
-    /* rseq register then unregister. */
+    /* rseq validates flags, the 32-byte minimum and the area pointer before
+     * publishing anything. */
     static char rseq_area[32] __attribute__((aligned(32)));
+    errno = 0;
+    if (syscall(SYS_rseq, rseq_area, 32, 8, 0x53053053) >= 0 || errno != EINVAL)
+        return fail("rseq bad flag", errno);
+    errno = 0;
+    if (syscall(SYS_rseq, rseq_area, 31, 0, 0x53053053) >= 0 || errno != EINVAL)
+        return fail("rseq short area", errno);
+    errno = 0;
+    if (syscall(SYS_rseq, NULL, 32, 0, 0x53053053) >= 0 || errno != EFAULT)
+        return fail("rseq null area", errno);
+    /* rseq register then unregister. */
     if (syscall(SYS_rseq, rseq_area, (uint32_t)sizeof(rseq_area), 0, 0x53053053) != 0)
         return fail("rseq register", errno);
     if (syscall(SYS_rseq, rseq_area, (uint32_t)sizeof(rseq_area), 1, 0) != 0)
@@ -914,7 +988,7 @@ static int test_io_uring_and_landlock(void)
     int fsfd = syscall(SYS_fsopen, "proc", 0);
     if (fsfd < 0)
         return fail("fsopen", errno);
-    if (syscall(SYS_fsconfig, fsfd, 2 /* SET_STRING */, "type", "proc", 0) != 0)
+    if (syscall(SYS_fsconfig, fsfd, 1 /* SET_STRING */, "type", "proc", 0) != 0)
         return fail("fsconfig", errno);
     close(fsfd);
     rmdir("/tmp/syscall_ext_mnt");
@@ -975,10 +1049,38 @@ static int test_msg_and_compat(void)
     if (syscall(SYS_ioprio_get, 1 /* PROCESS */, 0) != iop)
         return fail("ioprio_get", errno);
 
-    /* pkey alloc/free. */
+    /* pkey alloc/mprotect/free.  pkey == -1 is the documented mprotect
+     * fallback; an allocated key is accepted; an unallocated key is EINVAL. */
     int pkey = syscall(SYS_pkey_alloc, 0, 0);
     if (pkey < 0)
         return fail("pkey_alloc", errno);
+    void *pkpage = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pkpage == MAP_FAILED) {
+        syscall(SYS_pkey_free, pkey);
+        return fail("pkey mmap", errno);
+    }
+    if (syscall(SYS_pkey_mprotect, pkpage, 4096, PROT_READ, pkey) != 0) {
+        munmap(pkpage, 4096);
+        syscall(SYS_pkey_free, pkey);
+        return fail("pkey_mprotect key", errno);
+    }
+    if (syscall(SYS_pkey_mprotect, pkpage, 4096,
+                PROT_READ | PROT_WRITE, -1) != 0) {
+        munmap(pkpage, 4096);
+        syscall(SYS_pkey_free, pkey);
+        return fail("pkey_mprotect fallback", errno);
+    }
+    int bad_key = pkey == 15 ? 14 : 15;
+    errno = 0;
+    if (syscall(SYS_pkey_mprotect, pkpage, 4096, PROT_READ, bad_key) >= 0 ||
+        errno != EINVAL) {
+        int e = errno;
+        munmap(pkpage, 4096);
+        syscall(SYS_pkey_free, pkey);
+        return fail("pkey_mprotect unallocated", e);
+    }
+    munmap(pkpage, 4096);
     if (syscall(SYS_pkey_free, pkey) != 0)
         return fail("pkey_free", errno);
 
@@ -1577,6 +1679,429 @@ static int test_uffd_double_registration(void)
     return 0;
 }
 
+/* Unregister liveness: once a range is unregistered, faults on it must take
+ * the ordinary zero-fill path and must not queue another PAGEFAULT event or
+ * wake anyone.  A stale MM_SAFE_UFFD mark would instead park the fault. */
+static int test_uffd_unregister_liveness(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return fail("uffd live create", errno);
+    struct uffdio_api api = {0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0) {
+        int e = errno;
+        close(fd);
+        return fail("uffd live api", e);
+    }
+
+    unsigned char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        close(fd);
+        return fail("uffd live mmap", errno);
+    }
+    struct uffdio_register reg = {0};
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live register", e);
+    }
+    struct uffdio_range ur = {0};
+    ur.start = (uint64_t)(uintptr_t)page;
+    ur.len = 4096;
+    if (ioctl(fd, UFFDIO_UNREGISTER, &ur) != 0) {
+        int e = errno;
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live unregister", e);
+    }
+
+    struct pollfd pfd = { .fd = (int)fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) != 0) {
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live poll", 0);
+    }
+    struct uffd_msg msg;
+    errno = 0;
+    if (read(fd, &msg, sizeof(msg)) >= 0 || errno != EAGAIN) {
+        int e = errno;
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live no event", e);
+    }
+
+    g_uffd_read_byte = -1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0) {
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live thread", errno);
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    int joined = pthread_timedjoin_np(th, NULL, &deadline);
+    if (joined != 0 || g_uffd_read_byte != 0) {
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live fallback", joined != 0 ? joined : g_uffd_read_byte);
+    }
+    if (poll(&pfd, 1, 0) != 0) {
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd live late event", 0);
+    }
+
+    munmap(page, 4096);
+    close(fd);
+    return 0;
+}
+
+/* Closing the last reference to the fd while a fault is parked must
+ * abort that fault to the normal zero-fill path: the range owner is released
+ * and the waiter woken, and the object stays alive until the faulter drops its
+ * transient reference.  A missing wake would hang the join below. */
+static int test_uffd_close_while_parked(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fd < 0)
+        return fail("uffd close create", errno);
+    struct uffdio_api api = {0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0) {
+        int e = errno;
+        close(fd);
+        return fail("uffd close api", e);
+    }
+    unsigned char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        close(fd);
+        return fail("uffd close mmap", errno);
+    }
+    struct uffdio_register reg = {0};
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd close register", e);
+    }
+
+    g_uffd_read_byte = -1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0) {
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd close thread", errno);
+    }
+    struct uffd_msg msg;
+    if (read(fd, &msg, sizeof(msg)) != (ssize_t)sizeof(msg) ||
+        msg.event != UFFD_EVENT_PAGEFAULT) {
+        close(fd);
+        munmap(page, 4096);
+        return fail("uffd close event", 0);
+    }
+
+    close(fd);
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    int joined = pthread_timedjoin_np(th, NULL, &deadline);
+    if (joined != 0 || g_uffd_read_byte != 0) {
+        munmap(page, 4096);
+        return fail("uffd close wake", joined != 0 ? joined : g_uffd_read_byte);
+    }
+    munmap(page, 4096);
+    return 0;
+}
+
+/* Closing releases the registration; a reused fd number must reach a fresh
+ * object with an empty event queue, never the old one. */
+static int test_uffd_fd_reuse(void)
+{
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fd < 0)
+        return fail("uffd reuse create", errno);
+    struct uffdio_api api = {0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0) {
+        int e = errno;
+        close(fd);
+        return fail("uffd reuse api", e);
+    }
+    unsigned char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        close(fd);
+        return fail("uffd reuse mmap", errno);
+    }
+    struct uffdio_register reg = {0};
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        munmap(page, 4096);
+        close(fd);
+        return fail("uffd reuse register", e);
+    }
+    close(fd); /* final reference: releases every owner range */
+
+    g_uffd_read_byte = -1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0) {
+        munmap(page, 4096);
+        return fail("uffd reuse fallback thread", errno);
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 1;
+    int joined = pthread_timedjoin_np(th, NULL, &deadline);
+    if (joined != 0 || g_uffd_read_byte != 0) {
+        munmap(page, 4096);
+        return fail("uffd reuse fallback", joined != 0 ? joined : g_uffd_read_byte);
+    }
+    munmap(page, 4096);
+
+    int probe = open("/dev/null", O_RDONLY);
+    if (probe < 0)
+        return fail("uffd reuse probe open", errno);
+    if (probe != fd) {
+        close(probe);
+        return fail("uffd reuse number", probe);
+    }
+    struct uffdio_range ur = {0};
+    ur.start = (uint64_t)(uintptr_t)g_uffd_payload;
+    ur.len = 4096;
+    errno = 0;
+    if (ioctl(probe, UFFDIO_UNREGISTER, &ur) >= 0 || errno != ENOTTY) {
+        int e = errno;
+        close(probe);
+        return fail("uffd reuse alias", e);
+    }
+    close(probe);
+
+    long fd2 = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+    if (fd2 < 0)
+        return fail("uffd reuse create 2", errno);
+    if (fd2 != fd) {
+        close(fd2);
+        return fail("uffd reuse number 2", fd2);
+    }
+    struct pollfd pfd = { .fd = (int)fd2, .events = POLLIN };
+    if (poll(&pfd, 1, 0) != 0) {
+        close(fd2);
+        return fail("uffd reuse stale event", 0);
+    }
+    struct uffd_msg msg;
+    errno = 0;
+    if (read(fd2, &msg, sizeof(msg)) >= 0 || errno != EAGAIN) {
+        int e = errno;
+        close(fd2);
+        return fail("uffd reuse stale read", e);
+    }
+
+    /* The fresh object is functional and independent of the old range. */
+    api = (struct uffdio_api){0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd2, UFFDIO_API, &api) != 0) {
+        int e = errno;
+        close(fd2);
+        return fail("uffd reuse api 2", e);
+    }
+    unsigned char *page2 = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page2 == MAP_FAILED) {
+        close(fd2);
+        return fail("uffd reuse mmap 2", errno);
+    }
+    reg = (struct uffdio_register){0};
+    reg.range.start = (uint64_t)(uintptr_t)page2;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd2, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        munmap(page2, 4096);
+        close(fd2);
+        return fail("uffd reuse register 2", e);
+    }
+    g_uffd_read_byte = -1;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page2) != 0) {
+        munmap(page2, 4096);
+        close(fd2);
+        return fail("uffd reuse thread 2", errno);
+    }
+    pfd.fd = (int)fd2;
+    if (poll(&pfd, 1, 1000) != 1) {
+        close(fd2);
+        munmap(page2, 4096);
+        return fail("uffd reuse event poll", 0);
+    }
+    if (read(fd2, &msg, sizeof(msg)) != (ssize_t)sizeof(msg) ||
+        msg.arg.pagefault.address != (uint64_t)(uintptr_t)page2) {
+        close(fd2);
+        munmap(page2, 4096);
+        return fail("uffd reuse event", 0);
+    }
+    struct uffdio_copy cp = {0};
+    cp.dst = (uint64_t)(uintptr_t)page2;
+    cp.src = (uint64_t)(uintptr_t)g_uffd_payload;
+    cp.len = 4096;
+    if (ioctl(fd2, UFFDIO_COPY, &cp) != 0) {
+        close(fd2);
+        munmap(page2, 4096);
+        return fail("uffd reuse copy", errno);
+    }
+    pthread_join(th, NULL);
+    if (g_uffd_read_byte != g_uffd_payload[0]) {
+        close(fd2);
+        munmap(page2, 4096);
+        return fail("uffd reuse content", 0);
+    }
+    munmap(page2, 4096);
+    close(fd2);
+    return 0;
+}
+
+/* Deny paths must fail before creating state: a wrong API version, a
+ * non-anonymous or shared mapping, a wrong mode and an unregistered range. */
+static int test_uffd_deny_paths(void)
+{
+    errno = 0;
+    long bad = syscall(SYS_userfaultfd, 0x80000000UL);
+    if (bad >= 0 || errno != EINVAL)
+        return fail("uffd deny flags", (int)bad);
+
+    /* An unprivileged task may only create a uffd with UFFD_USER_MODE_ONLY;
+     * without it Linux requires CAP_SYS_PTRACE. */
+    pid_t child = fork();
+    if (child < 0)
+        return fail("uffd deny fork", errno);
+    if (child == 0) {
+        if (setgid(65534) || setuid(65534))
+            _exit(1);
+        errno = 0;
+        long f0 = syscall(SYS_userfaultfd, 0);
+        int denied = f0 < 0 && errno == EPERM;
+        if (f0 >= 0)
+            close(f0);
+        long f1 = syscall(SYS_userfaultfd, 1 /* UFFD_USER_MODE_ONLY */);
+        int user_only_ok = f1 >= 0;
+        if (f1 >= 0)
+            close(f1);
+        _exit(denied && user_only_ok ? 0 : 2);
+    }
+    int st = 0;
+    if (waitpid(child, &st, 0) != child || !WIFEXITED(st) ||
+        WEXITSTATUS(st) != 0)
+        return fail("uffd deny permission", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+
+    long fd = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return fail("uffd deny create", errno);
+    struct uffdio_api api = {0};
+    api.api = 0xAB;
+    errno = 0;
+    if (ioctl(fd, UFFDIO_API, &api) >= 0 || errno != EINVAL) {
+        int e = errno;
+        close(fd);
+        return fail("uffd deny api version", e);
+    }
+    api = (struct uffdio_api){0};
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fd, UFFDIO_API, &api) != 0) {
+        int e = errno;
+        close(fd);
+        return fail("uffd deny api retry", e);
+    }
+
+    void *filepage = NULL;
+    int ffd = open("/tmp/uffd-deny-file", O_CREAT | O_RDWR, 0600);
+    if (ffd >= 0) {
+        if (ftruncate(ffd, 4096) == 0)
+            filepage = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                            ffd, 0);
+        close(ffd);
+    }
+
+    void *shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared == MAP_FAILED)
+        shared = NULL;
+
+    void *anon = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (anon == MAP_FAILED) {
+        if (shared) munmap(shared, 4096);
+        if (filepage && filepage != MAP_FAILED) munmap(filepage, 4096);
+        unlink("/tmp/uffd-deny-file");
+        close(fd);
+        return fail("uffd deny mmap", errno);
+    }
+
+    struct uffdio_register reg = {0};
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (shared) {
+        reg.range.start = (uint64_t)(uintptr_t)shared;
+        errno = 0;
+        if (ioctl(fd, UFFDIO_REGISTER, &reg) >= 0 || errno != EINVAL)
+            goto deny_fail;
+    }
+    if (filepage && filepage != MAP_FAILED) {
+        reg.range.start = (uint64_t)(uintptr_t)filepage;
+        errno = 0;
+        if (ioctl(fd, UFFDIO_REGISTER, &reg) >= 0 || errno != EINVAL)
+            goto deny_fail;
+    }
+    /* A non-MISSING mode is not implemented and must be refused. */
+    reg.range.start = (uint64_t)(uintptr_t)anon;
+    reg.mode = 2 /* UFFDIO_REGISTER_MODE_WP */;
+    errno = 0;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) >= 0 || errno != EINVAL)
+        goto deny_fail;
+    /* A valid registration still works after all of the refusals. */
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fd, UFFDIO_REGISTER, &reg) != 0)
+        goto deny_fail;
+    struct uffdio_range ur = {0};
+    ur.start = (uint64_t)(uintptr_t)anon + 8192;
+    ur.len = 4096;
+    errno = 0;
+    if (ioctl(fd, UFFDIO_UNREGISTER, &ur) >= 0 || errno != ENOENT)
+        goto deny_fail;
+    struct pollfd pfd = { .fd = (int)fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) != 0)
+        goto deny_fail;
+    ur.start = (uint64_t)(uintptr_t)anon;
+    if (ioctl(fd, UFFDIO_UNREGISTER, &ur) != 0)
+        goto deny_fail;
+
+    munmap(anon, 4096);
+    if (shared) munmap(shared, 4096);
+    if (filepage && filepage != MAP_FAILED) munmap(filepage, 4096);
+    unlink("/tmp/uffd-deny-file");
+    close(fd);
+    return 0;
+
+deny_fail:
+    if (shared) munmap(shared, 4096);
+    if (filepage && filepage != MAP_FAILED) munmap(filepage, 4096);
+    unlink("/tmp/uffd-deny-file");
+    munmap(anon, 4096);
+    close(fd);
+    return fail("uffd deny path", errno);
+}
+
 /* ---- perf_event_open (kernel/abi/linux/sys_perf.c) ---- */
 
 #define PERF_TYPE_SOFTWARE 1
@@ -1910,6 +2435,81 @@ static int test_splice_tee(void)
     if (splice(p[0], NULL, p[1], NULL, 1, 0x10) >= 0 || errno != EINVAL)
         return fail("splice bad flag", errno);
 
+    /* Linux returns 0 for an empty transfer before it even resolves the
+     * descriptors or validates flags (ksys_splice/__do_sys_tee). */
+    errno = 0;
+    if (splice(-1, NULL, -1, NULL, 0, 0) != 0)
+        return fail("splice zero len", errno);
+    errno = 0;
+    if (tee(-1, -1, 0, 0) != 0)
+        return fail("tee zero len", errno);
+    errno = 0;
+    if (splice(-1, NULL, -1, NULL, 0, 0x10) != 0)
+        return fail("splice zero len bad flag", errno);
+    errno = 0;
+    if (tee(-1, -1, 0, 0x10) != 0)
+        return fail("tee zero len bad flag", errno);
+
+    /* Flags that are valid for a different call are rejected. */
+    errno = 0;
+    if (tee(p[0], p[1], 1, 0x10) >= 0 || errno != EINVAL)
+        return fail("tee bad flag", errno);
+    errno = 0;
+    if (splice(p[0], NULL, p[1], NULL, 1, 0x08 /* GIFT */) >= 0 ||
+        errno != EINVAL)
+        return fail("splice gift flag", errno);
+    errno = 0;
+    if (tee(p[0], p[1], 1, 0x08 /* GIFT */) >= 0 || errno != EINVAL)
+        return fail("tee gift flag", errno);
+    errno = 0;
+    if (vmsplice(p[1], &iov, 1, 0x10) >= 0 || errno != EINVAL)
+        return fail("vmsplice bad flag", errno);
+
+    /* vmsplice segment count is bounded and must not be truncated to int. */
+    errno = 0;
+    if (vmsplice(p[1], &iov, 1025, 0) >= 0 || errno != EINVAL)
+        return fail("vmsplice nr_segs high", errno);
+    errno = 0;
+    if (syscall(SYS_vmsplice, p[1], &iov, 0x100000001ULL, 0) >= 0 ||
+        errno != EINVAL)
+        return fail("vmsplice nr_segs truncation", errno);
+    if (vmsplice(p[1], NULL, 0, 0) != 0)
+        return fail("vmsplice zero segs", errno);
+    errno = 0;
+    if (vmsplice(p[1], NULL, 1, 0) >= 0 || errno != EFAULT)
+        return fail("vmsplice null iov", errno);
+    struct iovec bad_iov = { .iov_base = (void *)(uintptr_t)1, .iov_len = 1 };
+    errno = 0;
+    if (vmsplice(p[1], &bad_iov, 1, 0) >= 0 || errno != EFAULT)
+        return fail("vmsplice bad base", errno);
+    struct iovec empty_iov = { .iov_base = NULL, .iov_len = 0 };
+    if (vmsplice(p[1], &empty_iov, 1, 0) != 0)
+        return fail("vmsplice empty iov", errno);
+
+    /* Bad offset pointers fail in usercopy, and tee requires both endpoints
+     * to be pipes. */
+    errno = 0;
+    if (splice(f1, (off_t *)(uintptr_t)1, p[1], NULL, 1, 0) >= 0 ||
+        errno != EFAULT)
+        return fail("splice bad off_in", errno);
+    errno = 0;
+    if (tee(p[0], f1, 1, 0) >= 0 || errno != EINVAL)
+        return fail("tee non-pipe", errno);
+
+    /* Nonblocking transfers on an empty pipe report EAGAIN instead of 0. */
+    int q[2];
+    if (pipe(q) != 0)
+        return fail("splice empty pipe", errno);
+    errno = 0;
+    if (splice(q[0], NULL, f2, NULL, 1, SPLICE_F_NONBLOCK) >= 0 ||
+        errno != EAGAIN)
+        return fail("splice empty EAGAIN", errno);
+    errno = 0;
+    if (tee(q[0], q[1], 1, SPLICE_F_NONBLOCK) >= 0 || errno != EAGAIN)
+        return fail("tee empty EAGAIN", errno);
+    close(q[0]);
+    close(q[1]);
+
     close(f1);
     close(f2);
     close(p[0]);
@@ -2069,10 +2669,19 @@ int main(int argc, char **argv)
         return -1;
     if (test_userfaultfd() < 0)
         return 1;
+    if (test_uffd_unregister_liveness() < 0)
+        return 1;
+    if (test_uffd_close_while_parked() < 0)
+        return 1;
+    if (test_uffd_fd_reuse() < 0)
+        return 1;
+    if (test_uffd_deny_paths() < 0)
+        return 1;
     if (!skip_uffd_race && test_uffd_unregister_fault_race() < 0)
         return 1;
     if (skip_uffd_race)
         printf("UFFD_RACE_STRESS: SKIP requested\n");
+    printf("SYSCALL_EXT: uffd-liveness-reuse-deny ok\n");
     uint64_t uffd_end_ns = monotonic_ns();
     printf("UFFD_STRESS_NS: %llu\n",
            (unsigned long long)(uffd_end_ns - uffd_start_ns));
@@ -2084,6 +2693,7 @@ int main(int argc, char **argv)
         return 1;
     if (test_splice_tee() < 0)
         return 1;
+    printf("SYSCALL_EXT: splice-boundaries ok\n");
     if (test_membarrier() < 0)
         return 1;
     if (test_eventfd_fcntl_nonblock() < 0)

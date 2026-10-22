@@ -219,3 +219,35 @@ Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 s
 剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [native-abi-runtime-status.md](native-abi-runtime-status.md) §8a。
 
 详细运行时状态与后续路线图见 [native-abi-runtime-status.md](native-abi-runtime-status.md)。
+
+## ABI 行为与差分验证（2026-10-22）
+
+同一份归一化 fixture 现在同时覆盖两个方向：
+
+- **ABI=linux 与 ABI=both 的交叉断言**：`user/cmds/core/abi_behavior.c` 在两种内核档位
+  运行，输出 7 条 `ABI_BEHAVIOR:` 归一化记录（pipe 字节流、fd 表与 dup 共享偏移、
+  匿名 mmap/mprotect、socketpair、电平触发 readiness、坏描述符/零长度错误类）。
+  两条 smoke 都用 `tools/tests/abi_behavior_expected.txt`（手写预期值，不由实现生成）
+  校验；覆盖的操作在两档位上没有差异。
+- **Linux 与 Native personality 的逐操作差分**：`user/tests/test_native_abi_behavior.c`
+  用原生 `a20_path_open`/`a20_hdl_*`/`a20_vm_*`/`a20_net_socketpair`/字节流 pipe
+  原语执行同一操作集并打印同样的行；`tools/abi_behavior_diff.py` 要求两个 block
+  逐行等于预期值且彼此相等。错误类按显式映射归一化（Native `BAD_HANDLE` ↔ Linux
+  `EBADF`，`INVALID_ARGUMENT` ↔ `EINVAL`）；有意差异（handle 空间、权限由 rights
+  而非 uid 判定）记录在 `docs/native-abi/` 的对应参考页。
+
+```sh
+make smoke-abi-behavior-linux   # ABI=linux
+make smoke-abi-behavior-both    # ABI=both：Linux + Native 两份输出互相印证
+```
+
+IDL 版本协商与畸形 ACK 矩阵也在保留架构（AArch64）上执行；`tools/run-idl-ack-matrix.sh`
+构建 test-only adversary、组成镜像、注入后运行：
+
+```sh
+make smoke-idl-ack-aarch64      # 正 legacy 回退 + 9 条畸形 ACK 拒绝，共 10 例
+```
+
+RISC-V64 的同一矩阵在 SMP2 上同样通过。各消息族的未知值契约（SVCMGR 原样回显、
+RTCD 消费不回复、UFSD `-ENOSYS`、协商 ACK 拒绝）见
+[05-idl-and-personality.md](../../hybrid-kernel/05-idl-and-personality.md) §1.5。

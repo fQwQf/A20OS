@@ -2,14 +2,14 @@
 
 由 `tools/gen_envelope_coverage.py` 从 `kernel/abi/linux/syscall_table.def` 机械生成——每登记一个新 syscall，`make check-envelope-coverage` 即失败直至其被显式分类。
 
-- 登记入口总数：**381**
+- 登记入口总数：**382**
 - ACQUIRE：14
 - TRANSFER：3
 - USE：15
 - FAILCLOSED：16
 - PLANNED：35
-- NA：298
-- **资源权威相关且已调解：48**；已知未调解面（PLANNED）：35（全部挂 W2 行项）；无权威参与（NA）：298
+- NA：299
+- **资源权威相关且已调解：48**；已知未调解面（PLANNED）：35（全部挂 W2 行项）；无权威参与（NA）：299
 
 分类语义见 docs/research/05 §2.5；类目定义见生成脚本头部。PLANNED 行项清零是论文投稿前条件（审稿人第一攻击点）。
 
@@ -384,6 +384,7 @@
 | 919 | `hyp_vcpu_irq` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
 | 920 | `hyp_stats` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
 | 921 | `hyp_vm_smp` | FAILCLOSED | hypervisor 控制面未纳入 envelope 委托模型；对信封任务拒绝 |
+| 922 | `a20_envelope_acquire_race_test` | NA |  |
 | 1000 | `arch_prctl` | NA |  |
 | 1001 | `set_thread_area` | NA |  |
 | 1002 | `poll` | NA |  |

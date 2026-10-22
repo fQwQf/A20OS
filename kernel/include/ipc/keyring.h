@@ -120,6 +120,10 @@ int  keyring_setperm(key_serial_t id, uint32_t perm);
 int  keyring_set_timeout(key_serial_t id, unsigned long secs);
 int  keyring_link(key_serial_t id, key_serial_t ringid);
 int  keyring_unlink(key_serial_t id, key_serial_t ringid);
+/* CLEAR: unlink every member of @id.  INVALIDATE: expire @id and detach it
+ * from every ring; keyrings are refused with -EINVAL. */
+int  keyring_clear(key_serial_t id);
+int  keyring_invalidate(key_serial_t id);
 key_serial_t keyring_search(key_serial_t ringid, const char *type,
                             const char *desc);
 /* DESCRIBE: writes the "type;uid;gid;perm;desc" string into @buf.  Returns

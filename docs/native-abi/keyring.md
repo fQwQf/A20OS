@@ -8,12 +8,27 @@ C 参考实现持有一个全局的 key/keyring 对象序号映射、一把粗�
 任务 session-ring 挂钩，以及一个按 uid 持久化的 ring 缓存。
 
 当前实现的命令有：add 或 replace、request、get keyring id、join session、chown、设置权限掩码、设置
-超时、link、unlink、search、describe、read。fork 共享任务的 session-ring 引用，exit 释放它。request 先
-搜 session ring 再搜 user ring，并可能尽力把找到的 key 链接进请求的目标 ring。search 按配置深度遍历
-嵌套 ring，忽略已过期的 key。重复 link 成功且不再增加引用；对非成员做 unlink 返回 `-ENOENT`。修改属性
-要求当前有效 uid 拥有该对象，或具备 `CAP_SYS_ADMIN`。存储的权限掩码目前还没有用于约束 read/search/link。
-`KEYCTL_CLEAR`、`KEYCTL_INVALIDATE` 及其他未实现的命令继续返回 `-EOPNOTSUPP`；request 的 callout 数据
-被忽略。
+超时、link、unlink、search、describe、read、clear、invalidate。fork 共享任务的 session-ring 引用，exit
+释放它。request 先搜 session ring 再搜 user ring，并可能尽力把找到的 key 链接进请求的目标 ring。search
+按配置深度遍历嵌套 ring，忽略已过期的 key。重复 link 成功且不再增加引用；对非成员做 unlink 返回
+`-ENOENT`。修改属性（chown/setperm/set_timeout）要求当前有效 uid 拥有该对象，或具备 `CAP_SYS_ADMIN`。
+
+权限掩码参与访问判定，规则与 Linux 的 `key_need_perm_mask()` 一致：按有效 uid/egid 选择
+`KEY_POS_*`（属主）、`KEY_GRP_*`（同组）或 `KEY_OTH_*`（其他）一类，读取要求 VIEW|READ，search 要求
+VIEW|SEARCH，link 要求被链接对象的 VIEW|LINK 和目标 ring 的 VIEW|WRITE，describe 只要求 VIEW，
+add/unlink/clear 要求目标 ring 的 VIEW|WRITE。没有权限的 key 对 search 不可见（返回 `-ENOKEY`），
+按序号 read/describe/link 返回 `-EACCES`。补充组（supplementary groups）不在当前凭据视图里，因此组
+判定只看 egid。
+
+`KEYCTL_CLEAR` 清空目标 ring 的成员，`KEYCTL_INVALIDATE` 让 key 立即过期并从所有 ring 摘除（之后按序号
+和按名字都不再可见）；对 keyring 调用 INVALIDATE 返回 `-EINVAL`。其余未实现的命令（UPDATE、REVOKE、
+INSTANTIATE、NEGATE、SET_REQKEY_KEYRING、ASSUME_AUTHORITY、GET_SECURITY、SESSION_TO_PARENT、
+REJECT、GET_PERSISTENT、DH_COMPUTE、RESTRICT_KEYRING、MOVE）是明确契约：一律返回 `-EOPNOTSUPP`，不是
+遗漏。request 的 callout 数据被忽略。
+
+有意边界：keyring 是任务 session ring 加按 uid 持久 user ring，没有 `nsproxy` 驱动的 keyring namespace；
+capability 判定只使用本内核已实现的 capability 子集（keyring 路径只查 `CAP_SYS_ADMIN`）。这两项不在
+1.0 keyring 承诺内，故不列为缺口。
 
 有一处遗留细节与 Linux 格式的 description 契约有意区分开：当以 `buf == NULL` 查询内核 helper 时，C
 参考实现按每个 uid/gid 字段十一个字节来估算长度。对普通的十进制 id，这个估算大于实际渲染出的字符串；
@@ -23,8 +38,9 @@ selector 与 syscall 契约测试。
 
 超时换算把乘法与加法饱和在 `u64::MAX`，因此极大的非零超时不会回绕成立即过期；零则清除过期时间。
 惰性创建特殊 ring 仍然无法暴露独立的 `ENOMEM` 结果，因为它的公开 helper 只返回空指针，调用方只能把
-该失败映射为 `ENOKEY`。这是既有 API 的限制。存储的权限掩码会保留且可修改，但完整的 `KEYCTL` 权限位
-约束没有实现；已实现的属主/`CAP_SYS_ADMIN` 检查仍然生效。因此本模块不宣称完整的 Linux keyring 语义。
+该失败映射为 `ENOKEY`。这是既有 API 的限制。权限掩码现在参与 read/search/link/describe 与 ring
+write 判定（见上），属主/`CAP_SYS_ADMIN` 检查仍用于属性修改。本模块不宣称完整的 Linux keyring
+语义：未实现的命令和 namespace 边界按上面的明确契约处理。
 
 ## 本批中 Rust 承担的职责
 

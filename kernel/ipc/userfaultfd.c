@@ -40,6 +40,7 @@
  */
 
 #define UFFD_EVENT_CAPACITY 256
+#define UFFD_USER_MODE_ONLY  0x1
 
 typedef struct userfaultfd {
     spinlock_t lock;
@@ -668,8 +669,16 @@ static vfile_ops_t g_userfaultfd_ops = {
 
 int userfaultfd_create_file(unsigned flags)
 {
-    if (flags & ~(O_CLOEXEC | O_NONBLOCK | 1)) /* 1 = UFFD_USER_MODE_ONLY */
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY))
         return -EINVAL;
+    /* Linux 5.11+ allows an unprivileged task to create a userfaultfd only
+     * when it restricts itself to user-mode faults; otherwise the call is
+     * privileged.  A20OS has no kernel-mode faulter path, so the flag changes
+     * no later behaviour -- it is the only way an unprivileged task can opt
+     * in, and refusing it would make the flag meaningless. */
+    if (!(flags & UFFD_USER_MODE_ONLY) &&
+        !proc_has_cap(proc_current(), CAP_SYS_PTRACE))
+        return -EPERM;
 
     userfaultfd_t *uffd = kmalloc(sizeof(*uffd));
     if (!uffd)
