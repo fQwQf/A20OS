@@ -215,3 +215,17 @@
 - freq100 linear20.34→index19.93MiB/s(-2.02%)；freq16384 44.71→55.51(+24.16%)但逐对-19.24/+27.60/+33.28%，不当成一致应用改善。Linux freq100控制也-28%，硬盘/宿主其它独立TCG任务影响明显。完整fileio-2026-10-22*和报告第13节已写。
 - 独立diag完成perf-fileio-diagnostic：两个窗口分别260/8次fsync，经过时间4.721/4.777秒（包含等待、非CPU占比），约25.8k块写回IO，42k/68k页，usedchecks/completion约6，bouncebytes0。窗口包含prepare/verify，不能全部归给RUN；暂未证实cache扫描而非同步小IO主导。源码blockcachepool实际2000页，位图等变化需先有阶段证据，暂不贸然改。
 - 当前本任务所有构建/性能进程结束。下一项可低风险缓存COW class：snapshot已有锁定table/level及VMA，而mm_fork_page_class还rootwalk且fallback再次VMA查找。需真实class/backing/huge测试后单项同参对照。UTC16:00截止，之后不开始新实验。
+
+## 2026-10-22 22:49 北京时间：COW cached class 候选正在复测
+
+- fileio工具/原始24样本/隔离控制/诊断已提交9dcecfe6，主线已验证内核仍cow-token adbc...。PTE-identical实验已拒绝并回退，默认构建曾还原到adbc且与还原前逐字节相同。
+- 当前C候选未提交：mm_fork_page_class直接使用snapshot已有locked table/level与已查到VMA，省一次root walk及缺元数据时的第二次VMA查找；有效class优先保留，fallback顺序不改，arm32无sidecar分支保持anon。Rust接口不变。
+- 真实C adapter测试现纳入实际class helper和pt.h宏，涵盖4KiB/huge、metadata有效class优先、invalid/PT_NODE→VMO/file-shared/file-private/anon/noVMA、每次恰一次VMA lookup，ASan/UBSan通过；Rust事务83checks通过。x86构建完成cow-class.elf b39f1b3938032422a73363ab9efc17e24393a2a8626f30d4dd40f7fdfa82050f。
+- **当前exec session90994**，日志cow-class-campaign.log：先4项COW guest回归，成功后cow-token/cow-class五对AB/BA/AB/BA/AB，沿用cow-token-config.json 9case共180样本，测项前关闭、要求测后0；输出perf-cow-class-regression和perf-cow-class-paired-*。期间不要编译或并行性能测试。
+- 截止UTC16:00（北京时间00:00）仍约1小时，当前只跑这一项；完成后按数据决定保留，归档原始数据/patch/rollback，别因剩余时间急于提交不确定改变。
+
+## 2026-10-22 23:05 北京时间：COW class 完成
+
+- session90994已结束，无本任务构建/测试残留。180性能样本全部成功，90guest状态0，4guest回归和Rust83/真实C ASanUBSan通过，包含非零VA不同level索引。
+- 保留已有table/level/VMA复用：64MiB总中位-1.97%四对下降，空brk-3.44%五对下降，stressfork+1.52%四对上升；16MiB mmap持平，稀疏brk+2.37%四对上升，明确不作普遍改善保证。报告第14节和cow-class-2026-10-22*已归档。
+- 接下来补离线perf差分工具，再最终完整APK回归。截止UTC16:00仍有效，不推送/合并/部署。
