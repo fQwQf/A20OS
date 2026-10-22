@@ -51,5 +51,10 @@ mcopy -o -i "$img" "$udir/rust-idl-peer-ack-$tag" "::/rust-idl-peer-ack-$tag"
 mcopy -o -i "$img" "$udir/rust-idl-adversary-$tag" "::/rust-idl-adversary-$tag"
 
 mkdir -p "$out"
-python3 "$root/tools/run-idl-ack-guest.py" --arch "$arch" \
+# The runner boots QEMU itself, so hold the same repository-wide activity (SH)
+# + qemu-1 (EX) leases as tools/smoke.py.  A busy slot exits 75, matching the
+# run-build.sh convention.
+flock -s "$common/parallel-rewrite/activity.lock" \
+    flock -E 75 -n "$common/parallel-rewrite/qemu-1.lock" \
+    python3 "$root/tools/run-idl-ack-guest.py" --arch "$arch" \
     --kernel "$kernel" --image "$img" --output "$out" --timeout 180
