@@ -27,7 +27,9 @@
 //! none allocates.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::AtomicU64;
 
 const NO_ADDR: u32 = 0xFFFF_FFFF;
 const NO_PORT: u16 = 0xFFFF;
@@ -139,7 +141,27 @@ fn zero_rule() -> FilterRule {
 }
 
 fn bump(counter: *mut u64, by: u64) {
-    unsafe { AtomicU64::from_ptr(counter).fetch_add(by, Ordering::Relaxed) };
+    #[cfg(target_has_atomic = "64")]
+    unsafe {
+        AtomicU64::from_ptr(counter).fetch_add(by, Ordering::Relaxed);
+    }
+    /* The hook path holds g_lwip_lock, so on profiles without 64-bit atomics a
+     * plain read-modify-write has the same publication discipline. */
+    #[cfg(not(target_has_atomic = "64"))]
+    unsafe {
+        *counter = (*counter).wrapping_add(by);
+    }
+}
+
+fn load_stat(p: *mut u64) -> u64 {
+    #[cfg(target_has_atomic = "64")]
+    {
+        unsafe { AtomicU64::from_ptr(p).load(Ordering::Relaxed) }
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        unsafe { *p }
+    }
 }
 
 fn stat_field(stats: *mut FilterStats, which: u32) -> *mut u64 {
@@ -425,8 +447,7 @@ pub unsafe extern "C" fn a20_netfilter_rule_stats(v: *const FilterView,
             /* Sum over both direction banks, exactly as the C accessor did:
              * an assignment would let the second bank's zeros overwrite the
              * first bank's counts. */
-            let v = unsafe { AtomicU64::from_ptr(stat_field(stats, which))
-                .load(Ordering::Relaxed) };
+            let v = load_stat(stat_field(stats, which));
             *slot = slot.wrapping_add(v);
         }
     }

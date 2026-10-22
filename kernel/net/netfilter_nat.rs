@@ -30,7 +30,34 @@
 //! the rule table, including same-direction retransmissions.
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::AtomicU64;
+
+/* riscv32/arm32 have no 64-bit atomics.  These counters are only touched with
+ * g_lwip_lock held, so a plain read-modify-write keeps the same publication
+ * discipline the C reference had. */
+fn load_stat(p: *mut u64) -> u64 {
+    #[cfg(target_has_atomic = "64")]
+    {
+        unsafe { AtomicU64::from_ptr(p).load(Ordering::Relaxed) }
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        unsafe { *p }
+    }
+}
+
+fn add_stat(p: *mut u64, by: u64) {
+    #[cfg(target_has_atomic = "64")]
+    unsafe {
+        AtomicU64::from_ptr(p).fetch_add(by, Ordering::Relaxed);
+    }
+    #[cfg(not(target_has_atomic = "64"))]
+    unsafe {
+        *p = (*p).wrapping_add(by);
+    }
+}
 
 /* ------------------------------------------------------------- constants */
 
@@ -641,10 +668,8 @@ pub unsafe extern "C" fn a20_netfilter_ct_get_stats(v: *const CtView,
         if s.is_null() {
             continue;
         }
-        stats.packets += unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*s).packets))
-            .load(Ordering::Relaxed) };
-        stats.bytes += unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*s).bytes))
-            .load(Ordering::Relaxed) };
+        stats.packets += load_stat(ptr::addr_of_mut!((*s).packets));
+        stats.bytes += load_stat(ptr::addr_of_mut!((*s).bytes));
     }
     let lifetime = unsafe { &*v.0.lifetime };
     stats.tracked = unsafe { *v.0.used as u64 };
@@ -780,12 +805,8 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(v: *const CtView,
 
     let st = v.0.dir_stats[if dir == DIR_IN { 0 } else { 1 }];
     if !st.is_null() {
-        unsafe {
-            AtomicU64::from_ptr(ptr::addr_of_mut!((*st).packets))
-                .fetch_add(1, Ordering::Relaxed);
-            AtomicU64::from_ptr(ptr::addr_of_mut!((*st).bytes))
-                .fetch_add(len as u64, Ordering::Relaxed);
-        }
+        add_stat(ptr::addr_of_mut!((*st).packets), 1);
+        add_stat(ptr::addr_of_mut!((*st).bytes), len as u64);
     }
 
     if let Some((idx, is_reverse)) =
@@ -795,10 +816,7 @@ pub unsafe extern "C" fn a20_netfilter_ct_process(v: *const CtView,
         let e = &mut entries[idx];
         e.last_ms = unsafe { ct_now(&v) };
         e.packets = e.packets.wrapping_add(1);
-        unsafe {
-            AtomicU64::from_ptr(ptr::addr_of_mut!(e.bytes))
-                .fetch_add(len as u64, Ordering::Relaxed);
-        }
+        add_stat(ptr::addr_of_mut!(e.bytes), len as u64);
         if is_reverse {
             e.state = CT_ESTABLISHED;
         } else if pkt.proto == PROTO_TCP && (pkt.tcp_flags & 0x10) != 0

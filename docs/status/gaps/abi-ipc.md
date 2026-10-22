@@ -72,3 +72,9 @@
 - 缺口：task 状态的持有方式偏离既定边界，门禁为红。
 - 关闭条件：断言在候选上通过，或按当前契约改写断言并有依据。
 - 来源：同上。
+### ABI-11 arm32 用户态在 fork 出的命令返回后崩溃
+
+- 现状：`ARCH=arm32 ABI=both BRINGUP=0` 的镜像能启动到 shell，内建命令（`echo`）正常；执行任何 fork 出去的命令（`/bin/echo`、`poweroff`）时子进程正常输出，随后父进程 mksh 在 `execute()` 里以空指针崩溃：`SIGSEGV ... sepc=0x23a3c stval=0x17`，指令是 `ldrb r3,[r9,#22]`，r9=0。此行为在本轮合并前后同样复现（同一镜像、同一输入），不是合并引入。BRINGUP=1 的内核镜像不受影响，能 `part ok` 并干净关机。
+- 缺口：arm32 上子进程退出后的等待/信号返回路径会让 mksh 走到一个空指针；用户态镜像因此无法完成任何真正的命令，也无法干净关机。
+- 关闭条件：arm32 用户态镜像里 `/bin/echo` 连续执行两次后 mksh 仍存活，且 `poweroff` 能触发 `System is going down for power-off NOW`。
+- 来源：CORE 包在合并后重跑 `smoke-arch-mmu-matrix` 的 arm32 用例时暴露；崩溃现场见 QEMU 日志（内核 `SIGSEGV: pid=6 ... comm=mksh`）。

@@ -281,7 +281,7 @@ void netfilter_format(char *buf, size_t bufsz)
 static net_filter_view_t g_filter_view = {
     .rules = g_rules,
     .max = NETFILTER_MAX_RULES,
-    .count = &g_rule_count,
+    .count = (uint32_t *)&g_rule_count,
     .stats_in = &g_stats[0].stats,
     .stats_out = &g_stats[1].stats,
 };

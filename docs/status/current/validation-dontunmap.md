@@ -114,8 +114,8 @@ RSS 没有增长，因此一条绿灯不可能来自“线程从未真正相撞�
 ## 覆盖范围与未覆盖项
 
 RV64 Linux 是主线（`smoke-mm-*` 默认档，含 SMP2 与 SMP8 变体）；aarch64 覆盖共享写冷启动与
-`ABI=both` 的 DONTUNMAP 聚焦用例。仍开放：32 位内核 bring-up（`kernel/mm/**` 已经全部编译通过，
-剩余失败在 proc/net/fs，见 [mm.md](../gaps/mm.md) MM-05）、并发 VMO ref/attach/final-release 压力、
-以及忠实的 C 性能对照。QEMU 结果不构成真机验证。
+`ABI=both` 的 DONTUNMAP 聚焦用例。32 位内核 bring-up 已经通过（riscv32/arm32 的 `check-*-bringup` 与 QEMU 启动、自然关机）。
+仍开放：arm32 用户态镜像 fork 后的 mksh 崩溃（[ABI-11](../gaps/abi-ipc.md)）、并发 VMO
+ref/attach/final-release 压力、以及忠实的 C 性能对照。QEMU 结果不构成真机验证。
 
 单一 `MM_STRESS` 绿灯不等于 MM 完成：上面每一条结论都只对应它自己那条门禁的断言。
