@@ -281,6 +281,7 @@ unsafe extern "C" {
                                    gw: *const u8) -> i32;
     fn a20_net_netlink_if_set_addr6(ifindex: u32, addr: *const u8,
                                     prefixlen: u8) -> i32;
+    fn a20_net_netlink_if_del_addr6(ifindex: u32, addr: *const u8) -> i32;
     fn a20_net_netlink_loopback_mtu(ns: *mut c_void, value: u32, set: i32) -> u32;
     fn a20_net_netlink_loopback_up(ns: *mut c_void, value: u32, set: i32) -> u32;
     fn a20_net_netlink_klog_uevent(action: *const i8, subsystem: *const i8,
@@ -1103,9 +1104,12 @@ unsafe fn apply_newlink(ns: *mut c_void, ifi: &IfInfoMsg, attrs: &[u8]) -> i32 {
 }
 
 unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
-    if msg_type != RTM_NEWADDR {
-        return -EOPNOTSUPP; /* no IPv6 delete in this tree */
+    if msg_type != RTM_NEWADDR && msg_type != RTM_DELADDR {
+        return -EOPNOTSUPP;
     }
+    /* Only the family-independent fields are used for a delete; the prefix
+     * length is not stored per address, so the event carries 0 just like the
+     * IPv4 delete path. */
     if ifa.index == 0 {
         return -EINVAL;
     }
@@ -1142,6 +1146,9 @@ unsafe fn apply_addr6(msg_type: u16, ifa: &IfAddrMsg, attrs: &[u8]) -> i32 {
         return -EINVAL;
     }
     let want = if have_local { &local } else { &address };
+    if msg_type == RTM_DELADDR {
+        return a20_net_netlink_if_del_addr6(ifa.index, want.as_ptr());
+    }
     a20_net_netlink_if_set_addr6(ifa.index, want.as_ptr(), ifa.prefixlen)
 }
 
@@ -1505,7 +1512,8 @@ pub unsafe extern "C" fn a20_net_netlink_addr_notify(ifindex: u32, addr: *const 
 #[no_mangle]
 pub unsafe extern "C" fn a20_net_netlink_addr6_notify(ifindex: u32,
                                                       addr: *const u8,
-                                                      prefixlen: u8) {
+                                                      prefixlen: u8,
+                                                      msg_type: u16) {
     if addr.is_null() {
         return;
     }
@@ -1525,7 +1533,7 @@ pub unsafe extern "C" fn a20_net_netlink_addr6_notify(ifindex: u32,
     let Some(e) = found else { return };
     let mut msg = MsgBuf::new();
     let total = build_addrmsg6(&mut msg.0, e.index, &a16, prefixlen,
-                               name_bytes(e), e.loopback, RTM_NEWADDR, 0,
+                               name_bytes(e), e.loopback, msg_type, 0,
                                nlrt_next_seq());
     if total == 0 {
         return;
@@ -1607,6 +1615,7 @@ mod tests {
     static mut T_SET_FLAGS: i32 = 0;
     static mut T_SET_ADDR: i32 = 0;
     static mut T_SET_ADDR6: i32 = 0;
+    static mut T_DEL_ADDR6: i32 = 0;
     static mut T_GET_ADDR_IP: [u8; 4] = [0; 4];
     static mut T_GET_ADDR_RC: i32 = 0;
     static mut T_LOOP_MTU: u32 = 65536;
@@ -1670,6 +1679,7 @@ mod tests {
         T_SET_FLAGS = 0;
         T_SET_ADDR = 0;
         T_SET_ADDR6 = 0;
+        T_DEL_ADDR6 = 0;
         T_GET_ADDR_IP = [0; 4];
         T_GET_ADDR_RC = 0;
         T_LOOP_MTU = 65536;
@@ -1846,6 +1856,11 @@ mod tests {
     unsafe extern "C" fn a20_net_netlink_if_set_addr6(_i: u32, _a: *const u8,
                                                       _p: u8) -> i32 {
         T_SET_ADDR6 += 1;
+        0
+    }
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_netlink_if_del_addr6(_i: u32, _a: *const u8) -> i32 {
+        T_DEL_ADDR6 += 1;
         0
     }
     #[no_mangle]
@@ -2438,7 +2453,7 @@ mod tests {
     }
 
     #[test]
-    fn addr6_is_add_only_and_validates_its_prefix() {
+    fn addr6_add_delete_and_prefix_validation() {
         unsafe {
             let _serial = serial();
             reset();
@@ -2456,11 +2471,12 @@ mod tests {
                                                      0), 0);
             assert_eq!(T_SET_ADDR6, 1);
 
-            /* A delete is refused: the writer is add-only. */
+            /* A delete reaches the same parser and the delete primitive. */
             let del = route_req(RTM_DELADDR, 0, &body[..28]);
             assert_eq!(a20_net_netlink_route_request(s as *mut c_void, del.as_ptr() as *const c_void,
                                                      del.len() as usize, ptr::null(),
-                                                     0), -EOPNOTSUPP);
+                                                     0), 0);
+            assert_eq!(T_DEL_ADDR6, 1);
 
             /* A prefix over 128. */
             body[1] = 129;
@@ -2660,14 +2676,29 @@ mod tests {
             let hdr = &*(T_ENQ_BYTES.0.as_ptr() as *const NlMsghdr);
             assert_eq!(hdr.msg_type, RTM_DELADDR);
 
-            /* A new IPv6 address goes to its own group only. */
+            /* IPv6 events go only to a socket bound to the v6 group. */
+            let mut b = Sock::new();
+            b.protocol = NETLINK_ROUTE;
+            b.bound = 1;
+            set_local(&mut b, 6, RTNLGRP_IPV6_IFADDR);
+            S_SLOTS[1] = &mut b;
+
             let a16 = [0u8; 16];
-            a20_net_netlink_addr6_notify(2, a16.as_ptr(), 64);
-            assert_eq!(T_ENQ_CALLS, 2); /* the v4 group does not include v6 */
+            a20_net_netlink_addr6_notify(2, a16.as_ptr(), 64, RTM_NEWADDR);
+            assert_eq!(T_ENQ_CALLS, 3); /* only the new v6-group socket gets it */
+            assert_eq!((*(T_ENQ_BYTES.0.as_ptr() as *const NlMsghdr)).msg_type,
+                       RTM_NEWADDR);
+
+            /* A deleted IPv6 address is published as RTM_DELADDR. */
+            a20_net_netlink_addr6_notify(2, a16.as_ptr(), 0, RTM_DELADDR);
+            assert_eq!(T_ENQ_CALLS, 4);
+            assert_eq!((*(T_ENQ_BYTES.0.as_ptr() as *const NlMsghdr)).msg_type,
+                       RTM_DELADDR);
+            S_SLOTS[1] = ptr::null_mut();
 
             /* An interface not in the snapshot publishes nothing. */
             a20_net_netlink_addr_notify(9, zero.as_ptr(), zero.as_ptr());
-            assert_eq!(T_ENQ_CALLS, 2);
+            assert_eq!(T_ENQ_CALLS, 4);
         }
     }
 

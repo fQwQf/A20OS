@@ -1062,7 +1062,12 @@ tcp_recved(struct tcp_pcb *pcb, u16_t len)
   {
     tcpwnd_size_t wnd_max = TCP_WND_MAX(pcb);
     if (pcb->wnd_limit && pcb->wnd_limit < wnd_max) {
-      wnd_max = pcb->wnd_limit;
+      /* A20OS: a ceiling may only stop the window from reopening.  Shrinking
+       * below the window already advertised drops data the peer was told it
+       * could send; the socket layer caps a fresh connection before its SYN
+       * instead. */
+      wnd_max = (pcb->wnd_limit > pcb->rcv_wnd) ? pcb->wnd_limit
+                                                : pcb->rcv_wnd;
     }
     rcv_wnd = (tcpwnd_size_t)(pcb->rcv_wnd + len);
     if ((rcv_wnd > wnd_max) || (rcv_wnd < pcb->rcv_wnd)) {

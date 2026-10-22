@@ -347,6 +347,11 @@ int a20_net_netlink_if_set_addr6(uint32_t ifindex, const uint8_t *addr,
     return a20_lwip_if_set_addr6((unsigned)ifindex, addr, prefixlen);
 }
 
+int a20_net_netlink_if_del_addr6(uint32_t ifindex, const uint8_t *addr)
+{
+    return a20_lwip_if_del_addr6((unsigned)ifindex, addr);
+}
+
 uint32_t a20_net_netlink_loopback_mtu(void *ns, uint32_t value, int set)
 {
     resource_namespace_t *r = (resource_namespace_t *)ns;
@@ -419,8 +424,8 @@ void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
 }
 
 void net_netlink_addr6_notify(unsigned ifindex, const uint8_t addr[16],
-                              uint8_t prefixlen)
+                              uint8_t prefixlen, uint16_t msg_type)
 {
-    a20_net_netlink_addr6_notify(ifindex, addr, prefixlen);
+    a20_net_netlink_addr6_notify(ifindex, addr, prefixlen, msg_type);
 }
 

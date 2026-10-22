@@ -24,8 +24,14 @@ const ENODEV: i32 = 19;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
 const EOPNOTSUPP: i32 = 95;
+const EADDRNOTAVAIL: i32 = 99;
 
 const A20_LWIP_IF_F_UP: u32 = 0x1;
+
+/* rtnetlink message numbers, restated because this module does not include the
+ * netlink parser.  They are part of the wire ABI and must not drift. */
+const RTM_NEWADDR: u16 = 20;
+const RTM_DELADDR: u16 = 21;
 const MAX_LINKS: usize = 32;
 
 /// `nlrt_link_event_t`, filled by the collect primitive.
@@ -59,6 +65,7 @@ unsafe extern "C" {
     fn a20_lwip_stack_get_mask(n: *mut c_void, out: *mut u8);
     fn a20_lwip_stack_get_gw(n: *mut c_void, out: *mut u8);
     fn a20_lwip_stack_add_ip6(n: *mut c_void, addr: *const u8) -> i32;
+    fn a20_lwip_stack_del_ip6(n: *mut c_void, addr: *const u8) -> i32;
     fn a20_lwip_stack_set_mtu(n: *mut c_void, mtu: u16);
     fn a20_lwip_stack_set_up(n: *mut c_void, up: i32);
     fn a20_lwip_stack_frame_size() -> i32;
@@ -70,7 +77,8 @@ unsafe extern "C" {
     fn a20_lwip_stack_collect_link_events(out: *mut c_void, max: i32) -> i32;
     fn a20_lwip_stack_notify_link_events(events: *const c_void, n: i32);
     fn a20_lwip_stack_notify_addr(ifindex: u32, addr: *const u8, mask: *const u8);
-    fn a20_lwip_stack_notify_addr6(ifindex: u32, addr: *const u8, prefixlen: u8);
+    fn a20_lwip_stack_notify_addr6(ifindex: u32, addr: *const u8, prefixlen: u8,
+                                   msg_type: u16);
     fn a20_lwip_stack_netif_sendable(n: *mut c_void) -> i32;
     fn a20_lwip_stack_device_send(n: *mut c_void, frame: *const u8, len: usize) -> i32;
 }
@@ -251,7 +259,8 @@ pub unsafe extern "C" fn a20_lwip_if_get_addr(ifindex: u32, addr: *mut u8,
 
 /// Add one IPv6 address, promoted straight to VALID: the address came from an
 /// explicit administrative request, not from a router advertisement, so no DAD
-/// runs.  Add-only, matching the lwIP capability.
+/// runs.  This is the DAD contract for the write path; see
+/// docs/net/network-config-design.md.
 #[no_mangle]
 pub unsafe extern "C" fn a20_lwip_if_set_addr6(ifindex: u32, addr: *const u8,
                                               prefixlen: u8) -> i32 {
@@ -281,7 +290,37 @@ pub unsafe extern "C" fn a20_lwip_if_set_addr6(ifindex: u32, addr: *const u8,
         return -ENOSPC;
     }
     a20_lwip_stack_unlock(flags);
-    a20_lwip_stack_notify_addr6(ifindex, want.as_ptr(), prefixlen);
+    a20_lwip_stack_notify_addr6(ifindex, want.as_ptr(), prefixlen, RTM_NEWADDR);
+    0
+}
+
+/// Delete one administratively added IPv6 address.  The event is a DELADDR and
+/// carries no prefix length, matching the IPv4 delete convention: this tree
+/// does not store a per-address prefix, and the socket cannot discover one.
+#[no_mangle]
+pub unsafe extern "C" fn a20_lwip_if_del_addr6(ifindex: u32,
+                                               addr: *const u8) -> i32 {
+    if addr.is_null() {
+        return -EINVAL;
+    }
+    let mut want = [0u8; 16];
+    ptr::copy_nonoverlapping(addr, want.as_mut_ptr(), 16);
+    if want.iter().all(|b| *b == 0) {
+        return -EINVAL;
+    }
+    let mut flags = 0u64;
+    a20_lwip_stack_lock(&mut flags);
+    let n = a20_lwip_stack_netif_by_index(ifindex);
+    if n.is_null() {
+        a20_lwip_stack_unlock(flags);
+        return -ENODEV;
+    }
+    let e = a20_lwip_stack_del_ip6(n, want.as_ptr());
+    a20_lwip_stack_unlock(flags);
+    if e < 0 {
+        return -EADDRNOTAVAIL;
+    }
+    a20_lwip_stack_notify_addr6(ifindex, want.as_ptr(), 0, RTM_DELADDR);
     0
 }
 
@@ -417,6 +456,9 @@ mod tests {
     static mut T_NOTIFY_MASK_BYTES: [u8; 4] = [0; 4];
     static mut T_NOTIFY_ADDR6: i32 = 0;
     static mut T_NOTIFY_ADDR6_PLEN: u8 = 0;
+    static mut T_NOTIFY_ADDR6_TYPE: i32 = 0;
+    static mut T_DEL6: i32 = 0;
+    static mut T_DEL6_RC: i32 = 0;
     static mut T_ADD6: i32 = 0;
     static mut T_ADD6_RC: i32 = 0;
     static mut T_SET_IP: i32 = 0;
@@ -474,6 +516,9 @@ mod tests {
         T_NOTIFY_MASK_BYTES = [0; 4];
         T_NOTIFY_ADDR6 = 0;
         T_NOTIFY_ADDR6_PLEN = 0;
+        T_NOTIFY_ADDR6_TYPE = 0;
+        T_DEL6 = 0;
+        T_DEL6_RC = 0;
         T_ADD6 = 0;
         T_ADD6_RC = 0;
         T_SET_IP = 0;
@@ -561,6 +606,11 @@ mod tests {
         T_ADD6_RC
     }
     #[no_mangle]
+    unsafe extern "C" fn a20_lwip_stack_del_ip6(_np: *mut c_void, _a: *const u8) -> i32 {
+        T_DEL6 += 1;
+        T_DEL6_RC
+    }
+    #[no_mangle]
     unsafe extern "C" fn a20_lwip_stack_set_mtu(np: *mut c_void, mtu: u16) {
         T_SET_MTU += 1;
         (*(np as *mut Netif)).mtu = mtu;
@@ -626,9 +676,10 @@ mod tests {
     }
     #[no_mangle]
     unsafe extern "C" fn a20_lwip_stack_notify_addr6(_i: u32, _a: *const u8,
-                                                     plen: u8) {
+                                                     plen: u8, msg_type: u16) {
         T_NOTIFY_ADDR6 += 1;
         T_NOTIFY_ADDR6_PLEN = plen;
+        T_NOTIFY_ADDR6_TYPE = msg_type as i32;
     }
     #[no_mangle]
     unsafe extern "C" fn a20_lwip_stack_netif_sendable(np: *mut c_void) -> i32 {
@@ -806,6 +857,7 @@ mod tests {
             assert_eq!(a20_lwip_if_set_addr6(2, a16.as_ptr(), 64), 0);
             assert_eq!(T_ADD6, 1);
             assert_eq!((T_NOTIFY_ADDR6, T_NOTIFY_ADDR6_PLEN), (1, 64));
+            assert_eq!(T_NOTIFY_ADDR6_TYPE, RTM_NEWADDR as i32);
 
             /* All-zero is refused. */
             let zero = [0u8; 16];
@@ -818,6 +870,19 @@ mod tests {
             assert_eq!(T_NOTIFY_ADDR6, 1);
             /* Unknown interface. */
             assert_eq!(a20_lwip_if_set_addr6(9, a16.as_ptr(), 64), -ENODEV);
+
+            /* Delete: present -> DELADDR event, absent -> EADDRNOTAVAIL. */
+            reset();
+            assert_eq!(a20_lwip_if_del_addr6(2, a16.as_ptr()), 0);
+            assert_eq!(T_DEL6, 1);
+            assert_eq!((T_NOTIFY_ADDR6, T_NOTIFY_ADDR6_TYPE), (1, RTM_DELADDR as i32));
+            assert_eq!(T_NOTIFY_ADDR6_PLEN, 0);
+            T_DEL6_RC = -1;
+            assert_eq!(a20_lwip_if_del_addr6(2, a16.as_ptr()), -EADDRNOTAVAIL);
+            assert_eq!(a20_lwip_if_del_addr6(9, a16.as_ptr()), -ENODEV);
+            assert_eq!(a20_lwip_if_del_addr6(2, ptr::null()), -EINVAL);
+            let zero = [0u8; 16];
+            assert_eq!(a20_lwip_if_del_addr6(2, zero.as_ptr()), -EINVAL);
         }
     }
 

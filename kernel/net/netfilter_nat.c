@@ -103,9 +103,9 @@ static net_conntrack_entry_t g_ct[NET_CONNTRACK_MAX];
 static uint16_t
     g_ct_head[NET_CONNTRACK_BUCKETS]; /* NET_CONNTRACK_NONE = empty */
 static uint16_t g_ct_rhead[NET_CONNTRACK_BUCKETS]; /* reply-direction chain */
-static unsigned g_ct_used;
-static unsigned g_ct_sweep; /* sweeper resume point */
-static int g_ct_enabled = 1;
+static uint32_t g_ct_used;
+static uint32_t g_ct_sweep; /* sweeper resume point */
+static int32_t g_ct_enabled = 1;
 
 /*
  * NAT table storage.  Shared by both implementations: the Rust state machine
@@ -113,7 +113,7 @@ static int g_ct_enabled = 1;
  * directly, and the /proc renderer reads it either way.
  */
 static net_nat_rule_t g_nat[NETFILTER_MAX_NAT_RULES];
-static unsigned g_nat_count;
+static uint32_t g_nat_count;
 static seqlock_t g_nat_seq = SEQLOCK_INIT;
 
 #if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
@@ -133,7 +133,7 @@ _Static_assert(sizeof(g_ct) + sizeof(g_nat) <= NET_PROFILE_FILTER_BUDGET,
 #endif
 
 static net_conntrack_stats_t g_ct_lifetime;
-static unsigned g_ct_sweeps;
+static uint32_t g_ct_sweeps;
 
 #define NET_CT_STATS_STRIDE 128
 
@@ -178,7 +178,7 @@ static net_conntrack_stats_bank_t g_ct_dir_stats[2];
  * every reader here already holds.
  */
 static uint32_t g_to_ticks[3]; /* TCP new, TCP established, UDP */
-static int g_time_ready;
+static int32_t g_time_ready;
 
 /*
  * Runtime overrides for the three millisecond constants, 0 = use the compiled-in
@@ -236,9 +236,9 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off) {
     NETFILTER_EMIT("ct_evicted: %llu\n", (unsigned long long)cs.evicted);
     NETFILTER_EMIT("ct_timeout: %llu\n", (unsigned long long)cs.timeout);
     NETFILTER_EMIT("ct_lru_victim: %d\n", netfilter_conntrack_lru_victim());
-    NETFILTER_EMIT("ct_sweeps: %u\n", netfilter_conntrack_sweeps());
+    NETFILTER_EMIT("ct_sweeps: %u\n", (unsigned)netfilter_conntrack_sweeps());
     NETFILTER_EMIT("ct_packets: %llu\n", (unsigned long long)cs.packets);
-    NETFILTER_EMIT("nat_rules: %u\n", g_nat_count);
+    NETFILTER_EMIT("nat_rules: %u\n", (unsigned)g_nat_count);
 
     for (unsigned i = 0; i < g_nat_count && off < bufsz; i++) {
         const net_nat_rule_t *r = &g_nat[i];
