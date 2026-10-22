@@ -36,7 +36,7 @@
  * travel with it: left outside, a NOMMU build has a static declaration and no
  * definition, which -Werror calls an unused function. */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-static int pt_table_empty(pte_t *table, int level);
+static int pt_table_empty(pte_t *table, int level, int cleared_idx);
 #endif
 
 /* Huge-leaf installs through pt_map_huge (THP fault, fork clone, mremap
@@ -473,7 +473,7 @@ int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
         int idx1 = arch_pt_vpn(va, 1);
         mm_pt_node_lock(table);
         mm_pt_node_lock(l0);
-        if (!pt_table_empty(l0, 0)) {
+        if (!pt_table_empty(l0, 0, -1)) {
             mm_pt_node_unlock(l0);
             mm_pt_node_unlock(table);
             return -EEXIST;
@@ -513,14 +513,28 @@ int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
 #endif
 }
 
-static int pt_table_empty(pte_t *table, int level) {
-    int entries = arch_pt_level_entries(level);
-    for (int i = 0; i < entries; i++) {
-        if ((table[i] & PTE_V)
+static int pt_entry_mapped(pte_t entry) {
+    return (entry & PTE_V)
 #ifdef CONFIG_SWAP
-            || pte_is_swap(table[i])
+        || pte_is_swap(entry)
 #endif
-        )
+        ;
+}
+
+static int pt_table_empty(pte_t *table, int level, int cleared_idx) {
+    int entries = arch_pt_level_entries(level);
+    /* Sequential teardown normally leaves the next slot populated.  Check
+     * its neighbours first, rather than rescanning an ever-longer cleared
+     * prefix for every page.  These are only early nonempty answers: sparse
+     * tables and the last leaf still get the full scan before retirement. */
+    if (cleared_idx >= 0 && cleared_idx < entries) {
+        if (cleared_idx + 1 < entries && pt_entry_mapped(table[cleared_idx + 1]))
+            return 0;
+        if (cleared_idx > 0 && pt_entry_mapped(table[cleared_idx - 1]))
+            return 0;
+    }
+    for (int i = 0; i < entries; i++) {
+        if (pt_entry_mapped(table[i]))
             return 0;
     }
     return 1;
@@ -564,7 +578,7 @@ int pt_unmap(mm_struct_t *mm, vaddr_t va) {
          * entry into child between the two and lose it.  parent, not child --
          * see mm_pt_node_lock() on the ordering. */
         mm_pt_node_lock(parent);
-        if (!pt_table_empty(child, level)) {
+        if (!pt_table_empty(child, level, idx_path[level])) {
             mm_pt_node_unlock(parent);
             break;
         }
@@ -633,7 +647,7 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
                 pte_t *parent = path[l + 1];
                 /* Test and clear in one critical section -- see pt_unmap(). */
                 mm_pt_node_lock(parent);
-                if (!pt_table_empty(child, l)) {
+                if (!pt_table_empty(child, l, idx_path[l])) {
                     mm_pt_node_unlock(parent);
                     break;
                 }
