@@ -9,26 +9,12 @@
 - 关闭条件：选一个完整驱动，probe/data/IRQ/DMA/removal 在两种模式下逐项一致，含越权 DMA 拒绝与清理。
 - 来源：requirements N05。
 
-### DRIVER-02 注册表失败路径的架构覆盖
-
-- 现状：RV64 单 hart 上 driver/device/bus 注册表增长失败已注入验证。
-- 缺口：其他架构与 SMP 没有同等覆盖。
-- 关闭条件：适用架构/SMP 上三条增长失败路径都通过，资源计数恢复。
-- 来源：[current/v1.0-progress.md](../current/v1.0-progress.md) 优先级表第 6 项。
-
 ### DRIVER-03 MSI / MSI-X 的剩余能力
 
 - 现状：x86_64 的 MSI-X 能力解析、LAPIC 编程与 virtio/e1000e 接入已有；MSI（能力 0x05）全树未使用。
 - 缺口：只带 MSI 的设备（AHCI/NVMe/xHCI/rtl8139）只能走 INTx 或轮询；非 x86 的 MSI-X 与 per-queue 亲和性未实现。
 - 关闭条件：MSI 路径可用并按 MSI → MSI-X → INTx → 轮询降级；非 x86 有实现或明确的每设备类回退。
 - 来源：requirements N10–N12、[current/server-readiness.md](../current/server-readiness.md) §八。
-
-### DRIVER-04 e1000e MSI-X 的数据面
-
-- 现状：向量表解析与武装有实现；没有证明向量真的承载包流量。
-- 缺口：收发路径与 queue/vector 计数未独立核对。
-- 关闭条件：收发数据包时 queue/vector 计数增长，拆除干净。
-- 来源：requirements N12。
 
 ### DRIVER-05 USB 生命周期
 
