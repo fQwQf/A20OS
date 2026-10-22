@@ -40,9 +40,8 @@ const ENOMEM: i32 = -12;
 
 const PFN_NONE: u32 = u32::MAX;
 
-/// Everything the transaction needs to know about a source leaf.  Filled by
-/// the C probe; `kind` records which reference the share snapshot took so the
-/// failure path can give back exactly that one.
+/// Unlocked source-leaf probe. Kept separate from the pinned share snapshot:
+/// a probe alone does not own either a frame reference or a node lock.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Src {
@@ -62,6 +61,29 @@ struct Src {
     class: u32,
     kind: i32,
 }
+
+/// Pinned leaf and the exact node lock acquired by the C snapshot step.
+/// Unlike the unlocked probe, these pointers stay valid under parent->lock
+/// until the transaction explicitly drops the node lock before mapping child.
+#[repr(C)]
+#[derive(Default)]
+struct SharedSnapshot {
+    pcp: *mut c_void,
+    slot: *mut c_void,
+    node: *mut c_void,
+    pa: usize,
+    raw_flags: usize,
+    cow_flags: usize,
+    pfn: u32,
+    w_or_cow: i32,
+    class: u32,
+    kind: i32,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 64] = [(); core::mem::size_of::<SharedSnapshot>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 40] = [(); core::mem::size_of::<SharedSnapshot>()];
 
 #[cfg(target_pointer_width = "64")]
 const _: [(); 88] = [(); core::mem::size_of::<Src>()];
@@ -92,18 +114,17 @@ unsafe extern "C" {
         parent: *mut c_void,
         va: usize,
         level: i32,
-        out: *mut Src,
+        out: *mut SharedSnapshot,
     ) -> i32;
     fn a20_cow_share_downgrade(
         parent: *mut c_void,
         va: usize,
         level: i32,
-        pa: usize,
+        snapshot: *const SharedSnapshot,
         flags: usize,
-        class: u32,
     );
-    fn a20_cow_share_unlock(parent: *mut c_void, va: usize);
-    fn a20_cow_release_ref(src: *const Src);
+    fn a20_cow_share_unlock(snapshot: *const SharedSnapshot);
+    fn a20_cow_release_ref(src: *const SharedSnapshot);
 }
 
 /// Clone one present leaf.  `level` is the leaf's page-table level, so a huge
@@ -147,17 +168,17 @@ unsafe fn clone_leaf(
 
     // Share.  The snapshot pins the leaf's reference while the node lock is
     // held, so the frame cannot be freed by a racing COW before it is ours.
-    let mut snap = Src::default();
+    let mut snap = SharedSnapshot::default();
     if unsafe { a20_cow_share_snapshot(parent, va, level, &mut snap) } == 0 {
         return 0; // the leaf vanished or is no longer a leaf
     }
     let flags = if shared != 0 { snap.raw_flags } else { snap.cow_flags };
     if shared == 0 && snap.w_or_cow != 0 {
         unsafe {
-            a20_cow_share_downgrade(parent, va, level, snap.pa, flags, snap.class)
+            a20_cow_share_downgrade(parent, va, level, &snap, flags)
         };
     }
-    unsafe { a20_cow_share_unlock(parent, va) };
+    unsafe { a20_cow_share_unlock(&snap) };
 
     let r = unsafe { a20_cow_map_child(child, va, snap.pfn, flags, snap.class, level) };
     if r < 0 {

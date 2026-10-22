@@ -180,3 +180,17 @@
 - 诊断候选最终全套APK对照84/84完成；新版21个guest测项计数审计全0，全部输入hash未变。原始/失败初探/host/六项guest及全套APK归档procfs-diag-2026-10-22*，报告第10节完整。
 - 当前新内核对Linux中位：CPU1/2t约1.006/1.007、memory-write0.867、共享锁0.297、fork0.151、SHA0.890。SysV1.068但时钟/调度语义及范围影响仍需保留，不能称全系统领先。前后CPU控制也有7%-9%逐对差异，宿主其它独立KVM/TCG实验仍存在，不把内存/密码学的宽范围吞吐差异归因于本补丁。
 - 诊断候选准备提交；所有本任务性能/构建进程已结束。下一步沿当前c4e776...内核作为冻结baseline，检查dense COW share snapshot/downgrade/unlock重复PT root walks。若尝试，保持父锁/引用固定/锁token一致、失败回滚及同参数实测，不复活先前无一致收益的probe-only试验。
+
+## 2026-10-22 21:59 北京时间：COW 节点 token 候选正在复测
+
+- 诊断修复已提交e98aea06，frozen baseline为procfs-diag-v2.elf c4e776...，之前所有84APK及新状态审计原始证据已提交。
+- COW候选：将unlocked Src probe与64B SharedSnapshot区分，snapshot携带确切slot/node，downgrade/status/unlock复用这些指针，避免3次root walk。初次probe/节点锁内重读+引用固定不改，不是复活之前被拒绝的probe-only改动。Rust SharedSnapshot不Copy，C/RS ABI断言64B(LP64)/40B(ILP32)，普通probe ABI保留。
+- host Rust事务83checks通过，检查child map发生在unlock之后、失败只释放正确pin。新增真实C adapter ASan/UBSan测试通过：原slot/node身份、巨大页状态、匿名frame/cache pin/VMO无frame引用、leaf消失释放锁；fixture首次变量名puts冲突编译失败已保留，修正后PASS。checked range双swap各20万回归通过。只构建x86。
+- kernel保存cow-token.elf adbcbbdf0e203c163790490a50dca77a769cb22391f06ca2352f4a2f63fee8f3，尚未提交候选。
+- **当前exec session74336**，日志cow-token-campaign.log：先MM/process-vm-exec-COW/TLB teardown/swap四项guest，成功后baseline/cow-token五对AB/BA/AB/BA/AB，配置cow-token-config.json，9case（getpid首尾、最小fork、3种brk、mmap touched16/64、stress fork），共180性能样本。新runner明确关闭+测后审计，要求guest状态全0；期间不要编译或并行性能。输出perf-cow-token-regression与perf-cow-token-paired-*。
+- 下一项可审查重复fork对already-COW叶项是否做无意义相同PTE写/状态刷新/TLB note；mm_cow_flags会清D，要先确保等价比较和状态一致性，不直接跳过COW标记页。先完成当前单项ablation。
+
+## 2026-10-22 22:07 北京时间
+
+- COW token完整180样本完成，90guest状态全0、base unchanged。64MiB总16.1586→15.8014ms(-2.21%)五对同向；父fork阶段9.3265→8.6593ms(-7.15%)五对同向，wait+6.62%抵消部分。stress fork605.21→644.21(+6.44%)五对同向。首末getpid控制-3.45%/+3.18%，保留对收益精度的限制，详见报告第11节。
+- cow-token-2026-10-22*已归档，准备提交节点复用作为独立回退点。接下来单独试验downgrade仅在编码后PTE不同才写并note TLB，状态sync始终保留，不能直接按COW位跳过，因为mm_cow_flags会清D。该实验尚未写代码，先保留当前snapshot/锁顺序。

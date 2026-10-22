@@ -163,6 +163,24 @@ _Static_assert(sizeof(struct a20_cow_src) == 88, "Rust/C cow src ABI");
 _Static_assert(sizeof(struct a20_cow_src) == 60, "Rust/C cow src ABI");
 #endif
 
+/* The pinned share transaction carries the exact slot and locked table;
+ * downgrade/status/unlock must not walk from the root again to rediscover
+ * these. parent->lock keeps their topology/lifetime stable throughout. */
+struct a20_cow_shared_snapshot {
+    void *pcp;
+    pte_t *slot;
+    pte_t *node;
+    uintptr_t pa;
+    uintptr_t raw_flags;
+    uintptr_t cow_flags;
+    uint32_t pfn;
+    int32_t w_or_cow;
+    uint32_t class;
+    int32_t kind;
+};
+_Static_assert(sizeof(struct a20_cow_shared_snapshot) ==
+               6 * sizeof(uintptr_t) + 16, "Rust/C cow shared snapshot ABI");
+
 uint64_t a20_cow_policy_flags(const void *parent_ptr, uintptr_t va, int *present)
 {
     const mm_struct_t *parent = parent_ptr;
@@ -279,7 +297,7 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
  * neither: there is no separate node lock to take (the whole clone runs under
  * parent->lock, see mm_fork()) and no status byte to keep in step. */
 int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
-                           struct a20_cow_src *out)
+                           struct a20_cow_shared_snapshot *out)
 {
     mm_struct_t *parent = parent_ptr;
     if (!out)
@@ -289,8 +307,9 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
     if (!src_pte)
         return 0;
+    pte_t *stab = NULL;
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+    stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         mm_pt_node_lock(stab);
 #endif
@@ -310,7 +329,8 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
         is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
     if (!pcp && !is_vmo)
         frame_get(pfn);
-    out->pte = (uintptr_t)source;
+    out->slot = src_pte;
+    out->node = stab;
     out->pa = arch_pte_addr(source);
     out->pfn = pfn;
     out->raw_flags = arch_pte_flags(source);
@@ -319,17 +339,19 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     out->class = cls;
     out->pcp = pcp;
     out->kind = pcp ? 2 : (is_vmo ? 0 : 1);
-    out->level = level;
+    (void)level;
     return 1;
 }
 
 void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
-                             uintptr_t pa, uintptr_t flags, uint32_t class)
+                             const struct a20_cow_shared_snapshot *snapshot,
+                             uintptr_t flags)
 {
     mm_struct_t *parent = parent_ptr;
-    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
+    pte_t *src_pte = snapshot ? snapshot->slot : NULL;
     if (!src_pte)
         return;
+    uintptr_t pa = snapshot->pa;
 #ifdef ARCH_HAS_PTE_BLOCK
     size_t leaf_size = vm_pt_level_size(level);
     *src_pte = (leaf_size >= PMD_SIZE)
@@ -340,31 +362,26 @@ void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
 #endif
     mm_tlb_note_change(parent, va, vm_pt_level_size(level));
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
-    if (stab)
-        (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
-                                (uint8_t)class);
+    if (snapshot->node)
+        (void)mm_pt_sync_status(snapshot->node, level, arch_pt_vpn(va, level),
+                                (uint8_t)snapshot->class);
 #else
     /* No status sidecar to bring in step: the PTE rewrite above is the whole
      * of the parent-side downgrade on the arm32 short-descriptor backend. */
     (void)level;
-    (void)class;
 #endif
 }
 
-void a20_cow_share_unlock(void *parent_ptr, uintptr_t va)
+void a20_cow_share_unlock(const struct a20_cow_shared_snapshot *snapshot)
 {
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    mm_struct_t *parent = parent_ptr;
-    pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
-    if (stab)
-        mm_pt_node_unlock(stab);
+    if (snapshot && snapshot->node)
+        mm_pt_node_unlock(snapshot->node);
 #else
     /* a20_cow_share_snapshot() took no lock on this backend, so there is
      * nothing to release; the Rust clone transaction still calls this on
      * every success path. */
-    (void)parent_ptr;
-    (void)va;
+    (void)snapshot;
 #endif
 }
 
@@ -378,7 +395,7 @@ void a20_cow_rss_add(void *child, uintptr_t pages)
     mm_rss_add(child, pages);
 }
 
-void a20_cow_release_ref(const struct a20_cow_src *src)
+void a20_cow_release_ref(const struct a20_cow_shared_snapshot *src)
 {
     if (!src)
         return;
