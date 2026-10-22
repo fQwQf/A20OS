@@ -298,6 +298,13 @@ static inline int arch_syscall_resched_allowed(void)
 # define ARCH_TRAP_FAST_RETURN_DISARM(ctx) do { (void)(ctx); } while (0)
 #endif
 
+/* A cause value the arch declares harmless: the trap fired but had no work
+ * (LoongArch spurious interrupt).  Handlers resume the interrupted context
+ * instead of dispatching. */
+#ifndef ARCH_TRAP_CAUSE_IS_SPURIOUS
+# define ARCH_TRAP_CAUSE_IS_SPURIOUS(cause) 0
+#endif
+
 /*
  * Does timer_get_ticks() advance independently of interrupt delivery, so that
  * early boot -- before secondary CPUs and their timers are up -- can bound a

@@ -399,13 +399,11 @@ struct a20_cowf_probe {
     int32_t   pfn_valid;
     int32_t   order;
 };
-/* 4 pointer-width words plus 4 + 28 bytes of scalars: 72 on LP64, 52 on
- * ILP32.  (The previous 48 for ILP32 was never reachable -- it does not match
- * the field list -- so a 32-bit build could not compile at all.)  The Rust
- * mirror in kernel/mm/cow_fault.rs pins the same pair. */
-_Static_assert(sizeof(struct a20_cowf_probe) ==
-                   (sizeof(void *) == 8 ? 72 : 52),
-               "Rust/C cowf probe ABI");
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_cowf_probe) == 72, "Rust/C cowf probe ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_cowf_probe) == 52, "Rust/C cowf probe ABI");
+#endif
 
 int a20_cowf_has_pgdir(const void *mm_ptr)
 {
@@ -421,15 +419,13 @@ void a20_cowf_probe(const void *mm_ptr, uintptr_t stval,
         return;
     memset(out, 0, sizeof(*out));
     out->pfn = PFN_NONE;
-    /* See a20_cow_probe() in cow.c: the struct keeps pointer-width fields to
-     * match the Rust mirror, so the vaddr_t/size_t outputs go through locals. */
+    /* Bridge the width-fixed Rust ABI struct (uintptr_t) to pt_lookup_leaf()'s
+     * native vaddr_t: same width, different C type on a 32-bit target. */
     vaddr_t base = 0;
-    size_t size = 0;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &base, &size);
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, stval, NULL, &base, &out->size);
+    out->base = base;
     if (!pte)
         return;
-    out->base = (uintptr_t)base;
-    out->size = (uintptr_t)size;
     out->slot = pte;
     out->pte = (uintptr_t)*pte;
     out->present = (*pte & PTE_V) != 0;
@@ -2043,12 +2039,7 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
                 (vma->vm_flags & (VM_FILE | VM_SHARED | VM_WRITE)) ==
                     (VM_FILE | VM_SHARED | VM_WRITE);
             if (regrant && !(*leaf & PTE_W)) {
-#if !defined(ARCH_HAS_PGTABLE_OPS)
-                /* Publishing the regranted protection goes through the per-PTE
-                 * status sidecar, which this architecture does not have; fall
-                 * through to the ordinary fault path below instead. */
-                regrant = 0;
-#else
+#if defined(ARCH_HAS_PGTABLE_OPS)
                 int level = 0;
                 (void)pt_lookup_leaf(mm->pgdir, stval, &level, NULL, NULL);
                 pte_t *table = mm_pt_leaf_table(mm->pgdir, stval);
@@ -2078,7 +2069,30 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
                     }
                     mm_pt_node_unlock(table);
                 }
-#endif /* ARCH_HAS_PGTABLE_OPS */
+#else
+                /* arm32's short-descriptor backend keeps no per-PTE status
+                 * sidecar and no node lock: mm->lock, already held here,
+                 * serialises the leaf rewrite, and there is no status byte to
+                 * bring in step with it. */
+                pte_t old = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+                for (;;) {
+                    if (!(old & PTE_V) || !arch_pte_is_leaf(old) ||
+                        (old & PTE_COW)) {
+                        regrant = 0;
+                        break;
+                    }
+                    if (old & PTE_W)
+                        break;
+                    pte_t desired = arch_pte_leaf(arch_pte_addr(old),
+                        arch_pte_flags(old) | (pte_t)PTE_W);
+                    if (__atomic_compare_exchange_n(leaf, &old, desired,
+                            0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                        mm_tlb_note_change(mm, stval &
+                            ~(vaddr_t)(PAGE_SIZE - 1), PAGE_SIZE);
+                        break;
+                    }
+                }
+#endif
             }
             spin_unlock_irqrestore(&mm->lock, flags);
             mm_tlb_invalidate_finish(mm);

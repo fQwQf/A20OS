@@ -1180,6 +1180,68 @@ class NativeRustServiceSelectorTests(unittest.TestCase):
             self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=1", calls[0])
             self.assertIn("NATIVE_RUST_UFSD_TEST_CLOSE_TOKEN_DROP_ACK_ONCE=0", calls[1])
 
+    def test_ufsd_ext4_truncate_fault_profile_is_stamped_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "isolated" / "riscv64-user"
+            out.mkdir(parents=True)
+            runtime = out / "ufsd-rv"
+            production = out / "ufsd-rust-rv-orphan-rust-extent-rust"
+            fault = out / "ufsd-rust-rv-orphan-rust-extent-rust-test-ext4-trunc-free-fail-once"
+            c_reference = out / "ufsd-c-rv"
+            native = out / "native-tool"
+            stamp = out / ".native-build-id"
+            old_repo, old_submake = stamps.REPO, stamps.submake
+            stamps.REPO = repo
+            calls = []
+
+            def fake_submake(args):
+                calls.append(args)
+                injected = next(x.split("=", 1)[1] for x in args
+                                if x.startswith("NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE="))
+                runtime.write_text("C ufsd")
+                native.write_text("native")
+                for path in (runtime, native):
+                    path.chmod(0o755)
+                selected = fault if injected == "1" else production
+                selected.write_text("Rust truncate-fault ufsd" if injected == "1" else "Rust production ufsd")
+                selected.chmod(0o755)
+                return 0
+
+            stamps.submake = fake_submake
+            try:
+                args = argparse.Namespace(
+                    build_id="same-user-build", stamp=str(stamp), binaries=str(native),
+                    user_build_dir=str(out), arch="riscv64", nommu="0", opt="-O3", roots="",
+                    native_rust_peer="0", native_rust_idl_service="0", native_rust_echod="0",
+                    native_rust_svcmgr="0", native_rust_rtcd="0", native_rust_ufsd="1",
+                    native_rust_ufsd_ext4_orphan="1", native_rust_ufsd_ext4_extent_txn="1",
+                    native_rust_ufsd_test_ext4_trunc_free_fail_once="1",
+                    native_rust_ufsd_test_close_orphan_write_fail_once="0",
+                    native_rust_ufsd_test_close_orphan_write_fail_after="1",
+                    native_rust_ufsd_test_close_orphan_restore_fail="0",
+                    native_rust_ufsd_test_close_token_drop_ack_once="0",
+                    rust_peer_binary="", rust_service_binary="", rust_service_test_binary="",
+                    rust_echod_binary="", rust_svcmgr_binary="", rust_rtcd_binary="",
+                    rust_ufsd_binary=str(fault), rust_ufsd_test_ext4_trunc_free_bin=str(fault))
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(runtime.read_text(), "Rust truncate-fault ufsd")
+                self.assertTrue(c_reference.is_file())
+                self.assertIn("NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE=1", stamp.read_text())
+                args.native_rust_ufsd_test_ext4_trunc_free_fail_once = "0"
+                args.rust_ufsd_binary = str(production)
+                self.assertEqual(stamps.cmd_native(args), 0)
+                self.assertEqual(runtime.read_text(), "Rust production ufsd")
+                self.assertFalse(fault.exists())
+                self.assertEqual(c_reference.read_text(), "C ufsd")
+                self.assertIn("NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE=0", stamp.read_text())
+            finally:
+                stamps.REPO, stamps.submake = old_repo, old_submake
+
+            self.assertEqual(len(calls), 2)
+            self.assertIn("NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE=1", calls[0])
+            self.assertIn("NATIVE_RUST_UFSD_TEST_EXT4_TRUNC_FREE_FAIL_ONCE=0", calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

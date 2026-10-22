@@ -47,7 +47,7 @@ from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/leg
 | goldfish RTC | 已迁移 | 内建 `goldfish_rtc_kdrv.c` 已删除；`rtc.a20drv` 在 riscv64/aarch64/loongarch64 QEMU virt 上由 `smoke-drvmod-*` 验证绑定 |
 | PC speaker | 已迁移 | 内建 `pc_speaker.c` 已删除；`pc-spkr.a20drv`（x86_64）经统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
 | CMOS RTC (MC146818) | 新增 `.a20drv` | `cmos-rtc.a20drv`（x86_64 Early）：x86_64 墙钟来源，只读、无 IRQ、无时区换算、century 寄存器不可信时按 20xx 处理；门禁 `smoke-rtc-cmos` **已实跑 PASS**（`-rtc base=utc`，宿主侧复核来客墙钟；日志 `.kernel-build/smoke/rtc-cmos-x86_64.log`，来客采用 epoch 1791231484，与编译期种子 1791230264 不同，说明读到的是硬件），`smoke-rtc-cmos-fallback`（CMOS 落在可接受窗口外时回退到编译期种子）**尚未执行过**。两块 x86_64 板级（qemu-virt-x86_64、x86_64-pc）都声明了该 platform 设备 |
-| UART | 内核服务 | 启动早期串口服务，模块加载前必须可用，不是可迁移设备包 |
+| UART | 内核服务 | 启动早期串口服务，模块加载前必须可用，不是可迁移设备包。8250 已写 `IER=0x01` 并注册了 `UART0_IRQ`，但**接收实测不是中断驱动的**：没有任务读控制台时输入不被处理（前台不读终端的作业按 ^C 无效），见 [gaps/drivers.md](../gaps/drivers.md) DRIVER-08 |
 | virtio-blk | 已迁移 | 根文件系统挂载依赖它；`virtio-blk.a20drv` 已嵌入 Early DriverStore（root ramfs overlay），在挂载真实根盘前加载，解除 bootstrap 循环 |
 | PCI bus、virtio-mmio bus、USB core、framebuffer/gpu_core、audio_core、input_mux | 内核服务 | transport、class 聚合和设备节点服务，保持静态链接，不计入迁移账本 |
 | DMA/PCI BAR/class ops 框架 API | 已导出 | `drv_dma_alloc_coherent`/`dma_alloc_coherent_aligned`/`dma_sync_*`、`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`/`pci_bus`、block/net/input/audio/display class 操作（统一核心桥接）|

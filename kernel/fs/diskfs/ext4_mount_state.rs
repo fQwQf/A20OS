@@ -36,6 +36,24 @@ pub extern "C" fn a20_ext4_mount_state_admit(state: u16) -> i32 {
     }
 }
 
+/// Whether a dirty no-journal image may be made writable again after crash
+/// recovery has run.
+///
+/// The two reasons `admit` says no are not equivalent.  `ERROR_FS` says this
+/// driver caught metadata it could not trust during a previous session; no
+/// mount-time recovery repairs that, so the image stays refused.  A missing
+/// `VALID_FS` on its own only says the previous session did not finish, and a
+/// no-journal ext4 records exactly that work in its legacy orphan chain --
+/// which the caller finishes before the mount is published.
+#[no_mangle]
+pub extern "C" fn a20_ext4_mount_state_recoverable(state: u16) -> i32 {
+    if state & EXT4_ERROR_FS != 0 || state & EXT4_VALID_FS != 0 {
+        0
+    } else {
+        1
+    }
+}
+
 /// Persisted before exposing a no-journal mount to writers.  A crash leaves
 /// VALID_FS clear; a reported metadata inconsistency additionally sets
 /// ERROR_FS through `a20_ext4_mount_state_error`.
@@ -134,6 +152,17 @@ mod tests {
         assert_eq!(a20_ext4_mount_state_admit(0), 0);
         assert_eq!(a20_ext4_mount_state_admit(EXT4_ERROR_FS), 0);
         assert_eq!(a20_ext4_mount_state_admit(EXT4_VALID_FS | EXT4_ERROR_FS), 0);
+    }
+
+    #[test]
+    fn only_benign_dirty_state_is_recoverable() {
+        // Crash residue: no ERROR_FS, so orphan recovery can finish the session.
+        assert_eq!(a20_ext4_mount_state_recoverable(0), 1);
+        assert_eq!(a20_ext4_mount_state_recoverable(0x10), 1);
+        // Already clean, or a state the driver itself flagged: not "recover".
+        assert_eq!(a20_ext4_mount_state_recoverable(EXT4_VALID_FS), 0);
+        assert_eq!(a20_ext4_mount_state_recoverable(EXT4_ERROR_FS), 0);
+        assert_eq!(a20_ext4_mount_state_recoverable(EXT4_VALID_FS | EXT4_ERROR_FS), 0);
     }
 
     #[test]

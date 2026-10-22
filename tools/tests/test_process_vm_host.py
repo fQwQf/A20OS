@@ -44,7 +44,8 @@ int a20_process_vm_range_ok(uintptr_t address, size_t length) {
            length <= sizeof(arena) - (address - base);
 }
 int a20_process_vm_pin_leaf(void *mm, uintptr_t address, int write,
-                            void **kernel, size_t *available, uintptr_t *token) {
+                            void **kernel, size_t *available, uintptr_t *token,
+                            int *write_guard) {
     if (mm != &test_mm || !a20_process_vm_range_ok(address, 1)) return -EFAULT;
     uintptr_t off = address - (uintptr_t)arena;
     unsigned page = off / PAGE;
@@ -56,9 +57,11 @@ int a20_process_vm_pin_leaf(void *mm, uintptr_t address, int write,
     *kernel = arena + off;
     *available = PAGE - (off % PAGE);
     *token = page + 1;
+    *write_guard = 0;
     frame_gets++;
     return 0;
 }
+void mm_shared_write_leave(void) {}
 void a20_process_vm_frame_put(uintptr_t token) { if (token) frame_puts++; }
 int a20_process_vm_break_cow(void *task, void *mm, uintptr_t address) {
     (void)task; (void)address; cow_calls++; cow_mm_seen = mm; cow_once = 0;

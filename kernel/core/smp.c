@@ -7,7 +7,10 @@
 #include "proc/proc.h"
 
 #if ARCH_TIMER_BOOT_MONOTONIC
-/* The arch counter advances independently of interrupt delivery. */
+/* The arch counter runs independently of interrupt delivery, so this is a real
+ * bounded deadline even before secondary CPUs and their timer IRQs are up.
+ * Ports that expose timer_get_ticks() only through software/low-word clocks
+ * keep the poll fallback below. */
 #define SMP_START_WAIT_TICKS (5ULL * TICKS_PER_SEC)
 #else
 #define SMP_START_WAIT_FALLBACK_LOOPS 10000000U
@@ -198,7 +201,10 @@ void smp_boot_secondaries(void)
     const uint64_t wait_elapsed = timer_get_ticks() - wait_start;
     const char *wait_unit = "ticks";
 #else
-    /* Other retained ports do not yet have a boot-safe monotonic clock. */
+    /* Early boot cannot assume timer_get_ticks() is monotonic or advancing on
+     * every retained architecture (for example, IRQ-driven MCU ticks). Keep
+     * the legacy bounded poll fallback there; its wall duration is platform
+     * and load dependent, and is not a five-second guarantee. */
     unsigned wait_elapsed = 0;
     while ((smp_online_cpu_mask() & started_mask) != started_mask &&
            wait_elapsed < SMP_START_WAIT_FALLBACK_LOOPS) {
@@ -333,6 +339,10 @@ int smp_membarrier_sync_all(void)
             if (timer_get_ticks() - wait_start > 5UL * ARCH_TIMER_FREQ) {
                 printf("[SMP membarrier] timeout self=%u target=%u\n", self,
                        cpu);
+                /* Give back the IRQ state borrowed above: returning with IRQs
+                 * forced on would leak into the caller's disabled section. */
+                if (irqs_were_off)
+                    arch_local_irq_disable();
                 return -EIO;
             }
             arch_cpu_relax();

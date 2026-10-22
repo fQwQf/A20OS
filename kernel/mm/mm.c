@@ -19,6 +19,7 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "mm/pt.h"
+#include "mm/failinject.h"
 #include "mm/fault.h"
 #include "mm/usercopy.h"
 #include "mm/shutdown_write.h"
@@ -222,6 +223,10 @@ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
             table = arch_pte_to_ptr(pte);
         } else {
             if (!alloc) return NULL;
+            /* MM-04 stage 1: fail the intermediate-node frame allocation the
+             * way pfa_alloc_page() would, before the parent entry is linked. */
+            if (mm_fail_inject_scoped(MM_FAIL_STAGE_PT_NODE))
+                return NULL;
             pte_t *next = (pte_t *)frame_alloc();
             if (!next) return NULL;
             /* A new intermediate node needs its descriptor before the parent
@@ -434,6 +439,9 @@ int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
                 return -EEXIST;
             table = arch_pte_to_ptr(pte);
         } else {
+            /* MM-04 stage 1: same intermediate-node failure as pt_walk. */
+            if (mm_fail_inject_scoped(MM_FAIL_STAGE_PT_NODE))
+                return -ENOMEM;
             pte_t *next = (pte_t *)frame_alloc();
             if (!next) return -ENOMEM;
             mm_pt_node_init(next, level - 1);

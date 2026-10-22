@@ -1274,6 +1274,10 @@ void a20_pp_cap_drop(task_t *t, uint32_t bit)
     t->cred.cap_bounding &= ~(1ULL << bit);
 }
 
+uint32_t a20_pp_get_securebits(task_t *t) { return t->cred.securebits; }
+
+void a20_pp_set_securebits(task_t *t, uint32_t bits) { t->cred.securebits = bits; }
+
 int a20_pp_nnps(task_t *t) { return t->policy.no_new_privs; }
 
 void a20_pp_set_nnps(task_t *t) { t->policy.no_new_privs = 1; }

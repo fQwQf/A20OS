@@ -7,9 +7,11 @@ description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream package
 arch = "aarch64"
 
 [machine]
-# TCG emulation + software rendering make the desktop CPU-bound;
-# 4 vCPUs are a verified SMP configuration on qemu-virt.
-smp = 4
+# aarch64 SMP is unstable under GUI load: two distinct kernel panics were
+# observed at smp=4 (a corrupted trap frame after an IPI storm, and a
+# cross-task register dump during SIGSEGV delivery). Run single-CPU until
+# the race is found; see docs/status/current/known-issues.md.
+smp = 1
 memory = "2G"
 
 [gui]

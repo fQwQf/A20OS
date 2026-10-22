@@ -9,8 +9,8 @@
 # Cargo manifest anywhere in this file, so nothing here depends on rustc's own
 # linker or on a crate registry.
 #
-# The Rust IDL peer, adversary, and service support the installed RV64 and
-# AArch64 freestanding targets.  Their protocol logic is shared; the narrow C
+# The Rust IDL peer, adversary, and service support the installed RV64, RV32,
+# AArch64, and x86_64 freestanding targets. Their protocol logic is shared; the narrow C
 # syscall shim delegates register placement and trap behavior to the Native
 # SDK for each target.  Other Rust user services keep their own architecture
 # guards until an ABI-matched target and runtime evidence are available.
@@ -323,7 +323,7 @@ native-rust-idl-service: $(RUST_USER_SERVICE_BIN) $(RUST_USER_SERVICE_TEST_BIN)
 else
 .PHONY: native-rust-idl-service
 native-rust-idl-service:
-	@echo "native-rust-idl-service requires NATIVE_RUST_IDL_SERVICE=1 and ARCH=riscv64 or aarch64" >&2
+	@echo "native-rust-idl-service requires NATIVE_RUST_IDL_SERVICE=1 and an enabled Native architecture" >&2
 	@exit 2
 endif
 

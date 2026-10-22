@@ -305,6 +305,11 @@ void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
 static void user_trap_handler(trap_context_t *ctx) {
     ARCH_TRAP_FAST_RETURN_DISARM(ctx);
     reg_t scause = arch_read_cause();
+    /* arch_read_cause() re-reads the cause register; on LoongArch a pending
+     * interrupt bit can clear between the dispatch site's read and this one,
+     * and the arch declares that value harmless. */
+    if (ARCH_TRAP_CAUSE_IS_SPURIOUS(scause))
+        return;
     task_t *current = proc_current();
     if (current && current->pgdir)
         current->trap_ctx = ctx;
@@ -584,6 +589,10 @@ void trap_handler(trap_context_t *ctx)
 
 void kernel_trap_handler(trap_context_t *ctx) {
     reg_t scause = arch_read_cause();
+    /* See user_trap_handler: this second cause read can race the interrupt
+     * source's deassertion and observe a value the arch declares harmless. */
+    if (ARCH_TRAP_CAUSE_IS_SPURIOUS(scause))
+        return;
 
     /* Architecture guest-trap hooks run before host trap-frame bookkeeping. */
     if (arch_hyp_guest_trap(ctx))

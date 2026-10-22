@@ -193,7 +193,9 @@ JBD2_MAGIC = 0xC03B3998
 JBD2_SUPERBLOCK_V2 = 4
 JBD2_FEATURE_INCOMPAT_64BIT = 0x2
 JBD2_FEATURE_INCOMPAT_CSUM_V3 = 0x10
+JBD2_FEATURE_COMPAT_CHECKSUM_V1 = 0x1
 JBD2_CRC32C_CHKSUM = 4
+JBD2_SB_COMPAT_OFF = 36
 JBD2_SB_INCOMPAT_OFF = 40
 JBD2_SB_CHECKSUM_TYPE_OFF = 80
 JBD2_SB_CHECKSUM_OFF = 252
@@ -307,6 +309,32 @@ def enable_journal_checksums(path: Path) -> None:
           f"64bit|csum_v3, crc32c {checksum:#010x}")
 
 
+def downgrade_journal_to_v1(path: Path) -> None:
+    """Rewrite the journal superblock from csum_v3 to legacy v1.
+
+    A journal with *no* checksum feature at all is neither v1 nor v2, and the
+    read-only downgrade policy refuses it because it cannot be classified.
+    v1 is `compat & COMPAT_CHECKSUM` with no v2/v3 incompat bits, which is what
+    this writes.
+    """
+    data = bytearray(path.read_bytes())
+    offset = _journal_superblock_offset(bytes(data))
+    meta = bytearray(data[offset:offset + 4096])
+    if _be32(meta, 0) != JBD2_MAGIC or _be32(meta, 4) != JBD2_SUPERBLOCK_V2:
+        raise SystemExit("ext4-journal-legacy: no JBD2 superblock")
+    incompat = _be32(meta, JBD2_SB_INCOMPAT_OFF) & ~(
+        JBD2_FEATURE_INCOMPAT_CSUM_V3)
+    compat = _be32(meta, JBD2_SB_COMPAT_OFF) | JBD2_FEATURE_COMPAT_CHECKSUM_V1
+    struct.pack_into(">I", meta, JBD2_SB_INCOMPAT_OFF, incompat)
+    struct.pack_into(">I", meta, JBD2_SB_COMPAT_OFF, compat)
+    meta[JBD2_SB_CHECKSUM_TYPE_OFF] = 0
+    struct.pack_into(">I", meta, JBD2_SB_CHECKSUM_OFF, 0)
+    data[offset:offset + 4096] = meta
+    path.write_bytes(bytes(data))
+    print(f"img: journal superblock at block {offset // 4096}: legacy v1 "
+          f"(compat {compat:#x}, incompat {incompat:#x})")
+
+
 def build_ext4(a) -> int:
     return _build_ext4(a, journal=bool(getattr(a, "ext4_journal", "")))
 
@@ -322,7 +350,18 @@ def build_ext4_journal(a) -> int:
     return _build_ext4(a, journal=True)
 
 
-def _build_ext4(a, *, journal: bool) -> int:
+def build_ext4_journal_legacy(a) -> int:
+    """An ext4 image with a journal, but keeping mke2fs's legacy (v1/v2)
+    journal superblock: no descriptor, commit or data checksums.
+
+    This is the shape the read-only downgrade policy is about.  A writable
+    mount of it must be refused -- there is no replay or write support for a
+    legacy log -- while a clean one may be mounted read-only explicitly.
+    """
+    return _build_ext4(a, journal=True, journal_checksums=False)
+
+
+def _build_ext4(a, *, journal: bool, journal_checksums: bool = True) -> int:
     img = REPO / a.ext4_img
     img.parent.mkdir(parents=True, exist_ok=True)
     staging_parent = REPO / a.ext4_staging_dir
@@ -369,8 +408,10 @@ def _build_ext4(a, *, journal: bool) -> int:
             # would mean copying a whole page into every log block.
             cmd += ["-b", "4096"]
         must(cmd + ["-d", str(staging), str(tmp)])
-        if journal:
+        if journal and journal_checksums:
             enable_journal_checksums(tmp)
+        elif journal:
+            downgrade_journal_to_v1(tmp)
         os.replace(tmp, img)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -577,7 +618,8 @@ def inject_mlibc(a) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
-                    choices=["fat32", "ext4", "ext4-journal", "release-disk",
+                    choices=["fat32", "ext4", "ext4-journal",
+                             "ext4-journal-legacy", "release-disk",
                              "scratch",
                              "sbase-rootfs", "mlibc-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
@@ -587,6 +629,7 @@ def main() -> int:
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4,
             "ext4-journal": build_ext4_journal,
+            "ext4-journal-legacy": build_ext4_journal_legacy,
             "release-disk": build_release_disk, "scratch": build_scratch,
             "sbase-rootfs": inject_sbase,
             "mlibc-rootfs": inject_mlibc,

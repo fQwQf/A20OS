@@ -22,3 +22,21 @@
 | `check-arch-boundary` | CORE / MM / ABI | [core.md](core.md) |
 | `check-stm32f103`（硬编码 MMIO 地址） | DRIVER / 平台 | [drivers.md](drivers.md) |
 | `check-doc-drift` 的剩余引用、`check-stm32f103` 缺 `rg` | 文档与门禁自身 | [docs.md](docs.md) DOCS-04/05 |
+
+## DELIVERY-05 已发布的构建镜像缺 armhf 开发头与 rustc
+
+- 现状：`tools/ci/Dockerfile` 已改为“共享 base + 每架构一个 target”，并显式装上
+  每个交叉架构的 `libc6-dev-*-cross`（交叉 gcc 只把它列为 Recommends，而构建用
+  `--no-install-recommends`，所以旧镜像里编译器在、`#include <limits.h>` 就死）与
+  Rust（`rustc`/`cargo`/`rust-src`/宿主 std，以及各架构的 no_std target）。
+  本地 8 个 target 全部构建并通过 `tools/ci/image-selftest.sh`；用新的 `arm32`/`riscv`
+  镜像、不挂宿主工具链，已经复现出 `check-arm32-bringup` 与
+  `check-riscv32-bringup` 的真实错误清单（见 [mm.md](mm.md) MM-05）。
+  **但 ghcr 上的 `:latest` 仍是旧内容**——推送要靠 `buildenv.yml`，本轮没有执行。
+- 缺口：在重新发布之前，CI 里任何容器内内核构建仍会因缺 `rustc` 直接失败（Error 127），
+  而 arm32 仍会停在 `bits/libc-header-start.h`；也就是说“镜像齐全”目前只是仓库内的
+  事实，不是 CI 拿到的事实。
+- 关闭条件：跑一次 `buildenv.yml`（或用 `tools/ci/build-image.sh` 构建后推送）刷新
+  ghcr 上的 8 个 tag，然后在一个容器 job 里确认 `check-<arch>-bringup` 不再报工具链缺失
+  （源码本身的失败另计）。
+- 来源：MM-05 的 arm32/riscv32 复现（[mm.md](mm.md)）。

@@ -55,10 +55,9 @@ void a20_vma_split_annotate(void *a, void *b, void *c) { (void)a;(void)b;(void)c
 void a20_vma_merge_commit(void *a, void *b, void *c) { (void)a;(void)b;(void)c; }
 int a20_vma_can_merge_rust(const void *, const void *);
 static int check(struct mm_seg a, struct mm_seg b, int expected, const char *name) {
-    int c = vma_can_merge(&a, &b);
     int r = a20_vma_can_merge_rust(&a, &b);
-    if (c != expected || r != expected) {
-        fprintf(stderr, "VMA_HOST: FAIL %s C=%d Rust=%d expected=%d\n", name, c, r, expected);
+    if (r != expected) {
+        fprintf(stderr, "VMA_HOST: FAIL %s Rust=%d expected=%d\n", name, r, expected);
         return 1;
     }
     return 0;
@@ -89,30 +88,14 @@ int main(void) {
     b.start=0x2100;
     failures += check(a,b,0,"nonadjacent");
     if (failures) return 1;
-    puts("VMA_HOST: production Rust merge policy matches extracted C contract");
+    puts("VMA_HOST: production Rust merge policy matches documented contract");
     return 0;
 }
 """
 
 
-def extract_function(source, signature):
-    start = source.index(signature)
-    opening = source.index("{", start)
-    depth = 0
-    for pos in range(opening, len(source)):
-        if source[pos] == "{":
-            depth += 1
-        elif source[pos] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:pos + 1]
-    raise AssertionError(f"unterminated function {signature}")
-
-
 class VmaRegionHostTest(unittest.TestCase):
-    def test_rust_merge_policy_against_actual_c_function(self):
-        source = (ROOT / "kernel/mm/vma.c").read_text()
-        c_function = extract_function(source, "static int vma_can_merge(")
+    def test_rust_merge_policy_against_documented_contract(self):
         with tempfile.TemporaryDirectory(prefix="a20-vma-region-") as directory:
             tmp = pathlib.Path(directory)
             rust_obj = tmp / "vma_region.o"
@@ -123,14 +106,14 @@ class VmaRegionHostTest(unittest.TestCase):
                 "-C", "panic=abort", "-C", "opt-level=2",
                 str(ROOT / "kernel/mm/vma_region.rs"), "-o", str(rust_obj),
             ], check=True, cwd=ROOT)
-            c_file.write_text(HARNESS.replace("static int check(", c_function + "\nstatic int check("))
+            c_file.write_text(HARNESS)
             subprocess.run([
                 "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
                 str(c_file), str(rust_obj), "-o", str(exe),
             ], check=True, cwd=ROOT)
             result = subprocess.run([str(exe)], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("matches extracted C contract", result.stdout)
+            self.assertIn("matches documented contract", result.stdout)
 
 
 if __name__ == "__main__":

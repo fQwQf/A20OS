@@ -20,5 +20,4 @@
 | [desktop-crtc-enoent.md](desktop-crtc-enoent.md) | DESKTOP-13 | 间歇性 Failed to set CRTC |
 | [core-arm32-fp.md](core-arm32-fp.md) | CORE-07 | arm32 FP 上下文 |
 | [net-ipv6-pbuf.md](net-ipv6-pbuf.md) | NET-09 | IPv6 收包 pbuf 引用计数破坏 |
-| [fs-ext4-bitmap.md](fs-ext4-bitmap.md) | FS-09 | guest 写盘后位图校验和不一致 |
 | [fs-ext4-orphan.md](fs-ext4-orphan.md) | FS-01 | unlink 后孤儿 inode 回收 |

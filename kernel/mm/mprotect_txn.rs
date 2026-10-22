@@ -93,14 +93,14 @@ struct Bits {
 
 #[cfg(target_pointer_width = "64")]
 const _: [(); 48] = [(); core::mem::size_of::<Rec>()];
-#[cfg(target_pointer_width = "32")]
-const _: [(); 40] = [(); core::mem::size_of::<Rec>()];
 #[cfg(target_pointer_width = "64")]
 const _: [(); 48] = [(); core::mem::size_of::<Leaf>()];
-#[cfg(target_pointer_width = "32")]
-const _: [(); 32] = [(); core::mem::size_of::<Leaf>()];
 #[cfg(target_pointer_width = "64")]
 const _: [(); 32] = [(); core::mem::size_of::<Bits>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 40] = [(); core::mem::size_of::<Rec>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 32] = [(); core::mem::size_of::<Leaf>()];
 #[cfg(target_pointer_width = "32")]
 const _: [(); 16] = [(); core::mem::size_of::<Bits>()];
 

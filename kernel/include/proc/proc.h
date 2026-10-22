@@ -105,7 +105,24 @@ typedef struct proc_cred {
     uint64_t cap_permitted;
     uint64_t cap_inheritable;
     uint64_t cap_bounding;
+    /* Linux securebits (SECBIT_*): per-credential policy that modifies how a
+     * uid transition and execve treat the capability sets.  prctl(PR_SET_
+     * SECUREBITS)/PR_SET_KEEPCAPS write it; SECBIT_KEEP_CAPS is what the
+     * capability-aware tools (iputils' ping among them) rely on. */
+    uint32_t securebits;
 } proc_cred_t;
+
+/* Linux securebits (include/uapi/linux/securebits.h).  Each *_LOCKED bit sits
+ * immediately above the policy bit it freezes, which is what lets callers
+ * derive the frozen mask as `(securebits >> 1) & 0xff`. */
+#define SECBIT_NOROOT                      0x01
+#define SECBIT_NOROOT_LOCKED               0x02
+#define SECBIT_NO_SETUID_FIXUP             0x04
+#define SECBIT_NO_SETUID_FIXUP_LOCKED      0x08
+#define SECBIT_KEEP_CAPS                   0x10
+#define SECBIT_KEEP_CAPS_LOCKED            0x20
+#define SECBIT_NO_CAP_AMBIENT_RAISE        0x40
+#define SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED 0x80
 
 #define CAP_CHOWN            0
 #define CAP_DAC_OVERRIDE     1
