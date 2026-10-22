@@ -87,6 +87,7 @@ static const uint8_t exit_uuid[16] = {0xc2, 0, 0, 0, 0, 0, 0, 0,
 static const uint8_t bad_uuid[16] = {0xc3, 0, 0, 0, 0, 0, 0, 0,
                                      0,    0, 0, 0, 0, 0, 0, 3};
 static const uint8_t absent_uuid[16] = {0xc4};
+static int task_stat(const char *key, uint64_t *value);
 static int start_daemon(void) {
     const char *argv[] = {"/bin/appd-" A20_CLUSTER_ARCH_TAG,
                           loop_id,
@@ -376,8 +377,27 @@ static int control(void *ctx, const uint8_t *q, uint32_t n, uint8_t *reply,
                    uint32_t cap) {
     (void)ctx;
     if (n != 4 || cap < 4 || q[0] != 'A' || q[1] != 'T' || q[2] != 1 ||
-        q[3] > 3 || !q[3])
+        (q[3] > 3 && q[3] != 8) || !q[3])
         return -1;
+    if (q[3] == 8) {
+        if (cap < 32)
+            return -1;
+        uint64_t tasks = 0, zombies = 0, errors = 0;
+        if (task_stat("task_objects", &tasks) ||
+            task_stat("zombies", &zombies) ||
+            task_stat("lifetime_errors", &errors))
+            return -1;
+        for (unsigned i = 0; i < 32; i++)
+            reply[i] = 0;
+        reply[0] = 'A';
+        reply[1] = 'T';
+        reply[2] = 1;
+        reply[3] = 8;
+        a20_work_put64(reply + 8, tasks);
+        a20_work_put64(reply + 16, zombies);
+        a20_work_put64(reply + 24, errors);
+        return 32;
+    }
     if (q[3] == 2) {
         stop(daemon);
         daemon = A20_HANDLE_NULL;
@@ -388,6 +408,30 @@ static int control(void *ctx, const uint8_t *q, uint32_t n, uint8_t *reply,
         return -1;
     a20_memcpy(reply, q, 4);
     return 4;
+}
+/* The peer's own kernel counters, so the owner node and the controller node
+ * are both checked after a real service death. */
+static int peer_stats(unsigned who, uint64_t *tasks, uint64_t *zombies,
+                      uint64_t *errors) {
+    a20_node_id_t node;
+    a20_node_id_parse_hex(identities[who], &node);
+    uint32_t slot;
+    uint64_t epoch;
+    a20_handle_t ep = A20_HANDLE_NULL;
+    if (a20_cluster_resolve(&node, "apps.test", 9, 8000, &slot, &epoch) < 0 ||
+        a20_cluster_connect_bound(&node, slot, epoch, &ep) < 0)
+        return -1;
+    uint8_t q[4] = {'A', 'T', 1, 8}, reply[32];
+    uint32_t n = sizeof(reply);
+    int ok = a20_cluster_exchange(ep, q, 4, reply, &n, 5000) >= 0 && n == 32 &&
+             !a20_memcmp(q, reply, 4);
+    a20_hdl_close(ep);
+    if (!ok)
+        return -1;
+    *tasks = a20_work_u64(reply + 8);
+    *zombies = a20_work_u64(reply + 16);
+    *errors = a20_work_u64(reply + 24);
+    return 0;
 }
 static int peer(unsigned who, unsigned op) {
     a20_node_id_t node;
@@ -430,6 +474,77 @@ static int exited(a20_app_session_t *s, a20_app_ticket_t *ticket, int expected,
         sleep_ms(10);
     }
     return -1;
+}
+/* /proc/a20/task_lifetime is the kernel's own accounting, not a test mirror:
+ * a service death must leave no zombie and no extra task object behind. */
+static int task_stat(const char *key, uint64_t *value) {
+    static const char path[] = "/proc/a20/task_lifetime";
+    a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
+                                 .path = (uint64_t)(uintptr_t)path,
+                                 .path_len = sizeof(path) - 1,
+                                 .rights = A20_RIGHT_READ};
+    if (a20_path_open(&file) < 0)
+        return -1;
+    char bytes[2048];
+    uint64_t got = 0;
+    int r = a20_hdl_read_buf(file.out_handle, bytes, sizeof(bytes) - 1, &got);
+    a20_hdl_close(file.out_handle);
+    if (r < 0 || got >= sizeof(bytes))
+        return -1;
+    bytes[got] = 0;
+    unsigned n = a20_strlen(key);
+    for (char *p = bytes; *p;) {
+        char *end = p;
+        while (*end && *end != '\n')
+            end++;
+        if ((unsigned)(end - p) > n + 2 && !a20_memcmp(p, key, n) &&
+            p[n] == ':' && p[n + 1] == ' ') {
+            *value = 0;
+            for (char *d = p + n + 2; d < end; d++) {
+                if (*d < '0' || *d > '9')
+                    return -1;
+                *value = *value * 10 + (unsigned)(*d - '0');
+            }
+            return 0;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return -1;
+}
+static uint64_t base_tasks, base_zombies, base_errors;
+static int capture_resource_baseline(void) {
+    return task_stat("task_objects", &base_tasks) ||
+                   task_stat("zombies", &base_zombies) ||
+                   task_stat("lifetime_errors", &base_errors)
+               ? -1
+               : 0;
+}
+static int link_resources_empty(void) {
+    a20_cluster_resource_args_t r = {0}, q = {0};
+    if (a20_cluster_resources(&r) < 0 ||
+        a20_cluster_reassembly_resources(&q) < 0)
+        return 0;
+    return !r.values[A20_CLX_STAT_EXPORTS] && !r.values[A20_CLX_STAT_PROXIES] &&
+           !r.values[A20_CLX_STAT_INFLIGHT] &&
+           !r.values[A20_CLX_STAT_INFLIGHT_BYTES] &&
+           !q.values[A20_CLX_REASM_CONTEXTS] && !q.values[A20_CLX_REASM_BYTES];
+}
+/* Only report recovery once the kernel reports the pre-test task object
+ * count again, no zombie, no lifetime error and no cluster link residue. */
+static int resources_recovered(unsigned seconds) {
+    uint64_t start = a20_agent_clock_ms(0);
+    for (;;) {
+        uint64_t tasks = 0, zombies = 0, errors = 0;
+        if (!task_stat("task_objects", &tasks) &&
+            !task_stat("zombies", &zombies) &&
+            !task_stat("lifetime_errors", &errors) && tasks == base_tasks &&
+            zombies == base_zombies && errors == base_errors &&
+            link_resources_empty())
+            return 0;
+        if (a20_agent_clock_ms(0) - start >= (uint64_t)seconds * 1000)
+            return -1;
+        sleep_ms(20);
+    }
 }
 static int linux_applications(uint8_t domains[3][16]) {
     uint8_t loop[16] = {0xc9}, short_app[16] = {0xc8};
@@ -680,6 +795,98 @@ static int lifecycle(const uint8_t domain[16], uint64_t nonce) {
     a20_app_close(&s);
     return 0;
 }
+/* Each phase below is a distinct failure contract. The owner never accepts a
+ * second execution for an unknown ticket: a dead service changes the
+ * controller identity, and a network break only changes reachability. */
+static int service_and_network_faults(const uint8_t b[16],
+                                      uint8_t candidates[3][16]) {
+    a20_app_session_t s;
+    a20_app_ticket_t ticket;
+    a20_app_result_t result;
+    /* Unknown START outcome, then the owner dies before any query. */
+    if (a20_app_connect(b, 8000, &s) < 0)
+        return -1;
+    sleep_ms(300); /* the pre-fault app's final release must settle */
+    uint64_t owner_tasks, owner_zombies, owner_errors;
+    if (peer_stats(1, &owner_tasks, &owner_zombies, &owner_errors))
+        return -1;
+    note("APPS: service-death-drop-ready\n");
+    if (a20_app_start(&s, loop_uuid, 102, 1500, &ticket, &result) !=
+        -A20_ERR_TIMED_OUT)
+        return -1;
+    if (peer(1, 2)) /* real kill + restart of appd */
+        return -1;
+    if (a20_app_resume(&ticket, 8000, &s) != -A20_ERR_EXPIRED)
+        return -1;
+    if (a20_app_connect(b, 8000, &s) < 0 ||
+        a20_app_offer(&s, loop_uuid, 4000, &result) < 0 || result.occupied ||
+        result.active)
+        return -1;
+    /* The killed owner's app and worker threads must be gone, not merely
+     * absent from the new owner's record table. */
+    uint64_t recovered = a20_agent_clock_ms(0);
+    for (;;) {
+        uint64_t tasks = 0, zombies = 0, errors = 0;
+        if (!peer_stats(1, &tasks, &zombies, &errors) && tasks == owner_tasks &&
+            zombies == owner_zombies && errors == owner_errors)
+            break;
+        if (a20_agent_clock_ms(0) - recovered >= 15000)
+            return -1;
+        sleep_ms(50);
+    }
+    if (a20_app_start(&s, loop_uuid, 103, 4000, &ticket, &result) < 0 ||
+        result.state != A20_APP_RUNNING ||
+        a20_app_stop(&s, &ticket, 9, 4000, &result) < 0 ||
+        exited(&s, &ticket, 137, &result))
+        return -1;
+    a20_app_close(&s);
+    note("APPS: service-death-pass\n");
+
+    /* A network break makes the outcome unknown; the same ticket must find
+     * the original root after reconnect rather than launch again. */
+    if (a20_app_connect(b, 8000, &s) < 0 ||
+        a20_app_start(&s, loop_uuid, 104, 4000, &ticket, &result) < 0 ||
+        result.state != A20_APP_RUNNING)
+        return -1;
+    a20_object_id_t root = result.root;
+    note("APPS: partition-ready\n");
+    sleep_ms(500); /* let the host apply the link break before the query */
+    if (a20_app_query(&s, &ticket, 1500, &result) != -A20_ERR_TIMED_OUT)
+        return -1;
+    sleep_ms(4500);
+    if (a20_app_resume(&ticket, 8000, &s) < 0 ||
+        a20_app_query(&s, &ticket, 4000, &result) < 0 ||
+        result.state != A20_APP_RUNNING ||
+        !a20_object_id_equal(&root, &result.root) ||
+        a20_app_stop(&s, &ticket, 9, 4000, &result) < 0 ||
+        exited(&s, &ticket, 137, &result))
+        return -1;
+    a20_app_close(&s);
+    note("APPS: partition-pass\n");
+
+    /* A member disappears before placement. The unreachable candidate must
+     * not be selected and the surviving owner must execute once. */
+    note("APPS: member-fail-ready\n");
+    sleep_ms(1500);
+    uint64_t begin = a20_agent_clock_ms(0);
+    a20_app_ticket_t placed;
+    for (;;) {
+        if (a20_app_start_any(candidates, 3, loop_uuid, 105, 30000, &placed,
+                              &result) >= 0 &&
+            result.state == A20_APP_RUNNING)
+            break;
+        if (a20_agent_clock_ms(0) - begin >= 40000)
+            return -1;
+        sleep_ms(500);
+    }
+    if (a20_app_resume(&placed, 8000, &s) < 0 ||
+        a20_app_stop(&s, &placed, 9, 4000, &result) < 0 ||
+        exited(&s, &placed, 137, &result))
+        return -1;
+    a20_app_close(&s);
+    note("APPS: member-fail-pass\n");
+    return 0;
+}
 int main(int argc, char **argv, char **envp) {
     (void)envp;
     a20_start_info_t *si = a20_get_start_info();
@@ -716,6 +923,8 @@ int main(int argc, char **argv, char **envp) {
         }
 
     a20_memcpy(local_domain, self.bytes, 16);
+    if (!role && capture_resource_baseline())
+        return fail("task lifetime baseline");
     if (start_daemon())
         return fail("start daemon");
     if (role) {
@@ -817,9 +1026,14 @@ int main(int argc, char **argv, char **envp) {
         a20_app_resume(&ticket, 8000, &s) != -A20_ERR_EXPIRED)
         return fail("old controller");
     if (a20_app_connect(b, 8000, &s) < 0 ||
-        a20_app_start(&s, loop_uuid, 101, 4000, &ticket, &result) < 0)
+        a20_app_start(&s, loop_uuid, 101, 4000, &ticket, &result) < 0 ||
+        a20_app_stop(&s, &ticket, 9, 4000, &result) < 0 ||
+        exited(&s, &ticket, 137, &result))
         return fail("new controller");
-    note("APPS: restart-pass\nAPPS: reboot-ready\n");
+    note("APPS: restart-pass\n");
+    if (service_and_network_faults(b, candidates))
+        return fail("service/network fault matrix");
+    note("APPS: reboot-ready\n");
     sleep_ms(11000);
     a20_app_close(&s);
     if (peer(1, 1) || a20_app_resume(&ticket, 8000, &s) != -A20_ERR_EXPIRED ||
@@ -844,6 +1058,9 @@ int main(int argc, char **argv, char **envp) {
     if (linux_applications(candidates))
         return fail("Linux executable lifecycle");
     stop(daemon);
+    if (resources_recovered(15))
+        return fail("final resource recovery");
+    note("APPS: recovered-pass tasks/zombies/errors=baseline cluster=empty\n");
     note("APPS: PASS\n");
     return 0;
 }

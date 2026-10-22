@@ -194,6 +194,75 @@ static int is_state(a20_object_reference_t *ref, unsigned state) {
     a20_object_snapshot_t s;
     return a20_object_query(ref, 4000, &s) >= 0 && s.state == state ? 0 : -1;
 }
+/* Same kernel accounting used by the application fault matrix: a directory
+ * death and a lease/revoke must not leave a task object, zombie or proxy. */
+static int task_stat(const char *key, uint64_t *value) {
+    static const char path[] = "/proc/a20/task_lifetime";
+    a20_path_open_args_t file = {.dir = A20_HANDLE_NULL,
+                                 .path = (uint64_t)(uintptr_t)path,
+                                 .path_len = sizeof(path) - 1,
+                                 .rights = A20_RIGHT_READ};
+    if (a20_path_open(&file) < 0)
+        return -1;
+    char bytes[2048];
+    uint64_t got = 0;
+    int r = a20_hdl_read_buf(file.out_handle, bytes, sizeof(bytes) - 1, &got);
+    a20_hdl_close(file.out_handle);
+    if (r < 0 || got >= sizeof(bytes))
+        return -1;
+    bytes[got] = 0;
+    unsigned n = a20_strlen(key);
+    for (char *p = bytes; *p;) {
+        char *end = p;
+        while (*end && *end != '\n')
+            end++;
+        if ((unsigned)(end - p) > n + 2 && !a20_memcmp(p, key, n) &&
+            p[n] == ':' && p[n + 1] == ' ') {
+            *value = 0;
+            for (char *d = p + n + 2; d < end; d++) {
+                if (*d < '0' || *d > '9')
+                    return -1;
+                *value = *value * 10 + (unsigned)(*d - '0');
+            }
+            return 0;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return -1;
+}
+static uint64_t base_tasks, base_zombies, base_errors;
+static int capture_resource_baseline(void) {
+    return task_stat("task_objects", &base_tasks) ||
+                   task_stat("zombies", &base_zombies) ||
+                   task_stat("lifetime_errors", &base_errors)
+               ? -1
+               : 0;
+}
+static int link_resources_empty(void) {
+    a20_cluster_resource_args_t r = {0}, q = {0};
+    if (a20_cluster_resources(&r) < 0 ||
+        a20_cluster_reassembly_resources(&q) < 0)
+        return 0;
+    return !r.values[A20_CLX_STAT_EXPORTS] && !r.values[A20_CLX_STAT_PROXIES] &&
+           !r.values[A20_CLX_STAT_INFLIGHT] &&
+           !r.values[A20_CLX_STAT_INFLIGHT_BYTES] &&
+           !q.values[A20_CLX_REASM_CONTEXTS] && !q.values[A20_CLX_REASM_BYTES];
+}
+static int resources_recovered(unsigned seconds) {
+    uint64_t start = a20_agent_clock_ms(0);
+    for (;;) {
+        uint64_t tasks = 0, zombies = 0, errors = 0;
+        if (!task_stat("task_objects", &tasks) &&
+            !task_stat("zombies", &zombies) &&
+            !task_stat("lifetime_errors", &errors) && tasks == base_tasks &&
+            zombies == base_zombies && errors == base_errors &&
+            link_resources_empty())
+            return 0;
+        if (a20_agent_clock_ms(0) - start >= (uint64_t)seconds * 1000)
+            return -1;
+        sleep_ms(20);
+    }
+}
 int main(int argc, char **argv, char **envp) {
     (void)envp;
     a20_start_info_t *si = a20_get_start_info();
@@ -231,6 +300,8 @@ int main(int argc, char **argv, char **envp) {
                                   0) < 0)
                 return fail("route");
         }
+    if (!role && capture_resource_baseline())
+        return fail("task lifetime baseline");
     if (start_daemon())
         return fail("start daemon");
     if (new_child())
@@ -287,6 +358,9 @@ int main(int argc, char **argv, char **envp) {
         b.endpoint != A20_HANDLE_NULL)
         return fail("revoke");
     note("OBJECTS: revoke-pass\n");
+    /* The fault phases below extend the run past one 30 s lease interval. */
+    if (a20_object_renew(&publication, 30000, 4000) < 0)
+        return fail("renew after revoke");
     if (peer(1, 4, &newid) || a20_object_id_equal(&newid, &bid) ||
         a20_object_open(&newid, 8000, &b, &snapshot) < 0)
         return fail("new task identity");
@@ -300,6 +374,18 @@ int main(int argc, char **argv, char **envp) {
     if (peer(2, 6, &newid) || !a20_object_id_equal(&newid, &cid) ||
         a20_object_open(&cid, 8000, &c, &snapshot) < 0)
         return fail("republication");
+    /* Unreachable is not RETIRED: the owner shard keeps the record and the
+     * same object id resolves LIVE after the link comes back. */
+    note("OBJECTS: partition-ready\n");
+    sleep_ms(500); /* let the host apply the link break before the query */
+    if (a20_object_query(&c, 1500, &snapshot) >= 0)
+        return fail("partition query");
+    sleep_ms(4500);
+    if (a20_object_open(&cid, 8000, &c, &snapshot) < 0 || snapshot.state != 1)
+        return fail("partition recovery");
+    note("OBJECTS: partition-pass\n");
+    if (a20_object_renew(&publication, 30000, 4000) < 0)
+        return fail("renew after partition");
     if (peer(1, 5, &newid))
         return fail("daemon restart");
     if (a20_object_query(&b, 4000, &snapshot) >= 0 ||
@@ -310,6 +396,7 @@ int main(int argc, char **argv, char **envp) {
     if (peer(1, 6, &newid) || !a20_object_id_equal(&newid, &bid) ||
         a20_object_open(&bid, 8000, &b, &snapshot) < 0)
         return fail("restart reexport");
+    note("OBJECTS: service-death-pass\n");
     if (a20_object_renew(&publication, 30000, 4000) < 0)
         return fail("local renewal");
     note("OBJECTS: lifecycle-pass\nOBJECTS: reboot-ready\n");
@@ -330,6 +417,10 @@ int main(int argc, char **argv, char **envp) {
     a20_object_close(&local);
     stop(child);
     stop(daemon);
+    if (resources_recovered(15))
+        return fail("final resource recovery");
+    note("OBJECTS: recovered-pass tasks/zombies/errors=baseline "
+         "cluster=empty\n");
     note("OBJECTS: PASS\n");
     return 0;
 }
