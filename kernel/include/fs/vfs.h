@@ -231,6 +231,7 @@ typedef struct vnode {
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
     struct page_cache_page *cache_dirty_tail;
+    struct page_cache_page *cache_dirty_root;
     /* Serializes buffered writes against each other so size/offset updates
      * and page-cache insertion stay consistent for one file.  Per-vnode on
      * purpose: the previous fixed array of 64 hash-bucket mutexes made any

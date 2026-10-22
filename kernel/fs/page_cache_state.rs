@@ -77,7 +77,7 @@ pub const PAGE_CACHE_BUCKET_LOCKS: usize = 1024;
 pub const PIN_COUNTER_STRIDE: usize = 64;
 const _: [(); 64] = [(); PIN_COUNTER_STRIDE];
 
-/// Mirror of `page_cache_page_t` through `global_dirty_next`.  `fill_lock` and
+/// Mirror of `page_cache_page_t` through `dirty_parent_color`.  `fill_lock` and
 /// everything after it stay C-owned; the struct is never stored as an array in
 /// Rust, only reached through pointers the C pool hands over.
 #[repr(C)]
@@ -102,6 +102,8 @@ pub struct PageCachePage {
     pub dirty_next: *mut PageCachePage,
     pub global_dirty_prev: *mut PageCachePage,
     pub global_dirty_next: *mut PageCachePage,
+    pub dirty_children: [*mut PageCachePage; 2],
+    pub dirty_parent_color: usize,
 }
 
 /// Leading fields of `vnode_t` the page cache state model reads.  The C adapter
@@ -123,6 +125,7 @@ pub struct VnodeHead {
     pub cache_pages: *mut PageCachePage,
     pub cache_dirty_pages: *mut PageCachePage,
     pub cache_dirty_tail: *mut PageCachePage,
+    pub cache_dirty_root: *mut PageCachePage,
 }
 
 /// Optional telemetry hook: `page_cache_account_scan(entries)`.
@@ -847,6 +850,186 @@ pub unsafe extern "C" fn a20_pagecache_mapping_remove(p: *mut PageCachePage) {
 // dirty lists (per-vnode descending index + global dirtied order)
 // ------------------------------------------------------------------
 
+// Intrusive red-black index. The ordered dirty links remain the writeback
+// iterator; this index only removes the linear search for middle insertion.
+// All operations hold g_page_cache_lock; there are no allocations or recursion.
+// Descriptor alignment leaves bit 0 of the parent pointer available for red.
+#[inline]
+unsafe fn dirty_parent(p: *mut PageCachePage) -> *mut PageCachePage {
+    ((*p).dirty_parent_color & !1usize) as *mut PageCachePage
+}
+#[inline]
+unsafe fn dirty_red(p: *mut PageCachePage) -> bool {
+    !p.is_null() && (*p).dirty_parent_color & 1 != 0
+}
+#[inline]
+unsafe fn dirty_set_parent(p: *mut PageCachePage, parent: *mut PageCachePage) {
+    if !p.is_null() {
+        (*p).dirty_parent_color = parent as usize | ((*p).dirty_parent_color & 1);
+    }
+}
+#[inline]
+unsafe fn dirty_set_red(p: *mut PageCachePage, red: bool) {
+    if !p.is_null() {
+        (*p).dirty_parent_color = ((*p).dirty_parent_color & !1usize) | red as usize;
+    }
+}
+
+// Promote x's child on `side` (0 = right rotation, 1 = left rotation).
+unsafe fn dirty_rotate(root: &mut *mut PageCachePage, x: *mut PageCachePage, side: usize) {
+    let y = (*x).dirty_children[side];
+    let parent = dirty_parent(x);
+    (*x).dirty_children[side] = (*y).dirty_children[1 - side];
+    dirty_set_parent((*x).dirty_children[side], x);
+    dirty_set_parent(y, parent);
+    if parent.is_null() {
+        *root = y;
+    } else {
+        let at = ((*parent).dirty_children[1] == x) as usize;
+        (*parent).dirty_children[at] = y;
+    }
+    (*y).dirty_children[1 - side] = x;
+    dirty_set_parent(x, y);
+}
+
+/// Insert p and return the nearest strictly higher index for the dirty list.
+unsafe fn dirty_tree_insert(vn: &mut VnodeHead, p: *mut PageCachePage) -> *mut PageCachePage {
+    let mut parent = core::ptr::null_mut();
+    let mut at = vn.cache_dirty_root;
+    let mut higher = core::ptr::null_mut();
+    let mut side = 0;
+    // Preserve the old list's constant-time position lookup for sequential
+    // writers. Min/max leaves have a free outward child; rotations still do
+    // the usual bounded repair. Strict inequalities keep duplicate-key test
+    // inputs on the general path (production hash keys are unique per vnode).
+    let head = vn.cache_dirty_pages;
+    let tail = vn.cache_dirty_tail;
+    if !head.is_null() && (*p).index > (*head).index &&
+       (*head).dirty_children[1].is_null() {
+        parent = head;
+        side = 1;
+    } else if !tail.is_null() && (*p).index < (*tail).index &&
+              (*tail).dirty_children[0].is_null() {
+        parent = tail;
+        higher = tail;
+    } else {
+        while !at.is_null() {
+            parent = at;
+            side = ((*p).index >= (*at).index) as usize;
+            if side == 0 { higher = at; }
+            at = (*at).dirty_children[side];
+        }
+    }
+    (*p).dirty_children = [core::ptr::null_mut(); 2];
+    (*p).dirty_parent_color = parent as usize | 1;
+    if parent.is_null() { vn.cache_dirty_root = p; }
+    else { (*parent).dirty_children[side] = p; }
+
+    let mut x = p;
+    while dirty_red(dirty_parent(x)) {
+        let mut par = dirty_parent(x);
+        let grand = dirty_parent(par);
+        let dir = ((*grand).dirty_children[1] == par) as usize;
+        let uncle = (*grand).dirty_children[1 - dir];
+        if dirty_red(uncle) {
+            dirty_set_red(par, false);
+            dirty_set_red(uncle, false);
+            dirty_set_red(grand, true);
+            x = grand;
+        } else {
+            if x == (*par).dirty_children[1 - dir] {
+                x = par;
+                dirty_rotate(&mut vn.cache_dirty_root, x, 1 - dir);
+                par = dirty_parent(x);
+            }
+            dirty_set_red(par, false);
+            dirty_set_red(grand, true);
+            dirty_rotate(&mut vn.cache_dirty_root, grand, dir);
+        }
+    }
+    dirty_set_red(vn.cache_dirty_root, false);
+    higher
+}
+
+unsafe fn dirty_transplant(root: &mut *mut PageCachePage, old: *mut PageCachePage,
+                          new: *mut PageCachePage) {
+    let parent = dirty_parent(old);
+    if parent.is_null() { *root = new; }
+    else { (*parent).dirty_children[((*parent).dirty_children[1] == old) as usize] = new; }
+    dirty_set_parent(new, parent);
+}
+
+unsafe fn dirty_tree_remove(vn: &mut VnodeHead, z: *mut PageCachePage) {
+    let mut y = z;
+    let mut was_red = dirty_red(y);
+    let mut x;
+    let mut parent;
+    if (*z).dirty_children[0].is_null() {
+        x = (*z).dirty_children[1];
+        parent = dirty_parent(z);
+        dirty_transplant(&mut vn.cache_dirty_root, z, x);
+    } else if (*z).dirty_children[1].is_null() {
+        x = (*z).dirty_children[0];
+        parent = dirty_parent(z);
+        dirty_transplant(&mut vn.cache_dirty_root, z, x);
+    } else {
+        y = (*z).dirty_children[1];
+        while !(*y).dirty_children[0].is_null() { y = (*y).dirty_children[0]; }
+        was_red = dirty_red(y);
+        x = (*y).dirty_children[1];
+        if dirty_parent(y) == z {
+            parent = y;
+            dirty_set_parent(x, y);
+        } else {
+            parent = dirty_parent(y);
+            dirty_transplant(&mut vn.cache_dirty_root, y, x);
+            (*y).dirty_children[1] = (*z).dirty_children[1];
+            dirty_set_parent((*y).dirty_children[1], y);
+        }
+        dirty_transplant(&mut vn.cache_dirty_root, z, y);
+        (*y).dirty_children[0] = (*z).dirty_children[0];
+        dirty_set_parent((*y).dirty_children[0], y);
+        dirty_set_red(y, dirty_red(z));
+    }
+    if !was_red {
+        while x != vn.cache_dirty_root && !dirty_red(x) {
+            // A null leaf has no embedded parent; carry it across transplants.
+            let dir = ((*parent).dirty_children[1] == x &&
+                       (*parent).dirty_children[0] != x) as usize;
+            let mut sibling = (*parent).dirty_children[1 - dir];
+            if dirty_red(sibling) {
+                dirty_set_red(sibling, false);
+                dirty_set_red(parent, true);
+                dirty_rotate(&mut vn.cache_dirty_root, parent, 1 - dir);
+                sibling = (*parent).dirty_children[1 - dir];
+            }
+            // A valid RB tree has a sibling here; null is black defensively.
+            if sibling.is_null() || (!dirty_red((*sibling).dirty_children[0]) &&
+                                     !dirty_red((*sibling).dirty_children[1])) {
+                dirty_set_red(sibling, true);
+                x = parent;
+                parent = dirty_parent(x);
+            } else {
+                if !dirty_red((*sibling).dirty_children[1 - dir]) {
+                    dirty_set_red((*sibling).dirty_children[dir], false);
+                    dirty_set_red(sibling, true);
+                    dirty_rotate(&mut vn.cache_dirty_root, sibling, dir);
+                    sibling = (*parent).dirty_children[1 - dir];
+                }
+                dirty_set_red(sibling, dirty_red(parent));
+                dirty_set_red(parent, false);
+                dirty_set_red((*sibling).dirty_children[1 - dir], false);
+                dirty_rotate(&mut vn.cache_dirty_root, parent, 1 - dir);
+                x = vn.cache_dirty_root;
+                break;
+            }
+        }
+        dirty_set_red(x, false);
+    }
+    (*z).dirty_children = [core::ptr::null_mut(); 2];
+    (*z).dirty_parent_color = 0;
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn a20_pagecache_dirty_insert(
     p: *mut PageCachePage,
@@ -859,6 +1042,7 @@ pub unsafe extern "C" fn a20_pagecache_dirty_insert(
     // SAFETY: caller holds g_page_cache_lock; page->vnode is live.
     unsafe {
         let vn = &mut (*((*p).vnode as *mut VnodeHead));
+        let higher = dirty_tree_insert(vn, p);
         let head = vn.cache_dirty_pages;
         let tail = vn.cache_dirty_tail;
         if head.is_null() {
@@ -877,10 +1061,7 @@ pub unsafe extern "C" fn a20_pagecache_dirty_insert(
             (*tail).dirty_next = p;
             vn.cache_dirty_tail = p;
         } else {
-            let mut at = head;
-            while !(*at).dirty_next.is_null() && (*(*at).dirty_next).index > (*p).index {
-                at = (*at).dirty_next;
-            }
+            let at = higher;
             (*p).dirty_prev = at;
             (*p).dirty_next = (*at).dirty_next;
             (*(*at).dirty_next).dirty_prev = p;
@@ -914,6 +1095,7 @@ pub unsafe extern "C" fn a20_pagecache_dirty_remove(
         } else {
             (*p).vnode as *mut VnodeHead
         };
+        if !vn.is_null() { dirty_tree_remove(&mut *vn, p); }
         if !(*p).dirty_prev.is_null() {
             (*(*p).dirty_prev).dirty_next = (*p).dirty_next;
         } else if !vn.is_null() {
@@ -1874,6 +2056,7 @@ mod tests {
             dirty_next: core::ptr::null_mut(),
             global_dirty_prev: core::ptr::null_mut(),
             global_dirty_next: core::ptr::null_mut(),
+            dirty_children: [core::ptr::null_mut(); 2], dirty_parent_color: 0,
         }
     }
 
@@ -1893,6 +2076,7 @@ mod tests {
             cache_pages: core::ptr::null_mut(),
             cache_dirty_pages: core::ptr::null_mut(),
             cache_dirty_tail: core::ptr::null_mut(),
+            cache_dirty_root: core::ptr::null_mut(),
         }
     }
 
@@ -2113,6 +2297,7 @@ mod tests {
         mapping_prev: core::ptr::null_mut(), mapping_next: core::ptr::null_mut(),
         dirty_prev: core::ptr::null_mut(), dirty_next: core::ptr::null_mut(),
         global_dirty_prev: core::ptr::null_mut(), global_dirty_next: core::ptr::null_mut(),
+            dirty_children: [core::ptr::null_mut(); 2], dirty_parent_color: 0,
     };
 
     extern "C" fn txn_collect(
@@ -2225,9 +2410,13 @@ mod tests {
             assert_eq!(core::mem::offset_of!(PageCachePage, data), 64);
             assert_eq!(core::mem::offset_of!(PageCachePage, prev), 72);
             assert_eq!(core::mem::offset_of!(PageCachePage, global_dirty_next), 136);
+            assert_eq!(core::mem::offset_of!(PageCachePage, dirty_children), 144);
+            assert_eq!(core::mem::offset_of!(PageCachePage, dirty_parent_color), 160);
+            assert_eq!(core::mem::size_of::<PageCachePage>(), 168);
             assert_eq!(core::mem::offset_of!(VnodeHead, mnt), 48);
             assert_eq!(core::mem::offset_of!(VnodeHead, cache_pages), 72);
             assert_eq!(core::mem::offset_of!(VnodeHead, cache_dirty_tail), 88);
+            assert_eq!(core::mem::offset_of!(VnodeHead, cache_dirty_root), 96);
         }
     }
 
@@ -2266,6 +2455,124 @@ mod tests {
             assert_eq!(b, &mut pool[1] as *mut _);
             let _ = a20_pagecache_free_take(&mut free, head);
             assert!(a20_pagecache_free_take(&mut free, head).is_null());
+        }
+    }
+
+    // Structural checks are independent of the rotation implementation. The
+    // C differential fixture separately compares all list/writeback semantics.
+    unsafe fn check_dirty_tree(vn: &VnodeHead, expected: usize) {
+        use std::collections::BTreeSet;
+        unsafe fn walk(p: *mut PageCachePage, parent: *mut PageCachePage,
+                       seen: &mut BTreeSet<usize>, keys: &mut Vec<u64>) -> usize {
+            if p.is_null() { return 1; }
+            assert!(seen.insert(p as usize), "cycle/duplicate tree membership");
+            assert_eq!(dirty_parent(p), parent);
+            assert_ne!((*p).dirty, 0);
+            if dirty_red(p) {
+                assert!(!dirty_red((*p).dirty_children[0]));
+                assert!(!dirty_red((*p).dirty_children[1]));
+            }
+            let left = walk((*p).dirty_children[0], p, seen, keys);
+            keys.push((*p).index);
+            let right = walk((*p).dirty_children[1], p, seen, keys);
+            assert_eq!(left, right, "black height");
+            left + (!dirty_red(p)) as usize
+        }
+        assert!(!dirty_red(vn.cache_dirty_root));
+        let mut seen = BTreeSet::new();
+        let mut keys = Vec::new();
+        walk(vn.cache_dirty_root, core::ptr::null_mut(), &mut seen, &mut keys);
+        assert_eq!(seen.len(), expected);
+        assert!(keys.windows(2).all(|p| p[0] <= p[1]));
+        let mut p = vn.cache_dirty_pages;
+        let mut prev = core::ptr::null_mut();
+        let mut count = 0;
+        while !p.is_null() {
+            assert!(seen.remove(&(p as usize)), "list membership differs");
+            assert_eq!((*p).dirty_prev, prev);
+            assert_eq!((*p).index, keys[expected - count - 1]);
+            prev = p;
+            p = (*p).dirty_next;
+            count += 1;
+        }
+        assert_eq!(prev, vn.cache_dirty_tail);
+        assert_eq!(count, expected);
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn dirty_rb_random_reinsert_and_arbitrary_removal() {
+        unsafe {
+            let mut vn = mk_vn();
+            let mut pages: Vec<_> = (0..257).map(|_| mk()).collect();
+            let mut head = core::ptr::null_mut();
+            let mut count = 0;
+            let mut state = 0x123456789abcdefu64;
+            for (i, p) in pages.iter_mut().enumerate() {
+                p.vnode = &mut vn as *mut _ as *mut c_void;
+                p.index = if i == 256 { u64::MAX } else { i as u64 * 0x100000001 };
+                p.valid = 1;
+            }
+            for _ in 0..30000 {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                let i = state as usize % pages.len();
+                let p = &mut pages[i];
+                if p.dirty == 0 {
+                    // Removed descriptors may be reused at another index;
+                    // include duplicates and both u64 endpoints as well.
+                    p.index = match (state >> 16) % 4 {
+                        0 => 0, 1 => u64::MAX, 2 => (state >> 24) % 16,
+                        _ => state,
+                    };
+                    a20_pagecache_dirty_insert(p, &mut head, &mut count);
+                    // Idempotence: already dirty does not relink either index.
+                    a20_pagecache_dirty_insert(p, &mut head, &mut count);
+                } else {
+                    a20_pagecache_dirty_remove(p, &mut head, &mut count);
+                    assert_eq!(p.dirty_parent_color, 0);
+                    assert!(p.dirty_children.iter().all(|p| p.is_null()));
+                    a20_pagecache_dirty_remove(p, &mut head, &mut count);
+                }
+                check_dirty_tree(&vn, count);
+            }
+            while !vn.cache_dirty_root.is_null() {
+                a20_pagecache_dirty_remove(vn.cache_dirty_root, &mut head, &mut count);
+                check_dirty_tree(&vn, count);
+            }
+            assert!(head.is_null());
+        }
+    }
+
+    #[test]
+    fn dirty_rb_large_ordered_reverse_and_interleaved() {
+        unsafe {
+            for order in 0..3 {
+                let mut vn = mk_vn();
+                let mut pages: Vec<_> = (0..16384).map(|_| mk()).collect();
+                let mut head = core::ptr::null_mut();
+                let mut count = 0;
+                for i in 0..pages.len() {
+                    let at = match order { 0 => i, 1 => pages.len() - i - 1,
+                                           _ => (i * 8191) % pages.len() };
+                    let p = &mut pages[at];
+                    p.vnode = &mut vn as *mut _ as *mut c_void;
+                    p.index = at as u64;
+                    p.valid = 1;
+                    a20_pagecache_dirty_insert(p, &mut head, &mut count);
+                    if i % 512 == 0 { check_dirty_tree(&vn, count); }
+                }
+                check_dirty_tree(&vn, count);
+                for i in 0..pages.len() {
+                    // Alternate min, max and root, including successor swaps.
+                    let p = match i % 3 { 0 => vn.cache_dirty_pages,
+                                         1 => vn.cache_dirty_tail,
+                                         _ => vn.cache_dirty_root };
+                    a20_pagecache_dirty_remove(p, &mut head, &mut count);
+                    if i % 512 == 0 { check_dirty_tree(&vn, count); }
+                }
+                check_dirty_tree(&vn, 0);
+                assert!(head.is_null());
+            }
         }
     }
 

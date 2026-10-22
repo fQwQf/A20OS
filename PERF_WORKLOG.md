@@ -127,3 +127,17 @@
 - **当前正在构建** dirty-rb内核，日志build/performance/dirty-rb-build.log；等完成复制到build/performance/dirty-rb.elf，再先运行fs/pagecache/mmap相关guest回归，之后yield-keep/dirty-rb AB/BA/AB三轮同dirty-config-v2对照。构建与性能实验不得重叠。
 
 - 20:55补充：dirty-rb构建完成，ELF4742cf56f4e055ffa1e75850fe6f5a87f61221bfa8566275541a7dfe400ba14b，保存在build/performance/dirty-rb.elf。**当前exec session82260**正在跑mm_stress、vfs_concurrency、FSYNC_TEST_DIR=/var的fsync_durability_test，证据perf-dirty-rb-regression，日志dirty-rb-regression.log。回归未完成前不启动同参数对照，候选仍未提交。
+
+## 2026-10-22 21:00 北京时间：dirty RB v2 正在复测
+
+- v1完整三对108样本全部成功：随机16384页中位32264→4693ns/page (-85.45%)，4096页8527→4387 (-48.55%)；但顺序1024/4096页+7.8%/+7.3%，不能忽略。原始v1 ELF、gitdiff和host日志已保存，尚未提交候选。
+- v2给严格高于头/低于尾的插入直接使用头尾叶子空child，不再从root搜索；中间插入仍RB O(log n)，writeback链表不动。额外host覆盖旧descriptor改index复用、重复keys及0/u64max；18tests+20万Cdiff通过。
+- 实际相同x86 C编译参数 sizeof page_cache_page_t 336→360、vnode_t296→304，记录build/performance/dirty-rb-layout/sizes.json。每2048初始descriptor额外48KiB、262144最大容量额外6MiB（对应1GiB数据缓存的0.59%）；按需池增长，不一次分配全部。MCU整体无pagecache，不加无用双实现。
+- **当前exec session93437**，日志build/performance/dirty-rb-v2-campaign.log：v2 guest mm/vfs-concurrency/fsync后自动旧yield-keep与dirty-rb-v2 AB/BA/AB三轮共108性能样本。目录perf-dirty-rb-v2-regression / perf-dirty-rb-v2-paired-*。不要在此阶段编译或并行性能实验。v2 ELF da7c3d85e2e9e23abfb1dab4ad86b29846d4c20ae2cccfcd4f9cfae5716bd085。
+- 等结束比较所有顺序、逆序、随机规模及ranges，收益确立后归档完整raw/gzip/CSV/JSON与源码、提交候选。若顺序仍小回退要明确报告权衡，不掩盖。
+
+## 2026-10-22 21:04 北京时间
+
+- dirty RB v2正式三对108样本完成并归档 dirty-index-2026-10-22*：随机1024/4096/16384页延迟-16.33%/-47.88%/-84.51%，三对均同向；大规模顺/逆序约持平。小规模逆序+4.25%/+6.08%已明确报告。
+- 额外fsync三对108样本全部成功，归档dirty-flush-2026-10-22*。随机16384页的fsync本身+7.01%，但写+fsync两段计时之和649.993→231.798ms(-64.34%)，三对均下降；4096随机合计-24.61%；顺/逆序合计-1.49%～+2.12%。校验、准备、close/unlink不在这两段内，不冒称端到端。
+- 18项host/20万差分及3项guest正确性已完成，候选准备提交。所有性能/构建进程已结束。下一项考虑brk/stack克隆range逐页扫描：mmap已经present walker，但mm_fork_clone_range仍逐地址；需保持DONTFORK/WIPEONFORK、dst already present和huge base语义。先新micro测untouched brk规模，不复用已冻结旧micro。
