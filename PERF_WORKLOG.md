@@ -48,3 +48,11 @@
 - 下一步先对当前内核重跑原七项 APK benchmark（5秒×3轮，两侧42样本），再考虑调度路径。计数关闭，构建不可与性能测量重叠。
 - yield 的低风险候选：`sched()` keep_current 和 late_ready 分支都先解开 park_lock，再重新获取同一锁调用 `rt_rr_dispatch_task(cur,timer_get_ticks())`，即使普通 EEVDF 任务也先求时间。可把 RR 检查/重置放进已有锁区间，仅 RR 任务采样时间。可以抽同一 helper 复用两处分支，但必须保留 W2 再检查、迁移/RT throttled 条件、on_rq 移除、IRQ状态和 park token；真实函数 seam 测试+SMP guest 压力后再衡量单线程 yield/原共享锁负载。
 - 不要贸然启用 x86 FSGSBASE 来减少 MSR：当前 GS/NMI 窗口检测依赖用户不能通过 WRGSBASE 写高位内核地址；CR4.FSGSBASE 会开放用户指令，必须先处理该安全不变量。暂不实施。
+
+## 当前正在进行：原七项 APK 回归
+
+- 判空优化已提交 `0886af84`。第一项提交 `63b56120`，前置基准提交 `228d5cb0`。
+- 已启动 `python3 tools/bench-apk-linux.py --build-dir build/performance/apk-input --image <repo>/build/images/benchmark-x86_64.img --out build/evidence/perf-mm-improved-apk --cpus 4,6 --seconds 5 --runs 3 --timeout 40`。
+- 输出 `build/performance/apk-mm-improved.log`，证据 `build/evidence/perf-mm-improved-apk`，预计数分钟。先检查该进程/manifest 是否完成，**未完成前不要编译或并行跑性能测量**。
+- `apk-input` 中 ELF symlink 指向已保存的 table-hint，FAT 指向原基线（只读使用），镜像由 runner 私有复制。
+- 下一次 heartbeat：等该阶段完成，核对42样本/指标/哈希；归档报告中相同 Linux 版本与新 A20 的数据，明确不能忽略宿主波动；之后推进上述 yield 候选。今夜午夜的截止约束仍有效，未完成部分如实记录，不需用户再次授权。
