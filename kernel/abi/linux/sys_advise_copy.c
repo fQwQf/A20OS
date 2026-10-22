@@ -103,6 +103,10 @@ int64_t sys_copy_file_range(int fd_in, long *off_in, int fd_out, long *off_out, 
 
 int64_t sys_splice(int fd_in, long *off_in, int fd_out, long *off_out, size_t len, unsigned flags)
 {
+    /* Linux returns 0 for an empty transfer before resolving descriptors or
+     * validating flags (ksys_splice's `if (!len) return 0`). */
+    if (len == 0)
+        return 0;
     if (flags & ~(SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE))
         return -EINVAL;
 
@@ -161,11 +165,15 @@ int64_t sys_vmsplice(int fd, const void *iov, unsigned long nr_segs, unsigned fl
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     int nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
-    return vmsplice_do((int)gfd, iov, (int)nr_segs, nonblock);
+    /* Pass the full 64-bit count through: truncating to int lets
+     * nr_segs = 2^32 + 1 look like one segment. */
+    return vmsplice_do((int)gfd, iov, nr_segs, nonblock);
 }
 
 int64_t sys_tee(int fd_in, int fd_out, size_t len, unsigned flags)
 {
+    if (len == 0)
+        return 0;
     if (flags & ~(SPLICE_F_NONBLOCK | SPLICE_F_MORE))
         return -EINVAL;
 

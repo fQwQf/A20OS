@@ -60,6 +60,9 @@ smoke-iommu-discovery:
 smoke-iommu-udriver-isolation:
 	$(PYTHON) tools/smoke.py smoke-iommu-udriver-isolation
 
+smoke-iommu-multidevice:
+	$(PYTHON) tools/smoke.py smoke-iommu-multidevice
+
 # Thin wrapper: the smoke definition lives in instances/smoke-loongarch64.toml.
 smoke-loongarch64:
 	tools/a20 test smoke-loongarch64
@@ -880,13 +883,14 @@ smoke-ahci-ich9:
 	errs=$$(last_counter ahci_errors); \
 	bound=$$(grep -c '\[AHCI\] device on port' "$$log" || true); \
 	if grep -q 'FSYNC_TEST: PASS' "$$log" && \
-	   grep -q 'completion=irq' "$$log" && \
+	   grep -q '\[MSI\].*enabled vector' "$$log" && \
+	   grep -q 'completion=irq(msi)' "$$log" && \
 	   [ "$$bound" -eq 1 ] && \
 	   [ "$$irq" -gt 0 ] && \
 	   [ "$$poll" -eq 0 ] && \
 	   [ "$$cmds" -gt 0 ] && \
 	   ! grep -qiE 'panic|assertion failed' "$$log"; then \
-		echo "smoke-ahci-ich9: PASS (one ich9-ahci port bound on the interrupt path;" \
+		echo "smoke-ahci-ich9: PASS (one ich9-ahci port bound on the MSI path;" \
 			 "$$cmds commands, $$irq of them completed through the IRQ top-half, $$poll via polling); log saved to $$log"; \
 		echo "  recorded, not asserted: ahci_irq_wakeups=$$wake ahci_park_rounds=$$park ahci_errors=$$errs"; \
 		grep -E '^\[AHCI\]' "$$log" || true; \
@@ -933,6 +937,9 @@ smoke-io-event:
 
 smoke-syscall-ext:
 	$(PYTHON) tools/smoke.py smoke-syscall-ext
+
+smoke-syscall-ext-smp2:
+	$(PYTHON) tools/smoke.py smoke-syscall-ext-smp2
 
 smoke-sched-stress:
 	$(PYTHON) tools/smoke.py smoke-sched-stress
@@ -1005,6 +1012,9 @@ smoke-cpuinfo:
 .PHONY: smoke-sigchld-group
 smoke-sigchld-group:
 	$(PYTHON) tools/smoke.py smoke-sigchld-group
+
+smoke-child-exit-matrix:
+	$(PYTHON) tools/smoke.py smoke-child-exit-matrix
 
 smoke-scm-stress:
 	$(PYTHON) tools/smoke.py smoke-scm-stress
@@ -1991,6 +2001,146 @@ smoke-net-e1000-irq:
 		echo "  log saved to $$log; tail:"; \
 		tail -n 60 "$$log"; \
 		exit 1; \
+	fi
+
+# ---------------------------------------------------------------------------
+# smoke-net-e1000e-msix -- packet traffic carried on the MSI-X vectors
+# ---------------------------------------------------------------------------
+# The e1000 gate above runs QEMU's 82540EM, which has no MSI-X capability, so it
+# only ever proves the legacy cause bits.  The 82574L ("e1000e") is the part that
+# has MSI-X, and with MSI-X enabled its receive/transmit write-backs are reported
+# as RXQ0/TXQ0 rather than RXT0/TXDW.  A driver that announces MSI-X but enables
+# only the legacy bits receives nothing and lets the stack's poll hook hide it.
+#
+# This gate therefore asserts three independent facts: the IVAR mapping was
+# programmed, both table entries fired (RX on one, TX on the other), and the
+# existing per-cause counters grew.  Traffic shape and host probe are the e1000
+# gate's; only the model and port differ.
+smoke-net-e1000e-msix:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	build_dir=$$($(MAKE) --no-print-directory ARCH=x86_64 print-build-dir); \
+	log="$(SMOKE_LOG_DIR)/net-e1000e-msix-x86_64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_E1000); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18093 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_E1000) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$$build_dir/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18093-10.0.2.15:18093 \
+		-device e1000e,netdev=net \
+		-kernel $$build_dir/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/e1000_host_probe.py 18093 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter e1000_irq_calls); \
+	irq_rx=$$(last_counter e1000_irq_rx); \
+	irq_tx=$$(last_counter e1000_irq_tx); \
+	tx_reclaimed=$$(last_counter e1000_tx_reclaimed); \
+	rx_drained=$$(last_counter e1000_rx_drained); \
+	ready_line=$$(grep -m1 '\[E1000\] ready:' "$$log" || true); \
+	ivar_line=$$(grep -m1 '\[E1000\] MSI-X IVAR:' "$$log" || true); \
+	vec_line=$$(grep -m1 '\[E1000\] MSI-X vectors carried traffic:' "$$log" || true); \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the host never completed the port forward"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || true; \
+		echo "  log saved to $$log"; exit 1; \
+	elif ! printf '%s' "$$ready_line" | grep -q '(msix)'; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the driver did not arm MSI-X"; \
+		echo "    $${ready_line:-<absent>}"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif printf '%s' "$$ready_line" | grep -q 'dataplane=polling'; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the driver fell back to polling"; \
+		echo "    $$ready_line"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif [ -z "$$ivar_line" ] || [ -z "$$vec_line" ]; then \
+		echo "smoke-net-e1000e-msix: FAIL -- the vector table was armed but did not carry traffic"; \
+		echo "  IVAR: $${ivar_line:-<absent>}"; \
+		echo "  vectors: $${vec_line:-<absent: no per-vector counts>}"; \
+		echo "  counters: irq_calls=$$irq_calls irq_rx=$$irq_rx irq_tx=$$irq_tx"; \
+		echo "  log saved to $$log"; exit 1; \
+	elif grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" && \
+	     [ "$$irq_rx" -gt 0 ] && [ "$$irq_tx" -gt 0 ] && \
+	     [ "$$tx_reclaimed" -gt 0 ] && [ "$$rx_drained" -gt 0 ] && \
+	     ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-e1000e-msix: PASS (hostfwd round trip 18093 through the 82574L;" \
+			 "$$irq_rx RX-cause and $$irq_tx TX-cause interrupts, $$rx_drained descriptors drained," \
+			 "$$tx_reclaimed released); log saved to $$log"; \
+		echo "    $$ready_line"; \
+		echo "    $$ivar_line"; \
+		echo "    $$vec_line"; \
+	else \
+		echo "smoke-net-e1000e-msix: FAIL (status=$$status probe=$$probe irq_rx=$$irq_rx irq_tx=$$irq_tx" \
+			 "tx_reclaimed=$$tx_reclaimed rx_drained=$$rx_drained)"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (no TCP_ACCEPT_TEST line)"; \
+		echo "  log saved to $$log; tail:"; tail -n 60 "$$log"; exit 1; \
+	fi
+
+# ---------------------------------------------------------------------------
+# smoke-net-e1000-i440fx-intx -- legacy INTx through the PIIX3 PIRQ links
+# ---------------------------------------------------------------------------
+# The q35 gate above routes INTx straight into the IOAPIC (level/low).  i440fx
+# goes through the PIIX3 PIRQ links instead: firmware picks a link for the
+# slot, QEMU forwards its level to an ISA IRQ, and the kernel has to read the
+# link route and program the IOAPIC entry with ISA trigger/polarity.  This gate
+# proves the whole path delivers packets; without it "PIRQ programmable" would
+# only mean the config byte reads back.
+smoke-net-e1000-i440fx-intx:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	build_dir=$$($(MAKE) --no-print-directory ARCH=x86_64 print-build-dir); \
+	log="$(SMOKE_LOG_DIR)/net-e1000-i440fx-intx.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_E1000); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18100 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_E1000) qemu-system-x86_64 \
+		-machine pc -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$$build_dir/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18100-10.0.2.15:18100 \
+		-device e1000,netdev=net \
+		-kernel $$build_dir/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/e1000_host_probe.py 18100 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter e1000_irq_calls); \
+	irq_rx=$$(last_counter e1000_irq_rx); \
+	irq_tx=$$(last_counter e1000_irq_tx); \
+	ready_line=$$(grep -m1 '\[E1000\] ready:' "$$log" || true); \
+	intx_line=$$(grep -m1 '\[PCI\] INTx .*i440fx PIRQ' "$$log" || true); \
+	if [ "$$probe" -ne 0 ] || [ -z "$$intx_line" ] || \
+	   ! grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" || \
+	   [ "$$irq_calls" -le 0 ] || [ "$$irq_rx" -le 0 ] || [ "$$irq_tx" -le 0 ] || \
+	   grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-e1000-i440fx-intx: FAIL (status=$$status probe=$$probe irq_calls=$$irq_calls irq_rx=$$irq_rx irq_tx=$$irq_tx)"; \
+		grep -E '\[PCI\] INTx|\[E1000\]|TCP_ACCEPT' "$$log" || true; \
+		echo "  log saved to $$log; tail:"; tail -n 40 "$$log"; exit 1; \
+	else \
+		echo "smoke-net-e1000-i440fx-intx: PASS (hostfwd round trip through i440fx PIRQ INTx;" \
+			 "$$irq_calls interrupts, $$irq_rx RX and $$irq_tx TX causes); log saved to $$log"; \
+		echo "    $$intx_line"; \
+		echo "    $$ready_line"; \
 	fi
 
 # ---------------------------------------------------------------------------

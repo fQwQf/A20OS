@@ -46,7 +46,7 @@
 	step7-rv-release-8c step7-la-release-8c \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c _step35_smoke
-.PHONY: _release_build _release_disk smoke-usb-x86_64
+.PHONY: _release_build _release_disk smoke-usb-x86_64 smoke-usb-hotplug-x86_64
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -217,6 +217,23 @@ smoke-socket-stress:
 smoke-driver-lifecycle:
 	$(PYTHON) tools/smoke.py smoke-driver-lifecycle
 
+smoke-pirq-i440fx:
+	$(PYTHON) tools/smoke.py smoke-pirq-i440fx
+
+# DRIVER-02: same injected growth-failure paths on every architecture that has
+# a runnable bringup kernel here, and with two CPUs online.
+smoke-driver-lifecycle-x86_64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-x86_64
+
+smoke-driver-lifecycle-aarch64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-aarch64
+
+smoke-driver-lifecycle-loongarch64:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-loongarch64
+
+smoke-driver-lifecycle-smp2:
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle-smp2
+
 # Platform-bus IRQ resource channel: a synthetic platform device that published a
 # RES_IRQ is claimed, served by a simulated dispatch and released, and one that
 # published none falls back to polling.  No dw-mshc model exists in QEMU, so
@@ -251,6 +268,9 @@ smoke-audio-userspace:
 
 smoke-usb-x86_64:
 	$(PYTHON) tools/smoke.py smoke-usb-x86_64
+
+smoke-usb-hotplug-x86_64:
+	$(PYTHON) tools/smoke.py smoke-usb-hotplug-x86_64
 
 smoke-virtio-sound:
 	$(PYTHON) tools/smoke.py smoke-virtio-sound

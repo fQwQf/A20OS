@@ -54,6 +54,9 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
 int pci_intx_irq(const device_t *dev);
 int pci_user_device_find(uint16_t vendor, uint16_t device,
                          pci_user_device_info_t *out);
+/* Nth (zero-based) matching function.  pci_user_device_find() is index 0. */
+int pci_user_device_find_index(uint16_t vendor, uint16_t device,
+                               unsigned index, pci_user_device_info_t *out);
 int pci_user_device_bus_master(uint16_t devid, int enable);
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end);
 /* Reconcile ECAM with the published PCI device set.  Call only from process

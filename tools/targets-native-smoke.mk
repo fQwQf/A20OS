@@ -149,6 +149,25 @@ native-linux-arch: $(NATIVE_LINUX_BIN)
 native-linux-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-linux-arch
 
+# Native twin of /bin/abi_behavior: the same normalized operation set through
+# raw Native primitives, printed as identical ABI_BEHAVIOR lines.
+define NATIVE_ABI_BEHAVIOR_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) -Iuser -Iuser/liba20rt -T$(NATIVE_LD) \
+    $(3) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_abi_behavior.c $(NATIVE_LIBS) -o $(4)
+endef
+
+$(NATIVE_ABI_BEHAVIOR_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+		user/tests/test_native_abi_behavior.c user/liba20rt/a20_personality.h
+	$(call NATIVE_ABI_BEHAVIOR_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-abi-behavior-arch: $(NATIVE_ABI_BEHAVIOR_BIN)
+
+native-abi-behavior-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-abi-behavior-arch
+
 native-ubd-arch: $(NATIVE_UBDD_BIN)
 
 native-ubd-rv:
@@ -243,6 +262,18 @@ smoke-native-cluster:
 
 smoke-native-personality:
 	$(PYTHON) tools/smoke.py smoke-native-personality --arch $(ARCH)
+
+# ABI-01/ABI-03: identical normalized fixture on the Linux and Native
+# personalities, checked against one independent expectation.
+smoke-abi-behavior-both:
+	$(PYTHON) tools/smoke.py smoke-abi-behavior-both
+
+smoke-abi-behavior-linux:
+	$(PYTHON) tools/smoke.py smoke-abi-behavior-linux
+
+# ABI-02: the full malformed-ACK matrix on the reserved AArch64 ABI.
+smoke-idl-ack-aarch64:
+	sh tools/run-idl-ack-matrix.sh aarch64
 
 smoke-native-linux:
 	$(PYTHON) tools/smoke.py smoke-native-linux --arch $(ARCH)

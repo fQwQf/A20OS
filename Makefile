@@ -189,6 +189,7 @@ XLATOR_SUPPORTED_ARCHES := $(TRIM_CAP_XLATOR_ARCHES)
 # and the gate invocations keep working unchanged.
 CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
 CONFIG_PLATFORM_IRQ_TEST ?= 0
+CONFIG_PCI_PIRQ_TEST ?= 0
 CONFIG_CHANNEL_DONATE_TEST ?= n
 CONFIG_HDA_SMOKE_TEST ?= 0
 CONFIG_NVME_SMOKE_TEST ?= 0
@@ -912,7 +913,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1201,6 +1202,7 @@ NATIVE_UFSD_BIN        := $(NATIVE_BUILD_DIR)/ufsd-$(NATIVE_TAG)
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
 NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
+NATIVE_ABI_BEHAVIOR_BIN := $(NATIVE_BUILD_DIR)/native-abi-behavior-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
 NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
@@ -1238,6 +1240,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UEDUD_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
+                          $(NATIVE_ABI_BEHAVIOR_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
                           $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \
@@ -2166,6 +2169,11 @@ endif
 # IRQ line, so it is a gate build and not a shipping default.
 ifeq ($(CONFIG_PLATFORM_IRQ_TEST),y)
 CFLAGS += -DCONFIG_PLATFORM_IRQ_TEST
+endif
+
+# i440fx PIRQ write/readback self-check (smoke-pirq-i440fx).
+ifeq ($(CONFIG_PCI_PIRQ_TEST),y)
+CFLAGS += -DCONFIG_PCI_PIRQ_TEST
 endif
 
 # Deterministic regression hook for the channel-call deferred-wake fallback.

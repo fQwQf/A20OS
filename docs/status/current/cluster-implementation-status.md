@@ -465,7 +465,7 @@ SMP 边界和 11 项新配置拒绝检查通过。全仓格式门禁仍有 114 �
 [25-native-shared-kernel.md](../../cluster/25-native-shared-kernel.md)。
 后续仍需真实多 MCU 验收、用户程序执行、设备/IRQ 所有权、JVM 和图形输入
 栈；当前没有启动真实 Minecraft Java 客户端，目标尚未完成，应用验收见
-[../../cluster/24-single-system-minecraft.md](../../cluster/../../cluster/24-single-system-minecraft.md)。
+[../../cluster/24-single-system-minecraft.md](../../cluster/24-single-system-minecraft.md)。
 
 ## 26. FSMC 桥、推导 RAM 与完整固件联合仿真
 
@@ -814,7 +814,7 @@ pthread 程序已验证 TLS/栈保持、64 轮权限切换、128 次实际保护
 共享内核新增通用设备 owner 调用入口；次 QEMU 不创建串口时，CPU 1 上的普通
 Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x86_64/AArch64/RV64
 四端点并发用例中各通过 80000 次调用。机制、进度约束和未完成的磁盘/图形/JVM
-部分见 [../../cluster/56-shared-device-owner.md](../../cluster/../../cluster/56-shared-device-owner.md)。
+部分见 [../../cluster/56-shared-device-owner.md](../../cluster/56-shared-device-owner.md)。
 
 共享设备机制已接入通用驱动 MMIO。只有主实例挂载磁盘的双 QEMU 中，CPU 1
 内核线程及 Linux 用户程序已完成真实 virtio-blk 读写、flush 和回读；宿主在
@@ -825,7 +825,7 @@ Linux 程序已通过主实例唯一串口收发。相同生产请求队列在 x
 已进一步验证 CPU 1 挂载主实例磁盘上的 ext4 并 exec 磁盘程序，真实文件与
 目录 fsync、重命名、回读、卸载及宿主独立检查通过。测试发现并修复了既有
 ext4 校验和/空闲计数问题，也修正了只看 e2fsck 退出码的验收漏洞。三种
-文件系统格式和普通 SMP 对照见 [58](../../cluster/../../cluster/58-shared-filesystem-execution.md)。
+文件系统格式和普通 SMP 对照见 [58](../../cluster/58-shared-filesystem-execution.md)。
 
 现已在双 QEMU 共享内核中启动真实 OpenJDK 21，并运行同一 JVM 的两个 Java
 线程：16 次亲和性检查、512 个动态领取任务、实际 CPU 掩码 3，总和一致，
@@ -914,3 +914,82 @@ Minecraft 已经可用，亦没有普通模式性能基准来支持整体零性�
 后续文件系统挂载、从磁盘 exec 和真实文件 fsync 已推进至
 [58](../../cluster/58-shared-filesystem-execution.md)。JVM、图形和 Minecraft 跨实例验收
 尚未完成。
+
+## CLUSTER 1.0 关闭记录（2026-10-22）
+
+### 服务、对象与应用故障矩阵
+
+三个真实内核（RV64、AArch64、x86_64）现在执行同一组真实 ELF 故障用例。
+宿主只转发、丢弃或重启真实帧/进程，不代替 guest 判定：
+
+| 故障 | guest 实际检查 |
+|---|---|
+| START 回复丢失 | 超时后 resume 原 ticket 得到 RUNNING 与原 root；显式重试同一键得到同一任务 |
+| owner 在结果未知时死亡 | 旧 ticket `EXPIRED`；新 owner 的 occupied/active 为零；新 start 只执行一次 |
+| 网络分区 | query 在预算内超时；恢复后同一 ticket 找到同一 controller/root 并正常退出 |
+| 成员在启动前不可达 | 三候选 placement 跳过不可达成员，存活 owner 只执行一次 |
+| 目录服务不可达 | query 超时而不是 `RETIRED`；恢复后同一对象名重新打开为 LIVE |
+| 目录进程重启 | 旧引用关闭；空目录不自动恢复；发布者显式重新发布后同一对象可打开 |
+| 最终回收 | `/proc/a20/task_lifetime` 的 task objects 回到基线、zombies/lifetime errors 为零，集群 export/proxy/inflight/重组归零；service death 后 owner 节点的 task objects 也回到被杀前的基线 |
+
+对应入口：
+
+```sh
+make check-cluster-apps
+make check-cluster-objects
+make check-cluster-unit
+PATH=<arm-none-eabi toolchain>:$PATH \
+    python3 tools/check-object-directory-portability.py --kind apps
+```
+
+本轮实际结果：`check-cluster-apps` 在 RV64/AArch64/x86_64 上通过，新增
+`service-death`、`partition`、`member-fail`、`recovered` 标记；真实
+`APP-WORK` 计数为 32/9/18，主动丢弃 6 个 START 回复（其中 2 个属于
+owner 死亡场景；重试次数随宿主调度变化，检查器只要求至少一次）。`check-cluster-objects` 在同一三内核上通过
+`partition`、`service-death`、`recovered`。`check-cluster-unit` 通过。
+`check-object-directory-portability.py --kind apps` 的 x86_64、
+AArch64、RISC-V64 实际执行与 x86_64 ASan/UBSan 通过，ARMv7-M/RV32
+freestanding 编译通过（使用隔离解包在 `/tmp` 的 ARM 工具链，未改系统安装）。
+
+`make check-mcu-program-rtl` 的固件构建当前被
+[DELIVERY-06](../gaps/delivery.md) 阻塞：`tools/rust-kernel.mk` 在
+`ARCH=armv7m` 且 `CONFIG_FLAT_USER_MEMORY=1` 时没有 flat-policy Rust
+target。该门禁不是 cluster 断言失败，本轮没有把它记为通过；MCU 侧仍是
+指令/RTL 模型证据，不替代物理板。
+
+### 四节点负载契约
+
+`tools/check-cluster-load.py` 现在按 [21-performance.md](../../cluster/21-performance.md)
+的参考契约判定：每方向 admitted SEND/s 不低于 `--min-rate`，且
+`submitted == delivered`、重复/坏帧为零、结束时资源归零。本轮实测：
+
+| 运行 | 每方向 admitted SEND/s | 结果 |
+|---|---:|---|
+| 60 s 无丢包 | 124.833–139.467 | PASS |
+| 600 s 无丢包 | 120.578–125.512 | PASS |
+| 300 s 10% 丢包 | 68.397–73.163 | PASS（floor 25） |
+
+早期 `>10000 条/秒` 目标已按缺口台账允许的“有依据的契约”替换，不再作为
+1.0 验收线；8 小时连续运行与物理板吞吐仍按下一节的边界披露。
+
+### 物理边界（明确未验证）
+
+本轮 CLUSTER 验收全部是 QEMU TCG 加主机进程 leaf。以下不能由 QEMU 确立，
+随 1.0 候选明确披露：
+
+- 真实 STM32 或其他 MCU 的时钟/时序、电气行为、总线一致性、FSMC/fabric
+  仲裁波形与掉电时刻；Verilator/RTL 和指令模拟不是物理板证据。
+- 真实 MCU 的 Flash/RAM/堆/栈资源高点与持久身份 journal 的实际掉电行为。
+- 物理交换机/线缆下的 MTU、分片、丢包模式与 8 小时连续运行。
+- 多物理板共享 RAM 的缓存维护、整域复位与热插拔。
+
+物理驱动接口与内存布局检查保留；QEMU 的双/三/四节点结果不能外推为
+物理部署的吞吐或时延承诺。这些边界不阻塞其他 1.0 工作，也不改写为
+“已通过”。
+
+### 跨重启语义范围
+
+[62-release-scope.md](../../cluster/62-release-scope.md) 明确排除跨重启
+exactly-once、运行中进程自动迁移与 controller 故障自动接管。1.0 只承诺
+当前 owner/会话/启动内的至多一次可见执行与结果查询；重启后的旧 ticket
+失败关闭为 `EXPIRED`。

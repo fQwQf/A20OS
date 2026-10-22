@@ -65,6 +65,9 @@ STALE/EXPIRED。回收空槽还能先于尚未到达的首次 START 取消该执
 回收不是持久化。断电/控制进程重启仍按已有真实 controller/boot_epoch 失效
 规则处理。没有自动清理无人确认的终态，也不自动回收仍存活或 LOST 的任务；
 无人持有 ticket 的记录可能继续占用容量，后续仍需显式托管/恢复策略。
+跨重启 exactly-once 与自动迁移已由
+[62-release-scope.md](62-release-scope.md) 明确排除出 1.0；这里的持续复用
+只覆盖当前 controller 生命周期。
 
 ## CA/2 线格式
 

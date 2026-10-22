@@ -1,5 +1,7 @@
 # Milk-V Duo（SophGo CV1800B）
 
+> **1.0 范围（2026-10-22）**：本板移出 1.0 运行矩阵。没有板卡，SD/eMMC 与 GMAC 驱动无法在实体板上验证；源码、构建目标与本文档保留，不再作为 1.0 启动/存储/网络能力的验收对象。硬件到位后可重新立项。
+
 `ARCH=riscv64 BOARD=milk-v-duo`
 
 约 10–13 美元。与 [LicheeRV Nano](licheerv-nano.md) 同属 SophGo IP 家族、同一条启动链，但有一个决定性

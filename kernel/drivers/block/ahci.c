@@ -2,6 +2,7 @@
 
 #include "drivers/block/ahci.h"
 #include "drivers/bus/pci_bus.h"
+#include "drivers/bus/pci_msi.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
@@ -123,6 +124,7 @@ typedef struct __attribute__((aligned(1024))) ahci_port {
     uint32_t last_is;
     int irq;
     int irq_registered;
+    int msi;                  /* the registered line is an MSI vector */
     wait_queue_t waiters;
     /* Sleepable mutex: the IRQ handler never takes it, and the command
      * wait path parks while holding it. */
@@ -502,6 +504,51 @@ static int ahci_irq_handler(int irq, void *priv) {
     return 0;
 }
 
+/* Claim the completion interrupt, preferring MSI when the function publishes
+ * capability 0x05.  A platform whose arch message hooks refuse MSI leaves the
+ * capability disabled and the caller's INTx line is used; if registration of
+ * the vector itself fails, the vector is returned and INTx is tried once.
+ *
+ * Order: MSI -> INTx -> polling.  AHCI has no MSI-X capability, so the MSI-X
+ * step of the policy is absent on this device rather than skipped silently.
+ * Returns 0 when a handler is installed. */
+static int ahci_claim_irq(device_t *dev, ahci_port_t *port, int intx_irq)
+{
+    int irq = intx_irq;
+    int msi = 0;
+    if (dev->bus == &pci_bus) {
+        int vec = irq_alloc_vectors(1);
+        if (vec >= 0) {
+            if (pci_msi_enable(dev, (uint32_t)vec) == 0) {
+                irq = vec;
+                msi = 1;
+            } else {
+                irq_free_vectors((uint32_t)vec, 1);
+            }
+        }
+    }
+    if (irq >= 0 &&
+        request_irq((uint32_t)irq, ahci_irq_handler,
+                    msi ? 0 : IRQF_SHARED, port) == 0) {
+        port->irq = irq;
+        port->irq_registered = 1;
+        port->msi = msi;
+        return 0;
+    }
+    if (msi) {
+        pci_msi_disable(dev);
+        irq_free_vectors((uint32_t)irq, 1);
+        if (intx_irq >= 0 &&
+            request_irq((uint32_t)intx_irq, ahci_irq_handler,
+                        IRQF_SHARED, port) == 0) {
+            port->irq = intx_irq;
+            port->irq_registered = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int ahci_wait_link(ahci_port_t *port) {
     uint32_t ssts = 0;
     for (unsigned ms = 0; ms < AHCI_TIMEOUT_MS; ms++) {
@@ -653,24 +700,18 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
 
     if (force_poll) {
         printf("[AHCI] a20.ahci.poll=1; completion path stays in polling\n");
+    } else if (ahci_claim_irq(dev, port, irq) == 0) {
+        /* Unmask the port and the host only with the handler in place.
+         * PxIE stays 0 until here: an HBA asserting a line with nobody
+         * clearing its source storms the CPU.  Enabling every port bit
+         * (DPS/DSE/PRDIE/TF...) rather than a narrow set is what makes the
+         * wait independent of which bit a given HBA raises for which
+         * command. */
+        ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
+        writel(AHCI_GHC_AE | AHCI_GHC_IE,
+               ahci_reg(port->host_regs, AHCI_GHC));
     } else if (irq >= 0) {
-        if (request_irq((uint32_t)irq, ahci_irq_handler, IRQF_SHARED,
-                        port) == 0) {
-            port->irq = irq;
-            port->irq_registered = 1;
-            /* Unmask the port and the host only with the handler in place.
-             * PxIE stays 0 until here: an HBA asserting a shared level line
-             * with nobody clearing its source storms the CPU.  Enabling every
-             * port bit (DPS/DSE/PRDIE/TF...) rather than a narrow set is what
-             * makes the wait independent of which bit a given HBA raises for
-             * which command. */
-            ahci_write(port, AHCI_PXIE, 0xFFFFFFFFU);
-            writel(AHCI_GHC_AE | AHCI_GHC_IE,
-                   ahci_reg(port->host_regs, AHCI_GHC));
-        } else {
-            printf("[AHCI] failed to register IRQ %d; polling enabled\n",
-                   irq);
-        }
+        printf("[AHCI] failed to register IRQ %d; polling enabled\n", irq);
     }
 
     port->block.read_sector = ahci_block_read;
@@ -684,7 +725,8 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
     printf("[AHCI] device on port %u, capacity=%lu sectors%s completion=%s\n",
            port->port_no, (unsigned long)port->capacity,
            port->read_only ? ", writes blocked" : "",
-           port->irq_registered ? "irq" : "poll");
+           port->irq_registered ? (port->msi ? "irq(msi)" : "irq(intx)")
+                                : "poll");
     return 0;
 
 fail:
@@ -729,6 +771,10 @@ static int ahci_remove(device_t *dev) {
     ahci_write(port, AHCI_PXIE, 0);
     if (port->irq_registered) {
         free_irq((uint32_t)port->irq, port);
+        if (port->msi) {
+            pci_msi_disable(dev);
+            irq_free_vectors((uint32_t)port->irq, 1);
+        }
         writel(AHCI_GHC_AE,
                ahci_reg(port->host_regs, AHCI_GHC));
     }
