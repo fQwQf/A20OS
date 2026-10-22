@@ -275,3 +275,11 @@
 - 只在性能工作区临时叠加该tree的tracked修改构建，然后finally还原全部源文件，main从未改变。组合ELF3c181659fbbae6e756bd874a54c4d51570a9ea048daa015fafa5b30daf9ac7a0通过相同九项guest回归；session12018结束，无本任务运行进程。
 - 注意默认.kernel-build/kernel.elf当前为组合3c1816（构建缓存也为组合flags），不是性能HEAD单独的a0cb7d。已保存prospective-merge/kernel.elf，源文件均恢复HEAD且git clean；正式性能数据仍对应各自冻结ELF。保留main用户本地实现为未提交状态，不把其补丁提交到性能分支。
 - 午夜finalize-main.py会保存这份实际组合kernel及全部忽略runtime，并保留main原有tracked/untracked工作。接下来只做归档、preflight、时间/进程检查与等待，不再新实验。
+
+## 2026-10-23 00:01 北京时间：按授权合并并完成清理
+
+- UTC16:00:10截止后执行主工作区备份与合并：main从41f06061快进至性能分支cdc44c63，未开始新实验。
+- 原有tracked本地修改恢复后的tree精确等于预检三方合并tree 21b6420d057721f1dd5503bb17f4c08fd717e53b；四个独立untracked文件逐字节恢复并复核。16份与性能分支新增文件重名的旧untracked版本另存原文，不覆盖更新后的工具/基线；原stash保留供恢复。
+- 完整忽略runtime、回退ELF、组合内核、原基准world/FAT、Linux kernel/initrd和可用的重写路径manifest保存于主checkout build/a20-performance-20261022。基准三个输入与原hash全部一致，Linux两个boot文件也与原hash一致；premerge目录保留原tracked/staged patch和untracked tar。
+- 附着a20-performance worktree已通过managed archive移除，Git worktree列表中不再存在，checkout路径已删除；已合并分支perf/a20-performance删除。main仍保留用户原有未提交工作，没有顺手提交无关修改；本条只提交性能工作日志。
+- 最终验证见报告21节：性能集成九项guest通过；与现有本地修改的组合另有九项guest通过、页缓存20项Rust/20万差分通过。失败/不一致实验保留原始证据并回退。未推送或部署。
