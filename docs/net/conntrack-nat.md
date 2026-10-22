@@ -40,19 +40,15 @@ entries 逐档取自 `net_profile.h:177`（EMBEDDED）、`:455`（DEFAULT）、`
 这张表每次引导都付，不管 netfilter 有没有被加载过，所以它的天花板属于档位的内存
 预算，而不是一个没人开启的功能（见「EMBEDDED 达标」那一节）。
 
-每条**上限** 64 字节（`NET_PROFILE_CONNTRACK_ENTRY_BYTES`，`net_profile.h:486-487`），
-由 `_Static_assert` 钉住（`netfilter_nat.c:44`），将来加字段撑破档位预算是编译错误，
-不是静悄悄变大的 `.bss`。
-
-**实测 sizeof 现在正好是 64 字节，即上界，本档的 filter 项没有余量。** `810e9e431`
-给条目加了 `icmp_off` / `icmp_type` / `icmp_id` 三个字段（`netfilter.h:281-284`），
-结构体从 56 涨到 64：原布局排到 `rhash_next` 是 52 B，尾部补齐到 56；加 5 B 后是 57 B，
-因含 `uint64_t` 而按 8 对齐，补到 64。于是 EMBEDDED 档的 filter 项是
-32×64 + 16×80 = **3328 B，正好等于** `NET_PROFILE_FILTER_BUDGET`
-（`netfilter_nat.c:561` 的断言取 `<=`，所以仍然通过）。**再加一个字节到条目上，
-EMBEDDED 档就编译不过**——这个方向是好的，但要知道余量已经归零。
-注意 `netfilter_nat.c:554-556` 那条预算注释仍写着旧的 "32 entries x 56 B … = 3072 B"，
-它没有跟着 `810e9e431` 一起更新，**以本行的编译期实测为准**。
+每条**上限** 64 字节（`NET_PROFILE_CONNTRACK_ENTRY_BYTES`），由 `_Static_assert`
+钉住（`netfilter_nat.c:59` 固定实测布局为 56 B，`:95` 再对档位上限取 `<=`），将来加
+字段撑破档位预算是编译错误，不是静悄悄变大的 `.bss`。**实测 sizeof 是 56 字节，
+不是 64**：结构体排到 `rhash_next` 是 52 B，按 8 对齐补到 56。ICMP echo 的 type/id
+直接归一化进 `src_port`/`dst_port` 元组（echo 回程只交换地址、不交换字段），没有
+独立的 `icmp_off`/`icmp_type`/`icmp_id` 字段；早先文档里"条目已涨到 64 B、余量为零"
+的说法基于一个不在当前树里的布局，已作废。EMBEDDED 的 filter 项实测
+32×56 + 32×40 = **3072 B**，对 3328 B 的 `NET_PROFILE_FILTER_BUDGET` 仍有 256 B 余量
+（`netfilter_nat.c` 的断言取 `<=`）。
 另两条断言钉住 `NET_CONNTRACK_MAX < NET_CONNTRACK_NONE` 与
 `NET_CONNTRACK_MAX % NET_CONNTRACK_BUCKETS == 0`（`:46-48`）——后者是回程链按下标
 取桶的前提，不成立会静默取错桶头。
@@ -151,15 +147,20 @@ natadd out proto=tcp dport=80    action=masquerade
   地址改写不必动它——这一点是"只翻地址"能成立的前提，不是省事。
   另外 ICMP 超时走 **UDP 的空闲超时**而不是 TCP 的：echo 是无连接协议，回程时间由对方
   决定，没有握手可据以判断"新建"状态，用 connect 超时去计它是在陈述一个它没有的握手。
-- **ICMP 差错报文本身不被翻译。** 按 RFC 5508 NAT 应当改写差错报文内嵌报文的五元组并
-  重算 ICMP 校验和，这里不改；于是一端从对端收到的差错报文里看到的是翻译后的地址，
-  内层校验和对不上，通常整条报文被丢。这是上面第一条的另一面：既不认领，也不还原。
-- **没有 ALG。** 无 FTP/SIP/ISAKMP 载荷检查，地址写在报文体里的协议只翻头部，控制通道
-  不会跟着走。
-- **不分片 NAT。** 无分片包和首片会翻；非首片没有端口，既无元组可索引也无头部可改，直接
-  放行——选择放行而不是"记条目但不翻译"，因为后者会让条目看起来有状态而实际转换是残的。
-  被分片的流因此可能被静默弄坏。**分片的 echo 属于这一类**：解析器只在未分片的包上认出
-  echo 类型，所以它既不被跟踪也不被翻译。
+- **ICMP 差错报文本身不被翻译（设计边界，PMTU 因此不可用）。** 按 RFC 5508 NAT 应当
+  改写差错报文内嵌报文的五元组并重算 ICMP 校验和，这里不改；于是一端从对端收到的差错
+  报文里看到的是翻译后的地址，内层校验和对不上，通常整条报文被丢。这是上面第一条的
+  另一面：既不认领，也不还原。**要实现它，仅仅改 NAT 还不够**：vendored lwIP 的
+  `icmp_input()` 默认分支直接丢弃入站 ICMP 差错（只生成出站差错），所以即使翻译正确，
+  TCP 也拿不到 PMTU 更新。因此这条被明确记录为边界，而不是留一个半成品。
+- **没有 ALG（设计边界）。** 无 FTP/SIP/ISAKMP 载荷检查，地址写在报文体里的协议只翻
+  头部，控制通道不会跟着走。
+- **不分片 NAT（设计边界）。** 首片（offset 0，MF=1）仍带端口，会被解析、跟踪并翻译；
+  非首片没有端口，既无元组可索引也无头部可改，直接放行。选择放行而不是"记条目但不翻译"，
+  因为后者会让条目看起来有状态而实际转换是残的。被分片的流因此可能被静默弄坏。
+  **分片的 echo 属于同一类**：首片会被识别为 echo 并跟踪，后续片不被翻译——这比"完全不
+  跟踪"更接近半转换状态，所以部署上应当避免对会被分片的流量做 NAT。修复需要按 `ip_id`
+  关联分片，属于独立设计，不在 1.0 承诺内。
 - **无 helper 模块**，无 fullcone / 端口保持变体，无 IPv6 NAT（hook 只解析 IPv4）。
 - **除 TCP/UDP/ICMP echo 外一律不跟踪**，即使 NAT 规则里写了 `proto=`。
 - **表是定长的**，三档分别 32 / 256 / 1024 条（`net_profile.h:177` / `:455` / `:404`），
@@ -167,9 +168,12 @@ natadd out proto=tcp dport=80    action=masquerade
   "容量与超时"。**EMBEDDED 档的 32 条是本轮从 64 下调的**，该档整张网络内存的断言上界
   是 44 KiB（`NET_PROFILE_TOTAL_BUDGET`），下调的直接后果是这个目标上并发跟踪流数减半，
   溢出表现为静默重新建条目 + 重新翻译，与上面 LRU 那一段同源。
-- **没有动态端口分配。** `masquerade` 不带 `toport=` 时保留客户端原端口，多个同源端口的
-  并发连接不会被打散；只有显式写 `toport=` 才会改端口，而那是所有走这条规则的流共用的一个
-  固定值，不是分配器。
+- **没有动态端口分配（设计边界）。** `masquerade` 不带 `toport=` 时保留客户端原端口，
+  多个同源端口的并发连接不会被打散。**`masquerade` 不接受 `toport=`**（解析器直接拒绝，
+  `netnat_test` 钉住这一点）；需要固定端口改写的场景用 `snat to=<addr> toport=<port>`，
+  它是所有走这条规则的流共用的一个固定值，不是分配器。
+- **方向必须匹配 hook。** `dnat` 只能装在 `in`，`snat`/`masquerade` 只能装在 `out`；
+  装错方向在规则解析时返回 `-EINVAL`，而不是装进一张永远不会命中的表。
 
 ## 门禁
 
@@ -177,13 +181,15 @@ natadd out proto=tcp dport=80    action=masquerade
 |---|---|
 | `smoke-netfilter` | 既有 drop/accept 语义不回归，且 conntrack 计数随 `udp_send_once` 增长、`/proc` 里能看到该五元组（`user/cmds/net/netfilter_test.c` 测试 8）；**外加 ICMP echo 跟踪**：手工构造的 echo 请求发往网关，`ct_packets` 增长、`ct_tracked` 增加、`/proc` 里出现 `icmp=echo id=...` 且条目是 `state=established`——回程能匹配上这条状态才是本项的关键证据，只有 insert 的话条目会一直是 `new`（测试 9） |
 | `smoke-netfilter-nat` | 端到端 DNAT 端口转发：QEMU `hostfwd` 把 `127.0.0.1:18081` 转到 guest 18081，guest 侧规则转到 18082，host 侧 `tools/netnat_host_probe.py` 连上、发出、收到回显 |
+| `smoke-netfilter-snat` | 端到端出站 SNAT：guest 主动连 `10.0.2.2:18083`，规则改写到 `10.0.2.15:18084`；`tools/netnat_snat_probe.py` 在宿主机回显，guest 断言 `/proc/a20/netfilter` 出现 `action=snat` 和 established 状态，并做删规则 + `ctflush` 的阴性对照 |
 | `smoke-ct-capacity` | 表填到 `ct_capacity` 恰好停住；多一条流恰好淘汰一条，且**淘汰的是最久未用的那一条**（淘汰前后的 `ct_lru_victim` 各断言一次）；短超时（`cttimeout 100 100 100`）下条目在截止时间内被回收、`ct_timeout` +1 且 `ct_sweeps` 前进 |
 | `test-nat-rewrite`（在 `make check` 内） | 主机侧编译**真实的** `kernel/net/netfilter_rewrite.c`：SNAT/MASQUERADE/DNAT 地址改写后 IP 与 L4 校验和都用独立的一次性重算校验；端口改写与 `toport=0` 语义；masquerade 取的是"正在离开的那块接口"的地址；回程元组的推导，并与对端实际会发出的那个帧逐字段比对（`tools/test-nat-rewrite-host.c`） |
 
-SNAT/MASQUERADE **没有**端到端门禁，这是拓扑决定的而不是遗漏：QEMU user-net 自己在宿主
-侧做 NAT，guest 外面没有第二个对端，回程包不存在，所以 `smoke-netfilter-nat` 只能覆盖
-DNAT。上表最后一行是这个方向上能拿到的最强证据——它跑的是出货源码，不是副本，但仍然是
-主机侧单元测试，不能替代真机上的端到端验证。
+SNAT 的端到端拓扑是 guest 主动发起、宿主机回显（QEMU user-net 把 `10.0.2.2` 映射到
+宿主 loopback），回程包真实存在，因此 `smoke-netfilter-snat` 能证明 output hook 的改写、
+conntrack 回程链和返回路径。它的**观测边界**是：QEMU user-net 在 guest 之外还会做一次
+自己的地址/端口转换，所以宿主机探针无法看到 guest 改写的源端口。源端口改写本身由
+`test-nat-rewrite` 的主机侧一次性重算逐字段验证；不要把这个限制读成"SNAT 端口没生效"。
 
 两个测试钩子是为了让上面的容量/超时断言不必靠 256 条真实流和 30 秒等待达成：
 `ctinject`（经由数据面同一个 `netfilter_ct_insert` 插入合成流）和 `cttimeout`（运行期覆盖

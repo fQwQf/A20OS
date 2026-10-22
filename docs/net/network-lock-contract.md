@@ -39,6 +39,43 @@ ARP、ICMP/ICMPv6（含 ND/RA）、所有 IP fragment/reassembly、broadcast/mul
 全局 timer/maintenance 也只能在该 barrier 下运行。分类器是保守门控；无法明确识别的
 帧必须降级到冷路径。
 
+### 死锁边界与门禁（当前状态）
+
+最终拆分后的边界是：**普通单播 TCP/UDP 热路径不取得 `g_lwip_lock`**，只取得所属
+lane 锁（TCP/UDP 输出另加按对象分片的 shared guard）。`g_lwip_lock` 仍作为两件事
+存在——设备 ingress/staging 门和 control barrier 的外层门——并且这两件事都只出现在
+冷路径、设备中断入口和配置事务里。以下边界是有意保留的，不是遗留：
+
+- **global shared-domain 分片 0**：ARP/ND6 cache、conntrack 表、UDP autobind 和
+  TCP ISS 使用 `NULL` key 的 shared guard，因此都落在同一分片。它们要么是真正的
+  全局对象（ARP cache、conntrack 表），要么是没有对象可散列的单次编号生成器
+  （autobind、ISS）。拆成每 lane 一份会改变语义，而不是提高并行度。热包在这些
+  guard 内只做有界查表/更新，不做分配、I/O 或阻塞。
+- **loopback**：回环交付仍在 control barrier 下排空（本地 fast path，不经过设备）。
+  它不是外部数据面的一部分；把它移到每 lane 队列属于独立设计，不在 1.0 承诺内。
+- **e1000 / rtl8139 中断入口**：仍取完整 control barrier，而 virtio 已改走 ingress
+  lock。这是驱动拥有的路径（`kernel/drivers/net/`），不在本包可改范围；已作为
+  跨领域项报告给 drivers。virtio 是 1.0 的主要数据面，其 ingress 顺序由
+  `tools/check_lwip_concurrency_wiring.py` 静态门禁保护。
+
+运行时死锁/误用边界由以下 panic 强制，均由
+`make check-honesty-policy` 的 `lwip-concurrency-wiring` 静态门禁配套：
+
+| 违规 | 位置 | 结果 |
+| --- | --- | --- |
+| lane 锁内升级到 control barrier | `a20_lwip_lock()` | panic |
+| 同一 lane 递归加锁 | `a20_lwip_lane_lock()` | panic |
+| 非 owner 释放 lane 锁 | `a20_lwip_lane_unlock()` | panic |
+| 错误上下文 claim/consume lane 队列 | `net_lane.c` | panic |
+| 非 owner 释放 shared guard | `lwip_concurrency.c` | panic |
+
+PCB 归属断言：`tcp_pcbs_sane()` 在 `CONFIG_NET_PCB_SANE` 下检查 TCP 各 bucket 的
+`pcb->lane`、wildcard 归属和 addr/port 一致性；UDP 没有独立的 sane 函数，等价检查
+在 `udp_input()` 的每个被访问 pcb 上就地执行（bucket 与 `lane` 一致、wildcard
+只出现在 sentinel bucket、非 wildcard 的 `lane` 与自身 addr/port 一致）。两者都在
+`smoke-net-tcp-lanes` / `smoke-netopt-lwip` 的 `-DCONFIG_NET_PCB_SANE=1` 构建中编译
+进去，中断言即 panic。
+
 lane 是按网络元组/对象确定的逻辑归属，不是 CPU 亲和性：任意可运行该路径的 CPU 都可
 取得对应 owner-lane 锁处理工作，队列 claim 保证同一 lane 同时只有一个核心消费者。
 `ip_data` 这类逐包临时全局状态在多 lane 配置下按当前 lane 保存。跨 lane 的全局服务

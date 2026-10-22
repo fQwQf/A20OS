@@ -65,7 +65,7 @@
 | aarch64 | 通过 | 未验证 | 构建通过；桌面实例的运行证据属 DESKTOP |
 | x86_64 | 通过 | 未验证 | 构建通过；桌面实例的运行证据属 DESKTOP |
 | loongarch64 | 通过 | 未验证 | 构建通过；本机无实板 |
-| riscv32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过；剩余失败在 proc/net/fs，见 [MM-05](../gaps/mm.md)、[CORE-11](../gaps/core.md)、[NET-12](../gaps/net.md)、[FS-11](../gaps/fs.md) |
+| riscv32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过；剩余失败在 proc/fs；`kernel/net/**` 已无错误（NET-12 已关闭），见 [MM-05](../gaps/mm.md)、[CORE-11](../gaps/core.md)、[FS-11](../gaps/fs.md) |
 | arm32 | 失败（内核）/ 通过（用户态） | N/A | `kernel/mm/**` 已全部编译通过（`elf_rust ABI drift` 断言已补宽度分支）；剩余失败在 fs/proc；构建镜像已在 `tools/ci/Dockerfile` 里补上 `libc6-dev-armhf-cross` 与 Rust（待重新发布），见 [MM-05](../gaps/mm.md)、[FS-11](../gaps/fs.md)、[CORE-11](../gaps/core.md)、[DELIVERY-05](../gaps/delivery.md) |
 | armv7m (STM32F103) | 失败 | N/A | `make stm32f103-bringup` 在 `tools/rust-kernel.mk` 的解析期断言处停下；`check-stm32f103` 另报硬编码 MMIO 地址。见 [DRIVER-09/10](../gaps/drivers.md) |
 
@@ -117,7 +117,7 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 | 用例 | 根因 | 归属 |
 | --- | --- | --- |
 | `test_vma_region_host`、`test_rust_merge_policy_against_actual_c_function` | 在源码里找不到自己绑定的标记，`ValueError: substring not found` | MM |
-| `test_tcp_send_backpressure` | 同上 | NET |
+| ~~`test_tcp_send_backpressure`~~ | 已改为编译并运行 `kernel/net/socket_inet_send_tcp.rs` 的宿主 Rust 测试（不再抓源码窗口） | NET（已修） |
 | `test_usercopy_strings_host`、`test_usercopy_nommu_host`、`test_tlb_transaction_races`（2 个）、`test_process_vm_host` | 把内核 C 抽出来用宿主 gcc 编译，但抽取窗口不含新增的 `extern` 声明/Rust 桥接原型，或 C/Rust 接口签名已变 | MM |
 | `test_production_module_partial_results_and_references` | 同上（抽取/链接） | PROC |
 | `test_dispatch_ownership` | 宿主探针以 `SIGABRT` 结束（行为不符，不只是夹具漂移） | CORE |
@@ -137,7 +137,7 @@ runqueue 放置/迁移/跨 CPU 唤醒与进程退出、wait、线程组回收此
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。通过 15 项；失败 9 项：`check-a20-tests`（§5）、`check-honesty-policy`（lwIP accept 阶段接线断言）、`host-tests`（`check-proc-wait-window` 找不到 `WAIT4_C_ENGINE_BEGIN` 标记）、`check-task-lifetime-boundary`、`check-abi-boundary`、`check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记）、`check-task-state-boundary`、`check-arch-boundary`、`check-doc-drift`（8 条 gates.py 断言已通过；同目标的 `tools/check_doc_citations.py` 仍报 12 条越界引用，集中在 `docs/net/**` 与 `docs/roadmap/**`，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-08 失败，见 [ABI-08](../gaps/abi-ipc.md)） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。通过 15 项；失败 9 项：`check-a20-tests`（§5）、`check-honesty-policy`（lwIP accept 接线断言已本地修复：`lwip-concurrency-wiring` PASS；该 job 仍有其他检查为红）、`host-tests`（`check-proc-wait-window` 找不到 `WAIT4_C_ENGINE_BEGIN` 标记）、`check-task-lifetime-boundary`、`check-abi-boundary`、`check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记）、`check-task-state-boundary`、`check-arch-boundary`、`check-doc-drift`（8 条 gates.py 断言已通过；同目标的 `tools/check_doc_citations.py` 仍报 12 条越界引用，集中在 `docs/net/**` 与 `docs/roadmap/**`，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-08 失败，见 [ABI-08](../gaps/abi-ipc.md)） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |

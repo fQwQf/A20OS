@@ -241,9 +241,15 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
   推导出的深度，把 pcb 并不拥有的 room 发出去。现在循环直接问 pcb，对从未设置过该
   选项的 socket 这与改动前逐字节相同。
   下调不会凭空缩掉已经排进 lwIP 的数据：已排队的字节要等 ACK 回来才让出新的可用空间。
-- **两者都没有自动调优。** 没有 `tcp_wmem` / `tcp_rmem`，没有内存压力反馈，也不从
-  实测吞吐调整。Linux 会据此增长 `sk_sndbuf` / `sk_rcvbuf`，本树不会；依赖那种增长的
-  调用方拿不到。
+- **有界自动调优。** 每个档位的初始值 `NET_PROFILE_TCP_BUF_INIT` 低于协议上限
+  （EMBEDDED 等于其 1 KiB 上限；DEFAULT / SERVER 为 32 KiB），因此从未显式设置选项的
+  调用方有增长空间。策略是**需求驱动的倍增**：接收侧一次读取至少达到当前上限的一半时
+  增长，发送侧在 `pcb->snd_buf` 耗尽时增长；两者都只增长到 `TCP_WND` /
+  `TCP_SND_BUF` 和窗口缩放允许的同一上限，`getsockopt` 回读的就是增长后的值。
+  **显式 `setsockopt(SO_SNDBUF/SO_RCVBUF)` 会关闭对应方向的自动调优**，调用方给出的值
+  是最终值。不自动收缩：收缩一个活跃窗口需要窗口公告，而没有收益。没有
+  `tcp_wmem` / `tcp_rmem` 形式的全局 sysctl，也没有内存压力反馈——上限本身就是
+  `MEM_SIZE` 与 pbuf 池的约束，压力表现为池的 `err`（见 `/proc/a20/netmem`）。
 - 这两个选项对 **UDP/RAW 也接受**，语义与 TCP 不同，见下一节。
 
 ### UDP/RAW 的 `SO_SNDBUF` / `SO_RCVBUF`：接受，但含义不同
@@ -274,7 +280,34 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 - **接收侧是丢包，不是反压。** TCP 侧靠 `wnd_limit` 停止接收窗口的扩张，让对端慢下来；
   数据报侧只能丢弃——并且**不会**合成 ICMP port unreachable（与本路径既有的"队列满就
   丢"是同一条边界）。
-- **同样没有自动调优**，理由与 TCP 侧相同。
+- **数据报没有自动调优**：这两个选项约束的是单报文长度与接收队列字节数，没有可增长
+  的协议窗口，显式设置即为最终值。
+
+### pbuf 池与零拷贝收包的边界（1.0）
+
+池容量按档位（`net_profile.h`，`MEMP_MEM_MALLOC=1`）：
+
+| 档位 | 元素数 | 元素 payload | 池 payload 上限 | 含 24 B pbuf 头的占用 |
+|---|---|---|---|---|
+| EMBEDDED | 10 | 512 B | 5 KiB | 5,360 B |
+| DEFAULT | 256 | 1600 B | 400 KiB | 415,744 B |
+| SERVER | 4096 | 1600 B | 6.25 MiB | 6,651,904 B |
+
+这些是**上限**而不是静态预留：池元素从 lwIP heap 分配，所以真实起点是
+`MEM_SIZE` 与其它 13 个池的竞争。`/proc/a20/netmem` 现在同时打印
+`pbuf pool: elements=... bytes=...` 与 `heap: size=... used=... avail=... err=...`，
+判据是：`PBUF_POOL max` 达到元素数且 `err==0` 是池受限；heap `avail` 先到 0 或
+`mem.err` 上升是内存受限。`TCP_WND` 不大于池可容纳的段数由 `lwipopts.h` 的
+`_Static_assert` 钉住，窗口缩放解除的是协议上限，不是池上限。
+
+**没有设备到 lwIP 的零拷贝收包，这是设计边界。** 设备接口是
+`int (*recv)(device*, void *buf, size_t maxlen)`：它把帧复制进调用者缓冲区，没有
+"交出引用"的操作。真正的零拷贝需要在 `kernel/drivers` 增加新的 recv op（或让驱动
+直接收进 pbuf），这不在网络的 owned paths 内。网络侧已经避免第二次复制：单 lane
+路径让 `pbuf_take()` 从设备 scratch 直接拷进 pool 元素，多 lane 路径的 lane ring
+槽位是复用的，只能先 `memcpy` 进槽位再 `pbuf_take`，因为把复用的槽位包装成
+`pbuf_custom` 会在下一个帧到达时踩到仍被 lwIP 持有的 pbuf。要消掉这次复制，需要
+"预分配槽位 + 锁外空闲链表 + 槽位归还回调"的完整池，属于独立设计。
 
 ### RTNETLINK 多播组
 
@@ -284,7 +317,7 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 |---|---|---|---|
 | `RTNLGRP_LINK` | `0x1` | `RTM_NEWLINK`：链路状态变化 | `a20_lwip_sync_link_state()` |
 | `RTNLGRP_IPV4_IFADDR` | `0x5` | `RTM_NEWADDR` / `RTM_DELADDR` | `a20_lwip_if_set_addr()` |
-| `RTNLGRP_IPV6_IFADDR` | `0xA` | `RTM_NEWADDR` | `a20_lwip_if_set_addr6()` |
+| `RTNLGRP_IPV6_IFADDR` | `0xA` | `RTM_NEWADDR` / `RTM_DELADDR` | `a20_lwip_if_set_addr6()` / `a20_lwip_if_del_addr6()` |
 
 **表里第三列是本轮新增 `RTNLGRP_IPV6_IFADDR` 的理由**：先有写入路径，才有组。只定义一个
 组号而没有任何内核代码能往里投递，等于给监听者一个可以 bind 却永远收不到东西的承诺——
@@ -299,22 +332,29 @@ IPv4 地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有
 
 **IPv6 写入路径的边界（必须一起读）**：
 
-- **只有加，没有删。** `LWIP_NETIF_API=0` 下 lwIP 不导出
-  `netif_remove_ip6_addr()`，删除要走 `nd6.c` 内部地址池的拆除流程，从 socket 层伸手进去
-  是一项真实的分歧，而树里目前没有任何东西需要它。所以 `RTM_DELADDR` +
-  `AF_INET6` **显式返回 `-EOPNOTSUPP`**，而不是接受之后改发一条 `RTM_NEWADDR` 去谎报
-  "已删除"一个其实还在的地址。
-- **不做 DAD。** `netif_add_ip6_address()` 会把地址置为 `TENTATIVE` 等 ND6 定时器探测后
-  提升；本路径直接置 `IP6_ADDR_VALID`，因为地址来自一条显式的管理请求而不是路由器通告，
-  且回环 netif 已经走同一条捷径（`a20_lwip_loopif_init_cb()`）。**监听者不得把这个事件
-  读成"重复地址检测通过"。**
+- **加和删都实现。** lwIP 没有 `netif_remove_ip6_addr()`；受支持的拆除原语是
+  `netif_ip6_addr_set_state(..., IP6_ADDR_INVALID)`：它释放 MLD 成员、中止绑定在该地址
+  上的 TCP/UDP/RAW PCB，并让槽位可被下一次 `netif_add_ip6_address()` 复用。删除不存在的
+  地址返回 `-EADDRNOTAVAIL`，删除格式错误的请求返回 `-EINVAL`。
+- **不做 DAD，这是写侧的明确契约。** `netif_add_ip6_address()` 会把地址置为
+  `TENTATIVE` 等 ND6 定时器探测后提升；本路径直接置 `IP6_ADDR_VALID`，因为地址来自一条
+  显式的管理请求而不是路由器通告，且回环 netif 已经走同一条捷径
+  （`a20_lwip_loopif_init_cb()`）。**监听者不得把这个事件读成"重复地址检测通过"**：
+  事件里没有 `IFA_F_TENTATIVE`，也不会在 DAD 完成后补发第二条事件。链路本地地址和
+  SLAAC 地址仍由 lwIP 的 `nd6_tmr()` 做 DAD。
 - **`ifa_prefixlen` 只校验、不落地。** lwIP 的 IPv6 子网成员关系编在地址自身里
   （`ip6_addr_t`），`struct netif` 没有每地址的前缀长度字段。它被校验（>128 报
-  `-EINVAL`），并且是通知里回报的那个数。
+  `-EINVAL`），并且是 NEWADDR 通知里回报的那个数；DELADDR 与 IPv4 的删除路径一致，
+  回报 0。
 - **回环的 `::1` 不产生事件。** 它在 netif 初始化时由 `a20_lwip_loopif_init_cb()` 加入，
   早于任何 netlink 监听者存在，不是"变化"。
-- ND6 自己从路由器通告学到的地址（本树开着 `LWIP_IPV6_AUTOCONFIG`）**不会**发通知：
-  lwIP 没有给出这个事件的钩子。**已知会漏的事件**。
+- **ND6 学到的地址不发通知，记录为已知边界。** 上游 lwIP 其实有钩子
+  （`LWIP_NETIF_EXT_STATUS_CALLBACK` + `LWIP_NSC_IPV6_ADDR_STATE_CHANGED`），但本树的
+  `lwipopts.h` 把它编译掉了（`LWIP_NETIF_EXT_STATUS_CALLBACK=0`），没有注册者。因此
+  `LWIP_IPV6_AUTOCONFIG` 从路由器通告生成的地址、以及生命周期导致的 deprecate/invalid
+  转换都不会出现在 `RTNLGRP_IPV6_IFADDR` 上。管理路径（NEWADDR / DELADDR）是唯一有事件
+  的来源；要支持自动配置通知需要打开该回调并把事件延迟到 `g_lwip_lock` 之外发布，
+  这不在 1.0 的配置面承诺内。
 
 一个监听者的接收队列满不会挡住其他监听者——Linux 在这里丢消息并报溢出，本树没有
 socket 级的溢出上报面，所以计数并 `klog` 一条
@@ -427,7 +467,7 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
       断言检查的是加了选项之后的和。
 - [x] `SO_SNDBUF` / `SO_RCVBUF` 真的约束发送队列深度与 pcb 接收窗口，
       `getsockopt` 回读生效值；抬高对既有连接立即生效（写 `pcb->snd_buf`，
-      DIVERGENCE §2.10）；无自动调优这一点已写进源码注释与本文。
+      DIVERGENCE §2.10）；需求驱动的有界自动调优见上文，显式设置会关闭它。
 - [x] `TCP_CONGESTION` 对未知名返回 `-ENOPROTOOPT`，`getsockopt` 回真实算法名。
 - [x] RTNETLINK 向 `RTNLGRP_LINK` / `RTNLGRP_IPV4_IFADDR` / `RTNLGRP_IPV6_IFADDR`
       投递 `RTM_NEWLINK` / `RTM_NEWADDR`（IPv4 地址全零时改发 `RTM_DELADDR`）；三个组
@@ -449,14 +489,16 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 - [x] `SIOCSIFMTU` 的 ioctl 分支补齐（此前派发得到 `-ENOTTY`），两个入口共用
       `a20_lwip_if_set_mtu()` 的档位封顶；`netlink_test` 的 `test_mtu_ceiling()`
       二分发现档位上限并断言边界两侧。
-- [ ] **未做**：套接字缓冲无自动调优（无 `tcp_wmem` / `tcp_rmem`、无内存压力反馈、
-      不从实测吞吐调整）；IPv6 地址只有加没有删、不做 DAD、ND6 自学地址不发通知；
-      conntrack 不跟踪 ICMP 差错报文（PMTU 探测因此不可用）。
+- [x] 套接字缓冲实现有界自动调优（初始值低于上限、需求驱动倍增、显式设置关闭），
+      见上文；IPv6 地址 `RTM_DELADDR` 已实现，DAD 契约与 ND6 自学地址不发通知的边界
+      已写入本文；conntrack 不跟踪 ICMP 差错报文（PMTU 探测因此不可用）仍是有意边界。
 - [ ] **未做**：CUBIC 的 HyStart / DCTCP / `W_max` 跨 pcb 持久化；Eq. 4 的 RTT 分母
       只能是 `pcb->sa`（整个 `TCP_SLOW_INTERVAL` = 500 ms 一档），所以该区域只在
       `W_max` 低于约 3.25 段时可能成为约束项——见上面那一节。
-- [ ] **未做**：三条预算断言只有 tier 1 有，tier 2/3 的池上限仍远大于各自的
-      `MEM_SIZE`，本轮未对账。
+- [x] 三个档位的池上限与 `MEM_SIZE` 都有求和断言
+      （`NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE`）；DEFAULT 的
+      `MEM_SIZE` 从 512 KiB 调到 1 MiB，因为按真实元素尺寸（含每元素堆头和空闲链
+      终止符）计算需要约 771 KiB。EMBEDDED 的 44 KiB 总预算按实测值重新对账。
 - [ ] **未做**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输不完成的
       现象，本轮一次都没复现，原因未查明。功能未削减，建议（部署用命令行键）保留。
 - [ ] **未跑**（按分工由编排层在合并后统一执行）：ASAN 压力测试与全量回归，
