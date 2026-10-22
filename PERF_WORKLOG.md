@@ -235,3 +235,20 @@
 - 新增a20-perf-diff.py，支持完整文本对照和diagnostic manifest，canonical syscall映射、全部精确整数delta、elapsed ticks/每调用平均，不输出CPU百分比。拒绝明显截断/配对缺失/重置/停用状态；完整缺失尾部不可检测的限制已写明。
 - 三项host验收全部通过，真实fileio两窗口260/8次fsync和原ticks精确一致。初始预期手工抄录错误已修正，非修改实测数据。
 - 最终x86内核构建结束；接下来冻结cow-class ELF运行完整七项APK，期间不编译。
+
+## 2026-10-22 23:06 北京时间：最终APK正在运行
+
+- 当前exec session99202，日志build/performance/apk-final-campaign.log，冻结cow-class b39f1b...，七项APK、同核4/6、2vCPU2GiB、5秒、三轮，目录perf-apk-final。第一轮全部有效；期间不编译/另起性能实验。
+- 已准备build/performance/build-final-profile.py（尚未执行）：重用旧coarse MM/fork/wait观测点，保留新版grow procfs，另外分解block-sync transaction/device-write/device-flush，带empty span粗略估计计时开销。只诊断、finally还原源码，再重建验证正式ELF逐字节一致。须等最终APK结束后才编译，诊断吞吐不能混入正式吞吐。
+
+## 2026-10-22 23:10 北京时间：最终APK完成、分阶段诊断开始
+
+- session99202完成，42/42有效、21guest状态0、输入未变；apk-final-2026-10-22*已归档。CPU约1.008倍Linux，线程0.293、fork0.141；fork315–671ops/s波动保留，不挑轮次。
+- 临时诊断构建成功，ELF338cb9e331c1963c10371339e67ad8daf9c91001ff6455b721805ef459128872。finally源文件哈希全部还原且无g_bp符号残留。
+- 预期“还原ELF逐字节相同”的断言失败：这次CFLAGS全量重编使version.h的__DATE__/__TIME__由20:53变23:08，字符串合并/rodata位置也改变。生产ELF349bb30409c53743efe1b312f4dade03529905d8c036555ef587c7994ca1bc83；全部函数符号地址/大小与冻结b39f1b完全相同，正式性能仍明确对应b39f1b。保留失败及重建日志，不把两种ELF冒称字节相同。final-rebuilt.elf另存待正确性检查。
+- 当前exec session30573，日志final-profile-campaign.log，三个boot×6case，包含MM正确性、最小fork/稀疏brk/dense mmap和两种fileio。host /bin/true为占位，仅分析guest诊断，不作为性能比较；新增fileio-profile.sh在RUN前后各抓完整快照，避免把prepare/verify混入RUN阶段归因。源码已还原、无并行编译。
+
+## 2026-10-22 23:12 北京时间：用户追加合并授权
+
+- 用户明确要求：到午夜完成后合并性能worktree到main，然后删除worktree和branch。这覆盖之前“不得自行合并”的限制；仍不推送/部署。须先保存证据并正确处理main的现有用户改动。
+- 当前main位于原checkout且有大量未提交修改/未跟踪基线文件，若干与性能分支重叠（Makefile/pagecache/syscall等）。不能覆盖或顺手提交这些无关工作。截止前先完成可审阅成果，截止后采用可恢复方式整合，保留原改动。
