@@ -2133,6 +2133,30 @@ void context_switch(task_t *next) {
 
 /* SCHED_SWITCH_PATH_END */
 
+/* Revalidate a current task after an empty pick or a late wake.  RR quantum
+ * renewal belongs in the same park-lock section as the keep decision; fair
+ * tasks need neither a second lock acquisition nor another clock sample. */
+static int sched_try_keep_current(task_t *cur, int rt_throttled)
+{
+    if (!cur)
+        return 0;
+    int keep = 0;
+    uint64_t flags = spin_lock_irqsave(&cur->park_lock);
+    if (!rt_throttled && !cur->affinity_migrate_pending &&
+        (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
+        if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
+            proc_runq_remove_locked(cur);
+        cur->state = PROC_RUNNING;
+        proc_sched_assert_task_locked(cur);
+        /* A lone expired RR task starts its next quantum here. */
+        if (cur->sched_policy == SCHED_RR)
+            rt_rr_dispatch_task(cur, timer_get_ticks());
+        keep = 1;
+    }
+    spin_unlock_irqrestore(&cur->park_lock, flags);
+    return keep;
+}
+
 void sched(void) {
     task_t *sched_owner = proc_current();
     /* Interrupts are masked for the pick->publish->__switch region below and
@@ -2251,53 +2275,17 @@ void sched(void) {
      * can still publish READY again, so the fall-to-idle branch re-takes
      * cur->park_lock and re-checks before committing to the idle switch.
      */
-    int keep_current = 0;
     task_t *cur = proc_current();
-    if (cur) {
-        uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-        if (!current_rt_throttled && !cur->affinity_migrate_pending &&
-            (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
-            if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
-                proc_runq_remove_locked(cur);
-            cur->state = PROC_RUNNING;
-            proc_sched_assert_task_locked(cur);
-            keep_current = 1;
-        }
-        spin_unlock_irqrestore(&cur->park_lock, cf);
-    }
-    if (keep_current) {
-        /* An expired lone RR task has no peer to rotate behind. Start its
-         * next quantum here instead of repeatedly requesting an empty pick. */
-        uint64_t rr_flags = spin_lock_irqsave(&cur->park_lock);
-        rt_rr_dispatch_task(cur, timer_get_ticks());
-        spin_unlock_irqrestore(&cur->park_lock, rr_flags);
+    if (sched_try_keep_current(cur, current_rt_throttled))
         goto out;
-    }
 
     task_t *idle = proc_idle_task();
     if (cur != idle) {
         /* W2: re-close the window opened by the release above.  A wake that
          * landed between the two critical sections re-published READY +
          * on_rq; consume it and keep this task instead of idling. */
-        int late_ready = 0;
-        if (cur) {
-            uint64_t cf = spin_lock_irqsave(&cur->park_lock);
-            if (!current_rt_throttled && !cur->affinity_migrate_pending &&
-                (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
-                if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
-                    proc_runq_remove_locked(cur);
-                cur->state = PROC_RUNNING;
-                proc_sched_assert_task_locked(cur);
-                late_ready = 1;
-            }
-            spin_unlock_irqrestore(&cur->park_lock, cf);
-        }
-        if (late_ready) {
-            uint64_t rr_flags = spin_lock_irqsave(&cur->park_lock);
-            rt_rr_dispatch_task(cur, timer_get_ticks());
-            spin_unlock_irqrestore(&cur->park_lock, rr_flags);
+        if (sched_try_keep_current(cur, current_rt_throttled))
             goto out;
-        }
         if (cur && cur->pid >= 4)
             ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);
         /* idle never parks and never blocks, so its park_lock has no

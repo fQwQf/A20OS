@@ -22,10 +22,15 @@ PRELUDE = r'''
 #define EEVDF_BASE_SLICE 10
 #define PROC_RUNNING 2
 #define PROC_READY 1
+extern uint64_t a20_eevdf_effective_weight(uint32_t, uint32_t);
+extern uint64_t a20_eevdf_virtual_slice(int32_t, uint64_t, uint64_t);
+extern uint64_t a20_eevdf_advance_vruntime(uint64_t, uint64_t, uint64_t);
+extern uint64_t a20_eevdf_deadline(uint64_t, uint64_t);
+extern uint64_t a20_eevdf_advance_vtime(uint64_t, uint64_t, uint64_t);
 typedef struct {
     uint32_t cfs_weight, pi_boost_weight;
     uint64_t eevdf_vruntime, eevdf_deadline, eevdf_last_account;
-    int pid, state, on_cpu, park_lock;
+    int pid, state, on_cpu, park_lock, eevdf_deadline_lock;
     unsigned owner_cpu, cpu_id;
 } task_t;
 typedef struct { uint64_t eevdf_weight, eevdf_vtime; } proc_runq_t;
@@ -127,6 +132,10 @@ def main():
     legacy = legacy.replace('#endif\n', '', 1)
     with tempfile.TemporaryDirectory(prefix='a20-yield-accounting-') as directory:
         directory = Path(directory)
+        math_object = directory / 'eevdf_math.o'
+        subprocess.run(['rustc', '--edition=2021', '--crate-type=lib', '--emit=obj',
+                        '-C', 'panic=abort', '-C', 'opt-level=2',
+                        str(ROOT / 'kernel/proc/eevdf_math.rs'), '-o', str(math_object)], check=True)
         for name, code, flags, expected in [
             ('preempt', yielding, ['-DCONFIG_KERNEL_PREEMPT=1'], 0),
             ('cooperative', yielding, [], 0),
@@ -135,7 +144,8 @@ def main():
             src, exe = directory / (name + '.c'), directory / name
             src.write_text(PRELUDE + bodies + '\n' + code + HARNESS)
             subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra',
-                            '-Werror', *flags, str(src), '-o', str(exe)], check=True)
+                            '-Werror', '-Wl,--gc-sections', *flags, str(src),
+                            str(math_object), '-o', str(exe)], check=True)
             result = subprocess.run([str(exe)], check=False)
             if result.returncode != expected:
                 raise SystemExit(f'{name}: expected exit {expected}, got {result.returncode}')
