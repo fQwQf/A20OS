@@ -58,6 +58,10 @@ typedef struct page_cache_page {
     struct page_cache_page *dirty_next;
     struct page_cache_page *global_dirty_prev;
     struct page_cache_page *global_dirty_next;
+    /* Intrusive RB index for random dirty insertion, under the global lock.
+     * Ordered dirty_prev/next still provide O(1) writeback iteration. */
+    struct page_cache_page *dirty_children[2];
+    uintptr_t dirty_parent_color;
     /* Kept last on purpose: the Rust state engine
      * (kernel/fs/page_cache_state.rs) mirrors every field before this one and
      * never touches the lock, so the mutex's internal layout does not have to

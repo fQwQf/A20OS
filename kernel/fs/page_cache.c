@@ -159,7 +159,7 @@ extern vnode_t *a20_pagecache_reclaim_clean(
     size_t *global_dirty_count, size_t *valid_pages, page_cache_page_t **free_head,
     void (*account)(size_t));
 
-/* The Rust engine mirrors the descriptor prefix through global_dirty_next and
+/* The Rust engine mirrors the descriptor prefix through dirty_parent_color and
  * the leading vnode cache fields; these asserts fail the build on drift. */
 _Static_assert(__builtin_offsetof(page_cache_page_t, index) == 8,
                "page cache state mirror: index offset");
@@ -192,6 +192,18 @@ _Static_assert(__builtin_offsetof(vnode_t, mnt) == 36,
 _Static_assert(__builtin_offsetof(vnode_t, cache_pages) == 48,
                "page cache state mirror: vnode.cache_pages offset (ILP32)");
 #endif
+
+_Static_assert(__alignof__(page_cache_page_t) >= 2,
+               "page cache RB parent/color requires aligned descriptors");
+_Static_assert(__builtin_offsetof(page_cache_page_t, dirty_children) ==
+               __builtin_offsetof(page_cache_page_t, global_dirty_next) + sizeof(void *),
+               "page cache state mirror: dirty_children offset");
+_Static_assert(__builtin_offsetof(page_cache_page_t, dirty_parent_color) ==
+               __builtin_offsetof(page_cache_page_t, dirty_children) + 2 * sizeof(void *),
+               "page cache state mirror: dirty_parent_color offset");
+_Static_assert(__builtin_offsetof(vnode_t, cache_dirty_root) ==
+               __builtin_offsetof(vnode_t, cache_dirty_tail) + sizeof(void *),
+               "page cache state mirror: vnode.cache_dirty_root offset");
 
 static spinlock_t g_page_cache_lock = SPINLOCK_INIT;
 static spinlock_t g_page_cache_bucket_locks[PAGE_CACHE_BUCKET_LOCKS];

@@ -37,6 +37,8 @@ typedef struct PPage {
     struct PPage *mapping_prev, *mapping_next;
     struct PPage *dirty_prev, *dirty_next;
     struct PPage *global_dirty_prev, *global_dirty_next;
+    struct PPage *dirty_children[2];
+    uintptr_t dirty_parent_color;
 } PPage;
 
 typedef struct VNode {
@@ -52,6 +54,7 @@ typedef struct VNode {
     PPage *cache_pages;
     PPage *cache_dirty_pages;
     PPage *cache_dirty_tail;
+    PPage *cache_dirty_root;
 } VNode;
 
 typedef struct PinCounter {
