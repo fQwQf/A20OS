@@ -190,3 +190,31 @@ lwIP 内存保护问题，修复后的版本须重新测量：
 多跳、实际 Native UART SEND 网关在最终版本再次通过；新增双 CPU 门禁
 通过，并记录完整 QEMU 参数和内核 SHA256。七架构构建与完整文档关联
 内核门禁也再次通过。短时调用成功及瞬时资源回收不等于长期稳定性验收。
+
+## 四节点 SEND 速率契约（2026-10-22）
+
+`tools/check-cluster-load.py` 现在是带契约门禁，而不是只打印数值：
+
+```sh
+python3 tools/check-cluster-load.py --seconds 60 --timeout 240 --min-rate 100
+python3 tools/check-cluster-load.py --seconds 600 --timeout 900 --min-rate 100
+python3 tools/check-cluster-load.py --seconds 300 --timeout 600 \
+    --random-loss 0.1 --min-rate 25 --seed 20261011
+```
+
+判据同时包含：接收者单调窗口内的实际接纳数、`submitted == delivered`、
+零重复/零坏帧、结束时在途字节/重组/代理归零，以及每方向速率不低于
+`--min-rate`。检查器只转发真实 Ethernet 帧，不生成业务回复；四个 guest
+运行同一 Native ELF。
+
+参考环境实测（四套独立 RISC-V QEMU TCG，本机为开发主机，不是物理板）：
+
+| 运行 | 每方向 admitted SEND/s | 结果 |
+|---|---:|---|
+| 60 s，无注入丢包 | 124.833 / 130.383 / 132.350 / 139.467 | 精确交付，契约通过 |
+| 600 s，无注入丢包 | 124.325 / 120.578 / 125.512 / 123.473 | 精确交付，资源归零，契约通过 |
+| 300 s，10% 随机丢包 | 71.437 / 68.397 / 73.163 / 72.630 | 精确交付，资源归零，契约通过 |
+
+这些数字**不是**线速或物理部署承诺。早期 `>10k msg/s/节点` 的数字没有
+受支持的测量依据，已从 1.0 验收线移除；生产部署的 8 小时矩阵仍保留在
+[06-production.md](06-production.md)，作为未验证的物理/长期边界。
