@@ -224,8 +224,14 @@
 - **当前exec session90994**，日志cow-class-campaign.log：先4项COW guest回归，成功后cow-token/cow-class五对AB/BA/AB/BA/AB，沿用cow-token-config.json 9case共180样本，测项前关闭、要求测后0；输出perf-cow-class-regression和perf-cow-class-paired-*。期间不要编译或并行性能测试。
 - 截止UTC16:00（北京时间00:00）仍约1小时，当前只跑这一项；完成后按数据决定保留，归档原始数据/patch/rollback，别因剩余时间急于提交不确定改变。
 
-## 2026-10-22 23:05 北京时间：COW class 完成
+## 2026-10-22 23:02 北京时间：COW class 完成
 
 - session90994已结束，无本任务构建/测试残留。180性能样本全部成功，90guest状态0，4guest回归和Rust83/真实C ASanUBSan通过，包含非零VA不同level索引。
 - 保留已有table/level/VMA复用：64MiB总中位-1.97%四对下降，空brk-3.44%五对下降，stressfork+1.52%四对上升；16MiB mmap持平，稀疏brk+2.37%四对上升，明确不作普遍改善保证。报告第14节和cow-class-2026-10-22*已归档。
 - 接下来补离线perf差分工具，再最终完整APK回归。截止UTC16:00仍有效，不推送/合并/部署。
+
+## 2026-10-22 23:04 北京时间：离线分析工具
+
+- 新增a20-perf-diff.py，支持完整文本对照和diagnostic manifest，canonical syscall映射、全部精确整数delta、elapsed ticks/每调用平均，不输出CPU百分比。拒绝明显截断/配对缺失/重置/停用状态；完整缺失尾部不可检测的限制已写明。
+- 三项host验收全部通过，真实fileio两窗口260/8次fsync和原ticks精确一致。初始预期手工抄录错误已修正，非修改实测数据。
+- 最终x86内核构建结束；接下来冻结cow-class ELF运行完整七项APK，期间不编译。
