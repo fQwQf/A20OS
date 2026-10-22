@@ -6,6 +6,8 @@
 - 原始基线与分析：`docs/status/measurements/{apk-linux,bottlenecks}-2026-10-22.md`。
 - 原内核、FAT 和 APK world 使用原 checkout 中只读基线；runner 每轮复制 world，QEMU 使用 snapshot。`build/benchmark-host-root` 是指向原 checkout 的只读使用 symlink。
 - 约束：不 push/merge/deploy。编译与性能测量串行；两侧 affinity 4,6，KVM 2 vCPU/2 GiB，三次重复、交替 Linux/A20；正式速度使用关闭诊断计数的内核。
+- 用户后续偏好：通用 C 改动只做一种架构的验证，当前选 x86_64。除非实际改动涉及架构接口/ABI，不再展开多架构构建。
+- 用户新方向：对测量证明有热点的线性查询/有序插入考虑堆、平衡树等；提供快版/嵌入式省内存版仅在实际差额达到 KiB 量级、且嵌入式仍保留该模块时；若差额很小或模块本来被裁剪则不增加双实现。
 
 ## 2026-10-22 19:50 北京时间
 
@@ -56,3 +58,35 @@
 - 输出 `build/performance/apk-mm-improved.log`，证据 `build/evidence/perf-mm-improved-apk`，预计数分钟。先检查该进程/manifest 是否完成，**未完成前不要编译或并行跑性能测量**。
 - `apk-input` 中 ELF symlink 指向已保存的 table-hint，FAT 指向原基线（只读使用），镜像由 runner 私有复制。
 - 下一次 heartbeat：等该阶段完成，核对42样本/指标/哈希；归档报告中相同 Linux 版本与新 A20 的数据，明确不能忽略宿主波动；之后推进上述 yield 候选。今夜午夜的截止约束仍有效，未完成部分如实记录，不需用户再次授权。
+
+## 2026-10-22 20:13 北京时间
+
+- 七项 APK 复测完成：42/42 ok，输入哈希不变，摘要在 manifest 内（不是单独 summary.json）。CPU/内存/共享锁基本接近前轮，但 fork A20 325.37、Linux 3081.92 ops/s 都低于早期；已启动当前时段原内核同参数完整42样本对照，避免忽略潜在回退。
+- **当前运行**：`bench-apk-linux.py` 原内核对照，证据 `build/evidence/perf-stock-apk-current`，日志 `build/performance/apk-stock-current.log`。期间禁止编译/并行性能任务。
+- yield keep-current 候选已写入 `kernel/proc/sched.c`，保留两次独立重检，RR重置移入现有锁区间，非RR不额外采时。已构建保存 `build/performance/yield-keep.elf`，尚未做 guest 回归或性能测量，未提交。
+- 新 `tools/tests/test_sched_keep_current.py` 执行真实 sched/helper/双任务锁函数，涵盖 IRQ on/off、普通/queued/RR/blocked/stopped/migrating/throttled/peer dispatch，以及在第一次拒绝后精确注入 late wake，已通过。
+- 旧 `test_sched_yield_accounting.py` fixture 落后于 HEAD 的 EEVDF Rust 数学接口和 deadline lock，原本不能编译。已更新 fixture 声明、字段并链接真实 eevdf_math.rs；原正向测试与 legacy负控制通过（负控制打印 incorrect accounting 是预期）。current migration 测试通过。
+- 之后：原内核42样本完成后先解释 fork 绝对值差异；随后用 `sched-regression-config.json` 注入原 checkout 的 sched_stress/futex_stress/gs_base_test 做 x86_64 SMP2 guest 回归，再用 `yield-config.json` 对 table-hint/yield-keep AB/BA/AB，关闭计数器。
+
+## 2026-10-22 20:18 北京时间：数据结构筛查（尚未改动）
+
+- 已有高级结构：EEVDF ready 队列 Treap，wait/alarm timer 最小堆，PID hash，VMA 有序索引。不要盲目替换语义适合FIFO的队列。
+- 待测候选：`page_cache_state.rs:a20_pagecache_dirty_insert` 的每 vnode dirty 有序双链表。头尾插入已 O(1)，中间随机首次弄脏需要线性扫描。应先用**相同缓存规模、预先读取使页面驻留、定序/逆序/随机首次pwrite**对照，看随机规模增长是否暴露 O(n²)，再决定平衡树。可用静态同 ELF micro、host/guest 文件路径明确设在普通文件系统而非tmpfs。page_cache 在 MCU trim 中不存在，若改这里不必给裁剪的 MCU 额外双实现。
+- 省内存候选：`wait_timer.rs` 的 STORAGE_CAPACITY 固定8192，而C回调 WAIT_TIMER_HEAP_MAX 可为64/4。Rust等待heap对象在 MCU timer_heap.c 存在时无条件链接；MCU启动 proc_init→proc_sched_runq_init→proc_timer_heap_init→Rust init，源码看不出可被裁剪。alarm Rust已有非MCU guard、MCU用小Cheap，不能误报alarm同样问题。应使用 nm/size 确认 wait heap 对象/最终镜像实际占用后，考虑构建时容量贯通（无需另写一个低级算法）。该模块 heap初始化在boot调用，不应仅以链接了obj就宣称存活。
+- Rust构建flags stamp当前未包含 WAIT_TIMER_HEAP_MAX；若做容量编译配置，需保证 C/Rust 单一有效容量、合法范围、flags stamp和增量重建；保留默认8192和host tests小容量覆盖。STM32_QEMU 在Makefile2111另行 CFLAGS 强制4，要统一处理而非只看用户变量。
+
+## 2026-10-22 20:21 北京时间
+
+- 原内核当前完整 APK 对照42/42 ok，已归档。当前A20 fork原259.38→MM改进325.37 ops/s（+25.44%）；早期586绝对值当前原内核也不能复现，Linux也明显变慢。完整表与范围已追加报告。
+- **未解决关注点**：完整套件 SysV semaphore switch 原207037→MM改进192483 ops/s（-7.03%），guest范围不重叠。不能宣称所有负载无退化；应后续用 stock/table-hint/yield-keep 定向交替复查，而非用宿主波动笼统掩盖。
+- yield候选首次guest sched_stress/futex_stress通过；GS_BASE失败是测试安装到/usr/bin/gs-base-test，但程序内部exec硬编码/bin/gs_base_test。初次失败证据保留 `perf-yield-keep-regression`，不能计入全通过。已改安装路径重跑，配置 `sched-regression-config-v2.json`。
+- **正在运行** exec session **48858**，日志 `build/performance/yield-campaign.log`：先v2三项guest回归（正确GS路径），成功后自动 table-hint/yield-keep 三轮AB/BA/AB，配置yield-config-v2.json（micro getpid、yield 100万、1t/2t私锁/2t共享锁、SysV switch），每项3秒或固定次数，关闭计数器。各轮目录 `perf-yield-paired-{1,2,3}-{table-hint,yield-keep}`。期间不要编译或并行性能任务。
+- 省内存 waitheap 确认源码startup调用，但尚未nm最终验证。MCU alarm已小C版，不动它。暂未写新数据结构或容量代码，先完成上述yield候选。
+
+## 2026-10-22 20:26 北京时间
+
+- yield campaign session48858完成；v2三项guest全部通过，72性能样本全部0/基础镜像不变，已归档 `yield-keep-2026-10-22*`、追加报告第5节。
+- A20 medians：yield1681.08→1557.69ns (-7.34%)，1t yield +7.75%，2t私锁+6.77%，共享锁3326.33→3932.81events/s (+18.23%)，SysV203844.68→271330.37 (+33.11%)；三对方向一致；getpid615.16→616.69ns控制基本不变。准备提交该候选。
+- 用户的小内存建议已落到下一项候选：`wait_timer.rs` 编译期读取容量env（合法1..8192，默认8192），Make从最终CFLAGS派生实际容量并写入Rust flags stamp，避免MCU运行limit小却保留8192数组。未改算法。新host tests在4/64/8192容量运行相同ownership/取消/过期/竞态回归，并以nm验证真实BSS缩小；非法0/8193/nondecimal拒绝，2项测试通过。
+- **当前构建** exec session **68128**，输出 `build/performance/timer-capacity-build.log`：同一x86_64 BUILD_DIR依次cap4/64/8192构建Rust对象，记录nm、stamp和mtime到 `timer-capacity-sizes.json`，检查增量重建。旧8192对象保存 `build/performance/wait-timer-before.o`。此构建尚未最终审查，容量候选未提交。
+- 下一步核对容量对象实际BSS、与旧对象默认导出代码一致性；默认x86_64内核构建/guest计时回归；配置选择只用一架构多容量，不展开架构矩阵。之后原内核/yield-keep 做SysV定向对照并处理dirty索引测量。
