@@ -1182,6 +1182,7 @@ NATIVE_UFSD_BIN        := $(NATIVE_BUILD_DIR)/ufsd-$(NATIVE_TAG)
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
 NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
+NATIVE_ABI_BEHAVIOR_BIN := $(NATIVE_BUILD_DIR)/native-abi-behavior-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
 NATIVE_CLUSTER_BIN     := $(NATIVE_BUILD_DIR)/native-cluster-$(NATIVE_TAG)
@@ -1219,6 +1220,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_UEDUD_BIN) \
                           $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
+                          $(NATIVE_ABI_BEHAVIOR_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN) $(NATIVE_CLUSTER_BIN) \
                           $(NATIVE_CLUSTER_AGENT_BIN) $(NATIVE_CLUSTER_PROBE_BIN) \

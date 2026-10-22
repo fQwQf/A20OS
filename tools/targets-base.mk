@@ -24,6 +24,8 @@
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
 		native-uedud-arch native-uedud-rv smoke-iommu-udriver-isolation \
 		native-personality-arch native-personality-rv smoke-native-personality \
+		native-abi-behavior-arch native-abi-behavior-rv smoke-abi-behavior-both smoke-abi-behavior-linux \
+		smoke-idl-ack-aarch64 \
 		native-linux-arch native-linux-rv smoke-native-linux \
 		check-a20-idl \
 		smoke-iommu-discovery \

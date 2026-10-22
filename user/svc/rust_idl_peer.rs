@@ -1432,18 +1432,23 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const u8, _envp: *const *con
 /// business echo cannot be mistaken for a successful negative case.
 #[cfg(idl_ack_test)]
 fn run_adversarial_ack_cases() -> bool {
-    let cases: [(&str, u16, u16, u32); 9] = [
-        ("wrong_nonce", 1, 3, 0xa001_0001),
-        ("selection_outside_overlap", 1, 3, 0xa002_0002),
-        ("short_frame", 1, 3, 0xa003_0003),
-        ("trailing_frame", 1, 3, 0xa004_0004),
-        ("status_selection_conflict", 1, 3, 0xa005_0005),
-        ("legacy_echo_excludes_v1", 2, 3, 0xa006_0006),
-        ("unknown_status", 1, 3, 0xa007_0007),
-        ("unknown_reply_type", 1, 3, 0xa008_0008),
-        ("unsupported_envelope_version", 1, 3, 0xa009_0009),
+    // Positive control: an exact legacy echo that does cover v1 must be
+    // accepted through the same negotiation path that rejects the malformed
+    // ACKs below.  Without it, "legacy fallback" would only be proven for
+    // rejection, not acceptance.
+    let cases: [(&str, u16, u16, u32, bool); 10] = [
+        ("legacy_echo_accepts_v1", 1, 3, 0xa00a_000a, false),
+        ("wrong_nonce", 1, 3, 0xa001_0001, true),
+        ("selection_outside_overlap", 1, 3, 0xa002_0002, true),
+        ("short_frame", 1, 3, 0xa003_0003, true),
+        ("trailing_frame", 1, 3, 0xa004_0004, true),
+        ("status_selection_conflict", 1, 3, 0xa005_0005, true),
+        ("legacy_echo_excludes_v1", 2, 3, 0xa006_0006, true),
+        ("unknown_status", 1, 3, 0xa007_0007, true),
+        ("unknown_reply_type", 1, 3, 0xa008_0008, true),
+        ("unsupported_envelope_version", 1, 3, 0xa009_0009, true),
     ];
-    for (label, min_version, max_version, nonce) in cases {
+    for (label, min_version, max_version, nonce, expected_reject) in cases {
         let (ep, task) = match spawn_service(ACK_ADVERSARY_PATH) {
             Ok(v) => v,
             Err(st) => {
@@ -1453,8 +1458,14 @@ fn run_adversarial_ack_cases() -> bool {
         };
         let outcome = negotiate_service(ep, min_version, max_version,
                                         nonce, label, true);
-        if !matches!(outcome, Ok(NegotiationOutcome::Rejected)) {
-            fail(label, "malformed acknowledgment was not rejected by negotiation path");
+        if expected_reject {
+            if !matches!(outcome, Ok(NegotiationOutcome::Rejected)) {
+                fail(label, "malformed acknowledgment was not rejected by negotiation path");
+                retire(task, ep);
+                return false;
+            }
+        } else if !matches!(outcome, Ok(NegotiationOutcome::LegacyEcho)) {
+            fail(label, "in-range legacy echo was not accepted");
             retire(task, ep);
             return false;
         }
@@ -1480,11 +1491,17 @@ fn run_adversarial_ack_cases() -> bool {
             fail(label, "failed to close adversarial peer handles");
             return false;
         }
-        put_str("IDL_ACK_REJECT: case=");
-        put(label.as_bytes());
-        put_line(" PASS rejected-before-fallback response_sent=1 cleanup=PASS");
+        if expected_reject {
+            put_str("IDL_ACK_REJECT: case=");
+            put(label.as_bytes());
+            put_line(" PASS rejected-before-fallback response_sent=1 cleanup=PASS");
+        } else {
+            put_str("IDL_ACK_ACCEPT: case=");
+            put(label.as_bytes());
+            put_line(" PASS accepted-legacy-in-range response_sent=1 cleanup=PASS");
+        }
     }
-    put_line("IDL_ACK_ADVERSARIAL: PASS cases=9 cleanup=9");
+    put_line("IDL_ACK_ADVERSARIAL: PASS cases=10 cleanup=10");
     true
 }
 

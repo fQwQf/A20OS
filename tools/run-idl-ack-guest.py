@@ -15,6 +15,7 @@ from pathlib import Path
 
 REQUIRED = [
     b"RUST_NATIVE_SVC: PASS restarts=1",
+    b"IDL_ACK_ACCEPT: case=legacy_echo_accepts_v1 PASS accepted-legacy-in-range response_sent=1 cleanup=PASS",
     b"IDL_ACK_REJECT: case=wrong_nonce PASS rejected-before-fallback response_sent=1 cleanup=PASS",
     b"IDL_ACK_REJECT: case=selection_outside_overlap PASS rejected-before-fallback response_sent=1 cleanup=PASS",
     b"IDL_ACK_REJECT: case=short_frame PASS rejected-before-fallback response_sent=1 cleanup=PASS",
@@ -24,7 +25,7 @@ REQUIRED = [
     b"IDL_ACK_REJECT: case=unknown_status PASS rejected-before-fallback response_sent=1 cleanup=PASS",
     b"IDL_ACK_REJECT: case=unknown_reply_type PASS rejected-before-fallback response_sent=1 cleanup=PASS",
     b"IDL_ACK_REJECT: case=unsupported_envelope_version PASS rejected-before-fallback response_sent=1 cleanup=PASS",
-    b"IDL_ACK_ADVERSARIAL: PASS cases=9 cleanup=9",
+    b"IDL_ACK_ADVERSARIAL: PASS cases=10 cleanup=10",
     b"System is going down for power-off NOW",
     b"[SD] audit errors=0",
 ]
@@ -56,17 +57,18 @@ def main() -> int:
     parser.add_argument("--image", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=90)
-    parser.add_argument("--arch", choices=("riscv64", "riscv32", "x86_64"), default="riscv64")
+    parser.add_argument("--arch", choices=("riscv64", "riscv32", "x86_64", "aarch64"), default="riscv64")
     parser.add_argument("--smp", type=int)
     parser.add_argument("--profile-label", default="unlabeled")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    expected_smp = {"riscv64": 2, "riscv32": 1, "x86_64": 2}[args.arch]
+    expected_smp = {"riscv64": 2, "riscv32": 1, "x86_64": 2, "aarch64": 1}[args.arch]
     if args.smp is None:
         args.smp = expected_smp
     if args.smp != expected_smp:
         parser.error(f"{args.arch} ACK profile requires --smp {expected_smp}")
-    peer_tag = {"riscv64": "rv", "riscv32": "rv32", "x86_64": "x86_64"}[args.arch]
+    peer_tag = {"riscv64": "rv", "riscv32": "rv32", "x86_64": "x86_64",
+                "aarch64": "aarch64"}[args.arch]
     guest_peer = f"/bin/rust-idl-peer-ack-{peer_tag}"
     online_marker = f"[SMP] {expected_smp}/{expected_smp} configured CPUs online".encode()
     online_required = args.arch in ("riscv64", "x86_64")
@@ -79,6 +81,17 @@ def main() -> int:
             "-serial", "stdio", "-monitor", "none", "-smp", str(args.smp),
             "-no-reboot", "-drive", f"file={args.image},if=none,format=raw,id=x0",
             "-device", "virtio-blk-pci,drive=x0", "-kernel", str(args.kernel),
+        ]
+    elif args.arch == "aarch64":
+        # Raw AArch64 boot follows the Linux protocol and passes the DTB in
+        # x0, so it takes the .bin and has no -bios.
+        argv = [
+            "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57",
+            "-m", "1G", "-serial", "stdio", "-monitor", "none",
+            "-smp", str(args.smp),
+            "-drive", f"file={args.image},if=none,format=raw,id=x0",
+            "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
+            "-kernel", str(args.kernel),
         ]
     else:
         argv = [
