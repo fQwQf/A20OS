@@ -21,6 +21,62 @@ $(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
 
 mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
 
+# ------------------------------------------------------------------
+# Dynamic mlibc artifacts (ld.so + libc.so) for the real rtld gate.
+#
+# The shared link needs a toolchain whose ld supports -shared; the bare-metal
+# riscv64-unknown-elf ld does not.  The linux-gnu driver is used only to
+# link: the C library itself is still the A20 sysdeps build, and every link
+# runs with -nostdlib so no host libc is involved.
+# ------------------------------------------------------------------
+MLIBC_SHARED_BUILD    := $(MLIBC_DIR)/build-a20-shared
+MLIBC_SHARED_SYSROOT  := user/build/mlibc-shared-sysroot
+MLIBC_SHARED_CROSS    := user/mlibc/a20-shared.cross-file
+MLIBC_SHARED_DEPS     := $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
+                         $(wildcard $(MLIBC_DIR)/options/rtld/riscv64/*) \
+                         $(MLIBC_DIR)/meson.build $(MLIBC_SHARED_CROSS)
+MLIBC_DYNAMIC_CFLAGS  := -march=rv64gc -mabi=lp64d -mcmodel=medany -O2 \
+                         -D_GNU_SOURCE $(MLIBC_FAST_TYPE_FLAGS) \
+                         -isystem $(MLIBC_SHARED_SYSROOT)/include
+MLIBC_DYNAMIC_APP     := $(NATIVE_BUILD_DIR)/mlibc-dynamic-$(NATIVE_TAG)
+MLIBC_DYNAMIC_PLUGIN  := $(NATIVE_BUILD_DIR)/libmlibcplug.so
+
+$(MLIBC_SHARED_SYSROOT)/lib/libc.so: $(MLIBC_SHARED_DEPS)
+	@test -d "$(MLIBC_SHARED_BUILD)" || meson setup $(MLIBC_SHARED_BUILD) $(MLIBC_DIR) \
+		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
+		--cross-file $(MLIBC_SHARED_CROSS) \
+		-Ddefault_library=both -Dbuild_tests=false \
+		--prefix=$(abspath $(MLIBC_SHARED_SYSROOT))
+	ninja -C $(MLIBC_SHARED_BUILD)
+	meson install -C $(MLIBC_SHARED_BUILD) --no-rebuild --quiet
+
+mlibc-shared-sysroot: $(MLIBC_SHARED_SYSROOT)/lib/libc.so
+
+$(MLIBC_DYNAMIC_PLUGIN): user/tests/test_mlibc_dynamic_plugin.c \
+		$(MLIBC_SHARED_SYSROOT)/lib/libc.so
+	@mkdir -p $(dir $@)
+	$(RISCV_GNU_CC) $(MLIBC_DYNAMIC_CFLAGS) -fPIC -shared -nostdlib \
+		-Wl,-soname,libmlibcplug.so $< -o $@
+
+$(MLIBC_DYNAMIC_APP): user/tests/test_mlibc_dynamic.c user/mlibc/a20-mlibc-dyn.ld \
+		$(MLIBC_SHARED_SYSROOT)/lib/libc.so $(MLIBC_SHARED_SYSROOT)/lib/crt1.o
+	@mkdir -p $(dir $@)
+	$(RISCV_GNU_CC) $(MLIBC_DYNAMIC_CFLAGS) -fPIE -c $< -o $@.o
+	$(RISCV_GNU_CC) -march=rv64gc -mabi=lp64d -mcmodel=medany -nostdlib -pie \
+		-Wl,--allow-shlib-undefined -Wl,-dynamic-linker,/lib/ld.so \
+		-Wl,-rpath,'$$ORIGIN/lib' -T user/mlibc/a20-mlibc-dyn.ld \
+		$(MLIBC_SHARED_SYSROOT)/lib/crt1.o $@.o \
+		-L$(MLIBC_SHARED_SYSROOT)/lib -lc -lgcc -o $@
+	@rm -f $@.o
+
+.PHONY: mlibc-dynamic mlibc-dynamic-rootfs
+mlibc-dynamic: $(MLIBC_DYNAMIC_APP) $(MLIBC_DYNAMIC_PLUGIN)
+
+mlibc-dynamic-rootfs: mlibc-dynamic
+	@$(PYTHON) tools/img.py mlibc-dynamic-rootfs \
+		--fat32-img "$(FAT32_IMG)" --native-build-dir "$(NATIVE_BUILD_DIR)" \
+		--mlibc-sysroot "$(abspath $(MLIBC_SHARED_SYSROOT))" --tag "$(NATIVE_TAG)"
+
 # Optional full-libc concurrency workload; not part of ordinary rootfs builds.
 MLIBC_THREADS_BIN := $(NATIVE_BUILD_DIR)/mlibc-threads-$(NATIVE_TAG)
 .PHONY: mlibc-threads
@@ -107,7 +163,7 @@ $(MLIBC_MKSH_OBJDIR)/%.o: $(MLIBC_MKSH_DIR)/%.c | $(MLIBC_SYSROOT)/lib/libc.a
 $(MLIBC_MKSH_BIN): $(MLIBC_MKSH_OBJS) $(MLIBC_SYSROOT)/lib/libc.a user/mlibc/a20-mlibc.ld
 	$(call MLIBC_LINK_RECIPE,$(MLIBC_MKSH_OBJS),-lc,$@)
 
-mlibc-hello-rv: $(MLIBC_HELLO_BIN) $(MLIBC_CHILD_BIN) $(MLIBC_FORK_BIN) $(MLIBC_SIGCHLD_BIN) $(MLIBC_MKSH_BIN)
+mlibc-hello-rv: $(MLIBC_HELLO_BIN) $(MLIBC_CHILD_BIN) $(MLIBC_FORK_BIN) $(MLIBC_SIGCHLD_BIN) $(MLIBC_PIPEEXEC_BIN) $(MLIBC_MKSH_BIN)
 
 # Declared .PHONY; the shell was previously only reachable as a prerequisite of
 # mlibc-hello-rv, which left `make mlibc-mksh` with no rule.
@@ -193,6 +249,9 @@ smoke-mlibc:
 
 smoke-mlibc-fork:
 	$(PYTHON) tools/smoke.py smoke-mlibc-fork
+
+smoke-mlibc-dynamic:
+	$(PYTHON) tools/smoke.py smoke-mlibc-dynamic
 
 smoke-mlibc-mksh:
 	$(PYTHON) tools/smoke.py smoke-mlibc-mksh

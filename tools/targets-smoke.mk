@@ -465,6 +465,9 @@ smoke-mm-process-vm-exec-cow-rust:
 smoke-elf-exec-rust:
 	$(PYTHON) tools/smoke.py smoke-elf-exec-rust
 
+smoke-nommu-exec:
+	$(PYTHON) tools/smoke.py smoke-nommu-exec
+
 # The AArch64 half of the same gate.  The case has been in the table all along;
 # without this target check-smoke-cases reported it as unreachable, so nothing
 # ran it and the AArch64 exec path had no gate at all.
