@@ -3,6 +3,10 @@
 > 未完成事项见 [1.0 缺口台账](../gaps/README.md)；本页只描述当前实现与验证结果。
 > 最后核实：2026-10-23。平台：QEMU `virt`，RISC-V64、AArch64；ABI=both。
 
+2026-10-23 的 Native 1.1 运行时接口、SDK/适配层分工与迁移见
+[扩展规范](../../native-abi/10-runtime-extensions.md)；新增验证见
+[mlibc 加固验收记录](../history/mlibc-native-hardening-2026-10-23.md)。
+
 本页覆盖 package 的四个验收面：真实 mlibc 动态链接、exec 继承、kexec staging/handoff
 边界、NOMMU 平台矩阵。旧的 fakeld 探针仍保留在 `smoke-native-dynlink`，但动态链接的
 验收不再以它为依据。
@@ -15,7 +19,7 @@
   VmMap/VmUnmap/VmProtect、AnonAllocate/AnonFree、Stat、Futex*、TcbSet、
   LibcLog/LibcPanic/Write）。它不引用 libc 的 malloc/calloc；ld.so 在 libc.so
   存在之前就能完成自举。
-- `options/rtld/riscv64/entry.S`（及 aarch64 版本）在 `relocateSelf` 之前把内核传入的
+- `sysdeps/a20/rtld-entry.S`（RV64/AArch64 分支）在 `relocateSelf` 之前把内核传入的
   `a20_start_info_t` 保存到 `__a20_rt_start_info`，并在跳转到应用入口时把 a0/x0 恢复成
   同一个 start_info；解释器与应用看到同一个句柄表。
 - A20 的 `mlibc` 配置启用 `MLIBC_MAP_DSO_SEGMENTS`：每个 PT_LOAD 按最终权限直接从文件

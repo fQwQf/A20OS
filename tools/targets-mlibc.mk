@@ -10,8 +10,13 @@ MLIBC_FAST_TYPE_FLAGS := \
 	-D__INT_FAST8_TYPE__="signed char" -D__INT_FAST16_TYPE__=long -D__INT_FAST32_TYPE__=long \
 	-D__UINT_FAST8_TYPE__="unsigned char" -D__UINT_FAST16_TYPE__="unsigned long" -D__UINT_FAST32_TYPE__="unsigned long"
 
-$(MLIBC_SYSROOT)/lib/libc.a: $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
-	$(MLIBC_DIR)/options/posix/include/spawn.h \
+# Let Ninja see generic libc/header changes too; depending only on the port
+# sources could silently keep an old installed archive after a common fix.
+MLIBC_SOURCE_DEPS := $(shell find $(MLIBC_DIR)/options $(MLIBC_DIR)/sysdeps/a20 $(MLIBC_DIR)/subprojects -type f) \
+                     $(wildcard $(MLIBC_DIR)/meson*.build $(MLIBC_DIR)/meson*.txt $(MLIBC_DIR)/meson.options)
+MLIBC_NATIVE_HEADERS := $(wildcard user/liba20rt/*.h kernel/include/uapi/a20/*.h)
+
+$(MLIBC_SYSROOT)/lib/libc.a: $(MLIBC_SOURCE_DEPS) \
 	$(MLIBC_DIR)/ci/a20-riscv64.cross-file
 	@test -d "$(MLIBC_BUILD)" || meson setup $(MLIBC_BUILD) $(MLIBC_DIR) \
 		--cross-file $(MLIBC_DIR)/ci/a20-riscv64.cross-file \
@@ -32,7 +37,7 @@ mlibc-sysroot: $(MLIBC_SYSROOT)/lib/libc.a
 MLIBC_SHARED_BUILD    := $(MLIBC_DIR)/build-a20-shared
 MLIBC_SHARED_SYSROOT  := user/build/mlibc-shared-sysroot
 MLIBC_SHARED_CROSS    := user/mlibc/a20-shared.cross-file
-MLIBC_SHARED_DEPS     := $(wildcard $(MLIBC_DIR)/sysdeps/a20/*) \
+MLIBC_SHARED_DEPS     := $(MLIBC_SOURCE_DEPS) \
                          $(wildcard $(MLIBC_DIR)/options/rtld/riscv64/*) \
                          $(MLIBC_DIR)/meson.build $(MLIBC_SHARED_CROSS)
 MLIBC_DYNAMIC_CFLAGS  := -march=rv64gc -mabi=lp64d -mcmodel=medany -O2 \
@@ -106,9 +111,12 @@ mlibc-signals:
 	@exit 1
 endif
 
+# Bare-metal GCC does not forward -static to ld. Select archives explicitly
+# when a sysroot built with --library both also contains shared libraries.
 define MLIBC_LINK_RECIPE
 @mkdir -p $(dir $(3))
 $(RISCV_ELF_PREFIX)gcc -march=rv64gc -mabi=lp64d -mcmodel=medany -static -nostdlib \
+	-Wl,-Bstatic \
 	-D_GNU_SOURCE $(MLIBC_FAST_TYPE_FLAGS) \
 	-isystem $(MLIBC_SYSROOT)/include \
 	-T user/mlibc/a20-mlibc.ld \
@@ -136,6 +144,35 @@ $(MLIBC_SIGCHLD_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_sigchld.
 MLIBC_PIPEEXEC_BIN := $(NATIVE_BUILD_DIR)/mlibc-pipeexec-$(NATIVE_TAG)
 $(MLIBC_PIPEEXEC_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_pipeexec.c user/mlibc/a20-mlibc.ld
 	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_pipeexec.c,-lc,$@)
+
+MLIBC_SEMANTICS_BIN := $(NATIVE_BUILD_DIR)/mlibc-semantics-$(NATIVE_TAG)
+$(MLIBC_SEMANTICS_BIN): $(MLIBC_NATIVE_HEADERS) $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_semantics.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_semantics.c,-lc -lpthread,$@)
+
+.PHONY: mlibc-semantics
+mlibc-semantics: $(MLIBC_SEMANTICS_BIN)
+
+MLIBC_NETWORK_BIN := $(NATIVE_BUILD_DIR)/mlibc-network-$(NATIVE_TAG)
+$(MLIBC_NETWORK_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_network.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_network.c,-lc -lpthread,$@)
+.PHONY: mlibc-network
+mlibc-network: $(MLIBC_NETWORK_BIN)
+
+# Compile unmodified upstream tests as Native ELFs. These are run in the
+# guest, so a Linux sysdep or host-libc pass cannot substitute for acceptance.
+MLIBC_UPSTREAM_CASES := ansi/alloc ansi/sscanf ansi/snprintf ansi/sprintf \
+	ansi/strtol ansi/strtof ansi/longjmp ansi/qsort ansi/calloc ansi/strcmp \
+	ansi/strchr ansi/strrchr ansi/ungetc ansi/fopen ansi/fputs ansi/ftell \
+	ansi/fseek-eof ansi/fgetpos ansi/threads-mtx ansi/threads-cnd \
+	ansi/threads-once ansi/threads-tss ansi/threads-thrd
+MLIBC_UPSTREAM_BINS := $(addprefix $(NATIVE_BUILD_DIR)/mlibc-upstream-,$(subst /,-,$(MLIBC_UPSTREAM_CASES)))
+define MLIBC_UPSTREAM_template
+$(NATIVE_BUILD_DIR)/mlibc-upstream-$(subst /,-,$(1)): $(MLIBC_SYSROOT)/lib/libc.a $(MLIBC_DIR)/tests/$(1).c user/mlibc/a20-mlibc.ld
+	$$(call MLIBC_LINK_RECIPE,$(MLIBC_DIR)/tests/$(1).c,-lc -lpthread -lm -lrt,$$@)
+endef
+$(foreach test_case,$(MLIBC_UPSTREAM_CASES),$(eval $(call MLIBC_UPSTREAM_template,$(test_case))))
+.PHONY: mlibc-upstream-tests
+mlibc-upstream-tests: $(MLIBC_UPSTREAM_BINS)
 
 # ------------------------------------------------------------------
 # mksh on mlibc (native ABI)

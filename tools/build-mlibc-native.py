@@ -27,6 +27,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--arch', choices=['riscv64', 'aarch64'], default='riscv64')
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--library', choices=['static', 'shared', 'both'], default='static')
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--cc', help='optional target C compiler override')
     p.add_argument('--cxx', help='optional target C++ compiler override')
@@ -35,7 +36,7 @@ def main():
     if args.jobs < 1 or (out.exists() and any(out.iterdir())):
         p.error('positive jobs and empty output required; preserve failed builds')
     out.mkdir(parents=True, exist_ok=True)
-    report = dict(built=False, arch=args.arch, abi='a20-native', runtime_verified=False, commands=[])
+    report = dict(built=False, arch=args.arch, abi='a20-native', library=args.library, runtime_verified=False, commands=[])
 
     def save():
         (out / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -72,15 +73,18 @@ def main():
         build = out / 'build'
         sysroot = out / 'sysroot'
         run(['meson', 'setup', str(build), str(source), '--cross-file', str(cross),
-             '--cross-file', str(override), '--wrap-mode=nodownload', '-Ddefault_library=static',
+             '--cross-file', str(override), '--wrap-mode=nodownload', '-Ddefault_library=' + args.library,
              '-Dbuild_tests=false', '--prefix=' + str(sysroot)], 'configure')
         run(['ninja', '-C', str(build), '-j' + str(args.jobs)], 'compile')
         run(['meson', 'install', '-C', str(build), '--no-rebuild', '--quiet'], 'install')
         for name, digest in frozen.items():
             if sha(source / name) != digest:
                 raise ValueError('frozen source changed while building: ' + name)
-        if not (sysroot / 'lib/libc.a').is_file():
-            raise ValueError('full static libc archive missing')
+        required = ['libc.a'] if args.library == 'static' else ['libc.so', 'ld.so']
+        if args.library == 'both': required.append('libc.a')
+        for name in required:
+            if not (sysroot / 'lib' / name).is_file():
+                raise ValueError('full libc build product missing: ' + name)
         report.update(built=True, phase='built', sysroot=hashes(sysroot))
         print('BUILT Native full libc ' + args.arch, flush=True)
     except Exception as error:
