@@ -8,7 +8,7 @@
 | 领域 | 已集成的行为 | 覆盖范围与剩余限制 |
 | --- | --- | --- |
 | Signal | Rust 信号核心，接入 Linux/Native signal 与 signalfd。 | 已覆盖 guest 冒烟路径。三组成对 C/R 测量是小样本且区间重叠，不构成稳定的性能优势结论。 |
-| ELF / exec | Rust ELF 规划与 exec/kexec 事务路径已集成。 | 覆盖 RV64 与 AArch64 的针对性 guest 用例以及 host fixture 重放。在被测 QEMU 路径上 kexec handoff 仍不可用；NOMMU 检查只是对象构建，不是 guest 验证。 |
+| ELF / exec | Rust ELF 规划与 exec/kexec 事务路径已集成。 | 覆盖 RV64 与 AArch64 的针对性 guest 用例以及 host fixture 重放。真实 mlibc `ld.so`/`libc.so` 动态程序、exec 继承、kexec staging 与 RV64 NOMMU 静态 ELF exec 已 guest 验证；没有架构提供 kexec handoff 后端，`reboot(KEXEC)` 在 staged 后返回 ENOSYS，属平台限制。NOMMU 多进程运行时仍受 fork/reap 缺口限制。见 [native-runtime-1.0.md](native-runtime-1.0.md)。 |
 | Filesystem | Rust 拥有部分复杂 VFS、UXFS、procfs 与缓存状态迁移；C 快路径在合适处保留。 | 针对性的缓存对照在最终同档样本中未发现稳定的 rename/unlink 回退。ISOFS 压力覆盖不完整；NTFS 的 crash/remount 在两种实现上都失败；ext4 无日志时的 deferred-orphan EIO 仍未解决。见 [一致性限制](../../fs/fs-consistency-model.md)。 |
 | Linux 与 Native IPC | Rust 拥有已接受的 MQ、SysV、Landlock/seccomp、Native IPC 以及 wait/fault 事务切片。 | 组合的 RV64 ABI=both SMP2 guest 跑完三个针对性程序并以状态 0 自然退出。UFFD 的 unregister/close/fd 复用/权限拒绝组合在 SMP2 下通过；keyring 权限掩码与 CLEAR/INVALIDATE 在 Rust/C 两个 selector 上通过；子进程退出矩阵（线程组、vfork、CLONE_PARENT、PDEATHSIG、SA_NOCLDWAIT）在 SMP2 下通过；Linux/Native 归一化行为差分与 ABI=linux/ABI=both 交叉断言通过。性能样本仍有噪声。 |
 | MM-VM | Rust 事务切片覆盖 VMA/VMO/COW、fork、回收、共享写 shutdown 与 fault 处理。 | 已覆盖十二个针对性冒烟用例。跨架构的运行时结论不成立。 |

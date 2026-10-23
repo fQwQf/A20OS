@@ -578,6 +578,9 @@ void signal_exec_reset(void *task)
                                  offsetof(sigaction_t, sa_mask),
                                  offsetof(sigaction_t, sa_flags),
                                  &slots);
+    /* POSIX: the new image starts with an empty signal mask.  This is a
+     * per-task field protected by the same signal-state lock. */
+    t->sig_blocked = 0;
     spin_unlock_irqrestore(&ss->lock, flags);
 }
 

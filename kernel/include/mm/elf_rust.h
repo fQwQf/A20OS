@@ -249,6 +249,7 @@ typedef struct {
     uint64_t sp;
     uint64_t platform_va;
     uint64_t random_va;
+    uint64_t execfn_va;
     uint32_t env_count;
     uint32_t arg_count;
     uint32_t auxv_count;
@@ -406,7 +407,7 @@ _Static_assert(sizeof(a20_elf_interpreter_ops_t) == 40, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_auxv_pair_t) == 16, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_auxv_input_t) == 88, "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_stack_plan_t) ==
-                   40 + 2 * A20_ELF_MAX_ARG_STRINGS * 8 +
+                   48 + 2 * A20_ELF_MAX_ARG_STRINGS * 8 +
                        A20_ELF_AUXV_MAX_PAIRS * 16,
                "elf_rust ABI drift");
 _Static_assert(sizeof(a20_elf_start_info_plan_t) ==
@@ -458,6 +459,7 @@ int32_t a20_elf_plan_stack(uint64_t stack_top, size_t ptr_size,
                            const uint8_t *const *envp_ptrs,
                            const size_t *envp_lens, size_t envc,
                            const uint8_t *platform, size_t platform_len,
+                           const uint8_t *execfn, size_t execfn_len,
                            const a20_elf_auxv_input_t *aux,
                            a20_elf_stack_plan_t *out);
 int32_t a20_elf_plan_stack_a20(uint64_t stack_top, size_t ptr_size,
@@ -477,6 +479,7 @@ int32_t a20_elf_write_linux_stack(uint64_t stack_top, size_t ptr_size,
                                   const uint8_t *const *envp_ptrs,
                                   const size_t *envp_lens, size_t envc,
                                   const uint8_t *platform, size_t platform_len,
+                                  const uint8_t *execfn, size_t execfn_len,
                                   const a20_elf_auxv_input_t *aux,
                                   void *context, a20_elf_stack_copy_fn copy,
                                   a20_elf_stack_random_fn random,
