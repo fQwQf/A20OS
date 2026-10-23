@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -410,6 +411,30 @@ static void service_guests(void)
         }
     }
 }
+/* Sleep until a control request or guest output arrives.  A plain nanosleep
+ * depends on the timer wakeup path, which can be delayed by seconds while
+ * guest vCPUs run; data arrival must be able to wake the supervisor on its
+ * own, or START/LIST time out even though the request is already queued. */
+static void wait_for_work(void)
+{
+    struct pollfd pfd[1 + VMD_MAX_GUESTS];
+    unsigned n = 0;
+    pfd[n].fd = control_fd;
+    pfd[n].events = POLLIN;
+    n++;
+    for (unsigned i = 0; i < VMD_MAX_GUESTS; i++) {
+        if (guests[i].name[0] && guests[i].output_fd >= 0) {
+            pfd[n].fd = guests[i].output_fd;
+            pfd[n].events = POLLIN;
+            n++;
+        }
+    }
+    if (poll(pfd, n, 5) < 0 && errno != EINTR) {
+        struct timespec ts = {0, 5000000};
+        nanosleep(&ts, NULL);
+    }
+}
+
 int main(void)
 {
     if (getuid() != 0) { fprintf(stderr, "a20-vmd requires root\n"); return 1; }
@@ -443,7 +468,7 @@ int main(void)
     fflush(stdout);
     while (!shutting_down) {
         service_guests(); receive_requests();
-        struct timespec ts = {0, 5000000}; nanosleep(&ts, NULL);
+        wait_for_work();
     }
     for (unsigned i = 0; i < VMD_MAX_GUESTS; i++) stop_guest(&guests[i]);
     for (;;) {

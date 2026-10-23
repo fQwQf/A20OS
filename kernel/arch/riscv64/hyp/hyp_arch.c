@@ -17,6 +17,7 @@
 #include "core/errno.h"
 #include "core/stdio.h"
 #include "core/timer.h"
+#include "core/cpu.h"
 #include "proc/proc.h"
 #include "hyp_asm_offsets.h"
 _Static_assert(__builtin_offsetof(hyp_vcpu_t, fpu) == HYP_ASM_VCPU_FPU_OFF, "FPU offset");
@@ -41,6 +42,8 @@ static int hyp_probe(void)
     __atomic_store_n(&probed, value, __ATOMIC_RELEASE);
     return value;
 }
+
+static uint64_t hyp_run_start[CONFIG_NR_CPUS];
 
 int hyp_supported(void)
 {
@@ -288,8 +291,24 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
      * walks for guest entry. Full activation fences follow the CSR restore. */
     /* RUN owns a CPU until the next HS trap. Arm a bounded host slice even
      * when the previous task left no immediate timer work. Guest timers use
-     * vstimecmp and cannot substitute for this host scheduling deadline. */
-    timer_set_interval(riscv64_timer_freq() / 100);
+     * vstimecmp and cannot substitute for this host scheduling deadline.
+     *
+     * Do NOT re-arm from "now" on every RUN.  A managed guest returns to the
+     * host on console output (one trap per byte), so RUNs are often much
+     * shorter than a tick; pushing the deadline forward each time means it
+     * never expires.  With no host tick the scheduler never preempts a VMM
+     * task, and the supervisor, a second VMM, or any task blocked in a long
+     * syscall can stall for seconds.  Only shorten a deadline that is absent
+     * or further away than one slice; an already-pending tick is left to
+     * fire. */
+    uint64_t tick_slice = riscv64_timer_freq() / 100;
+    uint64_t tick_now, tick_deadline;
+    __asm__ volatile("csrr %0, time" : "=r"(tick_now));
+    __asm__ volatile("csrr %0, 0x14d" : "=r"(tick_deadline)); /* stimecmp */
+    hyp_run_start[cpu_current_id()] = tick_now;
+    if (tick_deadline == 0 ||
+        (tick_deadline > tick_now && tick_deadline - tick_now > tick_slice))
+        timer_set_interval(tick_slice);
     __asm__ volatile("csrs sie, %0" :: "r"(1ULL << 5) : "memory");
     task_t *host = proc_current();
     if (host && host->trap_ctx) ARCH_TRAP_FAST_RETURN_DISARM(host->trap_ctx);
@@ -453,6 +472,22 @@ int hyp_arch_guest_trap(void *trap_frame)
     if (resume && vcpu->exit == HYP_EXIT_YIELD) resume = 0;
     if (resume) hyp_vcpu_sync_irqs(vcpu);
     if (resume && hyp_vcpu_control_exit(vcpu)) resume = 0;
+    /* A managed guest that keeps trapping to HS (console, MMIO, ecall) can
+     * stay inside one RUN for much longer than a host tick when the host
+     * timer interrupt is not delivered while VS-mode executes (measured on
+     * QEMU 10.0.13 with a guest running interrupts-disabled regions).  The
+     * host scheduler then misses its accounting and wakeups: sleepers
+     * overshoot by seconds and the supervisor cannot answer STOP/START.
+     * End the managed RUN once a host slice has elapsed, so the pending
+     * timer interrupt is taken in host mode. */
+    if (resume && vcpu->vm->managed_console) {
+        unsigned run_cpu = cpu_current_id();
+        if (timer_get_ticks() - hyp_run_start[run_cpu] >=
+            riscv64_timer_freq() / 100) {
+            vcpu->exit = HYP_EXIT_YIELD;
+            resume = 0;
+        }
+    }
     if (resume && vcpu->vm->managed_console &&
         ((scause & CAUSE_INTR_MASK) || hyp_console_pending(vcpu->vm))) {
         vcpu->exit = HYP_EXIT_YIELD;
