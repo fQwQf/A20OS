@@ -61,7 +61,7 @@ bus_type_t *get_virtio_mmio_bus(void) {
 /* VIRTIO_MMIO_IRQ_MODEL:
  * - Each MMIO slot is assigned a platform IRQ line relative to a base.
  * - The base is passed by the board because it is platform-specific
- *   (e.g. RISC-V QEMU virt starts at IRQ 1, AArch64 QEMU virt at IRQ 16).
+ *   (e.g. RISC-V QEMU virt starts at IRQ 1, AArch64 QEMU virt at INTID 48).
  * - Drivers retrieve the IRQ through device_get_resource(dev, RES_IRQ, 0).
  */
 void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base) {
