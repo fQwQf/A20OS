@@ -9,7 +9,7 @@
   映射/页表计数回到基线。已修复宿主 tick 被每次 RUN 推迟导致的调度停摆，
   managed RUN 现在在 guest trap 边界按宿主时间片主动让出。
 - 缺口：同宿主第二轮多 guest 仍会超时——管理进程可能连续数十秒得不到唤醒
-  （跨领域阻塞，见 [runtime.md](runtime.md) `RT-01`），RPC 3 秒超时后探针失败；
+  （跨领域阻塞，见 [runtime.md](runtime.md) `RUNTIME-06`），RPC 3 秒超时后探针失败；
   pause/resume 后退出仍不稳定；双 VM × 双 vCPU guest 能到 2/2 online，但随后
   在 guest 侧 trap frame 上出现 `sstatus` 损坏（SPP 变成栈指针），根因未定位；
   100 次 create/destroy 循环未完成。
