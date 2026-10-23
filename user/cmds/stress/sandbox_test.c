@@ -217,18 +217,24 @@ int main(int argc, char **argv) {
     pid_t child = fork();
     if (!child)
         _exit(filter_probe());
-    if (!wait_ok(child))
+    if (!wait_ok(child)) {
+        puts("SANDBOX: FAIL seccomp-filter");
         goto fail;
+    }
     child = fork();
     if (!child)
         _exit(filter_trap_probe());
-    if (!wait_ok(child))
+    if (!wait_ok(child)) {
+        puts("SANDBOX: FAIL seccomp-trap");
         goto fail;
+    }
     child = fork();
     if (!child)
         _exit(filter_stack_probe());
-    if (!wait_ok(child))
+    if (!wait_ok(child)) {
+        puts("SANDBOX: FAIL seccomp-stack");
         goto fail;
+    }
     uint32_t action = SECCOMP_RET_ALLOW;
     if (syscall(SYS_seccomp, 2, 0, &action) || action != SECCOMP_RET_ALLOW)
         goto fail;

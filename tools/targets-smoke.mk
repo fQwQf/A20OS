@@ -102,6 +102,10 @@ smoke-abi-linux:
 smoke-net-iface:
 	tools/a20 test smoke-net-iface
 
+.PHONY: smoke-security-release
+smoke-security-release:
+	$(PYTHON) tools/smoke.py smoke-security-release
+
 smoke-envelope:
 	$(PYTHON) tools/smoke.py smoke-envelope
 
