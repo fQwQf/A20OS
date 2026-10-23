@@ -317,10 +317,13 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 | `Exec format error`，日志干净 | `cat /proc/a20/xlator` | 该 guest 行显示 `path=(none)` 或 `argv="(unset)"` |
 | `/proc/a20/xlator` 不存在 | 构建配置 | 这是一个 `CONFIG_XLATOR=0` 的内核 |
 | 转发成功但 guest 行为不对 | shim 打出的 `argv[i]=` | 模板形状与翻译器不匹配，见第 4 节 |
-| 翻译器起来了但 guest 在 syscall 面上崩 | guest 自己的输出 | 与本特性无关：guest 需要的 syscall 覆盖见 `kernel/abi/linux/syscall_coverage.md` |
+| 翻译器起来了但 guest 在 syscall 面上崩 | guest 自己的输出 | 核对 guest 需要的 Linux ABI syscall 是否受支持 |
 | 翻译器报 JIT 相关的 `mprotect` 失败 | `W^X 策略` 日志行 | 见下一节 |
 
-失败时的日志落点：`.kernel-build/smoke/exec-xlator-riscv64.log`（`smoke-exec-xlator`）与 `.kernel-build/smoke/exec-xlator-shim-riscv64.log`（shim 用例）。
+guest 需要的 syscall 覆盖见 `kernel/abi/linux/syscall_coverage.md`。失败时分别查看：
+
+- `.kernel-build/smoke/exec-xlator-riscv64.log`：翻译器门禁日志。
+- `.kernel-build/smoke/exec-xlator-shim-riscv64.log`：shim 用例日志。
 
 ### W^X 配置与验证
 

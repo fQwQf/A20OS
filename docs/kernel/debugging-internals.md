@@ -5,7 +5,11 @@
 
 ## 内核调试状态机 {#debug-state}
 
-`kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
+`kernel/proc/debug.c` 提供与 ABI 无关的观察者-被观察者调试模型。基础操作包括
+`proc_debug_traceme`、`proc_debug_attach`、`proc_debug_detach`、`proc_debug_resume`、
+`proc_debug_singlestep` 与 `proc_debug_kill`。接口还提供寄存器读写、地址空间 PEEK/POKE、
+siginfo 快照、`PT_DEBUG_EVENT_EXEC` / `PT_DEBUG_EVENT_EXIT` 事件停止，以及
+`proc_debug_syscall_entry` / `proc_debug_syscall_exit` 的 syscall 边界停止。
 
 Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。Native ABI 的调试对象也映射到同一接口面，见 [Native 调试接口](../native-abi/06-security.md)。
 
