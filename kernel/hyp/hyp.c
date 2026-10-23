@@ -11,6 +11,7 @@
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "cg/cgroup.h"
+#include "cg/cgroup_impl.h"
 #include "core/panic.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -392,6 +393,88 @@ int hyp_selftest(void)
         return st_fail("remap");
     if (hyp_s2_map(vm, base + 2 * PAGE_SIZE, pfns[2], PTE_R | PTE_W) != -EEXIST)
         return st_fail("remap-eexist");
+
+    /* ---- failure paths: every refusal must leave the address space and the
+     * frame accounting exactly as it found them.  These are the negative
+     * controls HYP-02 asks for; a map that refuses after taking ownership, or
+     * a load that keeps half its pages, is a leak that only shows up after
+     * enough failed creates. */
+    uint8_t *failbuf = kmalloc(PAGE_SIZE * 2);
+    if (!failbuf)
+        return st_fail("failbuf");
+    memset(failbuf, 0x5a, PAGE_SIZE * 2);
+
+    /* Out-of-window and bad-frame refusals happen before any ownership moves. */
+    if (hyp_s2_map(vm, 1ULL << 40, pfns[0], PTE_R) != -ERANGE)
+        return st_fail("map-range");
+    if (hyp_s2_map(vm, base + 5 * PAGE_SIZE, PFN_NONE, PTE_R) != -EINVAL)
+        return st_fail("map-bad-pfn");
+    if (hyp_ram_fill(vm, 0) != -EFAULT)
+        return st_fail("fill-outside-window");
+    /* The UART is device space, not RAM: a fill there must refuse and must
+     * not allocate a frame. */
+    if (hyp_ram_fill(vm, 0x10000000ULL) != -EFAULT)
+        return st_fail("fill-device-gpa");
+
+    /* A load that collides with an existing mapping keeps the old mapping,
+     * returns the frames it allocated, and unmaps the pages it installed.
+     * Map only the SECOND page of the range so the first one is installed and
+     * has to be unwound. */
+    uint64_t region = base + 8 * PAGE_SIZE;
+    pfn_t keep = pfa_alloc_page();
+    if (keep == PFN_NONE)
+        return st_fail("keep-alloc");
+    memset(pfn_to_virt(keep), 0x33, PAGE_SIZE);
+    if (hyp_s2_map(vm, region + PAGE_SIZE, keep, PTE_R | PTE_W) != 0)
+        return st_fail("partial-setup");
+    /* A failed load may leave the page-table nodes it created in place (they
+     * are shared and reusable); what must be identical is the mapped-page
+     * count and the surviving mapping. */
+    struct hyp_stats st_before, st_after;
+    hyp_stats_get(&st_before);
+    if (hyp_vm_load(vm, region, failbuf, PAGE_SIZE * 2) != -EEXIST)
+        return st_fail("load-partial-refuse");
+    if (hyp_s2_translate(vm, region) != 0)
+        return st_fail("load-partial-unwind");
+    if (hyp_s2_translate(vm, region + PAGE_SIZE) != pfn_to_phys(keep))
+        return st_fail("load-partial-clobber");
+    hyp_stats_get(&st_after);
+    if (st_after.mapped_pages != st_before.mapped_pages)
+        return st_fail("load-partial-leak");
+    if (hyp_vm_load(vm, 0xFFFFFFF000ULL, failbuf, PAGE_SIZE) != -EINVAL)
+        return st_fail("load-out-of-window");
+    hyp_stats_get(&st_after);
+    if (st_after.mapped_pages != st_before.mapped_pages)
+        return st_fail("refusal-leak");
+    if (hyp_s2_unmap(vm, region + PAGE_SIZE) != 0)
+        return st_fail("partial-teardown");
+    frame_put(keep);
+
+    /* Low memory: a cgroup with a zero limit refuses the charge, so both the
+     * bulk loader and the demand-fill path must return -ENOMEM without leaving
+     * a mapping or a frame behind.  Using the real charge path keeps this
+     * deterministic instead of trying to exhaust the machine. */
+    cg_node_t tiny;
+    memset(&tiny, 0, sizeof(tiny));
+    spin_init(&tiny.lock);
+    cg_mem_init(&tiny.res.mem);
+    tiny.res.mem.limit = 0;
+    struct cg_node *saved_cg = vm->charge_cg;
+    vm->charge_cg = &tiny;
+    uint64_t oom_gpa = region + 16 * PAGE_SIZE;
+    struct hyp_stats st_oom0, st_oom1;
+    hyp_stats_get(&st_oom0);
+    if (hyp_vm_load(vm, oom_gpa, failbuf, PAGE_SIZE) != -ENOMEM)
+        return st_fail("load-oom");
+    if (hyp_s2_translate(vm, oom_gpa) != 0)
+        return st_fail("load-oom-map");
+    if (hyp_ram_fill(vm, oom_gpa) != -ENOMEM)
+        return st_fail("fill-oom");
+    hyp_stats_get(&st_oom1);
+    if (st_oom1.mapped_pages != st_oom0.mapped_pages)
+        return st_fail("oom-leak");
+    vm->charge_cg = saved_cg;
+    kfree(failbuf);
 
     /* Destroy: every lent frame returns with its reference dropped, so the
      * buddy sees exactly the four frames this test allocated, free again. */
