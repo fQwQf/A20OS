@@ -9,3 +9,10 @@
 - 关闭条件：arm32 上 FP 上下文切换用例通过；或明确降级为不支持并写入平台契约。
 - 诊断：[notes/core-arm32-fp.md](notes/core-arm32-fp.md)。
 
+
+### CORE-RUNTIME-05 NOMMU 用户态在 fork 出的子进程结束后退出
+
+- 现状：`ARCH=riscv64 ABI=both NOMMU=1` 的 QEMU 镜像能启动到 mksh，内建命令正常；执行任意会 fork 的输入（`/bin/echo ...` 或 `(echo SUB)`）后子进程输出正常，随后 mksh 退出、init 打印 `[init] shutting down`，父 shell 不再接受下一条命令。没有用户态 FATAL/SIGSEGV 记录。该现象与 [ABI-11](abi-ipc.md) 记录的 arm32 “fork 出的命令返回后 mksh 崩溃”属同一等待/信号返回面，但 NOMMU RV64 上是直接退出而不是空指针崩溃。
+- 缺口：NOMMU 用户态的 fork/reap 生命周期没有完成；因此 NOMMU 只能验证到第一次外部 ELF exec，不能验证多命令运行时。
+- 关闭条件：RV64 NOMMU 镜像里连续执行两次 `/bin/echo` 后 mksh 仍存活，且 `poweroff` 走正常关机路径。
+- 来源：RUNTIME 包在新增 `smoke-nommu-exec` guest 运行时发现；本包只覆盖 ELF/exec，未改 fork/reap 实现。

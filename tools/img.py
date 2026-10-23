@@ -607,11 +607,32 @@ def inject_mlibc(a) -> int:
     """
     img = REPO / a.fat32_img
     native = REPO / a.native_build_dir
+    # The FAT image is mounted at /bin in the guest, so image paths are
+    # root-relative: ::/x is guest /bin/x (same layout as inject_sbase).
     for name in ("mlibc-hello", "mlibc-child", "mlibc-fork",
                  "mlibc-sigchld", "mlibc-pipeexec", "mlibc-mksh"):
-        mcopy(str(img), str(native / f"{name}-{a.tag}"), f"::/bin/{name}-{a.tag}")
-    mcopy(str(img), "user/tests/test_mlibc_mksh.sh", "::/bin/test-mlibc-mksh.sh")
+        mcopy(str(img), str(native / f"{name}-{a.tag}"), f"::/{name}-{a.tag}")
+    mcopy(str(img), "user/tests/test_mlibc_mksh.sh", "::/test-mlibc-mksh.sh")
     print(f"img: mlibc binaries injected into {img}")
+    return 0
+
+
+def inject_mlibc_dynamic(a) -> int:
+    """Install the real ld.so/libc.so and the dynamic runtime workload.
+
+    The FAT image is mounted at /bin, so image path ::/x is guest /bin/x and
+    ::/lib/x is guest /bin/lib/x.  PT_INTERP=/lib/ld.so is found through the
+    loader's mount-relative resolution and $ORIGIN/lib resolves to /bin/lib.
+    """
+    img = REPO / a.fat32_img
+    native = REPO / a.native_build_dir
+    sysroot = Path(a.mlibc_sysroot)
+    mcopy(str(img), str(sysroot / "lib/ld.so"), "::/lib/ld.so")
+    mcopy(str(img), str(sysroot / "lib/libc.so"), "::/lib/libc.so")
+    mcopy(str(img), str(native / "libmlibcplug.so"), "::/lib/libmlibcplug.so")
+    mcopy(str(img), str(native / f"mlibc-dynamic-{a.tag}"),
+          f"::/mlibc-dynamic-{a.tag}")
+    print(f"img: mlibc dynamic artifacts injected into {img}")
     return 0
 
 
@@ -621,10 +642,11 @@ def main() -> int:
                     choices=["fat32", "ext4", "ext4-journal",
                              "ext4-journal-legacy", "release-disk",
                              "scratch",
-                             "sbase-rootfs", "mlibc-rootfs", "copy", "verify-vbox",
+                             "sbase-rootfs", "mlibc-rootfs",
+                             "mlibc-dynamic-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
     for f in (
-              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "guest-kernel", "guest-kernel-ramfs", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag" ):
+              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "guest-kernel", "guest-kernel-ramfs", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "tag", "mlibc-sysroot" ):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4,
@@ -633,6 +655,7 @@ def main() -> int:
             "release-disk": build_release_disk, "scratch": build_scratch,
             "sbase-rootfs": inject_sbase,
             "mlibc-rootfs": inject_mlibc,
+            "mlibc-dynamic-rootfs": inject_mlibc_dynamic,
             "copy": copy_image,
             "verify-vbox": verify_vbox_rootfs,
             "vf2-minimal": build_vf2_minimal}[a.command](a)

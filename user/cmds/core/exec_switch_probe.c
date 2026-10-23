@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,11 @@ extern char **environ;
 
 static volatile int thread_up;
 static __thread int tls_marker;
+
+static void sigusr1_handler(int sig)
+{
+    (void)sig;
+}
 
 /* Classify the tasks the new image sees. A successful exec must have run the
  * terminate-siblings phase, so no *live* sibling may remain; a zombie that
@@ -50,16 +56,24 @@ static void task_stats(int *total, int *alive, int *zombies)
         (*total)++;
         char path[64];
         snprintf(path, sizeof(path), "/proc/self/task/%s/stat", e->d_name);
-        int fd = open(path, O_RDONLY);
+        int fd = -1;
+        for (int attempt = 0; attempt < 3 && fd < 0; attempt++) {
+            fd = open(path, O_RDONLY);
+            if (fd < 0)
+                sched_yield();
+        }
+        /* A terminated sibling can linger as a task entry whose stat is
+         * already unreadable during teardown.  A runnable task always has a
+         * readable stat, so an unreadable entry is dead, not alive. */
         if (fd < 0) {
-            (*alive)++;
+            (*zombies)++;
             continue;
         }
         char buf[256];
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         close(fd);
         if (n <= 0) {
-            (*alive)++;
+            (*zombies)++;
             continue;
         }
         buf[n] = '\0';
@@ -124,11 +138,28 @@ static int child_mode(int argc, char **argv)
      * the ids untouched. */
     int creds_ok = (getuid() == 0 && geteuid() == 0 && getgid() == getegid());
 
+    /* exec semantics for signal state: caught dispositions revert to SIG_DFL,
+     * ignored dispositions stay ignored, and the blocked mask is cleared. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    int hup_default = (sigaction(SIGUSR1, NULL, &sa) == 0 &&
+                       sa.sa_handler == SIG_DFL);
+    memset(&sa, 0, sizeof(sa));
+    int pipe_ignored = (sigaction(SIGPIPE, NULL, &sa) == 0 &&
+                        sa.sa_handler == SIG_IGN);
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    int mask_cleared = (sigprocmask(SIG_SETMASK, NULL, &blocked) == 0 &&
+                        !sigismember(&blocked, SIGUSR2));
+
     printf("SWITCH_CHILD: kept_ok=%d closed_ok=%d tls_ok=%d tasks=%d alive=%d "
-           "zombies=%d creds_ok=%d\n",
-           kept_ok, closed_ok, tls_ok, total, alive, zombies, creds_ok);
+           "zombies=%d creds_ok=%d hup_default=%d pipe_ignored=%d "
+           "mask_cleared=%d\n",
+           kept_ok, closed_ok, tls_ok, total, alive, zombies, creds_ok,
+           hup_default, pipe_ignored, mask_cleared);
     fflush(stdout);
-    return (kept_ok && closed_ok && tls_ok && alive == 1 && creds_ok) ? 0 : 1;
+    return (kept_ok && closed_ok && tls_ok && alive == 1 && creds_ok &&
+            hup_default && pipe_ignored && mask_cleared) ? 0 : 1;
 }
 
 int main(int argc, char **argv)
@@ -165,12 +196,45 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Caught handler and an ignored signal, plus a blocked signal, to observe
+     * exec's reset rules in the child. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigusr1_handler; /* non-default, never delivered */
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+        printf("EXECSWITCH: FAIL sigaction\n");
+        return 1;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGPIPE, &sa, NULL) < 0) {
+        printf("EXECSWITCH: FAIL sigaction ign\n");
+        return 1;
+    }
+    sigset_t block;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &block, NULL) < 0) {
+        printf("EXECSWITCH: FAIL sigprocmask\n");
+        return 1;
+    }
+
+    /* Execute through a symlink: the loader must follow it and still reach
+     * the same image (the child reports success). */
+    unlink("/tmp/exec-switch-link");
+    if (symlink("/bin/exec_switch_probe", "/tmp/exec-switch-link") < 0) {
+        printf("EXECSWITCH: FAIL symlink\n");
+        return 1;
+    }
+
     char kbuf[16], cbuf[16];
     snprintf(kbuf, sizeof(kbuf), "%d", kept);
     snprintf(cbuf, sizeof(cbuf), "%d", closed);
 
     char *cargv[] = { "/bin/exec_switch_probe", "--child", kbuf, cbuf, NULL };
-    execve("/bin/exec_switch_probe", cargv, environ);
+    execve("/tmp/exec-switch-link", cargv, environ);
     printf("EXECSWITCH: FAIL execve errno=%d\n", errno);
     return 1;
 }

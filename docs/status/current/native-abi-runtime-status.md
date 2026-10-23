@@ -80,9 +80,18 @@ Phase 2 新增：
 - socket：socket/bind/connect/listen/accept/socketpair/sendmsg/recvmsg/shutdown/getname 全部接入 net_* 封装。
 - 内核配套：`path_open` 对常规文件授予 EXEC right；`task_spawn` 向子进程 start_info 安装 root/cwd/stdio；`handle_poll` 支持 vfile 系（vfs_poll_events）、channel（消息计数）、task/thread（ZOMBIE）。
 
-构建与验证：`make mlibc-sysroot`（meson+ninja 构建静态 libc.a），`make smoke-mlibc`（QEMU 冒烟：stdio/malloc/文件 I/O/4 线程 mutex/pipe/poll/socketpair/posix_spawn+waitpid，测试程序 `user/tests/test_mlibc_hello.c` + `test_mlibc_child.c`）。
+构建与验证：`make mlibc-sysroot`（meson+ninja 构建静态 libc.a），`make smoke-mlibc`（QEMU 冒烟：stdio/malloc/文件 I/O/4 线程 mutex/pipe/poll/socketpair/posix_spawn+waitpid，测试程序 `user/tests/test_mlibc_hello.c` + `test_mlibc_child.c`）。FAT 镜像在 guest 挂到 `/bin`，注入路径按镜像根写（`::/x` 即 guest `/bin/x`）。
 
-已知限制：动态链接（评估见 §8a）、task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（当前构建/smoke 只有 riscv64）。工具链注意：mlibc 需要 glibc LP64 fast 类型与 `_GNU_SOURCE`，构建用 `MLIBC_FAST_TYPE_FLAGS` 补齐。
+动态链接已落地：`make mlibc-shared-sysroot` 产出真实 `ld.so`/`libc.so`，
+`make smoke-mlibc-dynamic` 在 guest 内运行带 TLS 多线程、dlopen、`$ORIGIN`、
+atexit 与 re-exec 的动态 Native 程序。实现与 exec 继承矩阵见
+[current/native-runtime-1.0.md](native-runtime-1.0.md)。
+
+已知限制：task_spawn 的非 stdio handle 继承（仅 fd 0/1/2）、多架构交叉文件（当前
+构建/smoke 只有 riscv64）。private 文件映射的写权限受 handle rights 上限约束，
+rtld 因此以 O_RDWR 打开 DSO，只读介质上的可写段加载仍需 MM 层支持（见
+[native-runtime-1.0.md](native-runtime-1.0.md) §1）。工具链注意：mlibc 需要 glibc
+LP64 fast 类型与 `_GNU_SOURCE`，构建用 `MLIBC_FAST_TYPE_FLAGS` 补齐。
 
 ### 5a-2. 管道数据流修复（2026-08，已完成）
 
@@ -115,11 +124,14 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 | 启动协议：auxv | conventional stack/auxv（AT_BASE/AT_ENTRY/AT_PHDR…），start_info 经 a0 传递给解释器并由其转发 | 已验证（同上）；AT_PHDR 计算修正为「首 LOAD 的 vaddr−offset+e_phoff」 |
 | 文件映射窗口 | demand fault 对文件 VMA 的填充 | 已验证：test_native_mm 分区 7（path_open→vm_map FILE→按需调页校验 ELF magic） |
 | 头部页背书（联调中发现并修复） | 首 LOAD 头部半页此前零填充，ELF 头/phdr 表不落内存，AT_PHDR 悬空 | 已修复：lazy 与 eager 两条加载路径均回填前置文件字节 |
-| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so`（PT_DYNAMIC、GOT/PLT） | 未执行（估列小；所需内核原语均已验证） |
-| TLS 动态模型 / dlopen | rtld 全部现成，sysdeps 只需 vm_map/vm_protect/文件读取 | 小-中（估列） |
-| 总计 | 内核侧已就绪并通过探针冒烟；剩余为 mlibc rtld 制品与应用级联调 | 可据此启动 rtld 联调排期 |
+| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so`（PT_DYNAMIC、GOT/PLT） | 已完成：`make mlibc-shared-sysroot`；rtld 使用独立的 `sysdeps/a20/rtld.cpp` |
+| TLS 动态模型 / dlopen | rtld + `__tls_get_addr`；插件用 global-dynamic TLS | 已验证：`smoke-mlibc-dynamic`（可执行文件 + dlopen 插件，4 线程） |
+| AT_EXECFN / `$ORIGIN` | auxv 发布可执行文件路径，rtld 以此展开 RUNPATH | 已验证：清空 `LD_LIBRARY_PATH` 后仅靠 `$ORIGIN/lib` 找到 libc.so |
 
-设计注意：静态 Native 程序不需要 PT_INTERP。动态探针采用自定义最小解释器（fakeld）验证内核全链路；mlibc 动态制品（ld.so/libc.so）与真实 rtld 应用联调仍为后续排期项。
+设计注意：静态 Native 程序不需要 PT_INTERP。动态探针 `smoke-native-dynlink`
+（fakeld）仍保留为内核装载路径的独立探针，但真实动态链接的验收以
+`smoke-mlibc-dynamic` 的真实 `ld.so`/`libc.so` 为准；细节见
+[native-runtime-1.0.md](native-runtime-1.0.md)。
 
 ### 6. 空转机制接入与缺失实现补齐（已完成）
 
@@ -216,7 +228,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 syscall 编号、多架构 crt0 和 hello world 测试。Phase 1 的 `liba20c` 最小 C 库覆盖 malloc、fd↔handle 映射、FILE*、errno，以及基础 POSIX open/read/write/close 包装。Phase 2 把内核侧 syscall 扩展到 142 个，落到 task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等入口。mlibc Phase 1-2 打通 `sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
 
-剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [native-abi-runtime-status.md](native-abi-runtime-status.md) §8a。
+剩余工作集中在两处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序。Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建已完成并验证，见 [native-runtime-1.0.md](native-runtime-1.0.md)。
 
 详细运行时状态与后续路线图见 [native-abi-runtime-status.md](native-abi-runtime-status.md)。
 
