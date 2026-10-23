@@ -99,6 +99,7 @@ a20_signal_queue_state_t signal_queue_state_fill(void *task, signal_state_t *ss)
 
 /* Copy signal state on fork */
 void signal_copy(const signal_state_t *src, signal_state_t *dst);
+int signal_exec_unshare(void *task);
 
 /* Queue a signal to a process */
 int  signal_send(int pid, int signum);

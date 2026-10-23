@@ -555,6 +555,24 @@ void signal_task_restore_sigsuspend(void *task)
     spin_unlock_irqrestore(&ss->lock, flags);
 }
 
+/* Exec must not reset dispositions still shared with a different process
+ * created by CLONE_SIGHAND. Allocate before exec's irreversible commit. */
+int signal_exec_unshare(void *task)
+{
+    task_t *t = task;
+    signal_state_t *old = t ? t->signals : NULL;
+    if (!old || refcount_read(&old->refcount) == 1)
+        return 0;
+    signal_state_t *copy = kmalloc(sizeof(*copy));
+    if (!copy)
+        return -ENOMEM;
+    signal_copy(old, copy);
+    t->signals = copy;
+    if (refcount_dec_and_test(&old->refcount))
+        kfree(old);
+    return 0;
+}
+
 void signal_exec_reset(void *task)
 {
     task_t *t = (task_t *)task;

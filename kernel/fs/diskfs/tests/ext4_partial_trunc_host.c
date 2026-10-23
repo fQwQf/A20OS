@@ -60,6 +60,7 @@ extern int ext4_vn_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
 
 /* fsio_* — the device I/O contract ufs_vnfs_backend.c expects. */
 static int g_fd = -1;
+static vnode_t *g_extend_during_write;
 
 int fsio_read(uint32_t lba, void *buf, uint32_t count)
 {
@@ -73,6 +74,13 @@ int fsio_write(uint32_t lba, const void *buf, uint32_t count)
 {
     if (g_fd < 0 || !buf) return -1;
     long off = (long)lba * 512;
+    /* Deterministically interleave buffered EOF growth with an older
+     * filesystem writeback, without relying on host scheduling. */
+    if (g_extend_during_write) {
+        g_extend_during_write->size = 8192;
+        ((ext4_vnode_priv_t *)g_extend_during_write->fs_data)->file_size = 8192;
+        g_extend_during_write = NULL;
+    }
     long n = pwrite(g_fd, buf, (unsigned long)count * 512, off);
     return n == (long)count * 512 ? 0 : -1;
 }
@@ -292,6 +300,29 @@ static void do_mkfile(const char *name, char *pages)
     printf("MKFILE %s ok\n", name);
 }
 
+static void do_writeback_size_race(void)
+{
+    vnode_t *vn = NULL;
+    static char page[4096];
+    memset(page, 0x73, sizeof(page));
+    if (ext4_vn_create(g_root, "eof-race", 0600, &vn) < 0 ||
+        ext4_vn_truncate(vn, 4096) < 0) {
+        g_scenario_failed = 1;
+        return;
+    }
+    g_extend_during_write = vn;
+    int ret = ext4_vn_writepage(vn, 0, page, sizeof(page));
+    if (ret < 0 || g_extend_during_write || vn->size != 8192 ||
+        ((ext4_vnode_priv_t *)vn->fs_data)->file_size != 8192) {
+        host_report("HOST_WRITEBACK_EOF_RACE_FAIL\n");
+        g_scenario_failed = 1;
+    } else {
+        host_report("HOST_WRITEBACK_EOF_RACE_PASS\n");
+    }
+    g_extend_during_write = NULL;
+    vnode_put(vn);
+}
+
 static uint64_t parse_u64(const char *s, int *ok)
 {
     uint64_t v = 0;
@@ -383,6 +414,150 @@ static int do_trunc_retry(const char *name, uint64_t size, uint64_t old_size)
     return rc;
 }
 
+static void do_desktop_regression(void)
+{
+    char pages[] = "1,3,5";
+    do_mkfile("desktop-sparse", pages);
+    vnode_t *vn = NULL;
+    if (g_scenario_failed || ext4_lookup(g_root, "desktop-sparse", &vn) < 0) {
+        g_scenario_failed = 1;
+        return;
+    }
+    ext4_vnode_priv_t *priv = vn->fs_data;
+    ext4_inode_t before, after;
+    uint64_t old_blocks[3];
+    if (ext4_read_inode(priv->sb, priv->inode_num, &before) < 0) {
+        g_scenario_failed = 1;
+        vnode_put(vn);
+        return;
+    }
+    for (int i = 0; i < 3; i++)
+        old_blocks[i] = ext4_block_map(priv->sb, &before, 1 + i * 2);
+    static char batch[6 * 4096], readback[sizeof(batch)];
+    for (size_t i = 0; i < sizeof(batch); i++)
+        batch[i] = (char)(1 + i % 251);
+    int rc = ext4_vn_writepages(vn, 0, batch, sizeof(batch));
+    if (rc < 0 || ext4_read_inode(priv->sb, priv->inode_num, &after) < 0) {
+        g_scenario_failed = 1;
+    } else {
+        for (int i = 0; i < 3; i++) {
+            if (!old_blocks[i] || ext4_block_map(priv->sb, &after, 1 + i * 2) != old_blocks[i]) {
+                host_report("HOST_DESKTOP_BATCH_REPLACED_EXISTING_BLOCK\n");
+                g_scenario_failed = 1;
+            }
+        }
+        rc = ext4_vn_readpages(vn, 0, readback, sizeof(readback));
+        if (rc != sizeof(readback) || memcmp(batch, readback, sizeof(batch))) {
+            host_report("HOST_DESKTOP_BATCH_CONTENT_FAIL\n");
+            g_scenario_failed = 1;
+        }
+    }
+    vnode_put(vn);
+    /* Cross a full leaf, then fill holes in both halves. The permutation
+     * forces insertion before/between old extents and updates root keys. */
+    vn = NULL;
+    if (ext4_vn_create(g_root, "desktop-tree", 0644, &vn) < 0 ||
+        ext4_vn_truncate(vn, 800 * 4096) < 0) {
+        g_scenario_failed = 1;
+        return;
+    }
+    static char tree_page[4096];
+    for (unsigned i = 0; i < 400 && !g_scenario_failed; i++) {
+        unsigned page = 2 * ((i * 167) % 400);
+        memset(tree_page, 1 + page % 251, sizeof(tree_page));
+        if (ext4_vn_writepage(vn, page, tree_page, sizeof(tree_page)) < 0)
+            g_scenario_failed = 1;
+    }
+    for (unsigned page = 0; page < 800 && !g_scenario_failed; page++) {
+        memset(tree_page, 0, sizeof(tree_page));
+        if (ext4_vn_readpage(vn, page, tree_page, sizeof(tree_page)) < 0) {
+            g_scenario_failed = 1;
+            break;
+        }
+        for (unsigned j = 0; j < sizeof(tree_page); j++) {
+            unsigned char expected = page % 2 ? 0 : 1 + page % 251;
+            if ((unsigned char)tree_page[j] != expected)
+                g_scenario_failed = 1;
+        }
+    }
+    vnode_put(vn);
+    if (g_scenario_failed) host_report("HOST_DESKTOP_TREE_FAIL\n");
+    if (ext4_vn_symlink(g_root, "desktop-lock", "127.0.1.1:+189") < 0 ||
+        ext4_vn_unlink(g_root, "desktop-lock") < 0) {
+        host_report("HOST_DESKTOP_SYMLINK_UNLINK_FAIL\n");
+        g_scenario_failed = 1;
+    }
+    if (!g_scenario_failed)
+        host_report("HOST_DESKTOP_BATCH_AND_SYMLINK_PASS\n");
+}
+
+static void do_desktop_shutdown(void)
+{
+    char pages[] = "0";
+    do_mkfile("held-temp", pages);
+    vnode_t *held_file = NULL, *held_link = NULL;
+    if (ext4_lookup(g_root, "held-temp", &held_file) < 0 ||
+        ext4_vn_unlink(g_root, "held-temp") < 0 ||
+        ext4_vn_symlink(g_root, "held-lock", "127.0.1.1:+189") < 0 ||
+        ext4_lookup(g_root, "held-lock", &held_link) < 0 ||
+        ext4_vn_unlink(g_root, "held-lock") < 0 ||
+        ext4_shutdown_clean(g_root) < 0) {
+        host_report("HOST_DESKTOP_SHUTDOWN_FAIL\n");
+        g_scenario_failed = 1;
+        return;
+    }
+    /* Model firmware poweroff: deliberately keep the cached/mapped vnode
+     * references alive, with no more access after the final shutdown gate. */
+    host_report("HOST_DESKTOP_SHUTDOWN_PASS\n");
+}
+
+static void do_indexed_lazy_regression(void)
+{
+    vnode_t *dir = NULL, *file = NULL, *old = NULL;
+    if (ext4_lookup(g_root, "indexed", &dir) < 0) goto fail;
+    ext4_vnode_priv_t *priv = dir->fs_data;
+    ext4_sb_info_t *sb = priv->sb;
+    ext4_inode_t inode;
+    if (ext4_read_inode(sb, priv->inode_num, &inode) < 0 ||
+        !(inode.i_flags & EXT4_INDEX_FL)) goto fail;
+    if (ext4_vn_create(dir, "apk-added", 0644, &file) < 0) goto fail;
+    vnode_put(file); file = NULL;
+    if (ext4_vn_unlink(dir, "old-000001") < 0 ||
+        ext4_vn_rename(dir, "old-000002", dir, "apk-renamed", 0) < 0 ||
+        ext4_lookup(dir, "old-000500", &old) < 0) goto fail;
+    vnode_put(old); old = NULL;
+    if (ext4_read_inode(sb, priv->inode_num, &inode) < 0 ||
+        (inode.i_flags & EXT4_INDEX_FL)) goto fail;
+    int block_group = -1, inode_group = -1;
+    for (uint32_t g = 1; g < sb->groups_count; g++) {
+        if (sb->group_descs[g].bg_flags & EXT4_BG_BLOCK_UNINIT) block_group = g;
+        if (sb->group_descs[g].bg_flags & EXT4_BG_INODE_UNINIT) inode_group = g;
+    }
+    if (block_group < 0 || inode_group < 0) goto fail;
+    sb->inode_group_rotor = (uint32_t)inode_group;
+    if (ext4_vn_create(g_root, "lazy-group", 0644, &file) < 0 ||
+        ext4_vn_truncate(file, 512 * 4096) < 0) goto fail;
+    sb->block_group_rotor = (uint32_t)block_group;
+    static char pages[64 * 4096], readback[sizeof(pages)];
+    for (unsigned batch = 0; batch < 8; batch++) {
+        memset(pages, 1 + batch, sizeof(pages));
+        if (ext4_vn_writepages(file, batch * 64, pages, sizeof(pages)) < 0 ||
+            ext4_vn_readpages(file, batch * 64, readback, sizeof(readback)) != sizeof(readback) ||
+            memcmp(pages, readback, sizeof(pages))) goto fail;
+    }
+    if ((sb->group_descs[block_group].bg_flags & EXT4_BG_BLOCK_UNINIT) ||
+        (sb->group_descs[inode_group].bg_flags & EXT4_BG_INODE_UNINIT)) goto fail;
+    vnode_put(file); vnode_put(dir);
+    host_report("HOST_INDEXED_LAZY_PASS\n");
+    return;
+fail:
+    if (old) vnode_put(old);
+    if (file) vnode_put(file);
+    if (dir) vnode_put(dir);
+    g_scenario_failed = 1;
+    host_report("HOST_INDEXED_LAZY_FAIL\n");
+}
+
 int main(int argc, char **argv)
 {
     fscompat_log_sink = host_log_sink;
@@ -395,7 +570,15 @@ int main(int argc, char **argv)
         return 1;
     for (int i = 2; i < argc; i++) {
         char *spec = argv[i];
-        if (strcmp(spec, "statfs") == 0) {
+        if (strcmp(spec, "writeback-eof") == 0) {
+            do_writeback_size_race();
+        } else if (strcmp(spec, "indexed-lazy") == 0) {
+            do_indexed_lazy_regression();
+        } else if (strcmp(spec, "desktop") == 0) {
+            do_desktop_regression();
+        } else if (strcmp(spec, "desktop-shutdown") == 0) {
+            do_desktop_shutdown();
+        } else if (strcmp(spec, "statfs") == 0) {
             do_statfs();
         } else if (strncmp(spec, "expectdelta:", 12) == 0) {
             int ok;

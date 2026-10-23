@@ -350,11 +350,17 @@ void proc_task_init_files(task_t *t, task_t *parent, uint64_t clone_flags)
 #endif
 }
 
-int proc_task_init_signals(task_t *t, task_t *parent, int checked)
+int proc_task_init_signals(task_t *t, task_t *parent, uint64_t clone_flags,
+                           int checked)
 {
     if (!t)
         return -EINVAL;
 #ifndef CONFIG_MCU
+    if (parent && parent->signals && (clone_flags & CLONE_SIGHAND)) {
+        t->signals = parent->signals;
+        refcount_inc(&t->signals->refcount);
+        return 0;
+    }
     t->signals = kmalloc(sizeof(signal_state_t));
     if (!t->signals)
         return checked ? -ENOMEM : 0;
@@ -365,6 +371,7 @@ int proc_task_init_signals(task_t *t, task_t *parent, int checked)
         signal_init((signal_state_t *)t->signals);
 #else
     (void)parent;
+    (void)clone_flags;
     (void)checked;
     t->signals = NULL;
 #endif
@@ -389,7 +396,7 @@ static void task_init(task_t *t, task_t *parent, uint64_t clone_flags,
     (void)detached;
     (void)defer_files;
 #endif
-    (void)proc_task_init_signals(t, parent, 0);
+    (void)proc_task_init_signals(t, parent, clone_flags, 0);
 }
 
 void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)

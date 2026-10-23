@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import struct
@@ -346,7 +347,7 @@ def check_staging_space(root: Path, need_mb: int) -> None:
             f"under build/ on purpose, so `make clean` can reach it)")
 
 
-def read_world(paths: list[Path]) -> list[str]:
+def read_world(paths: list[Path], arch: str | None = None) -> list[str]:
     pkgs: list[str] = []
     for path in paths:
         try:
@@ -357,6 +358,18 @@ def read_world(paths: list[Path]) -> list[str]:
             line = line.split("#", 1)[0].strip()
             if not line:
                 continue
+            if line.startswith("["):
+                selector = re.fullmatch(r"\[([A-Za-z0-9_,+-]+)\]\s*(\S+)", line)
+                if not selector:
+                    die(f"{path}:{ln}: invalid architecture selector {line!r}")
+                architectures = selector[1].split(",")
+                if any(a not in ELF_MACHINES for a in architectures):
+                    die(f"{path}:{ln}: unknown architecture in {selector[1]!r}")
+                if arch is None:
+                    die(f"{path}:{ln}: architecture selector requires --arch")
+                if arch not in architectures:
+                    continue
+                line = selector[2]
             if any(c.isspace() for c in line):
                 die(f"{path}:{ln}: whitespace inside package spec {line!r}")
             pkgs.append(line)
@@ -413,6 +426,19 @@ def ensure_alpine_keys(mirror: str, dest: Path) -> None:
                 found += 1
     if not found:
         die(f"{names[-1]} contained no *.rsa.pub keys")
+
+
+def install_apk_keys(staging: Path, keys_dir: Path | None,
+                     sudo: list[str]) -> None:
+    """Keep the image's apk client able to verify the repositories we used."""
+    if keys_dir is None:
+        return
+    keys = sorted(keys_dir.glob("*.rsa.pub"))
+    if not keys:
+        return
+    dest = staging / "etc" / "apk" / "keys"
+    run(["install", "-d", "-m", "0755", str(dest)], sudo)
+    run(["install", "-m", "0644", *(str(p) for p in keys), str(dest)], sudo)
 
 
 def main() -> None:
@@ -474,7 +500,7 @@ def main() -> None:
     if not Path(apk).exists():
         die(f"apk binary not found: {apk}")
 
-    pkgs = read_world(args.world)
+    pkgs = read_world(args.world, args.arch)
 
     # --- repository list ---
     repos: list[str] = []          # passed to apk -X
@@ -579,6 +605,8 @@ def main() -> None:
 
         for overlay in args.overlay:
             apply_overlay(overlay, staging, sudo, keep_account_files=True)
+
+        install_apk_keys(staging, keys_dir, sudo)
 
         if args.ssh_pubkey:
             keys = [pk.resolve() for pk in args.ssh_pubkey]

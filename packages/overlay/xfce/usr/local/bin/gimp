@@ -1,0 +1,17 @@
+#!/bin/sh
+# A20OS x86 currently saves x87/SSE state, not AVX/XSAVE state. Alpine's
+# AVX babl extensions can execute AVX in their initializer before rejecting
+# the CPU, so expose the other upstream extensions through a private path.
+if [ "$(uname -m)" = x86_64 ] && [ -z "${BABL_PATH:-}" ]; then
+    modules=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/a20-babl.XXXXXX") || exit 1
+    trap 'rm -r "$modules"' EXIT
+    for module in /usr/lib/babl-0.1/*.so; do
+        case "$module" in
+            */avx*|*/x86-64-v3*|*/x86-64-v4*) continue ;;
+        esac
+        ln -s "$module" "$modules/" || exit 1
+    done
+    export BABL_PATH="$modules"
+fi
+export GEGL_USE_OPENCL="${GEGL_USE_OPENCL:-no}"
+/usr/bin/gimp-3.0 "$@"

@@ -52,6 +52,25 @@ make ARCH=riscv64 run-world  PKG_WORLD=devel    # 组镜像并在 QEMU 验证
 仍然从源码构建的用户程序只有两个：新增的 `user/cmds/` 程序，和必须进 FAT32
 根的 fastfetch。详见 [distro/source-software-porting.md](../distro/source-software-porting.md)。
 
+## 在桌面内使用 apk
+
+新的 `xfce` 镜像包含 apk、Alpine 公钥和仓库配置。进入 A20OS 桌面终端后：
+
+```sh
+apk update
+apk search tree
+apk add tree
+tree --version
+apk del tree
+```
+
+上述更新、安装、执行、删除和触发脚本已在 x86_64 A20OS 内实测。包安装成功
+并不表示包内所有程序都兼容 A20OS；新增软件仍需验证其系统调用、图形和音频
+依赖。当前未验证完整系统 `apk upgrade`。
+
+旧镜像不会因为源码 world 改动而自动获得 apk 或新应用，需要重新组装。新增
+桌面软件与架构差异见 [测试记录](../status/history/desktop-apps-apk-2026-10-23.md)。
+
 ## 在容器里构建（与 CI 完全相同的环境）
 
 ```bash

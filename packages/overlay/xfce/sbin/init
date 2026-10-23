@@ -42,6 +42,9 @@ fi
 if [ ! -f /usr/share/mime/mime.cache ]; then
     update-mime-database /usr/share/mime 2>/dev/null || true
 fi
+# The final overlay supplies the default IBus engines after apk's triggers.
+# Compile it before clients start; user dconf preferences still take priority.
+glib-compile-schemas /usr/share/glib-2.0/schemas
 
 dbus-uuidgen --ensure 2>/dev/null || true
 dbus-daemon --system --fork

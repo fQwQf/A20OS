@@ -104,10 +104,10 @@ typedef struct net_bh_event {
     uint16_t __pad_meta;
     /*
      * Set instead of using `data` when the payload exceeds
-     * NET_BH_INLINE_PAYLOAD, which only a datagram socket can produce: a TCP
-     * segment is at most TCP_MSS.  `spill` is a pbuf the ring has taken a
+     * NET_BH_INLINE_PAYLOAD: a large datagram or lwIP's coalesced TCP chain.
+     * `spill` is a pbuf the ring has taken a
      * reference to and `spill_off` is where this event's slice starts in it.
-     * The ring frees the reference when it next wraps onto the same slot, so
+     * The ring frees consumed references under its producer's lane lock, so
      * the pbuf is never released outside the lwIP critical section -- memp has
      * no internal locking and today every memp call happens under
      * g_lwip_lock.
@@ -121,8 +121,8 @@ typedef struct net_bh_ring {
     net_bh_event_t events[NET_BH_RING_SIZE];
     /*
      * Spill references owned per slot, indexed the same way as `events`.
-     * bh_ring_prepare() reclaims the slot's reference before handing it out
-     * again, and socket teardown drains the whole array.
+     * The bottom-half tail reclaims consumed slots after releasing the socket
+     * lock; producer reuse and socket teardown also drain their references.
      */
     struct pbuf *owned[NET_BH_RING_SIZE];
     uint32_t head;

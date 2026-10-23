@@ -27,6 +27,7 @@ if [ "$(xfconf-query -c xfce4-panel -p /plugins/plugin-10 2>/dev/null)" = action
         >/dev/null 2>&1 || \
         echo "a20: could not publish the actions menu item list" >&2
 fi
+/usr/lib/a20/start-input-method &
 xfsettingsd &
 xfdesktop &
 xfce4-panel &

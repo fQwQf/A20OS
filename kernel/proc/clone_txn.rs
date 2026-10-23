@@ -162,7 +162,7 @@ extern "C" {
     fn proc_task_init_seccomp(t: *mut core::ffi::c_void, parent: *const core::ffi::c_void);
     fn proc_task_init_fs_cgroup(t: *mut core::ffi::c_void, parent: *const core::ffi::c_void);
     fn proc_task_init_signals(t: *mut core::ffi::c_void, parent: *const core::ffi::c_void,
-                              checked: i32) -> i32;
+                              flags: u64, checked: i32) -> i32;
     fn proc_set_name(t: *mut core::ffi::c_void, name: *const u8);
     fn proc_publish_task_slot_locked(t: *mut core::ffi::c_void) -> i32;
     fn proc_tg_link_locked(t: *mut core::ffi::c_void) -> i32;
@@ -324,7 +324,7 @@ unsafe extern "C" fn stage_files(ctx: *mut core::ffi::c_void) -> i32 {
 
 unsafe extern "C" fn stage_signals(ctx: *mut core::ffi::c_void) -> i32 {
     let tx = unsafe { &mut *(ctx as *mut CloneTxn) };
-    unsafe { proc_task_init_signals(tx.task, tx.parent, 1) }
+    unsafe { proc_task_init_signals(tx.task, tx.parent, tx.flags, 1) }
 }
 
 unsafe extern "C" fn stage_namespaces(ctx: *mut core::ffi::c_void) -> i32 {
@@ -903,7 +903,9 @@ mod tests {
     #[unsafe(no_mangle)]
     unsafe extern "C" fn proc_task_init_signals(_t: *mut core::ffi::c_void,
                                                 _parent: *const core::ffi::c_void,
+                                                flags: u64,
                                                 _checked: i32) -> i32 {
+        assert_eq!(flags as i32, fix().child.clone_flags);
         fix().note("signals");
         0
     }

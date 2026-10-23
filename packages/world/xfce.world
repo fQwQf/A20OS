@@ -11,6 +11,8 @@ a20-drivers
 musl
 busybox
 ca-certificates
+apk-tools
+alpine-keys
 
 # Shell 与系统信息工具（xfce4-terminal 默认 shell 走 /etc/passwd）
 zsh
@@ -69,6 +71,9 @@ xfce4-mailwatch-plugin
 # 输入法
 ibus
 ibus-rime
+ibus-gtk3
+ibus-gtk4
+rime-plum-data
 
 # 字体
 font-noto
@@ -89,9 +94,9 @@ ffplay
 # 缩略图服务（thunar/xfdesktop 通过 D-Bus 激活 org.freedesktop.thumbnails.Thumbnailer1）
 tumbler
 
-# JVM（Minecraft 等 Java 程序；openjdk21 在 x86_64/aarch64/riscv64 均有包。
-# 注意 LWJGL 只提供 x86_64/aarch64 native，riscv64 跑不了 Minecraft）
+# JVM 与 Minecraft 启动器（按实际架构检查 LWJGL native 和版本清单）。
 openjdk21-jre
+python3
 # LWJGL 的 Linux native 是 glibc 链接（DT_NEEDED 为 libc.so.6/libdl.so.2/
 # libpthread.so.0），且上游不提供 musl 变体；本镜像是纯 musl，缺了它 JNI 层
 # 无法 dlopen。gcompat 提供 glibc ABI 兼容层，是 Java + LWJGL 的前置包。
@@ -120,6 +125,18 @@ netsurf
 curl
 networkmanager
 network-manager-applet
+
+# 无需联网账号的日常工具。浏览器保留 Firefox；不重复加入 Chromium。
+geany
+evince
+# Alpine v3.23 没有 RISC-V / LoongArch LibreOffice 包。
+[x86_64,aarch64] libreoffice-writer
+[x86_64,aarch64] libreoffice-calc
+[x86_64,aarch64] libreoffice-gtk
+[x86_64,aarch64] libreoffice-lang-zh_cn
+keepassxc
+qt5-qtwayland
+gimp
 
 # 音频
 pulseaudio

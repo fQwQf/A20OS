@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -19,6 +22,39 @@ struct sock_fprog {
 };
 static __thread int expected, tid, received, errors;
 static int ready, start;
+static void handler(int sig, siginfo_t *info, void *context);
+
+static int exec_child(void *unused) {
+    (void)unused;
+    execl("/bin/true", "true", (char *)NULL);
+    _exit(1);
+}
+
+static int check_process_dispositions(void) {
+    pid_t child = fork();
+    if (child < 0)
+        return 1;
+    if (!child) {
+        signal(SIGSYS, SIG_IGN);
+        _exit(0);
+    }
+    int status;
+    struct sigaction current;
+    if (waitpid(child, &status, 0) != child || status ||
+        sigaction(SIGSYS, NULL, &current) || current.sa_sigaction != handler)
+        return 1;
+    /* CLONE_SIGHAND shares until exec, which must detach the table before
+     * resetting handlers without altering the parent's disposition. */
+    void *stack = malloc(65536);
+    if (!stack)
+        return 1;
+    child = clone(exec_child, (char *)stack + 65536,
+                  CLONE_VM | CLONE_SIGHAND | SIGCHLD, NULL);
+    int failed = child < 0 || waitpid(child, &status, 0) != child || status ||
+                 sigaction(SIGSYS, NULL, &current) || current.sa_sigaction != handler;
+    free(stack);
+    return failed;
+}
 
 static void handler(int sig, siginfo_t *info, void *context) {
     ucontext_t *uc = context;
@@ -54,6 +90,9 @@ static void *worker(void *arg) {
         usleep(1000);
     if (failed)
         return (void *)1;
+    struct sigaction current;
+    if (sigaction(SIGSYS, NULL, &current) || current.sa_sigaction != handler)
+        return (void *)1;
     for (int i = 0; i < 200; i++) {
         uint64_t token = 0xabc00000ULL + tid, observed;
         unsigned mask;
@@ -72,14 +111,16 @@ static void *worker(void *arg) {
 int main(void) {
     struct sigaction act = {.sa_sigaction = handler, .sa_flags = SA_SIGINFO};
     sigemptyset(&act.sa_mask);
-    if (sigaction(SIGSYS, &act, NULL))
-        return 1;
     pthread_t threads[4];
     for (uintptr_t i = 0; i < 4; i++)
         if (pthread_create(&threads[i], NULL, worker, (void *)i))
             return 1;
     while (__atomic_load_n(&ready, __ATOMIC_ACQUIRE) != 4)
         usleep(1000);
+    /* Existing threads must observe dispositions installed by a sibling.
+     * Firefox creates its async threads before installing the sandbox trap. */
+    if (sigaction(SIGSYS, &act, NULL))
+        return 1;
     __atomic_store_n(&start, 1, __ATOMIC_RELEASE);
     int failed = 0;
     for (int i = 0; i < 4; i++) {
@@ -87,6 +128,7 @@ int main(void) {
         if (pthread_join(threads[i], &result) || result)
             failed = 1;
     }
+    failed |= check_process_dispositions();
     puts(failed ? "SECCOMP_CONTEXT: FAIL"
                 : "SECCOMP_CONTEXT: PASS thread+siginfo+registers+emulation");
     return failed;

@@ -349,7 +349,7 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
         return (uint64_t)-EINVAL;
     uint64_t lk = spin_lock_irqsave(&g_shm_lock);
     if (shmid < 0 || shmid >= SYSV_SHM_MAX ||
-        (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC)) || g_shm[shmid].marked_delete) {
+        (!g_shm[shmid].used || g_shm[shmid].namespace_ino != resource_ns_ino(PROCNS_IPC))) {
         spin_unlock_irqrestore(&g_shm_lock, lk);
         sysv_shm_unref_attach(shmid);
         return (uint64_t)-EINVAL;

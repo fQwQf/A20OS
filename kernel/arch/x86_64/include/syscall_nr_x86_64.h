@@ -578,7 +578,7 @@ static inline uint32_t x86_syscall_to_kernel_nr(uint32_t x86_nr)
         /* 261 */ SYS_utimensat,    /* futimesat -> utimensat */
         /* 262 */ SYS_fstatat,      /* newfstatat */
         /* 263 */ SYS_unlinkat,
-        /* 264 */ SYS_renameat2,    /* renameat -> renameat2 */
+        /* 264 */ SYS_renameat,     /* four arguments; r8 is not flags */
         /* 265 */ SYS_linkat,
         /* 266 */ SYS_symlinkat,
         /* 267 */ SYS_readlinkat,

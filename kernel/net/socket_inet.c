@@ -574,6 +574,28 @@ void a20_net_bh_consume_commit(void *sp)
     __atomic_fetch_add(&s->bh_ring.tail, 1, __ATOMIC_RELEASE);
 }
 
+/* Copying a spill into the socket queue completes before tail is published.
+ * Reclaim those references outside the socket lock, under the producer's
+ * lwIP lane lock. Keeping a ring's worth of large TCP chains until wrap can
+ * otherwise pin the entire receive pbuf pool and stop further input. */
+void a20_net_bh_reclaim_spills(void *sp)
+{
+    net_socket_t *s = (net_socket_t *)sp;
+    net_bh_ring_t *r = &s->bh_ring;
+    uint64_t flags = net_inet_socket_lane_lock(s);
+    uint32_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
+    uint32_t live = head - tail;
+    for (uint32_t i = 0; i < NET_BH_RING_SIZE; i++) {
+        uint32_t distance = (i - tail) & (NET_BH_RING_SIZE - 1);
+        if (distance >= live && r->owned[i]) {
+            pbuf_free(r->owned[i]);
+            r->owned[i] = NULL;
+        }
+    }
+    a20_lwip_lane_unlock(flags);
+}
+
 void a20_net_bh_stage_payload(void *sp, void *event, void *pp, uint32_t off,
                               size_t len)
 {
@@ -588,7 +610,7 @@ void a20_net_bh_stage_payload(void *sp, void *event, void *pp, uint32_t off,
         e->len = len;
         return;
     }
-    /* Anything larger is held by reference; only a datagram can reach here. */
+    /* Large datagrams and coalesced TCP receive chains are held by reference. */
     pbuf_ref(p);
     r->owned[((uintptr_t)e - (uintptr_t)r->events) /
              sizeof(net_bh_event_t)] = p;
@@ -834,9 +856,8 @@ static bool net_inet_tcp_stage_payload(net_socket_t *s, struct pbuf *p)
     return a20_net_bh_stage_tcp(s, p) != 0;
 }
 
-/* A TCP segment must never take the spill arm: the inline area has to cover a
- * full MSS, and it must stay smaller than the largest payload the socket layer
- * accepts. */
+/* Individual TCP segments fit inline; lwIP's coalesced receive chains use the
+ * referenced-pbuf spill arm, which also serves large datagrams. */
 _Static_assert(NET_BH_INLINE_PAYLOAD >= TCP_MSS,
                "inline bottom-half staging must cover a full TCP segment");
 _Static_assert(NET_BH_INLINE_PAYLOAD < NET_MAX_PAYLOAD,
@@ -1494,6 +1515,7 @@ void net_inet_bottom_half_process_all(void)
             net_bh_slot_clear(i);
             net_sock_unlock(s, irq);
         }
+        a20_net_bh_reclaim_spills(s);
         /* Two references at most: the one net_bucket_slot_ref() took, plus the
          * one the accept drain below needs. */
         if (accept_pending && net_inet_accept_stage_drain(s, &wake_q))

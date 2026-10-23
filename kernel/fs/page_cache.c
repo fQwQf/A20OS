@@ -54,6 +54,7 @@ extern page_cache_page_t *a20_pagecache_get_transaction(
     uint64_t (*)(void *), void (*)(void *, uint64_t),
     uint64_t (*)(void *, uint32_t), void (*)(void *, uint32_t, uint64_t),
     int (*)(void *, int), page_cache_page_t *(*)(void *, vnode_t **),
+    size_t (*)(void *),
     int (*)(void *, size_t), void (*)(void *, page_cache_page_t *),
     void (*)(void *, void *), void (*)(void *, void *),
     int (*)(uint32_t), void (*)(size_t));
@@ -211,10 +212,10 @@ static mutex_t g_page_cache_grow_lock;
 /* Writeback serialization.  A single mutex made every fsync (and cache
  * pressure writeback) from eight parallel processes serialize, even when they
  * flush disjoint vnodes.  The global mutex is kept for whole-cache writeback
- * (vn == NULL); per-vnode writeback takes a hashed per-vnode mutex so
- * concurrent fsyncs of different files proceed in parallel.  Two writebacks
- * of the same vnode still serialize and the dirty-gen publish/clear path is
- * unchanged. */
+ * (vn == NULL); each global batch also takes its actual vnode's hashed
+ * mutex. Per-vnode writeback takes that same mutex, so fsyncs of different
+ * files can run in parallel without racing sync/pressure writeback of the
+ * same inode. */
 #define PAGE_CACHE_WRITEBACK_LOCKS 64
 static mutex_t g_page_cache_writeback_lock;
 static mutex_t g_page_cache_writeback_locks[PAGE_CACHE_WRITEBACK_LOCKS];
@@ -365,14 +366,10 @@ static void dirty_remove_locked(page_cache_page_t *page)
  * lock acquisition each, and an unbounded scan turned one allocation miss into
  * an O(cache size) critical section that stalled every other miss, evict and
  * statistics caller.  Giving up early is not a lost opportunity: the accessed
- * bits of the candidates already visited are cleared, so the caller's next
- * sweep reaches pages this one had to skip.
+ * candidates already visited move to the front, so the caller's next sweep
+ * reaches the next window even when the previous one was entirely pinned.
  */
 #define PAGE_CACHE_EVICT_SCAN_BUDGET 128U
-/* Extra sweeps one allocation may spend before escalating.  Each is a separate
- * bounded critical section, so the worst case is a fixed number of short
- * sections rather than one long one. */
-#define PAGE_CACHE_EVICT_SWEEPS 3U
 
 static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
@@ -503,6 +500,15 @@ static int page_cache_get_grow(void *ctx, int force)
 { (void)ctx; return page_cache_grow_internal(force); }
 static page_cache_page_t *page_cache_get_evict(void *ctx, vnode_t **deferred)
 { (void)ctx; return evict_locked(deferred); }
+/* Called under the global lock. Cover the entire allocated cache twice so a
+ * clean page beyond pinned surfaces gets its second chance and can then be
+ * reclaimed. Three fixed windows could falsely report exhaustion. */
+static size_t page_cache_get_sweep_limit(void *ctx)
+{
+    (void)ctx;
+    return 2 * ((g_allocated_pages + PAGE_CACHE_EVICT_SCAN_BUDGET - 1) /
+                PAGE_CACHE_EVICT_SCAN_BUDGET);
+}
 static int page_cache_get_pressure_writeback(void *ctx, size_t count)
 { (void)ctx; return page_cache_writeback_some(count); }
 static void page_cache_get_zero(void *ctx, page_cache_page_t *page)
@@ -523,7 +529,8 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
         page_cache_get_global_lock,
         page_cache_get_global_unlock, page_cache_get_bucket_lock,
         page_cache_get_bucket_unlock, page_cache_get_grow,
-        page_cache_get_evict, page_cache_get_pressure_writeback,
+        page_cache_get_evict, page_cache_get_sweep_limit,
+        page_cache_get_pressure_writeback,
         page_cache_get_zero, page_cache_get_vnode_get,
         page_cache_get_vnode_put, page_cache_state_pfn_reclaimable,
         page_cache_state_scan_bridge);

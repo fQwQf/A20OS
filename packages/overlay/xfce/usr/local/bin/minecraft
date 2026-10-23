@@ -17,17 +17,10 @@ set -eu
 
 A20_MEDIA=${A20_MEDIA:-/usr/share/a20-media}
 
-if [ -z "${MC_HOME:-}" ]; then
-    for d in "$A20_MEDIA"/*; do
-        [ -f "$d/client.jar" ] && MC_HOME=$d
-    done
-fi
-[ -n "${MC_HOME:-}" ] && [ -f "$MC_HOME/client.jar" ] || {
-    echo "minecraft: no client.jar under $A20_MEDIA (set MC_HOME=...)" >&2
-    exit 1
-}
-
-VERSION=$(basename "$MC_HOME")
+MC_SELECTOR=/usr/lib/a20/minecraft/select.py
+MC_ARCH=$(uname -m)
+MC_HOME=$(python3 "$MC_SELECTOR" --arch "$MC_ARCH" --media "$A20_MEDIA" --home "${MC_HOME:-}")
+VERSION=$(python3 "$MC_SELECTOR" --arch "$MC_ARCH" --home "$MC_HOME" --version)
 ASSET_INDEX=$(basename "$(ls "$MC_HOME"/assets/indexes/*.json 2>/dev/null | head -1)" .json)
 GAMEDIR=${GAMEDIR:-$HOME/.minecraft}
 USERNAME=${USERNAME:-Player}

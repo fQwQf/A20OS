@@ -68,6 +68,66 @@ static int ext4_dir_write_block(ext4_sb_info_t *sb, uint32_t dir_ino,
                            sb->block_size) < 0 ? -EIO : 0;
 }
 
+/* Readers walk every directory block linearly. Before a mutation, convert
+ * an imported HTree root (and any empty interior index blocks) to that same
+ * representation. Treating '..' padding as free space while INDEX_FL stays
+ * set overwrites dx_root and leaves a corrupt directory for Linux/e2fsck. */
+static int ext4_dir_make_linear(ext4_sb_info_t *sb, ext4_inode_t *di,
+                                uint32_t dir_ino, uint64_t size)
+{
+    if (!(di->i_flags & EXT4_INDEX_FL)) return 0;
+    uint32_t bs = sb->block_size;
+    uint32_t blocks = (uint32_t)((size + bs - 1) / bs);
+    size_t reserve = ext4_dir_tail_reserve(sb);
+    char *raw = kmalloc(bs);
+    if (!raw) return -ENOMEM;
+    int ret = 0;
+    for (uint32_t b = 0; b < blocks; b++) {
+        uint64_t physical = ext4_block_map(sb, di, b);
+        if (!physical || bcache_read_bytes(sb->bc, physical * bs, raw, bs) < 0) {
+            ret = -EIO; break;
+        }
+        ext4_dir_entry_t *first = (ext4_dir_entry_t *)raw;
+        if (b == 0) {
+            if (ext4_dir_entry_check(first, 0, bs, NULL) < 0 ||
+                first->name_len != 1 || first->name[0] != '.') {
+                ret = -EIO; break;
+            }
+            uint32_t off = first->rec_len;
+            ext4_dir_entry_t *parent = (ext4_dir_entry_t *)(raw + off);
+            if (ext4_dir_entry_check(parent, off, bs, NULL) < 0 ||
+                parent->name_len != 2 || memcmp(parent->name, "..", 2) ||
+                off != 12 || parent->rec_len != bs - off) {
+                ret = -EIO; break;
+            }
+            uint32_t parent_ino = parent->inode;
+            memset(raw, 0, bs);
+            first->inode = dir_ino; first->rec_len = 12;
+            first->name_len = 1; first->file_type = EXT4_FT_DIR;
+            first->name[0] = '.';
+            parent = (ext4_dir_entry_t *)(raw + 12);
+            parent->inode = parent_ino; parent->rec_len = bs - 12 - reserve;
+            parent->name_len = 2; parent->file_type = EXT4_FT_DIR;
+            memcpy(parent->name, "..", 2);
+        } else if (first->inode == 0 && first->rec_len == bs) {
+            /* dx_node masquerades as one unused full-block dirent. */
+            memset(raw, 0, bs);
+            first->rec_len = bs - reserve;
+        } else {
+            continue; /* Ordinary leaf entries already use linear layout. */
+        }
+        ret = ext4_dir_write_block(sb, dir_ino, di->i_generation, physical, raw);
+        if (ret < 0) break;
+    }
+    kfree(raw);
+    if (ret == 0) {
+        di->i_flags &= ~EXT4_INDEX_FL;
+        ret = ext4_write_inode(sb, dir_ino, di);
+    }
+    if (ret < 0) ext4_mark_inconsistent(sb);
+    return ret;
+}
+
 int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                           const char *name, uint32_t *out_ino, uint8_t *out_ft) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
@@ -111,6 +171,8 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
     uint16_t need = (uint16_t)((8 + nl + 3) & ~3);
     size_t reserve = ext4_dir_tail_reserve(sb);
     if (need + reserve > bs) return -ENAMETOOLONG;
+    int linear = ext4_dir_make_linear(sb, di, dir_ino, *dsz);
+    if (linear < 0) return linear;
     uint32_t nb = (*dsz + bs - 1) / bs;
 
     char *blk = (char *)kmalloc(bs);
@@ -188,6 +250,8 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
+    int linear = ext4_dir_make_linear(sb, di, dir_ino, dsz);
+    if (linear < 0) return linear;
     char *blk = (char *)kmalloc(bs); if (!blk) return -ENOMEM;
     for (uint32_t b = 0; b < nb; b++) {
         uint64_t p = ext4_block_map(sb, di, b); if (!p) continue;
@@ -219,6 +283,8 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
+    int linear = ext4_dir_make_linear(sb, di, dir_ino, *dsz);
+    if (linear < 0) return linear;
     uint32_t nb = (*dsz + bs - 1) / bs;
     char *blk = (char *)kmalloc(bs);
     if (!blk) return -ENOMEM;

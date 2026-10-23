@@ -205,7 +205,13 @@ int64_t syscall_dispatch(trap_context_t *ctx)
             cur->restart_nr = args.nr;
             for (int i = 0; i < 6; i++)
                 cur->restart_args[i] = args.arg[i];
+            /* x86 saves RIP after a two-byte syscall/int instruction;
+             * fixed-width trap architectures advance by four bytes. */
+#ifdef ARCH_SYSCALL_INSN_SIZE
+            TRAP_CTX_EPC(ctx) -= ARCH_SYSCALL_INSN_SIZE;
+#else
             TRAP_CTX_EPC(ctx) -= 4;
+#endif
             restart_syscall = 1;
         } else {
             ret = -EINTR;
