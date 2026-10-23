@@ -30,6 +30,18 @@
 | USB HID | `kernel/drivers/usb/class/usb_hid.c` | 每接口 `h->lock`；局部顺序 `h->lock -> xhci->lock`（单向） |
 | USB storage | `kernel/drivers/usb/class/usb_storage.c` | 每实例 `st->lock` 是 sleepable `mutex_t`；局部顺序 `st->lock -> xhci->lock`（单向）；`msc_command()` 跨同步 bulk wait 持有它是允许的，因为等待方不持 spinlock |
 
+## 用户 MMIO 映射事务
+
+`udriver_map_mmio()` 在锁外分配临时 VMA，再按 `mm->tlb_lock`（可睡眠）→
+`mm->lock` → 页表节点锁执行映射。全部 PTE 成功才发布 VMA；失败时先清理失败页的
+空页表路径，再逆序撤销已映射前缀，登记 TLB 失效范围。释放 `mm->lock` 后完成
+本地/远端 TLB fence，再释放临时 VMA 和 deferred 对象。MMIO 不拥有设备数据帧引用，
+回滚仅回收中间页表。页表退休复用既有 reader grace period，不引入驱动私有锁。
+
+Landlock 的 `g_landlock_policy_lock` 是叶锁，仅保护有界的策略增补、冻结和匹配；
+不得持有它做 VFS、usercopy、分配、引用释放或任务发布。fd/task 引用计数独立使用
+原子操作；fork 在子任务发布前取得策略引用，安装规则后才能原子发布任务指针。
+
 ## 全局顺序摘要
 
 `kernel/include/core/lock.h` 中的全局顺序为：

@@ -36,7 +36,7 @@
 - userfaultfd（`kernel/ipc/userfaultfd.c`）：MISSING 模式匿名私有区间，UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE，read/poll 投递 PAGEFAULT 事件，缺页线程 park 直到 handler 用 COPY/ZEROPAGE 解析；不支持 UFFD_FEATURE_EVENT_FORK、shmem 与 WP 模式。
 - perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
 - futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
-- Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
+- Landlock：fd-backed READ_FILE/WRITE_FILE 路径子集，在普通 open、openat2 和 proc fd 重开中按同一次解析所得目标检查，创建/截断前拒绝；fork/exec 继承，关闭 ruleset fd 不解除限制。策略首次安装后冻结，多个任务可安装同一冻结 fd；匹配规则的权限取并集。每任务一个 ruleset、最多 64 个 255 字节前缀，超长规则报 ENAMETOOLONG。它是路径策略，不提供 Linux inode 锚定、网络/scoping、执行或目录修改限制；不发布标准 ABI 版本。详见 `docs/security/release-acceptance.md`。
 - rseq：注册/注销每线程 rseq 区域，并在注册时与每次调度分发把 cpu_id/cpu_id_start/node_id/mm_cid 经直接映射写入用户区域（非驻留页静默跳过）；抢占时的序列中止（`rseq_ip_fixup`）仍是后续深化方向。
 - `splice`/`vmsplice`/`tee` 是真实语义（核心 `kernel/fs/splice.c` + pipe peek）：file↔pipe、pipe↔pipe、tee 不消耗源；`SPLICE_F_*` 校验、pipe 端点非空 offset 返回 `-ESPIPE`、无 pipe 端点返回 `-EINVAL`；传输基于拷贝（等价 Linux 非页对齐回退路径）。
 - `membarrier` 实现完整命令集：QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_GLOBAL_EXPEDITED/PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)/REGISTER_PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)；`PRIVATE_EXPEDITED` 要求先注册（否则 `-EPERM`），真正的跨 CPU 屏障复用 reschedule IPI（远端处理函数执行 acquire fence 并回 ack）。未知命令与非法 flags 返回 `-EINVAL`。
@@ -49,6 +49,7 @@
 - `seccomp` 是经典 BPF 引擎（校验器+解释器，`kernel/ipc/seccomp.c`）：STRICT 白名单、fork 继承的过滤器链、分发入口 KILL/TRAP(SIGSYS+SYS_SECCOMP)/ERRNO/LOG 动作；TSYNC/LOG flags 与 USER_NOTIF 在安装期拒绝。`kexec_load/file_load` 完成段装载与内核重叠校验，reboot(KEXEC) 在无 machine_kexec 后端时按已装载/-EINVAL 报告。`quotactl(_fd)` 由配额核心支撑（Q_QUOTAON/OFF、GETFMT、GETINFO/SETINFO、GET/SETQUOTA、GETNEXTQUOTA、Q_SYNC），VFS 写增长/ftruncate/O_CREAT/mkdir/symlink/unlink 挂钩强制 EDQUOT。
 - `renameat` 已补注册（编号 38，glibc 直接调用）：实现为 `renameat2` 的 flags=0 包装。`sched_setattr`/`sched_getattr` 改为完整 `struct sched_attr` 线格式：校验 policy/flags/nice/priority 并经 `proc_sched_set` 落调度器，支持 `SCHED_FLAG_RESET_ON_FORK`；不应用 util-clamp/deadline 字段。
 - `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
+- Landlock 仅接受 `READ_FILE`/`WRITE_FILE` handled 位；其余执行、目录修改与 ioctl 位返回 `EOPNOTSUPP`。create 校验 flags、至少 8 字节且不超过一页的 size、非零 handled，以及扩展区全零；非零扩展返回 `E2BIG`，不创建更弱的 ruleset。ABI 版本查询未实现。当前隔离验收结论见 [安全现状](../../../docs/status/current/security-status.md)。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
 - `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。
 - RISC-V 专用：`riscv_hwprobe` 报告 IMA 基础行为；`riscv_flush_icache` 刷新范围 icache；`rt_tgsigqueueinfo` 按 tid 投递。

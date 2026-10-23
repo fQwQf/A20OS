@@ -6,6 +6,16 @@
 
 审查覆盖 driver core、公共总线、STM32F103、VirtualBox ARM64/x86_64 及其设备驱动。
 
+## 用户 MMIO 的失败契约
+
+`udriver_map_mmio()` 对页取整后的完整范围授权，仅在全部页成功后发布 VMA。
+逐页映射失败会撤销已安装 PTE、回收失败遍历留下的空中间页表、完成 TLB 事务并释放
+临时 VMA。`tools/tests/test_udriver_mmio_rollback_host.py` 运行生产 mapper/unmap，
+在跨两级页表边界时注入分配失败，保留邻接映射，并以移除回滚/空表清理为负控。
+RV64 guest 的 Native MMIO 用例另覆盖正常访问、release 和输出拷贝失败清理。
+这不是 guest 全局 OOM 或实板 DMA 故障注入结论。锁序见
+[锁顺序契约](../../drivers/guide/lock-order.md)。
+
 ## 如何阅读矩阵
 
 每行矩阵的格式是：范围、状态、说明。

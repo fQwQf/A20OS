@@ -6,6 +6,15 @@
 
 <!-- 以下内容从 docs/fs/ntfs.md 迁入；只保留当前状态，历史运行记录已删除。 -->
 
+## 路径访问与 Landlock
+
+普通 open、openat2 与 proc fd 重开在创建、截断、后端 open 前检查解析后的目标路径。
+普通 open 与 openat2 使用同一次遍历返回的 vnode 与 canonical path，避免检查原始
+符号链接名后访问另一个目标。READ_FILE/WRITE_FILE 子集及继承语义见
+[安全候选验收](../../security/release-acceptance.md)；该路径策略不提供 inode 锚定的
+Linux 完整 Landlock 语义。`smoke-security-release` 覆盖符号链接、相对别名、openat2、
+proc fd 重开与创建拒绝，并验证没有截断/创建副作用。
+
 ## ISOFS
 
 只读；名字按 ISO 9660 规则转小写并去掉 `;1` 版本后缀。没有 Rock Ridge / Joliet。
