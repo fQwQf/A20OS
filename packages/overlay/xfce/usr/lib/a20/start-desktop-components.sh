@@ -16,6 +16,17 @@ until timeout 10 xfconf-query -c xsettings -p /Net/ThemeName >/dev/null 2>&1; do
     fi
     sleep 1
 done
+# The actions plugin's built-in item list hides Restart and offers Suspend,
+# Switch User and Lock Screen, none of which this session can perform (no
+# logind, no greeter, no Wayland screensaver).  Publish exactly the power menu
+# org.xfce.SessionManager implements, and only while plugin-10 is the actions
+# plugin in the shipped panel layout.
+if [ "$(xfconf-query -c xfce4-panel -p /plugins/plugin-10 2>/dev/null)" = actions ]; then
+    xfconf-query -c xfce4-panel -p /plugins/plugin-10/items -n -a \
+        -t string -s "+logout" -t string -s "+restart" -t string -s "+shutdown" \
+        >/dev/null 2>&1 || \
+        echo "a20: could not publish the actions menu item list" >&2
+fi
 xfsettingsd &
 xfdesktop &
 xfce4-panel &

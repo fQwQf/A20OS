@@ -7,11 +7,13 @@ description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream package
 arch = "aarch64"
 
 [machine]
-# aarch64 SMP is unstable under GUI load: two distinct kernel panics were
-# observed at smp=4 (a corrupted trap frame after an IPI storm, and a
-# cross-task register dump during SIGSEGV delivery). Run single-CPU until
-# the race is found; see docs/status/current/known-issues.md.
-smp = 1
+# 4 vCPUs: the two panics this file used to work around (a corrupted trap frame
+# after an IPI storm, and a cross-task register dump during SIGSEGV delivery)
+# no longer reproduce. sched/proc/futex/mm/scm stress pass under NR_CPUS=4 at
+# -smp 4 for 30+ minutes with scheduler violations at 0, and the desktop cold
+# boots and renders with all four CPUs online and no panic. See
+# docs/status/history/desktop-1.0-2026-10-23.md.
+smp = 4
 memory = "2G"
 
 [gui]

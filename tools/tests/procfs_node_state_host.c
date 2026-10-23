@@ -560,15 +560,27 @@ static int render_content_checks(void)
         return 1;
     }
 
-    n = a20_procfs_render_fdinfo(123, 0100002, 99, got, sizeof(got));
+    n = a20_procfs_render_fdinfo(123, 0100002, 99, 0, got, sizeof(got));
     want = snprintf(expected, sizeof(expected), "pos:\t%lu\nflags:\t0%o\nino:\t%lu\n",
                     123ul, 0100002u, 99ul);
     if (n != want || strcmp(got, expected) != 0) {
         fprintf(stderr, "fdinfo mismatch n=%d want=%d\n", n, want);
         return 1;
     }
+    /* A pidfd adds the lines dbus reads to resolve its own credentials. */
+    memset(got, 0, sizeof(got));
+    n = a20_procfs_render_fdinfo(0, 02000002, 99, 456, got, sizeof(got));
+    want = snprintf(expected, sizeof(expected),
+                    "pos:\t%lu\nflags:\t0%o\nino:\t%lu\n"
+                    "Pid:\t%d\nNSpid:\t%d\n",
+                    0ul, 02000002u, 99ul, 456, 456);
+    if (n != want || strcmp(got, expected) != 0) {
+        fprintf(stderr, "pidfd fdinfo mismatch n=%d want=%d got='%s'\n",
+                n, want, got);
+        return 1;
+    }
     memset(got, 0xa5, sizeof(got));
-    n = a20_procfs_render_fdinfo(123, 0100002, 99, got, 5);
+    n = a20_procfs_render_fdinfo(123, 0100002, 99, 0, got, 5);
     if (n != 4 || got[4] != '\0' || memcmp(got, "pos:", 4) != 0) {
         fprintf(stderr, "fdinfo truncation contract mismatch n=%d\n", n);
         return 1;

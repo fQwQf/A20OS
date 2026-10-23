@@ -88,4 +88,21 @@ if [ -x /usr/lib/polkit-1/polkitd ]; then
     /usr/lib/polkit-1/polkitd 2>/dev/null &
 fi
 
-exec runuser -l root -c /usr/lib/a20/start-xfce4-session
+# The compositor owns the session.  When it exits (the power menu's Log Out,
+# or a crash) there is no display manager to return to, so restart the
+# session instead of leaving PID 1 with no userspace.  Three consecutive short
+# sessions mean the platform itself is unusable: power off rather than spin.
+attempt=0
+while :; do
+    runuser -l root -c /usr/lib/a20/start-xfce4-session
+    status=$?
+    attempt=$((attempt + 1))
+    echo "a20: desktop session exited status=$status (attempt $attempt)" >&2
+    if [ "$attempt" -ge 3 ]; then
+        echo "a20: desktop session ended $attempt times; powering off" >&2
+        poweroff -f
+        sleep 30
+        break
+    fi
+    sleep 2
+done
