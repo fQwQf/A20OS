@@ -76,7 +76,7 @@ RV64 MMU 的信号 restorer 通过匿名 VMO 的 RX 映射持有，权限上限�
 
 ## 配置和命令
 
-在本包 worktree 中运行，使用仓库公共 build lease；linked worktree 的 `.git` 是文件，
+在仓库工作目录中运行，使用公共 build lease；linked worktree 的 `.git` 是文件，
 所以先从 common dir 定位脚本：
 
 ```sh
