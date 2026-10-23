@@ -560,6 +560,10 @@ int pt_unmap(mm_struct_t *mm, vaddr_t va) {
     }
 
     int leaf_idx = arch_pt_vpn(va, 0);
+    /* The teardown loop passes each table's cleared slot to pt_table_empty() as
+     * a fast-path hint.  Level 0's cleared slot is the leaf index, which the
+     * descent loop above does not visit. */
+    idx_path[0] = leaf_idx;
     pte_t *pte = &table[leaf_idx];
     mm_pt_node_lock(path[0]);
     if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {

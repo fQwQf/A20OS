@@ -3324,7 +3324,14 @@ int ext4_shutdown_clean(vnode_t *root)
     if (!esi || ext4_is_inconsistent(esi))
         return -117;
 
-    int ret = ext4_journal_close(esi);
+    /* A vnode that was unlinked while its file was still open stays on the
+     * orphan chain until its last reference drops, and the vnode cache can
+     * outlive the session.  Reap the chain before the journal closes so a
+     * clean image leaves no orphan entry for the next mount or e2fsck. */
+    int ret = ext4_orphan_recover(esi);
+    if (ret < 0)
+        return ret;
+    ret = ext4_journal_close(esi);
     if (ret < 0)
         return ret;
     bcache_t *bc = esi->bc;

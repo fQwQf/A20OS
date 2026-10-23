@@ -1438,12 +1438,14 @@ pub unsafe extern "C" fn a20_procfs_render_maps(
 }
 
 /// Render `/proc/<pid>/fdinfo/<fd>` after the adapter has pinned the file and
-/// sampled its offset, flags and inode.
+/// sampled its offset, flags and inode.  `pid` is the pid a pidfd refers to
+/// (Linux reports it as `Pid:`/`NSpid:`); it is <= 0 for every other file.
 #[no_mangle]
 pub unsafe extern "C" fn a20_procfs_render_fdinfo(
     pos: usize,
     flags: u32,
     ino: core::ffi::c_ulong,
+    pid: c_int,
     buf: *mut c_char,
     bufsz: usize,
 ) -> c_int {
@@ -1451,6 +1453,9 @@ pub unsafe extern "C" fn a20_procfs_render_fdinfo(
     unsafe { *buf = 0; }
     let mut w = W { p: buf as *mut u8, cap: bufsz - 1, len: 0, over: false };
     let _ = write!(w, "pos:\t{}\nflags:\t0{:o}\nino:\t{}\n", pos, flags, ino);
+    if pid > 0 {
+        let _ = write!(w, "Pid:\t{}\nNSpid:\t{}\n", pid, pid);
+    }
     unsafe { *buf.add(w.len) = 0; }
     w.len as c_int
 }
@@ -2845,6 +2850,27 @@ mod tests {
         assert!(rendered.starts_with(b"00001000-00003000 rw-p 00000040 00:00 7 [heap]\nSize:"), "{}", String::from_utf8_lossy(rendered));
         assert!(rendered.ends_with(b"THPeligible:           1\nVmFlags: rd wr mr mw me ac\n"));
         assert_eq!(out[n as usize], 0);
+    }
+
+    #[test]
+    fn fdinfo_renders_pidfd_target_and_rejects_invalid_buffers() {
+        let mut out = [0xa5u8; 128];
+        let n = unsafe {
+            a20_procfs_render_fdinfo(0, 0o2000002, 99, 456, out.as_mut_ptr() as *mut c_char, out.len())
+        };
+        assert_eq!(&out[..n as usize],
+                   b"pos:\t0\nflags:\t02000002\nino:\t99\nPid:\t456\nNSpid:\t456\n");
+        assert_eq!(out[n as usize], 0);
+
+        // A non-pidfd (pid <= 0) must not claim a target pid.
+        let n = unsafe {
+            a20_procfs_render_fdinfo(7, 0o2, 3, -1, out.as_mut_ptr() as *mut c_char, out.len())
+        };
+        assert_eq!(&out[..n as usize], b"pos:\t7\nflags:\t02\nino:\t3\n");
+
+        assert_eq!(unsafe {
+            a20_procfs_render_fdinfo(0, 0, 0, 0, core::ptr::null_mut(), 8)
+        }, -22);
     }
 
     #[test]

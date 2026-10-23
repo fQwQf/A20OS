@@ -16,6 +16,9 @@
 
 typedef struct pidfd_file {
     task_t *task;
+    /* Linux keeps reporting the target pid in fdinfo after the task exits,
+     * so the number is captured when the pidfd is created. */
+    int pid;
 } pidfd_file_t;
 
 void a20_pidfd_state_init_rust(void **task, void *value);
@@ -125,6 +128,18 @@ int linux_pidfd_pid(int pidfd)
     return pid;
 }
 
+int linux_pidfd_vfile_pid(const vfile_t *vf)
+{
+    if (!vf || vf->ops != &g_pidfd_ops || !vf->priv)
+        return -1;
+    pidfd_file_t *pf = (pidfd_file_t *)vf->priv;
+    if (pf->pid > 0)
+        return pf->pid;
+    task_t *target =
+        a20_pidfd_state_task_rust((void *const *)&pf->task);
+    return target ? target->pid : -1;
+}
+
 static int linux_pidfd_create_task(task_t *target, int flags)
 {
     /* This function consumes the caller's task reference on every path. */
@@ -140,6 +155,7 @@ static int linux_pidfd_create_task(task_t *target, int flags)
         proc_put(target);
         return -ENOMEM;
     }
+    pf->pid = target->pid;
     a20_pidfd_state_init_rust((void **)&pf->task, target);
 
     vfile_t *vf = vfile_alloc();

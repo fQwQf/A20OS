@@ -11,13 +11,6 @@
 
 | 笔记 | 台账条目 | 主题 |
 | --- | --- | --- |
-| [desktop-x86-sigsegv.md](desktop-x86-sigsegv.md) | DESKTOP-08 | x86_64 桌面组件随机 SIGSEGV（fix8–fix11） |
-| [desktop-jvm-mpv-exit.md](desktop-jvm-mpv-exit.md) | DESKTOP-03 | java 退出码 255 / mpv 偶发崩溃 |
-| [desktop-wallpaper.md](desktop-wallpaper.md) | DESKTOP-09 | 壁纸不渲染 |
-| [desktop-panel-menu.md](desktop-panel-menu.md) | DESKTOP-10 | 面板下拉菜单项不启动应用 |
-| [desktop-backspace.md](desktop-backspace.md) | DESKTOP-11 | Backspace 失效 |
-| [desktop-dbus-credentials.md](desktop-dbus-credentials.md) | DESKTOP-12 | dbus NoReply / SCM_CREDENTIALS pid=-1 |
-| [desktop-crtc-enoent.md](desktop-crtc-enoent.md) | DESKTOP-13 | 间歇性 Failed to set CRTC |
 | [core-arm32-fp.md](core-arm32-fp.md) | CORE-07 | arm32 FP 上下文 |
 | [net-ipv6-pbuf.md](net-ipv6-pbuf.md) | NET-09 | IPv6 收包 pbuf 引用计数破坏 |
 | [fs-ext4-orphan.md](fs-ext4-orphan.md) | FS-01 | unlink 后孤儿 inode 回收 |

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs inside dbus-run-session: publish the session manager before the panel
+# builds its actions menu, then hand the session to the compositor.
+/usr/lib/a20/session-power.py &
+exec labwc ${LABWC_DEBUG:+-d}
