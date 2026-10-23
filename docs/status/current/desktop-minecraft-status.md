@@ -105,6 +105,19 @@ xfce4-session 的 X11 会话：
   凭据；没有这两行时日志里的 `pid=` 是 `18446744073709551615`。SCM_CREDENTIALS
   与 SO_PEERCRED 的 pid 由 `scm_stress` 的 listen/accept 用例覆盖。
 
+## 文件系统写回与关机
+
+- full profile 默认使用 ext4 的 Rust extent 事务（`EXT4_EXTENT_TXN_IMPL=rust`）：
+  桌面写出的文件会形成 depth-1 extent 树，C 的 root-trim 路径拒绝这种形状，
+  导致 unlink 后的 orphan 无法回收。Rust 事务展开 depth-0/1 树并重建
+  单一根，因此删除大文件时不再留下 orphan。
+- `ext4_shutdown_clean()` 在提交 CLEAN 之前重放并回收残留 orphan：被删除时
+  仍有 vnode 引用的 inode 会留在孤儿链上，而 vnode 缓存可以活过会话；这一步
+  保证正常关机后的镜像没有待恢复条目。
+- 实测：x86_64 桌面上两轮写负载（200 个小文件、一个 6 段稀疏文件、缩略图与
+  xfconf 写入）→ `poweroff` → 宿主 `e2fsck -fn` 两轮都干净；同一内核上
+  `vfs_stress`、`mm_stress`、`mtcorrupt_test`、`scm_stress` 全部通过。
+
 ## 进程与内存稳定性
 
 - 匿名 fault-around 窗口在 VMA 被并发合并后把良性身份变化判成失败，是

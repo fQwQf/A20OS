@@ -1,6 +1,6 @@
 # 桌面电源菜单、凭据与稳定性验收（2026-10-23）
 
-本轮关闭 DESKTOP-01、02、03、04、05、08、09、10、11、12、13，并在 AArch64 SMP4 上复跑
+本轮关闭 DESKTOP-01、02、03、04、05、07、08、09、10、11、12、13，并在 AArch64 SMP4 上复跑
 共享调度/内存负载。平台：x86_64/QEMU KVM，4 vCPU、4 GiB，1024×768 virtio-gpu
 （pixman）；RISC-V 与 AArch64 为 TCG、4 vCPU。
 
@@ -27,6 +27,11 @@
   身份变化判成失败，是 mpv/LuaJIT、tumblerd、JVM 那条“指针字段变 NULL”的根因
   （修复与 `smoke-mtcorrupt` 门禁已在树上）。`mpv.conf` 删除
   `load-scripts=no`/`osc=no`/`ytdl=no`，恢复内置脚本。
+- **ext4 的 depth-1 extent 与关机 orphan（跨领域窄修）。** full profile 默认
+  改用 Rust extent 事务（C root-trim 只接受 depth-0，桌面写出的大文件无法在
+  unlink 后回收）；`ext4_shutdown_clean()` 在持久化 CLEAN 前回收残留 orphan，
+  因为被删除但仍被 vnode 缓存的 inode 会留到会话结束。两轮桌面写负载后
+  宿主 `e2fsck -fn` 干净。
 - **`pt_unmap()` 的页表回收提示未初始化（跨领域窄修）。** 下降循环只填
   `idx_path[1..ROOT]`，回收循环第一层用的 `idx_path[0]` 从未赋值；`pt_table_empty()`
   只用它做“非空”快路径提示，所以症状是空页表可能不被回收，同时 riscv64 的
@@ -60,19 +65,17 @@
 | Minecraft 音频 | LWJGL OpenAL 在 "ALSA Default" 上初始化，`Sound engine started`；标题音乐被 QEMU wav 录下（33 秒、非静音、主频约 185 Hz） |
 | 全屏 | `xfce4-terminal --fullscreen` 与 Minecraft（XWayland，F11）都覆盖整个 1024×768 输出 |
 | `smoke-audio-userspace` | x86_64 上 PASS（`check_wav_pcm: PASS rate=44100 channels=2 frames=218824`） |
-| 桌面写盘 | 300 文件 + 缩略图 + xfconf + JVM/mpv 写入后正常关机；宿主 `e2fsck -fn` 仍报 orphan 链与位图差异（见下） |
+| 桌面写盘 | full profile 改用 Rust extent 事务并在关机前回收残留 orphan；两轮写负载（200 文件 + 6 段稀疏文件 + 缩略图/xfconf）后正常关机，宿主 `e2fsck -fn` 两轮都干净 |
+| FS 回归 | 同一内核上 `vfs_stress`、`mm_stress`、`mtcorrupt_test`、`scm_stress` 全部通过，0 panic |
 
 负控：旧的 x86_64 内核上运行新增的 fdinfo 断言得到
 `SCM_STRESS: FAIL peer pidfd fdinfo must name process`；当前内核通过。
 
 ## 未完成
 
-- AArch64 桌面在 SMP4 冷启动并渲染，但该轮键盘没有被 libinput 接管，输入/
-  窗口负载仍只在 x86_64 与 riscv64 上验收（DESKTOP-05 的输入项）。
+- AArch64 桌面在 SMP4 冷启动并渲染，但该轮 udev 的 input worker 超时导致键盘
+  未被 libinput 接管；输入/窗口负载只在 x86_64 与 riscv64 上验收。
 - 语音聊天使用的 16 kHz 采集设备未开放（ALSA 层只报告 48 kHz 播放/采集）；
   Minecraft 记录 `failed to set sample rate near 16000` 后跳过语音。
-- 桌面写负载后正常关机，宿主 `e2fsck -fn` 仍报两个 inode 在 orphan 链上、位图
-  差异；根因是 ext4 orphan reap 拒绝 depth-1 extent 树（FS-03），不在本包范围
-  （DESKTOP-07）。
 - Minecraft 帧率目标/对照（DESKTOP-06）、AArch64 `svcmgr` 强停验收
   （DESKTOP-14）仍未完成。
