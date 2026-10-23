@@ -13,6 +13,16 @@ repo_url: https://github.com/fQwQf/A20OS
 repo_name: fQwQf/A20OS
 edit_uri: edit/main/docs/
 
+strict: true
+validation:
+  links:
+    not_found: warn
+    unrecognized_links: warn
+    anchors: warn
+
+hooks:
+  - ../tools/mkdocs_repo_links.py
+
 # 文档源：仓库根目录的 docs/（相对本配置文件解析）
 docs_dir: ../docs
 
@@ -194,7 +204,9 @@ nav:
       - 构建指南: dev/build.md
       - 测试门禁: testing-gates.md
       - 调试指南: dev/debug.md
+      - 内核调试技术参考: kernel/debugging-internals.md
       - 实例化构建与运行: dev/instances.md
+      - 构建与宿主工具技术参考: dev/tooling-internals.md
       - 外部依赖: dev/external-dependencies.md
   - 打包与发行:
       - 包管理与镜像分发: packaging/README.md
@@ -215,6 +227,7 @@ nav:
   - 状态与进度:
       - 状态目录说明: status/README.md
       - 模块状态: status/current/module-status-2026-10-19.md
+      - 文档与门禁: status/current/docs-gates.md
       - 服务器就绪度: status/current/server-readiness.md
       - 1.0 进度台账: status/current/v1.0-progress.md
       - 1.0 缺口台账:
@@ -244,7 +257,6 @@ nav:
               - CRTC ENOENT: status/gaps/notes/desktop-crtc-enoent.md
               - arm32 FP: status/gaps/notes/core-arm32-fp.md
               - IPv6 pbuf: status/gaps/notes/net-ipv6-pbuf.md
-              - ext4 位图: status/gaps/notes/fs-ext4-bitmap.md
               - ext4 孤儿: status/gaps/notes/fs-ext4-orphan.md
       - 各子系统实现状态:
           - 集群与服务: status/current/cluster-implementation-status.md

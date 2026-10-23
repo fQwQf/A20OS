@@ -263,7 +263,7 @@ GPU3D_TEST: PASS (UAPI surface works; rendering still unproven)
 
 > 这是**上一轮**的历史输出，保留作对照。那条 16 字节占位流正是本轮要纠正的
 > 缺陷：它报 PASS 时并没有渲染任何东西。当前门禁提交真实 `VIRGL_CCMD_CLEAR`
-> （76 字节）并逐像素回读，见 [§7.2](#命令流编码与像素回读本轮落地且证明了一件事)。
+> （76 字节）并逐像素回读，见 [§7.2](#command-stream-readback)。
 > 上面最后两行**不再是**现在的输出。
 
 反向用例（`GPU_3D=0`）门禁确实 **FAIL**（点名五条缺失 pattern），
@@ -535,7 +535,7 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。症状指向
 OpenGL 4.6，以及解锁 Venus/Vulkan。这是一条需要单独决策的宿主配置改动，不是内核补一个
 分发分支的事，因此本轮不做。
 
-### 7.2 命令流编码与像素回读：本轮落地，且证明了一件事
+### 7.2 命令流编码与像素回读：本轮落地，且证明了一件事 {#command-stream-readback}
 
 上一轮把"像素回读比对"列为未实现，并附警告"不要凭记忆写"。本轮照做了，
 **没有凭记忆**：用 `apt-get source virglrenderer` 取到 **1.1.0** 源码，

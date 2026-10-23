@@ -182,9 +182,11 @@ elf_load 失败（-ENOEXEC）
 
 env 注入发生在 argv 改写**安装之后**，所以它失败时 bprm 处于一致状态，调用方的 `bprm_free()` 能正常展开。
 
-## 9. W^X：per-task 放行
+## 9. W^X：per-task 放行 {#wx-internals}
 
-`task_t.xlator_host` 仅由内核在 re-exec 路径上设置，`mm_wx_filter_prot()` 见此位即放行。它**不跨 fork 继承**：一个自身是外来架构的子进程必须自己再走一次 `execve` 与同一套检查。这与 fd/凭据类状态的语义不同，是有意的收紧。
+`task_t.xlator_host` 仅由内核在 re-exec 路径上设置。`kernel/mm/wx.c` 的
+`a20_wx_task_is_xlator_host()` 读取该位，`kernel/mm/wx_policy.rs` 的 `mm_wx_filter_prot()`
+在执行普通 W^X 策略前据此放行。它**不跨 fork 继承**：一个自身是外来架构的子进程必须自己再走一次 `execve` 与同一套检查。这与 fd/凭据类状态的语义不同，是有意的收紧。
 
 放行路径打 `kinfo`，理由是可观测性优先于串口安静；代价是高 QPS 下日志偏吵。若日后需要降噪，应改为可配置级别，而不是删掉这行——它是「这个进程不受 W^X 保护」的唯一可见痕迹。
 
@@ -200,7 +202,7 @@ env 注入发生在 argv 改写**安装之后**，所以它失败时 bprm 处于
 - **动态链接 guest、32 位 guest、翻译器的崩溃隔离与资源计量**，均未实现。
 - **两个 guest 同时各跑一个自己的真翻译器没有测试**——仓里只有一种真翻译器。多个 guest 的并发**配置**已经跑通。
 - **AOT / 编译器型翻译器没有实现**，需要的是新机制而不是新配置项，理由见 [02-integration.md](02-integration.md#5-aot-型翻译器prism-一类尚不支持)，接口上落在哪一步见 [04-extending.md](04-extending.md#5-编译器型aot翻译器需要的那一整块)。
-- **没有预留 per-guest 的 vtable。** 现在剩下的那条轴（执行模型：包装器 vs 编译器）确实不是 argv 模板能表达的，但要给它建的不是一张全 NULL 的函数指针表，而是「同步等一个进程 + 产物缓存 + 产物的权限路径 + 新的错误契约」四块机制。理由与这一步什么时候该做，见 [04-extending.md](04-extending.md#4-为什么不预留一张-vtable)。
+- **没有预留 per-guest 的 vtable。** 现在剩下的那条轴（执行模型：包装器 vs 编译器）确实不是 argv 模板能表达的，但要给它建的不是一张全 NULL 的函数指针表，而是「同步等一个进程 + 产物缓存 + 产物的权限路径 + 新的错误契约」四块机制。理由与这一步什么时候该做，见 [04-extending.md](04-extending.md#4-为什么现在不预留一张-vtable)。
 - **native-ABI 翻译器不存在**，所以 native-ABI 镜像一律 `ENOEXEC`。二元组键已经就位，加上它是一行注册表；为什么现在还没有，以及移植 qemu 的可行形态是什么，见 [04-extending.md](04-extending.md#3-加一个-native-abi-翻译器需要改什么)。
 - **启动时不校验翻译器文件是否存在。**
 - **一次 `smoke-exec-xlator` 超时未定位。** 首次运行该用例时超时（guest 到了 mksh 但没有命令执行），未改任何代码重跑即通过。没有复现，也没有定位。
