@@ -62,15 +62,18 @@ static void task_stats(int *total, int *alive, int *zombies)
             if (fd < 0)
                 sched_yield();
         }
+        /* A terminated sibling can linger as a task entry whose stat is
+         * already unreadable during teardown.  A runnable task always has a
+         * readable stat, so an unreadable entry is dead, not alive. */
         if (fd < 0) {
-            (*alive)++;
+            (*zombies)++;
             continue;
         }
         char buf[256];
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         close(fd);
         if (n <= 0) {
-            (*alive)++;
+            (*zombies)++;
             continue;
         }
         buf[n] = '\0';
