@@ -1,6 +1,7 @@
 #include "drivers/audio/alsa.h"
 
 #include "core/errno.h"
+#include "core/timekeeping.h"
 #include "core/string.h"
 #include "drivers/audio/audio_core.h"
 #include "drivers/core/driver_class.h"
@@ -70,6 +71,7 @@ typedef struct {
     uint32_t period_size;
     uint32_t buffer_size;
     uint64_t hw_ptr;
+    int tstamp_type;
 } alsa_pcm_ctx_t;
 
 /* ALSA wire structs (Linux ABI, 64-bit). */
@@ -133,10 +135,18 @@ struct snd_xferi {
     void *buf;
     uint64_t frames;
 };
+/* Linux UAPI layout (sound/asound.h).  alsa-lib encodes the struct size in
+ * the ioctl number and reads fields by offset, so reserved_ is ABI. */
 struct snd_ctl_card_info {
-    unsigned int card, pad;
-    unsigned char card_[16], driver[16], shortname[32], longname[80];
-    unsigned char mixer_name[80], components[128], reserved[64];
+    int card;
+    int pad;
+    unsigned char id[16];
+    unsigned char driver[16];
+    unsigned char name[32];
+    unsigned char longname[80];
+    unsigned char reserved_[16];
+    unsigned char mixername[80];
+    unsigned char components[128];
 };
 struct snd_pcm_info {
     unsigned int device, subdevice;
@@ -145,6 +155,30 @@ struct snd_pcm_info {
     unsigned int dev_class, dev_subclass, subdevices_count, subdevices_avail;
     unsigned char pad1[16];
     unsigned char reserved[64];
+};
+struct snd_pcm_mmap_status {
+    int state;
+    int pad1;
+    uint64_t hw_ptr;
+    struct snd_timespec tstamp;
+    int suspended_state;
+    uint32_t pad3;
+    struct snd_timespec audio_tstamp;
+};
+struct snd_pcm_mmap_control {
+    uint64_t appl_ptr;
+    uint64_t avail_min;
+};
+struct snd_pcm_sync_ptr {
+    uint32_t flags;
+    union {
+        struct snd_pcm_mmap_status status;
+        uint8_t reserved[64];
+    } s;
+    union {
+        struct snd_pcm_mmap_control control;
+        uint8_t reserved[64];
+    } c;
 };
 
 /* Find the A20 audio device + ops. */
@@ -228,9 +262,43 @@ static unsigned int hw_params_clamp(unsigned int value, unsigned int lo,
     return value;
 }
 
+static int hw_params_mask_refine(struct snd_mask *mask,
+                                 const struct snd_mask *limit)
+{
+    unsigned int any = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        mask->bits[i] &= limit->bits[i];
+        any |= mask->bits[i];
+    }
+    return any ? 0 : -EINVAL;
+}
+
+/* Narrow one interval to [lo, hi]; an open bound that coincides with the
+ * supported limit means the intersection is empty. */
+static int hw_params_interval_refine(struct snd_interval *itv, unsigned int lo,
+                                     unsigned int hi)
+{
+    if (itv->empty || itv->min > hi || itv->max < lo)
+        return -EINVAL;
+    if (itv->min < lo) {
+        itv->min = lo;
+        itv->openmin = 0;
+    } else if (itv->min == lo && itv->openmin) {
+        return -EINVAL;
+    }
+    if (itv->max > hi) {
+        itv->max = hi;
+        itv->openmax = 0;
+    } else if (itv->max == hi && itv->openmax) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
 {
     struct snd_pcm_hw_params hp;
+    struct snd_pcm_hw_params sup;
     device_t *dev;
     audio_dev_ops_t *ops;
     int r;
@@ -243,7 +311,26 @@ static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
         return r;
     if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
         return -EOPNOTSUPP;
-    hw_params_fill_supported(&hp, ops);
+
+    /* Refine must intersect the application's constraints with what the
+     * hardware supports; replacing them (as an earlier version did) silently
+     * widens an exact channel count back to a range and alsa-lib then rejects
+     * the object. */
+    memset(&sup, 0, sizeof(sup));
+    hw_params_fill_supported(&sup, ops);
+    for (unsigned i = 0; i < 3; i++)
+        if (hw_params_mask_refine(&hp.masks[i], &sup.masks[i]) < 0)
+            return -EINVAL;
+    for (unsigned i = 0; i < 12; i++) {
+        struct snd_interval *itv = &hp.intervals[i];
+        if (hw_params_interval_refine(itv, sup.intervals[i].min,
+                                      sup.intervals[i].max) < 0)
+            return -EINVAL;
+    }
+    hp.flags = 0;
+    hp.rmask = 0x000fffff;
+    hp.cmask = 0;
+    hp.info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
     return copy_to_user(arg, &hp, sizeof(hp)) < 0 ? -EFAULT : 0;
 }
 
@@ -261,6 +348,25 @@ static int alsa_pcm_info(alsa_pcm_ctx_t *ctx, void *arg)
     return copy_to_user(arg, &info, sizeof(info)) < 0 ? -EFAULT : 0;
 }
 
+static int hw_params_interval_allows(const struct snd_interval *itv,
+                                     unsigned int value)
+{
+    if (itv->empty)
+        return 0;
+    if (value < itv->min || value > itv->max)
+        return 0;
+    if (itv->openmin && value == itv->min)
+        return 0;
+    if (itv->openmax && value == itv->max)
+        return 0;
+    return 1;
+}
+
+static int hw_params_mask_has(const struct snd_mask *mask, unsigned int value)
+{
+    return !!(mask->bits[value / 32] & (1u << (value % 32)));
+}
+
 static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
 {
     struct snd_pcm_hw_params hp;
@@ -275,30 +381,88 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
     if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
         return -EOPNOTSUPP;
 
-    /* Negotiate format/rate/channels from the user's requested values. */
-    unsigned int want_channels =
-        hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)].min;
-    unsigned int want_rate = hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)].min;
-    unsigned int want_period =
-        hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min;
+    if (!hw_params_mask_has(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
+                            SNDRV_PCM_ACCESS_RW_INTERLEAVED) ||
+        !hw_params_mask_has(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
+                            SNDRV_PCM_FORMAT_S16_LE))
+        return -EINVAL;
+
+    const struct snd_interval *ch_itv =
+        &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)];
+    const struct snd_interval *rate_itv =
+        &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)];
+    const struct snd_interval *period_itv =
+        &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)];
+    const struct snd_interval *buffer_itv =
+        &hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)];
     unsigned int rate_min = ops->caps.min_rate ? ops->caps.min_rate : 8000;
     unsigned int rate_max = ops->caps.max_rate ? ops->caps.max_rate : 48000;
 
-    hw_params_fill_supported(&hp, ops);
+    /* Every negotiated parameter must become a single value inside the range
+     * the application offered; alsa-lib validates the returned params and
+     * rejects a range where it asked for a value. */
+    unsigned int channels = ch_itv->min ? ch_itv->min : 2;
+    channels = hw_params_clamp(channels, 1, 2, 2);
+    if (!hw_params_interval_allows(ch_itv, channels))
+        return -EINVAL;
+    unsigned int rate = rate_itv->min ? rate_itv->min : 48000;
+    rate = hw_params_clamp(rate, rate_min, rate_max, 48000);
+    if (!hw_params_interval_allows(rate_itv, rate))
+        return -EINVAL;
+    unsigned int period = period_itv->min ? period_itv->min : 1024;
+    period = hw_params_clamp(period, 16, 1u << 20, 1024);
+    if (!hw_params_interval_allows(period_itv, period))
+        return -EINVAL;
+    unsigned int buffer = buffer_itv->min ? buffer_itv->min : period * 2;
+    buffer = hw_params_clamp(buffer, period * 2, 1u << 22, period * 2);
+    buffer -= buffer % period;
+    if (!hw_params_interval_allows(buffer_itv, buffer))
+        return -EINVAL;
 
     ctx->format = SNDRV_PCM_FORMAT_S16_LE;
-    ctx->channels = hw_params_clamp(want_channels, 1, 2, 2);
-    ctx->rate = hw_params_clamp(want_rate, rate_min, rate_max, 48000);
-    ctx->period_size = hw_params_clamp(want_period, 16, 1u << 20, 1024);
-    ctx->buffer_size = ctx->period_size;
+    ctx->channels = channels;
+    ctx->rate = rate;
+    ctx->period_size = period;
+    ctx->buffer_size = buffer;
 
+    hw_params_mask_set(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
+                       SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    hw_params_mask_set(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
+                       SNDRV_PCM_FORMAT_S16_LE);
+    hw_params_mask_set(&hp.masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_SUBFORMAT)],
+                       SNDRV_PCM_SUBFORMAT_STD);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_SAMPLE_BITS)], 16, 16);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_FRAME_BITS)],
+                           16 * channels, 16 * channels);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)],
-                           ctx->channels, ctx->channels);
+                           channels, channels);
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)],
-                           ctx->rate, ctx->rate);
+                           rate, rate);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)],
+                           (unsigned int)((uint64_t)period * 1000000 / rate),
+                           (unsigned int)((uint64_t)period * 1000000 / rate));
     hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)],
-                           ctx->period_size, ctx->period_size);
-    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIODS)], 2, 2);
+                           period, period);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_BYTES)],
+                           period * channels * 2, period * channels * 2);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIODS)],
+                           buffer / period, buffer / period);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_TIME)],
+                           (unsigned int)((uint64_t)buffer * 1000000 / rate),
+                           (unsigned int)((uint64_t)buffer * 1000000 / rate));
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)],
+                           buffer, buffer);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)],
+                           buffer * channels * 2, buffer * channels * 2);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_TICK_TIME)], 0, 0);
+    hp.flags = 0;
+    hp.rmask = 0x000fffff;
+    hp.cmask = 0;
+    hp.info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
+    hp.msbits = 16;
+    hp.rate_num = rate;
+    hp.rate_den = 1;
+    hp.fifo_size = 0;
 
     /* Configure the A20 backend. */
     a20_audio_format_t fmt;
@@ -327,11 +491,24 @@ static int alsa_pcm_sw_params(alsa_pcm_ctx_t *ctx, void *arg)
     return copy_to_user(arg, &sp, sizeof(sp)) < 0 ? -EFAULT : 0;
 }
 
+static void alsa_pcm_now(const alsa_pcm_ctx_t *ctx, struct snd_timespec *ts)
+{
+    uint64_t now[2];
+    if (ctx->tstamp_type == 0)
+        timekeeping_get_realtime(now);
+    else
+        timekeeping_get_monotonic(now);
+    ts->sec = (int64_t)now[0];
+    ts->nsec = (int64_t)now[1];
+}
+
 static int alsa_pcm_status(alsa_pcm_ctx_t *ctx, void *arg)
 {
     struct snd_pcm_status st;
     memset(&st, 0, sizeof(st));
     st.state = ctx->state;
+    alsa_pcm_now(ctx, &st.trigger_tstamp);
+    st.tstamp = st.trigger_tstamp;
     st.hw_ptr = ctx->hw_ptr;
     st.appl_ptr = ctx->hw_ptr;
     st.avail = ctx->buffer_size;
@@ -457,6 +634,42 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         int mode = 0;
         return copy_to_user(arg, &mode, sizeof(mode)) < 0 ? -EFAULT : 0;
     }
+    case SNDRV_PCM_IOCTL_TTSTAMP: {
+        int type;
+        if (copy_from_user(&type, arg, sizeof(type)) < 0)
+            return -EFAULT;
+        if (type < 0 || type > 2)
+            return -EINVAL;
+        ctx->tstamp_type = type;
+        return 0;
+    }
+    case SNDRV_PCM_IOCTL_USER_PVERSION: {
+        /* alsa-lib announces the UAPI version it was built against; it is
+         * advisory, and rejecting it fails every snd_pcm_open. */
+        unsigned int version;
+        if (copy_from_user(&version, arg, sizeof(version)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case SNDRV_PCM_IOCTL_SYNC_PTR: {
+        struct snd_pcm_sync_ptr sp;
+        if (copy_from_user(&sp, arg, sizeof(sp)) < 0)
+            return -EFAULT;
+        sp.s.status.state = ctx->state;
+        sp.s.status.hw_ptr = ctx->hw_ptr;
+        sp.s.status.suspended_state = 0;
+        alsa_pcm_now(ctx, &sp.s.status.tstamp);
+        sp.s.status.audio_tstamp = sp.s.status.tstamp;
+        sp.c.control.appl_ptr = ctx->hw_ptr;
+        sp.c.control.avail_min = ctx->buffer_size;
+        return copy_to_user(arg, &sp, sizeof(sp)) < 0 ? -EFAULT : 0;
+    }
+    case SNDRV_PCM_IOCTL_STATUS_EXT:
+        return alsa_pcm_status(ctx, arg);
+    case SNDRV_PCM_IOCTL_DELAY: {
+        int64_t delay = 0;
+        return copy_to_user(arg, &delay, sizeof(delay)) < 0 ? -EFAULT : 0;
+    }
     default:
         return -EINVAL;
     }
@@ -501,42 +714,63 @@ static int alsa_control_ioctl(vfile_t *vf, unsigned long req, void *arg)
     (void)vf;
     switch (req) {
     case SNDRV_CTL_IOCTL_PVERSION: {
-        int ver = 0x010106; /* ALSA 1.1.6 */
+        int ver = SNDRV_CTL_VERSION;
         return copy_to_user(arg, &ver, sizeof(ver)) < 0 ? -EFAULT : 0;
     }
     case SNDRV_CTL_IOCTL_CARD_INFO: {
         struct snd_ctl_card_info info;
         memset(&info, 0, sizeof(info));
         info.card = 0;
-        strncpy((char *)info.card_, "a20", sizeof(info.card_) - 1);
+        strncpy((char *)info.id, "a20", sizeof(info.id) - 1);
         strncpy((char *)info.driver, "a20sound", sizeof(info.driver) - 1);
-        strncpy((char *)info.shortname, "A20OS Audio", sizeof(info.shortname) - 1);
-        strncpy((char *)info.longname, "A20OS Audio Device", sizeof(info.longname) - 1);
+        strncpy((char *)info.name, "A20OS Audio", sizeof(info.name) - 1);
+        strncpy((char *)info.longname, "A20OS Audio Device",
+                sizeof(info.longname) - 1);
         return copy_to_user(arg, &info, sizeof(info)) < 0 ? -EFAULT : 0;
     }
     case SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE: {
-        int dev = 0;
+        int dev;
         if (copy_from_user(&dev, arg, sizeof(dev)) < 0)
             return -EFAULT;
         device_t *d;
         audio_dev_ops_t *o;
         if (alsa_audio_get(&d, &o) < 0)
             return -ENODEV;
-        dev = (dev == 0) ? 0 : -1;
+        /* One PCM device: -1 starts the scan at 0, any non-negative index
+         * ends it. */
+        dev = dev < 0 ? 0 : -1;
         return copy_to_user(arg, &dev, sizeof(dev)) < 0 ? -EFAULT : 0;
     }
     case SNDRV_CTL_IOCTL_PCM_INFO: {
         struct snd_pcm_info info;
-        memset(&info, 0, sizeof(info));
-        info.device = 0;
+        if (copy_from_user(&info, arg, sizeof(info)) < 0)
+            return -EFAULT;
+        if (info.device != 0)
+            return -ENOENT;
+        if (info.stream != 0 && info.stream != 1)
+            return -EINVAL;
         info.subdevice = 0;
-        info.stream = 0;
         info.card = 0;
-        strncpy((char *)info.id, "a20pcm", sizeof(info.id) - 1);
-        strncpy((char *)info.name, "A20OS PCM", sizeof(info.name) - 1);
+        memset(info.id, 0, sizeof(info.id));
+        memset(info.name, 0, sizeof(info.name));
+        memset(info.subname, 0, sizeof(info.subname));
+        strncpy((char *)info.id, "A20PCM", sizeof(info.id) - 1);
+        strncpy((char *)info.name, "A20OS Audio", sizeof(info.name) - 1);
+        strncpy((char *)info.subname, "A20 PCM", sizeof(info.subname) - 1);
+        info.dev_class = 0;
+        info.dev_subclass = 0;
         info.subdevices_count = 1;
         info.subdevices_avail = 1;
         return copy_to_user(arg, &info, sizeof(info)) < 0 ? -EFAULT : 0;
+    }
+    case SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE: {
+        int subdevice;
+        if (copy_from_user(&subdevice, arg, sizeof(subdevice)) < 0)
+            return -EFAULT;
+        /* alsa-lib calls this with -1 ("no preference") before opening the
+         * PCM; only a real subdevice beyond the single one we expose is
+         * refused. */
+        return subdevice < 0 || subdevice == 0 ? 0 : -ENODEV;
     }
     default:
         return -EINVAL;
