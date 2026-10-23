@@ -750,17 +750,16 @@ VMO 级。
    关于 v2 行为的一切描述都是推演"。运行结论与逐行日志见
    [03-usage.md §3.3](03-usage.md)（`smoke-hyp-a20os` 与手工 `hypvm` 两次真跑，
    guest 侧结果逐字段相同）。仍然只验到 banner 一层，banner 之后的事见 §10 第 9 条。
-9. **一次宿主会话里只能引导一台 guest。** 实测：同一 shell 里连续两次运行
-   `/hypvm`，第一次正常 PASS，第二次——**参数与第一次完全相同**——打完
-   `HYPVM: running` 之后一个 guest 控制台字节都没有，`hyp_vcpu_run()` 一直不
-   返回，QEMU 100% CPU，宿主连一条 `[ERR] hyp:` 都没打（说明 guest 在跑、且没有
-   陷入）。单独跑 `hypvm -m 96`、单独跑自定义 `-b` 都正常，所以与参数无关，是第
-   一次 guest 以 `HYP_EXIT_FAULT` 退出之后留下的状态。根因未查（怀疑与第 2 条
-   "不注入外部中断"下 guest 等待一个永远不会被投递的外部中断有关——注意不是
-   时钟中断，时钟中断那条路是通的），修它属于
-   [02-roadmap.md](02-roadmap.md) §2 的范围。**后果**：`smoke-hyp-vm` 与
-   `smoke-hyp-vm-96` 因此是两个门禁、两次 QEMU 启动，而不是一个门禁里的两行
-   命令。
+9. **同一宿主可以连续引导 guest；剩余问题是管理通道的唤醒延迟。** 早先记录的
+   "第二次 `/hypvm` 一个 guest 字节都没有、`hyp_vcpu_run()` 不返回"在本轮重建后
+   未复现：同一 shell 连续两次 `hypvm -m 96` 都正常打印 guest 控制台并 PASS。
+   当前重复运行的不稳定点在 `a20-vmd`：两台 managed guest 同时运行时，管理进程
+   的 5 ms 睡眠会被推迟到约 1 s、偶发数十秒，START/LIST 的 3 s RPC 因此超时；
+   同一时间宿主 shell 仍能在 10 ms 量级响应，说明不是整机停摆。该问题在
+   `kernel/proc` 的等待定时器/调度唤醒路径，已作为跨领域缺口
+   [RUNTIME-06](../status/gaps/runtime.md) 记录，不在 hypervisor 包内修复。
+   `smoke-hyp-vm` 与 `smoke-hyp-vm-96` 仍保持两次 QEMU 启动，因为每次启动更易于
+   诊断，不是功能上不能连续。
 ---
 
 ## 11. 用户入口：hypvm
