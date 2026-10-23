@@ -727,7 +727,10 @@ NET_SOCKET_QUEUE_IMPL ?= $(if $(filter $(ARCH),$(NET_RUST_OK)),rust,c)
 ifeq ($(filter $(NET_SOCKET_QUEUE_IMPL),c rust),)
 $(error NET_SOCKET_QUEUE_IMPL must be c or rust)
 endif
-EXT4_EXTENT_TXN_IMPL ?= c
+# The full profile mounts writable ext4 and produces files whose extent trees
+# need a leaf level (depth 1); the Rust transaction implements that shape and
+# the shutdown-time orphan reap, while the C root-trim path refuses depth > 0.
+EXT4_EXTENT_TXN_IMPL ?= $(if $(filter full,$(PROFILE)),rust,c)
 ifeq ($(filter $(EXT4_EXTENT_TXN_IMPL),c rust),)
 $(error EXT4_EXTENT_TXN_IMPL must be c or rust)
 endif
