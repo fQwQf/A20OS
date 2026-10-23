@@ -110,7 +110,9 @@ static void aa64_reboot(void) {
 extern void virtio_mmio_enumerate(uintptr_t base, int max_slots, int irq_base);
 
 static void aa64_enumerate_devices(void) {
-    virtio_mmio_enumerate(VIRTIO_BASE, 8, 16);
+    /* The DT encodes SPI numbers relative to INTID 32. request_irq() and
+     * GICD registers use the full INTID, so SPI 16 is interrupt 48. */
+    virtio_mmio_enumerate(VIRTIO_BASE, 8, 32 + 16);
 }
 
 void board_register_module_devices(void);
