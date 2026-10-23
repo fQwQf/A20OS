@@ -21,3 +21,10 @@
 - 缺口：ARMv7-M 的内核固件无法构建，MCU 档没有构建证据；需要区分"MCU profile 真的要用这个 Rust 模块"（补 armv7m 目标）与"这个模块不在 MCU profile 里"（把断言按 `KERNEL_SRC` 加条件）。
 - 关闭条件：`make stm32f103-bringup` 与 `make stm32f103-xuanwu` 编译通过，且 `check-stm32f103` 通过。
 - 来源：同上。
+
+### DRIVER-SECURITY-03 用户 MMIO 逐页映射失败缺少回滚
+
+- 现状：`kernel/drivers/core/udriver.c::udriver_map_mmio()` 逐页调用 `pt_map()`，全部成功后才填写 VMA 的 start/end 并发布。若后续页分配/映射失败，fail 分支只有 `vma_put()`，没有撤销此前成功安装的 PTE，也没有完成 deferred VMA 清理。
+- 缺口：后端返回失败后，用户地址空间可能保留没有 VMA 的部分设备映射；这违反 SECURITY-03 的拒绝无副作用与资源释放契约。Native ABI 现已修复成功映射后的输出拷贝失败回滚，但该修复不覆盖后端内部的部分失败。
+- 关闭条件：由 DRIVER/MM owner 审查映射事务、锁序及 TLB 生命周期，撤销已安装部分并释放临时 VMA；在至少已映射一页后注入 `pt_map` 失败，确认没有剩余设备 PTE、临时对象/页表资源泄漏，正常映射与释放仍通过。
+- 来源：SECURITY 包为 SECURITY-03 审查 Native MMIO 输出失败清理时确认的源码路径（2026-10-23）。逐页分配失败尚未做 guest 故障注入，不计作 PASS。本包未修改驱动/MM 源码。

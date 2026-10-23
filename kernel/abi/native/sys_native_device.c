@@ -9,6 +9,7 @@
 #include "core/string.h"
 #include "proc/proc.h"
 #include "mm/mm.h"
+#include "mm/vm.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
 
@@ -45,6 +46,16 @@ int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
     a20_device_map_mmio_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
+    if (!kargs.length || (kargs.phys_base & (PAGE_SIZE - 1)) ||
+        kargs.length > UINT64_MAX - (PAGE_SIZE - 1) ||
+        !kargs.prot || (kargs.prot & ~3U))
+        return -A20_ERR_INVALID_ARGUMENT;
+    /* Authorize the complete hardware page span: the page table cannot
+     * enforce a byte-sized window once its containing page is mapped. */
+    uint64_t length = (kargs.length + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (kargs.phys_base > UINT64_MAX - length)
+        return -A20_ERR_INVALID_ARGUMENT;
+
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_BAD_HANDLE;
 
@@ -55,13 +66,15 @@ int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
         return -A20_ERR_ACCESS;
 
     uint64_t va = 0;
-    if (udriver_map_mmio(cur->mm, kargs.phys_base, kargs.length,
+    if (udriver_map_mmio(cur->mm, kargs.phys_base, length,
                          kargs.prot, &va) < 0)
         return -A20_ERR_ACCESS;
 
     kargs.out_addr = va;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        mm_munmap(cur->mm, va, (size_t)length);
         return -A20_ERR_FAULT;
+    }
     return A20_OK;
 }
 

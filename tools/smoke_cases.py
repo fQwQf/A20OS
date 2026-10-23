@@ -3586,6 +3586,7 @@ CASES: dict[str, dict] = {
                  '-kernel', '@BUILD_DIR@/kernel.elf', '-append', 'a20.wx=deny'],
         'expect': ['SECURITY_RELEASE: PASS', 'WX_ASLR: PASS', 'SANDBOX: PASS',
                    'CRED_STATE_TEST: PASS', 'opc ok', 'ac ok', 'xattr ok',
+                   'NATIVE_MM: PASS', 'NATIVE_MM: security-device PASS',
                    'UEDUD: dev0 faulted', 'UEDUD: dev1 unaffected',
                    'UEDUD: domains released', 'ENVELOPE_SMOKE: PASS',
                    r'\[SD\] POWER_OFF entry', 'audit errors=0'],

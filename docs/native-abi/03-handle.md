@@ -627,7 +627,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
-| 0x0C00 | `device_map_mmio` | `int64_t device_map_mmio(a20_device_map_mmio_args_t *args)` | 映射白名单内的设备物理窗口（PFNMAP） |
+| 0x0C00 | `device_map_mmio` | `int64_t device_map_mmio(a20_device_map_mmio_args_t *args)` | 映射白名单内的完整页跨度（PFNMAP），仅支持读/写；输出拷贝失败撤销映射，范围与所有权拒绝不修改 out_addr |
 | 0x0C01 | `device_irq_listen` | `int64_t device_irq_listen(uint32_t irq, a20_handle_t queue, uint64_t user_data)` | 绑定物理 IRQ 到 EventQ（电平协议：先屏蔽再投递） |
 | 0x0C02 | `device_irq_ack` | `int64_t device_irq_ack(uint32_t irq)` | 重新武装 IRQ（`irq_enable`） |
 | 0x0C03 | `device_irq_unlisten` | `int64_t device_irq_unlisten(uint32_t irq)` | 解绑 IRQ 并释放队列引用 |

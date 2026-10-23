@@ -14,6 +14,9 @@
   EACCES。拒绝 read 不改输出缓冲，拒绝 write 不改文件；close 仍可释放引用，退出后
   `n_shadows=0`。同 uid 非 owner 与跨 uid 无 capability 的调用者不能撤销，owner
   可撤销；fork 与 exec 保留 envelope。操作/字节配额耗尽的拒绝同样无读写副作用。
+- Native MMIO 按完整页跨度授权，拒绝零长度、回绕和未支持的执行权限；输出地址拷贝失败
+  时撤销映射。guest 用只读参数页连续触发三次失败，随后验证首个空闲地址仍可分配；
+  非 owner、越界拒绝、正常映射与释放均通过。
 - Native handle 使用现有 rights、temporal 操作预算与自动关闭实现，当前用例通过。
   Linux envelope 与 Native handle 的空间、继承和授权语义分别验证，不声明二者等价。
 - 用户 W^X 默认 `off`，安全候选显式选择 `a20.wx=deny`。内核 W^X、ASLR、栈保护
@@ -30,6 +33,7 @@
 | Landlock symlink | FAIL | 允许目录内的符号链接能读到被拒绝的目标 |
 | envelope 撤销、继承、配额 | PASS | 新增逐项正/负控制，加既有 `envelope_smoke` 全部场景 |
 | Native handle | PASS | rights 收窄、transfer、事件、temporal 操作耗尽/自动关闭、meta/xattr |
+| Native VM/MMIO | PASS | VMAR 越界/权限上限/失败回滚；MMIO 非 owner、范围、执行权限与输出失败回滚；正常访问与释放 |
 | credential | PASS | `cred_state_test` 的 capset 拒绝矩阵、uid/gid/FSID 与 fork 隔离 |
 | W^X/ASLR workload | PASS | RWX mmap/mprotect 拒绝、RW/RX 允许、exec 随机布局 |
 | `make smoke-wx-aslr` 总用例 | FAIL | workload PASS，但 shell 的信号 trampoline 请求 RWX 后退出，显式 poweroff 未执行 |
@@ -38,10 +42,11 @@
 | 安全开启性能 | PASS（测量） | 两种配置同输入，见参考页；不认证整个 OS 的性能 |
 | 普通 shell boot（WX off） | PASS | 外部 echo、显式 poweroff、审计零错误、QEMU 自然 rc=0 |
 | 安全候选总用例 | FAIL | 上述 Landlock 两项和 SIGSYS 失败均保留，QEMU 自然 rc=0 不会覆盖功能失败 |
-| 其他 CPU/ABI、实板与 DMA 吞吐 | 未测 | 本次结论仅覆盖表头平台和 workload |
+| 其他 CPU/ABI、实板、DMA 吞吐与驱动页表分配故障注入 | 未测 | 本次结论仅覆盖表头平台和 workload |
 | 未提供的网络/scoping 等 Landlock 限制 | N/A | 创建入口报错，不计作隔离覆盖 |
 
 SECURITY-01、SECURITY-04 已删除：前者的现有状态机无需新增重写，当前针对性控制验证了
 表列支持路径；后者已有真实同输入数据与默认值判断。SECURITY-02/03 仍保留。
 跨模块缺陷已分别登记为 [ABI-SECURITY-02/03](../gaps/abi-ipc.md) 与
-[FS-SECURITY-03](../gaps/fs.md)。当前安全候选不能关账，也不代表 OS 1.0 完成。
+[FS-SECURITY-03](../gaps/fs.md)；驱动逐页映射失败回滚的源码问题另见
+[DRIVER-SECURITY-03](../gaps/drivers.md)。当前安全候选不能关账，也不代表 OS 1.0 完成。

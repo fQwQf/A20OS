@@ -35,6 +35,22 @@ Landlock create 的最小输入是 8 字节 `handled_access_fs`。flags 必须�
 ABI v1。当前字符串路径规则的 fork/symlink 验收结果见现状页，不能据一次成功的
 `restrict_self` 断言整个进程已经隔离。
 
+## Native MMIO 边界
+
+`device_map_mmio` 只支持读/写保护位。长度必须非零，物理基址页对齐，向上取整及范围
+加法不可回绕。授权检查使用向上取整后的完整页跨度；返回错误时不改用户 `out_addr`。
+如果映射已经建立而输出拷贝失败，ABI 入口通过 MM unmap 撤销新映射，返回 FAULT。
+
+候选调用 `native-mm-rv --security-device`：EDU/IOMMU 必须存在，检查未 claim 的任务
+不能 map/release；claim 后的零长度、回绕、BAR 外范围和执行权限请求被拒绝；只读输出
+参数连续失败三次后，用真实 VM 分配器确认空闲地址没有被泄漏映射占用。最后正常映射、
+读取 EDU 标识、release 并确认旧 VA 已被解除。普通 `native-mm-rv` 不要求 PCI 设备。
+该控制也完整运行原有 VMAR 越界、权限上限和 remap 回滚用例。
+
+宿主夹具直接运行生产 ABI 函数，分别移除完整页跨度授权、输出失败回滚作为负控。
+驱动后端在逐页 `pt_map` 分配失败时的回滚另属 DRIVER-SECURITY-03；正常 guest 通过
+不能替代该故障注入验证。
+
 ## 配置和命令
 
 在本包 worktree 中运行，使用仓库公共 build lease；linked worktree 的 `.git` 是文件，
@@ -44,6 +60,7 @@ ABI v1。当前字符串路径规则的 fork/symlink 验收结果见现状页，
 common=$(git rev-parse --path-format=absolute --git-common-dir)
 runner="$common/parallel-rewrite/run-build.sh"
 "$runner" build-2 python3 tools/tests/test_landlock_create_host.py
+"$runner" build-2 python3 tools/tests/test_security_mmio_host.py
 make check-honesty-policy check-smoke-cases
 "$runner" build-2 make smoke-security-release
 "$runner" build-2 make smoke-wx-aslr
