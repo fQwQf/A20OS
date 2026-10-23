@@ -66,15 +66,15 @@ xfce4-session 的 X11 会话：
 - 内核把 HDA/virtio-snd 暴露成 ALSA PCM：`/dev/snd/controlC0`、
   `pcmC0D0p`、`pcmC0D0c`。原生 `audioplay` 与 `smoke-audio-userspace` 门禁
   都在这条路径上验证过。
-- 桌面里的 ALSA 客户端目前打不开设备。x86_64 实测：三个 snd 节点的裸
-  `open(2)` 都成功，但 libasound 的 `snd_pcm_open("hw:0,0")` 返回 `-ENOENT`，
-  `"default"` 返回 `-EPROTO`（Sound protocol is not compatible），
-  `snd_card_load(0)` 返回 0。内核 `SNDRV_PCM_IOCTL_INFO` 的 ioctl 号是
-  `0x81204101`（结构体 0x120 字节），Linux UAPI 是 `0x81104101`（0x110 字节），
-  已记为 [DRIVER-11](../../gaps/drivers.md)。
-- `alsoft.conf` 因此仍选择 `drivers = null`（No Output）。验收“有声播放”需要
-  先修好 ALSA 打开路径，再让 OpenAL 选择 ALSA 后端并核对 QEMU 录音后端里的
-  非静音采样。
+- 桌面 ALSA 客户端可以打开设备并播放。修复的是 ALSA 兼容层的 UAPI 细节：
+  `SNDRV_CTL_IOCTL_PVERSION` 返回 2.0.9（不是 1.1.6），CARD_INFO 使用 Linux 的
+  376 字节布局与 `0x81785501`，PCM_NEXT_DEVICE/PCM_INFO 使用 Linux 编号，
+  接受 `PREFER_SUBDEVICE(-1)`、`USER_PVERSION`、`SYNC_PTR`、`STATUS_EXT`、
+  `DELAY`，`HW_REFINE` 把应用约束与硬件能力求交集（不再覆盖），`HW_PARAMS`
+  把每个参数收敛成单一值并返回一致的 frame/period/buffer 关系。
+- `alsoft.conf` 现在选择 `drivers = alsa`（不再是 null/No Output）。实测：OpenAL
+  打开设备、source 进入 PLAYING 并结束；mpv `--ao=alsa` 播放 440 Hz 测试音；
+  QEMU 的 wav 后端录到 441 Hz、非静音（峰值等于注入幅度，RMS 约 5.5k–8k）。
 
 ## JVM 与调试信息
 

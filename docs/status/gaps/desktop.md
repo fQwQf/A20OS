@@ -10,12 +10,11 @@
   AArch64 TCG 桌面上 eudev 的 input worker 超时被杀，libinput 没有接收键盘，
   QMP/HMP 注入的按键与按钮都不产生 evdev 事件（相对移动可见）；同一镜像在
   x86_64 KVM 与 riscv64 TCG 上键盘正常。
-  音频是 No Output：内核 PCM 与 `smoke-audio-userspace` 通过；x86_64 桌面里
-  `/dev/snd/controlC0`、`pcmC0D0p/c` 的裸 open 成功，但 libasound 的
-  `hw:0,0` 返回 `-ENOENT`、`default` 返回 `-EPROTO`，`alsoft.conf` 仍选择
-  `drivers = null`。内核 `SNDRV_PCM_IOCTL_INFO` 的结构体尺寸/ioctl 号与
-  Linux UAPI 不一致，已记为 [DRIVER-11](drivers.md)。
-- 缺口：全屏、真实硬件输入、绝对鼠标位置提示未系统验收；有声播放不可验收。
+  音频已可验收：ALSA 控制/PCM 的版本、ioctl 编号、CARD_INFO 布局、REFINE 交集
+  与 HW_PARAMS 精确协商修正后，mpv `--ao=alsa` 与 OpenAL（`drivers = alsa`）
+  都能打开设备并播放 440 Hz 测试音；QEMU 的 wav 后端录到 441 Hz、非静音
+  （RMS 5.5k–8k，峰值等于注入幅度）。
+- 缺口：全屏与真实硬件输入未系统验收。
 - 关闭条件：每项在承诺平台上给出真实输入与输出证据；音频有声播放可验收。
 - 来源：[current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)。
 
