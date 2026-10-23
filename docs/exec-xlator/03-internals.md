@@ -182,9 +182,11 @@ elf_load 失败（-ENOEXEC）
 
 env 注入发生在 argv 改写**安装之后**，所以它失败时 bprm 处于一致状态，调用方的 `bprm_free()` 能正常展开。
 
-## 9. W^X：per-task 放行
+## 9. W^X：per-task 放行 {#wx-internals}
 
-`task_t.xlator_host` 仅由内核在 re-exec 路径上设置，`mm_wx_filter_prot()` 见此位即放行。它**不跨 fork 继承**：一个自身是外来架构的子进程必须自己再走一次 `execve` 与同一套检查。这与 fd/凭据类状态的语义不同，是有意的收紧。
+`task_t.xlator_host` 仅由内核在 re-exec 路径上设置。`kernel/mm/wx.c` 的
+`a20_wx_task_is_xlator_host()` 读取该位，`kernel/mm/wx_policy.rs` 的 `mm_wx_filter_prot()`
+在执行普通 W^X 策略前据此放行。它**不跨 fork 继承**：一个自身是外来架构的子进程必须自己再走一次 `execve` 与同一套检查。这与 fd/凭据类状态的语义不同，是有意的收紧。
 
 放行路径打 `kinfo`，理由是可观测性优先于串口安静；代价是高 QPS 下日志偏吵。若日后需要降噪，应改为可配置级别，而不是删掉这行——它是「这个进程不受 W^X 保护」的唯一可见痕迹。
 

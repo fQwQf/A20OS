@@ -1,6 +1,6 @@
 # 构建与运行指南
 
-本文记录当前混合 C/Rust 构建入口。各子系统按真实状态选择 C 或 Rust；Rust 已接管若干复杂对象生命周期、并发状态与回滚职责，简单 dispatch、glue、byte-copy 和成熟热点原语可保留在 C。1.0 的目标是完成已承诺功能并验证稳定性，不以 Rust 比例或删减 C 行数作为门槛。当前批次实现与验证概况见 [模块状态](../status/current/module-status-2026-10-19.md)，完整发布条件见 [1.0 计划](../releases/v1.0.md)。
+本指南列出工具链前提、构建/运行命令和常用配置。当前实现与验证概况见 [模块状态](../status/current/module-status-2026-10-19.md)，实现选择与发布条件见 [1.0 计划](../releases/v1.0.md)。
 [1.0 平台范围](../releases/v1.0.md#2-平台范围) 已排除 LoongArch32/PPC64LE。活跃 Make、
 实例、CI 和测试矩阵已停止列入这两个历史目标；默认构建会明确拒绝它们。历史源码与
 实例保留供追溯。需要复现时，在干净 checkout 中切到 `v0.18`，再按各平台文档操作；
@@ -44,10 +44,8 @@ rustup target add aarch64-unknown-none armv7a-none-eabihf \
     riscv64imac-unknown-none-elf thumbv7m-none-eabi x86_64-unknown-none
 ```
 
-`rust-src` 不是可选项：riscv32 是自定义 JSON 目标
-（`tools/rust-targets/riscv32imafdc-a20.json`），构建入口用
-`-Z build-std=core` 现场编 core，而 core 来自这个组件。构建入口自己会设
-`RUSTC_BOOTSTRAP=1`，所以 stable 工具链够用。
+riscv32 必须安装 `rust-src`；缺少它会使构建失败。构建入口设置所需选项，无需额外切换工具链。
+技术依据见 [目标运行库](tooling-internals.md#target-runtime)。
 
 注意：
 
@@ -64,7 +62,7 @@ rustup target add aarch64-unknown-none armv7a-none-eabihf \
   `make FF_LINUX_UAPI_ROOT=/tmp/arm-root/usr check-build-matrix`；这个变量只
   影响**用户态**的 UAPI 头搜索（`user/Makefile`），不解决内核侧的 libc 头。
   ARMv7-M 另走 STM32 目标，工具链不同。
-- ARM32 musl 的 `time_t` 是 64 位，直接 syscall 回归 `timer_edge` 因此使用 `timer_settime64` / `timer_gettime64` 编号和同宽的 `itimerspec` 布局；不要把 32 位 `timer_*32` 编号与 64 位结构体混用。
+- ARM32 定时器回归夹具的维护约束见 [时间 ABI](tooling-internals.md#arm32-time-abi)。
 - Python：Makefile 默认调用 `python3`（Python 3.11 或更新版本，仅需标准库）。不需要 Conda，也不会因机器安装了 Conda 而自动切换解释器。可通过 `make PYTHON=/path/to/python3 ...` 显式指定其他解释器。
 - `grub-pc-bin` / `grub-efi-amd64-bin` / `xorriso`：只有 x86_64 瘦客户机部署用得到。`tools/a20 package x86_64-pc` 生成 GRUB rescue ISO 时，`grub-mkrescue` 会调用 `xorriso`；缺了它会在打包这一步报 `grub-mkrescue: 未找到 xorriso`。riscv64/aarch64 板和 QEMU 虚拟机都不需要这三个包。
 
@@ -143,7 +141,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 ## 注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
-- 顶层构建可能同时从磁盘镜像与 RAMFS guest kernel 进入用户构建。`tools/stamps.py` 会按共享的 `user/build/<arch>[-nommu]` 输出根使用跨进程锁，并在拿锁后重新检查 stamp；因此不同 `OPT`/profile 或 user/native stamp 的独立 make 进程不会并发清理或写入同一目录。锁文件位于该目录的父目录，不会随变体 clean 一起删除。
+- 共享用户态输出目录的构建会串行执行。不同优化选项或 profile 可同时发起构建，等待中的构建将在目录可用后继续；维护接线时见 [并发构建契约](tooling-internals.md#concurrent-builds)。
 - `make clean` 会清除当前仓库配置的 `.kernel-build` 内容。若该路径是指向专用外部构建缓存的符号链接，命令会保留链接并清空其目标中的架构构建目录。首次使用外部缓存时，先确认目标目录专用于 A20OS，再创建标记文件：`printf 'a20-build-root-v1\n' > /path/to/cache/.a20-build-root`。清理会验证该标记、拒绝指向仓库本身/父目录的链接，并拒绝不符合架构构建目录命名约定的内容，以免误删无关文件。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
 - 发布构建 `make all` 构建 RISC-V64 与 LoongArch64，使用 `PROFILE=benchmark NR_CPUS=8 DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1`，输出根目录的 `kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。默认优化仍来自 `OPT=-O3`；若需要改变优化必须使用 `OPT`。

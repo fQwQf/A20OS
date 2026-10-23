@@ -22,8 +22,11 @@ syscall 覆盖表。源码已拆分的 NAT、校验和、dcache 与 netfilter �
 
 用户路径审查覆盖构建、调试、实例、打包快速开始、发行版构建/引导、翻译器使用、虚拟机使用、
 集群运维与驱动入门。操作页保留用途、前提、命令、可观察结果与失败语义；驱动教程所需的
-寄存器/DMA 契约属于开发操作前提。具体的布局、termios 编码、ptrace 状态字段和翻译器内部
-豁免机制已作为窄修请求交给 [DELIVERY](../gaps/delivery.md) 与 [CORE](../gaps/core.md) 的文档 owner。
+寄存器/DMA 契约属于开发操作前提。构建夹具 ABI、termios 编码、stamp/实例互斥与 QEMU
+参数生成契约集中在 [工具技术参考](../../dev/tooling-internals.md)；ptrace 状态字段、ABI 适配、
+符号表和 UBSan 接线集中在 [内核调试参考](../../kernel/debugging-internals.md)。翻译器使用页
+只保留 W^X 策略、验证命令、日志与拒绝语义，字段和生命周期链接到已有
+[内部契约](../../exec-xlator/03-internals.md#wx-internals)。操作页与技术页互相链接，命令和行为契约保持一致。
 
 ## 网站与 PDF
 
