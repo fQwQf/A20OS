@@ -25,7 +25,7 @@ printf '#![no_std]\npub fn probe() -> u32 { 0 }\n' > "$tmp/probe.rs"
 printf '#include <limits.h>\n#include <stdint.h>\n' > "$tmp/libc.c"
 
 common() {
-    for tool in make python3 ccache mtools mcopy mkfs.ext4; do
+    for tool in make python3 ccache mtools mcopy mkfs.ext4 rg; do
         command -v "$tool" >/dev/null 2>&1 || fail "$tool missing"
     done
     command -v rustc >/dev/null 2>&1 || fail "rustc missing"

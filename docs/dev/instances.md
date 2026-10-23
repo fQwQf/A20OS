@@ -7,13 +7,14 @@
 checkout 作为历史复现基线。功能与性能实例的证据要求见
 [1.0 验收](../releases/v1.0-validation.md)。
 
-A20OS 的构建、运行与冒烟测试配置统一由实例清单声明：`instances/` 目录下的每个 TOML 文件描述一个完整的、可构建、可运行、可测试的系统实例（架构、板卡、ABI、内核选项、机器配置、根文件系统、网络、GUI、测试期望）。`tools/a20` 读取实例、做完整校验、推导出对应的 Makefile 变量，再调用 make 执行。Makefile 仍是唯一的构建引擎，实例层只负责"配置声明 + 变量推导"，两者通过 `make -n` 输出的 QEMU 命令行保持一致。
+A20OS 的构建、运行与冒烟测试配置统一由 `instances/` 下的 TOML 清单声明。
+每份清单指定架构、板卡、ABI、内核选项、根文件系统、网络、GUI 与测试期望。
 
-设计要点：
+- 未写的字段沿用 Makefile 默认值；能力范围可用 `tools/a20 trim <实例>` 查询。
+- 架构、板卡、ABI、SMP、NOMMU 和驱动组件配置在构建前校验；失败会指出具体字段。
+- 修改清单或注册表后运行 `make check-manifests`，修改工具后运行 `make check-a20-tests`。
 
-- 未写的字段不落任何变量，直接落回 Makefile 默认值。实例只携带自己的增量；门禁**逻辑**（force-off、`$(error)`）只有一个出处（Makefile），而门禁**数据**——各能力的架构矩阵与 MCU profile 的策展源码清单——只有一个出处（`components/trim.toml`，经生成的 `components/trim.mk` 喂给 Makefile，`tools/a20` 校验实例时读同一份 TOML，`tools/a20 trim` 展示它推导出的剪裁计划）。
-- 校验前置：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
-- 声明即门禁：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-trim-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、剪裁注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
+解析、注册表与构建接线的维护约束见 [工具技术参考](tooling-internals.md#instance-parsing)。
 
 ## 快速上手
 
@@ -206,7 +207,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 
 `gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
-`[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）也**不**导出成 make 变量：它们是 a20 自己按 dataclass 驱动的，串口会话、复位脉冲、命令注入和 expect 匹配都不经过任何 recipe。这里曾经导出全部 11 个 `TARGET_*`，其中 8 个没有任何 recipe 读取，于是 `a20 show-vars` 会声称 make 拿到了它其实从未见过的配置。少导出无人消费的变量，比多导出更可靠。
+`[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）只供 a20 控制台动作读取，不导出 make 变量。用 `a20 show` 查看串口、复位、命令与匹配条件，不能从 `show-vars` 的 make 变量列表推断它们是否配置。接线约束见 [实例解析参考](tooling-internals.md#instance-parsing)。
 
 `list` 的"可用动作"列不是分类标签，而是逐条镜像对应命令里已经存在的拒绝条件（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在 `boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令就要在这里补上它的条件，这正是这一列的用途。
 
@@ -295,15 +296,15 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 
 `console` 的执行顺序是：复位（可选）→ 等 `console_check` → 等 `boot_wait` → 注入 `commands` → 等 `expect`。**每一处等待都有上限**：板子没起来、或者起来了但不回话，会在一个具名的阶段上结束，而不是把终端挂住。
 
-### 为什么没有 pyserial
+### 串口前提
 
-串口是用标准库的 `termios`/`fcntl`/`select` 说的。`tools/a20` 的 PEP 723 头声明 `dependencies = []`，docs 也承诺只用标准库。为了设置六个标志位而引入 pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍。
-
-波特率编码交给平台自己：Linux 上 `B115200` 是 `0o10002`，BSD 上编号又不一样，`termios` 模块里已经带着正确的常量，所以这里不再手写一张表。
+`tools/a20 console` / `deploy` 只需 Python 标准库，无需安装 pyserial。
+串口设备必须可访问，所选波特率必须受宿主平台支持；不支持时命令会报告可用波特率。
+串口传输与平台编码的实现说明见 [串口技术参考](tooling-internals.md#serial-transport)。
 
 ### 安全边界
 
-- `reset` 用 `shlex.split` 拆成 argv 后执行，**不走 shell**：清单因此无法把管道或 `;` smuggle 进来（`reset-cmd; rm -rf /` 会被当成一个字面量参数名）。
+- `reset` 按命令参数执行，不经 shell；清单中不能使用管道或 `;` 连接多条命令。
 - `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
 - `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，正是「产物账本」一节要消灭的那类东西。
 - 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
@@ -395,7 +396,7 @@ tools/a20 regen-drivers             # 写
 
 ### 同一实例不会被并发跑两遍
 
-`a20 test` 对每个实例持有 `.kernel-build/smoke/<name>.lock`（`flock`）。锁在**构建之前**获取，因为两个进程各自把完整内核编译一遍写进同一个 `BUILD_DIR`，输的那一方会在几分钟后才发现自己输，而它已经把构建产物搅乱了。
+同一实例已有 `a20 test` 运行时，再次启动会在构建前失败。并发保护的实现契约见 [工具技术参考](tooling-internals.md#instance-exclusion)。
 
 获取锁失败时报 `InstanceBusy`（退出码 1）并指出锁在哪，而不是静默排队等一个自己不知道存在的进程。
 
@@ -403,11 +404,16 @@ tools/a20 regen-drivers             # 写
 
 会话失败时打印日志的**最后 80 行**而不是全文。一次 `console` 的日志轻易上万行，而有用信息通常在末尾：panic、assert、启动失败原因都在那里。
 
-### 谁拥有 QEMU 命令行
+### 查看 QEMU 命令行
 
-make 拥有每一个 flag。`$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)` 在 make 里展开，`tools/qemu.py` 读到这个结果并负责执行（build → verify → exec），`a20 run` / `debug` 走的是同一条路。所以启动顺序里不再有 shell 配方，而命令行只有一个来源。
+需要检查实际启动参数时，使用与目标实例相同的构建变量运行 `make _qemu_argv`：
 
-`_qemu_argv` 只负责打印这个结果，**因此必须没有前置依赖**：一旦它带上依赖，"取一下命令行"就会先把整个世界重新构建一遍。查询命令行要用 `make _qemu_argv`，不要加 `-n`。加了会打印出 `printf` 本身，而不是它输出的命令行。
+```bash
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 _qemu_argv
+```
+
+该命令只查询、不构建。不要加 `-n`，否则得到的是打印命令而不是 QEMU 参数。
+参数生成与执行的分工见 [工具技术参考](tooling-internals.md#qemu-arguments)。
 
 ## 产物账本（`a20 ledger`）
 
@@ -467,7 +473,7 @@ QEMU 确实接受 `hostfwd=tcp::0-...` 并正常启动，但它**不会在任何
 
 ### 端口也是一项会被等待的资源
 
-声明的端口在启动前会被实际 bind 一次探测（不是读 `/proc`，因为 QEMU 自己也不设 `SO_REUSEADDR`，只有真的 bind 才知道能不能成）。端口被占用时，行为与内存/CPU 一致：**等待到释放**，而不是失败。`--no-wait` 仍然可以立即失败。
+声明的端口在启动前检查是否可用。端口被占用时，默认等待释放；`--no-wait` 使检查立即失败，`--wait-timeout` 限制等待时长。端口探测机制见 [工具技术参考](tooling-internals.md#host-ports)。
 
 ```bash
 tools/a20 ports                    # 谁占了哪些端口、现在空不空、跨实例是否冲突
@@ -533,7 +539,7 @@ a20: waiting to run qemu-riscv64 -- host resources are short
 
 ## 冒烟测试实例
 
-带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 的流程：构建（bringup → `kernel-only`，否则 `dev-build`）→ 用 `make _qemu_argv` 拿到该实例的精确 QEMU 命令行（该目标无前置依赖，只打印不构建，所以这里不能加 `-n`：加了会打印出 printf 本身而不是它输出的命令行）（单一事实来源，不复制 Makefile 逻辑）→ 启动（`machine.extra_qemu` 已并入 `EXTRA_QEMU` 参与该命令行的生成），等待 `input_delay` 秒后经串口注入 `commands` → 在 `timeout` 内等待退出或超时杀掉。
+带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 先构建并启动该实例，等待 `input_delay` 秒后经串口注入 `commands`，在 `timeout` 内等待退出或终止超时会话。`bringup = true` 只构建内核，其他实例构建开发镜像；额外的 QEMU 参数由 `machine.extra_qemu` 声明。参数生成契约见 [工具技术参考](tooling-internals.md#qemu-arguments)。
 
 判定规则与旧的手写冒烟一致：**日志中 `expect` 的全部子串都出现即 PASS**（超时杀掉但日志已齐也算 PASS）；否则 FAIL 并打印日志末尾 80 行。日志保存在 `.kernel-build/smoke/<实例名>.log`。
 
@@ -659,7 +665,7 @@ world_size_mb = 4096
 
 `tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从 Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false` 可做纯本地仓库组合。x86_64 变体 `xfce-x86_64` 使用同一个 `xfce` world（Wayland/labwc），并在带 `/dev/kvm` 的宿主机上自动启用 KVM 加速。注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted 架构。
 
-`run` 本身就做全量构建（内核、软件包、world 镜像），所以**不需要**先跑 `tools/a20 build`；`build` 只是"只构建不启动"的快捷方式。world 镜像是无日志 ext4，而 QEMU 结束时是被直接杀掉的，所以下一次看镜像永远是"脏"的——这是预期状态，不是上一轮的遗产：`mkrootfs.py` 每轮都会从 `packages/world/xfce.world` 重新铺满整块盘（实测 522 个 apk 全部 Installing），前一轮写进去的数据不会带进下一轮。也正因如此，`a20 run` 对 world 实例**跳过启动前的 fsck**（`_gate_qemu(..., check_image=inst.rootfs.world is None)`）：既查不出真问题，失败信息又会让人误以为得先 `build`。
+`run` 会完成内核、软件包和 world 镜像构建，无需预先执行 `tools/a20 build`。每次运行都会重新生成 world 镜像，前一轮写入的数据不会保留。world 镜像为无日志 ext4，QEMU 被终止后呈脏状态属于预期；此类实例不做启动前 fsck。维护镜像接线时见 [工具技术参考](tooling-internals.md#world-images)。
 
 纯命令行（无 `[gui]`）的同类实例见 `instances/cli-<arch>.toml`：world 为 `cli`（Alpine 上游 zsh + GNU coreutils/findutils/grep/sed/gawk + git/vim/tmux/htop/curl/python3），overlay 的 stage-2 init 直接把串口交给 zsh，是 QEMU 上的日常命令行环境。注意 `server` world 并不是同一回事——它是刻意的"最小服务器形态"（busybox ash + dropbear + chrony），不以交互体验为目标。
 

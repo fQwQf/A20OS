@@ -14,11 +14,21 @@
 - 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[dev/build.md](dev/build.md)、[dev/instances.md](dev/instances.md)、[kernel/process-scheduler.md](kernel/process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - 目录分工：根目录只放入口文档（本页、贡献指南、架构总览、测试门禁与致谢/许可声明）；`dev/` 放构建、运行、调试与外部依赖；`kernel/` 放核心内核参考（调度、内存管理、Linux ABI 细节、架构特性）；其余按子系统分目录（`drivers/`、`fs/`、`net/`、`graphics/`、`native-abi/`、`cluster/`、`hypervisor/`、`platforms/` 等）。
 - 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- 状态与进度文档：`status/` 是进度、已知问题、模块状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/gaps/` 是**唯一的待办与缺口台账**（完成一项删一项，清空即表示承诺范围完成），`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
+- 状态与进度文档：`status/` 是进度、已知问题、模块状态与测量协议的唯一存放处；`status/current/` 描述当前状态，`status/gaps/` 是**唯一的待办与缺口台账**（完成一项删一项，清空即表示承诺范围完成），`status/history/` 保留已被取代的结论性叙述，`status/measurements/` 放测量基线与协议。文档与门禁工具的当前行为及复验入口见 [docs-gates.md](status/current/docs-gates.md)。状态文档不定义接口契约，也不记录 commit SHA 或逐次运行结果。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
 - 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
 - 冲突时的顺序：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与当前提交匹配的运行日志，最后才是叙述性文档。
+
+## 按读者选择参考页
+
+用户操作路径只承载用途、前提、命令、可观察结果与失败语义。锁序、引用/所有权、
+内部状态与回滚机制属于技术参考页或源码注释；操作页用链接引导需要实现细节的读者。
+驱动开发教程中的寄存器与 DMA 契约、调试命令需要的参数布局属于其读者完成操作的前提。
+
+- 运行系统：从 [构建](dev/build.md)、[实例](dev/instances.md)、[打包快速开始](packaging/quickstart.md)、[翻译器使用](exec-xlator/01-usage.md)、[虚拟机使用](hypervisor/03-usage.md)、[集群运维](cluster/10-operator-guide.md) 进入。
+- 理解实现：阅读各子系统的技术契约；例如 [调度](kernel/process-scheduler.md)、[网络锁](net/network-lock-contract.md)、[翻译器内部](exec-xlator/03-internals.md)、[驱动运行时](drivers/guide/runtime-contracts.md)。
+- 检查文档：`make check-doc-drift` 检查源码路径、候选内容与行号范围；`mkdocs build` 构建文档站并严格检查内部链接和锚点；`make docs` 生成参考手册 PDF。依赖与聚合门禁的边界见 [文档门禁现状](status/current/docs-gates.md)。
 
 ## 文档时效性约定
 

@@ -36,7 +36,7 @@ gdb-multiarch .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf
 
 ## 串口日志与 panic 输出
 
-A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中，会把消息打印到串口后尝试关机。
+A20OS 使用 UART 输出启动日志；panic 会把消息打印到串口后尝试关机。
 
 日志来源：
 
@@ -99,36 +99,32 @@ git submodule update --init --recursive
 - QEMU 的 `-s` 监听所有网络接口，不要在不可信网络中使用。
 - 崩溃时先保存 `.kernel-build/smoke/` 或终端日志，再重新编译，避免覆盖现场。
 
-## 内核调试接口（proc_debug_*）
+## 用户态进程调试
 
-`kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
-
-Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。Native ABI 的调试对象也映射到同一接口面，见下文。
-
-停止语义（对应 task 状态机）：
-- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`，`proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
-- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
-- `PTRACE_CONT` 带信号恢复时通过一次性 `ptrace_deliver_sig` 标记避免二次停止。
+Linux ABI 的 `ptrace(2)` 可用于附加、停止/恢复、读写寄存器与地址空间、观察 exec/exit
+事件及 syscall 边界。观察者可用不带 `WUNTRACED` 的 `wait4` 接收被调试任务的停止通知。
+支持的请求与边界如下：
 
 已实现（Linux ABI）：TRACEME/ATTACH/SEIZE/INTERRUPT/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、 GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、 PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS (TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
 
 未实现：TRACEFORK/CLONE 事件、SECCOMP、riscv64 单步（与 Linux 一致，gdb 回退断点步进）。
 
-## kallsyms 符号化回溯
+内核调试接口、寄存器快照与 syscall 恢复机制见 [内核调试技术参考](../kernel/debugging-internals.md#debug-state)。
 
-内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`，`tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），两遍的 `.text` 地址一致，表项精确。
+## 符号化回溯
 
-`kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c` 的 weak 定义保证内核仍可链接，回溯退化为裸地址。
+内核 oops 回溯可显示 `name+0xN`。若只有裸地址，可结合本次构建的 `kernel.elf` 在 GDB
+中定位；符号表生成与降级条件见 [符号化技术参考](../kernel/debugging-internals.md#symbolization)。
 
 ## Native ABI 调试接口（Debug 0x0900）
 
-Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机，syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在 `user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
+Native ABI 的调试操作使用 `A20_OBJ_DEBUG` 会话 handle；用户态 SDK 入口是 `user/liba20rt/a20_debug.h`，API 与权限见 [安全模型](../native-abi/06-security.md)。使用时注意：
 
 - 会话是 handle（可收窄权限、随进程消亡自动释放），不是 pid；
 - `debug_wait` 同时报告停止事件与**退出事件**（目标变 zombie 时报告 EXIT 事件，消息为退出码），无需 TRACEEXIT 选项；
-- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式与内核 `PT_DEBUG_RESUME_*` 对应；
+- 无信号注入（native 无信号概念）；`debug_resume` 支持 CONT/SYSCALL 模式；
 - `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
-- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
+- 进程级 SIGSTOP 会停住整个进程，因此调试器应 attach 独立进程。
 
 权限（[Native ABI 安全模型](../native-abi/06-security.md) §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
 
@@ -136,6 +132,6 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 
 ## UBSan（未定义行为检测）
 
-开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。`BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和发布构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
+开发构建（`BRINGUP=0`）默认启用 `-fsanitize=undefined`（排除 `alignment,bounds-strict`）。检测到移位越界、有符号溢出等问题时，会输出 `UBSAN: <kind> at file:line` 并继续运行。`BRINGUP=1` 默认关闭；可用 `CONFIG_UBSAN=0` 显式关闭其他构建中的检测。
 
-启动时 `ubsan_selftest()` 输出两行 `UBSAN_SELFTEST: start / PASS`，是**预期的自检**（故意触发一次 handler 验证报告链路，报告文本在自检期间被抑制），不是真实错误；只有当日志出现 `UBSAN: <kind> at ...` 才是真正的未定义行为告警。
+启动时的 `UBSAN_SELFTEST: start / PASS` 是预期自检，不是真实错误；`UBSAN: <kind> at ...` 才是未定义行为告警。实现与自检接线见 [内核调试技术参考](../kernel/debugging-internals.md#ubsan-runtime)。

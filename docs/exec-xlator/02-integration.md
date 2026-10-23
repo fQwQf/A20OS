@@ -123,7 +123,7 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 
 - 加一个**翻译器** = 一次启动配置改动，零代码（本文第 3 节）。
 - 加一个 **guest 架构** = 两处编辑，外加过一道门禁。
-- 加一个 **guest ABI**（同一架构的第二种 ABI，例如将来的 native-ABI 翻译器）= `.def` 加一行，外加门禁的一条新断言。CC 表那条「两处编辑」对它不直接适用，理由与处理方式见 [04-extending.md](04-extending.md#第-3-步tools-targets-xlator-mk-加交叉编译器)。
+- 加一个 **guest ABI**（同一架构的第二种 ABI，例如将来的 native-ABI 翻译器）= `.def` 加一行，外加门禁的一条新断言。CC 表那条「两处编辑」对它不直接适用，理由与处理方式见 [04-extending.md](04-extending.md#第-3-步toolstargets-xlatormk-加交叉编译器)。
 
 两处编辑：
 

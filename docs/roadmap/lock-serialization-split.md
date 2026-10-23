@@ -279,7 +279,7 @@ INV-P2 / tasklist）归类，**不按是否出现在热路径归类**。
 `net_socket_table_walk`（`socket_table.c:41-58`）今天在一把 `g_net_lock` 下扫完
 `NET_MAX_SOCKETS` 并回调 procfs，**而该文件 :15-23 的不变量恰恰是**
 "`closed` 与注销在同一临界区，所以快照看不到半释放的 socket"。
-分桶后如果什么都不定，就会诱导实现去同时持 128 把桶锁 —— `kernel/fs/vfs/dcache.c:355-370`
+分桶后如果什么都不定，就会诱导实现去同时持 128 把桶锁 —— `kernel/fs/vfs/dcache.c` 的 `vfs_dcache_invalidate_all`
 明确记录这条路会 livelock（"every VFS_DCACHE_BUCKET_LOCKS lock was held, with
 interrupts disabled … an interrupt that reached any lookup spun on a lock its own
 interrupted context was holding"），并且 dcache 的解法是**一次一把**。
@@ -287,7 +287,7 @@ interrupted context was holding"），并且 dcache 的解法是**一次一把**
 因此规定：
 
 1. **禁止**同时持多把桶锁遍历。遍历改为**逐桶**：`for (b = 0..NBUCKETS) { 取 bucket[b];
-   扫 512 个 slot; 释放 }`，与 `vfs_dcache_invalidate_all`（`dcache.c:357-375`）
+   扫 512 个 slot; 释放 }`，与 `vfs_dcache_invalidate_all`（`kernel/fs/vfs/dcache.c`）
    的形态一致。
 2. **每个 slot 在桶锁下取 `proc_get()` 引用**，然后释放桶锁再执行
    `fn(s, arg)`，回调结束后 `proc_put()`。这样 socket 的存储与内核栈在回调期间存活，
@@ -564,7 +564,7 @@ make smoke-smp-lock-contention
 | 9 | 噪声纪律量纲不同 | §5.2 噪声纪律重写：当场带宽 + 同二进制同场次复测对照 |
 | 10 | 负载名与"先建 bench"过期 | §5.2：命令名 `net_stress_test`（附 `targets-smoke.mk:470` 与 `smoke_cases.py` 无命中的证据）、bench 产物已存在（附 `ls` 与 `Makefile:1335` 证据） |
 | 11 | net 普查数字把引用当取锁 | §2.1：235 文本引用 / 54 取锁点，并说明 §0「一轮只动一个数据面结构」按 54 重述 |
-| 12 | 全表遍历无方案 | §2.2.4：逐桶遍历 + `proc_get` 引用 + 不变量改写为逐桶一致，引 `dcache.c:355-370` |
+| 12 | 全表遍历无方案 | §2.2.4：逐桶遍历 + `proc_get` 引用 + 不变量改写为逐桶一致，引 `kernel/fs/vfs/dcache.c` 的 `vfs_dcache_invalidate_all` |
 | 13 | "天然闭合"前提未言明 | §1.3「窗口 W1」：记为**修正**，并解释现注释与代码矛盾 |
 | 14 | 第二个 late-wake 窗口 | §1.3「窗口 W2」：fall-to-idle 前再取 `cur->park_lock`；`context_switch(idle)` 取 `idle->park_lock` |
 | 15 | E 类映射 tasklist_lock 会 livelock / 失去 state 同步 | §1.3 E1/E2/E3 拆分：E3 快照后打印（引 `uart.c:111-116`）、E2 逐任务 park_lock |

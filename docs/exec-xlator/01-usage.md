@@ -8,9 +8,9 @@
 
 > 这个文件是一个**格式合法的**外来架构 ELF，它的 ABI 是哪一种，以及我为这个（架构, ABI）配过翻译器吗？
 
-三个都是，才把这次 exec 改写成「执行那个翻译器，把这个外来镜像和它的参数交给它」。改写走的是 exec 自己的重试循环，所以对内核其余部分而言，这就是一次普通的 exec。
+三个都是，才把这次 exec 改写成「执行那个翻译器，把这个外来镜像和它的参数交给它」。成功后调用者成为翻译器进程，保持普通 `execve` 的替换语义。
 
-**为什么要问 ABI。** A20OS 有两种 ABI（Linux ABI 与 A20 native ABI），两种都是本机机器的 ELF64，唯一的区别是有没有 `PT_A20_START_INFO` 这个 program header。所以「架构」不足以说明「谁跑得了它」：qemu-user 只有 Linux ABI，遇到 native-ABI 镜像会失败。今天没有任何 native-ABI 翻译器，因此 native-ABI 镜像一律 `ENOEXEC`——见第 9 节。
+**配置必须匹配 ABI。** 同一架构的镜像也可能使用 Linux ABI 或 A20 native ABI。qemu-user 只接受 Linux ABI；当前没有 native-ABI 翻译器，因此外来 native-ABI 镜像返回 `ENOEXEC`——见第 9 节。ELF 判定机制见 [内部参考](03-internals.md)。
 
 结果：调用方的地址空间被翻译器接管，guest 在翻译器**自己的**地址空间里被翻译执行。
 
@@ -30,7 +30,7 @@
 
 | 层 | 开关 | 默认 | 关掉之后 |
 |---|---|---|---|
-| 编译期 | `CONFIG_XLATOR` | `y`（编进来） | 整块不参与构建：`kernel/proc/xlator.c` 不编译、`task_t` 不带该字段、`exec.c` 无此分支、符号表里搜不到 `xlator_*` |
+| 编译期 | `CONFIG_XLATOR` | `y`（编进来） | 不提供外来架构翻译；`/proc/a20/xlator` 不存在 |
 | 启动时 | `a20.xlator=1` | 关 | `execve` 外来二进制返回 `ENOEXEC` |
 | 运行期 | `/proc/a20/xlator` | 跟随启动键 | 下一次 `execve` 不再转发；已在跑的翻译器继续跑完 |
 
@@ -43,7 +43,7 @@
 | 条件 | 原因 |
 |---|---|
 | `NOMMU=1` | 没有 MMU 可以按需调入 guest 内存 |
-| `PROFILE=mcu` | 该 profile 本来就替换整个源文件列表 |
+| `PROFILE=mcu` | MCU 档不提供外来架构翻译 |
 | `ARCH` 不在 `riscv64 loongarch64 aarch64 x86_64 ppc64le` 里 | 翻译器要 JIT guest 代码，需要 64 位 MMU 宿主和 `mprotect(RWX)`；32 位或 NOMMU 宿主做不到 |
 
 验证裁剪真的生效（不依赖 QEMU）：
@@ -317,22 +317,33 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 | `Exec format error`，日志干净 | `cat /proc/a20/xlator` | 该 guest 行显示 `path=(none)` 或 `argv="(unset)"` |
 | `/proc/a20/xlator` 不存在 | 构建配置 | 这是一个 `CONFIG_XLATOR=0` 的内核 |
 | 转发成功但 guest 行为不对 | shim 打出的 `argv[i]=` | 模板形状与翻译器不匹配，见第 4 节 |
-| 翻译器起来了但 guest 在 syscall 面上崩 | guest 自己的输出 | 与本特性无关：guest 需要的 syscall 覆盖见 `kernel/abi/linux/syscall_coverage.md` |
+| 翻译器起来了但 guest 在 syscall 面上崩 | guest 自己的输出 | 核对 guest 需要的 Linux ABI syscall 是否受支持 |
 | 翻译器报 JIT 相关的 `mprotect` 失败 | `W^X 策略` 日志行 | 见下一节 |
 
-失败时的日志落点：`.kernel-build/smoke/exec-xlator-riscv64.log`（`smoke-exec-xlator`）与 `.kernel-build/smoke/exec-xlator-shim-riscv64.log`（shim 用例）。
+guest 需要的 syscall 覆盖见 `kernel/abi/linux/syscall_coverage.md`。失败时分别查看：
 
-### W^X：per-task 放行，不是全局关策略
+- `.kernel-build/smoke/exec-xlator-riscv64.log`：翻译器门禁日志。
+- `.kernel-build/smoke/exec-xlator-shim-riscv64.log`：shim 用例日志。
 
-翻译器必须把 guest 代码 JIT 进 RWX 缓冲区，A20OS 的用户态 W^X 门（`kernel/mm/wx.c`）会拦下它。
+### W^X 配置与验证
 
-**这棵树的用户态 W^X 默认策略是 `off`**，由 `a20.wx=deny|strip|off` 决定（`kernel/mm/wx.c` 里的默认值是刻意的：V8 之类会把代码页 mprotect 成 W|X 再写，严格策略不会让内核更难破，只会让它起不来）。
+`a20.wx=deny|strip|off` 选择用户态 W^X 策略，默认是 `off`。`deny` 拒绝普通进程的
+可写且可执行映射，`strip` 去掉可写权限，`off` 不限制这类映射。配置的翻译器宿主获得
+按进程的放行，能申请 JIT 所需的映射；其他进程仍受所选策略约束。
 
-本实现**没有**让这条路径靠 `a20.wx=off` 放行——那等于为一个功能关掉全系统的策略。做法是 `task_t.xlator_host`：仅由内核在 re-exec 路径上设置，`mm_wx_filter_prot()` 见此位即放行。所以如果你看到 `W^X 策略: off`，说明有人用全局开关换取了翻译器能跑，这不是本实现认可的配置。
+验证放行时，在启动命令行显式加入 `a20.wx=deny`，并检查两类日志：
 
-要在自己的板子上验证这条放行路径确实有效，命令行要**显式**加上 `a20.wx=deny`：`smoke-exec-xlator` 与 `smoke-exec-xlator-la64` 都这么做，并且禁止 `W^X 策略: off` 出现在日志里。默认策略是 off 的时候放行路径照样会触发（豁免是按任务判的，与策略无关），但那时它什么也没证明——没有东西被拒绝过。
+- `W^X 策略: deny`：确认本次运行启用了限制；若显示 `off`，本次运行不能证明按进程放行。
+- `翻译器宿主，放行 W|X`：确认翻译器申请的映射获准；若翻译器仍报告 `mprotect` 失败，结合该进程的日志继续排查。
 
-放行路径会打 `kinfo` 日志，代价是高 QPS 下日志偏吵；它是「这个进程不受 W^X 保护」的唯一可见痕迹，所以不要删。若日后需要降噪，应改为可配置级别。
+既有门禁使用上述配置，并拒绝日志中的 `W^X 策略: off`：
+
+```bash
+make smoke-exec-xlator
+make smoke-exec-xlator-la64
+```
+
+字段设置、生命周期和放行范围的设计理由见 [W^X 内部契约](03-internals.md#wx-internals)。
 
 ## 9. 已知边界
 
@@ -340,7 +351,7 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 
 - **启动时不校验翻译器文件存在**，理由见第 3 节。
 - **路径只在启动时解析**，运行期不能改。
-- **W^X 放行是过度近似。** 内核给「被转发到的那个程序」开豁免，因为无从知道管理员指向的翻译器到底会不会 JIT——按需要 JIT 假设是唯一安全的方向，代价是一个**不** JIT 的翻译器也拿到了放行。要收紧就得在配置里加一条「这个翻译器需要 W^X 放行」的性质，而那等于让一个命令行字符串参与权限决定。
+- **配置的翻译器都会获得 W^X 放行，包括不使用 JIT 的翻译器。** 放行范围和设计理由见 [内部契约](03-internals.md#wx-internals)。
 - **固定模板参数与 env 条目不能含空格或逗号**，见第 4、5 节。
 - **只服务 Linux ABI 的 guest。** 通道的键是 `(e_machine, abi)`，而注册表里只有 `abi=linux` 的行——因为 qemu-user 只有 Linux ABI。所以一个带 `PT_A20_START_INFO` 的外来架构镜像（native-ABI）会得到 `ENOEXEC`，而不是被送进一个装不下它的翻译器。要加 native-ABI 的翻译器是**加一行注册表**，但它本身还不存在；见 [04-extending.md](04-extending.md#3-加一个-native-abi-翻译器需要改什么)。
 - **动态链接 guest、32 位 guest、翻译器的崩溃隔离与资源计量**，均未实现。通道目前只承载「一个外来静态 Linux-ABI 可执行文件跑完并返回退出码」这一件事。

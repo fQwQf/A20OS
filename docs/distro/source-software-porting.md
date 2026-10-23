@@ -15,7 +15,7 @@ A20OS 的板上镜像有两个用户态文件系统：
 
 **先问一句：Alpine 上游有没有这个包？** 大多数"要移植的软件"其实已经有
 apk 包，写进 world 清单就能用。只有上游没有包、或包不满足需求时才需要自己
-构建，而自己构建的路径现在只剩两条（见 [4. 接入方式](#选择接入方式)）：
+构建，而自己构建的路径现在只剩两条（见 [4. 接入方式](#software-integration)）：
 新增一个 `user/cmds/` 程序，或 fastfetch 这类必须进 FAT32 根的组件。
 
 ## 2. 评估上游源码和目标约束
@@ -62,7 +62,7 @@ git submodule status --recursive
 git -C user/external/apps/example rev-parse HEAD
 ```
 
-## 4. 选择接入方式
+## 4. 选择接入方式 {#software-integration}
 
 ### 4.1 基础命令：放入 `user/Makefile`
 
