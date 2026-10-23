@@ -31,7 +31,7 @@ hypvm managed 模式提供独立输入输出队列和可恢复 RUN。a20-vmd 用
 | 无 H 扩展 | selftest 明确 SKIP；hypvm 返回 errno=95、退出码 4，宿主仍可交互 |
 | 单次双 guest 生命周期 | 两台 shell 执行不同命令、无串线、重连、暂停隔离、正常关机和 destroy 全部通过 |
 | 实际 PTY console 前端 | 输入拼接 echo 得到 FRONTEND_WORKS，Ctrl-] 断开通过 |
-| 同宿主重复双 guest | **不稳定**：本轮最终树上 5 轮中 3 轮通过；失败轮的管理请求在 3 秒 RPC 内无响应，属于宿主唤醒延迟（[RUNTIME-06](../gaps/runtime.md)），不是 VM 计数泄漏 |
+| 同宿主重复双 guest | **不稳定**：本轮最终树上 8 轮中 5 轮通过；失败轮的管理请求在 3 秒 RPC 内无响应，属于宿主唤醒延迟（[RUNTIME-06](../gaps/runtime.md)），不是 VM 计数泄漏 |
 | 暂停恢复后正常退出 | **不稳定**：有通过记录，也复现收到 exit 后未结束 |
 | 两台双 vCPU guest | **未通过验收**：可到 2/2 CPU online 并打印 banner，随后 guest trap frame 的 `sstatus` 被栈指针污染，根因未定位 |
 
