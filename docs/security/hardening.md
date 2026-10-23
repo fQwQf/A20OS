@@ -1,7 +1,9 @@
 # A20OS 安全加固状态
 
-最后核实：2026-09（当前工作树）。验证记录均为历史记录，引用为当前
-结论前须在当期提交上重新运行。
+安全候选核实：2026-10-23。逐项当前结果见 [SECURITY 现状](../status/current/security-status.md)，
+接口与可复制命令见 [候选验收](release-acceptance.md)。该候选中 Landlock fork/symlink 与
+WX deny 下的信号返回验收失败，不能宣称安全门禁全绿。下面未列入本轮验收表的其他模块
+验证记录不作为本次候选的通过依据。
 
 ## 诚实性原则（fail-closed）
 
@@ -45,11 +47,11 @@
 |---|---|---|
 | 用户指针校验 | `kernel/mm/mm.c` 的 `copy_from_user`/`copy_to_user` 统一入口：范围检查（`user_range_ok`，防回绕）+ 逐页 PTE_V/PTE_U/可写校验 + COW 折断；无 KERNEL_DS/set_fs 模式 | 全部 syscall 路径强制经过 |
 | 监督模式访问防护 | x86_64 `x86_64_enable_smep_smap()`（CPUID leaf 7 门控 CR4.SMEP/SMAP，`trap_init` 每 CPU 调用）；aarch64 `aarch64_enable_pan()`（ID_AA64MMFR1_EL1.PAN 门控 SCTLR_EL1.PAN）；riscv64 用户 trap 入口显式 `csrc` 清除 SUM 位（保持 SUM=0，不只是"从未置位"）。内核不直接解引用用户 VA。Linux ABI 与 Native ABI 的用户指针访问统一经 `copy_from/to_user` 的直映射拷贝辅助（Native net 的 bind/connect/accept/getname 原先把裸用户指针交给核心层解引用，已改为内核缓冲暂存 + copy 进出），故无需 stac/clac 窗口 | `smoke-x86_64`/`smoke-aarch64`（默认 CPU 空操作路径）；`-cpu max` 完整引导到 mksh 无 fault（防护实际生效路径）；`smoke-riscv64`/`smoke-abi-linux` 验证 riscv64 无隐藏直接解引用 |
-| 用户态 W^X | `kernel/mm/wx.c` 单一策略 `mm_wx_filter_prot()`，mmap/mprotect/ELF 装载全路径过滤；默认 deny（-EACCES），cmdline `a20.wx=strip|off` 可降级 | `user/cmds/stress/wx_aslr_test.c`（RWX 拒绝）；全量 195 个静态 musl 二进制扫描零 RWX PT_LOAD |
+| 用户态 W^X | `kernel/mm/wx.c` 单一策略 `mm_wx_filter_prot()`，mmap/mprotect/ELF 装载全路径过滤；默认 off；cmdline `a20.wx=deny` 拒绝 RWX（-EACCES），`strip` 剥离写权限 | `wx_aslr_test` workload 在 deny 下 PASS；普通 shell 的信号返回仍使 `smoke-wx-aslr` 总用例 FAIL，见当前验收表 |
 | 内核自身 W^X（KXAN） | `kernel/arch/{riscv64,x86_64,aarch64}/mm/kwx.c`：`arch_kernel_wx_finalize()` 在 `mm_init()` 后把引导大页旁路重建为 text=ROX/rodata=RO/data=RW+NX、直映射 NX；drvmod 模块 text=RX（`arch_kwx_module_protect`）；aarch64 置回 SCTLR_EL1.WXN | 启动自检（`mm_query_leaf` 四点断言，失败 panic）+ `[KXAN]` 日志行；smoke-riscv64/abi-linux/x86_64/aarch64 + smoke-smp-bringup（2 核）全 PASS。边界见 `docs/security/kernel-wx.md` |
 | ASLR | `kernel/mm/aslr.c`：栈顶向下页对齐偏移（64 位 10 位熵，受 vdso_layout 约束）、mmap 基址 per-process 随机（64 位 20 位熵）、brk 起始随机偏移；PIE 基址原有 11 位熵。fork 继承布局（Linux 语义） | `wx_aslr_test`：两次 exec 栈/mmap 地址不同；`cat /proc/self/maps` 两次运行 `[stack]` 区间不同 |
 | 内核栈 canary | `kernel/core/stack_protector.c`：`__stack_chk_guard`（熵池就绪后随机化）+ `__stack_chk_fail`；`-fstack-protector-strong` 默认开（`CONFIG_STACK_PROTECTOR`） | 全架构零警告构建；smoke 无 stack smashing |
-| seccomp | `kernel/ipc/seccomp.c`：cBPF verifier + STRICT/FILTER 模式 + fork 继承，挂在 syscall 主路径。树内无任何服务安装 filter，机制可用但默认未施加 | `smoke-syscall-ext` |
+| seccomp | `kernel/ipc/seccomp.c`：cBPF verifier + STRICT/FILTER 模式 + fork 继承，挂在 syscall 主路径。默认不施加；测试进程主动安装 | 当前基本 ERRNO/允许与 fork 控制通过，SIGSYS/TRAP 在 WX deny 下 FAIL；不声明完整 sandbox 通过 |
 | capabilities | 16 个 caps 子集（`kernel/include/proc/proc.h`），capset EPERM 矩阵在 `kernel/proc/cred.c`。缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG | syscall 覆盖表 |
 | `/proc/<pid>/pagemap` 访问门 | 逐条 PFN 记录曾对任意 uid 可读（`procfs_fread` 中唯一漏掉 `proc_task_may_access` 的 per-pid 读取器），可击穿用户态 ASLR 并暴露内核直映射布局 | 已加归属检查，跨 uid 读返回 `-EACCES` |
 | 权限门：reboot/poweroff | `sys_reboot` 的每个出口都会终止机器，而 magic 是公开 ABI 常量而非密钥 | 要求 `CAP_SYS_BOOT` 或 `euid==0`，与 `sys_missing.c` 的 kexec 入口同一约定 |

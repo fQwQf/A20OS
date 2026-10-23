@@ -49,6 +49,7 @@
 - `seccomp` 是经典 BPF 引擎（校验器+解释器，`kernel/ipc/seccomp.c`）：STRICT 白名单、fork 继承的过滤器链、分发入口 KILL/TRAP(SIGSYS+SYS_SECCOMP)/ERRNO/LOG 动作；TSYNC/LOG flags 与 USER_NOTIF 在安装期拒绝。`kexec_load/file_load` 完成段装载与内核重叠校验，reboot(KEXEC) 在无 machine_kexec 后端时按已装载/-EINVAL 报告。`quotactl(_fd)` 由配额核心支撑（Q_QUOTAON/OFF、GETFMT、GETINFO/SETINFO、GET/SETQUOTA、GETNEXTQUOTA、Q_SYNC），VFS 写增长/ftruncate/O_CREAT/mkdir/symlink/unlink 挂钩强制 EDQUOT。
 - `renameat` 已补注册（编号 38，glibc 直接调用）：实现为 `renameat2` 的 flags=0 包装。`sched_setattr`/`sched_getattr` 改为完整 `struct sched_attr` 线格式：校验 policy/flags/nice/priority 并经 `proc_sched_set` 落调度器，支持 `SCHED_FLAG_RESET_ON_FORK`；不应用 util-clamp/deadline 字段。
 - `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
+- Landlock 仅接受 `READ_FILE`/`WRITE_FILE` handled 位；其余执行、目录修改与 ioctl 位返回 `EOPNOTSUPP`。create 校验 flags、至少 8 字节且不超过一页的 size、非零 handled，以及扩展区全零；非零扩展返回 `E2BIG`，不创建更弱的 ruleset。ABI 版本查询未实现。当前隔离验收结论见 [安全现状](../../../docs/status/current/security-status.md)。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。
 - `statmount`/`listmount`/`listns`/`open_tree_attr` 提供 mount 表自省，`setxattrat` 系列提供 dirfd 相对 xattr。
 - RISC-V 专用：`riscv_hwprobe` 报告 IMA 基础行为；`riscv_flush_icache` 刷新范围 icache；`rt_tgsigqueueinfo` 按 tid 投递。
