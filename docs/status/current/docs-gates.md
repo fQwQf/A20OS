@@ -43,7 +43,8 @@ make docs
 
 `make docs` 调用 `tools/gen_docs_pdf.sh`，需要 pandoc、XeLaTeX、rsvg-convert、fontconfig、
 DejaVu 与 Noto CJK 字体；缺少依赖会列出安装命令并退出。生成的参考手册 PDF 不入库。
-Pandoc 的警告直接使构建失败。
+Pandoc 的警告直接使构建失败。数字开头的中文标题在 MkDocs 与 Pandoc 间使用共同的显式锚点，
+以保持网页和合并 PDF 的内部跳转一致。
 
 ## 验收边界
 

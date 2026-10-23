@@ -467,7 +467,7 @@ PASS 那行现在是**有像素证据**的：两遍颜色都由 host 渲染出�
 
 但**这仍然是手写命令流的证据，不是 Mesa 的**。`gpu3d_test` 自己发
 `DRM_IOCTL_VIRTGPU_*`，所以它不经过 DRI 驱动；stock Mesa 能否用上这条通路是另一个
-命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#80-本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
+命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#sysfs-rendering)）。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 
@@ -686,7 +686,7 @@ libEGL warning: egl: failed to create dri2 screen
   别把已经能用的桌面弄坏。而且这只是 GL 链的第一环，后面还有 kms_swrast 建 screen、EGL、真 dma-buf PRIME、
   MODE_GETFB2、以及放开 `WLR_RENDERER`。
 
-### 8.0 本轮：sysfs 那条路走了一半是死路，`llvmpipe` 回退正在承重
+### 8.0 本轮：sysfs 那条路走了一半是死路，`llvmpipe` 回退正在承重 {#sysfs-rendering}
 
 本轮把 §8 上面那条猜测（"补一个 sysfs 入口就能让 Mesa attach"）实际做了一遍，**结论是它
 单独做会把已经能用的桌面弄坏**，所以已回退。记在这里是因为失败方式比结论更值得留档。
