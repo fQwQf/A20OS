@@ -1,6 +1,6 @@
 # 桌面电源菜单、凭据与稳定性验收（2026-10-23）
 
-本轮关闭 DESKTOP-01、02、03、04、08、09、10、11、12、13，并在 AArch64 SMP4 上复跑
+本轮关闭 DESKTOP-01、02、03、04、05、08、09、10、11、12、13，并在 AArch64 SMP4 上复跑
 共享调度/内存负载。平台：x86_64/QEMU KVM，4 vCPU、4 GiB，1024×768 virtio-gpu
 （pixman）；RISC-V 与 AArch64 为 TCG、4 vCPU。
 
@@ -56,7 +56,10 @@
 | RISC-V 桌面 | TCG 4 vCPU 冷启动；Applications → Terminal 输入 `echo a20-riscv` 与 Backspace 测试；Thunar 打开 `/root`；电源菜单 Shut Down 打印 `[SD] POWER_OFF entry` 后关机 |
 | RISC-V 关机拒绝对照 | 修复前 `mntns_shutdown_begin()` 返回 `-EBUSY`，`[SD] poweroff refused: filesystem shutdown failed (-16)`，QEMU 不退出；加入 RETRY_* 语义的有界重试后同一操作关机 |
 | `smoke-mtcorrupt` | riscv64 `NR_CPUS=4 CONFIG_SLAB_DEBUG=1` 构建通过并 PASS（此前被 `mm.c` 的未初始化告警挡住） |
-| ALSA 边界 | x86_64 桌面：三个 snd 节点裸 open 成功，`snd_pcm_open("hw:0,0")` = `-ENOENT`，`"default"` = `-EPROTO`，`snd_card_load(0)` = 0 |
+| ALSA 修复 | `snd_pcm_open("hw:0,0")`/`"default"` 都成功；OpenAL（`drivers = alsa`）source 进入 PLAYING/STOPPED 且无错误；mpv `--ao=alsa` 播放 440 Hz；QEMU wav 录到 441 Hz、非静音 |
+| Minecraft 音频 | LWJGL OpenAL 在 "ALSA Default" 上初始化，`Sound engine started`；标题音乐被 QEMU wav 录下（33 秒、非静音、主频约 185 Hz） |
+| 全屏 | `xfce4-terminal --fullscreen` 与 Minecraft（XWayland，F11）都覆盖整个 1024×768 输出 |
+| `smoke-audio-userspace` | x86_64 上 PASS（`check_wav_pcm: PASS rate=44100 channels=2 frames=218824`） |
 | 桌面写盘 | 300 文件 + 缩略图 + xfconf + JVM/mpv 写入后正常关机；宿主 `e2fsck -fn` 仍报 orphan 链与位图差异（见下） |
 
 负控：旧的 x86_64 内核上运行新增的 fdinfo 断言得到
@@ -66,9 +69,8 @@
 
 - AArch64 桌面在 SMP4 冷启动并渲染，但该轮键盘没有被 libinput 接管，输入/
   窗口负载仍只在 x86_64 与 riscv64 上验收（DESKTOP-05 的输入项）。
-- 桌面音频仍是有声输出不可用：ALSA 打开路径失败，且内核
-  `SNDRV_PCM_IOCTL_INFO` 的尺寸与 Linux UAPI 不一致（DRIVER-11）；OpenAL 仍选
-  null 后端（DESKTOP-05）。
+- 语音聊天使用的 16 kHz 采集设备未开放（ALSA 层只报告 48 kHz 播放/采集）；
+  Minecraft 记录 `failed to set sample rate near 16000` 后跳过语音。
 - 桌面写负载后正常关机，宿主 `e2fsck -fn` 仍报两个 inode 在 orphan 链上、位图
   差异；根因是 ext4 orphan reap 拒绝 depth-1 extent 树（FS-03），不在本包范围
   （DESKTOP-07）。
