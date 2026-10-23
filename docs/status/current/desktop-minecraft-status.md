@@ -52,7 +52,9 @@ xfce4-session 的 X11 会话：
   浏览 `/root`，最后从电源菜单正常关机（`[SD] POWER_OFF entry`，x86_64 与
   riscv64 各一次）。riscv64 上第一次关机曾因为文件操作在途被
   `mntns_shutdown_begin()` 以 `-EBUSY` 拒绝，`session-power.py` 现在按内核的
-  RETRY_* 契约做有界重试。
+  RETRY_* 契约做有界重试。普通 `poweroff` 没有这层重试：Minecraft 还在
+  播放音乐时，第一次 `vfs_system_shutdown` 也会返回 `-EBUSY`，shell 的
+  `poweroff -f` 因此失败（会话电源菜单会重试并成功）。
 - aarch64（TCG，4 vCPU、`smp = 4`）冷启动到完整桌面，`[SMP] 4/4 configured
   CPUs online`，运行 10 分钟以上无 panic；该轮 eudev 的 input worker 超时被杀，
   libinput 没有接管键盘，所以键盘/按钮输入未能在 AArch64 上验收（相对指针移动
@@ -60,6 +62,20 @@ xfce4-session 的 X11 会话：
 - AArch64 SMP4 的共享状态负载：`sched_stress`、`proc_stress`、`futex_stress`、
   `mm_stress`、`scm_stress` 在 `NR_CPUS=4` 构建以 `-smp 4` 全部 PASS，约
   30 分钟无 KERNEL TRAP/PANIC，调度器违规为 0。
+
+## 输入、全屏与指针边界
+
+- 输入链路：QEMU 的虚拟键盘/鼠标事件进入内核 `input_mux` 的 evdev 流，
+  再由 udev/libinput 交给客户端。实测在终端里输入命令与 Backspace、用菜单启动
+  应用、用鼠标点击面板；串口日志里的 `[INPUT]` 行证明事件走的是内核设备，
+  不是应用层注入。物理板卡不在这些 QEMU 实例的承诺平台内。
+- 全屏：`xfce4-terminal --fullscreen` 覆盖整个输出（含面板）；Minecraft 在
+  XWayland 下按 F11 后窗口填满 1024×768。两者都有截图。
+- 绝对指针：Wayland 不提供“把指针移到指定位置”的协议，GLFW 会打印
+  `Wayland does not support setting mouse position`。这是协议边界，不是
+  A20OS 缺功能；Minecraft 的鼠标转向用相对运动工作。QEMU 的
+  `virtio-tablet` 因缺少 ABS resolution 被 libinput 忽略，不能作为绝对指针
+  验收设备。
 
 ## 音频
 
@@ -75,6 +91,10 @@ xfce4-session 的 X11 会话：
 - `alsoft.conf` 现在选择 `drivers = alsa`（不再是 null/No Output）。实测：OpenAL
   打开设备、source 进入 PLAYING 并结束；mpv `--ao=alsa` 播放 440 Hz 测试音；
   QEMU 的 wav 后端录到 441 Hz、非静音（峰值等于注入幅度，RMS 约 5.5k–8k）。
+- Minecraft 的 LWJGL OpenAL 也在 `ALSA Default` 上初始化并启动 sound engine；
+  标题画面音乐被 QEMU 的 wav 后端录下（33 秒、非静音、主频约 185 Hz）。
+  语音聊天使用的 16 kHz 采集设备仍未开放（驱动只报告 48 kHz），游戏记录
+  `failed to set sample rate near 16000` 后跳过它。
 
 ## JVM 与调试信息
 

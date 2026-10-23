@@ -3,21 +3,6 @@
 对应 V1-DESKTOP。现状见 [current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)；
 仍未关闭问题的诊断见 [notes/](notes/README.md)。
 
-### DESKTOP-05 输入与显示范围
-
-- 现状：键盘移动、背包、鼠标转向与跳跃已实测；全屏与真实硬件输入未系统验收。
-  QEMU 的 `virtio-tablet` 被 libinput 以缺少 resolution 为由忽略，绝对指针不可用。
-  AArch64 TCG 桌面上 eudev 的 input worker 超时被杀，libinput 没有接收键盘，
-  QMP/HMP 注入的按键与按钮都不产生 evdev 事件（相对移动可见）；同一镜像在
-  x86_64 KVM 与 riscv64 TCG 上键盘正常。
-  音频已可验收：ALSA 控制/PCM 的版本、ioctl 编号、CARD_INFO 布局、REFINE 交集
-  与 HW_PARAMS 精确协商修正后，mpv `--ao=alsa` 与 OpenAL（`drivers = alsa`）
-  都能打开设备并播放 440 Hz 测试音；QEMU 的 wav 后端录到 441 Hz、非静音
-  （RMS 5.5k–8k，峰值等于注入幅度）。
-- 缺口：全屏与真实硬件输入未系统验收。
-- 关闭条件：每项在承诺平台上给出真实输入与输出证据；音频有声播放可验收。
-- 来源：[current/desktop-minecraft-status.md](../current/desktop-minecraft-status.md)。
-
 ### DESKTOP-06 Minecraft 性能
 
 - 现状：854×480、4 区块视距下约 8–18 FPS，菜单约 20 FPS。
