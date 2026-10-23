@@ -204,7 +204,9 @@ nav:
       - 构建指南: dev/build.md
       - 测试门禁: testing-gates.md
       - 调试指南: dev/debug.md
+      - 内核调试技术参考: kernel/debugging-internals.md
       - 实例化构建与运行: dev/instances.md
+      - 构建与宿主工具技术参考: dev/tooling-internals.md
       - 外部依赖: dev/external-dependencies.md
   - 打包与发行:
       - 包管理与镜像分发: packaging/README.md
