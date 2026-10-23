@@ -467,7 +467,7 @@ PASS 那行现在是**有像素证据**的：两遍颜色都由 host 渲染出�
 
 但**这仍然是手写命令流的证据，不是 Mesa 的**。`gpu3d_test` 自己发
 `DRM_IOCTL_VIRTGPU_*`，所以它不经过 DRI 驱动；stock Mesa 能否用上这条通路是另一个
-命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
+命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#80-本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 

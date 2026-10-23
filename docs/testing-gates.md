@@ -1339,7 +1339,7 @@ production comparison has been accepted.
   `e2fsck -fn` 是干净的（5 个 pass 全过），说明损坏不是构建期引入、而是之后发生，
   具体来源未定位。
 - rootfs 构建：直接 `apk add` 走官方 CDN 会慢到像卡死；用预置的 `a20rootfs-builder`
-  docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。详见 [`build.md`](../../distro/build.md)。
+  docker 镜像（apk 源已指 USTC），约 2 分钟一个镜像。详见 [`build.md`](distro/build.md)。
 - 改 overlay 必须重建镜像：debugfs 对 8GiB 的 metadata_csum ext4 打不开 rw。
 - QEMU 串口日志在后台跑时的坑：镜像被 QEMU 以 RW 打开，重复启动前要清掉占用进程；
   判断占用者看 `/proc/*/fd`，不要用 `pgrep -f`。

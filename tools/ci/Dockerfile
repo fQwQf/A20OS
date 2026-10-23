@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl git ca-certificates xz-utils file \
         dosfstools e2fsprogs mtools fakeroot sudo openssl \
         qemu-user-static \
-        python3 ccache \
+        python3 ccache ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust 放在 base：每个架构的内核与用户态构建都要它。rust-src 不是可选项——

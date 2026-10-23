@@ -1,0 +1,6 @@
+# Root entry point; the publishing design and navigation live in site/.
+INHERIT: site/mkdocs.yml
+docs_dir: docs
+site_dir: site/_pages/docs
+hooks:
+  - tools/mkdocs_repo_links.py
