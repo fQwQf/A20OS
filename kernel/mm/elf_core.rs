@@ -1407,6 +1407,7 @@ pub struct StackPlan {
     pub sp: u64,
     pub platform_va: u64,
     pub random_va: u64,
+    pub execfn_va: u64,
     pub env_count: u32,
     pub arg_count: u32,
     pub auxv_count: u32,
@@ -1422,6 +1423,7 @@ impl Default for StackPlan {
             sp: 0,
             platform_va: 0,
             random_va: 0,
+            execfn_va: 0,
             env_count: 0,
             arg_count: 0,
             auxv_count: 0,
@@ -1456,6 +1458,7 @@ pub fn build_auxv(
     aux: &AuxvInput,
     platform_va: u64,
     random_va: u64,
+    execfn_va: u64,
     out: &mut [AuxvPair; AUXV_MAX_PAIRS],
 ) -> usize {
     const AT_NULL: u64 = 0;
@@ -1477,35 +1480,40 @@ pub fn build_auxv(
     const AT_RANDOM: u64 = 25;
     const AT_HWCAP2: u64 = 26;
     const AT_SYSINFO_EHDR: u64 = 33;
+    const AT_EXECFN: u64 = 31;
 
-    let pairs: [(u64, u64); 19] = [
-        (AT_PHDR, aux.phdr_va),
-        (AT_PHENT, aux.phentsize),
-        (AT_PHNUM, aux.phnum),
-        (AT_PAGESZ, aux.page_size),
-        (AT_BASE, aux.interp_base),
-        (AT_FLAGS, 0),
-        (AT_ENTRY, aux.exec_entry),
-        (AT_UID, 0),
-        (AT_EUID, 0),
-        (AT_GID, 0),
-        (AT_EGID, 0),
-        (AT_PLATFORM, platform_va),
-        (AT_HWCAP, aux.hwcap),
-        (AT_CLKTCK, aux.clktck),
-        (AT_SECURE, aux.secure),
-        (AT_RANDOM, random_va),
-        (AT_HWCAP2, aux.hwcap2),
-        (AT_SYSINFO_EHDR, aux.vdso_ehdr),
-        (AT_NULL, 0),
-    ];
-    for (i, (k, v)) in pairs.iter().enumerate() {
-        match out.get_mut(i) {
-            Some(slot) => *slot = AuxvPair { key: *k, val: *v },
-            None => break,
+    let mut n = 0usize;
+    let mut push = |key: u64, val: u64| {
+        if let Some(slot) = out.get_mut(n) {
+            *slot = AuxvPair { key, val };
+            n += 1;
         }
+    };
+    push(AT_PHDR, aux.phdr_va);
+    push(AT_PHENT, aux.phentsize);
+    push(AT_PHNUM, aux.phnum);
+    push(AT_PAGESZ, aux.page_size);
+    push(AT_BASE, aux.interp_base);
+    push(AT_FLAGS, 0);
+    push(AT_ENTRY, aux.exec_entry);
+    push(AT_UID, 0);
+    push(AT_EUID, 0);
+    push(AT_GID, 0);
+    push(AT_EGID, 0);
+    push(AT_PLATFORM, platform_va);
+    push(AT_HWCAP, aux.hwcap);
+    push(AT_CLKTCK, aux.clktck);
+    push(AT_SECURE, aux.secure);
+    push(AT_RANDOM, random_va);
+    push(AT_HWCAP2, aux.hwcap2);
+    push(AT_SYSINFO_EHDR, aux.vdso_ehdr);
+    // A buffer-loaded image has no pathname; omit AT_EXECFN rather than
+    // publishing a null string pointer.
+    if execfn_va != 0 {
+        push(AT_EXECFN, execfn_va);
     }
-    pairs.len()
+    push(AT_NULL, 0);
+    n
 }
 
 /// Plan the conventional Linux initial stack. `argv`/`envp` are the string
@@ -1518,6 +1526,7 @@ pub fn plan_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
     platform: &[u8],
+    execfn: &[u8],
     aux: &AuxvInput,
 ) -> Result<StackPlan, i32> {
     let ptr = ptr_size as u64;
@@ -1545,14 +1554,20 @@ pub fn plan_stack(
 
     sp &= !15u64;
 
-    // platform string, then the 16-byte random window.
+    // execfn/platform strings, then the 16-byte random window.
     let plat_len = platform.len() as u64 + 1;
     sp = sp.checked_sub(plat_len).ok_or(-ENOMEM)?;
     plan.platform_va = sp;
+    if !execfn.is_empty() {
+        let execfn_len = execfn.len() as u64 + 1;
+        sp = sp.checked_sub(execfn_len).ok_or(-ENOMEM)?;
+        plan.execfn_va = sp;
+    }
     sp = sp.checked_sub(16).ok_or(-ENOMEM)?;
     plan.random_va = sp;
 
-    let naux = build_auxv(aux, plan.platform_va, plan.random_va, &mut plan.auxv);
+    let naux = build_auxv(aux, plan.platform_va, plan.random_va, plan.execfn_va,
+                          &mut plan.auxv);
     plan.auxv_count = naux as u32;
     if naux > AUXV_MAX_PAIRS {
         return Err(-E2BIG);
@@ -2913,6 +2928,8 @@ pub unsafe extern "C" fn a20_elf_plan_stack(
     envc: usize,
     platform: *const u8,
     platform_len: usize,
+    execfn: *const u8,
+    execfn_len: usize,
     aux: *const AuxvInput,
     out: *mut StackPlan,
 ) -> i32 {
@@ -2944,6 +2961,11 @@ pub unsafe extern "C" fn a20_elf_plan_stack(
     } else {
         core::slice::from_raw_parts(platform, platform_len)
     };
+    let execfn_bytes = if execfn.is_null() || execfn_len == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(execfn, execfn_len)
+    };
     let argv_n = argc.min(MAX_ARG_STRINGS);
     let envp_n = envc.min(MAX_ARG_STRINGS);
     let argv_slice = argv_buf.get(..argv_n).map_or(&[][..], |s| s);
@@ -2954,6 +2976,7 @@ pub unsafe extern "C" fn a20_elf_plan_stack(
         argv_slice,
         envp_slice,
         platform_bytes,
+        execfn_bytes,
         &*aux,
     ) {
         Ok(p) => {
@@ -2962,6 +2985,7 @@ pub unsafe extern "C" fn a20_elf_plan_stack(
             (*out).sp = p.sp;
             (*out).platform_va = p.platform_va;
             (*out).random_va = p.random_va;
+            (*out).execfn_va = p.execfn_va;
             (*out).env_count = p.env_count;
             (*out).arg_count = p.arg_count;
             (*out).auxv_count = p.auxv_count;
@@ -3026,6 +3050,8 @@ pub unsafe extern "C" fn a20_elf_write_linux_stack(
     envc: usize,
     platform: *const u8,
     platform_len: usize,
+    execfn: *const u8,
+    execfn_len: usize,
     aux: *const AuxvInput,
     context: *mut core::ffi::c_void,
     copy: Option<StackCopy>,
@@ -3035,7 +3061,8 @@ pub unsafe extern "C" fn a20_elf_write_linux_stack(
     sp_out: *mut u64,
 ) -> i32 {
     if aux.is_null() || platform.is_null() || sp_out.is_null() ||
-        copy.is_none() || random.is_none() || ptr_size != size_of::<usize>() {
+        copy.is_none() || random.is_none() || ptr_size != size_of::<usize>() ||
+        (execfn_len != 0 && execfn.is_null()) {
         return -EFAULT;
     }
     let argv_buf = match stack_input_slices(argv_ptrs, argv_lens, argc) {
@@ -3049,7 +3076,13 @@ pub unsafe extern "C" fn a20_elf_write_linux_stack(
     let argv = &argv_buf[..argc];
     let envp = &envp_buf[..envc];
     let platform_bytes = core::slice::from_raw_parts(platform, platform_len);
-    let plan = match plan_stack(stack_top, ptr_size, argv, envp, platform_bytes, &*aux) {
+    let execfn_bytes = if execfn_len == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(execfn, execfn_len)
+    };
+    let plan = match plan_stack(stack_top, ptr_size, argv, envp, platform_bytes,
+                                execfn_bytes, &*aux) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -3065,6 +3098,10 @@ pub unsafe extern "C" fn a20_elf_write_linux_stack(
         }
     }
     if copy(context, plan.platform_va, platform, platform_len + 1) < 0 {
+        return -EFAULT;
+    }
+    if plan.execfn_va != 0 && execfn_len != 0 &&
+        copy(context, plan.execfn_va, execfn, execfn_len + 1) < 0 {
         return -EFAULT;
     }
     let mut random_bytes = [0u8; 16];
@@ -4619,20 +4656,23 @@ mod tests {
             clktck: 100,
             secure: 0,
         };
-        let plan = plan_stack(0x3FFFF000, 8, &argv, &envp, b"riscv64", &aux).unwrap();
+        let plan = plan_stack(0x3FFFF000, 8, &argv, &envp, b"riscv64", b"/bin/app", &aux).unwrap();
         assert_eq!(plan.sp & 15, 0);
         assert_eq!(plan.arg_count, 2);
         assert_eq!(plan.env_count, 1);
-        assert_eq!(plan.auxv_count, 19);
+        assert_eq!(plan.auxv_count, 20);
         // argv[0] sits below argv[1] (reverse placement).
         assert!(plan.arg_addrs[0] < plan.arg_addrs[1]);
         // The final SP must be below every string.
         assert!(plan.sp < plan.arg_addrs[0]);
         assert!(plan.sp < plan.env_addrs[0]);
         assert!(plan.platform_va < plan.arg_addrs[0]);
-        assert!(plan.random_va + 16 == plan.platform_va);
-        // AT_NULL terminator present.
-        assert_eq!(plan.auxv[18].key, 0);
+        assert!(plan.execfn_va < plan.platform_va);
+        assert!(plan.random_va + 16 == plan.execfn_va);
+        // AT_NULL terminator present; AT_EXECFN precedes it.
+        assert_eq!(plan.auxv[19].key, 0);
+        assert_eq!(plan.auxv[18].key, 31);
+        assert_eq!(plan.auxv[18].val, plan.execfn_va);
         assert_eq!(plan.auxv[3].key, 6); // AT_PAGESZ
         assert_eq!(plan.auxv[3].val, 4096);
     }
@@ -4641,14 +4681,14 @@ mod tests {
     fn stack_plan_rejects_overlong_arrays() {
         let big: Vec<&[u8]> = vec![b"x"; MAX_ARG_STRINGS + 1];
         let aux = AuxvInput::default();
-        assert_eq!(plan_stack(0x3FFFF000, 8, &big, &[], b"p", &aux), Err(-E2BIG));
+        assert_eq!(plan_stack(0x3FFFF000, 8, &big, &[], b"p", b"", &aux), Err(-E2BIG));
     }
 
     #[test]
     fn stack_plan_32bit_pointer_sizes() {
         let argv: [&[u8]; 1] = [b"a"];
         let aux = AuxvInput { page_size: 4096, clktck: 100, ..Default::default() };
-        let plan = plan_stack(0x3FFFF000, 4, &argv, &[], b"arm32", &aux).unwrap();
+        let plan = plan_stack(0x3FFFF000, 4, &argv, &[], b"arm32", b"/bin/app", &aux).unwrap();
         assert_eq!(plan.sp & 15, 0);
     }
 

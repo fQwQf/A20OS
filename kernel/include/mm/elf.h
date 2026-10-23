@@ -217,6 +217,9 @@ typedef struct elf_load_info {
     vaddr_t   interp_base;
     struct mm_seg *mmap;
     int       is_native_abi;
+    /* Borrowed path used as AT_EXECFN on the initial stack; NULL for images
+     * loaded from a buffer. */
+    const char *path;
 #ifdef CONFIG_NOMMU
     void     *nommu_allocs[NOMMU_ALLOC_MAX];
     size_t    nommu_alloc_sizes[NOMMU_ALLOC_MAX];
