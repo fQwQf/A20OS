@@ -4,11 +4,26 @@
 #include "a20_types.h"
 #include "a20_syscall.h"
 #include "../../kernel/include/uapi/a20/task_signal.h"
+#include "../../kernel/include/uapi/a20/thread_exit.h"
+#include "../../kernel/include/uapi/a20/task_status.h"
 
 static inline void a20_task_exit(int code)
 {
     a20_syscall6(A20_SYS_task_exit, (uint64_t)(int32_t)code, 0, 0, 0, 0, 0);
     __builtin_unreachable();
+}
+
+/* Explicit versioned exits; a successful call does not return. Scalar exit
+ * wrappers retain their original contract and ignore unused registers. */
+static inline a20_status_t a20_task_exit_extended(a20_exit_args_t *request) {
+    if (sizeof(uintptr_t) != 8) return -A20_ERR_NOT_SUPPORTED;
+    request->size = sizeof(*request); request->version = 1;
+    return a20_syscall6(A20_SYS_task_exit, A20_EXIT_STRUCT, (uint64_t)(uintptr_t)request, 0, 0, 0, 0);
+}
+static inline a20_status_t a20_thread_exit_extended(a20_exit_args_t *request) {
+    if (sizeof(uintptr_t) != 8) return -A20_ERR_NOT_SUPPORTED;
+    request->size = sizeof(*request); request->version = 1;
+    return a20_syscall6(A20_SYS_thread_exit, A20_EXIT_STRUCT, (uint64_t)(uintptr_t)request, 0, 0, 0, 0);
 }
 
 static inline a20_status_t a20_task_spawn(a20_task_spawn_args_t *args)
@@ -175,5 +190,22 @@ static inline a20_status_t a20_thread_signal_mask(uint64_t mask, uint64_t *old,
     if (status == A20_OK && old)
         *old = args.result;
     return status;
+}
+/* Returns the child pid to its parent and zero to the child. Child outputs
+ * and manifest child_handle values are written only into the child's VM. */
+static inline a20_status_t a20_task_clone(a20_clone_args_t *args) {
+    return a20_syscall6(A20_SYS_task_clone, (uint64_t)(uintptr_t)args, 0, 0, 0, 0, 0);
+}
+static inline a20_status_t a20_task_execve(const char *path,
+        char *const argv[], char *const envp[], const a20_exec_bootstrap_args_t *bootstrap) {
+    if (!bootstrap) return a20_syscall6(A20_SYS_execve, (uint64_t)(uintptr_t)path,
+        (uint64_t)(uintptr_t)argv, (uint64_t)(uintptr_t)envp, 0, 0, 0);
+    if (sizeof(uintptr_t) != 8) return -A20_ERR_NOT_SUPPORTED;
+    a20_exec_bootstrap_args_t request = *bootstrap;
+    request.path = (uint64_t)(uintptr_t)path;
+    request.argv = (uint64_t)(uintptr_t)argv;
+    request.envp = (uint64_t)(uintptr_t)envp;
+    return a20_syscall6(A20_SYS_execve, A20_EXEC_STRUCT,
+        (uint64_t)(uintptr_t)&request, 0, 0, 0, 0);
 }
 #endif

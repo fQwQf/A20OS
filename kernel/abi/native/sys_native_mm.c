@@ -116,7 +116,8 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 
     if (!kargs.length || kargs.length > SIZE_MAX - (PAGE_SIZE - 1) ||
         (kargs.prot & ~(A20_PROT_READ | A20_PROT_WRITE | A20_PROT_EXEC)) ||
-        (kargs.flags & ~(MAP_FIXED | MAP_FIXED_NOREPLACE)))
+        (kargs.flags & ~(A20_MAP_SHARED | A20_MAP_PRIVATE | MAP_FIXED | MAP_FIXED_NOREPLACE)) ||
+        ((kargs.flags & (A20_MAP_SHARED | A20_MAP_PRIVATE)) == (A20_MAP_SHARED | A20_MAP_PRIVATE)))
         return -A20_ERR_INVALID_ARGUMENT;
     size_t length = ROUND_UP((size_t)kargs.length, PAGE_SIZE);
     if (length > USER_VA_LIMIT || kargs.addr_hint >= USER_VA_LIMIT ||
@@ -158,17 +159,33 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         r = a20_handle_lookup_ref_internal(ht, kargs.source, A20_OBJ_INVALID,
                                            A20_RIGHT_MAP, &src);
         if (r < 0) goto out;
-        prot = a20_vm_prot_eff(prot, src.rights);
+        a20_rights_t map_rights = src.rights;
+        /* A private file mapping cannot write back to its source. Anyone
+         * allowed to read it may also create and modify a private copy. */
+        if ((kargs.flags & A20_MAP_PRIVATE) && src.type == A20_OBJ_FILE &&
+            (map_rights & A20_RIGHT_READ))
+            map_rights |= A20_RIGHT_WRITE;
+        prot = a20_vm_prot_eff(prot, map_rights);
+        if ((kargs.flags & (A20_MAP_SHARED | A20_MAP_PRIVATE)) && prot != kargs.prot) {
+            r = -A20_ERR_ACCESS;
+            goto out;
+        }
         if (src.type != A20_OBJ_MEMORY && src.type != A20_OBJ_FILE &&
             src.type != A20_OBJ_DEVICE) {
             r = -A20_ERR_INVALID_ARGUMENT;
+            goto out;
+        }
+        if (src.type == A20_OBJ_MEMORY && (kargs.flags & A20_MAP_PRIVATE)) {
+            /* VMO mappings retain canonical shared pages across fork. A
+             * private VMO shadow is a separate operation, not this mode. */
+            r = -A20_ERR_NOT_SUPPORTED;
             goto out;
         }
         if (src.type != A20_OBJ_MEMORY && !(src.rights & A20_RIGHT_READ)) {
             r = -A20_ERR_ACCESS;
             goto out;
         }
-    } else {
+    } else if (!(kargs.flags & A20_MAP_PRIVATE)) {
         anonymous = vmo_create(VMO_ANONYMOUS, length, 0);
         if (!anonymous) {
             r = -A20_ERR_NO_MEMORY;
@@ -178,7 +195,7 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 
     mm_struct_t *mm = cur->mm;
     vaddr_t addr = (vaddr_t)kargs.addr_hint;
-    int placement = kargs.flags;
+    int placement = kargs.flags & (MAP_FIXED | MAP_FIXED_NOREPLACE);
     mm_tlb_invalidate_begin(mm);
     uint64_t lock_flags = spin_lock_irqsave(&mm->lock);
     uint64_t limit = cur->limits.as / PAGE_SIZE;
@@ -200,13 +217,26 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         }
         placement = MAP_FIXED_NOREPLACE;
     }
-    if (anonymous || src.type == A20_OBJ_MEMORY) {
+    if (kargs.source == A20_HANDLE_NULL && (kargs.flags & A20_MAP_PRIVATE)) {
+        /* Ordinary private anonymous memory participates in the normal COW
+         * fork path. VMO-backed pages deliberately preserve shared identity. */
+        addr = mm_mmap_native_locked(mm, addr, length, a20_prot_to_mmap(prot),
+                                      MAP_PRIVATE | MAP_ANONYMOUS | placement);
+        if (!mm_addr_is_error(addr) && route) {
+            mm_seg_t *segment = mm_seg_find(mm, addr);
+            if (segment) {
+                vmar_acquire(route);
+                segment->vmar_owner = route;
+            }
+        }
+    } else if (anonymous || src.type == A20_OBJ_MEMORY) {
         struct vmo *vmo = anonymous ? anonymous : (struct vmo *)src.object;
         addr = mm_mmap_vmo_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
-                                      MAP_SHARED | placement, vmo, kargs.offset, prot, route);
+                                      ((kargs.flags & A20_MAP_PRIVATE) ? MAP_PRIVATE : MAP_SHARED) |
+                                          placement, vmo, kargs.offset, prot, route);
     } else {
         addr = mm_mmap_file_cap_locked(mm, addr, length, a20_prot_to_mmap(prot),
-                                   MAP_PRIVATE | placement,
+                                   ((kargs.flags & A20_MAP_SHARED) ? MAP_SHARED : MAP_PRIVATE) | placement,
                                    (struct vfile *)src.object, kargs.offset, prot, route);
         if (!mm_addr_is_error(addr))
             src.object = NULL; /* VMA consumes the file lookup reference. */

@@ -28,6 +28,10 @@ common_flags=(-std=gnu11 -O2 -ffunction-sections -fdata-sections -fno-builtin
   -I"$build_root/include" -I"$repo_root/kernel/arch/x86_64/include"
   -I"$repo_root/kernel/include" -I"$repo_root/kernel")
 
+"$rustc_bin" --edition=2021 --crate-type lib --emit=obj \
+  --target x86_64-unknown-linux-gnu -C panic=abort -C opt-level=2 \
+  "$repo_root/kernel/proc/signal_core.rs" -o "$build_root/rust/signal_core.o"
+
 for impl in c rust; do
   cflags=("${common_flags[@]}")
   if [[ "$impl" == rust ]]; then
@@ -44,7 +48,7 @@ for impl in c rust; do
     -o "$build_root/c/handle_table-$impl.o"
   "$cc_bin" "${common_flags[@]}" -c "$repo_root/tools/test_handle_slot_host.c" \
     -o "$build_root/c/host-test.o"
-  link_inputs=("$build_root/c/host-test.o" "$build_root/c/handle_table-$impl.o")
+  link_inputs=("$build_root/c/host-test.o" "$build_root/c/handle_table-$impl.o" "$build_root/rust/signal_core.o")
   if [[ "$impl" == rust ]]; then
     link_inputs+=("$build_root/rust/handle_slot.o" "$build_root/rust/handle_table_state.o")
   fi

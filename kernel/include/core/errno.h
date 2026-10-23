@@ -56,6 +56,9 @@
 #define ENOTCONN     107
 #define EDESTADDRREQ 89
 #define ENOPROTOOPT  92
+#define ECONNABORTED 103
+#define ECONNRESET   104
+#define EHOSTUNREACH 113
 #define ECONNREFUSED 111
 #define ETIMEDOUT    110
 #define ENODATA      61

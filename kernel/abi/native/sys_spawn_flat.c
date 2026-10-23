@@ -76,7 +76,7 @@ static uintptr_t prepare_start(const a20_flat_program_t *program,
     vector[args->argc] = 0;
     top = (top - sizeof(a20_start_info_t)) & ~(uintptr_t)15;
     a20_start_info_t info = {.size = sizeof(info),
-                             .version = 1,
+                             .version = A20_START_INFO_VERSION,
                              .argc = args->argc,
                              .envc = args->envc,
                              .argv = argv,

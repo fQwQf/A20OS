@@ -20,6 +20,7 @@
 #include "mm/vm.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
+#include "fs/pipe.h"
 #include "fs/xattr.h"
 #include "net/socket.h"
 #include "sys/usercopy.h"
@@ -90,6 +91,7 @@ extern int64_t a20_clx_map_send_err(int64_t r, const a20_channel_ep_t *ep);
 extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
+extern int64_t a20_native_vfs_result(int r);
 extern int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
                                        a20_handle_t *handles, uint32_t count);
 extern void a20_handle_abort_reserved(struct a20_ht_internal *ht,
@@ -240,6 +242,40 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
 
     a20_channel_create_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    if (kargs.flags & ~(A20_CHANNEL_BYTE_STREAM | A20_CHANNEL_NONBLOCK))
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (kargs.flags & A20_CHANNEL_BYTE_STREAM) {
+        if (kargs.type || kargs.msg_capacity)
+            return -A20_ERR_INVALID_ARGUMENT;
+        struct a20_ht_internal *ht = task_get_a20_ht(proc_current());
+        if (!ht) return -A20_ERR_BAD_HANDLE;
+        vfile_t *rd, *wr;
+        int error = pipe_create_vfiles(&rd, &wr,
+                                      kargs.flags & A20_CHANNEL_NONBLOCK ? O_NONBLOCK : 0);
+        if (error < 0) return a20_native_vfs_result(error);
+        a20_rights_t common = A20_RIGHT_STAT | A20_RIGHT_DUP |
+                              A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
+        int64_t h0 = a20_handle_install(ht, rd, A20_OBJ_PIPE_ENDPOINT, common | A20_RIGHT_READ);
+        int64_t h1 = h0 >= 0 ? a20_handle_install(ht, wr, A20_OBJ_PIPE_ENDPOINT,
+                                                common | A20_RIGHT_WRITE) : h0;
+        if (h0 < 0 || h1 < 0) {
+            if (h0 >= 0) a20_handle_remove(ht, (a20_handle_t)h0);
+            else vfs_put_file(rd);
+            vfs_put_file(wr);
+            return h0 < 0 ? h0 : h1;
+        }
+        kargs.out_endpoints[0] = (a20_handle_t)h0;
+        kargs.out_endpoints[1] = (a20_handle_t)h1;
+        if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+            a20_handle_remove(ht, (a20_handle_t)h0);
+            a20_handle_remove(ht, (a20_handle_t)h1);
+            return -A20_ERR_FAULT;
+        }
+        return A20_OK;
+    }
+    if (kargs.flags)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     /* Typed channel (docs/native-abi/05-ipc.md §2.3): copy the type
      * signature from userspace and normalize its limits. */

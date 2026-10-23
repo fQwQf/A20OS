@@ -741,7 +741,26 @@ int a20_net_bh_wakeq_count(void *wake_q)
 
 void a20_net_bh_notify(void *sp, uint32_t event, uint64_t d0, uint64_t d1)
 {
-    net_event_notify((net_socket_t *)sp, event, d0, d1);
+    net_socket_t *s = (net_socket_t *)sp;
+    if (event == A20_EVENT_ERROR) {
+        /* lwIP error numbers are private to the transport. SO_ERROR reports
+         * a positive public errno and consumes it independently of tcp_err,
+         * which the blocking connect transaction still needs. */
+        int error = (int)d0;
+        switch (error) {
+        case ERR_OK: error = 0; break;
+        case ERR_MEM: case ERR_BUF: error = ENOMEM; break;
+        case ERR_TIMEOUT: error = ETIMEDOUT; break;
+        case ERR_RTE: error = ENETUNREACH; break;
+        case ERR_USE: error = EADDRINUSE; break;
+        case ERR_RST: error = s->ever_connected ? ECONNRESET : ECONNREFUSED; break;
+        case ERR_ABRT: error = ECONNABORTED; break;
+        case ERR_CLSD: case ERR_CONN: error = ENOTCONN; break;
+        default: error = EIO; break;
+        }
+        s->pending_error = error;
+    }
+    net_event_notify(s, event, d0, d1);
 }
 
 void a20_net_bh_socket_lock(void *sp, uint64_t *flags)
@@ -1389,9 +1408,9 @@ static bool net_inet_tcp_pcb_is_listen(const net_socket_t *s)
 
 void net_tcp_close_pcb(net_socket_t *s)
 {
-    if (!s || !s->tcp)
-        return;
+    if (!s) return;
     uint64_t flags = a20_lwip_lock();
+    if (!s->tcp) { a20_lwip_unlock(flags); return; }
     a20_lwip_lane_enter(net_socket_lane_load(s));
     tcp_arg(s->tcp, NULL);
     if (net_inet_tcp_pcb_is_listen(s)) {
@@ -1411,9 +1430,9 @@ void net_tcp_close_pcb(net_socket_t *s)
 
 void net_tcp_drop_pcb(net_socket_t *s)
 {
-    if (!s || !s->tcp)
-        return;
+    if (!s) return;
     uint64_t flags = a20_lwip_lock();
+    if (!s->tcp) { a20_lwip_unlock(flags); return; }
     a20_lwip_lane_enter(net_socket_lane_load(s));
     tcp_arg(s->tcp, NULL);
     if (net_inet_tcp_pcb_is_listen(s)) {
@@ -2429,6 +2448,32 @@ void a20_net_inet_connect_trace(int which)
         ktrace_net("[NET] connect: pushed child to listener accept queue\n");
     else
         ktrace_net("[NET] connect: local TCP connect done\n");
+}
+
+/* Core transport half-close. No socket/bucket lock may be held while lwIP
+ * stages FIN/error callbacks; the normal bottom half publishes their events. */
+int net_inet_shutdown(net_socket_t *s, int receive, int transmit)
+{
+    if (!s || (s->domain != AF_INET && s->domain != AF_INET6) ||
+        s->type != SOCK_STREAM || s->local_tcp)
+        return 0;
+    if (receive && transmit) {
+        /* tcp_shutdown(...,1,1) may free the pcb. The full close path clears
+         * callbacks and ownership; never tcp_output a consumed pointer. */
+        net_tcp_close_pcb(s);
+        return 0;
+    }
+    uint64_t irq = a20_lwip_lock();
+    a20_lwip_lane_enter(net_socket_lane_load(s));
+    err_t error = ERR_OK;
+    if (s->tcp) {
+        int closing = s->tcp->state == FIN_WAIT_1 || s->tcp->state == FIN_WAIT_2 ||
+            s->tcp->state == CLOSING || s->tcp->state == LAST_ACK || s->tcp->state == TIME_WAIT;
+        if (!(transmit && !receive && closing)) error = tcp_shutdown(s->tcp, receive, transmit);
+    }
+    if (error == ERR_OK && s->tcp) (void)tcp_output(s->tcp);
+    a20_lwip_unlock(irq);
+    return error == ERR_OK ? 0 : error == ERR_MEM ? -ENOMEM : -ENOTCONN;
 }
 
 static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t addrlen,

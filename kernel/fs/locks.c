@@ -11,6 +11,7 @@
 typedef struct fs_file_lock {
     int used;
     int owner_kind;
+    int owner_pid;
     uintptr_t key;
     uintptr_t owner;
     short type;
@@ -143,15 +144,15 @@ static int fs_lock_range(vfile_t *vf, const fs_flock_t *lk,
     else if (lk->l_whence == SEEK_END) base = fs_file_size(vf);
     else return -EINVAL;
 
-    int64_t s = base + lk->l_start;
-    int64_t e;
+    int64_t s, e;
+    if (__builtin_add_overflow(base, lk->l_start, &s)) return -EOVERFLOW;
     if (lk->l_len == 0) {
         e = 0x7fffffffffffffffLL;
     } else if (lk->l_len > 0) {
-        e = s + lk->l_len - 1;
+        if (__builtin_add_overflow(s, lk->l_len - 1, &e)) return -EOVERFLOW;
     } else {
-        e = s - 1;
-        s = s + lk->l_len;
+        if (__builtin_sub_overflow(s, (int64_t)1, &e) ||
+            __builtin_add_overflow(s, lk->l_len, &s)) return -EOVERFLOW;
     }
     if (s < 0) return -EINVAL;
     *start = s;
@@ -200,8 +201,10 @@ int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, uintptr_t owner)
         lk->l_start = g_file_locks[i].start;
         lk->l_len = (g_file_locks[i].end == 0x7fffffffffffffffLL) ?
                     0 : (g_file_locks[i].end - g_file_locks[i].start + 1);
-        lk->l_pid = (g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID) ?
-                    (int)g_file_locks[i].owner : -1;
+        lk->l_pid = g_file_locks[i].owner_kind == FS_LOCK_OWNER_NATIVE ?
+                    g_file_locks[i].owner_pid :
+                    (g_file_locks[i].owner_kind == FS_LOCK_OWNER_PID ?
+                     (int)g_file_locks[i].owner : -1);
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
         return 0;
     }
@@ -347,7 +350,8 @@ retry:
     for (int i = 0; i < count; i++) {
         if (merged_count > 0 &&
             sc[merged_count - 1].type == sc[i].type &&
-            sc[merged_count - 1].end + 1 >= sc[i].start) {
+            (sc[merged_count - 1].end == INT64_MAX ||
+             sc[merged_count - 1].end + 1 >= sc[i].start)) {
             if (sc[i].end > sc[merged_count - 1].end)
                 sc[merged_count - 1].end = sc[i].end;
         } else {
@@ -383,6 +387,9 @@ retry:
             g_file_locks[i].key = key;
             g_file_locks[i].owner_kind = owner_kind;
             g_file_locks[i].owner = owner;
+            task_t *current = proc_current();
+            g_file_locks[i].owner_pid = owner_kind == FS_LOCK_OWNER_NATIVE && current ?
+                (current->tgid > 0 ? current->tgid : current->pid) : -1;
             g_file_locks[i].start = sc[write_idx].start;
             g_file_locks[i].end = sc[write_idx].end;
             g_file_locks[i].type = sc[write_idx].type;
@@ -398,6 +405,25 @@ retry:
         fs_lock_wake_waiters();
     kfree(sc);
     return 0;
+}
+
+/* Native process locks follow the shared capability table, so exiting one
+ * pthread cannot release another thread's locks or leave them tied to a TID. */
+void fs_locks_release_native(void *owner, vfile_t *file)
+{
+    uintptr_t key = file ? fs_lock_key(file) : 0;
+    uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
+    int changed = 0;
+    for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
+        if (g_file_locks[i].used && g_file_locks[i].owner_kind == FS_LOCK_OWNER_NATIVE &&
+            g_file_locks[i].owner == (uintptr_t)owner && (!file || g_file_locks[i].key == key)) {
+            g_file_locks[i].used = 0;
+            changed = 1;
+        }
+    }
+    if (changed) g_file_lock_generation++;
+    spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+    if (changed) fs_lock_wake_waiters();
 }
 
 void fs_locks_release_process(int pid)

@@ -1,5 +1,8 @@
 # A20OS Native ABI：用户态启动协议
 
+> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
+> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
+
 > 第 1、7、8 节描述当前协议（2026-08 核实）；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
 
 ---
@@ -38,6 +41,10 @@ typedef struct a20_start_info {
 
     a20_handle_t service_registry; /* well-known 注册表客户端端点，可为 NULL */
     uint32_t _pad_registry;
+
+    /* version 2, appended after the 104-byte v1 prefix */
+    uint64_t bootstrap_data;
+    uint64_t bootstrap_size;
 } a20_start_info_t;
 ```
 
@@ -99,7 +106,7 @@ typedef struct a20_start_info {
 | 路径 | 适用场景 | 工作量 | POSIX 兼容性 | 状态 |
 |------|---------|--------|-------------|------|
 | 从零写 liba20c | Phase 0-1，验证最小程序 | ~985 行 | ISO C 子集 | 已完成 |
-| mlibc `sysdeps/a20` | 较完整 Native libc | 约 1800 行 sysdeps | 已接入子集，非完整 POSIX | 活跃，当前 RISC-V64 |
+| mlibc `sysdeps/a20` | 较完整 Native libc | sysdeps/rtld/构建接入 | 已接入子集，非完整 POSIX | 活跃，RISC-V64/AArch64（见验收记录） |
 | 旧 musl bridge | 历史参考 | `user/archive/` | 未形成当前可验证完整 POSIX | 已归档，不参与构建 |
 
 ### 2.2 liba20rt — 最小运行时

@@ -29,7 +29,7 @@ task_t *proc_find_get(int pid);
 void proc_put(task_t *task);
 void proc_free_pid(int pid);
 void proc_publish_deferred_task(task_t *task);
-int proc_wait4(int pid, int *status, int flags);
+int proc_wait4_task(task_t *target, int *status, int flags);
 int proc_create_thread_deferred(uint64_t entry, uint64_t arg, vaddr_t sp,
                                 vaddr_t tls, size_t size, task_t **out);
 struct a20_ht_internal *task_get_a20_ht(task_t *task);

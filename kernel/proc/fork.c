@@ -11,6 +11,7 @@
 #include "fs/vfs/mntns.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
+#include "mm/process_vm.h"
 #include "mm/vm.h"
 #include "sys/usercopy.h"
 #include "ipc/envelope.h"
@@ -21,26 +22,11 @@
 
 int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
 {
-    if (!task || !task->pgdir)
-        return -EFAULT;
-
-    size_t done = 0;
-    while (done < n) {
-        vaddr_t va = (vaddr_t)(uintptr_t)dst + done;
-        paddr_t pa = pt_translate(task->pgdir, va);
-        if (!pa)
-            return -EFAULT;
-        pfn_t pfn = phys_to_pfn(pa);
-        if (!pfn_valid(pfn))
-            return -EFAULT;
-        char *kv = (char *)pfn_to_virt(pfn) + (pa & (PAGE_SIZE - 1));
-        size_t chunk = PAGE_SIZE - (va & (PAGE_SIZE - 1));
-        if (chunk > n - done)
-            chunk = n - done;
-        memcpy(kv, (const char *)src + done, chunk);
-        done += chunk;
-    }
-    return 0;
+    /* Resolve COW before writing. A direct physical memcpy would also change
+     * the parent's private pages and could overwrite the child's results when
+     * the syscall subsequently publishes its parent-side output. */
+    long copied = process_vm_write_kernel(task, dst, src, n);
+    return copied == (long)n ? 0 : -EFAULT;
 }
 
 #ifdef CONFIG_NOMMU

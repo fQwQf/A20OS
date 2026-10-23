@@ -14,6 +14,30 @@ typedef struct {
     uint8_t  c_cc[KTTY_NCCS];
 } ktty_termios_t;
 
+typedef struct {
+    uint16_t row, col, xpixel, ypixel;
+} ktty_winsize_t;
+
+struct vfile;
+
+/* Kernel-buffer operations: shared by typed Native controls and device code.
+ * No userspace pointer or architecture-specific ioctl layout crosses here. */
+int tty_vfile_get_termios(struct vfile *vf, ktty_termios_t *out);
+int tty_vfile_set_termios(struct vfile *vf, const ktty_termios_t *in, int action);
+int tty_vfile_get_winsize(struct vfile *vf, ktty_winsize_t *out);
+int tty_vfile_set_winsize(struct vfile *vf, const ktty_winsize_t *in);
+int tty_vfile_flush(struct vfile *vf, int queue);
+int tty_console_get_termios(ktty_termios_t *out);
+int tty_console_set_termios(const ktty_termios_t *in, int action);
+int tty_console_get_winsize(ktty_winsize_t *out);
+int tty_console_set_winsize(const ktty_winsize_t *in);
+int tty_console_flush(int queue);
+int pty_get_termios(int index, ktty_termios_t *out);
+int pty_set_termios(int index, const ktty_termios_t *in, int action, int master);
+int pty_get_winsize(int index, ktty_winsize_t *out);
+int pty_set_winsize(int index, const ktty_winsize_t *in);
+int pty_flush(int index, int queue, int master);
+
 long arch_tty_termios_to_user(void *dst, const ktty_termios_t *src);
 long arch_tty_termios_from_user(ktty_termios_t *dst, const void *src);
 

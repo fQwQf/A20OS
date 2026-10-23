@@ -7,6 +7,7 @@ static task_t parent, child;
 static struct a20_ht_internal table;
 static int mode, created, destroyed, published, put_count, installed, removed;
 static int waiting, wait_result, wait_status = 37 << 8;
+static int expected_joinable;
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args);
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 task_t *proc_current(void) {
@@ -25,11 +26,12 @@ void proc_free_pid(int pid) {
     destroyed++;
 }
 void proc_publish_deferred_task(task_t *task) {
-    assert(task == &child && child.a20_joinable == 1 && installed == 1);
+    assert(task == &child &&
+           child.a20_joinable == (unsigned)expected_joinable && installed == 1);
     published++;
 }
-int proc_wait4(int pid, int *status, int flags) {
-    assert(waiting && pid == 42 && flags == 0);
+int proc_wait4_task(task_t *target, int *status, int flags) {
+    assert(waiting && target == &child && flags == 0);
     *status = wait_status;
     return wait_result;
 }
@@ -92,30 +94,34 @@ int main(void) {
                                       -A20_ERR_FAULT,
                                       -A20_ERR_FAULT,
                                       -A20_ERR_BAD_HANDLE};
-    for (mode = 0; mode < 7; mode++) {
-        created = destroyed = published = put_count = installed = removed = 0;
-        child.a20_joinable = 0;
-        a20_thread_create_args_t args = {.size = sizeof(args),
-                                         .version = 1,
-                                         .entry = 0x1001,
-                                         .arg = 77,
-                                         .stack_base = 0x8000,
-                                         .stack_size = 4096,
-                                         .out_thread = 99};
-        a20_syscall_args_t call = {.arg = {(uintptr_t)&args}};
-        assert(sys_a20_thread_create(&call) == results[mode]);
-        if (!mode) {
-            assert(created == 1 && published == 1 && put_count == 1 &&
-                   !destroyed && !removed && args.out_thread == 7);
-        } else if (mode == 3 || mode == 4) {
-            assert(created == 1 && !published && destroyed == 1 &&
-                   put_count == 1 && removed == (mode == 4) &&
-                   args.out_thread == 99);
-        } else {
-            assert(!created && !destroyed && !put_count && !published &&
-                   !removed && args.out_thread == 99);
+    for (expected_joinable = 0; expected_joinable < 2; expected_joinable++)
+        for (mode = 0; mode < 7; mode++) {
+            created = destroyed = published = put_count = installed = removed =
+                0;
+            child.a20_joinable = 0;
+            a20_thread_create_args_t args = {.size = sizeof(args),
+                                             .version = 1,
+                                             .flags =
+                                                 expected_joinable ? 1u : 0u,
+                                             .entry = 0x1001,
+                                             .arg = 77,
+                                             .stack_base = 0x8000,
+                                             .stack_size = 4096,
+                                             .out_thread = 99};
+            a20_syscall_args_t call = {.arg = {(uintptr_t)&args}};
+            assert(sys_a20_thread_create(&call) == results[mode]);
+            if (!mode) {
+                assert(created == 1 && published == 1 && put_count == 1 &&
+                       !destroyed && !removed && args.out_thread == 7);
+            } else if (mode == 3 || mode == 4) {
+                assert(created == 1 && !published && destroyed == 1 &&
+                       put_count == 1 && removed == (mode == 4) &&
+                       args.out_thread == 99);
+            } else {
+                assert(!created && !destroyed && !put_count && !published &&
+                       !removed && args.out_thread == 99);
+            }
         }
-    }
     waiting = 1;
     mode = 0;
     child.pid = 42;
@@ -137,14 +143,15 @@ int main(void) {
             assert(!memcmp(&before, &status, sizeof(status)));
         else
             assert(status.size == sizeof(status) && status.version == 1 &&
-                   status.exit_code == 37);
+                   status.exit_code == 37 && status.exit_reason == 0);
     }
     for (unsigned signal = 1; signal <= 31; signal++) {
         wait_status = signal | 0x80; /* Includes the core-dump flag. */
         a20_task_status_t status;
         a20_syscall_args_t args = {.arg = {7, 0, (uintptr_t)&status}};
         assert(sys_a20_task_wait(&args) == A20_OK);
-        assert(status.exit_code == (int32_t)(128 + signal));
+        assert(status.exit_code == (int32_t)(128 + signal) &&
+               status.exit_reason == 2);
     }
     printf("PASS Native thread admission: 7 failure/publication paths; 5 wait "
            "results\n");

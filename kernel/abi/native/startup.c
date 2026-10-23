@@ -68,7 +68,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
     a20_start_info_t info;
     memset(&info, 0, sizeof(info));
     info.size = sizeof(info);
-    info.version = 1;
+    info.version = A20_START_INFO_VERSION;
     info.page_size = PAGE_SIZE;
 
     /* a20_handle_t is uint32_t, so a failed install (negative int64) must be

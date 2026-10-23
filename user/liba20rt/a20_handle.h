@@ -173,7 +173,30 @@ static inline a20_status_t a20_hdl_get_temporal(a20_handle_t h,
 
 static inline a20_status_t a20_hdl_set_label(a20_handle_t h, uint32_t label)
 {
-    return a20_hdl_control(h, A20_HANDLE_CTRL_SET_LABEL, label, 0);
+    a20_ctl_int_args_t args = {sizeof(args), 1, (int32_t)label, 0};
+    return a20_hdl_control(h, A20_HANDLE_CTRL_SET_LABEL, (uint64_t)(uintptr_t)&args, 0);
+}
+
+/* Every typed control carries the documented fixed schema. These helpers
+ * allocate no heap storage and never forward an ioctl/fcntl namespace. */
+static inline a20_status_t a20_hdl_socket_config(a20_handle_t h, int setting,
+                                                a20_socket_config_t *args) {
+    if (!args) return -A20_ERR_FAULT;
+    args->size = sizeof(*args); args->version = 1;
+    return a20_hdl_control(h, setting ? A20_HANDLE_CTRL_SET_SOCKET_CONFIG : A20_HANDLE_CTRL_GET_SOCKET_CONFIG,
+                            (uint64_t)(uintptr_t)args, 0);
+}
+static inline a20_status_t a20_hdl_terminal_config(a20_handle_t h, int setting,
+                                                  a20_terminal_config_t *args) {
+    if (!args) return -A20_ERR_FAULT;
+    args->size = sizeof(*args); args->version = 1;
+    return a20_hdl_control(h, setting ? A20_HANDLE_CTRL_SET_TERMINAL_CONFIG : A20_HANDLE_CTRL_GET_TERMINAL_CONFIG,
+                            (uint64_t)(uintptr_t)args, 0);
+}
+static inline a20_status_t a20_hdl_file_lock(a20_handle_t h, a20_file_lock_args_t *args) {
+    if (!args) return -A20_ERR_FAULT;
+    args->size = sizeof(*args); args->version = 1;
+    return a20_hdl_control(h, A20_HANDLE_CTRL_FILE_LOCK, (uint64_t)(uintptr_t)args, 0);
 }
 
 /* The xattr syscalls take their arguments flat (0x0108-0x010B in

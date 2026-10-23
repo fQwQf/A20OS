@@ -6,6 +6,7 @@
 #include "core/defs.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
+#include "mm/slab.h"
 #include "ipc/handle_table.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
@@ -20,6 +21,8 @@
 #include "fs/flat_files.h"
 #endif
 #define A20_ARG(n) (args->arg[(n)])
+extern int64_t a20_native_vfs_result(int r);
+
 int64_t sys_a20_handle_seek(const a20_syscall_args_t *args) {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
     a20_off_t *offset_ptr = (a20_off_t *)(uintptr_t)A20_ARG(1);
@@ -258,166 +261,146 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args) {
     return A20_OK;
 }
 
-int64_t sys_a20_handle_read(const a20_syscall_args_t *args) {
-    a20_io_args_t *uargs = (a20_io_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs)
-        return -A20_ERR_FAULT;
-
-    a20_io_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+/* One bounded kernel buffer keeps PIPE_BUF writes atomic and positional
+ * I/O under the vfile offset lock. User copies stay outside that lock, since
+ * their faults may read a mapping of the same file. */
+static int64_t a20_file_io(const a20_syscall_args_t *args, int writing) {
+    a20_io_args_t *user = (void *)(uintptr_t)A20_ARG(0);
+    a20_io_args_t io;
+    A20_VALIDATE_AND_COPY(user, io);
+    if (io.iov_count > 1024 || io._pad0 || io._pad1)
+        return -A20_ERR_INVALID_ARGUMENT;
+    struct a20_ht_internal *ht = task_get_a20_ht(proc_current());
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
-
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_ref_internal(
-        ht, kargs.handle, A20_OBJ_INVALID, A20_RIGHT_READ, &entry);
-    if (ret < 0)
-        return ret;
-
+    int64_t result = a20_handle_lookup_ref_internal(
+        ht, io.handle, A20_OBJ_INVALID,
+        writing ? A20_RIGHT_WRITE : A20_RIGHT_READ, &entry);
+    if (result < 0)
+        return result;
     if (!a20_object_is_vfile_backed(entry.type)) {
         a20_object_release(entry.object, entry.type);
         return -A20_ERR_INVALID_ARGUMENT;
     }
-
-    /* Bell-LaPadula No Read Up (docs/native-abi/06-security.md §5.2) */
-    if (a20_ht_get_label(ht) < entry.security_label) {
+    if (writing ? a20_ht_get_label(ht) > entry.security_label
+                : a20_ht_get_label(ht) < entry.security_label) {
         a20_object_release(entry.object, entry.type);
         return -A20_ERR_ACCESS;
     }
-    vfile_t *vf = (vfile_t *)entry.object;
-    if (!vf) {
-        a20_object_release(entry.object, entry.type);
-        return -A20_ERR_BAD_HANDLE;
-    }
-
-    /* Read iov buffers */
-    uint64_t total_read = 0;
-    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
-    for (uint32_t i = 0; i < kargs.iov_count; i++) {
-        a20_iovec_t v;
-        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
-            total_read = (uint64_t)-A20_ERR_FAULT;
-            break;
-        }
-        if (v.len == 0)
-            continue;
-
-        char *buf = (char *)(uintptr_t)v.base;
-        if (!buf)
-            continue;
-
-        char kbuf[512];
-        uint64_t remaining = v.len;
-        uint64_t done = 0;
-        while (remaining > 0) {
-            size_t chunk =
-                remaining > sizeof(kbuf) ? sizeof(kbuf) : (size_t)remaining;
-            int64_t n = vfs_read_file(vf, kbuf, chunk);
-            if (n < 0) {
-                if (total_read == 0)
-                    total_read = (uint64_t)-A20_ERR_IO;
-                goto read_done;
-            }
-            if (copy_to_user(buf + done, kbuf, (size_t)n) < 0) {
-                total_read = (uint64_t)-A20_ERR_FAULT;
-                goto read_done;
-            }
-            done += (uint64_t)n;
-            remaining -= (uint64_t)n;
-            total_read += (uint64_t)n;
-            if ((uint64_t)n < chunk)
-                break;
+    a20_iovec_t local[8];
+    a20_iovec_t *iov = local;
+    char *buffer = NULL;
+    if (io.iov_count > 8) {
+        iov = kmalloc(io.iov_count * sizeof(*iov));
+        if (!iov) {
+            result = -A20_ERR_NO_MEMORY;
+            goto out;
         }
     }
-read_done:
+    if (io.iov_count && copy_from_user(iov, (void *)(uintptr_t)io.iov,
+                                       io.iov_count * sizeof(*iov)) < 0) {
+        result = -A20_ERR_FAULT;
+        goto out;
+    }
+    size_t total = 0;
+    for (uint32_t i = 0; i < io.iov_count; i++) {
+        if (iov[i].len > SIZE_MAX - total) {
+            result = -A20_ERR_INVALID_ARGUMENT;
+            goto out;
+        }
+        total += iov[i].len;
+    }
+    if (total > INT64_MAX) {
+        result = -A20_ERR_INVALID_ARGUMENT;
+        goto out;
+    }
+    if (!total) {
+        result = 0;
+        goto publish;
+    }
+    if (total > 65536)
+        total = 65536;
+    buffer = kmalloc(total);
+    if (!buffer) {
+        result = -A20_ERR_NO_MEMORY;
+        goto out;
+    }
+    size_t copied = 0;
+    if (writing) {
+        for (uint32_t i = 0; i < io.iov_count && copied < total; i++) {
+            size_t count =
+                iov[i].len < total - copied ? iov[i].len : total - copied;
+            if (count &&
+                copy_from_user(buffer + copied, (void *)(uintptr_t)iov[i].base,
+                               count) < (long)count) {
+                result = -A20_ERR_FAULT;
+                goto out;
+            }
+            copied += count;
+        }
+    }
+    vfile_t *vf = entry.object;
+    if (io.offset != UINT64_MAX) {
+        if (!(entry.rights & A20_RIGHT_SEEK)) {
+            result = -A20_ERR_NOT_SUPPORTED;
+            goto out;
+        }
+        result = writing ? vfs_pwrite_file(vf, buffer, total, io.offset)
+                         : vfs_pread_file(vf, buffer, total, io.offset);
+    } else {
+        int lock_offset = vf && vf->vnode && vf->ops && vf->ops->lseek;
+        if (lock_offset)
+            mutex_lock(&vf->offset_lock);
+        result = writing ? vfs_write_file(vf, buffer, total)
+                         : vfs_read_file(vf, buffer, total);
+        if (lock_offset)
+            mutex_unlock(&vf->offset_lock);
+    }
+    if (result < 0) {
+        result = result == -ESPIPE ? -A20_ERR_NOT_SUPPORTED
+                                   : a20_native_vfs_result((int)result);
+        goto out;
+    }
+    if ((uint64_t)result > total) {
+        result = -A20_ERR_IO;
+        goto out;
+    }
+    if (!writing) {
+        for (uint32_t i = 0; i < io.iov_count && copied < (size_t)result; i++) {
+            size_t count = iov[i].len < (size_t)result - copied
+                               ? iov[i].len
+                               : (size_t)result - copied;
+            if (count && copy_to_user((void *)(uintptr_t)iov[i].base,
+                                      buffer + copied, count) < (long)count) {
+                if (!copied) {
+                    result = -A20_ERR_FAULT;
+                    goto out;
+                }
+                result = (int64_t)copied;
+                goto publish;
+            }
+            copied += count;
+        }
+    }
+publish:
+    io.out_count = result;
+    if (a20_copy_struct_to_user(user, &io, sizeof(io)) < 0)
+        result = -A20_ERR_FAULT;
+out:
+    kfree(buffer);
+    if (iov != local)
+        kfree(iov);
     a20_object_release(entry.object, entry.type);
+    return result;
+}
 
-    kargs.out_count = total_read;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-    return (int64_t)total_read;
+int64_t sys_a20_handle_read(const a20_syscall_args_t *args) {
+    return a20_file_io(args, 0);
 }
 
 int64_t sys_a20_handle_write(const a20_syscall_args_t *args) {
-    a20_io_args_t *uargs = (a20_io_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs)
-        return -A20_ERR_FAULT;
-
-    a20_io_args_t kargs;
-    A20_VALIDATE_AND_COPY(uargs, kargs);
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht)
-        return -A20_ERR_BAD_HANDLE;
-
-    a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_ref_internal(
-        ht, kargs.handle, A20_OBJ_INVALID, A20_RIGHT_WRITE, &entry);
-    if (ret < 0)
-        return ret;
-
-    if (!a20_object_is_vfile_backed(entry.type)) {
-        a20_object_release(entry.object, entry.type);
-        return -A20_ERR_INVALID_ARGUMENT;
-    }
-
-    /* Bell-LaPadula No Write Down (docs/native-abi/06-security.md §5.2) */
-    if (a20_ht_get_label(ht) > entry.security_label) {
-        a20_object_release(entry.object, entry.type);
-        return -A20_ERR_ACCESS;
-    }
-
-    vfile_t *vf = (vfile_t *)entry.object;
-
-    uint64_t total_written = 0;
-    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
-    for (uint32_t i = 0; i < kargs.iov_count; i++) {
-        a20_iovec_t v;
-        if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
-            total_written = (uint64_t)-A20_ERR_FAULT;
-            break;
-        }
-        if (v.len == 0)
-            continue;
-
-        const char *buf = (const char *)(uintptr_t)v.base;
-        if (!buf)
-            continue;
-
-        char kbuf[512];
-        uint64_t remaining = v.len;
-        uint64_t done = 0;
-        while (remaining > 0) {
-            size_t chunk =
-                remaining > sizeof(kbuf) ? sizeof(kbuf) : (size_t)remaining;
-            if (copy_from_user(kbuf, buf + done, chunk) < (long)chunk) {
-                total_written = (uint64_t)-A20_ERR_FAULT;
-                goto write_done;
-            }
-            int64_t n = vfs_write_file(vf, kbuf, chunk);
-            if (n < 0) {
-                if (total_written == 0)
-                    total_written = (uint64_t)-A20_ERR_IO;
-                goto write_done;
-            }
-            done += (uint64_t)n;
-            remaining -= (uint64_t)n;
-            total_written += (uint64_t)n;
-            if ((uint64_t)n < chunk)
-                break;
-        }
-    }
-write_done:
-    a20_object_release(entry.object, entry.type);
-
-    kargs.out_count = total_written;
-    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-    return (int64_t)total_written;
+    return a20_file_io(args, 1);
 }
 
 int64_t sys_a20_handle_stat(const a20_syscall_args_t *args) {

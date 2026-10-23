@@ -1,5 +1,8 @@
 # A20OS Native ABI：类型与结构体定义
 
+> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
+> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
+
 > 内容已按 2026-08 的内核头与 `user/liba20rt/a20_types.h` 核对。带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
 
 ---

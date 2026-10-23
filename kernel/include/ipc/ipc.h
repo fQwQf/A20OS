@@ -112,6 +112,28 @@ typedef enum a20_object_type {
 #define A20_ERR_REMOTE_CLOSED        28   /* peer endpoint closed (remote CLOSE) */
 #define A20_ERR_CLUSTER_UNSUPPORTED  29   /* cross-node handle/donate, MCU frag/broadcast, HELLO hash clash */
 
+
+/* Extended I/O statuses: appended without changing existing ABI values. */
+#define A20_ERR_BROKEN_PIPE               30
+#define A20_ERR_NOT_SOCKET                31
+#define A20_ERR_PROTOCOL_OPTION           32
+#define A20_ERR_ADDRESS_IN_USE            33
+#define A20_ERR_ADDRESS_NOT_AVAILABLE     34
+#define A20_ERR_CONNECTION_REFUSED        35
+#define A20_ERR_CONNECTION_RESET          36
+#define A20_ERR_NOT_CONNECTED             37
+#define A20_ERR_ALREADY_CONNECTED         38
+#define A20_ERR_IN_PROGRESS               39
+#define A20_ERR_ALREADY_IN_PROGRESS       40
+#define A20_ERR_NETWORK_UNREACHABLE       41
+#define A20_ERR_HOST_UNREACHABLE          42
+#define A20_ERR_MESSAGE_TOO_LARGE         43
+#define A20_ERR_ILLEGAL_SEEK              44
+#define A20_ERR_NOT_TERMINAL              45
+#define A20_ERR_OVERFLOW 46
+#define A20_ERR_NO_LOCKS 47
+#define A20_ERR_DEADLOCK 48
+
 /* ---- Observable event types (docs/native-abi/05-ipc.md §3.3) ---- */
 
 #define A20_EVENT_READABLE        0u   /* file/socket/pipe: data readable   */

@@ -7,13 +7,15 @@
 #include "abi/native/syscall_entry.h"
 #include "abi/native/errno.h"
 #include "sys_validate.h"
+#include "uapi/a20/thread_exit.h"
 #define A20_ARG(n) (args->arg[(n)])
 
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
     a20_thread_create_args_t *uargs = (void *)(uintptr_t)A20_ARG(0);
     a20_thread_create_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
-    if (!kargs.entry || !kargs.stack_base || !kargs.stack_size || kargs.flags ||
+    if (!kargs.entry || !kargs.stack_base || !kargs.stack_size ||
+        (kargs.flags & ~A20_THREAD_CREATE_JOINABLE) ||
         kargs.entry > UINTPTR_MAX || kargs.arg > UINTPTR_MAX ||
         kargs.stack_base > UINTPTR_MAX || kargs.stack_size > SIZE_MAX ||
         kargs.tls_base > UINTPTR_MAX || kargs.stack_size > kargs.stack_base)
@@ -55,7 +57,7 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args) {
         proc_put(child);
         return -A20_ERR_FAULT;
     }
-    child->a20_joinable = 1;
+    child->a20_joinable = !!(kargs.flags & A20_THREAD_CREATE_JOINABLE);
     proc_publish_deferred_task(child);
     proc_put(child);
     return h;
@@ -101,8 +103,8 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
 
     int status = 0;
     /* WNOHANG=1: non-block mode reports WOULD_BLOCK until the target exits. */
-    int wret = proc_wait4(target->pid, &status,
-                          (flags & A20_TASK_WAIT_NONBLOCK) ? 1 : 0);
+    int wret = proc_wait4_task(target, &status,
+                               (flags & A20_TASK_WAIT_NONBLOCK) ? 1 : 0);
     proc_put(target);
     /* Interrupts leave the child and its handle available for a later join.
      * Native callers consume their pending signals and choose whether to retry. */
@@ -122,7 +124,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args) {
          * Native explicit exit codes retain their existing representation. */
         ts.exit_code =
             (status & 0x7f) ? 128 + (status & 0x7f) : (status >> 8) & 0xff;
-        ts.exit_reason = 0;
+        ts.exit_reason = (status & 0x7f) ? ((status & 0x80) ? 2u : 1u) : 0u;
         if (copy_to_user(out, &ts, sizeof(ts)) < 0)
             return -A20_ERR_FAULT;
     }

@@ -533,6 +533,6 @@ int main(int argc, char **argv, char **envp)
         return 1;
     note("dma ok\n", 7);
 
-    note("NATIVE_CONTRACT: PASS\n", 20);
+    note("NATIVE_CONTRACT: PASS\n", sizeof("NATIVE_CONTRACT: PASS\n") - 1);
     return 0;
 }

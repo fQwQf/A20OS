@@ -782,6 +782,14 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
     int r = a20_net_getsockopt_state(&v, level, optname, *optlen, &rep);
     if (r < 0)
         return r;
+    if (level == SOL_SOCKET && optname == SO_ERROR) {
+        /* Validate the output shape before consuming this shared socket state.
+         * Aliases must observe the error once, even when queried concurrently. */
+        uint64_t irq = net_sock_lock(s);
+        rep.val0 = s->pending_error;
+        s->pending_error = 0;
+        net_sock_unlock(s, irq);
+    }
     switch (rep.kind) {
     case NET_OPT_REPORT_INT: {
         int val = (int)rep.val0;
@@ -832,6 +840,10 @@ int net_shutdown_sock(net_socket_t *s, int how)
 {
     if (!s)
         return -ENOTSOCK;
+    if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR)
+        return -EINVAL;
+    int transport = net_inet_shutdown(s, how != SHUT_WR, how != SHUT_RD);
+    if (transport < 0) return transport;
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     net_socket_t *peer = NULL;

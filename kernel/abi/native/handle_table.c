@@ -19,6 +19,7 @@
 #include "core/timer.h"
 #include "mm/slab.h"
 #include "fs/vfs.h"
+#include "fs/locks.h"
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
 #include "abi/native/rights.h"
@@ -238,7 +239,7 @@ static const a20_rights_t a20_type_rights[A20_OBJ_HYP_VCPU + 1] = {
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT | A20_RIGHT_CONTROL,
     [A20_OBJ_PIPE_ENDPOINT]    = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
-                                 A20_RIGHT_DUP | A20_RIGHT_TRANSFER,
+                                 A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
     [A20_OBJ_CHANNEL_ENDPOINT] = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER,
     [A20_OBJ_EVENT_QUEUE]      = A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
@@ -287,6 +288,9 @@ struct a20_ht_internal *a20_ht_create(void)
 {
     struct a20_ht_internal *ht = kmalloc(sizeof(*ht));
     if (!ht) return NULL;
+    /* kmalloc may return another process's storage: initialize checkpoint
+     * state as well as slots before publishing this table. */
+    memset(ht, 0, sizeof(*ht));
 
     ht->security_label = 0; /* default: L (docs/native-abi/06-security.md §5.1) */
     refcount_set(&ht->refcount, 1);
@@ -356,6 +360,9 @@ void a20_handle_host_set_quota(struct a20_ht_internal *ht, uint32_t quota)
 void a20_ht_destroy(struct a20_ht_internal *ht)
 {
     if (!ht) return;
+#if !defined(CONFIG_MCU) && !defined(CONFIG_NATIVE_TASK_HANDLES_ONLY)
+    fs_locks_release_native(ht, NULL);
+#endif
 
 #ifndef CONFIG_NATIVE_TASK_HANDLES_ONLY
     extern void a20_channel_trace_dump(void);
@@ -739,6 +746,9 @@ int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h)
 
     if (!obj)
         return -A20_ERR_BAD_HANDLE;
+#if !defined(CONFIG_MCU) && !defined(CONFIG_NATIVE_TASK_HANDLES_ONLY)
+    if (type == A20_OBJ_FILE) fs_locks_release_native(ht, obj);
+#endif
     a20_object_release(obj, type);
     return A20_OK;
 }
@@ -1081,8 +1091,12 @@ void a20_temporal_sweep(struct a20_ht_internal *ht)
         }
         spin_unlock_irqrestore(&ht->lock, flags);
 
-        for (uint32_t i = 0; i < n; i++)
+        for (uint32_t i = 0; i < n; i++) {
+#if !defined(CONFIG_MCU) && !defined(CONFIG_NATIVE_TASK_HANDLES_ONLY)
+            if (types[i] == A20_OBJ_FILE) fs_locks_release_native(ht, objs[i]);
+#endif
             a20_object_release(objs[i], types[i]);
+        }
 
         if (n < A20_SWEEP_BATCH)
             break;

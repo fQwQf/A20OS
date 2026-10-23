@@ -1,4 +1,5 @@
 #include "fs/tty.h"
+#include "drivers/char/uart.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "core/string.h"
@@ -519,6 +520,42 @@ typedef struct {
     uint16_t v_signal;
     uint16_t v_state;
 } devfs_vt_stat_t;
+
+static spinlock_t g_tty_settings_lock = SPINLOCK_INIT;
+
+int tty_console_get_termios(ktty_termios_t *out) {
+    uint64_t flags = spin_lock_irqsave(&g_tty_settings_lock);
+    *out = g_dev_tty.termios;
+    spin_unlock_irqrestore(&g_tty_settings_lock, flags);
+    return 0;
+}
+int tty_console_flush(int queue) {
+    if (queue < 0 || queue > 2) return -EINVAL;
+    if (queue == 0 || queue == 2)
+        for (unsigned n = 0; n < 4096 && uart_try_getc() >= 0; n++) {}
+    /* Console output is written synchronously; there is no device TX queue. */
+    return 0;
+}
+int tty_console_set_termios(const ktty_termios_t *in, int action) {
+    if (action < 0 || action > 2) return -EINVAL;
+    if (action == 2) tty_console_flush(0);
+    uint64_t flags = spin_lock_irqsave(&g_tty_settings_lock);
+    g_dev_tty.termios = *in;
+    spin_unlock_irqrestore(&g_tty_settings_lock, flags);
+    return 0;
+}
+int tty_console_get_winsize(ktty_winsize_t *out) {
+    uint64_t flags = spin_lock_irqsave(&g_tty_settings_lock);
+    memcpy(out, &g_dev_tty.winsize, sizeof(*out));
+    spin_unlock_irqrestore(&g_tty_settings_lock, flags);
+    return 0;
+}
+int tty_console_set_winsize(const ktty_winsize_t *in) {
+    uint64_t flags = spin_lock_irqsave(&g_tty_settings_lock);
+    memcpy(&g_dev_tty.winsize, in, sizeof(*in));
+    spin_unlock_irqrestore(&g_tty_settings_lock, flags);
+    return 0;
+}
 
 int tty_console_ioctl(unsigned long req, void *arg) {
     /* Value-passing requests (no pointer dereference): the argument is the

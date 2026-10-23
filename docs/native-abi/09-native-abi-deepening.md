@@ -4,6 +4,9 @@
 >
 > **实现状态（2026-08）**：§2-§7 的应包装项与深化项均已实现并通过 `smoke-native-deepen`（Pager、monitor、task_mem、vm_share_region、vm_protect capability、FS 事件、socket 事件源）；`check-abi-boundary` 与 `check-doc-drift` 通过。§8 的其余深化项为后续演进。
 
+> 2026-10-23：socket configuration 已按固定字段 Native 控制实现，见
+> [运行时扩展 §5](10-runtime-extensions.md#5-类型化-handle-control)。拒绝任意 `level/optname/optval` 透传的设计约束不变。
+
 ## 1. 机制三分清单
 
 内核为 Linux ABI 实现了一批"独有内核机制"（io_uring、perf、userfaultfd、 epoll、inotify/fanotify、eventfd/timerfd/signalfd、SysV 三件套、POSIX mq、 keyring、pidfd、AIO、file-handle、mount-context、Landlock、cgroupfs/PSI、 drvmod、acct、rseq 等）。原始盘点（2026-08）列 21 项；此后落地的子系统另在 §1.4 补判。按 A20 原则逐类判定：

@@ -335,8 +335,11 @@ int64_t sys_a20_clock_resolution(const a20_syscall_args_t *args)
     a20_time_ns_t *out = (a20_time_ns_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
-    a20_time_ns_t res = 1000000;
-    if (clock_id == 0 || clock_id == 1) res = 1;
+    if (clock_id != 0 && clock_id != 1 && clock_id != 4 && clock_id != 5 && clock_id != 6)
+        return -A20_ERR_INVALID_ARGUMENT;
+    uint64_t frequency = TICKS_PER_SEC;
+    if (!frequency) return -A20_ERR_IO;
+    a20_time_ns_t res = 1000000000ULL / frequency + !!(1000000000ULL % frequency);
     if (copy_to_user(out, &res, sizeof(res)) < 0) return -A20_ERR_FAULT;
     return A20_OK;
 }

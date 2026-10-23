@@ -5,6 +5,7 @@
 
 #define FS_LOCK_OWNER_PID 1
 #define FS_LOCK_OWNER_OFD 2
+#define FS_LOCK_OWNER_NATIVE 3 /* shared Native capability-table identity */
 
 typedef struct fs_flock {
     short l_type;
@@ -17,6 +18,7 @@ typedef struct fs_flock {
 int fs_locks_get(vfile_t *vf, fs_flock_t *lk, int owner_kind, uintptr_t owner);
 int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind, uintptr_t owner, int wait);
 int fs_flocks_apply(vfile_t *vf, int operation);
+void fs_locks_release_native(void *owner, vfile_t *file);
 void fs_locks_release_process(int pid);
 void fs_locks_release_process_file(vfile_t *vf, int pid);
 void fs_locks_release_file(vfile_t *vf, uintptr_t owner);

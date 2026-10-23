@@ -325,6 +325,7 @@ typedef struct net_socket {
     int local_tcp;
     int tcp_connecting;
     int tcp_err;
+    int pending_error; /* positive errno, consumed by SO_ERROR under socket lock */
     int tcp_nodelay;
     /* Congestion control requested via TCP_CONGESTION, as a TCP_CONG_*
      * value from lwip/priv/tcp_cubic_priv.h.  TCP_CONG_RENO is the default
@@ -1303,6 +1304,7 @@ void     net_inet_socket_destroy(net_socket_t *s);
 void     net_inet_bottom_half_process_socket(net_socket_t *s);
 void     net_inet_bottom_half_process_all(void);
 int      net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen);
+int      net_inet_shutdown(net_socket_t *s, int receive, int transmit);
 int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
                           const void *connect_addr, size_t peer_len);
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
