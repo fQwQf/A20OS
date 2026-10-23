@@ -1123,6 +1123,7 @@ static int32_t elf_load_tx_commit(void *opaque, const a20_elf_load_result_t *r)
         .tls_tp = (vaddr_t)r->tls_tp, .interp_base = (vaddr_t)r->interp_base,
         .mmap = (struct mm_seg *)(uintptr_t)r->mmap,
         .is_native_abi = r->is_native_abi,
+        .path = tx->path,
     };
 #ifdef CONFIG_NOMMU
     elf_transfer_nommu_allocs(&tx->mm, tx->info);
@@ -1378,7 +1379,12 @@ int elf_probe_foreign(int fd, elf_guest_key_t *out)
 
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     elf_rust_src_t src = { .fd = -1, .buf = buf, .buf_len = len };
-    return elf_rust_load_planned(&src, "<buffer>", info);
+    int r = elf_rust_load_planned(&src, "<buffer>", info);
+    /* No filesystem path exists for AT_EXECFN; publish none rather than a
+     * synthetic "<buffer>" that no loader could resolve. */
+    if (r == 0)
+        info->path = NULL;
+    return r;
 }
 
 
@@ -1487,8 +1493,9 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
     int32_t r = a20_elf_write_linux_stack(
         stack_top, sizeof(uintptr_t), argv_ptrs, argv_lens, (size_t)argc,
         envp_ptrs, envp_lens, (size_t)envc,
-        (const uint8_t *)platform, strlen(platform), &aux,
-        &writer, elf_stack_copy_ffi, elf_stack_random_ffi,
+        (const uint8_t *)platform, strlen(platform),
+        (const uint8_t *)info->path, info->path ? strlen(info->path) : 0,
+        &aux, &writer, elf_stack_copy_ffi, elf_stack_random_ffi,
         out_auxv ? (uintptr_t *)out_auxv : NULL, out_auxv_n, &sp);
     return r < 0 ? 0 : (vaddr_t)sp;
 }
