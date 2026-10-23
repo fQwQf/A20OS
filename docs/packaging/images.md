@@ -1,6 +1,6 @@
 # 镜像组装：world 清单与 mkrootfs
 
-最后核实：2026-08-27（与 `tools/mkrootfs.py` 同步维护）。
+最后核实：2026-10-23（与 `tools/mkrootfs.py` 同步维护）。
 
 ## world 文件：镜像即清单
 
@@ -22,7 +22,7 @@ git
 
 - `#` 开头（或行内 `#` 之后）是注释；空行忽略；
 - 支持 apk 的版本约束语法：`vim=9.1.*`、`git>=2.4` 等；
-- 一行一个包，不允许行内空格。
+- 一行一个包；可加架构前缀，如 `[x86_64,aarch64] libreoffice-writer`，只在选定架构安装。前缀外仍不允许包名含空格。
 
 **组合镜像 = 编辑清单**。这正是旧体系做不到的事：要一个"带 vim 的最小
 系统"，复制 base.world、加一行 `vim`，组装即可，不需要改任何 Makefile。
@@ -34,6 +34,7 @@ git
 | `min` | a20-min + a20-drivers（**面向真机出厂**的最小用户态） | 无 |
 | `base` | a20-base + a20-drivers（纯自有，对应旧 disk.img 的内容） | 无 |
 | `devel` | base + Alpine 上游 musl/busybox/vim/git/curl 等 | 需要访问 Alpine 镜像站 |
+| `xfce` | XFCE/labwc + Firefox、IBus/Rime、Geany、Evince、KeePassXC、GIMP；x86_64/AArch64 另含 LibreOffice Writer/Calc。提供 guest apk | 需要访问 Alpine 镜像站 |
 | `server` | Alpine 上游 dropbear（SSH）/ chrony（NTP）/ busybox syslogd+crond，overlay init 拉起（实例 `server-riscv64`，SSH 转发 host:2222）；声明层就绪，端到端验证待办 | 需要访问 Alpine 镜像站 |
 | `cli` | Alpine 上游 zsh + GNU coreutils/findutils/grep/sed/gawk + git/vim/tmux/htop/curl/python3 等，overlay init 直接开出 zsh 登录 shell（实例 `cli-<arch>`，纯命令行工作站，171 个包 / 156 MiB） | 需要访问 Alpine 镜像站 |
 
@@ -56,9 +57,8 @@ initramfs 的 `RAMFS_USER_PROGRAMS` 对齐，保证"内建 initramfs 启动"和"
 需要 Alpine 生态（vim/git/桌面）时用 `devel` / `xfce`，那些 world 不基于
 `min`。取舍理由写在 `packages/recipes/a20-min.toml` 的注释里。
 
-> 完整的 XFCE 桌面发行版路径（`make distro-run`，chroot 进 Alpine
-> rootfs）仍然由 `user/rootfs/alpine/` 承载；它本身就是同一思路的先驱，
-> 后续可作为 `desktop.world` 迁入本体系，见 [migration.md](migration.md)。
+XFCE 已使用 `packages/world/xfce.world` 与 `packages/overlay/xfce/`；软件实测范围见
+[2026-10-23 桌面与 apk 验证](../status/history/desktop-apps-apk-2026-10-23.md)。
 
 ## 组装：`mkrootfs.py`
 
@@ -80,8 +80,10 @@ tools/mkrootfs.py --arch riscv64 \
    `/tmp` tmpfs；该目录随 `make clean` 一并删除，不会像 `/tmp` 那样留下
    清不掉的残留），且开始前先核对该文件系统的可用空间，不足则直接报错退出；
 3. 应用 `--overlay` 目录（可选，层层覆盖）；
-4. 写入 `/etc/apk/repositories`（仅远程仓库），让镜像内的系统
-   将来也能 `apk add`；
+4. 写入 `/etc/apk/repositories`（仅远程仓库），并把 `--keys-dir` 下的
+   `*.rsa.pub` 公钥复制到 `/etc/apk/keys`（不复制私钥）。`xfce` 清单包含
+   `apk-tools` 与 `alpine-keys`，启动后可直接使用 `apk`；其他清单若要提供该
+   命令，也需要显式加入 `apk-tools`；
 5. `mkfs.ext4 -d staging` 产出镜像。
 
 ### 权限与 --usermode

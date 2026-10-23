@@ -236,9 +236,28 @@ static int test_semop_transactions(void)
     return 0;
 }
 
+static int test_shm_attach_after_rmid(void)
+{
+    int id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+    CHK(id >= 0, "shmget removed attach");
+    char *first = shmat(id, NULL, 0);
+    CHK(first != (void *)-1, "first shmat");
+    strcpy(first, "parent");
+    CHK(shmctl(id, IPC_RMID, NULL) == 0, "mark shared segment removed");
+    char *second = shmat(id, NULL, 0);
+    CHK(second != (void *)-1, "shmat after IPC_RMID (GIMP plug-in pattern)");
+    CHK(strcmp(second, "parent") == 0, "shared bytes after IPC_RMID");
+    strcpy(second, "plugin");
+    CHK(strcmp(first, "plugin") == 0, "shared write after IPC_RMID");
+    CHK(shmdt(first) == 0 && shmdt(second) == 0, "last detach removes segment");
+    CHK(shmat(id, NULL, 0) == (void *)-1, "removed segment cannot be resurrected");
+    puts("  shmat after IPC_RMID: shared bytes and last-detach lifetime");
+    return 0;
+}
+
 int main(void)
 {
-    if (test_shm_info() || test_shm_stat() || test_msg_stat() ||
+    if (test_shm_info() || test_shm_stat() || test_shm_attach_after_rmid() || test_msg_stat() ||
         test_sem_stat() || test_semop_transactions()) {
         printf("SYSV_IPC_ABI: FAIL\n");
         return 1;

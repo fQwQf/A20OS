@@ -147,17 +147,6 @@ static void bprm_free(exec_bprm_t *bprm)
     }
 }
 
-static int exec_replace_path(exec_bprm_t *bprm, const char *path)
-{
-    char *copy = kmalloc(strlen(path) + 1);
-    if (!copy)
-        return -ENOMEM;
-    strcpy(copy, path);
-    kfree(bprm->path);
-    bprm->path = copy;
-    return 0;
-}
-
 /* ================================================================== */
 /*  exec_copy_args — copy argv OR envp from user into kernel arrays   */
 /* ================================================================== */
@@ -1116,7 +1105,11 @@ static void exec_cb_auxv(void *opaque)
 }
 
 static int32_t exec_cb_unshare(void *opaque)
-{ return fdtable_unshare(((exec_rust_context_t *)opaque)->task); }
+{
+    task_t *t = ((exec_rust_context_t *)opaque)->task;
+    int rc = fdtable_unshare(t);
+    return rc < 0 ? rc : signal_exec_unshare(t);
+}
 static void exec_cb_siblings(void *opaque)
 {
     exec_rust_context_t *c = opaque;
@@ -1369,38 +1362,12 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         return r;
     }
 
-    /* ---- 2. Resolve absolute path for exec_path ---- */
+    /* Keep the caller's spelling in bprm.path: a script interpreter opens
+     * that pathname again in the same cwd/chroot. exec_open_and_check fills
+     * abs_path from the opened vnode for ELF metadata and /proc; passing that
+     * global VFS path as a script argument would leak the chroot prefix
+     * (e.g. apk's lib/apk/exec/... becomes an inaccessible /extra/lib/...). */
     char abs_path[MAX_PATH_LEN];
-    const char *cwd = t->fs.cwd[0] ? t->fs.cwd : "/";
-    const char *root = t->fs.root_path[0] ? t->fs.root_path : "/";
-    if (bprm.path[0] == '/') {
-        if (strcmp(root, "/") == 0) {
-            strncpy(abs_path, bprm.path, MAX_PATH_LEN - 1);
-            abs_path[MAX_PATH_LEN - 1] = '\0';
-        } else {
-            snprintf(abs_path, MAX_PATH_LEN, "%s%s", root, bprm.path);
-        }
-    } else {
-        size_t cwd_len = strlen(cwd);
-        if (cwd_len > 0 && cwd[cwd_len - 1] == '/')
-            snprintf(abs_path, MAX_PATH_LEN, "%s%s", cwd, bprm.path);
-        else
-            snprintf(abs_path, MAX_PATH_LEN, "%s/%s", cwd, bprm.path);
-        if (strcmp(root, "/") != 0) {
-            char rooted[MAX_PATH_LEN];
-            snprintf(rooted, MAX_PATH_LEN, "%s%s", root, abs_path);
-            strncpy(abs_path, rooted, MAX_PATH_LEN - 1);
-            abs_path[MAX_PATH_LEN - 1] = '\0';
-        }
-    }
-    vfs_path_normalize_absolute_with_root(abs_path, root);
-    if (bprm.path[0] != '/') {
-        r = exec_replace_path(&bprm, abs_path);
-        if (r < 0) {
-            bprm_free(&bprm);
-            return r;
-        }
-    }
 
     /* ---- 3. Iterative format resolution loop ---- */
     kstat_t exec_st;

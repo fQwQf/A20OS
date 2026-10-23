@@ -132,7 +132,8 @@ void proc_task_init_base(task_t *t, task_t *parent);
 void proc_task_init_seccomp(task_t *t, task_t *parent);
 void proc_task_init_fs_cgroup(task_t *t, task_t *parent);
 void proc_task_init_files(task_t *t, task_t *parent, uint64_t clone_flags);
-int proc_task_init_signals(task_t *t, task_t *parent, int checked);
+int proc_task_init_signals(task_t *t, task_t *parent, uint64_t clone_flags,
+                           int checked);
 void proc_task_park_counters_init(void);
 void proc_task_init_detached(task_t *t);
 task_t *proc_task_alloc_storage(void);

@@ -14,9 +14,9 @@
 //! counters.
 //!
 //! Everything that is a *decision* is here: the all-or-nothing capacity
-//! reservation and the chunking of a TCP segment (staging part of it and
-//! returning ERR_MEM would replay the segment on the retry and duplicate the
-//! part already staged); the spill-versus-copy choice for a datagram; what a
+//! reservation of a whole TCP receive (staging part of it and returning
+//! ERR_MEM would replay it on retry and duplicate bytes); the spill-versus-copy
+//! choice for a payload; what a
 //! full ring costs in each callback (drop, or leave the pbuf with lwIP); the
 //! order in which the connected/error/closed flags are exchanged and applied --
 //! the ring is drained against the *pre-existing* local close, and the peer's
@@ -94,6 +94,7 @@ unsafe extern "C" {
     fn a20_net_bh_commit(s: *mut c_void);
     fn a20_net_bh_consume(s: *mut c_void) -> *mut c_void;
     fn a20_net_bh_consume_commit(s: *mut c_void);
+    fn a20_net_bh_reclaim_spills(s: *mut c_void);
     fn a20_net_bh_stage_payload(s: *mut c_void, event: *mut c_void, p: *mut c_void,
                                 off: u32, len: usize);
     fn a20_net_bh_pbuf_len(p: *mut c_void) -> u32;
@@ -119,7 +120,6 @@ unsafe extern "C" {
     fn a20_net_bh_wakeq_init(wake_q: *mut c_void);
     fn a20_net_bh_wakeq_flush(wake_q: *mut c_void);
     fn a20_net_bh_wake_all(s: *mut c_void, which: i32);
-    fn a20_net_bh_inline_payload() -> u32;
     fn a20_net_bh_max_sockets() -> i32;
     fn a20_net_bh_accept_pending(s: *mut c_void) -> i32;
 }
@@ -197,8 +197,9 @@ pub unsafe extern "C" fn a20_net_bh_schedule(s: *mut c_void) -> i32 {
 
 /* --------------------------------------------------------------- producer */
 
-/// Stage a whole received TCP segment, splitting it across as many events as
-/// that takes.
+/// Stage a whole TCP receive in one event. lwIP can join several segments
+/// after reordering or refusal, so a pbuf can exceed the entire inline ring.
+/// The C payload primitive holds larger chains by reference, as for datagrams.
 ///
 /// All or nothing, deliberately: an lwIP recv callback that returns anything
 /// other than ERR_OK is telling lwIP it did *not* take the pbuf, which parks it
@@ -212,30 +213,16 @@ pub unsafe extern "C" fn a20_net_bh_stage_tcp(s: *mut c_void, p: *mut c_void) ->
         return 0;
     }
     let total = a20_net_bh_pbuf_len(p);
-    let inline_payload = a20_net_bh_inline_payload();
-    let mut need = (total + inline_payload - 1) / inline_payload;
-    if need == 0 {
-        need = 1;
-    }
-    if a20_net_bh_reserve(s, need) == 0 {
+    if a20_net_bh_reserve(s, 1) == 0 {
         return 0;
     }
-    let mut off: u32 = 0;
-    while off < total {
+    if total != 0 {
         let mut event: *mut c_void = ptr::null_mut();
         if a20_net_bh_prepare(s, &mut event) < 0 {
-            /* Unreachable after a successful reservation; keeping the check
-             * means a ring that shrank under us fails closed rather than
-             * overrunning. */
             return 0;
         }
-        let mut n = total - off;
-        if n > inline_payload {
-            n = inline_payload;
-        }
-        a20_net_bh_stage_payload(s, event, p, off, n as usize);
+        a20_net_bh_stage_payload(s, event, p, 0, total as usize);
         a20_net_bh_commit(s);
-        off += n;
     }
     1
 }
@@ -479,6 +466,7 @@ pub unsafe extern "C" fn a20_net_bh_process_socket(s: *mut c_void) {
     (*(v.bh_pending as *const AtomicI32)).store(0, Ordering::Release);
     a20_net_bh_slot_clear(s);
     a20_net_bh_socket_unlock(s, irq);
+    a20_net_bh_reclaim_spills(s);
     if accept_pending != 0 && a20_net_bh_accept_drain(s, wake_q.as_mut_ptr()) != 0 {
         drain |= DRAIN_ACCEPT;
     }
@@ -617,7 +605,6 @@ mod tests {
     static mut T_STAGE_OFFS: [u32; 16] = [0; 16];
     static mut T_STAGE_CALLS: i32 = 0;
     static mut T_SPILL_AT: i32 = -1;
-    static mut T_INLINE_PAYLOAD: u32 = 4;
     static mut T_MAX_SOCKETS: i32 = 8;
     static mut T_PUBLISH: i32 = 0;
     static mut T_FREE_CALLS: i32 = 0;
@@ -697,7 +684,6 @@ mod tests {
         T_STAGE_OFFS = [0; 16];
         T_STAGE_CALLS = 0;
         T_SPILL_AT = -1;
-        T_INLINE_PAYLOAD = 4;
         T_MAX_SOCKETS = 8;
         T_PUBLISH = 0;
         T_FREE_CALLS = 0;
@@ -778,11 +764,6 @@ mod tests {
     }
 
     #[no_mangle]
-    unsafe extern "C" fn a20_net_bh_inline_payload() -> u32 {
-        T_INLINE_PAYLOAD
-    }
-
-    #[no_mangle]
     unsafe extern "C" fn a20_net_bh_max_sockets() -> i32 {
         T_MAX_SOCKETS
     }
@@ -824,6 +805,9 @@ mod tests {
     unsafe extern "C" fn a20_net_bh_consume_commit(_s: *mut c_void) {
         T_TAIL += 1;
     }
+
+    #[no_mangle]
+    unsafe extern "C" fn a20_net_bh_reclaim_spills(_s: *mut c_void) {}
 
     #[no_mangle]
     unsafe extern "C" fn a20_net_bh_stage_payload(_s: *mut c_void, event: *mut c_void,
@@ -1011,19 +995,26 @@ mod tests {
     /* -------------------------------------------------------- producers */
 
     #[test]
-    fn tcp_staging_chunks_a_segment_and_is_all_or_nothing() {
+    fn tcp_staging_accepts_coalesced_chains_and_is_all_or_nothing() {
         unsafe {
             let _serial = serial();
             reset();
             let mut s = Sock::new();
             let mut p = Pbuf { len: 10 };
 
-            /* Inline payload is 4: 10 bytes take three events, all reserved up
-             * front. */
+            /* A coalesced receive may exceed the whole inline ring. It must
+             * still fit in one event using the pbuf spill path. */
             assert_eq!(a20_net_bh_stage_tcp(s.p(), &mut p as *mut Pbuf as *mut c_void), 1);
-            assert_eq!(T_STAGE_CALLS, 3);
-            assert_eq!(T_STAGE_LENS[..3], [4, 4, 2]);
-            assert_eq!(T_STAGE_OFFS[..3], [0, 4, 8]);
+            assert_eq!(T_STAGE_CALLS, 1);
+            assert_eq!(T_STAGE_LENS[0], 10);
+            assert_eq!(T_STAGE_OFFS[0], 0);
+
+            reset();
+            let mut s = Sock::new();
+            p.len = 65535;
+            assert_eq!(a20_net_bh_stage_tcp(s.p(), &mut p as *mut Pbuf as *mut c_void), 1);
+            assert_eq!(T_STAGE_CALLS, 1);
+            assert_eq!(T_STAGE_LENS[0], 65535);
 
             /* A failed reservation stages nothing at all. */
             reset();

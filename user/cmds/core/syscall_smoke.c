@@ -898,7 +898,10 @@ int main(int argc, char **argv)
     if (write(ofd, msg, strlen(msg)) != (ssize_t)strlen(msg))
         return fail("renameat-write");
     close(ofd);
-    if (syscall(SYS_renameat, AT_FDCWD, oldpath, AT_FDCWD, newpath) < 0)
+    /* A four-argument syscall must ignore the unused fifth register.  apk's
+     * safe-file commit exercises this with nonzero garbage left in r8. */
+    if (syscall(SYS_renameat, AT_FDCWD, oldpath, AT_FDCWD, newpath,
+                0x40000000UL) < 0)
         return fail("renameat");
     if (stat(newpath, &st) < 0 || st.st_size != (off_t)strlen(msg))
         return fail("renameat-stat");

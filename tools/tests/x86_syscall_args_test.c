@@ -36,10 +36,18 @@ static void test_rmdir_flags(void)
     assert(args.arg[2] == 0x200);
 }
 
+static void test_renameat_arity(void)
+{
+    /* r8 is caller scratch for renameat, but carries flags for renameat2. */
+    assert(x86_syscall_to_kernel_nr(X86_SYS_renameat) == SYS_renameat);
+    assert(x86_syscall_to_kernel_nr(X86_SYS_renameat2) == SYS_renameat2);
+}
+
 int main(void)
 {
     test_unlink_flags();
     test_rmdir_flags();
+    test_renameat_arity();
     puts("x86_syscall_args_test: PASS");
     return 0;
 }

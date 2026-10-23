@@ -76,6 +76,9 @@
 #define EXT4_FT_DIRENT_TAIL 0xDE
 
 #define EXT4_ROOT_INO      2
+#define EXT4_INDEX_FL      0x00001000
+#define EXT4_BG_INODE_UNINIT 0x0001
+#define EXT4_BG_BLOCK_UNINIT 0x0002
 
 #ifndef S_IFLNK
 #define S_IFLNK            0120000

@@ -21,6 +21,11 @@ GPU。下载脚本读取 Mojang 版本清单并按 SHA1 校验客户端、librar
 本次完整数据为 107 个 library、9 个 native、4591 个 asset 对象，资源索引 29。
 镜像内文件位于 `/usr/share/a20-media/1.21.11`；客户端数据不会提交进 Git。
 
+桌面镜像自动打包 `build/minecraft/*` 中原生库 ELF 架构与目标架构一致的
+客户端。客体 `minecraft` 命令再次根据 `uname -m` 检查原生库；同时存在多个
+架构的资源时，不会因目录排序而选中 RISC-V。显式 `MC_HOME` 也必须匹配，
+游戏版本从 `version.json` 读取，目录名中的架构后缀不会进入版本号。
+
 在已经启动的桌面中，点击 Minecraft 菜单入口或运行：
 
 ```sh

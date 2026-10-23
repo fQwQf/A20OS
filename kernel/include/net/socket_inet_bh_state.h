@@ -84,6 +84,7 @@ int  a20_net_bh_prepare(void *s, void **event_out);
 void a20_net_bh_commit(void *s);
 void *a20_net_bh_consume(void *s);
 void a20_net_bh_consume_commit(void *s);
+void a20_net_bh_reclaim_spills(void *s);
 void a20_net_bh_stage_payload(void *s, void *event, void *p, uint32_t off,
                               size_t len);
 uint32_t a20_net_bh_pbuf_len(void *p);

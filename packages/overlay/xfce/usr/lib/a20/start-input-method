@@ -1,0 +1,10 @@
+#!/bin/sh
+# Labwc implements input-method-v2. IBus supplies the Wayland keyboard and
+# candidate panel together with its XIM bridge for Xwayland applications.
+if ! command -v ibus >/dev/null 2>&1; then
+    exit 0
+fi
+
+# The native Wayland panel must not inherit toolkit-module overrides.
+unset GTK_IM_MODULE QT_IM_MODULE
+exec ibus start --type wayland

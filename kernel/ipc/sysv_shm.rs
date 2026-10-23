@@ -209,7 +209,9 @@ pub unsafe extern "C" fn a20_sysv_shm_attach_txn(table: *mut SysvShm, ctx: *mut 
     if table.is_null() || id < 0 || id as usize >= MAX { return -EINVAL; }
     let irq = unsafe { a20_sysv_shm_lock(ctx) };
     let obj = unsafe { &mut *table.add(id as usize) };
-    if obj.used == 0 || obj.namespace_ino != unsafe { a20_sysv_shm_namespace(ctx) } || obj.marked_delete != 0 {
+    // Linux allows shmat after IPC_RMID while another attachment keeps the
+    // segment alive. GIMP removes the name before its plug-ins attach.
+    if obj.used == 0 || obj.namespace_ino != unsafe { a20_sysv_shm_namespace(ctx) } {
         unsafe { a20_sysv_shm_unlock(ctx, irq) };
         return -EINVAL;
     }
@@ -306,13 +308,17 @@ mod tests {
             assert_eq!(a20_sysv_shm_ref_txn(table.as_mut_ptr(), ctx, 0, 1), 0);
             assert_eq!(a20_sysv_shm_control_txn(table.as_mut_ptr(), ctx, 0, IPC_RMID, core::ptr::null_mut()), 0);
             assert_eq!(a20_sysv_shm_ref_txn(table.as_mut_ptr(), ctx, 0, 1), 0);
-            assert_eq!(a20_sysv_shm_attach_txn(table.as_mut_ptr(), ctx, 0), -EINVAL);
+            assert_eq!(a20_sysv_shm_get_txn(table.as_mut_ptr(), ctx, 17, 1, 0), -ENOENT);
+            assert_eq!(a20_sysv_shm_attach_txn(table.as_mut_ptr(), ctx, 0), 0);
         }
-        assert_eq!((table[0].marked_delete, table[0].nattach, mock.freed), (1, 2, 0));
+        assert_eq!((table[0].marked_delete, table[0].nattach, mock.freed), (1, 3, 0));
+        unsafe { assert_eq!(a20_sysv_shm_ref_txn(table.as_mut_ptr(), ctx, 0, -1), 0) };
+        assert_eq!((table[0].used, mock.freed), (1, 0));
         unsafe { assert_eq!(a20_sysv_shm_ref_txn(table.as_mut_ptr(), ctx, 0, -1), 0) };
         assert_eq!((table[0].used, mock.freed), (1, 0));
         unsafe { assert_eq!(a20_sysv_shm_ref_txn(table.as_mut_ptr(), ctx, 0, -1), 0) };
         assert_eq!((table[0].used, mock.freed), (0, 2));
+        unsafe { assert_eq!(a20_sysv_shm_attach_txn(table.as_mut_ptr(), ctx, 0), -EINVAL) };
         assert!(!mock.locked);
     }
 

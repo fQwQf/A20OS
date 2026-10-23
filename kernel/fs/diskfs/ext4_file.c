@@ -35,31 +35,34 @@ void ext4_fctx_inode_dirty(ext4_fctx_t *fc) {
 }
 
 
+/* Readers and writeback may hold an older EOF snapshot while a buffered
+ * writer extends the vnode. Only truncate may shrink it. A plain assignment
+ * here can make the next writeback skip dirty pages beyond that stale EOF. */
+static void ext4_publish_size(vfile_t *vf, uint64_t size)
+{
+    if (!vf->vnode) return;
+    size_t old = __atomic_load_n(&vf->vnode->size, __ATOMIC_ACQUIRE);
+    while (old < size && !__atomic_compare_exchange_n(&vf->vnode->size,
+            &old, (size_t)size, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
+    if (vf->vnode->fs_data) {
+        ext4_vnode_priv_t *fp = vf->vnode->fs_data;
+        uint64_t previous = __atomic_load_n(&fp->file_size, __ATOMIC_ACQUIRE);
+        while (previous < size && !__atomic_compare_exchange_n(&fp->file_size,
+                &previous, size, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
+    }
+}
+
 void ext4_fctx_refresh_size(vfile_t *vf, ext4_fctx_t *fc) {
     ext4_inode_t inode;
     if (ext4_read_inode(fc->sb, fc->inode_num, &inode) < 0) return;
-    fc->file_size = ext4_inode_size(&inode);
-    if (vf->vnode) {
-        vf->vnode->size = fc->file_size;
-        if (vf->vnode->fs_data) {
-            ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
-            fp->file_size = fc->file_size;
-        }
-    }
+    ext4_fctx_set_size(vf, fc, ext4_inode_size(&inode));
 }
-
 
 void ext4_fctx_set_size(vfile_t *vf, ext4_fctx_t *fc, uint64_t size) {
-    fc->file_size = size;
-    if (vf->vnode) {
-        vf->vnode->size = fc->file_size;
-        if (vf->vnode->fs_data) {
-            ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
-            fp->file_size = fc->file_size;
-        }
-    }
+    ext4_publish_size(vf, size);
+    fc->file_size = vf->vnode && vf->vnode->size > size
+        ? vf->vnode->size : size;
 }
-
 
 int ext4_fread(vfile_t *vf, char *buf, size_t count) {
     ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
@@ -143,6 +146,15 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             size_t wanted = (count - done) / bs;
             if (wanted > 256)
                 wanted = 256;
+            /* The writeback window may span a hole followed by existing
+             * extents. Allocate only the hole: growing across a mapped block
+             * inserts overlapping extents and leaks its old allocation. */
+            for (size_t i = 1; i < wanted; i++) {
+                if (ext4_block_map_cached(fc, inode, lblk + (uint32_t)i)) {
+                    wanted = i;
+                    break;
+                }
+            }
             uint64_t first_phys = 0;
             size_t allocated = ext4_alloc_blocks_uninitialized(
                 fc->sb, wanted, &first_phys);
@@ -198,11 +210,7 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             ext4_inode_set_size(inode, fc->file_size);
             inode_dirty = 1;
         }
-        if (vf->vnode && vf->vnode->fs_data) {
-            ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)vf->vnode->fs_data;
-            fp->file_size = final_size;
-            vf->vnode->size = final_size;
-        }
+        ext4_publish_size(vf, final_size);
         vf->offset = fc->file_off;
     }
     /* A contiguous page-cache batch may allocate many adjacent blocks.  The
@@ -227,8 +235,8 @@ int ext4_vn_readpage(vnode_t *vn, uint64_t index,
 
     memset(data, 0, len);
     uint64_t logical_size = vn->size;
-    if (logical_size > fp->file_size)
-        fp->file_size = logical_size;
+    vfile_t size_vf = { .vnode = vn };
+    ext4_publish_size(&size_vf, logical_size);
     uint64_t off = index * PAGE_SIZE;
     if (off >= logical_size)
         return 0;
@@ -340,8 +348,8 @@ int ext4_vn_writepage(vnode_t *vn, uint64_t index,
         return -EISDIR;
 
     uint64_t logical_size = vn->size;
-    if (logical_size > fp->file_size)
-        fp->file_size = logical_size;
+    vfile_t size_vf = { .vnode = vn };
+    ext4_publish_size(&size_vf, logical_size);
     uint64_t off = index * PAGE_SIZE;
     if (off >= logical_size)
         return 0;
@@ -380,8 +388,8 @@ int ext4_vn_writepages(vnode_t *vn, uint64_t index,
         return -EISDIR;
 
     uint64_t logical_size = vn->size;
-    if (logical_size > fp->file_size)
-        fp->file_size = logical_size;
+    vfile_t size_vf = { .vnode = vn };
+    ext4_publish_size(&size_vf, logical_size);
     uint64_t off = index * PAGE_SIZE;
     if (off >= logical_size)
         return 0;
@@ -517,8 +525,8 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
         uint64_t disk_size = ext4_inode_size(&fc->inode);
         if (disk_size > current_size)
             current_size = disk_size;
-        fp->file_size = current_size;
-        vn->size = current_size;
+        vfile_t size_vf = { .vnode = vn };
+        ext4_publish_size(&size_vf, current_size);
         fc->inode_valid = 1;
     }
     fc->file_size = current_size;

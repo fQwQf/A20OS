@@ -241,7 +241,10 @@ struct PagePinGuard {
 
 impl PagePinGuard {
     unsafe fn pin(page: *mut PageCachePage, bucket_pinned: *mut usize) -> Self {
-        unsafe { a20_pagecache_pin(page, bucket_pinned) };
+        unsafe {
+            a20_pagecache_pin(page, bucket_pinned);
+            (*page).accessed = 1;
+        }
         Self { page, bucket_pinned }
     }
 
@@ -504,6 +507,14 @@ pub unsafe extern "C" fn a20_pagecache_writeback_transaction(
         let first = pages[0];
         let page_vn = unsafe { (*first).vnode as *mut VnodeHead };
         let index = unsafe { (*first).index };
+        // A whole-cache flush owns the global collector gate, not the
+        // per-vnode writeback gate. It must also take the actual vnode's
+        // gate before touching its inode: otherwise sync/pressure writeback
+        // and a concurrent fsync can publish competing extent snapshots.
+        let global_batch = vn.is_null() && !page_vn.is_null();
+        if global_batch {
+            serial_lock(page_vn);
+        }
         let batched = writepage.is_none() && batch_allowed(page_vn, count) != 0;
         let count = if batched || count == 1 {
             count
@@ -544,6 +555,9 @@ pub unsafe extern "C" fn a20_pagecache_writeback_transaction(
                 put(*page);
                 *page = core::ptr::null_mut();
             }
+        }
+        if global_batch {
+            serial_unlock(page_vn);
         }
         if result < 0 {
             break;
@@ -1262,6 +1276,12 @@ pub unsafe extern "C" fn a20_pagecache_evict_scan(
         let mut visited = 0usize;
         while p != lru_head && visited < budget {
             visited += 1;
+            // Move every visited descriptor, including pinned/dirty ones,
+            // away from the tail. Otherwise each bounded call inspects the
+            // same window forever while clean pages beyond it go unused.
+            let next = (*p).prev;
+            a20_pagecache_lru_remove(p);
+            a20_pagecache_lru_insert_front(lru_head, p);
             if ref_read(p) == 0
                 && (*p).dirty == 0
                 && reclaimable((*p).pfn) != 0
@@ -1275,7 +1295,7 @@ pub unsafe extern "C" fn a20_pagecache_evict_scan(
                         if (*p).accessed != 0 {
                             (*p).accessed = 0;
                             unlockb(blk, bflags);
-                            p = (*p).prev;
+                            p = next;
                             continue;
                         }
                         *out_vnode = a20_pagecache_detach(
@@ -1292,7 +1312,7 @@ pub unsafe extern "C" fn a20_pagecache_evict_scan(
                         scan(account, visited);
                         return p;
                     }
-                    p = (*p).prev;
+                    p = next;
                     continue;
                 }
                 // Free descriptor: not in any hash chain, no bucket lock needed.
@@ -1302,7 +1322,7 @@ pub unsafe extern "C" fn a20_pagecache_evict_scan(
                 scan(account, visited);
                 return p;
             }
-            p = (*p).prev;
+            p = next;
         }
         scan(account, visited);
         core::ptr::null_mut()
@@ -1716,6 +1736,7 @@ pub unsafe extern "C" fn a20_pagecache_get_transaction(
     global_lock: Option<CacheLockFn>, global_unlock: Option<CacheUnlockFn>,
     bucket_lock: Option<CacheBucketLockFn>, bucket_unlock: Option<CacheBucketUnlockFn>,
     grow: Option<CacheGrowFn>, evict: Option<CacheEvictFn>,
+    sweep_limit: Option<extern "C" fn(*mut c_void) -> usize>,
     pressure_writeback: Option<CachePressureWritebackFn>,
     zero_page: Option<CachePageZeroFn>, vnode_get: Option<CacheVnodeRefFn>,
     vnode_put: Option<CacheVnodeRefFn>,
@@ -1731,7 +1752,7 @@ pub unsafe extern "C" fn a20_pagecache_get_transaction(
     if context.is_null() || vn.is_null() || hash.is_null() || lru_head.is_null()
         || lru_tail.is_null() || free_head.is_null() || global_dirty_head.is_null()
         || global_dirty_count.is_null() || valid_pages.is_null() || bucket_pinned.is_null()
-        || reclaimable.is_none() { return core::ptr::null_mut(); }
+        || reclaimable.is_none() || sweep_limit.is_none() { return core::ptr::null_mut(); }
 
     unsafe {
         let hash_idx = hash_index(vn, index);
@@ -1793,10 +1814,12 @@ pub unsafe extern "C" fn a20_pagecache_get_transaction(
             if page.is_null() {
                 page = evict(context, &mut deferred);
             }
+            let limit = sweep_limit.unwrap()(context);
             global_guard.release();
             if !deferred.is_null() { vput(context, deferred); }
             if page.is_null() {
-                if sweeps < 3 { sweeps += 1; continue; }
+                sweeps += 1;
+                if sweeps < limit { continue; }
                 if writeback(context, pressure_batch_pages) > 0 { sweeps = 0; continue; }
                 if grow(context, 1) == 0 { sweeps = 0; continue; }
                 return core::ptr::null_mut();
@@ -1916,12 +1939,16 @@ pub unsafe extern "C" fn a20_pagecache_write_transaction(
             mark_uptodate(context,page);
         }
         core::ptr::copy_nonoverlapping(buffer.add(done),(*page).data.cast::<u8>().add(page_off),chunk);
+        // Publish EOF before exposing a dirty page to sync/writeback. Otherwise
+        // an extending write can be acknowledged as clean while the filesystem
+        // still sees the old EOF and skips the page entirely.
+        commit(context,(start+done+chunk) as u64);
         mark_dirty(context,page);
         unlock_page(context,page);
         put(context,page);
         done+=chunk; updated+=1;
     }
-    if done>0 { commit(context,(start+done) as u64); seek(context,(start+done) as u64); }
+    if done>0 { seek(context,(start+done) as u64); }
     if let Some(f)=perf { f(context,updated); }
     done as isize
 }
@@ -2021,6 +2048,7 @@ mod tests {
         {
             let _pin = unsafe { PagePinGuard::pin(&mut page, counters.as_mut_ptr()) };
             assert_eq!(page.ref_count, 1);
+            assert_eq!(page.accessed, 1);
             assert_eq!(unsafe { a20_pagecache_pinned_total(counters.as_ptr()) }, 1);
         }
         assert_eq!(page.ref_count, 0);
@@ -2229,7 +2257,15 @@ mod tests {
     extern "C" fn file_seek(ctx:*mut c_void,p:u64) { unsafe { (*(ctx as *mut FileHarness)).seek=p; } }
     extern "C" fn file_lock(ctx:*mut c_void,_:*mut PageCachePage)->c_int { unsafe { (*(ctx as *mut FileHarness)).locked+=1; } 0 }
     extern "C" fn file_unlock(ctx:*mut c_void,_:*mut PageCachePage)->c_int { unsafe { (*(ctx as *mut FileHarness)).unlocked+=1; } 0 }
-    extern "C" fn file_dirty(_: *mut c_void,p:*mut PageCachePage)->c_int { unsafe { (*p).dirty=1; (*p).dirty_gen+=1; } 0 }
+    extern "C" fn file_dirty(ctx: *mut c_void,p:*mut PageCachePage)->c_int {
+        unsafe {
+            let h=&*(ctx as *mut FileHarness);
+            assert_eq!(h.commits, h.locked, "each dirty page needs its EOF published first");
+            assert!(h.locked > h.unlocked, "EOF and dirty must publish under the page lock");
+            (*p).dirty=1; (*p).dirty_gen+=1;
+        }
+        0
+    }
     extern "C" fn file_zero(_: *mut c_void,p:*mut PageCachePage)->c_int { unsafe { core::ptr::write_bytes((*p).data.cast::<u8>(),0,PAGE_SIZE); } 0 }
     extern "C" fn file_uptodate(_: *mut c_void,p:*mut PageCachePage)->c_int { unsafe { (*p).uptodate=1; } 0 }
     extern "C" fn file_clean(_: *mut c_void,p:*mut PageCachePage)->c_int { unsafe { (*p).dirty=0; } 0 }
@@ -2287,6 +2323,8 @@ mod tests {
     static TXN_CONFIRMED: AtomicUsize = AtomicUsize::new(0);
     static TXN_PUT: AtomicUsize = AtomicUsize::new(0);
     static TXN_SERIAL: AtomicUsize = AtomicUsize::new(0);
+    static TXN_VNODE_GATE: AtomicUsize = AtomicUsize::new(0);
+    static TXN_TARGET: AtomicUsize = AtomicUsize::new(0);
     static TXN_PERF: AtomicUsize = AtomicUsize::new(0);
     static TXN_RESULT: AtomicI32 = AtomicI32::new(0);
     static mut TXN_PAGE: PageCachePage = PageCachePage {
@@ -2315,6 +2353,7 @@ mod tests {
         1
     }
     extern "C" fn txn_lock(_: *mut *mut PageCachePage, _: usize) {
+        assert_eq!(TXN_VNODE_GATE.load(Ordering::Acquire), 1);
         TXN_LOCKED.fetch_add(1, Ordering::AcqRel);
     }
     extern "C" fn txn_unlock(_: *mut *mut PageCachePage, _: usize) {
@@ -2336,10 +2375,12 @@ mod tests {
     extern "C" fn txn_put(_: *mut PageCachePage) {
         TXN_PUT.fetch_add(1, Ordering::AcqRel);
     }
-    extern "C" fn txn_serial_lock(_: *mut VnodeHead) {
+    extern "C" fn txn_serial_lock(vn: *mut VnodeHead) {
         TXN_SERIAL.fetch_add(1, Ordering::AcqRel);
+        if !vn.is_null() { TXN_VNODE_GATE.fetch_add(1, Ordering::AcqRel); }
     }
-    extern "C" fn txn_serial_unlock(_: *mut VnodeHead) {
+    extern "C" fn txn_serial_unlock(vn: *mut VnodeHead) {
+        if !vn.is_null() { TXN_VNODE_GATE.fetch_sub(1, Ordering::AcqRel); }
         TXN_SERIAL.fetch_sub(1, Ordering::AcqRel);
     }
     extern "C" fn txn_perf(count: usize) {
@@ -2349,7 +2390,7 @@ mod tests {
     fn reset_txn(result: c_int) {
         for counter in [&TXN_COLLECTED, &TXN_LOCKED, &TXN_UNLOCKED,
                         &TXN_WRITTEN, &TXN_CONFIRMED, &TXN_PUT,
-                        &TXN_SERIAL, &TXN_PERF] {
+                        &TXN_SERIAL, &TXN_VNODE_GATE, &TXN_PERF] {
             counter.store(0, Ordering::Release);
         }
         TXN_RESULT.store(result, Ordering::Release);
@@ -2398,6 +2439,30 @@ mod tests {
         assert_eq!(TXN_PERF.load(Ordering::Acquire), 1);
         assert_eq!(TXN_SERIAL.load(Ordering::Acquire), 0);
         assert_eq!(written, 1);
+
+        // A global flush must acquire the same vnode gate as fsync before
+        // locking pages or publishing an inode, including its error path.
+        extern "C" fn collect_global(
+            _: *mut VnodeHead, out: *mut *mut PageCachePage, max: usize,
+        ) -> usize {
+            txn_collect(TXN_TARGET.load(Ordering::Acquire) as *mut VnodeHead, out, max)
+        }
+        TXN_TARGET.store(&mut vn as *mut VnodeHead as usize, Ordering::Release);
+        for error in [0, -5] {
+            reset_txn(error);
+            let result = unsafe {
+                a20_pagecache_writeback_transaction(
+                    core::ptr::null_mut(), None, core::ptr::null_mut(), 0, &mut written,
+                    Some(collect_global), Some(txn_lock), Some(txn_unlock),
+                    Some(txn_no_batch), Some(txn_write), Some(txn_alloc),
+                    Some(txn_free), Some(txn_confirm), Some(txn_put),
+                    Some(txn_serial_lock), Some(txn_serial_unlock), Some(txn_perf),
+                )
+            };
+            assert_eq!(result, error);
+            assert_eq!(TXN_SERIAL.load(Ordering::Acquire), 0);
+            assert_eq!(TXN_VNODE_GATE.load(Ordering::Acquire), 0);
+        }
     }
 
     #[test]
@@ -2633,6 +2698,141 @@ mod tests {
             assert!(vn.cache_pages.is_null());
             assert!(vn.cache_dirty_pages.is_null());
             assert_eq!(gcount, 0);
+        }
+    }
+
+    struct GetHarness {
+        head: *mut PageCachePage, tail: *mut PageCachePage,
+        hash: *mut *mut PageCachePage, dirty: *mut *mut PageCachePage,
+        dirty_count: *mut usize, valid: *mut usize,
+        sweeps: usize, limit: usize, writebacks: usize, gets: usize, puts: usize,
+    }
+    extern "C" fn get_lock(_: *mut c_void) -> u64 { 0 }
+    extern "C" fn get_unlock(_: *mut c_void, _: u64) {}
+    extern "C" fn get_bucket_lock(_: *mut c_void, _: u32) -> u64 { 0 }
+    extern "C" fn get_bucket_unlock(_: *mut c_void, _: u32, _: u64) {}
+    extern "C" fn get_grow(_: *mut c_void, _: c_int) -> c_int { -12 }
+    extern "C" fn get_zero(_: *mut c_void, _: *mut PageCachePage) {}
+    extern "C" fn get_vget(ctx: *mut c_void, _: *mut c_void) {
+        unsafe { (*(ctx as *mut GetHarness)).gets += 1; }
+    }
+    extern "C" fn get_vput(ctx: *mut c_void, _: *mut c_void) {
+        unsafe { (*(ctx as *mut GetHarness)).puts += 1; }
+    }
+    extern "C" fn get_limit(ctx: *mut c_void) -> usize {
+        unsafe { (*(ctx as *mut GetHarness)).limit }
+    }
+    extern "C" fn get_writeback(ctx: *mut c_void, _: usize) -> c_int {
+        unsafe { (*(ctx as *mut GetHarness)).writebacks += 1; }
+        0
+    }
+    extern "C" fn get_evict(ctx: *mut c_void, deferred: *mut *mut c_void) -> *mut PageCachePage {
+        unsafe {
+            let h = &mut *(ctx as *mut GetHarness);
+            h.sweeps += 1;
+            a20_pagecache_evict_scan(h.head, h.tail, 128,
+                Some(reclaimable_yes), Some(lock_stub), Some(unlock_stub),
+                h.hash, h.dirty, h.dirty_count, h.valid, Some(scan_stub), deferred)
+        }
+    }
+
+    #[test]
+    fn get_searches_whole_cache_before_reporting_exhaustion() {
+        unsafe {
+            let mut vn = mk_vn();
+            let mut pool: Vec<_> = (0..1025).map(|_| mk()).collect();
+            let mut head = mk();
+            let mut tail = mk();
+            head.next = &mut tail;
+            tail.prev = &mut head;
+            let mut hash = vec![core::ptr::null_mut(); PAGE_CACHE_HASH_BUCKETS];
+            let mut dirty = core::ptr::null_mut();
+            let mut free = core::ptr::null_mut();
+            let mut dirty_count = 0;
+            let mut valid = pool.len();
+            let mut pins = vec![0usize; PAGE_CACHE_BUCKET_LOCKS * PIN_COUNTER_STRIDE / core::mem::size_of::<usize>()];
+            for (i, p) in pool.iter_mut().enumerate() {
+                p.vnode = &mut vn as *mut _ as *mut c_void;
+                p.index = i as u64;
+                p.valid = 1;
+                p.ref_count = if i < 1024 { 1 } else { 0 };
+                p.accessed = 1;
+                if p.ref_count != 0 { a20_pagecache_account_pin(p, pins.as_mut_ptr()); }
+                a20_pagecache_hash_insert(hash.as_mut_ptr(), p);
+                a20_pagecache_mapping_insert(p);
+                a20_pagecache_lru_insert_front(&mut head, p);
+            }
+            let mut h = GetHarness { head: &mut head, tail: &mut tail,
+                hash: hash.as_mut_ptr(), dirty: &mut dirty,
+                dirty_count: &mut dirty_count, valid: &mut valid,
+                sweeps: 0, limit: 18, writebacks: 0, gets: 0, puts: 0 };
+            let mut get = |index| a20_pagecache_get_transaction(
+                &mut h as *mut _ as *mut c_void, &mut vn, index, 1,
+                hash.as_mut_ptr(), &mut head, &mut tail, &mut free, &mut dirty,
+                &mut dirty_count, &mut valid, pins.as_mut_ptr(), 1024,
+                Some(get_lock), Some(get_unlock), Some(get_bucket_lock), Some(get_bucket_unlock),
+                Some(get_grow), Some(get_evict), Some(get_limit), Some(get_writeback),
+                Some(get_zero), Some(get_vget), Some(get_vput), Some(reclaimable_yes), Some(scan_stub));
+            let page = get(2048);
+            assert_eq!(page, &mut pool[1024] as *mut _);
+            assert_eq!((*page).index, 2048);
+            // Every descriptor is now pinned. Failure must terminate after
+            // a complete bounded search, without dropping any mapping.
+            assert!(get(2049).is_null());
+            drop(get);
+            assert!(h.sweeps > h.limit);
+            assert_eq!(h.writebacks, 1);
+            assert_eq!((h.gets, h.puts), (1, 1));
+            assert_eq!(valid, 1025);
+            assert_eq!(a20_pagecache_pinned_total(pins.as_ptr()), 1025);
+            assert_eq!(a20_pagecache_put(page, pins.as_mut_ptr()), 1);
+            assert_eq!(a20_pagecache_pinned_total(pins.as_ptr()), 1024);
+        }
+    }
+
+    #[test]
+    fn evict_scan_advances_past_pinned_tail() {
+        unsafe {
+            let mut vn = mk_vn();
+            let mut pool: Vec<_> = (0..1025).map(|_| mk()).collect();
+            let mut head = mk();
+            let mut tail = mk();
+            head.next = &mut tail;
+            tail.prev = &mut head;
+            let mut hash = vec![core::ptr::null_mut(); PAGE_CACHE_HASH_BUCKETS];
+            let mut dirty = core::ptr::null_mut();
+            let mut dirty_count = 0;
+            let mut valid = pool.len();
+            for (i, p) in pool.iter_mut().enumerate() {
+                p.vnode = &mut vn as *mut _ as *mut c_void;
+                p.index = i as u64;
+                p.valid = 1;
+                p.ref_count = if i < 1024 { 1 } else { 0 };
+                p.accessed = 1;
+                a20_pagecache_hash_insert(hash.as_mut_ptr(), p);
+                a20_pagecache_mapping_insert(p);
+                a20_pagecache_lru_insert_front(&mut head, p);
+            }
+            // Shared desktop surfaces can pin an entire tail window. Each
+            // bounded sweep must advance, and the clean page beyond it must
+            // survive one second chance before being reclaimed.
+            let mut got = core::ptr::null_mut();
+            for _ in 0..18 {
+                let mut deferred = core::ptr::null_mut();
+                got = a20_pagecache_evict_scan(
+                    &mut head, &mut tail, 128, Some(reclaimable_yes),
+                    Some(lock_stub), Some(unlock_stub), hash.as_mut_ptr(),
+                    &mut dirty, &mut dirty_count, &mut valid, Some(scan_stub),
+                    &mut deferred,
+                );
+                if !got.is_null() {
+                    assert_eq!(deferred, &mut vn as *mut _ as *mut c_void);
+                    break;
+                }
+            }
+            assert_eq!(got, &mut pool[1024] as *mut _);
+            assert_eq!(valid, 1024);
+            assert!(pool[..1024].iter().all(|p| p.valid == 1 && p.ref_count == 1));
         }
     }
 

@@ -346,6 +346,9 @@ static PPage *ref_evict(World *w, size_t budget, VNode **deferred)
     *deferred = NULL;
     while (page != &w->lru_head && visited < budget) {
         visited++;
+        PPage *next = page->prev;
+        ref_lru_remove(page);
+        ref_lru_front(&w->lru_head, page);
         if (page->ref_count == 0 && !page->dirty &&
             reclaimable_cb(page->pfn)) {
             if (page->valid) {
@@ -355,7 +358,7 @@ static PPage *ref_evict(World *w, size_t budget, VNode **deferred)
                     if (page->accessed) {
                         page->accessed = 0;
                         unlock_cb(idx & (NBUCKET - 1), bflags);
-                        page = page->prev;
+                        page = next;
                         continue;
                     }
                     *deferred = ref_detach(w, page);
@@ -368,7 +371,7 @@ static PPage *ref_evict(World *w, size_t budget, VNode **deferred)
                     scan_cb(visited);
                     return page;
                 }
-                page = page->prev;
+                page = next;
                 continue;
             }
             page->ref_count = 1;
@@ -377,7 +380,7 @@ static PPage *ref_evict(World *w, size_t budget, VNode **deferred)
             scan_cb(visited);
             return page;
         }
-        page = page->prev;
+        page = next;
     }
     scan_cb(visited);
     return NULL;

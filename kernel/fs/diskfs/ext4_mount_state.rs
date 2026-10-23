@@ -98,7 +98,8 @@ pub unsafe extern "C" fn a20_ext4_mount_state_transition(
     if ret < 0 { return ret; }
     let next = match transition {
         1 => {
-            if a20_ext4_mount_state_admit(state) == 0 { return -117; }
+            if a20_ext4_mount_state_admit(state) == 0 &&
+                a20_ext4_mount_state_recoverable(state) == 0 { return -117; }
             a20_ext4_mount_state_begin(state)
         }
         2 => {
@@ -108,13 +109,13 @@ pub unsafe extern "C" fn a20_ext4_mount_state_transition(
         3 => a20_ext4_mount_state_error(state),
         _ => return EINVAL,
     };
-    // A no-op BEGIN cannot be admitted from a clean state: BEGIN always
-    // clears VALID_FS. An idempotent ERROR may skip IO because it is already
+    // A no-op BEGIN can resume orphan recovery or retry a failed flush.
+    // An idempotent ERROR may skip IO because it is already
     // fail-closed. CLEAN must still issue a barrier when the bytes already
     // match: a previous CLEAN write may have reached cache but its flush
     // failed, and retry must not mistake cached state for durable state.
     if next == state {
-        return if transition == 2 { flush(ops.context) } else { 0 };
+        return if transition == 1 || transition == 2 { flush(ops.context) } else { 0 };
     }
     let ret = write_state(ops.context, next);
     if ret < 0 { return ret; }
@@ -202,6 +203,13 @@ mod tests {
         assert_eq!(disk.state, 0);
         assert_eq!(a20_ext4_mount_state_admit(disk.state), 0);
         assert_eq!(&disk.calls[..disk.len], &[1, 2, 3]);
+        disk.len = 0;
+        assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 1) }, EIO);
+        assert_eq!(&disk.calls[..disk.len], &[1, 3]);
+        disk.fail_flush = false;
+        disk.len = 0;
+        assert_eq!(unsafe { a20_ext4_mount_state_transition(&ops, 1) }, 0);
+        assert_eq!(&disk.calls[..disk.len], &[1, 3]);
     }
 
     #[test]

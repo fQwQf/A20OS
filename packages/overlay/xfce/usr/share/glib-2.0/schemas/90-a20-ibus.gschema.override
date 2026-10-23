@@ -1,0 +1,2 @@
+[org.freedesktop.ibus.general]
+preload-engines=['xkb:us::eng', 'rime']

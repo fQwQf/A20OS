@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.xfce.Notifyd
+# Alpine notifyd lacks Wayland window support; use the desktop Xwayland.
+Exec=/usr/bin/env GDK_BACKEND=x11 /usr/lib/xfce4/notifyd/xfce4-notifyd

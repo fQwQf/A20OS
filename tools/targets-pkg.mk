@@ -63,16 +63,15 @@ QEMU_MEMORY_WORLD   := $(if $(filter $(QEMU_MEMORY_DEFAULT),$(QEMU_MEMORY)),$(QE
 # GUI_MEDIA 默认是「粘性」的：桌面镜像在每次 run 时都会重建，而 overlay 只在给出
 # GUI_MEDIA 时才生成 —— 于是 `make run-gui-x86_64`（不带变量）会把上次注入的
 # /usr/share/a20-media 悄悄丢掉，看起来像"媒体没进镜像"。桌面 world 默认从已取件的
-# build/minecraft/* 注入；要显式关掉就传 `GUI_MEDIA=`。
-# 媒体里的 ELF 若与目标架构不符会在生成 overlay 时剔除并提示（Mojang 的 natives
-# 只有 x86_64，没有 riscv64）—— 不剔除的话 mkrootfs 的 overlay 架构检查会拒绝整个镜像。
+# build/minecraft/* 中与目标架构一致的完整客户端注入；要显式关掉就传 `GUI_MEDIA=`。
+# 根据 natives 的 ELF 架构筛选，不能只剔除外架构 .so 后留下不能运行的客户端。
 #
 # 自动注入只对桌面 world 生效。PKG_WORLD 由调用方（a20 run / run-world）给出，
 # 在本行展开时已知，所以可以直接判。非桌面 world 注入媒体是纯粹的伤害：一份
 # 535 MiB 的 Minecraft 数据集进没有 JVM、没有启动器、没有桌面的 server 镜像，
 # 既塞不进 world_size_mb=512 的 ext4（表现为 mkfs.ext4 的 "Could not allocate
 # block"，看着像磁盘满），又让 server 镜像白白多占几百 MiB。
-GUI_MEDIA_AUTO     := $(wildcard build/minecraft/*)
+GUI_MEDIA_AUTO     = $(shell $(PYTHON) packages/overlay/xfce/usr/lib/a20/minecraft/select.py --media build/minecraft --arch $(PKG_ARCH) --all)
 GUI_MEDIA          ?= $(if $(filter $(PKG_WORLD_GUI),$(PKG_WORLD)),$(GUI_MEDIA_AUTO),)
 GUI_MEDIA_DIR      ?= /usr/share/a20-media
 GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
@@ -155,16 +154,16 @@ run-world-gui: $(FAT32_IMG)
 #   make run-gui-x86_64 GUI_MEDIA=~/Videos/demo.mp4
 .PHONY: run-gui run-gui-riscv64 run-gui-aarch64 run-gui-x86_64 run-gui-loongarch64
 run-gui-riscv64:
-	$(MAKE) ARCH=riscv64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+	$(MAKE) ARCH=riscv64 PKG_WORLD=xfce run-world-gui
 run-gui-aarch64:
-	$(MAKE) ARCH=aarch64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+	$(MAKE) ARCH=aarch64 PKG_WORLD=xfce run-world-gui
 run-gui-x86_64:
-	$(MAKE) ARCH=x86_64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+	$(MAKE) ARCH=x86_64 PKG_WORLD=xfce run-world-gui
 run-gui-loongarch64:
-	$(MAKE) ARCH=loongarch64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+	$(MAKE) ARCH=loongarch64 PKG_WORLD=xfce run-world-gui
 
 run-gui:
-	$(MAKE) ARCH=$(ARCH) PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+	$(MAKE) ARCH=$(ARCH) PKG_WORLD=xfce run-world-gui
 
 # 组装并直接启动：world 镜像作为第二块盘（内核挂载为 /extra；
 # 含 /usr/lib/a20/init 标记的镜像会被 init chroot 接管，即 distro 模式）。

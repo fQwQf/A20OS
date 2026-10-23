@@ -31,7 +31,8 @@ e2fsck -V 2>&1 | head -1
 
 DISKFS_SRCS="kernel/fs/diskfs/ext4.c kernel/fs/diskfs/ext4_namei.c \
 kernel/fs/diskfs/ext4_file.c kernel/fs/diskfs/ext4_journal.c \
-kernel/fs/diskfs/ext4_csum.c kernel/fs/diskfs/ext4_sync.c"
+kernel/fs/diskfs/ext4_csum.c kernel/fs/diskfs/ext4_sync.c \
+kernel/fs/diskfs/ext4_xattr.c"
 FSCOMPAT_SRCS="user/svc/fscompat/compat.c user/svc/fscompat/bcache_user.c"
 HOST_INC="-Iuser/svc/fscompat -Ikernel/include -Ikernel/arch/riscv64/include"
 
@@ -118,6 +119,41 @@ for sel in c rust; do
         | tee "$work/free-$sel.txt"
 done
 
+echo "== desktop sparse writeback and fast-symlink unlink =="
+for sel in c rust; do
+    cp "$work/base.img" "$work/desktop-$sel.img"
+    "$work/harness-$sel" "$work/desktop-$sel.img" desktop writeback-eof \
+        > "$work/desktop-$sel.log" 2>&1
+    cat "$work/desktop-$sel.log"
+    grep -q '^HOST_DESKTOP_BATCH_AND_SYMLINK_PASS$' "$work/desktop-$sel.log"
+    grep -q '^HOST_WRITEBACK_EOF_RACE_PASS$' "$work/desktop-$sel.log"
+    e2fsck -fn "$work/desktop-$sel.img" > "$work/desktop-$sel.e2fsck" 2>&1
+    cp "$work/base.img" "$work/shutdown-$sel.img"
+    "$work/harness-$sel" "$work/shutdown-$sel.img" desktop-shutdown \
+        > "$work/shutdown-$sel.log" 2>&1
+    grep -q '^HOST_DESKTOP_SHUTDOWN_PASS$' "$work/shutdown-$sel.log"
+    e2fsck -fn "$work/shutdown-$sel.img" > "$work/shutdown-$sel.e2fsck" 2>&1
+done
+
+# Simulate a crash after unlink published an orphaned Firefox-style lock.
+# Mount recovery must drain its inline target without treating it as extents.
+cp "$work/base.img" "$work/orphan-symlink.img"
+debugfs -w -R 'symlink lock 127.0.1.1:+189' "$work/orphan-symlink.img" >/dev/null 2>&1
+ino=$(debugfs -R 'stat lock' "$work/orphan-symlink.img" 2>/dev/null | \
+    sed -n 's/^Inode: \([0-9]*\).*/\1/p')
+test -n "$ino"
+debugfs -w -R "set_inode_field lock links_count 0" "$work/orphan-symlink.img" >/dev/null 2>&1
+debugfs -w -R 'unlink lock' "$work/orphan-symlink.img" >/dev/null 2>&1
+debugfs -w -R "set_super_value last_orphan $ino" "$work/orphan-symlink.img" >/dev/null 2>&1
+debugfs -w -R 'set_super_value state 0' "$work/orphan-symlink.img" >/dev/null 2>&1
+for sel in c rust; do
+    cp "$work/orphan-symlink.img" "$work/orphan-symlink-$sel.img"
+    "$work/harness-$sel" "$work/orphan-symlink-$sel.img" statfs \
+        > "$work/orphan-symlink-$sel.log" 2>&1
+    e2fsck -fn "$work/orphan-symlink-$sel.img" > "$work/orphan-symlink-$sel.e2fsck" 2>&1
+    echo "orphan-symlink-$sel: recovery and e2fsck PASS"
+done
+
 echo "== Rust depth-1 input and reclaim validation =="
 cp "$work/base.img" "$work/work-rust-depth1.img"
 "$work/harness-rust" "$work/work-rust-depth1.img" \
@@ -170,3 +206,24 @@ else
     exit 1
 fi
 echo "evidence dir: $work"
+
+# APK mutates imported indexed /usr/bin-like directories and can allocate
+# into a previously untouched lazy block/inode group. Check both selectors
+# against independently rebuilt e2fsprogs indexes and final fsck.
+mkdir -p "$work/index-seed/indexed"
+i=1
+while [ "$i" -le 512 ]; do
+    name=$(printf 'old-%06d' "$i")
+    : > "$work/index-seed/indexed/$name"
+    i=$((i + 1))
+done
+truncate -s 512M "$work/index-base.img"
+mke2fs -q -F -t ext4 -b 4096 -O ^has_journal -d "$work/index-seed" "$work/index-base.img"
+e2fsck -fyD "$work/index-base.img" > "$work/index-optimize.log" 2>&1 || [ "$?" -eq 1 ]
+for selector in c rust; do
+    cp --sparse=always "$work/index-base.img" "$work/index-$selector.img"
+    "$work/harness-$selector" "$work/index-$selector.img" indexed-lazy \
+        > "$work/index-$selector.log" 2>&1
+    e2fsck -fn "$work/index-$selector.img" > "$work/index-$selector.e2fsck" 2>&1
+    echo "indexed directory + lazy allocation ($selector): fsck clean"
+done
