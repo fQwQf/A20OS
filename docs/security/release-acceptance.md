@@ -32,8 +32,27 @@ Landlock create 的最小输入是 8 字节 `handled_access_fs`。flags 必须�
 
 校验在 ruleset 分配前完成。零扩展可接受；网络、scoping、执行、目录修改与 ioctl
 限制不被静默丢弃。未提供标准 Landlock ABI 版本查询，也不宣称完整 Linux Landlock
-ABI v1。当前字符串路径规则的 fork/symlink 验收结果见现状页，不能据一次成功的
-`restrict_self` 断言整个进程已经隔离。
+ABI v1。
+
+每任务至多安装一个 ruleset；fork 在子任务发布前取得引用，exec 保留限制，关闭
+ruleset fd 不解除限制。首次安装冻结规则，其他任务可重复安装同一冻结 fd，后续
+add_rule 报 EINVAL。策略最多 64 个、每个 255 字节的绝对路径前缀；过长报
+ENAMETOOLONG，不截断成更宽的授权。匹配按目录分量边界检查，多个命中规则的权限
+取并集。C 叶锁串行化策略修改/冻结/读取，引用计数独立原子维护；不在锁内执行
+VFS、分配或 usercopy。
+
+规则目录和 open 目标都解析为 canonical path。普通 open 与 openat2 在同一次遍历
+返回的 vnode 上执行检查，再进入 create/truncate/backend open；proc fd 重开也检查
+保留的目标路径。测试既允许目录内读写，又拒绝文件/目录符号链接、相对别名、
+openat2 与 proc fd 的外部目标，验证拒绝不截断、不创建。安装前已有描述符按原契约
+保留权限；该路径子集不是 Linux 的 inode 锚定 LSM，不约束 rename/link/mount 等
+未支持的目录拓扑修改，也不撤销已有文件描述符。因此仅靠 READ_FILE/WRITE_FILE
+规则不足以承载允许不可信进程修改目录拓扑的完整 Linux Landlock 沙箱；应用需要
+同时限制这些未授权的系统调用。设计边界不计作已覆盖的隔离功能。
+
+RV64 MMU 的信号 restorer 通过匿名 VMO 的 RX 映射持有，权限上限也是 RX，
+不请求可写栈执行，不增加 W^X 豁免。VMO/VMA 生命周期负责 fork、失败与退出清理；
+分配失败保留原有终止行为，不降级安全策略。
 
 ## Native MMIO 边界
 
@@ -48,8 +67,12 @@ ABI v1。当前字符串路径规则的 fork/symlink 验收结果见现状页，
 该控制也完整运行原有 VMAR 越界、权限上限和 remap 回滚用例。
 
 宿主夹具直接运行生产 ABI 函数，分别移除完整页跨度授权、输出失败回滚作为负控。
-驱动后端在逐页 `pt_map` 分配失败时的回滚另属 DRIVER-SECURITY-03；正常 guest 通过
-不能替代该故障注入验证。
+驱动后端的 `pt_map` 部分失败会先清理失败页的空路径，再撤销已映射前缀；全部
+成功才发布 VMA。生产 mapper 和 `pt_unmap` 的宿主夹具在两级页表边界注入分配
+失败，检查没有剩余 PTE/临时 VMA/空页表、邻接映射不变及 TLB 事务配对；分别移除
+回滚与空表清理的负控均失败。故障注入替换分配/硬件边界，不宣称 guest 全局 OOM。
+锁序是 tlb mutex → mm spinlock → 页表节点锁；锁外结束 TLB 事务和 deferred 清理，
+不释放设备数据帧。
 
 ## 配置和命令
 
@@ -61,8 +84,13 @@ common=$(git rev-parse --path-format=absolute --git-common-dir)
 runner="$common/parallel-rewrite/run-build.sh"
 "$runner" build-2 python3 tools/tests/test_landlock_create_host.py
 "$runner" build-2 python3 tools/tests/test_security_mmio_host.py
+"$runner" build-2 python3 tools/tests/test_udriver_mmio_rollback_host.py
+"$runner" build-2 python3 tools/tests/test_pt_table_empty.py
+"$runner" build-2 python3 tools/tests/test_pt_mcs_preempt_window.py
+"$runner" build-2 sh -c 'rustc --edition=2021 --test kernel/ipc/landlock.rs -o /tmp/a20-landlock-tests && /tmp/a20-landlock-tests'
 make check-honesty-policy check-smoke-cases
 "$runner" build-2 make smoke-security-release
+"$runner" build-2 python3 tools/smoke.py smoke-security-release --nr-cpus 2
 "$runner" build-2 make smoke-wx-aslr
 "$runner" build-2 python3 tools/security_release.py boot
 "$runner" build-2 python3 tools/security_release.py perf-off
@@ -75,8 +103,9 @@ make check-honesty-policy check-smoke-cases
 
 安全候选选择 `a20.wx=deny`，挂载 RISC-V IOMMU 和两个 EDU 设备；内核仍使用 dev
 配置的栈保护、内核 W^X、ASLR、UBSan。candidate 以 `exec` 把 shell 替换为测试监督者，
-让每个独立 workload 都能执行到并给出结果。它没有证明 shell 的 SIGCHLD 路径可用：
-原有 `smoke-wx-aslr` 仍独立运行并保留其失败。监督者退出后 init 正常关机，必须看到
+让每个独立 workload 都能执行到并给出结果。原有 `smoke-wx-aslr` 独立覆盖 shell 的
+SIGCHLD 与显式 poweroff；候选的 root 监督者不能替代这个控制。监督者退出后 init
+正常关机，必须看到
 POWER_OFF、audit errors=0 和 QEMU rc=0；功能 FAIL 即使 rc=0 也使总用例失败。
 
 普通 boot 对照使用 WX off，检查 shell、外部 echo 与显式 poweroff。它通过只证明

@@ -35,8 +35,8 @@ def main():
             case['argv'] = without_iommu
             case['argv'][-1] = 'a20.wx=off'
     elif args.mode == 'boot':
-        # This is the ordinary shell control. The candidate uses exec to let
-        # independent probes finish even when W^X breaks shell SIGCHLD handling.
+        # Keep the ordinary shell control independent of the candidate
+        # supervisor, so child-exit handling and explicit poweroff are checked.
         case['stdin']['lines'] = ['/bin/echo SECURITY_BOOT_OK', 'poweroff']
         case['argv'][-1] = 'a20.wx=off'
         case['expect'] = ['SECURITY_BOOT_OK', 'System is going down for power-off',

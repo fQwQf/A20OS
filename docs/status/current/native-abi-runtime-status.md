@@ -263,3 +263,14 @@ make smoke-idl-ack-aarch64      # 正 legacy 回退 + 9 条畸形 ACK 拒绝，�
 RISC-V64 的同一矩阵在 SMP2 上同样通过。各消息族的未知值契约（SVCMGR 原样回显、
 RTCD 消费不回复、UFSD `-ENOSYS`、协商 ACK 拒绝）见
 [05-idl-and-personality.md](../../hybrid-kernel/05-idl-and-personality.md) §1.5。
+
+## 安全候选的继承与信号返回
+
+RV64 MMU 的信号 restorer 由匿名 VMO 持有，以 RX 映射且权限上限固定为 RX；
+不再为信号返回请求可写栈可执行。fork 复制既有 VMA/VMO 引用，exec/退出复用 MM
+清理；分配失败不放宽 W^X。WX deny 下 shell 子进程退出、seccomp TRAP/SIGSYS
+和完整 sandbox workload 通过。NOMMU 保持原架构行为，未计作受硬件保护的 W^X。
+
+Landlock 在子任务发布前 pin 父任务已安装的冻结策略，退出/创建失败释放各自引用；
+exec 保留原任务策略。适用接口与 RV64 候选矩阵见
+[安全候选现状](security-status.md)。

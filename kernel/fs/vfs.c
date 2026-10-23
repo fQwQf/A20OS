@@ -163,6 +163,21 @@ invalid:
     return -ENOENT;
 }
 
+/* Called on the canonical path of the same pinned vnode that open will
+ * use, before create/truncate/backend open can have any side effects. */
+static int vfs_landlock_open(const char *path, int flags, int type)
+{
+    uint64_t need = 0;
+    if (type == VFS_FT_DIR)
+        need = LANDLOCK_ACCESS_FS_READ_DIR;
+    else {
+        if (vfs_should_read(flags)) need |= LANDLOCK_ACCESS_FS_READ_FILE;
+        if (vfs_should_write(flags) || (flags & O_TRUNC))
+            need |= LANDLOCK_ACCESS_FS_WRITE_FILE;
+    }
+    return landlock_check_path(path, need);
+}
+
 static int vfs_proc_fd_open(const char *path, int flags)
 {
     task_t *task = NULL;
@@ -195,6 +210,8 @@ static int vfs_proc_fd_open(const char *path, int flags)
     proc_put(task);
     if (!vn)
         return -ENXIO;
+    int lr = vfs_landlock_open(target_path, flags, vn->type);
+    if (lr < 0) { vnode_put(vn); return lr; }
 
     if ((flags & O_DIRECTORY) && vn->type != VFS_FT_DIR) {
         vnode_put(vn);
@@ -302,22 +319,6 @@ static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve 
         cur->vfs_open_errno = 0;
     const char *cwd = cur ? cur->fs.cwd : "/";
 
-    /* Landlock enforcement for restricted processes. */
-    {
-        uint64_t need = LANDLOCK_ACCESS_FS_READ_FILE;
-        if ((flags & O_WRONLY) || (flags & O_RDWR) || (flags & O_CREAT) ||
-            (flags & O_TRUNC))
-            need |= LANDLOCK_ACCESS_FS_WRITE_FILE;
-        if (mode & S_IFDIR)
-            need = LANDLOCK_ACCESS_FS_READ_DIR;
-        int lr = landlock_check_path(path, need);
-        if (lr < 0) {
-            if (cur)
-                cur->vfs_open_errno = -lr;
-            return lr;
-        }
-    }
-
     /* Check for special device files */
     char resolved[MAX_PATH_LEN];
     int pr = vfs_path_join(cwd, path, resolved, sizeof(resolved));
@@ -353,8 +354,20 @@ static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve 
     mount_t *mnt = vfs_find_mount(resolved);
     if (!mnt) { kdebug("[VFS] open '%s': no mount\n", resolved); return -ENOENT; }
 
+    char canonical[MAX_PATH_LEN];
+    int lookup_err = 0;
+    vnode_t *vn = vnode_lookup_path_openat2(resolved, mnt->path, root, 0,
+                                            canonical, sizeof(canonical), &lookup_err);
+    if (lookup_err) vfs_set_lookup_errno(lookup_err);
+    strncpy(resolved, canonical, sizeof(resolved) - 1);
+    resolved[sizeof(resolved) - 1] = '\0';
+    mnt = vfs_find_mount(resolved);
+    if (!mnt) { vnode_put(vn); return -ENOENT; }
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
-    vnode_t *vn = vnode_lookup_path(mnt, rel);
+    int type = vn ? vn->type :
+        ((mode & S_IFMT) == S_IFDIR ? VFS_FT_DIR : VFS_FT_REGULAR);
+    int lr = vfs_landlock_open(resolved, flags, type);
+    if (lr < 0) { vnode_put(vn); return lr; }
     if (!vn) {
         if (vfs_lookup_errno() && !(flags & O_CREAT))
             return vfs_lookup_errno();
@@ -364,18 +377,29 @@ static int vfs_open_impl(const char *path, int flags, int mode) {    /* Resolve 
 
         char parent_path[MAX_PATH_LEN];
         char fname[MAX_NAME_LEN];
-        int sr = vfs_path_split_parent_name(rel, parent_path, sizeof(parent_path),
+        int sr = vfs_path_split_parent_name(resolved, parent_path, sizeof(parent_path),
                                             fname, sizeof(fname));
         if (sr < 0)
             return sr;
 
-        vnode_t *parent = vnode_lookup_path(mnt, parent_path);
+        vnode_t *parent = vnode_lookup_path_openat2(parent_path, mnt->path, root, 0,
+                                                    canonical, sizeof(canonical), &lookup_err);
         if (!parent) {
-            return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
+            return lookup_err ? lookup_err : -ENOENT;
         }
         if (parent->type != VFS_FT_DIR) {
             vnode_put(parent);
             return -ENOTDIR;
+        }
+        /* A missing target needs a second walk for its parent. Bind this
+         * check to that pinned parent, even if an alias changed meanwhile. */
+        sr = vfs_path_join(canonical, fname, resolved, sizeof(resolved));
+        if (!sr) sr = vfs_landlock_open(resolved, flags, type);
+        if (sr < 0) { vnode_put(parent); return sr; }
+        mnt = vfs_find_mount(resolved);
+        if (!mnt || (mnt->flags & 1)) {
+            vnode_put(parent);
+            return mnt ? -EROFS : -ENOENT;
         }
         if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
             vnode_put(parent);
@@ -560,6 +584,10 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     int lookup_err = 0;
     vnode_t *vn = vnode_lookup_path_openat2(logical, start, root, resolve,
                                             resolved, sizeof(resolved), &lookup_err);
+    int type = vn ? vn->type :
+        ((mode & S_IFMT) == S_IFDIR ? VFS_FT_DIR : VFS_FT_REGULAR);
+    int lr = vfs_landlock_open(resolved, flags, type);
+    if (lr < 0) { vnode_put(vn); return lr; }
 
     if (!vn) {
         if (lookup_err == -ENOENT && (flags & O_CREAT)) {
@@ -573,11 +601,20 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                                             fname, sizeof(fname)) < 0)
                 return -ENAMETOOLONG;
 
-            vnode_t *parent = vnode_lookup_path(mnt,
-                                                vfs_strip_mount_prefix(parent_path, mnt));
+            char parent_canonical[MAX_PATH_LEN];
+            vnode_t *parent = vnode_lookup_path_openat2(parent_path, start, root, resolve,
+                                                        parent_canonical, sizeof(parent_canonical), &lookup_err);
             if (!parent || parent->type != VFS_FT_DIR) {
                 vnode_put(parent);
-                return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
+                return lookup_err ? lookup_err : -ENOTDIR;
+            }
+            int cr = vfs_path_join(parent_canonical, fname, resolved, sizeof(resolved));
+            if (!cr) cr = vfs_landlock_open(resolved, flags, type);
+            if (cr < 0) { vnode_put(parent); return cr; }
+            mnt = vfs_find_mount(resolved);
+            if (!mnt || (mnt->flags & 1)) {
+                vnode_put(parent);
+                return mnt ? -EROFS : -ENOENT;
             }
             if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
                 vnode_put(parent);
@@ -595,7 +632,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
             }
 
             int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
-            int cr = parent->ops->create(parent, fname, cmode, &vn);
+            cr = parent->ops->create(parent, fname, cmode, &vn);
             if (cr < 0) {
                 vnode_put(parent);
                 return cr;
