@@ -975,7 +975,7 @@ RT 选择，普通任务可以竞争剩余时间；下一周期恢复。计量�
 ## 五、可观测性
 
 本轮把「静默说谎」的观测面改成了真实测量（详见
-[../security/hardening.md](../../../security/hardening.md) 的诚实性原则）：
+[../security/hardening.md](../../security/hardening.md) 的诚实性原则）：
 `/proc/<pid>/io`、`/proc/loadavg`、`/proc/pressure`、`getrusage`、
 `TCP_CONGESTION` 现均为真实值。
 

@@ -118,10 +118,10 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
    一个设备没算的校验和：**每一个包**都被丢，表现为"网络完全不通"，而计数器只显示
    `rx_drops`，没有任何 "checksum feature misused" 的线索。这正是两个能力位一直
    不置位的理由。
-2. **NAT 与发送卸载互斥。** `netfilter_nat.c:754-892` 对 L4 校验和做**增量修正**
-   （改地址/端口后按 one's complement 折叠）：`netfilter_csum_delta()` 在 `:754-763`，
-   L4 地址改写 `netfilter_fix_l4()` 在 `:815-834`，端口改写 `netfilter_set_port()` 在
-   `:875-892`。若校验和字段此时是"部分和"而不是完整
+2. **NAT 与发送卸载互斥。** `netfilter_rewrite.c` 的 `netfilter_set_addr` / `netfilter_set_port` 对 L4 校验和做**增量修正**
+   （改地址/端口后按 one's complement 折叠）：同文件中的 `netfilter_csum_delta()`
+   计算差量，`netfilter_fix_l4()` 修正 L4 地址校验和，`netfilter_set_port()` 修正端口
+   校验和。若校验和字段此时是"部分和"而不是完整
    校验和，增量算出来的值没有意义——NAT 表里的连接全部发出去就是错包。启用发送卸载
    必须同时决定：NAT 之后由谁补完校验和（设备？栈？还是禁止带 NAT 的 netif 卸载？）。
 3. **TCP 路径不会被开关关住。** 见 §1.2：`tcp_out.c:1587-1596` 无条件写完整校验和。
@@ -160,4 +160,4 @@ lwIP 的 TCP 发送路径没有把这个位接进去。要真的卸载，必须�
 | 驱动 RX 只读 num_buffers，不读 flags | `kernel/drivers/net/virtio_net.c:929-947` |
 | QEMU virtio-net 不用 `DATA_VALID` | 外部 Debian QEMU 10.0.13+ds：`hw/net/virtio-net.c` 全文无该宏；定义在 `include/standard-headers/linux/virtio_net.h:132`，来源见[外部 QEMU 源码定位](../dev/external-dependencies.md) |
 | QEMU 会补算 TX 校验和 | 外部 Debian QEMU 10.0.13+ds：`hw/net/net_tx_pkt.c:833-838`，来源见[外部 QEMU 源码定位](../dev/external-dependencies.md) |
-| NAT 增量修正 L4 校验和 | `kernel/net/netfilter_nat.c:754-892` |
+| NAT 增量修正 L4 校验和 | `kernel/net/netfilter_rewrite.c`（`netfilter_set_addr` / `netfilter_set_port`） |

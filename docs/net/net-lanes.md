@@ -263,7 +263,7 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:187`）这个代际标志，�
 | 清扫从 `a20_lwip_poll_timers_locked()` 调用 | 成立。`lwip_stack.c:651`。 |
 | "/proc 读者取同一把锁而非 seqlock" | **成立，但审计者一度判错**。 |
 
-最后一条是这次审计真正的收获。`netfilter_format()` 在 `netfilter.c:641` 已经取了
+最后一条是这次审计真正的收获。`kernel/net/netfilter.c` 的 `netfilter_format()` 已经取了
 `g_lwip_lock` 再调 `netfilter_nat_format()`，所以 connwalk 并没有漏锁。但当初那次
 grep 只覆盖了 `lwip_stack.c` 和 `procfs.c`，没覆盖 `netfilter.c`，读出来像"缺一把锁"，
 于是加了一把。加锁的后果是自死锁——`spin_lock_irqsave()` 不可重入。

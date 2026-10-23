@@ -193,6 +193,7 @@ rsvg-convert --format=pdf --output="$LOGO_PDF" tools/a20os-logo.svg
 
 say "Generating $OUT from $((${#DOCS[@]})) documents ..."
 pandoc "${DOCS[@]}" \
+    --fail-if-warnings \
     --pdf-engine=xelatex \
     --template="$TEMPLATE" \
     --lua-filter=tools/a20os_pdf.lua \

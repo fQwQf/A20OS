@@ -142,7 +142,7 @@ CORE 包此后修好了本表原本的 `test_dispatch_ownership`（负控的重�
 | job | 内容 | 当前状态 |
 | --- | --- | --- |
 | `buildenv-image` | 解析小写镜像名 | 纯 shell，无失败面 |
-| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`（断言 6/6 通过；目标的 arm32 依赖需固定容器）、`check-task-lifetime-boundary`、`host-tests`、`check-host-scripts`（76 个脚本全过）后，`check-a20-tests`（§5）与 `check-honesty-policy` 的 lwIP accept 接线断言（NET-10）已修复并通过；仍为红的是：`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，ABI-09）、`check-task-state-boundary`（ABI-10）、`check-doc-drift`（8 条 gates 断言通过；`tools/check_doc_citations.py` 仍报越界引用，见 [DOCS-05](../gaps/docs.md)；另有 `gen_linux_syscall_coverage.py --check` 因 ABI-09 失败） |
+| `toolchain-gates` | 宿主侧源码契约门禁（裸 runner，24 项） | **本地复现：红**。CORE 包修好 `check-arch-boundary`（断言 6/6 通过；目标的 arm32 依赖需固定容器）、`check-task-lifetime-boundary`、`host-tests`、`check-host-scripts`（76 个脚本全过）后，`check-a20-tests`（§5）与 `check-honesty-policy` 的 lwIP accept 接线断言（NET-10）已修复并通过；仍为红的是：`check-abi-boundary` 与 `check-envelope-coverage`（`a20_envelope_acquire_race_test` 未登记，ABI-09）、`check-task-state-boundary`（ABI-10）。文档漂移项已由 DOCS 包重新验证通过（8/8 断言、源码引用与 syscall 覆盖表检查，见 [文档门禁现状](docs-gates.md)） |
 | `ci-kernel-arches` | 解析内核构建矩阵 | 纯 make，正常 |
 | `cluster-runtime` | 集群运行期门禁 | 未本地复现（需容器 + 60 分钟级 QEMU） |
 | `build-{riscv64,x86_64,aarch64,loongarch64}` | dev-build + `pkg-repo` + `image-world` | 未本地复现（需容器 + 磁盘预算）；riscv64 的 dev-build 已在 §2 单独验证 |

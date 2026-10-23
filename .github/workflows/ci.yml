@@ -306,6 +306,10 @@ jobs:
           key: ccache-kernel-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: ccache-kernel-${{ matrix.arch }}-
 
+      - name: STM32F103 source and firmware gate
+        if: matrix.arch == 'arm32'
+        run: make check-stm32f103
+
       - name: Kernel bring-up build gate (check-<arch>-bringup)
         run: make check-${{ matrix.arch }}-bringup
         env:

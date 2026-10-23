@@ -9,3 +9,17 @@
 - 关闭条件：arm32 上 FP 上下文切换用例通过；或明确降级为不支持并写入平台契约。
 - 诊断：[notes/core-arm32-fp.md](notes/core-arm32-fp.md)。
 
+
+### CORE-DOCS-01 翻译器使用手册中的内核豁免机制
+
+- 现状：`docs/exec-xlator/01-usage.md` 的 W^X 段落在验证命令之间解释 task_t.xlator_host、mm_wx_filter_prot 与 re-exec 设置时机。
+- 缺口：使用路径混入内核内部字段与实现调用关系。
+- 关闭条件：使用页保留 a20.wx 的配置、显式 deny 的验证命令、预期日志和拒绝语义；字段与 re-exec 内部契约移到已有 `03-internals.md` 或源码注释，并从使用页链接。
+- 来源：DOCS-03 用户流程边界审查；本包只提出请求，由 CORE owner 修改。
+
+### CORE-DOCS-02 阻塞、信号和超时边界断言仍指向旧实现
+
+- 现状：DOCS 包复验六份归档的关联静态门禁时，归档标记均存在，但 `check-blocking-point-boundary` 有 4 条断言失败：current.c 的 cpu_id 写入不在白名单、task.c 注释被 proc_make_ready 调用规则命中，以及 futex waiter、wait timer 的旧 C 结构已迁到 Rust。`check-signal-exit-boundary` 缺少 park.c 中的旧 PARK_SIGNAL_MODE_PROTOCOL 标记；`check-timeout-ownership-boundary` 有 3 条断言仍查找旧 C 定时器结构、重复拒绝计数器和批量唤醒形态。
+- 缺口：这些静态门禁没有跟随 CORE 所有权接口迁移；当前反模式白名单是否仍合理、对应 Rust 结构与跨 FFI 唤醒是否维持原契约，需要由 CORE owner 判断。
+- 关闭条件：依据当前状态写入边界、Rust waiter/定时器所有权与唤醒序号契约，更新 `tools/gates.toml` 中对应断言并保留有区分力的负控，然后重跑三个静态门禁及其 runtime 依赖。不要通过放宽全局白名单或删除约束来消除红灯。
+- 来源：DOCS 包 DOCS-02 归档引用复验；本包只报告具体失败，不替 CORE 判定锁与生命周期契约。

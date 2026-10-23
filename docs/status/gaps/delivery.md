@@ -21,7 +21,7 @@
 | `check-abi-boundary`、`check-envelope-coverage`、`check-task-state-boundary` | ABI / IPC | [abi-ipc.md](abi-ipc.md) |
 | `check-arch-boundary` | CORE / MM / ABI | [core.md](core.md) |
 | `check-stm32f103`（硬编码 MMIO 地址） | DRIVER / 平台 | [drivers.md](drivers.md) |
-| `check-doc-drift` 的剩余引用、`check-stm32f103` 缺 `rg` | 文档与门禁自身 | [docs.md](docs.md) DOCS-04/05 |
+| `check-stm32f103` 的镜像依赖与云端接线验证 | 文档与门禁自身 | [docs.md](docs.md) DOCS-04 |
 
 ## DELIVERY-05 已发布的构建镜像缺 armhf 开发头与 rustc
 
@@ -54,3 +54,10 @@
   配置下明确排除 Rust flat 策略并由 owner 记录等价保证），然后重新运行
   `make check-mcu-program-rtl` 并保存实际 guest/RTL 结果。
 - 来源：CLUSTER 1.0 验收尝试；本包不修改全局构建规则。
+
+### DELIVERY-DOCS-01 用户构建路径夹带实现说明
+
+- 现状：`docs/dev/build.md` 的环境准备包含 ARM32 syscall/time_t 布局解释；`docs/dev/instances.md` 的“为什么没有 pyserial”包含 termios 编码与依赖取舍；`docs/dev/debug.md` 的内核调试接口段落包含 ptrace_saved_ctx、EPC 回卷与一次性标志的实现说明。
+- 缺口：读者执行构建、串口和调试流程时需要越过内部实现内容。
+- 关闭条件：构建/运行/调试操作路径只留用途、前提、命令、可观察结果与失败语义；上述布局、平台编码和内核停止状态机制移到技术参考页或源码注释，并保留跳转。不要改变命令或 ABI 语义。
+- 来源：DOCS-03 的用户流程边界审查；本包只提出具体请求，由 DELIVERY 文档 owner 修改。
