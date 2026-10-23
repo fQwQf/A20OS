@@ -51,6 +51,76 @@ static int fail(a20_handle_t out, int code, const char *msg, uint32_t len)
     return code;
 }
 
+/* Optional SECURITY candidate control: normal native-mm needs no PCI device.
+ * The candidate has already run UEDUD's DMA/fault/release workload, so its
+ * released EDU window can now exercise non-owner and malformed MMIO requests. */
+static int device_boundary(a20_handle_t out)
+{
+    a20_device_info_args_t info = {0};
+    info.bus = 1; /* PCI */
+    info.vendor = 0x1234;
+    info.device = 0x11e8;
+    if (a20_device_get_info(&info) != A20_OK ||
+        !(info.out_flags & A20_DEVICE_INFO_F_IOMMU))
+        return fail(out, 80, "security device absent", 22);
+    a20_device_map_mmio_args_t map = {
+        .size = sizeof(map), .version = 1, .prot = 3,
+        .phys_base = info.out_mmio_base, .length = PAGE, .out_addr = 0xfeed,
+    };
+    a20_status_t st = a20_syscall6(A20_SYS_device_map_mmio, (uint64_t)&map, 0, 0, 0, 0, 0);
+    if (st != -A20_ERR_ACCESS || map.out_addr != 0xfeed ||
+        a20_device_release(info.out_mmio_base) != -A20_ERR_PERM)
+        return fail(out, 81, "non-owner device access", 23);
+    if (a20_device_claim(info.out_mmio_base) != A20_OK)
+        return fail(out, 82, "security claim", 14);
+    uint64_t request_page = 0, gap = 0, after = 0;
+    if (a20_vm_alloc_pages(1, 3, &request_page) != A20_OK ||
+        a20_vm_alloc_pages(1, 3, &gap) != A20_OK ||
+        a20_vm_unmap(gap, PAGE) != A20_OK)
+        return fail(out, 87, "MMIO copyout fixture", 20);
+    a20_device_map_mmio_args_t *readonly = (void *)(uintptr_t)request_page;
+    *readonly = map;
+    if (a20_vm_protect(request_page, PAGE, 1) != A20_OK)
+        return fail(out, 88, "MMIO readonly request", 21);
+    for (unsigned i = 0; i < 3; i++) {
+        st = a20_syscall6(A20_SYS_device_map_mmio, request_page, 0, 0, 0, 0, 0);
+        if (st != -A20_ERR_FAULT || readonly->out_addr != 0xfeed)
+            return failh(out, 89, "MMIO copyout", 12, st);
+    }
+    /* A failed output copy must not leave an undiscoverable mapping in the
+     * first free gap. The real VM allocator makes a leak observable here. */
+    if (a20_vm_alloc_pages(1, 3, &after) != A20_OK || after != gap ||
+        a20_vm_unmap(after, PAGE) != A20_OK ||
+        a20_vm_unmap(request_page, PAGE) != A20_OK)
+        return fail(out, 91, "MMIO copyout leaked mapping", 27);
+    const uint64_t lengths[] = { 0, ~0ULL, info.out_mmio_size + PAGE };
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+        map.length = lengths[i];
+        st = a20_syscall6(A20_SYS_device_map_mmio, (uint64_t)&map, 0, 0, 0, 0, 0);
+        a20_status_t want = i == 2 ? -A20_ERR_ACCESS : -A20_ERR_INVALID_ARGUMENT;
+        if (st != want || map.out_addr != 0xfeed)
+            return failh(out, 83, "MMIO range", 10, st);
+    }
+    map.length = PAGE;
+    map.prot = 7;
+    st = a20_syscall6(A20_SYS_device_map_mmio, (uint64_t)&map, 0, 0, 0, 0, 0);
+    if (st != -A20_ERR_INVALID_ARGUMENT || map.out_addr != 0xfeed)
+        return fail(out, 84, "MMIO executable", 15);
+    map.prot = 3;
+    st = a20_syscall6(A20_SYS_device_map_mmio, (uint64_t)&map, 0, 0, 0, 0, 0);
+    if (st != A20_OK || map.out_addr == 0xfeed)
+        return fail(out, 85, "MMIO valid request", 18);
+    /* EDU's identification register is read-only and has no device effects. */
+    volatile uint32_t *regs = (void *)(uintptr_t)map.out_addr;
+    if ((regs[0] & 0xff) != 0xedu ||
+        a20_device_release(info.out_mmio_base) != A20_OK ||
+        a20_vm_protect(map.out_addr, PAGE, 1) != -A20_ERR_NO_MEMORY)
+        return fail(out, 86, "MMIO release", 12);
+    a20_hdl_write_buf(out, "NATIVE_MM: security-device PASS\n",
+                      sizeof("NATIVE_MM: security-device PASS\n") - 1, (void *)0);
+    return 0;
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
@@ -59,6 +129,11 @@ int main(int argc, char **argv, char **envp)
     a20_handle_t out = si ? si->stdout_handle : A20_HANDLE_NULL;
     if (out == A20_HANDLE_NULL)
         return 90;
+
+    if (argc == 2 && a20_strcmp(argv[1], "--security-device") == 0) {
+        int result = device_boundary(out);
+        if (result) return result;
+    }
 
     /* 1. vm_alloc: 16 pages, RW. */
     uint64_t base = 0;

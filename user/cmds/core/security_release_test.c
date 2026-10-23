@@ -311,12 +311,12 @@ static int probe(const char *name, int (*run)(void))
     return code != 0;
 }
 
-static int run_program(const char *path)
+static int run_program(const char *path, const char *arg)
 {
     fflush(stdout);
     pid_t child = fork();
     if (!child) {
-        execl(path, path, NULL);
+        execl(path, path, arg, NULL);
         _exit(127);
     }
     int code = wait_code(child);
@@ -424,11 +424,12 @@ int main(int argc, char **argv)
     unlink("/tmp/security-release/link");
     unlink(allowed); unlink(outside); rmdir("/tmp/security-release");
     if (argc == 2 && !strcmp(argv[1], "--candidate")) {
-        failures += run_program("/bin/wx_aslr_test");
-        failures += run_program("/bin/sandbox_test");
-        failures += run_program("/bin/cred_state_test");
-        failures += run_program("/bin/native-handle-rv");
-        failures += run_program("/bin/envelope_smoke");
+        failures += run_program("/bin/wx_aslr_test", NULL);
+        failures += run_program("/bin/sandbox_test", NULL);
+        failures += run_program("/bin/cred_state_test", NULL);
+        failures += run_program("/bin/native-handle-rv", NULL);
+        failures += run_program("/bin/native-mm-rv", "--security-device");
+        failures += run_program("/bin/envelope_smoke", NULL);
     }
     printf("SECURITY_RELEASE: %s failures=%d\n", failures ? "FAIL" : "PASS", failures);
     return failures != 0;
