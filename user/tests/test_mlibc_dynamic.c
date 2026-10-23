@@ -32,20 +32,17 @@ static _Thread_local int tls_main;
 static atomic_int shared_count;
 static int failures;
 
-static void fail(const char *what)
-{
+static void fail(const char *what) {
     printf("DYNAMIC: FAIL %s\n", what);
     failures++;
 }
 
-static void atexit_marker(void)
-{
+static void atexit_marker(void) {
     printf("DYNAMIC: atexit\n");
     fflush(stdout);
 }
 
-static void *worker(void *arg)
-{
+static void *worker(void *arg) {
     int id = (int)(long)arg;
     tls_main = id * 100;
     for (int i = 0; i < ITERS; i++) {
@@ -55,15 +52,13 @@ static void *worker(void *arg)
     return (void *)(long)tls_main;
 }
 
-static int cmp_int(const void *a, const void *b)
-{
+static int cmp_int(const void *a, const void *b) {
     int x = *(const int *)a;
     int y = *(const int *)b;
     return (x > y) - (x < y);
 }
 
-static void test_libc_calls(void)
-{
+static void test_libc_calls(void) {
     char buf[64];
     snprintf(buf, sizeof(buf), "%s-%d", "dyn", 42);
     if (strcmp(buf, "dyn-42") != 0)
@@ -71,15 +66,14 @@ static void test_libc_calls(void)
     if (strlen("abcdef") != 6)
         fail("strlen");
 
-    int values[7] = { 7, 1, 5, 3, 2, 6, 4 };
+    int values[7] = {7, 1, 5, 3, 2, 6, 4};
     qsort(values, 7, sizeof(values[0]), cmp_int);
     for (int i = 0; i < 7; i++)
         if (values[i] != i + 1)
             fail("qsort");
 }
 
-static void test_threads(void)
-{
+static void test_threads(void) {
     atomic_init(&shared_count, 0);
     pthread_t threads[NTHREADS];
     for (int i = 0; i < NTHREADS; i++) {
@@ -114,8 +108,7 @@ struct plugin_job {
     int id;
 };
 
-static void *plugin_worker(void *arg)
-{
+static void *plugin_worker(void *arg) {
     struct plugin_job *job = arg;
     struct plug *p = job->p;
     /* A fresh thread starts with the module's initial TLS image (zero), not
@@ -128,8 +121,7 @@ static void *plugin_worker(void *arg)
     return (void *)(long)p->tls_get();
 }
 
-static void test_plugin(void)
-{
+static void test_plugin(void) {
     struct plug p;
     memset(&p, 0, sizeof(p));
     p.handle = dlopen("/bin/lib/libmlibcplug.so", RTLD_NOW);
@@ -175,8 +167,7 @@ static void test_plugin(void)
         fail("plugin-tls-main");
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     atexit(atexit_marker);
 
     if (argc > 1 && strcmp(argv[1], "reexec") == 0) {
@@ -196,8 +187,8 @@ int main(int argc, char **argv)
     printf("DYNAMIC: PASS\n");
     fflush(stdout);
 
-    char *nargv[] = { "mlibc-dynamic-rv", "reexec", NULL };
-    execve("/bin/mlibc-dynamic-rv", nargv, environ);
+    char *nargv[] = {argv[0], "reexec", NULL};
+    execve(argv[0], nargv, environ);
     printf("DYNAMIC: FAIL execve\n");
     return 2;
 }

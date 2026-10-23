@@ -21,9 +21,15 @@ static int64_t a20_syscall6(uint64_t number, uint64_t pointer,
     if (number == A20_SYS_vm_map) {
         auto &a = *(a20_vm_map_args *)pointer;
         mismatch |= a.size != sizeof(canonical_map) || a.version != 1 ||
-            a.source != 9 || a.vmar != A20_HANDLE_NULL || a.addr_hint != 0x10000 ||
-            a.length != 4096 || a.offset != 8192 || a.prot != 5 || a.flags != 0;
-        a.out_addr = 0x1234000;
+            a.vmar != A20_HANDLE_NULL || a.length != 4096 || a.flags != MAP_PRIVATE;
+        if (a.source == A20_HANDLE_NULL) {
+            mismatch |= a.addr_hint != 0 || a.offset != 0 || a.prot != 3;
+            a.out_addr = 0x9876000;
+        } else {
+            mismatch |= a.source != 9 || a.addr_hint != 0x10000 ||
+                a.offset != 8192 || a.prot != 5;
+            a.out_addr = 0x1234000;
+        }
     } else if (number == A20_SYS_vm_alloc) {
         auto &a = *(a20_vm_alloc_args *)pointer;
         mismatch |= a.length != 4096 || a.prot != 3;

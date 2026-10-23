@@ -93,6 +93,7 @@ static void *worker(void *argument) {
     return (void *)(uintptr_t)(20 + index);
 }
 int main(void) {
+    fprintf(stderr, "MLIBC_SIGNALS: stage=start pid=%d\n", (int)getpid());
     main_thread = pthread_self();
     sigset_t set = both(), old, pending;
     OK(pthread_sigmask(SIG_SETMASK, &set, NULL));
@@ -132,7 +133,10 @@ int main(void) {
     }
     /* A cloned process receives a new real identity and no parent thread
      * capabilities. Existing fork()/waitpid() callers must keep working. */
+    fprintf(stderr, "MLIBC_SIGNALS: stage=joined pid=%d\n", (int)getpid());
     pid_t child = fork();
+    fprintf(stderr, "MLIBC_SIGNALS: stage=fork pid=%d child=%d\n",
+            (int)getpid(), (int)child);
     CHECK(child >= 0);
     if (!child) {
         main_thread = pthread_self();
@@ -146,6 +150,7 @@ int main(void) {
     int child_status;
     CHECK(waitpid(child, &child_status, 0) == child &&
           WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    fprintf(stderr, "MLIBC_SIGNALS: stage=reaped pid=%d\n", (int)getpid());
     struct timespec short_wait = {.tv_nsec = 3000000}, before, after;
     CHECK(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
     CHECK(sigtimedwait(&set, NULL, &short_wait) == -1 && errno == EAGAIN);
