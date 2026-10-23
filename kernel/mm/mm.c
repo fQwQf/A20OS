@@ -540,61 +540,57 @@ static int pt_table_empty(pte_t *table, int level, int cleared_idx) {
     return 1;
 }
 
-// 取消虚拟地址的映射，并回收变空的中间页表页
+/* Unmap a base page and retire empty tables. Even an absent leaf may have
+ * an allocated prefix left by a failed pt_walk(); prune that prefix while
+ * retaining the historical -EINVAL result for an absent mapping.
+ * Caller holds mm->lock and the address-space TLB transaction. */
 int pt_unmap(mm_struct_t *mm, vaddr_t va) {
     if (!mm) return -EINVAL;
-    pt_root_t *pgdir = mm->pgdir;
     pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
-    pte_t *table = pgdir;
-
-    path[ARCH_PT_ROOT_LEVEL] = pgdir;
-    for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
+    pte_t *table = mm->pgdir;
+    path[ARCH_PT_ROOT_LEVEL] = table;
+    int level = ARCH_PT_ROOT_LEVEL;
+    for (; level > 0; level--) {
         int idx = arch_pt_vpn(va, level);
         idx_path[level] = idx;
         pte_t pte = table[idx];
-        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
-            return -EINVAL;
+        if (!(pte & PTE_V)) break;
+        if (arch_pte_is_leaf(pte)) return -EINVAL;
         table = arch_pte_to_ptr(pte);
         path[level - 1] = table;
     }
-
-    int leaf_idx = arch_pt_vpn(va, 0);
-    /* The teardown loop passes each table's cleared slot to pt_table_empty() as
-     * a fast-path hint.  Level 0's cleared slot is the leaf index, which the
-     * descent loop above does not visit. */
-    idx_path[0] = leaf_idx;
-    pte_t *pte = &table[leaf_idx];
-    mm_pt_node_lock(path[0]);
-    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
-        mm_pt_node_unlock(path[0]);
-        return -EINVAL;
+    int result = -EINVAL;
+    int idx = arch_pt_vpn(va, level);
+    if (level == 0) {
+        mm_pt_node_lock(table);
+        if ((table[idx] & PTE_V) && arch_pte_is_leaf(table[idx])) {
+            table[idx] = 0;
+            mm_pt_note_absent(table, 0, idx);
+            result = 0;
+        }
+        mm_pt_node_unlock(table);
     }
-    *pte = 0;
-    mm_pt_note_absent(path[0], 0, leaf_idx);
-    mm_pt_node_unlock(path[0]);
-
-    for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
+    for (; level < ARCH_PT_ROOT_LEVEL; level++) {
         pte_t *child = path[level];
         pte_t *parent = path[level + 1];
-        /* The emptiness test and the parent clear share this critical section:
-         * a peer that had already descended past parent could otherwise slip an
-         * entry into child between the two and lose it.  parent, not child --
-         * see mm_pt_node_lock() on the ordering. */
+        /* Parent lock spans emptiness and unlink, excluding a descended
+         * cursor from inserting into the child between these two actions. */
         mm_pt_node_lock(parent);
-        if (!pt_table_empty(child, level, idx_path[level])) {
+        if (!pt_table_empty(child, level, idx)) {
             mm_pt_node_unlock(parent);
             break;
         }
-        parent[idx_path[level + 1]] = 0;
-        mm_pt_node_clear_seg(parent, level + 1, idx_path[level + 1]);
-        mm_pt_note_absent(parent, level + 1, idx_path[level + 1]);
+        idx = idx_path[level + 1];
+        parent[idx] = 0;
+        mm_pt_node_clear_seg(parent, level + 1, idx);
+        mm_pt_note_absent(parent, level + 1, idx);
         mm_pt_node_unlock(parent);
         mm_pt_retire_table(mm, child, level);
     }
-    /* The leaf frame reference is NOT dropped here: pt_unmap never owned it.
-     * Callers (io_uring, signal, framebuffer) release it themselves. */
-    return 0;
+    /* Device/VMO callers own their frame references. Never release a data
+     * frame here; retirement only consumes empty intermediate table pages. */
+    return result;
 }
 
 int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,

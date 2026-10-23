@@ -6,10 +6,10 @@
  *
  * Implements the landlock_create_ruleset / landlock_add_rule /
  * landlock_restrict_self syscalls on top of a per-process ruleset stored in
- * the task.  Rules match path prefixes; enforcement happens in vfs_open and
- * the directory-mutating VFS entry points.  This is a genuine access-control
- * layer, not a no-op: restricted processes cannot open or create paths below
- * a denied prefix.
+ * the task. READ_FILE/WRITE_FILE rules match canonical path prefixes at the
+ * open boundary, including openat2 and proc-fd reopens, before side effects.
+ * Directory mutation, inode-anchored rules and policy stacking are outside
+ * this subset; the Linux creation ABI rejects unsupported handled bits.
  */
 
 #include "core/types.h"
@@ -61,9 +61,8 @@ typedef struct landlock_ruleset landlock_ruleset_t;
  * ruleset handle) or a negative errno. */
 int landlock_create_ruleset(uint64_t handled_access_fs);
 
-/* Add a path-beneath rule to the ruleset identified by @ruleset_fd.  @path is
- * a kernel NUL-terminated pathname, @parent_fd is the dirfd for relative
- * resolution (AT_FDCWD for absolute).  Returns 0 or a negative errno. */
+/* Copy a Linux path-beneath attribute from @attr_user and resolve its dirfd.
+ * The ruleset must still be mutable. Returns 0 or a negative errno. */
 int landlock_add_rule(int ruleset_fd, int rule_type, const void *attr_user,
                       unsigned flags);
 
@@ -73,6 +72,9 @@ int landlock_restrict_self(int ruleset_fd, unsigned flags);
 /* Enforcement hook: returns 0 if @path is allowed for the current task under
  * Landlock, or -EACCES if a restricted prefix denies it. */
 int landlock_check_path(const char *path, uint64_t needed_access);
+
+/* Task construction: take a child-owned pin before the child is published. */
+void landlock_inherit_task(struct task_t *child, const struct task_t *parent);
 
 /* Release a process's rulesets (task teardown). */
 void landlock_release_task(struct task_t *t);

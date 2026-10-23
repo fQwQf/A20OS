@@ -64,22 +64,21 @@ static int create_abi(void)
     return 0;
 }
 
-static int add_read_rule(int rs, const char *path)
+static int add_rule(int rs, const char *path, uint64_t access)
 {
     int fd = open(path, O_RDONLY | O_DIRECTORY);
     if (fd < 0) return -1;
-    struct { uint64_t access; int32_t parent; } rule = { LL_READ, fd };
+    struct { uint64_t access; int32_t parent; } rule = { access, fd };
     int r = syscall(SYS_landlock_add_rule, rs, 1, &rule, 0);
     close(fd);
     return r;
 }
 
-static int restrict_read(void)
+static int restrict_fs(uint64_t handled)
 {
-    uint64_t handled = LL_READ;
     int rs = syscall(SYS_landlock_create_ruleset, &handled, sizeof(handled), 0);
     if (rs < 0) return 1;
-    if (add_read_rule(rs, "/tmp/security-release") || add_read_rule(rs, "/bin"))
+    if (add_rule(rs, "/tmp/security-release", handled) || add_rule(rs, "/bin", LL_READ))
         return 2;
     if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) ||
         syscall(SYS_landlock_restrict_self, rs, 0)) return 3;
@@ -91,7 +90,7 @@ static int landlock_permission(void)
     if (setgid(65534) || setuid(65534)) return 1;
     uint64_t handled = LL_READ;
     int rs = syscall(SYS_landlock_create_ruleset, &handled, sizeof(handled), 0);
-    if (rs < 0 || add_read_rule(rs, "/tmp/security-release")) return 2;
+    if (rs < 0 || add_rule(rs, "/tmp/security-release", LL_READ)) return 2;
     if (syscall(SYS_landlock_restrict_self, rs, 0) != -1 || errno != EACCES)
         return 3;
     /* A refused restriction must leave this previously accessible file usable. */
@@ -106,7 +105,7 @@ static int landlock_permission(void)
 
 static int landlock_fork(void)
 {
-    if (restrict_read() || !denied_open(outside)) return 1;
+    if (restrict_fs(LL_READ) || !denied_open(outside)) return 1;
     pid_t child = fork();
     if (!child) _exit(denied_open(outside) ? 0 : 2);
     return wait_code(child);
@@ -114,15 +113,77 @@ static int landlock_fork(void)
 
 static int landlock_exec(void)
 {
-    if (restrict_read() || !denied_open(outside)) return 1;
+    if (restrict_fs(LL_READ) || !denied_open(outside)) return 1;
     execl("/bin/security_release_test", "security_release_test", "--landlock-exec", NULL);
     return 2;
 }
 
 static int landlock_symlink(void)
 {
-    if (restrict_read() || !denied_open(outside)) return 1;
+    if (restrict_fs(LL_READ) || !denied_open(outside)) return 1;
     return denied_open("/tmp/security-release/link") ? 0 : 2;
+}
+
+static int landlock_write_aliases(void)
+{
+    int retained = open(outside, O_RDONLY);
+    int dir = open("/tmp/security-release", O_RDONLY | O_DIRECTORY);
+    if (retained < 0 || dir < 0 || restrict_fs(LL_READ | LL_WRITE)) return 1;
+    int fd = open(allowed, O_WRONLY);
+    if (fd < 0 || pwrite(fd, "x", 1, 0) != 1 || close(fd)) return 2;
+    fd = open("/tmp/security-release/created", O_CREAT | O_WRONLY, 0600);
+    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd)) return 10;
+    struct { uint64_t flags, mode, resolve; } create_how = { O_CREAT | O_WRONLY, 0600, 0 };
+    fd = syscall(SYS_openat2, dir, "created-at2", &create_how, sizeof(create_how));
+    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd)) return 11;
+    const char *aliases[] = { "/tmp/security-release/link",
+        "/tmp/security-release/../security-release-outside" };
+    for (unsigned i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+        fd = open(aliases[i], O_WRONLY | O_TRUNC);
+        if (fd >= 0 || errno != EACCES) return 3 + i;
+        struct { uint64_t flags, mode, resolve; } how = { O_WRONLY | O_TRUNC, 0, 0 };
+        if (syscall(SYS_openat2, AT_FDCWD, aliases[i], &how, sizeof(how)) != -1 ||
+            errno != EACCES) return 5 + i;
+    }
+    if (openat(dir, "escape/security-release-created", O_CREAT | O_WRONLY, 0600) != -1 ||
+        errno != EACCES) return 7;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", retained);
+    if (open(path, O_WRONLY | O_TRUNC) != -1 || errno != EACCES) return 8;
+    /* Existing descriptors keep their authority; failed reopens must not
+     * truncate the underlying object before returning a denial. */
+    char data[65], expected[64];
+    memset(expected, 'x', sizeof(expected));
+    if (pread(retained, data, sizeof(data), 0) != 64 ||
+        memcmp(data, expected, 64) || close(retained) || close(dir)) return 9;
+    return 0;
+}
+
+static int landlock_shared_ruleset(void)
+{
+    uint64_t handled = LL_READ;
+    int rs = syscall(SYS_landlock_create_ruleset, &handled, sizeof(handled), 0);
+    int ready[2];
+    if (rs < 0 || add_rule(rs, "/tmp/security-release", handled) || pipe(ready)) return 1;
+    pid_t child = fork();
+    if (!child) {
+        close(ready[1]);
+        char byte;
+        if (read(ready[0], &byte, 1) != 1 || close(ready[0])) _exit(2);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) ||
+            syscall(SYS_landlock_restrict_self, rs, 0)) _exit(3);
+        if (add_rule(rs, "/tmp/security-release", handled) != -1 || errno != EINVAL)
+            _exit(4);
+        if (close(rs) || !denied_open(outside)) _exit(5);
+        int fd = open(allowed, O_RDONLY);
+        _exit(fd >= 0 && !close(fd) ? 0 : 6);
+    }
+    close(ready[0]);
+    int r = prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) ||
+        syscall(SYS_landlock_restrict_self, rs, 0) || close(rs);
+    if (write(ready[1], "x", 1) != 1 || close(ready[1])) r = 1;
+    int result = wait_code(child);
+    return r || result || !denied_open(outside) ? 10 + result : 0;
 }
 
 static void file_policy(struct env_policy *p)
@@ -346,7 +407,7 @@ static int benchmark(int enabled)
             {0x06, 0, 0, 0x00050000U | EPERM}, {0x06, 0, 0, 0x7fff0000U},
         };
         struct { uint16_t count; struct filter *filter; } prog = { 4, filter };
-        if (restrict_read() || prctl(PR_SET_SECCOMP, 2L, &prog, 0L, 0L) ||
+        if (restrict_fs(LL_READ) || prctl(PR_SET_SECCOMP, 2L, &prog, 0L, 0L) ||
             syscall(SYS_getppid) != -1 || errno != EPERM || !denied_open(outside))
             return 2;
         struct env_policy p;
@@ -410,11 +471,18 @@ int main(int argc, char **argv)
     }
     unlink("/tmp/security-release/link");
     if (symlink(outside, "/tmp/security-release/link")) return 1;
+    unlink("/tmp/security-release/escape");
+    unlink("/tmp/security-release-created");
+    if (symlink("/tmp", "/tmp/security-release/escape")) return 1;
     int failures = probe("landlock-create-abi", create_abi);
     failures += probe("landlock-no-cap", landlock_permission);
     failures += probe("landlock-fork", landlock_fork);
     failures += probe("landlock-exec", landlock_exec);
     failures += probe("landlock-symlink", landlock_symlink);
+    failures += probe("landlock-write-aliases-no-effects", landlock_write_aliases);
+    failures += probe("landlock-shared-sealed-ruleset", landlock_shared_ruleset);
+    struct stat created;
+    if (!stat("/tmp/security-release-created", &created) || errno != ENOENT) failures++;
     failures += probe("envelope-revoke-old-refs", envelope_revoke);
     failures += probe("envelope-revoke-non-owner", envelope_same_uid);
     failures += probe("envelope-revoke-cross-uid-no-cap", envelope_cross_uid);
@@ -422,6 +490,10 @@ int main(int argc, char **argv)
     failures += probe("envelope-op-quota-no-effects", envelope_op_quota);
     failures += probe("envelope-data-quota-no-effects", envelope_data_quota);
     unlink("/tmp/security-release/link");
+    unlink("/tmp/security-release/escape");
+    unlink("/tmp/security-release-created");
+    unlink("/tmp/security-release/created");
+    unlink("/tmp/security-release/created-at2");
     unlink(allowed); unlink(outside); rmdir("/tmp/security-release");
     if (argc == 2 && !strcmp(argv[1], "--candidate")) {
         failures += run_program("/bin/wx_aslr_test", NULL);

@@ -271,9 +271,6 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
 static int exec_open_and_check(const char *path, kstat_t *st_out,
                                char resolved[MAX_PATH_LEN])
 {
-    int lr = landlock_check_path(path, LANDLOCK_ACCESS_FS_READ_FILE);
-    if (lr < 0)
-        return lr;
     /* openat2 records the path after following all symlinks on the very file
      * opened, avoiding a separate realpath walk racing a rename/replacement. */
     int fd = vfs_openat2(AT_FDCWD, path, O_RDONLY, 0, 0);

@@ -295,8 +295,10 @@ void proc_task_init_base(task_t *t, task_t *parent)
 
 void proc_task_init_seccomp(task_t *t, task_t *parent)
 {
-    if (t)
+    if (t) {
         seccomp_inherit(t, parent);
+        landlock_inherit_task(t, parent);
+    }
 }
 
 void proc_task_init_fs_cgroup(task_t *t, task_t *parent)
