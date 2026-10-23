@@ -312,7 +312,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                              uint32_t stderr_h, uint32_t self_task_h,
                              uint32_t root_h, uint32_t cwd_h,
                              uint32_t inherited_fd_limit,
-                             uint32_t registry_h);
+                             uint32_t registry_h,
+                             const void *bootstrap_data, size_t bootstrap_size);
 vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
                                     char *const argv[], char *const envp[],
                                     const elf_load_info_t *info,
@@ -320,7 +321,8 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
                                     uint32_t stderr_h, uint32_t self_task_h,
                                     uint32_t root_h, uint32_t cwd_h,
                                     uint32_t inherited_fd_limit,
-                                    vaddr_t *start_info_out);
+                                    vaddr_t *start_info_out,
+                                    const void *bootstrap_data, size_t bootstrap_size);
 #endif
 
 /* Native ELF relocation encodings supplied by arch. */

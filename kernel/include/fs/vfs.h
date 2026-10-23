@@ -475,6 +475,8 @@ int      vfs_write(int fd, const char *buf, size_t count);
 int      vfs_read_file(vfile_t *vf, char *buf, size_t count);
 int      vfs_write_file(vfile_t *vf, const char *buf, size_t count);
 int      vfs_pread(int fd, char *buf, size_t count, uint64_t offset);
+int      vfs_pread_file(vfile_t *vf, char *buf, size_t count, uint64_t offset);
+int      vfs_pwrite_file(vfile_t *vf, const char *buf, size_t count, uint64_t offset);
 long     vfs_lseek(int fd, long offset, int whence);
 long     vfs_lseek_vfile(vfile_t *vf, long offset, int whence);
 int      vfs_getdents64(int fd, void *dirp, size_t count);

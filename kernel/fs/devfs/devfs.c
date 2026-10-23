@@ -1422,6 +1422,38 @@ int devfs_is_tty_vfile(vfile_t *vf) {
                   vf->ops == &g_devfs_stderr_ops);
 }
 
+/* Device identities are local to devfs; callers pass pinned vfiles. */
+int tty_vfile_get_termios(vfile_t *vf, ktty_termios_t *out) {
+    if (devfs_is_tty_vfile(vf)) return tty_console_get_termios(out);
+    if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
+        return pty_get_termios((int)(intptr_t)vf->priv, out);
+    return -ENOTTY;
+}
+int tty_vfile_set_termios(vfile_t *vf, const ktty_termios_t *in, int action) {
+    if (devfs_is_tty_vfile(vf)) return tty_console_set_termios(in, action);
+    if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
+        return pty_set_termios((int)(intptr_t)vf->priv, in, action, vf->ops == &g_devfs_ptm_ops);
+    return -ENOTTY;
+}
+int tty_vfile_get_winsize(vfile_t *vf, ktty_winsize_t *out) {
+    if (devfs_is_tty_vfile(vf)) return tty_console_get_winsize(out);
+    if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
+        return pty_get_winsize((int)(intptr_t)vf->priv, out);
+    return -ENOTTY;
+}
+int tty_vfile_set_winsize(vfile_t *vf, const ktty_winsize_t *in) {
+    if (devfs_is_tty_vfile(vf)) return tty_console_set_winsize(in);
+    if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
+        return pty_set_winsize((int)(intptr_t)vf->priv, in);
+    return -ENOTTY;
+}
+int tty_vfile_flush(vfile_t *vf, int queue) {
+    if (devfs_is_tty_vfile(vf)) return tty_console_flush(queue);
+    if (vf && (vf->ops == &g_devfs_ptm_ops || vf->ops == &g_devfs_pts_ops))
+        return pty_flush((int)(intptr_t)vf->priv, queue, vf->ops == &g_devfs_ptm_ops);
+    return -ENOTTY;
+}
+
 int devfs_is_zero_vfile(vfile_t *vf) {
     return vf && vf->ops == &g_devfs_zero_ops;
 }

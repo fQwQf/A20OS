@@ -1,5 +1,8 @@
 # A20OS Native ABI：IPC 与事件子系统设计
 
+> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
+> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
+
 > Channel（消息通道）和 Event Queue（事件队列）的数据结构、协议与实现架构按 2026-08 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
 
 ---

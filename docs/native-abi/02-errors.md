@@ -52,11 +52,34 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 #define A20_ERR_CLUSTER_TIMEOUT      27   /* 集群：远程 CALL 超 deadline / 建链超时 */
 #define A20_ERR_REMOTE_CLOSED        28   /* 集群：对端端点已关闭 */
 #define A20_ERR_CLUSTER_UNSUPPORTED  29   /* 集群：跨机 handle/捐赠、MCU 分片/广播、HELLO 哈希冲突 */
+#define A20_ERR_BROKEN_PIPE               30
+#define A20_ERR_NOT_SOCKET                31
+#define A20_ERR_PROTOCOL_OPTION           32
+#define A20_ERR_ADDRESS_IN_USE            33
+#define A20_ERR_ADDRESS_NOT_AVAILABLE     34
+#define A20_ERR_CONNECTION_REFUSED        35
+#define A20_ERR_CONNECTION_RESET          36
+#define A20_ERR_NOT_CONNECTED             37
+#define A20_ERR_ALREADY_CONNECTED         38
+#define A20_ERR_IN_PROGRESS               39
+#define A20_ERR_ALREADY_IN_PROGRESS       40
+#define A20_ERR_NETWORK_UNREACHABLE       41
+#define A20_ERR_HOST_UNREACHABLE          42
+#define A20_ERR_MESSAGE_TOO_LARGE         43
+#define A20_ERR_ILLEGAL_SEEK              44
+#define A20_ERR_NOT_TERMINAL              45
+#define A20_ERR_OVERFLOW 46
+#define A20_ERR_NO_LOCKS 47
+#define A20_ERR_DEADLOCK 48
 ```
 
 26–29 是集群子系统追加的四个码（docs/cluster/01-abi.md）。每个码只对应一个触发场景，禁止混用，这样远端失败才能无歧义地映射回原因。
 
 ---
+
+30–48 为 Native 1.1 新增的对象/网络/范围状态，仍使用 A20 自己的编号。
+Linux errno 只在 libc 映射；新增细分错误的旧调用者处理规则见
+[运行时扩展 §2](10-runtime-extensions.md#2-协商与布局)。
 
 ## 3. 错误码分类
 

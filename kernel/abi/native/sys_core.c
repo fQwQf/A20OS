@@ -29,6 +29,10 @@
 #include "core/timer.h"
 #include "handle_table.h"
 #include "proc/proc.h"
+#include "proc/exec.h"
+#include "proc/signal.h"
+#include "uapi/a20/exec.h"
+#include "uapi/a20/thread_exit.h"
 #include "proc/proc_internal.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
@@ -84,6 +88,25 @@ uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 
 /* ===== Core (0x0000) ===== */
 
+static uint64_t native_feature_word0(void)
+{
+    uint64_t features = (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3) |
+        (1ULL << A20_ABI_FEATURE_BYTE_STREAM) | (1ULL << A20_ABI_FEATURE_MAP_MODES) |
+        (1ULL << A20_ABI_FEATURE_FILE_FLAGS) | (1ULL << A20_ABI_FEATURE_SOCKET_OPTIONS) |
+        (1ULL << A20_ABI_FEATURE_TERMINAL_CONTROL) | (1ULL << A20_ABI_FEATURE_FILE_LOCKS) |
+        (1ULL << A20_ABI_FEATURE_NET_MESSAGES_V2) | (1ULL << A20_ABI_FEATURE_THREAD_JOINABLE);
+    /* The opt-in tag must fit a scalar register. 32-bit profiles keep legacy
+     * calls and must not advertise extensions whose tag would be truncated. */
+    if (sizeof(uintptr_t) == 8)
+        features |= (1ULL << A20_ABI_FEATURE_EXEC_BOOTSTRAP) |
+                    (1ULL << A20_ABI_FEATURE_THREAD_EXIT_CLEANUP) |
+                    (1ULL << A20_ABI_FEATURE_SIGNAL_EXIT);
+#ifdef CONFIG_ABI_BOTH
+    features |= 1ULL << A20_ABI_FEATURE_LINUX_EXEC;
+#endif
+    return features;
+}
+
 int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
 {
     a20_abi_info_t *out = (a20_abi_info_t *)(uintptr_t)A20_ARG(0);
@@ -101,11 +124,7 @@ int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
     info.handle_bits = 32;
     /* feature_bits: bit 0 = handle_table, bit 1 = temporal_capabilities,
      * bit 2 = futex (Sync 0x0B00), bit 3 = atomic32 (0x0B02) */
-    info.feature_bits[0] =
-        (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3);
-#ifdef CONFIG_ABI_BOTH
-    info.feature_bits[0] |= 1ULL << A20_ABI_FEATURE_LINUX_EXEC;
-#endif
+    info.feature_bits[0] = native_feature_word0();
     if (copy_to_user(out, &info, sizeof(info)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
@@ -120,12 +139,7 @@ int64_t sys_a20_feature_test(const a20_syscall_args_t *args)
 
     /* Match the feature_bits from abi_info */
     uint64_t features[4] = {0};
-    features[0] = (1ULL << 0) | (1ULL << 1) | (1ULL << 2) |
-                  (1ULL << 3); /* handle_table + temporal + futex + atomic32 */
-
-#ifdef CONFIG_ABI_BOTH
-    features[0] |= 1ULL << A20_ABI_FEATURE_LINUX_EXEC;
-#endif
+    features[0] = native_feature_word0();
     if (features[word] & (1ULL << bit))
         return A20_OK;
     return -A20_ERR_NOT_SUPPORTED;
@@ -285,6 +299,21 @@ int64_t sys_a20_handle_close_many(const a20_syscall_args_t *args)
 int64_t sys_a20_task_exit(const a20_syscall_args_t *args)
 {
     int32_t code = (int32_t)A20_ARG(0);
+    if (A20_ARG(0) == A20_EXIT_STRUCT) {
+        a20_exit_args_t request;
+        a20_exit_args_t *user = (void *)(uintptr_t)A20_ARG(1);
+        if (!user || copy_from_user(&request, user, sizeof(request)) < 0)
+            return -A20_ERR_FAULT;
+        if (request.size < sizeof(request) || request.version != 1 ||
+            request.flags || request.release_base || request.release_length ||
+            request.cause > A20_EXIT_CAUSE_NOTIFICATION ||
+            (request.cause == A20_EXIT_CAUSE_NORMAL && request.notification) ||
+            (request.cause == A20_EXIT_CAUSE_NOTIFICATION &&
+             (!request.notification || request.notification >= NSIG)))
+            return -A20_ERR_INVALID_ARGUMENT;
+        code = request.cause == A20_EXIT_CAUSE_NOTIFICATION ?
+            signal_fatal_exit_code_dumped(request.notification, 0) : request.code;
+    }
     task_t *cur = proc_current();
 
     /* Drop this thread's handle-table reference; the table outlives until
@@ -681,7 +710,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                       &info, child_stdio[0], child_stdio[1],
                                       child_stdio[2], child_self_task,
                                       child_root_h, child_cwd_h,
-                                      child_fd_limit, child_registry);
+                                      child_fd_limit, child_registry, NULL, 0);
     free_arg_vector(argv_ks, argc);
     free_arg_vector(envp_ks, envc);
     if (sp == 0) {
@@ -706,144 +735,128 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 /*  task_clone — capability-safe process continuation                  */
 /* ================================================================== */
 
-#define A20_CLONE_MANIFEST_MAX 64
+#define A20_CLONE_MANIFEST_MAX 1024
+
+/* Transfer one explicit capability with all of its restrictions intact.
+ * The lookup reference becomes the new table's ownership on success. */
+static int64_t a20_clone_install(struct a20_ht_internal *source,
+                                 struct a20_ht_internal *dest,
+                                 a20_handle_t handle, uint16_t type,
+                                 a20_rights_t requested)
+{
+    a20_handle_entry_t entry;
+    int64_t result = a20_handle_lookup_ref_internal(source, handle, type,
+                                                    A20_RIGHT_DUP, &entry);
+    if (result < 0) return result;
+    if (requested && (requested & ~entry.rights)) {
+        a20_object_release(entry.object, entry.type);
+        return -A20_ERR_ACCESS;
+    }
+    result = a20_handle_install_temporal(dest, entry.object, entry.type,
+        requested ? requested : entry.rights, entry.expiry_tick,
+        entry.remaining_ops, entry.temporal_flags, entry.security_label);
+    if (result < 0) a20_object_release(entry.object, entry.type);
+    return result;
+}
 
 int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
 {
-    a20_clone_args_t *uargs = (a20_clone_args_t *)(uintptr_t)A20_ARG(0);
-    if (!uargs) return -A20_ERR_FAULT;
-
+    a20_clone_args_t *uargs = (void *)(uintptr_t)A20_ARG(0);
     a20_clone_args_t kargs;
-    memset(&kargs, 0, sizeof(kargs));
-    uint32_t hdr[2];
-    if (copy_from_user(hdr, uargs, sizeof(hdr)) < 0)
-        return -A20_ERR_FAULT;
-    if (hdr[1] < 1 || hdr[1] > 1)
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+    if ((kargs.flags & ~(A20_CLONE_COW_VM | A20_CLONE_STACK)) ||
+        kargs.reserved || kargs.reserved1 ||
+        kargs.handle_count > A20_CLONE_MANIFEST_MAX ||
+        ((kargs.flags & A20_CLONE_STACK) && (!kargs.stack || (kargs.stack & 15))))
         return -A20_ERR_INVALID_ARGUMENT;
-    if (hdr[0] < (uint32_t)sizeof(kargs))
-        return -A20_ERR_INVALID_ARGUMENT;
-    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
-        return -A20_ERR_FAULT;
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    struct a20_ht_internal *ht = task_get_a20_ht(proc_current());
     if (!ht) return -A20_ERR_BAD_HANDLE;
-
-    if (kargs.handle_count > A20_CLONE_MANIFEST_MAX)
-        return -A20_ERR_INVALID_ARGUMENT;
-    a20_clone_handle_t manifest[A20_CLONE_MANIFEST_MAX];
-    if (kargs.handle_count > 0) {
-        if (copy_from_user(manifest, (void *)(uintptr_t)kargs.handles,
-                           kargs.handle_count * sizeof(a20_clone_handle_t)) < 0)
-            return -A20_ERR_FAULT;
-    }
-
-    /* Create the child: COW address-space copy + register continuation
-     * (a0 == 0 in the child).  NOT made runnable yet. */
+    a20_clone_handle_t *manifest = NULL;
+    struct a20_ht_internal *new_ht = NULL;
     task_t *new_task = NULL;
-    vaddr_t child_sp = (kargs.flags & A20_CLONE_STACK) ? (vaddr_t)kargs.stack : 0;
-    int child_pid = proc_clone_deferred(child_sp, &new_task);
-    if (child_pid < 0 || !new_task)
-        return -A20_ERR_NO_MEMORY;
-    new_task->abi_mode = 1;
-
-    /* The child's handle table is built ONLY from the explicit manifest —
-     * no implicit capability inheritance.  Each entry is validated against
-     * the parent's table and installed with rights ⊆ the parent's. */
-    struct a20_ht_internal *new_ht = a20_ht_create();
-    if (!new_ht) {
-        proc_force_exit(new_task, 1);
-        proc_make_ready(new_task);
-        return -A20_ERR_NO_MEMORY;
-    }
-    __atomic_store_n(&new_task->a20_ht, new_ht, __ATOMIC_RELEASE);
-
-    /* Standard handles: self task, root dir, cwd dir (mirror task_spawn). */
-    a20_handle_t child_self = A20_HANDLE_NULL;
-    int64_t self_h = a20_handle_install_task(
-        new_ht, new_task, A20_OBJ_TASK,
-        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
-            A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-    if (self_h >= 0) {
-        child_self = (a20_handle_t)self_h;
-        new_task->a20_self_h = child_self;
-    }
-
-    a20_handle_t child_root = A20_HANDLE_NULL, child_cwd = A20_HANDLE_NULL;
-    a20_handle_entry_t entry;
-    if (a20_handle_lookup_ref_internal(ht, kargs.root_dir, A20_OBJ_DIRECTORY,
-                                       A20_RIGHT_READ | A20_RIGHT_STAT,
-                                       &entry) == A20_OK) {
-        a20_object_ref(entry.object, entry.type);
-        int64_t h = a20_handle_install(new_ht, entry.object, A20_OBJ_DIRECTORY,
-                                       A20_RIGHT_READ | A20_RIGHT_STAT |
-                                       A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-        if (h >= 0) child_root = (a20_handle_t)h;
-        else a20_object_release(entry.object, entry.type);
-        a20_object_release(entry.object, entry.type);
-    }
-    if (kargs.cwd_dir != A20_HANDLE_NULL &&
-        a20_handle_lookup_ref_internal(ht, kargs.cwd_dir, A20_OBJ_DIRECTORY,
-                                       A20_RIGHT_READ | A20_RIGHT_STAT,
-                                       &entry) == A20_OK) {
-        a20_object_ref(entry.object, entry.type);
-        int64_t h = a20_handle_install(new_ht, entry.object, A20_OBJ_DIRECTORY,
-                                       A20_RIGHT_READ | A20_RIGHT_STAT |
-                                       A20_RIGHT_DUP);
-        if (h >= 0) child_cwd = (a20_handle_t)h;
-        else a20_object_release(entry.object, entry.type);
-        a20_object_release(entry.object, entry.type);
-    }
-    if (child_cwd == A20_HANDLE_NULL)
-        child_cwd = child_root;
-
-    /* Manifest: install each handle; child_rights must be ⊆ the parent's. */
-    for (uint32_t i = 0; i < kargs.handle_count; i++) {
-        a20_handle_entry_t mentry;
-        manifest[i].child_handle = A20_HANDLE_NULL;
-        if (a20_handle_lookup_ref_internal(ht, manifest[i].parent_handle,
-                                           A20_OBJ_INVALID, 0, &mentry) < 0)
-            continue;
-        a20_rights_t rights = manifest[i].child_rights
-                                  ? (manifest[i].child_rights & mentry.rights)
-                                  : mentry.rights;
-        a20_object_ref(mentry.object, mentry.type);
-        int64_t h = a20_handle_install(new_ht, mentry.object, mentry.type,
-                                       rights);
-        if (h >= 0)
-            manifest[i].child_handle = (a20_handle_t)h;
-        else
-            a20_object_release(mentry.object, mentry.type);
-        a20_object_release(mentry.object, mentry.type);
-    }
-
-    /* The parent receives a child task handle. */
     a20_handle_t task_h = A20_HANDLE_NULL;
-    int64_t ph = a20_handle_install_task(
-        ht, new_task, A20_OBJ_TASK,
-        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
-            A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
-    if (ph >= 0) task_h = (a20_handle_t)ph;
-    kargs.out_task = task_h;
-
-    /* Write the child-side results into the CHILD's memory (the child is a
-     * COW copy; without this the child would read stale handle values). */
-    if (kargs.handle_count > 0) {
-        proc_copy_to_task_user(new_task, (void *)(uintptr_t)kargs.handles, manifest,
-                               kargs.handle_count * sizeof(a20_clone_handle_t));
+    int64_t result = -A20_ERR_NO_MEMORY;
+    if (kargs.handle_count) {
+        size_t bytes = kargs.handle_count * sizeof(*manifest);
+        manifest = kmalloc(bytes);
+        if (!manifest) goto out;
+        if (copy_from_user(manifest, (void *)(uintptr_t)kargs.handles, bytes) < 0) {
+            result = -A20_ERR_FAULT;
+            goto out;
+        }
     }
-    proc_copy_to_task_user(new_task, (void *)&uargs->out_root, &child_root,
-                           sizeof(child_root));
-    proc_copy_to_task_user(new_task, (void *)&uargs->out_cwd, &child_cwd,
-                           sizeof(child_cwd));
-    proc_copy_to_task_user(new_task, (void *)&uargs->out_self, &child_self,
-                           sizeof(child_self));
+    new_ht = a20_ht_create();
+    if (!new_ht) goto out;
+    a20_ht_set_label(new_ht, a20_ht_get_label(ht));
+    a20_handle_t child_root = A20_HANDLE_NULL, child_cwd = A20_HANDLE_NULL;
+    if (kargs.root_dir != A20_HANDLE_NULL) {
+        result = a20_clone_install(ht, new_ht, kargs.root_dir, A20_OBJ_DIRECTORY, 0);
+        if (result < 0) goto out;
+        child_root = (a20_handle_t)result;
+    }
+    if (kargs.cwd_dir != A20_HANDLE_NULL) {
+        result = a20_clone_install(ht, new_ht, kargs.cwd_dir, A20_OBJ_DIRECTORY, 0);
+        if (result < 0) goto out;
+        child_cwd = (a20_handle_t)result;
+    } else child_cwd = child_root;
+    for (uint32_t i = 0; i < kargs.handle_count; i++) {
+        result = a20_clone_install(ht, new_ht, manifest[i].parent_handle,
+                                   A20_OBJ_INVALID, manifest[i].child_rights);
+        if (result < 0) goto out;
+        manifest[i].child_handle = (a20_handle_t)result;
+    }
 
-    /* Parent side: report the child task handle. */
-    a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs));
-
+    /* Validate and acquire every declared capability before creating a child.
+     * No failed transfer may leave a partly initialized runnable process. */
+    int child_pid = proc_clone_deferred(
+        (kargs.flags & A20_CLONE_STACK) ? (vaddr_t)kargs.stack : 0, &new_task);
+    if (child_pid < 0 || !new_task) {
+        result = child_pid == -EAGAIN ? -A20_ERR_WOULD_BLOCK : -A20_ERR_NO_MEMORY;
+        goto out;
+    }
+    new_task->abi_mode = 1;
+    __atomic_store_n(&new_task->a20_ht, new_ht, __ATOMIC_RELEASE);
+    new_ht = NULL; /* now owned by the task */
+    struct a20_ht_internal *child_ht = task_get_a20_ht(new_task);
+    int64_t self_h = a20_handle_install_task(child_ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+        A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+    if (self_h < 0) { result = self_h; goto out; }
+    new_task->a20_self_h = (a20_handle_t)self_h;
+    result = a20_handle_install_task(ht, new_task, A20_OBJ_TASK,
+        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+        A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN);
+    if (result < 0) goto out;
+    task_h = (a20_handle_t)result;
+    a20_clone_args_t child_args = kargs;
+    child_args.out_task = A20_HANDLE_NULL;
+    child_args.out_root = child_root;
+    child_args.out_cwd = child_cwd;
+    child_args.out_self = (a20_handle_t)self_h;
+    if ((kargs.handle_count && proc_copy_to_task_user(new_task,
+            (void *)(uintptr_t)kargs.handles, manifest,
+            kargs.handle_count * sizeof(*manifest)) < 0) ||
+        proc_copy_to_task_user(new_task, uargs, &child_args, sizeof(child_args)) < 0) {
+        result = -A20_ERR_FAULT;
+        goto out;
+    }
+    kargs.out_task = task_h;
+    kargs.out_root = kargs.out_cwd = kargs.out_self = A20_HANDLE_NULL;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        result = -A20_ERR_FAULT;
+        goto out;
+    }
+    kfree(manifest);
     proc_make_ready(new_task);
     return child_pid;
+out:
+    if (task_h != A20_HANDLE_NULL) a20_handle_remove(ht, task_h);
+    /* Deferred tasks have not run. Use the construction rollback path, which
+     * unlinks the task and drops its MM, handle table and identity references. */
+    if (new_task) proc_destroy_task(new_task);
+    if (new_ht) a20_ht_put_ref(new_ht);
+    kfree(manifest);
+    return result;
 }
 
 /* Declare the process's current native standard handles (fd 0/1/2, root,
@@ -882,17 +895,58 @@ int64_t sys_a20_task_adopt(const a20_syscall_args_t *args)
 /*  execve — in-place image replacement (fork's partner in the child)  */
 /* ================================================================== */
 
-extern int sys_execve(const char *path, char **argv, char **envp);
 extern int64_t a20_native_vfs_result(int r);
 
 int64_t sys_a20_execve(const a20_syscall_args_t *args)
 {
-    /* Reuse the core exec path (proc_exec).  On success the image is
-     * replaced and exec never returns here; on failure map to A20 errno. */
-    int r = sys_execve((const char *)(uintptr_t)A20_ARG(0), (char **)(uintptr_t)A20_ARG(1),
-                       (char **)(uintptr_t)A20_ARG(2));
-    if (r == 0)
-        return A20_OK;
+    uint64_t path_user = A20_ARG(0), argv_user = A20_ARG(1), envp_user = A20_ARG(2);
+    int extended = path_user == A20_EXEC_STRUCT;
+    a20_exec_bootstrap_args_t kargs = {0};
+    if (extended) {
+        a20_exec_bootstrap_args_t *uargs = (void *)(uintptr_t)A20_ARG(1);
+        A20_VALIDATE_AND_COPY(uargs, kargs);
+        path_user = kargs.path; argv_user = kargs.argv; envp_user = kargs.envp;
+    }
+    char path[MAX_PATH_LEN];
+    long error = user_path_strncpy(path, (const char *)(uintptr_t)path_user, sizeof(path));
+    if (error < 0) return a20_native_vfs_result((int)error);
+    proc_exec_bootstrap_t bootstrap = {0};
+    void *data = NULL;
+    uint32_t *close_handles = NULL;
+    if (extended) {
+        if (kargs.reserved || kargs.data_size > A20_EXEC_BOOTSTRAP_MAX ||
+            kargs.close_count > A20_EXEC_CLOSE_MAX)
+            return -A20_ERR_INVALID_ARGUMENT;
+        if (kargs.data_size) {
+            data = kmalloc(kargs.data_size);
+            if (!data) return -A20_ERR_NO_MEMORY;
+            if (copy_from_user(data, (void *)(uintptr_t)kargs.data, kargs.data_size) < 0) {
+                kfree(data);
+                return -A20_ERR_FAULT;
+            }
+        }
+        if (kargs.close_count) {
+            size_t size = kargs.close_count * sizeof(uint32_t);
+            close_handles = kmalloc(size);
+            if (!close_handles) {
+                kfree(data);
+                return -A20_ERR_NO_MEMORY;
+            }
+            if (copy_from_user(close_handles, (void *)(uintptr_t)kargs.close_handles, size) < 0) {
+                kfree(close_handles);
+                kfree(data);
+                return -A20_ERR_FAULT;
+            }
+        }
+        bootstrap.data = data;
+        bootstrap.size = kargs.data_size;
+        bootstrap.close_handles = close_handles;
+        bootstrap.close_count = kargs.close_count;
+    }
+    int r = proc_exec_with_bootstrap(path, (char **)(uintptr_t)argv_user,
+                                     (char **)(uintptr_t)envp_user, &bootstrap);
+    kfree(close_handles);
+    kfree(data);
     return a20_native_vfs_result(r);
 }
 

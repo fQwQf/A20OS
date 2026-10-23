@@ -16,6 +16,7 @@
  */
 
 #include "proc/proc.h"
+#include "proc/exec.h"
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
@@ -69,6 +70,7 @@ typedef struct {
     int     envc;
     int     depth;                      /* shebang nesting depth */
     size_t  bytes;                      /* argv+envp string bytes, for limits */
+    const proc_exec_bootstrap_t *bootstrap;
 } exec_bprm_t;
 
 /* ================================================================== */
@@ -807,7 +809,8 @@ static uint64_t exec_setup_native_abi(task_t *t,
                                        int argc, char *const *k_argv,
                                        char *const *k_envp,
                                        vaddr_t *start_info_out,
-                                       exec_native_handles_t *state)
+                                       exec_native_handles_t *state,
+                                       const proc_exec_bootstrap_t *bootstrap)
 {
     /* A native->native exec preserves the caller's handle table so that
      * fork+exec keeps its stdio (pipes/files the fork child wired up via
@@ -938,18 +941,30 @@ static uint64_t exec_setup_native_abi(task_t *t,
         }
     }
 
+    if (bootstrap) {
+        for (uint32_t i = 0; i < bootstrap->close_count; i++) {
+            uint32_t h = bootstrap->close_handles[i];
+            if (stdin_h == h) stdin_h = A20_HANDLE_NULL;
+            if (stdout_h == h) stdout_h = A20_HANDLE_NULL;
+            if (stderr_h == h) stderr_h = A20_HANDLE_NULL;
+        }
+    }
+
     if (info->interp_base) {
         return elf_setup_stack_a20_dynamic(
             info->stack_top, argc, k_argv, k_envp, info,
             stdin_h, stdout_h, stderr_h, self_h, root_h, cwd_h,
             0,
-            start_info_out);
+            start_info_out, bootstrap ? bootstrap->data : NULL,
+            bootstrap ? bootstrap->size : 0);
     }
 
     return elf_setup_stack_a20(info->stack_top, argc,
                                k_argv, k_envp, info,
                                stdin_h, stdout_h, stderr_h, self_h,
-                               root_h, cwd_h, 0, registry_h);
+                               root_h, cwd_h, 0, registry_h,
+                               bootstrap ? bootstrap->data : NULL,
+                               bootstrap ? bootstrap->size : 0);
 }
 #endif /* CONFIG_ABI_NATIVE */
 
@@ -1040,7 +1055,7 @@ static int32_t exec_cb_native_stack(void *opaque)
     exec_rust_context_t *c = opaque;
     c->sp = exec_setup_native_abi(c->task, c->info, c->bprm->argc,
         (char *const *)c->bprm->args, (char *const *)c->bprm->envs,
-        &c->native_start_info, &c->native_handles);
+        &c->native_start_info, &c->native_handles, c->bprm->bootstrap);
     return c->sp ? 0 : -ENOMEM;
 #else
     (void)opaque;
@@ -1121,7 +1136,22 @@ static void exec_cb_siblings(void *opaque)
 #endif
 }
 static void exec_cb_cloexec(void *opaque)
-{ fdtable_close_on_exec(((exec_rust_context_t *)opaque)->task); }
+{
+    exec_rust_context_t *c = opaque;
+    fdtable_close_on_exec(c->task);
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    if (c->bprm->bootstrap && c->task->a20_ht) {
+        const proc_exec_bootstrap_t *bootstrap = c->bprm->bootstrap;
+        for (uint32_t i = 0; i < bootstrap->close_count; i++) {
+            uint32_t h = bootstrap->close_handles[i];
+            (void)a20_handle_remove(c->task->a20_ht, h);
+            if (c->task->a20_stdin_h == h) c->task->a20_stdin_h = A20_HANDLE_NULL;
+            if (c->task->a20_stdout_h == h) c->task->a20_stdout_h = A20_HANDLE_NULL;
+            if (c->task->a20_stderr_h == h) c->task->a20_stderr_h = A20_HANDLE_NULL;
+        }
+    }
+#endif
+}
 
 static void exec_cb_trap(void *opaque)
 {
@@ -1305,6 +1335,12 @@ static void exec_trace_stop(task_t *t)
 
 int proc_exec(const char *path, char *const argv[], char *const envp[])
 {
+    return proc_exec_with_bootstrap(path, argv, envp, NULL);
+}
+
+int proc_exec_with_bootstrap(const char *path, char *const argv[], char *const envp[],
+                             const proc_exec_bootstrap_t *bootstrap)
+{
     task_t *t = proc_current();
     if (!t)
         return -ESRCH;
@@ -1312,6 +1348,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
     /* ---- 1. Initialise bprm and copy args from user ONCE ---- */
     exec_bprm_t bprm;
     memset(&bprm, 0, sizeof(bprm));
+    bprm.bootstrap = bootstrap;
 
     bprm.path = kmalloc(strlen(path) + 1);
     if (!bprm.path)

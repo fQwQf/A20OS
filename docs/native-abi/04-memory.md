@@ -1,5 +1,8 @@
 # A20OS Native ABI：内存子系统设计
 
+> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
+> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
+
 > 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
 > `kernel/include/mm/vm.h` 核对。层级 VMAR 由核心 `vmar_t` 表示；映射仍复用核心 MM。2026-10-13 的修订已进入完整构建与运行验收，覆盖范围见 验证记录。
 >

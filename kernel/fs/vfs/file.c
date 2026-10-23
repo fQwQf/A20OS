@@ -215,39 +215,50 @@ int vfs_write(int fd, const char *buf, size_t count)
     return r;
 }
 
-int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
+int vfs_pread_file(vfile_t *vf, char *buf, size_t count, uint64_t offset)
 {
-    if (!buf)
-        return -EINVAL;
-    vfile_t *vf = vfs_get_file_ref(fd);
-    if (!vf)
-        return -EBADF;
-    if (!vf->ops || !vf->ops->lseek) {
-        vfs_put_file_ref(fd, vf);
-        return -ESPIPE;
-    }
-
+    if (!vf) return -EBADF;
+    if (!buf && count) return -EFAULT;
+    if (offset > (uint64_t)__LONG_MAX__) return -EINVAL;
+    if (!vf->vnode || !vf->ops || !vf->ops->lseek) return -ESPIPE;
     mutex_lock(&vf->offset_lock);
     long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
-    if (saved < 0) {
-        mutex_unlock(&vf->offset_lock);
-        vfs_put_file_ref(fd, vf);
-        return (int)saved;
+    int result = (int)saved;
+    if (saved >= 0) {
+        long position = vf->ops->lseek(vf, (long)offset, SEEK_SET);
+        result = position < 0 ? (int)position : vfs_read_file(vf, buf, count);
+        long restored = vf->ops->lseek(vf, saved, SEEK_SET);
+        if (restored < 0 && result >= 0) result = (int)restored;
     }
-    long seek_r = vf->ops->lseek(vf, (long)offset, SEEK_SET);
-    if (seek_r < 0) {
-        mutex_unlock(&vf->offset_lock);
-        vfs_put_file_ref(fd, vf);
-        return (int)seek_r;
-    }
-
-    int r = vfs_read_file(vf, buf, count);
-    long restore_r = vf->ops->lseek(vf, saved, SEEK_SET);
     mutex_unlock(&vf->offset_lock);
+    return result;
+}
+
+int vfs_pwrite_file(vfile_t *vf, const char *buf, size_t count, uint64_t offset)
+{
+    if (!vf) return -EBADF;
+    if (!buf && count) return -EFAULT;
+    if (offset > (uint64_t)__LONG_MAX__) return -EINVAL;
+    if (!vf->vnode || !vf->ops || !vf->ops->lseek) return -ESPIPE;
+    mutex_lock(&vf->offset_lock);
+    long saved = vf->ops->lseek(vf, 0, SEEK_CUR);
+    int result = (int)saved;
+    if (saved >= 0) {
+        long position = vf->ops->lseek(vf, (long)offset, SEEK_SET);
+        result = position < 0 ? (int)position : vfs_write_file(vf, buf, count);
+        long restored = vf->ops->lseek(vf, saved, SEEK_SET);
+        if (restored < 0 && result >= 0) result = (int)restored;
+    }
+    mutex_unlock(&vf->offset_lock);
+    return result;
+}
+
+int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
+{
+    vfile_t *vf = vfs_get_file_ref(fd);
+    int result = vfs_pread_file(vf, buf, count, offset);
     vfs_put_file_ref(fd, vf);
-    if (restore_r < 0 && r >= 0)
-        return (int)restore_r;
-    return r;
+    return result;
 }
 
 static long vfs_lseek_vfile_impl(vfile_t *vf, long offset, int whence)

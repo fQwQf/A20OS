@@ -924,7 +924,7 @@ pub unsafe extern "C" fn a20_net_getsockopt_state(
             }
             return 0;
         }
-        val = 0;
+        return -ENOPROTOOPT;
     } else if level == IPPROTO_IP {
         /* Report the effective value, not the stored field: a caller that never
          * set an option must see the TTL/TOS its packets actually carry, which

@@ -25,8 +25,14 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
         return -A20_ERR_BAD_HANDLE;
 
     task_t *target = NULL;
-    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_INVALID,
-                                    A20_RIGHT_SIGNAL, &target);
+    int thread_handle = 0;
+    int64_t r = a20_handle_task_get(ht, task_h, A20_OBJ_TASK, A20_RIGHT_SIGNAL,
+                                    &target);
+    if (r == -A20_ERR_BAD_HANDLE) {
+        thread_handle = 1;
+        r = a20_handle_task_get(ht, task_h, A20_OBJ_THREAD, A20_RIGHT_SIGNAL,
+                                &target);
+    }
     if (r < 0)
         return r;
     if (!target)
@@ -36,12 +42,20 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
         proc_put(target);
         return A20_OK;
     }
+    /* A THREAD capability must not turn into process-wide termination after
+     * a personality change. Termination of its referenced execution context
+     * is independent of the target's user ABI. */
+    if (sig == SIGKILL && (thread_handle || (mode & A20_SIGNAL_THREAD))) {
+        proc_force_exit(target, signal_fatal_exit_code_dumped(SIGKILL, 0));
+        proc_put(target);
+        return A20_OK;
+    }
 #ifdef CONFIG_ABI_BOTH
     /* An owner keeps the same task handle across Native -> Linux exec.
      * Linux signals must enter the shared signal state so fatal signals end
      * the whole pthread group, including sleeping workers. */
     if (target->abi_mode == 0) {
-        int sent = (mode & A20_SIGNAL_THREAD)
+        int sent = (thread_handle || (mode & A20_SIGNAL_THREAD))
                        ? signal_send_thread(target->pid, sig)
                        : signal_send_task(target, sig);
         proc_put(target);
@@ -51,16 +65,23 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args) {
     if (sig == 9) {
         /* Force the referenced target to exit at its safe boundary. Calling
          * proc_exit here would terminate the requesting agent instead. */
-        proc_force_exit(target, 128 + 9);
+        if (thread_handle || (mode & A20_SIGNAL_THREAD)) {
+            proc_force_exit(target, signal_fatal_exit_code_dumped(SIGKILL, 0));
+            r = 0;
+        } else {
+            /* A process capability controls its whole group; KILL is queued
+             * through the unmaskable kernel path, including CPU-bound tasks. */
+            r = signal_send_task(target, SIGKILL);
+        }
         proc_put(target);
-        return A20_OK;
+        return r < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
     }
 
     /* Checkpoint-based delivery: record the signal and wake the target if it
      * is parked at a checkpoint (event/futex wait).  The handler runs on the
      * next explicit checkpoint (signal_check), never
      * asynchronously. */
-    if (mode & A20_SIGNAL_THREAD) {
+    if (thread_handle || (mode & A20_SIGNAL_THREAD)) {
         a20_thread_sig_pend(target, sig);
     } else {
         struct a20_ht_internal *tht = task_get_a20_ht_ref(target);
@@ -113,8 +134,8 @@ int64_t sys_a20_signal_check(const a20_syscall_args_t *args) {
     uint64_t mode = A20_ARG(0);
     if (mode == A20_SIGNAL_STRUCT)
         return signal_control((void *)(uintptr_t)A20_ARG(1));
-    if (a20_signal_native_mode_valid(
-            mode, A20_SIGNAL_THREAD | A20_SIGNAL_PEEK | A20_SIGNAL_SELECT))
+    if (a20_signal_native_mode_valid(mode, A20_SIGNAL_THREAD | A20_SIGNAL_PEEK |
+                                               A20_SIGNAL_SELECT))
         return -A20_ERR_INVALID_ARGUMENT;
     task_t *cur = proc_current();
     if (mode & A20_SIGNAL_THREAD)
@@ -134,8 +155,8 @@ int64_t sys_a20_signal_mask(const a20_syscall_args_t *args) {
     if (!ht)
         return -A20_ERR_BAD_HANDLE;
     uint64_t mode = A20_ARG(2);
-    if (a20_signal_native_mode_valid(
-            mode, A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
+    if (a20_signal_native_mode_valid(mode,
+                                     A20_SIGNAL_THREAD | A20_SIGNAL_MASK_QUERY))
         return -A20_ERR_INVALID_ARGUMENT;
     uint64_t old =
         (mode & A20_SIGNAL_THREAD)

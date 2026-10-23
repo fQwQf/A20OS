@@ -1501,6 +1501,18 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
 }
 
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+static vaddr_t elf_native_copy_bootstrap(const elf_load_info_t *info,
+                                         vaddr_t stack_top, const void *data,
+                                         size_t size)
+{
+    if (!size) return stack_top;
+    if (!data || size > 65536 || stack_top < size + PAGE_SIZE) return 0;
+    vaddr_t address = (stack_top - size) & ~(vaddr_t)15;
+    vaddr_t bottom = stack_top - (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
+    if (stack_copy(info->pgdir, address, data, size, &bottom) < 0) return 0;
+    return address;
+}
+
 /*
  * Native-ABI initial stack. Rust owns the layout and writes strings, pointer
  * arrays, and descriptor fields; C supplies the mapped-page copy mechanism.
@@ -1512,10 +1524,14 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                             uint32_t stderr_h, uint32_t self_task_h,
                             uint32_t root_h, uint32_t cwd_h,
                             uint32_t inherited_fd_limit,
-                            uint32_t registry_h)
+                            uint32_t registry_h,
+                            const void *bootstrap_data, size_t bootstrap_size)
 {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
+
+    stack_top = elf_native_copy_bootstrap(info, stack_top, bootstrap_data, bootstrap_size);
+    if (!stack_top) return 0;
 
     pt_root_t *pgdir = info->pgdir;
     vaddr_t stack_bottom = stack_top -
@@ -1541,7 +1557,7 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
     a20_start_info_t si;
     memset(&si, 0, sizeof(si));
     si.size = sizeof(si);
-    si.version = 1;
+    si.version = A20_START_INFO_VERSION;
     si.reserved0 = inherited_fd_limit;
     si.root_dir = root_h;
     si.cwd_dir = cwd_h;
@@ -1551,6 +1567,8 @@ vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
     si.self_task = self_task_h;
     si.page_size = PAGE_SIZE;
     si.service_registry = registry_h;
+    si.bootstrap_data = bootstrap_size ? stack_top : 0;
+    si.bootstrap_size = bootstrap_size;
 
     elf_stack_writer_t writer = {
         .pgdir = pgdir,
@@ -1578,10 +1596,14 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
                                      uint32_t stderr_h, uint32_t self_task_h,
                                      uint32_t root_h, uint32_t cwd_h,
                                      uint32_t inherited_fd_limit,
-                                     vaddr_t *start_info_out)
+                                     vaddr_t *start_info_out,
+                                     const void *bootstrap_data, size_t bootstrap_size)
 {
     if (!start_info_out)
         return 0;
+
+    stack_top = elf_native_copy_bootstrap(info, stack_top, bootstrap_data, bootstrap_size);
+    if (!stack_top) return 0;
 
     vaddr_t si_va = stack_top - sizeof(a20_start_info_t);
     /* Native-dynamic tasks keep the syscall path for now: no vDSO is
@@ -1603,7 +1625,7 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
     a20_start_info_t si;
     memset(&si, 0, sizeof(si));
     si.size = sizeof(si);
-    si.version = 1;
+    si.version = A20_START_INFO_VERSION;
     si.argc = (uint32_t)argc;
     si.envc = (uint32_t)envc;
     si.reserved0 = inherited_fd_limit;
@@ -1616,6 +1638,8 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
     si.root_dir = root_h;
     si.cwd_dir = cwd_h;
     si.page_size = PAGE_SIZE;
+    si.bootstrap_data = bootstrap_size ? stack_top : 0;
+    si.bootstrap_size = bootstrap_size;
 
     vaddr_t stack_bottom = stack_top -
         (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;

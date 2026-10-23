@@ -74,7 +74,7 @@ static inline a20_status_t a20_net_sendmsg(a20_handle_t socket,
                                            uint32_t control_len,
                                            uint64_t *out_sent)
 {
-    a20_net_sendmsg_args_t args;
+    a20_net_sendmsg_args_t args = {0};
     args.size         = sizeof(args);
     args.version      = 1;
     args.socket       = socket;
@@ -103,7 +103,7 @@ static inline a20_status_t a20_net_recvmsg(a20_handle_t socket,
                                            uint64_t *out_received,
                                            uint32_t *out_addr_len)
 {
-    a20_net_recvmsg_args_t args;
+    a20_net_recvmsg_args_t args = {0};
     args.size          = sizeof(args);
     args.version       = 1;
     args.socket        = socket;
@@ -123,6 +123,19 @@ static inline a20_status_t a20_net_recvmsg(a20_handle_t socket,
     if (out_addr_len)
         *out_addr_len = args.out_addr_len;
     return r;
+}
+
+/* Message v2 uses Native endpoint/flag schemas; legacy wrappers above retain
+ * fixed-IP v1 transport. Callers initialize the complete request to zero. */
+static inline a20_status_t a20_net_send_message(a20_net_sendmsg_args_t *args) {
+    if (!args) return -A20_ERR_FAULT;
+    args->size = sizeof(*args); args->version = 2;
+    return a20_syscall6(A20_SYS_net_sendmsg, (uint64_t)(uintptr_t)args, 0, 0, 0, 0, 0);
+}
+static inline a20_status_t a20_net_receive_message(a20_net_recvmsg_args_t *args) {
+    if (!args) return -A20_ERR_FAULT;
+    args->size = sizeof(*args); args->version = 2;
+    return a20_syscall6(A20_SYS_net_recvmsg, (uint64_t)(uintptr_t)args, 0, 0, 0, 0, 0);
 }
 
 static inline a20_status_t a20_net_socketpair(int domain, int type, int protocol,

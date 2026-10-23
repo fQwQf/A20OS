@@ -441,7 +441,7 @@ int main(int argc, char **argv, char **envp)
     }
 
     if (g_out != A20_HANDLE_NULL) {
-        a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: PASS\n", 21, (void *)0);
+        a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: PASS\n", sizeof("NATIVE_DEEPEN: PASS\n") - 1, (void *)0);
     }
     return 0;
 }

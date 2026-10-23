@@ -16,6 +16,10 @@
 #define O_APPEND     0x400
 #define O_CLOEXEC    0x80000
 #define O_NONBLOCK   0x800
+#define O_DSYNC      0x1000
+#define O_ASYNC      0x2000
+#define O_NOATIME    0x40000
+#define O_SYNC       0x101000
 #define O_EXCL       0x80
 #define O_PATH       0x200000
 

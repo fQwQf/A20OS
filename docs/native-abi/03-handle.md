@@ -1,5 +1,8 @@
 # A20OS Native ABI：Handle 子系统设计
 
+> 2026-10-23：Native 1.1.0 的新增字段、op、feature、版本与迁移规则见
+> [运行时扩展规范](10-runtime-extensions.md)。本页已有前缀仍有效；冲突的旧实现状态说明以该规范和验收记录为准。
+
 > Handle 子系统覆盖 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 2026-08 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
@@ -248,7 +251,7 @@ A20 的 Native ABI **没有通用 ioctl**。所有控制操作经 `handle_contro
 
 以终端几何为例：`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。`tcflush`、`tcsetwinsize` 同理走 `TCFLUSH`/`SET_WINSIZE`。
 
-> POSIX 兼容定位：mlibc 的 `ioctl()` 只是一个翻译层，把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件锁/owner 元数据（`fcntl` F_GETLK 等）当前在 Native 上返回 `ENOTSUP`（暂无类型化等价物，作为明确不支持记录）。研究文档 01 §2.4 批评的正是 ioctl；A20 的回答是用类型化控制替代它，而不是复刻它。
+> POSIX 兼容定位：mlibc 的 `ioctl()` 只是一个翻译层，把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件范围锁新增类型化 `FILE_LOCK` op；原始 fcntl 命令不进入 Native ABI，owner 元数据 F_SETOWN 等仍不支持，见 [1.1 扩展](10-runtime-extensions.md#file-range-locks)。研究文档 01 §2.4 批评的正是 ioctl；A20 的回答是用类型化控制替代它，而不是复刻它。
 
 ---
 

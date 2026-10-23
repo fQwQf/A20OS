@@ -441,7 +441,7 @@ typedef struct task_t {
 #define A20_TASK_OBJECTS_ENABLED 1
     struct a20_task_object
         *a20_object;       /* weak task binding; task owns one ref */
-    unsigned a20_joinable; /* immutable after Native thread publication */
+    unsigned a20_joinable; /* published once; dying detached thread clears atomically */
     /* Native thread checkpoint state, protected by its shared handle-table
      * lock. Separate from Linux signal state and legacy process checkpoints. */
     uint64_t a20_signal_pending;
@@ -794,7 +794,7 @@ static inline int proc_native_thread_waitable(const task_t *task,
                                               const task_t *parent) {
 #if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) &&                \
     (!defined(CONFIG_MCU) || defined(CONFIG_MCU_NATIVE_PROGRAM))
-    return task && task->a20_joinable && parent && parent != task &&
+    return task && __atomic_load_n(&task->a20_joinable, __ATOMIC_ACQUIRE) && parent && parent != task &&
            parent->tgid == task->tgid;
 #else
     (void)task;

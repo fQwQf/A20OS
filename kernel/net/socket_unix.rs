@@ -606,6 +606,7 @@ pub unsafe extern "C" fn a20_net_unix_socket_sendto(s: *mut c_void, buf: *const 
     let src_local_len = *v.local_len;
     ptr::copy_nonoverlapping(v.local, src_local.as_mut_ptr(), src_local_len);
     let sock_type = *v.sock_type;
+    let was_connected = *v.ever_connected != 0 || *v.connected != 0;
     let peer = *v.peer;
     let had_peer = !peer.is_null();
     /* Sampled under the lock, so it cannot be freed between the test and the
@@ -632,6 +633,9 @@ pub unsafe extern "C" fn a20_net_unix_socket_sendto(s: *mut c_void, buf: *const 
         dst = a20_net_unix_find_bound(v.net_ns, AF_UNIX, sock_type, dst_addr, dst_len);
     }
     if dst.is_null() {
+        if was_connected && (sock_type == SOCK_STREAM || sock_type == SOCK_SEQPACKET) {
+            return -EPIPE;
+        }
         return if !dst_addr.is_null() { -ECONNREFUSED } else { -EDESTADDRREQ };
     }
 
@@ -640,6 +644,9 @@ pub unsafe extern "C" fn a20_net_unix_socket_sendto(s: *mut c_void, buf: *const 
     if a20_net_unix_is_live(dst) == 0 {
         a20_net_unix_unlock2(&mut pair);
         a20_net_unix_free(dst);
+        if sock_type == SOCK_STREAM || sock_type == SOCK_SEQPACKET {
+            return -EPIPE;
+        }
         return if !dst_addr.is_null() { -ECONNREFUSED } else { -EDESTADDRREQ };
     }
     let dv = view_of(dst);
@@ -1691,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn sendto_a_stream_socket_with_a_dead_peer_is_refused() {
+    fn sendto_a_stream_socket_with_a_dead_peer_is_broken_pipe() {
         unsafe {
             let _serial = serial();
             reset();
@@ -1703,7 +1710,7 @@ mod tests {
             s.peer = &mut dead;
 
             assert_eq!(a20_net_unix_socket_sendto(s.p(), cstr("hi").as_ptr() as *const c_void,
-                        2, ptr::null(), 0, ptr::null_mut(), 0, 512), -ECONNREFUSED);
+                        2, ptr::null(), 0, ptr::null_mut(), 0, 512), -EPIPE);
             assert_eq!(T_FREE_CALLS, 1);
             assert_eq!(T_ENQ_CALLS, 0);
         }

@@ -89,7 +89,7 @@ NATIVE_LIBC_SRC  := \
 # instead: over-declaring is the safe direction for a correctness net, and
 # $(wildcard) yields an empty list for an absent directory rather than a
 # literal unexpanded path.
-NATIVE_SDK_HDRS := kernel/include/uapi/a20/abi_features.h $(wildcard kernel/include/uapi/a20/cluster*.h) kernel/include/uapi/a20/runtime.h $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+NATIVE_SDK_HDRS := $(wildcard kernel/include/uapi/a20/*.h user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
 
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))

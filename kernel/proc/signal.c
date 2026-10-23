@@ -195,16 +195,19 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
 
 #if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) && \
     !defined(CONFIG_MCU)
-    /* Native tasks observe signals through the handle-table checkpoint set
-     * (sys_a20_signal_check); their handlers live in the libc (mlibc), not
-     * in the kernel signal state.  Pend into the checkpoint set FIRST so the
-     * kernel's default-ignore discard below (e.g. SIGCHLD) cannot swallow a
-     * signal a native sigsuspend/checkpoint must see. */
-    if (t->abi_mode == 1 && t->a20_ht) {
-        struct a20_ht_internal *ht = (struct a20_ht_internal *)t->a20_ht;
-        extern void a20_ht_sig_pend(struct a20_ht_internal *ht, int sig);
-        a20_ht_sig_pend(ht, signum);
+    /* Catchable Native signals belong exclusively to its checkpoint queue.
+     * Queuing them in Linux state too would apply a second SIG_DFL action
+     * before libc can honor its handler, mask or SIG_IGN (notably SIGPIPE).
+     * Unmaskable KILL/STOP retain kernel delivery and safe-boundary control. */
+    if (t->abi_mode == 1 && t->a20_ht && signum != SIGKILL && signum != SIGSTOP) {
+        extern void a20_ht_sig_pend(struct a20_ht_internal *, int);
+        extern void a20_thread_sig_pend(task_t *, int);
+        if (thread_directed) a20_thread_sig_pend(t, signum);
+        else a20_ht_sig_pend((struct a20_ht_internal *)t->a20_ht, signum);
         a20_task_object_notify(t, A20_EVENT_SIGNALED, (uint64_t)signum, 0, 0);
+        if (signum == SIGCONT) (void)proc_sched_resume_stopped(t, 1);
+        (void)proc_interrupt_wait(t, PROC_WAKE_SIGNAL);
+        return 0;
     }
 #endif
 
@@ -389,10 +392,23 @@ int signal_send_task(void *task, int signum)
 
 int signal_task_has_unblocked(void *task) {
     task_t *t = (task_t *)task;
-    if (!t || !t->signals)
-        return 0;
+    if (!t) return 0;
     if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
         return 1;
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) && !defined(CONFIG_MCU)
+    if (t->abi_mode == 1 && t->a20_ht) {
+        /* Native handlers and masks belong to the libc checkpoint protocol.
+         * Check without consuming before an interruptible park, closing the
+         * enqueue-before-park race for file locks, pipes and futexes too. */
+        extern uint64_t a20_thread_sig_check(task_t *, uint32_t, uint64_t);
+        if (a20_thread_sig_check(t, 2u /* A20_SIGNAL_PEEK */, 0)) return 1;
+        signal_state_t *native_state = (signal_state_t *)t->signals;
+        uint64_t unmaskable = signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP);
+        return native_state && ((__atomic_load_n(&native_state->pending, __ATOMIC_ACQUIRE) |
+            __atomic_load_n(&t->thread_pending, __ATOMIC_ACQUIRE)) & unmaskable);
+    }
+#endif
+    if (!t->signals) return 0;
     signal_state_t *ss = (signal_state_t *)t->signals;
     uint64_t flags = spin_lock_irqsave(&ss->lock);
     uint64_t deliverable = signal_deliverable_locked(t, ss);

@@ -147,8 +147,8 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
     if (pb->reader_closed) {
         spin_unlock(&pb->lock);
         task_t *t = proc_current();
-        if (t)
-            signal_send(t->pid, SIGPIPE);
+        if (t && t->abi_mode == 0)
+            signal_send_thread(t->pid, SIGPIPE);
         return -EPIPE;
     }
     size_t n = 0;
@@ -161,8 +161,8 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     spin_unlock(&pb->lock);
                     if (n > 0) return (int)n;
                     task_t *t = proc_current();
-                    if (t)
-                        signal_send(t->pid, SIGPIPE);
+                    if (t && t->abi_mode == 0)
+                        signal_send_thread(t->pid, SIGPIPE);
                     return -EPIPE;
                 }
                 if (vf->flags & O_NONBLOCK) {
@@ -197,8 +197,8 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
                     spin_unlock(&pb->lock);
                     if (n > 0) return (int)n;
                     task_t *t = proc_current();
-                    if (t)
-                        signal_send(t->pid, SIGPIPE);
+                    if (t && t->abi_mode == 0)
+                        signal_send_thread(t->pid, SIGPIPE);
                     return -EPIPE;
                 }
                 if (vf->flags & O_NONBLOCK) {
@@ -459,11 +459,12 @@ int pipe_set_size(vfile_t *vf, size_t size)
     return pipe_resize(pb, size);
 }
 
-int pipe_create(int pipefd[2])
+int pipe_create_vfiles(vfile_t **read_end, vfile_t **write_end, int flags)
 {
     pipe_buf_t *pb = (pipe_buf_t *)kmalloc(sizeof(pipe_buf_t));
     if (!pb) return -ENOMEM;
     memset(pb, 0, sizeof(*pb));
+    pb->read_fd = pb->write_fd = -1;
     spin_init(&pb->lock);
     wait_queue_init(&pb->read_waiters);
     wait_queue_init(&pb->write_waiters);
@@ -485,9 +486,9 @@ int pipe_create(int pipefd[2])
 
     /* vfile_alloc() initialized the object and assigned its stable identity;
      * do not memset it here or aliases lose that identity. */
-    rd->ops = &g_pipe_read_ops; rd->priv = pb; rd->flags = O_RDONLY;
+    rd->ops = &g_pipe_read_ops; rd->priv = pb; rd->flags = O_RDONLY | flags;
     vfile_ref_init(rd, 1);
-    wr->ops = &g_pipe_write_ops; wr->priv = pb; wr->flags = O_WRONLY;
+    wr->ops = &g_pipe_write_ops; wr->priv = pb; wr->flags = O_WRONLY | flags;
     vfile_ref_init(wr, 1);
     if (env_kind_tag_vfile(rd, A20_OBJ_PIPE_ENDPOINT) < 0 ||
         env_kind_tag_vfile(wr, A20_OBJ_PIPE_ENDPOINT) < 0) {
@@ -498,17 +499,25 @@ int pipe_create(int pipefd[2])
         return -EINVAL;
     }
 
+    *read_end = rd;
+    *write_end = wr;
+    return 0;
+}
+
+int pipe_create(int pipefd[2])
+{
+    vfile_t *rd, *wr;
+    int error = pipe_create_vfiles(&rd, &wr, 0);
+    if (error < 0)
+        return error;
+    pipe_buf_t *pb = rd->priv;
     int fdrd = fdtable_install_current_vfile(rd, 0);
     int fdwr = fdtable_install_current_vfile(wr, 0);
     if (fdrd < 0 || fdwr < 0) {
         if (fdrd >= 0) fdtable_close_current(fdrd);
-        else vfile_free(rd);
+        else vfs_put_file(rd);
         if (fdwr >= 0) fdtable_close_current(fdwr);
-        else vfile_free(wr);
-        if (pb->ref > 0) {
-            if (pb->data) kfree(pb->data);
-            kfree(pb);
-        }
+        else vfs_put_file(wr);
         return -EMFILE;
     }
     pipefd[0] = fdrd;

@@ -263,7 +263,7 @@ int driver_manager_spawn_user(const char *path)
     uint64_t sp = elf_setup_stack_a20(info.stack_top, 1, argv, NULL, &info,
                                       stdin_h, stdout_h, stderr_h,
                                       (uint32_t)self_h, root_h, cwd_h, 0,
-                                      registry_h);
+                                      registry_h, NULL, 0);
     if (sp == 0) {
         proc_force_exit(task, 1);
         proc_publish_deferred_task(task);

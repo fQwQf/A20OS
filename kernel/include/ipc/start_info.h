@@ -8,6 +8,7 @@
  */
 #ifndef _IPC_START_INFO_H
 #define _IPC_START_INFO_H
+#define A20_START_INFO_VERSION 2u
 
 #include "ipc/ipc.h"
 
@@ -40,6 +41,10 @@ typedef struct a20_start_info {
      * registry is unavailable. */
     a20_handle_t service_registry;
     uint32_t _pad_registry;
+
+    /* Opaque runtime startup bytes retained across native exec. */
+    uint64_t bootstrap_data;
+    uint64_t bootstrap_size;
 } a20_start_info_t;
 
 #endif /* _IPC_START_INFO_H */

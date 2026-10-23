@@ -568,6 +568,56 @@ int pty_slave_write(int idx, const char *buf, size_t count) {
     return (int)n;
 }
 
+int pty_get_termios(int idx, ktty_termios_t *out) {
+    if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    *out = g_ptys[idx].termios;
+    spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    return 0;
+}
+int pty_flush(int idx, int queue, int master) {
+    if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    if (queue < 0 || queue > 2) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    if (queue == 2 || (queue == 0 && !master) || (queue == 1 && master)) {
+        g_ptys[idx].m2s_used = g_ptys[idx].m2s_head = g_ptys[idx].m2s_tail = 0;
+        g_ptys[idx].canon_len = g_ptys[idx].canon_lines = 0;
+    }
+    if (queue == 2 || (queue == 0 && master) || (queue == 1 && !master))
+        g_ptys[idx].s2m_used = g_ptys[idx].s2m_head = g_ptys[idx].s2m_tail = 0;
+    spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    return 0;
+}
+int pty_set_termios(int idx, const ktty_termios_t *in, int action, int master) {
+    if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    if (action < 0 || action > 2) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    /* A queued PTY drain needs a waitable TX-empty operation. Until that is
+     * available, report unsupported instead of discarding pending output. */
+    if (action && (master ? g_ptys[idx].m2s_used : g_ptys[idx].s2m_used)) {
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        return -EOPNOTSUPP;
+    }
+    g_ptys[idx].termios = *in;
+    spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    return action == 2 ? pty_flush(idx, 0, master) : 0;
+}
+int pty_get_winsize(int idx, ktty_winsize_t *out) {
+    if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    *out = (ktty_winsize_t){g_ptys[idx].ws_row, g_ptys[idx].ws_col, 0, 0};
+    spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    return 0;
+}
+int pty_set_winsize(int idx, const ktty_winsize_t *in) {
+    if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+    g_ptys[idx].ws_row = in->row;
+    g_ptys[idx].ws_col = in->col;
+    spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+    return 0;
+}
+
 int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
     /* Linux serves the same termios through both ends of a pty pair: they

@@ -5,6 +5,8 @@
 
 int pipe_vfile_is(vfile_t *vf);
 int pipe_create(int pipefd[2]);
+/* Return owned endpoint references without allocating POSIX descriptors. */
+int pipe_create_vfiles(vfile_t **read_end, vfile_t **write_end, int flags);
 int pipe_poll_events(vfile_t *vf, short events);
 int pipe_get_available(vfile_t *vf);
 int pipe_get_size(vfile_t *vf);

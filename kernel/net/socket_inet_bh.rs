@@ -341,6 +341,8 @@ pub unsafe extern "C" fn a20_net_bh_process_locked(s: *mut c_void,
             *v.ever_connected = 1;
             a20_net_bh_notify(s, A20_EVENT_CONNECTION, 0, 0);
             a20_net_bh_notify(s, A20_EVENT_WRITABLE, 0, 0);
+        } else {
+            a20_net_bh_notify(s, A20_EVENT_ERROR, err as u64, 0);
         }
         if a20_net_bh_collect_all(s, 0, wake_q) != 0 {
             drain |= DRAIN_READ;
@@ -1149,7 +1151,8 @@ mod tests {
             let drain = a20_net_bh_process_locked(s.p(), ptr::null_mut(), &mut ap);
             assert_eq!((s.tcp_connecting, s.tcp_err), (0, -11));
             assert_eq!((s.connected, s.ever_connected), (0, 0));
-            assert_eq!(T_NOTIFY_N, 0);
+            assert_eq!(T_NOTIFY_N, 1);
+            assert_eq!(T_NOTIFY[0], A20_EVENT_ERROR as i32);
             assert_eq!(drain, 0);
         }
     }

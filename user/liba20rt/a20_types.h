@@ -15,6 +15,12 @@
 #define _A20_TYPES_H
 
 #include <stdint.h>
+#define A20_EXEC_STRUCT 0x4132304558454301ULL
+
+#define A20_CHANNEL_BYTE_STREAM (1u << 0)
+#define A20_CHANNEL_NONBLOCK    (1u << 1)
+#define A20_MAP_SHARED  0x01u
+#define A20_MAP_PRIVATE 0x02u
 #include "a20_arch.h"
 
 #ifdef __cplusplus
@@ -66,6 +72,42 @@ typedef int64_t a20_status_t;
 
 static inline int a20_status_is_ok(a20_status_t s) { return s >= 0; }
 static inline int a20_status_is_err(a20_status_t s) { return s < 0; }
+
+
+/* Indices accepted by feature_test and used in abi_info.feature_bits. */
+#define A20_ABI_FEATURE_LINUX_EXEC 4u
+#define A20_ABI_FEATURE_BYTE_STREAM 5u
+#define A20_ABI_FEATURE_MAP_MODES 6u
+#define A20_ABI_FEATURE_EXEC_BOOTSTRAP 7u
+#define A20_ABI_FEATURE_FILE_FLAGS 8u
+#define A20_ABI_FEATURE_THREAD_EXIT_CLEANUP 9u
+#define A20_ABI_FEATURE_SOCKET_OPTIONS 10u
+#define A20_ABI_FEATURE_TERMINAL_CONTROL 11u
+#define A20_ABI_FEATURE_FILE_LOCKS 12u
+#define A20_ABI_FEATURE_SIGNAL_EXIT 13u
+#define A20_ABI_FEATURE_NET_MESSAGES_V2 14u
+#define A20_ABI_FEATURE_THREAD_JOINABLE 15u
+
+/* Extended I/O statuses: appended without changing existing ABI values. */
+#define A20_ERR_BROKEN_PIPE               ((a20_status_t)30)
+#define A20_ERR_NOT_SOCKET                ((a20_status_t)31)
+#define A20_ERR_PROTOCOL_OPTION           ((a20_status_t)32)
+#define A20_ERR_ADDRESS_IN_USE            ((a20_status_t)33)
+#define A20_ERR_ADDRESS_NOT_AVAILABLE     ((a20_status_t)34)
+#define A20_ERR_CONNECTION_REFUSED        ((a20_status_t)35)
+#define A20_ERR_CONNECTION_RESET          ((a20_status_t)36)
+#define A20_ERR_NOT_CONNECTED             ((a20_status_t)37)
+#define A20_ERR_ALREADY_CONNECTED         ((a20_status_t)38)
+#define A20_ERR_IN_PROGRESS               ((a20_status_t)39)
+#define A20_ERR_ALREADY_IN_PROGRESS       ((a20_status_t)40)
+#define A20_ERR_NETWORK_UNREACHABLE       ((a20_status_t)41)
+#define A20_ERR_HOST_UNREACHABLE          ((a20_status_t)42)
+#define A20_ERR_MESSAGE_TOO_LARGE         ((a20_status_t)43)
+#define A20_ERR_ILLEGAL_SEEK              ((a20_status_t)44)
+#define A20_ERR_NOT_TERMINAL              ((a20_status_t)45)
+#define A20_ERR_OVERFLOW ((a20_status_t)46)
+#define A20_ERR_NO_LOCKS ((a20_status_t)47)
+#define A20_ERR_DEADLOCK ((a20_status_t)48)
 
 /* ========================================================================
  * Fundamental types (kernel/include/abi/native/types.h)
@@ -214,7 +256,7 @@ typedef struct a20_abi_info {
 } a20_abi_info_t;
 
 #define A20_ABI_MAJOR  1
-#define A20_ABI_MINOR  0
+#define A20_ABI_MINOR  1
 #define A20_ABI_PATCH  0
 
 /* ========================================================================
@@ -249,6 +291,9 @@ typedef struct a20_start_info {
     /* Well-known service-registry client endpoint (may be NULL). */
     a20_handle_t service_registry;
     uint32_t _pad_registry;
+
+    uint64_t bootstrap_data;
+    uint64_t bootstrap_size;
 } a20_start_info_t;
 
 #define A20_NATIVE_FD_HANDLE_BASE 64u
@@ -300,6 +345,131 @@ typedef struct a20_control_args {
 #define A20_HANDLE_CTRL_SET_WINSIZE    7u  /* arg0 = a20_winsize_args_t* (in)     */
 #define A20_HANDLE_CTRL_TCFLUSH        8u  /* arg0 = a20_ctl_int_args_t* (queue)  */
 #define A20_HANDLE_CTRL_SET_FLAGS      9u  /* arg0 = a20_ctl_flags_args_t*        */
+#define A20_HANDLE_CTRL_GET_FLAGS     10u  /* arg0 = a20_ctl_flags_args_t* (out) */
+#define A20_HANDLE_CTRL_GET_SOCKET_CONFIG 11u
+#define A20_HANDLE_CTRL_SET_SOCKET_CONFIG 12u
+#define A20_HANDLE_CTRL_GET_TERMINAL_CONFIG 13u
+#define A20_HANDLE_CTRL_SET_TERMINAL_CONFIG 14u
+#define A20_HANDLE_CTRL_FILE_LOCK 15u
+
+#define A20_RANGE_UNLOCK 0u
+#define A20_RANGE_SHARED 1u
+#define A20_RANGE_EXCLUSIVE 2u
+/* Byte-range lock operation: 0=query, 1=set, 2=wait-and-set.
+ * owner_kind: 0=current task container, 1=referenced open-file object.
+ * owner_identity is diagnostic only: it never authorizes task operations.
+ * origin: 0=start, 1=current position, 2=end; zero length extends to EOF. */
+typedef struct a20_file_lock_args {
+    uint32_t size, version, operation, owner_kind;
+    int32_t type, whence;
+    int64_t start, length;
+    int32_t owner_identity;
+    uint32_t reserved;
+} a20_file_lock_args_t;
+
+#define A20_TERMINAL_INPUT_CR_TO_NL (1u << 0)
+#define A20_TERMINAL_INPUT_NL_TO_CR (1u << 1)
+#define A20_TERMINAL_INPUT_DROP_CR (1u << 2)
+#define A20_TERMINAL_INPUT_IGNORE_BREAK (1u << 3)
+#define A20_TERMINAL_INPUT_BREAK_NOTIFY (1u << 4)
+#define A20_TERMINAL_INPUT_IGNORE_PARITY (1u << 5)
+#define A20_TERMINAL_INPUT_MARK_PARITY (1u << 6)
+#define A20_TERMINAL_INPUT_CHECK_PARITY (1u << 7)
+#define A20_TERMINAL_INPUT_STRIP_HIGH (1u << 8)
+#define A20_TERMINAL_INPUT_LOWERCASE (1u << 9)
+#define A20_TERMINAL_INPUT_OUTPUT_FLOW (1u << 10)
+#define A20_TERMINAL_INPUT_ANY_RESUME (1u << 11)
+#define A20_TERMINAL_INPUT_INPUT_FLOW (1u << 12)
+#define A20_TERMINAL_INPUT_OVERFLOW_BELL (1u << 13)
+#define A20_TERMINAL_INPUT_UTF8 (1u << 14)
+#define A20_TERMINAL_OUTPUT_PROCESS (1u << 0)
+#define A20_TERMINAL_OUTPUT_NL_TO_CRNL (1u << 1)
+#define A20_TERMINAL_OUTPUT_CR_TO_NL (1u << 2)
+#define A20_TERMINAL_OUTPUT_DROP_COLUMN0_CR (1u << 3)
+#define A20_TERMINAL_OUTPUT_NL_COLUMN0 (1u << 4)
+#define A20_TERMINAL_OUTPUT_UPPERCASE (1u << 5)
+#define A20_TERMINAL_OUTPUT_FILL (1u << 6)
+#define A20_TERMINAL_OUTPUT_DELETE_FILL (1u << 7)
+#define A20_TERMINAL_LOCAL_LINE_INPUT (1u << 0)
+#define A20_TERMINAL_LOCAL_CONTROL_KEYS (1u << 1)
+#define A20_TERMINAL_LOCAL_ECHO (1u << 2)
+#define A20_TERMINAL_LOCAL_ECHO_ERASE (1u << 3)
+#define A20_TERMINAL_LOCAL_ECHO_KILL (1u << 4)
+#define A20_TERMINAL_LOCAL_ECHO_NL (1u << 5)
+#define A20_TERMINAL_LOCAL_ECHO_CONTROL (1u << 6)
+#define A20_TERMINAL_LOCAL_ECHO_PRINT (1u << 7)
+#define A20_TERMINAL_LOCAL_ECHO_ALL_ERASE (1u << 8)
+#define A20_TERMINAL_LOCAL_NO_FLUSH (1u << 9)
+#define A20_TERMINAL_LOCAL_BACKGROUND_WRITE (1u << 10)
+#define A20_TERMINAL_LOCAL_EXTENDED (1u << 11)
+#define A20_TERMINAL_LOCAL_DISCARD_OUTPUT (1u << 12)
+#define A20_TERMINAL_LOCAL_REINPUT (1u << 13)
+#define A20_TERMINAL_LOCAL_EXTERNAL (1u << 14)
+#define A20_TERMINAL_LOCAL_CASE_MAPPING (1u << 15)
+#define A20_TERMINAL_RECEIVE 1u
+#define A20_TERMINAL_HANGUP_ON_CLOSE 2u
+#define A20_TERMINAL_LOCAL_LINK 4u
+#define A20_TERMINAL_RTS_FLOW 8u
+/* Terminal protocol uses A20 modes and named control characters. Baud is
+ * bits/second, data_bits is 5..8, stop_bits is 1/2, parity is none/odd/even/mark/space.
+ * action: 0=immediate, 1=after output drain, 2=drain then flush input. */
+typedef struct a20_terminal_config {
+    uint32_t size, version, action, reserved;
+    uint32_t input_modes, output_modes, local_modes, device_modes, baud_rate;
+    uint8_t data_bits, stop_bits, parity, reserved_byte;
+    uint8_t interrupt_char;
+    uint8_t quit_char;
+    uint8_t erase_char;
+    uint8_t kill_char;
+    uint8_t eof_char;
+    uint8_t start_char;
+    uint8_t stop_char;
+    uint8_t suspend_char;
+    uint8_t eol_char;
+    uint8_t reprint_char;
+    uint8_t discard_char;
+    uint8_t word_erase_char;
+    uint8_t literal_next_char;
+    uint8_t eol2_char;
+    uint8_t minimum_bytes;
+    uint8_t timeout_deciseconds;
+    uint8_t switch_char;
+    uint8_t reserved_tail[3];
+} a20_terminal_config_t;
+
+#define A20_SOCKET_OPTIONS 1u
+#define A20_SOCKET_TX_CAPACITY 2u
+#define A20_SOCKET_RX_CAPACITY 4u
+#define A20_SOCKET_RX_TIMEOUT 8u
+#define A20_SOCKET_TX_TIMEOUT 16u
+#define A20_SOCKET_KEEPALIVE 32u
+#define A20_SOCKET_HOP_LIMIT 64u
+#define A20_SOCKET_IDENTITY 128u
+#define A20_SOCKET_FAILURE 256u
+#define A20_SOCKET_REUSE_ADDRESS 1u
+#define A20_SOCKET_REUSE_PORT 2u
+#define A20_SOCKET_KEEP_ALIVE 4u
+#define A20_SOCKET_NO_DELAY 8u
+#define A20_SOCKET_FAMILY_LOCAL 1u
+#define A20_SOCKET_FAMILY_IPV4 2u
+#define A20_SOCKET_FAMILY_IPV6 3u
+#define A20_SOCKET_TYPE_STREAM 1u
+#define A20_SOCKET_TYPE_DATAGRAM 2u
+#define A20_SOCKET_TYPE_SEQUENCE 3u
+#define A20_SOCKET_TRANSPORT_LOCAL 0u
+#define A20_SOCKET_TRANSPORT_TCP 1u
+#define A20_SOCKET_TRANSPORT_UDP 2u
+
+/* Fixed socket configuration. No level/optname namespace or user payload
+ * pointer crosses the ABI. Exactly one field group is selected per call. */
+typedef struct a20_socket_config {
+    uint32_t size, version, fields, reserved;
+    uint32_t option_mask, options, transmit_capacity, receive_capacity;
+    uint64_t receive_timeout_ns, transmit_timeout_ns;
+    uint32_t keep_idle_seconds, keep_interval_seconds, keep_probe_count, hop_limit;
+    uint32_t family, transport, type, failure;
+} a20_socket_config_t;
+
 
 /* Typed control argument structs (versioned; E-APPEND evolution). */
 typedef struct a20_winsize_args {
@@ -481,6 +651,34 @@ typedef struct a20_task_spawn_args {
     a20_handle_t   stderr_handle;
     uint32_t       reserved;
 } a20_task_spawn_args_t;
+
+/* Explicit continuation manifest, shared with task_clone. No handles other
+ * than this manifest, root/cwd and self are inherited by the child. */
+#define A20_CLONE_COW_VM (1u << 0)
+#define A20_CLONE_STACK (1u << 1)
+#define A20_CLONE_MANIFEST_MAX 1024u
+typedef struct a20_clone_handle {
+    a20_handle_t parent_handle;
+    a20_rights_t child_rights;
+    a20_handle_t child_handle;
+} a20_clone_handle_t;
+typedef struct a20_clone_args {
+    uint32_t size, version, flags, reserved;
+    uint64_t handles;
+    uint32_t handle_count, reserved1;
+    a20_handle_t root_dir, cwd_dir;
+    uint64_t stack;
+    a20_handle_t out_task, out_root, out_cwd, out_self;
+} a20_clone_args_t;
+
+#define A20_EXEC_BOOTSTRAP_MAX 65536u
+#define A20_EXEC_CLOSE_MAX 4096u
+typedef struct a20_exec_bootstrap_args {
+    uint32_t size, version;
+    uint64_t path, argv, envp;
+    uint64_t data, data_size, close_handles;
+    uint32_t close_count, reserved;
+} a20_exec_bootstrap_args_t;
 
 typedef struct a20_task_status {
     uint32_t       size;
@@ -1089,6 +1287,22 @@ typedef struct a20_device_block_attach_args {
  * Network structures (kernel/include/abi/native/types.h)
  * ======================================================================== */
 
+/* Native endpoint record. Port is host-order; scope is an interface index.
+ * length is 4/16 for IP or 0..108 local name bytes (including any leading NUL).
+ * The kernel interprets no POSIX sockaddr layout in message ABI v2. */
+typedef struct a20_net_endpoint {
+    uint32_t size, version, family, length;
+    uint16_t port, reserved;
+    uint32_t scope;
+    uint8_t address[16], local_name[108];
+} a20_net_endpoint_t;
+#define A20_NET_NONBLOCK 1u
+#define A20_NET_PEEK 2u
+#define A20_NET_WAIT_ALL 4u
+#define A20_NET_FULL_LENGTH 8u
+#define A20_NET_DATA_TRUNCATED 1u
+#define A20_NET_METADATA_TRUNCATED 2u
+
 typedef struct a20_net_addr {
     uint16_t family;    /* AF_INET, AF_INET6 */
     uint16_t port;
@@ -1117,6 +1331,8 @@ typedef struct a20_net_sendmsg_args {
     uint64_t       control;
     uint32_t       control_len;
     uint64_t       out_sent;
+    uint32_t addr_length; /* v2: sizeof(a20_net_endpoint) */
+    uint32_t reserved;
 } a20_net_sendmsg_args_t;
 
 typedef struct a20_net_recvmsg_args {
@@ -1131,6 +1347,9 @@ typedef struct a20_net_recvmsg_args {
     uint32_t       control_len;
     uint64_t       out_received;
     uint32_t       out_addr_len;
+    uint32_t _v1_tail_padding; /* old v1 tail padding remains untouched */
+    uint32_t addr_capacity; /* v2 input; out_addr_len reports full size */
+    uint32_t out_flags;     /* v2: A20_NET_*_TRUNCATED */
 } a20_net_recvmsg_args_t;
 
 typedef struct a20_net_socketpair_args {
