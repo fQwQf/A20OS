@@ -1,6 +1,6 @@
 # SECURITY 候选现状
 
-核实日期：2026-10-23。当前分支 `codex/security-release`。平台为 QEMU RISC-V64
+核实日期：2026-10-23。实现已合入 `main`。平台为 QEMU RISC-V64
 TCG、1 GiB、`ABI=both BRINGUP=0` dev，功能组合在 1 CPU 和 SMP2 验证；性能为
 1 CPU。待处理事项只见 [SECURITY 台账](../gaps/security.md)，接口、设计边界、
 默认值决策与可复制命令见 [安全候选验收](../../security/release-acceptance.md)。
