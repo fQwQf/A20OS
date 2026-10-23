@@ -43,7 +43,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
  | file handles | full | smoke-vfs-stress (PASS 2026-08-26) | name_to_handle_at/open_by_handle_at over a kernel-side handle registry with opaque handle minting. |
 | new mount API | partial | smoke-vfs-edge (libmount sequence), smoke-vfs-stress | `fsopen` -> `fsconfig` -> `fsmount` returns a **detached** mount fd, and `move_mount(mfd, "", AT_FDCWD, dir, MOVE_MOUNT_F_EMPTY_PATH)` attaches it; `fsconfig` follows Linux's command numbering; util-linux `mount`/`umount` work in a world guest. `fspick`/`open_tree`/`mount_setattr` stay on the existing table. |
 | io_uring | partial | smoke-syscall-ext | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
- | landlock | full | smoke-syscall-ext | fd-backed rulesets with path-beneath rules enforced at vfs_open; ABI v1 with supported access rights. |
+ | landlock | partial | smoke-security-release | fd-backed READ_FILE/WRITE_FILE subset; unsupported handled bits fail closed. No ABI version advertised; fork and symlink isolation acceptance fails (see docs/status/current/security-status.md). |
  | rseq | full | smoke-proc-stress (PASS 2026-08-26) | per-thread rseq registration/unregistration with signature validation; CPU migration abort is out of scope (registration-only). |
 | membarrier | full | smoke-syscall-ext | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via the reschedule IPI; RSEQ registration is a no-op (migration abort not yet implemented). |
  | SysV/POSIX message queues | full | smoke-syscall-ext | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c); full lifecycle with priority ordering and timed operations. |
@@ -408,9 +408,9 @@ strength of a boilerplate note.
 | `io_uring_setup` | aio | `partial` | `smoke-syscall-ext` | kernel-memory SQ/CQ rings mapped into the caller (kernel/fs/io_uring.c) |
 | `io_uring_enter` | aio | `partial` | `smoke-syscall-ext` | executes SQEs synchronously through the VFS (NOP/READ/WRITE/FSYNC/CLOSE) |
 | `io_uring_register` | aio | `partial` | `smoke-syscall-ext` | accepts file and eventfd registration |
-| `landlock_create_ruleset` | security | `full` | `smoke-syscall-ext` | creates an fd-backed ruleset |
-| `landlock_add_rule` | security | `full` | `smoke-syscall-ext` | adds path-beneath rules with access rights |
-| `landlock_restrict_self` | security | `full` | `smoke-syscall-ext` | installs the ruleset; enforced at vfs_open |
+| `landlock_create_ruleset` | security | `partial` | `smoke-security-release` | validates size/flags/zero extensions; only READ_FILE/WRITE_FILE accepted; unsupported restrictions fail closed |
+| `landlock_add_rule` | security | `partial` | `smoke-security-release` | adds lexical path-beneath rules; symlink isolation acceptance fails |
+| `landlock_restrict_self` | security | `partial` | `smoke-security-release` | no-cap/no-new-privs permission gate; exec retains restriction, fork isolation acceptance fails |
 | `ioprio_set` | scheduler | `full` | `smoke-syscall-ext` | validates and stores I/O priority per task with class/level validation and permission checks |
 | `ioprio_get` | scheduler | `full` | `smoke-syscall-ext` | returns the task I/O priority |
 | `pkey_alloc` | memory | `full` | `smoke-mm-stress` | allocates a protection key slot per task |

@@ -40,3 +40,17 @@ uid/gid 权限模型的差异。
 - 缺口：arm32 上子进程退出后的等待/信号返回路径会让 mksh 走到一个空指针；用户态镜像因此无法完成任何真正的命令，也无法干净关机。
 - 关闭条件：arm32 用户态镜像里 `/bin/echo` 连续执行两次后 mksh 仍存活，且 `poweroff` 能触发 `System is going down for power-off NOW`。
 - 来源：CORE 包在合并后重跑 `smoke-arch-mmu-matrix` 的 arm32 用例时暴露；崩溃现场见 QEMU 日志（内核 `SIGSEGV: pid=6 ... comm=mksh`）。本包未处理（属于 CORE/arm32 工作流）。
+
+### ABI-SECURITY-02 W^X deny 下 RISC-V 信号返回路径要求可写页可执行
+
+- 现状：RV64 `ABI=both BRINGUP=0`、`a20.wx=deny` 下，`wx_aslr_test` 自身 PASS，但 mksh 接收子进程退出信号时打印 `[WX] mprotect ... 拒绝`，随后 shell 退出，排在后面的 `poweroff` 未执行；`sandbox_test` 的 seccomp TRAP/SIGSYS 子用例同样失败。
+- 缺口：`kernel/proc/signal.c` 的默认 `arch_signal_tramp_addr()` 返回栈内 trampoline，`signal_deliver()` 调用 `mm_make_page_exec()`，后者保留 VM_WRITE 再请求 PROT_EXEC，因而与开启的 W^X 冲突。安全默认值验收不能通过。
+- 关闭条件：由 SIGNAL/架构 owner 修复信号返回契约，保持 W^X deny；`make smoke-wx-aslr` 必须完成原有 workload 和显式 poweroff，`make smoke-security-release` 中 `sandbox_test` 的 SIGSYS 路径通过；不能增加进程豁免或改为 WX off。
+- 来源：SECURITY 包当前候选的 guest 负控（2026-10-23），对应 SECURITY-02/03；源码边界为 `kernel/proc/signal.c` 与 `kernel/mm/mprotect.c`。本包未修改这些源码。
+
+### ABI-SECURITY-03 Landlock 限制未随 fork 继承
+
+- 现状：安装 READ_FILE ruleset、关闭 ruleset fd 后，父进程对 `/tmp/security-release-outside` 的 open 得到 EACCES，直接 exec 后仍拒绝；fork 出的子进程却能打开同一文件。
+- 缺口：`proc_task_init_seccomp()` 只继承 seccomp，fork/task 创建路径没有 Landlock 引用继承；task 释放路径却已有 `landlock_release_task()`。沙箱可用 fork 绕过。
+- 关闭条件：由 IPC/PROC owner 完成 ruleset 的继承、引用与失败清理契约，审查共享 ruleset 的同步；`security_release_test` 的 `landlock-fork` 正/负控制通过，exec/close/no-cap 原有控制继续通过，资源释放后无悬挂引用。
+- 来源：SECURITY 包 `make smoke-security-release` 的 `landlock-fork FAIL code=2`（2026-10-23），对应 SECURITY-03；本包仅修复 Linux ABI 创建参数边界，未修改 `kernel/ipc/`、`kernel/proc/`。
