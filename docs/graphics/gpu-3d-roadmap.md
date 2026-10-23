@@ -505,7 +505,7 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。症状指向
 | `VIRTGPU_RESOURCE_CREATE_BLOB` | 报 0 是正确答案，不是缺口 | 见下方专条 |
 | 窗口化/局部 present | 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
 | 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留；为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
-| 硬件视频解码 | 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 [mpv 退出诊断](../status/gaps/notes/desktop-jvm-mpv-exit.md)）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
+| 硬件视频解码 | 不存在，且在 QEMU 里不可能存在 | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是不可达。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 [mpv 当前状态](../status/current/desktop-minecraft-status.md)）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
 | `A20_RENDERER=gl`（合成器 GL 渲染器） | 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
 
 ---

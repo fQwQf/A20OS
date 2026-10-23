@@ -37,13 +37,13 @@ make run-gui-riscv64 GUI_MEDIA=~/Videos/demo.mp4       # 其他架构同理
 启动），只构建镜像用 `make ARCH=<arch> image-world PKG_WORLD=xfce
 GUI_MEDIA=...`。
 
-镜像内自带的播放器有 ffplay（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、parole（GStreamer 后端）、mpv（命令行）。**mpv 目前约 1/10 次崩溃**：它每个内建 Lua 脚本跑在自己的线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [mpv 退出诊断](../status/gaps/notes/desktop-jvm-mpv-exit.md)）；用 ffplay 或重试即可。命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
+镜像内自带的播放器有 ffplay（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、parole（GStreamer 后端）、mpv（命令行）。**mpv 目前约 1/10 次崩溃**：它每个内建 Lua 脚本跑在自己的线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [mpv 当前状态](../status/current/desktop-minecraft-status.md)）；用 ffplay 或重试即可。命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
 
 ### 桌面里的 JVM 与图形栈
 
 - **JVM**：world 装了 `openjdk21-jre`。`/usr/bin/java` 是 overlay 提供的
   薄封装（直接 exec 真实路径 + 给一组默认堆参数），原因见
-  [JVM 退出诊断](../status/gaps/notes/desktop-jvm-mpv-exit.md)。`java -version` 可用。
+  [JVM 当前状态](../status/current/desktop-minecraft-status.md)。`java -version` 可用。
 - **图形 API**：world 装了 Mesa（`mesa`/`mesa-dri-gallium`/`mesa-gl`/
   `mesa-gles`/`mesa-egl`/`mesa-gbm` + `mesa-utils`/`mesa-demos`）与
   `virglrenderer`，镜像里有 `swrast`/`kms_swrast`/`virtio_gpu`/`zink` DRI
