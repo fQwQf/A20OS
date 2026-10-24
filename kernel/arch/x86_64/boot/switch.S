@@ -75,11 +75,16 @@ __switch:
      * pointer. */
     fxrstor64 128(%rdi)
 
-    /* Publish the incoming task pointer through the per-CPU area.  Kernel
-     * GS base stays on the area for the whole kernel residency; the store
-     * replaces the former WRMSR.  arch_switch_tls_restore() (the C code right
-     * after this returns) puts the incoming task's user FS/GS bases back. */
-    movq  %rcx, %gs:0
+    /* Publish the incoming task pointer and kernel stack top through the
+     * per-CPU area.  Kernel GS base stays on the area for the whole kernel
+     * residency; these stores replace the former WRMSR.  syscall_entry reads
+     * the stack top directly from here, so the entry needs no task-pointer
+     * chase before the stack switch.  arch_switch_tls_restore() (the C code
+     * right after this returns) puts the incoming task's user FS/GS bases
+     * back. */
+    leaq  0x10000(%rdi), %rax
+    movq  %rax, %gs:8           /* area.kstack_top = incoming stack top */
+    movq  %rcx, %gs:0           /* area.task = incoming task */
 
     /* Check if cr3 changed */
     movq  %cr3, %r9

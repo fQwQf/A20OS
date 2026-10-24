@@ -259,24 +259,61 @@ kernel_trap:
     .globl syscall_entry_\cpu
 syscall_entry_\cpu:
     cli
-    movq  %rax,  __x86_64_syscall_scratch+(\cpu * 128)+0(%rip)
-    movq  %rcx,  __x86_64_syscall_scratch+(\cpu * 128)+8(%rip)
-    movq  %rdx,  __x86_64_syscall_scratch+(\cpu * 128)+16(%rip)
-    movq  %r10,  __x86_64_syscall_scratch+(\cpu * 128)+24(%rip)
-    movq  %r11,  __x86_64_syscall_scratch+(\cpu * 128)+32(%rip)
-    movq  %rsp,  __x86_64_syscall_scratch+(\cpu * 128)+40(%rip)
-    movq  %r9,   __x86_64_syscall_scratch+(\cpu * 128)+48(%rip)
-    movq  %r8,   __x86_64_syscall_scratch+(\cpu * 128)+56(%rip)
-    movq  %rdi,  __x86_64_syscall_scratch+(\cpu * 128)+64(%rip)
-    movq  %rsi,  __x86_64_syscall_scratch+(\cpu * 128)+72(%rip)
-    movq  %rbx,  __x86_64_syscall_scratch+(\cpu * 128)+80(%rip)
-    movq  %rbp,  __x86_64_syscall_scratch+(\cpu * 128)+88(%rip)
-    movq  %r12,  __x86_64_syscall_scratch+(\cpu * 128)+96(%rip)
-    movq  %r13,  __x86_64_syscall_scratch+(\cpu * 128)+104(%rip)
-    movq  %r14,  __x86_64_syscall_scratch+(\cpu * 128)+112(%rip)
-    movq  %r15,  __x86_64_syscall_scratch+(\cpu * 128)+120(%rip)
-    leaq  __x86_64_syscall_scratch+(\cpu * 128)(%rip), %r11
-    jmp syscall_entry_saved
+    swapgs
+    lfence
+    /* Park the two registers that the stack switch itself would lose.  The
+     * per-CPU GS area (offset 0 = task, 8 = kernel stack top) needs no
+     * register for its own addressing. */
+    movq  %rsp, %gs:16          /* user rsp */
+    movq  %r11, %gs:24          /* user rflags */
+    movq  %gs:8, %rsp           /* kernel stack top (published by __switch) */
+    subq  $208, %rsp
+    /* Build trap_context_t in place.  Offsets are the struct ABI shared with
+     * isr_common and __return_to_user. */
+    movq  %rax, 0(%rsp)         /* syscall number */
+    movq  %rbx, 8(%rsp)
+    movq  %rcx, 16(%rsp)        /* user RIP */
+    movq  %rdx, 24(%rsp)        /* arg2 */
+    movq  %rsi, 32(%rsp)        /* arg1 */
+    movq  %rdi, 40(%rsp)        /* arg0 */
+    movq  %rbp, 48(%rsp)
+    movq  %gs:16, %rax
+    movq  %rax, 56(%rsp)        /* user RSP */
+    movq  %r8, 64(%rsp)         /* arg4 */
+    movq  %r9, 72(%rsp)         /* arg6 */
+    movq  %r10, 80(%rsp)        /* arg3 */
+    movq  %r11, 88(%rsp)        /* user RFLAGS */
+    movq  %r12, 96(%rsp)
+    movq  %r13, 104(%rsp)
+    movq  %r14, 112(%rsp)
+    movq  %r15, 120(%rsp)
+    movq  %rcx, 128(%rsp)       /* return RIP */
+    movq  %r11, 136(%rsp)       /* return RFLAGS */
+    movq  $0x1B, 144(%rsp)      /* user CS */
+    movq  $0x23, 152(%rsp)      /* user SS */
+    movq  %gs:0, %r9            /* task pointer */
+    movq  %r9, 160(%rsp)        /* kernel_tp */
+    movq  0(%r9), %r14          /* saved task_context_t (task->kstack);
+                                 * user r14 was already saved at 112 above */
+    movq  $0, 168(%rsp)         /* kscratch0 */
+    leaq  208(%rsp), %rax
+    movq  %rax, 176(%rsp)       /* kernel stack top */
+    movq  $0, 184(%rsp)         /* user_fs_base: kernel never read it */
+    movq  %r14, 192(%rsp)       /* original task->kstack */
+    movq  $0, 200(%rsp)         /* user_gs_base: published via SWAPGS */
+    /* Publish the syscall trap state inline: the C trap machinery reads it
+     * back through the same per-CPU fields. */
+    movq  $0x80, %gs:32         /* cause */
+    movq  %rcx, %gs:40          /* epc = user RIP */
+    movq  $0, %gs:48            /* tval */
+
+    /* Keep IRQs masked until the common handler snapshots the CPU-local
+     * cause.  It enables preemption at arch_syscall_dispatch_enter().  An
+     * earlier STI permits migration between CPU-id lookup and cause load,
+     * making an ordinary syscall appear to be another CPU's page fault. */
+    movq  %rsp, %rdi
+    call  trap_handler
+    jmp   __return_to_user
     .endm
 
     syscall_cpu_entry 0
@@ -301,107 +338,6 @@ syscall_entry_\cpu:
 #if CONFIG_NR_CPUS > 7
     syscall_cpu_entry 7
 #endif
-
-syscall_entry_saved:
-    /* SYSCALL always enters from user mode. The scratch save above never
-     * accesses GS or the user stack; now activate the per-CPU area.  After
-     * SWAPGS the kernel GS base addresses struct x86_64_cpu_area, so the
-     * task pointer is one GS-relative load -- no RDMSR on this path. */
-    swapgs
-    lfence
-    movq  %gs:0, %r9            /* r9 = task pointer (area offset 0) */
-
-    /* r14 = saved task_context_t (task->kstack). */
-    movq  0(%r9), %r14
-
-    /*
-     * Compute the real kernel stack top from the task structure.  The saved
-     * context's tp field (offset 8) is the task pointer; task->kstack_base
-     * is at offset 8 in task_t.
-     */
-    movq  8(%r14), %rax         /* rax = task pointer */
-    movq  8(%rax), %rax         /* rax = task->kstack_base */
-    addq  $0x10000, %rax        /* rax = kernel stack top */
-
-    /* Switch to the kernel stack and allocate the trap_context_t. */
-    movq  %rax, %rsp
-    subq  $208, %rsp
-    movq  %rax, %r15            /* r15 = kernel stack top (for later fields) */
-
-    /* Copy the saved registers from the scratch array into the trap_context_t. */
-    movq  0(%r11), %rax         /* syscall number */
-    movq  %rax, 0(%rsp)
-    movq  80(%r11), %rax        /* rbx */
-    movq  %rax, 8(%rsp)
-    movq  8(%r11), %rax         /* user RIP */
-    movq  %rax, 16(%rsp)
-    movq  16(%r11), %rax        /* rdx / arg2 */
-    movq  %rax, 24(%rsp)
-    movq  72(%r11), %rax        /* rsi / arg1 */
-    movq  %rax, 32(%rsp)
-    movq  64(%r11), %rax        /* rdi / arg0 */
-    movq  %rax, 40(%rsp)
-    movq  88(%r11), %rax        /* rbp */
-    movq  %rax, 48(%rsp)
-    movq  40(%r11), %rax        /* user RSP */
-    movq  %rax, 56(%rsp)
-    movq  56(%r11), %rax        /* r8 / arg4 */
-    movq  %rax, 64(%rsp)
-    movq  48(%r11), %rax        /* r9 / arg6 */
-    movq  %rax, 72(%rsp)
-    movq  24(%r11), %rax        /* r10 / arg3 */
-    movq  %rax, 80(%rsp)
-    movq  32(%r11), %rax        /* r11 / RFLAGS */
-    movq  %rax, 88(%rsp)
-    movq  96(%r11), %rax        /* r12 */
-    movq  %rax, 96(%rsp)
-    movq  104(%r11), %rax       /* r13 */
-    movq  %rax, 104(%rsp)
-    movq  112(%r11), %rax       /* r14 */
-    movq  %rax, 112(%rsp)
-    movq  120(%r11), %rax       /* r15 */
-    movq  %rax, 120(%rsp)
-
-    /* Return address, flags, and segments. */
-    movq  8(%r11), %rax         /* user RIP */
-    movq  %rax, 128(%rsp)
-    movq  32(%r11), %rax        /* user RFLAGS */
-    movq  %rax, 136(%rsp)
-    movq  $0x1B, 144(%rsp)      /* user CS */
-    movq  $0x23, 152(%rsp)      /* user SS */
-
-    /* kernel_tp = current task pointer */
-    movq  %r9, 160(%rsp)
-
-    movq  $0, 168(%rsp)         /* kscratch0 */
-
-    /* Kernel stack top for future CPL3->CPL0 transitions. */
-    movq  %r15, 176(%rsp)
-
-    /* User FS/GS bases are not touched by kernel execution: MSR_FS_BASE keeps
-     * the user TLS for the whole syscall (arch_prctl and the switch-in
-     * restore are the only writers), and the user GS base is parked in
-     * MSR_KERNEL_GS_BASE where SWAPGS left it.  The frame slots stay zero so
-     * a stale user base can never leak back out through a future reader. */
-    movq  $0, 184(%rsp)         /* user_fs_base: kernel never read it */
-    movq  $0, 200(%rsp)         /* user_gs_base: published via SWAPGS */
-
-    /* Original task->kstack so __return_to_user / __switch can restore it. */
-    movq  %r14, 192(%rsp)
-
-    /* Publish the syscall cause in this CPU's trap state. */
-    movq  $0x80, %rdi
-    movq  128(%rsp), %rsi
-    xorl  %edx, %edx
-    call  x86_64_set_trap_state
-
-    /* Keep IRQs masked until the common handler snapshots the CPU-local
-     * cause.  It enables preemption at arch_syscall_dispatch_enter().  An
-     * earlier STI permits migration between CPU-id lookup and cause load,
-     * making an ordinary syscall appear to be another CPU's page fault. */
-    movq  %rsp, %rdi
-    call  trap_handler
-    jmp   __return_to_user
 
     .globl __return_to_user
 __return_to_user:

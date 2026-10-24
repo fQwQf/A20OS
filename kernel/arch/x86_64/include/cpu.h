@@ -151,11 +151,23 @@ static inline void arch_tlb_flush_page_local(uint64_t addr) {
  * Offsets are ABI: the syscall entry and __switch assembly hardcode them.
  */
 struct x86_64_cpu_area {
-    void *task;      /* 0: current task (proc_current fast path)      */
-    uint64_t cpu_id; /* 8: dense logical id, for early/debug readers  */
+    void *task;             /* 0:  current task (proc_current fast path)      */
+    uint64_t kstack_top;    /* 8:  incoming task's kernel stack top (entry rsp) */
+    uint64_t scratch_rsp;   /* 16: user rsp parked across the stack switch    */
+    uint64_t scratch_rflags;/* 24: user rflags parked across the stack switch */
+    uint64_t trap_cause;    /* 32: published trap cause (syscall: 0x80)       */
+    uint64_t trap_epc;      /* 40: published faulting PC                      */
+    uint64_t trap_tval;     /* 48: published fault address / 0                */
+    uint64_t cpu_id;        /* 56: dense logical id, early/debug readers      */
 };
-#define X86_64_CPU_AREA_TASK_OFFSET   0
-#define X86_64_CPU_AREA_CPUID_OFFSET  8
+#define X86_64_CPU_AREA_TASK_OFFSET    0
+#define X86_64_CPU_AREA_KSTACK_OFFSET  8
+#define X86_64_CPU_AREA_SP_OFFSET      16
+#define X86_64_CPU_AREA_RFLAGS_OFFSET  24
+#define X86_64_CPU_AREA_CAUSE_OFFSET   32
+#define X86_64_CPU_AREA_EPC_OFFSET     40
+#define X86_64_CPU_AREA_TVAL_OFFSET    48
+#define X86_64_CPU_AREA_CPUID_OFFSET   56
 
 /* Driver-module builds compile this header without the kernel's -DCONFIG_NR_CPUS
  * (they only need the inline helpers); the array itself lives in trap/irqchip.c
@@ -194,6 +206,24 @@ static inline void x86_64_cpu_gs_init(unsigned cpu) {
                          "a"(low), "d"(high));
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)0xC0000102),
                          "a"(low), "d"(high));
+}
+
+/* Per-CPU trap-state accessors: the syscall entry publishes cause/epc/tval
+ * with three GS-relative stores, and the generic trap machinery reaches the
+ * same fields through these helpers.  GS is always the per-CPU area in kernel
+ * mode, so no id lookup or array indexing is needed. */
+static inline void x86_64_area_store(unsigned offset, uint64_t value) {
+    __asm__ __volatile__("movq %0, %%gs:%c1"
+                         :
+                         : "r"(value), "i"(offset)
+                         : "memory");
+}
+static inline uint64_t x86_64_area_load(unsigned offset) {
+    uint64_t value;
+    __asm__ __volatile__("movq %%gs:%c1, %0"
+                         : "=r"(value)
+                         : "i"(offset));
+    return value;
 }
 
 /* User FS base (musl TLS) lives in MSR_FS_BASE for the whole kernel residency:
