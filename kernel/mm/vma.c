@@ -12,6 +12,11 @@
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/klog.h"
+
+/* munmap_txn.rs: release transaction for run-batched final-destroy leaves. */
+extern void a20_vma_free_run_release_rust(mm_seg_t *vma, uint64_t start_va,
+                                          const pfn_t *pfns, int count,
+                                          int no_frame_ref);
 #include "core/perf.h"
 
 #ifdef CONFIG_MM_DONTUNMAP_TEST_FAIL_SPLIT
@@ -931,22 +936,17 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
             int max = span < A20_VMA_FREE_RUN_PAGES ? (int)span
                                                     : A20_VMA_FREE_RUN_PAGES;
             int n = max > 0 ? pt_unmap_leaf_run(mm, va, max, run_pa) : 0;
-            for (int i = 0; i < n; i++) {
-                uint64_t page_va = va + (uint64_t)i * PAGE_SIZE;
-                pfn_t pfn = phys_to_pfn(run_pa[i]);
-                /* Same release contract as the scalar body below: a page in
-                 * the file cache holds its pin on the cache object; anything
-                 * else is a plain frame reference. */
-                page_cache_page_t *mapped_page =
-                    mm_file_cache_mapping_get(vma, page_va, pfn);
-                if (mapped_page) {
-                    page_cache_put(mapped_page);
-                    page_cache_put(mapped_page);
-                } else {
-                    frame_put(pfn);
-                }
-            }
             if (n > 0) {
+                /* Reference release is a transaction in Rust (see
+                 * munmap_txn.rs): per-page PFN classification decides cache
+                 * pin versus frame reference exactly once per leaf. */
+                pfn_t run_pfn[A20_VMA_FREE_RUN_PAGES];
+                for (int i = 0; i < n; i++)
+                    run_pfn[i] = phys_to_pfn(run_pa[i]);
+                int no_frame_ref =
+                    (vma->vm_flags & (VM_PFNMAP | VM_VMO)) != 0;
+                a20_vma_free_run_release_rust(vma, va, run_pfn, n,
+                                              no_frame_ref);
                 va += (uint64_t)n * PAGE_SIZE;
                 continue;
             }
