@@ -116,6 +116,11 @@ void   pfa_free(pfn_t pfn, int order);
 pfn_t  pfa_alloc_page(void);
 void   pfa_free_page(pfn_t pfn);
 void   frame_get(pfn_t pfn);
+/* Like frame_get(), invalid PFNs are skipped. Callers needing complete-batch
+ * semantics must hold valid mapping/reference ownership and prevalidate every
+ * PFN (the PFA range map is stable at runtime); frame_get_locked() still
+ * panics on a valid PFN whose refcount is zero. */
+void   frame_get_many(const pfn_t *pfns, size_t count);
 void   frame_put(pfn_t pfn);
 void   frame_put_many(const pfn_t *pfns, size_t count);
 size_t pfa_free_count(void);

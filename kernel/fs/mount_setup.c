@@ -47,6 +47,18 @@ static int class_block_write_sector(block_dev_t *block, uint64_t lba, const void
         class_block->ops->write(class_block->dev, lba, buf, count) : -1;
 }
 
+static int class_block_write_batch(block_dev_t *block,
+                                   const block_write_t *writes, size_t nr)
+{
+    if (!block)
+        return -EINVAL;
+    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
+    if (!class_block || !class_block->ops ||
+        !class_block->ops->write_batch)
+        return -EOPNOTSUPP;
+    return class_block->ops->write_batch(class_block->dev, writes, nr);
+}
+
 static int class_block_flush(block_dev_t *block)
 {
     class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
@@ -69,6 +81,8 @@ block_dev_t *mount_setup_block_device(int index)
     class_block->ops = ops;
     class_block->block.read_sector = class_block_read_sector;
     class_block->block.write_sector = class_block_write_sector;
+    class_block->block.write_batch = ops->write_batch ?
+        class_block_write_batch : NULL;
     class_block->block.flush        = class_block_flush;
     class_block->block.capacity = ops->capacity(dev);
     class_block->block.sector_size = ops->sector_size(dev);

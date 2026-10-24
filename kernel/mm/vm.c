@@ -41,6 +41,7 @@
 #include "core/klog.h"
 #include "core/perf.h"
 #include "core/smp.h"
+#include "core/timer.h"
 
 enum {
     MM_TLB_HOLD_FRAME = 1,
@@ -72,8 +73,8 @@ static mm_tlb_hold_t *mm_tlb_alloc_hold(mm_struct_t *mm)
 }
 
 /* Queue a detached page-table page for release after the shootdown barrier.
- * The PT frame is pinned like any other deferred frame so the buddy cannot
- * reuse it while a cursor might still hold a cached pointer into the subtree. */
+ * The hold list delays the page table's unique pfa_free ownership until
+ * readers drain; this does not take a frame_get reference. */
 int mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level)
 {
     if (!mm) return -EINVAL;
@@ -88,10 +89,9 @@ int mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level)
     hold->page = NULL;
     hold->kind = MM_TLB_HOLD_PT;
     hold->pt_level = (uint8_t)level;
-    /* Caller holds mm->lock (or the final mm reference).  The deferred list
-     * itself is the pin: nothing else can free a PT page except this drain,
-     * so no refcount manipulation is needed (PT pages are owned by the page
-     * table, not by frame refcounting). */
+    /* Caller holds mm->lock (or the final mm reference). The hold preserves
+     * the page table's unique allocation ownership until the grace period;
+     * do not frame_get/frame_put this PFN. */
     hold->next = mm->tlb_holds;
     mm->tlb_holds = hold;
     return 0;
@@ -242,6 +242,40 @@ int mm_tlb_hold_page(mm_struct_t *mm, page_cache_page_t *page)
     return mm_tlb_queue_hold(mm, PFN_NONE, page, MM_TLB_HOLD_PAGE);
 }
 
+/* Release detached mappings after shootdown and page-table readers have
+ * drained. Ordinary mapped frames own references and can be batched through
+ * frame_put_many(); page-table pages instead retain their unique allocation
+ * ownership and must be returned only through pfa_free(). */
+static void mm_tlb_release_holds(mm_tlb_hold_t *hold)
+{
+    pfn_t frame_chunk[64];
+    size_t frame_count = 0;
+
+    while (hold) {
+        mm_tlb_hold_t *next = hold->next;
+        if (hold->kind == MM_TLB_HOLD_PT) {
+            int order = (hold->pt_level == ARCH_PT_ROOT_LEVEL)
+                            ? ARCH_PT_ROOT_ORDER
+                            : 0;
+            pfa_free(hold->frame, order);
+            hold->frame = PFN_NONE;
+        } else if (hold->kind == MM_TLB_HOLD_FRAME) {
+            if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
+                frame_put_many(frame_chunk, frame_count);
+                frame_count = 0;
+            }
+            frame_chunk[frame_count++] = hold->frame;
+        } else if (hold->kind == MM_TLB_HOLD_PAGE) {
+            page_cache_put(hold->page);
+        }
+        kfree(hold);
+        hold = next;
+    }
+
+    if (frame_count)
+        frame_put_many(frame_chunk, frame_count);
+}
+
 void mm_tlb_invalidate_finish(mm_struct_t *mm)
 {
     if (!mm)
@@ -340,39 +374,10 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
         }
     }
 
-    /* Drain the deferred frame frees in batches so one munmap/exit of a
-     * large arena takes pfa.lock once per chunk instead of once per page
-     * (frame_put_many).  Page-cache holds keep their per-page release. */
-    {
-        pfn_t frame_chunk[64];
-        size_t frame_count = 0;
-        while (hold) {
-            mm_tlb_hold_t *next = hold->next;
-            if (hold->kind == MM_TLB_HOLD_PT) {
-                int order = (hold->pt_level == ARCH_PT_ROOT_LEVEL)
-                                ? ARCH_PT_ROOT_ORDER : 0;
-                if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
-                    frame_put_many(frame_chunk, frame_count);
-                    frame_count = 0;
-                }
-                frame_chunk[frame_count++] = hold->frame;
-                pfa_free(hold->frame, order);
-                hold->frame = PFN_NONE;
-            } else if (hold->kind == MM_TLB_HOLD_FRAME) {
-                if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
-                    frame_put_many(frame_chunk, frame_count);
-                    frame_count = 0;
-                }
-                frame_chunk[frame_count++] = hold->frame;
-            } else if (hold->kind == MM_TLB_HOLD_PAGE) {
-                page_cache_put(hold->page);
-            }
-            kfree(hold);
-            hold = next;
-        }
-        if (frame_count)
-            frame_put_many(frame_chunk, frame_count);
-    }
+    /* The shootdown and pt_readers grace period above are unchanged; now
+     * release ordinary references in batches and unique PT allocations via
+     * pfa_free, never through both ownership paths. */
+    mm_tlb_release_holds(hold);
 
     while (spares) {
         mm_tlb_hold_t *next = spares->next;
@@ -471,6 +476,10 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
 
     paddr_t old_pa = arch_pte_addr(*pte);
     pte_t flags = arch_pte_flags(*pte);
+#ifdef ARCH_PTE_BLOCK_ONLY_FLAGS
+    /* Demoted 4 KiB leaves must not reinterpret block-only PS (bit 7) as PAT. */
+    flags &= ~(pte_t)ARCH_PTE_BLOCK_ONLY_FLAGS;
+#endif
     pfn_t old_pfn = phys_to_pfn(old_pa);
     if (!pfn_valid(old_pfn))
         return -ENOMEM;
@@ -626,7 +635,29 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
     return mm;
 }
 
-void mm_destroy(mm_struct_t *mm) {
+/* The final unpublished MM may leave ordinary anonymous leaves for the
+ * terminal page-table walk.  This is not safe for munmap/exec-discard, where
+ * the page table remains live, and never applies to NOMMU builds. */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+static int mm_destroy_can_defer_anon_leaf_release(const mm_seg_t *vma)
+{
+    const uint64_t excluded = VM_FILE | VM_SHARED | VM_PFNMAP | VM_VMO |
+                              VM_SYSV_SHM;
+
+    if (!vma || !(vma->vm_flags & VM_ANON) || (vma->vm_flags & excluded))
+        return 0;
+    return !vma->file && !vma->file_vnode && !vma->vmo &&
+           !vma->vmar_owner;
+}
+#else
+static int mm_destroy_can_defer_anon_leaf_release(const mm_seg_t *vma)
+{
+    (void)vma;
+    return 0;
+}
+#endif
+
+static void mm_destroy_impl(mm_struct_t *mm) {
     if (!mm) return;
     if (!refcount_dec_and_test(&mm->refcount)) return;
 
@@ -691,7 +722,12 @@ void mm_destroy(mm_struct_t *mm) {
             }
         }
 #endif
-        free_vma_pages(mm, vma);
+        /* The final mm is unpublished and has no next executor.  For plain
+         * anonymous backing, keep leaf references until the post-shootdown
+         * pt_destroy_user() walk drops each resident/swap leaf exactly once. */
+        if (!mm_destroy_can_defer_anon_leaf_release(vma)) {
+            free_vma_pages(mm, vma);
+        }
         mm_seg_t *next = vma->next;
         vma_put(mm, vma);
         vma = next;
@@ -716,9 +752,28 @@ void mm_destroy(mm_struct_t *mm) {
 
     /* Drain any huge-page demotion holds before page-table frames are freed. */
     mm_tlb_invalidate_finish(mm);
-    if (mm->pgdir) pt_destroy_user(mm->pgdir);
+    if (mm->pgdir) {
+        pt_destroy_user(mm->pgdir);
+        mm->pgdir = NULL;
+    }
+    /* PT metadata can drop the last VMA segment references while the tree is
+     * destroyed. Their deferred releases run only after the root is gone, and
+     * callbacks must not observe its stale address. Also drain any deferred
+     * releases queued during the retire drain when there was no root left. */
+    mm_vma_flush_deferred(mm);
     arch_mm_context_release(mm->arch_asid);
     kfree(mm);
+}
+
+void mm_destroy(mm_struct_t *mm) {
+    uint32_t perf_timed =
+        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t start = perf_timed ? timer_get_ticks() : 0;
+    if (perf_timed)
+        a20_perf_count(A20_PERF_MM_DESTROY_CALLS);
+    mm_destroy_impl(mm);
+    if (perf_timed)
+        a20_perf_add(A20_PERF_MM_DESTROY_TICKS, timer_get_ticks() - start);
 }
 
 /* MM_FORK_COW_REGRESSION_GUARD:
@@ -734,6 +789,11 @@ void mm_destroy(mm_struct_t *mm) {
  *      same time;
  *   2. under SMP, another CPU is handling a page fault in the parent. */
 static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
+    uint32_t perf_timed =
+        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t fork_impl_start = perf_timed ? timer_get_ticks() : 0;
+    uint64_t setup_ticks = 0;
+    uint64_t clone_ticks = 0;
     if (!parent) return NULL;
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
     if (!child) return NULL;
@@ -799,6 +859,11 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
      * child's own entries are rebuilt lazily on first use. */
     child->seg_index_state = 0;
     child->seg_index_count = 0;
+    child->seg_index_hint = 0;
+    /* The dynamic index buffer is owned by the parent. Do not let the child
+     * clear/free the shallow-copied pointer or treat its entries as owned. */
+    child->seg_index_large = NULL;
+    child->seg_index_capacity = 0;
     memset(child->seg_index, 0, sizeof(child->seg_index));
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
@@ -861,6 +926,10 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
         child->total_vm += (cv->end - cv->start) / PAGE_SIZE;
     }
 
+    if (perf_timed)
+        setup_ticks = timer_get_ticks() - fork_impl_start;
+    uint64_t clone_start = perf_timed ? timer_get_ticks() : 0;
+
     /* parent->lock covers both the VMA snapshot and the page-table clone. */
     for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
@@ -912,7 +981,10 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
         if (vdso_fork_map(child) < 0)
             goto fail_locked;
     }
+    if (perf_timed)
+        clone_ticks = timer_get_ticks() - clone_start;
     spin_unlock_irqrestore(&parent->lock, parent_flags);
+    uint64_t finish_start = perf_timed ? timer_get_ticks() : 0;
 
     while (vma_pool) {
         mm_seg_t *next = vma_pool->next;
@@ -921,6 +993,12 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
     }
 
     mm_tlb_invalidate_finish(parent);
+    if (perf_timed) {
+        a20_perf_add(A20_PERF_MM_FORK_SETUP_TICKS, setup_ticks);
+        a20_perf_add(A20_PERF_MM_FORK_CLONE_TICKS, clone_ticks);
+        a20_perf_add(A20_PERF_MM_FORK_FINISH_TICKS,
+                     timer_get_ticks() - finish_start);
+    }
     return child;
 fail_locked:
     spin_unlock_irqrestore(&parent->lock, parent_flags);
@@ -936,10 +1014,20 @@ fail_locked:
 
 mm_struct_t *mm_fork(mm_struct_t *parent)
 {
-    if (mm_shared_write_enter_wait() < 0)
+    uint32_t perf_timed =
+        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t start = perf_timed ? timer_get_ticks() : 0;
+    if (perf_timed)
+        a20_perf_count(A20_PERF_MM_FORK_CALLS);
+    if (mm_shared_write_enter_wait() < 0) {
+        if (perf_timed)
+            a20_perf_add(A20_PERF_MM_FORK_TICKS, timer_get_ticks() - start);
         return NULL;
+    }
     mm_struct_t *child = mm_fork_impl(parent);
     mm_shared_write_leave();
+    if (perf_timed)
+        a20_perf_add(A20_PERF_MM_FORK_TICKS, timer_get_ticks() - start);
     return child;
 }
 

@@ -635,6 +635,23 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
         pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
         if (pte && (*pte & PTE_V)) {
             val = 1;
+        } else {
+            mm_seg_t *seg = mm_seg_find(t->mm, va);
+            if (seg && (seg->vm_flags & VM_FILE) &&
+                !(seg->vm_flags & (VM_VMO | VM_PFNMAP)) &&
+                seg->file_vnode) {
+                /* A file page may be resident in the page cache before this
+                 * process installs a PTE. Query without create or I/O, and
+                 * balance the temporary cache pin before dropping mm->lock. */
+                uint64_t file_byte = seg->backing_offset + (va - seg->start);
+                uint64_t index = file_byte / PAGE_SIZE;
+                page_cache_page_t *page =
+                    page_cache_get(seg->file_vnode, index, 0);
+                if (page) {
+                    val = page_cache_is_uptodate(page) != 0;
+                    page_cache_put(page);
+                }
+            }
         }
 #endif
         snapshot[i] = val;
