@@ -895,6 +895,12 @@ mm_seg_t *vma_try_merge(mm_struct_t *mm, mm_seg_t *vma) {
     return a20_vma_merge_transaction_rust(mm, vma, 1);
 }
 
+/* Sequential teardown batch: leaves cleared per pt_unmap_leaf_run() call.
+ * Bounded to one L0 table (512) so the run never crosses a table; 64 keeps
+ * the on-stack pa array small while still amortising the walk, node lock and
+ * empty-table cascade over a full batch. */
+#define A20_VMA_FREE_RUN_PAGES 64
+
 void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
 {
 #ifdef CONFIG_NOMMU
@@ -909,7 +915,42 @@ void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma)
 #else
     if (!mm->pgdir) return;
     int shared_file = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
+    /* Runs need the per-page release to be expressible from the cleared
+     * leaf's physical address alone: no shared-file dirty marking (that path
+     * reads PTE_D before the unmap) and no PFNMAP/VMO frames (never released
+     * here).  Everything else -- anon, anon-shared and private file pages --
+     * releases exactly like the scalar body. */
+    int runs_ok = !(vma->vm_flags & (VM_SHARED | VM_PFNMAP | VM_VMO |
+                                     VM_SYSV_SHM));
+    paddr_t run_pa[A20_VMA_FREE_RUN_PAGES];
     for (uint64_t va = vma->start; va < vma->end; ) {
+        if (runs_ok) {
+            /* The run must never cross the VMA boundary: pages past vma->end
+             * belong to another mapping and their pins are not ours. */
+            uint64_t span = (vma->end - va) / PAGE_SIZE;
+            int max = span < A20_VMA_FREE_RUN_PAGES ? (int)span
+                                                    : A20_VMA_FREE_RUN_PAGES;
+            int n = max > 0 ? pt_unmap_leaf_run(mm, va, max, run_pa) : 0;
+            for (int i = 0; i < n; i++) {
+                uint64_t page_va = va + (uint64_t)i * PAGE_SIZE;
+                pfn_t pfn = phys_to_pfn(run_pa[i]);
+                /* Same release contract as the scalar body below: a page in
+                 * the file cache holds its pin on the cache object; anything
+                 * else is a plain frame reference. */
+                page_cache_page_t *mapped_page =
+                    mm_file_cache_mapping_get(vma, page_va, pfn);
+                if (mapped_page) {
+                    page_cache_put(mapped_page);
+                    page_cache_put(mapped_page);
+                } else {
+                    frame_put(pfn);
+                }
+            }
+            if (n > 0) {
+                va += (uint64_t)n * PAGE_SIZE;
+                continue;
+            }
+        }
         /* Check whether the current mapping is a huge page that straddles a
          * VMA boundary; if so, demote it to base pages and release them
          * one at a time. */

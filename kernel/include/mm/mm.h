@@ -77,6 +77,15 @@ extern uint64_t mm_huge_install_count;
 int pt_unmap(struct mm_struct *mm, vaddr_t va);
 int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out);
+/* Unmap up to @max_pages consecutive level-0 leaves starting at @va under
+ * ONE root walk and ONE L0 node-lock acquisition; the empty-table cascade
+ * runs once at the end of the run instead of per page.  pa_out[i] receives
+ * each cleared leaf's physical address.  Returns the number of leaves
+ * unmapped (0 when @va does not start a present level-0 leaf: absent upper
+ * subtree, swap slot, huge leaf or absent slot -- the caller falls back to
+ * the scalar path for whatever the run stopped at). */
+int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                      paddr_t *pa_out);
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va);
 pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc);
 /* A missing entry also reports the absent subtree span in base/size/level.
