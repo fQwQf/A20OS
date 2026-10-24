@@ -13,6 +13,7 @@
 use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 mod usercopy_strings;
 
@@ -212,6 +213,56 @@ pub unsafe extern "C" fn a20_usercopy_copy_from_rust(
     // SAFETY: caller contract above guarantees the kernel output buffer and
     // validated user source span; copy_loop rechecks each page under mm lock.
     unsafe { copy_loop(&context, dst.cast(), src as usize, length, false) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `task` and `mm` are pinned by the C wrapper for this call, `address` is a
+/// validated user address, and `out` points to a writable kernel `u32`. The
+/// page callback's guard keeps the translation and mapping stable through one
+/// non-tearing acquire snapshot; concurrent writers may still change its value.
+pub unsafe extern "C" fn a20_usercopy_read_u32_atomic_rust(
+    task: *mut c_void,
+    mm: *mut c_void,
+    address: usize,
+    out: *mut u32,
+) -> i32 {
+    if task.is_null()
+        || mm.is_null()
+        || out.is_null()
+        || address & 3 != 0
+        || (out as usize) & (core::mem::align_of::<u32>() - 1) != 0
+    {
+        return EFAULT as i32;
+    }
+    let context = CopyContext { task, mm };
+    loop {
+        let access = match context.access(address, false) {
+            Ok(access) => access,
+            Err(error) if error.status == NEED_FAULT => {
+                if context.resolve(address, false, &error) < 0 {
+                    return EFAULT as i32;
+                }
+                continue;
+            }
+            Err(_) => return EFAULT as i32,
+        };
+        if access.chunk < core::mem::size_of::<u32>()
+            || (access.kernel_address as usize) & (core::mem::align_of::<u32>() - 1) != 0
+        {
+            return EFAULT as i32;
+        }
+        // SAFETY: C guarantees aligned user address; page access returns its
+        // aligned direct-map alias and holds the mapping lock through this
+        // acquire load. AtomicU32 provides a non-tearing 32-bit observation.
+        let value = unsafe {
+            AtomicU32::from_ptr(access.kernel_address.cast::<u32>()).load(Ordering::Acquire)
+        };
+        drop(access);
+        // SAFETY: `out` is the writable kernel output slot from the C wrapper.
+        unsafe { ptr::write(out, value) };
+        return 0;
+    }
 }
 
 #[no_mangle]

@@ -90,6 +90,15 @@ typedef enum a20_perf_counter {
     /* MM_AS_FAULT_FROM_STATUS: demand faults served from per-PTE status with
      * no VMA lookup at all (paper Fig. 8). */
     A20_PERF_MM_FAULT_FROM_STATUS,
+    /* Fork/destroy elapsed durations use timer ticks, include blocking waits,
+     * and are not CPU cycles. Fork phase totals are recorded on success only. */
+    A20_PERF_MM_FORK_CALLS,
+    A20_PERF_MM_FORK_TICKS,
+    A20_PERF_MM_FORK_SETUP_TICKS,
+    A20_PERF_MM_FORK_CLONE_TICKS,
+    A20_PERF_MM_FORK_FINISH_TICKS,
+    A20_PERF_MM_DESTROY_CALLS,
+    A20_PERF_MM_DESTROY_TICKS,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,
@@ -97,6 +106,12 @@ typedef enum a20_perf_counter {
     A20_PERF_VIRTIO_BLK_DIRECT_DMAS,
     A20_PERF_VIRTIO_BLK_BOUNCE_DMAS,
     A20_PERF_VIRTIO_BLK_BOUNCE_BYTES,
+    /* Wait durations are timer ticks (x86 frequency 1e9), including sleep;
+     * they are elapsed time, not CPU cycles. */
+    A20_PERF_VIRTIO_BLK_WAIT_CALLS,
+    A20_PERF_VIRTIO_BLK_WAIT_TICKS,
+    A20_PERF_VIRTIO_BLK_WAIT_PARKS,
+    A20_PERF_VIRTIO_BLK_WAIT_PARK_TICKS,
     /*
      * AHCI completion path.  A working interrupt path and a working polling
      * fallback are indistinguishable from the outside -- both make the disk

@@ -135,7 +135,9 @@ static inline int drv_dma_alloc(drv_dma_t *out, uint32_t npages)
     void *va = pfn_to_virt(pfn);
     extern void *memset(void *, int, size_t);
     memset(va, 0, (uint64_t)npages * DRV_PAGE_SIZE);
-    uint64_t pa = (uint64_t)pfn * DRV_PAGE_SIZE;
+    /* The cookie stores the allocator's compact PFN index; device addresses
+     * must use the range-aware PFN-to-PA conversion. */
+    uint64_t pa = (uint64_t)pfn_to_phys(pfn);
     for (uint32_t i = 0; i < npages; i++)
         out->phys[i] = pa + (uint64_t)i * DRV_PAGE_SIZE;
     for (uint32_t i = npages; i < 64; i++)

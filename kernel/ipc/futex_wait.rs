@@ -307,12 +307,14 @@ pub unsafe extern "C" fn a20_futex_wait_ticks_rust(
     if preflight < 0 {
         return preflight;
     }
+    if probe != expected {
+        return -EAGAIN;
+    }
 
-    let now = unsafe { timer_get_ticks() };
     let until = if ticks == 0 {
         0
     } else {
-        now.saturating_add(ticks)
+        unsafe { timer_get_ticks() }.saturating_add(ticks)
     };
     let token = unsafe { proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, until) };
     if token.task.is_null() {

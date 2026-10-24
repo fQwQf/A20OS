@@ -14,6 +14,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Deliberately does NOT print errno.  Most call sites are assertions or
@@ -2238,18 +2239,74 @@ static int shared_file_mremap_dontunmap_rollback(void)
 #define TLB_TD_ROUNDS  256
 #define TLB_TD_POISON  0xEE
 
+/* The first round uses a one-shot handshake to force a reader through a
+ * populated translation, then through the unmap/shootdown window. Later
+ * rounds retain the original probabilistic race. */
+enum {
+    TLB_TD_PHASE_IDLE = 0,
+    TLB_TD_PHASE_FIRST_ARMED = 1,
+    TLB_TD_PHASE_WARMED = 2,
+    TLB_TD_PHASE_UNMAPPED_AND_POISONED = 3,
+    TLB_TD_PHASE_PROBE_DONE = 4,
+};
+#define TLB_TD_PHASE_TIMEOUT_NS 5000000000LL
+
 static volatile int tlb_td_ready;
 static volatile int tlb_td_start;
 static volatile int tlb_td_stop;
 static volatile int tlb_td_armed;
+static volatile int tlb_td_phase;
+static volatile unsigned long tlb_td_generation;
 static volatile unsigned long tlb_td_reads;
 static volatile unsigned long tlb_td_bad;
 static volatile unsigned long tlb_td_faults;
 static volatile unsigned tlb_td_bad_byte;
+static volatile int tlb_td_bad_reader;
+static volatile int tlb_td_bad_page;
+static volatile unsigned long tlb_td_bad_generation;
+static volatile int tlb_td_unexpected_map;
 static unsigned char *tlb_td_region;
 static unsigned char *tlb_td_poison;
 static __thread int tlb_td_id;
 static sigjmp_buf tlb_td_jmp[TLB_TD_READERS];
+
+/* Main-thread wait only; reader 0 stays in a tight atomic phase wait so it
+ * cannot yield away the warmed TLB entry before teardown begins. */
+static int tlb_td_wait_for_phase(int expected)
+{
+    struct timespec start, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+        return -1;
+
+    for (;;) {
+        if (__atomic_load_n(&tlb_td_phase, __ATOMIC_ACQUIRE) == expected)
+            return 0;
+        if (__atomic_load_n(&tlb_td_stop, __ATOMIC_ACQUIRE))
+            return -1;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return -1;
+        long long elapsed = (long long)(now.tv_sec - start.tv_sec) * 1000000000LL +
+                            (long long)now.tv_nsec - start.tv_nsec;
+        if (elapsed >= TLB_TD_PHASE_TIMEOUT_NS)
+            return -1;
+        sched_yield();
+    }
+}
+
+/* Keep the first bad observation for an actionable report. A page-scan caller
+ * invokes this only for a same-generation mismatch; the deterministic probe
+ * also uses it if the unmapped address unexpectedly remains accessible. */
+static void tlb_td_record_bad(int reader, unsigned long generation, int page,
+                              unsigned char byte)
+{
+    unsigned long prior = __atomic_fetch_add(&tlb_td_bad, 1, __ATOMIC_RELAXED);
+    if (prior == 0) {
+        __atomic_store_n(&tlb_td_bad_reader, reader, __ATOMIC_RELAXED);
+        __atomic_store_n(&tlb_td_bad_generation, generation, __ATOMIC_RELAXED);
+        __atomic_store_n(&tlb_td_bad_page, page, __ATOMIC_RELAXED);
+        __atomic_store_n(&tlb_td_bad_byte, (unsigned)byte, __ATOMIC_RELAXED);
+    }
+}
 
 static void tlb_td_segv(int sig, siginfo_t *info, void *uc)
 {
@@ -2270,27 +2327,73 @@ static void *tlb_td_reader(void *arg)
         sched_yield();
 
     while (!__atomic_load_n(&tlb_td_stop, __ATOMIC_ACQUIRE)) {
-        /* Only read while the round is armed.  The main thread arms AFTER the
-         * fill and disarms BEFORE the unmap, so a reader that sees the flag
-         * has already observed the filled bytes; without this the reader would
-         * regularly read a freshly mapped, not-yet-filled page and report the
-         * zero page as corruption. */
+        /* The main thread arms after filling. The generation snapshot before
+         * this check and after the full scan rejects a delayed pass that
+         * crossed teardown and a later MAP_FIXED initialization. */
+        unsigned long pass_generation =
+            __atomic_load_n(&tlb_td_generation, __ATOMIC_ACQUIRE);
         if (!__atomic_load_n(&tlb_td_armed, __ATOMIC_ACQUIRE)) {
             sched_yield();
             continue;
         }
-        if (sigsetjmp(tlb_td_jmp[tlb_td_id], 1) != 0)
+        if (sigsetjmp(tlb_td_jmp[tlb_td_id], 1) != 0) {
+            /* Reader 0 reaches this branch only after the post-shootdown
+             * probe faults; publish that completed deterministic observation. */
+            if (tlb_td_id == 0 &&
+                __atomic_load_n(&tlb_td_phase, __ATOMIC_ACQUIRE) ==
+                    TLB_TD_PHASE_UNMAPPED_AND_POISONED)
+                __atomic_store_n(&tlb_td_phase, TLB_TD_PHASE_PROBE_DONE,
+                                 __ATOMIC_RELEASE);
             continue;
+        }
+        int mismatch_page = -1;
+        unsigned char mismatch_byte = 0;
         for (int i = 0; i < TLB_TD_PAGES; i++) {
             unsigned char got = tlb_td_region[(size_t)i * 4096];
             if (got != (unsigned char)(0x40 + i)) {
-                __atomic_store_n(&tlb_td_bad_byte, (unsigned)(unsigned char)got,
-                                 __ATOMIC_RELAXED);
-                __atomic_add_fetch(&tlb_td_bad, 1, __ATOMIC_RELAXED);
+                mismatch_page = i;
+                mismatch_byte = got;
                 break;
             }
         }
+        unsigned long after_generation =
+            __atomic_load_n(&tlb_td_generation, __ATOMIC_ACQUIRE);
+        int same_generation = pass_generation == after_generation;
+        if (same_generation && mismatch_page >= 0)
+            tlb_td_record_bad(tlb_td_id, pass_generation, mismatch_page,
+                              mismatch_byte);
         __atomic_add_fetch(&tlb_td_reads, 1, __ATOMIC_RELAXED);
+
+        if (tlb_td_id == 0 &&
+            __atomic_load_n(&tlb_td_phase, __ATOMIC_ACQUIRE) ==
+                TLB_TD_PHASE_FIRST_ARMED && same_generation &&
+            mismatch_page < 0) {
+            /* This completed pass proves the page was read while populated.
+             * Keep the first warmed translation resident until unmap and
+             * poison fill are complete; no yield is allowed in this window. */
+            __atomic_store_n(&tlb_td_phase, TLB_TD_PHASE_WARMED,
+                             __ATOMIC_RELEASE);
+            while (__atomic_load_n(&tlb_td_phase, __ATOMIC_ACQUIRE) !=
+                       TLB_TD_PHASE_UNMAPPED_AND_POISONED &&
+                   !__atomic_load_n(&tlb_td_stop, __ATOMIC_ACQUIRE)) {
+                /* Atomic loads keep this wait observable without yielding. */
+            }
+            if (__atomic_load_n(&tlb_td_stop, __ATOMIC_ACQUIRE))
+                break;
+
+            /* Access to the unmapped address must now fault. If it returns
+             * (including the expected old byte), record an unconditional
+             * failure. */
+            unsigned char got = *(volatile unsigned char *)tlb_td_region;
+            __atomic_store_n(&tlb_td_unexpected_map, 1, __ATOMIC_RELEASE);
+            tlb_td_record_bad(tlb_td_id,
+                              __atomic_load_n(&tlb_td_generation,
+                                              __ATOMIC_ACQUIRE),
+                              0, got);
+            __atomic_store_n(&tlb_td_phase, TLB_TD_PHASE_PROBE_DONE,
+                             __ATOMIC_RELEASE);
+            continue;
+        }
     }
     return NULL;
 }
@@ -2331,10 +2434,16 @@ static int concurrent_tlb_teardown(void)
     tlb_td_start = 0;
     tlb_td_stop = 0;
     tlb_td_armed = 0;
+    tlb_td_phase = TLB_TD_PHASE_IDLE;
+    tlb_td_generation = 0;
     tlb_td_reads = 0;
     tlb_td_bad = 0;
     tlb_td_faults = 0;
     tlb_td_bad_byte = 0;
+    tlb_td_bad_reader = -1;
+    tlb_td_bad_page = -1;
+    tlb_td_bad_generation = 0;
+    tlb_td_unexpected_map = 0;
 
     pthread_t workers[TLB_TD_READERS];
     int created = 0;
@@ -2358,6 +2467,9 @@ static int concurrent_tlb_teardown(void)
     int rounds_done = 0;
     long rss_before = -1;
     for (int round = 0; rc == 0 && round < TLB_TD_ROUNDS; round++) {
+        /* Publish a new round before mapping or filling it. Readers compare
+         * this stamp across a complete pass to reject cross-round ABA bytes. */
+        __atomic_add_fetch(&tlb_td_generation, 1UL, __ATOMIC_RELEASE);
         unsigned char *live = mmap(tlb_td_region, len, PROT_READ | PROT_WRITE,
                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
                                    -1, 0);
@@ -2367,17 +2479,31 @@ static int concurrent_tlb_teardown(void)
         }
         for (int i = 0; i < TLB_TD_PAGES; i++)
             memset(live + (size_t)i * 4096, 0x40 + i, 4096);
+        if (round == 0)
+            __atomic_store_n(&tlb_td_phase, TLB_TD_PHASE_FIRST_ARMED,
+                             __ATOMIC_RELEASE);
         __atomic_store_n(&tlb_td_armed, 1, __ATOMIC_RELEASE);
 
-        /* Let the readers get onto these PTEs before they are torn down. */
-        for (volatile int spin = 0; spin < 4000; spin++)
-            ;
+        if (round == 0) {
+            /* Do not begin teardown until reader 0 has completed a verified
+             * warm pass over the mapped bytes. Bound setup to avoid deadlock. */
+            if (tlb_td_wait_for_phase(TLB_TD_PHASE_WARMED) != 0) {
+                rc = fail("tlb-teardown-warm-handshake-timeout");
+                __atomic_store_n(&tlb_td_stop, 1, __ATOMIC_RELEASE);
+            }
+        } else {
+            /* Later rounds keep the original probabilistic race window. */
+            for (volatile int spin = 0; spin < 4000; spin++)
+                ;
+        }
 
         __atomic_store_n(&tlb_td_armed, 0, __ATOMIC_RELEASE);
         if (munmap(live, len) < 0) {
             rc = fail("tlb-teardown-unmap");
             break;
         }
+        if (rc != 0)
+            break;
 
         unsigned char *poison = mmap(tlb_td_poison, len, PROT_READ | PROT_WRITE,
                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
@@ -2387,10 +2513,26 @@ static int concurrent_tlb_teardown(void)
             break;
         }
         memset(poison, TLB_TD_POISON, len);
+
+        if (round == 0) {
+            /* Phase 3 is published only after shootdown and poison fill. Wait
+             * until reader 0 has taken the expected unmapped-page fault. Keep
+             * the poison mapping alive until that reader has resolved. */
+            __atomic_store_n(&tlb_td_phase,
+                             TLB_TD_PHASE_UNMAPPED_AND_POISONED,
+                             __ATOMIC_RELEASE);
+            if (tlb_td_wait_for_phase(TLB_TD_PHASE_PROBE_DONE) != 0) {
+                rc = fail("tlb-teardown-fault-handshake-timeout");
+                __atomic_store_n(&tlb_td_stop, 1, __ATOMIC_RELEASE);
+            }
+        }
+
         if (munmap(poison, len) < 0) {
             rc = fail("tlb-teardown-poison-unmap");
             break;
         }
+        if (rc != 0)
+            break;
 
         void *probe = mmap(tlb_td_region, len, PROT_NONE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
@@ -2415,11 +2557,17 @@ static int concurrent_tlb_teardown(void)
 
     unsigned long reads = __atomic_load_n(&tlb_td_reads, __ATOMIC_RELAXED);
     unsigned long faults = __atomic_load_n(&tlb_td_faults, __ATOMIC_RELAXED);
-    if (rc == 0 && __atomic_load_n(&tlb_td_bad, __ATOMIC_RELAXED) != 0) {
-        printf("MM_TLB_TEARDOWN: bad=%lu first_byte=0x%02x\n",
+    if (__atomic_load_n(&tlb_td_bad, __ATOMIC_RELAXED) != 0) {
+        printf("MM_TLB_TEARDOWN: bad=%lu unexpected_map=%d first_reader=%d "
+               "generation=%lu page=%d byte=0x%02x\n",
                __atomic_load_n(&tlb_td_bad, __ATOMIC_RELAXED),
+               __atomic_load_n(&tlb_td_unexpected_map, __ATOMIC_RELAXED),
+               __atomic_load_n(&tlb_td_bad_reader, __ATOMIC_RELAXED),
+               __atomic_load_n(&tlb_td_bad_generation, __ATOMIC_RELAXED),
+               __atomic_load_n(&tlb_td_bad_page, __ATOMIC_RELAXED),
                __atomic_load_n(&tlb_td_bad_byte, __ATOMIC_RELAXED));
-        rc = fail("tlb-teardown-stale-frame-visible");
+        if (rc == 0)
+            rc = fail("tlb-teardown-stale-frame-visible");
     }
     /* Non-vacuity: a run where no reader ever landed in a hole proves the
      * readers never actually raced the teardown, and a run where no reader
@@ -3368,13 +3516,38 @@ static int shared_file_eviction_with_mmap(void)
  * allocator returned, so the huge-leaf paths run regardless of its luck. */
 static char *huge_aligned_map(size_t *len_out)
 {
-    size_t len = 2 * HPSIZE;
-    char *mem = mmap(NULL, len, PROT_READ | PROT_WRITE,
+    const size_t raw_len = 2 * HPSIZE;
+    if (len_out)
+        *len_out = 0;
+    char *raw = mmap(NULL, raw_len, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-    if (mem == MAP_FAILED)
+    if (raw == MAP_FAILED)
         return MAP_FAILED;
-    uintptr_t win = ((uintptr_t)mem + HPSIZE - 1) & ~(uintptr_t)(HPSIZE - 1);
-    *len_out = len;
+
+    uintptr_t raw_start = (uintptr_t)raw;
+    uintptr_t raw_end = raw_start + raw_len;
+    uintptr_t win = (raw_start + HPSIZE - 1) & ~(uintptr_t)(HPSIZE - 1);
+    size_t prefix = (size_t)(win - raw_start);
+    size_t suffix = (size_t)(raw_end - (win + HPSIZE));
+
+    /* Keep exactly the aligned huge window: callers unmap the returned
+     * pointer/length, so leaving padding mapped could leak neighbors or make
+     * a later cleanup extend beyond the original allocation. */
+    if (prefix && munmap(raw, prefix) < 0) {
+        int saved_errno = errno;
+        (void)munmap(raw, raw_len);
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+    if (suffix && munmap((void *)(win + HPSIZE), suffix) < 0) {
+        int saved_errno = errno;
+        (void)munmap((void *)win, (size_t)(raw_end - win));
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+
+    if (len_out)
+        *len_out = HPSIZE;
     return (char *)win;
 }
 

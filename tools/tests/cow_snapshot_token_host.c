@@ -5,6 +5,7 @@
 #include <string.h>
 #define PAGE_SIZE 4096UL
 #define PMD_SIZE (2UL*1024*1024)
+#define ARCH_PT_ROOT_LEVEL 1
 #define PFN_NONE UINT32_MAX
 #define VM_VMO 16
 #define VM_FILE 32
@@ -29,15 +30,18 @@ static int frame_gets,frame_puts,cache_puts,cache_mode,present_vma=1,statuses,ch
 static size_t changed_size;
 static unsigned char stored_class, expected_class;
 static int status_reads, vma_lookups, expected_level=-1, expected_index;
+static uintptr_t expected_va;
+static int vanish_on_lock;
 static pte_t *pt_lookup_leaf(pte_t *pgdir,uintptr_t va,void *l,void *b,void *sz) {
-    (void)pgdir;(void)va;(void)l;(void)b;(void)sz;leaf_walks++;
-    return &tables[active][0];
+    (void)pgdir;(void)l;(void)b;(void)sz;leaf_walks++;expected_va=va;
+    return &tables[active][expected_index];
 }
 static pte_t *mm_pt_leaf_table(pte_t *pgdir,uintptr_t va) {
     (void)pgdir;(void)va;node_walks++;return tables[active];
 }
 static void mm_pt_node_lock(pte_t *table) {
     assert(locked==-1);locked=table==tables[0]?0:1;locks++;
+    if(vanish_on_lock) { tables[locked][expected_index]=0; vanish_on_lock=0; }
 }
 static void mm_pt_node_unlock(pte_t *table) {
     assert(locked==(table==tables[0]?0:1));locked=-1;unlocks++;
@@ -68,11 +72,15 @@ static size_t vm_pt_level_size(int level) {return level?PMD_SIZE:PAGE_SIZE;}
 static pte_t arch_pte_leaf(paddr_t pa,pte_t flags) {return pa|flags|PTE_LEAF;}
 static pte_t arch_pte_block(paddr_t pa,pte_t flags) {return pa|flags|PTE_LEAF|0x100;}
 static void mm_tlb_note_change(mm_struct_t *mm,uintptr_t va,size_t size) {
-    (void)mm;assert(locked==0&&va==0);changes++;changed_size=size;
+    (void)mm;assert(locked==0&&va==expected_va);changes++;changed_size=size;
 }
-static int arch_pt_vpn(uintptr_t va,int level) {return (va>>(12+9*level))&511;}
+static int arch_pt_vpn(uintptr_t va,int level) {
+    assert(level>=0&&level<=ARCH_PT_ROOT_LEVEL);
+    return (va>>(12+9*level))&511;
+}
+static int arch_pt_level_entries(int level) {return level>=0&&level<2?512:0;}
 static int mm_pt_sync_status(pte_t *table,int level,int idx,unsigned char cls) {
-    assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==0&&cls==expected_class);
+    assert(locked==0&&table==tables[0]&&(level==0||level==1)&&idx==expected_index&&cls==expected_class);
     statuses++;return 0;
 }
 /* SNAPSHOT_STRUCT */
@@ -84,12 +92,14 @@ static void reset(void) {
     active=leaf_walks=node_walks=locks=unlocks=frame_gets=frame_puts=cache_puts=statuses=changes=0;
     cache_mode=0;cache.pin=0;vma.vm_flags=0;present_vma=1;
     stored_class=expected_class=MM_ST_FILE_PRIVATE;status_reads=vma_lookups=0;
-    expected_level=-1;expected_index=0;
+    expected_level=-1;expected_index=0;expected_va=0;vanish_on_lock=0;
 }
 int main(void) {
     mm_struct_t parent={tables[0]};struct a20_cow_shared_snapshot snap;
     for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
         reset();if(kind==1)cache_mode=1;if(kind==2)vma.vm_flags=VM_VMO;
+        expected_index=0;expected_va=0;
+        tables[0][0]=0x9000|PTE_V|PTE_W|PTE_LEAF;
         assert(a20_cow_share_snapshot(&parent,0,level,&snap)==1);
         assert(snap.slot==&tables[0][0]&&snap.node==tables[0]&&snap.pfn==9);
         assert(locked==0&&snap.kind==(kind==1?2:kind==2?0:1));
@@ -106,6 +116,58 @@ int main(void) {
         a20_cow_release_ref(&snap);
         assert(frame_puts==(kind==0)&&cache_puts==(kind==1)&&cache.pin==0);
     }
+    /* The walker-supplied entry must use the same token/ref transaction but
+     * perform no root lookup. Use nonzero VPNs at both leaf geometries. */
+    for(int level=0;level<2;level++)for(int kind=0;kind<3;kind++) {
+        reset();
+        expected_index=level?2:7;
+        expected_va=(uintptr_t)expected_index*vm_pt_level_size(level);
+        if(kind==1)cache_mode=1;
+        if(kind==2)vma.vm_flags=VM_VMO;
+        tables[0][expected_index]=0x9000|PTE_V|PTE_W|PTE_LEAF;
+        assert(arch_pt_vpn(expected_va,level)==expected_index);
+        assert(a20_cow_share_snapshot_at(&parent,expected_va,level,
+                    &tables[0][expected_index],tables[0],&snap)==1);
+        assert(snap.slot==&tables[0][expected_index]&&snap.node==tables[0]&&snap.pfn==9);
+        assert(locked==0&&snap.kind==(kind==1?2:kind==2?0:1));
+        assert(frame_gets==(kind==0)&&cache.pin==(kind==1));
+        assert(leaf_walks==0&&node_walks==0);
+        active=1;
+        a20_cow_share_downgrade(&parent,expected_va,level,&snap,snap.cow_flags);
+        assert(tables[0][expected_index]&PTE_COW);
+        assert(tables[1][expected_index]==0&&changes==1&&
+               changed_size==vm_pt_level_size(level)&&statuses==1);
+        a20_cow_share_unlock(&snap);
+        assert(locked==-1&&locks==1&&unlocks==1&&leaf_walks==0&&node_walks==0);
+        a20_cow_release_ref(&snap);
+        assert(frame_puts==(kind==0)&&cache_puts==(kind==1)&&cache.pin==0);
+    }
+    /* Invalid borrowed geometry is rejected before taking a node lock or
+     * acquiring any backing reference. */
+    reset();
+    tables[0][0]=0x9000|PTE_V|PTE_W|PTE_LEAF;
+    assert(a20_cow_share_snapshot_at(&parent,0,0,&tables[0][0],tables[1],&snap)==0);
+    assert(locked==-1&&locks==0&&unlocks==0&&frame_gets==0&&cache.pin==0);
+    assert(snap.slot==NULL&&snap.node==NULL&&snap.pfn==PFN_NONE);
+    assert(a20_cow_share_snapshot_at(&parent,0,0,NULL,tables[0],&snap)==0);
+    assert(locked==-1&&locks==0&&frame_gets==0);
+    assert(snap.slot==NULL&&snap.node==NULL&&snap.pfn==PFN_NONE);
+    for(int bad_level=-1;bad_level<=ARCH_PT_ROOT_LEVEL+1;bad_level+=ARCH_PT_ROOT_LEVEL+2) {
+        assert(a20_cow_share_snapshot_at(&parent,0,bad_level,
+                    &tables[0][0],tables[0],&snap)==0);
+        assert(locked==-1&&locks==0&&unlocks==0&&frame_gets==0&&cache.pin==0);
+        assert(snap.slot==NULL&&snap.node==NULL&&snap.pfn==PFN_NONE);
+    }
+    /* The source may disappear between walker traversal and node exclusion;
+     * the snapshot re-reads under lock and releases that lock on rejection. */
+    reset();
+    expected_index=7;expected_va=7*PAGE_SIZE;
+    tables[0][expected_index]=0x9000|PTE_V|PTE_W|PTE_LEAF;
+    vanish_on_lock=1;
+    assert(a20_cow_share_snapshot_at(&parent,expected_va,0,
+                &tables[0][expected_index],tables[0],&snap)==0);
+    assert(locked==-1&&locks==1&&unlocks==1&&frame_gets==0&&cache.pin==0);
+    assert(snap.slot==NULL&&snap.node==NULL&&leaf_walks==0&&node_walks==0);
     for(int valid=0;valid<2;valid++) {
         reset();tables[0][0]=valid?PTE_V:0;
         assert(a20_cow_share_snapshot(&parent,0,0,&snap)==0);
@@ -141,6 +203,6 @@ int main(void) {
     reset();present_vma=0;
     assert(a20_cow_share_snapshot(&parent,0,0,&snap)==1&&frame_gets==1);
     a20_cow_share_unlock(&snap);a20_cow_release_ref(&snap);assert(frame_puts==1);
-    puts("COW_SNAPSHOT_TOKEN: real C adapters PASS slot/node identity, refs, huge/status and vanished leaf");
+    puts("COW_SNAPSHOT_TOKEN: real C adapters PASS old+walker tokens, no-root-walk, refs, huge/status and vanished leaf");
     return 0;
 }

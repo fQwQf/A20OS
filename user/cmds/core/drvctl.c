@@ -22,7 +22,8 @@
 
 #define A20_DRIVER_DESCRIPTOR_MAGIC   0x41323044U /* "A20D" */
 #define A20_DRIVER_DESCRIPTOR_VERSION 2U
-#define A20_DRIVER_ABI               1U
+/* Keep in sync with kernel/include/drivers/driver_descriptor.h. */
+#define A20_DRIVER_ABI               4U
 #define A20_DRIVER_MAX_MATCH 4
 
 /* Byte layout mirrors kernel/include/drivers/driver_descriptor.h

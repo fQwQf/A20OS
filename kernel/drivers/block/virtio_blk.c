@@ -34,8 +34,8 @@ _Static_assert(__builtin_offsetof(virtq_desc_t, addr) ==
                    __builtin_offsetof(a20_virtio_blk_desc_t, next),
                "shared VirtIO descriptor offsets");
 
-#define VQ_SIZE  VIRTIO_QUEUE_SIZE
-#define VIRTIO_BLK_REQ_SLOTS (VIRTIO_QUEUE_SIZE / 3)
+#define VQ_STORAGE_SIZE VIRTIO_QUEUE_MAX_SIZE
+#define VIRTIO_BLK_MAX_REQ_SLOTS (VIRTIO_QUEUE_MAX_SIZE / 3)
 #define VIRTIO_BLK_WAIT_TIMEOUT_TICKS (clock_ticks_per_sec() * 30)
 #define VIRTIO_BLK_MAX_RETRIES        3
 #define VIRTIO_BLK_RESET_SPINS        1000000U
@@ -49,6 +49,17 @@ _Static_assert(__builtin_offsetof(virtq_desc_t, addr) ==
 #define VIRTIO_BLK_REQUEST_DMA_BYTES      PAGE_SIZE
 /* One request queue, so one message-signalled vector. */
 #define VIRTIO_BLK_QUEUES                 1
+_Static_assert(VIRTIO_BLK_MAX_REQ_SLOTS == 21,
+               "64-entry queue request storage bound");
+_Static_assert(sizeof(virtio_blk_req_hdr_t) * VQ_STORAGE_SIZE +
+                   VQ_STORAGE_SIZE <= VIRTIO_BLK_REQUEST_DMA_BYTES,
+               "request headers and status bytes fit one DMA page");
+_Static_assert(VIRTIO_QUEUE_MAX_SIZE * sizeof(virtq_desc_t) +
+                   sizeof(virtq_avail_t) <= PAGE_SIZE,
+               "maximum legacy descriptor/available rings fit one page");
+_Static_assert(sizeof(virtq_avail_t) <= PAGE_SIZE &&
+                   sizeof(virtq_used_t) <= PAGE_SIZE,
+               "maximum split-ring views fit one page each");
 
 typedef struct {
     int                in_use;
@@ -78,7 +89,11 @@ typedef struct {
     uint64_t           request_dma_addr;
     virtio_blk_req_hdr_t *req_hdr;
     uint8_t           *status;
-    virtio_blk_req_t   req[VIRTIO_BLK_REQ_SLOTS];
+    /* Backing arrays cover the maximum queue; these negotiated counts govern
+     * runtime indexing and match the Rust queue state's active bounds. */
+    uint16_t           queue_size;
+    uint16_t           request_slots;
+    virtio_blk_req_t   req[VIRTIO_BLK_MAX_REQ_SLOTS];
 #ifdef CONFIG_VIRTIO_BLK_CORE_RUST
     a20_virtio_blk_queue_state_t queue_state;
 #endif
@@ -107,7 +122,7 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
 
 static void virtio_blk_free_dma(virtio_blk_inst_t *inst)
 {
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+    for (int i = 0; i < VIRTIO_BLK_MAX_REQ_SLOTS; i++) {
         if (!inst->req[i].dma_buf)
             continue;
         dma_free_coherent_aligned(inst->req[i].dma_buf,
@@ -155,12 +170,12 @@ static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst, device_t *dev)
 
     inst->req_hdr = (virtio_blk_req_hdr_t *)inst->request_dma_mem;
     inst->status = (uint8_t *)inst->request_dma_mem +
-                   sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE;
-    if ((uintptr_t)(inst->status + VIRTIO_QUEUE_SIZE) >
+                   sizeof(virtio_blk_req_hdr_t) * VQ_STORAGE_SIZE;
+    if ((uintptr_t)(inst->status + VQ_STORAGE_SIZE) >
         (uintptr_t)inst->request_dma_mem + VIRTIO_BLK_REQUEST_DMA_BYTES)
         goto fail;
 
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+    for (int i = 0; i < VIRTIO_BLK_MAX_REQ_SLOTS; i++) {
         inst->req[i].dma_buf =
             dma_alloc_coherent_aligned(dev, VIRTIO_BLK_BOUNCE_BYTES, PAGE_SIZE,
                                        &inst->req[i].dma_addr);
@@ -172,6 +187,25 @@ static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst, device_t *dev)
 fail:
     virtio_blk_free_dma(inst);
     return -1;
+}
+
+/* Choose the largest supported power-of-two depth in the compatibility
+ * range [32, 64]. Non-power-of-two advertised maxima round down. */
+static uint16_t virtio_blk_choose_queue_size(uint32_t qmax)
+{
+    if (qmax < VIRTIO_QUEUE_SIZE)
+        return 0;
+
+    return qmax >= VIRTIO_QUEUE_MAX_SIZE
+               ? VIRTIO_QUEUE_MAX_SIZE
+               : VIRTIO_QUEUE_SIZE;
+}
+
+/* Legacy MMIO places avail directly after the negotiated descriptor table,
+ * not after the maximum-capacity storage view. */
+static size_t virtio_blk_legacy_avail_offset(uint16_t queue_size)
+{
+    return (size_t)queue_size * sizeof(virtq_desc_t);
 }
 
 /*
@@ -234,20 +268,36 @@ static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst) {
 
     vt->write32(vt, VIRTIO_MMIO_QUEUE_SEL, 0);
     uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
-    if (qmax == 0 || qmax < VIRTIO_QUEUE_SIZE) {
-        printf("[VIRTIO%d] Queue max too small: %d\n", idx, qmax);
+    uint16_t queue_size = virtio_blk_choose_queue_size(qmax);
+    if (!queue_size) {
+        printf("[VIRTIO%d] Queue max too small: %u (need at least %u)\n",
+               idx, qmax, VIRTIO_QUEUE_SIZE);
         return -1;
     }
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
+    /* Completed request slots remain owned by waiters across reset. Changing
+     * queue geometry would invalidate their Rust queue slot handles. */
+    if (inst->queue_size && inst->queue_size != queue_size) {
+        printf("[VIRTIO%d] Queue depth changed across reset: %u -> %u\n",
+               idx, inst->queue_size, queue_size);
+        return -1;
+    }
 
     memset(inst->queue_dma_mem, 0, VIRTIO_BLK_QUEUE_DMA_BYTES);
     memset(inst->request_dma_mem, 0, VIRTIO_BLK_REQUEST_DMA_BYTES);
 #ifdef CONFIG_VIRTIO_BLK_CORE_RUST
-    if (a20_virtio_blk_queue_reset(&inst->queue_state) != 0) {
-        printf("[VIRTIO%d] Rust queue state not quiescent during reset\n", idx);
+    int queue_state_rc = inst->queue_size
+        ? a20_virtio_blk_queue_reset(&inst->queue_state)
+        : a20_virtio_blk_queue_init(&inst->queue_state, queue_size,
+                                    queue_size / 3U);
+    if (queue_state_rc != 0) {
+        printf("[VIRTIO%d] Rust queue state could not accept depth %u: %d\n",
+               idx, queue_size, queue_state_rc);
         return -1;
     }
 #endif
+    inst->queue_size = queue_size;
+    inst->request_slots = queue_size / 3U;
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, queue_size);
     arch_dma_sync_for_device(inst->queue_dma_mem,
                              VIRTIO_BLK_QUEUE_DMA_BYTES);
     arch_dma_sync_for_device(inst->request_dma_mem,
@@ -257,7 +307,8 @@ static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst) {
         uint8_t *queue = (uint8_t *)inst->queue_dma_mem;
         virtq_desc_t *l_desc = (virtq_desc_t *)queue;
         virtq_avail_t *l_avail =
-            (virtq_avail_t *)(queue + VQ_SIZE * sizeof(virtq_desc_t));
+            (virtq_avail_t *)(queue + virtio_blk_legacy_avail_offset(
+                inst->queue_size));
         virtq_used_t *l_used = (virtq_used_t *)(queue + PAGE_SIZE);
 
         inst->blk.desc  = l_desc;
@@ -309,11 +360,6 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst, device_t *dev) {
 
     inst->blk.legacy = inst->vt.legacy;
     spin_init(&inst->lock);
-#ifdef CONFIG_VIRTIO_BLK_CORE_RUST
-    if (a20_virtio_blk_queue_init(&inst->queue_state, VIRTIO_QUEUE_SIZE,
-                                  VIRTIO_BLK_REQ_SLOTS) != 0)
-        return -1;
-#endif
     if (virtio_blk_alloc_dma(inst, dev) != 0) {
         printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
         return -1;
@@ -405,7 +451,7 @@ int virtio_blk_init(void) {
 
 #ifndef CONFIG_VIRTIO_BLK_CORE_RUST
 static virtio_blk_req_t *virtio_blk_find_req_locked(virtio_blk_inst_t *inst, uint16_t head) {
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+    for (int i = 0; i < VIRTIO_BLK_MAX_REQ_SLOTS; i++) {
         virtio_blk_req_t *req = &inst->req[i];
         if (req->in_use && req->head == head)
             return req;
@@ -454,7 +500,7 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
         uint16_t req_slot = 0;
         if (id > UINT16_MAX || a20_virtio_blk_queue_validate_head(
                 &inst->queue_state, (uint16_t)id, &req_slot) != 0 ||
-            req_slot >= VIRTIO_BLK_REQ_SLOTS) {
+            req_slot >= inst->request_slots) {
             printf("[VIRTIO%d] invalid used head %u\n", inst->slot, id);
             virtio_blk_fail_queue_locked(inst, wake_q);
             return;
@@ -491,7 +537,7 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
 #else
     while (blk->last_used != used_idx) {
         completions++;
-        uint16_t ring_idx = blk->last_used % VIRTIO_QUEUE_SIZE;
+        uint16_t ring_idx = blk->last_used % inst->queue_size;
         arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
         uint16_t head = (uint16_t)used->ring[ring_idx].id;
         uint32_t used_len = used->ring[ring_idx].len;
@@ -562,7 +608,7 @@ static virtio_blk_req_t *virtio_blk_alloc_req_locked(virtio_blk_inst_t *inst,
     (void)flush;
 #endif
     virtio_blk_complete_used_locked(inst, wake_q);
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+    for (int i = 0; i < inst->request_slots; i++) {
         if (!inst->req[i].in_use) {
             virtio_blk_req_t *req = &inst->req[i];
             void *dma_buf = req->dma_buf;
@@ -633,9 +679,9 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
         return;
 
 #ifdef CONFIG_VIRTIO_BLK_CORE_RUST
-    uint16_t slots[VIRTIO_BLK_REQ_SLOTS];
+    uint16_t slots[VIRTIO_BLK_MAX_REQ_SLOTS];
     int failed = a20_virtio_blk_queue_fail_all(
-        &inst->queue_state, slots, VIRTIO_BLK_REQ_SLOTS);
+        &inst->queue_state, slots, VIRTIO_BLK_MAX_REQ_SLOTS);
     if (failed < 0) {
         printf("[VIRTIO%d] Rust queue failure collection failed: %d\n",
                inst->slot, failed);
@@ -651,7 +697,7 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
                                          PROC_WAKE_EXIT, wake_q, NULL);
     }
 #else
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
+    for (int i = 0; i < inst->request_slots; i++) {
         virtio_blk_req_t *req = &inst->req[i];
         if (!req->in_use)
             continue;
@@ -665,7 +711,7 @@ static void virtio_blk_fail_queue_locked(virtio_blk_inst_t *inst,
     /* device_init resets the aggregate counter. Clear each request's matching
      * ownership bit first so old completed waiters cannot decrement a newer
      * request after recovery. */
-    for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++)
+    for (int i = 0; i < inst->request_slots; i++)
         inst->req[i].in_flight_counted = 0;
 
     if (virtio_blk_device_init_locked(inst) != 0)
@@ -769,18 +815,23 @@ static int virtio_blk_build_chain(virtq_desc_t *descs, uint16_t queue_size,
 
 static void virtio_blk_sync_desc_chain(virtio_blk_inst_t *inst, uint16_t head,
                                        uint16_t count) {
-    uint16_t mask = VIRTIO_QUEUE_SIZE - 1;
+    uint16_t mask = inst->queue_size - 1;
     for (uint16_t i = 0; i < count; i++) {
         uint16_t index = (uint16_t)((head + i) & mask);
         arch_dma_sync_for_device(&inst->blk.desc[index], sizeof(virtq_desc_t));
     }
 }
 
+static void virtio_blk_kick_locked(virtio_blk_inst_t *inst) {
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    mb();
+    kernel_progress_note_pending(KERNEL_PROGRESS_PENDING_DEVICE);
+}
+
 static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                  uint64_t lba, void *buf, size_t sectors,
-                                 int write, int flush) {
+                                 int write, int flush, int notify) {
     size_t bytes = flush ? 0 : sectors * VIRTIO_BLK_SECTOR_SIZE;
-    virtio_transport_t *vt = &inst->vt;
     uint16_t slot = req->head;
 
     paddr_t pa = flush ? 0 : va_to_pa(buf);
@@ -836,11 +887,11 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     uint64_t header_addr = inst->request_dma_addr +
                            (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
     uint64_t status_addr = inst->request_dma_addr +
-                           sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE + slot;
+                           sizeof(virtio_blk_req_hdr_t) * VQ_STORAGE_SIZE + slot;
     a20_virtio_blk_segment_t segment = { .addr = req->io_dma_addr,
                                          .len = (uint32_t)bytes };
     int desc_count = virtio_blk_build_chain(
-        desc, VIRTIO_QUEUE_SIZE, slot,
+        desc, inst->queue_size, slot,
         header_addr, sizeof(virtio_blk_req_hdr_t), flush ? NULL : &segment,
         flush ? 0 : 1, status_addr, write ? 0 : 1);
     if (desc_count < 0) {
@@ -871,7 +922,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 #ifdef CONFIG_VIRTIO_BLK_CORE_RUST
             publish_slot;
 #else
-            avail->idx % VIRTIO_QUEUE_SIZE;
+            avail->idx % inst->queue_size;
 #endif
         avail->ring[fslot] = slot;
         arch_dma_sync_for_device(&inst->req_hdr[slot],
@@ -896,11 +947,8 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         inst->blk.desc_idx++;
         arch_dma_sync_for_device(&avail->idx, sizeof(avail->idx));
         wmb();
-        vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-        mb();
-        /* Tell the progress bridge a completion is now outstanding, so the
-         * scheduler/idle pass actually walks this device. */
-        kernel_progress_note_pending(KERNEL_PROGRESS_PENDING_DEVICE);
+        if (notify)
+            virtio_blk_kick_locked(inst);
         return 0;
     }
 
@@ -913,7 +961,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 #ifdef CONFIG_VIRTIO_BLK_CORE_RUST
         publish_slot;
 #else
-        avail->idx % VIRTIO_QUEUE_SIZE;
+        avail->idx % inst->queue_size;
 #endif
     avail->ring[avail_slot] = slot;
     arch_dma_sync_for_device(io_buf, bytes);
@@ -941,9 +989,8 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
     wmb();
 
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
-    mb();
-    kernel_progress_note_pending(KERNEL_PROGRESS_PENDING_DEVICE);
+    if (notify)
+        virtio_blk_kick_locked(inst);
     return 0;
 }
 
@@ -1057,10 +1104,19 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                 wait_queue_link(&req->waiters, &entry, token, 0);
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
-            if (linked)
+            if (linked) {
+                uint32_t perf_timed =
+                    __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+                uint64_t park_start = perf_timed ? timer_get_ticks() : 0;
+                if (perf_timed)
+                    a20_perf_count(A20_PERF_VIRTIO_BLK_WAIT_PARKS);
                 (void)proc_park_commit(token);
-            else
+                if (perf_timed)
+                    a20_perf_add(A20_PERF_VIRTIO_BLK_WAIT_PARK_TICKS,
+                                 timer_get_ticks() - park_start);
+            } else {
                 (void)proc_park_cancel(token);
+            }
             wait_queue_unlink(&req->waiters, &entry);
             proc_park_finish(token);
         } else {
@@ -1069,6 +1125,20 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             cpu_relax();
         }
     }
+}
+
+static int virtio_blk_wait_req_timed(virtio_blk_inst_t *inst,
+                                     virtio_blk_req_t *req, uint64_t lba) {
+    uint32_t perf_timed =
+        __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+    uint64_t wait_start = perf_timed ? timer_get_ticks() : 0;
+    if (perf_timed)
+        a20_perf_count(A20_PERF_VIRTIO_BLK_WAIT_CALLS);
+    int ret = virtio_blk_wait_req(inst, req, lba);
+    if (perf_timed)
+        a20_perf_add(A20_PERF_VIRTIO_BLK_WAIT_TICKS,
+                     timer_get_ticks() - wait_start);
+    return ret;
 }
 
 static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors,
@@ -1092,7 +1162,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors,
                                               flush);
             if (req) {
                 int submit_ret = virtio_blk_submit_req(
-                    inst, req, lba, buf, sectors, write, flush);
+                    inst, req, lba, buf, sectors, write, flush, 1);
                 if (submit_ret < 0)
                     req->in_use = 0;
                 spin_unlock_irqrestore(&inst->lock, flags);
@@ -1128,7 +1198,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors,
         if (!req)
             continue;
 
-        int ret = virtio_blk_wait_req(inst, req, lba);
+        int ret = virtio_blk_wait_req_timed(inst, req, lba);
         if (ret == 0)
             return 0;
         if (!inst->blk.valid)
@@ -1193,6 +1263,110 @@ static int blk_write_sector(block_dev_t *dev, uint64_t lba, const void *buf, siz
     return virtio_blk_write(inst->slot, lba, buf, count);
 }
 
+static int blk_write_batch(block_dev_t *dev, const block_write_t *writes,
+                           size_t nr) {
+    if (nr == 0)
+        return 0;
+    if (!dev || !writes)
+        return -EINVAL;
+
+    for (size_t i = 0; i < nr; i++) {
+        if (!writes[i].buf || writes[i].count == 0 ||
+            writes[i].count > VIRTIO_BLK_MAX_TRANSFER_SECTORS ||
+            writes[i].lba >= dev->capacity ||
+            writes[i].count > dev->capacity - writes[i].lba)
+            return -EINVAL;
+    }
+
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->priv;
+    if (!inst || inst->slot < 0 || inst->slot >= VIRTIO_MAX_DEVS ||
+        &g_insts[inst->slot] != inst || !inst->blk.valid)
+        return -ENODEV;
+
+    size_t window_limit = inst->request_slots;
+    if (window_limit > 16)
+        window_limit = 16;
+    size_t offset = 0;
+
+    while (offset < nr) {
+        virtio_blk_req_t *pending[VIRTIO_BLK_MAX_REQ_SLOTS];
+        uint64_t pending_lba[VIRTIO_BLK_MAX_REQ_SLOTS];
+        size_t submitted = 0;
+        int submit_error = 0;
+        int queue_full = 0;
+
+        while (submitted < window_limit && submitted < nr - offset) {
+            size_t index = offset + submitted;
+            proc_wake_q_t wake_q;
+            proc_wake_q_init(&wake_q);
+            uint64_t flags = spin_lock_irqsave(&inst->lock);
+            virtio_blk_req_t *req = NULL;
+            int submit_ret = 0;
+            if (!inst->blk.valid) {
+                submit_error = -ENODEV;
+            } else {
+                req = virtio_blk_alloc_req_locked(
+                    inst, &wake_q, writes[index].count, 1, 0);
+                if (req) {
+                    submit_ret = virtio_blk_submit_req(
+                        inst, req, writes[index].lba,
+                        (void *)writes[index].buf, writes[index].count,
+                        1, 0, 0);
+                    if (submit_ret < 0)
+                        req->in_use = 0;
+                } else {
+                    queue_full = 1;
+                }
+            }
+            spin_unlock_irqrestore(&inst->lock, flags);
+            (void)proc_wake_q_flush(&wake_q);
+
+            if (submit_error)
+                break;
+            if (!req)
+                break;
+            if (submit_ret < 0) {
+                submit_error = submit_ret;
+                break;
+            }
+            pending[submitted] = req;
+            pending_lba[submitted] = writes[index].lba;
+            submitted++;
+        }
+
+        if (submitted > 0) {
+            uint64_t flags = spin_lock_irqsave(&inst->lock);
+            if (inst->blk.valid)
+                virtio_blk_kick_locked(inst);
+            spin_unlock_irqrestore(&inst->lock, flags);
+        }
+
+        if (submitted == 0 && queue_full && !submit_error) {
+            size_t index = offset;
+            int ret = blk_write_sector(dev, writes[index].lba,
+                                       writes[index].buf, writes[index].count);
+            if (ret < 0)
+                return ret;
+            offset++;
+            continue;
+        }
+
+        int wait_error = 0;
+        for (size_t i = 0; i < submitted; i++) {
+            int ret = virtio_blk_wait_req_timed(inst, pending[i],
+                                                pending_lba[i]);
+            if (ret < 0 && !wait_error)
+                wait_error = ret;
+        }
+        if (submit_error)
+            return submit_error;
+        if (wait_error)
+            return wait_error;
+        offset += submitted;
+    }
+    return 0;
+}
+
 int virtio_blk_flush(int idx) {
     if (idx < 0 || idx >= g_ninst) return -EINVAL;
     if (!g_insts[idx].blk.valid) return -ENODEV;
@@ -1209,6 +1383,7 @@ block_dev_t *virtio_blk_get_dev(int idx) {
     if (!g_insts[idx].blk.valid) return NULL;
     g_insts[idx].blk_dev.read_sector  = blk_read_sector;
     g_insts[idx].blk_dev.write_sector = blk_write_sector;
+    g_insts[idx].blk_dev.write_batch  = blk_write_batch;
     g_insts[idx].blk_dev.flush        = blk_flush;
     return &g_insts[idx].blk_dev;
 }
@@ -1345,6 +1520,15 @@ static int virtio_blk_class_write(struct device *dev, uint64_t sector, const voi
     return virtio_blk_write(inst->slot, sector, buf, count);
 }
 
+static int virtio_blk_class_write_batch(struct device *dev,
+                                        const struct block_write *writes,
+                                        size_t nr) {
+    if (!dev || !dev->drv_priv)
+        return -ENODEV;
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
+    return blk_write_batch(&inst->blk_dev, writes, nr);
+}
+
 static uint64_t virtio_blk_class_capacity(struct device *dev) {
     virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
     return inst->blk.capacity;
@@ -1363,6 +1547,7 @@ static int virtio_blk_class_flush(struct device *dev) {
 static block_dev_ops_t virtio_blk_class_ops = {
     .read        = virtio_blk_class_read,
     .write       = virtio_blk_class_write,
+    .write_batch = virtio_blk_class_write_batch,
     .flush       = virtio_blk_class_flush,
     .capacity    = virtio_blk_class_capacity,
     .sector_size = virtio_blk_class_sector_size,
