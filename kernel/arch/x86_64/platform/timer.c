@@ -26,10 +26,9 @@ static uint64_t hpet_freq;
 static uintptr_t hpet_base;
 static unsigned use_hpet;
 /*
- * Per-CPU high-water mark.  The mark only exists to absorb a counter read that
- * lands behind an earlier one on this CPU, so keeping one per CPU lets each core
- * take it uncontended instead of serialising every reader in the system on a
- * single cache line.
+ * Per-CPU high-water mark. Each CPU owns a distinct cache line so its
+ * monotonicity CAS does not invalidate another CPU's slot. With two CPUs this
+ * storage occupies 128 bytes. The shared-SMP domain clock below is unchanged.
  */
 #ifdef CONFIG_QEMU_SHARED_SMP
 /* Each KVM VM has its own TSC epoch. CPU 0 owns the domain clock; its timer
@@ -38,7 +37,13 @@ static unsigned use_hpet;
  * stalls domain time; independent owner failover is not supported. */
 static volatile uint64_t shared_clock_ticks;
 #else
-static volatile uint64_t last_ticks[CONFIG_NR_CPUS];
+struct timer_tick_slot {
+    volatile uint64_t ticks;
+    uint8_t padding[64 - sizeof(uint64_t)];
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct timer_tick_slot) == 64,
+               "per-CPU timer high-water slot must occupy one cache line");
+static struct timer_tick_slot last_ticks[CONFIG_NR_CPUS];
 #endif
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
@@ -331,7 +336,7 @@ uint64_t timer_get_ticks(void) {
 #ifdef CONFIG_QEMU_SHARED_SMP
     volatile uint64_t *last = &shared_clock_ticks;
 #else
-    volatile uint64_t *last = &last_ticks[cpu_current_id()];
+    volatile uint64_t *last = &last_ticks[cpu_current_id()].ticks;
 #endif
 
     uint64_t previous = __atomic_load_n(last, __ATOMIC_RELAXED);

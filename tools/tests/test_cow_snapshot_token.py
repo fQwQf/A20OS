@@ -11,7 +11,7 @@ class SnapshotToken(unittest.TestCase):
     def test_lock_and_reference_identity(self):
         text = (ROOT / "kernel/mm/cow.c").read_text()
         struct = text[text.index("struct a20_cow_shared_snapshot {"):text.index("uint64_t a20_cow_policy_flags(")]
-        functions = text[text.index("int a20_cow_share_snapshot("):text.index("int a20_cow_requires_private_copy(")]
+        functions = text[text.index("static int a20_cow_share_snapshot_from_slot("):text.index("#ifndef CONFIG_NOMMU\n#if defined(ARCH_HAS_PGTABLE_OPS)\n/* The child is unpublished") ]
         release = text[text.index("void a20_cow_release_ref("):text.index("int mm_fork_clone_page(")]
         fixture = (ROOT / "tools/tests/cow_snapshot_token_host.c").read_text()
         class_start = text.index("#if defined(ARCH_HAS_PGTABLE_OPS)\nstatic uint8_t mm_fork_page_class")

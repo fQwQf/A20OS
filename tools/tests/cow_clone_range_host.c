@@ -6,7 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 #define PAGE_SIZE 4096UL
+#define A20_COW_ANON_BATCH_PAGES 64
+static int a20_cow_clone_anon_batch_rust(void *c, void *p, uintptr_t va, void *n) { (void)c; (void)p; (void)va; (void)n; return 0; }
 #define ARCH_PT_ROOT_LEVEL 2
+#define ARCH_HAS_PGTABLE_OPS 1
 #define PTE_V 1UL
 #define LEAF 2UL
 #define SWAP 4UL
@@ -29,6 +32,7 @@ typedef struct {
 static _Alignas(8) pte_t nodes[32][4];
 static unsigned used;
 static int swap_result;
+static size_t hint_calls, hint_validations;
 static size_t vm_pt_level_size(int level) { return PAGE_SIZE << (2*level); }
 static int arch_pt_level_entries(int level) { (void)level; return 4; }
 static int arch_pt_vpn(uintptr_t va,int level) { return (va/(PAGE_SIZE << (2*level)))&3; }
@@ -63,6 +67,22 @@ int mm_clone_swap_page(mm_struct_t *c,uintptr_t va,mm_struct_t *p,uintptr_t src)
 }
 int a20_cow_clone_leaf_rust(mm_struct_t *c,mm_struct_t *p,uintptr_t va,int level,int shared) {
     (void)p;return record(c,va,level,shared,0);
+}
+int a20_cow_clone_leaf_at_rust(mm_struct_t *c,mm_struct_t *p,uintptr_t va,
+                               int level,int shared,int checked,pte_t *slot,
+                               pte_t *node) {
+    hint_calls++;
+    int index=arch_pt_vpn(va,level);
+    assert(node!=NULL && index>=0 && index<arch_pt_level_entries(level));
+    assert(slot==&node[index]);
+    assert(*slot&PTE_V);
+    assert(arch_pte_is_leaf(*slot));
+    hint_validations++;
+    if(checked) {
+        if(p->policy[va/PAGE_SIZE]) return 0;
+        if(c->present[va/PAGE_SIZE]) return 0;
+    }
+    return record(c,va,level,shared,0);
 }
 int mm_fork_clone_page(mm_struct_t *c,mm_struct_t *p,uintptr_t va,int shared) {
     c->calls++;

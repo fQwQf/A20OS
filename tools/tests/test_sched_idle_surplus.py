@@ -21,7 +21,6 @@ typedef struct task {
     int state, on_rq, kstack, cg_throttled, dispatching;
     unsigned cpu_id, owner_cpu, mask;
     uint64_t ready_since;
-    struct task *rq_next, *rq_prev;
 } task_t;
 typedef struct {
     int lock, deny_lock;
@@ -32,12 +31,14 @@ static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static task_t idle_tasks[CONFIG_NR_CPUS], worker;
 static task_t *slots[CONFIG_NR_CPUS];
 static unsigned online, irq_enabled, removed, sched_runqueue_migrations;
+static unsigned remote_trylock_calls;
 static task_t *proc_current_on_cpu(unsigned cpu) {
     return cpu < CONFIG_NR_CPUS ? slots[cpu] : NULL;
 }
 static int smp_cpu_is_online(unsigned cpu) { return online & (1U << cpu); }
 static int spin_trylock_irqsave(int *lock, uint64_t *flags) {
     proc_runq_t *rq = (proc_runq_t *)lock;
+    remote_trylock_calls++;
     if (*lock || rq->deny_lock) return 0;
     *flags = irq_enabled; irq_enabled = 0; *lock = 1; return 1;
 }
@@ -63,24 +64,31 @@ static void reset(unsigned remote, unsigned count, int idle) {
     if (!idle) slots[remote] = (task_t *)(uintptr_t)1;
     worker = (task_t){.state=PROC_READY, .on_rq=1, .kstack=1,
         .cpu_id=remote, .owner_cpu=PROC_CPU_NONE, .mask=7,
-        .ready_since=123, .rq_next=&worker, .rq_prev=&worker};
+        .ready_since=123};
     sched_runq[remote] = (proc_runq_t){.nr_running=count,
         .weight=count, .eevdf_last=count ? &worker : NULL};
     online=7; removed=0; sched_runqueue_migrations=0;
+    remote_trylock_calls=0;
     sched_runq[0].lock=1; irq_enabled=0;
 }
 static void expect(unsigned remote, int steal) {
     unsigned count=sched_runq[remote].nr_running;
     task_t before=worker;
+    unsigned expected_trylocks=0;
+    for(unsigned cpu=1;cpu<CONFIG_NR_CPUS;cpu++)
+        if((online&(1U<<cpu))&&sched_runq[cpu].nr_running)
+            expected_trylocks++;
     task_t *picked=sched_runq_steal_locked(&sched_runq[0], 0);
     assert(!irq_enabled && sched_runq[0].lock && !sched_runq[remote].lock);
+    assert(remote_trylock_calls==expected_trylocks);
     assert((picked == &worker) == steal);
     assert(removed == (unsigned)steal && sched_runqueue_migrations == (unsigned)steal);
     assert(sched_runq[remote].nr_running == count - steal);
     assert(sched_runq[remote].weight == count - steal);
     if (steal) {
         assert(worker.cpu_id == 0 && worker.owner_cpu == 0 && worker.dispatching);
-        assert(!worker.on_rq && !worker.ready_since && !worker.rq_next && !worker.rq_prev);
+        /* Current EEVDF nodes are removed by eevdf_remove_locked mock. */
+        assert(!worker.on_rq && !worker.ready_since);
     } else {
         assert(!memcmp(&worker, &before, sizeof(worker)));
     }

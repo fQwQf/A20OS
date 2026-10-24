@@ -382,7 +382,7 @@ int vma_ref_aux(mm_seg_t *vma)
 /* ---- The ordered index, and the one lookup -------------------------------- */
 
 /*
- * mm->seg_index[] is an ordered, cached copy of mm->mmap.  There was a second
+ * mm->seg_index (embedded or dynamic) is an ordered, cached copy of mm->mmap.  There was a second
  * array for this -- vma_index[] -- and it is gone: the entries of both were
  * the same pointers, so one of them was always stale the moment the other was
  * rebuilt, and mm_find_vma() and mm_seg_find() were two binary searches over
@@ -400,60 +400,102 @@ int vma_ref_aux(mm_seg_t *vma)
  * nothing reads the array while state != 1 -- the lookup below rebuilds before
  * it reads, or falls through to the list without reading it at all (state 2). */
 
-/* How many times an address space has been found over MM_SEG_INDEX_CAPACITY
- * mappings and fallen back to the list walk.  See the overflow branch in
- * mm_seg_index_rebuild() for why this is counted rather than assumed. */
+/* How many rebuilds found more mappings than the embedded index can hold.
+ * The index grows when allocation succeeds; this remains the proc-visible
+ * capacity-exceeded diagnostic. */
 uint64_t mm_seg_index_overflow;
+
+static mm_seg_t **mm_seg_index_slots(mm_struct_t *mm)
+{
+    return mm->seg_index_large ? mm->seg_index_large : mm->seg_index;
+}
+
+static size_t mm_seg_index_active_capacity(mm_struct_t *mm)
+{
+    return mm->seg_index_large ? mm->seg_index_capacity
+                               : MM_SEG_INDEX_CAPACITY;
+}
+
+static size_t mm_seg_list_count(mm_struct_t *mm)
+{
+    size_t count = 0;
+    mm_seg_t *slow = mm->mmap;
+    mm_seg_t *fast = mm->mmap;
+
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
+        if (count == (size_t)-1)
+            panic("mm_seg_index_rebuild: mapping count overflow");
+        count++;
+
+        slow = slow ? slow->next : NULL;
+        fast = (fast && fast->next) ? fast->next->next : NULL;
+        if (slow && slow == fast)
+            panic("mm_seg_index_rebuild: mapping list cycle");
+    }
+    return count;
+}
 
 static void mm_seg_index_rebuild(mm_struct_t *mm)
 {
-    /* Release the previous pass's references BEFORE writing any new entry.
-     * The rebuild writes in place, so putting afterwards would put slots the
-     * new pass had already overwritten -- dropping references the new entries
-     * now hold, and leaking the old ones.
-     *
-     * old_count is seg_index_count unconditionally, NOT `state == 1 ?
-     * seg_index_count : 0`.  This function is only ever reached from state 0,
-     * so that guard was dead: invalidate() had already zeroed the count while
-     * leaving the owned pointers in the array, and the loop below therefore
-     * never ran.  Every reference the index took was orphaned at the next
-     * mutation and never put, so a VMA dropped from the list could never reach
-     * refcount zero and neither it nor its backing vnode/VMO was ever
-     * released.  Invalidate keeps the count so this pass can give the
-     * references back; state 2 has already NULLed its slots and zeroed the
-     * count, so it correctly contributes nothing here. */
-    uint16_t old_count = mm->seg_index_count;
-    for (uint16_t i = 0; i < old_count; i++) {
-        vma_put(mm, mm->seg_index[i]);
-        mm->seg_index[i] = NULL;
+    /* Invalidation preserves seg_index_count because these slots still own
+     * references. Put them before reusing the array; state 2 has already
+     * cleared its slots and count. */
+    size_t old_count = mm->seg_index_count;
+    mm_seg_t **slots = mm_seg_index_slots(mm);
+    __atomic_store_n(&mm->seg_index_hint, 0, __ATOMIC_RELAXED);
+    for (size_t i = 0; i < old_count; i++) {
+        vma_put(mm, slots[i]);
+        slots[i] = NULL;
     }
+    mm->seg_index_count = 0;
 
-    uint16_t count = 0;
-    /* The list is already sorted by start, so walking it in order produces a
-     * sorted index -- no sort step. */
-    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
-        if (count == MM_SEG_INDEX_CAPACITY) {
-            /* Over capacity.  Release what this pass took and fall back to the
-             * list, which is always correct.
-             *
-             * Counted, because "correct" is all this path has always claimed
-             * and nothing ever checked it: the software gates run processes
-             * with 14 mappings against a capacity of 1024, so this branch had
-             * never executed anywhere.  A zero here now means the fallback is
-             * still unexercised rather than silently unexercised -- the
-             * difference is whether a reader has to take the word for it. */
-            mm_seg_index_overflow++;
-            for (uint16_t i = 0; i < count; i++) {
-                vma_put(mm, mm->seg_index[i]);
-                mm->seg_index[i] = NULL;
+    size_t total = mm_seg_list_count(mm);
+    size_t capacity = mm_seg_index_active_capacity(mm);
+    if (total > MM_SEG_INDEX_CAPACITY)
+        mm_seg_index_overflow++;
+    if (total > capacity) {
+        size_t grown = capacity;
+        while (grown < total) {
+            if (grown > (size_t)-1 / 2) {
+                grown = total;
+                break;
             }
-            mm->seg_index_count = 0;
+            grown *= 2;
+        }
+        if (grown > (size_t)-1 / sizeof(*slots)) {
             mm->seg_index_state = 2;
             return;
         }
-        mm->seg_index[count++] = mm_seg_get(v);
+        if (!mm->seg_index_large || grown > mm->seg_index_capacity) {
+            mm_seg_t **replacement = kcalloc_atomic(grown, sizeof(*replacement));
+            if (!replacement) {
+                /* Allocation is nonblocking because callers may hold mm->lock.
+                 * Keep any empty old buffer for a later invalidation/retry. */
+                mm->seg_index_state = 2;
+                return;
+            }
+            kfree(mm->seg_index_large);
+            mm->seg_index_large = replacement;
+            mm->seg_index_capacity = grown;
+            slots = replacement;
+            capacity = grown;
+        } else {
+            capacity = mm->seg_index_capacity;
+            slots = mm->seg_index_large;
+        }
+    }
+
+    /* The list is already sorted by start, so walking it in order produces a
+     * complete sorted index. Each entry owns a reference, so lookup never
+     * follows an unpinned list link. */
+    size_t count = 0;
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
+        if (count >= capacity)
+            panic("mm_seg_index_rebuild: list changed during rebuild");
+        slots[count++] = mm_seg_get(v);
     }
     mm->seg_index_count = count;
+    __atomic_store_n(&mm->seg_index_hint, 0, __ATOMIC_RELAXED);
     mm->seg_index_state = 1;
 }
 
@@ -464,6 +506,7 @@ void mm_seg_index_invalidate(mm_struct_t *mm)
     /* seg_index_count deliberately survives: the slots below still hold owned
      * references, and the rebuild is the pass that puts them.  Zeroing the
      * count here is what orphaned them -- see mm_seg_index_rebuild(). */
+    __atomic_store_n(&mm->seg_index_hint, 0, __ATOMIC_RELAXED);
     mm->seg_index_state = 0;
 }
 
@@ -473,10 +516,17 @@ void mm_seg_index_clear(mm_struct_t *mm)
         return;
     /* Keyed on the count, not on state == 1: a dirty index (state 0) still
      * owns every reference the last valid pass took. */
-    for (uint16_t i = 0; i < mm->seg_index_count; i++)
-        vma_put(mm, mm->seg_index[i]);
+    mm_seg_t **slots = mm_seg_index_slots(mm);
+    for (size_t i = 0; i < mm->seg_index_count; i++) {
+        vma_put(mm, slots[i]);
+        slots[i] = NULL;
+    }
     memset(mm->seg_index, 0, sizeof(mm->seg_index));
     mm->seg_index_count = 0;
+    kfree(mm->seg_index_large);
+    mm->seg_index_large = NULL;
+    mm->seg_index_capacity = 0;
+    __atomic_store_n(&mm->seg_index_hint, 0, __ATOMIC_RELAXED);
     mm->seg_index_state = 0;
 }
 
@@ -489,28 +539,26 @@ mm_seg_t *mm_seg_find(mm_struct_t *mm, vaddr_t addr)
     size_t steps = 0;
     a20_perf_count(A20_PERF_VMA_LOOKUPS);
 
-    /* Rebuild only from state 0 (dirty).  The test used to be `!= 1`, which
-     * made state 2 -- capacity overflow -- re-run the whole rebuild on EVERY
-     * lookup: walk the list, take MM_SEG_INDEX_CAPACITY references, discover
-     * the overflow, put them all back, and only then fall through to the list
-     * walk the rebuild was a shortcut for.  So the over-capacity path paid a
-     * full rebuild plus the walk it was meant to replace, per fault.
-     *
-     * It is also the case that most needs the memo: an address space over
-     * MM_SEG_INDEX_CAPACITY mappings stays over it, so nothing about the retry
-     * can change the answer.  mm_seg_index_invalidate() still forces the retry
-     * (state 0), because a mutation is exactly what could bring the count back
-     * under the cap -- one rebuild attempt per mapping change instead of one
-     * per lookup.
-     *
-     * Measured on smoke-mm-seg-index-overflow, one line changed: the same
-     * workload read 10407 overflow rebuilds with `!= 1` and 2791 with `== 0`.
-     * The residue is the invalidate-per-mutation cost and is meant to be there
-     * -- those are the rebuilds that can still change the answer. */
+    /* Rebuild only from state 0 (dirty). Allocation failure is memoized in
+     * state 2 until a mapping mutation invalidates the index. Successful
+     * over-capacity rebuilds grow the owned array rather than scan an unpinned
+     * list suffix. */
     if (mm->seg_index_state == 0)
         mm_seg_index_rebuild(mm);
 
     if (mm->seg_index_state == 1) {
+        /* The owned index already pins the record. A hint adds no lifetime
+         * dependency: every hit still checks the complete covering interval. */
+        mm_seg_t **slots = mm_seg_index_slots(mm);
+        size_t hint = __atomic_load_n(&mm->seg_index_hint, __ATOMIC_RELAXED);
+        if (hint < mm->seg_index_count) {
+            steps++;
+            mm_seg_t *v = slots[hint];
+            if (v->start <= addr && addr < v->end) {
+                a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
+                return v;
+            }
+        }
         /* The last entry starting at or below `addr`; it covers `addr` only if
          * it has not ended. */
         size_t lo = 0;
@@ -518,15 +566,17 @@ mm_seg_t *mm_seg_find(mm_struct_t *mm, vaddr_t addr)
         while (lo < hi) {
             size_t mid = lo + (hi - lo) / 2;
             steps++;
-            if (mm->seg_index[mid]->start <= addr)
+            if (slots[mid]->start <= addr)
                 lo = mid + 1;
             else
                 hi = mid;
         }
         if (lo > 0) {
-            mm_seg_t *v = mm->seg_index[lo - 1];
+            mm_seg_t *v = slots[lo - 1];
             steps++;
             if (addr < v->end) {
+                __atomic_store_n(&mm->seg_index_hint, lo - 1,
+                                 __ATOMIC_RELAXED);
                 a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
                 return v;
             }
@@ -535,9 +585,9 @@ mm_seg_t *mm_seg_find(mm_struct_t *mm, vaddr_t addr)
         return NULL;
     }
 
-    /* Very unusual address spaces with more than MM_SEG_INDEX_CAPACITY mappings
-     * retain the proven linked-list behavior instead of allocating while
-     * mm->lock is held. */
+    /* Nonblocking allocation failure is memoized until the next list mutation.
+     * Preserve the original linear fallback rather than dereference a partial
+     * index. */
     for (mm_seg_t *v = mm->mmap; v; v = v->next) {
         steps++;
         if (steps > 100000u) {

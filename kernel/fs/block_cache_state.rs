@@ -9,7 +9,7 @@
 //!
 //! The two `#[repr(C)]` mirrors reproduce the LP64 layout exactly, including
 //! `bcache_entry_t::data` at offset 33 (a `char[512]` after a `u8`) and
-//! `pcache_entry_t::held` before `data`.  Byte-compatibility is what lets the
+//! `pcache_entry_t::held` before its payload pointer. Byte-compatibility is what lets the
 //! C reference model and this engine be driven by one differential harness.
 
 #![cfg_attr(not(test), no_std)]
@@ -18,7 +18,27 @@ use core::ffi::{c_int, c_uint};
 use core::sync::atomic::Ordering;
 
 pub const BCACHE_HASH_BUCKETS: usize = 1024;
-pub const PCACHE_HASH_BUCKETS: usize = 512;
+pub const PCACHE_MIN_PAGES: usize = 2000;
+pub const PCACHE_MAX_PAGES: usize = 16384;
+pub const PCACHE_TARGET_FRAME_DIVISOR: usize = 32;
+pub const PCACHE_HASH_BUCKETS: usize = 4096;
+
+/// Select page-cache descriptor capacity from physical memory. Payload frames
+/// remain lazy: the target is RAM/32 frames, capped at 16384 slots (64 MiB of
+/// payload), with the historical 2000-slot floor. On smaller RAM the floor
+/// may exceed RAM/32. Descriptor bytes and other caches are outside this
+/// per-cache payload target.
+#[no_mangle]
+pub extern "C" fn a20_pcache_page_limit(total_frames: usize) -> usize {
+    let target = total_frames / PCACHE_TARGET_FRAME_DIVISOR;
+    if target < PCACHE_MIN_PAGES {
+        PCACHE_MIN_PAGES
+    } else if target > PCACHE_MAX_PAGES {
+        PCACHE_MAX_PAGES
+    } else {
+        target
+    }
+}
 
 /// 512-byte metadata block pool entry. `data` at offset 33, size 576.
 #[repr(C)]
@@ -35,7 +55,9 @@ pub struct BcacheEntry {
     pub hnext: *mut BcacheEntry,
 }
 
-/// 4 KiB page pool entry. `held` at offset 36, `data` at offset 40, size 4160.
+/// Compact 4 KiB page descriptor. `data` is a lazily allocated payload owned
+/// by this slot until cache destruction; `held` is at 36 and the pointer at 40.
+/// The descriptor is 72 bytes on LP64 and 56 bytes on ILP32.
 #[repr(C)]
 pub struct PcacheEntry {
     pub page_no: u64,
@@ -45,10 +67,39 @@ pub struct PcacheEntry {
     pub valid: c_int,
     pub accessed: u8,
     pub held: c_int,
-    pub data: [u8; 4096],
+    pub data: *mut u8,
     pub prev: *mut PcacheEntry,
     pub next: *mut PcacheEntry,
     pub hnext: *mut PcacheEntry,
+}
+
+/// Dirty page-slot bitmap paired with the descriptor pool it indexes.
+/// Every field is protected by the owning block cache's global lock.
+#[repr(C)]
+pub struct PcacheDirtySet {
+    pub count: usize,
+    pub pool: *mut PcacheEntry,
+    pub pool_count: usize,
+    pub words: *mut u64,
+}
+
+#[inline]
+fn pcache_dirty_slot(set: &PcacheDirtySet, entry: *mut PcacheEntry) -> Option<usize> {
+    if set.pool.is_null() || set.words.is_null() || set.pool_count == 0 || entry.is_null() {
+        return None;
+    }
+    let base = set.pool as usize;
+    let address = entry as usize;
+    let bytes = set.pool_count.checked_mul(core::mem::size_of::<PcacheEntry>())?;
+    let end = base.checked_add(bytes)?;
+    if address < base || address >= end {
+        return None;
+    }
+    let offset = address - base;
+    if offset % core::mem::size_of::<PcacheEntry>() != 0 {
+        return None;
+    }
+    Some(offset / core::mem::size_of::<PcacheEntry>())
 }
 
 // Layout invariants.  The field offsets that do not depend on pointer width
@@ -58,13 +109,17 @@ const _: [(); 33] = [(); core::mem::offset_of!(BcacheEntry, data)];
 const _: [(); 40] = [(); core::mem::offset_of!(PcacheEntry, data)];
 const _: [(); 36] = [(); core::mem::offset_of!(PcacheEntry, held)];
 #[cfg(target_pointer_width = "64")]
+const _: [(); 32] = [(); core::mem::size_of::<PcacheDirtySet>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 16] = [(); core::mem::size_of::<PcacheDirtySet>()];
+#[cfg(target_pointer_width = "64")]
 const _: [(); 576] = [(); core::mem::size_of::<BcacheEntry>()];
 #[cfg(target_pointer_width = "64")]
-const _: [(); 4160] = [(); core::mem::size_of::<PcacheEntry>()];
+const _: [(); 72] = [(); core::mem::size_of::<PcacheEntry>()];
 #[cfg(target_pointer_width = "32")]
 const _: [(); 560] = [(); core::mem::size_of::<BcacheEntry>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 4152] = [(); core::mem::size_of::<PcacheEntry>()];
+const _: [(); 56] = [(); core::mem::size_of::<PcacheEntry>()];
 
 /// Eviction policy verdict for one candidate.
 pub const EVICT_SKIP: i32 = 0;
@@ -83,6 +138,8 @@ pub type BcacheUnlockFn = extern "C" fn(*mut core::ffi::c_void, u64);
 pub type BcachePageActionFn = extern "C" fn(*mut core::ffi::c_void, u64);
 pub type BcachePageFlushFn = extern "C" fn(*mut core::ffi::c_void, *mut PcacheEntry) -> c_int;
 pub type BcachePageReadFn = extern "C" fn(*mut core::ffi::c_void, u64, *mut u8) -> c_int;
+pub type PcachePageAllocFn = extern "C" fn(*mut core::ffi::c_void) -> *mut u8;
+pub type PcachePageFreeFn = extern "C" fn(*mut u8);
 pub type BcachePagePerfFn = extern "C" fn(*mut core::ffi::c_void, c_int);
 pub type BcachePageDiagnosticFn = extern "C" fn(*mut core::ffi::c_void, u64);
 pub type BcacheBlockIoFn = extern "C" fn(*mut core::ffi::c_void, u64, *mut u8, c_int) -> c_int;
@@ -97,11 +154,88 @@ pub type SyncCacheUnlockFn = extern "C" fn(*mut core::ffi::c_void, u64);
 pub type SyncClearPageBatchFn = extern "C" fn(*mut core::ffi::c_void, *const usize, *const u64, *const u64, usize);
 pub type SyncClearBlockFn = extern "C" fn(*mut core::ffi::c_void, usize, u64, u64);
 pub type SyncWriteFn = extern "C" fn(*mut core::ffi::c_void, u64, *const u8, usize) -> c_int;
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SyncWrite {
+    pub lba: u64,
+    pub buf: *const u8,
+    pub count: usize,
+}
+pub type SyncWriteManyFn = extern "C" fn(*mut core::ffi::c_void, *const SyncWrite, usize) -> c_int;
 pub type SyncLockFn = extern "C" fn(*mut core::ffi::c_void);
 pub type SyncErrorFn = extern "C" fn(*mut core::ffi::c_void);
 pub type SyncFlushFn = extern "C" fn(*mut core::ffi::c_void) -> c_int;
-pub type SyncAllocFn = extern "C" fn(usize) -> *mut u8;
-pub type SyncFreeFn = extern "C" fn(*mut u8);
+/// Scratch storage is acquired and released while the exclusive writeback
+/// lock is held; callbacks may lend cache-owned storage instead of allocating.
+pub type SyncAllocFn = extern "C" fn(*mut core::ffi::c_void, usize) -> *mut u8;
+pub type SyncFreeFn = extern "C" fn(*mut core::ffi::c_void, *mut u8);
+
+/// Find the next set slot bit at or after `start`. The caller holds bc->lock
+/// so bitmap updates cannot race the scan; clean slots cost no per-entry lock.
+unsafe fn pcache_next_dirty_slot(
+    dirty_set: *const PcacheDirtySet,
+    start: usize,
+) -> Option<usize> {
+    if dirty_set.is_null() {
+        return None;
+    }
+    unsafe {
+        let set = &*dirty_set;
+        if set.words.is_null() || start >= set.pool_count {
+            return None;
+        }
+        let mut index = start;
+        while index < set.pool_count {
+            let word_index = index / 64;
+            let bit_offset = index % 64;
+            let bits = *set.words.add(word_index) & (u64::MAX << bit_offset);
+            if bits != 0 {
+                let found = word_index * 64 + bits.trailing_zeros() as usize;
+                if found < set.pool_count {
+                    return Some(found);
+                }
+                return None;
+            }
+            index = (word_index + 1) * 64;
+        }
+    }
+    None
+}
+
+/// Find the next dirty slot that this sync mode can write. The caller holds
+/// bc->lock, so both the bitmap and selection fields remain coherent while
+/// clean, held, and out-of-scope slots are skipped.
+unsafe fn pcache_next_selected_dirty_slot(
+    dirty_set: *const PcacheDirtySet,
+    page_pool: *mut PcacheEntry,
+    page_count: usize,
+    mode: c_int,
+    page_nos: *const u64,
+    selected_count: usize,
+    start: usize,
+) -> Option<usize> {
+    let mut index = start;
+    while index < page_count {
+        let next = unsafe { pcache_next_dirty_slot(dirty_set, index) }?;
+        let entry = unsafe { &*page_pool.add(next) };
+        let selected = unsafe {
+            a20_bcache_sync_select(
+                mode,
+                entry.valid,
+                entry.dirty,
+                entry.held,
+                page_nos,
+                selected_count,
+                entry.page_no,
+            )
+        } != 0;
+        if selected {
+            return Some(next);
+        }
+        index = next + 1;
+    }
+    None
+}
 
 /// Own the page/block writeback scan, batching, generation snapshot and
 /// flush transaction. The pools are stable C-compatible arrays. Rust reads
@@ -116,12 +250,14 @@ pub unsafe extern "C" fn a20_bcache_sync_transaction(
     selected_count: usize,
     mode: c_int,
     page_pool: *mut PcacheEntry,
+    dirty_set: *mut PcacheDirtySet,
     block_pool: *mut BcacheEntry,
     cache_lock: Option<SyncCacheLockFn>,
     cache_unlock: Option<SyncCacheUnlockFn>,
     clear_block: Option<SyncClearBlockFn>,
     clear_pages: Option<SyncClearPageBatchFn>,
     write: Option<SyncWriteFn>,
+    write_many: Option<SyncWriteManyFn>,
     flush: Option<SyncFlushFn>,
     writeback_lock: Option<SyncLockFn>,
     writeback_unlock: Option<SyncLockFn>,
@@ -129,71 +265,121 @@ pub unsafe extern "C" fn a20_bcache_sync_transaction(
     alloc: Option<SyncAllocFn>,
     free: Option<SyncFreeFn>,
 ) -> c_int {
-    let (cache_lock, cache_unlock, clear_block, clear_pages, write, flush, writeback_lock,
+    let (cache_lock, cache_unlock, clear_block, clear_pages, write, write_many, flush, writeback_lock,
          writeback_unlock, note_error, alloc, free) = match (
-        cache_lock, cache_unlock, clear_block, clear_pages, write, flush, writeback_lock,
+        cache_lock, cache_unlock, clear_block, clear_pages, write, write_many, flush, writeback_lock,
         writeback_unlock, note_error, alloc, free,
     ) {
-        (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k)) =>
-            (a,b,c,d,e,f,g,h,i,j,k),
+        (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l)) =>
+            (a,b,c,d,e,f,g,h,i,j,k,l),
         _ => return -22,
     };
-    if context.is_null() || page_pool.is_null() || block_pool.is_null() { return -22; }
+    if context.is_null()
+        || page_pool.is_null()
+        || dirty_set.is_null()
+        || block_pool.is_null()
+    {
+        return -22;
+    }
+    unsafe {
+        if (*dirty_set).pool != page_pool
+            || (*dirty_set).pool_count != page_count
+            || (page_count != 0 && (*dirty_set).words.is_null())
+        {
+            return -22;
+        }
+    }
     const PAGE: usize = 4096;
     const BLOCK: usize = 512;
     const BATCH: usize = 256;
+    const VECTOR_BATCH: usize = 16;
     let mut first_error = 0;
     writeback_lock(context);
     let mut linear: *mut u8 = core::ptr::null_mut();
     let mut i = 0usize;
     while i < page_count {
-        let lock = cache_lock(context);
-        let first = unsafe { &mut *page_pool.add(i) };
-        let selected = a20_bcache_sync_select(mode, first.valid, first.dirty,
-            first.held, page_nos, selected_count, first.page_no) != 0;
-        let first_no = first.page_no;
-        let first_generation = first.dirty_gen;
-        if selected && !linear.is_null() {
-            unsafe { core::ptr::copy_nonoverlapping(first.data.as_ptr(), linear, PAGE); }
-        }
-        cache_unlock(context, lock);
-        if !selected {
-            i += 1;
-            continue;
-        }
         if linear.is_null() {
-            linear = alloc(BATCH * PAGE);
+            // Avoid allocating the large scratch buffer when dirty pages are
+            // all held or outside this scoped sync. Recheck the candidate in
+            // the batch loop after unlocking in case concurrent state changed.
+            let lock = cache_lock(context);
+            let candidate = unsafe {
+                pcache_next_selected_dirty_slot(
+                    dirty_set,
+                    page_pool,
+                    page_count,
+                    mode,
+                    page_nos,
+                    selected_count,
+                    i,
+                )
+            };
+            if let Some(index) = candidate {
+                i = index;
+            } else {
+                i = page_count;
+            }
+            cache_unlock(context, lock);
+            if i >= page_count {
+                break;
+            }
+            /* The exclusive writeback lock is held for this transaction; the
+             * borrowed scratch remains valid until released below. */
+            linear = alloc(context, BATCH * PAGE);
             if linear.is_null() { first_error = -12; break; }
-            continue;
         }
         let mut numbers = [0u64; BATCH];
         let mut generations = [0u64; BATCH];
         let mut indices = [0usize; BATCH];
-        let mut count = 1usize;
-        numbers[0] = first_no;
-        generations[0] = first_generation;
-        indices[0] = i;
-        while count < BATCH && i + count < page_count {
+        let mut vectors = [SyncWrite { lba: 0, buf: core::ptr::null(), count: 0 }; VECTOR_BATCH];
+        let mut count = 0usize;
+        let mut vector_count = 0usize;
+        while i < page_count && count < BATCH {
             let lock = cache_lock(context);
-            let next = unsafe { &mut *page_pool.add(i + count) };
-            let next_selected = a20_bcache_sync_select(mode, next.valid, next.dirty,
-                next.held, page_nos, selected_count, next.page_no) != 0;
-            let next_no = next.page_no;
-            let next_generation = next.dirty_gen;
-            if next_selected && next_no == numbers[count-1].wrapping_add(1) {
-                unsafe { core::ptr::copy_nonoverlapping(next.data.as_ptr(), linear.add(count * PAGE), PAGE); }
+            let next = unsafe { pcache_next_dirty_slot(dirty_set, i) };
+            let next = match next {
+                Some(index) => index,
+                None => {
+                    cache_unlock(context, lock);
+                    i = page_count;
+                    break;
+                }
+            };
+            i = next;
+            let entry = unsafe { &mut *page_pool.add(i) };
+            let selected = a20_bcache_sync_select(mode, entry.valid, entry.dirty,
+                entry.held, page_nos, selected_count, entry.page_no) != 0;
+            if !selected {
+                cache_unlock(context, lock);
+                i += 1;
+                continue;
             }
+            let page_no = entry.page_no;
+            let generation = entry.dirty_gen;
+            let lba = page_no.wrapping_mul(PAGE as u64 / BLOCK as u64);
+            let adjacent = vector_count != 0 &&
+                vectors[vector_count - 1].lba.wrapping_add(vectors[vector_count - 1].count as u64) == lba;
+            if vector_count == VECTOR_BATCH && !adjacent {
+                cache_unlock(context, lock);
+                break; // keep i at this selected page for the next transaction
+            }
+            let buffer = unsafe { linear.add(count * PAGE) };
+            unsafe { core::ptr::copy_nonoverlapping(entry.data, buffer, PAGE); }
             cache_unlock(context, lock);
-            if !next_selected || next_no != numbers[count-1].wrapping_add(1) {
-                break;
+            if adjacent {
+                vectors[vector_count - 1].count += PAGE / BLOCK;
+            } else {
+                vectors[vector_count] = SyncWrite { lba, buf: buffer, count: PAGE / BLOCK };
+                vector_count += 1;
             }
-            numbers[count] = next_no;
-            generations[count] = next_generation;
-            indices[count] = i + count;
+            numbers[count] = page_no;
+            generations[count] = generation;
+            indices[count] = i;
             count += 1;
+            i += 1;
         }
-        let sectors = count * PAGE / BLOCK;
-        let ret = write(context, numbers[0] * PAGE as u64 / BLOCK as u64, linear, sectors);
+        if count == 0 { continue; }
+        let ret = write_many(context, vectors.as_ptr(), vector_count);
         if ret >= 0 {
             clear_pages(context, indices.as_ptr(), numbers.as_ptr(), generations.as_ptr(), count);
         } else {
@@ -201,9 +387,10 @@ pub unsafe extern "C" fn a20_bcache_sync_transaction(
             note_error(context);
             break;
         }
-        i += count;
     }
-    if !linear.is_null() { free(linear); }
+    /* Release the scratch borrow before dropping writeback_lock. The later
+     * device flush does not access this buffer. */
+    if !linear.is_null() { free(context, linear); }
     if first_error == 0 && mode != SYNC_HELD {
         let mut tmp = [0u8; BLOCK];
         for i in 0..block_count {
@@ -515,26 +702,48 @@ pub unsafe extern "C" fn a20_bcache_set_block_dirty(
 
 #[no_mangle]
 pub unsafe extern "C" fn a20_bcache_set_page_dirty(
-    dirty_pages: *mut usize,
+    dirty_pages: *mut PcacheDirtySet,
     e: *mut PcacheEntry,
     dirty: c_int,
 ) {
     if dirty_pages.is_null() || e.is_null() {
         return;
     }
-    // SAFETY: caller holds bc->lock.
+
+    // Validate ownership before changing the entry. Doing this with integer
+    // addresses avoids `offset_from`'s same-allocation precondition for an
+    // invalid caller pointer; production callers pass a slot in this pool.
     unsafe {
+        let set = &mut *dirty_pages;
+        let index = match pcache_dirty_slot(set, e) {
+            Some(index) => index,
+            None => return,
+        };
+        let word_index = index / 64;
+        let word_count = set.pool_count / 64 + (set.pool_count % 64 != 0) as usize;
+        if word_index >= word_count {
+            return;
+        }
+        let mask = 1u64 << (index % 64);
+        let bit = &mut *set.words.add(word_index);
+
+        // SAFETY: the caller holds bc->lock, protecting entry, count, and bit.
         if dirty != 0 {
             (*e).dirty_gen = (*e).dirty_gen.wrapping_add(1);
             if (*e).dirty == 0 {
-                *dirty_pages = (*dirty_pages).wrapping_add(1);
+                set.count = set.count.wrapping_add(1);
             }
             (*e).dirty = 1;
+            *bit |= mask;
         } else if (*e).dirty != 0 {
             (*e).dirty = 0;
-            if *dirty_pages > 0 {
-                *dirty_pages -= 1;
+            if set.count > 0 {
+                set.count -= 1;
             }
+            *bit &= !mask;
+        } else {
+            // Repair an unexpected stale bit without changing the dirty count.
+            *bit &= !mask;
         }
     }
 }
@@ -874,28 +1083,71 @@ pub unsafe extern "C" fn a20_pcache_evict_transaction(
 /// publication state transitions.
 #[no_mangle]
 pub unsafe extern "C" fn a20_pcache_get_transaction(
-    context: *mut core::ffi::c_void, pool: *mut PcacheEntry, pool_count: usize,
-    hash: *mut *mut PcacheEntry, lru_head: *mut PcacheEntry,
-    lru_tail: *mut PcacheEntry, dirty_pages: *mut usize, page_no: u64,
-    full_overwrite: *const u8, quarantined: c_int,
+    context: *mut core::ffi::c_void,
+    pool: *mut PcacheEntry,
+    pool_count: usize,
+    hash: *mut *mut PcacheEntry,
+    lru_head: *mut PcacheEntry,
+    lru_tail: *mut PcacheEntry,
+    dirty_pages: *mut PcacheDirtySet,
+    page_no: u64,
+    full_overwrite: *const u8,
+    quarantined: c_int,
     lock_bucket: Option<BcacheBucketLockFn>,
     unlock_bucket: Option<BcacheBucketUnlockFn>,
-    lock_global: Option<BcacheLockFn>, unlock_global: Option<BcacheUnlockFn>,
-    fill_lock: Option<BcachePageActionFn>, fill_unlock: Option<BcachePageActionFn>,
-    writeback_lock: Option<BcachePageActionFn>, writeback_unlock: Option<BcachePageActionFn>,
-    flush_victim: Option<BcachePageFlushFn>, read_page: Option<BcachePageReadFn>,
-    perf: Option<BcachePagePerfFn>, diagnostic: Option<BcachePageDiagnosticFn>,
+    lock_global: Option<BcacheLockFn>,
+    unlock_global: Option<BcacheUnlockFn>,
+    fill_lock: Option<BcachePageActionFn>,
+    fill_unlock: Option<BcachePageActionFn>,
+    writeback_lock: Option<BcachePageActionFn>,
+    writeback_unlock: Option<BcachePageActionFn>,
+    flush_victim: Option<BcachePageFlushFn>,
+    read_page: Option<BcachePageReadFn>,
+    alloc_page: Option<PcachePageAllocFn>,
+    perf: Option<BcachePagePerfFn>,
+    diagnostic: Option<BcachePageDiagnosticFn>,
     note_error: Option<BcachePageActionFn>,
 ) -> *mut PcacheEntry {
-    let (lockb, unlockb, lockg, unlockg, fill, unfill, writeback, unwback,
-         flush, read) = match (lock_bucket, unlock_bucket, lock_global,
-         unlock_global, fill_lock, fill_unlock, writeback_lock,
-         writeback_unlock, flush_victim, read_page) {
-        (Some(a),Some(b),Some(c),Some(d),Some(e),Some(f),Some(g),Some(h),Some(i),Some(j)) =>
-            (a,b,c,d,e,f,g,h,i,j), _ => return core::ptr::null_mut(),
+    let (
+        lockb,
+        unlockb,
+        lockg,
+        unlockg,
+        fill,
+        unfill,
+        writeback,
+        unwback,
+        flush,
+        read,
+    ) = match (
+        lock_bucket,
+        unlock_bucket,
+        lock_global,
+        unlock_global,
+        fill_lock,
+        fill_unlock,
+        writeback_lock,
+        writeback_unlock,
+        flush_victim,
+        read_page,
+    ) {
+        (
+            Some(a), Some(b), Some(c), Some(d), Some(e),
+            Some(f), Some(g), Some(h), Some(i), Some(j),
+        ) => (a, b, c, d, e, f, g, h, i, j),
+        _ => return core::ptr::null_mut(),
     };
-    if context.is_null() || pool.is_null() || pool_count == 0 || hash.is_null() || lru_head.is_null()
-        || lru_tail.is_null() || dirty_pages.is_null() { return core::ptr::null_mut(); }
+    if context.is_null()
+        || pool.is_null()
+        || pool_count == 0
+        || hash.is_null()
+        || lru_head.is_null()
+        || lru_tail.is_null()
+        || dirty_pages.is_null()
+    {
+        return core::ptr::null_mut();
+    }
+
     unsafe {
         let flags = lockb(context, page_no);
         let mut e = a20_pcache_find_locked(hash, page_no);
@@ -918,14 +1170,19 @@ pub unsafe extern "C" fn a20_pcache_get_transaction(
         }
         unlockg(context, flags);
 
-        if let Some(f) = perf { f(context, 0); }
+        if let Some(f) = perf {
+            f(context, 0);
+        }
         fill(context, page_no);
         let flags = lockg(context);
         e = a20_pcache_find_locked(hash, page_no);
         if !e.is_null() {
             a20_bcache_ref_get(core::ptr::addr_of_mut!((*e).ref_));
-            a20_pcache_lru_remove(e); a20_pcache_lru_insert_front(lru_head, e);
-            unlockg(context, flags); unfill(context, page_no); return e;
+            a20_pcache_lru_remove(e);
+            a20_pcache_lru_insert_front(lru_head, e);
+            unlockg(context, flags);
+            unfill(context, page_no);
+            return e;
         }
         unlockg(context, flags);
 
@@ -934,29 +1191,50 @@ pub unsafe extern "C" fn a20_pcache_get_transaction(
         e = a20_pcache_find_locked(hash, page_no);
         if !e.is_null() {
             a20_bcache_ref_get(core::ptr::addr_of_mut!((*e).ref_));
-            a20_pcache_lru_remove(e); a20_pcache_lru_insert_front(lru_head, e);
-            unlockg(context, flags); unwback(context, page_no); unfill(context, page_no); return e;
+            a20_pcache_lru_remove(e);
+            a20_pcache_lru_insert_front(lru_head, e);
+            unlockg(context, flags);
+            unwback(context, page_no);
+            unfill(context, page_no);
+            return e;
         }
-        e = a20_pcache_evict_transaction(lru_head, lru_tail, hash, context, quarantined,
-                                         Some(lockb), Some(unlockb));
+        e = a20_pcache_evict_transaction(
+            lru_head,
+            lru_tail,
+            hash,
+            context,
+            quarantined,
+            Some(lockb),
+            Some(unlockb),
+        );
         if e.is_null() {
             unlockg(context, flags);
-            if let Some(f) = diagnostic { f(context, page_no); }
-            unwback(context, page_no); unfill(context, page_no); return core::ptr::null_mut();
+            if let Some(f) = diagnostic {
+                f(context, page_no);
+            }
+            unwback(context, page_no);
+            unfill(context, page_no);
+            return core::ptr::null_mut();
         }
         let old_page = (*e).page_no;
         let old_dirty = (*e).dirty != 0 && (*e).valid != 0;
         unlockg(context, flags);
 
         if old_dirty && flush(context, e) < 0 {
-            if let Some(f) = note_error { f(context, page_no); }
+            if let Some(f) = note_error {
+                f(context, page_no);
+            }
             let flags = lockg(context);
-            (*e).page_no = old_page; (*e).valid = 1; (*e).ref_ = 0;
+            (*e).page_no = old_page;
+            (*e).valid = 1;
+            (*e).ref_ = 0;
             a20_bcache_set_page_dirty(dirty_pages, e, 1);
             a20_pcache_hash_insert_locked(hash, e);
             a20_pcache_lru_insert_front(lru_head, e);
             unlockg(context, flags);
-            unwback(context, page_no); unfill(context, page_no); return core::ptr::null_mut();
+            unwback(context, page_no);
+            unfill(context, page_no);
+            return core::ptr::null_mut();
         }
         let flags = lockg(context);
         (*e).valid = 0;
@@ -964,34 +1242,96 @@ pub unsafe extern "C" fn a20_pcache_get_transaction(
         unlockg(context, flags);
         unwback(context, page_no);
 
-        if !full_overwrite.is_null() {
-            core::ptr::copy_nonoverlapping(full_overwrite, (*e).data.as_mut_ptr(), 4096);
-            if let Some(f) = perf { f(context, 3); }
-        } else if read(context, page_no, (*e).data.as_mut_ptr()) < 0 {
+        // The victim is exclusively owned by this fill. Cache and writeback
+        // locks are released for allocation, while the fill lock still prevents
+        // duplicate same-page fills. The allocator cannot reclaim, so this does
+        // not re-enter cache code while that serialization lock is held.
+        if (*e).data.is_null() {
+            let payload = match alloc_page {
+                Some(allocate) => allocate(context),
+                None => core::ptr::null_mut(),
+            };
+            if payload.is_null() {
+                let flags = lockg(context);
+                (*e).valid = 0;
+                (*e).ref_ = 0;
+                (*e).page_no = u64::MAX;
+                a20_pcache_lru_insert_front(lru_head, e);
+                unlockg(context, flags);
+                unfill(context, page_no);
+                return core::ptr::null_mut();
+            }
             let flags = lockg(context);
-            (*e).ref_ = 0; (*e).page_no = u64::MAX;
+            (*e).data = payload;
+            unlockg(context, flags);
+        }
+
+        if !full_overwrite.is_null() {
+            core::ptr::copy_nonoverlapping(full_overwrite, (*e).data, 4096);
+            if let Some(f) = perf {
+                f(context, 3);
+            }
+        } else if read(context, page_no, (*e).data) < 0 {
+            let flags = lockg(context);
+            (*e).ref_ = 0;
+            (*e).page_no = u64::MAX;
             a20_pcache_lru_insert_front(lru_head, e);
             unlockg(context, flags);
-            unfill(context, page_no); return core::ptr::null_mut();
+            unfill(context, page_no);
+            return core::ptr::null_mut();
         }
 
         let flags = lockg(context);
         let dup = a20_pcache_find_locked(hash, page_no);
         if !dup.is_null() {
-            (*e).ref_ = 0; (*e).page_no = u64::MAX; (*e).valid = 0;
+            (*e).ref_ = 0;
+            (*e).page_no = u64::MAX;
+            (*e).valid = 0;
             a20_pcache_lru_insert_front(lru_head, e);
             a20_bcache_ref_get(core::ptr::addr_of_mut!((*dup).ref_));
-            a20_pcache_lru_remove(dup); a20_pcache_lru_insert_front(lru_head, dup);
-            unlockg(context, flags); unfill(context, page_no); return dup;
+            a20_pcache_lru_remove(dup);
+            a20_pcache_lru_insert_front(lru_head, dup);
+            unlockg(context, flags);
+            unfill(context, page_no);
+            return dup;
         }
         (*e).page_no = page_no;
         a20_bcache_set_page_dirty(dirty_pages, e, 0);
-        (*e).dirty_gen = 0; (*e).valid = 1;
+        (*e).dirty_gen = 0;
+        (*e).valid = 1;
         a20_pcache_hash_insert_locked(hash, e);
         a20_pcache_lru_insert_front(lru_head, e);
         unlockg(context, flags);
         unfill(context, page_no);
         e
+    }
+}
+
+/// Release slot-owned payloads when the cache is exclusively being destroyed.
+/// Each pointer is cleared before calling C so repeated cleanup cannot double-free.
+#[no_mangle]
+pub unsafe extern "C" fn a20_pcache_release_storage(
+    pool: *mut PcacheEntry,
+    pool_count: usize,
+    free_page: Option<PcachePageFreeFn>,
+) {
+    let free_page = match free_page {
+        Some(free_page) => free_page,
+        None => return,
+    };
+    if pool.is_null() {
+        return;
+    }
+
+    unsafe {
+        for i in 0..pool_count {
+            let entry = &mut *pool.add(i);
+            let data = entry.data;
+            entry.data = core::ptr::null_mut();
+            if !data.is_null() {
+                free_page(data);
+            }
+        }
     }
 }
 
@@ -1062,7 +1402,8 @@ pub unsafe extern "C" fn a20_bcache_get_transaction(
 #[no_mangle]
 pub unsafe extern "C" fn a20_pcache_flush_transaction(
     context: *mut core::ffi::c_void, first: *mut PcacheEntry,
-    writeback_buffer: *mut u8, dirty_pages: *mut usize, max_pages: usize,
+    writeback_buffer: *mut u8, dirty_pages: *mut PcacheDirtySet,
+    max_pages: usize,
     find: Option<PcachePageFindFn>, lock: Option<BcacheLockFn>,
     unlock: Option<BcacheUnlockFn>, write: Option<PcacheWriteBatchFn>,
 ) -> c_int {
@@ -1084,7 +1425,7 @@ pub unsafe extern "C" fn a20_pcache_flush_transaction(
             let entry=if count==0 {first} else {find(context,no)};
             if entry.is_null() || (*entry).valid==0 || (*entry).dirty==0 { break; }
             gens[count]=(*entry).dirty_gen;
-            core::ptr::copy_nonoverlapping((*entry).data.as_ptr(),writeback_buffer.add(count*4096),4096);
+            core::ptr::copy_nonoverlapping((*entry).data,writeback_buffer.add(count*4096),4096);
             count+=1;
         }
         unlock(context,flags);
@@ -1141,7 +1482,7 @@ pub unsafe extern "C" fn a20_bcache_read_batch_transaction(
             for i in 0..pages {
                 let entry=find(context,first.wrapping_add(i as u64));
                 if !entry.is_null() {
-                    core::ptr::copy_nonoverlapping((*entry).data.as_ptr(),buffer.add(i*page_size as usize),page_size as usize);
+                    core::ptr::copy_nonoverlapping((*entry).data,buffer.add(i*page_size as usize),page_size as usize);
                     a20_pcache_lru_remove(entry);
                     a20_pcache_lru_insert_front(lru_head,entry);
                 }
@@ -1216,7 +1557,7 @@ mod tests {
 
     fn mk_pcache() -> PcacheEntry {
         PcacheEntry { page_no: 0, dirty: 0, dirty_gen: 0, ref_: 0, valid: 0,
-            accessed: 0, held: 0, data: [0u8; 4096], prev: core::ptr::null_mut(),
+            accessed: 0, held: 0, data: core::ptr::null_mut(), prev: core::ptr::null_mut(),
             next: core::ptr::null_mut(), hnext: core::ptr::null_mut() }
     }
 
@@ -1224,7 +1565,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn layout_matches_c() {
         assert_eq!(core::mem::size_of::<BcacheEntry>(), 576);
-        assert_eq!(core::mem::size_of::<PcacheEntry>(), 4160);
+        assert_eq!(core::mem::size_of::<PcacheEntry>(), 72);
         assert_eq!(core::mem::offset_of!(BcacheEntry, data), 33);
         assert_eq!(core::mem::offset_of!(PcacheEntry, held), 36);
         assert_eq!(core::mem::offset_of!(PcacheEntry, data), 40);
@@ -1234,10 +1575,13 @@ mod tests {
     fn hash_keys_respect_mask() {
         assert_eq!(a20_bcache_hash_key(0x2), 2);
         assert_eq!(a20_bcache_hash_key(BCACHE_HASH_BUCKETS as u64), 0);
-        for lba in 0..2000u64 {
+        for lba in 0..(PCACHE_HASH_BUCKETS as u64 * 2) {
             assert!(a20_bcache_hash_key(lba) < BCACHE_HASH_BUCKETS as u32);
             assert!(a20_pcache_hash_key(lba) < PCACHE_HASH_BUCKETS as u32);
         }
+        assert_eq!(a20_pcache_hash_key((PCACHE_HASH_BUCKETS - 1) as u64),
+                   (PCACHE_HASH_BUCKETS - 1) as u32);
+        assert_eq!(a20_pcache_hash_key(PCACHE_HASH_BUCKETS as u64), 0);
     }
 
     #[test]

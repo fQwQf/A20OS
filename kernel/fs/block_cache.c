@@ -1,9 +1,11 @@
 #include "fs/block_cache.h"
 #include "mm/mm.h"
+#include "mm/frame.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/perf.h"
 #include "core/errno.h"
+#include "core/panic.h"
 #include "core/timer.h"
 #include "core/lock_counters.h"
 #include "proc/proc.h"
@@ -25,6 +27,7 @@ extern int a20_bcache_read_batch_plan(uint64_t byte_off, size_t len,
                                      size_t *out_sectors);
 extern unsigned a20_bcache_hash_key(uint64_t lba);
 extern unsigned a20_pcache_hash_key(uint64_t page_no);
+extern size_t a20_pcache_page_limit(size_t total_frames);
 extern int a20_bcache_ref_read(const int *ref);
 extern void a20_bcache_ref_get(int *ref);
 extern void a20_bcache_ref_put(int *ref);
@@ -38,7 +41,8 @@ extern bcache_entry_t *a20_bcache_find_locked(bcache_entry_t **hash, uint64_t lb
 extern void a20_pcache_hash_remove_locked(pcache_entry_t **hash, pcache_entry_t *e);
 extern pcache_entry_t *a20_pcache_find_locked(pcache_entry_t **hash, uint64_t page_no);
 extern void a20_bcache_set_block_dirty(size_t *dirty_blocks, bcache_entry_t *e, int dirty);
-extern void a20_bcache_set_page_dirty(size_t *dirty_pages, pcache_entry_t *e, int dirty);
+extern void a20_bcache_set_page_dirty(pcache_dirty_set_t *dirty_pages,
+                                      pcache_entry_t *e, int dirty);
 extern int a20_bcache_hold_page(pcache_entry_t *pool, size_t n, uint64_t page_no);
 extern void a20_bcache_release_holds(pcache_entry_t *pool, size_t n);
 extern size_t a20_bcache_held_pages(const pcache_entry_t *pool, size_t n);
@@ -55,23 +59,26 @@ extern pcache_entry_t *a20_pcache_evict_transaction(
     uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t));
 extern int a20_bcache_sync_transaction(
     void *, size_t, size_t, const uint64_t *, size_t, int,
-    pcache_entry_t *, bcache_entry_t *, uint64_t (*)(void *),
+    pcache_entry_t *, pcache_dirty_set_t *, bcache_entry_t *,
+    uint64_t (*)(void *),
     void (*)(void *, uint64_t),
     void (*)(void *, size_t, uint64_t, uint64_t),
     void (*)(void *, const size_t *, const uint64_t *, const uint64_t *, size_t),
-    int (*)(void *, uint64_t, const uint8_t *, size_t), int (*)(void *),
+    int (*)(void *, uint64_t, const uint8_t *, size_t),
+    int (*)(void *, const block_write_t *, size_t), int (*)(void *),
     void (*)(void *), void (*)(void *), void (*)(void *),
-    uint8_t *(*)(size_t), void (*)(uint8_t *));
+    uint8_t *(*)(void *, size_t), void (*)(void *, uint8_t *));
 extern pcache_entry_t *a20_pcache_get_transaction(
     void *, pcache_entry_t *, size_t, pcache_entry_t **, pcache_entry_t *,
-    pcache_entry_t *, size_t *, uint64_t, const uint8_t *, int,
+    pcache_entry_t *, pcache_dirty_set_t *, uint64_t, const uint8_t *, int,
     uint64_t (*)(void *, uint64_t), void (*)(void *, uint64_t, uint64_t),
     uint64_t (*)(void *), void (*)(void *, uint64_t),
     void (*)(void *, uint64_t), void (*)(void *, uint64_t),
     void (*)(void *, uint64_t), void (*)(void *, uint64_t),
     int (*)(void *, pcache_entry_t *), int (*)(void *, uint64_t, uint8_t *),
-    void (*)(void *, int), void (*)(void *, uint64_t),
+    uint8_t *(*)(void *), void (*)(void *, int), void (*)(void *, uint64_t),
     void (*)(void *, uint64_t));
+extern void a20_pcache_release_storage(pcache_entry_t *, size_t, void (*)(uint8_t *));
 extern bcache_entry_t *a20_bcache_get_transaction(
     void *, bcache_entry_t *, size_t, bcache_entry_t **, bcache_entry_t *,
     bcache_entry_t *, size_t *, uint64_t, int,
@@ -80,7 +87,7 @@ extern bcache_entry_t *a20_bcache_get_transaction(
     void (*)(void *, uint64_t), void (*)(void *, uint64_t),
     int (*)(void *, uint64_t, uint8_t *, int), void (*)(void *, uint64_t));
 extern int a20_pcache_flush_transaction(
-    void *, pcache_entry_t *, uint8_t *, size_t *, size_t,
+    void *, pcache_entry_t *, uint8_t *, pcache_dirty_set_t *, size_t,
     pcache_entry_t *(*)(void *, uint64_t), uint64_t (*)(void *),
     void (*)(void *, uint64_t), int (*)(void *, uint64_t, const uint8_t *, size_t));
 extern int a20_bcache_read_batch_transaction(
@@ -90,6 +97,8 @@ extern int a20_bcache_read_batch_transaction(
     void (*)(void *, uint64_t), pcache_entry_t *(*)(void *, uint64_t),
     int (*)(void *, uint64_t, uint8_t *, size_t),
     int (*)(void *, uint64_t, uint8_t *, size_t), void (*)(void *, size_t));
+
+static void pcache_free_page(uint8_t *data);
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
@@ -318,12 +327,28 @@ bcache_t *bcache_create(block_dev_t *dev) {
     rw_mutex_init(&bc->writeback_lock);
     bc->pool = (bcache_entry_t *)kmalloc(sizeof(bcache_entry_t) * bc->pool_size);
     if (!bc->pool) { kfree(bc); return NULL; }
-    bc->page_pool_size = PCACHE_MAX_PAGES;
+    bc->page_pool_size = (int)a20_pcache_page_limit((size_t)pfa.total_frames);
     bc->page_pool = (pcache_entry_t *)kmalloc(sizeof(pcache_entry_t) * bc->page_pool_size);
     if (!bc->page_pool) { kfree(bc->pool); kfree(bc); return NULL; }
+    size_t dirty_word_count =
+        ((size_t)bc->page_pool_size + 63U) / 64U;
+    bc->dirty_pages.words = (uint64_t *)kmalloc(
+        dirty_word_count * sizeof(*bc->dirty_pages.words));
+    if (!bc->dirty_pages.words) {
+        kfree(bc->page_pool);
+        kfree(bc->pool);
+        kfree(bc);
+        return NULL;
+    }
+    bc->dirty_pages.count = 0;
+    bc->dirty_pages.pool = bc->page_pool;
+    bc->dirty_pages.pool_count = (size_t)bc->page_pool_size;
+    memset(bc->dirty_pages.words, 0,
+           dirty_word_count * sizeof(*bc->dirty_pages.words));
     bc->writeback_buffer =
         (char *)kmalloc(PCACHE_PAGE_SIZE * BCACHE_SYNC_BATCH_PAGES);
     if (!bc->writeback_buffer) {
+        kfree(bc->dirty_pages.words);
         kfree(bc->page_pool);
         kfree(bc->pool);
         kfree(bc);
@@ -361,10 +386,8 @@ bcache_t *bcache_create(block_dev_t *dev) {
         page_lru_insert_front(bc, &bc->page_pool[i]);
     }
 
-    kdebug("[BCACHE] Created cache: %d blocks + %d pages (%d KB)\n",
-           bc->pool_size, bc->page_pool_size,
-           (int)((bc->pool_size * BCACHE_BLOCK_SIZE +
-                  bc->page_pool_size * PCACHE_PAGE_SIZE) / 1024));
+    kdebug("[BCACHE] Created cache: blocks=%d page_slots=%d payload_allocated_bytes=0\n",
+           bc->pool_size, bc->page_pool_size);
     if (g_bcache_count < (int)(sizeof(g_bcache_list) / sizeof(g_bcache_list[0])))
         g_bcache_list[g_bcache_count++] = bc;
     return bc;
@@ -381,7 +404,16 @@ void bcache_destroy(bcache_t *bc) {
             break;
         }
     }
-    if (bc->page_pool) kfree(bc->page_pool);
+    if (bc->page_pool) {
+        /* Destruction is exclusive: sync has completed and no caller, DMA, or
+         * borrowed page pointer may outlive this cache. Only now detach/free
+         * the slot-owned payload frames, before freeing their descriptors. */
+        a20_pcache_release_storage(bc->page_pool, (size_t)bc->page_pool_size,
+                                   pcache_free_page);
+        kfree(bc->page_pool);
+    }
+    if (bc->dirty_pages.words)
+        kfree(bc->dirty_pages.words);
     if (bc->writeback_buffer) kfree(bc->writeback_buffer);
     if (bc->pool) kfree(bc->pool);
     kfree(bc);
@@ -398,8 +430,6 @@ void bcache_get_stats(bcache_stats_t *stats)
         if (!bc)
             continue;
         stats->block_pool_bytes += (size_t)bc->pool_size * BCACHE_BLOCK_SIZE;
-        stats->page_pool_bytes += (size_t)bc->page_pool_size * PCACHE_PAGE_SIZE;
-
         uint64_t flags = spin_lock_irqsave(&bc->lock);
         for (int j = 0; j < bc->pool_size; j++) {
             if (bc->pool[j].valid) {
@@ -409,6 +439,8 @@ void bcache_get_stats(bcache_stats_t *stats)
             }
         }
         for (int j = 0; j < bc->page_pool_size; j++) {
+            if (bc->page_pool[j].data)
+                stats->page_pool_bytes += PCACHE_PAGE_SIZE;
             if (bc->page_pool[j].valid) {
                 stats->valid_pages++;
                 if (bc->page_pool[j].dirty)
@@ -515,6 +547,35 @@ static int bcache_sync_write(void *ctx, uint64_t lba, const uint8_t *data, size_
                  sectors/(PCACHE_PAGE_SIZE/BCACHE_BLOCK_SIZE));
     return r;
 }
+static int bcache_sync_write_many(void *ctx, const block_write_t *vectors,
+                                  size_t nr)
+{
+    bcache_t *bc = ctx;
+    if (!bc || !bc->dev || !vectors || nr == 0)
+        return -EINVAL;
+    if (!bc->dev->write_batch) {
+        for (size_t i = 0; i < nr; i++) {
+            int r = bcache_sync_write(ctx, vectors[i].lba,
+                                      vectors[i].buf, vectors[i].count);
+            if (r < 0)
+                return r;
+        }
+        return 0;
+    }
+
+    int r = bc->dev->write_batch(bc->dev, vectors, nr);
+    /* Count submitted vectors as writeback attempts, including failed batches. */
+    for (size_t i = 0; i < nr; i++) {
+        a20_perf_count(A20_PERF_PCACHE_WRITEBACK_IOS);
+        a20_perf_add(A20_PERF_PCACHE_WRITEBACK_PAGES,
+                     vectors[i].count / (PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE));
+    }
+    if (r == 0) {
+        for (size_t i = 0; i < nr; i++)
+            bcache_account_device_io(bc->dev, (int)vectors[i].count, 1);
+    }
+    return r;
+}
 static int bcache_sync_flush(void *ctx)
 {
     bcache_t *bc=ctx; if (!bc->dev || !bc->dev->flush) return 0;
@@ -523,8 +584,26 @@ static int bcache_sync_flush(void *ctx)
 static void bcache_sync_lock(void *ctx) { rw_mutex_write_lock(&((bcache_t *)ctx)->writeback_lock); }
 static void bcache_sync_unlock(void *ctx) { rw_mutex_write_unlock(&((bcache_t *)ctx)->writeback_lock); }
 static void bcache_sync_error(void *ctx) { bcache_note_write_error(ctx); }
-static uint8_t *bcache_sync_alloc(size_t n) { return kmalloc(n); }
-static void bcache_sync_free(uint8_t *p) { kfree(p); }
+/* Sync borrows the cache-owned scratch page buffer while holding the exclusive
+ * writeback lock. The same buffer serves eviction flushes and is freed only by
+ * bcache_destroy(), after all users have stopped. */
+static uint8_t *bcache_sync_borrow_buffer(void *ctx, size_t n)
+{
+    bcache_t *bc = ctx;
+    const size_t capacity = PCACHE_PAGE_SIZE * BCACHE_SYNC_BATCH_PAGES;
+    if (!bc || !bc->dev || !bc->writeback_buffer || n > capacity)
+        return NULL;
+    return (uint8_t *)bc->writeback_buffer;
+}
+
+static void bcache_sync_release_buffer(void *ctx, uint8_t *buffer)
+{
+    bcache_t *bc = ctx;
+    if (!bc || !bc->writeback_buffer ||
+        buffer != (uint8_t *)bc->writeback_buffer)
+        panic("block cache: invalid writeback buffer release %p", buffer);
+    /* This only ends the sync's borrow; the cache retains ownership. */
+}
 
 static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
                               size_t page_count, enum bcache_sync_mode mode)
@@ -539,11 +618,14 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
     if (bcache_write_quarantined(bc)) return -EIO;
     return a20_bcache_sync_transaction(
         bc, (size_t)bc->page_pool_size, (size_t)bc->pool_size,
-        page_nos, page_count, (int)mode, bc->page_pool, bc->pool,
+        page_nos, page_count, (int)mode, bc->page_pool, &bc->dirty_pages,
+        bc->pool,
         bcache_sync_cache_lock, bcache_sync_cache_unlock,
         bcache_sync_clear_block, bcache_sync_clear_pages, bcache_sync_write,
+        bcache_sync_write_many,
         bcache_sync_flush, bcache_sync_lock, bcache_sync_unlock,
-        bcache_sync_error, bcache_sync_alloc, bcache_sync_free);
+        bcache_sync_error, bcache_sync_borrow_buffer,
+        bcache_sync_release_buffer);
 }
 
 int bcache_sync_checked(bcache_t *bc) {
@@ -637,6 +719,33 @@ static void pcache_get_diagnostic(void *ctx, uint64_t page_no)
     printf("[BCACHE] no evictable page page=%lu valid=%lu dirty=%lu referenced=%lu total_refs=%lu max_refs=%d\\n",(unsigned long)page_no,(unsigned long)valid,(unsigned long)dirty,(unsigned long)referenced,(unsigned long)total_refs,max_refs);
 }
 static void pcache_get_note_error(void *ctx, uint64_t unused) { (void)unused; bcache_note_write_error(ctx); }
+
+/* Payload frames are order-0 allocations with reclaim disabled. This callback
+ * runs with cache and writeback locks released; same-page fill serialization
+ * remains held, and slots own the frame thereafter. */
+static uint8_t *pcache_get_alloc_page(void *ctx)
+{
+    (void)ctx;
+    pfn_t pfn = pfa_alloc_flags(0, 0);
+    if (pfn == PFN_NONE)
+        return NULL;
+    void *page = pfn_to_virt(pfn);
+    if (!page) {
+        frame_put(pfn);
+        return NULL;
+    }
+    return (uint8_t *)page;
+}
+
+static void pcache_free_page(uint8_t *data)
+{
+    if (!data)
+        return;
+    pfn_t pfn = virt_to_pfn(data);
+    if (pfn == PFN_NONE)
+        panic("block cache: invalid owned page payload %p", data);
+    frame_put(pfn);
+}
 static int pcache_flush_write(void *ctx, uint64_t lba,
                               const uint8_t *data, size_t sectors)
 {
@@ -676,7 +785,8 @@ static pcache_entry_t *pcache_get(bcache_t *bc, uint64_t page_no,
         pcache_get_global_lock, pcache_get_global_unlock,
         pcache_get_fill_lock, pcache_get_fill_unlock,
         pcache_get_writeback_lock, pcache_get_writeback_unlock,
-        pcache_get_flush_victim, pcache_get_read, pcache_get_perf,
+        pcache_get_flush_victim, pcache_get_read, pcache_get_alloc_page,
+        pcache_get_perf,
         pcache_get_diagnostic, pcache_get_note_error);
 }
 

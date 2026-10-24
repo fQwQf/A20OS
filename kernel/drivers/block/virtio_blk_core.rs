@@ -584,4 +584,95 @@ mod tests {
             assert_eq!(q.descriptor_bitmap, 0);
         }
     }
+
+    #[test]
+    fn negotiated_32_and_64_queues_reserve_cancel_and_reuse_descriptors() {
+        for queue_size in [32u16, 64u16] {
+            let slot_count = queue_size / 3;
+            let mut q = A20VirtioBlkQueueState::default();
+            assert_eq!(unsafe {
+                a20_virtio_blk_queue_init(&mut q, queue_size, slot_count)
+            }, 0);
+
+            let run_mask = |head: u16| {
+                (0..3).fold(0u64, |mask, offset| {
+                    mask | (1u64 << (head.wrapping_add(offset) & (queue_size - 1)))
+                })
+            };
+            let mut live = vec![None; slot_count as usize];
+            let mut expected_bitmap = 0u64;
+
+            /* Fill every active request slot with a nonoverlapping three
+             * descriptor chain. Queue depth 64 uses bitmap bit 63. */
+            for index in 0..slot_count as usize {
+                let (mut slot, mut head) = (u16::MAX, u16::MAX);
+                assert_eq!(unsafe {
+                    a20_virtio_blk_queue_reserve(&mut q, 3, 1, 0, &mut slot, &mut head)
+                }, 0);
+                assert_eq!(slot as usize, index);
+                let mask = run_mask(head);
+                assert_eq!(expected_bitmap & mask, 0, "overlapping live chain");
+                expected_bitmap |= mask;
+                live[index] = Some((slot, head));
+                assert_eq!(q.descriptor_bitmap, expected_bitmap);
+                assert_eq!(q.descriptor_bitmap.count_ones(), 3 * (index as u32 + 1));
+            }
+            assert_eq!(q.descriptor_bitmap.count_ones(), 3 * slot_count as u32);
+
+            let (mut extra_slot, mut extra_head) = (u16::MAX, u16::MAX);
+            assert_eq!(unsafe {
+                a20_virtio_blk_queue_reserve(
+                    &mut q, 3, 1, 0, &mut extra_slot, &mut extra_head,
+                )
+            }, ENOSPC);
+
+            /* Free slot zero, then reserve at the fixed cursor: the chain
+             * crosses the queue's last descriptor and wraps to descriptor 0. */
+            let (first_slot, first_head) = live[0].take().unwrap();
+            assert_eq!(first_head, 0);
+            assert_eq!(unsafe { a20_virtio_blk_queue_cancel(&mut q, first_slot) }, 0);
+            expected_bitmap &= !run_mask(first_head);
+            assert_eq!(q.descriptor_bitmap, expected_bitmap);
+
+            let (mut wrapped_slot, mut wrapped_head) = (u16::MAX, u16::MAX);
+            assert_eq!(unsafe {
+                a20_virtio_blk_queue_reserve(
+                    &mut q, 3, 1, 0, &mut wrapped_slot, &mut wrapped_head,
+                )
+            }, 0);
+            let expected_cursor = (3 * slot_count) & (queue_size - 1);
+            assert_eq!(wrapped_head, expected_cursor);
+            assert!(wrapped_head + 2 >= queue_size);
+            let wrapped_mask = run_mask(wrapped_head);
+            assert_eq!(expected_bitmap & wrapped_mask, 0);
+            expected_bitmap |= wrapped_mask;
+            live[wrapped_slot as usize] = Some((wrapped_slot, wrapped_head));
+            assert_eq!(q.descriptor_bitmap, expected_bitmap);
+
+            /* Cancel a non-first live request out of order, then prove the
+             * allocator reuses exactly that freed run without touching peers. */
+            let middle = (slot_count / 2) as usize;
+            let (middle_slot, middle_head) = live[middle].take().unwrap();
+            assert_eq!(unsafe { a20_virtio_blk_queue_cancel(&mut q, middle_slot) }, 0);
+            expected_bitmap &= !run_mask(middle_head);
+            let (mut reused_slot, mut reused_head) = (u16::MAX, u16::MAX);
+            assert_eq!(unsafe {
+                a20_virtio_blk_queue_reserve(
+                    &mut q, 3, 1, 0, &mut reused_slot, &mut reused_head,
+                )
+            }, 0);
+            assert_eq!(reused_slot, middle_slot);
+            assert_eq!(reused_head, middle_head);
+            assert_eq!(expected_bitmap & run_mask(reused_head), 0);
+            expected_bitmap |= run_mask(reused_head);
+            live[reused_slot as usize] = Some((reused_slot, reused_head));
+            assert_eq!(q.descriptor_bitmap, expected_bitmap);
+
+            for request in live.into_iter().flatten() {
+                assert_eq!(unsafe { a20_virtio_blk_queue_cancel(&mut q, request.0) }, 0);
+            }
+            assert_eq!(q.descriptor_bitmap, 0);
+            assert_eq!(q.active_count, 0);
+        }
+    }
 }

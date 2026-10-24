@@ -313,7 +313,8 @@ typedef struct mm_struct {
     mm_seg_t *mmap;
 
     /* Ordered index over the list above: a cached, sorted copy so that
-     * mm_seg_find() can binary-search instead of walking.
+     * mm_seg_find() can binary-search instead of walking. Small address spaces
+     * use the embedded slots; larger ones use seg_index_large.
      *
      * Its entries are OWNED references (mm_seg_get), not borrowed pointers.
      * They could be borrowed only while the list owns every record for the
@@ -323,13 +324,16 @@ typedef struct mm_struct {
      * Owning them costs one refcount per entry per rebuild and removes that
      * class of bug entirely.
      *
-     * Rebuilt lazily (state 0=dirty, 1=valid, 2=overflow) and invalidated from
-     * the same mutators that change the list, so it never disagrees about
-     * whether it is current. */
+     * Rebuilt lazily (state 0=dirty, 1=valid, 2=allocation fallback) and
+     * invalidated from the same mutators that change the list, so it never
+     * disagrees about whether it is current. Dynamic storage is owned by this
+     * mm; after a struct copy (fork), the child must detach it before cleanup. */
     mm_seg_t *seg_index[MM_SEG_INDEX_CAPACITY];
-    uint16_t seg_index_count;
-    uint8_t seg_index_state; /* 0=dirty, 1=valid, 2=capacity overflow */
-    uint8_t _pad_seg_index;
+    mm_seg_t **seg_index_large;
+    size_t seg_index_capacity; /* 0 means the embedded MM_SEG_INDEX_CAPACITY */
+    size_t seg_index_count;
+    uint8_t seg_index_state; /* 0=dirty, 1=valid, 2=allocation fallback */
+    size_t seg_index_hint; /* recent covering slot; index only, never a VMA ref */
     mm_seg_t *deferred_vma;   /* released only after the last holder drops it */
     /*
      * Protects deferred_vma only.  Deliberately separate from mm->lock so a
@@ -428,9 +432,9 @@ void mm_seg_index_invalidate(mm_struct_t *mm);
  * Caller holds mm->lock, or is tearing down an unshared mm. */
 void mm_seg_index_clear(mm_struct_t *mm);
 
-/* Times an address space was found over MM_SEG_INDEX_CAPACITY mappings, so
- * mm_seg_find() used the linked list instead of the ordered index.  Printed by
- * the MM-ASM audit; see mm_seg_index_rebuild() in mm/vma.c. */
+/* Rebuilds whose mapping count exceeded the embedded index capacity. The
+ * dynamic owned index normally grows; allocation failure uses state 2's
+ * linked-list fallback. Printed by the MM-ASM audit. */
 extern uint64_t mm_seg_index_overflow;
 
 /*

@@ -36,12 +36,18 @@ typedef struct PEntry {
     int valid;
     unsigned char accessed;
     int held;
-    char data[4096];
+    char *data;
     struct PEntry *prev, *next, *hnext;
 } PEntry;
+typedef struct {
+    size_t count;
+    PEntry *pool;
+    size_t pool_count;
+    uint64_t *words;
+} PcacheDirtySet;
 
 #define BHASH 1024
-#define PHASH 512
+#define PHASH 4096
 #define POOL 64
 
 /* Rust ABI */
@@ -61,7 +67,7 @@ extern void a20_pcache_hash_insert_locked(PEntry **, PEntry *);
 extern void a20_pcache_hash_remove_locked(PEntry **, PEntry *);
 extern PEntry *a20_pcache_find_locked(PEntry **, uint64_t);
 extern void a20_bcache_set_block_dirty(size_t *, BEntry *, int);
-extern void a20_bcache_set_page_dirty(size_t *, PEntry *, int);
+extern void a20_bcache_set_page_dirty(PcacheDirtySet *, PEntry *, int);
 extern int a20_bcache_hold_page(PEntry *, size_t, uint64_t);
 extern void a20_bcache_release_holds(PEntry *, size_t);
 extern size_t a20_bcache_held_pages(const PEntry *, size_t);
@@ -102,9 +108,18 @@ static void c_bdirty(size_t *n, BEntry *e, int d) {
     if (d) { e->dirty_gen++; if (!e->dirty) (*n)++; e->dirty = 1; }
     else if (e->dirty) { e->dirty = 0; if (*n > 0) (*n)--; }
 }
-static void c_pdirty(size_t *n, PEntry *e, int d) {
-    if (d) { e->dirty_gen++; if (!e->dirty) (*n)++; e->dirty = 1; }
-    else if (e->dirty) { e->dirty = 0; if (*n > 0) (*n)--; }
+static void c_pdirty(PcacheDirtySet *set, PEntry *e, int d) {
+    size_t index = (size_t)(e - set->pool);
+    uint64_t mask = 1ull << (index % 64);
+    if (d) {
+        e->dirty_gen++;
+        if (!e->dirty) set->count++;
+        e->dirty = 1;
+        set->words[index / 64] |= mask;
+    } else {
+        if (e->dirty) { e->dirty = 0; if (set->count > 0) set->count--; }
+        set->words[index / 64] &= ~mask;
+    }
 }
 static int c_ref_read(const int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE); }
 static void c_ref_get(int *r) { __atomic_fetch_add(r, 1, __ATOMIC_ACQUIRE); }
@@ -149,7 +164,9 @@ typedef struct {
     PEntry *phash[PHASH];
     BEntry blru_h, blru_t;
     PEntry plru_h, plru_t;
-    size_t dirty_blocks, dirty_pages;
+    size_t dirty_blocks;
+    PcacheDirtySet dirty_pages;
+    uint64_t dirty_words[(POOL + 63) / 64];
     uint64_t quar;
     int rust;
 } world_t;
@@ -157,6 +174,9 @@ typedef struct {
 static void world_init(world_t *w)
 {
     memset(w, 0, sizeof(*w));
+    w->dirty_pages.pool = w->ppool;
+    w->dirty_pages.pool_count = POOL;
+    w->dirty_pages.words = w->dirty_words;
     for (int i = 0; i < POOL; i++) {
         w->bpool[i].lba = (uint64_t)-1;
         w->ppool[i].page_no = (uint64_t)-1;
@@ -188,7 +208,9 @@ static void project(const world_t *w, uint64_t *out, size_t *n)
     out[k++] = (uint64_t)pn;
     for (int i = 0; i < pn; i++) out[k++] = (uint64_t)(ps[i].e - w->ppool);
     out[k++] = w->dirty_blocks;
-    out[k++] = w->dirty_pages;
+    out[k++] = w->dirty_pages.count;
+    for (size_t i = 0; i < (POOL + 63) / 64; i++)
+        out[k++] = w->dirty_words[i];
     out[k++] = w->quar;
     *n = k;
 }
@@ -196,7 +218,7 @@ static void project(const world_t *w, uint64_t *out, size_t *n)
 static uint64_t rng_state = 0x123456789abcdef0ull;
 static uint64_t rng_next(void) { uint64_t x = rng_state; x ^= x << 13; x ^= x >> 7; x ^= x << 17; rng_state = x; return x; }
 
-#define OPS 40000
+#define OPS 200000
 #define FAIL(...) do { fprintf(stderr, "block-cache-state MISMATCH (op %d): ", op); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); return 1; } while (0)
 
 int main(void)
@@ -330,6 +352,6 @@ int main(void)
         }
     if (a20_bcache_hash_key(0x100000003ull) != c_bhash(0x100000003ull)) FAIL("bhash");
     if (a20_pcache_hash_key(0x100000003ull) != c_phash(0x100000003ull)) FAIL("phash");
-    puts("BLOCK_CACHE_STATE: PASS differential (40000 ops + policy space)");
+    puts("BLOCK_CACHE_STATE: PASS differential (200000 ops + policy space)");
     return 0;
 }

@@ -54,6 +54,7 @@ struct a20_cow_shared_snapshot {
     int32_t kind;
 };
 _Static_assert(sizeof(struct a20_cow_shared_snapshot) == 64, "host snapshot ABI");
+struct a20_cow_anon_batch_page { uint32_t pfn, class; uintptr_t flags; };
 static int snapshot_slot, snapshot_node, snapshot_locked;
 
 /* ------------------------------------------------------------- the model */
@@ -71,9 +72,11 @@ static int g_requires_copy;
 static uint32_t g_alloc_pfn;
 static int g_map_rc;
 static int g_snapshot_ok;
+static int g_snapshot_present, g_snapshot_leaf;
 static int32_t g_snap_kind;
 
-static int probe_calls, clone_swap_calls, dst_calls, alloc_calls, free_calls;
+static int probe_calls, snapshot_calls, clone_swap_calls, dst_calls, alloc_calls, free_calls;
+static int snapshot_at_calls;
 static int copy_calls, map_calls, downgrade_calls, unlock_calls;
 static int release_calls, release_kind, rss_calls, rss_pages;
 static int merge_guard; /* unused; keeps the layout obvious */
@@ -102,8 +105,10 @@ static void reset(void)
     g_alloc_pfn = 42;
     g_map_rc = 0;
     g_snapshot_ok = 1;
+    g_snapshot_present = g_snapshot_leaf = 1;
     g_snap_kind = 1;
-    probe_calls = clone_swap_calls = dst_calls = alloc_calls = free_calls = 0;
+    probe_calls = snapshot_calls = clone_swap_calls = dst_calls = alloc_calls = free_calls = 0;
+    snapshot_at_calls = 0;
     copy_calls = map_calls = downgrade_calls = unlock_calls = 0;
     release_calls = rss_calls = 0;
     release_kind = -1;
@@ -206,18 +211,44 @@ int a20_cow_map_child(void *child, uintptr_t va, uint32_t pfn, uintptr_t flags,
     return g_map_rc;
 }
 
+/* The scalar suite does not enter batch mapping; provide its current ABI. */
+int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
+                                      uintptr_t start, void *node,
+                                      struct a20_cow_anon_batch_page *out)
+{
+    (void)parent; (void)child; (void)start; (void)node; (void)out;
+    return 0;
+}
+int a20_cow_map_child_anon_batch(void *child, uintptr_t va,
+                                 const struct a20_cow_anon_batch_page *pages,
+                                 size_t count)
+{
+    (void)child; (void)va; (void)pages; (void)count;
+    return -95;
+}
+void frame_put_many(const uint32_t *pfns, size_t count)
+{
+    (void)pfns; (void)count;
+}
+
 int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
                            struct a20_cow_shared_snapshot *out)
 {
     (void)parent;
     (void)va;
     (void)level;
+    snapshot_calls++;
     if (!g_snapshot_ok)
         return 0;
+    snapshot_locked = 1;
+    /* The real C helper validates present+leaf while holding the node lock. */
+    if (!g_snapshot_present || !g_snapshot_leaf) {
+        snapshot_locked = 0; /* the C helper releases its lock on rejection */
+        return 0;
+    }
     memset(out, 0, sizeof(*out));
     out->slot = &snapshot_slot;
     out->node = &snapshot_node;
-    snapshot_locked = 1;
     out->pfn = g_probe_pfn;
     out->pa = 0x9000;
     out->raw_flags = g_probe_raw;
@@ -227,6 +258,16 @@ int a20_cow_share_snapshot(void *parent, uintptr_t va, int level,
     out->kind = g_snap_kind;
     out->pcp = (g_snap_kind == 2) ? (void *)(uintptr_t)0xC0FFEE : NULL;
     return 1;
+}
+
+int a20_cow_share_snapshot_at(void *parent, uintptr_t va, int level,
+                              void *slot, void *node,
+                              struct a20_cow_shared_snapshot *out)
+{
+    check(slot == &snapshot_slot && node == &snapshot_node,
+          "snapshot-at receives the walker-borrowed slot and node");
+    snapshot_at_calls++;
+    return a20_cow_share_snapshot(parent, va, level, out);
 }
 
 void a20_cow_share_downgrade(void *parent, uintptr_t va, int level,
@@ -265,6 +306,11 @@ void a20_cow_rss_add(void *child, uintptr_t pages)
 
 extern int a20_fork_clone_page_rust(void *child, void *parent, uintptr_t va,
                                     int shared);
+extern int a20_cow_clone_leaf_rust(void *child, void *parent, uintptr_t va,
+                                   int level, int shared);
+extern int a20_cow_clone_leaf_at_rust(void *child, void *parent, uintptr_t va,
+                                      int level, int shared, int checked,
+                                      void *slot, void *node);
 
 /* -------------------------------------------------------------- scenarios */
 
@@ -372,6 +418,7 @@ static void share_and_cow(void)
     check(last_map_flags == g_probe_cow, "share: the child gets the COW flags");
     check(last_map_pfn == g_probe_pfn, "share: the child maps the same frame");
     check(release_calls == 0, "share: no reference is dropped on success");
+    check(probe_calls == 1, "address entry: only its dispatch probe runs for sharing");
 
     /* A read-only leaf needs no downgrade but is still shared. */
     reset();
@@ -387,6 +434,50 @@ static void share_and_cow(void)
           "shared: succeeds");
     check(downgrade_calls == 0, "shared: the parent is never downgraded");
     check(last_map_flags == g_probe_raw, "shared: the child gets the raw flags");
+
+    /* The C walker already supplies a leaf: sharing uses only its snapshot. */
+    reset();
+    check(a20_cow_clone_leaf_rust(&child, &parent, 0x1000, 0, 0) == 0,
+          "direct leaf: sharing succeeds");
+    check(probe_calls == 0 && snapshot_calls == 1,
+          "direct leaf: shared path skips the unlocked probe");
+
+    reset();
+    check(a20_cow_clone_leaf_at_rust(&child, &parent, 0x1000, 0, 0, 0,
+                                     &snapshot_slot, &snapshot_node) == 0,
+          "walker hint: shared leaf succeeds");
+    check(probe_calls == 0 && snapshot_at_calls == 1 && snapshot_calls == 1,
+          "walker hint: uses supplied slot without an unlocked probe");
+
+    /* The locked snapshot independently rejects a source that vanished or
+       ceased to be a leaf after the dispatch probe. */
+    reset();
+    g_snapshot_present = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "snapshot absent: source disappearance is tolerated");
+    check(map_calls == 0 && unlock_calls == 0 && rss_calls == 0 && !snapshot_locked,
+          "snapshot absent: no map, unlock, or rss charge");
+    reset();
+    g_snapshot_leaf = 0;
+    check(a20_fork_clone_page_rust(&child, &parent, 0x1000, 0) == 0,
+          "snapshot not leaf: source change is tolerated");
+    check(map_calls == 0 && unlock_calls == 0 && rss_calls == 0 && !snapshot_locked,
+          "snapshot not leaf: no map, unlock, or rss charge");
+
+    reset();
+    g_policy_flags = VM_DONTFORK;
+    check(a20_cow_clone_leaf_at_rust(&child, &parent, 0x1000, 0, 0, 1,
+                                     &snapshot_slot, &snapshot_node) == 0,
+          "walker checked: dontfork is skipped");
+    check(snapshot_at_calls == 0 && map_calls == 0,
+          "walker checked: policy skip precedes snapshot");
+    reset();
+    g_dst_present = 1;
+    check(a20_cow_clone_leaf_at_rust(&child, &parent, 0x1000, 0, 0, 1,
+                                     &snapshot_slot, &snapshot_node) == 0,
+          "walker checked: existing child leaf is skipped");
+    check(snapshot_at_calls == 0 && map_calls == 0,
+          "walker checked: destination check precedes snapshot");
 
     /* A failed child map gives back exactly the reference that was taken. */
     reset();
@@ -414,11 +505,39 @@ static void share_and_cow(void)
           "vanished: nothing is mapped and no lock is held");
 }
 
+static void private_probe_validation(void)
+{
+    static int child, parent;
+    reset();
+    g_requires_copy = 1;
+    g_probe_present = 0;
+    check(a20_cow_clone_leaf_rust(&child, &parent, 0x1000, 0, 0) == 0,
+          "private direct leaf: absent source is skipped");
+    check(probe_calls == 1 && alloc_calls == 0 && map_calls == 0,
+          "private direct leaf: probe validates before allocation");
+    reset();
+    g_requires_copy = 1;
+    g_probe_leaf = 0;
+    check(a20_cow_clone_leaf_rust(&child, &parent, 0x1000, 0, 0) == 0,
+          "private direct leaf: non-leaf source is skipped");
+    check(alloc_calls == 0 && map_calls == 0,
+          "private direct leaf: non-leaf is not copied");
+
+    reset();
+    g_requires_copy = 1;
+    check(a20_cow_clone_leaf_at_rust(&child, &parent, 0x1000, 0, 0, 0,
+                                     &snapshot_slot, &snapshot_node) == 0,
+          "walker hint: private-copy succeeds");
+    check(probe_calls == 1 && snapshot_at_calls == 0 && map_calls == 1,
+          "walker hint: private-copy retains source probe validation");
+}
+
 int main(void)
 {
     skip_and_dispatch();
     private_copy();
     share_and_cow();
+    private_probe_validation();
     reset();
 
     if (failures) {

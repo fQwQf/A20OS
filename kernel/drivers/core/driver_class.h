@@ -14,6 +14,7 @@
 #include "uapi/a20/block.h"
 
 struct device;
+struct block_write;
 struct audio_dev_ops;
 struct virtio_gpu_mem_entry;
 struct virtio_gpu_box;
@@ -64,6 +65,10 @@ typedef struct block_dev_ops {
     int     (*ioctl)(struct device *dev, unsigned long req, void *arg);
     uint64_t (*capacity)(struct device *dev);
     uint32_t (*sector_size)(struct device *dev);
+    /* Optional synchronous batch write. Buffers stay borrowed through return;
+     * a negative errno may follow partial writes. NULL selects serial writes. */
+    int     (*write_batch)(struct device *dev,
+                           const struct block_write *writes, size_t nr);
 } block_dev_ops_t;
 
 /* block ioctl requests.  The numbers live in uapi/a20/block.h because they are

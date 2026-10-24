@@ -14,6 +14,8 @@ struct task_t;
  * operate on kernel-owned buffers or already-validated scalar values.
  */
 long copy_from_user(void *dst, const void *src, size_t n);
+/* Non-tearing acquire snapshot for one aligned futex-sized word. */
+int user_read_u32_atomic(const uint32_t *src, uint32_t *out);
 long copy_to_user(void *dst, const void *src, size_t n);
 int  user_prepare_write(struct task_t *t, uint64_t va);
 long user_strncpy(char *dst, const char *src, size_t max);
