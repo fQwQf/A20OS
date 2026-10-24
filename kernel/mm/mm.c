@@ -768,6 +768,93 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
     return -EINVAL;
 }
 
+/* Run-batched teardown for sequential final-destroy loops (free_vma_pages).
+ *
+ * pt_unmap_leaf() re-walks from the root for every page and, after clearing
+ * each leaf, walks the empty-table cascade with a node lock per level.  A
+ * sequential sweep of a mapped region therefore pays several lock round
+ * trips per page for state that only changes once per table.  This helper
+ * descends once, holds the level-0 node lock across the whole run, clears
+ * each present base-page leaf, and runs the cascade a single time at the
+ * end (the last cleared index feeds pt_table_empty()'s neighbour hint).
+ * Everything the scalar path treats specially -- swap entries, huge leaves,
+ * absent slots, absent upper subtrees -- ends the run and is left for the
+ * caller's per-page fallback, so per-page semantics never change. */
+int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                      paddr_t *pa_out) {
+    if (!mm || !mm->pgdir || !pa_out || max_pages <= 0) return 0;
+    pt_root_t *pgdir = mm->pgdir;
+    pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
+    int idx_path[ARCH_PT_ROOT_LEVEL + 1];
+    pte_t *table = pgdir;
+
+    path[ARCH_PT_ROOT_LEVEL] = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        int idx = arch_pt_vpn(va, level);
+        idx_path[level] = idx;
+        pte_t *pte = &table[idx];
+        pte_t entry = *pte;
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(entry))
+            return 0;
+#endif
+        if (!(entry & PTE_V))
+            return 0;
+        if (arch_pte_is_leaf(entry)) {
+            /* Only base-page runs; huge leaves fall back to the scalar path
+             * (free_vma_pages demotes straddlers there). */
+            if (level != 0)
+                return 0;
+            break;
+        }
+        if (level == 0)
+            return 0;
+        table = arch_pte_to_ptr(entry);
+        path[level - 1] = table;
+    }
+
+    int entries = arch_pt_level_entries(0);
+    int first = idx_path[0];
+    if (first < 0 || first >= entries)
+        return 0;
+    int count = 0;
+    mm_pt_node_lock(path[0]);
+    for (int i = 0; i < max_pages && first + i < entries; i++) {
+        pte_t *pte = &path[0][first + i];
+        pte_t entry = *pte;
+#ifdef CONFIG_SWAP
+        if (pte_is_swap(entry))
+            break;
+#endif
+        if (!(entry & PTE_V) || !arch_pte_is_leaf(entry))
+            break;
+        pa_out[count++] = arch_pte_addr(entry);
+        *pte = 0;
+        mm_pt_note_absent(path[0], 0, first + i);
+    }
+    mm_pt_node_unlock(path[0]);
+    if (!count)
+        return 0;
+
+    /* The run emptied its slots; cascade absent upper nodes exactly like the
+     * per-page path, once for the whole run. */
+    for (int l = 0; l < ARCH_PT_ROOT_LEVEL; l++) {
+        pte_t *child = path[l];
+        pte_t *parent = path[l + 1];
+        mm_pt_node_lock(parent);
+        if (!pt_table_empty(child, l, first + count - 1)) {
+            mm_pt_node_unlock(parent);
+            break;
+        }
+        parent[idx_path[l + 1]] = 0;
+        mm_pt_node_clear_seg(parent, l + 1, idx_path[l + 1]);
+        mm_pt_note_absent(parent, l + 1, idx_path[l + 1]);
+        mm_pt_node_unlock(parent);
+        mm_pt_retire_table(mm, child, l);
+    }
+    return count;
+}
+
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
     vaddr_t base = 0;
     size_t size = 0;
