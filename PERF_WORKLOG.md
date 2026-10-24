@@ -293,3 +293,12 @@
 - fork 剖析（计数器 3 轮 `build/evidence/fork-diag-candB`，微基准 150 次 fork+exit）：fork syscall 侧 40.2µs 中 clone 占 35.6µs（89%），setup 3.4µs、finish 0.8µs；wait 侧 destroy ~29.7µs/次。mm_pt_lock_acquires ≈96/fork ≈1/页；vma_lookups ≈98/fork（每页一次 policy 查找）。64 页批处理仅覆盖 VM_ANON；stress-ng 的 ~3300 页多数为文件页，仍走逐页标量快照+降级+子方根级 pt_walk。
 - 下一步候选（未实施）：文件页（VM_FILE 私有映射）批处理克隆——扩展 `a20_cow_share_anon_batch_snapshot` 的类过滤与成组 pin（需确认 cache 帧 pin 的成组路径），或先做标量路径的子方连续段安装以省每页根级 pt_walk。预期把 fork 循环 1.27ms 压向 ~0.8ms，仍显著落后 Linux（220µs），差距在每页元数据与锁协议。
 - 环境：宿主 powersave governor 未改动；apk 测量 affinity 4,6 交替 5 轮；证据 `build/evidence/{micro-candA-final,micro-candB,apk-candA-2026-10-24,apk-candB-2026-10-24,candA-regression-full15x3,candB-regression-full15x3}`。
+
+## 2026-10-24 北京时间（第二轮：fork 回收批处理 + Rust 释放事务）
+
+- 用户追加授权：不局限 Linux 做法，可参考学术界/其他系统或自创；易多重释放/竞态/泄漏的代码可用 Rust 实现或重写。以测量为准。
+- 候选 F（提交 `96d9f958`）：`pt_unmap_leaf_run()`——free_vma_pages 的顺序销毁按 L0 表分段批处理（一次根行走、一次节点锁、段末一次空表级联；swap/大页/缺槽结束该段并回退标量路径）。apk fork 790→849 ops/s（+7.5%，0.181×）。首个版本越界 unmap 相邻 VMA 导致引用双重释放（启动即崩，refs=0），以边界上限修复；事故与修复一并记录在提交说明。
+- Rust 事务（提交 `d955c7ae`）：按用户指示，把"每叶引用释放分类"（cache pin ×2 / frame put / 不 put）迁入 `munmap_txn.rs::a20_vma_free_run_release_rust`，与 unmap 事务共置同一所有权规则（按 PFN 分类，绝不用 VMA 级标志）；C 只传 PFN 数组与 no_frame_ref 谓词。行为等价：apk fork 852、其余持平；回归 90/90。
+- 本日累计（相对早晨基线 `apk-bench-2026-10-24-r5`）：threads-2 4124→6139（+49%，0.466×）、switch 278k→323k（+16%，本轮 Linux 侧波动大取 1.445 中位比）、fork 737→852（+16%，0.179×）、cpu/memory/sha256 持平。微基准：getpid 621→378、futex-wake 684→447、yield 1291→1051、fork 138.7→130.7µs。
+- 证据：`build/evidence/{candF-regression-full15x3,candG-regression-full15x3,apk-candF-2026-10-24,apk-candG-2026-10-24,micro-candF}`。
+- 下一候选（未实施，按收益排序）：① 标量克隆侧的 L0 段批处理（节点锁/VMA 查找提升到段粒度，预期 fork 再 +5-10%）；② 匿名延迟销毁路径 pt_destroy_user 的 per-page frame_put 难以批处理（refcount 语义），若做需配合页表级共享的表级 COW（改动面覆盖全部 fault 路径，需独立立项）；③ futex 争用交接路径剖析（threads-2 剩余 0.47× 的主要来源）。
