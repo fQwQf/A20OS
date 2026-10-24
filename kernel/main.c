@@ -60,6 +60,18 @@ void init_kthread(void);
 __attribute__((weak)) void arch_run_bootarg_selftests(void) {
 }
 
+/* User thread-pointer restore after a context switch defaults to nothing:
+ * most architectures keep the user TLS in state that __switch already
+ * carries.  x86_64 overrides this in trap/irqchip.c. */
+__attribute__((weak)) void arch_switch_tls_restore(void) {
+}
+
+/* exec(2) publishes the new image's TLS; weak no-op unless the architecture
+ * keeps the user thread pointer in an MSR that outlives the exec (x86_64). */
+__attribute__((weak)) void arch_publish_user_tls(uint64_t base) {
+    (void)base;
+}
+
 /* ============================================================
  * Block-device mount — unified strategy
  *

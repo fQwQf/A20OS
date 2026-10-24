@@ -276,8 +276,17 @@ int a20_clone_init_arch(task_t *t, task_t *parent, uint64_t flags, vaddr_t stack
         t->ustack = stack ? stack : parent->ustack;
         if (stack)
             TRAP_CTX_SP(trap) = stack;
-        if (flags & CLONE_SETTLS)
+        /* A forked child keeps the parent's thread-pointer bases (Linux
+         * copies fsbase/gsbase into the new task); CLONE_SETTLS replaces the
+         * FS base for threads.  The task-struct copies are authoritative:
+         * the switch-in TLS restore reads them, and frame slots are rebuilt
+         * per trap. */
+        t->arch_tls_fs_base = parent->arch_tls_fs_base;
+        t->arch_tls_gs_base = parent->arch_tls_gs_base;
+        if (flags & CLONE_SETTLS) {
             TRAP_CTX_TP(trap) = tls;
+            t->arch_tls_fs_base = tls;
+        }
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         t->first_kernel_entry = (uintptr_t)user_trap_return;
         ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;

@@ -114,6 +114,10 @@ extern void *syscall_entry_table[CONFIG_NR_CPUS];
 #define EFER_NXE        (1ULL << 11)
 #define RFLAGS_IF       (1ULL << 9)
 
+/* The per-CPU area the kernel GS base addresses (see cpu.h).  Both GS MSRs
+ * point here from per-CPU bringup; the task pointer moves through area.task. */
+struct x86_64_cpu_area x86_64_cpu_areas[CONFIG_NR_CPUS];
+
 extern uintptr_t __stack_chk_guard;
 
 static uint64_t make_gdt_entry(uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
@@ -719,20 +723,13 @@ void trap_init(void) {
     efer |= EFER_SCE | EFER_NXE;
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_EFER), "a"((uint32_t)efer), "d"((uint32_t)(efer >> 32)));
 
-    /* The compiler emits TLS-style canary reads (mov %fs:0x28,...) under
-     * -fstack-protector-strong, but kernel mode has no TLS and FS base stays
-     * 0.  That only "worked" while linear address 0x28 was reachable through
-     * the boot identity map, which task page tables do not carry.  Point the
-     * kernel FS base at a stub whose +0x28 slot is __stack_chk_guard so the
-     * canary check resolves to the global guard value.  Per CPU (trap_init
-     * also runs on APs).  User mode keeps its own TLS: the trap frame saves
-     * and restores the user FS base around kernel/user transitions. */
-    {
-        uint64_t fsbase = (uint64_t)(uintptr_t)&__stack_chk_guard - 0x28;
-        __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_FS_BASE),
-                             "a"((uint32_t)fsbase),
-                             "d"((uint32_t)(fsbase >> 32)));
-    }
+    /* Point both GS MSRs at this CPU's per-CPU area (see cpu.h).  The kernel
+     * task pointer moves through area.task instead of an MSR rewrite, and the
+     * stack-protected C reads its canary from the global guard symbol, so no
+     * FS-base swap is needed around kernel/user transitions.  trap_init also
+     * runs on APs, which reach here with the area already selected by the
+     * secondary entry; selecting it again is harmless. */
+    x86_64_cpu_gs_init(cpu_current_id());
 
     /* Supervisor-mode access/execution prevention, per CPU.  No-op on CPU
      * models that do not advertise the features (e.g. QEMU qemu64). */
@@ -763,6 +760,39 @@ void trap_init(void) {
          * arch_handle_irq() hands them to driver_irq_dispatch(), and the
          * module registers its ISRs through the framework (request_irq). */
     }
+}
+
+/* Restore the incoming task's user FS/GS bases after __switch.
+ *
+ * Kernel code never rewrites MSR_FS_BASE, so the user TLS base survives every
+ * syscall; across a context switch the MSR still holds the OUTGOING task's
+ * base, and the incoming task's bases come from its task struct -- the
+ * authoritative copy, because trap-frame slots are rebuilt on every trap.
+ * arch_prctl, CLONE_SETTLS and exec keep task->arch_tls_*_base in step with
+ * the MSRs, so this one restore per switch-in is the only cross-task FS/GS
+ * work.  Kernel threads and idle tasks have zero bases and never return to
+ * user; leaving the MSRs alone is fine because the next user-returning task
+ * restores its own bases first. */
+void arch_switch_tls_restore(void) {
+    task_t *task = (task_t *)arch_get_task_pointer();
+    if (task) {
+        arch_write_user_fs_base(task->arch_tls_fs_base);
+        arch_write_user_gs_base(task->arch_tls_gs_base);
+    }
+}
+
+/* exec(2) rebuilds the task's trap frame in place and returns to user without
+ * a context switch, so the new image's TLS must reach MSR_FS_BASE here and
+ * the task struct must carry it for later switches.  exec also clears the
+ * user GS base, exactly like a fresh task: the new image owns its TLS state. */
+void arch_publish_user_tls(uint64_t base) {
+    task_t *task = (task_t *)arch_get_task_pointer();
+    if (task) {
+        task->arch_tls_fs_base = base;
+        task->arch_tls_gs_base = 0;
+    }
+    arch_write_user_fs_base(base);
+    arch_write_user_gs_base(0);
 }
 
 void arch_handle_irq(uint64_t irq, int from_user) {

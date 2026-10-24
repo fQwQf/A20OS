@@ -223,6 +223,10 @@ void x86_64_secondary_entry(unsigned cpu_id)
 {
     if (cpu_id == 0 || cpu_id >= CONFIG_NR_CPUS)
         arch_halt();
+    /* Select this CPU's per-CPU GS area before anything else runs: every
+     * kernel-mode %gs-relative access (proc_current fast path) depends on it,
+     * and no C has run on this CPU since the trampoline. */
+    x86_64_cpu_gs_init(cpu_id);
     __atomic_store_n(&ap_started[cpu_id], 1, __ATOMIC_RELEASE);
     smp_secondary_init(cpu_id);
     arch_local_irq_enable();

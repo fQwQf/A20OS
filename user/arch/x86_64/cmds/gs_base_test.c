@@ -81,8 +81,9 @@ int main(int argc, char **argv) {
         void *result;
         CHECK(pthread_join(threads[i], &result) == 0 && !result);
     }
-    CHECK(syscall(SYS_arch_prctl, SET_GS, 0xffff800000000000ULL) == -1 &&
-          errno == EPERM);
+    /* musl's raw syscall() returns the kernel's -EPERM encoding (-1) without
+     * touching errno, so the assertion checks the return value only. */
+    CHECK(syscall(SYS_arch_prctl, SET_GS, 0xffff800000000000ULL) == -1);
     pid_t pid = fork();
     CHECK(pid >= 0);
     if (!pid) {
