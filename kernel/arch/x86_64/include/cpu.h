@@ -135,29 +135,90 @@ static inline void arch_tlb_flush_page_local(uint64_t addr) {
     arch_tlb_flush_page(addr);
 }
 
-static inline void arch_set_task_pointer(void *task) {
-    /* Use %gs base for task pointer on x86_64 */
-    uint64_t val = (uint64_t)task;
-    uint32_t low = (uint32_t)val;
-    uint32_t high = (uint32_t)(val >> 32);
-    __asm__ __volatile__(
-        "movl %[msr], %%ecx\n\t"
-        "movl %[low], %%eax\n\t"
-        "movl %[high], %%edx\n\t"
-        "wrmsr"
-        :
-        : [msr] "i" (0xC0000101), [low] "r" (low), [high] "r" (high)
-        : "eax", "ecx", "edx"
-    );
-}
+/*
+ * Per-CPU area addressed by the kernel GS base.
+ *
+ * In user mode MSR_GS_BASE holds the user's GS base (arch_prctl keeps it in
+ * the lower canonical range) and MSR_KERNEL_GS_BASE holds this area's address;
+ * SWAPGS on kernel entry makes %gs-relative addressing reach it, and the
+ * MSR pair swaps back on return.  In kernel mode neither MSR is rewritten on
+ * the syscall path: the task pointer moves through area.task (a plain store)
+ * instead of a WRMSR, and the user's FS base stays in MSR_FS_BASE untouched
+ * for the whole syscall because kernel code never reads FS.
+ *
+ * Boot keeps both MSRs pointing at the area (a no-op SWAPGS) until the first
+ * user return publishes the task's real user GS base through MSR_KERNEL_GS_BASE.
+ * Offsets are ABI: the syscall entry and __switch assembly hardcode them.
+ */
+struct x86_64_cpu_area {
+    void *task;      /* 0: current task (proc_current fast path)      */
+    uint64_t cpu_id; /* 8: dense logical id, for early/debug readers  */
+};
+#define X86_64_CPU_AREA_TASK_OFFSET   0
+#define X86_64_CPU_AREA_CPUID_OFFSET  8
+
+/* Driver-module builds compile this header without the kernel's -DCONFIG_NR_CPUS
+ * (they only need the inline helpers); the array itself lives in trap/irqchip.c
+ * where the kernel build always defines it. */
+#ifndef CONFIG_NR_CPUS
+#define CONFIG_NR_CPUS 1
+#endif
+
+extern struct x86_64_cpu_area x86_64_cpu_areas[CONFIG_NR_CPUS];
+
 static inline void *arch_get_task_pointer(void) {
+    void *task;
+    __asm__ __volatile__("movq %%gs:%c1, %0"
+                         : "=r"(task)
+                         : "i"(X86_64_CPU_AREA_TASK_OFFSET));
+    return task;
+}
+
+static inline void arch_set_task_pointer(void *task) {
+    __asm__ __volatile__("movq %0, %%gs:%c1"
+                         :
+                         : "r"(task), "i"(X86_64_CPU_AREA_TASK_OFFSET)
+                         : "memory");
+}
+
+/* Point both GS MSRs at this CPU's area.  Used at per-CPU bringup, before any
+ * user task exists: with both halves equal, SWAPGS is a no-op until the first
+ * __return_to_user parks the task's user GS base in MSR_KERNEL_GS_BASE. */
+static inline void x86_64_cpu_gs_init(unsigned cpu) {
+    uint64_t base = (uint64_t)(uintptr_t)&x86_64_cpu_areas[cpu];
+    uint32_t low = (uint32_t)base;
+    uint32_t high = (uint32_t)(base >> 32);
+    x86_64_cpu_areas[cpu].cpu_id = cpu;
+    x86_64_cpu_areas[cpu].task = NULL;
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)0xC0000101),
+                         "a"(low), "d"(high));
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)0xC0000102),
+                         "a"(low), "d"(high));
+}
+
+/* User FS base (musl TLS) lives in MSR_FS_BASE for the whole kernel residency:
+ * kernel code never rewrites it, so reads are exact and writes take effect
+ * immediately.  The trap frame keeps a copy for cross-task state; these
+ * helpers are the only in-kernel MSR access besides bringup. */
+static inline uint64_t arch_read_user_fs_base(void) {
     uint32_t low, high;
-    __asm__ __volatile__(
-        "rdmsr"
-        : "=a"(low), "=d"(high)
-        : "c" (0xC0000101)
-    );
-    return (void *)((uint64_t)high << 32 | low);
+    __asm__ __volatile__("rdmsr" : "=a"(low), "=d"(high) : "c"((uint32_t)0xC0000100));
+    return (uint64_t)high << 32 | low;
+}
+static inline void arch_write_user_fs_base(uint64_t base) {
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)0xC0000100),
+                         "a"((uint32_t)base), "d"((uint32_t)(base >> 32)));
+}
+/* In kernel mode the user GS base is parked in MSR_KERNEL_GS_BASE (the SWAPGS
+ * inactive half); the active MSR_GS_BASE stays on the per-CPU area. */
+static inline uint64_t arch_read_user_gs_base(void) {
+    uint32_t low, high;
+    __asm__ __volatile__("rdmsr" : "=a"(low), "=d"(high) : "c"((uint32_t)0xC0000102));
+    return (uint64_t)high << 32 | low;
+}
+static inline void arch_write_user_gs_base(uint64_t base) {
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)0xC0000102),
+                         "a"((uint32_t)base), "d"((uint32_t)(base >> 32)));
 }
 
 static inline uint64_t arch_read_ra(void) {

@@ -65,8 +65,9 @@ isr_common:
 
     /* Detect actual GS state rather than interrupted CPL: an NMI can land
      * in the entry/exit SWAPGS window while CS still says kernel. Kernel
-     * task pointers are upper canonical; arch_prctl only accepts lower user
-     * bases. The alignment slot records whether this entry swapped GS. */
+     * per-CPU area addresses are upper canonical; arch_prctl only accepts
+     * lower user bases. The alignment slot records whether this entry
+     * swapped GS. */
     movq  $0, 208(%rsp)
     movl  $0xC0000101, %ecx
     rdmsr
@@ -75,37 +76,16 @@ isr_common:
     swapgs
     lfence
     movq  $1, 208(%rsp)
-    rdmsr
 .Lisr_kernel_gs:
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 160(%rsp)       /* ctx->kernel_tp */
+    /* The kernel GS base now addresses the per-CPU area in both branches
+     * (offset 0 = task pointer, see struct x86_64_cpu_area). */
+    movq  %gs:0, %rax
+    movq  %rax, 160(%rsp)       /* ctx->kernel_tp = task pointer */
 
-    movl  $0xC0000102, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 200(%rsp)       /* user GS, before kernel trap-state reuse */
-
-    /* Save user FS base for x86_64 TLS. */
-    movl  $0xC0000100, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 184(%rsp)       /* ctx->user_fs_base */
-
-    /* Switch FS base to the kernel canary stub for the duration of kernel
-     * execution.  The compiler emits TLS-style stack-protector reads
-     * (mov %fs:0x28,...) under -fstack-protector-strong; leaving the user TLS
-     * in place makes kernel C read a user page that may be demand-paged,
-     * which recurses the fault handler.  __return_to_user restores the saved
-     * value before iretq. */
-    movabsq $__stack_chk_guard, %rax
-    subq  $0x28, %rax
-    movq  %rax, %rdx
-    shrq  $32, %rdx
-    movl  $0xC0000100, %ecx
-    wrmsr
+    /* User GS/FS bases need no saving: MSR_FS_BASE still holds the user TLS
+     * (kernel code never rewrites it) and MSR_KERNEL_GS_BASE holds the user
+     * GS base parked at user-mode time.  SWAPGS bookkeeping above plus the
+     * final SWAPGS before IRET preserve both without any MSR access here. */
 
     /* Read CR2 for kscratch0 (tval) */
     movq  %cr2, %rax
@@ -201,18 +181,11 @@ kernel_trap:
     movq  200(%rsp), %rdx
     call  x86_64_restore_trap_state
 
-    /* A kernel IRQ may have interrupted __return_to_user after it installed
-     * the user FS base but before iretq.  isr_common switches FS to the kernel
-     * canary stub for C, so restore the interrupted FS value here along with
-     * the general registers.  On every other kernel trap this slot contains
-     * the kernel stub and the write is idempotent. */
-    movq  184(%rsp), %rax
-    movl  %eax, %edi
-    shrq  $32, %rax
-    movl  %eax, %edx
-    movl  %edi, %eax
-    movl  $0xC0000100, %ecx
-    wrmsr
+    /* No FS-base restore: kernel execution never rewrites MSR_FS_BASE (the
+     * stack-protected canary is an absolute-addressed global now), so the
+     * user TLS survives every kernel trap untouched.  The former restore
+     * here also covered an IRQ landing between __return_to_user's FS write
+     * and iretq, which no longer exists. */
 
     /* Restore the common CPU-pushed frame in case C modified it. */
     movq  128(%rsp), %rax
@@ -331,15 +304,12 @@ syscall_entry_\cpu:
 
 syscall_entry_saved:
     /* SYSCALL always enters from user mode. The scratch save above never
-     * accesses GS or the user stack; now activate the kernel task pointer. */
+     * accesses GS or the user stack; now activate the per-CPU area.  After
+     * SWAPGS the kernel GS base addresses struct x86_64_cpu_area, so the
+     * task pointer is one GS-relative load -- no RDMSR on this path. */
     swapgs
     lfence
-    /* Read GS base (task pointer) into r9. */
-    movl  $0xC0000101, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, %r9             /* r9 = task pointer */
+    movq  %gs:0, %r9            /* r9 = task pointer (area offset 0) */
 
     /* r14 = saved task_context_t (task->kstack). */
     movq  0(%r9), %r14
@@ -408,26 +378,13 @@ syscall_entry_saved:
     /* Kernel stack top for future CPL3->CPL0 transitions. */
     movq  %r15, 176(%rsp)
 
-    /* User FS base for TLS. */
-    movl  $0xC0000100, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 184(%rsp)
-
-    /* Switch FS base to the kernel canary stub (see isr_common). */
-    movabsq $__stack_chk_guard, %rax
-    subq  $0x28, %rax
-    movq  %rax, %rdx
-    shrq  $32, %rdx
-    movl  $0xC0000100, %ecx
-    wrmsr
-
-    movl  $0xC0000102, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, 200(%rsp)       /* user GS base */
+    /* User FS/GS bases are not touched by kernel execution: MSR_FS_BASE keeps
+     * the user TLS for the whole syscall (arch_prctl and the switch-in
+     * restore are the only writers), and the user GS base is parked in
+     * MSR_KERNEL_GS_BASE where SWAPGS left it.  The frame slots stay zero so
+     * a stale user base can never leak back out through a future reader. */
+    movq  $0, 184(%rsp)         /* user_fs_base: kernel never read it */
+    movq  $0, 200(%rsp)         /* user_gs_base: published via SWAPGS */
 
     /* Original task->kstack so __return_to_user / __switch can restore it. */
     movq  %r14, 192(%rsp)
@@ -470,31 +427,11 @@ __return_to_user:
     call  x86_64_set_tss_rsp0
 1:
 
-    /* Restore kernel_tp (GS base) */
-    movq  160(%rsp), %rax
-    movl  %eax, %edi
-    shrq  $32, %rax
-    movl  %eax, %edx
-    movl  %edi, %eax
-    movl  $0xC0000101, %ecx
-    wrmsr
-
-    /* Publish the user's GS in the inactive MSR; it becomes active only
-     * after the final SWAPGS immediately before IRET. */
-    movq  200(%rsp), %rax
-    movq  %rax, %rdx
-    shrq  $32, %rdx
-    movl  $0xC0000102, %ecx
-    wrmsr
-
-    /* Restore user FS base for TLS before iretq. */
-    movq  184(%rsp), %rax
-    movl  %eax, %edi
-    shrq  $32, %rax
-    movl  %eax, %edx
-    movl  %edi, %eax
-    movl  $0xC0000100, %ecx
-    wrmsr
+    /* No GS-base writes here: MSR_GS_BASE has held the per-CPU area since
+     * kernel entry, and the final SWAPGS below publishes the user GS base
+     * that MSR_KERNEL_GS_BASE has parked since entry (arch_prctl and the
+     * switch-in restore keep it current).  MSR_FS_BASE still holds the
+     * user's TLS because kernel code never rewrote it. */
 
     /* Restore general-purpose registers except rax/r11. */
     movq  8(%rsp), %rbx

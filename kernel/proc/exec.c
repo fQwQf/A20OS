@@ -1190,6 +1190,10 @@ static void exec_cb_trap(void *opaque)
     TRAP_CTX_KScratch0(trap) = user_as;
     arch_trap_ctx_set_user_entry(trap, info->entry);
     TRAP_CTX_SP(trap) = c->sp; TRAP_CTX_TP(trap) = info->tls_tp;
+    /* exec returns to user without a context switch, so the new TLS must be
+     * published to the MSR here (no-op on architectures where __switch or the
+     * register file carries it). */
+    arch_publish_user_tls(info->tls_tp);
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     if (info->is_native_abi)
         TRAP_CTX_SET_ARG0(trap, c->native_start_info ? c->native_start_info : c->sp);

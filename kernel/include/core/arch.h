@@ -33,6 +33,17 @@
  * conservative fallbacks when an architecture does not override them.
  * init_kthread() calls the bootarg diagnostics once after scheduler startup. */
 void arch_run_bootarg_selftests(void);
+/* Republish the just-switched-in task's user thread-pointer state after
+ * __switch().  Architectures that carry the user TLS in registers kept alive
+ * by the context switch (or that restore it in the switch itself) leave this
+ * as the weak no-op; x86_64 restores MSR_FS_BASE/MSR_KERNEL_GS_BASE here so
+ * the syscall entry/exit path never has to save or swap them. */
+void arch_switch_tls_restore(void);
+/* Make @base the calling task's effective user thread pointer for its next
+ * return to user.  exec(2) rebuilds the trap frame without a context switch,
+ * so on x86_64 the MSR must be written here rather than left to the
+ * switch-in restore.  Weak no-op elsewhere. */
+void arch_publish_user_tls(uint64_t base);
 /* Optional architecture-owned fields following a /proc/cpuinfo processor ID.
  * Return the number of bytes formatted, with snprintf truncation semantics. */
 int arch_cpuinfo_fields(char *buf, size_t size);

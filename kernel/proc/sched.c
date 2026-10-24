@@ -2138,6 +2138,10 @@ static void context_switch_locked(task_t *next) {
         ARCH_TRAP_FAST_RETURN_DISARM(prev->trap_ctx);
     ARCH_SCHED_SWITCH(next);
     __switch(next->kstack);
+    /* Running as the incoming task now.  x86_64 keeps the user's FS/GS bases
+     * out of the syscall path entirely, so the switch-in is the one place that
+     * republishes them (no-op on architectures that carry current in tp). */
+    arch_switch_tls_restore();
     proc_switch_complete();
 }
 

@@ -12,12 +12,8 @@ __switch:
      * overlap with) the trap_context_t at the top of the kernel stack.
      */
 
-    /* Read current task pointer from GS base MSR. */
-    movl  $0xC0000101, %ecx
-    rdmsr
-    shlq  $32, %rdx
-    orq   %rdx, %rax
-    movq  %rax, %r9             /* r9 = current task pointer */
+    /* Read current task pointer from the per-CPU area (offset 0 = task). */
+    movq  %gs:0, %r9
 
     /* r10 = base of current task's kernel stack (= task_context_t location). */
     movq  8(%r9), %r10          /* task->kstack_base */
@@ -76,17 +72,14 @@ __switch:
     movq  80(%rdi), %rsi        /* cr3 */
 
     /* Load the incoming task's FPU/SSE state while %rdi is still the context
-     * pointer (the GS-base setup below clobbers %edi). */
+     * pointer. */
     fxrstor64 128(%rdi)
 
-    /* Set tp via gsbase */
-    movq  %rcx, %rax
-    movl  %eax, %edi
-    shrq  $32, %rax
-    movl  %eax, %edx
-    movl  %edi, %eax
-    movl  $0xC0000101, %ecx
-    wrmsr
+    /* Publish the incoming task pointer through the per-CPU area.  Kernel
+     * GS base stays on the area for the whole kernel residency; the store
+     * replaces the former WRMSR.  arch_switch_tls_restore() (the C code right
+     * after this returns) puts the incoming task's user FS/GS bases back. */
+    movq  %rcx, %gs:0
 
     /* Check if cr3 changed */
     movq  %cr3, %r9

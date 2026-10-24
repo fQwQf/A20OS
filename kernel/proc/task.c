@@ -427,6 +427,10 @@ void proc_task_first_entry(void)
 
     if (t)
         t->first_kernel_entry = 0;
+    /* A brand-new task reaches user through this path, not through the
+     * post-__switch continuation, so publish its thread-pointer bases here
+     * as well (no-op on architectures that carry them in registers). */
+    arch_switch_tls_restore();
     proc_switch_complete();
 #ifndef CONFIG_MCU
     if (t && t->trap_ctx) {

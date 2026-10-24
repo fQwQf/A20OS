@@ -613,6 +613,12 @@ typedef struct task_t {
      * context switches, and remote policy changes. */
     uint64_t           rt_rr_remaining;
     uint64_t           rt_rr_last_account;
+    /* Authoritative user thread-pointer bases (x86_64 consumers only).  The
+     * syscall entry zeroes the trap-frame copies, so the values that survive
+     * a context switch must live here, not in a frame that is rebuilt on
+     * every trap.  Appended to preserve all existing task_t offsets. */
+    uint64_t           arch_tls_fs_base;
+    uint64_t           arch_tls_gs_base;
 } task_t;
 
 _Static_assert(sizeof(proc_park_state_t) == sizeof(int32_t) &&

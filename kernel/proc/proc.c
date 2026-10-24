@@ -708,6 +708,8 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
     TRAP_CTX_SP(trap)   = sp;
     TRAP_CTX_TP(trap)    = tls_tp;
     TRAP_CTX_STATUS(trap) = arch_user_initial_status();
+    /* Task-struct copy is authoritative for the switch-in TLS restore. */
+    t->arch_tls_fs_base = tls_tp;
     uint64_t user_as = pgdir ? arch_make_addr_space_token(pgdir) : 0;
     TRAP_CTX_KScratch0(trap) = user_as;
     trap->kernel_tp = (uintptr_t)t;
