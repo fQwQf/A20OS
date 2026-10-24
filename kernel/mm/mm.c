@@ -208,14 +208,23 @@ void pt_destroy(pt_root_t *pgdir) {
  *   instead of allocating over the mapping.
  * - Returns NULL on allocation failure when alloc != 0.
  */
-pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
+/* Return the table that owns the returned slot along with it. The owner is
+ * borrowed for exactly the PTE's lifetime under the caller's existing MM
+ * locking contract; this does not acquire or extend any page-table lock. */
+static pte_t *pt_walk_with_owner(pt_root_t *pgdir, vaddr_t va, int alloc,
+                                 pte_t **owner_out) {
+    if (owner_out)
+        *owner_out = NULL;
     pte_t *table = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {
         int vpn = arch_pt_vpn(va, level);
         pte_t pte = table[vpn];
 #ifdef CONFIG_SWAP
-        if (pte_is_swap(pte))
+        if (pte_is_swap(pte)) {
+            if (owner_out)
+                *owner_out = table;
             return &table[vpn];
+        }
 #endif
         if (pte & PTE_V) {
             if (arch_pte_is_leaf(pte))
@@ -239,7 +248,14 @@ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
             table = next;
         }
     }
-    return &table[arch_pt_vpn(va, 0)];
+    int vpn = arch_pt_vpn(va, 0);
+    if (owner_out)
+        *owner_out = table;
+    return &table[vpn];
+}
+
+pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
+    return pt_walk_with_owner(pgdir, va, alloc, NULL);
 }
 
 pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, int *level_out,
@@ -375,17 +391,13 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     return pt_map_cls(pgdir, va, pa, flags, MM_ST_ANON_MAPPED);
 }
 
-/*
- * pt_map_cls is pt_map with an explicit per-page status.  The status is the
- * authoritative record of what this page is; the PTE records only the frame
- * and the effective permissions.  Callers that know more than "a private
- * anonymous page" -- a file-backed mapping, a fork-shared page, a VMO page --
- * pass the real class, so a later fault needs no interval lookup.
- */
-int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
-               uint8_t cls) {
-    pte_t *pte = pt_walk(pgdir, va, 1);
-    if (!pte) return -ENOMEM;
+/* Shared leaf installation keeps scalar and bounded fork mapping identical:
+ * replace-reference handling, executable cache maintenance, PTE encoding and
+ * the status sidecar all live in this one operation. `owner` is the table
+ * returned with `pte` by the walk; callers retain the existing locking rules. */
+static void pt_install_leaf_cls(pte_t *owner, pte_t *pte, vaddr_t va,
+                                paddr_t pa, pte_t flags, uint8_t cls)
+{
     if (*pte & PTE_V) {
         paddr_t old_pa = arch_pte_addr(*pte);
         if (old_pa != pa) {
@@ -405,13 +417,97 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
     }
     *pte = arch_pte_leaf(pa, flags);
 
-    /* Record the status in the table that owns this PTE slot. */
-    pte_t *owner = mm_pt_leaf_table(pgdir, va);
+    /* Record status in the exact table returned with this PTE. Reusing the
+     * borrowed owner avoids a second root walk without changing lock rules. */
     if (owner)
         mm_pt_note_present(owner, 0, arch_pt_vpn(va, 0),
                            (uint8_t)(MM_ST_CLS_BYTE(cls) |
                                      (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
                                      mm_pt_prot_bits(flags)));
+}
+
+/* pt_map_cls is pt_map with an explicit per-page status. The status is the
+ * authoritative record of what this page is; the PTE records only the frame
+ * and effective permissions. Callers that know more than a private anonymous
+ * page (for example, file-backed, fork-shared, or VMO pages) pass that class
+ * so a later fault needs no interval lookup. */
+int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+               uint8_t cls) {
+    pte_t *owner = NULL;
+    pte_t *pte = pt_walk_with_owner(pgdir, va, 1, &owner);
+    if (!pte) return -ENOMEM;
+    pt_install_leaf_cls(owner, pte, va, pa, flags, cls);
+    return 0;
+}
+
+/* Map a complete, bounded child-fork batch after validating every input and
+ * destination.  The child is unpublished and exclusively owned by mm_fork;
+ * callers retain the 64 frame pins and account RSS only after success.  Empty
+ * intermediate tables allocated by the one walk belong to that child and are
+ * reclaimed by ordinary mm_destroy if preflight fails. */
+int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
+                      const struct a20_cow_anon_batch_page *pages,
+                      size_t nr)
+{
+    if (!pgdir || !pages || nr == 0 || nr > A20_COW_ANON_BATCH_PAGES ||
+        (start & (PAGE_SIZE - 1)) || start >= USER_VA_LIMIT ||
+        nr > ((uintptr_t)-1 - start) / PAGE_SIZE)
+        return -EINVAL;
+
+    uintptr_t end = start + nr * PAGE_SIZE;
+    if (end > USER_VA_LIMIT)
+        return -EINVAL;
+
+    int first = arch_pt_vpn(start, 0);
+    int entries = arch_pt_level_entries(0);
+    if (first < 0 || entries <= 0 || first >= entries ||
+        nr > (size_t)(entries - first))
+        return -EINVAL;
+    /* The page indexes are contiguous and the run cannot wrap; matching each
+     * endpoint's upper indexes therefore proves the complete span stays in
+     * this same level-0 table on every paging geometry. */
+    vaddr_t last = start + (nr - 1) * PAGE_SIZE;
+    for (int level = 1; level <= ARCH_PT_ROOT_LEVEL; level++) {
+        int first_parent = arch_pt_vpn(start, level);
+        if (arch_pt_vpn(last, level) != first_parent)
+            return -EINVAL;
+    }
+
+    for (size_t i = 0; i < nr; i++) {
+        if (!pfn_valid((pfn_t)pages[i].pfn) ||
+            pages[i].class != MM_ST_ANON_MAPPED ||
+            !(pages[i].flags & PTE_U) || (pages[i].flags & PTE_W))
+            return -EINVAL;
+    }
+
+    pte_t *owner = NULL;
+    pte_t *first_slot = pt_walk_with_owner(pgdir, start, 1, &owner);
+    if (!first_slot || !owner)
+        return -ENOMEM;
+    pt_meta_t *meta = mm_pt_meta(owner);
+    if (!meta || mm_pt_meta_level(meta) != 0)
+        return -EINVAL;
+    if (first_slot != &owner[first])
+        return -EINVAL;
+
+    /* Check raw entries as well as decoded leaves so swap entries, huge
+     * leaves and nonzero invalid/reserved encodings all decline preflight. */
+    for (size_t i = 0; i < nr; i++) {
+        if (owner[first + (int)i] != 0)
+            return -EEXIST;
+    }
+
+    /* No operation below this point can fail.  The caller's frame references
+     * become child mapping references only after this entire function returns. */
+    for (size_t i = 0; i < nr; i++) {
+        vaddr_t va = start + i * PAGE_SIZE;
+        /* PFNs index compact allocator metadata; a range base is required to
+         * recover the corresponding physical address. */
+        paddr_t pa = pfn_to_phys((pfn_t)pages[i].pfn);
+        pt_install_leaf_cls(owner, &owner[first + (int)i], va, pa,
+                            (pte_t)pages[i].flags,
+                            (uint8_t)pages[i].class);
+    }
     return 0;
 }
 
@@ -930,7 +1026,9 @@ retry_access:
     spin_unlock(&t->park_lock);
 
     uint64_t va = user_va;
-    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+    vaddr_t base;
+    size_t mapped_size;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, &base, &mapped_size);
     int allowed = pte && (write ? pte_user_writable(*pte)
                                 : pte_user_readable(*pte));
     mm_seg_t *vma = mm_seg_find(mm, va);
@@ -967,9 +1065,6 @@ retry_access:
         return 1; /* Rust resolves faults only after this lock is released. */
     }
 
-    vaddr_t base;
-    size_t mapped_size;
-    pte = pt_lookup_leaf(mm->pgdir, va, NULL, &base, &mapped_size);
     if (!pte || !(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
         spin_unlock_irqrestore(&mm->lock, task_flags);
         if (shared_write_guard)
@@ -1062,6 +1157,8 @@ extern long a20_usercopy_copy_from_rust(task_t *t, mm_struct_t *mm,
                                         void *dst, const void *src, size_t n);
 extern long a20_usercopy_copy_to_rust(task_t *t, mm_struct_t *mm,
                                       void *dst, const void *src, size_t n);
+extern int a20_usercopy_read_u32_atomic_rust(task_t *t, mm_struct_t *mm,
+                                             uintptr_t src, uint32_t *out);
 extern long a20_user_strncpy_rust(task_t *t, mm_struct_t *mm, char *dst,
                                   const char *src, size_t max);
 extern long a20_user_strnlen_rust(task_t *t, mm_struct_t *mm,
@@ -1075,6 +1172,23 @@ static mm_struct_t *usercopy_pin_mm(task_t *t)
     return mm;
 }
 
+
+int user_read_u32_atomic(const uint32_t *src, uint32_t *out)
+{
+    task_t *t = proc_current();
+    if (!t || !t->mm || !out)
+        return -EFAULT;
+    uintptr_t address = (uintptr_t)src;
+    if ((address & (sizeof(uint32_t) - 1)) != 0 ||
+        !user_range_ok((uint64_t)address, sizeof(uint32_t)))
+        return -EFAULT;
+    mm_struct_t *mm = usercopy_pin_mm(t);
+    if (!mm)
+        return -EFAULT;
+    int result = a20_usercopy_read_u32_atomic_rust(t, mm, address, out);
+    mm_destroy(mm);
+    return result;
+}
 
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();

@@ -74,8 +74,11 @@
 /* VIRTIO_F_VERSION_1 is bit 32 (in the upper 32-bit feature word) */
 #define VIRTIO_F_VERSION_1_BIT   1
 
-/* Queue size (must be power of 2) */
+/* Fixed-depth queues use 32. VirtIO block may negotiate up to 64, so the
+ * shared ring views reserve the maximum storage while other drivers retain
+ * their existing 32-entry runtime depth. */
 #define VIRTIO_QUEUE_SIZE        32
+#define VIRTIO_QUEUE_MAX_SIZE    64
 
 /* Sector size */
 #define VIRTIO_BLK_SECTOR_SIZE   512
@@ -94,7 +97,9 @@ typedef struct {
 typedef struct {
     uint16_t flags;
     uint16_t idx;
-    uint16_t ring[VIRTIO_QUEUE_SIZE];
+    uint16_t ring[VIRTIO_QUEUE_MAX_SIZE];
+    /* Trailing EVENT_IDX field is layout-only; this driver does not
+     * negotiate or access EVENT_IDX. */
     uint16_t used_event;
 } virtq_avail_t;
 
@@ -108,7 +113,8 @@ typedef struct {
 typedef struct {
     uint16_t flags;
     uint16_t idx;
-    virtq_used_elem_t ring[VIRTIO_QUEUE_SIZE];
+    virtq_used_elem_t ring[VIRTIO_QUEUE_MAX_SIZE];
+    /* Trailing EVENT_IDX field is layout-only; EVENT_IDX is not negotiated. */
     uint16_t avail_event;
 } virtq_used_t;
 

@@ -6,6 +6,7 @@ Use a separate output directory for every experiment; no base image is changed.
 """
 from __future__ import annotations
 import argparse
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -36,6 +37,10 @@ def locks(text):
     return result
 
 
+def host_utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
@@ -45,12 +50,17 @@ def main():
     ap.add_argument("--timeout", type=int, default=40)
     ap.add_argument("--kernel", type=Path)
     ap.add_argument("--install", action="append", default=[], help="hostfile:/guest/path")
+    ap.add_argument("--replace-install", action="append", default=[],
+                    help="guest path to remove from the private image before installing it")
     ap.add_argument("--no-counters", action="store_true")
     ap.add_argument("--preserve-counter-state", action="store_true",
                     help="with --no-counters, leave state untouched for lifecycle diagnostics")
     args = ap.parse_args()
     if args.preserve_counter_state and not args.no_counters:
         ap.error("--preserve-counter-state requires --no-counters")
+    install_paths = {item.split(":", 1)[1] for item in args.install if ":" in item}
+    if any(path not in install_paths for path in args.replace_install):
+        ap.error("--replace-install must name a path supplied by --install")
     config = json.loads(args.config.read_text())
     source = json.loads(args.baseline.read_text())
     args.out.mkdir(parents=True, exist_ok=False)
@@ -66,6 +76,7 @@ def main():
                 "config": config, "runner_sha256": bench.sha(__file__), "samples": [], "boots": [],
                 "kernel_sha256": bench.sha(qemu[qemu.index("-kernel") + 1]), "base_image_sha256": bench.sha(base),
                 "counters_enabled": not args.no_counters,
+                "replace_install": args.replace_install,
                 "counter_policy": ("preserve" if args.preserve_counter_state else
                                    "disable_before_each_case_and_audit_after" if args.no_counters else
                                    "diagnostic_snapshots")}
@@ -79,12 +90,21 @@ def main():
             if side == "linux":
                 for case in config:
                     argv = case.get("host_argv") or source["host_prefix"] + [str(root / "usr/bin" / case["argv"][0]), *case["argv"][1:]]
+                    started_utc = host_utc_now()
+                    started_ns = time.monotonic_ns()
                     start = time.monotonic()
                     proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=args.timeout)
+                    wall_seconds = time.monotonic() - start
+                    finished_ns = time.monotonic_ns()
+                    finished_utc = host_utc_now()
                     output = proc.stdout + proc.stderr
                     (out / f"{run}-linux-{case['name']}.log").write_text(output)
                     row = {"run": run, "side": side, "case": case["name"], "exit_code": proc.returncode,
-                           "wall_seconds": time.monotonic() - start, "output": output, "argv": argv}
+                           "wall_seconds": wall_seconds, "output": output, "argv": argv,
+                           "host_started_utc": started_utc, "host_finished_utc": finished_utc,
+                           "host_started_monotonic_ns": started_ns,
+                           "host_finished_monotonic_ns": finished_ns,
+                           "host_timestamp_semantics": "subprocess_roundtrip"}
                     manifest["samples"].append(row)
                     save()
                     print(f"{run} linux {case['name']}: exit={proc.returncode}", flush=True)
@@ -116,6 +136,12 @@ def main():
             for install in args.install:
                 src, dst = install.split(":", 1)
                 installs.append((Path(src).resolve(), dst))
+            for dst in args.replace_install:
+                # Replacement is deliberately scoped to this run's private
+                # image.  debugfs write cannot replace an existing inode and
+                # paths such as /bin/echo may be BusyBox symlinks in the base.
+                subprocess.run(["/usr/sbin/debugfs", "-w", "-R", f"rm {dst}",
+                                str(private)], check=True, capture_output=True)
             for src, dst in installs:
                 subprocess.run(["/usr/sbin/debugfs", "-w", "-R", f"write {src} {dst}", str(private)],
                                check=True, capture_output=True)
@@ -133,9 +159,17 @@ def main():
                     if not args.no_counters:
                         pre, _ = guest.until(f"\nDIAG_PRE_END_{token}\\r?\\n".encode(), 20)
                         pre = pre.decode(errors="replace")
+                    started_utc = host_utc_now()
+                    started_ns = time.monotonic_ns()
                     output, rc, wall = guest.result(token, args.timeout)
+                    finished_ns = time.monotonic_ns()
+                    finished_utc = host_utc_now()
                     row = {"run": run, "side": side, "case": case["name"], "exit_code": rc,
-                           "wall_seconds": wall, "output": output, "argv": case["argv"]}
+                           "wall_seconds": wall, "output": output, "argv": case["argv"],
+                           "host_started_utc": started_utc, "host_finished_utc": finished_utc,
+                           "host_started_monotonic_ns": started_ns,
+                           "host_finished_monotonic_ns": finished_ns,
+                           "host_timestamp_semantics": "collection_roundtrip_not_command_boundary"}
                     if not args.no_counters:
                         post, _ = guest.until(f"\nDIAG_POST_END_{token}\\r?\\n".encode(), 20)
                         post = post.decode(errors="replace")

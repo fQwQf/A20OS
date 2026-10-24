@@ -20,8 +20,7 @@ size_t frame_free_count(void);
 
 /* Page table helpers and boot_pgdir are in arch/mm.h and arch/platform.h */
 
-#define PA2PFN(pa) ((paddr_t)(pa) >> PAGE_SIZE_BITS)
-#define PFN2PA(pfn) ((paddr_t)(pfn) << PAGE_SIZE_BITS)
+/* PFNs are compact metadata indices; use mm/frame.h for PA conversions. */
 
 static inline paddr_t va_to_pa(const void *va) {
     return (paddr_t)((uint64_t)(uintptr_t)va - PAGE_OFFSET);
@@ -36,6 +35,35 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
  * so a later fault resolves it from the metadata instead of a VMA. */
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
+
+/* Bounded fork-COW record shared by the C and Rust clone transaction. */
+#define A20_COW_ANON_BATCH_PAGES 64
+struct a20_cow_anon_batch_page {
+    uint32_t pfn;
+    uint32_t class;
+    uintptr_t flags;
+};
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 16,
+               "LP64 Rust/C anonymous batch page ABI");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(struct a20_cow_anon_batch_page) == 12,
+               "ILP32 Rust/C anonymous batch page ABI");
+#endif
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, pfn) == 0,
+               "anonymous batch pfn offset");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, class) == 4,
+               "anonymous batch class offset");
+_Static_assert(__builtin_offsetof(struct a20_cow_anon_batch_page, flags) == 8,
+               "anonymous batch flags offset");
+
+/* Map a bounded anonymous fork batch into an unpublished child whose page
+ * table is exclusively owned by the caller.  The caller owns the frame pins
+ * and updates child RSS; this routine validates the whole run before writing
+ * any leaf and does not acquire/drop frame references. */
+int pt_map_anon_batch(pt_root_t *pgdir, vaddr_t start,
+                      const struct a20_cow_anon_batch_page *pages,
+                      size_t nr);
 /* cls is the status class the huge leaf carries (MM_ST_ANON_MAPPED for a
  * fresh THP fault, the parent's class across fork, the source's class across
  * mremap).  A huge leaf is ONE entry of its table, so it gets ONE status

@@ -10,8 +10,14 @@
 #define BCACHE_MAX_BLOCKS   1024
 #define BCACHE_HASH_BUCKETS 1024
 #define PCACHE_PAGE_SIZE    4096
-#define PCACHE_MAX_PAGES    2000
-#define PCACHE_HASH_BUCKETS 512
+/* Per-cache payload target: total RAM / 32 frames, capped at 16384 slots
+ * (64 MiB of payload), with the historical 2000-slot floor. On smaller RAM
+ * the floor may exceed RAM/32. Payload frames stay lazy; descriptors and
+ * additional caches are outside this per-cache payload target. */
+#define PCACHE_MIN_PAGES    2000
+#define PCACHE_MAX_PAGES    16384
+#define PCACHE_TARGET_FRAME_DIVISOR 32
+#define PCACHE_HASH_BUCKETS 4096
 #define PCACHE_FILL_LOCKS   64
 #define BCACHE_READ_BATCH_MAX_PAGES 16
 /* Per-hash-group spinlocks for both the 512-byte and 4 KiB pools.  A warm hit
@@ -45,17 +51,36 @@ typedef struct pcache_entry {
      * write it to its home location.  It is also pinned against eviction,
      * because its only copy of the new metadata lives in this cache. */
     int      held;
-    char     data[PCACHE_PAGE_SIZE];
+    /* Slot-owned order-0 frame, allocated on first fill and freed at destroy. */
+    char    *data;
     struct pcache_entry *prev, *next;
     struct pcache_entry *hnext;
 } pcache_entry_t;
 
-/* kmalloc's largest contiguous allocation is 8 MiB.  Keep the enlarged page
- * pool in the same buddy order as the old 1024-entry pool, with room for the
- * allocator header, so the optimization does not raise allocation pressure. */
-_Static_assert(sizeof(pcache_entry_t) * PCACHE_MAX_PAGES + 64 <=
-                   8U * 1024U * 1024U,
-               "block page cache exceeds kmalloc maximum order");
+/* Dirty-page index; all fields and bitmap words are protected by bc->lock. */
+typedef struct pcache_dirty_set {
+    size_t count;
+    pcache_entry_t *pool;
+    size_t pool_count;
+    uint64_t *words;
+} pcache_dirty_set_t;
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(pcache_dirty_set_t) == 32,
+               "LP64 page dirty-set layout changed");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(pcache_dirty_set_t) == 16,
+               "ILP32 page dirty-set layout changed");
+#endif
+
+/* The page pool contains compact descriptors only (72 bytes LP64, 56 bytes
+ * ILP32). Payload pages are separate order-0 frames allocated on first fill. */
+#if __SIZEOF_POINTER__ == 8
+_Static_assert(sizeof(pcache_entry_t) == 72,
+               "LP64 block page-cache descriptor layout changed");
+#elif __SIZEOF_POINTER__ == 4
+_Static_assert(sizeof(pcache_entry_t) == 56,
+               "ILP32 block page-cache descriptor layout changed");
+#endif
 
 typedef struct bcache {
     block_dev_t     *dev;
@@ -69,7 +94,7 @@ typedef struct bcache {
     int              pool_size;
     int              page_pool_size;
     size_t           dirty_blocks;
-    size_t           dirty_pages;
+    pcache_dirty_set_t dirty_pages;
     spinlock_t       lock;
     /* Same-page fills serialize on one shard while unrelated cache misses
      * may issue block I/O concurrently. */
@@ -99,6 +124,7 @@ typedef struct bcache {
 typedef struct bcache_stats {
     size_t caches;
     size_t block_pool_bytes;
+    /* Bytes in currently allocated 4 KiB payload frames; excludes descriptors. */
     size_t page_pool_bytes;
     size_t valid_blocks;
     size_t dirty_blocks;

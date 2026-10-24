@@ -102,4 +102,18 @@ static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     return pte;
 }
 
+/* Generic huge-map callers use this encoder only for a PMD block: they have
+ * already checked 2 MiB VA/PA alignment.  Bit 7 is PS in a PDE block, while
+ * that same bit is PAT in a 4 KiB PTE; never use this encoder for a base leaf.
+ * Clear the software-only 4 KiB marker (bit 10) before setting hardware PS.
+ * arch_pte_leaf preserves U/RW/A/D/COW/G and translates PTE_X to NX state. */
+#define ARCH_HAS_PTE_BLOCK 1
+/* Flags that are meaningful only on a PMD block. In particular, bit 7 is
+ * PAT in a 4 KiB PTE, so demotion must not carry block PS into base leaves. */
+#define ARCH_PTE_BLOCK_ONLY_FLAGS PTE_PS
+static inline uint64_t arch_pte_block(paddr_t pa, uint64_t flags) {
+    uint64_t pte = arch_pte_leaf(pa, flags);
+    return (pte & ~PTE_LEAF) | PTE_PS;
+}
+
 #endif

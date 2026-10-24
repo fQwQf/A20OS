@@ -46,6 +46,9 @@
 #define FUTEX_BUCKETS      64
 #define FUTEX_WAKE_BATCH   64
 
+_Static_assert(sizeof(int) == sizeof(uint32_t),
+               "futex word and atomic usercopy width must match");
+
 extern int a20_futex_wait_ticks_rust(int *uaddr, int expected, uint64_t ticks,
                                      uint32_t bitset, int private);
 extern unsigned a20_futex_bucket_index(uintptr_t vkey, uintptr_t pkey);
@@ -257,7 +260,15 @@ void *a20_futex_task_mm(void *opaque_task)
 
 int a20_futex_preflight_word(const int *addr, int *out)
 {
-    return copy_from_user(out, addr, sizeof(*out)) < 0 ? -EFAULT : 0;
+    if (!out)
+        return -EFAULT;
+    uint32_t bits;
+    if (user_read_u32_atomic((const uint32_t *)(const void *)addr, &bits) < 0)
+        return -EFAULT;
+    /* Preserve the exact int object representation without a usercopy or an
+     * implementation-defined uint32_t-to-int conversion. */
+    memcpy(out, &bits, sizeof(bits));
+    return 0;
 }
 
 int a20_futex_mapping_lock(void *opaque_task, int *addr, int **word,
@@ -921,7 +932,9 @@ int futex_pi_acquire(int *uaddr, int try_only)
         }
 
         int wr = futex_wait_ticks(uaddr, wait_val, 0, FUTEX_BITSET_MATCH_ANY);
-        if (wr < 0 && wr != -ETIMEDOUT)
+        /* Unlock may change the word before wait admission. Recheck ownership
+         * on EAGAIN just as after a wake; it is not a failed blocking lock. */
+        if (wr < 0 && wr != -ETIMEDOUT && wr != -EAGAIN)
             return wr;
     }
 }

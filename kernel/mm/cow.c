@@ -141,6 +141,14 @@ extern int a20_fork_clone_page_rust(mm_struct_t *child, mm_struct_t *parent,
                                     vaddr_t va, int shared);
 extern int a20_cow_clone_leaf_rust(mm_struct_t *child, mm_struct_t *parent,
                                    vaddr_t va, int level, int shared);
+extern int a20_cow_clone_leaf_at_rust(mm_struct_t *child, mm_struct_t *parent,
+                                      vaddr_t va, int level, int shared,
+                                      int checked, pte_t *slot, pte_t *node);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+extern int a20_cow_clone_anon_batch_rust(mm_struct_t *child,
+                                         mm_struct_t *parent, vaddr_t va,
+                                         pte_t *node);
+#endif
 
 struct a20_cow_src {
     void     *pcp;
@@ -283,7 +291,29 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
     paddr_t pa = pfn_to_phys(pfn);
     if (level > 0)
         return pt_map_huge(child, va, pa, (pte_t)flags, (uint8_t)class);
-    return pt_map(child->pgdir, va, pa, (pte_t)flags);
+    /* Preserve source backing metadata for both 4K and huge leaves. */
+    return pt_map_cls(child->pgdir, va, pa, (pte_t)flags, (uint8_t)class);
+}
+
+/* Narrow bridge from the Rust batch transaction to the child page-table
+ * mapper.  Its all-or-none contract lets Rust transfer all 64 source pins
+ * only after every child leaf is installed. */
+int a20_cow_map_child_anon_batch(
+    void *child_ptr, uintptr_t va,
+    const struct a20_cow_anon_batch_page *pages, size_t nr)
+{
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    mm_struct_t *child = child_ptr;
+    if (!child || !child->pgdir)
+        return -EINVAL;
+    return pt_map_anon_batch(child->pgdir, va, pages, nr);
+#else
+    (void)child_ptr;
+    (void)va;
+    (void)pages;
+    (void)nr;
+    return -EOPNOTSUPP;
+#endif
 }
 
 /* MM_FORK_SNAPSHOT_PIN: snapshot and pin the source leaf under the parent's
@@ -298,20 +328,15 @@ int a20_cow_map_child(void *child_ptr, uintptr_t va, uint32_t pfn,
  * ARCH_HAS_PGTABLE_OPS backends.  arm32's short-descriptor page tables have
  * neither: there is no separate node lock to take (the whole clone runs under
  * parent->lock, see mm_fork()) and no status byte to keep in step. */
-int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
-                           struct a20_cow_shared_snapshot *out)
+/* `src_pte` and `stab` can come either from a fresh root walk or from the
+ * active C walker. In the latter case parent->lock keeps the borrowed table
+ * alive. We still take the node lock and re-read the slot before pinning; the
+ * borrowed address only avoids rediscovering the same leaf from the root. */
+static int a20_cow_share_snapshot_from_slot(
+    mm_struct_t *parent, uintptr_t va, int level, pte_t *src_pte, pte_t *stab,
+    struct a20_cow_shared_snapshot *out)
 {
-    mm_struct_t *parent = parent_ptr;
-    if (!out)
-        return 0;
-    memset(out, 0, sizeof(*out));
-    out->pfn = PFN_NONE;
-    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
-    if (!src_pte)
-        return 0;
-    pte_t *stab = NULL;
 #if defined(ARCH_HAS_PGTABLE_OPS)
-    stab = mm_pt_leaf_table(parent->pgdir, va);
     if (stab)
         mm_pt_node_lock(stab);
 #endif
@@ -342,6 +367,58 @@ int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
     out->pcp = pcp;
     out->kind = pcp ? 2 : (is_vmo ? 0 : 1);
     return 1;
+}
+
+int a20_cow_share_snapshot(void *parent_ptr, uintptr_t va, int level,
+                           struct a20_cow_shared_snapshot *out)
+{
+    mm_struct_t *parent = parent_ptr;
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+    pte_t *src_pte = pt_lookup_leaf(parent->pgdir, va, NULL, NULL, NULL);
+    if (!src_pte)
+        return 0;
+    pte_t *stab = NULL;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    stab = mm_pt_leaf_table(parent->pgdir, va);
+#endif
+    return a20_cow_share_snapshot_from_slot(parent, va, level, src_pte, stab,
+                                            out);
+}
+
+/* The walker owns parent->lock and lends this leaf location only for the
+ * duration of the clone call. Validate its geometry without another root
+ * descent, then let the shared snapshot take node exclusion, re-read the PTE,
+ * and pin the backing reference before it returns. */
+int a20_cow_share_snapshot_at(void *parent_ptr, uintptr_t va, int level,
+                              pte_t *slot, pte_t *node,
+                              struct a20_cow_shared_snapshot *out)
+{
+    mm_struct_t *parent = parent_ptr;
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+    out->pfn = PFN_NONE;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    if (level < 0 || level > ARCH_PT_ROOT_LEVEL)
+        return 0;
+    int entries = arch_pt_level_entries(level);
+    int index = arch_pt_vpn(va, level);
+    if (!slot || !node || entries <= 0 || index < 0 || index >= entries ||
+        slot != &node[index])
+        return 0;
+    return a20_cow_share_snapshot_from_slot(parent, va, level, slot, node,
+                                            out);
+#else
+    (void)parent;
+    (void)va;
+    (void)level;
+    (void)slot;
+    (void)node;
+    return 0;
+#endif
 }
 
 void a20_cow_share_downgrade(void *parent_ptr, uintptr_t va, int level,
@@ -385,6 +462,153 @@ void a20_cow_share_unlock(const struct a20_cow_shared_snapshot *snapshot)
     (void)snapshot;
 #endif
 }
+
+#ifndef CONFIG_NOMMU
+#if defined(ARCH_HAS_PGTABLE_OPS)
+/* The child is unpublished and has no concurrent page-table writer.  Use the
+ * absent-subtree span reported by one lookup when it covers the whole batch;
+ * otherwise accept only an absent level-0 slot and inspect that stable table
+ * with one non-allocating walk.  A returned leaf (including huge/swap) always
+ * declines before taking the source node lock or changing parent references. */
+static int cow_child_batch_empty(mm_struct_t *child, uintptr_t start,
+                                 uintptr_t bytes, int first)
+{
+    if (!child || !child->pgdir || bytes == 0 || first < 0)
+        return 0;
+    int entries = arch_pt_level_entries(0);
+    if (entries <= 0 || first >= entries ||
+        first > entries - A20_COW_ANON_BATCH_PAGES)
+        return 0;
+
+    int level = -1;
+    vaddr_t base = 0;
+    size_t span = 0;
+    pte_t *leaf = pt_lookup_leaf(child->pgdir, start, &level, &base, &span);
+    if (leaf)
+        return 0;
+    if (level < 0 || level > ARCH_PT_ROOT_LEVEL || span == 0 || base > start)
+        return 0;
+
+    uintptr_t offset = start - base;
+    if (offset <= span && bytes <= span - offset)
+        return 1;
+
+    if (level != 0 || base != start || span != PAGE_SIZE ||
+        arch_pt_vpn(start, 0) != first)
+        return 0;
+    pte_t *first_slot = pt_walk(child->pgdir, start, 0);
+    if (!first_slot)
+        return 0;
+    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+        if (first_slot[i] != 0)
+            return 0;
+    }
+    return 1;
+}
+#endif /* ARCH_HAS_PGTABLE_OPS */
+
+/* The caller is the active level-0 C walker under parent->lock. `node` is its
+ * borrowed leaf table, whose lifetime is protected until this call returns;
+ * this helper holds only this one source-node lock at a time. Preflight, pin,
+ * and downgrade one dense anonymous 4K run. Zero is side-effect-free fallback. */
+int a20_cow_share_anon_batch_snapshot(
+    void *parent_ptr, void *child_ptr, uintptr_t start, pte_t *node,
+    struct a20_cow_anon_batch_page *out)
+{
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    mm_struct_t *parent = parent_ptr;
+    mm_struct_t *child = child_ptr;
+    const uintptr_t bytes = A20_COW_ANON_BATCH_PAGES * PAGE_SIZE;
+    if (!parent || !child || !parent->pgdir || !child->pgdir || !node || !out)
+        return 0;
+    if ((start & (PAGE_SIZE - 1)) || start > (uintptr_t)-1 - bytes)
+        return 0;
+
+    int first = arch_pt_vpn(start, 0);
+    int entries = arch_pt_level_entries(0);
+    if (first < 0 || entries <= 0)
+        return 0;
+    if (first % A20_COW_ANON_BATCH_PAGES != 0 ||
+        first > entries - A20_COW_ANON_BATCH_PAGES)
+        return 0;
+    pt_meta_t *node_meta = mm_pt_meta(node);
+    if (!node_meta || mm_pt_meta_level(node_meta) != 0)
+        return 0;
+
+    uintptr_t end = start + bytes;
+    /* mm_fork() holds parent->lock, so this single VMA record and its policy
+     * remain stable for the complete source snapshot. */
+    mm_seg_t *vma = mm_seg_find(parent, start);
+    const uint64_t excluded = VM_FILE | VM_SHARED | VM_PFNMAP | VM_VMO |
+                              VM_DONTFORK | VM_WIPEONFORK;
+    if (!vma || start < vma->start || end > vma->end)
+        return 0;
+    if ((vma->vm_flags & (VM_ANON | excluded)) != VM_ANON)
+        return 0;
+
+    /* Inspect the unpublished destination before source pinning/downgrade.
+     * An absent upper subtree costs one lookup; an existing empty L0 table
+     * costs one lookup plus one walk instead of 64 repeated root walks. */
+    if (!cow_child_batch_empty(child, start, bytes, first))
+        return 0;
+
+    pte_t *slots[A20_COW_ANON_BATCH_PAGES];
+    pfn_t pfns[A20_COW_ANON_BATCH_PAGES];
+    mm_pt_node_lock(node);
+    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+        int index = first + (int)i;
+        pte_t *slot = &node[index];
+        pte_t source = *slot;
+        uint8_t status = mm_pt_peek(node, 0, index);
+        if (!(source & PTE_V) || !arch_pte_is_leaf(source) ||
+            MM_ST_GET_CLASS(status) != MM_ST_ANON_MAPPED ||
+            mm_pt_safe_test(node, 0, index, MM_SAFE_UFFD) ||
+            mm_pt_safe_test(node, 0, index, MM_SAFE_NO_FA)) {
+            mm_pt_node_unlock(node);
+            return 0;
+        }
+        pfn_t pfn = phys_to_pfn(arch_pte_addr(source));
+        if (!pfn_valid(pfn)) {
+            mm_pt_node_unlock(node);
+            return 0;
+        }
+        slots[i] = slot;
+        pfns[i] = pfn;
+        out[i].pfn = pfn;
+        out[i].class = MM_ST_GET_CLASS(status);
+        out[i].flags = mm_cow_flags(source);
+    }
+
+    /* All 64 entries are validated before any reference or PTE changes. */
+    frame_get_many(pfns, A20_COW_ANON_BATCH_PAGES);
+    for (unsigned i = 0; i < A20_COW_ANON_BATCH_PAGES; i++) {
+        pte_t source = *slots[i];
+        if (source & (PTE_W | PTE_COW)) {
+            struct a20_cow_shared_snapshot snap = {0};
+            uintptr_t va = start + (uintptr_t)i * PAGE_SIZE;
+            snap.slot = slots[i];
+            snap.node = node;
+            snap.pa = arch_pte_addr(source);
+            snap.pfn = pfns[i];
+            snap.raw_flags = arch_pte_flags(source);
+            snap.cow_flags = mm_cow_flags(source);
+            snap.w_or_cow = 1;
+            snap.class = MM_ST_ANON_MAPPED;
+            a20_cow_share_downgrade(parent, va, 0, &snap, snap.cow_flags);
+        }
+    }
+    mm_pt_node_unlock(node);
+    return 1;
+#else
+    (void)parent_ptr;
+    (void)child_ptr;
+    (void)start;
+    (void)node;
+    (void)out;
+    return 0;
+#endif /* ARCH_HAS_PGTABLE_OPS */
+}
+#endif /* !CONFIG_NOMMU */
 
 int a20_cow_requires_private_copy(void)
 {
@@ -453,6 +677,28 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
         if (entry_base >= end)
             break;
 
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+        /* Try only a complete aligned run contained in the requested range.
+         * The C snapshot does the all-or-nothing preflight; zero keeps the
+         * existing scalar path untouched, and success skips exactly 64 leaves. */
+        if (!shared && level == 0 && i % A20_COW_ANON_BATCH_PAGES == 0 &&
+            entries - i >= A20_COW_ANON_BATCH_PAGES && entry_base >= start &&
+            entry_base <= (vaddr_t)-1 - A20_COW_ANON_BATCH_PAGES * PAGE_SIZE) {
+            vaddr_t batch_end =
+                entry_base + A20_COW_ANON_BATCH_PAGES * PAGE_SIZE;
+            if (batch_end <= end) {
+                int batch = a20_cow_clone_anon_batch_rust(
+                    child, parent, entry_base, table);
+                if (batch < 0)
+                    return batch;
+                if (batch > 0) {
+                    i += A20_COW_ANON_BATCH_PAGES - 1;
+                    continue;
+                }
+            }
+        }
+#endif
+
         pte_t *pte = &table[i];
 #ifdef CONFIG_SWAP
         if (level == 0 && pte_is_swap(*pte)) {
@@ -472,10 +718,20 @@ static int mm_fork_clone_level(mm_struct_t *child, mm_struct_t *parent,
              * starting in its middle must not acquire an extra reference. */
             if (checked && entry_base < start)
                 continue;
-            int r = checked
-                        ? mm_fork_clone_page(child, parent, entry_base, shared)
-                        : mm_fork_clone_leaf(child, parent, pte, entry_base, level,
-                                             shared);
+            int r;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+            /* This leaf and its table came from the active walker. The caller
+             * holds parent->lock, so Rust can apply checked policy/dst rules
+             * and the C snapshot can validate/pin this exact slot without a
+             * second root walk. */
+            r = a20_cow_clone_leaf_at_rust(child, parent, entry_base, level,
+                                           shared, checked, pte, table);
+#else
+            r = checked
+                    ? mm_fork_clone_page(child, parent, entry_base, shared)
+                    : mm_fork_clone_leaf(child, parent, pte, entry_base, level,
+                                         shared);
+#endif
             if (r < 0)
                 return r;
             continue;
@@ -509,6 +765,16 @@ int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
 
 #else /* CONFIG_NOMMU */
 
+/* Rust keeps one cross-architecture clone entry point. NOMMU has no leaves to
+ * batch, so its C snapshot hook is an unconditional no-op fallback. */
+int a20_cow_share_anon_batch_snapshot(void *parent, void *child,
+                                      uintptr_t start, pte_t *node,
+                                      struct a20_cow_anon_batch_page *out)
+{
+    (void)parent; (void)child; (void)start; (void)node; (void)out;
+    return 0;
+}
+
 /* There is no page table to clone and nothing to copy: a NOMMU address space is
  * flat, so every mapping in it is already shared between parent and child and
  * there is no write protection to drop.  Returning 0 is the honest answer, and
@@ -532,6 +798,17 @@ int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
 int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
                        pte_t *src_pte, vaddr_t va, int level, int shared)
 { (void)child; (void)parent; (void)src_pte; (void)va; (void)level; (void)shared; return 0; }
+
+int a20_cow_map_child_anon_batch(
+    void *child, uintptr_t va,
+    const struct a20_cow_anon_batch_page *pages, size_t nr)
+{
+    (void)child;
+    (void)va;
+    (void)pages;
+    (void)nr;
+    return -EOPNOTSUPP;
+}
 
 int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
                                 pte_t *table, int level, vaddr_t base,

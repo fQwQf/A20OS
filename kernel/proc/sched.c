@@ -1690,6 +1690,11 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
         if (remote == local || !smp_cpu_is_online(remote))
             continue;
         proc_runq_t *rrq = &sched_runq[remote];
+        /* This is only a hint to avoid an empty-queue lock round trip. Like
+         * trylock and the later scan, it may miss a concurrent enqueue; the
+         * waker/rescheduler or a later idle pass will check that work again. */
+        if (__atomic_load_n(&rrq->nr_running, __ATOMIC_RELAXED) == 0)
+            continue;
         uint64_t rrf = 0;
         if (!spin_trylock_irqsave(&rrq->lock, &rrf))
             continue;
@@ -1741,7 +1746,7 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
  * current-versus-next and publish the context switch.  A path holding a
  * runqueue lock must never acquire a park_lock (INV-P4b).
  */
-task_t *proc_runq_pick_local(void)
+static task_t *sched_runq_pick_local(int *rt_throttled_out)
 {
     unsigned cpu = cpu_current_id();
     task_t *picked = NULL;
@@ -1808,9 +1813,20 @@ task_t *proc_runq_pick_local(void)
 
     if (!picked)
         __atomic_fetch_add(&sched_pick[cpu].empty_picks, 1, __ATOMIC_RELAXED);
+    /* Return the RT budget snapshot collected by this pick's locked account.
+     * sched() calls this helper with IRQs disabled and consumes the snapshot
+     * without relocking or reading the timer again. The public wrapper keeps
+     * the old picker IRQ behavior for callers with IRQs enabled. */
+    if (rt_throttled_out)
+        *rt_throttled_out = rt_throttled;
     RUNQ_UNLOCK_IRQ(cpu, rf);
     __atomic_fetch_sub(&sched_pick_parallel.active, 1, __ATOMIC_RELEASE);
     return picked;
+}
+
+task_t *proc_runq_pick_local(void)
+{
+    return sched_runq_pick_local(NULL);
 }
 /* SCHED_LOCAL_PICK_LOCK_SPLIT_END */
 
@@ -2133,15 +2149,13 @@ void context_switch(task_t *next) {
 
 /* SCHED_SWITCH_PATH_END */
 
-/* Revalidate a current task after an empty pick or a late wake.  RR quantum
- * renewal belongs in the same park-lock section as the keep decision; fair
- * tasks need neither a second lock acquisition nor another clock sample. */
-static int sched_try_keep_current(task_t *cur, int rt_throttled)
+/* Caller holds cur->park_lock.  RR quantum renewal belongs in the same
+ * critical section as the keep decision; fair tasks need no clock sample. */
+static int sched_try_keep_current_locked(task_t *cur, int rt_throttled)
 {
     if (!cur)
         return 0;
     int keep = 0;
-    uint64_t flags = spin_lock_irqsave(&cur->park_lock);
     if (!rt_throttled && !cur->affinity_migrate_pending &&
         (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
         if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
@@ -2153,6 +2167,16 @@ static int sched_try_keep_current(task_t *cur, int rt_throttled)
             rt_rr_dispatch_task(cur, timer_get_ticks());
         keep = 1;
     }
+    return keep;
+}
+
+/* Revalidate after a late wake, when sched() no longer holds park_lock. */
+static int sched_try_keep_current(task_t *cur, int rt_throttled)
+{
+    if (!cur)
+        return 0;
+    uint64_t flags = spin_lock_irqsave(&cur->park_lock);
+    int keep = sched_try_keep_current_locked(cur, rt_throttled);
     spin_unlock_irqrestore(&cur->park_lock, flags);
     return keep;
 }
@@ -2202,7 +2226,8 @@ void sched(void) {
      * task's own park_lock, and only after proc_runq_pick_local() has released
      * the runqueue lock, so the two never nest (INV-P4b).
      */
-    task_t *next = proc_runq_pick_local();
+    int rt_throttled = 0;
+    task_t *next = sched_runq_pick_local(&rt_throttled);
     /*
      * Window W1: between the pick and the park_lock acquires below, the picked
      * task is dispatch-owned but its state has not been re-validated.  The
@@ -2219,10 +2244,16 @@ void sched(void) {
      * exit, debug kill), which is exactly what the global lock used to exclude.
      */
     task_t *current = proc_current();
-    int current_rt_throttled = sched_rt_throttled_local() && sched_task_rt(current);
+    /* Reuse the runqueue pick's in-lock RT accounting result. The pick and
+     * this decision run on one CPU with IRQs masked, so no intervening local
+     * RT-accounting update can invalidate the snapshot. */
+    int current_rt_throttled = rt_throttled && sched_task_rt(current);
     task_t *picked = next;
     uint64_t nf = 0, cf = 0;
-    proc_lock_two_tasks(picked, current, &nf, &cf);
+    /* The pair helper treats a NULL first task as an empty lock set.  Keep
+     * current first so an empty pick still acquires its park_lock; the helper
+     * itself orders two non-NULL tasks by address. */
+    proc_lock_two_tasks(current, picked, &cf, &nf);
     if (current_rt_throttled && current && current->state == PROC_RUNNING)
         current->state = PROC_READY;
     if (next) {
@@ -2257,11 +2288,18 @@ void sched(void) {
     if (next) {
         next->exec_start = now;
         next->eevdf_last_account = now;
-        proc_unlock_two_tasks(picked, current, nf, cf);
+        proc_unlock_two_tasks(current, picked, cf, nf);
         context_switch_locked(next);
         goto out;
     }
-    proc_unlock_two_tasks(picked, current, nf, cf);
+    /* The empty-pick keep decision can reuse current's park_lock from the
+     * two-task critical section.  The W1/W2 checks below remain necessary
+     * when this locked check declines to keep and a wake races after unlock. */
+    if (sched_try_keep_current_locked(current, current_rt_throttled)) {
+        proc_unlock_two_tasks(current, picked, cf, nf);
+        goto out;
+    }
+    proc_unlock_two_tasks(current, picked, cf, nf);
 
     /*
      * A wake can race after the empty runqueue pick while the blocked task is

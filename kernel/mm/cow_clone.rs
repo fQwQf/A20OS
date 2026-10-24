@@ -37,6 +37,8 @@ const VM_WIPEONFORK: u64 = 1 << 10;
 const EEXIST: i32 = -17;
 const EAGAIN: i32 = -11;
 const ENOMEM: i32 = -12;
+const ANON_BATCH_PAGES: usize = 64;
+const PAGE_SIZE: usize = 4096;
 
 const PFN_NONE: u32 = u32::MAX;
 
@@ -80,6 +82,15 @@ struct SharedSnapshot {
     kind: i32,
 }
 
+/// Optional leaf location borrowed from the C walker while parent->lock is
+/// held. Keeping the pair together prevents a partial hint from silently
+/// falling back to a fresh root walk.
+#[derive(Clone, Copy)]
+struct LeafLocation {
+    slot: *mut c_void,
+    node: *mut c_void,
+}
+
 #[cfg(target_pointer_width = "64")]
 const _: [(); 64] = [(); core::mem::size_of::<SharedSnapshot>()];
 #[cfg(target_pointer_width = "32")]
@@ -116,6 +127,14 @@ unsafe extern "C" {
         level: i32,
         out: *mut SharedSnapshot,
     ) -> i32;
+    fn a20_cow_share_snapshot_at(
+        parent: *mut c_void,
+        va: usize,
+        level: i32,
+        slot: *mut c_void,
+        node: *mut c_void,
+        out: *mut SharedSnapshot,
+    ) -> i32;
     fn a20_cow_share_downgrade(
         parent: *mut c_void,
         va: usize,
@@ -127,6 +146,123 @@ unsafe extern "C" {
     fn a20_cow_release_ref(src: *const SharedSnapshot);
 }
 
+/* Must match kernel/mm/cow.c's bounded source snapshot record.  C has already
+ * validated the backing class and computes the same flags as scalar clone. */
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AnonBatchPage {
+    pfn: u32,
+    class: u32,
+    flags: usize,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: [(); 16] = [(); core::mem::size_of::<AnonBatchPage>()];
+#[cfg(target_pointer_width = "32")]
+const _: [(); 12] = [(); core::mem::size_of::<AnonBatchPage>()];
+const _: [(); 0] = [(); core::mem::offset_of!(AnonBatchPage, pfn)];
+const _: [(); 4] = [(); core::mem::offset_of!(AnonBatchPage, class)];
+const _: [(); 8] = [(); core::mem::offset_of!(AnonBatchPage, flags)];
+
+unsafe extern "C" {
+    fn a20_cow_share_anon_batch_snapshot(
+        parent: *mut c_void,
+        child: *mut c_void,
+        start: usize,
+        node: *mut c_void,
+        out: *mut AnonBatchPage,
+    ) -> i32;
+    fn a20_cow_map_child_anon_batch(
+        child: *mut c_void,
+        va: usize,
+        pages: *const AnonBatchPage,
+        count: usize,
+    ) -> i32;
+    fn frame_put_many(pfns: *const u32, count: usize);
+}
+
+/* Owns the references pinned by the C snapshot until each child mapping
+ * succeeds.  A failed map leaves its own pin and every later pin here; the
+ * already-mapped prefix belongs to the child and is reclaimed by mm_destroy. */
+struct AnonBatchGuard {
+    pages: [AnonBatchPage; ANON_BATCH_PAGES],
+    pinned: bool,
+    transferred: usize,
+}
+
+impl Drop for AnonBatchGuard {
+    fn drop(&mut self) {
+        if !self.pinned || self.transferred == ANON_BATCH_PAGES {
+            return;
+        }
+        let remaining = ANON_BATCH_PAGES - self.transferred;
+        let mut pfns = [0u32; ANON_BATCH_PAGES];
+        /* Only the untransferred tail pins remain guard-owned. */
+        for (page, dst) in self
+            .pages
+            .iter()
+            .skip(self.transferred)
+            .zip(pfns.iter_mut())
+        {
+            *dst = page.pfn;
+        }
+        /* The array is bounded to 64 and releases only pins not transferred
+         * to successful child mappings. */
+        unsafe { frame_put_many(pfns.as_ptr(), remaining) };
+    }
+}
+
+/// Attempt one all-or-nothing anonymous source snapshot.  Zero means the C
+/// preflight made no changes and the existing scalar walker should proceed;
+/// one means all 64 child leaves were mapped; negative aborts this fork after
+/// the guard drains every reference not already transferred to the child.
+#[no_mangle]
+pub unsafe extern "C" fn a20_cow_clone_anon_batch_rust(
+    child: *mut c_void,
+    parent: *mut c_void,
+    va: usize,
+    node: *mut c_void,
+) -> i32 {
+    if unsafe { a20_cow_requires_private_copy() } != 0 {
+        return 0;
+    }
+    let mut guard = AnonBatchGuard {
+        pages: [AnonBatchPage::default(); ANON_BATCH_PAGES],
+        pinned: false,
+        transferred: 0,
+    };
+    let snapshot = unsafe {
+        a20_cow_share_anon_batch_snapshot(
+            parent,
+            child,
+            va,
+            node,
+            guard.pages.as_mut_ptr(),
+        )
+    };
+    if snapshot <= 0 {
+        return snapshot;
+    }
+    guard.pinned = true;
+
+    let result = unsafe {
+        a20_cow_map_child_anon_batch(
+            child,
+            va,
+            guard.pages.as_ptr(),
+            ANON_BATCH_PAGES,
+        )
+    };
+    if result < 0 {
+        return result;
+    }
+    /* The C mapper validates the complete destination and has no failure
+     * point after its first PTE write, so ownership and RSS move as one batch. */
+    guard.transferred = ANON_BATCH_PAGES;
+    unsafe { a20_cow_rss_add(child, ANON_BATCH_PAGES) };
+    1
+}
+
 /// Clone one present leaf.  `level` is the leaf's page-table level, so a huge
 /// leaf is copied or shared as a whole.
 unsafe fn clone_leaf(
@@ -135,19 +271,22 @@ unsafe fn clone_leaf(
     va: usize,
     level: i32,
     shared: i32,
+    location: Option<LeafLocation>,
 ) -> i32 {
-    let mut src = Src::default();
-    unsafe { a20_cow_probe(parent, va, &mut src) };
-    if src.present == 0 || src.is_leaf == 0 {
-        return 0;
-    }
-
     let mut size = 0usize;
     let mut pmd_size = 0usize;
     let mut pmd_order = 0i32;
     unsafe { a20_cow_geometry(level, &mut size, &mut pmd_size, &mut pmd_order) };
 
     if shared == 0 && unsafe { a20_cow_requires_private_copy() } != 0 {
+        // Private-copy needs the source PFN and architecture flags.  The
+        // shared path gets its authoritative leaf state from the locked,
+        // pinned snapshot below, so an unlocked probe there is redundant.
+        let mut src = Src::default();
+        unsafe { a20_cow_probe(parent, va, &mut src) };
+        if src.present == 0 || src.is_leaf == 0 {
+            return 0;
+        }
         let order = if size == pmd_size { pmd_order } else { 0 };
         if size != 4096 && size != pmd_size {
             return ENOMEM;
@@ -169,7 +308,20 @@ unsafe fn clone_leaf(
     // Share.  The snapshot pins the leaf's reference while the node lock is
     // held, so the frame cannot be freed by a racing COW before it is ours.
     let mut snap = SharedSnapshot::default();
-    if unsafe { a20_cow_share_snapshot(parent, va, level, &mut snap) } == 0 {
+    let snapshot_ok = match location {
+        None => unsafe { a20_cow_share_snapshot(parent, va, level, &mut snap) },
+        Some(location) => unsafe {
+            a20_cow_share_snapshot_at(
+                parent,
+                va,
+                level,
+                location.slot,
+                location.node,
+                &mut snap,
+            )
+        },
+    };
+    if snapshot_ok == 0 {
         return 0; // the leaf vanished or is no longer a leaf
     }
     let flags = if shared != 0 { snap.raw_flags } else { snap.cow_flags };
@@ -218,7 +370,7 @@ pub unsafe extern "C" fn a20_fork_clone_page_rust(
     if unsafe { a20_cow_dst_present(child, va) } != 0 {
         return 0;
     }
-    unsafe { clone_leaf(child, parent, va, src.level, shared) }
+    unsafe { clone_leaf(child, parent, va, src.level, shared, None) }
 }
 
 /// Entry point for the C level walker, which already knows which leaf entry it
@@ -231,5 +383,41 @@ pub unsafe extern "C" fn a20_cow_clone_leaf_rust(
     level: i32,
     shared: i32,
 ) -> i32 {
-    unsafe { clone_leaf(child, parent, va, level, shared) }
+    unsafe { clone_leaf(child, parent, va, level, shared, None) }
+}
+
+/// Clone a leaf supplied by the C page-table walker. `slot` and `node` are
+/// borrowed under the caller's parent->lock; the C snapshot takes the node
+/// lock and revalidates the slot before pinning any backing reference.
+#[no_mangle]
+pub unsafe extern "C" fn a20_cow_clone_leaf_at_rust(
+    child: *mut c_void,
+    parent: *mut c_void,
+    va: usize,
+    level: i32,
+    shared: i32,
+    checked: i32,
+    slot: *mut c_void,
+    node: *mut c_void,
+) -> i32 {
+    if checked != 0 {
+        let mut present = 0i32;
+        let policy = unsafe { a20_cow_policy_flags(parent, va, &mut present) };
+        if present != 0 && policy & (VM_DONTFORK | VM_WIPEONFORK) != 0 {
+            return 0;
+        }
+        if unsafe { a20_cow_dst_present(child, va) } != 0 {
+            return 0;
+        }
+    }
+    unsafe {
+        clone_leaf(
+            child,
+            parent,
+            va,
+            level,
+            shared,
+            Some(LeafLocation { slot, node }),
+        )
+    }
 }

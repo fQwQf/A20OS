@@ -194,6 +194,22 @@ static const pfa_range_t *find_range_by_pa(paddr_t pa) {
     return NULL;
 }
 
+/* The caller holds pfa.lock and obtained this range from pfn, so the PFN is
+ * already validated.  PFNs index compact metadata; buddy geometry is PA-based.
+ */
+static pfn_t pfa_buddy_pfn(pfn_t pfn, int order,
+                           const pfa_range_t *range)
+{
+    paddr_t pa = range->base +
+        ((paddr_t)(pfn - range->start_pfn) << PAGE_SIZE_BITS);
+    paddr_t buddy_pa = pa ^ ((paddr_t)PAGE_SIZE << order);
+    if (buddy_pa < range->base || buddy_pa >= range->end)
+        return PFN_NONE;
+
+    return range->start_pfn +
+        (pfn_t)((buddy_pa - range->base) >> PAGE_SIZE_BITS);
+}
+
 static void fl_push(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
     if (m->prev != PFN_NONE || m->next != PFN_NONE) {
@@ -271,6 +287,53 @@ static void fl_push_clean(pfn_t pfn, int order)
     pfn_t half = 1u << (order - 1);
     fl_push_clean(pfn, order - 1);
     fl_push_clean(pfn + half, order - 1);
+}
+
+/* Seed one range's free lists after its reserved prefix.  The compact PFN
+ * IDs only index metadata; every initial block boundary is chosen in PA space.
+ */
+static void pfa_seed_range(const pfa_range_t *range, pfn_t used_frames)
+{
+    paddr_t free_start = range->base + ((paddr_t)used_frames << PAGE_SIZE_BITS);
+    paddr_t max_block = (paddr_t)PAGE_SIZE << MAX_ORDER;
+    paddr_t misalignment = free_start & (max_block - 1);
+    paddr_t prefix_bytes = misalignment ? max_block - misalignment : 0;
+    paddr_t available_bytes = range->end - free_start;
+    paddr_t aligned_start = free_start +
+        (prefix_bytes < available_bytes ? prefix_bytes : available_bytes);
+
+    /* Preserve every free page before the first physically aligned maximum
+     * block; these pages cannot safely be grouped using compact-PFN alignment.
+     */
+    for (paddr_t pa = free_start; pa < aligned_start; pa += PAGE_SIZE) {
+        pfn_t pfn = range->start_pfn +
+            (pfn_t)((pa - range->base) >> PAGE_SIZE_BITS);
+        pfa.meta[pfn].flags = FRAME_F_FREE;
+        pfa.meta[pfn].refcount = 0;
+        pfa.meta[pfn].order = 0;
+        pfa.meta[pfn].prev = PFN_NONE;
+        pfa.meta[pfn].next = PFN_NONE;
+        fl_push(pfn, 0);
+        pfa.free_frames++;
+    }
+
+    paddr_t pa = aligned_start;
+    for (int order = MAX_ORDER; order >= 0; order--) {
+        paddr_t block_bytes = (paddr_t)PAGE_SIZE << order;
+        while (pa < range->end && (pa & (block_bytes - 1)) == 0 &&
+               block_bytes <= range->end - pa) {
+            pfn_t pfn = range->start_pfn +
+                (pfn_t)((pa - range->base) >> PAGE_SIZE_BITS);
+            pfa.meta[pfn].flags = FRAME_F_FREE;
+            pfa.meta[pfn].refcount = 0;
+            pfa.meta[pfn].order = (uint8_t)order;
+            pfa.meta[pfn].prev = PFN_NONE;
+            pfa.meta[pfn].next = PFN_NONE;
+            fl_push_clean(pfn, order);
+            pa += block_bytes;
+            pfa.free_frames += (pfn_t)(block_bytes >> PAGE_SIZE_BITS);
+        }
+    }
 }
 
 static void fl_remove(pfn_t pfn, int order) {
@@ -462,33 +525,7 @@ void pfa_init(paddr_t kernel_end) {
             meta[i].next     = PFN_NONE;
         }
 
-        pfn_t start = (pfn_t)ROUND_UP((uint64_t)(range->start_pfn + used_frames), 1u << MAX_ORDER);
-
-        for (pfn_t i = range->start_pfn + used_frames; i < start && i < range->end_pfn; i++) {
-            meta[i].flags = FRAME_F_FREE;
-            meta[i].refcount = 0;
-            meta[i].order = 0;
-            meta[i].prev = PFN_NONE;
-            meta[i].next = PFN_NONE;
-            fl_push(i, 0);
-            pfa.free_frames++;
-        }
-
-        pfn_t remain = (range->end_pfn > start) ? range->end_pfn - start : 0;
-        for (int o = MAX_ORDER; o >= 0 && remain > 0; o--) {
-            pfn_t sz = 1u << o;
-            while (remain >= sz) {
-                meta[start].flags = FRAME_F_FREE;
-                meta[start].refcount = 0;
-                meta[start].order = (uint8_t)o;
-                meta[start].prev = PFN_NONE;
-                meta[start].next = PFN_NONE;
-                fl_push(start, o);
-                start  += sz;
-                remain -= sz;
-                pfa.free_frames += sz;
-            }
-        }
+        pfa_seed_range(range, used_frames);
     }
 }
 
@@ -507,16 +544,18 @@ static pfn_t pfa_alloc_from_buddy(int order)
     fl_remove(blk, o);
 
     if (pfa.meta[blk].flags != FRAME_F_FREE || pfa.meta[blk].order != (uint8_t)o ||
-        (blk & ((1u << o) - 1)) != 0) {
-        printf("[PFA DOUBLE-ALLOC] pfn=%lu flags=0x%x refcount=%u order_meta=%d list_order=%d free_lists[%d].count=%u cpu=%u\n",
+        (pfn_to_phys(blk) & (((paddr_t)PAGE_SIZE << o) - 1)) != 0) {
+        printf("[PFA DOUBLE-ALLOC] pfn=%lu flags=0x%x refcount=%u order_meta=%d list_order=%d free_lists[%d].count=%lu cpu=%u\n",
                (unsigned long)blk, pfa.meta[blk].flags, pfa.meta[blk].refcount,
-               (int)pfa.meta[blk].order, o, o, pfa.free_lists[o].count, cpu_current_id());
+               (int)pfa.meta[blk].order, o, o,
+               (unsigned long)pfa.free_lists[o].count, cpu_current_id());
         panic("pfa: double allocation detected");
     }
 
     while (o > order) {
         o--;
-        pfn_t buddy = blk ^ (1u << o);
+        /* Keep the lower half as blk; compact PFN XOR is not PA geometry. */
+        pfn_t buddy = blk + (1u << o);
         /* The buddy half must be entirely free; if any interior frame is
          * still allocated the block was corrupt when it entered the list. */
         for (pfn_t i = buddy; i < buddy + (1u << o); i++) {
@@ -670,9 +709,8 @@ void pfa_free(pfn_t pfn, int order) {
     }
 
     while (actual_order < MAX_ORDER) {
-        pfn_t buddy = pfn ^ (1u << actual_order);
-        if (buddy >= pfa.total_frames) break;
-        if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
+        pfn_t buddy = pfa_buddy_pfn(pfn, actual_order, range);
+        if (buddy == PFN_NONE) break;
         if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
         if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
         /* Stale metadata of a former block head keeps flags=FREE/order after
@@ -835,9 +873,7 @@ int pfa_audit_lists(void)
     return errors;
 }
 
-void frame_get(pfn_t pfn) {
-    if (!pfn_valid(pfn)) return;
-    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+static void frame_get_locked(pfn_t pfn) {
     /* A zero-refcount frame is free or unowned: taking a reference on it
      * means the caller found it through a dangling PTE/stale bookkeeping.
      * Resurrecting it here would later surface as a double free or as a
@@ -851,6 +887,27 @@ void frame_get(pfn_t pfn) {
         panic("pfa: frame_get on unreferenced frame");
     }
     pfa.meta[pfn].refcount++;
+}
+
+void frame_get(pfn_t pfn) {
+    if (!pfn_valid(pfn)) return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    frame_get_locked(pfn);
+    spin_unlock_irqrestore(&pfa.lock, flags);
+}
+
+/* Retain a bounded set of already-owned frames under one allocator lock.
+ * As with frame_get(), invalid PFNs are skipped. Callers requiring a complete
+ * batch must own valid mappings/references and prevalidate every PFN first;
+ * runtime PFA ranges are stable. A valid but unreferenced PFN still triggers
+ * frame_get_locked()'s panic diagnostic, not a recoverable batch failure. */
+void frame_get_many(const pfn_t *pfns, size_t count) {
+    if (!pfns || !count) return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    for (size_t i = 0; i < count; i++) {
+        if (pfn_valid(pfns[i]))
+            frame_get_locked(pfns[i]);
+    }
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
@@ -878,9 +935,8 @@ static void frame_put_locked(pfn_t pfn) {
             return;
         }
         while (actual_order < MAX_ORDER) {
-            pfn_t buddy = pfn ^ (1u << actual_order);
-            if (buddy >= pfa.total_frames) break;
-            if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
+            pfn_t buddy = pfa_buddy_pfn(pfn, actual_order, range);
+            if (buddy == PFN_NONE) break;
             if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
             if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
             /* See pfa_free: only a frame actually on this order's free list
