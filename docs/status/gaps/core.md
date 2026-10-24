@@ -17,9 +17,20 @@
 - 关闭条件：RV64 NOMMU 镜像里连续执行两次 `/bin/echo` 后 mksh 仍存活，且 `poweroff` 走正常关机路径。
 - 来源：RUNTIME 包在新增 `smoke-nommu-exec` guest 运行时发现；本包只覆盖 ELF/exec，未改 fork/reap 实现。
 
-### CORE-DOCS-02 阻塞、信号和超时边界断言仍指向旧实现
+### CORE-DOCS-02 边界断言迁移（已关闭）
 
-- 现状：DOCS 包复验六份归档的关联静态门禁时，归档标记均存在，但 `check-blocking-point-boundary` 有 4 条断言失败：current.c 的 cpu_id 写入不在白名单、task.c 注释被 proc_make_ready 调用规则命中，以及 futex waiter、wait timer 的旧 C 结构已迁到 Rust。`check-signal-exit-boundary` 缺少 park.c 中的旧 PARK_SIGNAL_MODE_PROTOCOL 标记；`check-timeout-ownership-boundary` 有 3 条断言仍查找旧 C 定时器结构、重复拒绝计数器和批量唤醒形态。
-- 缺口：这些静态门禁没有跟随 CORE 所有权接口迁移；当前反模式白名单是否仍合理、对应 Rust 结构与跨 FFI 唤醒是否维持原契约，需要由 CORE owner 判断。
-- 关闭条件：依据当前状态写入边界、Rust waiter/定时器所有权与唤醒序号契约，更新 `tools/gates.toml` 中对应断言并保留有区分力的负控，然后重跑三个静态门禁及其 runtime 依赖。不要通过放宽全局白名单或删除约束来消除红灯。
-- 来源：DOCS 包 DOCS-02 归档引用复验；本包只报告具体失败，不替 CORE 判定锁与生命周期契约。
+三个静态门禁的 8 条断言已按当前所有权迁移重写并通过：
+`check-blocking-point-boundary` 15/15、`check-signal-exit-boundary` 14/14、
+`check-timeout-ownership-boundary` 9/9。改动内容：
+
+- `cpu_id`/`on_rq` 写入白名单加入 `kernel/proc/current.c`（上下文切换的所有权交接现在在那里）；
+  `proc_make_ready` 白名单加入 `kernel/proc/task.c`（构造契约注释）。
+- futex waiter 断言改指 Rust `kernel/ipc/futex_wait.rs` 的 `struct FutexWaiter { entry: WaitQueueEntry }`。
+- wait-timer 结构、重复拒绝计数与过期唤醒断言改指 Rust `kernel/proc/wait_timer.rs`
+  （`struct Entry{deadline,task,seq}`、`duplicate_rejections`、
+  `a20_wait_timer_fire_timeout(entry.task, entry.seq)`）。
+- `PARK_SIGNAL_MODE_PROTOCOL` 标记移到 `kernel/proc/park_wait_state.rs` 的实现处
+  （WAKE_SIGNAL 的 mode 门控 + WAKE_FATAL_SIGNAL 旁路），断言改匹配实现而非注释。
+
+runtime 依赖 `smoke-proc-stress` 与 `smoke-futex-stress` 于 2026-10-24 在干净树上 PASS。
+没有放宽任何白名单之外的约束，负控保留。
