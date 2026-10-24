@@ -7,6 +7,13 @@
 - 现状：8250 在 `arch_uart_init()`（`kernel/arch/riscv64/include/console.h`）里写了 `IER = 0x01`（RX 中断使能），`uart_init()` 对 `UART0_IRQ`（QEMU virt 为 10）注册了 `uart_irq_wrapper`，`kernel/arch/riscv64/trap/irqchip.c` 也在 PLIC 里按 hart enable 了该源。但实测行为是「只有读者轮询才取字节」：前台跑 `ping`（不读终端）时按 ^C，收端行规一次 ISIG 都没有触发；等 `ping` 结束、shell 重新读终端时那个 `0x03` 才被取走。也就是说接收实际靠 `uart_getc()` 里的 `arch_uart_poll_getc()` 推进，RX 中断没有在起作用（是 `uart_handle_irq` 未被调用，还是 trap 分发没有把外部中断转进来，尚未定位）。
 - 缺口：控制台输入在「没人读」的时候不被处理，于是 echo/ISIG 这类收端行规事件只能发生在有读者的瞬间——提示符上按 ^C 有效，前台作业不读终端时按 ^C 无效。这与 [drivers/guide/device-classes.md](../../drivers/guide/device-classes.md) 写明的契约（"UART 硬件驱动只负责收发和中断"）不符，属于驱动未完成项，而不是 tty 层的缺陷。
 - 关闭条件：在没有任务读控制台的情况下，RX 字节仍进入环形缓冲区且 `rx_irq_bytes` 在没有 poll 的情况下增长；由此前台不读终端的作业也能被 ^C 打断（SIGINT 投递到该终端的前台进程组）；有一条门禁覆盖（例如前台跑 `ping`/`sleep` 时注入 ^C，断言作业在 2 秒内结束），并在 QEMU 与至少一块真机上通过。
+- 定位进展（2026-10-24）：trap/claim 路径已被排除——`smoke-proc-stress` 的 boot 日志出现
+  `[IRQDBG] first S-ext claim irq_id=1`（virtio-blk 源经同一 claim/complete/trap 路径成功分发），
+  而同一日志中 `uart_irq_wrapper` 的一次性探针从未触发；smoke 经串口注入的 `proc_stress`/`poweroff`
+  由 `uart_getc()` 的轮询路径（`rx_polls_rx_bytes`）送达。即 RX 中断从未触发，根因在 16550 → PLIC
+  源 10 的投递段（IER 已写 0x01、MCR OUT2 已置、PLIC priority/enable 均已配置）。
+  下一轮实验建议用 `qemu -d int` 抓 external interrupt 投递，或在校验 `arch_uart_init()` 之后
+  IER 是否被运行期清零。两个一次性 `[IRQDBG]` 探针保留在 `arch_handle_irq`/`uart_irq_wrapper`。
 - 来源：2026-10 实测（阻塞点记录见 [abi-ipc.md](abi-ipc.md) ABI-08）、[drivers/guide/device-classes.md](../../drivers/guide/device-classes.md)、`kernel/arch/riscv64/include/console.h`、`kernel/arch/riscv64/trap/irqchip.c`、`kernel/drivers/char/uart.c`。
 ### DRIVER-09 STM32F103 平台文件含硬编码 MMIO 地址
 
