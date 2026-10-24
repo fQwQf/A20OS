@@ -18,36 +18,37 @@
 
 #define PS2_MOUSE_IRQ_VECTOR 0x2c
 
-static uint64_t trap_cause[CONFIG_NR_CPUS];
-static uint64_t trap_epc[CONFIG_NR_CPUS];
-static uint64_t trap_tval[CONFIG_NR_CPUS];
-
-/* Per-CPU scratch used by syscall_entry before it can switch to the kernel
- * stack.  Only valid with interrupts disabled during the syscall window. */
-__attribute__((aligned(16))) uint64_t __x86_64_syscall_scratch[CONFIG_NR_CPUS][16];
-
+/* Trap cause/epc/tval live in the per-CPU GS area (see cpu.h): the syscall
+ * entry publishes them with inline stores, so the old per-CPU arrays and the
+ * syscall scratch area are gone. */
 void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval) {
-    unsigned cpu = cpu_current_id();
-    trap_cause[cpu] = cause;
-    trap_epc[cpu] = epc;
-    trap_tval[cpu] = tval;
+    x86_64_area_store(X86_64_CPU_AREA_CAUSE_OFFSET, cause);
+    x86_64_area_store(X86_64_CPU_AREA_EPC_OFFSET, epc);
+    x86_64_area_store(X86_64_CPU_AREA_TVAL_OFFSET, tval);
 }
 
 void x86_64_save_trap_state(uint64_t *cause, uint64_t *epc, uint64_t *tval) {
-    unsigned cpu = cpu_current_id();
-    *cause = trap_cause[cpu];
-    *epc = trap_epc[cpu];
-    *tval = trap_tval[cpu];
+    *cause = x86_64_area_load(X86_64_CPU_AREA_CAUSE_OFFSET);
+    *epc = x86_64_area_load(X86_64_CPU_AREA_EPC_OFFSET);
+    *tval = x86_64_area_load(X86_64_CPU_AREA_TVAL_OFFSET);
 }
 
 void x86_64_restore_trap_state(uint64_t cause, uint64_t epc, uint64_t tval) {
     x86_64_set_trap_state(cause, epc, tval);
 }
 
-uint64_t x86_64_get_trap_cause(void) { return trap_cause[cpu_current_id()]; }
-uint64_t x86_64_get_trap_epc(void) { return trap_epc[cpu_current_id()]; }
-uint64_t x86_64_get_trap_tval(void) { return trap_tval[cpu_current_id()]; }
-void x86_64_set_trap_epc(uint64_t value) { trap_epc[cpu_current_id()] = value; }
+uint64_t x86_64_get_trap_cause(void) {
+    return x86_64_area_load(X86_64_CPU_AREA_CAUSE_OFFSET);
+}
+uint64_t x86_64_get_trap_epc(void) {
+    return x86_64_area_load(X86_64_CPU_AREA_EPC_OFFSET);
+}
+uint64_t x86_64_get_trap_tval(void) {
+    return x86_64_area_load(X86_64_CPU_AREA_TVAL_OFFSET);
+}
+void x86_64_set_trap_epc(uint64_t value) {
+    x86_64_area_store(X86_64_CPU_AREA_EPC_OFFSET, value);
+}
 static void handle_timer_irq(int from_user) {
     timer_irq_tick();
     kernel_progress_timer_tick();
