@@ -283,3 +283,13 @@
 - 完整忽略runtime、回退ELF、组合内核、原基准world/FAT、Linux kernel/initrd和可用的重写路径manifest保存于主checkout build/a20-performance-20261022。基准三个输入与原hash全部一致，Linux两个boot文件也与原hash一致；premerge目录保留原tracked/staged patch和untracked tar。
 - 附着a20-performance worktree已通过managed archive移除，Git worktree列表中不再存在，checkout路径已删除；已合并分支perf/a20-performance删除。main仍保留用户原有未提交工作，没有顺手提交无关修改；本条只提交性能工作日志。
 - 最终验证见报告21节：性能集成九项guest通过；与现有本地修改的组合另有九项guest通过、页缓存20项Rust/20万差分通过。失败/不一致实验保留原始证据并回退。未推送或部署。
+
+## 2026-10-24 北京时间（syscall 路径与 fork 剖析轮）
+
+- 授权：用户在本会话直接要求强化 fork 与多线程同步两项，以测量为准；改动仅 x86_64。
+- 基线（merged 73fe0385，3 轮微基准 `build/evidence/micro-base-r1`）：getpid 621ns、yield 1291ns、futex-wake 684ns、futex-mismatch 938ns、mutex 15.5ns、fork 138.7µs；apk 五轮 threads-2 4124 ev/s（0.316×）、fork 737 ops/s、switch 278k ops/s。
+- 候选 A（提交 `ea0ff802`）：内核 GS base 改指 per-CPU 区（task 在 %gs:0），金丝雀改 `-mstack-protector-guard=global`，syscall 往返 6 次 MSR 全部消除；用户 FS/GS 权威副本移入 task_t（frame 每 trap 重建不可靠），exec 清 GS 语义修复。微基准 getpid 429ns（1.45×）、futex-wake 512（1.34×）；apk threads-2 5857（+42%，0.451×）、switch +18%、fork +5%。回归 15 项 × 3（45 用例）全过。中途以 stash 基线内核对照确认 ld-musl TLS 崩溃为候选引入并修复（frame 字段→task 字段 + proc_task_first_entry 补恢复钩子）。
+- 候选 B（提交 `59ecc2a0`）：syscall 入口就地构帧（删 128B scratch 中转与 set_trap_state 调用），cause/epc/tval 移入 per-CPU 区，__switch 发布 area.kstack_top。getpid 378ns（对原基线 1.64×）、futex-wake 447（1.53×）、fork 132µs；apk threads-2 6194（累计 +50%，0.460×）、switch 342k（+23%）、fork 790（+7%）。回归 90/90 过。
+- fork 剖析（计数器 3 轮 `build/evidence/fork-diag-candB`，微基准 150 次 fork+exit）：fork syscall 侧 40.2µs 中 clone 占 35.6µs（89%），setup 3.4µs、finish 0.8µs；wait 侧 destroy ~29.7µs/次。mm_pt_lock_acquires ≈96/fork ≈1/页；vma_lookups ≈98/fork（每页一次 policy 查找）。64 页批处理仅覆盖 VM_ANON；stress-ng 的 ~3300 页多数为文件页，仍走逐页标量快照+降级+子方根级 pt_walk。
+- 下一步候选（未实施）：文件页（VM_FILE 私有映射）批处理克隆——扩展 `a20_cow_share_anon_batch_snapshot` 的类过滤与成组 pin（需确认 cache 帧 pin 的成组路径），或先做标量路径的子方连续段安装以省每页根级 pt_walk。预期把 fork 循环 1.27ms 压向 ~0.8ms，仍显著落后 Linux（220µs），差距在每页元数据与锁协议。
+- 环境：宿主 powersave governor 未改动；apk 测量 affinity 4,6 交替 5 轮；证据 `build/evidence/{micro-candA-final,micro-candB,apk-candA-2026-10-24,apk-candB-2026-10-24,candA-regression-full15x3,candB-regression-full15x3}`。
