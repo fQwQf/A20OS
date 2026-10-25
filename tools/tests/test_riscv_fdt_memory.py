@@ -77,7 +77,7 @@ int window(const void *blob, size_t bytes, uint64_t physical,
                         "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "kernel/include"),
                         str(wrapper), str(ROOT / "kernel/core/fdt_view.c"),
                         str(ROOT / "kernel/firmware/devicetree/node.c"),
-                        str(ROOT / "kernel/firmware/devicetree/memory.c"), "-o", str(so)], check=True)
+                        str(ROOT / "kernel/firmware/devicetree/memory.c"), str(ROOT / "kernel/firmware/devicetree/framebuffer.c"), str(ROOT / "kernel/boot/framebuffer.c"), "-o", str(so)], check=True)
         cls.lib = ctypes.CDLL(str(so))
         cls.lib.window.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64,
                                   ctypes.c_uint64, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]

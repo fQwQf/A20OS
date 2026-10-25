@@ -1,4 +1,5 @@
 #include "drivers/gpu/framebuffer.h"
+#include "boot/framebuffer.h"
 #include "drivers/gpu/gpu_core.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
@@ -158,6 +159,10 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (prot & PROT_READ) ptef |= PTE_R;
     if (prot & PROT_WRITE) ptef |= PTE_W | PTE_D | PTE_R;
     if (prot & PROT_EXEC) ptef |= PTE_X;
+    uintptr_t mapping_flags;
+    r = boot_framebuffer_user_flags(fb_phys + off, len, ptef, &mapping_flags);
+    if (r) return r;
+    ptef = mapping_flags;
 
     spin_lock(&mm->lock);
 
@@ -374,6 +379,10 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
              */
             pte_t flags = PTE_V | PTE_R | PTE_W | PTE_U |
                           PTE_A | PTE_D | PTE_LEAF | PTE_DEVICE;
+            uintptr_t mapping_flags;
+            r = boot_framebuffer_user_flags(fb_phys, fb_size, flags, &mapping_flags);
+            if (r) { spin_unlock(&curr->mm->lock); return r; }
+            flags = mapping_flags;
             size_t mapped = 0;
             for (; mapped < fb_size; mapped += PAGE_SIZE) {
                 r = pt_map(curr->mm->pgdir, va + mapped,

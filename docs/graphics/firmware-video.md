@@ -138,3 +138,55 @@ python3 -m unittest tools.tests.test_boot_framebuffer tools.tests.test_videoplay
 ```
 
 这些检查区分模拟器运行与真实 J1900 主板支持；真实显示器、codec 和主板仍需实机验收。
+
+## 设备树固件显示
+
+DT 平台可以通过启用的 `simple-framebuffer` 节点交接固件已初始化的扫描输出。
+公共解析器接受 `/chosen` 物理 `reg`，或指向 `/reserved-memory` 的
+`memory-region`；后者优先。节点必须给出 `width`、`height`、`stride`、`format`。
+优先选择 `stdout-path` 指向的 framebuffer，其次 `display0` 别名；否则只能存在
+一个受支持的候选。多个候选而无明确选择会拒绝启动，避免猜测屏幕。
+所有启用的 framebuffer aperture 都在页分配器启动前保留，即使未被选中。
+合法但不支持的格式也保留显存，并继续串口启动，不发布 fbdev。
+坏地址、溢出或覆盖内核仍拒绝启动。
+
+支持 `r5g6b5`、`x1r5g5b5`、`r8g8b8`、`x8r8g8b8`、`x8b8g8r8`、
+`x2r10g10b10`。带 alpha 的 `a8*` 模式目前不支持。显存 aperture 必须包含
+页扩展后的可见范围；不足时保留资源、跳过显示。尺寸和 stride 使用共同验证规则。
+这条路径沿用固件模式，不设置 DE2、TCON、HDMI PHY 或 VOP2 寄存器。
+PINE/V3s/Quartz64 的固件和接线条件见各自平台文档；只有 DT 节点并不证明硬件输出已工作。
+
+AArch64 RAM framebuffer 要求现有映射确认为 WB、inner-shareable；内核和用户态
+映射保持相同缓存属性。固件从 `/memory` 裁掉的显存也按实际映射和平台 RAM 边界验证，
+不会当成普通 MMIO 映射。`FBIO_FLUSH` 清理到 PoC 并完成同步屏障。
+ARM32 RAM 路径目前只支持已确认 PIPT 的 Cortex-A7/A15，并保留覆盖 aperture 的
+完整 1 MiB section；验证不覆盖内核和活动 DTB 后，统一所有引导 section 别名的
+shareable 属性。无法证明别名安全时拒绝映射。现有 ARM32 权限编码不能表达
+shareable 只读用户映射，因此仅接受可写 framebuffer mmap；NoMMU RAM framebuffer 不支持。
+
+固件扫描输出的 `clocks`、`resets`、`power-domains` 引用在驱动绑定期间保留，
+阻止提供者在尚无原生显示接管协议时首次绑定并重设资源。卸载或 probe 失败会释放保留，
+并重试延迟提供者；已绑定提供者不能倒退成固件保留模式。当前不涵盖任意 `*-supply`
+稳压器属性。平台 MMC/音频时钟代码仍须按位修改，不能关闭显示已使用的时钟。
+
+绑定依据：[Linux simple-framebuffer binding](https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/display/simple-framebuffer.yaml)、
+[U-Boot sunxi DE2 交接](https://github.com/u-boot/u-boot/blob/master/drivers/video/sunxi/sunxi_de2.c)。
+
+QEMU 的可重复测试使用主机固件夹具初始化 ramfb，再将 DT 交给内核；内核只读取 DT，
+没有 fw_cfg 显示后门。在仓库根目录构建并运行独立 RAMFS media 配置（Bash）：
+
+```sh
+fb_arch=aarch64 # ARM32 改为 arm32，并安装对应交叉工具链
+fb_make=(ARCH="$fb_arch" BOARD="qemu-virt-$fb_arch" ABI=linux BRINGUP=0
+         RAMFS_USER=1 RAMFS_MEDIA=1 DRIVER_DEPLOYMENT=embedded CONFIG_UBSAN=0 CONFIG_SWAP=0)
+make "${fb_make[@]}" kernel-only -j2
+fb_build_dir=$(make -s "${fb_make[@]}" print-build-dir)
+python3 tools/check_dt_framebuffer.py --kernel "$fb_build_dir/kernel.bin" \
+  --platform "kernel/arch/$fb_arch/boot/tests/ramfb.json" \
+  --output ".kernel-build/smoke/dt-framebuffer-$fb_arch"
+python3 -m unittest tools.tests.test_dt_framebuffer tools.tests.test_simplefb_lifecycle \
+  tools.tests.test_sleep_abi
+```
+
+检查真实 fbdev mmap、`FBIO_FLUSH`、300 帧用户程序、QMP 屏幕 RGB 像素及正常关机。
+它验证固件交接和缓存路径，不能代替物理板显示控制器及面板验收。

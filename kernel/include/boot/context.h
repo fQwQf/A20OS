@@ -31,6 +31,8 @@ typedef struct boot_context {
     const char *command_line;
     fw_node_t hardware_root;
     boot_framebuffer_t framebuffer;
+    enum boot_framebuffer_memory framebuffer_memory;
+    fw_node_t framebuffer_node;
 } boot_context_t;
 
 const boot_context_t *boot_context_get(void);

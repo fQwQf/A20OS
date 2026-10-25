@@ -14,6 +14,15 @@ static inline void arch_boot_publish(boot_context_t *context) {
         if (fw_dt_init(&tree, context->fdt, context->fdt_available) < 0 ||
             fw_dt_root(&tree, &context->hardware_root) < 0)
             panic("boot: invalid firmware device tree");
+        if (fw_dt_framebuffer_select(&tree, &context->framebuffer,
+                                      &context->framebuffer_memory,
+                                      &context->framebuffer_node) < 0)
+            panic("boot: invalid or ambiguous DT framebuffer handoff");
+        if (context->framebuffer.magic &&
+            arch_boot_framebuffer_prepare(&context->framebuffer,
+                &context->framebuffer_memory, context->fdt_physical,
+                tree.view.size) < 0)
+            panic("boot: unsupported framebuffer memory mapping");
         int result = fw_dt_bootargs(&tree, command_line, sizeof(command_line));
         if (result < 0 && result != -ENOENT)
             panic("boot: invalid or oversized firmware command line");

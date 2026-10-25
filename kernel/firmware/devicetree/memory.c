@@ -108,6 +108,15 @@ static int collect(const fw_node_t *n, fw_dt_memory_t *map, int reserved,
     }
     return rc == -ENOENT ? 0 : rc;
 }
+static int reserve_scanout(void *opaque, const fw_node_t *node,
+                            const boot_framebuffer_t *fb) {
+    (void)node;
+    fw_dt_memory_t *map = opaque;
+    uint64_t base, bytes;
+    int rc = arch_boot_framebuffer_reservation(fb, &base, &bytes);
+    return rc ? rc : add(map->reserved, &map->reserved_count,
+                         map->reserved_capacity, base, bytes);
+}
 int fw_dt_memory(const fw_dt_t *tree, uint64_t physical, fw_dt_memory_t *out) {
     if (!out || (!out->ram && out->ram_capacity) ||
         (!out->reserved && out->reserved_capacity))
@@ -118,6 +127,7 @@ int fw_dt_memory(const fw_dt_t *tree, uint64_t physical, fw_dt_memory_t *out) {
     if (rc)
         return rc;
     rc = collect(&root, out, 0, 0);
+    if (!rc) rc = fw_dt_framebuffers(tree, reserve_scanout, out);
     uint64_t base, size;
     for (size_t i = 0; !rc; i++) {
         int found = fdt_view_reserve(&tree->view, i, &base, &size);

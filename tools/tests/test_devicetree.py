@@ -29,7 +29,7 @@ int named_resource(const char*path,unsigned index,char*out){fw_node_t r,n;fw_res
 int window(unsigned flags,unsigned capacity,uint64_t*out){fw_dt_range_t usable[16];size_t count=0;int rc=fw_dt_memory_window(&tree,0x100000,0x80000000,0x90000000,0x80200000,0x81000000,usable,capacity,&count,flags);out[0]=count;if(!rc)for(size_t i=0;i<count;i++){out[i*2+1]=usable[i].base;out[i*2+2]=usable[i].size;}return rc;}
 int memory(unsigned cap,uint64_t*out){fw_dt_range_t ram[16],reserved[16],usable[16];fw_dt_memory_t m={ram,reserved,cap,cap,0,0};int rc=fw_dt_memory(&tree,0x100000,&m);size_t n=0;if(!rc)rc=fw_dt_memory_subtract(&m,usable,cap,&n);if(!rc){out[0]=n;for(size_t i=0;i<n;i++){out[i*2+1]=usable[i].base;out[i*2+2]=usable[i].size;}}return rc;}
 ''')
-  subprocess.run(['cc','-shared','-fPIC','-O2','-std=gnu99','-fno-builtin','-Wall','-Wextra','-Werror','-I',str(ROOT/'kernel/include'),str(p/'wrap.c'),str(ROOT/'kernel/core/fdt_view.c'),str(ROOT/'kernel/firmware/devicetree/node.c'),str(ROOT/'kernel/firmware/devicetree/memory.c'),'-o',str(p/'dt.so')],check=True)
+  subprocess.run(['cc','-shared','-fPIC','-O2','-std=gnu99','-fno-builtin','-Wall','-Wextra','-Werror','-I',str(ROOT/'kernel/include'),str(p/'wrap.c'),str(ROOT/'kernel/core/fdt_view.c'),str(ROOT/'kernel/firmware/devicetree/node.c'),str(ROOT/'kernel/firmware/devicetree/memory.c'), str(ROOT/'kernel/firmware/devicetree/framebuffer.c'), str(ROOT/'kernel/boot/framebuffer.c'),'-o',str(p/'dt.so')],check=True)
   cls.lib=ctypes.CDLL(str(p/'dt.so'));cls.lib.load.argtypes=[ctypes.c_void_p,ctypes.c_size_t]
  @classmethod
  def tearDownClass(cls):cls.tmp.cleanup()

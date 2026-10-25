@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
             "-I" + str(ROOT / "kernel/arch/aarch64/include"),
             str(work / "host.c"), str(ROOT / "kernel/core/fdt_view.c"),
             str(ROOT / "kernel/firmware/devicetree/node.c"),
-            str(ROOT / "kernel/firmware/devicetree/memory.c"),
+            str(ROOT / "kernel/firmware/devicetree/memory.c"), str(ROOT / "kernel/firmware/devicetree/framebuffer.c"), str(ROOT / "kernel/boot/framebuffer.c"),
             str(ROOT / "kernel/arch/aarch64/boards/quartz64-zero/board.c"),
             "-o", str(cls.binary),
         ], check=True, capture_output=True, text=True)

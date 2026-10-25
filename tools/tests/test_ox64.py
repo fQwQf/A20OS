@@ -68,7 +68,7 @@ int memory(const void *b, size_t n, uint64_t *result) {
         subprocess.run(["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared",
                         "-I", str(ROOT), "-I", str(ROOT / "kernel/include"), str(c),
                         str(ROOT / "kernel/core/fdt_view.c"), str(ROOT / "kernel/firmware/devicetree/node.c"),
-                        str(ROOT / "kernel/firmware/devicetree/memory.c"), "-o", str(p / "wrapper.so")], check=True)
+                        str(ROOT / "kernel/firmware/devicetree/memory.c"), str(ROOT / "kernel/firmware/devicetree/framebuffer.c"), str(ROOT / "kernel/boot/framebuffer.c"), "-o", str(p / "wrapper.so")], check=True)
         cls.lib = ctypes.CDLL(str(p / "wrapper.so"))
         cls.lib.memory.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint64)]
         cls.lib.get.restype = ctypes.c_uint32

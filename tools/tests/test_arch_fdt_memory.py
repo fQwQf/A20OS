@@ -70,7 +70,7 @@ int main(int argc,char **argv) {
                 '-Wl,--defsym,test_kernel_start=0x80200000','-Wl,--defsym,test_kernel_end=0x82000000',
                 str(work/'host.c'),str(ROOT/f'kernel/arch/{arch}/platform/fdt.c'),
                 str(ROOT/'kernel/core/fdt_view.c'),str(ROOT/'kernel/firmware/devicetree/node.c'),
-                str(ROOT/'kernel/firmware/devicetree/memory.c'),'-o',str(binary)],check=True)
+                str(ROOT/'kernel/firmware/devicetree/memory.c'), str(ROOT/'kernel/firmware/devicetree/framebuffer.c'), str(ROOT/'kernel/boot/framebuffer.c'),'-o',str(binary)],check=True)
             cls.binaries.append(binary)
         cls.work=work
 

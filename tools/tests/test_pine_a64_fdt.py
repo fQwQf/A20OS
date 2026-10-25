@@ -59,6 +59,8 @@ class PineA64FirmwareTests(unittest.TestCase):
             # This suite executes early RAM/DT parsing only; storage electrical
             # setup has its own production-controller fixtures.
             "arch/common/sunxi_mmc0.h": "static inline void sunxi_board_prepare_mmc0(int a64) { (void)a64; }\n",
+            # Audio MMIO/PLL/power runs in test_sunxi_audio, not a host RAM map.
+            "arch/common/sunxi_audio.h": "#define SUNXI_AUDIO_A64 1\n#define SUNXI_AUDIO_V3S 2\nstatic inline int sunxi_board_prepare_audio(unsigned v, int c) { (void)v; (void)c; return 0; }\n",
             "core/arch.h": '''#pragma once
 #include "core/types.h"
 #define PAGE_OFFSET 0UL
@@ -150,7 +152,7 @@ int main(int argc, char **argv) {
             "-I" + str(ROOT / "kernel/arch/aarch64/include"),
             str(work / "host.c"), str(ROOT / "kernel/core/fdt_view.c"),
             str(ROOT / "kernel/firmware/devicetree/node.c"),
-            str(ROOT / "kernel/firmware/devicetree/memory.c"),
+            str(ROOT / "kernel/firmware/devicetree/memory.c"), str(ROOT / "kernel/firmware/devicetree/framebuffer.c"), str(ROOT / "kernel/boot/framebuffer.c"),
             str(ROOT / "kernel/arch/aarch64/boards/pine-a64/board.c"),
             "-o", str(cls.binary),
         ], check=True, capture_output=True, text=True)

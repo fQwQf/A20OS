@@ -60,7 +60,80 @@ int device_dependency_get(struct device *consumer, const char *property,
     *provider = found;
     return 0;
 }
+struct firmware_provider_hold {
+    device_t *provider;
+    device_t *consumer;
+    struct firmware_provider_hold *next;
+};
+static struct firmware_provider_hold *provider_holds;
+static mutex_t provider_holds_lock = MUTEX_INIT;
+static int provider_is_retained(device_t *provider) {
+    int held=0;
+    mutex_lock(&provider_holds_lock);
+    for (struct firmware_provider_hold *p=provider_holds;p;p=p->next)
+        if (p->provider==provider) {held=1;break;}
+    mutex_unlock(&provider_holds_lock);
+    return held;
+}
+static void release_provider_hold(void *opaque) {
+    struct firmware_provider_hold *hold=opaque;
+    mutex_lock(&provider_holds_lock);
+    for (struct firmware_provider_hold **p=&provider_holds;*p;p=&(*p)->next)
+        if (*p==hold) {*p=hold->next;break;}
+    mutex_unlock(&provider_holds_lock);
+    kfree(hold);
+    /* Never enter the driver lifecycle while holding the retention mutex.
+     * Its recursive lifecycle lock already serializes probe/remove. */
+    driver_retry_deferred();
+}
+static int retain_provider(device_t *consumer,const fw_node_t *node) {
+    int available=fw_node_available(node);
+    if (available<=0) return available<0?available:-EINVAL;
+    device_t *provider=firmware_device_find(node);
+    if (!provider) return -EPROBE_DEFER;
+    int duplicate=0;
+    mutex_lock(&provider_holds_lock);
+    for (struct firmware_provider_hold *p=provider_holds;p;p=p->next)
+        if (p->consumer==consumer && p->provider==provider) {duplicate=1;break;}
+    mutex_unlock(&provider_holds_lock);
+    if (duplicate) {device_put(provider);return 0;}
+    /* Called only from the serialized driver probe callback. An existing
+     * native binding cannot be safely assumed to preserve firmware clocks. */
+    if (provider->drv) {device_put(provider);return -EBUSY;}
+    struct firmware_provider_hold *hold=kmalloc(sizeof(*hold));
+    if (!hold) {device_put(provider);return -ENOMEM;}
+    int rc=device_add_dependency(consumer,provider);
+    if (!rc) rc=device_add_resource_action(consumer,release_provider_hold,hold);
+    if (!rc) {
+        hold->consumer=consumer;hold->provider=provider;
+        mutex_lock(&provider_holds_lock);
+        hold->next=provider_holds;provider_holds=hold;
+        mutex_unlock(&provider_holds_lock);
+    } else kfree(hold);
+    device_put(provider); /* The managed dependency owns the provider pin. */
+    return rc;
+}
+int firmware_device_retain_resources(struct device *consumer) {
+    if (!consumer || !fw_node_valid(&consumer->firmware_node)) return -EINVAL;
+    const struct {const char *property,*cells;} references[]={
+        {"clocks","#clock-cells"},{"resets","#reset-cells"},
+        {"power-domains","#power-domain-cells"},
+    };
+    for (size_t p=0;p<sizeof(references)/sizeof(references[0]);p++) {
+        for (size_t index=0;;index++) {
+            fw_reference_t reference;
+            int rc=fw_node_reference(&consumer->firmware_node,references[p].property,
+                                     references[p].cells,index,&reference);
+            if (rc==-ENOENT) break;
+            if (rc) return rc;
+            rc=retain_provider(consumer,&reference.node);
+            if (rc) return rc;
+        }
+    }
+    return 0;
+}
 int firmware_device_prepare(struct device *device) {
+    if (provider_is_retained(device)) return -EPROBE_DEFER;
     firmware_device_t *owned;
     mutex_lock(&devices_lock);
     for (owned = devices; owned; owned = owned->next)

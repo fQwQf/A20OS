@@ -558,6 +558,12 @@ static int reg_name(const fw_node_t *n, size_t index, const char **out) {
 static int dt_resource(const fw_node_t *n, size_t index, fw_resource_t *out) {
     if (!out)
         return -EINVAL;
+    int framebuffer = dt_match(n, "simple-framebuffer");
+    if (framebuffer < 0) return framebuffer;
+    if (framebuffer) {
+        int handled = fw_dt_framebuffer_resource(n, index, out);
+        if (handled != -ENOSYS) return handled;
+    }
     fw_node_t bus;
     int rc = dt_parent(n, &bus);
     if (rc)
