@@ -94,7 +94,10 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # The make target stages the image under build/x86_64-pc/ rather than
             # leaving it in the per-build directory, because an instance that
             # deploys this disk has to name one stable path in boot_media.
-            exec_make(inst, "x86_64-uefi-disk", list(make_args), dry_run)
+            extra = list(make_args)
+            if inst.target.boot_media:
+                extra.append(f"PC_UEFI_OUTPUT={inst.target.boot_media[0]}")
+            exec_make(inst, "x86_64-uefi-disk", extra, dry_run)
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",

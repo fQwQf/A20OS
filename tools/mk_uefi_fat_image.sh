@@ -10,7 +10,7 @@ rootfs_image=${3:-}
 efi_name=${4:-BOOTAA64.EFI}
 
 if [ -z "$efi_image" ] || [ -z "$output" ] || [ -z "$rootfs_image" ]; then
-    echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img> [esp-entry-name]" >&2
+    echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img|-> [esp-entry-name]" >&2
     exit 1
 fi
 # BOOTX64.EFI is the x86_64 loader, BOOTAA64.EFI the aarch64 one. The manifest
@@ -25,11 +25,11 @@ if [ ! -s "$efi_image" ]; then
     echo "Error: EFI image missing or empty: $efi_image" >&2
     exit 1
 fi
-if [ ! -s "$rootfs_image" ]; then
+if [ "$rootfs_image" != "-" ] && [ ! -s "$rootfs_image" ]; then
     echo "Error: root filesystem image missing or empty: $rootfs_image" >&2
     exit 1
 fi
-for command_name in parted mformat mmd mcopy sha256sum awk; do
+for command_name in parted mformat mmd mcopy sha256sum awk truncate; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "Error: $command_name not found (install parted and mtools)" >&2
         exit 1
@@ -38,7 +38,7 @@ done
 
 mkdir -p "$(dirname "$output")"
 rm -f "$output"
-dd if=/dev/zero of="$output" bs=1M count=256 status=none
+truncate -s 256M "$output"
 
 # VirtualBox's ARM UEFI firmware discovers a conventional EFI System
 # Partition more reliably than a whole-disk FAT superfloppy, particularly
@@ -49,7 +49,9 @@ parted -s "$output" mkpart ESP fat32 1MiB 255MiB
 parted -s "$output" set 1 esp on
 
 esp_offset=$((1024 * 1024))
-mformat -i "$output@@$esp_offset" -F -v A20OS ::
+esp_sectors=$(((255 - 1) * 1024 * 1024 / 512))
+# Constrain the BPB to the GPT extent, excluding the backup GPT tail.
+mformat -i "$output@@$esp_offset" -T "$esp_sectors" -F -v A20OS ::
 
 # mtools maps one image per drive.  Use a temporary drive map so the complete
 # FAT root (including /init, /mksh, /etc and runtime libraries) can share the
@@ -64,11 +66,11 @@ mkdir -p "$TMPDIR"
 
 tmp_mtoolsrc=$(mktemp)
 trap 'rm -f "$tmp_mtoolsrc"' EXIT HUP INT TERM
-cat > "$tmp_mtoolsrc" <<EOF
-drive a: file="$rootfs_image"
-drive b: file="$output" offset=$esp_offset
-EOF
-MTOOLSRC="$tmp_mtoolsrc" mcopy -s 'a:/*' b:/
+printf 'drive b: file="%s" offset=%s\n' "$output" "$esp_offset" > "$tmp_mtoolsrc"
+if [ "$rootfs_image" != "-" ]; then
+    printf 'drive a: file="%s"\n' "$rootfs_image" >> "$tmp_mtoolsrc"
+    MTOOLSRC="$tmp_mtoolsrc" mcopy -s 'a:/*' b:/
+fi
 MTOOLSRC="$tmp_mtoolsrc" mmd b:/EFI b:/EFI/BOOT
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" "b:/EFI/BOOT/$efi_name"
 manifest=$(mktemp)
@@ -80,10 +82,14 @@ trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
     printf 'format=a20os-vbox-%s-gpt-v1\n' "$arch_slug"
     printf '%s_sha256=' "$loader_key"
     sha256sum "$efi_image" | awk '{print $1}'
-    printf 'rootfs_sha256='
-    sha256sum "$rootfs_image" | awk '{print $1}'
+    if [ "$rootfs_image" = "-" ]; then
+        printf 'rootfs=embedded\n'
+    else
+        printf 'rootfs_sha256='
+        sha256sum "$rootfs_image" | awk '{print $1}'
+    fi
 } > "$manifest"
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$manifest" b:/A20OS.MANIFEST
 sha256sum "$output" > "$output.sha256"
-echo "GPT/UEFI disk ($arch_slug) with A20OS root filesystem created: $output"
+echo "GPT/UEFI disk ($arch_slug) created: $output"
 echo "Image checksum: $output.sha256"

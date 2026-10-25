@@ -37,6 +37,10 @@ extern const unsigned char _binary_native_input_start[], _binary_native_input_en
 extern const unsigned char _binary_cluster_threads_start[], _binary_cluster_threads_end[];
 #endif
 
+#ifdef CONFIG_RAMFS_MEDIA
+extern const unsigned char _binary_videoplay_start[], _binary_videoplay_end[];
+extern const unsigned char _binary_audioplay_start[], _binary_audioplay_end[];
+#endif
 
 static const unsigned char ramfs_shell_marker[] = "ram-only\n";
 
@@ -73,6 +77,10 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/sync", sync),
     USER_ENTRY("/bin/poweroff", poweroff),
     USER_ENTRY("/bin/reboot", reboot),
+#ifdef CONFIG_RAMFS_MEDIA
+    USER_ENTRY("/bin/videoplay", videoplay),
+    USER_ENTRY("/bin/audioplay", audioplay),
+#endif
 
 #ifdef CONFIG_STORAGE_READ_ONLY
     USER_ENTRY("/bin/storage_read_test", storage_read_test),

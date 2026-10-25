@@ -105,6 +105,15 @@ ifneq ($(RAMFS_USER),1)
 $(error RAMFS_FPU_TESTS=1 requires RAMFS_USER=1)
 endif
 endif
+RAMFS_MEDIA ?= 0
+ifeq ($(filter $(RAMFS_MEDIA),0 1),)
+$(error RAMFS_MEDIA must be 0 or 1)
+endif
+ifeq ($(RAMFS_MEDIA),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_MEDIA=1 requires RAMFS_USER=1)
+endif
+endif
 ifeq ($(filter $(RAMFS_NATIVE_TESTS),0 1),)
 $(error RAMFS_NATIVE_TESTS must be 0 or 1)
 endif
@@ -926,7 +935,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_MEDIA)),-media,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1724,6 +1733,25 @@ endif
 ifneq ($(strip $(NET_GUEST_GATEWAY)),)
 NET_GUEST_APPEND += a20.gateway=$(NET_GUEST_GATEWAY)
 endif
+endif
+# A bulk console shares the host terminal with the early UART. Both mux
+# inputs feed the existing TTY discipline (signals, foreground process group,
+# termios); only userspace output changes transport after vport0 is published.
+QEMU_CONSOLE ?= serial
+ifeq ($(QEMU_CONSOLE),virtio)
+ifneq ($(ARCH),x86_64)
+$(error QEMU_CONSOLE=virtio currently requires ARCH=x86_64)
+endif
+ifneq ($(DISPLAY_MODE),text)
+$(error QEMU_CONSOLE=virtio requires DISPLAY_MODE=text)
+endif
+QEMU_FLAGS := $(filter-out -nographic,$(QEMU_FLAGS)) -display none -monitor none \
+    -chardev stdio,id=a20stdio,mux=on,signal=off -serial chardev:a20stdio \
+    -device virtio-serial-pci,id=a20tty \
+    -device virtconsole,chardev=a20stdio,bus=a20tty.0
+NET_GUEST_APPEND += a20.console=vport0
+endif
+ifneq ($(strip $(NET_GUEST_APPEND)),)
 QEMU_FLAGS += -append '$(NET_GUEST_APPEND)'
 endif
 # Snapshot the flags before an optional second disk is appended, so the
@@ -3155,6 +3183,10 @@ RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
 ifeq ($(RAMFS_FPU_TESTS),1)
 RAMFS_USER_PROGRAMS += fork_fpu_probe
 CFLAGS += -DCONFIG_RAMFS_FPU_TESTS
+endif
+ifeq ($(RAMFS_MEDIA),1)
+RAMFS_USER_PROGRAMS += videoplay audioplay
+CFLAGS += -DCONFIG_RAMFS_MEDIA
 endif
 ifeq ($(STORAGE_READ_ONLY),1)
 RAMFS_USER_PROGRAMS += storage_read_test

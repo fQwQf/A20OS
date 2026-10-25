@@ -28,5 +28,7 @@ block_dev_t *mount_setup_block_device(int index);
 /* Probe DOS/MBR storage and mount its first Linux partition read-only at
  * /extra.  Intended for explicitly selected RAM-only board experiments. */
 void mount_read_only_storage(void);
+/* Optional RAMFS media input: first raw/GPT FAT32 volume, read-only /media. */
+void mount_ramfs_media(void);
 
 #endif /* _MOUNT_SETUP_H */

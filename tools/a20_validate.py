@@ -87,6 +87,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     """Semantic cross-checks mirroring the Makefile's own guards."""
     e: list[str] = []
     k, m, g, n, r, t = inst.kernel, inst.machine, inst.gui, inst.net, inst.rootfs, inst.test
+    if k.ramfs_media and k.ramfs_user is not True:
+        e.append("kernel.ramfs_media requires kernel.ramfs_user=true")
     if inst.arch in RETIRED_ARCHES:
         e.append(f"arch: '{inst.arch}' is retired from active builds; use a clean v0.18 checkout for historical reproduction")
     elif inst.arch not in KNOWN_ARCHES:
@@ -121,6 +123,15 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
             e.append("machine.vm_manager requires generic driver deployment for virtio-console")
     if m.accel is not None and m.accel not in {"tcg", "kvm"}:
         e.append("machine.accel must be tcg or kvm")
+    if m.console is not None and m.console not in {"serial", "virtio"}:
+        e.append("machine.console must be serial or virtio")
+    if m.console == "virtio":
+        if (inst.arch != "x86_64" or inst.board != "qemu-virt-x86_64" or
+                g.enabled or m.display_mode == "gui" or k.bringup or
+                r.world is None or m.vm_manager):
+            e.append("machine.console=virtio requires an x86_64 QEMU headless world instance")
+        if k.driver_deployment == "embedded":
+            e.append("machine.console=virtio requires generic driver deployment")
     if m.smp is not None:
         if m.smp < 1:
             e.append("machine.smp: must be >= 1")

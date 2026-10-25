@@ -216,8 +216,13 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BUILD_STAMP)
 # Directly bootable x86_64 UEFI disk.  Unlike pc-rescue-disk this stages
 # BOOTX64.EFI rather than GRUB, because GRUB 2.12 drops the multiboot ACPI tags
 # and the kernel then never learns the RSDP (see instances/vbox-x86_64.toml).
+ifeq ($(RAMFS_USER),1)
+$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) tools/mk_uefi_fat_image.sh
+	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ - BOOTX64.EFI
+else
 $(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/mk_uefi_fat_image.sh
 	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
+endif
 
 .PHONY: x86_64-uefi-loader
 x86_64-uefi-loader: $(VBOX_X86_64_EFI)
