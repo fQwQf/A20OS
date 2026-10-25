@@ -21,6 +21,8 @@
 .equ CSR_SAVE1,   0x31
 .equ CSR_DMW0,    0x180
 .equ CSR_DMW1,    0x181
+.equ CSR_DMW2,    0x182
+.equ CSR_DMW3,    0x183
 
 _start:
     /*
@@ -35,15 +37,23 @@ _start:
      * mapping that contains the current PC.  QEMU keeps its identity DMW.
      */
 #if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
-    li.d        $t0, 0x800000000000000f
+    li.d        $t0, 0x8000000000000001
     csrwr       $t0, CSR_DMW0
-    li.d        $t0, 0x900000000000001f
+    li.d        $t0, 0x9000000000000011
     csrwr       $t0, CSR_DMW1
 #else
     li.d        $t0, 0x11
     csrwr       $t0, CSR_DMW0
+    li.d        $t0, 0x8000000000000001  /* VSEG8, PLV0, strongly uncached MMIO */
     csrwr       $t0, CSR_DMW1
 #endif
+
+    /* Firmware windows must not leave an alternate PLV3 direct-map alias.
+     * DMW[3:0] is the privilege enable mask; kernel aliases are PLV0 only. */
+    move        $t0, $zero
+    csrwr       $t0, CSR_DMW2
+    move        $t0, $zero
+    csrwr       $t0, CSR_DMW3
 
     invtlb      0, $zero, $zero
 

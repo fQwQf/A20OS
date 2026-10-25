@@ -125,18 +125,21 @@ def user_output_lock(user_build_dir: str):
 def cmd_user(a) -> int:
     if not a.build_id:
         raise SystemExit("error: user stamp needs --build-id")
+    targets = getattr(a, "targets", "").split()
+    if any(Path(target).name != target or target in (".", "..") for target in targets):
+        raise SystemExit("error: user targets must be simple program names")
     with user_output_lock(a.user_build_dir):
         stamp = REPO / a.stamp
         stamp.parent.mkdir(parents=True, exist_ok=True)
         need_build = need_clean = False
-        init = REPO / a.user_build_dir / "init"
-        mksh = REPO / a.user_build_dir / "mksh"
+        programs = targets or ["init", "mksh"]
+        binaries = [REPO / a.user_build_dir / program for program in programs]
 
         # Re-evaluate only after taking the output-root lock. Another make
         # process may have completed this exact build while we were waiting.
         if stamp_id(stamp) != a.build_id:
             need_build = need_clean = True
-        elif not os.access(init, os.X_OK) or not os.access(mksh, os.X_OK):
+        elif any(not os.access(binary, os.X_OK) for binary in binaries):
             need_build = True
         elif any_newer(stamp, a.roots.split(), a.skip.split()):
             need_build = True
@@ -163,7 +166,8 @@ def cmd_user(a) -> int:
             rc = submake(["-C", "user", *common, "clean"])
             if rc != 0:
                 return rc
-        rc = submake(["-C", "user", *common])
+        rc = submake(["-C", "user", *common,
+                      *(str(user_build_dir / program) for program in targets)])
         if rc != 0:
             return rc
         stamp.write_text(a.build_id + "\n")
@@ -617,6 +621,8 @@ def main() -> int:
             s.add_argument("--futex-cow-window-test",
                            choices=("0", "1"), default="0")
             s.add_argument("--user-variant", required=True)
+            s.add_argument("--targets", default="",
+                           help="build only these named user programs instead of all")
         else:
             s.add_argument("--user-build-dir")
             s.add_argument("--binaries", default="")

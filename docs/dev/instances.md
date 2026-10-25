@@ -287,8 +287,8 @@ vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 cons
 
 ## 物理目标与上板验证（`[target]`）
 
-板级支持范围、默认实例和部署方法见
-[硬件平台](../platforms/README.md)。
+板级支持范围、默认实例和部署方法由 `docs/platforms/` 中对应的单平台页面说明；
+文档范围见 [平台文档约定](../platforms/README.md)。
 `console` / `deploy` 支持 `--serial DEVICE` 覆盖串口；`deploy` 支持
 `--media-device DEVICE` 覆盖目的盘、`--no-console` 将介质准备与上板验证分开、
 `--no-build` 复用已构建产物（带烧录后端时还需 `--no-flash`）。
@@ -325,7 +325,7 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 
 没有内核块驱动时，仍可由固件通过 SD FAT、USB 或网络载入内核；A20OS 启动后的块设备能力需另行验证。
 `board-sdcard` 生成板级 SD 镜像；固件、DTB 和启动脚本的组成由平台打包器决定。
-`prepare` 取得固件依赖，`package` 生成可写介质。完整操作见 [硬件平台](../platforms/README.md)。
+`prepare` 取得固件依赖，`package` 生成可写介质。完整操作由对应单平台页面说明。
 
 ```sh
 tools/a20 prepare pine-a64
@@ -464,7 +464,7 @@ not built yet:
 
 三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**：正是绝对路径让旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
 
-它取代的是 `docs/platforms/physical-boards.md` 里手抄的那种记录：镜像大小和 SHA-256 从终端里抄出来、标上日期、旁边写着某个贡献者家目录的绝对路径。那些数字无法校验，改了一个字节也没人会发现；重新生成一份账本比重新敲一遍便宜，而手抄的数字在长期维护下必然失真。
+账本直接计算当前产物的大小和 SHA-256；更换配置或重新构建后应重新生成，不在平台文档中维护手抄的镜像摘要。
 
 产物路径向 make 查询而不是在 Python 里重算 `BUILD_DIR`：那个名字把 ARCH、BOARD、ABI、BRINGUP、NOMMU、SMP 数、驱动部署等十几个开关都编码了进去。
 
@@ -610,7 +610,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 新增烧录方式只需两步，Python 不用改：加一条 `[[backend]]`，再写对应的 make 目标。
 
-`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里；两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
+`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/arch/<arch>/boards/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里；两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
 
 ## 剪裁注册表（components/trim.toml）
 
@@ -623,7 +623,7 @@ opt = "-Os"
 cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
 nommu = true                 # profile 隐含 NOMMU=1
 bringup = true               # ……以及 BRINGUP=1（kernel-only）
-sources = [ "kernel/mcu/main.c", "kernel/core/panic.c", … ]  # 策展源码白名单
+sources = [ "kernel/arch/armv7m/boards/stm32f103/mcu_main.c", "kernel/core/panic.c", … ]  # 策展源码白名单
 
 [capability.swap]            # 能力矩阵：架构白名单 + 可选 board 排除
 arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32"]
@@ -634,7 +634,7 @@ x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
 
 消费路径有两条：Makefile 读 `make regen-trim-fragment` 生成的 `components/trim.mk`（`NOMMU_SUPPORTED_ARCHES`、`SWAP_SUPPORTED_ARCHES` 等矩阵与 mcu 源码列表都出自它），`tools/a20` 校验实例时直接读 TOML——同一份数据喂两边，实例校验和构建不可能各说各话。`make check-trim-registry`（= `tools/a20 check-trim`）做三件事：注册表自身自洽（必备条目存在、源码文件真实存在、board 排除项真实存在）、生成的 fragment 没有过期、每个发射的变量都有 makefile 在读（没有消费者的策略条目是死配置）。
 
-想知道一个实例按什么剪裁计划构建，用 `tools/a20 trim <实例>`：profile 是谁、哪些能力开/关/被 force-off 及其理由、flash/RAM 预算从哪来。`a20 show` 也带一行摘要。策略的**逻辑**（force-off 顺序、`$(error)`）仍在 Makefile；这份文件只搬走了**数据**。板级事实（引脚、时钟）继续留在 `kernel/platform/<board>/`，链接兼容桩（`kernel/mcu/mcu_stubs.c`）是代码，都不属于这里。
+想知道一个实例按什么剪裁计划构建，用 `tools/a20 trim <实例>`：profile 是谁、哪些能力开/关/被 force-off 及其理由、flash/RAM 预算从哪来。`a20 show` 也带一行摘要。策略的**逻辑**（force-off 顺序、`$(error)`）仍在 Makefile；这份文件只搬走了**数据**。板级事实（引脚、时钟）继续留在 `kernel/arch/<arch>/boards/<board>/`，链接兼容桩（`kernel/mcu/mcu_stubs.c`）是代码，都不属于这里。
 
 ## CI 门禁
 

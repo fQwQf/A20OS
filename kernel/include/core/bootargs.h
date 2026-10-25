@@ -29,9 +29,9 @@ int uart_cmdline_read(char *out, size_t outsz);
 #endif
 
 /* Extract /chosen/bootargs from a Flattened Device Tree.  dtb_va must be
- * directly dereferenceable in the caller's address space; returns 0 on
- * success, -1 when absent or malformed. */
-int fdt_extract_bootargs(const void *dtb_va, char *out, size_t outsz);
+ * mapped for the independently established available byte count. Returns 0 on
+ * success, negative errno when absent, malformed or too long. Never truncates. */
+int fdt_extract_bootargs(const void *dtb_va, size_t available, char *out, size_t outsz);
 
 /* Return the kernel command line extracted at boot.  May return NULL or an
  * empty string if no command line was supplied. */

@@ -21,7 +21,7 @@ for src in "$@"; do
             -std=gnu99 \
             -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel \
             -Ikernel/net/lwip_port -Ikernel/external/lwip/src/include \
-            -Ikernel/platform/qemu-virt-riscv64 \
+            -Ikernel/arch/riscv64/boards/qemu-virt-riscv64 \
             -I"$build_dir/generated" \
             -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany \
             -DRISCV64 -DCONFIG_RISCV64 -DCONFIG_ABI_LINUX -DCONFIG_NR_CPUS=1 \

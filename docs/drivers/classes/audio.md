@@ -60,7 +60,7 @@ controlq 串行执行 SET_PARAMS、PREPARE、START、STOP 和 RELEASE。txq 使�
 
 `make run-world-gui PKG_WORLD=xfce` 默认挂载 QEMU `intel-hda` 与 `hda-duplex`。设置 `QEMU_GUI_AUDIO_DEVICE=virtio` 后，RISC-V64 改用 MMIO `virtio-sound-device`，x86_64 和 LoongArch64 改用 `virtio-sound-pci`。宿主 backend 由 `QEMU_GUI_AUDIO_DRIVER` 选择，Linux 默认 `pa`，也可使用 `pipewire`、`alsa`、`sdl` 或 `none`。
 
-RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 ECAM 和 BAR 映射，以及 `kernel/platform/qemu-virt-riscv64/board.c` 启动 PCI 枚举。AArch64 QEMU virt 尚未提供相同 PCI host 路径，因此目前只有编译覆盖。
+RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 ECAM 和 BAR 映射，以及 `kernel/arch/riscv64/boards/qemu-virt-riscv64/board.c` 启动 PCI 枚举。AArch64 QEMU virt 尚未提供相同 PCI host 路径，因此目前只有编译覆盖。
 
 ## 验证
 

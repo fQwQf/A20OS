@@ -574,14 +574,17 @@ static int ls2k_gmac_driver_probe(device_t *dev) {
     if (!res)
         return -1;
 
-    if (ls2k_gmac_init(res->start) != 0) {
-        kinfo("[LS2K-GMAC] Failed to init at 0x%lx\n", (unsigned long)res->start);
+    uintptr_t base = (uintptr_t)device_map_mmio(dev, 0);
+    if (!base) return -ENODEV;
+
+    if (ls2k_gmac_init(base) != 0) {
+        kinfo("[LS2K-GMAC] Failed to init at 0x%lx\n", (unsigned long)base);
         return -1;
     }
 
-    ls2k_gmac_priv_t *priv = gmac_instance(res->start);
+    ls2k_gmac_priv_t *priv = gmac_instance(base);
     dev->drv_priv = priv;
-    kinfo("[LS2K-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
+    kinfo("[LS2K-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)base);
     return 0;
 }
 
@@ -631,15 +634,14 @@ static net_dev_ops_t ls2k_gmac_net_ops = {
     .link_up = ls2k_gmac_class_link_up,
 };
 
-static const device_id_t ls2k_gmac_ids[] = {
-    { .vendor = LS2K_GMAC_PLATFORM_VENDOR, .device = LS2K_GMAC_PLATFORM_DEVICE,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
+static const firmware_device_id_t ls2k_gmac_firmware_ids[] = {
+    {.id = "ls2k1000-gmac"}, {0}
+};
 static driver_t ls2k_gmac_driver = {
     .name       = "ls2k-gmac",
-    .id_table   = ls2k_gmac_ids,
+    .firmware_ids = ls2k_gmac_firmware_ids,
+    .irq_optional = 1,
     .bus        = &platform_bus,
     .probe      = ls2k_gmac_driver_probe,
     .remove     = ls2k_gmac_driver_remove,

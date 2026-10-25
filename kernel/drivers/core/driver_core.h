@@ -12,6 +12,7 @@
 #define _DRIVER_CORE_H
 
 #include "core/types.h"
+#include "firmware/node.h"
 #include "core/defs.h"
 #include "drivers/driver_descriptor.h"
 /* For CLASS_DEVICE_NAME_MAX (the class-device publication object and the
@@ -31,7 +32,7 @@ struct class_device;
  *
  * For PCI:  vendor/device are PCI vendor/device IDs
  * For VirtIO: vendor = VIRTIO_VENDOR, device = VIRTIO_DEV_*
- * For platform: vendor = DT compatible hash, device = 0
+ * For platform: firmware IDs are matched by the bus; static presets use IDs
  * ============================================================ */
 #define VENDOR_ANY   0xFFFFFFFFUL
 #define DEVICE_ANY   0xFFFFFFFFUL
@@ -65,7 +66,7 @@ enum resource_type {
 
 typedef struct resource {
     enum resource_type type;
-    uint64_t           start;      /* inclusive */
+    uint64_t           start;      /* inclusive CPU physical address / port / IRQ */
     uint64_t           end;        /* inclusive */
     uint32_t           flags;
     const char        *name;       /* optional label */
@@ -83,6 +84,15 @@ typedef struct resource {
 #define DEV_STATE_SUSPENDED 3
 #define DEV_STATE_REMOVED   4
 #define DEV_STATE_REMOVING  5
+#define DEV_STATE_DEFERRED  6
+
+typedef struct firmware_device_id {
+    const char *id;
+    const char *source; /* NULL accepts any firmware provider */
+    uint64_t driver_data;
+} firmware_device_id_t;
+struct device_resource_action;
+struct device_dependency;
 
 typedef struct device {
     const char        *name;       /* e.g. "virtio-net0" */
@@ -122,6 +132,17 @@ typedef struct device {
      * driver calls before returning 0, because publication happens right after
      * probe returns. */
     char               devfs_name[CLASS_DEVICE_NAME_MAX];
+    fw_node_t          firmware_node;
+    /* Board-verified identity supplement for incomplete firmware; immutable
+     * string storage outlives this device. It never replaces firmware data. */
+    const char        *software_id;
+    const firmware_device_id_t *firmware_match;
+    struct device_resource_action *resource_actions;
+    struct device_dependency *dependencies;
+    unsigned references;
+    struct device *parent_reference; /* Core lifetime pin, released at final put. */
+    void (*release)(struct device *);
+    int                probe_error; /* last probe result; -EPROBE_DEFER is retriable */
 } device_t;
 
 /* ============================================================
@@ -143,11 +164,8 @@ typedef struct driver {
     const device_id_t  *id_table;  /* NULL-terminated array */
     struct bus_type    *bus;       /* bus this driver lives on */
 
-    /* Optional device-tree compatible string this driver claims, e.g.
-     * "starfive,jh7110-mmc".  With it set, the driver binds to the node carrying
-     * that compatible at the addresses the firmware described, instead of every
-     * board file hand-copying an MMIO base.  NULL when not device-tree described. */
-    const char         *of_compatible;
+    /* Firmware identity table, terminated by an entry with id == NULL. */
+    const firmware_device_id_t *firmware_ids;
 
     /* Optional protocol-level narrowing after the bus ID match.  It must not
      * access device registers or allocate resources. */
@@ -170,6 +188,9 @@ typedef struct driver {
     /* read-only probe: may bind user-owned devices but must not claim or
      * destructively initialize them (dual-placement kernel shell). */
     int                 read_only_probe;
+    /* Polling-only adapters may omit IRQ resources while their controller
+     * domain is unavailable. Malformed IRQ descriptors remain fatal. */
+    int                 irq_optional;
 } driver_t;
 
 /* ============================================================
@@ -208,7 +229,8 @@ typedef struct bus_type {
  * pointer registration with -EEXIST.  Registration may synchronously invoke
  * probe on existing objects; unregistration synchronously invokes remove.
  * These entry points run in task/boot context and must not be called by IRQ
- * handlers or recursively from lifecycle callbacks.
+ * handlers. Bus probes may publish child devices; arbitrary recursive driver
+ * registration and self-unregistration from lifecycle callbacks are invalid.
  */
 void driver_core_init(void);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
@@ -233,6 +255,30 @@ void bus_unregister(bus_type_t *bus);
 int  bus_probe_device(device_t *dev);
 
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index);
+/* MMIO resources always carry physical addresses. Mapping is architecture-owned. */
+void *device_map_mmio(device_t *dev, int index);
+void *device_map_resource(device_t *dev, const resource_t *resource);
+int device_add_resource_action(device_t *dev, void (*release)(void *), void *data);
+void device_release_resources(device_t *dev);
+/* Registration, child-parent topology and progress snapshots retain device
+ * objects. Dynamically allocated buses provide release(); the creator drops
+ * its initial reference after unregistering (or transfers ownership to the
+ * registry after registration). Static devices may leave release unset. A
+ * registered child's parent remains pinned until the child's final put. */
+device_t *device_get(device_t *dev);
+void device_put(device_t *dev);
+int device_add_dependency(device_t *consumer, device_t *provider);
+/* Returned devices carry a reference; release it with device_put(). */
+device_t *device_find_get_by_firmware(const fw_node_t *node);
+device_t *device_find_get_by_firmware_id(const char *id);
+device_t *device_find_get_by_mmio(uint64_t physical);
+void *arch_device_map_mmio(uint64_t physical, size_t size, uint32_t flags);
+void arch_device_unmap_mmio(void *address, size_t size);
+/* Serialize discovery and suppress probes until its paired end. */
+void driver_discovery_begin(void);
+void driver_discovery_end(void);
+int driver_retry_deferred(void);
+int driver_device_count(void);
 
 /*
  * Ask for a specific devfs node name for this device, e.g. "vport0" instead of
@@ -244,19 +290,14 @@ resource_t *device_get_resource(device_t *dev, enum resource_type type, int inde
  */
 int device_set_devfs_name(device_t *dev, const char *name);
 
-/* iterate devices by class */
-device_t *device_find_by_class(uint32_t class_type, int index);
+/* IRQ-safe lookup by rank among currently published devices of this class.
+ * Returned device carries a reference for device_put. Persistent disk handles
+ * use class_device_get_by_index and its stable class index instead. */
+device_t *device_find_get_by_class(uint32_t class_type, int index);
 
 /* probe all unbound devices against registered drivers */
 void driver_probe_all(void);
 void driver_progress_class(uint32_t class_type);
-
-/* Find the platform-bus driver claiming a device-tree compatible string and
- * report the first id_table entry it would bind as.  Returns 0 and leaves the
- * outputs untouched when no driver claims it, so a caller walking a device tree
- * can skip nodes nothing supports instead of inventing an identity for them. */
-int  driver_lookup_compatible(const char *compatible,
-                              uint32_t *vendor, uint32_t *device);
 
 /* ------------------------------------------------------------------ */
 /*  Unified driver manager                                             */
@@ -283,7 +324,7 @@ int driver_manager_spawn_user(const char *path);
 /* ============================================================
  * Board configuration — one per board preset
  *
- * Provided by kernel/board/<board>/board.c
+ * Provided by kernel/arch/<arch>/boards/<board>/board.c
  * Selected at compile time by BOARD=<name> in Makefile
  * ============================================================ */
 typedef struct irqchip_ops {
@@ -316,8 +357,10 @@ typedef struct board_config {
 
     /* bus enumeration: board calls device_register() for each device */
     void                 (*enumerate_devices)(void);
+    /* Self-enumerating buses supplement firmware platform devices. */
+    void                 (*enumerate_buses)(void);
     /* Devices reserved for runtime module/user-service discovery. */
-    void                 (*register_module_devices)(void);
+    void                 (*configure_devices)(void);
 
     /* Board-specific handoff and user-service resource policy. */
     void                 (*prepare_scheduler)(void);
@@ -362,7 +405,7 @@ typedef struct board_config {
     int                  uart_rx_is_polled;
 } board_config_t;
 
-/* Global board config — defined in kernel/board/<board>/board.c */
+/* Global board config — defined in kernel/arch/<arch>/boards/<board>/board.c */
 extern const board_config_t *const current_board;
 
 #endif /* _DRIVER_CORE_H */

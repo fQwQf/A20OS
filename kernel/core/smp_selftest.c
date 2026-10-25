@@ -344,9 +344,12 @@ static void rv32_sync_test_controller(void)
  * Direct class operations bypass the filesystem/page cache, exercising DMA,
  * transport notification and completion on the real device owner. */
 static void disk_roundtrip(void) {
-    device_t *dev = device_find_by_class(DEV_CLASS_BLOCK, 0);
-    CHECK(dev && dev->drv && dev->drv->class_ops);
-    const block_dev_ops_t *ops = dev->drv->class_ops;
+    device_t *dev = device_find_get_by_class(DEV_CLASS_BLOCK, 0);
+    CHECK(dev);
+    class_device_t *cdev = class_device_ref_for_device(dev);
+    const void *table;
+    CHECK(class_device_ops_begin(cdev, DEV_CLASS_BLOCK, &table) == 0);
+    const block_dev_ops_t *ops = table;
     CHECK(ops->read && ops->write && ops->flush && ops->capacity && ops->sector_size);
     CHECK(ops->capacity(dev) == 4096 && ops->sector_size(dev) == 512);
     unsigned char *buffer = kmalloc(512);
@@ -364,6 +367,9 @@ static void disk_roundtrip(void) {
         CHECK(cpu_current_id() == remote_cpu);
     }
     kfree(buffer);
+    class_device_call_end(cdev);
+    class_device_put(cdev);
+    device_put(dev);
     printf("[SMP-DISK] PASS cpu=%u sectors=32 bytes=16384 flush=32 readback=32\n", cpu_current_id());
 }
 

@@ -25,70 +25,98 @@
 
 /* Explicit mounts may use already-probed class devices even in a RAM-root
  * bringup. Automatic root probing below retains its existing profile gate. */
+#define CLASS_BLOCK_HANDLE_BUDGET 256U
+/* Borrowed block_dev handles can outlive unplug in BC/UXFS consumers. Keep a
+ * bounded stable descriptor for each class index; retired indices stay offline
+ * and are never redirected to a new disk. Device/class references are released
+ * at unpublish. Reclaiming descriptors requires owned BC/UXFS handle contracts. */
 typedef struct class_block_dev {
     block_dev_t block;
-    device_t *dev;
-    const block_dev_ops_t *ops;
+    class_device_t *binding;
+    int used;
 } class_block_dev_t;
-
-static int class_block_read_sector(block_dev_t *block, uint64_t lba, void *buf,
-                                   size_t count)
-{
-    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
-    return class_block && class_block->ops && class_block->ops->read ?
-        class_block->ops->read(class_block->dev, lba, buf, count) : -1;
+static class_block_dev_t class_blocks[CLASS_BLOCK_HANDLE_BUDGET];
+static spinlock_t class_blocks_lock = SPINLOCK_INIT;
+static class_device_t *class_block_ref(block_dev_t *block) {
+    if (!block || !block->priv) return NULL;
+    class_block_dev_t *handle = block->priv;
+    uint64_t flags = spin_lock_irqsave(&class_blocks_lock);
+    class_device_t *binding = handle->binding;
+    class_device_get(binding);
+    spin_unlock_irqrestore(&class_blocks_lock, flags);
+    return binding;
 }
-
-static int class_block_write_sector(block_dev_t *block, uint64_t lba, const void *buf,
-                                    size_t count)
-{
-    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
-    return class_block && class_block->ops && class_block->ops->write ?
-        class_block->ops->write(class_block->dev, lba, buf, count) : -1;
+static void class_block_offline(class_device_t *binding, void *data) {
+    class_block_dev_t *handle = data;
+    uint64_t flags = spin_lock_irqsave(&class_blocks_lock);
+    int owned = handle->binding == binding;
+    if (owned) handle->binding = NULL;
+    spin_unlock_irqrestore(&class_blocks_lock, flags);
+    if (owned) class_device_put(binding);
 }
-
-static int class_block_write_batch(block_dev_t *block,
-                                   const block_write_t *writes, size_t nr)
-{
-    if (!block)
-        return -EINVAL;
-    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
-    if (!class_block || !class_block->ops ||
-        !class_block->ops->write_batch)
-        return -EOPNOTSUPP;
-    return class_block->ops->write_batch(class_block->dev, writes, nr);
+#define CLASS_BLOCK_OPERATION(name, arguments, expression) \
+static int name arguments { \
+    class_device_t *binding = class_block_ref(block); \
+    const void *table; \
+    int rc = class_device_ops_begin(binding, DEV_CLASS_BLOCK, &table); \
+    if (!rc) { \
+        const block_dev_ops_t *ops = table; \
+        rc = (expression); \
+        class_device_call_end(binding); \
+    } \
+    class_device_put(binding); \
+    return rc; \
 }
-
-static int class_block_flush(block_dev_t *block)
-{
-    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
-    if (!class_block || !class_block->ops || !class_block->ops->flush)
-        return -EOPNOTSUPP;
-    return class_block->ops->flush(class_block->dev);
-}
+CLASS_BLOCK_OPERATION(class_block_read_sector,
+    (block_dev_t *block, uint64_t lba, void *buf, size_t count),
+    ops->read ? ops->read(binding->dev, lba, buf, count) : -EOPNOTSUPP)
+CLASS_BLOCK_OPERATION(class_block_write_sector,
+    (block_dev_t *block, uint64_t lba, const void *buf, size_t count),
+    ops->write ? ops->write(binding->dev, lba, buf, count) : -EOPNOTSUPP)
+CLASS_BLOCK_OPERATION(class_block_write_batch,
+    (block_dev_t *block, const block_write_t *writes, size_t count),
+    ops->write_batch ? ops->write_batch(binding->dev, writes, count) : -EOPNOTSUPP)
+CLASS_BLOCK_OPERATION(class_block_flush, (block_dev_t *block),
+    ops->flush ? ops->flush(binding->dev) : -EOPNOTSUPP)
+#undef CLASS_BLOCK_OPERATION
 
 block_dev_t *mount_setup_block_device(int index)
 {
-    static class_block_dev_t class_blocks[16];
-    device_t *dev = device_find_by_class(DEV_CLASS_BLOCK, index);
-    if (!dev || !dev->drv || !dev->drv->class_ops || index < 0 || index >= 16)
-        return NULL;
-    const block_dev_ops_t *ops = (const block_dev_ops_t *)dev->drv->class_ops;
-    if (!ops->read || !ops->write || !ops->capacity || !ops->sector_size)
-        return NULL;
-    class_block_dev_t *class_block = &class_blocks[index];
-    class_block->dev = dev;
-    class_block->ops = ops;
-    class_block->block.read_sector = class_block_read_sector;
-    class_block->block.write_sector = class_block_write_sector;
-    class_block->block.write_batch = ops->write_batch ?
-        class_block_write_batch : NULL;
-    class_block->block.flush        = class_block_flush;
-    class_block->block.capacity = ops->capacity(dev);
-    class_block->block.sector_size = ops->sector_size(dev);
-    class_block->block.priv = class_block;
-    class_block->block.release = NULL;
-    return &class_block->block;
+    if (index < 0 || (unsigned)index >= CLASS_BLOCK_HANDLE_BUDGET) return NULL;
+    class_device_t *binding = class_device_get_by_index(DEV_CLASS_BLOCK, (unsigned)index);
+    if (!binding) return NULL;
+    const void *table;
+    if (class_device_ops_begin(binding, DEV_CLASS_BLOCK, &table)) {
+        class_device_put(binding); return NULL;
+    }
+    const block_dev_ops_t *ops = table;
+    int ready = ops->read && ops->write && ops->capacity && ops->sector_size;
+    uint64_t capacity = ready ? ops->capacity(binding->dev) : 0;
+    uint32_t sector_size = ready ? ops->sector_size(binding->dev) : 0;
+    int has_batch = ready && ops->write_batch;
+    class_device_call_end(binding);
+    if (!ready || !capacity || !sector_size) { class_device_put(binding); return NULL; }
+    class_block_dev_t *handle = &class_blocks[index];
+    uint64_t flags = spin_lock_irqsave(&class_blocks_lock);
+    if (handle->used) {
+        int same = handle->binding == binding;
+        spin_unlock_irqrestore(&class_blocks_lock, flags);
+        class_device_put(binding);
+        if (!same) printf("[BLOCK] stable handle index %d retired; descriptor budget exhausted for index\n", index);
+        return same ? &handle->block : NULL;
+    }
+    handle->used = 1;
+    class_device_get(binding);
+    handle->binding = binding;
+    handle->block = (block_dev_t){.read_sector = class_block_read_sector,
+        .write_sector = class_block_write_sector, .flush = class_block_flush,
+        .write_batch = has_batch ? class_block_write_batch : NULL,
+        .capacity = capacity, .sector_size = sector_size, .priv = handle};
+    spin_unlock_irqrestore(&class_blocks_lock, flags);
+    int rc = class_device_set_offline(binding, class_block_offline, handle);
+    if (rc) class_block_offline(binding, handle);
+    class_device_put(binding);
+    return rc ? NULL : &handle->block;
 }
 
 #if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY)

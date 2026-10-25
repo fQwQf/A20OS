@@ -17,7 +17,7 @@
 #     so `a20 check` rejects an instance asking for a capability its
 #     architecture does not declare.
 #
-# The wildcard halves of the trim (board drivers, kernel/platform/<board>/,
+# The wildcard halves of the trim (board drivers, kernel/arch/<arch>/boards/<board>/,
 # kernel/arch/<arch>/) stay in the Makefile on purpose: they are per-board
 # facts the registry cannot enumerate.
 
@@ -38,7 +38,6 @@ cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
 nommu = true
 bringup = true
 sources = [
-    "kernel/mcu/main.c",
     "kernel/mcu/uart.c",
     "kernel/mcu/heap.c",
     "kernel/mcu/mcu_stubs.c",
@@ -76,6 +75,7 @@ sources = [
     "kernel/core/stack_protector.c",
     "kernel/proc/sched.c",
     "kernel/proc/park.c",
+    "kernel/proc/park_wait_state.c",
     "kernel/proc/timer_heap.c",
     "kernel/proc/current.c",
     "kernel/proc/pid.c",
@@ -83,6 +83,7 @@ sources = [
     "kernel/proc/proc.c",
     "kernel/proc/userns.c",
     "kernel/proc/task.c",
+    "kernel/proc/task_lifecycle.c",
     "kernel/proc/exit.c",
     "kernel/proc/signal.c",
     "kernel/proc/cg_cpu.c",
@@ -116,7 +117,7 @@ arches = ["riscv64", "loongarch64", "aarch64", "x86_64"]
 # enforceable build fact), so this list is the instance-facing policy that
 # must be a superset of the recipes actually present.
 [capability.ramfs-user]
-arches = ["loongarch64", "riscv64"]
+arches = ["loongarch64", "riscv64", "aarch64", "x86_64", "arm32"]
 
 # SMP >1 is only pre-verified on these QEMU virt platforms; anything else
 # needs machine.allow_unverified_smp = true.

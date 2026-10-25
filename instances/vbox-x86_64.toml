@@ -37,7 +37,7 @@ kind = "uefi-disk"
 
 [target]
 serial = "/dev/ttyUSB0"
-baud = 115200
+baud = 38400
 boot_wait = 5
 boot_timeout = "180s"
 # Both probes are the regression guard.  [RAM] usable means the memory map was

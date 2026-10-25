@@ -1,5 +1,6 @@
     .set PAGE_OFFSET, 0xFFFF800000000000
-    .set PHYS_BASE,   0x00200000
+#include "../include/kernel_load.h"
+    .set PHYS_BASE,   X86_KERNEL_LOAD_ADDRESS
     /* With VIRT_BASE = PAGE_OFFSET + PHYS_BASE, physical addr = symbol - PAGE_OFFSET */
 
     /* Multiboot v1 header with load addresses */
@@ -158,7 +159,7 @@ gdt_desc:
     .long gdt - PAGE_OFFSET
 
     /* ==================================================================
-     * UEFI entry.  Entered directly from kernel/boot/uefi/x86_64_loader.c
+     * UEFI entry.  Entered directly from kernel/arch/x86_64/boot/uefi/x86_64_loader.c
      * in 64-bit long mode with the firmware's identity map still active.
      *
      * GRUB cannot be used under UEFI because GRUB 2.12 does not fill the
@@ -186,6 +187,8 @@ gdt_desc:
 _start_uefi:
     cli
     cld
+    movabsq $x86_boot_framebuffer_pa - PAGE_OFFSET, %rax
+    movq %rdx, (%rax)
 
     /* Adopt the loader's multiboot block.  Reusing the v1 layout means
      * x86_ram_detect() and multiboot_cmdline() need no UEFI-specific path,
@@ -201,6 +204,8 @@ _start_uefi:
                                          multiboot path's EBX */
     movabsq $x86_boot_acpi_rsdp - PAGE_OFFSET, %rcx
     movq   %rsi, (%rcx)
+    movabsq $x86_booted_uefi - PAGE_OFFSET, %rcx
+    movq   $1, (%rcx)
 
     /* The UEFI loader supplies the same v1 command-line field. Preserve it
      * before BSS clearing, using only the current identity mapping. */
@@ -322,8 +327,16 @@ gdt_desc64:
 
     .section .data
     .align 8
+    .globl x86_boot_framebuffer_pa
+x86_boot_framebuffer_pa:
+    .quad 0
     .globl x86_boot_acpi_rsdp
 x86_boot_acpi_rsdp:
+    .quad 0
+    /* Entry protocol is independent of whether ACPI was supplied.  Keep this
+     * in initialized data so the common BSS clear preserves the handoff. */
+    .globl x86_booted_uefi
+x86_booted_uefi:
     .quad 0
 
     .section .text.entry, "ax"

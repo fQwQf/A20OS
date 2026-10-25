@@ -8,7 +8,7 @@
 
 每个入口必须检查 `dev`、`dev->drv_priv`、buffer 和长度。read/write 的 class buffer 是内核地址。可能并发的入口必须在实例内同步。可选操作留 `NULL`；不要“返回成功但什么也不做”来假装支持。未知 ioctl 返回 `-ENOTTY`，硬件不支持的已知能力返回 `-EOPNOTSUPP`。当前动态 devfs 只为内建 block ioctl 和 audio 通用 ioctl 完成 usercopy；自定义 block/char `ops->ioctl` 仍收到原始 `arg`，在增加通用封送前不得直接解引用它。
 
-`device_find_by_class(class, index)` 按注册顺序返回已绑定设备。调用者遇到 `NULL` 就停止枚举。设备类枚举只在设备生命周期内使用；调用者不能缓存裸 `device_t *` 跨越 remove。
+`device_find_get_by_class(class, index)` 按当前在线设备的顺序返回持有引用的设备；`index` 是在线列表中的位置。调用者必须以 `device_put()` 归还引用。引用保证设备对象仍存在；调用驱动前还必须取得 class 引用，并在 `class_device_ops_begin()` 与 `class_device_call_end()` 之间访问 vtable。块设备持久句柄使用 `class_device_get_by_index()` 的稳定索引：每次成功发布消耗一个 0–255 索引，解绑后该索引永久离线，本次启动不会分配给另一块盘。
 
 ## Block：`DEV_CLASS_BLOCK`
 

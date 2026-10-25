@@ -4,7 +4,7 @@
  * Register-level implementation of the classic ("non C+") RTL8139 data path,
  * structured exactly like kernel/drivers/net/e1000.c: a PCI id_table, one
  * static instance, and the net_dev_ops_t class interface consumed by
- * kernel/net/lwip_stack.c through device_find_by_class(DEV_CLASS_NET, n).
+ * kernel/net/lwip_stack.c through device_find_get_by_class(DEV_CLASS_NET, n).
  *
  * Why this part is here at all
  * ----------------------------
@@ -452,18 +452,7 @@ static int rtl8139_irq_handler(int irq, void *priv)
         return 0;
     rtl8139_writew(nic, RTL8139_ISR, isr);
 
-    /* Same 8-slot walk e1000_irq_handler() does: A20_NET_MAX_DEVS is private to
-     * kernel/net/lwip_stack.c, and the enumeration stops at the first NULL. */
-    int net_idx = -1;
-    for (int i = 0; i < 8; i++) {
-        device_t *cur = device_find_by_class(DEV_CLASS_NET, i);
-        if (!cur)
-            break;
-        if (cur == dev) {
-            net_idx = i;
-            break;
-        }
-    }
+    int net_idx = a20_lwip_netif_index_for_device(dev);
 
     uint64_t flags = a20_lwip_lock();
     if (net_idx >= 0)
@@ -693,7 +682,8 @@ static int rtl8139_probe(device_t *dev)
     memset(nic, 0, sizeof(*nic));
     nic->irq = -1;
     spin_init(&nic->lock);
-    nic->regs = (uintptr_t)bar->start;
+    nic->regs = (uintptr_t)pci_map_bar(dev, 1);
+    if (!nic->regs) return -EIO;
 
     /* Reset before reading anything else: the reset restores the MAC from the
      * EEPROM shadow, so a MAC read before it would report whatever the previous

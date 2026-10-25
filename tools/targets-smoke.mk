@@ -79,6 +79,14 @@ smoke-aarch64:
 smoke-x86_64:
 	tools/a20 test smoke-x86_64
 
+.PHONY: smoke-uefi-x86_64 smoke-uefi-x86_64-impl
+smoke-uefi-x86_64:
+	$(MAKE) ARCH=x86_64 BOARD=x86_64-pc ABI=linux BRINGUP=1 \
+	  DRIVER_DEPLOYMENT=embedded smoke-uefi-x86_64-impl
+
+smoke-uefi-x86_64-impl: $(VBOX_X86_64_EFI)
+	$(PYTHON) tools/check_uefi_boot.py --efi $(VBOX_X86_64_EFI)
+
 smoke-x86-fp-preserve:
 	$(PYTHON) tools/smoke.py smoke-x86-fp-preserve
 
@@ -2179,7 +2187,7 @@ smoke-net-e1000-i440fx-intx:
 # mi->cmdline=<load_addr + page-aligned image size> -- but SeaBIOS 1.16.3 copies
 # only the image bytes, so guest RAM there is zero and firmware_bootargs()
 # reports cmdline='' and then cmdline_size=0 from fw_cfg.  The kernel therefore
-# falls back to the string in kernel/platform/qemu-virt-x86_64/board.c:24, which
+# falls back to the string in kernel/arch/x86_64/boards/qemu-virt-x86_64/board.c:24, which
 # carries no a20.tcpmode, and boots in the default fast mode.  In fast mode
 # net_listen_sock() drops the bound pcb (socket_control.c:242), so the port is not
 # listening in the stack and an inbound SYN is answered with RST -- a failure

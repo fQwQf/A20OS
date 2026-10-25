@@ -57,17 +57,13 @@ static int vinput_probe(device_t *dev)
     return found ? 0 : -ENODEV;
 }
 
-static const device_id_t vinput_probe_ids[] = {
-    { .vendor = 0x10006000UL, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { .vendor = 0x0A000A00UL, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "virtio,mmio"}, {0}
+};
 static driver_t vinput_probe_driver = {
     .name = "virtio-input-probe",
-    .id_table = vinput_probe_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .read_only_probe = 1,   /* user service uinputd owns the slot */
     .probe = vinput_probe,

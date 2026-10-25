@@ -46,8 +46,8 @@ class Ox64Contracts(unittest.TestCase):
 #include <string.h>
 static volatile uint32_t regs[0x100/4];
 #define UART0_BASE ((uintptr_t)regs)
-#include "kernel/platform/ox64/ox64_console.h"
-#include "kernel/arch/riscv64/platform/fdt_memory.h"
+#include "kernel/arch/riscv64/boards/ox64/ox64_console.h"
+#include "firmware/devicetree.h"
 void reset(void) { memset((void *)regs, 0, sizeof(regs)); }
 void set(unsigned offset, uint32_t value) { regs[offset/4] = value; }
 uint32_t get(unsigned offset) { return regs[offset/4]; }
@@ -56,15 +56,19 @@ void output(int c) { arch_uart_putc(c); }
 int input(void) { return arch_uart_poll_getc(); }
 void flush(void) { arch_uart_flush(); }
 int memory(const void *b, size_t n, uint64_t *result) {
-    riscv_fdt_memory_t m;
-    int rc = riscv_fdt_memory_window(b, n, 0x53800000,
-        0x50000000, 0x53f00000, 0x50200000, 0x50800000, &m);
-    result[0] = m.base; result[1] = m.end; return rc;
+    fw_dt_t tree;
+    int rc = fw_dt_init(&tree, b, n);
+    fw_dt_range_t ranges[16]; size_t count = 0;
+    if (!rc) rc = fw_dt_memory_window(&tree, 0x53800000,
+        0x50000000, 0x53f00000, 0x50200000, 0x50800000, ranges, 16, &count, 0);
+    if (!rc) { result[0] = ranges[0].base; result[1] = ranges[0].base + ranges[0].size; }
+    return rc;
 }
 ''')
         subprocess.run(["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared",
                         "-I", str(ROOT), "-I", str(ROOT / "kernel/include"), str(c),
-                        str(ROOT / "kernel/core/fdt_view.c"), "-o", str(p / "wrapper.so")], check=True)
+                        str(ROOT / "kernel/core/fdt_view.c"), str(ROOT / "kernel/firmware/devicetree/node.c"),
+                        str(ROOT / "kernel/firmware/devicetree/memory.c"), "-o", str(p / "wrapper.so")], check=True)
         cls.lib = ctypes.CDLL(str(p / "wrapper.so"))
         cls.lib.memory.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint64)]
         cls.lib.get.restype = ctypes.c_uint32
@@ -103,8 +107,7 @@ int memory(const void *b, size_t n, uint64_t *result) {
         self.assertEqual(self.lib.memory(data, len(blob), result), 0)
         # DTB must remain live; allocator excludes it as well as the M0 tail.
         self.assertEqual(list(result), [0x50000000, 0x53800000])
-        self.assertEqual(self.lib.memory(None, 0, result), 1)
-        self.assertEqual(list(result), [0x50000000, 0x53f00000])
+        self.assertEqual(self.lib.memory(None, 0, result), -22)
 
     def test_wrong_board_and_bad_reserve_map_are_rejected(self):
         for data in [b"bad", tree().replace(b"pine64,ox64", b"pine64,other"),

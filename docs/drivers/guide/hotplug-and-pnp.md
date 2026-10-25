@@ -19,12 +19,14 @@ bus detects remove
   -> device_unregister
   -> class device offline
   -> driver remove
-  -> bus releases its device record
+  -> managed resources and dependencies released
+  -> bus drops its creator reference
+  -> final device_put invokes release
 ```
 
 `device_hotplug()` 位于 `kernel/drivers/core/driver_core.c`。ADD 成功后才调用可选的 `bus_type_t.hotplug(..., BUS_EVENT_ADD)`；REMOVE 则在驱动 `remove` 完成后通知总线。因此 bus 回调只处理总线自己的记录或事件传播，不能取代驱动生命周期。
 
-注册会同步执行匹配和 `probe`，注销会同步执行 `remove`。所以只能从可睡眠的进程、worker 或调度/idle 下半部调用，绝不能直接从硬件中断处理程序调用。
+普通注册会同步尝试匹配和 `probe`；discovery 事务期间先发布完整设备集合，事务结束后由统一 probe/retry 路径绑定。注销会同步执行 `remove`。所以只能从可睡眠的进程、worker 或调度/idle 下半部调用，绝不能直接从硬件中断处理程序调用。
 
 ## 当前总线支持
 
@@ -35,7 +37,7 @@ USB 是当前端到端支持的热插拔总线：
 1. `usb_core_poll()` 在进程上下文按 250 ms 节流执行；它由 kernel progress bridge 调用。
 2. 每个 HCD 轮询事件环并读取每个 root port 的连接状态。
 3. 新连接端口经过 reset、slot/address 分配、descriptor/configuration 解析；每个 USB interface 被发布为一个 `device_t`，USB class driver 自动匹配并 probe。
-4. 连接消失时，核心先对每个 interface 发出 REMOVE，等待 class driver 停止 URB、IRQ/DMA 和 I/O，然后调用 HCD 的 `abort_slot`，最后释放 interface、endpoint 与 `usb_device_t` 存储。
+4. 连接消失时，先调用 HCD 的 `abort_slot`，断开控制器事件与未完成传输；再对每个 interface 发出 REMOVE，排空类调用并解除驱动绑定。interface、endpoint 和 `usb_device_t` 协议存储在解绑后回收，独立的 `device_t` 记录按引用计数延迟释放。
 
 USB HCD 应准确实现 `port_connected` 和 `abort_slot`。`abort_slot` 必须取消该 slot 的未完成传输，保证在它返回后不会再回调已经释放的 `usb_urb_t` 或 interface 私有状态。
 
@@ -54,13 +56,17 @@ VirtIO-MMIO 与固定 platform device 通常不是物理可热插拔总线；若
 1. 取得实例锁，将 `ready`/`removing` 置为不可用，拒绝新 I/O。
 2. 在设备侧屏蔽中断，注销 IRQ，取消或有界等待进行中的请求。
 3. 停止 DMA 和队列，解除 class 或子系统注册。
-4. 释放 DMA、MMIO 映射及私有内存，清空 `dev->drv_priv`。
+4. 释放未托管的 DMA 和私有内存，清空 `dev->drv_priv`；核心随后逆序执行受管资源回收。
 
-不要在 `remove` 后使用 `dev`、`dev->plat_data` 或 `drv_priv` 保存的指针。总线拥有 `device_t`、资源和 `plat_data`；它可以在 REMOVE 返回后立即销毁这些对象。反过来，驱动拥有 `drv_priv`，核心只会清空它，不能替驱动释放其中资源。
+持有 `device_get()` 引用只保证设备记录存活，不保证绑定仍在线。类消费者必须在 class call guard 内读取驱动操作表和发起调用；解除绑定先置 offline，等待已经进入的调用退出，再执行 remove。总线不能在 REMOVE 返回时直接释放或重置仍有引用的设备记录；动态对象由最终 `device_put()` 调用 `release()` 回收。解绑后释放协议存储前必须清除相应借用指针。驱动负责停止硬件并释放未托管的 `drv_priv` 资源。
 
 对 USB class driver，所有 URB completion 都必须先检查实例是否仍处于 ready 状态。对 PCI/平台驱动，DMA completion 和 IRQ top half 必须能和 remove 并发发生，且不会在资源释放后访问寄存器或 ring。
 
 可加载 `.a20drv` 模块的 `DriverEntry` 仍然只注册 `driver_t`。模块在设备不存在时保持已注册状态；以后设备热插入时，`device_hotplug(ADD)` 会自动匹配并调用它的 `probe`。当前已成功注册的模块会被 pin，不支持运行期卸载或替换模块本身；热插拔针对设备实例，不等同于模块热更新。
+
+## 块设备身份预算
+
+块类每次成功绑定取得独立索引，单次启动最多 256 个身份，撤销后不循环复用。借用的 block adapter 使用同样的有界预算；解绑后释放其设备和类引用，旧 adapter 保持离线并返回 `-ENODEV`。旧文件系统或 UXFS 服务保存的磁盘编号不能指向后来插入的另一块盘。预算耗尽时新绑定明确失败。
 
 ## 验证建议
 

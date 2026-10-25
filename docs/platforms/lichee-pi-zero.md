@@ -1,6 +1,6 @@
 # Lichee Pi Zero（Allwinner V3s）
 
-A20OS 的 `lichee-pi-zero` 实例面向搭载 Allwinner V3s、64 MiB DDR2 的原版 Lichee Pi Zero，使用 ARMv7-A MMU 和单个 Cortex-A7。它是串口内核 bring-up 平台；固件、内核、uImage 和完整 SD 镜像可在主机交叉构建，物理硬件启动尚未验证。
+A20OS 的 `lichee-pi-zero` 实例面向搭载 Allwinner V3s、64 MiB DDR2 的原版 Lichee Pi Zero，使用 ARMv7-A MMU 和单个 Cortex-A7。它提供独立的内核 bring-up 和 RAMFS 串口 shell 实例；固件、内核、uImage 和完整 SD 镜像可在主机交叉构建，物理硬件启动尚未验证。
 
 ## 系统支持
 
@@ -10,11 +10,59 @@ A20OS 的 `lichee-pi-zero` 实例面向搭载 Allwinner V3s、64 MiB DDR2 的原
 | UART0 | DW APB UART，物理地址 `0x01c28000`、32 位访问、寄存器间隔 4 字节。保留 U-Boot 已配置的引脚、时钟与 115200 分频，支持收发及 RX IRQ。 |
 | 中断 | GIC-400，Distributor `0x01c81000`、CPU interface `0x01c82000`；UART IRQ 32、非安全物理通用定时器 IRQ 30。 |
 | 时间 | 24 MHz ARM 通用计数器；64 位 `CNTPCT` 读取与物理定时器。 |
-| 启动内存 | 从匹配 DTB 读取 RAM、bootargs、`reserved-memory` 和 memreserve；保护 DTB 自身及固件保留区。分配器只使用第一个保留区之前的连续 RAM。 |
+| 启动内存 | 从匹配 DTB 读取 RAM、bootargs、`reserved-memory` 和 memreserve；保护 DTB 自身及固件保留区，分配器使用扣除保留区后的多个 RAM 区间。 |
 | 关机 / 重启 | 关机输出标记后停机，需要外部断电；重启通过 V3s watchdog 请求复位。两者均待实机验证。 |
-| SD / 网络 / USB / 显示 | SD 读卡由 SPL/U-Boot 完成。A20OS 尚无 V3s MMC、EMAC、USB、显示及摄像头驱动，不提供 SD 根文件系统、网络登录或用户态 shell。 |
+| SD / MMC0 | DT 的 `allwinner,sun7i-a20-mmc` 节点接入通用 `sunxi-mmc` PIO 块驱动；SDSC/SDHC/SDXC、512 字节扇区、单块读写和 flush；1-bit / 400 kHz。实机未验证；SD 不作为默认根文件系统，串口 shell 使用独立 RAMFS 实例。 |
+| 网络 / USB / 显示 | 尚无 EMAC、USB、显示及摄像头驱动；不提供网络登录。 |
 
 默认 `[kernel].bringup=true`、关闭 swap、不创建用户态。验收串口必须包含内存范围、`System ready (bringup, no userspace)`、`part ok` 和停机标记；这些字符串同时出现也只证明对应一次运行达到验收点。
+
+## RAMFS 串口 shell
+
+`lichee-pi-zero-shell` 复用同一板型固件和 SD 布局，将 init、mksh 及基本命令静态
+ELF 嵌入内核，关闭 bring-up 自动停机和 swap。启动后直接通过 UART0 进入 shell，
+无需内核 SD 驱动挂载根分区。先准备板级固件，再打包 shell 实例：
+
+```sh
+tools/a20 prepare lichee-pi-zero
+tools/a20 package lichee-pi-zero-shell
+sudo tools/a20 deploy lichee-pi-zero-shell --no-build --no-console \
+  --media-device /dev/disk/by-id/替换为实际SD整卡设备
+tools/a20 console lichee-pi-zero-shell --serial /dev/ttyUSB0 --interactive
+```
+
+该实例生成 `build/lichee-pi-zero/a20os-lichee-pi-zero-shell-sdcard.img`；每次 package
+都会按所选实例刷新共享 handoff 目录，不可复用另一个实例的旧 bundle。启动验收先等待
+`[init] fork=0, calling execve mksh`，再实际输入以下命令确认用户程序工作：
+
+```sh
+/bin/echo FIRST
+/bin/echo SECOND
+/bin/sleep 1; echo TIMER_OK
+echo hello > /tmp/hello
+/bin/cat /tmp/hello
+/bin/ps
+/bin/poweroff
+```
+
+写入 `/tmp` 和根目录的文件只保存在 RAM，复位即消失。`poweroff` 最后输出 V3s
+停机标记，需要移除外部电源。Ethernet/SSH、显示、音频均未因本 shell 实例启用；
+ARM32 已保存 trap、调度切换和信号帧的 VFP 上下文，父子进程寄存器隔离探针已通过。
+但 QEMU 重复运行仍可触发 fork 子进程的间歇 SIGSEGV，见 ABI-11；该 shell 实例是待验收配置，
+尚不能作为稳定交互系统，也不能宣称视频播放可用。
+
+主机回归使用 **QEMU virt，而非模拟 V3s 外设**，检查 ARM32 Linux ABI 的连续 exec/
+wait、休眠唤醒、subshell、文件重定向与正常关机：
+
+```sh
+make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 \
+  DRIVER_DEPLOYMENT=embedded kernel-only -j2
+python3 tools/check_arm32_shell.py --kernel 构建输出目录/kernel.elf --memory-mb 64
+```
+
+回归以 QEMU 生成的 DTB 经 ARM Linux `r2` 协议交接，分别在 64 MiB 与 1 GiB 完成上述命令；
+64 MiB 时内核初始化后报告约 41 MiB 可用内存。它验证小内存预算，不模拟 V3s 的管脚与外设。
+V3s shell 已交叉构建；串口接线、DRAM/SD 时序与真实硬件运行仍须逐板验收。
 
 ## 启动协议与地址
 
@@ -32,11 +80,26 @@ BootROM 从 SD 卡 8 KiB 位置读取 SPL；SPL 初始化 DDR，启动主线 U-B
 
 ## 主机依赖与固件
 
-Linux 主机需要 `make`、`arm-linux-gnueabihf-gcc`/binutils、交叉 libc 开发头、Python 3.11+、Rust `armv7a-none-eabihf` 目标、`bison`、`flex`、`swig`、OpenSSL 开发包、`mkfs.fat` 和 `mtools`。Debian/Ubuntu 的交叉工具链包通常为 `gcc-arm-linux-gnueabihf`、`binutils-arm-linux-gnueabihf`、`libc6-dev-armhf-cross`。Rust 目标安装：
+Linux 主机需要 ARM32 GNU 硬浮点交叉工具链、固件构建工具与 FAT 组装工具。Debian/Ubuntu 安装：
 
 ```sh
-rustup target add armv7a-none-eabihf
+sudo apt-get install build-essential git curl ca-certificates python3 \
+  gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf libc6-dev-armhf-cross \
+  bison flex swig libssl-dev libgnutls28-dev python3-dev python3-pip \
+  python3-setuptools python3-yaml dosfstools mtools
 ```
+
+安装 rustup 后配置仓库指定的 Rust 1.96.0；若尚无 rustup，可先执行下面前两条命令。已有 rustup 时可跳过安装器：
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/a20-rustup-init.sh
+sh /tmp/a20-rustup-init.sh -y --profile minimal --default-toolchain 1.96.0
+. "$HOME/.cargo/env"
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 armv7a-none-eabihf
+```
+
+下列仓库命令均在 A20OS 源码根目录执行；首次构建先运行 `git submodule update --init --recursive`。主机 Python 必须为 3.11 或更新版本，可用 `python3 --version` 确认。首次下载源码、Rust 组件和 Cargo 依赖需要联网。
 
 在仓库根目录执行：
 
@@ -98,9 +161,42 @@ tools/a20 console lichee-pi-zero --serial /dev/ttyUSB0 --auto-handoff
 
 64 MiB 不能按 QEMU virt 的 1 GiB 参数启动。不得使用其他 V3s 板、Lichee Pi Nano F1C100s 或 RISC-V LicheeRV Nano 的 DTB/固件。未知设备树、内核与固件保留区重叠时，内核会拒绝继续分配内存。
 
+## 内核 SD 驱动与边界
+
+`kernel/drivers/block/sunxi_mmc.c` 与 `sunxi_mmc_core.c` 是同一套架构无关控制器/
+SD 协议实现。V3s 板级 `configure_devices` 为 DT 中已经启用、位于 MMC0 的节点
+配置 PF0..PF5 的 function 2、30 mA 和上拉，打开 CCU AHB gate/reset，采用
+OSC24M / 4 / 15 = 400 kHz。固件设备图保留节点身份；不会通过复制静态节点绕过 DT。
+卡槽供电沿用 SPL/U-Boot；默认打包固件确实从该 MMC0 卡加载内核。
+
+驱动以 1-bit 低速逐扇区 PIO 避免依赖 DMA、缓存一致性和高速调谐：
+支持 SD 初始化、RCA、CSD、SDSC 字节寻址和 SDHC/SDXC 扇区寻址、CMD17/CMD24
+读写及 CMD13 flush/就绪检查。CSD 永久/临时写保护及固件 `read-only` 属性均会拒绝写入。
+所有硬件等待有上限；传输错误使当前绑定离线，后续 I/O 返回错误，需重新绑定初始化。
+探测失败和移除接入公共 devres 与 class 生命周期。
+
+尚不支持 4-bit/高速、DMA、MMC/eMMC、SDIO、GPIO 卡检测/机械写保护或热插拔重枚举。
+不能热拔正在使用的卡。内核正常启动不等于卡片读写通过：实机应先核对
+`[SUNXI-MMC]` 容量日志，再完成扇区内容与主机对比、受控写入和断电后读回。
+固件仍负责 SPL/DDR 和加载内核，SD 驱动不替代启动固件。
+
+生产代码宿主测试入口为：
+
+```sh
+python3 -m unittest tools.tests.test_sunxi_mmc
+```
+
+ASan/UBSan fixtures 检查 SDHC/SDSC 读写、容量/地址边界、写保护、无卡、CRC/FIFO/
+clock/power/状态超时、分配失败及 probe/remove 清理。实际管脚时序、卡片兼容性、
+供电和持久性仍待真机验证。
+
 ## 硬件与协议依据
 
 - [Sipeed Lichee Pi Zero 板卡介绍](https://wiki.sipeed.com/soft/Lichee/zh/Zero-Doc/Start/board_intro.html) 与 [UART0 / 上电使用说明](https://wiki.sipeed.com/soft/Lichee/zh/Zero-Doc/Start/use_board.html)：板型、64 MiB 内存及 `U0T/R` 调试口。
 - [U-Boot LicheePi_Zero_defconfig](https://github.com/u-boot/u-boot/blob/v2025.10/configs/LicheePi_Zero_defconfig) 和 [Allwinner 启动布局](https://docs.u-boot.org/en/v2025.10/board/allwinner/sunxi.html)：匹配 V3s 板型、集成 SPL 镜像及 SD 原始偏移。
 - [上游 V3s SoC 设备树](https://github.com/u-boot/u-boot/blob/v2025.10/dts/upstream/src/arm/allwinner/sun8i-v3s.dtsi) 与 [Lichee Pi Zero DTS](https://github.com/u-boot/u-boot/blob/v2025.10/dts/upstream/src/arm/allwinner/sun8i-v3s-licheepi-zero.dts)：UART、GIC、定时器中断、时钟和板级兼容标识。
 - [U-Boot bootm 协议](https://docs.u-boot.org/en/v2025.10/usage/cmd/bootm.html)：legacy uImage 和外部 DTB 交接方式。
+
+- [Linux v6.17 V3s CCU](https://github.com/torvalds/linux/blob/v6.17/drivers/clk/sunxi-ng/ccu-sun8i-v3s.c)、[V3s pinctrl](https://github.com/torvalds/linux/blob/v6.17/drivers/pinctrl/sunxi/pinctrl-sun8i-v3s.c)：MMC0 gate/reset、分频和 PF0..PF5 功能。
+- [U-Boot v2025.10 sunxi MMC](https://github.com/u-boot/u-boot/blob/v2025.10/drivers/mmc/sunxi_mmc.c) 与 [寄存器定义](https://github.com/u-boot/u-boot/blob/v2025.10/drivers/mmc/sunxi_mmc.h)：V3s PIO 控制器寄存器事实。
+- [SD Association 简化规范](https://www.sdcard.org/downloads/pls/)：SD 初始化、CSD 与块传输协议。

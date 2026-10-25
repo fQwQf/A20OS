@@ -6,7 +6,7 @@
  * and the 50 s idle watchdog -- against a simulated head node built with
  * the same shared wire builders from kernel/cluster/uart.h.  The UART and
  * timer seams (uart_putc / uart_try_getc / timer_get_ticks /
- * riscv64_timer_freq) are stubbed with controllable queues so each scenario
+ * arch_timer_frequency) are stubbed with controllable queues so each scenario
  * can script exactly what the wire carries.
  *
  * Every expectation cites its rule:
@@ -75,7 +75,7 @@ uint64_t timer_get_ticks(void) {
 }
 
 /* timer.h resolves TICKS_PER_SEC through this on riscv64 (QEMU: 10 MHz). */
-uint64_t riscv64_timer_freq(void) {
+uint64_t arch_timer_frequency(void) {
     return 10000000ULL;
 }
 

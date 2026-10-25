@@ -25,7 +25,7 @@ generic 只把驱动核心、总线与 `GENERIC_KERNEL_SERVICE_SRCS` 的九个�
 
 full profile 的 `DRIVER_DEPLOYMENT=embedded` 将 `EMBEDDED_DEVICE_DRIVER_SRCS` 与内核服务静态链接到内核，过滤掉 `driver_manager.c`，不构建 `.a20drv` 包，也不填充或扫描 DriverStore。该静态账本不是 generic 包的并集：RTC、PC speaker、PS/2、NVMe、TPM、HDA、vinput 和 vinput-probe 等 module-only 实现当前不会出现在 embedded 镜像。
 
-MCU profile 是构建图例外：`armv7m` 强制 `PROFILE=mcu`，直接通配 `BOARD_DRIVER_DIR`（当前为 `kernel/drivers/stm32f1/*.c`）和板级平台源码，不消费 full profile 的 `DRIVER_KERNEL_SRCS`。`armv7m` 和尚无 drvmod 工具链的 `ppc64le` 当前都默认标记为 embedded，但二者的实际源码选择分别由 MCU 分支和 full-profile embedded 分支决定。其他架构可显式选择 embedded，但必须按实际构建分支核对所需能力。
+MCU profile 是构建图例外：`armv7m` 强制 `PROFILE=mcu`，直接通配 `BOARD_DRIVER_DIR`（当前为 `kernel/arch/armv7m/boards/stm32f103/drivers/*.c`）和板级平台源码，不消费 full profile 的 `DRIVER_KERNEL_SRCS`。`armv7m` 和尚无 drvmod 工具链的 `ppc64le` 当前都默认标记为 embedded，但二者的实际源码选择分别由 MCU 分支和 full-profile embedded 分支决定。其他架构可显式选择 embedded，但必须按实际构建分支核对所需能力。
 
 模块包装通常通过包含 `kernel/drivers/` 下的共享实现并改写 `DRIVER_REGISTER` 来复用同一协议源码；只有在 `tools/driver-modules.mk` 明确提供包装和架构清单项时，这种双部署才成立。embedded 不是第二个驱动模型，也不应产生只适用于 STM32 的部署 API。
 

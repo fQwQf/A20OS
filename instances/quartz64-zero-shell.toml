@@ -1,0 +1,49 @@
+name = "quartz64-zero-shell"
+description = "quartz64-zero serial mksh shell in RAM; physical validation pending"
+arch = "aarch64"
+board = "quartz64-zero"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 1500000
+boot_wait = 3
+boot_timeout = "120s"
+# Wait for init to launch mksh; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/quartz64-zero/a20os-quartz64-zero-shell-sdcard.img"]
+# Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x02080000",
+    "setenv fdt_addr_r 0x0a000000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} rk3566-quartz64-zero.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, mksh and
+basic commands in the kernel; no root disk or network is required. Prepare
+firmware using the base board instance, then package this shell instance.
+The SD image and kernel are rebuilt with this instance's configuration.
+The handoff bundle at build/quartz64-zero/handoff is refreshed by packaging;
+do not reuse a bundle from a different instance. The shell stays running.
+Filesystem writes are RAM-only and disappear at reset. Ethernet/SSH, video
+and audio are separate capabilities, not enabled by this shell profile.
+Physical board execution is pending; see docs/platforms/quartz64-zero.md.
+"""

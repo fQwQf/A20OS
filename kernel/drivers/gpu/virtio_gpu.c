@@ -1479,10 +1479,11 @@ static int virtio_gpu_probe(device_t *dev) {
     virtio_transport_t vt = {
         .read32 = virtio_gpu_mmio_read32,
         .write32 = virtio_gpu_mmio_write32,
-        .priv = (void *)(uintptr_t)mmio_res->start,
+        .priv = device_map_mmio(dev, 0),
         .legacy = 0,
         .irq = -1,
     };
+    if (!vt.priv) return -ENODEV;
     resource_t *mmio_irq = device_get_resource(dev, RES_IRQ, 0);
     if (mmio_irq)
         vt.irq = (int)mmio_irq->start;

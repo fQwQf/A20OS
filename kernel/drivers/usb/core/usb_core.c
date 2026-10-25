@@ -58,8 +58,29 @@ static bus_type_t g_usb_bus = {
 /* Per-interface device publication                                    */
 /* ------------------------------------------------------------------ */
 
+static void usb_interface_device_release(device_t *dev)
+{
+    kfree((void *)dev->hardware_id);
+    kfree(dev);
+}
+
+static void usb_unpublish_interface(usb_interface_t *iface)
+{
+    device_t *dev = iface->device;
+    if (!dev)
+        return;
+    device_hotplug(dev, BUS_EVENT_REMOVE);
+    /* Class removal has drained operations. An open class handle can retain
+     * the device shell, but must never retain freed interface storage. */
+    dev->plat_data = NULL;
+    iface->device = NULL;
+    device_put(dev); /* Drop the publisher's creator reference. */
+}
+
 static int usb_publish_interfaces(usb_device_t *udev)
 {
+    int ret = 0;
+    driver_discovery_begin();
     for (uint8_t i = 0; i < udev->iface_count; i++) {
         usb_interface_t *iface = &udev->ifaces[i];
 
@@ -68,28 +89,44 @@ static int usb_publish_interfaces(usb_device_t *udev)
         if (!d || !hwid) {
             if (d) kfree(d);
             if (hwid) kfree(hwid);
-            return -ENOMEM;
+            ret = -ENOMEM;
+            goto rollback;
         }
         hwid->vendor = iface->interface_class;
         hwid->device = (uint32_t)((iface->interface_subclass << 8) |
                                   iface->interface_protocol);
         hwid->subvendor = VENDOR_ANY;
         hwid->subdevice = DEVICE_ANY;
-        iface->device = d;
-
         d->name = "usb-iface";
         d->bus = &g_usb_bus;
+        d->parent = udev->hcd->hcd_dev;
+        d->references = 1;
+        d->release = usb_interface_device_release;
         d->hardware_id = hwid;
         d->plat_data = iface;
         d->drv_priv = NULL;
 
-        if (device_hotplug(d, BUS_EVENT_ADD) < 0) {
-            kfree(hwid);
-            kfree(d);
-            iface->device = NULL;
+        ret = device_hotplug(d, BUS_EVENT_ADD);
+        if (ret < 0) {
+            d->plat_data = NULL;
+            device_put(d);
+            goto rollback;
         }
+        iface->device = d;
     }
+    driver_discovery_end();
+    /* Deferred retry only visits devices that already returned EPROBE_DEFER;
+     * these newly published interfaces still need their first probe. */
+    for (uint8_t i = 0; i < udev->iface_count; i++)
+        bus_probe_device(udev->ifaces[i].device);
+    driver_retry_deferred();
     return 0;
+
+rollback:
+    for (uint8_t i = 0; i < udev->iface_count; i++)
+        usb_unpublish_interface(&udev->ifaces[i]);
+    driver_discovery_end();
+    return ret;
 }
 
 static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
@@ -121,12 +158,7 @@ static void usb_disconnect_port(usb_hcd_t *hcd, unsigned port)
     /* Remove class devices before their interface and endpoint storage. */
     for (uint8_t i = 0; i < udev->iface_count; i++) {
         usb_interface_t *iface = &udev->ifaces[i];
-        if (iface->device) {
-            device_hotplug(iface->device, BUS_EVENT_REMOVE);
-            kfree((void *)iface->device->hardware_id);
-            kfree(iface->device);
-            iface->device = NULL;
-        }
+        usb_unpublish_interface(iface);
         kfree(iface->eps);
     }
     kfree(udev->ifaces);
@@ -332,11 +364,7 @@ int usb_core_enumerate_port(usb_hcd_t *hcd, unsigned port)
     if (!hcd->port_devices || port == 0 || port > hcd->max_ports) {
         r = -EINVAL;
         for (uint8_t i = 0; i < udev->iface_count; i++) {
-            if (udev->ifaces[i].device) {
-                device_hotplug(udev->ifaces[i].device, BUS_EVENT_REMOVE);
-                kfree((void *)udev->ifaces[i].device->hardware_id);
-                kfree(udev->ifaces[i].device);
-            }
+            usb_unpublish_interface(&udev->ifaces[i]);
             kfree(udev->ifaces[i].eps);
         }
         kfree(udev->ifaces);

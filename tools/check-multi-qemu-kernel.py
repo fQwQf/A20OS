@@ -188,7 +188,7 @@ def main():
             "Makefile", "tools/check-multi-qemu-kernel.py", "tools/boot/shared-qemu-reset.S",
             "kernel/arch/x86_64/boot/ap_trampoline.S", "kernel/arch/x86_64/platform/smp.c",
             "kernel/arch/x86_64/platform/timer.c", "kernel/arch/x86_64/trap/irqchip.c",
-            "kernel/arch/x86_64/include/platform.h", "kernel/platform/qemu-virt-x86_64/board.c",
+            "kernel/arch/x86_64/include/platform.h", "kernel/arch/x86_64/boards/qemu-virt-x86_64/board.c",
             "kernel/core/smp_selftest.c", "kernel/fs/rootfs_user.c", "tools/targets-images.mk",
             "kernel/proc/sched.c", "kernel/proc/current.c", "kernel/include/proc/proc.h",
             "user/cmds/stress/cluster_threads.c", "kernel/core/shared_device_call.c",

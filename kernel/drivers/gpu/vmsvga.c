@@ -286,9 +286,10 @@ static int vmsvga_probe(device_t *dev) {
     spin_init(&svga->lock);
     svga->legacy = pci_device_id(dev) ==
                    ((uint32_t)VMSVGA_VENDOR_ID << 16 | VMSVGA2_DEVICE_ID);
-    svga->regs = (uintptr_t)regs->start;
-    svga->fb_virt = (uintptr_t)fb->start;
-    svga->fb_phys = (uintptr_t)fb->start - PAGE_OFFSET;
+    svga->regs = (uintptr_t)device_map_resource(dev, regs);
+    svga->fb_virt = (uintptr_t)device_map_resource(dev, fb);
+    if (!svga->regs || !svga->fb_virt) return -EIO;
+    svga->fb_phys = (uintptr_t)fb->start;
     svga->fb_size = (size_t)(fb->end - fb->start + 1U);
 
     if (svga->legacy) {
@@ -312,8 +313,10 @@ static int vmsvga_probe(device_t *dev) {
         if (!svga->width || !svga->height || svga->bpp != 32U || !device_fb ||
             device_fb_size < (size_t)svga->width * svga->height * 4U)
             return -1;
+        if (device_fb < fb->start || device_fb > fb->end ||
+            device_fb_size > fb->end - device_fb + 1) return -ENODEV;
         svga->fb_phys = device_fb;
-        svga->fb_virt = device_fb + PAGE_OFFSET;
+        svga->fb_virt += device_fb - fb->start;
         svga->fb_size = device_fb_size;
         dev->drv_priv = svga;
         if (gpu_device_register(dev) < 0) {

@@ -14,12 +14,15 @@ DRIVER_CORE_SRCS := \
 
 # Kernel services, not migratable device drivers. They provide the substrate
 # used by optional .a20drv packages and remain in the image.
+# simplefb is the bootstrap exception: it preserves the firmware-owned
+# scanout before a native GPU driver or module-backed display is available.
 GENERIC_KERNEL_SERVICE_SRCS := \
     $(KERNEL_DIR)/drivers/block/loop.c \
     $(KERNEL_DIR)/drivers/block/udisk.c \
     $(KERNEL_DIR)/drivers/char/pty.c \
     $(KERNEL_DIR)/drivers/char/uart.c \
     $(KERNEL_DIR)/drivers/gpu/framebuffer.c \
+    $(KERNEL_DIR)/drivers/gpu/simplefb.c \
     $(KERNEL_DIR)/drivers/gpu/gpu_core.c \
     $(KERNEL_DIR)/drivers/gpu/drm.c \
     $(KERNEL_DIR)/drivers/audio/audio_core.c \
@@ -33,6 +36,10 @@ GENERIC_KERNEL_SERVICE_SRCS := \
 EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/block/ahci.c \
     $(KERNEL_DIR)/drivers/block/dw_sdio.c \
+    $(KERNEL_DIR)/drivers/block/sunxi_mmc.c \
+    $(KERNEL_DIR)/drivers/block/sunxi_mmc_core.c \
+    $(KERNEL_DIR)/drivers/block/sdhci.c \
+    $(KERNEL_DIR)/drivers/block/sdhci_core.c \
     $(KERNEL_DIR)/drivers/block/virtio_blk.c \
     $(KERNEL_DIR)/drivers/block/virtio_scsi.c \
     $(KERNEL_DIR)/drivers/net/e1000.c \

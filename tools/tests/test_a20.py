@@ -615,7 +615,7 @@ class TestRegistryParsing(unittest.TestCase):
         path = self.write('[[backend]]\nname = "x"\nboards = ["no-such-board"]\n'
                           'make_target = "flash-xuanwu-openocd"\n')
         errors = validate_flash_backends(load_flash_backends_in(path), REPO_ROOT)
-        self.assertTrue(any("has no kernel/platform" in e for e in errors), errors)
+        self.assertTrue(any("has no kernel/arch" in e for e in errors), errors)
 
 
 def load_flash_backends_in(path: Path):

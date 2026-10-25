@@ -1,155 +1,53 @@
-#ifdef CONFIG_RISCV32
+#include "firmware/devicetree.h"
+#include "boot/context.h"
+#include "core/panic.h"
+#include "core/errno.h"
+#include "drivers/core/driver_core.h"
+#include "mm/frame.h"
+#include "platform.h"
 
-#include "core/types.h"
-#include "core/string.h"
-#include "../../riscv64/platform/fdt_isa.h"
-
-#define FDT_MAGIC 0xd00dfeedU
-#define FDT_BEGIN_NODE 1U
-#define FDT_END_NODE 2U
-#define FDT_PROP 3U
-#define FDT_NOP 4U
-#define FDT_END 9U
-
-static uint32_t be32(uint32_t v) {
-    return ((v >> 24) & 0xffU) | ((v >> 8) & 0xff00U) | ((v << 8) & 0xff0000U) | ((v << 24) & 0xff000000U);
-}
-
-static uint32_t read_be32(const void *p) {
-    return be32(*(const uint32_t *)p);
-}
-
-static const char *skip_name(const char *p) {
-    while (*p)
-        p++;
-    return p + 1;
-}
-
-static int fdt_extract_bootargs(uint32_t dtb_pa, char *out, size_t outsz) {
-    if (!out || outsz == 0 || dtb_pa == 0)
-        return -1;
-    out[0] = '\0';
-    const uint8_t *base = (const uint8_t *)(uintptr_t)dtb_pa;
-    if (read_be32(base) != FDT_MAGIC)
-        return -1;
-    uint32_t off_struct = read_be32(base + 8);
-    uint32_t off_strings = read_be32(base + 12);
-    const uint8_t *stringsp = base + off_strings;
-    const uint8_t *p = base + off_struct;
-    int depth = 0;
-    int in_chosen = 0;
-    for (;;) {
-        uint32_t token = read_be32(p);
-        p += 4;
-        if (token == FDT_END)
-            break;
-        switch (token) {
-        case FDT_BEGIN_NODE: {
-            const char *name = (const char *)p;
-            p = (const uint8_t *)skip_name(name);
-            p = (const uint8_t *)(((uintptr_t)p + 3) & ~3UL);
-            depth++;
-            if (depth == 2 && strcmp(name, "chosen") == 0)
-                in_chosen = 1;
-            break;
-        }
-        case FDT_END_NODE:
-            if (depth == 2 && in_chosen)
-                in_chosen = 0;
-            depth--;
-            break;
-        case FDT_PROP: {
-            uint32_t len = read_be32(p);
-            uint32_t nameoff = read_be32(p + 4);
-            p += 8;
-            const char *propname = (const char *)(stringsp + nameoff);
-            if (in_chosen && strcmp(propname, "bootargs") == 0) {
-                size_t n = len;
-                if (n > outsz - 1)
-                    n = outsz - 1;
-                memcpy(out, p, n);
-                out[n] = '\0';
-                return 0;
-            }
-            p += ((len + 3) & ~3U);
-            break;
-        }
-        case FDT_NOP:
-            break;
-        default:
-            return -1;
-        }
-        if (depth < 0)
-            break;
+/* Boards with stricter identity/topology checks may provide their own ranges.
+ * All other DT handoffs still preserve the DTB and firmware reservations. */
+static fw_dt_range_t firmware_ranges[PFA_MAX_RANGES];
+static size_t firmware_range_count;
+static int memory_ready;
+static void firmware_memory_init(void) {
+    if (memory_ready) return;
+    const boot_context_t *b = boot_context_get();
+    uint64_t base = current_board ? current_board->ram_base : PHYS_MEMORY_BASE;
+    uint64_t end = current_board ? current_board->ram_end : PHYS_MEMORY_END;
+    firmware_ranges[0] = (fw_dt_range_t){base, end - base};
+    firmware_range_count = 1;
+    if (b && b->fdt) {
+        fw_dt_t tree; extern char _start[], _bss_end[];
+        int rc = fw_dt_init(&tree, b->fdt, b->fdt_available);
+        if (!rc) rc = fw_dt_memory_window(&tree, b->fdt_physical, base, end,
+            (uintptr_t)_start - PAGE_OFFSET, (uintptr_t)_bss_end - PAGE_OFFSET,
+            firmware_ranges, PFA_MAX_RANGES, &firmware_range_count, 0);
+        if (rc) panic("RISC-V32: invalid or excessive DT RAM/reservations");
     }
-    return -1;
+    memory_ready = 1;
 }
-
-extern uint32_t __boot_dtb_ptr;
-
-int riscv32_fdt_has_isa_extension(const char *extension)
-{
-    /* Before MMU initialization, OpenSBI's physical pointer is reachable
-     * through the temporary identity map. */
-    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
-    if (!base || !extension || read_be32(base) != FDT_MAGIC)
-        return 0;
-
-    uint32_t totalsize = read_be32(base + 4);
-    uint32_t off_struct = read_be32(base + 8);
-    uint32_t off_strings = read_be32(base + 12);
-    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize)
-        return 0;
-
-    const uint8_t *p = base + off_struct;
-    const uint8_t *endp = base + totalsize;
-    const uint8_t *stringsp = base + off_strings;
-    while (p + 4 <= endp) {
-        uint32_t token = read_be32(p);
-        p += 4;
-        if (token == FDT_END)
-            break;
-        if (token == FDT_BEGIN_NODE) {
-            const char *name_end = (const char *)p;
-            while ((const uint8_t *)name_end < endp && *name_end)
-                name_end++;
-            if ((const uint8_t *)name_end >= endp)
-                return 0;
-            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
-            continue;
-        }
-        if (token == FDT_END_NODE || token == FDT_NOP)
-            continue;
-        if (token != FDT_PROP || p + 8 > endp)
-            return 0;
-
-        uint32_t len = read_be32(p);
-        uint32_t nameoff = read_be32(p + 4);
-        p += 8;
-        uint32_t padded = (len + 3U) & ~3U;
-        if (p + padded > endp || off_strings + nameoff >= totalsize)
-            return 0;
-        const char *propname = (const char *)(stringsp + nameoff);
-        int legacy_isa = strcmp(propname, "riscv,isa") == 0;
-        if ((legacy_isa || strcmp(propname, "riscv,isa-extensions") == 0) &&
-            fdt_isa_string_has_extension((const char *)p, len, extension,
-                                         legacy_isa))
-            return 1;
-        p += padded;
-    }
+size_t arch_ram_range_count(void) {
+    firmware_memory_init();
+    return firmware_range_count;
+}
+int arch_ram_range(size_t index, paddr_t *base, paddr_t *end) {
+    firmware_memory_init();
+    if (!base || !end || index >= firmware_range_count) return -EINVAL;
+    *base = firmware_ranges[index].base;
+    *end = firmware_ranges[index].base + firmware_ranges[index].size;
     return 0;
 }
 
-
-const char *arch_bootargs_get(void) {
-    static char bootargs_buf[1024];
-    static int ready;
-    if (!ready) {
-        bootargs_buf[0] = '\0';
-        fdt_extract_bootargs(__boot_dtb_ptr, bootargs_buf, sizeof(bootargs_buf));
-        ready = 1;
-    }
-    return bootargs_buf[0] ? bootargs_buf : NULL;
+#ifdef CONFIG_RISCV32
+#include "core/bootargs.h"
+#include "../../common/riscv/fdt.h"
+int riscv32_fdt_has_isa_extension(const char *extension) {
+    return riscv_firmware_extension(extension);
 }
-
-#endif /* CONFIG_RISCV32 */
+const char *arch_bootargs_get(void) {
+    const boot_context_t *b = boot_context_get();
+    return b ? b->command_line : NULL;
+}
+#endif

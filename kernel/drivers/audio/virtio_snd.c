@@ -990,10 +990,11 @@ static int virtio_snd_probe(device_t *dev)
     virtio_transport_t transport = {
         .read32 = virtio_snd_mmio_read32,
         .write32 = virtio_snd_mmio_write32,
-        .priv = (void *)(uintptr_t)mmio->start,
+        .priv = device_map_mmio(dev, 0),
         .legacy = 0,
         .irq = -1,
     };
+    if (!transport.priv) return -ENODEV;
     resource_t *mmio_irq = device_get_resource(dev, RES_IRQ, 0);
     if (mmio_irq)
         transport.irq = (int)mmio_irq->start;

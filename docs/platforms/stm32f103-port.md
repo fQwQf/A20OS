@@ -1,213 +1,182 @@
-# STM32F103 移植与运行手册
+# STM32F103 / Cortex-M3
 
-> 最后核实：2026-08。构建变量、目录和已接入的驱动 API 已与源码核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，**不是**当前提交的重新验收结果；"下一步"明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。QEMU 和 OpenOCD launcher 已使用当前产物路径，但仍须在具备对应软件与硬件的环境中分别验证。
+本平台是 **ARMv7-M、无 MMU 的 MCU 内核配置**，不是完整的 Linux/POSIX 系统镜像。
+源码包含复位入口、UART、NVIC、SysTick、通用内核调度器接入、堆分配和板级外设服务；
+默认没有独立用户态进程、shell、完整 VM 或通用网络栈。编译、烧录校验、复位启动与
+每个外设的实机验收是四个不同结果，不应相互替代。
 
-> 板级常量或引脚定义不要藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
+## 目标与支持状态
 
-STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS 的架构和 board 边界：
+| 实例 | 目标和资源 | 支持入口 |
+| --- | --- | --- |
+| `stm32f103` | 通用 STM32F103，64 KiB Flash / 20 KiB SRAM | UART、堆、定时器与 idle 调度器基础固件；不创建 Xuanwu 外设服务线程 |
+| `stm32f103-xuanwu` | 普中玄武 STM32F103ZET6，512 KiB Flash / 64 KiB SRAM | 编译外设配置，注册的 CMSIS-DAP/SWD OpenOCD 烧录 |
+| `stm32f103-qemu` | QEMU `stm32vldiscovery`，128 KiB Flash / 8 KiB SRAM | 编译并模拟 UART/初始化/受限调度器 idle probe；不是 Xuanwu 外设模型 |
 
-- `kernel/arch/armv7m`：vector table、reset path、CPU 原语、exception frame、PendSV/SVC 抢占、SysTick、fault handling、firmware hooks、编译器 runtime helper。
-- `kernel/drivers/stm32f1`：可复用的 STM32F1 UART、SDIO、display、input、sensor、radio、RTC、watchdog、外部 SRAM 和 actuator 驱动。
-- `kernel/platform/stm32f103`：clock/memory 配置、NVIC-facing board 操作、外部 IRQ 路由、board/device 组合。
-- `kernel/mcu`：小内存 kernel profile 和 allocator。
+三个配置都使用 `ARCH=armv7m BOARD=stm32f103`，由 MCU profile 自动选择 NOMMU、
+bring-up 和 embedded 驱动。Flash 地址为 `0x08000000`，SRAM 从 `0x20000000` 起。
+不得把 512 KiB 的 Xuanwu 固件或烧录配置用于 64 KiB 芯片。
 
-MCU profile 链接通用调度器和一小部分 NOMMU/VFS，但不包含完整网络或 VM 子系统。STM32F103 通常只有 20 KiB SRAM 且无 MMU，所以这些设施需要嵌入式配置层，而不是只加新 CPU 和设备驱动。源码实现 reset/data/BSS 设置、UART、IRQ、1 kHz SysTick、抢占式任务调度、设备服务任务和动态分配；实际板上行为需按“硬件 smoke test”重新验证。MCU profile 的策展源码清单、能力矩阵与 `-Os`/`CONFIG_MCU` 等构建参数声明在 `components/trim.toml`（`[profile.mcu]`，经生成的 `components/trim.mk` 喂给 Makefile）；`tools/a20 trim stm32f103` 可查看该实例推导出的完整剪裁计划。
+实际 Xuanwu 外设运行、抢占可靠性和接线组合须在目标板重新验收。本页列的是源码
+接口和可执行操作，不将旧硬件日志或 QEMU 初始化成功当作当前实板通过。
 
-## 构建固件
+## 宿主依赖
 
-默认 bring-up：
-
-```sh
-make stm32f103-bringup
-```
-
-输出：
-
-```text
-.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f64k-r20k/kernel.elf
-.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f64k-r20k/kernel.bin
-```
-
-二进制链接到 flash 地址 `0x08000000`。用 OpenOCD、ST-Link 或其他 STM32 编程器烧写。USART1 用 PA9/PA10，115200 8N1。通用 bring-up 目标使用 8 MHz HSI 时钟。
-
-普中玄武 STM32F103ZET6 板（512 KiB Flash / 64 KiB SRAM）用：
+在 Linux 主机的仓库根目录操作。Python 需 3.11 或更新版本，需 GNU make、宿主
+C 工具链以及 ARM bare-metal 工具链；QEMU 和 OpenOCD 分别用于模拟和烧录：
 
 ```sh
-make stm32f103-xuanwu
+sudo apt install build-essential git python3 gcc-arm-none-eabi binutils-arm-none-eabi \
+  openocd qemu-system-arm picocom
 ```
 
-运行架构边界检查并构建 Xuanwu 镜像：
+仓库若启用 Rust 组件，使用 `rust-toolchain.toml` 选择的工具链。安装
+[rustup](https://rustup.rs/) 后准备对应目标：
 
 ```sh
-make check-stm32f103
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 thumbv7m-none-eabi
+git submodule update --init --recursive
 ```
 
-输出：
+Makefile 也有 Clang `--target=arm-none-eabi` 备选，主流程建议使用上述 GCC 工具链。
+烧录需能访问 USB 调试器及主机 udev 权限，串口需能访问相应 tty 设备。
+QEMU 无需物理板或调试器，实板烧录无需启动 QEMU。
 
-```text
-.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k/kernel.bin
-```
+## 构建与产物
 
-`STM32_XUANWU_ELF`、`flash-stm32f103-xuanwu` 和 `run-stm32f103-qemu` 均使用包含 `BOARD` 的当前 `BUILD_DIR` 命名。目标存在和固件编译通过不等于 QEMU 或实板已经验证；运行结论仍须来自具备对应环境的一次实际执行。
-
-`flash-stm32f103-xuanwu` recipe 的目标流程使用 `interface/cmsis-dap.cfg`、SWD 1 MHz，并允许通过 `STM32_OPENOCD_ADAPTER_KHZ` 和 `STM32_CMSIS_DAP_SERIAL` 选择速率和 probe。recipe 会读取上述 Xuanwu `BUILD_DIR` 中的 ELF。
-
-该 recipe 原本针对 PZ CMSIS-DAP firmware 无法可靠完成通用 `reset halt` 的情况：通过 Cortex-M Debug Halting Control and Status Register 停住，写入并校验 flash，再从 flash vector table 恢复 MSP 和 PC。没有匹配的 probe 或实板时不能把固件编译结果记成烧录通过。
-
-## Xuanwu 时钟与 UART
-
-Xuanwu 目标启用 8 MHz HSE 并切换到标称 72 MHz HSE×9 PLL 时钟，然后初始化 UART 和 SysTick；如果 HSE 或 PLL 启动失败则回退到 HSI。APB1 跑 36 MHz，APB2 跑 72 MHz。USART1 驱动从实时 RCC 寄存器读取 APB2 时钟，计算 BRR，而不是直接假设示例里的 72 MHz。RXNE 中断把数据放进 128 字节接收 ring，并通过所需的 SR/DR 读取序列清除 parity、framing、noise 和 overrun 错误。
-
-## 电机与 LCD
-
-PB5 分配给 Xuanwu 板的 ULN2003 电机输入，由 TIM3_CH2 通过 partial remap 驱动。Xuanwu 构建中禁用之前 PB5 的心跳 LED，避免破坏风扇 PWM 波形。
-
-板载 16-bit FSMC LCD 在启动时初始化。背光在 PB0 有信号时启用。面板复位接到板级复位，而不是某个 GPIO。固件先显示红、绿、蓝自测帧，然后画一个带实时 uptime 计数器的 A20OS 状态页。驱动按 vendor 示例的默认 HX8357D 兼容 3.5 英寸面板路径；该面板通过 STM32 16-bit FSMC 总线连接，但每个 RGB565 像素仍拆成两个 8-bit 写入。
-
-所有 Xuanwu 外设都是运行时可选。LCD、外部 SRAM、TF 卡、触摸初始化失败都会通过 USART1 报告，然后被忽略；内核仍会到达 SysTick/WFI 心跳循环。普通 `stm32f103-bringup` 目标编译同一个 platform manager，但禁用所有 Xuanwu 专用 probe，这就是无外设构建门禁。
-
-## TF 卡与 SDIO
-
-板载 TF 卡座使用 STM32 SDIO 引脚 `PC8-PC12` 和 `PD2`。驱动支持 SDSC 和 SDHC/SDXC 卡，带 1-bit fallback 和 4-bit 传输。读写是单扇区粒度，接口用通用 `block_dev_t`，另含 FAT32 boot sector 检测和卷标报告。ready 状态每 2 秒检查一次；卡缺失或移除后，每 5 秒自动调用 recovery probe，因此重新插入无需串口命令。MCU profile 不在进程可见命名空间里暴露这张卡。小型 board adapter 可以挂载 FAT32lite 用于校准和内核侧访问，同时 SDIO 驱动也发布通用 `block_dev_t` 接口。
-
-## 触摸与按键
-
-3.5 英寸面板搭载 XPT2046 兼容电阻触摸屏：
-
-```text
-PB1  = T_CLK
-PB2  = T_DOUT
-PF9  = T_DIN
-PF10 = T_PEN
-PF11 = T_CS
-```
-
-触摸每 20 ms 采样一次，带 trimmed sampling、噪声剔除、平滑和可配置轴校准。XPT2046 没有可读 device ID，所以空闲面板和缺失面板都无害地表现为 armed interface，直到 `T_PEN` 被拉低。
-
-四个黄色按键在触摸不可用时也可用。vendor 映射：
-
-```text
-PA0  active-high
-PE4  active-low
-PE3  active-low
-PE2  active-low
-```
-
-它们每 20 ms 采样并做 debounce，对应上、左、下、右事件（顺序为 `PA0`、`PE2`、`PE3`、`PE4`）。左右键在 `STATUS`、`MEM`、`TF`、`BT`、`INPUT TEST` 页面间切换；上下键选择状态行；右键打开选中的 memory、storage、Bluetooth 或 input 行。在 input 页，上键移动可见测试光标，下键清除画布。
-
-## 光感与背光
-
-板载光敏电阻在 `PF8` 通过 `ADC3 channel 6` 采样，与 vendor 光感实验一致。每次读取做 10 次真实 12-bit 转换，去掉最高和最低样本，然后平均并低通滤波。LCD 系统页显示测到的 ADC 值和 vendor 兼容的相对亮度 0-100。这故意不标成 lux，因为电阻网络没有工厂光度学校准。
-
-LCD 背光控制驱动板文档里标为高电平有效的 `LCD_BL` 信号，接在 `PB0`。亮度调制和自动亮度都关闭；PB0 保持高电平，面板维持正常硬件亮度。光敏电阻继续独立采样并显示。
-
-## 内存页测量
-
-内存页使用运行时测量，而不是把 Makefile 容量设置当成硬件事实。在 Xuanwu 上：
-
-- Flash 容量从 STM32 工厂 size 寄存器读取。
-- 内部 SRAM 容量从实时 DBGMCU 设备标识符和工厂 Flash density 推导；未知设备会显式使用链接布局 fallback，而不是假装测到了硅片容量。
-- 固件 Flash 使用来自最终链接的 load-image 边界。
-- 内部 RAM 使用结合静态 data/BSS 范围、实时 allocator 元数据和分配、以及从复位时填充模式测得的栈高水位。
-- 外部 SRAM 容量通过逐次探测地址线边界直到第一个镜像地址，再在该区间内用保存/恢复模式校验来确定。
-- 外部 SRAM 的 live allocator 使用情况，只有 probe 成功后才单独显示。
-
-板载 1 MiB 异步 SRAM 位于 FSMC Bank1 NOR/SRAM3 的 `0x68000000`。可通过 `stm32_extsram_alloc()` 和 `stm32_extsram_free()` 分配，用于未来 framebuffer、cache 或文件系统 working set，而不消耗内部 64 KiB SRAM。`kmalloc()` 在内部堆无法满足分配时也会自动使用外部 SRAM，但内部 SRAM 仍是首选。
-
-## 蓝牙 HC-05
-
-PZ-HC05 蓝牙模块接在 `USART3` 的 `PB10/PB11`，38400 8N1。`PA4` 驱动模块 KEY 输入，保持低电平进入透明数据模式；`PA15` 在释放 JTAG-only 引脚后接收专用 PIO9 连接状态输出，SWD 保持启用。PA15 使用上拉，只有当信号保持高电平 500 ms 后才接受为已连接；这能防止缺失模块或 LED 脉冲被误判为连接。
-
-默认名称 `KasaneTeto`，PIN `2233`，UUID `0x1101`，波特率 `38400`。构建时可覆盖：
+基础芯片和玄武板分别构建，不混用几何参数：
 
 ```sh
-make stm32f103-xuanwu \
-    STM32_BT_NAME=MY-BOARD STM32_BT_PIN=6789 \
-    STM32_BT_UUID=1101 STM32_BT_BAUD=38400
+tools/a20 check instances/stm32f103.toml instances/stm32f103-xuanwu.toml \
+  instances/stm32f103-qemu.toml
+tools/a20 build stm32f103
+tools/a20 build stm32f103-xuanwu
+tools/a20 ledger stm32f103-xuanwu
 ```
 
-服务是经典蓝牙 SPP。标准 HC-05 固件把 UUID 固定为 `0x1101`（`00001101-0000-1000-8000-00805F9B34FB`），不暴露 `AT+UUID`；兼容固件如果实现了该命令，会写入并读回。标准 HC-05 上请求非 `1101` 的 UUID 会被报告为 unverified，而不是显示为真实模块状态。
+产物在该实例配置的构建目录中：`kernel.elf` 含地址/调试信息，`kernel.bin` 是从
+Flash 起点开始的平面固件。目录包含配置指纹，不应照抄历史目录名。可直接查询：
 
-USART3 接收走中断驱动 ring buffer，按换行或 20 ms 空闲间隔分帧。Bluetooth 页显示已验证 role、名称、PIN、UUID 来源、连接状态和字节计数。测试发送按钮只在 PA15 报告真实连接时成功。
+```sh
+a20_stm32_base=$(make -s ARCH=armv7m BOARD=stm32f103 \
+  STM32_FLASH_KB=64 STM32_RAM_KB=20 print-build-dir)
+a20_stm32_xuanwu=$(make -s ARCH=armv7m BOARD=stm32f103 \
+  STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 print-build-dir)
+ls -l "$a20_stm32_base/kernel.elf" "$a20_stm32_xuanwu/kernel.elf"
+arm-none-eabi-size "$a20_stm32_xuanwu/kernel.elf"
+```
 
-启用 USART3 前，驱动会先测试 PB11 是否跟随内部上拉/下拉。如果跟随，说明模块 TX 路径浮空，启动会报告 `rx=floating`。在 Xuanwu 上通常意味着 P10 的 `USART3_TX`/`W_TX` 和 `USART3_RX`/`W_RX` 跳线帽缺失或接反、模块插反或未供电。正常上电空闲模块会报告 `rx=driven-high`。
+本平台没有 `[package]` 和 SD/USB 启动镜像；部署对象就是 ELF/Flash 固件。
+`tools/a20 package stm32f103-xuanwu` 不是有效打包入口。
+`make check-stm32f103` 进行架构边界静态检查并构建 Xuanwu 固件，**不运行 QEMU、
+不烧录、不验证实板**。`tools/a20 trim stm32f103` 可查看裁剪配置。
 
-完整 AT probe 不会自动重复，因为缺失模块可能阻塞外设服务任务数秒。源码有 Bluetooth reprobe helper，但当前没有调用点，也没有 USART1 命令解析器；改变接线或供电后需要重启，不能使用文档中曾列出的 `bt retry` 命令。
+## 玄武板烧录
 
-## USART 共享驱动
+确认芯片为 STM32F103ZET6，调试器连接 SWDIO、SWCLK、GND 和所需电压参考。
+板子通过自身电源正确供电，避免不同电源相互馈电；按调试器规范连接参考电压。
+使用 SWD 保留调试端口；正常从 Flash 复位启动时 BOOT0 保持低电平。
 
-USART1、USART2、USART3 共享 STM32 UART 寄存器驱动。它从实时 RCC 时钟树推导各外设时钟，计算并报告实际 BRR 值，每次使用前复位 USART，配置 8N1 TX/RX 引脚，排空硬件错误，并控制对应 NVIC 线。USART3 会显式清除 remap 位，确保模块始终使用 Xuanwu 的 `PB10/PB11` 路由，即使调试器或之前烧写的应用把 AFIO 留在其他状态。
+默认烧录使用 `interface/cmsis-dap.cfg`、`target/stm32f1x.cfg`、SWD、1000 kHz：
 
-## ESP8266 WiFi
+```sh
+tools/a20 flash stm32f103-xuanwu --dry-run
+tools/a20 flash stm32f103-xuanwu
+```
 
-两个射频可同时工作。板座上直接插着 HC-05，Dupont 线连接的 ESP8266 用 `USART2`（`PA2` TX 接 ESP RX，`PA3` RX 接 ESP TX），`PC6` 驱动 CH_PD/EN，`PC7` 驱动 RESET。两个模块和 MCU 必须共地；ESP8266 供电要能提供足够 3.3 V 电流。USART2 和 USART3 有独立的接收中断和 ring buffer，所以 WiFi probe 不会占用或重新配置蓝牙 UART。
+此命令会擦写固件覆盖的 Flash 区域。先保存需要保留的原固件；Flash 中不能有不可丢弃
+数据。工具先构建，再执行写入和 `verify_image`，从向量表读出 MSP/PC 并恢复执行。
+它没有使用通用 `reset halt`，因此写完之后还应单独断开调试器、复位验证冷启动。
 
-ESP8266 是 ESP8266EX，1 MiB Flash，官方 Nano AT v1.7.4.0（SDK v3.0.4），115200 8N1。非阻塞 probe 拉低 RESET 500 ms，等待 2 秒，然后最多重试 3 次候选波特率，从 115200 开始。硬件测试已确认 reset 控制和两个 UART 方向。上一次失败是 PA2 到模块 RX 之间的 Dupont 线损坏；换线后 AT 硬件链路完成。AP 关联和代理 TCP 连接是独立的配置/集成步骤。
+需要指定同型号 probe 或降低速率时：
 
-板级 early-init 保持 PA4 低电平，让模块进入可发现数据模式。配置严格按 PZ 示例的运行时 AT 序列：先反复尝试 9600，发送命令时拉高 KEY，发送完立刻拉低 KEY，然后等待响应。收到第一次有效回复后，测试后续命令需要 KEY 低、每命令脉冲或保持高。然后检查其他支持的数据率。写入并读回 slave role（`ROLE=0`）、任意 peer 配对（`CMODE=1`）、设备名、PIN 和透明 UART 设置，再发 `AT+RESET`，拉低 KEY，进入透明 slave 等待模式。RESET 命令离开 USART3 后立即拉低 KEY，让模块在重启期间采样到数据模式；当 vendor 专用命令无法读回时也会发 reset，防止已检测到的模块卡在不可发现的 AT 模式。
+```sh
+tools/a20 flash stm32f103-xuanwu -- \
+  STM32_CMSIS_DAP_SERIAL=实际调试器序列号 STM32_OPENOCD_ADAPTER_KHZ=500
+```
 
-接口只有真实模块在电气上驱动 PB11 或回复 AT 命令后才显示 ready；`WAITING` 仍需要验证过的 slave 配置和成功的 reset。这区分了“模块存在但 AT 方言未知”和“模块缺失”，而不会声称未验证的配置。默认名 `KasaneTeto`，PIN `2233`，UUID `0x1101`，波特率 `38400`，可通过上述构建变量修改。
+其他 probe 需修改本地实例 `[flash].interface` 等字段，并核对其 OpenOCD 配置，
+不能只把设备名当作 CMSIS-DAP 参数。注册后端仅允许 512/64 KiB 的 Xuanwu 几何配置，
+通用 64/20 KiB 实例没有 `a20 flash` 后端。
 
-## USART1 接收边界
+基础芯片可使用独立 STM32CubeProgrammer：选择实际芯片/接口，写 ELF，或把
+`kernel.bin` 写至 **`0x08000000`**，执行校验后复位。使用其他工具时，同样先核对
+芯片容量和文件地址，不要绕过目标型号检查。
 
-USART1 使用 115200 8N1；RXNE 中断只把收到的字节送入 `kernel/mcu/uart.c` 的接收 ring。当前源码没有消费文本行的交互式命令解析器，因此曾记录的 `uart`、`perf`、`sd retry` 和 `bt ...` 都不是已实现接口。驱动打印的启动/状态日志仍可用于观察波特率、BRR、字节数和硬件错误。
+## 串口、启动和可观察验收
 
-SysTick 从实时 RCC HCLK 推导 1 kHz reload，而不是假设复位默认的 8 MHz。TF 卡缺失时由外设服务任务每 5 秒自动重试；Bluetooth 和 WiFi reprobe helper 当前没有调用点。
+USART1 **PA9=TX、PA10=RX，115200、8N1、无流控**。使用 3.3 V TTL 串口，TX/RX
+交叉并共地，不连接 RS-232 电平。按实际 tty 替换：
 
-## 调度器与任务
+```sh
+picocom --baud 115200 --flow n /dev/serial/by-id/实际串口设备
+```
 
-MCU profile 现在链接通用 A20OS 进程调度器。ARMv7-M `__switch` 保存并恢复 `r4-r11`、SP、返回地址、任务指针和 CONTROL。物理板上把外设服务跑成一个内核任务；QEMU 用两个调度器探测任务替代。任务设计为通过 `proc_yield()` 协作让出，同时也会在 10 ms 时间片内被抢占。SysTick 挂起最低优先级 PendSV 异常；PendSV 把异常返回重定向到 thread-mode trampoline，保存易失寄存器集并在 handler mode 外安全进入现有调度器；SVC 在任务恢复时还原中断的 PC/xPSR。每个任务有 preemption guard，落在调度器内部时会把 tick 推迟。MCU-only 批处理限制、256 项 PID 命名空间和兼容桩减少了通用调度器占用。8 KiB QEMU profile 跑两个不主动让出的忙循环任务，并报告 `PREEMPT PASS`，证明两个任务只靠时间片推进。
+这些 STM32 实例没有 `[target]` 串口会话配置，因此此处使用串口终端，不能直接期望
+`a20 console stm32f103-xuanwu` 具备自动验收。先连终端再复位，保存日志并检查：
 
-## 显示与仪表板
+1. `A20OS ARMv7-M STM32F103 bringup`、正确 board 和 heap 大小。
+2. `[BOOT] allocator=ok`；Xuanwu 配置另外检查实际外设 probe 的 ready/failure 状态。
+3. `[BOOT] scheduler initialized`。
+4. `[BOOT] SysTick=1000Hz source=HCLK=...`；继续观察计数/服务任务是否推进。
+5. 脱离调试器后重复冷启动，确认不是 probe 留下的时钟/寄存器状态导致偶然成功。
 
-当 workable panel 安装好时，board bring-up 仪表板仍可通过触摸选择。存储页显示容量、FAT32 状态、SDIO 总线宽度和卷标。触摸页是一个小画板，支持连续笔画和 `CLEAR` 按钮，无需串口终端即可检查面板方向和校准。TF 和 touch 的状态行也兼任页面快捷键。
+普通配置使用 HSI；Xuanwu 尝试 8 MHz HSE ×9 的 72 MHz PLL，失败回退到 HSI。
+UART BRR 和 SysTick reload 从实时 RCC 时钟推导。日志显示的是配置与运行状态；
+1 kHz 字符串不等同于用外部仪器测得的定时器精度。
 
-## 烧写后验证
+USART1 RX 中断只送入 ring buffer，当前没有文本命令解析器。
+`uart`、`perf`、`sd retry`、`bt retry` 都不是有效命令，也没有 `cat` 或 shell。
 
-STM32CubeProgrammer 也可以把二进制写到地址 `0x08000000`，或直接写 ELF。复位后 USART1 在 PA9 115200 8N1 打印输出；接收是 PA10。正常 flash 启动时保持 BOOT0 低电平。
+## Xuanwu 可选外设
 
-## QEMU launcher 限制
+板级组合由 `kernel/arch/armv7m/boards/stm32f103/` 管理，协议驱动位于
+`kernel/arch/armv7m/boards/stm32f103/drivers/`。以下为当前接口，需实际安装对应硬件才可验收：
 
-QEMU 的 `stm32vldiscovery` 模型有 128 KiB flash 和 8 KiB SRAM，所以 `run-stm32f103-qemu` 配置的实际构建目录是 `.kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu/`。launcher 从该目录加载 `kernel.bin`；有效 smoke 结论仍要求实际 QEMU 运行到预期串口标记。
+| 外设 | 接口及验收 |
+| --- | --- |
+| 外部 SRAM | FSMC Bank1 NOR/SRAM3 `0x68000000`；probe 成功后检查容量/读写与 allocator；标称容量不能替代探测 |
+| LCD | 16 位 FSMC、HX8357D 兼容路径；先观察自测色帧，再检查状态页和 uptime；不同面板不保证兼容 |
+| 触摸 | XPT2046 兼容：PB1 CLK、PB2 DOUT、PF9 DIN、PF10 PEN、PF11 CS；以按下/抬起和坐标证明真实输入 |
+| TF 卡 | SDIO PC8–PC12、PD2；检查容量、总线宽度、FAT32 元数据和插拔恢复；不自动成为用户态 rootfs |
+| 按键 | PA0、PE2/PE3/PE4；确认去抖后事件及页面动作 |
+| 光感/背光 | PF8 ADC3 channel 6、PB0 背光；ADC 相对值不是 lux 测量 |
+| HC-05 | USART3 PB10/PB11，PA4 KEY、PA15 状态；默认 38400；检查模块实际响应、连接与双向传输 |
+| ESP8266 | USART2 PA2/PA3，PC6 EN、PC7 RESET；需独立满足 3.3 V 电流；AT 响应不等于 AP/TCP 已连通 |
+| 电机 | PB5/TIM3_CH2 partial remap；仅在匹配驱动电路/负载下验证 PWM |
 
-## 硬件 smoke test
+可选外设失败会在 UART 报告，不能由内核继续运行推断该设备正常。
+HC-05 缺省名称/PIN/UUID/数据率可用 `STM32_BT_NAME`、`STM32_BT_PIN`、
+`STM32_BT_UUID`、`STM32_BT_BAUD` 构建变量调整；模块固件是否支持读回必须按日志判断。
+TF 数据写测试使用可丢弃卡；驱动的单扇区 I/O、FAT32 元数据解析不等于完整 VFS 已挂载。
 
-烧写后预期行为：
+## QEMU 独立验证
 
-1. LED0 上电后亮起，然后每 500 ms 翻转一次。
-2. USART1 打印启动状态和外设事件。原来的每秒一次 `[TICK]` 行已关闭，保持控制台安静。
-3. LCD 显示外部 SRAM、TF/FAT32、方向键和 uptime 状态。
-4. 黄色方向键发出 `[KEY]` 消息。左右切换页面，上下控制当前页面。
-5. 如果触摸可用，底部 `STATUS`、`MEM`、`TF`、`BT`、`INPUT` 按钮切换页面；画图留下青色笔画，`CLEAR` 擦除。
-6. 触摸面板显示坐标并发出 `[TOUCH] down`/`[TOUCH] up` 消息。
-7. `BT` 页报告 HC-05 连接状态。手机在 38400 8N1 配对，从蓝牙串口应用发送文本，按上键发送 `A20OS HC05 TEST` 回复。
-8. 遮住和移开板载光敏电阻。`LIGHT` ADC/level 值会变化，面板背光保持固定亮。
-9. 插入或移除 TF 卡分别在不重启的情况下在 5 秒或 2 秒内被检测到。
+```sh
+tools/a20 build stm32f103-qemu
+tools/a20 run stm32f103-qemu
+```
 
-用 FAT32 格式化的 TF 卡检查文件系统元数据。原始或非 FAT32 卡仍会被初始化成块设备。
+实际 launcher 是 `qemu-system-arm -machine stm32vldiscovery -nographic -kernel ...`，
+使用 **128 KiB Flash / 8 KiB SRAM** 的专用产物。终止 QEMU 使用 `Ctrl-A X`。
+观察 allocator、scheduler、SysTick 初始化，以及
+`[SCHED] constrained QEMU idle probe online`。当前模型只有受限 idle probe，
+不应期待双忙循环 `PREEMPT PASS`，也不能据此宣称物理多任务抢占通过。
+QEMU 不模拟 Xuanwu LCD、SDIO 卡、电气连接或外部 SRAM fabric。
 
-> 注意：不要在装有有价值数据的 TF 卡上做写测试。
+## 故障与边界
 
-## 驱动开发提示
+| 现象 | 检查 |
+| --- | --- |
+| 无编译器/链接失败 | ARM bare-metal 工具链和所选 Flash/SRAM 几何；不要改大 RAM 数值掩盖溢出 |
+| 找不到调试器 | USB 权限、interface cfg、probe 序列号、电源、SWD 连线和速率 |
+| 烧录校验通过但复位无输出 | BOOT0、向量表/Flash 起点、PA9 接收线、115200、时钟及独立复位 |
+| allocator 失败或任务分配 panic | 实际 SRAM 容量和 MCU profile 内存预算；QEMU 8 KiB 限制不同于物理板 |
+| 有启动日志但外设不可用 | 具体板型、跳线、外设供电、pinmux 和该 probe 的错误信息 |
+| 串口键入无响应 | 当前无命令解析器；只用日志和面板/物理输入验收 |
 
-- 复现 bring-up：执行 `make stm32f103-bringup` 或 `make stm32f103-xuanwu`，从实际 `BUILD_DIR` 选择产物，用独立烧录工具写入后观察 USART1 输出。
-- 扩展 STM32F1 驱动层：把 GPIO、EXTI、SPI、I2C、SPI-flash 控制器接口做成可复用驱动，不要在可复用驱动里硬编码 Xuanwu 引脚。
-- 新板级移植：提供 `kernel/platform/<board>/` 下的链接脚本、`BOARD_INCLUDE_DIR` 和 `BOARD_DRIVER_DIR`；板级常量留在 platform 代码。
-- 调试外设时使用启动和状态日志确认时钟与错误计数；当前没有 `uart` 或 `perf` 命令解析器。
-
-## 下一步
-
-1. 在物理 Xuanwu 板上，并发 LCD、SDIO、UART 中断负载下验证 10 ms SysTick/PendSV 抢占路径。
-2. 决定应用是跑在特权 flat 地址空间，还是使用 Cortex-M MPU 做粗粒度隔离。
-3. 把 MCU 兼容桩替换为必需的 IPC 和小型 VFS 实现，然后挂载现有 TF `block_dev_t`。
-4. 在 STM32F1 驱动层扩展可复用的 GPIO、EXTI、SPI、I2C 和 SPI-flash 控制器接口。
-5. 把 SDIO 传输移到 DMA，并用外部 SRAM 做块缓存。
-
-## 原生多芯片共享内核实验
-
-新增默认关闭的 `MCU_SHARED_KERNEL=1` 端口，使用独立固件目录及共享链接脚本。
-它要求新增共享 RAM 和硬件仲裁器，NE1/NE2 接线不同于 Xuanwu 的 NE3 单端口
-外部 SRAM，不能直接在现有板上运行。已用两个 Cortex-M3 指令引擎运行完整
-固件，验证原生线程迁移；没有物理运行证据。构建、仲裁 ABI、私有/共享内存
-布局与后续验收见 [原生共享内核设计](../cluster/25-native-shared-kernel.md)。
-现有单 MCU、Xuanwu 外设、UART leaf 和 stm32vldiscovery 配置继续保留。
+普通 MCU profile 的任务是同一地址空间的内核线程，没有 MMU 隔离。默认关闭的
+`MCU_SHARED_KERNEL=1` 需要额外共享 RAM 和仲裁硬件，其接线不等于 Xuanwu 单端口
+SRAM；不属于本页可直接烧写运行的配置。调度器、外设 DMA、完整 VFS/网络与共享硬件
+各自需要独立验收，不能从当前初始化标记推出。

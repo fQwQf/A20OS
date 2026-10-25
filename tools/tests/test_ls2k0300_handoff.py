@@ -106,7 +106,7 @@ class Firmware:
             result = f'CRC32 for 9000000008000000 ... ==> {crc:08x}\n'
         elif command.startswith('bootelf -p '):
             self.queue.extend([b'## Starting application at 0x9000000002000000 ...\r\n',
-                               b'[LS2K0300] stage=polled\r\nSystem ready (bringup, no userspace)\r\npart ok\r\n'])
+                               b'[LS2K0300] stage=irq\r\nSystem ready (bringup, no userspace)\r\npart ok\r\n'])
             return
         # Split the prompt across reads to exercise the streaming recognizer.
         response = command + '\r\n' + result + '\r\n=> '

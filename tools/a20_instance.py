@@ -144,7 +144,7 @@ class NetCfg:
         empty guest address is not.  So the short form's implicit guest address
         is filled in with the one the tree's own boards boot with under QEMU's
         slirp, 10.0.2.15 -- see the `a20.ip=` default in
-        kernel/platform/qemu-virt-x86_64/board.c and the -append line shared by
+        kernel/arch/x86_64/boards/qemu-virt-x86_64/board.c and the -append line shared by
         the targets in tools/targets-smoke.mk.  A manifest whose guest has some
         other address already spells it out, and this leaves that alone.
 

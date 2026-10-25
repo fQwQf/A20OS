@@ -76,8 +76,8 @@ def _make_root(tmp: Path, text: str = MINIMAL_TRIM) -> Path:
     src = tmp / "kernel" / "core"
     src.mkdir(parents=True, exist_ok=True)
     (src / "panic.c").write_text("/* stub */\n")
-    (tmp / "kernel" / "platform" / "licheerv-nano").mkdir(parents=True, exist_ok=True)
-    (tmp / "kernel" / "platform" / "licheerv-nano" / "board.c").write_text("/* stub */\n")
+    (tmp / "kernel" / "arch" / "riscv64" / "boards" / "licheerv-nano").mkdir(parents=True, exist_ok=True)
+    (tmp / "kernel" / "arch" / "riscv64" / "boards" / "licheerv-nano" / "board.c").write_text("/* stub */\n")
     return tmp
 
 

@@ -29,6 +29,10 @@ HOST_TESTS_PROBES := \
 
 # SCRIPTED, grouped by the driver script that runs them.
 HOST_TESTS_SCRIPTED := \
+    tools/tests/test_acpi_tables.c \
+    tools/tests/test_uacpi_namespace.c \
+    tools/tests/uacpi_host_test_osl.c \
+    tools/tests/host_sunxi_mmc.c \
     tools/tests/block_cache_state_host.c \
     tools/tests/completion_state_host.c \
     tools/tests/envelope_policy_host.c \
@@ -77,6 +81,37 @@ HOST_TESTS_SRC := $(filter-out $(HOST_TESTS_PROBES) $(HOST_TESTS_SCRIPTED),\
                                $(wildcard tools/tests/*.c))
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,$(TMPDIR)/a20-host-%,$(HOST_TESTS_SRC))
 HOST_TESTS_BIN += $(TMPDIR)/a20-host-test_lwip_allocator_single_lane
+
+# Production firmware/provider/driver graph fixtures, including the real AML
+# interpreter. Python owns their multi-source host compilation and UBSan runs.
+.PHONY: check-firmware-model
+check-firmware-model:
+	$(PYTHON) -m unittest tools.tests.test_firmware_model \
+	  tools.tests.test_devicetree \
+	  tools.tests.test_acpi_tables \
+	  tools.tests.test_uacpi_namespace \
+	  tools.tests.test_pci_resources \
+	  tools.tests.test_arch_layout \
+	  tools.tests.test_arch_mmio \
+	  tools.tests.test_arch_fdt_memory \
+	  tools.tests.test_board_module_devices \
+	  tools.tests.test_pine_a64_fdt \
+	  tools.tests.test_quartz64_zero_fdt \
+	  tools.tests.test_lichee_pi_zero_fdt \
+	  tools.tests.test_riscv_fdt_memory \
+	  tools.tests.test_ssi_arch_state \
+	  tools.tests.test_elf_load_span \
+	  tools.tests.test_mcu_heap_backend \
+	  tools.tests.test_x86_boot_memory \
+	  tools.tests.test_aarch64_uefi_memory \
+	  tools.tests.test_aarch64_uefi_loader \
+	  tools.tests.test_class_binding \
+	  tools.tests.test_native_bus_lifetime \
+	  tools.tests.test_sunxi_mmc \
+	  tools.tests.test_sdhci \
+	  tools.tests.test_dw_sdio \
+	  tools.tests.test_ls2k0300_liointc \
+	  tools.tests.test_boot_framebuffer
 
 # Execute the production common fabric driver for x86-64, AArch64 and RV64.
 .PHONY: check-shared-fabric-portability

@@ -50,6 +50,8 @@ static inline uint64_t swp_entry_to_pte(swap_entry_t entry) {
 
 /* Compat aliases for arch-agnostic code */
 #define PTE_MAT1  0UL
+/* PAT reset entry 3 is UC: match the kernel device alias. */
+#define PTE_DEVICE ((1UL << 3) | (1UL << 4))
 
 #define PTE_KERN (PTE_V | PTE_W | PTE_NX | PTE_LEAF)
 #define PTE_USER (PTE_V | PTE_W | PTE_U | PTE_NX | PTE_LEAF)

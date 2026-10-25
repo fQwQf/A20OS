@@ -29,10 +29,16 @@
 
 #include <arch.h>
 
+/* Without cacheable-memory flags, other ports already encode device memory. */
+#ifndef PTE_DEVICE
+#define PTE_DEVICE 0UL
+#endif
+
 /* Architecture-owned initialization hooks. The generic definitions provide
  * conservative fallbacks when an architecture does not override them.
  * init_kthread() calls the bootarg diagnostics once after scheduler startup. */
 void arch_run_bootarg_selftests(void);
+void arch_run_platform_selftests(void);
 /* Republish the just-switched-in task's user thread-pointer state after
  * __switch().  Architectures that carry the user TLS in registers kept alive
  * by the context switch (or that restore it in the switch itself) leave this

@@ -30,6 +30,7 @@ import tomllib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from a20_boards import board_directory
 from typing import Any, Final, Sequence
 
 from a20_instance import KNOWN_ARCHES, Instance
@@ -342,8 +343,8 @@ def validate_flash_backends(entries: tuple[FlashBackend, ...], repo_root: Path) 
             e.append(f"backend '{b.name}': duplicate entry")
         seen.add(b.name)
         for board in b.boards:
-            if not (repo_root / "kernel" / "platform" / board / "board.c").is_file():
-                e.append(f"backend '{b.name}': board '{board}' has no kernel/platform/{board}/board.c")
+            if not ((directory := board_directory(repo_root, board)) and (directory / "board.c").is_file()):
+                e.append(f"backend '{b.name}': board '{board}' has no kernel/arch/<arch>/boards/{board}/board.c")
         rule = re.compile(rf"^{re.escape(b.make_target)}\s*:", re.MULTILINE)
         if not any(rule.search(f.read_text(encoding="utf-8", errors="replace")) for f in makefiles):
             e.append(f"backend '{b.name}': make target '{b.make_target}' is not defined in any makefile")
@@ -586,9 +587,9 @@ def validate_trim_registry(reg: TrimRegistry, repo_root: Path) -> list[str]:
             if arch not in KNOWN_ARCHES:
                 e.append(f"capability '{c.name}': unknown arch '{arch}'")
         for board in c.board_exclusions:
-            if not (repo_root / "kernel" / "platform" / board / "board.c").is_file():
+            if not ((directory := board_directory(repo_root, board)) and (directory / "board.c").is_file()):
                 e.append(f"capability '{c.name}': board '{board}' has no "
-                         f"kernel/platform/{board}/board.c")
+                         f"kernel/arch/<arch>/boards/{board}/board.c")
 
     for arch in reg.arch_cppflags:
         if arch not in KNOWN_ARCHES:

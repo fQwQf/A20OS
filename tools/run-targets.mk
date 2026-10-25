@@ -94,7 +94,7 @@ x86_64-uefi-disk: $(VBOX_X86_64_IMG)
 # kernel plus the commands that hand it to the boot chain already on the board.
 # The load address is read back out of the ELF by the script, so a board that
 # relocates its image needs no entry here.
-kernel-bundle: $(if $(filter 1,$(BRINGUP)),kernel-only,dev-build)
+kernel-bundle: $(if $(filter 1,$(BRINGUP) $(RAMFS_USER)),kernel-only,dev-build)
 	@mkdir -p build/$(BOARD)
 	READELF="$(READELF)" tools/mk_kernel_bundle.sh \
 		$(KERNEL_ELF) $(KERNEL_BIN) build/$(BOARD)/handoff $(BOARD) "$(HANDOFF_INSTANCE)"

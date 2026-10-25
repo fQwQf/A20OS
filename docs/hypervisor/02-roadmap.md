@@ -267,7 +267,7 @@ hvip 都没写**就通了，因为 guest 侧是轮询 `LSR` 的。也就是说 �
 
 ### 2.3 客服用到的 SBI 扩展
 
-guest 侧的 SMP 完全建立在 SBI 上（`kernel/platform/qemu-virt-riscv64/board.c`）：
+guest 侧的 SMP 完全建立在 SBI 上（`kernel/arch/riscv64/boards/qemu-virt-riscv64/board.c`）：
 `sbi_hart_start()` 启 secondary hart、`sbi_send_ipi()` 发中断、
 `rv64_smp_remote_tlb_flush()` 自己用 IPI 实现远端 TLB 刷新（注释明确说 QEMU
 TCG 下 `SBI REMOTE SFENCE.VMA` 不可靠）。这三项都不在 v2 的 SBI 面里。
@@ -444,7 +444,7 @@ TCG 与真实 H 扩展 CPU 已知不同的几处，都是本设计依赖的：
 | `hideleg` 位翻译（2/6/10 → 1/5/9） | — | 规格要求，实现未必全 |
 | 嵌套虚拟化 | 不支持 | `hstatus.HU` 与 HLV/HLVX 指令的真值 |
 
-**现有真机**：`kernel/platform/` 下有 VisionFive 2（JH7110）与 LS2K1000
+**现有真机**：`kernel/arch/<arch>/boards/` 下有 VisionFive 2（JH7110）与 LS2K1000
 （LoongArch）两家带 H 能力的 riscv64/其它平台板子，其中 licheerv-nano 与
 milk-v-duo 在树里是完整板级实现（[platforms/porting-guide.md](../platforms/porting-guide.md)）。
 **具体哪一块硬件的 H 扩展支持哪几条（尤其 x4 与 `hcounteren` 的 WARL 位），

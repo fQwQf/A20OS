@@ -645,14 +645,17 @@ static int starfive_gmac_driver_probe(device_t *dev) {
     if (!res)
         return -1;
 
-    if (starfive_gmac_init(res->start) != 0) {
-        kinfo("[StarFive-GMAC] Failed to init at 0x%lx\n", (unsigned long)res->start);
+    uintptr_t base = (uintptr_t)device_map_mmio(dev, 0);
+    if (!base) return -ENODEV;
+
+    if (starfive_gmac_init(base) != 0) {
+        kinfo("[StarFive-GMAC] Failed to init at 0x%lx\n", (unsigned long)base);
         return -1;
     }
 
-    starfive_gmac_priv_t *priv = gmac_instance(res->start);
+    starfive_gmac_priv_t *priv = gmac_instance(base);
     dev->drv_priv = priv;
-    kinfo("[StarFive-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)res->start);
+    kinfo("[StarFive-GMAC] Probed '%s' at 0x%lx\n", dev->name, (unsigned long)base);
     return 0;
 }
 
@@ -696,18 +699,16 @@ static net_dev_ops_t starfive_gmac_net_ops = {
     .poll = starfive_gmac_class_poll,
 };
 
-static const device_id_t starfive_gmac_ids[] = {
-    { .vendor = STARFIVE_GMAC_PLATFORM_VENDOR, .device = STARFIVE_GMAC_PLATFORM_DEVICE,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
+
+static const firmware_device_id_t starfive_gmac_firmware_ids[] = {
+    { .id = "starfive,jh7110-dwmac" }, {0}
 };
 
 static driver_t starfive_gmac_driver = {
     .name       = "starfive-gmac",
-    .id_table   = starfive_gmac_ids,
     .bus        = &platform_bus,
     /* jh7110.dtsi: gmac0/gmac1 "starfive,jh7110-dwmac" */
-    .of_compatible = "starfive,jh7110-dwmac",
+    .firmware_ids = starfive_gmac_firmware_ids,
     .probe      = starfive_gmac_driver_probe,
     .remove     = starfive_gmac_driver_remove,
     .class_ops  = &starfive_gmac_net_ops,

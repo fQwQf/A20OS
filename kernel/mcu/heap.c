@@ -1,7 +1,7 @@
 #include "mm/slab.h"
 #include "core/arch.h"
 #include "core/string.h"
-#include "drivers/stm32f1/extsram.h"
+#include "heap_backend.h"
 #include "heap.h"
 #ifdef CONFIG_MCU_SHARED_KERNEL
 #include "shared_kernel.h"
@@ -48,8 +48,7 @@ size_t mcu_heap_available(void) {
     mcu_heap_get_stats(&stats);
     size_t total = stats.free_bytes;
 #ifndef CONFIG_MCU_SHARED_KERNEL
-    if (stm32_extsram_ready())
-        total += stm32_extsram_available();
+    total += arch_mcu_heap_available();
 #endif
     return total;
 }
@@ -100,7 +99,7 @@ void *kmalloc(size_t size) {
 #ifdef CONFIG_MCU_SHARED_KERNEL
     return NULL;
 #else
-    return stm32_extsram_alloc(size);
+    return arch_mcu_heap_alloc(size);
 #endif
 }
 
@@ -108,8 +107,8 @@ void kfree(void *ptr) {
     if (!ptr)
         return;
 #ifndef CONFIG_MCU_SHARED_KERNEL
-    if (stm32_extsram_owns(ptr)) {
-        stm32_extsram_free(ptr);
+    if (arch_mcu_heap_owns(ptr)) {
+        arch_mcu_heap_free(ptr);
         return;
     }
 #endif
@@ -150,8 +149,8 @@ void *krealloc(void *ptr, size_t size) {
     }
     size_t old_size;
 #ifndef CONFIG_MCU_SHARED_KERNEL
-    if (stm32_extsram_owns(ptr)) {
-        old_size = stm32_extsram_allocation_size(ptr);
+    if (arch_mcu_heap_owns(ptr)) {
+        old_size = arch_mcu_heap_allocation_size(ptr);
     } else
 #endif
     {

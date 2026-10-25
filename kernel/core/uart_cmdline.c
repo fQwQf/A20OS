@@ -39,7 +39,7 @@
 #include "core/string.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
-#include "platform.h"
+#include "drivers/core/driver_hwapi.h"
 
 /* Matches BOOTARGS_MAX in core/bootargs.c, which is where the result lands
  * and the real ceiling on what survives. */
@@ -52,9 +52,8 @@
  *
  * The deadline is measured on timer_get_ticks(), which on LoongArch64 is the
  * rdtime.d counter and runs whether or not the periodic timer is enabled --
- * timer_enable() happens much later in main.c.  The ARCH_TIMER_FREQ idiom and
- * the 5-second window are copied from the QEMU riscv64 board's existing
- * console wait.
+ * timer_enable() happens much later in main.c. clock_ticks_per_sec() uses the board's
+ * counter-frequency contract, including firmware-dependent timebases.
  */
 #define UART_CMDLINE_TIMEOUT_S 5
 
@@ -71,14 +70,14 @@ int uart_cmdline_read(char *out, size_t outsz)
     uart_puts("[UARTCMD] type a kernel command line, or press Enter for "
               "none\n[UARTCMD] ");
 
-    const uint64_t window = UART_CMDLINE_TIMEOUT_S * ARCH_TIMER_FREQ;
+    const uint64_t window = UART_CMDLINE_TIMEOUT_S * clock_ticks_per_sec();
     uint64_t wait_start = timer_get_ticks();
     size_t len = 0;
 
     for (;;) {
         /* Unsigned subtraction: monotonic, so this reads as elapsed time and
          * stays correct across the counter's own wrap.  Same idiom as the
-         * console wait in kernel/platform/qemu-virt-riscv64/board.c. */
+         * console wait in kernel/arch/riscv64/boards/qemu-virt-riscv64/board.c. */
         if (timer_get_ticks() - wait_start > window)
             break;
 

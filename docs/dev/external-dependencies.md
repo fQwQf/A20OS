@@ -2,7 +2,7 @@
 
 ## 源码存储形态
 
-- `kernel/external/lwip` 与 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree。
+- `kernel/external/{lwip,uacpi}` 与 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree。
 - `.gitmodules` 目前只登记 `user/external/apps/fastfetch` 一项；超级项目的 gitlink 条目固定具体 commit；许可证必须对该精确 commit 核验。
 - fastfetch 是唯一仍从源码编译进根文件系统的独立第三方程序：它被链接进 FAT32 根，而该根在任何 Alpine world 挂载之前就要启动。
 - 基础 `user/Makefile` 存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
@@ -14,6 +14,10 @@
 `tools/img.py extra`、`tools/stamps.py extra-inputs` 与 `tools/pkg.py prepare-riscv64-sysroot` 已随之删除。真板仍需要一块可写 ext4（挂 `/extra`），该分区现在由 world 镜像填充：`mkrootfs.py` 输出的无分区表 raw ext4 可直接替换原 `extra.img`，`make vf2-sdcard` 即走此路径（`VF2_WORLD` 选 world，默认 `devel`）。
 
 被删除的 glibc sysroot 引导（`prepare-riscv64-glibc-sysroot.sh`）曾为源码构建的 glibc 动态链接程序提供运行库；Alpine 包自带各自 loader，因此不再需要。
+
+## uACPI
+
+`kernel/external/uacpi` 保存未经修改的上游 7.0.0 `source/` 与 `include/`；固定 revision、归档 SHA256 与许可证入口见其 `A20OS-SOURCE`。ACPI 表、namespace 与 AML 适配位于 `kernel/firmware/acpi/`；物理映射、PCI 配置、端口访问和 SCI 入口在各架构的 `arch/` 实现。更新上游后须运行 `make check-firmware-model` 的生产 namespace fixture，并验证相应平台的 ACPI 启动和 S5 关机。同步时保留上游 MIT `LICENSE`。
 
 ## lwIP
 

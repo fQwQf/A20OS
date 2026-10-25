@@ -54,7 +54,7 @@ cd "$repo" || { record_exit repository-cd 1; exit 1; }
 inc=( -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel \
       -Ikernel/net/lwip_port -Ikernel/external/lwip/src/include \
       -Ikernel/external/littlefs -Ikernel/external/littlefs/compat \
-      -Ikernel/platform/x86_64-pc )
+      -Ikernel/arch/x86_64/boards/x86_64-pc )
 {
   gcc --version
   gcc -v 2>&1

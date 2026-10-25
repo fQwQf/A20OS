@@ -174,3 +174,10 @@ unsigned long linux_arch_user_offset(int field)
     default:                         return 0;
     }
 }
+
+void arch_run_platform_selftests(void) {
+#ifdef CONFIG_PCI_PIRQ_TEST
+    extern void x86_64_pci_pirq_selftest(void);
+    x86_64_pci_pirq_selftest();
+#endif
+}

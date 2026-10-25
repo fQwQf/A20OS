@@ -2265,10 +2265,10 @@ index 79197544..e5f836f4 100644
      if (perf_timed)
          setup_ticks = timer_get_ticks() - fork_impl_start;
      uint64_t clone_start = perf_timed ? timer_get_ticks() : 0;
-diff --git a/kernel/platform/licheerv-nano/board.c b/kernel/platform/licheerv-nano/board.c
+diff --git a/kernel/arch/riscv64/boards/licheerv-nano/board.c b/kernel/arch/riscv64/boards/licheerv-nano/board.c
 index a4a8fce4..0624fa1a 100644
---- a/kernel/platform/licheerv-nano/board.c
-+++ b/kernel/platform/licheerv-nano/board.c
+--- a/kernel/arch/riscv64/boards/licheerv-nano/board.c
++++ b/kernel/arch/riscv64/boards/licheerv-nano/board.c
 @@ -6,7 +6,7 @@
   * Boot chain: the SG2002 boot ROM loads a vendor FSBL (cv181x.bin) from the
   * TF card, which initialises clocks and DRAM and loads OpenSBI; OpenSBI then
@@ -2289,10 +2289,10 @@ index a4a8fce4..0624fa1a 100644
   *
   * Interrupt controller: the DTS calls it "thead,c900-plic", which mainline
   * binds to its standard SiFive PLIC driver, so the shared PLIC in
-diff --git a/kernel/platform/licheerv-nano/licheerv_nano_platform.h b/kernel/platform/licheerv-nano/licheerv_nano_platform.h
+diff --git a/kernel/arch/riscv64/boards/licheerv-nano/licheerv_nano_platform.h b/kernel/arch/riscv64/boards/licheerv-nano/licheerv_nano_platform.h
 index 9d7b0cee..51409fbc 100644
---- a/kernel/platform/licheerv-nano/licheerv_nano_platform.h
-+++ b/kernel/platform/licheerv-nano/licheerv_nano_platform.h
+--- a/kernel/arch/riscv64/boards/licheerv-nano/licheerv_nano_platform.h
++++ b/kernel/arch/riscv64/boards/licheerv-nano/licheerv_nano_platform.h
 @@ -13,10 +13,9 @@
   * at commit 551c722f40809618230001baccf219193e22fc5a.
   *
@@ -2307,10 +2307,10 @@ index 9d7b0cee..51409fbc 100644
   * docs/platforms/licheerv-nano.md.
   */
  
-diff --git a/kernel/platform/visionfive2/ldscript-nommu.ld b/kernel/platform/visionfive2/ldscript-nommu.ld
+diff --git a/kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld b/kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld
 index 801e726d..e65fad31 100644
---- a/kernel/platform/visionfive2/ldscript-nommu.ld
-+++ b/kernel/platform/visionfive2/ldscript-nommu.ld
+--- a/kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld
++++ b/kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld
 @@ -25,6 +25,10 @@ SECTIONS
          *(.text.entry)
          *(.text .text.*)
@@ -2331,10 +2331,10 @@ index 801e726d..e65fad31 100644
  
      /DISCARD/ : {
          *(.eh_frame .eh_frame_hdr)
-diff --git a/kernel/platform/visionfive2/ldscript.ld b/kernel/platform/visionfive2/ldscript.ld
+diff --git a/kernel/arch/riscv64/boards/visionfive2/ldscript.ld b/kernel/arch/riscv64/boards/visionfive2/ldscript.ld
 index 18ede642..751f0519 100644
---- a/kernel/platform/visionfive2/ldscript.ld
-+++ b/kernel/platform/visionfive2/ldscript.ld
+--- a/kernel/arch/riscv64/boards/visionfive2/ldscript.ld
++++ b/kernel/arch/riscv64/boards/visionfive2/ldscript.ld
 @@ -38,6 +38,10 @@ SECTIONS
          *(.text.entry)
          *(.text .text.*)

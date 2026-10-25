@@ -529,7 +529,8 @@ static int vrng_probe(device_t *dev)
         resource_t *irq_res = drv_device_get_resource(dev, RES_IRQ, 0);
         vt.read32 = vrng_mmio_read32;
         vt.write32 = vrng_mmio_write32;
-        vt.priv = (void *)(uintptr_t)mmio_res->start;
+        vt.priv = device_map_mmio(dev, 0);
+        if (!vt.priv) return -ENODEV;
         vt.legacy = 0;
         vt.irq = irq_res ? (int)irq_res->start : -1;
     }

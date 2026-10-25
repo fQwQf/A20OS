@@ -160,6 +160,11 @@ void keyring_release_task(task_t *task) {
 void landlock_release_task(task_t *task) {
     (void)task;
 }
+
+void landlock_inherit_task(task_t *child, const task_t *parent) {
+    (void)parent;
+    child->landlock_rulesets = NULL;
+}
 void env_release_task(task_t *task) {
     (void)task;
 }

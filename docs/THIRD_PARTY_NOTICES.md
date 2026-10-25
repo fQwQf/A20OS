@@ -22,6 +22,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 | 组件 | 许可证 | 位置 | 说明 |
 |------|--------|------|------|
+| uACPI | MIT | `kernel/external/uacpi` | 7.0.0；上游版本与归档校验值见 `A20OS-SOURCE`，分发保留 `LICENSE` |
 | lwIP | BSD-3-Clause | `kernel/external/lwip` | 网络协议栈，`NO_SYS=1` 模式集成；跟踪上游 `COPYING` |
 
 ## 4. 用户态构建依赖

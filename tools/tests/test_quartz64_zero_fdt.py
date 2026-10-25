@@ -82,12 +82,14 @@ typedef struct {
     const timer_ops_t *timer;
     void *smp;
     void (*early_init)(void), (*poweroff)(void), (*reboot)(void);
+    void (*configure_devices)(void);
     int defer_network_init, vdso_user_timer_unreliable;
 } board_config_t;
 extern const irqchip_ops_t quartz64_zero_gic_ops;
 extern const board_config_t *const current_board;
 ''',
         }
+        stubs["mm/frame.h"] = "#pragma once\n#define PFA_MAX_RANGES 32\n"
         for name, content in stubs.items():
             path = work / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,9 +99,15 @@ extern const board_config_t *const current_board;
 #include <stdarg.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "boot/context.h"
+#include "firmware/devicetree.h"
+static boot_context_t test_context;
+static char command_line[1024];
+const boot_context_t *boot_context_get(void) { return &test_context; }
 #include "drivers/core/driver_core.h"
 uint64_t aarch64_boot_dtb = 0x0a000000;
 const irqchip_ops_t quartz64_zero_gic_ops = {0};
+void quartz64_zero_configure_storage(void) {}
 uint64_t aarch64_timer_freq(void) { return 24000000; }
 uint64_t timer_get_ticks(void) { return 42; }
 uint64_t arch_smp_boot_hw_id(void) { return 0; }
@@ -118,27 +126,34 @@ int main(int argc, char **argv) {
     if (p == MAP_FAILED) { perror("mmap"); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 1;
-    fread(p, 1, 0x200000, f); fclose(f);
+    size_t bytes = fread(p, 1, 0x200000, f); fclose(f);
+    test_context.fdt = p; test_context.fdt_available = bytes;
+    test_context.fdt_physical = 0x0a000000;
+    fw_dt_t tree;
+    if (!fw_dt_init(&tree, p, bytes)) (void)fw_dt_bootargs(&tree, command_line, sizeof(command_line));
+    test_context.command_line = command_line;
     current_board->early_init();
     paddr_t base = 0, end = 0;
     if (quartz64_zero_ram_range(0, &base, &end) || base != 0x00200000 ||
         end != strtoull(argv[2], NULL, 0) ||
         strcmp(arch_bootargs_get(), "a20.hostname=quartz64-zero-test") ||
-        quartz64_zero_ram_range(1, &base, &end) != -1) return 1;
+        quartz64_zero_ram_range(32, &base, &end) >= 0) return 1;
     return 0;
 }
 ''')
         cls.binary = work / "test"
         subprocess.run([
             "cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror", "-no-pie",
-            "-D_start=quartz_test_start", "-D_end=quartz_test_end",
+            "-fno-builtin", "-D_start=quartz_test_start", "-D_end=quartz_test_end",
             "-Wl,--defsym,quartz_test_start=0x02080000",
             "-Wl,--defsym,quartz_test_end=0x02800000",
             "-I" + str(work), "-I" + str(ROOT / "kernel/include"),
-            "-I" + str(ROOT / "kernel/platform/quartz64-zero"),
+            "-I" + str(ROOT / "kernel/arch/aarch64/boards/quartz64-zero"),
             "-I" + str(ROOT / "kernel/arch/aarch64/include"),
             str(work / "host.c"), str(ROOT / "kernel/core/fdt_view.c"),
-            str(ROOT / "kernel/platform/quartz64-zero/board.c"),
+            str(ROOT / "kernel/firmware/devicetree/node.c"),
+            str(ROOT / "kernel/firmware/devicetree/memory.c"),
+            str(ROOT / "kernel/arch/aarch64/boards/quartz64-zero/board.c"),
             "-o", str(cls.binary),
         ], check=True, capture_output=True, text=True)
 
@@ -172,15 +187,15 @@ int main(int argc, char **argv) {
     def test_wrong_board_is_rejected(self):
         self.run_fixture(fixture(compatible="pine64,quartz64-zero-plus"), panic=True)
 
-    def test_dtb_beyond_reported_ram_is_rejected(self):
-        self.run_fixture(fixture(memory=0x8000000), panic=True)
+    def test_independently_mapped_dtb_may_be_outside_allocatable_ram(self):
+        self.run_fixture(fixture(memory=0x8000000), expected_end=0x08000000)
 
     def test_dynamic_reserved_memory_is_rejected(self):
         self.run_fixture(fixture(dynamic_size=0x100000), panic=True)
 
-    def test_dynamic_size_with_reg_is_rejected_conservatively(self):
+    def test_static_reg_takes_precedence_over_optional_size(self):
         self.run_fixture(fixture(reserved_memory=(0x08000000, 0x1000),
-                                 dynamic_size=0x1000), panic=True)
+                                 dynamic_size=0x1000), expected_end=0x08000000)
 
     def test_missing_final_end_is_rejected_after_valid_memory(self):
         data = bytearray(fixture())

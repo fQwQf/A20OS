@@ -26,7 +26,7 @@ Pango 等待链与其[上游字体查询实现](https://github.com/GNOME/pango/b
   以 x86/LoongArch 命名的禁用开关，使用统一的页缓存/COW 所有权规则。
 - ELF/驱动模块的机器重定位、指令编码、跳板格式、架构符号导出、RISC-V 专有 syscall
   和 PPC termios ABI 位于 `kernel/arch`。通用模块加载器只处理布局、边界、权限和生命周期。
-- 板级 MMIO 白名单、设备枚举、TPM 资源、启动时序及中断格式由 `kernel/platform`
+- 板级 MMIO 白名单、设备枚举、TPM 资源、启动时序及中断格式由 `kernel/arch/<arch>/boards`
   通过 board callbacks 提供；CPU 指令仍位于 `kernel/arch`，通用层不判断板名或 ISA 名。
 - `check-arch-boundary` 同时检查编译器 ISA 宏、`CONFIG_*` 架构和板名。现有 vDSO、
   外部代码和独立 STM32 驱动目录仍按原门禁范围管理，并非整个仓库已完成彻底移植。

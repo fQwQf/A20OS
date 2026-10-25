@@ -13,6 +13,18 @@ extern const unsigned char _binary_timer_preempt_start[];
 extern const unsigned char _binary_timer_preempt_end[];
 extern const unsigned char _binary_timer_idle_start[];
 extern const unsigned char _binary_timer_idle_end[];
+#ifdef CONFIG_RAMFS_FPU_TESTS
+extern const unsigned char _binary_fork_fpu_probe_start[], _binary_fork_fpu_probe_end[];
+#endif
+extern const unsigned char _binary_echo_start[], _binary_echo_end[];
+extern const unsigned char _binary_uname_start[], _binary_uname_end[];
+extern const unsigned char _binary_mkdir_start[], _binary_mkdir_end[];
+extern const unsigned char _binary_rm_start[], _binary_rm_end[];
+extern const unsigned char _binary_cp_start[], _binary_cp_end[];
+extern const unsigned char _binary_sync_start[], _binary_sync_end[];
+extern const unsigned char _binary_poweroff_start[], _binary_poweroff_end[];
+extern const unsigned char _binary_reboot_start[], _binary_reboot_end[];
+
 #ifdef CONFIG_STORAGE_READ_ONLY
 extern const unsigned char _binary_storage_read_test_start[];
 extern const unsigned char _binary_storage_read_test_end[];
@@ -24,6 +36,7 @@ extern const unsigned char _binary_native_spawn_start[], _binary_native_spawn_en
 extern const unsigned char _binary_native_input_start[], _binary_native_input_end[];
 extern const unsigned char _binary_cluster_threads_start[], _binary_cluster_threads_end[];
 #endif
+
 
 static const unsigned char ramfs_shell_marker[] = "ram-only\n";
 
@@ -49,6 +62,18 @@ rootfs_overlay_entry_t g_rootfs_user_overlay[] = {
     USER_ENTRY("/bin/sleep", sleep),
     USER_ENTRY("/bin/timer_preempt", timer_preempt),
     USER_ENTRY("/bin/timer_idle", timer_idle),
+#ifdef CONFIG_RAMFS_FPU_TESTS
+    USER_ENTRY("/bin/fork_fpu_probe", fork_fpu_probe),
+#endif
+    USER_ENTRY("/bin/echo", echo),
+    USER_ENTRY("/bin/uname", uname),
+    USER_ENTRY("/bin/mkdir", mkdir),
+    USER_ENTRY("/bin/rm", rm),
+    USER_ENTRY("/bin/cp", cp),
+    USER_ENTRY("/bin/sync", sync),
+    USER_ENTRY("/bin/poweroff", poweroff),
+    USER_ENTRY("/bin/reboot", reboot),
+
 #ifdef CONFIG_STORAGE_READ_ONLY
     USER_ENTRY("/bin/storage_read_test", storage_read_test),
 #endif

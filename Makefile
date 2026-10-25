@@ -90,10 +90,21 @@ RETIRED_ARCHES := loongarch32 ppc64le
 ifneq ($(filter $(ARCH),$(RETIRED_ARCHES)),)
 $(error ARCH=$(ARCH) is retired from active builds; for historical reproduction, check out v0.18 or earlier (see docs/releases/v1.0.md))
 endif
+# Optional architecture-owned build policy; no board facts in the engine.
+-include kernel/arch/$(ARCH)/config.mk
 ABI ?= both
 BRINGUP ?= 0
 RAMFS_USER ?= 0
 RAMFS_NATIVE_TESTS ?= 0
+RAMFS_FPU_TESTS ?= 0
+ifeq ($(filter $(RAMFS_FPU_TESTS),0 1),)
+$(error RAMFS_FPU_TESTS must be 0 or 1)
+endif
+ifeq ($(RAMFS_FPU_TESTS),1)
+ifneq ($(RAMFS_USER),1)
+$(error RAMFS_FPU_TESTS=1 requires RAMFS_USER=1)
+endif
+endif
 ifeq ($(filter $(RAMFS_NATIVE_TESTS),0 1),)
 $(error RAMFS_NATIVE_TESTS must be 0 or 1)
 endif
@@ -915,7 +926,7 @@ endif
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(filter 1,$(RAMFS_FPU_TESTS)),-fpu-test,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(and $(filter-out mcu,$(PROFILE)),$(filter-out 2,$(CLUSTER_PROFILE))),-clxp$(CLUSTER_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter 1,$(SMP_SELFTEST)),-smp-test,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_PLATFORM_IRQ_TEST)),-platform-irq,)$(if $(filter y,$(CONFIG_PCI_PIRQ_TEST)),-pirq-test,)$(if $(filter y,$(CONFIG_CHANNEL_DONATE_TEST)),-channel-donate-test,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(NETFILTER_REWRITE_IMPL),rust)
 BUILD_VARIANT := $(BUILD_VARIANT)-nfrust
@@ -1129,6 +1140,7 @@ $(error CLUSTER_SSI=1 requires ABI=linux or both)
 endif
 BUILD_VARIANT := $(BUILD_VARIANT)-ssi1
 endif
+BUILD_VARIANT := $(BUILD_VARIANT)$(if $(ARCH_CONFIG_VARIANT),-$(ARCH_CONFIG_VARIANT),)
 BUILD_VARIANT_FULL := $(BUILD_VARIANT)
 ifneq ($(shell printf '%s' '$(BUILD_VARIANT_FULL)' | awk 'length($$0) > 120 { print "long" }'),)
 BUILD_VARIANT := $(firstword $(subst -, ,$(BUILD_VARIANT_FULL)))-$(shell printf '%s' '$(BUILD_VARIANT_FULL)' | sha256sum | cut -c1-16)
@@ -1160,8 +1172,12 @@ USER_VARIANT = $(USER_LIBC_VARIANT)$(if $(filter 1,$(QEMU_SHARED_SMP)),-shared-q
 USER_BUILD_DIR = user/build/$(USER_VARIANT)
 USER_BUILD_STAMP = $(USER_BUILD_DIR)/.build-id
 ARCH_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/include
-BOARD_INCLUDE_DIR = $(KERNEL_DIR)/platform/$(BOARD)
-BOARD_DRIVER_DIR = $(KERNEL_DIR)/drivers/$(if $(filter stm32f103,$(BOARD)),stm32f1,)
+BOARD_INCLUDE_DIR = $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)
+# Select exactly one board. Architecture recursion must not collect sibling
+# boards or standalone EFI applications now owned by this same arch tree.
+ARCH_KERNEL_C_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -type f -name '*.c' -print | sort)
+ARCH_KERNEL_ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -path '*/boards' -prune -o -path '*/boot/uefi' -prune -o -type f -name '*.S' -print | sort)
+BOARD_DRIVER_DIR = $(BOARD_INCLUDE_DIR)/drivers
 EXT4_STAGING_DIR = $(BUILD_DIR)/ext4-staging
 BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
@@ -1425,7 +1441,7 @@ PHYS_BASE_armv7m      := 0x20000000
 PHYS_BASE_ppc64le     := 0x00400000
 PHYS_BASE_riscv32     := 0x80200000
 PHYS_BASE_riscv64     := 0x80200000
-PHYS_BASE_x86_64      := 0x00200000
+PHYS_BASE_x86_64      := $(X86_KERNEL_LOAD_ADDRESS_CANONICAL)
 PHYS_BASE_loongarch64 := 0x9000000000000000
 PHYS_BASE_loongarch32 := 0x80000000
 
@@ -1591,8 +1607,8 @@ QEMU_GUI_DEVICES_DEFAULT := -device $(QEMU_GPU) \
 CCACHE ?= $(shell command -v ccache 2>/dev/null)
 CCACHE_PREFIX := $(if $(CCACHE),$(CCACHE) ,)
 CROSS_PREFIX := $(CROSS_PREFIX_$(ARCH))
-ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH))
-ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
+ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH)) $(ARCH_CONFIG_CFLAGS)
+ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH)) $(ARCH_CONFIG_LDFLAGS)
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
 # The virgl 3D renderer runs on the HOST: QEMU dlopen()s libvirglrenderer and
@@ -1745,7 +1761,7 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -I$(KERNEL_DIR)/external/littlefs/compat \
          -DLFS_MALLOC=lfs_kmalloc -DLFS_FREE=lfs_kfree \
          -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -DLFS_NO_ASSERT -DLFS_NO_TRACE \
-         -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
+         -I$(BOARD_INCLUDE_DIR) -I$(BOARD_INCLUDE_DIR)/include -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
@@ -2144,7 +2160,7 @@ endif
 ifeq ($(STM32_QEMU),1)
 # The 8 KiB QEMU probe carries only idle; use the existing bounded timer
 # heap override instead of spending 2.5 KiB on the 64-entry MCU default.
-CFLAGS += -DCONFIG_STM32_QEMU -DCONFIG_WAIT_TIMER_HEAP_MAX=4
+CFLAGS += -DCONFIG_STM32_QEMU -DCONFIG_MCU_DISABLE_CLUSTER_LEAF -DCONFIG_WAIT_TIMER_HEAP_MAX=4
 endif
 endif
 ifeq ($(filter $(ARCH),arm32 armv7m riscv32 loongarch32),)
@@ -2248,7 +2264,7 @@ ifeq ($(CONFIG_IOMMU_TRRESP_LEGACY_PPN),1)
 CFLAGS += -DCONFIG_IOMMU_TRRESP_LEGACY_PPN
 endif
 
-BOARD_LDSCRIPT = $(KERNEL_DIR)/platform/$(BOARD)/ldscript.ld
+BOARD_LDSCRIPT = $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)/ldscript.ld
 ifeq ($(wildcard $(BOARD_LDSCRIPT)),)
 LDSCRIPT = $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld
 else
@@ -2297,9 +2313,10 @@ ifeq ($(PROFILE),mcu)
 # per-board facts the registry cannot enumerate.
 CFLAGS += $(TRIM_PROFILE_MCU_OPT) $(TRIM_PROFILE_MCU_CPPFLAGS)
 KERNEL_SRC = $(TRIM_PROFILE_MCU_SOURCES) \
+             $(wildcard $(KERNEL_DIR)/boot/*.c) $(KERNEL_DIR)/firmware/node.c \
              $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
-             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
-             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) $(ARCH_SHARED_SRC_$(ARCH))
+             $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)/*.c) \
+             $(ARCH_KERNEL_C_SRC) $(ARCH_SHARED_SRC_$(ARCH))
 else
 # The CONFIG_XLATOR=n case drops kernel/proc/xlator.c from the source list
 # outright rather than compiling it to an empty translation unit -- the same
@@ -2309,6 +2326,9 @@ else
 # mean the file is not built at all.
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
+             $(wildcard $(KERNEL_DIR)/boot/*.c) $(wildcard $(KERNEL_DIR)/firmware/*.c) \
+             $(wildcard $(KERNEL_DIR)/firmware/devicetree/*.c) \
+             $(filter-out $(KERNEL_DIR)/firmware/acpi/uacpi_os.c,$(wildcard $(KERNEL_DIR)/firmware/acpi/*.c)) \
              $(wildcard $(KERNEL_DIR)/hyp/*.c) \
              $(filter-out $(KERNEL_DIR)/mm/nommu.c $(KERNEL_DIR)/mm/vmo_page_selftest.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
              $(if $(filter-out y,$(CONFIG_XLATOR)),$(filter-out $(KERNEL_DIR)/proc/xlator.c,$(wildcard $(KERNEL_DIR)/proc/*.c)),$(wildcard $(KERNEL_DIR)/proc/*.c)) \
@@ -2323,13 +2343,18 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(KERNEL_DIR)/arch/common/module_reloc.c $(KERNEL_DIR)/arch/common/elf_reloc.c \
              $(DRIVER_KERNEL_SRCS) \
              $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
-             $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
+             $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)/*.c) \
              $(ABI_SRCS) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
-             $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) $(ARCH_SHARED_SRC_$(ARCH)) \
+             $(ARCH_KERNEL_C_SRC) $(ARCH_SHARED_SRC_$(ARCH)) \
              $(LWIP_SRC) \
              $(LFS_SRC)
+
+ifneq ($(filter $(ARCH),x86_64 aarch64),)
+CFLAGS += -DCONFIG_UACPI -DCONFIG_ACPI -Ikernel/external/uacpi/include
+KERNEL_SRC += $(KERNEL_DIR)/firmware/acpi/uacpi_os.c $(wildcard $(KERNEL_DIR)/external/uacpi/source/*.c)
+endif
 
 ifeq ($(NOMMU),1)
 KERNEL_SRC += $(KERNEL_DIR)/mm/nommu.c
@@ -3041,7 +3066,7 @@ $(error signal core requires kernel/proc/signal.c in this profile)
 endif
 KERNEL_OBJ += $(RUST_SIGNAL_CORE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
-ifeq ($(VFS_LIFECYCLE_IMPL),rust)
+ifeq ($(RUST_VFS_LIFECYCLE_ACTIVE),rust)
 KERNEL_OBJ += $(RUST_VFS_LIFECYCLE_OBJECT)
 RUST_KERNEL_RUNTIME_LINK := $(RUST_KERNEL_RUNTIME_ARCHIVE)
 endif
@@ -3125,7 +3150,12 @@ endif
 # ELF is linked as read-only kernel data, then copied into the root ramfs by
 # kernel/fs/rootfs_user.c.  Keep this opt-in so normal disk-backed images do
 # not grow and existing submission artifacts remain unchanged.
-RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle
+RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle \
+                      echo uname mkdir rm cp sync poweroff reboot
+ifeq ($(RAMFS_FPU_TESTS),1)
+RAMFS_USER_PROGRAMS += fork_fpu_probe
+CFLAGS += -DCONFIG_RAMFS_FPU_TESTS
+endif
 ifeq ($(STORAGE_READ_ONLY),1)
 RAMFS_USER_PROGRAMS += storage_read_test
 endif
@@ -3145,6 +3175,7 @@ RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
 RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
 RAMFS_USER_OBJCOPY_x86_64    := -O elf64-x86-64 -B i386:x86-64
 RAMFS_USER_OBJCOPY_aarch64   := -O elf64-littleaarch64 -B aarch64
+RAMFS_USER_OBJCOPY_arm32     := -O elf32-littlearm -B arm
 ifeq ($(RAMFS_USER),1)
 # Gate on the objcopy entry rather than on an arch list, so adding an
 # architecture is one table line instead of two places that can disagree.  The
@@ -3192,8 +3223,8 @@ $(VDSO_BLOB): $(VDSO_ELF)
 	    vdso.elf vdso_blob.o
 
 # ASM sources
-ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort) \
-          $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.S)
+ASM_SRC = $(ARCH_KERNEL_ASM_SRC) \
+          $(wildcard $(KERNEL_DIR)/arch/$(ARCH)/boards/$(BOARD)/*.S)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
 DEP_FILES = $(filter-out $(RAMFS_USER_BLOBS:.o=.d),$(KERNEL_OBJ:.o=.d)) \
             $(ASM_OBJ:.o=.d)

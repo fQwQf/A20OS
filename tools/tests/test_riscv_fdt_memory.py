@@ -57,90 +57,98 @@ class RiscvFdtMemory(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix="a20-riscv-memory-")
         wrapper = Path(cls.temp.name) / "wrapper.c"
         wrapper.write_text('''
-#include "kernel/arch/riscv64/platform/fdt_memory.h"
-int window(const void *blob, size_t bytes, uint64_t physical, uint64_t *result) {
-    riscv_fdt_memory_t out;
-    int rc = riscv_fdt_memory_window(blob, bytes, physical,
-        0x80000000, 0x90000000, 0x80200000, 0x82000000, &out);
-    result[0] = out.base; result[1] = out.end;
-    return rc;
-}
-int window_vf2(const void *blob, size_t bytes, uint64_t physical, uint64_t *result) {
-    riscv_fdt_memory_t out;
-    int rc = riscv_fdt_memory_window(blob, bytes, physical,
-        0x40000000, 0x240000000ULL, 0x40200000, 0x42000000, &out);
-    result[0] = out.base; result[1] = out.end;
+#include "firmware/devicetree.h"
+int window(const void *blob, size_t bytes, uint64_t physical,
+           uint64_t base, uint64_t end, uint64_t *result) {
+    fw_dt_t tree; fw_dt_range_t ranges[16]; size_t count = 0;
+    int rc = fw_dt_init(&tree, blob, bytes);
+    if (!rc) rc = fw_dt_memory_window(&tree, physical, base, end,
+        base + 0x200000, base + 0x2000000, ranges, 16, &count, 0);
+    result[0] = count;
+    if (!rc) for (size_t i = 0; i < count; i++) {
+        result[1 + i*2] = ranges[i].base;
+        result[2 + i*2] = ranges[i].base + ranges[i].size;
+    }
     return rc;
 }
 ''')
         so = Path(cls.temp.name) / "memory.so"
-        subprocess.run(["cc", "-shared", "-fPIC", "-std=gnu99", "-O2", "-Wall", "-Wextra", "-Werror",
-                        "-I", str(ROOT), "-I", str(ROOT / "kernel/include"),
-                        str(wrapper), str(ROOT / "kernel/core/fdt_view.c"), "-o", str(so)], check=True)
+        subprocess.run(["cc", "-shared", "-fPIC", "-std=gnu99", "-O2", "-fno-builtin",
+                        "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "kernel/include"),
+                        str(wrapper), str(ROOT / "kernel/core/fdt_view.c"),
+                        str(ROOT / "kernel/firmware/devicetree/node.c"),
+                        str(ROOT / "kernel/firmware/devicetree/memory.c"), "-o", str(so)], check=True)
         cls.lib = ctypes.CDLL(str(so))
         cls.lib.window.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint64,
-                                  ctypes.POINTER(ctypes.c_uint64)]
+                                  ctypes.c_uint64, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
         cls.lib.window.restype = ctypes.c_int
-        cls.lib.window_vf2.argtypes = cls.lib.window.argtypes
-        cls.lib.window_vf2.restype = ctypes.c_int
 
     @classmethod
     def tearDownClass(cls):
         cls.temp.cleanup()
 
-    def window(self, blob, physical=0x8f000000):
-        result = (ctypes.c_uint64 * 2)()
+    def window(self, blob, physical=0x8f000000, base=0x80000000, end=0x90000000):
+        result = (ctypes.c_uint64 * 33)()
         data = ctypes.create_string_buffer(blob) if blob is not None else None
-        rc = self.lib.window(data, len(blob) if blob else 0, physical, result)
-        return rc, tuple(result)
+        rc = self.lib.window(data, len(blob) if blob else 0, physical, base, end, result)
+        ranges = [(result[1 + i*2], result[2 + i*2]) for i in range(result[0])]
+        return rc, ranges
 
-    def test_missing_dtb_preserves_board_fallback(self):
-        self.assertEqual(self.window(None), (1, (0x80000000, 0x90000000)))
+    def test_missing_dtb_is_not_hidden_by_common_parser(self):
+        # The architecture owns explicit no-firmware fallback; this helper does not.
+        self.assertEqual(self.window(None), (-22, []))
 
-    def test_dtb_itself_survives_allocator(self):
-        self.assertEqual(self.window(dtb()), (0, (0x80000000, 0x8f000000)))
+    def test_dtb_itself_survives_allocator_on_both_sides(self):
+        blob = dtb()
+        start = (0x8f000000 + len(blob) + 4095) & ~4095
+        self.assertEqual(self.window(blob), (0, [(0x80000000, 0x8f000000),
+                                                (start, 0x90000000)]))
 
     def test_memreserve_firmware_and_top(self):
-        blob = dtb(reservations=[(0x80000000, 0x200000), (0x8c000000, 0x1000000)])
-        self.assertEqual(self.window(blob), (0, (0x80000000, 0x8c000000)))
+        blob = dtb(reservations=[(0x80000000, 0x200000), (0x8c000000, 0x4000000)])
+        self.assertEqual(self.window(blob), (0, [(0x80200000, 0x8c000000)]))
 
     def test_reserved_nodes_before_memory_and_unaligned(self):
         blob = dtb(child_reservations=[(0x84000123, 0x2345)], reserved_first=True)
-        self.assertEqual(self.window(blob), (0, (0x80000000, 0x84000000)))
+        rc, ranges = self.window(blob, physical=0x90000000)
+        self.assertEqual((rc, ranges), (0, [(0x80000000, 0x84000000),
+                                          (0x84003000, 0x90000000)]))
 
     def test_reservation_boundaries_and_order(self):
         blob = dtb(reservations=[(0x90000000, 4096), (0x7ffff000, 4096),
                                   (0x88000000, 4096), (0x85000000, 4096)])
-        self.assertEqual(self.window(blob), (0, (0x80000000, 0x85000000)))
+        self.assertEqual(self.window(blob, physical=0x91000000), (0, [
+            (0x80000000, 0x85000000), (0x85001000, 0x88000000),
+            (0x88001000, 0x90000000)]))
 
     def test_kernel_overlap_rejected_in_each_reservation_source(self):
         for kw in ({"reservations": [(0x801ff000, 0x2000)]},
                    {"child_reservations": [(0x81fff000, 0x2000)]}):
-            self.assertEqual(self.window(dtb(**kw))[0], -1)
-        self.assertEqual(self.window(dtb(), physical=0x81fff000)[0], -1)
+            self.assertEqual(self.window(dtb(**kw)), (-14, []))
+        self.assertEqual(self.window(dtb(), physical=0x81fffff0), (-14, []))
 
     def test_32bit_cells_and_memory_clamping(self):
         self.assertEqual(self.window(dtb(cells=1, ram_size=0x8000000)),
-                         (0, (0x80000000, 0x88000000)))
+                         (0, [(0x80000000, 0x88000000)]))
 
     def test_vf2_ram_window_starts_below_qemu(self):
         blob = dtb(ram_base=0x40000000, ram_size=0x200000000,
                    reservations=[(0x40000000, 0x200000)])
-        result = (ctypes.c_uint64 * 2)()
-        data = ctypes.create_string_buffer(blob)
-        rc = self.lib.window_vf2(data, len(blob), 0x46000000, result)
-        self.assertEqual((rc, tuple(result)), (0, (0x40000000, 0x46000000)))
+        start = (0x46000000 + len(blob) + 4095) & ~4095
+        self.assertEqual(self.window(blob, physical=0x46000000, base=0x40000000,
+                                     end=0x240000000), (0, [
+            (0x40200000, 0x46000000), (start, 0x240000000)]))
 
     def test_unsafe_or_malformed_descriptions_rejected(self):
-        fixtures = [dtb(dynamic=True), dtb(ranges=bytes(16)),
+        fixtures = [dtb(dynamic=True), dtb(ranges=bytes(16), child_reservations=[(0x84000000,4096)]),
                     dtb(truncate_reg=True), dtb(ram_size=0x1000000),
                     dtb(child_reservations=[(0x8ffff000, 0)]),
                     dtb(reservations=[(0xfffffffffffff000, 0x2000)])]
         for blob in fixtures:
-            self.assertEqual(self.window(blob)[0], -1)
+            self.assertLess(self.window(blob)[0], 0)
         valid = dtb()
         for size in range(len(valid)):
-            self.assertEqual(self.window(valid[:size])[0], -1, size)
+            self.assertLess(self.window(valid[:size])[0], 0, size)
 
 
 if __name__ == "__main__":

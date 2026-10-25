@@ -301,7 +301,7 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
      * syscall can stall for seconds.  Only shorten a deadline that is absent
      * or further away than one slice; an already-pending tick is left to
      * fire. */
-    uint64_t tick_slice = riscv64_timer_freq() / 100;
+    uint64_t tick_slice = arch_timer_frequency() / 100;
     uint64_t tick_now, tick_deadline;
     __asm__ volatile("csrr %0, time" : "=r"(tick_now));
     __asm__ volatile("csrr %0, 0x14d" : "=r"(tick_deadline)); /* stimecmp */
@@ -483,7 +483,7 @@ int hyp_arch_guest_trap(void *trap_frame)
     if (resume && vcpu->vm->managed_console) {
         unsigned run_cpu = cpu_current_id();
         if (timer_get_ticks() - hyp_run_start[run_cpu] >=
-            riscv64_timer_freq() / 100) {
+            arch_timer_frequency() / 100) {
             vcpu->exit = HYP_EXIT_YIELD;
             resume = 0;
         }

@@ -70,33 +70,16 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 
 > 逐项兼容等级详见 [kernel/abi/linux/syscall_coverage.md](kernel/abi/linux/syscall_coverage.md)。
 
-## 支持的硬件平台
-A20OS 的硬件抽象层已接入以下平台，运行、构建与真机验证边界分别列出。
-1.0 保留平台与退出目标见 [平台范围](docs/releases/v1.0.md#2-平台范围)。
-`tools/a20 boards` 列出当前树中的板子，过渡期仍可能包含退出目标，不等于 1.0 支持清单。
+## 硬件与虚拟机平台
 
-* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`virtualbox-aarch64`
-* **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
-* **廉价 SBC / 瘦客户机**（均为 build-verified，尚未上板验证）：
-  * [Sipeed LicheeRV Nano](docs/platforms/licheerv-nano.md)（SophGo SG2002，riscv64，256 MiB，约 USD 9–14）
-  * [Milk-V Duo](docs/platforms/milk-v-duo.md)（SophGo CV1800B，riscv64，64 MiB，约 USD 10–13）
-  * [Allwinner H616/H618](docs/platforms/sun50i-h616.md)（Orange Pi Zero 2 / Zero 3 / Zero 2W，aarch64，约 USD 18–35，**启动链零 blob**）
-  * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
-  * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）—— **ACPI 路径已按规范实现（FADT/MADT/`_PRT`/S5），但解释器从未在真实固件上跑过，实机中断投递未验证**
-* **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
-  * **不含网络**：`PROFILE=mcu` 走 [components/trim.toml](components/trim.toml) `[profile.mcu].sources` 的独立源文件清单，其中既没有 `kernel/net/*.c` 也没有 lwIP，所以 socket 层与协议栈在这个目标上**从未被编译**，`NET_PROFILE` 对它完全无效。网络对 STM32F103 的支持需要先把网络栈纳入 MCU trim（并按 20 KiB SRAM 重新定档），那是尚未做的产品决定，不是打开某个开关即可。详见 [docs/status/current/server-readiness.md](docs/status/current/server-readiness.md) §二。
+各目标的硬件范围、运行模式、依赖、构建和部署方法由
+[`docs/platforms/`](docs/platforms/README.md) 中的单平台文档说明。
+README 不维护设备清单、价格或统一的“已支持”标签。
+发布承诺范围见 [平台范围](docs/releases/v1.0.md#2-平台范围)。
 
-### 关于 NOMMU
-
-`NOMMU_SUPPORTED_ARCHES = riscv64 riscv32 aarch64 arm32 armv7m`（声明在 [components/trim.toml](components/trim.toml) 的能力矩阵，经生成的 `components/trim.mk` 进入构建），无分页路径在这些架构上是真实存在的代码路径（mm/proc/ipc/abi 共 173 处），不是仅能启动的 stub。小内存板（如 Milk-V Duo 的 64 MiB）应当走 NOMMU：
-
-```sh
-make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
-```
-
-`tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口；`make check-trim-registry` 保证实例校验与构建读到的矩阵不漂移。
-
-* **退出 1.0 的历史移植**：LoongArch32（LA32R / NaiLoong）与 PPC64LE（pSeries）。不再承诺继续完善或 Rust 迁移；复现需使用 `v0.18` checkout 内的历史文档，见 [v0.18 说明](docs/releases/v0.18.md)。
+`tools/a20 boards` 查询板级源码，`tools/a20 list` 查询实例，
+`tools/a20 show <实例名>` 查询对应动作与资源需求；这些查询不证明真机可用。
+NOMMU 是按架构和实例选择的运行模式，不能由内存大小推定某块板已经具备该移植。
 
 ## 网络栈的当前边界
 按名字读大这份能力是最容易出错的地方，所以把边界写在 README 而不是只留在设计文档里：
@@ -186,28 +169,7 @@ tools/a20 test smoke-riscv64       # 冒烟测试实例
 ```
 实例字段参考、组件注册表与门禁详见 [docs/dev/instances.md](docs/dev/instances.md)。
 
-其他架构：
-```bash
-# 构建其他架构 (例: aarch64)
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
-
-# 廉价 SBC / 瘦客户机（build-verified，尚未上板验证）
-make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only
-make ARCH=riscv64 BOARD=milk-v-duo    NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
-make ARCH=aarch64 BOARD=sun50i-h616    ABI=linux BRINGUP=1 kernel-only
-make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
-make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only
-
-# STM32 入口当前有 Rust target 构建阻塞，见构建指南的“其他平台与当前边界”
-# STM32F103 64 KiB Flash / 20 KiB SRAM 固件（无网络栈，见上）
-make stm32f103-bringup
-
-# 普中玄武 STM32F103ZET6（512 KiB Flash / 64 KiB SRAM）
-make stm32f103-xuanwu
-
-# 使用 QEMU STM32VLDISCOVERY（128 KiB Flash / 8 KiB SRAM）验证基础 bring-up
-make run-stm32f103-qemu
-```
+其他平台的构建、固件与介质操作请直接阅读对应单平台文档。
 
 *高级编译选项：*
 * `OPT="-O3"` / `OPT="-O0 -g -DDEBUG"`：控制内核优化与调试选项
@@ -274,7 +236,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 │   ├── syscall/      # syscall 分发与追踪
 │   ├── vdso/         # 各架构 vDSO 时间快路径
 │   └── external/     # vendored 第三方源码；lwIP 已带 A20OS 自有改动，见其 DIVERGENCE.md
-├── kernel/platform/  # 板级内存、设备、IRQ、timer 与 SMP 启动
+├── kernel/arch/*/boards/  # 板级内存、设备、IRQ、timer 与 SMP 启动
 ├── docs/             # 设计方案与技术专题说明文档
 └── Makefile          # 高度定制化跨平台构建脚本
 ```

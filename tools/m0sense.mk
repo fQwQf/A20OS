@@ -1,5 +1,5 @@
 # BL702 hardware probe.  Keep it independent of the SBI-based RV32 OS build.
-M0SENSE_PROBE_DIR := kernel/platform/m0sense-bl702/probe
+M0SENSE_PROBE_DIR := kernel/arch/riscv32/boards/m0sense-bl702/probe
 M0SENSE_PROBE_OUT := build/m0sense-bl702/handoff
 M0SENSE_CROSS ?= $(RISCV_ELF_PREFIX)
 M0SENSE_FLAGS := -march=rv32imc_zicsr_zifencei -mabi=ilp32 -mcmodel=medany \

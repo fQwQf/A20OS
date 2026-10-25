@@ -121,15 +121,13 @@ uintptr_t drv_map_mmio(void *dev, uintptr_t phys, size_t size)
         return 0;
     if (drv_mmio_find(dev))
         return 0;
-    /* The arch hook validates the range against the platform's direct-map
-     * window (implemented in kernel/arch/<arch>/platform/arch_hooks.c). */
-    if (!arch_drv_mmio_window_ok(phys, size))
-        return 0;
+    void *mapping = arch_device_map_mmio(phys, size, 0);
+    if (!mapping) return 0;
     uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
     for (int i = 0; i < (int)(sizeof(drv_mmio_cache) / sizeof(drv_mmio_cache[0])); i++) {
         if (!drv_mmio_cache[i].dev) {
             drv_mmio_cache[i].dev = dev;
-            drv_mmio_cache[i].va = PAGE_OFFSET + phys;
+            drv_mmio_cache[i].va = (uintptr_t)mapping;
             drv_mmio_cache[i].size = size;
             uintptr_t va = drv_mmio_cache[i].va;
             spin_unlock_irqrestore(&drv_framework_lock, flags);
@@ -137,6 +135,7 @@ uintptr_t drv_map_mmio(void *dev, uintptr_t phys, size_t size)
         }
     }
     spin_unlock_irqrestore(&drv_framework_lock, flags);
+    arch_device_unmap_mmio(mapping, size);
     return 0;
 }
 
@@ -146,9 +145,11 @@ void drv_unmap_mmio(void *dev)
         return;
     uint64_t flags = spin_lock_irqsave(&drv_framework_lock);
     drv_mmio_entry_t *e = drv_mmio_find(dev);
-    if (e)
-        memset(e, 0, sizeof(*e));
+    uintptr_t mapping = e ? e->va : 0;
+    size_t size = e ? (size_t)e->size : 0;
+    if (e) memset(e, 0, sizeof(*e));
     spin_unlock_irqrestore(&drv_framework_lock, flags);
+    if (mapping) arch_device_unmap_mmio((void *)mapping, size);
 }
 
 uint32_t drv_read32(void *dev, uintptr_t off)
@@ -328,6 +329,16 @@ const struct drv_export drv_export_table[] = {
     { "drv_free",            drv_free },
     { "drv_log",             drv_log },
     { "drv_map_mmio",        drv_map_mmio },
+    { "device_map_mmio",     device_map_mmio },
+    { "device_add_resource_action", device_add_resource_action },
+    { "fw_node_match_id", fw_node_match_id },
+    { "fw_node_has_property", fw_node_has_property },
+    { "fw_node_read_u32", fw_node_read_u32 },
+    { "fw_node_read_u64", fw_node_read_u64 },
+    { "fw_node_read_string", fw_node_read_string },
+    { "device_find_get_by_firmware_id", device_find_get_by_firmware_id },
+    { "device_get", device_get },
+    { "device_put", device_put },
     { "drv_unmap_mmio",      drv_unmap_mmio },
     { "drv_read32",          drv_read32 },
     { "drv_write32",         drv_write32 },
@@ -350,7 +361,7 @@ const struct drv_export drv_export_table[] = {
     { "drv_device_set_devfs_name", drv_device_set_devfs_name },
     { "drv_driver_probe_all", drv_driver_probe_all },
     { "device_get_resource",  (void *)device_get_resource },
-    { "device_find_by_class",  (void *)device_find_by_class },
+    { "device_find_get_by_class",  (void *)device_find_get_by_class },
     /* platform bus IRQ resource channel.  A module-bound platform device
      * learns its line from the same board resource -- or, on RISC-V, the same
      * device-tree `interrupts` property -- a built-in driver reads, so the
@@ -371,7 +382,7 @@ const struct drv_export drv_export_table[] = {
      * unresolved symbol rather than let it load and misbehave. */
     { "bootargs_get",         (void *)bootargs_get },
     /* A class driver that initialises its own instance (rather than being
-     * handed one by a bus scan) has to publish it, or device_find_by_class()
+     * handed one by a bus scan) has to publish it, or device_find_get_by_class()
      * cannot see it and mount_setup_block_device() finds no disk. */
     { "device_register",     (void *)device_register },
     { "platform_bus",        &platform_bus },
@@ -380,6 +391,7 @@ const struct drv_export drv_export_table[] = {
     { "pci_bus",             &pci_bus },
     { "pci_class_code",      (void *)pci_class_code },
     { "pci_device_id",       (void *)pci_device_id },
+    { "pci_map_bar", pci_map_bar },
     { "pci_get_bar_resource", (void *)pci_get_bar_resource },
     { "pci_intx_irq",        (void *)pci_intx_irq },
     { "pci_enable_and_assign_bars", (void *)pci_enable_and_assign_bars },
@@ -485,8 +497,6 @@ const struct drv_export drv_export_table[] = {
      * exported or the loader rejects the module with an unresolved symbol. */
     { "kallsyms_lookup",     (void *)kallsyms_lookup },
     { "kallsyms_print",      (void *)kallsyms_print },
-    { "arch_virtio_blk_probe", (void *)arch_virtio_blk_probe },
-    { "arch_virtio_net_probe", (void *)arch_virtio_net_probe },
     /* hwapi passthroughs used by module class drivers */
     { "dma_alloc_coherent",  (void *)dma_alloc_coherent },
     { "dma_free_coherent",   (void *)dma_free_coherent },
@@ -526,6 +536,7 @@ const struct drv_export drv_export_table[] = {
     { "a20_lwip_poll_timers_locked",   (void *)a20_lwip_poll_timers_locked },
     { "a20_lwip_poll_rx_locked",       (void *)a20_lwip_poll_rx_locked },
     { "a20_lwip_process_netif_irq_locked", (void *)a20_lwip_process_netif_irq_locked },
+    { "a20_lwip_netif_index_for_device", (void *)a20_lwip_netif_index_for_device },
     { "a20_lwip_rx_pending_any",       (void *)a20_lwip_rx_pending_any },
     { "a20_lwip_signal_rx_pending",    (void *)a20_lwip_signal_rx_pending },
 };

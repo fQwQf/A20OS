@@ -7,23 +7,15 @@ extern bus_type_t platform_bus;
 
 typedef struct platform_device {
     device_t dev;
-    device_id_t id;
 } platform_device_t;
 
 int platform_device_register(platform_device_t *pdev);
 void platform_device_unregister(platform_device_t *pdev);
 
 /*
- * PLATFORM_IRQ_RESOURCE_CHANNEL: the platform bus already carries every
- * resource kind in device_t.res[] -- RES_MMIO, RES_IRQ, RES_DMA, RES_MEM,
- * RES_IOPORT -- and both a board's fixed device table and the RISC-V device
- * tree enumerator (kernel/arch/riscv64/platform/fdt_dev.c) fill them in.  What
- * was missing is a driver-facing way to ask for the line with defined failure
- * semantics, so every driver had to re-derive "absent" from a NULL resource
- * pointer and could not tell "the board published no line" (keep polling) from
- * "the board published a broken line" (a real error).
- *
- * This is that accessor.  @dev must be on platform_bus.
+ * Read the first resolved IRQ resource. @dev must be on platform_bus.
+ * Firmware IRQ specifiers are resolved by their controller domain before
+ * probe; resource addresses carry driver IRQ identifiers, not raw DT cells.
  *
  *   >= 0            the IRQ line, usable with request_irq();
  *   -ENODEV         the board published no RES_IRQ for this device.  This is
@@ -37,8 +29,8 @@ void platform_device_unregister(platform_device_t *pdev);
  *                   fallback decision is made once, in the driver, instead of
  *                   after a register call whose only signal is -EINVAL.
  *
- * Backward compatibility is total: a device with no RES_IRQ gets -ENODEV, and
- * a driver that has never heard of this function keeps working unchanged.
+ * Only a driver with an explicit polling implementation may treat an absent
+ * line as optional. Invalid descriptions must not become guessed IRQs.
  */
 #define PLATFORM_IRQ_MAX_LINES 256U
 

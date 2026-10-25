@@ -157,9 +157,6 @@ typedef struct virtio_blk {
 
 #define VIRTIO_MAX_DEVS 5
 
-/* Probe the next transport-provided virtio-blk device and assign a slot. */
-int  virtio_blk_init(void);
-
 /* Read/write N sectors starting at LBA on device idx */
 int  virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors);
 int  virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors);

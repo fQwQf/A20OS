@@ -13,7 +13,7 @@
 | UART | `kernel/drivers/char/uart.c` | `rx_lock` |
 | PTY | `kernel/drivers/char/pty.c` | `g_pty_alloc_lock`、每个 pair 的 `lock` |
 | loop | `kernel/drivers/block/loop.c` | `g_loop[i].lock` |
-| DW SDIO | `kernel/drivers/block/dw_sdio.c` | `g_sdio.lock`（mutex，`lock` → `irq_lock`）；`g_sdio.irq_lock` 只保护中断 latch |
+| DW SDIO | `kernel/drivers/block/dw_sdio.c` | 每主机 `sdio_priv_t.lock`（mutex，`lock` → `irq_lock`）；`irq_lock` 只保护中断 latch |
 | StarFive GMAC | `kernel/drivers/net/starfive_gmac.c` | 无 |
 | Loongson-2K GMAC | `kernel/drivers/net/ls2k_gmac.c` | 无 |
 | AHCI | `kernel/drivers/block/ahci.c` | sleepable `port->lock` mutex |
@@ -144,20 +144,20 @@ loop lock 从不跨 backing-file VFS 操作持有，loop lock 下也不发生内
 
 ### DW SDIO
 
-该驱动有两个私有锁，**任何路径都不同时持有**：
+每个绑定的主机都有独立 `sdio_priv_t`，没有跨设备的全局控制器状态。
 
-- `g_sdio.lock` 是可睡眠的 `mutex_t`，串行化命令/数据寄存器序列与 `g_sdio` 的 `ready/rca/sectors`。它必须可睡眠，因为中断完成路径要在锁内 park 到 `wait_queue_t`（见下）。
-- `g_sdio.irq_lock` 是 `spinlock_t`，只保护 `g_sdio.irq_status` 这一把中断 latch。只在中断顶半部与轮询喂 latch 处持有，绝不跨寄存器访问。
+- `lock` 是可睡眠 mutex，串行化命令/数据寄存器、卡状态和扇区传输；`sdio_io()` 获取它。
+- `irq_lock` 是 spinlock，只保护中断 latch。传输可在持有 `lock` 时获取它，反向禁止。
+- IRQ 顶半部只收集/清除状态并唤醒等待者，释放 `irq_lock` 后才 flush 唤醒队列。
+- 完成等待先短暂轮询，再按最多 5 ms 的 chunk park；所有循环都有 deadline。
+  FIFO 循环每次重新读取实际 FIFO 状态，中断事件不能代替 FIFO 空/满条件。
+- probe 的卡枚举全程轮询；完成枚举后才申请 IRQ、打开控制器中断。无 IRQ 或显式
+  `a20.dw-sdio.poll=1` 时仍通过同一寄存器协议轮询。
+- class 核心在 remove 前排空活动操作；remove 屏蔽中断并等待在途 IRQ，随后受管动作
+  释放主机状态。受管动作在 MMIO 取消映射前执行，probe 失败也执行同一路径。
 
-单向顺序（只在持有 `lock` 时才允许再取 `irq_lock`；反向禁止）：
-
-- 中断模式与轮询模式都从 `sdio_xfer_block()` 进入 `mutex_lock(&g_sdio.lock)`；`dw_sdio_class_read/write()` 不自己加锁。
-- `sdio_wait_cond()`（合并了原 `sdio_wait_cmd`/`sdio_wait_data_idle`）先自旋 `SDIO_IRQ_PRE_POLL_US`，仍不满足才 park（`proc_park_prepare/commit` + `wait_queue_link/unlink`），chunk 上限 `SDIO_PARK_CHUNK_MS`；每次 park 前重新检查 latch、`stopped` 与 deadline，所以不会睡过中断。
-- `sdio_irq_handler()` 只拿 `irq_lock`、写 latch、write-1-to-clear RINTSTS、`wait_queue_collect_all`，然后**在释放 `irq_lock` 之后**才 `proc_wake_q_flush()`：唤醒者不能在自旋锁下排进调度。
-- park 前用 `sdio_can_park()`（`irq_registered && !poll_only && proc_current() != NULL`）守门：probe 在 `kernel_main` 里跑，`proc_current()` 返回 NULL，所以卡枚举（`dw_sdio_init_dev`）全程轮询，INTMASK 始终为 0。这条约束不能删——在 spinlock 下 park 会死锁。
-- 自旋与 park 都有超时上限（`SDIO_CMD_TIMEOUT_MS` / `SDIO_SECTOR_TIMEOUT_MS`），不会无限等待。
-
-锁内只做寄存器轮询、数据搬运与 park/唤醒，不分配、不调用 VFS。`sdio_downgrade_to_poll()` 在 `lock` 内调用 `free_irq()`：此时没有 in-flight handler 依赖本锁，且 `free_irq` 自己会等待在途 handler 完成。
+传输锁内不分配、不调用 VFS。CRC 或数据超时后停止该卡继续传输，显式重新绑定后
+重新枚举，避免继续使用未知的卡/控制器数据状态。
 
 ### StarFive GMAC
 
@@ -387,7 +387,7 @@ IRQ handler 内不打日志（它可能在任意上下文抢占 console）：`ir
 - `kernel/drivers/char/virtio_console.c`：`g_vport.lock`，锁外 notify、锁外控制台镜像与锁外的同步发送等待。
 - `kernel/drivers/char/pty.c`：`g_pty_alloc_lock` 和 per-pair `lock`。
 - `kernel/drivers/block/loop.c`：per-device loop lock。
-- `kernel/drivers/block/dw_sdio.c`：`g_sdio.lock`（mutex）串行化轮询与中断两条传输路径，`g_sdio.irq_lock` 保护中断 latch。
+- `kernel/drivers/block/dw_sdio.c`：每主机 `sdio_priv_t.lock`（mutex）串行化轮询与中断传输路径，`irq_lock` 保护中断 latch。
 - `kernel/drivers/net/starfive_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
-- `kernel/platform/visionfive2/board.c`、`kernel/platform/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。
+- `kernel/arch/riscv64/boards/visionfive2/board.c`、`kernel/arch/loongarch64/boards/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。

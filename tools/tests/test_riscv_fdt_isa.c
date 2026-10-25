@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <string.h>
 
-#include "../../kernel/arch/riscv64/platform/fdt_isa.h"
+#include "../../kernel/arch/common/riscv/fdt_isa.h"
 
 int main(void) {
     static const char legacy[] = "rv64imafdch_zicntr_zihintpause";

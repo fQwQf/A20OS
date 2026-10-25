@@ -34,19 +34,24 @@
 #define UART0_IRQ 33U
 #endif
 
+size_t arch_firmware_ram_range_count(void);
+int arch_firmware_ram_range(size_t index, paddr_t *base, paddr_t *end);
+
 static inline size_t arch_ram_range_count(void) {
-    return 1;
+#ifdef ARCH_BOARD_RAM_RANGE_COUNT
+    return ARCH_BOARD_RAM_RANGE_COUNT();
+#else
+    return arch_firmware_ram_range_count();
+#endif
 }
 
 static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
-    if (idx != 0 || !base || !end)
+    if (idx >= arch_ram_range_count() || !base || !end)
         return -1;
 #ifdef ARCH_BOARD_RAM_RANGE
     return ARCH_BOARD_RAM_RANGE(idx, base, end);
 #else
-    *base = PHYS_MEMORY_BASE;
-    *end = PHYS_MEMORY_END;
-    return 0;
+    return arch_firmware_ram_range(idx, base, end);
 #endif
 }
 

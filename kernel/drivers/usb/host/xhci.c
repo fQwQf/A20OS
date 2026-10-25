@@ -1267,8 +1267,8 @@ static int xhci_alloc_controller(device_t *dev, xhci_controller_t **out)
         return -ENOMEM;
     xhci_controller_t *xhci = (xhci_controller_t *)
         (((uintptr_t)raw + (XHCI_DMA_ALIGN - 1UL)) & ~(XHCI_DMA_ALIGN - 1UL));
-    xhci->alloc_ptr = raw;
     memset(xhci, 0, sizeof(*xhci));
+    xhci->alloc_ptr = raw;
     int ret = xhci_dma_ok(dev, xhci, sizeof(*xhci));
     if (ret) {
         kfree(raw);
@@ -1380,7 +1380,8 @@ static int xhci_probe(device_t *dev)
     if (alloc)
         return alloc;
     spin_init(&xhci->lock);
-    xhci->cap = (uintptr_t)bar->start;
+    xhci->cap = (uintptr_t)pci_map_bar(dev, 0);
+    if (!xhci->cap) { kfree(xhci->alloc_ptr); return -EIO; }
     uint8_t cap_length = readb((const volatile void *)xhci->cap);
     uint32_t hcs1 = xhci_read32(xhci->cap, 0x04U);
     uint32_t hcc1 = xhci_read32(xhci->cap, 0x10U);

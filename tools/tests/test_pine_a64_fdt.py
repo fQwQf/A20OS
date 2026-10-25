@@ -56,6 +56,9 @@ class PineA64FirmwareTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix="a20-pine-a64-")
         work = Path(cls.tmp.name)
         stubs = {
+            # This suite executes early RAM/DT parsing only; storage electrical
+            # setup has its own production-controller fixtures.
+            "arch/common/sunxi_mmc0.h": "static inline void sunxi_board_prepare_mmc0(int a64) { (void)a64; }\n",
             "core/arch.h": '''#pragma once
 #include "core/types.h"
 #define PAGE_OFFSET 0UL
@@ -78,12 +81,14 @@ typedef struct {
     const timer_ops_t *timer;
     void *smp;
     void (*early_init)(void), (*poweroff)(void), (*reboot)(void);
+    void (*configure_devices)(void);
     int defer_network_init, vdso_user_timer_unreliable;
 } board_config_t;
 extern const irqchip_ops_t aarch64_gicv2_ops;
 extern const board_config_t *const current_board;
 ''',
         }
+        stubs["mm/frame.h"] = "#pragma once\n#define PFA_MAX_RANGES 32\n"
         for name, content in stubs.items():
             path = work / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +98,11 @@ extern const board_config_t *const current_board;
 #include <stdarg.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "boot/context.h"
+#include "firmware/devicetree.h"
+static boot_context_t test_context;
+static char command_line[1024];
+const boot_context_t *boot_context_get(void) { return &test_context; }
 #include "gicv2_device.h"
 uint64_t aarch64_boot_dtb = 0x4fa00000;
 const irqchip_ops_t aarch64_gicv2_ops = {0};
@@ -114,27 +124,34 @@ int main(int argc, char **argv) {
     if (p == MAP_FAILED) { perror("mmap"); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 1;
-    fread(p, 1, 0x200000, f); fclose(f);
+    size_t bytes = fread(p, 1, 0x200000, f); fclose(f);
+    test_context.fdt = p; test_context.fdt_available = bytes;
+    test_context.fdt_physical = 0x4fa00000;
+    fw_dt_t tree;
+    if (!fw_dt_init(&tree, p, bytes)) (void)fw_dt_bootargs(&tree, command_line, sizeof(command_line));
+    test_context.command_line = command_line;
     current_board->early_init();
     paddr_t base = 0, end = 0;
     if (pine_a64_ram_range(0, &base, &end) || base != 0x40000000 ||
         end != strtoull(argv[2], NULL, 0) ||
         strcmp(arch_bootargs_get(), "a20.hostname=pine-a64-test") ||
-        pine_a64_ram_range(1, &base, &end) != -1) return 1;
+        pine_a64_ram_range(32, &base, &end) >= 0) return 1;
     return 0;
 }
 ''')
         cls.binary = work / "test"
         subprocess.run([
             "cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror", "-no-pie",
-            "-D_start=pine_test_start", "-D_end=pine_test_end",
+            "-fno-builtin", "-D_start=pine_test_start", "-D_end=pine_test_end",
             "-Wl,--defsym,pine_test_start=0x40080000",
             "-Wl,--defsym,pine_test_end=0x40800000",
             "-I" + str(work), "-I" + str(ROOT / "kernel/include"),
-            "-I" + str(ROOT / "kernel/platform/pine-a64"),
+            "-I" + str(ROOT / "kernel/arch/aarch64/boards/pine-a64"),
             "-I" + str(ROOT / "kernel/arch/aarch64/include"),
             str(work / "host.c"), str(ROOT / "kernel/core/fdt_view.c"),
-            str(ROOT / "kernel/platform/pine-a64/board.c"),
+            str(ROOT / "kernel/firmware/devicetree/node.c"),
+            str(ROOT / "kernel/firmware/devicetree/memory.c"),
+            str(ROOT / "kernel/arch/aarch64/boards/pine-a64/board.c"),
             "-o", str(cls.binary),
         ], check=True, capture_output=True, text=True)
 
@@ -168,8 +185,8 @@ int main(int argc, char **argv) {
     def test_wrong_board_is_rejected(self):
         self.run_fixture(fixture(compatible="pine64,pine64-plus"), panic=True)
 
-    def test_dtb_beyond_reported_ram_is_rejected(self):
-        self.run_fixture(fixture(memory=0x8000000), panic=True)
+    def test_independently_mapped_dtb_may_be_outside_allocatable_ram(self):
+        self.run_fixture(fixture(memory=0x8000000), expected_end=0x48000000)
 
     def test_malformed_tree_is_rejected(self):
         self.run_fixture(fixture(malformed=True), panic=True)

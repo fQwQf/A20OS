@@ -15,7 +15,7 @@ static void arch_irq_restore(uint32_t flags) {
     assert(irq_held);
     irq_held = 0;
 }
-#include "../../kernel/platform/stm32f103/cluster_uart.c"
+#include "../../kernel/arch/armv7m/boards/stm32f103/cluster_uart.c"
 
 static int (*send_byte)(void *, uint8_t);
 static int (*receive_byte)(void *);

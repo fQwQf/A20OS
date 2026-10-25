@@ -15,11 +15,9 @@
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 
-/* The QEMU probe image is the one MCU configuration without a peer and
- * without SRAM slack (see kernel/mcu/main.c); everywhere else the leaf is
- * on.  This keeps ONE source file for all MCU builds (03-kernel-impl.md
- * §4: "禁止分裂文件"). */
-#if defined(CONFIG_STM32_QEMU) && !defined(CONFIG_MCU_CLUSTER_LEAF)
+/* Constrained probe images may omit cluster protocol buffers when no peer
+ * exists. A cluster or test profile can explicitly enable the leaf. */
+#if defined(CONFIG_MCU_DISABLE_CLUSTER_LEAF) && !defined(CONFIG_MCU_CLUSTER_LEAF)
 #define A20_MCU_LEAF_ENABLED 0
 #else
 #define A20_MCU_LEAF_ENABLED 1

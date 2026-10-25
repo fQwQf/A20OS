@@ -1,6 +1,6 @@
 # MCU 启动身份与持久会话
 
-实际入口：`kernel/platform/stm32f103/cluster_identity.c`，由 MCU `kernel_main`
+实际入口：`kernel/arch/armv7m/boards/stm32f103/cluster_identity.c`，由 MCU `kernel_main`
 在专用集群固件的中断开启、协议泵开始之前调用。共用 journal 算法为
 `kernel/mcu/boot_epoch.h`，板级只提供半字读写和页擦除回调。
 

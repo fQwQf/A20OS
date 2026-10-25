@@ -1,247 +1,163 @@
-# VirtualBox ARM64 运行与验收手册
+# VirtualBox ARM64
 
-> 最后核实：2026-08。下表保留早期 VirtualBox ARM64 实机观察；源码仍提供对应 loader、board 和驱动路径。状态中的"已验证/已跑通"只属于该历史快照；对当前 HEAD 的结论必须按本页重新采集连续证据。
+本页从源码构建可直接挂载的 ARM64 UEFI 磁盘，并在 **ARM64 宿主的 VirtualBox** 中启动。
+实例是 `instances/vbox-aarch64.toml`，平台为 `virtualbox-aarch64`。这是虚拟机平台，
+不适用于 ARM 开发板，也不能在 x86_64 VirtualBox 中运行。
 
-> `vbox-*-image-aarch64` wrapper 不设置 `DRIVER_DEPLOYMENT`，因此默认 `generic` 镜像不包含 E1000 或 VMSVGA 驱动模块。下面的网络和 GUI 流程要求从命令行传入 `DRIVER_DEPLOYMENT=embedded`；递归 Make 会传播该命令行变量。这样只会把驱动编入镜像，不代表已通过 VirtualBox 验收。
+## 支持状态
 
-> 只以"出现桌面"或"shell 启动"不能作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
+已实现 UEFI loader、MMU、PL011 串口、GICv3、ACPI MCFG/PCI 枚举、VirtIO-SCSI、
+E1000、VMSVGA 和 USB HID 路径。默认镜像包含 MMU 用户态与 FAT32 rootfs；实际
+VirtualBox 启动及每个外设的可用性须按本页在目标 VM 验收，构建成功不等于运行通过。
 
-在 VirtualBox ARM64 上制作镜像、配置虚拟机，并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
+| 约束 | 行为 |
+| --- | --- |
+| 内核入口 | `BOOTAA64.EFI` 按 ELF 完整内存跨度分配（含 BSS），将内核放在 `0x08080000`；交接 RSDP、命令行及版本化 UEFI 内存表 |
+| RAM | 在 `0x08000000..0x28000000` 内按 UEFI 内存表选择可回收页；保留 runtime、ACPI 表、交接区及命令行；增加 VM 内存不会扩大当前映射窗口 |
+| 串口 | PL011 `0xffddf000`，VirtualBox UART1；可通过宿主 TCP 转发交互 |
+| 中断 | GICv3，GICD `0xfcd30000`、GICR `0xfcd40000` |
+| 时钟/调度 | 平台强制协作式软件时钟路径；不能据此验收硬件定时器精度或抢占延迟 |
+| 存储 | VirtIO-SCSI；PCI 中断路由不完整，设备可能使用轮询 |
+| 网络/显示 | 需要对应驱动，推荐使用下方 embedded 构建；不保证自动启动桌面 |
 
-## 源码状态与验证边界
+内核要求配套版本的 `BOOTAA64.EFI`，旧加载器缺少版本化内存表会明确停止启动。
+加载器保留完整 ELF `PT_LOAD.p_memsz` 跨度并清零文件末尾；固件内存表中的
+LoaderCode、LoaderData、BootServicesCode、BootServicesData、ConventionalMemory
+只有在未标记 runtime 时才可能交给页分配器。RSDP、根表、全部 SDT，以及 FADT 引用的
+DSDT/FACS 会验证并按页保留，即使固件将它们放在启动服务内存中也不会回收。
+内存表截断、描述符重叠、版本不匹配或保留区超出有界容量都会停止启动。
+UEFI LoadOptions 最大为 1023 个字符，超长输入会明确失败，不会截断配置。
+这些规则遵循 [UEFI 内存分配及 ExitBootServices 约定](https://uefi.org/specs/UEFI/2.10/07_Services_Boot_Services.html)。
 
-| 组件 | 状态 | 说明 |
-|---|---|---|
-| ARM64 UEFI boot disk | 已实现 | `make vbox-image-aarch64` 生成带 `EFI/BOOT/BOOTAA64.EFI` 的 FAT 磁盘。 |
-| UEFI loader | 已实现 | 把 flat kernel 装载到 `0x08080000`，退出 boot services，关闭 firmware MMU，进入 A20OS。 |
-| Early page tables | 已实现 | 把 VirtualBox RAM 映射到 `0x08000000`，高地址平台 MMIO 映射为 device memory。 |
-| Serial console | 已实现，需硬件验证 | PL011 配置在实测地址 `0xFFDDF000`。 |
-| GIC | 已实现，需硬件验证 | GICv3 distributor 和 redistributor 支持，替换掉原来无效的 GICv2 CPU interface 代码。 |
-| Timer | 软件 fallback | VirtualBox 在 EL1 trap 两个 ARM generic timer 接口；早期启动使用非抢占软件计数器。 |
-| ACPI/PCIe discovery | 已实现 | UEFI loader 传递 ACPI RSDP；board 解析 MCFG 并枚举 PCIe ECAM。 |
-| VirtIO-SCSI disk | 已目标验证 | VBox `1af4:1048` 控制器发现 boot LUN，挂载 GPT FAT32 partition 的 `/bin`。 |
-| Network | 驱动已实现，历史目标检测 | VBox 暴露 Intel E1000 `8086:100e`；默认 generic 镜像不包含该驱动，网络验收需 embedded 构建。 |
-| VMSVGA display | 驱动已实现，历史目标验证 | SVGAv3 `15ad:0406` 曾在 VBox ARM 上被检测；默认 generic 镜像不包含该驱动，GUI 验收需 embedded 构建。 |
-| USB HID input | 已实现，需目标验证 | Intel `8086:1e31` xHCI controller 轮询；USB 键盘、鼠标、Tablet 事件进入 `/dev/event0`。 |
-| Serial recovery console | 已实现 | 磁盘或图形路径失败时仍可用。 |
-| Userspace and remote shell | 已实现 | MMU userspace 到达 musl `init`/`mksh`；embedded E1000 路径可启动 TCP 2323 的 `telnetd`，默认 generic 镜像只能依赖串口 shell。启动会打印 `/init` 大小、ELF entry 和 FNV-1a hash，用于识别 stale disk。 |
+当前 `vbox-aarch64-text` 只选择另一镜像文件名，使用同一 FAT rootfs；它不是独立的
+驱动裁剪配置，也不会通过实例字段自动关闭 GUI。不存在 `vbox-gui-image-aarch64` 目标。
 
-UEFI loader、PCI discovery、VirtIO-SCSI 和 SVGAv3 probe 曾在 VirtualBox ARM64 上跑通。同一个 AArch64 MMU userspace 镜像也曾在 QEMU 上通过 `init`、`fork`/`exec` 和交互式 `mksh` 做回归测试。这些历史结果不能外推到当前默认 generic 镜像。
+## 宿主依赖
 
-## 构建镜像
+构建可在 Linux x86_64 交叉编译环境执行；运行需要支持 ARM VM 的 VirtualBox ARM64
+发行版，例如 Apple Silicon macOS。VirtualBox 7.2 的 Windows on Arm 入口属于厂商的
+实验功能，不能用 x86_64 包替代。具体宿主支持范围见
+[Oracle 安装说明](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html)。
+准备至少 8 GiB 构建主机内存和约 20 GiB 可用磁盘；VM 起步使用 1 vCPU、1 GiB RAM。
 
-安装 AArch64 交叉编译器和 `mtools`。Debian/Ubuntu：
+Linux 构建依赖示例：
 
-```bash
-sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu mtools parted
-make vbox-image-aarch64
+```sh
+sudo apt install build-essential git curl ca-certificates python3 xz-utils file \
+  gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
+  dosfstools e2fsprogs mtools parted util-linux
 ```
 
-上面的默认 generic 镜像可用于串口、UEFI 和存储 bring-up，但不包含 E1000/VMSVGA。需要执行下文的网络或 GUI 流程时使用：
+Python 需 3.11 或更新版本。安装 rustup 后，在仓库根目录执行：
 
-```bash
-make DRIVER_DEPLOYMENT=embedded vbox-image-aarch64
+```sh
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 aarch64-unknown-none
+rustup component add --toolchain 1.96.0 rust-src
+git submodule update --init --recursive
 ```
 
-embedded 变体位于 `.kernel-build/aarch64-virtualbox-aarch64-both-dev-embedded/`。构建成功只证明驱动已静态链接；仍需按本页保存 VirtualBox 目标日志。
+Rust 版本由仓库 `rust-toolchain.toml` 选择；Makefile 使用 `rust-src` 自动构建内核软件浮点 core。尚无 rustup 时，可从
+[官方安装入口](https://rustup.rs/) 安装；源码必须含子模块。运行端还需 `VBoxManage`，
+交互串口示例使用 `nc`（Debian/Ubuntu：`netcat-openbsd`）。无需 Guest Additions 或 GRUB。
 
-默认镜像输出：
+## 构建与定位产物
 
-```text
-.kernel-build/aarch64-virtualbox-aarch64-both-dev/a20os-vbox-aarch64.img
+推荐显式使用 embedded 驱动，命令均在仓库根目录执行：
+
+```sh
+tools/a20 check instances/vbox-aarch64.toml
+tools/a20 package vbox-aarch64 -- DRIVER_DEPLOYMENT=embedded
+a20_vbox_build=$(make -s ARCH=aarch64 BOARD=virtualbox-aarch64 ABI=both \
+  DRIVER_DEPLOYMENT=embedded print-build-dir)
+ls -l "$a20_vbox_build/a20os-vbox-aarch64.img"
+sha256sum "$a20_vbox_build/a20os-vbox-aarch64.img"
 ```
 
-这是 256 MiB 的 GPT 磁盘，FAT32 EFI System Partition 里同时包含 `EFI/BOOT/BOOTAA64.EFI` 和 A20OS `/bin` root filesystem。它不是 x86 GRUB ISO。
+镜像为 **256 MiB GPT 磁盘**，FAT32 ESP 从 1 MiB 起，含
+`EFI/BOOT/BOOTAA64.EFI`、`/init`、`/mksh`、`/etc` 和运行库。旁边的 `.img.sha256`
+与 ESP 中 `A20OS.MANIFEST` 可用于核对介质。构建目录由配置生成，不应照抄固定哈希。
+`package` 会校验 staged `/init` 与本次用户态产物相符。
 
-## 在 VirtualBox 中运行
+若使用原实例的默认 generic 配置，命令为 `tools/a20 package vbox-aarch64`，
+可用 `tools/a20 ledger vbox-aarch64` 查询其路径。ledger 不接受 make 覆盖参数，不能
+用该默认记录定位上方 embedded 变体；应使用同一组选项的 `print-build-dir`。
 
-需要 VirtualBox 7.2 或更新版本，运行在 ARM64 宿主上。创建至少 1 GiB RAM、启用 EFI 的 ARM64 VM，把生成的镜像作为第一块硬盘挂上去。不要启用 Secure Boot。
+需要 text 文件名时运行 `tools/a20 package vbox-aarch64-text -- DRIVER_DEPLOYMENT=embedded`，
+其输出在同一配置的构建目录，名为 `a20os-vbox-aarch64-text.img`。
 
-为能同时输入和输出，把 UART1 配置成 TCP server，而不是文件。文件模式只能记录输出，不能接收键盘输入。VM 关机后，在 Windows PowerShell 里执行：
+## 创建 VM 并附加磁盘
 
-```powershell
-$vm = "A20"
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `
-  --uart1 0x03f8 4 `
-  --uartmode1 tcpserver 5555
+1. 在 ARM64 VirtualBox 中创建 ARM64 Linux/Other VM，使用 1 CPU、1 GiB RAM、UEFI，关闭
+   Secure Boot；不要选择 x86 来宾架构。
+2. 存储控制器选择 VirtIO-SCSI，启动盘接 port 0；先不附加其他磁盘。
+3. 显示选择 VMSVGA；如需验收网络，选择 Intel PRO/1000 MT Desktop（82540EM）、NAT。
+4. 串口 UART1 选择 TCP Server，端口 5555；文件模式只能记录输出，不能输入 shell 命令。
+
+将构建生成的 `.img` 复制到运行端工作目录，命名为 `a20os-arm64.img`。在运行端转换
+为一个**尚不存在的新 VDI**：
+
+```sh
+VBoxManage convertfromraw a20os-arm64.img a20os-arm64.vdi --format VDI
+VBoxManage showvminfo "A20OS ARM64" --machinereadable
 ```
 
-启动 VM，然后用 `telnet 127.0.0.1 5555` 或 PuTTY Raw/TCP 连接。第一次启动保持串口连接：日志会报告 ACPI MCFG window、PCI 设备、VirtIO-SCSI 容量和文件系统挂载结果。
+把 `A20OS ARM64` 换为实际 VM 名。使用上条输出中的控制器名附加，以下假设为
+`VirtioSCSI`；也可在管理器的存储页面选择该 VDI：
 
-### 转换并附加新磁盘
-
-更新镜像后，必须重新生成并替换 VM 挂载的 VDI。直接转换旧 raw 镜像不会得到新的 GPT partition。不要对已经挂载或正在使用的 VDI 执行 `convertfromraw`；每次用新的输出文件名，避免 VirtualBox 保留旧的 medium UUID：
-
-```powershell
-$raw = "C:\Users\super\Downloads\a20os-vbox-aarch64.img"
-$vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" convertfromraw `
-  $raw $vdi --format VDI
+```sh
+VBoxManage storageattach "A20OS ARM64" --storagectl "VirtioSCSI" \
+  --port 0 --device 0 --type hdd --medium a20os-arm64.vdi
+VBoxManage modifyvm "A20OS ARM64" --uart1 0x03f8 4 --uartmode1 tcpserver 5555
+VBoxManage startvm "A20OS ARM64" --type gui
+nc 127.0.0.1 5555 | tee a20os-arm64-serial.log
 ```
 
-> 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。已挂载到 VM 的 VDI 不再转换，旧的 medium UUID 也不要留着。
+这里 `--uart1` 是 VirtualBox 的端口配置接口，内核仍使用上述 PL011 地址。
+TCP 字节流不需要给 `nc` 配置波特率。Windows 可用 `VBoxManage.exe` 执行相同参数，
+并用 PuTTY Raw/TCP 连接 `127.0.0.1:5555`。连接后重启一次 VM，以收集完整启动日志。
 
-构建还会生成 `a20os-vbox-aarch64.img.sha256` 并在 ESP 中写入 `A20OS.MANIFEST`。如果镜像是当前构建的，串口日志中的 `[INIT] image` 行和 `file-entry` 必须与刚构建的 `/init` 匹配；出现旧构建的 entry 说明 VM 还挂在一个 stale VDI 上。
+镜像更新后关闭 VM，转换为新的 VDI 文件名并重新附加；不要覆盖正在使用的 VDI。
+虚拟机流程不需要 `a20 deploy --media-device`，该命令是写物理介质，不是附加 VM 磁盘。
 
-VirtualBox ARM 默认使用 VirtIO-SCSI 控制器。除非你的 VirtualBox 版本明确要求其他控制器，否则保持默认。
+## 验收
 
-## 网络与远程 shell
+预期依次观察到 UEFI loader、A20OS banner、`[VBOX] ACPI RSDP`、MCFG/ECAM、PCI ID/BAR、
+VirtIO-SCSI 容量和 FAT32 挂载，随后 `[INIT] System ready` 与用户态 shell。
+`System ready` 单独出现仅证明内核初始化，用户态还须通过串口实际执行：
 
-本节要求使用 `DRIVER_DEPLOYMENT=embedded` 构建的镜像；默认 generic 镜像没有 E1000，不能预期出现网络 ready 或 `telnetd` 日志。
-
-保持 VM 的 Intel PRO/1000 MT Desktop 适配器接在 NAT 上，并转发宿主端口到客户机 TCP 2323。VM 关机时执行：
-
-```powershell
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm $vm `--nic1 nat `--nictype1 82540EM `--natpf1 "a20-telnet,tcp,127.0.0.1,2323,,2323"
+```sh
+cat /etc/os-release
+ls /bin
+echo VBOX_ARM64_OK
 ```
 
-串口出现 `[telnetd] listening on port 2323` 后，用 `telnet 127.0.0.1 2323` 或 PuTTY Raw/TCP 连接。该服务无认证，因此只转发到 loopback。
+保存输出及镜像哈希。无认证 `telnetd` 的启用以实际日志为准；只有出现
+`[telnetd] listening on port 2323` 才配置 NAT 转发。VM 关机时执行：
 
-## GUI 与文本镜像
-
-显式构建图形镜像：
-
-```bash
-make DRIVER_DEPLOYMENT=embedded vbox-gui-image-aarch64
+```sh
+VBoxManage modifyvm "A20OS ARM64" --nic1 nat --nictype1 82540EM \
+  --natpf1 "a20-shell,tcp,127.0.0.1,2323,,2323"
 ```
 
-输出：
+启动后可用 `nc 127.0.0.1 2323`；此路径还需要 E1000 ready、lwIP 接口及来宾地址日志。
+转发绑定 loopback。没有这些条件时使用 UART shell，不把 TCP 失败解释为内核启动失败。
 
-```text
-.kernel-build/aarch64-virtualbox-aarch64-both-dev-embedded/a20os-vbox-aarch64-gui.img
-```
+显示验收要求看到 `15ad:0406` 的 PCI 绑定、GPU ready、framebuffer 模式与实际更新；
+USB 输入需 xHCI/HID ready 及真实按键/指针事件。彩条、shell 或桌面单一现象不能替代
+驱动链验收。PCI 轮询、图形/输入组合和长时间时钟行为均应单独记录。
 
-embedded 图形镜像包含 `/etc/a20-gui` 标记，并保留 UART1 串口 shell。文本-only 恢复盘可继续使用默认 generic 构建：
+## 失败定位
 
-```bash
-make vbox-text-image-aarch64
-```
+| 现象 | 检查 |
+| --- | --- |
+| 无 UEFI loader 输出 | ARM64 VM、EFI、Secure Boot、启动顺序和新 VDI 是否附加正确 |
+| `incompatible AArch64 UEFI loader` / `invalid AArch64 UEFI memory handoff` | 重建并重新附加配套 EFI 镜像；记录固件内存表与异常日志，禁止退回整段静态 RAM |
+| loader 后无内核日志 | UART1 TCP 是否连接；平台地址是否与当前 VBox 机器模型一致 |
+| `ACPI MCFG unavailable` | 记录 VBox 版本、配置和 VBox.log；PCI 发现未完成，先勿排查文件系统 |
+| 无 `/bin/init` 或无 shell | VirtIO-SCSI PCI ID/绑定、容量、ESP rootfs 和挂载日志 |
+| 网络或显示无设备 | embedded 配置是否与所附磁盘相符、E1000/VMSVGA 型号是否正确 |
+| 代码改动未反映 | 比较 raw 哈希、重新转换并附加新 VDI；不要复用旧介质 |
 
-输出：
-
-```text
-.kernel-build/aarch64-virtualbox-aarch64-both-dev/a20os-vbox-aarch64-text.img
-```
-
-保持 VirtualBox 显示控制器选择 VMSVGA。SVGAv3 使用显式 update command，成功的图形 probe 会在串口报告 `[GPU] SVGAv3 ready`。红、绿、蓝、白四条 bar 是驱动 scanout 自测，不是 desktop。它们会在用户态报告以下全部信息后被替换：
-
-```text
-[init] desktop queued: pid=2
-[desktop] entered main
-Framebuffer mapped: va=0x30000000 size=3145728 stride=4096
-[desktop] framebuffer ready
-Mission Control initialized, entering loop...
-```
-
-图形镜像用普通 `fork`/`exec` 启动 desktop。它不会用 `vfork` 挂起 PID 1，因为 VirtualBox ARM timer fallback 是协作式的。发布新子进程后，协作 clone 路径会主动 yield 一次，让子进程无需等待 VirtualBox ARM 不提供的中断即可进入 `exec`。
-
-镜像目标在打包前还会把 staged `/init` 与当前 MMU user build 做比较。这能拦截被打断/增量构建留在 FAT 里的 NOMMU `init`。历史故障样本中的 NOMMU 二进制把 `fork()` 改成 `vfork()`，日志表现为 `clone begin: ... flags=0x4111`；历史修复样本报告 `flags=0x11`，随后是 `desktop queued` 和 `[desktop] entered main`。这些具体日志值是快照证据，不是 HEAD 预期输出断言。
-
-## 附加磁盘到控制器
-
-用 `VBoxManage` 把磁盘挂到 ARM VM 选中的控制器。VirtualBox 7.2 通常创建 `VirtioSCSI` 控制器，Windows PowerShell 示例：
-
-```powershell
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storageattach "A20OS ARM64" `--storagectl "VirtioSCSI" `--port 0 --device 0 --type hdd `--medium "C:\Users\super\Downloads\a20os-vbox-aarch64-gpt.vdi"
-```
-
-如果控制器名不同，用下面命令查看实际名称并替换：
-
-```powershell
-& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" showvminfo "A20OS ARM64" --machinereadable
-```
-
-firmware 只需要看到 EFI System Partition 和标准的 `EFI/BOOT/BOOTAA64.EFI` 路径。
-
-## 第一阶段预期输出
-
-```text
-A20OS: loading kernel
-======================================
-    A20OS Kernel
-======================================
-```
-
-如果看到 UEFI 消息但之后没有 kernel 串口输出，firmware handoff 已经成功了，剩下的问题通常是 VirtualBox PL011 地址或串口配置。如果连 UEFI 消息都没有，检查 EFI 是否启用、Secure Boot 是否关闭、镜像是否排在启动顺序第一。
-
-## 驱动验收时需要保留的证据
-
-PCI transport 当前使用轮询；在 ACPI interrupt controller 解析完成前，这能让 storage、display 和 xHCI HID 不依赖 VirtualBox 专用 MSI/INTx 路由。PCI enumerator 会打印每个设备及其 BAR；验收时把这些行连同串口日志一起提交。如果日志出现 `ACPI MCFG unavailable`，请一并提交 `VBox.log`：这表示 firmware 没有通过标准 UEFI configuration table 发布 ACPI。
-
-有效验收必须保留：
-
-- `[VBOX] ACPI RSDP`
-- MCFG/ECAM bus 范围
-- 目标 `[BUS] pci` ID 和 BAR
-- 驱动 ready 行
-- `[DRIVER] ... bound`
-- block mount、lwIP attach、`/dev/fb0` 或 `/dev/event0` 的实际 I/O
-
-没有目标设备时，还要验证驱动不会误绑定。
-
-## 在 QEMU AAVMF 上验证 loader
-
-loader 不依赖真实板子即可在 QEMU AAVMF 上验证。关键在于 loader 的装载地址必须等于该 board 链接时的 `PHYS_BASE`：qemu-virt-aarch64 链在 `0x40080000`，而 AAVMF 的 RAM 从 `0x40000000` 起。若 loader 按 VirtualBox 的 `0x08080000` 去 `AllocatePages`，AAVMF 根本没有那块内存，直接 `UEFI load failed`。这个地址现在由 `VBOX_AARCH64_LOAD_ADDRESS` 从 board 的 `ldscript.ld` 读出，不再需要手工指定：
-
-```bash
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 kernel-only \
-    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/BOOTAA64.EFI
-sh tools/mk_uefi_fat_image.sh \
-    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/BOOTAA64.EFI /tmp/a64.img \
-    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/fat32.img BOOTAA64.EFI
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 -nographic \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd \
-    -drive if=pflash,format=raw,file=AAVMF_VARS.fd \
-    -drive file=/tmp/a64.img,format=raw,if=none,id=hd0 \
-    -device virtio-blk-device,bus=virtio-mmio-bus.0,drive=hd0 \
-    -serial mon:stdio
-```
-
-实测（不是推断）到达用户态，根文件系统已挂载：
-
-```text
-[BUS] virtio-mmio: found 1 devices (base=0x800a000000 irq_base=16)
-[VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
-[INIT] Block device -> /bin (fat32)
-[INIT] System ready
-Welcome to A20OS!
-```
-
-注意 `bus=virtio-mmio-bus.0` 不能省。省略它时设备不会落在 mmio 总线上，内核的 `virtio-mmio: found 0 devices` 会让人误以为是内核问题。
-
-这条路径验证的是 loader 与内核入口，与 VirtualBox ARM 无关；VirtualBox ARM 上是否真的能启动仍未验证，本机没有 `VBoxManage`。
-
-## 新增 VirtualBox ARM64 设备
-
-1. 先确认协议是否已有通用 PCI/VirtIO 驱动。
-2. 功能驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_AARCH64` 或本平台的 GIC/PL011/ECAM 常量；这些事实属于 `kernel/platform/virtualbox-aarch64/`。
-3. 当前 PCI 中断路由不完整，暂时使用轮询的驱动必须有单次预算和双重超时，并在 [实现状态](../status/current/drivers-implementation-status.md) 记录解除轮询的条件。
-
-## 常见故障
-
-| 现象 | 定位 |
-|---|---|
-| 看不到 UEFI 消息 | 检查 EFI 启用、Secure Boot 关闭、镜像启动顺序第一。 |
-| UEFI 后无 kernel 串口输出 | 检查 PL011 地址和串口配置（文件 vs TCP server）。 |
-| 串口有日志但 `/bin/init` 不存在 | 检查 VirtIO-SCSI controller、磁盘附加和 FAT32 `/bin`。 |
-| 桌面不出现 | 先确认镜像以 `DRIVER_DEPLOYMENT=embedded` 构建，再看 `[GPU] SVGAv3 ready` 和 framebuffer 日志。 |
-| 网络不通 | 先确认 embedded 构建，再检查 E1000 ready、lwIP attach、NAT 和端口转发。 |
-| 修改后行为不变 | 确认重新生成了镜像，VM 挂载的是新 VDI/UUID。 |
-
-## 验收记录模板
-
-```text
-VirtualBox version:
-Host architecture:
-A20OS commit/diff:
-Build command:
-Image path and checksum:
-VM graphics/storage/network/input configuration:
-Enumerated PCI ID and BARs:
-Bound driver and ready line:
-Class consumer line:
-I/O performed and result:
-Known untested features:
-```
-
-完整提交清单和跨平台构建矩阵见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
+此平台地址窗口固定；其他 VirtualBox 机器模型、硬件定时器、抢占和完整 PCI IRQ 路由
+不在本页的保证范围。QEMU AAVMF 的启动结果不能替代 ARM64 VirtualBox 的运行验收。

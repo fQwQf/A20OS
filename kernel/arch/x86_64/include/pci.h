@@ -51,6 +51,5 @@ typedef struct {
     uint16_t  notify_off_cache[PCI_VIRTIO_NOTIFY_CACHE];
 } pci_virtio_dev_t;
 
-void pci_init(void);
 
 #endif

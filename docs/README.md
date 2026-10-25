@@ -7,7 +7,7 @@
 安装单架构依赖与固定 Rust，运行 `python3 tools/check_quickstart.py`，再执行
 `tools/a20 run qemu-riscv64 -- -j4`。进入 shell 后用 `poweroff` 退出；
 `make -j4 smoke-quickstart` 自动验收 shell、外部命令和正常关机。
-根目录 `make all` 是双架构发布构建。了解系统架构可继续阅读 [OS-Design.md](OS-Design.md)。
+根目录 `make all` 是双架构发布构建。了解系统架构可继续阅读 [OS-Design.md](OS-Design.md)，启动与硬件发现接口见 [启动模型](dev/boot-model.md)。
 
 ---
 
@@ -80,16 +80,9 @@
 
 ## 平台移植与运行
 
-- [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
-- [platforms/README.md](platforms/README.md)：硬件平台支持范围、默认实例与各平台部署文档
-- [platforms/licheerv-nano.md](platforms/licheerv-nano.md)、[platforms/milk-v-duo.md](platforms/milk-v-duo.md)、[platforms/rk3328.md](platforms/rk3328.md)、[platforms/sun50i-h616.md](platforms/sun50i-h616.md)：RISC-V 与 ARM SBC 的平台配置、设备支持范围及部署方法
-- [platforms/x86_64-pc.md](platforms/x86_64-pc.md)：x86_64 PC / 瘦客户机目标（PIRQ 与 INTx 已在 QEMU i440fx 实测；真机未验证）
-- `tools/a20 boards`：列出树里全部板子及其架构、SMP、链接脚本情况
-- [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）
-- [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
-- [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
-- [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
-- [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈
+- [平台文档约定](platforms/README.md)：单平台页面的范围、支持状态与操作要求。
+- [移植指南](platforms/porting-guide.md)：板级接口、构建接入与验证要求。
+- `tools/a20 boards` 和 `tools/a20 list`：查询当前源码中的板配置及实例；部署步骤分别写在对应的平台页面中。
 
 ## 用户态、桌面与发行版
 

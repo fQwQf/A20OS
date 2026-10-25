@@ -14,6 +14,9 @@ extern void la64_eiointc_pic_init(void);
 #ifdef CONFIG_BOARD_LS2K1000
 extern void ls2k1000_handle_device_irq(void);
 #endif
+#ifdef CONFIG_BOARD_LS2K0300
+extern void ls2k0300_handle_device_irq(unsigned bank);
+#endif
 
 static void handle_timer_irq(int from_user) {
     uint64_t ticlr = 1;
@@ -47,8 +50,10 @@ void trap_init(void) {
     ecfg &= ~0x1FFFUL;
 #endif
 #ifdef CONFIG_BOARD_LS2K0300
-    /* Phase 1: discard firmware device routes and leave all IRQs masked. */
+    /* Discard firmware masks. TI is enabled after scheduler initialization;
+     * the two legacy LIOINTC banks cascade on HWI0 and HWI2. */
     ecfg &= ~0x1FFFUL;
+    ecfg |= (1UL << 2) | (1UL << 4);
 #else
     ecfg |= (1UL << 12) | (1UL << 11);
 #endif
@@ -82,7 +87,12 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         return;
     }
 
-#ifdef CONFIG_BOARD_LS2K1000
+#ifdef CONFIG_BOARD_LS2K0300
+    if (irq == 2 || irq == 4) {
+        ls2k0300_handle_device_irq(irq == 4);
+        return;
+    }
+#elif defined(CONFIG_BOARD_LS2K1000)
     if (irq == LS2K_LIOINTC_PARENT_IRQ) {
         ls2k1000_handle_device_irq();
         return;

@@ -230,6 +230,11 @@ extern uint64_t g_perf_sw_context_switches;
 
 static inline void a20_perf_add(a20_perf_counter_t counter, uint64_t value)
 {
+#ifdef CONFIG_MCU
+    /* The MCU profile excludes perf.c and its per-CPU accounting storage. */
+    (void)counter;
+    (void)value;
+#else
     if (__builtin_expect(
             __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED) == 0, 1))
         return;
@@ -240,6 +245,7 @@ static inline void a20_perf_add(a20_perf_counter_t counter, uint64_t value)
         cpu = 0;
     __atomic_fetch_add(&g_a20_perf_percpu[cpu].values[counter], value,
                        __ATOMIC_RELAXED);
+#endif
 }
 
 static inline void a20_perf_count(a20_perf_counter_t counter)

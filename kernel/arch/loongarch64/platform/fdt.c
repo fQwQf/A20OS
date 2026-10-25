@@ -1,288 +1,48 @@
 #ifdef CONFIG_LOONGARCH64
-
 #include "core/bootargs.h"
-#include "core/consts.h"
+#include "core/panic.h"
+#include "core/errno.h"
 #include "core/stdio.h"
-#include "core/string.h"
-#include "core/types.h"
-#include "platform.h"
+#include "boot/context.h"
+#include "firmware/devicetree.h"
 #include "drivers/core/driver_core.h"
-#include "firmware.h"
-
-#define FDT_MAGIC       0xd00dfeedU
-#define FDT_BEGIN_NODE  1U
-#define FDT_END_NODE    2U
-#define FDT_PROP        3U
-#define FDT_NOP         4U
-#define FDT_END         9U
-#define LA_RAM_RANGES   4
-
-typedef struct {
-    paddr_t base;
-    paddr_t end;
-} la_ram_range_t;
-
-extern uint64_t __boot_dtb_ptr;
-
-/* Safe fallback for firmware which does not publish a usable FDT. */
-static la_ram_range_t ram_ranges[LA_RAM_RANGES] = {
-    { 0x00000000UL, 0x10000000UL },
-    { PHYS_MEMORY_BASE, PHYS_MEMORY_END },
-};
-static size_t ram_range_count = 2;
-
-static uint32_t read_be32(const void *ptr)
-{
-    const uint8_t *p = (const uint8_t *)ptr;
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static uint64_t read_be64(const void *ptr)
-{
-    const uint8_t *p = (const uint8_t *)ptr;
-    return ((uint64_t)read_be32(p) << 32) | read_be32(p + 4);
-}
-
-static int add_ram_range(la_ram_range_t *ranges, size_t *count,
-                         uint64_t base, uint64_t size)
-{
-    if (!size || base + size < base || *count >= LA_RAM_RANGES)
-        return -1;
-
-    uint64_t start = (base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    uint64_t end = (base + size) & ~(PAGE_SIZE - 1);
-    if (end <= start)
-        return -1;
-
-    ranges[*count].base = (paddr_t)start;
-    ranges[*count].end = (paddr_t)end;
-    (*count)++;
+#include "mm/frame.h"
+#include "platform.h"
+static fw_dt_range_t ranges[PFA_MAX_RANGES];
+static size_t range_count;
+size_t arch_ram_range_count(void) { return range_count ? range_count : 1; }
+int arch_ram_range(size_t i, paddr_t *base, paddr_t *end) {
+    if (!base || !end || i >= arch_ram_range_count()) return -1;
+    if (!range_count) { *base = PHYS_MEMORY_BASE; *end = PHYS_MEMORY_END; }
+    else { *base = ranges[i].base; *end = ranges[i].base + ranges[i].size; }
     return 0;
 }
-
-static int validate_and_sort_ranges(la_ram_range_t *ranges, size_t count)
-{
-    for (size_t i = 1; i < count; i++) {
-        la_ram_range_t cur = ranges[i];
-        size_t j = i;
-        while (j > 0 && ranges[j - 1].base > cur.base) {
-            ranges[j] = ranges[j - 1];
-            j--;
-        }
-        ranges[j] = cur;
-    }
-
-    for (size_t i = 0; i < count; i++) {
-        if (ranges[i].end <= ranges[i].base)
-            return -1;
-        if (i && ranges[i - 1].end > ranges[i].base)
-            return -1;
-    }
-    return 0;
-}
-
-size_t arch_ram_range_count(void)
-{
-    return ram_range_count;
-}
-
-int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
-{
-    if (!base || !end || idx >= ram_range_count)
-        return -1;
-    *base = ram_ranges[idx].base;
-    *end = ram_ranges[idx].end;
-    return 0;
-}
-
-/* The kernel command line, out of the same DTB the memory map comes from.
- *
- * Without this, LoongArch64 had no arch_bootargs_get() at all and fell through
- * to the weak default in core/bootargs.c that returns NULL.  That is not a
- * niche gap: bootargs_get() feeds every `a20.*` key, so with no command line
- * the whole configurable surface was unreachable here -- `a20.ip` and
- * `a20.tcpmode` as much as `a20.xlator`.  The instance manifests passed no
- * -append for the same reason, so nothing had ever exercised it.
- *
- * The DTB address is a build-time constant in boot/entry.S rather than a
- * register the firmware hands over (compare riscv64, which saves `a1`), so
- * `dtb` can legitimately be zero on a board whose firmware publishes nothing.
- * That case falls through to NULL, which is the fail-closed answer: no
- * command line, and therefore no behaviour the administrator did not ask for.
- *
- * The result is cached because bootargs_init() copies it once but the pointer
- * outlives that copy, and several consumers call this independently.
- *
- * With CONFIG_UART_CMDLINE=y there is a console fallback for the case that
- * matters here in practice: QEMU's loongarch virt publishes no command line
- * by any route, so the DTB comes up empty and every a20.* key is dead.  The
- * fallback is opt-in at build time precisely because it is an input path --
- * see kernel/core/uart_cmdline.c for why.
- */
-const char *arch_bootargs_get(void)
-{
-    static char bootargs_buf[1024];
-    static int ready;
-
-    if (!ready) {
-        bootargs_buf[0] = '\0';
-        uint64_t dtb = __boot_dtb_ptr;
-        printf("[FDT] dtb_ptr=0x%lx\n", dtb);
-        if (dtb && fdt_extract_bootargs((const void *)(uintptr_t)dtb,
-                                         bootargs_buf,
-                                         sizeof(bootargs_buf)) == 0) {
-            printf("[FDT] bootargs='%s'\n", bootargs_buf);
-        } else {
-            printf("[FDT] no bootargs extracted\n");
-#if defined(CONFIG_UART_CMDLINE)
-            if (uart_cmdline_read(bootargs_buf, sizeof(bootargs_buf)) > 0)
-                printf("[FDT] bootargs='%s'\n", bootargs_buf);
+const char *arch_bootargs_get(void) {
+    const boot_context_t *b = boot_context_get();
+    if (b && b->command_line && b->command_line[0]) return b->command_line;
+#ifdef CONFIG_UART_CMDLINE
+    static char line[1024]; static int ready;
+    if (!ready) { (void)uart_cmdline_read(line, sizeof(line)); ready = 1; }
+    return line[0] ? line : NULL;
+#else
+    return NULL;
 #endif
-        }
-        ready = 1;
-    }
-    return bootargs_buf[0] ? bootargs_buf : NULL;
 }
-
-void loongarch64_memory_init(void)
-{
-    /* A physical board without a firmware FDT falls back to the physical
-     * window the board declares (e.g. LS2K1000: DDR at 0x0..0x40000000),
-     * instead of the QEMU-virt-only defaults below.  A usable DTB still wins
-     * because the parse below replaces these ranges on success. */
-    if (current_board &&
-        current_board->ram_end > current_board->ram_base) {
-        ram_ranges[0].base = current_board->ram_base;
-        ram_ranges[0].end = current_board->ram_end;
-        ram_range_count = 1;
+void loongarch64_memory_init(void) {
+    uint64_t base = current_board ? current_board->ram_base : PHYS_MEMORY_BASE;
+    uint64_t end = current_board ? current_board->ram_end : PHYS_MEMORY_END;
+    ranges[0] = (fw_dt_range_t){base, end - base}; range_count = 1;
+    const boot_context_t *b = boot_context_get();
+    if (b && b->fdt) {
+        fw_dt_t tree; extern char _start[], _end[];
+        int rc = fw_dt_init(&tree, b->fdt, b->fdt_available);
+        if (!rc) rc = fw_dt_memory_window(&tree, b->fdt_physical, base, end,
+            (uintptr_t)_start - PAGE_OFFSET, (uintptr_t)_end - PAGE_OFFSET,
+            ranges, PFA_MAX_RANGES, &range_count, FW_DT_MEMORY_STATIC_IF_ABSENT);
+        if (rc) panic("LoongArch: invalid or excessive DT RAM/reservations");
     }
-
-    const uint8_t *fdt = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
-    if (!fdt || read_be32(fdt) != FDT_MAGIC) {
-        printf("[FDT] LoongArch memory map unavailable, using board window "
-               "0x%lx..0x%lx (%lu MiB)\n",
-               (unsigned long)ram_ranges[0].base,
-               (unsigned long)ram_ranges[0].end,
-               (unsigned long)((ram_ranges[0].end -
-                                ram_ranges[0].base) >> 20));
-        return;
-    }
-
-    uint32_t totalsize = read_be32(fdt + 4);
-    uint32_t off_struct = read_be32(fdt + 8);
-    uint32_t off_strings = read_be32(fdt + 12);
-    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize) {
-        printf("[FDT] malformed LoongArch FDT, using board window fallback\n");
-        return;
-    }
-
-    const uint8_t *p = fdt + off_struct;
-    const uint8_t *endp = fdt + totalsize;
-    const uint8_t *strings = fdt + off_strings;
-    la_ram_range_t discovered[LA_RAM_RANGES];
-    size_t discovered_count = 0;
-    int depth = 0;
-    int memory_depth = -1;
-
-    while (p + 4 <= endp) {
-        uint32_t token = read_be32(p);
-        p += 4;
-        if (token == FDT_END)
-            break;
-        if (token == FDT_BEGIN_NODE) {
-            const char *name = (const char *)p;
-            const char *name_end = name;
-            while ((const uint8_t *)name_end < endp && *name_end)
-                name_end++;
-            if ((const uint8_t *)name_end >= endp)
-                break;
-            depth++;
-            if (depth == 2 &&
-                (strcmp(name, "memory") == 0 ||
-                 strncmp(name, "memory@", 7) == 0))
-                memory_depth = depth;
-            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
-            continue;
-        }
-        if (token == FDT_END_NODE) {
-            if (depth == memory_depth)
-                memory_depth = -1;
-            depth--;
-            continue;
-        }
-        if (token == FDT_NOP)
-            continue;
-        if (token != FDT_PROP || p + 8 > endp)
-            break;
-
-        uint32_t len = read_be32(p);
-        uint32_t nameoff = read_be32(p + 4);
-        p += 8;
-        uint32_t padded = (len + 3U) & ~3U;
-        if (p + padded > endp || off_strings + nameoff >= totalsize)
-            break;
-
-        const char *propname = (const char *)(strings + nameoff);
-        if (depth == memory_depth && strcmp(propname, "reg") == 0) {
-            for (uint32_t off = 0; off + 16 <= len; off += 16) {
-                if (add_ram_range(discovered, &discovered_count,
-                                  read_be64(p + off),
-                                  read_be64(p + off + 8)) < 0) {
-                    discovered_count = 0;
-                    break;
-                }
-            }
-        }
-        p += padded;
-    }
-
-    if (!discovered_count ||
-        validate_and_sort_ranges(discovered, discovered_count) < 0) {
-        printf("[FDT] invalid LoongArch RAM ranges, using board window fallback\n");
-        return;
-    }
-
-    /* Firmware describes installed RAM, while the board window describes RAM
-     * the kernel is allowed to own.  Intersect the two so reserved firmware,
-     * framebuffer, and recovery regions can never enter the allocator. */
-    la_ram_range_t usable[LA_RAM_RANGES];
-    size_t usable_count = 0;
-    paddr_t window_base = current_board ? current_board->ram_base
-                                        : PHYS_MEMORY_BASE;
-    paddr_t window_end = current_board ? current_board->ram_end
-                                       : PHYS_MEMORY_END;
-    for (size_t i = 0; i < discovered_count; i++) {
-        paddr_t base = discovered[i].base > window_base
-                           ? discovered[i].base : window_base;
-        paddr_t end = discovered[i].end < window_end
-                          ? discovered[i].end : window_end;
-        if (end > base) {
-            usable[usable_count].base = base;
-            usable[usable_count].end = end;
-            usable_count++;
-        }
-    }
-    if (!usable_count) {
-        printf("[FDT] RAM does not overlap board window, using fallback\n");
-        return;
-    }
-
-    memcpy(ram_ranges, usable, usable_count * sizeof(usable[0]));
-    ram_range_count = usable_count;
-
-    uint64_t total = 0;
-    for (size_t i = 0; i < ram_range_count; i++) {
-        total += ram_ranges[i].end - ram_ranges[i].base;
-        printf("[FDT] RAM range %lu: 0x%lx..0x%lx (%lu MiB)\n",
-               (unsigned long)i,
-               (unsigned long)ram_ranges[i].base,
-               (unsigned long)ram_ranges[i].end,
-               (unsigned long)((ram_ranges[i].end -
-                                ram_ranges[i].base) >> 20));
-    }
-    printf("[FDT] LoongArch total RAM: %lu MiB\n",
-           (unsigned long)(total >> 20));
+    for (size_t i = 0; i < range_count; i++)
+        printf("[FDT] RAM range %lu: 0x%lx..0x%lx\n", (unsigned long)i,
+            (unsigned long)ranges[i].base, (unsigned long)(ranges[i].base + ranges[i].size));
 }
-
 #endif
