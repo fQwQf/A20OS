@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Quartz64-Zero v0.1 schematic (20240428), minimal UART + 3.3V SD boot.
+ * Do not substitute Quartz64 A/B PMIC/GPIO regulator wiring. */
+/dts-v1/;
+#include "rk3566.dtsi"
+/ {
+    model = "PINE64 Quartz64-Zero";
+    compatible = "pine64,quartz64-zero", "rockchip,rk3566";
+    aliases { mmc0 = &sdmmc0; };
+    chosen { stdout-path = "serial2:1500000n8"; };
+    memory@0 { device_type = "memory"; reg = <0 0 0 0x40000000>; };
+    vcc3v3_sys: regulator-vcc3v3-sys {
+        compatible = "regulator-fixed";
+        regulator-name = "vcc3v3_sys";
+        regulator-min-microvolt = <3300000>;
+        regulator-max-microvolt = <3300000>;
+        regulator-always-on;
+        regulator-boot-on;
+    };
+};
+&sdmmc0 {
+    bus-width = <4>;
+    max-frequency = <25000000>;
+    disable-wp;
+    no-1-8-v;
+    no-mmc;
+    no-sdio;
+    vmmc-supply = <&vcc3v3_sys>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&sdmmc0_bus4 &sdmmc0_clk &sdmmc0_cmd &sdmmc0_det>;
+    status = "okay";
+};
+&uart2 { status = "okay"; };

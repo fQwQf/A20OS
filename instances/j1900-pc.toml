@@ -1,0 +1,30 @@
+# First-stage kernel bring-up, not a hardware-validated desktop image.
+# J1900 is a CPU family, not a motherboard: COM1, firmware bitness and NIC
+# model still have to be inventoried on the actual industrial PC.
+name = "j1900-pc"
+description = "Intel J1900 industrial PC, single-core GRUB USB kernel bring-up"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[package]
+kind = "grub-iso"
+variant = "rescue-usb"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_timeout = "180s"
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "[INIT] System ready (bringup, no userspace)"]
+# There is no shell in this stage. Do not inject shell commands or require
+# their echo as evidence of execution.
+boot_media = ["build/x86_64-pc/a20os-rescue.iso"]
+media_device = "/dev/sdX"
+log = ".kernel-build/console/j1900-pc.log"

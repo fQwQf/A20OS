@@ -1,0 +1,42 @@
+# SG2002 single-hart S-mode bring-up, not a userspace image. No board run yet.
+name = "licheerv-nano-e"
+description = "LicheeRV Nano SG2002-E SD/UART bring-up with FAT/FIP image; no Ethernet driver"
+arch = "riscv64"
+board = "licheerv-nano"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+swap = false
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 0
+boot_timeout = "120s"
+# BRINGUP without RAMFS_USER checks allocator then shuts down, no shell.
+console_check = ["[FDT] RAM range", "System ready (bringup, no userspace)", "part ok", "System is going down for power-off NOW"]
+boot_media = ["build/licheerv-nano/a20os-licheerv-nano-sdcard.img"]
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv fdt_addr_r 0x82000000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} sg2002-licheerv-nano-b.dtb",
+    "fdt addr ${fdt_addr_r}",
+    "fdt print /memory@80000000",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Use prepare/package to build the shared SG2002 256 MiB SD/UART image. Mainline
+uses the Nano B DTB for common UART/MMC early bring-up; Ethernet, Wi-Fi, video
+and optional secondary RTOS are not enabled. scriptaddr is moved away from
+the A20OS Image. Original vendor E firmware with verified Ethernet may instead
+use the separate licheerv-nano-e-tftp instance. No physical run has occurred.
+See docs/platforms/licheerv-nano.md.
+"""

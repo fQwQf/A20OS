@@ -1,0 +1,42 @@
+name = "lichee-pi-zero"
+description = "Lichee Pi Zero Allwinner V3s ARMv7-A 64 MiB MMU single-core UART bring-up"
+arch = "arm32"
+board = "lichee-pi-zero"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+swap = false
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 0
+boot_timeout = "120s"
+console_check = ["[V3s] allocator RAM=", "System ready (bringup, no userspace)", "part ok", "[V3s] halted; remove external power"]
+boot_media = ["build/lichee-pi-zero/a20os-lichee-pi-zero-sdcard.img"]
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x42000000",
+    "setenv fdt_addr_r 0x41800000",
+    "fatload mmc 0:1 ${loadaddr} kernel.uimg",
+    "fatload mmc 0:1 ${fdt_addr_r} sun8i-v3s-licheepi-zero.dtb",
+    "bootm ${loadaddr} - ${fdt_addr_r}",
+]
+note = """The complete SD image contains mainline LicheePi_Zero SPL/U-Boot, matching DTB
+and a CRC-checked boot.scr. prepare builds the board firmware; package creates
+the FAT32 whole-card image. kernel.uimg is a legacy ARM uImage staged at
+0x42000000 and unpacked by bootm to ELF entry 0x40080000. It is not ARM64 Image
+or zImage; do not use booti/bootz/go. Shutdown halts until external power removal.
+Physical hardware validation is pending. See docs/platforms/lichee-pi-zero.md.
+"""
