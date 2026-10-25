@@ -23,6 +23,11 @@
 #define VPORT_IOCTL_SET_CONSOLE  0x9001
 /* arg: struct vport_stats* in user space. */
 #define VPORT_IOCTL_GET_STATS    0x9002
+/* No argument: wait for the last accepted transmit frame to retire. */
+#define VPORT_IOCTL_DRAIN        0x9003
+/* No argument: succeeds only for the negotiated flow-controlled TTY binding.
+ * Older modules reject this request, allowing the kernel to retain the UART. */
+#define VPORT_IOCTL_CONSOLE_READY 0x9004
 
 struct vport_stats {
     uint32_t version;

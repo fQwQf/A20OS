@@ -11,6 +11,10 @@
 #include "proc/signal.h"
 #include "sys/usercopy.h"
 #include "core/ioctl.h"
+#include "core/bootargs.h"
+#include "drivers/core/driver_class.h"
+#include "drivers/core/driver_core.h"
+#include "drivers/char/virtio_console.h"
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
@@ -32,6 +36,11 @@ extern spinlock_t klog_console_lock;
 /* Bound interrupt-off time while allowing whole short records in one burst. */
 #define TTY_EMIT_CHUNK 256
 static mutex_t g_tty_write_lock = MUTEX_INIT;
+/* The reference is owned by g_tty_write_lock. Each operation additionally
+ * leases the current binding so unload cannot free its ops or DMA buffers. */
+static class_device_t *g_tty_bulk_console;
+static int g_tty_use_bulk_console;
+static int g_tty_bulk_ready;
 
 __attribute__((weak)) unsigned long arch_linux_ioctl_request(unsigned long req)
 {
@@ -272,6 +281,16 @@ void tty_console_init(void) {
     tty->kbmode = 0x01;    /* K_XLATE */
     tty->kdmode = 0x00;    /* KD_TEXT */
     tty->vt_process = 0;   /* VT_AUTO */
+    const char *args = bootargs_get();
+    const char option[] = "a20.console=vport0";
+    while (args && *args) {
+        while (*args == ' ' || *args == '\t') args++;
+        const char *word = args;
+        while (*args && *args != ' ' && *args != '\t') args++;
+        if ((size_t)(args - word) == sizeof(option) - 1 &&
+            !memcmp(word, option, sizeof(option) - 1))
+            g_tty_use_bulk_console = 1;
+    }
 }
 
 int tty_console_read(vfile_t *vf, char *buf, size_t count) {
@@ -343,11 +362,57 @@ static int tty_parse_mouse_mode(const char *buf, size_t count)
 
 int tty_console_write(vfile_t *vf, const char *buf, size_t count) {
     (void)vf;
+    if (!count) return 0;
     /* One owner for the entire userspace write. Kernel records use the same
      * console spinlock for each bounded burst, so they cannot splice bytes
      * into a short line. No PID lookup or pending per-task buffers are needed. */
     mutex_lock(&g_tty_write_lock);
     tty_parse_mouse_mode(buf, count);
+    if (g_tty_use_bulk_console) {
+        if (!g_tty_bulk_console)
+            g_tty_bulk_console = class_device_get_by_name("vport0");
+        const void *class_ops;
+        if (g_tty_bulk_console &&
+            !class_device_ops_begin(g_tty_bulk_console, DEV_CLASS_CHAR, &class_ops)) {
+            const char_dev_ops_t *ops = class_ops;
+            if (!g_tty_bulk_ready) {
+                /* A stale raw-port module can bind successfully but has no
+                 * MULTIPORT handshake. Verify the wire contract before ever
+                 * handing it terminal bytes. */
+                if (!ops->ioctl || ops->ioctl(g_tty_bulk_console->dev,
+                                             VPORT_IOCTL_CONSOLE_READY, NULL)) {
+                    class_device_call_end(g_tty_bulk_console);
+                    class_device_put(g_tty_bulk_console);
+                    g_tty_bulk_console = NULL;
+                    goto serial_console;
+                }
+                g_tty_bulk_ready = 1;
+            }
+            size_t sent = 0;
+            int error = -ENOSYS;
+            while (sent < count && ops->write) {
+                if (signal_task_has_unblocked(proc_current())) {
+                    error = -ERESTARTSYS;
+                    break;
+                }
+                int n = ops->write(g_tty_bulk_console->dev, buf + sent, count - sent);
+                if (n <= 0) { error = n; break; }
+                sent += (size_t)n;
+            }
+            class_device_call_end(g_tty_bulk_console);
+            mutex_unlock(&g_tty_write_lock);
+            /* A timeout may leave a DMA frame in flight. Never replay that
+             * frame onto the UART: only the device can retire its ownership. */
+            return sent ? (int)sent : error;
+        }
+        if (g_tty_bulk_console) {
+            class_device_put(g_tty_bulk_console);
+            g_tty_bulk_console = NULL;
+            g_tty_bulk_ready = 0;
+        }
+        /* Early boot or unplug: the serial console remains available. */
+    }
+serial_console:
     for (size_t i = 0; i < count; ) {
         size_t n = count - i;
         if (n > TTY_EMIT_CHUNK) {
@@ -407,11 +472,31 @@ int tty_console_flush(int queue) {
     if (queue < 0 || queue > 2) return -EINVAL;
     if (queue == 0 || queue == 2)
         for (unsigned n = 0; n < 4096 && uart_try_getc() >= 0; n++) {}
-    /* Console output is written synchronously; there is no device TX queue. */
     return 0;
 }
+
+static int tty_console_drain(void) {
+    int result = 0;
+    mutex_lock(&g_tty_write_lock);
+    const void *class_ops;
+    if (g_tty_bulk_console &&
+        !class_device_ops_begin(g_tty_bulk_console, DEV_CLASS_CHAR, &class_ops)) {
+        const char_dev_ops_t *ops = class_ops;
+        result = ops->ioctl ? ops->ioctl(g_tty_bulk_console->dev, VPORT_IOCTL_DRAIN, NULL) : -ENOTTY;
+        class_device_call_end(g_tty_bulk_console);
+    } else {
+        uart_flush();
+    }
+    mutex_unlock(&g_tty_write_lock);
+    return result;
+}
+
 int tty_console_set_termios(const ktty_termios_t *in, int action) {
     if (action < 0 || action > 2) return -EINVAL;
+    if (action) {
+        int result = tty_console_drain();
+        if (result) return result;
+    }
     if (action == 2) tty_console_flush(0);
     uint64_t flags = spin_lock_irqsave(&g_tty_settings_lock);
     g_dev_tty.termios = *in;
@@ -432,6 +517,10 @@ int tty_console_set_winsize(const ktty_winsize_t *in) {
 }
 
 int tty_console_ioctl(unsigned long req, void *arg) {
+    /* tcdrain passes the value 1, not a userspace pointer. A zero argument
+     * requests a break, which this virtual console does not implement. */
+    if (req == TCSBRK)
+        return (uintptr_t)arg ? tty_console_drain() : -EOPNOTSUPP;
     /* Value-passing requests (no pointer dereference): the argument is the
      * mode/VT number itself, so NULL is a legitimate value (K_RAW/KD_TEXT). */
     if (req == DEVFS_KDSKBMODE) {

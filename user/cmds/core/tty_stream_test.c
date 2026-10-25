@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <termios.h>
 
 int main(void)
 {
@@ -30,6 +31,7 @@ int main(void)
             !WIFEXITED(status) || WEXITSTATUS(status))
             return 1;
     }
+    if (tcdrain(1)) return 1;
     puts("TTY_STREAM: PASS");
     return 0;
 }

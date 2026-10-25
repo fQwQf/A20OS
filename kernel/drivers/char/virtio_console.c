@@ -13,18 +13,16 @@
  *   q1 transmit  guest -> host, port 0     (128 slots offered)
  *   q2 control receive, q3 control transmit (deliberately not set up)
  *
- * VIRTIO_CONSOLE_F_MULTIPORT is not negotiated, so the device keeps exactly
- * one port at id 0, serves it from q0/q1 with no control-virtq handshake, and
- * QEMU marks it guest_connected as soon as the driver sets DRIVER_OK.  That is
- * what lets this driver carry a console port on two virtqueues.  The limits
- * that follow are recorded in docs/status/current/drivers-implementation-status.md: no
- * port above 0, no multiport control protocol.
+ * The raw /dev/vport0 personality keeps the non-MULTIPORT port-0 contract.
+ * With a20.console=vport0, MULTIPORT control queues perform DEVICE_READY /
+ * PORT_READY / PORT_OPEN for physical port 1 (data queues 4/5), still exposed
+ * as logical vport0. QEMU's flow-controlled virtserialport reserves port zero
+ * for the legacy console, whose backend may discard bytes on EAGAIN.
  *
- * Receive is interrupt driven: the ISR drains the used ring into a byte ring
- * and mirrors the bytes into the console input path while console mirroring is
- * on.  Transmit is synchronous — one descriptor in flight, bounded wait for its
- * completion, never a hardware wait under the instance lock (see
- * docs/drivers/guide/lock-order.md).
+ * Receive is interrupt driven and feeds the existing console input discipline.
+ * Transmit has sixteen separately owned DMA slots. The selected bulk TTY
+ * accepts copied frames, waits for space without a spinlock, and exposes an
+ * explicit drain. Raw port clients retain synchronous write completion.
  */
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/virtio_transport.h"
@@ -44,6 +42,7 @@
 #include "core/sync.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+#include "proc/signal.h"
 #include "sys/usercopy.h"
 
 /* VIRTIO_ID_CONSOLE.  virtio-console and virtio-guest-agent share the id;
@@ -85,8 +84,11 @@
 
 #define VPORT_Q_RX               0U
 #define VPORT_Q_TX               1U
+#define VPORT_Q_CTRL_RX          2U
+#define VPORT_Q_CTRL_TX          3U
 #define VPORT_RX_SLOTS           8U
-#define VPORT_TX_SLOTS           1U
+#define VPORT_TX_SLOTS           16U
+#define VPORT_RING_SLOTS         16U
 #define VPORT_BUF_SIZE           4096U
 #define VPORT_RING_SIZE          4096U
 #define VPORT_TX_TIMEOUT_MS      2000U
@@ -108,7 +110,7 @@ typedef struct {
 typedef struct {
     uint16_t flags;
     uint16_t idx;
-    uint16_t ring[VPORT_RX_SLOTS];
+    uint16_t ring[VPORT_RING_SLOTS];
     uint16_t used_event;
 } vport_avail_t;
 
@@ -120,7 +122,7 @@ typedef struct {
 typedef struct {
     uint16_t flags;
     uint16_t idx;
-    vport_used_elem_t ring[VPORT_RX_SLOTS];
+    vport_used_elem_t ring[VPORT_RING_SLOTS];
     uint16_t avail_event;
 } vport_used_t;
 
@@ -141,16 +143,29 @@ typedef struct {
 } vport_tx_mem_t;
 
 typedef struct {
+    vport_desc_t desc[VPORT_RX_SLOTS] ALIGNED(64);
+    vport_avail_t avail ALIGNED(64);
+    vport_used_t used ALIGNED(64);
+    uint8_t buf[VPORT_RX_SLOTS][64] ALIGNED(64);
+} vport_ctrl_mem_t;
+
+typedef struct {
     virtio_transport_t vt;
     vport_rx_mem_t    *rx_mem;
     uint64_t           rx_dma;
     vport_tx_mem_t    *tx_mem;
     uint64_t           tx_dma;
+    vport_ctrl_mem_t  *ctrl_rx, *ctrl_tx;
+    uint64_t           ctrl_rx_dma, ctrl_tx_dma;
+    uint16_t           ctrl_last_used;
     /* Guards the byte ring, the console-mirror flag and state, both
      * last_used cursors and the counters.  Innermost lock: uart_receive_char()
      * takes the UART rx lock and flushes wake queues, so it is never called
      * with this held. */
     spinlock_t lock ALIGNED(64);
+    /* Serialize submit -> completion, including descriptor retirement. The
+     * instance spinlock must never cover a hardware wait. */
+    mutex_t tx_lock;
     uint8_t    ring[VPORT_RING_SIZE];
     uint32_t   head;
     uint32_t   tail;
@@ -161,20 +176,12 @@ typedef struct {
     uint32_t   rx_dropped;
     uint32_t   tx_bytes;
     uint32_t   tx_timeouts;
-    /* One descriptor and one buffer are shared by every writer, so this says
-     * whether the previous write's frame is still owned by the device.  Without
-     * it a second writer -- or a retry after a timeout -- overwrites
-     * tx_mem->buf[0] and desc[0] while the device is still reading them, and
-     * the frame on the wire becomes a splice of two writes.  Guarded by
-     * p->lock, and not cleared on the timeout path: the descriptor was already
-     * handed to the device, so only the device's own used.idx can retire it. */
-    uint8_t    tx_busy;
-    /* used.idx as it stood when tx_busy was raised: the frame in flight is
-     * retired exactly when used.idx stops equalling this.  Kept across a
-     * timeout so a later write can reap a completion that arrived after the
-     * deadline instead of writing over a frame the device may still be
-     * reading. */
-    uint16_t   tx_submitted_used;
+    /* tx_lock owns submission/retirement. Bits remain set after timeout or
+     * interruption until the device returns the corresponding descriptor. */
+    uint32_t   tx_busy;
+    uint8_t    console_output;
+    uint16_t   rx_queue, tx_queue;
+    uint8_t    port_id;
     uint16_t   rx_last_used;
     uint16_t   tx_last_used;
     int        console_mirror;
@@ -195,11 +202,6 @@ static inline uint64_t vport_rx_buf_pa(const vport_inst_t *p, unsigned slot)
 {
     return p->rx_dma + offsetof(vport_rx_mem_t, buf) +
            (uint64_t)slot * VPORT_BUF_SIZE;
-}
-
-static inline uint64_t vport_tx_buf_pa(const vport_inst_t *p)
-{
-    return p->tx_dma + offsetof(vport_tx_mem_t, buf);
 }
 
 static void vport_rx_post_all(vport_inst_t *p)
@@ -323,7 +325,7 @@ static void vport_rx_pump(vport_inst_t *p)
     spin_unlock_irqrestore(&p->lock, flags);
 
     if (repost)
-        p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_RX);
+        p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, p->rx_queue);
     vport_console_flush(p);
 }
 
@@ -380,6 +382,14 @@ static void vport_program_queue(vport_inst_t *p, uint32_t index,
 
 static void vport_free_dma(vport_inst_t *p)
 {
+    if (p->ctrl_rx) {
+        dma_free_coherent_aligned(p->ctrl_rx, sizeof(*p->ctrl_rx), p->ctrl_rx_dma);
+        p->ctrl_rx = NULL;
+    }
+    if (p->ctrl_tx) {
+        dma_free_coherent_aligned(p->ctrl_tx, sizeof(*p->ctrl_tx), p->ctrl_tx_dma);
+        p->ctrl_tx = NULL;
+    }
     if (p->tx_mem) {
         dma_free_coherent_aligned(p->tx_mem, sizeof(*p->tx_mem), p->tx_dma);
         p->tx_mem = NULL;
@@ -399,20 +409,113 @@ static void vport_fail(vport_inst_t *p, int irq_registered, int irq)
     p->vt.write32(&p->vt, VPORT_MMIO_STATUS,
                   p->vt.read32(&p->vt, VPORT_MMIO_STATUS) |
                   VPORT_STATUS_FAILED);
+    /* Control queues may already own descriptors when the handshake fails. */
+    p->vt.write32(&p->vt, VPORT_MMIO_STATUS, 0);
+    mb();
     vport_free_dma(p);
     memset(p, 0, sizeof(*p));
 }
 
-static int vport_is_management(void)
+static int vport_boot_option(const char *option)
 {
     const char *p = bootargs_get();
+    size_t length = strlen(option);
     while (p && *p) {
         while (*p == ' ' || *p == '\t' || *p == '\n') p++;
         const char *start = p;
         while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
-        if (p - start == 9 && !memcmp(start, "a20.vmd=1", 9)) return 1;
+        if ((size_t)(p - start) == length && !memcmp(start, option, length)) return 1;
     }
     return 0;
+}
+static int vport_is_management(void)
+{
+    return vport_boot_option("a20.vmd=1");
+}
+
+/* A flow-controlled virtserialport needs the MULTIPORT control handshake
+ * even when only one port is exposed. QEMU's virtconsole intentionally drops
+ * bytes on a short backend write, so it cannot be the reliable bulk terminal. */
+static int vport_control_setup(vport_inst_t *p, device_t *dev)
+{
+    p->ctrl_rx = dma_alloc_coherent_aligned(dev, sizeof(*p->ctrl_rx), PAGE_SIZE, &p->ctrl_rx_dma);
+    p->ctrl_tx = dma_alloc_coherent_aligned(dev, sizeof(*p->ctrl_tx), PAGE_SIZE, &p->ctrl_tx_dma);
+    if (!p->ctrl_rx || !p->ctrl_tx) return -ENOMEM;
+    memset(p->ctrl_rx, 0, sizeof(*p->ctrl_rx));
+    memset(p->ctrl_tx, 0, sizeof(*p->ctrl_tx));
+    p->ctrl_rx->avail.flags = p->ctrl_tx->avail.flags = 1;
+    if (vport_setup_queue(p, VPORT_Q_CTRL_RX, VPORT_RX_SLOTS) ||
+        vport_setup_queue(p, VPORT_Q_CTRL_TX, 1)) return -ENODEV;
+    vport_program_queue(p, VPORT_Q_CTRL_RX,
+        p->ctrl_rx_dma + offsetof(vport_ctrl_mem_t, desc),
+        p->ctrl_rx_dma + offsetof(vport_ctrl_mem_t, avail),
+        p->ctrl_rx_dma + offsetof(vport_ctrl_mem_t, used));
+    vport_program_queue(p, VPORT_Q_CTRL_TX,
+        p->ctrl_tx_dma + offsetof(vport_ctrl_mem_t, desc),
+        p->ctrl_tx_dma + offsetof(vport_ctrl_mem_t, avail),
+        p->ctrl_tx_dma + offsetof(vport_ctrl_mem_t, used));
+    for (unsigned i = 0; i < VPORT_RX_SLOTS; i++) {
+        p->ctrl_rx->desc[i] = (vport_desc_t){
+            .addr=p->ctrl_rx_dma + offsetof(vport_ctrl_mem_t, buf) + i * 64,
+            .len=64, .flags=VPORT_QD_F_WRITE};
+        p->ctrl_rx->avail.ring[i] = (uint16_t)i;
+    }
+    wmb();
+    p->ctrl_rx->avail.idx = VPORT_RX_SLOTS;
+    dma_sync_for_device(p->ctrl_rx, sizeof(*p->ctrl_rx));
+    dma_sync_for_device(p->ctrl_tx, sizeof(*p->ctrl_tx));
+    return 0;
+}
+
+static int vport_control_send(vport_inst_t *p, uint16_t event)
+{
+    /* Fixed physical port id, value=1; encode the wire packet bytewise. */
+    uint8_t packet[8] = {p->port_id,0,0,0,(uint8_t)event,(uint8_t)(event >> 8),1,0};
+    memcpy(p->ctrl_tx->buf[0], packet, sizeof(packet));
+    p->ctrl_tx->desc[0] = (vport_desc_t){
+        .addr=p->ctrl_tx_dma + offsetof(vport_ctrl_mem_t, buf), .len=8};
+    uint16_t before = p->ctrl_tx->used.idx;
+    p->ctrl_tx->avail.ring[0] = 0;
+    wmb();
+    p->ctrl_tx->avail.idx++;
+    dma_sync_for_device(p->ctrl_tx, sizeof(*p->ctrl_tx));
+    p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_CTRL_TX);
+    uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
+    do {
+        dma_sync_for_cpu(&p->ctrl_tx->used, sizeof(p->ctrl_tx->used));
+        if (p->ctrl_tx->used.idx != before) return 0;
+        proc_yield();
+    } while (clock_get_ticks() < deadline);
+    return -ETIMEDOUT;
+}
+
+static int vport_control_wait(vport_inst_t *p, uint16_t event)
+{
+    uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
+    do {
+        dma_sync_for_cpu(p->ctrl_rx, sizeof(*p->ctrl_rx));
+        uint16_t used = p->ctrl_rx->used.idx;
+        if ((uint16_t)(used - p->ctrl_last_used) > VPORT_RX_SLOTS) return -EIO;
+        rmb();
+        int found = 0;
+        while (p->ctrl_last_used != used) {
+            vport_used_elem_t elem = p->ctrl_rx->used.ring[p->ctrl_last_used % VPORT_RX_SLOTS];
+            if (elem.id >= VPORT_RX_SLOTS || elem.len < 8 || elem.len > 64) return -EIO;
+            const uint8_t *packet = p->ctrl_rx->buf[elem.id];
+            unsigned type = packet[4] | (unsigned)packet[5] << 8;
+            if (packet[0] == p->port_id && !packet[1] && !packet[2] && !packet[3] &&
+                type == event && packet[6] == 1 && packet[7] == 0) found = 1;
+            p->ctrl_rx->avail.ring[p->ctrl_rx->avail.idx % VPORT_RX_SLOTS] = (uint16_t)elem.id;
+            wmb();
+            p->ctrl_rx->avail.idx++;
+            p->ctrl_last_used++;
+        }
+        dma_sync_for_device(&p->ctrl_rx->avail, sizeof(p->ctrl_rx->avail));
+        p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_CTRL_RX);
+        if (found) return 0;
+        proc_yield();
+    } while (clock_get_ticks() < deadline);
+    return -ETIMEDOUT;
 }
 
 static int vport_probe(device_t *dev)
@@ -427,12 +530,17 @@ static int vport_probe(device_t *dev)
     vport_inst_t *p = &g_vport;
     memset(p, 0, sizeof(*p));
     spin_init(&p->lock);
+    mutex_init(&p->tx_lock);
     p->vt = vt;
     p->console_mirror = !vport_is_management();
+    p->console_output = p->console_mirror && vport_boot_option("a20.console=vport0");
+    p->port_id = p->console_output ? 1 : 0;
+    p->rx_queue = p->console_output ? 4 : VPORT_Q_RX;
+    p->tx_queue = p->console_output ? 5 : VPORT_Q_TX;
     p->irq = vt.irq;
 
-    /* Feature negotiation: VIRTIO_F_VERSION_1 only, so the queues are the
-     * modern split rings described at the top of this file. */
+    /* Negotiate modern split rings and, for the bulk terminal only, the
+     * control protocol needed by a flow-controlled host serial port. */
     p->vt.write32(&p->vt, VPORT_MMIO_STATUS, 0);
     mb();
     uint32_t status = VPORT_STATUS_ACK | VPORT_STATUS_DRIVER;
@@ -448,7 +556,13 @@ static int vport_probe(device_t *dev)
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES_SEL, 1);
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES, VPORT_F_VERSION_1);
     p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES_SEL, 0);
-    p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES, 0);
+    p->vt.write32(&p->vt, VPORT_MMIO_DEV_FEATURES_SEL, 0);
+    uint32_t features_lo = p->vt.read32(&p->vt, VPORT_MMIO_DEV_FEATURES);
+    if (p->console_output && !(features_lo & 2U)) {
+        vport_fail(p, 0, -1);
+        return -EOPNOTSUPP;
+    }
+    p->vt.write32(&p->vt, VPORT_MMIO_DRV_FEATURES, p->console_output ? 2U : 0U);
     mb();
 
     status |= VPORT_STATUS_FEATURES_OK;
@@ -473,22 +587,30 @@ static int vport_probe(device_t *dev)
         return -ENOMEM;
     }
     memset(p->tx_mem, 0, sizeof(*p->tx_mem));
+    /* TX is retired by writers/drain. Completion IRQs for every short TTY
+     * write add no information, while RX still needs prompt IRQ delivery. */
+    p->tx_mem->avail.flags = 1; /* VIRTQ_AVAIL_F_NO_INTERRUPT */
     dma_sync_for_device(p->rx_mem, sizeof(*p->rx_mem));
     dma_sync_for_device(p->tx_mem, sizeof(*p->tx_mem));
 
-    if (vport_setup_queue(p, VPORT_Q_RX, VPORT_RX_SLOTS) < 0 ||
-        vport_setup_queue(p, VPORT_Q_TX, VPORT_TX_SLOTS) < 0) {
+    if (vport_setup_queue(p, p->rx_queue, VPORT_RX_SLOTS) < 0 ||
+        vport_setup_queue(p, p->tx_queue, VPORT_TX_SLOTS) < 0) {
         vport_fail(p, 0, -1);
         return -ENODEV;
     }
-    vport_program_queue(p, VPORT_Q_RX,
+    vport_program_queue(p, p->rx_queue,
                         p->rx_dma + offsetof(vport_rx_mem_t, desc),
                         p->rx_dma + offsetof(vport_rx_mem_t, avail),
                         p->rx_dma + offsetof(vport_rx_mem_t, used));
-    vport_program_queue(p, VPORT_Q_TX,
+    vport_program_queue(p, p->tx_queue,
                         p->tx_dma + offsetof(vport_tx_mem_t, desc),
                         p->tx_dma + offsetof(vport_tx_mem_t, avail),
                         p->tx_dma + offsetof(vport_tx_mem_t, used));
+
+    if (p->console_output) {
+        int error = vport_control_setup(p, dev);
+        if (error) { vport_fail(p, 0, -1); return error; }
+    }
 
     int irq_registered = 0;
     if (p->vt.irq >= 0) {
@@ -521,7 +643,24 @@ static int vport_probe(device_t *dev)
     mb();
 
     vport_rx_post_all(p);
-    p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_RX);
+    p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, p->rx_queue);
+
+    if (p->console_output) {
+        p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_CTRL_RX);
+        int error = vport_control_send(p, 0); /* DEVICE_READY */
+        if (!error) error = vport_control_wait(p, 1); /* PORT_ADD */
+        if (!error) error = vport_control_send(p, 3); /* PORT_READY */
+        if (!error) error = vport_control_wait(p, 6); /* host PORT_OPEN */
+        if (!error) error = vport_control_send(p, 6); /* guest PORT_OPEN */
+        if (error) {
+            p->valid = 0;
+            vport_fail(p, irq_registered, p->irq);
+            dev->drv_priv = NULL;
+            return error;
+        }
+        kinfo("[VPORT] bulk TTY ready (flow-controlled port 1, %u TX slots)\n",
+              VPORT_TX_SLOTS);
+    }
 
     kinfo("[VPORT] virtio-console port 0 ready (irq=%d, /dev/vport0)\n",
           p->vt.irq);
@@ -575,99 +714,97 @@ static int vport_class_read(device_t *dev, void *buf, size_t count)
     return n ? (int)n : -EAGAIN;
 }
 
+/* Called with the instance lock and tx_lock held. Device-returned ids are
+ * validated before indexing the DMA allocation. Completion, rather than a
+ * timeout or syscall return, is the only transfer of buffer ownership. */
+static int vport_tx_reap_locked(vport_inst_t *p)
+{
+    dma_sync_for_cpu(&p->tx_mem->used, sizeof(p->tx_mem->used));
+    uint16_t used = p->tx_mem->used.idx;
+    if ((uint16_t)(used - p->tx_last_used) > VPORT_TX_SLOTS) return -EIO;
+    rmb();
+    while (p->tx_last_used != used) {
+        uint32_t id = p->tx_mem->used.ring[p->tx_last_used % VPORT_TX_SLOTS].id;
+        if (id >= VPORT_TX_SLOTS || !(p->tx_busy & (1U << id))) return -EIO;
+        p->tx_bytes += p->tx_mem->desc[id].len;
+        p->tx_busy &= ~(1U << id);
+        p->tx_last_used++;
+    }
+    return 0;
+}
+
+static int vport_tx_wait(vport_inst_t *p, int all, int interruptible)
+{
+    uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
+    unsigned spins = 0;
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&p->lock);
+        int error = vport_tx_reap_locked(p);
+        int ready = all ? !p->tx_busy : p->tx_busy != (1U << VPORT_TX_SLOTS) - 1;
+        spin_unlock_irqrestore(&p->lock, flags);
+        if (error || ready) return error;
+        if (++spins < 256) {
+            __asm__ volatile("" ::: "memory");
+            continue;
+        }
+        spins = 0;
+        if (interruptible && signal_task_has_unblocked(proc_current()))
+            return -ERESTARTSYS;
+        if (clock_get_ticks() >= deadline) break;
+        proc_yield();
+    }
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    p->tx_timeouts++;
+    spin_unlock_irqrestore(&p->lock, flags);
+    return -ETIMEDOUT;
+}
+
+static int vport_write_locked(device_t *dev, const void *buf, size_t count)
+{
+    vport_inst_t *p = dev ? dev->drv_priv : NULL;
+    if (!p || !p->valid || !buf || !count) return -EINVAL;
+    int error = vport_tx_wait(p, 0, 1);
+    if (error) return error;
+    size_t len = count > VPORT_BUF_SIZE ? VPORT_BUF_SIZE : count;
+    uint64_t flags = spin_lock_irqsave(&p->lock);
+    unsigned slot = (unsigned)__builtin_ctz(~p->tx_busy & ((1U << VPORT_TX_SLOTS) - 1));
+    p->tx_busy |= 1U << slot;
+    memcpy(p->tx_mem->buf[slot], buf, len);
+    dma_sync_for_device(p->tx_mem->buf[slot], len);
+    p->tx_mem->desc[slot].addr = p->tx_dma + offsetof(vport_tx_mem_t, buf) +
+                               (uint64_t)slot * VPORT_BUF_SIZE;
+    p->tx_mem->desc[slot].len = (uint32_t)len;
+    p->tx_mem->desc[slot].flags = 0;
+    p->tx_mem->desc[slot].next = 0;
+    dma_sync_for_device(&p->tx_mem->desc[slot], sizeof(p->tx_mem->desc[slot]));
+    uint16_t idx = p->tx_mem->avail.idx;
+    p->tx_mem->avail.ring[idx % VPORT_TX_SLOTS] = (uint16_t)slot;
+    wmb();
+    p->tx_mem->avail.idx = (uint16_t)(idx + 1);
+    dma_sync_for_device(&p->tx_mem->avail, sizeof(p->tx_mem->avail));
+    spin_unlock_irqrestore(&p->lock, flags);
+    /* The device may already be draining this queue. Respect its split-ring
+     * notification suppression after publishing the new index. The full
+     * barrier pairs with the device's enable-and-recheck protocol. */
+    mb();
+    dma_sync_for_cpu(&p->tx_mem->used, sizeof(p->tx_mem->used));
+    if (!(p->tx_mem->used.flags & 1U)) /* VIRTQ_USED_F_NO_NOTIFY */
+        p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, p->tx_queue);
+    /* Console writes accept copied frames and apply backpressure only when
+     * all slots are device-owned. Raw vport clients remain synchronous. */
+    if (p->console_output) return (int)len;
+    error = vport_tx_wait(p, 1, 0);
+    return error ? error : (int)len;
+}
+
 static int vport_class_write(device_t *dev, const void *buf, size_t count)
 {
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
-    if (!p || !p->valid || !buf || !count)
-        return -EINVAL;
-
-    size_t len = count > VPORT_BUF_SIZE ? VPORT_BUF_SIZE : count;
-    uint16_t before;
-
-    {
-        uint64_t flags = spin_lock_irqsave(&p->lock);
-        if (!p->valid) {
-            spin_unlock_irqrestore(&p->lock, flags);
-            return -ENODEV;
-        }
-
-        /* A frame left in flight by a write that timed out is still owned by
-         * the device.  Retire it here if it has since completed, so this write
-         * does not splice onto it; if it has not, refuse rather than overwrite
-         * a buffer the device may still be reading.  The used ring is
-         * authoritative either way -- it, and not the timeout, is what actually
-         * frees the descriptor. */
-        if (p->tx_busy) {
-            dma_sync_for_cpu(&p->tx_mem->used, sizeof(p->tx_mem->used));
-            if (p->tx_mem->used.idx == p->tx_submitted_used) {
-                spin_unlock_irqrestore(&p->lock, flags);
-                return -EBUSY;
-            }
-            p->tx_busy = 0;
-        }
-
-        p->tx_busy = 1;
-        memcpy(p->tx_mem->buf[0], buf, len);
-        dma_sync_for_device(p->tx_mem->buf[0], len);
-
-        p->tx_mem->desc[0].addr = vport_tx_buf_pa(p);
-        p->tx_mem->desc[0].len = (uint32_t)len;
-        p->tx_mem->desc[0].flags = 0;
-        p->tx_mem->desc[0].next = 0;
-        dma_sync_for_device(p->tx_mem->desc, sizeof(p->tx_mem->desc));
-
-        uint16_t idx = p->tx_mem->avail.idx;
-        p->tx_mem->avail.ring[idx % VPORT_TX_SLOTS] = 0;
-        p->tx_mem->avail.idx = (uint16_t)(idx + 1);
-        before = p->tx_mem->used.idx;
-        p->tx_submitted_used = before;
-        wmb();
-        dma_sync_for_device(&p->tx_mem->avail, sizeof(p->tx_mem->avail));
-        spin_unlock_irqrestore(&p->lock, flags);
-    }
-    p->vt.write32(&p->vt, VPORT_MMIO_QUEUE_NOTIFY, VPORT_Q_TX);
-
-    /* Bounded wait for the single in-flight descriptor.  The instance lock is
-     * deliberately dropped first: lock-order.md forbids waiting for hardware
-     * under a spinlock. */
-    uint64_t deadline = clock_get_ticks() + MS_TO_TICKS(VPORT_TX_TIMEOUT_MS);
-    for (;;) {
-        dma_sync_for_cpu(&p->tx_mem->used, sizeof(p->tx_mem->used));
-        uint16_t used_idx = p->tx_mem->used.idx;
-        if (used_idx != before) {
-            /* The used element retires the descriptor; its length field says
-             * nothing about this queue.  do_flush_queued_data() in QEMU's
-             * hw/char/virtio-serial-bus.c pushes every completed guest->host
-             * buffer with virtqueue_push(vq, elem, 0), so the reported length
-             * is always 0 while the bytes really did go to the host (the
-             * receive direction is different: write_to_port() pushes the
-             * length it copied, which is why vport_rx_pump() can use it).
-             * Clamping len to it turned every write() into a zero-length
-             * write.  The queue holds descriptor 0 and nothing else, so the
-             * bytes delivered are exactly the len published above. */
-            uint64_t flags = spin_lock_irqsave(&p->lock);
-            p->tx_bytes += (uint32_t)len;
-            p->tx_last_used = used_idx;
-            /* The device has consumed the frame: the shared descriptor and
-             * buffer are free for the next writer. */
-            p->tx_busy = 0;
-            spin_unlock_irqrestore(&p->lock, flags);
-            return (int)len;
-        }
-        if (clock_get_ticks() >= deadline)
-            break;
-        proc_yield();
-    }
-
-    uint64_t flags = spin_lock_irqsave(&p->lock);
-    p->tx_timeouts++;
-    /* tx_busy deliberately stays set.  The descriptor was already published in
-     * avail, so clearing it here is what let the next write overwrite buf[0]
-     * and desc[0] while the device was still reading them -- the frame on the
-     * wire came out spliced.  Leaving it set makes this frame in flight until
-     * the used ring retires it, which the next write reaps. */
-    spin_unlock_irqrestore(&p->lock, flags);
-    return -ETIMEDOUT;
+    if (!p) return -ENODEV;
+    mutex_lock(&p->tx_lock);
+    int n = vport_write_locked(dev, buf, count);
+    mutex_unlock(&p->tx_lock);
+    return n;
 }
 
 static int vport_class_poll(device_t *dev, short events)
@@ -688,6 +825,16 @@ static int vport_class_ioctl(device_t *dev, unsigned long req, void *arg)
     vport_inst_t *p = dev ? dev->drv_priv : NULL;
     if (!p || !p->valid)
         return -ENODEV;
+
+    if (req == VPORT_IOCTL_CONSOLE_READY)
+        return p->console_output && p->port_id == 1 ? 0 : -ENODEV;
+
+    if (req == VPORT_IOCTL_DRAIN) {
+        mutex_lock(&p->tx_lock);
+        int result = vport_tx_wait(p, 1, 1);
+        mutex_unlock(&p->tx_lock);
+        return result;
+    }
 
     /* The generic char adapter hands ioctl() the raw user pointer (see
      * docs/drivers/guide/device-classes.md), so this driver does its own
