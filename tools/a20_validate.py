@@ -132,6 +132,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
             e.append("machine.console=virtio requires an x86_64 QEMU headless world instance")
         if k.driver_deployment == "embedded":
             e.append("machine.console=virtio requires generic driver deployment")
+        if r.drivers is not None and "virtio-console" not in r.drivers:
+            e.append("machine.console=virtio requires the virtio-console driver")
     if m.smp is not None:
         if m.smp < 1:
             e.append("machine.smp: must be >= 1")

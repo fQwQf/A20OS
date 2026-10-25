@@ -98,6 +98,7 @@ external_root = false
 ramfs_user = false           # 仅 loongarch64/riscv64（components/trim.toml 的 ramfs-user 矩阵）
 
 [machine]
+console = "serial"           # cli-x86_64 默认 virtio：带背压的批量 TTY；其余保持 serial
 smp = 1                      # >1 仅限已验证 QEMU 平台，否则需 allow_unverified_smp
 memory = "1G"                # QEMU -m 参数格式
 allow_unverified_smp = false

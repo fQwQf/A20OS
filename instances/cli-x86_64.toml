@@ -6,6 +6,7 @@ description = "Command-line workstation via apk world 'cli' (zsh, GNU coreutils,
 arch = "x86_64"
 
 [machine]
+console = "virtio"
 memory = "2G"
 smp = 2
 
