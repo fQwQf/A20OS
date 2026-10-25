@@ -601,7 +601,9 @@ static int fw_cfg_read_file(const char *name, char *out, size_t outsz) {
     return -1;
 }
 
-static char g_bootargs[256];
+/* Copied by both boot entry paths before clearing BSS. QEMU may place the
+ * Multiboot string directly after the loaded image, inside our BSS range. */
+__attribute__((section(".data"))) char g_bootargs[256];
 
 #define MULTIBOOT_TAG_ACPI_OLD 14u
 
@@ -622,39 +624,13 @@ struct x86_mb_info {
 extern __attribute__((section(".data"))) volatile uint32_t g_mb_magic;
 extern __attribute__((section(".data"))) volatile uint32_t g_mb_info;
 
-/* Multiboot v1 passes the kernel command line as a physical address in the
- * info block (offset 16).  This is the only source of bootargs on real
- * hardware: GRUB hands the string over in the multiboot info whether it was
- * loaded by BIOS or by UEFI boot services, whereas fw_cfg is a QEMU device that
- * simply does not exist on a physical machine.  Reading only fw_cfg left every
- * a20.* knob unreachable on real x86_64. */
-static const char *multiboot_cmdline(void) {
-    if (g_mb_magic != 0x2BADB002u || !g_mb_info)
-        return NULL;
-    /* g_mb_info is physical (EBX) and cannot hold a direct-mapped address: it is
-     * a uint32_t and PAGE_OFFSET does not fit in 32 bits.  So every dereference
-     * adds PAGE_OFFSET itself, as x86_ram_detect() does; a raw read works only
-     * because entry.S identity-maps the first gigabyte. */
-    const struct x86_mb_info *mi =
-        (const void *)(PAGE_OFFSET + (uintptr_t)g_mb_info);
-    if (!mi->cmdline)
-        return NULL;
-    return (const char *)(PAGE_OFFSET + (uintptr_t)mi->cmdline);
-}
-
 const char *firmware_bootargs(void) {
     static int mb_probed;
     if (!mb_probed) {
         mb_probed = 1;
-        /* Do this before anything asks about ACPI: the RSDP is what makes MCFG,
-         * MADT and the rest reachable, and on UEFI there is nowhere else to look
-         * for it. */
-        const char *mb = multiboot_cmdline();
-        if (mb) {
-            size_t i = 0;
-            for (; i + 1 < sizeof(g_bootargs) && mb[i]; i++)
-                g_bootargs[i] = mb[i];
-            g_bootargs[i] = '\0';
+        /* Boot assembly already copied Multiboot text into kernel-owned data.
+         * Report it once; fw_cfg remains the fallback when no text was given. */
+        if (g_bootargs[0]) {
             printf("[BOOTARGS] multiboot cmdline='%s'\n", g_bootargs);
         }
     }

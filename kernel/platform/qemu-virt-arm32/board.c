@@ -5,6 +5,14 @@
 #include "core/cpu.h"
 #include "core/timer.h"
 #include "core/smp.h"
+#include "core/bootargs.h"
+
+/* A strong board hook must override core/bootargs.c's empty weak default.
+ * Physical boards may instead parse and reserve their own firmware DTB. */
+extern const char *arm32_fdt_bootargs_get(void);
+const char *arch_bootargs_get(void) {
+    return arm32_fdt_bootargs_get();
+}
 
 #if CONFIG_NR_CPUS > 8
 #error "ARM32 QEMU virt SMP uses GICv2 and supports at most 8 CPUs"

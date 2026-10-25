@@ -464,8 +464,8 @@ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
         l2[i] = 0;
     }
     if (count && pt_table_empty(l2, ARM32_L2_ENTRIES)) {
-        pt_free_internal(l2, 0);
         mm->pgdir[idx1] = 0;
+        pt_free_internal(l2, 0);
     }
     return count;
 }
