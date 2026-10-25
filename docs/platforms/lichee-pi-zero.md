@@ -14,6 +14,7 @@ A20OS 的 `lichee-pi-zero` 实例面向搭载 Allwinner V3s、64 MiB DDR2 的原
 | 关机 / 重启 | 关机输出标记后停机，需要外部断电；重启通过 V3s watchdog 请求复位。两者均待实机验证。 |
 | SD / MMC0 | DT 的 `allwinner,sun7i-a20-mmc` 节点接入通用 `sunxi-mmc` PIO 块驱动；SDSC/SDHC/SDXC、512 字节扇区、单块读写和 flush；1-bit / 400 kHz。实机未验证；SD 不作为默认根文件系统，串口 shell 使用独立 RAMFS 实例。 |
 | 网络 / USB / 显示 | 尚无 EMAC、USB、显示及摄像头驱动；不提供网络登录。 |
+| 模拟音频 | 内部 DAC/FIFO/模拟 codec 的 `sunxi-codec` DMA 播放实现，48 kHz、双声道 S16_LE；裸板默认关闭，仅明确连接的 Dock/外接耳机拓扑可启用；未实机验证。 |
 
 默认 `[kernel].bringup=true`、关闭 swap、不创建用户态。验收串口必须包含内存范围、`System ready (bringup, no userspace)`、`part ok` 和停机标记；这些字符串同时出现也只证明对应一次运行达到验收点。
 
@@ -49,7 +50,7 @@ echo hello > /tmp/hello
 停机标记，需要移除外部电源。Ethernet/SSH、显示、音频均未因本 shell 实例启用；
 ARM32 已保存 trap、调度切换和信号帧的 VFP 上下文，父子进程寄存器隔离探针已通过。
 64 MiB QEMU virt 已连续 10 轮通过每轮 40 次顺序 fork/exec、浮点隔离、抢占、空闲唤醒、
-文件操作和正常关机。该配置提供 RAM 串口 shell；V3s 外设仍待实机验收，显示和音频驱动尚未实现。
+文件操作和正常关机。该配置提供 RAM 串口 shell；V3s 外设仍待实机验收，原生显示控制器驱动尚未实现。
 
 主机回归使用 **QEMU virt，而非模拟 V3s 外设**，检查 ARM32 Linux ABI 的连续 exec/
 wait、休眠唤醒、subshell、文件重定向与正常关机：
@@ -190,6 +191,40 @@ python3 -m unittest tools.tests.test_sunxi_mmc
 ASan/UBSan fixtures 检查 SDHC/SDSC 读写、容量/地址边界、写保护、无卡、CRC/FIFO/
 clock/power/状态超时、分配失败及 probe/remove 清理。实际管脚时序、卡片兼容性、
 供电和持久性仍待真机验证。
+
+## 可选音频与显示交接
+
+裸 Lichee Pi Zero 没有板载耳机插座；V3s 内部 codec 的存在不等于已连接输出。
+板级代码只在固件根节点包含 `licheepi,licheepi-zero-dock` compatible，或显式
+布尔属性 `a20,headphone-connected` 时准备音频；后者是 A20 板级接线声明，
+只应在已确认 DAC/耳机线路及供电时添加。两种情况还必须提供 enabled 的
+`allwinner,sun8i-v3s-codec`、模拟 codec、CCU 和 DMA 节点及真实 IRQ。
+默认固件不增加该声明，也不启用虚假的耳机设备。
+
+驱动由内部 DAC FIFO 和 sun6i 风格 DMA 组成，固定 48 kHz stereo S16_LE，
+DMA channel 0 独占，使用 DRQ15、32 KiB 环形缓冲。写入有背压，支持尾部排空，
+欠载或无法可靠判断已消费的周期返回错误；停止超时时保留仍可能被 DMA 使用的内存。
+不支持录音、混音、HDMI 或自动切换采样率。板级时钟配置仅修改音频和 DMA 相关位，
+拒绝接管不匹配的活跃音频 PLL。明确连接的设备可通过现有 `/dev/audioN` 接口播放。
+
+默认 shell 镜像不含播放器；验证外接音频时，可在现有 shell 构建/打包命令末尾添加
+`-- RAMFS_MEDIA=1`，将已有 `audioplay` 和 `videoplay` 一并嵌入。
+这些命令仍须使用与实际 Dock/接线匹配的 DTB；不能只改布尔属性就代替供电、引脚和线路。
+进入 shell 后可运行 `audioplay --tone 440 --duration 1000`。
+`python3 -m unittest tools.tests.test_sunxi_audio` 检查生产驱动的 codec、DMA、背压、
+欠载和错误清理；测试不代表 Dock 电气输出已经验收。
+
+显示侧可消费固件提供的标准 DT simple-framebuffer，接入已有 GPU/fbdev；
+其宽高、stride、格式、显存预留均来自真实交接。ARM32 对 RAM 帧缓冲还保留其
+覆盖的完整 1 MiB section，并统一内核别名与用户映射属性；无法安全处理的映射拒绝接管。
+目前本板固件配置没有初始化具体 LCD，A20 也没有 V3s TCON/DE2 原生驱动。
+LCD 面板型号、RGB 时序、背光和复位接线确定前，默认配置仍为串口输出。
+
+实现依据为 [Linux v6.17 V3s codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun4i-codec.c)、
+[模拟 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun8i-codec-analog.c)、
+[V3s CCU](https://github.com/torvalds/linux/blob/v6.17/drivers/clk/sunxi-ng/ccu-sun8i-v3s.c)
+和 [DMA](https://github.com/torvalds/linux/blob/v6.17/drivers/dma/sun6i-dma.c)。
+公开实现用于核对寄存器和协议；A20 内核驱动为独立实现。
 
 ## 硬件与协议依据
 

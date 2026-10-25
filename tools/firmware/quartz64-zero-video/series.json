@@ -1,0 +1,65 @@
+[
+  {
+    "file": "0001.patch",
+    "patchwork_id": 2273126,
+    "subject": "[1/9] video: rockchip: Add VOP2 support",
+    "sha256": "5a2bf06690ab134011d12813325cd1eb27b9b486b3dc1e297dad338858ba5319",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/f8435edb9a55111d17b517bac0762ea15397a8a5.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0002.patch",
+    "patchwork_id": 2273127,
+    "subject": "[2/9] arm: dts: rockchip: rk356x: Prerelocate VOP in U-Boot proper",
+    "sha256": "da0fa94b9fc66c1b298915d133abddf150dee60e3ba010706613c91b868a288b",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/fc3b0e2aebaa76bc1dcd2d0d57fe84c6890382aa.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0003.patch",
+    "patchwork_id": 2273128,
+    "subject": "[3/9] video: rockchip: Add HDMI support for RK3568",
+    "sha256": "ec95bb04d1ef8f7e8af000578b09b071a16ae65dd85575b4a184871fb5aec0ef",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/55bba8f7c9f56e8a4b27da56a3bd596265bf00bf.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0004.patch",
+    "patchwork_id": 2273132,
+    "subject": "[4/9] clk: rockchip: rk3568: Use assigned VPLL clock when possible",
+    "sha256": "59cbae002ff499785aa7d5e104420730d0ae49a9bf628cc5b90d34ed17c34adf",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/9867265ec3ac6caff5ca959cd13cdf1d75bf8081.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0005.patch",
+    "patchwork_id": 2273133,
+    "subject": "[5/9] video: rockchip: vop2: fix NULL register base in rk3568 probe",
+    "sha256": "5c2ce3aa9c10944b0bb0c8ff3c786bf99d92075178064c1d363554be09d6e8fc",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/e96a7d1ed33b5be368556ee0f9b3383df6e32efd.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0006.patch",
+    "patchwork_id": 2273129,
+    "subject": "[6/9] video: rockchip: rk3568: ungate the HDMI controller clocks",
+    "sha256": "a55ba141679ebbef844452ba32f64f311c84a517ac592a23bb31242e7bff94d3",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/acea05b10adc77f4207271b2f6ff7aa19c5765fa.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0007.patch",
+    "patchwork_id": 2273134,
+    "subject": "[7/9] video: rockchip: rk3568: bring up the HDMI PHY reference clock",
+    "sha256": "d8b8557017f5a61437958c308746b06d6dc23d1ab93e57613eb0392c0a0995c6",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/aaaf6d082cbe34acd779af040306e582b91c8360.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0008.patch",
+    "patchwork_id": 2273130,
+    "subject": "[8/9] video: rockchip: rk3568: power the HDMI PHY analog supplies",
+    "sha256": "f0e57f52dad2ad8522d5b42dd6a54322e661ba3e0ea9a1ab5234d9f20177acd7",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/112ed25a4d143e4f3aee97d5d2cc700c203dc05d.1784424101.git.daniel@makrotopia.org/"
+  },
+  {
+    "file": "0009.patch",
+    "patchwork_id": 2273131,
+    "subject": "[9/9] configs: nanopi-r5c: enable HDMI video output",
+    "sha256": "22c2fa5e357e49a551c9eeb136e6714224562c435d06fa1e4d8f6ca742041cb0",
+    "url": "https://patchwork.ozlabs.org/project/uboot/patch/5f0e4fc51c9ec9b6662f3471f7c86763deb28a03.1784424101.git.daniel@makrotopia.org/"
+  }
+]

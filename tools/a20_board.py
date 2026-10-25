@@ -19,6 +19,13 @@ from a20_registry import FlashBackend, RegistryError, load_flash_backends
 FLASH_TARGET_REACHABLE: Final = frozenset({"flash-xuanwu-openocd"})
 
 
+def firmware_make_args(inst: Instance) -> list[str]:
+    """Keep prepare and package on the firmware selected by the instance."""
+    if inst.board == "quartz64-zero" and inst.package.variant == "video":
+        return ["QUARTZ64_ZERO_VIDEO=1"]
+    return []
+
+
 def run_flash(inst: Instance, backends: tuple[FlashBackend, ...],
               make_args: list[str], dry_run: bool) -> None:
     """Build the firmware, then program the board with the declared backend."""
@@ -60,7 +67,8 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
                       "ox64": "ox64-sdcard"}.get(inst.board)
             if target is None:
                 raise A20Error(f"no SD-card packager for board {inst.board}")
-            extra = [*make_args, f"HANDOFF_INSTANCE={inst.source}"]
+            extra = [*firmware_make_args(inst), *make_args,
+                     f"HANDOFF_INSTANCE={inst.source}"]
             # The instance names its deployable artifact; keep recovery and
             # interactive images distinct while sharing the prepared firmware.
             image_variable = {"pine-a64": "PINE_A64_IMAGE",

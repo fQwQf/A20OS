@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Zero schematic v0.1, sheets 15, 23 and 25: RK817 LDO2/LDO7 feed HDMI. */
+#include <dt-bindings/soc/rockchip,vop2.h>
+/ {
+    hdmi-con {
+        compatible = "hdmi-connector";
+        type = "a";
+        port { zero_hdmi_con: endpoint { remote-endpoint = <&zero_hdmi_out>; }; };
+    };
+};
+&i2c0 {
+    status = "okay";
+    rk817: pmic@20 {
+        compatible = "rockchip,rk817";
+        reg = <0x20>;
+        #clock-cells = <1>;
+        regulators {
+            zero_hdmi_0v9: LDO_REG2 {
+                regulator-name = "vdda0v9_image";
+                regulator-min-microvolt = <900000>;
+                regulator-max-microvolt = <900000>;
+                regulator-always-on;
+                regulator-boot-on;
+            };
+            zero_hdmi_1v8: LDO_REG7 {
+                regulator-name = "vcca1v8_image";
+                regulator-min-microvolt = <1800000>;
+                regulator-max-microvolt = <1800000>;
+                regulator-always-on;
+                regulator-boot-on;
+            };
+        };
+    };
+};
+&hdmi {
+    avdd-0v9-supply = <&zero_hdmi_0v9>;
+    avdd-1v8-supply = <&zero_hdmi_1v8>;
+    status = "okay";
+};
+&hdmi_in { zero_hdmi_in: endpoint { remote-endpoint = <&zero_vp0_hdmi>; }; };
+&hdmi_out { zero_hdmi_out: endpoint { remote-endpoint = <&zero_hdmi_con>; }; };
+&vop {
+    assigned-clocks = <&cru DCLK_VOP0>, <&cru DCLK_VOP1>;
+    assigned-clock-parents = <&pmucru PLL_HPLL>, <&cru PLL_VPLL>;
+    status = "okay";
+};
+&vp0 {
+    zero_vp0_hdmi: endpoint@ROCKCHIP_VOP2_EP_HDMI0 {
+        reg = <ROCKCHIP_VOP2_EP_HDMI0>;
+        remote-endpoint = <&zero_hdmi_in>;
+    };
+};
+/* HDMI audio/I2S and RK817 codec are not enabled until PCM drivers exist. */

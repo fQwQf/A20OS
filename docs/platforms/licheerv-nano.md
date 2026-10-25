@@ -58,10 +58,27 @@ fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也�
 | 中断 | T-Head C900 PLIC，`0x70000000`；当前只覆盖电平中断路径 |
 | SD | `0x04310000`，IRQ 36，SDHCI/DWCMSHC；`sdhci` 块驱动提供 1-bit、3.3 V、最高 25 MHz 的 PIO 读写，尚未实机验证 |
 | 网络 | E/WE 有 100M 网口；U-Boot TFTP 能力不等于 A20OS 已有 SG2002 网卡驱动 |
+| 显示 | 板载 31-pin、2-lane MIPI DSI 接口；没有 HDMI。A20OS 尚无 SG2002 显示控制器、DSI PHY 和屏幕初始化驱动 |
+| 音频 | 板载模拟麦克风和可接小于 1 W 扬声器的功放；A20OS 尚无 SG2002 DAC/I2S/DMA 播放驱动 |
 
 UART 使用 32 位寄存器访问与 4 字节间距，保留 FSBL/U-Boot 设置的时钟、引脚和 115200 波特率。
 内核采用标准 RISC-V Image 头，由 U-Boot 以 `booti KERNEL - DTB` 启动；
 第三参数必须为独立 DTB，`-` 只表示不使用 initrd。
+
+### 显示和声音的设备条件
+
+Nano 的音频硬件确实存在，不能因为尚未编写驱动而归为“无对应设备”。
+其显示口需要具体的 MIPI 屏幕、转接板和排线；不同屏幕的 DCS 初始化、
+lane 时序、复位与背光供电不能由通用 framebuffer 推断。
+[厂商规格及接线入口](https://wiki.sipeed.com/hardware/en/lichee/RV_Nano/1_intro.html)
+列出了显示接口、板载功放和不同型号的配置。
+
+厂商公开的 [SG2002 板级设备树](https://github.com/sipeed/LicheeRV-Nano-Build/blob/main/build/boards/sg200x/sg2002_licheervnano_sd/dts_riscv/sg2002_licheervnano_sd.dts)
+及 [CVITEK 音频实现](https://github.com/sipeed/LicheeRV-Nano-Build/tree/main/linux_5.10/sound/soc/cvitek)
+可作为寄存器和拓扑依据。当前 A20OS 的 RISC-V DMA 同步钩子尚未实现
+C906 非一致性缓存维护；在补齐并验证这条路径前，不能把通用 DMA 分配接口
+直接当作可用的音频 DMA。现有 SD 驱动采用 PIO，不依赖该能力。
+默认实例继续提供串口 shell，不创建虚假的 `/dev/fb0` 或 PCM 播放设备。
 
 ## 从空卡准备完整产物
 

@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zlib
+from pine_a64 import firmware_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "build/quartz64-zero"
@@ -30,6 +31,17 @@ SOURCES = {
         "sha256": "33b6910dc737bfbbf4317ae0a48fe687335d6a08eee8fdfcb3a4adffc4c4a516",
     },
 }
+VIDEO_SOURCE = {
+    "version": "v2026.07", "commit": "ece349ade2973e220f524ce59e59711cc919263f",
+    "repository": "u-boot/u-boot",
+    "sha256": "c51a3c160ee8a7f4304e52498ecfe327789c9464a3681b5c5bd3c72b1f18a079",
+}
+VIDEO_FILES = ROOT / "tools/firmware/quartz64-zero-video"
+VIDEO_CONFIG = ("CONFIG_VIDEO=y", "CONFIG_VIDEO_ROCKCHIP=y",
+                "CONFIG_DISPLAY_ROCKCHIP_HDMI=y", "CONFIG_VIDEO_DT_SIMPLEFB=y",
+                "CONFIG_EVENT=y", "# CONFIG_VIDEO_REMOVE is not set",
+                "CONFIG_PMIC_RK8XX=y", "CONFIG_REGULATOR_RK8XX=y")
+
 SECTOR = 512
 FIRMWARE_OFFSET = 32768
 PARTITION_OFFSET = 16 * 1024 * 1024
@@ -184,6 +196,12 @@ def validate_firmware(firmware: Path) -> dict:
     for name in ("u-boot-rockchip.bin", DTB_NAME, "mkimage"):
         if manifest.get("files", {}).get(name) != artifact(firmware / name):
             raise PrepareError(f"modified firmware artifact: {name}")
+    if manifest.get("video_profile"):
+        config = firmware / "u-boot.config"
+        if manifest.get("files", {}).get("u-boot.config") != artifact(config):
+            raise PrepareError("modified video firmware configuration")
+        if not set(VIDEO_CONFIG).issubset(config.read_text().splitlines()):
+            raise PrepareError("video firmware lacks required scanout/handoff configuration")
     data = (firmware / "u-boot-rockchip.bin").read_bytes()
     # RK3568 SD v2 header, then FIT at configured SPL_PAD_TO (relative to 32KiB).
     if (data[:4] != b"RKNS" or len(data) <= 0x7f8000 or
@@ -195,22 +213,65 @@ def validate_firmware(firmware: Path) -> dict:
     return manifest
 
 
+def uboot_environment() -> dict[str, str]:
+    return firmware_environment(SOURCE_DATE_EPOCH)
+
+
 def prepare(args) -> None:
     make, gcc = tool("make"), tool(args.cross_compile + "gcc")
     for name in ("bison", "flex", "swig", "openssl"):
         tool(name)
-    env = dict(os.environ, SOURCE_DATE_EPOCH=SOURCE_DATE_EPOCH, TZ="UTC")
+    env = uboot_environment()
+    video = getattr(args, "video", False)
     work, out, cache = args.work.resolve(), args.out.resolve(), args.cache.resolve()
+    if video:
+        if work == (BASE / "firmware-build").resolve():
+            work = BASE / "firmware-build-video"
+        if out == (BASE / "firmware").resolve():
+            out = BASE / "firmware-video"
     work.mkdir(parents=True, exist_ok=True)
     pydeps = work / "python-deps"
     if not (pydeps / "elftools").is_dir():
         run([sys.executable, "-m", "pip", "install", "--target", str(pydeps),
              "--disable-pip-version-check", "pyelftools==0.32"])
     env["PYTHONPATH"] = str(pydeps) + os.pathsep + env.get("PYTHONPATH", "")
-    uboot = source_tree("u-boot", cache)
+    source_spec = VIDEO_SOURCE if video else SOURCES["u-boot"]
+    uboot = source_tree("u-boot", cache, source_spec)
+    if video:
+        for entry in json.loads((VIDEO_FILES / "series.json").read_text()):
+            patch = VIDEO_FILES / "patches" / entry["file"]
+            if sha256(patch) != entry["sha256"]:
+                raise PrepareError(f"modified video patch: {patch}")
+            run([tool("patch"), "--batch", "--fuzz=0", "-d", str(uboot),
+                 "-p1", "-i", str(patch)], env=env)
+        # This VOP2 pipeline programs native ARGB8888 without channel swap.
+        vop_source = uboot / "drivers/video/rockchip/rk_vop2.c"
+        vop_text = vop_source.read_text()
+        needle = "uc_priv->bpix = l2bpp;"
+        if vop_text.count(needle) != 1:
+            raise PrepareError("unexpected VOP2 format publication site")
+        vop_text = vop_text.replace(needle, needle + "\n\tuc_priv->format = VIDEO_X8R8G8B8;")
+        routing = "writel(reg, &overlay->port_sel);"
+        if vop_text.count(routing) != 1:
+            raise PrepareError("unexpected VOP2 plane routing site")
+        vop_text = vop_text.replace(routing, routing +
+            "\n\tif (port != 0) return -ENOSYS;\n\ta20_vop2_opaque(priv->regs);")
+        vop_text = vop_text.replace('#include "rk_vop2.h"',
+            '#include "rk_vop2.h"\n#include "a20_vop2_opaque.h"')
+        vop_source.write_text(vop_text)
+        shutil.copy2(VIDEO_FILES / "a20_vop2_opaque.h", vop_source.parent)
+        dt_dir = uboot / "dts/upstream/src/arm64/rockchip"
+        shutil.copy2(VIDEO_FILES / "rk3566-quartz64-zero-video.dtsi", dt_dir)
+        shutil.copy2(VIDEO_FILES / "a20_simplefb.c", uboot / "arch/arm/mach-rockchip/a20_simplefb.c")
+        with (uboot / "arch/arm/mach-rockchip/Makefile").open("a") as stream:
+            stream.write("\nifndef CONFIG_XPL_BUILD\nobj-y += a20_simplefb.o\nendif\n")
     for path in LOCAL_FIRMWARE.iterdir():
         target_dir = uboot / ("dts/upstream/src/arm64/rockchip" if path.suffix == ".dts" else "arch/arm/dts")
         shutil.copy2(path, target_dir / path.name)
+    if video:
+        board_dts = uboot / "dts/upstream/src/arm64/rockchip" / (DTB_NAME[:-4] + ".dts")
+        with board_dts.open("a") as stream:
+            stream.write('\n#include "rk3566-quartz64-zero-video.dtsi"\n')
     tpl = blob_file(cache, "rk3566_ddr_1056MHz_v1.26.bin")
     bl31 = blob_file(cache, "rk3568_bl31_v1.46.elf")
     uboot_build = work / "u-boot"
@@ -230,22 +291,39 @@ def prepare(args) -> None:
         "CMD_FAT": True, "CMD_ITEST": True, "CMD_BOOTI": True,
         "SYS_MALLOC_LEN": "0x1000000",
     }
+    if video:
+        options.update({"VIDEO": True, "DISPLAY": True, "VIDEO_ROCKCHIP": True,
+                        "DISPLAY_ROCKCHIP_HDMI": True, "VIDEO_DT_SIMPLEFB": True,
+                        "EVENT": True, "VIDEO_REMOVE": False, "CMD_VIDEO": True,
+                        "DM_PMIC": True, "PMIC_RK8XX": True,
+                        "DM_REGULATOR": True, "REGULATOR_RK8XX": True,
+                        "VIDEO_ROCKCHIP_MAX_XRES": "3840",
+                        "VIDEO_ROCKCHIP_MAX_YRES": "2160"})
     for key, value in options.items():
         run([*config, "--enable" if value is True else "--disable" if value is False else
-             "--set-str" if not value.startswith("0x") else "--set-val", key,
+             "--set-str" if not value.startswith("0x") and not value.isdigit() else "--set-val", key,
              *([] if isinstance(value, bool) else [value])], env=env)
     run([*common, "olddefconfig"], env=env)
     run([*common, f"-j{args.jobs}"], env=env)
+    if video:
+        actual_config = (uboot_build / ".config").read_text().splitlines()
+        if not set(VIDEO_CONFIG).issubset(actual_config):
+            raise PrepareError("U-Boot rejected a required video configuration option")
     dtb = uboot_build / "dts/upstream/src/arm64/rockchip" / DTB_NAME
     out.mkdir(parents=True, exist_ok=True)
     outputs = {"u-boot-rockchip.bin": uboot_build / "u-boot-rockchip.bin",
                DTB_NAME: dtb, "mkimage": uboot_build / "tools/mkimage"}
+    if video:
+        outputs["u-boot.config"] = uboot_build / ".config"
     for name, source in outputs.items():
         regular_output(out / name)
         shutil.copy2(source, out / name)
     manifest = {
         "format": "a20os-quartz64-zero-firmware-v1", "board": "quartz64-zero", "ram_mib": 1024,
-        "hardware_validated": False, "sources": {"u-boot": SOURCES["u-boot"]},
+        "hardware_validated": False, "sources": {"u-boot": source_spec},
+        "video_profile": video,
+        "video_sources": ({"patches": json.loads((VIDEO_FILES / "series.json").read_text()),
+                           "local_files": {p.name: artifact(p) for p in VIDEO_FILES.iterdir() if p.is_file()}} if video else None),
         "rkbin_commit": RKBIN_COMMIT, "rkbin_files": BLOBS,
         "defconfig": "generic-rk3568_defconfig", "config_overrides": ["CONFIG_CRC32_VERIFY=y", "CONFIG_BOOTMETH_SCRIPT=y"],
         "local_board_files": {path.name: artifact(path) for path in LOCAL_FIRMWARE.iterdir()},
@@ -359,6 +437,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     p = sub.add_parser("prepare", help="download digest-pinned source and build SPL/TF-A/U-Boot/DTB")
+    p.add_argument("--video", action="store_true", help="opt-in RK3566 VOP2/HDMI firmware; separate firmware-video output")
     p.add_argument("--cache", type=Path, default=BASE / "source-cache")
     p.add_argument("--work", type=Path, default=BASE / "firmware-build")
     p.add_argument("--out", type=Path, default=BASE / "firmware")

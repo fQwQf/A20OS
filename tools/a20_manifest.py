@@ -139,7 +139,9 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
             if inst.board == "lichee-pi-zero":
                 out.append(("bundle-uimage", f"{folder}/kernel.uimg"))
         if inst.package.kind == "board-sdcard":
-            out += [("firmware-manifest", f"build/{inst.board}/firmware/manifest.json")]
+            firmware = "firmware-video" if (inst.board == "quartz64-zero" and
+                                             inst.package.variant == "video") else "firmware"
+            out += [("firmware-manifest", f"build/{inst.board}/{firmware}/manifest.json")]
             out += [(f"boot-media-manifest-{i}", rel + ".json")
                     for i, rel in enumerate(inst.target.boot_media or (), 1)]
     return [(role, rel) for role, rel in out if rel]

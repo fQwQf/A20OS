@@ -3,7 +3,8 @@
 本页对应原版 **PINE A64 512 MiB、Allwinner A64、DDR3**，实例为
 `instances/pine-a64.toml`。A64+、PINE A64-LTS、PINE H64 不适用本平台配置。
 当前实例为单核内核初始化配置，提供串口、MMU、GICv2、定时器和 PSCI 接口；
-提供 MMC0 microSD 的原生 PIO 块驱动；默认实例不包含用户态或持久 rootfs。
+提供 MMC0 microSD 原生 PIO、固件 HDMI 帧缓冲接管和内部 codec PCM 播放驱动；
+默认实例不包含用户态或持久 rootfs。
 实机运行状态：未验证，不能将构建及寄存器模型测试视为上板成功。
 
 
@@ -45,7 +46,7 @@ poweroff
 
 文件系统为 RAM-only，重启后丢失写入。最小用户构建仅编译嵌入命令，不构建
 fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也不承诺网卡、
-显示或音频可用。当前状态为交叉构建与封装检查；板上执行仍须实机验收。
+显示或音频的实机可用性。需要现有播放器时使用下述 media 实例；板上执行仍须实机验收。
 
 ## 适配内容和边界
 
@@ -59,7 +60,9 @@ fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也�
 | 电源 | TF-A 提供的 PSCI SMC 关机/重启；板级电源结果等待真机确认 |
 | CPU | 只启用启动 CPU；`NR_CPUS != 1` 明确拒绝 |
 | microSD / MMC0 | DT 枚举的 `allwinner,sun50i-a64-mmc`，通用 `sunxi-mmc` 驱动；SDSC/SDHC/SDXC、512 字节扇区、单块 PIO 读写和 flush，1-bit / 400 kHz；实机未验证 |
-| 尚未实现 | EMAC、USB、HDMI、音频、PMIC 驱动、SMP；MMC DMA、4-bit/高速、eMMC、SDIO、热插拔 |
+| HDMI | 保留 SPL/U-Boot DE2 → DW-HDMI 已建立的扫描输出，以 DT simple-framebuffer 接入 GPU/fbdev；没有内核原生 modesetting/热插拔驱动 |
+| 模拟音频 | `sunxi-codec`：A64 I2S → codec AIF1 → 模拟耳机输出，DMA channel 0，48 kHz / stereo / S16_LE；含 AXP803 ELDO1 1.8 V 充电泵供电初始化；未实机验证 |
+| 尚未实现 | EMAC、USB、HDMI 音频、音频录制/混音、通用 PMIC/DVFS、SMP；MMC DMA、4-bit/高速、eMMC、SDIO、热插拔 |
 
 串口驱动保留 U-Boot 设置好的 115200 波特率除数、时钟、复位和 PB8/PB9
 pinmux。不能直接绕过 SPL/TF-A/U-Boot 从复位入口进入该内核。
@@ -276,6 +279,59 @@ python3 -m unittest tools.tests.test_sunxi_mmc
 首次实机应保留完整 `[SUNXI-MMC]` 日志，核对容量与实际卡一致；该日志只表示卡初始化。
 完成扇区内容与主机读回对比、受控写入及断电后读回以前，不宣称存储实机可用。
 默认 bring-up 到达 `part ok` 也不构成 SD I/O 验收。
+
+## HDMI 画面与耳机播放
+
+`pine-a64-media` 使用相同启动链，额外嵌入已有的 `videoplay` 和 `audioplay`。
+无需窗口管理器。主机关联的串口、写卡步骤与前文相同：
+
+```sh
+tools/a20 prepare pine-a64-media
+tools/a20 package pine-a64-media -- -j2
+tools/a20 deploy pine-a64-media --media-device /dev/实际SD整盘设备 --no-console
+tools/a20 console pine-a64-media --serial /dev/ttyUSB0 --interactive
+```
+
+整卡镜像为 `build/pine-a64/a20os-pine-a64-media-sdcard.img`。开机前连接 HDMI
+显示器，使用本页对应的原版 512 MiB 板和匹配固件。U-Boot 的 DE2/DW-HDMI
+驱动选取实际模式，并在启动时向 DT 写入物理地址、宽高、stride 和格式。
+A20 从 DT 接管已有扫描缓冲区，提前将其排除出页分配器；RAM 帧缓冲的内核
+和用户映射使用一致的缓存属性，提交画面时清理缓存。没有有效交接时不创建
+显示设备，也不假定固定分辨率。内核不负责重新初始化 HDMI、EDID 或恢复断开的显示器。
+
+耳机播放使用原版板的 3.5 mm 输出。板级代码只从已枚举的 DT 资源组装
+I2S、数字/模拟 codec、DMA、CCU 和 RSB 拓扑；通用音频驱动不包含板级物理地址。
+RSB 依赖启动固件已初始化的总线和 AXP803 运行时地址；驱动校验芯片 ID，
+只开启耳机充电泵所需的 ELDO1=1.8 V，不重设活跃的其他电源。
+音频 PLL 被不同配置占用、DMA channel 0 已被使用或任一必要节点缺失时拒绝绑定。
+目前没有可分配 DMA channel 的通用 broker，不能同时由另一个驱动占用 channel 0。
+
+在板上检查日志、设备和现有播放器：
+
+```sh
+ls /dev
+videoplay --test 320 240 30
+audioplay --tone 440 --duration 1000
+```
+
+首条播放命令连续更新 10 秒测试画面后退出。RGB24 文件可用
+`videoplay /tmp/clip.rgb 320 240 30` 播放；PCM WAV 可用 `audioplay /tmp/clip.wav`。
+默认 RAM 镜像不含这些文件，也没有 MP4/H.264 解码或音画同步承诺。
+驱动输出固定为 48 kHz 双声道 S16_LE，支持写入背压、尾部排空和欠载报错；
+不是 HDMI 音频或麦克风录音接口。通过现有音频类接口提供 `/dev/audioN` 及 PCM 兼容入口。
+
+主机可运行 `python3 -m unittest tools.tests.test_sunxi_audio`，执行实际生产驱动的
+DMA/codec/供电/PLL 模型，覆盖错误和失败清理。通用 DT 帧缓冲另有 QEMU 实际像素检查。
+这些测试不替代板上的 HDMI 首屏、持续更新、耳机波形、DMA 缓存一致性和中断延迟验收。
+目前 PINE 实机显示及发声均未验证。
+
+音频寄存器与拓扑依据：
+[Linux v6.17 I2S](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun4i-i2s.c)、
+[A64 数字 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun8i-codec.c)、
+[模拟 codec](https://github.com/torvalds/linux/blob/v6.17/sound/soc/sunxi/sun50i-codec-analog.c)、
+[sun6i DMA](https://github.com/torvalds/linux/blob/v6.17/drivers/dma/sun6i-dma.c)。
+显示交接依据 [U-Boot v2025.10 DE2](https://github.com/u-boot/u-boot/blob/v2025.10/drivers/video/sunxi/sunxi_de2.c)。
+上述公开实现用于核对寄存器与协议，没有将 Linux GPL 实现链接进 A20 内核。
 
 ## 依据
 

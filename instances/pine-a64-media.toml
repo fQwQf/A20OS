@@ -1,0 +1,45 @@
+name = "pine-a64-media"
+description = "pine-a64 HDMI firmware scanout and native headphone PCM; physical validation pending"
+arch = "aarch64"
+board = "pine-a64"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ramfs_media = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 3
+boot_timeout = "120s"
+# Wait for init to launch mksh; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+boot_media = ["build/pine-a64/a20os-pine-a64-media-sdcard.img"]
+# Deliberate placeholder; deploy --media-device /dev/actual-card chooses it.
+media_device = "/dev/sdX"
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "setenv loadaddr 0x40080000",
+    "setenv fdt_addr_r 0x4fa00000",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} sun50i-a64-pine64.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """RAM shell with existing videoplay and audioplay. HDMI firmware scanout and native headphone PCM.
+Physical execution is pending; see docs/platforms/pine-a64.md.
+Video/audio devices are exposed only after their hardware probe succeeds.
+Files remain in RAM and disappear at reset. No SSH service is provided.
+"""

@@ -170,12 +170,22 @@ def validate_firmware(firmware: Path) -> dict:
     return manifest
 
 
+def firmware_environment(epoch: str = SOURCE_DATE_EPOCH) -> dict[str, str]:
+    """Start an independent firmware build, including when invoked by A20 make."""
+    env = dict(os.environ, SOURCE_DATE_EPOCH=epoch, TZ="UTC")
+    # U-Boot chooses ARCH=arm/riscv itself. A20's ARCH names and command-line
+    # make overrides must not change this separate project's configuration.
+    for name in ("ARCH", "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKELEVEL"):
+        env.pop(name, None)
+    return env
+
+
 def prepare(args) -> None:
     make = tool("make")
     gcc = tool(args.cross_compile + "gcc")
     for name in ("bison", "flex", "swig", "openssl"):
         tool(name)
-    env = dict(os.environ, SOURCE_DATE_EPOCH=SOURCE_DATE_EPOCH, TZ="UTC")
+    env = firmware_environment()
     work, out = args.work.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
     # U-Boot binman uses pyelftools. Keep its pinned dependency local instead
