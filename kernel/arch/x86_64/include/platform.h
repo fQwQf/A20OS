@@ -197,6 +197,7 @@ void x86_64_smp_secondary_init(void);
 #define SSTATUS_FS_MASK    0
 
 extern uint64_t boot_pgdir[512];
+void x86_64_timer_ensure_deadline(uint64_t ticks);
 
 /*
  * Remove the temporary identity mapping in PML4[0].  The boot code needs it to

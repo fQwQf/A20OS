@@ -25,6 +25,7 @@ _start:
 .Limage_entry:
 #endif
 #if AARCH64_BOOT_NORMALIZE_EL
+    mov     x11, xzr
     bl      aarch64_boot_enter_el1
 #endif
     msr     tpidrro_el0, xzr /* Boot CPU is always logical CPU zero. */
@@ -312,6 +313,7 @@ _start:
     .global aarch64_secondary_start
 aarch64_secondary_start:
 #if AARCH64_BOOT_NORMALIZE_EL
+    mov     x11, x0
     bl      aarch64_boot_enter_el1
 #endif
     /* PSCI enters with the MMU off and the logical CPU number in x0. */
@@ -415,12 +417,34 @@ aarch64_boot_enter_el1:
     mrs     x9, CurrentEL
     cmp     x9, #8
     b.ne    .Lboot_el1
+    /* Retain a physical, stackless EL2 monitor before entering host EL1.
+     * Firmware that hands off at EL1 cannot install this monitor. */
+    adrp    x9, aarch64_hyp_vectors
+    add     x9, x9, :lo12:aarch64_hyp_vectors
+    msr     vbar_el2, x9
+    msr     tpidr_el2, xzr
+    adrp    x9, aarch64_hyp_stacks
+    add     x9, x9, :lo12:aarch64_hyp_stacks
+    add     x10, x11, #1
+    add     x9, x9, x10, lsl #6
+    mov     sp, x9
+    ldr     x9, =0x30c50830
+    msr     sctlr_el2, x9
+    adrp    x9, aarch64_hyp_boot_cpus
+    add     x9, x9, :lo12:aarch64_hyp_boot_cpus
+    cmp     x11, #CONFIG_NR_CPUS
+    b.hs    .Lhyp_boot_marked
+    mov     x10, #1
+    str     x10, [x9, x11, lsl #3]
+.Lhyp_boot_marked:
     mov     x9, #(1 << 31) /* HCR.RW: EL1 AArch64 */
     msr     hcr_el2, x9
     mov     x9, #3 /* EL1 physical counter and timer access */
     msr     cnthctl_el2, x9
     msr     cntvoff_el2, xzr
-    msr     cptr_el2, xzr
+    mov     x9, #0x33ff /* CPTR RES1, FP/SIMD allowed, no SVE. */
+    msr     cptr_el2, x9
+    msr     mdcr_el2, xzr
     ldr     x9, =0x30d00800 /* EL1 RES1 bits, MMU/cache off */
     msr     sctlr_el1, x9
     adr     x9, .Lboot_el1
@@ -469,3 +493,15 @@ _stack_bottom:
     .space 4096 * 16 * CONFIG_NR_CPUS
     .global _stack_end
 _stack_end:
+
+    /* This survives the primary's later BSS clear. */
+    .section .data
+    .align 3
+    .global aarch64_hyp_boot_cpus
+aarch64_hyp_boot_cpus:
+    .zero 8 * CONFIG_NR_CPUS
+
+    .align 6
+    .global aarch64_hyp_stacks
+aarch64_hyp_stacks:
+    .zero 64 * CONFIG_NR_CPUS

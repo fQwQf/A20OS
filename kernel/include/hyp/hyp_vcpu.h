@@ -113,6 +113,7 @@ typedef struct hyp_vcpu {
     unsigned irq_set, irq_clear;
     uint64_t hvip;
     unsigned id, hart_state;
+    void *backend_data; /* backend-owned; appended after all asm-visible fields */
 } hyp_vcpu_t;
 
 /* ---- kernel C API (kernel/hyp/hyp_vcpu.c implements) ---- */

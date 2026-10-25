@@ -27,6 +27,8 @@ typedef struct hyp_backend {
     int (*load)(struct hyp_vcpu *vcpu);
     void (*enter)(struct hyp_vcpu *vcpu);
     void (*put)(struct hyp_vcpu *vcpu);
+    /* Release lazily allocated architecture state after the last vCPU ref. */
+    void (*vcpu_destroy)(struct hyp_vcpu *vcpu);
 } hyp_backend_t;
 const hyp_backend_t *hyp_arch_backend(void);
 #endif
