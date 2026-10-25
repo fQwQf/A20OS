@@ -35,9 +35,12 @@ A20OS 的 hypervisor 不是 KVM 的复刻。它是 capability 叙事下的最小
 地基：stage-2 是"又一个地址空间"，其并发、审计、生命周期全部复用单级模型；
 guest RAM 是被出借（lend）的帧，出借是身份标志 + 引用计数，不是新记账系统。
 
-优先架构是 riscv64（H-extension，QEMU TCG 可测）。arm32/loongarch 无
-stage-2 硬件的架构走 stub（`hyp_supported()==0`），generic 半在任何架构都
-编译。
+本文的地基设计起于 riscv64 H 后端。2026-10-25 已增加 RV32 H、AArch64
+EL2、ARM32 HYP、AMD SVM、Intel VMX 的可执行后端与双 vCPU 验证；LoongArch
+LVZ 为默认关闭、尚无硬件正控的实验实现。下文关于单一 ISA、页表宽度或单核
+的阶段描述保留作历史记录；当前能力、使用方式与边界见
+[使用指南](03-usage.md)、[后端说明](08-multiarch-backends.md) 和
+[运行验证](09-smp-validation.md)。
 
 ## 2. stage-2 = 单级模型的一个新客户
 
