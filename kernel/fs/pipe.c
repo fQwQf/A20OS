@@ -25,21 +25,27 @@ typedef struct pipe_buf {
     int             ref;
     int             read_fd;        /* global fd of the read endpoint */
     int             write_fd;       /* global fd of the write endpoint */
+    /* Protected by lock. Poll-source flags are sticky: once a readiness
+     * subscriber has seen a queue we keep publishing every notification.
+     * Direct blocking waiters are counted across link/commit/unlink. */
+    unsigned        waiting_readers, waiting_writers;
+    size_t          write_wait_min;
+    unsigned        polled_readers, polled_writers;
     wait_queue_t    read_waiters;
     wait_queue_t    write_waiters;
 } pipe_buf_t;
 
-static void pipe_wake_readers(pipe_buf_t *pb)
+static void pipe_wake_readers(pipe_buf_t *pb, int queued)
 {
-    wait_queue_wake_all(&pb->read_waiters, 0, PROC_WAKE_EVENT);
+    if (queued) wait_queue_wake_all(&pb->read_waiters, 0, PROC_WAKE_EVENT);
     if (pb->read_fd >= 0)
         a20_event_notify((void *)(uintptr_t)pb->read_fd,
                          A20_OBJ_PIPE_ENDPOINT, A20_EVENT_READABLE, 0, 0);
 }
 
-static void pipe_wake_writers(pipe_buf_t *pb)
+static void pipe_wake_writers(pipe_buf_t *pb, int queued)
 {
-    wait_queue_wake_all(&pb->write_waiters, 0, PROC_WAKE_EVENT);
+    if (queued) wait_queue_wake_all(&pb->write_waiters, 0, PROC_WAKE_EVENT);
     if (pb->write_fd >= 0)
         a20_event_notify((void *)(uintptr_t)pb->write_fd,
                          A20_OBJ_PIPE_ENDPOINT, A20_EVENT_WRITABLE, 0, 0);
@@ -79,6 +85,12 @@ static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq,
     }
 
     wait_queue_entry_t entry = {0};
+    unsigned *waiting = wq == &pb->read_waiters ?
+                        &pb->waiting_readers : &pb->waiting_writers;
+    if (wq == &pb->write_waiters &&
+        (!*waiting || needed < pb->write_wait_min))
+        pb->write_wait_min = needed;
+    ++*waiting;
     bool linked = wait_queue_link(wq, &entry, token, 0);
 
     spin_unlock(&pb->lock);
@@ -92,6 +104,7 @@ static int pipe_wait_interruptible_locked(pipe_buf_t *pb, wait_queue_t *wq,
     wait_queue_unlink(wq, &entry);
     proc_park_finish(token);
     spin_lock(&pb->lock);
+    --*waiting;
 
     if (proc_wake_reason_is_task_interrupt(reason) ||
         signal_task_has_unblocked(t))
@@ -129,11 +142,18 @@ static int pipe_read(vfile_t *vf, char *buf, size_t count)
     size_t second = n - first;
     if (second)
         memcpy(buf + first, pb->data, second);
-    pb->tail = (pb->tail + n) % pb->capacity;
+    pb->tail += n;
+    if (pb->tail >= pb->capacity) pb->tail -= pb->capacity;
     pb->used -= n;
+    /* An atomic writer cannot proceed until its whole record fits. Avoid
+     * waking it after every smaller read only to have it immediately park.
+     * The minimum is conservative while multiple writers are waiting; it is
+     * reset when the next first writer registers under this same lock. */
+    int queued = pb->polled_writers ||
+        (pb->waiting_writers && pb->capacity - pb->used >= pb->write_wait_min);
     spin_unlock(&pb->lock);
 
-    pipe_wake_writers(pb);
+    pipe_wake_writers(pb, queued);
     return (int)n;
 }
 
@@ -141,93 +161,50 @@ static int pipe_write(vfile_t *vf, const char *buf, size_t count)
 {
     pipe_buf_t *pb = (pipe_buf_t *)vf->priv;
     if (!pb) return -EBADF;
-    if (count == 0) return 0;
-
-    spin_lock(&pb->lock);
-    if (pb->reader_closed) {
-        spin_unlock(&pb->lock);
-        task_t *t = proc_current();
-        if (t && t->abi_mode == 0)
-            signal_send_thread(t->pid, SIGPIPE);
-        return -EPIPE;
-    }
+    if (!count) return 0;
     size_t n = 0;
+    /* Atomicity applies to the original write, not a large write's tail. */
+    size_t needed = count <= PIPE_BUF_SIZE ? count : 1;
+    spin_lock(&pb->lock);
     while (n < count) {
-        size_t remaining = count - n;
-        size_t space = pb->capacity - pb->used;
-        if (remaining <= PIPE_BUF_SIZE) {
-            while (space < remaining) {
-                if (pb->reader_closed) {
-                    spin_unlock(&pb->lock);
-                    if (n > 0) return (int)n;
-                    task_t *t = proc_current();
-                    if (t && t->abi_mode == 0)
-                        signal_send_thread(t->pid, SIGPIPE);
-                    return -EPIPE;
-                }
-                if (vf->flags & O_NONBLOCK) {
-                    spin_unlock(&pb->lock);
-                    return n ? (int)n : -EAGAIN;
-                }
-                int wr = pipe_wait_interruptible_locked(
-                    pb, &pb->write_waiters, remaining);
-                if (wr < 0) {
-                    spin_unlock(&pb->lock);
-                    return n ? (int)n : wr;
-                }
-                space = pb->capacity - pb->used;
-            }
-            size_t chunk = remaining;
-            size_t first = pb->capacity - pb->head;
-            if (first > chunk)
-                first = chunk;
-            memcpy(pb->data + pb->head, buf + n, first);
-            size_t second = chunk - first;
-            if (second)
-                memcpy(pb->data, buf + n + first, second);
-            pb->head = (pb->head + chunk) % pb->capacity;
-            pb->used += chunk;
-            n += chunk;
+        /* Recheck even when space is available: a reader can close while
+         * this writer drops the lock to publish a wakeup. */
+        if (pb->reader_closed) {
             spin_unlock(&pb->lock);
-            pipe_wake_readers(pb);
-            spin_lock(&pb->lock);
-        } else {
-            if (space == 0) {
-                if (pb->reader_closed) {
-                    spin_unlock(&pb->lock);
-                    if (n > 0) return (int)n;
-                    task_t *t = proc_current();
-                    if (t && t->abi_mode == 0)
-                        signal_send_thread(t->pid, SIGPIPE);
-                    return -EPIPE;
-                }
-                if (vf->flags & O_NONBLOCK) {
-                    spin_unlock(&pb->lock);
-                    return n ? (int)n : -EAGAIN;
-                }
-                int wr = pipe_wait_interruptible_locked(
-                    pb, &pb->write_waiters, 1);
-                if (wr < 0) {
-                    spin_unlock(&pb->lock);
-                    return n ? (int)n : wr;
-                }
-                continue;
-            }
-            size_t chunk = remaining < space ? remaining : space;
-            size_t first = pb->capacity - pb->head;
-            if (first > chunk)
-                first = chunk;
-            memcpy(pb->data + pb->head, buf + n, first);
-            size_t second = chunk - first;
-            if (second)
-                memcpy(pb->data, buf + n + first, second);
-            pb->head = (pb->head + chunk) % pb->capacity;
-            pb->used += chunk;
-            n += chunk;
-            spin_unlock(&pb->lock);
-            pipe_wake_readers(pb);
-            spin_lock(&pb->lock);
+            task_t *t = proc_current();
+            if (t && t->abi_mode == 0)
+                signal_send_thread(t->pid, SIGPIPE);
+            return n ? (int)n : -EPIPE;
         }
+        size_t space = pb->capacity - pb->used;
+        if (space < needed) {
+            if (vf->flags & O_NONBLOCK) {
+                spin_unlock(&pb->lock);
+                return n ? (int)n : -EAGAIN;
+            }
+            int wr = pipe_wait_interruptible_locked(pb, &pb->write_waiters, needed);
+            if (wr < 0) {
+                spin_unlock(&pb->lock);
+                return n ? (int)n : wr;
+            }
+            continue;
+        }
+        size_t chunk = count - n;
+        if (chunk > space) chunk = space;
+        size_t first = pb->capacity - pb->head;
+        if (first > chunk) first = chunk;
+        memcpy(pb->data + pb->head, buf + n, first);
+        if (chunk > first) memcpy(pb->data, buf + n + first, chunk - first);
+        pb->head += chunk;
+        if (pb->head >= pb->capacity) pb->head -= pb->capacity;
+        pb->used += chunk;
+        n += chunk;
+        int queued = pb->waiting_readers || pb->polled_readers;
+        spin_unlock(&pb->lock);
+        pipe_wake_readers(pb, queued);
+        /* A completed write needs no further ownership of the ring. */
+        if (n == count) return (int)n;
+        spin_lock(&pb->lock);
     }
     spin_unlock(&pb->lock);
     return (int)n;
@@ -280,16 +257,23 @@ static int pipe_resize(pipe_buf_t *pb, size_t new_capacity)
         return (int)new_capacity;
     }
 
-    for (size_t i = 0; i < pb->used; i++)
-        new_data[i] = pb->data[(pb->tail + i) % pb->capacity];
+    size_t first = pb->capacity - pb->tail;
+    if (first > pb->used) first = pb->used;
+    memcpy(new_data, pb->data + pb->tail, first);
+    if (pb->used > first)
+        memcpy(new_data + first, pb->data, pb->used - first);
     char *old_data = pb->data;
     pb->data = new_data;
     pb->capacity = new_capacity;
     pb->logical_size = new_capacity;
     pb->tail = 0;
-    pb->head = pb->used % pb->capacity;
+    pb->head = pb->used == pb->capacity ? 0 : pb->used;
+    int queued = pb->waiting_writers || pb->polled_writers;
     spin_unlock(&pb->lock);
 
+    /* Capacity changes are readiness changes too. A full-pipe writer must
+     * not remain asleep after F_SETPIPE_SZ creates free space. */
+    pipe_wake_writers(pb, queued);
     kfree(old_data);
     return (int)new_capacity;
 }
@@ -306,7 +290,7 @@ static int pipe_read_close(vfile_t *vf)
         spin_unlock(&pb->lock);
 
         if (last_reader)
-            pipe_wake_writers(pb);
+            pipe_wake_writers(pb, 1);
         if (!refs) {
             if (pb->data) kfree(pb->data);
             kfree(pb);
@@ -327,7 +311,7 @@ static int pipe_write_close(vfile_t *vf)
         spin_unlock(&pb->lock);
 
         if (last_writer)
-            pipe_wake_readers(pb);
+            pipe_wake_readers(pb, 1);
         if (!refs) {
             if (pb->data) kfree(pb->data);
             kfree(pb);
@@ -346,8 +330,15 @@ static size_t pipe_poll_sources(vfile_t *vf, short events,
     pipe_buf_t *pb = vf ? vf->priv : NULL;
     if (!pb || !sources || max == 0)
         return 0;
-    sources[0].queue = vf->ops == &g_pipe_read_ops ?
-                       &pb->read_waiters : &pb->write_waiters;
+    spin_lock(&pb->lock);
+    if (vf->ops == &g_pipe_read_ops) {
+        pb->polled_readers = 1;
+        sources[0].queue = &pb->read_waiters;
+    } else {
+        pb->polled_writers = 1;
+        sources[0].queue = &pb->write_waiters;
+    }
+    spin_unlock(&pb->lock);
     sources[0].key = 0;
     sources[0].deadline = 0;
     return 1;
