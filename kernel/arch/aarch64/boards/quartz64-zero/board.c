@@ -1,4 +1,5 @@
 #include "drivers/core/driver_core.h"
+#include "arch/common/rk3566_audio.h"
 #include "core/arch.h"
 #include "firmware/devicetree.h"
 #include "boot/context.h"
@@ -65,6 +66,12 @@ static const timer_ops_t quartz64_zero_timer = {
     .ticks_per_sec = quartz64_zero_frequency,
 };
 void quartz64_zero_configure_storage(void);
+static void quartz64_zero_configure_devices(void) {
+    quartz64_zero_configure_storage();
+    int result = rk3566_board_prepare_audio();
+    if (result < 0)
+        printf("[Quartz64-Zero] headphone audio topology unavailable: %d\n", result);
+}
 static const board_config_t quartz64_zero_board = {
     .name = "quartz64-zero",
     .ram_base = PHYS_MEMORY_BASE,
@@ -73,7 +80,7 @@ static const board_config_t quartz64_zero_board = {
     .timer = &quartz64_zero_timer,
     .smp = NULL,
     .early_init = quartz64_zero_early_init,
-    .configure_devices = quartz64_zero_configure_storage,
+    .configure_devices = quartz64_zero_configure_devices,
     .poweroff = firmware_shutdown,
     .reboot = firmware_reboot,
     .defer_network_init = 1,

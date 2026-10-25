@@ -155,6 +155,9 @@ void   dma_sync_for_cpu(void *vaddr, size_t size);
  * - A mask must be a run of low-order ones.  dma_set_mask() rejects anything
  *   else with -EINVAL rather than rounding it up or down: a half-declared window
  *   is how a driver ends up believing it is safe above 4 GiB.
+ * - A non-coherent architecture can withhold DMA until cache maintenance has
+ *   been authorized. In that state dma_set_mask() returns -EOPNOTSUPP and
+ *   both allocators return NULL without allocating or exposing a DMA handle.
  * - The allocators take the device and refuse to return memory it cannot be
  *   given.  dma_alloc_coherent() keeps the kmalloc fast path and only falls
  *   back to physically contiguous pages when the slab block already lands

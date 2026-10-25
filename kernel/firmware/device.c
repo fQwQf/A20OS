@@ -162,6 +162,23 @@ int firmware_device_prepare(struct device *device) {
     }
     return 0;
 }
+int firmware_device_irq(struct device *device, size_t index) {
+    if (!device || index > 0x7fffffffU) return -EINVAL;
+    const resource_t *resource = device_get_resource(device, RES_IRQ, (int)index);
+    if (resource) {
+        if (resource->start != resource->end) return -EINVAL;
+        if (resource->start >= PLATFORM_IRQ_MAX_LINES) return -ERANGE;
+        return (int)resource->start;
+    }
+    if (!fw_node_valid(&device->firmware_node)) return -ENODEV;
+    fw_reference_t reference;
+    int rc = fw_node_irq(&device->firmware_node, index, &reference);
+    if (rc) return rc == -ENOENT ? -ENODEV : rc;
+    uint32_t irq, flags;
+    rc = fw_irq_resolve(&reference, &irq, &flags);
+    if (rc) return rc;
+    return irq < PLATFORM_IRQ_MAX_LINES ? (int)irq : -ERANGE;
+}
 static int has_identity(const fw_node_t *node) {
     fw_property_t property;
     const char *names[] = {"compatible", "hardware-id", "acpi,hid", "acpi,cid"};

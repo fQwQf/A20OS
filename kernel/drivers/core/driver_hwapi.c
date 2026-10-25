@@ -305,6 +305,13 @@ static int dma_mask_well_formed(uint64_t mask)
         return 0;
     return (mask & (mask + 1U)) == 0;
 }
+/* Non-coherent architectures may require a permission-checked cache handoff
+ * before any driver can own DMA memory. An absent hook preserves the existing
+ * coherent-platform contract; an explicit refusal must fail before allocation. */
+extern int arch_device_dma_ready(void) __attribute__((weak));
+static int dma_arch_ready(void) {
+    return !arch_device_dma_ready || arch_device_dma_ready();
+}
 
 int dma_set_mask(struct device *dev, uint64_t mask)
 {
@@ -312,6 +319,8 @@ int dma_set_mask(struct device *dev, uint64_t mask)
         return -EINVAL;
     if (!dma_mask_well_formed(mask))
         return -EINVAL;
+    if (!dma_arch_ready())
+        return -EOPNOTSUPP;
     dev->dma_mask = mask;
     return 0;
 }
@@ -393,7 +402,7 @@ void *dma_alloc_coherent(struct device *dev, size_t size, uint64_t *dma_handle)
 {
     if (dma_handle)
         *dma_handle = 0;
-    if (!size)
+    if (!size || !dma_arch_ready())
         return NULL;
     extern void *kmalloc(size_t);
     void *ptr = kmalloc(size);
@@ -451,7 +460,7 @@ void *dma_alloc_coherent_aligned(struct device *dev, size_t size,
 {
     if (dma_handle)
         *dma_handle = 0;
-    if (!size || !alignment || alignment > PAGE_SIZE ||
+    if (!size || !dma_arch_ready() || !alignment || alignment > PAGE_SIZE ||
         (alignment & (alignment - 1U)))
         return NULL;
     return dma_alloc_pages(dma_get_mask(dev), size, alignment, dma_handle);

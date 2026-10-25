@@ -17,7 +17,7 @@
 #include "core/stdio.h"
 #include "core/poll.h"
 #include "mm/slab.h"
-#include "sunxi_pcm_ring.h"
+#include "pcm_period_ring.h"
 
 #define DMA_CHANNEL 0x100U
 #define DMA_EN (DMA_CHANNEL + 0x00)
@@ -38,7 +38,7 @@ struct sunxi_audio {
     struct sunxi_lli *lli;
     spinlock_t lock;
     mutex_t writer;
-    sunxi_pcm_ring_t ring;
+    pcm_period_ring_t ring;
     size_t partial;
     int irq_live, powered, quarantined, dma_owned, seen_period;
     uint64_t last_completion;
@@ -138,14 +138,14 @@ static int sunxi_irq(int irq, void *opaque) {
     reg_write(s->dma, 0x10, pending);
     if (s->ring.running && (pending & DMA_IRQ_PACKAGE)) {
         uint32_t source = reg_read(s->dma, DMA_SRC);
-        unsigned expected = (s->ring.consumer + 1) % SUNXI_PCM_PERIODS;
+        unsigned expected = (s->ring.consumer + 1) % PCM_PERIODS;
         uint64_t delta = (uint64_t)source - s->data_pa;
-        int current_valid = source >= s->data_pa && delta <= SUNXI_PCM_BYTES;
-        unsigned current = (unsigned)(delta / SUNXI_PCM_PERIOD_BYTES) % SUNXI_PCM_PERIODS;
+        int current_valid = source >= s->data_pa && delta <= PCM_BYTES;
+        unsigned current = (unsigned)(delta / PCM_PERIOD_BYTES) % PCM_PERIODS;
         /* Package flags are sticky, not counters. A delayed IRQ which missed
          * a complete period must not release/refill the wrong buffer. */
         uint64_t now = clock_get_ticks();
-        uint64_t period_ticks = clock_ticks_per_sec() * SUNXI_PCM_PERIOD_BYTES / 192000U;
+        uint64_t period_ticks = clock_ticks_per_sec() * PCM_PERIOD_BYTES / 192000U;
         int timely = period_ticks && now - s->last_completion < period_ticks * 2;
         s->last_completion = now;
         int boundary = current == s->ring.consumer && reg_read(s->dma, DMA_CHANNEL + 0x18) == 0;
@@ -154,11 +154,11 @@ static int sunxi_irq(int irq, void *opaque) {
          * Clear startup status once; any later FIFO fault is a real XRUN. */
         int fifo_ok = !s->seen_period || !fifo_errors;
         s->seen_period = 1;
-        int result = timely && fifo_ok && current_valid && (current == expected || boundary) ? sunxi_pcm_complete(&s->ring) : -1;
-        unsigned previous = (s->ring.consumer + SUNXI_PCM_PERIODS - 1) % SUNXI_PCM_PERIODS;
+        int result = timely && fifo_ok && current_valid && (current == expected || boundary) ? pcm_period_complete(&s->ring) : -1;
+        unsigned previous = (s->ring.consumer + PCM_PERIODS - 1) % PCM_PERIODS;
         if (result >= 0) {
-            memset(s->data + previous * SUNXI_PCM_PERIOD_BYTES, 0, SUNXI_PCM_PERIOD_BYTES);
-            dma_sync_for_device(s->data + previous * SUNXI_PCM_PERIOD_BYTES, SUNXI_PCM_PERIOD_BYTES);
+            memset(s->data + previous * PCM_PERIOD_BYTES, 0, PCM_PERIOD_BYTES);
+            dma_sync_for_device(s->data + previous * PCM_PERIOD_BYTES, PCM_PERIOD_BYTES);
         }
         if (result <= 0) {
             /* Stop at the end of valid content. DMA may fetch zeros during
@@ -227,8 +227,8 @@ static int reset_stream(struct sunxi_audio *s) {
     uint64_t flags = spin_lock_irqsave(&s->lock);
     memset(&s->ring, 0, sizeof(s->ring));
     s->partial = 0;
-    memset(s->data, 0, SUNXI_PCM_BYTES);
-    dma_sync_for_device(s->data, SUNXI_PCM_BYTES);
+    memset(s->data, 0, PCM_BYTES);
+    dma_sync_for_device(s->data, PCM_BYTES);
     fifo_reset(s);
     spin_unlock_irqrestore(&s->lock, flags);
     return 0;
@@ -248,7 +248,7 @@ static int audio_write(device_t *dev, const void *buffer, size_t count) {
         uint64_t flags = spin_lock_irqsave(&s->lock);
         int error = s->ring.error;
         if (error) { spin_unlock_irqrestore(&s->lock, flags); break; }
-        if (s->ring.count == SUNXI_PCM_PERIODS) {
+        if (s->ring.count == PCM_PERIODS) {
             spin_unlock_irqrestore(&s->lock, flags);
             if (++waiting >= 1000) {
                 transmitter(s, 0);
@@ -260,15 +260,15 @@ static int audio_write(device_t *dev, const void *buffer, size_t count) {
             continue;
         }
         waiting = 0;
-        size_t n = SUNXI_PCM_PERIOD_BYTES - s->partial;
+        size_t n = PCM_PERIOD_BYTES - s->partial;
         if (n > count - done) n = count - done;
-        uint8_t *target = s->data + s->ring.producer * SUNXI_PCM_PERIOD_BYTES;
+        uint8_t *target = s->data + s->ring.producer * PCM_PERIOD_BYTES;
         memcpy(target + s->partial, (const uint8_t *)buffer + done, n);
         s->partial += n;
         done += n;
-        if (s->partial == SUNXI_PCM_PERIOD_BYTES) {
-            dma_sync_for_device(target, SUNXI_PCM_PERIOD_BYTES);
-            if (sunxi_pcm_publish(&s->ring) < 0) s->ring.error = -EIO;
+        if (s->partial == PCM_PERIOD_BYTES) {
+            dma_sync_for_device(target, PCM_PERIOD_BYTES);
+            if (pcm_period_publish(&s->ring) < 0) s->ring.error = -EIO;
             s->partial = 0;
             if (!s->ring.running && s->ring.count >= 2) {
                 mute(s, 0);
@@ -296,10 +296,10 @@ static int audio_drain(device_t *dev) {
     uint64_t flags = spin_lock_irqsave(&s->lock);
     s->ring.draining = 1;
     if (s->partial && !s->ring.error) {
-        uint8_t *target = s->data + s->ring.producer * SUNXI_PCM_PERIOD_BYTES;
-        memset(target + s->partial, 0, SUNXI_PCM_PERIOD_BYTES - s->partial);
-        dma_sync_for_device(target, SUNXI_PCM_PERIOD_BYTES);
-        if (sunxi_pcm_publish(&s->ring) < 0) s->ring.error = -EIO;
+        uint8_t *target = s->data + s->ring.producer * PCM_PERIOD_BYTES;
+        memset(target + s->partial, 0, PCM_PERIOD_BYTES - s->partial);
+        dma_sync_for_device(target, PCM_PERIOD_BYTES);
+        if (pcm_period_publish(&s->ring) < 0) s->ring.error = -EIO;
         s->partial = 0;
     }
     if (!s->ring.running && s->ring.count && !s->ring.error) { mute(s, 0); dma_start_locked(s); }
@@ -334,7 +334,7 @@ static int audio_poll(device_t *dev, short events) {
     if (!s) return POLLERR;
     uint64_t flags = spin_lock_irqsave(&s->lock);
     int result = s->ring.error || s->quarantined ? POLLERR :
-        (s->ring.count < SUNXI_PCM_PERIODS ? events & POLLOUT : 0);
+        (s->ring.count < PCM_PERIODS ? events & POLLOUT : 0);
     spin_unlock_irqrestore(&s->lock, flags);
     return result;
 }
@@ -348,7 +348,7 @@ static void destroy(struct sunxi_audio *s) {
     if (s->irq_live) free_irq(s->platform->dma_irq, s);
     if (!s->quarantined) {
         if (s->lli) dma_free_coherent_aligned(s->lli, 4096, s->lli_pa);
-        if (s->data) dma_free_coherent_aligned(s->data, SUNXI_PCM_BYTES, s->data_pa);
+        if (s->data) dma_free_coherent_aligned(s->data, PCM_BYTES, s->data_pa);
     }
     if (s->powered) {
         mute(s, 1);
@@ -403,18 +403,18 @@ static int audio_probe(device_t *dev) {
     if ((reg_read(s->dma, DMA_EN) & 1) || (reg_read(s->dma, 0x00) & DMA_IRQ_MASK)) { result = -EBUSY; goto fail; }
     s->dma_owned = 1;
     if (dma_set_mask(dev, 0xffffffffULL) < 0) { result = -EIO; goto fail; }
-    s->data = dma_alloc_coherent_aligned(dev, SUNXI_PCM_BYTES, 4096, &s->data_pa);
+    s->data = dma_alloc_coherent_aligned(dev, PCM_BYTES, 4096, &s->data_pa);
     s->lli = dma_alloc_coherent_aligned(dev, 4096, 4096, &s->lli_pa);
     if (!s->data || !s->lli) { result = -ENOMEM; goto fail; }
     s->fifo_pa = resource->start + 0x20;
-    if (s->fifo_pa > 0xffffffffULL || s->data_pa + SUNXI_PCM_BYTES > 0x100000000ULL || s->lli_pa + 4096 > 0x100000000ULL) { result = -EOVERFLOW; goto fail; }
-    memset(s->data, 0, SUNXI_PCM_BYTES);
-    for (unsigned i = 0; i < SUNXI_PCM_PERIODS; i++) {
-        s->lli[i] = (struct sunxi_lli){SUNXI_DMA_CFG, (uint32_t)(s->data_pa + i * SUNXI_PCM_PERIOD_BYTES),
-            (uint32_t)s->fifo_pa, SUNXI_PCM_PERIOD_BYTES, 8,
-            (uint32_t)(s->lli_pa + ((i + 1) % SUNXI_PCM_PERIODS) * sizeof(*s->lli))};
+    if (s->fifo_pa > 0xffffffffULL || s->data_pa + PCM_BYTES > 0x100000000ULL || s->lli_pa + 4096 > 0x100000000ULL) { result = -EOVERFLOW; goto fail; }
+    memset(s->data, 0, PCM_BYTES);
+    for (unsigned i = 0; i < PCM_PERIODS; i++) {
+        s->lli[i] = (struct sunxi_lli){SUNXI_DMA_CFG, (uint32_t)(s->data_pa + i * PCM_PERIOD_BYTES),
+            (uint32_t)s->fifo_pa, PCM_PERIOD_BYTES, 8,
+            (uint32_t)(s->lli_pa + ((i + 1) % PCM_PERIODS) * sizeof(*s->lli))};
     }
-    dma_sync_for_device(s->data, SUNXI_PCM_BYTES);
+    dma_sync_for_device(s->data, PCM_BYTES);
     dma_sync_for_device(s->lli, 4096);
     s->powered = 1;
     result = p->power(1);
