@@ -4,6 +4,9 @@
 #include "abi/linux/syscall_entry.h"
 #include "syscall_nr_arm32.h"
 
+/* ARM EABI legacy sleep syscalls use two signed 32-bit fields. */
+#define ARCH_LINUX_LEGACY_SLEEP_TIME32 1
+
 static inline void arch_syscall_adjust_args(linux_syscall_args_t *args) {
     uint32_t host_nr = (uint32_t)args->nr;
     uint32_t kernel_nr = arm32_syscall_to_kernel_nr(host_nr);

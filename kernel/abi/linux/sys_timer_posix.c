@@ -75,12 +75,6 @@ static void adjtimex_state_init(kernel_timex_t *tx)
     tx->tolerance = 500000L;
 }
 
-static int posix_clock_is_monotonic(int clk)
-{
-    return clk == 1 || clk == 2 || clk == 3 || clk == 4 ||
-           clk == 6 || clk == 7 || clk == 9;
-}
-
 static uint64_t timeval_to_ticks(uint64_t sec, uint64_t usec)
 {
     return sec * TICKS_PER_SEC + (usec * TICKS_PER_SEC + 999999ULL) / 1000000ULL;
@@ -132,84 +126,6 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
     if (rem && out[2] == 0 && out[3] == 0)
         out[3] = 1;
     return 0;
-}
-
-int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
-{
-    const int TIMER_ABSTIME = 1;
-    if (flags & ~TIMER_ABSTIME) return -EINVAL;
-    if (!req) return -EFAULT;
-
-    /* CLOCK_PROCESS/THREAD_CPUTIME_ID sleeps are not modeled; refuse them
-     * rather than silently sleeping on the monotonic clock. */
-    if (clk == 2 || clk == 3) return -EOPNOTSUPP;
-    int realtime = posix_clock_is_realtime(clk);
-    int monotonic = posix_clock_is_monotonic(clk);
-    if (!realtime && !monotonic) return -EINVAL;
-
-    uint64_t ts[2];
-    if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
-    if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 ||
-        ts[1] >= 1000000000ULL) return -EINVAL;
-
-    uint64_t until;
-    if (flags & TIMER_ABSTIME) {
-        uint64_t now_ts[2];
-        if (realtime) timekeeping_get_realtime(now_ts);
-        else timekeeping_get_monotonic(now_ts);
-
-        if (ts[0] < now_ts[0] || (ts[0] == now_ts[0] && ts[1] <= now_ts[1]))
-            return 0;
-
-        uint64_t sec = ts[0] - now_ts[0];
-        uint64_t nsec;
-        if (ts[1] >= now_ts[1]) {
-            nsec = ts[1] - now_ts[1];
-        } else {
-            if (sec == 0) return 0;
-            sec--;
-            nsec = 1000000000ULL + ts[1] - now_ts[1];
-        }
-        uint64_t ticks = sec * TICKS_PER_SEC +
-                         (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
-        until = timer_get_ticks() + ticks;
-    } else {
-        uint64_t ticks = ts[0] * TICKS_PER_SEC +
-                         (ts[1] * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
-        if (ticks == 0)
-            return 0;
-        until = timer_get_ticks() + ticks;
-    }
-
-    task_t *t = proc_current();
-    if (!t) {
-        while (timer_get_ticks() < until) cpu_relax();
-        return 0;
-    }
-    for (;;) {
-        proc_wake_reason_t reason =
-            proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
-        if (reason == PROC_WAKE_TIMEOUT_CAPACITY)
-            return -EAGAIN;
-        if (proc_wake_reason_is_task_interrupt(reason) ||
-            signal_task_has_unblocked(t)) {
-            /* Linux: clock_nanosleep is never restarted; relative sleeps
-             * report the remaining time through rem. */
-            if (!(flags & TIMER_ABSTIME) && rem) {
-                uint64_t now = timer_get_ticks();
-                uint64_t left = until > now ? until - now : 0;
-                uint64_t out[2] = {
-                    left / TICKS_PER_SEC,
-                    (left % TICKS_PER_SEC) * 1000000000ULL / TICKS_PER_SEC,
-                };
-                if (copy_to_user(rem, out, sizeof(out)) < 0)
-                    return -EFAULT;
-            }
-            return -EINTR;
-        }
-        if (timer_get_ticks() >= until)
-            return 0;
-    }
 }
 
 int64_t sys_getitimer(int which, void *curr_value)
