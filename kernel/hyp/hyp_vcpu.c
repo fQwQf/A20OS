@@ -45,7 +45,7 @@
  *
  * R|W|X is valid. Guest stage-1 permissions still apply.
  */
-#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | PTE_X)
+#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | HYP_PROT_EXEC)
 
 /* CPU-local activation: one RUN owner per vCPU, with each VM bounded by
  * its configured parallel limit and synchronous stage-2 fences. Distinct managed
@@ -465,6 +465,8 @@ int hyp_vcpu_run_result(hyp_vcpu_t *vcpu, hyp_exit_reason_t *reason)
     vcpu->claimed = 1;
     vcpu->host_cpu = cpu;
     vcpu->vm->run_count++;
+    if (vcpu->vm->run_count > vcpu->vm->peak_run_count)
+        vcpu->vm->peak_run_count = vcpu->vm->run_count;
     vcpu->vm->active_cpu_mask |= 1u << cpu;
     hyp_vcpu_get(vcpu);
     if (legacy) hyp_legacy_vcpu = vcpu;

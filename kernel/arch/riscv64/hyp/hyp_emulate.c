@@ -699,6 +699,15 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
      * translation is page granular, so the offset the guest computed survives
      * into the GPA unchanged. */
     uint64_t gpage = (htval << 2) & ~(uint64_t)(PAGE_SIZE - 1);
+    extern pte_t hyp_riscv_s2_prot(hyp_vm_t *, uint64_t);
+    pte_t access = scause == HYP_SCAUSE_GPF_INST ? PTE_X :
+                   scause == HYP_SCAUSE_GPF_STORE ? PTE_W : PTE_R;
+    pte_t present = hyp_riscv_s2_prot(vcpu->vm, gpage);
+    if (present && !(present & access)) {
+        hyp_vcpu_record_fault(vcpu, scause, gpage, htval);
+        return 0;
+    }
+
 
     if (scause == HYP_SCAUSE_GPF_INST) {
         /* A fetch has neither width nor operand, so the device model is not

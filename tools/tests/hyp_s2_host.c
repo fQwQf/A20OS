@@ -171,6 +171,13 @@ static void test_format(unsigned levels) {
     vm.active_cpu_mask = 2;
     assert(hyp_s2_tree_map(&vm, gpa + PAGE_SIZE, extra, PTE_R) == -EBUSY);
     assert(hyp_s2_tree_unmap(&vm, gpa) == -EBUSY);
+    /* SMP permits only additions while a remote CPU holds translations. */
+    f.live_update = 1;
+    assert(hyp_s2_tree_map(&vm, gpa + PAGE_SIZE, extra, PTE_R) == 0);
+    assert(hyp_s2_tree_unmap(&vm, gpa + PAGE_SIZE) == -EBUSY);
+    vm.active_cpu_mask = 1;
+    assert(hyp_s2_tree_unmap(&vm, gpa + PAGE_SIZE) == 0);
+    f.live_update = 0;
     vm.active_cpu_mask = 1; /* current CPU can update its own mapping */
     mm_pt_audit_report_t r;
     assert(hyp_s2_tree_audit(&vm, &r) == 0 && r.pt_pages == levels && r.entries == levels);

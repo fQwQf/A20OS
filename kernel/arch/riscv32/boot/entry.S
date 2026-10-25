@@ -1,7 +1,9 @@
     .section .text.entry
     .globl _start
 _start:
-    bnez    a0, .park
+    mv      tp, zero
+    /* OpenSBI may elect any hart for cold boot. Only that hart runs _start;
+     * HSM secondaries use riscv32_secondary_start below. */
 
     la      sp, _stack_end
 
@@ -114,6 +116,34 @@ __boot_dtb_ptr:
     .align 12
     .globl _stack_bottom
 _stack_bottom:
-    .space 4096 * 16
+    .space 4096 * 16 * CONFIG_NR_CPUS
     .globl _stack_end
 _stack_end:
+
+    .section .text.entry
+    .align 2
+    .globl riscv32_secondary_start
+riscv32_secondary_start:
+    mv      tp, zero
+    /* SBI passes logical CPU id in a1. Boot page tables are published before
+     * hart_start, so secondaries only install the already-built root. */
+    mv      s0, a1
+    la      sp, _stack_end
+    li      t0, 65536
+    mul     t0, s0, t0
+    sub     sp, sp, t0
+#ifndef CONFIG_NOMMU
+    la      t0, boot_pgdir
+    srli    t0, t0, 12
+    li      t1, 0x80000000
+    or      t0, t0, t1
+    csrw    satp, t0
+    sfence.vma
+#endif
+    la      t0, __trap_from_kernel
+    csrw    stvec, t0
+    li      t0, 0x6100
+    csrs    sstatus, t0
+    mv      a0, s0
+    call    riscv32_secondary_entry
+    j       .park

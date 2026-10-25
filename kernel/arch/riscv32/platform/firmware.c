@@ -8,7 +8,7 @@ uint32_t sbi_call(uint32_t eid, uint32_t fid, uint32_t arg0, uint32_t arg1, uint
     register uint32_t a2 __asm__("a2") = arg2;
     register uint32_t a6 __asm__("a6") = fid;
     register uint32_t a7 __asm__("a7") = eid;
-    __asm__ __volatile__("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a6), "r"(a7) : "memory");
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1) : "r"(a2), "r"(a6), "r"(a7) : "memory");
     return a0;
 }
 

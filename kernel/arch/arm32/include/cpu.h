@@ -6,7 +6,7 @@
 
 #define ARM32_CACHE_LINE 64U
 
-extern volatile uint32_t arm32_trap_flags;
+extern volatile uint32_t arm32_trap_flags[CONFIG_NR_CPUS];
 uint32_t arm32_gic_ack(void);
 
 /*
@@ -50,7 +50,7 @@ static inline void arch_flush_icache_range(const void *addr, size_t size) {
 static inline unsigned arch_current_cpu_id(void) {
     uint32_t mpidr;
     __asm__ __volatile__("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
-    return mpidr & 0x3U;
+    return mpidr & 0xFFU;
 }
 
 static inline uint32_t arch_read_cpsr(void) {
@@ -134,13 +134,13 @@ static inline uint64_t arch_read_cycle(void) {
     return v;
 }
 
-extern volatile uint32_t arm32_trap_flags;
-extern volatile uint32_t arm32_fault_addr;
-extern volatile uint32_t arm32_fault_pc;
+extern volatile uint32_t arm32_trap_flags[CONFIG_NR_CPUS];
+extern volatile uint32_t arm32_fault_addr[CONFIG_NR_CPUS];
+extern volatile uint32_t arm32_fault_pc[CONFIG_NR_CPUS];
 
-static inline uint64_t arch_read_cause(void) { return (uint64_t)arm32_trap_flags; }
-static inline uint64_t arch_read_epc(void) { return (uint64_t)arm32_fault_pc; }
-static inline uint64_t arch_read_tval(void) { return (uint64_t)arm32_fault_addr; }
+static inline uint64_t arch_read_cause(void) { return (uint64_t)arm32_trap_flags[arch_current_cpu_id()]; }
+static inline uint64_t arch_read_epc(void) { return (uint64_t)arm32_fault_pc[arch_current_cpu_id()]; }
+static inline uint64_t arch_read_tval(void) { return (uint64_t)arm32_fault_addr[arch_current_cpu_id()]; }
 static inline void arch_write_epc(uint64_t v) { (void)v; }
 static inline void arch_write_tvec(uint64_t v) {
     __asm__ __volatile__("mcr p15, 0, %0, c12, c0, 0\n\tisb" :: "r"((uint32_t)v) : "memory");

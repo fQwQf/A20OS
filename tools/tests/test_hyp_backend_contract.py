@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-UNAVAILABLE_ARCHES = ("arm32", "riscv32", "loongarch64", "ppc64le")
+UNAVAILABLE_ARCHES = ("ppc64le",)
 
 SHIMS = {
     "mm/pt.h": """#pragma once

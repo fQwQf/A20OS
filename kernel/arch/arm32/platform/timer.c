@@ -19,9 +19,9 @@ void timer_set_interval(uint64_t ticks) {
 }
 
 uint64_t timer_get_ticks(void) {
-    uint32_t lo;
-    __asm__ __volatile__("mrc p15, 0, %0, c14, c0, 0" : "=r"(lo));
-    return lo;
+    uint32_t lo, hi;
+    __asm__ __volatile__("mrrc p15, 0, %0, %1, c14" : "=r"(lo), "=r"(hi));
+    return ((uint64_t)hi << 32) | lo;
 }
 
 void timer_irq_tick(void) {

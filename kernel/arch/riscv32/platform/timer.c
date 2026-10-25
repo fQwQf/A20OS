@@ -7,12 +7,12 @@
 static uint64_t timer_freq;
 
 static uint64_t aclint_mtime_read(void) {
-    uint32_t lo, hi;
-    __asm__ volatile(
-        "csrr %0, timeh\n"
-        "csrr %1, time\n"
-        : "=r"(hi), "=r"(lo)
-    );
+    uint32_t lo, hi, again;
+    do {
+        __asm__ volatile("csrr %0, timeh" : "=r"(hi));
+        __asm__ volatile("csrr %0, time" : "=r"(lo));
+        __asm__ volatile("csrr %0, timeh" : "=r"(again));
+    } while (hi != again);
     return ((uint64_t)hi << 32) | lo;
 }
 

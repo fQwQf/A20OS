@@ -13,8 +13,10 @@ typedef struct hyp_s2_format {
      * synchronously retire local translations before backing can be reused.
      * Every backend must also flush on load (including CPU migration). */
     int (*invalidate)(hyp_vm_t *vm, uint64_t gpa);
-    /* Zero rejects updates while a remote CPU has this VM claimed. A backend
-     * enabling this must implement synchronous remote invalidation as well. */
+    /* Allow zero-to-present additions while remote vCPUs are running. Every
+     * hardware re-entry must flush translations, so a remote fault retries
+     * against the new map. Unmap always rejects remote active CPUs: backing
+     * is never returned while another CPU can retain a translation. */
     int live_update;
     uint64_t leaf_check_mask; /* audit excludes hardware-maintained A/D bits */
 } hyp_s2_format_t;

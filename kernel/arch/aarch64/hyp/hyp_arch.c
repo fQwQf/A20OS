@@ -6,6 +6,7 @@
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "core/cpu.h"
+#include "core/smp.h"
 #include "core/errno.h"
 #include "core/string.h"
 #include "core/timer.h"
@@ -70,7 +71,7 @@ static const hyp_s2_format_t stage2_format = {
     .leaf_check_mask = 3 | (15ULL << 2) | (3ULL << 6) |
                        (3ULL << 8) | (1ULL << 54),
     .leaf_flags = stage2_leaf, .invalidate = stage2_invalidate,
-    .live_update = 0,
+    .live_update = 1,
 };
 static int aarch64_vm_init(hyp_vm_t *vm)
 {
@@ -79,7 +80,7 @@ static int aarch64_vm_init(hyp_vm_t *vm)
 static int aarch64_smp(hyp_vm_t *vm)
 {
     (void)vm;
-    return -EOPNOTSUPP; /* Virtual GIC and cross-CPU TLB shootdown are absent. */
+    return smp_online_cpu_count() > 1 ? 0 : -EOPNOTSUPP;
 }
 
 /* EL2 accesses state with its MMU off. Clean to PoC before the call and
@@ -107,13 +108,13 @@ static void aarch64_destroy_vcpu(hyp_vcpu_t *vcpu)
 static void aarch64_reset(hyp_vcpu_t *vcpu, uint64_t entry,
                           uint64_t hart, uint64_t opaque)
 {
-    (void)hart;
     if (vcpu->backend_data) {
         struct aarch64_hyp_state *s = vcpu->backend_data;
         memset(s, 0, PAGE_SIZE);
         s->guest.pstate = 0x3c5;
         s->guest.sys[0] = 0x30d00800;
         s->guest.sys[2] = 3ULL << 20;
+        s->mpidr = 0x80000000ULL | hart;
     }
     memset(vcpu->regs, 0, sizeof(vcpu->regs));
     vcpu->pc = entry;
@@ -121,7 +122,7 @@ static void aarch64_reset(hyp_vcpu_t *vcpu, uint64_t entry,
 }
 static int aarch64_set_boot(hyp_vcpu_t *vcpu, uint64_t hart, uint64_t dtb)
 {
-    if (hart) return -EOPNOTSUPP;
+    if (hart != vcpu->id) return -EINVAL;
     /* AArch64 Linux/Image boot protocol: x0=DTB, x1..x3=0, EL1h. */
     vcpu->regs[0] = dtb;
     vcpu->regs[1] = vcpu->regs[2] = vcpu->regs[3] = 0;
@@ -156,7 +157,7 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
     s->hcr = (1ULL << 31) | (1ULL << 21) | (1ULL << 20) |
              (1ULL << 19) | (1ULL << 14) | (1ULL << 13) |
              (1ULL << 5) | (1ULL << 4) | (1ULL << 3) | (1ULL << 1) | 1;
-    s->mpidr = 0x80000000ULL; /* UP, affinity zero. */
+    s->mpidr = 0x80000000ULL | vcpu->id;
     uint64_t now, deadline, ctl, freq;
     __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
     __asm__ volatile("mrs %0, cntp_cval_el0" : "=r"(deadline));
@@ -234,12 +235,25 @@ static int guest_call(hyp_vcpu_t *vcpu)
     case 0x84000008: case 0x84000009:
         vcpu->exit = HYP_EXIT_SHUTDOWN;
         return 0;
+    case 0x84000003: case 0xc4000003: { /* CPU_ON: affinity maps to vCPU id. */
+        uint64_t hart = vcpu->regs[1];
+        int rc = hyp_vm_hart_start(vcpu->vm, hart, vcpu->regs[2], vcpu->regs[3]);
+        result = !rc ? 0 : rc == -EALREADY ? -4 : -2;
+        break;
+    }
+    case 0x84000004: case 0xc4000004: { /* AFFINITY_INFO */
+        int st = hyp_vm_hart_status(vcpu->vm, vcpu->regs[1]);
+        result = st < 0 ? -2 : st == HYP_HART_STOPPED ? 1 :
+                 st == HYP_HART_START_PENDING ? 2 : 0;
+        break;
+    }
     case 0x84000002: /* CPU_OFF */
         vcpu->exit = HYP_EXIT_HART_STOPPED;
         return 0;
     case 0x8400000a: /* PSCI_FEATURES */
         switch ((uint32_t)vcpu->regs[1]) {
-        case 0x84000000: case 0x84000002: case 0x84000008:
+        case 0x84000000: case 0x84000002: case 0x84000003:
+        case 0xc4000003: case 0x84000004: case 0xc4000004: case 0x84000008:
         case 0x84000009: case 0x8400000a: result = 0; break;
         }
         break;
@@ -318,7 +332,7 @@ static void aarch64_put(hyp_vcpu_t *vcpu)
 const hyp_backend_t *hyp_arch_backend(void)
 {
     static const hyp_backend_t backend = {
-        .name = "aarch64-el2", .s2_root_order = 0, .max_running_vcpus = 1,
+        .name = "aarch64-el2", .s2_root_order = 0, .max_running_vcpus = CONFIG_NR_CPUS,
         .gpa_limit = 1ULL << 39, .ram_base = 0x40000000,
         .probe_smp = aarch64_smp, .reset = aarch64_reset,
         .vm_init = aarch64_vm_init, .vm_destroy = hyp_s2_tree_destroy,
