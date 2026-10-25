@@ -2,6 +2,9 @@
 #define A20_HYP_BACKEND_H
 #include "core/types.h"
 #include "mm/pt.h"
+/* Short-descriptor host MMUs may expose no semantic executable bit. Guest
+ * stage-2 permissions still need one; keep it out of the host PTE ABI. */
+#define HYP_PROT_EXEC ((pte_t)(PTE_X ? PTE_X : (1UL << 31)))
 struct hyp_vm;
 struct hyp_vcpu;
 /* Internal interface shared by all ABI adapters. Capabilities describe the

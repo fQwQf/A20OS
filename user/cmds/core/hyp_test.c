@@ -59,7 +59,7 @@ struct hyp_test_status {
 
 /* Where the demo guest lives; the stage-2 root only programs root entries
  * [0, 512 GiB), so this is well inside the limit. */
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__arm__)
 #define GUEST_BASE 0x40000000ULL
 #elif defined(__x86_64__)
 #define GUEST_BASE 0x100000ULL
@@ -79,7 +79,7 @@ struct hyp_test_status {
 #define GUEST_UART_LSR_OFF  5
 #define GUEST_UART_RBR_OFF  0
 
-#if !defined(__aarch64__) && !defined(__x86_64__)
+#if !defined(__aarch64__) && !defined(__x86_64__) && !defined(__arm__)
 /*
  * Minimal guest: print "HYP\n" with four legacy SBI console_putchar calls,
  * then shut down.  Every word below was assembled and disassembled with
@@ -202,8 +202,17 @@ int main(int argc, char **argv)
         0xd2800100, 0xd4000002,
     };
     size_t code_size = sizeof(code);
+#elif defined(__arm__)
+    static const uint32_t code[] = {
+        0xe3a00001, 0xe3a01048, 0xe1400070,
+        0xe3a00001, 0xe3a01059, 0xe1400070,
+        0xe3a00001, 0xe3a01050, 0xe1400070,
+        0xe3a00001, 0xe3a0100a, 0xe1400070,
+        0xe3a00008, 0xe1400070,
+    };
+    size_t code_size = sizeof(code);
 #elif defined(__x86_64__)
-    static const uint8_t code[] = {
+    uint8_t code[] = {
         0xb8,1,0,0,0, 0xbb,'H',0,0,0, 0x0f,0x01,0xd9,
         0xb8,1,0,0,0, 0xbb,'Y',0,0,0, 0x0f,0x01,0xd9,
         0xb8,1,0,0,0, 0xbb,'P',0,0,0, 0x0f,0x01,0xd9,
@@ -211,6 +220,20 @@ int main(int argc, char **argv)
         0xb8,8,0,0,0, 0x0f,0x01,0xd9,
     };
     size_t code_size = sizeof(code);
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(0x80000000u), "c"(0));
+    int svm = 0;
+    if (a >= 0x80000001u) {
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(0x80000001u), "c"(0));
+        svm = !!(c & 4);
+    }
+    if (!svm) { /* VMX uses VMCALL; the SVM payload uses VMMCALL. */
+        for (size_t i = 0; i + 2 < sizeof(code); i++)
+            if (code[i] == 0x0f && code[i + 1] == 1 && code[i + 2] == 0xd9)
+                code[i + 2] = 0xc1;
+    }
 #else
     /* In echo mode the guest is ONE program: the banner followed by the round
      * trip and the shutdown, laid at the same base.  Appending the round trip
@@ -244,7 +267,7 @@ int main(int argc, char **argv)
 
     size_t code_size = n * sizeof(code[0]);
 #endif
-#if defined(__aarch64__) || defined(__x86_64__)
+#if defined(__aarch64__) || defined(__x86_64__) || defined(__arm__)
     if (do_echo) {
         fprintf(stderr, "hyp_test: echo requires the RISC-V UART guest payload\n");
         return 2;

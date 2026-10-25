@@ -11,7 +11,7 @@
 
 ## 当前实现
 
-Native 与 Linux 扩展 syscall 包装共享 VM/vCPU 核心，统一引用、生命周期、配置、控制和统计。Linux 扩展 syscall **不是 KVM ABI**。既有 RISC-V H 后端要求 Sstc 和 firmware 权限。2026-10-25 增加了实验性 AArch64 EL2 与 x86_64 AMD SVM 后端，已验证小型同架构 guest 的真实执行、按需映射、抢占和回收；新后端限单 vCPU，未验收完整 OS guest、虚拟中断控制器或 Intel VMX。其余架构仍返回不支持。实现范围、可重复命令与验证边界见 [多架构后端](../../hypervisor/08-multiarch-backends.md)。
+Native 与 Linux 扩展 syscall 包装共享 VM/vCPU 核心，统一引用、生命周期、配置、控制和统计。Linux 扩展 syscall **不是 KVM ABI**。既有 RISC-V H 后端要求 Sstc 和 firmware 权限。2026-10-25 增加并实际运行验证了 AArch64 EL2、ARM32 HYP、RV32 H、x86_64 AMD SVM/Intel VMX 后端，以及每种可执行后端的双宿主 CPU / 双 vCPU 并行、按需映射、权限拒绝、抢占、停止和回收。VMX 使用 Bochs 软件 CPU 实际执行，SVM 另有嵌套 KVM 记录；没有 Intel 实机验收。LoongArch LVZ 仅提供默认关闭的实验实现，尚无 LVZ 正控运行证据。完整 OS guest SMP、virtual GIC/APIC 和长期稳定性没有因此验收。见 [多架构后端](../../hypervisor/08-multiarch-backends.md) 与 [SMP 验证记录](../../hypervisor/09-smp-validation.md)。
 
 Sv39x4 根表 16 KiB 对齐，开放低 512 GiB GPA，使用 VMID 0 并在激活时刷新两阶段翻译。RAM 按页分配记账，设备通过 pin/copy 访问。vCPU 激活为 CPU-local，保存 VS CSR、FP、计时器和 IRQ 状态。
 

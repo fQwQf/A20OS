@@ -1,0 +1,47 @@
+/* Test-only Multiboot v1 handoff after the Bochs BIOS boots this sector.
+ * The debugger preloads kernel.bin at 2 MiB. Exclude the top 64 KiB of the
+ * 512 MiB machine: Bochs BIOS stores its ACPI tables there. */
+.code16
+.global _start
+_start:
+ cli
+ xorw %ax,%ax
+ movw %ax,%ds
+ movw %ax,%es
+ movw %ax,%ss
+ movw $0x7c00,%sp
+ inb $0x92,%al
+ orb $2,%al
+ outb %al,$0x92
+ lgdt gdtr
+ movl %cr0,%eax
+ orl $1,%eax
+ movl %eax,%cr0
+ ljmpl $8,$protected
+.code32
+protected:
+ movw $16,%ax
+ movw %ax,%ds
+ movw %ax,%es
+ movw %ax,%ss
+ movl $0x90000,%esp
+ movl $0x2badb002,%eax
+ movl $mbinfo,%ebx
+ movl $0x200020,%edx
+ jmp *%edx
+.align 8
+gdt:
+ .quad 0,0x00cf9b000000ffff,0x00cf93000000ffff
+gdtr:
+ .word 23
+ .long gdt
+mbinfo:
+ .long 0x45,640,523200,0,cmdline,0,0,0,0,0,0,24,mmap
+mmap:
+ .long 20
+ .quad 0x100000,0x1fef0000
+ .long 1
+cmdline:
+ .asciz "@BOOTARGS@"
+.org 510
+.word 0xaa55

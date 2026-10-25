@@ -121,7 +121,7 @@ arches = ["loongarch64", "riscv64"]
 # SMP >1 is only pre-verified on these QEMU virt platforms; anything else
 # needs machine.allow_unverified_smp = true.
 [capability.smp-verified-qemu]
-arches = ["riscv64", "aarch64", "loongarch64", "x86_64"]
+arches = ["riscv64", "riscv32", "arm32", "aarch64", "loongarch64", "x86_64"]
 
 # PCIe MMIO windows.  Boards whose SoC has no PCIe root complex must leave
 # the MMIO-allocation window undefined, not defined-as-zero: pci_bus.c would

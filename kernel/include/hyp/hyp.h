@@ -115,6 +115,7 @@ typedef struct hyp_vm {
     /* Serializes native-format stage-2 trees and RUN activation. */
     spinlock_t s2_lock;
     const struct hyp_s2_format *s2_format;
+    unsigned peak_run_count; /* observed concurrent RUN owners, control_lock */
 } hyp_vm_t;
 
 struct hyp_stats {

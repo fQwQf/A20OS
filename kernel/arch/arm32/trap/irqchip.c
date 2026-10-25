@@ -6,9 +6,9 @@
 #include "drivers/core/driver_hwapi.h"
 #include "core/progress.h"
 
-volatile uint32_t arm32_trap_flags;
-volatile uint32_t arm32_fault_addr;
-volatile uint32_t arm32_fault_pc;
+volatile uint32_t arm32_trap_flags[CONFIG_NR_CPUS];
+volatile uint32_t arm32_fault_addr[CONFIG_NR_CPUS];
+volatile uint32_t arm32_fault_pc[CONFIG_NR_CPUS];
 
 static inline volatile uint32_t *gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
@@ -43,21 +43,27 @@ static void gic_set_target(uint32_t irq, uint8_t mask) {
     *gicd_reg8(GICD_ITARGETSR(irq)) = mask;
 }
 
+static uint32_t gic_iar[CONFIG_NR_CPUS];
 static void gic_eoi(uint32_t irq) {
-    *gicc_reg32(GICC_EOIR) = irq;
+    (void)irq;
+    *gicc_reg32(GICC_EOIR) = gic_iar[arch_current_cpu_id()];
 }
 
 uint32_t arm32_gic_ack(void) {
-    return *gicc_reg32(GICC_IAR) & 0x3FFU;
+    uint32_t iar = *gicc_reg32(GICC_IAR);
+    gic_iar[arch_current_cpu_id()] = iar;
+    return iar & 0x3FFU;
 }
 
 static void gic_init(void) {
-    *gicd_reg32(GICD_CTLR) = 0;
+    if (!arch_current_cpu_id()) *gicd_reg32(GICD_CTLR) = 0;
     *gicc_reg32(GICC_CTLR) = 0;
     gic_set_priority(IRQ_S_TIMER, 0x40);
     gic_set_priority(UART0_IRQ, 0x40);
     gic_set_target(IRQ_S_TIMER, 0x01);
     gic_set_target(UART0_IRQ, 0x01);
+    gic_set_priority(IRQ_S_SOFT, 0x40);
+    gic_enable_irq(IRQ_S_SOFT);
     gic_enable_irq(IRQ_S_TIMER);
     gic_enable_irq(UART0_IRQ);
     *gicc_reg32(GICC_PMR) = 0xFF;
@@ -85,6 +91,11 @@ void trap_init(void) {
 void arch_handle_irq(reg_t irq, int from_user) {
     if (irq >= 1020)
         return;
+    if (irq == IRQ_S_SOFT) {
+        proc_sched_handle_reschedule_ipi();
+        gic_eoi(IRQ_S_SOFT);
+        return;
+    }
     if (irq == IRQ_S_TIMER) {
         handle_timer_irq(from_user);
         return;

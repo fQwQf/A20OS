@@ -444,6 +444,28 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
     return 0;
 }
 
+/* The generic final-destroy path may batch base-page removals. ARM short
+ * descriptors have 256 leaf slots; stop before sections, holes or swap. */
+int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                      paddr_t *pa_out) {
+    if (!mm || !mm->pgdir || !pa_out || max_pages <= 0) return 0;
+    int root = L1_INDEX(va);
+    if (!l1_index_valid(root) || !IS_TABLE(mm->pgdir[root])) return 0;
+    pte_t *table = arch_pte_to_ptr(mm->pgdir[root]);
+    unsigned first = L2_INDEX(va), count = 0;
+    while (count < (unsigned)max_pages && first + count < ARM32_L2_ENTRIES) {
+        pte_t entry = table[first + count];
+        if (!(entry & PTE_V) || !IS_LEAF(entry)) break;
+        pa_out[count] = arch_pte_addr(entry);
+        table[first + count++] = 0;
+    }
+    if (count && pt_table_empty(table, ARM32_L2_ENTRIES)) {
+        mm->pgdir[root] = 0;
+        pt_free_internal(table, 0);
+    }
+    return count;
+}
+
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
     vaddr_t base;
     size_t size;

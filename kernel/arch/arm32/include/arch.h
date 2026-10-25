@@ -2,6 +2,8 @@
 #define _ARCH_ARM32_H
 
 #define ARCH_NAME "arm32"
+/* Native stage-2 owns its LPAE tree independently of host short descriptors. */
+#define ARCH_HAS_HYP_S2 1
 
 #include "platform.h"
 #include "console.h"

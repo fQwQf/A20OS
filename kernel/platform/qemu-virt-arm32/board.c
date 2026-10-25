@@ -4,6 +4,11 @@
 #include "core/arch.h"
 #include "core/cpu.h"
 #include "core/timer.h"
+#include "core/smp.h"
+
+#if CONFIG_NR_CPUS > 8
+#error "ARM32 QEMU virt SMP uses GICv2 and supports at most 8 CPUs"
+#endif
 
 static inline volatile uint32_t *arm32_gicd_reg32(uint32_t off) {
     return (volatile uint32_t *)(uintptr_t)(GICD_BASE + off);
@@ -90,12 +95,39 @@ static void arm32_enumerate_devices(void) {
     virtio_mmio_enumerate(VIRTIO_BASE, 8, 48);
 }
 
+static unsigned arm32_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity, uint64_t boot) {
+    if (boot) return 0;
+    for (unsigned i = 0; i < capacity; i++) {
+        cpus[i].hw_id = i;
+        cpus[i].platform_cookie = 0;
+    }
+    return capacity;
+}
+static int arm32_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry, uintptr_t context) {
+    return firmware_cpu_on(cpu->hw_id, entry, context);
+}
+static void arm32_smp_ipi(const smp_cpu_desc_t *cpu, smp_ipi_reason_t reason) {
+    (void)reason;
+    arch_wmb();
+    *arm32_gicd_reg32(0xf00) = (1u << (16 + cpu->hw_id)) | IRQ_S_SOFT;
+}
+static void arm32_smp_secondary_init(const smp_cpu_desc_t *cpu) {
+    (void)cpu;
+    volatile uint32_t *gicc = (void *)(uintptr_t)GICC_BASE;
+    gicc[0] = 0; gicc[1] = 0xff; gicc[0] = 1;
+}
+static const smp_platform_ops_t arm32_smp_ops = {
+    .discover = arm32_smp_discover, .start = arm32_smp_start,
+    .send_ipi = arm32_smp_ipi, .secondary_init = arm32_smp_secondary_init,
+};
+
 static const board_config_t qemu_virt_arm32 = {
     .name = "qemu-virt-arm32",
     .ram_base = PHYS_MEMORY_BASE,
     .ram_end = PHYS_MEMORY_END,
     .irqchip = &arm32_irqchip_ops,
     .timer = &arm32_timer_ops,
+    .smp = &arm32_smp_ops,
     .early_init = arm32_early_init,
     .poweroff = arm32_poweroff,
     .reboot = arm32_reboot,

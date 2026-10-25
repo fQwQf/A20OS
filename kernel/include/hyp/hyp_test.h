@@ -9,6 +9,8 @@ typedef struct hyp_test_payload {
     size_t spin_size;
     uint64_t check_offset;
     uint32_t check_value;
+    const void *smp_code;
+    size_t smp_size;
 } hyp_test_payload_t;
 const hyp_test_payload_t *hyp_arch_test_payload(void);
 #endif

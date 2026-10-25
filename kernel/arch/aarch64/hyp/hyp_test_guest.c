@@ -12,12 +12,16 @@ static const uint32_t code[] = {
     0xd2800100, 0xd4000002, /* mov x0,#8; hvc #0 */
 };
 static const uint32_t spin[] = {0x14000000}; /* b . */
+static const uint32_t smp_code[] = {
+    0x52800021, 0xb9000001, 0x92800082, 0x8a020002, 0xb9400841, 0x34ffffe1, 0xd2800040, 0xf2b08000, 0xd4000002, 0x14000000
+};
 const hyp_test_payload_t *hyp_arch_test_payload(void)
 {
     static const hyp_test_payload_t p = {
         .code = code, .code_size = sizeof(code),
         .spin = spin, .spin_size = sizeof(spin),
         .check_offset = 4096 + 4, .check_value = 0x5a,
+        .smp_code = smp_code, .smp_size = sizeof(smp_code),
     };
     return &p;
 }
