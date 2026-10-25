@@ -64,6 +64,7 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # The instance names its deployable artifact; keep recovery and
             # interactive images distinct while sharing the prepared firmware.
             image_variable = {"pine-a64": "PINE_A64_IMAGE",
+                              "lichee-pi-zero": "LICHEE_PI_ZERO_IMAGE",
                               "quartz64-zero": "QUARTZ64_ZERO_IMAGE",
                               "licheerv-nano": "LICHEERV_NANO_IMAGE",
                               "ox64": "OX64_IMAGE"}.get(inst.board)

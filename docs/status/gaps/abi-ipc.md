@@ -34,9 +34,9 @@ uid/gid 权限模型的差异。
 - 关闭条件：`TIOCSCTTY(0)`/`TIOCNOTTY` 按 Linux 语义生效（只有会话首进程能取得，重复取得 `EPERM`，steal 位可夺取）；会话首进程退出时向该终端的前台进程组发 SIGHUP、向会话内其余进程发 SIGCONT，并解除归属；后台进程组读终端收到 SIGTTIN（写且置 `TOSTOP` 时收到 SIGTTOU）；`vhangup` 有真正可撤销的终端；上述行为各有 guest 门禁覆盖。
 - 来源：`kernel/fs/devfs/tty.c`、`kernel/drivers/char/{uart,pty}.c`、[abi/linux/syscall_coverage.md](../../../kernel/abi/linux/syscall_coverage.md)。本包未处理（属于终端/驱动工作流）。
 
-### ABI-11 arm32 用户态在 fork 出的命令返回后崩溃
+### ABI-11 ARM32 fork/exec 运行时（QEMU 关闭条件已满足）
 
-- 现状：`ARCH=arm32 ABI=both BRINGUP=0` 的镜像能启动到 shell，内建命令（`echo`）正常；执行任何 fork 出去的命令（`/bin/echo`、`poweroff`）时子进程正常输出，随后父进程 mksh 在 `execute()` 里以空指针崩溃：`SIGSEGV ... sepc=0x23a3c stval=0x17`，指令是 `ldrb r3,[r9,#22]`，r9=0。此行为在本轮合并前后同样复现（同一镜像、同一输入），不是合并引入。BRINGUP=1 的内核镜像不受影响，能 `part ok` 并干净关机。
-- 缺口：arm32 上子进程退出后的等待/信号返回路径会让 mksh 走到一个空指针；用户态镜像因此无法完成任何真正的命令，也无法干净关机。
-- 关闭条件：arm32 用户态镜像里 `/bin/echo` 连续执行两次后 mksh 仍存活，且 `poweroff` 能触发 `System is going down for power-off NOW`。
-- 来源：CORE 包在合并后重跑 `smoke-arch-mmu-matrix` 的 arm32 用例时暴露；崩溃现场见 QEMU 日志（内核 `SIGSEGV: pid=6 ... comm=mksh`）。本包未处理（属于 CORE/arm32 工作流）。
+- 当前实现：C/Rust 内存接口统一采用原生地址和计数宽度，避免 ILP32 参数错位释放仍被映射的页框。异常处理进入任务自己的内核栈后允许调度；trap、切换和信号帧保存对应 VFP 状态。
+- 验证范围：QEMU virt、64 MiB、`ABI=both`、RAMFS，连续 10 轮，每轮 40 次顺序 fork/exec，并验证父子 VFP 隔离、抢占、空闲唤醒、文件读写和正常关机，共 400 次 fork/exec 通过，无 SIGSEGV、内核异常或内存耗尽。
+- 回归入口：以 `ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 DRIVER_DEPLOYMENT=embedded` 构建，执行 `python3 tools/check_serial_shell.py --arch arm32 --kernel <kernel.elf> --memory-mb 64 --fpu --timers --stress-forks 40`。
+- 边界：此结论只覆盖上述配置；V3s 板级 UART、DDR、SD 和真实中断时序尚待实机验收，异步信号与长期负载仍需独立覆盖。

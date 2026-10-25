@@ -33,7 +33,7 @@ class BoardShellProfiles(unittest.TestCase):
         self.assertNotIn('-DCONFIG_RAMFS_MEDIA', plain_vars['CFLAGS'])
 
     def test_shell_kernel_and_package_configuration(self):
-        for board in ('pine-a64', 'quartz64-zero', 'licheerv-nano', 'ox64', 'ls2k0300'):
+        for board in ('pine-a64', 'quartz64-zero', 'licheerv-nano', 'ox64', 'ls2k0300', 'lichee-pi-zero'):
             with self.subTest(board=board):
                 inst = parse_instance(REPO_ROOT / 'instances' / f'{board}-shell.toml')
                 variables = derive_make_vars(inst)
@@ -56,7 +56,7 @@ class BoardShellProfiles(unittest.TestCase):
         self.assertFalse(any(role.startswith('rootfs-') for role, _ in paths))
 
     def test_shell_and_recovery_images_are_distinct(self):
-        for board in ('pine-a64', 'quartz64-zero', 'licheerv-nano', 'ox64'):
+        for board in ('pine-a64', 'quartz64-zero', 'licheerv-nano', 'ox64', 'lichee-pi-zero'):
             recovery = parse_instance(REPO_ROOT / 'instances' / f'{board}.toml')
             shell = parse_instance(REPO_ROOT / 'instances' / f'{board}-shell.toml')
             self.assertNotEqual(shell.target.boot_media, recovery.target.boot_media)

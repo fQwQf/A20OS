@@ -48,16 +48,17 @@ echo hello > /tmp/hello
 写入 `/tmp` 和根目录的文件只保存在 RAM，复位即消失。`poweroff` 最后输出 V3s
 停机标记，需要移除外部电源。Ethernet/SSH、显示、音频均未因本 shell 实例启用；
 ARM32 已保存 trap、调度切换和信号帧的 VFP 上下文，父子进程寄存器隔离探针已通过。
-但 QEMU 重复运行仍可触发 fork 子进程的间歇 SIGSEGV，见 ABI-11；该 shell 实例是待验收配置，
-尚不能作为稳定交互系统，也不能宣称视频播放可用。
+64 MiB QEMU virt 已连续 10 轮通过每轮 40 次顺序 fork/exec、浮点隔离、抢占、空闲唤醒、
+文件操作和正常关机。该配置提供 RAM 串口 shell；V3s 外设仍待实机验收，显示和音频驱动尚未实现。
 
 主机回归使用 **QEMU virt，而非模拟 V3s 外设**，检查 ARM32 Linux ABI 的连续 exec/
 wait、休眠唤醒、subshell、文件重定向与正常关机：
 
 ```sh
-make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 \
+make ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 RAMFS_USER=1 RAMFS_FPU_TESTS=1 \
   DRIVER_DEPLOYMENT=embedded kernel-only -j2
-python3 tools/check_arm32_shell.py --kernel 构建输出目录/kernel.elf --memory-mb 64
+python3 tools/check_serial_shell.py --arch arm32 --kernel 构建输出目录/kernel.elf \
+  --memory-mb 64 --fpu --timers --stress-forks 40
 ```
 
 回归以 QEMU 生成的 DTB 经 ARM Linux `r2` 协议交接，分别在 64 MiB 与 1 GiB 完成上述命令；
