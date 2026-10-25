@@ -65,6 +65,11 @@ class InstanceError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class KernelCfg:
+    virtio_console_profile: str | None = None
+    virtio_console_rx_slots: int | None = None
+    virtio_console_tx_slots: int | None = None
+    virtio_console_buffer_size: int | None = None
+    virtio_console_ring_size: int | None = None
     profile: str | None = None
     opt: str | None = None
     user_opt: str | None = None
@@ -325,6 +330,9 @@ _SECTION_SPECS: Final = {
     "kernel": {f: ("bool" if f in {
         "bringup", "nommu", "ubsan", "swap", "werror",
         "cooperative_boot", "storage_read_only", "external_root", "ramfs_user", "ramfs_media",
+    } else "int" if f in {
+        "virtio_console_rx_slots", "virtio_console_tx_slots",
+        "virtio_console_buffer_size", "virtio_console_ring_size",
     } else "str") for f in KernelCfg.__dataclass_fields__},
     "machine": {f: ("int" if f == "smp" else "bool" if f in ("allow_unverified_smp", "gpu_3d", "vm_manager")
                     else "str_list" if f == "extra_qemu" else "str")

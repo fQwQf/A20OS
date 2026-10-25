@@ -20,14 +20,16 @@
  * for the legacy console, whose backend may discard bytes on EAGAIN.
  *
  * Receive is interrupt driven and feeds the existing console input discipline.
- * Transmit has sixteen separately owned DMA slots. The selected bulk TTY
- * accepts copied frames, waits for space without a spinlock, and exposes an
+ * Transmit has configurable, separately owned DMA slots (default sixteen).
+ * The selected bulk TTY accepts copied frames, waits for space without a
+ * spinlock, and exposes an
  * explicit drain. Raw port clients retain synchronous write completion.
  */
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
 #include "drivers/char/virtio_console.h"
+#include "drivers/char/virtio_console_config.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
@@ -86,11 +88,11 @@
 #define VPORT_Q_TX               1U
 #define VPORT_Q_CTRL_RX          2U
 #define VPORT_Q_CTRL_TX          3U
-#define VPORT_RX_SLOTS           8U
-#define VPORT_TX_SLOTS           16U
-#define VPORT_RING_SLOTS         16U
-#define VPORT_BUF_SIZE           4096U
-#define VPORT_RING_SIZE          4096U
+#define VPORT_RX_SLOTS           CONFIG_VIRTIO_CONSOLE_RX_SLOTS
+#define VPORT_TX_SLOTS           CONFIG_VIRTIO_CONSOLE_TX_SLOTS
+#define VPORT_RING_SLOTS         ((VPORT_RX_SLOTS > VPORT_TX_SLOTS) ? VPORT_RX_SLOTS : VPORT_TX_SLOTS)
+#define VPORT_BUF_SIZE           CONFIG_VIRTIO_CONSOLE_BUFFER_SIZE
+#define VPORT_RING_SIZE          CONFIG_VIRTIO_CONSOLE_RING_SIZE
 #define VPORT_TX_TIMEOUT_MS      2000U
 /* Console bytes are copied out in batches this size: the copy has to happen
  * under the instance lock (uart_receive_char must not be called with it held,

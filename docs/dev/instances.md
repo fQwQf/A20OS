@@ -96,6 +96,11 @@ cooperative_boot = false
 storage_read_only = false
 external_root = false
 ramfs_user = false           # 仅 loongarch64/riscv64（components/trim.toml 的 ramfs-user 矩阵）
+virtio_console_profile = "throughput" # 默认；compact 减少队列与缓冲区内存
+# virtio_console_rx_slots = 2         # 可单独覆盖预设，必须为 1～16 的 2 次幂
+# virtio_console_tx_slots = 2
+# virtio_console_buffer_size = 512    # 64～4096 的 2 次幂，单位 B
+# virtio_console_ring_size = 512      # 128～65536 的 2 次幂，单位 B
 
 [machine]
 console = "serial"           # cli-x86_64 默认 virtio：带背压的批量 TTY；其余保持 serial
@@ -191,6 +196,9 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `kernel.profile` / `opt` / `user_opt` | `PROFILE` / `OPT` / `USER_OPT` |
 | `kernel.bringup` / `nommu` | `BRINGUP` / `NOMMU` |
 | `kernel.driver_deployment` | `DRIVER_DEPLOYMENT` |
+| `kernel.virtio_console_profile` | `VIRTIO_CONSOLE_PROFILE`（`throughput` / `compact`） |
+| `kernel.virtio_console_rx_slots` / `virtio_console_tx_slots` | `VIRTIO_CONSOLE_RX_SLOTS` / `VIRTIO_CONSOLE_TX_SLOTS` |
+| `kernel.virtio_console_buffer_size` / `virtio_console_ring_size` | `VIRTIO_CONSOLE_BUFFER_SIZE` / `VIRTIO_CONSOLE_RING_SIZE` |
 | `kernel.ubsan` / `werror` | `CONFIG_UBSAN` / `KERNEL_WERROR` |
 | `kernel.swap` | `CONFIG_SWAP`（y/n） |
 | `kernel.cooperative_boot` / `storage_read_only` / `external_root` / `ramfs_user` | `COOPERATIVE_BOOT` / `STORAGE_READ_ONLY` / `EXTERNAL_ROOT` / `RAMFS_USER` |
@@ -206,6 +214,10 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
 | `target.serial` / `boot_media` / `media_device` | `TARGET_SERIAL` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` |
+
+`kernel.virtio_console_*` 是驱动构建配置：`throughput` 默认保持吞吐配置，
+`compact` 将当前 x86_64 批量 TTY 的 DMA 分配从 200 KiB 降至 16 KiB。
+预设、覆盖参数、Make 用法及完整内存预算见 [Virtio-console 内存配置](../drivers/classes/virtio-console.md)。
 
 `gui.enabled`、`test.commands`、`test.expect`、`test.require_clean_exit`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 

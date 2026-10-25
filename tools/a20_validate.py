@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Final, assert_never
+from virtio_console_config import resolve as resolve_virtio_console
 
 from a20_registry import (
     RegistryError,
@@ -112,6 +113,13 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if k.driver_deployment is not None and k.driver_deployment not in DRIVER_DEPLOYMENTS:
         e.append(f"kernel.driver_deployment: unsupported '{k.driver_deployment}'; "
                  f"supported: {', '.join(DRIVER_DEPLOYMENTS)}")
+    try:
+        resolve_virtio_console(k.virtio_console_profile, **{
+            name: getattr(k, "virtio_console_" + name)
+            for name in ("rx_slots", "tx_slots", "buffer_size", "ring_size")
+        })
+    except ValueError as error:
+        e.append(f"kernel.{error}")
     trim = _trim(inst, repo_root, e)
     if trim is not None:
         _validate_capabilities(inst, trim, e)

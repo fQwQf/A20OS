@@ -193,11 +193,28 @@ $(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c \
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
-$(USER_BUILD_DIR)/virtio-console.a20drv: $(DRVMOD_DIR)/virtio_console.c \
+# These settings affect only this driver, not the common userland build ID.
+# Recheck the header on each build, but change its timestamp only when the
+# resolved values change. Switching presets (including back to defaults)
+# therefore rebuilds the module and its dependent images without make clean.
+VIRTIO_CONSOLE_PROFILE ?= throughput
+VPORT_CONFIG_HEADER := $(USER_BUILD_DIR)/.virtio-console-config.h
+vport_shellquote = '$(subst ','"'"',$(1))'
+VPORT_CONFIG_ARGS = --profile $(call vport_shellquote,$(VIRTIO_CONSOLE_PROFILE)) \
+    $(if $(strip $(VIRTIO_CONSOLE_RX_SLOTS)),--rx-slots $(call vport_shellquote,$(VIRTIO_CONSOLE_RX_SLOTS))) \
+    $(if $(strip $(VIRTIO_CONSOLE_TX_SLOTS)),--tx-slots $(call vport_shellquote,$(VIRTIO_CONSOLE_TX_SLOTS))) \
+    $(if $(strip $(VIRTIO_CONSOLE_BUFFER_SIZE)),--buffer-size $(call vport_shellquote,$(VIRTIO_CONSOLE_BUFFER_SIZE))) \
+    $(if $(strip $(VIRTIO_CONSOLE_RING_SIZE)),--ring-size $(call vport_shellquote,$(VIRTIO_CONSOLE_RING_SIZE)))
+.PHONY: FORCE_VPORT_CONFIG
+FORCE_VPORT_CONFIG:
+$(VPORT_CONFIG_HEADER): tools/virtio_console_config.py $(USER_BUILD_STAMP) FORCE_VPORT_CONFIG
+	@$(PYTHON) tools/virtio_console_config.py $(VPORT_CONFIG_ARGS) --output $(call vport_shellquote,$@)
+
+$(USER_BUILD_DIR)/virtio-console.a20drv: $(DRVMOD_DIR)/virtio_console.c $(VPORT_CONFIG_HEADER) \
 		kernel/drivers/char/virtio_console.c \
 		kernel/include/drivers/char/virtio_console.h
 	@mkdir -p $(dir $@)
-	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -include $(call vport_shellquote,$(VPORT_CONFIG_HEADER)) -c $< -o $@
 
 $(USER_BUILD_DIR)/virtio-rng.a20drv: $(DRVMOD_DIR)/virtio_rng.c \
 		kernel/drivers/char/virtio_rng.c
