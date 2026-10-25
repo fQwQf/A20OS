@@ -1734,9 +1734,10 @@ ifneq ($(strip $(NET_GUEST_GATEWAY)),)
 NET_GUEST_APPEND += a20.gateway=$(NET_GUEST_GATEWAY)
 endif
 endif
-# A bulk console shares the host terminal with the early UART. Both mux
-# inputs feed the existing TTY discipline (signals, foreground process group,
-# termios); only userspace output changes transport after vport0 is published.
+# The bulk console runner merges independent UART/virtserialport sockets.
+# Avoid QEMU's lossy virtconsole path and stdio-mux writable-watch limitation.
+# Keyboard input retains the existing UART TTY signal/foreground discipline;
+# userspace output changes transport after the bulk binding is published.
 QEMU_CONSOLE ?= serial
 ifeq ($(QEMU_CONSOLE),virtio)
 ifneq ($(ARCH),x86_64)
@@ -1745,10 +1746,8 @@ endif
 ifneq ($(DISPLAY_MODE),text)
 $(error QEMU_CONSOLE=virtio requires DISPLAY_MODE=text)
 endif
-QEMU_FLAGS := $(filter-out -nographic,$(QEMU_FLAGS)) -display none -monitor none \
-    -chardev stdio,id=a20stdio,mux=on,signal=off -serial chardev:a20stdio \
-    -device virtio-serial-pci,id=a20tty \
-    -device virtconsole,chardev=a20stdio,bus=a20tty.0
+QEMU_FLAGS := $(filter-out -nographic,$(QEMU_FLAGS)) -display none -monitor none
+QEMU_CONSOLE_RUNNER := $(PYTHON) tools/qemu_console.py --
 NET_GUEST_APPEND += a20.console=vport0
 endif
 ifneq ($(strip $(NET_GUEST_APPEND)),)

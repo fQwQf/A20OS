@@ -169,7 +169,7 @@ run-gui:
 # 含 /usr/lib/a20/init 标记的镜像会被 init chroot 接管，即 distro 模式）。
 # 根盘仍是常规开发镜像（FAT32 → /bin）。
 run-world: image-world $(FAT32_IMG)
-	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
+	$(QEMU_CONSOLE_RUNNER) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
 		-device $(QEMU_BLK_SECOND),drive=xworld \
 		-kernel $(KERNEL_ELF)
