@@ -1,0 +1,2357 @@
+diff --git a/kernel/arch/aarch64/include/console.h b/kernel/arch/aarch64/include/console.h
+index 5f95153f..7ce1a58a 100644
+--- a/kernel/arch/aarch64/include/console.h
++++ b/kernel/arch/aarch64/include/console.h
+@@ -4,6 +4,10 @@
+ #include "core/types.h"
+ #include "platform.h"
+ 
++#if __has_include("board_console.h")
++#include "board_console.h"
++#else
++
+ #ifndef PL011_BAUD_IBRD
+ #define PL011_BAUD_IBRD 13
+ #define PL011_BAUD_FBRD 1
+@@ -68,4 +72,5 @@ static inline void arch_uart_ack_irq(void) {
+     *arch_uart_reg32(PL011_ICR) = PL011_IMSC_RXIM | PL011_IMSC_RTIM;
+ }
+ 
++#endif /* board console or PL011 */
+ #endif /* _ARCH_AARCH64_CONSOLE_H */
+diff --git a/kernel/arch/aarch64/platform/firmware.c b/kernel/arch/aarch64/platform/firmware.c
+index 7c940ec8..5fc080b1 100644
+--- a/kernel/arch/aarch64/platform/firmware.c
++++ b/kernel/arch/aarch64/platform/firmware.c
+@@ -9,9 +9,15 @@
+ #define PSCI_SYSTEM_RESET 0x84000009UL
+ #define PSCI_CPU_ON 0xC4000003UL
+ 
++#ifdef AARCH64_PSCI_USE_SMC
++#define PSCI_INSTRUCTION "smc #0"
++#else
++#define PSCI_INSTRUCTION "hvc #0"
++#endif
++
+ static inline uint64_t psci_call0(uint64_t fn) {
+     register uint64_t x0 __asm__("x0") = fn;
+-    __asm__ __volatile__("hvc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
++    __asm__ __volatile__(PSCI_INSTRUCTION : "+r"(x0) : : "x1", "x2", "x3", "memory");
+     return x0;
+ }
+ 
+@@ -20,7 +26,7 @@ int64_t firmware_cpu_on(uint64_t target_cpu, uint64_t entry, uint64_t context) {
+     register uint64_t x1 __asm__("x1") = target_cpu;
+     register uint64_t x2 __asm__("x2") = entry;
+     register uint64_t x3 __asm__("x3") = context;
+-    __asm__ __volatile__("hvc #0"
++    __asm__ __volatile__(PSCI_INSTRUCTION
+                          : "+r"(x0)
+                          : "r"(x1), "r"(x2), "r"(x3)
+                          : "memory");
+diff --git a/kernel/arch/aarch64/platform/timer.c b/kernel/arch/aarch64/platform/timer.c
+index 9393d544..ff0382a2 100644
+--- a/kernel/arch/aarch64/platform/timer.c
++++ b/kernel/arch/aarch64/platform/timer.c
+@@ -49,15 +49,34 @@ void timer_init(void) {
+ }
+ 
+ void timer_set_interval(uint64_t ticks) {
++#ifdef AARCH64_TIMER_ERRATUM_SUN50I_A64
++    /* TVAL uses the same unstable counter internally. Compute the deadline
++     * from the filtered read, as upstream's sun50i A64 workaround does. */
++    uint64_t deadline = timer_get_ticks() + ticks;
++    __asm__ __volatile__("msr cntp_cval_el0, %0\n\tisb" :: "r"(deadline) : "memory");
++    timer_enable();
++#else
+     __asm__ __volatile__("msr cntp_tval_el0, %0\n\t"
+                          "mov x1, #1\n\t"
+                          "msr cntp_ctl_el0, x1" ::"r"(ticks)
+                          : "x1", "memory");
++#endif
+ }
+ 
+ uint64_t timer_get_ticks(void) {
+     uint64_t val;
++#ifdef AARCH64_TIMER_ERRATUM_SUN50I_A64
++    /* A64's counter can glitch at carries. Reject low-nine-bit all-zero or
++     * all-one samples; 150 attempts bounds the wait (Linux v6.17
++     * drivers/clocksource/arm_arch_timer.c, sun50i UNKNOWN1 workaround). */
++    for (unsigned retry = 0; retry < 150; retry++) {
++        __asm__ __volatile__("isb\n\tmrs %0, cntpct_el0" : "=r"(val) :: "memory");
++        if (((val + 1) & 0x1ffUL) > 1)
++            return val;
++    }
++#else
+     __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(val));
++#endif
+     return val;
+ }
+ 
+diff --git a/kernel/arch/aarch64/trap/irqchip.c b/kernel/arch/aarch64/trap/irqchip.c
+index aea96480..cc7f8425 100644
+--- a/kernel/arch/aarch64/trap/irqchip.c
++++ b/kernel/arch/aarch64/trap/irqchip.c
+@@ -154,6 +154,13 @@ static void gic_init(void) {
+     value |= 1U;
+     __asm__ __volatile__("msr icc_sre_el1, %0\n\tisb" :: "r"(value) : "memory");
+ 
++    /* ARE_NS must change while both non-secure groups are disabled. */
++    *gicd_reg32(GICD_CTLR) = 0;
++    while (*gicd_reg32(GICD_CTLR) & (1U << 31))
++        arch_cpu_relax();
++    *gicd_reg32(GICD_CTLR) = 1U << 4;
++    while (*gicd_reg32(GICD_CTLR) & (1U << 31))
++        arch_cpu_relax();
+     *gicd_reg32(GICD_CTLR) = (1U << 4) | (1U << 1);
+     while (*gicd_reg32(GICD_CTLR) & (1U << 31))
+         arch_cpu_relax();
+@@ -167,9 +174,9 @@ static void gic_init(void) {
+     /* The UART SPI is handled as non-secure Group 1. */
+ #ifndef CONFIG_COOPERATIVE_BOOT
+     /* The normal AArch64 boards use the architected timer PPI as Group 1. */
+-    *gicr_reg32(0x10000 + 0x80) = 1U << IRQ_S_TIMER;
++    *gicr_reg32(0x10000 + 0x80) |= 1U << IRQ_S_TIMER;
+ #endif
+-    *gicd_reg32(0x80 + (UART0_IRQ / 32U) * 4) = 1U << (UART0_IRQ % 32U);
++    *gicd_reg32(0x80 + (UART0_IRQ / 32U) * 4) |= 1U << (UART0_IRQ % 32U);
+     *(volatile uint64_t *)(uintptr_t)(GICD_BASE + 0x6000 + UART0_IRQ * 8U) = 0;
+ 
+ #ifndef CONFIG_COOPERATIVE_BOOT
+@@ -181,6 +188,10 @@ static void gic_init(void) {
+ #endif
+     gic_enable_irq(UART0_IRQ);
+ 
++    /* EOI also deactivates: inherited split EOI mode would leave IRQs active. */
++    __asm__ __volatile__("mrs %0, icc_ctlr_el1" : "=r"(value));
++    value &= ~(1UL << 1);
++    __asm__ __volatile__("msr icc_ctlr_el1, %0\n\tisb" :: "r"(value) : "memory");
+     value = 0xFF;
+     __asm__ __volatile__("msr icc_pmr_el1, %0" :: "r"(value) : "memory");
+     value = 0;
+diff --git a/kernel/arch/arm32/boot/entry.S b/kernel/arch/arm32/boot/entry.S
+index 7e4c3756..4c2ce2e3 100644
+--- a/kernel/arch/arm32/boot/entry.S
++++ b/kernel/arch/arm32/boot/entry.S
+@@ -1,14 +1,39 @@
+     .syntax unified
+     .arch armv7-a
++#include "boot_config.h"
+ 
+     .section .text.entry
+     .global _start
+ _start:
++    /* Linux ARM handoff supplies the DTB in r2. Keep it until BSS is clear. */
++    mov     r8, r2
++#if ARM32_BOOT_NORMALIZE_HYP
++    .arch_extension virt
++    cpsid   if
++    mrs     r0, cpsr
++    and     r0, r0, #0x1f
++    cmp     r0, #0x1a
++    bne     .Lsvc_ready
++    mov     r0, #0
++    mcr     p15, 4, r0, c1, c1, 0 /* HCR: no stage-2 translation/traps. */
++    mcr     p15, 4, r0, c1, c1, 2 /* HCPTR: permit VFP at PL1. */
++    mcrr    p15, 4, r0, r0, c14   /* CNTVOFF = 0. */
++    mov     r0, #3
++    mcr     p15, 4, r0, c14, c1, 0 /* CNTHCTL physical counter/timer. */
++    ldr     r0, =0x1d3
++    msr     spsr_cxsf, r0
++    adr     r0, .Lsvc_ready
++    msr     ELR_hyp, r0
++    eret
++.Lsvc_ready:
++    cps     #0x13
++#endif
+     /* Running with the MMU off at the physical load address.
+      * Use a small physical stack inside the entry section. */
+     ldr     sp, =_early_stack_end
+ 
+-    /* Early debug: send 'A' to the physical PL011 UART. */
++#if !ARM32_BOOT_BOARD_LAYOUT
++    /* QEMU's optional early PL011 debug marker. */
+     ldr     r10, =0x09000000
+ 1:
+     ldr     r11, [r10, #0x18]
+@@ -16,6 +41,7 @@ _start:
+     bne     1b
+     mov     r11, #'A'
+     str     r11, [r10]
++#endif
+ 
+ #ifndef CONFIG_NOMMU
+     /* boot_pgdir is placed in this physical section. */
+@@ -53,9 +79,15 @@ _start:
+ 
+     add     r2, r2, #0x100000
+     add     r1, r1, #1
+-    cmp     r1, #1024
++    cmp     r1, #ARM32_BOOT_RAM_SECTIONS
+     blo     2b
+ 
++#if ARM32_BOOT_BOARD_LAYOUT
++    ldr     r7, =(ARM32_BOOT_DEVICE_SLOT * 4)
++    ldr     r1, =ARM32_BOOT_DEVICE_SECTION
++    add     r3, r0, r7
++    str     r1, [r3]
++#else
+     /* Map the QEMU virt device region so that UART/GIC/virtio are usable
+      * at their PAGE_OFFSET-relative virtual addresses. */
+     ldr     r7, =(0x880 * 4)
+@@ -72,6 +104,7 @@ _start:
+     ldr     r1, =0x0A000616          /* PA 0x0A000000 -> VA 0x8A000000 (virtio) */
+     add     r3, r0, r7
+     str     r1, [r3]
++#endif
+ 
+     /* Ensure page table writes reach memory before enabling the MMU. */
+     dsb
+@@ -117,6 +150,7 @@ _start:
+     .section .text
+     .global _high_start
+ _high_start:
++#if !ARM32_BOOT_BOARD_LAYOUT
+     /* Debug: send 'B' through the high virtual UART. */
+ #ifdef CONFIG_NOMMU
+     ldr     r10, =0x09000000
+@@ -129,6 +163,7 @@ _high_start:
+     bne     1b
+     mov     r11, #'B'
+     str     r11, [r10]
++#endif
+ 
+     /* Now running at high virtual addresses.  Use the linked BSS/stack. */
+     ldr     sp, =_stack_end
+@@ -157,6 +192,8 @@ _high_start:
+     str     r2, [r0], #4
+     b       2b
+ 3:
++    ldr     r0, =arm32_boot_dtb
++    str     r8, [r0]
+     /* Install the vector table. */
+     ldr     r0, =arm32_vector_table
+     mcr     p15, 0, r0, c12, c0, 0
+@@ -174,6 +211,7 @@ _high_start:
+     mcr     p15, 0, r0, c1, c0, 0
+     isb
+ 
++    bl      early_uart_init
+     bl      kernel_main
+ 
+ 4:
+@@ -202,3 +240,9 @@ _stack_bottom:
+     .space 16384
+     .global _stack_end
+ _stack_end:
++
++    .section .bss
++    .align 2
++    .global arm32_boot_dtb
++arm32_boot_dtb:
++    .space 4
+diff --git a/kernel/arch/arm32/include/console.h b/kernel/arch/arm32/include/console.h
+index bfa0e575..fa1bd4cc 100644
+--- a/kernel/arch/arm32/include/console.h
++++ b/kernel/arch/arm32/include/console.h
+@@ -4,6 +4,10 @@
+ #include "core/types.h"
+ #include "platform.h"
+ 
++#if __has_include("board_console.h")
++#include "board_console.h"
++#else
++
+ #define PL011_DR        0x00
+ #define PL011_FR        0x18
+ #define PL011_IBRD      0x24
+@@ -61,3 +65,4 @@ static inline void arch_uart_ack_irq(void) {
+ }
+ 
+ #endif
++#endif
+diff --git a/kernel/arch/arm32/include/platform.h b/kernel/arch/arm32/include/platform.h
+index d12a2bf7..eb8b145b 100644
+--- a/kernel/arch/arm32/include/platform.h
++++ b/kernel/arch/arm32/include/platform.h
+@@ -3,9 +3,6 @@
+ 
+ #include "core/types.h"
+ 
+-#define PHYS_MEMORY_BASE   0x40000000UL
+-#define PHYS_MEMORY_END    0x80000000UL
+-#define KERNEL_ENTRY       0x40080000UL
+ #ifdef CONFIG_NOMMU
+ #define PAGE_OFFSET        0x0UL
+ #define USER_VA_LIMIT      PHYS_MEMORY_END
+@@ -14,6 +11,23 @@
+ #define USER_VA_LIMIT      0x70000000UL
+ #endif
+ 
++#if __has_include("board_platform.h")
++#include "board_platform.h"
++#else
++#define PHYS_MEMORY_BASE   0x40000000UL
++#define PHYS_MEMORY_END    0x80000000UL
++#define KERNEL_ENTRY       0x40080000UL
++#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
++#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
++#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
++#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
++#define PCIE_ECAM_BASE     (0x3F000000UL + PAGE_OFFSET)
++#define PCIE_BUS_START     0
++#define PCIE_BUS_END       0
++#define UART0_IRQ          33U
++#define ARCH_TIMER_FREQ    62500000UL
++#endif
++
+ static inline size_t arch_ram_range_count(void) {
+     return 1;
+ }
+@@ -21,23 +35,20 @@ static inline size_t arch_ram_range_count(void) {
+ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
+     if (idx != 0 || !base || !end)
+         return -1;
++#ifdef ARCH_BOARD_RAM_RANGE
++    return ARCH_BOARD_RAM_RANGE(idx, base, end);
++#else
+     *base = PHYS_MEMORY_BASE;
+     *end = PHYS_MEMORY_END;
+     return 0;
++#endif
+ }
+ 
+-#define UART0_BASE         (0x09000000UL + PAGE_OFFSET)
+-#define GICD_BASE          (0x08000000UL + PAGE_OFFSET)
+-#define GICC_BASE          (0x08010000UL + PAGE_OFFSET)
+-#define VIRTIO_BASE        (0x0A000000UL + PAGE_OFFSET)
+-#define PCIE_ECAM_BASE     (0x3F000000UL + PAGE_OFFSET)
+-#define PCIE_BUS_START     0
+-#define PCIE_BUS_END       0
+-#define UART0_IRQ          33U
++#ifndef IRQ_S_TIMER
+ #define IRQ_S_TIMER        30U
++#endif
+ #define IRQ_S_EXT          UART0_IRQ
+ #define IRQ_S_SOFT         1U
+-#define ARCH_TIMER_FREQ    62500000UL
+ 
+ #define CAUSE_ECALL_U           11U
+ #define CAUSE_INSN_PAGE_FAULT   12U
+diff --git a/kernel/arch/arm32/platform/fdt.c b/kernel/arch/arm32/platform/fdt.c
+index b46a6cc5..b0927be7 100644
+--- a/kernel/arch/arm32/platform/fdt.c
++++ b/kernel/arch/arm32/platform/fdt.c
+@@ -2,7 +2,7 @@
+ 
+ #include "core/types.h"
+ 
+-const char *arch_bootargs_get(void) {
++__attribute__((weak)) const char *arch_bootargs_get(void) {
+     return NULL;
+ }
+ 
+diff --git a/kernel/arch/arm32/platform/firmware.c b/kernel/arch/arm32/platform/firmware.c
+index 86be3458..3ff7c2a8 100644
+--- a/kernel/arch/arm32/platform/firmware.c
++++ b/kernel/arch/arm32/platform/firmware.c
+@@ -18,14 +18,25 @@ static void arm32_psci_call(uint32_t fn_id) {
+     );
+ }
+ 
++void platform_firmware_shutdown(void) __attribute__((weak));
++void platform_firmware_reboot(void) __attribute__((weak));
++
++void early_uart_init(void) {
++    arch_uart_init();
++}
++
+ void firmware_shutdown(void) {
+     arch_local_irq_disable();
++    if (platform_firmware_shutdown)
++        platform_firmware_shutdown();
+     arm32_psci_call(PSCI_SYSTEM_OFF);
+     arch_halt();
+ }
+ 
+ void firmware_reboot(void) {
+     arch_local_irq_disable();
++    if (platform_firmware_reboot)
++        platform_firmware_reboot();
+     arm32_psci_call(PSCI_SYSTEM_RESET);
+     arch_halt();
+ }
+diff --git a/kernel/arch/arm32/platform/timer.c b/kernel/arch/arm32/platform/timer.c
+index 4acafc05..a574cd05 100644
+--- a/kernel/arch/arm32/platform/timer.c
++++ b/kernel/arch/arm32/platform/timer.c
+@@ -9,7 +9,7 @@ void timer_init(void) {
+ }
+ 
+ void timer_set_interval(uint64_t ticks) {
+-    uint32_t v = (uint32_t)ticks;
++    uint32_t v = ticks > 0x7fffffffULL ? 0x7fffffffU : (uint32_t)ticks;
+     __asm__ __volatile__(
+         "mcr p15, 0, %0, c14, c2, 0\n\t"
+         "mov r1, #1\n\t"
+@@ -19,9 +19,12 @@ void timer_set_interval(uint64_t ticks) {
+ }
+ 
+ uint64_t timer_get_ticks(void) {
+-    uint32_t lo;
+-    __asm__ __volatile__("mrc p15, 0, %0, c14, c0, 0" : "=r"(lo));
+-    return lo;
++    uint32_t lo, hi;
++    /* MRC c14,c0,0 is CNTFRQ (constant), not the counter. CNTPCT requires
++     * an atomic 64-bit MRRC read and must not wrap at the low 32 bits. */
++    __asm__ __volatile__("isb\n\tmrrc p15, 0, %0, %1, c14"
++                         : "=r"(lo), "=r"(hi) :: "memory");
++    return ((uint64_t)hi << 32) | lo;
+ }
+ 
+ void timer_irq_tick(void) {
+diff --git a/kernel/arch/arm32/platform/virtio_probe.c b/kernel/arch/arm32/platform/virtio_probe.c
+index 2c59bff5..1e095a25 100644
+--- a/kernel/arch/arm32/platform/virtio_probe.c
++++ b/kernel/arch/arm32/platform/virtio_probe.c
+@@ -2,6 +2,7 @@
+ #include "drivers/block/virtio_blk.h"
+ #include "platform.h"
+ 
++#ifdef VIRTIO_BASE
+ static uint32_t mmio_read(virtio_transport_t *t, uint32_t off) {
+     return *(volatile uint32_t *)((uintptr_t)t->priv + off);
+ }
+@@ -43,3 +44,15 @@ int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
+ int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
+     return arch_virtio_probe_type(1, index, vt);
+ }
++#else
++int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
++    (void)index;
++    (void)vt;
++    return -1;
++}
++int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
++    (void)index;
++    (void)vt;
++    return -1;
++}
++#endif
+diff --git a/kernel/arch/loongarch64/boot/entry.S b/kernel/arch/loongarch64/boot/entry.S
+index c491c595..1575cfed 100644
+--- a/kernel/arch/loongarch64/boot/entry.S
++++ b/kernel/arch/loongarch64/boot/entry.S
+@@ -34,7 +34,7 @@ _start:
+      * firmware's standard uncached/cached pair without ever dropping the
+      * mapping that contains the current PC.  QEMU keeps its identity DMW.
+      */
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     li.d        $t0, 0x800000000000000f
+     csrwr       $t0, CSR_DMW0
+     li.d        $t0, 0x900000000000001f
+@@ -47,7 +47,7 @@ _start:
+ 
+     invtlb      0, $zero, $zero
+ 
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     /* U-Boot already runs with paging and the cached DMW active. */
+     li.d        $t0, 0xB0
+ #else
+@@ -64,7 +64,12 @@ _start:
+      * instructions in its dynamic loader before main(), so every CPU must
+      * enable LSX before it can enter userspace.
+      */
++#ifdef CONFIG_BOARD_LS2K0300
++    /* LA264: scalar FPU only; never assume LSX exists. */
++    li.d        $t0, 1
++#else
+     li.d        $t0, 3
++#endif
+     csrwr       $t0, CSR_EUEN
+ 
+     /* Set exception entry point */
+@@ -98,8 +103,13 @@ bss_clear:
+     b           bss_clear
+ bss_done:
+     /* Preserve the firmware DTB pointer after clearing BSS. */
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
++#ifdef CONFIG_BOARD_LS2K0300
++    /* RAM loader has no established FDT argument contract yet. */
++    move        $t0, $zero
++#else
+     li.d        $t0, 0x900000000a000000
++#endif
+ #else
+     li.d        $t0, 0x100000
+ #endif
+@@ -125,7 +135,7 @@ setup_mmu:
+ 
+     /* Load the physical boot_pgdir address into PGDL and PGDH. */
+     la.global   $t0, boot_pgdir
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     li.d        $t1, 0x9000000000000000
+     sub.d       $t0, $t0, $t1
+ #endif
+@@ -191,17 +201,21 @@ setup_mmu:
+     invtlb      0, $zero, $zero
+ 
+     csrrd       $a0, CSR_CPUID
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
++#ifdef CONFIG_BOARD_LS2K0300
++    move        $a1, $zero
++#else
+     li.d        $a1, 0x900000000a000000
++#endif
+ #else
+     li.d        $a1, 0x100000
+ #endif
+ 
+     bnez        $a0, call_secondary
+-    /* The physical board's 100 MHz timer can fire while the allocator and
++    /* A physical board's timer can fire while the allocator and
+      * networking globals are still being initialized.  Keep IE clear until
+      * kernel_main has initialized the process and progress subsystems. */
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     li.d        $t0, 0xB0
+ #else
+     li.d        $t0, 0xB4
+diff --git a/kernel/arch/loongarch64/boot/switch.S b/kernel/arch/loongarch64/boot/switch.S
+index 5da85929..c18bc4e6 100644
+--- a/kernel/arch/loongarch64/boot/switch.S
++++ b/kernel/arch/loongarch64/boot/switch.S
+@@ -16,7 +16,7 @@
+     .global __switch_la64
+     .global __switch
+ 
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
+     defined(CONFIG_LS2K_TRAP_TRACE)
+     /* Single-character checkpoints for first-switch hardware bring-up. */
+     .macro LS2K_SWITCH_MARK value
+diff --git a/kernel/arch/loongarch64/include/console.h b/kernel/arch/loongarch64/include/console.h
+index a0db7f4f..aac49e84 100644
+--- a/kernel/arch/loongarch64/include/console.h
++++ b/kernel/arch/loongarch64/include/console.h
+@@ -5,7 +5,7 @@
+ #include "platform.h"
+ 
+ static inline void arch_uart_init(void) {
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     /* Keep U-Boot's 115200 8N1 divisor.  The cooperative fallback polls;
+      * the Phase 2 image enables RX only after LIOINTC was initialized. */
+     volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
+diff --git a/kernel/arch/loongarch64/include/cpu.h b/kernel/arch/loongarch64/include/cpu.h
+index 1f94a981..96938591 100644
+--- a/kernel/arch/loongarch64/include/cpu.h
++++ b/kernel/arch/loongarch64/include/cpu.h
+@@ -3,7 +3,7 @@
+ 
+ #define ARCH_HAS_LOCAL_TLB_FLUSH 1
+ 
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
+ /* Physical-board bring-up runs without interrupt delivery until the LS2K1000
+  * timer and interrupt-controller paths are validated.  Keep syscall dispatch
+  * consistent with that polling model instead of re-enabling CRMD.IE. */
+diff --git a/kernel/arch/loongarch64/include/mmu_layout.h b/kernel/arch/loongarch64/include/mmu_layout.h
+index 0a79722c..8ae52a9a 100644
+--- a/kernel/arch/loongarch64/include/mmu_layout.h
++++ b/kernel/arch/loongarch64/include/mmu_layout.h
+@@ -7,7 +7,7 @@
+  * by 2K1000LA ports; the QEMU virt target retains its existing folded Dir2
+  * layout so its established kernel and userspace path is unchanged.
+  */
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+ #define LA64_PT_LEVELS       4
+ #define LA64_PT_ROOT_LEVEL   3
+ #define LA64_PT_HAS_DIR2     1
+diff --git a/kernel/arch/loongarch64/include/platform.h b/kernel/arch/loongarch64/include/platform.h
+index 1e61798b..d463658c 100644
+--- a/kernel/arch/loongarch64/include/platform.h
++++ b/kernel/arch/loongarch64/include/platform.h
+@@ -6,6 +6,8 @@
+ /* QEMU uses an identity DMW; physical boards may provide their own map. */
+ #ifdef CONFIG_BOARD_LS2K1000
+ #include "ls2k1000_platform.h"
++#elif defined(CONFIG_BOARD_LS2K0300)
++#include "ls2k0300_platform.h"
+ #else
+ #define PHYS_MEMORY_BASE   0x80000000UL
+ #define PHYS_MEMORY_END    0x90000000UL
+@@ -40,7 +42,9 @@ void loongarch64_memory_init(void);
+ 
+ #define CLINT_BASE         0x00000000UL
+ #define CLINT_TIMER_FREQ   100000000UL   /* 100 MHz — QEMU loongarch rdtime.d runs at 10ns period */
++#ifndef ARCH_TIMER_FREQ
+ #define ARCH_TIMER_FREQ    CLINT_TIMER_FREQ
++#endif
+ 
+ void loongarch64_smp_send_ipi(unsigned cpu, unsigned vector);
+ void loongarch64_iocsr_write64(uint64_t value, uint32_t reg);
+diff --git a/kernel/arch/loongarch64/include/trap_frame.h b/kernel/arch/loongarch64/include/trap_frame.h
+index e74c774a..c1038d8d 100644
+--- a/kernel/arch/loongarch64/include/trap_frame.h
++++ b/kernel/arch/loongarch64/include/trap_frame.h
+@@ -159,7 +159,7 @@ static inline uint64_t arch_task_kernel_status(void) {
+ }
+ 
+ static inline uint64_t arch_user_initial_status(void) {
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
+     /* PPLV=3 with PIE clear: timer delivery is intentionally disabled until
+      * the LS2K1000 trap path has completed hardware validation. */
+     return SSTATUS_FS_CLEAN;
+diff --git a/kernel/arch/loongarch64/platform/firmware.c b/kernel/arch/loongarch64/platform/firmware.c
+index ee22f1a3..8d358823 100644
+--- a/kernel/arch/loongarch64/platform/firmware.c
++++ b/kernel/arch/loongarch64/platform/firmware.c
+@@ -33,7 +33,7 @@ void firmware_set_timer(uint64_t time) {
+ 
+ void firmware_shutdown(void) {
+     arch_local_irq_disable();
+-#ifndef CONFIG_BOARD_LS2K1000
++#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
+     qemu_virt_poweroff();
+ #endif
+     while (1) {
+@@ -43,7 +43,7 @@ void firmware_shutdown(void) {
+ 
+ void firmware_reboot(void) {
+     arch_local_irq_disable();
+-#ifndef CONFIG_BOARD_LS2K1000
++#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
+     qemu_virt_reset();
+ #endif
+     while (1) {
+diff --git a/kernel/arch/loongarch64/trap/irqchip.c b/kernel/arch/loongarch64/trap/irqchip.c
+index f70d0432..3a9db64a 100644
+--- a/kernel/arch/loongarch64/trap/irqchip.c
++++ b/kernel/arch/loongarch64/trap/irqchip.c
+@@ -46,12 +46,17 @@ void trap_init(void) {
+      * only timer/IPI; the Phase 2 image adds the LS2K HWI1 cascade below. */
+     ecfg &= ~0x1FFFUL;
+ #endif
++#ifdef CONFIG_BOARD_LS2K0300
++    /* Phase 1: discard firmware device routes and leave all IRQs masked. */
++    ecfg &= ~0x1FFFUL;
++#else
+     ecfg |= (1UL << 12) | (1UL << 11);
++#endif
+ #ifdef CONFIG_BOARD_LS2K1000
+ #ifndef CONFIG_COOPERATIVE_BOOT
+     ecfg |= (1UL << LS2K_LIOINTC_PARENT_IRQ);
+ #endif
+-#else
++#elif !defined(CONFIG_BOARD_LS2K0300)
+     ecfg |= (1UL << 2);
+ #endif
+     __asm__ __volatile__("csrwr %0, 0x4"
+@@ -61,7 +66,7 @@ void trap_init(void) {
+ 
+     /* Unmask the PCH-PIC PCI INTx lines and enable the EIOINTC inputs so the
+      * QEMU virt I/O interrupt controllers can deliver device IRQs on HWI0. */
+-#ifndef CONFIG_BOARD_LS2K1000
++#if !defined(CONFIG_BOARD_LS2K1000) && !defined(CONFIG_BOARD_LS2K0300)
+     la64_eiointc_pic_init();
+ #endif
+ }
+diff --git a/kernel/arch/loongarch64/trap/trap.S b/kernel/arch/loongarch64/trap/trap.S
+index 2dd94aff..b06ee6bf 100644
+--- a/kernel/arch/loongarch64/trap/trap.S
++++ b/kernel/arch/loongarch64/trap/trap.S
+@@ -49,7 +49,7 @@
+     .global loongarch64_idle_region_start
+     .global loongarch64_idle_region_end
+ 
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
+     defined(CONFIG_LS2K_TRAP_TRACE)
+     /* Return/trap checkpoints for physical-board userspace bring-up.  Callers
+      * place these only after the interrupted t0/t1 values are safely stored. */
+@@ -109,7 +109,7 @@ loongarch64_idle_region_end:
+  * If PPLV==3 (user mode): sp = user sp, SAVE0 = kernel sp, SAVE1 = task tp.
+  * If PPLV==0 (kernel mode): sp = kernel sp.
+  */
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     /* LS2K1000 clears EENTRY[11:0].  Keep this physical-board-only so the
+      * QEMU exception layout and object code remain unchanged. */
+     .section .trap_entry, "ax"
+@@ -130,7 +130,7 @@ trap_entry_la64:
+     b       __trap_from_user     /* PPLV != 0 → came from user */
+ .Ltrap_kernel:
+     b       __trap_from_kernel
+-#ifdef CONFIG_BOARD_LS2K1000
++#if defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)
+     .section .text
+ #endif
+ 
+@@ -184,6 +184,40 @@ __trap_from_kernel:
+     st.d    $s7,   $sp, REG_OFF(30)
+     st.d    $s8,   $sp, REG_OFF(31)
+ 
++#ifdef CONFIG_BOARD_LS2K0300
++    fst.d     $f0,  $sp, VR_OFF(0)
++    fst.d     $f1,  $sp, VR_OFF(1)
++    fst.d     $f2,  $sp, VR_OFF(2)
++    fst.d     $f3,  $sp, VR_OFF(3)
++    fst.d     $f4,  $sp, VR_OFF(4)
++    fst.d     $f5,  $sp, VR_OFF(5)
++    fst.d     $f6,  $sp, VR_OFF(6)
++    fst.d     $f7,  $sp, VR_OFF(7)
++    fst.d     $f8,  $sp, VR_OFF(8)
++    fst.d     $f9,  $sp, VR_OFF(9)
++    fst.d     $f10, $sp, VR_OFF(10)
++    fst.d     $f11, $sp, VR_OFF(11)
++    fst.d     $f12, $sp, VR_OFF(12)
++    fst.d     $f13, $sp, VR_OFF(13)
++    fst.d     $f14, $sp, VR_OFF(14)
++    fst.d     $f15, $sp, VR_OFF(15)
++    fst.d     $f16, $sp, VR_OFF(16)
++    fst.d     $f17, $sp, VR_OFF(17)
++    fst.d     $f18, $sp, VR_OFF(18)
++    fst.d     $f19, $sp, VR_OFF(19)
++    fst.d     $f20, $sp, VR_OFF(20)
++    fst.d     $f21, $sp, VR_OFF(21)
++    fst.d     $f22, $sp, VR_OFF(22)
++    fst.d     $f23, $sp, VR_OFF(23)
++    fst.d     $f24, $sp, VR_OFF(24)
++    fst.d     $f25, $sp, VR_OFF(25)
++    fst.d     $f26, $sp, VR_OFF(26)
++    fst.d     $f27, $sp, VR_OFF(27)
++    fst.d     $f28, $sp, VR_OFF(28)
++    fst.d     $f29, $sp, VR_OFF(29)
++    fst.d     $f30, $sp, VR_OFF(30)
++    fst.d     $f31, $sp, VR_OFF(31)
++#else
+     vst     $vr0,  $sp, VR_OFF(0)
+     vst     $vr1,  $sp, VR_OFF(1)
+     vst     $vr2,  $sp, VR_OFF(2)
+@@ -216,6 +250,7 @@ __trap_from_kernel:
+     vst     $vr29, $sp, VR_OFF(29)
+     vst     $vr30, $sp, VR_OFF(30)
+     vst     $vr31, $sp, VR_OFF(31)
++#endif
+     movfcsr2gr $t0, $fcsr0
+     st.d    $t0, $sp, FCSR_OFF
+     movcf2gr $t0, $fcc0
+@@ -279,7 +314,7 @@ __trap_from_user:
+     st.d    $t0, $sp, REG_OFF(12)
+     st.d    $t1, $sp, REG_OFF(13)
+     LS2K_TRAP_MARK 85              /* U: user exception frame active */
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT) && \
+     defined(CONFIG_LS2K_TRAP_TRACE)
+     csrrd   $t0, 0x5               /* ESTAT.Ecode */
+     srli.d  $t0, $t0, 16
+@@ -342,6 +377,40 @@ __trap_from_user:
+     st.d    $s8,   $sp, REG_OFF(31)
+     LS2K_TRAP_MARK 86              /* V: all user GPRs saved */
+ 
++#ifdef CONFIG_BOARD_LS2K0300
++    fst.d     $f0,  $sp, VR_OFF(0)
++    fst.d     $f1,  $sp, VR_OFF(1)
++    fst.d     $f2,  $sp, VR_OFF(2)
++    fst.d     $f3,  $sp, VR_OFF(3)
++    fst.d     $f4,  $sp, VR_OFF(4)
++    fst.d     $f5,  $sp, VR_OFF(5)
++    fst.d     $f6,  $sp, VR_OFF(6)
++    fst.d     $f7,  $sp, VR_OFF(7)
++    fst.d     $f8,  $sp, VR_OFF(8)
++    fst.d     $f9,  $sp, VR_OFF(9)
++    fst.d     $f10, $sp, VR_OFF(10)
++    fst.d     $f11, $sp, VR_OFF(11)
++    fst.d     $f12, $sp, VR_OFF(12)
++    fst.d     $f13, $sp, VR_OFF(13)
++    fst.d     $f14, $sp, VR_OFF(14)
++    fst.d     $f15, $sp, VR_OFF(15)
++    fst.d     $f16, $sp, VR_OFF(16)
++    fst.d     $f17, $sp, VR_OFF(17)
++    fst.d     $f18, $sp, VR_OFF(18)
++    fst.d     $f19, $sp, VR_OFF(19)
++    fst.d     $f20, $sp, VR_OFF(20)
++    fst.d     $f21, $sp, VR_OFF(21)
++    fst.d     $f22, $sp, VR_OFF(22)
++    fst.d     $f23, $sp, VR_OFF(23)
++    fst.d     $f24, $sp, VR_OFF(24)
++    fst.d     $f25, $sp, VR_OFF(25)
++    fst.d     $f26, $sp, VR_OFF(26)
++    fst.d     $f27, $sp, VR_OFF(27)
++    fst.d     $f28, $sp, VR_OFF(28)
++    fst.d     $f29, $sp, VR_OFF(29)
++    fst.d     $f30, $sp, VR_OFF(30)
++    fst.d     $f31, $sp, VR_OFF(31)
++#else
+     vst     $vr0,  $sp, VR_OFF(0)
+     vst     $vr1,  $sp, VR_OFF(1)
+     vst     $vr2,  $sp, VR_OFF(2)
+@@ -374,6 +443,7 @@ __trap_from_user:
+     vst     $vr29, $sp, VR_OFF(29)
+     vst     $vr30, $sp, VR_OFF(30)
+     vst     $vr31, $sp, VR_OFF(31)
++#endif
+     LS2K_TRAP_MARK 87              /* W: LSX state saved */
+     movfcsr2gr $t0, $fcsr0
+     st.d    $t0, $sp, FCSR_OFF
+@@ -459,6 +529,40 @@ user_trap_return:
+     LS2K_TRAP_MARK 75              /* K: return CSRs installed */
+ 
+     /* Restore scalar FP and LSX state before GPRs. */
++#ifdef CONFIG_BOARD_LS2K0300
++    fld.d     $f0,  $sp, VR_OFF(0)
++    fld.d     $f1,  $sp, VR_OFF(1)
++    fld.d     $f2,  $sp, VR_OFF(2)
++    fld.d     $f3,  $sp, VR_OFF(3)
++    fld.d     $f4,  $sp, VR_OFF(4)
++    fld.d     $f5,  $sp, VR_OFF(5)
++    fld.d     $f6,  $sp, VR_OFF(6)
++    fld.d     $f7,  $sp, VR_OFF(7)
++    fld.d     $f8,  $sp, VR_OFF(8)
++    fld.d     $f9,  $sp, VR_OFF(9)
++    fld.d     $f10, $sp, VR_OFF(10)
++    fld.d     $f11, $sp, VR_OFF(11)
++    fld.d     $f12, $sp, VR_OFF(12)
++    fld.d     $f13, $sp, VR_OFF(13)
++    fld.d     $f14, $sp, VR_OFF(14)
++    fld.d     $f15, $sp, VR_OFF(15)
++    fld.d     $f16, $sp, VR_OFF(16)
++    fld.d     $f17, $sp, VR_OFF(17)
++    fld.d     $f18, $sp, VR_OFF(18)
++    fld.d     $f19, $sp, VR_OFF(19)
++    fld.d     $f20, $sp, VR_OFF(20)
++    fld.d     $f21, $sp, VR_OFF(21)
++    fld.d     $f22, $sp, VR_OFF(22)
++    fld.d     $f23, $sp, VR_OFF(23)
++    fld.d     $f24, $sp, VR_OFF(24)
++    fld.d     $f25, $sp, VR_OFF(25)
++    fld.d     $f26, $sp, VR_OFF(26)
++    fld.d     $f27, $sp, VR_OFF(27)
++    fld.d     $f28, $sp, VR_OFF(28)
++    fld.d     $f29, $sp, VR_OFF(29)
++    fld.d     $f30, $sp, VR_OFF(30)
++    fld.d     $f31, $sp, VR_OFF(31)
++#else
+     vld     $vr0,  $sp, VR_OFF(0)
+     vld     $vr1,  $sp, VR_OFF(1)
+     vld     $vr2,  $sp, VR_OFF(2)
+@@ -491,6 +595,7 @@ user_trap_return:
+     vld     $vr29, $sp, VR_OFF(29)
+     vld     $vr30, $sp, VR_OFF(30)
+     vld     $vr31, $sp, VR_OFF(31)
++#endif
+     ld.d    $t0, $sp, FCSR_OFF
+     movgr2fcsr $fcsr0, $t0
+     ld.d    $t0, $sp, FCC_OFF
+@@ -571,7 +676,7 @@ arch_return_to_user:
+     .p2align 12
+ tlb_refill_entry_la64:
+     csrwr   $r21, 0x8B             /* TLBRSAVE = save $r21 (reserved, not used by user) */
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
+     csrwr   $t0, 0x33              /* SAVE3 = interrupted $t0 */
+     csrwr   $t1, 0x34              /* SAVE4 = interrupted $t1 */
+ #endif
+@@ -606,7 +711,7 @@ tlb_refill_entry_la64:
+     tlbfill
+     LS2K_REFILL_MARK 84            /* T: refill installed */
+ 
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
+     csrrd   $t0, 0x33
+     csrrd   $t1, 0x34
+ #endif
+@@ -630,7 +735,7 @@ tlb_refill_entry_la64:
+     csrwr   $zero, 0x8C
+     csrwr   $zero, 0x8D
+     tlbfill
+-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
++#if (defined(CONFIG_BOARD_LS2K1000) || defined(CONFIG_BOARD_LS2K0300)) && defined(CONFIG_COOPERATIVE_BOOT)
+     csrrd   $t0, 0x33
+     csrrd   $t1, 0x34
+ #endif
+diff --git a/kernel/arch/riscv64/boot/entry.S b/kernel/arch/riscv64/boot/entry.S
+index 2349e300..d572b091 100644
+--- a/kernel/arch/riscv64/boot/entry.S
++++ b/kernel/arch/riscv64/boot/entry.S
+@@ -21,6 +21,26 @@
+     .section .text.entry
+     .globl _start
+ _start:
++    /* Linux-compatible 64-byte RISC-V Image header.  U-Boot booti validates
++     * magic2 and uses text_offset/image_size before entering with a0=hartid,
++     * a1=FDT.  Keep the entry executable for OpenSBI and QEMU ELF loaders. */
++    .option push
++    .option norvc
++    j       .Limage_entry
++    .word   0
++    .dword  0x200000                /* all supported boards: RAM + 2 MiB */
++    .dword  _end - _start
++    .dword  0                       /* little endian */
++    .word   2                       /* header version 0.2 */
++    .word   0
++    .dword  0
++    .ascii  "RISCV\0\0\0"
++    .word   0x05435352              /* RSC\x05 */
++    .word   0                       /* no PE/COFF header */
++    .option pop
++.Limage_entry:
++    .global __riscv_image_header_end
++__riscv_image_header_end:
+     /* a0 = hart ID, a1 = DTB pointer (passed by OpenSBI).
+      * Only the boot hart runs global initialization; others wait for release.
+      * BSS is cleared below, so boot arguments are saved after that. */
+diff --git a/kernel/arch/riscv64/boot/ldscript.ld b/kernel/arch/riscv64/boot/ldscript.ld
+index b2fd6941..4ef8a771 100644
+--- a/kernel/arch/riscv64/boot/ldscript.ld
++++ b/kernel/arch/riscv64/boot/ldscript.ld
+@@ -39,6 +39,10 @@ SECTIONS
+         *(.text.entry)
+         *(.text .text.*)
+     } :text
++    ASSERT(__riscv_image_header_end - _start == 64,
++           "riscv64: Image header must be exactly 64 bytes")
++    ASSERT(PHYS_BASE - BOOT_MAP_PHYS == 0x200000,
++           "riscv64: Image header load offset must match linker layout")
+ 
+     . = ALIGN(4096);
+     __rodata_start = .;
+diff --git a/kernel/arch/riscv64/include/console.h b/kernel/arch/riscv64/include/console.h
+index ec377cbd..729f28c9 100644
+--- a/kernel/arch/riscv64/include/console.h
++++ b/kernel/arch/riscv64/include/console.h
+@@ -4,17 +4,29 @@
+ #include "core/types.h"
+ #include "platform.h"
+ 
++#ifdef CONFIG_BOARD_OX64
++#include "ox64_console.h"
++#else
++
++/* SG2002 uses a DW APB UART: reg-shift=2 and reg-io-width=4.
++ * QEMU's byte-stride NS16550 must keep its original access width. */
++#ifdef CONFIG_BOARD_LICHEERV_NANO
++typedef volatile uint32_t arch_uart_regs_t;
++#else
++typedef volatile uint8_t arch_uart_regs_t;
++#endif
++
+ static inline void arch_uart_init(void) {
+-#ifdef CONFIG_BOARD_VISIONFIVE2
++#if defined(CONFIG_BOARD_VISIONFIVE2) || defined(CONFIG_BOARD_LICHEERV_NANO)
+     /*
+-     * U-Boot/OpenSBI already owns the JH7110 UART setup (115200 8N1); do not
++     * U-Boot/OpenSBI already owns the board UART setup (115200 8N1); do not
+      * reprogram the divisor.  Output/input below still drive the 16550
+      * registers directly: the SBI legacy console drops characters during
+      * burst output (garbled boot logs, lost shell prompt/echo on the board).
+      */
+     return;
+ #else
+-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
++    arch_uart_regs_t *uart = (arch_uart_regs_t *)UART0_BASE;
+     uart[1] = 0x00;
+     uart[3] = 0x80;
+     uart[0] = 0x03;
+@@ -27,25 +39,26 @@ static inline void arch_uart_init(void) {
+ }
+ 
+ static inline void arch_uart_putc(char c) {
+-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
++    arch_uart_regs_t *uart = (arch_uart_regs_t *)UART0_BASE;
+     while ((uart[5] & 0x20) == 0)
+         ;
+     uart[0] = (uint8_t)c;
+ }
+ 
+ static inline int arch_uart_poll_getc(void) {
+-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
++    arch_uart_regs_t *uart = (arch_uart_regs_t *)UART0_BASE;
+     if (uart[5] & 0x01)
+         return uart[0];
+     return -1;
+ }
+ 
+ static inline void arch_uart_flush(void) {
+-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
++    arch_uart_regs_t *uart = (arch_uart_regs_t *)UART0_BASE;
+     while ((uart[5] & 0x40) == 0)
+         ;
+ }
+ 
+ static inline void arch_uart_ack_irq(void) {}
+ 
++#endif /* !CONFIG_BOARD_OX64 */
+ #endif /* _ARCH_RISCV64_CONSOLE_H */
+diff --git a/kernel/arch/riscv64/include/platform.h b/kernel/arch/riscv64/include/platform.h
+index 9739ace2..b8faa04a 100644
+--- a/kernel/arch/riscv64/include/platform.h
++++ b/kernel/arch/riscv64/include/platform.h
+@@ -9,6 +9,8 @@
+  * instruction-set mechanisms only. */
+ #if defined(CONFIG_BOARD_LICHEERV_NANO)
+ #include "licheerv_nano_platform.h"
++#elif defined(CONFIG_BOARD_OX64)
++#include "ox64_platform.h"
+ #elif defined(CONFIG_BOARD_MILK_V_DUO)
+ #include "milk_v_duo_platform.h"
+ #else
+@@ -40,7 +42,7 @@ uint64_t riscv64_fdt_timebase_freq(void);
+  * absent tree from a tree that simply describes nothing it has a driver for. */
+ int riscv64_fdt_enumerate_platform_devices(void);
+ 
+-#if !(defined(CONFIG_BOARD_LICHEERV_NANO) || defined(CONFIG_BOARD_MILK_V_DUO))
++#if !(defined(CONFIG_BOARD_LICHEERV_NANO) || defined(CONFIG_BOARD_MILK_V_DUO) || defined(CONFIG_BOARD_OX64))
+ /* MMIO base addresses.  The SophGo boards supply their own UART0_BASE,
+  * PLIC_BASE and UART0_IRQ from the header above and have neither a PCIe
+  * controller nor a virtio MMIO transport, so those constants are deliberately
+diff --git a/kernel/arch/riscv64/platform/fdt.c b/kernel/arch/riscv64/platform/fdt.c
+index 820085dd..dbd8dbd1 100644
+--- a/kernel/arch/riscv64/platform/fdt.c
++++ b/kernel/arch/riscv64/platform/fdt.c
+@@ -8,6 +8,8 @@
+ #include "firmware.h"
+ #include "platform.h"
+ #include "fdt_isa.h"
++#include "fdt_memory.h"
++#include "core/panic.h"
+ #include "drivers/core/driver_core.h"
+ 
+ #define FDT_MAGIC       0xd00dfeedU
+@@ -30,12 +32,6 @@ static uint32_t read_be32(const void *p)
+     return be32(*(const uint32_t *)p);
+ }
+ 
+-static uint64_t read_be64(const void *p)
+-{
+-    return ((uint64_t)read_be32(p) << 32) |
+-           (uint64_t)read_be32((const uint8_t *)p + 4);
+-}
+-
+ extern uint64_t __boot_dtb_ptr;
+ 
+ static paddr_t riscv64_ram_base = PHYS_MEMORY_BASE;
+@@ -192,122 +188,38 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
+ void riscv64_memory_init(void)
+ {
+     riscv64_window_from_board();
+-
+-    /* Snapshot the only ISA properties consumed after MMU initialization.
+-     * OpenSBI's DTB is passed as a physical pointer and may not be mapped (or
+-     * retained) after the temporary boot identity map is removed. */
++    extern char _start[], _end[];
++    uint64_t dtb = __boot_dtb_ptr;
++    size_t available = 0;
++    if (dtb) {
++        if ((dtb & 7) || dtb < riscv64_ram_base || dtb >= riscv64_ram_end)
++            panic("RISC-V: firmware DTB lies outside the board boot RAM map");
++        uint64_t mapped = riscv64_ram_end - dtb;
++        available = mapped < 0x200000 ? (size_t)mapped : 0x200000;
++    }
++    riscv_fdt_memory_t memory;
++    int rc = riscv_fdt_memory_window((const void *)(uintptr_t)dtb, available,
++        dtb, riscv64_ram_base, riscv64_ram_end,
++        (uintptr_t)_start - PAGE_OFFSET, (uintptr_t)_end - PAGE_OFFSET, &memory);
++    if (rc < 0)
++        panic("RISC-V: invalid FDT RAM/reservation or firmware overlaps kernel");
++    riscv64_ram_base = (paddr_t)memory.base;
++    riscv64_ram_end = (paddr_t)memory.end;
++    if (rc == 1) {
++        printf("[FDT] memory node unavailable, using board window 0x%lx..0x%lx\n",
++               (unsigned long)riscv64_ram_base, (unsigned long)riscv64_ram_end);
++    } else {
++        printf("[FDT] RAM range 0x%lx..0x%lx (%lu MiB, firmware reservations excluded)\n",
++               (unsigned long)riscv64_ram_base, (unsigned long)riscv64_ram_end,
++               (unsigned long)((riscv64_ram_end - riscv64_ram_base) >> 20));
++    }
++    /* Snapshot ISA facts only after validating the DTB. Physical boot mappings
++     * are removed later; the firmware buffer is now excluded from allocation. */
+     if (!riscv64_fdt_isa_cache_ready) {
+         riscv64_fdt_has_h = riscv64_fdt_has_isa_extension("h");
+         riscv64_fdt_has_sstc = riscv64_fdt_has_isa_extension("sstc");
+         riscv64_fdt_isa_cache_ready = 1;
+     }
+-
+-    const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
+-    if (!base || read_be32(base) != FDT_MAGIC) {
+-        printf("[FDT] memory node unavailable, using board window "
+-               "0x%lx..0x%lx\n",
+-               (unsigned long)riscv64_ram_base,
+-               (unsigned long)riscv64_ram_end);
+-        return;
+-    }
+-
+-    uint32_t totalsize = read_be32(base + 4);
+-    uint32_t off_struct = read_be32(base + 8);
+-    uint32_t off_strings = read_be32(base + 12);
+-    if (totalsize < 40 || off_struct >= totalsize || off_strings >= totalsize) {
+-        printf("[FDT] malformed header, using board window "
+-               "0x%lx..0x%lx\n",
+-               (unsigned long)riscv64_ram_base,
+-               (unsigned long)riscv64_ram_end);
+-        return;
+-    }
+-
+-    const uint8_t *p = base + off_struct;
+-    const uint8_t *endp = base + totalsize;
+-    const uint8_t *stringsp = base + off_strings;
+-    int depth = 0;
+-    int memory_depth = -1;
+-
+-    while (p + 4 <= endp) {
+-        uint32_t token = read_be32(p);
+-        p += 4;
+-        if (token == FDT_END)
+-            break;
+-
+-        if (token == FDT_BEGIN_NODE) {
+-            const char *name = (const char *)p;
+-            const char *name_end = name;
+-            while ((const uint8_t *)name_end < endp && *name_end)
+-                name_end++;
+-            if ((const uint8_t *)name_end >= endp)
+-                break;
+-            depth++;
+-            if (depth == 2 &&
+-                (strcmp(name, "memory") == 0 ||
+-                 strncmp(name, "memory@", 7) == 0))
+-                memory_depth = depth;
+-            p = (const uint8_t *)(((uintptr_t)(name_end + 1) + 3) & ~3UL);
+-            continue;
+-        }
+-
+-        if (token == FDT_END_NODE) {
+-            if (depth == memory_depth)
+-                memory_depth = -1;
+-            depth--;
+-            continue;
+-        }
+-
+-        if (token == FDT_NOP)
+-            continue;
+-
+-        if (token != FDT_PROP || p + 8 > endp)
+-            break;
+-
+-        uint32_t len = read_be32(p);
+-        uint32_t nameoff = read_be32(p + 4);
+-        p += 8;
+-        if (p + ((len + 3U) & ~3U) > endp ||
+-            off_strings + nameoff >= totalsize)
+-            break;
+-
+-        const char *propname = (const char *)(stringsp + nameoff);
+-        if (depth == memory_depth && strcmp(propname, "reg") == 0 && len >= 16) {
+-            uint64_t ram_base = read_be64(p);
+-            uint64_t ram_size = read_be64(p + 8);
+-            uint64_t ram_end = ram_base + ram_size;
+-            if (ram_end < ram_base)
+-                break;
+-            if (ram_end > PHYS_MEMORY_MAX_END) {
+-                printf("[FDT] RAM end 0x%lx exceeds boot map, clamping to 0x%lx\n",
+-                       (unsigned long)ram_end,
+-                       (unsigned long)PHYS_MEMORY_MAX_END);
+-                ram_end = PHYS_MEMORY_MAX_END;
+-            }
+-            /* Accept the first memory range that overlaps the board's usable
+-             * physical window and clamp it to that window. */
+-            if (ram_end > (uint64_t)riscv64_ram_base &&
+-                ram_base < (uint64_t)riscv64_ram_end) {
+-                if (ram_base < (uint64_t)riscv64_ram_base)
+-                    ram_base = riscv64_ram_base;
+-                if (ram_end > (uint64_t)riscv64_ram_end)
+-                    ram_end = riscv64_ram_end;
+-                riscv64_ram_base = (paddr_t)(ram_base & ~(PAGE_SIZE - 1));
+-                riscv64_ram_end = (paddr_t)(ram_end & ~(PAGE_SIZE - 1));
+-                printf("[FDT] RAM range 0x%lx..0x%lx (%lu MiB)\n",
+-                       (unsigned long)riscv64_ram_base,
+-                       (unsigned long)riscv64_ram_end,
+-                       (unsigned long)((riscv64_ram_end -
+-                                        riscv64_ram_base) >> 20));
+-                return;
+-            }
+-        }
+-        p += (len + 3U) & ~3U;
+-    }
+-
+-    printf("[FDT] memory node parse failed, using board window "
+-           "0x%lx..0x%lx\n",
+-           (unsigned long)riscv64_ram_base,
+-           (unsigned long)riscv64_ram_end);
+ }
+ 
+ const char *arch_bootargs_get(void)
+diff --git a/kernel/arch/x86_64/boot/entry.S b/kernel/arch/x86_64/boot/entry.S
+index 19957082..c751850f 100644
+--- a/kernel/arch/x86_64/boot/entry.S
++++ b/kernel/arch/x86_64/boot/entry.S
+@@ -67,25 +67,28 @@ _start:
+     addl  $0x200000, %eax
+     loop  1b
+ 
+-    /*
+-     * Higher-half map using 1GB pages.
+-     * PDPT_hh[0..3] map 0xFFFF800000000000 -> physical 0-4GB.
+-     *
+-     * 0-2GB: RAM — normal WB caching (flags 0x83).
+-     * 2-4GB: MMIO (PCI ECAM, LAPIC, IOAPIC, PCI BARs) — PCD=1 (bit 3)
+-     *        forces Uncacheable access so MMIO reads return live values
+-     *        instead of stale cache lines.  On QEMU 2G RAM this entire
+-     *        range is device memory so blanket PCD is safe.
+-     */
++    /* Use 2 MiB pages: 1 GiB pages are optional even on Intel 64 CPUs
++     * (notably Bay Trail/J1900). Preserve WB below 2 GiB and UC above. */
+     movl  $(boot_pdpt_hh - PAGE_OFFSET), %edi
+-    movl  $0x00000083, %eax    /* 1GB page: physical 0-1GB (RAM, WB) */
++    movl  $(boot_pd_hh - PAGE_OFFSET + 0x003), %eax
++    movl  $4, %ecx
++1:
+     movl  %eax, (%edi)
+-    movl  $0x40000083, %eax    /* 1GB page: physical 1-2GB (RAM, WB) */
+-    movl  %eax, 8(%edi)
+-    movl  $0x8000008B, %eax    /* 1GB page: physical 2-3GB (MMIO, UC) */
+-    movl  %eax, 16(%edi)
+-    movl  $0xC000008B, %eax    /* 1GB page: physical 3-4GB (MMIO, UC) */
+-    movl  %eax, 24(%edi)
++    addl  $4096, %eax
++    addl  $8, %edi
++    loop  1b
++    movl  $(boot_pd_hh - PAGE_OFFSET), %edi
++    movl  $0x83, %eax
++    movl  $2048, %ecx
++1:
++    testl %eax, %eax
++    jns   2f
++    orl   $0x18, %eax          /* default PAT entry 3: UC for MMIO */
++2:
++    movl  %eax, (%edi)
++    addl  $8, %edi
++    addl  $0x200000, %eax
++    loop  1b
+ 
+     /* Enable PAE and 2 MiB pages used by the temporary identity map. */
+     movl  %cr4, %eax
+@@ -191,7 +194,7 @@ _start_uefi:
+ 
+     /* Build the boot page tables: PML4 -> PDPT_id/PDPT_hh -> PD_id, an
+      * identity map of the first gigabyte in 2 MiB pages, and a higher-half
+-     * window over 0-4 GiB in 1 GiB pages.  2-4 GiB is marked uncacheable
++     * window over 0-4 GiB in 2 MiB pages.  2-4 GiB is marked uncacheable
+      * because that is where PCI ECAM and the APICs live. */
+     movabsq $(boot_pgdir - PAGE_OFFSET), %rdi
+     xorl  %eax, %eax
+@@ -221,14 +224,25 @@ _start_uefi:
+     loop   1b
+ 
+     movabsq $(boot_pdpt_hh - PAGE_OFFSET), %rdi
+-    movl   $0x00000083, %eax
++    movabsq $(boot_pd_hh - PAGE_OFFSET + 0x003), %rax
++    movl   $4, %ecx
++1:
+     movq   %rax, (%rdi)
+-    movl   $0x40000083, %eax
+-    movq   %rax, 8(%rdi)
+-    movl   $0x8000008B, %eax
+-    movq   %rax, 16(%rdi)
+-    movl   $0xC000008B, %eax
+-    movq   %rax, 24(%rdi)
++    addq   $4096, %rax
++    addq   $8, %rdi
++    loop   1b
++    movabsq $(boot_pd_hh - PAGE_OFFSET), %rdi
++    movl   $0x83, %eax
++    movl   $2048, %ecx
++1:
++    testl  %eax, %eax
++    jns    2f
++    orl    $0x18, %eax         /* default PAT entry 3: UC for MMIO */
++2:
++    movq   %rax, (%rdi)
++    addq   $8, %rdi
++    addl   $0x200000, %eax
++    loop   1b
+ 
+     /* PAE and the 2 MiB pages the identity map uses.  LME and PG are already
+      * set: we were started in long mode by the firmware.  These are 64-bit
+@@ -309,6 +323,9 @@ boot_pdpt_hh:
+     .align 4096
+ boot_pd_id:
+     .space 4096
++    .align 4096
++boot_pd_hh:
++    .space 4096 * 4
+ 
+ /* BSP boot stack, 64 KiB -- the same size the other arches reserve (see
+  * arch/aarch64/boot/entry.S).  .bss.stack is collected first by
+diff --git a/kernel/arch/x86_64/mm/kwx.c b/kernel/arch/x86_64/mm/kwx.c
+index 64b22ecb..0ba4e894 100644
+--- a/kernel/arch/x86_64/mm/kwx.c
++++ b/kernel/arch/x86_64/mm/kwx.c
+@@ -1,8 +1,8 @@
+ /*
+  * A20OS x86_64 — kernel's own W^X (KXAN)
+  *
+- * At boot, entry.S maps physical 0..4 GiB into the high half with four 1 GiB
+- * huge pages (boot_pdpt_hh, RWX; EFER.NXE is turned on by trap_init).  This
++ * At boot, entry.S maps physical 0..4 GiB with 2 MiB leaves under
++ * boot_pdpt_hh (RWX; EFER.NXE is turned on by trap_init). This
+  * file runs after mm_init() (arch_kernel_wx_finalize, from kernel_main, still
+  * in the BSP single-core stage) and refines them into:
+  *
+@@ -150,8 +150,10 @@ void arch_kernel_wx_finalize(void)
+      * guest with no FAT32 device, no /bin, and a panic at PID 1. */
+     for (int slot = 0; slot < (int)(X86_HIGH_RAM_MAP_END >> 30); slot++) {
+         uint64_t e = boot_pdpt_hh[slot];
+-        if (!(e & PTE_V) || !(e & PTE_PS))
++        if (!(e & PTE_V))
+             continue;
++        uint64_t *old_pd = (e & PTE_PS) ? NULL :
++            (uint64_t *)(uintptr_t)((e & ~0xfffULL & ~PTE_NX) + PAGE_OFFSET);
+         paddr_t base = (paddr_t)slot * X86_GIGA_SIZE;
+         int covers_ram = (slot == 0);   /* slot 0 holds the image; must downgrade */
+         size_t nranges = arch_ram_range_count();
+@@ -162,7 +164,12 @@ void arch_kernel_wx_finalize(void)
+                 covers_ram = 1;
+         }
+         if (!covers_ram) {
+-            boot_pdpt_hh[slot] = e | PTE_NX;
++            if (old_pd) {
++                for (int i = 0; i < 512; i++)
++                    old_pd[i] |= PTE_NX;
++            } else {
++                boot_pdpt_hh[slot] = e | PTE_NX;
++            }
+             continue;
+         }
+ 
+@@ -170,7 +177,8 @@ void arch_kernel_wx_finalize(void)
+         if (!pd)
+             panic("kwx: cannot allocate PD");
+         for (int i = 0; i < 512; i++)
+-            pd[i] = (base + (paddr_t)i * PMD_SIZE) | (e & 0xFFFUL) | PTE_NX;
++            pd[i] = old_pd ? old_pd[i] | PTE_NX :
++                (base + (paddr_t)i * PMD_SIZE) | (e & 0xFFFUL) | PTE_NX;
+ 
+         /* the image's 2 MiB block in this slot, linked in once its PT is built */
+         for (vaddr_t blk = ROUND_DOWN(img_start, PMD_SIZE); blk < img_end;
+diff --git a/kernel/arch/x86_64/platform/firmware.c b/kernel/arch/x86_64/platform/firmware.c
+index ab4ecda3..92eb9552 100644
+--- a/kernel/arch/x86_64/platform/firmware.c
++++ b/kernel/arch/x86_64/platform/firmware.c
+@@ -702,8 +702,8 @@ int firmware_console_getchar(void) {
+  * the comment there) so we can read the real memory map instead of assuming
+  * 1 GiB.  Only "available" (type 1) regions above the low 1 MiB are offered
+  * (the low page holds the IVT/BDA/legacy hole and must never be handed out),
+- * and nothing past the 2 GiB direct-map window that entry.S builds with 1 GiB
+- * pages.  If anything is missing we fall back to the old 1 GiB range.
++ * below the 2 GiB cacheable part of the boot direct map. If anything is
++ * missing we fall back to the old 1 GiB range.
+  */
+ #define X86_MB_BOOTLOADER_MAGIC 0x2BADB002u
+ #define X86_MB_INFO_MEM_MAP     0x00000040u
+@@ -719,13 +719,17 @@ int firmware_console_getchar(void) {
+  * ECAM and the MMIO window are at 2.75/3 GiB, inside the uncacheable part of
+  * the boot map.  The boot map stops at 4 GiB, so map the whole 1 GiB chunks a
+  * usable range fully covers, as cacheable RAM, and report them as usable.
+- * Chunks are all-or-nothing on purpose: a partially RAM 1 GiB page would also
+- * make whatever else is in it cacheable.
++ * Chunks remain all-or-nothing: do not make non-RAM holes cacheable. Each
++ * accepted chunk is installed as 512 ordinary 2 MiB leaves.
+  */
+ #define X86_HIGH_RAM_BASE       0x100000000ULL
+ #define X86_HIGH_PAGE           0x40000000ULL
+ 
+ extern uint64_t boot_pdpt_hh[512];
++/* Static tables are available before the frame allocator starts.  Do not
++ * install optional 1 GiB leaves while detecting memory on older Intel 64. */
++static uint64_t high_ram_pd[(X86_HIGH_RAM_MAP_END - X86_HIGH_RAM_BASE) >> 30][512]
++    __attribute__((aligned(4096)));
+ 
+ static void x86_high_ram_map_flush(void)
+ {
+@@ -796,7 +800,11 @@ static void x86_ram_detect(void) {
+                    chunk + X86_HIGH_PAGE <= X86_HIGH_RAM_MAP_END &&
+                    n < X86_RAM_RANGE_MAX;
+                  chunk += X86_HIGH_PAGE) {
+-                boot_pdpt_hh[chunk >> 30] = (uint64_t)chunk | 0x83ULL;
++                uint64_t *pd = high_ram_pd[(chunk - X86_HIGH_RAM_BASE) >> 30];
++                for (unsigned i = 0; i < 512; i++)
++                    pd[i] = (uint64_t)(chunk + (paddr_t)i * 0x200000) | 0x83ULL;
++                boot_pdpt_hh[chunk >> 30] =
++                    ((uintptr_t)pd - PAGE_OFFSET) | 0x003ULL;
+                 mapped_high = 1;
+                 g_ram_base[n] = chunk;
+                 g_ram_end[n] = chunk + X86_HIGH_PAGE;
+diff --git a/kernel/include/mm/mm.h b/kernel/include/mm/mm.h
+index e51be3a4..1127aa43 100644
+--- a/kernel/include/mm/mm.h
++++ b/kernel/include/mm/mm.h
+@@ -86,6 +86,22 @@ int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
+  * the scalar path for whatever the run stopped at). */
+ int pt_unmap_leaf_run(struct mm_struct *mm, vaddr_t va, int max_pages,
+                       paddr_t *pa_out);
++/* Fork table sharing (a20.ptshare).  mm_pt_ensure_exclusive() settles the
++ * share covering @va so the caller mutates a table it exclusively owns;
++ * NULL means @va has no leaf table (the caller's normal absent path
++ * applies).  The range form settles every leaf table under [start, end). */
++extern int g_mm_ptshare_enabled;
++uint64_t mm_cow_flags(uint64_t pte);
++/* Returns 0 with *out = the leaf table @mm may mutate (NULL when @va has no
++ * leaf table), or -ENOMEM when the share could not be settled: the caller
++ * must then abort its mutation instead of touching the shared table. */
++int mm_pt_ensure_exclusive(struct mm_struct *mm, vaddr_t va, pte_t **out);
++/* Range form; -ENOMEM leaves the mutation to be retried or skipped. */
++int mm_pt_ensure_range_exclusive(struct mm_struct *mm, vaddr_t start,
++                                 vaddr_t end);
++void pt_destroy_user_mm(struct mm_struct *mm);
++/* Settle every fork-share the dying mm holds (mm_destroy pre-pass). */
++void pt_destroy_settle_shares(struct mm_struct *mm);
+ paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va);
+ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc);
+ /* A missing entry also reports the absent subtree span in base/size/level.
+diff --git a/kernel/include/mm/pt.h b/kernel/include/mm/pt.h
+index 9c587224..82a83437 100644
+--- a/kernel/include/mm/pt.h
++++ b/kernel/include/mm/pt.h
+@@ -233,14 +233,15 @@ typedef struct pt_meta {
+  * child that exits without writing releases its share per TABLE, not per
+  * page.  The debt is settled lazily:
+  *
+- *   - a parent-side COW fault in a shared table materializes exactly one
+- *     page (frame reference transferred to the borrower, remembered in
+- *     mask[]),
+- *   - any borrower-side structure change (fault install, unmap, mprotect,
+- *     swap-out) first gives the borrower its own copy of the table and the
+- *     references for every leaf it inherited,
+- *   - an owner-side structure change hands the table to the borrower and
+- *     moves the owner to a private copy.
++ *   - any per-mm divergence after the fork -- a fault install, a COW copy,
++ *     an unmap, an mprotect, a swap-out, on EITHER side -- first ends the
++ *     share: the diverging side takes a private copy of the table and the
++ *     frame references for every leaf it inherits, and the table stays with
++ *     the other side.  In-place single-page materialization cannot work
++ *     because the status sidecar is shared too, so one slot cannot describe
++ *     two mms at once.
++ *   - a borrower that exits without ever diverging settles its share per
++ *     TABLE: it holds no references, so nothing per page is released.
+  *
+  * struct pt_share exists only while a table is lent out; at most one
+  * borrower per table, so a fork of an already-borrowed table falls back to
+@@ -249,10 +250,6 @@ typedef struct pt_meta {
+ struct pt_share {
+     struct mm_struct *owner;    /* mm whose mapping created the table  */
+     struct mm_struct *borrower; /* the single fork child borrowing it  */
+-    /* Materialized-borrower bitmap: bit i set means the borrower holds a
+-     * frame reference for leaf i (transferred by an owner COW fault); clear
+-     * means the owner's reference is still the only one. */
+-    uint8_t mask[MM_PT_META_ENTRIES / 8];
+ };
+ 
+ /* ------------------------------------------------------------------ *
+@@ -649,22 +646,15 @@ void mm_pt_node_unlock(pte_t *table);
+  * falls back to the eager per-page clone). */
+ int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
+                       struct mm_struct *borrower);
+-/* Borrower exit on a table it never wrote: release the materialized
+- * references recorded in mask[] and detach the share.  The table stays with
+- * the owner. */
+-void mm_pt_share_end_borrow(pte_t *table);
+-/* Owner structure change: hand the table to the borrower by materializing a
+- * frame reference for every present leaf the borrower does not already hold
+- * (mask[] clear).  On return the borrower owns the table exclusively. */
+-void mm_pt_share_owner_handoff(pte_t *table);
+-/* Borrower structure change: copy the table page and its status/safe
+- * sidecars into @dst (already allocated and node-initialized), taking a
+- * frame reference for every present leaf that mask[] does not already cover,
+- * then detach the share so @table is exclusive to the owner again. */
+-void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst);
++/* Detach a share whose references have been settled by the caller (the
++ * mm layer classifies each leaf: page-cache pin or frame reference). */
++void mm_pt_share_detach(pte_t *table);
+ /* Non-NULL while the table is lent out.  Read side only; mutate the record
+  * only under the node lock. */
+ struct pt_share *mm_pt_share(pte_t *table);
++/* Copy one leaf table's hardware page and status/safe sidecars into another
++ * already-allocated table. */
++void mm_pt_copy_table(pte_t *src, pte_t *dst);
+ void mm_pt_node_unlock(pte_t *table);
+ 
+ /* The table that owns the leaf slot for addr, i.e. the parent of the leaf.
+diff --git a/kernel/mm/cow.c b/kernel/mm/cow.c
+index a48c828c..e1d5a4b6 100644
+--- a/kernel/mm/cow.c
++++ b/kernel/mm/cow.c
+@@ -24,7 +24,7 @@ static size_t vm_pt_level_size(int level) {
+     return PAGE_SIZE << (ARCH_PT_BITS * level);
+ }
+ 
+-static uint64_t mm_cow_flags(uint64_t pte) {
++uint64_t mm_cow_flags(uint64_t pte) {
+     uint64_t flags = pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A |
+                             PTE_D | PTE_G | PTE_MAT1 | PTE_LEAF |
+                             PTE_COW);
+diff --git a/kernel/mm/fault.c b/kernel/mm/fault.c
+index 06651fc3..d9c3d901 100644
+--- a/kernel/mm/fault.c
++++ b/kernel/mm/fault.c
+@@ -164,6 +164,11 @@ static int fault_install(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flag
+ {
+     (void)cls;
+     (void)replace;
++    /* Installing into a fork-shared leaf table diverges this mm (the other
++     * side must not see the new page); settle the share first. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, page_va, &l0) < 0)
++        return -ENOMEM;
+     return pt_map(mm->pgdir, page_va, pfn_to_phys(pfn), flags);
+ }
+ #endif
+@@ -197,6 +202,13 @@ static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+ static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                             pfn_t *pfns, size_t n, pte_t flags)
+ {
++    /* The window can span at most one leaf-table boundary (it is far
++     * smaller than a table), so settling both ends covers every page. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, start, &l0) < 0)
++        return 0;
++    if (mm_pt_ensure_exclusive(mm, end - 1, &l0) < 0)
++        return 0;
+     mm_cursor_t cur;
+     int r = mm_addrspace_lock(mm, start, end, &cur);
+     if (r != 0)
+@@ -586,6 +598,13 @@ static int handle_cow_fault_locked(task_t *t, mm_struct_t *mm, uint64_t stval,
+     (void)old_page_out;
+     return -1;
+ #else
++    /* A fork-shared leaf table diverges on the first COW copy: whichever
++     * side faults takes its private copy of the table (and the references
++     * for the leaves it inherits) before the transaction snapshots a slot,
++     * because the status sidecar is shared and cannot describe two mms. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, stval & ~(vaddr_t)(PAGE_SIZE - 1), &l0) < 0)
++        return -ENOMEM;
+     return a20_cow_fault_locked_rust(t, mm, stval, old_pfn_out, old_page_out);
+ #endif
+ }
+diff --git a/kernel/mm/mm.c b/kernel/mm/mm.c
+index 9e60556f..88ea756c 100644
+--- a/kernel/mm/mm.c
++++ b/kernel/mm/mm.c
+@@ -18,7 +18,9 @@
+ #include "mm/frame.h"
+ #include "mm/slab.h"
+ #include "mm/vm.h"
++#include "mm/vm_internal.h"
+ #include "mm/pt.h"
++#include "fs/page_cache.h"
+ #include "mm/failinject.h"
+ #include "mm/fault.h"
+ #include "mm/usercopy.h"
+@@ -942,13 +944,150 @@ pte_t *pt_clone(pt_root_t *src_pgdir) {
+     return pt_clone_level(src_pgdir, ARCH_PT_ROOT_LEVEL);
+ }
+ 
+-static void pt_destroy_user_recursive(pte_t *table, int level) {
++/* Fork table-sharing switch (a20.ptshare=0 disables).  Default on: the
++ * bootarg exists so the same binary can A/B the two regimes and so a
++ * bisect lands on one commit. */
++int g_mm_ptshare_enabled = 0; /* TEST default-off */
++
++/* End the share of @l0 for whichever side @mm is, giving @mm an exclusive
++ * leaf table it may mutate, and relink @mm's L1 entry.
++ *
++ * Returns 0 with *out set to the table to mutate (NULL when @va has no leaf
++ * table -- the caller's normal absent path applies), or -ENOMEM when the
++ * private copy could not be allocated; the caller must then give up its
++ * mutation rather than touch the shared table.
++ *
++ * Reference settlement is the borrower's either way: on a borrower
++ * divergence it copies the table and takes one reference per present leaf;
++ * on an owner divergence the table stays with the borrower, which takes the
++ * references while the owner keeps a private copy.  A leaf's reference kind
++ * is classified exactly the way the release path classifies it -- a page
++ * that is the canonical page-cache page of its file index keeps a cache
++ * pin, anything else a frame reference -- so teardown always balances.  The
++ * VMA list used for that lookup is the mm whose mm->lock is held here (the
++ * borrower when it diverges; the owner otherwise, whose list for a shared
++ * table still equals the fork-time state or the share would already have
++ * ended).
++ *
++ * Callers hold mm->lock. */
++int mm_pt_ensure_exclusive(struct mm_struct *mm, vaddr_t va, pte_t **out)
++{
++    *out = NULL;
++    if (!mm || !mm->pgdir || !g_mm_ptshare_enabled)
++        return 0;
++    pte_t *table = mm->pgdir;
++    pte_t *l1_table = NULL;
++    int l1_idx = 0;
++    for (int level = ARCH_PT_ROOT_LEVEL; level > 1; level--) {
++        int idx = arch_pt_vpn(va, level);
++        pte_t pte = table[idx];
++        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
++            return 0;
++        table = arch_pte_to_ptr(pte);
++        if (level - 1 == 1) {
++            l1_table = table;
++            l1_idx = arch_pt_vpn(va, 1);
++        }
++    }
++    if (!l1_table)
++        return 0;
++    pte_t *l1_slot = &l1_table[l1_idx];
++    pte_t l0_pte = *l1_slot;
++    if (!(l0_pte & PTE_V) || arch_pte_is_leaf(l0_pte))
++        return 0;
++    pte_t *l0 = arch_pte_to_ptr(l0_pte);
++    pt_meta_t *pm = mm_pt_meta(l0);
++    struct pt_share *sh = pm ? pm->share : NULL;
++    if (!sh) {
++        *out = l0;
++        return 0;
++    }
++
++    pte_t *mine = (pte_t *)frame_alloc();
++    if (mine == (pte_t *)PFN_NONE)
++        return -ENOMEM;
++    if (mm_pt_node_init_atomic(mine, 0) < 0) {
++        pfa_free(virt_to_pfn(mine), 0);
++        return -ENOMEM;
++    }
++
++    mm_pt_node_lock(l0);
++    sh = pm->share;
++    if (!sh) {
++        /* The other side settled the share first; re-read our L1 slot: if it
++         * still names l0, the table is ours to mutate. */
++        mm_pt_node_unlock(l0);
++        pfa_free(virt_to_pfn(mine), 0);
++        mm_pt_node_fini(mine);
++        *out = (*l1_slot == l0_pte) ? l0 : NULL;
++        return 0;
++    }
++    int is_borrower = sh->borrower == mm;
++    if (!is_borrower && sh->owner != mm) {
++        mm_pt_node_unlock(l0);
++        pfa_free(virt_to_pfn(mine), 0);
++        mm_pt_node_fini(mine);
++        return -EINVAL;
++    }
++    mm_pt_copy_table(l0, mine);
++    /* The borrower settles one reference per inherited leaf.  A cache-backed
++     * leaf keeps the lookup's reference as its pin; anything else takes a
++     * frame reference.  Runs under the node lock so a concurrent fault on
++     * the other side cannot interleave with the settlement. */
++    vaddr_t base = va & ~(vaddr_t)(pt_level_size(1) - 1);
++    for (int k = 0; k < MM_PT_META_ENTRIES; k++) {
++        pte_t e = ((pte_t *)l0)[k];
++        if (!(e & PTE_V) || !arch_pte_is_leaf(e))
++            continue;
++        pfn_t pfn = phys_to_pfn(arch_pte_addr(e));
++        vaddr_t leaf_va = base + (vaddr_t)k * PAGE_SIZE;
++        mm_seg_t *vma = mm_seg_find(mm, leaf_va);
++        page_cache_page_t *pcp = mm_file_cache_mapping_get(vma, leaf_va, pfn);
++        if (!pcp)
++            frame_get(pfn);
++    }
++    pm->share = NULL;
++    kfree(sh);
++    mm_pt_node_unlock(l0);
++
++    /* Relink this mm's L1 entry to the private copy.  Leaf translations are
++     * unchanged, so no TLB work is needed for the swap itself. */
++    mm_pt_node_lock(l1_table);
++    *l1_slot = arch_pte_from_pa(va_to_pa(mine)) | PTE_DIR;
++    mm_pt_node_unlock(l1_table);
++    *out = mine;
++    return 0;
++}
++
++/* Settle every share that touches [start, end): each covered leaf table
++ * ends up exclusive to @mm.  Used by range operations (mprotect) whose
++ * transaction captured state before the per-page hooks can run. */
++int mm_pt_ensure_range_exclusive(struct mm_struct *mm, vaddr_t start,
++                                 vaddr_t end)
++{
++    vaddr_t va = start & ~(vaddr_t)(PAGE_SIZE - 1);
++    while (va < end) {
++        vaddr_t next = va + PAGE_SIZE;
++        pte_t *l0 = NULL;
++        int r = mm_pt_ensure_exclusive(mm, va, &l0);
++        if (r < 0)
++            return r;
++        if (!l0)
++            next = (va | ((vaddr_t)pt_level_size(1) - 1)) + 1;
++        va = next;
++    }
++    return 0;
++}
++
++static void pt_destroy_user_recursive(struct mm_struct *mm, pte_t *table,
++                                      int level, vaddr_t base) {
+     if (!table) return;
+     /* Only user half (0..255) lives at root; kernel half is shared
+      * and must not be freed.  Lower levels may span all 512 entries. */
+     int limit = (level == ARCH_PT_ROOT_LEVEL) ?
+         ARCH_PT_USER_END : arch_pt_level_entries(level);
+     for (int i = 0; i < limit; i++) {
++        vaddr_t entry_base = base + (vaddr_t)i * pt_level_size(level);
+         pte_t pte = table[i];
+ #ifdef CONFIG_SWAP
+         if (pte_is_swap(pte)) {
+@@ -976,7 +1115,46 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
+                 continue;
+             }
+             pte_t *next = arch_pte_to_ptr(pte);
+-            pt_destroy_user_recursive(next, level - 1);
++#if defined(ARCH_HAS_PGTABLE_OPS)
++            /* A fork-shared leaf table is settled per TABLE, not per page:
++             * a borrower that never diverged holds no leaf references at
++             * all, and an owner that dies hands its references to the
++             * borrower.  Either way the surviving side keeps the table, and
++             * this mm's entry just goes away. */
++            struct pt_share *sh = mm_pt_share(next);
++            if (sh && sh->borrower == mm) {
++                /* A borrower that never diverged holds no leaf references:
++                 * nothing per page to release. */
++                mm_pt_share_detach(next);
++                table[i] = 0;
++                mm_pt_note_absent(table, level, i);
++                continue;
++            }
++            if (sh && sh->owner == mm) {
++                /* The owner dies: the borrower takes one reference per
++                 * present leaf, classified like the release path. */
++                vaddr_t span = pt_level_size(level - 1);
++                vaddr_t l0_base = entry_base;
++                (void)span;
++                for (int k = 0; k < MM_PT_META_ENTRIES; k++) {
++                    pte_t e = ((pte_t *)next)[k];
++                    if (!(e & PTE_V) || !arch_pte_is_leaf(e))
++                        continue;
++                    pfn_t pfn = phys_to_pfn(arch_pte_addr(e));
++                    vaddr_t leaf_va = l0_base + (vaddr_t)k * PAGE_SIZE;
++                    mm_seg_t *vma = mm_seg_find(mm, leaf_va);
++                    page_cache_page_t *pcp =
++                        mm_file_cache_mapping_get(vma, leaf_va, pfn);
++                    if (!pcp)
++                        frame_get(pfn);
++                }
++                mm_pt_share_detach(next);
++                table[i] = 0;
++                mm_pt_note_absent(table, level, i);
++                continue;
++            }
++#endif
++            pt_destroy_user_recursive(mm, next, level - 1, entry_base);
+             pt_free_table(next, level - 1);
+             table[i] = 0;
+             mm_pt_note_absent(table, level, i);
+@@ -986,10 +1164,88 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
+ 
+ void pt_destroy_user(pt_root_t *pgdir) {
+     if (!pgdir) return;
+-    pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
++    pt_destroy_user_recursive(NULL, pgdir, ARCH_PT_ROOT_LEVEL, 0);
+     pt_free_table(pgdir, ARCH_PT_ROOT_LEVEL);
+ }
+ 
++/* Settle every fork-share the dying mm holds, at table granularity, BEFORE
++ * the VMA teardown walks: a borrowed table is dropped outright (its leaves
++ * carry no references of ours), and an owned shared table hands its
++ * references to the borrower (classified like the release path, resolved
++ * through this mm's mapping list, which for a shared table still equals the
++ * fork-time state).  This mm's L1 entries for settled tables are cleared, so
++ * the per-VMA teardown and pt_destroy_user() below simply see absent ranges
++ * and never pay for them. */
++void pt_destroy_settle_shares(struct mm_struct *mm)
++{
++    pte_t *stack[ARCH_PT_ROOT_LEVEL + 1];
++    int cursors[ARCH_PT_ROOT_LEVEL + 1];
++    vaddr_t bases[ARCH_PT_ROOT_LEVEL + 1];
++    int level = ARCH_PT_ROOT_LEVEL;
++    pte_t *table = mm->pgdir;
++    vaddr_t base = 0;
++    cursors[level] = 0;
++    for (;;) {
++        int limit = (level == ARCH_PT_ROOT_LEVEL)
++                        ? ARCH_PT_USER_END
++                        : arch_pt_level_entries(level);
++        if (cursors[level] >= limit) {
++            if (level == ARCH_PT_ROOT_LEVEL)
++                break;
++            level++;
++            table = stack[level];
++            base = bases[level];
++            continue;
++        }
++        int i = cursors[level]++;
++        vaddr_t eb = base + (vaddr_t)i * pt_level_size(level);
++        pte_t pte = table[i];
++        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
++            continue;
++        if (level > 1) {
++            stack[level] = table;
++            bases[level] = base;
++            table = arch_pte_to_ptr(pte);
++            base = eb;
++            level--;
++            cursors[level] = 0;
++            continue;
++        }
++        pte_t *l0 = arch_pte_to_ptr(pte);
++        pt_meta_t *pm = mm_pt_meta(l0);
++        struct pt_share *sh = pm ? pm->share : NULL;
++        if (!sh)
++            continue;
++        if (sh->owner == mm) {
++            for (int k = 0; k < MM_PT_META_ENTRIES; k++) {
++                pte_t e = ((pte_t *)l0)[k];
++                if (!(e & PTE_V) || !arch_pte_is_leaf(e))
++                    continue;
++                pfn_t pfn = phys_to_pfn(arch_pte_addr(e));
++                vaddr_t leaf_va = eb + (vaddr_t)k * PAGE_SIZE;
++                mm_seg_t *vma = mm_seg_find(mm, leaf_va);
++                page_cache_page_t *pcp =
++                    mm_file_cache_mapping_get(vma, leaf_va, pfn);
++                if (!pcp)
++                    frame_get(pfn);
++            }
++        }
++        /* Borrowed tables: the borrower holds nothing; detach only. */
++        mm_pt_share_detach(l0);
++        table[i] = 0;
++        mm_pt_note_absent(table, level, i);
++    }
++}
++
++/* Share-aware final destroy: mm_destroy passes the dying mm so borrowed and
++ * owned shared leaf tables settle per table.  Callers without an mm (or
++ * with an mm that cannot hold shares) keep the plain form. */
++void pt_destroy_user_mm(struct mm_struct *mm) {
++    if (!mm || !mm->pgdir) return;
++    pt_destroy_user_recursive(mm, mm->pgdir, ARCH_PT_ROOT_LEVEL, 0);
++    pt_free_table(mm->pgdir, ARCH_PT_ROOT_LEVEL);
++}
++
+ #endif /* defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU) */
+ 
+ static inline int user_range_ok(uint64_t va, size_t n) {
+diff --git a/kernel/mm/mmap.c b/kernel/mm/mmap.c
+index 664916d2..a2d6f4dc 100644
+--- a/kernel/mm/mmap.c
++++ b/kernel/mm/mmap.c
+@@ -153,6 +153,8 @@ void a20_mmap_provision_anon(void *mm_ptr, uintptr_t start, uintptr_t end,
+                              uintptr_t ptef)
+ {
+ #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
++    if (mm_pt_ensure_range_exclusive((struct mm_struct *)mm_ptr, start, end) < 0)
++        return;
+     (void)mm_pt_provision_anon(mm_ptr, start, end, (pte_t)ptef);
+ #else
+     (void)mm_ptr;
+@@ -273,6 +275,11 @@ void mm_mmap_seg_annotate(mm_struct_t *mm, mm_seg_t *m, vaddr_t start,
+ {
+     if (!mm || !m || end <= start || !seg_dispatchable(m))
+         return;
++    /* Backing annotations live in the leaf tables; a fork-shared table
++     * cannot carry this mm's file identity.  Skipping the annotation on
++     * failure is safe: dispatch falls back to the VMA list. */
++    if (mm_pt_ensure_range_exclusive(mm, start, end) < 0)
++        return;
+     (void)mm_pt_annotate_seg(mm, start, end, m);
+ }
+ 
+diff --git a/kernel/mm/mprotect.c b/kernel/mm/mprotect.c
+index d81a477d..f3f4c42d 100644
+--- a/kernel/mm/mprotect.c
++++ b/kernel/mm/mprotect.c
+@@ -227,6 +227,12 @@ int a20_mprotect_install(void *mm_ptr, uintptr_t va, uintptr_t observed,
+                          uintptr_t pa, uintptr_t flags)
+ {
+     mm_struct_t *mm = mm_ptr;
++    /* mprotect diverges this mm's PTE flags from the fork-share; the caller
++     * also settles the range up front, so this is a backstop for leaves that
++     * appeared between the range pass and this install. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, va, &l0) < 0)
++        return 0;
+     pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
+     if (!pte)
+         return 0;
+@@ -264,6 +270,11 @@ void a20_mprotect_refresh_absent(void *mm_ptr, uintptr_t va, uintptr_t ptef)
+ {
+ #if defined(ARCH_HAS_PGTABLE_OPS)
+     mm_struct_t *mm = mm_ptr;
++    /* The status sidecar of a shared table cannot carry two mms' protection
++     * bits; refresh is a divergence like any other. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, va, &l0) < 0)
++        return;
+     pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+     if (ltab)
+         mm_pt_node_lock(ltab);
+diff --git a/kernel/mm/munmap.c b/kernel/mm/munmap.c
+index 0509f462..80936809 100644
+--- a/kernel/mm/munmap.c
++++ b/kernel/mm/munmap.c
+@@ -445,6 +445,14 @@ int a20_munmap_leaf_hold(void *mm_ptr, void *vma_ptr, uintptr_t va, uint32_t pfn
+ int a20_munmap_leaf_unmap(void *mm_ptr, uintptr_t va,
+                           struct a20_munmap_leaf *out)
+ {
++    mm_struct_t *mm = mm_ptr;
++    /* Unmapping one leaf of a fork-shared table diverges this mm: settle the
++     * share (a private copy plus the inherited references) before the walk.
++     * The final-destroy sweep never comes through here -- it settles at
++     * table granularity in pt_destroy_settle_shares() instead. */
++    pte_t *l0 = NULL;
++    if (mm_pt_ensure_exclusive(mm, va, &l0) < 0)
++        return -ENOMEM;
+     paddr_t pa = 0;
+     vaddr_t base = 0;
+     size_t size = 0;
+@@ -581,6 +589,9 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
+             mm_insert_vma(mm, vma);
+             mm->total_vm += (map_end - map_start) / PAGE_SIZE;
+ #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
++            if (mm_pt_ensure_range_exclusive(mm, map_start, map_end) < 0)
++                (void)0; /* skip provisioning; faults dispatch from the VMA */
++            else
+             (void)mm_pt_provision_anon(mm, map_start, map_end,
+                                         mm_user_brk_pte_flags());
+ #endif
+diff --git a/kernel/mm/pt.c b/kernel/mm/pt.c
+index c56f4171..2a309029 100644
+--- a/kernel/mm/pt.c
++++ b/kernel/mm/pt.c
+@@ -489,71 +489,49 @@ int mm_pt_share_begin(pte_t *table, struct mm_struct *owner,
+     return 0;
+ }
+ 
+-static void share_put_mask_refs(pte_t *table, struct pt_share *sh)
+-{
+-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+-        if (!(sh->mask[i >> 3] & (1u << (i & 7))))
+-            continue;
+-        pte_t pte = ((pte_t *)table)[i];
+-        if ((pte & PTE_V) && arch_pte_is_leaf(pte))
+-            frame_put(phys_to_pfn(arch_pte_addr(pte)));
+-    }
+-}
+-
+-void mm_pt_share_end_borrow(pte_t *table)
+-{
+-    pt_meta_t *pm = mm_pt_meta(table);
+-    struct pt_share *sh = pm ? pm->share : NULL;
+-    if (!sh)
+-        return;
+-    share_put_mask_refs(table, sh);
+-    pm->share = NULL;
+-    kfree(sh);
+-}
+ 
+-void mm_pt_share_owner_handoff(pte_t *table)
+-{
+-    pt_meta_t *pm = mm_pt_meta(table);
+-    struct pt_share *sh = pm ? pm->share : NULL;
+-    if (!sh)
++/* Copy the hardware page, the status/safe sidecars and the backing-object
++ * annotations of one leaf table into another already-allocated,
++ * node-initialized table.  Callers decide which side takes (or keeps) the
++ * leaf references; the annotation block is duplicated because each table
++ * owns its block, while the segment array underneath is shared with one
++ * more reference.  An annotation allocation failure leaves the copy without
++ * a segtab: file faults on the copy fall back to VMA dispatch, which is
++ * slower but correct. */
++void mm_pt_copy_table(pte_t *src, pte_t *dst)
++{
++    pt_meta_t *sm = mm_pt_meta(src);
++    pt_meta_t *dm = mm_pt_meta(dst);
++    if (!sm || !dm)
+         return;
+-    /* The borrower already holds the mask[] references; take one for every
+-     * other present leaf so the (now exclusive) borrower owns them all. */
+-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+-        pte_t pte = ((pte_t *)table)[i];
+-        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+-            continue;
+-        if (sh->mask[i >> 3] & (1u << (i & 7)))
+-            continue;
+-        frame_get(phys_to_pfn(arch_pte_addr(pte)));
++    memcpy(dst, src, PAGE_SIZE);
++    memcpy(dm->cls, sm->cls, sizeof(dm->cls));
++    memcpy(dm->safe, sm->safe, sizeof(dm->safe));
++    dm->nr_present = sm->nr_present;
++    if (sm->segtab) {
++        mm_segtab_t *st = kcalloc(1, sizeof(*st) +
++                                  (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
++        if (st) {
++            st->idx = (uint8_t *)(st + 1);
++            memcpy(st->idx, sm->segtab->idx,
++                   (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
++            st->arr = sm->segtab->arr;
++            __atomic_add_fetch(&st->arr->refcount, 1, __ATOMIC_ACQ_REL);
++            dm->segtab = st;
++        }
+     }
+-    pm->share = NULL;
+-    kfree(sh);
+ }
+ 
+-void mm_pt_share_borrower_copy(pte_t *table, pte_t *dst)
++/* Detach a settled share.  The reference settlement (who takes or keeps
++ * which leaf references) is the caller's, because classifying a leaf --
++ * page-cache pin versus plain frame reference -- needs the mm's mapping
++ * list, which lives above this layer. */
++void mm_pt_share_detach(pte_t *table)
+ {
+     pt_meta_t *pm = mm_pt_meta(table);
+-    pt_meta_t *dm = mm_pt_meta(dst);
+     struct pt_share *sh = pm ? pm->share : NULL;
+-    if (!sh || !dm)
++    if (!sh)
+         return;
+-    /* Copy the hardware page and the authoritative sidecars; nr_present is
+-     * identical because the entries are. */
+-    memcpy(dst, table, PAGE_SIZE);
+-    memcpy(dm->cls, pm->cls, sizeof(dm->cls));
+-    memcpy(dm->safe, pm->safe, sizeof(dm->safe));
+-    dm->nr_present = pm->nr_present;
+-    /* The borrower takes its own reference for every leaf the mask does not
+-     * already cover; mask-covered leaves' references simply stay with it. */
+-    for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
+-        pte_t pte = ((pte_t *)table)[i];
+-        if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+-            continue;
+-        if (sh->mask[i >> 3] & (1u << (i & 7)))
+-            continue;
+-        frame_get(phys_to_pfn(arch_pte_addr(pte)));
+-    }
+     pm->share = NULL;
+     kfree(sh);
+ }
+diff --git a/kernel/mm/vm.c b/kernel/mm/vm.c
+index 79197544..e5f836f4 100644
+--- a/kernel/mm/vm.c
++++ b/kernel/mm/vm.c
+@@ -37,6 +37,7 @@
+ #include "proc/proc.h"
+ #include "proc/proc_internal.h"
+ #include "core/string.h"
++#include "core/bootargs.h"
+ #include "core/panic.h"
+ #include "core/klog.h"
+ #include "core/perf.h"
+@@ -674,6 +675,9 @@ static void mm_destroy_impl(mm_struct_t *mm) {
+      * list and page table are torn down. */
+     aio_context_reap_mm(mm);
+ 
++    /* Settle fork-shared leaf tables first: after this, the per-VMA teardown
++     * and pt_destroy_user() only ever see tables this mm exclusively owns. */
++    pt_destroy_settle_shares(mm);
+     /* Publish any VMA whose teardown was deferred, then walk the list and drop
+      * each VMA's own pages.  free_vma_pages() lives in mm/vma.c; the split
+      * keeps the cold teardown path out of the hot map/unmap code. */
+@@ -753,7 +757,9 @@ static void mm_destroy_impl(mm_struct_t *mm) {
+     /* Drain any huge-page demotion holds before page-table frames are freed. */
+     mm_tlb_invalidate_finish(mm);
+     if (mm->pgdir) {
+-        pt_destroy_user(mm->pgdir);
++        /* Share-aware: borrowed tables drop per table, owned shared tables
++         * hand their references to the surviving borrower. */
++        pt_destroy_user_mm(mm);
+         mm->pgdir = NULL;
+     }
+     /* PT metadata can drop the last VMA segment references while the tree is
+@@ -788,6 +794,181 @@ void mm_destroy(mm_struct_t *mm) {
+  *   1. in a multithreaded program, another thread of the parent faults at the
+  *      same time;
+  *   2. under SMP, another CPU is handling a page fault in the parent. */
++/* Fork table sharing (a20.ptshare, see struct pt_share in mm/pt.h).
++ *
++ * A level-0 table the parent exclusively owns is lent to the child when its
++ * whole span is covered only by forkable private-anonymous VMAs (gaps are
++ * fine: absent entries are shared as absent) and none of its leaves carry
++ * safety annotations or swap entries.  The parent's writable leaves are
++ * downgraded in place -- that rewrite is shared semantics by definition --
++ * and the child's L1 entry is pointed at the same table.  The child takes
++ * NO per-page references: the owner's references cover the frames while the
++ * share lasts, and every later divergence (fault, unmap, mprotect, COW on
++ * either side) settles the share before it mutates.
++ *
++ * Tables that fail any check keep the eager per-page clone below, which
++ * naturally skips shared ranges through its destination-present checks. */
++#ifdef ARCH_HAS_PGTABLE_OPS
++static size_t fork_share_level_span(int level) {
++    return PAGE_SIZE << (ARCH_PT_BITS * level);
++}
++
++static void fork_share_tables(mm_struct_t *parent, mm_struct_t *child)
++{
++    if (!g_mm_ptshare_enabled)
++        return;
++    /* Private file mappings share too: the backing annotations are part of
++     * the table's fork-time state and the borrower's cache pins are debt,
++     * exactly like anonymous frames.  Gaps are fine (absent entries are
++     * shared as absent). */
++    const uint64_t unshareable = VM_SHARED | VM_VMO | VM_PFNMAP |
++                                 VM_SYSV_SHM | VM_DONTFORK | VM_WIPEONFORK |
++                                 VM_LOCKED;
++    pte_t *stack[ARCH_PT_ROOT_LEVEL + 1];
++    int cursors[ARCH_PT_ROOT_LEVEL + 1];
++    vaddr_t bases[ARCH_PT_ROOT_LEVEL + 1];
++    int level = ARCH_PT_ROOT_LEVEL;
++    pte_t *table = parent->pgdir;
++    vaddr_t base = 0;
++    cursors[level] = 0;
++    for (;;) {
++        int limit = (level == ARCH_PT_ROOT_LEVEL)
++                        ? ARCH_PT_USER_END
++                        : arch_pt_level_entries(level);
++        if (cursors[level] >= limit) {
++            if (level == ARCH_PT_ROOT_LEVEL)
++                break;
++            level++;
++            table = stack[level];
++            base = bases[level];
++            continue;
++        }
++        int i = cursors[level]++;
++        vaddr_t eb = base + (vaddr_t)i * fork_share_level_span(level);
++        pte_t pte = table[i];
++        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
++            continue;
++        if (level > 1) {
++            stack[level] = table;
++            bases[level] = base;
++            table = arch_pte_to_ptr(pte);
++            base = eb;
++            level--;
++            cursors[level] = 0;
++            continue;
++        }
++
++        /* level 1: the child of this entry is a level-0 table spanning
++         * [eb, eb + fork_share_level_span(1)). */
++        pte_t *l0 = arch_pte_to_ptr(pte);
++        pt_meta_t *pm = mm_pt_meta(l0);
++        if (!pm || pm->share)
++            continue;
++        int have_safe = 0;
++        for (size_t b = 0; b < sizeof(pm->safe); b++)
++            have_safe |= pm->safe[b] != 0;
++        if (have_safe)
++            continue;
++        int present = 0, swap_seen = 0;
++        for (int k = 0; k < MM_PT_META_ENTRIES; k++) {
++            pte_t e = ((pte_t *)l0)[k];
++#ifdef CONFIG_SWAP
++            if (pte_is_swap(e)) { swap_seen = 1; break; }
++#endif
++            if (e & PTE_V)
++                present++;
++        }
++        if (swap_seen)
++            continue;
++        for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
++            if (pv->end <= eb || pv->start >= eb + fork_share_level_span(1))
++                continue;
++            if (pv->vm_flags & unshareable) {
++                present = 0;
++                break;
++            }
++        }
++        if (!present)
++            continue;
++
++        /* Lend.  parent->lock serializes this whole sequence against every
++         * parent-side mutator and the child is still unpublished, so the
++         * node locks only guard against the lockless status readers. */
++        mm_pt_node_lock(l0);
++        if (pm->share || mm_pt_share_begin(l0, parent, child) < 0) {
++            mm_pt_node_unlock(l0);
++            continue;
++        }
++        mm_pt_node_unlock(l0);
++
++        /* Child L1 chain, allocated on demand. */
++        pte_t *ctable = child->pgdir;
++        int fail = 0;
++        for (int cl = ARCH_PT_ROOT_LEVEL; cl > 1 && !fail; cl--) {
++            int cidx = arch_pt_vpn(eb, cl);
++            pte_t *slot = &ctable[cidx];
++            if (!(*slot & PTE_V)) {
++                pte_t *nt = (pte_t *)frame_alloc();
++                if (nt == (pte_t *)PFN_NONE ||
++                    mm_pt_node_init_atomic(nt, cl - 1) < 0) {
++                    fail = 1;
++                    break;
++                }
++                memset(nt, 0, PAGE_SIZE);
++                *slot = arch_pte_from_pa(va_to_pa(nt)) | PTE_DIR;
++                mm_pt_note_present(ctable, cl, cidx,
++                                   MM_ST_CLS_BYTE(MM_ST_PT_NODE));
++            } else if (arch_pte_is_leaf(*slot)) {
++                fail = 1;
++                break;
++            }
++            ctable = arch_pte_to_ptr(*slot);
++        }
++        if (fail) {
++            mm_pt_node_lock(l0);
++            mm_pt_share_detach(l0);
++            mm_pt_node_unlock(l0);
++            continue;
++        }
++        int cidx1 = arch_pt_vpn(eb, 1);
++        pte_t *cslot = &ctable[cidx1];
++        mm_pt_node_lock(ctable);
++        *cslot = pte; /* the parent's level-1 entry, verbatim */
++        mm_pt_note_present(ctable, 1, cidx1, MM_ST_CLS_BYTE(MM_ST_PT_NODE));
++        mm_pt_node_unlock(ctable);
++
++        /* Downgrade the parent's writable leaves in place: this rewrite is
++         * shared semantics by definition (both sides must COW). */
++        mm_pt_node_lock(l0);
++        for (int k = 0; k < MM_PT_META_ENTRIES; k++) {
++            pte_t *e = &((pte_t *)l0)[k];
++            if (!(*e & PTE_V) || !arch_pte_is_leaf(*e))
++                continue;
++            if (!(*e & (PTE_W | PTE_COW)))
++                continue;
++            paddr_t pa = arch_pte_addr(*e);
++            *e = arch_pte_leaf(pa, mm_cow_flags(*e));
++            mm_pt_sync_status(l0, 0, k,
++                              (uint8_t)(MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED) |
++                                        MM_ST_COW_BIT |
++                                        mm_pt_prot_bits(*e)));
++            mm_tlb_note_change(parent, eb + (vaddr_t)k * PAGE_SIZE,
++                               PAGE_SIZE);
++        }
++        mm_pt_node_unlock(l0);
++        mm_rss_add(child, present);
++    }
++}
++
++#else
++/* ARM32 short descriptors retain the eager clone path below. */
++static void fork_share_tables(mm_struct_t *parent, mm_struct_t *child)
++{
++    (void)parent;
++    (void)child;
++}
++#endif
++
+ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
+     uint32_t perf_timed =
+         __atomic_load_n(&g_a20_perf_enabled, __ATOMIC_RELAXED);
+@@ -926,6 +1107,10 @@ static mm_struct_t *mm_fork_impl(mm_struct_t *parent) {
+         child->total_vm += (cv->end - cv->start) / PAGE_SIZE;
+     }
+ 
++    /* Lend exclusively-owned anonymous leaf tables to the child before the
++     * per-page clone; the clone below skips whatever arrived shared. */
++    fork_share_tables(parent, child);
++
+     if (perf_timed)
+         setup_ticks = timer_get_ticks() - fork_impl_start;
+     uint64_t clone_start = perf_timed ? timer_get_ticks() : 0;
+diff --git a/kernel/platform/licheerv-nano/board.c b/kernel/platform/licheerv-nano/board.c
+index a4a8fce4..0624fa1a 100644
+--- a/kernel/platform/licheerv-nano/board.c
++++ b/kernel/platform/licheerv-nano/board.c
+@@ -6,7 +6,7 @@
+  * Boot chain: the SG2002 boot ROM loads a vendor FSBL (cv181x.bin) from the
+  * TF card, which initialises clocks and DRAM and loads OpenSBI; OpenSBI then
+  * hands S-mode to the kernel image.  mainline U-Boot has a board target for
+- * this part (configs/licheerv_nano_defconfig) and mainline OpenSBI supports it
++ * this part (configs/sipeed_licheerv_nano_defconfig) and mainline OpenSBI supports it
+  * via fw_dynamic, so the SBI interfaces the kernel already uses -- timer,
+  * console, SRST -- are the same ones QEMU virt uses.
+  *
+@@ -15,7 +15,9 @@
+  *
+  * The CPU is a T-Head C906, and upstream describes it as rv64imafdc with
+  * mmu-type riscv,sv39.  That is exactly the -march=rv64imafdc_zicsr_zifencei
+- * the riscv64 build already uses, so no architecture work is needed here.
++ * the riscv64 build already uses. The UART still requires 32-bit accesses at
++ * four-byte register strides, unlike QEMU's byte-stride NS16550, and U-Boot
++ * booti needs the standard RISC-V Image header in arch entry.S.
+  *
+  * Interrupt controller: the DTS calls it "thead,c900-plic", which mainline
+  * binds to its standard SiFive PLIC driver, so the shared PLIC in
+diff --git a/kernel/platform/licheerv-nano/licheerv_nano_platform.h b/kernel/platform/licheerv-nano/licheerv_nano_platform.h
+index 9d7b0cee..51409fbc 100644
+--- a/kernel/platform/licheerv-nano/licheerv_nano_platform.h
++++ b/kernel/platform/licheerv-nano/licheerv_nano_platform.h
+@@ -13,10 +13,9 @@
+  * at commit 551c722f40809618230001baccf219193e22fc5a.
+  *
+  * Unverified: KERNEL_ENTRY.  A20OS's riscv64 load address is a compile-time
+- * constant and this board's U-Boot kernel_addr has not been read off the
+- * hardware.  The arch default 0x80200000 is kept because it is where every
+- * other RISC-V port in this tree loads; if the board hangs before the first
+- * printf, this is the first value to check.  See
++ * constant. The architecture's 2 MiB Image offset places the kernel above
++ * OpenSBI at 0x80200000; actual U-Boot/FDT/reserved-memory placement must be
++ * checked before loading, including the kernel's BSS footprint. See
+  * docs/platforms/licheerv-nano.md.
+  */
+ 
+diff --git a/kernel/platform/visionfive2/ldscript-nommu.ld b/kernel/platform/visionfive2/ldscript-nommu.ld
+index 801e726d..e65fad31 100644
+--- a/kernel/platform/visionfive2/ldscript-nommu.ld
++++ b/kernel/platform/visionfive2/ldscript-nommu.ld
+@@ -25,6 +25,10 @@ SECTIONS
+         *(.text.entry)
+         *(.text .text.*)
+     } :text
++    ASSERT(__riscv_image_header_end - _start == 64,
++           "riscv64: Image header must be exactly 64 bytes")
++    ASSERT(PHYS_BASE - BOOT_MAP_PHYS == 0x200000,
++           "riscv64: Image header load offset must match linker layout")
+ 
+     . = ALIGN(4096);
+     .rodata : {
+@@ -56,6 +60,8 @@ SECTIONS
+         *(COMMON)
+         _bss_end = .;
+     } :data
++    . = ALIGN(4096);
++    _end = .;
+ 
+     /DISCARD/ : {
+         *(.eh_frame .eh_frame_hdr)
+diff --git a/kernel/platform/visionfive2/ldscript.ld b/kernel/platform/visionfive2/ldscript.ld
+index 18ede642..751f0519 100644
+--- a/kernel/platform/visionfive2/ldscript.ld
++++ b/kernel/platform/visionfive2/ldscript.ld
+@@ -38,6 +38,10 @@ SECTIONS
+         *(.text.entry)
+         *(.text .text.*)
+     } :text
++    ASSERT(__riscv_image_header_end - _start == 64,
++           "riscv64: Image header must be exactly 64 bytes")
++    ASSERT(PHYS_BASE - BOOT_MAP_PHYS == 0x200000,
++           "riscv64: Image header load offset must match linker layout")
+ 
+     . = ALIGN(4096);
+     __rodata_start = .;
+@@ -86,6 +90,8 @@ SECTIONS
+         *(COMMON)
+         _bss_end = .;
+     } :data
++    . = ALIGN(4096);
++    _end = .;
+ 
+     /* Both invariants of the layout above, stated so a later edit that breaks
+      * either fails the link instead of booting into silent corruption. */
