@@ -31,7 +31,7 @@
 驱动开发教程中的寄存器与 DMA 契约、调试命令需要的参数布局属于其读者完成操作的前提。
 
 - 运行系统：从 [构建](dev/build.md)、[实例](dev/instances.md)、[打包快速开始](packaging/quickstart.md)、[翻译器使用](exec-xlator/01-usage.md)、[虚拟机使用](hypervisor/03-usage.md)、[集群运维](cluster/10-operator-guide.md) 进入。
-- 远程页数据共享：[可配置远程内存](cluster/63-configurable-remote-memory.md) 描述默认关闭、只读/可写模式、容量/流量限制、SDK 与部署；当前提供显式快照和事务，不提供普通线程自动跨机执行。
+- 远程页数据共享：[可配置远程内存](cluster/63-configurable-remote-memory.md) 提供显式快照和事务；普通程序跨机执行见 [透明线程执行片](cluster/64-transparent-thread-slices.md)，当前为串行交接的实验模式，尚不提供同进程多机并行加速。
 - 理解实现：阅读各子系统的技术契约；例如 [调度](kernel/process-scheduler.md)、[网络锁](net/network-lock-contract.md)、[翻译器内部](exec-xlator/03-internals.md)、[驱动运行时](drivers/guide/runtime-contracts.md)。
 - 检查文档：`make check-doc-drift` 检查源码路径、候选内容与行号范围；`mkdocs build` 构建文档站并严格检查内部链接和锚点；`make docs` 生成参考手册 PDF。依赖与聚合门禁的边界见 [文档门禁现状](status/current/docs-gates.md)。
 

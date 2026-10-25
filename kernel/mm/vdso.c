@@ -17,6 +17,7 @@
 #include "core/types.h"
 #include "drivers/core/driver_core.h"
 #include "core/timer.h"
+#include "cluster/ssi.h"
 
 __attribute__((weak)) uint64_t arch_vdso_counter(void)
 {
@@ -130,6 +131,9 @@ void vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc)
 
 vaddr_t vdso_auxv_ehdr(void)
 {
+    /* Managed execs must use the authoritative home clock syscalls. */
+    if (cluster_ssi_managed(proc_current()))
+        return 0;
 #ifdef CONFIG_NOMMU
     /* Without page tables there is no way to place the vDSO image at
      * A20_VDSO_VA: pt_map() is a no-op, so vdso_map_image() reports success

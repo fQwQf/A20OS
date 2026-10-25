@@ -1,3 +1,4 @@
+#include "cluster/ssi.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
@@ -439,6 +440,10 @@ void proc_task_first_entry(void)
         dump_user_pt_path(t->pgdir, TRAP_CTX_EPC(t->trap_ctx), "entry");
         dump_user_pt_path(t->pgdir, TRAP_CTX_SP(t->trap_ctx) - 1, "stack");
 #endif
+#ifdef CONFIG_CLUSTER_SSI
+        arch_local_irq_disable();
+#endif
+        cluster_ssi_before_user(t->trap_ctx);
         arch_return_to_user(t->trap_ctx);
     }
 #endif
