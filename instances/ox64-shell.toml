@@ -1,0 +1,50 @@
+name = "ox64-shell"
+description = "ox64 serial mksh shell in RAM; physical validation pending"
+arch = "riscv64"
+board = "ox64"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ubsan = false
+nommu = false
+driver_deployment = "embedded"
+swap = false
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 2000000
+boot_media = ["build/ox64/a20os-ox64-shell-sdcard.img"]
+# Deliberate placeholder: select the actual card with deploy --media-device.
+media_device = "/dev/sdX"
+boot_timeout = "120s"
+# Wait for init to launch mksh; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+
+[package]
+kind = "board-sdcard"
+
+[handoff]
+method = "mmc"
+commands = [
+    "mmc rescan",
+    "setenv fdt_addr_r 0x53800000",
+    "setenv fdt_high 0xffffffffffffffff",
+    "fatload mmc 0:1 ${loadaddr} kernel.bin",
+    "fatload mmc 0:1 ${fdt_addr_r} bl808-pine64-ox64.dtb",
+    "booti ${loadaddr} - ${fdt_addr_r}",
+]
+note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, mksh and
+basic commands in the kernel; no root disk or network is required. Prepare
+firmware using the base board instance, then package this shell instance.
+The SD image and kernel are rebuilt with this instance's configuration.
+The handoff bundle at build/ox64/handoff is refreshed by packaging;
+do not reuse a bundle from a different instance. The shell stays running.
+Filesystem writes are RAM-only and disappear at reset. Ethernet/SSH, video
+and audio are separate capabilities, not enabled by this shell profile.
+Physical board execution is pending; see docs/platforms/ox64.md.
+"""

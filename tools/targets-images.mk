@@ -183,9 +183,30 @@ $(addprefix $(RAMFS_USER_BLOB_DIR)/,native_futex.o native_spawn.o native_input.o
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
 		$* $(abspath $@)
 
-$(RAMFS_USER_BLOB_DIR)/%.o: $(USER_BUILD_STAMP)
+# Serial-board rootfs builds only the explicitly embedded programs. Keep a
+# separate userspace output root so its stamp cannot clean or invalidate the
+# full development userland (nor pull fastfetch/media dependencies into a
+# 64 MiB shell image).
+RAMFS_USER_BUILD_DIR = user/build/$(USER_VARIANT)-ramfs
+RAMFS_USER_BUILD_STAMP = $(RAMFS_USER_BUILD_DIR)/.ramfs-build-id
+ifeq ($(RAMFS_NATIVE_TESTS),1)
+RAMFS_USER_BUILD_DIR = $(USER_BUILD_DIR)
+RAMFS_USER_BUILD_STAMP = $(USER_BUILD_STAMP)
+else
+$(RAMFS_USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
+	@$(PYTHON) tools/stamps.py user \
+		--stamp "$@" --build-id "$(USER_BUILD_ID):ramfs:$(RAMFS_USER_PROGRAMS)" \
+		--arch "$(ARCH)" --nommu "$(NOMMU)" \
+		--user-build-dir "$(RAMFS_USER_BUILD_DIR)" --user-variant "$(USER_VARIANT)-ramfs" \
+		--user-opt="$(USER_OPT)" --profile "$(PROFILE)" \
+		--targets "$(RAMFS_USER_PROGRAMS)" \
+		--roots "user/Makefile $(USER_BUILD_CHECK_DIRS)" \
+		--skip "*/.git user/build user/external/musl/build-*"
+endif
+
+$(RAMFS_USER_BLOB_DIR)/%.o: $(RAMFS_USER_BUILD_STAMP)
 	@mkdir -p $(dir $@)
-	cd $(USER_BUILD_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
+	cd $(RAMFS_USER_BUILD_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
 		$* $(abspath $@)
 
@@ -198,16 +219,22 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(USER_BUILD_STAMP)
 $(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/mk_uefi_fat_image.sh
 	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
 
-$(VBOX_X86_64_EFI): $(KERNEL_BIN) kernel/boot/uefi/x86_64_loader.c kernel/boot/uefi/x86_64_kernel_blob.S kernel/boot/uefi/x86_64_efi.lds
+.PHONY: x86_64-uefi-loader
+x86_64-uefi-loader: $(VBOX_X86_64_EFI)
+
+$(VBOX_X86_64_EFI): kernel/include/boot/framebuffer.h kernel/include/core/types.h $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/arch/x86_64/boot/uefi/x86_64_loader.c kernel/arch/x86_64/include/kernel_load.h kernel/arch/x86_64/boot/uefi/x86_64_kernel_blob.S kernel/arch/x86_64/boot/uefi/x86_64_efi.lds
 	@mkdir -p $(dir $@)
-	$(CC) -mabi=ms -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
+	@memory_bytes="$$($(PYTHON) tools/elf_load_span.py $(KERNEL_ELF) --expected-base $(X86_KERNEL_LOAD_ADDRESS_CANONICAL))" && \
+	$(CC) -Ikernel/include -mabi=ms -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
 		-fno-builtin -fvisibility=hidden \
-		-c kernel/boot/uefi/x86_64_loader.c -o $(BUILD_DIR)/x86-64-uefi-loader.o
+		-DKERNEL_MEMORY_BYTES=$$memory_bytes \
+		-DX86_KERNEL_LOAD_ADDRESS=$(X86_KERNEL_LOAD_ADDRESS_CANONICAL) \
+		-c kernel/arch/x86_64/boot/uefi/x86_64_loader.c -o $(BUILD_DIR)/x86-64-uefi-loader.o
 	$(CC) -fpic -ffreestanding -fno-stack-protector \
 		-DKERNEL_BIN_PATH='"$(abspath $(KERNEL_BIN))"' \
-		-c kernel/boot/uefi/x86_64_kernel_blob.S -o $(BUILD_DIR)/x86-64-uefi-kernel.o
+		-c kernel/arch/x86_64/boot/uefi/x86_64_kernel_blob.S -o $(BUILD_DIR)/x86-64-uefi-kernel.o
 	$(CC) -nostdlib -shared -Wl,-Bsymbolic -Wl,-e,efi_main \
-		-Wl,-T,kernel/boot/uefi/x86_64_efi.lds \
+		-Wl,-T,kernel/arch/x86_64/boot/uefi/x86_64_efi.lds \
 		-o $(BUILD_DIR)/x86-64-uefi-loader.so \
 		$(BUILD_DIR)/x86-64-uefi-loader.o $(BUILD_DIR)/x86-64-uefi-kernel.o
 	$(OBJCOPY) -j .text -j .reloc -j .dynamic -j .data -j .kernel \
@@ -215,18 +242,20 @@ $(VBOX_X86_64_EFI): $(KERNEL_BIN) kernel/boot/uefi/x86_64_loader.c kernel/boot/u
 		-O pei-x86-64 --subsystem efi-app \
 		$(BUILD_DIR)/x86-64-uefi-loader.so $@
 
-$(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot/uefi/aarch64_kernel_blob.S
+$(VBOX_AARCH64_EFI): $(KERNEL_BIN) $(KERNEL_ELF) tools/elf_load_span.py kernel/arch/aarch64/boot/uefi/aarch64_loader.c kernel/arch/aarch64/boot/uefi/handoff.h kernel/arch/aarch64/boot/uefi/loader_arch.h kernel/arch/aarch64/boot/uefi/aarch64_kernel_blob.S
 	@mkdir -p $(dir $@)
+	@memory_bytes="$$($(PYTHON) tools/elf_load_span.py $(KERNEL_ELF) --expected-base $(VBOX_AARCH64_LOAD_ADDRESS))" && \
 	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
+		-DKERNEL_MEMORY_BYTES=$$memory_bytes \
 		-fno-builtin -fvisibility=hidden -mno-outline-atomics \
 		-DKERNEL_LOAD_ADDRESS=$(VBOX_AARCH64_LOAD_ADDRESS) \
-		-c kernel/boot/uefi/aarch64_loader.c \
+		-c kernel/arch/aarch64/boot/uefi/aarch64_loader.c \
 		-o $(BUILD_DIR)/uefi-loader.o
 	$(CC) -march=armv8-a -fpic -ffreestanding \
 		-DKERNEL_BIN_PATH='"$(abspath $(KERNEL_BIN))"' \
-		-c kernel/boot/uefi/aarch64_kernel_blob.S -o $(BUILD_DIR)/uefi-kernel.o
+		-c kernel/arch/aarch64/boot/uefi/aarch64_kernel_blob.S -o $(BUILD_DIR)/uefi-kernel.o
 	$(CC) -nostdlib -shared -Wl,-Bsymbolic -Wl,-e,efi_main \
-		-Wl,-T,kernel/boot/uefi/aarch64_efi.lds \
+		-Wl,-T,kernel/arch/aarch64/boot/uefi/aarch64_efi.lds \
 		-o $(BUILD_DIR)/uefi-loader.so \
 		$(BUILD_DIR)/uefi-loader.o $(BUILD_DIR)/uefi-kernel.o
 	$(OBJCOPY) -j .text -j .reloc -j .dynamic -j .data -j .kernel \

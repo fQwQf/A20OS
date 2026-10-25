@@ -14,19 +14,9 @@
 #include "core/stdio.h"
 #include "core/klog.h"
 #include "core/string.h"
+#include "mm/slab.h"
 
-/*
- * The 64-bit-BAR relocation below exists because x86_64's higher-half direct map
- * only covers the first 4 GiB.  On arches whose direct map covers all of RAM
- * there is nothing to relocate, so no address can reach this limit.
- */
-#ifndef PHYS_MAP_LIMIT
-#define PHYS_MAP_LIMIT (~(uintptr_t)0)
-#endif
-
-#ifdef CONFIG_PCI_MMIO_ALLOC
-#include "platform.h"
-#endif
+#include "core/errno.h"
 
 #define PCI_ANY_ID          0xFFFFFFFFUL
 #define PCI_VENDOR_ID_REDHAT 0x1AF4
@@ -45,6 +35,7 @@ typedef struct pci_bus_data {
 } pci_bus_data_t;
 
 static pci_bus_data_t g_pci_data;
+static int g_pci_initialized;
 
 /* Config-space access goes through the arch HAL, which decides between an ECAM
  * memory window and the legacy 0xCF8/0xCFC port pair once per access by probing
@@ -74,7 +65,8 @@ typedef struct pci_dev_info {
     uint16_t subdevice;
     uint64_t bar[6];             /* raw, indexed by PCI BAR number */
     uint64_t bar_size[6];
-    int      bar_resource[6];    /* PCI BAR -> device resource, -1 if I/O */
+    uint8_t bar_io[6];
+    int      bar_resource[6];    /* PCI BAR -> published MMIO/port resource */
 } pci_dev_info_t;
 
 #define PCI_MAX_PUBLISHED_DEVICES 128
@@ -125,9 +117,7 @@ int pci_intx_irq(const device_t *dev) {
     return arch_pci_intx_irq(info->bus, info->dev, info->func, (int)pin);
 }
 
-#ifdef CONFIG_PCI_MMIO_ALLOC
-static uintptr_t g_pci_mmio_alloc;
-#endif
+static uint64_t g_pci_mmio_alloc;
 
 /* VirtIO modern PCI capability layout (VirtIO 1.0, section 4.1.4.3). */
 #define PCI_STATUS_CAP_LIST          0x10U
@@ -178,8 +168,6 @@ typedef struct pci_virtio_transport {
     unsigned queues_selected;  /* queues given a vector by msix_prepare() */
 } pci_virtio_transport_t;
 
-static pci_virtio_transport_t g_pci_virtio[32];
-static int g_pci_virtio_count;
 
 static uint8_t pci_read8(const pci_dev_info_t *info, uint32_t reg) {
     uint32_t word = pci_ecam_read(info->bus, info->dev, info->func, reg & ~3U);
@@ -212,6 +200,8 @@ void pci_cfg_write16(const device_t *dev, uint32_t reg, uint16_t val) {
         return;
     uint32_t offset = reg & ~3U;
     uint32_t word = pci_ecam_read(info->bus, info->dev, info->func, offset);
+    /* Command shares a dword with W1C Status: do not replay latched bits. */
+    if (offset == 0x04 && !(reg & 2U)) word &= 0xffffU;
     uint32_t shift = (reg & 2U) * 8U;
     word &= ~(0xFFFFU << shift);
     word |= (uint32_t)val << shift;
@@ -296,6 +286,12 @@ static uint64_t pci_bar_size(const pci_dev_info_t *info, int bar,
     if (bar_flags)
         *bar_flags = flags;
     if (is_64) {
+        unsigned header = (pci_ecam_read(info->bus, info->dev, info->func, 0x0c) >> 16) & 0x7f;
+        int count = header == 0 ? 6 : header == 1 ? 2 : 0;
+        if (bar + 1 >= count) {
+            pci_ecam_write(info->bus, info->dev, info->func, offset, bar_lo);
+            return 0;
+        }
         original_hi = pci_ecam_read(info->bus, info->dev, info->func, offset + 4U);
         pci_ecam_write(info->bus, info->dev, info->func, offset + 4U,
                        0xFFFFFFFFU);
@@ -323,29 +319,63 @@ static uint64_t pci_bar_address(const pci_dev_info_t *info, int bar,
     return address;
 }
 
+/* Allocation policy is host-owned. Avoid every published firmware BAR, even
+ * when no driver has bound that function yet. The cursor is monotonically
+ * consumed; exhausting the declared host window is an explicit error. */
+static int pci_allocate_mmio(uint64_t size, int is_64, uint64_t *address) {
+    uint64_t base, length;
+    int rc = arch_pci_mmio_window(&base, &length);
+    if (rc) return rc;
+    if (!size || !length || length > (~(uint64_t)0) - base) return -ERANGE;
+    uint64_t cursor = g_pci_mmio_alloc > base ? g_pci_mmio_alloc : base;
+    for (unsigned attempt = 0; attempt <= PCI_MAX_PUBLISHED_DEVICES * 6U; attempt++) {
+        if (cursor > (~(uint64_t)0) - (size - 1U)) return -ERANGE;
+        uint64_t aligned = (cursor + size - 1U) & ~(size - 1U);
+        if (aligned < base || aligned > base + length || size > base + length - aligned ||
+            (!is_64 && (aligned > (~(uint32_t)0) || size - 1U > (~(uint32_t)0) - aligned)))
+            return -ERANGE;
+        uint64_t next = aligned;
+        for (unsigned slot = 0; slot < PCI_MAX_PUBLISHED_DEVICES; slot++) {
+            if (!g_pci_in_use[slot]) continue;
+            const pci_dev_info_t *info = &g_pci_infos[slot];
+            for (int i = 0; i < 6; i++) {
+                uint64_t address = info->bar[i], length = info->bar_size[i];
+                if (info->bar_io[i] || !address || !length) continue;
+                if (length - 1U > (~(uint64_t)0) - address) return -ERANGE;
+                uint64_t end = address + length - 1U;
+                if (aligned <= end && address <= aligned + size - 1U) {
+                    if (end == (~(uint64_t)0)) return -ERANGE;
+                    if (end + 1U > next) next = end + 1U;
+                }
+            }
+        }
+        if (next != aligned) { cursor = next; continue; }
+        if (!arch_pci_bar_reachable(aligned, size)) return -ERANGE;
+        g_pci_mmio_alloc = aligned + size;
+        *address = aligned;
+        return 0;
+    }
+    return -ENOSPC;
+}
+
 static int pci_assign_bars(device_t *dev, int bus_master) {
     pci_dev_info_t *info = dev ? dev->plat_data : NULL;
     if (!info)
         return -1;
 
-#ifdef CONFIG_PCI_MMIO_ALLOC
-    if (!g_pci_mmio_alloc)
-#ifdef CONFIG_PCI_MMIO_BASE_LEGACY
-        g_pci_mmio_alloc = PCI_MMIO_BASE - PAGE_OFFSET;
-#else
-        g_pci_mmio_alloc = PCIE_MMIO_BASE;
-#endif
-#endif
+    unsigned header = (pci_ecam_read(info->bus, info->dev, info->func, 0x0c) >> 16) & 0x7f;
+    int bar_count = header == 0 ? 6 : header == 1 ? 2 : 0;
+    if (!bar_count) return -EOPNOTSUPP;
 
     /* BAR sizing writes all ones into the BAR.  Disable address decoding
      * while doing that, as required by PCI, then restore it below. */
-    uint32_t command = pci_ecam_read(info->bus, info->dev, info->func, 0x04);
+    uint32_t command = pci_ecam_read(info->bus, info->dev, info->func, 0x04) & 0xffffU;
     pci_ecam_write(info->bus, info->dev, info->func, 0x04, command & ~0x3U);
 
     int res_count = 0;
     for (int bar = 0; bar < 6; bar++)
         info->bar_resource[bar] = -1;
-    for (int bar = 0; bar < 6; bar++) {
+    for (int bar = 0; bar < bar_count; bar++) {
         uint32_t offset = 0x10U + (uint32_t)bar * 4U;
         uint32_t bar_lo = pci_ecam_read(info->bus, info->dev, info->func, offset);
         if (bar_lo == 0xFFFFFFFFU)
@@ -368,24 +398,15 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
         uint64_t addr = is_io ? (bar_lo & ~0x3U) :
                                 pci_bar_address(info, bar, bar_lo, is_64);
 
-#ifdef CONFIG_PCI_MMIO_ALLOC
-        /* The firmware may place a 64-bit BAR above the 4 GiB the
-         * higher-half direct map covers; then addr + PAGE_OFFSET is
-         * unreachable and any access faults.  Relocate such a BAR into the
-         * covered 32-bit window, same as an unassigned one. */
-        if (!is_io && (addr == 0 || addr >= PHYS_MAP_LIMIT)) {
-            uintptr_t aligned = (g_pci_mmio_alloc + (uintptr_t)size - 1U) &
-                                ~((uintptr_t)size - 1U);
-#ifdef CONFIG_PCI_MMIO_BASE_ECAM
-            if (aligned < PCIE_MMIO_BASE ||
-                aligned + (uintptr_t)size > PCIE_MMIO_BASE + PCIE_MMIO_SIZE) {
-                kerr("[PCI] %02x:%02x.%x BAR%d exceeds MMIO window\n",
-                     info->bus, info->dev, info->func, bar);
+        if (!is_io && (!addr || !arch_pci_bar_reachable(addr, size))) {
+            uint64_t aligned;
+            int rc = pci_allocate_mmio(size, is_64, &aligned);
+            if (rc) {
+                kerr("[PCI] %02x:%02x.%x BAR%d has no usable host MMIO allocation: %d\n",
+                     info->bus, info->dev, info->func, bar, rc);
                 pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
-                return -1;
+                return rc;
             }
-#endif
-            g_pci_mmio_alloc = aligned + (uintptr_t)size;
             pci_ecam_write(info->bus, info->dev, info->func, offset,
                            (uint32_t)(aligned | (bar_flags & 0xFU)));
             if (is_64)
@@ -393,26 +414,25 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
                                (uint32_t)(aligned >> 32));
             addr = aligned;
         }
-#else
-        if (!is_io && addr == 0) {
-            kerr("[PCI] %02x:%02x.%x BAR%d is unassigned and platform has no MMIO allocator\n",
-                 info->bus, info->dev, info->func, bar);
+        if (!is_io && size - 1U > (~(uint64_t)0) - addr) {
             pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
-            return -1;
+            return -ERANGE;
         }
-#endif
 
-        if (!is_io && res_count < 6) {
-            dev->res[res_count].type = RES_MMIO;
-            dev->res[res_count].start = arch_pci_bar_to_resource(addr);
+        if (addr && res_count < 6) {
+            dev->res[res_count].type = is_io ? RES_IOPORT : RES_MMIO;
+            dev->res[res_count].start = addr;
             dev->res[res_count].end = dev->res[res_count].start + size - 1U;
-            dev->res[res_count].flags = is_64 ? IORESOURCE_MMIO_64BIT :
-                                                IORESOURCE_MMIO_32BIT;
+            dev->res[res_count].flags = is_io ? 0 : (is_64 ? IORESOURCE_MMIO_64BIT :
+                                                IORESOURCE_MMIO_32BIT) |
+                                                ((bar_flags & 8U) ? IORESOURCE_PREFETCH : 0);
             info->bar_resource[bar] = res_count;
             res_count++;
+            if (is_io) command |= 1U;
         }
         info->bar[bar] = addr;
         info->bar_size[bar] = size;
+        info->bar_io[bar] = is_io;
         if (is_64)
             bar++;
     }
@@ -423,13 +443,13 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
     else
         command &= ~0x4U;
     pci_ecam_write(info->bus, info->dev, info->func, 0x04, command);
-    /* Keep the interrupt line visible to drivers after rebuilding the BAR
-     * resources.  Modern virtio currently polls, but legacy PCI users may
-     * still request INTx. */
-    if (info->irq != 0 && info->irq != 0xFF && res_count < 6) {
+    /* Only a host-routed driver IRQ is a usable resource. The PCI Interrupt
+     * Line byte is firmware metadata, never an architecture IRQ identifier. */
+    int irq = pci_intx_irq(dev);
+    if (irq >= 0 && res_count < 7) {
         dev->res[res_count].type = RES_IRQ;
-        dev->res[res_count].start = info->irq;
-        dev->res[res_count].end = info->irq;
+        dev->res[res_count].start = (uint32_t)irq;
+        dev->res[res_count].end = (uint32_t)irq;
         dev->res[res_count].flags = IORESOURCE_IRQ_LEVEL;
         res_count++;
     }
@@ -449,6 +469,10 @@ resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar) {
     if (resource < 0 || resource >= dev->res_count)
         return NULL;
     return &dev->res[resource];
+}
+
+void *pci_map_bar(device_t *dev, unsigned int bar) {
+    return device_map_resource(dev, pci_get_bar_resource(dev, bar));
 }
 
 int pci_user_device_find_index(uint16_t vendor, uint16_t device,
@@ -691,7 +715,7 @@ static void pci_virtio_msix_teardown(virtio_transport_t *t)
 int pci_virtio_transport_init(device_t *dev, int type,
                               virtio_transport_t *transport) {
     pci_dev_info_t *info = dev ? (pci_dev_info_t *)dev->plat_data : NULL;
-    if (!info || !transport || g_pci_virtio_count >= (int)ARRAY_SIZE(g_pci_virtio))
+    if (!info || !transport)
         return -1;
     if (pci_enable_and_assign_bars(dev) != 0) {
         kerr("[VIRTIO-PCI] %s: BAR setup failed (type=%d)\n", dev->name, type);
@@ -714,13 +738,23 @@ int pci_virtio_transport_init(device_t *dev, int type,
             uint8_t bar = pci_read8(info, (uint32_t)ptr + 4U);
             uint32_t offset = pci_ecam_read(info->bus, info->dev, info->func,
                                              (uint32_t)ptr + 8U);
-            if (bar < 6 && info->bar[bar] && info->bar_size[bar] &&
+            /* Only these types describe MMIO regions used by this transport.
+             * PCI_CFG (type 5) is an optional configuration-space access
+             * mechanism: its writable BAR/offset/length may initially be zero.
+             * Unknown capability types must likewise be skipped. */
+            if (cfg_type >= VIRTIO_PCI_CAP_COMMON_CFG &&
+                cfg_type <= VIRTIO_PCI_CAP_DEVICE_CFG &&
+                bar < 6 && info->bar[bar] && info->bar_size[bar] &&
                 (uint64_t)offset < info->bar_size[bar]) {
-                uint32_t bar_lo = pci_ecam_read(info->bus, info->dev, info->func,
-                                                 0x10U + (uint32_t)bar * 4U);
-                int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
-                uintptr_t base = arch_pci_bar_to_resource(
-                    pci_bar_address(info, bar, bar_lo, is_64));
+                uint32_t length = pci_ecam_read(info->bus, info->dev, info->func,
+                                                  (uint32_t)ptr + 12U);
+                uint8_t cap_length = (uint8_t)(cap >> 16);
+                if (cap_length < 16 || !length || length > info->bar_size[bar] - offset ||
+                    (cfg_type == VIRTIO_PCI_CAP_COMMON_CFG && length < 56) ||
+                    (cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG && (cap_length < 20 || length < 2)))
+                    return -EINVAL;
+                uintptr_t base = (uintptr_t)pci_map_bar(dev, bar);
+                if (!base) return -EIO;
                 switch (cfg_type) {
                 case VIRTIO_PCI_CAP_COMMON_CFG: candidate.common = base + offset; found |= 1; break;
                 case VIRTIO_PCI_CAP_NOTIFY_CFG:
@@ -746,10 +780,20 @@ int pci_virtio_transport_init(device_t *dev, int type,
         return -1;
     }
 
-    g_pci_virtio[g_pci_virtio_count] = candidate;
+    /* Binding storage follows the driver-core remove -> devres ordering.
+     * Repeated remove/reprobe must not consume a permanent transport slot. */
+    pci_virtio_transport_t *owned = kmalloc(sizeof(*owned));
+    if (!owned)
+        return -ENOMEM;
+    *owned = candidate;
+    int ret = device_add_resource_action(dev, kfree, owned);
+    if (ret) {
+        kfree(owned);
+        return ret;
+    }
     transport->read32 = pci_virtio_read32;
     transport->write32 = pci_virtio_write32;
-    transport->priv = &g_pci_virtio[g_pci_virtio_count++];
+    transport->priv = owned;
     transport->legacy = 0;
     transport->shared_irq = 1;
     transport->msix_prepare = pci_virtio_msix_prepare;
@@ -775,7 +819,10 @@ static int pci_slot_for_bdf(int bus, int dev, int func)
             return i;
     }
     for (int i = 0; i < PCI_MAX_PUBLISHED_DEVICES; i++)
-        if (!g_pci_in_use[i])
+        /* The static creator keeps reference one. Retired records can still
+         * be held by progress snapshots or open class devices. */
+        if (!g_pci_in_use[i] &&
+            __atomic_load_n(&g_pci_devs[i].references, __ATOMIC_ACQUIRE) <= 1)
             return i;
     return -1;
 }
@@ -805,17 +852,28 @@ static int pci_publish_bdf(int bus, int dev, int func,
          * still be reported as one, or a rescan stops following it and the
          * devices behind it get reaped as missing. */
         uint32_t hdr = pci_ecam_read(bus, dev, func, 0x0E);
-        int is_bridge = ((hdr >> 16) & 0xFF) == 1;
+        int is_bridge = ((hdr >> 16) & 0x7F) == 1;
 
         uint16_t device_id = (uint16_t)((id >> 16) & 0xFFFF);
         int slot = pci_slot_for_bdf(bus, dev, func);
-        if (slot < 0)
+        if (slot < 0) {
+            kerr("[BUS] pci: device slots exhausted for %02x:%02x.%x (error=%d)\n",
+                 bus, dev, func, -ENOSPC);
             return is_bridge;
+        }
         if (g_pci_in_use[slot] &&
             (g_pci_infos[slot].vendor != vendor ||
              g_pci_infos[slot].device != device_id)) {
             device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
             g_pci_in_use[slot] = 0;
+            /* Unregister drops the registry pin, not external references.
+             * Find a safe record again before writing a replacement identity. */
+            slot = pci_slot_for_bdf(bus, dev, func);
+            if (slot < 0) {
+                kerr("[BUS] pci: replacement slots exhausted for %02x:%02x.%x (error=%d)\n",
+                     bus, dev, func, -ENOSPC);
+                return is_bridge;
+            }
         }
         (*seen)[slot] = 1;
         if (g_pci_in_use[slot]) {
@@ -840,17 +898,39 @@ static int pci_publish_bdf(int bus, int dev, int func,
 
         uint32_t class_rev = pci_ecam_read(bus, dev, func, 0x08);
 
-        for (int b = 0; b < 6; b++) {
-            uint32_t bar_lo = pci_ecam_read(bus, dev, func, 0x10 + b * 4);
-            int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
-            info->bar[b] = (bar_lo == 0xFFFFFFFF || bar_lo == 0) ? 0 :
-                           pci_bar_address(info, b, bar_lo, is_64);
-            info->bar_size[b] = 0;
-            info->bar_resource[b] = -1;
-        }
-
         resource_t *res = g_pci_resources[slot];
         memset(res, 0, sizeof(g_pci_resources[slot]));
+        int resource_count = 0;
+        for (int b = 0; b < 6; b++) info->bar_resource[b] = -1;
+        /* Size assigned BARs before binding so unknown devices reserve their
+         * apertures too. Type-1 bridge bus/window registers are not BARs. */
+        unsigned header_type = (hdr >> 16) & 0x7f;
+        int bars = header_type == 0 ? 6 : header_type == 1 ? 2 : 0;
+        uint32_t command = pci_ecam_read(bus, dev, func, 0x04) & 0xffffU;
+        pci_ecam_write(bus, dev, func, 0x04, command & ~3U);
+        for (int b = 0; b < bars; b++) {
+            uint32_t raw = pci_ecam_read(bus, dev, func, 0x10 + b * 4), flags;
+            if (raw == 0xffffffffU) continue;
+            uint64_t size = pci_bar_size(info, b, raw, &flags);
+            if (!size || (size & (size - 1U))) continue;
+            int io = flags & 1U;
+            int wide = !io && ((flags & 6U) == 4U);
+            uint64_t address = io ? raw & ~3U : pci_bar_address(info, b, raw, wide);
+            info->bar[b] = address;
+            info->bar_size[b] = size;
+            info->bar_io[b] = io;
+            if (address && size && !(size & (size - 1U)) &&
+                size - 1U <= (~(uint64_t)0) - address) {
+                info->bar_resource[b] = resource_count;
+                res[resource_count++] = (resource_t){
+                    .type = io ? RES_IOPORT : RES_MMIO,
+                    .start = address, .end = address + size - 1U,
+                    .flags = io ? 0 : (wide ? IORESOURCE_MMIO_64BIT : IORESOURCE_MMIO_32BIT) |
+                                ((flags & 8U) ? IORESOURCE_PREFETCH : 0)};
+            }
+            if (wide) b++;
+        }
+        pci_ecam_write(bus, dev, func, 0x04, command);
 
         snprintf(g_pci_names[slot], sizeof(g_pci_names[slot]),
                  "pci-%04x:%04x-%d", vendor, device_id, slot);
@@ -861,8 +941,14 @@ static int pci_publish_bdf(int bus, int dev, int func,
         pdev->bus           = &pci_bus;
         pdev->plat_data     = info;
         pdev->res           = res;
-        pdev->res_count     = 0;
+        pdev->res_count     = resource_count;
         pdev->state         = DEV_STATE_UNINIT;
+        int routed_irq = pci_intx_irq(pdev);
+        if (routed_irq >= 0) {
+            res[pdev->res_count++] = (resource_t){
+                .type = RES_IRQ, .start = (uint32_t)routed_irq,
+                .end = (uint32_t)routed_irq, .flags = IORESOURCE_IRQ_LEVEL};
+        }
 
         if (device_hotplug(pdev, BUS_EVENT_ADD) < 0)
             return is_bridge;
@@ -911,9 +997,9 @@ static void pci_scan_current(int remove_missing)
                 if (!pci_publish_bdf(bus, dev, func, &seen, &found))
                     continue;
                 /* Bridge: enqueue every bus in [secondary, subordinate]. */
-                uint32_t br = pci_ecam_read(bus, dev, func, 0x19);
-                int secondary = br & 0xFF;
-                int subordinate = (br >> 8) & 0xFF;
+                uint32_t br = pci_ecam_read(bus, dev, func, 0x18);
+                int secondary = (br >> 8) & 0xFF;
+                int subordinate = (br >> 16) & 0xFF;
                 if (secondary == 0 || subordinate < secondary)
                     continue;
                 for (int b = secondary; b <= subordinate; b++) {
@@ -941,21 +1027,29 @@ static void pci_scan_current(int remove_missing)
 }
 
 void pci_enumerate(uintptr_t ecam_base, int bus_start, int bus_end) {
+    if (bus_start < 0 || bus_end > 256 || bus_start >= bus_end)
+        return;
     g_pci_data.ecam_base = ecam_base;
     g_pci_data.bus_start = bus_start;
     g_pci_data.bus_end   = bus_end;
 
-#ifdef CONFIG_PCI_MMIO_ALLOC
     arch_pci_host_init(ecam_base);
-#endif
 
-    bus_register(&pci_bus);
+    int registered = bus_register(&pci_bus);
+    if (registered < 0 && registered != -EEXIST)
+        return;
+    g_pci_initialized = 1;
+    driver_discovery_begin();
     pci_scan_current(0);
+    driver_discovery_end();
 }
 
 void pci_rescan(void)
 {
-    if (!g_pci_data.ecam_base)
+    if (!g_pci_initialized)
         return;
+    driver_discovery_begin();
     pci_scan_current(1);
+    driver_discovery_end();
+    driver_retry_deferred();
 }

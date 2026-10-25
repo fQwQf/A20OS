@@ -4,6 +4,8 @@
 
 ## MMIO
 
+`resource_t` 中的 MMIO 是包含两端的物理地址范围。先用 `device_map_mmio(dev, index)` 或 `device_map_resource(dev, res)` 映射；PCI 使用 `pci_map_bar(dev, physical_bar_number)`。映射失败即不可访问。映射由设备核心托管，在 probe 失败或解除绑定时回收，驱动不得自行加 `PAGE_OFFSET` 或把资源地址强制转换为指针。
+
 使用 `readb/readw/readl/readq` 和 `writeb/writew/writel/writeq`。这些操作保留 volatile 访问并带读/写屏障。`*_relaxed` 不带屏障，只能在协议明确允许、且外层已有正确屏障的紧密循环中使用。
 
 寄存器访问必须按硬件规定宽度，不能把 8 位 W1C 寄存器用 32 位 read-modify-write。W1C/W0C、读清除、写入触发等副作用要在寄存器定义旁说明。轮询循环必须同时具备硬件条件和超时：
@@ -62,7 +64,7 @@ int      dma_range_ok(const struct device *dev, uint64_t addr, size_t size);
 1. probe 中读到硬件能力后、第一次分配 DMA 之前调用 `dma_set_mask()`。mask 必须是低位连续 1，否则返回 `-EINVAL`，不会被静默取整。
 2. 分配器按 mask 校验并在不满足时另选内存：`dma_alloc_coherent()` 先走 kmalloc 快路径，块落在窗口外时归还并改从帧分配器取物理连续页；`dma_alloc_coherent_aligned()` 向帧分配器重试固定次数（`DMA_MASK_ALLOC_ATTEMPTS`）。
 3. 无法满足时返回 `NULL`。`NULL` 是 probe 失败的信号，没有 bounce 路径，也不会截断 handle。**不得**为了让它成功而改用一个设备解不了的地址。
-4. `dma_alloc_*_coherent(NULL, ...)` 表示「没有可约束的设备」，走完整 64 位窗口。旧的 arch 扫描路径（`virtio_blk_init()`）属于这一类。
+4. `dma_alloc_*_coherent(NULL, ...)` 表示「没有可约束的设备」，走完整 64 位窗口。普通设备驱动应传入已枚举的 `device_t`，以应用该设备的 DMA mask。
 5. 驱动自己分配的 ring/context（例如 kmalloc 出来的 xHCI controller 结构）不经过分配器，必须在把地址写进设备前用 `dma_addr_ok()` / `dma_range_ok()` 校验，否则返回失败。
 
 当前限制：帧分配器没有「给我 4 GiB 以下的内存」这类分区接口，收窄 mask 只能靠有界重试。在 RAM 全部位于 32 位窗口之上的机器上，声明 32-bit mask 的设备会 probe 失败；这比让它在运行中 DMA 到解不了的地址更接近真实行为，但确实是一个失败而不是成功。IOMMU/IOVA 仍然没有实现，因此 mask 只是窗口检查，不是地址翻译。

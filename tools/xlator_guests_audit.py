@@ -123,7 +123,7 @@ def archs_defining_bootargs() -> dict[str, list[str]]:
 
     Ownership is taken from the path, not from a table: the implementations
     live either under kernel/arch/<arch>/ or in a board directory named for
-    the architecture (kernel/platform/qemu-virt-aarch64/board.c), so the name
+    the architecture (kernel/arch/aarch64/boards/qemu-virt-aarch64/board.c), so the name
     appearing in the path is what ties a definition to an architecture.
 
     kernel/core/bootargs.c is skipped on purpose.  Its weak default *is* the

@@ -1,76 +1,48 @@
-# VirtualBox 驱动栈与运行入口
+# VirtualBox 公共设备模型
 
-> 最后核实：2026-08。本页的发现链和设备限制已与源码布局核对；设备"已跑通"的证据来自较早的 VirtualBox 运行记录。对当前 HEAD 的结论必须按下列 runbook 重新收集日志。
+本页是 **VirtualBox 两种架构共用的设备发现与驱动参考**，不是镜像安装手册。
+ARM64 与 x86_64 使用不同 CPU、固件入口和平台地址，不能互换镜像。
+各自的构建依赖、镜像制作、虚拟机配置、启动与故障定位完整写在
+[ARM64 操作手册](virtualbox-aarch64.md) 和 [x86_64 操作手册](virtualbox-x86_64.md)；
+选择对应架构的一页即可执行，无需先按本页操作。
 
-> 不要为 VirtualBox 创建"VBox 专用 AHCI/E1000"等重复驱动。优先使用标准 PCI ID 表和通用 class 驱动；同一协议在其他虚拟机或真机上应复用同一驱动。
+## 支持方式
 
-在 VirtualBox 上运行 A20OS 时，内核通过标准平台发现与通用 PCI 驱动枚举设备。ARM64 与 x86_64 启动路径不同，但 PCI 设备最终进入同一 device/driver/class 模型。
+VirtualBox 是标准虚拟设备的提供方。A20OS 通过通用 PCI/VirtIO、block、net、display、
+input 驱动访问设备，不为 VirtualBox 创建重复的 AHCI 或 E1000 协议实现。
+平台代码只负责固件入口、RAM/MMIO 映射、ACPI 与中断控制器。
 
-## ARM64 发现链
+| 项目 | ARM64 | x86_64 |
+| --- | --- | --- |
+| 实例 | `vbox-aarch64` / `vbox-aarch64-text` | `vbox-x86_64` / `vbox-iso-x86_64` / `vbox-disk-x86_64` |
+| 固件入口 | UEFI `BOOTAA64.EFI` | UEFI `BOOTX64.EFI`，或 GRUB Multiboot ISO |
+| 平台 | `virtualbox-aarch64` | `qemu-virt-x86_64` 的 PC 平台接口 |
+| 中断/时钟 | GICv3；协作式软件时钟路径 | APIC/IOAPIC、架构平台时钟 |
+| PCI 发现 | UEFI RSDP → ACPI MCFG → ECAM | ACPI MCFG；无可用表时尝试兼容配置空间 |
+| 常用存储 | VirtIO-SCSI `1af4:1048` | AHCI `8086:2922/2829` |
+| 常用显示 | SVGAv3 `15ad:0406` | VMSVGA `15ad:0405` |
+| 常用网络 | E1000 `8086:100e` | E1000 或受支持的 VirtIO net |
+| 输入 | xHCI + USB HID | PS/2；其他协议按实际驱动匹配 |
 
-```text
-UEFI BOOTAA64.EFI
--> loader 传递 ACPI RSDP，装载 kernel at 0x08080000
--> virtualbox-aarch64 early page tables / PL011 / GICv3
--> board enumerate: RSDP -> XSDT/RSDT -> MCFG
--> pci_enumerate(ECAM) -> PCI device_register
--> .a20drv 或 embedded 驱动 probe
--> block/net/display/input class consumers
-```
+这些是已实现的接口和目标设备，不构成对任意 VirtualBox 版本、宿主或全部设备组合的
+运行承诺。构建完成只说明产物生成；每次运行需要在对应架构的虚拟机收集启动和 I/O 证据。
+ARM64 的 PCI MSI/INTx 路由仍有限制，若驱动退回轮询，不能把设备可用解释为中断已验收。
 
-平台源码位于 `kernel/platform/virtualbox-aarch64/`。物理 RAM 为 `0x08000000..0x28000000`，kernel entry 为 `0x08080000`；PL011、GICD/GICR 和 PCI windows 在早期页表中映射。ECAM 物理地址由 MCFG 提供，驱动看到的是加 `PAGE_OFFSET` 的内核地址。
+## 驱动部署与验收
 
-GICv3 架构 trap 层负责 distributor/CPU interface 初始化；board irqchip 提供 enable/disable/eoi。当前 PCI MSI/INTx 路由尚不完整，所以 VirtIO-SCSI、VMSVGA、E1000 与 xHCI 主要轮询。ARM generic timer 在 VirtualBox EL1 被 trap，软件 fallback 不可作为唯一超时来源。
+`generic` 构建依赖镜像中的 `.a20drv` 模块及模块加载路径；`embedded` 将所选驱动链接进
+内核。两种架构的操作手册均给出显式 `DRIVER_DEPLOYMENT=embedded` 的设备验收入口，
+避免把模块未包含或未加载当成 PCI 发现失败。两者都只匹配驱动 ID 表覆盖的设备。
 
-## ARM64 设备矩阵
+驱动验收应保存以下连续信息，而不是只记录桌面或 shell 出现：
 
-| VirtualBox 设备 | PCI ID | 驱动 | 类 | 当前模式 |
-|---|---|---|---|---|
-| VirtIO-SCSI | `1af4:1048` | `kernel/drivers/block/virtio_scsi.c` / `virtio-scsi.a20drv` | BLOCK | 三个 split queue，requestq 走 MSI-X → INTx → 轮询的完成阶梯；VirtualBox ARM 上 MSI-X 不可用，实际以轮询为主 |
-| Intel E1000 82540EM | `8086:100e` | `kernel/drivers/net/e1000.c` / `e1000.a20drv` | NET | RX/TX descriptor ring 轮询 |
-| SVGAv3/VMSVGA | `15ad:0406` | `kernel/drivers/gpu/vmsvga.c` / `vmsvga.a20drv` | DISPLAY | BAR0 regs、BAR2 VRAM、update command |
-| Intel Panther Point xHCI | `8086:1e31` | `kernel/drivers/usb/host/xhci.c` + `usb-hid.a20drv` | INPUT | USB boot keyboard/mouse/tablet，INTx event ring；该平台的 PCI INTx 路由尚不完整，取不到线时自动退回轮询 |
+1. 固件入口、RAM 和 ACPI/PCI 发现结果。
+2. 目标 PCI vendor/device、BAR 与驱动绑定。
+3. 容量、接口、模式等设备 ready 信息。
+4. 对应类消费者：文件系统挂载/读写、网络收发、framebuffer 更新或输入事件。
+5. 使用的轮询/IRQ 模式及未验证功能。
 
-VirtIO-SCSI 使用 LUN 0、READ/WRITE(10)、SYNCHRONIZE CACHE(10) 和 512 字节扇区；启动盘首先解析 GPT 第一个 partition，再尝试 FAT32 `/bin`。E1000 由 lwIP 按 `DEV_CLASS_NET` 自动挂接，当前 ARM board 源码合成 VBox NAT 静态 bootargs。VMSVGA probe 调用 display registry，`/dev/fb0` 是保留的 display 聚合节点；xHCI HID 事件由 `/dev/event0` 聚合。其他 char/block/audio class 设备由 devfs 动态发布，并在 `/sys/class` 中出现。
+没有目标 PCI ID 时先检查虚拟机设备选择；已有 ID 却无驱动绑定时再检查部署方式与
+ID 表。增加设备支持时复用标准协议驱动，将宿主/架构差异留在平台和 PCI HAL。
 
-## x86_64 发现链
-
-x86_64 使用 GRUB Multiboot ISO 启动，平台 PCI host 枚举 VirtualBox 设备。典型驱动为：VMSVGA `15ad:0405`、Intel AHCI `8086:2922/2829`、PS/2 键鼠，以及可配置的 VirtIO network。E1000 驱动现已存在，也可匹配 `8086:100e`。
-
-AHCI driver 当前只管理首个可用 SATA port，使用 LBA48、512 字节扇区和单 command slot。PS/2 是 x86 平台的板级控制器服务；可复用输入驱动统一使用 `DEV_CLASS_INPUT`。
-
-## 新增 VirtualBox 设备支持
-
-1. 从串口 `[BUS] pci` 日志记录 vendor/device/subsystem/class/BAR。
-2. 优先确认是否已有标准驱动；同一 PCI ID/协议不得新建 VBox 分叉。
-3. 新 PCI 驱动使用 `pci_bus`、ID 表和 `pci_get_bar_resource`。
-4. 无可靠 IRQ 时可以先轮询，但 poll 必须有预算，数据面不得无限阻塞；文档记录解除轮询的条件。
-5. 在 ARM64 与 x86_64 都暴露相同硬件协议时，驱动不得包含 `CONFIG_BOARD_VIRTUALBOX_*`，架构差异留给 PCI HAL、DMA 和映射层。
-6. 更新本页设备矩阵、[实现状态](../status/current/drivers-implementation-status.md) 和目标平台运行文档。
-
-## 平台运行手册
-
-创建虚拟机、制作/转换镜像、配置串口和逐项验收分别见：
-
-- [VirtualBox ARM64 运行手册](virtualbox-aarch64.md)
-- [VirtualBox x86_64 运行手册](virtualbox-x86_64.md)
-
-运行配置只决定 VirtualBox 暴露哪些标准设备，不改变驱动接口；同一个 PCI ID/协议在其他虚拟机或物理机上仍应复用同一驱动。
-
-## 构建与验证
-
-ARM64 kernel：
-
-```sh
-make vbox-image-aarch64
-```
-
-x86_64：
-
-```sh
-tools/a20 package vbox-iso-x86_64
-```
-
-统一形态的 UEFI 直接启动磁盘见 [VirtualBox x86_64 运行与验收手册](virtualbox-x86_64.md#直接启动磁盘镜像)，该形态目前停在 `System ready`。
-
-硬件日志至少应包含 ACPI MCFG/ECAM、目标 PCI ID、BAR、driver ready、对应类消费者（mount/lwIP/framebuffer/input）的成功信息。不能只以桌面出现或 shell 启动作为驱动成功证据，因为兼容设备或恢复路径可能掩盖目标驱动未绑定。
+参考：[Oracle VirtualBox 宿主与客户机架构说明](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/Introduction.html)。

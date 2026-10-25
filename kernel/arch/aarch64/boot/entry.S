@@ -36,6 +36,7 @@ _start:
     mov     x4, x0
     /* ...and the firmware's LoadOptions cmdline in x2, or 0 if it gave none. */
     mov     x6, x2
+    mov     x7, x3 /* Versioned UEFI memory-map handoff. */
 #endif
     adrp    x0, _stack_end
     add     x0, x0, :lo12:_stack_end
@@ -62,6 +63,9 @@ _start:
     adrp    x3, aarch64_boot_cmdline
     add     x3, x3, :lo12:aarch64_boot_cmdline
     str     x6, [x3]
+    adrp    x3, aarch64_boot_uefi_handoff
+    add     x3, x3, :lo12:aarch64_boot_uefi_handoff
+    str     x7, [x3]
 #endif
     /* Enable FP/SIMD access at EL1/EL0. */
     mrs     x2, cpacr_el1
@@ -505,3 +509,11 @@ aarch64_hyp_boot_cpus:
     .global aarch64_hyp_stacks
 aarch64_hyp_stacks:
     .zero 64 * CONFIG_NR_CPUS
+
+#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+    .section .data
+    .align 3
+    .global aarch64_boot_uefi_handoff
+aarch64_boot_uefi_handoff:
+    .quad 0
+#endif

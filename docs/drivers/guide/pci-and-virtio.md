@@ -42,9 +42,9 @@ resource_t *regs = pci_get_bar_resource(dev, 0);
 
 helper 会在 BAR sizing 时暂时关闭地址 decoding，计算大小，为 x86_64 或 LoongArch 未分配的 MMIO BAR 从平台 PCI 窗口分配地址，启用 memory/bus-master，并把 MMIO BAR 转换成 `RES_MMIO`。原始 BAR 为零可能表示“已实现但固件尚未分配”，因此仍须写全一 sizing；只有 sizing mask 也表明 size 为零时才是未实现 BAR。分配时必须保留 sizing mask 返回的 I/O、32/64 位和 prefetchable 类型位。
 
-LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZE`，越界时 probe 失败而不是写入截断地址。I/O port BAR 当前不进入资源数组。INTx line 如果有效会追加 `RES_IRQ`。
+LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZE`，越界时 probe 失败而不是写入截断地址。已分配的 I/O port BAR 发布为 `RES_IOPORT`；未分配的 I/O BAR 没有端口分配器，不猜测端口。INTx 只有经 host 路由为驱动 IRQ 后才追加 `RES_IRQ`。
 
-64 位 BAR 占两个配置 BAR slot，但只生成一个 MMIO resource，所以必须用 `pci_get_bar_resource(dev, physical_bar_number)`。校验 `end >= start` 和最小 aperture 大小后才能访问。BAR 地址已经通过 `arch_pci_bar_to_resource` 变成内核可访问地址。
+64 位 BAR 占两个配置 BAR slot，但只生成一个 MMIO resource，所以必须用 `pci_get_bar_resource(dev, physical_bar_number)`。校验 `end >= start` 和最小 aperture 大小后才能访问。资源中的 BAR 地址是 CPU 物理地址；驱动用 `pci_map_bar(dev, physical_bar_number)` 获取受管映射，不能直接访问资源地址。
 
 ## MSI-X
 
@@ -244,7 +244,7 @@ static int my_pci_remove(device_t *dev){
 PCI 协议驱动只能依赖以下公共输入：
 
 - `device_t`、`matched_id` 与 `pci_class_code()` 提供身份；
-- `pci_enable_and_assign_bars()` 与 `pci_get_bar_resource()` 提供可访问 MMIO；
+- `pci_enable_and_assign_bars()` 与 `pci_get_bar_resource()` 发布物理 BAR，`pci_map_bar()` 提供可访问映射；
 - `read*/write*` 提供有序寄存器访问；
 - `dma_alloc_coherent_aligned()` 返回 CPU 地址和设备 DMA handle，`dma_sync_for_*()` 转移可见性；
 - `request_irq/free_irq` 提供中断能力，或由驱动明确记录轮询模式。
@@ -363,17 +363,17 @@ transitional ID 的 subsystem device 常用来区分 VirtIO type，ID 表必须�
 
 console(3) 与 virtio-guest-agent 共用 device id，本树只有 virtio-serial 设备模型实现驱动使用的端口队列。它的队列顺序与其它设备不同：非 multiport 的 virtio-serial 在 QEMU 里先加 port 0 的 receive/transmit，再加 control 一对，之后才是每个端口自己的一对（`hw/char/virtio-serial-bus.c`）。因此 `virtio_console.c` 只协商 `VIRTIO_F_VERSION_1`、**不协商 MULTIPORT**，用 q0=rx(port0)、q1=tx(port0) 承载唯一端口，并且完全不设控制队列；设备在驱动写 `DRIVER_OK` 时就把 port 0 标记为 guest_connected。若要支持 port 1 以上，必须补上 control virtqueue 的 `VIRTIO_CONSOLE_PORT_OPEN` 握手，而不是简单加队列。
 
-PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()` 与 `pci_virtio_transport_init()`。驱动、类消费者和 `arch_virtio_*_probe()` 不得再次扫描同一 PCI host 或重写 BAR。QEMU/VirtualBox 的 PCI VirtIO 设备走统一 PCI bus；VirtIO-MMIO 设备由 `virtio_mmio_enumerate()` 发布，二者最终进入同一 driver probe，不以运行期 fallback 互相探测。
+PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()` 与 `pci_virtio_transport_init()`。驱动、类消费者和 `arch_virtio_*_probe()` 不得再次扫描同一 PCI host 或重写 BAR。QEMU/VirtualBox 的 PCI VirtIO 设备走统一 PCI bus；VirtIO-MMIO 固件节点通过 transport bridge 发布子设备，无固件板使用显式 `virtio_mmio_enumerate()` slot fallback，二者最终进入同一 driver probe，不以运行期 fallback 互相探测。
 
 ## Board-bound transport 的发布与重试
 
 PCI 与 `virtio_mmio_enumerate()` 两条路径的差别只有「谁来构造这个 transport」，但它们必须落到同一个可见性规则上：**驱动不会自动出现在设备模型里**。
 
-`device_find_by_class()` 只看 `dev->drv->class_type`；`driver_matches_device()` 对双方都没有 bus 的组合，要求存在 `match()` 回调，否则拒绝绑定。board 自己构造的 transport（QEMU virt 的 `virtio-mmio` slot、ppc64le 的 `spapr-vio`）没有 bus，也没有 `match()`，所以它必须**自己调用 `device_register()`**，否则 `mount_setup_block_device()` 之类的 class 消费者永远看不到这块盘。症状是启动日志里 transport 建好了、`notify` 也在动，但 `/bin` 挂不上、`init` 报 `no init program found`。
+transport 必须先通过 `device_register()` 发布设备，再由 bus 匹配与 probe 完成绑定。只有成功发布 class 的在线设备才出现在 `device_find_get_by_class()` 中；该 API 返回持有引用的设备，调用者以 `device_put()` 归还。持有设备引用并不允许绕过 class 调用保护访问驱动 vtable。
 
-第二个坑是重试次数：QEMU virt 上 virtio-mmio slot 是递增的，板级代码若按「probe 一次，失败就放弃」，那么 slot 0 上挂的设备会把整条总线判死。应当**一直 probe 到 slot 返回非设备为止**（`VIRTIO_MMIO_MAGIC_VALUE` 为 0 即无设备）。
+VirtIO-MMIO 的固件 bridge 在 probe 中建立子设备，并用 devres 在 bridge 解绑时先撤销子设备。显式 slot 枚举按板级声明的 slot 数检查每个位置；空 slot 不终止后面的扫描。VirtIO 子设备仍走统一 VirtIO bus，不在模块入口或 class 消费者中重复探测硬件。
 
-这两点合起来解释了一个很难定位的故障：同一个 QEMU 机器上 aarch64 与 ppc64le 行为不同——因为 deployment profile 不同（见 `deployment-profiles.md`），virtio-blk 在 aarch64 是**可加载模块**、在 ppc64le 是**内建**。内建路径下 `device_register()` 是直接调用，加载路径下它必须出现在 `drv_export_table[]` 里，否则模块加载时就是 `unresolved symbol 'device_register'`。
+模块自行创建设备时同样使用导出的注册与引用 API，并在 remove 或失败清理中撤销发布。类消费者可缓存受生命周期管理的适配器；解绑后，适配器返回 `-ENODEV`，不得转向另一设备。
 
 ## 失败定位
 

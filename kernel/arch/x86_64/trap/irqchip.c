@@ -13,6 +13,8 @@
 #include "platform.h"
 #include "firmware.h"
 #include "core/string.h"
+#include "core/errno.h"
+#include "firmware/irq.h"
 
 #include "trap_frame.h"
 
@@ -380,6 +382,31 @@ static void ioapic_init(void) {
               (unsigned long)IOAPIC_FALLBACK_BASE);
 }
 
+static uint32_t firmware_vector_gsi[256];
+static uint8_t firmware_vector_valid[256];
+int arch_firmware_irq_map(uint32_t gsi, uint32_t flags) {
+    unsigned idx; uint32_t entry;
+    /* 0x58..0xef belongs to MSI-X; never alias that allocator's vectors. */
+    if (gsi >= 24 || arch_ioapic_gsi_lookup(gsi, &idx, &entry)) return -EOPNOTSUPP;
+    if (flags != 1 && flags != 2 && flags != 4 && flags != 8) return -EINVAL;
+    uint32_t vector = (gsi == 1 || gsi == 4 || gsi == 12) ? 0x20 + gsi : 0x40 + gsi;
+    uint32_t low = vector | (1U << 16);
+    if (flags == 2 || flags == 8) low |= 1U << 13;
+    if (flags == 4 || flags == 8) low |= 1U << 15;
+    uintptr_t base = arch_ioapic_base(idx);
+    uint32_t reg = 0x10 + entry * 2;
+    if (firmware_vector_valid[vector]) {
+        uint32_t previous = ioapic_read_at(base, reg);
+        if ((previous & ((1U << 13) | (1U << 15))) !=
+            (low & ((1U << 13) | (1U << 15)))) return -EINVAL;
+        return (int)vector;
+    }
+    ioapic_write_at(base, reg + 1, arch_ioapic_dest_id(idx));
+    ioapic_write_at(base, reg, low);
+    firmware_vector_gsi[vector] = gsi; firmware_vector_valid[vector] = 1;
+    return (int)vector;
+}
+
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
     /* PCI INTx is level-triggered and active-low.  Route the GSI to the
      * vector with physical destination mode aimed at the controller's own
@@ -525,7 +552,7 @@ int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
 
     /* Firmware first: on any machine with a usable DSDT this is the answer, and
      * it is the only one that holds for a device behind a bridge. */
-    uint32_t gsi = arch_pci_prt_gsi(bus, dev, pin);
+    uint32_t gsi = arch_pci_prt_gsi_fn(bus, dev, func, pin);
     int from_prt = gsi != PCI_PRT_GSI_NONE;
     int from_pirq = 0;
 
@@ -693,9 +720,10 @@ void x86_64_pci_irq_set_masked(int vector, int masked) {
         x86_64_msix_lvt((uint32_t)vector, masked);
         return;
     }
-    if (vector < X86_64_PCI_VECTOR_BASE)
-        return;
-    uint32_t gsi = (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
+    if (vector < 0 || vector >= 256) return;
+    if (!firmware_vector_valid[vector] && vector < X86_64_PCI_VECTOR_BASE) return;
+    uint32_t gsi = firmware_vector_valid[vector] ? firmware_vector_gsi[vector] :
+        (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
     unsigned idx;
     uint32_t entry;
     /* Re-resolve the line rather than assuming GSI N is entry N of controller

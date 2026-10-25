@@ -66,7 +66,7 @@ check-x86_64-pc-build:
 # spelling it out: a fully integrated Rust profile makes BUILD_VARIANT long
 # enough that the Makefile hashes it (see BUILD_VARIANT_FULL there), so a
 # hardcoded descriptive path silently names a directory no build ever creates.
-VF2_IMAGE_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 DRIVER_DEPLOYMENT=embedded KERNEL_WERROR=0 LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld print-build-dir)
+VF2_IMAGE_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 DRIVER_DEPLOYMENT=embedded KERNEL_WERROR=0 LDSCRIPT=kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld print-build-dir)
 # The board's /extra partition is filled by an apk world image rather than by
 # compiling software out of user/external/.  mkrootfs.py already emits a
 # partitionless raw ext4, which is exactly what make-boot-image.sh expects for
@@ -91,7 +91,7 @@ vf2-image: vf2-extra-sources vf2-world-image
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
 		DRIVER_DEPLOYMENT=embedded \
 		KERNEL_WERROR=0 \
-		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
+		LDSCRIPT=kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld \
 		$(VF2_IMAGE_BUILD_DIR)/fat32.img kernel-only
 	@if [ -f user/external/apps/fastfetch/src/fastfetch.c ]; then \
 		$(MAKE) -C user ARCH=riscv64 NOMMU=1 OPT="-O3" PROFILE=full \
@@ -139,7 +139,7 @@ VF2_KERNEL_WERROR   :=
 else
 VF2_ABI             := linux
 VF2_NOMMU           := 1
-VF2_LDSCRIPT        := LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld
+VF2_LDSCRIPT        := LDSCRIPT=kernel/arch/riscv64/boards/visionfive2/ldscript-nommu.ld
 VF2_USER_BUILD_DIR  := user/build/riscv64-nommu
 # NOMMU leaves MMU-only code (elf seg_start, pte_to_vm_flags, aslr) unused;
 # the validated VF2 build already relaxes -Werror for the same reason.

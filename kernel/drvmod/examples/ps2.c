@@ -375,11 +375,6 @@ static int ps2_remove(device_t *dev)
     return 0;
 }
 
-static const device_id_t ps2_ids[] = {
-    { .vendor = 0x50533200UL, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
 /* Publish the ring as an input class device so /dev/event0 (input_mux)
  * drains it: QEMU's monitor/VNC input targets the PS/2 controller by
@@ -436,9 +431,12 @@ static const input_dev_ops_t ps2_class_ops = {
     .ioctl = ps2_class_ioctl,
 };
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "PNP0303"}, {0}
+};
 static driver_t ps2_driver = {
     .name = "ps2",
-    .id_table = ps2_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .probe = ps2_probe,
     .remove = ps2_remove,

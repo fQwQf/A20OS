@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/sync.h"
 
+int arch_uart_irq(void);
 void uart_init(void);
 void uart_putc(char c);
 /* Caller holds the console serialization lock, as for uart_putc(). */

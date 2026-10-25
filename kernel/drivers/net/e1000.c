@@ -477,16 +477,8 @@ static int e1000_irq_handler(int irq, void *priv) {
         spin_unlock_irqrestore(&nic->lock, lf);
     }
 
-    int net_idx = -1;
-    for (int i = 0; i < 8; i++) {
-        device_t *cur = device_find_by_class(DEV_CLASS_NET, i);
-        if (!cur)
-            break;
-        if (cur == dev) {
-            net_idx = i;
-            break;
-        }
-    }
+    int net_idx = a20_lwip_netif_index_for_device(dev);
+
     uint64_t flags = a20_lwip_lock();
     if (net_idx >= 0)
         a20_lwip_process_netif_irq_locked(net_idx);
@@ -855,7 +847,8 @@ static int e1000_probe(device_t *dev)
     memset(nic, 0, sizeof(*nic));
     nic->msix_base = -1;
     spin_init(&nic->lock);
-    nic->regs = (uintptr_t)bar->start;
+    nic->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!nic->regs) return -EIO;
 
     uint32_t ral = e1000_read(nic, E1000_RAL0);
     uint32_t rah = e1000_read(nic, E1000_RAH0);

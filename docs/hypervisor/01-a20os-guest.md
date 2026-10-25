@@ -248,7 +248,7 @@ guest 是 A20OS 自己，它的 SBI 调用面由
 **`set_timer` 不是可选项。** `timer_set_interval()`（`timer.c:46-56`）只有在
 `riscv64_fdt_has_isa_extension("sstc")` 为真时才写 sstc 的 stimecmp CSR，否则
 调 `firmware_set_timer()`。而 `riscv64_fdt_has_isa_extension()` 查的是 FDT 里的
-`riscv,isa` 属性（`kernel/arch/riscv64/platform/fdt.c:116`）——最小 FDT 里
+`riscv,isa` 属性（`kernel/arch/common/riscv/fdt.h`）——最小 FDT 里
 若没有这一项，guest 一律走 SBI `set_timer`。此时 guest 自己没有任何办法给自己
 设定时器，除非 HS 实现 `a7=0`。**把 sstc 写进最小 FDT 与实现 `set_timer` 两条路
 至少要有一条通**；这是引导切片必须同时面对的两件事，不是可以推后的细节。
@@ -364,7 +364,7 @@ PLIC 在 `0x0C000000`（`platform.h:46`），virtio-mmio 从 `0x10001000` 起
 （`:45`），PCIe ECAM 在 `0x30000000`（`:47`）——全都在窗口外，全部落进这一档。
 
 PLIC 特别值得说一句：`plic_configure(PLIC_PLIC_BASE, …)` 在 guest 的
-`early_init` 里是**无条件调用**的（`kernel/platform/qemu-virt-riscv64/board.c:171`），
+`early_init` 里是**无条件调用**的（`kernel/arch/riscv64/boards/qemu-virt-riscv64/board.c:171`），
 所以 guest 一启动就一定会去写 PLIC 的 PRIORITY/SENABLE 寄存器。RAZ/WI + 计数器
 保证这些写不卡死，也不至于让 guest 在一个"IRQ 永远不会来"的等待里停住。
 

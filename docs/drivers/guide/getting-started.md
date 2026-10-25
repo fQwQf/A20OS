@@ -25,7 +25,7 @@ kernel/include/drivers/<class>/      各功能类公共声明
 kernel/drivers/bus/                  总线枚举和 transport
 kernel/drivers/block|net|gpu|input/  通用功能驱动实现
 kernel/drvmod/examples/              generic 模块包装和描述符
-kernel/platform/<board>/             板级地址、固件发现和固定设备
+kernel/arch/<arch>/boards/<board>/             板级地址、固件发现和固定设备
 kernel/include/core/errno.h          内核负 errno
 kernel/include/core/lock.h           spinlock API
 kernel/include/mm/slab.h             kmalloc/kfree
@@ -330,7 +330,7 @@ probe 成功不等于用户可见：
 
 | 类 | 当前消费者/出口 |
 |---|---|
-| NET | lwIP 用 `device_find_by_class(DEV_CLASS_NET, n)` 枚举，无 `/dev` 节点 |
+| NET | lwIP 用 `device_find_get_by_class(DEV_CLASS_NET, n)` 枚举，无 `/dev` 节点 |
 | DISPLAY | probe 另调用 display registry，用户经 `/dev/fb0` 使用 |
 | INPUT | `/dev/event0` 聚合 `DEV_CLASS_INPUT` |
 | BLOCK | class 自动发布 `/dev/diskN`，文件系统也可直接消费 class；驱动不发布私有 getter |

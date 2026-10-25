@@ -2,6 +2,7 @@
  * A20OS Driver Core — registration, matching, enumeration
  */
 #include "drivers/core/driver_core.h"
+#include "firmware/device.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_registry_test.h"
 #include "drivers/core/driver_class.h"
@@ -29,6 +30,28 @@ static spinlock_t g_driver_core_lock = SPINLOCK_INIT;
 /* Serializes registry mutation with probe/remove callbacks.  The spinlock only
  * protects the arrays themselves and is never held across driver code. */
 static mutex_t g_driver_core_ops = MUTEX_INIT;
+
+/* The scheduler mutex is recursive only when it has a task owner. Before
+ * proc_init the boot CPU also enters nested bus/driver callbacks; represent
+ * that boot context explicitly instead of recursively taking an ownerless
+ * mutex. Registry lifecycle APIs must not be called from interrupt context. */
+extern struct task_t *proc_current(void);
+static unsigned boot_ops_depth[CONFIG_NR_CPUS];
+static void driver_ops_lock(void) {
+    if (!proc_current()) {
+        unsigned cpu = cpu_current_id();
+        if (boot_ops_depth[cpu]++) return;
+    }
+    mutex_lock(&g_driver_core_ops);
+}
+static void driver_ops_unlock(void) {
+    if (!proc_current()) {
+        unsigned cpu = cpu_current_id();
+        if (!boot_ops_depth[cpu]) panic("driver lifecycle boot unlock underflow");
+        if (--boot_ops_depth[cpu]) return;
+    }
+    mutex_unlock(&g_driver_core_ops);
+}
 
 static driver_t   **g_drivers;
 static int         g_driver_count;
@@ -124,8 +147,8 @@ static void *driver_registry_grow_bus(void *old, size_t size)
  * registry.  Each CPU therefore keeps a private mirror of the bound devices
  * that have a progress callback, rebuilt under that mutex only when
  * g_progress_epoch moves.  The mirror is a caching hint, never the lifetime
- * guard: entries are device_t pointers, which are static objects that outlive
- * every binding, and each entry is entered through class_device_ref_for_device()
+ * guard: entries hold device object references, and each entry is entered
+ * through class_device_ref_for_device()
  * plus class_device_call_begin(), so a device unbound mid-walk is either
  * skipped or is pinned until class_device_unpublish() drains it, which happens
  * before drv->remove() frees the driver's private state. */
@@ -143,6 +166,25 @@ static void driver_progress_binding_changed(void)
     __atomic_add_fetch(&g_progress_epoch, 1, __ATOMIC_RELEASE);
 }
 
+device_t *device_get(device_t *dev) {
+    if (!dev) return NULL;
+    unsigned old = __atomic_load_n(&dev->references, __ATOMIC_RELAXED);
+    while (old && old != (unsigned)-1) {
+        if (__atomic_compare_exchange_n(&dev->references, &old, old + 1, 0,
+                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return dev;
+    }
+    return NULL;
+}
+void device_put(device_t *dev) {
+    if (!dev) return;
+    if (__atomic_sub_fetch(&dev->references, 1, __ATOMIC_ACQ_REL) == 0) {
+        device_t *parent = dev->parent_reference;
+        dev->parent_reference = NULL;
+        if (dev->release) dev->release(dev);
+        device_put(parent);
+    }
+}
+
 static void driver_progress_refresh(unsigned cpu)
 {
     int need = g_device_count > 0 ? g_device_count : 1;
@@ -154,10 +196,12 @@ static void driver_progress_refresh(unsigned cpu)
         g_progress_mirror[cpu] = grown;
         g_progress_cap[cpu] = need;
     }
+    for (int i = 0; i < g_progress_count[cpu]; i++)
+        device_put(g_progress_mirror[cpu][i]);
     int n = 0;
     for (int i = 0; i < g_device_count; i++) {
         device_t *dev = g_devices[i];
-        if (dev->drv && dev->drv->progress)
+        if (dev->drv && dev->drv->progress && device_get(dev))
             g_progress_mirror[cpu][n++] = dev;
     }
     __atomic_store_n(&g_progress_count[cpu], n, __ATOMIC_RELEASE);
@@ -169,6 +213,8 @@ static void driver_progress_refresh(unsigned cpu)
 static int driver_matches_device(driver_t *drv, device_t *dev)
 {
     int match = 0;
+    dev->matched_id = NULL;
+    dev->firmware_match = NULL;
     if (dev->bus && dev->bus->match)
         match = dev->bus->match(dev, drv);
     else if (!dev->bus && !drv->bus)
@@ -179,12 +225,14 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
         match = drv->match ? drv->match(dev) : 0;
     if (match && drv->match && !drv->match(dev)) {
         dev->matched_id = NULL;
+        dev->firmware_match = NULL;
         match = 0;
     }
     /* One owner per device: a user-owned device accepts only read-only
      * kernel probes; the owning user-service driver drives it. */
     if (match && dev->user_owned && !drv->read_only_probe) {
         dev->matched_id = NULL;
+        dev->firmware_match = NULL;
         match = 0;
     }
     return match;
@@ -194,23 +242,159 @@ static int driver_matches_device(driver_t *drv, device_t *dev)
 extern const uintptr_t __driver_init_start;
 extern const uintptr_t __driver_init_end;
 
+static unsigned discovery_depth;
+
+struct device_dependency {
+    device_t *provider;
+    struct device_dependency *next;
+};
+struct device_resource_action {
+    void (*release)(void *);
+    void *data;
+    struct device_resource_action *next;
+};
+int device_add_resource_action(device_t *dev, void (*release)(void *), void *data) {
+    if (!dev || !release) return -EINVAL;
+    struct device_resource_action *action = kmalloc(sizeof(*action));
+    if (!action) return -ENOMEM;
+    *action = (struct device_resource_action){release, data, dev->resource_actions};
+    dev->resource_actions = action;
+    return 0;
+}
+void device_release_resources(device_t *dev) {
+    while (dev && dev->resource_actions) {
+        struct device_resource_action *action = dev->resource_actions;
+        dev->resource_actions = action->next;
+        action->release(action->data);
+        kfree(action);
+    }
+}
+struct device_mmio_mapping { void *address; size_t size; };
+static void release_mmio(void *data) {
+    struct device_mmio_mapping *map = data;
+    arch_device_unmap_mmio(map->address, map->size);
+    kfree(map);
+}
+void *device_map_resource(device_t *dev, const resource_t *res) {
+    int belongs = 0;
+    if (!dev || !res || res->type != RES_MMIO) return NULL;
+    for (int i = 0; i < dev->res_count; i++) if (&dev->res[i] == res) belongs = 1;
+    if (!belongs || res->end < res->start || res->end - res->start >= SIZE_MAX) return NULL;
+    size_t size = (size_t)(res->end - res->start + 1);
+    struct device_mmio_mapping *map = kmalloc(sizeof(*map));
+    if (!map) return NULL;
+    map->address = arch_device_map_mmio(res->start, size, res->flags);
+    map->size = size;
+    if (!map->address) { kfree(map); return NULL; }
+    if (device_add_resource_action(dev, release_mmio, map)) {
+        release_mmio(map); return NULL;
+    }
+    return map->address;
+}
+void *device_map_mmio(device_t *dev, int index) {
+    return device_map_resource(dev, device_get_resource(dev, RES_MMIO, index));
+}
+static int depends_on(device_t *dev, device_t *target, unsigned depth) {
+    if (dev == target) return 1;
+    if (depth > (unsigned)g_device_count) return 1;
+    if (dev->parent && depends_on(dev->parent, target, depth + 1)) return 1;
+    for (struct device_dependency *link = dev->dependencies; link; link = link->next)
+        if (depends_on(link->provider, target, depth + 1)) return 1;
+    return 0;
+}
+int device_add_dependency(device_t *consumer, device_t *provider) {
+    if (!consumer || !provider) return -EINVAL;
+    driver_ops_lock();
+    if (depends_on(provider, consumer, 0)) {
+        driver_ops_unlock(); return -ELOOP;
+    }
+    for (struct device_dependency *link = consumer->dependencies; link; link = link->next)
+        if (link->provider == provider) { driver_ops_unlock(); return 0; }
+    struct device_dependency *link = kmalloc(sizeof(*link));
+    if (!link) { driver_ops_unlock(); return -ENOMEM; }
+    if (!device_get(provider)) {
+        kfree(link); driver_ops_unlock(); return -ENODEV;
+    }
+    *link = (struct device_dependency){provider, consumer->dependencies};
+    consumer->dependencies = link;
+    driver_ops_unlock();
+    return 0;
+}
+static void release_dependencies(device_t *dev) {
+    while (dev->dependencies) {
+        struct device_dependency *link = dev->dependencies;
+        dev->dependencies = link->next;
+        device_put(link->provider);
+        kfree(link);
+    }
+}
+/* Called with the lifecycle mutex held. Consumers are quiesced before any
+ * provider resource is released; the acyclic link graph bounds recursion. */
+static void device_unbind(device_t *dev) {
+    for (;;) {
+        device_t *dependent = NULL;
+        for (int i = 0; i < g_device_count && !dependent; i++) {
+            device_t *consumer = g_devices[i];
+            if (consumer == dev) continue;
+            if (consumer->drv && consumer->parent == dev) dependent = consumer;
+            for (struct device_dependency *link = consumer->dependencies; link; link = link->next)
+                if (link->provider == dev) { dependent = consumer; break; }
+        }
+        if (!dependent) break;
+        device_get(dependent);
+        device_unbind(dependent);
+        dependent->probe_error = -EPROBE_DEFER;
+        dependent->state = DEV_STATE_DEFERRED;
+        device_put(dependent);
+    }
+    driver_t *drv = dev->drv;
+    dev->state = DEV_STATE_REMOVING;
+    class_device_unpublish(dev);
+    if (drv && drv->remove) drv->remove(dev);
+    device_release_resources(dev);
+    release_dependencies(dev);
+    dev->drv = NULL; dev->drv_priv = NULL;
+    dev->matched_id = NULL; dev->firmware_match = NULL;
+    dev->state = DEV_STATE_REMOVED;
+    driver_progress_binding_changed();
+}
+
 static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
+    /* A retry reconstructs its links. A different matching driver must not
+     * inherit dependencies retained by an earlier deferred probe. */
+    release_dependencies(dev);
     dev->drv = drv;
+    int prepared = firmware_device_prepare(dev);
+    if (prepared) {
+        dev->drv = NULL;
+        dev->matched_id = NULL;
+        dev->firmware_match = NULL;
+        if (prepared != -EPROBE_DEFER) release_dependencies(dev);
+        dev->probe_error = prepared;
+        dev->state = prepared == -EPROBE_DEFER ? DEV_STATE_DEFERRED : DEV_STATE_UNINIT;
+        return prepared;
+    }
     if (!drv->probe) {
+        dev->probe_error = 0;
         dev->state = DEV_STATE_PROBED;
         driver_progress_binding_changed();
         return 0;
     }
     int ret = drv->probe(dev);
+    dev->probe_error = ret;
     if (ret == 0) {
         dev->state = DEV_STATE_PROBED;
         ret = class_device_publish(dev);
         if (ret < 0) {
             if (drv->remove)
                 drv->remove(dev);
+            device_release_resources(dev);
+            release_dependencies(dev);
             dev->drv = NULL;
             dev->drv_priv = NULL;
             dev->matched_id = NULL;
+            dev->firmware_match = NULL;
+            dev->probe_error = ret;
             dev->state = DEV_STATE_UNINIT;
             driver_progress_binding_changed();
             return ret;
@@ -219,10 +403,13 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
         return 0;
     }
     /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
+    device_release_resources(dev);
+    if (ret != -EPROBE_DEFER) release_dependencies(dev);
     dev->drv = NULL;
     dev->drv_priv = NULL;
     dev->matched_id = NULL;
-    dev->state = DEV_STATE_UNINIT;
+    dev->firmware_match = NULL;
+    dev->state = ret == -EPROBE_DEFER ? DEV_STATE_DEFERRED : DEV_STATE_UNINIT;
     driver_progress_binding_changed();
     return ret;
 }
@@ -289,28 +476,28 @@ int driver_register(driver_t *drv) {
     if (!drv || !drv->name)
         return -EINVAL;
 
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_drivers,
         &g_driver_count, &g_driver_cap, drv, driver_registry_grow_driver);
     if (insert == -EEXIST) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return insert;
     }
     if (insert < 0) {
         kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=driver capacity=%d error=%d\n",
              g_driver_cap, insert);
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return insert;
     }
 #else
     for (int i = 0; i < g_driver_count; i++) {
         if (g_drivers[i] == drv) {
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
             return -EEXIST;
         }
     }
@@ -323,7 +510,7 @@ int driver_register(driver_t *drv) {
             kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=driver capacity=%d error=%d\n",
                  g_driver_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
             return -ENOMEM;
         }
         g_drivers = new_arr;
@@ -337,7 +524,7 @@ int driver_register(driver_t *drv) {
     kinfo("[DRIVER] registered driver '%s' (class=%d)\n",
           drv->name, drv->class_type);
 
-    for (int i = 0; i < g_device_count; i++) {
+    for (int i = 0; !discovery_depth && i < g_device_count; i++) {
         device_t *dev = g_devices[i];
         if (dev->drv != NULL)
             continue;
@@ -352,20 +539,21 @@ int driver_register(driver_t *drv) {
             }
         }
     }
-    mutex_unlock(&g_driver_core_ops);
+    driver_ops_unlock();
+    driver_retry_deferred();
     return 0;
 }
 
 int driver_unregister(driver_t *drv) {
     if (!drv) return -EINVAL;
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int remove = a20_driver_registry_remove((void **)&g_drivers,
                                              &g_driver_count, drv);
     if (remove < 0) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return remove;
     }
 #else
@@ -379,28 +567,20 @@ int driver_unregister(driver_t *drv) {
     }
     if (!found) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return -ENOENT;
     }
 #endif
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
-    /* Lifecycle callbacks may release IRQs, DMA memory, or sleep. */
-    for (int j = 0; j < g_device_count; j++) {
-        device_t *dev = g_devices[j];
-        if (dev->drv != drv)
-            continue;
-        dev->state = DEV_STATE_REMOVING;
-        class_device_unpublish(dev);
-        if (drv->remove)
-            drv->remove(dev);
-        dev->drv = NULL;
-        dev->drv_priv = NULL;
-        dev->matched_id = NULL;
-        dev->state = DEV_STATE_REMOVED;
-        driver_progress_binding_changed();
+    for (;;) {
+        device_t *bound = NULL;
+        for (int j = 0; j < g_device_count; j++)
+            if (g_devices[j]->drv == drv) { bound = g_devices[j]; break; }
+        if (!bound) break;
+        device_unbind(bound);
     }
-    mutex_unlock(&g_driver_core_ops);
+    driver_ops_unlock();
     return 0;
 }
 
@@ -413,21 +593,36 @@ int device_register(device_t *dev) {
     if (!dev || !dev->name)
         return -EINVAL;
 
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
+    device_t *held_parent = NULL;
+    if (dev->parent_reference && dev->parent_reference != dev->parent) {
+        driver_ops_unlock();
+        return -EBUSY;
+    }
+    if (dev->parent && !dev->parent_reference) {
+        device_t *at = dev->parent;
+        unsigned depth = 0;
+        while (at && at != dev && depth++ <= (unsigned)g_device_count) at = at->parent;
+        if (at) { driver_ops_unlock(); return -ELOOP; }
+        held_parent = device_get(dev->parent);
+        if (!held_parent) { driver_ops_unlock(); return -ENODEV; }
+    }
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_devices,
         &g_device_count, &g_device_cap, dev, driver_registry_grow_device);
     if (insert == -EEXIST) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
+        device_put(held_parent);
         return insert;
     }
     if (insert < 0) {
         kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=device capacity=%d error=%d\n",
              g_device_cap, insert);
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
+        device_put(held_parent);
         return insert;
     }
     dev->state = DEV_STATE_UNINIT;
@@ -435,7 +630,8 @@ int device_register(device_t *dev) {
     for (int i = 0; i < g_device_count; i++) {
         if (g_devices[i] == dev) {
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
+            device_put(held_parent);
             return -EEXIST;
         }
     }
@@ -448,7 +644,8 @@ int device_register(device_t *dev) {
             kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=device capacity=%d error=%d\n",
                  g_device_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
+            device_put(held_parent);
             return -ENOMEM;
         }
         g_devices = new_arr;
@@ -457,38 +654,42 @@ int device_register(device_t *dev) {
     g_devices[g_device_count++] = dev;
     dev->state = DEV_STATE_UNINIT;
 #endif
+    if (held_parent) dev->parent_reference = held_parent;
+    if (!dev->references) __atomic_store_n(&dev->references, 1, __ATOMIC_RELAXED);
+    if (!device_get(dev)) panic("registering retired device");
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
     kinfo("[DRIVER] registered device '%s' (bus=%s)\n",
           dev->name ? dev->name : "?",
           (dev->bus && dev->bus->name) ? dev->bus->name : "?");
 
-    for (int i = 0; i < g_driver_count; i++) {
+    for (int i = 0; !discovery_depth && i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
         if (driver_matches_device(drv, dev)) {
             int ret = driver_probe_bound_device(drv, dev);
             if (ret == 0) {
                 kinfo("[DRIVER] device '%s' bound to driver '%s'\n",
                       dev->name, drv->name);
-                mutex_unlock(&g_driver_core_ops);
+                driver_ops_unlock();
                 return 0;
             }
+            if (ret == -EPROBE_DEFER) break;
         }
     }
-    mutex_unlock(&g_driver_core_ops);
+    driver_ops_unlock();
     return 0;
 }
 
 void device_unregister(device_t *dev) {
     if (!dev) return;
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int remove = a20_driver_registry_remove((void **)&g_devices,
                                              &g_device_count, dev);
     if (remove < 0) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return;
     }
 #else
@@ -502,23 +703,15 @@ void device_unregister(device_t *dev) {
     }
     if (!found) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return;
     }
 #endif
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
 
-    driver_t *drv = dev->drv;
-    dev->state = DEV_STATE_REMOVING;
-    class_device_unpublish(dev);
-    if (drv && drv->remove)
-        drv->remove(dev);
-    dev->drv = NULL;
-    dev->drv_priv = NULL;
-    dev->state = DEV_STATE_REMOVED;
-    dev->matched_id = NULL;
-    driver_progress_binding_changed();
-    mutex_unlock(&g_driver_core_ops);
+    device_unbind(dev);
+    driver_ops_unlock();
+    device_put(dev);
 }
 
 int device_hotplug(device_t *dev, int event)
@@ -544,28 +737,28 @@ int device_hotplug(device_t *dev, int event)
 int bus_register(bus_type_t *bus) {
     if (!bus || !bus->name)
         return -EINVAL;
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int insert = a20_driver_registry_insert((void **)&g_buses,
         &g_bus_count, &g_bus_cap, bus, driver_registry_grow_bus);
     if (insert == -EEXIST) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return insert;
     }
     if (insert < 0) {
         kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=bus capacity=%d error=%d\n",
              g_bus_cap, insert);
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return insert;
     }
 #else
     for (int i = 0; i < g_bus_count; i++) {
         if (g_buses[i] == bus) {
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
             return -EEXIST;
         }
     }
@@ -578,7 +771,7 @@ int bus_register(bus_type_t *bus) {
             kerr("[DRIVER] REGISTRY_CAPACITY_EXHAUSTED kind=bus capacity=%d error=%d\n",
                  g_bus_cap, -ENOMEM);
             spin_unlock_irqrestore(&g_driver_core_lock, flags);
-            mutex_unlock(&g_driver_core_ops);
+            driver_ops_unlock();
             return -ENOMEM;
         }
         g_buses = new_arr;
@@ -587,21 +780,21 @@ int bus_register(bus_type_t *bus) {
     g_buses[g_bus_count++] = bus;
 #endif
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
-    mutex_unlock(&g_driver_core_ops);
+    driver_ops_unlock();
     kinfo("[DRIVER] registered bus '%s'\n", bus->name);
     return 0;
 }
 
 void bus_unregister(bus_type_t *bus) {
     if (!bus) return;
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
 #ifdef CONFIG_DRIVER_REGISTRY_RUST
     int remove = a20_driver_registry_remove((void **)&g_buses,
                                              &g_bus_count, bus);
     if (remove < 0) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return;
     }
 #else
@@ -615,32 +808,35 @@ void bus_unregister(bus_type_t *bus) {
     }
     if (!found) {
         spin_unlock_irqrestore(&g_driver_core_lock, flags);
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return;
     }
 #endif
     spin_unlock_irqrestore(&g_driver_core_lock, flags);
-    mutex_unlock(&g_driver_core_ops);
+    driver_ops_unlock();
 }
 
 int bus_probe_device(device_t *dev) {
     if (!dev) return -EINVAL;
-    mutex_lock(&g_driver_core_ops);
+    driver_ops_lock();
     if (dev->drv) {
-        mutex_unlock(&g_driver_core_ops);
+        driver_ops_unlock();
         return -EBUSY;
     }
+    int result = -ENODEV;
     for (int i = 0; i < g_driver_count; i++) {
         driver_t *drv = g_drivers[i];
         if (driver_matches_device(drv, dev)) {
-            if (driver_probe_bound_device(drv, dev) == 0) {
-                mutex_unlock(&g_driver_core_ops);
+            result = driver_probe_bound_device(drv, dev);
+            if (result == 0) {
+                driver_ops_unlock();
                 return 0;
             }
+            if (result == -EPROBE_DEFER) break;
         }
     }
-    mutex_unlock(&g_driver_core_ops);
-    return -ENODEV;
+    driver_ops_unlock();
+    return result;
 }
 
 int device_set_devfs_name(device_t *dev, const char *name) {
@@ -673,62 +869,92 @@ resource_t *device_get_resource(device_t *dev, enum resource_type type, int inde
     return NULL;
 }
 
-device_t *device_find_by_class(uint32_t class_type, int index) {
-    int found = 0;
-    for (int i = 0; i < g_device_count; i++) {
-        device_t *dev = g_devices[i];
-        if (dev->drv && dev->drv->class_type == class_type) {
-            if (found == index)
-                return dev;
-            found++;
-        }
-    }
-    return NULL;
+device_t *device_find_get_by_class(uint32_t class_type, int index) {
+    if (index < 0) return NULL;
+    class_device_t *cdev = class_device_get_by_type(class_type, (unsigned)index);
+    if (!cdev) return NULL;
+    device_t *dev = device_get(cdev->dev);
+    class_device_put(cdev);
+    return dev;
 }
 
-int driver_lookup_compatible(const char *compatible,
-                             uint32_t *vendor, uint32_t *device)
-{
-    if (!compatible || !compatible[0])
-        return -EINVAL;
-
-    const driver_t *owner = NULL;
-    int claimants = 0;
-
-    for (int i = 0; i < g_driver_count; i++) {
-        const driver_t *drv = g_drivers[i];
-        if (!drv->of_compatible || !drv->id_table)
-            continue;
-        if (strcmp(drv->of_compatible, compatible) != 0)
-            continue;
-        claimants++;
-        if (!owner)
-            owner = drv;
+device_t *device_find_get_by_firmware(const fw_node_t *node) {
+    if (!fw_node_valid(node)) return NULL;
+    device_t *found = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_driver_core_lock);
+    for (int i = 0; i < g_device_count; i++)
+        if (fw_node_equal(&g_devices[i]->firmware_node, node)) {
+            found = device_get(g_devices[i]); break;
+        }
+    spin_unlock_irqrestore(&g_driver_core_lock, flags);
+    return found;
+}
+device_t *device_find_get_by_firmware_id(const char *id) {
+    if (!id) return NULL;
+    device_t *found = NULL;
+    driver_ops_lock();
+    for (int i = 0; i < g_device_count; i++)
+        if (fw_node_match_id(&g_devices[i]->firmware_node, id) > 0 ||
+            (g_devices[i]->software_id && !strcmp(g_devices[i]->software_id, id))) {
+            found = device_get(g_devices[i]); break;
+        }
+    driver_ops_unlock();
+    return found;
+}
+device_t *device_find_get_by_mmio(uint64_t physical) {
+    device_t *found = NULL;
+    driver_ops_lock();
+    for (int i = 0; i < g_device_count; i++) {
+        resource_t *resource = device_get_resource(g_devices[i], RES_MMIO, 0);
+        if (resource && resource->start == physical) { found = device_get(g_devices[i]); break; }
     }
-
-    if (!owner)
-        return -ENODEV;
-
-    if (claimants > 1)
-        kwarn("[DT] \"%s\" claimed by %d drivers, binding %s\n",
-              compatible, claimants, owner->name);
-
-    if (vendor)
-        *vendor = owner->id_table[0].vendor;
-    if (device)
-        *device = owner->id_table[0].device;
-    return 0;
+    driver_ops_unlock();
+    return found;
+}
+int driver_device_count(void) { return g_device_count; }
+void driver_discovery_begin(void) {
+    driver_ops_lock();
+    discovery_depth++;
+}
+void driver_discovery_end(void) {
+    if (!discovery_depth) panic("driver discovery transaction underflow");
+    discovery_depth--;
+    driver_ops_unlock();
+}
+int driver_retry_deferred(void) {
+    int total = 0, progress;
+    static int retrying;
+    driver_ops_lock();
+    if (discovery_depth || retrying) { driver_ops_unlock(); return 0; }
+    retrying = 1;
+    /* Normally each pass binds at least one of this finite device set. A
+     * callback may mutate that set; bound retries even in that case. */
+    unsigned passes = (unsigned)g_device_count + 1;
+    do {
+        progress = 0;
+        for (int i = 0; i < g_device_count; i++) {
+            device_t *dev = g_devices[i];
+            if (!dev->drv && dev->probe_error == -EPROBE_DEFER && !bus_probe_device(dev)) {
+                progress++; total++;
+            }
+        }
+    } while (progress && --passes);
+    retrying = 0;
+    driver_ops_unlock();
+    return total;
 }
 
 void driver_probe_all(void) {
     int probed = 0;
+    driver_ops_lock();
     for (int i = 0; i < g_device_count; i++) {
         device_t *dev = g_devices[i];
-        if (dev->drv || dev->state >= DEV_STATE_PROBED)
-            continue;
+        if (dev->drv) continue;
         if (bus_probe_device(dev) == 0)
             probed++;
     }
+    probed += driver_retry_deferred();
+    driver_ops_unlock();
     kinfo("[DRIVER] probe_all: %d devices probed\n", probed);
 }
 
@@ -751,9 +977,6 @@ void driver_progress_class(uint32_t class_type)
     int n = __atomic_load_n(&g_progress_count[cpu], __ATOMIC_ACQUIRE);
     for (int i = 0; i < n; i++) {
         device_t *dev = g_progress_mirror[cpu][i];
-        driver_t *drv = dev ? dev->drv : NULL;
-        if (!drv || drv->class_type != class_type || !drv->progress)
-            continue;
         /* Pin the class device for the callback.  class_device_unpublish()
          * waits for the matching call_end() and runs before drv->remove(),
          * so a driver cannot have its private state freed under a poll that
@@ -762,7 +985,10 @@ void driver_progress_class(uint32_t class_type)
         if (!cdev)
             continue;
         if (class_device_call_begin(cdev) == 0) {
-            if (dev->drv == drv && drv->progress)
+            /* Even reading drv->class_type requires this guard: a module's
+             * driver object may have been freed after mirror creation. */
+            driver_t *drv = dev->drv;
+            if (drv && drv->class_type == class_type && drv->progress)
                 drv->progress(dev);
             class_device_call_end(cdev);
         }

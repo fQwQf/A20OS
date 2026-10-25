@@ -104,7 +104,8 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
     """(role, repo-relative path) pairs worth reporting for this instance."""
     out: list[tuple[str, str]] = [("kernel-elf", vars_["KERNEL_ELF"]),
                                   ("kernel-bin", vars_["KERNEL_BIN"])]
-    if inst.kernel.bringup is not True and inst.arch != "armv7m":
+    if (inst.kernel.bringup is not True and not inst.kernel.ramfs_user
+            and inst.arch != "armv7m"):
         out += [("rootfs-fat32", vars_["FAT32_IMG"]),
                 ("rootfs-ext4", vars_["EXT4_IMG"])]
     if inst.rootfs.world:
@@ -135,6 +136,8 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
             out += [("bundle-image", f"{folder}/kernel.bin"),
                     ("handoff-commands", f"{folder}/uboot.cmd"),
                     ("bundle-manifest", f"{folder}/manifest.json")]
+            if inst.board == "lichee-pi-zero":
+                out.append(("bundle-uimage", f"{folder}/kernel.uimg"))
         if inst.package.kind == "board-sdcard":
             out += [("firmware-manifest", f"build/{inst.board}/firmware/manifest.json")]
             out += [(f"boot-media-manifest-{i}", rel + ".json")

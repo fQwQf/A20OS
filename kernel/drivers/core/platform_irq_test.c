@@ -43,12 +43,6 @@
 #include "core/stdio.h"
 #include "core/string.h"
 
-/* A vendor/device pair no driver in the tree claims, so registering these
- * devices cannot disturb a real board's binding.  0xA20A is the lifecycle
- * test's; these are the next two. */
-#define IRQTEST_VENDOR_WITH_IRQ    0xA20BU
-#define IRQTEST_VENDOR_WITHOUT_IRQ 0xA20CU
-#define IRQTEST_DEVICE             0x0001U
 
 /* Line search.  The IRQ registry is a fixed 256-entry table and a board may
  * already own part of it, so rather than assume a line this test claims the
@@ -111,8 +105,6 @@ int platform_irq_test_run(void)
     dev_with_irq.dev.res       = res_with_irq;
     dev_with_irq.dev.res_count = 2;
     dev_with_irq.dev.state     = DEV_STATE_UNINIT;
-    dev_with_irq.id.vendor     = IRQTEST_VENDOR_WITH_IRQ;
-    dev_with_irq.id.device     = IRQTEST_DEVICE;
 
     res_without_irq[0].type  = RES_MMIO;
     res_without_irq[0].start = 0x10010000UL;
@@ -123,8 +115,6 @@ int platform_irq_test_run(void)
     dev_without_irq.dev.res       = res_without_irq;
     dev_without_irq.dev.res_count = 1;
     dev_without_irq.dev.state     = DEV_STATE_UNINIT;
-    dev_without_irq.id.vendor     = IRQTEST_VENDOR_WITHOUT_IRQ;
-    dev_without_irq.id.device     = IRQTEST_DEVICE;
 
     /* A RES_IRQ whose end != start is a range, not a line. */
     res_range_irq[0].type  = RES_IRQ;
@@ -135,8 +125,6 @@ int platform_irq_test_run(void)
     dev_range_irq.dev.res       = res_range_irq;
     dev_range_irq.dev.res_count = 1;
     dev_range_irq.dev.state     = DEV_STATE_UNINIT;
-    dev_range_irq.id.vendor     = IRQTEST_VENDOR_WITH_IRQ;
-    dev_range_irq.id.device     = 0x0002U;
 
     if (platform_device_register(&dev_with_irq) != 0) {
         kerr("[PLATFORM-IRQ] device_register(with IRQ) failed\n");

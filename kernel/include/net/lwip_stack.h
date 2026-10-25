@@ -2,6 +2,7 @@
 #define _NET_LWIP_STACK_H
 
 #include "core/types.h"
+struct device;
 
 /* LWIP_PROGRESS_API: use a20_lwip_poll() only through core/progress from
  * scheduler/idle code; socket paths may poll explicitly while waiting on network
@@ -17,6 +18,8 @@ void a20_lwip_poll_locked(void);
 void a20_lwip_poll_timers_locked(void);
 void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
+/* IRQ-safe identity lookup independent of class-registry rank changes. */
+int a20_lwip_netif_index_for_device(const struct device *dev);
 /* Stage D: the guaranteed receive poll point.  kernel_progress_run_bottom_halves()
  * (i.e. every sched() and idle pass, on every CPU) calls A20_LWIP_LANE_RX_POLL(),
  * so staged frames are processed without any task having to ask for them.

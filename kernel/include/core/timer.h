@@ -4,13 +4,11 @@
 #include "core/types.h"
 #include "core/consts.h"
 
-/* Timer frequency.  Most arches provide the compile-time ARCH_TIMER_FREQ
- * via arch/platform.h.  riscv64 resolves the timebase at runtime from the
- * firmware DTB (QEMU virt = 10 MHz, StarFive JH7110 = 24 MHz) so the same
- * kernel image keeps correct wall-clock and scheduling intervals on both. */
+/* Architectures with a firmware-dependent timebase publish a runtime
+ * frequency callback; other targets use their platform constant. */
 #if ARCH_TIMER_FREQ_RUNTIME
-uint64_t riscv64_timer_freq(void);
-#define TICKS_PER_SEC   riscv64_timer_freq()
+uint64_t arch_timer_frequency(void);
+#define TICKS_PER_SEC   arch_timer_frequency()
 #else
 #define TICKS_PER_SEC   ARCH_TIMER_FREQ
 #endif

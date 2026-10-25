@@ -93,8 +93,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append(f"arch: unsupported '{inst.arch}'; supported: {', '.join(ACTIVE_ARCHES)}")
     if not _NAME_RE.fullmatch(inst.name):
         e.append(f"name: '{inst.name}' must match {_NAME_RE.pattern}")
-    if inst.board and not (repo_root / "kernel" / "platform" / inst.board).is_dir():
-        e.append(f"board: no kernel/platform/{inst.board} directory")
+    if inst.board and not (repo_root / "kernel" / "arch" / inst.arch / "boards" / inst.board).is_dir():
+        e.append(f"board: no kernel/arch/{inst.arch}/boards/{inst.board} directory")
     physical_arch = {"pine-a64": "aarch64", "ls2k0300": "loongarch64",
                      "lichee-pi-zero": "arm32", "quartz64-zero": "aarch64",
                      "ox64": "riscv64",

@@ -18,8 +18,8 @@
 | 目标 | 来源 | 无外部参数时的行为 |
 |---|---|---|
 | RISC-V64、RISC-V32、PPC64LE | FDT `/chosen/bootargs` | 没有属性则默认 DHCP；部分 QEMU run/smoke 目标用 `-append` 注入 NAT 参数 |
-| QEMU AArch64 | `kernel/platform/qemu-virt-aarch64/board.c` 的编译期字符串 | `10.0.2.15/24`、gateway `10.0.2.2`、DNS `10.0.2.3`、hostname `a20os-qemu` |
-| VirtualBox AArch64 | `kernel/platform/virtualbox-aarch64/board.c` 的编译期字符串 | 同一 NAT 地址，hostname `a20os-vbox` |
+| QEMU AArch64 | `kernel/arch/aarch64/boards/qemu-virt-aarch64/board.c` 的编译期字符串 | `10.0.2.15/24`、gateway `10.0.2.2`、DNS `10.0.2.3`、hostname `a20os-qemu` |
+| VirtualBox AArch64 | `kernel/arch/aarch64/boards/virtualbox-aarch64/board.c` 的编译期字符串 | 同一 NAT 地址，hostname `a20os-vbox` |
 | LoongArch64 | 固件 DTB 的 `/chosen/bootargs`（`kernel/arch/loongarch64/platform/fdt.c`）；DTB 里没有时，`UART_CMDLINE=y` 会在串口上收一次 | 未配置：**QEMU loongarch virt 不向内核送任何命令行**，实测 `-append`、`-machine append=`、`-machine dtb=<自带 bootargs>`、fw_cfg 四条路都不通。收的方式见 [../exec-xlator/01-usage.md](../exec-xlator/01-usage.md) |
 | 其他未实现 `arch_bootargs_get()` 的目标 | weak hook 返回 `NULL` | 未配置 |
 

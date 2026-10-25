@@ -588,7 +588,8 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
 
     ahci_port_t *port = &g_ahci_port;
     memset(port, 0, sizeof(*port));
-    port->host_regs = (uintptr_t)abar->start;
+    port->host_regs = (uintptr_t)device_map_mmio(dev, 0);
+    if (!port->host_regs) return -EIO;
     port->regs = port->host_regs;
     port->irq = -1;
     port->read_only = !!(flags & AHCI_PLATFORM_F_READ_ONLY);
@@ -638,7 +639,7 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
         if (!(pi & (1U << n)))
             continue;
         port->port_no = n;
-        port->regs = (uintptr_t)abar->start + AHCI_PORT_BASE + n * AHCI_PORT_STRIDE;
+        port->regs = port->host_regs + AHCI_PORT_BASE + n * AHCI_PORT_STRIDE;
         if (preserve_firmware_link) {
             printf("[AHCI] port %u firmware state ssts=%x sctl=%x tfd=%x\n",
                    n, ahci_read(port, AHCI_PXSSTS),
@@ -750,12 +751,16 @@ static int ahci_pci_probe(device_t *dev) {
 }
 
 static int ahci_platform_probe(device_t *dev) {
-    const ahci_platform_data_t *data = dev ?
-        (const ahci_platform_data_t *)dev->plat_data : NULL;
+    uint32_t flags = dev->firmware_match ? (uint32_t)dev->firmware_match->driver_data : 0;
+    uint32_t port_map = 0;
+#ifdef CONFIG_STORAGE_READ_ONLY
+    flags |= AHCI_PLATFORM_F_READ_ONLY;
+#endif
+    int property = fw_node_read_u32(&dev->firmware_node, "ports-implemented", &port_map);
+    if (property && property != -ENOENT) return property;
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
     int irq = irq_res ? (int)irq_res->start : -1;
-    return ahci_probe_common(dev, irq, data ? data->flags : 0,
-                             data ? data->port_map : 0);
+    return ahci_probe_common(dev, irq, flags, port_map);
 }
 
 static int ahci_remove(device_t *dev) {
@@ -832,11 +837,6 @@ static const device_id_t ahci_ids[] = {
     { 0 },
 };
 
-static const device_id_t ahci_platform_ids[] = {
-    { .vendor = AHCI_PLATFORM_VENDOR, .device = AHCI_PLATFORM_DEVICE,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
 static driver_t ahci_driver = {
     .name = "ahci",
@@ -848,9 +848,14 @@ static driver_t ahci_driver = {
     .class_type = DEV_CLASS_BLOCK,
 };
 
+static const firmware_device_id_t ahci_firmware_ids[] = {
+    {.id = "ls2k1000-ahci", .driver_data = AHCI_PLATFORM_F_PRESERVE_FIRMWARE_LINK},
+    {0}
+};
 static driver_t ahci_platform_driver = {
     .name = "ahci-platform",
-    .id_table = ahci_platform_ids,
+    .firmware_ids = ahci_firmware_ids,
+    .irq_optional = 1,
     .bus = &platform_bus,
     .probe = ahci_platform_probe,
     .remove = ahci_remove,

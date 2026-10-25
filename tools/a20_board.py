@@ -60,7 +60,16 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
                       "ox64": "ox64-sdcard"}.get(inst.board)
             if target is None:
                 raise A20Error(f"no SD-card packager for board {inst.board}")
-            exec_make(inst, target, [*make_args, f"HANDOFF_INSTANCE={inst.source}"], dry_run)
+            extra = [*make_args, f"HANDOFF_INSTANCE={inst.source}"]
+            # The instance names its deployable artifact; keep recovery and
+            # interactive images distinct while sharing the prepared firmware.
+            image_variable = {"pine-a64": "PINE_A64_IMAGE",
+                              "quartz64-zero": "QUARTZ64_ZERO_IMAGE",
+                              "licheerv-nano": "LICHEERV_NANO_IMAGE",
+                              "ox64": "OX64_IMAGE"}.get(inst.board)
+            if image_variable and inst.target.boot_media:
+                extra.append(f"{image_variable}={inst.target.boot_media[0]}")
+            exec_make(inst, target, extra, dry_run)
         case "grub-iso":
             # A physical PC boots the same ISO from a USB stick, so it needs the
             # artifact at a stable path an instance can name in boot_media; the
@@ -99,7 +108,7 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             target = {"ls2k0300": "ls2k0300-bundle",
                       "m0sense-bl702": "m0sense-probe"}.get(inst.board, "kernel-bundle")
             extra = list(make_args)
-            if target == "kernel-bundle":
+            if target in {"kernel-bundle", "ls2k0300-bundle"}:
                 extra.append(f"HANDOFF_INSTANCE={inst.source}")
             exec_make(inst, target, extra, dry_run)
         case "fit-sdcard":

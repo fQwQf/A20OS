@@ -7,11 +7,9 @@
 # single FAT32 EFI System Partition -- so both architectures hand an operator the
 # same kind of thing, and both boot with no ISO in the tray and no second device.
 #
-# UEFI rather than BIOS is deliberate.  The kernel in the tree is a multiboot image,
-# and more to the point most 2025-era machines are UEFI-only with no CSM option while
-# kernel/boot/uefi/ holds an aarch64 loader with no x86_64 stub -- so GRUB is the only
-# boot path that covers what these machines actually ship with.  The same reasoning is
-# recorded in docs/platforms/x86_64-pc.md, where this image replaces the ISO.
+# This target packages the Multiboot kernel behind GRUB on a GPT/ESP disk.
+# Architecture-owned standalone EFI loaders are separate build targets.
+# See docs/platforms/x86_64-pc.md for deployment requirements.
 #
 # GRUB is built with grub-mkimage against an explicit /boot/grub prefix, and the
 # modules live on the ESP.  A grub-mkstandalone image was tried first and did boot,

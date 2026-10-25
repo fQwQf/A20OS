@@ -1,24 +1,28 @@
 # A20OS 平台移植指南
 
-已有架构上的新开发板主要通过 `kernel/platform/<board>/` 接入，板级地址、CPU 拓扑和启动协议都不写回 `kernel/arch/`。
+本页是开发者接口参考，不声明某个设备的支持状态或部署方法。已有架构上的新开发板主要通过 `kernel/arch/<arch>/boards/<board>/` 接入；板级地址和拓扑由平台提供，架构入口通过明确的板级头文件和 hook 接收启动参数。
 
 ## 代码边界
 
-`kernel/arch/<arch>/` 负责指令集机制：异常入口、寄存器访问、页表切换、secondary trampoline 和读取硬件 CPU ID。`kernel/platform/<board>/` 负责板级事实：RAM/MMIO 布局、CPU 拓扑、固件启动方法、中断控制器实例、设备资源和关机方式。可复用设备协议放在 `kernel/drivers/`，调度、online 状态和启动编排放在 `kernel/core/` 与 `kernel/proc/`。
+`kernel/arch/<arch>/` 负责指令集机制：异常入口、寄存器访问、页表切换、secondary trampoline 和读取硬件 CPU ID。`kernel/arch/<arch>/boards/<board>/` 负责板级事实：RAM/MMIO 布局、CPU 拓扑、固件启动方法、中断控制器实例、设备资源和关机方式。可复用设备协议放在 `kernel/drivers/`，调度、online 状态和启动编排放在 `kernel/core/` 与 `kernel/proc/`。
 
 新板不得通过 `CONFIG_BOARD_*` 在 `kernel/arch/<arch>/platform/smp.c` 中增加启动分支。若架构缺少一种通用指令机制，应先增加架构 helper，再由 platform hook 选择和提供参数。
 
 ## 构建接入
 
-创建 `kernel/platform/<board>/board.c` 并定义唯一的：
+创建 `kernel/arch/<arch>/boards/<board>/board.c` 并定义唯一的：
 
 ```c
 const board_config_t *const current_board;
 ```
 
-构建系统自动加入该目录顶层的 `*.c`，并把该目录加入头文件搜索路径。平台若提供 `kernel/platform/<board>/ldscript.ld`，它会覆盖架构默认链接脚本。平台子目录和平台汇编不会被自动递归加入；需要它们时必须先扩展 Makefile 的明确规则。
+构建系统自动加入该目录顶层的 `*.c`，并把该目录加入头文件搜索路径。平台若提供 `kernel/arch/<arch>/boards/<board>/ldscript.ld`，它会覆盖架构默认链接脚本。平台子目录和平台汇编不会被自动递归加入；需要它们时必须先扩展 Makefile 的明确规则。
 
-构建与实例接入有两个声明式入口，新板不需要改 Makefile 的门禁逻辑：给板写一个 `instances/<board>.toml`（架构、板卡、flash/SRAM 几何等），`tools/a20 build|run|flash <实例>` 即可用；若目标属于新的构建档位（例如第二个 MCU 级架构），在 `components/trim.toml` 里把架构加进 `[profile.mcu].arches`，或按需增改 `[capability.*]` 矩阵——改完执行 `make regen-trim-fragment`，`make check-trim-registry` 会校验自洽性与生成物时效。板级事实（引脚、时钟、内存映射）仍只写在 `kernel/platform/<board>/`，不进注册表。
+实例接入使用 `instances/<board>.toml` 声明架构、板卡、构建参数和传输方式；板级约束可由 `kernel/arch/<arch>/boards/<board>/board.mk` 提供。实例能解析不代表启动链已完成。`tools/a20 build` 需要有效编译规则；`run` 需要真实可用的仿真机器配置；`prepare`、`package`、`deploy`、`flash` 各自需要对应的固件准备、镜像、介质或编程器实现。新增打包类型仍需接入工具分派和校验，不能只增加 TOML 字段。
+
+架构入口会使用 `board_boot.h`、`board_console.h` 等可选板级头文件。添加板配置时必须核对 Image header、链接地址、初始映射、UART 协议和固件参数是否真正被启动代码采用；不能只看 `board.c` 中的设备表。
+
+若目标属于新的构建档位，在 `components/trim.toml` 中调整 `[profile.mcu].arches` 或 `[capability.*]` 矩阵，再执行 `make regen-trim-fragment` 和 `make check-trim-registry`。该注册表描述裁剪能力，不代替引脚、时钟和内存布局。
 
 `board_config_t` 当前包含 RAM 描述、irqchip、timer、SMP、early init、电源控制和设备枚举。新增字段必须确认存在真实调用方，不能只增加未接通的操作表。
 
@@ -53,11 +57,11 @@ proc_init_secondary
 -> idle_loop
 ```
 
-不支持 secondary 启动的平台不要提供伪造的空 `smp_platform_ops`。保持 `.smp = NULL`，即使内核以 `NR_CPUS>1` 构建也会明确退化为 BSP-only。
+不支持 secondary 启动的平台不要提供伪造的空 `smp_platform_ops`。保持 `.smp = NULL`，并按平台实际约束拒绝多核构建或明确报告 BSP-only，不能伪报 secondary online。
 
 ## 中断与定时器
 
-板级 irqchip 负责设备 IRQ 的 enable、disable、ack 和 eoi。调度 IPI 只通过 `smp_platform_ops.send_ipi`，不属于设备 irqchip 操作表。硬件协议可复用时，应放到 `kernel/drivers/` 下清晰命名的可复用子目录，board 只提供基址、IRQ 和 affinity 数据；当前树没有预建的 `kernel/drivers/irqchip/` 目录，不要把规划路径写成现有路径。
+板级 irqchip 负责设备 IRQ 的 enable、disable、ack 和 eoi。调度 IPI 只通过 `smp_platform_ops.send_ipi`，不属于设备 irqchip 操作表。硬件协议可复用时，放到 `kernel/drivers/` 下对应子目录，例如已有的 `kernel/drivers/irqchip/plic.c`；board 提供基址、IRQ 和 affinity 数据。
 
 每个 secondary 都必须有可用的本地 timer。`timer_get_ticks()` 在 CPU 迁移前后必须单调，频率必须与 `ARCH_TIMER_FREQ` 契约一致；不同 CPU 的本地 timer 配置不能只依赖 BSP 的一次性寄存器初始化。
 
@@ -88,14 +92,14 @@ make check-concurrency-foundation
 
 新平台在完成运行时多核验证前，需要显式设置 `ALLOW_UNVERIFIED_SMP=1`。不要仅凭成功链接就把平台加入已验证列表。
 
-## 验收记录
+## 平台操作文档
 
-平台文档至少记录 QEMU 或硬件型号、固件版本、CPU 数、启动日志、worker CPU 分布、压力测试结果和已知限制。多核验收应包含如下证据，而不只是 configured 数量：
+每个目标的单平台文档应能独立使用，包含：
 
-```text
-[SMP] 8/8 configured CPUs online
-SMP_BENCH workers=8 ... status=PASS
-SMP_BENCH cpus 0:1 1:1 2:1 3:1 4:1 5:1 6:1 7:1
-SCHED_STRESS: PASS
-PROC_STRESS: PASS
-```
+1. 适用型号、RAM/固件变种、当前已实现设备，以及虚拟机和实机分别达到的支持状态。
+2. 主机系统、GNU 工具链、Rust 版本/targets/组件、Python 与固件工具依赖，以及仓库初始化命令。
+3. 完整的构建与打包入口、实际输出路径、固件来源、启动协议及地址约束。
+4. 串口接线、速率、电平、介质准备、启动步骤、日志位置、可观察的成功和失败标记。
+5. 恢复方法、缺失驱动与操作限制；尚不可部署时，明确列出阻断和当前可运行的构建/检查入口。
+
+正文记录操作系统的现状与可重复操作，不记录工作过程、某位开发者的主机路径、逐日进度或一次性跑测叙述。源码链接和通用指南是补充材料，不能代替本页的必要命令。运行日志留在构建输出，动态产物哈希由实例账本生成；平台页只说明如何获得和判断它们。

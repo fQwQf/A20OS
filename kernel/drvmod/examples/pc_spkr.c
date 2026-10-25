@@ -147,14 +147,13 @@ static const audio_dev_ops_t pc_speaker_ops = {
     .stop = pc_speaker_stop,
 };
 
-static const device_id_t pc_speaker_ids[] = {
-    { .vendor = A20_PLATFORM_VENDOR, .device = A20_DEVICE_PC_SPEAKER },
-    { 0 },
-};
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "PNP0800"}, {0}
+};
 static driver_t pc_speaker_driver = {
     .name = "pc-speaker",
-    .id_table = pc_speaker_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .probe = pc_speaker_probe,
     .remove = pc_speaker_remove,

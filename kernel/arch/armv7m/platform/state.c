@@ -13,6 +13,8 @@ volatile uint32_t armv7m_trap_cause MCU_PRIVATE_BSS;
 volatile uint32_t armv7m_fault_addr MCU_PRIVATE_BSS;
 volatile uint32_t armv7m_fault_pc MCU_PRIVATE_BSS;
 void *armv7m_task_pointer MCU_PRIVATE_BSS;
+/* Cortex-M task context switching has no separate privileged TLS register. */
+void arch_switch_tls_restore(void) {}
 #ifdef CONFIG_MCU_SHARED_KERNEL
 unsigned armv7m_private_cpu_id MCU_PRIVATE_BSS;
 unsigned armv7m_private_shared_ready MCU_PRIVATE_BSS;

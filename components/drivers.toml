@@ -33,9 +33,23 @@ description = "virtio SCSI host (boot disk candidate)"
 [[driver]]
 name = "dw-sdio"
 source = "kernel/drvmod/examples/dw_sdio.c"
+arches = ["riscv64", "aarch64"]
+early_arches = ["riscv64", "aarch64"]
+description = "DesignWare MSHC SD card (VisionFive 2 / Quartz64 Zero)"
+
+[[driver]]
+name = "sunxi-mmc"
+source = "kernel/drvmod/examples/sunxi_mmc.c"
+arches = ["aarch64"]
+early_arches = ["aarch64"]
+description = "Allwinner MMC0 SD card (PINE A64 / Lichee Pi Zero V3s)"
+
+[[driver]]
+name = "sdhci"
+source = "kernel/drvmod/examples/sdhci.c"
 arches = ["riscv64"]
 early_arches = ["riscv64"]
-description = "DesignWare SDIO (VisionFive 2 SD card, boot disk candidate)"
+description = "PIO SDHCI SD card (SG2002 / BL808)"
 
 [[driver]]
 name = "ahci"

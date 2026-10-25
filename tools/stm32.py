@@ -49,13 +49,14 @@ POST_FLASH_TCL: tuple[str, ...] = (
 # is a regex over the tree; the gate passes when the search finds nothing.  The
 # scope strings are joined onto KERNEL_DIR, which make owns.
 CONFIG_ASSERTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("hardcoded STM32 MMIO address",
+    ("hardcoded STM32 MMIO address in board orchestration",
      r"0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}",
-     ("platform/stm32f103", "--glob", "*.[ch]",
-      "--glob", "!board.c", "--glob", "!board_config.h")),
+     ("arch/armv7m/boards/stm32f103", "--glob", "*.[ch]",
+      "--glob", "!board.c", "--glob", "!board_config.h",
+      "--glob", "!**/drivers/**")),
     ("CONFIG_ARMV7M outside arch/board code",
      r"CONFIG_ARMV7M",
-     ("", "--glob", "!kernel/arch/**", "--glob", "!kernel/platform/**",
+     ("", "--glob", "!kernel/arch/**",
       "--glob", "!kernel/external/**",
       "--glob", "!kernel/include/core/arch.h")),
 )

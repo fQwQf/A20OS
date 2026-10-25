@@ -1,8 +1,8 @@
 /*
  * DW-SDIO (Synopsys DesignWare SDIO/MMC Host Controller) Driver
  *
- * Supports VisionFive2 and other boards with DW-SDIO.
- * Reference: rocketos os/src/drivers/block/sdio.rs
+ * SD/SDSC/SDHC/SDXC, default-speed one-bit PIO.
+ * MMC/eMMC, SDIO function cards and UHS voltage switching are not supported.
  */
 #ifndef _DW_SDIO_H
 #define _DW_SDIO_H
@@ -13,8 +13,7 @@
 /* Public API for FS layer */
 #define DW_SDIO_SECTOR_SIZE 512
 
-/* Platform identity contract: the board registers its SDIO controller as a
- * platform device with these IDs; the driver binds through platform_bus. */
+/* Loadable-package descriptor identity. Runtime binding uses firmware IDs. */
 #define DW_SDIO_PLATFORM_VENDOR 0x5F56U
 #define DW_SDIO_PLATFORM_DEVICE 1U
 
@@ -40,8 +39,7 @@
  * A line is only claimed when the board actually published one, so a device
  * that never had a RES_IRQ behaves exactly as it did before this existed.
  */
-static inline int dw_sdio_pick_irq_mode(int have_irq_line, int force_poll)
-{
+static inline int dw_sdio_pick_irq_mode(int have_irq_line, int force_poll) {
     return (have_irq_line >= 0 && !force_poll) ? 1 : 0;
 }
 
@@ -50,8 +48,7 @@ static inline int dw_sdio_pick_irq_mode(int have_irq_line, int force_poll)
  * self-check can feed it a synthetic string: the parser the driver runs at
  * probe time is the parser under test, not a copy of it.
  */
-static inline int dw_sdio_poll_forced(const char *cmdline)
-{
+static inline int dw_sdio_poll_forced(const char *cmdline) {
     const char *p = cmdline;
     while (p && *p) {
         while (*p == ' ' || *p == '\t')
@@ -63,25 +60,21 @@ static inline int dw_sdio_poll_forced(const char *cmdline)
             p++;
         size_t klen = sizeof(DW_SDIO_POLL_KEY) - 1;
         if ((size_t)(p - tok) > klen &&
-            memcmp(tok, DW_SDIO_POLL_KEY, klen) == 0 &&
-            tok[klen] >= '1' && tok[klen] <= '9')
+            memcmp(tok, DW_SDIO_POLL_KEY, klen) == 0 && tok[klen] >= '1' &&
+            tok[klen] <= '9')
             return 1;
     }
     return 0;
 }
 
-int  dw_sdio_init_dev(uintptr_t base);
-int  dw_sdio_read_sector(uintptr_t base, uint64_t lba, void *buf, size_t count);
-int  dw_sdio_write_sector(uintptr_t base, uint64_t lba, const void *buf, size_t count);
-uint64_t dw_sdio_capacity(uintptr_t base);
-int  dw_sdio_card_ready(uintptr_t base);
-
-/*
- * Which completion path the instance is actually running: 1 = interrupt
- * driven, 0 = polling.  Also 0 after a completion timeout downgraded the
- * instance, so a caller reporting the active mode does not report the
- * requested one.
- */
-int  dw_sdio_using_irq(void);
+/* Optional board-prepared host configuration, set on the canonical firmware
+ * device before probe. input_hz is the effective clock entering CLKDIV, after
+ * any SoC integration divider; platform glue must enable clocks/reset/pins.
+ * Without platform data, clock-frequency is required on the firmware node. */
+typedef struct dw_sdio_platform_data {
+    uint32_t input_hz;
+    uint32_t max_hz;
+    uint32_t fifo_depth;
+} dw_sdio_platform_data_t;
 
 #endif /* _DW_SDIO_H */

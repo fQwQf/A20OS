@@ -3,6 +3,7 @@
  * and returns all writable private pages before the home lease is released. */
 #ifdef CONFIG_CLUSTER_SSI
 #include "cluster/ssi.h"
+#include "cluster/arch_state.h"
 #include "uapi/a20/cluster_ssi.h"
 #include "core/errno.h"
 #include "core/string.h"
@@ -50,20 +51,15 @@ struct ssi_header {
     uint64_t epoch, va;
     uint32_t flags, length;
 };
-struct ssi_context {
-    uint64_t regs[18]; /* user registers through RFLAGS; never kernel fields */
-    uint64_t fs, gs;
-    uint8_t fpu[512] __attribute__((aligned(16)));
-};
 struct ssi_start {
     uint8_t token[32];
     uint32_t pages, quantum, bytes, reserved;
-    struct ssi_context user;
+    cluster_arch_state_t user;
 };
 _Static_assert(sizeof(struct ssi_pages) == 1056,
                "Rust SSI page transaction ABI");
 _Static_assert(sizeof(struct ssi_header) == 32, "SSI1 stream header ABI");
-_Static_assert(sizeof(struct ssi_context) == 672, "SSI1 user state ABI");
+_Static_assert(sizeof(cluster_arch_state_t) == 672, "SSI1 user state ABI");
 _Static_assert(sizeof(struct ssi_start) == 720, "SSI1 start ABI");
 struct ssi_session {
     vfile_t *file;
@@ -72,7 +68,7 @@ struct ssi_session {
     uint64_t epoch, deadline, started, user_ticks;
     uint32_t quantum;
     struct ssi_pages pages;
-    struct ssi_context user;
+    cluster_arch_state_t user;
     uint8_t buffer[4096];
 };
 static struct a20_ssi_config config;
@@ -166,34 +162,6 @@ static int receive_header(struct ssi_session *s, struct ssi_header *h) {
                ? 0
                : -EIO;
 }
-static void capture(struct ssi_context *w, trap_context_t *ctx) {
-    memcpy(w->regs, ctx, sizeof(w->regs));
-    w->fs = proc_current()->arch_tls_fs_base;
-    w->gs = proc_current()->arch_tls_gs_base;
-    __asm__ volatile("fxsave64 (%0)" : : "r"(w->fpu) : "memory");
-}
-static int valid_context(const struct ssi_context *w) {
-    uint32_t mxcsr;
-    memcpy(&mxcsr, w->fpu + 24, 4);
-    return w->regs[16] < USER_VA_LIMIT && w->regs[7] < USER_VA_LIMIT &&
-           w->fs < USER_VA_LIMIT && w->gs < USER_VA_LIMIT &&
-           !(mxcsr & ~0xffbfU);
-}
-static void restore(struct ssi_context *w, task_t *t, trap_context_t *ctx,
-                    int live) {
-    memcpy(ctx, w->regs, sizeof(w->regs));
-    ctx->rflags = (ctx->rflags & 0xcd5U) | 0x202U;
-    ctx->user_fs_base = t->arch_tls_fs_base = w->fs;
-    ctx->user_gs_base = t->arch_tls_gs_base = w->gs;
-    if (live) {
-        arch_write_user_fs_base(w->fs);
-        arch_write_user_gs_base(w->gs);
-        __asm__ volatile("fxrstor64 (%0)" : : "r"(w->fpu) : "memory");
-    } else {
-        task_context_t *base = arch_task_context_base(t->kstack_base, 0, ctx);
-        memcpy(base->fpu, w->fpu, 512);
-    }
-}
 static int safe_mapping(const mm_seg_t *v) {
     return v && !(v->vm_flags &
                   (VM_SHARED | VM_PFNMAP | VM_SYSV_SHM | VM_VMO | VM_GUARD));
@@ -248,7 +216,7 @@ static void finish_remote(trap_context_t *ctx, uint32_t reason)
     __attribute__((noreturn));
 static void finish_remote(trap_context_t *ctx, uint32_t reason) {
     struct ssi_session *s = remote;
-    capture(&s->user, ctx);
+    arch_cluster_state_capture(&s->user, ctx);
     arch_local_irq_enable();
     int r = 0;
     for (uint32_t i = 0; i < s->pages.len && r == 0; i++) {
@@ -360,7 +328,7 @@ static void worker(void) {
             (memcmp(start->token, config.token, 32) || start->reserved ||
              !start->pages || start->pages > config.max_pages ||
              !start->quantum || start->quantum > config.quantum_ticks ||
-             start->bytes > config.max_bytes || !valid_context(&start->user)))
+             start->bytes > config.max_bytes || !arch_cluster_state_valid(&start->user)))
             r = -EINVAL;
         if (r == 0) {
             s->epoch = h.epoch;
@@ -372,9 +340,10 @@ static void worker(void) {
              * avoids ambiguous image ownership on the generic image helper's
              * early task/PID/stack allocation failures. No task is runnable
              * until the root and both saved context tokens are installed. */
-            int pid = proc_alloc_user_image(
-                start->user.regs[16], start->user.regs[7], NULL, NULL, 0,
-                start->user.regs[7], 0, start->user.fs, 1);
+            uint64_t entry, stack, tls;
+            arch_cluster_state_user_entry(&start->user, &entry, &stack, &tls);
+            int pid = proc_alloc_user_image(entry, stack, NULL, NULL, 0,
+                                            stack, 0, tls, 1);
             if (pid < 0) {
                 r = pid;
             } else {
@@ -394,7 +363,7 @@ static void worker(void) {
                     arch_setup_signal_trampoline(t->mm);
                     s->task = t;
                     t->abi_mode = 0;
-                    restore(&start->user, t, t->trap_ctx, 0);
+                    arch_cluster_state_restore(&start->user, t, t->trap_ctx, 0);
                     s->user_ticks = t->utime_ticks;
                     remote = s;
                     proc_publish_deferred_task(t);
@@ -551,7 +520,7 @@ void cluster_ssi_before_user(trap_context_t *ctx) {
     start->pages = config.max_pages;
     start->quantum = config.quantum_ticks;
     start->bytes = config.max_bytes;
-    capture(&start->user, ctx);
+    arch_cluster_state_capture(&start->user, ctx);
     arch_local_irq_enable();
     s->file = take_fd(
         net_socket_create(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), &s->socket);
@@ -580,7 +549,7 @@ void cluster_ssi_before_user(trap_context_t *ctx) {
         } else if (h.type == SSI_DONE && !h.va && h.length == sizeof(s->user) &&
                    (h.flags == SSI_SYSCALL || h.flags == SSI_QUANTUM)) {
             r = transfer(s, &s->user, sizeof(s->user), 0);
-            if (r == 0 && (!valid_context(&s->user) ||
+            if (r == 0 && (!arch_cluster_state_valid(&s->user) ||
                            !a20_ssi_pages_complete(&s->pages)))
                 r = -EIO;
             if (r == 0)
@@ -606,7 +575,7 @@ void cluster_ssi_before_user(trap_context_t *ctx) {
           epoch, t->pid, s->pages.len, s->pages.bytes, reason, r);
     arch_local_irq_disable();
     if (r == 0)
-        restore(&s->user, t, ctx, 1);
+        arch_cluster_state_restore(&s->user, t, ctx, 1);
     kfree(start);
     kfree(staged);
     kfree(s);

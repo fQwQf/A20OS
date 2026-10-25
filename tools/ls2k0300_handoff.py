@@ -415,7 +415,7 @@ def run_handoff(transport, inst=None, *, bundle=None, transfer='mmc',
         session.command('setenv autostart yes', command_timeout)
         transport.write(f'bootelf -p {plan.staging:x}\r'.encode('ascii'))
         expected = tuple(getattr(getattr(inst, 'target', None), 'console_check', ()) or
-                         ('[LS2K0300] stage=polled', 'System ready'))
+                         ('[LS2K0300] stage=irq', 'System ready'))
         deadline = now() + boot_timeout
         bootlog = ''
         while now() < deadline:

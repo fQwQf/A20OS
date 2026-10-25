@@ -329,22 +329,27 @@ static int tpm_tis_init(uintptr_t base, uint64_t phys) {
 
 static int tpm_probe(device_t *dev)
 {
+    if (fw_node_match_id(&dev->firmware_node, "MSFT0101") > 0) {
+        uint32_t method;
+        if (fw_node_read_u32(&dev->firmware_node, "acpi,tpm2-start-method", &method))
+            return -ENODEV;
+        if (method != 6) return -EOPNOTSUPP; /* CRB has a different protocol. */
+    }
     resource_t *res = device_get_resource(dev, RES_MMIO, 0);
-    if (!res)
+    if (!res || res->end < res->start || res->end - res->start < TIS_RID + 3)
         return -ENODEV;
     uint64_t phys = res->start;
-    return tpm_tis_init(PAGE_OFFSET + (uintptr_t)phys, phys);
+    uintptr_t mapping = (uintptr_t)device_map_mmio(dev, 0);
+    return mapping ? tpm_tis_init(mapping, phys) : -EIO;
 }
 
-static const device_id_t tpm_ids[] = {
-    { .vendor = 0x54504D00UL, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "MSFT0101"}, {.id = "tcg,tpm-tis-mmio"}, {0}
+};
 static driver_t tpm_driver = {
     .name = "tpm2-tis",
-    .id_table = tpm_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .probe = tpm_probe,
     .class_type = DEV_CLASS_NONE,

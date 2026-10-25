@@ -8,8 +8,10 @@
 #include "net/socket_internal.h"
 
 /* class_allocate_index() hands out a unique (class_type, index) pair per
- * device and index cycles over 0..255, so the total number of published class
- * devices is bounded by 256 per class type.  Backing the registry with a fixed
+ * device in 0..255, so the total number of published class devices is bounded
+ * by 256 per class type. Block indices are a lifetime budget and never reused;
+ * other classes can reuse an index after its publication is removed.
+ * Backing the registry with a fixed
  * static array keeps kcalloc/krealloc out of g_class_lock entirely: both
  * allocate through the reclaiming allocator, whose OOM path takes tasklist_lock,
  * a task park_lock and mm->lock, writes swap pages to disk, waits on remote TLB
@@ -66,9 +68,9 @@ void class_device_emit_uevents(const char *action)
         if (!subsystem)
             continue;
         for (unsigned index = 0; index < 256; index++) {
-            class_device_t *cdev = class_device_get_by_type(type, index);
+            class_device_t *cdev = class_device_get_by_index(type, index);
             if (!cdev)
-                break;
+                continue;
             netlink_uevent_emit(action, subsystem, cdev->name, cdev->devt);
             class_device_put(cdev);
         }
@@ -88,6 +90,13 @@ static uint64_t class_devt(uint32_t type, uint32_t index)
 
 static int class_allocate_index(uint32_t type, uint32_t *index)
 {
+    /* Filesystems and UXFS retain numeric disk identities. A removed disk
+     * index is never reassigned within this boot, including after wraparound. */
+    if (type == DEV_CLASS_BLOCK) {
+        if (g_class_next_index[type] >= CLASS_INDEX_SPACE) return -ENOSPC;
+        *index = g_class_next_index[type];
+        return 0;
+    }
     unsigned start = g_class_next_index[type] & 0xffU;
     for (unsigned offset = 0; offset <= 0xffU; offset++) {
         unsigned candidate = (start + offset) & 0xffU;
@@ -161,6 +170,13 @@ int class_device_publish(struct device *dev)
             return -EEXIST;
         }
     }
+    if (!device_get(dev)) {
+        spin_unlock_irqrestore(&g_class_lock, flags);
+        kfree(cdev);
+        return -ENODEV;
+    }
+    if (cdev->class_type == DEV_CLASS_BLOCK)
+        g_class_next_index[DEV_CLASS_BLOCK] = cdev->index + 1;
     __atomic_store_n(&cdev->online, 1, __ATOMIC_RELEASE);
     g_class_devices[g_class_count++] = cdev;
     dev->class_dev = cdev;
@@ -182,6 +198,9 @@ void class_device_unpublish(struct device *dev)
 
     uint64_t state_flags = spin_lock_irqsave(&cdev->state_lock);
     __atomic_store_n(&cdev->online, 0, __ATOMIC_RELEASE);
+    void (*offline)(class_device_t *, void *) = cdev->offline;
+    void *offline_data = cdev->offline_data;
+    cdev->offline = NULL; cdev->offline_data = NULL;
     spin_unlock_irqrestore(&cdev->state_lock, state_flags);
     uint64_t flags = spin_lock_irqsave(&g_class_lock);
     for (unsigned i = 0; i < g_class_count; i++) {
@@ -192,6 +211,8 @@ void class_device_unpublish(struct device *dev)
     }
     dev->class_dev = NULL;
     spin_unlock_irqrestore(&g_class_lock, flags);
+
+    if (offline) offline(cdev, offline_data);
 
     while (__atomic_load_n(&cdev->active_calls, __ATOMIC_ACQUIRE) != 0)
         __asm__ volatile("" ::: "memory");
@@ -206,8 +227,11 @@ void class_device_get(class_device_t *cdev)
 
 void class_device_put(class_device_t *cdev)
 {
-    if (cdev && refcount_dec_and_test(&cdev->refs))
+    if (cdev && refcount_dec_and_test(&cdev->refs)) {
+        device_t *dev = cdev->dev;
         kfree(cdev);
+        device_put(dev);
+    }
 }
 
 /* Reading dev->class_dev on its own races class_device_unpublish(), which
@@ -263,6 +287,32 @@ class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index)
 {
     return class_device_get_match(NULL, class_type, index, 0);
 }
+class_device_t *class_device_get_by_index(uint32_t type, unsigned index)
+{
+    class_device_t *result = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_class_lock);
+    for (unsigned i = 0; i < g_class_count; i++) {
+        class_device_t *cdev = g_class_devices[i];
+        if (cdev->class_type == type && cdev->index == index &&
+            __atomic_load_n(&cdev->online, __ATOMIC_ACQUIRE)) {
+            class_device_get(cdev); result = cdev; break;
+        }
+    }
+    spin_unlock_irqrestore(&g_class_lock, flags);
+    return result;
+}
+int class_device_set_offline(class_device_t *cdev,
+                             void (*callback)(class_device_t *, void *), void *data)
+{
+    if (!cdev || !callback) return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&cdev->state_lock);
+    int rc = 0;
+    if (!__atomic_load_n(&cdev->online, __ATOMIC_ACQUIRE)) rc = -ENODEV;
+    else if (cdev->offline && cdev->offline != callback) rc = -EBUSY;
+    else { cdev->offline = callback; cdev->offline_data = data; }
+    spin_unlock_irqrestore(&cdev->state_lock, flags);
+    return rc;
+}
 
 class_device_t *class_device_get_nth(unsigned index)
 {
@@ -282,6 +332,20 @@ int class_device_call_begin(class_device_t *cdev)
     spin_unlock_irqrestore(&cdev->state_lock, flags);
     return 0;
 }
+int class_device_ops_begin(class_device_t *cdev, uint32_t class_type, const void **ops)
+{
+    if (!ops) return -EINVAL;
+    *ops = NULL;
+    int rc = class_device_call_begin(cdev);
+    if (rc) return rc;
+    driver_t *drv = cdev->dev->drv;
+    if (!drv || cdev->class_type != class_type || drv->class_type != class_type || !drv->class_ops) {
+        class_device_call_end(cdev);
+        return -ENODEV;
+    }
+    *ops = drv->class_ops;
+    return 0;
+}
 
 void class_device_call_end(class_device_t *cdev)
 {
@@ -299,4 +363,65 @@ int class_device_has_devnode(const class_device_t *cdev)
 uint8_t class_device_dirent_type(const class_device_t *cdev)
 {
     return cdev && cdev->class_type == DEV_CLASS_BLOCK ? 6 : 2;
+}
+
+int class_net_ready(class_device_t *cdev)
+{
+    const void *table;
+    if (class_device_ops_begin(cdev, DEV_CLASS_NET, &table)) return 0;
+    const net_dev_ops_t *ops = table;
+    int ready = ops->send && ops->recv && ops->mac;
+    class_device_call_end(cdev);
+    return ready;
+}
+#define NET_OPERATION(name, arguments, expression) \
+int name arguments { \
+    const void *table; \
+    int rc = class_device_ops_begin(cdev, DEV_CLASS_NET, &table); \
+    if (rc) return rc; \
+    const net_dev_ops_t *ops = table; \
+    rc = (expression); \
+    class_device_call_end(cdev); \
+    return rc; \
+}
+NET_OPERATION(class_net_send, (class_device_t *cdev, const void *packet, size_t length),
+              ops->send ? ops->send(cdev->dev, packet, length) : -EOPNOTSUPP)
+NET_OPERATION(class_net_recv, (class_device_t *cdev, void *packet, size_t length),
+              ops->recv ? ops->recv(cdev->dev, packet, length) : -EOPNOTSUPP)
+NET_OPERATION(class_net_send_sg, (class_device_t *cdev, const net_iovec_t *iov, unsigned count),
+              ops->send_sg ? ops->send_sg(cdev->dev, iov, count) : -EOPNOTSUPP)
+NET_OPERATION(class_net_link_up, (class_device_t *cdev),
+              ops->link_up ? ops->link_up(cdev->dev) : 1)
+NET_OPERATION(class_net_rx_irq_driven, (class_device_t *cdev),
+              ops->rx_irq_driven ? ops->rx_irq_driven(cdev->dev) : 0)
+#undef NET_OPERATION
+void class_net_poll(class_device_t *cdev)
+{
+    const void *table;
+    if (class_device_ops_begin(cdev, DEV_CLASS_NET, &table)) return;
+    const net_dev_ops_t *ops = table;
+    if (ops->poll) ops->poll(cdev->dev);
+    class_device_call_end(cdev);
+}
+uint32_t class_net_caps(class_device_t *cdev)
+{
+    const void *table;
+    if (class_device_ops_begin(cdev, DEV_CLASS_NET, &table)) return 0;
+    const net_dev_ops_t *ops = table;
+    uint32_t caps = ops->caps ? ops->caps(cdev->dev) : 0;
+    if (!ops->send_sg) caps &= ~NET_DEV_CAP_TX_SG;
+    class_device_call_end(cdev);
+    return caps;
+}
+int class_net_copy_mac(class_device_t *cdev, uint8_t out[6])
+{
+    if (!out) return -EINVAL;
+    const void *table;
+    int rc = class_device_ops_begin(cdev, DEV_CLASS_NET, &table);
+    if (rc) return rc;
+    const net_dev_ops_t *ops = table;
+    const uint8_t *mac = ops->mac ? ops->mac(cdev->dev) : NULL;
+    if (mac) memcpy(out, mac, 6);
+    class_device_call_end(cdev);
+    return mac ? 0 : -EOPNOTSUPP;
 }

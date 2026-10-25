@@ -18,21 +18,17 @@
 #if defined(DRV_ENV_KERNEL)
 
 #include "core/types.h"
-#include "mm/frame.h" /* PAGE_OFFSET */
+#include "drivers/core/driver_core.h"
 
-/* Kernel placement: qemu-virt device windows are direct-mapped.  Platforms
- * without a full direct map must route this through a real ioremap (TODO). */
+/* Kernel placement uses the architecture-owned device mapping policy. */
 static inline uint64_t drv_mmio_map(uint64_t phys, uint64_t size, uint32_t prot)
 {
-    (void)size;
-    (void)prot;
-    return phys + PAGE_OFFSET;
+    return (uint64_t)(uintptr_t)arch_device_map_mmio(phys, (size_t)size, prot);
 }
 
 static inline void drv_mmio_unmap(uint64_t va, uint64_t size)
 {
-    (void)va;
-    (void)size;
+    arch_device_unmap_mmio((void *)(uintptr_t)va, (size_t)size);
 }
 
 #elif defined(DRV_ENV_USER)

@@ -9,7 +9,7 @@
  * Decouples the virtio-blk driver from the underlying transport
  * (MMIO on RISC-V, PCI modern on LoongArch).  The driver calls
  * read32/write32 through function pointers; the arch layer
- * provides the implementation and device discovery.
+ * provides the implementation; buses publish devices before driver binding.
  *
  * Register offsets passed to read32/write32 are the MMIO-style
  * offsets (VIRTIO_MMIO_* defines from virtio_blk.h).  The
@@ -55,12 +55,5 @@ typedef struct virtio_transport {
     int  msix_base;
     int  msix_vectors;
 } virtio_transport_t;
-
-/* Probe for the next virtio-blk device.
- * index = sequential device number (0, 1, 2 …).
- * On success, fills *vt and returns 0.
- * On failure (no more devices), returns -1. */
-int arch_virtio_blk_probe(int index, virtio_transport_t *vt);
-int arch_virtio_net_probe(int index, virtio_transport_t *vt);
 
 #endif /* _VIRTIO_TRANSPORT_H */

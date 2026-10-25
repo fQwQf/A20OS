@@ -219,7 +219,9 @@ int pci_msix_enable(device_t *dev, unsigned vectors)
                        PCI_MSIX_FUNCTION_MASK, PCI_MSIX_ENABLE);
 
     st->table_size = info.table_size;
-    st->table = (uintptr_t)res->start + info.table_offset;
+    uintptr_t mapping = (uintptr_t)pci_map_bar(dev, info.table_bir);
+    if (!mapping) return -EIO;
+    st->table = mapping + info.table_offset;
     st->programed = 0;
 
     kinfo("[MSI-X] %s: capability at 0x%02x, table %u entries in BAR%u+0x%x "

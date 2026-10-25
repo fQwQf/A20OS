@@ -62,7 +62,7 @@ static void arch_plic_complete(uint32_t irq) {
 volatile unsigned int riscv64_trap_t0_test_active;
 volatile unsigned int riscv64_trap_t0_test_seen;
 static unsigned int riscv64_trap_t0_test_cpu;
-extern uint64_t riscv64_timer_freq(void);
+extern uint64_t arch_timer_frequency(void);
 extern int riscv64_trap_t0_test_asm(uint64_t timeout_ticks);
 
 static void handle_timer_irq(int from_user) {
@@ -80,7 +80,7 @@ int riscv64_trap_t0_selftest(void)
 {
     riscv64_trap_t0_test_cpu = arch_current_cpu_id();
     __atomic_store_n(&riscv64_trap_t0_test_seen, 0, __ATOMIC_RELAXED);
-    int result = riscv64_trap_t0_test_asm(riscv64_timer_freq() / 10);
+    int result = riscv64_trap_t0_test_asm(arch_timer_frequency() / 10);
     int seen = __atomic_load_n(&riscv64_trap_t0_test_seen, __ATOMIC_ACQUIRE);
     return result == 0 && seen;
 }

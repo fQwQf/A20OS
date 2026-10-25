@@ -38,6 +38,8 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 | ABI 边界 | `make check-abi-boundary` |
 | Native ABI 三表交叉 | `make check-native-abi-coverage`（登记表 / 编号表 / `docs/native-abi/` 互相对齐；宿主侧） |
 | 双 ABI 编译守卫 | `make check-abi-config-guard`（禁裸 `#ifdef CONFIG_ABI_LINUX`/`#ifdef CONFIG_ABI_NATIVE`；宿主侧） |
+| UEFI 交接 | `make smoke-uefi-x86_64`（OVMF、独立 EFI loader、RAM 保留、ACPI 与 S5） |
+| 启动与硬件发现 | `make check-firmware-model`（生产 DT/ACPI/uACPI、静态描述、资源与 IRQ、依赖和回滚的宿主 fixture） |
 | 驱动核心 | `make check-driver-core-model` |
 | x86 驱动保持用户 FP 状态 | `make smoke-x86-fp-preserve`（4 CPU、ext4 块设备上的 raw syscall；构建还检查 ET_REL 驱动 ISA） |
 | 外部依赖 | `make check-external-dependency-boundary` |
@@ -56,7 +58,7 @@ LoongArch32/PPC64LE 已退出 1.0；活跃 Make/CI/实例/门禁矩阵已撤下�
 
 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。活跃 LoongArch64、x86_64 的 NOMMU 配置在构建入口被拒绝；PPC64LE/LoongArch32 则因平台已退休由更早的架构 guard 拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
-`SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/platform/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
+`SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/arch/<arch>/boards/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
 
 `ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-handle-test` 与 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
 
@@ -413,7 +415,7 @@ rg -n 'posix_timer_tick|posix_itimer_cpu_tick' kernel/mcu/mcu_stubs.c kernel/pro
 
 `make check-driver-core-model` 检查 `DRIVER_CORE_CONCURRENCY_MODEL`、`DRIVER_CORE_DYNAMIC_LIMITS`、`DRIVER_PROBE_FAILURE_CLEANUP`、`DRIVER_ENUMERATION_FAILURE_MODEL`、`DRIVER_IRQ_DMA_SEMANTICS`、`DRIVER_SMOKE_MATRIX` 等静态契约；确认驱动生命周期测试、virtio-blk/net、UART、PTY、loop、PCI 与 virtio-mmio 枚举函数存在，且 `kernel/main.c` 不再直接调用 `virtio_blk_init`/`virtio_net_init`。
 
-失败时查 `kernel/drivers/core/driver_core.c`、`kernel/drivers/core/driver_hwapi.c`、`kernel/drivers/core/driver_lifecycle_test.c` 中对应契约字符串，确认 `docs/drivers/README.md` 引用了 `kernel/drivers/` 与 `kernel/platform/`，并修掉直接调用驱动的初始化代码。
+失败时查 `kernel/drivers/core/driver_core.c`、`kernel/drivers/core/driver_hwapi.c`、`kernel/drivers/core/driver_lifecycle_test.c` 中对应契约字符串，确认 `docs/drivers/README.md` 引用了 `kernel/drivers/` 与 `kernel/arch/<arch>/boards/`，并修掉直接调用驱动的初始化代码。
 
 ### 外部依赖边界
 
@@ -427,7 +429,7 @@ vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第�
 
 `make check-arch-boundary` 禁止通用内核代码中出现 `CONFIG_AARCH64`/`CONFIG_ARM32`/`__aarch64__`/`__arm__` 等架构条件编译；验证 LoongArch64、x86_64 的 NOMMU 构建在入口即被拒绝，LoongArch32/PPC64LE 则由退休架构 guard 拒绝；确认 `smoke-arch-mmu-matrix` 在 Makefile 与 `docs/OS-Design.md` 中存在。
 
-失败时看 `rg` 扫描结果中是否在 `kernel/arch/**`、`kernel/platform/**`、`kernel/external/**`、`kernel/include/core/arch.h` 之外出现架构宏，并确认 `docs/testing-gates.md` 与 `docs/OS-Design.md` 包含 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT` 与 `smoke-arch-mmu-matrix`。
+失败时看 `rg` 扫描结果中是否在 `kernel/arch/**`、`kernel/arch/*/boards/**`、`kernel/external/**`、`kernel/include/core/arch.h` 之外出现架构宏，并确认 `docs/testing-gates.md` 与 `docs/OS-Design.md` 包含 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT` 与 `smoke-arch-mmu-matrix`。
 
 ### 构建矩阵
 

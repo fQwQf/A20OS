@@ -1661,7 +1661,7 @@ vma=0 anon_virt=0`。riscv64 侧无回归（`smoke-mm-stress` / `smoke-mm-fork-e
 riscv64/x86_64/aarch64 与 riscv64/aarch64 NOMMU 构建通过。
 
 x86_64 上该参数目前无效，且这是既有的独立缺口。`arch_bootargs_get()` 在 x86_64 由
-`kernel/platform/qemu-virt-x86_64/board.c` 实现，读的是 QEMU fw_cfg 的
+`kernel/arch/x86_64/boards/qemu-virt-x86_64/board.c` 实现，读的是 QEMU fw_cfg 的
 `opt/cmdline`。实测无论用 `-append` 还是
 `-fw_cfg name=opt/cmdline,string=...`，内核都只看到
 `[FW_CFG] cmdline_size=0`、`cmdline=''`，即命令行根本没进内核。后果是 `a20.wx=`
@@ -5616,7 +5616,7 @@ if (base + span >= end)
    * 陷阱入口 `trap.S:107` 的 `csrc sstatus, t1` 清 SIE，所以缺页跑在**中断关闭**
      的上下文里；
    * `arch_cpu_relax()` 在 riscv64 是裸 `nop`（`cpu.h:21`）；
-   * `rv64_ipi_tlb_flush_handler()`（`kernel/platform/qemu-virt-riscv64/board.c:139`）
+   * `rv64_ipi_tlb_flush_handler()`（`kernel/arch/riscv64/boards/qemu-virt-riscv64/board.c:139`）
      **不取任何锁**，只做
      `sfence.vma` + ack ——所以目标 CPU 若能接到软中断，它 ack 时不需要拿页表锁；
    * `rv64_smp_remote_tlb_flush()` 的等待循环注释明确要求「targets must service

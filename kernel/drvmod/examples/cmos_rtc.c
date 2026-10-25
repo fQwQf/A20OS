@@ -268,16 +268,16 @@ static int cmos_rtc_probe(device_t *dev)
 {
     resource_t *index_res = device_get_resource(dev, RES_IOPORT, 0);
     resource_t *data_res = device_get_resource(dev, RES_IOPORT, 1);
-    if (!index_res || !data_res || index_res->end < index_res->start ||
-        data_res->end < data_res->start)
-        return -ENODEV;
+    if (!index_res || index_res->end < index_res->start || index_res->start > 0xffff ||
+        (data_res && (data_res->end < data_res->start || data_res->start > 0xffff)) ||
+        (!data_res && index_res->end - index_res->start < 1)) return -ENODEV;
 
     cmos_rtc_t *rtc = (cmos_rtc_t *)drv_alloc(sizeof(*rtc));
     if (!rtc)
         return -ENOMEM;
     memset(rtc, 0, sizeof(*rtc));
     rtc->index_port = (uint16_t)index_res->start;
-    rtc->data_port = (uint16_t)data_res->start;
+    rtc->data_port = (uint16_t)(data_res ? data_res->start : index_res->start + 1);
 
     uint64_t epoch = 0;
     int century_fallback = 0;
@@ -314,14 +314,13 @@ static int cmos_rtc_remove(device_t *dev)
     return 0;
 }
 
-static const device_id_t cmos_rtc_ids[] = {
-    { .vendor = A20_PLATFORM_VENDOR, .device = A20_DEVICE_CMOS_RTC },
-    { 0 },
-};
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "PNP0B00"}, {0}
+};
 static driver_t cmos_rtc_driver = {
     .name = "cmos-rtc",
-    .id_table = cmos_rtc_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .probe = cmos_rtc_probe,
     .remove = cmos_rtc_remove,

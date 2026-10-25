@@ -32,6 +32,9 @@ DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
 endif
 DRVMOD_CFLAGS += -std=gnu99
+ifeq ($(STORAGE_READ_ONLY),1)
+DRVMOD_CFLAGS += -DCONFIG_STORAGE_READ_ONLY
+endif
 ifeq ($(QEMU_SHARED_SMP),1)
 DRVMOD_CFLAGS += -DCONFIG_SHARED_DEVICE_CALL -DCONFIG_SHARED_MMIO_OWNER=0
 endif
@@ -156,6 +159,18 @@ $(USER_BUILD_DIR)/ahci.a20drv: $(DRVMOD_DIR)/ahci.c \
 
 $(USER_BUILD_DIR)/dw-sdio.a20drv: $(DRVMOD_DIR)/dw_sdio.c \
 		kernel/drivers/block/dw_sdio.c kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/sunxi-mmc.a20drv: $(DRVMOD_DIR)/sunxi_mmc.c \
+		kernel/drivers/block/sunxi_mmc.c kernel/drivers/block/sunxi_mmc_core.c \
+		kernel/include/drivers/block/sunxi_mmc.h kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/sdhci.a20drv: $(DRVMOD_DIR)/sdhci.c \
+		kernel/drivers/block/sdhci.c kernel/drivers/block/sdhci_core.c \
+		kernel/include/drivers/block/sdhci.h kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

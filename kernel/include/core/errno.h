@@ -80,6 +80,8 @@
 #define ECANCELED    125
 #define ERESTARTNOINTR 513
 
+#define EPROBE_DEFER 517   /* internal driver dependency is not ready */
+
 #define ERESTARTSYS  512   /* restart syscall after signal delivery */
 
 

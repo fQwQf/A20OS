@@ -14,7 +14,7 @@ static int timer_backend_ready;
  * is authoritative (QEMU virt publishes 10 MHz, JH7110 24 MHz); fall back to
  * the arch constant when no usable DTB was handed over.  The result is
  * cached so hot paths (TICKS_PER_SEC conversions) stay a single load. */
-uint64_t riscv64_timer_freq(void) {
+uint64_t arch_timer_frequency(void) {
     uint64_t freq = __atomic_load_n(&timer_freq, __ATOMIC_ACQUIRE);
     if (freq)
         return freq;
@@ -31,9 +31,9 @@ void timer_init(void) {
         __atomic_store_n(&timer_backend_ready, 1, __ATOMIC_RELEASE);
         printf("[TIMER] backend=%s freq=%llu Hz\n",
                timer_has_sstc ? "sstc" : "sbi",
-               (unsigned long long)riscv64_timer_freq());
+               (unsigned long long)arch_timer_frequency());
     }
-    timer_set_interval(riscv64_timer_freq() / 100);
+    timer_set_interval(arch_timer_frequency() / 100);
     /* Allow U-mode to read the time CSR directly; the vDSO time path
      * (kernel/mm/vdso.c) depends on this on every hart. */
     uint64_t scounteren;

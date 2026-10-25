@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import struct
 import zlib
+import tomllib
 
 
 def inspect_elf(path):
@@ -55,9 +56,18 @@ def main():
     parser.add_argument('elf', type=Path)
     parser.add_argument('binary', type=Path)
     parser.add_argument('out', type=Path)
+    parser.add_argument('--instance', type=Path)
     args = parser.parse_args()
     try:
         metadata = inspect_elf(args.elf)
+        if args.instance:
+            instance_bytes = args.instance.read_bytes()
+            instance = tomllib.loads(instance_bytes.decode('utf-8'))
+            if instance.get('board') != 'ls2k0300':
+                raise ValueError('handoff instance and packaged board disagree')
+            metadata['instance'] = {'name': instance.get('name', args.instance.stem),
+                                    'sha256': hashlib.sha256(instance_bytes).hexdigest(),
+                                    'kernel': instance.get('kernel', {})}
         if not args.binary.is_file():
             raise ValueError('missing raw kernel binary')
     except (OSError, ValueError, struct.error) as error:

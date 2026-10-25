@@ -237,7 +237,7 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 * 统一 hwapi：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
 * 类 ops vtable：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
 
-静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all` 与 ARMv7-M 默认）把完整驱动集静态链接进内核。PPC64LE 的历史默认值不再适用于当前构建。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
+静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/arch/<arch>/boards/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all` 与 ARMv7-M 默认）把完整驱动集静态链接进内核。PPC64LE 的历史默认值不再适用于当前构建。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
 
 ```text
 trap/MM/time init -> board->early_init() -> driver_core_init()
@@ -289,7 +289,7 @@ Native ABI 完整规范在哪里？见 [docs/native-abi/00-overview.md](native-a
 * 当前问题与路线图：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
 * 源码布局：
   * `kernel/abi/`：两套 ABI
-  * `kernel/arch/` 和 `kernel/platform/`：HAL 与板级初始化
+  * `kernel/arch/` 和 `kernel/arch/<arch>/boards/`：HAL 与板级初始化
   * `kernel/mm/`：VMO/VMAR、页缓存、COW、OOM
   * `kernel/proc/`：任务、调度器、信号、Futex、cgroup
   * `kernel/fs/`：VFS、FAT32、ext4、NTFS、ISO9660、ramfs、伪文件系统

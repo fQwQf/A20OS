@@ -163,8 +163,8 @@ void   dma_sync_for_cpu(void *vaddr, size_t size);
  *   both return NULL.  NULL is the caller's cue to fail probe -- there is no
  *   bounce path here and no handle is ever silently truncated.
  * - dma_alloc_*_coherent(NULL, ...) means "no device to constrain" and uses the
- *   full 64-bit window.  That is the right answer for the legacy arch scan path
- *   (virtio_blk_init()), which has no device_t at all.
+ *   full 64-bit window. Device drivers pass their discovered device so the
+ *   allocation respects its DMA mask.
  * - The free entry points take no device: releasing consults no mask, and the
  *   dma_handle is what pairs an allocation with its release.  Because
  *   dma_alloc_coherent() may hand back either allocator's block and the release

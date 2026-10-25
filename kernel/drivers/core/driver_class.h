@@ -36,17 +36,27 @@ typedef struct class_device {
     spinlock_t state_lock;
     volatile unsigned active_calls;
     volatile int online;
+    void (*offline)(struct class_device *, void *);
+    void *offline_data;
 } class_device_t;
 
 int class_device_publish(struct device *dev);
 void class_device_unpublish(struct device *dev);
 class_device_t *class_device_get_by_name(const char *name);
 class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index);
+/* Stable publication index, not the rank among currently online devices. */
+class_device_t *class_device_get_by_index(uint32_t class_type, unsigned index);
 class_device_t *class_device_get_nth(unsigned index);
 void class_device_get(class_device_t *cdev);
 void class_device_put(class_device_t *cdev);
 class_device_t *class_device_ref_for_device(const struct device *dev);
 int class_device_call_begin(class_device_t *cdev);
+/* Caller holds a cdev reference. Success pins this binding until call_end;
+ * only then may the returned, module-owned operation table be accessed. */
+int class_device_ops_begin(class_device_t *cdev, uint32_t class_type, const void **ops);
+/* One canonical class adapter owns this hook. It runs outside class locks
+ * after publication is revoked. Replacing the same hook may change its slot. */
+int class_device_set_offline(class_device_t *, void (*callback)(class_device_t *, void *), void *);
 void class_device_call_end(class_device_t *cdev);
 int class_device_has_devnode(const class_device_t *cdev);
 uint8_t class_device_dirent_type(const class_device_t *cdev);
@@ -208,6 +218,18 @@ typedef struct net_dev_ops {
     uint32_t       (*caps)(struct device *dev);
 } net_dev_ops_t;
 
+/* Binding references are stable across unplug. These adapters acquire an
+ * online call guard for each operation and never cache a module vtable. */
+int class_net_ready(class_device_t *cdev);
+int class_net_send(class_device_t *cdev, const void *packet, size_t length);
+int class_net_recv(class_device_t *cdev, void *packet, size_t length);
+int class_net_send_sg(class_device_t *cdev, const net_iovec_t *iov, unsigned count);
+void class_net_poll(class_device_t *cdev);
+uint32_t class_net_caps(class_device_t *cdev);
+int class_net_link_up(class_device_t *cdev);
+int class_net_rx_irq_driven(class_device_t *cdev);
+int class_net_copy_mac(class_device_t *cdev, uint8_t out[6]);
+
 /* net ioctl requests */
 #define NET_IOCTL_GET_MAC    0x2001
 #define NET_IOCTL_SET_MAC    0x2002
@@ -243,6 +265,11 @@ typedef struct input_dev_ops {
  *
  * Used by: framebuffer / graphics subsystem
  * ============================================================ */
+typedef struct gpu_scanout_layout {
+    uint32_t stride;
+    uint32_t red_mask, green_mask, blue_mask, reserved_mask;
+} gpu_scanout_layout_t;
+
 typedef struct gpu_dev_ops {
     int     (*get_info)(struct device *dev, uint32_t *width, uint32_t *height, uint32_t *bpp);
     int     (*get_fb)(struct device *dev, uintptr_t *fb_paddr, size_t *fb_size);
@@ -306,6 +333,8 @@ typedef struct gpu_dev_ops {
                                uint32_t height);
     int     (*submit_3d)(struct device *dev, uint32_t ctx_id,
                          const void *cmdbuf, size_t len);
+    /* Optional: firmware scanouts may have padded pitch and RGB/BGR masks. */
+    int (*get_layout)(struct device *dev, gpu_scanout_layout_t *layout);
 } gpu_dev_ops_t;
 
 typedef struct audio_dev_ops audio_dev_ops_t;

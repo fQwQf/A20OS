@@ -397,7 +397,8 @@ static int riscv_iommu_probe(device_t *dev)
     resource_t *bar = pci_get_bar_resource(dev, 0);
     if (!bar || bar->type != RES_MMIO || bar->start >= bar->end)
         return -1;
-    g_iommu_base = bar->start;
+    g_iommu_base = (uintptr_t)pci_map_bar(dev, 0);
+    if (!g_iommu_base) return -EIO;
     kinfo("[IOMMU] riscv-iommu: BAR0=0x%lx..0x%lx\n",
           (unsigned long)bar->start, (unsigned long)bar->end);
 

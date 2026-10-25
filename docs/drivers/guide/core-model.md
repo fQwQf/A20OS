@@ -4,11 +4,11 @@
 
 ## 三个核心对象
 
-`device_t` 代表一个硬件实例，由总线或板级枚举器创建。创建者拥有 `device_t` 本身、设备名、资源数组和 `plat_data` 的存储，这些内存必须活到 `device_unregister()` 完成。不要在枚举函数栈上分配它们。
+`device_t` 代表一个硬件实例，由总线或板级枚举器创建。创建者拥有设备名、资源数组和 `plat_data` 的存储。注册表、父子关系、依赖和进度快照会持有设备引用；动态对象通过 `release()` 在最终 `device_put()` 时回收，不能在 `device_unregister()` 返回时直接释放。不要在枚举函数栈上分配设备描述。
 
 `driver_t` 代表一种驱动实现，通常是一个文件内的静态对象。一份驱动可以绑定多个设备。`class_type` 和 `class_ops` 向块层、网络栈、输入层、显示层或音频层提供稳定接口。
 
-`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI、VirtIO-MMIO 和 platform bus 已有公共实现。固定设备由板级文件填写 `platform_device_t` 的 ID 与资源并调用 `platform_device_register()`，不应再为每个设备定义私有 bus。
+`bus_type_t` 决定某个 `device_t` 是否匹配某个 `driver_t`。PCI、VirtIO-MMIO 和 platform bus 已有公共实现。固件设备通过统一 `fw_node_t` 枚举器发布；没有 DT/ACPI 的固定硬件使用静态 provider。原生总线负责自身子设备，不应为每个设备定义私有 bus。启动与完整发现契约见 [启动模型](../../dev/boot-model.md)。
 
 ## 四层边界
 
@@ -21,7 +21,7 @@
 | 总线层 | 枚举 function、读取 ID、BAR sizing/assignment、资源发布和第一阶段 ID 匹配 | 控制器复位、命令队列和 class 语义 |
 | 协议驱动层 | 通过公共 PCI/MMIO/DMA/IRQ API 实现寄存器协议、probe/remove 和 class ops | 硬编码 ECAM、物理 BAR 窗口、页表偏移或 CPU 指令 |
 
-因此 NVMe 和 HDA 属于 PCI 协议驱动：源码不应由 `CONFIG_X86_64` 包围。它们能否在某个平台实际工作，取决于该平台是否已经提供可访问的 ECAM、BAR 资源、DMA 地址转换和必要的 cache 一致性。PC Speaker 直接依赖 x86 port I/O 与 PIT，保留架构门禁是正确的。
+因此 NVMe 和 HDA 属于 PCI 协议驱动：源码不应由 `CONFIG_X86_64` 包围。它们能否在某个平台实际工作，取决于该平台是否已经提供可访问的 ECAM、BAR 资源、DMA 地址转换和必要的 cache 一致性。PC Speaker 消费端口 I/O 能力和 PIT 协议；端口指令由架构后端实现，设备可用性由 ACPI 或静态硬件描述决定。
 
 “架构无关”不等于“所有平台已可运行”。驱动在某架构成功编译，只证明没有静态架构依赖；必须在该平台观察到枚举、绑定和真实 DMA/I/O 完成后，才能标记运行验证。
 
@@ -60,7 +60,7 @@ ID 表以 `{ 0 }` 结束。PCI 驱动对不限制的子系统字段必须写 `VE
 
 ### `resource_t`
 
-资源类型包括 `RES_IRQ`、`RES_MMIO`、`RES_DMA`、`RES_MEM`。`start` 和 `end` 都包含在范围内，所以长度计算为：
+资源类型包括 `RES_IRQ`、`RES_MMIO`、`RES_IOPORT`、`RES_DMA`、`RES_MEM`。`RES_MMIO` 始终存 CPU 物理地址，通过 `device_map_mmio()`、`device_map_resource()` 或 `pci_map_bar()` 取得映射；禁止直接解引用 `start`。`start` 和 `end` 都包含在范围内，所以长度计算为：
 
 ```c
 uint64_t size = res->end - res->start + 1;
@@ -70,7 +70,7 @@ uint64_t size = res->end - res->start + 1;
 
 ### `driver_t`
 
-`probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
+platform 驱动通过 `firmware_ids` 匹配 DT compatible、ACPI HID/CID 或静态 hardware-id，匹配项保存在 `firmware_match`；总线私有的数字 ID 保存在 `matched_id`。`probe`、`remove`、`suspend`、`resume` 是生命周期回调。`class_ops` 的真实类型由 `class_type` 决定。内建驱动的 `module` 必须为 `NULL`，该字段由核心保留，不属于当前驱动开发接口。
 
 匹配分两阶段完成：总线 `bus_type_t.match(dev, drv)` 先按 transport identity 匹配并设置 `dev->matched_id`；可选的 `driver_t.match(dev)` 再按协议字段缩小范围。例如 HDA 检查 `04:03:00`，NVMe 检查 `01:08:02`。第二阶段只能读取已经枚举的身份信息，不得访问设备寄存器、分配 BAR/DMA 或改变硬件；拒绝时核心清除 `matched_id`，不会调用 probe。
 
@@ -112,7 +112,7 @@ UNINIT --match--> probe
 probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 ```
 
-核心只会清空指针，不知道驱动已经申请了哪些硬件资源。因此 probe 失败前的所有回滚由驱动负责。`remove` 在 driver registry spinlock 之外调用，可以释放 IRQ/DMA，也可以执行有界等待，但仍应尽快停止设备。
+核心在 probe 失败和 remove 后逆序执行受管资源动作并清理依赖；MMIO 映射 helper 自动登记回收。驱动必须回滚未托管的分配，停止 DMA 并撤销 IRQ。返回 `-EPROBE_DEFER` 表示 provider 尚未就绪；使用 `device_dependency_get()` 建立依赖后，核心负责有界重试及 provider 撤销时先解除 consumer 绑定。`remove` 在 driver registry spinlock 之外调用，可以释放 IRQ/DMA，也可以执行有界等待，但仍应尽快停止设备。
 
 ### 推荐 probe 顺序
 
@@ -133,7 +133,7 @@ probe < 0 -> core 清空 drv、drv_priv，状态回到 UNINIT
 2. 屏蔽设备中断，再调用 `free_irq()`。
 3. 停止队列/DMA；必要时等待当前请求有界结束。
 4. 从 display 等类级 registry 注销。
-5. 释放 DMA、映射和普通内存。
+5. 释放未托管的 DMA 和普通内存；已登记的映射及动作由核心回收。
 6. 清空 `dev->drv_priv` 和实例槽。核心随后再次清空绑定字段，因此清理必须幂等。
 
 > 不要在枚举函数栈上创建 `device_t` 或 `resource_t`；不要从 `kernel_main` 手动调用 `probe`；不要把所有错误返回裸 `-1`；也不要在同一平台已经接入总线模型后，又通过 `arch_virtio_*_probe()` 扫描 PCI 并重新分配 BAR。这些做法都会破坏已绑定驱动的 MMIO/notify 地址，导致设备 status 归零、queue 停止。
@@ -199,7 +199,9 @@ static int example_probe(device_t *dev) {
     example_priv_t *p = &g_example;
     memset(p, 0, sizeof(*p));
     spin_init(&p->lock);
-    p->regs = (uintptr_t)bar0->start;
+    p->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!p->regs)
+        return -ENODEV;
     /* reset, identify, allocate DMA, initialize rings */
     dev->drv_priv = p;
     p->ready = 1;
@@ -255,11 +257,11 @@ DRIVER_REGISTER(example_driver);
 
 每个硬件 function 只能由一个 bus enumerator 创建并配置一次。路径是：
 
-`board.enumerate_devices -> bus enumerator -> device_register -> driver probe`
+`firmware_device_enumerate / board.enumerate_buses -> device_register -> driver probe`
 
-class 消费者只能通过 `device_find_by_class()` 或类适配层使用已绑定设备。禁止在 mount、network init、devfs open 或兼容 getter 中再次调用架构私有扫描器。
+class 消费者只能通过 `device_find_get_by_class()` 或类适配层使用已绑定设备。禁止在 mount、network init、devfs open 或兼容 getter 中再次调用架构私有扫描器。
 
-尤其禁止“统一 PCI 枚举已完成，但 `arch_virtio_*_probe()` 又扫描 PCI 并重新分配 BAR”的双路径。重新写 BAR 会使已绑定驱动保存的 MMIO/notify 地址失效，表现为设备 status 归零、queue 停止。arch probe hook 只允许服务尚未接入 bus model 的平台；同一平台一旦由 bus model 枚举，该 hook 必须删除或不可达。
+尤其禁止“统一 PCI 枚举已完成，但 `arch_virtio_*_probe()` 又扫描 PCI 并重新分配 BAR”的双路径。重新写 BAR 会使已绑定驱动保存的 MMIO/notify 地址失效，表现为设备 status 归零、queue 停止。当前活跃平台已移除这些 arch probe hook，设备统一由固件与原生总线枚举器发布。
 
 ## 模块化驱动注册
 

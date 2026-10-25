@@ -18,6 +18,7 @@ A20OS 使用并参考了许多开源项目与公开标准。这里集中记录�
 |------|------|--------|------|
 | [musl](https://musl.libc.org/) | Linux ABI 用户态 libc | MIT | `user/external/musl` |
 | [mlibc](https://github.com/managarm/mlibc) | Native ABI libc 基础 | MIT | `user/external/mlibc` |
+| [uACPI](https://github.com/uACPI/uACPI) | ACPI 表、AML namespace 与电源管理解释器 | MIT | `kernel/external/uacpi` |
 | [lwIP](https://savannah.nongnu.org/projects/lwip/) | 内核网络协议栈（`NO_SYS=1`） | BSD-3-Clause | `kernel/external/lwip` |
 | [mksh](http://www.mirbsd.org/mksh.htm) | 默认 shell | 逐文件混合：MirBSD/MirOS 条款、ISC、CC0 OR MirOS，并含 Unicode notice | `user/external/mksh-cvs2git` |
 | [sbase](https://core.suckless.org/sbase/) | 基础工具（`ls`、`cat` 等） | MIT | `user/external/sbase` |
@@ -43,13 +44,13 @@ mksh 不能归并为单一 MirBSD 许可证：多数源文件携带 MirBSD/MirOS
 | [Uinxed-Kernel](https://github.com/ViudiraTech/Uinxed-Kernel) | 当前源码注释称 Apache-2.0；精确 revision 未记录 | 当前源码注释归因的 USB BOT/SCSI 传输与 recovery 流程、ISO 9660 名字转小写/去 `;1` 策略 | USB Mass Storage、ISO 9660 |
 | [RocketOS](https://gitlab.eduxiji.net/T202510213995926/oskernel2025-rocketos) | **未核实**；当前 A20OS 源码注释称 MIT | VFS 设计启发；VisionFive 2 与 LS2K1000 的 board/GMAC bring-up 参考 | VFS、两个 board 文件与两个 GMAC 驱动；注释没有界定逐行来源 |
 
-RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kernel/platform/{visionfive2,ls2k1000}/board.c` 和 `kernel/drivers/net/{starfive_gmac,ls2k_gmac}.c` 写有 RocketOS porting/bring-up reference，但仓库没有记录所参考的精确 RocketOS revision、该 revision 的许可证文本、逐文件来源对照或单独授权。在取得这些证据前，不能把注释中的“MIT”、“inspired”或“reference”升级为已验证许可证，也不能断言相关文件未包含复制或改写代码。应对精确 revision 做 provenance/license 审计，或取得覆盖相关代码的单独授权。
+RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kernel/arch/<arch>/boards/{visionfive2,ls2k1000}/board.c` 和 `kernel/drivers/net/{starfive_gmac,ls2k_gmac}.c` 写有 RocketOS porting/bring-up reference，但仓库没有记录所参考的精确 RocketOS revision、该 revision 的许可证文本、逐文件来源对照或单独授权。在取得这些证据前，不能把注释中的“MIT”、“inspired”或“reference”升级为已验证许可证，也不能断言相关文件未包含复制或改写代码。应对精确 revision 做 provenance/license 审计，或取得覆盖相关代码的单独授权。
 
 两块物理板 bring-up 的硬件细节（JH7110 SYS_CRG 时钟偏移、YT8531 PHY、LS2K1000 GMAC0 基址 0x40040000 与 PCI 配置窗口 0xfe00001800 等）也参考了 RocketOS 的 StarFive `drivers/net/starfive/` 与 la2000 `drivers/net/la2000/` 驱动，并在 `docs/platforms/physical-boards.md` 中逐项标注"未核实"；该文档不等同于来源对照或授权记录。
 
 ### 2.1 新增板级移植的硬件事实来源
 
-`kernel/platform/{licheerv-nano,milk-v-duo,rk3328,sun50i-h616,x86_64-pc}/` 下各
+`kernel/arch/<arch>/boards/{licheerv-nano,milk-v-duo,rk3328,sun50i-h616,x86_64-pc}/` 下各
 `<board>_platform.h` 中的每一个地址、尺寸、中断号与时钟频率，都逐项转录自上游
 公开设备树与文档，并在文件内就近标注了来源文件与 commit：
 

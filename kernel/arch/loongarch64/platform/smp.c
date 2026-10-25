@@ -20,7 +20,7 @@
 #define IPI_TLB_FLUSH          (1U << IPI_TLB_FLUSH_VECTOR)
 
 /* Default IPI TLB-flush handler.  Boards that implement generation-based
- * shootdowns (see kernel/platform/qemu-virt-loongarch64/board.c) provide a
+ * shootdowns (see kernel/arch/loongarch64/boards/qemu-virt-loongarch64/board.c) provide a
  * strong override; a board that does not enable SMP uses this local
  * invtlb, which keeps the arch build independent of any single board. */
 __attribute__((weak))

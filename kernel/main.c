@@ -1,4 +1,10 @@
 #include "core/stdio.h"
+#include "boot/context.h"
+#include "firmware/device.h"
+#ifdef CONFIG_ACPI
+#include "firmware/acpi.h"
+extern void acpi_os_start_worker(void);
+#endif
 #include "core/bootargs.h"
 #include "hyp/hyp.h"
 #include "drivers/char/uart.h"
@@ -58,6 +64,9 @@ void init_kthread(void);
 
 /* Architecture-owned bootarg diagnostics are a no-op unless an architecture
  * provides a real implementation. */
+__attribute__((weak)) void arch_run_platform_selftests(void) {
+}
+
 __attribute__((weak)) void arch_run_bootarg_selftests(void) {
 }
 
@@ -99,7 +108,13 @@ static void bringup_smoke_test(void) {
 }
 #endif
 
+static void boot_advance(enum boot_phase expected, enum boot_phase next) {
+    if (boot_context_advance(expected, next) < 0)
+        panic("boot: invalid initialization phase transition");
+}
+
 void kernel_main(void) {
+    arch_boot_context_init();
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     extern void a20_registry_init(void);
 #endif
@@ -132,7 +147,9 @@ void kernel_main(void) {
     printf("[INIT] Timer initialized\n");
     timekeeping_init();
     printf("[INIT] Timekeeping initialized\n");
+    boot_advance(BOOT_PHASE_HANDOFF, BOOT_PHASE_EARLY);
     mm_init();
+    boot_advance(BOOT_PHASE_EARLY, BOOT_PHASE_MEMORY);
     printf("[INIT] Memory initialized\n");
     /* Split the boot megapage map into per-section kernel permissions
      * (text ROX / rodata RO / data RW+NX, direct map NX).  Must run before
@@ -168,11 +185,33 @@ void kernel_main(void) {
     printf("[INIT] Driver core initialized\n");
     usb_core_init();
     printf("[INIT] USB core initialized\n");
-    if (current_board && current_board->enumerate_devices) {
+#ifdef CONFIG_ACPI
+    fw_node_t acpi_root = {0};
+    const acpi_context_t *acpi = arch_acpi_context();
+    if (acpi) {
+        if (acpi_namespace_initialize(acpi, &acpi_root) < 0)
+            panic("boot: ACPI namespace initialization failed");
+        if (!fw_node_valid(&boot_context_get()->hardware_root) &&
+            boot_context_set_hardware_root(&acpi_root) < 0)
+            panic("boot: cannot publish ACPI hardware root");
+    }
+#endif
+    const fw_node_t *hardware = &boot_context_get()->hardware_root;
+    if (fw_node_valid(hardware)) {
+        if (firmware_device_enumerate(hardware) < 0)
+            panic("boot: firmware device enumeration failed");
+    } else if (current_board && current_board->enumerate_devices) {
         current_board->enumerate_devices();
-        printf("[INIT] Board devices enumerated (%s)\n",
+        printf("[INIT] Static board fallback devices enumerated (%s)\n",
                current_board->name ? current_board->name : "unknown");
     }
+    if (current_board && current_board->enumerate_buses)
+        current_board->enumerate_buses();
+    if (current_board && current_board->configure_devices)
+        current_board->configure_devices();
+    if (boot_framebuffer_enumerate() < 0)
+        panic("boot: invalid framebuffer discovery");
+    boot_advance(BOOT_PHASE_MEMORY, BOOT_PHASE_DEVICES);
     driver_probe_all();
     printf("[INIT] Drivers probed\n");
     usb_core_scan();
@@ -182,10 +221,7 @@ void kernel_main(void) {
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
 #endif
-#if defined(CONFIG_PCI_PIRQ_TEST) && defined(CONFIG_X86_64)
-    extern void x86_64_pci_pirq_selftest(void);
-    x86_64_pci_pirq_selftest();
-#endif
+    arch_run_platform_selftests();
     /* Runs after driver_probe_all() so the IRQ registry already holds whatever
      * the board claimed, and before vfs_init(): this only touches the driver
      * core and the IRQ table. */
@@ -208,6 +244,10 @@ void kernel_main(void) {
 
 #if defined(CONFIG_STORAGE_READ_ONLY)
     mount_read_only_storage();
+#elif defined(CONFIG_RAMFS_USER)
+    /* The boot card contains firmware payloads, not the RAM shell's /bin.
+     * Keep embedded executables visible; data disks can be mounted explicitly. */
+    printf("[INIT] RAMFS userspace: keeping embedded /bin\n");
 #elif defined(BRINGUP)
     printf("[INIT] BRINGUP mode: no block devices\n");
 #else
@@ -215,6 +255,9 @@ void kernel_main(void) {
 #endif
 
     proc_init();
+#ifdef CONFIG_ACPI
+    acpi_os_start_worker();
+#endif
     printf("[INIT] Process manager initialized\n");
 #ifdef CONFIG_VMO_PAGE_TEST
     vmo_page_selftest_run();
@@ -229,6 +272,7 @@ void kernel_main(void) {
     loop_init();
 
 #if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
+    boot_advance(BOOT_PHASE_DEVICES, BOOT_PHASE_READY);
     printf("[INIT] System ready (bringup, no userspace)\n\n");
     hyp_boot_selftest();
     smp_selftest_boot();
@@ -255,6 +299,7 @@ void kernel_main(void) {
     }
 #endif
 
+    boot_advance(BOOT_PHASE_DEVICES, BOOT_PHASE_READY);
     printf("[INIT] System ready\n\n");
     printf("\033[1;36m");
     printf("%s\n",

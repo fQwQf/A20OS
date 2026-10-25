@@ -13,7 +13,14 @@
 | 没有 UF2 卷时恢复原厂 loader | USB 数据线、短接硬件 BOOT 焊盘与 3.3 V 的导线、官方 DevCube |
 | SRAM 调试 | 外置 JTAG 调试器与对应线材；不是普通 USB-C 线 |
 
-软件依赖是 Python 3、`riscv64-unknown-elf-gcc`、objcopy。探针构建本身不下载或链接厂商 SDK。
+Linux 主机需要 Python 3.11+、GNU make、`riscv64-unknown-elf-gcc` 和同前缀 objcopy。Debian/Ubuntu 安装：
+
+```sh
+sudo apt-get install build-essential git python3 python3-venv \
+  gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf
+```
+
+探针由 C/汇编构建，不下载或链接厂商 SDK，也不编译 Rust 内核。仅使用外置 JTAG 路径时还需支持 BL702 RISC-V 调试的 OpenOCD；本页后文给出配置与加载命令。下列命令均在 A20OS 源码根目录执行，首次使用先运行 `git submodule update --init --recursive`。
 
 ## 一、构建与核对产物
 

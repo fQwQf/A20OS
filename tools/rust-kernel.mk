@@ -4,7 +4,7 @@
 RUSTC ?= rustc
 CARGO ?= cargo
 
-RUST_OPT_FLAG := $(firstword $(filter -O0 -O1 -O2 -O3 -Os,$(OPT)))
+RUST_OPT_FLAG := $(firstword $(filter -O0 -O1 -O2 -O3 -Os,$(if $(filter mcu,$(PROFILE)),$(TRIM_PROFILE_MCU_OPT),$(OPT))))
 RUST_OPT_LEVEL := $(if $(filter -Os,$(RUST_OPT_FLAG)),s,$(patsubst -O%,%,$(RUST_OPT_FLAG)))
 RUST_DEBUG_INFO := $(if $(findstring -g,$(OPT)),2,0)
 
@@ -32,14 +32,15 @@ RUST_RV32_OBJECT_FLAGS := $(if $(filter riscv32,$(ARCH)),-Z unstable-options --s
 RUST_AARCH64_TARGET := aarch64-unknown-none-softfloat
 RUST_AARCH64_CORE_CACHE_ROOT ?= $(HOME)/.cache/a20os/rust-target-core
 # Source-bound Rust modules are mandatory where their C adapters are compiled.
+RUST_VFS_LIFECYCLE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/vfs.c,$(KERNEL_SRC)),rust,$(if $(and $(filter $(KERNEL_DIR)/fs/file.c,$(KERNEL_SRC)),$(filter 1,$(NATIVE_FLAT_FILES))),rust,))
 RUST_UXFS_VNODE_IDENTITY_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
 RUST_UXFS_RPC_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
 RUST_UXFS_OPS_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
 RUST_UXFS_LIFETIME_STATE_ACTIVE := $(if $(filter $(KERNEL_DIR)/fs/uxfs/uxfs.c,$(KERNEL_SRC)),rust,)
 RUST_AARCH64_SELECTED := $(filter rust, $(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(DONTUNMAP_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(USER_COPY_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(PID_IMPL) $(VMA_IMPL) $(VMO_PAGE_IMPL) $(VMO_LIFECYCLE_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(SYSV_SEM_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL) $(POSIX_MQ_IMPL) $(SYSV_MSG_IMPL) $(SYSV_SHM_IMPL) $(USERFAULTFD_STATE_IMPL) $(FUTEX_WAIT_IMPL) $(CHANNEL_SEND_IMPL))
-RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(RUST_UXFS_VNODE_IDENTITY_ACTIVE) $(RUST_UXFS_RPC_STATE_ACTIVE) $(RUST_UXFS_OPS_STATE_ACTIVE) $(RUST_UXFS_LIFETIME_STATE_ACTIVE))
+RUST_AARCH64_SELECTED += $(filter rust,$(RUST_VFS_LIFECYCLE_ACTIVE) $(RUST_FS_STATE_ACTIVE) $(RUST_SIGNAL_CORE_ACTIVE) $(RUST_UXFS_VNODE_IDENTITY_ACTIVE) $(RUST_UXFS_RPC_STATE_ACTIVE) $(RUST_UXFS_OPS_STATE_ACTIVE) $(RUST_UXFS_LIFETIME_STATE_ACTIVE))
 RUST_AARCH64_SELECTED := $(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL))
-RUST_AARCH64_SELECTED += $(filter rust,$(VFS_LIFECYCLE_IMPL))
+RUST_AARCH64_SELECTED += $(filter rust,$(RUST_VFS_LIFECYCLE_ACTIVE))
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(RUST_AARCH64_SELECTED)),)
 RUST_AARCH64_RUSTSRC_DIR := $(shell $(RUSTC) --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library
@@ -172,7 +173,7 @@ endif
 ifneq ($(filter rust,$(NETFILTER_REWRITE_IMPL) $(TASK_OBJECTS_IMPL) $(CHANNEL_RECV_TXN_IMPL) $(HANDLE_SLOT_TRANSITIONS_IMPL) $(PROCESS_VM_IMPL) $(PARK_WAIT_IMPL) $(WAIT_TIMER_IMPL) $(WAIT_QUEUE_IMPL) $(RW_MUTEX_IMPL) $(MUTEX_STATE_IMPL) $(COMPLETION_IMPL) $(TASK_LIFECYCLE_IMPL) $(TASK_EXIT_IMPL) $(WAIT4_IMPL) $(TASK_PLACEMENT_IMPL) $(EEVDF_MATH_IMPL) $(RT_SCHED_IMPL) $(TASK_CONSTRUCTION_IMPL) $(VMO_PAGER_IMPL) $(DRIVER_REGISTRY_IMPL) $(VIRTIO_BLK_CORE_IMPL) $(ENVELOPE_POLICY_IMPL) $(FDTABLE_STATE_IMPL) $(EVENTPOLL_STATE_IMPL) $(EVENT_DESCRIPTOR_STATE_IMPL) $(LINUX_SCM_RIGHTS_IMPL) $(LINUX_MMSG_TXN_IMPL) $(NET_SOCKET_QUEUE_IMPL) $(EXT4_EXTENT_TXN_IMPL) $(KEYRING_IMPL)),)
 $(error Rust kernel slices require OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
-ifeq ($(filter rust,$(VFS_LIFECYCLE_IMPL)),rust)
+ifeq ($(filter rust,$(RUST_VFS_LIFECYCLE_ACTIVE)),rust)
 ifeq ($(strip $(RUST_OPT_FLAG)),)
 $(error Rust VFS lifecycle requires OPT to include one of -O0/-O1/-O2/-O3/-Os)
 endif
@@ -3969,8 +3970,9 @@ endif
 RUST_VFS_LIFECYCLE_SRC := kernel/fs/vfs/vfs_lifecycle.rs
 RUST_VFS_LIFECYCLE_SHUTDOWN_SRC := kernel/fs/vfs/shutdown_state.rs
 RUST_VFS_LIFECYCLE_VFILE_SRC := kernel/fs/vfs/vfile_lifecycle.rs
-RUST_VFS_LIFECYCLE_TARGET := $(RUST_EXT4_EXTENT_TXN_TARGET)
+RUST_VFS_LIFECYCLE_TARGET := $(if $(filter armv7m,$(ARCH)),thumbv7m-none-eabi,$(RUST_EXT4_EXTENT_TXN_TARGET))
 RUST_VFS_LIFECYCLE_OBJECT := $(BUILD_DIR)/rust/vfs_lifecycle.o
+ifneq ($(RUST_VFS_LIFECYCLE_ACTIVE),)
 ifeq ($(strip $(RUST_VFS_LIFECYCLE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH))
 endif
@@ -3984,6 +3986,7 @@ $(RUST_VFS_LIFECYCLE_FLAGS_STAMP): FORCE_RUST_VFS_LIFECYCLE_FLAGS
 $(RUST_VFS_LIFECYCLE_OBJECT): $(RUST_VFS_LIFECYCLE_SRC) $(RUST_VFS_LIFECYCLE_SHUTDOWN_SRC) $(RUST_VFS_LIFECYCLE_VFILE_SRC) kernel/include/fs/vfs/shutdown.h tools/rust-kernel.mk $(RUST_VFS_LIFECYCLE_FLAGS_STAMP) $(RUST_TARGET_CORE_READY)
 	@mkdir -p $(dir $@)
 	$(RUST_TARGET_BOOTSTRAP) $(RUSTC) --edition=2021 --crate-type lib --emit=obj --target $(RUST_VFS_LIFECYCLE_TARGET) $(RUST_TARGET_OBJECT_FLAGS) -C panic=abort -C opt-level=$(RUST_OPT_LEVEL) -C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 -C relocation-model=static $< -o $@
+endif
 
 # UXFS_VNODE_IDENTITY owns the canonical (sb, ino) -> vnode decisions:
 # duplicate resolution, entry removal, per-superblock clearing and the rotating
@@ -4149,9 +4152,7 @@ RUST_BLOCK_CACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_BLOCK_CACHE_STATE_TARGET := $(RUST_BLOCK_CACHE_STATE_TARGET_$(ARCH))
 RUST_BLOCK_CACHE_STATE_OBJECT := $(BUILD_DIR)/rust/block_cache_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/block_cache.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/block_cache.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_BLOCK_CACHE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4173,6 +4174,7 @@ $(RUST_BLOCK_CACHE_STATE_OBJECT): $(RUST_BLOCK_CACHE_STATE_SRC) kernel/include/f
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # PAGE_CACHE_STATE owns the page cache's structural state model: hash, global
 # LRU, per-vnode mapping list, dirty lists, free stack, page references and
@@ -4188,9 +4190,7 @@ RUST_PAGE_CACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_PAGE_CACHE_STATE_TARGET := $(RUST_PAGE_CACHE_STATE_TARGET_$(ARCH))
 RUST_PAGE_CACHE_STATE_OBJECT := $(BUILD_DIR)/rust/page_cache_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/page_cache.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/page_cache.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/page_cache.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_PAGE_CACHE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4212,6 +4212,7 @@ $(RUST_PAGE_CACHE_STATE_OBJECT): $(RUST_PAGE_CACHE_STATE_SRC) kernel/include/fs/
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_DCACHE_STATE owns the dentry cache slot table's state transitions: the
 # name hash, hash-chain link/unlink, LRU, free list, exact-match search with
@@ -4228,9 +4229,7 @@ RUST_VFS_DCACHE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_DCACHE_STATE_TARGET := $(RUST_VFS_DCACHE_STATE_TARGET_$(ARCH))
 RUST_VFS_DCACHE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_dcache_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/dcache.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/dcache.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/dcache.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_DCACHE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4252,6 +4251,7 @@ $(RUST_VFS_DCACHE_STATE_OBJECT): $(RUST_VFS_DCACHE_STATE_SRC) tools/rust-kernel.
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # PROCFS_STATE owns the procfs read/seek offset state and the getdents64
 # directory cursor: the dirent layout, the byte budget, the cursor advance and
@@ -4268,9 +4268,7 @@ RUST_PROCFS_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_PROCFS_STATE_TARGET := $(RUST_PROCFS_STATE_TARGET_$(ARCH))
 RUST_PROCFS_STATE_OBJECT := $(BUILD_DIR)/rust/procfs_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/procfs/procfs.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_PROCFS_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4292,6 +4290,7 @@ $(RUST_PROCFS_STATE_OBJECT): $(RUST_PROCFS_STATE_SRC) kernel/include/fs/procfs_s
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # PROCFS_NODE_STATE owns the procfs node tables and content plan: the global
 # name table, the parent-scoped node table (with the task/fdtable probes routed
@@ -4309,9 +4308,7 @@ RUST_PROCFS_NODE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_PROCFS_NODE_STATE_TARGET := $(RUST_PROCFS_NODE_STATE_TARGET_$(ARCH))
 RUST_PROCFS_NODE_STATE_OBJECT := $(BUILD_DIR)/rust/procfs_node_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/procfs/procfs.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/procfs/procfs.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_PROCFS_NODE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4333,6 +4330,7 @@ $(RUST_PROCFS_NODE_STATE_OBJECT): $(RUST_PROCFS_NODE_STATE_SRC) kernel/include/f
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_PATH_STATE owns the path-string layer every path-taking syscall funnels
 # through: the "."/".."/"//" collapse with its overflow rule, the same collapse
@@ -4349,9 +4347,7 @@ RUST_VFS_PATH_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_PATH_STATE_TARGET := $(RUST_VFS_PATH_STATE_TARGET_$(ARCH))
 RUST_VFS_PATH_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_path_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/path.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/path.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/path.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_PATH_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4373,6 +4369,7 @@ $(RUST_VFS_PATH_STATE_OBJECT): $(RUST_VFS_PATH_STATE_SRC) kernel/include/fs/vfs/
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_PATH_WALK_STATE owns the path-resolution traversal: component iteration,
 # the `.`/`..` and mount-crossing handling, symlink following with its RESOLVE_*
@@ -4391,9 +4388,7 @@ RUST_VFS_PATH_WALK_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_PATH_WALK_STATE_TARGET := $(RUST_VFS_PATH_WALK_STATE_TARGET_$(ARCH))
 RUST_VFS_PATH_WALK_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_path_walk_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/path_resolution.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/path_resolution.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/path_resolution.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_PATH_WALK_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4415,6 +4410,7 @@ $(RUST_VFS_PATH_WALK_STATE_OBJECT): $(RUST_VFS_PATH_WALK_STATE_SRC) kernel/inclu
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_MUTATE_STATE owns the decision order of unlink/rmdir/rename: flag
 # validation, operand resolution through the mount table and the process root,
@@ -4433,9 +4429,7 @@ RUST_VFS_MUTATE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_MUTATE_STATE_TARGET := $(RUST_VFS_MUTATE_STATE_TARGET_$(ARCH))
 RUST_VFS_MUTATE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mutate_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_MUTATE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4457,6 +4451,7 @@ $(RUST_VFS_MUTATE_STATE_OBJECT): $(RUST_VFS_MUTATE_STATE_SRC) kernel/include/fs/
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_MNTNS_STATE owns the mount-namespace lifecycle state: the in-flight
 # admission counters, the shutdown flag, the mutation/fileop admission
@@ -4473,9 +4468,7 @@ RUST_VFS_MNTNS_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_MNTNS_STATE_TARGET := $(RUST_VFS_MNTNS_STATE_TARGET_$(ARCH))
 RUST_VFS_MNTNS_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mntns_lifecycle.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/mntns.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/mntns.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/mntns.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_MNTNS_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4497,6 +4490,7 @@ $(RUST_VFS_MNTNS_STATE_OBJECT): $(RUST_VFS_MNTNS_STATE_SRC) kernel/include/fs/vf
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # VFS_MOUNT_STATE owns the mount-table orchestration: umount(2) path matching
 # with the busy-rule order and MNT_DETACH waiver, and the move_mount(2)
@@ -4513,9 +4507,7 @@ RUST_VFS_MOUNT_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_VFS_MOUNT_STATE_TARGET := $(RUST_VFS_MOUNT_STATE_TARGET_$(ARCH))
 RUST_VFS_MOUNT_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_mount_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/mount_ops.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/mount_ops.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/mount_ops.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_VFS_MOUNT_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4537,6 +4529,7 @@ $(RUST_VFS_MOUNT_STATE_OBJECT): $(RUST_VFS_MOUNT_STATE_SRC) kernel/include/fs/vf
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 # FILE_STATE owns the open-file I/O-path policy (read/write admission, which
 # data path a regular file uses).
@@ -4551,9 +4544,7 @@ RUST_FILE_STATE_TARGET_arm32 := armv7a-none-eabihf
 RUST_FILE_STATE_TARGET := $(RUST_FILE_STATE_TARGET_$(ARCH))
 RUST_FILE_STATE_OBJECT := $(BUILD_DIR)/rust/vfs_file_state.o
 
-ifeq ($(filter $(KERNEL_DIR)/fs/vfs/file.c,$(KERNEL_SRC)),)
-$(error the Rust module requires kernel/fs/vfs/file.c in this profile)
-endif
+ifneq ($(filter $(KERNEL_DIR)/fs/vfs/file.c,$(KERNEL_SRC)),)
 ifeq ($(strip $(RUST_FILE_STATE_TARGET)),)
 $(error the Rust module has no kernel Rust target for ARCH=$(ARCH); keep the C reference selected)
 endif
@@ -4575,6 +4566,7 @@ $(RUST_FILE_STATE_OBJECT): $(RUST_FILE_STATE_SRC) $(RUST_FILE_STATE_HDR) tools/r
 		-C debuginfo=$(RUST_DEBUG_INFO) -C codegen-units=1 \
 		-C relocation-model=static \
 		$< -o $@
+endif
 
 
 # The signal decision core (kernel/proc/signal_core.rs) owns the transplantable

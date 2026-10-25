@@ -528,7 +528,8 @@ static int hda_probe(device_t *dev)
     hda_controller_t *hda = kcalloc(1, sizeof(*hda));
     if (!hda)
         return -ENOMEM;
-    hda->regs = (uintptr_t)bar->start;
+    hda->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!hda->regs) { kfree(hda); return -EIO; }
     mutex_init(&hda->lock);
     spin_init(&hda->state_lock);
     uint16_t gcap = readw(hda_reg(hda, HDA_REG_GCAP));

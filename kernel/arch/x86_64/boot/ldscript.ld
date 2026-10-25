@@ -1,8 +1,8 @@
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-PROVIDE(PHYS_BASE = 0x00200000);
-PROVIDE(VIRT_BASE = 0xFFFF800000200000);
+PROVIDE(PHYS_BASE = 0x02000000);
+PROVIDE(VIRT_BASE = 0xFFFF800000000000 + PHYS_BASE);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 SECTIONS
@@ -87,6 +87,9 @@ SECTIONS
            "x86_64: boot stack must stay below _bss_end (pfa owns everything above it)")
     ASSERT(_stack_end - _stack_bottom >= 64 * 1024,
            "x86_64: boot stack is below the 64 KiB every other arch reserves")
+
+    ASSERT(PHYS_BASE + (_bss_end - VIRT_BASE) <= 0x40000000,
+           "x86_64: complete kernel must fit the initial 1 GiB identity map")
 
     /DISCARD/ : {
         *(.eh_frame .eh_frame_hdr)

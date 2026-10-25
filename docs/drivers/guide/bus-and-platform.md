@@ -1,110 +1,95 @@
 # 总线、平台与硬件资源
 
-硬件如何变成 `device_t`：先确定设备挂在已有总线上，还是固定在某块板上。已有 PCI/VirtIO 设备直接使用公共枚举器；只有新硬件拓扑才需要写平台或总线代码。涉及 MMIO/IRQ/DMA 的运行时规则见 [运行时契约](runtime-contracts.md)，锁规则见 [锁顺序](lock-order.md)，PCI 与 VirtIO 细节见 [PCI 与 VirtIO](pci-and-virtio.md)。
+普通设备由固件 provider 或原生总线创建，驱动只消费身份、资源及依赖。交接协议、启动阶段、描述来源选择和失败回滚见 [启动与硬件发现](../../dev/boot-model.md)；驱动生命周期见 [核心模型](core-model.md)。
 
-## 分层边界
+## 组织边界
 
-```text
-kernel/platform/<board>/  板级事实：RAM、固定地址、ACPI/FDT、时钟、引脚
-kernel/drivers/bus/        总线协议：扫描、匹配、BAR/slot、子设备
-kernel/drivers/<class>/    可复用功能驱动：只消费 resource/plat_data
-kernel/include/drivers/    跨模块公共接口
-```
+| 位置 | 职责 |
+|---|---|
+| `kernel/arch/<arch>/boards/<board>/` | 早期控制台、启动窗口、中断控制器、供电、静态描述与板级勘误 |
+| `kernel/firmware/` | DT、ACPI、静态描述的通用解析、节点和设备图 |
+| `kernel/drivers/bus/` | PCI/USB 等原生枚举与 transport 子设备 |
+| `kernel/drivers/<class>/` | 可复用设备协议，只消费公共资源、属性和硬件能力接口 |
 
-可复用驱动不得包含某块板的寄存器地址、GIC 编号或引脚号。平台代码不得复制 AHCI、E1000、VirtIO、VMSVGA 等设备协议。
+CPU 指令、页表格式、端口指令和板级地址全部属于 `arch/`。驱动不能包含板级 `platform.h`，板级代码不能复制 AHCI、E1000 或 VirtIO 协议。
 
-## `board_config_t`
+## 板级启动接口
 
-每个目标板定义唯一的：
+每个板定义唯一 `current_board`，类型为 `board_config_t`，由构建系统选择。其设备相关 hooks 按下列顺序使用：
+
+1. `early_init`：内存分配器和 driver core 之前的准备，不分配普通运行时设备。
+2. `enumerate_devices`：仅在没有有效固件硬件根时调用，发布静态 provider fallback。
+3. `enumerate_buses`：发布 PCI 等自枚举总线，补充固件设备图。
+4. `configure_devices`：在 probe 前设置用户态所有权或已验证的设备勘误，复用已有设备。
+
+有 DT/ACPI 时不得用固定地址表重新创建同一设备。静态资源必须是该板已知事实；缺少描述、无驱动和损坏的描述不能混为一类。
+
+## 固件设备与匹配
+
+DT compatible、ACPI HID/CID、静态 hardware-id 都通过 `fw_node_t` 处理。platform 驱动声明：
 
 ```c
-const board_config_t *const current_board = &my_board;
-```
-
-字段包括 RAM 范围、`irqchip_ops_t`、`timer_ops_t`、`early_init`、电源操作和 `enumerate_devices`。虽然存在 `BOARD_REGISTER` 宏，当前各平台实际通过 `current_board` 编译期选择，外部移植应遵循现有平台做法。
-
-启动顺序中 `early_init` 在内存和 driver core 之前，只能做无需动态分配的早期控制台/硬件准备。`enumerate_devices` 在 driver core 初始化后运行，可以调用 `bus_register()`、`device_register()`、`pci_enumerate()` 或 `virtio_mmio_enumerate()`。
-
-## 固定平台设备模板
-
-设备和资源必须是静态或动态长生命周期对象：
-
-```c
-static resource_t timer_resources[] = {
-    { .type = RES_MMIO, .start = MY_TIMER_VA,
-      .end = MY_TIMER_VA + 0xfff, .flags = IORESOURCE_MMIO_32BIT,
-      .name = "registers" },
-    { .type = RES_IRQ, .start = MY_TIMER_IRQ,
-      .end = MY_TIMER_IRQ, .flags = IORESOURCE_IRQ_LEVEL,
-      .name = "irq" },
+static const firmware_device_id_t timer_ids[] = {
+    { .id = "vendor,my-timer" },
+    { .id = "VND0001", .source = "acpi" },
+    { 0 }
 };
 
-static device_t timer_device = {
-    .name = "my-timer0",
+static driver_t timer_driver = {
+    .name = "my-timer",
     .bus = &platform_bus,
-    .res = timer_resources,
-    .res_count = ARRAY_SIZE(timer_resources),
+    .firmware_ids = timer_ids,
+    .probe = timer_probe,
+    .remove = timer_remove,
 };
-
-static void my_enumerate_devices(void) {
-    int ret = bus_register(&platform_bus);
-    if (ret < 0)
-        return;
-    ret = device_register(&timer_device);
-    if (ret < 0)
-        bus_unregister(&platform_bus);
-}
 ```
 
-平台 bus 的 `match` 应使用稳定的 ID 或 `plat_data` compatible 值，不要只比较驱动名称。若只有一个板内设备且暂时使用名称匹配，必须把它标为平台私有且禁止通配其他驱动。
+`firmware_match->driver_data` 可区分寄存器协议变体。硬件身份不能从驱动注册状态反向推导；即使没有匹配驱动，设备仍应出现在设备图中。
 
-## 驱动侧读 IRQ 资源：`platform_device_irq()`
+没有固件的板使用 `firmware/static.h` 中的不可变 `fw_static_tree_t`，通过 `fw_static_init()` 和 `firmware_device_enumerate()` 发布。节点属性、资源、名称及 provider 引用存储必须覆盖设备的整个生命周期。不要在枚举栈上分配这些数据，也不要为静态表构造假的 DTB。
 
-`resource_t` 一直有 `RES_IRQ`，但板级**是否**发布中断线号是可选的，而且"没发布"和"发布了但是坏的"在 `device_get_resource()` 里都只是一个 `NULL`。驱动自己遍历 `dev->res[]` 区分不了这两者，所以读取线号只有一个入口：
+## MMIO 与 PCI BAR
+
+`resource_t.start/end` 是包含两端的物理范围。先检查范围和最小 aperture，再映射：
 
 ```c
-int platform_device_irq(device_t *dev);
+resource_t *r = device_get_resource(dev, RES_MMIO, 0);
+if (!r || r->end < r->start || r->end - r->start < 0xfff)
+    return -EINVAL;
+void *regs = device_map_mmio(dev, 0);
+if (!regs)
+    return -ENODEV;
 ```
 
-| 返回 | 含义 | 驱动应当怎么做 |
-|---|---|---|
-| `>= 0` | 可用的线号（`RES_IRQ` 单点，`end == start`） | `request_irq()`，完成路径可以 park |
-| `-ENODEV` | 板级没发布 `RES_IRQ`（**不是错误**） | 轮询；行为与引入本函数之前完全一致 |
-| `-EINVAL` | `dev` 为空、非 platform bus，或 `RES_IRQ` 的 `end != start`（只接受单点线号） | 当作板级声明缺陷处理，可告警后轮询 |
-| `-ERANGE` | 线号超出固定 256 线 irq 表 | 当作板级声明缺陷处理，可告警后轮询 |
+映射 helper 为设备登记回收动作，probe 失败和 remove 后自动释放。架构层验证映射属性与可达性；驱动不加减 `PAGE_OFFSET`。
 
-向后兼容是完整的：不带 `RES_IRQ` 的 platform 设备读出 `-ENODEV`，而没有调用过本函数的驱动行为一点不变。`PLATFORM_IRQ_MAX_LINES` 与函数原型声明在 `kernel/include/drivers/bus/platform_bus.h`。
+PCI BAR 使用 `pci_get_bar_resource(dev, physical_bar_number)` 和 `pci_map_bar()`，不能按资源数组下标猜 BAR 编号。host 配置访问、可达性及分配窗口由架构接口提供；普通驱动不扫描 ECAM 或修改其他设备的 BAR。具体规则见 [PCI 与 VirtIO](pci-and-virtio.md)。
 
-板级在 `kernel/platform/*/board.c` 的固定表里发布 IRQ 时，把 `.start` 与 `.end` 都写成同一个线号；riscv64 的 FDT 枚举路径已自动从 `interrupts` 生成 `RES_IRQ`。**不要为了让驱动走中断而猜一个常量线号**：猜错时驱动会在超时后自行降级为轮询，代价是每个扇区先等满超时。
+## IRQ 与 provider 依赖
 
-## MMIO 资源中的地址
+固件 IRQ 首先是控制器节点和 binding 参数，经 `fw_irq_domain_t` 解析后才成为 `RES_IRQ`。`platform_device_irq(dev)` 返回第一个已解析中断：
 
-`resource_t.start/end` 存放驱动可直接访问的内核虚拟地址，不一定是裸物理地址。板级映射负责建立地址属性。PCI BAR 通过 `arch_pci_bar_to_resource()` 转换；AArch64 VirtualBox 会加 `PAGE_OFFSET`，VMSVGA 则在向用户态报告显存时再保存/计算物理地址。
+| 返回值 | 语义 |
+|---|---|
+| `>= 0` | 可交给 `request_irq()` 的驱动中断编号 |
+| `-ENODEV` | 没有发布中断资源 |
+| `-EINVAL` | 非 platform 设备或中断资源不是单点 |
+| `-ERANGE` | 超过当前 256 项驱动 IRQ registry |
 
-驱动不得自行无条件加 `PAGE_OFFSET`。只有确实需要 DMA 地址或用户映射物理地址时使用 `va_to_pa()`，并先确认该地址属于线性映射 RAM；MMIO BAR 不是普通 RAM，不能交给 `va_to_pa()` 当 DMA buffer。
+provider 未就绪在进入 probe 前返回 `-EPROBE_DEFER`；有轮询实现的驱动可显式声明 `irq_optional`。错误的 IRQ 编码、无支持的触发方式和越界不能静默当成“没有中断”。驱动不得猜 GSI、GIC SPI 或 PLIC 编号。
 
-## IRQ controller 契约
+时钟、复位等依赖通过 `device_dependency_get()` 获取并建立 consumer/provider 关系，调用者归还返回的设备引用。核心在 provider 到达后重试，在 provider 撤销前先解除 consumer 绑定，并拒绝依赖环。
 
-板级 irqchip 必须实现使能、禁用和 EOI。`driver_irq_dispatch()` 在架构入口已读取中断号后调用 handler，最后 EOI；handler 不自行调用 GIC EOI。`request_irq` 当前最多支持 IRQ 0..255。`IRQF_SHARED` 标志受支持：当现有 handler 与新增 handler 都以 `IRQF_SHARED` 注册时，按单链表 chain 依次分发（`kernel/drivers/core/driver_hwapi.c`）；否则同一条线上第二个注册返回 `-EBUSY`。
+架构 IRQ 入口负责 ack/EOI，普通 handler 不直接写 GIC 或 APIC。只有共享线上的所有 handler 都使用 `IRQF_SHARED` 时才允许共享。请求 IRQ 后，驱动必须在 remove 和失败回滚中撤销它。
 
-## Timer 契约
+## 时间与早期控制台
 
-`timer_ops.read_ticks` 必须单调回绕安全，`ticks_per_sec` 返回真实频率。`udelay/mdelay` 是 busy wait，不能在持有自旋锁、IRQ handler 或长数据路径中大量使用。VirtualBox ARM 的 generic timer 当前被 trap，平台使用软件 fallback，所以其超时还必须增加迭代上限，不能只依赖 tick 前进。
+`timer_ops.read_ticks` 必须单调且回绕安全，`ticks_per_sec` 返回与计数器一致的真实频率。轮询同时设置时间和迭代上限。不得在 IRQ handler 或自旋锁内执行长延时。
 
-## STM32F103 例外
+早期 UART 通过架构 console adapter 提供，在普通设备模型就绪前服务启动日志。终端缓冲与行规程属于通用代码；寄存器布局、引脚、时钟和实际 IRQ 由架构或板级适配器提供。
 
-STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、触摸、UART、Wi-Fi/蓝牙由 `stm32_peripherals_service()` 轮询，属于 MCU profile 的板级服务模型。LED、背光、风扇、蜂鸣器、DHT11、光敏传感器和按键可保留轻量 API；但不得在 IRQ 中执行长延时协议。需要多实例、通用 `/dev`、热插拔或跨板复用时必须转换为本章的 device/driver 模型。STM32F103 移植细节见 [STM32F103 移植](../../platforms/stm32f103-port.md)。
+STM32F103 的板级外设服务、构建与部署状态见 [平台文档](../../platforms/stm32f103-port.md)。需要多实例、通用 `/dev`、热插拔或跨板复用的外设应使用 device/driver 模型。
 
-## 移植新平台的步骤
+## 新平台接入
 
-完整的架构/platform 边界、SMP hooks 和验收要求见[平台移植指南](../../platforms/porting-guide.md)。
-
-1. 创建 `kernel/platform/<board>/` 和平台头，定义 RAM、启动地址、早期 MMIO 映射。
-2. 提供链接脚本，包含 `.driver_init` 的 start/end 与 `KEEP`。
-3. 实现 `current_board`、irqchip、timer、early console 和 power/reboot；多核平台还要提供 `smp_platform_ops`。
-4. 从 ACPI/FDT/固件或固定资源枚举设备；优先调用已有总线枚举器。
-5. 在 Makefile 选择正确 `BOARD_INCLUDE_DIR`、平台源文件和链接脚本。
-6. 先构建 `kernel-only`，再验证串口日志中的 driver core、总线和设备绑定。
-7. 最后才接用户镜像、网络和 GUI，避免把文件系统/桌面问题误判为平台驱动问题。
-
-> 不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../../platforms/virtualbox.md)。
+在 `arch/<arch>/boards/<board>/` 实现交接适配、早期控制台、内存保留、中断和电源机制，优先消费 DT 或 ACPI；仅为缺少固件描述的硬件提供静态 provider。已有 PCI、USB、VirtIO 设备使用公共枚举器和驱动。移植步骤与验收要求见 [平台移植指南](../../platforms/porting-guide.md)。

@@ -50,15 +50,13 @@ static int rtc_remove(device_t *dev)
     return 0;
 }
 
-static const device_id_t rtc_ids[] = {
-    { .vendor = GOLDFISH_RTC_BASE, .device = 0,
-      .subvendor = VENDOR_ANY, .subdevice = DEVICE_ANY },
-    { 0 },
-};
 
+static const firmware_device_id_t firmware_ids[] = {
+    {.id = "google,goldfish-rtc"}, {0}
+};
 static driver_t rtc_driver = {
     .name = "goldfish-rtc",
-    .id_table = rtc_ids,
+    .firmware_ids = firmware_ids,
     .bus = &platform_bus,
     .read_only_probe = 1,   /* user service rtcd owns the device */
     .probe = rtc_probe,

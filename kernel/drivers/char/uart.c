@@ -3,7 +3,6 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_register.h"
 #include "drivers/core/driver_hwapi.h"
-#include "platform.h"
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/klog.h"
@@ -182,7 +181,9 @@ void uart_init(void) {
     wait_queue_init(&rx_waiters);
     arch_uart_init();
     uart_flush();
-    request_irq(UART0_IRQ, uart_irq_wrapper, 0, NULL);
+    int console_irq = arch_uart_irq();
+    if (console_irq >= 0)
+        request_irq((uint32_t)console_irq, uart_irq_wrapper, 0, NULL);
 }
 
 void uart_putc(char c) {

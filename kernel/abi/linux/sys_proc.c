@@ -38,10 +38,6 @@ __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
      * the frame field is the cross-task copy and the MSR makes the new base
      * effective for this task's return to user. */
     TRAP_CTX_TP(t->trap_ctx) = (uint64_t)(uintptr_t)ptr;
-#ifdef CONFIG_X86_64
-    t->arch_tls_fs_base = (uint64_t)(uintptr_t)ptr;
-    arch_write_user_fs_base((uint64_t)(uintptr_t)ptr);
-#endif
     return 0;
 }
 
@@ -56,9 +52,6 @@ __attribute__((weak)) int64_t sys_get_thread_area(void *ptr) {
      * elsewhere the frame field is the only copy.  Linux returns -EINVAL
      * when no descriptor is set; A20OS always has the base available. */
     uint64_t base = TRAP_CTX_TP(t->trap_ctx);
-#ifdef CONFIG_X86_64
-    base = arch_read_user_fs_base();
-#endif
     if (copy_to_user(ptr, &base, sizeof(uint64_t)) < 0)
         return -EFAULT;
     return 0;

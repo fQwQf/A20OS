@@ -409,8 +409,6 @@ void driver_manager_early_init(void)
 void driver_manager_init(void)
 {
     kinfo("[DRIVERMGR] runtime driver manager init\n");
-    if (current_board && current_board->register_module_devices)
-        current_board->register_module_devices();
     manager_scan_store(DRIVER_STORE_RUNTIME, 0, 1);
     drvmod_init_all();
     kinfo("[DRIVERMGR] runtime driver manager init done\n");

@@ -1,0 +1,42 @@
+name = "ls2k0300-shell"
+description = "ls2k0300 serial mksh shell in RAM; physical validation pending"
+arch = "loongarch64"
+board = "ls2k0300"
+abi = "linux"
+
+[kernel]
+bringup = false
+ramfs_user = true
+ubsan = false
+swap = false
+driver_deployment = "embedded"
+
+[package]
+kind = "kernel-bundle"
+
+[machine]
+smp = 1
+
+[target]
+serial = "/dev/serial/by-id/REPLACE_WITH_LS2K0300_UART"
+baud = 115200
+boot_wait = 3
+boot_timeout = "120s"
+# Wait for init to launch mksh; this profile remains interactive.
+console_check = ["System ready", "[init] fork=0, calling execve mksh"]
+
+[handoff]
+method = "uboot-elf"
+prompt_timeout = "60s"
+command_timeout = "30s"
+commands = ["version", "bdinfo", "printenv", "help bootelf", "help tftpboot"]
+note = """Interactive serial shell profile: RAMFS_USER embeds /bin/init, mksh and
+basic commands in the kernel; no root disk or network is required. Prepare
+firmware using the base board instance, then package this shell instance.
+The SD image and kernel are rebuilt with this instance's configuration.
+The handoff bundle at build/ls2k0300/handoff is refreshed by packaging;
+do not reuse a bundle from a different instance. The shell stays running.
+Filesystem writes are RAM-only and disappear at reset. Ethernet/SSH, video
+and audio are separate capabilities, not enabled by this shell profile.
+Physical board execution is pending; see docs/platforms/2k0300.md.
+"""

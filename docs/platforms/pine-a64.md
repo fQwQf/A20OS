@@ -3,7 +3,49 @@
 本页对应原版 **PINE A64 512 MiB、Allwinner A64、DDR3**，实例为
 `instances/pine-a64.toml`。A64+、PINE A64-LTS、PINE H64 不适用本平台配置。
 当前实例为单核内核初始化配置，提供串口、MMU、GICv2、定时器和 PSCI 接口；
-不包含用户态、持久 rootfs 或板载存储/网络驱动。实机运行状态：未验证。
+提供 MMC0 microSD 的原生 PIO 块驱动；默认实例不包含用户态或持久 rootfs。
+实机运行状态：未验证，不能将构建及寄存器模型测试视为上板成功。
+
+
+## 串口交互 shell 配置
+
+`pine-a64-shell` 实例嵌入静态链接的 `/bin/init`、`mksh` 和基本命令。
+它采用完整用户态启动路径（`bringup=false`、`ramfs_user=true`），不需要根磁盘。
+默认嵌入 17 个程序：`init mksh help ls cat ps sleep timer_preempt timer_idle`
+和 `echo uname mkdir rm cp sync poweroff reboot`。启动时保留 RAMFS 的 `/bin`，
+不会把含内核与 DTB 的启动 FAT 分区自动覆盖挂载到这里。
+原 `pine-a64` 实例仍用于内核初始化验收，二者不能互换验收标准。
+
+```sh
+tools/a20 prepare pine-a64
+tools/a20 build pine-a64-shell
+tools/a20 package pine-a64-shell
+tools/a20 console pine-a64-shell
+```
+
+SD 镜像是 `build/pine-a64/a20os-pine-a64-shell-sdcard.img`，部署时使用
+`tools/a20 deploy pine-a64-shell --media-device /dev/实际卡设备`。
+打包会重新生成所选实例对应的内核与 handoff，公共 handoff 目录不得混用旧包。
+
+串口接线、电平、波特率和固件要求沿用本文。`System ready` 只表示内核就绪；
+验收还须看到 init 启动 mksh，实际输入并检查输出：
+
+```sh
+echo A20_SERIAL_OK
+uname -a
+ls /bin
+cat /proc/meminfo
+mkdir /tmp/check
+echo hello > /tmp/check/message
+cat /tmp/check/message
+rm /tmp/check/message
+sync
+poweroff
+```
+
+文件系统为 RAM-only，重启后丢失写入。最小用户构建仅编译嵌入命令，不构建
+fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也不承诺网卡、
+显示或音频可用。当前状态为交叉构建与封装检查；板上执行仍须实机验收。
 
 ## 适配内容和边界
 
@@ -16,16 +58,16 @@
 | 定时器 | 读 CNTFRQ 获取频率，非安全物理定时器 PPI 14 即 IRQ 30；A64 UNKNOWN1 计数器勘误过滤和 CVAL deadline |
 | 电源 | TF-A 提供的 PSCI SMC 关机/重启；板级电源结果等待真机确认 |
 | CPU | 只启用启动 CPU；`NR_CPUS != 1` 明确拒绝 |
-| 尚未实现 | sunxi MMC、EMAC、USB、HDMI、音频、PMIC 驱动、SMP |
+| microSD / MMC0 | DT 枚举的 `allwinner,sun50i-a64-mmc`，通用 `sunxi-mmc` 驱动；SDSC/SDHC/SDXC、512 字节扇区、单块 PIO 读写和 flush，1-bit / 400 kHz；实机未验证 |
+| 尚未实现 | EMAC、USB、HDMI、音频、PMIC 驱动、SMP；MMC DMA、4-bit/高速、eMMC、SDIO、热插拔 |
 
 串口驱动保留 U-Boot 设置好的 115200 波特率除数、时钟、复位和 PB8/PB9
 pinmux。不能直接绕过 SPL/TF-A/U-Boot 从复位入口进入该内核。
 通用 AArch64 PL011 寄存器协议不适用于这块板。
 为避免用户态直接读取有勘误的 CNTVCT，PINE A64 不发布通用 vDSO，时钟查询走内核。
 
-内存分配器目前使用单段连续 RAM，因此遇到内核后方的第一处固件保留区域时，
-保守地舍弃其后的 RAM。日志中的 allocator RAM 可能少于 512 MiB，这是保护固件
-内存的结果。没有有效 DTB、板型不符、保留区域覆盖内核或 RAM 不足会停止启动。
+内存分配器使用设备树 RAM 扣除 DTB 和固件保留区域后的多个有效区间。
+日志中的 allocator RAM 可能少于 512 MiB，这是保护固件内存的结果。没有有效 DTB、板型不符、保留区域覆盖内核或 RAM 不足会停止启动。
 
 默认实例 `bringup = true`，到 `System ready (bringup, no userspace)` 后执行一次
 分配/释放检查，再打印 `part ok` 并请求关机；**没有交互 shell 或持久 rootfs**。
@@ -33,16 +75,29 @@ pinmux。不能直接绕过 SPL/TF-A/U-Boot 从复位入口进入该内核。
 
 ## 1. 主机依赖与完整构建
 
-安装仓库构建指南要求的 AArch64 交叉工具链、Rust targets 和依赖。固件准备还需要
-GNU make、宿主 C 编译器、bison、flex、swig、OpenSSL/GnuTLS 开发头文件、Python 开发
-头文件、pip/setuptools/PyYAML；整卡组装需要 dosfstools 与 mtools。
-Debian/Ubuntu 对应包名示例：
+Linux 主机使用 AArch64 GNU 交叉工具链；Debian/Ubuntu 安装内核、固件及 FAT 组装依赖：
 
 ```sh
-sudo apt install build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+sudo apt-get install build-essential git curl ca-certificates python3 \
+  gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
   bison flex swig libssl-dev libgnutls28-dev python3-dev python3-pip \
   python3-setuptools python3-yaml dosfstools mtools
 ```
+
+安装 rustup 后配置仓库指定的 Rust 1.96.0；若尚无 rustup，可先执行下面前两条命令。已有 rustup 时可跳过安装器：
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/a20-rustup-init.sh
+sh /tmp/a20-rustup-init.sh -y --profile minimal --default-toolchain 1.96.0
+. "$HOME/.cargo/env"
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 aarch64-unknown-none
+rustup component add --toolchain 1.96.0 rust-src
+```
+
+下列仓库命令均在 A20OS 源码根目录执行；首次构建先运行 `git submodule update --init --recursive`。主机 Python 必须为 3.11 或更新版本，可用 `python3 --version` 确认。首次下载源码、Rust 组件和 Cargo 依赖需要联网。
+
+AArch64 内核需要匹配的软件浮点 `core`，由 Makefile 使用 `rust-src` 自动构建；无需另行切换 nightly。
 
 在仓库根目录执行：
 
@@ -121,8 +176,8 @@ tools/a20 deploy pine-a64 --media-device /dev/实际SD整盘设备 --no-console
 实例里的 `/dev/sdX` 是故意保留的占位符，不是可直接使用的设备名。该命令会覆盖目标
 卡的分区表和前 128 MiB 内容；首次使用专用空卡。镜像构建脚本只写普通文件，拒绝设备
 和符号链接作为输出；只有单独的实例 deploy 写卡步骤才访问所选设备。
-卡容量可大于镜像，余下空间暂不使用。内核尚无 MMC 驱动，并不妨碍 U-Boot 从卡加载
-内核；内核接管后无法继续访问卡。
+卡容量可大于镜像，余下空间暂不使用。U-Boot 从卡加载内核后，A20OS 的
+`sunxi-mmc` 重新初始化 SD 卡并发布块设备；默认 bring-up 仍不挂载根文件系统。
 
 ## 4. 串口与首次启动
 
@@ -194,6 +249,34 @@ U-Boot `booti` 会对工作 DTB 填写检测到的 RAM，并按其启动流程�
 没有首屏输出时，先确认是 UART0 而非 UART2，核对 Image 地址、匹配 DTB、固件启动层级，
 不要先把问题归因于 shell 或根文件系统。
 
+## 内核 SD 驱动与验收范围
+
+驱动入口为 `kernel/drivers/block/sunxi_mmc.c`，协议引擎为
+`kernel/drivers/block/sunxi_mmc_core.c`。固件枚举器从 DT 创建设备；板级
+`configure_devices` 仅为启用的 MMC0 节点配置 CCU 总线门控/复位、PF0..PF5
+pinmux 和上拉，再附加电气参数，不另行发布静态 MMC 设备。MMC1/MMC2 不会被猜测启用。
+A64 的固定二分频已计入 CCU 设置，新 timing 模式和 clock-update DAT0 mask
+由控制器协议处理。板级不重新编程 AXP803，卡槽 3.3 V 供电沿用启动固件状态。
+
+驱动支持 CMD0/8/55/ACMD41/2/3/9/7/16/13 初始化、CSD 容量与写保护解析，
+用 CMD17/CMD24 逐扇区读写；SDSC 使用字节地址，SDHC/SDXC 使用扇区地址。
+命令、FIFO、busy 和卡就绪等待均有时间与轮询上限。出现传输错误后停止接受后续
+I/O，返回错误，需重新绑定初始化；失败探测撤销映射和私有状态。移除时先由公共
+class 核心阻止新调用并排空在途调用，再关闭控制器。卡检测 GPIO、拔插重新枚举、
+物理写保护开关、DMA、4-bit/高速调谐和电压切换尚未实现；不能热拔正在使用的卡。
+
+生产代码宿主验证命令：
+
+```sh
+python3 -m unittest tools.tests.test_sunxi_mmc
+```
+
+测试覆盖 SDHC/SDSC 容量及地址、非对齐读写、多扇区拆分、SDXC 最大 LBA、CSD 写保护、
+错误/超时、类适配和探测失败回滚；使用 ASan/UBSan。它不模拟真实管脚时序、供电和卡兼容性。
+首次实机应保留完整 `[SUNXI-MMC]` 日志，核对容量与实际卡一致；该日志只表示卡初始化。
+完成扇区内容与主机读回对比、受控写入及断电后读回以前，不宣称存储实机可用。
+默认 bring-up 到达 `part ok` 也不构成 SD I/O 验收。
+
 ## 依据
 
 - [PINE64 官方板型、内存和接口说明](https://pine64.org/documentation/Pine_A64/_full/)：原版及 LTS 区别、512 MiB 版本。
@@ -205,3 +288,8 @@ U-Boot `booti` 会对工作 DTB 填写检测到的 RAM，并按其启动流程�
 - [U-Boot 官方 Allwinner 启动固件指南](https://docs.u-boot.org/en/latest/board/allwinner/sunxi.html)：SPL/TF-A 集成与 SD 写入位置。
 - [TF-A 官方 Allwinner 平台说明](https://trustedfirmware-a.readthedocs.io/en/latest/plat/allwinner.html)：`sun50i_a64`、BL31、PSCI 与可选 SCP。
 - [U-Boot booti 协议](https://docs.u-boot.org/en/latest/usage/cmd/booti.html)：ARM64 Image 和独立 FDT 参数。
+
+- [Allwinner A64 User Manual，SMC 与 CCU 章节](https://files.pine64.org/doc/datasheet/pine64/Allwinner_A64_User_Manual_V1.0.pdf)：寄存器、命令/FIFO 状态及电气时钟配置。
+- [Linux v6.17 A64 CCU](https://github.com/torvalds/linux/blob/v6.17/drivers/clk/sunxi-ng/ccu-sun50i-a64.c) 与 [sunxi MMC](https://github.com/torvalds/linux/blob/v6.17/drivers/mmc/host/sunxi-mmc.c)：A64 固定后分频、新 timing、DAT0 mask 和 sample delay。
+- [U-Boot v2025.10 sunxi MMC](https://github.com/u-boot/u-boot/blob/v2025.10/drivers/mmc/sunxi_mmc.c)：PIO 寄存器行为交叉核对。
+- [SD Association 简化规范](https://www.sdcard.org/downloads/pls/)：SD 初始化、CSD、块寻址和写保护协议。

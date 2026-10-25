@@ -2,9 +2,50 @@
 
 本平台对应 **PINE64 Quartz64-Zero / Quartz64 Model “Zero”、RK3566T、1 GiB LPDDR4**，
 实例为 `instances/quartz64-zero.toml`。不适用于 Quartz64 Model A/B、SOQuartz 或 Radxa Zero。
-当前提供单核 MMU 内核、UART2、GICv3、架构定时器、固件 DTB 内存保护和 PSCI 调用，
+当前提供单核 MMU 内核、UART2、GICv3、架构定时器、固件 DTB 内存保护、PSCI 调用和 SDMMC0 块驱动，
 以及可构建的完整 microSD 镜像。**实机启动尚未验证**；默认实例仅执行内核初始化与
 内存分配检查，没有交互 shell、用户态程序或持久 rootfs。
+
+
+## 串口交互 shell 配置
+
+`quartz64-zero-shell` 实例嵌入静态链接的 `/bin/init`、`mksh` 和基本命令。
+它采用完整用户态启动路径（`bringup=false`、`ramfs_user=true`），不需要根磁盘。
+默认嵌入 17 个程序：`init mksh help ls cat ps sleep timer_preempt timer_idle`
+和 `echo uname mkdir rm cp sync poweroff reboot`。启动时保留 RAMFS 的 `/bin`，
+不会把含内核与 DTB 的启动 FAT 分区自动覆盖挂载到这里。
+原 `quartz64-zero` 实例仍用于内核初始化验收，二者不能互换验收标准。
+
+```sh
+tools/a20 prepare quartz64-zero
+tools/a20 build quartz64-zero-shell
+tools/a20 package quartz64-zero-shell
+tools/a20 console quartz64-zero-shell
+```
+
+SD 镜像是 `build/quartz64-zero/a20os-quartz64-zero-shell-sdcard.img`，部署时使用
+`tools/a20 deploy quartz64-zero-shell --media-device /dev/实际卡设备`。
+打包会重新生成所选实例对应的内核与 handoff，公共 handoff 目录不得混用旧包。
+
+串口接线、电平、波特率和固件要求沿用本文。`System ready` 只表示内核就绪；
+验收还须看到 init 启动 mksh，实际输入并检查输出：
+
+```sh
+echo A20_SERIAL_OK
+uname -a
+ls /bin
+cat /proc/meminfo
+mkdir /tmp/check
+echo hello > /tmp/check/message
+cat /tmp/check/message
+rm /tmp/check/message
+sync
+poweroff
+```
+
+文件系统为 RAM-only，重启后丢失写入。最小用户构建仅编译嵌入命令，不构建
+fastfetch、FFmpeg 或完整发行版。这个配置不包含 SSH 服务，也不承诺网卡、
+显示或音频可用。当前状态为交叉构建与封装检查；板上执行仍须实机验收。
 
 ## 硬件与内核接口
 
@@ -19,7 +60,8 @@
 | 中断 | **GICv3 / GIC600**，GICD `0xfd400000`，GICR `0xfd460000..0xfd4e0000`；按 GICR_TYPER affinity 选择启动 CPU 的 redistributor；CPU 接口使用 ICC 系统寄存器 |
 | 定时器 | 非安全物理定时器 PPI 14 / INTID 30；从 CNTFRQ 读取频率，固件配置预期 24 MHz |
 | 电源 | TF-A PSCI SMC 重启/关机；实际断电效果需上板确认 |
-| 未实现 | 内核 MMC/eMMC、USB、PCIe、以太网、Wi-Fi/BT、HDMI、音频、PMIC、DVFS、SMP、ITS/MSI |
+| microSD | SDMMC0 `0xfe2b0000`、SPI 98 / INTID 130；DW-MSHC 单线 PIO，固定 3.3 V、最高 12 MHz，SDSC/SDHC/SDXC，发布统一 block class；实机读写未验收 |
+| 未实现 | eMMC、USB、PCIe、以太网、Wi-Fi/BT、HDMI、音频、PMIC、DVFS、SMP、ITS/MSI |
 
 GICv3 是上游 RK356x SoC 设备树确认的硬件事实。GICv3 的 CPU 接口不是 GICv2 的 GICC
 MMIO，不能沿用 PINE A64 的中断控制器。EL3 固件必须先将 UART 和非安全物理定时器
@@ -35,13 +77,29 @@ DTB、内核与保留区域重叠、内存不足会停止启动。动态 `reserv
 
 ## 主机准备与完整构建
 
-先满足仓库 AArch64 内核构建依赖，包括交叉工具链和 Rust targets。固件与 SD 组装还需要：
+Linux 主机使用 AArch64 GNU 交叉工具链；Debian/Ubuntu 安装内核、固件及 FAT 组装依赖：
 
 ```sh
-sudo apt install build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+sudo apt-get install build-essential git curl ca-certificates python3 \
+  gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
   bison flex swig libssl-dev libgnutls28-dev python3-dev python3-pip \
   python3-setuptools python3-yaml dosfstools mtools
 ```
+
+安装 rustup 后配置仓库指定的 Rust 1.96.0；若尚无 rustup，可先执行下面前两条命令。已有 rustup 时可跳过安装器：
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/a20-rustup-init.sh
+sh /tmp/a20-rustup-init.sh -y --profile minimal --default-toolchain 1.96.0
+. "$HOME/.cargo/env"
+rustup toolchain install 1.96.0 --profile minimal
+rustup target add --toolchain 1.96.0 aarch64-unknown-none
+rustup component add --toolchain 1.96.0 rust-src
+```
+
+下列仓库命令均在 A20OS 源码根目录执行；首次构建先运行 `git submodule update --init --recursive`。主机 Python 必须为 3.11 或更新版本，可用 `python3 --version` 确认。首次下载源码、Rust 组件和 Cargo 依赖需要联网。
+
+AArch64 内核需要匹配的软件浮点 `core`，由 Makefile 使用 `rust-src` 自动构建；无需另行切换 nightly。
 
 在仓库根目录执行：
 
@@ -92,6 +150,15 @@ Zero 原理图的 SD 插座电源直接接 `VCC3V3_SYS`，检测脚为 GPIO0_A4�
 SDMMC0 四位总线，固定 3.3 V、最高 25 MHz，并禁用 1.8 V 切换；不复制 Model A
 的 GPIO 控制 SD 电源。保留已有 PMIC 电源状态，不执行未经核实的 PMIC/DVFS 调节。
 eMMC、SPI、USB 和其他板级外设不作为启动依赖。OP-TEE 不是此路径的组成部分。
+
+内核沿用 DT 枚举出的 SDMMC0 设备，不再创建另一份板级设备。`arch/aarch64/boards/quartz64-zero/storage.c`
+负责 SD 管脚复用、上拉、驱动强度、时钟门控和复位；选择 24 MHz 晶振，计入 Rockchip
+集成层固定二分频后向通用驱动提供 12 MHz 输入。通用 `drivers/block/dw_sdio.c`
+完成有界控制器复位、卡枚举、CSD 容量解析、块/字节寻址和单扇区读写。
+它不进行 UHS/1.8 V 切换、DMA、四线提速或热插卡。
+无卡、CRC 或数据超时会返回错误；I/O 失败后停止该卡继续传输，重新绑定会重新枚举。
+默认实例仍是内核初始化检查，未增加持久 rootfs；SD 镜像第一分区由 U-Boot
+读取内核，内核能绑定 SD 控制器并不代表已建立用户态根文件系统。
 固件 manifest 记录本地 DTS 的哈希；Model A/B 的 DTB 无法通过包的板型校验。
 
 ## 写入 microSD
@@ -180,7 +247,7 @@ booti ${loadaddr} - ${fdt_addr_r}
 优先执行卡上 `boot.scr`。DTB 暂存地址与内核完整 footprint 分离；U-Boot 仍可为 DTB
 分配最终位置，内核按接收到的地址保护它。不要 `saveenv`。
 
-### 到货时的失败定位
+### 故障定位
 
 - 没有 DDR/SPL 首屏：先核对电源、8/10/GND 接线、1.5 Mbps 及 SD 内容；移除可拆卸
   eMMC 模块以排除其他固件启动优先级。若能通过原厂镜像启动而本镜像止于 DDR 训练，
@@ -210,3 +277,5 @@ booti ${loadaddr} - ${fdt_addr_r}
 - [PINE64 发布页 Zero 专用下载](https://pine64.org/documentation/Quartz64/Software/Releases/)：原厂 SD 对照镜像及 SDCardTool。
 - [ARM64 Image 协议](https://docs.kernel.org/arch/arm64/booting.html)：Image flags、加载位置和 DTB 入口。
 - [Arm GIC 架构规范 IHI0069](https://developer.arm.com/documentation/ihi0069/latest/) 与 [TF-A GICv3 分组实现](https://github.com/TrustedFirmware-A/trusted-firmware-a/blob/v2.13.0/drivers/arm/gic/v3/gicv3_main.c)：安全/非安全中断归属边界。
+
+- [Linux v6.12 DW-MMC 核心](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc.c)、[Rockchip 接入](https://github.com/torvalds/linux/blob/v6.12/drivers/mmc/host/dw_mmc-rockchip.c) 和 [RK3568 时钟](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/rockchip/clk-rk3568.c)：寄存器布局、FIFO、固定二分频和 gate/mux 事实参考；本仓库驱动独立实现，未复制上游 GPL 实现。

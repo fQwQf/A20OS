@@ -26,8 +26,8 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 	} > $@.tmp
 	@$(PYTHON) tools/stamps.py adopt --tmp "$@.tmp" --target "$@"
 
-$(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
-$(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
+$(BUILD_DIR)/arch/armv7m/boards/stm32f103/drivers/bluetooth.o: $(STM32_BT_CONFIG_HDR)
+$(BUILD_DIR)/arch/armv7m/boards/stm32f103/drivers/wifi.o: $(STM32_WIFI_CONFIG_HDR)
 
 # Thin wrappers: STM32 configurations live in instances/stm32f103*.toml.
 stm32f103-bringup:

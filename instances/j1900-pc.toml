@@ -20,7 +20,7 @@ variant = "rescue-usb"
 
 [target]
 serial = "/dev/ttyUSB0"
-baud = 115200
+baud = 38400
 boot_timeout = "180s"
 console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "[INIT] System ready (bringup, no userspace)"]
 # There is no shell in this stage. Do not inject shell commands or require

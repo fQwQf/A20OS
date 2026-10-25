@@ -365,7 +365,8 @@ static int vinput_probe(device_t *dev) {
         virtio_transport_t vt;
         if (pci_virtio_transport_init(dev, 18, &vt) != 0)
             return -1;
-        return vinput_init_transport(dev, &vt);
+        if (!vt.priv) return -ENODEV;
+    return vinput_init_transport(dev, &vt);
     }
 
     resource_t *mmio_res = drv_device_get_resource(dev, RES_MMIO, 0);
@@ -376,7 +377,7 @@ static int vinput_probe(device_t *dev) {
     virtio_transport_t vt = {
         .read32 = vinput_mmio_read32,
         .write32 = vinput_mmio_write32,
-        .priv = (void *)(uintptr_t)mmio_res->start,
+        .priv = device_map_mmio(dev, 0),
         .legacy = 0,
         .irq = (int)irq_res->start,
     };

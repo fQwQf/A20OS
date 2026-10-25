@@ -215,12 +215,12 @@ _Static_assert(sizeof(g_netifs) + sizeof(g_loopif) <=
 typedef struct {
     int idx;
     device_t *dev;
-    const net_dev_ops_t *ops;
-/* Capabilities the driver reported at registration time, sampled once.
+    class_device_t *binding;
+    /* Capabilities the driver reported at registration time, sampled once.
      * Sampling here rather than per packet is deliberate: a caps() query on
      * every linkoutput() would put a driver call in front of every frame, and
-     * the answer can only change across a re-probe, which replaces `ops`
-     * wholesale in a20_lwip_register_netifs() anyway. */
+     * the answer can only change across a re-probe, which replaces the class
+     * binding in a20_lwip_register_netifs(). */
     uint32_t caps;
     uint8_t rx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
     uint8_t tx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
@@ -256,6 +256,71 @@ _Static_assert(sizeof(a20_lwip_netif_state_t) <=
                "budget; these are unconditional .bss per registered device");
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
+
+static spinlock_t g_netif_binding_lock = SPINLOCK_INIT;
+static void netif_binding_offline(class_device_t *binding, void *data) {
+    a20_lwip_netif_state_t *st = data;
+    uint64_t flags = spin_lock_irqsave(&g_netif_binding_lock);
+    int owned = st->binding == binding;
+    if (owned) { st->binding = NULL; st->dev = NULL; }
+    spin_unlock_irqrestore(&g_netif_binding_lock, flags);
+    if (owned) class_device_put(binding);
+}
+int a20_lwip_netif_index_for_device(const device_t *dev) {
+    int index = -1;
+    uint64_t flags = spin_lock_irqsave(&g_netif_binding_lock);
+    for (int i = 0; i < A20_NET_MAX_DEVS; i++)
+        if (g_netif_state[i].binding && g_netif_state[i].dev == dev) {
+            index = i; break;
+        }
+    spin_unlock_irqrestore(&g_netif_binding_lock, flags);
+    return index;
+}
+static class_device_t *netif_binding_get(const a20_lwip_netif_state_t *st) {
+    uint64_t flags = spin_lock_irqsave(&g_netif_binding_lock);
+    class_device_t *binding = st ? st->binding : NULL;
+    class_device_get(binding);
+    spin_unlock_irqrestore(&g_netif_binding_lock, flags);
+    return binding;
+}
+static int netif_device_send(a20_lwip_netif_state_t *st, const void *data, size_t length) {
+    class_device_t *cdev = netif_binding_get(st);
+    int rc = class_net_send(cdev, data, length); class_device_put(cdev); return rc;
+}
+static int netif_device_recv(a20_lwip_netif_state_t *st, void *data, size_t length) {
+    class_device_t *cdev = netif_binding_get(st);
+    int rc = class_net_recv(cdev, data, length); class_device_put(cdev); return rc;
+}
+static int netif_device_send_sg(a20_lwip_netif_state_t *st, const net_iovec_t *iov, unsigned count) {
+    class_device_t *cdev = netif_binding_get(st);
+    int rc = class_net_send_sg(cdev, iov, count); class_device_put(cdev); return rc;
+}
+static void netif_device_poll(a20_lwip_netif_state_t *st) {
+    class_device_t *cdev = netif_binding_get(st);
+    class_net_poll(cdev); class_device_put(cdev);
+}
+static int netif_device_irq_driven(const a20_lwip_netif_state_t *st) {
+    class_device_t *cdev = netif_binding_get(st);
+    int rc = class_net_rx_irq_driven(cdev); class_device_put(cdev);
+    return rc < 0 ? 1 : rc;
+}
+/* Called under the lwIP control barrier. Preserve old handles' offline
+ * identity, and drop the stack's binding/device reference on replacement. */
+static void netif_binding_clear(unsigned index) {
+    a20_lwip_netif_state_t *st = &g_netif_state[index];
+    uint64_t flags = spin_lock_irqsave(&g_netif_binding_lock);
+    class_device_t *old = st->binding;
+    st->binding = NULL; st->dev = NULL;
+    spin_unlock_irqrestore(&g_netif_binding_lock, flags);
+    if (!g_netifs[index].state) { class_device_put(old); return; }
+#if LWIP_DHCP
+    dhcp_stop(&g_netifs[index]);
+#endif
+    netif_set_down(&g_netifs[index]);
+    netif_remove(&g_netifs[index]);
+    memset(&g_netifs[index], 0, sizeof(g_netifs[index]));
+    class_device_put(old);
+}
 
 /* Bumped whenever some netif's link_pending goes 0 -> 1, so the flush's fast
  * path is one relaxed load instead of a walk of every device. */
@@ -298,7 +363,8 @@ int a20_lwip_stack_netif_has_state(void *np)
  * netif init callback (which has the state, not the netif). */
 static int a20_lwip_device_link_up(const a20_lwip_netif_state_t *st)
 {
-    return !st->ops->link_up || st->ops->link_up(st->dev) > 0;
+    class_device_t *cdev = netif_binding_get(st);
+    int up = class_net_link_up(cdev); class_device_put(cdev); return up > 0;
 }
 
 int a20_lwip_stack_device_link_up(void *np)
@@ -476,7 +542,7 @@ int r;
      * The loopback netif never reaches this function (netif_loop_output()
      * bypasses linkoutput entirely), so the fast path cannot affect it.
      */
-    if ((st->caps & NET_DEV_CAP_TX_SG) && st->ops->send_sg && p->next == NULL) {
+    if ((st->caps & NET_DEV_CAP_TX_SG) && p->next == NULL) {
         net_iovec_t iov;
         pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
         if (a20_lwip_filter(st->tx_frame, p->tot_len, st->idx, 0) ==
@@ -487,7 +553,7 @@ int r;
         }
         iov.base = st->tx_frame;
         iov.len = p->tot_len;
-        r = st->ops->send_sg(st->dev, &iov, 1);
+        r = netif_device_send_sg(st, &iov, 1);
         if (r == (int)p->tot_len) {
             __atomic_fetch_add(&st->tx_sg_frames, 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&st->tx_sg_bytes, p->tot_len, __ATOMIC_RELAXED);
@@ -500,7 +566,7 @@ int r;
             a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
             return ERR_OK;
         }
-        r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
+        r = netif_device_send(st, st->tx_frame, p->tot_len);
     }
 
     a20_lwip_shared_unlock(A20_LWIP_SHARED_TX, st, tx_flags);
@@ -520,9 +586,11 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
         return ERR_ARG;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
-    const uint8_t *mac = st->ops->mac(st->dev);
-    if (!mac)
-        return ERR_IF;
+    uint8_t mac[6];
+    class_device_t *cdev = netif_binding_get(st);
+    int mac_error = class_net_copy_mac(cdev, mac);
+    class_device_put(cdev);
+    if (mac_error) return ERR_IF;
 
     netif->name[0] = 'e';
     netif->name[1] = 'n';
@@ -612,25 +680,37 @@ static void a20_lwip_register_netifs(void) {
     }
 
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
-        device_t *dev = device_find_by_class(DEV_CLASS_NET, i);
-        if (!dev || !dev->drv || !dev->drv->class_ops)
-            break;
-        if (g_netif_state[i].dev == dev)
+        device_t *dev = device_find_get_by_class(DEV_CLASS_NET, i);
+        class_device_t *binding = dev ? class_device_ref_for_device(dev) : NULL;
+        if (!binding || !class_net_ready(binding)) {
+            class_device_put(binding); device_put(dev);
+            netif_binding_clear((unsigned)i);
             continue;
-        const net_dev_ops_t *ops = (const net_dev_ops_t *)dev->drv->class_ops;
-        if (!ops->send || !ops->recv || !ops->mac)
-            continue;
-
+        }
+        uint64_t binding_flags = spin_lock_irqsave(&g_netif_binding_lock);
+        int same_binding = g_netif_state[i].binding == binding;
+        spin_unlock_irqrestore(&g_netif_binding_lock, binding_flags);
+        if (same_binding) {
+            class_device_put(binding); device_put(dev); continue;
+        }
+        netif_binding_clear((unsigned)i);
         g_netif_state[i].idx = i;
+        g_netif_state[i].caps = class_net_caps(binding);
+        binding_flags = spin_lock_irqsave(&g_netif_binding_lock);
         g_netif_state[i].dev = dev;
-        g_netif_state[i].ops = ops;
-        g_netif_state[i].caps = ops->caps ? ops->caps(dev) : 0;
+        g_netif_state[i].binding = binding;
+        spin_unlock_irqrestore(&g_netif_binding_lock, binding_flags);
+        if (class_device_set_offline(binding, netif_binding_offline, &g_netif_state[i])) {
+            netif_binding_offline(binding, &g_netif_state[i]);
+            device_put(dev); continue;
+        }
         struct netif *n = netif_add(&g_netifs[i], &ipaddr, &netmask, &gw,
                                     &g_netif_state[i],
                                     a20_lwip_netif_init_cb,
                                     ethernet_input);
         if (!n) {
             printf("[LWIP] failed to add %s\n", dev->name ? dev->name : "net");
+            netif_binding_clear((unsigned)i); device_put(dev);
             continue;
         }
         /* First one registered becomes the default, as on Linux.  Calling
@@ -671,6 +751,7 @@ static void a20_lwip_register_netifs(void) {
             dhcp_start(n);
         }
 #endif
+        device_put(dev);
     }
 }
 
@@ -1144,7 +1225,7 @@ static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
             drained = 0;
             break;
         }
-        int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
+        int len = netif_device_recv(st, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
         done++;
@@ -1368,7 +1449,7 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
             drained = 0;
             break;
         }
-        int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
+        int len = netif_device_recv(st, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
         done++;
@@ -1454,8 +1535,7 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
 
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
-        if (st->dev && st->ops && st->ops->poll)
-            st->ops->poll(st->dev);
+        netif_device_poll(st);
     }
 
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -1590,8 +1670,7 @@ void a20_lwip_poll_rx_locked(unsigned budget)
         return;
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
-        if (st->dev && st->ops && st->ops->poll)
-            st->ops->poll(st->dev);
+        netif_device_poll(st);
     }
     int complete = 1;
     for (struct netif *n = netif_list; n; n = n->next) {
@@ -1706,8 +1785,7 @@ void a20_lwip_poll_waiter(void) {
             continue;
         /* A driver that does not report IRQ-driven RX may only be making
          * progress through polling, so it must be drained unconditionally. */
-        if (!st->ops || !st->ops->rx_irq_driven ||
-            !st->ops->rx_irq_driven(st->dev))
+        if (!netif_device_irq_driven(st))
             need_lock = 1;
     }
     if (need_lock) {
@@ -2038,7 +2116,13 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
         if (virtio_net_dev_stats && st && st->dev) {
             net_dev_stats_t ds;
             memset(&ds, 0, sizeof(ds));
-            virtio_net_dev_stats(st->dev, &ds);
+            class_device_t *binding = netif_binding_get(st);
+            const void *stats_ops;
+            if (!class_device_ops_begin(binding, DEV_CLASS_NET, &stats_ops)) {
+                virtio_net_dev_stats(binding->dev, &ds);
+                class_device_call_end(binding);
+            }
+            class_device_put(binding);
             snprintf(row, sizeof(row),
                      "%s-drv: rx %llu pkts %llu drops, tx %llu pkts %llu drops\n",
                      name, ds.rx_packets, ds.rx_drops,
@@ -2458,14 +2542,15 @@ int a20_lwip_stack_netif_sendable(void *np)
     if (!n || !n->state)
         return 0;
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-    return (st->dev && st->ops && st->ops->send) ? 1 : 0;
+    class_device_t *cdev = netif_binding_get(st);
+    int ready = class_net_ready(cdev); class_device_put(cdev); return ready;
 }
 
 int a20_lwip_stack_device_send(void *np, const uint8_t *frame, size_t len)
 {
     struct netif *n = (struct netif *)np;
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
-    return st->ops->send(st->dev, frame, (int)len);
+    return netif_device_send(st, frame, len);
 }
 
 void a20_lwip_stack_notify_addr(unsigned ifindex, const uint8_t addr[4],

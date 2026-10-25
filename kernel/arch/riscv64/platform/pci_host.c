@@ -64,3 +64,20 @@ uintptr_t arch_pci_bar_to_resource(uint64_t bar_addr) {
 }
 
 #endif /* PCIE_ECAM_BASE */
+
+#include "core/errno.h"
+extern void *arch_device_map_mmio(uint64_t, size_t, uint32_t);
+int arch_pci_mmio_window(uint64_t *base, uint64_t *size) {
+    if (!base || !size) return -EINVAL;
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    *base = 0x40000000ULL; *size = 0x40000000ULL;
+    return 0;
+#else
+    *base = 0; *size = 0;
+    return -EOPNOTSUPP;
+#endif
+}
+int arch_pci_bar_reachable(uint64_t base, uint64_t size) {
+    if (!size || size > (uint64_t)(~(size_t)0)) return 0;
+    return arch_device_map_mmio(base, (size_t)size, 0) != NULL;
+}

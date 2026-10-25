@@ -36,7 +36,9 @@
  * 4: block_dev_ops_t appends the optional synchronous write_batch callback,
  * and block_dev_t appends its matching callback. Old modules have shorter
  * block vtables and are rejected before the kernel can read beyond them. */
-#define A20_DRIVER_ABI 4U
+/* 5: firmware nodes and explicit probe state in device_t; MMIO resources
+ * uniformly contain CPU physical addresses rather than mapped pointers. */
+#define A20_DRIVER_ABI 6U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,

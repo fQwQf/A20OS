@@ -43,10 +43,11 @@ uint32_t pci_device_id(const device_t *dev);
  * Returns -ENODEV for devices on another bus. */
 int pci_device_location(const device_t *dev, unsigned *bus,
                         unsigned *slot, unsigned *function);
-/* Return the resource corresponding to a physical PCI BAR number.  MMIO
- * resources are compacted in device->res, so display drivers must not assume
+/* Return the MMIO or I/O-port resource for a physical PCI BAR number.
+ * Resources are compacted in device->res, so display drivers must not assume
  * that BAR2 is the second resource when BAR0 is a 64-bit BAR. */
 resource_t *pci_get_bar_resource(device_t *dev, unsigned int bar);
+void *pci_map_bar(device_t *dev, unsigned int bar);
 /* Resolve the INTx interrupt line for an enumerated PCI function through
  * arch_pci_intx_irq(), or -1 when the platform has no routing for it.
  * Drivers must keep their polling fallback for the -1 case and must NOT

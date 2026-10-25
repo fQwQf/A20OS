@@ -17,7 +17,9 @@
 
 #define MAX_ORDER    11   /* orders 0..11 → 4KB to 8MB */
 #define PFN_NONE     ((uint32_t)-1)
-#define PFA_MAX_RANGES 4
+/* Firmware may fragment RAM around runtime services, ACPI and reserved pools.
+ * Keep every usable interval; adapters must fail rather than truncate this cap. */
+#define PFA_MAX_RANGES 64
 
 typedef uint32_t pfn_t;
 

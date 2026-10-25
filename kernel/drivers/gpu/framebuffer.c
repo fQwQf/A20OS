@@ -46,6 +46,29 @@ static void fb_fill_var_screeninfo(struct fb_var_screeninfo *var,
     var->width = (uint32_t)-1;
 }
 
+static int fb_apply_layout(struct device *dev, gpu_dev_ops_t *ops,
+                           struct fb_var_screeninfo *var, uint32_t *stride) {
+    if (!ops->get_layout) return 0;
+    gpu_scanout_layout_t layout;
+    int rc = ops->get_layout(dev, &layout);
+    if (rc) return rc;
+    if (!var->yres || !var->bits_per_pixel ||
+        layout.stride < (uint64_t)var->xres * (var->bits_per_pixel / 8))
+        return -EINVAL;
+    uint32_t masks[] = {layout.red_mask, layout.green_mask, layout.blue_mask};
+    struct fb_bitfield *fields[] = {&var->red, &var->green, &var->blue};
+    for (unsigned i = 0; i < 3; i++) {
+        *fields[i] = (struct fb_bitfield){0};
+        uint32_t mask = masks[i];
+        if (!mask) continue;
+        while (!(mask & 1)) { fields[i]->offset++; mask >>= 1; }
+        while (mask & 1) { fields[i]->length++; mask >>= 1; }
+        if (mask) return -EINVAL;
+    }
+    if (stride) *stride = layout.stride;
+    return 0;
+}
+
 /*
  * Periodic framebuffer refresh.  Compositors written for Linux fbdev
  * semantics (weston, X) draw into the mmap'd scanout and never issue a
@@ -103,6 +126,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
 
     if (off & (PAGE_SIZE - 1))
         return -EINVAL;
+    if (len > SIZE_MAX - (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0)
         return -EINVAL;
@@ -130,7 +154,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
      * keeps the mapping at the default (Device) attribute index on
      * AArch64; see FBIO_MAP_FB.
      */
-    pte_t ptef = PTE_V | PTE_U | PTE_A | PTE_LEAF;
+    pte_t ptef = PTE_V | PTE_U | PTE_A | PTE_LEAF | PTE_DEVICE;
     if (prot & PROT_READ) ptef |= PTE_R;
     if (prot & PROT_WRITE) ptef |= PTE_W | PTE_D | PTE_R;
     if (prot & PROT_EXEC) ptef |= PTE_X;
@@ -178,7 +202,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
         return r;
     }
 
-    mm_seg_t *vma = kcalloc(1, sizeof(*vma));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) {
         while (mapped > 0) {
             mapped -= PAGE_SIZE;
@@ -188,7 +212,6 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
         arch_tlb_flush();
         return -ENOMEM;
     }
-    refcount_set(&vma->refcount, 1);
     vma->start = addr;
     vma->end = addr + len;
     vma->vm_flags = VM_SHARED | VM_DONTFORK | VM_PFNMAP;
@@ -248,6 +271,8 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             if (r < 0)
                 return r;
             fb_fill_var_screeninfo(&var, w, h, bpp);
+            r = fb_apply_layout(dev, ops, &var, NULL);
+            if (r) return r;
             printf("[FB] FBIOGET_VSCREENINFO: xres=%u yres=%u bpp=%u\n",
                    var.xres, var.yres, var.bits_per_pixel);
             return copy_to_user(arg, &var, sizeof(var)) < 0 ? -EFAULT : 0;
@@ -292,7 +317,12 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return r;
             /* The exported framebuffer is a tightly described scanout.  GPU
              * drivers restrict smem_len to the visible pitch * height. */
+            if (!h) return -EINVAL;
             fix.line_length = (uint32_t)(fb_size / h);
+            struct fb_var_screeninfo var;
+            fb_fill_var_screeninfo(&var, w, h, bpp);
+            r = fb_apply_layout(dev, ops, &var, &fix.line_length);
+            if (r) return r;
             return copy_to_user(arg, &fix, sizeof(fix)) < 0 ? -EFAULT : 0;
         }
         case FBIO_MAP_FB: {
@@ -343,7 +373,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
              * without memory-type bits simply ignore the omitted MAT1 flag.
              */
             pte_t flags = PTE_V | PTE_R | PTE_W | PTE_U |
-                          PTE_A | PTE_D | PTE_LEAF;
+                          PTE_A | PTE_D | PTE_LEAF | PTE_DEVICE;
             size_t mapped = 0;
             for (; mapped < fb_size; mapped += PAGE_SIZE) {
                 r = pt_map(curr->mm->pgdir, va + mapped,
@@ -361,7 +391,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return r;
             }
 
-            mm_seg_t *vma = kcalloc(1, sizeof(*vma));
+            mm_seg_t *vma = mm_seg_new();
             if (!vma) {
                 while (mapped > 0) {
                     mapped -= PAGE_SIZE;
@@ -371,7 +401,6 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 arch_tlb_flush();
                 return -ENOMEM;
             }
-            refcount_set(&vma->refcount, 1);
             vma->start = va;
             vma->end = va + fb_size;
             vma->vm_flags = VM_READ | VM_WRITE | VM_SHARED |

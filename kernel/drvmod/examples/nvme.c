@@ -555,7 +555,8 @@ static int nvme_probe(device_t *dev)
     nvme_controller_t *ctrl = kcalloc(1, sizeof(*ctrl));
     if (!ctrl)
         return -ENOMEM;
-    ctrl->regs = (uintptr_t)bar->start;
+    ctrl->regs = (uintptr_t)pci_map_bar(dev, 0);
+    if (!ctrl->regs) { kfree(ctrl); return -EIO; }
     mutex_init(&ctrl->io_lock);
     uint64_t cap = readq(nvme_reg(ctrl, NVME_REG_CAP));
     ctrl->ready_timeout_ms =

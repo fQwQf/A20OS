@@ -2,11 +2,12 @@
 #define _ARCH_X86_64_PLATFORM_H
 
 #include "core/types.h"
+#include "kernel_load.h"
 
 /* Physical memory layout (QEMU q35, 1GB) */
 #define PHYS_MEMORY_BASE   0x00000000UL
 #define PHYS_MEMORY_END    0x40000000UL
-#define KERNEL_ENTRY       0x00200000UL
+#define KERNEL_ENTRY       ((paddr_t)X86_KERNEL_LOAD_ADDRESS)
 #define PAGE_OFFSET        0xFFFF800000000000UL
 #define USER_VA_LIMIT      0x0000800000000000UL
 
@@ -91,6 +92,7 @@ uint64_t  x86_64_pci_gsi_firq_count(uint32_t gsi);
  * @pin is 1..4 (A..D).  Returns PCI_PRT_GSI_NONE when firmware says nothing
  * usable. */
 uint32_t  arch_pci_prt_gsi(int bus, int dev, int pin);
+uint32_t arch_pci_prt_gsi_fn(int bus, int dev, int function, int pin);
 /* i440fx PIRQ links: PIIX3 config 0x60..0x63 route PIRQA..PIRQD to ISA IRQs.
  * read returns 0..15, or -1 when the machine is not i440fx; program writes
  * @irq and verifies the readback (the chipset latches the byte). */
